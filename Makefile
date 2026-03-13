@@ -16,6 +16,17 @@ CONFIG_FILE ?= $(BUILD_DIR)/config.yaml
 
 GOFMT=gofmt
 
+
+# OS binary suffix
+ifeq ($(OS),Windows_NT)
+EXE := .exe
+else
+EXE :=
+endif
+
+# Discover main packages under ./cmd/*
+CMD_IMPORTS := $(shell go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./cmd/* 2>/dev/null | sed '/^$$/d')
+CMD_NAMES := $(notdir $(CMD_IMPORTS))
 # all .go files that are not auto-generated and should be auto-formatted and linted.
 ALL_SRC = $(shell find . -name '*.go' \
 				   -not -name 'doc.go' \
@@ -32,11 +43,24 @@ ALL_SRC = $(shell find . -name '*.go' \
 				   -type f | \
 				sort)
 
-.PHONY: build
+.PHONY: build build-%
 
 build: fmt
-	mkdir -p $(BIN_DIR)
-	$(GO) build $(GOFLAGS) -ldflags "$(GO_LDFLAGS)" -o $(BIN_NAME) main.go
+	@mkdir -p $(BIN_DIR)
+	@set -e; \
+	if [ -z "$(CMD_NAMES)" ]; then \
+	  echo "No commands found under ./cmd"; \
+	else \
+	  for name in $(CMD_NAMES); do \
+	    echo "Building $$name"; \
+	    GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -ldflags "$(GO_LDFLAGS)" -o $(BIN_DIR)/$$name$(EXE) ./cmd/$$name ; \
+	  done; \
+	fi
+
+build-%: fmt
+	@mkdir -p $(BIN_DIR)
+	@echo "Building $*"
+	@GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -ldflags "$(GO_LDFLAGS)" -o $(BIN_DIR)/$*$(EXE) ./cmd/$*
 
 # 格式化目标
 .PHONY: fmt
