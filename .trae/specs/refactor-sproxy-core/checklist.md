@@ -1,0 +1,15 @@
+- [x] -config YAML 可被加载并与 flag 合并
+- [x] uploads_dir 可配置、目录存在并写入可用
+- [x] slog 全局初始化，级别与格式可配置
+- [x] 所有日志使用 slog 且包含 request-id
+- [x] 带宽统计仅累计一次且非负
+- [x] /bandwidth 随下载变化且值合理
+- [x] HTTP 服务端设置 ReadHeader/Read/Write/Idle 超时与 MaxHeaderBytes
+- [x] 代理 http.Client 设置超时与连接限制
+- [x] transfer 仅允许 allow-list 主机访问
+- [x] hop-by-hop 头已剔除（Connection、Keep-Alive、TE 等）
+- [x] /healthz 返回 200 OK
+- [x] /version 返回 Version 与 BuildAt
+- [x] /upload、/download、/delete 行为与返回结构保持兼容
+- [x] Windows 路径安全检查仍然有效
+- [x] 优雅退出在 SIGINT/SIGTERM 下生效

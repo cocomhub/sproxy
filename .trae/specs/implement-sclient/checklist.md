@@ -1,0 +1,22 @@
+# Checklist
+
+- [x] sclient 无参数运行时显示帮助信息
+- [x] sclient help 显示完整帮助信息（含所有子命令和选项说明）
+- [x] sclient version 显示版本号和构建时间
+- [x] sclient config show 正确显示所有配置项
+- [x] sclient config set 正确修改并持久化配置项
+- [x] 首次运行时自动创建 ~/.sclient.yaml 默认配置
+- [x] sclient upload <file> 成功上传文件并显示结果
+- [x] sclient upload <file1> <file2> 依次上传多个文件
+- [x] sclient upload --no-md5 <file> 跳过 MD5 计算
+- [x] sclient upload 文件不存在时显示错误并跳过
+- [x] sclient download <filename> 成功下载文件
+- [x] sclient download <filename> -o <path> 下载到指定路径
+- [x] sclient download 后正确进行 MD5 校验
+- [x] sclient delete <filename> 成功删除文件
+- [x] sclient list 显示服务器文件列表
+- [x] -s/--server 选项正确覆盖配置文件中的服务器地址
+- [x] -v/--verbose 选项输出详细请求信息
+- [x] 上传/下载过程显示实时进度
+- [x] go build ./cmd/sclient/... 编译通过
+- [x] go vet ./cmd/sclient/... 无警告

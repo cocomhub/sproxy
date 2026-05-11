@@ -1,0 +1,40 @@
+# Tasks
+- [x] 任务 1：建立配置模型与解析
+  - [x] 定义 Config 结构与默认值
+  - [x] 从 YAML 加载并与 flag 合并
+  - [x] 校验 uploads_dir、addr、超时区间
+  - [x] 提供示例 config.yaml
+- [x] 任务 2：统一日志初始化
+  - [x] 按配置初始化 slog（级别/格式）
+  - [x] 注入 request-id 日志字段
+  - [x] 将 log.* 调用替换为 slog
+- [x] 任务 3：修复带宽统计重复计数
+  - [x] 去除重复累计代码
+  - [x] 自测/单测验证统计正确性
+- [x] 任务 4：抽取与强化 HTTP 服务器
+  - [x] 使用显式 mux 注册路由
+  - [x] 设置服务端超时与最大头
+  - [x] 优雅退出逻辑整理
+  - [x] 新增 /healthz 与 /version
+- [x] 任务 5：提升 transfer 安全与稳定
+  - [x] 支持 allowed_hosts 校验（列表/通配）
+  - [x] 设置 http.Client 超时与 Transport 限制
+  - [x] 剔除 hop-by-hop 头
+- [x] 任务 6：处理器拆分与响应一致化
+  - [x] 将 upload/download/delete 移入 handlers 包
+  - [x] 统一 sendJSONResponse/错误处理
+  - [x] 保持兼容的返回结构与状态码
+- [x] 任务 7：文档与示例补充
+  - [x] 添加 README 更新要点
+  - [x] 提供 config.yaml 示例与说明
+- [x] 任务 8：基础测试与验证
+  - [x] 带宽统计准确性验证
+  - [x] allow-list 放行/拦截验证
+  - [x] 超时配置生效验证
+
+# Task Dependencies
+- [任务 2] 依赖 [任务 1]
+- [任务 4] 依赖 [任务 1]、[任务 2]
+- [任务 5] 依赖 [任务 1]
+- [任务 6] 依赖 [任务 2]、[任务 4]
+- [任务 8] 依赖 [任务 3]、[任务 4]、[任务 5]
