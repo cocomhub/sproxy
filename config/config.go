@@ -26,6 +26,7 @@ type Config struct {
 	LogLevel       string         `yaml:"log_level"`
 	LogFormat      string         `yaml:"log_format"`
 	MaxHeaderBytes int            `yaml:"max_header_bytes"`
+	TunnelKey      string         `yaml:"tunnel_key"`
 }
 
 func Default() *Config {

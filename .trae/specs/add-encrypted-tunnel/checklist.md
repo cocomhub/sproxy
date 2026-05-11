@@ -1,0 +1,28 @@
+# Checklist
+
+- [ ] sproxy Config 包含 TunnelKey 字段，yaml tag 为 tunnel_key
+- [ ] sproxy 启动时 tunnel_key 为空不报错（tunnel 功能禁用）
+- [ ] sproxy 启动时 tunnel_key 为非 64 字符 hex 时报错退出
+- [ ] sproxy 启动时 tunnel_key 为合法 64 字符 hex 时正常启动
+- [ ] POST /tunnel 且 tunnel_key 未配置时返回 403
+- [ ] POST /tunnel 且 tunnel_key 已配置时正常解密转发
+- [ ] GET /tunnel 返回 405 Method Not Allowed
+- [ ] POST /tunnel 请求体为空时返回 400
+- [ ] POST /tunnel 解密失败（错误 key）时返回 400
+- [ ] Tunnel 转发 GET 请求能正确返回目标响应
+- [ ] Tunnel 转发 POST 请求能正确传递请求体到目标
+- [ ] Tunnel 转发时目标不可达返回 502
+- [ ] 原有 `/{host}/{filepath...}` transfer 路由功能不受影响
+- [ ] sclient SclientConfig 包含 TunnelKey 和 TunnelEndpoint 字段
+- [ ] sclient config show 显示 tunnel_key（掩码）和 tunnel_endpoint
+- [ ] sclient config set tunnel_key <非法值> 时校验失败
+- [ ] sclient config set tunnel_key <合法 64 hex> 时保存成功
+- [ ] sclient tunnel 命令未配置 tunnel_key 时提示错误
+- [ ] sclient tunnel <url> 发送 GET 请求并输出响应
+- [ ] sclient tunnel -X POST -d 'body' <url> 发送 POST 请求
+- [ ] sclient tunnel -H "Accept: json" <url> 发送自定义头
+- [ ] sclient tunnel -i <url> 输出响应头和响应体
+- [ ] sclient tunnel -v <url> 输出加密前后的请求载荷
+- [ ] encryptPayload/decryptPayload 往返一致性（加密后可完整解密恢复）
+- [ ] go build ./... 全项目编译通过
+- [ ] go vet ./... 无警告

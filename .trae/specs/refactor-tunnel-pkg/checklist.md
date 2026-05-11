@@ -1,0 +1,25 @@
+# Checklist
+
+- [ ] pkg/tunnel 包存在于 pkg/tunnel/tunnel.go，package 名为 tunnel
+- [ ] tunnel.ParseKey 正确解析 64 字符 hex 为 32 字节 key，非法输入返回 error
+- [ ] tunnel.GenerateKey 返回 32 字节随机 key
+- [ ] tunnel.Encrypt 和 tunnel.Decrypt 往返一致（加密后可完整解密恢复）
+- [ ] tunnel.Request 和 tunnel.Response 结构体已公开定义
+- [ ] tunnel.EncodeBody / tunnel.DecodeBody 正确进行 base64 编解码
+- [ ] tunnel.NewHandler 返回 http.Handler，可直接挂载到任意 mux
+- [ ] tunnel.NewHandler：key 为空时返回 403
+- [ ] tunnel.NewHandler：请求体为空或解密失败时返回 400
+- [ ] tunnel.NewHandler：代理目标不可达时返回加密的 status=502 响应（而非 HTTP 502）
+- [ ] tunnel.NewHandler：正常转发时将目标响应加密后返回
+- [ ] tunnel.NewClient 正确解析 hexKey，返回 *Client
+- [ ] tunnel.Client.Do 正确发送加密请求并解密响应
+- [ ] internal/handlers/crypto.go 已删除
+- [ ] internal/handlers/handlers.go 中 tunnelRequest/tunnelResponse 结构体已删除
+- [ ] internal/handlers/handlers.go 中 h.tunnel 方法已删除，改为注册 tunnel.NewHandler
+- [ ] cmd/sclient/crypto.go 已删除
+- [ ] cmd/sclient/client.go 中 tunnelRequest/tunnelResponse 结构体已删除
+- [ ] cmd/sclient/client.go 中 TunnelRequest 使用 tunnel.Client.Do 实现
+- [ ] sclient genkey 子命令输出 64 字符 hex 字符串
+- [ ] sclient help 包含 genkey 命令说明
+- [ ] go build ./... 编译通过
+- [ ] go vet ./... 无警告

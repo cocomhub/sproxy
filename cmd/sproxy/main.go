@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -60,6 +61,20 @@ func main() {
 	initLogger(cfg)
 	slog.Info("config loaded", "path", *cfgPath, "log_level", levelString(cfg.LogLevel), "log_format", formatString(cfg.LogFormat))
 
+	var tunnelKey []byte
+	if cfg.TunnelKey != "" {
+		if len(cfg.TunnelKey) != 64 {
+			fmt.Fprintf(os.Stderr, "invalid tunnel_key: must be 64 hex characters\n")
+			os.Exit(1)
+		}
+		key, err := hex.DecodeString(cfg.TunnelKey)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid tunnel_key: %s\n", err.Error())
+			os.Exit(1)
+		}
+		tunnelKey = key
+	}
+
 	appCfg = cfg
 	tr := &http.Transport{
 		MaxIdleConns:        100,
@@ -71,7 +86,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	handlers.RegisterRoutes(mux, cfg, httpClient, *uploadsDir, Version, BuildAt)
+	handlers.RegisterRoutes(mux, cfg, httpClient, *uploadsDir, Version, BuildAt, tunnelKey)
 
 	fmt.Printf("downserver start at: http://localhost%s\n", cfg.Addr)
 	fmt.Printf("uploads dir: %s\n", cfg.UploadsDir)

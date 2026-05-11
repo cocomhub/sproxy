@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
 var (
@@ -116,10 +118,85 @@ func main() {
 				os.Exit(1)
 			}
 		}
+	case "tunnel":
+		if cfg.TunnelKey == "" {
+			fmt.Fprintln(os.Stderr, "请先配置 tunnel_key: sclient config set tunnel_key <64位hex密钥>")
+			os.Exit(1)
+		}
+		method := "GET"
+		var headers map[string]string
+		var body string
+		showHeaders := false
+		tunnelVerbose := verbose
+
+		var tunnelArgs []string
+		i := 0
+		for i < len(remaining) {
+			arg := remaining[i]
+			switch arg {
+			case "-X", "--method":
+				i++
+				if i < len(remaining) {
+					method = remaining[i]
+				}
+			case "-H", "--header":
+				i++
+				if i < len(remaining) {
+					parts := strings.SplitN(remaining[i], ":", 2)
+					if len(parts) == 2 {
+						if headers == nil {
+							headers = make(map[string]string)
+						}
+						headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+					}
+				}
+			case "-d", "--data":
+				i++
+				if i < len(remaining) {
+					body = remaining[i]
+				}
+			case "-i", "--include":
+				showHeaders = true
+			default:
+				if strings.HasPrefix(arg, "-") {
+					fmt.Fprintf(os.Stderr, "未知选项: %s\n", arg)
+					os.Exit(1)
+				}
+				tunnelArgs = append(tunnelArgs, arg)
+			}
+			i++
+		}
+
+		if len(tunnelArgs) == 0 {
+			fmt.Fprintln(os.Stderr, "请指定目标 URL")
+			os.Exit(1)
+		}
+		targetURL := tunnelArgs[0]
+
+		if strings.HasPrefix(body, "@") {
+			data, err := os.ReadFile(body[1:])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "读取文件失败: %v\n", err)
+				os.Exit(1)
+			}
+			body = string(data)
+		}
+
+		if err := TunnelRequest(cfg, method, targetURL, headers, body, showHeaders, tunnelVerbose); err != nil {
+			fmt.Fprintf(os.Stderr, "tunnel 请求失败: %v\n", err)
+			os.Exit(1)
+		}
 	case "version":
 		fmt.Printf("sclient version %s (build: %s)\n", Version, BuildAt)
 		fmt.Println()
 		HandleConfigShow(cfg)
+	case "genkey":
+		key, err := tunnel.GenerateKey()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "生成密钥失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(key)
 	case "help":
 		printHelp()
 	default:
@@ -158,6 +235,23 @@ func parseGlobalOptions(args []string, serverOverride *string, noMD5 *bool, outp
 			}
 		case "-v", "--verbose":
 			*verbose = true
+		case "-X", "--method":
+			i++
+			if i < len(args) {
+				positional = append(positional, arg, args[i])
+			}
+		case "-H", "--header":
+			i++
+			if i < len(args) {
+				positional = append(positional, arg, args[i])
+			}
+		case "-d", "--data":
+			i++
+			if i < len(args) {
+				positional = append(positional, arg, args[i])
+			}
+		case "-i", "--include":
+			positional = append(positional, arg)
 		default:
 			if strings.HasPrefix(arg, "-") {
 				fmt.Fprintf(os.Stderr, "未知选项: %s\n", arg)
@@ -179,6 +273,8 @@ func printHelp() {
 	fmt.Println("  download <文件名> [输出路径]  下载文件")
 	fmt.Println("  delete   <文件名>            删除文件")
 	fmt.Println("  list                         列出服务器上的文件")
+	fmt.Println("  tunnel   <url>               通过加密隧道转发请求")
+	fmt.Println("  genkey                       生成 tunnel_key 密钥")
 	fmt.Println("  config   [show|set <键> <值>] 配置管理")
 	fmt.Println("  version                      显示版本信息")
 	fmt.Println("  help                         显示此帮助信息")
@@ -189,6 +285,12 @@ func printHelp() {
 	fmt.Println("  -o, --output <路径>         指定下载文件的输出路径")
 	fmt.Println("  -v, --verbose               显示详细输出")
 	fmt.Println()
+	fmt.Println("隧道选项:")
+	fmt.Println("  -X, --method <METHOD>        请求方法 (默认: GET)")
+	fmt.Println("  -H, --header <Header: Value> 自定义请求头 (可重复)")
+	fmt.Println("  -d, --data <body|@file>      请求体 (@file 从文件读取)")
+	fmt.Println("  -i, --include                显示响应头")
+	fmt.Println()
 	fmt.Println("示例:")
 	fmt.Println("  sclient upload document.pdf")
 	fmt.Println("  sclient upload image1.jpg image2.png")
@@ -197,6 +299,8 @@ func printHelp() {
 	fmt.Println("  sclient upload data.txt -s http://192.168.1.100:18080")
 	fmt.Println("  sclient config set server_url http://example.com:18080")
 	fmt.Println("  sclient config show")
+	fmt.Println("  sclient tunnel https://api.example.com/data")
+	fmt.Println("  sclient tunnel -X POST -H \"Content-Type: application/json\" -d '{\"key\":\"val\"}' https://api.example.com/echo")
 	fmt.Println()
 	fmt.Println("配置文件: ~/.sclient.yaml")
 }

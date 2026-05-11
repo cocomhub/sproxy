@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/config"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
 type UploadResponse struct {
@@ -45,7 +46,7 @@ type Handlers struct {
 	curBandwidth *int64
 }
 
-func RegisterRoutes(mux *http.ServeMux, cfg *config.Config, client *http.Client, uploadsDir, version, buildAt string) {
+func RegisterRoutes(mux *http.ServeMux, cfg *config.Config, client *http.Client, uploadsDir, version, buildAt string, tunnelKey []byte) {
 	var sendSize int64
 	var curBandwidth int64
 
@@ -80,6 +81,7 @@ func RegisterRoutes(mux *http.ServeMux, cfg *config.Config, client *http.Client,
 	mux.HandleFunc("/healthz", h.healthz)
 	mux.HandleFunc("/version", h.versionHandler)
 	mux.HandleFunc("/{host}/{filepath...}", h.transfer)
+	mux.Handle("POST /tunnel", tunnel.NewHandler(tunnelKey))
 }
 
 func (h *Handlers) transfer(w http.ResponseWriter, r *http.Request) {

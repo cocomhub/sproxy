@@ -14,7 +14,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
 type serverResponse struct {
@@ -284,5 +287,42 @@ func ListFiles(fullURL string, timeout int) error {
 		fmt.Println(f)
 	}
 
+	return nil
+}
+
+func TunnelRequest(cfg *SclientConfig, method, targetURL string, headers map[string]string, body string, showHeaders, verbose bool) error {
+	c, err := tunnel.NewClient(cfg.TunnelKey, strings.TrimRight(cfg.ServerURL, "/")+cfg.TunnelEndpoint, time.Duration(cfg.Timeout)*time.Second)
+	if err != nil {
+		return fmt.Errorf("创建 tunnel 客户端失败: %w", err)
+	}
+	req := &tunnel.Request{
+		Method:  method,
+		URL:     targetURL,
+		Headers: headers,
+		Body:    tunnel.EncodeBody([]byte(body)),
+	}
+	if verbose {
+		payloadJSON, _ := json.Marshal(req)
+		fmt.Fprintf(os.Stderr, "[请求载荷] %s\n", string(payloadJSON))
+		fmt.Fprintf(os.Stderr, "[Tunnel] POST %s\n", c.TunnelURL)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("tunnel 请求失败: %w", err)
+	}
+	if verbose {
+		fmt.Fprintf(os.Stderr, "[响应状态] %d\n", resp.Status)
+	}
+	if showHeaders {
+		for k, v := range resp.Headers {
+			fmt.Printf("%s: %s\n", k, v)
+		}
+		fmt.Println()
+	}
+	bodyBytes, err := tunnel.DecodeBody(resp.Body)
+	if err != nil {
+		return fmt.Errorf("解码响应体失败: %w", err)
+	}
+	fmt.Print(string(bodyBytes))
 	return nil
 }

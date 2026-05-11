@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"gopkg.in/yaml.v3"
 )
 
@@ -19,6 +20,8 @@ type SclientConfig struct {
 	DeleteEndpoint   string `yaml:"delete_endpoint"`
 	CheckMD5         bool   `yaml:"check_md5"`
 	Timeout          int    `yaml:"timeout"`
+	TunnelKey        string `yaml:"tunnel_key"`
+	TunnelEndpoint   string `yaml:"tunnel_endpoint"`
 }
 
 func DefaultConfig() *SclientConfig {
@@ -29,6 +32,7 @@ func DefaultConfig() *SclientConfig {
 		DeleteEndpoint:   "/delete",
 		CheckMD5:         true,
 		Timeout:          300,
+		TunnelEndpoint:   "/tunnel",
 	}
 }
 
@@ -97,6 +101,14 @@ func HandleConfigShow(cfg *SclientConfig) {
 	fmt.Printf("delete_endpoint: %s\n", cfg.DeleteEndpoint)
 	fmt.Printf("check_md5: %v\n", cfg.CheckMD5)
 	fmt.Printf("timeout: %d\n", cfg.Timeout)
+	fmt.Printf("tunnel_endpoint: %s\n", cfg.TunnelEndpoint)
+	if cfg.TunnelKey == "" {
+		fmt.Println("tunnel_key: (未设置)")
+	} else if len(cfg.TunnelKey) >= 8 {
+		fmt.Printf("tunnel_key: %s****%s\n", cfg.TunnelKey[:4], cfg.TunnelKey[len(cfg.TunnelKey)-4:])
+	} else {
+		fmt.Println("tunnel_key: ****")
+	}
 }
 
 func HandleConfigSet(cfg *SclientConfig, configPath, key, value string) error {
@@ -127,8 +139,15 @@ func HandleConfigSet(cfg *SclientConfig, configPath, key, value string) error {
 			return fmt.Errorf("timeout 的值必须大于 0")
 		}
 		cfg.Timeout = v
+	case "tunnel_key":
+		if _, err := tunnel.ParseKey(value); err != nil {
+			return fmt.Errorf("tunnel_key 必须是64位十六进制字符串")
+		}
+		cfg.TunnelKey = value
+	case "tunnel_endpoint":
+		cfg.TunnelEndpoint = value
 	default:
-		return fmt.Errorf("未知的配置项: %s，支持的配置项: server_url, upload_endpoint, download_endpoint, delete_endpoint, check_md5, timeout", key)
+		return fmt.Errorf("未知的配置项: %s，支持的配置项: server_url, upload_endpoint, download_endpoint, delete_endpoint, check_md5, timeout, tunnel_key, tunnel_endpoint", key)
 	}
 
 	if err := SaveConfig(cfg, configPath); err != nil {
