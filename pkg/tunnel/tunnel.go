@@ -339,3 +339,68 @@ func (c *Client) Do(req *Request) (*Response, error) {
 
 	return &resp, nil
 }
+
+func httpRequestToTunnelRequest(req *http.Request) (*Request, error) {
+	headers := make(map[string]string)
+	for k := range req.Header {
+		headers[k] = req.Header.Get(k)
+	}
+
+	var bodyEncoded string
+	if req.Body != nil && req.Body != http.NoBody {
+		bodyBytes, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read request body: %w", err)
+		}
+		bodyEncoded = EncodeBody(bodyBytes)
+	}
+
+	return &Request{
+		Method:  req.Method,
+		URL:     req.URL.String(),
+		Headers: headers,
+		Body:    bodyEncoded,
+	}, nil
+}
+
+func tunnelResponseToHTTPResponse(resp *Response) (*http.Response, error) {
+	bodyBytes, err := DecodeBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("decode response body: %w", err)
+	}
+
+	header := make(http.Header)
+	for k, v := range resp.Headers {
+		header.Set(k, v)
+	}
+
+	return &http.Response{
+		Status:     fmt.Sprintf("%d %s", resp.Status, http.StatusText(resp.Status)),
+		StatusCode: resp.Status,
+		Header:     header,
+		Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
+	}, nil
+}
+
+// DoHTTP 接受标准 *http.Request，通过加密隧道转发并返回标准 *http.Response。
+//
+// 与 Do 不同，DoHTTP 直接使用标准库类型，调用方无需了解 tunnel.Request/Response 结构体。
+// 目标返回非 2xx 状态码时，仍返回 *http.Response（非 error），StatusCode 正确反映目标状态。
+func (c *Client) DoHTTP(req *http.Request) (*http.Response, error) {
+	tunnelReq, err := httpRequestToTunnelRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("convert request: %w", err)
+	}
+
+	tunnelResp, err := c.Do(tunnelReq)
+	if err != nil {
+		return nil, err
+	}
+
+	httpResp, err := tunnelResponseToHTTPResponse(tunnelResp)
+	if err != nil {
+		return nil, fmt.Errorf("convert response: %w", err)
+	}
+
+	return httpResp, nil
+}

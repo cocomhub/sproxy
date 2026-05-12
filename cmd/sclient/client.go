@@ -295,34 +295,47 @@ func TunnelRequest(cfg *SclientConfig, method, targetURL string, headers map[str
 	if err != nil {
 		return fmt.Errorf("创建 tunnel 客户端失败: %w", err)
 	}
-	req := &tunnel.Request{
-		Method:  method,
-		URL:     targetURL,
-		Headers: headers,
-		Body:    tunnel.EncodeBody([]byte(body)),
+
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
 	}
+	req, err := http.NewRequest(method, targetURL, bodyReader)
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %w", err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
 	if verbose {
-		payloadJSON, _ := json.Marshal(req)
-		fmt.Fprintf(os.Stderr, "[请求载荷] %s\n", string(payloadJSON))
-		fmt.Fprintf(os.Stderr, "[Tunnel] POST %s\n", c.TunnelURL)
+		tunnelURL := strings.TrimRight(cfg.ServerURL, "/") + cfg.TunnelEndpoint
+		fmt.Fprintf(os.Stderr, "[Tunnel] POST %s\n", tunnelURL)
+		fmt.Fprintf(os.Stderr, "[请求] %s %s\n", method, targetURL)
 	}
-	resp, err := c.Do(req)
+
+	resp, err := c.DoHTTP(req)
 	if err != nil {
 		return fmt.Errorf("tunnel 请求失败: %w", err)
 	}
+	defer resp.Body.Close()
+
 	if verbose {
-		fmt.Fprintf(os.Stderr, "[响应状态] %d\n", resp.Status)
+		fmt.Fprintf(os.Stderr, "[响应状态] %d\n", resp.StatusCode)
 	}
 	if showHeaders {
-		for k, v := range resp.Headers {
-			fmt.Printf("%s: %s\n", k, v)
+		for k, v := range resp.Header {
+			for _, vv := range v {
+				fmt.Printf("%s: %s\n", k, vv)
+			}
 		}
 		fmt.Println()
 	}
-	bodyBytes, err := tunnel.DecodeBody(resp.Body)
+
+	respBodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("解码响应体失败: %w", err)
+		return fmt.Errorf("读取响应体失败: %w", err)
 	}
-	fmt.Print(string(bodyBytes))
+	fmt.Print(string(respBodyBytes))
 	return nil
 }

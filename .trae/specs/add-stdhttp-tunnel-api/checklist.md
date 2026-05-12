@@ -1,0 +1,10 @@
+- [x] `DoHTTP` 方法定义在 `Client` 上，签名为 `func (c *Client) DoHTTP(req *http.Request) (*http.Response, error)`
+- [x] `DoHTTP` 接受任意 HTTP Method 的标准 `*http.Request`，正确提取 Method、URL、Headers、Body
+- [x] `DoHTTP` 返回的标准 `*http.Response` 包含正确的 StatusCode、Headers、Body
+- [x] `DoHTTP` 在网络错误或解密失败时返回 error（非 nil）
+- [x] `DoHTTP` 在目标返回非 2xx 状态码时，仍返回 `*http.Response`（非 error），StatusCode 正确
+- [x] `sclient` 的 `TunnelRequest` 函数使用 `c.DoHTTP()` 替代原有的 `c.Do()`
+- [x] `sclient tunnel` 子命令行为与改前完全一致（状态码、响应头、响应体输出不变）
+- [x] `ExampleClient_DoHTTP` 测试可运行且通过，覆盖 GET 请求端到端场景
+- [x] `go build ./...` 成功（exit code 0）
+- [x] `go vet ./...` 成功（exit code 0）

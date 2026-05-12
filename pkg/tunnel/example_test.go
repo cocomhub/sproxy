@@ -272,6 +272,48 @@ func Example_tamperDetection() {
 	// Output: 400
 }
 
+func ExampleClient_DoHTTP() {
+	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Response-Header", "test-value")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"method":"%s","path":"%s"}`, r.Method, r.URL.Path)
+	}))
+	defer targetServer.Close()
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
+	proxyServer := httptest.NewServer(mux)
+	defer proxyServer.Close()
+
+	client, _ := tunnel.NewClient(
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		proxyServer.URL+"/tunnel",
+		5*time.Second,
+	)
+
+	req, _ := http.NewRequest("GET", targetServer.URL+"/api/hello", nil)
+	req.Header.Set("X-Custom", "test")
+
+	resp, err := client.DoHTTP(req)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	fmt.Println(resp.StatusCode)
+	fmt.Println(resp.Header.Get("X-Response-Header"))
+
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Println(string(body))
+	// Output:
+	// 200
+	// test-value
+	// {"method":"GET","path":"/api/hello"}
+}
+
 func Example() {
 	os.Setenv("TUNNEL_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	defer os.Unsetenv("TUNNEL_KEY")
