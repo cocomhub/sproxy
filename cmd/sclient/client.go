@@ -314,7 +314,7 @@ func TunnelRequest(cfg *SclientConfig, method, targetURL string, headers map[str
 		fmt.Fprintf(os.Stderr, "[请求] %s %s\n", method, targetURL)
 	}
 
-	resp, err := c.DoHTTP(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return fmt.Errorf("tunnel 请求失败: %w", err)
 	}

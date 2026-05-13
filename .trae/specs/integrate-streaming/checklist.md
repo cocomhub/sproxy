@@ -1,0 +1,17 @@
+- [x] `encodeMetadataFrame` 正确生成 `[4B metaLen][encrypted metadata]` 格式
+- [x] `decodeMetadataFrame(r io.Reader, key []byte)` 从 Reader 流式读取并解密 metadata
+- [x] `Client.Do` 帧路径：body 通过 `io.Pipe` + `EncryptStream` 流式发送，无 `io.ReadAll(req.Body)`
+- [x] `Client.Do` 帧路径：请求 body 无全量缓冲，内存占用不超过 chunk size + metadata 大小
+- [x] `Client.Do` 帧路径响应：`*http.Response.Body` 为流式解密 Reader，无 `io.ReadAll(httpResp.Body)`
+- [x] `Client.Do` 帧路径响应：调用方 `io.Copy` 边解密边消费
+- [x] `NewHandler` 帧路径请求：无 `io.ReadAll(r.Body)`，使用 `decodeMetadataFrame` + `DecryptStream`
+- [x] `NewHandler` 帧路径响应：`EncryptStream` 流式加密目标响应，无 `io.ReadAll(resp.Body)`
+- [x] `DoRaw` 签名和行为完全不变（内部改为流式帧协议）
+- [x] `encodeFrame` / `decodeFrame` 函数已删除（不再需要），`DoRaw` 内部直接使用新流式函数
+- [x] `resp.Body.Close()` 正确关闭底层 HTTP 连接，无 goroutine 泄漏
+- [x] `ExampleClient_Do_largeBody` 发送 128KB（≥64KB）数据端到端通过
+- [x] `ExampleClient_Do_streamResponse` 流式响应读取通过
+- [x] 所有已有 Example 测试通过（19/19）
+- [x] `go build ./...` 成功
+- [x] `go vet ./...` 成功
+- [x] `stream.go` 中 `uint16` chunk 长度溢出 bug 已修复（改为 `uint32`）

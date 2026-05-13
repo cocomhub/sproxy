@@ -4,6 +4,7 @@
 package tunnel_test
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,7 +109,7 @@ func ExampleNewHandler() {
 		5*time.Second,
 	)
 
-	resp, err := client.Do(&tunnel.Request{
+	resp, err := client.DoRaw(&tunnel.Request{
 		Method: "GET",
 		URL:    targetServer.URL,
 	})
@@ -121,7 +122,7 @@ func ExampleNewHandler() {
 	// Output: 200
 }
 
-func ExampleClient_Do() {
+func ExampleClient_DoRaw() {
 	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +141,7 @@ func ExampleClient_Do() {
 		5*time.Second,
 	)
 
-	resp, err := client.Do(&tunnel.Request{
+	resp, err := client.DoRaw(&tunnel.Request{
 		Method: "GET",
 		URL:    targetServer.URL,
 	})
@@ -177,7 +178,7 @@ func Example_clientDoWithPOST() {
 		5*time.Second,
 	)
 
-	resp, err := client.Do(&tunnel.Request{
+	resp, err := client.DoRaw(&tunnel.Request{
 		Method:  "POST",
 		URL:     targetServer.URL,
 		Headers: map[string]string{"Content-Type": "text/plain"},
@@ -262,7 +263,8 @@ func Example_tamperDetection() {
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/tunnel", "application/octet-stream", nil)
+	// 发送损坏的帧（非法 metadata），服务端应返回 400
+	resp, err := http.Post(server.URL+"/tunnel", "application/x-tunnel-frame", bytes.NewReader([]byte("corrupted frame data")))
 	if err != nil {
 		fmt.Println("error:", err)
 		return
@@ -272,7 +274,7 @@ func Example_tamperDetection() {
 	// Output: 400
 }
 
-func ExampleClient_DoHTTP() {
+func ExampleClient_Do() {
 	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -296,7 +298,7 @@ func ExampleClient_DoHTTP() {
 	req, _ := http.NewRequest("GET", targetServer.URL+"/api/hello", nil)
 	req.Header.Set("X-Custom", "test")
 
-	resp, err := client.DoHTTP(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
@@ -312,6 +314,125 @@ func ExampleClient_DoHTTP() {
 	// 200
 	// test-value
 	// {"method":"GET","path":"/api/hello"}
+}
+
+func ExampleClient_Do_largeBody() {
+	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		fmt.Fprintf(w, `{"size":%d}`, len(body))
+	}))
+	defer targetServer.Close()
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
+	proxyServer := httptest.NewServer(mux)
+	defer proxyServer.Close()
+
+	client, _ := tunnel.NewClient(
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		proxyServer.URL+"/tunnel",
+		10*time.Second,
+	)
+
+	// 使用 ≥ 64KB 的数据验证流式传输（2 个完整 chunk）
+	largeBody := make([]byte, 128*1024)
+	for i := range largeBody {
+		largeBody[i] = byte('A' + (i % 26))
+	}
+
+	req, _ := http.NewRequest("POST", targetServer.URL, bytes.NewReader(largeBody))
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	fmt.Println(resp.StatusCode)
+
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Println(string(body))
+	// Output:
+	// 200
+	// {"size":131072}
+}
+
+func ExampleClient_Do_streamResponse() {
+	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+	const responseSize = 128 * 1024 // 128KB
+
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data := make([]byte, responseSize)
+		for i := range data {
+			data[i] = byte('Z' - (i % 26))
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+	}))
+	defer targetServer.Close()
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
+	proxyServer := httptest.NewServer(mux)
+	defer proxyServer.Close()
+
+	client, _ := tunnel.NewClient(
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		proxyServer.URL+"/tunnel",
+		10*time.Second,
+	)
+
+	req, _ := http.NewRequest("GET", targetServer.URL, nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 流式消费：io.Copy 边解密边读，内存占用恒定
+	var buf bytes.Buffer
+	n, err := io.Copy(&buf, resp.Body)
+	if err != nil {
+		fmt.Println("copy error:", err)
+		return
+	}
+
+	fmt.Println(resp.StatusCode)
+	fmt.Println(n == responseSize)
+	// Output:
+	// 200
+	// true
+}
+
+func Example_encryptStreamDecryptStream() {
+	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+	original := []byte("hello streaming world with chunked AES-256-GCM encryption")
+	var encrypted bytes.Buffer
+
+	n, err := tunnel.EncryptStream(key, bytes.NewReader(original), &encrypted)
+	if err != nil {
+		fmt.Println("encrypt error:", err)
+		return
+	}
+	_ = n
+
+	var decrypted bytes.Buffer
+	n2, err := tunnel.DecryptStream(key, bytes.NewReader(encrypted.Bytes()), &decrypted)
+	if err != nil {
+		fmt.Println("decrypt error:", err)
+		return
+	}
+	_ = n2
+
+	fmt.Println(string(decrypted.Bytes()))
+	// Output: hello streaming world with chunked AES-256-GCM encryption
 }
 
 func Example() {
