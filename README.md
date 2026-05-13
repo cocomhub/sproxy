@@ -33,7 +33,7 @@
   - 覆盖配置中的监听地址与上传目录
 
     ```bash
-    ./build/bin/sproxy --config ./config.example.yaml --addr :18080 --uploads-dir ./uploads
+    ./build/bin/sproxy --config ./config.example.yaml --addr :18083 --uploads-dir ./uploads
     ```
 
 
@@ -41,7 +41,7 @@
 
 - `--version`：打印版本与构建信息后退出
 - `--config <PATH>`：指定 YAML 配置文件路径（默认 `config.yaml`，不存在时使用内置默认值）
-- `--addr <ADDR>`：覆盖配置中的监听地址（如 `:18080`）
+- `--addr <ADDR>`：覆盖配置中的监听地址（如 `:18083`）
 - `--uploads-dir <DIR>`：覆盖配置中的上传目录路径
 
 
@@ -63,8 +63,9 @@
 示例片段：
 
 ```yaml
-addr: ":18080"
+addr: ":18083"
 uploads_dir: "./uploads"
+tunnel_key: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 allowed_hosts:
   - "example.com"
   - "example.org:443"
@@ -97,7 +98,7 @@ max_header_bytes: 1048576
 - 指定监听地址
 
   ```bash
-  ./build/bin/sproxy --addr :18080
+  ./build/bin/sproxy --addr :18083
   ```
 
 - 指定上传目录
@@ -106,6 +107,11 @@ max_header_bytes: 1048576
   ./build/bin/sproxy --uploads-dir ./uploads
   ```
 
+- 指定隧道密钥
+
+  ```bash
+  ./build/bin/sproxy --tunnel-key "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+  ```
 
 ## 注意
 

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/handlers"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -234,7 +235,12 @@ func DeleteFile(serverURL, filename string, verbose bool, timeout int) error {
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
-	req.Header.Set("X-File-MD5", "")
+
+	deleteFileMD5, err := handlers.FileMD5(filename)
+	if err != nil {
+		return fmt.Errorf("计算文件MD5失败: " + err.Error())
+	}
+	req.Header.Set("X-File-MD5", deleteFileMD5)
 
 	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
 	resp, err := client.Do(req)

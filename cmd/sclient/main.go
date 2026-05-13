@@ -4,6 +4,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -16,8 +17,22 @@ var (
 	BuildAt = "unknown"
 )
 
+var (
+	cfgPath string
+)
+
+func init() {
+	configPath, err := configFilePath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "获取配置文件路径失败: %v\n", err)
+		os.Exit(1)
+	}
+	flag.StringVar(&cfgPath, "config", configPath, "配置文件路径")
+}
+
 func main() {
-	args := os.Args[1:]
+	flag.Parse()
+	args := flag.Args()
 
 	if len(args) == 0 {
 		printHelp()
@@ -33,13 +48,7 @@ func main() {
 
 	remaining := parseGlobalOptions(cmdArgs, &serverOverride, &noMD5, &outputPath, &verbose)
 
-	configPath, err := configFilePath()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "获取配置文件路径失败: %v\n", err)
-		os.Exit(1)
-	}
-
-	cfg, err := LoadConfig(configPath)
+	cfg, err := LoadConfig(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
 		os.Exit(1)
@@ -109,7 +118,7 @@ func main() {
 					fmt.Fprintln(os.Stderr, "用法: sclient config set <键> <值>")
 					os.Exit(1)
 				}
-				if err := HandleConfigSet(cfg, configPath, remaining[1], remaining[2]); err != nil {
+				if err := HandleConfigSet(cfg, cfgPath, remaining[1], remaining[2]); err != nil {
 					fmt.Fprintf(os.Stderr, "设置配置失败: %v\n", err)
 					os.Exit(1)
 				}
@@ -280,7 +289,7 @@ func printHelp() {
 	fmt.Println("  help                         显示此帮助信息")
 	fmt.Println()
 	fmt.Println("选项:")
-	fmt.Println("  -s, --server <URL>          服务器地址 (默认: http://localhost:18080)")
+	fmt.Println("  -s, --server <URL>          服务器地址 (默认: http://localhost:18083)")
 	fmt.Println("  --no-md5                    禁用 MD5 校验")
 	fmt.Println("  -o, --output <路径>         指定下载文件的输出路径")
 	fmt.Println("  -v, --verbose               显示详细输出")
@@ -296,11 +305,11 @@ func printHelp() {
 	fmt.Println("  sclient upload image1.jpg image2.png")
 	fmt.Println("  sclient download report.pdf")
 	fmt.Println("  sclient download report.pdf -o /tmp/report.pdf")
-	fmt.Println("  sclient upload data.txt -s http://192.168.1.100:18080")
-	fmt.Println("  sclient config set server_url http://example.com:18080")
+	fmt.Println("  sclient upload data.txt -s http://192.168.1.100:18083")
+	fmt.Println("  sclient config set server_url http://example.com:18083")
 	fmt.Println("  sclient config show")
 	fmt.Println("  sclient tunnel https://api.example.com/data")
 	fmt.Println("  sclient tunnel -X POST -H \"Content-Type: application/json\" -d '{\"key\":\"val\"}' https://api.example.com/echo")
 	fmt.Println()
-	fmt.Println("配置文件: ~/.sclient.yaml")
+	fmt.Printf("配置文件: %s\n", cfgPath)
 }

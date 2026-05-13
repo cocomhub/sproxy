@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
-
-	"github.com/cocomhub/sproxy/config"
 )
 
 func TestIsHostAllowed(t *testing.T) {
@@ -26,7 +24,7 @@ func TestIsHostAllowed(t *testing.T) {
 
 	// 精确匹配 host:port
 	{
-		h := &Handlers{cfg: &config.Config{AllowedHosts: []string{"example.org:443"}}}
+		h := &Handlers{cfg: &Config{AllowedHosts: []string{"example.org:443"}}}
 		if !h.isHostAllowed("example.org:443") {
 			t.Fatalf("expected exact host:port match to pass")
 		}
@@ -40,7 +38,7 @@ func TestIsHostAllowed(t *testing.T) {
 
 	// 纯主机名匹配（允许任意端口）
 	{
-		h := &Handlers{cfg: &config.Config{AllowedHosts: []string{"example.com"}}}
+		h := &Handlers{cfg: &Config{AllowedHosts: []string{"example.com"}}}
 		if !h.isHostAllowed("example.com") {
 			t.Fatalf("expected pure hostname to pass")
 		}

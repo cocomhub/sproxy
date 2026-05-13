@@ -26,13 +26,14 @@ type SclientConfig struct {
 
 func DefaultConfig() *SclientConfig {
 	return &SclientConfig{
-		ServerURL:        "http://localhost:18080",
+		ServerURL:        "http://localhost:18083",
 		UploadEndpoint:   "/upload",
 		DownloadEndpoint: "/download",
 		DeleteEndpoint:   "/delete",
 		CheckMD5:         true,
 		Timeout:          300,
 		TunnelEndpoint:   "/tunnel",
+		TunnelKey:        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 	}
 }
 

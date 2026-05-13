@@ -19,7 +19,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cocomhub/sproxy/config"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -36,7 +35,7 @@ func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {
 }
 
 type Handlers struct {
-	cfg        *config.Config
+	cfg        *Config
 	client     *http.Client
 	uploadsDir string
 	version    string
@@ -46,7 +45,7 @@ type Handlers struct {
 	curBandwidth *int64
 }
 
-func RegisterRoutes(mux *http.ServeMux, cfg *config.Config, client *http.Client, uploadsDir, version, buildAt string, tunnelKey []byte) {
+func RegisterRoutes(mux *http.ServeMux, cfg *Config, client *http.Client, uploadsDir, version, buildAt string, tunnelKey []byte) {
 	var sendSize int64
 	var curBandwidth int64
 

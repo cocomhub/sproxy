@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/cocomhub/sproxy/config"
 	"github.com/cocomhub/sproxy/internal/handlers"
 )
 
@@ -24,15 +23,16 @@ var (
 )
 
 var (
-	cfgPath = flag.String("config", "config.yaml", "配置文件路径")
+	cfgPath = flag.String("config", "sproxy.yaml", "配置文件路径")
 	showVer = flag.Bool("version", false, "打印版本与构建信息后退出")
 	// 命令行标志定义
-	uploadsDir = flag.String("uploads-dir", "./uploads", "uploads file dir")
-	listenAddr = flag.String("addr", "", "listen address, e.g. :18080")
+	uploadsDir = flag.String("uploads-dir", "", "uploads file dir")
+	listenAddr = flag.String("addr", "", "listen address, e.g. :18083")
+	tunnelKey  = flag.String("tunnel-key", "", "tunnel key, must be 64 hex characters")
 )
 
 var (
-	appCfg     *config.Config
+	appCfg     *handlers.Config
 	httpClient *http.Client
 )
 
@@ -45,7 +45,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	cfg, err := config.Load(*cfgPath)
+	cfg, err := handlers.LoadConfig(*cfgPath)
 	if err != nil {
 		fmt.Printf("load config error: %s\n", err.Error())
 		os.Exit(1)
@@ -55,6 +55,9 @@ func main() {
 	}
 	if *uploadsDir != "" {
 		cfg.UploadsDir = *uploadsDir
+	}
+	if *tunnelKey != "" {
+		cfg.TunnelKey = *tunnelKey
 	}
 	*uploadsDir = cfg.UploadsDir
 
@@ -130,7 +133,7 @@ func main() {
 	slog.Info("downserver exit")
 }
 
-func initLogger(cfg *config.Config) {
+func initLogger(cfg *handlers.Config) {
 	level := slog.LevelInfo
 	switch levelString(cfg.LogLevel) {
 	case "debug":

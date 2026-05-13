@@ -109,92 +109,15 @@ func ExampleNewHandler() {
 		5*time.Second,
 	)
 
-	resp, err := client.DoRaw(&tunnel.Request{
-		Method: "GET",
-		URL:    targetServer.URL,
-	})
+	req, _ := http.NewRequest("GET", targetServer.URL, nil)
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
 
 	fmt.Println(resp.Status)
-	// Output: 200
-}
-
-func ExampleClient_DoRaw() {
-	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-
-	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"message":"hello from target"}`)
-	}))
-	defer targetServer.Close()
-
-	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
-	proxyServer := httptest.NewServer(mux)
-	defer proxyServer.Close()
-
-	client, _ := tunnel.NewClient(
-		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		proxyServer.URL+"/tunnel",
-		5*time.Second,
-	)
-
-	resp, err := client.DoRaw(&tunnel.Request{
-		Method: "GET",
-		URL:    targetServer.URL,
-	})
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
-
-	body, _ := tunnel.DecodeBody(resp.Body)
-	fmt.Println(resp.Status)
-	fmt.Println(string(body))
-	// Output:
-	// 200
-	// {"message":"hello from target"}
-}
-
-func Example_clientDoWithPOST() {
-	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-
-	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		fmt.Fprintf(w, `{"echo":"%s"}`, string(body))
-	}))
-	defer targetServer.Close()
-
-	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
-	proxyServer := httptest.NewServer(mux)
-	defer proxyServer.Close()
-
-	client, _ := tunnel.NewClient(
-		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		proxyServer.URL+"/tunnel",
-		5*time.Second,
-	)
-
-	resp, err := client.DoRaw(&tunnel.Request{
-		Method:  "POST",
-		URL:     targetServer.URL,
-		Headers: map[string]string{"Content-Type": "text/plain"},
-		Body:    tunnel.EncodeBody([]byte("hello gcm")),
-	})
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
-
-	body, _ := tunnel.DecodeBody(resp.Body)
-	fmt.Println(resp.Status)
-	fmt.Println(string(body))
-	// Output:
-	// 200
-	// {"echo":"hello gcm"}
+	// Output: 200 OK
 }
 
 func Example_newHandlerEmptyKey() {

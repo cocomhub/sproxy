@@ -1,8 +1,9 @@
 # Copyright 2026 The Cocomhub Authors. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-addr: ":18080"
+addr: ":18083"
 uploads_dir: "./uploads"
+tunnel_key: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 allowed_hosts:
   - "example.com"
   - "example.org:443"

@@ -322,78 +322,9 @@ func NewClient(hexKey, tunnelURL string, timeout time.Duration) (*Client, error)
 	}, nil
 }
 
-// DoRaw 发送一个加密隧道请求（使用 tunnel.Request）并返回解密后的响应。
-//
-// 这是低级 API，直接操作 tunnel.Request / tunnel.Response 结构体。
-// 推荐使用 Do(req *http.Request) 获取标准库类型。
-//
-// 内部使用流式帧协议：metadata 帧 + EncryptStream 发送请求，
-// decodeMetadataFrame + DecryptStream 接收响应。
-// Response.Body 仍为 Base64 编码字符串，与旧版签名完全兼容。
-//
-// 如果 HTTP 状态码不是 200，返回错误。
-func (c *Client) DoRaw(req *Request) (*Response, error) {
-	// 1. metadata（不含 body 字段）
-	metaOnly := &Request{Method: req.Method, URL: req.URL, Headers: req.Headers}
-	metaJSON, err := json.Marshal(metaOnly)
-	if err != nil {
-		return nil, fmt.Errorf("marshal metadata: %w", err)
-	}
-	metaFrame, err := encodeMetadataFrame(c.Key, metaJSON)
-	if err != nil {
-		return nil, fmt.Errorf("encode metadata frame: %w", err)
-	}
-
-	// 2. body：将 req.Body（Base64）解码后作为流式加密源
-	var bodyReader io.Reader = strings.NewReader("")
-	if req.Body != "" {
-		bodyBytes, decErr := DecodeBody(req.Body)
-		if decErr != nil {
-			return nil, fmt.Errorf("decode request body: %w", decErr)
-		}
-		bodyReader = bytes.NewReader(bodyBytes)
-	}
-	pr, pw := io.Pipe()
-	go func() {
-		_, encErr := EncryptStream(c.Key, bodyReader, pw)
-		pw.CloseWithError(encErr)
-	}()
-
-	// 3. POST：metaFrame + encrypted stream
-	combined := io.MultiReader(bytes.NewReader(metaFrame), pr)
-	httpResp, err := c.HTTPClient.Post(c.TunnelURL, frameContentType, combined)
-	if err != nil {
-		return nil, fmt.Errorf("post request: %w", err)
-	}
-	defer httpResp.Body.Close()
-
-	if httpResp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("tunnel error (HTTP %d): %s", httpResp.StatusCode, string(errBody))
-	}
-
-	// 4. 响应：decodeMetadataFrame + DecryptStream（全量收集，保持 Response.Body 为 Base64）
-	respMetaJSON, err := decodeMetadataFrame(httpResp.Body, c.Key)
-	if err != nil {
-		return nil, fmt.Errorf("decode response metadata: %w", err)
-	}
-	var resp Response
-	if err := json.Unmarshal(respMetaJSON, &resp); err != nil {
-		return nil, fmt.Errorf("unmarshal response metadata: %w", err)
-	}
-
-	var bodyBuf bytes.Buffer
-	if _, err := DecryptStream(c.Key, httpResp.Body, &bodyBuf); err != nil {
-		return nil, fmt.Errorf("decrypt response body: %w", err)
-	}
-	resp.Body = EncodeBody(bodyBuf.Bytes())
-
-	return &resp, nil
-}
-
 // Do 接受标准 *http.Request，通过加密隧道转发并返回标准 *http.Response。
 //
-// 这是推荐的主 API，使用标准库类型，调用方零学习成本。
+// 使用标准库类型，调用方零学习成本。
 // 所有请求/响应统一使用流式帧协议，内存占用恒定（不超过单个加密块大小）。
 // 返回的 *http.Response.Body 为流式 Reader，调用方可边读边消费，关闭时自动释放底层连接。
 // 目标返回非 2xx 状态码时，仍返回 *http.Response（非 error），StatusCode 正确反映目标状态。
