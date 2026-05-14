@@ -7,12 +7,14 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -296,7 +298,7 @@ func ListFiles(fullURL string, timeout int) error {
 	return nil
 }
 
-func TunnelRequest(cfg *SclientConfig, method, targetURL string, headers map[string]string, body string, showHeaders, verbose bool) error {
+func TunnelRequest(cfg *SclientConfig, method, targetURL string, headers map[string]string, body, outputFile string, verbose bool) error {
 	c, err := tunnel.NewClient(cfg.TunnelKey, strings.TrimRight(cfg.ServerURL, "/")+cfg.TunnelEndpoint, time.Duration(cfg.Timeout)*time.Second)
 	if err != nil {
 		return fmt.Errorf("创建 tunnel 客户端失败: %w", err)
@@ -306,6 +308,7 @@ func TunnelRequest(cfg *SclientConfig, method, targetURL string, headers map[str
 	if body != "" {
 		bodyReader = strings.NewReader(body)
 	}
+
 	req, err := http.NewRequest(method, targetURL, bodyReader)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %w", err)
@@ -314,10 +317,37 @@ func TunnelRequest(cfg *SclientConfig, method, targetURL string, headers map[str
 		req.Header.Set(k, v)
 	}
 
+	finalOutputFile := outputFile
+	if finalOutputFile == "" {
+		baseOutputFile := path.Base(req.URL.Path)
+		if baseOutputFile == "." || baseOutputFile == "" || baseOutputFile == "/" {
+			baseOutputFile = "index.html"
+		}
+		finalOutputFile = baseOutputFile
+		no := 1
+		for {
+			if _, err := os.Stat(finalOutputFile); errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			finalOutputFile = fmt.Sprintf("%s.%d", baseOutputFile, no)
+			no++
+		}
+	}
+
+	f, err := os.Create(finalOutputFile)
+	if err != nil {
+		return fmt.Errorf("创建结果文件失败: %w", err)
+	}
+	defer f.Close()
+
 	if verbose {
 		tunnelURL := strings.TrimRight(cfg.ServerURL, "/") + cfg.TunnelEndpoint
-		fmt.Fprintf(os.Stderr, "[Tunnel] POST %s\n", tunnelURL)
+		fmt.Fprintf(os.Stderr, "--%s-- #Tunnel %s\n", time.Now().Format("2006-01-02 15:04:05"), tunnelURL)
 		fmt.Fprintf(os.Stderr, "[请求] %s %s\n", method, targetURL)
+		for k := range req.Header {
+			fmt.Fprintf(os.Stderr, "%s: %s\n", k, req.Header.Get(k))
+		}
+		fmt.Fprintln(os.Stderr)
 	}
 
 	resp, err := c.Do(req)
@@ -327,21 +357,107 @@ func TunnelRequest(cfg *SclientConfig, method, targetURL string, headers map[str
 	defer resp.Body.Close()
 
 	if verbose {
-		fmt.Fprintf(os.Stderr, "[响应状态] %d\n", resp.StatusCode)
-	}
-	if showHeaders {
-		for k, v := range resp.Header {
-			for _, vv := range v {
-				fmt.Printf("%s: %s\n", k, vv)
-			}
+		fmt.Fprintf(os.Stderr, "[响应状态] %s\n", resp.Status)
+		for k := range resp.Header {
+			fmt.Fprintf(os.Stderr, "%s: %s\n", k, resp.Header.Get(k))
 		}
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 	}
 
-	respBodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("读取响应体失败: %w", err)
+	contentLength := resp.ContentLength
+	if contentLength > 0 {
+		fmt.Fprintf(os.Stderr, "长度：%d (%s) [%s]\n", contentLength, formatByte(float64(contentLength)), resp.Header.Get("Content-Type"))
+		fmt.Fprintf(os.Stderr, "正在保存至: ‘%s’\n\n", finalOutputFile)
 	}
-	fmt.Print(string(respBodyBytes))
+
+	barWidth := 50
+	var totalRead, lastRead int64
+	startAt := time.Now()
+	lastPrintAt := time.Now()
+	buf := make([]byte, 32*1024) // 32KB 缓冲区
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			written, writeErr := f.Write(buf[:n])
+			if writeErr != nil {
+				return fmt.Errorf("写入文件失败: %w", writeErr)
+			}
+			totalRead += int64(written)
+
+			// 打印进度条 (仅在有总长度时打印)
+			if contentLength > 0 && time.Since(lastPrintAt) > time.Second {
+				// 1. 计算百分比
+				percent := float64(totalRead) / float64(contentLength) * 100
+
+				// 2. 计算speed
+				speed := (float64(totalRead - lastRead)) / time.Since(lastPrintAt).Seconds()
+
+				// 3. 计算eta
+				eta := int64(float64(contentLength-totalRead) / speed)
+
+				// 4. 绘制进度条的方块（比如总长50个字符）
+				filled := int(percent / 100 * float64(barWidth))
+				bar := strings.Repeat("=", max(filled-1, 0)) + ">" + strings.Repeat(" ", barWidth-filled)
+
+				// 5. 格式化已下载和总大小（这里简单用字节表示，实际可以用 humanize 库美化）
+				// 注意：最后加几个空格是为了擦除上一次打印可能残留的长字符
+				fmt.Fprintf(os.Stderr, "\r%6.2f%% [%s] %s (%s/s) ETA: %s      ",
+					percent, bar, formatByte(float64(totalRead)), formatByte(speed), formatETA(eta))
+
+				lastRead = totalRead
+				lastPrintAt = time.Now()
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("读取响应体失败: %w", err)
+		}
+	}
+
+	if contentLength > 0 {
+		endAt := time.Now()
+
+		percent := float64(totalRead) / float64(contentLength) * 100
+		speed := (float64(totalRead - lastRead)) / time.Since(lastPrintAt).Seconds()
+		filled := int(percent / 100 * float64(barWidth))
+		bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+		fmt.Fprintf(os.Stderr, "\r%6.2f%% [%s] %s (%s/s)   in %s    ",
+			percent, bar, formatByte(float64(totalRead)), formatByte(speed), endAt.Sub(startAt))
+
+		totalSpeed := float64(totalRead) / endAt.Sub(startAt).Seconds()
+		fmt.Fprintf(os.Stderr, "\n\n%s (%s/s) - ‘%s’ saved [%d/%d]\n", endAt.Format("2006-01-02 15:04:05"),
+			formatByte(totalSpeed), finalOutputFile, totalRead, contentLength)
+	}
+	modTimeStr := resp.Header.Get("Last-Modified")
+	if modTimeStr != "" {
+		modTime, err := time.Parse(time.RFC1123, modTimeStr)
+		if err == nil {
+			os.Chtimes(finalOutputFile, modTime, modTime)
+		}
+	}
 	return nil
+}
+
+func formatByte(size float64) string {
+	if size > 1024*1024 {
+		return fmt.Sprintf("%.1f MB", size/1024/1024)
+	} else if size > 1024 {
+		return fmt.Sprintf("%.1f KB", size/1024)
+	}
+	return fmt.Sprintf("%.0f B", size)
+}
+
+func formatETA(seconds int64) string {
+	if seconds <= 0 {
+		return "--:--"
+	}
+	if seconds > 3600 {
+		return fmt.Sprintf("%dh %dm", seconds/3600, (seconds%3600)/60)
+	}
+	if seconds > 60 {
+		return fmt.Sprintf("%dm %ds", seconds/60, seconds%60)
+	}
+	return fmt.Sprintf("%ds", seconds)
 }

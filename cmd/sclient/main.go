@@ -135,7 +135,6 @@ func main() {
 		method := "GET"
 		var headers map[string]string
 		var body string
-		showHeaders := false
 		tunnelVerbose := verbose
 
 		var tunnelArgs []string
@@ -164,8 +163,6 @@ func main() {
 				if i < len(remaining) {
 					body = remaining[i]
 				}
-			case "-i", "--include":
-				showHeaders = true
 			default:
 				if strings.HasPrefix(arg, "-") {
 					fmt.Fprintf(os.Stderr, "未知选项: %s\n", arg)
@@ -191,7 +188,7 @@ func main() {
 			body = string(data)
 		}
 
-		if err := TunnelRequest(cfg, method, targetURL, headers, body, showHeaders, tunnelVerbose); err != nil {
+		if err := TunnelRequest(cfg, method, targetURL, headers, body, outputPath, tunnelVerbose); err != nil {
 			fmt.Fprintf(os.Stderr, "tunnel 请求失败: %v\n", err)
 			os.Exit(1)
 		}

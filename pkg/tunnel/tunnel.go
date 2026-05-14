@@ -86,9 +86,11 @@ type Request struct {
 //
 // Body 字段为 Base64 编码，需使用 DecodeBody 解码后获取原始内容。
 type Response struct {
-	Status  int               `json:"status"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
+	Proto         string      `json:"proto"`
+	Status        int         `json:"status"`
+	Headers       http.Header `json:"headers"`
+	ContentLength int64       `json:"content_length"`
+	Body          string      `json:"body"`
 }
 
 // ParseKey 将十六进制字符串解析为 32 字节的 AES-256 密钥。
@@ -253,7 +255,7 @@ func NewHandler(key []byte) http.Handler {
 			// 转发失败：返回 502，仍使用帧格式
 			errMetaJSON, _ := json.Marshal(Response{
 				Status:  502,
-				Headers: map[string]string{},
+				Headers: make(http.Header),
 			})
 			errMetaFrame, _ := encodeMetadataFrame(key, errMetaJSON)
 			w.Header().Set("Content-Type", frameContentType)
@@ -264,14 +266,13 @@ func NewHandler(key []byte) http.Handler {
 		}
 		defer resp.Body.Close()
 
-		// 4. 收集响应头
-		respHeaders := make(map[string]string)
-		for k := range resp.Header {
-			respHeaders[k] = resp.Header.Get(k)
-		}
-
-		// 5. 写出响应：metadata 帧 + 流式加密 body
-		respMetaJSON, err := json.Marshal(Response{Status: resp.StatusCode, Headers: respHeaders})
+		// 4. 写出响应：metadata 帧 + 流式加密 body
+		respMetaJSON, err := json.Marshal(Response{
+			Proto:         resp.Proto,
+			Status:        resp.StatusCode,
+			Headers:       resp.Header.Clone(),
+			ContentLength: resp.ContentLength,
+		})
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -393,15 +394,12 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		httpResp.Body.Close()
 	}()
 
-	header := make(http.Header)
-	for k, v := range tunnelResp.Headers {
-		header.Set(k, v)
-	}
-
 	return &http.Response{
-		Status:     fmt.Sprintf("%d %s", tunnelResp.Status, http.StatusText(tunnelResp.Status)),
-		StatusCode: tunnelResp.Status,
-		Header:     header,
-		Body:       rpr,
+		Status:        fmt.Sprintf("%d %s", tunnelResp.Status, http.StatusText(tunnelResp.Status)),
+		StatusCode:    tunnelResp.Status,
+		Proto:         tunnelResp.Proto,
+		Header:        tunnelResp.Headers.Clone(),
+		Body:          rpr,
+		ContentLength: tunnelResp.ContentLength,
 	}, nil
 }

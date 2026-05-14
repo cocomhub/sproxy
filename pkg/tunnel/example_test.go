@@ -161,14 +161,14 @@ func ExampleRequest() {
 func ExampleResponse() {
 	resp := tunnel.Response{
 		Status: 200,
-		Headers: map[string]string{
-			"Content-Type": "application/json",
+		Headers: http.Header{
+			"Content-Type": {"application/json"},
 		},
 		Body: tunnel.EncodeBody([]byte(`{"result":"ok"}`)),
 	}
 
 	fmt.Println(resp.Status)
-	fmt.Println(resp.Headers["Content-Type"])
+	fmt.Println(resp.Headers.Get("Content-Type"))
 
 	decoded, _ := tunnel.DecodeBody(resp.Body)
 	fmt.Println(string(decoded))
