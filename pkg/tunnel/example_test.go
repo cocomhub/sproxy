@@ -72,22 +72,6 @@ func Example_randomNonce() {
 	// Output: true
 }
 
-func ExampleEncodeBody() {
-	encoded := tunnel.EncodeBody([]byte("hello world"))
-	fmt.Println(encoded)
-	// Output: aGVsbG8gd29ybGQ=
-}
-
-func ExampleDecodeBody() {
-	decoded, err := tunnel.DecodeBody("aGVsbG8gd29ybGQ=")
-	if err != nil {
-		fmt.Println("error:", err)
-		return
-	}
-	fmt.Println(string(decoded))
-	// Output: hello world
-}
-
 func ExampleNewHandler() {
 	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
@@ -142,20 +126,16 @@ func ExampleRequest() {
 		Method:  "POST",
 		URL:     "https://api.example.com/echo",
 		Headers: map[string]string{"Content-Type": "application/json"},
-		Body:    tunnel.EncodeBody([]byte(`{"key":"value"}`)),
 	}
 
 	fmt.Println(req.Method)
 	fmt.Println(req.URL)
 	fmt.Println(req.Headers["Content-Type"])
 
-	decoded, _ := tunnel.DecodeBody(req.Body)
-	fmt.Println(string(decoded))
 	// Output:
 	// POST
 	// https://api.example.com/echo
 	// application/json
-	// {"key":"value"}
 }
 
 func ExampleResponse() {
@@ -164,18 +144,14 @@ func ExampleResponse() {
 		Headers: http.Header{
 			"Content-Type": {"application/json"},
 		},
-		Body: tunnel.EncodeBody([]byte(`{"result":"ok"}`)),
 	}
 
 	fmt.Println(resp.Status)
 	fmt.Println(resp.Headers.Get("Content-Type"))
 
-	decoded, _ := tunnel.DecodeBody(resp.Body)
-	fmt.Println(string(decoded))
 	// Output:
 	// 200
 	// application/json
-	// {"result":"ok"}
 }
 
 func Example_tamperDetection() {

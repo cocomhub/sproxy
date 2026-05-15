@@ -9,7 +9,7 @@
 //   - 加解密：AES-256-GCM 加密（Encrypt）和解密（Decrypt），nonce 随机生成并前置
 //   - 编解码：Base64 编码（EncodeBody）和解码（DecodeBody），用于传输二进制数据
 //   - 服务端：NewHandler 返回标准 http.Handler，可嵌入任意 HTTP 服务
-//   - 客户端：Client 结构体提供 Do 和 DoRaw 方法，发送加密请求并解密响应
+//   - 客户端：Client 结构体提供 Do 方法，发送加密请求并解密响应
 //
 // 协议格式
 //
@@ -43,13 +43,6 @@
 //	resp, _ := client.Do(req)
 //	defer resp.Body.Close()
 //	io.Copy(os.Stdout, resp.Body)
-//
-// 客户端调用（低级 API，直接使用 tunnel.Request）：
-//
-//	client.DoRaw(&tunnel.Request{
-//	    Method: "GET",
-//	    URL:    "https://api.example.com/data",
-//	})
 package tunnel
 
 import (
@@ -57,7 +50,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -73,24 +65,18 @@ const (
 )
 
 // Request 表示一个加密隧道请求，包含要转发到目标服务器的 HTTP 请求信息。
-//
-// Body 字段应使用 EncodeBody 进行 Base64 编码后再设置。
 type Request struct {
 	Method  string            `json:"method"`
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
 }
 
 // Response 表示加密隧道响应，包含目标服务器返回的 HTTP 响应信息。
-//
-// Body 字段为 Base64 编码，需使用 DecodeBody 解码后获取原始内容。
 type Response struct {
 	Proto         string      `json:"proto"`
 	Status        int         `json:"status"`
 	Headers       http.Header `json:"headers"`
 	ContentLength int64       `json:"content_length"`
-	Body          string      `json:"body"`
 }
 
 // ParseKey 将十六进制字符串解析为 32 字节的 AES-256 密钥。
@@ -163,16 +149,6 @@ func Decrypt(key, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("decrypt: %w", err)
 	}
 	return plaintext, nil
-}
-
-// EncodeBody 将二进制数据编码为 Base64 字符串，用于填充 Request.Body 或 Response.Body。
-func EncodeBody(data []byte) string {
-	return base64.StdEncoding.EncodeToString(data)
-}
-
-// DecodeBody 将 Base64 字符串解码为原始二进制数据，用于解析 Request.Body 或 Response.Body。
-func DecodeBody(encoded string) ([]byte, error) {
-	return base64.StdEncoding.DecodeString(encoded)
 }
 
 // encodeMetadataFrame 将 metadata JSON 加密后生成帧头：[4B big-endian metaLen][encrypted metadata]。
