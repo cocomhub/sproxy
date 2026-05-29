@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "mcp__mcp-atlassian-http__confluence_get_page",
+      "mcp__mcp-atlassian-http__jira_get_issue",
+      "Read(**)",
+      "Bash(awk:*)",
+      "Bash(bash:*)",
+      "Bash(brew install:*)",
+      "Bash(cd:*)",
+      "Bash(chmod:*)",
+      "Bash(cp:*)",
+      "Bash(export:*)",
+      "Bash(find:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(perl:*)",
+      "Bash(sed:*)",
+      "Bash(touch:*)",
+      "mcp__mcp_server_mysql__connect_db",
+      "mcp__mcp_server_mysql__query",
+      "mcp__mcp_server_mysql__list_tables",
+      "mcp__mcp_server_mysql__describe_table",
+      "mcp__mcp-atlassian-http__confluence_update_page",
+      "Bash(touch *)",
+      "Bash(git *)",
+      "Bash(go *)",
+      "Bash(Get-ChildItem -Recurse -Depth 3 -Name D:\\\\workdir\\\\leon\\\\cocomhub\\\\sproxy)",
+      "Bash(Sort-Object)",
+      "Bash(make build *)"
+    ],
+    "deny": []
+  }
+}

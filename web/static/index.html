@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<!--
+ Copyright 2026 The Cocomhub Authors. All rights reserved.
+ SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sproxy 文件管理</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 0; padding: 20px; background: #f5f7fa; color: #333; }
+.container { max-width: 1000px; margin: 0 auto; background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.1); padding: 24px; }
+h1 { margin: 0 0 20px; font-size: 24px; }
+.auth-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; padding: 12px; background: #f0f4ff; border-radius: 6px; }
+.auth-bar label { font-weight: 600; font-size: 14px; white-space: nowrap; }
+.auth-bar input { flex: 1; padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+.auth-bar button { padding: 6px 16px; background: #4a90d9; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+.auth-bar button:hover { background: #357abd; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+.btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+.btn-primary { background: #4a90d9; color: #fff; }
+.btn-primary:hover { background: #357abd; }
+.btn-danger { background: #e74c3c; color: #fff; }
+.btn-danger:hover { background: #c0392b; }
+.btn-secondary { background: #95a5a6; color: #fff; }
+.btn-secondary:hover { background: #7f8c8d; }
+.btn-sm { padding: 4px 10px; font-size: 13px; }
+.btn:disabled { opacity: .6; cursor: not-allowed; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #eee; font-size: 14px; }
+th { font-weight: 600; background: #f8f9fa; white-space: nowrap; }
+tr:hover td { background: #f8f9fa; }
+.file-actions { display: flex; gap: 6px; }
+.empty-msg { text-align: center; color: #999; padding: 40px 0; }
+.upload-progress { margin: 8px 0; height: 4px; background: #eee; border-radius: 2px; overflow: hidden; }
+.upload-progress-bar { height: 100%; background: #4a90d9; width: 0; transition: width .3s; }
+.overflow-dots { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.checksum-cell { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 13px; cursor: pointer; color: #555; display: inline-flex; align-items: center; gap: 4px; }
+.checksum-cell:hover { color: #333; }
+.checksum-cell .copy-icon { opacity: .4; font-size: 12px; }
+.checksum-cell:hover .copy-icon { opacity: .8; }
+.toast { position: fixed; bottom: 20px; right: 20px; padding: 12px 20px; border-radius: 6px; color: #fff; font-size: 14px; opacity: 0; transition: opacity .3s; z-index: 999; }
+.toast.show { opacity: 1; }
+.toast-success { background: #27ae60; }
+.toast-error { background: #e74c3c; }
+.toast-warning { background: #f39c12; }
+.size-cell { white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="container" id="app">
+  <h1>sproxy 文件管理</h1>
+  <div class="auth-bar">
+    <label for="token">Token:</label>
+    <input type="password" id="token" placeholder="可选，输入 Bearer Token">
+    <button onclick="saveToken()">保存</button>
+  </div>
+  <div class="toolbar">
+    <label class="btn btn-primary" for="file-input" id="upload-btn-label">上传文件</label>
+    <input type="file" id="file-input" multiple style="display:none" onchange="uploadFiles(this.files)">
+    <button class="btn btn-secondary" onclick="refreshList()">刷新列表</button>
+    <span id="upload-hash-status" style="font-size:13px;color:#999;margin-left:8px;"></span>
+  </div>
+  <div id="upload-progress-container"></div>
+  <div id="file-list">
+    <div class="empty-msg">加载中...</div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const BASE = '';
+let token = localStorage.getItem('sproxy_token') || '';
+document.getElementById('token').value = token;
+
+function saveToken() {
+  token = document.getElementById('token').value;
+  localStorage.setItem('sproxy_token', token);
+  showToast('Token 已保存', 'success');
+}
+
+function headers(extra) {
+  const h = extra || {};
+  if (token) h['Authorization'] = 'Bearer ' + token;
+  return h;
+}
+
+// --- Web Crypto SHA-256 ---
+async function computeSHA256(file) {
+  const buffer = await file.arrayBuffer();
+  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function getChecksumPrefix(cs) {
+  if (!cs) return '-';
+  return cs.substring(0, 16) + '…';
+}
+
+function copyChecksum(cs) {
+  navigator.clipboard.writeText(cs).then(function() {
+    showToast('Checksum 已复制到剪贴板', 'success');
+  }).catch(function() {
+    showToast('复制失败', 'error');
+  });
+}
+
+// --- 上传 ---
+async function uploadFiles(files) {
+  if (!files || files.length === 0) return;
+  const container = document.getElementById('upload-progress-container');
+  const hashStatus = document.getElementById('upload-hash-status');
+
+  for (const file of files) {
+    const progId = 'prog-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+    container.insertAdjacentHTML('beforeend', '<div><small>' + escHtml(file.name) + ' (' + formatSize(file.size) + ')</small><div class="upload-progress"><div class="upload-progress-bar" id="' + progId + '"></div></div></div>');
+
+    // 计算 SHA-256
+    hashStatus.textContent = '计算 ' + file.name + ' SHA-256…';
+    let fileChecksum;
+    try {
+      fileChecksum = await computeSHA256(file);
+    } catch(e) {
+      hashStatus.textContent = '';
+      showToast(file.name + ' SHA-256 计算失败: ' + e.message, 'error');
+      continue;
+    }
+    hashStatus.textContent = '';
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', BASE + '/upload', true);
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.setRequestHeader('X-File-Checksum', fileChecksum);
+      xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable) {
+          document.getElementById(progId).style.width = (e.loaded / e.total * 100) + '%';
+        }
+      };
+      const resp = await new Promise(function(resolve, reject) {
+        xhr.onload = function() { resolve(xhr); };
+        xhr.onerror = function() { reject(new Error('网络错误')); };
+        xhr.send(formData);
+      });
+      const data = JSON.parse(resp.responseText);
+      if (resp.status >= 200 && resp.status < 300 && data.success) {
+        showToast(file.name + ' 上传成功', 'success');
+      } else {
+        showToast(file.name + ' 上传失败: ' + (data.message || resp.status), 'error');
+      }
+    } catch(e) {
+      showToast(file.name + ' 上传失败: ' + e.message, 'error');
+    }
+  }
+  container.innerHTML = '';
+  refreshList();
+}
+
+// --- 文件列表 ---
+async function refreshList() {
+  const el = document.getElementById('file-list');
+  el.innerHTML = '<div class="empty-msg">加载中...</div>';
+  try {
+    const resp = await fetch(BASE + '/api/files', { headers: headers() });
+    const data = await resp.json();
+    if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + (data.message || resp.status) + '</div>'; return; }
+    const files = data.files || [];
+    if (files.length === 0) { el.innerHTML = '<div class="empty-msg">暂无文件</div>'; return; }
+    let html = '<table><thead><tr><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
+    for (const fi of files) {
+      const cs = fi.checksum || '';
+      const csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
+      html += '<tr><td class="overflow-dots" title="' + escHtml(fi.name) + '">' + escHtml(fi.name) + '</td>' +
+        '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
+        '<td>' + csDisplay + '</td>' +
+        '<td class="file-actions">' +
+        '<button class="btn btn-primary btn-sm" onclick="downloadFile(\'' + escJsStr(fi.name) + '\', \'' + escJsStr(cs) + '\')">下载</button>' +
+        '<button class="btn btn-danger btn-sm" onclick="deleteFile(\'' + escJsStr(fi.name) + '\', \'' + escJsStr(cs) + '\')">删除</button>' +
+        '</td></tr>';
+    }
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
+  }
+}
+
+// --- 下载（校验 checksum）---
+async function downloadFile(name, expectedChecksum) {
+  try {
+    const resp = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
+    if (!resp.ok) {
+      const data = await resp.json().catch(function() { return {}; });
+      showToast('下载失败: ' + (data.message || resp.status), 'error');
+      return;
+    }
+    const serverCS = resp.headers.get('X-File-Checksum') || '';
+    const blob = await resp.blob();
+
+    // 下载后校验 checksum
+    if (serverCS) {
+      try {
+        const buffer = await blob.arrayBuffer();
+        const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const localCS = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        if (localCS !== serverCS) {
+          showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0,16) + '…, 本地 ' + localCS.substring(0,16) + '…', 'error');
+          return;
+        }
+      } catch(e) {
+        showToast(name + ' 校验失败: ' + e.message, 'warning');
+      }
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast(name + ' 下载完成' + (serverCS ? '，校验通过' : ''), 'success');
+  } catch(e) {
+    showToast('下载失败: ' + e.message, 'error');
+  }
+}
+
+// --- 删除（带 checksum，走 POST /delete）---
+async function deleteFile(name, checksum) {
+  if (!confirm('确认删除 "' + name + '"?')) return;
+  if (!checksum) {
+    showToast('缺少 checksum，无法校验完整性', 'error');
+    return;
+  }
+  try {
+    const resp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(name), {
+      method: 'POST',
+      headers: headers({
+        'X-File-Checksum': checksum
+      })
+    });
+    const data = await resp.json();
+    if (resp.ok && data.success) {
+      showToast('删除成功: ' + name, 'success');
+      refreshList();
+    } else {
+      showToast('删除失败: ' + (data.message || resp.status), 'error');
+    }
+  } catch(e) {
+    showToast('删除失败: ' + e.message, 'error');
+  }
+}
+
+function showToast(msg, type) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast toast-' + type + ' show';
+  clearTimeout(el._timer);
+  el._timer = setTimeout(function() { el.classList.remove('show'); }, 3000);
+}
+
+function formatSize(bytes) {
+  if (bytes >= 1024*1024) return (bytes/1024/1024).toFixed(1) + ' MB';
+  if (bytes >= 1024) return (bytes/1024).toFixed(1) + ' KB';
+  return bytes + ' B';
+}
+
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escJsStr(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"'); }
+
+refreshList();
+</script>
+</body>
+</html>

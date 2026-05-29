@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package handlers
+package server
 
 import (
 	"fmt"
@@ -11,6 +11,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type TLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+}
+
+type RateLimitConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	Requests int           `yaml:"requests"`
+	Window   time.Duration `yaml:"window"`
+}
+
 type ServerTimeouts struct {
 	ReadHeader time.Duration `yaml:"read_header"`
 	Read       time.Duration `yaml:"read"`
@@ -19,22 +31,28 @@ type ServerTimeouts struct {
 }
 
 type Config struct {
-	Addr           string         `yaml:"addr"`
-	UploadsDir     string         `yaml:"uploads_dir"`
-	AllowedHosts   []string       `yaml:"allowed_hosts"`
-	ServerTimeouts ServerTimeouts `yaml:"server_timeouts"`
-	ClientTimeout  time.Duration  `yaml:"client_timeout"`
-	LogLevel       string         `yaml:"log_level"`
-	LogFormat      string         `yaml:"log_format"`
-	MaxHeaderBytes int            `yaml:"max_header_bytes"`
-	TunnelKey      string         `yaml:"tunnel_key"`
+	Addr           string          `yaml:"addr"`
+	UploadsDir     string          `yaml:"uploads_dir"`
+	MaxUploadBytes int64           `yaml:"max_upload_bytes"`
+	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts"`
+	LogLevel       string          `yaml:"log_level"`
+	LogFormat      string          `yaml:"log_format"`
+	MaxHeaderBytes int             `yaml:"max_header_bytes"`
+	TunnelKey      string          `yaml:"tunnel_key"`
+	TLS            TLSConfig       `yaml:"tls"`
+	AuthToken      string          `yaml:"auth_token"`
+	RateLimit      RateLimitConfig `yaml:"rate_limit"`
 }
 
 func Default() *Config {
 	return &Config{
-		Addr:       ":18083",
-		UploadsDir: "./uploads",
-		TunnelKey:  "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+		Addr:           ":18083",
+		UploadsDir:     "./uploads",
+		MaxUploadBytes: 1 << 30, // 1 GiB
+		RateLimit: RateLimitConfig{
+			Requests: 10,
+			Window:   time.Second,
+		},
 	}
 }
 

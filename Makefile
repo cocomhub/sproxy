@@ -86,6 +86,12 @@ fix:
 clean:
 	rm -rf $(BIN_DIR)
 
+.PHONY: test
+
+test:
+	@echo Running go test -race ./...
+	@$(GO) test -race ./...
+
 .PHONY: run
 
 run: build

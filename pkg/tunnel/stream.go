@@ -14,6 +14,11 @@ import (
 
 const DefaultChunkSize = 64 * 1024
 
+// maxChunkLen 是 DecryptStream 接受的单帧密文最大字节数，
+// 等于 DefaultChunkSize 明文 + GCM nonce(12) + tag(16) + 一点冗余。
+// 用于在解析帧长度后拒绝异常巨大的 chunk，避免 make([]byte, chunkLen) 触发 OOM。
+const maxChunkLen = DefaultChunkSize + 64
+
 // EncryptStream 从 r 中分块读取数据，使用 AES-256-GCM 独立加密每个块，
 // 并将帧格式的密文写入 w。
 //
@@ -105,6 +110,9 @@ func DecryptStream(key []byte, r io.Reader, w io.Writer) (int64, error) {
 		}
 
 		chunkLen := binary.BigEndian.Uint32(lenBuf)
+		if chunkLen > maxChunkLen {
+			return written, fmt.Errorf("decrypt stream: chunk too large: %d > %d", chunkLen, maxChunkLen)
+		}
 		chunk := make([]byte, chunkLen)
 		if _, err := io.ReadFull(r, chunk); err != nil {
 			return written, fmt.Errorf("decrypt stream: read chunk: %w", err)

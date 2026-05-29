@@ -4,11 +4,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -17,9 +25,7 @@ var (
 	BuildAt = "unknown"
 )
 
-var (
-	cfgPath string
-)
+var cfgPath string
 
 func init() {
 	configPath, err := configFilePath()
@@ -28,6 +34,14 @@ func init() {
 		os.Exit(1)
 	}
 	flag.StringVar(&cfgPath, "config", configPath, "配置文件路径")
+}
+
+func configFilePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("获取用户主目录失败: %w", err)
+	}
+	return filepath.Join(home, ".sclient.yaml"), nil
 }
 
 func main() {
@@ -42,24 +56,40 @@ func main() {
 	cmd, cmdArgs := parseCommand(args)
 
 	var serverOverride string
-	var noMD5 bool
+	var noChecksum bool
 	var outputPath string
 	var verbose bool
 
-	remaining := parseGlobalOptions(cmdArgs, &serverOverride, &noMD5, &outputPath, &verbose)
+	remaining := parseGlobalOptions(cmdArgs, &serverOverride, &noChecksum, &outputPath, &verbose)
 
-	cfg, err := LoadConfig(cfgPath)
+	cfg, err := client.LoadConfig(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
 		os.Exit(1)
 	}
 
+	serverURL := cfg.ServerURL
 	if serverOverride != "" {
-		cfg.ServerURL = serverOverride
+		serverURL = serverOverride
 	}
-	if noMD5 {
-		cfg.CheckMD5 = false
+
+	// 构造 FileClient
+	opts := []client.Option{
+		client.WithChecksum(!noChecksum),
+		client.WithProgress(func(label string, read, total int64) {
+			if total > 0 {
+				percent := float64(read) / float64(total) * 100
+				fmt.Fprintf(os.Stderr, "\r%s: %.1f%% (%s/%s)  ", label, percent, client.FormatByte(float64(read)), client.FormatByte(float64(total)))
+			} else {
+				fmt.Fprintf(os.Stderr, "\r%s: %s  ", label, client.FormatByte(float64(read)))
+			}
+			if read == total {
+				fmt.Fprintf(os.Stderr, "\n")
+			}
+		}),
 	}
+	cli := client.NewFileClient(serverURL, opts...)
+	ctx := context.Background()
 
 	switch cmd {
 	case "upload":
@@ -68,10 +98,18 @@ func main() {
 			os.Exit(1)
 		}
 		for _, filePath := range remaining {
-			uploadURL := strings.TrimRight(cfg.ServerURL, "/") + cfg.UploadEndpoint
-			if err := UploadFile(uploadURL, filePath, cfg.CheckMD5, verbose, cfg.Timeout); err != nil {
-				fmt.Fprintf(os.Stderr, "上传 %s 失败: %v\n", filePath, err)
+			fmt.Printf("上传: %s\n", filePath)
+			result, err := cli.Upload(ctx, filePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "上传失败: %s %v\n", filePath, err)
+				if result != nil {
+					fmt.Fprintf(os.Stderr, "服务端消息: %s\n", result.Message)
+				}
 				os.Exit(1)
+			}
+			fmt.Printf("成功: %v, 消息: %s\n", result.Success, result.Message)
+			if result.Checksum != "" {
+				fmt.Printf("文件 SHA-256: %s\n", result.Checksum)
 			}
 		}
 	case "download":
@@ -83,42 +121,58 @@ func main() {
 		if outputPath == "" && len(remaining) > 1 {
 			outputPath = remaining[1]
 		}
-		downloadURL := strings.TrimRight(cfg.ServerURL, "/") + cfg.DownloadEndpoint
-		if err := DownloadFile(downloadURL, filename, outputPath, cfg.CheckMD5, verbose, cfg.Timeout); err != nil {
+		fmt.Printf("下载请求 GET %s?filename=%s\n", strings.TrimRight(serverURL, "/")+"/download", filename)
+		if err := cli.Download(ctx, filename, outputPath); err != nil {
 			fmt.Fprintf(os.Stderr, "下载失败: %v\n", err)
 			os.Exit(1)
 		}
+		fmt.Printf("文件已下载到: %s\n", outputPath)
 	case "delete":
 		if len(remaining) == 0 {
 			fmt.Fprintln(os.Stderr, "请指定要删除的文件名")
 			os.Exit(1)
 		}
 		filename := remaining[0]
-		deleteURL := strings.TrimRight(cfg.ServerURL, "/") + cfg.DeleteEndpoint
-		if err := DeleteFile(deleteURL, filename, verbose, cfg.Timeout); err != nil {
+		fmt.Printf("删除请求 POST %s?filename=%s\n", strings.TrimRight(serverURL, "/")+"/delete", filename)
+		if err := cli.Delete(ctx, filename); err != nil {
 			fmt.Fprintf(os.Stderr, "删除失败: %v\n", err)
 			os.Exit(1)
 		}
+		fmt.Printf("文件删除成功: %s\n", filename)
 	case "list":
-		listURL := strings.TrimRight(cfg.ServerURL, "/") + "/api/files"
-		if err := ListFiles(listURL, cfg.Timeout); err != nil {
+		files, err := cli.List(ctx)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "列出文件失败: %v\n", err)
 			os.Exit(1)
 		}
+		if len(files) == 0 {
+			fmt.Println("no files found")
+		} else {
+			for _, f := range files {
+				csPrefix := f.Checksum
+				if len(csPrefix) > 16 {
+					csPrefix = csPrefix[:16] + "…"
+				}
+				if csPrefix == "" {
+					csPrefix = "-"
+				}
+				fmt.Printf("%-40s  %10s  %s\n", f.Name, client.FormatByte(float64(f.Size)), csPrefix)
+			}
+		}
 	case "config":
 		if len(remaining) == 0 {
-			HandleConfigShow(cfg)
+			client.HandleConfigShow(cfg)
 		} else {
 			subCmd := remaining[0]
 			switch subCmd {
 			case "show":
-				HandleConfigShow(cfg)
+				client.HandleConfigShow(cfg)
 			case "set":
 				if len(remaining) < 3 {
 					fmt.Fprintln(os.Stderr, "用法: sclient config set <键> <值>")
 					os.Exit(1)
 				}
-				if err := HandleConfigSet(cfg, cfgPath, remaining[1], remaining[2]); err != nil {
+				if err := client.HandleConfigSet(cfg, cfgPath, remaining[1], remaining[2]); err != nil {
 					fmt.Fprintf(os.Stderr, "设置配置失败: %v\n", err)
 					os.Exit(1)
 				}
@@ -188,14 +242,14 @@ func main() {
 			body = string(data)
 		}
 
-		if err := TunnelRequest(cfg, method, targetURL, headers, body, outputPath, tunnelVerbose); err != nil {
+		if err := tunnelRequest(cfg, method, targetURL, headers, body, outputPath, tunnelVerbose); err != nil {
 			fmt.Fprintf(os.Stderr, "tunnel 请求失败: %v\n", err)
 			os.Exit(1)
 		}
 	case "version":
 		fmt.Printf("sclient version %s (build: %s)\n", Version, BuildAt)
 		fmt.Println()
-		HandleConfigShow(cfg)
+		client.HandleConfigShow(cfg)
 	case "genkey":
 		key, err := tunnel.GenerateKey()
 		if err != nil {
@@ -212,6 +266,134 @@ func main() {
 	}
 }
 
+// tunnelRequest 是 CLI 专用的隧道请求函数，包含 curl 风格的进度条输出。
+func tunnelRequest(cfg *client.Config, method, targetURL string, headers map[string]string, body, outputFile string, verbose bool) error {
+	// 创建带隧道配置的新客户端
+	tunnelOpt := client.WithTunnel(cfg.TunnelKey)
+	tunnelCli := client.NewFileClient(cfg.ServerURL, tunnelOpt)
+
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, targetURL, bodyReader)
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %w", err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	finalOutputFile := outputFile
+	if finalOutputFile == "" {
+		baseOutputFile := path.Base(req.URL.Path)
+		if baseOutputFile == "." || baseOutputFile == "" || baseOutputFile == "/" {
+			baseOutputFile = "index.html"
+		}
+		finalOutputFile = baseOutputFile
+		no := 1
+		for {
+			if _, err := os.Stat(finalOutputFile); errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			finalOutputFile = fmt.Sprintf("%s.%d", baseOutputFile, no)
+			no++
+		}
+	}
+
+	f, err := os.Create(finalOutputFile)
+	if err != nil {
+		return fmt.Errorf("创建结果文件失败: %w", err)
+	}
+	defer f.Close()
+
+	if verbose {
+		tunnelURL := strings.TrimRight(cfg.ServerURL, "/") + cfg.TunnelEndpoint
+		fmt.Fprintf(os.Stderr, "--%s-- #Tunnel %s\n", time.Now().Format("2006-01-02 15:04:05"), tunnelURL)
+		fmt.Fprintf(os.Stderr, "[请求] %s %s\n", method, targetURL)
+		for k := range req.Header {
+			fmt.Fprintf(os.Stderr, "%s: %s\n", k, req.Header.Get(k))
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
+	resp, err := tunnelCli.TunnelDo(req)
+	if err != nil {
+		return fmt.Errorf("tunnel 请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if verbose {
+		fmt.Fprintf(os.Stderr, "[响应状态] %s\n", resp.Status)
+		for k := range resp.Header {
+			fmt.Fprintf(os.Stderr, "%s: %s\n", k, resp.Header.Get(k))
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
+	contentLength := resp.ContentLength
+	if contentLength > 0 {
+		fmt.Fprintf(os.Stderr, "长度：%d (%s) [%s]\n", contentLength, client.FormatByte(float64(contentLength)), resp.Header.Get("Content-Type"))
+		fmt.Fprintf(os.Stderr, "正在保存至: '%s'\n\n", finalOutputFile)
+	}
+
+	barWidth := 50
+	var totalRead, lastRead int64
+	startAt := time.Now()
+	lastPrintAt := time.Now()
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			written, writeErr := f.Write(buf[:n])
+			if writeErr != nil {
+				return fmt.Errorf("写入文件失败: %w", writeErr)
+			}
+			totalRead += int64(written)
+
+			if contentLength > 0 && time.Since(lastPrintAt) > time.Second {
+				percent := float64(totalRead) / float64(contentLength) * 100
+				speed := (float64(totalRead - lastRead)) / time.Since(lastPrintAt).Seconds()
+				eta := int64(float64(contentLength-totalRead) / speed)
+				filled := int(percent / 100 * float64(barWidth))
+				bar := strings.Repeat("=", max(filled-1, 0)) + ">" + strings.Repeat(" ", barWidth-filled)
+				fmt.Fprintf(os.Stderr, "\r%6.2f%% [%s] %s (%s/s) ETA: %s      ",
+					percent, bar, client.FormatByte(float64(totalRead)), client.FormatByte(speed), client.FormatETA(eta))
+				lastRead = totalRead
+				lastPrintAt = time.Now()
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("读取响应体失败: %w", err)
+		}
+	}
+
+	if contentLength > 0 {
+		endAt := time.Now()
+		percent := float64(totalRead) / float64(contentLength) * 100
+		speed := (float64(totalRead - lastRead)) / time.Since(lastPrintAt).Seconds()
+		filled := int(percent / 100 * float64(barWidth))
+		bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+		fmt.Fprintf(os.Stderr, "\r%6.2f%% [%s] %s (%s/s)   in %s    ",
+			percent, bar, client.FormatByte(float64(totalRead)), client.FormatByte(speed), endAt.Sub(startAt))
+		totalSpeed := float64(totalRead) / endAt.Sub(startAt).Seconds()
+		fmt.Fprintf(os.Stderr, "\n\n%s (%s/s) - '%s' saved [%d/%d]\n", endAt.Format("2006-01-02 15:04:05"),
+			client.FormatByte(totalSpeed), finalOutputFile, totalRead, contentLength)
+	}
+	modTimeStr := resp.Header.Get("Last-Modified")
+	if modTimeStr != "" {
+		modTime, err := time.Parse(time.RFC1123, modTimeStr)
+		if err == nil {
+			os.Chtimes(finalOutputFile, modTime, modTime)
+		}
+	}
+	return nil
+}
+
 func parseCommand(args []string) (string, []string) {
 	for i, arg := range args {
 		if !strings.HasPrefix(arg, "-") {
@@ -221,7 +403,7 @@ func parseCommand(args []string) (string, []string) {
 	return "", args
 }
 
-func parseGlobalOptions(args []string, serverOverride *string, noMD5 *bool, outputPath *string, verbose *bool) []string {
+func parseGlobalOptions(args []string, serverOverride *string, noChecksum *bool, outputPath *string, verbose *bool) []string {
 	var positional []string
 	i := 0
 	for i < len(args) {
@@ -232,8 +414,8 @@ func parseGlobalOptions(args []string, serverOverride *string, noMD5 *bool, outp
 			if i < len(args) {
 				*serverOverride = args[i]
 			}
-		case "--no-md5":
-			*noMD5 = true
+		case "--no-checksum":
+			*noChecksum = true
 		case "-o", "--output":
 			i++
 			if i < len(args) {
@@ -287,7 +469,7 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println("选项:")
 	fmt.Println("  -s, --server <URL>          服务器地址 (默认: http://localhost:18083)")
-	fmt.Println("  --no-md5                    禁用 MD5 校验")
+	fmt.Println("  --no-checksum              禁用 SHA-256 校验")
 	fmt.Println("  -o, --output <路径>         指定下载文件的输出路径")
 	fmt.Println("  -v, --verbose               显示详细输出")
 	fmt.Println()
