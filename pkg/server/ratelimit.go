@@ -4,6 +4,7 @@
 package server
 
 import (
+	"log/slog"
 	"net/http"
 	"sort"
 	"sync"
@@ -17,14 +18,16 @@ type RateLimiter struct {
 	limit      int
 	window     time.Duration
 	timestamps []time.Time
+	logger     *slog.Logger
 }
 
 // NewRateLimiter creates a RateLimiter allowing up to `limit` requests
 // per sliding `window` duration.
-func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
+func NewRateLimiter(limit int, window time.Duration, logger *slog.Logger) *RateLimiter {
 	return &RateLimiter{
 		limit:  limit,
 		window: window,
+		logger: defaultLogger(logger),
 	}
 }
 
@@ -56,6 +59,7 @@ func (rl *RateLimiter) Allow() bool {
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !rl.Allow() {
+			rl.logger.Warn("rate limit exceeded", "remote_addr", r.RemoteAddr, "path", r.URL.Path)
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}

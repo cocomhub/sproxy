@@ -83,7 +83,7 @@ func ExampleNewHandler() {
 	defer targetServer.Close()
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
+	mux.Handle("POST /tunnel", tunnel.NewHandler(key, nil))
 	proxyServer := httptest.NewServer(mux)
 	defer proxyServer.Close()
 
@@ -91,6 +91,7 @@ func ExampleNewHandler() {
 		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		proxyServer.URL+"/tunnel",
 		5*time.Second,
+		nil,
 	)
 
 	req, _ := http.NewRequest("GET", targetServer.URL, nil)
@@ -106,7 +107,7 @@ func ExampleNewHandler() {
 
 func Example_newHandlerEmptyKey() {
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(nil))
+	mux.Handle("POST /tunnel", tunnel.NewHandler(nil, nil))
 
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -158,7 +159,7 @@ func Example_tamperDetection() {
 	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
+	mux.Handle("POST /tunnel", tunnel.NewHandler(key, nil))
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -184,7 +185,7 @@ func ExampleClient_Do() {
 	defer targetServer.Close()
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
+	mux.Handle("POST /tunnel", tunnel.NewHandler(key, nil))
 	proxyServer := httptest.NewServer(mux)
 	defer proxyServer.Close()
 
@@ -192,6 +193,7 @@ func ExampleClient_Do() {
 		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		proxyServer.URL+"/tunnel",
 		5*time.Second,
+		nil,
 	)
 
 	req, _ := http.NewRequest("GET", targetServer.URL+"/api/hello", nil)
@@ -225,7 +227,7 @@ func ExampleClient_Do_largeBody() {
 	defer targetServer.Close()
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
+	mux.Handle("POST /tunnel", tunnel.NewHandler(key, nil))
 	proxyServer := httptest.NewServer(mux)
 	defer proxyServer.Close()
 
@@ -233,6 +235,7 @@ func ExampleClient_Do_largeBody() {
 		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		proxyServer.URL+"/tunnel",
 		10*time.Second,
+		nil,
 	)
 
 	// 使用 ≥ 64KB 的数据验证流式传输（2 个完整 chunk）
@@ -276,7 +279,7 @@ func ExampleClient_Do_streamResponse() {
 	defer targetServer.Close()
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key))
+	mux.Handle("POST /tunnel", tunnel.NewHandler(key, nil))
 	proxyServer := httptest.NewServer(mux)
 	defer proxyServer.Close()
 
@@ -284,6 +287,7 @@ func ExampleClient_Do_streamResponse() {
 		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		proxyServer.URL+"/tunnel",
 		10*time.Second,
+		nil,
 	)
 
 	req, _ := http.NewRequest("GET", targetServer.URL, nil)

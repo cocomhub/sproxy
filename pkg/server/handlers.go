@@ -26,19 +26,24 @@ type Handlers struct {
 	version       string
 	buildAt       string
 	checksumStore *ChecksumStore
+	uploadStore   *UploadStore
+	logger        *slog.Logger
 }
 
-func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointer[Config], version, buildAt string, tunnelKey []byte) {
+func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointer[Config], version, buildAt string, tunnelKey []byte, logger *slog.Logger) {
 	cfg := cfgPtr.Load()
+	log := defaultLogger(logger)
 
 	// 初始化 ChecksumStore
-	cs := NewChecksumStore(cfg.UploadsDir)
+	cs := NewChecksumStore(cfg.UploadsDir, log.With("component", "checksum_store"))
 
 	h := &Handlers{
 		cfgPtr:        cfgPtr,
 		version:       version,
 		buildAt:       buildAt,
 		checksumStore: cs,
+		uploadStore:   NewUploadStore(cfg.UploadsDir, log.With("component", "upload_store")),
+		logger:        log,
 	}
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
@@ -48,10 +53,17 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	localMux.HandleFunc("POST /delete", h.delete)
 	localMux.HandleFunc("GET /api/files", h.listFiles)
 
+	// 分块上传/下载路由（本地）
+	localMux.HandleFunc("POST /upload/init", h.uploadInit)
+	localMux.HandleFunc("POST /upload/chunk", h.uploadChunk)
+	localMux.HandleFunc("GET /upload/status", h.uploadStatus)
+	localMux.HandleFunc("POST /upload/complete", h.uploadComplete)
+	localMux.HandleFunc("GET /download/chunk", h.downloadChunk)
+
 	// 速率限制中间件（仅应用于 tunnel handler）
-	var tunnelHandler http.Handler = tunnel.NewLocalHandler(tunnelKey, localMux)
+	var tunnelHandler http.Handler = tunnel.NewLocalHandler(tunnelKey, localMux, log.With("component", "tunnel"))
 	if cfg.RateLimit.Enabled {
-		rl := NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window)
+		rl := NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "rate_limiter"))
 		tunnelHandler = rl.Middleware(tunnelHandler)
 	}
 
@@ -59,6 +71,11 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
 	mux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
 	mux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
+	mux.HandleFunc("POST /upload/init", h.authMiddleware(h.uploadInit))
+	mux.HandleFunc("POST /upload/chunk", h.authMiddleware(h.uploadChunk))
+	mux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
+	mux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
+	mux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.Handle("POST /tunnel", tunnelHandler)
@@ -66,7 +83,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	// Web UI
 	subFS, err := fs.Sub(web.StaticFS, "static")
 	if err != nil {
-		slog.Error("web static fs sub error", "error", err)
+		h.logger.Error("web static fs sub error", "error", err)
 	} else {
 		mux.Handle("GET /ui/", http.StripPrefix("/ui/", http.FileServer(http.FS(subFS))))
 	}
@@ -105,7 +122,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	if reqID == "" {
 		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
-	logger := slog.With("req_id", reqID)
+	logger := h.logger.With("req_id", reqID)
 
 	cfg := h.cfgPtr.Load()
 	// 限制请求体大小，防止 OOM；超过 MaxBytesReader 会向客户端返回 413
@@ -231,7 +248,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	} else if cs, err := FileChecksum(filePath); err == nil {
 		w.Header().Set("X-File-Checksum", cs)
 	} else {
-		slog.Warn("计算文件 checksum 失败", "error", err.Error(), "filename", filename)
+		h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "filename", filename)
 	}
 
 	http.ServeFile(w, r, filePath)
@@ -242,7 +259,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	if reqID == "" {
 		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
-	logger := slog.With("req_id", reqID)
+	logger := h.logger.With("req_id", reqID)
 
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
@@ -295,7 +312,7 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		slog.Error("读取上传目录失败", "error", err.Error())
+		h.logger.Error("读取上传目录失败", "error", err.Error())
 		sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusInternalServerError)
 		return
 	}

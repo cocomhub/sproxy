@@ -21,6 +21,7 @@ type Config struct {
 	Timeout          int    `yaml:"timeout"`
 	TunnelKey        string `yaml:"tunnel_key"`
 	TunnelEndpoint   string `yaml:"tunnel_endpoint"`
+	ChunkSize        int64  `yaml:"chunk_size"` // 分块上传/下载块大小（字节），默认 4 MiB
 }
 
 func DefaultConfig() *Config {
@@ -33,6 +34,7 @@ func DefaultConfig() *Config {
 		Timeout:          300,
 		TunnelKey:        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 		TunnelEndpoint:   "/tunnel",
+		ChunkSize:        4 << 20, // 4 MiB
 	}
 }
 
@@ -92,6 +94,7 @@ func HandleConfigShow(cfg *Config) {
 	}
 	fmt.Printf("TunnelKey:      %s\n", maskedKey)
 	fmt.Printf("TunnelEndpoint: %s\n", cfg.TunnelEndpoint)
+	fmt.Printf("ChunkSize:      %d\n", cfg.ChunkSize)
 }
 
 func HandleConfigSet(cfg *Config, configPath, key, value string) error {
@@ -114,6 +117,10 @@ func HandleConfigSet(cfg *Config, configPath, key, value string) error {
 		cfg.TunnelKey = value
 	case "tunnel_endpoint":
 		cfg.TunnelEndpoint = value
+	case "chunk_size":
+		if _, err := fmt.Sscanf(value, "%d", &cfg.ChunkSize); err != nil {
+			return fmt.Errorf("无效的分块大小: %w", err)
+		}
 	default:
 		return fmt.Errorf("未知配置键: %s", key)
 	}

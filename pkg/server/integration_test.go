@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -41,12 +42,13 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	cs := NewChecksumStore(cfg.UploadsDir)
+	cs := NewChecksumStore(cfg.UploadsDir, nil)
 	h := &Handlers{
 		cfgPtr:        &cfgPtr,
 		version:       "test",
 		buildAt:       "test",
 		checksumStore: cs,
+		logger:        slog.Default(),
 	}
 
 	mux := http.NewServeMux()
@@ -422,7 +424,7 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cs := NewChecksumStore(tmpDir)
+	cs := NewChecksumStore(tmpDir, nil)
 
 	var wg sync.WaitGroup
 	const goroutines = 50
@@ -445,7 +447,7 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 	wg.Wait()
 
 	// 重新打开 store，确认磁盘内容能正确解析
-	cs2 := NewChecksumStore(tmpDir)
+	cs2 := NewChecksumStore(tmpDir, nil)
 	all := cs2.GetAll()
 	// 至少不能 panic、不能丢出错误。具体保留数量取决于调度。
 	t.Logf("after concurrent ops, store has %d entries", len(all))
@@ -460,7 +462,7 @@ func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cs := NewChecksumStore(tmpDir)
+	cs := NewChecksumStore(tmpDir, nil)
 	cs.Set("k", "v")
 	cs.Set("k2", "v2")
 	cs.Delete("k")
@@ -490,5 +492,5 @@ func TestRegisterRoutes_Smoke(t *testing.T) {
 	mux := http.NewServeMux()
 	// 32 字节占位 tunnel key
 	key := make([]byte, 32)
-	RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", key)
+	RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", key, nil)
 }

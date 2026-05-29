@@ -42,6 +42,11 @@ type Config struct {
 	TLS            TLSConfig       `yaml:"tls"`
 	AuthToken      string          `yaml:"auth_token"`
 	RateLimit      RateLimitConfig `yaml:"rate_limit"`
+
+	// 分块上传配置
+	ChunkSize           int64         `yaml:"chunk_size"`             // 每块大小，默认 4 MiB
+	MaxChunkUploadBytes int64         `yaml:"max_chunk_upload_bytes"` // 单块请求体最大限制，默认 8 MiB
+	UploadSessionTTL    time.Duration `yaml:"upload_session_ttl"`     // 未完成上传会话保留时间，默认 24h
 }
 
 func Default() *Config {
@@ -53,6 +58,9 @@ func Default() *Config {
 			Requests: 10,
 			Window:   time.Second,
 		},
+		ChunkSize:           4 << 20,        // 4 MiB
+		MaxChunkUploadBytes: 8 << 20,        // 8 MiB
+		UploadSessionTTL:    24 * time.Hour, // 24h
 	}
 }
 

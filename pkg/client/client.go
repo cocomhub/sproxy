@@ -77,6 +77,8 @@ type FileClient struct {
 	tunnelClient  *tunnel.Client
 	checkChecksum bool
 	progressFn    func(label string, read, total int64)
+	ChunkSize     int64
+	logger        *slog.Logger
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
@@ -88,6 +90,8 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 		serverURL:     strings.TrimRight(serverURL, "/"),
 		httpClient:    &http.Client{Timeout: 300 * time.Second},
 		checkChecksum: true,
+		ChunkSize:     4 << 20, // 4 MiB
+		logger:        slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -105,9 +109,9 @@ func WithHTTPClient(hc *http.Client) Option {
 // WithTunnel 启用加密隧道传输，hexKey 需与 sproxy 服务端的 tunnel_key 一致。
 func WithTunnel(hexKey string) Option {
 	return func(c *FileClient) {
-		tc, err := tunnel.NewClient(hexKey, c.serverURL+"/tunnel", c.httpClient.Timeout)
+		tc, err := tunnel.NewClient(hexKey, c.serverURL+"/tunnel", c.httpClient.Timeout, c.logger)
 		if err != nil {
-			slog.Warn("创建隧道客户端失败", "error", err)
+			c.logger.Warn("创建隧道客户端失败", "error", err)
 			return
 		}
 		c.tunnelClient = tc
@@ -132,6 +136,16 @@ func WithChecksum(enabled bool) Option {
 func WithProgress(fn func(label string, read, total int64)) Option {
 	return func(c *FileClient) {
 		c.progressFn = fn
+	}
+}
+
+// WithLogger 设置 FileClient 内部使用的日志记录器。
+// 当 logger 为 nil 时使用 slog.Default()。
+func WithLogger(logger *slog.Logger) Option {
+	return func(c *FileClient) {
+		if logger != nil {
+			c.logger = logger
+		}
 	}
 }
 
@@ -175,7 +189,7 @@ func (c *FileClient) Upload(ctx context.Context, filePath string) (*UploadResult
 			return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
 		}
 		fileChecksum = hex.EncodeToString(h.Sum(nil))
-		slog.Debug("文件 SHA-256", "filepath", filePath, "checksum", fileChecksum)
+		c.logger.Debug("文件 SHA-256", "filepath", filePath, "checksum", fileChecksum)
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("重置文件指针失败: %w", err)
 		}
@@ -281,7 +295,7 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	}
 
 	if c.checkChecksum && serverCS != "" {
-		slog.Debug("下载文件校验", "filename", outputPath, "server_checksum", serverCS)
+		c.logger.Debug("下载文件校验", "filename", outputPath, "server_checksum", serverCS)
 		localCS, err := calculateChecksum(outputPath)
 		if err != nil {
 			return fmt.Errorf("计算本地 SHA-256 失败: %w", err)
@@ -289,7 +303,7 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 		if serverCS != localCS {
 			return fmt.Errorf("文件校验失败: 服务端 %s, 本地 %s", serverCS, localCS)
 		}
-		slog.Debug("文件校验通过", "checksum", serverCS)
+		c.logger.Debug("文件校验通过", "checksum", serverCS)
 	}
 
 	return nil

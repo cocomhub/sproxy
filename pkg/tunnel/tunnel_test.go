@@ -25,7 +25,7 @@ const testHexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 var _ = GenerateKey
 
 func TestNewHandler_returnsForbiddenOnEmptyKey(t *testing.T) {
-	h := NewHandler(nil)
+	h := NewHandler(nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/tunnel", nil)
 	h.ServeHTTP(rec, req)
@@ -42,11 +42,11 @@ func TestNewHandlerForwardsAbsoluteURL(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	handler := NewHandler(testKey)
+	handler := NewHandler(testKey, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -77,11 +77,11 @@ func TestNewLocalHandler_dispatchesRelativeURL(t *testing.T) {
 		_, _ = w.Write([]byte(`{"files":[{"name":"test.txt","size":123}]}`))
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -120,11 +120,11 @@ func TestNewLocalHandler_dispatchesWithQueryAndHeaders(t *testing.T) {
 		_, _ = w.Write([]byte(`{"success":true}`))
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -152,11 +152,11 @@ func TestNewLocalHandler_dispatchesUploadBody(t *testing.T) {
 		_, _ = w.Write([]byte(`{"success":true,"file_checksum":"abc"}`))
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -190,11 +190,11 @@ func TestNewLocalHandler_forwardsAbsoluteURL(t *testing.T) {
 		_, _ = w.Write([]byte("should-not-reach"))
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -222,11 +222,11 @@ func TestNewLocalHandler_withNil_actsLikeNewHandler(t *testing.T) {
 	defer backend.Close()
 
 	// NewLocalHandler with nil localHandler
-	handler := NewLocalHandler(testKey, nil)
+	handler := NewLocalHandler(testKey, nil, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -274,11 +274,11 @@ func TestNewLocalHandler_responseHeadersInMetadata(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"not found"}`))
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestNewLocalHandler_responseHeadersInMetadata(t *testing.T) {
 }
 
 func TestNewClient_rejectsInvalidKey(t *testing.T) {
-	_, err := NewClient("short", "http://localhost/tunnel", 0)
+	_, err := NewClient("short", "http://localhost/tunnel", 0, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid key")
 	}
@@ -358,11 +358,11 @@ func TestNewLocalHandler_preservesMethodAndURL(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -421,11 +421,11 @@ func TestNewLocalHandler_bodyMultiPartCompatible(t *testing.T) {
 		_, _ = w.Write([]byte(`{"success":true}`))
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -459,11 +459,11 @@ func TestNewLocalHandler_largeStreamingBody(t *testing.T) {
 		_, _ = w.Write(payload[:100]) // 小响应
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -493,11 +493,11 @@ func TestNewLocalHandler_multiValueResponseHeaders(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -532,11 +532,11 @@ func TestNewLocalHandler_metadataRoundtrip(t *testing.T) {
 		_, _ = w.Write([]byte("hello"))
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -575,11 +575,11 @@ func TestNewLocalHandler_emptyBody(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -603,11 +603,11 @@ func TestNewLocalHandler_rejectsNonLeadingSlash(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := NewLocalHandler(testKey, local)
+	handler := NewLocalHandler(testKey, local, nil)
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
-	client, err := NewClient(testHexKey, ts.URL, 0)
+	client, err := NewClient(testHexKey, ts.URL, 0, nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

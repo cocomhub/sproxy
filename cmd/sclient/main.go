@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
@@ -59,8 +60,12 @@ func main() {
 	var noChecksum bool
 	var outputPath string
 	var verbose bool
+	var chunkedMode bool
+	var chunkSize int64
+	var concurrency int
+	var resume bool
 
-	remaining := parseGlobalOptions(cmdArgs, &serverOverride, &noChecksum, &outputPath, &verbose)
+	remaining := parseGlobalOptions(cmdArgs, &serverOverride, &noChecksum, &outputPath, &verbose, &chunkedMode, &chunkSize, &concurrency, &resume)
 
 	cfg, err := client.LoadConfig(cfgPath)
 	if err != nil {
@@ -74,7 +79,9 @@ func main() {
 	}
 
 	// 构造 FileClient
+	logger := initLogger(verbose)
 	opts := []client.Option{
+		client.WithLogger(logger),
 		client.WithChecksum(!noChecksum),
 		client.WithProgress(func(label string, read, total int64) {
 			if total > 0 {
@@ -91,6 +98,11 @@ func main() {
 	if cfg.TunnelKey != "" {
 		opts = append(opts, client.WithTunnel(cfg.TunnelKey))
 	}
+	if cfg.ChunkSize > 0 {
+		opts = append(opts, func(c *client.FileClient) {
+			c.ChunkSize = cfg.ChunkSize
+		})
+	}
 	cli := client.NewFileClient(serverURL, opts...)
 	ctx := context.Background()
 
@@ -102,17 +114,45 @@ func main() {
 		}
 		for _, filePath := range remaining {
 			fmt.Printf("上传: %s\n", filePath)
-			result, err := cli.Upload(ctx, filePath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "上传失败: %s %v\n", filePath, err)
-				if result != nil {
-					fmt.Fprintf(os.Stderr, "服务端消息: %s\n", result.Message)
+			// 判断是否使用分块上传
+			useChunked := chunkedMode
+			if !useChunked {
+				if stat, err := os.Stat(filePath); err == nil {
+					useChunked = client.ShouldAutoChunk(stat.Size())
 				}
-				os.Exit(1)
 			}
-			fmt.Printf("成功: %v, 消息: %s\n", result.Success, result.Message)
-			if result.Checksum != "" {
-				fmt.Printf("文件 SHA-256: %s\n", result.Checksum)
+			if useChunked {
+				chunkOpts := []client.ChunkedOption{
+					client.WithChunkedResume(resume),
+				}
+				if chunkSize > 0 {
+					chunkOpts = append(chunkOpts, client.WithChunkedChunkSize(chunkSize))
+				}
+				if concurrency > 0 {
+					chunkOpts = append(chunkOpts, client.WithChunkedConcurrency(concurrency))
+				}
+				result, err := cli.ChunkedUpload(ctx, filePath, chunkOpts...)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "分块上传失败: %s %v\n", filePath, err)
+					os.Exit(1)
+				}
+				fmt.Printf("成功: %v, 消息: %s\n", result.Success, result.Message)
+				if result.FileChecksum != "" {
+					fmt.Printf("文件 SHA-256: %s\n", result.FileChecksum)
+				}
+			} else {
+				result, err := cli.Upload(ctx, filePath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "上传失败: %s %v\n", filePath, err)
+					if result != nil {
+						fmt.Fprintf(os.Stderr, "服务端消息: %s\n", result.Message)
+					}
+					os.Exit(1)
+				}
+				fmt.Printf("成功: %v, 消息: %s\n", result.Success, result.Message)
+				if result.Checksum != "" {
+					fmt.Printf("文件 SHA-256: %s\n", result.Checksum)
+				}
 			}
 		}
 	case "download":
@@ -124,10 +164,27 @@ func main() {
 		if outputPath == "" && len(remaining) > 1 {
 			outputPath = remaining[1]
 		}
-		fmt.Printf("下载请求 GET %s?filename=%s\n", strings.TrimRight(serverURL, "/")+"/download", filename)
-		if err := cli.Download(ctx, filename, outputPath); err != nil {
-			fmt.Fprintf(os.Stderr, "下载失败: %v\n", err)
-			os.Exit(1)
+
+		if chunkedMode {
+			chunkOpts := []client.ChunkedOption{
+				client.WithChunkedResume(resume),
+			}
+			if chunkSize > 0 {
+				chunkOpts = append(chunkOpts, client.WithChunkedChunkSize(chunkSize))
+			}
+			if concurrency > 0 {
+				chunkOpts = append(chunkOpts, client.WithChunkedConcurrency(concurrency))
+			}
+			if err := cli.ChunkedDownload(ctx, filename, outputPath, chunkOpts...); err != nil {
+				fmt.Fprintf(os.Stderr, "分块下载失败: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Printf("下载请求 GET %s?filename=%s\n", strings.TrimRight(serverURL, "/")+"/download", filename)
+			if err := cli.Download(ctx, filename, outputPath); err != nil {
+				fmt.Fprintf(os.Stderr, "下载失败: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		fmt.Printf("文件已下载到: %s\n", outputPath)
 	case "delete":
@@ -406,7 +463,7 @@ func parseCommand(args []string) (string, []string) {
 	return "", args
 }
 
-func parseGlobalOptions(args []string, serverOverride *string, noChecksum *bool, outputPath *string, verbose *bool) []string {
+func parseGlobalOptions(args []string, serverOverride *string, noChecksum *bool, outputPath *string, verbose *bool, chunkedMode *bool, chunkSize *int64, concurrency *int, resume *bool) []string {
 	var positional []string
 	i := 0
 	for i < len(args) {
@@ -426,6 +483,26 @@ func parseGlobalOptions(args []string, serverOverride *string, noChecksum *bool,
 			}
 		case "-v", "--verbose":
 			*verbose = true
+		case "--chunked":
+			*chunkedMode = true
+		case "--chunk-size":
+			i++
+			if i < len(args) {
+				val := int64(0)
+				if _, err := fmt.Sscanf(args[i], "%d", &val); err == nil {
+					*chunkSize = val
+				}
+			}
+		case "--concurrency":
+			i++
+			if i < len(args) {
+				val := 0
+				if _, err := fmt.Sscanf(args[i], "%d", &val); err == nil {
+					*concurrency = val
+				}
+			}
+		case "--resume":
+			*resume = true
 		case "-X", "--method":
 			i++
 			if i < len(args) {
@@ -475,6 +552,10 @@ func printHelp() {
 	fmt.Println("  --no-checksum              禁用 SHA-256 校验")
 	fmt.Println("  -o, --output <路径>         指定下载文件的输出路径")
 	fmt.Println("  -v, --verbose               显示详细输出")
+	fmt.Println("  --chunked                  启用分块上传/下载模式")
+	fmt.Println("  --chunk-size <bytes>        分块大小 (默认: 4MB)")
+	fmt.Println("  --concurrency <n>           上传/下载并发数 (默认: 4)")
+	fmt.Println("  --resume                   续传模式 (默认启用)")
 	fmt.Println()
 	fmt.Println("隧道选项:")
 	fmt.Println("  -X, --method <METHOD>        请求方法 (默认: GET)")
@@ -488,10 +569,24 @@ func printHelp() {
 	fmt.Println("  sclient download report.pdf")
 	fmt.Println("  sclient download report.pdf -o /tmp/report.pdf")
 	fmt.Println("  sclient upload data.txt -s http://192.168.1.100:18083")
+	fmt.Println("  sclient upload --chunked largefile.iso")
+	fmt.Println("  sclient upload --chunked --resume largefile.iso")
+	fmt.Println("  sclient download --chunked largefile.iso")
 	fmt.Println("  sclient config set server_url http://example.com:18083")
 	fmt.Println("  sclient config show")
 	fmt.Println("  sclient tunnel https://api.example.com/data")
 	fmt.Println("  sclient tunnel -X POST -H \"Content-Type: application/json\" -d '{\"key\":\"val\"}' https://api.example.com/echo")
 	fmt.Println()
 	fmt.Printf("配置文件: %s\n", cfgPath)
+}
+
+// initLogger 初始化 sclient 的控制台日志。
+// verbose 为 true 时输出 Debug 级别，否则 Info 级别。
+// 输出到 stderr，格式为文本，不对用户可见输出造成干扰。
+func initLogger(verbose bool) *slog.Logger {
+	level := slog.LevelInfo
+	if verbose {
+		level = slog.LevelDebug
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }

@@ -63,7 +63,7 @@ func main() {
 	*uploadsDir = cfg.UploadsDir
 	cfgPtr.Store(cfg)
 
-	initLogger(cfg)
+	logger := initLogger(cfg)
 	slog.Info("config loaded", "path", *cfgPath, "log_level", levelString(cfg.LogLevel), "log_format", formatString(cfg.LogFormat))
 
 	var tunnelKey []byte
@@ -102,7 +102,7 @@ func main() {
 	defer cancel()
 
 	mux := http.NewServeMux()
-	server.RegisterRoutes(ctx, mux, &cfgPtr, Version, BuildAt, tunnelKey)
+	server.RegisterRoutes(ctx, mux, &cfgPtr, Version, BuildAt, tunnelKey, logger)
 
 	protocol := "http"
 	if cfg.TLS.Enabled {
@@ -206,7 +206,7 @@ func main() {
 	slog.Info("downserver exit")
 }
 
-func initLogger(cfg *server.Config) {
+func initLogger(cfg *server.Config) *slog.Logger {
 	level := slog.LevelInfo
 	switch levelString(cfg.LogLevel) {
 	case "debug":
@@ -226,7 +226,9 @@ func initLogger(cfg *server.Config) {
 	default:
 		h = slog.NewTextHandler(os.Stdout, opts)
 	}
-	slog.SetDefault(slog.New(h))
+	logger := slog.New(h)
+	slog.SetDefault(logger)
+	return logger
 }
 
 func levelString(s string) string {

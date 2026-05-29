@@ -18,20 +18,22 @@ type ChecksumStore struct {
 	mu        sync.RWMutex
 	storePath string
 	checksums map[string]string // filename -> sha256 hex
+	logger    *slog.Logger
 }
 
 // NewChecksumStore 创建 ChecksumStore，从 uploadsDir/.checksums.json 加载已有记录。
-func NewChecksumStore(uploadsDir string) *ChecksumStore {
+func NewChecksumStore(uploadsDir string, logger *slog.Logger) *ChecksumStore {
 	storePath := filepath.Join(uploadsDir, ".checksums.json")
 	cs := &ChecksumStore{
 		storePath: storePath,
 		checksums: make(map[string]string),
+		logger:    defaultLogger(logger),
 	}
 
 	data, err := os.ReadFile(storePath)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			slog.Warn("读取 checksum 存储文件失败", "path", storePath, "error", err)
+			cs.logger.Warn("读取 checksum 存储文件失败", "path", storePath, "error", err)
 		}
 		return cs
 	}
@@ -41,7 +43,7 @@ func NewChecksumStore(uploadsDir string) *ChecksumStore {
 	}
 
 	if err := json.Unmarshal(data, &cs.checksums); err != nil {
-		slog.Warn("解析 checksum 存储文件失败，将使用空存储", "path", storePath, "error", err)
+		cs.logger.Warn("解析 checksum 存储文件失败，将使用空存储", "path", storePath, "error", err)
 		cs.checksums = make(map[string]string)
 	}
 	return cs
@@ -61,7 +63,7 @@ func (cs *ChecksumStore) Set(filename, checksum string) {
 	defer cs.mu.Unlock()
 	cs.checksums[filename] = checksum
 	if err := cs.saveLocked(); err != nil {
-		slog.Error("checksum 存储持久化失败", "op", "set", "filename", filename, "error", err)
+		cs.logger.Error("checksum 存储持久化失败", "op", "set", "filename", filename, "error", err)
 	}
 }
 
@@ -71,7 +73,7 @@ func (cs *ChecksumStore) Delete(filename string) {
 	defer cs.mu.Unlock()
 	delete(cs.checksums, filename)
 	if err := cs.saveLocked(); err != nil {
-		slog.Error("checksum 存储持久化失败", "op", "delete", "filename", filename, "error", err)
+		cs.logger.Error("checksum 存储持久化失败", "op", "delete", "filename", filename, "error", err)
 	}
 }
 

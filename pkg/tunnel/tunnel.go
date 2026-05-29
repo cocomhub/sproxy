@@ -56,6 +56,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -190,16 +191,29 @@ type Handler struct {
 	key          []byte
 	httpClient   *http.Client
 	localHandler http.Handler
+	logger       *slog.Logger
 }
 
 // NewHandler 创建一个仅支持外部转发的加密隧道处理器。
 //
 // 行为同旧版闭包实现。如果 key 为空，处理器直接返回 403 Forbidden。
+// logger 为 nil 时使用 slog.Default()。
 // 使用方式：mux.Handle("POST /tunnel", tunnel.NewHandler(key))
-func NewHandler(key []byte) http.Handler {
+func NewHandler(key []byte, logger *slog.Logger) http.Handler {
+	log := logger
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Handler{
-		key:        key,
-		httpClient: &http.Client{},
+		key: key,
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
+		logger: log,
 	}
 }
 
@@ -207,11 +221,23 @@ func NewHandler(key []byte) http.Handler {
 //
 // 当请求 URL 为绝对路径（如 /upload）且在 local 中注册时，直接在当前进程中转发到 local handler；
 // 当请求 URL 为绝对 URL（如 https://example.com/api）时，与原 NewHandler 行为一致。
-func NewLocalHandler(key []byte, local http.Handler) http.Handler {
+// logger 为 nil 时使用 slog.Default()。
+func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.Handler {
+	log := logger
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Handler{
-		key:          key,
-		httpClient:   &http.Client{},
+		key: key,
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 		localHandler: local,
+		logger:       log,
 	}
 }
 
@@ -222,21 +248,28 @@ func isRelativePath(urlStr string) bool {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(h.key) == 0 {
+		h.logger.Warn("隧道密钥为空，拒绝请求")
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 
+	h.logger.Debug("隧道请求", "method", r.Method, "remote", r.RemoteAddr)
+
 	// 1. 解析 metadata 帧
 	metaJSON, err := decodeMetadataFrame(r.Body, h.key)
 	if err != nil {
+		h.logger.Error("解析隧道 metadata 失败", "error", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	var req Request
 	if err := json.Unmarshal(metaJSON, &req); err != nil {
+		h.logger.Error("反序列化隧道请求失败", "error", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+
+	h.logger.Debug("隧道请求 metadata", "method", req.Method, "url", req.URL)
 
 	// 2. r.Body 剩余部分为流式加密 body，通过 Pipe + DecryptStream 流式解密
 	bodyPr, bodyPw := io.Pipe()
@@ -401,6 +434,7 @@ type Client struct {
 	Key        []byte
 	TunnelURL  string
 	HTTPClient *http.Client
+	logger     *slog.Logger
 }
 
 // NewClient 创建一个加密隧道客户端。
@@ -409,19 +443,30 @@ type Client struct {
 //   - hexKey: 64 位十六进制密钥字符串，与 sproxy 服务端 tunnel_key 一致
 //   - tunnelURL: 隧道服务端地址，如 "http://proxy:8080/tunnel"
 //   - timeout: HTTP 客户端超时时间
+//   - logger: 日志记录器，为 nil 时使用 slog.Default()
 //
 // 如果 hexKey 格式无效（非 64 位十六进制），返回错误。
-func NewClient(hexKey, tunnelURL string, timeout time.Duration) (*Client, error) {
+func NewClient(hexKey, tunnelURL string, timeout time.Duration, logger *slog.Logger) (*Client, error) {
 	key, err := ParseKey(hexKey)
 	if err != nil {
 		return nil, err
+	}
+	log := logger
+	if log == nil {
+		log = slog.Default()
 	}
 	return &Client{
 		Key:       key,
 		TunnelURL: strings.TrimRight(tunnelURL, "/"),
 		HTTPClient: &http.Client{
 			Timeout: timeout,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		},
+		logger: log,
 	}, nil
 }
 
@@ -432,6 +477,8 @@ func NewClient(hexKey, tunnelURL string, timeout time.Duration) (*Client, error)
 // 返回的 *http.Response.Body 为流式 Reader，调用方可边读边消费，关闭时自动释放底层连接。
 // 目标返回非 2xx 状态码时，仍返回 *http.Response（非 error），StatusCode 正确反映目标状态。
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	c.logger.Debug("隧道客户端请求", "method", req.Method, "url", req.URL.String())
+
 	// 1. 构造 metadata（不含 body）
 	headers := make(map[string]string)
 	for k := range req.Header {
@@ -472,6 +519,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	if httpResp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
+		c.logger.Error("隧道响应异常", "status", httpResp.StatusCode, "body", string(errBody))
 		return nil, fmt.Errorf("tunnel error (HTTP %d): %s", httpResp.StatusCode, string(errBody))
 	}
 
@@ -479,6 +527,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	respMetaJSON, err := decodeMetadataFrame(httpResp.Body, c.Key)
 	if err != nil {
 		httpResp.Body.Close()
+		c.logger.Error("解析隧道响应 metadata 失败", "error", err)
 		return nil, fmt.Errorf("decode response metadata: %w", err)
 	}
 	var tunnelResp Response
@@ -486,6 +535,8 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		httpResp.Body.Close()
 		return nil, fmt.Errorf("unmarshal response metadata: %w", err)
 	}
+
+	c.logger.Debug("隧道响应 metadata", "status", tunnelResp.Status, "proto", tunnelResp.Proto)
 
 	// 5. 响应 body：流式 Pipe + DecryptStream goroutine
 	// 调用方 resp.Body.Close() 会关闭 rpr，进而触发 rpw.CloseWithError，终止 goroutine
