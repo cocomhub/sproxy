@@ -56,6 +56,9 @@ tr:hover td { background: #f8f9fa; }
     <label for="token">Token:</label>
     <input type="password" id="token" placeholder="可选，输入 Bearer Token">
     <button onclick="saveToken()">保存</button>
+    <label for="tunnel-key" style="margin-left:16px;">Tunnel Key:</label>
+    <input type="password" id="tunnel-key" placeholder="64位 hex 密钥，可选" style="flex:1.5;">
+    <button onclick="saveTunnelKey()">保存</button>
   </div>
   <div class="toolbar">
     <label class="btn btn-primary" for="file-input" id="upload-btn-label">上传文件</label>
@@ -72,7 +75,12 @@ tr:hover td { background: #f8f9fa; }
 <script>
 const BASE = '';
 let token = localStorage.getItem('sproxy_token') || '';
+let tunnelHexKey = localStorage.getItem('sproxy_tunnel_key') || '';
 document.getElementById('token').value = token;
+document.getElementById('tunnel-key').value = tunnelHexKey;
+
+// 缓存导入的 CryptoKey，避免重复导入
+let _tunnelCryptoKey = null;
 
 function saveToken() {
   token = document.getElementById('token').value;
@@ -80,9 +88,130 @@ function saveToken() {
   showToast('Token 已保存', 'success');
 }
 
+function saveTunnelKey() {
+  tunnelHexKey = document.getElementById('tunnel-key').value;
+  localStorage.setItem('sproxy_tunnel_key', tunnelHexKey);
+  _tunnelCryptoKey = null; // 清除缓存，下次重新导入
+  showToast('Tunnel Key 已保存', 'success');
+}
+
+// --- 隧道加解密 ---
+async function getTunnelCryptoKey() {
+  if (!tunnelHexKey) return null;
+  if (_tunnelCryptoKey) return _tunnelCryptoKey;
+  const raw = hexToBytes(tunnelHexKey);
+  if (raw.length !== 32) {
+    showToast('Tunnel Key 必须为 64 位 hex', 'error');
+    return null;
+  }
+  _tunnelCryptoKey = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  return _tunnelCryptoKey;
+}
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(new Uint8Array(bytes)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function tunnelRequest(method, urlPath, headersObj, bodyBytes) {
+  const key = await getTunnelCryptoKey();
+  if (!key) throw new Error('未配置有效的 Tunnel Key');
+
+  // 构造请求元数据
+  const meta = { method: method, url: urlPath, headers: {} };
+  if (headersObj) {
+    for (const [k, v] of Object.entries(headersObj)) {
+      if (k !== 'Authorization') meta.headers[k] = v; // 隧道模式下不发送 Bearer Token
+    }
+  }
+
+  // 序列化：4B metaLen + encrypted(metaJSON) + encrypted(body as a single chunk)
+  const metaJSON = new TextEncoder().encode(JSON.stringify(meta));
+  const metaIV = crypto.getRandomValues(new Uint8Array(12));
+  const metaCT = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: metaIV }, key, metaJSON);
+  const metaFrame = new Uint8Array(4 + metaIV.length + metaCT.byteLength);
+  const dv = new DataView(metaFrame.buffer);
+  dv.setUint32(0, metaIV.length + metaCT.byteLength, false); // big-endian
+  metaFrame.set(metaIV, 4);
+  metaFrame.set(new Uint8Array(metaCT), 4 + metaIV.length);
+
+  // 加密 body（使用简化格式：length(4B) + nonce(12B) + ciphertext）
+  let bodyFrame = new Uint8Array(0);
+  if (bodyBytes && bodyBytes.byteLength > 0) {
+    const bodyIV = crypto.getRandomValues(new Uint8Array(12));
+    const bodyCT = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: bodyIV }, key, bodyBytes);
+    bodyFrame = new Uint8Array(4 + bodyIV.length + bodyCT.byteLength);
+    const bdv = new DataView(bodyFrame.buffer);
+    bdv.setUint32(0, bodyIV.length + bodyCT.byteLength, false);
+    bodyFrame.set(bodyIV, 4);
+    bodyFrame.set(new Uint8Array(bodyCT), 4 + bodyIV.length);
+  }
+
+  // 合并发送
+  const fullBody = new Uint8Array(metaFrame.length + bodyFrame.length);
+  fullBody.set(metaFrame, 0);
+  fullBody.set(bodyFrame, metaFrame.length);
+
+  const resp = await fetch(BASE + '/tunnel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-tunnel-frame' },
+    body: fullBody
+  });
+  if (!resp.ok) {
+    throw new Error('隧道请求失败: HTTP ' + resp.status);
+  }
+
+  // 读取完整响应体（因为浏览器无法流式解析自定义帧协议）
+  const respArrayBuf = await resp.arrayBuffer();
+  const respBytes = new Uint8Array(respArrayBuf);
+
+  // 解析响应 metadata
+  if (respBytes.length < 4) throw new Error('响应数据不足');
+  const respMetaLen = new DataView(respBytes.buffer).getUint32(0, false);
+  const respMetaEnc = respBytes.slice(4, 4 + respMetaLen);
+
+  const respMetaIV = respMetaEnc.slice(0, 12);
+  const respMetaCT = respMetaEnc.slice(12);
+  const respMetaPlain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: respMetaIV }, key, respMetaCT);
+  const respMeta = JSON.parse(new TextDecoder().decode(respMetaPlain));
+
+  // 解析响应 body — EncryptStream 分块发送，需要循环读取所有块
+  const bodyStart = 4 + respMetaLen;
+  let respBody = new Uint8Array(0);
+  let offset = bodyStart;
+  while (offset + 4 <= respBytes.length) {
+    const bLen = new DataView(respBytes.buffer, offset).getUint32(0, false);
+    if (bLen === 0 || offset + 4 + bLen > respBytes.length) break;
+    const bEnc = respBytes.slice(offset + 4, offset + 4 + bLen);
+    if (bEnc.length > 0) {
+      const bIV = bEnc.slice(0, 12);
+      const bCT = bEnc.slice(12);
+      const chunk = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bIV }, key, bCT));
+      const merged = new Uint8Array(respBody.length + chunk.length);
+      merged.set(respBody, 0);
+      merged.set(chunk, respBody.length);
+      respBody = merged;
+    }
+    offset += 4 + bLen;
+  }
+
+  return {
+    status: respMeta.status,
+    headers: respMeta.headers || {},
+    body: respBody
+  };
+}
+
 function headers(extra) {
   const h = extra || {};
-  if (token) h['Authorization'] = 'Bearer ' + token;
+  if (token && !tunnelHexKey) h['Authorization'] = 'Bearer ' + token;
   return h;
 }
 
@@ -129,32 +258,63 @@ async function uploadFiles(files) {
     }
     hashStatus.textContent = '';
 
-    const formData = new FormData();
-    formData.append('file', file);
+    if (tunnelHexKey) {
+      // 隧道模式：构造 multipart body，通过隧道发送
+      try {
+        const boundary = '----WebKitFormBoundary' + Math.random().toString(36).slice(2, 10);
+        const fileBytes = await file.arrayBuffer();
+        const headerStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + file.name + '"\r\nContent-Type: application/octet-stream\r\n\r\n';
+        const footerStr = '\r\n--' + boundary + '--\r\n';
+        const encoder = new TextEncoder();
+        const headerBytes = encoder.encode(headerStr);
+        const footerBytes = encoder.encode(footerStr);
+        const fullBody = new Uint8Array(headerBytes.length + fileBytes.byteLength + footerBytes.length);
+        fullBody.set(headerBytes, 0);
+        fullBody.set(new Uint8Array(fileBytes), headerBytes.length);
+        fullBody.set(footerBytes, headerBytes.length + fileBytes.byteLength);
 
-    try {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', BASE + '/upload', true);
-      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-      xhr.setRequestHeader('X-File-Checksum', fileChecksum);
-      xhr.upload.onprogress = function(e) {
-        if (e.lengthComputable) {
-          document.getElementById(progId).style.width = (e.loaded / e.total * 100) + '%';
+        document.getElementById(progId).style.width = '50%';
+        const result = await tunnelRequest('POST', '/upload', { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'X-File-Checksum': fileChecksum }, fullBody);
+        document.getElementById(progId).style.width = '100%';
+
+        const data = JSON.parse(new TextDecoder().decode(result.body));
+        if (result.status >= 200 && result.status < 300 && data.success) {
+          showToast(file.name + ' 上传成功', 'success');
+        } else {
+          showToast(file.name + ' 上传失败: ' + (data.message || result.status), 'error');
         }
-      };
-      const resp = await new Promise(function(resolve, reject) {
-        xhr.onload = function() { resolve(xhr); };
-        xhr.onerror = function() { reject(new Error('网络错误')); };
-        xhr.send(formData);
-      });
-      const data = JSON.parse(resp.responseText);
-      if (resp.status >= 200 && resp.status < 300 && data.success) {
-        showToast(file.name + ' 上传成功', 'success');
-      } else {
-        showToast(file.name + ' 上传失败: ' + (data.message || resp.status), 'error');
+      } catch(e) {
+        showToast(file.name + ' 上传失败: ' + e.message, 'error');
       }
-    } catch(e) {
-      showToast(file.name + ' 上传失败: ' + e.message, 'error');
+    } else {
+      // 直连模式
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', BASE + '/upload', true);
+        if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+        xhr.setRequestHeader('X-File-Checksum', fileChecksum);
+        xhr.upload.onprogress = function(e) {
+          if (e.lengthComputable) {
+            document.getElementById(progId).style.width = (e.loaded / e.total * 100) + '%';
+          }
+        };
+        const resp = await new Promise(function(resolve, reject) {
+          xhr.onload = function() { resolve(xhr); };
+          xhr.onerror = function() { reject(new Error('网络错误')); };
+          xhr.send(formData);
+        });
+        const data = JSON.parse(resp.responseText);
+        if (resp.status >= 200 && resp.status < 300 && data.success) {
+          showToast(file.name + ' 上传成功', 'success');
+        } else {
+          showToast(file.name + ' 上传失败: ' + (data.message || resp.status), 'error');
+        }
+      } catch(e) {
+        showToast(file.name + ' 上传失败: ' + e.message, 'error');
+      }
     }
   }
   container.innerHTML = '';
@@ -166,10 +326,17 @@ async function refreshList() {
   const el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">加载中...</div>';
   try {
-    const resp = await fetch(BASE + '/api/files', { headers: headers() });
-    const data = await resp.json();
-    if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + (data.message || resp.status) + '</div>'; return; }
-    const files = data.files || [];
+    let files;
+    if (tunnelHexKey) {
+      const result = await tunnelRequest('GET', '/api/files', {}, null);
+      const data = JSON.parse(new TextDecoder().decode(result.body));
+      files = data.files || [];
+    } else {
+      const resp = await fetch(BASE + '/api/files', { headers: headers() });
+      const data = await resp.json();
+      if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + (data.message || resp.status) + '</div>'; return; }
+      files = data.files || [];
+    }
     if (files.length === 0) { el.innerHTML = '<div class="empty-msg">暂无文件</div>'; return; }
     let html = '<table><thead><tr><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
     for (const fi of files) {
@@ -193,40 +360,68 @@ async function refreshList() {
 // --- 下载（校验 checksum）---
 async function downloadFile(name, expectedChecksum) {
   try {
-    const resp = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
-    if (!resp.ok) {
-      const data = await resp.json().catch(function() { return {}; });
-      showToast('下载失败: ' + (data.message || resp.status), 'error');
-      return;
-    }
-    const serverCS = resp.headers.get('X-File-Checksum') || '';
-    const blob = await resp.blob();
+    if (tunnelHexKey) {
+      const result = await tunnelRequest('GET', '/download?filename=' + encodeURIComponent(name), {}, null);
+      const serverCS = (result.headers['X-File-Checksum'] || [''])[0];
 
-    // 下载后校验 checksum
-    if (serverCS) {
-      try {
-        const buffer = await blob.arrayBuffer();
-        const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        const localCS = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-        if (localCS !== serverCS) {
-          showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0,16) + '…, 本地 ' + localCS.substring(0,16) + '…', 'error');
-          return;
+      if (serverCS) {
+        try {
+          const localCS = bytesToHex(await crypto.subtle.digest('SHA-256', result.body));
+          if (localCS !== serverCS) {
+            showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0,16) + '…, 本地 ' + localCS.substring(0,16) + '…', 'error');
+            return;
+          }
+        } catch(e) {
+          showToast(name + ' 校验失败: ' + e.message, 'warning');
         }
-      } catch(e) {
-        showToast(name + ' 校验失败: ' + e.message, 'warning');
       }
-    }
 
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast(name + ' 下载完成' + (serverCS ? '，校验通过' : ''), 'success');
+      const blob = new Blob([result.body]);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast(name + ' 下载完成' + (serverCS ? '，校验通过' : ''), 'success');
+    } else {
+      const resp = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
+      if (!resp.ok) {
+        const data = await resp.json().catch(function() { return {}; });
+        showToast('下载失败: ' + (data.message || resp.status), 'error');
+        return;
+      }
+      const serverCS = resp.headers.get('X-File-Checksum') || '';
+      const blob = await resp.blob();
+
+      // 下载后校验 checksum
+      if (serverCS) {
+        try {
+          const buffer = await blob.arrayBuffer();
+          const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+          const hashArray = Array.from(new Uint8Array(hashBuffer));
+          const localCS = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+          if (localCS !== serverCS) {
+            showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0,16) + '…, 本地 ' + localCS.substring(0,16) + '…', 'error');
+            return;
+          }
+        } catch(e) {
+          showToast(name + ' 校验失败: ' + e.message, 'warning');
+        }
+      }
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast(name + ' 下载完成' + (serverCS ? '，校验通过' : ''), 'success');
+    }
   } catch(e) {
     showToast('下载失败: ' + e.message, 'error');
   }
@@ -240,18 +435,29 @@ async function deleteFile(name, checksum) {
     return;
   }
   try {
-    const resp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(name), {
-      method: 'POST',
-      headers: headers({
-        'X-File-Checksum': checksum
-      })
-    });
-    const data = await resp.json();
-    if (resp.ok && data.success) {
-      showToast('删除成功: ' + name, 'success');
-      refreshList();
+    if (tunnelHexKey) {
+      const result = await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(name), { 'X-File-Checksum': checksum }, null);
+      const data = JSON.parse(new TextDecoder().decode(result.body));
+      if (result.status >= 200 && result.status < 300 && data.success) {
+        showToast('删除成功: ' + name, 'success');
+        refreshList();
+      } else {
+        showToast('删除失败: ' + (data.message || result.status), 'error');
+      }
     } else {
-      showToast('删除失败: ' + (data.message || resp.status), 'error');
+      const resp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(name), {
+        method: 'POST',
+        headers: headers({
+          'X-File-Checksum': checksum
+        })
+      });
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        showToast('删除成功: ' + name, 'success');
+        refreshList();
+      } else {
+        showToast('删除失败: ' + (data.message || resp.status), 'error');
+      }
     }
   } catch(e) {
     showToast('删除失败: ' + e.message, 'error');

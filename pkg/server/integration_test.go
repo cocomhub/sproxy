@@ -50,11 +50,11 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/upload", h.authMiddleware(h.upload))
-	mux.HandleFunc("/download", h.authMiddleware(h.download))
-	mux.HandleFunc("/delete", h.authMiddleware(h.delete))
+	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
+	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
+	mux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
 	mux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
-	mux.HandleFunc("/healthz", h.healthz)
+	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /", h.webRedirect)
 
 	ts := httptest.NewServer(mux)
@@ -124,15 +124,25 @@ func TestUpload_HappyPath(t *testing.T) {
 }
 
 func TestUpload_PathTraversal(t *testing.T) {
-	url, _, cleanup := newTestServer(t, nil)
+	url, cfgPtr, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
 	body := []byte("malicious")
 	status, respBody := uploadFile(t, url, "../escape.txt", body, map[string]string{
 		"X-File-Checksum": sha256hex(body),
 	})
-	if status != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", status, respBody)
+	if status == http.StatusBadRequest {
+		// Go <1.26 行为：路径穿越被 sproxy 拦截
+		return
+	}
+	// Go >=1.26 行为：mime/multipart 自动清洗文件名，sproxy 应成功保存
+	if status != http.StatusOK {
+		t.Fatalf("expected 200 (Go >=1.26 sanitized) or 400 (Go <1.26), got %d: %s", status, respBody)
+	}
+	// 验证文件名已被清洗（不会是 ../escape.txt）
+	uploadsDir := cfgPtr.Load().UploadsDir
+	if _, err := os.Stat(filepath.Join(uploadsDir, "escape.txt")); os.IsNotExist(err) {
+		t.Fatalf("expected file to be saved as escape.txt (sanitized)")
 	}
 }
 

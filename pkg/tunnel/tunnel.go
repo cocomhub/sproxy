@@ -8,7 +8,8 @@
 //   - 密钥管理：生成随机密钥（GenerateKey）、解析十六进制密钥（ParseKey）
 //   - 加解密：AES-256-GCM 加密（Encrypt）和解密（Decrypt），nonce 随机生成并前置
 //   - 编解码：Base64 编码（EncodeBody）和解码（DecodeBody），用于传输二进制数据
-//   - 服务端：NewHandler 返回标准 http.Handler，可嵌入任意 HTTP 服务
+//   - 服务端：NewHandler / NewLocalHandler 返回标准 http.Handler，可嵌入任意 HTTP 服务
+//   - 本地路由：NewLocalHandler 支持将相对路径请求直接路由到本地 handler，无需外部 HTTP 调用
 //   - 客户端：Client 结构体提供 Do 方法，发送加密请求并解密响应
 //
 // 协议格式
@@ -57,6 +58,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -178,94 +180,218 @@ func decodeMetadataFrame(r io.Reader, key []byte) ([]byte, error) {
 	return Decrypt(key, encMeta)
 }
 
-// NewHandler 创建一个加密隧道 HTTP 处理器，可嵌入任意 http.ServeMux。
+// Handler 处理加密隧道请求，支持外部转发和本地路由两种模式。
 //
-// 处理器统一使用流式帧协议（application/x-tunnel-frame）：
-//  1. 从请求体读取 metadata 帧，解密得到目标 URL、Method、Headers
-//  2. 剩余请求体通过 DecryptStream 流式解密，作为代理请求 body
-//  3. 代理请求转发到目标 URL
-//  4. 响应 metadata 帧 + EncryptStream 流式加密目标响应 body
+// 外部转发（默认）：将加密请求解密后转发到外部目标 URL。
+// 本地路由：当配置了 localHandler 且请求 URL 为相对路径时，将请求直接路由到本地 handler。
 //
-// 如果 key 为空，处理器直接返回 403 Forbidden。
+// 两种模式统一使用流式帧协议，响应体通过 Pipe 流式加密，不缓冲在内存中。
+type Handler struct {
+	key          []byte
+	httpClient   *http.Client
+	localHandler http.Handler
+}
+
+// NewHandler 创建一个仅支持外部转发的加密隧道处理器。
+//
+// 行为同旧版闭包实现。如果 key 为空，处理器直接返回 403 Forbidden。
 // 使用方式：mux.Handle("POST /tunnel", tunnel.NewHandler(key))
 func NewHandler(key []byte) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(key) == 0 {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
+	return &Handler{
+		key:        key,
+		httpClient: &http.Client{},
+	}
+}
 
-		// 1. 解析 metadata 帧
-		metaJSON, err := decodeMetadataFrame(r.Body, key)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		var req Request
-		if err := json.Unmarshal(metaJSON, &req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
+// NewLocalHandler 创建一个支持本地路由和外部转发的加密隧道处理器。
+//
+// 当请求 URL 为绝对路径（如 /upload）且在 local 中注册时，直接在当前进程中转发到 local handler；
+// 当请求 URL 为绝对 URL（如 https://example.com/api）时，与原 NewHandler 行为一致。
+func NewLocalHandler(key []byte, local http.Handler) http.Handler {
+	return &Handler{
+		key:          key,
+		httpClient:   &http.Client{},
+		localHandler: local,
+	}
+}
 
-		// 2. r.Body 剩余部分为流式加密 body，通过 Pipe + DecryptStream 流式解密
-		bodyPr, bodyPw := io.Pipe()
-		go func() {
-			_, decErr := DecryptStream(key, r.Body, bodyPw)
-			bodyPw.CloseWithError(decErr)
-		}()
+// isRelativePath 判断 urlStr 是否为相对路径（以 / 开头且不包含 ://）。
+func isRelativePath(urlStr string) bool {
+	return !strings.Contains(urlStr, "://") && strings.HasPrefix(urlStr, "/")
+}
 
-		// 3. 构造并发送代理请求
-		proxyReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, bodyPr)
-		if err != nil {
-			bodyPr.CloseWithError(err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		for k, v := range req.Headers {
-			proxyReq.Header.Set(k, v)
-		}
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if len(h.key) == 0 {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 
-		httpClient := &http.Client{}
-		resp, err := httpClient.Do(proxyReq)
-		if err != nil {
-			// 转发失败：返回 502，仍使用帧格式
-			errMetaJSON, _ := json.Marshal(Response{
-				Status:  502,
-				Headers: make(http.Header),
-			})
-			errMetaFrame, _ := encodeMetadataFrame(key, errMetaJSON)
-			w.Header().Set("Content-Type", frameContentType)
-			w.WriteHeader(http.StatusOK)
-			w.Write(errMetaFrame)
-			EncryptStream(key, strings.NewReader(err.Error()), w) //nolint:errcheck
-			return
-		}
-		defer resp.Body.Close()
+	// 1. 解析 metadata 帧
+	metaJSON, err := decodeMetadataFrame(r.Body, h.key)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	var req Request
+	if err := json.Unmarshal(metaJSON, &req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 
-		// 4. 写出响应：metadata 帧 + 流式加密 body
-		respMetaJSON, err := json.Marshal(Response{
-			Proto:         resp.Proto,
-			Status:        resp.StatusCode,
-			Headers:       resp.Header.Clone(),
-			ContentLength: resp.ContentLength,
+	// 2. r.Body 剩余部分为流式加密 body，通过 Pipe + DecryptStream 流式解密
+	bodyPr, bodyPw := io.Pipe()
+	go func() {
+		_, decErr := DecryptStream(h.key, r.Body, bodyPw)
+		bodyPw.CloseWithError(decErr)
+	}()
+
+	// 分支：本地路由 vs 外部转发
+	if h.localHandler != nil && isRelativePath(req.URL) {
+		h.dispatchLocal(w, r, &req, bodyPr)
+	} else {
+		h.forwardExternal(w, r, &req, bodyPr)
+	}
+}
+
+// dispatchLocal 将加密请求路由到本地 handler，响应体通过 Pipe 流式加密。
+func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader) {
+	localReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	for k, v := range req.Headers {
+		localReq.Header.Set(k, v)
+	}
+
+	// Pipe：本地 handler 写入 body，流式加密 goroutine 读取
+	bodyPr, bodyPw := io.Pipe()
+	sr := newStreamRecorder(bodyPw)
+
+	// Goroutine：等待 metadata 就绪，写出 metadata 帧 + 流式加密 body
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-sr.metaReady
+
+		sr.mu.Lock()
+		code := sr.statusCode
+		hdrs := sr.header.Clone()
+		sr.mu.Unlock()
+
+		respMetaJSON, _ := json.Marshal(Response{
+			Proto:         "HTTP/1.1",
+			Status:        code,
+			Headers:       hdrs,
+			ContentLength: -1,
 		})
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		metaFrame, err := encodeMetadataFrame(key, respMetaJSON)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
+		metaFrame, _ := encodeMetadataFrame(h.key, respMetaJSON)
 
 		w.Header().Set("Content-Type", frameContentType)
 		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write(metaFrame); err != nil {
-			return
-		}
-		EncryptStream(key, resp.Body, w) //nolint:errcheck
+		_, _ = w.Write(metaFrame)
+		_, _ = EncryptStream(h.key, bodyPr, w)
+		_ = bodyPr.Close()
+	}()
+
+	// 同步运行本地 handler
+	h.localHandler.ServeHTTP(sr, localReq)
+
+	// 如果 handler 没有写 body（只有 WriteHeader），确保 metaReady 仍被关闭
+	sr.once.Do(func() {
+		close(sr.metaReady)
 	})
+	_ = bodyPw.Close()
+	<-done
+}
+
+// forwardExternal 将加密请求转发到外部目标 URL，保持原 NewHandler 的完整行为。
+func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader) {
+	proxyReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	for k, v := range req.Headers {
+		proxyReq.Header.Set(k, v)
+	}
+
+	resp, err := h.httpClient.Do(proxyReq)
+	if err != nil {
+		// 转发失败：返回 502，仍使用帧格式
+		errMetaJSON, _ := json.Marshal(Response{
+			Status:  502,
+			Headers: make(http.Header),
+		})
+		errMetaFrame, _ := encodeMetadataFrame(h.key, errMetaJSON)
+		w.Header().Set("Content-Type", frameContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(errMetaFrame)
+		_, _ = EncryptStream(h.key, strings.NewReader(err.Error()), w) //nolint:errcheck
+		return
+	}
+	defer resp.Body.Close()
+
+	// 写出响应：metadata 帧 + 流式加密 body
+	respMetaJSON, err := json.Marshal(Response{
+		Proto:         resp.Proto,
+		Status:        resp.StatusCode,
+		Headers:       resp.Header.Clone(),
+		ContentLength: resp.ContentLength,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	metaFrame, err := encodeMetadataFrame(h.key, respMetaJSON)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", frameContentType)
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(metaFrame); err != nil {
+		return
+	}
+	_, _ = EncryptStream(h.key, resp.Body, w) //nolint:errcheck
+}
+
+// streamRecorder 是一个自定义 http.ResponseWriter，将 handler 的输出通过 Pipe 流式输出，
+// 供 EncryptStream 消费。状态码和响应头在首次 Write 时确定并通知给加密 goroutine。
+type streamRecorder struct {
+	header     http.Header
+	statusCode int
+	mu         sync.Mutex
+
+	bodyWriter *io.PipeWriter
+
+	once      sync.Once
+	metaReady chan struct{} // 关闭后表示 metadata（状态码、header）已就绪
+}
+
+func newStreamRecorder(bodyWriter *io.PipeWriter) *streamRecorder {
+	return &streamRecorder{
+		header:     make(http.Header),
+		statusCode: http.StatusOK,
+		bodyWriter: bodyWriter,
+		metaReady:  make(chan struct{}),
+	}
+}
+
+func (sr *streamRecorder) Header() http.Header { return sr.header }
+
+func (sr *streamRecorder) WriteHeader(code int) {
+	sr.mu.Lock()
+	sr.statusCode = code
+	sr.mu.Unlock()
+}
+
+func (sr *streamRecorder) Write(data []byte) (int, error) {
+	sr.once.Do(func() {
+		close(sr.metaReady)
+	})
+	return sr.bodyWriter.Write(data)
 }
 
 // Client 是加密隧道客户端，用于向隧道服务端发送加密请求并接收解密响应。

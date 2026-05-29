@@ -88,6 +88,9 @@ func main() {
 			}
 		}),
 	}
+	if cfg.TunnelKey != "" {
+		opts = append(opts, client.WithTunnel(cfg.TunnelKey))
+	}
 	cli := client.NewFileClient(serverURL, opts...)
 	ctx := context.Background()
 

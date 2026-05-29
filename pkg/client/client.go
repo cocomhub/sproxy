@@ -154,6 +154,7 @@ func calculateChecksum(filePath string) (string, error) {
 //
 // 如果启用了 checksum 校验（默认开启），会在上传前计算文件的 SHA-256，
 // 并通过 X-File-Checksum 请求头发送给服务端进行完整性校验。
+// 如果配置了 tunnel_key，上传数据将通过加密隧道传输。
 func (c *FileClient) Upload(ctx context.Context, filePath string) (*UploadResult, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -204,16 +205,13 @@ func (c *FileClient) Upload(ctx context.Context, filePath string) (*UploadResult
 		}
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/upload", pr)
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	headers := make(http.Header)
+	headers.Set("Content-Type", mw.FormDataContentType())
 	if c.checkChecksum && fileChecksum != "" {
-		req.Header.Set("X-File-Checksum", fileChecksum)
+		headers.Set("X-File-Checksum", fileChecksum)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}
@@ -241,21 +239,16 @@ func (c *FileClient) Upload(ctx context.Context, filePath string) (*UploadResult
 //
 // outputPath 指定本地保存路径；为空时使用 filename。
 // 如果启用了 checksum 校验（默认开启），会在下载后验证服务端返回的 X-File-Checksum。
+// 如果配置了 tunnel_key，下载数据将通过加密隧道传输。
 func (c *FileClient) Download(ctx context.Context, filename, outputPath string) error {
 	if outputPath == "" {
 		outputPath = filename
 	}
 
-	params := url.Values{}
-	params.Set("filename", filename)
-	fullURL := c.serverURL + "/download?" + params.Encode()
+	urlPath := "/download?" + url.Values{"filename": {filename}}.Encode()
+	headers := make(http.Header)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
-	if err != nil {
-		return fmt.Errorf("创建请求失败: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)
 	if err != nil {
 		return fmt.Errorf("请求失败: %w", err)
 	}
@@ -307,25 +300,20 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 // 如果启用了 checksum 校验（默认开启），会先计算本地文件的 SHA-256，
 // 通过 X-File-Checksum 请求头发送给服务端进行身份验证。
 // 注意：你需要有本地文件副本才能删除。
+// 如果配置了 tunnel_key，删除请求将通过加密隧道传输。
 func (c *FileClient) Delete(ctx context.Context, filename string) error {
-	params := url.Values{}
-	params.Set("filename", filename)
-	fullURL := c.serverURL + "/delete?" + params.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, nil)
-	if err != nil {
-		return fmt.Errorf("创建请求失败: %w", err)
-	}
+	urlPath := "/delete?" + url.Values{"filename": {filename}}.Encode()
+	headers := make(http.Header)
 
 	if c.checkChecksum {
 		fileChecksum, err := calculateChecksum(filename)
 		if err != nil {
 			return fmt.Errorf("计算文件 SHA-256 失败: %w", err)
 		}
-		req.Header.Set("X-File-Checksum", fileChecksum)
+		headers.Set("X-File-Checksum", fileChecksum)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doRequest(ctx, "POST", urlPath, nil, headers)
 	if err != nil {
 		return fmt.Errorf("请求失败: %w", err)
 	}
@@ -356,15 +344,11 @@ type FileInfo struct {
 }
 
 // List 列出 sproxy 服务端上的文件，返回 name + size + checksum 的结构化列表。
+//
+// 如果配置了 tunnel_key，列表请求将通过加密隧道传输。
 func (c *FileClient) List(ctx context.Context) ([]FileInfo, error) {
-	fullURL := c.serverURL + "/api/files"
-
-	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
+	headers := make(http.Header)
+	resp, err := c.doRequest(ctx, "GET", "/api/files", nil, headers)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}
@@ -394,4 +378,34 @@ func (c *FileClient) TunnelDo(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("未配置隧道密钥，请使用 WithTunnel 选项创建 FileClient")
 	}
 	return c.tunnelClient.Do(req)
+}
+
+// doRequest 统一发送 HTTP 请求：当配置了隧道客户端时走加密隧道，否则直连。
+//
+// urlPath 是相对路径，如 "/upload" 或 "/download?filename=test.txt"。
+// 隧道模式下 URL 保持相对路径，由服务端隧道 handler 本地路由；
+// 直连模式下拼接 serverURL + urlPath 构造完整 URL。
+func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	for k, vals := range headers {
+		for _, v := range vals {
+			req.Header.Add(k, v)
+		}
+	}
+
+	if c.tunnelClient != nil {
+		// 隧道模式：使用相对 URL，隧道客户端处理加密
+		return c.tunnelClient.Do(req)
+	}
+
+	// 直连模式：补全 server URL
+	fullURL := c.serverURL + urlPath
+	req.URL, err = url.Parse(fullURL)
+	if err != nil {
+		return nil, fmt.Errorf("解析 URL 失败: %w", err)
+	}
+	return c.httpClient.Do(req)
 }

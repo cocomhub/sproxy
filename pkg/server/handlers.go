@@ -41,19 +41,26 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 		checksumStore: cs,
 	}
 
+	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
+	localMux := http.NewServeMux()
+	localMux.HandleFunc("POST /upload", h.upload)
+	localMux.HandleFunc("GET /download", h.download)
+	localMux.HandleFunc("POST /delete", h.delete)
+	localMux.HandleFunc("GET /api/files", h.listFiles)
+
 	// 速率限制中间件（仅应用于 tunnel handler）
-	var tunnelHandler http.Handler = tunnel.NewHandler(tunnelKey)
+	var tunnelHandler http.Handler = tunnel.NewLocalHandler(tunnelKey, localMux)
 	if cfg.RateLimit.Enabled {
 		rl := NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window)
 		tunnelHandler = rl.Middleware(tunnelHandler)
 	}
 
-	mux.HandleFunc("/upload", h.authMiddleware(h.upload))
-	mux.HandleFunc("/download", h.authMiddleware(h.download))
-	mux.HandleFunc("/delete", h.authMiddleware(h.delete))
+	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
+	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
+	mux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
 	mux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
-	mux.HandleFunc("/healthz", h.healthz)
-	mux.HandleFunc("/version", h.versionHandler)
+	mux.HandleFunc("GET /healthz", h.healthz)
+	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.Handle("POST /tunnel", tunnelHandler)
 
 	// Web UI
@@ -94,10 +101,6 @@ func (h *Handlers) versionHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "只支持POST方法", http.StatusMethodNotAllowed)
-		return
-	}
 	reqID := r.Header.Get("X-Request-ID")
 	if reqID == "" {
 		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
@@ -235,10 +238,6 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "只支持POST方法"}, http.StatusMethodNotAllowed)
-		return
-	}
 	reqID := r.Header.Get("X-Request-ID")
 	if reqID == "" {
 		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
