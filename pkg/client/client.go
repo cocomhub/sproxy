@@ -180,9 +180,14 @@ func shortHash(h string) string {
 	return h
 }
 
-// UploadTo 上传本地文件到指定的远端路径。
-// remotePath 为远端路径（如 "dir1/file.txt"），保留目录结构。
-func (c *FileClient) UploadTo(ctx context.Context, localPath, remotePath string) (*UploadResult, error) {
+// Upload 上传本地文件到 sproxy 服务端的指定远端路径。
+//
+// localPath 为本地文件路径，remotePath 为远端路径（如 "dir1/file.txt"），保留目录结构。
+// 如果启用了 checksum 校验（默认开启），会在上传前计算文件的 SHA-256，
+// 并通过 X-File-Checksum 请求头发送给服务端进行完整性校验。
+// 同时通过 X-File-MTime 请求头传递文件的修改时间。
+// 如果配置了 tunnel_key，上传数据将通过加密隧道传输。
+func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (*UploadResult, error) {
 	file, err := os.Open(localPath)
 	if err != nil {
 		return nil, fmt.Errorf("打开文件失败: %w", err)
@@ -263,91 +268,34 @@ func (c *FileClient) UploadTo(ctx context.Context, localPath, remotePath string)
 	return &result, nil
 }
 
-// Upload 上传一个文件到 sproxy 服务端。
-//
-// 如果启用了 checksum 校验（默认开启），会在上传前计算文件的 SHA-256，
-// 并通过 X-File-Checksum 请求头发送给服务端进行完整性校验。
-// 同时通过 X-File-MTime 请求头传递文件的修改时间。
-// 如果配置了 tunnel_key，上传数据将通过加密隧道传输。
-func (c *FileClient) Upload(ctx context.Context, filePath string) (*UploadResult, error) {
-	file, err := os.Open(filePath)
+// Mkdir 在服务端创建指定子目录。
+func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
+	urlPath := "/mkdir?dirname=" + url.QueryEscape(dirname)
+	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("打开文件失败: %w", err)
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("获取文件信息失败: %w", err)
-	}
-	fileSize := stat.Size()
-
-	var fileChecksum string
-	if c.checkChecksum {
-		h := sha256.New()
-		if _, err := io.Copy(h, file); err != nil {
-			return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
-		}
-		fileChecksum = hex.EncodeToString(h.Sum(nil))
-		c.logger.Debug("文件 SHA-256", "filepath", filePath, "checksum", shortHash(fileChecksum))
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			return nil, fmt.Errorf("重置文件指针失败: %w", err)
-		}
-	}
-
-	pr, pw := io.Pipe()
-	mw := multipart.NewWriter(pw)
-
-	go func() {
-		defer pw.Close()
-		defer mw.Close()
-		part, err := mw.CreateFormFile("file", filepath.ToSlash(filepath.Clean(filePath)))
-		if err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-		var src io.Reader = file
-		if c.progressFn != nil {
-			c.progressFn("上传", 0, fileSize)
-			src = NewProgressReader(file, fileSize, func(read, total int64) {
-				c.progressFn("上传", read, total)
-			})
-		}
-		if _, err := io.Copy(part, src); err != nil {
-			pw.CloseWithError(err)
-			return
-		}
-	}()
-
-	headers := make(http.Header)
-	headers.Set("Content-Type", mw.FormDataContentType())
-	if c.checkChecksum && fileChecksum != "" {
-		headers.Set("X-File-Checksum", fileChecksum)
-	}
-	headers.Set("X-File-MTime", fmt.Sprintf("%d", stat.ModTime().UnixNano()))
-
-	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
-	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return fmt.Errorf("请求失败: %w", err)
 	}
 	defer resp.Body.Close()
-
-	// 非 2xx 不要直接当 JSON 解，避免把 "unauthorized" 之类的纯文本当成 success=false 静默吞掉
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, fmt.Errorf("上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("创建目录失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
+	return nil
+}
 
-	var result UploadResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+// Rmdir 在服务端删除指定目录（含所有内容）。
+func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
+	urlPath := "/rmdir?dirname=" + url.QueryEscape(dirname)
+	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
+	if err != nil {
+		return fmt.Errorf("请求失败: %w", err)
 	}
-
-	if !result.Success {
-		return &result, fmt.Errorf("上传失败: %s", result.Message)
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("删除目录失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
-
-	return &result, nil
+	return nil
 }
 
 // Download 从 sproxy 服务端下载文件并保存到本地。

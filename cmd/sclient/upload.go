@@ -59,7 +59,7 @@ var uploadCmd = &cobra.Command{
 				if concurrency > 0 {
 					chunkOpts = append(chunkOpts, client.WithChunkedConcurrency(concurrency))
 				}
-				result, err := cli.ChunkedUpload(ctx, filePath, chunkOpts...)
+				result, err := cli.ChunkedUpload(ctx, filePath, remotePath, chunkOpts...)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "分块上传失败: %s %v\n", filePath, err)
 					os.Exit(1)
@@ -69,7 +69,7 @@ var uploadCmd = &cobra.Command{
 					fmt.Printf("文件 SHA-256: %s\n", result.FileChecksum)
 				}
 			} else {
-				result, err := cli.UploadTo(ctx, filePath, remotePath)
+				result, err := cli.Upload(ctx, filePath, remotePath)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "上传失败: %s %v\n", filePath, err)
 					if result != nil {

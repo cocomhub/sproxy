@@ -92,18 +92,19 @@ func generateUploadID(filename string, fileSize int64, modTime time.Time, fileCh
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
-// ChunkedUpload 分块上传文件。当文件较大时自动使用分块上传，支持续传。
+// ChunkedUpload 分块上传文件到指定的远端路径。支持续传。
 //
 // 参数：
 //   - ctx: 上下文
-//   - filePath: 本地文件路径
-//   - opts: 可选参数（若不设置则使用 FileClient 的默认值）
+//   - localPath: 本地文件路径
+//   - remotePath: 远端路径（如 "dir1/file.txt"）
+//   - opts: 可选参数
 //
 // 可选参数通过 ChunkedOption 函数设置：
 //   - WithChunkedChunkSize(size): 分块大小
 //   - WithChunkedConcurrency(n): 并发数
 //   - WithChunkedResume(enabled): 续传模式
-func (c *FileClient) ChunkedUpload(ctx context.Context, filePath string, opts ...ChunkedOption) (*ChunkedUploadResult, error) {
+func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath string, opts ...ChunkedOption) (*ChunkedUploadResult, error) {
 	// 解析选项
 	opt := &chunkedOpts{
 		chunkSize:   c.ChunkSize,
@@ -118,7 +119,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, filePath string, opts ..
 		maxChunk = defaultMaxChunk
 	}
 
-	file, err := os.Open(filePath)
+	file, err := os.Open(localPath)
 	if err != nil {
 		return nil, fmt.Errorf("打开文件失败: %w", err)
 	}
@@ -133,12 +134,12 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, filePath string, opts ..
 
 	// 检查 checksum 缓存
 	var fileChecksum string
-	absPath, _ := filepath.Abs(filePath)
+	absPath, _ := filepath.Abs(localPath)
 	if cached, ok := uploadCache.Load(absPath); ok {
 		entry := cached.(*uploadCacheEntry)
 		if entry.fileSize == fileSize && entry.modTime.Equal(modTime) {
 			fileChecksum = entry.fileChecksum
-			c.logger.Debug("checksum 缓存命中", "filepath", filePath)
+			c.logger.Debug("checksum 缓存命中", "filepath", localPath)
 		}
 	}
 
@@ -158,13 +159,13 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, filePath string, opts ..
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("重置文件指针失败: %w", err)
 		}
-		c.logger.Debug("文件 SHA-256 计算完毕", "filepath", filePath, "checksum", shortHash(fileChecksum))
+		c.logger.Debug("文件 SHA-256 计算完毕", "filepath", localPath, "checksum", shortHash(fileChecksum))
 	}
 
 	// 自适应分块大小
 	chunkSize := calcChunkSize(fileSize, opt.chunkSize, maxChunk)
 	totalChunks := int((fileSize + chunkSize - 1) / chunkSize)
-	filename := filepath.ToSlash(filepath.Clean(filePath))
+	filename := filepath.ToSlash(filepath.Clean(remotePath))
 	uploadID := generateUploadID(filename, fileSize, modTime, fileChecksum)
 
 	c.logger.Info("分块上传开始", "filename", filename, "fileSize", fileSize,
@@ -206,7 +207,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, filePath string, opts ..
 					"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
 
 				// 只上传缺失分块
-				result, err := c.uploadChunks(ctx, filePath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, statusData.MissingChunks, opt.concurrency)
+				result, err := c.uploadChunks(ctx, localPath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, statusData.MissingChunks, opt.concurrency)
 				if err != nil {
 					return nil, err
 				}
@@ -281,7 +282,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, filePath string, opts ..
 	for i := 0; i < totalChunks; i++ {
 		allChunks[i] = i
 	}
-	return c.uploadChunks(ctx, filePath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, allChunks, opt.concurrency)
+	return c.uploadChunks(ctx, localPath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, allChunks, opt.concurrency)
 }
 
 // uploadChunks 上传指定索引列表的分块，然后完成上传。

@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -74,6 +75,20 @@ func (cs *ChecksumStore) Delete(filename string) {
 	delete(cs.checksums, filename)
 	if err := cs.saveLocked(); err != nil {
 		cs.logger.Error("checksum 存储持久化失败", "op", "delete", "filename", filename, "error", err)
+	}
+}
+
+// DeletePrefix 删除指定前缀的所有 checksum 记录（用于目录删除）。
+func (cs *ChecksumStore) DeletePrefix(prefix string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	for key := range cs.checksums {
+		if strings.HasPrefix(key, prefix) {
+			delete(cs.checksums, key)
+		}
+	}
+	if err := cs.saveLocked(); err != nil {
+		cs.logger.Error("checksum 存储持久化失败", "op", "deletePrefix", "prefix", prefix, "error", err)
 	}
 }
 

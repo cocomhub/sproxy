@@ -52,6 +52,8 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	localMux.HandleFunc("GET /download", h.download)
 	localMux.HandleFunc("POST /delete", h.delete)
 	localMux.HandleFunc("GET /api/files", h.listFiles)
+	localMux.HandleFunc("POST /mkdir", h.mkdir)
+	localMux.HandleFunc("POST /rmdir", h.rmdir)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -76,6 +78,8 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
 	mux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
 	mux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
+	mux.HandleFunc("POST /mkdir", h.authMiddleware(h.mkdir))
+	mux.HandleFunc("POST /rmdir", h.authMiddleware(h.rmdir))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.Handle("POST /tunnel", tunnelHandler)

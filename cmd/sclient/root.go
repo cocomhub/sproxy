@@ -45,6 +45,8 @@ var rootCmd = &cobra.Command{
 		_ = v.BindPFlag("server_url", cmd.Flags().Lookup("server"))
 		_ = v.BindPFlag("chunk_size", cmd.Flags().Lookup("chunk-size"))
 		_ = v.BindPFlag("check_checksum", cmd.Flags().Lookup("no-checksum"))
+		// 加载缓存的当前目录
+		loadCurrentDir()
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
