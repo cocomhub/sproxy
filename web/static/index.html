@@ -70,6 +70,9 @@ tr:hover td { background: #f8f9fa; }
     <button class="btn btn-secondary" onclick="refreshList()">刷新列表</button>
     <span id="upload-hash-status" style="font-size:13px;color:#999;margin-left:8px;"></span>
   </div>
+  <div id="dir-bar" style="margin-bottom:12px;padding:6px 12px;background:#f0f4ff;border-radius:4px;font-size:14px;">
+    <strong>目录：</strong><span id="dir-breadcrumb"><a href="javascript:void(0)" onclick="navigateDir('')">/</a></span>
+  </div>
   <div id="upload-progress-container"></div>
   <div id="file-list">
     <div class="empty-msg">加载中...</div>
@@ -81,6 +84,7 @@ const BASE = '';
 let token = localStorage.getItem('sproxy_token') || '';
 let tunnelHexKey = localStorage.getItem('sproxy_tunnel_key') || '';
 let chunkedPref = localStorage.getItem('sproxy_chunked') !== 'false'; // 默认启用
+let currentSubdir = ''; // 当前浏览的子目录
 document.getElementById('token').value = token;
 document.getElementById('tunnel-key').value = tunnelHexKey;
 document.getElementById('chunked-toggle').checked = chunkedPref;
@@ -261,7 +265,7 @@ const AUTO_CHUNK_THRESHOLD = 100 * 1024 * 1024; // 100 MiB
 async function chunkedUpload(file, tunnelMode) {
   const totalSize = file.size;
   const totalChunks = Math.ceil(totalSize / CHUNK_SIZE);
-  const fileName = file.name;
+  const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
 
   const progId = 'prog-' + Date.now() + '-' + Math.random().toString(36).slice(2);
   const container = document.getElementById('upload-progress-container');
@@ -459,7 +463,7 @@ async function uploadFiles(files) {
       try {
         const boundary = '----WebKitFormBoundary' + Math.random().toString(36).slice(2, 10);
         const fileBytes = await file.arrayBuffer();
-        const headerStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + file.name + '"\r\nContent-Type: application/octet-stream\r\n\r\n';
+        const headerStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + fileName + '"\r\nContent-Type: application/octet-stream\r\n\r\n';
         const footerStr = '\r\n--' + boundary + '--\r\n';
         const encoder = new TextEncoder();
         const headerBytes = encoder.encode(headerStr);
@@ -485,7 +489,7 @@ async function uploadFiles(files) {
     } else {
       // 直连模式
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', file, fileName);
 
       try {
         const xhr = new XMLHttpRequest();
@@ -521,14 +525,16 @@ async function uploadFiles(files) {
 async function refreshList() {
   const el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">加载中...</div>';
+  updateBreadcrumb();
   try {
     let files;
+    const listUrl = '/api/files' + (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) : '');
     if (tunnelHexKey) {
-      const result = await tunnelRequest('GET', '/api/files', {}, null);
+      const result = await tunnelRequest('GET', listUrl, {}, null);
       const data = JSON.parse(new TextDecoder().decode(result.body));
       files = data.files || [];
     } else {
-      const resp = await fetch(BASE + '/api/files', { headers: headers() });
+      const resp = await fetch(BASE + listUrl, { headers: headers() });
       const data = await resp.json();
       if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + (data.message || resp.status) + '</div>'; return; }
       files = data.files || [];
@@ -536,21 +542,49 @@ async function refreshList() {
     if (files.length === 0) { el.innerHTML = '<div class="empty-msg">暂无文件</div>'; return; }
     let html = '<table><thead><tr><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
     for (const fi of files) {
-      const cs = fi.checksum || '';
-      const csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
-      html += '<tr><td class="overflow-dots" title="' + escHtml(fi.name) + '">' + escHtml(fi.name) + '</td>' +
-        '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
-        '<td>' + csDisplay + '</td>' +
-        '<td class="file-actions">' +
-        '<button class="btn btn-primary btn-sm" onclick="downloadFile(\'' + escJsStr(fi.name) + '\', \'' + escJsStr(cs) + '\')">下载</button>' +
-        '<button class="btn btn-danger btn-sm" onclick="deleteFile(\'' + escJsStr(fi.name) + '\', \'' + escJsStr(cs) + '\')">删除</button>' +
-        '</td></tr>';
+      const fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
+      if (fi.is_dir) {
+        html += '<tr style="cursor:pointer;background:#f8f9fa;"><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
+          '<td>-</td><td>-</td><td><button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button></td></tr>';
+      } else {
+        const cs = fi.checksum || '';
+        const csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
+        html += '<tr><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
+          '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
+          '<td>' + csDisplay + '</td>' +
+          '<td class="file-actions">' +
+          '<button class="btn btn-primary btn-sm" onclick="downloadFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">下载</button>' +
+          '<button class="btn btn-danger btn-sm" onclick="deleteFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">删除</button>' +
+          '</td></tr>';
+      }
     }
     html += '</tbody></table>';
     el.innerHTML = html;
   } catch(e) {
     el.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
   }
+}
+
+// --- 目录导航 ---
+function navigateDir(subdir) {
+  currentSubdir = subdir;
+  refreshList();
+}
+
+function updateBreadcrumb() {
+  const el = document.getElementById('dir-breadcrumb');
+  if (!currentSubdir) {
+    el.innerHTML = '<a href="javascript:void(0)" onclick="navigateDir(\'\')">/</a>';
+    return;
+  }
+  const parts = currentSubdir.split('/');
+  let html = '<a href="javascript:void(0)" onclick="navigateDir(\'\')">/</a>';
+  let accumulated = '';
+  for (let i = 0; i < parts.length; i++) {
+    accumulated = accumulated ? accumulated + '/' + parts[i] : parts[i];
+    html += ' <span style="color:#999">›</span> <a href="javascript:void(0)" onclick="navigateDir(\'' + escJsStr(accumulated) + '\')">' + escHtml(parts[i]) + '</a>';
+  }
+  el.innerHTML = html;
 }
 
 // --- 下载（校验 checksum）---

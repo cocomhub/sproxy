@@ -164,7 +164,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, filePath string, opts ..
 	// 自适应分块大小
 	chunkSize := calcChunkSize(fileSize, opt.chunkSize, maxChunk)
 	totalChunks := int((fileSize + chunkSize - 1) / chunkSize)
-	filename := filepath.Base(filePath)
+	filename := filepath.ToSlash(filepath.Clean(filePath))
 	uploadID := generateUploadID(filename, fileSize, modTime, fileChecksum)
 
 	c.logger.Info("分块上传开始", "filename", filename, "fileSize", fileSize,

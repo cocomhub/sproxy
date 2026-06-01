@@ -180,6 +180,89 @@ func shortHash(h string) string {
 	return h
 }
 
+// UploadTo 上传本地文件到指定的远端路径。
+// remotePath 为远端路径（如 "dir1/file.txt"），保留目录结构。
+func (c *FileClient) UploadTo(ctx context.Context, localPath, remotePath string) (*UploadResult, error) {
+	file, err := os.Open(localPath)
+	if err != nil {
+		return nil, fmt.Errorf("打开文件失败: %w", err)
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("获取文件信息失败: %w", err)
+	}
+	fileSize := stat.Size()
+
+	var fileChecksum string
+	if c.checkChecksum {
+		h := sha256.New()
+		if _, err := io.Copy(h, file); err != nil {
+			return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
+		}
+		fileChecksum = hex.EncodeToString(h.Sum(nil))
+		c.logger.Debug("文件 SHA-256", "filepath", localPath, "remote", remotePath, "checksum", shortHash(fileChecksum))
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("重置文件指针失败: %w", err)
+		}
+	}
+
+	remoteClean := filepath.ToSlash(filepath.Clean(remotePath))
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+
+	go func() {
+		defer pw.Close()
+		defer mw.Close()
+		part, err := mw.CreateFormFile("file", remoteClean)
+		if err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		var src io.Reader = file
+		if c.progressFn != nil {
+			c.progressFn("上传", 0, fileSize)
+			src = NewProgressReader(file, fileSize, func(read, total int64) {
+				c.progressFn("上传", read, total)
+			})
+		}
+		if _, err := io.Copy(part, src); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+	}()
+
+	headers := make(http.Header)
+	headers.Set("Content-Type", mw.FormDataContentType())
+	if c.checkChecksum && fileChecksum != "" {
+		headers.Set("X-File-Checksum", fileChecksum)
+	}
+	headers.Set("X-File-MTime", fmt.Sprintf("%d", stat.ModTime().UnixNano()))
+
+	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
+	if err != nil {
+		return nil, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var result UploadResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+
+	if !result.Success {
+		return &result, fmt.Errorf("上传失败: %s", result.Message)
+	}
+
+	return &result, nil
+}
+
 // Upload 上传一个文件到 sproxy 服务端。
 //
 // 如果启用了 checksum 校验（默认开启），会在上传前计算文件的 SHA-256，
@@ -218,7 +301,7 @@ func (c *FileClient) Upload(ctx context.Context, filePath string) (*UploadResult
 	go func() {
 		defer pw.Close()
 		defer mw.Close()
-		part, err := mw.CreateFormFile("file", filepath.Base(filePath))
+		part, err := mw.CreateFormFile("file", filepath.ToSlash(filepath.Clean(filePath)))
 		if err != nil {
 			pw.CloseWithError(err)
 			return
@@ -385,6 +468,7 @@ type FileInfo struct {
 	Size     int64  `json:"size"`
 	Checksum string `json:"checksum"`
 	ModTime  int64  `json:"mod_time"` // UnixNano
+	IsDir    bool   `json:"is_dir"`
 }
 
 // List 列出 sproxy 服务端上的文件，返回 name + size + checksum 的结构化列表。
@@ -393,6 +477,30 @@ type FileInfo struct {
 func (c *FileClient) List(ctx context.Context) ([]FileInfo, error) {
 	headers := make(http.Header)
 	resp, err := c.doRequest(ctx, "GET", "/api/files", nil, headers)
+	if err != nil {
+		return nil, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("列出文件失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Files []FileInfo `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+
+	return result.Files, nil
+}
+
+// ListSubdir 列出 sproxy 服务端上指定子目录的文件。
+func (c *FileClient) ListSubdir(ctx context.Context, subdir string) ([]FileInfo, error) {
+	headers := make(http.Header)
+	resp, err := c.doRequest(ctx, "GET", "/api/files?subdir="+url.QueryEscape(subdir), nil, headers)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
 	}

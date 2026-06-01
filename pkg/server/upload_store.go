@@ -32,13 +32,14 @@ type ChunkedUploadSession struct {
 
 // UploadStore 管理分块上传会话的持久化与并发安全。
 type UploadStore struct {
-	mu        sync.RWMutex
-	baseDir   string // <uploadsDir>/.__chunked__/
-	sessions  map[string]*ChunkedUploadSession
-	persistCh chan string   // uploadID → 异步持久化
-	stopCh    chan struct{} // 关闭后台 goroutine
-	wg        sync.WaitGroup
-	logger    *slog.Logger
+	mu         sync.RWMutex
+	baseDir    string // <uploadsDir>/.__chunked__/
+	sessions   map[string]*ChunkedUploadSession
+	persistCh  chan string   // uploadID → 异步持久化
+	stopCh     chan struct{} // 关闭后台 goroutine
+	wg         sync.WaitGroup
+	sessionTTL time.Duration // 未完成上传会话的保留时间
+	logger     *slog.Logger
 }
 
 const (
@@ -47,19 +48,25 @@ const (
 )
 
 // NewUploadStore 创建并启动 UploadStore，同时从磁盘恢复已有 session。
-func NewUploadStore(baseDir string, logger *slog.Logger) *UploadStore {
+// sessionTTL 指定未完成上传会话的过期时间，默认 24h。
+func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) *UploadStore {
 	storeDir := filepath.Join(baseDir, chunkedDirName)
 	log := defaultLogger(logger)
 	if err := os.MkdirAll(storeDir, 0755); err != nil {
 		log.Error("创建分块上传目录失败", "error", err)
 	}
 
+	if sessionTTL <= 0 {
+		sessionTTL = 24 * time.Hour
+	}
+
 	us := &UploadStore{
-		baseDir:   storeDir,
-		sessions:  make(map[string]*ChunkedUploadSession),
-		persistCh: make(chan string, 64),
-		stopCh:    make(chan struct{}),
-		logger:    log,
+		baseDir:    storeDir,
+		sessions:   make(map[string]*ChunkedUploadSession),
+		persistCh:  make(chan string, 64),
+		stopCh:     make(chan struct{}),
+		sessionTTL: sessionTTL,
+		logger:     log,
 	}
 	us.recoverSessions()
 
@@ -97,7 +104,7 @@ func (us *UploadStore) CreateSession(uploadID, filename string, totalSize, chunk
 		FileChecksum:   fileChecksum,
 		FileModTime:    fileModTime,
 		CreatedAt:      now,
-		ExpiresAt:      now.Add(24 * time.Hour),
+		ExpiresAt:      now.Add(us.sessionTTL),
 	}
 
 	us.logger.Info("创建上传会话", "upload_id", uploadID, "filename", filename,
@@ -479,7 +486,7 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 		FileChecksum:   fileChecksum,
 		FileModTime:    fileModTime,
 		CreatedAt:      now,
-		ExpiresAt:      now.Add(24 * time.Hour),
+		ExpiresAt:      now.Add(us.sessionTTL),
 	}
 
 	us.logger.Info("创建上传会话", "upload_id", uploadID, "filename", filename,

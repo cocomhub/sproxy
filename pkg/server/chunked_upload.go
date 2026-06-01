@@ -44,7 +44,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "缺少 upload_id"}, http.StatusBadRequest)
 		return
 	}
-	if filepath.Base(req.Filename) != req.Filename {
+	if _, err := ValidateFilePath(req.Filename); err != nil {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}

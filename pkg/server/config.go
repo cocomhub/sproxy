@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
 
@@ -44,10 +45,10 @@ type Config struct {
 	RateLimit      RateLimitConfig `yaml:"rate_limit"`
 
 	// 分块上传配置
-	ChunkSize           int64         `yaml:"chunk_size"`             // 每块大小，默认 4 MiB
-	MaxChunkSize        int64         `yaml:"max_chunk_size"`         // 最大分块大小，默认 0（不限制）
-	MaxChunkUploadBytes int64         `yaml:"max_chunk_upload_bytes"` // 单块请求体最大限制，默认 8 MiB
-	UploadSessionTTL    time.Duration `yaml:"upload_session_ttl"`     // 未完成上传会话保留时间，默认 24h
+	ChunkSize           int64         `yaml:"chunk_size"`
+	MaxChunkSize        int64         `yaml:"max_chunk_size"`
+	MaxChunkUploadBytes int64         `yaml:"max_chunk_upload_bytes"`
+	UploadSessionTTL    time.Duration `yaml:"upload_session_ttl"`
 }
 
 func Default() *Config {
@@ -63,6 +64,41 @@ func Default() *Config {
 		MaxChunkUploadBytes: 8 << 20,        // 8 MiB
 		UploadSessionTTL:    24 * time.Hour, // 24h
 	}
+}
+
+// Validate 校验配置合理性，设置零值字段为默认值。
+func (c *Config) Validate() error {
+	if c.Addr == "" {
+		c.Addr = ":18083"
+	}
+	if c.UploadsDir == "" {
+		c.UploadsDir = "./uploads"
+	}
+	if c.ChunkSize <= 0 {
+		c.ChunkSize = 4 << 20
+	}
+	if c.MaxChunkUploadBytes <= 0 {
+		c.MaxChunkUploadBytes = 8 << 20
+	}
+	if c.UploadSessionTTL <= 0 {
+		c.UploadSessionTTL = 24 * time.Hour
+	}
+	if c.TunnelKey != "" && len(c.TunnelKey) != 64 {
+		return fmt.Errorf("tunnel_key 必须是 64 位 hex 字符")
+	}
+	return nil
+}
+
+// LoadFromViper 从 viper 实例解码配置，合并默认值并校验。
+func LoadFromViper(v *viper.Viper) (*Config, error) {
+	cfg := Default()
+	if err := v.Unmarshal(cfg); err != nil {
+		return nil, fmt.Errorf("配置解码失败: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func LoadConfig(path string) (*Config, error) {

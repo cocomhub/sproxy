@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // newTestServerWithChunked 启动一个包含分块上传/下载路由的测试服务器。
@@ -45,7 +46,7 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 		version:       "test",
 		buildAt:       "test",
 		checksumStore: cs,
-		uploadStore:   NewUploadStore(cfg.UploadsDir, nil),
+		uploadStore:   NewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
 		logger:        slog.Default(),
 	}
 
@@ -574,7 +575,7 @@ func TestUploadStore_CreateAndGet(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, nil)
+	us := NewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, err := us.CreateSession("test-upload-id", "test.txt", 100, 4096, 1, strings.Repeat("a", 64), 0)
@@ -602,7 +603,7 @@ func TestUploadStore_MarkAndCheck(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, nil)
+	us := NewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, _ := us.CreateSession("test-upload-id-2", "test.txt", 8192, 4096, 2, strings.Repeat("b", 64), 0)
@@ -629,7 +630,7 @@ func TestUploadStore_Complete(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, nil)
+	us := NewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, _ := us.CreateSession("test-upload-id-3", "test.txt", 100, 4096, 1, strings.Repeat("c", 64), 0)
@@ -655,10 +656,11 @@ func TestUploadStore_MissingChunks(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, nil)
+	us := NewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, _ := us.CreateSession("test-upload-id-4", "test.txt", 8192, 4096, 2, strings.Repeat("d", 64), 0)
+
 	us.MarkChunkReceived(session.UploadID, 0, "h0")
 
 	missing := MissingChunks(us.GetSession(session.UploadID))

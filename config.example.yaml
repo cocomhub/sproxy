@@ -33,5 +33,6 @@ max_header_bytes: 1048576
 
 # 分块上传设置
 # chunk_size: 4194304               # 每块大小 (4MB)
+# max_chunk_size: 67108864          # 最大分块大小 (64MB)
 # max_chunk_upload_bytes: 8388608   # 单块请求体最大限制 (8MB)
 # upload_session_ttl: "24h"         # 未完成上传会话保留时间

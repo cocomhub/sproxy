@@ -34,7 +34,7 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件名不能为空"}, http.StatusBadRequest)
 		return
 	}
-	if filepath.Base(filename) != filename {
+	if _, err := ValidateFilePath(filename); err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}
@@ -85,6 +85,11 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		length = fileSize - offset
 	}
 
+	// 防止 length 过大导致 OOM（限制到 maxChunkHashBuf = 8 MiB）
+	if length > maxChunkHashBuf {
+		length = maxChunkHashBuf
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		h.logger.Error("打开文件失败", "error", err, "filename", filename)
@@ -99,7 +104,7 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 设置响应头
+	// 设置响应头（length 已截断完毕）
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+length-1, fileSize))
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))

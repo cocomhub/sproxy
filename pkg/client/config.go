@@ -8,35 +8,56 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
 
 // Config 是 sclient 的配置文件结构。
 type Config struct {
-	ServerURL        string `yaml:"server_url"`
-	UploadEndpoint   string `yaml:"upload_endpoint"`
-	DownloadEndpoint string `yaml:"download_endpoint"`
-	DeleteEndpoint   string `yaml:"delete_endpoint"`
-	CheckChecksum    bool   `yaml:"check_checksum"`
-	Timeout          int    `yaml:"timeout"`
-	TunnelKey        string `yaml:"tunnel_key"`
-	TunnelEndpoint   string `yaml:"tunnel_endpoint"`
-	ChunkSize        int64  `yaml:"chunk_size"`     // 分块上传/下载块大小（字节），默认 4 MiB
-	MaxChunkSize     int64  `yaml:"max_chunk_size"` // 最大分块大小（字节），默认 0（不限制）
+	ServerURL     string `yaml:"server_url"`
+	CheckChecksum bool   `yaml:"check_checksum"`
+	Timeout       int    `yaml:"timeout"`
+	TunnelKey     string `yaml:"tunnel_key"`
+	ChunkSize     int64  `yaml:"chunk_size"`
+	MaxChunkSize  int64  `yaml:"max_chunk_size"`
 }
 
 func DefaultConfig() *Config {
 	return &Config{
-		ServerURL:        "http://localhost:18083",
-		UploadEndpoint:   "/upload",
-		DownloadEndpoint: "/download",
-		DeleteEndpoint:   "/delete",
-		CheckChecksum:    true,
-		Timeout:          300,
-		TunnelKey:        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-		TunnelEndpoint:   "/tunnel",
-		ChunkSize:        4 << 20, // 4 MiB
+		ServerURL:     "http://localhost:18083",
+		CheckChecksum: true,
+		Timeout:       300,
+		ChunkSize:     4 << 20, // 4 MiB
 	}
+}
+
+// Validate 校验配置合理性，设置零值字段为默认值。
+func (c *Config) Validate() error {
+	if c.ServerURL == "" {
+		c.ServerURL = "http://localhost:18083"
+	}
+	if c.Timeout <= 0 {
+		c.Timeout = 300
+	}
+	if c.ChunkSize <= 0 {
+		c.ChunkSize = 4 << 20
+	}
+	if c.TunnelKey != "" && len(c.TunnelKey) != 64 {
+		return fmt.Errorf("tunnel_key 必须是 64 位 hex 字符")
+	}
+	return nil
+}
+
+// LoadFromViper 从 viper 实例解码配置，合并默认值并校验。
+func LoadFromViper(v *viper.Viper) (*Config, error) {
+	cfg := DefaultConfig()
+	if err := v.Unmarshal(cfg); err != nil {
+		return nil, fmt.Errorf("配置解码失败: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func configFilePath() (string, error) {
@@ -83,32 +104,22 @@ func SaveConfig(cfg *Config, path string) error {
 }
 
 func HandleConfigShow(cfg *Config) {
-	fmt.Printf("ServerURL:      %s\n", cfg.ServerURL)
-	fmt.Printf("UploadEndpoint:   %s\n", cfg.UploadEndpoint)
-	fmt.Printf("DownloadEndpoint: %s\n", cfg.DownloadEndpoint)
-	fmt.Printf("DeleteEndpoint:   %s\n", cfg.DeleteEndpoint)
-	fmt.Printf("CheckChecksum:   %v\n", cfg.CheckChecksum)
-	fmt.Printf("Timeout:        %d\n", cfg.Timeout)
+	fmt.Printf("ServerURL:     %s\n", cfg.ServerURL)
+	fmt.Printf("CheckChecksum: %v\n", cfg.CheckChecksum)
+	fmt.Printf("Timeout:       %d\n", cfg.Timeout)
 	maskedKey := cfg.TunnelKey
 	if len(maskedKey) > 8 {
 		maskedKey = maskedKey[:4] + "****" + maskedKey[len(maskedKey)-4:]
 	}
-	fmt.Printf("TunnelKey:      %s\n", maskedKey)
-	fmt.Printf("TunnelEndpoint: %s\n", cfg.TunnelEndpoint)
-	fmt.Printf("ChunkSize:      %d\n", cfg.ChunkSize)
-	fmt.Printf("MaxChunkSize:   %d\n", cfg.MaxChunkSize)
+	fmt.Printf("TunnelKey:     %s\n", maskedKey)
+	fmt.Printf("ChunkSize:     %d\n", cfg.ChunkSize)
+	fmt.Printf("MaxChunkSize:  %d\n", cfg.MaxChunkSize)
 }
 
 func HandleConfigSet(cfg *Config, configPath, key, value string) error {
 	switch key {
 	case "server_url":
 		cfg.ServerURL = value
-	case "upload_endpoint":
-		cfg.UploadEndpoint = value
-	case "download_endpoint":
-		cfg.DownloadEndpoint = value
-	case "delete_endpoint":
-		cfg.DeleteEndpoint = value
 	case "check_checksum":
 		cfg.CheckChecksum = value == "true"
 	case "timeout":
@@ -117,11 +128,13 @@ func HandleConfigSet(cfg *Config, configPath, key, value string) error {
 		}
 	case "tunnel_key":
 		cfg.TunnelKey = value
-	case "tunnel_endpoint":
-		cfg.TunnelEndpoint = value
 	case "chunk_size":
 		if _, err := fmt.Sscanf(value, "%d", &cfg.ChunkSize); err != nil {
 			return fmt.Errorf("无效的分块大小: %w", err)
+		}
+	case "max_chunk_size":
+		if _, err := fmt.Sscanf(value, "%d", &cfg.MaxChunkSize); err != nil {
+			return fmt.Errorf("无效的最大分块大小: %w", err)
 		}
 	default:
 		return fmt.Errorf("未知配置键: %s", key)

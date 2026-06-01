@@ -42,7 +42,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 		version:       version,
 		buildAt:       buildAt,
 		checksumStore: cs,
-		uploadStore:   NewUploadStore(cfg.UploadsDir, log.With("component", "upload_store")),
+		uploadStore:   NewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, log.With("component", "upload_store")),
 		logger:        log,
 	}
 
@@ -154,20 +154,6 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 路径穿越校验
-	if filepath.Base(handler.Filename) != handler.Filename {
-		logger.Warn("无效的文件名", "filename", handler.Filename)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
-		return
-	}
-
-	uploadDir := cfg.UploadsDir
-	if err := os.MkdirAll(uploadDir, 0755); err != nil {
-		logger.Error("创建目录失败", "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
-		return
-	}
-
 	expectedChecksum := r.Header.Get("X-File-Checksum")
 	if expectedChecksum == "" {
 		logger.Warn("缺少 X-File-Checksum 请求头")
@@ -175,10 +161,26 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filePath := filepath.Join(uploadDir, handler.Filename)
+	// 路径校验（支持子目录）
+	remotePath, err := ValidateFilePath(handler.Filename)
+	if err != nil {
+		logger.Warn("无效的文件名", "filename", handler.Filename, "error", err)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
+		return
+	}
+	logger.Debug("上传路径", "remote", remotePath)
+
+	uploadDir := cfg.UploadsDir
+	filePath := filepath.Join(uploadDir, remotePath)
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		logger.Error("创建目录失败", "error", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
+		return
+	}
+
 	if stat, err := os.Stat(filePath); err == nil {
 		if !verifyFileWithChecksum(filePath, expectedChecksum) {
-			logger.Warn("文件已存在，但校验失败", "filename", handler.Filename)
+			logger.Warn("文件已存在，但校验失败", "filename", remotePath)
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件已存在，但校验失败"}, http.StatusConflict)
 			return
 		}
@@ -188,7 +190,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 	tempFile, err := os.Create(filePath + ".tmp")
 	if err != nil {
-		logger.Error("创建文件失败", "error", err.Error(), "filename", handler.Filename)
+		logger.Error("创建文件失败", "error", err.Error(), "filename", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -201,31 +203,31 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	multiWriter := io.MultiWriter(tempFile, sha256Hash)
 
 	if _, err := io.Copy(multiWriter, file); err != nil {
-		logger.Error("保存文件失败", "error", err.Error(), "filename", handler.Filename)
+		logger.Error("保存文件失败", "error", err.Error(), "filename", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "保存文件失败"}, http.StatusInternalServerError)
 		return
 	}
 	if err := tempFile.Close(); err != nil {
-		logger.Error("关闭临时文件失败", "error", err.Error(), "filename", handler.Filename)
+		logger.Error("关闭临时文件失败", "error", err.Error(), "filename", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "保存文件失败"}, http.StatusInternalServerError)
 		return
 	}
 
 	serverChecksum := hex.EncodeToString(sha256Hash.Sum(nil))
 	if serverChecksum != expectedChecksum {
-		logger.Warn("文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "filename", handler.Filename)
+		logger.Warn("文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "filename", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件 SHA-256 校验失败"}, http.StatusBadRequest)
 		return
 	}
 
 	if err := os.Rename(filePath+".tmp", filePath); err != nil {
-		logger.Error("重命名文件失败", "error", err.Error(), "filename", handler.Filename)
+		logger.Error("重命名文件失败", "error", err.Error(), "filename", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "重命名文件失败"}, http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("X-File-Checksum", serverChecksum)
-	h.checksumStore.Set(handler.Filename, serverChecksum)
+	h.checksumStore.Set(remotePath, serverChecksum)
 
 	// 处理文件修改时间
 	if mtimeStr := r.Header.Get("X-File-MTime"); mtimeStr != "" {
@@ -233,7 +235,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
 			modTime := time.Unix(0, mtimeInt)
 			if err := os.Chtimes(filePath, modTime, modTime); err != nil {
-				logger.Warn("设置文件时间戳失败", "filename", handler.Filename, "error", err)
+				logger.Warn("设置文件时间戳失败", "filename", remotePath, "error", err)
 			}
 		}
 	}
@@ -251,26 +253,27 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件名不能为空"}, http.StatusBadRequest)
 		return
 	}
-	if filepath.Base(filename) != filename {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+	remotePath, err := ValidateFilePath(filename)
+	if err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
 	cfg := h.cfgPtr.Load()
-	filePath := filepath.Join(cfg.UploadsDir, filename)
+	filePath := filepath.Join(cfg.UploadsDir, remotePath)
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", remotePath))
 	w.Header().Set("Content-Type", "application/octet-stream")
 
 	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算
-	if cs, ok := h.checksumStore.Get(filename); ok {
+	if cs, ok := h.checksumStore.Get(remotePath); ok {
 		w.Header().Set("X-File-Checksum", cs)
 	} else if cs, err := FileChecksum(filePath); err == nil {
 		w.Header().Set("X-File-Checksum", cs)
 	} else {
-		h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "filename", filename)
+		h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "filename", remotePath)
 	}
 
 	// 返回文件修改时间
@@ -293,12 +296,13 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件名不能为空"}, http.StatusBadRequest)
 		return
 	}
-	if filepath.Base(filename) != filename {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+	remotePath, err := ValidateFilePath(filename)
+	if err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
 	cfg := h.cfgPtr.Load()
-	filePath := filepath.Join(cfg.UploadsDir, filename)
+	filePath := filepath.Join(cfg.UploadsDir, remotePath)
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 		return
@@ -307,13 +311,13 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	expectedChecksum := r.Header.Get("X-File-Checksum")
 	if expectedChecksum == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "缺少 X-File-Checksum 请求头"}, http.StatusBadRequest)
-		logger.Warn("X-File-Checksum 为空", "filename", filename)
+		logger.Warn("X-File-Checksum 为空", "filename", remotePath)
 		return
 	}
 
 	if !verifyFileWithChecksum(filePath, expectedChecksum) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件校验失败"}, http.StatusBadRequest)
-		logger.Warn("文件校验失败", "filename", filename)
+		logger.Warn("文件校验失败", "filename", remotePath)
 		return
 	}
 
@@ -321,8 +325,8 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除文件失败: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	h.checksumStore.Delete(filename)
-	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件删除成功: %s", filename)}, http.StatusOK)
+	h.checksumStore.Delete(remotePath)
+	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, http.StatusOK)
 }
 
 type fileInfo struct {
@@ -330,11 +334,23 @@ type fileInfo struct {
 	Size     int64  `json:"size"`
 	Checksum string `json:"checksum"`
 	ModTime  int64  `json:"mod_time"` // UnixNano
+	IsDir    bool   `json:"is_dir"`   // 是否为目录
 }
 
 func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
-	entries, err := os.ReadDir(cfg.UploadsDir)
+
+	// 支持按层级查询：?subdir=path 列出指定子目录，默认列出根目录
+	targetDir := cfg.UploadsDir
+	if subdir := r.URL.Query().Get("subdir"); subdir != "" {
+		if _, err := ValidateFilePath(subdir); err != nil {
+			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+			return
+		}
+		targetDir = filepath.Join(cfg.UploadsDir, subdir)
+	}
+
+	entries, err := os.ReadDir(targetDir)
 	if os.IsNotExist(err) {
 		sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
 		return
@@ -348,7 +364,15 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	csMap := h.checksumStore.GetAll()
 	files := make([]fileInfo, 0, len(entries))
 	for _, e := range entries {
+		// 跳过 .checksums.json 和 .__chunked__
+		if e.Name() == ".checksums.json" || e.Name() == chunkedDirName {
+			continue
+		}
 		if e.IsDir() {
+			files = append(files, fileInfo{
+				Name:  e.Name(),
+				IsDir: true,
+			})
 			continue
 		}
 		info, err := e.Info()
@@ -360,7 +384,13 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 			Size:    info.Size(),
 			ModTime: info.ModTime().UnixNano(),
 		}
-		if cs, ok := csMap[e.Name()]; ok {
+		// 使用完整相对路径查找 checksum
+		relName := e.Name()
+		if subdir := r.URL.Query().Get("subdir"); subdir != "" {
+			cleaned, _ := ValidateFilePath(subdir)
+			relName = filepath.ToSlash(filepath.Join(cleaned, e.Name()))
+		}
+		if cs, ok := csMap[relName]; ok {
 			fi.Checksum = cs
 		}
 		files = append(files, fi)
