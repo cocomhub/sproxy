@@ -22,18 +22,28 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 	// 限制请求体大小
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB 足够
 	var req struct {
+		UploadID     string `json:"upload_id"`
 		Filename     string `json:"filename"`
 		TotalSize    int64  `json:"total_size"`
 		ChunkSize    int64  `json:"chunk_size"`
 		TotalChunks  int    `json:"total_chunks"`
 		FileChecksum string `json:"file_checksum"`
+		FileModTime  int64  `json:"file_mod_time"` // UnixNano, 0 = unknown
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "请求体解析失败: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
 
+	h.logger.Debug("uploadInit 请求", "filename", req.Filename, "total_size", req.TotalSize,
+		"chunk_size", req.ChunkSize, "total_chunks", req.TotalChunks,
+		"file_checksum", shortHash(req.FileChecksum), "upload_id", req.UploadID)
+
 	// 校验字段
+	if req.UploadID == "" {
+		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "缺少 upload_id"}, http.StatusBadRequest)
+		return
+	}
 	if filepath.Base(req.Filename) != req.Filename {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
@@ -73,6 +83,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 	existingPath := filepath.Join(cfg.UploadsDir, req.Filename)
 	if stat, err := os.Stat(existingPath); err == nil {
 		if verifyFileWithChecksum(existingPath, req.FileChecksum) {
+			h.logger.Info("文件已存在，跳过上传", "filename", req.Filename, "size", stat.Size(), "checksum", shortHash(req.FileChecksum))
 			sendJSONResponse(w, ChunkedInitResponse{
 				Success:  true,
 				UploadID: "already_exists",
@@ -81,11 +92,12 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 文件存在但 checksum 不匹配，不允许覆盖
+		h.logger.Warn("同名文件已存在但 checksum 不匹配", "filename", req.Filename)
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "同名文件已存在但 checksum 不匹配"}, http.StatusConflict)
 		return
 	}
 
-	// 查找可续传的 session
+	// 分块大小：使用客户端传入的 chunk_size，由客户端自适应计算
 	chunkSize := req.ChunkSize
 	if chunkSize <= 0 {
 		chunkSize = cfg.ChunkSize
@@ -94,9 +106,10 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		chunkSize = 4 << 20 // 4 MiB 保底
 	}
 
-	session, reused, err := h.uploadStore.GetOrCreateSession(req.Filename, req.TotalSize, chunkSize, req.TotalChunks, req.FileChecksum)
+	session, reused, err := h.uploadStore.GetOrCreateSession(req.UploadID, req.Filename,
+		req.TotalSize, chunkSize, req.TotalChunks, req.FileChecksum, req.FileModTime)
 	if err != nil {
-		h.logger.Error("创建上传会话失败", "error", err)
+		h.logger.Error("创建/续传上传会话失败", "upload_id", req.UploadID, "error", err)
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -105,6 +118,11 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 	if reused {
 		missing := MissingChunks(session)
 		msg = fmt.Sprintf("续传会话已恢复，缺失 %d 个分块", len(missing))
+		h.logger.Info("续传会话", "upload_id", session.UploadID, "filename", req.Filename,
+			"missing", len(missing), "total", session.TotalChunks)
+	} else {
+		h.logger.Info("新上传会话", "upload_id", session.UploadID, "filename", req.Filename,
+			"total_size", req.TotalSize, "total_chunks", session.TotalChunks)
 	}
 
 	sendJSONResponse(w, ChunkedInitResponse{
@@ -145,6 +163,8 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.logger.Debug("uploadChunk 请求", "upload_id", uploadID, "chunk_index", chunkIndex)
+
 	// 获取 session
 	session := h.uploadStore.GetSession(uploadID)
 	if session == nil {
@@ -171,6 +191,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 
 	// 幂等：如果该块已接收且 checksum 匹配，直接返回成功
 	if session.ReceivedChunks[chunkIndex] && session.ChunkChecksums[chunkIndex] == chunkChecksum {
+		h.logger.Debug("chunk 已存在，跳过", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortHash(chunkChecksum))
 		sendJSONResponse(w, ChunkUploadResponse{Success: true, ChunkIndex: chunkIndex, Message: "分块已存在，跳过"}, http.StatusOK)
 		return
 	}
@@ -183,7 +204,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	tmpPath := chunkPath + ".tmp"
 	tempFile, err := os.Create(tmpPath)
 	if err != nil {
-		h.logger.Error("创建 chunk 临时文件失败", "error", err)
+		h.logger.Error("创建 chunk 临时文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "创建临时文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -194,13 +215,13 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	sha256Hash := sha256.New()
 	multiWriter := io.MultiWriter(tempFile, sha256Hash)
 	if _, err := io.Copy(multiWriter, file); err != nil {
-		h.logger.Error("写入 chunk 失败", "error", err)
+		h.logger.Error("写入 chunk 失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "写入分块失败"}, http.StatusInternalServerError)
 		return
 	}
 
 	if err := tempFile.Close(); err != nil {
-		h.logger.Error("关闭 chunk 临时文件失败", "error", err)
+		h.logger.Error("关闭 chunk 临时文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "关闭临时文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -208,7 +229,8 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	// 校验 SHA-256
 	serverChecksum := hex.EncodeToString(sha256Hash.Sum(nil))
 	if chunkChecksum != "" && serverChecksum != chunkChecksum {
-		h.logger.Warn("chunk SHA-256 不匹配", "chunk_index", chunkIndex, "server", serverChecksum, "client", chunkChecksum)
+		h.logger.Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", chunkIndex,
+			"server", shortHash(serverChecksum), "client", shortHash(chunkChecksum))
 		sendJSONResponse(w, ChunkUploadResponse{
 			Success:     false,
 			ChunkIndex:  chunkIndex,
@@ -220,18 +242,19 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 
 	// 原子重命名
 	if err := os.Rename(tmpPath, chunkPath); err != nil {
-		h.logger.Error("重命名 chunk 文件失败", "error", err)
+		h.logger.Error("重命名 chunk 文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "保存分块失败"}, http.StatusInternalServerError)
 		return
 	}
 
 	// 更新 session
 	if err := h.uploadStore.MarkChunkReceived(uploadID, chunkIndex, serverChecksum); err != nil {
-		h.logger.Error("标记分块已接收失败", "error", err)
+		h.logger.Error("标记分块已接收失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "更新状态失败"}, http.StatusInternalServerError)
 		return
 	}
 
+	h.logger.Debug("chunk 上传成功", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortHash(serverChecksum))
 	sendJSONResponse(w, ChunkUploadResponse{
 		Success:    true,
 		ChunkIndex: chunkIndex,
@@ -241,27 +264,87 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 
 // uploadStatus 查询上传会话状态。
 func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
-	uploadID := r.URL.Query().Get("upload_id")
-	if uploadID == "" {
-		sendJSONResponse(w, ChunkStatusResponse{Success: false}, http.StatusBadRequest)
-		return
+	params := r.URL.Query()
+	uploadID := params.Get("upload_id")
+	filename := params.Get("filename")
+
+	// 1. 按 upload_id 查 session
+	if uploadID != "" {
+		session := h.uploadStore.GetSession(uploadID)
+		if session != nil {
+			missing := MissingChunks(session)
+			finished := session.Completed
+			sendJSONResponse(w, ChunkStatusResponse{
+				Success:       true,
+				Finished:      finished,
+				UploadID:      session.UploadID,
+				ReceivedCount: len(session.ReceivedChunks) - len(missing),
+				TotalChunks:   session.TotalChunks,
+				MissingChunks: missing,
+				Completed:     session.Completed,
+				FileChecksum:  session.FileChecksum,
+				Filename:      session.Filename,
+				Message:       fmt.Sprintf("会话%d/%d分块已接收", len(session.ReceivedChunks)-len(missing), session.TotalChunks),
+			}, http.StatusOK)
+			return
+		}
+		// upload_id 存在但 session 不存在
+		if filename == "" {
+			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: "upload_id 不存在或已过期"}, http.StatusNotFound)
+			return
+		}
 	}
 
-	session := h.uploadStore.GetSession(uploadID)
-	if session == nil {
-		sendJSONResponse(w, ChunkStatusResponse{Success: false}, http.StatusNotFound)
-		return
+	// 2. 按 filename 查找未完成的 session
+	if filename != "" {
+		session := h.uploadStore.GetSessionByFilename(filename)
+		if session != nil {
+			missing := MissingChunks(session)
+			sendJSONResponse(w, ChunkStatusResponse{
+				Success:       true,
+				UploadID:      session.UploadID,
+				ReceivedCount: len(session.ReceivedChunks) - len(missing),
+				TotalChunks:   session.TotalChunks,
+				MissingChunks: missing,
+				Completed:     session.Completed,
+				FileChecksum:  session.FileChecksum,
+				Filename:      session.Filename,
+			}, http.StatusOK)
+			return
+		}
+
+		// 3. 检查磁盘上文件是否已存在且 checksum 匹配
+		cfg := h.cfgPtr.Load()
+		filePath := filepath.Join(cfg.UploadsDir, filename)
+		if stat, err := os.Stat(filePath); err == nil {
+			if checksum, ok := h.checksumStore.Get(filename); ok {
+				sendJSONResponse(w, ChunkStatusResponse{
+					Success:      true,
+					Finished:     true,
+					Completed:    true,
+					FileChecksum: checksum,
+					Filename:     filename,
+					Message:      fmt.Sprintf("文件已存在, size: %d", stat.Size()),
+				}, http.StatusOK)
+				return
+			}
+			// 有文件但无 checksum 记录（意外情况），实时计算
+			if cs, err := FileChecksum(filePath); err == nil {
+				sendJSONResponse(w, ChunkStatusResponse{
+					Success:      true,
+					Finished:     true,
+					Completed:    true,
+					FileChecksum: cs,
+					Filename:     filename,
+					Message:      fmt.Sprintf("文件已存在, size: %d", stat.Size()),
+				}, http.StatusOK)
+				return
+			}
+		}
 	}
 
-	missing := MissingChunks(session)
-	sendJSONResponse(w, ChunkStatusResponse{
-		Success:       true,
-		UploadID:      session.UploadID,
-		ReceivedCount: len(session.ReceivedChunks) - len(missing),
-		TotalChunks:   session.TotalChunks,
-		MissingChunks: missing,
-		Completed:     session.Completed,
-	}, http.StatusOK)
+	// 什么都没找到
+	sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: "未找到文件或上传会话"}, http.StatusNotFound)
 }
 
 // uploadComplete 合并所有分块完成上传。
@@ -288,7 +371,11 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.logger.Info("uploadComplete 开始", "upload_id", req.UploadID, "filename", session.Filename,
+		"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
+
 	if session.Completed {
+		h.logger.Info("上传已完成（幂等）", "upload_id", req.UploadID, "filename", session.Filename)
 		sendJSONResponse(w, ChunkCompleteResponse{
 			Success:      true,
 			Filename:     session.Filename,
@@ -303,6 +390,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		// 刷新 session 获取最新状态
 		session = h.uploadStore.GetSession(req.UploadID)
 		missing := MissingChunks(session)
+		h.logger.Warn("合并请求时还有分块未接收", "upload_id", req.UploadID, "missing", len(missing))
 		sendJSONResponse(w, ChunkCompleteResponse{
 			Success: false,
 			Message: fmt.Sprintf("还有 %d 个分块未接收", len(missing)),
@@ -315,7 +403,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	tmpPath := filePath + ".tmp"
 	outFile, err := os.Create(tmpPath)
 	if err != nil {
-		h.logger.Error("创建合并文件失败", "error", err)
+		h.logger.Error("创建合并文件失败", "upload_id", req.UploadID, "filename", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "创建目标文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -329,13 +417,13 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		chunkPath := h.uploadStore.ChunkFilePath(req.UploadID, i)
 		chunkFile, err := os.Open(chunkPath)
 		if err != nil {
-			h.logger.Error("打开 chunk 文件失败", "chunk_index", i, "error", err)
+			h.logger.Error("打开 chunk 文件失败", "upload_id", req.UploadID, "chunk_index", i, "error", err)
 			sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: fmt.Sprintf("读取分块 %d 失败", i)}, http.StatusInternalServerError)
 			return
 		}
 		if _, err := io.Copy(multiWriter, chunkFile); err != nil {
 			chunkFile.Close()
-			h.logger.Error("合并 chunk 失败", "chunk_index", i, "error", err)
+			h.logger.Error("合并 chunk 失败", "upload_id", req.UploadID, "chunk_index", i, "error", err)
 			sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: fmt.Sprintf("合并分块 %d 失败", i)}, http.StatusInternalServerError)
 			return
 		}
@@ -343,7 +431,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := outFile.Close(); err != nil {
-		h.logger.Error("关闭合并文件失败", "error", err)
+		h.logger.Error("关闭合并文件失败", "upload_id", req.UploadID, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "关闭目标文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -358,9 +446,17 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	// 原子重命名为最终文件名
 	if err := os.Rename(tmpPath, filePath); err != nil {
-		h.logger.Error("重命名最终文件失败", "error", err)
+		h.logger.Error("重命名最终文件失败", "upload_id", req.UploadID, "filename", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "重命名文件失败"}, http.StatusInternalServerError)
 		return
+	}
+
+	// 保留文件原始修改时间
+	if session.FileModTime > 0 {
+		modTime := time.Unix(0, session.FileModTime)
+		if err := os.Chtimes(filePath, modTime, modTime); err != nil {
+			h.logger.Warn("设置文件时间戳失败", "filename", session.Filename, "error", err)
+		}
 	}
 
 	// 记录 checksum
@@ -368,7 +464,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	// 标记完成（延迟清理 session 目录）
 	if err := h.uploadStore.CompleteSession(req.UploadID); err != nil {
-		h.logger.Warn("标记 session 完成失败", "error", err)
+		h.logger.Warn("标记 session 完成失败", "upload_id", req.UploadID, "error", err)
 	}
 
 	// 异步清理 session 目录
@@ -377,6 +473,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		h.uploadStore.DeleteSession(req.UploadID)
 	}()
 
+	h.logger.Info("文件合并完成", "filename", session.Filename, "checksum", shortHash(finalChecksum), "size", session.TotalSize)
 	sendJSONResponse(w, ChunkCompleteResponse{
 		Success:      true,
 		Filename:     session.Filename,

@@ -61,7 +61,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	localMux.HandleFunc("GET /download/chunk", h.downloadChunk)
 
 	// 速率限制中间件（仅应用于 tunnel handler）
-	var tunnelHandler http.Handler = tunnel.NewLocalHandler(tunnelKey, localMux, log.With("component", "tunnel"))
+	var tunnelHandler http.Handler = tunnel.NewLocalHandler(tunnelKey, requestLogMiddleware(log.With("component", "request"), localMux), log.With("component", "tunnel"))
 	if cfg.RateLimit.Enabled {
 		rl := NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "rate_limiter"))
 		tunnelHandler = rl.Middleware(tunnelHandler)
@@ -90,6 +90,16 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 
 	// GET / -> /ui/ 重定向
 	mux.HandleFunc("GET /", h.webRedirect)
+}
+
+// requestLogMiddleware 记录 HTTP 请求的基本信息：方法、路径、远程地址、耗时。
+func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		logger.Info("请求", "method", r.Method, "path", r.URL.Path,
+			"remote", r.RemoteAddr, "user_agent", r.UserAgent(), "duration", time.Since(start))
+	})
 }
 
 func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -216,6 +226,18 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("X-File-Checksum", serverChecksum)
 	h.checksumStore.Set(handler.Filename, serverChecksum)
+
+	// 处理文件修改时间
+	if mtimeStr := r.Header.Get("X-File-MTime"); mtimeStr != "" {
+		var mtimeInt int64
+		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
+			modTime := time.Unix(0, mtimeInt)
+			if err := os.Chtimes(filePath, modTime, modTime); err != nil {
+				logger.Warn("设置文件时间戳失败", "filename", handler.Filename, "error", err)
+			}
+		}
+	}
+
 	sendJSONResponse(w, UploadResponse{
 		Success:  true,
 		Message:  fmt.Sprintf("文件上传成功, size: %d", handler.Size),
@@ -249,6 +271,11 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-File-Checksum", cs)
 	} else {
 		h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "filename", filename)
+	}
+
+	// 返回文件修改时间
+	if stat, err := os.Stat(filePath); err == nil {
+		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", stat.ModTime().UnixNano()))
 	}
 
 	http.ServeFile(w, r, filePath)
@@ -302,6 +329,7 @@ type fileInfo struct {
 	Name     string `json:"name"`
 	Size     int64  `json:"size"`
 	Checksum string `json:"checksum"`
+	ModTime  int64  `json:"mod_time"` // UnixNano
 }
 
 func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
@@ -328,8 +356,9 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		fi := fileInfo{
-			Name: e.Name(),
-			Size: info.Size(),
+			Name:    e.Name(),
+			Size:    info.Size(),
+			ModTime: info.ModTime().UnixNano(),
 		}
 		if cs, ok := csMap[e.Name()]; ok {
 			fi.Checksum = cs

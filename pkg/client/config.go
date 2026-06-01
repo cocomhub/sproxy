@@ -21,7 +21,8 @@ type Config struct {
 	Timeout          int    `yaml:"timeout"`
 	TunnelKey        string `yaml:"tunnel_key"`
 	TunnelEndpoint   string `yaml:"tunnel_endpoint"`
-	ChunkSize        int64  `yaml:"chunk_size"` // 分块上传/下载块大小（字节），默认 4 MiB
+	ChunkSize        int64  `yaml:"chunk_size"`     // 分块上传/下载块大小（字节），默认 4 MiB
+	MaxChunkSize     int64  `yaml:"max_chunk_size"` // 最大分块大小（字节），默认 0（不限制）
 }
 
 func DefaultConfig() *Config {
@@ -95,6 +96,7 @@ func HandleConfigShow(cfg *Config) {
 	fmt.Printf("TunnelKey:      %s\n", maskedKey)
 	fmt.Printf("TunnelEndpoint: %s\n", cfg.TunnelEndpoint)
 	fmt.Printf("ChunkSize:      %d\n", cfg.ChunkSize)
+	fmt.Printf("MaxChunkSize:   %d\n", cfg.MaxChunkSize)
 }
 
 func HandleConfigSet(cfg *Config, configPath, key, value string) error {

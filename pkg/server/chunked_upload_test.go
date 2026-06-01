@@ -73,6 +73,7 @@ func TestUploadInit_HappyPath(t *testing.T) {
 	fileChecksum := sha256hex(body)
 
 	initReq := map[string]any{
+		"upload_id":     "test-upload-happy",
 		"filename":      "chunked-test.txt",
 		"total_size":    len(body),
 		"chunk_size":    4096,
@@ -108,6 +109,7 @@ func TestUploadInit_InvalidFilename(t *testing.T) {
 	defer cleanup()
 
 	initReq := map[string]any{
+		"upload_id":     "test-upload-invalid-filename",
 		"filename":      "../../escape.txt",
 		"total_size":    100,
 		"chunk_size":    4096,
@@ -132,6 +134,7 @@ func TestUploadInit_InvalidChecksum(t *testing.T) {
 	defer cleanup()
 
 	initReq := map[string]any{
+		"upload_id":     "test-upload-invalid-checksum",
 		"filename":      "test.txt",
 		"total_size":    100,
 		"chunk_size":    4096,
@@ -523,7 +526,9 @@ func initSession(t *testing.T, baseURL, filename string, totalSize int64, fileCh
 
 func initSessionEx(t *testing.T, baseURL, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string) string {
 	t.Helper()
+	uploadID := fmt.Sprintf("test-upload-%s-%d", filename, totalSize)
 	initReq := map[string]any{
+		"upload_id":     uploadID,
 		"filename":      filename,
 		"total_size":    totalSize,
 		"chunk_size":    chunkSize,
@@ -572,7 +577,7 @@ func TestUploadStore_CreateAndGet(t *testing.T) {
 	us := NewUploadStore(tmpDir, nil)
 	defer us.Stop()
 
-	session, err := us.CreateSession("test.txt", 100, 4096, 1, strings.Repeat("a", 64))
+	session, err := us.CreateSession("test-upload-id", "test.txt", 100, 4096, 1, strings.Repeat("a", 64), 0)
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
@@ -600,7 +605,7 @@ func TestUploadStore_MarkAndCheck(t *testing.T) {
 	us := NewUploadStore(tmpDir, nil)
 	defer us.Stop()
 
-	session, _ := us.CreateSession("test.txt", 8192, 4096, 2, strings.Repeat("b", 64))
+	session, _ := us.CreateSession("test-upload-id-2", "test.txt", 8192, 4096, 2, strings.Repeat("b", 64), 0)
 
 	if us.AllChunksReceived(session.UploadID) {
 		t.Fatal("should not have all chunks before any upload")
@@ -627,7 +632,7 @@ func TestUploadStore_Complete(t *testing.T) {
 	us := NewUploadStore(tmpDir, nil)
 	defer us.Stop()
 
-	session, _ := us.CreateSession("test.txt", 100, 4096, 1, strings.Repeat("c", 64))
+	session, _ := us.CreateSession("test-upload-id-3", "test.txt", 100, 4096, 1, strings.Repeat("c", 64), 0)
 	us.MarkChunkReceived(session.UploadID, 0, "chunkhash")
 	us.CompleteSession(session.UploadID)
 
@@ -653,7 +658,7 @@ func TestUploadStore_MissingChunks(t *testing.T) {
 	us := NewUploadStore(tmpDir, nil)
 	defer us.Stop()
 
-	session, _ := us.CreateSession("test.txt", 8192, 4096, 2, strings.Repeat("d", 64))
+	session, _ := us.CreateSession("test-upload-id-4", "test.txt", 8192, 4096, 2, strings.Repeat("d", 64), 0)
 	us.MarkChunkReceived(session.UploadID, 0, "h0")
 
 	missing := MissingChunks(us.GetSession(session.UploadID))

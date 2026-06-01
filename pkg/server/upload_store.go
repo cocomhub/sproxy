@@ -4,11 +4,8 @@
 package server
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,6 +24,7 @@ type ChunkedUploadSession struct {
 	ReceivedChunks []bool    `json:"received_chunks"`
 	ChunkChecksums []string  `json:"chunk_checksums"`
 	FileChecksum   string    `json:"file_checksum"`
+	FileModTime    int64     `json:"file_mod_time"` // UnixNano, 0 = unknown
 	CreatedAt      time.Time `json:"created_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	Completed      bool      `json:"completed"`
@@ -82,14 +80,11 @@ func (us *UploadStore) Stop() {
 	us.wg.Wait()
 }
 
-// CreateSession 创建一个新的分块上传会话。
-func (us *UploadStore) CreateSession(filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string) (*ChunkedUploadSession, error) {
-	idBytes := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, idBytes); err != nil {
-		return nil, fmt.Errorf("生成 upload_id 失败: %w", err)
+// CreateSession 创建一个新的分块上传会话，使用客户端提供的 uploadID。
+func (us *UploadStore) CreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, error) {
+	if uploadID == "" {
+		return nil, fmt.Errorf("upload_id 不能为空")
 	}
-	uploadID := hex.EncodeToString(idBytes)
-
 	now := time.Now()
 	session := &ChunkedUploadSession{
 		UploadID:       uploadID,
@@ -100,9 +95,13 @@ func (us *UploadStore) CreateSession(filename string, totalSize, chunkSize int64
 		ReceivedChunks: make([]bool, totalChunks),
 		ChunkChecksums: make([]string, totalChunks),
 		FileChecksum:   fileChecksum,
+		FileModTime:    fileModTime,
 		CreatedAt:      now,
 		ExpiresAt:      now.Add(24 * time.Hour),
 	}
+
+	us.logger.Info("创建上传会话", "upload_id", uploadID, "filename", filename,
+		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)
 
 	// 创建会话目录
 	sessionDir := filepath.Join(us.baseDir, uploadID)
@@ -140,6 +139,23 @@ func (us *UploadStore) GetSession(uploadID string) *ChunkedUploadSession {
 	return &cp
 }
 
+// GetSessionByFilename 按文件名查找未完成的 session。
+func (us *UploadStore) GetSessionByFilename(filename string) *ChunkedUploadSession {
+	us.mu.RLock()
+	defer us.mu.RUnlock()
+	for _, s := range us.sessions {
+		if s.Filename == filename && !s.Completed {
+			cp := *s
+			cp.ReceivedChunks = make([]bool, len(s.ReceivedChunks))
+			copy(cp.ReceivedChunks, s.ReceivedChunks)
+			cp.ChunkChecksums = make([]string, len(s.ChunkChecksums))
+			copy(cp.ChunkChecksums, s.ChunkChecksums)
+			return &cp
+		}
+	}
+	return nil
+}
+
 // MarkChunkReceived 标记指定分块为已接收并持久化。
 func (us *UploadStore) MarkChunkReceived(uploadID string, chunkIndex int, checksum string) error {
 	us.mu.Lock()
@@ -155,6 +171,9 @@ func (us *UploadStore) MarkChunkReceived(uploadID string, chunkIndex int, checks
 
 	s.ReceivedChunks[chunkIndex] = true
 	s.ChunkChecksums[chunkIndex] = checksum
+
+	us.logger.Debug("chunk 已接收", "upload_id", uploadID, "chunk_index", chunkIndex,
+		"checksum", shortHash(checksum), "received", countReceived(s.ReceivedChunks), "total", s.TotalChunks)
 
 	// 异步持久化
 	select {
@@ -199,6 +218,8 @@ func (us *UploadStore) CompleteSession(uploadID string) error {
 	}
 
 	s.Completed = true
+	us.logger.Info("上传会话已完成", "upload_id", uploadID, "filename", s.Filename,
+		"received", countReceived(s.ReceivedChunks), "total", s.TotalChunks)
 	select {
 	case us.persistCh <- uploadID:
 	default:
@@ -300,7 +321,7 @@ func (us *UploadStore) cleanupExpired() {
 	now := time.Now()
 	for id, s := range us.sessions {
 		if !s.Completed && now.After(s.ExpiresAt) {
-			us.logger.Info("清理过期上传会话", "upload_id", id, "filename", s.Filename)
+			us.logger.Info("清理过期上传会话", "upload_id", id, "filename", s.Filename, "expires_at", s.ExpiresAt)
 			delete(us.sessions, id)
 			dir := filepath.Join(us.baseDir, id)
 			if err := os.RemoveAll(dir); err != nil {
@@ -403,16 +424,36 @@ func countReceived(bitmap []bool) int {
 	return count
 }
 
-// GetOrCreateSession 根据文件名查找已有未完成的 session，或创建新 session。
-func (us *UploadStore) GetOrCreateSession(filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string) (*ChunkedUploadSession, bool, error) {
+// shortHash 截取 SHA-256 的前 12 位用于日志显示。
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
+// GetOrCreateSession 根据 uploadID 或文件名查找已有未完成的 session，或创建新 session。
+func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, bool, error) {
 	us.mu.Lock()
 	defer us.mu.Unlock()
 
-	// 查找已有未完成的同名文件 session
+	// 按 uploadID 查找
+	if uploadID != "" {
+		if s, ok := us.sessions[uploadID]; ok && !s.Completed {
+			us.logger.Info("找到可续传的 session", "upload_id", s.UploadID, "filename", s.Filename)
+			cp := *s
+			cp.ReceivedChunks = make([]bool, len(s.ReceivedChunks))
+			copy(cp.ReceivedChunks, s.ReceivedChunks)
+			cp.ChunkChecksums = make([]string, len(s.ChunkChecksums))
+			copy(cp.ChunkChecksums, s.ChunkChecksums)
+			return &cp, true, nil
+		}
+	}
+
+	// 按文件名查找（兼容旧版本 / 无 upload_id 场景）
 	for _, s := range us.sessions {
 		if s.Filename == filename && !s.Completed && s.FileChecksum == fileChecksum && s.TotalSize == totalSize {
-			us.logger.Info("找到可续传的 session", "upload_id", s.UploadID, "filename", filename)
-			// 返回副本
+			us.logger.Info("找到可续传的 session（按文件名匹配）", "upload_id", s.UploadID, "filename", filename)
 			cp := *s
 			cp.ReceivedChunks = make([]bool, len(s.ReceivedChunks))
 			copy(cp.ReceivedChunks, s.ReceivedChunks)
@@ -423,12 +464,9 @@ func (us *UploadStore) GetOrCreateSession(filename string, totalSize, chunkSize 
 	}
 
 	// 创建新 session
-	idBytes := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, idBytes); err != nil {
-		return nil, false, fmt.Errorf("生成 upload_id 失败: %w", err)
+	if uploadID == "" {
+		return nil, false, fmt.Errorf("upload_id 不能为空")
 	}
-	uploadID := hex.EncodeToString(idBytes)
-
 	now := time.Now()
 	session := &ChunkedUploadSession{
 		UploadID:       uploadID,
@@ -439,9 +477,13 @@ func (us *UploadStore) GetOrCreateSession(filename string, totalSize, chunkSize 
 		ReceivedChunks: make([]bool, totalChunks),
 		ChunkChecksums: make([]string, totalChunks),
 		FileChecksum:   fileChecksum,
+		FileModTime:    fileModTime,
 		CreatedAt:      now,
 		ExpiresAt:      now.Add(24 * time.Hour),
 	}
+
+	us.logger.Info("创建上传会话", "upload_id", uploadID, "filename", filename,
+		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)
 
 	// 创建会话目录
 	sessionDir := filepath.Join(us.baseDir, uploadID)

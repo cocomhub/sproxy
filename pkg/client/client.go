@@ -78,6 +78,7 @@ type FileClient struct {
 	checkChecksum bool
 	progressFn    func(label string, read, total int64)
 	ChunkSize     int64
+	MaxChunkSize  int64
 	logger        *slog.Logger
 }
 
@@ -139,6 +140,13 @@ func WithProgress(fn func(label string, read, total int64)) Option {
 	}
 }
 
+// WithMaxChunkSize 设置最大分块大小。当设置为 0 时使用默认值 64MB。
+func WithMaxChunkSize(n int64) Option {
+	return func(c *FileClient) {
+		c.MaxChunkSize = n
+	}
+}
+
 // WithLogger 设置 FileClient 内部使用的日志记录器。
 // 当 logger 为 nil 时使用 slog.Default()。
 func WithLogger(logger *slog.Logger) Option {
@@ -164,10 +172,19 @@ func calculateChecksum(filePath string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// shortHash 截取 SHA-256 的前 12 位用于日志显示。
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
 // Upload 上传一个文件到 sproxy 服务端。
 //
 // 如果启用了 checksum 校验（默认开启），会在上传前计算文件的 SHA-256，
 // 并通过 X-File-Checksum 请求头发送给服务端进行完整性校验。
+// 同时通过 X-File-MTime 请求头传递文件的修改时间。
 // 如果配置了 tunnel_key，上传数据将通过加密隧道传输。
 func (c *FileClient) Upload(ctx context.Context, filePath string) (*UploadResult, error) {
 	file, err := os.Open(filePath)
@@ -189,7 +206,7 @@ func (c *FileClient) Upload(ctx context.Context, filePath string) (*UploadResult
 			return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
 		}
 		fileChecksum = hex.EncodeToString(h.Sum(nil))
-		c.logger.Debug("文件 SHA-256", "filepath", filePath, "checksum", fileChecksum)
+		c.logger.Debug("文件 SHA-256", "filepath", filePath, "checksum", shortHash(fileChecksum))
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("重置文件指针失败: %w", err)
 		}
@@ -224,6 +241,7 @@ func (c *FileClient) Upload(ctx context.Context, filePath string) (*UploadResult
 	if c.checkChecksum && fileChecksum != "" {
 		headers.Set("X-File-Checksum", fileChecksum)
 	}
+	headers.Set("X-File-MTime", fmt.Sprintf("%d", stat.ModTime().UnixNano()))
 
 	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
 	if err != nil {
@@ -306,6 +324,17 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 		c.logger.Debug("文件校验通过", "checksum", serverCS)
 	}
 
+	// 恢复文件修改时间
+	if mtimeStr := resp.Header.Get("X-File-MTime"); mtimeStr != "" {
+		var mtimeInt int64
+		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
+			modTime := time.Unix(0, mtimeInt)
+			if err := os.Chtimes(outputPath, modTime, modTime); err != nil {
+				c.logger.Warn("设置文件时间戳失败", "filename", outputPath, "error", err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -355,6 +384,7 @@ type FileInfo struct {
 	Name     string `json:"name"`
 	Size     int64  `json:"size"`
 	Checksum string `json:"checksum"`
+	ModTime  int64  `json:"mod_time"` // UnixNano
 }
 
 // List 列出 sproxy 服务端上的文件，返回 name + size + checksum 的结构化列表。

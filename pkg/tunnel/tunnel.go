@@ -288,6 +288,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // dispatchLocal 将加密请求路由到本地 handler，响应体通过 Pipe 流式加密。
 func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader) {
+	h.logger.Debug("隧道本地路由", "method", req.Method, "url", req.URL)
 	localReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -340,6 +341,7 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 
 // forwardExternal 将加密请求转发到外部目标 URL，保持原 NewHandler 的完整行为。
 func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader) {
+	h.logger.Debug("隧道外部转发", "method", req.Method, "url", req.URL)
 	proxyReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)

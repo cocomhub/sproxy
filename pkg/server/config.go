@@ -45,6 +45,7 @@ type Config struct {
 
 	// 分块上传配置
 	ChunkSize           int64         `yaml:"chunk_size"`             // 每块大小，默认 4 MiB
+	MaxChunkSize        int64         `yaml:"max_chunk_size"`         // 最大分块大小，默认 0（不限制）
 	MaxChunkUploadBytes int64         `yaml:"max_chunk_upload_bytes"` // 单块请求体最大限制，默认 8 MiB
 	UploadSessionTTL    time.Duration `yaml:"upload_session_ttl"`     // 未完成上传会话保留时间，默认 24h
 }

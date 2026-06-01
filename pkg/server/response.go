@@ -25,11 +25,15 @@ type ChunkedInitResponse struct {
 // ChunkStatusResponse 分块上传状态查询响应。
 type ChunkStatusResponse struct {
 	Success       bool   `json:"success"`
-	UploadID      string `json:"upload_id"`
-	ReceivedCount int    `json:"received_count"`
-	TotalChunks   int    `json:"total_chunks"`
-	MissingChunks []int  `json:"missing_chunks"`
-	Completed     bool   `json:"completed"`
+	Finished      bool   `json:"finished,omitempty"`  // 文件已完整上传（无需再传）
+	UploadID      string `json:"upload_id,omitempty"` // omitempty 以便 finished 时返回空
+	ReceivedCount int    `json:"received_count,omitempty"`
+	TotalChunks   int    `json:"total_chunks,omitempty"`
+	MissingChunks []int  `json:"missing_chunks,omitempty"`
+	Completed     bool   `json:"completed,omitempty"`
+	FileChecksum  string `json:"file_checksum,omitempty"`
+	Filename      string `json:"filename,omitempty"`
+	Message       string `json:"message,omitempty"`
 }
 
 // ChunkUploadResponse 单块上传响应。
