@@ -70,8 +70,10 @@ tr:hover td { background: #f8f9fa; }
     <button class="btn btn-secondary" onclick="refreshList()">刷新列表</button>
     <span id="upload-hash-status" style="font-size:13px;color:#999;margin-left:8px;"></span>
   </div>
-  <div id="dir-bar" style="margin-bottom:12px;padding:6px 12px;background:#f0f4ff;border-radius:4px;font-size:14px;">
-    <strong>目录：</strong><span id="dir-breadcrumb"><a href="javascript:void(0)" onclick="navigateDir('')">/</a></span>
+  <div id="dir-bar" style="margin-bottom:12px;padding:6px 12px;background:#f0f4ff;border-radius:4px;font-size:14px;display:flex;align-items:center;gap:8px;">
+    <strong>目录：</strong><span id="dir-breadcrumb" style="flex:1;"><a href="javascript:void(0)" onclick="navigateDir('')">/</a></span>
+    <input type="text" id="new-dir-name" placeholder="新建目录名" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;width:150px;">
+    <button class="btn btn-sm btn-primary" onclick="mkdirDir()">新建</button>
   </div>
   <div id="upload-progress-container"></div>
   <div id="file-list">
@@ -446,6 +448,9 @@ async function uploadFiles(files) {
     const progId = 'prog-' + Date.now() + '-' + Math.random().toString(36).slice(2);
     container.insertAdjacentHTML('beforeend', '<div><small>' + escHtml(file.name) + ' (' + formatSize(file.size) + ')</small><div class="upload-progress"><div class="upload-progress-bar" id="' + progId + '"></div></div></div>');
 
+    // 计算远端文件名（含当前子目录前缀）
+    const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
+
     // 计算 SHA-256
     hashStatus.textContent = '计算 ' + file.name + ' SHA-256…';
     let fileChecksum;
@@ -545,7 +550,9 @@ async function refreshList() {
       const fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
       if (fi.is_dir) {
         html += '<tr style="cursor:pointer;background:#f8f9fa;"><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
-          '<td>-</td><td>-</td><td><button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button></td></tr>';
+          '<td>-</td><td>-</td><td>' +
+          '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
+          '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
       } else {
         const cs = fi.checksum || '';
         const csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
@@ -585,6 +592,72 @@ function updateBreadcrumb() {
     html += ' <span style="color:#999">›</span> <a href="javascript:void(0)" onclick="navigateDir(\'' + escJsStr(accumulated) + '\')">' + escHtml(parts[i]) + '</a>';
   }
   el.innerHTML = html;
+}
+
+// --- 目录操作 ---
+async function mkdirDir() {
+  const input = document.getElementById('new-dir-name');
+  const name = input.value.trim();
+  if (!name) { showToast('请输入目录名', 'warning'); return; }
+  const dirPath = currentSubdir ? currentSubdir + '/' + name : name;
+  try {
+    if (tunnelHexKey) {
+      const result = await tunnelRequest('POST', '/mkdir?dirname=' + encodeURIComponent(dirPath), {}, null);
+      const data = JSON.parse(new TextDecoder().decode(result.body));
+      if (result.status >= 200 && result.status < 300 && data.success) {
+        showToast('目录已创建: ' + dirPath, 'success');
+        input.value = '';
+        refreshList();
+      } else {
+        showToast('创建目录失败: ' + (data.message || result.status), 'error');
+      }
+    } else {
+      const resp = await fetch(BASE + '/mkdir?dirname=' + encodeURIComponent(dirPath), {
+        method: 'POST',
+        headers: headers()
+      });
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        showToast('目录已创建: ' + dirPath, 'success');
+        input.value = '';
+        refreshList();
+      } else {
+        showToast('创建目录失败: ' + (data.message || resp.status), 'error');
+      }
+    }
+  } catch(e) {
+    showToast('创建目录失败: ' + e.message, 'error');
+  }
+}
+
+async function rmdirDir(dirPath) {
+  if (!confirm('确认删除目录 "' + dirPath + '" 及其所有内容?')) return;
+  try {
+    if (tunnelHexKey) {
+      const result = await tunnelRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirPath), {}, null);
+      const data = JSON.parse(new TextDecoder().decode(result.body));
+      if (result.status >= 200 && result.status < 300 && data.success) {
+        showToast('目录已删除: ' + dirPath, 'success');
+        refreshList();
+      } else {
+        showToast('删除目录失败: ' + (data.message || result.status), 'error');
+      }
+    } else {
+      const resp = await fetch(BASE + '/rmdir?dirname=' + encodeURIComponent(dirPath), {
+        method: 'POST',
+        headers: headers()
+      });
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        showToast('目录已删除: ' + dirPath, 'success');
+        refreshList();
+      } else {
+        showToast('删除目录失败: ' + (data.message || resp.status), 'error');
+      }
+    }
+  } catch(e) {
+    showToast('删除目录失败: ' + e.message, 'error');
+  }
 }
 
 // --- 下载（校验 checksum）---

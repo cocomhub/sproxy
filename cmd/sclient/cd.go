@@ -15,15 +15,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func init() {
-	rmdirCmd.Flags().Bool("force", false, "跳过非空确认提示")
-
-	rootCmd.AddCommand(cdCmd)
-	rootCmd.AddCommand(pwdCmd)
-	rootCmd.AddCommand(mkdirCmd)
-	rootCmd.AddCommand(rmdirCmd)
-}
-
 // ---- cd 命令 ----
 
 var cdCmd = &cobra.Command{
