@@ -30,7 +30,9 @@ type Handlers struct {
 	logger        *slog.Logger
 }
 
-func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointer[Config], version, buildAt string, tunnelKey []byte, logger *slog.Logger) {
+// RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
+// 调用方应在进程退出前调用 (*Handlers).Close() 以释放后台 goroutine 与持久化资源。
+func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointer[Config], version, buildAt string, tunnelKey []byte, logger *slog.Logger) *Handlers {
 	cfg := cfgPtr.Load()
 	log := defaultLogger(logger)
 
@@ -51,7 +53,9 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	localMux.HandleFunc("POST /upload", h.upload)
 	localMux.HandleFunc("GET /download", h.download)
 	localMux.HandleFunc("POST /delete", h.delete)
+	localMux.HandleFunc("POST /rename", h.rename)
 	localMux.HandleFunc("GET /api/files", h.listFiles)
+	localMux.HandleFunc("HEAD /api/files/stat", h.stat)
 	localMux.HandleFunc("POST /mkdir", h.mkdir)
 	localMux.HandleFunc("POST /rmdir", h.rmdir)
 
@@ -72,7 +76,9 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
 	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
 	mux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
+	mux.HandleFunc("POST /rename", h.authMiddleware(h.rename))
 	mux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
+	mux.HandleFunc("HEAD /api/files/stat", h.authMiddleware(h.stat))
 	mux.HandleFunc("POST /upload/init", h.authMiddleware(h.uploadInit))
 	mux.HandleFunc("POST /upload/chunk", h.authMiddleware(h.uploadChunk))
 	mux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
@@ -94,6 +100,17 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 
 	// GET / -> /ui/ 重定向
 	mux.HandleFunc("GET /", h.webRedirect)
+
+	return h
+}
+
+// Close 释放 Handlers 持有的后台资源：停止 UploadStore 的 persist/cleanup goroutine。
+// 在进程退出前应调用一次（通常通过 defer h.Close()）。多次调用是安全的。
+func (h *Handlers) Close() error {
+	if h.uploadStore != nil {
+		h.uploadStore.Stop()
+	}
+	return nil
 }
 
 // requestLogMiddleware 记录 HTTP 请求的基本信息：方法、路径、远程地址、耗时。
@@ -198,8 +215,10 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建文件失败"}, http.StatusInternalServerError)
 		return
 	}
-	defer tempFile.Close()
-	// 任何错误路径都保证 .tmp 不残留；rename 成功后 .tmp 已不在，os.Remove 会无声失败
+	// .tmp 文件统一在错误路径或 rename 成功后由 defer os.Remove 兜底清理；
+	// rename 成功后 .tmp 已不在原位，os.Remove 会无声失败，不影响成品文件。
+	// 不使用 defer tempFile.Close()，因为正常路径需要在 rename 前显式 Close，
+	// 双 close 在 Windows 上有句柄复用风险。下方错误路径手动 Close 后再 return。
 	defer os.Remove(filePath + ".tmp")
 
 	// 边写边算 SHA-256，复用同一份字节流
@@ -207,6 +226,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	multiWriter := io.MultiWriter(tempFile, sha256Hash)
 
 	if _, err := io.Copy(multiWriter, file); err != nil {
+		_ = tempFile.Close()
 		logger.Error("保存文件失败", "error", err.Error(), "filename", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "保存文件失败"}, http.StatusInternalServerError)
 		return
@@ -264,12 +284,29 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := h.cfgPtr.Load()
 	filePath := filepath.Join(cfg.UploadsDir, remotePath)
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
+		} else {
+			h.logger.Error("打开文件失败", "filename", remotePath, "error", err.Error())
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "打开文件失败"}, http.StatusInternalServerError)
+		}
 		return
 	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		h.logger.Error("stat 文件失败", "filename", remotePath, "error", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "stat 失败"}, http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", remotePath))
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Accept-Ranges", "bytes")
 
 	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算
 	if cs, ok := h.checksumStore.Get(remotePath); ok {
@@ -280,12 +317,12 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "filename", remotePath)
 	}
 
-	// 返回文件修改时间
-	if stat, err := os.Stat(filePath); err == nil {
-		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", stat.ModTime().UnixNano()))
-	}
+	w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
 
-	http.ServeFile(w, r, filePath)
+	// 使用 http.ServeContent 替代 http.ServeFile：
+	//   - 自动处理 Range header（返回 206 + Content-Range，旧客户端不带 Range 仍 200 全量）
+	//   - 不会根据扩展名嗅探并覆盖已设置的 Content-Type（同步修复缺陷 #12）
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 }
 
 func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
@@ -404,6 +441,123 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) webRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/ui/", http.StatusMovedPermanently)
+}
+
+// rename 处理 POST /rename?from=<old>&to=<new>。
+// 与 delete 对称，要求 X-File-Checksum 头校验源文件，避免误覆盖。
+// 目标路径已存在时返回 409；服务端会自动 mkdir -p 中间目录。
+func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
+	reqID := r.Header.Get("X-Request-ID")
+	if reqID == "" {
+		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	logger := h.logger.With("req_id", reqID)
+
+	fromRaw := r.URL.Query().Get("from")
+	toRaw := r.URL.Query().Get("to")
+	if fromRaw == "" || toRaw == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "from 和 to 都不能为空"}, http.StatusBadRequest)
+		return
+	}
+	from, err := ValidateFilePath(fromRaw)
+	if err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的源路径: " + err.Error()}, http.StatusBadRequest)
+		return
+	}
+	to, err := ValidateFilePath(toRaw)
+	if err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目标路径: " + err.Error()}, http.StatusBadRequest)
+		return
+	}
+	if from == to {
+		sendJSONResponse(w, UploadResponse{Success: true, Message: "源与目标相同，无需移动"}, http.StatusOK)
+		return
+	}
+
+	expectedChecksum := r.Header.Get("X-File-Checksum")
+	if expectedChecksum == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "缺少 X-File-Checksum 请求头"}, http.StatusBadRequest)
+		return
+	}
+
+	cfg := h.cfgPtr.Load()
+	fromPath := filepath.Join(cfg.UploadsDir, from)
+	toPath := filepath.Join(cfg.UploadsDir, to)
+
+	if _, err := os.Stat(fromPath); os.IsNotExist(err) {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
+		return
+	}
+	if _, err := os.Stat(toPath); err == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
+		return
+	}
+
+	if !verifyFileWithChecksum(fromPath, expectedChecksum) {
+		logger.Warn("rename checksum 校验失败", "from", from)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件 SHA-256 校验失败"}, http.StatusBadRequest)
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
+		logger.Error("创建目标父目录失败", "to", to, "error", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目标父目录失败"}, http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(fromPath, toPath); err != nil {
+		logger.Error("重命名失败", "from", from, "to", to, "error", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "重命名失败: " + err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	h.checksumStore.Rename(from, to)
+
+	logger.Info("文件已重命名", "from", from, "to", to, "checksum", expectedChecksum)
+	sendJSONResponse(w, UploadResponse{
+		Success:  true,
+		Message:  fmt.Sprintf("文件已重命名: %s -> %s", from, to),
+		Checksum: expectedChecksum,
+	}, http.StatusOK)
+}
+
+// stat 处理 HEAD /api/files/stat?filename=<name>。
+// 通过响应头 X-File-Size、X-File-Checksum、X-File-MTime（UnixNano）返回元信息。
+// 文件不存在返回 404；不返回响应体。
+func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
+	filename := r.URL.Query().Get("filename")
+	if filename == "" {
+		http.Error(w, "missing filename", http.StatusBadRequest)
+		return
+	}
+	remotePath, err := ValidateFilePath(filename)
+	if err != nil {
+		http.Error(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
+	cfg := h.cfgPtr.Load()
+	fullPath := filepath.Join(cfg.UploadsDir, remotePath)
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			h.logger.Error("stat 失败", "filename", remotePath, "error", err.Error())
+			http.Error(w, "stat error", http.StatusInternalServerError)
+		}
+		return
+	}
+	if info.IsDir() {
+		w.Header().Set("X-File-IsDir", "true")
+	}
+	w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
+	w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
+	if cs, ok := h.checksumStore.Get(remotePath); ok {
+		w.Header().Set("X-File-Checksum", cs)
+	} else if !info.IsDir() {
+		if cs, err := FileChecksum(fullPath); err == nil {
+			w.Header().Set("X-File-Checksum", cs)
+		}
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func verifyFileWithChecksum(filePath, expectedChecksum string) bool {

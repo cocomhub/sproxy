@@ -53,10 +53,23 @@
 - `GET /healthz`：健康检查，返回 200 OK 与文本 `OK`
 - `GET /version`：返回版本与构建时间
 - `POST /upload`：表单上传文件，字段名 `file`；需携带头 `X-File-Checksum`（SHA-256，hex）
-- `GET /download?filename=<name>`：下载已上传文件，响应头返回 `X-File-Checksum`
+- `GET /download?filename=<name>`：下载已上传文件，响应头返回 `X-File-Checksum`，**支持标准 Range header**
 - `POST /delete?filename=<name>`：删除已上传文件；需携带头 `X-File-Checksum`
-- `GET /api/files`：列出已上传文件，返回 `{files: [{name, size, checksum}, ...]}`
+- `POST /rename?from=<old>&to=<new>`：重命名 / 移动文件；同样需要 `X-File-Checksum`
+- `HEAD /api/files/stat?filename=<name>`：查询单文件元信息（响应头）
+- `GET /api/files`：列出已上传文件，返回 `{files: [{name, size, checksum, mod_time, is_dir}, ...]}`
 - `POST /tunnel`：AES-256-GCM 加密的 HTTP 请求转发（需配置 `tunnel_key`）
+
+
+## 详细文档
+
+更完整的参考文档位于 `docs/` 目录：
+
+- [docs/api.md](./docs/api.md)：完整 HTTP API 参考，含请求 / 响应格式与错误码
+- [docs/tunnel.md](./docs/tunnel.md)：加密隧道协议规范与安全性说明
+- [docs/config.md](./docs/config.md)：所有配置字段、优先级、SIGHUP 热重载范围
+- [docs/cli.md](./docs/cli.md)：sclient 全部子命令使用说明
+- [CHANGELOG.md](./CHANGELOG.md)：版本变更记录
 
 
 ## 配置示例

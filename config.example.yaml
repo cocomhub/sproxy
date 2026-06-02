@@ -3,6 +3,10 @@
 
 addr: ":18083"
 uploads_dir: "./uploads"
+
+# 单次普通上传（非分块）最大字节数，超过返回 413。0 或不填使用默认 1 GiB。
+# max_upload_bytes: 1073741824
+
 # tunnel_key 留空时 sproxy 自动生成 64 位 hex 密钥并回写到配置文件
 # 可通过 `sclient genkey` 手动生成
 # tunnel_key: ""
@@ -12,6 +16,10 @@ server_timeouts:
   read: "30s"
   write: "30s"
   idle: "60s"
+  # graceful shutdown 超时：收到 SIGINT/SIGTERM 后等待活跃请求结束的最长时间。
+  # 0 或不填使用默认 30s。超时后强制关闭剩余连接。
+  shutdown: "30s"
+
 log_level: "info"
 log_format: "text"
 max_header_bytes: 1048576
@@ -23,6 +31,8 @@ max_header_bytes: 1048576
 #   key_file: "certs/_wildcard.sproxy.local-key.pem"
 
 # Bearer Token 认证（默认关闭，留空 = 无认证）
+# 启用后，除 /healthz、/version、/ui/、POST /tunnel 之外所有路由都要求
+# Authorization: Bearer <token> 请求头。
 # auth_token: "your-secret-token"
 
 # 速率限制（默认关闭；enabled: true 时限制 tunnel handler）
@@ -33,6 +43,6 @@ max_header_bytes: 1048576
 
 # 分块上传设置
 # chunk_size: 4194304               # 每块大小 (4MB)
-# max_chunk_size: 67108864          # 最大分块大小 (64MB)
-# max_chunk_upload_bytes: 8388608   # 单块请求体最大限制 (8MB)
-# upload_session_ttl: "24h"         # 未完成上传会话保留时间
+# max_chunk_size: 67108864          # 最大分块大小 (64MB)，仅客户端使用
+# max_chunk_upload_bytes: 8388608   # 单块请求体服务端最大限制 (8MB)，超过返回 413
+# upload_session_ttl: "24h"         # 未完成上传会话保留时间，过期自动清理

@@ -14,20 +14,20 @@ import (
 
 // Config 是 sclient 的配置文件结构。
 type Config struct {
-	ServerURL     string `yaml:"server_url"`
-	CheckChecksum bool   `yaml:"check_checksum"`
-	Timeout       int    `yaml:"timeout"`
-	TunnelKey     string `yaml:"tunnel_key"`
-	ChunkSize     int64  `yaml:"chunk_size"`
-	MaxChunkSize  int64  `yaml:"max_chunk_size"`
+	ServerURL    string `yaml:"server_url" mapstructure:"server_url"`
+	NoChecksum   bool   `yaml:"no_checksum" mapstructure:"no_checksum"`
+	Timeout      int    `yaml:"timeout" mapstructure:"timeout"`
+	TunnelKey    string `yaml:"tunnel_key" mapstructure:"tunnel_key"`
+	ChunkSize    int64  `yaml:"chunk_size" mapstructure:"chunk_size"`
+	MaxChunkSize int64  `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
 }
 
 func DefaultConfig() *Config {
 	return &Config{
-		ServerURL:     "http://localhost:18083",
-		CheckChecksum: true,
-		Timeout:       300,
-		ChunkSize:     4 << 20, // 4 MiB
+		ServerURL:  "http://localhost:18083",
+		NoChecksum: false,
+		Timeout:    300,
+		ChunkSize:  4 << 20, // 4 MiB
 	}
 }
 
@@ -105,7 +105,7 @@ func SaveConfig(cfg *Config, path string) error {
 
 func HandleConfigShow(cfg *Config) {
 	fmt.Printf("ServerURL:     %s\n", cfg.ServerURL)
-	fmt.Printf("CheckChecksum: %v\n", cfg.CheckChecksum)
+	fmt.Printf("NoChecksum:    %v\n", cfg.NoChecksum)
 	fmt.Printf("Timeout:       %d\n", cfg.Timeout)
 	maskedKey := cfg.TunnelKey
 	if len(maskedKey) > 8 {
@@ -120,8 +120,8 @@ func HandleConfigSet(cfg *Config, configPath, key, value string) error {
 	switch key {
 	case "server_url":
 		cfg.ServerURL = value
-	case "check_checksum":
-		cfg.CheckChecksum = value == "true"
+	case "no_checksum":
+		cfg.NoChecksum = value == "true"
 	case "timeout":
 		if _, err := fmt.Sscanf(value, "%d", &cfg.Timeout); err != nil {
 			return fmt.Errorf("无效的超时值: %w", err)

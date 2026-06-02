@@ -23,12 +23,23 @@ type ChecksumStore struct {
 }
 
 // NewChecksumStore 创建 ChecksumStore，从 uploadsDir/.checksums.json 加载已有记录。
+// 同时清理可能由上次进程崩溃残留的 .checksums.json.tmp 文件。
 func NewChecksumStore(uploadsDir string, logger *slog.Logger) *ChecksumStore {
 	storePath := filepath.Join(uploadsDir, ".checksums.json")
 	cs := &ChecksumStore{
 		storePath: storePath,
 		checksums: make(map[string]string),
 		logger:    defaultLogger(logger),
+	}
+
+	// 启动时清理上次崩溃残留的 tmp 文件（不影响最终 .checksums.json）
+	tmpResidue := storePath + ".tmp"
+	if _, err := os.Stat(tmpResidue); err == nil {
+		if rmErr := os.Remove(tmpResidue); rmErr != nil {
+			cs.logger.Warn("清理 checksum tmp 残留失败", "path", tmpResidue, "error", rmErr)
+		} else {
+			cs.logger.Info("已清理 checksum tmp 残留", "path", tmpResidue)
+		}
 	}
 
 	data, err := os.ReadFile(storePath)
@@ -78,6 +89,22 @@ func (cs *ChecksumStore) Delete(filename string) {
 	}
 }
 
+// Rename 将一条 checksum 记录从 from 路径迁移到 to 路径并持久化。
+// 如果 from 不存在则是 no-op（不报错）；如果 to 已存在则被覆盖（与 os.Rename 行为对齐）。
+func (cs *ChecksumStore) Rename(from, to string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	v, ok := cs.checksums[from]
+	if !ok {
+		return
+	}
+	delete(cs.checksums, from)
+	cs.checksums[to] = v
+	if err := cs.saveLocked(); err != nil {
+		cs.logger.Error("checksum 存储持久化失败", "op", "rename", "from", from, "to", to, "error", err)
+	}
+}
+
 // DeletePrefix 删除指定前缀的所有 checksum 记录（用于目录删除）。
 func (cs *ChecksumStore) DeletePrefix(prefix string) {
 	cs.mu.Lock()
@@ -103,12 +130,15 @@ func (cs *ChecksumStore) GetAll() map[string]string {
 
 // saveLocked 必须在持有 cs.mu 的情况下调用：
 // 先写入临时文件再用 os.Rename 原子替换，避免进程中途崩溃导致 .checksums.json 损坏。
+// 即便 Rename 失败，也保证清理 tmp 文件不残留。
 func (cs *ChecksumStore) saveLocked() error {
 	data, err := json.MarshalIndent(cs.checksums, "", "  ")
 	if err != nil {
 		return err
 	}
 	tmp := cs.storePath + ".tmp"
+	// 兜底清理：Rename 成功后 tmp 已不在原位，os.Remove 会无声失败；Rename 失败时则真正清除残留。
+	defer os.Remove(tmp)
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err
 	}

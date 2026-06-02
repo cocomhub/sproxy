@@ -65,7 +65,14 @@ import (
 
 const (
 	frameContentType = "application/x-tunnel-frame"
+
+	// MaxMetadataBytes 限制 metadata 帧的最大长度（1 MiB），防止远程攻击者通过伪造的 metaLen 触发 OOM。
+	// 合法 metadata 通常仅几百字节到几 KiB，1 MiB 已留足上限。
+	MaxMetadataBytes = 1 << 20
 )
+
+// ErrMetadataTooLarge 表示 metadata 帧长度超过 MaxMetadataBytes。
+var ErrMetadataTooLarge = fmt.Errorf("metadata frame too large (> %d bytes)", MaxMetadataBytes)
 
 // Request 表示一个加密隧道请求，包含要转发到目标服务器的 HTTP 请求信息。
 type Request struct {
@@ -168,12 +175,16 @@ func encodeMetadataFrame(key, metadataJSON []byte) ([]byte, error) {
 
 // decodeMetadataFrame 从 r 中读取 [4B metaLen][encrypted metadata]，解密后返回 metadata JSON。
 // 读取完成后 r 的当前位置指向 stream chunks 的起始处。
+// 如果 metaLen 超过 MaxMetadataBytes，返回 ErrMetadataTooLarge，防止恶意输入触发 OOM。
 func decodeMetadataFrame(r io.Reader, key []byte) ([]byte, error) {
 	var lenBuf [4]byte
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
 		return nil, fmt.Errorf("read metadata length: %w", err)
 	}
 	metaLen := binary.BigEndian.Uint32(lenBuf[:])
+	if metaLen > MaxMetadataBytes {
+		return nil, ErrMetadataTooLarge
+	}
 	encMeta := make([]byte, metaLen)
 	if _, err := io.ReadFull(r, encMeta); err != nil {
 		return nil, fmt.Errorf("read metadata: %w", err)
@@ -328,14 +339,22 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 		_ = bodyPr.Close()
 	}()
 
-	// 同步运行本地 handler
-	h.localHandler.ServeHTTP(sr, localReq)
+	// 同步运行本地 handler。
+	// 使用 defer + recover 兜底：handler 即便 panic，也能保证 metaReady 被关闭 + bodyPw 被 Close，
+	// 避免上方 goroutine 永远阻塞在 <-sr.metaReady 而导致整个隧道 goroutine 泄漏。
+	func() {
+		defer func() {
+			sr.once.Do(func() {
+				close(sr.metaReady)
+			})
+			_ = bodyPw.Close()
+			if rec := recover(); rec != nil {
+				h.logger.Error("本地 handler panic", "panic", rec, "url", req.URL)
+			}
+		}()
+		h.localHandler.ServeHTTP(sr, localReq)
+	}()
 
-	// 如果 handler 没有写 body（只有 WriteHeader），确保 metaReady 仍被关闭
-	sr.once.Do(func() {
-		close(sr.metaReady)
-	})
-	_ = bodyPw.Close()
 	<-done
 }
 
@@ -394,6 +413,10 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 
 // streamRecorder 是一个自定义 http.ResponseWriter，将 handler 的输出通过 Pipe 流式输出，
 // 供 EncryptStream 消费。状态码和响应头在首次 Write 时确定并通知给加密 goroutine。
+//
+// 所有对 header / statusCode 的访问都通过 mu 串行化：
+// 标准 http.Handler 约定单个 goroutine 使用 ResponseWriter，但响应头组装 goroutine 与
+// handler goroutine 之间通过 metaReady 跨边界共享 header，因此显式加锁更安全。
 type streamRecorder struct {
 	header     http.Header
 	statusCode int
@@ -414,7 +437,11 @@ func newStreamRecorder(bodyWriter *io.PipeWriter) *streamRecorder {
 	}
 }
 
-func (sr *streamRecorder) Header() http.Header { return sr.header }
+func (sr *streamRecorder) Header() http.Header {
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	return sr.header
+}
 
 func (sr *streamRecorder) WriteHeader(code int) {
 	sr.mu.Lock()

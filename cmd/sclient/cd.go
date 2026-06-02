@@ -46,7 +46,7 @@ cd / 回到根目录，cd .. 返回上级目录。`,
 			if currentDir == "" {
 				return
 			}
-			parts := strings.SplitN(currentDir, "/", -1)
+			parts := strings.Split(currentDir, "/")
 			if len(parts) <= 1 {
 				currentDir = ""
 			} else {
@@ -101,7 +101,7 @@ var mkdirCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		dirname := resolveRemotePath(args[0])
+		dirname := mustResolveRemotePath(args[0])
 		if err := cli.Mkdir(context.TODO(), dirname); err != nil {
 			fmt.Fprintf(os.Stderr, "创建目录失败: %v\n", err)
 			os.Exit(1)
@@ -124,10 +124,10 @@ var rmdirCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		dirname := resolveRemotePath(args[0])
+		dirname := mustResolveRemotePath(args[0])
 
 		// 检查目录是否为空：先 list 子目录
-		entries, listErr := cli.ListSubdir(context.TODO(), dirname)
+		entries, listErr := cli.List(context.TODO(), dirname)
 		force, _ := cmd.Flags().GetBool("force")
 
 		if listErr == nil && len(entries) > 0 && !force {
@@ -190,20 +190,43 @@ func loadCurrentDir() {
 // ---- 远端路径解析 ----
 
 // resolveRemotePath 根据当前目录和用户传入的路径，返回完整的远端路径。
-// 若用户传入绝对路径（以 / 开头）或包含 ..，直接使用用户路径；
+// 若用户传入绝对路径（以 / 开头）：直接使用清洗后的路径（脱掉前导 /）；
 // 否则拼接 currentDir。
-func resolveRemotePath(userPath string) string {
+//
+// 如果路径中出现父级引用（`..` 或 `../`），返回错误：服务端 ValidateFilePath 同样会拒绝，
+// 在客户端预拦截可以避免向服务端发送注定失败的请求，并给用户更清晰的本地报错。
+func resolveRemotePath(userPath string) (string, error) {
 	if userPath == "" {
-		return currentDir
+		return currentDir, nil
 	}
+
+	var raw string
 	if strings.HasPrefix(userPath, "/") {
-		return filepath.ToSlash(filepath.Clean(userPath[1:]))
+		// 绝对路径：去掉前导 / 后清洗，绕过当前目录。
+		raw = userPath[1:]
+	} else if currentDir != "" {
+		raw = currentDir + "/" + userPath
+	} else {
+		raw = userPath
 	}
-	if strings.HasPrefix(userPath, "..") || strings.Contains(userPath, "../") {
-		return filepath.ToSlash(filepath.Clean(userPath))
+
+	cleaned := filepath.ToSlash(filepath.Clean(raw))
+	if cleaned == "." {
+		cleaned = ""
 	}
-	if currentDir != "" {
-		return filepath.ToSlash(filepath.Clean(currentDir + "/" + userPath))
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		return "", fmt.Errorf("路径包含父级引用 '..'，禁止访问上层目录: %s", userPath)
 	}
-	return filepath.ToSlash(filepath.Clean(userPath))
+	return cleaned, nil
+}
+
+// mustResolveRemotePath 是 resolveRemotePath 的便捷封装：路径校验失败时打印错误并退出。
+// 用于 cobra Run 函数（非 RunE），保持原有的"出错即退出"语义。
+func mustResolveRemotePath(userPath string) string {
+	cleaned, err := resolveRemotePath(userPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "无效的路径: %v\n", err)
+		os.Exit(1)
+	}
+	return cleaned
 }

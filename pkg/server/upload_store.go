@@ -37,6 +37,7 @@ type UploadStore struct {
 	sessions   map[string]*ChunkedUploadSession
 	persistCh  chan string   // uploadID → 异步持久化
 	stopCh     chan struct{} // 关闭后台 goroutine
+	stopOnce   sync.Once     // 保证 Stop 幂等
 	wg         sync.WaitGroup
 	sessionTTL time.Duration // 未完成上传会话的保留时间
 	logger     *slog.Logger
@@ -81,10 +82,12 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	return us
 }
 
-// Stop 停止后台 goroutine 并等待结束。
+// Stop 停止后台 goroutine 并等待结束。多次调用是安全的（幂等）。
 func (us *UploadStore) Stop() {
-	close(us.stopCh)
-	us.wg.Wait()
+	us.stopOnce.Do(func() {
+		close(us.stopCh)
+		us.wg.Wait()
+	})
 }
 
 // CreateSession 创建一个新的分块上传会话，使用客户端提供的 uploadID。
@@ -271,14 +274,23 @@ func (us *UploadStore) persistLoop() {
 }
 
 // persistSession 将指定 session 持久化到磁盘。
+// 在持锁状态下深拷贝 session（含 ReceivedChunks / ChunkChecksums 两个 slice），
+// 然后在释放锁后再做 JSON marshal / 写文件，避免 marshal 期间被 MarkChunkReceived 改写 slice 造成 data race。
 func (us *UploadStore) persistSession(uploadID string) {
 	us.mu.RLock()
 	s, ok := us.sessions[uploadID]
-	us.mu.RUnlock()
 	if !ok {
+		us.mu.RUnlock()
 		return
 	}
-	if err := us.writeSessionJSON(s); err != nil {
+	snapshot := *s
+	snapshot.ReceivedChunks = make([]bool, len(s.ReceivedChunks))
+	copy(snapshot.ReceivedChunks, s.ReceivedChunks)
+	snapshot.ChunkChecksums = make([]string, len(s.ChunkChecksums))
+	copy(snapshot.ChunkChecksums, s.ChunkChecksums)
+	us.mu.RUnlock()
+
+	if err := us.writeSessionJSON(&snapshot); err != nil {
 		us.logger.Error("持久化 session 失败", "upload_id", uploadID, "error", err)
 	}
 }

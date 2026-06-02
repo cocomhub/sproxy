@@ -44,7 +44,6 @@ var rootCmd = &cobra.Command{
 		// 持久 flag 绑定到 viper key
 		_ = v.BindPFlag("server_url", cmd.Flags().Lookup("server"))
 		_ = v.BindPFlag("chunk_size", cmd.Flags().Lookup("chunk-size"))
-		_ = v.BindPFlag("check_checksum", cmd.Flags().Lookup("no-checksum"))
 		// 加载缓存的当前目录
 		loadCurrentDir()
 		return nil
@@ -86,7 +85,6 @@ func init() {
 
 	// 全局选项（persistent flags）
 	rootCmd.PersistentFlags().StringP("server", "s", "", "服务器地址 (覆盖配置中的 server_url)")
-	rootCmd.PersistentFlags().Bool("no-checksum", false, "禁用 SHA-256 校验")
 	rootCmd.PersistentFlags().StringP("output", "o", "", "指定下载文件的输出路径")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "显示详细输出")
 	rootCmd.PersistentFlags().Bool("chunked", false, "启用分块上传/下载模式")
@@ -123,14 +121,6 @@ func buildFileClient(cmd *cobra.Command) (*client.FileClient, error) {
 
 	opts := []client.Option{
 		client.WithLogger(logger),
-		client.WithChecksum(func() bool {
-			// --no-checksum flag 显式设置时覆盖配置文件值
-			if cmd.Flags().Changed("no-checksum") {
-				v, _ := cmd.Flags().GetBool("no-checksum")
-				return !v
-			}
-			return cfg.CheckChecksum
-		}()),
 		client.WithProgress(func(label string, read, total int64) {
 			if total > 0 {
 				percent := float64(read) / float64(total) * 100
@@ -169,5 +159,7 @@ func initLogger(verbose bool) *slog.Logger {
 	if verbose {
 		level = slog.LevelDebug
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(logger)
+	return logger
 }

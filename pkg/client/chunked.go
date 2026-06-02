@@ -522,35 +522,11 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 					return
 				}
 
-				resp, err := c.doRequest(ctx, "GET", urlPath, nil, nil)
-				if err != nil {
-					continue
-				}
-				defer resp.Body.Close()
-
-				if resp.StatusCode != http.StatusOK {
-					resp.Body.Close()
+				data, ok := c.tryDownloadChunk(ctx, urlPath, length)
+				if !ok {
 					continue
 				}
 
-				// 读取分块数据
-				data, err := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if err != nil {
-					continue
-				}
-
-				// 校验分块 checksum
-				serverChunkCS := resp.Header.Get("X-Chunk-Checksum")
-				if serverChunkCS != "" && c.checkChecksum {
-					chunkHash := sha256.Sum256(data)
-					localCS := hex.EncodeToString(chunkHash[:])
-					if localCS != serverChunkCS {
-						continue
-					}
-				}
-
-				// 写入文件
 				mu.Lock()
 				if _, writeErr := outFile.WriteAt(data, offset); writeErr != nil {
 					mu.Unlock()
@@ -580,7 +556,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	}
 
 	// 校验完整文件 checksum
-	if c.checkChecksum && expectedChecksum != "" {
+	if expectedChecksum != "" {
 		c.logger.Debug("分块下载文件校验", "filename", outputPath, "expected_checksum", shortHash(expectedChecksum))
 		localCS, err := calculateChecksum(outputPath)
 		if err != nil {
@@ -601,6 +577,41 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 
 	c.logger.Info("分块下载完成", "filename", outputPath)
 	return nil
+}
+
+// tryDownloadChunk 执行一次分块下载尝试：发请求、按需校验 X-Chunk-Checksum，返回 (data, true) 表示成功。
+// 失败一律返回 (nil, false)，由调用方决定是否重试。
+//
+// 通过把 defer resp.Body.Close() 放到本函数边界，避免在 ChunkedDownload 的重试循环中累积 defer / 重复 Close。
+func (c *FileClient) tryDownloadChunk(ctx context.Context, urlPath string, expectLength int64) ([]byte, bool) {
+	resp, err := c.doRequest(ctx, "GET", urlPath, nil, nil)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false
+	}
+	if expectLength > 0 && int64(len(data)) != expectLength {
+		// 服务端返回长度与请求不符（截断、错位），强制重试以避免写入错块。
+		return nil, false
+	}
+
+	serverChunkCS := resp.Header.Get("X-Chunk-Checksum")
+	if serverChunkCS != "" {
+		chunkHash := sha256.Sum256(data)
+		localCS := hex.EncodeToString(chunkHash[:])
+		if localCS != serverChunkCS {
+			return nil, false
+		}
+	}
+	return data, true
 }
 
 // ChunkedOption 分块上传/下载的可选参数。

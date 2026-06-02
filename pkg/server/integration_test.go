@@ -25,13 +25,12 @@ import (
 
 // newTestServer 启动一个临时的 httptest.Server，绑定到独立的 uploads 目录。
 // 返回服务地址、cfgPtr 及 cleanup 函数。tunnel 路由不挂载（避免要求 32 字节 key）。
+//
+// 使用 t.TempDir() 与 t.Cleanup() 自动管理临时目录与服务关闭，避免遗忘 cleanup。
 func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config], func()) {
 	t.Helper()
 
-	tmpDir, err := os.MkdirTemp("", "sproxy-test-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
+	tmpDir := t.TempDir()
 
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
@@ -60,10 +59,9 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	mux.HandleFunc("GET /", h.webRedirect)
 
 	ts := httptest.NewServer(mux)
-	cleanup := func() {
-		ts.Close()
-		_ = os.RemoveAll(tmpDir)
-	}
+	t.Cleanup(ts.Close)
+	// 兼容旧的 `defer cleanup()` 调用语义，仍返回一个 no-op cleanup（实际工作交给 t.Cleanup）。
+	cleanup := func() {}
 	return ts.URL, &cfgPtr, cleanup
 }
 
@@ -481,8 +479,8 @@ func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
 // ---- 辅助：避免 context 未使用警告 ----
 
 func TestRegisterRoutes_Smoke(t *testing.T) {
-	tmpDir, _ := os.MkdirTemp("", "smoke-*")
-	defer os.RemoveAll(tmpDir)
+	t.Parallel()
+	tmpDir := t.TempDir()
 
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
@@ -492,5 +490,6 @@ func TestRegisterRoutes_Smoke(t *testing.T) {
 	mux := http.NewServeMux()
 	// 32 字节占位 tunnel key
 	key := make([]byte, 32)
-	RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", key, nil)
+	h := RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", key, nil)
+	t.Cleanup(func() { _ = h.Close() })
 }

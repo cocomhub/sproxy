@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
@@ -28,12 +29,10 @@ var listCmd = &cobra.Command{
 		subdir, _ := cmd.Flags().GetString("subdir")
 
 		var files []client.FileInfo
-		if subdir != "" {
-			files, err = cli.ListSubdir(context.Background(), subdir)
+		if strings.HasPrefix(subdir, "/") {
+			files, err = cli.List(context.Background(), subdir)
 		} else if currentDir != "" {
-			files, err = cli.ListSubdir(context.Background(), currentDir)
-		} else {
-			files, err = cli.List(context.Background())
+			files, err = cli.List(context.Background(), currentDir, subdir)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "列出文件失败: %v\n", err)

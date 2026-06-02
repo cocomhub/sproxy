@@ -156,6 +156,18 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "缺少 upload_id 或 chunk_index"}, http.StatusBadRequest)
 		return
 	}
+	if chunkChecksum == "" {
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "缺少 chunk_checksum"}, http.StatusBadRequest)
+		return
+	}
+	if len(chunkChecksum) != 64 {
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "chunk_checksum 必须是 64 位 hex"}, http.StatusBadRequest)
+		return
+	}
+	if _, err := hex.DecodeString(chunkChecksum); err != nil {
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "chunk_checksum 不是有效的 hex"}, http.StatusBadRequest)
+		return
+	}
 
 	chunkIndex := 0
 	if _, err := fmt.Sscanf(chunkIndexStr, "%d", &chunkIndex); err != nil {
@@ -226,9 +238,9 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 校验 SHA-256
+	// 校验 SHA-256（chunk_checksum 已在请求入口强制必填且校验格式）
 	serverChecksum := hex.EncodeToString(sha256Hash.Sum(nil))
-	if chunkChecksum != "" && serverChecksum != chunkChecksum {
+	if serverChecksum != chunkChecksum {
 		h.logger.Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", chunkIndex,
 			"server", shortHash(serverChecksum), "client", shortHash(chunkChecksum))
 		sendJSONResponse(w, ChunkUploadResponse{
@@ -414,20 +426,11 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	multiWriter := io.MultiWriter(outFile, hasher)
 
 	for i := 0; i < session.TotalChunks; i++ {
-		chunkPath := h.uploadStore.ChunkFilePath(req.UploadID, i)
-		chunkFile, err := os.Open(chunkPath)
-		if err != nil {
-			h.logger.Error("打开 chunk 文件失败", "upload_id", req.UploadID, "chunk_index", i, "error", err)
-			sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: fmt.Sprintf("读取分块 %d 失败", i)}, http.StatusInternalServerError)
-			return
-		}
-		if _, err := io.Copy(multiWriter, chunkFile); err != nil {
-			chunkFile.Close()
+		if err := h.mergeOneChunk(req.UploadID, i, multiWriter); err != nil {
 			h.logger.Error("合并 chunk 失败", "upload_id", req.UploadID, "chunk_index", i, "error", err)
-			sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: fmt.Sprintf("合并分块 %d 失败", i)}, http.StatusInternalServerError)
+			sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: fmt.Sprintf("合并分块 %d 失败: %v", i, err)}, http.StatusInternalServerError)
 			return
 		}
-		chunkFile.Close()
 	}
 
 	if err := outFile.Close(); err != nil {
@@ -480,4 +483,19 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		FileChecksum: finalChecksum,
 		Message:      "文件合并并校验通过",
 	}, http.StatusOK)
+}
+
+// mergeOneChunk 读取单个 chunk 文件并把内容拷贝到 dst。
+// 通过把 defer chunkFile.Close() 放到本函数边界，避免在合并循环中累积 defer 或漏掉手动 Close。
+func (h *Handlers) mergeOneChunk(uploadID string, idx int, dst io.Writer) error {
+	chunkPath := h.uploadStore.ChunkFilePath(uploadID, idx)
+	chunkFile, err := os.Open(chunkPath)
+	if err != nil {
+		return fmt.Errorf("打开 chunk %d 失败: %w", idx, err)
+	}
+	defer chunkFile.Close()
+	if _, err := io.Copy(dst, chunkFile); err != nil {
+		return fmt.Errorf("拷贝 chunk %d 失败: %w", idx, err)
+	}
+	return nil
 }

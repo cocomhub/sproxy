@@ -26,7 +26,7 @@ output 指定本地保存路径，省略时使用文件名。`,
 			os.Exit(1)
 		}
 
-		filename := resolveRemotePath(args[0])
+		filename := mustResolveRemotePath(args[0])
 		outputPath, _ := cmd.Flags().GetString("output")
 		if outputPath == "" && len(args) > 1 {
 			outputPath = args[1]

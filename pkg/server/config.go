@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
@@ -29,26 +30,27 @@ type ServerTimeouts struct {
 	Read       time.Duration `yaml:"read"`
 	Write      time.Duration `yaml:"write"`
 	Idle       time.Duration `yaml:"idle"`
+	Shutdown   time.Duration `yaml:"shutdown"`
 }
 
 type Config struct {
-	Addr           string          `yaml:"addr"`
-	UploadsDir     string          `yaml:"uploads_dir"`
-	MaxUploadBytes int64           `yaml:"max_upload_bytes"`
-	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts"`
-	LogLevel       string          `yaml:"log_level"`
-	LogFormat      string          `yaml:"log_format"`
-	MaxHeaderBytes int             `yaml:"max_header_bytes"`
-	TunnelKey      string          `yaml:"tunnel_key"`
-	TLS            TLSConfig       `yaml:"tls"`
-	AuthToken      string          `yaml:"auth_token"`
-	RateLimit      RateLimitConfig `yaml:"rate_limit"`
+	Addr           string          `yaml:"addr" mapstructure:"addr"`
+	UploadsDir     string          `yaml:"uploads_dir" mapstructure:"uploads_dir"`
+	MaxUploadBytes int64           `yaml:"max_upload_bytes" mapstructure:"max_upload_bytes"`
+	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`
+	LogLevel       string          `yaml:"log_level" mapstructure:"log_level"`
+	LogFormat      string          `yaml:"log_format" mapstructure:"log_format"`
+	MaxHeaderBytes int             `yaml:"max_header_bytes" mapstructure:"max_header_bytes"`
+	TunnelKey      string          `yaml:"tunnel_key" mapstructure:"tunnel_key"`
+	TLS            TLSConfig       `yaml:"tls" mapstructure:"tls"`
+	AuthToken      string          `yaml:"auth_token" mapstructure:"auth_token"`
+	RateLimit      RateLimitConfig `yaml:"rate_limit" mapstructure:"rate_limit"`
 
 	// 分块上传配置
-	ChunkSize           int64         `yaml:"chunk_size"`
-	MaxChunkSize        int64         `yaml:"max_chunk_size"`
-	MaxChunkUploadBytes int64         `yaml:"max_chunk_upload_bytes"`
-	UploadSessionTTL    time.Duration `yaml:"upload_session_ttl"`
+	ChunkSize           int64         `yaml:"chunk_size" mapstructure:"chunk_size"`
+	MaxChunkSize        int64         `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
+	MaxChunkUploadBytes int64         `yaml:"max_chunk_upload_bytes" mapstructure:"max_chunk_upload_bytes"`
+	UploadSessionTTL    time.Duration `yaml:"upload_session_ttl" mapstructure:"upload_session_ttl"`
 }
 
 func Default() *Config {
@@ -56,6 +58,9 @@ func Default() *Config {
 		Addr:           ":18083",
 		UploadsDir:     "./uploads",
 		MaxUploadBytes: 1 << 30, // 1 GiB
+		ServerTimeouts: ServerTimeouts{
+			Shutdown: 30 * time.Second,
+		},
 		RateLimit: RateLimitConfig{
 			Requests: 10,
 			Window:   time.Second,
@@ -83,8 +88,15 @@ func (c *Config) Validate() error {
 	if c.UploadSessionTTL <= 0 {
 		c.UploadSessionTTL = 24 * time.Hour
 	}
-	if c.TunnelKey != "" && len(c.TunnelKey) != 64 {
-		return fmt.Errorf("tunnel_key 必须是 64 位 hex 字符")
+	if c.ServerTimeouts.Shutdown <= 0 {
+		c.ServerTimeouts.Shutdown = 30 * time.Second
+	}
+	if c.TunnelKey != "" {
+		// 同时校验长度与 hex 格式，避免运行时 hex.DecodeString 报错才发现。
+		// 复用 pkg/tunnel.ParseKey 保持单一来源。
+		if _, err := tunnel.ParseKey(c.TunnelKey); err != nil {
+			return fmt.Errorf("tunnel_key 校验失败（必须是 64 位十六进制字符 0-9a-fA-F）: %w", err)
+		}
 	}
 	return nil
 }

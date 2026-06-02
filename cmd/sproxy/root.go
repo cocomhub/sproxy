@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -101,7 +102,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	mux := http.NewServeMux()
-	server.RegisterRoutes(ctx, mux, &cfgPtr, Version, BuildAt, tunnelKey, logger)
+	h := server.RegisterRoutes(ctx, mux, &cfgPtr, Version, BuildAt, tunnelKey, logger)
+	defer func() {
+		if err := h.Close(); err != nil {
+			slog.Warn("handlers close error", "error", err.Error())
+		}
+	}()
 
 	protocol := "http"
 	if cfg.TLS.Enabled {
@@ -128,17 +134,26 @@ func runServer(cmd *cobra.Command, args []string) error {
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
 
+	// shutdownDone 在 graceful shutdown 流程完成后被关闭，便于主 goroutine 等待清理动作真正执行完成。
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		for sig := range signalChan {
 			if sig == syscall.SIGHUP {
 				handleSighup(cfg, logger)
 				continue
 			}
 			cancel()
-			if err := s.Shutdown(context.Background()); err != nil {
-				slog.Error("shutdown error", "error", err.Error())
-				os.Exit(1)
+			currentCfg := cfgPtr.Load()
+			shutdownTimeout := currentCfg.ServerTimeouts.Shutdown
+			if shutdownTimeout <= 0 {
+				shutdownTimeout = 30 * time.Second
 			}
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			if err := s.Shutdown(shutdownCtx); err != nil {
+				slog.Error("shutdown error", "error", err.Error(), "timeout", shutdownTimeout)
+			}
+			shutdownCancel()
 			return
 		}
 	}()
@@ -170,6 +185,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// 走到这里说明 ListenAndServe 已被 Shutdown 关闭（ErrServerClosed 路径）。
+	// 等 signal handler goroutine 完成清理，避免 defer h.Close() 抢在 Shutdown 真正释放连接前执行。
+	<-shutdownDone
 	slog.Info("downserver exit")
 	return nil
 }
@@ -202,7 +220,7 @@ func resolveTunnelKey(cfg *server.Config) ([]byte, error) {
 
 // handleSighup 处理 SIGHUP 信号：使用 viper 重新读取配置文件，
 // 仅 log_level/log_format/auth_token 等软配置生效。
-func handleSighup(oldCfg *server.Config, logger *slog.Logger) {
+func handleSighup(oldCfg *server.Config, _ *slog.Logger) {
 	v := viper.GetViper()
 	if err := v.ReadInConfig(); err != nil {
 		slog.Error("SIGHUP config reload failed", "error", err)

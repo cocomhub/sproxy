@@ -21,13 +21,11 @@ import (
 )
 
 // newTestServerWithChunked 启动一个包含分块上传/下载路由的测试服务器。
+// 使用 t.TempDir() 与 t.Cleanup() 自动管理临时目录与 UploadStore 后台 goroutine。
 func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config], func()) {
 	t.Helper()
 
-	tmpDir, err := os.MkdirTemp("", "sproxy-chunked-test-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
+	tmpDir := t.TempDir()
 
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
@@ -58,11 +56,12 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	mux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
 
 	ts := httptest.NewServer(mux)
-	cleanup := func() {
+	t.Cleanup(func() {
 		ts.Close()
 		h.uploadStore.Stop()
-		_ = os.RemoveAll(tmpDir)
-	}
+	})
+	// 返回 no-op cleanup 保持调用方代码兼容
+	cleanup := func() {}
 	return ts.URL, &cfgPtr, cleanup
 }
 

@@ -24,7 +24,7 @@ filename 可以包含路径，如 "dir/file.txt"。`,
 			os.Exit(1)
 		}
 
-		filename := resolveRemotePath(args[0])
+		filename := mustResolveRemotePath(args[0])
 		if err := cli.Delete(context.Background(), filename); err != nil {
 			fmt.Fprintf(os.Stderr, "删除失败: %v\n", err)
 			os.Exit(1)

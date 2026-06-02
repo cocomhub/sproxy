@@ -49,7 +49,7 @@ func ValidateFilePath(filename string) (string, error) {
 	}
 
 	// 逐组件检查 ".."（路径穿越）
-	parts := strings.SplitN(cleaned, string(filepath.Separator), -1)
+	parts := strings.Split(cleaned, string(filepath.Separator))
 	if slices.Contains(parts, "..") {
 		return "", fmt.Errorf("文件名不能包含路径穿越: %s", filename)
 	}

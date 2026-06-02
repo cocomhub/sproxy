@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -72,14 +73,13 @@ type Option func(*FileClient)
 //	result, err := client.Upload(ctx, "file.txt")
 //	err := client.Download(ctx, "file.txt", "/tmp/file.txt")
 type FileClient struct {
-	serverURL     string
-	httpClient    *http.Client
-	tunnelClient  *tunnel.Client
-	checkChecksum bool
-	progressFn    func(label string, read, total int64)
-	ChunkSize     int64
-	MaxChunkSize  int64
-	logger        *slog.Logger
+	serverURL    string
+	httpClient   *http.Client
+	tunnelClient *tunnel.Client
+	progressFn   func(label string, read, total int64)
+	ChunkSize    int64
+	MaxChunkSize int64
+	logger       *slog.Logger
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
@@ -88,11 +88,10 @@ type FileClient struct {
 // 可以通过 Option 设置自定义 HTTP 客户端、隧道加密、超时等。
 func NewFileClient(serverURL string, opts ...Option) *FileClient {
 	c := &FileClient{
-		serverURL:     strings.TrimRight(serverURL, "/"),
-		httpClient:    &http.Client{Timeout: 300 * time.Second},
-		checkChecksum: true,
-		ChunkSize:     4 << 20, // 4 MiB
-		logger:        slog.Default(),
+		serverURL:  strings.TrimRight(serverURL, "/"),
+		httpClient: &http.Client{Timeout: 300 * time.Second},
+		ChunkSize:  4 << 20, // 4 MiB
+		logger:     slog.Default(),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -123,13 +122,6 @@ func WithTunnel(hexKey string) Option {
 func WithTimeout(d time.Duration) Option {
 	return func(c *FileClient) {
 		c.httpClient.Timeout = d
-	}
-}
-
-// WithChecksum 设置是否启用文件校验。
-func WithChecksum(enabled bool) Option {
-	return func(c *FileClient) {
-		c.checkChecksum = enabled
 	}
 }
 
@@ -201,16 +193,14 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	fileSize := stat.Size()
 
 	var fileChecksum string
-	if c.checkChecksum {
-		h := sha256.New()
-		if _, err := io.Copy(h, file); err != nil {
-			return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
-		}
-		fileChecksum = hex.EncodeToString(h.Sum(nil))
-		c.logger.Debug("文件 SHA-256", "filepath", localPath, "remote", remotePath, "checksum", shortHash(fileChecksum))
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			return nil, fmt.Errorf("重置文件指针失败: %w", err)
-		}
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
+	}
+	fileChecksum = hex.EncodeToString(h.Sum(nil))
+	c.logger.Debug("文件 SHA-256", "filepath", localPath, "remote", remotePath, "checksum", shortHash(fileChecksum))
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("重置文件指针失败: %w", err)
 	}
 
 	remoteClean := filepath.ToSlash(filepath.Clean(remotePath))
@@ -240,9 +230,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 
 	headers := make(http.Header)
 	headers.Set("Content-Type", mw.FormDataContentType())
-	if c.checkChecksum && fileChecksum != "" {
-		headers.Set("X-File-Checksum", fileChecksum)
-	}
+	headers.Set("X-File-Checksum", fileChecksum)
 	headers.Set("X-File-MTime", fmt.Sprintf("%d", stat.ModTime().UnixNano()))
 
 	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
@@ -343,7 +331,7 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
 
-	if c.checkChecksum && serverCS != "" {
+	if serverCS != "" {
 		c.logger.Debug("下载文件校验", "filename", outputPath, "server_checksum", serverCS)
 		localCS, err := calculateChecksum(outputPath)
 		if err != nil {
@@ -379,13 +367,11 @@ func (c *FileClient) Delete(ctx context.Context, filename string) error {
 	urlPath := "/delete?" + url.Values{"filename": {filename}}.Encode()
 	headers := make(http.Header)
 
-	if c.checkChecksum {
-		fileChecksum, err := calculateChecksum(filename)
-		if err != nil {
-			return fmt.Errorf("计算文件 SHA-256 失败: %w", err)
-		}
-		headers.Set("X-File-Checksum", fileChecksum)
+	fileChecksum, err := calculateChecksum(filename)
+	if err != nil {
+		return fmt.Errorf("计算文件 SHA-256 失败: %w", err)
 	}
+	headers.Set("X-File-Checksum", fileChecksum)
 
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, headers)
 	if err != nil {
@@ -419,35 +405,76 @@ type FileInfo struct {
 	IsDir    bool   `json:"is_dir"`
 }
 
-// List 列出 sproxy 服务端上的文件，返回 name + size + checksum 的结构化列表。
+// Rename 通过 POST /rename?from=&to= 在服务端将文件从 from 移到 to。
+// 与 Delete 对称，必须传入 from 的当前 SHA-256 用于校验（避免误覆盖）。
 //
-// 如果配置了 tunnel_key，列表请求将通过加密隧道传输。
-func (c *FileClient) List(ctx context.Context) ([]FileInfo, error) {
+// fromChecksum 通常通过先调用 Stat 获取；为空时方法报错。
+func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) error {
+	if from == "" || to == "" {
+		return fmt.Errorf("from / to 不能为空")
+	}
+	if fromChecksum == "" {
+		return fmt.Errorf("fromChecksum 不能为空（必须传入源文件 SHA-256 以防误覆盖）")
+	}
+
+	urlPath := "/rename?" + url.Values{"from": {from}, "to": {to}}.Encode()
 	headers := make(http.Header)
-	resp, err := c.doRequest(ctx, "GET", "/api/files", nil, headers)
+	headers.Set("X-File-Checksum", fromChecksum)
+
+	resp, err := c.doRequest(ctx, "POST", urlPath, nil, headers)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return fmt.Errorf("请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, fmt.Errorf("列出文件失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("重命名失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
-
-	var result struct {
-		Files []FileInfo `json:"files"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
-	}
-
-	return result.Files, nil
+	return nil
 }
 
-// ListSubdir 列出 sproxy 服务端上指定子目录的文件。
-func (c *FileClient) ListSubdir(ctx context.Context, subdir string) ([]FileInfo, error) {
+// Stat 通过 HEAD /api/files/stat?filename=<name> 获取远端单个文件元信息。
+// 响应来源于 X-File-Size、X-File-Checksum、X-File-MTime 三个响应头；不返回 body。
+// 文件不存在时返回错误（HTTP 404 包装为 error）。
+func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, error) {
+	if filename == "" {
+		return nil, fmt.Errorf("filename 不能为空")
+	}
+	urlPath := "/api/files/stat?" + url.Values{"filename": {filename}}.Encode()
+	resp, err := c.doRequest(ctx, "HEAD", urlPath, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("文件不存在: %s", filename)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("stat 失败 (HTTP %d)", resp.StatusCode)
+	}
+
+	info := &FileInfo{
+		Name:     filepath.Base(filename),
+		Checksum: resp.Header.Get("X-File-Checksum"),
+		IsDir:    resp.Header.Get("X-File-IsDir") == "true",
+	}
+	if s := resp.Header.Get("X-File-Size"); s != "" {
+		_, _ = fmt.Sscanf(s, "%d", &info.Size)
+	}
+	if s := resp.Header.Get("X-File-MTime"); s != "" {
+		_, _ = fmt.Sscanf(s, "%d", &info.ModTime)
+	}
+	return info, nil
+}
+
+// List 列出 sproxy 服务端上的文件，返回 name + size + checksum 的结构化列表。
+//
+// 如果配置了 tunnel_key，列表请求将通过加密隧道传输。
+func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, error) {
 	headers := make(http.Header)
+	subdir := path.Join(append([]string{"/"}, subdirs...)...)
 	resp, err := c.doRequest(ctx, "GET", "/api/files?subdir="+url.QueryEscape(subdir), nil, headers)
 	if err != nil {
 		return nil, fmt.Errorf("请求失败: %w", err)
@@ -498,7 +525,8 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 
 	if c.tunnelClient != nil {
 		// 隧道模式：使用相对 URL，隧道客户端处理加密
-		return c.tunnelClient.Do(req)
+		resp, err := c.tunnelClient.Do(req)
+		return closeBodyIfErr(resp, err)
 	}
 
 	// 直连模式：补全 server URL
@@ -507,5 +535,17 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	if err != nil {
 		return nil, fmt.Errorf("解析 URL 失败: %w", err)
 	}
-	return c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req)
+	return closeBodyIfErr(resp, err)
+}
+
+// closeBodyIfErr 在 (resp, err) 同时非 nil 的情况下关闭 resp.Body，避免连接 / 句柄泄漏。
+// 这是 http.Client.Do 在某些错误（例如 redirect 策略错误）下会返回的非典型形态：返回了响应但同时报错。
+// 调用方拿到 err 时通常 return，不会自己 Close，所以这里兜底。
+func closeBodyIfErr(resp *http.Response, err error) (*http.Response, error) {
+	if err != nil && resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+		return nil, err
+	}
+	return resp, err
 }
