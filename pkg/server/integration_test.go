@@ -812,3 +812,278 @@ func TestRmdir_PathTraversal(t *testing.T) {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
 	}
 }
+
+// ---- rename 分支测试 ----
+
+func TestRename_SameSourceAndTarget(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("same file")
+	cs := sha256hex(body)
+	uploadFile(t, url, "same.txt", body, map[string]string{"X-File-Checksum": cs})
+
+	req, _ := http.NewRequest("POST", url+"/rename?from=same.txt&to=same.txt", nil)
+	req.Header.Set("X-File-Checksum", cs)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 (same path), got %d", resp.StatusCode)
+	}
+	var result UploadResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if !result.Success {
+		t.Fatalf("expected success: %+v", result)
+	}
+}
+
+func TestRename_TargetAlreadyExists(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	bodyA := []byte("file A")
+	csA := sha256hex(bodyA)
+	bodyB := []byte("file B")
+	csB := sha256hex(bodyB)
+
+	uploadFile(t, url, "a.txt", bodyA, map[string]string{"X-File-Checksum": csA})
+	uploadFile(t, url, "b.txt", bodyB, map[string]string{"X-File-Checksum": csB})
+
+	req, _ := http.NewRequest("POST", url+"/rename?from=a.txt&to=b.txt", nil)
+	req.Header.Set("X-File-Checksum", csA)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+}
+
+func TestRename_SourceNotFound(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("POST", url+"/rename?from=nope.txt&to=dest.txt", nil)
+	req.Header.Set("X-File-Checksum", strings.Repeat("a", 64))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestRename_MissingChecksum(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("POST", url+"/rename?from=a.txt&to=b.txt", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRename_PathTraversal(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("POST", url+"/rename?from=../../a.txt&to=b.txt", nil)
+	req.Header.Set("X-File-Checksum", strings.Repeat("b", 64))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// ---- stat 分支测试 ----
+
+func TestStat_HappyPath(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("stat me")
+	cs := sha256hex(body)
+	uploadFile(t, url, "stat-test.txt", body, map[string]string{"X-File-Checksum": cs})
+
+	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=stat-test.txt", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-File-Size"); got == "" {
+		t.Fatal("missing X-File-Size")
+	}
+	if got := resp.Header.Get("X-File-Checksum"); got != cs {
+		t.Fatalf("X-File-Checksum mismatch: got %q, want %q", got, cs)
+	}
+	if got := resp.Header.Get("X-File-MTime"); got == "" {
+		t.Fatal("missing X-File-MTime")
+	}
+}
+
+func TestStat_DirectoryReturnsIsDir(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	uploadsDir := cfgPtr.Load().UploadsDir
+	if err := os.Mkdir(filepath.Join(uploadsDir, "statdir"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=statdir", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("X-File-IsDir") != "true" {
+		t.Fatal("expected X-File-IsDir=true for directory")
+	}
+}
+
+func TestStat_FileNotFound(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=nonexistent.txt", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestStat_EmptyFilename(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestStat_PathTraversal(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=../../../etc/passwd", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// ---- listFiles 子目录测试 ----
+
+func TestListFiles_SubdirParameter(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	uploadsDir := cfgPtr.Load().UploadsDir
+	if err := os.MkdirAll(filepath.Join(uploadsDir, "mydir"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	body := []byte("nested file")
+	cs := sha256hex(body)
+	uploadFile(t, url, "mydir/nested.txt", body, map[string]string{
+		"X-File-Checksum": cs,
+		"X-File-Path":     "mydir/nested.txt",
+	})
+
+	resp, err := http.Get(url + "/api/files?subdir=mydir")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Files []fileInfo `json:"files"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if len(result.Files) != 1 || result.Files[0].Name != "nested.txt" {
+		t.Fatalf("expected [nested.txt], got %+v", result.Files)
+	}
+	if result.Files[0].Checksum != cs {
+		t.Fatalf("checksum mismatch: got %q, want %q", result.Files[0].Checksum, cs)
+	}
+}
+
+func TestListFiles_SubdirPathTraversalReturns200Empty(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	resp, err := http.Get(url + "/api/files?subdir=../../../etc")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Files []fileInfo `json:"files"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	if len(result.Files) != 0 {
+		t.Fatalf("expected empty list, got %+v", result.Files)
+	}
+}
+
+// ---- upload 文件已存在 checksum 不匹配 ----
+
+func TestUpload_ExistingFileChecksumMismatch(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("original content")
+	cs := sha256hex(body)
+	uploadFile(t, url, "conflict.txt", body, map[string]string{"X-File-Checksum": cs})
+
+	body2 := []byte("different content")
+	cs2 := sha256hex(body2)
+	status, respBody := uploadFile(t, url, "conflict.txt", body2, map[string]string{
+		"X-File-Checksum": cs2,
+		"X-File-Path":     "conflict.txt",
+	})
+	if status != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", status, respBody)
+	}
+}
