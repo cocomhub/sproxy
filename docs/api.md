@@ -25,6 +25,8 @@ SPDX-License-Identifier: Apache-2.0
   `POST /tunnel` 之外的所有路由都要求 `Authorization: Bearer <token>`。
 - **隧道**：所有路由（除 `POST /tunnel` 自身）都可以通过 `POST /tunnel` 走 AES-256-GCM
   加密信道访问，sclient 默认就这么做。
+- **Gzip 压缩**：服务端自动为 JSON 响应启用 gzip 压缩（当客户端请求头包含
+  `Accept-Encoding: gzip` 时）。二进制下载流不做压缩。
 
 ## 基础
 
@@ -123,6 +125,64 @@ BuildAt: 2026-06-01T12:00:00Z
 | 400 | 路径无效 / 缺少 checksum / checksum 不匹配 |
 | 404 | 源文件不存在 |
 | 409 | 目标已存在 |
+
+### POST /api/batch/delete
+
+批量删除文件（continue-on-error 模式）。请求体 JSON：
+
+```json
+{
+  "files": [
+    {"filename": "file1.txt", "checksum": "abc..."},
+    {"filename": "sub/file2.txt", "checksum": "def..."}
+  ]
+}
+```
+
+| 项 | 内容 |
+|---|---|
+| Content-Type | `application/json` |
+| 每个条目必须含 | `filename`（路径）、`checksum`（当前 SHA-256 hex） |
+
+响应 `200`：
+```json
+[
+  {"filename": "file1.txt", "success": true, "message": "删除成功"},
+  {"filename": "sub/file2.txt", "success": false, "message": "checksum 不匹配"}
+]
+```
+
+- 按数组顺序逐个执行，单个失败不影响后续条目
+- 每个条目的校验逻辑与单文件 `POST /delete` 一致
+
+### POST /api/batch/rename
+
+批量重命名 / 移动文件（continue-on-error 模式）。请求体 JSON：
+
+```json
+{
+  "operations": [
+    {"from": "old1.txt", "to": "new1.txt", "checksum": "abc..."},
+    {"from": "old2.txt", "to": "sub/new2.txt", "checksum": "def..."}
+  ]
+}
+```
+
+| 项 | 内容 |
+|---|---|
+| Content-Type | `application/json` |
+| 每个操作必须含 | `from`（源路径）、`to`（目标路径）、`checksum`（源文件当前 SHA-256 hex） |
+
+响应 `200`：
+```json
+[
+  {"from": "old1.txt", "to": "new1.txt", "success": true, "message": "重命名成功"},
+  {"from": "old2.txt", "to": "sub/new2.txt", "success": false, "message": "源文件不存在"}
+]
+```
+
+- 按数组顺序逐个执行，单个失败不影响后续操作
+- 每个操作的校验逻辑与单文件 `POST /rename` 一致
 
 ### HEAD /api/files/stat?filename=...
 

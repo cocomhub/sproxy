@@ -29,6 +29,7 @@ max_header_bytes: 1048576
 #   enabled: true
 #   cert_file: "certs/_wildcard.sproxy.local.pem"
 #   key_file: "certs/_wildcard.sproxy.local-key.pem"
+#   # auto_tls: true  # 默认 false；true 时证书/私钥缺失自动生成 ECDSA P-256 自签证书
 
 # Bearer Token 认证（默认关闭，留空 = 无认证）
 # 启用后，除 /healthz、/version、/ui/、POST /tunnel 之外所有路由都要求

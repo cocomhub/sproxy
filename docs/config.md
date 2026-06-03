@@ -38,6 +38,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `tls.enabled` | bool | `false` | 启用 TLS |
 | `tls.cert_file` | string | (空) | 证书路径（启用 TLS 时生效） |
 | `tls.key_file` | string | (空) | 私钥路径 |
+| `tls.auto_tls` | bool | `false` | `true` 时证书/私钥缺失自动生成 ECDSA P-256 自签证书 |
 | **rate_limit** | object |  | 速率限制（仅限制 `POST /tunnel` 入口） |
 | `rate_limit.enabled` | bool | `false` | 启用 |
 | `rate_limit.requests` | int | `10` | 窗口内允许请求数 |
@@ -47,6 +48,11 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `max_chunk_size` | int64 | `0` | 仅客户端配置，服务端忽略 |
 | `max_chunk_upload_bytes` | int64 | `8388608` (8 MiB) | 单块请求体最大限制 |
 | `upload_session_ttl` | duration | `24h` | 未完成会话保留时间 |
+
+### Gzip 压缩
+
+服务端自动为 JSON 响应启用 gzip 压缩（当客户端 `Accept-Encoding` 包含 `gzip` 时），
+无需额外配置。二进制文件下载流不做压缩。
 
 ### 时长字段格式
 

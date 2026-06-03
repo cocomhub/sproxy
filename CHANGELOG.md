@@ -10,6 +10,47 @@ SPDX-License-Identifier: Apache-2.0
 
 ## [Unreleased]
 
+### Added
+- Phase 1（代码质量与覆盖）：
+  - 测试覆盖率达标：pkg/server 71.6%、pkg/client 60.2%、pkg/tunnel 83.3%
+  - 新增 `internal/size` 测试、`cmd/sproxy` 测试、`cmd/sclient` 测试
+  - Web UI 新增重命名按钮（调用 POST /rename）
+  - 修复 `context.TODO()` 占位符（替换为 `context.Background()`）
+  - 修复进程中 `sync.Map uploadCache` 包级变量污染（迁移为 FileClient 结构体字段）
+  - 修复 `json.Encode` / `os.MkdirAll` 被忽略的错误（记录日志）
+- Phase 2（搜索/分页/CI/Docker）：
+  - 文件搜索 API：`GET /api/files/search?q=keyword`（递归 WalkDir + 不区分大小写）
+  - 文件列表分页：`GET /api/files?offset=N&limit=M`，响应含 total/offset/limit
+  - GitHub Actions CI：lint + test（ubuntu/windows）+ 交叉编译
+  - Dockerfile：多阶段构建（golang:1.26-alpine → alpine:3.21），非 root 用户
+- Phase 3（批量操作/压缩/限流/模糊测试/排序）：
+  - 批量删除 API：`POST /api/batch/delete`，continue-on-error 模式
+  - 批量重命名 API：`POST /api/batch/rename`，continue-on-error 模式
+  - 传输压缩：GzipMiddleware 透明 gzip 压缩 JSON 响应
+  - 速率限制全覆盖：apiHandler 链统一应用 RateLimiter
+  - ValidateFilePath 模糊测试：5s 无崩溃，84 个 interesting 输入
+  - 文件列表排序：`?sort=name|size|time&order=asc|desc`
+- Phase 4（发布自动化/基准测试/搜索UI/隧道优化/e2e/TLS）：
+  - goreleaser 发布自动化：5 平台交叉编译 + archive 打包 + changelog
+  - pkg/server 基准测试：upload 84MB/s、download 222MB/s、并发/分块
+  - pkg/client 基准测试：upload 74MB/s、download 97MB/s、分块/List
+  - Web UI 文件搜索：搜索栏 + 清除按钮 + 隧道/非隧道双模式
+  - 隧道流性能优化：可配置 chunk 大小 + sync.Pool 减少分配
+  - 端到端冒烟测试：test/e2e_test.go，启动子进程跑完整操作流程
+  - TLS 自签证书自动生成：ECDSA P-256、10年有效期、含 SAN
+
+### Changed
+- 配置新增 `tls.auto_tls` 字段：证书缺失时自动生成自签证书
+- 服务端中间件链重构：localMux → GzipMiddleware → apiHandler → RateLimiter（可选）
+- 文件列表 API 响应扩展：新增 `total`/`offset`/`limit` 字段（向后兼容）
+- tunnel 流式加解密支持可配置 chunk 大小
+
+### Fixed
+- `context.TODO()` 替换为 `context.Background()`
+- `sync.Map uploadCache` 从包级变量迁移为 FileClient 结构体字段
+- `json.Encode` 和 `os.MkdirAll` 错误被忽略的问题
+- 服务端 API 路由未受速率限制保护的问题
+
 ## [0.2.0] - 2026-06-01
 
 ### Added

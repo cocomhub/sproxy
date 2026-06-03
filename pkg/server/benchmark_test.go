@@ -208,9 +208,7 @@ func BenchmarkConcurrentUploads(b *testing.B) {
 	)
 
 	for range concurrency {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				n := int(counter.Add(1) - 1)
 				if n >= b.N {
@@ -225,7 +223,7 @@ func BenchmarkConcurrentUploads(b *testing.B) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errCh)
