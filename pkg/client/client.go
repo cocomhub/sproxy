@@ -493,6 +493,7 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 
 // List 列出 sproxy 服务端上的文件，返回 name + size + checksum 的结构化列表。
 //
+// 支持可选的 offset 和 limit 分页参数。limit 为 0 表示不限制，offset 默认从 0 开始。
 // 如果配置了 tunnel_key，列表请求将通过加密隧道传输。
 func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, error) {
 	headers := make(http.Header)
@@ -506,6 +507,61 @@ func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, e
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return nil, fmt.Errorf("列出文件失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Files []FileInfo `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+
+	return result.Files, nil
+}
+
+// ListWithPagination 列出文件并返回分页信息。
+// offset 从 0 开始，limit 为 0 表示不限制。
+func (c *FileClient) ListWithPagination(ctx context.Context, offset, limit int, subdirs ...string) ([]FileInfo, int, error) {
+	headers := make(http.Header)
+	subdir := path.Join(append([]string{"/"}, subdirs...)...)
+	urlPath := fmt.Sprintf("/api/files?subdir=%s&offset=%d&limit=%d", url.QueryEscape(subdir), offset, limit)
+	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)
+	if err != nil {
+		return nil, 0, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, 0, fmt.Errorf("列出文件失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Files  []FileInfo `json:"files"`
+		Total  int        `json:"total"`
+		Offset int        `json:"offset"`
+		Limit  int        `json:"limit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, 0, fmt.Errorf("解析响应失败: %w", err)
+	}
+
+	return result.Files, result.Total, nil
+}
+
+// Search 搜索服务端文件名包含 q 的文件（不区分大小写）。
+// 使用 GET /api/files/search?q=<keyword>，递归搜索全部目录。
+func (c *FileClient) Search(ctx context.Context, q string) ([]FileInfo, error) {
+	headers := make(http.Header)
+	resp, err := c.doRequest(ctx, "GET", "/api/files/search?q="+url.QueryEscape(q), nil, headers)
+	if err != nil {
+		return nil, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("搜索失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
 	var result struct {

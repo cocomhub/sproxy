@@ -57,6 +57,7 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
 	mux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
 	mux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
+	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /", h.webRedirect)
 
@@ -401,6 +402,194 @@ func TestList_StructuredResponse(t *testing.T) {
 	}
 }
 
+// ---- search ----
+
+func TestSearchFiles_ByKeyword(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	body := []byte("hello world")
+	cs := sha256hex(body)
+	code, _ := uploadFile(t, url, "report.txt", body, map[string]string{"X-File-Checksum": cs})
+	if code != 200 {
+		t.Fatalf("upload: expected 200, got %d", code)
+	}
+	code2, _ := uploadFile(t, url, "other.txt", body, map[string]string{"X-File-Checksum": cs})
+	if code2 != 200 {
+		t.Fatalf("upload other: expected 200, got %d", code2)
+	}
+
+	resp, err := http.Get(url + "/api/files/search?q=report")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("search status: expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Files []struct {
+			Name     string `json:"name"`
+			Size     int64  `json:"size"`
+			Checksum string `json:"checksum"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Files) != 1 {
+		t.Fatalf("expected 1 file, got %d: %+v", len(result.Files), result.Files)
+	}
+	if result.Files[0].Name != "report.txt" {
+		t.Fatalf("expected report.txt, got %s", result.Files[0].Name)
+	}
+}
+
+func TestSearchFiles_Empty(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	resp, err := http.Get(url + "/api/files/search?q=")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("search status: expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Files []any `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Files) != 0 {
+		t.Fatalf("expected 0 files for empty query, got %d", len(result.Files))
+	}
+}
+
+func TestSearchFiles_NoMatch(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	resp, err := http.Get(url + "/api/files/search?q=nonexistent")
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("search status: expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Files []any `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Files) != 0 {
+		t.Fatalf("expected 0 files, got %d", len(result.Files))
+	}
+}
+
+// ---- pagination ----
+
+func TestListFiles_Pagination_Offset(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	// 上传 3 个文件
+	body := []byte("data")
+	cs := sha256hex(body)
+	for i := 0; i < 3; i++ {
+		fn := fmt.Sprintf("file%d.txt", i)
+		code, _ := uploadFile(t, url, fn, body, map[string]string{"X-File-Checksum": cs})
+		if code != 200 {
+			t.Fatalf("upload %s: %d", fn, code)
+		}
+	}
+
+	resp, err := http.Get(url + "/api/files?offset=1&limit=1")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Files  []any `json:"files"`
+		Offset int   `json:"offset"`
+		Limit  int   `json:"limit"`
+		Total  int   `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Offset != 1 {
+		t.Fatalf("offset: expected 1, got %d", result.Offset)
+	}
+	if result.Limit != 1 {
+		t.Fatalf("limit: expected 1, got %d", result.Limit)
+	}
+	if result.Total != 3 {
+		t.Fatalf("total: expected 3, got %d", result.Total)
+	}
+	if len(result.Files) != 1 {
+		t.Fatalf("files: expected 1, got %d", len(result.Files))
+	}
+}
+
+func TestListFiles_Pagination_Unlimited(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	body := []byte("data")
+	cs := sha256hex(body)
+	for i := 0; i < 3; i++ {
+		code, _ := uploadFile(t, url, fmt.Sprintf("f%d.txt", i), body, map[string]string{"X-File-Checksum": cs})
+		if code != 200 {
+			t.Fatalf("upload: %d", code)
+		}
+	}
+
+	// 不传分页参数——向后兼容
+	resp, err := http.Get(url + "/api/files")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Files  []any `json:"files"`
+		Total  int   `json:"total"`
+		Offset int   `json:"offset"`
+		Limit  int   `json:"limit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 至少 3 个文件
+	if result.Total < 3 {
+		t.Fatalf("total: expected >= 3, got %d", result.Total)
+	}
+	if result.Offset != 0 {
+		t.Fatalf("offset: expected 0, got %d", result.Offset)
+	}
+	if result.Limit != 0 {
+		t.Fatalf("limit: expected 0 (unlimited), got %d", result.Limit)
+	}
+	if len(result.Files) < 3 {
+		t.Fatalf("files: expected >= 3, got %d", len(result.Files))
+	}
+}
+
 // ---- 路由相关 ----
 
 func TestRedirectRoot(t *testing.T) {
@@ -573,6 +762,7 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	mux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
 	mux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
 	mux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
+	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.HandleFunc("GET /", h.webRedirect)

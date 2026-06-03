@@ -24,7 +24,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 	for i, c := range cmds {
 		names[i] = c.Use
 	}
-	for _, want := range []string{"upload", "download", "delete", "list", "tunnel", "genkey", "config", "version"} {
+	for _, want := range []string{"upload", "download", "delete", "list", "search", "tunnel", "genkey", "config", "version"} {
 		found := false
 		for _, name := range names {
 			if strings.HasPrefix(name, want) {
@@ -154,6 +154,20 @@ func TestStatCmd(t *testing.T) {
 	}
 	if err := statCmd.Args(statCmd, []string{"f.txt"}); err != nil {
 		t.Errorf("stat with 1 arg should be ok: %v", err)
+	}
+}
+
+// ---- search command ----
+
+func TestSearchCmd(t *testing.T) {
+	if searchCmd.Use != "search <keyword>" {
+		t.Errorf("searchCmd.Use = %q", searchCmd.Use)
+	}
+	if err := searchCmd.Args(searchCmd, []string{}); err == nil {
+		t.Error("search should require exactly 1 arg")
+	}
+	if err := searchCmd.Args(searchCmd, []string{"keyword"}); err != nil {
+		t.Errorf("search with 1 arg should be ok: %v", err)
 	}
 }
 

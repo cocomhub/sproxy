@@ -23,6 +23,24 @@ import (
 	"github.com/cocomhub/sproxy/web"
 )
 
+// parsePagination 从请求查询参数中解析 offset 和 limit。
+// offset 默认 0，limit 为 0 表示不限。
+func parsePagination(r *http.Request) (offset, limit int) {
+	if o := r.URL.Query().Get("offset"); o != "" {
+		fmt.Sscanf(o, "%d", &offset)
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	return
+}
+
 type Handlers struct {
 	cfgPtr        *atomic.Pointer[Config]
 	version       string
@@ -60,6 +78,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	localMux.HandleFunc("HEAD /api/files/stat", h.stat)
 	localMux.HandleFunc("POST /mkdir", h.mkdir)
 	localMux.HandleFunc("POST /rmdir", h.rmdir)
+	localMux.HandleFunc("GET /api/files/search", h.searchFiles)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -88,6 +107,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
 	mux.HandleFunc("POST /mkdir", h.authMiddleware(h.mkdir))
 	mux.HandleFunc("POST /rmdir", h.authMiddleware(h.rmdir))
+	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.Handle("POST /tunnel", tunnelHandler)
@@ -399,6 +419,13 @@ type fileInfo struct {
 	IsDir    bool   `json:"is_dir"`   // 是否为目录
 }
 
+type listResponse struct {
+	Files  []fileInfo `json:"files"`
+	Total  int        `json:"total"`
+	Offset int        `json:"offset"`
+	Limit  int        `json:"limit"`
+}
+
 func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 
@@ -413,10 +440,13 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 		targetDir = filepath.Join(cfg.UploadsDir, subdir)
 	}
 
+	// 分页参数
+	offset, limit := parsePagination(r)
+
 	entries, err := os.ReadDir(targetDir)
 	h.logger.Info("读取目录", "dir", targetDir)
 	if os.IsNotExist(err) {
-		sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+		sendJSONResponse(w, listResponse{Files: []fileInfo{}, Total: 0, Offset: offset, Limit: limit}, http.StatusOK)
 		return
 	}
 	if err != nil {
@@ -426,12 +456,27 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	csMap := h.checksumStore.GetAll()
+	total := 0
 	files := make([]fileInfo, 0, len(entries))
+	skipped := 0
 	for _, e := range entries {
 		// 跳过 .checksums.json 和 .__chunked__
 		if e.Name() == ".checksums.json" || e.Name() == chunkedDirName {
 			continue
 		}
+		total++
+
+		// 分页：跳过 offset 之前的条目
+		if skipped < offset {
+			skipped++
+			continue
+		}
+
+		// 达到 limit 后停止收集（但继续计数 total）
+		if limit > 0 && len(files) >= limit {
+			continue
+		}
+
 		if e.IsDir() {
 			files = append(files, fileInfo{
 				Name:  e.Name(),
@@ -459,11 +504,73 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		files = append(files, fi)
 	}
-	sendJSONResponse(w, map[string]any{"files": files}, http.StatusOK)
+	sendJSONResponse(w, listResponse{Files: files, Total: total, Offset: offset, Limit: limit}, http.StatusOK)
 }
 
 func (h *Handlers) webRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/ui/", http.StatusMovedPermanently)
+}
+
+// searchFiles 处理 GET /api/files/search?q=keyword。
+// 递归搜索 uploads_dir 下文件名包含 q 的文件，不区分大小写。
+// 返回与 listFiles 相同的 fileInfo 结构。
+func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+		return
+	}
+	qLower := strings.ToLower(q)
+
+	cfg := h.cfgPtr.Load()
+	csMap := h.checksumStore.GetAll()
+
+	var results []fileInfo
+	if err := filepath.WalkDir(cfg.UploadsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip inaccessible entries
+		}
+		rel, _ := filepath.Rel(cfg.UploadsDir, path)
+		if rel == "." {
+			return nil
+		}
+		// 跳过内部目录
+		if d.Name() == ".checksums.json" || d.Name() == chunkedDirName {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.Contains(strings.ToLower(d.Name()), qLower) {
+			return nil
+		}
+		if d.IsDir() {
+			results = append(results, fileInfo{
+				Name:  filepath.ToSlash(rel),
+				IsDir: true,
+			})
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		fi := fileInfo{
+			Name:    filepath.ToSlash(rel),
+			Size:    info.Size(),
+			ModTime: info.ModTime().UnixNano(),
+		}
+		if cs, ok := csMap[filepath.ToSlash(rel)]; ok {
+			fi.Checksum = cs
+		}
+		results = append(results, fi)
+		return nil
+	}); err != nil {
+		h.logger.Error("搜索文件失败", "error", err.Error())
+		sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusInternalServerError)
+		return
+	}
+	sendJSONResponse(w, map[string]any{"files": results}, http.StatusOK)
 }
 
 // rename 处理 POST /rename?from=<old>&to=<new>。

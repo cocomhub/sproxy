@@ -97,6 +97,7 @@ func init() {
 	rootCmd.AddCommand(downloadCmd)
 	rootCmd.AddCommand(deleteCmd)
 	rootCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(tunnelCmd)
 	rootCmd.AddCommand(genkeyCmd)
 	rootCmd.AddCommand(configCmd)

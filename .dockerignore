@@ -1,0 +1,25 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Build artifacts
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp
+*.temp
+
+# Config (user-specific)
+config.yaml
+*.local.yaml
