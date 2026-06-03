@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/server"
@@ -306,4 +307,120 @@ func TestConcurrent_RenameAndDelete(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// ---------- 辅助函数 ----------
+
+func sha256hex(b []byte) string {
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+// ---------- 混沌测试（崩溃恢复） ----------
+
+func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	// 阶段1: 创建 session 并上传部分分块
+	us1 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+
+	fileData := bytes.Repeat([]byte("ChaosTest"), 2048)
+	fileChecksum := sha256hex(fileData)
+	chunkSize := int64(4096)
+	totalChunks := 4
+
+	us1.CreateSession("crash-test-id", "crash-recover.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum, 0)
+	for i := 0; i < 2; i++ {
+		chunkData := fileData[i*int(chunkSize) : (i+1)*int(chunkSize)]
+		chunkCS := sha256hex(chunkData)
+
+		chunkDir := filepath.Join(tmpDir, ".__chunked__", "crash-test-id")
+		os.MkdirAll(chunkDir, 0755)
+		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), chunkData, 0644)
+
+		us1.MarkChunkReceived("crash-test-id", i, chunkCS)
+	}
+	us1.Stop() // 模拟 crash
+
+	// 阶段2: 新实例 recover
+	us2 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	defer us2.Stop()
+
+	s := us2.GetSession("crash-test-id")
+	if s == nil {
+		t.Fatal("session should be recovered after crash")
+	}
+	if !s.ReceivedChunks[0] || !s.ReceivedChunks[1] {
+		t.Fatal("chunks 0 and 1 should be recovered")
+	}
+	if s.ReceivedChunks[2] || s.ReceivedChunks[3] {
+		t.Fatal("chunks 2 and 3 should not be marked")
+	}
+
+	// 上传剩余分块
+	for i := 2; i < totalChunks; i++ {
+		start := i * int(chunkSize)
+		end := start + int(chunkSize)
+		chunkData := fileData[start:end]
+		chunkCS := sha256hex(chunkData)
+		chunkDir := filepath.Join(tmpDir, ".__chunked__", "crash-test-id")
+		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), chunkData, 0644)
+		us2.MarkChunkReceived("crash-test-id", i, chunkCS)
+	}
+
+	if !us2.AllChunksReceived("crash-test-id") {
+		t.Fatal("all chunks should be received after resume")
+	}
+}
+
+func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	us1 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1.CreateSession("partial-id", "partial-recover.bin", 8192, 4096, 2, strings.Repeat("x", 64), 0)
+	us1.Stop()
+
+	// 手动写入 chunk 文件但不调用 MarkChunkReceived (模拟 crash)
+	chunkDir := filepath.Join(tmpDir, ".__chunked__", "partial-id")
+	os.MkdirAll(chunkDir, 0755)
+
+	for i := 0; i < 2; i++ {
+		data := bytes.Repeat([]byte{byte(i)}, 4096)
+		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), data, 0644)
+	}
+
+	us2 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	defer us2.Stop()
+
+	s := us2.GetSession("partial-id")
+	if s == nil {
+		t.Fatal("session should be recovered")
+	}
+	t.Logf("recovered session: received=%v", s.ReceivedChunks)
+}
+
+func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	cs := server.NewChecksumStore(tmpDir, nil)
+	cs.Set("k1", "v1")
+	cs.Set("k2", "v2")
+
+	// 模拟 crash: 创建一个 .tmp 残留文件
+	tmpFile := filepath.Join(tmpDir, ".checksums.json.tmp")
+	os.WriteFile(tmpFile, []byte(`{"stale":"data"}`), 0644)
+
+	// 新实例: 应清理 .tmp 并正确加载已持久化的 .json
+	cs2 := server.NewChecksumStore(tmpDir, nil)
+	all := cs2.GetAll()
+	if len(all) != 2 {
+		t.Fatalf("expected 2 entries, got %d; tmp residue was not cleaned", len(all))
+	}
+	// 确认 .tmp 已清理
+	if _, err := os.Stat(tmpFile); err == nil {
+		t.Fatal(".tmp should be cleaned up on startup")
+	}
 }
