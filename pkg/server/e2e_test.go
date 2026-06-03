@@ -4,14 +4,17 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -189,4 +192,118 @@ func TestE2E_RangeDownload(t *testing.T) {
 			t.Fatalf("byte %d mismatch: want %d, got %d", i, byte(10+i), buf[i])
 		}
 	}
+}
+
+// ---------- 并发测试 ----------
+
+func TestConcurrent_UploadDifferentFiles(t *testing.T) {
+	t.Parallel()
+	url, _ := startTestServer(t)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 20)
+
+	for i := range 20 {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			srcDir := t.TempDir()
+			data := []byte(fmt.Sprintf("concurrent file %d content", n))
+			srcPath := filepath.Join(srcDir, fmt.Sprintf("f%d.txt", n))
+			if err := os.WriteFile(srcPath, data, 0644); err != nil {
+				errCh <- err
+				return
+			}
+			c := client.NewFileClient(url)
+			if _, err := c.Upload(context.Background(), srcPath, fmt.Sprintf("f%d.txt", n)); err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent upload error: %v", err)
+		}
+	}
+}
+
+func TestConcurrent_UploadSameFile(t *testing.T) {
+	t.Parallel()
+	url, _ := startTestServer(t)
+
+	srcDir := t.TempDir()
+	data := []byte("same content for all uploads")
+	srcPath := filepath.Join(srcDir, "same.txt")
+	if err := os.WriteFile(srcPath, data, 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	successCount := int32(0)
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := client.NewFileClient(url)
+			if result, err := c.Upload(context.Background(), srcPath, "same.txt"); err == nil && result.Success {
+				atomic.AddInt32(&successCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if successCount < 1 {
+		t.Fatal("at least one upload should succeed")
+	}
+	c := client.NewFileClient(url)
+	outDir := t.TempDir()
+	outPath := filepath.Join(outDir, "same.txt")
+	if err := c.Download(context.Background(), "same.txt", outPath); err != nil {
+		t.Fatalf("download after concurrent: %v", err)
+	}
+	got, _ := os.ReadFile(outPath)
+	if !bytes.Equal(got, data) {
+		t.Fatal("downloaded content mismatch after concurrent upload")
+	}
+}
+
+func TestConcurrent_RenameAndDelete(t *testing.T) {
+	t.Parallel()
+	url, _ := startTestServer(t)
+
+	srcDir := t.TempDir()
+	data := []byte("concurrent rename/delete target")
+	srcPath := filepath.Join(srcDir, "target.txt")
+	if err := os.WriteFile(srcPath, data, 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	c := client.NewFileClient(url)
+	if _, err := c.Upload(context.Background(), srcPath, "target.txt"); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			info, err := c.Stat(context.Background(), "target.txt")
+			if err != nil {
+				return
+			}
+			_ = c.Rename(context.Background(), "target.txt", "moved.txt", info.Checksum)
+		}()
+	}
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = c.Delete(context.Background(), "target.txt", "")
+		}()
+	}
+	wg.Wait()
 }
