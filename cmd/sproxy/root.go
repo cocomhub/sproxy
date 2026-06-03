@@ -167,6 +167,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 		if keyFile == "" {
 			keyFile = "certs/_wildcard.sproxy.local-key.pem"
 		}
+		if cfg.TLS.AutoTLS {
+			if _, err := os.Stat(certFile); os.IsNotExist(err) {
+				slog.Info("自动生成自签证书", "cert", certFile, "key", keyFile)
+				if err := server.GenerateSelfSignedCert(certFile, keyFile); err != nil {
+					return fmt.Errorf("自动生成自签证书失败: %w", err)
+				}
+			}
+		}
 		slog.Info("TLS enabled", "cert", certFile, "key", keyFile)
 		if err := s.ListenAndServeTLS(certFile, keyFile); err != nil {
 			if err == http.ErrServerClosed {

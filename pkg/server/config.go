@@ -18,6 +18,7 @@ type TLSConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
+	AutoTLS  bool   `yaml:"auto_tls"`
 }
 
 type RateLimitConfig struct {
@@ -64,6 +65,9 @@ func Default() *Config {
 		RateLimit: RateLimitConfig{
 			Requests: 10,
 			Window:   time.Second,
+		},
+		TLS: TLSConfig{
+			AutoTLS: false,
 		},
 		ChunkSize:        size.DefaultChunkSize,
 		UploadSessionTTL: 24 * time.Hour,

@@ -1,0 +1,162 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# v2.8+ schema
+version: 2
+
+project_name: sproxy
+
+before:
+  hooks:
+    - go mod tidy
+    - go fmt ./...
+
+builds:
+  - id: sproxy
+    main: ./cmd/sproxy
+    binary: sproxy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -w -s
+      - -X main.Version={{ .Version }}
+      - -X main.BuildAt={{ .Date }}
+
+  - id: sclient
+    main: ./cmd/sclient
+    binary: sclient
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -w -s
+      - -X main.Version={{ .Version }}
+      - -X main.BuildAt={{ .Date }}
+
+archives:
+  - id: default
+    builds:
+      - sproxy
+      - sclient
+    formats: ["tar.gz"]
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - config.example.yaml
+      - README.md
+      - LICENSE
+      - docs/*.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ .Version }}-SNAPSHOT-{{ .ShortCommit }}"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: "新功能"
+      regexp: "^feat(\\s*\\(.*\\))?:"
+      order: 0
+    - title: "缺陷修复"
+      regexp: "^fix(\\s*\\(.*\\))?:"
+      order: 1
+    - title: "性能优化"
+      regexp: "^perf(\\s*\\(.*\\))?:"
+      order: 2
+    - title: "代码重构"
+      regexp: "^refactor(\\s*\\(.*\\))?:"
+      order: 3
+    - title: "其他"
+      order: 999
+
+release:
+  github:
+    owner: cocomhub
+    name: sproxy
+  draft: true
+  prerelease: auto
+  header: |
+    ## sproxy {{ .Version }} ({{ .Date }})
+
+    发布的二进制包含 sproxy 服务端和 sclient 客户端。
+
+    ### 安装方式
+
+    ```bash
+    # 方式一：下载预编译二进制
+    # 从 Assets 选择对应平台下载，解压后即可使用
+
+    # 方式二：Go install
+    go install github.com/cocomhub/sproxy/cmd/sproxy@{{ .Tag }}
+    go install github.com/cocomhub/sproxy/cmd/sclient@{{ .Tag }}
+    ```
+
+  footer: |
+    **完整变更日志**: https://github.com/cocomhub/sproxy/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+#nfpm:
+#  - id: sproxy
+#    package_name: sproxy
+#    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+#    homepage: https://github.com/cocomhub/sproxy
+#    description: 轻量文件上传/下载/删除服务 + 加密隧道
+#    maintainer: Cocomhub Authors
+#    license: Apache-2.0
+#    formats:
+#      - deb
+#      - rpm
+#    bindir: /usr/local/bin
+#    files:
+#      - config.example.yaml: /etc/sproxy/config.yaml
+#      - docs/*.md: /usr/share/doc/sproxy/
+
+#brews:
+#  - name: sproxy
+#    repository:
+#      owner: cocomhub
+#      name: homebrew-tap
+#    commit_msg_template: "chore(brew): update sproxy {{ .Tag }}"
+#    directory: Formula
+#    homepage: https://github.com/cocomhub/sproxy
+#    description: 轻量文件上传/下载/删除服务 + 加密隧道
+#    license: Apache-2.0
+#    test: |
+#      system "#{bin}/sproxy --version"
+#    install: |
+#      bin.install "sproxy"
+#      bin.install "sclient"
+
+#dockers:
+#  - image_templates:
+#      - "ghcr.io/cocomhub/sproxy:{{ .Version }}"
+#      - "ghcr.io/cocomhub/sproxy:latest"
+#    dockerfile: Dockerfile
+#    build_flag_templates:
+#      - "--pull"
+#      - "--label=org.opencontainers.image.created={{ .Date }}"
+#      - "--label=org.opencontainers.image.title=sproxy"
+#      - "--label=org.opencontainers.image.version={{ .Version }}"
+#      - "--label=org.opencontainers.image.licenses=Apache-2.0"
