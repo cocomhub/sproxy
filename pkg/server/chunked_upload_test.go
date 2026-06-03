@@ -5,6 +5,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/client"
 )
 
 // newTestServerWithChunked 启动一个包含分块上传/下载路由的测试服务器。
@@ -48,6 +51,8 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
+	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
 	mux.HandleFunc("POST /upload/init", h.authMiddleware(h.uploadInit))
 	mux.HandleFunc("POST /upload/chunk", h.authMiddleware(h.uploadChunk))
 	mux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
@@ -714,3 +719,223 @@ func TestUploadStore_MissingChunks(t *testing.T) {
 
 // ---- 通用 SHA-256 辅助 ----
 // sha256hex 定义在 integration_test.go
+
+// ---- L3: 分块上传端到端链路测试 ----
+
+func TestChunkedUpload_MultiChunkLargeFile(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	fileData := bytes.Repeat([]byte("LargeFileData!"), 4096) // ~52 KiB
+	fileChecksum := sha256hex(fileData)
+
+	chunkSize := int64(4096)
+	totalChunks := (len(fileData) + int(chunkSize) - 1) / int(chunkSize)
+
+	uploadID := initSessionEx(t, url, "large-chunked.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum)
+
+	for i := range totalChunks {
+		start := i * int(chunkSize)
+		end := min(start+int(chunkSize), len(fileData))
+		chunkData := fileData[start:end]
+		chunkCS := sha256hex(chunkData)
+		uploadChunk(t, url, uploadID, i, chunkCS, chunkData)
+	}
+
+	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
+	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result ChunkCompleteResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if !result.Success {
+		t.Fatalf("complete failed: %v", result)
+	}
+	if result.FileChecksum != fileChecksum {
+		t.Fatalf("checksum mismatch: got %s, want %s", result.FileChecksum, fileChecksum)
+	}
+}
+
+func TestChunkedUpload_ResumeAfterInterrupt(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	fileData := bytes.Repeat([]byte("ResumeMe"), 3000) // ~24 KiB, 6 chunks at 4KiB
+	fileChecksum := sha256hex(fileData)
+	chunkSize := int64(4096)
+	totalChunks := (len(fileData) + int(chunkSize) - 1) / int(chunkSize)
+
+	uploadID := initSessionEx(t, url, "resume-test.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum)
+
+	// 只上传前 3 个分块
+	for i := range 3 {
+		start := i * int(chunkSize)
+		end := min(start+int(chunkSize), len(fileData))
+		chunkData := fileData[start:end]
+		uploadChunk(t, url, uploadID, i, sha256hex(chunkData), chunkData)
+	}
+
+	// 查询状态
+	statusResp, err := http.Get(url + "/upload/status?upload_id=" + uploadID)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	var status ChunkStatusResponse
+	json.NewDecoder(statusResp.Body).Decode(&status)
+	statusResp.Body.Close()
+
+	if !status.Success {
+		t.Fatalf("status failed: %v", status)
+	}
+	if len(status.MissingChunks) != totalChunks-3 {
+		t.Fatalf("expected %d missing chunks, got %v", totalChunks-3, status.MissingChunks)
+	}
+
+	// 上传剩余分块
+	for _, idx := range status.MissingChunks {
+		start := idx * int(chunkSize)
+		end := min(start+int(chunkSize), len(fileData))
+		chunkData := fileData[start:end]
+		uploadChunk(t, url, uploadID, idx, sha256hex(chunkData), chunkData)
+	}
+
+	// Complete
+	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
+	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	defer resp.Body.Close()
+	var result ChunkCompleteResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if !result.Success {
+		t.Fatalf("resume complete failed: %v", result)
+	}
+}
+
+func TestChunkedUpload_AlreadyExists_ChecksumMatch(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	body := []byte("existing file content")
+	cs := sha256hex(body)
+	uploadFile(t, url, "existing.txt", body, map[string]string{"X-File-Checksum": cs})
+
+	initReq := map[string]any{
+		"upload_id":     "already-exists-test",
+		"filename":      "existing.txt",
+		"total_size":    len(body),
+		"chunk_size":    4096,
+		"total_chunks":  1,
+		"file_checksum": cs,
+	}
+	initJSON, _ := json.Marshal(initReq)
+	resp, err := http.Post(url+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var initResult ChunkedInitResponse
+	json.NewDecoder(resp.Body).Decode(&initResult)
+	if !initResult.Success {
+		t.Fatalf("expected success for existing file with matching checksum: %v", initResult)
+	}
+	if initResult.UploadID != "already_exists" {
+		t.Fatalf("expected upload_id='already_exists', got %q", initResult.UploadID)
+	}
+}
+
+func TestChunkedUpload_AlreadyExists_ChecksumMismatch(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	body := []byte("original content")
+	uploadFile(t, url, "conflict-chunked.txt", body, map[string]string{
+		"X-File-Checksum": sha256hex(body),
+	})
+
+	initReq := map[string]any{
+		"upload_id":     "conflict-test",
+		"filename":      "conflict-chunked.txt",
+		"total_size":    100,
+		"chunk_size":    4096,
+		"total_chunks":  1,
+		"file_checksum": strings.Repeat("f", 64),
+	}
+	initJSON, _ := json.Marshal(initReq)
+	resp, err := http.Post(url+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+}
+
+func TestChunkedUploadStatus_ByFilename(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	fileData := []byte("status by filename test")
+	fileChecksum := sha256hex(fileData)
+	uploadID := initSession(t, url, "status-by-fn.txt", int64(len(fileData)), fileChecksum)
+
+	uploadChunk(t, url, uploadID, 0, fileChecksum, fileData)
+
+	resp, err := http.Get(url + "/upload/status?filename=status-by-fn.txt")
+	if err != nil {
+		t.Fatalf("status by filename: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var status ChunkStatusResponse
+	json.NewDecoder(resp.Body).Decode(&status)
+	if !status.Success {
+		t.Fatalf("status by filename failed: %v", status)
+	}
+	if status.UploadID != uploadID {
+		t.Fatalf("expected upload_id %s, got %s", uploadID, status.UploadID)
+	}
+}
+
+func TestChunkedDigestConsistency(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	data := []byte("consistency check across upload modes")
+	cs := sha256hex(data)
+
+	// 方式1: 普通上传
+	uploadFile(t, url, "consistency-normal.bin", data, map[string]string{"X-File-Checksum": cs})
+
+	// 方式2: 分块上传
+	chunkSize := int64(4096)
+	totalChunks := 1
+	uploadID := initSessionEx(t, url, "consistency-chunked.bin", int64(len(data)), chunkSize, totalChunks, cs)
+	uploadChunk(t, url, uploadID, 0, cs, data)
+	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
+	http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+
+	c := client.NewFileClient(url)
+	outDir := t.TempDir()
+
+	out1 := filepath.Join(outDir, "normal.bin")
+	if err := c.Download(context.Background(), "consistency-normal.bin", out1); err != nil {
+		t.Fatalf("download normal: %v", err)
+	}
+	out2 := filepath.Join(outDir, "chunked.bin")
+	if err := c.Download(context.Background(), "consistency-chunked.bin", out2); err != nil {
+		t.Fatalf("download chunked: %v", err)
+	}
+
+	data1, _ := os.ReadFile(out1)
+	data2, _ := os.ReadFile(out2)
+	if !bytes.Equal(data1, data2) {
+		t.Fatal("normal upload and chunked upload produced different content")
+	}
+}
