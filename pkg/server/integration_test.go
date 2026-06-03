@@ -600,3 +600,215 @@ func makeReadOnlyDir(t *testing.T) (string, func()) {
 	}
 	return d, func() {}
 }
+
+// ---- healthz / version ----
+
+func TestHealthz_ReturnsOK(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	resp, err := http.Get(url + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "OK" {
+		t.Fatalf("expected 'OK', got %q", body)
+	}
+}
+
+func TestVersion_ReturnsInfo(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	resp, err := http.Get(url + "/version")
+	if err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Version:") {
+		t.Fatalf("expected version info, got %q", body)
+	}
+}
+
+// ---- mkdir ----
+
+func TestMkdir_HappyPath(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("POST", url+"/mkdir?dirname=testdir", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	dirPath := filepath.Join(cfgPtr.Load().UploadsDir, "testdir")
+	if info, err := os.Stat(dirPath); err != nil || !info.IsDir() {
+		t.Fatalf("directory should exist: %v", err)
+	}
+}
+
+func TestMkdir_MissingDirname(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("POST", url+"/mkdir", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestMkdir_PathTraversal(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("POST", url+"/mkdir?dirname=../../escape", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// ---- rmdir ----
+
+func TestRmdir_HappyPath(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	uploadsDir := cfgPtr.Load().UploadsDir
+	dirPath := filepath.Join(uploadsDir, "toremove")
+	if err := os.Mkdir(dirPath, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=toremove", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(dirPath); !os.IsNotExist(err) {
+		t.Fatal("directory should be removed")
+	}
+}
+
+func TestRmdir_WithFiles_AlsoDeletesChecksums(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	uploadsDir := cfgPtr.Load().UploadsDir
+	subDir := filepath.Join(uploadsDir, "subdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	body := []byte("hello")
+	uploadFile(t, url, "subdir/a.txt", body, map[string]string{
+		"X-File-Checksum": sha256hex(body),
+		"X-File-Path":     "subdir/a.txt",
+	})
+
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=subdir", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(subDir); !os.IsNotExist(err) {
+		t.Fatal("directory should be removed")
+	}
+	listResp, err := http.Get(url + "/api/files")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	defer listResp.Body.Close()
+	var listResult struct {
+		Files []fileInfo `json:"files"`
+	}
+	json.NewDecoder(listResp.Body).Decode(&listResult)
+	for _, f := range listResult.Files {
+		if f.Name == "a.txt" || strings.HasPrefix(f.Name, "subdir/") {
+			t.Fatalf("file from deleted subdir should not appear in root listing: %s", f.Name)
+		}
+	}
+}
+
+func TestRmdir_NonExistent(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=nonexistent", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestRmdir_OnFileReturns400(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("I am a file")
+	uploadFile(t, url, "notadir.txt", body, map[string]string{
+		"X-File-Checksum": sha256hex(body),
+	})
+
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=notadir.txt", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRmdir_PathTraversal(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=../../escape", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
