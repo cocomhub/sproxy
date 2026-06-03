@@ -33,13 +33,14 @@ type ChunkedUploadSession struct {
 // UploadStore 管理分块上传会话的持久化与并发安全。
 type UploadStore struct {
 	mu         sync.RWMutex
-	baseDir    string // <uploadsDir>/.__chunked__/
+	writeMu    sync.Mutex     // 串行化 writeSessionJSON，防止 Windows rename 竞争
+	baseDir    string         // <uploadsDir>/.__chunked__/
 	sessions   map[string]*ChunkedUploadSession
-	persistCh  chan string   // uploadID → 异步持久化
-	stopCh     chan struct{} // 关闭后台 goroutine
-	stopOnce   sync.Once     // 保证 Stop 幂等
+	persistCh  chan string    // uploadID → 异步持久化
+	stopCh     chan struct{}  // 关闭后台 goroutine
+	stopOnce   sync.Once      // 保证 Stop 幂等
 	wg         sync.WaitGroup
-	sessionTTL time.Duration // 未完成上传会话的保留时间
+	sessionTTL time.Duration  // 未完成上传会话的保留时间
 	logger     *slog.Logger
 }
 
@@ -296,7 +297,11 @@ func (us *UploadStore) persistSession(uploadID string) {
 }
 
 // writeSessionJSON 原子写入 session.json。
+// 使用 writeMu 串行化写入，防止 Windows 上 os.CreateTemp + os.Rename 并发竞争。
 func (us *UploadStore) writeSessionJSON(s *ChunkedUploadSession) error {
+	us.writeMu.Lock()
+	defer us.writeMu.Unlock()
+
 	data, err := json.Marshal(s)
 	if err != nil {
 		return fmt.Errorf("序列化 session 失败: %w", err)
@@ -305,12 +310,29 @@ func (us *UploadStore) writeSessionJSON(s *ChunkedUploadSession) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("创建目录失败: %w", err)
 	}
-	tmpPath := filepath.Join(dir, "session.json.tmp")
 	finalPath := filepath.Join(dir, "session.json")
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	tmpFile, err := os.CreateTemp(dir, "session.json.tmp.*")
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("关闭临时文件失败: %w", err)
+	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
+		// Windows cannot rename over an existing file; remove and retry.
+		if rmErr := os.Remove(finalPath); rmErr == nil {
+			if err2 := os.Rename(tmpPath, finalPath); err2 == nil {
+				return nil
+			}
+		}
+		os.Remove(tmpPath)
 		return fmt.Errorf("重命名失败: %w", err)
 	}
 	return nil

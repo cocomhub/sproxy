@@ -216,7 +216,19 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tempFile, err := os.Create(filePath + ".tmp")
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		logger.Error("创建目录失败", "error", err.Error(), "filename", remotePath)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
+		return
+	}
+	tempFile, err := os.CreateTemp(dir, filepath.Base(filePath)+".tmp.*")
+	if err != nil {
+		logger.Error("创建文件失败", "error", err.Error(), "filename", remotePath)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建文件失败"}, http.StatusInternalServerError)
+		return
+	}
+	tmpPath := tempFile.Name()
 	if err != nil {
 		logger.Error("创建文件失败", "error", err.Error(), "filename", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建文件失败"}, http.StatusInternalServerError)
@@ -226,7 +238,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	// rename 成功后 .tmp 已不在原位，os.Remove 会无声失败，不影响成品文件。
 	// 不使用 defer tempFile.Close()，因为正常路径需要在 rename 前显式 Close，
 	// 双 close 在 Windows 上有句柄复用风险。下方错误路径手动 Close 后再 return。
-	defer os.Remove(filePath + ".tmp")
+	defer os.Remove(tmpPath)
 
 	// 边写边算 SHA-256，复用同一份字节流
 	sha256Hash := sha256.New()
@@ -251,11 +263,18 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.Rename(filePath+".tmp", filePath); err != nil {
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		// Windows cannot rename over an existing file; remove and retry.
+		if rmErr := os.Remove(filePath); rmErr == nil {
+			if err2 := os.Rename(tmpPath, filePath); err2 == nil {
+				goto afterRename
+			}
+		}
 		logger.Error("重命名文件失败", "error", err.Error(), "filename", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "重命名文件失败"}, http.StatusInternalServerError)
 		return
 	}
+afterRename:
 
 	w.Header().Set("X-File-Checksum", serverChecksum)
 	h.checksumStore.Set(remotePath, serverChecksum)
