@@ -58,6 +58,8 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	mux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
 	mux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
 	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
+	mux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
+	mux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /", h.webRedirect)
 
@@ -504,7 +506,7 @@ func TestListFiles_Pagination_Offset(t *testing.T) {
 	// 上传 3 个文件
 	body := []byte("data")
 	cs := sha256hex(body)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		fn := fmt.Sprintf("file%d.txt", i)
 		code, _ := uploadFile(t, url, fn, body, map[string]string{"X-File-Checksum": cs})
 		if code != 200 {
@@ -550,7 +552,7 @@ func TestListFiles_Pagination_Unlimited(t *testing.T) {
 
 	body := []byte("data")
 	cs := sha256hex(body)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		code, _ := uploadFile(t, url, fmt.Sprintf("f%d.txt", i), body, map[string]string{"X-File-Checksum": cs})
 		if code != 200 {
 			t.Fatalf("upload: %d", code)
@@ -587,6 +589,181 @@ func TestListFiles_Pagination_Unlimited(t *testing.T) {
 	}
 	if len(result.Files) < 3 {
 		t.Fatalf("files: expected >= 3, got %d", len(result.Files))
+	}
+}
+
+// ---- sort ----
+
+func TestListFiles_SortByName(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	body := []byte("data")
+	cs := sha256hex(body)
+	for _, name := range []string{"b.txt", "a.txt", "c.txt"} {
+		code, _ := uploadFile(t, url, name, body, map[string]string{"X-File-Checksum": cs})
+		if code != 200 {
+			t.Fatalf("upload %s: %d", name, code)
+		}
+	}
+
+	resp, err := http.Get(url + "/api/files?sort=name&order=asc")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Files) < 3 {
+		t.Fatalf("expected >= 3 files, got %d", len(result.Files))
+	}
+	names := make([]string, 0, len(result.Files))
+	for _, f := range result.Files {
+		names = append(names, f.Name)
+	}
+	// a.txt should come before b.txt, and b.txt before c.txt
+	if names[0] != "a.txt" || names[1] != "b.txt" || names[2] != "c.txt" {
+		t.Fatalf("expected sorted [a.txt, b.txt, c.txt], got %v", names)
+	}
+}
+
+func TestListFiles_SortByNameDesc(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	body := []byte("data")
+	cs := sha256hex(body)
+	for _, name := range []string{"a.txt", "c.txt", "b.txt"} {
+		code, _ := uploadFile(t, url, name, body, map[string]string{"X-File-Checksum": cs})
+		if code != 200 {
+			t.Fatalf("upload %s: %d", name, code)
+		}
+	}
+
+	resp, err := http.Get(url + "/api/files?sort=name&order=desc")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	names := make([]string, 0, len(result.Files))
+	for _, f := range result.Files {
+		names = append(names, f.Name)
+	}
+	// c.txt should come before b.txt, b.txt before a.txt
+	if names[0] != "c.txt" || names[1] != "b.txt" || names[2] != "a.txt" {
+		t.Fatalf("expected sorted desc [c.txt, b.txt, a.txt], got %v", names)
+	}
+}
+
+// ---- batch ----
+
+func TestBatchDelete_Success(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	body := []byte("data")
+	cs := sha256hex(body)
+	code, _ := uploadFile(t, url, "a.txt", body, map[string]string{"X-File-Checksum": cs})
+	if code != 200 {
+		t.Fatalf("upload a.txt: expected 200, got %d", code)
+	}
+	code2, _ := uploadFile(t, url, "b.txt", body, map[string]string{"X-File-Checksum": cs})
+	if code2 != 200 {
+		t.Fatalf("upload b.txt: expected 200, got %d", code2)
+	}
+
+	reqBody := fmt.Sprintf(`{"files":[{"filename":"a.txt","checksum":"%s"},{"filename":"b.txt","checksum":"%s"}]}`, cs, cs)
+	req, _ := http.NewRequest("POST", url+"/api/batch/delete", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("batch delete: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Results []struct {
+			Filename string `json:"filename"`
+			Success  bool   `json:"success"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(result.Results))
+	}
+	for _, r := range result.Results {
+		if !r.Success {
+			t.Fatalf("expected success for %s", r.Filename)
+		}
+	}
+}
+
+func TestBatchDelete_ContinueOnError(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	body := []byte("data")
+	cs := sha256hex(body)
+	code, _ := uploadFile(t, url, "exists.txt", body, map[string]string{"X-File-Checksum": cs})
+	if code != 200 {
+		t.Fatalf("upload exists.txt: expected 200, got %d", code)
+	}
+
+	reqBody := fmt.Sprintf(`{"files":[{"filename":"nonexistent.txt","checksum":"%s"},{"filename":"exists.txt","checksum":"%s"}]}`, cs, cs)
+	req, _ := http.NewRequest("POST", url+"/api/batch/delete", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("batch delete: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Results []struct {
+			Filename string `json:"filename"`
+			Success  bool   `json:"success"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(result.Results))
+	}
+	// nonexistent.txt -> success (idempotent delete)
+	if !result.Results[0].Success {
+		t.Fatalf("expected success for nonexistent (idempotent): %+v", result.Results[0])
+	}
+	// exists.txt -> success
+	if !result.Results[1].Success {
+		t.Fatalf("expected success for exists.txt: %+v", result.Results[1])
 	}
 }
 
@@ -763,6 +940,8 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	mux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
 	mux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
 	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
+	mux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
+	mux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.HandleFunc("GET /", h.webRedirect)

@@ -4,6 +4,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -572,6 +573,86 @@ func (c *FileClient) Search(ctx context.Context, q string) ([]FileInfo, error) {
 	}
 
 	return result.Files, nil
+}
+
+// BatchDeleteRequest 批量删除请求体
+type BatchDeleteRequest struct {
+	Files []BatchDeleteFile `json:"files"`
+}
+
+// BatchDeleteFile 单条删除文件
+type BatchDeleteFile struct {
+	Filename string `json:"filename"`
+	Checksum string `json:"checksum"`
+}
+
+// BatchOperationResult 批量操作单条结果
+type BatchOperationResult struct {
+	Filename string `json:"filename"`
+	Success  bool   `json:"success"`
+	Message  string `json:"message"`
+}
+
+// BatchRenameRequest 批量重命名请求体
+type BatchRenameRequest struct {
+	Operations []BatchRenameOp `json:"operations"`
+}
+
+// BatchRenameOp 单条重命名操作
+type BatchRenameOp struct {
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Checksum string `json:"checksum"`
+}
+
+// BatchDelete 批量删除文件。继续处理模式：单条失败不影响其余。
+func (c *FileClient) BatchDelete(ctx context.Context, files []BatchDeleteFile) ([]BatchOperationResult, error) {
+	req := BatchDeleteRequest{Files: files}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("序列化请求失败: %w", err)
+	}
+	resp, err := c.doRequest(ctx, "POST", "/api/batch/delete", bytes.NewReader(body), nil)
+	if err != nil {
+		return nil, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("批量删除失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Results []BatchOperationResult `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+	return result.Results, nil
+}
+
+// BatchRename 批量重命名文件。继续处理模式：单条失败不影响其余。
+func (c *FileClient) BatchRename(ctx context.Context, operations []BatchRenameOp) ([]BatchOperationResult, error) {
+	req := BatchRenameRequest{Operations: operations}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("序列化请求失败: %w", err)
+	}
+	resp, err := c.doRequest(ctx, "POST", "/api/batch/rename", bytes.NewReader(body), nil)
+	if err != nil {
+		return nil, fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("批量重命名失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	var result struct {
+		Results []BatchOperationResult `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+	return result.Results, nil
 }
 
 // TunnelDo 通过加密隧道发送一个 HTTP 请求。

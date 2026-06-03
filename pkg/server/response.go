@@ -60,3 +60,33 @@ func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {
 		slog.Default().Warn("Encode JSON response failed", "error", err)
 	}
 }
+
+// BatchOperationResult 批量操作单条结果
+type BatchOperationResult struct {
+	Filename string `json:"filename"`
+	Success  bool   `json:"success"`
+	Message  string `json:"message"`
+}
+
+// BatchOperationRequest 批量删除请求体
+type BatchDeleteRequest struct {
+	Files []BatchDeleteFile `json:"files"`
+}
+
+// BatchDeleteFile 批量删除中的单条文件
+type BatchDeleteFile struct {
+	Filename string `json:"filename"`
+	Checksum string `json:"checksum"`
+}
+
+// BatchRenameRequest 批量重命名请求体
+type BatchRenameRequest struct {
+	Operations []BatchRenameOp `json:"operations"`
+}
+
+// BatchRenameOp 单条重命名操作
+type BatchRenameOp struct {
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Checksum string `json:"checksum"`
+}

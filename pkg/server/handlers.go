@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -79,6 +81,8 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	localMux.HandleFunc("POST /mkdir", h.mkdir)
 	localMux.HandleFunc("POST /rmdir", h.rmdir)
 	localMux.HandleFunc("GET /api/files/search", h.searchFiles)
+	localMux.HandleFunc("POST /api/batch/delete", h.batchDelete)
+	localMux.HandleFunc("POST /api/batch/rename", h.batchRename)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -87,12 +91,15 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	localMux.HandleFunc("POST /upload/complete", h.uploadComplete)
 	localMux.HandleFunc("GET /download/chunk", h.downloadChunk)
 
-	// 速率限制中间件（仅应用于 tunnel handler）
-	var tunnelHandler http.Handler = tunnel.NewLocalHandler(tunnelKey, requestLogMiddleware(log.With("component", "request"), localMux), log.With("component", "tunnel"))
+	// gzip + 速率限制中间件链
+	var apiHandler http.Handler = localMux
+	apiHandler = GzipMiddleware(log.With("component", "gzip"))(apiHandler)
 	if cfg.RateLimit.Enabled {
 		rl := NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "rate_limiter"))
-		tunnelHandler = rl.Middleware(tunnelHandler)
+		apiHandler = rl.Middleware(apiHandler)
 	}
+
+	var tunnelHandler http.Handler = tunnel.NewLocalHandler(tunnelKey, requestLogMiddleware(log.With("component", "request"), apiHandler), log.With("component", "tunnel"))
 
 	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
 	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
@@ -108,6 +115,8 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("POST /mkdir", h.authMiddleware(h.mkdir))
 	mux.HandleFunc("POST /rmdir", h.authMiddleware(h.rmdir))
 	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
+	mux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
+	mux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.Handle("POST /tunnel", tunnelHandler)
@@ -411,6 +420,145 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, http.StatusOK)
 }
 
+// batchDelete 处理 POST /api/batch/delete。
+// 请求体 JSON：{"files": [{"filename": "...", "checksum": "..."}]}
+// 继续处理模式：单条失败不影响其余文件。
+func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
+	var req BatchDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无法解析请求体: " + err.Error()}, http.StatusBadRequest)
+		return
+	}
+	if len(req.Files) == 0 {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "files 不能为空"}, http.StatusBadRequest)
+		return
+	}
+	cfg := h.cfgPtr.Load()
+	logger := h.logger.With("batch", "delete")
+	results := make([]BatchOperationResult, 0, len(req.Files))
+	for _, f := range req.Files {
+		result := BatchOperationResult{Filename: f.Filename}
+		remotePath, err := ValidateFilePath(f.Filename)
+		if err != nil {
+			result.Message = "无效的文件名: " + err.Error()
+			results = append(results, result)
+			continue
+		}
+		filePath := filepath.Join(cfg.UploadsDir, remotePath)
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			// 文件不存在视为成功（幂等删除）
+			result.Success = true
+			result.Message = "文件不存在（幂等删除）"
+			results = append(results, result)
+			continue
+		}
+		if f.Checksum == "" {
+			result.Message = "缺少 checksum"
+			results = append(results, result)
+			continue
+		}
+		// 校验 checksum
+		valid := verifyFileWithChecksum(filePath, f.Checksum)
+		// 仍然执行删除，但标记校验失败
+		if err := os.Remove(filePath); err != nil {
+			result.Message = "删除失败: " + err.Error()
+		} else {
+			h.checksumStore.Delete(remotePath)
+			result.Success = true
+			result.Message = "删除成功"
+			if !valid {
+				result.Message = "删除成功（checksum 不匹配，文件内容可能已变更）"
+				logger.Warn("删除时 checksum 不匹配", "filename", remotePath)
+			}
+		}
+		results = append(results, result)
+	}
+	sendJSONResponse(w, map[string]any{"results": results}, http.StatusOK)
+}
+
+// batchRename 处理 POST /api/batch/rename。
+// 请求体 JSON：{"operations": [{"from": "...", "to": "...", "checksum": "..."}]}
+// 继续处理模式：单条失败不影响其余操作。
+func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
+	var req BatchRenameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无法解析请求体: " + err.Error()}, http.StatusBadRequest)
+		return
+	}
+	if len(req.Operations) == 0 {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "operations 不能为空"}, http.StatusBadRequest)
+		return
+	}
+	cfg := h.cfgPtr.Load()
+	logger := h.logger.With("batch", "rename")
+	results := make([]BatchOperationResult, 0, len(req.Operations))
+	for _, op := range req.Operations {
+		result := BatchOperationResult{Filename: op.From + " -> " + op.To}
+		from, err := ValidateFilePath(op.From)
+		if err != nil {
+			result.Message = "无效的源路径: " + err.Error()
+			results = append(results, result)
+			continue
+		}
+		to, err := ValidateFilePath(op.To)
+		if err != nil {
+			result.Message = "无效的目标路径: " + err.Error()
+			results = append(results, result)
+			continue
+		}
+		if from == to {
+			result.Success = true
+			result.Message = "源与目标相同，无需移动"
+			results = append(results, result)
+			continue
+		}
+		fromPath := filepath.Join(cfg.UploadsDir, from)
+		toPath := filepath.Join(cfg.UploadsDir, to)
+		if _, err := os.Stat(fromPath); os.IsNotExist(err) {
+			result.Message = "源文件不存在"
+			results = append(results, result)
+			continue
+		}
+		if _, err := os.Stat(toPath); err == nil {
+			result.Message = "目标路径已存在"
+			results = append(results, result)
+			continue
+		}
+		if op.Checksum == "" {
+			result.Message = "缺少 checksum"
+			results = append(results, result)
+			continue
+		}
+		if !verifyFileWithChecksum(fromPath, op.Checksum) {
+			logger.Warn("batch rename checksum 不匹配", "from", op.From)
+			result.Message = "源文件 SHA-256 校验失败"
+			results = append(results, result)
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
+			logger.Error("创建目标父目录失败", "to", to, "error", err.Error())
+			result.Message = "创建父目录失败"
+			results = append(results, result)
+			continue
+		}
+		if err := os.Rename(fromPath, toPath); err != nil {
+			logger.Error("batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
+			result.Message = "重命名失败: " + err.Error()
+			results = append(results, result)
+			continue
+		}
+		h.checksumStore.Rename(from, to)
+		results = append(results, BatchOperationResult{
+			Filename: op.From + " -> " + op.To,
+			Success:  true,
+			Message:  "重命名成功",
+		})
+	}
+	sendJSONResponse(w, map[string]any{"results": results}, http.StatusOK)
+}
+
 type fileInfo struct {
 	Name     string `json:"name"`
 	Size     int64  `json:"size"`
@@ -443,6 +591,13 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	// 分页参数
 	offset, limit := parsePagination(r)
 
+	// 排序参数
+	sortBy := r.URL.Query().Get("sort")
+	sortOrder := r.URL.Query().Get("order")
+	if sortOrder != "desc" {
+		sortOrder = "asc"
+	}
+
 	entries, err := os.ReadDir(targetDir)
 	h.logger.Info("读取目录", "dir", targetDir)
 	if os.IsNotExist(err) {
@@ -456,29 +611,15 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	csMap := h.checksumStore.GetAll()
-	total := 0
-	files := make([]fileInfo, 0, len(entries))
-	skipped := 0
+
+	// 收集所有条目（跳过内部目录）
+	allFiles := make([]fileInfo, 0, len(entries))
 	for _, e := range entries {
-		// 跳过 .checksums.json 和 .__chunked__
 		if e.Name() == ".checksums.json" || e.Name() == chunkedDirName {
 			continue
 		}
-		total++
-
-		// 分页：跳过 offset 之前的条目
-		if skipped < offset {
-			skipped++
-			continue
-		}
-
-		// 达到 limit 后停止收集（但继续计数 total）
-		if limit > 0 && len(files) >= limit {
-			continue
-		}
-
 		if e.IsDir() {
-			files = append(files, fileInfo{
+			allFiles = append(allFiles, fileInfo{
 				Name:  e.Name(),
 				IsDir: true,
 			})
@@ -493,7 +634,6 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 			Size:    info.Size(),
 			ModTime: info.ModTime().UnixNano(),
 		}
-		// 使用完整相对路径查找 checksum
 		relName := e.Name()
 		if subdir := r.URL.Query().Get("subdir"); subdir != "" {
 			cleaned, _ := ValidateFilePath(subdir)
@@ -502,8 +642,47 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 		if cs, ok := csMap[relName]; ok {
 			fi.Checksum = cs
 		}
-		files = append(files, fi)
+		allFiles = append(allFiles, fi)
 	}
+
+	// 排序
+	switch sortBy {
+	case "size":
+		sort.SliceStable(allFiles, func(i, j int) bool {
+			if sortOrder == "desc" {
+				return allFiles[i].Size > allFiles[j].Size
+			}
+			return allFiles[i].Size < allFiles[j].Size
+		})
+	case "time":
+		sort.SliceStable(allFiles, func(i, j int) bool {
+			if sortOrder == "desc" {
+				return allFiles[i].ModTime > allFiles[j].ModTime
+			}
+			return allFiles[i].ModTime < allFiles[j].ModTime
+		})
+	default: // "name"
+		if sortOrder == "desc" {
+			sort.SliceStable(allFiles, func(i, j int) bool {
+				return allFiles[i].Name > allFiles[j].Name
+			})
+		} else {
+			sort.SliceStable(allFiles, func(i, j int) bool {
+				return allFiles[i].Name < allFiles[j].Name
+			})
+		}
+	}
+
+	total := len(allFiles)
+
+	// 分页
+	var files []fileInfo
+	start := min(offset, total)
+	end := total
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	files = allFiles[start:end]
 	sendJSONResponse(w, listResponse{Files: files, Total: total, Offset: offset, Limit: limit}, http.StatusOK)
 }
 
