@@ -33,14 +33,14 @@ type ChunkedUploadSession struct {
 // UploadStore 管理分块上传会话的持久化与并发安全。
 type UploadStore struct {
 	mu         sync.RWMutex
-	writeMu    sync.Mutex     // 串行化 writeSessionJSON，防止 Windows rename 竞争
-	baseDir    string         // <uploadsDir>/.__chunked__/
+	writeMu    sync.Mutex // 串行化 writeSessionJSON，防止 Windows rename 竞争
+	baseDir    string     // <uploadsDir>/.__chunked__/
 	sessions   map[string]*ChunkedUploadSession
-	persistCh  chan string    // uploadID → 异步持久化
-	stopCh     chan struct{}  // 关闭后台 goroutine
-	stopOnce   sync.Once      // 保证 Stop 幂等
+	persistCh  chan string   // uploadID → 异步持久化
+	stopCh     chan struct{} // 关闭后台 goroutine
+	stopOnce   sync.Once     // 保证 Stop 幂等
 	wg         sync.WaitGroup
-	sessionTTL time.Duration  // 未完成上传会话的保留时间
+	sessionTTL time.Duration // 未完成上传会话的保留时间
 	logger     *slog.Logger
 }
 

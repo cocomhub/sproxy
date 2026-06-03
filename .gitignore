@@ -6,3 +6,5 @@ local
 *.local
 certs
 *.exe
+*.out
+*.cover

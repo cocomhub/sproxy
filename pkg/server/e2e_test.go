@@ -209,7 +209,7 @@ func TestConcurrent_UploadDifferentFiles(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			srcDir := t.TempDir()
-			data := []byte(fmt.Sprintf("concurrent file %d content", n))
+			data := fmt.Appendf(nil, "concurrent file %d content", n)
 			srcPath := filepath.Join(srcDir, fmt.Sprintf("f%d.txt", n))
 			if err := os.WriteFile(srcPath, data, 0644); err != nil {
 				errCh <- err
@@ -245,14 +245,12 @@ func TestConcurrent_UploadSameFile(t *testing.T) {
 	var wg sync.WaitGroup
 	successCount := int32(0)
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			c := client.NewFileClient(url)
 			if result, err := c.Upload(context.Background(), srcPath, "same.txt"); err == nil && result.Success {
 				atomic.AddInt32(&successCount, 1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -289,22 +287,18 @@ func TestConcurrent_RenameAndDelete(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 5 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			info, err := c.Stat(context.Background(), "target.txt")
 			if err != nil {
 				return
 			}
 			_ = c.Rename(context.Background(), "target.txt", "moved.txt", info.Checksum)
-		}()
+		})
 	}
 	for range 5 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = c.Delete(context.Background(), "target.txt", "")
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -331,7 +325,7 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	totalChunks := 4
 
 	us1.CreateSession("crash-test-id", "crash-recover.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum, 0)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		chunkData := fileData[i*int(chunkSize) : (i+1)*int(chunkSize)]
 		chunkCS := sha256hex(chunkData)
 
@@ -386,7 +380,7 @@ func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 	chunkDir := filepath.Join(tmpDir, ".__chunked__", "partial-id")
 	os.MkdirAll(chunkDir, 0755)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		data := bytes.Repeat([]byte{byte(i)}, 4096)
 		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), data, 0644)
 	}

@@ -91,7 +91,7 @@ func TestChecksumStore_GetAll_Consistency(t *testing.T) {
 	for i := range 100 {
 		cs.Set(fmt.Sprintf("f%d", i), fmt.Sprintf("cs%d", i))
 	}
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		cs.Delete(fmt.Sprintf("f%d", i))
 	}
 

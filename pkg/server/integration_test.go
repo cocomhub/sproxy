@@ -169,13 +169,13 @@ func TestUpload_ChecksumMismatch(t *testing.T) {
 		t.Fatalf("expected 400 checksum mismatch, got %d", status)
 	}
 	// 确认临时文件已清理
-		if dents, _ := os.ReadDir(cfgPtr.Load().UploadsDir); dents != nil {
-			for _, de := range dents {
-				if strings.HasPrefix(de.Name(), "bad.txt.tmp") {
-					t.Fatalf("temp file should have been cleaned up: %s", de.Name())
-				}
+	if dents, _ := os.ReadDir(cfgPtr.Load().UploadsDir); dents != nil {
+		for _, de := range dents {
+			if strings.HasPrefix(de.Name(), "bad.txt.tmp") {
+				t.Fatalf("temp file should have been cleaned up: %s", de.Name())
 			}
 		}
+	}
 	finalPath := filepath.Join(cfgPtr.Load().UploadsDir, "bad.txt")
 	if _, err := os.Stat(finalPath); err == nil {
 		t.Fatalf("final file should not exist: %s", finalPath)
