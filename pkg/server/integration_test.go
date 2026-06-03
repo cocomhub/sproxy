@@ -17,10 +17,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // newTestServer 启动一个临时的 httptest.Server，绑定到独立的 uploads 目录。
@@ -527,4 +529,74 @@ func TestRegisterRoutes_Smoke(t *testing.T) {
 	key := make([]byte, 32)
 	h := RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", key, nil)
 	t.Cleanup(func() { _ = h.Close() })
+}
+
+// newTestServerWithAllRoutes 启动包含全部路由的测试服务器（含 tunnel key 但不绑定真实端口）。
+func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config]) {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	cfg := Default()
+	cfg.UploadsDir = tmpDir
+	cfg.ChunkSize = 4 << 10 // 4 KiB for testing
+	if modifyCfg != nil {
+		modifyCfg(cfg)
+	}
+
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+
+	cs := NewChecksumStore(cfg.UploadsDir, nil)
+	h := &Handlers{
+		cfgPtr:        &cfgPtr,
+		version:       "test-version",
+		buildAt:       "test-buildat",
+		checksumStore: cs,
+		uploadStore:   NewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
+		logger:        slog.Default(),
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
+	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
+	mux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
+	mux.HandleFunc("POST /rename", h.authMiddleware(h.rename))
+	mux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
+	mux.HandleFunc("HEAD /api/files/stat", h.authMiddleware(h.stat))
+	mux.HandleFunc("POST /mkdir", h.authMiddleware(h.mkdir))
+	mux.HandleFunc("POST /rmdir", h.authMiddleware(h.rmdir))
+	mux.HandleFunc("POST /upload/init", h.authMiddleware(h.uploadInit))
+	mux.HandleFunc("POST /upload/chunk", h.authMiddleware(h.uploadChunk))
+	mux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
+	mux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
+	mux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
+	mux.HandleFunc("GET /healthz", h.healthz)
+	mux.HandleFunc("GET /version", h.versionHandler)
+	mux.HandleFunc("GET /", h.webRedirect)
+
+	ts := httptest.NewServer(mux)
+	t.Cleanup(func() {
+		ts.Close()
+		h.uploadStore.Stop()
+	})
+	return ts.URL, &cfgPtr
+}
+
+// makeReadOnlyDir 创建一个只读目录（无写权限），用于测试文件写入失败路径。
+func makeReadOnlyDir(t *testing.T) (string, func()) {
+	t.Helper()
+	d := t.TempDir()
+
+	roDir := filepath.Join(d, "readonly")
+	if err := os.Mkdir(roDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(roDir, 0444); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		cleanup := func() { os.Chmod(roDir, 0755) }
+		return roDir, cleanup
+	}
+	return d, func() {}
 }
