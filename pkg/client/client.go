@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -90,7 +91,7 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 	c := &FileClient{
 		serverURL:  strings.TrimRight(serverURL, "/"),
 		httpClient: &http.Client{Timeout: 300 * time.Second},
-		ChunkSize:  4 << 20, // 4 MiB
+		ChunkSize:  size.DefaultChunkSize, // 4 MiB
 		logger:     slog.Default(),
 	}
 	for _, opt := range opts {
@@ -231,6 +232,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	headers := make(http.Header)
 	headers.Set("Content-Type", mw.FormDataContentType())
 	headers.Set("X-File-Checksum", fileChecksum)
+	headers.Set("X-File-Path", remoteClean)
 	headers.Set("X-File-MTime", fmt.Sprintf("%d", stat.ModTime().UnixNano()))
 
 	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
@@ -359,18 +361,36 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 
 // Delete 从 sproxy 服务端删除文件。
 //
-// 如果启用了 checksum 校验（默认开启），会先计算本地文件的 SHA-256，
-// 通过 X-File-Checksum 请求头发送给服务端进行身份验证。
-// 注意：你需要有本地文件副本才能删除。
+// 默认通过 Stat 获取远端文件的 SHA-256 进行身份验证，无需本地文件。
+// 如果提供了 localPath（非空），则会计算本地文件的 SHA-256 并与远端比对，一致才执行删除。
 // 如果配置了 tunnel_key，删除请求将通过加密隧道传输。
-func (c *FileClient) Delete(ctx context.Context, filename string) error {
+func (c *FileClient) Delete(ctx context.Context, filename string, localPath string) error {
 	urlPath := "/delete?" + url.Values{"filename": {filename}}.Encode()
 	headers := make(http.Header)
 
-	fileChecksum, err := calculateChecksum(filename)
-	if err != nil {
-		return fmt.Errorf("计算文件 SHA-256 失败: %w", err)
+	// 先通过 Stat 获取远端 checksum
+	fileChecksum := ""
+	if info, statErr := c.Stat(ctx, filename); statErr == nil && info.Checksum != "" {
+		fileChecksum = info.Checksum
+	} else if statErr != nil {
+		return fmt.Errorf("获取远端文件信息失败: %w", statErr)
+	} else {
+		return fmt.Errorf("远端文件 checksum 为空，无法删除: %s", filename)
 	}
+
+	// 如果指定了本地文件路径，额外校验本地文件 checksum 与远端一致
+	if localPath != "" {
+		localCS, err := calculateChecksum(localPath)
+		if err != nil {
+			return fmt.Errorf("计算本地文件 SHA-256 失败: %w", err)
+		}
+		if localCS != fileChecksum {
+			return fmt.Errorf("本地文件 SHA-256 与远端不匹配，拒绝删除（远端: %s, 本地: %s）",
+				shortHash(fileChecksum), shortHash(localCS))
+		}
+		c.logger.Debug("本地文件校验通过", "localPath", localPath, "checksum", shortHash(fileChecksum))
+	}
+
 	headers.Set("X-File-Checksum", fileChecksum)
 
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, headers)

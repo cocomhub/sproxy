@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
@@ -27,7 +28,7 @@ func DefaultConfig() *Config {
 		ServerURL:  "http://localhost:18083",
 		NoChecksum: false,
 		Timeout:    300,
-		ChunkSize:  4 << 20, // 4 MiB
+		ChunkSize:  size.DefaultChunkSize, // 4 MiB
 	}
 }
 
@@ -40,7 +41,7 @@ func (c *Config) Validate() error {
 		c.Timeout = 300
 	}
 	if c.ChunkSize <= 0 {
-		c.ChunkSize = 4 << 20
+		c.ChunkSize = size.DefaultChunkSize
 	}
 	if c.TunnelKey != "" && len(c.TunnelKey) != 64 {
 		return fmt.Errorf("tunnel_key 必须是 64 位 hex 字符")

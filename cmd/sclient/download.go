@@ -16,8 +16,8 @@ var downloadCmd = &cobra.Command{
 	Use:   "download <filename> [output]",
 	Short: "下载文件",
 	Long: `从 sproxy 服务端下载文件。
-filename 可以包含路径，如 "dir/file.txt" 下载对应子目录下的文件。
-output 指定本地保存路径，省略时使用文件名。`,
+	filename 可以包含路径，如 "dir/file.txt" 下载对应子目录下的文件。
+	output 指定本地保存路径，省略时使用文件名。`,
 	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		cli, err := buildFileClient(cmd)
@@ -33,11 +33,18 @@ output 指定本地保存路径，省略时使用文件名。`,
 		}
 
 		chunkedMode, _ := cmd.Flags().GetBool("chunked")
+
+		// 如果未显式指定分块模式，检查远端文件大小是否达到自动分块阈值
+		ctx := context.Background()
+		if !chunkedMode {
+			if info, statErr := cli.Stat(ctx, filename); statErr == nil && info.Size > 0 {
+				chunkedMode = client.ShouldAutoChunk(info.Size)
+			}
+		}
+
 		concurrency, _ := cmd.Flags().GetInt("concurrency")
 		chunkSize, _ := cmd.Flags().GetInt64("chunk-size")
 		resume, _ := cmd.Flags().GetBool("resume")
-
-		ctx := context.Background()
 
 		if chunkedMode {
 			chunkOpts := []client.ChunkedOption{

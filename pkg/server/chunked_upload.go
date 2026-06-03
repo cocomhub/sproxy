@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/cocomhub/sproxy/internal/size"
 )
 
 // uploadInit 初始化一个分块上传会话。
@@ -20,7 +22,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 
 	// 限制请求体大小
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB 足够
+	r.Body = http.MaxBytesReader(w, r.Body, size.MultipartBufSize) // 1MB 足够
 	var req struct {
 		UploadID     string `json:"upload_id"`
 		Filename     string `json:"filename"`
@@ -103,7 +105,19 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		chunkSize = cfg.ChunkSize
 	}
 	if chunkSize <= 0 {
-		chunkSize = 4 << 20 // 4 MiB 保底
+		chunkSize = size.DefaultChunkSize // 4 MiB 保底
+	}
+
+	// 确保客户端 chunk 不超过服务端单块请求上限
+	// 预留 1024 字节用于 multipart 边界与表单字段开销，避免 body 略超限制导致 413
+	if chunkSize > size.DefaultChunkBodyLimit-1024 {
+		h.logger.Info("chunk_size 超出服务端上限，自动裁剪",
+			"client_chunk_size", chunkSize,
+			"max_chunk_upload_bytes", size.DefaultChunkBodyLimit,
+			"filename", req.Filename,
+			"upload_id", shortHash(req.UploadID))
+		chunkSize = size.DefaultChunkBodyLimit - 1024
+		req.TotalChunks = int((req.TotalSize + chunkSize - 1) / chunkSize)
 	}
 
 	session, reused, err := h.uploadStore.GetOrCreateSession(req.UploadID, req.Filename,
@@ -135,15 +149,11 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 
 // uploadChunk 上传单个分块。
 func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
-	cfg := h.cfgPtr.Load()
-
-	// 限制请求体大小
-	if cfg.MaxChunkUploadBytes > 0 {
-		r.Body = http.MaxBytesReader(w, r.Body, cfg.MaxChunkUploadBytes)
-	}
+	// 限制请求体大小（含 multipart 开销）
+	r.Body = http.MaxBytesReader(w, r.Body, size.DefaultChunkBodyLimit)
 
 	// 解析 multipart
-	if err := r.ParseMultipartForm(1 << 20); err != nil { // 1MB 内存缓冲
+	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil { // 超过 DefaultChunkBodyLimit 由 MaxBytesReader 拦截
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败: " + err.Error()}, http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -238,7 +248,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 校验 SHA-256（chunk_checksum 已在请求入口强制必填且校验格式）
+	// 校验 SHA-256
 	serverChecksum := hex.EncodeToString(sha256Hash.Sum(nil))
 	if serverChecksum != chunkChecksum {
 		h.logger.Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", chunkIndex,
@@ -363,7 +373,7 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1KB 足够
+	r.Body = http.MaxBytesReader(w, r.Body, size.CompleteBodyLimit) // 1KB 足够
 	var req struct {
 		UploadID string `json:"upload_id"`
 	}
@@ -412,6 +422,14 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	// 合并分块
 	filePath := filepath.Join(cfg.UploadsDir, session.Filename)
+
+	// 确保目标文件的父目录存在（支持子目录路径）
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		h.logger.Error("创建目标父目录失败", "upload_id", req.UploadID, "filename", session.Filename, "error", err)
+		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "创建目标目录失败"}, http.StatusInternalServerError)
+		return
+	}
+
 	tmpPath := filePath + ".tmp"
 	outFile, err := os.Create(tmpPath)
 	if err != nil {
@@ -486,7 +504,6 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 }
 
 // mergeOneChunk 读取单个 chunk 文件并把内容拷贝到 dst。
-// 通过把 defer chunkFile.Close() 放到本函数边界，避免在合并循环中累积 defer 或漏掉手动 Close。
 func (h *Handlers) mergeOneChunk(uploadID string, idx int, dst io.Writer) error {
 	chunkPath := h.uploadStore.ChunkFilePath(uploadID, idx)
 	chunkFile, err := os.Open(chunkPath)

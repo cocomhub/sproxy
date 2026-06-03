@@ -14,9 +14,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/web"
 )
@@ -157,11 +159,9 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 	cfg := h.cfgPtr.Load()
 	// 限制请求体大小，防止 OOM；超过 MaxBytesReader 会向客户端返回 413
-	if cfg.MaxUploadBytes > 0 {
-		r.Body = http.MaxBytesReader(w, r.Body, cfg.MaxUploadBytes)
-	}
-	// 仅在内存中缓冲 10 MiB，超出部分由 stdlib 落临时文件
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, size.UploadBodyLimit)
+	// 仅在内存中缓冲 MultipartBufSize，超出部分由 stdlib 落临时文件
+	if err := r.ParseMultipartForm(size.MultipartBufSize); err != nil {
 		logger.Warn("解析 multipart 失败", "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体过大或解析失败: " + err.Error()}, http.StatusRequestEntityTooLarge)
 		return
@@ -183,13 +183,20 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 路径校验（支持子目录）
-	remotePath, err := ValidateFilePath(handler.Filename)
+	// Go >=1.26 的 mime/multipart 会对 Content-Disposition 中的 filename 调用
+	// filepath.Base，导致 "dir/file.txt" 被截断为 "file.txt"。
+	// 因此优先使用 X-File-Path 头获取完整路径，回退到 handler.Filename 兼容旧客户端。
+	remotePathStr := r.Header.Get("X-File-Path")
+	if remotePathStr == "" {
+		remotePathStr = handler.Filename
+	}
+	remotePath, err := ValidateFilePath(remotePathStr)
 	if err != nil {
-		logger.Warn("无效的文件名", "filename", handler.Filename, "error", err)
+		logger.Warn("无效的文件名", "filename", remotePathStr, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
-	logger.Debug("上传路径", "remote", remotePath)
+	logger.Debug("上传路径", "remote", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
 
 	uploadDir := cfg.UploadsDir
 	filePath := filepath.Join(uploadDir, remotePath)
@@ -383,8 +390,9 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 
 	// 支持按层级查询：?subdir=path 列出指定子目录，默认列出根目录
 	targetDir := cfg.UploadsDir
-	if subdir := r.URL.Query().Get("subdir"); subdir != "" {
+	if subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/"); subdir != "" {
 		if _, err := ValidateFilePath(subdir); err != nil {
+			h.logger.Warn("无效的子目录", "subdir", subdir, "error", err.Error())
 			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
 			return
 		}
@@ -392,6 +400,7 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entries, err := os.ReadDir(targetDir)
+	h.logger.Info("读取目录", "dir", targetDir)
 	if os.IsNotExist(err) {
 		sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
 		return

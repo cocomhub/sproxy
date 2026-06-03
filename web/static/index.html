@@ -48,6 +48,8 @@ tr:hover td { background: #f8f9fa; }
 .toast-warning { background: #f39c12; }
 .size-cell { white-space: nowrap; }
 .chunk-progress-text { font-size: 12px; color: #666; margin-top: 2px; }
+.resume-btn { margin: 4px 0; padding: 2px 8px; font-size: 12px; background: #27ae60; color: #fff; border: none; border-radius: 3px; cursor: pointer; }
+.resume-btn:hover { background: #219a52; }
 </style>
 </head>
 <body>
@@ -64,11 +66,7 @@ tr:hover td { background: #f8f9fa; }
   <div class="toolbar">
     <label class="btn btn-primary" for="file-input" id="upload-btn-label">上传文件</label>
     <input type="file" id="file-input" multiple style="display:none" onchange="uploadFiles(this.files)">
-    <label class="btn btn-secondary" style="cursor:pointer">
-      <input type="checkbox" id="chunked-toggle" checked onchange="saveChunkedPref()"> 分块上传
-    </label>
     <button class="btn btn-secondary" onclick="refreshList()">刷新列表</button>
-    <span id="upload-hash-status" style="font-size:13px;color:#999;margin-left:8px;"></span>
   </div>
   <div id="dir-bar" style="margin-bottom:12px;padding:6px 12px;background:#f0f4ff;border-radius:4px;font-size:14px;display:flex;align-items:center;gap:8px;">
     <strong>目录：</strong><span id="dir-breadcrumb" style="flex:1;"><a href="javascript:void(0)" onclick="navigateDir('')">/</a></span>
@@ -76,6 +74,7 @@ tr:hover td { background: #f8f9fa; }
     <button class="btn btn-sm btn-primary" onclick="mkdirDir()">新建</button>
   </div>
   <div id="upload-progress-container"></div>
+  <div id="resume-container" style="margin-bottom:8px;display:none;"></div>
   <div id="file-list">
     <div class="empty-msg">加载中...</div>
   </div>
@@ -85,11 +84,9 @@ tr:hover td { background: #f8f9fa; }
 const BASE = '';
 let token = localStorage.getItem('sproxy_token') || '';
 let tunnelHexKey = localStorage.getItem('sproxy_tunnel_key') || '';
-let chunkedPref = localStorage.getItem('sproxy_chunked') !== 'false'; // 默认启用
-let currentSubdir = ''; // 当前浏览的子目录
+let currentSubdir = localStorage.getItem('sproxy_subdir') || '';
 document.getElementById('token').value = token;
 document.getElementById('tunnel-key').value = tunnelHexKey;
-document.getElementById('chunked-toggle').checked = chunkedPref;
 
 // 缓存导入的 CryptoKey，避免重复导入
 let _tunnelCryptoKey = null;
@@ -103,13 +100,8 @@ function saveToken() {
 function saveTunnelKey() {
   tunnelHexKey = document.getElementById('tunnel-key').value;
   localStorage.setItem('sproxy_tunnel_key', tunnelHexKey);
-  _tunnelCryptoKey = null; // 清除缓存，下次重新导入
+  _tunnelCryptoKey = null;
   showToast('Tunnel Key 已保存', 'success');
-}
-
-function saveChunkedPref() {
-  chunkedPref = document.getElementById('chunked-toggle').checked;
-  localStorage.setItem('sproxy_chunked', chunkedPref);
 }
 
 // --- 隧道加解密 ---
@@ -141,25 +133,22 @@ async function tunnelRequest(method, urlPath, headersObj, bodyBytes) {
   const key = await getTunnelCryptoKey();
   if (!key) throw new Error('未配置有效的 Tunnel Key');
 
-  // 构造请求元数据
   const meta = { method: method, url: urlPath, headers: {} };
   if (headersObj) {
     for (const [k, v] of Object.entries(headersObj)) {
-      if (k !== 'Authorization') meta.headers[k] = v; // 隧道模式下不发送 Bearer Token
+      if (k !== 'Authorization') meta.headers[k] = v;
     }
   }
 
-  // 序列化：4B metaLen + encrypted(metaJSON) + encrypted(body as a single chunk)
   const metaJSON = new TextEncoder().encode(JSON.stringify(meta));
   const metaIV = crypto.getRandomValues(new Uint8Array(12));
   const metaCT = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: metaIV }, key, metaJSON);
   const metaFrame = new Uint8Array(4 + metaIV.length + metaCT.byteLength);
   const dv = new DataView(metaFrame.buffer);
-  dv.setUint32(0, metaIV.length + metaCT.byteLength, false); // big-endian
+  dv.setUint32(0, metaIV.length + metaCT.byteLength, false);
   metaFrame.set(metaIV, 4);
   metaFrame.set(new Uint8Array(metaCT), 4 + metaIV.length);
 
-  // 加密 body
   let bodyFrame = new Uint8Array(0);
   if (bodyBytes && bodyBytes.byteLength > 0) {
     const bodyIV = crypto.getRandomValues(new Uint8Array(12));
@@ -171,7 +160,6 @@ async function tunnelRequest(method, urlPath, headersObj, bodyBytes) {
     bodyFrame.set(new Uint8Array(bodyCT), 4 + bodyIV.length);
   }
 
-  // 合并发送
   const fullBody = new Uint8Array(metaFrame.length + bodyFrame.length);
   fullBody.set(metaFrame, 0);
   fullBody.set(bodyFrame, metaFrame.length);
@@ -185,11 +173,9 @@ async function tunnelRequest(method, urlPath, headersObj, bodyBytes) {
     throw new Error('隧道请求失败: HTTP ' + resp.status);
   }
 
-  // 读取完整响应体
   const respArrayBuf = await resp.arrayBuffer();
   const respBytes = new Uint8Array(respArrayBuf);
 
-  // 解析响应 metadata
   if (respBytes.length < 4) throw new Error('响应数据不足');
   const respMetaLen = new DataView(respBytes.buffer).getUint32(0, false);
   const respMetaEnc = respBytes.slice(4, 4 + respMetaLen);
@@ -199,7 +185,6 @@ async function tunnelRequest(method, urlPath, headersObj, bodyBytes) {
   const respMetaPlain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: respMetaIV }, key, respMetaCT);
   const respMeta = JSON.parse(new TextDecoder().decode(respMetaPlain));
 
-  // 解析响应 body
   const bodyStart = 4 + respMetaLen;
   let respBody = new Uint8Array(0);
   let offset = bodyStart;
@@ -226,25 +211,106 @@ async function tunnelRequest(method, urlPath, headersObj, bodyBytes) {
   };
 }
 
+// --- 纯 JS 增量 SHA-256 实现 ---
+// 支持 update(Uint8Array) / digest('hex') 模式，避免 Web Crypto 需要完整 buffer
+var Sha256 = (function() {
+  var K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+  ];
+  function Sha256() {
+    this.h = [
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    ];
+    this._buf = [];  // buffered bytes
+    this._len = 0;   // total bits processed
+  }
+  Sha256.prototype.update = function(data) {
+    if (!data || !data.length) return this;
+    this._len += data.length * 8;
+    for (var i = 0; i < data.length; i++) {
+      this._buf[this._buf.length] = data[i];
+      if (this._buf.length === 64) {
+        this._transform(this._buf);
+        this._buf = [];
+      }
+    }
+    return this;
+  };
+  Sha256.prototype.digest = function() {
+    // padding: 0x80 + 0x00 * ... + 64-bit bit length
+    var bits = this._len;
+    var buf = this._buf.slice();
+    buf.push(0x80);
+    while (buf.length % 64 !== 56) buf.push(0x00);
+    for (var i = 7; i >= 0; i--) buf.push((bits >>> (i * 8)) & 0xff);
+    for (var i = 0; i < buf.length; i += 64) {
+      this._transform(buf.slice(i, i + 64));
+    }
+    // produce hex output
+    var hex = '';
+    for (var i = 0; i < 8; i++) {
+      for (var j = 3; j >= 0; j--) {
+        var b = (this.h[i] >>> (j * 8)) & 0xff;
+        hex += (b < 16 ? '0' : '') + b.toString(16);
+      }
+    }
+    return hex;
+  };
+  Sha256.prototype._transform = function(m) {
+    var w = new Array(64);
+    for (var i = 0; i < 16; i++) {
+      w[i] = (m[i*4] << 24) | (m[i*4+1] << 16) | (m[i*4+2] << 8) | m[i*4+3];
+    }
+    for (var i = 16; i < 64; i++) {
+      var s0 = rot(w[i-15], 7) ^ rot(w[i-15], 18) ^ (w[i-15] >>> 3);
+      var s1 = rot(w[i-2], 17) ^ rot(w[i-2], 19) ^ (w[i-2] >>> 10);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) | 0;
+    }
+    var a = this.h[0], b = this.h[1], c = this.h[2], d = this.h[3];
+    var e = this.h[4], f = this.h[5], g = this.h[6], hh = this.h[7];
+    for (var i = 0; i < 64; i++) {
+      var S1 = rot(e, 6) ^ rot(e, 11) ^ rot(e, 25);
+      var ch = (e & f) ^ ((~e) & g);
+      var t1 = (hh + S1 + ch + K[i] + w[i]) | 0;
+      var S0 = rot(a, 2) ^ rot(a, 13) ^ rot(a, 22);
+      var maj = (a & b) ^ (a & c) ^ (b & c);
+      var t2 = (S0 + maj) | 0;
+      hh = g; g = f; f = e; e = (d + t1) | 0;
+      d = c; c = b; b = a; a = (t1 + t2) | 0;
+    }
+    this.h[0] = (this.h[0] + a) | 0;
+    this.h[1] = (this.h[1] + b) | 0;
+    this.h[2] = (this.h[2] + c) | 0;
+    this.h[3] = (this.h[3] + d) | 0;
+    this.h[4] = (this.h[4] + e) | 0;
+    this.h[5] = (this.h[5] + f) | 0;
+    this.h[6] = (this.h[6] + g) | 0;
+    this.h[7] = (this.h[7] + hh) | 0;
+  };
+  function rot(x, n) { return (x >>> n) | (x << (32 - n)); }
+  return Sha256;
+})();
+
 function headers(extra) {
   const h = extra || {};
   if (token && !tunnelHexKey) h['Authorization'] = 'Bearer ' + token;
   return h;
-}
-
-// --- Web Crypto SHA-256 ---
-async function computeSHA256(file) {
-  const buffer = await file.arrayBuffer();
-  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-async function computeSHA256Blob(blob) {
-  const buffer = await blob.arrayBuffer();
-  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 function getChecksumPrefix(cs) {
@@ -260,64 +326,151 @@ function copyChecksum(cs) {
   });
 }
 
-const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MiB
-const AUTO_CHUNK_THRESHOLD = 100 * 1024 * 1024; // 100 MiB
+function generateUploadId(filename, totalSize, lastModified, fileChecksum) {
+  // 与 Go 客户端 generateUploadID 一致：SHA-256("filename|size|mtimeNano|checksum")[:32]
+  const mtimeNano = (lastModified || Date.now()) * 1_000_000;
+  const raw = filename + '|' + totalSize + '|' + mtimeNano + '|' + fileChecksum;
+  const encoder = new TextEncoder();
+  // 元数据很小，直接用 crypto.subtle.digest
+  return crypto.subtle.digest('SHA-256', encoder.encode(raw)).then(function(hash) {
+    return bytesToHex(new Uint8Array(hash)).substring(0, 32);
+  });
+}
+
+const BASE_CHUNK_SIZE = 4 * 1024 * 1024; // 4 MiB
+const MAX_CHUNK_SIZE = 64 * 1024 * 1024; // 64 MiB
+
+// calcChunkSize 自适应分块大小，匹配 Go 客户端 pkg/client/chunked.go calcChunkSize 逻辑
+function calcChunkSize(fileSize) {
+  var chunkSize = BASE_CHUNK_SIZE;
+  while (chunkSize * 512 < fileSize && chunkSize < MAX_CHUNK_SIZE) {
+    chunkSize *= 2;
+  }
+  return Math.min(chunkSize, MAX_CHUNK_SIZE);
+}
+
+// --- 流式 SHA-256 (增量，不上大内存) ---
+async function computeSHA256(file) {
+  const sha256 = new Sha256();
+  var chunkSize = Math.min(4 * 1024 * 1024, file.size || Infinity);
+  var totalChunks = Math.ceil(file.size / chunkSize);
+  for (var i = 0; i < totalChunks; i++) {
+    var start = i * chunkSize;
+    var end = Math.min(start + chunkSize, file.size);
+    var buffer = await file.slice(start, end).arrayBuffer();
+    sha256.update(new Uint8Array(buffer));
+  }
+  return sha256.digest();
+}
+
+async function computeSHA256Blob(blob) {
+  if (blob.size <= 4 * 1024 * 1024) {
+    var buf = await blob.arrayBuffer();
+    var sha256 = new Sha256();
+    sha256.update(new Uint8Array(buf));
+    return sha256.digest();
+  }
+  // 大 blob 分块
+  var sha256 = new Sha256();
+  var cs = Math.min(4 * 1024 * 1024, blob.size);
+  var tc = Math.ceil(blob.size / cs);
+  for (var i = 0; i < tc; i++) {
+    var s = i * cs;
+    var e = Math.min(s + cs, blob.size);
+    var b = await blob.slice(s, e).arrayBuffer();
+    sha256.update(new Uint8Array(b));
+  }
+  return sha256.digest();
+}
+
+// --- localStorage 上传会话管理 ---
+var SESSIONS_KEY = 'sproxy_upload_sessions';
+
+function loadSessions() {
+  try {
+    return JSON.parse(localStorage.getItem(SESSIONS_KEY)) || {};
+  } catch(e) { return {}; }
+}
+
+function saveSessions(sessions) {
+  try { localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions)); } catch(e) {}
+}
+
+function saveUploadSession(uploadId, data) {
+  var sessions = loadSessions();
+  sessions[uploadId] = data;
+  saveSessions(sessions);
+}
+
+function removeUploadSession(uploadId) {
+  var sessions = loadSessions();
+  delete sessions[uploadId];
+  saveSessions(sessions);
+}
 
 // --- 分块上传 ---
-async function chunkedUpload(file, tunnelMode) {
-  const totalSize = file.size;
-  const totalChunks = Math.ceil(totalSize / CHUNK_SIZE);
-  const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
+async function chunkedUpload(file, tunnelMode, resumeSession) {
+  var totalSize = file.size;
+  var chunkSize = calcChunkSize(totalSize);
+  var totalChunks = Math.ceil(totalSize / chunkSize);
+  var fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
 
-  const progId = 'prog-' + Date.now() + '-' + Math.random().toString(36).slice(2);
-  const container = document.getElementById('upload-progress-container');
+  // 续传模式下使用已有 uploadId 和 fileChecksum
+  var uploadId, fileChecksum;
+
+  // 进度条创建
+  var progId = 'prog-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+  var container = document.getElementById('upload-progress-container');
   container.insertAdjacentHTML('beforeend',
     '<div id="' + progId + '-wrap"><small>' + escHtml(fileName) + ' (' + formatSize(totalSize) + ', ' + totalChunks + ' 分块)</small>' +
     '<div class="upload-progress"><div class="upload-progress-bar" id="' + progId + '"></div></div>' +
     '<div class="chunk-progress-text" id="' + progId + '-text">计算 SHA-256…</div></div>');
-
-  function updateProg(loaded, total, chunkIdx) {
-    const pct = total > 0 ? (loaded / total * 100) : 0;
+  var updateProg = function(loaded, total, chunkIdx) {
+    var pct = total > 0 ? (loaded / total * 100) : 0;
     document.getElementById(progId).style.width = pct + '%';
     document.getElementById(progId + '-text').textContent =
       Math.round(pct) + '%（分块 ' + (chunkIdx + 1) + '/' + totalChunks + ', ' + formatSize(loaded) + '/' + formatSize(total) + '）';
-  }
+  };
 
-  // 计算完整文件 SHA-256
-  let fileChecksum;
-  try {
-    fileChecksum = await computeSHA256(file);
-  } catch (e) {
-    showToast(fileName + ' SHA-256 计算失败: ' + e.message, 'error');
-    return;
+  if (resumeSession) {
+    // 续传：使用已有 session 数据
+    uploadId = resumeSession.uploadId;
+    fileChecksum = resumeSession.fileChecksum;
+    document.getElementById(progId + '-text').textContent = '续传中…';
+  } else {
+    // 新上传：流式计算完整文件 SHA-256（不上大内存）
+    try {
+      fileChecksum = await computeSHA256(file);
+    } catch (e) {
+      showToast(fileName + ' SHA-256 计算失败: ' + e.message, 'error');
+      return;
+    }
+    // 生成确定性的 upload_id
+    uploadId = await generateUploadId(fileName, totalSize, file.lastModified, fileChecksum);
   }
 
   try {
     // 初始化分块上传
-    let initResult;
+    var initResult;
+    var initBody = {
+      upload_id: uploadId,
+      filename: fileName,
+      total_size: totalSize,
+      chunk_size: chunkSize,
+      total_chunks: totalChunks,
+      file_checksum: fileChecksum
+    };
     if (tunnelMode) {
-      const initResp = await tunnelRequest('POST', '/upload/init',
+      var initResp = await tunnelRequest('POST', '/upload/init',
         { 'Content-Type': 'application/json' },
-        new TextEncoder().encode(JSON.stringify({
-          filename: fileName,
-          total_size: totalSize,
-          chunk_size: CHUNK_SIZE,
-          total_chunks: totalChunks,
-          file_checksum: fileChecksum
-        }))
+        new TextEncoder().encode(JSON.stringify(initBody))
       );
       initResult = JSON.parse(new TextDecoder().decode(initResp.body));
     } else {
-      const resp = await fetch(BASE + '/upload/init', {
+      var resp = await fetch(BASE + '/upload/init', {
         method: 'POST',
         headers: headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({
-          filename: fileName,
-          total_size: totalSize,
-          chunk_size: CHUNK_SIZE,
-          total_chunks: totalChunks,
-          file_checksum: fileChecksum
-        })
+        body: JSON.stringify(initBody)
       });
       initResult = await resp.json();
     }
@@ -332,53 +485,100 @@ async function chunkedUpload(file, tunnelMode) {
       return;
     }
 
-    const uploadId = initResult.upload_id;
-    let uploadedBytes = 0;
+    // 获取缺失的分块列表
+    var missingChunks = null;
+    if (initResult.upload_id && initResult.upload_id !== 'already_exists') {
+      // 查询状态获取缺失分块
+      var statusResp = await fetch(BASE + '/upload/status?upload_id=' + initResult.upload_id, { headers: headers() });
+      if (statusResp.ok) {
+        var statusData = await statusResp.json();
+        if (statusData.success && statusData.missing_chunks) {
+          missingChunks = statusData.missing_chunks;
+        }
+      }
+    }
+
+    var actualUploadId = initResult.upload_id;
+    var uploadedBytes = 0;
+
+    // 确定要上传的分块索引列表
+    var chunkIndices;
+    if (missingChunks && missingChunks.length > 0) {
+      chunkIndices = missingChunks;
+    } else if (resumeSession && resumeSession.completedChunks) {
+      // 续传：跳过已上传的分块
+      chunkIndices = [];
+      for (var i = 0; i < totalChunks; i++) {
+        if (resumeSession.completedChunks.indexOf(i) === -1) {
+          chunkIndices.push(i);
+        }
+      }
+    } else {
+      chunkIndices = [];
+      for (var i = 0; i < totalChunks; i++) chunkIndices.push(i);
+    }
+
+    // 保存 session 到 localStorage
+    saveUploadSession(actualUploadId, {
+      filename: fileName,
+      totalSize: totalSize,
+      chunkSize: chunkSize,
+      totalChunks: totalChunks,
+      fileChecksum: fileChecksum,
+      lastModified: file.lastModified,
+      uploadId: actualUploadId,
+      completedChunks: resumeSession ? (resumeSession.completedChunks || []) : [],
+      status: 'uploading',
+      startedAt: Date.now()
+    });
+    var sessionData = loadSessions()[actualUploadId];
+    if (!sessionData.completedChunks) sessionData.completedChunks = [];
 
     // 上传每个分块
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, totalSize);
-      const chunkBlob = file.slice(start, end);
+    for (var ci = 0; ci < chunkIndices.length; ci++) {
+      var idx = chunkIndices[ci];
+      var start = idx * chunkSize;
+      var end = Math.min(start + chunkSize, totalSize);
 
-      const chunkChecksum = await computeSHA256Blob(chunkBlob);
+      // 单次读取：同一 buffer 既算 SHA-256 又用于上传
+      var chunkBytes = await file.slice(start, end).arrayBuffer();
+      var chunkData = new Uint8Array(chunkBytes);
+
+      var chunkSha = new Sha256();
+      chunkSha.update(chunkData);
+      var chunkChecksum = chunkSha.digest();
 
       // 上传（含重试）
-      let success = false;
-      for (let retry = 0; retry < 3 && !success; retry++) {
-        const chunkBytes = await chunkBlob.arrayBuffer();
-
-        // 构造 multipart
-        const formData = new FormData();
-        formData.append('upload_id', uploadId);
-        formData.append('chunk_index', String(i));
-        formData.append('chunk_checksum', chunkChecksum);
-        formData.append('chunk', new Blob([chunkBytes]), String(i).padStart(5, '0') + '.chunk');
-
-        let result;
+      var success = false;
+      for (var retry = 0; retry < 3 && !success; retry++) {
         if (tunnelMode) {
-          // 隧道模式：构造 multipart body 发送
-          const boundary = '----WebKitFormBoundary' + Math.random().toString(36).slice(2, 10);
-          const encoder = new TextEncoder();
-          const headerStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="upload_id"\r\n\r\n' + uploadId + '\r\n';
-          const idxStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="chunk_index"\r\n\r\n' + i + '\r\n';
-          const csStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="chunk_checksum"\r\n\r\n' + chunkChecksum + '\r\n';
-          const fileHeader = '--' + boundary + '\r\nContent-Disposition: form-data; name="chunk"; filename="' + String(i).padStart(5, '0') + '.chunk"\r\nContent-Type: application/octet-stream\r\n\r\n';
-          const footer = '\r\n--' + boundary + '--\r\n';
-          const parts = [
+          var boundary = '----WebKitFormBoundary' + Math.random().toString(36).slice(2, 10);
+          var encoder = new TextEncoder();
+          var headerStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="upload_id"\r\n\r\n' + actualUploadId + '\r\n';
+          var idxStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="chunk_index"\r\n\r\n' + idx + '\r\n';
+          var csStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="chunk_checksum"\r\n\r\n' + chunkChecksum + '\r\n';
+          var fileHeader = '--' + boundary + '\r\nContent-Disposition: form-data; name="chunk"; filename="' + String(idx).padStart(5, '0') + '.chunk"\r\nContent-Type: application/octet-stream\r\n\r\n';
+          var footer = '\r\n--' + boundary + '--\r\n';
+          var parts = [
             encoder.encode(headerStr), encoder.encode(idxStr), encoder.encode(csStr),
-            encoder.encode(fileHeader), new Uint8Array(chunkBytes), encoder.encode(footer)
+            encoder.encode(fileHeader), chunkData, encoder.encode(footer)
           ];
-          const totalLen = parts.reduce((s, p) => s + p.byteLength, 0);
-          const fullBody = new Uint8Array(totalLen);
-          let off = 0;
-          for (const p of parts) { fullBody.set(p, off); off += p.byteLength; }
+          var tlen = parts.reduce(function(s, p) { return s + p.byteLength; }, 0);
+          var fullBody = new Uint8Array(tlen);
+          var off = 0;
+          for (var pi = 0; pi < parts.length; pi++) { fullBody.set(parts[pi], off); off += parts[pi].byteLength; }
 
-          const treq = await tunnelRequest('POST', '/upload/chunk',
+          var treq = await tunnelRequest('POST', '/upload/chunk',
             { 'Content-Type': 'multipart/form-data; boundary=' + boundary }, fullBody);
-          result = JSON.parse(new TextDecoder().decode(treq.body));
+          var result = JSON.parse(new TextDecoder().decode(treq.body));
         } else {
-          const resp = await fetch(BASE + '/upload/chunk', {
+          var formData = new FormData();
+          formData.append('upload_id', actualUploadId);
+          formData.append('chunk_index', String(idx));
+          formData.append('chunk_checksum', chunkChecksum);
+          formData.append('chunk', new Blob([chunkBytes]), String(idx).padStart(5, '0') + '.chunk');
+
+          var resp = await fetch(BASE + '/upload/chunk', {
             method: 'POST',
             headers: headers({}),
             body: formData
@@ -388,174 +588,95 @@ async function chunkedUpload(file, tunnelMode) {
 
         if (result.success) {
           success = true;
-          uploadedBytes += chunkBlob.size;
-          updateProg(uploadedBytes, totalSize, i);
+          uploadedBytes += (end - start);
+          updateProg(uploadedBytes, totalSize, idx);
+          // 更新 localStorage
+          if (sessionData.completedChunks.indexOf(idx) === -1) {
+            sessionData.completedChunks.push(idx);
+            saveUploadSession(actualUploadId, sessionData);
+          }
         } else if (!result.should_retry) {
-          showToast(fileName + ' 分块 ' + i + ' 上传失败: ' + (result.message || 'unknown'), 'error');
+          showToast(fileName + ' 分块 ' + idx + ' 上传失败: ' + (result.message || 'unknown'), 'error');
           return;
         }
-        // should_retry: 继续循环
       }
-
       if (!success) {
-        showToast(fileName + ' 分块 ' + i + ' 上传失败（重试耗尽）', 'error');
+        showToast(fileName + ' 分块 ' + idx + ' 上传失败（重试耗尽）', 'error');
         return;
       }
     }
 
     // 完成上传
-    let completeResult;
+    var completeResult;
     if (tunnelMode) {
-      const cresp = await tunnelRequest('POST', '/upload/complete',
+      var cresp = await tunnelRequest('POST', '/upload/complete',
         { 'Content-Type': 'application/json' },
-        new TextEncoder().encode(JSON.stringify({ upload_id: uploadId }))
+        new TextEncoder().encode(JSON.stringify({ upload_id: actualUploadId }))
       );
       completeResult = JSON.parse(new TextDecoder().decode(cresp.body));
     } else {
-      const resp = await fetch(BASE + '/upload/complete', {
+      var resp = await fetch(BASE + '/upload/complete', {
         method: 'POST',
         headers: headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ upload_id: uploadId })
+        body: JSON.stringify({ upload_id: actualUploadId })
       });
       completeResult = await resp.json();
     }
 
     if (completeResult.success) {
       showToast(fileName + ' 上传成功，校验通过', 'success');
+      removeUploadSession(actualUploadId);
     } else {
+      sessionData.status = 'failed';
+      saveUploadSession(actualUploadId, sessionData);
       showToast(fileName + ' 合并失败: ' + (completeResult.message || 'unknown'), 'error');
-      return;
     }
   } catch (e) {
     showToast(fileName + ' 分块上传失败: ' + e.message, 'error');
   }
 }
 
-// --- 上传（入口）---
+// --- 上传入口（全部分块上传）---
 async function uploadFiles(files) {
   if (!files || files.length === 0) return;
-  const container = document.getElementById('upload-progress-container');
-  const hashStatus = document.getElementById('upload-hash-status');
-
-  for (const file of files) {
-    const useChunked = chunkedPref || file.size > AUTO_CHUNK_THRESHOLD;
-
-    if (useChunked) {
-      await chunkedUpload(file, !!tunnelHexKey);
-      continue;
-    }
-
-    const progId = 'prog-' + Date.now() + '-' + Math.random().toString(36).slice(2);
-    container.insertAdjacentHTML('beforeend', '<div><small>' + escHtml(file.name) + ' (' + formatSize(file.size) + ')</small><div class="upload-progress"><div class="upload-progress-bar" id="' + progId + '"></div></div></div>');
-
-    // 计算远端文件名（含当前子目录前缀）
-    const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
-
-    // 计算 SHA-256
-    hashStatus.textContent = '计算 ' + file.name + ' SHA-256…';
-    let fileChecksum;
-    try {
-      fileChecksum = await computeSHA256(file);
-    } catch(e) {
-      hashStatus.textContent = '';
-      showToast(file.name + ' SHA-256 计算失败: ' + e.message, 'error');
-      continue;
-    }
-    hashStatus.textContent = '';
-
-    if (tunnelHexKey) {
-      // 隧道模式：构造 multipart body，通过隧道发送
-      try {
-        const boundary = '----WebKitFormBoundary' + Math.random().toString(36).slice(2, 10);
-        const fileBytes = await file.arrayBuffer();
-        const headerStr = '--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + fileName + '"\r\nContent-Type: application/octet-stream\r\n\r\n';
-        const footerStr = '\r\n--' + boundary + '--\r\n';
-        const encoder = new TextEncoder();
-        const headerBytes = encoder.encode(headerStr);
-        const footerBytes = encoder.encode(footerStr);
-        const fullBody = new Uint8Array(headerBytes.length + fileBytes.byteLength + footerBytes.length);
-        fullBody.set(headerBytes, 0);
-        fullBody.set(new Uint8Array(fileBytes), headerBytes.length);
-        fullBody.set(footerBytes, headerBytes.length + fileBytes.byteLength);
-
-        document.getElementById(progId).style.width = '50%';
-        const result = await tunnelRequest('POST', '/upload', { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'X-File-Checksum': fileChecksum }, fullBody);
-        document.getElementById(progId).style.width = '100%';
-
-        const data = JSON.parse(new TextDecoder().decode(result.body));
-        if (result.status >= 200 && result.status < 300 && data.success) {
-          showToast(file.name + ' 上传成功', 'success');
-        } else {
-          showToast(file.name + ' 上传失败: ' + (data.message || result.status), 'error');
-        }
-      } catch(e) {
-        showToast(file.name + ' 上传失败: ' + e.message, 'error');
-      }
-    } else {
-      // 直连模式
-      const formData = new FormData();
-      formData.append('file', file, fileName);
-
-      try {
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', BASE + '/upload', true);
-        if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-        xhr.setRequestHeader('X-File-Checksum', fileChecksum);
-        xhr.upload.onprogress = function(e) {
-          if (e.lengthComputable) {
-            document.getElementById(progId).style.width = (e.loaded / e.total * 100) + '%';
-          }
-        };
-        const resp = await new Promise(function(resolve, reject) {
-          xhr.onload = function() { resolve(xhr); };
-          xhr.onerror = function() { reject(new Error('网络错误')); };
-          xhr.send(formData);
-        });
-        const data = JSON.parse(resp.responseText);
-        if (resp.status >= 200 && resp.status < 300 && data.success) {
-          showToast(file.name + ' 上传成功', 'success');
-        } else {
-          showToast(file.name + ' 上传失败: ' + (data.message || resp.status), 'error');
-        }
-      } catch(e) {
-        showToast(file.name + ' 上传失败: ' + e.message, 'error');
-      }
-    }
+  for (var i = 0; i < files.length; i++) {
+    await chunkedUpload(files[i], !!tunnelHexKey, null);
   }
-  container.innerHTML = '';
+  document.getElementById('upload-progress-container').innerHTML = '';
   refreshList();
 }
 
 // --- 文件列表 ---
 async function refreshList() {
-  const el = document.getElementById('file-list');
+  var el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">加载中...</div>';
   updateBreadcrumb();
   try {
-    let files;
-    const listUrl = '/api/files' + (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) : '');
+    var files;
+    var listUrl = '/api/files' + (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) : '');
     if (tunnelHexKey) {
-      const result = await tunnelRequest('GET', listUrl, {}, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
+      var result = await tunnelRequest('GET', listUrl, {}, null);
+      var data = JSON.parse(new TextDecoder().decode(result.body));
       files = data.files || [];
     } else {
-      const resp = await fetch(BASE + listUrl, { headers: headers() });
-      const data = await resp.json();
+      var resp = await fetch(BASE + listUrl, { headers: headers() });
+      var data = await resp.json();
       if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + (data.message || resp.status) + '</div>'; return; }
       files = data.files || [];
     }
     if (files.length === 0) { el.innerHTML = '<div class="empty-msg">暂无文件</div>'; return; }
-    let html = '<table><thead><tr><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
-    for (const fi of files) {
-      const fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
+    var html = '<table><thead><tr><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
+    for (var fiIdx = 0; fiIdx < files.length; fiIdx++) {
+      var fi = files[fiIdx];
+      var fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
       if (fi.is_dir) {
         html += '<tr style="cursor:pointer;background:#f8f9fa;"><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
           '<td>-</td><td>-</td><td>' +
           '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
           '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
       } else {
-        const cs = fi.checksum || '';
-        const csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
+        var cs = fi.checksum || '';
+        var csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
         html += '<tr><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
           '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
           '<td>' + csDisplay + '</td>' +
@@ -575,19 +696,20 @@ async function refreshList() {
 // --- 目录导航 ---
 function navigateDir(subdir) {
   currentSubdir = subdir;
+  localStorage.setItem('sproxy_subdir', subdir);
   refreshList();
 }
 
 function updateBreadcrumb() {
-  const el = document.getElementById('dir-breadcrumb');
+  var el = document.getElementById('dir-breadcrumb');
   if (!currentSubdir) {
     el.innerHTML = '<a href="javascript:void(0)" onclick="navigateDir(\'\')">/</a>';
     return;
   }
-  const parts = currentSubdir.split('/');
-  let html = '<a href="javascript:void(0)" onclick="navigateDir(\'\')">/</a>';
-  let accumulated = '';
-  for (let i = 0; i < parts.length; i++) {
+  var parts = currentSubdir.split('/');
+  var html = '<a href="javascript:void(0)" onclick="navigateDir(\'\')">/</a>';
+  var accumulated = '';
+  for (var i = 0; i < parts.length; i++) {
     accumulated = accumulated ? accumulated + '/' + parts[i] : parts[i];
     html += ' <span style="color:#999">›</span> <a href="javascript:void(0)" onclick="navigateDir(\'' + escJsStr(accumulated) + '\')">' + escHtml(parts[i]) + '</a>';
   }
@@ -596,14 +718,14 @@ function updateBreadcrumb() {
 
 // --- 目录操作 ---
 async function mkdirDir() {
-  const input = document.getElementById('new-dir-name');
-  const name = input.value.trim();
+  var input = document.getElementById('new-dir-name');
+  var name = input.value.trim();
   if (!name) { showToast('请输入目录名', 'warning'); return; }
-  const dirPath = currentSubdir ? currentSubdir + '/' + name : name;
+  var dirPath = currentSubdir ? currentSubdir + '/' + name : name;
   try {
     if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/mkdir?dirname=' + encodeURIComponent(dirPath), {}, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
+      var result = await tunnelRequest('POST', '/mkdir?dirname=' + encodeURIComponent(dirPath), {}, null);
+      var data = JSON.parse(new TextDecoder().decode(result.body));
       if (result.status >= 200 && result.status < 300 && data.success) {
         showToast('目录已创建: ' + dirPath, 'success');
         input.value = '';
@@ -612,11 +734,11 @@ async function mkdirDir() {
         showToast('创建目录失败: ' + (data.message || result.status), 'error');
       }
     } else {
-      const resp = await fetch(BASE + '/mkdir?dirname=' + encodeURIComponent(dirPath), {
+      var resp = await fetch(BASE + '/mkdir?dirname=' + encodeURIComponent(dirPath), {
         method: 'POST',
         headers: headers()
       });
-      const data = await resp.json();
+      var data = await resp.json();
       if (resp.ok && data.success) {
         showToast('目录已创建: ' + dirPath, 'success');
         input.value = '';
@@ -634,8 +756,8 @@ async function rmdirDir(dirPath) {
   if (!confirm('确认删除目录 "' + dirPath + '" 及其所有内容?')) return;
   try {
     if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirPath), {}, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
+      var result = await tunnelRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirPath), {}, null);
+      var data = JSON.parse(new TextDecoder().decode(result.body));
       if (result.status >= 200 && result.status < 300 && data.success) {
         showToast('目录已删除: ' + dirPath, 'success');
         refreshList();
@@ -643,11 +765,11 @@ async function rmdirDir(dirPath) {
         showToast('删除目录失败: ' + (data.message || result.status), 'error');
       }
     } else {
-      const resp = await fetch(BASE + '/rmdir?dirname=' + encodeURIComponent(dirPath), {
+      var resp = await fetch(BASE + '/rmdir?dirname=' + encodeURIComponent(dirPath), {
         method: 'POST',
         headers: headers()
       });
-      const data = await resp.json();
+      var data = await resp.json();
       if (resp.ok && data.success) {
         showToast('目录已删除: ' + dirPath, 'success');
         refreshList();
@@ -660,16 +782,19 @@ async function rmdirDir(dirPath) {
   }
 }
 
-// --- 下载（校验 checksum）---
+// --- 下载（校验 checksum，大文件流式校验）---
 async function downloadFile(name, expectedChecksum) {
   try {
     if (tunnelHexKey) {
-      const result = await tunnelRequest('GET', '/download?filename=' + encodeURIComponent(name), {}, null);
-      const serverCS = (result.headers['X-File-Checksum'] || [''])[0];
+      // 隧道模式：完整响应已在内存中
+      var result = await tunnelRequest('GET', '/download?filename=' + encodeURIComponent(name), {}, null);
+      var serverCS = (result.headers['X-File-Checksum'] || [''])[0];
 
       if (serverCS) {
         try {
-          const localCS = bytesToHex(await crypto.subtle.digest('SHA-256', result.body));
+          var sha256 = new Sha256();
+          sha256.update(new Uint8Array(result.body));
+          var localCS = sha256.digest();
           if (localCS !== serverCS) {
             showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0,16) + '…, 本地 ' + localCS.substring(0,16) + '…', 'error');
             return;
@@ -679,9 +804,9 @@ async function downloadFile(name, expectedChecksum) {
         }
       }
 
-      const blob = new Blob([result.body]);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      var blob = new Blob([result.body]);
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
       a.href = url;
       a.download = name;
       document.body.appendChild(a);
@@ -690,24 +815,64 @@ async function downloadFile(name, expectedChecksum) {
       URL.revokeObjectURL(url);
       showToast(name + ' 下载完成' + (serverCS ? '，校验通过' : ''), 'success');
     } else {
-      const resp = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
+      var resp = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
       if (!resp.ok) {
-        const data = await resp.json().catch(function() { return {}; });
+        var data = await resp.json().catch(function() { return {}; });
         showToast('下载失败: ' + (data.message || resp.status), 'error');
         return;
       }
-      const serverCS = resp.headers.get('X-File-Checksum') || '';
-      const blob = await resp.blob();
+      var serverCS = resp.headers.get('X-File-Checksum') || '';
+      var contentLength = parseInt(resp.headers.get('Content-Length') || '0');
 
-      // 下载后校验 checksum
+      // 下载后校验 checksum（大文件用流式）
       if (serverCS) {
         try {
-          const buffer = await blob.arrayBuffer();
-          const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-          const hashArray = Array.from(new Uint8Array(hashBuffer));
-          const localCS = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-          if (localCS !== serverCS) {
-            showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0,16) + '…, 本地 ' + localCS.substring(0,16) + '…', 'error');
+          var sha256 = new Sha256();
+          if (contentLength > 100 * 1024 * 1024) {
+            // 大文件：流式读取 response body
+            var reader = resp.body.getReader();
+            var readResult;
+            while (!(readResult = await reader.read()).done) {
+              sha256.update(new Uint8Array(readResult.value));
+            }
+            var localCS = sha256.digest();
+            // 流式读取后 body 已被消费，重新下载
+            if (localCS !== serverCS) {
+              showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0,16) + '…, 本地 ' + localCS.substring(0,16) + '…', 'error');
+              return;
+            }
+            // checksum 匹配，重新下载并保存
+            var resp2 = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
+            var blob2 = await resp2.blob();
+            var url2 = URL.createObjectURL(blob2);
+            var a2 = document.createElement('a');
+            a2.href = url2;
+            a2.download = name;
+            document.body.appendChild(a2);
+            a2.click();
+            document.body.removeChild(a2);
+            URL.revokeObjectURL(url2);
+            showToast(name + ' 下载完成，校验通过', 'success');
+            return;
+          } else {
+            // 小文件：直接用 blob
+            var buffer = await resp.arrayBuffer();
+            sha256.update(new Uint8Array(buffer));
+            var localCS = sha256.digest();
+            if (localCS !== serverCS) {
+              showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0,16) + '…, 本地 ' + localCS.substring(0,16) + '…', 'error');
+              return;
+            }
+            var blob = new Blob([buffer]);
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = name;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            showToast(name + ' 下载完成，校验通过', 'success');
             return;
           }
         } catch(e) {
@@ -715,15 +880,17 @@ async function downloadFile(name, expectedChecksum) {
         }
       }
 
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      // 无 checksum 或校验出错：直接下载
+      var blob = await resp.blob();
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
       a.href = url;
       a.download = name;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      showToast(name + ' 下载完成' + (serverCS ? '，校验通过' : ''), 'success');
+      showToast(name + ' 下载完成', 'success');
     }
   } catch(e) {
     showToast('下载失败: ' + e.message, 'error');
@@ -739,8 +906,8 @@ async function deleteFile(name, checksum) {
   }
   try {
     if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(name), { 'X-File-Checksum': checksum }, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
+      var result = await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(name), { 'X-File-Checksum': checksum }, null);
+      var data = JSON.parse(new TextDecoder().decode(result.body));
       if (result.status >= 200 && result.status < 300 && data.success) {
         showToast('删除成功: ' + name, 'success');
         refreshList();
@@ -748,13 +915,13 @@ async function deleteFile(name, checksum) {
         showToast('删除失败: ' + (data.message || result.status), 'error');
       }
     } else {
-      const resp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(name), {
+      var resp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(name), {
         method: 'POST',
         headers: headers({
           'X-File-Checksum': checksum
         })
       });
-      const data = await resp.json();
+      var data = await resp.json();
       if (resp.ok && data.success) {
         showToast('删除成功: ' + name, 'success');
         refreshList();
@@ -767,8 +934,105 @@ async function deleteFile(name, checksum) {
   }
 }
 
+// --- 续传检测（页面加载时调用）---
+function checkResumableUploads() {
+  var sessions = loadSessions();
+  var hasResumable = false;
+  for (var uploadId in sessions) {
+    var data = sessions[uploadId];
+    if (data.status !== 'uploading') continue;
+    hasResumable = true;
+
+    (function(sessionData, sessUploadId) {
+      // 查询服务端状态
+      var statusUrl = '/upload/status?upload_id=' + sessUploadId + '&filename=' + encodeURIComponent(sessionData.filename);
+      fetch(BASE + statusUrl, { headers: headers() })
+        .then(function(r) { return r.json(); })
+        .then(function(status) {
+          if (status.success && !status.finished && status.missing_chunks && status.missing_chunks.length > 0) {
+            showResumePrompt(sessionData, sessUploadId);
+          } else if (status.success && status.finished) {
+            // 服务端已完成，清除本地记录
+            removeUploadSession(sessUploadId);
+          } else {
+            // session 已过期
+            removeUploadSession(sessUploadId);
+          }
+        })
+        .catch(function() {
+          removeUploadSession(sessUploadId);
+        });
+    })(data, uploadId);
+  }
+  if (!hasResumable) {
+    var el = document.getElementById('resume-container');
+    if (el) el.style.display = 'none';
+  }
+}
+
+function showResumePrompt(data, uploadId) {
+  var el = document.getElementById('resume-container');
+  if (!el) return;
+  el.style.display = 'block';
+  var div = document.createElement('div');
+  div.style.cssText = 'padding:8px 12px;background:#f0fff0;border-radius:4px;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+  div.innerHTML = '<span style="flex:1;">📦 未完成的上传: <strong>' + escHtml(data.filename) + '</strong> (' + (data.completedChunks ? data.completedChunks.length : 0) + '/' + data.totalChunks + ' 分块)</span>' +
+    '<input type="file" id="resume-file-' + uploadId + '" style="display:none" onchange="resumeUpload(\'' + uploadId + '\', this.files[0])">' +
+    '<button class="resume-btn" onclick="document.getElementById(\'resume-file-' + uploadId + '\').click()">选择文件续传</button>' +
+    '<button class="btn btn-sm btn-secondary" onclick="dismissResume(\'' + uploadId + '\')">忽略</button>';
+  el.appendChild(div);
+}
+
+function dismissResume(uploadId) {
+  removeUploadSession(uploadId);
+  var el = document.getElementById('resume-container');
+  if (el) el.innerHTML = '';
+  checkResumableUploads();
+}
+
+async function resumeUpload(uploadId, file) {
+  if (!file) return;
+  var sessions = loadSessions();
+  var data = sessions[uploadId];
+  if (!data) { showToast('续传数据已丢失', 'error'); return; }
+
+  // 校验文件匹配
+  if (file.size !== data.totalSize) {
+    showToast('文件大小不匹配，无法续传', 'error');
+    return;
+  }
+
+  // 快速校验：计算文件 SHA-256 并与 session 记录比对
+  try {
+    var checksum = await computeSHA256(file);
+    if (checksum !== data.fileChecksum) {
+      showToast('文件内容不匹配（SHA-256 不一致），无法续传', 'error');
+      return;
+    }
+  } catch(e) {
+    showToast('SHA-256 计算失败: ' + e.message, 'error');
+    return;
+  }
+
+  showToast('文件校验通过，开始续传…', 'success');
+
+  // 设置 currentSubdir 匹配续传文件的目录
+  var parts = data.filename.split('/');
+  if (parts.length > 1) {
+    currentSubdir = parts.slice(0, -1).join('/');
+    localStorage.setItem('sproxy_subdir', currentSubdir);
+  }
+
+  await chunkedUpload(file, !!tunnelHexKey, data);
+
+  var resumeContainer = document.getElementById('resume-container');
+  if (resumeContainer) resumeContainer.innerHTML = '';
+  checkResumableUploads();
+  refreshList();
+}
+
 function showToast(msg, type) {
-  const el = document.getElementById('toast');
+  var el = document.getElementById('toast');
   el.textContent = msg;
   el.className = 'toast toast-' + type + ' show';
   clearTimeout(el._timer);
@@ -784,7 +1048,9 @@ function formatSize(bytes) {
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function escJsStr(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"'); }
 
+// 初始化
 refreshList();
+checkResumableUploads();
 </script>
 </body>
 </html>

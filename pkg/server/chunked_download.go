@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-)
 
-const maxChunkHashBuf = 8 << 20 // 8 MiB 最大缓冲用于计算 chunk hash
+	"github.com/cocomhub/sproxy/internal/size"
+)
 
 // downloadChunk 下载文件的指定分块。
 //
@@ -43,7 +43,7 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	offset := int64(0)
 	length := cfg.ChunkSize
 	if length <= 0 {
-		length = 4 << 20 // 4 MiB 保底
+		length = size.DefaultChunkSize // 4 MiB 保底
 	}
 
 	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
@@ -58,8 +58,8 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 保护：防止 length 过大导致 OOM
-		if length > cfg.MaxChunkUploadBytes && cfg.MaxChunkUploadBytes > 0 {
-			length = cfg.MaxChunkUploadBytes
+		if length > size.MaxChunkHashBuf {
+			length = size.MaxChunkHashBuf
 		}
 	}
 
@@ -85,9 +85,9 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		length = fileSize - offset
 	}
 
-	// 防止 length 过大导致 OOM（限制到 maxChunkHashBuf = 8 MiB）
-	if length > maxChunkHashBuf {
-		length = maxChunkHashBuf
+	// 防止 length 过大导致 OOM（限制到 MaxChunkHashBuf）
+	if length > size.MaxChunkHashBuf {
+		length = size.MaxChunkHashBuf
 	}
 
 	file, err := os.Open(filePath)
@@ -116,14 +116,11 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 计算本块 SHA-256：先读入缓冲区，计算 hash，再写入 ResponseWriter
-	// 缓冲区最大 maxChunkHashBuf，避免 OOM
-	if length > maxChunkHashBuf {
-		length = maxChunkHashBuf
-	}
+	// 缓冲区最大 MaxChunkHashBuf，避免 OOM
 	data := make([]byte, length)
 	if _, err := io.ReadFull(file, data); err != nil {
 		// 文件可能被截断或读取到末尾
-		// 回退到流式读取
+		// 回退到缓冲区读取
 		_ = file.Close()
 		file2, openErr := os.Open(filePath)
 		if openErr != nil {
@@ -132,16 +129,23 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer file2.Close()
-		file2.Seek(offset, io.SeekStart)
-
-		hasher := sha256.New()
-		limitedReader := io.LimitReader(file2, length)
-		multiWriter := io.MultiWriter(w, hasher)
-		if _, copyErr := io.CopyN(multiWriter, limitedReader, length); copyErr != nil {
-			h.logger.Error("流式读取文件失败", "error", copyErr)
+		if _, seekErr := file2.Seek(offset, io.SeekStart); seekErr != nil {
+			h.logger.Error("文件 seek 失败", "error", seekErr)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件读取失败"}, http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("X-Chunk-Checksum", hex.EncodeToString(hasher.Sum(nil)))
+		data2 := make([]byte, length)
+		if _, readErr := io.ReadFull(file2, data2); readErr != nil {
+			h.logger.Error("读取文件失败", "error", readErr)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件读取失败"}, http.StatusInternalServerError)
+			return
+		}
+		chunkHash := sha256.Sum256(data2)
+		w.Header().Set("X-Chunk-Checksum", hex.EncodeToString(chunkHash[:]))
+		w.WriteHeader(http.StatusOK)
+		if _, writeErr := w.Write(data2); writeErr != nil {
+			h.logger.Warn("写入分块响应失败", "error", writeErr)
+		}
 		return
 	}
 

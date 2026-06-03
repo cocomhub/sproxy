@@ -18,14 +18,13 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/internal/size"
 )
 
 const (
-	defaultChunkSize   = 4 << 20  // 4 MiB
-	defaultMaxChunk    = 64 << 20 // 64 MiB
 	defaultConcurrency = 4
 	maxRetries         = 3
-	autoChunkThreshold = 100 << 20 // 100 MiB：超过此大小自动启用分块
 )
 
 // ChunkedUploadResult 表示分块上传的结果。
@@ -67,10 +66,10 @@ var uploadCache sync.Map // key = absFilePath
 // preferred 为首选分块大小（默认 4 MiB），maxChunk 为最大限制（默认 64 MiB）。
 func calcChunkSize(fileSize, preferred, maxChunk int64) int64 {
 	if maxChunk <= 0 {
-		maxChunk = defaultMaxChunk
+		maxChunk = size.DefaultMaxChunkSize
 	}
 	if preferred <= 0 {
-		preferred = defaultChunkSize
+		preferred = size.DefaultChunkSize
 	}
 	chunkSize := min(preferred, maxChunk)
 	if fileSize > 0 {
@@ -116,7 +115,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	}
 	maxChunk := c.MaxChunkSize
 	if maxChunk <= 0 {
-		maxChunk = defaultMaxChunk
+		maxChunk = size.DefaultMaxChunkSize
 	}
 
 	file, err := os.Open(localPath)
@@ -275,6 +274,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	if initResult.ChunkSize > 0 {
 		chunkSize = initResult.ChunkSize
 		totalChunks = int((fileSize + chunkSize - 1) / chunkSize)
+		c.logger.Info("服务端返回的 chunk_size", "chunk_size", chunkSize, "total_chunks", totalChunks)
 	}
 
 	// 上传全部分块
@@ -331,12 +331,16 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 				f, err := os.Open(filePath)
 				mu.Unlock()
 				if err != nil {
+					c.logger.Warn("chunk 打开文件失败", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "file", filePath, "error", err)
 					return
 				}
 				f.Seek(offset, io.SeekStart)
 				n, readErr := io.ReadFull(f, chunkData)
 				f.Close()
 				if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
+					c.logger.Warn("chunk 读取失败", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "offset", offset, "error", readErr)
 					continue
 				}
 				chunkData = chunkData[:n]
@@ -354,6 +358,8 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 
 				part, err := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", chunkIdx))
 				if err != nil {
+					c.logger.Warn("chunk 创建 form 失败", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "error", err)
 					continue
 				}
 				part.Write(chunkData)
@@ -364,6 +370,8 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 
 				chunkResp, err := c.doRequest(ctx, "POST", "/upload/chunk", &buf, headers)
 				if err != nil {
+					c.logger.Warn("chunk 上传请求失败", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "error", err)
 					continue
 				}
 
@@ -372,7 +380,13 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 					ShouldRetry bool   `json:"should_retry"`
 					Message     string `json:"message"`
 				}
-				json.NewDecoder(chunkResp.Body).Decode(&chunkResult)
+				if decodeErr := json.NewDecoder(chunkResp.Body).Decode(&chunkResult); decodeErr != nil {
+					c.logger.Warn("chunk 响应解析失败", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "status", chunkResp.StatusCode,
+						"error", decodeErr)
+					chunkResp.Body.Close()
+					continue
+				}
 				chunkResp.Body.Close()
 
 				if chunkResult.Success {
@@ -389,6 +403,9 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 
 				if !chunkResult.ShouldRetry {
 					// 非重试错误（如 upload_id 过期），标记失败
+					c.logger.Warn("chunk 非重试错误", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "status", chunkResp.StatusCode,
+						"message", chunkResult.Message)
 					mu.Lock()
 					failed = true
 					mu.Unlock()
@@ -397,6 +414,8 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 				// should_retry: 继续重试
 			}
 			// 重试耗尽
+			c.logger.Warn("chunk 重试耗尽", "chunk_index", chunkIdx,
+				"upload_id", shortHash(uploadID))
 			mu.Lock()
 			failed = true
 			mu.Unlock()
@@ -443,7 +462,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	}
 	maxChunk := c.MaxChunkSize
 	if maxChunk <= 0 {
-		maxChunk = defaultMaxChunk
+		maxChunk = size.DefaultMaxChunkSize
 	}
 
 	if outputPath == "" {
@@ -646,5 +665,5 @@ func WithChunkedResume(enabled bool) ChunkedOption {
 
 // ShouldAutoChunk 判断是否应自动启用分块模式。
 func ShouldAutoChunk(fileSize int64) bool {
-	return fileSize > autoChunkThreshold
+	return fileSize > size.AutoChunkThreshold
 }

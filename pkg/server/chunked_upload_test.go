@@ -29,8 +29,7 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
-	cfg.ChunkSize = 4 << 10           // 4 KiB for testing
-	cfg.MaxChunkUploadBytes = 8 << 10 // 8 KiB
+	cfg.ChunkSize = 4 << 10 // 4 KiB for testing
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}
@@ -518,6 +517,51 @@ func TestDownloadChunk_PathTraversal(t *testing.T) {
 }
 
 // ---- Helpers ----
+
+func TestUploadComplete_SubDir(t *testing.T) {
+	url, cfgPtr, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	// filename 包含子目录
+	filename := "subdir/upload-test.txt"
+	fileData := []byte("file in subdirectory via chunked upload")
+	fileChecksum := sha256hex(fileData)
+	chunkSize := int64(4096)
+	totalChunks := 1
+
+	uploadID := initSessionEx(t, url, filename, int64(len(fileData)), chunkSize, totalChunks, fileChecksum)
+
+	// 上传分块
+	uploadChunk(t, url, uploadID, 0, fileChecksum, fileData)
+
+	// 完成
+	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
+	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if err != nil {
+		t.Fatalf("complete request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var completeResult ChunkCompleteResponse
+	json.NewDecoder(resp.Body).Decode(&completeResult)
+	if !completeResult.Success {
+		t.Fatalf("expected success, got: %v", completeResult)
+	}
+
+	// 验证文件已创建在子目录中
+	uploadsDir := cfgPtr.Load().UploadsDir
+	savedPath := filepath.Join(uploadsDir, filepath.FromSlash(filename))
+	if _, err := os.Stat(savedPath); os.IsNotExist(err) {
+		t.Fatalf("saved file not found at subdirectory path: %s", savedPath)
+	}
+
+	saved, _ := os.ReadFile(savedPath)
+	if !bytes.Equal(saved, fileData) {
+		t.Fatalf("saved file content mismatch")
+	}
+}
+
+// ---- 辅助函数 ----
 
 func initSession(t *testing.T, baseURL, filename string, totalSize int64, fileChecksum string) string {
 	t.Helper()

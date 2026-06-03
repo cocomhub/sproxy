@@ -273,6 +273,74 @@ func TestFileClient_Rename(t *testing.T) {
 	}
 }
 
+func TestFileClient_Delete_RemoteChecksum(t *testing.T) {
+	t.Parallel()
+	ts, dir := newMockServer(t)
+	// 预上传一个文件
+	if err := os.WriteFile(filepath.Join(dir, "del.txt"), []byte("delete me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewFileClient(ts.URL)
+	// 不传 localPath，依赖远端 stat 获取 checksum
+	if err := c.Delete(context.Background(), "del.txt", ""); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	// 确认文件已从服务端删除
+	if _, err := os.Stat(filepath.Join(dir, "del.txt")); !os.IsNotExist(err) {
+		t.Fatal("expected file to be deleted on server")
+	}
+}
+
+func TestFileClient_Delete_LocalCheckMatch(t *testing.T) {
+	t.Parallel()
+	ts, dir := newMockServer(t)
+	if err := os.WriteFile(filepath.Join(dir, "match.txt"), []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 创建本地文件，内容与服务端一致
+	srcDir := t.TempDir()
+	localPath := filepath.Join(srcDir, "match.txt")
+	if err := os.WriteFile(localPath, []byte("content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewFileClient(ts.URL)
+	if err := c.Delete(context.Background(), "match.txt", localPath); err != nil {
+		t.Fatalf("Delete with --check-local should succeed: %v", err)
+	}
+}
+
+func TestFileClient_Delete_LocalCheckMismatch(t *testing.T) {
+	t.Parallel()
+	ts, dir := newMockServer(t)
+	if err := os.WriteFile(filepath.Join(dir, "mismatch.txt"), []byte("remote content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 创建本地文件，内容不同
+	srcDir := t.TempDir()
+	localPath := filepath.Join(srcDir, "mismatch.txt")
+	if err := os.WriteFile(localPath, []byte("local content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewFileClient(ts.URL)
+	if err := c.Delete(context.Background(), "mismatch.txt", localPath); err == nil {
+		t.Fatal("expected error when --check-local content mismatches")
+	}
+}
+
+func TestFileClient_Delete_FileNotFound(t *testing.T) {
+	t.Parallel()
+	ts, _ := newMockServer(t)
+	c := NewFileClient(ts.URL)
+	if err := c.Delete(context.Background(), "nonexistent.txt", ""); err == nil {
+		t.Fatal("expected error for nonexistent file")
+	}
+}
+
 func TestFileClient_Rename_RequiresChecksum(t *testing.T) {
 	t.Parallel()
 	ts, _ := newMockServer(t)

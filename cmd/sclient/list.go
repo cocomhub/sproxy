@@ -17,8 +17,7 @@ var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "列出服务器上的文件",
 	Long: `列出 sproxy 服务端上的文件。
-默认列出上传根目录的顶层文件；可使用 --subdir 参数列出子目录。
-如: sclient list --subdir dir1`,
+	默认列出当前目录的顶层文件。`,
 	Run: func(cmd *cobra.Command, args []string) {
 		cli, err := buildFileClient(cmd)
 		if err != nil {
@@ -26,13 +25,16 @@ var listCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		subdir, _ := cmd.Flags().GetString("subdir")
+		var subdir string
+		if len(args) > 0 {
+			subdir = args[0]
+		}
 
 		var files []client.FileInfo
-		if strings.HasPrefix(subdir, "/") {
-			files, err = cli.List(context.Background(), subdir)
-		} else if currentDir != "" {
+		if !strings.HasPrefix(subdir, "/") {
 			files, err = cli.List(context.Background(), currentDir, subdir)
+		} else {
+			files, err = cli.List(context.Background(), subdir)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "列出文件失败: %v\n", err)

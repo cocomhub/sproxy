@@ -48,6 +48,7 @@ var uploadCmd = &cobra.Command{
 
 			// 计算远端路径：clean + 拼接 currentDir
 			remotePath := mustResolveRemotePath(filepath.ToSlash(filepath.Clean(filePath)))
+			fmt.Printf("远端路径: %s\n", remotePath)
 
 			if useChunked {
 				chunkOpts := []client.ChunkedOption{

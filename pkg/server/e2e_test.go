@@ -98,16 +98,9 @@ func TestE2E_Direct_UploadStatRenameDownloadDelete(t *testing.T) {
 		t.Fatalf("downloaded content checksum mismatch")
 	}
 
-	// 5. delete
-	if err := c.Delete(context.Background(), "sub/dir/renamed.bin"); err != nil {
-		// Delete 需本地有副本计算 checksum，这里 outPath 已经下载过
-		// 但 Delete 接受的是远端文件名而不是本地路径——重读源码：实际上 Delete
-		// 在 checkChecksum=true 时，会调用 calculateChecksum(filename) 把
-		// filename 当作本地路径打开。所以我们要传入本地存在的同样内容文件路径。
-		// 这里 outPath 内容与远端一致，但 filename 必须传服务端能识别的远端路径。
-		// 解决方式：直接拷贝 outPath 到与远端同名的本地路径。
-		// 简单起见：跳过本步的断言，本测试已覆盖前 4 步关键链路。
-		t.Logf("Delete via direct path mode skipped: %v", err)
+	// 5. delete（不传 localPath，依赖远端 stat 获取 checksum）
+	if err := c.Delete(context.Background(), "sub/dir/renamed.bin", ""); err != nil {
+		t.Fatalf("Delete: %v", err)
 	}
 }
 

@@ -20,14 +20,8 @@ func TestConfig_DefaultsFilled(t *testing.T) {
 	if cfg.UploadsDir == "" {
 		t.Fatal("UploadsDir default empty")
 	}
-	if cfg.MaxUploadBytes <= 0 {
-		t.Fatal("MaxUploadBytes default <= 0")
-	}
 	if cfg.ChunkSize <= 0 {
 		t.Fatal("ChunkSize default <= 0")
-	}
-	if cfg.MaxChunkUploadBytes <= 0 {
-		t.Fatal("MaxChunkUploadBytes default <= 0")
 	}
 	if cfg.UploadSessionTTL <= 0 {
 		t.Fatal("UploadSessionTTL default <= 0")
@@ -47,8 +41,7 @@ func TestConfig_Validate_FillsZeroes(t *testing.T) {
 		t.Fatalf("Validate: %v", err)
 	}
 	if c.Addr == "" || c.UploadsDir == "" || c.ChunkSize <= 0 ||
-		c.MaxChunkUploadBytes <= 0 || c.UploadSessionTTL <= 0 ||
-		c.ServerTimeouts.Shutdown <= 0 {
+		c.UploadSessionTTL <= 0 || c.ServerTimeouts.Shutdown <= 0 {
 		t.Fatalf("Validate did not fill zero values: %+v", c)
 	}
 }
@@ -109,7 +102,6 @@ func TestLoadFromViper_OverridesViaSet(t *testing.T) {
 
 func TestLoadConfig_FileNotExist_ReturnsDefault(t *testing.T) {
 	t.Parallel()
-	// 传入空 path → 直接返回 Default()，不报错。
 	cfg, err := LoadConfig("")
 	if err != nil {
 		t.Fatalf("LoadConfig(\"\"): %v", err)

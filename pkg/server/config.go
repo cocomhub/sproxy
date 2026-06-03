@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -34,9 +35,10 @@ type ServerTimeouts struct {
 }
 
 type Config struct {
-	Addr           string          `yaml:"addr" mapstructure:"addr"`
-	UploadsDir     string          `yaml:"uploads_dir" mapstructure:"uploads_dir"`
-	MaxUploadBytes int64           `yaml:"max_upload_bytes" mapstructure:"max_upload_bytes"`
+	Addr       string `yaml:"addr" mapstructure:"addr"`
+	UploadsDir string `yaml:"uploads_dir" mapstructure:"uploads_dir"`
+	// MaxUploadBytes 已移至 internal/size.UploadBodyLimit（1 GiB 硬限制），不可配置。
+	// MaxChunkUploadBytes 已移至 internal/size.DefaultChunkBodyLimit（64 MiB 硬限制），不可配置。
 	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`
 	LogLevel       string          `yaml:"log_level" mapstructure:"log_level"`
 	LogFormat      string          `yaml:"log_format" mapstructure:"log_format"`
@@ -47,17 +49,15 @@ type Config struct {
 	RateLimit      RateLimitConfig `yaml:"rate_limit" mapstructure:"rate_limit"`
 
 	// 分块上传配置
-	ChunkSize           int64         `yaml:"chunk_size" mapstructure:"chunk_size"`
-	MaxChunkSize        int64         `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
-	MaxChunkUploadBytes int64         `yaml:"max_chunk_upload_bytes" mapstructure:"max_chunk_upload_bytes"`
-	UploadSessionTTL    time.Duration `yaml:"upload_session_ttl" mapstructure:"upload_session_ttl"`
+	ChunkSize        int64         `yaml:"chunk_size" mapstructure:"chunk_size"`
+	MaxChunkSize     int64         `yaml:"max_chunk_size" mapstructure:"max_chunk_size"` // 仅 sclient 使用；服务端按 DefaultChunkBodyLimit 限制
+	UploadSessionTTL time.Duration `yaml:"upload_session_ttl" mapstructure:"upload_session_ttl"`
 }
 
 func Default() *Config {
 	return &Config{
-		Addr:           ":18083",
-		UploadsDir:     "./uploads",
-		MaxUploadBytes: 1 << 30, // 1 GiB
+		Addr:       ":18083",
+		UploadsDir: "./uploads",
 		ServerTimeouts: ServerTimeouts{
 			Shutdown: 30 * time.Second,
 		},
@@ -65,9 +65,8 @@ func Default() *Config {
 			Requests: 10,
 			Window:   time.Second,
 		},
-		ChunkSize:           4 << 20,        // 4 MiB
-		MaxChunkUploadBytes: 8 << 20,        // 8 MiB
-		UploadSessionTTL:    24 * time.Hour, // 24h
+		ChunkSize:        size.DefaultChunkSize,
+		UploadSessionTTL: 24 * time.Hour,
 	}
 }
 
@@ -80,10 +79,7 @@ func (c *Config) Validate() error {
 		c.UploadsDir = "./uploads"
 	}
 	if c.ChunkSize <= 0 {
-		c.ChunkSize = 4 << 20
-	}
-	if c.MaxChunkUploadBytes <= 0 {
-		c.MaxChunkUploadBytes = 8 << 20
+		c.ChunkSize = size.DefaultChunkSize
 	}
 	if c.UploadSessionTTL <= 0 {
 		c.UploadSessionTTL = 24 * time.Hour
