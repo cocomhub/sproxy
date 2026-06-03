@@ -32,16 +32,18 @@ type ChunkedUploadSession struct {
 
 // UploadStore 管理分块上传会话的持久化与并发安全。
 type UploadStore struct {
-	mu         sync.RWMutex
-	writeMu    sync.Mutex // 串行化 writeSessionJSON，防止 Windows rename 竞争
-	baseDir    string     // <uploadsDir>/.__chunked__/
-	sessions   map[string]*ChunkedUploadSession
-	persistCh  chan string   // uploadID → 异步持久化
-	stopCh     chan struct{} // 关闭后台 goroutine
-	stopOnce   sync.Once     // 保证 Stop 幂等
-	wg         sync.WaitGroup
-	sessionTTL time.Duration // 未完成上传会话的保留时间
-	logger     *slog.Logger
+	mu          sync.RWMutex
+	writeMu     sync.Mutex // 串行化 writeSessionJSON，防止 Windows rename 竞争
+	baseDir     string     // <uploadsDir>/.__chunked__/
+	sessions    map[string]*ChunkedUploadSession
+	fileLocks   map[string]*sync.RWMutex // 按 uploadID 保护的 chunk 文件读写锁
+	fileLocksMu sync.Mutex               // 保护 fileLocks map 本身
+	persistCh   chan string              // uploadID → 异步持久化
+	stopCh      chan struct{}            // 关闭后台 goroutine
+	stopOnce    sync.Once                // 保证 Stop 幂等
+	wg          sync.WaitGroup
+	sessionTTL  time.Duration // 未完成上传会话的保留时间
+	logger      *slog.Logger
 }
 
 const (
@@ -65,6 +67,7 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	us := &UploadStore{
 		baseDir:    storeDir,
 		sessions:   make(map[string]*ChunkedUploadSession),
+		fileLocks:  make(map[string]*sync.RWMutex),
 		persistCh:  make(chan string, 64),
 		stopCh:     make(chan struct{}),
 		sessionTTL: sessionTTL,
@@ -170,21 +173,26 @@ func (us *UploadStore) GetSessionByFilename(filename string) *ChunkedUploadSessi
 // MarkChunkReceived 标记指定分块为已接收并持久化。
 func (us *UploadStore) MarkChunkReceived(uploadID string, chunkIndex int, checksum string) error {
 	us.mu.Lock()
-	defer us.mu.Unlock()
 
 	s, ok := us.sessions[uploadID]
 	if !ok {
+		us.mu.Unlock()
 		return fmt.Errorf("upload_id 不存在: %s", uploadID)
 	}
 	if chunkIndex < 0 || chunkIndex >= s.TotalChunks {
+		us.mu.Unlock()
 		return fmt.Errorf("chunk_index %d 超出范围 [0, %d)", chunkIndex, s.TotalChunks)
 	}
 
 	s.ReceivedChunks[chunkIndex] = true
 	s.ChunkChecksums[chunkIndex] = checksum
 
+	received := countReceived(s.ReceivedChunks)
+	total := s.TotalChunks
+	us.mu.Unlock()
+
 	us.logger.Debug("chunk 已接收", "upload_id", uploadID, "chunk_index", chunkIndex,
-		"checksum", shortHash(checksum), "received", countReceived(s.ReceivedChunks), "total", s.TotalChunks)
+		"checksum", shortHash(checksum), "received", received, "total", total)
 
 	// 异步持久化
 	select {
@@ -255,10 +263,43 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 	delete(us.sessions, uploadID)
 	us.mu.Unlock()
 
+	us.fileLocksMu.Lock()
+	delete(us.fileLocks, uploadID)
+	us.fileLocksMu.Unlock()
+
 	dir := filepath.Join(us.baseDir, uploadID)
 	if err := os.RemoveAll(dir); err != nil {
 		us.logger.Warn("删除会话目录失败", "upload_id", uploadID, "error", err)
 	}
+}
+
+// lockChunkIO 获取 chunk 文件写入锁（读锁）。
+// uploadChunk 在写入 chunk 文件前调用，允许多个 uploadChunk 并发写入不同 chunk。
+func (us *UploadStore) lockChunkIO(uploadID string) func() {
+	us.fileLocksMu.Lock()
+	f, ok := us.fileLocks[uploadID]
+	if !ok {
+		f = new(sync.RWMutex)
+		us.fileLocks[uploadID] = f
+	}
+	us.fileLocksMu.Unlock()
+	f.RLock()
+	return f.RUnlock
+}
+
+// lockChunkMerge 获取 chunk 文件合并锁（写锁）。
+// mergeOneChunk 在读取 chunk 文件前调用，排他地等待所有正在写入的 chunk 完成后才允许读取，
+// 同时阻塞新的 chunk 写入，避免读到不完整的 chunk。
+func (us *UploadStore) lockChunkMerge(uploadID string) func() {
+	us.fileLocksMu.Lock()
+	f, ok := us.fileLocks[uploadID]
+	if !ok {
+		f = new(sync.RWMutex)
+		us.fileLocks[uploadID] = f
+	}
+	us.fileLocksMu.Unlock()
+	f.Lock()
+	return f.Unlock
 }
 
 // persistLoop 异步持久化 goroutine。
@@ -355,21 +396,42 @@ func (us *UploadStore) cleanupLoop() {
 }
 
 // cleanupExpired 清理过期未完成的 session。
+// 先持锁收集过期 ID，释放锁后再逐一 os.RemoveAll，避免持锁执行 I/O。
 func (us *UploadStore) cleanupExpired() {
-	us.mu.Lock()
-	defer us.mu.Unlock()
+	var expired []string
 
+	us.mu.Lock()
 	now := time.Now()
 	for id, s := range us.sessions {
 		if !s.Completed && now.After(s.ExpiresAt) {
 			us.logger.Info("清理过期上传会话", "upload_id", id, "filename", s.Filename, "expires_at", s.ExpiresAt)
 			delete(us.sessions, id)
-			dir := filepath.Join(us.baseDir, id)
-			if err := os.RemoveAll(dir); err != nil {
-				us.logger.Warn("清理过期会话目录失败", "upload_id", id, "error", err)
-			}
+			expired = append(expired, id)
 		}
 	}
+	us.mu.Unlock()
+
+	for _, id := range expired {
+		dir := filepath.Join(us.baseDir, id)
+		if err := os.RemoveAll(dir); err != nil {
+			us.logger.Warn("清理过期会话目录失败", "upload_id", id, "error", err)
+		}
+	}
+}
+
+// CleanupSessionAfter 在指定延迟后清理 session 目录。
+// 受 UploadStore.wg 追踪，支持通过 stopCh 提前中止。
+func (us *UploadStore) CleanupSessionAfter(uploadID string, delay time.Duration) {
+	us.wg.Go(func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			us.DeleteSession(uploadID)
+		case <-us.stopCh:
+			return
+		}
+	})
 }
 
 // recoverSessions 从磁盘恢复未完成的 session。

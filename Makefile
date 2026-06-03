@@ -16,7 +16,6 @@ CONFIG_FILE ?= $(BUILD_DIR)/config.yaml
 
 GOFMT=gofmt
 
-
 # OS binary suffix
 ifeq ($(OS),Windows_NT)
 EXE := .exe
@@ -24,38 +23,16 @@ else
 EXE :=
 endif
 
-# Discover main packages under ./cmd/*
-CMD_IMPORTS := $(shell go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./cmd/* 2>/dev/null | sed '/^$$/d')
-CMD_NAMES := $(notdir $(CMD_IMPORTS))
-# all .go files that are not auto-generated and should be auto-formatted and linted.
-ALL_SRC = $(shell find . -name '*.go' \
-				   -not -name 'doc.go' \
-				   -not -name '_*' \
-				   -not -name '.*' \
-				   -not -name 'mocks*' \
-				   -not -name 'model.pb.go' \
-				   -not -name 'model_test.pb.go' \
-				   -not -name 'storage_test.pb.go' \
-				   -not -path './examples/*' \
-				   -not -path './vendor/*' \
-				   -not -path '*/mocks/*' \
-				   -not -path '*/*-gen/*' \
-				   -type f | \
-				sort)
+# Static list of commands (cross-platform: no shell for-loop needed).
+CMD_NAMES := sproxy sclient
+# all .go files using go list (cross-platform).
+ALL_SRC = $(shell go list -f '{{range .GoFiles}}{{$$.Dir}}/{{.}} {{end}}' ./...)
 
 .PHONY: build build-%
 
 build: fmt
 	@mkdir -p $(BIN_DIR)
-	@set -e; \
-	if [ -z "$(CMD_NAMES)" ]; then \
-	  echo "No commands found under ./cmd"; \
-	else \
-	  for name in $(CMD_NAMES); do \
-	    echo "Building $$name"; \
-	    GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -ldflags "$(GO_LDFLAGS)" -o $(BIN_DIR)/$$name$(EXE) ./cmd/$$name ; \
-	  done; \
-	fi
+	@$(foreach name,$(CMD_NAMES),echo "Building $(name)"; GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -ldflags "$(GO_LDFLAGS)" -o $(BIN_DIR)/$(name)$(EXE) ./cmd/$(name);)
 
 build-%: fmt
 	@mkdir -p $(BIN_DIR)
@@ -86,9 +63,15 @@ fix:
 clean:
 	rm -rf $(BIN_DIR)
 
+.PHONY: vet
+
+vet:
+	@echo Running go vet ./...
+	@$(GO) vet ./...
+
 .PHONY: test
 
-test:
+test: vet
 	@echo Running go test -race ./...
 	@$(GO) test -race ./...
 

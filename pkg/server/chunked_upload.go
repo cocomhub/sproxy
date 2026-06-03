@@ -220,6 +220,10 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 
 	// 写入 chunk 文件并计算 SHA-256
 	chunkPath := h.uploadStore.ChunkFilePath(uploadID, chunkIndex)
+	// 获取 chunk IO 读锁：允许多个 uploadChunk 并发写入不同 chunk，
+	// 但阻塞 mergeOneChunk 的写锁，直到本 chunk 重命名完成。
+	unlockIO := h.uploadStore.lockChunkIO(uploadID)
+	defer unlockIO()
 	// 确保 session 目录存在
 	_ = os.MkdirAll(filepath.Dir(chunkPath), 0755)
 
@@ -319,6 +323,11 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 
 	// 2. 按 filename 查找未完成的 session
 	if filename != "" {
+		// 防御性校验：防止路径穿越
+		if _, err := ValidateFilePath(filename); err != nil {
+			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+			return
+		}
 		session := h.uploadStore.GetSessionByFilename(filename)
 		if session != nil {
 			missing := MissingChunks(session)
@@ -488,11 +497,8 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("标记 session 完成失败", "upload_id", req.UploadID, "error", err)
 	}
 
-	// 异步清理 session 目录
-	go func() {
-		time.Sleep(5 * time.Second)
-		h.uploadStore.DeleteSession(req.UploadID)
-	}()
+	// 异步清理 session 目录（由 wg 追踪，支持优雅停止）
+	h.uploadStore.CleanupSessionAfter(req.UploadID, 5*time.Second)
 
 	h.logger.Info("文件合并完成", "filename", session.Filename, "checksum", shortHash(finalChecksum), "size", session.TotalSize)
 	sendJSONResponse(w, ChunkCompleteResponse{
@@ -504,8 +510,12 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 }
 
 // mergeOneChunk 读取单个 chunk 文件并把内容拷贝到 dst。
+// 获取 chunk 合并写锁：等待所有正在写入的 chunk 完成后才允许读取，
+// 阻塞新的 chunk 写入，避免读到不完整的 chunk。
 func (h *Handlers) mergeOneChunk(uploadID string, idx int, dst io.Writer) error {
 	chunkPath := h.uploadStore.ChunkFilePath(uploadID, idx)
+	unlockMerge := h.uploadStore.lockChunkMerge(uploadID)
+	defer unlockMerge()
 	chunkFile, err := os.Open(chunkPath)
 	if err != nil {
 		return fmt.Errorf("打开 chunk %d 失败: %w", idx, err)

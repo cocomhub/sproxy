@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
@@ -289,7 +290,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string, chunkSize, fileSize int64, totalChunks int, fileChecksum, filename string, chunkIndices []int, concurrency int) (*ChunkedUploadResult, error) {
 	var (
 		mu       sync.Mutex
-		failed   bool
+		failed   atomic.Bool
 		wg       sync.WaitGroup
 		progress int64
 	)
@@ -307,7 +308,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 	close(taskCh)
 
 	for task := range taskCh {
-		if failed {
+		if failed.Load() {
 			break
 		}
 		idx := task.index
@@ -320,7 +321,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 			defer func() { <-sem }()
 
 			for range maxRetries {
-				if failed {
+				if failed.Load() {
 					return
 				}
 				// 读取分块数据
@@ -335,7 +336,12 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 						"upload_id", shortHash(uploadID), "file", filePath, "error", err)
 					return
 				}
-				f.Seek(offset, io.SeekStart)
+				if _, err := f.Seek(offset, io.SeekStart); err != nil {
+					c.logger.Warn("chunk seek 失败", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "offset", offset, "error", err)
+					f.Close()
+					continue
+				}
 				n, readErr := io.ReadFull(f, chunkData)
 				f.Close()
 				if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
@@ -352,9 +358,21 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 				// 构造 multipart 请求
 				var buf bytes.Buffer
 				mw := multipart.NewWriter(&buf)
-				mw.WriteField("upload_id", uploadID)
-				mw.WriteField("chunk_index", fmt.Sprintf("%d", chunkIdx))
-				mw.WriteField("chunk_checksum", chunkChecksum)
+				if err := mw.WriteField("upload_id", uploadID); err != nil {
+					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "error", err)
+					continue
+				}
+				if err := mw.WriteField("chunk_index", fmt.Sprintf("%d", chunkIdx)); err != nil {
+					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "error", err)
+					continue
+				}
+				if err := mw.WriteField("chunk_checksum", chunkChecksum); err != nil {
+					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "error", err)
+					continue
+				}
 
 				part, err := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", chunkIdx))
 				if err != nil {
@@ -362,7 +380,11 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 						"upload_id", shortHash(uploadID), "error", err)
 					continue
 				}
-				part.Write(chunkData)
+				if _, err := part.Write(chunkData); err != nil {
+					c.logger.Warn("chunk 写入 form part 失败", "chunk_index", chunkIdx,
+						"upload_id", shortHash(uploadID), "error", err)
+					continue
+				}
 				mw.Close()
 
 				headers := make(http.Header)
@@ -406,9 +428,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 					c.logger.Warn("chunk 非重试错误", "chunk_index", chunkIdx,
 						"upload_id", shortHash(uploadID), "status", chunkResp.StatusCode,
 						"message", chunkResult.Message)
-					mu.Lock()
-					failed = true
-					mu.Unlock()
+					failed.Store(true)
 					return
 				}
 				// should_retry: 继续重试
@@ -416,15 +436,13 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 			// 重试耗尽
 			c.logger.Warn("chunk 重试耗尽", "chunk_index", chunkIdx,
 				"upload_id", shortHash(uploadID))
-			mu.Lock()
-			failed = true
-			mu.Unlock()
+			failed.Store(true)
 		}(idx)
 	}
 
 	wg.Wait()
 
-	if failed {
+	if failed.Load() {
 		return nil, fmt.Errorf("上传失败：部分分块上传失败，可使用 --resume 续传")
 	}
 

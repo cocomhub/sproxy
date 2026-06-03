@@ -381,7 +381,9 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 		w.Header().Set("Content-Type", frameContentType)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(errMetaFrame)
-		_, _ = EncryptStream(h.key, strings.NewReader(err.Error()), w) //nolint:errcheck
+		if _, err := EncryptStream(h.key, strings.NewReader(err.Error()), w); err != nil {
+			h.logger.Error("隧道错误响应加密失败", "error", err)
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -408,7 +410,9 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 	if _, err := w.Write(metaFrame); err != nil {
 		return
 	}
-	_, _ = EncryptStream(h.key, resp.Body, w) //nolint:errcheck
+	if _, err := EncryptStream(h.key, resp.Body, w); err != nil {
+		h.logger.Error("隧道响应加密失败", "error", err)
+	}
 }
 
 // streamRecorder 是一个自定义 http.ResponseWriter，将 handler 的输出通过 Pipe 流式输出，
@@ -540,7 +544,13 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 
 	// 3. POST：metaFrame + encrypted stream
 	combined := io.MultiReader(bytes.NewReader(metaFrame), pr)
-	httpResp, err := c.HTTPClient.Post(c.TunnelURL, frameContentType, combined)
+	tunnelReq, err := http.NewRequestWithContext(req.Context(), "POST", c.TunnelURL, combined)
+	if err != nil {
+		pr.Close()
+		return nil, fmt.Errorf("create tunnel request: %w", err)
+	}
+	tunnelReq.Header.Set("Content-Type", frameContentType)
+	httpResp, err := c.HTTPClient.Do(tunnelReq)
 	if err != nil {
 		return nil, fmt.Errorf("post request: %w", err)
 	}

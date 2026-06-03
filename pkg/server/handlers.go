@@ -229,11 +229,6 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tmpPath := tempFile.Name()
-	if err != nil {
-		logger.Error("创建文件失败", "error", err.Error(), "filename", remotePath)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建文件失败"}, http.StatusInternalServerError)
-		return
-	}
 	// .tmp 文件统一在错误路径或 rename 成功后由 defer os.Remove 兜底清理；
 	// rename 成功后 .tmp 已不在原位，os.Remove 会无声失败，不影响成品文件。
 	// 不使用 defer tempFile.Close()，因为正常路径需要在 rename 前显式 Close，

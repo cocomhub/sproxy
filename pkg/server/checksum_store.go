@@ -17,6 +17,7 @@ import (
 // 持久化每个文件的 SHA-256 摘要，供 upload/download/delete 操作复用。
 type ChecksumStore struct {
 	mu        sync.RWMutex
+	saveMu    sync.Mutex // 串行化 save 的 WriteFile + Rename，防止并发写 .tmp 在 Windows 上 Rename 失败
 	storePath string
 	checksums map[string]string // filename -> sha256 hex
 	logger    *slog.Logger
@@ -72,9 +73,10 @@ func (cs *ChecksumStore) Get(filename string) (string, bool) {
 // Set 写入一条 checksum 记录并持久化到磁盘。
 func (cs *ChecksumStore) Set(filename, checksum string) {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	cs.checksums[filename] = checksum
-	if err := cs.saveLocked(); err != nil {
+	cs.mu.Unlock()
+
+	if err := cs.save(); err != nil {
 		cs.logger.Error("checksum 存储持久化失败", "op", "set", "filename", filename, "error", err)
 	}
 }
@@ -82,9 +84,10 @@ func (cs *ChecksumStore) Set(filename, checksum string) {
 // Delete 删除指定文件的 checksum 记录并持久化。
 func (cs *ChecksumStore) Delete(filename string) {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	delete(cs.checksums, filename)
-	if err := cs.saveLocked(); err != nil {
+	cs.mu.Unlock()
+
+	if err := cs.save(); err != nil {
 		cs.logger.Error("checksum 存储持久化失败", "op", "delete", "filename", filename, "error", err)
 	}
 }
@@ -93,14 +96,16 @@ func (cs *ChecksumStore) Delete(filename string) {
 // 如果 from 不存在则是 no-op（不报错）；如果 to 已存在则被覆盖（与 os.Rename 行为对齐）。
 func (cs *ChecksumStore) Rename(from, to string) {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	v, ok := cs.checksums[from]
 	if !ok {
+		cs.mu.Unlock()
 		return
 	}
 	delete(cs.checksums, from)
 	cs.checksums[to] = v
-	if err := cs.saveLocked(); err != nil {
+	cs.mu.Unlock()
+
+	if err := cs.save(); err != nil {
 		cs.logger.Error("checksum 存储持久化失败", "op", "rename", "from", from, "to", to, "error", err)
 	}
 }
@@ -108,13 +113,14 @@ func (cs *ChecksumStore) Rename(from, to string) {
 // DeletePrefix 删除指定前缀的所有 checksum 记录（用于目录删除）。
 func (cs *ChecksumStore) DeletePrefix(prefix string) {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	for key := range cs.checksums {
 		if strings.HasPrefix(key, prefix) {
 			delete(cs.checksums, key)
 		}
 	}
-	if err := cs.saveLocked(); err != nil {
+	cs.mu.Unlock()
+
+	if err := cs.save(); err != nil {
 		cs.logger.Error("checksum 存储持久化失败", "op", "deletePrefix", "prefix", prefix, "error", err)
 	}
 }
@@ -128,11 +134,19 @@ func (cs *ChecksumStore) GetAll() map[string]string {
 	return result
 }
 
-// saveLocked 必须在持有 cs.mu 的情况下调用：
-// 先写入临时文件再用 os.Rename 原子替换，避免进程中途崩溃导致 .checksums.json 损坏。
-// 即便 Rename 失败，也保证清理 tmp 文件不残留。
-func (cs *ChecksumStore) saveLocked() error {
-	data, err := json.MarshalIndent(cs.checksums, "", "  ")
+// save 将 checksums map 持久化到磁盘。
+// 先持 RLock 深拷贝 map，释放锁后再做 I/O，避免持锁执行磁盘操作。
+// 持 saveMu 串行化磁盘写入，防止 Windows 上并发 Rename 覆盖已有的 .checksums.json 失败。
+func (cs *ChecksumStore) save() error {
+	cs.saveMu.Lock()
+	defer cs.saveMu.Unlock()
+
+	cs.mu.RLock()
+	snapshot := make(map[string]string, len(cs.checksums))
+	maps.Copy(snapshot, cs.checksums)
+	cs.mu.RUnlock()
+
+	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return err
 	}
