@@ -102,7 +102,7 @@ var mkdirCmd = &cobra.Command{
 		}
 
 		dirname := mustResolveRemotePath(args[0])
-		if err := cli.Mkdir(context.TODO(), dirname); err != nil {
+		if err := cli.Mkdir(context.Background(), dirname); err != nil {
 			fmt.Fprintf(os.Stderr, "创建目录失败: %v\n", err)
 			os.Exit(1)
 		}
@@ -127,7 +127,7 @@ var rmdirCmd = &cobra.Command{
 		dirname := mustResolveRemotePath(args[0])
 
 		// 检查目录是否为空：先 list 子目录
-		entries, listErr := cli.List(context.TODO(), dirname)
+		entries, listErr := cli.List(context.Background(), dirname)
 		force, _ := cmd.Flags().GetBool("force")
 
 		if listErr == nil && len(entries) > 0 && !force {
@@ -142,7 +142,7 @@ var rmdirCmd = &cobra.Command{
 			}
 		}
 
-		if err := cli.Rmdir(context.TODO(), dirname); err != nil {
+		if err := cli.Rmdir(context.Background(), dirname); err != nil {
 			fmt.Fprintf(os.Stderr, "删除目录失败: %v\n", err)
 			os.Exit(1)
 		}

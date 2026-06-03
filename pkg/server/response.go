@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 )
 
@@ -55,5 +56,7 @@ type ChunkCompleteResponse struct {
 func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	_ = json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		slog.Default().Warn("Encode JSON response failed", "error", err)
+	}
 }

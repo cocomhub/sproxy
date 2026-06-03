@@ -61,8 +61,6 @@ type uploadCacheEntry struct {
 	fileChecksum string
 }
 
-var uploadCache sync.Map // key = absFilePath
-
 // calcChunkSize 根据文件大小自适应计算分块大小。
 // preferred 为首选分块大小（默认 4 MiB），maxChunk 为最大限制（默认 64 MiB）。
 func calcChunkSize(fileSize, preferred, maxChunk int64) int64 {
@@ -135,7 +133,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	// 检查 checksum 缓存
 	var fileChecksum string
 	absPath, _ := filepath.Abs(localPath)
-	if cached, ok := uploadCache.Load(absPath); ok {
+	if cached, ok := c.uploadCache.Load(absPath); ok {
 		entry := cached.(*uploadCacheEntry)
 		if entry.fileSize == fileSize && entry.modTime.Equal(modTime) {
 			fileChecksum = entry.fileChecksum
@@ -151,7 +149,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 		}
 		fileChecksum = hex.EncodeToString(h.Sum(nil))
 		// 写入缓存
-		uploadCache.Store(absPath, &uploadCacheEntry{
+		c.uploadCache.Store(absPath, &uploadCacheEntry{
 			fileSize:     fileSize,
 			modTime:      modTime,
 			fileChecksum: fileChecksum,

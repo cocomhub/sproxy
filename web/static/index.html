@@ -26,6 +26,8 @@ h1 { margin: 0 0 20px; font-size: 24px; }
 .btn-danger:hover { background: #c0392b; }
 .btn-secondary { background: #95a5a6; color: #fff; }
 .btn-secondary:hover { background: #7f8c8d; }
+.btn-warning { background: #f39c12; color: #fff; }
+.btn-warning:hover { background: #e67e22; }
 .btn-sm { padding: 4px 10px; font-size: 13px; }
 .btn:disabled { opacity: .6; cursor: not-allowed; }
 table { width: 100%; border-collapse: collapse; }
@@ -683,6 +685,7 @@ async function refreshList() {
           '<td class="file-actions">' +
           '<button class="btn btn-primary btn-sm" onclick="downloadFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">下载</button>' +
           '<button class="btn btn-danger btn-sm" onclick="deleteFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">删除</button>' +
+          '<button class="btn btn-warning btn-sm" onclick="renameFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">重命名</button>' +
           '</td></tr>';
       }
     }
@@ -931,6 +934,45 @@ async function deleteFile(name, checksum) {
     }
   } catch(e) {
     showToast('删除失败: ' + e.message, 'error');
+  }
+}
+
+// --- 重命名（带 checksum，走 POST /rename）---
+async function renameFile(name, checksum) {
+  if (!checksum) {
+    showToast('缺少 checksum，无法校验完整性', 'error');
+    return;
+  }
+  var newName = prompt('新的文件名（路径）:', name);
+  if (!newName || newName === name) return;
+
+  try {
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('POST', '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), { 'X-File-Checksum': checksum }, null);
+      var data = JSON.parse(new TextDecoder().decode(result.body));
+      if (result.status >= 200 && result.status < 300 && data.success) {
+        showToast('重命名成功: ' + newName, 'success');
+        refreshList();
+      } else {
+        showToast('重命名失败: ' + (data.message || result.status), 'error');
+      }
+    } else {
+      var resp = await fetch(BASE + '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), {
+        method: 'POST',
+        headers: headers({
+          'X-File-Checksum': checksum
+        })
+      });
+      var data = await resp.json();
+      if (resp.ok && data.success) {
+        showToast('重命名成功: ' + newName, 'success');
+        refreshList();
+      } else {
+        showToast('重命名失败: ' + (data.message || resp.status), 'error');
+      }
+    }
+  } catch(e) {
+    showToast('重命名失败: ' + e.message, 'error');
   }
 }
 

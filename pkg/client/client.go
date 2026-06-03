@@ -18,6 +18,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
@@ -81,6 +82,7 @@ type FileClient struct {
 	ChunkSize    int64
 	MaxChunkSize int64
 	logger       *slog.Logger
+	uploadCache  sync.Map // key = absFilePath, value = *uploadCacheEntry
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
