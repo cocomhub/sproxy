@@ -4,6 +4,8 @@
 package server
 
 import (
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -108,5 +110,41 @@ func TestLoadConfig_FileNotExist_ReturnsDefault(t *testing.T) {
 	}
 	if cfg.Addr != ":18083" {
 		t.Fatalf("expected default, got %+v", cfg)
+	}
+}
+
+func TestSaveConfig_ToFile(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "sproxy.yaml")
+
+	cfg := Default()
+	cfg.Addr = ":19999"
+	if err := SaveConfig(cfg, path); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.Addr != ":19999" {
+		t.Fatalf("Addr mismatch: want :19999, got %q", loaded.Addr)
+	}
+}
+
+func TestSaveConfig_ReadOnlyDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("read-only dir test not supported on Windows")
+	}
+	t.Parallel()
+
+	roDir, cleanup := makeReadOnlyDir(t)
+	defer cleanup()
+
+	cfg := Default()
+	err := SaveConfig(cfg, filepath.Join(roDir, "sproxy.yaml"))
+	if err == nil {
+		t.Fatal("expected error when saving to read-only directory")
 	}
 }
