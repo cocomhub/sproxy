@@ -50,7 +50,19 @@ type Handlers struct {
 	buildAt       string
 	checksumStore *ChecksumStore
 	uploadStore   *UploadStore
+	tunnelHandler http.Handler
 	logger        *slog.Logger
+}
+
+// TunnelUpdater 是隧道处理器密钥热替换接口。
+// cmd/sproxy 的 SIGHUP 处理流程通过此接口在运行时替换隧道密钥。
+type TunnelUpdater interface {
+	UpdateKey(key []byte)
+}
+
+// TunnelHandler 返回隧道处理器，用于 SIGHUP 时热替换密钥。
+func (h *Handlers) TunnelHandler() http.Handler {
+	return h.tunnelHandler
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -101,7 +113,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	}
 	apiHandler = CORSMiddleware(cfg.CORS, log.With("component", "cors"))(apiHandler)
 
-	var tunnelHandler http.Handler = tunnel.NewLocalHandler(tunnelKey, requestLogMiddleware(log.With("component", "request"), apiHandler), log.With("component", "tunnel"))
+	h.tunnelHandler = tunnel.NewLocalHandler(tunnelKey, requestLogMiddleware(log.With("component", "request"), apiHandler), log.With("component", "tunnel"))
 
 	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
 	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
@@ -121,7 +133,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
-	mux.Handle("POST /tunnel", tunnelHandler)
+	mux.Handle("POST /tunnel", h.tunnelHandler)
 
 	// Web UI
 	subFS, err := fs.Sub(web.StaticFS, "static")

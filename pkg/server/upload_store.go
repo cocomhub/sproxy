@@ -99,10 +99,30 @@ func (us *UploadStore) Health() error {
 	return nil
 }
 
-// Stop 停止后台 goroutine 并等待结束。多次调用是安全的（幂等）。
+// Stop 停止后台 goroutine 并等待结束。
+//
+// 优雅停止流程（draining）：
+//  1. 关闭 persistCh（不再接受新请求）
+//  2. 排空 persistCh：处理所有已入列的持久化请求
+//  3. 关闭 stopCh 通知 cleanupLoop 退出
+//  4. 等待 wg 完成
+//
+// 多次调用是安全的（幂等）。
 func (us *UploadStore) Stop() {
 	us.stopOnce.Do(func() {
+		// 1. 关闭 persistCh，不再接受新请求
+		//    通过 drain 模式确保所有已入列的 session 在退出前被持久化
+		close(us.persistCh)
+
+		// 2. 排空 persistCh
+		for uploadID := range us.persistCh {
+			us.persistSession(uploadID)
+		}
+
+		// 3. 关闭 stopCh 通知 cleanupLoop 退出
 		close(us.stopCh)
+
+		// 4. 等待所有 goroutine 完成
 		us.wg.Wait()
 	})
 }
@@ -207,12 +227,17 @@ func (us *UploadStore) MarkChunkReceived(uploadID string, chunkIndex int, checks
 	us.logger.Debug("chunk 已接收", "upload_id", uploadID, "chunk_index", chunkIndex,
 		"checksum", shortid.ShortHash(checksum), "received", received, "total", total)
 
-	// 异步持久化
+	// 异步持久化（检查 UploadStore 是否已停止）
 	select {
-	case us.persistCh <- uploadID:
+	case <-us.stopCh:
+		// 已停止，丢弃持久化请求
 	default:
-		// 通道满时同步持久化
-		go us.persistSession(uploadID)
+		select {
+		case us.persistCh <- uploadID:
+		default:
+			// 通道满时同步持久化
+			go us.persistSession(uploadID)
+		}
 	}
 	return nil
 }
@@ -253,9 +278,14 @@ func (us *UploadStore) CompleteSession(uploadID string) error {
 	us.logger.Info("上传会话已完成", "upload_id", uploadID, "file_name", s.Filename,
 		"received", countReceived(s.ReceivedChunks), "total", s.TotalChunks)
 	select {
-	case us.persistCh <- uploadID:
+	case <-us.stopCh:
+		// 已停止，不触发持久化
 	default:
-		go us.persistSession(uploadID)
+		select {
+		case us.persistCh <- uploadID:
+		default:
+			go us.persistSession(uploadID)
+		}
 	}
 	return nil
 }
@@ -316,6 +346,8 @@ func (us *UploadStore) lockChunkMerge(uploadID string) func() {
 }
 
 // persistLoop 异步持久化 goroutine。
+//
+// 使用 for-range 从 persistCh 消费，当 persistCh 被关闭时自动退出。
 func (us *UploadStore) persistLoop() {
 	defer us.wg.Done()
 	defer func() {
@@ -323,13 +355,8 @@ func (us *UploadStore) persistLoop() {
 			us.logger.Error("persistLoop panic", "panic", r)
 		}
 	}()
-	for {
-		select {
-		case <-us.stopCh:
-			return
-		case uploadID := <-us.persistCh:
-			us.persistSession(uploadID)
-		}
+	for uploadID := range us.persistCh {
+		us.persistSession(uploadID)
 	}
 }
 

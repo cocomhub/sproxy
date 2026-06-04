@@ -32,7 +32,13 @@
       "Bash(go *)",
       "Bash(Get-ChildItem -Recurse -Depth 3 -Name D:\\\\workdir\\\\leon\\\\cocomhub\\\\sproxy)",
       "Bash(Sort-Object)",
-      "Bash(make build *)"
+      "Bash(make build *)",
+      "PowerShell(Get-Command *)",
+      "PowerShell(Set-Content *)",
+      "PowerShell(go build *)",
+      "PowerShell(go *)",
+      "PowerShell(go test *)",
+      "PowerShell(go vet *)"
     ],
     "deny": []
   }

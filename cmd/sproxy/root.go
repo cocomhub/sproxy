@@ -23,8 +23,9 @@ import (
 )
 
 var (
-	cfgFile string
-	cfgPtr  atomic.Pointer[server.Config]
+	cfgFile             string
+	cfgPtr              atomic.Pointer[server.Config]
+	currentTunnelKeyHex string // 记录当前生效的 tunnel_key hex，用于 SIGHUP 轮换检测
 )
 
 var rootCmd = &cobra.Command{
@@ -97,6 +98,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("隧道密钥处理失败: %w", err)
 	}
+	currentTunnelKeyHex = cfg.TunnelKey
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -140,7 +142,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		defer close(shutdownDone)
 		for sig := range signalChan {
 			if sig == syscall.SIGHUP {
-				handleSighup(cfg, logger)
+				tunUpdater, ok := h.TunnelHandler().(server.TunnelUpdater)
+				if !ok {
+					slog.Warn("tunnel handler does not support UpdateKey")
+					handleSighup(cfg, nil)
+				} else {
+					handleSighup(cfg, tunUpdater)
+				}
 				continue
 			}
 			cancel()
@@ -154,6 +162,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 				slog.Error("shutdown error", "error", err.Error(), "timeout", shutdownTimeout)
 			}
 			shutdownCancel()
+			// http.Server 已停止 → 关闭 UploadStore 后台 goroutine
+			if err := h.Close(); err != nil {
+				slog.Warn("handlers close error", "error", err.Error())
+			}
 			return
 		}
 	}()
@@ -227,8 +239,9 @@ func resolveTunnelKey(cfg *server.Config) ([]byte, error) {
 }
 
 // handleSighup 处理 SIGHUP 信号：使用 viper 重新读取配置文件，
-// 仅 log_level/log_format/auth_token 等软配置生效。
-func handleSighup(oldCfg *server.Config, _ *slog.Logger) {
+// 仅 log_level/log_format/auth_token/tunnel_key 等软配置生效。
+// tunUpdater 为隧道密钥热替换接口；为 nil 时不替换密钥。
+func handleSighup(oldCfg *server.Config, tunUpdater server.TunnelUpdater) {
 	v := viper.GetViper()
 	if err := v.ReadInConfig(); err != nil {
 		slog.Error("SIGHUP config reload failed", "error", err)
@@ -246,8 +259,17 @@ func handleSighup(oldCfg *server.Config, _ *slog.Logger) {
 	if oldCfg.UploadsDir != newCfg.UploadsDir {
 		slog.Warn("uploads_dir 修改在 SIGHUP 后不会生效（ChecksumStore 不重建），需要重启进程", "old", oldCfg.UploadsDir, "new", newCfg.UploadsDir)
 	}
-	if oldCfg.TunnelKey != newCfg.TunnelKey {
-		slog.Warn("tunnel_key 修改在 SIGHUP 后不会生效，需要重启进程")
+	if currentTunnelKeyHex != newCfg.TunnelKey && newCfg.TunnelKey != "" && tunUpdater != nil {
+		slog.Info("tunnel_key 已变更，通过 UpdateKey 热替换",
+			"old_prefix", currentTunnelKeyHex[:8]+"...",
+			"new_prefix", newCfg.TunnelKey[:8]+"...")
+		tunnelKey, err := hex.DecodeString(newCfg.TunnelKey)
+		if err != nil {
+			slog.Error("新 tunnel_key hex 解析失败", "error", err)
+		} else {
+			tunUpdater.UpdateKey(tunnelKey)
+			currentTunnelKeyHex = newCfg.TunnelKey
+		}
 	}
 	if oldCfg.RateLimit != newCfg.RateLimit {
 		slog.Warn("rate_limit 修改在 SIGHUP 后不会生效，需要重启进程")

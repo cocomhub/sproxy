@@ -120,22 +120,24 @@ release:
   footer: |
     **完整变更日志**: https://github.com/cocomhub/sproxy/compare/{{ .PreviousTag }}...{{ .Tag }}
 
-#nfpm:
-#  - id: sproxy
-#    package_name: sproxy
-#    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-#    homepage: https://github.com/cocomhub/sproxy
-#    description: 轻量文件上传/下载/删除服务 + 加密隧道
-#    maintainer: Cocomhub Authors
-#    license: Apache-2.0
-#    formats:
-#      - deb
-#      - rpm
-#    bindir: /usr/local/bin
-#    files:
-#      - config.example.yaml: /etc/sproxy/config.yaml
-#      - docs/*.md: /usr/share/doc/sproxy/
+nfpm:
+  - id: sproxy
+    package_name: sproxy
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    homepage: https://github.com/cocomhub/sproxy
+    description: 轻量文件上传/下载/删除服务 + 加密隧道
+    maintainer: Cocomhub Authors
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/local/bin
+    files:
+      - config.example.yaml: /etc/sproxy/config.yaml
+      - docs/*.md: /usr/share/doc/sproxy/
 
+# Homebrew tap — 需要 cocomhub/homebrew-tap 仓库存在
+# 首次发布后取消注释
 #brews:
 #  - name: sproxy
 #    repository:
@@ -152,14 +154,14 @@ release:
 #      bin.install "sproxy"
 #      bin.install "sclient"
 
-#dockers:
-#  - image_templates:
-#      - "ghcr.io/cocomhub/sproxy:{{ .Version }}"
-#      - "ghcr.io/cocomhub/sproxy:latest"
-#    dockerfile: Dockerfile
-#    build_flag_templates:
-#      - "--pull"
-#      - "--label=org.opencontainers.image.created={{ .Date }}"
-#      - "--label=org.opencontainers.image.title=sproxy"
-#      - "--label=org.opencontainers.image.version={{ .Version }}"
-#      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+dockers:
+  - image_templates:
+      - "ghcr.io/cocomhub/sproxy:{{ .Version }}"
+      - "ghcr.io/cocomhub/sproxy:latest"
+    dockerfile: Dockerfile
+    build_flag_templates:
+      - "--pull"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+      - "--label=org.opencontainers.image.title=sproxy"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
