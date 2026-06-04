@@ -225,6 +225,114 @@ async function tunnelRequest(method, urlPath, headersObj, bodyBytes) {
   };
 }
 
+// --- 流式隧道下载（逐帧解密，避免大文件 OOM）---
+async function tunnelDownloadStream(name) {
+  const key = await getTunnelCryptoKey();
+  if (!key) throw new Error('未配置有效的 Tunnel Key');
+
+  // 构造 metadata 帧（不含 body）
+  const meta = { method: 'GET', url: '/download?filename=' + encodeURIComponent(name), headers: {} };
+  const metaJSON = new TextEncoder().encode(JSON.stringify(meta));
+  const metaIV = crypto.getRandomValues(new Uint8Array(12));
+  const metaCT = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: metaIV }, key, metaJSON);
+  const metaFrame = new Uint8Array(4 + metaIV.length + metaCT.byteLength);
+  const dv = new DataView(metaFrame.buffer);
+  dv.setUint32(0, metaIV.length + metaCT.byteLength, false);
+  metaFrame.set(metaIV, 4);
+  metaFrame.set(new Uint8Array(metaCT), 4 + metaIV.length);
+
+  // 发起 fetch 获取响应流
+  const resp = await fetch(BASE + '/tunnel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-tunnel-frame' },
+    body: metaFrame
+  });
+  if (!resp.ok) throw new Error('隧道请求失败: HTTP ' + resp.status);
+  if (!resp.body) return null; // 不支持流式，由调用方降级
+
+  const reader = resp.body.getReader();
+
+  // 辅助：从流中读取指定字节数
+  async function readBytes(n) {
+    var buf = new Uint8Array(0);
+    while (buf.length < n) {
+      var { done, value } = await reader.read();
+      if (done) throw new Error('响应数据不足');
+      var tmp = new Uint8Array(buf.length + value.length);
+      tmp.set(buf, 0);
+      tmp.set(value, buf.length);
+      buf = tmp;
+    }
+    return buf;
+  }
+
+  // 读取并解密 metadata
+  var metaLenBytes = await readBytes(4);
+  var metaLen = new DataView(metaLenBytes.buffer).getUint32(0, false);
+  var metaEnc = await readBytes(metaLen);
+  var metaIVdec = metaEnc.slice(0, 12);
+  var metaCTdec = metaEnc.slice(12);
+  var metaPlain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: metaIVdec }, key, metaCTdec);
+  var respMeta = JSON.parse(new TextDecoder().decode(metaPlain));
+
+  // 流式读取 body 帧，逐块解密
+  var chunks = [];
+  var remainder = new Uint8Array(0);
+
+  while (true) {
+    // 确保至少有 4 字节读 chunkLen
+    while (remainder.length < 4) {
+      var { done, value } = await reader.read();
+      if (done) break;
+      var tmp = new Uint8Array(remainder.length + value.length);
+      tmp.set(remainder, 0);
+      tmp.set(value, remainder.length);
+      remainder = tmp;
+    }
+    if (remainder.length < 4) break;
+
+    var chunkLen = new DataView(remainder.buffer).getUint32(0, false);
+    if (chunkLen === 0) break; // 空帧 = body 结束
+
+    // 确保有完整的帧数据
+    while (remainder.length < 4 + chunkLen) {
+      var { done, value } = await reader.read();
+      if (done) break;
+      var tmp = new Uint8Array(remainder.length + value.length);
+      tmp.set(remainder, 0);
+      tmp.set(value, remainder.length);
+      remainder = tmp;
+    }
+    if (remainder.length < 4 + chunkLen) break;
+
+    var frameData = remainder.slice(4, 4 + chunkLen);
+    remainder = remainder.slice(4 + chunkLen);
+
+    // 解密当前帧
+    if (frameData.length >= 12) {
+      var fIV = frameData.slice(0, 12);
+      var fCT = frameData.slice(12);
+      var plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fIV }, key, fCT);
+      chunks.push(new Uint8Array(plain));
+    }
+  }
+
+  // 合并所有解密后的块
+  var totalLen = chunks.reduce(function(s, c) { return s + c.length; }, 0);
+  var allData = new Uint8Array(totalLen);
+  var off = 0;
+  for (var i = 0; i < chunks.length; i++) {
+    allData.set(chunks[i], off);
+    off += chunks[i].length;
+  }
+
+  return {
+    status: respMeta.status,
+    headers: respMeta.headers || {},
+    body: allData
+  };
+}
+
 // --- 纯 JS 增量 SHA-256 实现 ---
 // 支持 update(Uint8Array) / digest('hex') 模式，避免 Web Crypto 需要完整 buffer
 var Sha256 = (function() {
@@ -937,8 +1045,12 @@ async function rmdirDir(dirPath) {
 async function downloadFile(name, expectedChecksum) {
   try {
     if (tunnelHexKey) {
-      // 隧道模式：完整响应已在内存中
-      var result = await tunnelRequest('GET', '/download?filename=' + encodeURIComponent(name), {}, null);
+      // 隧道模式：流式下载（逐帧解密），避免大文件 OOM
+      var result = await tunnelDownloadStream(name);
+      if (!result) {
+        // 浏览器不支持流式，降级到原 tunnelRequest
+        result = await tunnelRequest('GET', '/download?filename=' + encodeURIComponent(name), {}, null);
+      }
       var serverCS = (result.headers['X-File-Checksum'] || [''])[0];
 
       if (serverCS) {
