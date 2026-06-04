@@ -653,6 +653,9 @@ async function uploadFiles(files) {
 
 // --- 文件列表 ---
 let _searchActive = false;
+let _currentOffset = 0;
+let _hasMore = false;
+const PAGE_LIMIT = 500;
 
 async function searchFiles() {
   var q = document.getElementById('search-input').value.trim();
@@ -719,9 +722,12 @@ async function refreshList() {
   var el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">加载中...</div>';
   updateBreadcrumb();
+  _currentOffset = 0;
+  _hasMore = false;
   try {
     var files;
-    var listUrl = '/api/files' + (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) : '');
+    var qs = (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) + '&' : '?') + 'offset=0&limit=' + PAGE_LIMIT;
+    var listUrl = '/api/files' + qs;
     if (tunnelHexKey) {
       var result = await tunnelRequest('GET', listUrl, {}, null);
       var data = JSON.parse(new TextDecoder().decode(result.body));
@@ -732,6 +738,8 @@ async function refreshList() {
       if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + (data.message || resp.status) + '</div>'; return; }
       files = data.files || [];
     }
+    _currentOffset = files.length;
+    _hasMore = (data.total || 0) > _currentOffset;
     if (files.length === 0) { el.innerHTML = '<div class="empty-msg">暂无文件</div>'; return; }
     var html = '<table><thead><tr><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
     for (var fiIdx = 0; fiIdx < files.length; fiIdx++) {
@@ -756,9 +764,72 @@ async function refreshList() {
       }
     }
     html += '</tbody></table>';
+    if (_hasMore) {
+      var remaining = (data.total || 0) - _currentOffset;
+      html += '<div id="load-more-container" style="text-align:center;padding:12px;">' +
+        '<button class="btn btn-primary" onclick="loadMore()">加载更多 (' + remaining + ')</button></div>';
+    }
     el.innerHTML = html;
   } catch(e) {
     el.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
+  }
+}
+
+async function loadMore() {
+  var el = document.getElementById('file-list');
+  var qs = (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) + '&' : '?') + 'offset=' + _currentOffset + '&limit=' + PAGE_LIMIT;
+  var listUrl = '/api/files' + qs;
+  try {
+    var files;
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('GET', listUrl, {}, null);
+      var data = JSON.parse(new TextDecoder().decode(result.body));
+      files = data.files || [];
+    } else {
+      var resp = await fetch(BASE + listUrl, { headers: headers() });
+      var data = await resp.json();
+      if (!resp.ok) return;
+      files = data.files || [];
+    }
+    _currentOffset += files.length;
+    _hasMore = (data.total || 0) > _currentOffset;
+
+    var tbody = el.querySelector('table tbody');
+    if (!tbody) { refreshList(); return; }
+    for (var fiIdx = 0; fiIdx < files.length; fiIdx++) {
+      var fi = files[fiIdx];
+      var fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
+      var rowHtml;
+      if (fi.is_dir) {
+        rowHtml = '<tr style="cursor:pointer;background:#f8f9fa;"><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
+          '<td>-</td><td>-</td><td>' +
+          '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
+          '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
+      } else {
+        var cs = fi.checksum || '';
+        var csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
+        rowHtml = '<tr><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
+          '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
+          '<td>' + csDisplay + '</td>' +
+          '<td class="file-actions">' +
+          '<button class="btn btn-primary btn-sm" onclick="downloadFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">下载</button>' +
+          '<button class="btn btn-danger btn-sm" onclick="deleteFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">删除</button>' +
+          '<button class="btn btn-warning btn-sm" onclick="renameFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">重命名</button>' +
+          '</td></tr>';
+      }
+      tbody.insertAdjacentHTML('beforeend', rowHtml);
+    }
+    var container = document.getElementById('load-more-container');
+    if (container) {
+      if (_hasMore) {
+        var remaining = (data.total || 0) - _currentOffset;
+        container.innerHTML = '<button class="btn btn-primary" onclick="loadMore()">加载更多 (' + remaining + ')</button>';
+      } else {
+        container.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">已加载全部 ' + data.total + ' 个文件</div>';
+      }
+    }
+  } catch(e) {
+    // 静默处理
   }
 }
 
