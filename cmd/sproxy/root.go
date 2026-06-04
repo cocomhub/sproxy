@@ -219,7 +219,7 @@ func resolveTunnelKey(cfg *server.Config) ([]byte, error) {
 		return nil, fmt.Errorf("generate tunnel key error: %w", err)
 	}
 	cfg.TunnelKey = newKey
-	fmt.Printf("Generated tunnel key: %s\n", cfg.TunnelKey)
+	fmt.Fprintf(os.Stderr, "Generated tunnel key: %s\n", cfg.TunnelKey)
 	if err := server.SaveConfig(cfg, cfgFile); err != nil {
 		return nil, fmt.Errorf("save config error: %w", err)
 	}
