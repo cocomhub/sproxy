@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
 )
 
@@ -158,7 +159,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("重置文件指针失败: %w", err)
 		}
-		c.logger.Debug("文件 SHA-256 计算完毕", "filepath", localPath, "checksum", shortHash(fileChecksum))
+		c.logger.Debug("文件 SHA-256 计算完毕", "filepath", localPath, "checksum", shortid.ShortHash(fileChecksum))
 	}
 
 	// 自适应分块大小
@@ -168,7 +169,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	uploadID := generateUploadID(filename, fileSize, modTime, fileChecksum)
 
 	c.logger.Info("分块上传开始", "filename", filename, "fileSize", fileSize,
-		"chunkSize", chunkSize, "totalChunks", totalChunks, "upload_id", shortHash(uploadID))
+		"chunkSize", chunkSize, "totalChunks", totalChunks, "upload_id", shortid.ShortHash(uploadID))
 
 	// 统一查询：先通过 upload_id + filename 查询文件状态
 	statusResp, err := c.doRequest(ctx, "GET",
@@ -190,7 +191,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 
 			// 状态1：文件已完整上传
 			if statusData.Finished || statusData.Completed {
-				c.logger.Info("文件已存在，直接返回成功", "filename", filename, "checksum", shortHash(fileChecksum))
+				c.logger.Info("文件已存在，直接返回成功", "filename", filename, "checksum", shortid.ShortHash(fileChecksum))
 				return &ChunkedUploadResult{
 					Success:      true,
 					UploadID:     uploadID,
@@ -202,7 +203,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 
 			// 状态2：有未完成的 session，续传
 			if statusData.UploadID != "" {
-				c.logger.Info("续传会话已恢复", "upload_id", shortHash(uploadID),
+				c.logger.Info("续传会话已恢复", "upload_id", shortid.ShortHash(uploadID),
 					"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
 
 				// 只上传缺失分块
@@ -220,7 +221,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	}
 
 	// 状态3：新文件 / 不在上传中，创建新 session
-	c.logger.Info("新上传", "filename", filename, "upload_id", shortHash(uploadID))
+	c.logger.Info("新上传", "filename", filename, "upload_id", shortid.ShortHash(uploadID))
 
 	initBody := chunkedInitRequest{
 		UploadID:     uploadID,
@@ -332,12 +333,12 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 				mu.Unlock()
 				if err != nil {
 					c.logger.Warn("chunk 打开文件失败", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "file", filePath, "error", err)
+						"upload_id", shortid.ShortHash(uploadID), "file", filePath, "error", err)
 					return
 				}
 				if _, err := f.Seek(offset, io.SeekStart); err != nil {
 					c.logger.Warn("chunk seek 失败", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "offset", offset, "error", err)
+						"upload_id", shortid.ShortHash(uploadID), "offset", offset, "error", err)
 					f.Close()
 					continue
 				}
@@ -345,7 +346,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 				f.Close()
 				if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
 					c.logger.Warn("chunk 读取失败", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "offset", offset, "error", readErr)
+						"upload_id", shortid.ShortHash(uploadID), "offset", offset, "error", readErr)
 					continue
 				}
 				chunkData = chunkData[:n]
@@ -359,29 +360,29 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 				mw := multipart.NewWriter(&buf)
 				if err := mw.WriteField("upload_id", uploadID); err != nil {
 					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "error", err)
+						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue
 				}
 				if err := mw.WriteField("chunk_index", fmt.Sprintf("%d", chunkIdx)); err != nil {
 					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "error", err)
+						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue
 				}
 				if err := mw.WriteField("chunk_checksum", chunkChecksum); err != nil {
 					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "error", err)
+						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue
 				}
 
 				part, err := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", chunkIdx))
 				if err != nil {
 					c.logger.Warn("chunk 创建 form 失败", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "error", err)
+						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue
 				}
 				if _, err := part.Write(chunkData); err != nil {
 					c.logger.Warn("chunk 写入 form part 失败", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "error", err)
+						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue
 				}
 				mw.Close()
@@ -392,7 +393,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 				chunkResp, err := c.doRequest(ctx, "POST", "/upload/chunk", &buf, headers)
 				if err != nil {
 					c.logger.Warn("chunk 上传请求失败", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "error", err)
+						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue
 				}
 
@@ -403,7 +404,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 				}
 				if decodeErr := json.NewDecoder(chunkResp.Body).Decode(&chunkResult); decodeErr != nil {
 					c.logger.Warn("chunk 响应解析失败", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "status", chunkResp.StatusCode,
+						"upload_id", shortid.ShortHash(uploadID), "status", chunkResp.StatusCode,
 						"error", decodeErr)
 					chunkResp.Body.Close()
 					continue
@@ -417,7 +418,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 					if c.progressFn != nil {
 						c.progressFn("上传", progress, fileSize)
 					}
-					c.logger.Debug("chunk 上传成功", "chunk_index", chunkIdx, "checksum", shortHash(chunkChecksum))
+					c.logger.Debug("chunk 上传成功", "chunk_index", chunkIdx, "checksum", shortid.ShortHash(chunkChecksum))
 					mu.Unlock()
 					return // 上传成功
 				}
@@ -425,7 +426,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 				if !chunkResult.ShouldRetry {
 					// 非重试错误（如 upload_id 过期），标记失败
 					c.logger.Warn("chunk 非重试错误", "chunk_index", chunkIdx,
-						"upload_id", shortHash(uploadID), "status", chunkResp.StatusCode,
+						"upload_id", shortid.ShortHash(uploadID), "status", chunkResp.StatusCode,
 						"message", chunkResult.Message)
 					failed.Store(true)
 					return
@@ -434,7 +435,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 			}
 			// 重试耗尽
 			c.logger.Warn("chunk 重试耗尽", "chunk_index", chunkIdx,
-				"upload_id", shortHash(uploadID))
+				"upload_id", shortid.ShortHash(uploadID))
 			failed.Store(true)
 		}(idx)
 	}
@@ -464,7 +465,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 		return nil, fmt.Errorf("文件合并失败: %s", completeResult.Message)
 	}
 
-	c.logger.Info("分块上传完成", "filename", filename, "checksum", shortHash(fileChecksum))
+	c.logger.Info("分块上传完成", "filename", filename, "checksum", shortid.ShortHash(fileChecksum))
 	return &completeResult, nil
 }
 
@@ -589,7 +590,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 
 	// 校验完整文件 checksum
 	if expectedChecksum != "" {
-		c.logger.Debug("分块下载文件校验", "filename", outputPath, "expected_checksum", shortHash(expectedChecksum))
+		c.logger.Debug("分块下载文件校验", "filename", outputPath, "expected_checksum", shortid.ShortHash(expectedChecksum))
 		localCS, err := calculateChecksum(outputPath)
 		if err != nil {
 			return fmt.Errorf("计算本地 SHA-256 失败: %w", err)

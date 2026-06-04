@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -168,14 +169,6 @@ func calculateChecksum(filePath string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// shortHash 截取 SHA-256 的前 12 位用于日志显示。
-func shortHash(h string) string {
-	if len(h) > 12 {
-		return h[:12]
-	}
-	return h
-}
-
 // Upload 上传本地文件到 sproxy 服务端的指定远端路径。
 //
 // localPath 为本地文件路径，remotePath 为远端路径（如 "dir1/file.txt"），保留目录结构。
@@ -202,7 +195,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 		return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
 	}
 	fileChecksum = hex.EncodeToString(h.Sum(nil))
-	c.logger.Debug("文件 SHA-256", "filepath", localPath, "remote", remotePath, "checksum", shortHash(fileChecksum))
+	c.logger.Debug("文件 SHA-256", "filepath", localPath, "remote", remotePath, "checksum", shortid.ShortHash(fileChecksum))
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("重置文件指针失败: %w", err)
 	}
@@ -389,9 +382,9 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 		}
 		if localCS != fileChecksum {
 			return fmt.Errorf("本地文件 SHA-256 与远端不匹配，拒绝删除（远端: %s, 本地: %s）",
-				shortHash(fileChecksum), shortHash(localCS))
+				shortid.ShortHash(fileChecksum), shortid.ShortHash(localCS))
 		}
-		c.logger.Debug("本地文件校验通过", "localPath", localPath, "checksum", shortHash(fileChecksum))
+		c.logger.Debug("本地文件校验通过", "localPath", localPath, "checksum", shortid.ShortHash(fileChecksum))
 	}
 
 	headers.Set("X-File-Checksum", fileChecksum)

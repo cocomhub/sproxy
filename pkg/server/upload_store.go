@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/internal/shortid"
 )
 
 // ChunkedUploadSession 表示一个分块上传会话。
@@ -192,7 +194,7 @@ func (us *UploadStore) MarkChunkReceived(uploadID string, chunkIndex int, checks
 	us.mu.Unlock()
 
 	us.logger.Debug("chunk 已接收", "upload_id", uploadID, "chunk_index", chunkIndex,
-		"checksum", shortHash(checksum), "received", received, "total", total)
+		"checksum", shortid.ShortHash(checksum), "received", received, "total", total)
 
 	// 异步持久化
 	select {
@@ -525,14 +527,6 @@ func countReceived(bitmap []bool) int {
 		}
 	}
 	return count
-}
-
-// shortHash 截取 SHA-256 的前 12 位用于日志显示。
-func shortHash(h string) string {
-	if len(h) > 12 {
-		return h[:12]
-	}
-	return h
 }
 
 // GetOrCreateSession 根据 uploadID 或文件名查找已有未完成的 session，或创建新 session。

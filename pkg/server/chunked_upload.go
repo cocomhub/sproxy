@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
 )
 
@@ -39,7 +40,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Debug("uploadInit 请求", "filename", req.Filename, "total_size", req.TotalSize,
 		"chunk_size", req.ChunkSize, "total_chunks", req.TotalChunks,
-		"file_checksum", shortHash(req.FileChecksum), "upload_id", req.UploadID)
+		"file_checksum", shortid.ShortHash(req.FileChecksum), "upload_id", req.UploadID)
 
 	// 校验字段
 	if req.UploadID == "" {
@@ -85,7 +86,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 	existingPath := filepath.Join(cfg.UploadsDir, req.Filename)
 	if stat, err := os.Stat(existingPath); err == nil {
 		if verifyFileWithChecksum(existingPath, req.FileChecksum) {
-			h.logger.Info("文件已存在，跳过上传", "filename", req.Filename, "size", stat.Size(), "checksum", shortHash(req.FileChecksum))
+			h.logger.Info("文件已存在，跳过上传", "filename", req.Filename, "size", stat.Size(), "checksum", shortid.ShortHash(req.FileChecksum))
 			sendJSONResponse(w, ChunkedInitResponse{
 				Success:  true,
 				UploadID: "already_exists",
@@ -115,7 +116,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 			"client_chunk_size", chunkSize,
 			"max_chunk_upload_bytes", size.DefaultChunkBodyLimit,
 			"filename", req.Filename,
-			"upload_id", shortHash(req.UploadID))
+			"upload_id", shortid.ShortHash(req.UploadID))
 		chunkSize = size.DefaultChunkBodyLimit - 1024
 		req.TotalChunks = int((req.TotalSize + chunkSize - 1) / chunkSize)
 	}
@@ -213,7 +214,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 
 	// 幂等：如果该块已接收且 checksum 匹配，直接返回成功
 	if session.ReceivedChunks[chunkIndex] && session.ChunkChecksums[chunkIndex] == chunkChecksum {
-		h.logger.Debug("chunk 已存在，跳过", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortHash(chunkChecksum))
+		h.logger.Debug("chunk 已存在，跳过", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortid.ShortHash(chunkChecksum))
 		sendJSONResponse(w, ChunkUploadResponse{Success: true, ChunkIndex: chunkIndex, Message: "分块已存在，跳过"}, http.StatusOK)
 		return
 	}
@@ -258,7 +259,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	serverChecksum := hex.EncodeToString(sha256Hash.Sum(nil))
 	if serverChecksum != chunkChecksum {
 		h.logger.Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", chunkIndex,
-			"server", shortHash(serverChecksum), "client", shortHash(chunkChecksum))
+			"server", shortid.ShortHash(serverChecksum), "client", shortid.ShortHash(chunkChecksum))
 		sendJSONResponse(w, ChunkUploadResponse{
 			Success:     false,
 			ChunkIndex:  chunkIndex,
@@ -282,7 +283,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Debug("chunk 上传成功", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortHash(serverChecksum))
+	h.logger.Debug("chunk 上传成功", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortid.ShortHash(serverChecksum))
 	sendJSONResponse(w, ChunkUploadResponse{
 		Success:    true,
 		ChunkIndex: chunkIndex,
@@ -502,7 +503,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	// 异步清理 session 目录（由 wg 追踪，支持优雅停止）
 	h.uploadStore.CleanupSessionAfter(req.UploadID, 5*time.Second)
 
-	h.logger.Info("文件合并完成", "filename", session.Filename, "checksum", shortHash(finalChecksum), "size", session.TotalSize)
+	h.logger.Info("文件合并完成", "filename", session.Filename, "checksum", shortid.ShortHash(finalChecksum), "size", session.TotalSize)
 	sendJSONResponse(w, ChunkCompleteResponse{
 		Success:      true,
 		Filename:     session.Filename,
