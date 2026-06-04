@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -485,27 +486,23 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		outputPath = filename
 	}
 
-	// 获取文件信息
+	// 获取文件信息（直接 Stat）
 	var fileSize int64
 	var expectedChecksum string
 	var fileModTime int64
 
-	listResp, err := c.doRequest(ctx, "GET", "/api/files", nil, nil)
-	if err == nil {
-		var listData struct {
-			Files []FileInfo `json:"files"`
+	statResp, err := c.doRequest(ctx, "HEAD", "/api/files/stat?filename="+url.QueryEscape(filename), nil, nil)
+	if err == nil && statResp.StatusCode == http.StatusOK {
+		if s := statResp.Header.Get("X-File-Size"); s != "" {
+			fileSize, _ = strconv.ParseInt(s, 10, 64)
 		}
-		if json.NewDecoder(listResp.Body).Decode(&listData) == nil {
-			for _, f := range listData.Files {
-				if f.Name == filename {
-					fileSize = f.Size
-					expectedChecksum = f.Checksum
-					fileModTime = f.ModTime
-					break
-				}
-			}
+		expectedChecksum = statResp.Header.Get("X-File-Checksum")
+		if m := statResp.Header.Get("X-File-MTime"); m != "" {
+			fileModTime, _ = strconv.ParseInt(m, 10, 64)
 		}
-		listResp.Body.Close()
+	}
+	if statResp != nil {
+		statResp.Body.Close()
 	}
 
 	if fileSize <= 0 {
