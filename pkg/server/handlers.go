@@ -182,6 +182,13 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	if h.uploadStore != nil {
+		if err := h.uploadStore.Health(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("UploadStore: " + err.Error()))
+			return
+		}
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("OK"))
 }

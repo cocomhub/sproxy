@@ -88,6 +88,17 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	return us
 }
 
+// Health 返回 UploadStore 的健康状态。
+// 检查后台 goroutine 是否仍在运行。
+func (us *UploadStore) Health() error {
+	select {
+	case <-us.stopCh:
+		return fmt.Errorf("UploadStore 已停止")
+	default:
+	}
+	return nil
+}
+
 // Stop 停止后台 goroutine 并等待结束。多次调用是安全的（幂等）。
 func (us *UploadStore) Stop() {
 	us.stopOnce.Do(func() {
@@ -307,6 +318,11 @@ func (us *UploadStore) lockChunkMerge(uploadID string) func() {
 // persistLoop 异步持久化 goroutine。
 func (us *UploadStore) persistLoop() {
 	defer us.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			us.logger.Error("persistLoop panic", "recover", r)
+		}
+	}()
 	for {
 		select {
 		case <-us.stopCh:
@@ -384,6 +400,11 @@ func (us *UploadStore) writeSessionJSON(s *ChunkedUploadSession) error {
 // cleanupLoop 周期性清理过期 session。
 func (us *UploadStore) cleanupLoop() {
 	defer us.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			us.logger.Error("cleanupLoop panic", "recover", r)
+		}
+	}()
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
