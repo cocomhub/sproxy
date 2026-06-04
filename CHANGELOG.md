@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格。
 版本号遵循 [SemVer 2.0.0](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.3.0] - 2026-06-04
 
 ### Added
 - Phase 1（代码质量与覆盖）：
