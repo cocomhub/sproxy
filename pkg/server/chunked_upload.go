@@ -38,7 +38,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Debug("uploadInit 请求", "filename", req.Filename, "total_size", req.TotalSize,
+	h.logger.Debug("uploadInit 请求", "file_name", req.Filename, "total_size", req.TotalSize,
 		"chunk_size", req.ChunkSize, "total_chunks", req.TotalChunks,
 		"file_checksum", shortid.ShortHash(req.FileChecksum), "upload_id", req.UploadID)
 
@@ -86,7 +86,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 	existingPath := filepath.Join(cfg.UploadsDir, req.Filename)
 	if stat, err := os.Stat(existingPath); err == nil {
 		if verifyFileWithChecksum(existingPath, req.FileChecksum) {
-			h.logger.Info("文件已存在，跳过上传", "filename", req.Filename, "size", stat.Size(), "checksum", shortid.ShortHash(req.FileChecksum))
+			h.logger.Info("文件已存在，跳过上传", "file_name", req.Filename, "size", stat.Size(), "checksum", shortid.ShortHash(req.FileChecksum))
 			sendJSONResponse(w, ChunkedInitResponse{
 				Success:  true,
 				UploadID: "already_exists",
@@ -95,7 +95,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 文件存在但 checksum 不匹配，不允许覆盖
-		h.logger.Warn("同名文件已存在但 checksum 不匹配", "filename", req.Filename)
+		h.logger.Warn("同名文件已存在但 checksum 不匹配", "file_name", req.Filename)
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "同名文件已存在但 checksum 不匹配"}, http.StatusConflict)
 		return
 	}
@@ -115,7 +115,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		h.logger.Info("chunk_size 超出服务端上限，自动裁剪",
 			"client_chunk_size", chunkSize,
 			"max_chunk_upload_bytes", size.DefaultChunkBodyLimit,
-			"filename", req.Filename,
+			"file_name", req.Filename,
 			"upload_id", shortid.ShortHash(req.UploadID))
 		chunkSize = size.DefaultChunkBodyLimit - 1024
 		req.TotalChunks = int((req.TotalSize + chunkSize - 1) / chunkSize)
@@ -133,10 +133,10 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 	if reused {
 		missing := MissingChunks(session)
 		msg = fmt.Sprintf("续传会话已恢复，缺失 %d 个分块", len(missing))
-		h.logger.Info("续传会话", "upload_id", session.UploadID, "filename", req.Filename,
+		h.logger.Info("续传会话", "upload_id", session.UploadID, "file_name", req.Filename,
 			"missing", len(missing), "total", session.TotalChunks)
 	} else {
-		h.logger.Info("新上传会话", "upload_id", session.UploadID, "filename", req.Filename,
+		h.logger.Info("新上传会话", "upload_id", session.UploadID, "file_name", req.Filename,
 			"total_size", req.TotalSize, "total_chunks", session.TotalChunks)
 	}
 
@@ -405,11 +405,11 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Info("uploadComplete 开始", "upload_id", req.UploadID, "filename", session.Filename,
+	h.logger.Info("uploadComplete 开始", "upload_id", req.UploadID, "file_name", session.Filename,
 		"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
 
 	if session.Completed {
-		h.logger.Info("上传已完成（幂等）", "upload_id", req.UploadID, "filename", session.Filename)
+		h.logger.Info("上传已完成（幂等）", "upload_id", req.UploadID, "file_name", session.Filename)
 		sendJSONResponse(w, ChunkCompleteResponse{
 			Success:      true,
 			Filename:     session.Filename,
@@ -437,7 +437,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	// 确保目标文件的父目录存在（支持子目录路径）
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-		h.logger.Error("创建目标父目录失败", "upload_id", req.UploadID, "filename", session.Filename, "error", err)
+		h.logger.Error("创建目标父目录失败", "upload_id", req.UploadID, "file_name", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "创建目标目录失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -445,7 +445,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	tmpPath := filePath + ".tmp"
 	outFile, err := os.Create(tmpPath)
 	if err != nil {
-		h.logger.Error("创建合并文件失败", "upload_id", req.UploadID, "filename", session.Filename, "error", err)
+		h.logger.Error("创建合并文件失败", "upload_id", req.UploadID, "file_name", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "创建目标文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -479,7 +479,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	// 原子重命名为最终文件名
 	if err := os.Rename(tmpPath, filePath); err != nil {
-		h.logger.Error("重命名最终文件失败", "upload_id", req.UploadID, "filename", session.Filename, "error", err)
+		h.logger.Error("重命名最终文件失败", "upload_id", req.UploadID, "file_name", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "重命名文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -488,7 +488,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	if session.FileModTime > 0 {
 		modTime := time.Unix(0, session.FileModTime)
 		if err := os.Chtimes(filePath, modTime, modTime); err != nil {
-			h.logger.Warn("设置文件时间戳失败", "filename", session.Filename, "error", err)
+			h.logger.Warn("设置文件时间戳失败", "file_name", session.Filename, "error", err)
 		}
 	}
 
@@ -503,7 +503,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	// 异步清理 session 目录（由 wg 追踪，支持优雅停止）
 	h.uploadStore.CleanupSessionAfter(req.UploadID, 5*time.Second)
 
-	h.logger.Info("文件合并完成", "filename", session.Filename, "checksum", shortid.ShortHash(finalChecksum), "size", session.TotalSize)
+	h.logger.Info("文件合并完成", "file_name", session.Filename, "checksum", shortid.ShortHash(finalChecksum), "size", session.TotalSize)
 	sendJSONResponse(w, ChunkCompleteResponse{
 		Success:      true,
 		Filename:     session.Filename,

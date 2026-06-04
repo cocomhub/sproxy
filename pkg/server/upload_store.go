@@ -127,7 +127,7 @@ func (us *UploadStore) CreateSession(uploadID, filename string, totalSize, chunk
 		ExpiresAt:      now.Add(us.sessionTTL),
 	}
 
-	us.logger.Info("创建上传会话", "upload_id", uploadID, "filename", filename,
+	us.logger.Info("创建上传会话", "upload_id", uploadID, "file_name", filename,
 		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)
 
 	// 创建会话目录
@@ -250,7 +250,7 @@ func (us *UploadStore) CompleteSession(uploadID string) error {
 	}
 
 	s.Completed = true
-	us.logger.Info("上传会话已完成", "upload_id", uploadID, "filename", s.Filename,
+	us.logger.Info("上传会话已完成", "upload_id", uploadID, "file_name", s.Filename,
 		"received", countReceived(s.ReceivedChunks), "total", s.TotalChunks)
 	select {
 	case us.persistCh <- uploadID:
@@ -320,7 +320,7 @@ func (us *UploadStore) persistLoop() {
 	defer us.wg.Done()
 	defer func() {
 		if r := recover(); r != nil {
-			us.logger.Error("persistLoop panic", "recover", r)
+			us.logger.Error("persistLoop panic", "panic", r)
 		}
 	}()
 	for {
@@ -402,7 +402,7 @@ func (us *UploadStore) cleanupLoop() {
 	defer us.wg.Done()
 	defer func() {
 		if r := recover(); r != nil {
-			us.logger.Error("cleanupLoop panic", "recover", r)
+			us.logger.Error("cleanupLoop panic", "panic", r)
 		}
 	}()
 	ticker := time.NewTicker(5 * time.Minute)
@@ -427,7 +427,7 @@ func (us *UploadStore) cleanupExpired() {
 	now := time.Now()
 	for id, s := range us.sessions {
 		if !s.Completed && now.After(s.ExpiresAt) {
-			us.logger.Info("清理过期上传会话", "upload_id", id, "filename", s.Filename, "expires_at", s.ExpiresAt)
+			us.logger.Info("清理过期上传会话", "upload_id", id, "file_name", s.Filename, "expires_at", s.ExpiresAt)
 			delete(us.sessions, id)
 			expired = append(expired, id)
 		}
@@ -502,7 +502,7 @@ func (us *UploadStore) recoverSessions() {
 		// 恢复：扫描磁盘上的 .chunk 文件，与 bitmap 对齐
 		us.reconcileChunks(&session, sessionDir)
 		us.sessions[uploadID] = &session
-		us.logger.Info("恢复上传会话", "upload_id", uploadID, "filename", session.Filename,
+		us.logger.Info("恢复上传会话", "upload_id", uploadID, "file_name", session.Filename,
 			"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
 	}
 }
@@ -558,7 +558,7 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 	// 按 uploadID 查找
 	if uploadID != "" {
 		if s, ok := us.sessions[uploadID]; ok && !s.Completed {
-			us.logger.Info("找到可续传的 session", "upload_id", s.UploadID, "filename", s.Filename)
+			us.logger.Info("找到可续传的 session", "upload_id", s.UploadID, "file_name", s.Filename)
 			cp := *s
 			cp.ReceivedChunks = make([]bool, len(s.ReceivedChunks))
 			copy(cp.ReceivedChunks, s.ReceivedChunks)
@@ -571,7 +571,7 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 	// 按文件名查找（兼容旧版本 / 无 upload_id 场景）
 	for _, s := range us.sessions {
 		if s.Filename == filename && !s.Completed && s.FileChecksum == fileChecksum && s.TotalSize == totalSize {
-			us.logger.Info("找到可续传的 session（按文件名匹配）", "upload_id", s.UploadID, "filename", filename)
+			us.logger.Info("找到可续传的 session（按文件名匹配）", "upload_id", s.UploadID, "file_name", filename)
 			cp := *s
 			cp.ReceivedChunks = make([]bool, len(s.ReceivedChunks))
 			copy(cp.ReceivedChunks, s.ReceivedChunks)
@@ -600,7 +600,7 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 		ExpiresAt:      now.Add(us.sessionTTL),
 	}
 
-	us.logger.Info("创建上传会话", "upload_id", uploadID, "filename", filename,
+	us.logger.Info("创建上传会话", "upload_id", uploadID, "file_name", filename,
 		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)
 
 	// 创建会话目录

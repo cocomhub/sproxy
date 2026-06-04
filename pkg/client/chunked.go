@@ -139,7 +139,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 		entry := cached.(*uploadCacheEntry)
 		if entry.fileSize == fileSize && entry.modTime.Equal(modTime) {
 			fileChecksum = entry.fileChecksum
-			c.logger.Debug("checksum 缓存命中", "filepath", localPath)
+			c.logger.Debug("checksum 缓存命中", "file_path", localPath)
 		}
 	}
 
@@ -159,7 +159,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("重置文件指针失败: %w", err)
 		}
-		c.logger.Debug("文件 SHA-256 计算完毕", "filepath", localPath, "checksum", shortid.ShortHash(fileChecksum))
+		c.logger.Debug("文件 SHA-256 计算完毕", "file_path", localPath, "checksum", shortid.ShortHash(fileChecksum))
 	}
 
 	// 自适应分块大小
@@ -168,8 +168,8 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	filename := filepath.ToSlash(filepath.Clean(remotePath))
 	uploadID := generateUploadID(filename, fileSize, modTime, fileChecksum)
 
-	c.logger.Info("分块上传开始", "filename", filename, "fileSize", fileSize,
-		"chunkSize", chunkSize, "totalChunks", totalChunks, "upload_id", shortid.ShortHash(uploadID))
+	c.logger.Info("分块上传开始", "file_name", filename, "file_size", fileSize,
+		"chunk_size", chunkSize, "total_chunks", totalChunks, "upload_id", shortid.ShortHash(uploadID))
 
 	// 统一查询：先通过 upload_id + filename 查询文件状态
 	statusResp, err := c.doRequest(ctx, "GET",
@@ -191,7 +191,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 
 			// 状态1：文件已完整上传
 			if statusData.Finished || statusData.Completed {
-				c.logger.Info("文件已存在，直接返回成功", "filename", filename, "checksum", shortid.ShortHash(fileChecksum))
+				c.logger.Info("文件已存在，直接返回成功", "file_name", filename, "checksum", shortid.ShortHash(fileChecksum))
 				return &ChunkedUploadResult{
 					Success:      true,
 					UploadID:     uploadID,
@@ -221,7 +221,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	}
 
 	// 状态3：新文件 / 不在上传中，创建新 session
-	c.logger.Info("新上传", "filename", filename, "upload_id", shortid.ShortHash(uploadID))
+	c.logger.Info("新上传", "file_name", filename, "upload_id", shortid.ShortHash(uploadID))
 
 	initBody := chunkedInitRequest{
 		UploadID:     uploadID,
@@ -262,7 +262,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 
 	// 如果 upload_id = "already_exists"，说明文件已存在且 checksum 匹配
 	if initResult.UploadID == "already_exists" {
-		c.logger.Info("文件已存在，直接返回成功", "filename", filename)
+		c.logger.Info("文件已存在，直接返回成功", "file_name", filename)
 		return &ChunkedUploadResult{
 			Success:      true,
 			UploadID:     "already_exists",
@@ -465,7 +465,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 		return nil, fmt.Errorf("文件合并失败: %s", completeResult.Message)
 	}
 
-	c.logger.Info("分块上传完成", "filename", filename, "checksum", shortid.ShortHash(fileChecksum))
+	c.logger.Info("分块上传完成", "file_name", filename, "checksum", shortid.ShortHash(fileChecksum))
 	return &completeResult, nil
 }
 
@@ -590,7 +590,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 
 	// 校验完整文件 checksum
 	if expectedChecksum != "" {
-		c.logger.Debug("分块下载文件校验", "filename", outputPath, "expected_checksum", shortid.ShortHash(expectedChecksum))
+		c.logger.Debug("分块下载文件校验", "file_name", outputPath, "checksum", shortid.ShortHash(expectedChecksum))
 		localCS, err := calculateChecksum(outputPath)
 		if err != nil {
 			return fmt.Errorf("计算本地 SHA-256 失败: %w", err)
@@ -604,11 +604,11 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	if fileModTime > 0 {
 		modTime := time.Unix(0, fileModTime)
 		if err := os.Chtimes(outputPath, modTime, modTime); err != nil {
-			c.logger.Warn("设置文件时间戳失败", "filename", outputPath, "error", err)
+			c.logger.Warn("设置文件时间戳失败", "file_name", outputPath, "error", err)
 		}
 	}
 
-	c.logger.Info("分块下载完成", "filename", outputPath)
+	c.logger.Info("分块下载完成", "file_name", outputPath)
 	return nil
 }
 

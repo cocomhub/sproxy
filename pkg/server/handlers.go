@@ -157,7 +157,7 @@ func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		logger.Info("请求", "method", r.Method, "path", r.URL.Path,
-			"remote", r.RemoteAddr, "user_agent", r.UserAgent(), "duration", time.Since(start))
+			"remote_addr", r.RemoteAddr, "user_agent", r.UserAgent(), "duration", time.Since(start))
 	})
 }
 
@@ -241,11 +241,11 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	remotePath, err := ValidateFilePath(remotePathStr)
 	if err != nil {
-		logger.Warn("无效的文件名", "filename", remotePathStr, "error", err)
+		logger.Warn("无效的文件名", "file_name", remotePathStr, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
-	logger.Debug("上传路径", "remote", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
+	logger.Debug("上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
 
 	uploadDir := cfg.UploadsDir
 	filePath := filepath.Join(uploadDir, remotePath)
@@ -257,7 +257,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 	if stat, err := os.Stat(filePath); err == nil {
 		if !verifyFileWithChecksum(filePath, expectedChecksum) {
-			logger.Warn("文件已存在，但校验失败", "filename", remotePath)
+			logger.Warn("文件已存在，但校验失败", "file_name", remotePath)
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件已存在，但校验失败"}, http.StatusConflict)
 			return
 		}
@@ -267,13 +267,13 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 	dir := filepath.Dir(filePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		logger.Error("创建目录失败", "error", err.Error(), "filename", remotePath)
+		logger.Error("创建目录失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
 		return
 	}
 	tempFile, err := os.CreateTemp(dir, filepath.Base(filePath)+".tmp.*")
 	if err != nil {
-		logger.Error("创建文件失败", "error", err.Error(), "filename", remotePath)
+		logger.Error("创建文件失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -290,19 +290,19 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := io.Copy(multiWriter, file); err != nil {
 		_ = tempFile.Close()
-		logger.Error("保存文件失败", "error", err.Error(), "filename", remotePath)
+		logger.Error("保存文件失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "保存文件失败"}, http.StatusInternalServerError)
 		return
 	}
 	if err := tempFile.Close(); err != nil {
-		logger.Error("关闭临时文件失败", "error", err.Error(), "filename", remotePath)
+		logger.Error("关闭临时文件失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "保存文件失败"}, http.StatusInternalServerError)
 		return
 	}
 
 	serverChecksum := hex.EncodeToString(sha256Hash.Sum(nil))
 	if serverChecksum != expectedChecksum {
-		logger.Warn("文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "filename", remotePath)
+		logger.Warn("文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件 SHA-256 校验失败"}, http.StatusBadRequest)
 		return
 	}
@@ -314,7 +314,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 				goto afterRename
 			}
 		}
-		logger.Error("重命名文件失败", "error", err.Error(), "filename", remotePath)
+		logger.Error("重命名文件失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "重命名文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -329,7 +329,7 @@ afterRename:
 		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
 			modTime := time.Unix(0, mtimeInt)
 			if err := os.Chtimes(filePath, modTime, modTime); err != nil {
-				logger.Warn("设置文件时间戳失败", "filename", remotePath, "error", err)
+				logger.Warn("设置文件时间戳失败", "file_name", remotePath, "error", err)
 			}
 		}
 	}
@@ -360,7 +360,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 		if os.IsNotExist(err) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 		} else {
-			h.logger.Error("打开文件失败", "filename", remotePath, "error", err.Error())
+			h.logger.Error("打开文件失败", "file_name", remotePath, "error", err.Error())
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "打开文件失败"}, http.StatusInternalServerError)
 		}
 		return
@@ -369,7 +369,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 
 	info, err := file.Stat()
 	if err != nil {
-		h.logger.Error("stat 文件失败", "filename", remotePath, "error", err.Error())
+		h.logger.Error("stat 文件失败", "file_name", remotePath, "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "stat 失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -384,7 +384,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	} else if cs, err := FileChecksum(filePath); err == nil {
 		w.Header().Set("X-File-Checksum", cs)
 	} else {
-		h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "filename", remotePath)
+		h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "file_name", remotePath)
 	}
 
 	w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
@@ -422,13 +422,13 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	expectedChecksum := r.Header.Get("X-File-Checksum")
 	if expectedChecksum == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "缺少 X-File-Checksum 请求头"}, http.StatusBadRequest)
-		logger.Warn("X-File-Checksum 为空", "filename", remotePath)
+		logger.Warn("X-File-Checksum 为空", "file_name", remotePath)
 		return
 	}
 
 	if !verifyFileWithChecksum(filePath, expectedChecksum) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件校验失败"}, http.StatusBadRequest)
-		logger.Warn("文件校验失败", "filename", remotePath)
+		logger.Warn("文件校验失败", "file_name", remotePath)
 		return
 	}
 
@@ -441,7 +441,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // batchDelete 处理 POST /api/batch/delete。
-// 请求体 JSON：{"files": [{"filename": "...", "checksum": "..."}]}
+// 请求体 JSON：{"files": [{"file_name": "...", "checksum": "..."}]}
 // 继续处理模式：单条失败不影响其余文件。
 func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
@@ -489,7 +489,7 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 			result.Message = "删除成功"
 			if !valid {
 				result.Message = "删除成功（checksum 不匹配，文件内容可能已变更）"
-				logger.Warn("删除时 checksum 不匹配", "filename", remotePath)
+				logger.Warn("删除时 checksum 不匹配", "file_name", remotePath)
 			}
 		}
 		results = append(results, result)
@@ -869,7 +869,7 @@ func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 		if os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
 		} else {
-			h.logger.Error("stat 失败", "filename", remotePath, "error", err.Error())
+			h.logger.Error("stat 失败", "file_name", remotePath, "error", err.Error())
 			http.Error(w, "stat error", http.StatusInternalServerError)
 		}
 		return

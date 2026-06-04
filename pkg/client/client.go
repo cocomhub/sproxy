@@ -22,8 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/internal/shortid"
+	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -195,7 +195,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 		return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
 	}
 	fileChecksum = hex.EncodeToString(h.Sum(nil))
-	c.logger.Debug("文件 SHA-256", "filepath", localPath, "remote", remotePath, "checksum", shortid.ShortHash(fileChecksum))
+	c.logger.Debug("文件 SHA-256", "file_path", localPath, "remote_path", remotePath, "checksum", shortid.ShortHash(fileChecksum))
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("重置文件指针失败: %w", err)
 	}
@@ -330,7 +330,7 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	}
 
 	if serverCS != "" {
-		c.logger.Debug("下载文件校验", "filename", outputPath, "server_checksum", serverCS)
+		c.logger.Debug("下载文件校验", "file_name", outputPath, "checksum", serverCS)
 		localCS, err := calculateChecksum(outputPath)
 		if err != nil {
 			return fmt.Errorf("计算本地 SHA-256 失败: %w", err)
@@ -347,7 +347,7 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
 			modTime := time.Unix(0, mtimeInt)
 			if err := os.Chtimes(outputPath, modTime, modTime); err != nil {
-				c.logger.Warn("设置文件时间戳失败", "filename", outputPath, "error", err)
+				c.logger.Warn("设置文件时间戳失败", "file_name", outputPath, "error", err)
 			}
 		}
 	}
@@ -384,7 +384,7 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 			return fmt.Errorf("本地文件 SHA-256 与远端不匹配，拒绝删除（远端: %s, 本地: %s）",
 				shortid.ShortHash(fileChecksum), shortid.ShortHash(localCS))
 		}
-		c.logger.Debug("本地文件校验通过", "localPath", localPath, "checksum", shortid.ShortHash(fileChecksum))
+		c.logger.Debug("本地文件校验通过", "local_path", localPath, "checksum", shortid.ShortHash(fileChecksum))
 	}
 
 	headers.Set("X-File-Checksum", fileChecksum)

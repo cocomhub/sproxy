@@ -92,7 +92,7 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		h.logger.Error("打开文件失败", "error", err, "filename", filename)
+		h.logger.Error("打开文件失败", "error", err, "file_name", filename)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "打开文件失败"}, http.StatusInternalServerError)
 		return
 	}

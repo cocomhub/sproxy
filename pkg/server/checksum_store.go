@@ -77,7 +77,7 @@ func (cs *ChecksumStore) Set(filename, checksum string) {
 	cs.mu.Unlock()
 
 	if err := cs.save(); err != nil {
-		cs.logger.Error("checksum 存储持久化失败", "op", "set", "filename", filename, "error", err)
+		cs.logger.Error("checksum 存储持久化失败", "op", "set", "file_name", filename, "error", err)
 	}
 }
 
@@ -88,7 +88,7 @@ func (cs *ChecksumStore) Delete(filename string) {
 	cs.mu.Unlock()
 
 	if err := cs.save(); err != nil {
-		cs.logger.Error("checksum 存储持久化失败", "op", "delete", "filename", filename, "error", err)
+		cs.logger.Error("checksum 存储持久化失败", "op", "delete", "file_name", filename, "error", err)
 	}
 }
 

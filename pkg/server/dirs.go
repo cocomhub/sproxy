@@ -27,12 +27,12 @@ func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 	targetDir := filepath.Join(cfg.UploadsDir, remotePath)
 
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		h.logger.Error("创建目录失败", "dirname", remotePath, "error", err)
+		h.logger.Error("创建目录失败", "dir", remotePath, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
 		return
 	}
 
-	h.logger.Info("目录已创建", "dirname", remotePath)
+	h.logger.Info("目录已创建", "dir", remotePath)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已创建: %s", remotePath)}, http.StatusOK)
 }
 
@@ -67,7 +67,7 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := os.RemoveAll(targetDir); err != nil {
-		h.logger.Error("删除目录失败", "dirname", remotePath, "error", err)
+		h.logger.Error("删除目录失败", "dir", remotePath, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除目录失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -75,6 +75,6 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 	// 清理 checksum store 中该目录下所有文件的记录
 	h.checksumStore.DeletePrefix(remotePath + "/")
 
-	h.logger.Info("目录已删除", "dirname", remotePath)
+	h.logger.Info("目录已删除", "dir", remotePath)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已删除: %s", remotePath)}, http.StatusOK)
 }

@@ -264,7 +264,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Debug("隧道请求", "method", r.Method, "remote", r.RemoteAddr)
+	h.logger.Debug("隧道请求", "method", r.Method, "remote_addr", r.RemoteAddr)
 
 	// 1. 解析 metadata 帧
 	metaJSON, err := decodeMetadataFrame(r.Body, h.key)

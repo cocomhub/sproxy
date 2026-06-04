@@ -1795,9 +1795,9 @@ func TestListFiles_PaginationMore(t *testing.T) {
 			t.Fatalf("expected 200, got %d", resp.StatusCode)
 		}
 		var result struct {
-			Files  []any `json:"files"`
-			Total  int   `json:"total"`
-			Limit  int   `json:"limit"`
+			Files []any `json:"files"`
+			Total int   `json:"total"`
+			Limit int   `json:"limit"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			t.Fatalf("decode: %v", err)
