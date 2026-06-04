@@ -6,6 +6,7 @@ package server
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -65,4 +66,22 @@ func TestVerifyChecksum_FileNotFound(t *testing.T) {
 	if verifyFileWithChecksum("/nonexistent", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
 		t.Fatal("verifyFileWithChecksum should return false for nonexistent file")
 	}
+}
+
+// TestChecksumStore_SaveError 测试 save() 在磁盘写入失败时的错误路径。
+// 在只读目录下创建 ChecksumStore，验证 Set/Delete 操作不 panic 且记录错误。
+// 注意：Windows 上只读目录不阻止文件写入，因此仅 Linux/macOS 有效。
+func TestChecksumStore_SaveError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("只读目录在 Windows 上不阻止文件写入")
+	}
+	roDir, cleanup := makeReadOnlyDir(t)
+	defer cleanup()
+
+	cs := NewChecksumStore(roDir, nil)
+
+	// Set 应该不 panic，save() 会失败但 Set 返回前已释放锁
+	cs.Set("k1", "v1")
+	cs.Delete("k2")
+	cs.Rename("k1", "k3")
 }

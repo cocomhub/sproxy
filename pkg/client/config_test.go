@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 func TestClientConfig_Defaults(t *testing.T) {
@@ -153,5 +155,185 @@ func TestClientConfig_LoadNonExistent(t *testing.T) {
 	// File should now exist (LoadConfig created it with defaults)
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		t.Error("Expected LoadConfig to create default config file, but file does not exist")
+	}
+}
+
+// TestHandleConfigShow verifies HandleConfigShow outputs to stdout without panicking.
+func TestHandleConfigShow(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ServerURL = "https://example.com"
+	cfg.TunnelKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	// Just verify it doesn't panic
+	HandleConfigShow(cfg)
+}
+
+func TestHandleConfigSet_ServerURL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	if err := HandleConfigSet(cfg, path, "server_url", "https://myserver:9090"); err != nil {
+		t.Fatalf("HandleConfigSet: %v", err)
+	}
+	if cfg.ServerURL != "https://myserver:9090" {
+		t.Fatalf("expected ServerURL=https://myserver:9090, got %q", cfg.ServerURL)
+	}
+	// Verify config was saved
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("expected config file to be saved")
+	}
+}
+
+func TestHandleConfigSet_Timeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	if err := HandleConfigSet(cfg, path, "timeout", "600"); err != nil {
+		t.Fatalf("HandleConfigSet: %v", err)
+	}
+	if cfg.Timeout != 600 {
+		t.Fatalf("expected Timeout=600, got %d", cfg.Timeout)
+	}
+}
+
+func TestHandleConfigSet_InvalidTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	if err := HandleConfigSet(cfg, path, "timeout", "not-a-number"); err == nil {
+		t.Fatal("expected error for invalid timeout value")
+	}
+}
+
+func TestHandleConfigSet_NoChecksum(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	if err := HandleConfigSet(cfg, path, "no_checksum", "true"); err != nil {
+		t.Fatalf("HandleConfigSet: %v", err)
+	}
+	if !cfg.NoChecksum {
+		t.Fatal("expected NoChecksum=true")
+	}
+}
+
+func TestHandleConfigSet_TunnelKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	key := strings.Repeat("a", 64)
+	if err := HandleConfigSet(cfg, path, "tunnel_key", key); err != nil {
+		t.Fatalf("HandleConfigSet: %v", err)
+	}
+	if cfg.TunnelKey != key {
+		t.Fatalf("expected TunnelKey=%q", key)
+	}
+}
+
+func TestHandleConfigSet_ChunkSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	if err := HandleConfigSet(cfg, path, "chunk_size", "8388608"); err != nil {
+		t.Fatalf("HandleConfigSet: %v", err)
+	}
+	if cfg.ChunkSize != 8388608 {
+		t.Fatalf("expected ChunkSize=8388608, got %d", cfg.ChunkSize)
+	}
+}
+
+func TestHandleConfigSet_InvalidChunkSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	if err := HandleConfigSet(cfg, path, "chunk_size", "not-valid"); err == nil {
+		t.Fatal("expected error for invalid chunk_size value")
+	}
+}
+
+func TestHandleConfigSet_MaxChunkSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	if err := HandleConfigSet(cfg, path, "max_chunk_size", "16777216"); err != nil {
+		t.Fatalf("HandleConfigSet: %v", err)
+	}
+	if cfg.MaxChunkSize != 16777216 {
+		t.Fatalf("expected MaxChunkSize=16777216, got %d", cfg.MaxChunkSize)
+	}
+}
+
+func TestHandleConfigSet_InvalidMaxChunkSize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	if err := HandleConfigSet(cfg, path, "max_chunk_size", "bad"); err == nil {
+		t.Fatal("expected error for invalid max_chunk_size")
+	}
+}
+
+func TestHandleConfigSet_UnknownKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	if err := HandleConfigSet(cfg, path, "unknown_key", "value"); err == nil {
+		t.Fatal("expected error for unknown config key")
+	}
+}
+
+// TestLoadFromViper tests LoadFromViper using a real viper instance.
+func TestLoadFromViper(t *testing.T) {
+	v := viper.New()
+	v.Set("server_url", "https://example.com:8443")
+	v.Set("timeout", 600)
+	v.Set("chunk_size", 8388608)
+	v.Set("no_checksum", true)
+
+	cfg, err := LoadFromViper(v)
+	if err != nil {
+		t.Fatalf("LoadFromViper: %v", err)
+	}
+	if cfg.ServerURL != "https://example.com:8443" {
+		t.Errorf("ServerURL: got %q, want %q", cfg.ServerURL, "https://example.com:8443")
+	}
+	if cfg.Timeout != 600 {
+		t.Errorf("Timeout: got %d, want %d", cfg.Timeout, 600)
+	}
+	if cfg.ChunkSize != 8388608 {
+		t.Errorf("ChunkSize: got %d, want %d", cfg.ChunkSize, 8388608)
+	}
+	if !cfg.NoChecksum {
+		t.Error("NoChecksum should be true")
+	}
+}
+
+func TestLoadFromViper_InvalidTunnelKey(t *testing.T) {
+	v := viper.New()
+	v.Set("server_url", "http://localhost:18083")
+	v.Set("tunnel_key", "short")
+
+	_, err := LoadFromViper(v)
+	if err == nil {
+		t.Fatal("expected error for invalid tunnel key length")
+	}
+}
+
+// TestConfigFilePath verifies configFilePath returns a non-empty path without error.
+func TestConfigFilePath(t *testing.T) {
+	path, err := configFilePath()
+	if err != nil {
+		t.Fatalf("configFilePath: %v", err)
+	}
+	if path == "" {
+		t.Fatal("configFilePath should not return empty path")
 	}
 }

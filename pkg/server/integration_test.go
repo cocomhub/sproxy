@@ -1421,27 +1421,107 @@ func TestListFiles_SubdirParameter(t *testing.T) {
 	}
 }
 
-func TestListFiles_SubdirPathTraversalReturns200Empty(t *testing.T) {
+func TestUpload_ParseMultipartFormError(t *testing.T) {
 	t.Parallel()
-	url, _ := newTestServerWithAllRoutes(t, nil)
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
 
-	resp, err := http.Get(url + "/api/files?subdir=../../../etc")
+	// 发送非法 multipart 数据（非正确格式的内容）
+	req, err := http.NewRequest("POST", url+"/upload", bytes.NewReader([]byte("not a valid multipart body")))
+	if err != nil {
+		t.Fatalf("new req: %v", err)
+	}
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=xxx")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do upload: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for bad multipart, got %d", resp.StatusCode)
+	}
+}
+
+func TestDownload_FileNotFound(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	resp, err := http.Get(url + "/download?filename=nonexistent.txt")
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestDelete_FileNotFound(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	req, _ := http.NewRequest("POST", url+"/delete?filename=nonexistent.txt", nil)
+	req.Header.Set("X-File-Checksum", sha256hex([]byte("dummy")))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestListFiles_SubdirNonExistent(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	resp, err := http.Get(url + "/api/files?subdir=nonexistent_subdir")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+		t.Fatalf("expected 200 (empty list), got %d", resp.StatusCode)
 	}
 	var result struct {
 		Files []fileInfo `json:"files"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if len(result.Files) != 0 {
-		t.Fatalf("expected empty list, got %+v", result.Files)
+		t.Fatalf("expected empty list for nonexistent subdir, got %d files", len(result.Files))
 	}
 }
 
+func TestSearchFiles_InvalidSubdir(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	// subdir 参数触发 ValidateFilePath 错误
+	resp, err := http.Get(url + "/api/files?subdir=../../escape")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 (empty safe response), got %d", resp.StatusCode)
+	}
+	var result struct {
+		Files []fileInfo `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Files) != 0 {
+		t.Fatalf("expected empty list for invalid subdir, got %d files", len(result.Files))
+	}
+}
 // ---- upload 文件已存在 checksum 不匹配 ----
 
 func TestUpload_ExistingFileChecksumMismatch(t *testing.T) {
@@ -1540,6 +1620,48 @@ func TestGzipMiddleware_NilLogger(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestGzipMiddleware_WriteHeaderAndFlush(t *testing.T) {
+	t.Parallel()
+
+	// 显式调用 w.WriteHeader() 和 w.(http.Flusher).Flush()，
+	// 覆盖 gzipResponseWriter.WriteHeader (0%) 和 gzipResponseWriter.Flush (0%)。
+	logger := slog.Default()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write([]byte("partial data"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	})
+	handler := GzipMiddleware(logger)(inner)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.Header.Get("Content-Encoding") != "gzip" {
+		t.Fatal("expected Content-Encoding: gzip")
+	}
+	if resp.Header.Get("Vary") != "Accept-Encoding" {
+		t.Fatal("expected Vary: Accept-Encoding")
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("response body should be valid gzip: %v", err)
+	}
+	decompressed, _ := io.ReadAll(gr)
+	gr.Close()
+	if string(decompressed) != "partial data" {
+		t.Fatalf("decompressed content mismatch: got %q", string(decompressed))
 	}
 }
 
@@ -1674,6 +1796,193 @@ func TestBatchRename_InvalidPath(t *testing.T) {
 	}
 	if result.Results[0].Success {
 		t.Fatal("expected failure for invalid path")
+	}
+}
+
+func TestBatchRename_MissingChecksum(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("nocs data")
+	cs := sha256hex(body)
+	code, _ := uploadFile(t, url, "nocs.txt", body, map[string]string{"X-File-Checksum": cs})
+	if code != 200 {
+		t.Fatalf("upload: expected 200, got %d", code)
+	}
+
+	reqBody := `{"operations":[{"from":"nocs.txt","to":"nocs_moved.txt","checksum":""}]}`
+	req, _ := http.NewRequest("POST", url+"/api/batch/rename", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("batch rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Results []struct {
+			Success bool   `json:"success"`
+			Message string `json:"message"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Results[0].Success {
+		t.Fatalf("expected failure when checksum is empty, got: %+v", result.Results[0])
+	}
+}
+
+func TestBatchRename_ChecksumMismatch(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("checksum test")
+	cs := sha256hex(body)
+	code, _ := uploadFile(t, url, "cs-test.txt", body, map[string]string{"X-File-Checksum": cs})
+	if code != 200 {
+		t.Fatalf("upload: expected 200, got %d", code)
+	}
+
+	wrongCS := sha256hex([]byte("wrong"))
+	reqBody := fmt.Sprintf(`{"operations":[{"from":"cs-test.txt","to":"cs-moved.txt","checksum":"%s"}]}`, wrongCS)
+	req, _ := http.NewRequest("POST", url+"/api/batch/rename", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("batch rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Results []struct {
+			Filename string `json:"filename"`
+			Success  bool   `json:"success"`
+			Message  string `json:"message"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result.Results))
+	}
+	if result.Results[0].Success {
+		t.Fatalf("expected failure for checksum mismatch, got: %+v", result.Results[0])
+	}
+}
+
+func TestBatchRename_TargetAlreadyExists(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("source file")
+	cs := sha256hex(body)
+	code1, _ := uploadFile(t, url, "src.txt", body, map[string]string{"X-File-Checksum": cs})
+	if code1 != 200 {
+		t.Fatalf("upload src: expected 200, got %d", code1)
+	}
+	code2, _ := uploadFile(t, url, "dst.txt", body, map[string]string{"X-File-Checksum": cs})
+	if code2 != 200 {
+		t.Fatalf("upload dst: expected 200, got %d", code2)
+	}
+
+	reqBody := fmt.Sprintf(`{"operations":[{"from":"src.txt","to":"dst.txt","checksum":"%s"}]}`, cs)
+	req, _ := http.NewRequest("POST", url+"/api/batch/rename", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("batch rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Results []struct {
+			Filename string `json:"filename"`
+			Success  bool   `json:"success"`
+			Message  string `json:"message"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(result.Results))
+	}
+	if result.Results[0].Success {
+		t.Fatalf("expected failure when target exists, got: %+v", result.Results[0])
+	}
+}
+
+func TestBatchRename_SamePath(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("same path")
+	cs := sha256hex(body)
+	code, _ := uploadFile(t, url, "same.txt", body, map[string]string{"X-File-Checksum": cs})
+	if code != 200 {
+		t.Fatalf("upload: expected 200, got %d", code)
+	}
+
+	reqBody := fmt.Sprintf(`{"operations":[{"from":"same.txt","to":"same.txt","checksum":"%s"}]}`, cs)
+	req, _ := http.NewRequest("POST", url+"/api/batch/rename", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("batch rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Results []struct {
+			Success bool   `json:"success"`
+			Message string `json:"message"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !result.Results[0].Success {
+		t.Fatalf("expected success for same source/target, got: %+v", result.Results[0])
+	}
+}
+
+func TestBatchRename_SourceNotFound(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	cs := sha256hex([]byte("nonexistent"))
+	reqBody := fmt.Sprintf(`{"operations":[{"from":"ghost.txt","to":"nowhere.txt","checksum":"%s"}]}`, cs)
+	req, _ := http.NewRequest("POST", url+"/api/batch/rename", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("batch rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result struct {
+		Results []struct {
+			Success bool   `json:"success"`
+			Message string `json:"message"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Results[0].Success {
+		t.Fatalf("expected failure for nonexistent source, got: %+v", result.Results[0])
 	}
 }
 

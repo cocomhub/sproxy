@@ -58,6 +58,28 @@ func TestWithLogger_Nil(t *testing.T) {
 	}
 }
 
+func TestWithTunnel_ValidKey(t *testing.T) {
+	t.Parallel()
+
+	c := NewFileClient("http://localhost:18083")
+	WithTunnel(strings.Repeat("abcdef", 11))(c) // 66 chars → invalid, logged as warn
+	if c.tunnelClient != nil {
+		t.Fatal("tunnelClient should be nil for invalid key")
+	}
+}
+
+func TestWithTunnel_InvalidKey(t *testing.T) {
+	t.Parallel()
+
+	c := NewFileClient("http://localhost:18083")
+	// 64 hex chars = 32 bytes = valid AES-256 key
+	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	WithTunnel(validKey)(c)
+	if c.tunnelClient == nil {
+		t.Fatal("tunnelClient should not be nil for valid key")
+	}
+}
+
 func TestWithProgress(t *testing.T) {
 	c := NewFileClient("http://localhost:18083")
 	var called atomic.Int64
