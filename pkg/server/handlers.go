@@ -127,7 +127,12 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	if err != nil {
 		h.logger.Error("web static fs sub error", "error", err)
 	} else {
-		mux.Handle("GET /ui/", http.StripPrefix("/ui/", http.FileServer(http.FS(subFS))))
+		fileServer := http.StripPrefix("/ui/", http.FileServer(http.FS(subFS)))
+		mux.Handle("GET /ui/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Security-Policy",
+				"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;")
+			fileServer.ServeHTTP(w, r)
+		}))
 	}
 
 	// GET / -> /ui/ 重定向
