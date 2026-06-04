@@ -587,8 +587,8 @@ func TestListFiles_Pagination_Unlimited(t *testing.T) {
 	if result.Offset != 0 {
 		t.Fatalf("offset: expected 0, got %d", result.Offset)
 	}
-	if result.Limit != 0 {
-		t.Fatalf("limit: expected 0 (unlimited), got %d", result.Limit)
+	if result.Limit != 1000 {
+		t.Fatalf("limit: expected 1000 (default), got %d", result.Limit)
 	}
 	if len(result.Files) < 3 {
 		t.Fatalf("files: expected >= 3, got %d", len(result.Files))
@@ -1785,7 +1785,7 @@ func TestListFiles_PaginationMore(t *testing.T) {
 		}
 	})
 
-	t.Run("limit_0_returns_all", func(t *testing.T) {
+	t.Run("limit_0_uses_default", func(t *testing.T) {
 		resp, err := http.Get(url + "/api/files?limit=0")
 		if err != nil {
 			t.Fatalf("list: %v", err)
@@ -1805,8 +1805,8 @@ func TestListFiles_PaginationMore(t *testing.T) {
 		if result.Total < 12 {
 			t.Fatalf("total: expected >= 12, got %d", result.Total)
 		}
-		if result.Limit != 0 {
-			t.Fatalf("limit: expected 0, got %d", result.Limit)
+		if result.Limit != 1000 {
+			t.Fatalf("limit: expected 1000 (default), got %d", result.Limit)
 		}
 		if len(result.Files) < 12 {
 			t.Fatalf("files: expected >= 12, got %d", len(result.Files))

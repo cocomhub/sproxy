@@ -27,7 +27,7 @@ import (
 )
 
 // parsePagination 从请求查询参数中解析 offset 和 limit。
-// offset 默认 0，limit 为 0 表示不限。
+// offset 默认 0，limit 默认 1000（上限 10000）。
 func parsePagination(r *http.Request) (offset, limit int) {
 	if o := r.URL.Query().Get("offset"); o != "" {
 		fmt.Sscanf(o, "%d", &offset)
@@ -38,8 +38,8 @@ func parsePagination(r *http.Request) (offset, limit int) {
 	if offset < 0 {
 		offset = 0
 	}
-	if limit < 0 {
-		limit = 0
+	if limit <= 0 || limit > 10000 {
+		limit = 1000
 	}
 	return
 }
