@@ -92,13 +92,14 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	localMux.HandleFunc("POST /upload/complete", h.uploadComplete)
 	localMux.HandleFunc("GET /download/chunk", h.downloadChunk)
 
-	// gzip + 速率限制中间件链
+	// gzip + 速率限制 + CORS 中间件链
 	var apiHandler http.Handler = localMux
 	apiHandler = GzipMiddleware(log.With("component", "gzip"))(apiHandler)
 	if cfg.RateLimit.Enabled {
 		rl := NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "rate_limiter"))
 		apiHandler = rl.Middleware(apiHandler)
 	}
+	apiHandler = CORSMiddleware(cfg.CORS, log.With("component", "cors"))(apiHandler)
 
 	var tunnelHandler http.Handler = tunnel.NewLocalHandler(tunnelKey, requestLogMiddleware(log.With("component", "request"), apiHandler), log.With("component", "tunnel"))
 

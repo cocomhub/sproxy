@@ -48,6 +48,7 @@ type Config struct {
 	TLS            TLSConfig       `yaml:"tls" mapstructure:"tls"`
 	AuthToken      string          `yaml:"auth_token" mapstructure:"auth_token"`
 	RateLimit      RateLimitConfig `yaml:"rate_limit" mapstructure:"rate_limit"`
+	CORS           CORSConfig      `yaml:"cors" mapstructure:"cors"`
 
 	// 分块上传配置
 	ChunkSize        int64         `yaml:"chunk_size" mapstructure:"chunk_size"`
@@ -68,6 +69,9 @@ func Default() *Config {
 		},
 		TLS: TLSConfig{
 			AutoTLS: false,
+		},
+		CORS: CORSConfig{
+			MaxAge: 86400,
 		},
 		ChunkSize:        size.DefaultChunkSize,
 		UploadSessionTTL: 24 * time.Hour,
