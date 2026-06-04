@@ -52,6 +52,9 @@ tr:hover td { background: #f8f9fa; }
 .chunk-progress-text { font-size: 12px; color: #666; margin-top: 2px; }
 .resume-btn { margin: 4px 0; padding: 2px 8px; font-size: 12px; background: #27ae60; color: #fff; border: none; border-radius: 3px; cursor: pointer; }
 .resume-btn:hover { background: #219a52; }
+#batch-toolbar { display:none; margin-bottom:8px; padding:8px 12px; background:#fff8e1; border-radius:4px; align-items:center; gap:8px; flex-wrap:wrap; }
+#batch-toolbar.show { display:flex; }
+.check-col { width:36px; text-align:center; }
 </style>
 </head>
 <body>
@@ -72,6 +75,12 @@ tr:hover td { background: #f8f9fa; }
     <input type="text" id="search-input" placeholder="搜索文件…" style="padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;flex:1;min-width:160px;" onkeydown="if(event.key==='Enter') searchFiles()">
     <button class="btn btn-primary" onclick="searchFiles()">搜索</button>
     <button class="btn btn-secondary" id="clear-search-btn" onclick="clearSearch()" style="display:none;">清除搜索</button>
+  </div>
+  <div id="batch-toolbar">
+    <span id="batch-count">已选 0 个文件</span>
+    <button class="btn btn-danger btn-sm" onclick="batchDelete()">批量删除</button>
+    <button class="btn btn-warning btn-sm" onclick="batchRename()">批量重命名</button>
+    <button class="btn btn-secondary btn-sm" onclick="clearSelection()">取消选择</button>
   </div>
   <div id="dir-bar" style="margin-bottom:12px;padding:6px 12px;background:#f0f4ff;border-radius:4px;font-size:14px;display:flex;align-items:center;gap:8px;">
     <strong>目录：</strong><span id="dir-breadcrumb" style="flex:1;"><a href="javascript:void(0)" onclick="navigateDir('')">/</a></span>
@@ -682,19 +691,19 @@ async function searchFiles() {
     _searchActive = true;
     document.getElementById('clear-search-btn').style.display = '';
     if (files.length === 0) { el.innerHTML = '<div class="empty-msg">未找到匹配文件</div>'; return; }
-    var html = '<table><thead><tr><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th class="check-col"><input type="checkbox" onchange="toggleSelectAll(this.checked)"></th><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
     for (var fiIdx = 0; fiIdx < files.length; fiIdx++) {
       var fi = files[fiIdx];
       var fullName = fi.name;
       if (fi.is_dir) {
-        html += '<tr style="cursor:pointer;background:#f8f9fa;"><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
+        html += '<tr style="cursor:pointer;background:#f8f9fa;"><td class="check-col"></td><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
           '<td>-</td><td>-</td><td>' +
           '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
           '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
       } else {
         var cs = fi.checksum || '';
         var csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
-        html += '<tr><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
+        html += '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '" onchange="updateBatchToolbar()"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
           '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
           '<td>' + csDisplay + '</td>' +
           '<td class="file-actions">' +
@@ -706,6 +715,7 @@ async function searchFiles() {
     }
     html += '</tbody></table>';
     el.innerHTML = html;
+    updateBatchToolbar();
   } catch(e) {
     el.innerHTML = '<div class="empty-msg">搜索失败: ' + e.message + '</div>';
   }
@@ -741,19 +751,19 @@ async function refreshList() {
     _currentOffset = files.length;
     _hasMore = (data.total || 0) > _currentOffset;
     if (files.length === 0) { el.innerHTML = '<div class="empty-msg">暂无文件</div>'; return; }
-    var html = '<table><thead><tr><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th class="check-col"><input type="checkbox" onchange="toggleSelectAll(this.checked)"></th><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
     for (var fiIdx = 0; fiIdx < files.length; fiIdx++) {
       var fi = files[fiIdx];
       var fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
       if (fi.is_dir) {
-        html += '<tr style="cursor:pointer;background:#f8f9fa;"><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
+        html += '<tr style="cursor:pointer;background:#f8f9fa;"><td class="check-col"></td><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
           '<td>-</td><td>-</td><td>' +
           '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
           '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
       } else {
         var cs = fi.checksum || '';
         var csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
-        html += '<tr><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
+        html += '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '" onchange="updateBatchToolbar()"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
           '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
           '<td>' + csDisplay + '</td>' +
           '<td class="file-actions">' +
@@ -770,6 +780,7 @@ async function refreshList() {
         '<button class="btn btn-primary" onclick="loadMore()">加载更多 (' + remaining + ')</button></div>';
     }
     el.innerHTML = html;
+    updateBatchToolbar();
   } catch(e) {
     el.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
   }
@@ -801,14 +812,14 @@ async function loadMore() {
       var fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
       var rowHtml;
       if (fi.is_dir) {
-        rowHtml = '<tr style="cursor:pointer;background:#f8f9fa;"><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
+        rowHtml = '<tr style="cursor:pointer;background:#f8f9fa;"><td class="check-col"></td><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
           '<td>-</td><td>-</td><td>' +
           '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
           '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
       } else {
         var cs = fi.checksum || '';
         var csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
-        rowHtml = '<tr><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
+        rowHtml = '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '" onchange="updateBatchToolbar()"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
           '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
           '<td>' + csDisplay + '</td>' +
           '<td class="file-actions">' +
@@ -1226,6 +1237,97 @@ function formatSize(bytes) {
 
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function escJsStr(s) { return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"'); }
+
+// === 批量操作 ===
+function toggleSelectAll(checked) {
+  var cbs = document.querySelectorAll('.file-select');
+  for (var i = 0; i < cbs.length; i++) { cbs[i].checked = checked; }
+  updateBatchToolbar();
+}
+function updateBatchToolbar() {
+  var cbs = document.querySelectorAll('.file-select:checked');
+  var count = cbs.length;
+  var toolbar = document.getElementById('batch-toolbar');
+  var label = document.getElementById('batch-count');
+  if (!toolbar || !label) return;
+  label.textContent = '已选 ' + count + ' 个文件';
+  if (count > 0) { toolbar.classList.add('show'); } else { toolbar.classList.remove('show'); }
+}
+function clearSelection() {
+  var cbs = document.querySelectorAll('.file-select:checked');
+  for (var i = 0; i < cbs.length; i++) { cbs[i].checked = false; }
+  updateBatchToolbar();
+}
+function getSelectedFiles() {
+  var cbs = document.querySelectorAll('.file-select:checked');
+  var results = [];
+  for (var i = 0; i < cbs.length; i++) {
+    var filename = cbs[i].getAttribute('data-filename');
+    var checksum = cbs[i].getAttribute('data-checksum');
+    if (filename) results.push({ filename: filename, checksum: checksum });
+  }
+  return results;
+}
+async function batchDelete() {
+  var files = getSelectedFiles();
+  if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
+  if (!confirm('确定要删除选中的 ' + files.length + ' 个文件吗？')) return;
+  var body = JSON.stringify({ files: files });
+  try {
+    var url = '/api/batch/delete';
+    var resp;
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('POST', url, { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
+      resp = { ok: true, json: function() { return JSON.parse(new TextDecoder().decode(result.body)); } };
+    } else {
+      resp = await fetch(BASE + url, { method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: body });
+    }
+    var data = await resp.json();
+    if (data.success) {
+      showToast(data.message || '删除完成', 'success');
+      refreshList();
+    } else {
+      showToast(data.message || '批量删除失败', 'error');
+    }
+  } catch(e) {
+    showToast('批量删除失败: ' + e.message, 'error');
+  }
+}
+async function batchRename() {
+  var files = getSelectedFiles();
+  if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
+  var operations = [];
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    var newName = prompt('重命名 "' + f.filename + '"\n请输入新文件名（取消跳过）:', f.filename);
+    if (newName === null) continue;
+    if (newName.trim() === '') { showToast('文件名不能为空', 'error'); return; }
+    if (newName === f.filename) continue;
+    operations.push({ from: f.filename, to: newName, checksum: f.checksum });
+  }
+  if (operations.length === 0) { showToast('没有需要重命名的文件', 'info'); return; }
+  var body = JSON.stringify({ operations: operations });
+  try {
+    var url = '/api/batch/rename';
+    var resp;
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('POST', url, { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
+      resp = { ok: true, json: function() { return JSON.parse(new TextDecoder().decode(result.body)); } };
+    } else {
+      resp = await fetch(BASE + url, { method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: body });
+    }
+    var data = await resp.json();
+    if (data.success) {
+      showToast(data.message || '重命名完成', 'success');
+      clearSelection();
+      refreshList();
+    } else {
+      showToast(data.message || '批量重命名失败', 'error');
+    }
+  } catch(e) {
+    showToast('批量重命名失败: ' + e.message, 'error');
+  }
+}
 
 // 初始化
 refreshList();
