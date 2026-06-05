@@ -99,6 +99,9 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 
 	localMux.HandleFunc("POST /api/archive", h.archiveHandler)
 	localMux.HandleFunc("GET /api/archive-dir", h.archiveDirHandler)
+	localMux.HandleFunc("GET /api/versions", h.listVersionsHandler)
+	localMux.HandleFunc("POST /api/versions/restore", h.restoreVersionHandler)
+	localMux.HandleFunc("DELETE /api/versions", h.deleteVersionHandler)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -136,6 +139,9 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
 	mux.HandleFunc("POST /api/archive", h.authMiddleware(h.archiveHandler))
 	mux.HandleFunc("GET /api/archive-dir", h.authMiddleware(h.archiveDirHandler))
+	mux.HandleFunc("GET /api/versions", h.authMiddleware(h.listVersionsHandler))
+	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
+	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.Handle("POST /tunnel", h.tunnelHandler)
@@ -273,13 +279,22 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if stat, err := os.Stat(filePath); err == nil {
-		if !verifyFileWithChecksum(filePath, expectedChecksum) {
+		if verifyFileWithChecksum(filePath, expectedChecksum) {
+			// 幂等上传：文件已存在且 checksum 匹配，先保存版本后返回
+			h.saveVersionBeforeOverwrite(remotePath)
+			sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件已上传成功, size: %d", stat.Size()), Checksum: expectedChecksum}, http.StatusOK)
+			return
+		}
+		if cfg.Versioning.Enabled {
+			// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本
+			h.saveVersionBeforeOverwrite(remotePath)
+			// 继续执行下面的写入流程，用新内容覆盖现有文件
+		} else {
+			// checksum 不匹配：冲突，需保留现有文件
 			logger.Warn("文件已存在，但校验失败", "file_name", remotePath)
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件已存在，但校验失败"}, http.StatusConflict)
 			return
 		}
-		sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件已上传成功, size: %d", stat.Size()), Checksum: expectedChecksum}, http.StatusOK)
-		return
 	}
 
 	dir := filepath.Dir(filePath)

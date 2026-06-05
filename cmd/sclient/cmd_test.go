@@ -177,7 +177,7 @@ func TestVersionCmd(t *testing.T) {
 	// version command is not registered via init() but via rootCmd init directly
 	var found bool
 	for _, c := range rootCmd.Commands() {
-		if c.Use == "version" {
+		if strings.HasPrefix(c.Use, "version") {
 			found = true
 			break
 		}

@@ -47,3 +47,8 @@ max_header_bytes: 1048576
 # max_chunk_size: 67108864          # 最大分块大小 (64MB)，仅客户端使用
 # max_chunk_upload_bytes: 8388608   # 单块请求体服务端最大限制 (8MB)，超过返回 413
 # upload_session_ttl: "24h"         # 未完成上传会话保留时间，过期自动清理
+
+# 文件版本管理（默认关闭）。上传覆盖前自动保存旧版本到 .__versions__/ 目录。
+# versioning:
+#   enabled: true
+#   max_versions: 10                # 保留最近的 N 个版本，超出自动清理

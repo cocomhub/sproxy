@@ -35,6 +35,11 @@ type ServerTimeouts struct {
 	Shutdown   time.Duration `yaml:"shutdown"`
 }
 
+type VersionConfig struct {
+	Enabled     bool `yaml:"enabled" mapstructure:"enabled"`
+	MaxVersions int  `yaml:"max_versions" mapstructure:"max_versions"`
+}
+
 type Config struct {
 	Addr       string `yaml:"addr" mapstructure:"addr"`
 	UploadsDir string `yaml:"uploads_dir" mapstructure:"uploads_dir"`
@@ -54,6 +59,9 @@ type Config struct {
 	ChunkSize        int64         `yaml:"chunk_size" mapstructure:"chunk_size"`
 	MaxChunkSize     int64         `yaml:"max_chunk_size" mapstructure:"max_chunk_size"` // 仅 sclient 使用；服务端按 DefaultChunkBodyLimit 限制
 	UploadSessionTTL time.Duration `yaml:"upload_session_ttl" mapstructure:"upload_session_ttl"`
+
+	// 文件版本管理（默认关闭）
+	Versioning VersionConfig `yaml:"versioning" mapstructure:"versioning"`
 }
 
 func Default() *Config {
