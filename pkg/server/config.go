@@ -63,8 +63,8 @@ type Config struct {
 	// 文件版本管理（默认关闭）
 	Versioning VersionConfig `yaml:"versioning" mapstructure:"versioning"`
 
-		// å¤ç¨æ· API å¯é¥è®¤è¯ï¼é»è®¤å³é­ï¼
-		APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`
+	// API 密钥配置
+	APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`
 }
 
 func Default() *Config {

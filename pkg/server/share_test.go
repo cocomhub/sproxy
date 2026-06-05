@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestShare_CreateAndAccess(t *testing.T) {
@@ -78,6 +79,8 @@ func TestShare_Expired(t *testing.T) {
 	var shareResp map[string]any
 	json.NewDecoder(resp.Body).Decode(&shareResp)
 	token, _ := shareResp["token"].(string)
+
+	time.Sleep(10 * time.Millisecond)
 
 	// 不跟随重定向的 client
 	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {

@@ -1,5 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "statusLine": {
+    "type": "command",
+    "command": "powershell -NoProfile -Command \"$input=$null; try{$raw=[Console]::In.ReadToEnd();if($raw){$input=$raw|ConvertFrom-Json}}catch{};$cwd=if($input){$input.workspace.current_dir}else{(Get-Location).Path};$mod='';$t=$cwd;while($t-and$t.Length-gt3){if(Test-Path(Join-Path$t'go.mod')){$mod=Split-Path$t-Leaf;break};$t=Split-Path$t-Parent};$rel='';if($mod-and$cwd.StartsWith($t,'OrdinalIgnoreCase')){$r=$cwd.Substring($t.Length).TrimStart('\\','/');if($r){$rel=\"/$r\"}};$br='';try{$b=&git -C$cwd branch --show-current 2>$null;if($LASTEXITCODE-eq0-and$b){$br=$b.Trim()}}catch{};$pr='';if($input.pr.number){$st=if($input.pr.review_state){\" [$($input.pr.review_state)]\"}else{''};$pr=\" PR#$($input.pr.number)$st\"};$out=@();if($mod){$out+=\"$mod$rel\"}else{$out+=(Split-Path$cwd-Leaf)};if($br){$out+=\"[$br]\"};if($pr){$out+=$pr};Write-Output($out-join' ')\""
+  },
   "permissions": {
     "allow": [
       "mcp__mcp-atlassian-http__confluence_get_page",
@@ -38,7 +42,16 @@
       "PowerShell(go build *)",
       "PowerShell(go *)",
       "PowerShell(go test *)",
-      "PowerShell(go vet *)"
+      "PowerShell(go vet *)",
+      "Skill(fewer-permission-prompts)",
+      "Bash(python3 *)",
+      "Bash(git rm *)",
+      "Bash(git reset *)",
+      "Bash(xxd pkg/server/handlers.go)",
+      "PowerShell(\\(Get-Prompt\\).ToString\\(\\))",
+      "PowerShell(Write-Host \"PROFILE path: $PROFILE\"; Write-Host \"===\"; if \\(Test-Path $PROFILE\\) { Get-Content $PROFILE -Encoding utf8 | Select-Object -First 100 } else { \"No profile found\" })",
+      "Bash(python -c ' *)",
+      "PowerShell(Write-Host \"--- Claude settings.json ---\"; $settings = \"$env:CLAUDE_CONFIG_DIR\\\\settings.json\"; if \\(Test-Path $settings\\) { Get-Content $settings -Raw } else { \"not found at $settings\" }; Write-Host \"--- Local settings ---\"; $local = \"$env:CLAUDE_PROJECT_DIR\\\\.claude\\\\settings.local.json\"; if \\(Test-Path $local\\) { Get-Content $local -Raw } else { \"not found at $local\" })"
     ],
     "deny": []
   }

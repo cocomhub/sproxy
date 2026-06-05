@@ -147,10 +147,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	ttl := 24 * time.Hour
 	if req.TTL != "" {
 		if d, err := time.ParseDuration(req.TTL); err == nil && d > 0 {
-			ttl = d
-			if ttl > maxShareTTL {
-				ttl = maxShareTTL
-			}
+			ttl = min(d, maxShareTTL)
 		}
 	}
 
