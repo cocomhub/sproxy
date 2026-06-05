@@ -52,6 +52,8 @@ type Handlers struct {
 	uploadStore   *UploadStore
 	tunnelHandler http.Handler
 	logger        *slog.Logger
+	metrics       *Metrics
+	handler       http.Handler // mux wrapped with metricsMiddleware
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -81,6 +83,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 		checksumStore: cs,
 		uploadStore:   NewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, log.With("component", "upload_store")),
 		logger:        log,
+		metrics:       NewMetrics(),
 	}
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
@@ -144,6 +147,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
+	mux.HandleFunc("GET /metrics", h.MetricsHandler)
 	mux.Handle("POST /tunnel", h.tunnelHandler)
 
 	// Web UI
@@ -162,6 +166,8 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	// GET / -> /ui/ 重定向
 	mux.HandleFunc("GET /", h.webRedirect)
 
+	h.handler = h.metricsMiddleware(mux)
+
 	return h
 }
 
@@ -172,6 +178,11 @@ func (h *Handlers) Close() error {
 		h.uploadStore.Stop()
 	}
 	return nil
+}
+
+// Handler 返回包装了 metricsMiddleware 的 HTTP handler，用于 http.Server.Handler。
+func (h *Handlers) Handler() http.Handler {
+	return h.handler
 }
 
 // requestLogMiddleware 记录 HTTP 请求的基本信息：方法、路径、远程地址、耗时。
@@ -371,6 +382,9 @@ afterRename:
 		Message:  fmt.Sprintf("文件上传成功, size: %d", handler.Size),
 		Checksum: serverChecksum,
 	}, http.StatusOK)
+	if h.metrics != nil {
+		h.metrics.RecordUpload(handler.Size)
+	}
 }
 
 func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
@@ -425,6 +439,9 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	//   - 自动处理 Range header（返回 206 + Content-Range，旧客户端不带 Range 仍 200 全量）
 	//   - 不会根据扩展名嗅探并覆盖已设置的 Content-Type（同步修复缺陷 #12）
 	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+	if h.metrics != nil {
+		h.metrics.RecordDownload(info.Size())
+	}
 }
 
 func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
@@ -469,6 +486,9 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.checksumStore.Delete(remotePath)
+	if h.metrics != nil {
+		h.metrics.RecordDelete()
+	}
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, http.StatusOK)
 }
 

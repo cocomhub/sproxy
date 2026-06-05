@@ -125,7 +125,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	s := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           mux,
+		Handler:           h.Handler(),
 		ReadHeaderTimeout: cfg.ServerTimeouts.ReadHeader,
 		ReadTimeout:       cfg.ServerTimeouts.Read,
 		WriteTimeout:      cfg.ServerTimeouts.Write,
