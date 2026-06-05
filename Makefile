@@ -75,6 +75,15 @@ test: vet
 	@echo Running go test -race ./...
 	@$(GO) test -race ./...
 
+.PHONY: cover
+
+cover: test
+	@mkdir -p $(BUILD_DIR)/coverage
+	$(GO) test -race -coverprofile=$(BUILD_DIR)/coverage/cover.out ./...
+	$(GO) tool cover -html=$(BUILD_DIR)/coverage/cover.out -o $(BUILD_DIR)/coverage/cover.html
+	@$(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out
+	@echo "Coverage report: file://$(BUILD_DIR)/coverage/cover.html"
+
 .PHONY: run
 
 run: build

@@ -70,14 +70,14 @@ func TestMetrics_RecordRequest(t *testing.T) {
 	if got := m.RequestsTotal.Load(); got != 4 {
 		t.Errorf("RequestsTotal: want 4, got %d", got)
 	}
-	if got := m.Requests2xx.Load(); got != 2 {
-		t.Errorf("Requests2xx: want 2, got %d", got)
+	if got := m.Requests2XX.Load(); got != 2 {
+		t.Errorf("Requests2XX: want 2, got %d", got)
 	}
-	if got := m.Requests4xx.Load(); got != 1 {
-		t.Errorf("Requests4xx: want 1, got %d", got)
+	if got := m.Requests4XX.Load(); got != 1 {
+		t.Errorf("Requests4XX: want 1, got %d", got)
 	}
-	if got := m.Requests5xx.Load(); got != 1 {
-		t.Errorf("Requests5xx: want 1, got %d", got)
+	if got := m.Requests5XX.Load(); got != 1 {
+		t.Errorf("Requests5XX: want 1, got %d", got)
 	}
 }
 
@@ -134,8 +134,8 @@ func TestMetricsMiddleware_CountsRequests(t *testing.T) {
 	if got := h.metrics.RequestsTotal.Load(); got != 3 {
 		t.Errorf("RequestsTotal: want 3, got %d", got)
 	}
-	if got := h.metrics.Requests2xx.Load(); got != 3 {
-		t.Errorf("Requests2xx: want 3, got %d", got)
+	if got := h.metrics.Requests2XX.Load(); got != 3 {
+		t.Errorf("Requests2XX: want 3, got %d", got)
 	}
 }
 

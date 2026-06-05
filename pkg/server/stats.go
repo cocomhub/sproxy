@@ -89,9 +89,9 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 		resp.BytesDownloaded = m.BytesDownloaded.Load()
 		resp.RequestCounts = RequestCounts{
 			Total: m.RequestsTotal.Load(),
-			Xx2:   m.Requests2xx.Load(),
-			Xx4:   m.Requests4xx.Load(),
-			Xx5:   m.Requests5xx.Load(),
+			Xx2:   m.Requests2XX.Load(),
+			Xx4:   m.Requests4XX.Load(),
+			Xx5:   m.Requests5XX.Load(),
 		}
 	}
 

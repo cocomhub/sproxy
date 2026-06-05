@@ -8,18 +8,17 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
 var searchCmd = &cobra.Command{
 	Use:   "search <keyword>",
 	Short: "搜索文件",
-	Long: `在 sproxy 服务端上搜索文件名包含指定关键字的文件（不区分大小写）。
+	Long: `搜索 sproxy 服务端上名称匹配的文件。
 
-示例：
-  sclient search report     # 搜索文件名包含 "report" 的文件
-  sclient search .txt       # 搜索所有 .txt 文件`,
+搜索关键字支持模糊匹配，例如：
+  sclient search report     # 搜索名称包含 "report" 的文件
+  sclient search .txt       # 搜索名称包含 .txt 的文件`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		cli, err := buildFileClient(cmd)
@@ -37,20 +36,11 @@ var searchCmd = &cobra.Command{
 		if len(files) == 0 {
 			fmt.Println("no files found")
 		} else {
-			for _, f := range files {
-				if f.IsDir {
-					fmt.Printf("%-40s  %10s\n", f.Name+"/", "-")
-				} else {
-					csPrefix := f.Checksum
-					if len(csPrefix) > 16 {
-						csPrefix = csPrefix[:16] + "…"
-					}
-					if csPrefix == "" {
-						csPrefix = "-"
-					}
-					fmt.Printf("%-40s  %10s  %s\n", f.Name, client.FormatByte(float64(f.Size)), csPrefix)
-				}
-			}
+			printFileList(files, os.Stdout)
 		}
 	},
+}
+
+func init() {
+	rootCmd.AddCommand(searchCmd)
 }

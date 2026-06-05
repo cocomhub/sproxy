@@ -171,53 +171,56 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	c.logger.Info("分块上传开始", "file_name", filename, "file_size", fileSize,
 		"chunk_size", chunkSize, "total_chunks", totalChunks, "upload_id", shortid.ShortHash(uploadID))
 
-	// 统一查询：先通过 upload_id + filename 查询文件状态
-	statusResp, err := c.doRequest(ctx, "GET",
-		fmt.Sprintf("/upload/status?upload_id=%s&filename=%s", uploadID, url.QueryEscape(filename)), nil, nil)
-	if err == nil && statusResp.StatusCode == http.StatusOK {
-		var statusData struct {
-			Success       bool   `json:"success"`
-			Finished      bool   `json:"finished"`
-			UploadID      string `json:"upload_id"`
-			ReceivedCount int    `json:"received_count"`
-			TotalChunks   int    `json:"total_chunks"`
-			MissingChunks []int  `json:"missing_chunks"`
-			Completed     bool   `json:"completed"`
-			FileChecksum  string `json:"file_checksum"`
-			Message       string `json:"message"`
-		}
-		if json.NewDecoder(statusResp.Body).Decode(&statusData) == nil && statusData.Success {
-			statusResp.Body.Close()
-
-			// 状态1：文件已完整上传
-			if statusData.Finished || statusData.Completed {
-				c.logger.Info("文件已存在，直接返回成功", "file_name", filename, "checksum", shortid.ShortHash(fileChecksum))
-				return &ChunkedUploadResult{
-					Success:      true,
-					UploadID:     uploadID,
-					Filename:     filename,
-					FileChecksum: fileChecksum,
-					Message:      "文件已存在",
-				}, nil
+	// 当 resume=false 时，跳过续传查询，直接走新建 session 路径
+	if opt.resume {
+		// 统一查询：先通过 upload_id + filename 查询文件状态
+		statusResp, err := c.doRequest(ctx, "GET",
+			fmt.Sprintf("/upload/status?upload_id=%s&filename=%s", uploadID, url.QueryEscape(filename)), nil, nil)
+		if err == nil && statusResp.StatusCode == http.StatusOK {
+			var statusData struct {
+				Success       bool   `json:"success"`
+				Finished      bool   `json:"finished"`
+				UploadID      string `json:"upload_id"`
+				ReceivedCount int    `json:"received_count"`
+				TotalChunks   int    `json:"total_chunks"`
+				MissingChunks []int  `json:"missing_chunks"`
+				Completed     bool   `json:"completed"`
+				FileChecksum  string `json:"file_checksum"`
+				Message       string `json:"message"`
 			}
+			if json.NewDecoder(statusResp.Body).Decode(&statusData) == nil && statusData.Success {
+				statusResp.Body.Close()
 
-			// 状态2：有未完成的 session，续传
-			if statusData.UploadID != "" {
-				c.logger.Info("续传会话已恢复", "upload_id", shortid.ShortHash(uploadID),
-					"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
-
-				// 只上传缺失分块
-				result, err := c.uploadChunks(ctx, localPath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, statusData.MissingChunks, opt.concurrency)
-				if err != nil {
-					return nil, err
+				// 状态1：文件已完整上传
+				if statusData.Finished || statusData.Completed {
+					c.logger.Info("文件已存在，直接返回成功", "file_name", filename, "checksum", shortid.ShortHash(fileChecksum))
+					return &ChunkedUploadResult{
+						Success:      true,
+						UploadID:     uploadID,
+						Filename:     filename,
+						FileChecksum: fileChecksum,
+						Message:      "文件已存在",
+					}, nil
 				}
-				return result, nil
+
+				// 状态2：有未完成的 session，续传
+				if statusData.UploadID != "" {
+					c.logger.Info("续传会话已恢复", "upload_id", shortid.ShortHash(uploadID),
+						"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
+
+					// 只上传缺失分块
+					result, err := c.uploadChunks(ctx, localPath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, statusData.MissingChunks, opt.concurrency)
+					if err != nil {
+						return nil, err
+					}
+					return result, nil
+				}
+			} else {
+				statusResp.Body.Close()
 			}
-		} else {
+		} else if err == nil {
 			statusResp.Body.Close()
 		}
-	} else if err == nil {
-		statusResp.Body.Close()
 	}
 
 	// 状态3：新文件 / 不在上传中，创建新 session

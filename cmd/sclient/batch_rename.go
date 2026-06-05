@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -16,16 +15,12 @@ var batchRenameCmd = &cobra.Command{
 	Use:   "batch-rename <from1> <to1> [from2 to2...]",
 	Short: "批量重命名文件",
 	Long: `批量重命名 sproxy 服务端上的文件。
-参数成对传入：每对 (from, to) 是一次重命名操作。
-每个源文件会先通过 Stat 获取 checksum 用于校验。
-
-示例：
-  sclient batch-rename old1.txt new1.txt old2.txt new2.txt`,
-	Args: cobra.MinimumNArgs(2),
+参数成对传入：每对 (from, to) 构成一次重命名操作。`,
+	Example: `  sclient batch-rename old1.txt new1.txt old2.txt new2.txt`,
+	Args:    cobra.MinimumNArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
-		argsLen := len(args)
-		if argsLen%2 != 0 {
-			fmt.Fprintln(os.Stderr, "参数必须成对提供：batch-rename <from1> <to1> [from2 to2...]")
+		if len(args)%2 != 0 {
+			fmt.Fprintf(os.Stderr, "参数必须成对出现\n")
 			os.Exit(1)
 		}
 
@@ -35,35 +30,45 @@ var batchRenameCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		ctx := context.Background()
-		operations := make([]client.BatchRenameOp, 0, argsLen/2)
-		for i := 0; i < argsLen; i += 2 {
-			from := mustResolveRemotePath(args[i])
-			to := mustResolveRemotePath(args[i+1])
-
-			info, statErr := cli.Stat(ctx, from)
-			if statErr != nil {
-				fmt.Fprintf(os.Stderr, "获取 %s 信息失败: %v\n", from, statErr)
-				os.Exit(1)
-			}
-			operations = append(operations, client.BatchRenameOp{
-				From:     from,
-				To:       to,
-				Checksum: info.Checksum,
-			})
+		// 构造成对参数列表
+		pairs := make([]struct{ from, to string }, len(args)/2)
+		for i := 0; i < len(args); i += 2 {
+			pairs[i/2].from, pairs[i/2].to = args[i], args[i+1]
 		}
 
-		results, err := cli.BatchRename(ctx, operations)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "批量重命名失败: %v\n", err)
+		results := make([]batchOperationResult, 0, len(pairs))
+		for _, p := range pairs {
+			result := batchOperationResult{Name: fmt.Sprintf("%s -> %s", p.from, p.to)}
+			// 先 stat 获取远端 checksum
+			info, err := cli.Stat(context.Background(), p.from)
+			if err != nil {
+				result.Message = fmt.Sprintf("stat 失败: %v", err)
+				results = append(results, result)
+				continue
+			}
+			if info.Checksum == "" {
+				result.Message = "远端文件 checksum 为空"
+				results = append(results, result)
+				continue
+			}
+
+			if err := cli.Rename(context.Background(), p.from, p.to, info.Checksum); err != nil {
+				result.Message = err.Error()
+			} else {
+				result.Success = true
+				result.Message = "OK"
+			}
+			results = append(results, result)
+		}
+
+		printBatchResults(results)
+
+		total := len(results)
+		success := countBatchSuccess(results)
+		fail := total - success
+		fmt.Printf("\n总: %d, 成功: %d, 失败: %d\n", total, success, fail)
+		if fail > 0 {
 			os.Exit(1)
-		}
-		for _, r := range results {
-			status := "OK"
-			if !r.Success {
-				status = "FAIL"
-			}
-			fmt.Printf("[%s] %s: %s\n", status, r.Filename, r.Message)
 		}
 	},
 }

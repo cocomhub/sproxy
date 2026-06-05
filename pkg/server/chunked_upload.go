@@ -34,7 +34,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		FileModTime  int64  `json:"file_mod_time"` // UnixNano, 0 = unknown
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "请求体解析失败: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
 		return
 	}
 
@@ -155,7 +155,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 
 	// 解析 multipart
 	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil { // 超过 DefaultChunkBodyLimit 由 MaxBytesReader 拦截
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败: " + err.Error()}, http.StatusRequestEntityTooLarge)
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败"}, http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -207,7 +207,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 
 	file, _, err := r.FormFile("chunk")
 	if err != nil {
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "读取分块文件失败: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "读取分块文件失败"}, http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
@@ -390,7 +390,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		UploadID string `json:"upload_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "请求体解析失败: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
 		return
 	}
 
@@ -458,7 +458,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	for i := 0; i < session.TotalChunks; i++ {
 		if err := h.mergeOneChunk(req.UploadID, i, multiWriter); err != nil {
 			h.logger.Error("合并 chunk 失败", "upload_id", req.UploadID, "chunk_index", i, "error", err)
-			sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: fmt.Sprintf("合并分块 %d 失败: %v", i, err)}, http.StatusInternalServerError)
+			sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: fmt.Sprintf("合并分块 %d 失败", i)}, http.StatusInternalServerError)
 			return
 		}
 	}

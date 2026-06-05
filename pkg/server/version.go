@@ -102,7 +102,7 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}
 
@@ -160,7 +160,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}
 
@@ -224,7 +224,7 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}
 

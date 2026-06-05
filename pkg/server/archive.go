@@ -28,7 +28,7 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
 	var req ArchiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无法解析请求体: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无法解析请求体"}, http.StatusBadRequest)
 		return
 	}
 	if len(req.Files) == 0 {
@@ -135,7 +135,7 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	relPath, err := ValidateFilePath(dirname)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录名: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录名"}, http.StatusBadRequest)
 		return
 	}
 

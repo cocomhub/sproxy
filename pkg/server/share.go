@@ -123,7 +123,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		OneTime      bool   `json:"one_time"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体解析失败: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
 		return
 	}
 	if req.Filename == "" {
@@ -132,7 +132,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	remotePath, err := ValidateFilePath(req.Filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}
 
@@ -153,7 +153,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 
 	link, err := h.shareStore.Create(req.Filename, fullPath, ttl, req.MaxDownloads, req.OneTime)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建分享链接失败: " + err.Error()}, http.StatusInternalServerError)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
 		return
 	}
 

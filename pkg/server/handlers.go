@@ -216,7 +216,7 @@ func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) versionHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(fmt.Appendf(nil, "Version: %s\nBuildAt: %s\n", h.version, h.buildAt))
+	_, _ = fmt.Fprintf(w, "Version: %s\nBuildAt: %s\n", h.version, h.buildAt)
 }
 
 func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
@@ -232,7 +232,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	// 仅在内存中缓冲 MultipartBufSize，超出部分由 stdlib 落临时文件
 	if err := r.ParseMultipartForm(size.MultipartBufSize); err != nil {
 		logger.Warn("解析 multipart 失败", "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体过大或解析失败: " + err.Error()}, http.StatusRequestEntityTooLarge)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体过大或解析失败"}, http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -262,7 +262,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	remotePath, err := ValidateFilePath(remotePathStr)
 	if err != nil {
 		logger.Warn("无效的文件名", "file_name", remotePathStr, "error", err)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}
 	logger.Debug("上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
@@ -381,7 +381,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	}
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}
 	cfg := h.cfgPtr.Load()
@@ -444,7 +444,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}
 	cfg := h.cfgPtr.Load()
@@ -468,7 +468,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := os.Remove(filePath); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除文件失败: " + err.Error()}, http.StatusInternalServerError)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除文件失败"}, http.StatusInternalServerError)
 		return
 	}
 	h.checksumStore.Delete(remotePath)
@@ -485,7 +485,7 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
 	var req BatchDeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无法解析请求体: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无法解析请求体"}, http.StatusBadRequest)
 		return
 	}
 	if len(req.Files) == 0 {
@@ -499,7 +499,7 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 		result := BatchOperationResult{Filename: f.Filename}
 		remotePath, err := ValidateFilePath(f.Filename)
 		if err != nil {
-			result.Message = "无效的文件名: " + err.Error()
+			result.Message = "无效的文件名"
 			results = append(results, result)
 			continue
 		}
@@ -520,7 +520,7 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 		valid := verifyFileWithChecksum(filePath, f.Checksum)
 		// 仍然执行删除，但标记校验失败
 		if err := os.Remove(filePath); err != nil {
-			result.Message = "删除失败: " + err.Error()
+			result.Message = "删除失败"
 		} else {
 			h.checksumStore.Delete(remotePath)
 			result.Success = true
@@ -532,7 +532,7 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		results = append(results, result)
 	}
-	sendJSONResponse(w, map[string]any{"results": results}, http.StatusOK)
+	sendJSONResponse(w, BatchDeleteResponse{Results: results}, http.StatusOK)
 }
 
 // batchRename 处理 POST /api/batch/rename。
@@ -542,7 +542,7 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
 	var req BatchRenameRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无法解析请求体: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无法解析请求体"}, http.StatusBadRequest)
 		return
 	}
 	if len(req.Operations) == 0 {
@@ -556,13 +556,13 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 		result := BatchOperationResult{Filename: op.From + " -> " + op.To}
 		from, err := ValidateFilePath(op.From)
 		if err != nil {
-			result.Message = "无效的源路径: " + err.Error()
+			result.Message = "无效的源路径"
 			results = append(results, result)
 			continue
 		}
 		to, err := ValidateFilePath(op.To)
 		if err != nil {
-			result.Message = "无效的目标路径: " + err.Error()
+			result.Message = "无效的目标路径"
 			results = append(results, result)
 			continue
 		}
@@ -603,7 +603,7 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := os.Rename(fromPath, toPath); err != nil {
 			logger.Error("batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
-			result.Message = "重命名失败: " + err.Error()
+			result.Message = "重命名失败"
 			results = append(results, result)
 			continue
 		}
@@ -614,7 +614,7 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 			Message:  "重命名成功",
 		})
 	}
-	sendJSONResponse(w, map[string]any{"results": results}, http.StatusOK)
+	sendJSONResponse(w, BatchRenameResponse{Results: results}, http.StatusOK)
 }
 
 type fileInfo struct {
@@ -828,12 +828,12 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 	}
 	from, err := ValidateFilePath(fromRaw)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的源路径: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的源路径"}, http.StatusBadRequest)
 		return
 	}
 	to, err := ValidateFilePath(toRaw)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目标路径: " + err.Error()}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目标路径"}, http.StatusBadRequest)
 		return
 	}
 	if from == to {
@@ -873,7 +873,7 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := os.Rename(fromPath, toPath); err != nil {
 		logger.Error("重命名失败", "from", from, "to", to, "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "重命名失败: " + err.Error()}, http.StatusInternalServerError)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
 		return
 	}
 	h.checksumStore.Rename(from, to)

@@ -7,16 +7,15 @@ import (
 	"fmt"
 	"net/http"
 	"sync/atomic"
-	"time"
 )
 
 // Metrics 使用 atomic 计数器收集请求统计数据。
 // 所有字段对齐到 64-bit 边界，确保 32-bit 平台安全。
 type Metrics struct {
 	RequestsTotal     atomic.Int64
-	Requests2xx       atomic.Int64
-	Requests4xx       atomic.Int64
-	Requests5xx       atomic.Int64
+	Requests2XX       atomic.Int64
+	Requests4XX       atomic.Int64
+	Requests5XX       atomic.Int64
 	BytesUploaded     atomic.Int64
 	BytesDownloaded   atomic.Int64
 	ActiveConnections atomic.Int64
@@ -35,11 +34,11 @@ func (m *Metrics) RecordRequest(statusCode int) {
 	m.RequestsTotal.Add(1)
 	switch {
 	case statusCode >= 200 && statusCode < 300:
-		m.Requests2xx.Add(1)
+		m.Requests2XX.Add(1)
 	case statusCode >= 400 && statusCode < 500:
-		m.Requests4xx.Add(1)
+		m.Requests4XX.Add(1)
 	case statusCode >= 500:
-		m.Requests5xx.Add(1)
+		m.Requests5XX.Add(1)
 	}
 }
 
@@ -79,15 +78,15 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, "# HELP sproxy_requests_2xx HTTP 2xx requests\n")
 	fmt.Fprintf(w, "# TYPE sproxy_requests_2xx counter\n")
-	fmt.Fprintf(w, "sproxy_requests_2xx %d\n\n", m.Requests2xx.Load())
+	fmt.Fprintf(w, "sproxy_requests_2xx %d\n\n", m.Requests2XX.Load())
 
 	fmt.Fprintf(w, "# HELP sproxy_requests_4xx HTTP 4xx requests\n")
 	fmt.Fprintf(w, "# TYPE sproxy_requests_4xx counter\n")
-	fmt.Fprintf(w, "sproxy_requests_4xx %d\n\n", m.Requests4xx.Load())
+	fmt.Fprintf(w, "sproxy_requests_4xx %d\n\n", m.Requests4XX.Load())
 
 	fmt.Fprintf(w, "# HELP sproxy_requests_5xx HTTP 5xx requests\n")
 	fmt.Fprintf(w, "# TYPE sproxy_requests_5xx counter\n")
-	fmt.Fprintf(w, "sproxy_requests_5xx %d\n\n", m.Requests5xx.Load())
+	fmt.Fprintf(w, "sproxy_requests_5xx %d\n\n", m.Requests5XX.Load())
 
 	fmt.Fprintf(w, "# HELP sproxy_bytes_uploaded Total bytes uploaded\n")
 	fmt.Fprintf(w, "# TYPE sproxy_bytes_uploaded counter\n")
@@ -144,7 +143,6 @@ func (mw *metricsResponseWriter) Write(b []byte) (int, error) {
 // 在 Handler 链外层使用，捕获所有响应的状态码。
 func (h *Handlers) metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
 		h.metrics.ActiveConnections.Add(1)
 		defer h.metrics.ActiveConnections.Add(-1)
 
@@ -152,6 +150,5 @@ func (h *Handlers) metricsMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(mw, r)
 
 		h.metrics.RecordRequest(mw.statusCode)
-		_ = start // 保留用于 future use（例如记录耗时）
 	})
 }

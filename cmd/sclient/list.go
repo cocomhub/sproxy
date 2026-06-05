@@ -17,7 +17,7 @@ var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "列出服务器上的文件",
 	Long: `列出 sproxy 服务端上的文件。
-	默认列出当前目录的顶层文件。`,
+		默认列出当前目录的顶层文件。`,
 	Run: func(cmd *cobra.Command, args []string) {
 		cli, err := buildFileClient(cmd)
 		if err != nil {
@@ -44,20 +44,7 @@ var listCmd = &cobra.Command{
 		if len(files) == 0 {
 			fmt.Println("no files found")
 		} else {
-			for _, f := range files {
-				if f.IsDir {
-					fmt.Printf("%-40s  %10s  %s\n", f.Name+"/", "-", "-")
-				} else {
-					csPrefix := f.Checksum
-					if len(csPrefix) > 16 {
-						csPrefix = csPrefix[:16] + "…"
-					}
-					if csPrefix == "" {
-						csPrefix = "-"
-					}
-					fmt.Printf("%-40s  %10s  %s\n", f.Name, client.FormatByte(float64(f.Size)), csPrefix)
-				}
-			}
+			printFileList(files, os.Stdout)
 		}
 	},
 }

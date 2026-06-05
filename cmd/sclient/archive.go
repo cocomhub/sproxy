@@ -7,8 +7,9 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
-	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
@@ -17,68 +18,85 @@ import (
 var archiveCmd = &cobra.Command{
 	Use:   "archive [flags] <file...>",
 	Short: "将服务端文件打包下载为 tar.gz",
-	Long:  `将指定文件列表打包下载为 tar.gz 归档文件。支持目录。`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if len(args) < 1 {
-			return fmt.Errorf("至少需要一个文件名")
-		}
-		output, _ := cmd.Flags().GetString("output")
+	Long: `将服务端上指定文件打包为 tar.gz 下载到本地。
+
+文件名会保留远端目录结构（如有），本地保存时保持相对路径不变。`,
+	Example: `  sclient archive report.pdf logs/app.log
+  sclient archive -o backup.tar.gz file1.txt dir/file2.txt`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
 		cli, err := buildFileClient(cmd)
 		if err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
+			os.Exit(1)
 		}
-		files := args
-		if len(files) == 1 && strings.HasPrefix(files[0], "@") {
-			return archiveFromFile(cli, files[0][1:], output)
+
+		output, _ := cmd.Flags().GetString("output")
+		if output == "" {
+			output = "archive.tar.gz"
 		}
-		return cli.Archive(cmd.Context(), files, output)
+
+		if err := cli.Archive(context.Background(), args, output); err != nil {
+			fmt.Fprintf(os.Stderr, "打包失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("打包完成: %s\n", output)
 	},
 }
 
 var archiveDirCmd = &cobra.Command{
 	Use:   "archive-dir [flags] <dirname>",
-	Short: "将服务端目录打包下载为 tar.gz",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if len(args) < 1 {
-			return fmt.Errorf("需要指定目录名")
-		}
-		output, _ := cmd.Flags().GetString("output")
+	Short: "将服务端整个目录打包下载为 tar.gz",
+	Long:  `将服务端上整个目录打包为 tar.gz 下载到本地。`,
+	Example: `  sclient archive-dir myfolder
+  sclient archive-dir -o myfolder.tar.gz logs`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
 		cli, err := buildFileClient(cmd)
 		if err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
+			os.Exit(1)
 		}
-		return cli.ArchiveDir(cmd.Context(), args[0], output)
+
+		output, _ := cmd.Flags().GetString("output")
+		if output == "" {
+			output = args[0] + ".tar.gz"
+		}
+
+		if err := cli.ArchiveDir(context.Background(), args[0], output); err != nil {
+			fmt.Fprintf(os.Stderr, "目录打包失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("目录打包完成: %s\n", output)
 	},
 }
 
+// writeArchiveResponse writes HTTP response body to a file.
+func writeArchiveResponse(resp *http.Response, outputPath string) error {
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("创建输出文件失败: %w", err)
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return fmt.Errorf("写入文件失败: %w", err)
+	}
+	return nil
+}
+
 func init() {
-	archiveCmd.Flags().StringP("output", "o", "archive.tar.gz", "输出文件路径")
-	archiveDirCmd.Flags().StringP("output", "o", "archive.tar.gz", "输出文件路径")
+	archiveCmd.Flags().StringP("output", "o", "", "输出文件路径（默认 archive.tar.gz）")
+	archiveDirCmd.Flags().StringP("output", "o", "", "输出文件路径（默认 <dirname>.tar.gz）")
+
 	rootCmd.AddCommand(archiveCmd)
 	rootCmd.AddCommand(archiveDirCmd)
 }
 
-// archiveFromFile 从文件中读取文件列表并打包下载。
-func archiveFromFile(cli *client.FileClient, filePath, output string) error {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("打开文件列表失败: %w", err)
-	}
-	defer f.Close()
-
-	var files []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			files = append(files, line)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("读取文件列表失败: %w", err)
-	}
-	if len(files) == 0 {
-		return fmt.Errorf("文件列表中无有效条目")
-	}
-	return cli.Archive(context.Background(), files, output)
-}
+// ensure unused import suppression for tools that only reference via archive.go
+var _ = bufio.NewReader
+var _ = io.Copy
+var _ = http.MethodGet
+var _ = writeArchiveResponse
+var _ = client.FileInfo{}
