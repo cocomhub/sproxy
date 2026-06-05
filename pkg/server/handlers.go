@@ -53,6 +53,7 @@ type Handlers struct {
 	tunnelHandler http.Handler
 	logger        *slog.Logger
 	metrics       *Metrics
+	shareStore    *ShareStore
 	handler       http.Handler // mux wrapped with metricsMiddleware
 }
 
@@ -84,6 +85,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 		uploadStore:   NewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, log.With("component", "upload_store")),
 		logger:        log,
 		metrics:       NewMetrics(),
+		shareStore:    NewShareStore(),
 	}
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
@@ -147,6 +149,8 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
 	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
 	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
+	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
+	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.HandleFunc("GET /metrics", h.MetricsHandler)

@@ -53,6 +53,8 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 		buildAt:       "test",
 		checksumStore: cs,
 		logger:        slog.Default(),
+		metrics:       NewMetrics(),
+		shareStore:    NewShareStore(),
 	}
 
 	mux := http.NewServeMux()
@@ -69,6 +71,8 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
 	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
 	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
+	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
+	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /", h.webRedirect)
 
@@ -932,6 +936,8 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 		checksumStore: cs,
 		uploadStore:   NewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
 		logger:        slog.Default(),
+		metrics:       NewMetrics(),
+		shareStore:    NewShareStore(),
 	}
 
 	mux := http.NewServeMux()
@@ -957,6 +963,8 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
 	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
 	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
+	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
+	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.HandleFunc("GET /", h.webRedirect)
