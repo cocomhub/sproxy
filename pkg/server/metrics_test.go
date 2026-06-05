@@ -123,7 +123,7 @@ func TestMetrics_ActiveConnections(t *testing.T) {
 func TestMetricsMiddleware_CountsRequests(t *testing.T) {
 	ts, h := newTestServerWithMetrics(t)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		resp, err := http.Get(ts.URL + "/metrics")
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)

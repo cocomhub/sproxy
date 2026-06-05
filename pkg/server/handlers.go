@@ -105,6 +105,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	localMux.HandleFunc("GET /api/versions", h.listVersionsHandler)
 	localMux.HandleFunc("POST /api/versions/restore", h.restoreVersionHandler)
 	localMux.HandleFunc("DELETE /api/versions", h.deleteVersionHandler)
+	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -145,6 +146,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("GET /api/versions", h.authMiddleware(h.listVersionsHandler))
 	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
 	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
+	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.HandleFunc("GET /metrics", h.MetricsHandler)

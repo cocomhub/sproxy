@@ -68,6 +68,7 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	mux.HandleFunc("GET /api/versions", h.authMiddleware(h.listVersionsHandler))
 	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
 	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
+	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /", h.webRedirect)
 
@@ -955,6 +956,7 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	mux.HandleFunc("GET /api/versions", h.authMiddleware(h.listVersionsHandler))
 	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
 	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
+	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.HandleFunc("GET /", h.webRedirect)
