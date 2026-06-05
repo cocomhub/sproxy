@@ -6,7 +6,6 @@ package server
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -199,25 +198,6 @@ func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		logger.Info("请求", "method", r.Method, "path", r.URL.Path,
 			"remote_addr", r.RemoteAddr, "user_agent", r.UserAgent(), "duration", time.Since(start))
 	})
-}
-
-func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		cfg := h.cfgPtr.Load()
-		if cfg != nil && cfg.AuthToken != "" {
-			auth := r.Header.Get("Authorization")
-			if !strings.HasPrefix(auth, "Bearer ") {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			token := strings.TrimPrefix(auth, "Bearer ")
-			if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.AuthToken)) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-		}
-		next(w, r)
-	}
 }
 
 func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
