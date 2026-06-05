@@ -63,6 +63,8 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
 	mux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
 	mux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
+	mux.HandleFunc("POST /api/archive", h.authMiddleware(h.archiveHandler))
+	mux.HandleFunc("GET /api/archive-dir", h.authMiddleware(h.archiveDirHandler))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /", h.webRedirect)
 
@@ -945,6 +947,8 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
 	mux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
 	mux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
+	mux.HandleFunc("POST /api/archive", h.authMiddleware(h.archiveHandler))
+	mux.HandleFunc("GET /api/archive-dir", h.authMiddleware(h.archiveDirHandler))
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.HandleFunc("GET /", h.webRedirect)
@@ -1522,6 +1526,7 @@ func TestSearchFiles_InvalidSubdir(t *testing.T) {
 		t.Fatalf("expected empty list for invalid subdir, got %d files", len(result.Files))
 	}
 }
+
 // ---- upload 文件已存在 checksum 不匹配 ----
 
 func TestUpload_ExistingFileChecksumMismatch(t *testing.T) {

@@ -80,6 +80,7 @@ tr:hover td { background: #f8f9fa; }
     <span id="batch-count">已选 0 个文件</span>
     <button class="btn btn-danger btn-sm" onclick="batchDelete()">批量删除</button>
     <button class="btn btn-warning btn-sm" onclick="batchRename()">批量重命名</button>
+    <button class="btn btn-primary btn-sm" onclick="batchDownloadArchive()">下载归档</button>
     <button class="btn btn-secondary btn-sm" onclick="clearSelection()">取消选择</button>
   </div>
   <div id="dir-bar" style="margin-bottom:12px;padding:6px 12px;background:#f0f4ff;border-radius:4px;font-size:14px;display:flex;align-items:center;gap:8px;">
@@ -1439,6 +1440,39 @@ async function batchRename() {
   } catch(e) {
     showToast('批量重命名失败: ' + e.message, 'error');
   }
+}
+
+function batchDownloadArchive() {
+  var selected = getSelectedFiles();
+  if (selected.length === 0) { showToast('请选择文件', 'warning'); return; }
+
+  var files = selected.map(function(f) {
+    return currentDir ? currentDir + '/' + f.name : f.name;
+  });
+
+  var headersObj = headers();
+  headersObj['Content-Type'] = 'application/json';
+
+  fetch(BASE + '/api/archive', {
+    method: 'POST',
+    headers: headersObj,
+    body: JSON.stringify({ files: files })
+  }).then(function(resp) {
+    if (!resp.ok) return resp.text().then(function(t) { throw new Error(t); });
+    var disposition = resp.headers.get('Content-Disposition') || '';
+    var match = disposition.match(/filename="?(.+?)"?$/);
+    var filename = match ? match[1] : 'archive.tar.gz';
+    return resp.blob().then(function(blob) {
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('归档下载完成: ' + filename, 'success');
+    });
+  }).catch(function(err) {
+    showToast('归档失败: ' + err.message, 'error');
+  });
 }
 
 // 初始化
