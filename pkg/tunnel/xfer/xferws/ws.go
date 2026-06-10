@@ -12,8 +12,8 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/coder/websocket"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	"github.com/coder/websocket"
 )
 
 func init() {

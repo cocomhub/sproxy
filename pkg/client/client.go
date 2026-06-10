@@ -25,6 +25,8 @@ import (
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
 // UploadResult 表示上传操作的响应结果。
@@ -80,6 +82,11 @@ type FileClient struct {
 	serverURL    string
 	httpClient   *http.Client
 	tunnelClient *tunnel.Client
+	xferName     string
+	hubURL       string
+	tunnelKey    []byte
+	tunnelMux    *mux.Mux
+	tunnelMuxMu  sync.Mutex
 	progressFn   func(label string, read, total int64)
 	ChunkSize    int64
 	MaxChunkSize int64
@@ -120,6 +127,24 @@ func WithTunnel(hexKey string) Option {
 			return
 		}
 		c.tunnelClient = tc
+	}
+}
+
+// WithXfer 启用扩展传输层（xfer），支持 hub 中继、WebSocket 等传输方式。
+// name 是已注册的传输层名称（如 "ws"），hubURL 是中继服务器地址，
+// hexKey 是 AES-256 隧道加密密钥（32 字节，64 hex 字符），为空时不加密。
+func WithXfer(name, hubURL, hexKey string) Option {
+	return func(c *FileClient) {
+		c.xferName = name
+		c.hubURL = hubURL
+		if hexKey != "" {
+			key, err := tunnel.ParseKey(hexKey)
+			if err != nil {
+				c.logger.Warn("解析 xfer 密钥失败", "error", err)
+				return
+			}
+			c.tunnelKey = key
+		}
 	}
 }
 
@@ -653,10 +678,40 @@ func (c *FileClient) BatchRename(ctx context.Context, operations []BatchRenameOp
 // 使用方式与标准 http.Client.Do 相同。需要先通过 WithTunnel 配置隧道密钥。
 // 如果未配置隧道密钥，返回错误。
 func (c *FileClient) TunnelDo(req *http.Request) (*http.Response, error) {
-	if c.tunnelClient == nil {
-		return nil, fmt.Errorf("未配置隧道密钥，请使用 WithTunnel 选项创建 FileClient")
+	if c.tunnelClient != nil {
+		return c.tunnelClient.Do(req)
 	}
-	return c.tunnelClient.Do(req)
+	if c.xferName != "" {
+		return c.doRequestViaXfer(req)
+	}
+	return nil, fmt.Errorf("未配置隧道，请使用 WithTunnel 或 WithXfer 选项创建 FileClient")
+}
+
+func (c *FileClient) doRequestViaXfer(req *http.Request) (*http.Response, error) {
+	tun, err := c.getTunnelMux()
+	if err != nil {
+		return nil, fmt.Errorf("获取隧道 mux 失败: %w", err)
+	}
+	return tun.Do(req)
+}
+
+func (c *FileClient) getTunnelMux() (*tunnel.Tunnel, error) {
+	c.tunnelMuxMu.Lock()
+	defer c.tunnelMuxMu.Unlock()
+	if c.tunnelMux != nil {
+		return tunnel.NewTunnel(c.tunnelMux, c.tunnelKey), nil
+	}
+	tp := xfer.Get(c.xferName)
+	if tp == nil {
+		return nil, fmt.Errorf("xfer 传输层 %q 未注册", c.xferName)
+	}
+	conn, err := tp.Dial(context.Background(), c.hubURL)
+	if err != nil {
+		return nil, fmt.Errorf("xfer 拨号失败: %w", err)
+	}
+	m := mux.New(conn, mux.RoleDialer)
+	c.tunnelMux = m
+	return tunnel.NewTunnel(m, c.tunnelKey), nil
 }
 
 // doRequest 统一发送 HTTP 请求：当配置了隧道客户端时走加密隧道，否则直连。
@@ -678,6 +733,11 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	if c.tunnelClient != nil {
 		// 隧道模式：使用相对 URL，隧道客户端处理加密
 		resp, err := c.tunnelClient.Do(req)
+		return closeBodyIfErr(resp, err)
+	}
+
+	if c.xferName != "" {
+		resp, err := c.doRequestViaXfer(req)
 		return closeBodyIfErr(resp, err)
 	}
 
