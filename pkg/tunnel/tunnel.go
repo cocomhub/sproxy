@@ -12,6 +12,7 @@
 //   - 本地路由：NewLocalHandler 支持将相对路径请求直接路由到本地 handler，无需外部 HTTP 调用
 //   - 客户端：Client 结构体提供 Do 方法，发送加密请求并解密响应
 //   - 密钥轮换：Handler.UpdateKey 支持在运行时热替换密钥，旧密钥保留短时窗口供存量连接使用
+//   - 多路复用隧道：NewTunnel 基于 mux 层创建持久双向隧道，支持流复用和双向 HTTP 请求交换
 //
 // 协议格式
 //
@@ -63,7 +64,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
+	)
 
 const (
 	frameContentType = "application/x-tunnel-frame"

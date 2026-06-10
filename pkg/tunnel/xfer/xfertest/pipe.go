@@ -15,10 +15,13 @@ import (
 // Pipe 创建一对通过内存管道连接的 xfer.Conn。
 // 用于测试 mux 和 tunnel 层，无需真实网络。
 func Pipe() (a, b xfer.Conn) {
-	chAB := make(chan message, 64)
-	chBA := make(chan message, 64)
-	done := make(chan struct{})
-	return newPipe(chAB, chBA, done), newPipe(chBA, chAB, done)
+	chAB := make(chan message, 256)
+	chBA := make(chan message, 256)
+
+	closeOnce := new(sync.Once)
+	closeCh := make(chan struct{})
+
+	return newPipe(chAB, chBA, closeCh, closeOnce), newPipe(chBA, chAB, closeCh, closeOnce)
 }
 
 type message struct {
@@ -27,15 +30,16 @@ type message struct {
 }
 
 type pipeConn struct {
-	rx   <-chan message
-	tx   chan<- message
-	done chan struct{}
-	mu   sync.Mutex
-	closed bool
+	rx        <-chan message
+	tx        chan<- message
+	closeCh   chan struct{}
+	closeOnce *sync.Once
+	mu        sync.Mutex
+	closed    bool
 }
 
-func newPipe(rx <-chan message, tx chan<- message, done chan struct{}) *pipeConn {
-	return &pipeConn{rx: rx, tx: tx, done: done}
+func newPipe(rx <-chan message, tx chan<- message, closeCh chan struct{}, closeOnce *sync.Once) *pipeConn {
+	return &pipeConn{rx: rx, tx: tx, closeCh: closeCh, closeOnce: closeOnce}
 }
 
 func (p *pipeConn) Send(ctx context.Context, msg []byte) error {
@@ -53,7 +57,7 @@ func (p *pipeConn) Send(ctx context.Context, msg []byte) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-p.done:
+	case <-p.closeCh:
 		return xfer.ErrConnClosed
 	}
 }
@@ -64,7 +68,7 @@ func (p *pipeConn) Receive(ctx context.Context) ([]byte, error) {
 		return msg.data, msg.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-p.done:
+	case <-p.closeCh:
 		return nil, fmt.Errorf("pipe: %w", xfer.ErrConnClosed)
 	}
 }
@@ -76,6 +80,8 @@ func (p *pipeConn) Close() error {
 		return nil
 	}
 	p.closed = true
-	close(p.done)
+	p.closeOnce.Do(func() {
+		close(p.closeCh)
+	})
 	return nil
 }
