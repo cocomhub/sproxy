@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -19,8 +20,8 @@ import (
 type Role int
 
 const (
-	RoleDialer   Role = iota // 主动拨号端，分配奇数 StreamID
-	RoleListener             // 监听接受端，分配偶数 StreamID
+	RoleDialer   Role = iota
+	RoleListener
 )
 
 // Stream 代表一条虚拟流，实现 io.ReadWriteCloser。
@@ -31,7 +32,7 @@ type Stream struct {
 	rOff int
 	rMu  sync.Mutex
 
-	dataCh chan []byte // 接收的数据帧；nil 表示对方 Close
+	dataCh chan []byte
 	done   chan struct{}
 }
 
@@ -72,7 +73,6 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 }
 
 func (s *Stream) Write(p []byte) (n int, err error) {
-	// 先检查 mux 是否已关闭，避免和 done channel 的竞态
 	select {
 	case <-s.done:
 		return 0, fmt.Errorf("mux: stream %d: %w", s.id, xfer.ErrConnClosed)
@@ -88,7 +88,6 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 	}
 }
 
-// CloseWrite 发送写半关闭信号。
 func (s *Stream) CloseWrite() error {
 	select {
 	case s.mux.writeCh <- writeMsg{streamID: s.id, data: nil}:
@@ -107,7 +106,6 @@ func (s *Stream) Close() error {
 	}
 }
 
-// closeMarker 是 Close 的哨兵值。
 var closeMarker = make([]byte, 0)
 
 type writeMsg struct {
@@ -117,9 +115,9 @@ type writeMsg struct {
 
 // Mux 在一条 xfer.Conn 上多路复用多条虚拟流。
 type Mux struct {
-	conn   xfer.Conn
-	role   Role
-	logger *slog.Logger
+	conn     xfer.Conn
+	role     Role
+	logger   *slog.Logger
 
 	mu       sync.Mutex
 	streams  map[StreamID]*Stream
@@ -128,8 +126,11 @@ type Mux struct {
 	writeCh  chan writeMsg
 	done     chan struct{}
 
-	errOnce  sync.Once
-	lastPong time.Time
+	errOnce    sync.Once
+	lastPongNano atomic.Int64 // unix nano, 避免跨 goroutine data race
+
+	ctx     context.Context
+	ctxOnce sync.Once
 }
 
 // New 创建 Mux，启动事件循环 goroutine。
@@ -142,8 +143,8 @@ func New(conn xfer.Conn, role Role) *Mux {
 		acceptCh: make(chan *Stream, 64),
 		writeCh:  make(chan writeMsg, 256),
 		done:     make(chan struct{}),
-		lastPong: time.Now(),
 	}
+	m.lastPongNano.Store(time.Now().UnixNano())
 	if role == RoleDialer {
 		m.nextID = 1
 	}
@@ -194,9 +195,9 @@ func (m *Mux) Close() error {
 	}
 	close(m.done)
 	for id, s := range m.streams {
+		delete(m.streams, id)
 		close(s.dataCh)
 		close(s.done)
-		delete(m.streams, id)
 	}
 	m.mu.Unlock()
 	return m.conn.Close()
@@ -229,7 +230,8 @@ func (m *Mux) removeStream(id StreamID, closeChannels bool) {
 
 func (m *Mux) readLoop() {
 	for {
-		msg, err := m.conn.Receive(context.Background())
+		// 使用 m 的缓存 context，退出时由 done 驱动
+		msg, err := m.conn.Receive(m.Context())
 		if err != nil {
 			m.errOnce.Do(func() { m.logger.Error("mux: recv error", "err", err) })
 			m.Close()
@@ -283,7 +285,8 @@ func (m *Mux) pingLoop() {
 			if err := m.conn.Send(context.Background(), frame); err != nil {
 				return
 			}
-			if time.Since(m.lastPong) > 90*time.Second {
+			lastPong := time.Unix(0, m.lastPongNano.Load())
+			if time.Since(lastPong) > 90*time.Second {
 				m.Close()
 				return
 			}
@@ -303,14 +306,16 @@ func (m *Mux) handleFrame(raw []byte) {
 	case FrameData:
 		m.mu.Lock()
 		s, ok := m.streams[sid]
-		m.mu.Unlock()
 		if !ok {
+			m.mu.Unlock()
 			return
 		}
+		// 在锁内发送到 dataCh，防止和 Close() 的 close(dataCh) 竞态
 		select {
 		case s.dataCh <- payload:
 		case <-s.done:
 		}
+		m.mu.Unlock()
 	case FrameOpen:
 		m.mu.Lock()
 		if _, exists := m.streams[sid]; exists {
@@ -330,30 +335,34 @@ func (m *Mux) handleFrame(raw []byte) {
 	case FrameCloseWrite:
 		m.mu.Lock()
 		s, ok := m.streams[sid]
-		m.mu.Unlock()
 		if !ok {
+			m.mu.Unlock()
 			return
 		}
+		// 在锁内发送 nil，防止和 Close() 的 close(dataCh) 竞态
 		select {
-		case s.dataCh <- nil: // nil 表示写半关闭
+		case s.dataCh <- nil:
 		case <-s.done:
 		}
+		m.mu.Unlock()
 	case FramePing:
 		_ = m.conn.Send(context.Background(), EncodeFrame(0, FramePong, nil))
 	case FramePong:
-		m.lastPong = time.Now()
+		m.lastPongNano.Store(time.Now().UnixNano())
 	}
 }
 
-// Context 返回一个上下文，当 mux 关闭时取消。
+// Context 返回一个上下文，当 mux 关闭时取消。结果被缓存，多次调用安全。
 func (m *Mux) Context() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		<-m.done
-		cancel()
-	}()
-	return ctx
+	m.ctxOnce.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		m.ctx = ctx
+		go func() {
+			<-m.done
+			cancel()
+		}()
+	})
+	return m.ctx
 }
 
-// Errors
 var ErrMuxClosed = errors.New("mux: closed")
