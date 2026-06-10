@@ -40,6 +40,25 @@ type VersionConfig struct {
 	MaxVersions int  `yaml:"max_versions" mapstructure:"max_versions"`
 }
 
+// HubConfig 配置 Hub 中继系统。
+type HubConfig struct {
+	Enabled    bool             `yaml:"enabled"`
+	NodeID     string           `yaml:"node_id"`
+	Transports TransportConfigs `yaml:"transports"`
+}
+
+// TransportConfigs 聚合所有可用的传输层配置。
+type TransportConfigs struct {
+	WS WSTransportConfig `yaml:"ws"`
+}
+
+// WSTransportConfig 配置 WebSocket 传输监听。
+type WSTransportConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
+	Path    string `yaml:"path"`
+}
+
 type Config struct {
 	Addr       string `yaml:"addr" mapstructure:"addr"`
 	UploadsDir string `yaml:"uploads_dir" mapstructure:"uploads_dir"`
@@ -62,6 +81,9 @@ type Config struct {
 
 	// 文件版本管理（默认关闭）
 	Versioning VersionConfig `yaml:"versioning" mapstructure:"versioning"`
+
+	// Hub 中继系统（默认关闭）
+	Hub HubConfig `yaml:"hub" mapstructure:"hub"`
 
 	// API 密钥配置
 	APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`

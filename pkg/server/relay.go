@@ -1,0 +1,95 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package server
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+)
+
+// RelayRequest 是中继请求的 JSON 格式。
+type RelayRequest struct {
+	Target     string            `json:"target"`
+	Method     string            `json:"method"`
+	Path       string            `json:"path"`
+	Headers    map[string]string `json:"headers"`
+	BodyBase64 string            `json:"body_base64"`
+}
+
+// RelayResponse 是中继响应的 JSON 格式。
+type RelayResponse struct {
+	Status     int                 `json:"status"`
+	Headers    map[string][]string `json:"headers"`
+	BodyBase64 string              `json:"body_base64"`
+	Error      string              `json:"error,omitempty"`
+}
+
+// RouteTable 提供节点发现接口，由 pkg/hub 包实现。
+type RouteTable interface {
+	// Lookup 返回指定 nodeID 的地址。如果节点不在路由表中，返回 false。
+	Lookup(nodeID string) (addr string, ok bool)
+}
+
+// RelayHandler 通过 hub 路由表转发请求到目标节点。
+// TODO: 完整实现需依赖 pkg/hub.RouteTable 和 pkg/mux.Stream — 当前为骨架版本。
+type RelayHandler struct {
+	nodeID     string
+	routeTable RouteTable
+	logger     *slog.Logger
+}
+
+// NewRelayHandler 创建一个新的中继处理器。
+// nodeID 为本地节点 ID，routeTable 用于查找目标节点。
+func NewRelayHandler(nodeID string, routeTable RouteTable, logger *slog.Logger) *RelayHandler {
+	return &RelayHandler{
+		nodeID:     nodeID,
+		routeTable: routeTable,
+		logger:     logger,
+	}
+}
+
+// ServeHTTP 处理中继请求。
+// 解析 JSON 请求体，查找目标节点，返回状态（当前返回 501 Not Implemented 骨架）。
+func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var req RelayRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeRelayError(w, fmt.Sprintf("解析请求失败: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if req.Target == "" {
+		writeRelayError(w, "缺少 target 字段", http.StatusBadRequest)
+		return
+	}
+
+	// 查找目标节点
+	addr, ok := h.routeTable.Lookup(req.Target)
+	if !ok {
+		h.logger.Warn("中继目标节点未找到", "target", req.Target)
+		writeRelayError(w, fmt.Sprintf("目标节点 %s 未找到", req.Target), http.StatusNotFound)
+		return
+	}
+
+	h.logger.Info("中继请求",
+		"target", req.Target,
+		"addr", addr,
+		"method", req.Method,
+		"path", req.Path,
+	)
+
+	// TODO: 完整实现 — 打开 mux stream，发送 HTTP 请求，读取响应，返回 JSON。
+	// 当前为骨架版本，返回 501。
+	writeRelayError(w, "中继功能尚在实现中", http.StatusNotImplemented)
+}
+
+func writeRelayError(w http.ResponseWriter, msg string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(RelayResponse{
+		Status: code,
+		Error:  msg,
+	})
+}

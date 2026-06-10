@@ -102,6 +102,7 @@ func init() {
 	rootCmd.AddCommand(genkeyCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(relayCmd)
 }
 
 // buildFileClient 根据 viper 配置和 persistent flag 构造 FileClient。

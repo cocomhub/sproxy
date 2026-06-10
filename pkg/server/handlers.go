@@ -53,6 +53,7 @@ type Handlers struct {
 	logger        *slog.Logger
 	metrics       *Metrics
 	shareStore    *ShareStore
+	relayHandler  http.Handler
 	handler       http.Handler // mux wrapped with metricsMiddleware
 }
 

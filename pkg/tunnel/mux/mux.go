@@ -72,6 +72,12 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 }
 
 func (s *Stream) Write(p []byte) (n int, err error) {
+	// 先检查 mux 是否已关闭，避免和 done channel 的竞态
+	select {
+	case <-s.done:
+		return 0, fmt.Errorf("mux: stream %d: %w", s.id, xfer.ErrConnClosed)
+	default:
+	}
 	cp := make([]byte, len(p))
 	copy(cp, p)
 	select {
