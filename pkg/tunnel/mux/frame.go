@@ -17,12 +17,12 @@ type StreamID uint32
 type FrameType byte
 
 const (
-	FrameData      FrameType = 0x00 // 用户流数据
-	FrameOpen      FrameType = 0x01 // 通知远端打开新流
-	FrameClose     FrameType = 0x02 // 关闭指定流
+	FrameData       FrameType = 0x00 // 用户流数据
+	FrameOpen       FrameType = 0x01 // 通知远端打开新流
+	FrameClose      FrameType = 0x02 // 关闭指定流
 	FrameCloseWrite FrameType = 0x05 // 写半关闭（不再有更多数据发送）
-	FramePing      FrameType = 0x03 // 心跳探测
-	FramePong      FrameType = 0x04 // 心跳回复
+	FramePing       FrameType = 0x03 // 心跳探测
+	FramePong       FrameType = 0x04 // 心跳回复
 )
 
 // FrameHeaderSize 是帧头部的固定字节数。

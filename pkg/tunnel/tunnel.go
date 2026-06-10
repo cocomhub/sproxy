@@ -64,7 +64,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-	)
+)
 
 const (
 	frameContentType = "application/x-tunnel-frame"

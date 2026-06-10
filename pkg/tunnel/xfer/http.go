@@ -13,15 +13,16 @@ import (
 // httpConn 将 HTTP POST 请求-响应包装为 Conn。
 //
 // 工作方式：
-//   Send(msg) — 暂存消息
-//   Receive(ctx) — 将暂存消息作为 POST body 发送到 /tunnel 端点，
-//                   读取响应体作为接收消息返回
+//
+//	Send(msg) — 暂存消息
+//	Receive(ctx) — 将暂存消息作为 POST body 发送到 /tunnel 端点，
+//	                读取响应体作为接收消息返回
 //
 // 注意：此实现要求每次 Send 后必须调用一次 Receive，
 // 不可多次 Send 后批量 Receive。
 type httpConn struct {
-	url    string
-	client *http.Client
+	url     string
+	client  *http.Client
 	pending []byte
 }
 

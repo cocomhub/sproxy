@@ -111,9 +111,9 @@ type writeMsg struct {
 
 // Mux 在一条 xfer.Conn 上多路复用多条虚拟流。
 type Mux struct {
-	conn     xfer.Conn
-	role     Role
-	logger   *slog.Logger
+	conn   xfer.Conn
+	role   Role
+	logger *slog.Logger
 
 	mu       sync.Mutex
 	streams  map[StreamID]*Stream
@@ -122,7 +122,7 @@ type Mux struct {
 	writeCh  chan writeMsg
 	done     chan struct{}
 
-	errOnce sync.Once
+	errOnce  sync.Once
 	lastPong time.Time
 }
 
