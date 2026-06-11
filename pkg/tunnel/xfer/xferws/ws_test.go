@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coder/websocket"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	xferws "github.com/cocomhub/sproxy/xfer/ws"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xferws"
+	"github.com/coder/websocket"
 )
 
 func TestTransportRegistered(t *testing.T) {
