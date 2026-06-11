@@ -1,6 +1,22 @@
 # sproxy
 
-轻量的文件上传/下载/删除服务，内置基于 AES-256-GCM 的加密隧道与嵌入式 Web UI；附带 `sclient` 客户端。
+轻量的文件上传/下载/删除服务，内置基于 AES-256-GCM 的加密隧道与嵌入式 Web UI；
+附带 `sclient` 客户端。支持 WebSocket 持久连接、虚拟流多路复用和星型中继网络。
+
+## 架构
+
+```
+应用层: sproxy HTTP 路由 + sclient CLI + FileClient Go SDK
+  ├── hub 层: 节点注册 / 路由表 / 中继转发
+  ├── tunnel 层: HTTP 请求-响应交换 (Tunnel.Do/Serve)
+  ├── mux 层: 虚拟流多路复用 (Stream RWC + 心跳)
+  └── xfer 层: 传输层抽象 (Conn Send/Receive)
+      ├── HTTP POST (内置，向后兼容)
+      ├── WebSocket (xfer/ws，独立子模块)
+      └── gRPC / QUIC / ... (可插拔)
+```
+
+详细架构说明见 [docs/architecture.md](./docs/architecture.md)。
 
 
 ## 快速开始
@@ -66,7 +82,8 @@
 更完整的参考文档位于 `docs/` 目录：
 
 - [docs/api.md](./docs/api.md)：完整 HTTP API 参考，含请求 / 响应格式与错误码
-- [docs/tunnel.md](./docs/tunnel.md)：加密隧道协议规范与安全性说明
+- [docs/architecture.md](./docs/architecture.md)：分层传输架构设计（xfer / mux / tunnel / hub）
+- [docs/tunnel.md](./docs/tunnel.md)：加密隧道协议规范与安全性说明（传统模式）
 - [docs/config.md](./docs/config.md)：所有配置字段、优先级、SIGHUP 热重载范围
 - [docs/cli.md](./docs/cli.md)：sclient 全部子命令使用说明
 - [CHANGELOG.md](./CHANGELOG.md)：版本变更记录

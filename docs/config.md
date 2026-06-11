@@ -105,6 +105,23 @@ sclient 的配置默认路径基于 XDG：
 | `chunk_size` | int64 | `4194304` (4 MiB) | 默认分块大小 |
 | `max_chunk_size` | int64 | `0` | 自适应分块上限；0 = fallback 到 64 MiB |
 | `auth_token` | string | (空) | Bearer 认证 token（如果服务端启用） |
+| `xfer_name` | string | (空) | 传输层名称（如 `"ws"`），空串 = 使用传统 HTTP POST |
+| `hub_url` | string | (空) | Hub 中继地址（启用 xfer 时必需），如 `ws://hub.example.com/ws` |
+
+### Hub 中继配置（服务端）
+
+服务端 `sproxy.yaml` 支持以下 hub 配置段：
+
+```yaml
+hub:
+  enabled: true                      # 启用 Hub 中继模式（默认关闭）
+  node_id: "sproxy-node-1"           # 节点标识，空串自动生成
+  transports:
+    ws:
+      enabled: true                  # 启用 WebSocket 传输监听
+      listen: ":18084"               # WebSocket 监听地址
+      path: "/ws"                    # WebSocket 升级路径
+```
 
 ### 当前目录（cd / pwd）
 
