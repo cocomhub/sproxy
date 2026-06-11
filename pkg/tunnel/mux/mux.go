@@ -67,8 +67,8 @@ type Stream struct {
 	done   chan struct{}
 
 	// 流控：窗口计数器
-	windowSize      atomic.Int32 // 剩余可发送字节数
-	windowUpdateCh  chan struct{} // 窗口补充时唤醒 Write
+	windowSize     atomic.Int32  // 剩余可发送字节数
+	windowUpdateCh chan struct{} // 窗口补充时唤醒 Write
 }
 
 func newStream(id StreamID, m *Mux) *Stream {

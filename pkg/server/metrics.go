@@ -159,6 +159,12 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE sproxy_mux_stream_errors counter\n")
 		fmt.Fprintf(w, "sproxy_mux_stream_errors %d\n\n", mm.Streams.Errors.Load())
 	}
+	// Hub 级指标
+	if rt := h.routeTable; rt != nil {
+		fmt.Fprintf(w, "# HELP sproxy_hub_nodes_connected Current number of connected relay nodes\n")
+		fmt.Fprintf(w, "# TYPE sproxy_hub_nodes_connected gauge\n")
+		fmt.Fprintf(w, "sproxy_hub_nodes_connected %d\n\n", rt.NodeCount())
+	}
 }
 
 // metricsResponseWriter 包装 http.ResponseWriter，捕获状态码。
