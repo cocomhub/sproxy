@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -194,6 +196,25 @@ func runServer(cmd *cobra.Command, args []string) error {
 			}
 		}
 		slog.Info("TLS enabled", "cert", certFile, "key", keyFile)
+
+		// mTLS: 配置客户端证书验证
+		if cfg.TLS.ClientCA != "" {
+			caCert, err := os.ReadFile(cfg.TLS.ClientCA)
+			if err != nil {
+				return fmt.Errorf("读取 ClientCA 证书失败: %w", err)
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caCert) {
+				return fmt.Errorf("ClientCA 证书解析失败（非 PEM 格式）")
+			}
+			s.TLSConfig = &tls.Config{
+				ClientAuth: tls.RequireAndVerifyClientCert,
+				ClientCAs:  caPool,
+				MinVersion: tls.VersionTLS12,
+			}
+			slog.Info("mTLS enabled", "client_ca", cfg.TLS.ClientCA)
+		}
+
 		if err := s.ListenAndServeTLS(certFile, keyFile); err != nil {
 			if err == http.ErrServerClosed {
 				slog.Info("listen and serve closed", "error", err.Error())

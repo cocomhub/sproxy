@@ -19,6 +19,7 @@ type TLSConfig struct {
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
 	AutoTLS  bool   `yaml:"auto_tls"`
+	ClientCA string `yaml:"client_ca"` // mTLS: CA 证书路径，非空时启用客户端证书验证
 }
 
 type RateLimitConfig struct {
@@ -42,22 +43,22 @@ type VersionConfig struct {
 
 // HubConfig 配置 Hub 中继系统。
 type HubConfig struct {
-	Enabled    bool             `yaml:"enabled"`
-	NodeID     string           `yaml:"node_id"`
-	RelayToken string           `yaml:"relay_token"`
-	Transports TransportConfigs `yaml:"transports"`
+	Enabled    bool             "yaml:\"enabled\""
+	NodeID     string           "yaml:\"node_id\""
+	RelayToken string           "yaml:\"relay_token\""
+	Transports TransportConfigs "yaml:\"transports\""
 }
 
 // TransportConfigs 聚合所有可用的传输层配置。
 type TransportConfigs struct {
-	WS WSTransportConfig `yaml:"ws"`
+	WS WSTransportConfig "yaml:\"ws\""
 }
 
 // WSTransportConfig 配置 WebSocket 传输监听。
 type WSTransportConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Listen  string `yaml:"listen"`
-	Path    string `yaml:"path"`
+	Enabled bool   "yaml:\"enabled\""
+	Listen  string "yaml:\"listen\""
+	Path    string "yaml:\"path\""
 }
 
 type Config struct {
@@ -83,11 +84,11 @@ type Config struct {
 	// 文件版本管理（默认关闭）
 	Versioning VersionConfig `yaml:"versioning" mapstructure:"versioning"`
 
-	// Hub 中继系统（默认关闭）
-	Hub HubConfig `yaml:"hub" mapstructure:"hub"`
-
 	// API 密钥配置
 	APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`
+
+	// Hub 中继系统（默认关闭）
+	Hub HubConfig `yaml:"hub" mapstructure:"hub"`
 }
 
 func Default() *Config {

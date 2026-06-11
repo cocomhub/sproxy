@@ -1,57 +1,156 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
+// Use of this source code is governed by an Apache-2.0 style license that
+// can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
-package xferwebrtc_test
+package webrtc
 
 import (
-	"context"
 	"testing"
 	"time"
-
-	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	_ "github.com/cocomhub/sproxy/xfer/webrtc"
 )
 
-func TestWebrtcRegistration(t *testing.T) {
-	tp := xfer.Get("webrtc")
-	if tp == nil {
-		t.Fatal("webrtc transport not registered via init()")
+// TestWebrtcRoundTrip verifies bidirectional message exchange.
+func TestWebrtcRoundTrip(t *testing.T) {
+	signal := NewSignal()
+	payload := []byte("Hello WebRTC!")
+
+	type result struct {
+		err  error
+		data []byte
 	}
-	if tp.Name != "webrtc" {
-		t.Fatalf("expected name 'webrtc', got %q", tp.Name)
+
+	dialRes := make(chan result, 1)
+	listenRes := make(chan result, 1)
+	dialDone := make(chan struct{})
+
+	// Listen goroutine.
+	go func() {
+		conn, err := Listen(signal)
+		if err != nil {
+			listenRes <- result{err: err}
+			return
+		}
+
+		buf := make([]byte, 4096)
+		n, err := conn.Read(buf)
+		if err != nil {
+			conn.Close()
+			listenRes <- result{err: err}
+			return
+		}
+
+		if _, err := conn.Write(buf[:n]); err != nil {
+			conn.Close()
+			listenRes <- result{err: err}
+			return
+		}
+		listenRes <- result{data: buf[:n]}
+		<-dialDone
+		conn.Close()
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Dial goroutine.
+	go func() {
+		conn, err := Dial(signal)
+		if err != nil {
+			dialRes <- result{err: err}
+			return
+		}
+		defer conn.Close()
+
+		if _, err := conn.Write(payload); err != nil {
+			dialRes <- result{err: err}
+			return
+		}
+
+		buf := make([]byte, 4096)
+		n, err := conn.Read(buf)
+		if err != nil {
+			dialRes <- result{err: err}
+			return
+		}
+		dialRes <- result{data: buf[:n]}
+		close(dialDone)
+	}()
+
+	var dialR, listenR result
+
+	select {
+	case dialR = <-dialRes:
+	case <-time.After(20 * time.Second):
+		t.Fatal("dial timed out")
 	}
-	if tp.Dial == nil {
-		t.Fatal("Dial is nil")
+	select {
+	case listenR = <-listenRes:
+	case <-time.After(20 * time.Second):
+		t.Fatal("listen timed out")
 	}
-	if tp.Listen == nil {
-		t.Fatal("Listen is nil")
+
+	if dialR.err != nil {
+		t.Fatalf("Dial: %v", dialR.err)
+	}
+	if listenR.err != nil {
+		t.Fatalf("Listen: %v", listenR.err)
+	}
+
+	if string(listenR.data) != string(payload) {
+		t.Errorf("listen got %q, want %q", string(listenR.data), string(payload))
+	}
+	if string(dialR.data) != string(payload) {
+		t.Errorf("dial got %q, want %q", string(dialR.data), string(payload))
 	}
 }
 
-func TestWebrtcDialNotImplemented(t *testing.T) {
-	tp := xfer.Get("webrtc")
-	if tp == nil {
-		t.Fatal("webrtc transport not registered")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+// TestWebrtcBasicConnect verifies one-way message delivery.
+func TestWebrtcBasicConnect(t *testing.T) {
+	signal := NewSignal()
+	payload := []byte("ping")
 
-	_, err := tp.Dial(ctx, "stub")
-	if err == nil {
-		t.Fatal("expected error for unimplemented dial")
-	}
-}
+	listenRes := make(chan error, 1)
+	var listenData []byte
 
-func TestWebrtcListenNotImplemented(t *testing.T) {
-	tp := xfer.Get("webrtc")
-	if tp == nil {
-		t.Fatal("webrtc transport not registered")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	go func() {
+		conn, err := Listen(signal)
+		if err != nil {
+			listenRes <- err
+			return
+		}
+		defer conn.Close()
 
-	_, err := tp.Listen(ctx, ":0")
-	if err == nil {
-		t.Fatal("expected error for unimplemented listen")
+		buf := make([]byte, 4096)
+		n, err := conn.Read(buf)
+		if err != nil {
+			listenRes <- err
+			return
+		}
+		listenData = buf[:n]
+		listenRes <- nil
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := Dial(signal)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("Dial write: %v", err)
+	}
+
+	select {
+	case err := <-listenRes:
+		if err != nil {
+			t.Fatalf("Listen: %v", err)
+		}
+		if string(listenData) != string(payload) {
+			t.Errorf("listen got %q, want %q", string(listenData), string(payload))
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("listen timed out")
 	}
 }
