@@ -6,8 +6,12 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
 
 // RelayRequest 是中继请求的 JSON 格式。
@@ -27,69 +31,83 @@ type RelayResponse struct {
 	Error      string              `json:"error,omitempty"`
 }
 
-// RouteTable 提供节点发现接口，由 pkg/hub 包实现。
-type RouteTable interface {
-	// Lookup 返回指定 nodeID 的地址。如果节点不在路由表中，返回 false。
-	Lookup(nodeID string) (addr string, ok bool)
-}
-
 // RelayHandler 通过 hub 路由表转发请求到目标节点。
-// TODO: 完整实现需依赖 pkg/hub.RouteTable 和 pkg/mux.Stream — 当前为骨架版本。
+// 使用 Tunnel 帧协议与目标节点的 Tunnel.Serve 通信。
 type RelayHandler struct {
-	nodeID     string
-	routeTable RouteTable
+	routeTable *hub.RouteTable
 	logger     *slog.Logger
 }
 
-// NewRelayHandler 创建一个新的中继处理器。
-// nodeID 为本地节点 ID，routeTable 用于查找目标节点。
-func NewRelayHandler(nodeID string, routeTable RouteTable, logger *slog.Logger) *RelayHandler {
-	return &RelayHandler{
-		nodeID:     nodeID,
-		routeTable: routeTable,
-		logger:     logger,
+// NewRelayHandler 创建中继处理器。
+func NewRelayHandler(rt *hub.RouteTable, logger *slog.Logger) *RelayHandler {
+	if logger == nil {
+		logger = slog.Default()
 	}
+	return &RelayHandler{routeTable: rt, logger: logger}
 }
 
-// ServeHTTP 处理中继请求。
-// 解析 JSON 请求体，查找目标节点，返回状态（当前返回 501 Not Implemented 骨架）。
+// ServeHTTP 处理中继请求：解析 JSON，查找目标节点，转发 HTTP 请求。
 func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req RelayRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeRelayError(w, fmt.Sprintf("解析请求失败: %v", err), http.StatusBadRequest)
 		return
 	}
-
 	if req.Target == "" {
 		writeRelayError(w, "缺少 target 字段", http.StatusBadRequest)
 		return
 	}
 
-	// 查找目标节点
-	addr, ok := h.routeTable.Lookup(req.Target)
-	if !ok {
+	targetMux := h.routeTable.Lookup(hub.NodeID(req.Target))
+	if targetMux == nil {
 		h.logger.Warn("中继目标节点未找到", "target", req.Target)
 		writeRelayError(w, fmt.Sprintf("目标节点 %s 未找到", req.Target), http.StatusNotFound)
 		return
 	}
 
-	h.logger.Info("中继请求",
-		"target", req.Target,
-		"addr", addr,
-		"method", req.Method,
-		"path", req.Path,
-	)
+	// 使用目标节点的 mux 创建临时 Tunnel 发送请求
+	// 注意：Tunnel.NewTunnel 接受 *mux.Mux 但不拥有其生命周期
+	// 这里使用无加密通道（中继传输层自身已加密）
+	tun := tunnel.NewTunnel(targetMux, nil)
 
-	// TODO: 完整实现 — 打开 mux stream，发送 HTTP 请求，读取响应，返回 JSON。
-	// 当前为骨架版本，返回 501。
-	writeRelayError(w, "中继功能尚在实现中", http.StatusNotImplemented)
+	// 构建转发请求
+	forwardReq, err := http.NewRequest(req.Method, req.Path, nil)
+	if err != nil {
+		writeRelayError(w, fmt.Sprintf("构建转发请求失败: %v", err), http.StatusInternalServerError)
+		return
+	}
+	for k, v := range req.Headers {
+		forwardReq.Header.Set(k, v)
+	}
+
+	resp, err := tun.Do(forwardReq)
+	if err != nil {
+		h.logger.Error("中继转发失败", "target", req.Target, "error", err)
+		writeRelayError(w, fmt.Sprintf("转发失败: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	result := RelayResponse{
+		Status:     resp.StatusCode,
+		Headers:    resp.Header,
+		BodyBase64: bodyToString(body),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(result)
+}
+
+// bodyToString 将 body 转为 string（小 body 暂不使用 base64，直接使用 UTF-8）。
+// TODO: 对二进制 body 使用 base64 编码。
+func bodyToString(body []byte) string {
+	return string(body)
 }
 
 func writeRelayError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(RelayResponse{
-		Status: code,
-		Error:  msg,
-	})
+	json.NewEncoder(w).Encode(RelayResponse{Status: code, Error: msg})
 }

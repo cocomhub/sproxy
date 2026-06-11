@@ -688,24 +688,33 @@ func (c *FileClient) TunnelDo(req *http.Request) (*http.Response, error) {
 }
 
 func (c *FileClient) doRequestViaXfer(req *http.Request) (*http.Response, error) {
-	tun, err := c.getTunnelMux()
+	tun, err := c.getTunnelMux(req.Context())
 	if err != nil {
 		return nil, fmt.Errorf("获取隧道 mux 失败: %w", err)
 	}
 	return tun.Do(req)
 }
 
-func (c *FileClient) getTunnelMux() (*tunnel.Tunnel, error) {
+func (c *FileClient) getTunnelMux(ctx context.Context) (*tunnel.Tunnel, error) {
 	c.tunnelMuxMu.Lock()
 	defer c.tunnelMuxMu.Unlock()
+
+	// 检查已有连接是否存活
 	if c.tunnelMux != nil {
-		return tunnel.NewTunnel(c.tunnelMux, c.tunnelKey), nil
+		select {
+		case <-c.tunnelMux.Context().Done():
+			// mux 已关闭，清理并重建
+			c.tunnelMux = nil
+		default:
+			return tunnel.NewTunnel(c.tunnelMux, c.tunnelKey), nil
+		}
 	}
+
 	tp := xfer.Get(c.xferName)
 	if tp == nil {
 		return nil, fmt.Errorf("xfer 传输层 %q 未注册", c.xferName)
 	}
-	conn, err := tp.Dial(context.Background(), c.hubURL)
+	conn, err := tp.Dial(ctx, c.hubURL)
 	if err != nil {
 		return nil, fmt.Errorf("xfer 拨号失败: %w", err)
 	}

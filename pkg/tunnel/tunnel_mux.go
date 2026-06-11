@@ -282,9 +282,12 @@ func (rw *bufferedResponseWriter) WriteHeader(code int) {
 }
 
 func (rw *bufferedResponseWriter) Write(data []byte) (int, error) {
+	rw.mu.Lock()
 	if !rw.wroteHdr {
-		rw.WriteHeader(http.StatusOK)
+		*rw.code = http.StatusOK
+		rw.wroteHdr = true
 	}
+	rw.mu.Unlock()
 	return rw.buf.Write(data)
 }
 
