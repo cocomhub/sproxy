@@ -9,3 +9,5 @@ certs
 *.out
 *.cover
 cover
+.claude/worktrees/
+.trae/
