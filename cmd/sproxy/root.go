@@ -18,6 +18,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -104,7 +105,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	mux := http.NewServeMux()
-	h := server.RegisterRoutes(ctx, mux, &cfgPtr, Version, BuildAt, tunnelKey, logger)
+	var routeTable *hub.RouteTable
+	if cfg.Hub.Enabled {
+		routeTable = hub.NewRouteTable()
+		logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
+	}
+	h := server.RegisterRoutes(ctx, mux, &cfgPtr, Version, BuildAt, tunnelKey, logger, routeTable)
 	defer func() {
 		if err := h.Close(); err != nil {
 			slog.Warn("handlers close error", "error", err.Error())

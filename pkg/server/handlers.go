@@ -22,6 +22,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/web"
 )
@@ -56,6 +57,7 @@ type Handlers struct {
 	muxMetrics    *mux.Metrics
 	shareStore    *ShareStore
 	relayHandler  http.Handler
+	routeTable    *hub.RouteTable
 	handler       http.Handler // mux wrapped with metricsMiddleware
 }
 
@@ -72,7 +74,7 @@ func (h *Handlers) TunnelHandler() http.Handler {
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
 // 调用方应在进程退出前调用 (*Handlers).Close() 以释放后台 goroutine 与持久化资源。
-func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointer[Config], version, buildAt string, tunnelKey []byte, logger *slog.Logger) *Handlers {
+func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointer[Config], version, buildAt string, tunnelKey []byte, logger *slog.Logger, routeTable *hub.RouteTable) *Handlers {
 	cfg := cfgPtr.Load()
 	log := defaultLogger(logger)
 
@@ -88,6 +90,7 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 		logger:        log,
 		metrics:       NewMetrics(),
 		shareStore:    NewShareStore(),
+		routeTable:    routeTable,
 	}
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
@@ -153,6 +156,14 @@ func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Poin
 	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
 	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
+
+	// Hub 管理 API（中继系统），需鉴权
+	if routeTable != nil {
+		mux.HandleFunc("GET /api/hub/nodes", h.authMiddleware(h.hubNodesHandler))
+		mux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
+		mux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))
+	}
+
 	mux.HandleFunc("GET /healthz", h.healthz)
 	mux.HandleFunc("GET /version", h.versionHandler)
 	mux.HandleFunc("GET /metrics", h.MetricsHandler)
@@ -220,6 +231,59 @@ func (h *Handlers) versionHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = fmt.Fprintf(w, "Version: %s\nBuildAt: %s\n", h.version, h.buildAt)
+}
+
+// hubNodesHandler 返回在线节点列表。
+func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
+	if h.routeTable == nil {
+		http.Error(w, "hub not enabled", http.StatusNotFound)
+		return
+	}
+	nodes := h.routeTable.List()
+	type nodeResp struct {
+		ID        string `json:"id"`
+		Addr      string `json:"addr,omitempty"`
+		Connected string `json:"connected,omitempty"`
+	}
+	resp := make([]nodeResp, 0, len(nodes))
+	for _, n := range nodes {
+		resp = append(resp, nodeResp{
+			ID:        string(n.ID),
+			Addr:      n.Addr,
+			Connected: n.Connected.Format("2006-01-02T15:04:05Z07:00"),
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// hubRemoveNodeHandler 踢出指定节点。
+func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) {
+	if h.routeTable == nil {
+		http.Error(w, "hub not enabled", http.StatusNotFound)
+		return
+	}
+	id := hub.NodeID(r.PathValue("id"))
+	if id == "" {
+		http.Error(w, "missing node id", http.StatusBadRequest)
+		return
+	}
+	h.routeTable.Remove(id)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "removed", "node": string(id)})
+}
+
+// hubStatsHandler 返回中继统计。
+func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
+	if h.routeTable == nil {
+		http.Error(w, "hub not enabled", http.StatusNotFound)
+		return
+	}
+	count := h.routeTable.NodeCount()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"nodes_connected": count,
+	})
 }
 
 func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {

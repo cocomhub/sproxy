@@ -44,6 +44,7 @@ type VersionConfig struct {
 type HubConfig struct {
 	Enabled    bool             `yaml:"enabled"`
 	NodeID     string           `yaml:"node_id"`
+	RelayToken string           `yaml:"relay_token"`
 	Transports TransportConfigs `yaml:"transports"`
 }
 

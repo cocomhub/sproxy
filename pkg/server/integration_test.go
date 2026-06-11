@@ -909,7 +909,7 @@ func TestRegisterRoutes_Smoke(t *testing.T) {
 	mux := http.NewServeMux()
 	// 32 字节占位 tunnel key
 	key := make([]byte, 32)
-	h := RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", key, nil)
+	h := RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", key, nil, nil)
 	t.Cleanup(func() { _ = h.Close() })
 }
 

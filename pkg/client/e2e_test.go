@@ -32,7 +32,7 @@ func startFullTestServer(t *testing.T) (string, *server.Config) {
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
-	h := server.RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", nil, nil)
+	h := server.RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", nil, nil, nil)
 	t.Cleanup(func() { _ = h.Close() })
 
 	ts := httptest.NewServer(mux)

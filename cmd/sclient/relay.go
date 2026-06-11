@@ -18,6 +18,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	reconnectBaseDelay = 1 * time.Second
+	reconnectMaxDelay  = 30 * time.Second
+)
+
 var relayCmd = &cobra.Command{
 	Use:   "relay",
 	Short: "启动中继节点，将远程请求转发到本地 HTTP 服务",
@@ -53,6 +58,31 @@ func runRelay(cmd *cobra.Command, args []string) error {
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
+
+	return runRelayWithRetry(ctx, nodeID, logger)
+}
+
+func runRelayWithRetry(ctx context.Context, nodeID string, logger *slog.Logger) error {
+	delay := reconnectBaseDelay
+	for {
+		err := runRelayOnce(ctx, nodeID, logger)
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		logger.Warn("中继断开，即将重连", "delay", delay, "error", err)
+		select {
+		case <-time.After(delay):
+			delay *= 2
+			if delay > reconnectMaxDelay {
+				delay = reconnectMaxDelay
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func runRelayOnce(ctx context.Context, nodeID string, logger *slog.Logger) error {
 
 	tp := xfer.Get("ws")
 	if tp == nil {
