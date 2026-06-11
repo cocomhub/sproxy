@@ -126,13 +126,20 @@ func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
 
 // streamBody 包装 mux.Stream 为 io.ReadCloser，用于响应体。
 // 当 key 非 nil 时，自动解密流。
+// 使用预读缓冲优化大文件读取性能，减少 mux 内部消息传递次数。
 type streamBody struct {
 	stream *mux.Stream
 	key    []byte
 	once   sync.Once
 	pr     *io.PipeReader
 	pw     *io.PipeWriter
+
+	// 预读缓冲（非加密模式）
+	rdBuf []byte
+	rdOff int
 }
+
+const streamBodyBufSize = 65536 // 64 KB 预读缓冲
 
 func (b *streamBody) Read(p []byte) (int, error) {
 	if b.key != nil {
@@ -145,7 +152,24 @@ func (b *streamBody) Read(p []byte) (int, error) {
 		})
 		return b.pr.Read(p)
 	}
-	return b.stream.Read(p)
+
+	// 非加密模式：预读缓冲
+	if b.rdOff >= len(b.rdBuf) {
+		b.rdBuf = make([]byte, streamBodyBufSize)
+		n, err := io.ReadAtLeast(b.stream, b.rdBuf, 1)
+		if err != nil && err != io.EOF {
+			return 0, err
+		}
+		b.rdBuf = b.rdBuf[:n]
+		b.rdOff = 0
+		if n == 0 {
+			return 0, io.EOF
+		}
+	}
+
+	n := copy(p, b.rdBuf[b.rdOff:])
+	b.rdOff += n
+	return n, nil
 }
 
 func (b *streamBody) Close() error {

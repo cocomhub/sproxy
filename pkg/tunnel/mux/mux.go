@@ -5,6 +5,7 @@ package mux
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,17 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
+
+// DefaultWindowSize 是每条流的初始发送窗口大小。
+const DefaultWindowSize = 65536 // 64 KB
+
+// maxRetries 是帧重传的最大次数。
+const maxRetries = 3
+
+// retryBaseDelay 是重传的基础延迟。
+const retryBaseDelay = 100 * time.Millisecond
+
+var xferErrClosed = xfer.ErrConnClosed
 
 // Role 标识 Mux 的角色。
 type Role int
@@ -53,15 +65,22 @@ type Stream struct {
 
 	dataCh chan []byte
 	done   chan struct{}
+
+	// 流控：窗口计数器
+	windowSize      atomic.Int32 // 剩余可发送字节数
+	windowUpdateCh  chan struct{} // 窗口补充时唤醒 Write
 }
 
 func newStream(id StreamID, m *Mux) *Stream {
-	return &Stream{
+	s := &Stream{
 		id:     id,
 		mux:    m,
 		dataCh: make(chan []byte, 64),
 		done:   make(chan struct{}),
 	}
+	s.windowSize.Store(DefaultWindowSize)
+	s.windowUpdateCh = make(chan struct{}, 8)
+	return s
 }
 
 func (s *Stream) ID() StreamID { return s.id }
@@ -81,6 +100,9 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 			}
 			s.rBuf = data
 			s.rOff = 0
+
+			// 流控：消费数据后发送 WindowUpdate
+			s.mux.sendWindowUpdateUnsafe(s.id, int32(len(data)))
 		case <-s.done:
 			return 0, fmt.Errorf("mux: stream %d: %w", s.id, xfer.ErrConnClosed)
 		}
@@ -98,12 +120,32 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 		return 0, fmt.Errorf("mux: stream %d: %w", s.id, xfer.ErrConnClosed)
 	default:
 	}
-	cp := make([]byte, len(p))
-	copy(cp, p)
+
+	// 流控：等待窗口可用
+	for s.windowSize.Load() <= 0 {
+		select {
+		case <-s.windowUpdateCh:
+			// 窗口已补充，继续检查
+		case <-s.done:
+			return 0, fmt.Errorf("mux: stream %d: %w", s.id, xfer.ErrConnClosed)
+		}
+	}
+
+	// 不超过窗口大小
+	writeLen := len(p)
+	ws := s.windowSize.Load()
+	if int32(writeLen) > ws {
+		writeLen = int(ws)
+	}
+
+	cp := make([]byte, writeLen)
+	copy(cp, p[:writeLen])
+
 	select {
 	case s.mux.writeCh <- writeMsg{streamID: s.id, data: cp}:
-		s.mux.metrics.Streams.BytesWritten.Add(int64(len(p)))
-		return len(p), nil
+		s.windowSize.Add(-int32(writeLen))
+		s.mux.metrics.Streams.BytesWritten.Add(int64(writeLen))
+		return writeLen, nil
 	case <-s.done:
 		return 0, fmt.Errorf("mux: stream %d: %w", s.id, xfer.ErrConnClosed)
 	}
@@ -132,6 +174,7 @@ var closeMarker = make([]byte, 0)
 type writeMsg struct {
 	streamID StreamID
 	data     []byte // nil=CloseWrite, empty([]byte{})=Close
+	isRaw    bool   // true=已经是编码好的完整帧，直接发送
 }
 
 // Mux 在一条 xfer.Conn 上多路复用多条虚拟流。
@@ -234,6 +277,25 @@ func (m *Mux) Close() error {
 	return m.conn.Close()
 }
 
+// sendWindowUpdateUnsafe 发送窗口更新帧（调用方需已持有 mu 锁或在 readLoop goroutine 中）。
+func (m *Mux) sendWindowUpdateUnsafe(sid StreamID, size int32) {
+	if size <= 0 {
+		return
+	}
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint32(payload, uint32(size))
+	frame := EncodeFrame(sid, FrameWindowUpdate, payload)
+	select {
+	case <-m.done:
+	default:
+		// 发送到 writeCh 由 writeLoop 处理
+		select {
+		case m.writeCh <- writeMsg{streamID: sid, data: frame, isRaw: true}:
+		default:
+		}
+	}
+}
+
 func (m *Mux) isClosed() bool {
 	select {
 	case <-m.done:
@@ -289,6 +351,8 @@ func (m *Mux) writeLoop() {
 func (m *Mux) sendFrame(msg writeMsg) {
 	var frame []byte
 	switch {
+	case msg.isRaw:
+		frame = msg.data
 	case msg.data == nil:
 		frame = EncodeFrame(msg.streamID, FrameCloseWrite, nil)
 	case len(msg.data) == 0:
@@ -300,8 +364,35 @@ func (m *Mux) sendFrame(msg writeMsg) {
 	m.metrics.FramesSent.Add(1)
 	if err := m.conn.Send(context.Background(), frame); err != nil {
 		m.metrics.Errors.Add(1)
-		m.errOnce.Do(func() { m.logger.Error("mux: send error", "err", err) })
-		m.Close()
+		if msg.isRaw || msg.data == nil || len(msg.data) == 0 {
+			// 控制帧 / 关闭帧失败直接关闭连接
+			m.errOnce.Do(func() { m.logger.Error("mux: send error", "err", err) })
+			m.Close()
+			return
+		}
+		// 数据帧失败：重传（指数退避）
+		m.retrySend(msg, 0)
+	}
+}
+
+// retrySend 重传数据帧，指数退避 100ms → 400ms → 900ms，最多重试 maxRetries 次。
+func (m *Mux) retrySend(msg writeMsg, attempt int) {
+	if attempt >= maxRetries {
+		m.errOnce.Do(func() { m.logger.Error("mux: retry exhausted for stream", "stream", msg.streamID) })
+		m.metrics.Streams.Errors.Add(1)
+		return
+	}
+	backoff := retryBaseDelay * time.Duration(attempt+1) * time.Duration(attempt+1)
+	time.Sleep(backoff)
+
+	frame := EncodeFrame(msg.streamID, FrameData, msg.data)
+	m.metrics.FramesSent.Add(1)
+	if err := m.conn.Send(context.Background(), frame); err != nil {
+		m.metrics.Errors.Add(1)
+		if errors.Is(err, xferErrClosed) {
+			return
+		}
+		m.retrySend(msg, attempt+1)
 	}
 }
 
@@ -388,6 +479,20 @@ func (m *Mux) handleFrame(raw []byte) {
 	case FramePong:
 		m.lastPongNano.Store(time.Now().UnixNano())
 		m.metrics.PongsReceived.Add(1)
+	case FrameWindowUpdate:
+		m.mu.Lock()
+		s, ok := m.streams[sid]
+		m.mu.Unlock()
+		if !ok {
+			return
+		}
+		// 窗口更新：补充额度
+		s.windowSize.Add(int32(binary.BigEndian.Uint32(payload)))
+		// 唤醒可能阻塞的 Write
+		select {
+		case s.windowUpdateCh <- struct{}{}:
+		default:
+		}
 	}
 }
 

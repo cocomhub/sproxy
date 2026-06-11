@@ -23,6 +23,7 @@ const (
 	FrameCloseWrite FrameType = 0x05 // 写半关闭（不再有更多数据发送）
 	FramePing       FrameType = 0x03 // 心跳探测
 	FramePong       FrameType = 0x04 // 心跳回复
+	FrameWindowUpdate FrameType = 0x07 // 窗口更新（流控）
 )
 
 // FrameHeaderSize 是帧头部的固定字节数。
