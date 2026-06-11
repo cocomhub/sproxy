@@ -4,6 +4,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -12,6 +13,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
 // ---- Option functions ----
@@ -328,7 +333,7 @@ func TestTunnelDo_WithoutTunnel(t *testing.T) {
 	c := NewFileClient("http://localhost:18083")
 	req, _ := http.NewRequest("GET", "/test", nil)
 	_, err := c.TunnelDo(req)
-	if err == nil || !strings.Contains(err.Error(), "未配置隧道密钥") {
+	if err == nil || !strings.Contains(err.Error(), "未配置隧道") {
 		t.Fatalf("expected tunnel not configured error, got %v", err)
 	}
 }
@@ -336,3 +341,236 @@ func TestTunnelDo_WithoutTunnel(t *testing.T) {
 // ---- LoadFromViper (config) ----
 // Note: viper tests are in config_test.go already, but LoadFromViper is at 0%.
 // Since it requires viper setup, we test it via the existing config test pattern.
+
+// ---- WithXfer Tests ----
+
+func TestWithXferSetsName(t *testing.T) {
+	c := &FileClient{logger: testLogger()}
+	opt := WithXfer("ws", "ws://hub:8080/ws", "")
+	opt(c)
+	if c.xferName != "ws" {
+		t.Fatalf("expected xferName ws, got %q", c.xferName)
+	}
+	if c.hubURL != "ws://hub:8080/ws" {
+		t.Fatalf("expected hubURL ws://hub:8080/ws, got %q", c.hubURL)
+	}
+	if c.tunnelKey != nil {
+		t.Fatal("expected nil tunnelKey for empty hexKey")
+	}
+}
+
+func TestWithXferWithKey(t *testing.T) {
+	c := &FileClient{logger: testLogger()}
+	opt := WithXfer("ws", "ws://hub:8080/ws", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	opt(c)
+	if c.tunnelKey == nil {
+		t.Fatal("expected non-nil tunnelKey")
+	}
+	if len(c.tunnelKey) != 32 {
+		t.Fatalf("expected 32 bytes key, got %d", len(c.tunnelKey))
+	}
+}
+
+func TestWithXferInvalidKey(t *testing.T) {
+	c := &FileClient{logger: testLogger()}
+	opt := WithXfer("ws", "ws://hub:8080/ws", "bad-key")
+	opt(c)
+	if c.tunnelKey != nil {
+		t.Fatal("expected nil tunnelKey for invalid hex")
+	}
+}
+
+func TestTunnelDo_WithXferNoTransport(t *testing.T) {
+	// WithXfer 设置了 name 但传输层未注册，getTunnelMux 应返回错误
+	c := &FileClient{
+		serverURL: "http://localhost:18083",
+		xferName:  "nonexistent",
+		hubURL:    "ws://hub:8080/ws",
+		logger:    testLogger(),
+	}
+	req, _ := http.NewRequest("GET", "/test", nil)
+	_, err := c.TunnelDo(req)
+	if err == nil {
+		t.Fatal("expected error for unregistered xfer transport")
+	}
+}
+
+func TestTunnelDo_WithTunnel(t *testing.T) {
+	// WithTunnel 被 WithXfer 抢占 — 预期 xfer 错误（因 ws 未注册）
+	c := &FileClient{
+		serverURL:  "http://localhost:18083",
+		httpClient: http.DefaultClient,
+		xferName:   "ws",
+		logger:     testLogger(),
+	}
+	req, _ := http.NewRequest("GET", "/test", nil)
+	_, err := c.TunnelDo(req)
+	if err == nil {
+		t.Fatal("expected error for unregistered xfer transport")
+	}
+}
+
+// testLogger 返回写入 discard 的日志器，避免测试输出混乱。
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// ---- E2E: xfer Pipe + mux + Tunnel ----
+
+func TestXferTunnelRoundTrip(t *testing.T) {
+	// 端到端测试：用 xfertest.Pipe 模拟传输层，
+	// 通过 mux -> Tunnel.Do/Serve 完成一个完整的 HTTP 请求-响应往返
+	a, b := xfertest.Pipe()
+	muxA := mux.New(a, mux.RoleDialer)
+	muxB := mux.New(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	tunA := tunnel.NewTunnel(muxA, nil)
+	tunB := tunnel.NewTunnel(muxB, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	srvErr := make(chan error, 1)
+	go func() {
+		srvErr <- tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			w.Write(body)
+		}))
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/echo", strings.NewReader("e2e"))
+	resp, err := tunA.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "e2e" {
+		t.Fatalf("expected %q, got %q", "e2e", string(body))
+	}
+	cancel()
+	<-srvErr
+}
+
+func TestXferTunnelConcurrentStreams(t *testing.T) {
+	a, b := xfertest.Pipe()
+	muxA := mux.New(a, mux.RoleDialer)
+	muxB := mux.New(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	tunA := tunnel.NewTunnel(muxA, nil)
+	tunB := tunnel.NewTunnel(muxB, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	srvErr := make(chan error, 1)
+	go func() {
+		srvErr <- tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(r.Method))
+		}))
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// 并发 10 个请求
+	errCh := make(chan error, 10)
+	for range 10 {
+		go func() {
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+			resp, err := tunA.Do(req)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			resp.Body.Close()
+			errCh <- nil
+		}()
+	}
+
+	for range 10 {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+	cancel()
+	<-srvErr
+}
+
+func TestXferTunnelEncrypted(t *testing.T) {
+	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	a, b := xfertest.Pipe()
+	muxA := mux.New(a, mux.RoleDialer)
+	muxB := mux.New(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	tunA := tunnel.NewTunnel(muxA, key)
+	tunB := tunnel.NewTunnel(muxB, key)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	srvErr := make(chan error, 1)
+	go func() {
+		srvErr <- tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			w.Write(bytes.ToUpper(body))
+		}))
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/enc", strings.NewReader("test"))
+	resp, err := tunA.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "TEST" {
+		t.Fatalf("expected TEST, got %q", string(body))
+	}
+	cancel()
+	<-srvErr
+}
+
+func TestXferTunnelLargeBody(t *testing.T) {
+	// mux 帧最大负载 65535，测试体必须小于等于该值
+	payload := strings.Repeat("A", 65000)
+	a, b := xfertest.Pipe()
+	muxA := mux.New(a, mux.RoleDialer)
+	muxB := mux.New(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	tunA := tunnel.NewTunnel(muxA, nil)
+	tunB := tunnel.NewTunnel(muxB, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	srvErr := make(chan error, 1)
+	go func() {
+		srvErr <- tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			w.Write(bytes.ToUpper(b))
+		}))
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/big", strings.NewReader(payload))
+	resp, err := tunA.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) != 65000 {
+		t.Fatalf("expected 100000 bytes, got %d", len(body))
+	}
+	cancel()
+	<-srvErr
+}
