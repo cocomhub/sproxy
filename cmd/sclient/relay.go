@@ -6,13 +6,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/xferws" // 注册 ws 传输层
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/xferws"
 	"github.com/spf13/cobra"
 )
 
@@ -46,13 +48,12 @@ func runRelay(cmd *cobra.Command, args []string) error {
 		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
 
-	logger := slog.With("node", nodeID, "hub", relayFl.hubURL)
+	logger := slog.With("node", nodeID, "hub", relayFl.hubURL, "local", relayFl.local)
 	logger.Info("中继节点启动")
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
-	// 1. 通过 ws 传输层连接到 Hub
 	tp := xfer.Get("ws")
 	if tp == nil {
 		return fmt.Errorf("ws 传输层未注册")
@@ -64,30 +65,64 @@ func runRelay(cmd *cobra.Command, args []string) error {
 	}
 	logger.Info("已连接到 Hub")
 
-	// 2. 创建 mux (Listener 角色)
 	m := mux.New(conn, mux.RoleListener)
 	defer m.Close()
 
-	// 3. 通过控制流发送 Register 帧
-	controlStream, err := m.Open(ctx)
+	// 注册节点：在控制流上发送 NodeID
+	ctrl, err := m.Open(ctx)
 	if err != nil {
 		return fmt.Errorf("创建控制流失败: %w", err)
 	}
-	if _, err := controlStream.Write([]byte(hub.NodeID(nodeID))); err != nil {
+	if _, err := ctrl.Write([]byte(nodeID)); err != nil {
 		return fmt.Errorf("发送注册帧失败: %w", err)
 	}
-	controlStream.Close()
+	ctrl.Close()
 	logger.Info("已注册到 Hub")
 
-	// 4. 等待中继请求
-	// TODO: 使用 Tunnel.Serve(ctx, localHTTPHandler) 替代原始流处理
-	// 当前为骨架版本：接受流后直接关闭
-	logger.Info("等待中继请求（骨架模式）...")
-	for {
-		stream, err := m.Accept(ctx)
-		if err != nil {
-			return fmt.Errorf("接受流失败: %w", err)
-		}
-		stream.Close()
+	// 使用 Tunnel.Serve 接受中继请求，转发到本地 HTTP 服务
+	localAddr := relayFl.local
+	if localAddr == "" {
+		localAddr = "http://127.0.0.1:8080"
 	}
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+
+	tun := tunnel.NewTunnel(m, nil)
+	logger.Info("等待中继请求...")
+
+	err = tun.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 转发请求到本地服务
+		forwardURL := localAddr + r.URL.Path
+		if r.URL.RawQuery != "" {
+			forwardURL += "?" + r.URL.RawQuery
+		}
+
+		forwardReq, err := http.NewRequestWithContext(ctx, r.Method, forwardURL, r.Body)
+		if err != nil {
+			logger.Warn("构建转发请求失败", "error", err)
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		forwardReq.Header = r.Header.Clone()
+
+		resp, err := httpClient.Do(forwardReq)
+		if err != nil {
+			logger.Warn("转发到本地失败", "path", r.URL.Path, "error", err)
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}))
+
+	if err != nil {
+		logger.Warn("中继服务停止", "error", err)
+	}
+	return err
 }

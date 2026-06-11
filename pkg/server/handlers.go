@@ -22,6 +22,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/web"
 )
 
@@ -52,6 +53,7 @@ type Handlers struct {
 	tunnelHandler http.Handler
 	logger        *slog.Logger
 	metrics       *Metrics
+	muxMetrics    *mux.Metrics
 	shareStore    *ShareStore
 	relayHandler  http.Handler
 	handler       http.Handler // mux wrapped with metricsMiddleware

@@ -24,6 +24,25 @@ const (
 	RoleListener
 )
 
+// StreamMetrics 收集流的统计信息。
+type StreamMetrics struct {
+	Opened       atomic.Int64
+	Closed       atomic.Int64
+	BytesRead    atomic.Int64
+	BytesWritten atomic.Int64
+	Errors       atomic.Int64
+}
+
+// Metrics 收集 mux 级别的统计信息。
+type Metrics struct {
+	Streams        StreamMetrics
+	PingsSent      atomic.Int64
+	PongsReceived  atomic.Int64
+	FramesReceived atomic.Int64
+	FramesSent     atomic.Int64
+	Errors         atomic.Int64
+}
+
 // Stream 代表一条虚拟流，实现 io.ReadWriteCloser。
 type Stream struct {
 	id   StreamID
@@ -69,6 +88,7 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 
 	n = copy(p, s.rBuf[s.rOff:])
 	s.rOff += n
+	s.mux.metrics.Streams.BytesRead.Add(int64(n))
 	return n, nil
 }
 
@@ -82,6 +102,7 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 	copy(cp, p)
 	select {
 	case s.mux.writeCh <- writeMsg{streamID: s.id, data: cp}:
+		s.mux.metrics.Streams.BytesWritten.Add(int64(len(p)))
 		return len(p), nil
 	case <-s.done:
 		return 0, fmt.Errorf("mux: stream %d: %w", s.id, xfer.ErrConnClosed)
@@ -115,9 +136,10 @@ type writeMsg struct {
 
 // Mux 在一条 xfer.Conn 上多路复用多条虚拟流。
 type Mux struct {
-	conn   xfer.Conn
-	role   Role
-	logger *slog.Logger
+	conn    xfer.Conn
+	role    Role
+	logger  *slog.Logger
+	metrics Metrics
 
 	mu       sync.Mutex
 	streams  map[StreamID]*Stream
@@ -127,7 +149,7 @@ type Mux struct {
 	done     chan struct{}
 
 	errOnce      sync.Once
-	lastPongNano atomic.Int64 // unix nano, 避免跨 goroutine data race
+	lastPongNano atomic.Int64
 
 	ctx     context.Context
 	ctxOnce sync.Once
@@ -144,6 +166,7 @@ func New(conn xfer.Conn, role Role) *Mux {
 		writeCh:  make(chan writeMsg, 256),
 		done:     make(chan struct{}),
 	}
+	m.metrics = Metrics{}
 	m.lastPongNano.Store(time.Now().UnixNano())
 	if role == RoleDialer {
 		m.nextID = 1
@@ -154,10 +177,16 @@ func New(conn xfer.Conn, role Role) *Mux {
 	return m
 }
 
+// Metrics 返回指向 mux 统计信息的指针。
+func (m *Mux) Metrics() *Metrics {
+	return &m.metrics
+}
+
 func (m *Mux) Open(ctx context.Context) (*Stream, error) {
 	m.mu.Lock()
 	if m.isClosed() {
 		m.mu.Unlock()
+		m.metrics.Streams.Errors.Add(1)
 		return nil, fmt.Errorf("mux: %w", xfer.ErrConnClosed)
 	}
 	id := m.nextID
@@ -171,8 +200,10 @@ func (m *Mux) Open(ctx context.Context) (*Stream, error) {
 		m.mu.Lock()
 		delete(m.streams, id)
 		m.mu.Unlock()
+		m.metrics.Streams.Errors.Add(1)
 		return nil, fmt.Errorf("mux: send open: %w", err)
 	}
+	m.metrics.Streams.Opened.Add(1)
 	return s, nil
 }
 
@@ -212,7 +243,6 @@ func (m *Mux) isClosed() bool {
 	}
 }
 
-// removeStream 从流表中移除流并清理。
 func (m *Mux) removeStream(id StreamID, closeChannels bool) {
 	m.mu.Lock()
 	s, ok := m.streams[id]
@@ -230,10 +260,12 @@ func (m *Mux) removeStream(id StreamID, closeChannels bool) {
 
 func (m *Mux) readLoop() {
 	for {
-		// 使用 m 的缓存 context，退出时由 done 驱动
 		msg, err := m.conn.Receive(m.Context())
 		if err != nil {
-			m.errOnce.Do(func() { m.logger.Error("mux: recv error", "err", err) })
+			m.errOnce.Do(func() {
+				m.metrics.Errors.Add(1)
+				m.logger.Error("mux: recv error", "err", err)
+			})
 			m.Close()
 			return
 		}
@@ -265,7 +297,9 @@ func (m *Mux) sendFrame(msg writeMsg) {
 	default:
 		frame = EncodeFrame(msg.streamID, FrameData, msg.data)
 	}
+	m.metrics.FramesSent.Add(1)
 	if err := m.conn.Send(context.Background(), frame); err != nil {
+		m.metrics.Errors.Add(1)
 		m.errOnce.Do(func() { m.logger.Error("mux: send error", "err", err) })
 		m.Close()
 	}
@@ -282,11 +316,14 @@ func (m *Mux) pingLoop() {
 			return
 		case <-ticker.C:
 			frame := EncodeFrame(0, FramePing, nil)
+			m.metrics.PingsSent.Add(1)
 			if err := m.conn.Send(context.Background(), frame); err != nil {
 				return
 			}
 			lastPong := time.Unix(0, m.lastPongNano.Load())
 			if time.Since(lastPong) > 90*time.Second {
+				m.metrics.Errors.Add(1)
+				m.logger.Warn("mux: heartbeat timeout, closing")
 				m.Close()
 				return
 			}
@@ -297,8 +334,10 @@ func (m *Mux) pingLoop() {
 // ─── 帧处理 ─────────────────────────────────────────
 
 func (m *Mux) handleFrame(raw []byte) {
+	m.metrics.FramesReceived.Add(1)
 	sid, ftype, payload, err := DecodeFrame(raw)
 	if err != nil {
+		m.metrics.Errors.Add(1)
 		m.logger.Warn("mux: invalid frame", "err", err)
 		return
 	}
@@ -310,7 +349,6 @@ func (m *Mux) handleFrame(raw []byte) {
 			m.mu.Unlock()
 			return
 		}
-		// 在锁内发送到 dataCh，防止和 Close() 的 close(dataCh) 竞态
 		select {
 		case s.dataCh <- payload:
 		case <-s.done:
@@ -332,6 +370,7 @@ func (m *Mux) handleFrame(raw []byte) {
 		}
 	case FrameClose:
 		m.removeStream(sid, true)
+		m.metrics.Streams.Closed.Add(1)
 	case FrameCloseWrite:
 		m.mu.Lock()
 		s, ok := m.streams[sid]
@@ -339,7 +378,6 @@ func (m *Mux) handleFrame(raw []byte) {
 			m.mu.Unlock()
 			return
 		}
-		// 在锁内发送 nil，防止和 Close() 的 close(dataCh) 竞态
 		select {
 		case s.dataCh <- nil:
 		case <-s.done:
@@ -349,10 +387,10 @@ func (m *Mux) handleFrame(raw []byte) {
 		_ = m.conn.Send(context.Background(), EncodeFrame(0, FramePong, nil))
 	case FramePong:
 		m.lastPongNano.Store(time.Now().UnixNano())
+		m.metrics.PongsReceived.Add(1)
 	}
 }
 
-// Context 返回一个上下文，当 mux 关闭时取消。结果被缓存，多次调用安全。
 func (m *Mux) Context() context.Context {
 	m.ctxOnce.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())

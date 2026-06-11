@@ -1,0 +1,79 @@
+# HELP sproxy_requests_total Total HTTP requests
+# TYPE sproxy_requests_total counter
+sproxy_requests_total %d
+
+# HELP sproxy_requests_2xx HTTP 2xx requests
+# TYPE sproxy_requests_2xx counter
+sproxy_requests_2xx %d
+
+# HELP sproxy_requests_4xx HTTP 4xx requests
+# TYPE sproxy_requests_4xx counter
+sproxy_requests_4xx %d
+
+# HELP sproxy_requests_5xx HTTP 5xx requests
+# TYPE sproxy_requests_5xx counter
+sproxy_requests_5xx %d
+
+# HELP sproxy_bytes_uploaded Total bytes uploaded
+# TYPE sproxy_bytes_uploaded counter
+sproxy_bytes_uploaded %d
+
+# HELP sproxy_bytes_downloaded Total bytes downloaded
+# TYPE sproxy_bytes_downloaded counter
+sproxy_bytes_downloaded %d
+
+# HELP sproxy_active_connections Currently active connections
+# TYPE sproxy_active_connections gauge
+sproxy_active_connections %d
+
+# HELP sproxy_files_uploaded Total files uploaded
+# TYPE sproxy_files_uploaded counter
+sproxy_files_uploaded %d
+
+# HELP sproxy_files_downloaded Total files downloaded
+# TYPE sproxy_files_downloaded counter
+sproxy_files_downloaded %d
+
+# HELP sproxy_files_deleted Total files deleted
+# TYPE sproxy_files_deleted counter
+sproxy_files_deleted %d
+
+# HELP sproxy_mux_streams_opened Mux streams opened
+# TYPE sproxy_mux_streams_opened counter
+sproxy_mux_streams_opened %d
+
+# HELP sproxy_mux_streams_closed Mux streams closed
+# TYPE sproxy_mux_streams_closed counter
+sproxy_mux_streams_closed %d
+
+# HELP sproxy_mux_bytes_read Mux bytes read
+# TYPE sproxy_mux_bytes_read counter
+sproxy_mux_bytes_read %d
+
+# HELP sproxy_mux_bytes_written Mux bytes written
+# TYPE sproxy_mux_bytes_written counter
+sproxy_mux_bytes_written %d
+
+# HELP sproxy_mux_frames_sent Mux frames sent
+# TYPE sproxy_mux_frames_sent counter
+sproxy_mux_frames_sent %d
+
+# HELP sproxy_mux_frames_received Mux frames received
+# TYPE sproxy_mux_frames_received counter
+sproxy_mux_frames_received %d
+
+# HELP sproxy_mux_pings_sent Mux pings sent
+# TYPE sproxy_mux_pings_sent counter
+sproxy_mux_pings_sent %d
+
+# HELP sproxy_mux_pongs_received Mux pongs received
+# TYPE sproxy_mux_pongs_received counter
+sproxy_mux_pongs_received %d
+
+# HELP sproxy_mux_errors Mux errors
+# TYPE sproxy_mux_errors counter
+sproxy_mux_errors %d
+
+# HELP sproxy_mux_stream_errors Mux stream errors
+# TYPE sproxy_mux_stream_errors counter
+sproxy_mux_stream_errors %d

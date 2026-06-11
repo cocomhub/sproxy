@@ -59,6 +59,25 @@ func (m *Metrics) RecordDelete() {
 	m.FilesDeleted.Add(1)
 }
 
+// Snapshot 返回当前所有指标的快照（用于调试和日志输出）。
+func (m *Metrics) Snapshot() map[string]int64 {
+	if m == nil {
+		return nil
+	}
+	return map[string]int64{
+		"requests_total":     m.RequestsTotal.Load(),
+		"requests_2xx":       m.Requests2XX.Load(),
+		"requests_4xx":       m.Requests4XX.Load(),
+		"requests_5xx":       m.Requests5XX.Load(),
+		"bytes_uploaded":     m.BytesUploaded.Load(),
+		"bytes_downloaded":   m.BytesDownloaded.Load(),
+		"active_connections": m.ActiveConnections.Load(),
+		"files_uploaded":     m.FilesUploaded.Load(),
+		"files_downloaded":   m.FilesDownloaded.Load(),
+		"files_deleted":      m.FilesDeleted.Load(),
+	}
+}
+
 // MetricsHandler 返回 GET /metrics 的 HTTP handler。
 // 使用 Prometheus 文本格式（仅标准库，无依赖）。
 func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
@@ -111,6 +130,35 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP sproxy_files_deleted Total files deleted\n")
 	fmt.Fprintf(w, "# TYPE sproxy_files_deleted counter\n")
 	fmt.Fprintf(w, "sproxy_files_deleted %d\n\n", m.FilesDeleted.Load())
+	if mm := h.muxMetrics; mm != nil {
+		fmt.Fprintf(w, "# HELP sproxy_mux_streams_opened Mux streams opened\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_streams_opened counter\n")
+		fmt.Fprintf(w, "sproxy_mux_streams_opened %d\n\n", mm.Streams.Opened.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_bytes_read Mux bytes read\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_bytes_read counter\n")
+		fmt.Fprintf(w, "sproxy_mux_bytes_read %d\n\n", mm.Streams.BytesRead.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_bytes_written Mux bytes written\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_bytes_written counter\n")
+		fmt.Fprintf(w, "sproxy_mux_bytes_written %d\n\n", mm.Streams.BytesWritten.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_frames_sent Mux frames sent\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_frames_sent counter\n")
+		fmt.Fprintf(w, "sproxy_mux_frames_sent %d\n\n", mm.FramesSent.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_frames_received Mux frames received\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_frames_received counter\n")
+		fmt.Fprintf(w, "sproxy_mux_frames_received %d\n\n", mm.FramesReceived.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_pings_sent Mux pings sent\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_pings_sent counter\n")
+		fmt.Fprintf(w, "sproxy_mux_pings_sent %d\n\n", mm.PingsSent.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_pongs_received Mux pongs received\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_pongs_received counter\n")
+		fmt.Fprintf(w, "sproxy_mux_pongs_received %d\n\n", mm.PongsReceived.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_errors Mux errors\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_errors counter\n")
+		fmt.Fprintf(w, "sproxy_mux_errors %d\n\n", mm.Errors.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_stream_errors Mux stream errors\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_stream_errors counter\n")
+		fmt.Fprintf(w, "sproxy_mux_stream_errors %d\n\n", mm.Streams.Errors.Load())
+	}
 }
 
 // metricsResponseWriter 包装 http.ResponseWriter，捕获状态码。
