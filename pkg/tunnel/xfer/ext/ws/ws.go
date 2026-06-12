@@ -68,7 +68,7 @@ func (c *wsConn) sendLoop() {
 	}
 }
 
-// Send 发送一条二进制消息。当缓冲区满时阻塞；关闭后返回 ErrConnClosed。
+// Send 发送一条二进制消息。关闭后返回 ErrConnClosed。
 func (c *wsConn) Send(ctx context.Context, msg []byte) error {
 	c.mu.Lock()
 	if c.closed {
@@ -77,8 +77,11 @@ func (c *wsConn) Send(ctx context.Context, msg []byte) error {
 	}
 	c.mu.Unlock()
 
+	cp := make([]byte, len(msg))
+	copy(cp, msg)
+
 	select {
-	case c.sendCh <- msg:
+	case c.sendCh <- cp:
 		return nil
 	case <-c.closeCh:
 		return xfer.ErrConnClosed
@@ -98,6 +101,7 @@ func (c *wsConn) Receive(ctx context.Context) ([]byte, error) {
 }
 
 // Close 关闭 WebSocket 连接。
+// 先关闭 closeCh 释放所有阻塞在 Send 上的 goroutine，再关闭底层连接。
 func (c *wsConn) Close() error {
 	c.mu.Lock()
 	if c.closed {
@@ -107,13 +111,15 @@ func (c *wsConn) Close() error {
 	c.closed = true
 	c.mu.Unlock()
 
-	// 先关闭底层连接使阻塞的 Write 返回，再通知发送循环退出
-	err := c.conn.CloseNow()
+	// 先关闭 closeCh 释放阻塞的 Send（它们读到 closeCh 后返回 ErrConnClosed）。
 	select {
 	case <-c.closeCh:
 	default:
 		close(c.closeCh)
 	}
+
+	// 再关闭底层连接：sendLoop 发现 closeCh 已关闭后退出循环。
+	err := c.conn.CloseNow()
 	c.wg.Wait()
 	return err
 }
