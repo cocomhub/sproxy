@@ -25,6 +25,10 @@
 | Hub 指标 | `sproxy_hub_nodes_connected` gauge | 集成完成 |
 | 诊断命令 | `sclient diag --ping` / `--hub-status` | 实现完成 |
 | mTLS 支持 | TLSConfig.ClientCA + RequireAndVerifyClientCert | 集成完成 |
+| DHT 节点发现 | `pkg/tunnel/hub/dht.go` — 内存 Kademlia 骨架 | 8 项测试 PASS |
+| OpenTelemetry Tracing | `pkg/tunnel/tracing/tracing.go` — 轻量 span 链 | 5 项测试 PASS |
+| gRPC 传输 | `xfer/grpc/` 独立 go.mod 骨架 | 3 项测试 PASS |
+| 无 Hub 直连 | `pkg/tunnel/p2p/` — DHT + WebRTC + mux 组装 | 3 项测试 PASS |
 | 文档 | architecture.md、cli.md(relay)、config.md(hub)、README | 已交付 |
 
 ## 📋 实际盘点：已实现 vs 未实现
