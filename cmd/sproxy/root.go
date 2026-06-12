@@ -29,6 +29,9 @@ var (
 	cfgFile             string
 	cfgPtr              atomic.Pointer[server.Config]
 	currentTunnelKeyHex string // 记录当前生效的 tunnel_key hex，用于 SIGHUP 轮换检测
+
+	// testSignalCh 用于测试注入 signal channel；为 nil 时 runServer 创建自己的 channel。
+	testSignalCh chan os.Signal
 )
 
 var rootCmd = &cobra.Command{
@@ -142,6 +145,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 
 	signalChan := make(chan os.Signal, 1)
+	if testSignalCh != nil {
+		signalChan = testSignalCh
+	}
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
 
 	// shutdownDone 在 graceful shutdown 流程完成后被关闭，便于主 goroutine 等待清理动作真正执行完成。

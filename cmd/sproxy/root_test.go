@@ -4,11 +4,16 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 func TestLevelString(t *testing.T) {
@@ -146,4 +151,57 @@ func captureStderr(fn func()) string {
 	buf := make([]byte, 4096)
 	n, _ := r.Read(buf)
 	return string(buf[:n])
+}
+
+func TestRunServer_StartStop(t *testing.T) {
+	// 通过注入 signal channel 来避免 Windows 对 os.Signal 的限制
+	tmpDir := t.TempDir()
+
+	cmd := &cobra.Command{Use: "sproxy"}
+	cmd.Flags().String("addr", "127.0.0.1:0", "")
+	cmd.Flags().String("uploads-dir", tmpDir, "")
+	cmd.Flags().String("tunnel-key", "", "")
+	cmd.Flags().Bool("version", false, "")
+
+	// 设置 viper 测试配置
+	v := viper.GetViper()
+	cfgFile = tmpDir + "/sproxy.yaml"
+	v.SetConfigFile(cfgFile)
+	v.SetConfigType("yaml")
+	v.SetEnvPrefix("SPROXY")
+	v.AutomaticEnv()
+	_ = v.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+	_ = v.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	_ = v.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+
+	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	v.Set("addr", "127.0.0.1:0")
+	v.Set("uploads_dir", tmpDir)
+	v.Set("log_level", "error")
+	v.Set("tunnel_key", validKey)
+
+	// 注入 signal channel，避免依赖真实的进程信号
+	sigCh := make(chan os.Signal, 1)
+	testSignalCh = sigCh
+	defer func() { testSignalCh = nil }()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServer(cmd, nil)
+	}()
+
+	// 等服务器启动
+	time.Sleep(500 * time.Millisecond)
+
+	// 通过注入的 channel 发送中断信号
+	sigCh <- os.Interrupt
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("runServer returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not shut down within 5s")
+	}
 }
