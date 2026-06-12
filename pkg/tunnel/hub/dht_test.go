@@ -4,50 +4,55 @@
 package hub
 
 import (
+	"context"
 	"sync"
 	"testing"
 )
 
 func TestDhtRegisterAndLookup(t *testing.T) {
-	dht := NewDHT()
+	dht := newMemoryDHT()
+	ctx := context.Background()
 
 	// Register a node
-	dht.Register("node-1", "192.168.1.10:9000", map[string]string{"region": "us-east"})
+	if err := dht.Register(ctx, PeerInfo{ID: "node-1", Addrs: []string{"192.168.1.10:9000"}, Meta: map[string]string{"region": "us-east"}}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Lookup should find it
-	node, ok := dht.Lookup("node-1")
-	if !ok {
-		t.Fatal("expected to find node-1")
+	node, err := dht.Lookup(ctx, "node-1")
+	if err != nil {
+		t.Fatal(err)
 	}
 	if node.ID != "node-1" {
 		t.Fatalf("expected ID node-1, got %s", node.ID)
 	}
-	if node.Addr != "192.168.1.10:9000" {
-		t.Fatalf("expected addr 192.168.1.10:9000, got %s", node.Addr)
+	if len(node.Addrs) == 0 || node.Addrs[0] != "192.168.1.10:9000" {
+		t.Fatalf("expected addr 192.168.1.10:9000, got %v", node.Addrs)
 	}
 	if node.Meta["region"] != "us-east" {
 		t.Fatalf("expected meta region us-east, got %s", node.Meta["region"])
 	}
 
 	// Lookup unknown node
-	_, ok = dht.Lookup("unknown")
-	if ok {
-		t.Fatal("expected false for unknown node")
+	_, err = dht.Lookup(ctx, "unknown")
+	if err == nil {
+		t.Fatal("expected error for unknown node")
 	}
 }
 
 func TestDhtRegisterOverwrite(t *testing.T) {
-	dht := NewDHT()
+	dht := newMemoryDHT()
+	ctx := context.Background()
 
-	dht.Register("node-1", "192.168.1.10:9000", nil)
-	dht.Register("node-1", "10.0.0.1:9001", map[string]string{"region": "eu-west"})
+	dht.Register(ctx, PeerInfo{ID: "node-1", Addrs: []string{"192.168.1.10:9000"}})
+	dht.Register(ctx, PeerInfo{ID: "node-1", Addrs: []string{"10.0.0.1:9001"}, Meta: map[string]string{"region": "eu-west"}})
 
-	node, ok := dht.Lookup("node-1")
-	if !ok {
-		t.Fatal("expected to find node-1 after overwrite")
+	node, err := dht.Lookup(ctx, "node-1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if node.Addr != "10.0.0.1:9001" {
-		t.Fatalf("expected updated addr 10.0.0.1:9001, got %s", node.Addr)
+	if len(node.Addrs) == 0 || node.Addrs[0] != "10.0.0.1:9001" {
+		t.Fatalf("expected updated addr 10.0.0.1:9001, got %v", node.Addrs)
 	}
 	if node.Meta["region"] != "eu-west" {
 		t.Fatalf("expected meta region eu-west after overwrite, got %s", node.Meta["region"])
@@ -55,54 +60,70 @@ func TestDhtRegisterOverwrite(t *testing.T) {
 }
 
 func TestDhtGetClosestNodes(t *testing.T) {
-	dht := NewDHT()
+	dht := newMemoryDHT()
+	ctx := context.Background()
 
 	// Register nodes with IDs that sort lexicographically
-	dht.Register("alpha", "addr1", nil)
-	dht.Register("bravo", "addr2", nil)
-	dht.Register("charlie", "addr3", nil)
-	dht.Register("delta", "addr4", nil)
-	dht.Register("echo", "addr5", nil)
+	dht.Register(ctx, PeerInfo{ID: "alpha", Addrs: []string{"addr1"}})
+	dht.Register(ctx, PeerInfo{ID: "bravo", Addrs: []string{"addr2"}})
+	dht.Register(ctx, PeerInfo{ID: "charlie", Addrs: []string{"addr3"}})
+	dht.Register(ctx, PeerInfo{ID: "delta", Addrs: []string{"addr4"}})
+	dht.Register(ctx, PeerInfo{ID: "echo", Addrs: []string{"addr5"}})
 
 	// Get 2 closest nodes to "bravo"
-	closest := dht.GetClosestNodes("bravo", 2)
+	closest, err := dht.GetClosestNodes(ctx, "bravo", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(closest) != 2 {
 		t.Fatalf("expected 2 closest nodes, got %d", len(closest))
 	}
-	// "alpha" and "bravo" itself but self excluded, so alpha and charlie
 	if closest[0].ID != "alpha" && closest[1].ID != "alpha" {
 		t.Fatal("expected alpha to be among the 2 closest nodes to bravo")
 	}
 
 	// Get more nodes than available
-	closest = dht.GetClosestNodes("zzzz", 100)
+	closest, err = dht.GetClosestNodes(ctx, "zzzz", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(closest) != 5 {
 		t.Fatalf("expected 5 nodes (capped at total), got %d", len(closest))
 	}
 
 	// Get closest on empty DHT
-	empty := NewDHT()
-	closest = empty.GetClosestNodes("anything", 3)
+	empty := newMemoryDHT()
+	closest, err = empty.GetClosestNodes(ctx, "anything", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(closest) != 0 {
 		t.Fatalf("expected 0 nodes from empty DHT, got %d", len(closest))
 	}
 
 	// Request 0 nodes
-	closest = dht.GetClosestNodes("bravo", 0)
+	closest, err = dht.GetClosestNodes(ctx, "bravo", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(closest) != 0 {
 		t.Fatalf("expected 0 nodes when n=0, got %d", len(closest))
 	}
 }
 
 func TestDhtGetClosestNodesSelfExcluded(t *testing.T) {
-	dht := NewDHT()
+	dht := newMemoryDHT()
+	ctx := context.Background()
 
-	dht.Register("alpha", "addr1", nil)
-	dht.Register("beta", "addr2", nil)
-	dht.Register("gamma", "addr3", nil)
+	dht.Register(ctx, PeerInfo{ID: "alpha", Addrs: []string{"addr1"}})
+	dht.Register(ctx, PeerInfo{ID: "beta", Addrs: []string{"addr2"}})
+	dht.Register(ctx, PeerInfo{ID: "gamma", Addrs: []string{"addr3"}})
 
 	// Get closest to "beta" — "beta" itself should not be in the result
-	closest := dht.GetClosestNodes("beta", 3)
+	closest, err := dht.GetClosestNodes(ctx, "beta", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, n := range closest {
 		if n.ID == "beta" {
 			t.Fatal("expected target node itself to be excluded from closest nodes")
@@ -114,7 +135,8 @@ func TestDhtGetClosestNodesSelfExcluded(t *testing.T) {
 }
 
 func TestDhtConcurrent(t *testing.T) {
-	dht := NewDHT()
+	dht := newMemoryDHT()
+	ctx := context.Background()
 
 	var wg sync.WaitGroup
 	n := 50
@@ -126,7 +148,7 @@ func TestDhtConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			id := "node-" + string(rune('a'+i))
-			dht.Register(id, "addr", nil)
+			dht.Register(ctx, PeerInfo{ID: id, Addrs: []string{"addr"}})
 		}()
 	}
 	wg.Wait()
@@ -138,8 +160,8 @@ func TestDhtConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			id := "node-" + string(rune('a'+i))
-			_, ok := dht.Lookup(id)
-			if !ok {
+			_, err := dht.Lookup(ctx, id)
+			if err != nil {
 				t.Errorf("expected to find %s", id)
 			}
 		}()
@@ -149,37 +171,35 @@ func TestDhtConcurrent(t *testing.T) {
 	// Verify all nodes were registered
 	for i := range n {
 		id := "node-" + string(rune('a'+i))
-		_, ok := dht.Lookup(id)
-		if !ok {
+		_, err := dht.Lookup(ctx, id)
+		if err != nil {
 			t.Fatalf("expected to find %s after concurrent registration", id)
 		}
 	}
 }
 
-func TestDhtBootstrapNotImplemented(t *testing.T) {
-	dht := NewDHT()
-	err := dht.Bootstrap("seed.example.com:9000")
-	if err == nil {
-		t.Fatal("expected error from Bootstrap, got nil")
-	}
-	if err.Error() != "not yet implemented" {
-		t.Fatalf("expected 'not yet implemented', got %q", err.Error())
+func TestDhtBootstrapNoop(t *testing.T) {
+	dht := newMemoryDHT()
+	err := dht.Bootstrap(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("expected no error from memory DHT Bootstrap, got %v", err)
 	}
 }
 
 func TestDhtLookupWithMeta(t *testing.T) {
-	dht := NewDHT()
+	dht := newMemoryDHT()
+	ctx := context.Background()
 
 	meta := map[string]string{
 		"version": "1.0.0",
 		"region":  "ap-southeast-1",
 		"role":    "relay",
 	}
-	dht.Register("node-meta", "10.0.0.1:9000", meta)
+	dht.Register(ctx, PeerInfo{ID: "node-meta", Addrs: []string{"10.0.0.1:9000"}, Meta: meta})
 
-	node, ok := dht.Lookup("node-meta")
-	if !ok {
-		t.Fatal("expected to find node-meta")
+	node, err := dht.Lookup(ctx, "node-meta")
+	if err != nil {
+		t.Fatal(err)
 	}
 	if node.Meta["version"] != meta["version"] {
 		t.Fatalf("expected meta version %s, got %s", meta["version"], node.Meta["version"])
@@ -193,13 +213,14 @@ func TestDhtLookupWithMeta(t *testing.T) {
 }
 
 func TestDhtRegisterNilMeta(t *testing.T) {
-	dht := NewDHT()
+	dht := newMemoryDHT()
+	ctx := context.Background()
 
-	dht.Register("nil-meta", "addr", nil)
+	dht.Register(ctx, PeerInfo{ID: "nil-meta", Addrs: []string{"addr"}})
 
-	node, ok := dht.Lookup("nil-meta")
-	if !ok {
-		t.Fatal("expected to find nil-meta")
+	node, err := dht.Lookup(ctx, "nil-meta")
+	if err != nil {
+		t.Fatal(err)
 	}
 	if node.Meta == nil {
 		t.Fatal("expected non-nil Meta after lookup, got nil")

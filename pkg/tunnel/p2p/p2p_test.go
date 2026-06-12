@@ -88,15 +88,15 @@ func TestP2PNodeRegisterAndLookup(t *testing.T) {
 	}
 	t.Cleanup(func() { node.Close() })
 
-	found, ok := dht.Lookup("node-a")
-	if !ok {
+	found, err := dht.Lookup(ctx, "node-a")
+	if err != nil {
 		t.Fatal("node-a not found in DHT after Listen")
 	}
 	if found.ID != "node-a" {
 		t.Fatalf("expected ID node-a, got %s", found.ID)
 	}
-	if found.Addr != "pipe://addr-a" {
-		t.Fatalf("expected addr pipe://addr-a, got %s", found.Addr)
+	if len(found.Addrs) == 0 || found.Addrs[0] != "pipe://addr-a" {
+		t.Fatalf("expected addr pipe://addr-a, got %v", found.Addrs)
 	}
 }
 
@@ -106,19 +106,22 @@ func TestP2PNodeDial(t *testing.T) {
 	fl := registerFakeWebRTC()
 
 	dht := hub.NewDHT()
-	dht.Register("target", "pipe://target-addr", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	dht.Register(ctx, hub.PeerInfo{ID: "target", Addrs: []string{"pipe://target-addr"}})
 
 	dialer := p2p.NewP2PNode("dialer", dht)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
 
 	// Accept the incoming pipe connection on a separate goroutine.
 	// Use a channel to signal when data has been written so the test
 	// knows when to read. Keep the listener alive until done.
 	done := make(chan struct{})
 	go func() {
-		conn, err := fl.Accept(ctx)
+		conn, err := fl.Accept(ctx2)
 		if err != nil {
 			close(done)
 			return
@@ -126,7 +129,7 @@ func TestP2PNodeDial(t *testing.T) {
 		m := mux.New(conn, mux.RoleListener)
 		defer m.Close()
 
-		stream, err := m.Open(ctx)
+		stream, err := m.Open(ctx2)
 		if err != nil {
 			close(done)
 			return

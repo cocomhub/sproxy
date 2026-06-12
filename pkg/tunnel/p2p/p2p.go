@@ -19,7 +19,7 @@ import (
 // WebRTC for transport, and mux for stream multiplexing.
 type P2PNode struct {
 	ID  string
-	DHT *hub.DHT
+	DHT hub.DHT
 
 	listener xfer.Listener
 
@@ -29,7 +29,7 @@ type P2PNode struct {
 }
 
 // NewP2PNode creates a new P2P node with the given ID and DHT.
-func NewP2PNode(id string, dht *hub.DHT) *P2PNode {
+func NewP2PNode(id string, dht hub.DHT) *P2PNode {
 	return &P2PNode{
 		ID:       id,
 		DHT:      dht,
@@ -41,8 +41,8 @@ func NewP2PNode(id string, dht *hub.DHT) *P2PNode {
 // Dial looks up targetID in the DHT, establishes a WebRTC connection, and
 // returns a mux.Mux (RoleDialer) for stream multiplexing.
 func (n *P2PNode) Dial(ctx context.Context, targetID string) (*mux.Mux, error) {
-	node, ok := n.DHT.Lookup(targetID)
-	if !ok {
+	node, err := n.DHT.Lookup(ctx, targetID)
+	if err != nil {
 		return nil, fmt.Errorf("p2p: target %q not found in DHT", targetID)
 	}
 
@@ -51,9 +51,15 @@ func (n *P2PNode) Dial(ctx context.Context, targetID string) (*mux.Mux, error) {
 		return nil, fmt.Errorf("p2p: webrtc transport not registered")
 	}
 
-	conn, err := transport.Dial(ctx, node.Addr)
+	// Use the first address from Addrs list, or fall back to empty string.
+	var addr string
+	if len(node.Addrs) > 0 {
+		addr = node.Addrs[0]
+	}
+
+	conn, err := transport.Dial(ctx, addr)
 	if err != nil {
-		return nil, fmt.Errorf("p2p: dial %q (%s): %w", targetID, node.Addr, err)
+		return nil, fmt.Errorf("p2p: dial %q (%s): %w", targetID, addr, err)
 	}
 
 	return mux.New(conn, mux.RoleDialer), nil
@@ -75,7 +81,7 @@ func (n *P2PNode) Listen(ctx context.Context, addr string) error {
 	n.listener = listener
 
 	// Register self in DHT so peers can discover this node.
-	n.DHT.Register(n.ID, addr, nil)
+	n.DHT.Register(ctx, hub.PeerInfo{ID: n.ID, Addrs: []string{addr}})
 
 	go n.acceptLoop(ctx)
 	return nil
