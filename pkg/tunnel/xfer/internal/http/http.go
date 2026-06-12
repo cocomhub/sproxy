@@ -1,14 +1,35 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package xfer
+// Package http 提供基于 HTTP POST 的 xfer.Conn 传输层实现。
+//
+// 将一次 Send + Receive 包装为一次 HTTP POST 请求-响应往返。
+// 在 init() 中自动注册到 xfer 全局注册表，名字为 "http"。
+//
+// 注意：HTTP 传输仅支持客户端 Dial，不支持服务端 Listen。
+package http
 
 import (
 	"bytes"
 	"context"
 	"io"
 	"net/http"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
+
+func init() {
+	xfer.TransportRegistry.Register(plugin.Plugin[*xfer.Transport]{
+		Name: "http",
+		Instance: &xfer.Transport{
+			Name:   "http",
+			Dial:   Dial,
+			Listen: nil, // HTTP 传输仅支持客户端 Dial
+		},
+		Priority: 0,
+	})
+}
 
 // httpConn 将 HTTP POST 请求-响应包装为 Conn。
 //
@@ -26,9 +47,9 @@ type httpConn struct {
 	pending []byte
 }
 
-// DialHTTP 创建一个通过 HTTP POST 传输的 Conn。
+// Dial 创建一个通过 HTTP POST 传输的 Conn。
 // addr 是 sproxy 服务端地址（如 "http://localhost:18083"）。
-func DialHTTP(ctx context.Context, addr string) (Conn, error) {
+func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
 	return &httpConn{
 		url:    addr + "/tunnel",
 		client: http.DefaultClient,

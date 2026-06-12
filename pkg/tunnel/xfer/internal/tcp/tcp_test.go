@@ -1,18 +1,18 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package xfertcp_test
+package tcp_test
 
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertcp"
-	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertcp"
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/internal/tcp"
 )
 
 // TestTcpConnRoundTrip 测试 TCP 传输的基本消息往返。
@@ -25,13 +25,16 @@ func TestTcpConnRoundTrip(t *testing.T) {
 		t.Fatal("tcp transport not registered")
 	}
 
-	listener, err := tp.Listen(ctx, ":0")
+	listener, err := tp.Listen(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
 
-	tcpLn := listener.(*xfertcp.TcpListener)
+	tcpLn, ok := listener.(interface{ Addr() net.Addr })
+	if !ok {
+		t.Fatal("listener does not implement Addr()")
+	}
 	addr := tcpLn.Addr().String()
 
 	var serverConn xfer.Conn
@@ -87,13 +90,16 @@ func TestTcpLargePayload(t *testing.T) {
 	defer cancel()
 
 	tp := xfer.Get("tcp")
-	listener, err := tp.Listen(ctx, ":0")
+	listener, err := tp.Listen(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
 
-	tcpLn := listener.(*xfertcp.TcpListener)
+	tcpLn, ok := listener.(interface{ Addr() net.Addr })
+	if !ok {
+		t.Fatal("listener does not implement Addr()")
+	}
 	addr := tcpLn.Addr().String()
 
 	var serverConn xfer.Conn
@@ -160,13 +166,16 @@ func TestTcpMultipleMessages(t *testing.T) {
 	defer cancel()
 
 	tp := xfer.Get("tcp")
-	listener, err := tp.Listen(ctx, ":0")
+	listener, err := tp.Listen(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
 
-	tcpLn := listener.(*xfertcp.TcpListener)
+	tcpLn, ok := listener.(interface{ Addr() net.Addr })
+	if !ok {
+		t.Fatal("listener does not implement Addr()")
+	}
 	addr := tcpLn.Addr().String()
 
 	var serverConn xfer.Conn

@@ -1,12 +1,12 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package xfertcp 提供基于 TCP 的 xfer.Conn 传输层实现。
+// Package tcp 提供基于 TCP 的 xfer.Conn 传输层实现。
 //
 // 使用标准 net 库，采用 4 字节大端长度前缀帧定界，
 // 将 TCP 字节流包装为 xfer.Conn 消息接口。
 // 在 init() 中自动注册到 xfer 全局注册表，名字为 "tcp"。
-package xfertcp
+package tcp
 
 import (
 	"context"
@@ -16,14 +16,19 @@ import (
 	"net"
 	"sync"
 
+	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
 func init() {
-	xfer.Register(&xfer.Transport{
-		Name:   "tcp",
-		Dial:   Dial,
-		Listen: Listen,
+	xfer.TransportRegistry.Register(plugin.Plugin[*xfer.Transport]{
+		Name: "tcp",
+		Instance: &xfer.Transport{
+			Name:   "tcp",
+			Dial:   Dial,
+			Listen: Listen,
+		},
+		Priority: 0,
 	})
 }
 
