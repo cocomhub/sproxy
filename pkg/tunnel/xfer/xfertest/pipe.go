@@ -8,50 +8,58 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
-// Pipe 创建一对通过内存管道连接的 xfer.Conn。
-// 用于测试 mux 和 tunnel 层，无需真实网络。
+// message 是 pipeConn 信道上传输的内部消息类型。
+type message struct {
+	data []byte
+}
+
+// Pipe 创建一对内存中连接的 xfer.Conn，用于测试。
+// 返回的两个 Conn 互为通信对端，数据通过有缓冲 channel 传递。
 func Pipe() (a, b xfer.Conn) {
 	chAB := make(chan message, 256)
 	chBA := make(chan message, 256)
 
-	closeOnce := new(sync.Once)
+	var closeOnce sync.Once
 	closeCh := make(chan struct{})
 
-	return newPipe(chAB, chBA, closeCh, closeOnce), newPipe(chBA, chAB, closeCh, closeOnce)
+	return newPipe(chAB, chBA, closeCh, &closeOnce),
+		newPipe(chBA, chAB, closeCh, &closeOnce)
 }
 
-type message struct {
-	data []byte
-	err  error
+func newPipe(rx, tx chan message, closeCh chan struct{}, closeOnce *sync.Once) *pipeConn {
+	return &pipeConn{
+		rx:        rx,
+		tx:        tx,
+		closeCh:   closeCh,
+		closeOnce: closeOnce,
+	}
 }
 
 type pipeConn struct {
-	rx        <-chan message
-	tx        chan<- message
+	rx        chan message
+	tx        chan message
 	closeCh   chan struct{}
 	closeOnce *sync.Once
-	mu        sync.Mutex
-	closed    bool
-}
-
-func newPipe(rx <-chan message, tx chan<- message, closeCh chan struct{}, closeOnce *sync.Once) *pipeConn {
-	return &pipeConn{rx: rx, tx: tx, closeCh: closeCh, closeOnce: closeOnce}
+	closed    atomic.Bool
 }
 
 func (p *pipeConn) Send(ctx context.Context, msg []byte) error {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
+	// Fast path: check context cancelled before sending.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.closed.Load() {
 		return xfer.ErrConnClosed
 	}
-	p.mu.Unlock()
 
 	cp := make([]byte, len(msg))
 	copy(cp, msg)
+
 	select {
 	case p.tx <- message{data: cp}:
 		return nil
@@ -64,24 +72,32 @@ func (p *pipeConn) Send(ctx context.Context, msg []byte) error {
 
 func (p *pipeConn) Receive(ctx context.Context) ([]byte, error) {
 	select {
-	case msg := <-p.rx:
-		return msg.data, msg.err
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-p.closeCh:
-		return nil, fmt.Errorf("pipe: %w", xfer.ErrConnClosed)
+		// If there's a buffered message, deliver it before returning closed.
+		select {
+		case m := <-p.rx:
+			return m.data, nil
+		default:
+			return nil, xfer.ErrConnClosed
+		}
+	case m, ok := <-p.rx:
+		if !ok {
+			return nil, xfer.ErrConnClosed
+		}
+		return m.data, nil
 	}
 }
 
 func (p *pipeConn) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
-		return nil
-	}
-	p.closed = true
 	p.closeOnce.Do(func() {
+		p.closed.Store(true)
 		close(p.closeCh)
 	})
 	return nil
+}
+
+func (p *pipeConn) String() string {
+	return fmt.Sprintf("pipeConn{tx:%v, rx:%v}", p.tx, p.rx)
 }
