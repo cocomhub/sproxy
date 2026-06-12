@@ -5,7 +5,10 @@ package main
 
 import (
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -253,6 +256,144 @@ func captureStdout(fn func()) string {
 	buf := make([]byte, 4096)
 	n, _ := r.Read(buf)
 	return string(buf[:n])
+}
+
+// ---- Upload command RunE 测试 ----
+
+func TestUploadCommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(srcFile, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"Success":true,"Message":"uploaded"}`))
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"upload", "--server", mock.URL, srcFile})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("upload command failed: %v", err)
+	}
+}
+
+// ---- Download command RunE 测试 ----
+
+func TestDownloadCommand_Success(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "out.txt")
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// download command 的 Stat 调用
+		if r.URL.Path == "/stat" {
+			w.Header().Set("X-File-Checksum", "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+			w.Header().Set("X-File-Size", "5")
+			w.Header().Set("X-File-IsDir", "false")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("X-File-Checksum", "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+		w.Header().Set("X-File-MTime", "0")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("hello"))
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"download", "--server", mock.URL, "test.txt", dst})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("download command failed: %v", err)
+	}
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello" {
+		t.Errorf("expected hello, got %s", string(data))
+	}
+}
+
+// ---- Delete command RunE 测试 ----
+
+func TestDeleteCommand_Success(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/files/stat" {
+			w.Header().Set("X-File-Checksum", "abc123")
+			w.Header().Set("X-File-Size", "5")
+			w.Header().Set("X-File-IsDir", "false")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"Success":true,"Message":"deleted"}`))
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	// 使用绝对路径绕过 currentDir
+	rootCmd.SetArgs([]string{"delete", "--server", mock.URL, "/test.txt"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("delete command failed: %v", err)
+	}
+}
+
+// ---- List command RunE 测试 ----
+
+func TestListCommand(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"files":[{"name":"a.txt","size":10}],"total":1}`))
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"list", "--server", mock.URL})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("list command failed: %v", err)
+	}
+}
+
+func TestListCommand_WithSubdirFlag(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"files":[{"name":"sub/","size":0,"is_dir":true}],"total":1}`))
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	// --subdir 使用绝对路径绕过 currentDir
+	rootCmd.SetArgs([]string{"list", "--server", mock.URL, "--subdir", "/sub"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("list command with subdir failed: %v", err)
+	}
+}
+
+// ---- 共享辅助函数 ----
+
+// captureRootCmdArgs 保存并重置 rootCmd 的 args 和 PersistentPreRunE 状态。
+// 返回的恢复函数应在测试结束时 defer 调用。
+func captureRootCmdArgs() func() {
+	oldArgs := rootCmd.Args
+	oldPreRunE := rootCmd.PersistentPreRunE
+	oldCurrentDir := currentDir
+	currentDir = ""
+
+	rootCmd.SetArgs(nil)
+	return func() {
+		rootCmd.Args = oldArgs
+		rootCmd.PersistentPreRunE = oldPreRunE
+		currentDir = oldCurrentDir
+	}
 }
 
 // 重置 cobra.Command 的 help func 避免在测试中意外触发帮助输出
