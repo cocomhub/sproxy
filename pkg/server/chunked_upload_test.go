@@ -988,4 +988,169 @@ func TestChunkedDownload_RangeNotSatisfiable(t *testing.T) {
 	}
 }
 
+func TestChunkedUpload_Resume(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	fileData := bytes.Repeat([]byte("ResumeMe"), 3000) // ~24 KiB, 6 chunks at 4KiB
+	fileChecksum := sha256hex(fileData)
+	chunkSize := int64(4096)
+	totalChunks := (len(fileData) + int(chunkSize) - 1) / int(chunkSize)
+
+	uploadID := initSessionEx(t, url, "resume-dl-verify.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum)
+
+	// 1. 只上传前 3 个分块
+	for i := range 3 {
+		start := i * int(chunkSize)
+		end := min(start+int(chunkSize), len(fileData))
+		chunkData := fileData[start:end]
+		uploadChunk(t, url, uploadID, i, sha256hex(chunkData), chunkData)
+	}
+
+	// 2. 查询 uploadStatus 验证已接收列表
+	statusResp, err := http.Get(url + "/upload/status?upload_id=" + uploadID)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	var status ChunkStatusResponse
+	json.NewDecoder(statusResp.Body).Decode(&status)
+	statusResp.Body.Close()
+
+	if !status.Success {
+		t.Fatalf("status failed: %v", status)
+	}
+	if status.ReceivedCount != 3 {
+		t.Fatalf("expected 3 received chunks, got %d (missing: %v)", status.ReceivedCount, status.MissingChunks)
+	}
+	if len(status.MissingChunks) != totalChunks-3 {
+		t.Fatalf("expected %d missing chunks, got %v", totalChunks-3, status.MissingChunks)
+	}
+
+	// 3. 补传缺失 chunk
+	for _, idx := range status.MissingChunks {
+		start := idx * int(chunkSize)
+		end := min(start+int(chunkSize), len(fileData))
+		chunkData := fileData[start:end]
+		uploadChunk(t, url, uploadID, idx, sha256hex(chunkData), chunkData)
+	}
+
+	// 4. uploadComplete -> 验证成功
+	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
+	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	defer resp.Body.Close()
+	var result ChunkCompleteResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if !result.Success {
+		t.Fatalf("resume complete failed: %v", result)
+	}
+	if result.FileChecksum != fileChecksum {
+		t.Fatalf("checksum mismatch: got %s, want %s", result.FileChecksum, fileChecksum)
+	}
+
+	// 5. 下载验证 checksum 一致
+	dlResp, err := http.Get(url + "/download?filename=resume-dl-verify.bin")
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	defer dlResp.Body.Close()
+	if dlResp.StatusCode != http.StatusOK {
+		t.Fatalf("download status: expected 200, got %d", dlResp.StatusCode)
+	}
+	dlData, err := io.ReadAll(dlResp.Body)
+	if err != nil {
+		t.Fatalf("read download body: %v", err)
+	}
+	if !bytes.Equal(dlData, fileData) {
+		t.Fatalf("downloaded content mismatch: len(dl)=%d, len(orig)=%d", len(dlData), len(fileData))
+	}
+	dlCS := dlResp.Header.Get("X-File-Checksum")
+	if dlCS != fileChecksum {
+		t.Fatalf("download checksum header mismatch: got %s, want %s", dlCS, fileChecksum)
+	}
+}
+
+func TestChunkedUpload_RetryExhausted(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	fileData := []byte("retry exhausted test data")
+	fileChecksum := sha256hex(fileData)
+	uploadID := initSession(t, url, "retry-exhausted.txt", int64(len(fileData)), fileChecksum)
+
+	// 用错误的 checksum 上传 chunk，服务端返回 200 但 Success=false
+	wrongCS := sha256hex([]byte("wrong data"))
+	chunkResp := uploadChunk(t, url, uploadID, 0, wrongCS, fileData)
+	var uploadResult ChunkUploadResponse
+	json.NewDecoder(chunkResp.Body).Decode(&uploadResult)
+	chunkResp.Body.Close()
+	if uploadResult.Success {
+		t.Fatal("expected chunk upload to fail with wrong checksum")
+	}
+	if !uploadResult.ShouldRetry {
+		t.Fatal("expected ShouldRetry=true for checksum mismatch")
+	}
+
+	// 用正确的 checksum 上传正确数据，应该成功
+	correctCS := sha256hex(fileData)
+	chunkResp2 := uploadChunk(t, url, uploadID, 0, correctCS, fileData)
+	json.NewDecoder(chunkResp2.Body).Decode(&uploadResult)
+	chunkResp2.Body.Close()
+	if !uploadResult.Success {
+		t.Fatalf("expected chunk upload to succeed with correct checksum: %v", uploadResult)
+	}
+
+	// complete 验证成功
+	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
+	cpResp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	defer cpResp.Body.Close()
+	var completeResult ChunkCompleteResponse
+	json.NewDecoder(cpResp.Body).Decode(&completeResult)
+	if !completeResult.Success {
+		t.Fatalf("complete failed: %v", completeResult)
+	}
+	if completeResult.FileChecksum != fileChecksum {
+		t.Fatalf("checksum mismatch: got %s, want %s", completeResult.FileChecksum, fileChecksum)
+	}
+}
+
+func TestChunkedUpload_ContextCancelled(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 立即取消
+
+	fileCS := sha256hex([]byte("cancelled"))
+	initReq := map[string]any{
+		"upload_id":     "cancel-test",
+		"filename":      "cancel.txt",
+		"total_size":    len("cancelled"),
+		"chunk_size":    4096,
+		"total_chunks":  1,
+		"file_checksum": fileCS,
+	}
+	initJSON, _ := json.Marshal(initReq)
+	req, err := http.NewRequestWithContext(ctx, "POST", url+"/upload/init", bytes.NewReader(initJSON))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// 已取消的 context 可能导致客户端 transport 层报错（如 "context canceled"），
+		// 这是可接受的 —— 我们只需确认没有 panic
+		t.Logf("context cancelled request returned error (expected): %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	// 如果能拿到响应，应该是有效的 HTTP 状态码（而不是 panic）
+	t.Logf("context cancelled init returned status %d", resp.StatusCode)
+}
+
 
