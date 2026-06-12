@@ -19,6 +19,12 @@
 | mux 指标 | Streams/Frames/Pings/Bytes 计数 + `GET /metrics` 输出 | 集成完成 |
 | Hub 中继 Handler | `POST /api/relay` JSON 请求 → Tunnel.Do 转发 | 实现完成 |
 | 数据竞争修复 | FrameData/CloseWrite 锁内发送、atomic lastPong、Context 缓存 | 全部修复 |
+| QUIC 传输 | `xferquic` 包，基于 quic-go，4B 帧定界 | 注册 PASS，Windows SKIP（UDP） |
+| WebRTC 传输 | `xfer/webrtc/` 独立 go.mod，内存信令 + ICE/STUN | RoundTrip PASS |
+| TCP 直连 | `xfertcp` 包，4B 长度前缀帧定界 | 4 项测试 PASS |
+| Hub 指标 | `sproxy_hub_nodes_connected` gauge | 集成完成 |
+| 诊断命令 | `sclient diag --ping` / `--hub-status` | 实现完成 |
+| mTLS 支持 | TLSConfig.ClientCA + RequireAndVerifyClientCert | 集成完成 |
 | 文档 | architecture.md、cli.md(relay)、config.md(hub)、README | 已交付 |
 
 ## 📋 实际盘点：已实现 vs 未实现

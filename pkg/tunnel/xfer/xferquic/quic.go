@@ -7,7 +7,7 @@
 // 采用 4 字节大端长度前缀帧定界（与 tcp 传输相同）。
 // 在 init() 中自动注册到 xfer 全局注册表，名字为 "quic"。
 //
-// Windows 兼容性
+// # Windows 兼容性
 //
 // quic-go 在 Windows 平台使用 UDP 协议。Windows 防火墙、防病毒软件或
 // 组策略可能阻止本地 UDP 通信，导致 QUIC 握手超时（DialAddr/Listen 挂起）。

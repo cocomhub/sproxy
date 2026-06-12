@@ -142,9 +142,7 @@ func TestQuicMultipleMessages(t *testing.T) {
 	defer sc.Close()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for range 10 {
 			msg, rerr := sc.Receive(bg)
 			if rerr != nil {
@@ -156,7 +154,7 @@ func TestQuicMultipleMessages(t *testing.T) {
 				return
 			}
 		}
-	}()
+	})
 
 	for i := range 10 {
 		msg := fmt.Appendf(nil, "msg-%d", i)
