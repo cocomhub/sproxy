@@ -939,3 +939,53 @@ func TestChunkedDigestConsistency(t *testing.T) {
 		t.Fatal("normal upload and chunked upload produced different content")
 	}
 }
+
+func TestChunkedDownload_EmptyFile(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	// 上传空文件
+	body := []byte{}
+	fileCS := sha256hex(body)
+	uploadFile(t, url, "empty.txt", body, map[string]string{
+		"X-File-Checksum": fileCS,
+	})
+
+	// 下载空文件（从 offset=0 开始）
+	resp, err := http.Get(url + "/download/chunk?filename=empty.txt&offset=0&length=64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable || resp.StatusCode == http.StatusOK {
+		// 空文件按 offset 0 处理：要么返回 416（空文件无内容可下载）
+		// 要么返回 200 但 content-length=0。两种行为都能接受
+		t.Logf("empty file download returned status %d (acceptable)", resp.StatusCode)
+	} else {
+		t.Errorf("expected 416 or 200 for empty file, got %d", resp.StatusCode)
+	}
+}
+
+func TestChunkedDownload_RangeNotSatisfiable(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	// 上传一个文件
+	body := []byte("small file")
+	fileCS := sha256hex(body)
+	uploadFile(t, url, "small.txt", body, map[string]string{
+		"X-File-Checksum": fileCS,
+	})
+
+	// 请求超出文件范围的 offset
+	resp, err := http.Get(url + "/download/chunk?filename=small.txt&offset=100&length=64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		t.Errorf("expected 416, got %d", resp.StatusCode)
+	}
+}
+
+
