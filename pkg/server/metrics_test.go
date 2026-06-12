@@ -166,3 +166,57 @@ func TestMetricsHandler_PrometheusFormat(t *testing.T) {
 		}
 	}
 }
+
+func TestMetricsSnapshot(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics()
+	m.RecordRequest(200)
+	m.RecordRequest(404)
+	m.RecordDownload(1024)
+	m.RecordUpload(2048)
+	m.RecordDelete()
+
+	s := m.Snapshot()
+	if s["requests_total"] != 2 {
+		t.Errorf("requests_total = %d, want 2", s["requests_total"])
+	}
+	if s["requests_2xx"] != 1 {
+		t.Errorf("requests_2xx = %d, want 1", s["requests_2xx"])
+	}
+	if s["requests_4xx"] != 1 {
+		t.Errorf("requests_4xx = %d, want 1", s["requests_4xx"])
+	}
+	if s["bytes_uploaded"] != 2048 {
+		t.Errorf("bytes_uploaded = %d, want 2048", s["bytes_uploaded"])
+	}
+	if s["bytes_downloaded"] != 1024 {
+		t.Errorf("bytes_downloaded = %d, want 1024", s["bytes_downloaded"])
+	}
+	if s["files_deleted"] != 1 {
+		t.Errorf("files_deleted = %d, want 1", s["files_deleted"])
+	}
+}
+
+func TestMetricsSnapshot_Empty(t *testing.T) {
+	t.Parallel()
+
+	m := NewMetrics()
+	s := m.Snapshot()
+	if s["requests_total"] != 0 {
+		t.Errorf("empty metrics: requests_total = %d, want 0", s["requests_total"])
+	}
+	if s["bytes_uploaded"] != 0 {
+		t.Errorf("empty metrics: bytes_uploaded = %d, want 0", s["bytes_uploaded"])
+	}
+}
+
+func TestMetricsSnapshot_Nil(t *testing.T) {
+	t.Parallel()
+
+	var m *Metrics = nil
+	s := m.Snapshot()
+	if s != nil {
+		t.Errorf("nil metrics: expected nil snapshot, got %v", s)
+	}
+}
