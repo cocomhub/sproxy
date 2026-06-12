@@ -1,11 +1,11 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package xferquic 提供基于 QUIC 的 xfer.Conn 传输层实现。
+// Package quic 提供基于 QUIC 的 xfer.Conn 传输层实现。
 //
 // 使用 quic-go 库，将 QUIC stream 包装为 xfer.Conn 接口。
 // 采用 4 字节大端长度前缀帧定界（与 tcp 传输相同）。
-// 在 init() 中自动注册到 xfer 全局注册表，名字为 "quic"。
+// 在 init() 中自动注册到 xfer.TransportRegistry，名字为 "quic"。
 //
 // # Windows 兼容性
 //
@@ -17,13 +17,13 @@
 //   - https://github.com/quic-go/quic-go/wiki/UDP-&-Windows
 //   - https://github.com/golang/go/issues/49161
 //
-// 解决方案：
+// 测试建议：
 //   - 在 Linux/macOS 运行测试（已验证正常）
 //   - Windows 上尝试关闭防火墙或添加 UDP 入站规则
-//   - 使用 `go test -run TestQuicRegistration` 仅测试注册逻辑
+//   - 使用 `go test -run TestQuicRegistration` 测试注册逻辑
 //
-// TODO: 待 quic-go 对 Windows UDP 的兼容性改善后，可移除上述限制。
-package xferquic
+// TODO: 待 quic-go 对 Windows UDP 的兼容性改善后，可移除本限制。
+package quic
 
 import (
 	"context"
@@ -41,19 +41,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/quic-go/quic-go"
 )
 
 func init() {
-	xfer.Register(&xfer.Transport{
-		Name:   "quic",
-		Dial:   Dial,
-		Listen: Listen,
+	xfer.TransportRegistry.Register(plugin.Plugin[*xfer.Transport]{
+		Name: "quic",
+		Instance: &xfer.Transport{
+			Name:   "quic",
+			Dial:   Dial,
+			Listen: Listen,
+		},
+		Priority: 10,
 	})
 }
 
-// quicConn 包装 quic.Stream 为 xfer.Conn，使用 4B 大端长度前缀定界。
+// quicConn 包装 quic.Stream 为 xfer.Conn，使用 4B 大端长度前缀帧。
 type quicConn struct {
 	stream quic.Stream
 	mu     sync.Mutex
@@ -102,7 +107,7 @@ func (c *quicConn) Close() error {
 	return c.stream.Close()
 }
 
-// QuicListener 实现 xfer.Listener，基于 quic-go Listener。
+// QuicListener 实现 xfer.Listener，包装 quic-go Listener。
 type QuicListener struct {
 	ln      *quic.Listener
 	closeCh chan struct{}
@@ -168,7 +173,7 @@ func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
 	return &quicConn{stream: stream}, nil
 }
 
-// Listen 在 addr 启动 QUIC 监听器。
+// Listen 在 addr 启用 QUIC 监听器。
 // addr 格式：host:port（如 "127.0.0.1:9000"）。
 func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
 	cert, err := selfSignedCert()
