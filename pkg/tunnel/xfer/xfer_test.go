@@ -27,16 +27,12 @@ func TestRegisterAndGet(t *testing.T) {
         t.Fatal("expected registered transport")
     }
 
-    // 验证重复注册 panic
-    defer func() {
-        if r := recover(); r == nil {
-            t.Fatal("expected panic on duplicate register")
-        }
-    }()
+    // 重复注册不会 panic（新 Registry 覆盖而非 panic）
     xfer.Register(t1)
 }
 
 func TestRegisterNilPanics(t *testing.T) {
+    // 注册 nil Transport 因访问 nil 字段而 panic
     defer func() {
         if r := recover(); r == nil {
             t.Fatal("expected panic on nil Transport")
