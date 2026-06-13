@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/hex"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -209,4 +211,100 @@ func TestRunServer_ListenAndServeError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when port is occupied")
 	}
+}
+
+// captureStdout 捕获 stdout 输出的辅助函数（与 captureStderr 对称，用于 initLogger 测试）。
+func captureStdout(fn func()) string {
+	r, w, err := os.Pipe()
+	if err != nil {
+		panic(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = old
+	buf := make([]byte, 4096)
+	n, _ := r.Read(buf)
+	return string(buf[:n])
+}
+
+// ---- initLogger tests ----
+
+func TestInitLogger_Combinations(t *testing.T) {
+	levels := []string{"debug", "info", "warn", "error"}
+	formats := []string{"text", "json"}
+
+	for _, level := range levels {
+		for _, format := range formats {
+			t.Run(level+"_"+format, func(t *testing.T) {
+				cfg := &server.Config{
+					LogLevel:  level,
+					LogFormat: format,
+				}
+
+				// Save and restore the default logger to avoid cross-test interference
+				oldDefault := slog.Default()
+				t.Cleanup(func() { slog.SetDefault(oldDefault) })
+
+				output := captureStdout(func() {
+					logger := initLogger(cfg)
+					if logger == nil {
+						t.Error("initLogger returned nil")
+						return
+					}
+					// Log at the configured level so the output is always visible
+					switch level {
+					case "debug":
+						logger.Debug("test message", "key", "value")
+					case "info":
+						logger.Info("test message", "key", "value")
+					case "warn":
+						logger.Warn("test message", "key", "value")
+					case "error":
+						logger.Error("test message", "key", "value")
+					}
+				})
+
+				if format == "json" {
+					// JSON output should be valid JSON
+					if len(output) == 0 {
+						t.Error("expected JSON output, got empty")
+						return
+					}
+					if output[0] != '{' {
+						t.Errorf("expected JSON object (starts with '{'), got: %s", output[:min(len(output), 50)])
+					}
+					if !bytes.Contains([]byte(output), []byte("test message")) {
+						t.Errorf("expected log message in JSON output, got: %s", output[:min(len(output), 100)])
+					}
+				} else {
+					// Text output should contain the message
+					if !bytes.Contains([]byte(output), []byte("test message")) {
+						t.Errorf("expected 'test message' in text output, got: %s", output[:min(len(output), 100)])
+					}
+				}
+			})
+		}
+	}
+}
+
+// ---- resolveTunnelKey tests ----
+
+func TestResolveTunnelKey_SaveError(t *testing.T) {
+	// Save cfgFile so resolveTunnelKey can restore it later
+	oldCfgFile := cfgFile
+	t.Cleanup(func() { cfgFile = oldCfgFile })
+
+	// Use a path where the parent directory does not exist.
+	// os.WriteFile will fail because the directory doesn't exist.
+	badDir := filepath.Join(t.TempDir(), "nonexistent")
+	cfgFile = filepath.Join(badDir, "sproxy.yaml")
+
+	cfg := &server.Config{TunnelKey: ""}
+	_, err := resolveTunnelKey(cfg)
+	if err == nil {
+		t.Fatal("expected error when SaveConfig fails due to non-writable path")
+	}
+	t.Logf("got expected error: %v", err)
 }

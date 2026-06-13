@@ -4,6 +4,8 @@
 package tunnel
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
@@ -114,4 +116,58 @@ func TestForwardExternal_HTTPClientError(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Logf("response status: %d (may be 502 or other error)", resp.StatusCode)
 	}
+}
+
+// ---- resolveKey tests ----
+
+func TestResolveKey_PrimaryKeyEmpty(t *testing.T) {
+	// Create handler with empty primaryKey and non-nil oldKey
+	metaContent := []byte(`{"method":"GET","url":"/api/test","headers":{}}`)
+
+	// Encrypt metadata with oldKey (testKey)
+	encMeta, err := Encrypt(testKey, metaContent)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	// Build metadata frame: [4B big-endian length][encrypted metadata]
+	frame := make([]byte, 4+len(encMeta))
+	binary.BigEndian.PutUint32(frame[0:4], uint32(len(encMeta)))
+	copy(frame[4:], encMeta)
+
+	handler := &Handler{
+		primaryKey: nil,
+		oldKey:     testKey,
+	}
+
+	decodedMeta, matchedKey, err := handler.resolveKey(bytes.NewReader(frame))
+	if err != nil {
+		t.Fatalf("resolveKey with oldKey should succeed: %v", err)
+	}
+
+	if !bytes.Equal(matchedKey, testKey) {
+		t.Fatal("resolveKey should return oldKey as the matched key")
+	}
+
+	if !bytes.Equal(decodedMeta, metaContent) {
+		t.Fatalf("decoded metadata mismatch: got %q, want %q", decodedMeta, metaContent)
+	}
+}
+
+func TestResolveKey_BothFail(t *testing.T) {
+	handler := &Handler{
+		primaryKey: nil,
+		oldKey:     nil,
+	}
+
+	// Send a frame with random bytes (invalid encrypted data)
+	frame := make([]byte, 8)
+	binary.BigEndian.PutUint32(frame[0:4], 4)
+	copy(frame[4:], []byte{0x01, 0x02, 0x03, 0x04})
+
+	_, _, err := handler.resolveKey(bytes.NewReader(frame))
+	if err == nil {
+		t.Fatal("resolveKey should return error when both keys are nil")
+	}
+	t.Logf("got expected error: %v", err)
 }

@@ -4,6 +4,9 @@
 package client
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -94,5 +97,67 @@ func TestGenerateUploadID_DifferentInputs(t *testing.T) {
 	id3 := generateUploadID("a.txt", 200, now, "abc")
 	if id1 == id3 {
 		t.Error("expected different upload_id for different sizes")
+	}
+}
+
+func TestTryDownloadChunk_LengthMismatch(t *testing.T) {
+	t.Parallel()
+	// Server returns body shorter than X-Chunk-Length (expectLength)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Chunk-Length", "100")
+		w.Write([]byte("short")) // only 5 bytes
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL)
+	data, ok := c.tryDownloadChunk(context.Background(), "/api/download/chunk?filename=f.txt&offset=0&length=100", 100)
+	if ok {
+		t.Fatal("expected tryDownloadChunk to return false on length mismatch")
+	}
+	if data != nil {
+		t.Fatal("expected nil data on length mismatch")
+	}
+}
+
+func TestTryDownloadChunk_ChecksumMismatch(t *testing.T) {
+	t.Parallel()
+	// Server returns body with wrong X-Chunk-Checksum header
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Chunk-Checksum", "0000000000000000000000000000000000000000000000000000000000000000")
+		w.Write([]byte("hello world"))
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL)
+	data, ok := c.tryDownloadChunk(context.Background(), "/api/download/chunk?filename=f.txt&offset=0&length=11", 11)
+	if ok {
+		t.Fatal("expected tryDownloadChunk to return false on checksum mismatch")
+	}
+	if data != nil {
+		t.Fatal("expected nil data on checksum mismatch")
+	}
+}
+
+func TestTryDownloadChunk_Non200(t *testing.T) {
+	t.Parallel()
+	// Server returns 500
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL)
+	data, ok := c.tryDownloadChunk(context.Background(), "/api/download/chunk?filename=f.txt&offset=0&length=100", 100)
+	if ok {
+		t.Fatal("expected tryDownloadChunk to return false on 500 status")
+	}
+	if data != nil {
+		t.Fatal("expected nil data on 500 status")
 	}
 }
