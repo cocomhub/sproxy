@@ -6,6 +6,8 @@
   },
   "permissions": {
     "allow": [
+      "Bash(*)",
+      "PowerShell(*)",
       "mcp__mcp-atlassian-http__confluence_get_page",
       "mcp__mcp-atlassian-http__jira_get_issue",
       "Read(**)",
@@ -34,7 +36,6 @@
       "Bash(touch *)",
       "Bash(git *)",
       "Bash(go *)",
-      "Bash(Get-ChildItem -Recurse -Depth 3 -Name D:\\\\workdir\\\\leon\\\\cocomhub\\\\sproxy)",
       "Bash(Sort-Object)",
       "Bash(make build *)",
       "PowerShell(Get-Command *)",
@@ -47,11 +48,7 @@
       "Bash(python3 *)",
       "Bash(git rm *)",
       "Bash(git reset *)",
-      "Bash(xxd pkg/server/handlers.go)",
-      "PowerShell(\\(Get-Prompt\\).ToString\\(\\))",
-      "PowerShell(Write-Host \"PROFILE path: $PROFILE\"; Write-Host \"===\"; if \\(Test-Path $PROFILE\\) { Get-Content $PROFILE -Encoding utf8 | Select-Object -First 100 } else { \"No profile found\" })",
-      "Bash(python -c ' *)",
-      "PowerShell(Write-Host \"--- Claude settings.json ---\"; $settings = \"$env:CLAUDE_CONFIG_DIR\\\\settings.json\"; if \\(Test-Path $settings\\) { Get-Content $settings -Raw } else { \"not found at $settings\" }; Write-Host \"--- Local settings ---\"; $local = \"$env:CLAUDE_PROJECT_DIR\\\\.claude\\\\settings.local.json\"; if \\(Test-Path $local\\) { Get-Content $local -Raw } else { \"not found at $local\" })"
+      "Bash(python -c ' *)"
     ],
     "deny": []
   }

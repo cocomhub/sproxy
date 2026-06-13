@@ -177,6 +177,27 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 - **`pkg/client/client_test.go`** — `newMockServer`（sproxy 兼容的 mock 服务端）
 - **`test/e2e_test.go`** — `startSPROXY`（构建真实二进制并启动的端到端测试辅助）
 
+### 测试模式清单
+
+| 模式 | 适用场景 | 示例文件 |
+|------|----------|----------|
+| **table-driven** | 多种输入/状态的函数级单元测试 | `handlers_test.go`, `gzip_test.go`, `cd_test.go` |
+| **表驱动 + subtest** | 参数化场景分组执行 | `gzip_test.go:TestGzipMiddleware_TableDriven` |
+| **httptest.Server** | HTTP handler 黑盒集成测试 | `integration_test.go:newTestServer` |
+| **httptest.NewRecorder** | middleware 白盒测试 | `gzip_test.go`, `cors_test.go` |
+| **mock server** | 客户端测试（模拟服务端） | `client_test.go:newMockServer` |
+| **build+subprocess** | 二进制级别端到端测试 | `test/e2e_test.go:startSPROXY` |
+| **fuzz** | 边界条件自动探索 | `validate_fuzz_test.go`, `calcchunksize_fuzz_test.go` |
+| **chaos** | crash 恢复测试 | `e2e_test.go:TestChaos_*` |
+| **concurrent** | 竞态检测 | 各 `_test.go` 中含 `sync.WaitGroup` 的测试 |
+
+### 已知的技术债务
+- `cmd/sproxy/root.go` 中 `runServer` 的信号处理 goroutine 在 `ListenAndServe` 失败时泄漏（`for sig := range signalChan` 永不退出）
+- `cmd/sclient/` 多个子命令在配置缺失时调用 `os.Exit(1)`，导致无法在常规测试中覆盖这些路径（已 `t.Skip`）
+- `captureStdout`/`captureStderr` 在 `cmd/sclient/cmd_test.go` 和 `cmd/sproxy/root_test.go` 中存在私有副本，因 `package main` 无法导入 `pkg/testutil`
+- `integration_test.go` 的 `newTestServerWithAllRoutes` 手动重复了 `RegisterRoutes` 的路由注册，新增路由时容易不同步
+- `test/e2e_test.go` 的 `findModuleRoot` 用文件系统遍历定位 `go.mod`，与已有的 `runtime.Caller` 方案冗余
+
 <!-- superpowers-zh:begin (do not edit between these markers) -->
 # Superpowers-ZH 中文增强版
 
