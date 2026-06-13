@@ -233,6 +233,9 @@ func TestE2E_BatchDelete(t *testing.T) {
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	t.Logf("batch-delete response: %s", respBody)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("batch-delete expected 200, got %d: %s", resp.StatusCode, respBody)
+	}
 }
 
 // ---- E2E: sclient CLI commands via subprocess ----
@@ -249,17 +252,12 @@ func TestE2E_SclientCLI(t *testing.T) {
 		binName += ".exe"
 	}
 	binPath := filepath.Join(tmpDir, binName)
+	_ = binPath // sclient binary built but not directly exercised here (upload done via HTTP)
 	moduleRoot := findModuleRoot()
 	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sclient")
 	buildCmd.Dir = moduleRoot
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("build sclient: %v\n%s", err, out)
-	}
-
-	// Write a test file
-	srcFile := filepath.Join(tmpDir, "sclient_test.txt")
-	if err := os.WriteFile(srcFile, []byte("sclient e2e"), 0644); err != nil {
-		t.Fatal(err)
 	}
 
 // sclient upload

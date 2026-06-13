@@ -65,8 +65,9 @@ func TestHandleSighup_KeyRotation(t *testing.T) {
 	}
 	setupViperForSighup(cfgPath)
 
-	// Set up the cfgFile global
+	// Set up the cfgFile global with save/restore
 	cfgFile = cfgPath
+	t.Cleanup(func() { cfgFile = "" })
 	var updated string
 	tunUpdater := &mockTunnelUpdater{updateFn: func(key []byte) {
 		updated = hex.EncodeToString(key)
@@ -190,8 +191,18 @@ func TestRunServer_ListenAndServeError(t *testing.T) {
 	cmd.Flags().String("tunnel-key", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "")
 	cmd.Flags().Bool("version", false, "")
 
+	// 注入 signal channel 避免 goroutine 泄漏
+	sigCh := make(chan os.Signal, 1)
+	testSignalCh = sigCh
+	t.Cleanup(func() { testSignalCh = nil })
+
 	v := viper.GetViper()
+	oldCfgFile := cfgFile
 	cfgFile = filepath.Join(tmpDir, "sproxy.yaml")
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+		cfgPtr.Store(nil)
+	})
 	v.SetConfigFile(cfgFile)
 	v.SetConfigType("yaml")
 	v.SetEnvPrefix("SPROXY")
@@ -203,9 +214,6 @@ func TestRunServer_ListenAndServeError(t *testing.T) {
 	v.Set("uploads_dir", tmpDir)
 	v.Set("tunnel_key", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
 	v.Set("log_level", "error")
-	t.Cleanup(func() {
-		cfgPtr.Store(nil)
-	})
 
 	err = runServer(cmd, nil)
 	if err == nil {
@@ -293,8 +301,7 @@ func TestInitLogger_Combinations(t *testing.T) {
 
 func TestResolveTunnelKey_SaveError(t *testing.T) {
 	// Save cfgFile so resolveTunnelKey can restore it later
-	oldCfgFile := cfgFile
-	t.Cleanup(func() { cfgFile = oldCfgFile })
+	t.Cleanup(func() { cfgFile = "" })
 
 	// Use a path where the parent directory does not exist.
 	// os.WriteFile will fail because the directory doesn't exist.
