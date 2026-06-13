@@ -25,6 +25,10 @@ make show-version         # 打印当前构建二进制的版本
 **无 `make test`、无 `make lint`**。测试直接：
 
 ```bash
+make test               # go vet + go test -race ./...
+make test-packages      # 分组运行测试，简化定位失败包
+make cover              # 覆盖率摘要（total: xx%）
+make cover-html         # 覆盖率 HTML 报告到 build/coverage/cover.html
 go test ./...
 go test -run TestName ./pkg/server/...     # 单测
 go test -race ./pkg/tunnel/...
@@ -147,6 +151,31 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 - 日志统一 `log/slog`（Text 或 JSON handler，按 `log_format` 切换）；新代码不要混入 `zap` / `logrus`
 - 中文文案禁止 GBK/ANSI；Windows 终端注意 UTF-8 输出，避免"文件正确但终端乱码"误判
 - 错误优先 `fmt.Errorf("...: %w", err)` 包装；handler 内不要把原始 error 直接抛给客户端，使用 `UploadResponse{Success,Message}` JSON 格式回包
+
+## 测试规范
+
+### 测试工具集
+跨包可复用的测试辅助函数位于 **`pkg/testutil/`**（`github.com/cocomhub/sproxy/pkg/testutil`）：
+- `TestKey()` — 64 hex char AES-256 测试密钥
+- `DiscardLogger()` — 输出到 io.Discard 的 slog.Logger
+- `SHA256Hex(data []byte)` — SHA-256 → hex string
+- `CaptureStdout(fn)` / `CaptureStderr(fn)` — 捕获 CLI 输出
+
+放置在 `pkg/` 而非 `internal/`，以兼顾未来 cmd 独立为 go module 时的可达性。
+
+### 测试约束
+1. **纯标准库测试** — 不使用 testify、gomock、gomega 等第三方断言/模拟库。延续现有 `t.Fatalf`/`t.Errorf` 模式。
+2. **127.0.0.1 回环绑定** — 所有含 HTTP 服务的测试必须监听 127.0.0.1（`httptest.NewServer` 默认行为即 loopback），**禁止**监听 `0.0.0.0` 或 `localhost`（后者在 Windows 可能触发防火墙授权弹窗）。
+3. **Windows 兼容** — 所有测试必须在 Windows 上通过（除标注 `//go:build !windows` 的 Unix-only 测试外）。路径分隔符使用 `filepath.Join` / `filepath.ToSlash` 处理跨平台差异。
+4. **全局状态隔离** — 测试 `cmd/sproxy` 和 `cmd/sclient` 时须用 `t.Cleanup` 恢复包级全局变量（`cfgPtr`、`currentDir`、`cfgFile` 等）。
+5. **Viper 隔离** — 测试优先使用 `viper.New()` 创建独立实例而非 `GetViper()` 全局单例（`LoadFromViper(v *viper.Viper)` 已接受参数）。
+
+### 现有测试辅助函数查找
+- **`pkg/testutil/`** — 跨包通用（TestKey, DiscardLogger, SHA256Hex, CaptureStdout, CaptureStderr）
+- **`pkg/server/server_test_common_test.go`** — server 包内共享（testKey, testLogger, withHeader）
+- **`pkg/server/integration_test.go`** — `newTestServer` + `newTestServerWithAllRoutes` 等变体
+- **`pkg/client/client_test.go`** — `newMockServer`（sproxy 兼容的 mock 服务端）
+- **`test/e2e_test.go`** — `startSPROXY`（构建真实二进制并启动的端到端测试辅助）
 
 <!-- superpowers-zh:begin (do not edit between these markers) -->
 # Superpowers-ZH 中文增强版

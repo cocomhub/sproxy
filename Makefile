@@ -73,15 +73,33 @@ vet:
 
 test: vet
 	@echo Running go test -race ./...
-	@$(GO) test -race ./...
+	@$(GO) test -race -count=1 -timeout=120s ./...
+
+# 分组运行测试（简化调试时定位失败的包）
+.PHONY: test-packages
+
+test-packages: vet
+	@echo "=== internal/... ===" && $(GO) test -race -count=1 -timeout=60s ./internal/... 2>&1
+	@echo "=== pkg/tunnel/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/tunnel/... 2>&1
+	@echo "=== pkg/client/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/client/... 2>&1
+	@echo "=== pkg/server/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/server/... 2>&1
+	@echo "=== cmd/... ===" && $(GO) test -race -count=1 -timeout=60s ./cmd/... 2>&1
 
 .PHONY: cover
 
-cover: test
+cover: vet
 	@mkdir -p $(BUILD_DIR)/coverage
-	$(GO) test -race -coverprofile=$(BUILD_DIR)/coverage/cover.out ./...
+	$(GO) test -count=1 -coverprofile=$(BUILD_DIR)/coverage/cover.out ./...
+	@$(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out | grep -E "total"
+
+# 覆盖率 HTML 报告（不含 race，避免 test/e2e_test.go 已知 race 阻断报告生成）
+.PHONY: cover-html
+
+cover-html: vet
+	@mkdir -p $(BUILD_DIR)/coverage
+	$(GO) test -count=1 -coverprofile=$(BUILD_DIR)/coverage/cover.out ./...
+	@$(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out | grep -E "total"
 	$(GO) tool cover -html=$(BUILD_DIR)/coverage/cover.out -o $(BUILD_DIR)/coverage/cover.html
-	@$(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out
 	@echo "Coverage report: file://$(BUILD_DIR)/coverage/cover.html"
 
 .PHONY: run

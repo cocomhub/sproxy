@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"sync"
 	"time"
 )
 
@@ -223,20 +224,26 @@ func startSPROXY(t *testing.T) (string, func()) {
 	}
 
 	cleanup := func() {
+		// 使用 sync.Once 保证 cmd.Wait() 只被调用一次，避免 data race
+		var waitOnce sync.Once
 		// Try graceful shutdown on Unix; Windows only supports Kill.
 		if runtime.GOOS != "windows" {
 			_ = cmd.Process.Signal(os.Interrupt) //nolint:errcheck // best-effort
 		}
 		done := make(chan struct{})
 		go func() {
-			cmd.Wait()
+			waitOnce.Do(func() {
+				cmd.Wait()
+			})
 			close(done)
 		}()
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
 			cmd.Process.Kill()
-			cmd.Wait()
+			waitOnce.Do(func() {
+				cmd.Wait()
+			})
 		}
 	}
 
