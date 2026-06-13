@@ -1,4 +1,4 @@
-// Copyright 2026 The Cocomhub Authors. All rights reserved.
+﻿// Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -395,10 +395,12 @@ func TestDownloadChunk_FirstChunk(t *testing.T) {
 	part, _ := mw.CreateFormFile("chunk", "00000.chunk")
 	part.Write(fileData)
 	mw.Close()
-	http.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
+	z1, _ := http.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
+	if z1 != nil { z1.Body.Close() }
 	// 完成
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	z2, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if z2 != nil { z2.Body.Close() }
 
 	// 下载第一个分块
 	resp, err := http.Get(url + "/download/chunk?filename=dl-chunk-test.txt&offset=0&length=10")
@@ -458,9 +460,11 @@ func TestDownloadChunk_EntireFile(t *testing.T) {
 	part, _ := mw.CreateFormFile("chunk", "00000.chunk")
 	part.Write(fileData)
 	mw.Close()
-	http.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
+	z3, _ := http.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
+	if z3 != nil { z3.Body.Close() }
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	z4, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if z4 != nil { z4.Body.Close() }
 
 	resp, err := http.Get(fmt.Sprintf("%s/download/chunk?filename=full-chunk.txt&offset=0&length=%d", url, len(fileData)))
 	if err != nil {
@@ -494,7 +498,8 @@ func TestDownloadChunk_InvalidOffset(t *testing.T) {
 	uploadID := initSession(t, url, "small.txt", int64(len(fileData)), fileChecksum)
 	uploadChunk(t, url, uploadID, 0, fileChecksum, fileData)
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	z5, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if z5 != nil { z5.Body.Close() }
 
 	// offset 超过 file size
 	resp, err := http.Get(url + "/download/chunk?filename=small.txt&offset=100&length=10")
@@ -919,7 +924,8 @@ func TestChunkedDigestConsistency(t *testing.T) {
 	uploadID := initSessionEx(t, url, "consistency-chunked.bin", int64(len(data)), chunkSize, totalChunks, cs)
 	uploadChunk(t, url, uploadID, 0, cs, data)
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	z6, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if z6 != nil { z6.Body.Close() }
 
 	c := client.NewFileClient(url)
 	outDir := t.TempDir()
