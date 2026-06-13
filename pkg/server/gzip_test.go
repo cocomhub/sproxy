@@ -14,10 +14,103 @@ import (
 	"testing"
 )
 
-func TestGzipMiddleware_Compresses(t *testing.T) {
+func TestGzipMiddleware_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		acceptEncoding string
+		body           string
+		wantGzip       bool
+	}{
+		{
+			name:           "gzip compression",
+			acceptEncoding: "gzip",
+			body:           "hello",
+			wantGzip:       true,
+		},
+		{
+			name:           "no accept-encoding",
+			acceptEncoding: "",
+			body:           "hello",
+			wantGzip:       false,
+		},
+		{
+			name:           "deflate only",
+			acceptEncoding: "deflate",
+			body:           "hello",
+			wantGzip:       false,
+		},
+		{
+			name:           "identity",
+			acceptEncoding: "identity",
+			body:           "hello",
+			wantGzip:       false,
+		},
+		{
+			name:           "multiple encodings with gzip",
+			acceptEncoding: "gzip, deflate, br",
+			body:           "gzip compression test",
+			wantGzip:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tt.body))
+			})
+
+			mw := GzipMiddleware(slog.Default())
+			handler := mw(inner)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/", nil)
+			if tt.acceptEncoding != "" {
+				req.Header.Set("Accept-Encoding", tt.acceptEncoding)
+			}
+
+			handler.ServeHTTP(rec, req)
+
+			if tt.wantGzip {
+				if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+					t.Fatalf("expected Content-Encoding: gzip, got: %q", enc)
+				}
+				found := slices.Contains(rec.Header().Values("Vary"), "Accept-Encoding")
+				if !found {
+					t.Fatal("expected Vary: Accept-Encoding header")
+				}
+				gr, err := gzip.NewReader(rec.Body)
+				if err != nil {
+					t.Fatalf("failed to create gzip reader: %v", err)
+				}
+				defer gr.Close()
+				body, err := io.ReadAll(gr)
+				if err != nil {
+					t.Fatalf("failed to read decompressed body: %v", err)
+				}
+				if string(body) != tt.body {
+					t.Fatalf("expected decompressed body %q, got: %q", tt.body, string(body))
+				}
+			} else {
+				if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+					t.Fatalf("expected no Content-Encoding, got: %q", enc)
+				}
+				if rec.Body.String() != tt.body {
+					t.Fatalf("expected body %q, got: %q", tt.body, rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
+// 保留 WriteHeader+status 的独立测试（无法 table-driven 化）
+func TestGzipMiddleware_WriteHeaderAndFlush(t *testing.T) {
+	t.Parallel()
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("hello"))
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not found"))
 	})
 
 	mw := GzipMiddleware(slog.Default())
@@ -29,127 +122,64 @@ func TestGzipMiddleware_Compresses(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	// Verify Content-Encoding header
-	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
-		t.Fatalf("expected Content-Encoding: gzip, got: %q", enc)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
 	}
 
-	// Verify Vary header
-	found := slices.Contains(rec.Header().Values("Vary"), "Accept-Encoding")
-	if !found {
-		t.Fatal("expected Vary: Accept-Encoding header")
-	}
-
-	// Verify body is gzip compressed
 	gr, err := gzip.NewReader(rec.Body)
 	if err != nil {
 		t.Fatalf("failed to create gzip reader: %v", err)
 	}
 	defer gr.Close()
-
-	body, err := io.ReadAll(gr)
-	if err != nil {
-		t.Fatalf("failed to read decompressed body: %v", err)
-	}
-	if string(body) != "hello" {
-		t.Fatalf("expected decompressed body 'hello', got: %q", string(body))
+	body, _ := io.ReadAll(gr)
+	if string(body) != "not found" {
+		t.Fatalf("expected 'not found', got: %q", string(body))
 	}
 }
 
-func TestGzipMiddleware_NoEncoding(t *testing.T) {
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestGzipMiddleware_NilLogger(t *testing.T) {
+	t.Parallel()
+	// GzipMiddleware(nil) should not panic
+	mw := GzipMiddleware(nil)
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("hello"))
-	})
+		_, _ = w.Write([]byte("ok"))
+	}))
 
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	handler.ServeHTTP(rec, req)
+
+	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+		t.Fatalf("expected Content-Encoding: gzip, got: %q", enc)
+	}
+	gr, _ := gzip.NewReader(rec.Body)
+	defer gr.Close()
+	body, _ := io.ReadAll(gr)
+	if string(body) != "ok" {
+		t.Fatalf("expected 'ok', got: %q", string(body))
+	}
+}
+
+func TestGzipMiddleware_NoAcceptEncoding(t *testing.T) {
+	t.Parallel()
+	// 验证在不传 Accept-Encoding 时 Content-Encoding 为空且 body 为原文
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("plain text"))
+	})
 	mw := GzipMiddleware(slog.Default())
 	handler := mw(inner)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
-	// No Accept-Encoding header
-
 	handler.ServeHTTP(rec, req)
 
-	// Verify no Content-Encoding header
 	if enc := rec.Header().Get("Content-Encoding"); enc != "" {
 		t.Fatalf("expected no Content-Encoding, got: %q", enc)
 	}
-
-	// Verify body is plain text
-	body := rec.Body.String()
-	if body != "hello" {
-		t.Fatalf("expected body 'hello', got: %q", body)
-	}
-
-	// Also verify without "gzip" in Accept-Encoding (e.g. "deflate")
-	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest("GET", "/", nil)
-	req2.Header.Set("Accept-Encoding", "deflate")
-	handler.ServeHTTP(rec2, req2)
-
-	if enc := rec2.Header().Get("Content-Encoding"); enc != "" {
-		t.Fatalf("expected no Content-Encoding for deflate-only, got: %q", enc)
-	}
-	if rec2.Body.String() != "hello" {
-		t.Fatalf("expected body 'hello' for deflate-only, got: %q", rec2.Body.String())
-	}
-}
-
-func TestGzipMiddleware_ContentEncodingNotGzip(t *testing.T) {
-	// Test that headers other than Accept-Encoding don't trigger compression
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("hello"))
-	})
-
-	mw := GzipMiddleware(slog.Default())
-	handler := mw(inner)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
-	req.Header.Set("Accept-Encoding", "identity")
-
-	handler.ServeHTTP(rec, req)
-
-	if enc := rec.Header().Get("Content-Encoding"); enc != "" {
-		t.Fatalf("expected no Content-Encoding for identity, got: %q", enc)
-	}
-	if rec.Body.String() != "hello" {
-		t.Fatalf("expected body 'hello', got: %q", rec.Body.String())
-	}
-}
-
-func TestGzipMiddleware_MultipleEncoding(t *testing.T) {
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("gzip compression test"))
-	})
-
-	mw := GzipMiddleware(slog.Default())
-	handler := mw(inner)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-
-	handler.ServeHTTP(rec, req)
-
-	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
-		t.Fatalf("expected Content-Encoding: gzip, got: %q", enc)
-	}
-
-	gr, err := gzip.NewReader(rec.Body)
-	if err != nil {
-		t.Fatalf("failed to create gzip reader: %v", err)
-	}
-	defer gr.Close()
-
-	body, err := io.ReadAll(gr)
-	if err != nil {
-		t.Fatalf("failed to read decompressed body: %v", err)
-	}
-	if !strings.Contains(string(body), "gzip compression") {
-		t.Fatalf("expected 'gzip compression' in decompressed body, got: %q", string(body))
+	if !strings.Contains(rec.Body.String(), "plain") {
+		t.Fatalf("expected 'plain' in body, got: %q", rec.Body.String())
 	}
 }
