@@ -334,7 +334,7 @@ func Example_encryptStreamDecryptStream() {
 	}
 	_ = n2
 
-	fmt.Println(string(decrypted.Bytes()))
+	fmt.Println(decrypted.String())
 	// Output: hello streaming world with chunked AES-256-GCM encryption
 }
 

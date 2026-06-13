@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +22,7 @@ func TestTunnelHandler_ReturnsHandler(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(nil, mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(context.TODO(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
 	defer h.Close()
 	th := h.TunnelHandler()
 	if th == nil {
@@ -42,7 +43,7 @@ func TestHandler_ReturnsNonNil(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(nil, mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(context.TODO(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
 	defer h.Close()
 	handler := h.Handler()
 	if handler == nil {
@@ -56,7 +57,7 @@ func TestHandler_HealthzRoute(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(nil, mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(context.TODO(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)
@@ -82,7 +83,7 @@ func TestHandler_VersionRoute(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(nil, mux, cfgPtr, "v1.0.0", "2026-06-13", nil, testLogger(), nil)
+	h := RegisterRoutes(context.TODO(), mux, cfgPtr, "v1.0.0", "2026-06-13", nil, testLogger(), nil)
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)
@@ -110,7 +111,7 @@ func TestHandler_UploadRouteRequiresAuth(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	h := RegisterRoutes(nil, mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(context.TODO(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)

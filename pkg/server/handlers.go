@@ -56,7 +56,6 @@ type Handlers struct {
 	metrics       *Metrics
 	muxMetrics    *mux.Metrics
 	shareStore    *ShareStore
-	relayHandler  http.Handler
 	routeTable    *hub.RouteTable
 	handler       http.Handler // mux wrapped with metricsMiddleware
 }

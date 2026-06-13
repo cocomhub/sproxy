@@ -109,7 +109,7 @@ func runHubStatus(ctx context.Context, hubAddr string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Hub 返回错误状态: %s", resp.Status)
+		return fmt.Errorf("hub 返回错误状态: %s", resp.Status)
 	}
 
 	var nodes []struct {

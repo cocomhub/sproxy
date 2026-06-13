@@ -691,7 +691,7 @@ func TestClient_ListWithPagination(t *testing.T) {
 	}
 
 	// limit=3，第二页 -> 应返回 3 个文件
-	files, total, err = c.ListWithPagination(context.Background(), 3, 3)
+	files, _, err = c.ListWithPagination(context.Background(), 3, 3)
 	if err != nil {
 		t.Fatalf("ListWithPagination page 2: %v", err)
 	}
@@ -700,7 +700,7 @@ func TestClient_ListWithPagination(t *testing.T) {
 	}
 
 	// limit=5，offset=0 -> 返回 5 个文件
-	files, total, err = c.ListWithPagination(context.Background(), 0, 5)
+	files, _, err = c.ListWithPagination(context.Background(), 0, 5)
 	if err != nil {
 		t.Fatalf("ListWithPagination limit=5: %v", err)
 	}

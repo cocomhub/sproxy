@@ -54,7 +54,7 @@ func TestMuxOpenAccept(t *testing.T) {
     }
 
     reply := []byte("pong")
-    n, err = streamB.Write(reply)
+    _, err = streamB.Write(reply)
     if err != nil {
         t.Fatal(err)
     }
