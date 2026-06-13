@@ -20,8 +20,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"testing"
 	"sync"
+	"testing"
 	"time"
 )
 

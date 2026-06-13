@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -34,13 +35,7 @@ func TestGzipMiddleware_Compresses(t *testing.T) {
 	}
 
 	// Verify Vary header
-	found := false
-	for _, v := range rec.Header().Values("Vary") {
-		if v == "Accept-Encoding" {
-			found = true
-			break
-		}
-	}
+	found := slices.Contains(rec.Header().Values("Vary"), "Accept-Encoding")
 	if !found {
 		t.Fatal("expected Vary: Accept-Encoding header")
 	}
