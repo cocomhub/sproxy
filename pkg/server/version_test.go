@@ -164,3 +164,129 @@ func TestVersion_MissingFilename(t *testing.T) {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
 	}
 }
+
+// ---- deleteVersionHandler tests ----
+
+func TestDeleteVersion_Disabled(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, err := http.NewRequest("DELETE", url+"/api/versions?filename=test.txt&version_id=12345", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("expected 501 for disabled versioning, got %d", resp.StatusCode)
+	}
+}
+
+func TestDeleteVersion_NoFilename(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.Versioning.Enabled = true
+	})
+
+	req, err := http.NewRequest("DELETE", url+"/api/versions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestDeleteVersion_HappyPath(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.Versioning.Enabled = true
+		cfg.Versioning.MaxVersions = 10
+	})
+
+	// Upload a file
+	body := []byte("delete version test")
+	uploadFile(t, url, "delver.txt", body, map[string]string{
+		"X-File-Checksum": sha256hex(body),
+	})
+
+	// Overwrite to create a version
+	body2 := []byte("delete version test v2")
+	uploadFile(t, url, "delver.txt", body2, map[string]string{
+		"X-File-Checksum": sha256hex(body2),
+	})
+
+	// List versions to get a version_id
+	resp, err := http.Get(url + "/api/versions?filename=delver.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var listResult struct {
+		Versions []VersionInfo `json:"versions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResult); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResult.Versions) == 0 {
+		t.Fatal("expected at least one version")
+	}
+
+	versionID := listResult.Versions[0].VersionID
+
+	// Delete the version
+	delURL := fmt.Sprintf("%s/api/versions?filename=delver.txt&version_id=%d", url, versionID)
+	req, err := http.NewRequest("DELETE", delURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 on delete version, got %d", resp.StatusCode)
+	}
+
+	var delResult UploadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&delResult); err != nil {
+		t.Fatal(err)
+	}
+	if !delResult.Success {
+		t.Fatalf("delete version failed: %s", delResult.Message)
+	}
+}
+
+func TestDeleteVersion_NonExistent(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.Versioning.Enabled = true
+	})
+
+	req, err := http.NewRequest("DELETE", url+"/api/versions?filename=nonexistent.txt&version_id=99999", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-existent version, got %d", resp.StatusCode)
+	}
+}

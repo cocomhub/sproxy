@@ -229,6 +229,11 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	cfg := h.cfgPtr.Load()
+	if !cfg.Versioning.Enabled {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "版本管理未启用"}, http.StatusNotImplemented)
+		return
+	}
+
 	verFile := filepath.Join(cfg.UploadsDir, versionsDirName, remotePath, versionIDStr)
 	if err := os.Remove(verFile); err != nil {
 		if os.IsNotExist(err) {
