@@ -276,8 +276,3 @@ func TestE2E_SclientCLI(t *testing.T) {
 		t.Errorf("expected sclient_test.txt in list output, got: %s", out)
 	}
 }
-
-// ---- helpers ----
-
-// moduleRootFromCaller returns the module root by walking up from the caller's source file.
-// Used instead of findModuleRoot (removed) which did the same thing via os.Getwd() traversal.

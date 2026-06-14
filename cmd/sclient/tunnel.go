@@ -34,6 +34,12 @@ var tunnelCmd = &cobra.Command{
 		v.SetConfigType("yaml")
 		v.SetEnvPrefix("SCLIENT")
 		v.AutomaticEnv()
+		if err := v.ReadInConfig(); err != nil {
+			var re viper.ConfigFileNotFoundError
+			if !errors.As(err, &re) {
+				return fmt.Errorf("读取配置文件失败: %w", err)
+			}
+		}
 		_ = v.BindPFlag("server_url", cmd.Flags().Lookup("server"))
 
 		cfg, err := client.LoadFromViper(v)

@@ -48,7 +48,8 @@
       "Bash(python3 *)",
       "Bash(git rm *)",
       "Bash(git reset *)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Skill(code-review)"
     ],
     "deny": []
   }
