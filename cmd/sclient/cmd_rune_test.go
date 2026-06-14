@@ -256,7 +256,12 @@ func TestConfigCommand(t *testing.T) {
 // ---- Tunnel command RunE 测试 ----
 
 func TestTunnelCommand_MissingKey(t *testing.T) {
-	// Tunnel command calls os.Exit(1) when tunnel_key is missing,
-	// which would kill the test process. Skip this test in normal runs.
-	t.Skip("跳过: tunnel 命令在缺密钥时 os.Exit(1)，不能在常规测试中运行")
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"tunnel", "http://example.com"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when tunnel_key is missing")
+	}
 }

@@ -28,16 +28,21 @@ var tunnelCmd = &cobra.Command{
   sclient tunnel https://api.example.com/data
   sclient tunnel -X POST -H "Content-Type: application/json" -d '{"key":"val"}' https://api.example.com/echo`,
 	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		cfg, err := client.LoadFromViper(viper.GetViper())
+	RunE: func(cmd *cobra.Command, args []string) error {
+		v := viper.New()
+		v.SetConfigFile(cfgFile)
+		v.SetConfigType("yaml")
+		v.SetEnvPrefix("SCLIENT")
+		v.AutomaticEnv()
+		_ = v.BindPFlag("server_url", cmd.Flags().Lookup("server"))
+
+		cfg, err := client.LoadFromViper(v)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("加载配置失败: %w", err)
 		}
 
 		if cfg.TunnelKey == "" {
-			fmt.Fprintln(os.Stderr, "请先配置 tunnel_key: sclient config set tunnel_key <64位hex密钥>")
-			os.Exit(1)
+			return fmt.Errorf("请先配置 tunnel_key: sclient config set tunnel_key <64位hex密钥>")
 		}
 
 		method, _ := cmd.Flags().GetString("method")
@@ -51,18 +56,14 @@ var tunnelCmd = &cobra.Command{
 		if strings.HasPrefix(body, "@") {
 			data, err := os.ReadFile(body[1:])
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "读取文件失败: %v\n", err)
-				os.Exit(1)
+				return fmt.Errorf("读取文件失败: %w", err)
 			}
 			body = string(data)
 		}
 
 		targetURL := args[0]
 
-		if err := tunnelRequest(cfg, method, targetURL, headers, body, outputPath, verbose, include); err != nil {
-			fmt.Fprintf(os.Stderr, "tunnel 请求失败: %v\n", err)
-			os.Exit(1)
-		}
+		return tunnelRequest(cfg, method, targetURL, headers, body, outputPath, verbose, include)
 	},
 }
 
