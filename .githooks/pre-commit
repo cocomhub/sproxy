@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+echo "=== pre-commit 检查 ==="
+
+# 1. go vet
+echo "[1/3] go vet..."
+go vet ./...
+
+# 2. gofmt 检查
+echo "[2/3] gofmt..."
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+  echo "未格式化的文件:"
+  echo "$unformatted"
+  echo "请运行: gofmt -w <file>"
+  exit 1
+fi
+
+# 3. 检查测试监听地址
+echo "[3/3] check-loopback..."
+found=$(grep -rn --include='*_test.go' 'Listen.*0\.0\.0\.0\|Listen.*localhost\|httptest.*0\.0\.0\.0\|\"localhost\"' . 2>/dev/null || true)
+if [ -n "$found" ]; then
+  echo "警告: 测试文件中发现 localhost/0.0.0.0 监听地址（应使用 127.0.0.1）:"
+  echo "$found"
+  exit 1
+fi
+
+echo "=== pre-commit 通过 ==="

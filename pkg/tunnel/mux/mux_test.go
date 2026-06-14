@@ -369,16 +369,16 @@ func TestMuxWriteChClosedStream(t *testing.T) {
 }
 
 func TestMuxMetrics(t *testing.T) {
-    a, b := xfertest.Pipe()
-    muxA := mux.New(a, mux.RoleDialer)
-    muxB := mux.New(b, mux.RoleListener)
-    defer muxA.Close()
-    defer muxB.Close()
+	a, b := xfertest.Pipe()
+	muxA := mux.New(a, mux.RoleDialer)
+	muxB := mux.New(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
 
-    m := muxA.Metrics()
-    if m == nil {
-        t.Fatal("Metrics() returned nil")
-    }
+	m := muxA.Metrics()
+	if m == nil {
+		t.Fatal("Metrics() returned nil")
+	}
 }
 
 // TestMuxSendReceive 验证 mux 基本发送接收正确性。

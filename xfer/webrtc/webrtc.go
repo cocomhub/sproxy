@@ -70,8 +70,8 @@ func (c *Conn) Close() error {
 	c.closeOnce.Do(func() { err = c.pc.Close() })
 	return err
 }
-func (c *Conn) LocalAddr() net.Addr               { return webrtcAddr{} }
-func (c *Conn) RemoteAddr() net.Addr              { return webrtcAddr{} }
+func (c *Conn) LocalAddr() net.Addr                { return webrtcAddr{} }
+func (c *Conn) RemoteAddr() net.Addr               { return webrtcAddr{} }
 func (c *Conn) SetDeadline(_ time.Time) error      { return nil }
 func (c *Conn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *Conn) SetWriteDeadline(_ time.Time) error { return nil }

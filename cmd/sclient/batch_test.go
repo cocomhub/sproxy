@@ -31,9 +31,14 @@ func TestRunBatchOperation(t *testing.T) {
 			wantFail: 2,
 		},
 		{
-			name:     "mixed results",
-			items:    []string{"good", "bad", "ok"},
-			op:       func(item string) error { if item == "bad" { return errors.New("err") }; return nil },
+			name:  "mixed results",
+			items: []string{"good", "bad", "ok"},
+			op: func(item string) error {
+				if item == "bad" {
+					return errors.New("err")
+				}
+				return nil
+			},
 			wantSucc: 2,
 			wantFail: 1,
 		},

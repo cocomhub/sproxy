@@ -10,9 +10,9 @@
 //	    rpc Stream(stream XferMsg) returns (stream XferMsg);
 //	}
 //
-// message XferMsg {
-//	    bytes payload = 1;
-//	}
+//	message XferMsg {
+//		    bytes payload = 1;
+//		}
 //
 // NOTE: This is a skeleton implementation. Dial returns "not yet implemented, use ws
 // instead". Full implementation requires protoc-generated code from the proto above.

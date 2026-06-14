@@ -179,3 +179,8 @@ bench-web:
 	@mkdir -p $(BENCH_DIR)/web
 	@go run tools/genbenchview/main.go -data=$(BENCH_DATA_DIR) -out=$(BENCH_DIR)/web
 	@echo "Benchmark web report: file://$(abspath $(BENCH_DIR)/web/index.html)"
+
+.PHONY: githooks
+githooks:
+	@git config core.hooksPath .githooks
+	@echo "Git hooks 已配置: .githooks/"
