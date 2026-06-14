@@ -368,6 +368,18 @@ func TestMuxWriteChClosedStream(t *testing.T) {
 	}
 }
 
+func TestMuxMetrics(t *testing.T) {
+    a, b := xfertest.Pipe()
+    muxA := mux.New(a, mux.RoleDialer)
+    defer muxA.Close()
+    _ = b.Close()
+
+    m := muxA.Metrics()
+    if m == nil {
+        t.Fatal("Metrics() returned nil")
+    }
+}
+
 func TestMuxFlowControl(t *testing.T) {
 	// NOTE: 完整的窗口耗尽测试需要 pipe transport 支持 sendWindowUpdateUnsafe
 	// 与 mux 内部 writeLoop 的交互，此处仅做窗口基本正确的验证。

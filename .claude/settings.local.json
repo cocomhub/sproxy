@@ -6,6 +6,8 @@
   },
   "permissions": {
     "allow": [
+      "Read",
+      "Write",
       "Bash(*)",
       "PowerShell(*)",
       "mcp__mcp-atlassian-http__confluence_get_page",

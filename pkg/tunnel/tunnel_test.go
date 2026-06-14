@@ -311,6 +311,46 @@ func TestNewClient_rejectsInvalidKey(t *testing.T) {
 var _ = testKey
 var _ = GenerateKey
 
+func TestEncryptDecrypt_Roundtrip(t *testing.T) {
+	plaintext := []byte("hello encryption!")
+	ciphertext, err := Encrypt(testKey, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := Decrypt(testKey, ciphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decrypted, plaintext) {
+		t.Fatalf("expected %q, got %q", plaintext, decrypted)
+	}
+}
+
+func TestEncryptDecrypt_EmptyPlaintext(t *testing.T) {
+	ciphertext, err := Encrypt(testKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := Decrypt(testKey, ciphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decrypted) != 0 {
+		t.Fatalf("expected empty, got %d bytes", len(decrypted))
+	}
+}
+
+func TestEncryptDecrypt_ShortKey(t *testing.T) {
+	_, err := Encrypt([]byte("short"), []byte("data"))
+	if err == nil {
+		t.Error("expected error for short key")
+	}
+	_, err = Decrypt([]byte("short"), []byte("data"))
+	if err == nil {
+		t.Error("expected error for short key")
+	}
+}
+
 func BenchmarkEncryptDecrypt(b *testing.B) {
 	key := testKey
 	plaintext := []byte(`{"method":"GET","url":"/api/files","headers":{}}`)

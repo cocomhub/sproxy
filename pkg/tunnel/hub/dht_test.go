@@ -229,3 +229,21 @@ func TestDhtRegisterNilMeta(t *testing.T) {
 		t.Fatalf("expected empty Meta, got %v", node.Meta)
 	}
 }
+
+func TestMemoryDHT_Close(t *testing.T) {
+	dht := newMemoryDHT()
+	if err := dht.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewDHT(t *testing.T) {
+	dht := NewDHT()
+	if dht == nil {
+		t.Fatal("NewDHT() returned nil")
+	}
+	// 验证返回的是 memoryDHT，实现了 Close
+	if err := dht.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
