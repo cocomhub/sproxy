@@ -126,3 +126,56 @@ run: build
 
 show-version:
 	$(BIN_NAME) --version
+
+TOOLS := \
+    github.com/google/addlicense@latest \
+    golang.org/x/perf/cmd/benchstat@latest
+
+.PHONY: tools
+tools:
+	@for tool in $(TOOLS); do \
+		echo "Installing $$tool..."; \
+		go install $$tool; \
+	done
+
+BENCH_DIR := $(BUILD_DIR)/benchmark
+BENCH_DATA_DIR := $(BENCH_DIR)/data
+
+.PHONY: bench
+bench:
+	@mkdir -p $(BENCH_DATA_DIR)
+	@echo "=== Running benchmarks ==="
+	@outfile="$(BENCH_DATA_DIR)/$(shell git rev-parse --abbrev-ref HEAD)-$(shell git rev-parse --short HEAD)-$(shell date +%Y%m%dT%H%M%S).txt"; \
+	  echo "Benchmark results will be saved to: $$outfile"; \
+	  echo "branch: $(shell git rev-parse --abbrev-ref HEAD)" > "$$outfile"; \
+	  echo "commit: $(shell git rev-parse --short HEAD)" >> "$$outfile"; \
+	  echo "date: $(shell date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$$outfile"; \
+	  echo "" >> "$$outfile"; \
+	  go test -bench=. -benchmem -count=1 \
+	    ./pkg/server/... \
+	    ./pkg/client/... \
+	    ./pkg/tunnel/mux/... \
+	    2>&1 | tee -a "$$outfile"; \
+	  echo ""; \
+	  echo "=== 清理旧记录（保留最近 10 条）==="; \
+	  cd $(BENCH_DATA_DIR) && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm -f; \
+	  echo "Done. Records in $(BENCH_DATA_DIR): $$(ls $(BENCH_DATA_DIR)/*.txt 2>/dev/null | wc -l)"
+
+.PHONY: bench-compare
+bench-compare:
+	@files=$$(ls -t $(BENCH_DATA_DIR)/*.txt 2>/dev/null | head -2); \
+	  count=$$(echo "$$files" | wc -l); \
+	  if [ "$$count" -lt 2 ]; then \
+	    echo "需要至少 2 条 benchmark 记录才能比较"; exit 1; \
+	  fi; \
+	  echo "=== 比较最近两次 benchmark 结果 ==="; \
+	  echo "新: $$(echo "$$files" | head -1)"; \
+	  echo "旧: $$(echo "$$files" | tail -1)"; \
+	  echo ""; \
+	  benchstat "$$(echo "$$files" | tail -1)" "$$(echo "$$files" | head -1)"
+
+.PHONY: bench-web
+bench-web:
+	@mkdir -p $(BENCH_DIR)/web
+	@go run tools/genbenchview/main.go -data=$(BENCH_DATA_DIR) -out=$(BENCH_DIR)/web
+	@echo "Benchmark web report: file://$(abspath $(BENCH_DIR)/web/index.html)"
