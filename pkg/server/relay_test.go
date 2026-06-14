@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -131,5 +132,29 @@ func TestBodyToString(t *testing.T) {
 				t.Fatalf("expected %q, got %q", string(tt.body), got)
 			}
 		})
+	}
+}
+
+func TestBodyToString_UTF8(t *testing.T) {
+	input := []byte("hello world")
+	got := bodyToString(input)
+	if got != "hello world" {
+		t.Errorf("expected 'hello world', got %q", got)
+	}
+}
+
+func TestBodyToString_Binary(t *testing.T) {
+	input := []byte{0x00, 0x01, 0xFF, 0xFE, 0x80}
+	got := bodyToString(input)
+	expected := base64.StdEncoding.EncodeToString(input)
+	if got != expected {
+		t.Errorf("expected base64 %q, got %q", expected, got)
+	}
+}
+
+func TestBodyToString_Empty(t *testing.T) {
+	got := bodyToString([]byte{})
+	if got != "" {
+		t.Errorf("expected empty string, got %q", got)
 	}
 }

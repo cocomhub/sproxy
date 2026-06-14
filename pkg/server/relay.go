@@ -4,11 +4,13 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -100,10 +102,13 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
-// bodyToString 将 body 转为 string（小 body 暂不使用 base64，直接使用 UTF-8）。
-// TODO: 对二进制 body 使用 base64 编码。
+// bodyToString 将 body 转为 string。
+// 有效 UTF-8 直接返回；二进制数据用 base64 编码。
 func bodyToString(body []byte) string {
-	return string(body)
+	if utf8.Valid(body) {
+		return string(body)
+	}
+	return base64.StdEncoding.EncodeToString(body)
 }
 
 func writeRelayError(w http.ResponseWriter, msg string, code int) {
