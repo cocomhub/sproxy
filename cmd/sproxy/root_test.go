@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -135,6 +136,64 @@ func TestRunServer_VersionFlag(t *testing.T) {
 	// Since we can't easily capture os.Exit in Go tests, we test the underlying
 	// handler logic by setting the version flag.
 	// Note: cobra.Execute() can't be easily unit tested in isolation.
+}
+
+func TestRunServer_SignalGoroutineLeak(t *testing.T) {
+	// 验证 runServer 返回后没有 goroutine 泄漏
+	before := runtime.NumGoroutine()
+
+	tmpDir := t.TempDir()
+	cmd := &cobra.Command{Use: "sproxy"}
+	cmd.Flags().String("addr", "127.0.0.1:0", "")
+	cmd.Flags().String("uploads-dir", tmpDir, "")
+	cmd.Flags().String("tunnel-key", "", "")
+	cmd.Flags().Bool("version", false, "")
+
+	v := viper.GetViper()
+	cfgFile = tmpDir + "/sproxy.yaml"
+	v.SetConfigFile(cfgFile)
+	v.SetConfigType("yaml")
+	v.SetEnvPrefix("SPROXY")
+	v.AutomaticEnv()
+	_ = v.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+	_ = v.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	_ = v.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+
+	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	v.Set("addr", "127.0.0.1:0")
+	v.Set("uploads_dir", tmpDir)
+	v.Set("log_level", "error")
+	v.Set("tunnel_key", validKey)
+
+	sigCh := make(chan os.Signal, 1)
+	testSignalCh = sigCh
+	defer func() { testSignalCh = nil }()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServer(cmd, nil)
+	}()
+
+	// 等服务器启动
+	time.Sleep(500 * time.Millisecond)
+
+	// 发送中断信号关闭服务器
+	sigCh <- os.Interrupt
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("runServer returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not shut down within 5s")
+	}
+
+	after := runtime.NumGoroutine()
+	// 允许少量 goroutine 波动（GC、测试框架、time.After 等）
+	if after > before+5 {
+		t.Errorf("possible goroutine leak after signal shutdown: before=%d, after=%d", before, after)
+	}
 }
 
 func TestRunServer_StartStop(t *testing.T) {
