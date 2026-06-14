@@ -92,12 +92,20 @@ test-packages: vet check-loopback
 	@echo "=== pkg/server/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/server/... 2>&1
 	@echo "=== test/... ===" && $(GO) test -race -count=1 -timeout=60s ./test/... 2>&1
 
+COVER_THRESHOLD ?= 85
+
 .PHONY: cover
 
 cover: vet
 	@mkdir -p $(BUILD_DIR)/coverage
 	$(GO) test -count=1 -coverprofile=$(BUILD_DIR)/coverage/cover.out ./...
 	@$(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out | grep -E "total"
+	@echo "=== 覆盖率门禁检查 ==="
+	@pct=$$($(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out | grep -E "^total" | awk '{print $$NF}' | sed 's/%//; s/\.[0-9]*//'); \
+	  echo "total coverage: $$pct% (threshold: $(COVER_THRESHOLD)%)"; \
+	  if [ "$$CI" = "true" ] && [ "$$pct" -lt "$(COVER_THRESHOLD)" ]; then \
+	    echo "FAIL: coverage $$pct% < threshold $(COVER_THRESHOLD)%"; exit 1; \
+	  fi
 
 # 覆盖率 HTML 报告（不含 race，避免 test/e2e_test.go 已知 race 阻断报告生成）
 .PHONY: cover-html
