@@ -65,24 +65,18 @@ func TestMetricsHandler_NilMetrics(t *testing.T) {
 
 func TestBatchRenameHandler(t *testing.T) {
 	// batchRename handler 不应 panic（即使输入无效）
+	cfg := Default()
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+
 	mux := http.NewServeMux()
-	RegisterRoutes(nil, mux, nil, "test", "now", nil, nil, nil)
+	RegisterRoutes(nil, mux, &cfgPtr, "test", "now", nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/batch-rename", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
-	_ = w
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
+	// 只要不 panic 且返回非 5xx 即可
+	if w.Code >= 500 {
+		t.Errorf("unexpected 5xx: %d", w.Code)
 	}
-	return false
 }

@@ -51,7 +51,7 @@ func TestDhtRegisterOverwrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(node.Addrs) == 0 || node.Addrs[0] != "10.0.0.1:9001" {
+	if len(node.Addrs) != 1 || node.Addrs[0] != "10.0.0.1:9001" {
 		t.Fatalf("expected updated addr 10.0.0.1:9001, got %v", node.Addrs)
 	}
 	if node.Meta["region"] != "eu-west" {

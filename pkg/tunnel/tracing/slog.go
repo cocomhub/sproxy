@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 )
@@ -69,7 +70,7 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 
 		indent := ""
 		if depth > 1 {
-			indent = stringsRepeat("  ", depth-1)
+			indent = strings.Repeat("  ", depth-1)
 		}
 
 		attrs := slog.String("trace_id", span.TraceID)
@@ -109,15 +110,4 @@ func tagsToAttrs(tags map[string]string) []any {
 		attrs = append(attrs, slog.String(k, v))
 	}
 	return attrs
-}
-
-func stringsRepeat(s string, count int) string {
-	if count <= 0 {
-		return ""
-	}
-	b := make([]byte, len(s)*count)
-	for i := range count {
-		copy(b[i*len(s):], s)
-	}
-	return string(b)
 }
