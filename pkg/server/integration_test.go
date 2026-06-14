@@ -22,7 +22,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // newTestServer 启动一个临时的 httptest.Server，绑定到独立的 uploads 目录。
@@ -910,7 +909,8 @@ func TestRegisterRoutes_Smoke(t *testing.T) {
 	t.Cleanup(func() { _ = h.Close() })
 }
 
-// newTestServerWithAllRoutes 启动包含全部路由的测试服务器（含 tunnel key 但不绑定真实端口）。
+// newTestServerWithAllRoutes 启动包含全部路由的测试服务器（委托给 RegisterRoutes 注册路由）。
+// 返回服务地址与 cfgPtr。使用 t.Cleanup 自动关闭服务与释放资源。
 func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config]) {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -918,58 +918,27 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
 	cfg.ChunkSize = 4 << 10 // 4 KiB for testing
+	cfg.LogLevel = "error"
+	cfg.AuthToken = ""
 	if modifyCfg != nil {
 		modifyCfg(cfg)
+	}
+
+	if !strings.Contains(cfg.Addr, "127.0.0.1") && !strings.HasPrefix(cfg.Addr, ":") {
+		cfg.Addr = "127.0.0.1" + cfg.Addr
 	}
 
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	cs := NewChecksumStore(cfg.UploadsDir, nil)
-	h := &Handlers{
-		cfgPtr:        &cfgPtr,
-		version:       "test-version",
-		buildAt:       "test-buildat",
-		checksumStore: cs,
-		uploadStore:   NewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
-		logger:        slog.Default(),
-		metrics:       NewMetrics(),
-		shareStore:    NewShareStore(),
-	}
-
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
-	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
-	mux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
-	mux.HandleFunc("POST /rename", h.authMiddleware(h.rename))
-	mux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
-	mux.HandleFunc("HEAD /api/files/stat", h.authMiddleware(h.stat))
-	mux.HandleFunc("POST /mkdir", h.authMiddleware(h.mkdir))
-	mux.HandleFunc("POST /rmdir", h.authMiddleware(h.rmdir))
-	mux.HandleFunc("POST /upload/init", h.authMiddleware(h.uploadInit))
-	mux.HandleFunc("POST /upload/chunk", h.authMiddleware(h.uploadChunk))
-	mux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
-	mux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
-	mux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
-	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
-	mux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
-	mux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
-	mux.HandleFunc("POST /api/archive", h.authMiddleware(h.archiveHandler))
-	mux.HandleFunc("GET /api/archive-dir", h.authMiddleware(h.archiveDirHandler))
-	mux.HandleFunc("GET /api/versions", h.authMiddleware(h.listVersionsHandler))
-	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
-	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
-	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
-	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
-	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
-	mux.HandleFunc("GET /healthz", h.healthz)
-	mux.HandleFunc("GET /version", h.versionHandler)
-	mux.HandleFunc("GET /", h.webRedirect)
+	key := make([]byte, 32) // 32 字节 tunnel key，测试用零值
+	h := RegisterRoutes(context.Background(), mux, &cfgPtr, "test-version", "test-buildat", key, testLogger(), nil)
 
-	ts := httptest.NewServer(mux)
+	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {
 		ts.Close()
-		h.uploadStore.Stop()
+		_ = h.Close()
 	})
 	return ts.URL, &cfgPtr
 }
