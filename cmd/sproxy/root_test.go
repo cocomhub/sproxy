@@ -137,22 +137,6 @@ func TestRunServer_VersionFlag(t *testing.T) {
 	// Note: cobra.Execute() can't be easily unit tested in isolation.
 }
 
-// captureStderr 捕获 stderr 输出的辅助函数
-func captureStderr(fn func()) string {
-	r, w, err := os.Pipe()
-	if err != nil {
-		panic(err)
-	}
-	old := os.Stderr
-	os.Stderr = w
-	fn()
-	w.Close()
-	os.Stderr = old
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	return string(buf[:n])
-}
-
 func TestRunServer_StartStop(t *testing.T) {
 	// 通过注入 signal channel 来避免 Windows 对 os.Signal 的限制
 	tmpDir := t.TempDir()

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -253,7 +252,8 @@ func TestE2E_SclientCLI(t *testing.T) {
 	}
 	binPath := filepath.Join(tmpDir, binName)
 	_ = binPath // sclient binary built but not directly exercised here (upload done via HTTP)
-	moduleRoot := findModuleRoot()
+	_, currentFile, _, _ := runtime.Caller(0)
+	moduleRoot := filepath.Dir(filepath.Dir(currentFile))
 	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sclient")
 	buildCmd.Dir = moduleRoot
 	if out, err := buildCmd.CombinedOutput(); err != nil {
@@ -279,20 +279,5 @@ func TestE2E_SclientCLI(t *testing.T) {
 
 // ---- helpers ----
 
-// findModuleRoot finds the sproxy module root by looking for go.mod.
-func findModuleRoot() string {
-	dir, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			panic("go.mod not found")
-		}
-		dir = parent
-	}
-}
+// moduleRootFromCaller returns the module root by walking up from the caller's source file.
+// Used instead of findModuleRoot (removed) which did the same thing via os.Getwd() traversal.

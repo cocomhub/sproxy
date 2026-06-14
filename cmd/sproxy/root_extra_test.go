@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -169,7 +170,7 @@ func TestHandleSighup_AddrChangeWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_ = captureStderr(func() {
+	_ = testutil.CaptureStderr(func() {
 		handleSighup(initialCfg, nil)
 	})
 }
@@ -221,22 +222,6 @@ func TestRunServer_ListenAndServeError(t *testing.T) {
 	}
 }
 
-// captureStdout 捕获 stdout 输出的辅助函数（与 captureStderr 对称，用于 initLogger 测试）。
-func captureStdout(fn func()) string {
-	r, w, err := os.Pipe()
-	if err != nil {
-		panic(err)
-	}
-	old := os.Stdout
-	os.Stdout = w
-	fn()
-	w.Close()
-	os.Stdout = old
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	return string(buf[:n])
-}
-
 // ---- initLogger tests ----
 
 func TestInitLogger_Combinations(t *testing.T) {
@@ -255,7 +240,7 @@ func TestInitLogger_Combinations(t *testing.T) {
 				oldDefault := slog.Default()
 				t.Cleanup(func() { slog.SetDefault(oldDefault) })
 
-				output := captureStdout(func() {
+				output := testutil.CaptureStdout(func() {
 					logger := initLogger(cfg)
 					if logger == nil {
 						t.Error("initLogger returned nil")

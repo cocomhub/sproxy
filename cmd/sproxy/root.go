@@ -150,37 +150,49 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
 
+	// stopSigCh 在 ListenAndServe 失败时关闭，通知信号 goroutine 退出（避免泄漏）。
+	stopSigCh := make(chan struct{})
+
 	// shutdownDone 在 graceful shutdown 流程完成后被关闭，便于主 goroutine 等待清理动作真正执行完成。
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
-		for sig := range signalChan {
-			if sig == syscall.SIGHUP {
-				tunUpdater, ok := h.TunnelHandler().(server.TunnelUpdater)
+		defer signal.Stop(signalChan)
+		for {
+			select {
+			case <-stopSigCh:
+				return
+			case sig, ok := <-signalChan:
 				if !ok {
-					slog.Warn("tunnel handler does not support UpdateKey")
-					handleSighup(cfg, nil)
-				} else {
-					handleSighup(cfg, tunUpdater)
+					return
 				}
-				continue
+				if sig == syscall.SIGHUP {
+					tunUpdater, ok := h.TunnelHandler().(server.TunnelUpdater)
+					if !ok {
+						slog.Warn("tunnel handler does not support UpdateKey")
+						handleSighup(cfg, nil)
+					} else {
+						handleSighup(cfg, tunUpdater)
+					}
+					continue
+				}
+				cancel()
+				currentCfg := cfgPtr.Load()
+				shutdownTimeout := currentCfg.ServerTimeouts.Shutdown
+				if shutdownTimeout <= 0 {
+					shutdownTimeout = 30 * time.Second
+				}
+				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+				if err := s.Shutdown(shutdownCtx); err != nil {
+					slog.Error("shutdown error", "error", err.Error(), "timeout", shutdownTimeout)
+				}
+				shutdownCancel()
+				// http.Server 已停止 → 关闭 UploadStore 后台 goroutine
+				if err := h.Close(); err != nil {
+					slog.Warn("handlers close error", "error", err.Error())
+				}
+				return
 			}
-			cancel()
-			currentCfg := cfgPtr.Load()
-			shutdownTimeout := currentCfg.ServerTimeouts.Shutdown
-			if shutdownTimeout <= 0 {
-				shutdownTimeout = 30 * time.Second
-			}
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
-			if err := s.Shutdown(shutdownCtx); err != nil {
-				slog.Error("shutdown error", "error", err.Error(), "timeout", shutdownTimeout)
-			}
-			shutdownCancel()
-			// http.Server 已停止 → 关闭 UploadStore 后台 goroutine
-			if err := h.Close(); err != nil {
-				slog.Warn("handlers close error", "error", err.Error())
-			}
-			return
 		}
 	}()
 
@@ -225,6 +237,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 			if err == http.ErrServerClosed {
 				slog.Info("listen and serve closed", "error", err.Error())
 			} else {
+				close(stopSigCh)
 				return fmt.Errorf("listen and serve error: %w", err)
 			}
 		}
@@ -233,6 +246,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 			if err == http.ErrServerClosed {
 				slog.Info("listen and serve closed", "error", err.Error())
 			} else {
+				close(stopSigCh)
 				return fmt.Errorf("listen and serve error: %w", err)
 			}
 		}
