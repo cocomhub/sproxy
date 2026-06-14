@@ -25,6 +25,7 @@ func testLogger() *slog.Logger {
 
 // withHeader 为 *http.Request 添加 header，返回自身便于链式调用。
 // 该函数当前无调用者（由 server_auth_test.go 旧代码引用），但保留作为测试公共辅助模式参考。
+//
 //lint:file-ignore U1000 保留以备未来 auth 测试使用
 func withHeader(r *http.Request, key, value string) *http.Request {
 	r.Header.Set(key, value)

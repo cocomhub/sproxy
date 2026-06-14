@@ -260,7 +260,7 @@ func TestE2E_SclientCLI(t *testing.T) {
 		t.Fatalf("build sclient: %v\n%s", err, out)
 	}
 
-// sclient upload
+	// sclient upload
 	uploadFile(t, baseURL, "sclient_test.txt", []byte("sclient e2e"), map[string]string{
 		"X-File-Checksum": sha256hex([]byte("sclient e2e")),
 	})

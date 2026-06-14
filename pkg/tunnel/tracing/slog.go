@@ -61,6 +61,7 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		if span.ended {
+			slog.Warn("span already ended")
 			return
 		}
 		span.ended = true

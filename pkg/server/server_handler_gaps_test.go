@@ -16,6 +16,17 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
+// TestHandlers_Close 验证 Close 幂等安全。
+func TestHandlers_Close(t *testing.T) {
+	cfgPtr := &atomic.Pointer[Config]{}
+	cfgPtr.Store(Default())
+	mux := http.NewServeMux()
+	h := RegisterRoutes(context.TODO(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h.Close()
+	// 再次 Close 不应 panic
+	h.Close()
+}
+
 func TestTunnelHandler_ReturnsHandler(t *testing.T) {
 	t.Parallel()
 

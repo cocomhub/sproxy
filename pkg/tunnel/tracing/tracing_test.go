@@ -106,3 +106,29 @@ func TestTracerTagsAppearInChildSpan(t *testing.T) {
 		t.Errorf("expected child span log to contain inherited tag 'region=us-east', got: %s", output)
 	}
 }
+
+func TestTracerWithTagAfterEnd(t *testing.T) {
+	// WithTag after ends should not panic
+	tracer := New()
+	ctx := context.Background()
+
+	ctx, end := tracer.StartSpan(ctx, "op")
+	end()
+	ctx = WithTag(ctx, "after", "end")
+	_ = ctx
+}
+
+func TestTracerDoubleEndProducesWarning(t *testing.T) {
+	output := captureLog(t, func() {
+		tracer := New()
+		ctx := context.Background()
+
+		_, end := tracer.StartSpan(ctx, "op")
+		end()
+		end() // second end should log a warning
+	})
+
+	if !hasLogLine(t, output, "already ended") {
+		t.Errorf("expected warning 'already ended' on double end, got: %s", output)
+	}
+}

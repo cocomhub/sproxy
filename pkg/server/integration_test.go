@@ -1562,4 +1562,3 @@ func TestUpload_ExistingFileChecksumMismatch(t *testing.T) {
 }
 
 // ---- GzipMiddleware ----
-

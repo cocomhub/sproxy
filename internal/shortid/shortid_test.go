@@ -6,8 +6,8 @@ package shortid
 import "testing"
 
 func TestShortHash_Long(t *testing.T) {
-	in := "abcdef0123456789"   // len 16
-	want := "abcdef012345"     // first 12 chars
+	in := "abcdef0123456789" // len 16
+	want := "abcdef012345"   // first 12 chars
 	if got := ShortHash(in); got != want {
 		t.Errorf("ShortHash(%q) = %q, want %q", in, got, want)
 	}

@@ -273,3 +273,27 @@ func TestUploadStore_ConcurrentMarkChunk(t *testing.T) {
 		t.Fatal("all chunks should be received after concurrent marking")
 	}
 }
+
+func TestUploadStore_CleanupSessionAfter(t *testing.T) {
+	tmpDir := t.TempDir()
+	us := NewUploadStore(tmpDir, 0, nil)
+	defer us.Stop()
+
+	sessionID := "cleanup-test"
+	us.CreateSession(sessionID, "cleanup.txt", 1024, 256, 4, "abcd", 0)
+
+	// 检查 session 存在
+	if session := us.GetSession(sessionID); session == nil {
+		t.Fatal("expected session to exist")
+	}
+
+	// 计划在 50ms 后清理
+	us.CleanupSessionAfter(sessionID, 50*time.Millisecond)
+
+	// 验证 50ms 后 session 被移除
+	time.Sleep(100 * time.Millisecond)
+
+	if session := us.GetSession(sessionID); session != nil {
+		t.Error("expected session to be cleaned up after TTL")
+	}
+}

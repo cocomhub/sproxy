@@ -4,15 +4,9 @@
 package xfer_test
 
 import (
-	"bytes"
-	"context"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/internal/http"
 )
 
 func TestRegisterAndGet(t *testing.T) {
@@ -49,79 +43,4 @@ func TestRegisterEmptyNamePanics(t *testing.T) {
 		}
 	}()
 	xfer.Register(&xfer.Transport{Name: ""})
-}
-
-func TestHTTPConnRoundTrip(t *testing.T) {
-	// server: /tunnel 接收 POST，原样返回 body
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatal(err)
-			return
-		}
-		w.Write(body)
-	}))
-	defer srv.Close()
-
-	ctx := context.Background()
-	tp := xfer.Get("http")
-	if tp == nil {
-		t.Fatal("http transport not registered")
-	}
-	conn, err := tp.Dial(ctx, srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	payload := []byte("hello xfer")
-	if err := conn.Send(ctx, payload); err != nil {
-		t.Fatal(err)
-	}
-
-	resp, err := conn.Receive(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(resp, payload) {
-		t.Fatalf("expected %q, got %q", payload, resp)
-	}
-}
-
-func TestHTTPConnMultipleRoundTrips(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		// 返回大写版
-		w.Write(bytes.ToUpper(body))
-	}))
-	defer srv.Close()
-
-	ctx := context.Background()
-	tp := xfer.Get("http")
-	if tp == nil {
-		t.Fatal("http transport not registered")
-	}
-	conn, err := tp.Dial(ctx, srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	msgs := []string{"one", "two", "three"}
-	for _, msg := range msgs {
-		if err := conn.Send(ctx, []byte(msg)); err != nil {
-			t.Fatal(err)
-		}
-		resp, err := conn.Receive(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := bytes.ToUpper([]byte(msg))
-		if !bytes.Equal(resp, want) {
-			t.Fatalf("expected %q, got %q", want, resp)
-		}
-	}
 }

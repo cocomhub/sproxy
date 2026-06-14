@@ -41,6 +41,12 @@ type tcpConn struct {
 
 // Send 发送一条消息：4B 大端长度前缀 + 消息体。
 func (c *tcpConn) Send(ctx context.Context, msg []byte) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -94,8 +100,9 @@ func (c *tcpConn) Close() error {
 
 // TcpListener 实现 xfer.Listener，基于 net.Listener。
 type TcpListener struct {
-	ln      net.Listener
-	closeCh chan struct{}
+	ln        net.Listener
+	closeCh   chan struct{}
+	closeOnce sync.Once
 }
 
 // Addr 返回监听器的网络地址。
@@ -129,9 +136,11 @@ func (l *TcpListener) Accept(ctx context.Context) (xfer.Conn, error) {
 	}
 }
 
-// Close 关闭监听器。
+// Close 关闭监听器。可安全多次调用。
 func (l *TcpListener) Close() error {
-	close(l.closeCh)
+	l.closeOnce.Do(func() {
+		close(l.closeCh)
+	})
 	return l.ln.Close()
 }
 

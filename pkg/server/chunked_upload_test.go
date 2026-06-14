@@ -1,4 +1,4 @@
-﻿// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 package server
@@ -396,11 +396,15 @@ func TestDownloadChunk_FirstChunk(t *testing.T) {
 	part.Write(fileData)
 	mw.Close()
 	z1, _ := http.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
-	if z1 != nil { z1.Body.Close() }
+	if z1 != nil {
+		z1.Body.Close()
+	}
 	// 完成
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
 	z2, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
-	if z2 != nil { z2.Body.Close() }
+	if z2 != nil {
+		z2.Body.Close()
+	}
 
 	// 下载第一个分块
 	resp, err := http.Get(url + "/download/chunk?filename=dl-chunk-test.txt&offset=0&length=10")
@@ -461,10 +465,14 @@ func TestDownloadChunk_EntireFile(t *testing.T) {
 	part.Write(fileData)
 	mw.Close()
 	z3, _ := http.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
-	if z3 != nil { z3.Body.Close() }
+	if z3 != nil {
+		z3.Body.Close()
+	}
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
 	z4, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
-	if z4 != nil { z4.Body.Close() }
+	if z4 != nil {
+		z4.Body.Close()
+	}
 
 	resp, err := http.Get(fmt.Sprintf("%s/download/chunk?filename=full-chunk.txt&offset=0&length=%d", url, len(fileData)))
 	if err != nil {
@@ -499,7 +507,9 @@ func TestDownloadChunk_InvalidOffset(t *testing.T) {
 	uploadChunk(t, url, uploadID, 0, fileChecksum, fileData)
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
 	z5, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
-	if z5 != nil { z5.Body.Close() }
+	if z5 != nil {
+		z5.Body.Close()
+	}
 
 	// offset 超过 file size
 	resp, err := http.Get(url + "/download/chunk?filename=small.txt&offset=100&length=10")
@@ -925,7 +935,9 @@ func TestChunkedDigestConsistency(t *testing.T) {
 	uploadChunk(t, url, uploadID, 0, cs, data)
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
 	z6, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
-	if z6 != nil { z6.Body.Close() }
+	if z6 != nil {
+		z6.Body.Close()
+	}
 
 	c := client.NewFileClient(url)
 	outDir := t.TempDir()
@@ -1158,5 +1170,3 @@ func TestChunkedUpload_ContextCancelled(t *testing.T) {
 	// 如果能拿到响应，应该是有效的 HTTP 状态码（而不是 panic）
 	t.Logf("context cancelled init returned status %d", resp.StatusCode)
 }
-
-
