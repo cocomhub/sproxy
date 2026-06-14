@@ -64,26 +64,33 @@ clean:
 	rm -rf $(BIN_DIR)
 
 .PHONY: vet
-
 vet:
 	@echo Running go vet ./...
 	@$(GO) vet ./...
 
+.PHONY: check-loopback
+check-loopback:
+	@echo "=== 检查测试监听地址 ==="
+	@! grep -rn --include='*_test.go' 'Listen.*0\.0\.0\.0\|Listen.*localhost\|httptest.*0\.0\.0\.0\|\.Addr\s*=\s*"localhost' . 2>/dev/null | grep -v './.claude/worktrees/' | grep -v 'xfer/grpc' || { echo "错误: 发现测试文件含 0.0.0.0 或 localhost 监听地址！（worktrees 和已废弃 xfer/grpc 除外）"; exit 1; }
+	@echo "OK"
+
 .PHONY: test
 
-test: vet
+test: vet check-loopback
 	@echo Running go test -race ./...
 	@$(GO) test -race -count=1 -timeout=120s ./...
 
 # 分组运行测试（简化调试时定位失败的包）
 .PHONY: test-packages
 
-test-packages: vet
+test-packages: vet check-loopback
+	@echo "=== cmd/sproxy/... ===" && $(GO) test -race -count=1 -timeout=60s ./cmd/sproxy/... 2>&1
+	@echo "=== cmd/sclient/... ===" && $(GO) test -race -count=1 -timeout=60s ./cmd/sclient/... 2>&1
 	@echo "=== internal/... ===" && $(GO) test -race -count=1 -timeout=60s ./internal/... 2>&1
 	@echo "=== pkg/tunnel/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/tunnel/... 2>&1
 	@echo "=== pkg/client/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/client/... 2>&1
 	@echo "=== pkg/server/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/server/... 2>&1
-	@echo "=== cmd/... ===" && $(GO) test -race -count=1 -timeout=60s ./cmd/... 2>&1
+	@echo "=== test/... ===" && $(GO) test -race -count=1 -timeout=60s ./test/... 2>&1
 
 .PHONY: cover
 
