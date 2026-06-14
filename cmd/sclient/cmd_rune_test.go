@@ -4,12 +4,15 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // ---- Search command RunE 测试 ----
@@ -29,7 +32,7 @@ func TestSearchCommand_HappyPath(t *testing.T) {
 	resetState := captureRootCmdArgs()
 	defer resetState()
 
-	out := captureStdout(func() {
+	out := testutil.CaptureStdout(func() {
 		rootCmd.SetArgs([]string{"search", "--server", mock.URL, "report"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("search command failed: %v", err)
@@ -49,7 +52,7 @@ func TestSearchCommand_NoResults(t *testing.T) {
 	resetState := captureRootCmdArgs()
 	defer resetState()
 
-	out := captureStdout(func() {
+	out := testutil.CaptureStdout(func() {
 		rootCmd.SetArgs([]string{"search", "--server", mock.URL, "nonexistent"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("search command failed: %v", err)
@@ -82,7 +85,7 @@ func TestMvCommand_HappyPath(t *testing.T) {
 	resetState := captureRootCmdArgs()
 	defer resetState()
 
-	out := captureStdout(func() {
+	out := testutil.CaptureStdout(func() {
 		rootCmd.SetArgs([]string{"mv", "--server", mock.URL, "old.txt", "new.txt"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("mv command failed: %v", err)
@@ -106,7 +109,7 @@ func TestMvCommand_ServerError(t *testing.T) {
 	resetState := captureRootCmdArgs()
 	defer resetState()
 
-	_ = captureStderr(func() {
+	_ = testutil.CaptureStderr(func() {
 		rootCmd.SetArgs([]string{"mv", "--server", mock.URL, "old.txt", "new.txt"})
 		rootCmd.Execute()
 	})
@@ -126,7 +129,7 @@ func TestStatCommand_HappyPath(t *testing.T) {
 	resetState := captureRootCmdArgs()
 	defer resetState()
 
-	out := captureStdout(func() {
+	out := testutil.CaptureStdout(func() {
 		rootCmd.SetArgs([]string{"stat", "--server", mock.URL, "test.txt"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("stat command failed: %v", err)
@@ -212,7 +215,7 @@ func TestGenkeyCommand(t *testing.T) {
 	resetState := captureRootCmdArgs()
 	defer resetState()
 
-	out := captureStdout(func() {
+	out := testutil.CaptureStdout(func() {
 		rootCmd.SetArgs([]string{"genkey"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("genkey command failed: %v", err)
@@ -230,7 +233,7 @@ func TestVersionCommand_Run(t *testing.T) {
 	resetState := captureRootCmdArgs()
 	defer resetState()
 
-	out := captureStdout(func() {
+	out := testutil.CaptureStdout(func() {
 		rootCmd.SetArgs([]string{"version"})
 		if err := rootCmd.Execute(); err != nil {
 			t.Fatalf("version command failed: %v", err)
@@ -247,7 +250,7 @@ func TestConfigCommand(t *testing.T) {
 	resetState := captureRootCmdArgs()
 	defer resetState()
 
-	_ = captureStdout(func() {
+	_ = testutil.CaptureStdout(func() {
 		rootCmd.SetArgs([]string{"config", "show"})
 		rootCmd.Execute()
 	})
@@ -303,7 +306,7 @@ func TestBatchRenameCommand_StatFails(t *testing.T) {
 	resetState := captureRootCmdArgs()
 	defer resetState()
 
-	captureStderr(func() {
+	testutil.CaptureStderr(func() {
 		rootCmd.SetArgs([]string{"batch-rename", "--server", mock.URL, "old.txt", "new.txt"})
 		err := rootCmd.Execute()
 		if err != nil {
@@ -314,18 +317,120 @@ func TestBatchRenameCommand_StatFails(t *testing.T) {
 
 // ---- Tunnel command RunE 扩展测试（skip, 因为需要有效的 tunnel_key）----
 
-func TestTunnelCommand_WithVerboseFlag(t *testing.T) {
-	t.Skip("tunnel 命令需要有效的 tunnel_key 和加密隧道，mock server 无法替代")
+func TestTunnelCommand_WithConfigKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := []byte(fmt.Sprintf("tunnel_key: %s\nserver_url: http://127.0.0.1:18083\n", testutil.TestKey()))
+	if err := os.WriteFile(cfgPath, cfgContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tunnel" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":200}`))
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	tmpContent := []byte(fmt.Sprintf("tunnel_key: %s\nserver_url: %s\n", testutil.TestKey(), mock.URL))
+	if err := os.WriteFile(cfgPath, tmpContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rootCmd.SetArgs([]string{"tunnel", "--config", cfgPath, "http://any-host.local/data"})
+	err := rootCmd.Execute()
+	if err != nil && strings.Contains(err.Error(), "tunnel_key") {
+		t.Errorf("unexpected missing key error after config: %v", err)
+	}
 }
 
-func TestTunnelCommand_WithHeaderFlag(t *testing.T) {
-	t.Skip("tunnel 命令需要有效的 tunnel_key")
+func TestTunnelCommand_HeaderFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	cfgContent := []byte(fmt.Sprintf("tunnel_key: %s\nserver_url: %s\n", testutil.TestKey(), mock.URL))
+	if err := os.WriteFile(cfgPath, cfgContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"tunnel", "--config", cfgPath, "-H", "X-Custom: value", "http://example.com/data"})
+	err := rootCmd.Execute()
+	if err != nil && strings.Contains(err.Error(), "tunnel_key") {
+		t.Errorf("unexpected missing key error: %v", err)
+	}
 }
 
-func TestTunnelCommand_WithMethodFlag(t *testing.T) {
-	t.Skip("tunnel 命令需要有效的 tunnel_key")
+func TestTunnelCommand_MethodFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	cfgContent := []byte(fmt.Sprintf("tunnel_key: %s\nserver_url: %s\n", testutil.TestKey(), mock.URL))
+	if err := os.WriteFile(cfgPath, cfgContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"tunnel", "--config", cfgPath, "-X", "POST", "http://example.com/data"})
+	err := rootCmd.Execute()
+	if err != nil && strings.Contains(err.Error(), "tunnel_key") {
+		t.Errorf("unexpected missing key error: %v", err)
+	}
 }
 
-func TestTunnelCommand_WithDataFlag(t *testing.T) {
-	t.Skip("tunnel 命令需要有效的 tunnel_key")
+func TestTunnelCommand_DataFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	cfgContent := []byte(fmt.Sprintf("tunnel_key: %s\nserver_url: %s\n", testutil.TestKey(), mock.URL))
+	if err := os.WriteFile(cfgPath, cfgContent, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"tunnel", "--config", cfgPath, "-d", `{"key":"val"}`, "http://example.com/data"})
+	err := rootCmd.Execute()
+	if err != nil && strings.Contains(err.Error(), "tunnel_key") {
+		t.Errorf("unexpected missing key error: %v", err)
+	}
+}
+
+func TestTunnelCommand_ErrorOnNoTunnelKey(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("server_url: http://127.0.0.1:18083\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"tunnel", "--config", cfgPath, "http://example.com/data"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when tunnel_key is missing")
+	}
 }

@@ -229,38 +229,6 @@ func TestResolveRemotePathOrErr(t *testing.T) {
 	}
 }
 
-// captureStderr 捕获 stderr 输出的辅助函数
-func captureStderr(fn func()) string {
-	r, w, err := os.Pipe()
-	if err != nil {
-		panic(err)
-	}
-	old := os.Stderr
-	os.Stderr = w
-	fn()
-	w.Close()
-	os.Stderr = old
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	return string(buf[:n])
-}
-
-// captureStdout 捕获 stdout 输出的辅助函数
-func captureStdout(fn func()) string {
-	r, w, err := os.Pipe()
-	if err != nil {
-		panic(err)
-	}
-	old := os.Stdout
-	os.Stdout = w
-	fn()
-	w.Close()
-	os.Stdout = old
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	return string(buf[:n])
-}
-
 // ---- Upload command RunE 测试 ----
 
 func TestUploadCommand(t *testing.T) {
