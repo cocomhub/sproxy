@@ -10,6 +10,7 @@ run:
 
 linters:
   enable:
+    # 已有
     - errcheck
     - gosimple
     - govet
@@ -18,6 +19,15 @@ linters:
     - typecheck
     - unused
     - gofmt
+    # 新增
+    - revive
+    - gocritic
+    - gosec
+    - whitespace
+    - goimports
+    - paralleltest
+    - thelper
+    - reassign
 
 linters-settings:
   staticcheck:
@@ -29,9 +39,25 @@ linters-settings:
       - shadow
   gofmt:
     simplify: true
+  gosec:
+    excludes:
+      - G101
 
 issues:
   exclude-rules:
     - path: _test\.go
       linters:
         - errcheck
+    - path: _test\.go
+      linters:
+        - paralleltest
+    - path: _test\.go
+      linters:
+        - gosec
+    - path: cmd/.*_test\.go
+      linters:
+        - thelper
+    - path: tools/
+      linters:
+        - errcheck
+        - gosec
