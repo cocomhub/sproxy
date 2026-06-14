@@ -17,12 +17,12 @@ var listCmd = &cobra.Command{
 	Use:   "list",
 	Short: "列出服务器上的文件",
 	Long: `列出 sproxy 服务端上的文件。
-		默认列出当前目录的顶层文件。`,
-	Run: func(cmd *cobra.Command, args []string) {
+			默认列出当前目录的顶层文件。`,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cli, err := buildFileClient(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("初始化客户端失败: %w", err)
 		}
 
 		var subdir string
@@ -38,7 +38,7 @@ var listCmd = &cobra.Command{
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "列出文件失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("列出文件失败: %w", err)
 		}
 
 		if len(files) == 0 {
@@ -46,6 +46,7 @@ var listCmd = &cobra.Command{
 		} else {
 			printFileList(files, os.Stdout)
 		}
+		return nil
 	},
 }
 

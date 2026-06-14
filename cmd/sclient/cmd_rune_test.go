@@ -295,10 +295,6 @@ func TestBatchRenameCommand_AllSuccess(t *testing.T) {
 }
 
 func TestBatchRenameCommand_StatFails(t *testing.T) {
-	// NOTE: batch_rename.go 中 os.Exit(1) 导致此测试无法通过。
-	// 这是已知技术债务：cmd/sclient/ 多个子命令在失败时调用 os.Exit(1)。
-	t.Skip("batch_rename 在失败时调用 os.Exit(1)，无法在常规测试中覆盖")
-
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))

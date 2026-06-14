@@ -16,21 +16,21 @@ var searchCmd = &cobra.Command{
 	Short: "搜索文件",
 	Long: `搜索 sproxy 服务端上名称匹配的文件。
 
-搜索关键字支持模糊匹配，例如：
-  sclient search report     # 搜索名称包含 "report" 的文件
-  sclient search .txt       # 搜索名称包含 .txt 的文件`,
+	搜索关键字支持模糊匹配，例如：
+	  sclient search report     # 搜索名称包含 "report" 的文件
+	  sclient search .txt       # 搜索名称包含 .txt 的文件`,
 	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cli, err := buildFileClient(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("初始化客户端失败: %w", err)
 		}
 
 		files, err := cli.Search(context.Background(), args[0])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "搜索失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("搜索失败: %w", err)
 		}
 
 		if len(files) == 0 {
@@ -38,6 +38,7 @@ var searchCmd = &cobra.Command{
 		} else {
 			printFileList(files, os.Stdout)
 		}
+		return nil
 	},
 }
 

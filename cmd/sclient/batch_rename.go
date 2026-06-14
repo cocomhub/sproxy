@@ -15,19 +15,18 @@ var batchRenameCmd = &cobra.Command{
 	Use:   "batch-rename <from1> <to1> [from2 to2...]",
 	Short: "批量重命名文件",
 	Long: `批量重命名 sproxy 服务端上的文件。
-参数成对传入：每对 (from, to) 构成一次重命名操作。`,
+	参数成对传入：每对 (from, to) 构成一次重命名操作。`,
 	Example: `  sclient batch-rename old1.txt new1.txt old2.txt new2.txt`,
 	Args:    cobra.MinimumNArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args)%2 != 0 {
-			fmt.Fprintf(os.Stderr, "参数必须成对出现\n")
-			os.Exit(1)
+			return fmt.Errorf("参数必须成对出现")
 		}
 
 		cli, err := buildFileClient(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("初始化客户端失败: %w", err)
 		}
 
 		// 构造成对参数列表
@@ -68,8 +67,9 @@ var batchRenameCmd = &cobra.Command{
 		fail := total - success
 		fmt.Printf("\n总: %d, 成功: %d, 失败: %d\n", total, success, fail)
 		if fail > 0 {
-			os.Exit(1)
+			return fmt.Errorf("批量重命名完成，%d 个操作失败", fail)
 		}
+		return nil
 	},
 }
 

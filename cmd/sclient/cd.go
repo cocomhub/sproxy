@@ -21,8 +21,8 @@ var cdCmd = &cobra.Command{
 	Use:   "cd [path]",
 	Short: "切换当前目录",
 	Long: `切换当前操作目录，后续 upload/download/list/delete 等命令将以此目录为基准。
-cd 带参数时进入指定子目录，无参数时打印当前目录。
-cd / 回到根目录，cd .. 返回上级目录。`,
+	cd 带参数时进入指定子目录，无参数时打印当前目录。
+	cd / 回到根目录，cd .. 返回上级目录。`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		if len(args) == 0 {
@@ -94,19 +94,24 @@ var mkdirCmd = &cobra.Command{
 	Short: "在服务端创建目录",
 	Long:  "在服务端上传目录下创建指定子目录。路径相对当前目录 (cd)，支持绝对路径 (/开头)。",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cli, err := buildFileClient(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("初始化客户端失败: %w", err)
 		}
 
-		dirname := mustResolveRemotePath(args[0])
+		dirname, err := resolveRemotePath(args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "无效的路径: %v\n", err)
+			return fmt.Errorf("无效的路径: %w", err)
+		}
 		if err := cli.Mkdir(context.Background(), dirname); err != nil {
 			fmt.Fprintf(os.Stderr, "创建目录失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("创建目录失败: %w", err)
 		}
 		fmt.Printf("目录已创建: %s\n", dirname)
+		return nil
 	},
 }
 
@@ -117,14 +122,18 @@ var rmdirCmd = &cobra.Command{
 	Short: "删除服务端目录",
 	Long:  "删除服务端上传目录下的指定目录（含所有内容）。路径相对当前目录。\n使用 --force 跳过确认提示。",
 	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cli, err := buildFileClient(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("初始化客户端失败: %w", err)
 		}
 
-		dirname := mustResolveRemotePath(args[0])
+		dirname, err := resolveRemotePath(args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "无效的路径: %v\n", err)
+			return fmt.Errorf("无效的路径: %w", err)
+		}
 
 		// 检查目录是否为空：先 list 子目录
 		entries, listErr := cli.List(context.Background(), dirname)
@@ -138,15 +147,16 @@ var rmdirCmd = &cobra.Command{
 			answer = strings.TrimSpace(strings.ToLower(answer))
 			if answer != "y" && answer != "yes" {
 				fmt.Println("已取消")
-				return
+				return nil
 			}
 		}
 
 		if err := cli.Rmdir(context.Background(), dirname); err != nil {
 			fmt.Fprintf(os.Stderr, "删除目录失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("删除目录失败: %w", err)
 		}
 		fmt.Printf("目录已删除: %s\n", dirname)
+		return nil
 	},
 }
 
@@ -220,13 +230,12 @@ func resolveRemotePath(userPath string) (string, error) {
 	return cleaned, nil
 }
 
-// mustResolveRemotePath 是 resolveRemotePath 的便捷封装：路径校验失败时打印错误并退出。
-// 用于 cobra Run 函数（非 RunE），保持原有的"出错即退出"语义。
-func mustResolveRemotePath(userPath string) string {
+// resolveRemotePathOrErr 是 resolveRemotePath 的便捷封装，供 RunE 命令使用。
+// 路径校验失败时返回 error。
+func resolveRemotePathOrErr(userPath string) (string, error) {
 	cleaned, err := resolveRemotePath(userPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "无效的路径: %v\n", err)
-		os.Exit(1)
+		return "", fmt.Errorf("无效的路径: %w", err)
 	}
-	return cleaned
+	return cleaned, nil
 }

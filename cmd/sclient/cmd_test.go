@@ -215,14 +215,17 @@ func TestCLientInitLogger(t *testing.T) {
 
 // ---- helper tests ----
 
-func TestMustResolveRemotePath(t *testing.T) {
+func TestResolveRemotePathOrErr(t *testing.T) {
 	old := currentDir
 	currentDir = ""
 	defer func() { currentDir = old }()
 
-	got := mustResolveRemotePath("test.txt")
+	got, err := resolveRemotePathOrErr("test.txt")
+	if err != nil {
+		t.Fatalf("resolveRemotePathOrErr('test.txt') unexpected error: %v", err)
+	}
 	if got != "test.txt" {
-		t.Errorf("mustResolveRemotePath('test.txt') = %q, want 'test.txt'", got)
+		t.Errorf("resolveRemotePathOrErr('test.txt') = %q, want 'test.txt'", got)
 	}
 }
 

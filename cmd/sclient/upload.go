@@ -17,17 +17,17 @@ var uploadCmd = &cobra.Command{
 	Use:   "upload <file1> [file2...]",
 	Short: "上传一个或多个文件",
 	Long: `上传一个或多个文件到 sproxy 服务端。
-文件路径中的目录结构会被保留。
-如：sclient upload dir/file.txt 会将文件保存到服务端的 uploads_dir/dir/file.txt
+	文件路径中的目录结构会被保留。
+	如：sclient upload dir/file.txt 会将文件保存到服务端的 uploads_dir/dir/file.txt
 
-受当前目录 (cd) 影响：相对路径会拼接当前目录前缀。
-使用 / 开头的绝对路径可以绕过当前目录。`,
+	受当前目录 (cd) 影响：相对路径会拼接当前目录前缀。
+	使用 / 开头的绝对路径可以绕过当前目录。`,
 	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		cli, err := buildFileClient(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("初始化客户端失败: %w", err)
 		}
 
 		chunkedMode, _ := cmd.Flags().GetBool("chunked")
@@ -47,7 +47,10 @@ var uploadCmd = &cobra.Command{
 			}
 
 			// 计算远端路径：clean + 拼接 currentDir
-			remotePath := mustResolveRemotePath(filepath.ToSlash(filepath.Clean(filePath)))
+			remotePath, err := resolveRemotePathOrErr(filepath.ToSlash(filepath.Clean(filePath)))
+			if err != nil {
+				return err
+			}
 			fmt.Printf("远端路径: %s\n", remotePath)
 
 			if useChunked {
@@ -63,7 +66,7 @@ var uploadCmd = &cobra.Command{
 				result, err := cli.ChunkedUpload(ctx, filePath, remotePath, chunkOpts...)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "分块上传失败: %s %v\n", filePath, err)
-					os.Exit(1)
+					return fmt.Errorf("分块上传失败 %s: %w", filePath, err)
 				}
 				fmt.Printf("成功: %v, 消息: %s\n", result.Success, result.Message)
 				if result.FileChecksum != "" {
@@ -76,7 +79,7 @@ var uploadCmd = &cobra.Command{
 					if result != nil {
 						fmt.Fprintf(os.Stderr, "服务端消息: %s\n", result.Message)
 					}
-					os.Exit(1)
+					return fmt.Errorf("上传失败 %s: %w", filePath, err)
 				}
 				fmt.Printf("成功: %v, 消息: %s\n", result.Success, result.Message)
 				if result.Checksum != "" {
@@ -84,6 +87,7 @@ var uploadCmd = &cobra.Command{
 				}
 			}
 		}
+		return nil
 	},
 }
 
