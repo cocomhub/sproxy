@@ -77,8 +77,18 @@ check-loopback:
 .PHONY: test
 
 test: vet check-loopback
-	@echo Running go test -race ./...
-	@$(GO) test -race -count=1 -timeout=120s ./...
+	@echo "Running go test -race ./..."
+	@mkdir -p $(TIMING_DATA_DIR)
+	@outfile="$(TIMING_DATA_DIR)/$(shell git rev-parse --abbrev-ref HEAD)-$(shell git rev-parse --short HEAD)-$(shell date +%Y%m%dT%H%M%S).txt"; \
+	  echo "branch: $(shell git rev-parse --abbrev-ref HEAD)" > "$$outfile"; \
+	  echo "commit: $(shell git rev-parse --short HEAD)" >> "$$outfile"; \
+	  echo "date: $(shell date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$$outfile"; \
+	  echo "---" >> "$$outfile"; \
+	  $(GO) test -race -count=1 -timeout=120s ./... 2>&1 | tee -a "$$outfile"; \
+	  echo ""; \
+	  echo "=== 清理旧记录（保留最近 10 条）==="; \
+	  cd $(TIMING_DATA_DIR) && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm -f; \
+	  echo "Done."
 
 # 分组运行测试（简化调试时定位失败的包）
 .PHONY: test-packages
@@ -97,9 +107,20 @@ COVER_THRESHOLD ?= 85
 .PHONY: cover
 
 cover: vet
-	@mkdir -p $(BUILD_DIR)/coverage
+	@mkdir -p $(BUILD_DIR)/coverage $(COVER_DATA_DIR)
 	$(GO) test -count=1 -coverprofile=$(BUILD_DIR)/coverage/cover.out ./...
 	@$(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out | grep -E "total"
+	@echo "=== 保存覆盖率记录 ==="
+	@outfile="$(COVER_DATA_DIR)/$(shell git rev-parse --abbrev-ref HEAD)-$(shell git rev-parse --short HEAD)-$(shell date +%Y%m%dT%H%M%S).txt"; \
+	  echo "branch: $(shell git rev-parse --abbrev-ref HEAD)" > "$$outfile"; \
+	  echo "commit: $(shell git rev-parse --short HEAD)" >> "$$outfile"; \
+	  echo "date: $(shell date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$$outfile"; \
+	  echo "---" >> "$$outfile"; \
+	  $(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out >> "$$outfile"; \
+	  echo "保存到: $$outfile"; \
+	  echo "=== 清理旧记录（保留最近 10 条）==="; \
+	  cd $(COVER_DATA_DIR) && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm -f; \
+	  echo "Done."
 	@echo "=== 覆盖率门禁检查 ==="
 	@pct=$$($(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out | grep -E "^total" | awk '{print $$NF}' | sed 's/%//; s/\.[0-9]*//'); \
 	  echo "total coverage: $$pct% (threshold: $(COVER_THRESHOLD)%)"; \
@@ -140,6 +161,13 @@ tools:
 
 BENCH_DIR := $(BUILD_DIR)/benchmark
 BENCH_DATA_DIR := $(BENCH_DIR)/data
+BENCH_WEB_DIR := $(BENCH_DIR)/web
+
+COVER_DATA_DIR := $(BUILD_DIR)/coverage/data
+COVER_WEB_DIR := $(BUILD_DIR)/coverage/web
+TIMING_DATA_DIR := $(BUILD_DIR)/timing/data
+TIMING_WEB_DIR := $(BUILD_DIR)/timing/web
+REPORT_DIR := $(BUILD_DIR)/report
 
 .PHONY: bench
 bench:
@@ -176,9 +204,34 @@ bench-compare:
 
 .PHONY: bench-web
 bench-web:
-	@mkdir -p $(BENCH_DIR)/web
-	@go run tools/genbenchview/main.go -data=$(BENCH_DATA_DIR) -out=$(BENCH_DIR)/web
-	@echo "Benchmark web report: file://$(abspath $(BENCH_DIR)/web/index.html)"
+	@mkdir -p $(BENCH_WEB_DIR)
+	@go run tools/genbenchview/main.go -data=$(BENCH_DATA_DIR) -out=$(BENCH_WEB_DIR)
+	@echo "Benchmark web report: file://$(abspath $(BENCH_WEB_DIR)/index.html)"
+
+# === 覆盖率趋势 ===
+.PHONY: cover-trend
+cover-trend:
+	@mkdir -p $(COVER_WEB_DIR)
+	@go run tools/gencoverview/main.go -data=$(COVER_DATA_DIR) -out=$(COVER_WEB_DIR)
+	@echo "Coverage trend: file://$(abspath $(COVER_WEB_DIR)/index.html)"
+
+# === 测试耗时趋势 ===
+.PHONY: timing-trend
+timing-trend:
+	@mkdir -p $(TIMING_WEB_DIR)
+	@go run tools/gentimingview/main.go -data=$(TIMING_DATA_DIR) -out=$(TIMING_WEB_DIR)
+	@echo "Timing trend: file://$(abspath $(TIMING_WEB_DIR)/index.html)"
+
+# === 统一报告 ===
+.PHONY: report
+report: cover cover-trend bench bench-web timing-trend
+	@mkdir -p $(REPORT_DIR)
+	@go run tools/genreport/main.go -out=$(REPORT_DIR)
+	@echo "=== 报告生成完成 ==="
+	@echo "Dashboard: file://$(abspath $(REPORT_DIR)/index.html)"
+	@echo "Benchmark: file://$(abspath $(BENCH_WEB_DIR)/index.html)"
+	@echo "Coverage:  file://$(abspath $(COVER_WEB_DIR)/index.html)"
+	@echo "Timing:    file://$(abspath $(TIMING_WEB_DIR)/index.html)"
 
 .PHONY: githooks
 githooks:
