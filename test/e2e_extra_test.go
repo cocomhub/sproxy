@@ -276,3 +276,76 @@ func TestE2E_SclientCLI(t *testing.T) {
 		t.Errorf("expected sclient_test.txt in list output, got: %s", out)
 	}
 }
+
+// ---- E2E: Web UI accessibility ----
+
+func TestE2E_WebUIAccessible(t *testing.T) {
+	t.Parallel()
+	baseURL, cleanup := startSPROXY(t)
+	defer cleanup()
+
+	resp, err := http.Get(baseURL + "/ui/")
+	if err != nil {
+		t.Fatalf("GET /ui/ failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ---- E2E: Health endpoint ----
+
+func TestE2E_HealthEndpoint(t *testing.T) {
+	t.Parallel()
+	baseURL, cleanup := startSPROXY(t)
+	defer cleanup()
+
+	resp, err := http.Get(baseURL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "OK" {
+		t.Errorf("expected 'OK', got %q", string(body))
+	}
+}
+
+// ---- E2E: File list after upload ----
+
+func TestE2E_FileListAfterUpload(t *testing.T) {
+	t.Parallel()
+	baseURL, cleanup := startSPROXY(t)
+	defer cleanup()
+
+	// Upload a file
+	data := []byte("hello e2e list test")
+	checksum := sha256hex(data)
+	status, body := uploadFile(t, baseURL, "list_test.txt", data, map[string]string{
+		"X-File-Checksum": checksum,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("upload failed: %d %s", status, body)
+	}
+
+	// List files via /api/files to verify
+	resp, err := http.Get(baseURL + "/api/files")
+	if err != nil {
+		t.Fatalf("GET /api/files failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list files expected 200, got %d", resp.StatusCode)
+	}
+	listBody, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(listBody), "list_test.txt") {
+		t.Errorf("expected list_test.txt in file list, got: %s", listBody)
+	}
+}
