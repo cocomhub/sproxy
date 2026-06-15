@@ -94,11 +94,11 @@ test: vet check-loopback
 .PHONY: test-packages
 
 test-packages: vet check-loopback
-	@echo "=== cmd/sproxy/... ===" && $(GO) test -race -count=1 -timeout=60s ./cmd/sproxy/... 2>&1
-	@echo "=== cmd/sclient/... ===" && $(GO) test -race -count=1 -timeout=60s ./cmd/sclient/... 2>&1
-	@echo "=== internal/... ===" && $(GO) test -race -count=1 -timeout=60s ./internal/... 2>&1
-	@echo "=== pkg/tunnel/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/tunnel/... 2>&1
-	@echo "=== pkg/client/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/client/... 2>&1
+	@echo "=== cmd/sproxy/... ===" && $(GO) test -race -count=1 -timeout=30s ./cmd/sproxy/... 2>&1
+	@echo "=== cmd/sclient/... ===" && $(GO) test -race -count=1 -timeout=30s ./cmd/sclient/... 2>&1
+	@echo "=== internal/... ===" && $(GO) test -race -count=1 -timeout=30s ./internal/... 2>&1
+	@echo "=== pkg/tunnel/... ===" && $(GO) test -race -count=1 -timeout=30s ./pkg/tunnel/... 2>&1
+	@echo "=== pkg/client/... ===" && $(GO) test -race -count=1 -timeout=30s ./pkg/client/... 2>&1
 	@echo "=== pkg/server/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/server/... 2>&1
 	@echo "=== test/... ===" && $(GO) test -race -count=1 -timeout=60s ./test/... 2>&1
 
