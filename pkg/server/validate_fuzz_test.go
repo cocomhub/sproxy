@@ -20,6 +20,7 @@ import (
 func FuzzValidateFilePath(f *testing.F) {
 	// seed corpus
 	seeds := []string{
+		// 正常路径
 		"file.txt",
 		"sub/dir/file.txt",
 		"a",
@@ -29,6 +30,12 @@ func FuzzValidateFilePath(f *testing.F) {
 		"a/b/c/d/e/file.txt",
 		"file with spaces.txt",
 		"文件名_中文.txt",
+		// 边界场景
+		"",                                    // 空字符串
+		"../../etc/passwd",                    // 路径穿越
+		"a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p.txt", // 深路径
+		"\x00test",                            // 空字节前缀
+		string([]byte{0x01, 0x02, 0x03}),      // 控制字符
 	}
 	for _, s := range seeds {
 		f.Add(s)
