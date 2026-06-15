@@ -48,7 +48,7 @@ func parseCoverFile(path string) (*coverRecord, error) {
 
 	rec := &coverRecord{}
 	scanner := bufio.NewScanner(f)
-	inData := false
+	separatorCount := 0
 	for scanner.Scan() {
 		line := scanner.Text()
 		switch {
@@ -58,22 +58,30 @@ func parseCoverFile(path string) (*coverRecord, error) {
 			rec.Commit = strings.TrimPrefix(line, "commit: ")
 		case strings.HasPrefix(line, "date: "):
 			rec.Date = strings.TrimPrefix(line, "date: ")
-		case line == "---":
-			inData = true
-		case inData && strings.HasPrefix(line, "total:"):
+		case strings.TrimSpace(line) == "---":
+			separatorCount++
+		case separatorCount >= 1 && separatorCount < 2 && strings.HasPrefix(line, "total:"):
+			// First section (per-function coverage): parse total line
+			// total:\t\t\t(statements)\t\t\t71.8%
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
-				rec.Total = fields[1]
+				rec.Total = fields[len(fields)-1]
 			}
-		case inData && strings.Contains(line, "% of statements"):
-			// Format: "ok   github.com/pkg/path\t53.5% of statements"
-			parts := strings.SplitN(line, "\t", 2)
-			if len(parts) == 2 {
-				pkg := pkgCover{
-					Name: strings.TrimSpace(parts[0]),
-					Pct:  strings.TrimSpace(parts[1]),
+		case separatorCount >= 2 && strings.HasPrefix(line, "ok") && strings.Contains(line, "%"):
+			// Second section (per-package): "ok	github.com/pkg/path	3.479s	coverage: 80.4% of statements"
+			fields := strings.Fields(line)
+			if len(fields) >= 4 {
+				// Find the coverage percentage field
+				for i, f := range fields {
+					if strings.Contains(f, "%") {
+						pkg := pkgCover{
+							Name: fields[1], // package import path
+							Pct:  fields[i],
+						}
+						rec.Packages = append(rec.Packages, pkg)
+						break
+					}
 				}
-				rec.Packages = append(rec.Packages, pkg)
 			}
 		}
 	}

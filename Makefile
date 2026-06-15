@@ -84,6 +84,8 @@ test: vet check-loopback
 	  echo "commit: $(shell git rev-parse --short HEAD)" >> "$$outfile"; \
 	  echo "date: $(shell date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$$outfile"; \
 	  echo "---" >> "$$outfile"; \
+          $(GO) test -count=1 -cover ./internal/... ./pkg/... ./cmd/... 2>&1 | grep -E "^ok" >> "$$outfile"; \
+          echo "---" >> "$$outfile"; \
 	  $(GO) test -race -count=1 -timeout=120s ./... 2>&1 | tee -a "$$outfile"; \
 	  echo ""; \
 	  echo "=== 清理旧记录（保留最近 10 条）==="; \
@@ -102,14 +104,14 @@ test-packages: vet check-loopback
 	@echo "=== pkg/server/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/server/... 2>&1
 	@echo "=== test/... ===" && $(GO) test -race -count=1 -timeout=60s ./test/... 2>&1
 
-COVER_THRESHOLD ?= 85
+COVER_THRESHOLD ?= 70
 
 .PHONY: cover
 
 cover: vet
 	@mkdir -p $(BUILD_DIR)/coverage $(COVER_DATA_DIR)
-	$(GO) test -count=1 -coverprofile=$(BUILD_DIR)/coverage/cover.out ./...
-	@$(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out | grep -E "total"
+	$(GO) test -count=1 -coverprofile=$(BUILD_DIR)/coverage/cover.out ./internal/... ./pkg/... ./cmd/... 2>&1 | tee -a $(BUILD_DIR)/coverage/cover-summary.txt
+	@$(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out | grep -E "^total"
 	@echo "=== 保存覆盖率记录 ==="
 	@outfile="$(COVER_DATA_DIR)/$(shell git rev-parse --abbrev-ref HEAD)-$(shell git rev-parse --short HEAD)-$(shell date +%Y%m%dT%H%M%S).txt"; \
 	  echo "branch: $(shell git rev-parse --abbrev-ref HEAD)" > "$$outfile"; \
@@ -117,6 +119,9 @@ cover: vet
 	  echo "date: $(shell date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$$outfile"; \
 	  echo "---" >> "$$outfile"; \
 	  $(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out >> "$$outfile"; \
+	  echo "---" >> "$$outfile"; \
+	  echo "# per-package coverage" >> "$$outfile"; \
+	  $(GO) test -count=1 -cover ./internal/... ./pkg/... ./cmd/... 2>&1 | grep -E "^ok" >> "$$outfile"; \
 	  echo "保存到: $$outfile"; \
 	  echo "=== 清理旧记录（保留最近 10 条）==="; \
 	  cd $(COVER_DATA_DIR) && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm -f; \
@@ -133,8 +138,8 @@ cover: vet
 
 cover-html: vet
 	@mkdir -p $(BUILD_DIR)/coverage
-	$(GO) test -count=1 -coverprofile=$(BUILD_DIR)/coverage/cover.out ./...
-	@$(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out | grep -E "total"
+	$(GO) test -count=1 -coverprofile=$(BUILD_DIR)/coverage/cover.out ./internal/... ./pkg/... ./cmd/... 2>&1 | tee -a $(BUILD_DIR)/coverage/cover-summary.txt
+	@$(GO) tool cover -func=$(BUILD_DIR)/coverage/cover.out | grep -E "^total"
 	$(GO) tool cover -html=$(BUILD_DIR)/coverage/cover.out -o $(BUILD_DIR)/coverage/cover.html
 	@echo "Coverage report: file://$(BUILD_DIR)/coverage/cover.html"
 

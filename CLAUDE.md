@@ -175,12 +175,18 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 4. **全局状态隔离** — 测试 `cmd/sproxy` 和 `cmd/sclient` 时须用 `t.Cleanup` 恢复包级全局变量（`cfgPtr`、`currentDir`、`cfgFile` 等）。
 5. **Viper 隔离** — 测试优先使用 `viper.New()` 创建独立实例而非 `GetViper()` 全局单例（`LoadFromViper(v *viper.Viper)` 已接受参数）。
 
-### 现有测试辅助函数查找
+### 测试辅助函数查找
 - **`pkg/testutil/`** — 跨包通用（TestKey, DiscardLogger, SHA256Hex, CaptureStdout, CaptureStderr）
 - **`pkg/server/server_test_common_test.go`** — server 包内共享（testKey, testLogger, withHeader）
 - **`pkg/server/integration_test.go`** — `newTestServer` + `newTestServerWithAllRoutes` 等变体
 - **`pkg/client/client_test.go`** — `newMockServer`（sproxy 兼容的 mock 服务端）
 - **`test/e2e_test.go`** — `startSPROXY`（构建真实二进制并启动的端到端测试辅助）
+
+### 测试注意事项
+1. **E2E 测试配置隔离** — 启动 sclient 子进程时，必须用 `--config` 指向临时配置文件，不要只用 `--server` flag。`--server` 不会阻止加载本地 `~/.config/sproxy/sclient.yaml` 中的 tunnel_key 等配置，导致测试意外通过隧道通信。
+2. **`-race` 下超时翻倍** — 含 goroutine 的测试（特别是 mux/p2p）在 `-race` 下运行时间显著增加。Context timeout 设置时留足余量，推荐正常值的 3 倍。
+3. **覆盖率测量排除`test/`和`tools/`** — `go test -cover ./...` 包含 E2E 测试包和工具包会稀释 total 覆盖率。正确做法：`go test -cover ./internal/... ./pkg/... ./cmd/...`
+4. **Makefile 修改优先用 Edit tool** — sed 处理 Makefile 的多行模式（反斜杠续行、`$$` 转义、`{` `}`嵌套）极其脆弱。复杂修改用 Read + Edit 工具。
 
 ### 测试模式清单
 
