@@ -23,7 +23,7 @@ func TestPrintFileList(t *testing.T) {
 				{Name: "report.pdf", Size: 1024, Checksum: "abc123def456"},
 				{Name: "notes.txt", Size: 512, Checksum: "xyz789"},
 			},
-			contains: []string{"report.pdf", "notes.txt", "1024 B", "512 B"},
+			contains: []string{"report.pdf", "notes.txt", "1.0 KB", "512 B"},
 			not:      []string{"[DIR]"},
 		},
 		{

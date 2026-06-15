@@ -434,3 +434,437 @@ func TestTunnelCommand_ErrorOnNoTunnelKey(t *testing.T) {
 		t.Error("expected error when tunnel_key is missing")
 	}
 }
+
+// ---- 补充 error path 测试：upload server error ----
+
+func TestUploadCommand_ServerError(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(srcFile, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"upload", "--server", mock.URL, srcFile})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 500")
+	}
+}
+
+// ---- Download command server error ----
+
+func TestDownloadCommand_ServerError(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "out.txt")
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"download", "--server", mock.URL, "test.txt", dst})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 404")
+	}
+}
+
+// ---- Delete command server error ----
+
+func TestDeleteCommand_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Stat returns OK, Delete returns error
+		if r.URL.Path == "/api/files/stat" {
+			w.Header().Set("X-File-Checksum", "abc123")
+			w.Header().Set("X-File-Size", "5")
+			w.Header().Set("X-File-IsDir", "false")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Error(w, "delete failed", http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"delete", "--server", mock.URL, "/test.txt"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when delete returns 500")
+	}
+}
+
+// ---- List command server error ----
+
+func TestListCommand_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"list", "--server", mock.URL})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 500")
+	}
+}
+
+// ---- Archive command server error ----
+
+func TestArchiveCommand_ServerError(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "out.tar.gz")
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"archive", "--server", mock.URL, "-o", dst, "test.txt"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 500")
+	}
+}
+
+// ---- Archive-dir command RunE 测试 ----
+
+func TestArchiveDirCommand_HappyPath(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "backup.tar.gz")
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("fake archive data"))
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"archive-dir", "--server", mock.URL, "-o", dst, "mydir"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("archive-dir command failed: %v", err)
+	}
+}
+
+func TestArchiveDirCommand_ServerError(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "backup.tar.gz")
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"archive-dir", "--server", mock.URL, "-o", dst, "mydir"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 500")
+	}
+}
+
+// ---- Config command error paths ----
+
+func TestConfigCommand_UnknownSubcommand(t *testing.T) {
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	var err error
+	_ = testutil.CaptureStderr(func() {
+		rootCmd.SetArgs([]string{"config", "unknown"})
+		err = rootCmd.Execute()
+	})
+	if err == nil {
+		t.Error("expected error for unknown subcommand")
+	}
+}
+
+func TestConfigCommand_SetMissingValue(t *testing.T) {
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"config", "set", "server_url"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when set has no value")
+	}
+}
+
+// ---- Version subcommand tests ----
+
+func TestVersionListCommand_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"version", "--server", mock.URL, "list", "test.txt"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 404")
+	}
+}
+
+func TestVersionRestoreCommand_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"version", "--server", mock.URL, "restore", "test.txt", "1"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 404")
+	}
+}
+
+func TestVersionDeleteCommand_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"version", "--server", mock.URL, "delete", "test.txt", "1"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 404")
+	}
+}
+
+// ---- Pwd command ----
+
+func TestPwdCommand(t *testing.T) {
+	oldDir := currentDir
+	currentDir = ""
+	defer func() { currentDir = oldDir }()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	out := testutil.CaptureStdout(func() {
+		rootCmd.SetArgs([]string{"pwd"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("pwd command failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "/") {
+		t.Errorf("expected pwd to output '/', got: %s", out)
+	}
+}
+
+func TestPwdCommand_WithCurrentDir(t *testing.T) {
+	oldDir := currentDir
+	currentDir = "subdir"
+	defer func() { currentDir = oldDir }()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+	currentDir = "subdir"
+
+	out := testutil.CaptureStdout(func() {
+		rootCmd.SetArgs([]string{"pwd"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("pwd command failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "subdir") {
+		t.Errorf("expected pwd to contain 'subdir', got: %s", out)
+	}
+}
+
+// ---- Mkdir command ----
+
+func TestMkdirCommand_HappyPath(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/mkdir" {
+			t.Errorf("expected path /mkdir, got %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true,"message":"created"}`))
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	out := testutil.CaptureStdout(func() {
+		rootCmd.SetArgs([]string{"mkdir", "--server", mock.URL, "newdir"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("mkdir command failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "目录已创建") {
+		t.Errorf("expected success message, got: %s", out)
+	}
+}
+
+func TestMkdirCommand_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"mkdir", "--server", mock.URL, "newdir"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 500")
+	}
+}
+
+// ---- Cd command ----
+
+func TestCdCommand_PrintCurrent(t *testing.T) {
+	oldDir := currentDir
+	currentDir = ""
+	defer func() { currentDir = oldDir }()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	out := testutil.CaptureStdout(func() {
+		rootCmd.SetArgs([]string{"cd"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("cd command failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "/") {
+		t.Errorf("expected cd output '/', got: %s", out)
+	}
+}
+
+func TestCdCommand_WithCurrentDir(t *testing.T) {
+	oldDir := currentDir
+	currentDir = "subdir"
+	defer func() { currentDir = oldDir }()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+	currentDir = "subdir"
+
+	out := testutil.CaptureStdout(func() {
+		rootCmd.SetArgs([]string{"cd"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("cd command failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "subdir") {
+		t.Errorf("expected cd output '/subdir', got: %s", out)
+	}
+}
+
+// ---- Batch-delete all fail scenario ----
+
+func TestBatchDeleteCommand_AllFail(t *testing.T) {
+	srcDir := t.TempDir()
+	srcFile := filepath.Join(srcDir, "a.txt")
+	if err := os.WriteFile(srcFile, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/files/stat" {
+			w.Header().Set("X-File-Checksum", "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+			w.Header().Set("X-File-Size", "5")
+			w.Header().Set("X-File-IsDir", "false")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.Error(w, "delete failed", http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"batch-delete", "--server", mock.URL, srcFile})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when all deletes fail")
+	}
+}
+
+// ---- Batch-rename odd args test ----
+
+func TestBatchRenameCommand_OddArgs(t *testing.T) {
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"batch-rename", "--server", "http://test.local", "old.txt", "new.txt", "orphan.txt"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error for odd number of args")
+	}
+}
+
+// ---- Search command server error ----
+
+func TestSearchCommand_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	rootCmd.SetArgs([]string{"search", "--server", mock.URL, "keyword"})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 500")
+	}
+}
+
+// ---- Stat command with directory type ----
+
+func TestStatCommand_Directory(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-File-Checksum", "")
+		w.Header().Set("X-File-Size", "0")
+		w.Header().Set("X-File-IsDir", "true")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	resetState := captureRootCmdArgs()
+	defer resetState()
+
+	out := testutil.CaptureStdout(func() {
+		rootCmd.SetArgs([]string{"stat", "--server", mock.URL, "mydir"})
+		if err := rootCmd.Execute(); err != nil {
+			t.Fatalf("stat command failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "directory") {
+		t.Errorf("expected output to mention directory, got: %s", out)
+	}
+}
