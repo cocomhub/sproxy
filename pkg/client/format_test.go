@@ -64,3 +64,15 @@ func TestFormatETA_Seconds(t *testing.T) {
 		t.Errorf("FormatETA(45) = %q, want 45s", got)
 	}
 }
+
+func TestFormatETA_ExactMinute(t *testing.T) {
+	if got := FormatETA(60); got != "60s" {
+		t.Errorf("FormatETA(60) = %q, want 60s (60 is not > 60)", got)
+	}
+}
+
+func TestFormatETA_ExactHour(t *testing.T) {
+	if got := FormatETA(3600); got != "60m 0s" {
+		t.Errorf("FormatETA(3600) = %q, want 60m 0s (3600 is not > 3600)", got)
+	}
+}

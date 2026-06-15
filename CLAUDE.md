@@ -10,6 +10,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > 历史：早期版本曾包含 `/{host}/{filepath...}` HTTPS 透明转发与 `/bandwidth` 端点，已于重构移除，定位收敛为文件服务 + 隧道。
 
+## 执行偏好
+
+- **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
+- **worktree**：除非用户明确要求，不使用 git worktree。
+
 ## 常用命令
 
 ```bash

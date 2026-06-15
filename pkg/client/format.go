@@ -7,9 +7,12 @@ import "fmt"
 
 // FormatByte 格式化字节数为人类可读字符串。
 func FormatByte(size float64) string {
-	if size > 1024*1024 {
+	if size <= 0 {
+		return "0 B"
+	}
+	if size >= 1024*1024 {
 		return fmt.Sprintf("%.1f MB", size/1024/1024)
-	} else if size > 1024 {
+	} else if size >= 1024 {
 		return fmt.Sprintf("%.1f KB", size/1024)
 	}
 	return fmt.Sprintf("%.0f B", size)

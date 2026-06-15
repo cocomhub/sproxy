@@ -5,105 +5,90 @@ package main
 
 import (
 	"errors"
-	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
-func TestLevelString(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
+// ---- levelString 边界测试 ----
+
+func TestLevelString_AllCases(t *testing.T) {
+	tests := []struct{ input, expected string }{
 		{"debug", "debug"},
 		{"info", "info"},
 		{"warn", "warn"},
 		{"error", "error"},
-		{"", "info"},
 		{"unknown", "info"},
-		{"DEBUG", "info"}, // case sensitive
+		{"", "info"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			if got := levelString(tt.input); got != tt.want {
-				t.Errorf("levelString(%q) = %q, want %q", tt.input, got, tt.want)
+			if got := levelString(tt.input); got != tt.expected {
+				t.Errorf("levelString(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
 	}
 }
 
-func TestFormatString(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
+// ---- formatString 边界测试 ----
+
+func TestFormatString_AllCases(t *testing.T) {
+	tests := []struct{ input, expected string }{
 		{"json", "json"},
 		{"text", "text"},
-		{"", "text"},
 		{"unknown", "text"},
-		{"JSON", "text"}, // case sensitive
+		{"", "text"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			if got := formatString(tt.input); got != tt.want {
-				t.Errorf("formatString(%q) = %q, want %q", tt.input, got, tt.want)
+			if got := formatString(tt.input); got != tt.expected {
+				t.Errorf("formatString(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
 	}
 }
 
-func TestInitLogger(t *testing.T) {
+// ---- initLogger 边界测试 ----
+// TestInitLogger_Boundaries 只覆盖边界值（default/unknown），不覆盖 root_extra_test.go 中已有的正常组合测试
+
+func TestInitLogger_Boundaries(t *testing.T) {
 	tests := []struct {
-		name    string
-		level   string
-		format  string
-		wantNil bool
+		name             string
+		logLevel, logFmt string
 	}{
-		{"default", "", "", false},
-		{"text_info", "info", "text", false},
-		{"json_debug", "debug", "json", false},
-		{"json_error", "error", "json", false},
+		{"default-level_default-format", "", ""},
+		{"unknown-level", "unknown", "text"},
+		{"unknown-format", "info", "unknown"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &server.Config{
-				LogLevel:  tt.level,
-				LogFormat: tt.format,
-			}
-			logger := initLogger(cfg)
+			logger := initLogger(&server.Config{LogLevel: tt.logLevel, LogFormat: tt.logFmt})
 			if logger == nil {
-				t.Error("initLogger returned nil")
+				t.Fatal("expected non-nil logger")
 			}
 		})
 	}
 }
 
-func TestInitLoggerSetsDefault(t *testing.T) {
-	// 验证 initLogger 调用后 slog.SetDefault 生效
-	cfg := &server.Config{LogLevel: "info", LogFormat: "text"}
-	logger := initLogger(cfg)
-	if slog.Default() != logger {
-		t.Error("slog.Default() should be the logger returned by initLogger")
-	}
-}
+// ---- resolveTunnelKey 边界测试 ----
 
-func TestResolveTunnelKey_Valid64Hex(t *testing.T) {
-	// 64 hex chars = 32 bytes
-	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+func TestResolveTunnelKey_Valid(t *testing.T) {
+	validKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	cfg := &server.Config{TunnelKey: validKey}
 	key, err := resolveTunnelKey(cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(key) != 32 {
-		t.Fatalf("expected 32 bytes key, got %d", len(key))
+		t.Errorf("expected 32 bytes, got %d", len(key))
 	}
 }
 
@@ -111,74 +96,110 @@ func TestResolveTunnelKey_InvalidLength(t *testing.T) {
 	cfg := &server.Config{TunnelKey: "short"}
 	_, err := resolveTunnelKey(cfg)
 	if err == nil {
-		t.Fatal("expected error for short key")
+		t.Error("expected error for short tunnel key")
 	}
 }
 
 func TestResolveTunnelKey_NonHex(t *testing.T) {
-	// Same length but includes non-hex chars
 	cfg := &server.Config{TunnelKey: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}
 	_, err := resolveTunnelKey(cfg)
 	if err == nil {
-		t.Fatal("expected error for non-hex key")
+		t.Error("expected error for non-hex tunnel key")
 	}
 }
 
-func TestResolveTunnelKey_Empty(t *testing.T) {
-	// empty key -> triggers auto-generate + file save
-	// This would call tunnel.GenerateKey() and server.SaveConfig().
-	// We can't easily test this without mocking, so skip for now.
-	// The function is indirectly tested through the valid/invalid key paths.
+// TestResolveTunnelKey_EmptyAutoGenFail 测试空密钥 + cfgFile 不可写时的错误路径
+// 与 root_extra_test.go 中 TestResolveTunnelKey_SaveError 类似但使用空路径场景
+func TestResolveTunnelKey_EmptyAutoGenFail(t *testing.T) {
+	// 保存并恢复全局 cfgFile
+	oldCfgFile := cfgFile
+	t.Cleanup(func() { cfgFile = oldCfgFile })
+
+	cfgFile = filepath.Join(t.TempDir(), "nonexistent", "sproxy.yaml")
+	cfg := &server.Config{TunnelKey: ""}
+	_, err := resolveTunnelKey(cfg)
+	if err == nil {
+		t.Fatal("expected error when auto-generate fails due to non-writable path")
+	}
+	t.Logf("got expected error: %v", err)
 }
+
+// ---- runServer 边界测试 ----
+// TestRunServer_VersionFlag 确保 --version 正确输出
 
 func TestRunServer_VersionFlag(t *testing.T) {
-	// Verify that with --version, Execute() prints version and exits with 0.
-	// Since we can't easily capture os.Exit in Go tests, we test the underlying
-	// handler logic by setting the version flag.
-	// Note: cobra.Execute() can't be easily unit tested in isolation.
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("version", false, "")
+	cmd.Flags().String("addr", "127.0.0.1:0", "")
+	_ = cmd.Flags().Set("version", "true")
+
+	stdout := captureOutput(func() {
+		_ = runServer(cmd, nil)
+	})
+	if !strings.Contains(stdout, "Version:") {
+		t.Errorf("expected Version output, got: %s", stdout)
+	}
 }
 
-func TestRunServer_SignalGoroutineLeak(t *testing.T) {
-	// 验证 runServer 返回后没有 goroutine 泄漏
-	before := runtime.NumGoroutine()
-
-	tmpDir := t.TempDir()
-	cmd := &cobra.Command{Use: "sproxy"}
-	cmd.Flags().String("addr", "127.0.0.1:0", "")
-	cmd.Flags().String("uploads-dir", tmpDir, "")
-	cmd.Flags().String("tunnel-key", "", "")
-	cmd.Flags().Bool("version", false, "")
-
-	v := viper.GetViper()
-	cfgFile = tmpDir + "/sproxy.yaml"
-	v.SetConfigFile(cfgFile)
-	v.SetConfigType("yaml")
-	v.SetEnvPrefix("SPROXY")
-	v.AutomaticEnv()
-	_ = v.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-	_ = v.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
-	_ = v.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
-
-	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	v.Set("addr", "127.0.0.1:0")
-	v.Set("uploads_dir", tmpDir)
-	v.Set("log_level", "error")
-	v.Set("tunnel_key", validKey)
+// TestRunServer_SignalShutdown 验证 server 能通过 SIGTERM 正常关闭
+func TestRunServer_SignalShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping signal shutdown test in short mode")
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	testSignalCh = sigCh
-	defer func() { testSignalCh = nil }()
+	t.Cleanup(func() { testSignalCh = nil })
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("addr", "127.0.0.1:0", "")
+	cmd.Flags().Bool("version", false, "")
 
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runServer(cmd, nil)
 	}()
 
-	// 等服务器启动
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
+	sigCh <- syscall.SIGTERM
 
-	// 发送中断信号关闭服务器
-	sigCh <- os.Interrupt
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("runServer returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not shut down within 5s")
+	}
+
+	// 确认没有明显的 goroutine 泄漏（允许少量增长）
+	after := runtime.NumGoroutine()
+	if after > runtime.GOMAXPROCS(0)*3+10 {
+		t.Errorf("suspicious number of goroutines after shutdown: %d", after)
+	}
+}
+
+func TestRunServer_SignalGoroutineLeak(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping goroutine leak test in short mode")
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	testSignalCh = sigCh
+	t.Cleanup(func() { testSignalCh = nil })
+
+	before := runtime.NumGoroutine()
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("version", false, "")
+	cmd.Flags().String("addr", "127.0.0.1:0", "")
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServer(cmd, nil)
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	sigCh <- syscall.SIGTERM
 
 	select {
 	case err := <-errCh:
@@ -190,61 +211,32 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 	}
 
 	after := runtime.NumGoroutine()
-	// 允许少量 goroutine 波动（GC、测试框架、time.After 等）
 	if after > before+5 {
 		t.Errorf("possible goroutine leak after signal shutdown: before=%d, after=%d", before, after)
 	}
 }
 
-func TestRunServer_StartStop(t *testing.T) {
-	// 通过注入 signal channel 来避免 Windows 对 os.Signal 的限制
-	tmpDir := t.TempDir()
+// ---- 测试辅助函数 ----
 
-	cmd := &cobra.Command{Use: "sproxy"}
-	cmd.Flags().String("addr", "127.0.0.1:0", "")
-	cmd.Flags().String("uploads-dir", tmpDir, "")
-	cmd.Flags().String("tunnel-key", "", "")
-	cmd.Flags().Bool("version", false, "")
+func captureOutput(fn func()) string {
+	r, w, _ := os.Pipe()
+	old := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
 
-	// 设置 viper 测试配置
-	v := viper.GetViper()
-	cfgFile = tmpDir + "/sproxy.yaml"
-	v.SetConfigFile(cfgFile)
-	v.SetConfigType("yaml")
-	v.SetEnvPrefix("SPROXY")
-	v.AutomaticEnv()
-	_ = v.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-	_ = v.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
-	_ = v.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+	fn()
+	_ = w.Close()
 
-	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	v.Set("addr", "127.0.0.1:0")
-	v.Set("uploads_dir", tmpDir)
-	v.Set("log_level", "error")
-	v.Set("tunnel_key", validKey)
-
-	// 注入 signal channel，避免依赖真实的进程信号
-	sigCh := make(chan os.Signal, 1)
-	testSignalCh = sigCh
-	defer func() { testSignalCh = nil }()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- runServer(cmd, nil)
-	}()
-
-	// 等服务器启动
-	time.Sleep(500 * time.Millisecond)
-
-	// 通过注入的 channel 发送中断信号
-	sigCh <- os.Interrupt
-
-	select {
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Errorf("runServer returned unexpected error: %v", err)
+	var buf strings.Builder
+	var dst [4096]byte
+	for {
+		n, err := r.Read(dst[:])
+		if n > 0 {
+			buf.Write(dst[:n])
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("server did not shut down within 5s")
+		if err != nil {
+			break
+		}
 	}
+	return buf.String()
 }

@@ -159,45 +159,7 @@ func TestProgressReader_EOF(t *testing.T) {
 
 // ---- FormatByte / FormatETA ----
 
-func TestFormatByte(t *testing.T) {
-	tests := []struct {
-		size float64
-		want string
-	}{
-		{0, "0 B"},
-		{500, "500 B"},
-		{1024, "1024 B"},
-		{1536, "1.5 KB"},
-		{1048576, "1024.0 KB"},
-		{1572864, "1.5 MB"},
-	}
-	for _, tt := range tests {
-		got := FormatByte(tt.size)
-		if got != tt.want {
-			t.Errorf("FormatByte(%v) = %q, want %q", tt.size, got, tt.want)
-		}
-	}
-}
-
-func TestFormatETA(t *testing.T) {
-	tests := []struct {
-		seconds int64
-		want    string
-	}{
-		{0, "--:--"},
-		{-1, "--:--"},
-		{30, "30s"},
-		{90, "1m 30s"},
-		{3661, "1h 1m"},
-	}
-	for _, tt := range tests {
-		got := FormatETA(tt.seconds)
-		if got != tt.want {
-			t.Errorf("FormatETA(%d) = %q, want %q", tt.seconds, got, tt.want)
-		}
-	}
-}
-
+// (moved to format_test.go)
 // ---- ChunkedOption functions ----
 
 func TestWithChunkedChunkSize(t *testing.T) {

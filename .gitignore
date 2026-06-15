@@ -12,3 +12,8 @@ cover
 .claude/worktrees/
 .trae/
 *.out.txt
+coverage.tmp
+data*
+cov2.html
+coverage.html
+sproxy.yaml

@@ -157,3 +157,55 @@ func TestHandleConfigShow(t *testing.T) {
 
 	HandleConfigShow(cfg)
 }
+
+func TestSaveConfig_Error(t *testing.T) {
+	// 写入只读目录应触发错误
+	cfg := DefaultConfig()
+	err := SaveConfig(cfg, "/nonexistent/path/sclient.yaml")
+	if err == nil {
+		t.Fatal("expected error saving to nonexistent path, got nil")
+	}
+}
+
+func TestLoadConfig_ReadError(t *testing.T) {
+	// 指向目录而非文件应触发读取错误
+	dir := t.TempDir()
+	_, err := LoadConfig(dir)
+	if err == nil {
+		t.Fatal("expected error reading directory as config file, got nil")
+	}
+}
+
+func TestLoadConfig_InvalidYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(path, []byte(": invalid yaml :: {{"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(path)
+	if err == nil {
+		t.Fatal("expected error for invalid YAML, got nil")
+	}
+}
+
+func TestLoadConfig_EmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.yaml")
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig on empty file: %v", err)
+	}
+	if cfg.ServerURL != "http://localhost:18083" {
+		t.Errorf("expected defaults for empty file, got %q", cfg.ServerURL)
+	}
+}
+
+func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TunnelKey = "short"
+	// Should not panic when key is <= 8 chars
+	HandleConfigShow(cfg)
+}
