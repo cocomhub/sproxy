@@ -1,63 +1,74 @@
 # Copyright 2026 The Cocomhub Authors. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# golangci-lint 配置文件
-# 参考: https://golangci-lint.run/usage/configuration/
 
+version: "2"
 run:
-  timeout: 5m
   go: "1.26"
-
 linters:
   enable:
-    # 已有
-    - errcheck
-    - gosimple
-    - govet
-    - ineffassign
-    - staticcheck
-    - typecheck
-    - unused
-    - gofmt
-    # 新增
-    - revive
     - gocritic
     - gosec
-    - whitespace
-    - goimports
     - paralleltest
-    - thelper
     - reassign
-
-linters-settings:
-  staticcheck:
-    checks: ["all", "-ST1000", "-ST1003", "-ST1016", "-ST1020", "-ST1021", "-ST1022"]
-  errcheck:
-    check-type-assertions: true
-  govet:
-    enable:
-      - shadow
-  gofmt:
-    simplify: true
-  gosec:
-    excludes:
-      - G101
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-    - path: _test\.go
-      linters:
-        - paralleltest
-    - path: _test\.go
-      linters:
-        - gosec
-    - path: cmd/.*_test\.go
-      linters:
-        - thelper
-    - path: tools/
-      linters:
-        - errcheck
-        - gosec
+    - revive
+    - thelper
+    - whitespace
+  settings:
+    errcheck:
+      check-type-assertions: true
+    gosec:
+      excludes:
+        - G101
+    govet:
+      enable:
+        - shadow
+    staticcheck:
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - errcheck
+        path: _test\.go
+      - linters:
+          - paralleltest
+        path: _test\.go
+      - linters:
+          - gosec
+        path: _test\.go
+      - linters:
+          - thelper
+        path: cmd/.*_test\.go
+      - linters:
+          - errcheck
+          - gosec
+        path: tools/
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

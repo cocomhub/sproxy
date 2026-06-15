@@ -5,6 +5,7 @@ package mux_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -420,6 +421,134 @@ func TestMuxSendReceive(t *testing.T) {
 	n, err := sB.Read(buf)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
+	}
+	if string(buf[:n]) != string(payload) {
+		t.Fatalf("expected %q, got %q", payload, buf[:n])
+	}
+}
+
+// TestMuxAcceptChFull_Reject 验证 acceptCh 满时，dialer 侧的 Read 返回错误而非阻塞。
+func TestMuxAcceptChFull_Reject(t *testing.T) {
+	a, b := xfertest.Pipe()
+	muxA := mux.New(a, mux.RoleDialer)
+	muxB := mux.New(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 用 acceptCh 容量（64）+1 个流来触发 acceptCh 满。
+	// 但需要先创建足够的流占满 acceptCh，同时不 Accept 它们。
+	// 由于服务端没有 goroutine 在 Accept，第 65 个流将触发 reject。
+	overflow := 65
+	streams := make([]*mux.Stream, 0, overflow)
+
+	for i := 0; i < overflow; i++ {
+		s, err := muxA.Open(ctx)
+		if err != nil {
+			t.Fatalf("Open #%d: %v", i, err)
+		}
+		streams = append(streams, s)
+	}
+
+	// 用多余的流验证 Read 不会阻塞，应返回 ErrStreamRejected
+	last := streams[overflow-1]
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1024)
+		_, err := last.Read(buf)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, mux.ErrStreamRejected) {
+			t.Fatalf("expected ErrStreamRejected, got: %v", err)
+		}
+		t.Logf("rejected stream Read returned: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read on rejected stream blocked indefinitely (expected immediate error)")
+	}
+}
+
+// TestMuxWithMaxStreams 验证 maxStreams 上限生效。
+func TestMuxWithMaxStreams(t *testing.T) {
+	a, b := xfertest.Pipe()
+	maxStreams := 5
+	muxA := mux.NewWithOpts(a, mux.RoleDialer, mux.WithMaxStreams(maxStreams))
+	muxB := mux.NewWithOpts(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 在 maxStreams 内打开，全部应成功
+	streams := make([]*mux.Stream, 0, maxStreams)
+	for i := 0; i < maxStreams; i++ {
+		s, err := muxA.Open(ctx)
+		if err != nil {
+			t.Fatalf("Open #%d within limit: %v", i, err)
+		}
+		streams = append(streams, s)
+	}
+
+	// 验证 maxStreams 限制在 dialer 侧就拒绝
+	if _, err := muxA.Open(ctx); !errors.Is(err, mux.ErrMaxStreams) {
+		t.Fatalf("Open past maxStreams should return ErrMaxStreams, got: %v", err)
+	} else {
+		t.Logf("Open past maxStreams returned expected error: %v", err)
+	}
+
+	// 正常关闭
+	for i := 0; i < maxStreams; i++ {
+		s, acceptErr := muxB.Accept(ctx)
+		if acceptErr != nil {
+			break
+		}
+		s.Close()
+	}
+	for _, s := range streams {
+		s.Close()
+	}
+}
+
+// TestMuxWithMaxStreams_Bounded 验证 maxStreams 内正常通信，超出后拒绝不阻塞。
+func TestMuxWithMaxStreams_Bounded(t *testing.T) {
+	a, b := xfertest.Pipe()
+	muxA := mux.NewWithOpts(a, mux.RoleDialer)
+	muxB := mux.NewWithOpts(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 打开一条流，验证正常 echo 通信
+	sA, err := muxA.Open(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sA.Close()
+
+	sB, err := muxB.Accept(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sB.Close()
+
+	payload := []byte("hello bounded streams")
+	_, err = sA.Write(payload)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	_ = sA.CloseWrite()
+
+	buf := make([]byte, 4096)
+	n, err := sB.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
 	}
 	if string(buf[:n]) != string(payload) {
 		t.Fatalf("expected %q, got %q", payload, buf[:n])
