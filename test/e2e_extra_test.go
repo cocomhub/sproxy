@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -265,8 +266,13 @@ func TestE2E_SclientCLI(t *testing.T) {
 		"X-File-Checksum": sha256hex([]byte("sclient e2e")),
 	})
 
-	// sclient list
-	cmd := exec.Command(binPath, "list", "--server", baseURL)
+	// sclient list: use a temp config to avoid local tunnel interference
+	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
+	cfgContent := fmt.Sprintf("server_url: %s\n", baseURL)
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(binPath, "list", "--config", cfgPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("sclient list: %v\n%s", err, out)

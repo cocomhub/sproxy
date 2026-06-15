@@ -106,14 +106,15 @@ func TestP2PNodeDial(t *testing.T) {
 	fl := registerFakeWebRTC()
 
 	dht := hub.NewDHT()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Use a generous timeout — under -race all operations are slower.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	dht.Register(ctx, hub.PeerInfo{ID: "target", Addrs: []string{"pipe://target-addr"}})
 
 	dialer := p2p.NewP2PNode("dialer", dht)
 
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel2()
 
 	// Accept the incoming pipe connection on a separate goroutine.
@@ -123,6 +124,7 @@ func TestP2PNodeDial(t *testing.T) {
 	go func() {
 		conn, err := fl.Accept(ctx2)
 		if err != nil {
+			t.Logf("Accept failed in goroutine: %v", err)
 			close(done)
 			return
 		}
@@ -131,6 +133,7 @@ func TestP2PNodeDial(t *testing.T) {
 
 		stream, err := m.Open(ctx2)
 		if err != nil {
+			t.Logf("Open stream failed in goroutine: %v", err)
 			close(done)
 			return
 		}
@@ -145,13 +148,13 @@ func TestP2PNodeDial(t *testing.T) {
 		<-m.Context().Done()
 	}()
 
+	// Wait for the listener to have written data, then read.
 	m, err := dialer.Dial(ctx, "target")
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
 	defer m.Close()
 
-	// Wait for the listener to have written data, then read.
 	<-done
 	stream, err := m.Accept(ctx)
 	if err != nil {
