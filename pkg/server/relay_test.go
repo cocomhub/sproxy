@@ -20,6 +20,22 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
+func TestRelayHandlerNilLogger(t *testing.T) {
+	// NewRelayHandler(nil) should not panic and use slog.Default()
+	rt := hub.NewRouteTable()
+	h := NewRelayHandler(rt, nil)
+	if h == nil {
+		t.Fatal("NewRelayHandler returned nil")
+	}
+	// 发起请求验证 handler 正常工作
+	req := httptest.NewRequest(http.MethodPost, "/api/relay", strings.NewReader(`{"target":""}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
 func TestRelayHandlerMissingTarget(t *testing.T) {
 	rt := hub.NewRouteTable()
 	h := NewRelayHandler(rt, slog.Default())
