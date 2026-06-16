@@ -128,7 +128,7 @@ func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
 // 当 key 非 nil 时，自动解密流。
 // 使用预读缓冲优化大文件读取性能，减少 mux 内部消息传递次数。
 type streamBody struct {
-	stream *mux.Stream
+	stream mux.Stream
 	key    []byte
 	once   sync.Once
 	pr     *io.PipeReader
@@ -194,7 +194,7 @@ func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	}
 }
 
-func (t *Tunnel) handleStream(stream *mux.Stream, handler http.Handler) {
+func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 	defer stream.CloseWrite()
 	// 注意：不 defer stream.Close() — 由客户端读完响应后主动 Close
 

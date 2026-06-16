@@ -351,3 +351,542 @@ Your branch is ahead of 'origin/master' by 24 commits.
 - Recurrence-Count: 1
 
 ---
+
+## [LRN-20260616-CR1] mux acceptCh 满时静默丢弃流导致 Read 永久阻塞
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: critical
+**Status**: promoted
+**Area**: backend
+
+### Summary
+mux acceptCh (64) 满时 handleFrame 静默丢弃流，dialer 端 Open() 已返回成功但 Read() 永远等不到数据，形成死锁。defer 因函数不返回永不执行，无任何救援机制。
+
+### Details
+经典死锁路径：
+1. dialer: Open() → 发送 FrameOpen → 返回 `*Stream, nil`
+2. listener: handleFrame(FrameOpen) → acceptCh 满 → `default:` → `removeStream(sid, true)` 静默丢弃
+3. dialer: s.Read(buf) → `<-s.dataCh` → 永远阻塞（对方没有流，不会发数据）
+
+benchmark `BenchmarkMuxConcurrentStreams(conc=100)` 中 conc 超过 acceptCh 容量(64) 时必触发。
+
+### Resolution
+- **Resolved**: 2026-06-16T07:00:00Z
+- **Commit/PR**: 72101b9, ec07f1a
+- **Notes**: 
+  1. 新增 `FrameReject(0x06)` 专用拒绝帧类型，acceptCh 满/超 maxStreams 时发回拒绝帧
+  2. dialer 端在 `case FrameReject:` 中设置 `s.rejected` 标记并关闭 dataCh/done
+  3. Read/Write 所有出口检查 rejected 标记，返回明确 `ErrStreamRejected` 哨兵错误
+  4. stream 抽象成接口，内部通道操作通过 `closeChannels/pushData/pushEOF/reject` 封装
+
+### Lessons
+- 同步 Open + 异步 Accept 的 mux 必须在拒绝时显式通知对端
+- `select/default` 模式静默丢弃是 mux 设计的经典陷阱（yamux/smux 用缓冲通道，HTTP/2 用协商）
+- goroutine 死锁时 defer 不执行 → 必须要有外部超时或保底机制
+
+### Metadata
+- Source: bug_fix
+- Pattern-Key: mux.accept_ch_drop_deadlock
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`, `pkg/tunnel/mux/frame.go`
+- Tags: mux, deadlock, concurrent, benchmark
+
+---
+
+## [LRN-20260616-CR2] m.mu 在通道操作期间持有导致死锁
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: critical
+**Status**: resolved
+**Area**: backend
+
+### Summary
+handleFrame(FrameData) 在 `m.mu.Lock()` 后阻塞在 `s.dataCh <- payload`（64 缓冲满），同时 `Close()` 在等 `m.mu` 才能 `close(m.done)` → 死锁。
+
+### Details
+```
+readLoop: m.mu.Lock() → s.dataCh <- payload (block)
+Close():   m.mu.Lock() (block) ← 永远拿不到锁
+```
+
+修复方案：
+- FrameData case：在 `m.mu` 下查找流，立即 `m.mu.Unlock()`，然后在 `closeMu` 下操作 dataCh
+- `closeMu sync.Mutex` 保护 dataCh/done 的关闭和写入互斥
+- `Close()` 遍历 streams 时也在 `closeMu` 下关闭通道
+
+额外发现：FrameCloseWrite 的 `s.dataCh <- nil` 也有相同问题，同样已修复。
+
+### Resolution
+- **Resolved**: 2026-06-16T11:00:00Z
+- **Commit/PR**: ec07f1a
+- **Notes**: 引入 closeMu 分离 m.mu 和通道操作锁
+
+### Lessons
+- 持有 mutex 时不能做任何可能阻塞的操作（通道发送、I/O、锁获取）
+- Go 中 "lock → lookup → unlock → work on value" 是正确模式
+- 通道操作（send/receive）必须在锁外部执行，否则与 `Close()` 形成 AA 死锁
+
+### Metadata
+- Source: bug_fix
+- Pattern-Key: mux.mu_held_during_chan_op
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: mux, deadlock, concurrency, mutex
+
+---
+
+## [LRN-20260616-CR3] readLoop/pingLoop/sendFrame 中 context.Background() 无超时导致永久阻塞
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: critical
+**Status**: resolved
+**Area**: backend
+
+### Summary
+`conn.Send(context.Background(), frame)` 在底层 transport 不可用时永久阻塞，导致对应 goroutine 卡死。mux 有 5 处、pingLoop 与 ping 响应也在其列。
+
+### Details
+涉及的调用点：
+- `sendFrame` raw 帧路径
+- `sendFrame` 数据帧重试循环
+- `sendFrame` 控制帧发送
+- `pingLoop` ping 发送
+- `handleFrame` FramePing → Pong 回复
+
+全部改为 `m.Context()`，在 `m.done` 关闭时统一取消，不会永久阻塞。
+
+### Resolution
+- **Resolved**: 2026-06-16T11:00:00Z
+- **Commit/PR**: ec07f1a
+- **Notes**: context.Background() → m.Context()
+
+### Lessons
+- `context.Background()` 在 goroutine 循环内使用是危险信号，尤其是 I/O 操作
+- 长期运行的 goroutine 应该使用可取消的派生 context
+- `m.done` + `context.WithCancel` 是 mux 的标准关闭传播模式
+
+### Metadata
+- Source: code_review
+- Pattern-Key: mux.context_background_blocking
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: context, goroutine, blocking
+
+---
+
+## [LRN-20260616-CR4] sendFrame 中 removeStream 先于 conn.Send 导致数据丢失
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+FrameClose 的 `closeMarker` 路径先调 `m.removeStream()`（关闭 dataCh/done），再 `conn.Send()`。若关闭前 writeCh 中仍有该流的待发送数据帧，数据帧在接收端被静默丢弃。
+
+### Details
+修复前流程：
+```
+sendFrame(closeMarker) → removeStream (close dataCh/done) → conn.Send(FrameClose)
+```
+
+修复后流程：
+```
+sendFrame(closeMarker) → conn.Send(FrameClose) → removeStream
+```
+
+### Resolution
+- **Resolved**: 2026-06-16T11:00:00Z
+- **Commit/PR**: ec07f1a
+- **Notes**: 先 Send 成功后再清理流状态
+
+### Lessons
+- 清理操作（removeStream）必须在确认操作（Send）之后，不能在之前
+- 数据帧和控制帧的处理顺序很重要：先发控制帧再清理，确保已排队的帧能完整传输
+- 类似的模式在 HTTP/2、QUIC 流关闭中也有体现：先发 GOAWAY 再清理
+
+### Metadata
+- Source: code_review
+- Pattern-Key: mux.remove_before_send
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: ordering, data_loss, stream
+
+---
+
+## [LRN-20260616-CR5] activeStreams 计数器因拒绝路径未递增而错误递减
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+acceptCh 满的拒绝路径中，handleFrame `default:` 分支调用了 `m.removeStream()`（含 `activeStreams.Add(-1)`），但此路径从未走到 `activeStreams.Add(1)`（在 accept-success 分支内）——计数器下溢。
+
+### Details
+修复前：`activeStreams` 的正确 `+1` 在 `case m.acceptCh <- s:` 内，`default` 路径直接调 `removeStream` 执行 `-1`，但 `+1` 从未发生。
+
+修复后：拒绝路径不再调用 `removeStream`，改为手动的 `delete + s.reject()`，只清理流状态不碰计数器。
+
+### Resolution
+- **Resolved**: 2026-06-16T11:00:00Z
+- **Commit/PR**: ec07f1a
+- **Notes**: 拒绝路径手动 delete + reject，不调 removeStream
+
+### Lessons
+- 原子计数器必须配对：每个 `Add(N)` 必须有对应的 `Add(-N)`，路径不能重叠
+- `removeStream` 不是通用的"清理"函数，它有假设视图（先 `+1` 过）
+- Go channel select 的分支内外的操作不是同一个执行路径
+
+### Metadata
+- Source: code_review
+- Pattern-Key: mux.active_streams_underflow
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: atomic, counter, underflow
+
+---
+
+## [LRN-20260616-CR6] pingLoop Send 失败后静默退出不关闭 mux
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+pingLoop 在 `conn.Send` 失败后仅 `return`，不调用 `m.Close()`。mux 继续运行但失去心跳监控，无法恢复。
+
+### Details
+修复前：`conn.Send` 错误 → log metrics → return（goroutine 退出，mux 无心跳）
+修复后：`conn.Send` 错误 → log + `m.Close()` → return
+
+readLoop 和 sendFrame 在各自的错误路径都调用了 `m.Close()`，只有 pingLoop 遗漏。
+
+### Resolution
+- **Resolved**: 2026-06-16T11:00:00Z
+- **Commit/PR**: ec07f1a
+- **Notes**: pingLoop Send 失败后先 m.Close() 再 return
+
+### Lessons
+- 所有 goroutine 的持久性 I/O 错误必须触发 mux 关闭
+- mux 的三个 goroutine（readLoop/writeLoop/pingLoop）必须保持一致错误处理策略
+- "单点退出"是 goroutine 的常见 bug：`return` 前需要检查是否需要传播关闭信号
+
+### Metadata
+- Source: code_review
+- Pattern-Key: mux.ping_loop_silent_exit
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: goroutine, error_handling, heartbeat
+
+---
+
+## [LRN-20260616-CR7] struct Stream 暴露内部通道 → 接口抽象确保封装
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+原 `Stream` 公共结构体暴露 `dataCh/done` 内部通道，外部代码（包括测试和 tunnel 包）直接访问导致竞态。重构为 `Stream` 接口 + 私有 `stream` 实现，所有内部操作封装在方法中。
+
+### Details
+重构内容：
+- `Stream` → `Stream` 接口（暴露 `io.ReadWriteCloser + ID() + CloseWrite()`）
+- `Stream` → `stream`（私有实现，首字母小写）
+- 新增封装方法：`closeChannels()` / `pushData()` / `pushEOF()` / `reject()` / `rejectedOrClosedErr()`
+- `closeMu sync.Mutex` 保护所有通道写操作
+- Mux 内部使用 `*stream`（类型安全），外部返回/接受 `Stream` 接口
+
+### Resolution
+- **Resolved**: 2026-06-16T12:30:00Z
+- **Commit/PR**: ec07f1a
+
+### Lessons
+- 公共结构体的内部通道会被外部直接写入 → 无法保证线程安全
+- Go 的接口类型 + 私有实现是包级封装的标准模式
+- 迁移 `*mux.Stream` → `mux.Stream` 接口时所有外部调用点都需要检查指针/接口转换（tunnel_mux.go 中多处需要 `*mux.Stream` → `mux.Stream`）
+
+### Metadata
+- Source: code_review
+- Pattern-Key: mux.stream_interface_encapsulation
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`, `pkg/tunnel/tunnel_mux.go`
+- Tags: interface, encapsulation, refactor
+
+---
+
+## [LRN-20260616-BP1] Stream.Write([]byte{}) 的空写入被误解析为 FrameClose
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: medium
+**Status**: resolved
+**Area**: backend
+
+### Summary
+`Stream.Write([]byte{})` 调用后，`writeMsg.data` 为 non-nil empty slice，`sendFrame` 的 `case len(msg.data) == 0` 匹配到 `closeMarker`（`make([]byte, 0)`），发送 FrameClose 关闭流。
+
+### Details
+修复方案：Write 开头检查 `if len(p) == 0 { return 0, nil }`，空写入不发送任何帧。
+
+### Resolution
+- **Resolved**: 2026-06-16T11:00:00Z
+- **Commit/PR**: ec07f1a
+- **Notes**: Write 空输入提前 return
+
+### Lessons
+- `closeMarker = make([]byte, 0)` 和用户数据 `[]byte{}` 在类型和长度上无法区分
+- 所有公共方法应先验证输入边界条件
+- 类似 bug 在各语言中常见：空字符串/空数组被误认为"结束标记"
+
+### Metadata
+- Source: code_review
+- Pattern-Key: mux.empty_write_misidentified
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: edge_case, input_validation
+
+---
+
+## [LRN-20260616-BP2] mux 重连/重试策略: readLoop 应区分临时/致命错误
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: medium
+**Status**: resolved
+**Area**: backend
+
+### Summary
+原 readLoop 在 `conn.Receive` 的任何错误上都直接 `m.Close()`+return，即使超时等可恢复错误。fix 添加了指数退避重试（maxRecvRetries=5）区分 `ErrConnClosed` 和临时错误。
+
+### Details
+`ErrConnClosed` → 立即关闭
+临时错误（timeout 等）→ 指数退避 100ms→200ms→400ms→800ms→1.6s，共 5 次重试后关闭
+
+sendFrame 数据帧路径已存在相似重试（maxRetries=3），但 missing 在控制帧上（无需重试）。
+
+### Resolution
+- **Resolved**: 2026-06-16T11:00:00Z
+- **Commit/PR**: ec07f1a
+- **Notes**: readLoop 增加重试；pingLoop 和 sendFrame 的控制帧路径不重试
+
+### Lessons
+- 所有 I/O goroutine 的循环需要区分"可恢复的临时错误"和"不可恢复的致命错误"
+- 指数退避重试是标准模式（初始 100ms，3 次约 700ms，5 次约 3.1s）
+- 重试计数应在成功时重置
+
+### Metadata
+- Source: code_review
+- Pattern-Key: mux.retry_read_loop
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: retry, resilience, transient_error
+
+---
+
+## [LRN-20260616-BP3] 接口重构后调用方必须从 `*Stream` 迁移到 `Stream` 接口
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: medium
+**Status**: resolved
+**Area**: backend
+
+### Summary
+`Stream` 从结构体变为接口后，`tunnel_mux.go` 中所有 `*mux.Stream` 引用需要改为 `mux.Stream`（接口）。注意 Rust-style `&interface{}` 在 Go 中不存在：接口本身就是引用。
+
+### Details
+影响文件：`pkg/tunnel/tunnel_mux.go`
+- `type streamBody struct { stream *mux.Stream }` → `stream mux.Stream`
+- `func handleStream(stream *mux.Stream)` → `stream mux.Stream`
+- `BenchmarkMuxConcurrentStreams(stream *mux.Stream)` → `stream mux.Stream`
+
+接口类型的方法必须通过接口值调用（非指针），Go 会自动处理。
+
+### Resolution
+- **Resolved**: 2026-06-16T12:30:00Z
+- **Commit/PR**: ec07f1a
+
+### Lessons
+- Go 的接口是值类型（包含指针和类型元组的双字结构），不需要 `*Stream` 指针
+- 迁移结构体→接口时 grep `*pkg.Interface` 比编译错误更能发现问题
+- vet 插桩能检测到 `*Interface` 但编译也能受阻（`cannot use ... as ... value`）
+
+### Metadata
+- Source: compilation_error
+- Pattern-Key: mux.struct_to_interface_adaptation
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/tunnel_mux.go`, `pkg/tunnel/mux/benchmark_test.go`
+- Tags: interface, migration, go
+
+---
+
+## [LRN-20260616-BP4] 不要用 `_ = err` 替代错误处理 — 所有可能失败的函数必须返回 error
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: backend
+
+### Summary
+代码评审发现 `sendFrame` raw 帧路径使用 `_ = m.conn.Send(context.Background(), msg.data)` 静默吞掉错误。这是"error no swallow"规则的违反。
+
+### Details
+修复路径已在此次提交中应用：
+- raw 帧发送失败 log + Close
+- 数据帧重试耗尽 log + Close
+- 控制帧发送失败 log + Close
+- pingLoop 发送失败 log + Close + return
+- FramePing pong 回复暂时保留 `_ = conn.Send()`（因为 Read 不可达已由 `m.Close()` 触发）
+
+### Lessons
+- `_ = func()` 永远是危险信号 — 即使是"控制帧丢失不重要"的假设也需要注释说明
+- `sendFrame` 中的错误应该全部处理，不做静默吞没
+- 本项目 memory 中有 `error-no-swallow` 经验
+
+### Metadata
+- Source: code_review
+- Pattern-Key: backend.error_no_swallow
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: error_handling, code_quality
+- See Also: error-no-swallow (project memory)
+
+---
+
+## [LRN-20260616-BP5] mux sendFrame 接收端通道关闭后还发送的竞态修正方法
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+`handleFrame(FrameData)` 中 lookup 到 `s`（stream 存在）后立即 `Unlock`，然后向 `s.dataCh` 发数据。但此时 `Close()` 可能同时关闭 dataCh，即 `close(ch)` 和 `ch <- data` 并发。解决方案：使用 `closeMu` 保护通道操作。
+
+### Details
+模式：
+```
+lookup 在 m.mu 下 → Unlock → closeMu.Lock → select { dataCh <- payload / case <-done } → closeMu.Unlock
+```
+
+Close 路径：
+```
+m.mu.Lock → closeMu.Lock → close(dataCh); close(done) → closeMu.Unlock → m.mu.Unlock
+```
+
+select 中的 `case <-s.done` 兜底：即使 dataCh 已关闭，done 通道也会收到关闭信号，不会 panic。
+
+### Resolution
+- **Resolved**: 2026-06-16T11:00:00Z
+- **Commit/PR**: ec07f1a
+
+### Lessons
+- `close(ch)` 和 `ch <- data` 并发时是 data race（Go race detector 会检测到）
+- select `case <-done` 兜底只能在 close(ch) 之后从 done 收到信号，但不能保证 close(ch) 发生在 `ch <- data` 之前
+- 唯一可靠的方案是同一个 mutex 保护 close 和 send
+
+### Metadata
+- Source: race_detector
+- Pattern-Key: mux.chan_close_send_race
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: race, channel, concurrency
+
+---
+
+## [LRN-20260616-BP6] FrameReject 通过 writeCh 发送可能被丢弃 — 优先通道的静默降级对策
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: backend
+
+### Summary
+`rejectStream` 通过 writeCh 发送 FrameReject，使用 select/default 非阻塞发送。writeCh (256) 满时拒绝帧被静默丢弃，dialer 端永远不知流被拒绝。
+
+### Analysis
+这是当前 mux 的一个已知设计不足。不做阻塞写的原因是 handleFrame 在 readLoop goroutine 中，不能阻塞在 writeCh 上（writeLoop 可能也在等 readLoop 处理窗口更新帧 → 死锁）。
+
+当前应对措施：
+1. writeCh 容量 256 足够大，高负载下才会满
+2. dialer 端流有 30s 超时的 context（benchmark 和测试中有）
+3. dialer 端可以显式调用 stream.Close() 解除阻塞
+4. 理想方案：独立的优先级通道给控制帧，但引入复杂度较高
+
+### Possible Improvements
+- 添加独立的高优先级控制帧通道（无缓冲或小缓冲）
+- 在 writeCh 满时主动关闭整个 mux（反正连接已经过载）
+- 使用 atomic 标志位 + ping/pong 带外通信
+
+### Metadata
+- Source: code_review
+- Pattern-Key: mux.reject_frame_drop
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: design, resilience, flow_control
+
+---
+
+## [LRN-20260616-BP7] 错误检查优先用 errors.Is 而非 == 或 err != nil
+
+**Logged**: 2026-06-16T12:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: backend
+
+### Summary
+Benchmark 中原先使用 `err == nil` 判断成功，但 `ErrStreamRejected`/`ErrMaxStreams` 是哨兵错误且被 `fmt.Errorf("...: %w", ...)` 包装。需要 `errors.Is(err, mux.ErrStreamRejected)` 才能正确匹配。
+
+### Details
+修复前 benchmark 直接 `if err != nil { break }`，无法区分"被拒绝"和"其他错误"
+修复后 `if errors.Is(err, mux.ErrMaxStreams) || errors.Is(err, mux.ErrStreamRejected) { break }`
+
+### Lessons
+- 使用 `fmt.Errorf("%w")` 包装的错误必须用 `errors.Is` 检查
+- `==` 比较只能对最外层无包装的哨兵错误生效
+- benchmark 中的错误处理必须是精确的，不能吞掉预期外的错误
+
+### Metadata
+- Source: code_review
+- Pattern-Key: backend.errors_is_pattern
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/benchmark_test.go`, `pkg/tunnel/mux/mux_test.go`
+- Tags: error_handling, testing, benchmark
+
+---
+
+## [LRN-20260616-BP8] Go race detector 发现的 dataCh close→send 竞态必须用 mutex 保护
+
+**Logged**: 2026-06-16T14:00:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: tests
+
+### Summary
+引入 `closeMu` 之前，`TestMuxSendReceive` 等测试在 `go test -race` 下失败，报告 `close(s.dataCh)` 和 `s.dataCh <- payload` 之间的数据竞争。使用 `select { case <-s.done }` 兜底不足以解决—race detector 仍然报错，因为 race 发生在 close 操作和 send 操作的并发访问上。
+
+### Details
+race detector 不关心 select 中的 case 是否能兜底。它只看两个 goroutine 是否并发操作了同一 channel（close 和 send）。只要两者之间没有同步的 happens-before 关系，就是 race。
+
+修复：`closeMu` 同时保护 close(dataCh) 和 dataCh <- payload，确保它们互斥。
+
+### Resolution
+- **Resolved**: 2026-06-16T12:30:00Z
+- **Commit/PR**: ec07f1a
+- **Notes**: `closeMu sync.Mutex` 添加到 Stream，所有 dataCh 操作在 closeMu 下执行
+
+### Lessons
+- Go race detector 对 channel 的 close/send 并发很敏感，即使 select 有兜底 case
+- select 兜底只保证不 panic（`send on closed channel`），不解决 race
+- race-free 的唯一方案是 mutex 保护或确保 close 前所有 sender 已退出
+
+### Metadata
+- Source: race_detector
+- Pattern-Key: testing.race_chan_close_send
+- Recurrence-Count: 1
+- Related Files: `pkg/tunnel/mux/mux.go`
+- Tags: race, testing, channel
+
+---

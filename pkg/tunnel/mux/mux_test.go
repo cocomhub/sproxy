@@ -172,7 +172,7 @@ func TestMuxMultipleStreams(t *testing.T) {
 	defer cancel()
 
 	const n = 5
-	streamsA := make([]*mux.Stream, n)
+	streamsA := make([]mux.Stream, n)
 	for i := range n {
 		s, err := muxA.Open(ctx)
 		if err != nil {
@@ -182,7 +182,7 @@ func TestMuxMultipleStreams(t *testing.T) {
 		streamsA[i] = s
 	}
 
-	bMap := make(map[mux.StreamID]*mux.Stream)
+	bMap := make(map[mux.StreamID]mux.Stream)
 	for range n {
 		s, err := muxB.Accept(ctx)
 		if err != nil {
@@ -442,9 +442,9 @@ func TestMuxAcceptChFull_Reject(t *testing.T) {
 	// 但需要先创建足够的流占满 acceptCh，同时不 Accept 它们。
 	// 由于服务端没有 goroutine 在 Accept，第 65 个流将触发 reject。
 	overflow := 65
-	streams := make([]*mux.Stream, 0, overflow)
+	streams := make([]mux.Stream, 0, overflow)
 
-	for i := 0; i < overflow; i++ {
+	for i := range overflow {
 		s, err := muxA.Open(ctx)
 		if err != nil {
 			t.Fatalf("Open #%d: %v", i, err)
@@ -485,8 +485,8 @@ func TestMuxWithMaxStreams(t *testing.T) {
 	defer cancel()
 
 	// 在 maxStreams 内打开，全部应成功
-	streams := make([]*mux.Stream, 0, maxStreams)
-	for i := 0; i < maxStreams; i++ {
+	streams := make([]mux.Stream, 0, maxStreams)
+	for i := range maxStreams {
 		s, err := muxA.Open(ctx)
 		if err != nil {
 			t.Fatalf("Open #%d within limit: %v", i, err)
@@ -502,7 +502,7 @@ func TestMuxWithMaxStreams(t *testing.T) {
 	}
 
 	// 正常关闭
-	for i := 0; i < maxStreams; i++ {
+	for range maxStreams {
 		s, acceptErr := muxB.Accept(ctx)
 		if acceptErr != nil {
 			break

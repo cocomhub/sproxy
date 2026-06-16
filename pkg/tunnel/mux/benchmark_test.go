@@ -95,7 +95,7 @@ func BenchmarkMuxConcurrentStreams(b *testing.B) {
 					if err != nil {
 						return
 					}
-					go func(stream *mux.Stream) {
+					go func(stream mux.Stream) {
 						buf := make([]byte, 65536)
 						for {
 							n, err := stream.Read(buf)
@@ -113,7 +113,7 @@ func BenchmarkMuxConcurrentStreams(b *testing.B) {
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				streams := make([]*mux.Stream, 0, conc)
+				streams := make([]mux.Stream, 0, conc)
 				for range conc {
 					s, err := muxA.Open(ctx)
 					if err != nil {
