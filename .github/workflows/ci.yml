@@ -9,20 +9,23 @@ on:
   pull_request:
     branches: [master]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
           check-latest: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
           args: --timeout=5m ./...
@@ -36,28 +39,32 @@ jobs:
         go: ["1.26"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
 
+      - name: Ensure make (Windows)
+        if: matrix.os == 'windows-latest'
+        run: choco install make -y
+
       - name: go vet
-        run: go vet ./...
+        run: make vet
 
       - name: go test (race)
-        run: go test -race -count=1 ./...
+        run: make test
 
       - name: go test (coverage)
-        run: go test -count=1 -coverprofile=cover.out ./...
+        run: make cover-check
         if: matrix.os == 'ubuntu-latest'
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.os }}
-          path: cover.out
+          path: build/cover.out
         if: matrix.os == 'ubuntu-latest'
 
   build:
@@ -69,44 +76,40 @@ jobs:
         goarch: [amd64, arm64]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
           check-latest: true
 
       - name: Build sproxy + sclient
-        run: |
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o build/bin/sproxy-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/sproxy/
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o build/bin/sclient-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/sclient/
+        run: make build-ci GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Build all sub-modules
+        run: make build-all
+
+      - uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
           path: build/bin/
 
   benchmark:
     name: Benchmark
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.26"
           check-latest: true
       - name: Install benchstat
         run: go install golang.org/x/perf/cmd/benchstat@latest
       - name: Run benchmark
-        run: |
-          mkdir -p build/benchmark/data
-          go test -bench=. -benchmem -count=1 \
-            ./pkg/server/... \
-            ./pkg/client/... \
-            ./pkg/tunnel/mux/... \
-            2>&1 > build/benchmark/data/ci-$(git rev-parse --short HEAD).txt
+        run: make bench
       - name: Upload benchmark artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
           path: build/benchmark/

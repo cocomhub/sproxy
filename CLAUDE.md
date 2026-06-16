@@ -18,25 +18,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-make build                # fmt + 自动发现 ./cmd/* 下所有 main 包，逐个产出到 build/bin/<name>
-make build-sproxy         # 只构建 sproxy（模式：build-<cmd-name>）
-make build-sclient        # 只构建 sclient
-make run                  # build + 用 build/config.yaml 运行 sproxy
-make fmt                  # addlicense + go fix + gofmt -s（gofumpt 已注释，不跑）
-make clean                # 删除 build/bin
-make show-version         # 打印当前构建二进制的版本
-```
+make build           # 本地构建（含格式化）
+make build-sproxy    # 只构建 sproxy（模式：build-<cmd-name>）
+make build-sclient   # 只构建 sclient
+make build-ci        # CI 构建（跳过格式化）
+make test            # 快速单元测试（已取消 vet/check-loopback 依赖）
+make test-cover      # 测试 + 覆盖率收集
+make test-packages   # 分组运行测试，快速定位失败包
+make cover-check     # 覆盖率门禁检查（默认 70%）
+make vet             # go vet
+make lint            # golangci-lint
+make bench           # 基准测试（-count=5，含数据目录追踪）
+make check-loopback  # 检查测试地址是否使用不安全监听
+make notest          # 检查所有包有测试文件（.notestignore 控制免检）
+make gofix           # go fix ./...
+make fmt             # addlicense + go fix + gofmt -s
+make clean           # 删除 build 目录
+make check-ci        # 全量检查入口（提交前使用）
+make run             # build + 用 build/config.yaml 运行 sproxy
+make show-version    # 打印当前构建二进制的版本
+make cover-html      # 覆盖率 HTML 报告到 build/coverage/cover.html
+make cover-trend     # 覆盖率趋势追踪
+make bench-compare   # 基准比较
 
-**无 `make test`、无 `make lint`**。测试直接：
+Windows 首次运行需安装 make：
+  pwsh scripts/install-make.ps1
 
-```bash
-make test               # go vet + go test -race ./...
-make test-packages      # 分组运行测试，简化定位失败包
-make cover              # 覆盖率摘要（total: xx%）
-make cover-html         # 覆盖率 HTML 报告到 build/coverage/cover.html
-go test ./...
-go test -run TestName ./pkg/server/...     # 单测
-go test -race ./pkg/tunnel/...
+所有 CI job 通过 `make <target>` 调用，不写裸 go 命令。
 ```
 
 现有测试位置：`pkg/server/integration_test.go`、`pkg/server/chunked_upload_test.go`、`pkg/tunnel/example_test.go`。

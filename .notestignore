@@ -1,0 +1,9 @@
+# .notestignore — 无测试文件的包免检列表
+# 语法：一行一个包路径或 glob 模式，支持 # 注释和空行
+# 随着测试覆盖率的提升，逐步移除条目
+
+# 以下为无测试文件的 tools 包，暂不要求测试：
+tools/genbenchview
+tools/gencoverview
+tools/genreport
+tools/gentimingview
