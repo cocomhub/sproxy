@@ -84,13 +84,13 @@ func TestE2E_Direct_UploadStatRenameDownloadDelete(t *testing.T) {
 	}
 
 	// 3. rename
-	if err := c.Rename(context.Background(), "data.bin", "sub/dir/renamed.bin", info.Checksum); err != nil {
+	if err = c.Rename(context.Background(), "data.bin", "sub/dir/renamed.bin", info.Checksum); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
 
 	// 4. download
 	outPath := filepath.Join(t.TempDir(), "out.bin")
-	if err := c.Download(context.Background(), "sub/dir/renamed.bin", outPath); err != nil {
+	if err = c.Download(context.Background(), "sub/dir/renamed.bin", outPath); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	got, err := os.ReadFile(outPath)

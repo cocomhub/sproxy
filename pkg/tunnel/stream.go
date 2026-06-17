@@ -35,7 +35,7 @@ var chunkPool = sync.Pool{
 // getBuf 从 chunkPool 获取一个至少 size 字节的 []byte。
 // 返回的切片 len 为 size，cap 至少为 size。
 func getBuf(size int) []byte {
-	bp := chunkPool.Get().(*[]byte)
+	bp := chunkPool.Get().(*[]byte) //nolint:errcheck
 	if cap(*bp) >= size {
 		return (*bp)[:size]
 	}
@@ -175,7 +175,7 @@ func DecryptStreamWithChunkSize(key []byte, r io.Reader, w io.Writer, maxChunkSi
 		}
 
 		chunk := getBuf(int(chunkLen))
-		if _, err := io.ReadFull(r, chunk); err != nil {
+		if _, err = io.ReadFull(r, chunk); err != nil {
 			putBuf(chunk, len(chunk))
 			return written, fmt.Errorf("decrypt stream: read chunk: %w", err)
 		}

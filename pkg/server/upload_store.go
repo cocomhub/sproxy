@@ -393,7 +393,7 @@ func (us *UploadStore) writeSessionJSON(s *ChunkedUploadSession) error {
 		return fmt.Errorf("序列化 session 失败: %w", err)
 	}
 	dir := filepath.Join(us.baseDir, s.UploadID)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err = os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("创建目录失败: %w", err)
 	}
 	finalPath := filepath.Join(dir, "session.json")

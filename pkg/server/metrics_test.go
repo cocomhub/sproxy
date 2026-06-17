@@ -214,7 +214,7 @@ func TestMetricsSnapshot_Empty(t *testing.T) {
 func TestMetricsSnapshot_Nil(t *testing.T) {
 	t.Parallel()
 
-	var m *Metrics = nil
+	var m *Metrics
 	s := m.Snapshot()
 	if s != nil {
 		t.Errorf("nil metrics: expected nil snapshot, got %v", s)

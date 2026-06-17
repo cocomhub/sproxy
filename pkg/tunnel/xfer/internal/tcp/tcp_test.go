@@ -61,7 +61,7 @@ func TestTcpConnRoundTrip(t *testing.T) {
 	defer serverConn.Close()
 
 	msg := []byte("hello tcp")
-	if err := clientConn.Send(ctx, msg); err != nil {
+	if err = clientConn.Send(ctx, msg); err != nil {
 		t.Fatal(err)
 	}
 	received, err := serverConn.Receive(ctx)
@@ -73,7 +73,7 @@ func TestTcpConnRoundTrip(t *testing.T) {
 	}
 
 	reply := []byte("reply")
-	if err := serverConn.Send(ctx, reply); err != nil {
+	if err = serverConn.Send(ctx, reply); err != nil {
 		t.Fatal(err)
 	}
 	received, err = clientConn.Receive(ctx)
@@ -128,7 +128,7 @@ func TestTcpLargePayload(t *testing.T) {
 		payload[i] = byte(i % 256)
 	}
 
-	if err := clientConn.Send(ctx, payload); err != nil {
+	if err = clientConn.Send(ctx, payload); err != nil {
 		t.Fatal(err)
 	}
 	received, err := serverConn.Receive(ctx)
@@ -200,7 +200,7 @@ func TestTcpMultipleMessages(t *testing.T) {
 
 	for i := range 10 {
 		msg := fmt.Appendf(nil, "msg-%d", i)
-		if err := clientConn.Send(ctx, msg); err != nil {
+		if err = clientConn.Send(ctx, msg); err != nil {
 			t.Fatal(err)
 		}
 		received, err := serverConn.Receive(ctx)

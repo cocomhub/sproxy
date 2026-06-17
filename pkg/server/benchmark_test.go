@@ -21,10 +21,10 @@ import (
 // ---- 基准测试辅助函数（接受 testing.TB 以支持 testing.B） ----
 
 // benchServer 创建基准测试用测试服务器（不含分块路由）。
-func benchServer(b testing.TB, modifyCfg func(*Config)) (string, *atomic.Pointer[Config]) {
-	b.Helper()
+func benchServer(tb testing.TB, modifyCfg func(*Config)) (string, *atomic.Pointer[Config]) {
+	tb.Helper()
 
-	tmpDir := b.TempDir()
+	tmpDir := tb.TempDir()
 
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
@@ -52,15 +52,15 @@ func benchServer(b testing.TB, modifyCfg func(*Config)) (string, *atomic.Pointer
 	mux.HandleFunc("GET /healthz", h.healthz)
 
 	ts := httptest.NewServer(mux)
-	b.Cleanup(ts.Close)
+	tb.Cleanup(ts.Close)
 	return ts.URL, &cfgPtr
 }
 
 // benchServerWithChunked 创建含分块路由的基准测试用测试服务器。
-func benchServerWithChunked(b testing.TB, modifyCfg func(*Config)) (string, *atomic.Pointer[Config]) {
-	b.Helper()
+func benchServerWithChunked(tb testing.TB, modifyCfg func(*Config)) (string, *atomic.Pointer[Config]) {
+	tb.Helper()
 
-	tmpDir := b.TempDir()
+	tmpDir := tb.TempDir()
 
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
@@ -92,7 +92,7 @@ func benchServerWithChunked(b testing.TB, modifyCfg func(*Config)) (string, *ato
 	mux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
 
 	ts := httptest.NewServer(mux)
-	b.Cleanup(func() {
+	tb.Cleanup(func() {
 		ts.Close()
 		h.uploadStore.Stop()
 	})
@@ -100,34 +100,35 @@ func benchServerWithChunked(b testing.TB, modifyCfg func(*Config)) (string, *ato
 }
 
 // uploadFileBench 上传文件（testing.TB 版本，复用 uploadFile 的逻辑）。
-func uploadFileBench(b testing.TB, baseURL, filename string, body []byte, headers map[string]string) (int, []byte) {
-	b.Helper()
+func uploadFileBench(tb testing.TB, baseURL, filename string, body []byte, headers map[string]string) (int, []byte) {
+	tb.Helper()
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	part, err := mw.CreateFormFile("file", filename)
 	if err != nil {
-		b.Fatalf("create form file: %v", err)
+		tb.Fatalf("create form file: %v", err)
 	}
-	if _, err := part.Write(body); err != nil {
-		b.Fatalf("write part: %v", err)
+	if _, err = part.Write(body); err != nil {
+		tb.Fatalf("write part: %v", err)
 	}
-	if err := mw.Close(); err != nil {
-		b.Fatalf("close multipart: %v", err)
+	if err = mw.Close(); err != nil {
+		tb.Fatalf("close multipart: %v", err)
 	}
 
 	req, err := http.NewRequest("POST", baseURL+"/upload", &buf)
 	if err != nil {
-		b.Fatalf("new request: %v", err)
+		tb.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	var resp *http.Response
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
-		b.Fatalf("do upload: %v", err)
+		tb.Fatalf("do upload: %v", err)
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)

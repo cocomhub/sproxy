@@ -129,7 +129,7 @@ func TestVersion_Restore(t *testing.T) {
 	var listResult struct {
 		Versions []VersionInfo `json:"versions"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&listResult); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&listResult); err != nil {
 		t.Fatal(err)
 	}
 	if len(listResult.Versions) == 0 {
@@ -236,7 +236,7 @@ func TestDeleteVersion_HappyPath(t *testing.T) {
 	var listResult struct {
 		Versions []VersionInfo `json:"versions"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&listResult); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&listResult); err != nil {
 		t.Fatal(err)
 	}
 	if len(listResult.Versions) == 0 {

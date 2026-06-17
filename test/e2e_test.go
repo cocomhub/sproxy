@@ -41,7 +41,7 @@ func uploadFile(t *testing.T, baseURL, filename string, body []byte, headers map
 	if err != nil {
 		t.Fatalf("create form file: %v", err)
 	}
-	if _, err := part.Write(body); err != nil {
+	if _, err = part.Write(body); err != nil {
 		t.Fatalf("write part: %v", err)
 	}
 	_ = mw.Close()
@@ -105,7 +105,7 @@ func searchFiles(t *testing.T, baseURL, query string) (int, map[string]any) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	var result map[string]any
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err = json.Unmarshal(body, &result); err != nil {
 		t.Fatalf("search unmarshal: %v (body: %s)", err, body)
 	}
 	return resp.StatusCode, result

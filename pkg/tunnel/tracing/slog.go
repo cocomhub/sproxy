@@ -66,7 +66,7 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 			return
 		}
 		span.ended = true
-		span.Duration = time.Since(span.StartTime.(time.Time))
+		span.Duration = time.Since(span.StartTime.(time.Time)) //nolint:errcheck
 
 		indent := ""
 		if depth > 1 {

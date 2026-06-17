@@ -136,7 +136,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	var fileChecksum string
 	absPath, _ := filepath.Abs(localPath)
 	if cached, ok := c.uploadCache.Load(absPath); ok {
-		entry := cached.(*uploadCacheEntry)
+		entry := cached.(*uploadCacheEntry) //nolint:errcheck
 		if entry.fileSize == fileSize && entry.modTime.Equal(modTime) {
 			fileChecksum = entry.fileChecksum
 			c.logger.Debug("checksum 缓存命中", "file_path", localPath)
@@ -146,7 +146,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	if fileChecksum == "" {
 		// 计算完整文件 SHA-256
 		h := sha256.New()
-		if _, err := io.Copy(h, file); err != nil {
+		if _, err = io.Copy(h, file); err != nil {
 			return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
 		}
 		fileChecksum = hex.EncodeToString(h.Sum(nil))
@@ -156,7 +156,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 			modTime:      modTime,
 			fileChecksum: fileChecksum,
 		})
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
+		if _, err = file.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("重置文件指针失败: %w", err)
 		}
 		c.logger.Debug("文件 SHA-256 计算完毕", "file_path", localPath, "checksum", shortid.ShortHash(fileChecksum))
@@ -174,9 +174,9 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	// 当 resume=false 时，跳过续传查询，直接走新建 session 路径
 	if opt.resume {
 		// 统一查询：先通过 upload_id + filename 查询文件状态
-		statusResp, err := c.doRequest(ctx, "GET",
+		statusResp, statusErr := c.doRequest(ctx, "GET",
 			fmt.Sprintf("/upload/status?upload_id=%s&filename=%s", uploadID, url.QueryEscape(filename)), nil, nil)
-		if err == nil && statusResp.StatusCode == http.StatusOK {
+		if statusErr == nil && statusResp.StatusCode == http.StatusOK {
 			var statusData struct {
 				Success       bool   `json:"success"`
 				Finished      bool   `json:"finished"`
@@ -209,16 +209,17 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 						"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
 
 					// 只上传缺失分块
-					result, err := c.uploadChunks(ctx, localPath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, statusData.MissingChunks, opt.concurrency)
+					var chunkResult *ChunkedUploadResult
+					chunkResult, err = c.uploadChunks(ctx, localPath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, statusData.MissingChunks, opt.concurrency)
 					if err != nil {
 						return nil, err
 					}
-					return result, nil
+					return chunkResult, nil
 				}
 			} else {
 				statusResp.Body.Close()
 			}
-		} else if err == nil {
+		} else if statusErr == nil {
 			statusResp.Body.Close()
 		}
 	}
@@ -339,7 +340,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 						"upload_id", shortid.ShortHash(uploadID), "file", filePath, "error", err)
 					return
 				}
-				if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				if _, err = f.Seek(offset, io.SeekStart); err != nil {
 					c.logger.Warn("chunk seek 失败", "chunk_index", chunkIdx,
 						"upload_id", shortid.ShortHash(uploadID), "offset", offset, "error", err)
 					f.Close()
@@ -361,17 +362,17 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 				// 构造 multipart 请求
 				var buf bytes.Buffer
 				mw := multipart.NewWriter(&buf)
-				if err := mw.WriteField("upload_id", uploadID); err != nil {
+				if err = mw.WriteField("upload_id", uploadID); err != nil {
 					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
 						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue
 				}
-				if err := mw.WriteField("chunk_index", fmt.Sprintf("%d", chunkIdx)); err != nil {
+				if err = mw.WriteField("chunk_index", fmt.Sprintf("%d", chunkIdx)); err != nil {
 					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
 						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue
 				}
-				if err := mw.WriteField("chunk_checksum", chunkChecksum); err != nil {
+				if err = mw.WriteField("chunk_checksum", chunkChecksum); err != nil {
 					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
 						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue
@@ -383,7 +384,7 @@ func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string
 						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue
 				}
-				if _, err := part.Write(chunkData); err != nil {
+				if _, err = part.Write(chunkData); err != nil {
 					c.logger.Warn("chunk 写入 form part 失败", "chunk_index", chunkIdx,
 						"upload_id", shortid.ShortHash(uploadID), "error", err)
 					continue

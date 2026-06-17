@@ -138,7 +138,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 
 	cfg := h.cfgPtr.Load()
 	fullPath := filepath.Join(cfg.UploadsDir, remotePath)
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+	if _, err = os.Stat(fullPath); os.IsNotExist(err) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 		return
 	}
@@ -146,7 +146,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	// 解析并限制 TTL
 	ttl := 24 * time.Hour
 	if req.TTL != "" {
-		if d, err := time.ParseDuration(req.TTL); err == nil && d > 0 {
+		if d, ttlErr := time.ParseDuration(req.TTL); ttlErr == nil && d > 0 {
 			ttl = min(d, maxShareTTL)
 		}
 	}

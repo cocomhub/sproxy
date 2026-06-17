@@ -90,14 +90,15 @@ func addFileToTar(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger)
 
 	if info.IsDir() {
 		// 递归添加目录内容
-		entries, err := os.ReadDir(fullPath)
+		var entries []os.DirEntry
+		entries, err = os.ReadDir(fullPath)
 		if err != nil {
 			return fmt.Errorf("读取目录失败: %w", err)
 		}
 		for _, entry := range entries {
 			childRel := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
 			childFull := filepath.Join(fullPath, entry.Name())
-			if err := addFileToTar(tw, childFull, childRel, logger); err != nil {
+			if err = addFileToTar(tw, childFull, childRel, logger); err != nil {
 				logger.Warn("归档添加子文件失败", "path", childRel, "error", err)
 			}
 		}

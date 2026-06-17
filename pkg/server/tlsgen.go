@@ -61,7 +61,7 @@ func GenerateSelfSignedCert(certFile, keyFile string) error {
 
 	// Ensure parent directory exists
 	dir := filepath.Dir(certFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err = os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create cert directory %s: %w", dir, err)
 	}
 
@@ -72,7 +72,7 @@ func GenerateSelfSignedCert(certFile, keyFile string) error {
 	}
 	defer certOut.Close()
 
-	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+	if err = pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
 		return fmt.Errorf("encode cert PEM: %w", err)
 	}
 

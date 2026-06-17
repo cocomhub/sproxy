@@ -99,7 +99,7 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(result)
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 // bodyToString 将 body 转为 string。
@@ -114,5 +114,5 @@ func bodyToString(body []byte) string {
 func writeRelayError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(RelayResponse{Status: code, Error: msg})
+	_ = json.NewEncoder(w).Encode(RelayResponse{Status: code, Error: msg})
 }

@@ -19,7 +19,7 @@ func TestHandler_UpdateKey_OldKeyStillWorks(t *testing.T) {
 		key2[i] = byte(i)
 	}
 
-	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("old-key-accepted"))
 	})
@@ -62,7 +62,7 @@ func TestHandler_ServeHTTP_EmptyKey(t *testing.T) {
 }
 
 func TestDispatchLocal_PanicRecovery(t *testing.T) {
-	panicHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	panicHandler := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		panic("test panic in local handler")
 	})
 
@@ -89,7 +89,7 @@ func TestDispatchLocal_PanicRecovery(t *testing.T) {
 
 func TestForwardExternal_HTTPClientError(t *testing.T) {
 	// httptest server that we close immediately, causing connection refused
-	closedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	closedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	closedSrv.Close()

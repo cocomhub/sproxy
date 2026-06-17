@@ -54,7 +54,7 @@ func (h *Handlers) saveVersion(remotePath, uploadsDir string) (int64, error) {
 	}
 	defer dst.Close()
 
-	if _, err := io.Copy(dst, src); err != nil {
+	if _, err = io.Copy(dst, src); err != nil {
 		os.Remove(verPath)
 		return 0, fmt.Errorf("复制版本文件失败: %w", err)
 	}
@@ -171,7 +171,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	verFile := filepath.Join(cfg.UploadsDir, versionsDirName, remotePath, versionIDStr)
-	if _, err := os.Stat(verFile); os.IsNotExist(err) {
+	if _, err = os.Stat(verFile); os.IsNotExist(err) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "版本文件不存在"}, http.StatusNotFound)
 		return
 	}
@@ -196,7 +196,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	}
 	defer dst.Close()
 
-	if _, err := io.Copy(dst, src); err != nil {
+	if _, err = io.Copy(dst, src); err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
 		return
 	}

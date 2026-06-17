@@ -448,7 +448,7 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 		w.Header().Set("Content-Type", frameContentType)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(errMetaFrame)
-		if _, err := EncryptStream(encKey, strings.NewReader(err.Error()), w); err != nil {
+		if _, err = EncryptStream(encKey, strings.NewReader(err.Error()), w); err != nil {
 			h.logger.Error("隧道错误响应加密失败", "error", err)
 		}
 		return

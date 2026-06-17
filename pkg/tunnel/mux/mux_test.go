@@ -92,10 +92,10 @@ func TestMuxCloseWrite(t *testing.T) {
 	defer streamB.Close()
 
 	// 发送数据 + CloseWrite
-	if _, err := streamA.Write([]byte("hello")); err != nil {
+	if _, err = streamA.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
-	if err := streamA.CloseWrite(); err != nil {
+	if err = streamA.CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -358,7 +358,7 @@ func TestMuxWriteChClosedStream(t *testing.T) {
 	}
 
 	// 先 CloseWrite 再 Write
-	if err := s.CloseWrite(); err != nil {
+	if err = s.CloseWrite(); err != nil {
 		t.Fatal(err)
 	}
 

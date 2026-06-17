@@ -279,7 +279,6 @@ type Mux struct {
 	activeStreams atomic.Int32
 	maxStreams    int32
 
-	errOnce      sync.Once
 	lastPongNano atomic.Int64
 
 	ctx     context.Context

@@ -226,7 +226,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	unlockIO := h.uploadStore.lockChunkIO(uploadID)
 	defer unlockIO()
 	// 确保 session 目录存在
-	if err := os.MkdirAll(filepath.Dir(chunkPath), 0755); err != nil {
+	if err = os.MkdirAll(filepath.Dir(chunkPath), 0755); err != nil {
 		h.logger.Warn("创建 session 目录失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 	}
 

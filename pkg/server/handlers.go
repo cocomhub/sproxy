@@ -31,10 +31,10 @@ import (
 // offset 默认 0，limit 默认 1000（上限 10000）。
 func parsePagination(r *http.Request) (offset, limit int) {
 	if o := r.URL.Query().Get("offset"); o != "" {
-		fmt.Sscanf(o, "%d", &offset)
+		_, _ = fmt.Sscanf(o, "%d", &offset)
 	}
 	if l := r.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &limit)
+		_, _ = fmt.Sscanf(l, "%d", &limit)
 	}
 	if offset < 0 {
 		offset = 0
@@ -73,7 +73,7 @@ func (h *Handlers) TunnelHandler() http.Handler {
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
 // 调用方应在进程退出前调用 (*Handlers).Close() 以释放后台 goroutine 与持久化资源。
-func RegisterRoutes(ctx context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointer[Config], version, buildAt string, tunnelKey []byte, logger *slog.Logger, routeTable *hub.RouteTable) *Handlers {
+func RegisterRoutes(_ context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointer[Config], version, buildAt string, tunnelKey []byte, logger *slog.Logger, routeTable *hub.RouteTable) *Handlers {
 	cfg := cfgPtr.Load()
 	log := defaultLogger(logger)
 
@@ -269,7 +269,7 @@ func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	h.routeTable.Remove(id)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "removed", "node": string(id)})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "removed", "node": string(id)})
 }
 
 // hubStatsHandler 返回中继统计。
@@ -280,7 +280,7 @@ func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	count := h.routeTable.NodeCount()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"nodes_connected": count,
 	})
 }
@@ -335,13 +335,13 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 	uploadDir := cfg.UploadsDir
 	filePath := filepath.Join(uploadDir, remotePath)
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+	if err = os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		logger.Error("创建目录失败", "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
 		return
 	}
 
-	if stat, err := os.Stat(filePath); err == nil {
+	if stat, statErr := os.Stat(filePath); statErr == nil {
 		if verifyFileWithChecksum(filePath, expectedChecksum) {
 			// 幂等上传：文件已存在且 checksum 匹配，先保存版本后返回
 			h.saveVersionBeforeOverwrite(remotePath)
@@ -361,7 +361,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err = os.MkdirAll(dir, 0755); err != nil {
 		logger.Error("创建目录失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
 		return

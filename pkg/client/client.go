@@ -216,12 +216,12 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 
 	var fileChecksum string
 	h := sha256.New()
-	if _, err := io.Copy(h, file); err != nil {
+	if _, err = io.Copy(h, file); err != nil {
 		return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
 	}
 	fileChecksum = hex.EncodeToString(h.Sum(nil))
 	c.logger.Debug("文件 SHA-256", "file_path", localPath, "remote_path", remotePath, "checksum", shortid.ShortHash(fileChecksum))
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("重置文件指针失败: %w", err)
 	}
 
@@ -232,9 +232,9 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	go func() {
 		defer pw.Close()
 		defer mw.Close()
-		part, err := mw.CreateFormFile("file", remoteClean)
-		if err != nil {
-			pw.CloseWithError(err)
+		part, wErr := mw.CreateFormFile("file", remoteClean)
+		if wErr != nil {
+			pw.CloseWithError(wErr)
 			return
 		}
 		var src io.Reader = file
@@ -244,7 +244,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 				c.progressFn("上传", read, total)
 			})
 		}
-		if _, err := io.Copy(part, src); err != nil {
+		if _, err = io.Copy(part, src); err != nil {
 			pw.CloseWithError(err)
 			return
 		}
@@ -739,14 +739,15 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		}
 	}
 
+	var resp *http.Response
 	if c.tunnelClient != nil {
 		// 隧道模式：使用相对 URL，隧道客户端处理加密
-		resp, err := c.tunnelClient.Do(req)
+		resp, err = c.tunnelClient.Do(req)
 		return closeBodyIfErr(resp, err)
 	}
 
 	if c.xferName != "" {
-		resp, err := c.doRequestViaXfer(req)
+		resp, err = c.doRequestViaXfer(req)
 		return closeBodyIfErr(resp, err)
 	}
 
@@ -756,7 +757,7 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	if err != nil {
 		return nil, fmt.Errorf("解析 URL 失败: %w", err)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err = c.httpClient.Do(req)
 	return closeBodyIfErr(resp, err)
 }
 
