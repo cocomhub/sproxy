@@ -81,7 +81,9 @@ func (n *P2PNode) Listen(ctx context.Context, addr string) error {
 	n.listener = listener
 
 	// Register self in DHT so peers can discover this node.
-	n.DHT.Register(ctx, hub.PeerInfo{ID: n.ID, Addrs: []string{addr}})
+	if err := n.DHT.Register(ctx, hub.PeerInfo{ID: n.ID, Addrs: []string{addr}}); err != nil {
+		return fmt.Errorf("p2p: register in DHT: %w", err)
+	}
 
 	go n.acceptLoop(ctx)
 	return nil

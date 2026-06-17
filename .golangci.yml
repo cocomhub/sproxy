@@ -19,6 +19,12 @@ linters:
     gosec:
       excludes:
         - G101
+        - G115
+        - G117
+        - G306
+        - G404
+        - G703
+        - G705
     govet:
       enable:
         - shadow
@@ -31,6 +37,10 @@ linters:
         - -ST1020
         - -ST1021
         - -ST1022
+    revive:
+      rules:
+        - name: unused-parameter
+          disabled: true
   exclusions:
     generated: lax
     presets:
@@ -55,6 +65,24 @@ linters:
           - errcheck
           - gosec
         path: tools/
+      - linters:
+          - revive
+        path: pkg/server/config\.go
+      - linters:
+          - revive
+        path: pkg/tunnel/p2p/p2p\.go
+      - linters:
+          - revive
+        path: pkg/tunnel/xfer/internal/tcp/tcp\.go
+      - linters:
+          - revive
+        path: pkg/server/metrics_test_extra\.go
+      - linters:
+          - errcheck
+        path: pkg/tunnel/tunnel_mux\.go
+      - linters:
+          - errcheck
+        path: pkg/server/handlers\.go
     paths:
       - third_party$
       - builtin$

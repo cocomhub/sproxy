@@ -2,8 +2,10 @@ go 1.26
 
 use (
 	.
-	./cmd/sproxy
 	./cmd/sclient
-	./pkg/tunnel/xfer/ext/ws
+	./cmd/sproxy
 	./pkg/tunnel/xfer/ext/quic
+	./pkg/tunnel/xfer/ext/ws
+	./xfer/grpc
+	./xfer/webrtc
 )

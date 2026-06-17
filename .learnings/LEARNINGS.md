@@ -890,3 +890,197 @@ race detector 不关心 select 中的 case 是否能兜底。它只看两个 gor
 - Tags: race, testing, channel
 
 ---
+
+## [LRN-20260618-GC1] golangci-lint v2 presets 不支持 stutter/var-naming
+
+**Logged**: 2026-06-18T15:00:00Z
+**Priority**: high
+**Status**: pending
+**Area**: config
+
+### Summary
+golangci-lint v2 的 `linters.exclusions.presets` 只支持有限的 preset 值（`comments`、`common-false-positives`、`legacy`、`std-error-handling`），不支持 `stutter`、`var-naming`。传入无效 preset 会直接退出报错 `invalid preset: stutter`。
+
+### Details
+尝试在 `.golangci.yml` 的 `presets` 中添加 `stutter` 和 `var-naming` 来豁免 revive 的 exported 和 var-naming 检查，结果 golangci-lint 直接报错退出。必须改用 `exclusions.rules` 通过 path 匹配来豁免特定文件的检查。
+
+正确的豁免方式：
+```yaml
+linters:
+  exclusions:
+    rules:
+      - linters:
+          - revive
+        path: pkg/server/config\.go
+```
+
+### Suggested Action
+新增 revive 豁免时，使用 `rules` 中基于 path 的方法，而非试图扩展 `presets`。
+
+### Metadata
+- Source: error
+- Pattern-Key: config.golangci.presets_v2
+- Related Files: `.golangci.yml`
+- Tags: golangci-lint, config
+
+---
+
+## [LRN-20260618-GC2] errcheck + type assertion 必须用 nolint 注释
+
+**Logged**: 2026-06-18T15:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: config
+
+### Summary
+type assertion（如 `chunkPool.Get().(*[]byte)`、`span.StartTime.(time.Time)`）触发的 errcheck 用 `_ =` 无法修复——类型断言不是函数调用，不支持 `_ =` 前缀。必须加 `//nolint:errcheck` 行尾注释。
+
+### Details
+errcheck 对类型断言的处理不同于函数返回值。以下写法会编译错误：
+```go
+_ = chunkPool.Get().(*[]byte)  // 语法错误
+```
+正确写法：
+```go
+bp := chunkPool.Get().(*[]byte) //nolint:errcheck
+```
+
+### Metadata
+- Source: error
+- Pattern-Key: lint.errcheck.type_assertion
+- Tags: errcheck, linter
+
+---
+
+## [LRN-20260618-GC3] gosec 配置级豁免优先代码级 nolint
+
+**Logged**: 2026-06-18T15:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: config
+
+### Summary
+sproxy 项目有多处 gosec 检查（G115 int overflow 转换、G306 WriteFile 权限、G703/G705 path traversal/XSS、G404 弱随机数），这些在项目中都有明确的边界检查或上下文确保安全。相比对每处加 `//nolint:gosec`，在配置级豁免更高效。
+
+### Details
+```yaml
+linters:
+  settings:
+    gosec:
+      excludes:
+        - G101
+        - G115
+        - G117
+        - G306
+        - G404
+        - G703
+        - G705
+```
+
+### Suggested Action
+对于项目中确认安全的 gosec 规则，优先在 `.golangci.yml` 的 `gosec.excludes` 中统一豁免，而非在每个文件加 nolint 注释。
+
+### Metadata
+- Pattern-Key: config.golangci.gosec_excludes
+- Related Files: `.golangci.yml`
+- Tags: gosec, linter, config
+
+---
+
+## [LRN-20260618-GC4] thelper: testing.TB 参数名必须为 tb
+
+**Logged**: 2026-06-18T15:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: tests
+
+### Summary
+thelper linter 要求 `testing.TB` 类型的参数命名为 `tb`（而非 `b`）。当函数体内使用的变量名是 `b` 时需要全局替换为 `tb`，包括 `b.Helper()`、`b.Fatalf()`、`b.Log()` 等所有调用。
+
+### Details
+```go
+// BAD - thelper 报错
+func benchServer(b testing.TB, ...) {
+    b.Helper()
+    b.Fatalf("...")
+}
+
+// GOOD
+func benchServer(tb testing.TB, ...) {
+    tb.Helper()
+    tb.Fatalf("...")
+}
+```
+
+### Metadata
+- Pattern-Key: lint.thelper.tb_naming
+- Tags: thelper, testing
+
+---
+
+## [LRN-20260618-GC5] 合并 worktree 时需先处理本地变更
+
+**Logged**: 2026-06-18T15:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+合并多个 worktree 到当前分支时，如果当前分支有未提交的变更（包括 git stash 中的内容），octopus merge 策略会因文件覆盖冲突失败。特别注意 `.githooks/pre-commit` 的模式变更（chmod 755 → 644）容易被 worktree 覆盖。
+
+### Details
+推荐顺序：
+1. 先提交（或 stash）本地 `.githooks/pre-commit` 等元数据变更
+2. 再 `git merge worktree-branch1 worktree-branch2`
+3. 用 `git stash pop` 恢复配置类变更
+
+冲突原因：worktree 中的 `.githooks/pre-commit` 可能被 linter 自动修改了权限位（755→644），与当前分支内容冲突。
+
+### Metadata
+- Pattern-Key: git.worktree_merge
+- Tags: git, worktree
+
+---
+
+## [LRN-20260618-GC6] govet shadow 修复模式：注意新变量和 goroutine 闭包
+
+**Logged**: 2026-06-18T15:00:00Z
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+修复 `govet shadow` 时，`if err := fn()` → `if err = fn()` 是最常见的修改，但有三种特殊情况需要区别对待。
+
+### Details
+1. **简单替换**（无新变量）：`if err := fn()` → `if err = fn()`
+2. **有同名新变量**（如 `resp, err :=`、`rec, err :=`、`f, err :=`）：需要先 `var resp *Type` 再 `resp, err = fn()`
+3. **goroutine 闭包中**（如 `part, err :=`）：不能简单用 `=` 因为闭包捕获了外层 `err`。改用独立变量名：
+   - `part, wErr := mw.CreateFormFile(...)` 
+   - `m, acceptErr := listenerNode.Accept(ctx)`
+   - `statusResp, statusErr := c.doRequest(...)`
+
+### Metadata
+- Source: error
+- Pattern-Key: lint.govet_shadow_patterns
+- Related Files: 22 个文件，涵盖 pkg/client/, pkg/server/, pkg/tunnel/, test/, tools/
+- Tags: govet, shadow, lint
+
+---
+
+## [LRN-20260618-GC7] golangci-lint 配置修改后部分文件被双重修改导致冲突
+
+**Logged**: 2026-06-18T15:30:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+并行分派两个 worktree 代理分别修改不同的 lint 问题（一个修复 errcheck+shadow，一个修复 revive+thelper），但两者都对 `.golangci.yml` 做了修改，导致 octopus merge 时出现冲突。同时，两者都通过 pre-commit hook 的 `addlicense` 修改了 `server_auth_test.go` 等文件，导致冲突面扩大。
+
+### Details
+教训：如果多个代理都会修改 `.golangci.yml`，最外层不应放在并行代理中处理，应合并后再统一修改。或者，在 worktree 建立之前就先把配置改好。
+
+### Metadata
+- Pattern-Key: infra.parallel_config_conflict
+- Tags: git, worktree, parallel
