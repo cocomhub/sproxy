@@ -43,11 +43,9 @@ func TestDefaultValueRelations(t *testing.T) {
 	if AutoChunkThreshold <= DefaultChunkSize {
 		t.Errorf("AutoChunkThreshold (%d) <= DefaultChunkSize (%d)", AutoChunkThreshold, DefaultChunkSize)
 	}
-	if AutoChunkThreshold <= DefaultMaxChunkSize {
-		// AutoChunkThreshold (100 MiB) > DefaultMaxChunkSize (64 MiB) by design:
-		// auto-chunk is triggered at 100 MiB, at which point the chunk size
-		// scales up adaptively from 4 MiB onward.
-	}
+	// AutoChunkThreshold (100 MiB) > DefaultMaxChunkSize (64 MiB) by design:
+	// auto-chunk is triggered at 100 MiB, at which point the chunk size
+	// scales up adaptively from 4 MiB onward.
 	if MultipartBufSize <= 0 || MultipartBufSize > DefaultChunkSize {
 		t.Errorf("MultipartBufSize (%d) out of reasonable range", MultipartBufSize)
 	}

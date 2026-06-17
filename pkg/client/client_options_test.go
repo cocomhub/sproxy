@@ -88,7 +88,7 @@ func TestWithTunnel_InvalidKey(t *testing.T) {
 func TestWithProgress(t *testing.T) {
 	c := NewFileClient("http://localhost:18083")
 	var called atomic.Int64
-	fn := func(label string, read, total int64) {
+	fn := func(_ string, read, _ int64) {
 		called.Add(read)
 	}
 	WithProgress(fn)(c)
@@ -139,7 +139,7 @@ func TestProgressReader_NilCallback(t *testing.T) {
 
 func TestProgressReader_EOF(t *testing.T) {
 	var totalRead int64
-	pr := NewProgressReader(strings.NewReader("abc"), 3, func(read, total int64) {
+	pr := NewProgressReader(strings.NewReader("abc"), 3, func(read, _ int64) {
 		totalRead = read
 	})
 	buf := make([]byte, 10)

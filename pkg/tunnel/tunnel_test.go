@@ -36,7 +36,7 @@ func TestNewHandler_returnsForbiddenOnEmptyKey(t *testing.T) {
 
 func TestNewHandlerForwardsAbsoluteURL(t *testing.T) {
 	// 创建一个测试用后端服务器
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Custom", "hello")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
@@ -72,7 +72,7 @@ func TestNewHandlerForwardsAbsoluteURL(t *testing.T) {
 
 func TestNewLocalHandler_dispatchesRelativeURL(t *testing.T) {
 	// 本地 handler：模拟文件列表
-	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"files":[{"name":"test.txt","size":123}]}`))
 	})

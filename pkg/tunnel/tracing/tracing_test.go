@@ -82,7 +82,7 @@ func TestTracerWithTag(t *testing.T) {
 	}
 }
 
-func TestTracerEndTwiceSafe(t *testing.T) {
+func TestTracerEndTwiceSafe(_ *testing.T) {
 	tracer := New()
 	ctx := context.Background()
 
@@ -107,7 +107,7 @@ func TestTracerTagsAppearInChildSpan(t *testing.T) {
 	}
 }
 
-func TestTracerWithTagAfterEnd(t *testing.T) {
+func TestTracerWithTagAfterEnd(_ *testing.T) {
 	// WithTag after ends should not panic
 	tracer := New()
 	ctx := context.Background()

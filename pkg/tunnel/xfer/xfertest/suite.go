@@ -20,6 +20,7 @@ type ConnFactory func(t *testing.T) (client, server xfer.Conn, cleanup func())
 
 // ConnSuite 运行所有 Conn 接口一致性测试。
 func ConnSuite(t *testing.T, factory ConnFactory) {
+	t.Helper()
 	t.Run("RoundTrip", func(t *testing.T) { testRoundTrip(t, factory) })
 	t.Run("MultipleMessages", func(t *testing.T) { testMultipleMessages(t, factory) })
 	t.Run("LargePayload", func(t *testing.T) { testLargePayload(t, factory) })
@@ -32,6 +33,7 @@ func ConnSuite(t *testing.T, factory ConnFactory) {
 }
 
 func testRoundTrip(t *testing.T, factory ConnFactory) {
+	t.Helper()
 	t.Parallel()
 	client, server, cleanup := factory(t)
 	defer cleanup()
@@ -50,6 +52,7 @@ func testRoundTrip(t *testing.T, factory ConnFactory) {
 }
 
 func testMultipleMessages(t *testing.T, factory ConnFactory) {
+	t.Helper()
 	t.Parallel()
 	client, server, cleanup := factory(t)
 	defer cleanup()
@@ -78,6 +81,7 @@ func testMultipleMessages(t *testing.T, factory ConnFactory) {
 }
 
 func testLargePayload(t *testing.T, factory ConnFactory) {
+	t.Helper()
 	t.Parallel()
 	client, server, cleanup := factory(t)
 	defer cleanup()
@@ -98,6 +102,7 @@ func testLargePayload(t *testing.T, factory ConnFactory) {
 }
 
 func testConcurrentSend(t *testing.T, factory ConnFactory) {
+	t.Helper()
 	t.Parallel()
 	client, server, cleanup := factory(t)
 	defer cleanup()
@@ -135,6 +140,7 @@ func testConcurrentSend(t *testing.T, factory ConnFactory) {
 }
 
 func testCloseWhileBlocking(t *testing.T, factory ConnFactory) {
+	t.Helper()
 	t.Parallel()
 	client, server, cleanup := factory(t)
 	defer cleanup()
@@ -179,6 +185,7 @@ func testCloseWhileBlocking(t *testing.T, factory ConnFactory) {
 }
 
 func testContextCancellation(t *testing.T, factory ConnFactory) {
+	t.Helper()
 	t.Parallel()
 	client, _, cleanup := factory(t)
 	defer cleanup()
@@ -193,6 +200,7 @@ func testContextCancellation(t *testing.T, factory ConnFactory) {
 }
 
 func testOrderedDelivery(t *testing.T, factory ConnFactory) {
+	t.Helper()
 	t.Parallel()
 	client, server, cleanup := factory(t)
 	defer cleanup()
@@ -218,6 +226,7 @@ func testOrderedDelivery(t *testing.T, factory ConnFactory) {
 }
 
 func testEmptyMessage(t *testing.T, factory ConnFactory) {
+	t.Helper()
 	t.Parallel()
 	client, server, cleanup := factory(t)
 	defer cleanup()
@@ -235,6 +244,7 @@ func testEmptyMessage(t *testing.T, factory ConnFactory) {
 }
 
 func testSendAfterClose(t *testing.T, factory ConnFactory) {
+	t.Helper()
 	t.Parallel()
 	client, _, cleanup := factory(t)
 	defer cleanup()

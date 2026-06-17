@@ -11,7 +11,7 @@ import (
 )
 
 func TestConnSuiteWithPipe(t *testing.T) {
-	xfertest.ConnSuite(t, func(t *testing.T) (client, server xfer.Conn, cleanup func()) {
+	xfertest.ConnSuite(t, func(_ *testing.T) (client, server xfer.Conn, cleanup func()) {
 		a, b := xfertest.Pipe()
 		return a, b, func() { a.Close(); b.Close() }
 	})

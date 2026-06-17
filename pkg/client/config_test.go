@@ -147,7 +147,7 @@ func TestLoadConfig_ValidFile(t *testing.T) {
 	}
 }
 
-func TestHandleConfigShow(t *testing.T) {
+func TestHandleConfigShow(_ *testing.T) {
 	// HandleConfigShow prints to stdout — verify it doesn't panic
 	cfg := DefaultConfig()
 	cfg.ServerURL = "https://example.com"
@@ -203,7 +203,7 @@ func TestLoadConfig_EmptyFile(t *testing.T) {
 	}
 }
 
-func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
+func TestHandleConfigShow_MaskedShortKey(_ *testing.T) {
 	cfg := DefaultConfig()
 	cfg.TunnelKey = "short"
 	// Should not panic when key is <= 8 chars

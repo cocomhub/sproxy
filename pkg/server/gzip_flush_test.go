@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestGzipResponseWriter_Flush(t *testing.T) {
+func TestGzipResponseWriter_Flush(_ *testing.T) {
 	// Flush() 不应 panic
 	w := &gzipResponseWriter{
 		Writer:         io.Discard,

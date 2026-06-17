@@ -35,7 +35,7 @@ func TestShare_CreateAndAccess(t *testing.T) {
 	}
 
 	var shareResp map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&shareResp); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&shareResp); err != nil {
 		t.Fatal(err)
 	}
 	token, ok := shareResp["token"].(string)
@@ -83,7 +83,7 @@ func TestShare_Expired(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 
 	// 不跟随重定向的 client
-	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
 	resp2, err := client.Get(url + "/s/" + token)

@@ -1224,7 +1224,7 @@ func TestFileClient_Upload_ProgressCallback(t *testing.T) {
 	}
 
 	var called bool
-	c := NewFileClient(ts.URL, WithProgress(func(label string, read, total int64) {
+	c := NewFileClient(ts.URL, WithProgress(func(_ string, _, _ int64) {
 		called = true
 	}))
 	if _, err := c.Upload(context.Background(), src, "remote.txt"); err != nil {

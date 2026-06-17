@@ -58,12 +58,12 @@ func registerFakeWebRTC() *fakeListener {
 
 		xfer.Register(&xfer.Transport{
 			Name: "webrtc",
-			Dial: func(ctx context.Context, addr string) (xfer.Conn, error) {
+			Dial: func(_ context.Context, _ string) (xfer.Conn, error) {
 				a, b := xfertest.Pipe()
 				fl.acceptCh <- fakeAcceptResult{conn: b}
 				return a, nil
 			},
-			Listen: func(ctx context.Context, addr string) (xfer.Listener, error) {
+			Listen: func(_ context.Context, _ string) (xfer.Listener, error) {
 				return fl, nil
 			},
 		})
@@ -192,15 +192,15 @@ func TestP2PNodeAccept(t *testing.T) {
 	// Spawn a goroutine that accepts one connection and reads data.
 	done := make(chan struct{})
 	go func() {
-		m, err := listenerNode.Accept(ctx)
-		if err != nil {
+		m, acceptErr := listenerNode.Accept(ctx)
+		if acceptErr != nil {
 			close(done)
 			return
 		}
 		defer m.Close()
 
-		stream, err := m.Open(ctx)
-		if err != nil {
+		stream, openErr := m.Open(ctx)
+		if openErr != nil {
 			close(done)
 			return
 		}

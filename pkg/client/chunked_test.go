@@ -104,7 +104,7 @@ func TestTryDownloadChunk_LengthMismatch(t *testing.T) {
 	t.Parallel()
 	// Server returns body shorter than X-Chunk-Length (expectLength)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Chunk-Length", "100")
 		w.Write([]byte("short")) // only 5 bytes
 	})
@@ -125,7 +125,7 @@ func TestTryDownloadChunk_ChecksumMismatch(t *testing.T) {
 	t.Parallel()
 	// Server returns body with wrong X-Chunk-Checksum header
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Chunk-Checksum", "0000000000000000000000000000000000000000000000000000000000000000")
 		w.Write([]byte("hello world"))
 	})
@@ -146,7 +146,7 @@ func TestTryDownloadChunk_Non200(t *testing.T) {
 	t.Parallel()
 	// Server returns 500
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/download/chunk", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
 	ts := httptest.NewServer(mux)

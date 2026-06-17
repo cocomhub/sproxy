@@ -44,8 +44,6 @@ func parseTimingFile(path string) (*timingRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-
 	rec := &timingRecord{}
 	scanner := bufio.NewScanner(f)
 	inData := false
@@ -100,7 +98,8 @@ func main() {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".txt") {
 			continue
 		}
-		rec, err := parseTimingFile(filepath.Join(*dataDir, entry.Name()))
+		var rec *timingRecord
+		rec, err = parseTimingFile(filepath.Join(*dataDir, entry.Name()))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "解析 %s 失败: %v\n", entry.Name(), err)
 			continue
@@ -207,7 +206,7 @@ chartData.forEach((group) => {
 </html>`))
 
 	outPath := filepath.Join(*outDir, "index.html")
-	if err := os.MkdirAll(*outDir, 0755); err != nil {
+	if err = os.MkdirAll(*outDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "创建输出目录失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -216,10 +215,9 @@ chartData.forEach((group) => {
 		fmt.Fprintf(os.Stderr, "创建输出文件失败: %v\n", err)
 		os.Exit(1)
 	}
-	defer f.Close()
-
 	if err := tmpl.Execute(f, allGroups); err != nil {
 		fmt.Fprintf(os.Stderr, "模板渲染失败: %v\n", err)
+		f.Close()
 		os.Exit(1)
 	}
 	fmt.Printf("已生成: %s\n", outPath)

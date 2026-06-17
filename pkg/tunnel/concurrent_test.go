@@ -71,7 +71,7 @@ func TestClient_ConcurrentRequests(t *testing.T) {
 	key, _ := ParseKey(strings.Repeat("c", 64))
 
 	local := http.NewServeMux()
-	local.HandleFunc("GET /echo", func(w http.ResponseWriter, r *http.Request) {
+	local.HandleFunc("GET /echo", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Server-Time", fmt.Sprintf("%d", time.Now().UnixNano()))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("hello"))
@@ -120,7 +120,7 @@ func TestDispatchLocal_HandlerPanicDoesNotHang(t *testing.T) {
 	key, _ := ParseKey(strings.Repeat("d", 64))
 
 	local := http.NewServeMux()
-	local.HandleFunc("GET /panic", func(w http.ResponseWriter, r *http.Request) {
+	local.HandleFunc("GET /panic", func(_ http.ResponseWriter, r *http.Request) {
 		panic("boom")
 	})
 

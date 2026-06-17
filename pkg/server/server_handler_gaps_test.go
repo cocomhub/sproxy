@@ -17,7 +17,7 @@ import (
 )
 
 // TestHandlers_Close 验证 Close 幂等安全。
-func TestHandlers_Close(t *testing.T) {
+func TestHandlers_Close(_ *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()

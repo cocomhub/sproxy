@@ -21,9 +21,9 @@ import (
 
 // newMockServerBench 是 newMockServer 的 testing.TB 版本，兼容 *testing.B。
 // 逻辑与 newMockServer 相同：提供 /upload、/download、/api/files 等路由。
-func newMockServerBench(b testing.TB) (*httptest.Server, string) {
-	b.Helper()
-	dir := b.TempDir()
+func newMockServerBench(tb testing.TB) (*httptest.Server, string) {
+	tb.Helper()
+	dir := tb.TempDir()
 
 	mux := http.NewServeMux()
 
@@ -102,7 +102,7 @@ func newMockServerBench(b testing.TB) (*httptest.Server, string) {
 	})
 
 	ts := httptest.NewServer(mux)
-	b.Cleanup(ts.Close)
+	tb.Cleanup(ts.Close)
 	return ts, dir
 }
 

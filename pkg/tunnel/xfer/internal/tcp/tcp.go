@@ -67,7 +67,7 @@ func (c *tcpConn) Send(ctx context.Context, msg []byte) error {
 }
 
 // Receive 阻塞接收一条消息：先读 4B 长度前缀，再读消息体。
-func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
+func (c *tcpConn) Receive(_ context.Context) ([]byte, error) {
 	if c.closed {
 		return nil, xfer.ErrConnClosed
 	}
@@ -157,7 +157,7 @@ func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
 
 // Listen 在指定地址启动 TCP 监听。
 // addr 格式：:port（如 ":9000"）。
-func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
+func Listen(_ context.Context, addr string) (xfer.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("tcp listen: %w", err)

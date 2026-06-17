@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -70,7 +71,7 @@ func TestBatchRenameHandler(t *testing.T) {
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
-	RegisterRoutes(nil, mux, &cfgPtr, "test", "now", nil, nil, nil)
+	RegisterRoutes(context.TODO(), mux, &cfgPtr, "test", "now", nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/batch-rename", nil)
 	w := httptest.NewRecorder()

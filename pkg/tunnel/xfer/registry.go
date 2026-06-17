@@ -17,8 +17,8 @@ var TransportRegistry = plugin.New[*Transport]("xfer", emptyTransport())
 func emptyTransport() *Transport {
 	return &Transport{
 		Name:   "builtin",
-		Dial:   func(ctx context.Context, addr string) (Conn, error) { return nil, ErrNoTransport },
-		Listen: func(ctx context.Context, addr string) (Listener, error) { return nil, ErrNoTransport },
+		Dial:   func(_ context.Context, _ string) (Conn, error) { return nil, ErrNoTransport },
+		Listen: func(_ context.Context, _ string) (Listener, error) { return nil, ErrNoTransport },
 	}
 }
 

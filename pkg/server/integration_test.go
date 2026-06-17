@@ -88,7 +88,7 @@ func uploadFile(t *testing.T, baseURL, filename string, body []byte, headers map
 	if err != nil {
 		t.Fatalf("create form file: %v", err)
 	}
-	if _, err := part.Write(body); err != nil {
+	if _, err = part.Write(body); err != nil {
 		t.Fatalf("write part: %v", err)
 	}
 	_ = mw.Close()
@@ -784,7 +784,7 @@ func TestRedirectRoot(t *testing.T) {
 
 	// 不跟随重定向，自己检查 Location
 	c := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
@@ -1105,7 +1105,7 @@ func TestRmdir_WithFiles_AlsoDeletesChecksums(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	if _, err := os.Stat(subDir); !os.IsNotExist(err) {
+	if _, err = os.Stat(subDir); !os.IsNotExist(err) {
 		t.Fatal("directory should be removed")
 	}
 	listResp, err := http.Get(url + "/api/files")

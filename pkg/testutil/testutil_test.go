@@ -20,7 +20,7 @@ func TestTestKey_Length(t *testing.T) {
 func TestTestKey_Hex(t *testing.T) {
 	key := TestKey()
 	for _, c := range key {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) { //nolint:staticcheck // readability
 			t.Errorf("TestKey() contains non-hex char %c", c)
 			break
 		}

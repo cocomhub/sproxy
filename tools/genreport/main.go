@@ -78,10 +78,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "创建输出文件失败: %v\n", err)
 		os.Exit(1)
 	}
-	defer f.Close()
 
 	if err := tmpl.Execute(f, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "模板渲染失败: %v\n", err)
+		f.Close()
 		os.Exit(1)
 	}
 	fmt.Printf("已生成: %s\n", outPath)

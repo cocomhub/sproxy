@@ -36,8 +36,6 @@ func parseBenchFile(path string) (*benchRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-
 	rec := &benchRecord{Date: time.Now().Format(time.RFC3339)}
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -101,7 +99,8 @@ func main() {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".txt") {
 			continue
 		}
-		rec, err := parseBenchFile(filepath.Join(*dataDir, entry.Name()))
+		var rec *benchRecord
+		rec, err = parseBenchFile(filepath.Join(*dataDir, entry.Name()))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "解析 %s 失败: %v\n", entry.Name(), err)
 			continue
@@ -197,10 +196,9 @@ chartData.forEach((group, idx) => {
 		fmt.Fprintf(os.Stderr, "创建输出文件失败: %v\n", err)
 		os.Exit(1)
 	}
-	defer f.Close()
-
 	if err := tmpl.Execute(f, groups); err != nil {
 		fmt.Fprintf(os.Stderr, "模板渲染失败: %v\n", err)
+		f.Close()
 		os.Exit(1)
 	}
 	fmt.Printf("已生成: %s\n", outPath)

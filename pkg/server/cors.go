@@ -55,12 +55,13 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 			}
 
 			// 判断是否允许该 origin
-			if allowAll {
+			switch {
+			case allowAll:
 				w.Header().Set("Access-Control-Allow-Origin", "*")
-			} else if originSet[origin] {
+			case originSet[origin]:
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
-			} else {
+			default:
 				// origin 不在白名单中，不添加 CORS 头（浏览器会阻止请求）
 				log.Warn("rejected CORS origin", "origin", origin)
 				next.ServeHTTP(w, r)

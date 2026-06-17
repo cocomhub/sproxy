@@ -50,7 +50,7 @@ func TestAuthMiddleware_NoAuthConfigured(t *testing.T) {
 	cfgPtr.Store(&Config{})
 	h := &Handlers{cfgPtr: cfgPtr}
 	called := false
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
 	})
 	handler := h.authMiddleware(inner)
@@ -74,7 +74,7 @@ func TestAuthMiddleware_AuthTokenMissing(t *testing.T) {
 	cfgPtr.Store(&Config{AuthToken: "secret"})
 	h := &Handlers{cfgPtr: cfgPtr}
 	called := false
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
 	})
 	handler := h.authMiddleware(inner)
@@ -124,7 +124,7 @@ func TestAuthMiddleware_AuthTokenMismatch(t *testing.T) {
 	cfgPtr.Store(&Config{AuthToken: "secret"})
 	h := &Handlers{cfgPtr: cfgPtr}
 	called := false
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
 	})
 	handler := h.authMiddleware(inner)
@@ -189,7 +189,7 @@ func TestAuthMiddleware_APIKeyInsufficientPermission(t *testing.T) {
 	})
 	h := &Handlers{cfgPtr: cfgPtr}
 	called := false
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
 	})
 	handler := h.authMiddleware(inner)
