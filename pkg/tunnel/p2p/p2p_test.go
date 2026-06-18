@@ -103,66 +103,55 @@ func TestP2PNodeRegisterAndLookup(t *testing.T) {
 // TestP2PNodeDial verifies that a P2PNode.Dial discovers a peer in DHT,
 // establishes a fake transport connection, and returns a working mux.Mux.
 func TestP2PNodeDial(t *testing.T) {
-	fl := registerFakeWebRTC()
+	_ = registerFakeWebRTC()
 
 	dht := hub.NewDHT()
-	// Use a generous timeout — under -race all operations are slower.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// 注册目标节点 DHT
 	dht.Register(ctx, hub.PeerInfo{ID: "target", Addrs: []string{"pipe://target-addr"}})
 
+	// 用标准 Listen 模式创建接收端
+	listener := p2p.NewP2PNode("target", dht)
+	if err := listener.Listen(ctx, "pipe://target-addr"); err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	defer listener.Close()
+
+	// Dialer 连接目标
 	dialer := p2p.NewP2PNode("dialer", dht)
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel2()
-
-	// Accept the incoming pipe connection on a separate goroutine.
-	// Use a channel to signal when data has been written so the test
-	// knows when to read. Keep the listener alive until done.
-	done := make(chan struct{})
-	go func() {
-		conn, err := fl.Accept(ctx2)
-		if err != nil {
-			t.Logf("Accept failed in goroutine: %v", err)
-			close(done)
-			return
-		}
-		m := mux.New(conn, mux.RoleListener)
-		defer m.Close()
-
-		stream, err := m.Open(ctx2)
-		if err != nil {
-			t.Logf("Open stream failed in goroutine: %v", err)
-			close(done)
-			return
-		}
-		defer stream.Close()
-
-		_, _ = stream.Write([]byte("hello from peer"))
-		_ = stream.CloseWrite()
-
-		close(done)
-
-		// Keep the mux alive until the test reads.
-		<-m.Context().Done()
-	}()
-
-	// Wait for the listener to have written data, then read.
 	m, err := dialer.Dial(ctx, "target")
 	if err != nil {
 		t.Fatalf("Dial failed: %v", err)
 	}
 	defer m.Close()
 
-	<-done
-	stream, err := m.Accept(ctx)
+	// 从 listener 端 Accept 连接
+	lm, err := listener.Accept(ctx)
 	if err != nil {
 		t.Fatalf("Accept failed: %v", err)
 	}
+	defer lm.Close()
+
+	// listener 端通过 mux 发数据
+	stream, err := lm.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open stream failed: %v", err)
+	}
+	defer stream.Close()
+
+	_, _ = stream.Write([]byte("hello from peer"))
+	_ = stream.CloseWrite()
+
+	// Dialer 端读取数据
+	ds, err := m.Accept(ctx)
+	if err != nil {
+		t.Fatalf("Accept dialer side failed: %v", err)
+	}
 
 	buf := make([]byte, 1024)
-	n, err := stream.Read(buf)
+	n, err := ds.Read(buf)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}

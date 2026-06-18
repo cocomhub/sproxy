@@ -351,19 +351,25 @@ func TestListCommand_WithSubdirFlag(t *testing.T) {
 
 // ---- 共享辅助函数 ----
 
-// captureRootCmdArgs 保存并重置 rootCmd 的 args 和 PersistentPreRunE 状态。
+// captureRootCmdArgs 保存并重置 rootCmd 的 args、PersistentPreRunE 状态，
+// 以及全局 cfgFile、cfgProvider、currentDir。
 // 返回的恢复函数应在测试结束时 defer 调用。
 func captureRootCmdArgs() func() {
 	oldArgs := rootCmd.Args
 	oldPreRunE := rootCmd.PersistentPreRunE
 	oldCurrentDir := currentDir
+	oldCfgFile := cfgFile
+	oldCfgProvider := cfgProvider
 	currentDir = ""
+	cfgProvider = nil
 
 	rootCmd.SetArgs(nil)
 	return func() {
 		rootCmd.Args = oldArgs
 		rootCmd.PersistentPreRunE = oldPreRunE
 		currentDir = oldCurrentDir
+		cfgFile = oldCfgFile
+		cfgProvider = oldCfgProvider
 	}
 }
 

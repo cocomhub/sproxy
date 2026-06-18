@@ -10,14 +10,33 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/internal/size"
-	"github.com/spf13/viper"
+	"github.com/cocomhub/sproxy/pkg/provider"
+	"gopkg.in/yaml.v3"
 )
+
+// mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。
+type mapProvider struct {
+	m map[string]any
+}
+
+func (p mapProvider) Unmarshal(obj any) error {
+	// 使用 yaml 作为中介：map → yaml bytes → struct
+	// Config 结构体使用 yaml tag，所以 yaml.Unmarshal 能正确匹配字段
+	data, err := yaml.Marshal(p.m)
+	if err != nil {
+		return err
+	}
+	return yaml.Unmarshal(data, obj)
+}
+
+// compile-time interface check
+var _ provider.Provider = mapProvider{}
 
 func TestConfigValidate(t *testing.T) {
 	t.Parallel()
 
 	// valid config — all fields set, no tunnel_key → no error
-	cfg := &Config{ServerURL: "http://localhost:8080", Timeout: 30, ChunkSize: size.DefaultChunkSize}
+	cfg := &Config{ServerURL: "http://127.0.0.1:8080", Timeout: 30, ChunkSize: size.DefaultChunkSize}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() on valid config: %v", err)
 	}
@@ -62,16 +81,14 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
-func TestLoadFromViper(t *testing.T) {
+func TestLoadFromProvider(t *testing.T) {
 	t.Parallel()
 
-	v := viper.New()
-	v.Set("server_url", "http://test:8080")
-	v.Set("timeout", 60)
+	p := mapProvider{m: map[string]any{"server_url": "http://test:8080", "timeout": 60}}
 
-	cfg, err := LoadFromViper(v)
+	cfg, err := LoadFromProvider(p)
 	if err != nil {
-		t.Fatalf("LoadFromViper: %v", err)
+		t.Fatalf("LoadFromProvider: %v", err)
 	}
 	if cfg.ServerURL != "http://test:8080" {
 		t.Errorf("ServerURL = %q, want %q", cfg.ServerURL, "http://test:8080")
@@ -84,14 +101,12 @@ func TestLoadFromViper(t *testing.T) {
 	}
 }
 
-func TestLoadFromViper_InvalidTunnelKey(t *testing.T) {
+func TestLoadFromProvider_InvalidTunnelKey(t *testing.T) {
 	t.Parallel()
 
-	v := viper.New()
-	v.Set("server_url", "http://test:8080")
-	v.Set("tunnel_key", "bad-key")
+	p := mapProvider{m: map[string]any{"server_url": "http://test:8080", "tunnel_key": "bad-key"}}
 
-	_, err := LoadFromViper(v)
+	_, err := LoadFromProvider(p)
 	if err == nil {
 		t.Fatal("expected error for invalid tunnel_key, got nil")
 	}

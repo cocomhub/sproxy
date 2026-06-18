@@ -8,7 +8,7 @@ import (
 	"os"
 
 	"github.com/cocomhub/sproxy/internal/size"
-	"github.com/spf13/viper"
+	"github.com/cocomhub/sproxy/pkg/provider"
 	"gopkg.in/yaml.v3"
 )
 
@@ -46,10 +46,10 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// LoadFromViper 浠?viper 瀹炰緥瑙ｇ爜閰嶇疆锛屽悎骞堕粯璁ゅ€煎苟鏍￠獙銆?
-func LoadFromViper(v *viper.Viper) (*Config, error) {
+// LoadFromProvider 从 provider.Provider 解码配置，合并默认值并校验。
+func LoadFromProvider(p provider.Provider) (*Config, error) {
 	cfg := DefaultConfig()
-	if err := v.Unmarshal(cfg); err != nil {
+	if err := p.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("閰嶇疆瑙ｇ爜澶辫触: %w", err)
 	}
 	if err := cfg.Validate(); err != nil {

@@ -8,9 +8,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,17 +18,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var (
 	cfgFile             string
 	cfgPtr              atomic.Pointer[server.Config]
 	currentTunnelKeyHex string // 记录当前生效的 tunnel_key hex，用于 SIGHUP 轮换检测
+	cfgProvider         *sproxycfg.ViperProvider
 
 	// testSignalCh 用于测试注入 signal channel；为 nil 时 runServer 创建自己的 channel。
 	testSignalCh chan os.Signal
@@ -38,25 +39,10 @@ var rootCmd = &cobra.Command{
 	Use:   "sproxy",
 	Short: "轻量文件上传/下载/删除服务 + 加密隧道",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// 初始化 viper
-		v := viper.GetViper()
-		v.SetConfigFile(cfgFile)
-		v.SetConfigType("yaml")
-		v.SetEnvPrefix("SPROXY")
-		v.AutomaticEnv()
-
-		// 忽略配置文件不存在的错误
-		if err := v.ReadInConfig(); err != nil {
-			var cfnfe viper.ConfigFileNotFoundError
-			if !errors.As(err, &cfnfe) && !os.IsNotExist(err) {
-				return fmt.Errorf("读取配置文件失败: %w", err)
-			}
-		}
-
-		// 绑定 flag 到 viper key
-		_ = v.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-		_ = v.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
-		_ = v.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+		cfgProvider = sproxycfg.New(cfgFile)
+		cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+		cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+		cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
 		return nil
 	},
 	RunE: runServer,
@@ -87,9 +73,23 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// 用 viper 解码配置
-	v := viper.GetViper()
-	cfg, err := server.LoadFromViper(v)
+	// 确保 cfgProvider 已初始化（测试可能未经 PersistentPreRunE 直接调用 runServer）
+	if cfgProvider == nil {
+		configPath := cfgFile
+		if configPath == "" {
+			configPath = "sproxy.yaml"
+		}
+		cfgProvider = sproxycfg.New(configPath)
+		cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+		cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+		cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+		if cfgFile == "" {
+			cfgFile = configPath
+		}
+	}
+
+	// 用 Provider 解码配置
+	cfg, err := server.LoadFromProvider(cfgProvider)
 	if err != nil {
 		return fmt.Errorf("配置解析失败: %w", err)
 	}
@@ -126,7 +126,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if cfg.TLS.Enabled {
 		protocol = "https"
 	}
-	fmt.Printf("downserver start at: %s://localhost%s\n", protocol, cfg.Addr)
+	// 提取 host 和 port，host 为空时补 127.0.0.1 用于展示
+	displayHost, displayPort, _ := net.SplitHostPort(cfg.Addr)
+	if displayHost == "" {
+		displayHost = "127.0.0.1"
+	}
+	fmt.Printf("downserver start at: %s://%s:%s\n", protocol, displayHost, displayPort)
 	fmt.Printf("uploads dir: %s\n", cfg.UploadsDir)
 
 	maxHeaderBytes := cfg.MaxHeaderBytes
@@ -285,16 +290,15 @@ func resolveTunnelKey(cfg *server.Config) ([]byte, error) {
 	return hex.DecodeString(cfg.TunnelKey)
 }
 
-// handleSighup 处理 SIGHUP 信号：使用 viper 重新读取配置文件，
+// handleSighup 处理 SIGHUP 信号：使用 Provider 重新读取配置文件，
 // 仅 log_level/log_format/auth_token/tunnel_key 等软配置生效。
 // tunUpdater 为隧道密钥热替换接口；为 nil 时不替换密钥。
 func handleSighup(oldCfg *server.Config, tunUpdater server.TunnelUpdater) {
-	v := viper.GetViper()
-	if err := v.ReadInConfig(); err != nil {
+	if err := cfgProvider.Refresh(); err != nil {
 		slog.Error("SIGHUP config reload failed", "error", err)
 		return
 	}
-	newCfg, err := server.LoadFromViper(v)
+	newCfg, err := server.LoadFromProvider(cfgProvider)
 	if err != nil {
 		slog.Error("SIGHUP config parse failed", "error", err)
 		return

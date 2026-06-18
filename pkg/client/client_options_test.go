@@ -22,7 +22,7 @@ import (
 // ---- Option functions ----
 
 func TestWithHTTPClient(t *testing.T) {
-	c := NewFileClient("http://localhost:18083")
+	c := NewFileClient("http://127.0.0.1:18083")
 	hc := &http.Client{Timeout: 99 * time.Second}
 	WithHTTPClient(hc)(c)
 	if c.httpClient.Timeout != 99*time.Second {
@@ -31,7 +31,7 @@ func TestWithHTTPClient(t *testing.T) {
 }
 
 func TestWithTimeout(t *testing.T) {
-	c := NewFileClient("http://localhost:18083")
+	c := NewFileClient("http://127.0.0.1:18083")
 	WithTimeout(123 * time.Second)(c)
 	if c.httpClient.Timeout != 123*time.Second {
 		t.Errorf("httpClient.Timeout = %v, want 123s", c.httpClient.Timeout)
@@ -39,7 +39,7 @@ func TestWithTimeout(t *testing.T) {
 }
 
 func TestWithMaxChunkSize(t *testing.T) {
-	c := NewFileClient("http://localhost:18083")
+	c := NewFileClient("http://127.0.0.1:18083")
 	WithMaxChunkSize(8888)(c)
 	if c.MaxChunkSize != 8888 {
 		t.Errorf("MaxChunkSize = %d, want 8888", c.MaxChunkSize)
@@ -47,7 +47,7 @@ func TestWithMaxChunkSize(t *testing.T) {
 }
 
 func TestWithLogger(t *testing.T) {
-	c := NewFileClient("http://localhost:18083")
+	c := NewFileClient("http://127.0.0.1:18083")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	WithLogger(logger)(c)
 	if c.logger != logger {
@@ -56,7 +56,7 @@ func TestWithLogger(t *testing.T) {
 }
 
 func TestWithLogger_Nil(t *testing.T) {
-	c := NewFileClient("http://localhost:18083")
+	c := NewFileClient("http://127.0.0.1:18083")
 	WithLogger(nil)(c)
 	if c.logger == nil {
 		t.Error("WithLogger(nil) should keep the default logger")
@@ -66,7 +66,7 @@ func TestWithLogger_Nil(t *testing.T) {
 func TestWithTunnel_ValidKey(t *testing.T) {
 	t.Parallel()
 
-	c := NewFileClient("http://localhost:18083")
+	c := NewFileClient("http://127.0.0.1:18083")
 	WithTunnel(strings.Repeat("abcdef", 11))(c) // 66 chars → invalid, logged as warn
 	if c.tunnelClient != nil {
 		t.Fatal("tunnelClient should be nil for invalid key")
@@ -76,7 +76,7 @@ func TestWithTunnel_ValidKey(t *testing.T) {
 func TestWithTunnel_InvalidKey(t *testing.T) {
 	t.Parallel()
 
-	c := NewFileClient("http://localhost:18083")
+	c := NewFileClient("http://127.0.0.1:18083")
 	// 64 hex chars = 32 bytes = valid AES-256 key
 	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	WithTunnel(validKey)(c)
@@ -86,7 +86,7 @@ func TestWithTunnel_InvalidKey(t *testing.T) {
 }
 
 func TestWithProgress(t *testing.T) {
-	c := NewFileClient("http://localhost:18083")
+	c := NewFileClient("http://127.0.0.1:18083")
 	var called atomic.Int64
 	fn := func(_ string, read, _ int64) {
 		called.Add(read)
@@ -292,7 +292,7 @@ func TestRmdir_ServerError(t *testing.T) {
 // ---- TunnelDo ----
 
 func TestTunnelDo_WithoutTunnel(t *testing.T) {
-	c := NewFileClient("http://localhost:18083")
+	c := NewFileClient("http://127.0.0.1:18083")
 	req, _ := http.NewRequest("GET", "/test", nil)
 	_, err := c.TunnelDo(req)
 	if err == nil || !strings.Contains(err.Error(), "未配置隧道") {
@@ -300,9 +300,8 @@ func TestTunnelDo_WithoutTunnel(t *testing.T) {
 	}
 }
 
-// ---- LoadFromViper (config) ----
-// Note: viper tests are in config_test.go already, but LoadFromViper is at 0%.
-// Since it requires viper setup, we test it via the existing config test pattern.
+// ---- LoadFromProvider (config) ----
+// Note: LoadFromProvider is tested via config_test.go pattern already.
 
 // ---- WithXfer Tests ----
 
@@ -345,7 +344,7 @@ func TestWithXferInvalidKey(t *testing.T) {
 func TestTunnelDo_WithXferNoTransport(t *testing.T) {
 	// WithXfer 设置了 name 但传输层未注册，getTunnelMux 应返回错误
 	c := &FileClient{
-		serverURL: "http://localhost:18083",
+		serverURL: "http://127.0.0.1:18083",
 		xferName:  "nonexistent",
 		hubURL:    "ws://hub:8080/ws",
 		logger:    testLogger(),
@@ -360,7 +359,7 @@ func TestTunnelDo_WithXferNoTransport(t *testing.T) {
 func TestTunnelDo_WithTunnel(t *testing.T) {
 	// WithTunnel 被 WithXfer 抢占 — 预期 xfer 错误（因 ws 未注册）
 	c := &FileClient{
-		serverURL:  "http://localhost:18083",
+		serverURL:  "http://127.0.0.1:18083",
 		httpClient: http.DefaultClient,
 		xferName:   "ws",
 		logger:     testLogger(),

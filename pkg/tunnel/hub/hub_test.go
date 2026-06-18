@@ -76,7 +76,7 @@ func TestRouteTableAddWithInfo(t *testing.T) {
 		ID:        "node-with-info",
 		Mux:       m,
 		Connected: time.Now(),
-		Addr:      "localhost:8080",
+		Addr:      "127.0.0.1:8080",
 		Token:     "sec-***",
 	})
 
@@ -90,8 +90,8 @@ func TestRouteTableAddWithInfo(t *testing.T) {
 	if len(nodes) != 1 {
 		t.Fatalf("expected 1 node, got %d", len(nodes))
 	}
-	if nodes[0].Addr != "localhost:8080" {
-		t.Fatalf("expected addr localhost:8080, got %s", nodes[0].Addr)
+	if nodes[0].Addr != "127.0.0.1:8080" {
+		t.Fatalf("expected addr 127.0.0.1:8080, got %s", nodes[0].Addr)
 	}
 	if nodes[0].Token != "sec-***" {
 		t.Fatalf("expected token sec-***, got %s", nodes[0].Token)
