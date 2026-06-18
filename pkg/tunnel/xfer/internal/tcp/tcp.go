@@ -16,19 +16,14 @@ import (
 	"net"
 	"sync"
 
-	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
 func init() {
-	xfer.TransportRegistry.Register(plugin.Plugin[*xfer.Transport]{
-		Name: "tcp",
-		Instance: &xfer.Transport{
-			Name:   "tcp",
-			Dial:   Dial,
-			Listen: Listen,
-		},
-		Priority: 0,
+	xfer.Register(&xfer.Transport{
+		Name:   "tcp",
+		Dial:   Dial,
+		Listen: Listen,
 	})
 }
 

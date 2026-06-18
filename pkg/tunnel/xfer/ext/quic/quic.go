@@ -41,20 +41,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/quic-go/quic-go"
 )
 
 func init() {
-	xfer.TransportRegistry.Register(plugin.Plugin[*xfer.Transport]{
-		Name: "quic",
-		Instance: &xfer.Transport{
-			Name:   "quic",
-			Dial:   Dial,
-			Listen: Listen,
-		},
-		Priority: 10,
+	xfer.Register(&xfer.Transport{
+		Name:   "quic",
+		Dial:   Dial,
+		Listen: Listen,
 	})
 }
 

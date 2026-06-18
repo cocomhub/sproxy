@@ -95,3 +95,11 @@ func (r *Registry[T]) IsDefault() bool {
 	defer r.mu.RUnlock()
 	return len(r.plugins) == 0
 }
+
+// Clear 移除所有已注册的插件，恢复为仅内置兜底的状态。
+// 仅用于测试；生产代码不应调用。
+func (r *Registry[T]) Clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.plugins = make(map[string]Plugin[T])
+}

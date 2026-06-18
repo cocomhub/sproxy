@@ -15,20 +15,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/coder/websocket"
 )
 
 func init() {
-	xfer.TransportRegistry.Register(plugin.Plugin[*xfer.Transport]{
-		Name: "ws",
-		Instance: &xfer.Transport{
-			Name:   "ws",
-			Dial:   Dial,
-			Listen: Listen,
-		},
-		Priority: 10,
+	xfer.Register(&xfer.Transport{
+		Name:   "ws",
+		Dial:   Dial,
+		Listen: Listen,
 	})
 }
 

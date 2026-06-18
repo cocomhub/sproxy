@@ -38,3 +38,14 @@ func Get(name string) *Transport {
 	t, _ := TransportRegistry.Get(name)
 	return t
 }
+
+// Active 返回最高优先级的已注册 Transport。
+// 无插件时返回内置 emptyTransport（Dial/Listen 均返回 ErrNoTransport）。
+func Active() *Transport {
+	return TransportRegistry.Active()
+}
+
+// IsDefault 返回是否使用内置兜底实现（即无外部插件注册）。
+func IsDefault() bool {
+	return TransportRegistry.IsDefault()
+}
