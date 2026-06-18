@@ -132,7 +132,7 @@ bench: prepare
 	  echo "date: $(shell date -u +%Y%m%dT%H%M%SZ)" >> "$$outfile"; \
 	  echo "" >> "$$outfile"; \
 	  rc=0; \
-	  $(GO) test -bench=. -benchmem -count=5 -run=^$$ ./... > "$$outfile.tmp" 2>&1 || rc=$$?; \
+	  $(GO) test -bench=. -benchmem -count=3 -benchtime=500ms -run=^$$ ./internal/... ./pkg/... ./cmd/sproxy/... > "$$outfile.tmp" 2>&1 || rc=$$?; \
 	  cat "$$outfile.tmp" >> "$$outfile"; \
 	  cat "$$outfile.tmp"; \
 	  rm -f "$$outfile.tmp"; \
