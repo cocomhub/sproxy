@@ -36,7 +36,7 @@ func TestConfigValidate(t *testing.T) {
 	t.Parallel()
 
 	// valid config — all fields set, no tunnel_key → no error
-	cfg := &Config{ServerURL: "http://localhost:8080", Timeout: 30, ChunkSize: size.DefaultChunkSize}
+	cfg := &Config{ServerURL: "http://127.0.0.1:8080", Timeout: 30, ChunkSize: size.DefaultChunkSize}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() on valid config: %v", err)
 	}

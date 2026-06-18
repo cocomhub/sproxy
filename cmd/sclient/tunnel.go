@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -97,17 +98,22 @@ func tunnelRequest(cfg *client.Config, method, targetURL string, headers []strin
 
 	finalOutputFile := outputFile
 	if finalOutputFile == "" {
+		// 无输出路径时写入临时目录，避免污染 CWD
+		baseDir := currentDir
+		if baseDir == "" {
+			baseDir = os.TempDir()
+		}
 		baseOutputFile := path.Base(req.URL.Path)
 		if baseOutputFile == "." || baseOutputFile == "" || baseOutputFile == "/" {
 			baseOutputFile = "index.html"
 		}
-		finalOutputFile = baseOutputFile
+		finalOutputFile = filepath.Join(baseDir, baseOutputFile)
 		no := 1
 		for {
 			if _, err := os.Stat(finalOutputFile); errors.Is(err, os.ErrNotExist) {
 				break
 			}
-			finalOutputFile = fmt.Sprintf("%s.%d", baseOutputFile, no)
+			finalOutputFile = filepath.Join(baseDir, fmt.Sprintf("%s.%d", baseOutputFile, no))
 			no++
 		}
 	}

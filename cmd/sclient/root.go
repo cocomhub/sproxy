@@ -122,7 +122,10 @@ func buildFileClient(cmd *cobra.Command) (*client.FileClient, error) {
 		}),
 	}
 	if cfg.TunnelKey != "" {
-		opts = append(opts, client.WithTunnel(cfg.TunnelKey))
+		// 当 --server flag 显式指定时，绕过隧道直接 HTTP
+		if s, _ := cmd.Flags().GetString("server"); s == "" {
+			opts = append(opts, client.WithTunnel(cfg.TunnelKey))
+		}
 	}
 	if cs, _ := cmd.Flags().GetInt64("chunk-size"); cs > 0 {
 		opts = append(opts, func(c *client.FileClient) {

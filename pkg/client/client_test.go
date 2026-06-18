@@ -884,7 +884,7 @@ func TestFileClient_Rename_ServerError(t *testing.T) {
 
 // TestFileClient_Rename_EmptyFrom 验证 Rename 空 from 时的校验。
 func TestFileClient_Rename_EmptyFrom(t *testing.T) {
-	c := NewFileClient("http://localhost:9999")
+	c := NewFileClient("http://127.0.0.1:9999")
 	if err := c.Rename(context.Background(), "", "b.txt", "abc"); err == nil {
 		t.Fatal("expected error for empty from")
 	}
@@ -892,7 +892,7 @@ func TestFileClient_Rename_EmptyFrom(t *testing.T) {
 
 // TestFileClient_Rename_EmptyTo 验证 Rename 空 to 时的校验。
 func TestFileClient_Rename_EmptyTo(t *testing.T) {
-	c := NewFileClient("http://localhost:9999")
+	c := NewFileClient("http://127.0.0.1:9999")
 	if err := c.Rename(context.Background(), "a.txt", "", "abc"); err == nil {
 		t.Fatal("expected error for empty to")
 	}
@@ -900,7 +900,7 @@ func TestFileClient_Rename_EmptyTo(t *testing.T) {
 
 // TestFileClient_Rename_EmptyChecksum 验证 Rename 空 checksum 时的校验。
 func TestFileClient_Rename_EmptyChecksum(t *testing.T) {
-	c := NewFileClient("http://localhost:9999")
+	c := NewFileClient("http://127.0.0.1:9999")
 	if err := c.Rename(context.Background(), "a.txt", "b.txt", ""); err == nil {
 		t.Fatal("expected error for empty checksum")
 	}
@@ -953,7 +953,7 @@ func TestFileClient_Delete_LocalPathChecksumMismatch(t *testing.T) {
 
 // TestFileClient_Stat_EmptyFilename 验证 Stat 空 filename 时的校验。
 func TestFileClient_Stat_EmptyFilename(t *testing.T) {
-	c := NewFileClient("http://localhost:9999")
+	c := NewFileClient("http://127.0.0.1:9999")
 	if _, err := c.Stat(context.Background(), ""); err == nil {
 		t.Fatal("expected error for empty filename")
 	}
