@@ -4,7 +4,6 @@
 package server
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,7 +20,7 @@ func TestBatchRenameHandler_HappyPath(t *testing.T) {
 
 	cs := NewChecksumStore(tmpDir, testLogger())
 	mux := http.NewServeMux()
-	Handlers := RegisterRoutes(context.Background(), mux, &cfgPtr, "test", "now", nil, testLogger(), nil)
+	Handlers := RegisterRoutes(t.Context(), mux, &cfgPtr, "test", "now", nil, testLogger(), nil)
 
 	// 上传一个文件，然后批量重命名
 	body := "--BOUNDARY\r\nContent-Disposition: form-data; name=\"file\"; filename=\"old.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--BOUNDARY--\r\n"

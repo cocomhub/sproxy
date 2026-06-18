@@ -27,7 +27,7 @@ func TestTunnelEcho(t *testing.T) {
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 
 	srvErr := make(chan error, 1)
@@ -65,7 +65,7 @@ func TestTunnelSequential(t *testing.T) {
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	srvErr := make(chan error, 1)
@@ -105,7 +105,7 @@ func TestTunnelEncrypted(t *testing.T) {
 	tunA := tunnel.NewTunnel(muxA, key)
 	tunB := tunnel.NewTunnel(muxB, key)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	srvErr := make(chan error, 1)
@@ -145,7 +145,7 @@ func TestTunnelBigBody(t *testing.T) {
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	srvErr := make(chan error, 1)
@@ -183,7 +183,7 @@ func TestTunnelHeaders(t *testing.T) {
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	srvErr := make(chan error, 1)

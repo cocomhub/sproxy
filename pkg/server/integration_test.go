@@ -5,7 +5,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -905,7 +904,7 @@ func TestRegisterRoutes_Smoke(t *testing.T) {
 	mux := http.NewServeMux()
 	// 32 字节占位 tunnel key
 	key := make([]byte, 32)
-	h := RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", key, nil, nil)
+	h := RegisterRoutes(t.Context(), mux, &cfgPtr, "v", "t", key, nil, nil)
 	t.Cleanup(func() { _ = h.Close() })
 }
 
@@ -933,7 +932,7 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 
 	mux := http.NewServeMux()
 	key := make([]byte, 32) // 32 字节 tunnel key，测试用零值
-	h := RegisterRoutes(context.Background(), mux, &cfgPtr, "test-version", "test-buildat", key, testLogger(), nil)
+	h := RegisterRoutes(t.Context(), mux, &cfgPtr, "test-version", "test-buildat", key, testLogger(), nil)
 
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {

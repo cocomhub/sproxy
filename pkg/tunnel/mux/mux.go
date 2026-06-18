@@ -509,6 +509,9 @@ func (m *Mux) readLoop() {
 			select {
 			case <-m.done:
 				return
+			case <-m.ctx.Done():
+				m.Close()
+				return
 			case <-time.After(backoff):
 			}
 			continue

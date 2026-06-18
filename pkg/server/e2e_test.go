@@ -5,7 +5,6 @@ package server_test
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -43,7 +42,7 @@ func startTestServer(t *testing.T) (string, string) {
 
 	key, _ := hex.DecodeString(cfg.TunnelKey)
 	mux := http.NewServeMux()
-	h := server.RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", key, nil, nil)
+	h := server.RegisterRoutes(t.Context(), mux, &cfgPtr, "v", "t", key, nil, nil)
 	t.Cleanup(func() { _ = h.Close() })
 
 	ts := httptest.NewServer(mux)
@@ -70,12 +69,12 @@ func TestE2E_Direct_UploadStatRenameDownloadDelete(t *testing.T) {
 	c := client.NewFileClient(url)
 
 	// 1. upload
-	if _, err := c.Upload(context.Background(), srcPath, "data.bin"); err != nil {
+	if _, err := c.Upload(t.Context(), srcPath, "data.bin"); err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
 
 	// 2. stat
-	info, err := c.Stat(context.Background(), "data.bin")
+	info, err := c.Stat(t.Context(), "data.bin")
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
@@ -84,13 +83,13 @@ func TestE2E_Direct_UploadStatRenameDownloadDelete(t *testing.T) {
 	}
 
 	// 3. rename
-	if err = c.Rename(context.Background(), "data.bin", "sub/dir/renamed.bin", info.Checksum); err != nil {
+	if err = c.Rename(t.Context(), "data.bin", "sub/dir/renamed.bin", info.Checksum); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
 
 	// 4. download
 	outPath := filepath.Join(t.TempDir(), "out.bin")
-	if err = c.Download(context.Background(), "sub/dir/renamed.bin", outPath); err != nil {
+	if err = c.Download(t.Context(), "sub/dir/renamed.bin", outPath); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	got, err := os.ReadFile(outPath)
@@ -103,7 +102,7 @@ func TestE2E_Direct_UploadStatRenameDownloadDelete(t *testing.T) {
 	}
 
 	// 5. delete（不传 localPath，依赖远端 stat 获取 checksum）
-	if err := c.Delete(context.Background(), "sub/dir/renamed.bin", ""); err != nil {
+	if err := c.Delete(t.Context(), "sub/dir/renamed.bin", ""); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 }
@@ -125,11 +124,11 @@ func TestE2E_Tunnel_UploadDownload(t *testing.T) {
 
 	c := client.NewFileClient(url, client.WithTunnel(makeKey()))
 
-	if _, err := c.Upload(context.Background(), srcPath, "tunnel.txt"); err != nil {
+	if _, err := c.Upload(t.Context(), srcPath, "tunnel.txt"); err != nil {
 		t.Fatalf("Upload via tunnel: %v", err)
 	}
 
-	info, err := c.Stat(context.Background(), "tunnel.txt")
+	info, err := c.Stat(t.Context(), "tunnel.txt")
 	if err != nil {
 		t.Fatalf("Stat via tunnel: %v", err)
 	}
@@ -138,7 +137,7 @@ func TestE2E_Tunnel_UploadDownload(t *testing.T) {
 	}
 
 	outPath := filepath.Join(t.TempDir(), "tunnel.out")
-	if err := c.Download(context.Background(), "tunnel.txt", outPath); err != nil {
+	if err := c.Download(t.Context(), "tunnel.txt", outPath); err != nil {
 		t.Fatalf("Download via tunnel: %v", err)
 	}
 	got, _ := os.ReadFile(outPath)
@@ -164,7 +163,7 @@ func TestE2E_RangeDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := client.NewFileClient(url)
-	if _, err := c.Upload(context.Background(), srcPath, "ranged.bin"); err != nil {
+	if _, err := c.Upload(t.Context(), srcPath, "ranged.bin"); err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
 
@@ -216,7 +215,7 @@ func TestConcurrent_UploadDifferentFiles(t *testing.T) {
 				return
 			}
 			c := client.NewFileClient(url)
-			if _, err := c.Upload(context.Background(), srcPath, fmt.Sprintf("f%d.txt", n)); err != nil {
+			if _, err := c.Upload(t.Context(), srcPath, fmt.Sprintf("f%d.txt", n)); err != nil {
 				errCh <- err
 			}
 		}(i)
@@ -247,7 +246,7 @@ func TestConcurrent_UploadSameFile(t *testing.T) {
 	for range 10 {
 		wg.Go(func() {
 			c := client.NewFileClient(url)
-			if result, err := c.Upload(context.Background(), srcPath, "same.txt"); err == nil && result.Success {
+			if result, err := c.Upload(t.Context(), srcPath, "same.txt"); err == nil && result.Success {
 				atomic.AddInt32(&successCount, 1)
 			}
 		})
@@ -260,7 +259,7 @@ func TestConcurrent_UploadSameFile(t *testing.T) {
 	c := client.NewFileClient(url)
 	outDir := t.TempDir()
 	outPath := filepath.Join(outDir, "same.txt")
-	if err := c.Download(context.Background(), "same.txt", outPath); err != nil {
+	if err := c.Download(t.Context(), "same.txt", outPath); err != nil {
 		t.Fatalf("download after concurrent: %v", err)
 	}
 	got, _ := os.ReadFile(outPath)
@@ -281,23 +280,23 @@ func TestConcurrent_RenameAndDelete(t *testing.T) {
 	}
 
 	c := client.NewFileClient(url)
-	if _, err := c.Upload(context.Background(), srcPath, "target.txt"); err != nil {
+	if _, err := c.Upload(t.Context(), srcPath, "target.txt"); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 
 	var wg sync.WaitGroup
 	for range 5 {
 		wg.Go(func() {
-			info, err := c.Stat(context.Background(), "target.txt")
+			info, err := c.Stat(t.Context(), "target.txt")
 			if err != nil {
 				return
 			}
-			_ = c.Rename(context.Background(), "target.txt", "moved.txt", info.Checksum)
+			_ = c.Rename(t.Context(), "target.txt", "moved.txt", info.Checksum)
 		})
 	}
 	for range 5 {
 		wg.Go(func() {
-			_ = c.Delete(context.Background(), "target.txt", "")
+			_ = c.Delete(t.Context(), "target.txt", "")
 		})
 	}
 	wg.Wait()

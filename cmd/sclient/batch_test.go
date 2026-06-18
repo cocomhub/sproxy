@@ -19,21 +19,21 @@ func TestRunBatchOperation(t *testing.T) {
 		wantFail int
 	}{
 		{
-			name:     "all succeed",
+			name:     "all_succeed",
 			items:    []string{"a", "b", "c"},
 			op:       func(item string) error { return nil },
 			wantSucc: 3,
 			wantFail: 0,
 		},
 		{
-			name:     "all fail",
+			name:     "all_fail",
 			items:    []string{"a", "b"},
 			op:       func(item string) error { return errors.New("fail") },
 			wantSucc: 0,
 			wantFail: 2,
 		},
 		{
-			name:  "mixed results",
+			name:  "mixed_results",
 			items: []string{"good", "bad", "ok"},
 			op: func(item string) error {
 				if item == "bad" {
@@ -45,7 +45,7 @@ func TestRunBatchOperation(t *testing.T) {
 			wantFail: 1,
 		},
 		{
-			name:     "empty input",
+			name:     "empty_input",
 			items:    []string{},
 			op:       func(item string) error { return nil },
 			wantSucc: 0,
@@ -77,7 +77,7 @@ func TestPrintBatchResults(t *testing.T) {
 		results []batchOperationResult
 	}{
 		{
-			name: "all OK",
+			name: "all_ok",
 			results: []batchOperationResult{
 				{Name: "file1.txt", Success: true, Message: "OK"},
 				{Name: "file2.txt", Success: true, Message: "OK"},

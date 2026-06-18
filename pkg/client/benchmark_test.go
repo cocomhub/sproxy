@@ -4,7 +4,6 @@
 package client
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -128,7 +127,7 @@ func BenchmarkUpload(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		remoteName := fmt.Sprintf("bench_upload_%d.dat", i)
-		res, err := c.Upload(context.Background(), src, remoteName)
+		res, err := c.Upload(b.Context(), src, remoteName)
 		if err != nil {
 			b.Fatalf("Upload: %v", err)
 		}
@@ -160,7 +159,7 @@ func BenchmarkDownload(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		out := filepath.Join(outDir, fmt.Sprintf("got_%d.dat", i))
-		if err := c.Download(context.Background(), "download.dat", out); err != nil {
+		if err := c.Download(b.Context(), "download.dat", out); err != nil {
 			b.Fatalf("Download: %v", err)
 		}
 	}
@@ -198,7 +197,7 @@ func BenchmarkChunkedUpload(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		remoteName := fmt.Sprintf("bench_chunked_%d.dat", i)
-		res, err := c.Upload(context.Background(), src, remoteName)
+		res, err := c.Upload(b.Context(), src, remoteName)
 		if err != nil {
 			b.Fatalf("Upload: %v", err)
 		}
@@ -226,7 +225,7 @@ func BenchmarkListFiles(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		files, err := c.List(context.Background())
+		files, err := c.List(b.Context())
 		if err != nil {
 			b.Fatalf("List: %v", err)
 		}

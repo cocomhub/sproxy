@@ -377,7 +377,13 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		<-sr.metaReady
+		defer bodyPr.Close()
+
+		select {
+		case <-sr.metaReady:
+		case <-r.Context().Done():
+			return
+		}
 
 		sr.mu.Lock()
 		code := sr.statusCode
@@ -400,7 +406,6 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(metaFrame)
 		_, _ = EncryptStream(encKey, bodyPr, w)
-		_ = bodyPr.Close()
 	}()
 
 	// 同步运行本地 handler。

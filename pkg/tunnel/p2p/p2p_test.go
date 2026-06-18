@@ -79,7 +79,7 @@ func TestP2PNodeRegisterAndLookup(t *testing.T) {
 	dht := hub.NewDHT()
 	node := p2p.NewP2PNode("node-a", dht)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	err := node.Listen(ctx, "pipe://addr-a")
@@ -106,7 +106,7 @@ func TestP2PNodeDial(t *testing.T) {
 	_ = registerFakeWebRTC()
 
 	dht := hub.NewDHT()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	// 注册目标节点 DHT
@@ -169,7 +169,7 @@ func TestP2PNodeAccept(t *testing.T) {
 	dht := hub.NewDHT()
 	listenerNode := p2p.NewP2PNode("listener", dht)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	err := listenerNode.Listen(ctx, "pipe://listener-addr")

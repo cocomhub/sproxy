@@ -18,7 +18,7 @@ func TestPrintFileList(t *testing.T) {
 		not      []string // substrings that must NOT appear
 	}{
 		{
-			name: "regular files",
+			name: "regular_files",
 			files: []client.FileInfo{
 				{Name: "report.pdf", Size: 1024, Checksum: "abc123def456"},
 				{Name: "notes.txt", Size: 512, Checksum: "xyz789"},
@@ -27,21 +27,21 @@ func TestPrintFileList(t *testing.T) {
 			not:      []string{"[DIR]"},
 		},
 		{
-			name: "directory entry",
+			name: "directory_entry",
 			files: []client.FileInfo{
 				{Name: "mydir", IsDir: true, Size: 0, Checksum: ""},
 			},
 			contains: []string{"[DIR]", "mydir/"},
 		},
 		{
-			name: "empty checksum",
+			name: "empty_checksum",
 			files: []client.FileInfo{
 				{Name: "no_checksum.bin", Size: 0, Checksum: ""},
 			},
 			contains: []string{"no_checksum.bin", "-"},
 		},
 		{
-			name: "truncated long checksum",
+			name: "truncated_long_checksum",
 			files: []client.FileInfo{
 				{Name: "long_hash.bin", Size: 999, Checksum: "abcdef1234567890extra"},
 			},
@@ -49,7 +49,7 @@ func TestPrintFileList(t *testing.T) {
 			not:      []string{"extra"},
 		},
 		{
-			name:     "empty file list",
+			name:     "empty_file_list",
 			files:    []client.FileInfo{},
 			contains: []string{},
 		},

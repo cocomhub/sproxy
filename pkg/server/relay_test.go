@@ -95,7 +95,7 @@ func TestRelayHandlerRoundTrip(t *testing.T) {
 	h := NewRelayHandler(rt, slog.Default())
 
 	// 启动服务端 goroutine（模拟目标节点的处理能力）
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	srvErr := make(chan error, 1)
