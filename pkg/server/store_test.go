@@ -152,8 +152,8 @@ func TestUploadStore_DeleteSession(t *testing.T) {
 
 func TestUploadStore_CleanupExpired(t *testing.T) {
 	tmpDir := t.TempDir()
-	// Use a minimal positive TTL so the session expires almost immediately
-	us := NewUploadStore(tmpDir, time.Nanosecond, nil)
+	// Use a negative TTL so the session is already expired on creation
+	us := NewUploadStore(tmpDir, -time.Nanosecond, nil)
 	defer us.Stop()
 
 	us.CreateSession("expired-id", "expired.txt", 100, 4096, 1, strings.Repeat("d", 64), 0)
