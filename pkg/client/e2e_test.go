@@ -5,7 +5,6 @@ package client
 
 import (
 	"bytes"
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,7 +31,7 @@ func startFullTestServer(t *testing.T) (string, *server.Config) {
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
-	h := server.RegisterRoutes(context.Background(), mux, &cfgPtr, "v", "t", nil, nil, nil)
+	h := server.RegisterRoutes(t.Context(), mux, &cfgPtr, "v", "t", nil, nil, nil)
 	t.Cleanup(func() { _ = h.Close() })
 
 	ts := httptest.NewServer(mux)
@@ -55,7 +54,7 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 	c.MaxChunkSize = 4096
 
 	// 分块上传
-	result, err := c.ChunkedUpload(context.Background(), srcPath, "upload.bin")
+	result, err := c.ChunkedUpload(t.Context(), srcPath, "upload.bin")
 	if err != nil {
 		t.Fatalf("ChunkedUpload: %v", err)
 	}
@@ -66,7 +65,7 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 	// 分块下载
 	outDir := t.TempDir()
 	outPath := filepath.Join(outDir, "downloaded.bin")
-	if err := c.ChunkedDownload(context.Background(), "upload.bin", outPath); err != nil {
+	if err := c.ChunkedDownload(t.Context(), "upload.bin", outPath); err != nil {
 		t.Fatalf("ChunkedDownload: %v", err)
 	}
 
@@ -91,7 +90,7 @@ func TestClientChunkedUpload_Resume(t *testing.T) {
 	c.MaxChunkSize = 4096
 
 	// 分块上传（允许续传）
-	result, err := c.ChunkedUpload(context.Background(), srcPath, "resume.bin")
+	result, err := c.ChunkedUpload(t.Context(), srcPath, "resume.bin")
 	if err != nil {
 		t.Fatalf("ChunkedUpload: %v", err)
 	}
@@ -102,7 +101,7 @@ func TestClientChunkedUpload_Resume(t *testing.T) {
 	// 下载验证
 	outDir := t.TempDir()
 	outPath := filepath.Join(outDir, "resume-dl.bin")
-	if err := c.Download(context.Background(), "resume.bin", outPath); err != nil {
+	if err := c.Download(t.Context(), "resume.bin", outPath); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	got, _ := os.ReadFile(outPath)
@@ -127,7 +126,7 @@ func TestClient_ChunkedUploadAutoThreshold(t *testing.T) {
 	}
 
 	c := NewFileClient(url)
-	result, err := c.Upload(context.Background(), srcPath, "small.bin")
+	result, err := c.Upload(t.Context(), srcPath, "small.bin")
 	if err != nil {
 		t.Fatalf("Upload (non-chunked): %v", err)
 	}

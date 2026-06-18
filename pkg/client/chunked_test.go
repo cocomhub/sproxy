@@ -4,7 +4,6 @@
 package client
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -112,7 +111,7 @@ func TestTryDownloadChunk_LengthMismatch(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	data, ok := c.tryDownloadChunk(context.Background(), "/api/download/chunk?filename=f.txt&offset=0&length=100", 100)
+	data, ok := c.tryDownloadChunk(t.Context(), "/api/download/chunk?filename=f.txt&offset=0&length=100", 100)
 	if ok {
 		t.Fatal("expected tryDownloadChunk to return false on length mismatch")
 	}
@@ -133,7 +132,7 @@ func TestTryDownloadChunk_ChecksumMismatch(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	data, ok := c.tryDownloadChunk(context.Background(), "/api/download/chunk?filename=f.txt&offset=0&length=11", 11)
+	data, ok := c.tryDownloadChunk(t.Context(), "/api/download/chunk?filename=f.txt&offset=0&length=11", 11)
 	if ok {
 		t.Fatal("expected tryDownloadChunk to return false on checksum mismatch")
 	}
@@ -153,7 +152,7 @@ func TestTryDownloadChunk_Non200(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	data, ok := c.tryDownloadChunk(context.Background(), "/api/download/chunk?filename=f.txt&offset=0&length=100", 100)
+	data, ok := c.tryDownloadChunk(t.Context(), "/api/download/chunk?filename=f.txt&offset=0&length=100", 100)
 	if ok {
 		t.Fatal("expected tryDownloadChunk to return false on 500 status")
 	}

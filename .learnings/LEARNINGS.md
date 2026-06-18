@@ -1491,3 +1491,134 @@ CI 日志显示 `TestP2PNodeDial` 在 benchmark job 中运行 15 秒后超时（
 - See Also: LRN-20260618-GC14 (global state capture)
 
 ---
+
+## [LRN-20260619-GC22] goroutine 写入 HTTP ResponseWriter 必须监听 ctx.Done()
+
+**Logged**: 2026-06-19T00:00:00Z
+**Priority**: critical
+**Status**: resolved
+**Area**: backend
+
+### Summary
+goroutine 中向 `http.ResponseWriter` 执行 `w.Write()` 或 `EncryptStream()` 时，如果客户端断连，写入将永久阻塞，导致 goroutine 泄漏。
+
+### Details
+`tunnel.go:dispatchLocal` 的 goroutine（line 378）中：
+```go
+go func() {
+    <-sr.metaReady
+    // ... 构造 metadata ...
+    w.Write(metaFrame)     // 客户端断连后永久阻塞
+    EncryptStream(..., w)  // 同上
+}()
+```
+`http.ResponseWriter.Write` 在底层 `net.Conn` 关闭后不会返回错误 — 写入的数据被丢弃，但调用方无法区分"成功写入"和"连接已断开"。当客户端在数据传输中断开连接时，goroutine 永久阻塞在 `w.Write` 上，无法到达 `<-done` 检查点。
+
+### Suggested Action
+任何写入 `http.ResponseWriter` 的 goroutine 都必须同时监听 `r.Context().Done()`：
+```go
+select {
+case <-sr.metaReady:
+case <-r.Context().Done():
+    return
+}
+```
+
+### Metadata
+- Pattern-Key: concurrency.http_writer_goroutine_leak
+- Related Files: `pkg/tunnel/tunnel.go:378-404`, `pkg/tunnel/tunnel.go:448-453`
+- Tags: concurrency, goroutine-leak, tunnel, critical
+- See Also: LRN-20260614-001 (sync.Once for close), LRN-20260618-GC21 (network test pattern)
+
+---
+
+## [LRN-20260619-GC23] mux readLoop 重试必须监听 m.ctx.Done()
+
+**Logged**: 2026-06-19T00:00:00Z
+**Priority**: critical
+**Status**: resolved
+**Area**: backend
+
+### Summary
+`mux.go:readLoop` 的重试 select 只监听了 `m.done`（只在 `Close()` 中关闭），没有监听 `m.ctx` 的取消。当父 context 被取消后，readLoop 继续重试直到 retries 耗尽。
+
+### Details
+```go
+select {
+case <-m.done:      // 只在 Close() 中关闭
+    return
+case <-time.After(backoff): // 继续重试
+}
+```
+`m.ctx` 是 mux 的外部 context（来自上层的 cancel）。当连接关闭或外部 context 被取消时，readLoop 不感知，继续尝试 `m.conn.Receive(m.Context())`，浪费资源且延迟关闭。
+
+修复：添加 `case <-m.ctx.Done(): m.Close(); return`
+
+### Suggested Action
+所有使用 `m.done` + `time.After` 的 select 都必须同时监听 `m.ctx.Done()`，确保 context 取消后能立即退出。
+
+### Metadata
+- Pattern-Key: concurrency.mux_context_aware_retry
+- Related Files: `pkg/tunnel/mux/mux.go:494-519`
+- Tags: concurrency, mux, retry, critical
+
+---
+
+## [LRN-20260619-GC24] 测试 TTL 用正 nanosecond 不可靠
+
+**Logged**: 2026-06-19T00:00:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: tests
+
+### Summary
+`time.Nanosecond` 作为正 TTL 在 `now.After(now.Add(time.Nanosecond))` 判定中不可靠。Windows CI runner 上系统时钟粒度低，`time.Now()` 可能落在同一个纳秒区间，判定为 false。
+
+### Details
+```go
+us := NewUploadStore(tmpDir, time.Nanosecond, nil)
+// CreateSession 内: ExpiresAt = now.Add(time.Nanosecond)
+// cleanupExpired 内: now.After(s.ExpiresAt)
+```
+在快系统（ns 级精度）上 `now.After()` 返回 true，在 Windows CI（μs 级粒度）上可能落在同一区间返回 false。这属于跨平台时钟行为差异。
+
+修复：使用负 TTL（`-time.Nanosecond`），创建时即过期。同时修改 `NewUploadStore` 的门禁逻辑：`< 0` 允许负 TTL，`== 0` 回退到 24h。
+
+### Suggested Action
+测试中需要"立即过期"语义时，始终使用负 TTL。正 TTL 在纳秒级不可靠，尤其跨平台。
+
+### Metadata
+- Pattern-Key: testing.negative_ttl_for_immediate_expiry
+- Related Files: `pkg/server/upload_store.go:65`, `pkg/server/store_test.go:156`
+- Tags: testing, flaky, windows, ttl
+
+---
+
+## [LRN-20260619-GC25] benchmark count 和 benchtime 应根据 CI 环境调整
+
+**Logged**: 2026-06-19T00:00:00Z
+**Priority**: medium
+**Status**: resolved
+**Area**: infra
+
+### Summary
+CI benchmark 使用 `count=5, benchtime=1s` 在 2 核 runner 上耗时 30 分钟。pkg/client 一个包就占了 1668s（28 分钟）。
+
+### Details
+CI runner（Ubuntu 2 核）比本地开发机（20 核）慢约 10 倍。`count=5, benchtime=1s` 对 4MB 数据的 chunked upload benchmark 产生大量文件 I/O 和 goroutine 创建开销。
+
+优化：
+- `count=5` → `count=3`（-40%）
+- `benchtime=1s` → `benchtime=500ms`（-50%）
+- 排除 sclient sub-module（`./internal/... ./pkg/... ./cmd/sproxy/...` 替换 `./...`）
+
+### Suggested Action
+CI 的 benchmark 配置应显著低于本地开发配置。建议 CI 使用 `count=3, benchtime=500ms`，本地开发用 `count=5, benchtime=2s`（用两个 Makefile target 区分）。
+
+### Metadata
+- Pattern-Key: ci.benchmark_config_for_slow_runners
+- Related Files: `Makefile` (bench target)
+- Tags: ci, benchmark, performance
+- See Also: LRN-20260618-GC18 (pipefail), LRN-20260618-GC20 (benchmark exclude tests)
+
+---

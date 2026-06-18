@@ -5,7 +5,6 @@ package client
 
 import (
 	"archive/tar"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -37,7 +36,7 @@ func TestClientArchive_SingleFile(t *testing.T) {
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
 	dst := filepath.Join(t.TempDir(), "out.tar")
 
-	err := c.Archive(context.Background(), []string{"test.txt"}, dst)
+	err := c.Archive(t.Context(), []string{"test.txt"}, dst)
 	if err != nil {
 		t.Fatalf("Archive() = %v", err)
 	}
@@ -77,7 +76,7 @@ func TestClientArchiveDir(t *testing.T) {
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
 	dst := filepath.Join(t.TempDir(), "dir.tar")
 
-	err := c.ArchiveDir(context.Background(), "mydir", dst)
+	err := c.ArchiveDir(t.Context(), "mydir", dst)
 	if err != nil {
 		t.Fatalf("ArchiveDir() = %v", err)
 	}
@@ -101,7 +100,7 @@ func TestClientArchive_ServerError(t *testing.T) {
 	defer mock.Close()
 
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
-	err := c.Archive(context.Background(), []string{"x.txt"}, filepath.Join(t.TempDir(), "out.tar"))
+	err := c.Archive(t.Context(), []string{"x.txt"}, filepath.Join(t.TempDir(), "out.tar"))
 	if err == nil {
 		t.Error("expected error for server 500, got nil")
 	}

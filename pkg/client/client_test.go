@@ -4,7 +4,6 @@
 package client
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -272,7 +271,7 @@ func TestFileClient_Upload_HappyPath(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	res, err := c.Upload(context.Background(), src, "a.txt")
+	res, err := c.Upload(t.Context(), src, "a.txt")
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
@@ -285,7 +284,7 @@ func TestFileClient_Upload_MissingFile(t *testing.T) {
 	t.Parallel()
 	ts, _ := newMockServer(t)
 	c := NewFileClient(ts.URL)
-	if _, err := c.Upload(context.Background(), "/non/existent/path", "x.txt"); err == nil {
+	if _, err := c.Upload(t.Context(), "/non/existent/path", "x.txt"); err == nil {
 		t.Fatal("expected error when local file missing")
 	}
 }
@@ -300,7 +299,7 @@ func TestFileClient_Download_RoundTrip(t *testing.T) {
 
 	out := filepath.Join(t.TempDir(), "got.txt")
 	c := NewFileClient(ts.URL)
-	if err := c.Download(context.Background(), "b.txt", out); err != nil {
+	if err := c.Download(t.Context(), "b.txt", out); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	got, _ := os.ReadFile(out)
@@ -314,7 +313,7 @@ func TestFileClient_Download_NotFound(t *testing.T) {
 	ts, _ := newMockServer(t)
 	c := NewFileClient(ts.URL)
 	out := filepath.Join(t.TempDir(), "nope.txt")
-	if err := c.Download(context.Background(), "nope.txt", out); err == nil {
+	if err := c.Download(t.Context(), "nope.txt", out); err == nil {
 		t.Fatal("expected error for missing file")
 	}
 }
@@ -326,7 +325,7 @@ func TestFileClient_List(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "y.txt"), []byte("22"), 0644)
 
 	c := NewFileClient(ts.URL)
-	files, err := c.List(context.Background(), "")
+	files, err := c.List(t.Context(), "")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -341,7 +340,7 @@ func TestFileClient_Stat(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "s.txt"), []byte("xy"), 0644)
 
 	c := NewFileClient(ts.URL)
-	info, err := c.Stat(context.Background(), "s.txt")
+	info, err := c.Stat(t.Context(), "s.txt")
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
@@ -357,7 +356,7 @@ func TestFileClient_Stat_NotFound(t *testing.T) {
 	t.Parallel()
 	ts, _ := newMockServer(t)
 	c := NewFileClient(ts.URL)
-	if _, err := c.Stat(context.Background(), "missing.txt"); err == nil {
+	if _, err := c.Stat(t.Context(), "missing.txt"); err == nil {
 		t.Fatal("expected error")
 	}
 }
@@ -368,11 +367,11 @@ func TestFileClient_Rename(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "old.txt"), []byte("z"), 0644)
 
 	c := NewFileClient(ts.URL)
-	info, err := c.Stat(context.Background(), "old.txt")
+	info, err := c.Stat(t.Context(), "old.txt")
 	if err != nil {
 		t.Fatalf("Stat: %v", err)
 	}
-	if err := c.Rename(context.Background(), "old.txt", "new.txt", info.Checksum); err != nil {
+	if err := c.Rename(t.Context(), "old.txt", "new.txt", info.Checksum); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "new.txt")); err != nil {
@@ -390,7 +389,7 @@ func TestFileClient_Delete_RemoteChecksum(t *testing.T) {
 
 	c := NewFileClient(ts.URL)
 	// 不传 localPath，依赖远端 stat 获取 checksum
-	if err := c.Delete(context.Background(), "del.txt", ""); err != nil {
+	if err := c.Delete(t.Context(), "del.txt", ""); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	// 确认文件已从服务端删除
@@ -414,7 +413,7 @@ func TestFileClient_Delete_LocalCheckMatch(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	if err := c.Delete(context.Background(), "match.txt", localPath); err != nil {
+	if err := c.Delete(t.Context(), "match.txt", localPath); err != nil {
 		t.Fatalf("Delete with --check-local should succeed: %v", err)
 	}
 }
@@ -434,7 +433,7 @@ func TestFileClient_Delete_LocalCheckMismatch(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	if err := c.Delete(context.Background(), "mismatch.txt", localPath); err == nil {
+	if err := c.Delete(t.Context(), "mismatch.txt", localPath); err == nil {
 		t.Fatal("expected error when --check-local content mismatches")
 	}
 }
@@ -443,7 +442,7 @@ func TestFileClient_Delete_FileNotFound(t *testing.T) {
 	t.Parallel()
 	ts, _ := newMockServer(t)
 	c := NewFileClient(ts.URL)
-	if err := c.Delete(context.Background(), "nonexistent.txt", ""); err == nil {
+	if err := c.Delete(t.Context(), "nonexistent.txt", ""); err == nil {
 		t.Fatal("expected error for nonexistent file")
 	}
 }
@@ -452,7 +451,7 @@ func TestFileClient_Rename_RequiresChecksum(t *testing.T) {
 	t.Parallel()
 	ts, _ := newMockServer(t)
 	c := NewFileClient(ts.URL)
-	err := c.Rename(context.Background(), "a", "b", "")
+	err := c.Rename(t.Context(), "a", "b", "")
 	if err == nil || !strings.Contains(err.Error(), "fromChecksum") {
 		t.Fatalf("expected fromChecksum required error, got %v", err)
 	}
@@ -473,7 +472,7 @@ func TestClient_Search(t *testing.T) {
 	c := NewFileClient(ts.URL)
 
 	// 搜索 "beta" -> 只返回 beta.txt
-	files, err := c.Search(context.Background(), "beta")
+	files, err := c.Search(t.Context(), "beta")
 	if err != nil {
 		t.Fatalf("Search beta: %v", err)
 	}
@@ -485,7 +484,7 @@ func TestClient_Search(t *testing.T) {
 	}
 
 	// 搜索空字符串 -> 返回空列表
-	files, err = c.Search(context.Background(), "")
+	files, err = c.Search(t.Context(), "")
 	if err != nil {
 		t.Fatalf("Search empty: %v", err)
 	}
@@ -508,10 +507,10 @@ func TestClient_BatchDelete(t *testing.T) {
 
 	// 先 stat 获取 checksum
 	c := NewFileClient(ts.URL)
-	info1, _ := c.Stat(context.Background(), "del1.txt")
-	info2, _ := c.Stat(context.Background(), "del2.txt")
+	info1, _ := c.Stat(t.Context(), "del1.txt")
+	info2, _ := c.Stat(t.Context(), "del2.txt")
 
-	results, err := c.BatchDelete(context.Background(), []BatchDeleteFile{
+	results, err := c.BatchDelete(t.Context(), []BatchDeleteFile{
 		{Filename: "del1.txt", Checksum: info1.Checksum},
 		{Filename: "del2.txt", Checksum: info2.Checksum},
 	})
@@ -552,10 +551,10 @@ func TestClient_BatchDelete_ContinueOnError(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	info, _ := c.Stat(context.Background(), "a.txt")
+	info, _ := c.Stat(t.Context(), "a.txt")
 
 	// 在批量删除中包含不存在的文件
-	results, err := c.BatchDelete(context.Background(), []BatchDeleteFile{
+	results, err := c.BatchDelete(t.Context(), []BatchDeleteFile{
 		{Filename: "a.txt", Checksum: info.Checksum},
 		{Filename: "nonexistent.txt", Checksum: "deadbeef"},
 	})
@@ -588,10 +587,10 @@ func TestClient_BatchRename(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	info1, _ := c.Stat(context.Background(), "old1.txt")
-	info2, _ := c.Stat(context.Background(), "old2.txt")
+	info1, _ := c.Stat(t.Context(), "old1.txt")
+	info2, _ := c.Stat(t.Context(), "old2.txt")
 
-	results, err := c.BatchRename(context.Background(), []BatchRenameOp{
+	results, err := c.BatchRename(t.Context(), []BatchRenameOp{
 		{From: "old1.txt", To: "new1.txt", Checksum: info1.Checksum},
 		{From: "old2.txt", To: "new2.txt", Checksum: info2.Checksum},
 	})
@@ -634,10 +633,10 @@ func TestClient_BatchRename_MissingChecksum(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	info, _ := c.Stat(context.Background(), "a.txt")
+	info, _ := c.Stat(t.Context(), "a.txt")
 
 	// 第一条缺 checksum，第二条合法
-	results, err := c.BatchRename(context.Background(), []BatchRenameOp{
+	results, err := c.BatchRename(t.Context(), []BatchRenameOp{
 		{From: "a.txt", To: "a_renamed.txt", Checksum: info.Checksum},
 		{From: "b.txt", To: "b_renamed.txt", Checksum: ""},
 	})
@@ -679,7 +678,7 @@ func TestClient_ListWithPagination(t *testing.T) {
 	c := NewFileClient(ts.URL)
 
 	// limit=3，第一页
-	files, total, err := c.ListWithPagination(context.Background(), 0, 3)
+	files, total, err := c.ListWithPagination(t.Context(), 0, 3)
 	if err != nil {
 		t.Fatalf("ListWithPagination: %v", err)
 	}
@@ -691,7 +690,7 @@ func TestClient_ListWithPagination(t *testing.T) {
 	}
 
 	// limit=3，第二页 -> 应返回 3 个文件
-	files, _, err = c.ListWithPagination(context.Background(), 3, 3)
+	files, _, err = c.ListWithPagination(t.Context(), 3, 3)
 	if err != nil {
 		t.Fatalf("ListWithPagination page 2: %v", err)
 	}
@@ -700,7 +699,7 @@ func TestClient_ListWithPagination(t *testing.T) {
 	}
 
 	// limit=5，offset=0 -> 返回 5 个文件
-	files, _, err = c.ListWithPagination(context.Background(), 0, 5)
+	files, _, err = c.ListWithPagination(t.Context(), 0, 5)
 	if err != nil {
 		t.Fatalf("ListWithPagination limit=5: %v", err)
 	}
@@ -724,7 +723,7 @@ func TestClient_ListWithPagination_NoLimit(t *testing.T) {
 	c := NewFileClient(ts.URL)
 
 	// limit=0 表示不限制
-	files, total, err := c.ListWithPagination(context.Background(), 0, 0)
+	files, total, err := c.ListWithPagination(t.Context(), 0, 0)
 	if err != nil {
 		t.Fatalf("ListWithPagination: %v", err)
 	}
@@ -775,7 +774,7 @@ func TestFileClient_Upload_MissingLocalFile(t *testing.T) {
 	ts, _ := newMockServer(t)
 
 	c := NewFileClient(ts.URL)
-	if _, err := c.Upload(context.Background(), "/nonexistent/path/file.txt", "remote.txt"); err == nil {
+	if _, err := c.Upload(t.Context(), "/nonexistent/path/file.txt", "remote.txt"); err == nil {
 		t.Fatal("expected error for missing local file")
 	}
 }
@@ -792,7 +791,7 @@ func TestFileClient_Download_EmptyOutputPath(t *testing.T) {
 	c := NewFileClient(ts.URL)
 	// 空 outputPath 应当自动使用 filename
 	out := filepath.Join(t.TempDir(), "b.txt")
-	if err := c.Download(context.Background(), "b.txt", out); err != nil {
+	if err := c.Download(t.Context(), "b.txt", out); err != nil {
 		t.Fatalf("Download with empty outputPath: %v", err)
 	}
 }
@@ -809,7 +808,7 @@ func TestFileClient_Search_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if _, err := c.Search(context.Background(), "test"); err == nil {
+	if _, err := c.Search(t.Context(), "test"); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -825,7 +824,7 @@ func TestFileClient_List_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if _, err := c.List(context.Background()); err == nil {
+	if _, err := c.List(t.Context()); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -841,7 +840,7 @@ func TestFileClient_BatchDelete_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if _, err := c.BatchDelete(context.Background(), []BatchDeleteFile{
+	if _, err := c.BatchDelete(t.Context(), []BatchDeleteFile{
 		{Filename: "a.txt", Checksum: "abc"},
 	}); err == nil {
 		t.Fatal("expected error for server error")
@@ -859,7 +858,7 @@ func TestFileClient_BatchRename_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if _, err := c.BatchRename(context.Background(), []BatchRenameOp{
+	if _, err := c.BatchRename(t.Context(), []BatchRenameOp{
 		{From: "a.txt", To: "b.txt", Checksum: "abc"},
 	}); err == nil {
 		t.Fatal("expected error for server error")
@@ -877,7 +876,7 @@ func TestFileClient_Rename_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.Rename(context.Background(), "a.txt", "b.txt", "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"); err == nil {
+	if err := c.Rename(t.Context(), "a.txt", "b.txt", "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -885,7 +884,7 @@ func TestFileClient_Rename_ServerError(t *testing.T) {
 // TestFileClient_Rename_EmptyFrom 验证 Rename 空 from 时的校验。
 func TestFileClient_Rename_EmptyFrom(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:9999")
-	if err := c.Rename(context.Background(), "", "b.txt", "abc"); err == nil {
+	if err := c.Rename(t.Context(), "", "b.txt", "abc"); err == nil {
 		t.Fatal("expected error for empty from")
 	}
 }
@@ -893,7 +892,7 @@ func TestFileClient_Rename_EmptyFrom(t *testing.T) {
 // TestFileClient_Rename_EmptyTo 验证 Rename 空 to 时的校验。
 func TestFileClient_Rename_EmptyTo(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:9999")
-	if err := c.Rename(context.Background(), "a.txt", "", "abc"); err == nil {
+	if err := c.Rename(t.Context(), "a.txt", "", "abc"); err == nil {
 		t.Fatal("expected error for empty to")
 	}
 }
@@ -901,7 +900,7 @@ func TestFileClient_Rename_EmptyTo(t *testing.T) {
 // TestFileClient_Rename_EmptyChecksum 验证 Rename 空 checksum 时的校验。
 func TestFileClient_Rename_EmptyChecksum(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:9999")
-	if err := c.Rename(context.Background(), "a.txt", "b.txt", ""); err == nil {
+	if err := c.Rename(t.Context(), "a.txt", "b.txt", ""); err == nil {
 		t.Fatal("expected error for empty checksum")
 	}
 }
@@ -917,7 +916,7 @@ func TestFileClient_ListWithPagination_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if _, _, err := c.ListWithPagination(context.Background(), 0, 10); err == nil {
+	if _, _, err := c.ListWithPagination(t.Context(), 0, 10); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -945,7 +944,7 @@ func TestFileClient_Delete_LocalPathChecksumMismatch(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	err := c.Delete(context.Background(), "mismatch.txt", filepath.Join(srcDir, "local.txt"))
+	err := c.Delete(t.Context(), "mismatch.txt", filepath.Join(srcDir, "local.txt"))
 	if err == nil {
 		t.Fatal("expected error for checksum mismatch")
 	}
@@ -954,7 +953,7 @@ func TestFileClient_Delete_LocalPathChecksumMismatch(t *testing.T) {
 // TestFileClient_Stat_EmptyFilename 验证 Stat 空 filename 时的校验。
 func TestFileClient_Stat_EmptyFilename(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:9999")
-	if _, err := c.Stat(context.Background(), ""); err == nil {
+	if _, err := c.Stat(t.Context(), ""); err == nil {
 		t.Fatal("expected error for empty filename")
 	}
 }
@@ -970,7 +969,7 @@ func TestFileClient_Stat_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if _, err := c.Stat(context.Background(), "test.txt"); err == nil {
+	if _, err := c.Stat(t.Context(), "test.txt"); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -986,7 +985,7 @@ func TestFileClient_Download_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.Download(context.Background(), "test.txt", "out.txt"); err == nil {
+	if err := c.Download(t.Context(), "test.txt", "out.txt"); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -1000,7 +999,7 @@ func TestFileClient_Delete_LocalPathChecksumError(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	err := c.Delete(context.Background(), "test.txt", "/nonexistent/path/local.txt")
+	err := c.Delete(t.Context(), "test.txt", "/nonexistent/path/local.txt")
 	if err == nil {
 		t.Fatal("expected error for missing local file")
 	}
@@ -1021,7 +1020,7 @@ func TestFileClient_Delete_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.Delete(context.Background(), "test.txt", ""); err == nil {
+	if err := c.Delete(t.Context(), "test.txt", ""); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -1037,7 +1036,7 @@ func TestFileClient_Delete_StatFailure(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL) // 不注册 Head API，Stat 会失败
-	if err := c.Delete(context.Background(), "test.txt", ""); err == nil {
+	if err := c.Delete(t.Context(), "test.txt", ""); err == nil {
 		t.Fatal("expected error for stat failure")
 	}
 }
@@ -1053,7 +1052,7 @@ func TestClientListVersions_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if _, err := c.ListVersions(context.Background(), "test.txt"); err == nil {
+	if _, err := c.ListVersions(t.Context(), "test.txt"); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -1069,7 +1068,7 @@ func TestClientRestoreVersion_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.RestoreVersion(context.Background(), "test.txt", "1"); err == nil {
+	if err := c.RestoreVersion(t.Context(), "test.txt", "1"); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -1085,7 +1084,7 @@ func TestClientDeleteVersion_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.DeleteVersion(context.Background(), "test.txt", "1"); err == nil {
+	if err := c.DeleteVersion(t.Context(), "test.txt", "1"); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -1093,7 +1092,7 @@ func TestClientDeleteVersion_ServerError(t *testing.T) {
 // TestClientListVersions_RequestError 验证版本 API 请求层面的错误路径。
 func TestClientListVersions_RequestError(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:1") // 预期连接被拒
-	if _, err := c.ListVersions(context.Background(), "test.txt"); err == nil {
+	if _, err := c.ListVersions(t.Context(), "test.txt"); err == nil {
 		t.Fatal("expected error for connection refused")
 	}
 }
@@ -1110,7 +1109,7 @@ func TestClientRestoreVersion_SuccessFalse(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.RestoreVersion(context.Background(), "test.txt", "999"); err == nil {
+	if err := c.RestoreVersion(t.Context(), "test.txt", "999"); err == nil {
 		t.Fatal("expected error for success=false response")
 	}
 }
@@ -1127,7 +1126,7 @@ func TestClientDeleteVersion_SuccessFalse(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.DeleteVersion(context.Background(), "test.txt", "999"); err == nil {
+	if err := c.DeleteVersion(t.Context(), "test.txt", "999"); err == nil {
 		t.Fatal("expected error for success=false response")
 	}
 }
@@ -1138,7 +1137,7 @@ func TestFileClient_Upload_StatError(t *testing.T) {
 	// 使用目录作为本地路径，会打开成功但 Stat 失败（目录 Stat 不会失败）
 	// 使用一个特殊路径：先 Mock 让 os.Open 成功但 Stat 失败比较困难，
 	// 这里验证 Upload 会先 Open 文件，所以给一个不存在路径即可
-	if _, err := c.Upload(context.Background(), "/nonexistent/file.txt", "remote.txt"); err == nil {
+	if _, err := c.Upload(t.Context(), "/nonexistent/file.txt", "remote.txt"); err == nil {
 		t.Fatal("expected error for missing local file")
 	}
 }
@@ -1146,7 +1145,7 @@ func TestFileClient_Upload_StatError(t *testing.T) {
 // TestClientBatchRename_MissingChecksum 验证 BatchRename 缺失 checksum。
 func TestClientBatchRename_MissingChecksum(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:9999")
-	if _, err := c.BatchRename(context.Background(), []BatchRenameOp{
+	if _, err := c.BatchRename(t.Context(), []BatchRenameOp{
 		{From: "a.txt", To: "b.txt"},
 	}); err == nil {
 		t.Fatal("expected error for missing checksum")
@@ -1171,7 +1170,7 @@ func TestFileClient_Upload_RequestError(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	if res, err := c.Upload(context.Background(), src, "remote.txt"); err != nil {
+	if res, err := c.Upload(t.Context(), src, "remote.txt"); err != nil {
 		t.Logf("upload returned error: %v", err)
 	} else if res.Success {
 		t.Fatal("expected success=false in response")
@@ -1207,7 +1206,7 @@ func TestFileClient_Upload_WithTunnel(t *testing.T) {
 	// WithTunnel creates tunnelClient silently, but Upload still goes through doRequest
 	// which calls c.tunnelClient.Do(req) when set.
 	// This should error because tunnel path doesn't match /upload.
-	if _, err := c.Upload(context.Background(), src, "remote.txt"); err == nil {
+	if _, err := c.Upload(t.Context(), src, "remote.txt"); err == nil {
 		t.Log("upload via tunnel succeeded (may depend on tunnel setup)")
 	}
 }
@@ -1227,7 +1226,7 @@ func TestFileClient_Upload_ProgressCallback(t *testing.T) {
 	c := NewFileClient(ts.URL, WithProgress(func(_ string, _, _ int64) {
 		called = true
 	}))
-	if _, err := c.Upload(context.Background(), src, "remote.txt"); err != nil {
+	if _, err := c.Upload(t.Context(), src, "remote.txt"); err != nil {
 		t.Fatalf("Upload failed: %v", err)
 	}
 	if !called {
@@ -1295,7 +1294,7 @@ func TestClientListVersions_UnmarshalError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if _, err := c.ListVersions(context.Background(), "test.txt"); err == nil {
+	if _, err := c.ListVersions(t.Context(), "test.txt"); err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
 }
@@ -1305,7 +1304,7 @@ func TestClientBatchDelete_ContinueOnError(t *testing.T) {
 	t.Parallel()
 	// 测试空列表不 panic
 	c := NewFileClient("http://127.0.0.1:1")
-	if _, err := c.BatchDelete(context.Background(), nil); err == nil {
+	if _, err := c.BatchDelete(t.Context(), nil); err == nil {
 		t.Fatal("expected error for nil files")
 	}
 }

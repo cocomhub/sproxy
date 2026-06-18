@@ -17,7 +17,7 @@ import (
 
 // TestTcpConnRoundTrip 测试 TCP 传输的基本消息往返。
 func TestTcpConnRoundTrip(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	tp := xfer.Get("tcp")
@@ -86,7 +86,7 @@ func TestTcpConnRoundTrip(t *testing.T) {
 }
 
 func TestTcpLargePayload(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	tp := xfer.Get("tcp")
@@ -162,7 +162,7 @@ func TestTcpRegistration(t *testing.T) {
 }
 
 func TestTcpMultipleMessages(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	tp := xfer.Get("tcp")

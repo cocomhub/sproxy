@@ -4,14 +4,13 @@
 package hub
 
 import (
-	"context"
 	"sync"
 	"testing"
 )
 
 func TestDhtRegisterAndLookup(t *testing.T) {
 	dht := newMemoryDHT()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Register a node
 	if err := dht.Register(ctx, PeerInfo{ID: "node-1", Addrs: []string{"192.168.1.10:9000"}, Meta: map[string]string{"region": "us-east"}}); err != nil {
@@ -42,7 +41,7 @@ func TestDhtRegisterAndLookup(t *testing.T) {
 
 func TestDhtRegisterOverwrite(t *testing.T) {
 	dht := newMemoryDHT()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	dht.Register(ctx, PeerInfo{ID: "node-1", Addrs: []string{"192.168.1.10:9000"}})
 	dht.Register(ctx, PeerInfo{ID: "node-1", Addrs: []string{"10.0.0.1:9001"}, Meta: map[string]string{"region": "eu-west"}})
@@ -61,7 +60,7 @@ func TestDhtRegisterOverwrite(t *testing.T) {
 
 func TestDhtGetClosestNodes(t *testing.T) {
 	dht := newMemoryDHT()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Register nodes with IDs that sort lexicographically
 	dht.Register(ctx, PeerInfo{ID: "alpha", Addrs: []string{"addr1"}})
@@ -113,7 +112,7 @@ func TestDhtGetClosestNodes(t *testing.T) {
 
 func TestDhtGetClosestNodesSelfExcluded(t *testing.T) {
 	dht := newMemoryDHT()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	dht.Register(ctx, PeerInfo{ID: "alpha", Addrs: []string{"addr1"}})
 	dht.Register(ctx, PeerInfo{ID: "beta", Addrs: []string{"addr2"}})
@@ -136,7 +135,7 @@ func TestDhtGetClosestNodesSelfExcluded(t *testing.T) {
 
 func TestDhtConcurrent(t *testing.T) {
 	dht := newMemoryDHT()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var wg sync.WaitGroup
 	n := 50
@@ -180,7 +179,7 @@ func TestDhtConcurrent(t *testing.T) {
 
 func TestDhtBootstrapNoop(t *testing.T) {
 	dht := newMemoryDHT()
-	err := dht.Bootstrap(context.Background(), nil)
+	err := dht.Bootstrap(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("expected no error from memory DHT Bootstrap, got %v", err)
 	}
@@ -188,7 +187,7 @@ func TestDhtBootstrapNoop(t *testing.T) {
 
 func TestDhtLookupWithMeta(t *testing.T) {
 	dht := newMemoryDHT()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	meta := map[string]string{
 		"version": "1.0.0",
@@ -214,7 +213,7 @@ func TestDhtLookupWithMeta(t *testing.T) {
 
 func TestDhtRegisterNilMeta(t *testing.T) {
 	dht := newMemoryDHT()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	dht.Register(ctx, PeerInfo{ID: "nil-meta", Addrs: []string{"addr"}})
 

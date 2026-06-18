@@ -943,11 +943,11 @@ func TestChunkedDigestConsistency(t *testing.T) {
 	outDir := t.TempDir()
 
 	out1 := filepath.Join(outDir, "normal.bin")
-	if err := c.Download(context.Background(), "consistency-normal.bin", out1); err != nil {
+	if err := c.Download(t.Context(), "consistency-normal.bin", out1); err != nil {
 		t.Fatalf("download normal: %v", err)
 	}
 	out2 := filepath.Join(outDir, "chunked.bin")
-	if err := c.Download(context.Background(), "consistency-chunked.bin", out2); err != nil {
+	if err := c.Download(t.Context(), "consistency-chunked.bin", out2); err != nil {
 		t.Fatalf("download chunked: %v", err)
 	}
 
@@ -1141,7 +1141,7 @@ func TestChunkedUpload_ContextCancelled(t *testing.T) {
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // 立即取消
 
 	fileCS := sha256hex([]byte("cancelled"))

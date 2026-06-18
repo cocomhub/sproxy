@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -160,7 +161,8 @@ func TestRunServer_SignalShutdown(t *testing.T) {
 		errCh <- runServer(cmd, nil)
 	}()
 
-	time.Sleep(300 * time.Millisecond)
+	// waitForServer 轮询等待服务器就绪
+	waitForServer(t, "127.0.0.1:18083", 5*time.Second)
 	sigCh <- syscall.SIGTERM
 
 	select {
@@ -198,7 +200,10 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 		errCh <- runServer(cmd, nil)
 	}()
 
-	time.Sleep(500 * time.Millisecond)
+	// 轮询等待 cfgPtr 被初始化（server 启动成功），然后用实际地址连接
+	waitForConfig(t, 5*time.Second)
+	addr := cfgPtr.Load().Addr
+	waitForServer(t, addr, 5*time.Second)
 	sigCh <- syscall.SIGTERM
 
 	select {
@@ -217,6 +222,33 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 }
 
 // ---- 测试辅助函数 ----
+
+// waitForServer 轮询等待 TCP 服务器就绪。
+func waitForServer(t testing.TB, addr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("server did not become ready within %v (addr=%s)", timeout, addr)
+}
+
+// waitForConfig 轮询等待 cfgPtr 被 server 初始化。
+func waitForConfig(t testing.TB, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cfg := cfgPtr.Load(); cfg != nil && cfg.Addr != "" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("config did not become ready within %v", timeout)
+}
 
 func captureOutput(fn func()) string {
 	r, w, _ := os.Pipe()

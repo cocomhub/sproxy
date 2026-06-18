@@ -21,7 +21,7 @@ func TestMuxOpenAccept(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	streamA, err := muxA.Open(ctx)
@@ -76,7 +76,7 @@ func TestMuxCloseWrite(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	streamA, err := muxA.Open(ctx)
@@ -123,7 +123,7 @@ func TestMuxBidirectionalWrite(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	sA, err := muxA.Open(ctx)
@@ -168,7 +168,7 @@ func TestMuxMultipleStreams(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	const n = 5
@@ -220,7 +220,7 @@ func TestMuxClose(t *testing.T) {
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	streamA, err := muxA.Open(ctx)
@@ -258,7 +258,7 @@ func TestMuxAcceptCancel(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
 	// Accept 应因 ctx 取消而超时
@@ -274,7 +274,7 @@ func TestMuxAcceptAfterClose(t *testing.T) {
 	muxB.Close()
 	_ = a
 
-	ctx := context.Background()
+	ctx := t.Context()
 	_, err := muxB.Accept(ctx)
 	if err == nil {
 		t.Fatal("expected error on accept after close")
@@ -287,7 +287,7 @@ func TestMuxOpenAfterClose(t *testing.T) {
 	muxA.Close()
 	_ = b
 
-	ctx := context.Background()
+	ctx := t.Context()
 	_, err := muxA.Open(ctx)
 	if err == nil {
 		t.Fatal("expected error on open after close")
@@ -302,7 +302,7 @@ func TestMuxDataForUnknownStream(t *testing.T) {
 	_ = b
 	// 间接测试：通过 muxB 发送一个对 muxA 未知流的 FrameData
 	// 利用 PipeConn 手动注入帧
-	ctx := context.Background()
+	ctx := t.Context()
 	// 直接通过 conn 发送一个指向不存在的 streamID 的帧
 	rawFrame := mux.EncodeFrame(999, mux.FrameData, []byte("orphan data"))
 	if err := b.Send(ctx, rawFrame); err != nil {
@@ -322,7 +322,7 @@ func TestMuxFramePingPong(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	// 打开一条流，确保连接活跃
@@ -349,7 +349,7 @@ func TestMuxWriteChClosedStream(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	s, err := muxA.Open(ctx)
@@ -393,7 +393,7 @@ func TestMuxSendReceive(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	sA, err := muxA.Open(ctx)
@@ -435,7 +435,7 @@ func TestMuxAcceptChFull_Reject(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	// 用 acceptCh 容量（64）+1 个流来触发 acceptCh 满。
@@ -481,7 +481,7 @@ func TestMuxWithMaxStreams(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	// 在 maxStreams 内打开，全部应成功
@@ -522,7 +522,7 @@ func TestMuxWithMaxStreams_Bounded(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	// 打开一条流，验证正常 echo 通信

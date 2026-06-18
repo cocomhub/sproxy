@@ -24,19 +24,19 @@ func TestGzipMiddleware_TableDriven(t *testing.T) {
 		wantGzip       bool
 	}{
 		{
-			name:           "gzip compression",
+			name:           "gzip_compression",
 			acceptEncoding: "gzip",
 			body:           "hello",
 			wantGzip:       true,
 		},
 		{
-			name:           "no accept-encoding",
+			name:           "no_accept_encoding",
 			acceptEncoding: "",
 			body:           "hello",
 			wantGzip:       false,
 		},
 		{
-			name:           "deflate only",
+			name:           "deflate_only",
 			acceptEncoding: "deflate",
 			body:           "hello",
 			wantGzip:       false,
@@ -48,7 +48,7 @@ func TestGzipMiddleware_TableDriven(t *testing.T) {
 			wantGzip:       false,
 		},
 		{
-			name:           "multiple encodings with gzip",
+			name:           "multiple_encodings_with_gzip",
 			acceptEncoding: "gzip, deflate, br",
 			body:           "gzip compression test",
 			wantGzip:       true,

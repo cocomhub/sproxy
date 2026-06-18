@@ -62,7 +62,9 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 		log.Error("创建分块上传目录失败", "error", err)
 	}
 
-	if sessionTTL <= 0 {
+	if sessionTTL < 0 {
+		sessionTTL = 0
+	} else if sessionTTL == 0 {
 		sessionTTL = 24 * time.Hour
 	}
 

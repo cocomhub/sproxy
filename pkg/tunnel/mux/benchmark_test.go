@@ -28,7 +28,7 @@ func BenchmarkMuxThroughput(b *testing.B) {
 			payload := make([]byte, size)
 
 			// echo server：将收到的数据写回
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
 			defer cancel()
 			go func() {
 				for {
@@ -85,7 +85,7 @@ func BenchmarkMuxConcurrentStreams(b *testing.B) {
 
 			payload := make([]byte, 1024)
 
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
 			defer cancel()
 
 			// echo server：每个 Accept 的流启动一个 echo goroutine

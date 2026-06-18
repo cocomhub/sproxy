@@ -238,7 +238,7 @@ func TestMkdir_RoundTrip(t *testing.T) {
 	})
 
 	c := NewFileClient(ts.URL)
-	if err := c.Mkdir(context.Background(), "testdir"); err != nil {
+	if err := c.Mkdir(t.Context(), "testdir"); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
 	_ = dir // 引用避免编译错误
@@ -252,7 +252,7 @@ func TestMkdir_ServerError(t *testing.T) {
 	})
 
 	c := NewFileClient(ts.URL)
-	if err := c.Mkdir(context.Background(), "bad"); err == nil {
+	if err := c.Mkdir(t.Context(), "bad"); err == nil {
 		t.Fatal("expected error for server failure")
 	}
 }
@@ -271,7 +271,7 @@ func TestRmdir_RoundTrip(t *testing.T) {
 	})
 
 	c := NewFileClient(ts.URL)
-	if err := c.Rmdir(context.Background(), "testdir"); err != nil {
+	if err := c.Rmdir(t.Context(), "testdir"); err != nil {
 		t.Fatalf("Rmdir: %v", err)
 	}
 }
@@ -284,7 +284,7 @@ func TestRmdir_ServerError(t *testing.T) {
 	})
 
 	c := NewFileClient(ts.URL)
-	if err := c.Rmdir(context.Background(), "nonexistent"); err == nil {
+	if err := c.Rmdir(t.Context(), "nonexistent"); err == nil {
 		t.Fatal("expected error for non-existent dir")
 	}
 }
@@ -390,7 +390,7 @@ func TestXferTunnelRoundTrip(t *testing.T) {
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 
 	srvErr := make(chan error, 1)
@@ -426,7 +426,7 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	srvErr := make(chan error, 1)
@@ -472,7 +472,7 @@ func TestXferTunnelEncrypted(t *testing.T) {
 	tunA := tunnel.NewTunnel(muxA, key)
 	tunB := tunnel.NewTunnel(muxB, key)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	srvErr := make(chan error, 1)
@@ -510,7 +510,7 @@ func TestXferTunnelLargeBody(t *testing.T) {
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	srvErr := make(chan error, 1)

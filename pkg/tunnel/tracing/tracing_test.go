@@ -5,7 +5,6 @@ package tracing
 
 import (
 	"bytes"
-	"context"
 	"log/slog"
 	"strings"
 	"testing"
@@ -29,7 +28,7 @@ func hasLogLine(t *testing.T, output, substr string) bool {
 func TestTracerStartEnd(t *testing.T) {
 	output := captureLog(t, func() {
 		tracer := New()
-		ctx := context.Background()
+		ctx := t.Context()
 
 		_, end := tracer.StartSpan(ctx, "test-operation")
 		end()
@@ -46,7 +45,7 @@ func TestTracerStartEnd(t *testing.T) {
 func TestTracerNestedSpans(t *testing.T) {
 	output := captureLog(t, func() {
 		tracer := New()
-		ctx := context.Background()
+		ctx := t.Context()
 
 		ctx, endParent := tracer.StartSpan(ctx, "parent")
 		_, endChild := tracer.StartSpan(ctx, "child")
@@ -65,7 +64,7 @@ func TestTracerNestedSpans(t *testing.T) {
 func TestTracerWithTag(t *testing.T) {
 	output := captureLog(t, func() {
 		tracer := New()
-		ctx := context.Background()
+		ctx := t.Context()
 
 		ctx, end := tracer.StartSpan(ctx, "tagged-op")
 		ctx = WithTag(ctx, "env", "test")
@@ -82,9 +81,9 @@ func TestTracerWithTag(t *testing.T) {
 	}
 }
 
-func TestTracerEndTwiceSafe(_ *testing.T) {
+func TestTracerEndTwiceSafe(t *testing.T) {
 	tracer := New()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	_, end := tracer.StartSpan(ctx, "safe-end")
 	end()
@@ -94,7 +93,7 @@ func TestTracerEndTwiceSafe(_ *testing.T) {
 func TestTracerTagsAppearInChildSpan(t *testing.T) {
 	output := captureLog(t, func() {
 		tracer := New()
-		ctx := context.Background()
+		ctx := t.Context()
 
 		ctx, _ = tracer.StartSpan(ctx, "outer")
 		ctx = WithTag(ctx, "region", "us-east")
@@ -107,10 +106,10 @@ func TestTracerTagsAppearInChildSpan(t *testing.T) {
 	}
 }
 
-func TestTracerWithTagAfterEnd(_ *testing.T) {
+func TestTracerWithTagAfterEnd(t *testing.T) {
 	// WithTag after ends should not panic
 	tracer := New()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	ctx, end := tracer.StartSpan(ctx, "op")
 	end()
@@ -121,7 +120,7 @@ func TestTracerWithTagAfterEnd(_ *testing.T) {
 func TestTracerDoubleEndProducesWarning(t *testing.T) {
 	output := captureLog(t, func() {
 		tracer := New()
-		ctx := context.Background()
+		ctx := t.Context()
 
 		_, end := tracer.StartSpan(ctx, "op")
 		end()
