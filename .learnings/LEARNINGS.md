@@ -1085,6 +1085,8 @@ func benchServer(tb testing.TB, ...) {
 - Pattern-Key: infra.parallel_config_conflict
 - Tags: git, worktree, parallel
 
+---
+
 ## [LRN-20260618-GC8] Linux SO_REUSEADDR 导致端口占用测试在 Linux 上不生效
 
 **Logged**: 2026-06-18T10:00:00Z
@@ -1258,3 +1260,234 @@ Cobra 中任何使用 `PersistentPreRunE` 初始化的包级变量，在 `RunE` 
 - Pattern-Key: tooling.prepare_new_files
 - Tags: gofmt, pre-commit, formatting
 - See Also: LRN-20260614-BP9 (gofmt 缩进转换 diff 噪声)
+
+---
+
+## [LRN-20260618-GC14] 测试捕获函数必须 save/restore 所有全局变量
+
+**Logged**: 2026-06-18T14:00:00Z
+**Priority**: high
+**Status**: pending
+**Area**: tests
+
+### Summary
+`captureRootCmdArgs()` 只保存了 `rootCmd.Args`、`PersistentPreRunE`、`currentDir`，遗漏了 `cfgFile` 和 `cfgProvider`，导致使用 `--config` 的测试污染后续测试。
+
+### Details
+`cmd/sclient/cmd_test.go` 的 `captureRootCmdArgs()` 是测试间隔离的关键函数。当测试 A 使用了 `--config xxx.yaml` 时，`rootCmd.PersistentPreRunE` 被触发，将 `cfgFile` 设为测试路径，并初始化 `cfgProvider`。
+
+测试 B 如果不使用 `--config`，但因为 `cfgFile` 仍指向测试 A 的配置文件，`PersistentPreRunE`（如果触发）或 fallback 初始化程序（如果不触发但直接读 cfgFile）都会读取错误的配置。
+
+修复方案：`captureRootCmdArgs()` 必须 save/restore `cfgFile`、`cfgProvider` 等所有包级全局变量，而不仅仅是 cobra 命令参数。
+
+### Suggested Action
+所有含 `captureXxx` 模式的测试辅助函数，在 save/restore 时枚举所有包级全局变量并逐项恢复。新增全局变量时同步更新。
+
+### Metadata
+- Pattern-Key: testing.global_state_capture
+- Related Files: `cmd/sclient/cmd_test.go`, `cmd/sproxy/root_test.go`
+- Tags: testing, global-state, isolation
+- See Also: LRN-20260618-GC9 (interface nil value trap), LRN-20260614-BP1 (viper.New isolation)
+
+---
+
+## [LRN-20260618-GC15] --server flag 应绕过隧道直接 HTTP
+
+**Logged**: 2026-06-18T14:00:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+sclient 的 `buildFileClient` 总是根据配置中的 `tunnel_key` 添加 `WithTunnel` 选项，导致测试中使用 `--server mockURL` 时请求仍通过隧道发往 mock server，因 mock server 没有 tunnel handler 而失败。
+
+### Details
+用户提供 `--server` flag 时，意图是直接向指定地址发送 HTTP 请求。但在 `root.go:125` 中，不论是否有 `--server` flag，只要 `cfg.TunnelKey != ""` 就添加 `WithTunnel`。测试中的 mock `httptest.Server` 不处理 `/tunnel` 路径，导致请求解析隧道响应时失败。
+
+修复：当 `--server` flag 被显式设置时，跳过 `WithTunnel()`。
+
+### Suggested Action
+命令行工具的 flag 覆盖机制（如 `--server`、`--port`）必须同时覆盖对应的"连接模式"（直连 vs 隧道 vs 代理），不能只覆盖地址。
+
+### Metadata
+- Pattern-Key: cli.flag_mode_override
+- Related Files: `cmd/sclient/root.go:125`
+- Tags: cli, testing, tunnel
+
+---
+
+## [LRN-20260618-GC16] tunnelRequest 无输出路径时不应写入 CWD
+
+**Logged**: 2026-06-18T14:30:00Z
+**Priority**: medium
+**Status**: resolved
+**Area**: backend
+
+### Summary
+`sclient tunnel http://host/` 在未指定 `-o` 输出路径时，`path.Base("/")` 返回空字符串，回退到 `"index.html"`，直接写入 CWD（如 `cmd/sclient/index.html`）。
+
+### Details
+`tunnelRequest()` 中 `outputFile` 为空时，使用 `path.Base(req.URL.Path)` 作为默认文件名。当 URL 路径为 `/` 或空时，`path.Base` 返回 `""` 或 `"."` 或 `"/"`，代码的 fallback 逻辑产生 `"index.html"`，直接写入当前工作目录。
+
+在测试过程中，`TestTunnelCommand_*` 使用 `http://example.com/data`（path Base 为 `"data"`）和 `http://any-host.local/data`，产生的 `data` 文件和 `index.html` 都落在 CWD。
+
+修复：写入路径改为 `filepath.Join(currentDir, baseOutputFile)`，`currentDir` 为空时回退到 `os.TempDir()`。
+
+### Suggested Action
+工具类命令的默认输出路径必须使用临时目录或用户配置的工作目录，永远不能写入 CWD。这也是安全最佳实践（避免 CWD 被篡改的 TOCTOU 攻击）。
+
+### Metadata
+- Pattern-Key: secure.default_output_path
+- Related Files: `cmd/sclient/tunnel.go:98-110`
+- Tags: security, cli, testing
+
+---
+
+## [LRN-20260618-GC17] 插件注册表测试必须使用独立实例
+
+**Logged**: 2026-06-18T15:00:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: tests
+
+### Summary
+`TestRegisterAndGet` 在全局 `xfer.TransportRegistry` 上注册了一个 Dial/Listen 为 nil 的 transport，导致后续 `TestEmptyTransport_DialReturnsError` 通过 `Active()` 拿到该 transport 后 panic。
+
+### Details
+`xfer.TransportRegistry` 是全局插件注册表，多个 `*_test.go` 文件中的测试共享此实例。Go 测试按文件名排序执行：
+
+1. `xfer_test.go`（`TestRegisterAndGet`）先注册 test transport（nil Dial）
+2. `registry_test.go`（`TestEmptyTransport_DialReturnsError`）调用 `Active()` 拿到优先级最高的 transport（即刚才注册的 test transport）
+3. 调用 `.Dial()` → nil pointer dereference panic
+
+修复：
+- 测试不再操作全局 `TransportRegistry`，改用 `plugin.New[*xfer.Transport]("test", builtin)` 创建独立 Registry 实例
+- 所有 Dial/Listen 实现为返回 `ErrNoTransport`，而非 nil
+
+### Suggested Action
+所有单例/注册表模式的测试必须使用独立实例。测试全局状态的测试必须在隔离的 Registry 实例上进行，使用 `plugin.New(name, builtin)` 而非直接访问包级变量。
+
+### Metadata
+- Pattern-Key: testing.plugin_registry_isolation
+- Related Files: `pkg/tunnel/xfer/xfer_test.go`, `pkg/tunnel/plugin/registry.go`
+- Tags: testing, race, isolation
+- See Also: LRN-20260618-GC14 (global state capture)
+
+---
+
+## [LRN-20260618-GC18] Makefile pipefail: tee 吞掉 go test 退出码
+
+**Logged**: 2026-06-18T15:30:00Z
+**Priority**: medium
+**Status**: resolved
+**Area**: infra
+
+### Summary
+Makefile `bench` 目标使用 `go test ... 2>&1 | tee -a file` 收集结果，但 `make` 只看到最后一个命令（`tee`）的退出码。`tee` 永远返回 0，所以即使 `go test` 失败，benchmark job 也显示成功。
+
+### Details
+CI 日志显示 `TestEmptyTransport_DialReturnsError` 发生了 nil pointer panic（benchmark 运行了 `go test -bench=. -benchmem -count=5 ./...`，包含了测试），但 benchmark job 的退出码为 0。
+
+修复：改为临时文件模式：
+```makefile
+rc=0
+$(GO) test -bench=. -benchmem -count=5 ./... > "$$outfile.tmp" 2>&1 || rc=$$?
+cat "$$outfile.tmp" >> "$$outfile"
+cat "$$outfile.tmp"
+rm -f "$$outfile.tmp"
+exit $$rc
+```
+
+### Suggested Action
+Makefile 中任何使用 `| tee` 收集 go test 输出的目标都要检查是否丢失了退出码。建议全局规则：Go 测试管道必须使用 `PIPESTATUS`（bash）或临时文件（跨 shell）来处理退出码。
+
+### Metadata
+- Pattern-Key: tooling.makefile_pipefail
+- Related Files: `Makefile` (bench target)
+- Tags: ci, makefile, pipefail
+- See Also: LRN-20260618-GC13 (pre-commit hook)
+
+---
+
+## [LRN-20260618-GC19] 命令行测试必须隔离本地配置文件的影响
+
+**Logged**: 2026-06-18T14:00:00Z
+**Priority**: high
+**Status**: pending
+**Area**: tests
+
+### Summary
+`sclient` 测试未隔离 `~/.sclient.yaml` 等本地配置文件，导致本地用户的配置（如 `server_url`、`tunnel_key`）影响测试行为。测试在 `CI` 上能通过，但在配置了 `tunnel_key` 的开发者机器上失败。
+
+### Details
+测试通过 `--server` flag 指定 mock server，但 sclient 的配置加载优先级为：CLI 标志 > 环境变量 > 配置文件 > 默认值。`--server` 仅覆盖了 `server_url`，没有覆盖 `tunnel_key`。如果本地配置中设置了 `tunnel_key`，`buildFileClient` 会添加 `WithTunnel`，将所有请求通过隧道发往 mock server。
+
+修复方案：
+1. `--server` flag 显式指定时绕过隧道（已做，LRN-20260618-GC15）
+2. 或者：测试中使用 `--config` 指向临时配置文件（且不设置 `tunnel_key`），完全隔离本地配置
+3. 或者：`PersistentPreRunE` 中设置 `SCLIENT_TUNNEL_KEY` 环境变量为空字符串覆盖本地配置
+
+### Suggested Action
+任何依赖外部配置（文件、环境变量）的命令行工具测试，都必须有配置隔离机制：要么 `--config` 临时文件，要么显式清空相关环境变量。
+
+### Metadata
+- Pattern-Key: testing.config_isolation
+- Related Files: `cmd/sclient/cmd_rune_test.go`, `cmd/sclient/root.go`
+- Tags: testing, config, isolation
+- See Also: LRN-20260618-GC14, LRN-20260618-GC15
+
+---
+
+## [LRN-20260618-GC20] benchmark 必须用 -run=^$ 排除测试函数
+
+**Logged**: 2026-06-18T22:50:00Z
+**Priority**: medium
+**Status**: resolved
+**Area**: infra
+
+### Summary
+`go test -bench=.` 不带 `-run=^$` 时也会运行所有 TestXxx 函数，导致 flaky test 拖垮整个 benchmark job。
+
+### Details
+benchmark job 运行 `go test -bench=. -benchmem -count=5 ./...` 时，Go 工具链默认匹配所有函数名。通配符 `.` 既匹配 BenchmarkXxx 也匹配 TestXxx。
+
+CI 日志显示 `TestP2PNodeDial` 在 benchmark job 中运行 15 秒后超时（`context deadline exceeded`），导致整个 job 失败。实际 benchmark 本身都是好的。
+
+修复：`-run=^$` 表示"匹配空函数名"，只有 benchmark 函数会被执行。
+
+### Suggested Action
+所有 `go test -bench` 的 CI target 都应加上 `-run=^$`。`go test -bench` 的文档中明确建议此模式。
+
+### Metadata
+- Pattern-Key: ci.benchmark_exclude_tests
+- Related Files: `Makefile`
+- Tags: ci, benchmark, flaky
+- See Also: LRN-20260618-GC18 (pipefail)
+
+---
+
+## [LRN-20260618-GC21] 网络测试应使用产品代码标准同步模式
+
+**Logged**: 2026-06-18T22:50:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: tests
+
+### Summary
+`TestP2PNodeDial` 使用手动 goroutine 从 `fakeListener.Accept` 接收，与 `P2PNode.Dial` 存在竞态。goroutine 可能在 Dial 到达前超时退出，导致测试阻塞 15 秒。
+
+### Details
+测试手动从 fakeListener Accept 的 goroutine 和 P2PNode.Dial 之间没有同步机制。`Dial` 通过 `xfertest.Pipe` 创建管道，将一端通过 `acceptCh` 发送给 listener，另一端返回给调用者。但如果 goroutine 还没调用 `fl.Accept` 或已超时，`acceptCh` 中的结果无人取走，`Dial` 返回的 mux 对象无法与任何人对端——`Accept` 读不到数据。
+
+修复：使用标准的 `P2PNode.Listen`（启动 acceptLoop）→ `P2PNode.Dial` → `P2PNode.Accept` 三件套流程，完全同步。
+
+### Suggested Action
+涉及 listener/accept 模式的测试始终优先使用产品代码的 `Listen()` 方法，而不是手动模拟其内部逻辑。标准流程的测试更具保真度且更稳定。
+
+### Metadata
+- Pattern-Key: testing.network_sync_pattern
+- Related Files: `pkg/tunnel/p2p/p2p_test.go`
+- Tags: testing, flaky, race, network
+- See Also: LRN-20260618-GC14 (global state capture)
+
+---
