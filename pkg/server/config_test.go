@@ -10,8 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/viper"
+	"github.com/cocomhub/sproxy/pkg/provider"
+	"gopkg.in/yaml.v3"
 )
+
+// compile-time interface check
+var _ provider.Provider = mapProvider{}
 
 func TestConfig_DefaultsFilled(t *testing.T) {
 	t.Parallel()
@@ -77,25 +81,39 @@ func TestConfig_Validate_TunnelKey_HexCheck(t *testing.T) {
 	}
 }
 
-func TestLoadFromViper_DefaultsOnly(t *testing.T) {
-	t.Parallel()
-	v := viper.New()
-	cfg, err := LoadFromViper(v)
+// mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。
+type mapProvider struct {
+	m map[string]any
+}
+
+func (p mapProvider) Unmarshal(obj any) error {
+	// 使用 yaml 作为中介：map → yaml bytes → struct
+	// Config 结构体使用 yaml tag，所以 yaml.Unmarshal 能正确匹配字段
+	data, err := yaml.Marshal(p.m)
 	if err != nil {
-		t.Fatalf("LoadFromViper: %v", err)
+		return err
+	}
+	return yaml.Unmarshal(data, obj)
+}
+
+func TestLoadFromProvider_DefaultsOnly(t *testing.T) {
+	t.Parallel()
+	p := mapProvider{m: map[string]any{}}
+	cfg, err := LoadFromProvider(p)
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
 	}
 	if cfg.Addr != ":18083" {
 		t.Fatalf("expected default Addr :18083, got %q", cfg.Addr)
 	}
 }
 
-func TestLoadFromViper_OverridesViaSet(t *testing.T) {
+func TestLoadFromProvider_OverridesViaSet(t *testing.T) {
 	t.Parallel()
-	v := viper.New()
-	v.Set("addr", ":19999")
-	cfg, err := LoadFromViper(v)
+	p := mapProvider{m: map[string]any{"addr": ":19999"}}
+	cfg, err := LoadFromProvider(p)
 	if err != nil {
-		t.Fatalf("LoadFromViper: %v", err)
+		t.Fatalf("LoadFromProvider: %v", err)
 	}
 	if cfg.Addr != ":19999" {
 		t.Fatalf("want :19999, got %q", cfg.Addr)

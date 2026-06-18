@@ -4,21 +4,21 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/adrg/xdg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var (
-	cfgFile    string
-	currentDir string
+	cfgFile     string
+	currentDir  string
+	cfgProvider *sclientcfg.ViperProvider
 )
 
 // rootCmd 是所有子命令的根命令
@@ -26,24 +26,9 @@ var rootCmd = &cobra.Command{
 	Use:   "sclient",
 	Short: "文件上传下载客户端",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// 初始化 viper
-		v := viper.GetViper()
-		v.SetConfigFile(cfgFile)
-		v.SetConfigType("yaml")
-		v.SetEnvPrefix("SCLIENT")
-		v.AutomaticEnv()
-
-		// 忽略配置文件不存在的错误
-		if err := v.ReadInConfig(); err != nil {
-			var cfnfe viper.ConfigFileNotFoundError
-			if !errors.As(err, &cfnfe) && !os.IsNotExist(err) {
-				return fmt.Errorf("读取配置文件失败: %w", err)
-			}
-		}
-
-		// 持久 flag 绑定到 viper key
-		_ = v.BindPFlag("server_url", cmd.Flags().Lookup("server"))
-		_ = v.BindPFlag("chunk_size", cmd.Flags().Lookup("chunk-size"))
+		cfgProvider = sclientcfg.New(cfgFile)
+		cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup("server"))
+		cfgProvider.BindPFlag("chunk_size", cmd.Flags().Lookup("chunk-size"))
 		// 加载缓存的当前目录
 		loadCurrentDir()
 		return nil
@@ -105,10 +90,10 @@ func init() {
 	rootCmd.AddCommand(relayCmd)
 }
 
-// buildFileClient 根据 viper 配置和 persistent flag 构造 FileClient。
+// buildFileClient 根据 cfgProvider 配置和 persistent flag 构造 FileClient。
 // 从配置中加载 server_url、tunnel_key、chunk_size 等，persistent flag 可覆盖。
 func buildFileClient(cmd *cobra.Command) (*client.FileClient, error) {
-	cfg, err := client.LoadFromViper(viper.GetViper())
+	cfg, err := client.LoadFromProvider(cfgProvider)
 	if err != nil {
 		return nil, fmt.Errorf("加载配置失败: %w", err)
 	}

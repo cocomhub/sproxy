@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var tunnelCmd = &cobra.Command{
@@ -29,20 +29,13 @@ var tunnelCmd = &cobra.Command{
   sclient tunnel -X POST -H "Content-Type: application/json" -d '{"key":"val"}' https://api.example.com/echo`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		v := viper.New()
-		v.SetConfigFile(cfgFile)
-		v.SetConfigType("yaml")
-		v.SetEnvPrefix("SCLIENT")
-		v.AutomaticEnv()
-		if err := v.ReadInConfig(); err != nil {
-			var re viper.ConfigFileNotFoundError
-			if !errors.As(err, &re) {
-				return fmt.Errorf("读取配置文件失败: %w", err)
-			}
+		// tunnel 命令可能没有通过 PersistentPreRunE，所以 fallback 初始化 cfgProvider
+		if cfgProvider == nil {
+			cfgProvider = sclientcfg.New(cfgFile)
+			cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup("server"))
 		}
-		_ = v.BindPFlag("server_url", cmd.Flags().Lookup("server"))
 
-		cfg, err := client.LoadFromViper(v)
+		cfg, err := client.LoadFromProvider(cfgProvider)
 		if err != nil {
 			return fmt.Errorf("加载配置失败: %w", err)
 		}

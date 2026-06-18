@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/provider"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
-	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
 
@@ -140,10 +140,10 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// LoadFromViper 从 viper 实例解码配置，合并默认值并校验。
-func LoadFromViper(v *viper.Viper) (*Config, error) {
+// LoadFromProvider 从 provider.Provider 解码配置，合并默认值并校验。
+func LoadFromProvider(p provider.Provider) (*Config, error) {
 	cfg := Default()
-	if err := v.Unmarshal(cfg); err != nil {
+	if err := p.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("配置解码失败: %w", err)
 	}
 	if err := cfg.Validate(); err != nil {

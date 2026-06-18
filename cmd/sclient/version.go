@@ -8,7 +8,6 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var versionCmd = &cobra.Command{
@@ -17,9 +16,11 @@ var versionCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Printf("sclient version %s (build: %s)\n", Version, BuildAt)
 		fmt.Println()
-		cfg, err := client.LoadFromViper(viper.GetViper())
-		if err == nil {
-			client.HandleConfigShow(cfg)
+		if cfgProvider != nil {
+			cfg, err := client.LoadFromProvider(cfgProvider)
+			if err == nil {
+				client.HandleConfigShow(cfg)
+			}
 		}
 	},
 }

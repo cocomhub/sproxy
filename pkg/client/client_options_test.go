@@ -300,9 +300,8 @@ func TestTunnelDo_WithoutTunnel(t *testing.T) {
 	}
 }
 
-// ---- LoadFromViper (config) ----
-// Note: viper tests are in config_test.go already, but LoadFromViper is at 0%.
-// Since it requires viper setup, we test it via the existing config test pattern.
+// ---- LoadFromProvider (config) ----
+// Note: LoadFromProvider is tested via config_test.go pattern already.
 
 // ---- WithXfer Tests ----
 
