@@ -129,13 +129,18 @@ bench: prepare
 	  echo "Benchmark results will be saved to: $$outfile"; \
 	  echo "branch: $(shell git rev-parse --abbrev-ref HEAD)" > "$$outfile"; \
 	  echo "commit: $(shell git rev-parse --short HEAD)" >> "$$outfile"; \
-	  echo "date: $(shell date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$$outfile"; \
+	  echo "date: $(shell date -u +%Y%m%dT%H%M%SZ)" >> "$$outfile"; \
 	  echo "" >> "$$outfile"; \
-	  $(GO) test -bench=. -benchmem -count=5 ./... 2>&1 | tee -a "$$outfile"; \
+	  rc=0; \
+	  $(GO) test -bench=. -benchmem -count=5 ./... > "$$outfile.tmp" 2>&1 || rc=$$?; \
+	  cat "$$outfile.tmp" >> "$$outfile"; \
+	  cat "$$outfile.tmp"; \
+	  rm -f "$$outfile.tmp"; \
 	  echo ""; \
 	  echo "=== 清理旧记录（保留最近 10 条）==="; \
 	  cd $(BENCH_DATA_DIR) && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm -f; \
-	  echo "Done. Records in $(BENCH_DATA_DIR): $$(ls $(BENCH_DATA_DIR)/*.txt 2>/dev/null | wc -l)"
+	  echo "Done. Records in $(BENCH_DATA_DIR): $$(ls $(BENCH_DATA_DIR)/*.txt 2>/dev/null | wc -l)"; \
+	  exit $$rc
 
 .PHONY: check-loopback
 check-loopback:

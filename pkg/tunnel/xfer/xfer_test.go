@@ -4,26 +4,68 @@
 package xfer_test
 
 import (
+	"context"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
 func TestRegisterAndGet(t *testing.T) {
-	// 验证空注册表 Get 返回 nil
-	if got := xfer.Get("nonexistent"); got != nil {
-		t.Fatal("expected nil for unknown transport")
-	}
+	// 使用独立 Registry 实例，不污染全局 TransportRegistry。
+	// 否则注册的 transport 可能被 Active() 选中，导致依赖 builtin 的测试失败。
+	reg := plugin.New[*xfer.Transport]("test", &xfer.Transport{
+		Name:   "builtin",
+		Dial:   func(_ context.Context, _ string) (xfer.Conn, error) { return nil, xfer.ErrNoTransport },
+		Listen: func(_ context.Context, _ string) (xfer.Listener, error) { return nil, xfer.ErrNoTransport },
+	})
 
-	// 注册一个测试 Transport
-	t1 := &xfer.Transport{Name: "test", Dial: nil, Listen: nil}
-	xfer.Register(t1)
-	if got := xfer.Get("test"); got != t1 {
-		t.Fatal("expected registered transport")
-	}
+	t.Run("empty registry returns builtin", func(t *testing.T) {
+		got := reg.Active()
+		if got == nil {
+			t.Fatal("Active() returned nil")
+		}
+	})
 
-	// 重复注册不会 panic（新 Registry 覆盖而非 panic）
-	xfer.Register(t1)
+	t.Run("Get returns nil for unknown", func(t *testing.T) {
+		got, ok := reg.Get("nonexistent")
+		if ok || got != nil {
+			t.Fatal("expected nil, false for unknown transport")
+		}
+	})
+
+	t1 := &xfer.Transport{
+		Name:   "test",
+		Dial:   func(_ context.Context, _ string) (xfer.Conn, error) { return nil, xfer.ErrNoTransport },
+		Listen: func(_ context.Context, _ string) (xfer.Listener, error) { return nil, xfer.ErrNoTransport },
+	}
+	reg.Register(plugin.Plugin[*xfer.Transport]{
+		Name:     t1.Name,
+		Instance: t1,
+		Priority: 0,
+	})
+
+	t.Run("Get returns registered transport", func(t *testing.T) {
+		got, ok := reg.Get("test")
+		if !ok || got == nil {
+			t.Fatal("expected registered transport")
+		}
+		if got != t1 {
+			t.Fatal("expected the same transport instance")
+		}
+	})
+
+	t.Run("duplicate register overwrites", func(t *testing.T) {
+		reg.Register(plugin.Plugin[*xfer.Transport]{
+			Name:     t1.Name,
+			Instance: t1,
+			Priority: 0,
+		})
+		got, ok := reg.Get("test")
+		if !ok || got == nil {
+			t.Fatal("expected transport after re-register")
+		}
+	})
 }
 
 func TestRegisterNilPanics(t *testing.T) {
