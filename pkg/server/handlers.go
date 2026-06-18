@@ -49,8 +49,8 @@ type Handlers struct {
 	cfgPtr        *atomic.Pointer[Config]
 	version       string
 	buildAt       string
-	checksumStore *ChecksumStore
-	uploadStore   *UploadStore
+	checksumStore ChecksumStoreIface
+	uploadStore   UploadStoreIface
 	tunnelHandler http.Handler
 	logger        *slog.Logger
 	metrics       *Metrics

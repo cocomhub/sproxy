@@ -32,6 +32,28 @@ type ChunkedUploadSession struct {
 	Completed      bool      `json:"completed"`
 }
 
+// UploadStoreIface 定义 UploadStore 的业务接口，方便测试替身。
+//
+// 包含 lockChunkIO/lockChunkMerge 等未导出方法，因为这些方法被同一包内的
+// handler 代码直接调用（chunked_upload.go），接口实现必须位于本包内。
+type UploadStoreIface interface {
+	Health() error
+	Stop()
+	CreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, error)
+	GetSession(uploadID string) *ChunkedUploadSession
+	GetSessionByFilename(filename string) *ChunkedUploadSession
+	MarkChunkReceived(uploadID string, chunkIndex int, checksum string) error
+	AllChunksReceived(uploadID string) bool
+	CompleteSession(uploadID string) error
+	ChunkFilePath(uploadID string, chunkIndex int) string
+	SessionDir(uploadID string) string
+	DeleteSession(uploadID string)
+	CleanupSessionAfter(uploadID string, delay time.Duration)
+	GetOrCreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, bool, error)
+	lockChunkIO(uploadID string) func()
+	lockChunkMerge(uploadID string) func()
+}
+
 // UploadStore 管理分块上传会话的持久化与并发安全。
 type UploadStore struct {
 	mu          sync.RWMutex
