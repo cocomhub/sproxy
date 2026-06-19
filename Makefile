@@ -256,7 +256,7 @@ help:
 	@echo "  notest          Verify all packages have test files"
 	@echo "  vet             Run go vet"
 	@echo "  lint            Run golangci-lint"
-t@echo "  bench-local     Run benchmarks with metadata (local use)"
+	@echo "  bench-local     Run benchmarks with metadata (local use)"
 	@echo "  bench           Run benchmarks (CI, output to build/bench/output.txt)"
 	@echo "  check-loopback  Check for unsafe listen addresses"
 	@echo "  gofix           Run go fix"
