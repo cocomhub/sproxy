@@ -6,8 +6,8 @@ require (
 	github.com/adrg/xdg v0.5.3
 	github.com/cocomhub/sproxy v0.0.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0-20260614053409-fdcb73361d09
-	github.com/spf13/cobra v1.9.1
-	github.com/spf13/pflag v1.0.6
+	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.9
 	github.com/spf13/viper v1.20.1
 )
 
