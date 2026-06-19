@@ -335,6 +335,16 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 	uploadDir := cfg.UploadsDir
 	filePath := filepath.Join(uploadDir, remotePath)
+
+	// 安全检查：确认最终路径在 uploads 目录内，防止路径穿越绕过 ValidateFilePath。
+	if absPath, absErr := filepath.Abs(filePath); absErr == nil {
+		absBase, _ := filepath.Abs(uploadDir)
+		if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
+			logger.Error("路径安全校验失败", "upload_dir", uploadDir, "file_path", filePath)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+			return
+		}
+	}
 	if err = os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		logger.Error("创建目录失败", "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)

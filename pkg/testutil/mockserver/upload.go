@@ -190,16 +190,24 @@ func (m *MockUploadStore) CleanupSessionAfter(uploadID string, delay time.Durati
 }
 
 // Stop 停止后台任务（mock 空实现，无后台 goroutine 需要停止）。
-func (m *MockUploadStore) Stop() {}
+func (m *MockUploadStore) Stop() {
+	// No-op: mock has no background goroutines or resources to release.
+}
 
 // Health 返回存储健康状态（mock 始终健康）。
 func (m *MockUploadStore) Health() error { return nil }
 
 // LockChunkIO 获取 chunk IO 锁的模拟实现：始终不阻塞，返回空操作函数。
-func (m *MockUploadStore) LockChunkIO(uploadID string) func() { return func() {} }
+func (m *MockUploadStore) LockChunkIO(uploadID string) func() {
+	// No-op: in-memory mock does not need chunk-level locking.
+	return func() {}
+}
 
 // LockChunkMerge 获取 chunk 合并锁的模拟实现：始终不阻塞，返回空操作函数。
-func (m *MockUploadStore) LockChunkMerge(uploadID string) func() { return func() {} }
+func (m *MockUploadStore) LockChunkMerge(uploadID string) func() {
+	// No-op: in-memory mock does not need merge-level locking.
+	return func() {}
+}
 
 // Ensure interface compliance.
 var _ server.UploadStoreIface = (*MockUploadStore)(nil)
