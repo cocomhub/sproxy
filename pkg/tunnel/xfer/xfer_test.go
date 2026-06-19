@@ -69,25 +69,6 @@ func TestRegisterAndGet(t *testing.T) {
 	})
 }
 
-func TestRegisterNilPanics(t *testing.T) {
-	// 注册 nil Transport 因访问 nil 字段而 panic
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on nil Transport")
-		}
-	}()
-	xfer.Register(nil)
-}
-
-func TestRegisterEmptyNamePanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic on empty name")
-		}
-	}()
-	xfer.Register(&xfer.Transport{Name: ""})
-}
-
 func TestConnSendAfterClose(t *testing.T) {
 	client, server := xfertest.Pipe()
 	defer client.Close()

@@ -34,8 +34,8 @@ type ChunkedUploadSession struct {
 
 // UploadStoreIface 定义 UploadStore 的业务接口，方便测试替身。
 //
-// 包含 lockChunkIO/lockChunkMerge 等未导出方法，因为这些方法被同一包内的
-// handler 代码直接调用（chunked_upload.go），接口实现必须位于本包内。
+// 注意：lockChunkIO/lockChunkMerge 因含有未导出方法签名而未包含在接口中，
+// handler 代码通过类型断言 (*UploadStore) 访问它们。
 type UploadStoreIface interface {
 	Health() error
 	Stop()
@@ -50,8 +50,6 @@ type UploadStoreIface interface {
 	DeleteSession(uploadID string)
 	CleanupSessionAfter(uploadID string, delay time.Duration)
 	GetOrCreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, bool, error)
-	lockChunkIO(uploadID string) func()
-	lockChunkMerge(uploadID string) func()
 }
 
 // UploadStore 管理分块上传会话的持久化与并发安全。

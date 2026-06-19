@@ -223,7 +223,10 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	chunkPath := h.uploadStore.ChunkFilePath(uploadID, chunkIndex)
 	// 获取 chunk IO 读锁：允许多个 uploadChunk 并发写入不同 chunk，
 	// 但阻塞 mergeOneChunk 的写锁，直到本 chunk 重命名完成。
-	unlockIO := h.uploadStore.lockChunkIO(uploadID)
+	unlockIO := func() {}
+	if ls, ok := h.uploadStore.(interface{ lockChunkIO(string) func() }); ok {
+		unlockIO = ls.lockChunkIO(uploadID)
+	}
 	defer unlockIO()
 	// 确保 session 目录存在
 	if err = os.MkdirAll(filepath.Dir(chunkPath), 0755); err != nil {
@@ -517,7 +520,10 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 // 阻塞新的 chunk 写入，避免读到不完整的 chunk。
 func (h *Handlers) mergeOneChunk(uploadID string, idx int, dst io.Writer) error {
 	chunkPath := h.uploadStore.ChunkFilePath(uploadID, idx)
-	unlockMerge := h.uploadStore.lockChunkMerge(uploadID)
+	unlockMerge := func() {}
+	if ls, ok := h.uploadStore.(interface{ lockChunkMerge(string) func() }); ok {
+		unlockMerge = ls.lockChunkMerge(uploadID)
+	}
 	defer unlockMerge()
 	chunkFile, err := os.Open(chunkPath)
 	if err != nil {
