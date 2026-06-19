@@ -34,6 +34,7 @@ SUB_MODULE_DIRS := $(shell find . -name 'go.mod' \
 VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_AT        ?= $(shell date +"%Y-%m-%dT%H:%M:%SZ")
 COVER_THRESHOLD ?= 70
+SONAR_PROJECT_KEY ?= cocomhub_sproxy
 SKIP_VERSION    ?= true
 VERSION_DIR     ?= internal/version/build
 GOTAGS          ?=
@@ -219,6 +220,20 @@ build-all:
 .PHONY: check-ci
 check-ci: vet lint check-loopback notest build-ci test-cover cover-check test-all build-all
 
+.PHONY: sonar-analyze
+sonar-analyze:
+	@if [ ! -f sonar-project.properties ]; then \
+		echo "missing sonar-project.properties"; exit 1; \
+	fi
+	sonar-scanner
+
+.PHONY: sonar-remediate
+sonar-remediate:
+	@if [ ! -f sonar-project.properties ]; then \
+		echo "missing sonar-project.properties"; exit 1; \
+	fi
+	sonar-scanner -Dsonar.remediation.projectKey=$(SONAR_PROJECT_KEY)
+
 .PHONY: help
 help:
 	@echo "Usage: make <target>"
@@ -242,6 +257,8 @@ help:
 	@echo "  test-all        Test all sub-modules"
 	@echo "  build-all       Build all sub-modules"
 	@echo "  check-ci        Full CI pipeline"
+	@echo "  sonar-analyze    Run SonarQube Cloud analysis"
+	@echo "  sonar-remediate  Run SonarQube Cloud remediation"
 	@echo ""
 	@echo "Custom targets:"
 	@echo "  build-<name>    Build a specific command (e.g., build-sproxy, build-sclient)"
