@@ -1759,3 +1759,119 @@ mock 子包（`mockxfer`/`mockdht`/`mockserver`）使用 `package xxxx`（非 `_
 - Recurrence-Count: 1
 - First-Seen: 2026-06-19
 - Related Files: `pkg/testutil/mockxfer/`, `pkg/testutil/mockdht/`, `pkg/testutil/mockserver/`
+
+---
+
+## [LRN-20260619-BP61] SonarCloud 路径注入修复 — joinSafePath 函数提取
+
+**Logged**: 2026-06-19T17:00:00Z
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+SonarCloud `gosecurity:S2083`（路径注入 BLOCKER）要求用户输入用于文件操作前必须经过可追踪的路径边界校验。不能仅依赖文档注释说明"已校验"。
+
+### Details
+原始的 `filePath` 通过 `filepath.Join(uploadDir, remotePath)` 构造，其中 `remotePath` 已通过 `ValidateFilePath` 校验（拒绝 `..`、绝对路径等）。但 SonarCloud 的 taint analysis 追踪不到 `ValidateFilePath` 内部的校验逻辑，仍然标 BLOCKER。
+
+修复方案：提取出 `joinSafePath(baseDir, userPath string) string` 函数，内部做 `filepath.Abs` + `strings.HasPrefix` 校验，失败返回空字符串。调用方检查空字符串后拒绝请求（fail-close）。
+
+### Suggested Action
+所有涉及用户输入拼接文件路径的地方，使用 `joinSafePath` 替代 `filepath.Join`：
+- `handlers.go` 中的 upload handler（已修复）
+- `handlers.go` 中的 download/delete handler（如有类似模式）
+
+### Metadata
+- Source: sonarcloud
+- Pattern-Key: security.path_injection_joinSafePath
+- Recurrence-Count: 1
+- First-Seen: 2026-06-19
+- Related Files: `pkg/server/validate.go`, `pkg/server/handlers.go`
+
+---
+
+## [LRN-20260619-BP62] 锁定逻辑抽象 — ChunkFileLocker 导出类型
+
+**Logged**: 2026-06-19T17:15:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: backend
+
+### Summary
+`UploadStore.LockChunkIO/LockChunkMerge` 中的真实 RWMutex 锁定逻辑，与 `MockUploadStore` 的空实现不一致，且 SonarCloud `go:S1186` 对空函数体报 CRITICAL code smell。
+
+### Details
+将锁定逻辑抽取为 `ChunkFileLocker` 导出类型，同时被 `UploadStore` 和 `MockUploadStore` 委托使用：
+- `UploadStore` 内部 `locker *ChunkFileLocker`，`LockChunkIO/LockChunkMerge` 委托给 `locker`
+- `MockUploadStore` 同样持有 `locker *server.ChunkFileLocker`，委托相同方法
+- 无需空函数 → `go:S1186` 消除
+- mock 与真实实现在锁定语义上完全一致
+
+### Suggested Action
+类似分层 mock 场景，优先抽取工具类型让 mock 委托，而非 mock 自己实现空版本。
+
+### Metadata
+- Source: conversation
+- Pattern-Key: tests.mock_delegate_to_real
+- Recurrence-Count: 1
+- First-Seen: 2026-06-19
+- Related Files: `pkg/server/upload_store.go`, `pkg/testutil/mockserver/upload.go`
+
+---
+
+## [LRN-20260619-BP63] 测试重复代码 — 辅助函数抽取降重
+
+**Logged**: 2026-06-19T17:30:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: tests
+
+### Summary
+SonarCloud 报告 "Duplicated Lines (%) on New Code 9.9%"，集中在 `coverage_gaps_test.go` 和 `edge_test.go` 的重复 boilerplate 模式。
+
+### Details
+- `coverage_gaps_test.go`：每个 batchRename 测试都独立写 `http.Post` → `ReadAll` → `Decode`，提取 `doBatchRename()` + `assertBatchRenameOK()` 辅助函数
+- `edge_test.go`：每个 mux 测试都写 `xfertest.Pipe()` → `mux.New` × 2 → `Open` → `Accept`，提取 `newMuxPair()` + `openStreamWithAccept()` 辅助函数
+
+效果：两个文件各减少 ~110 行（~16-17%），消除 SonarCloud 代码重复警告。
+
+### Suggested Action
+多测试共用 setup/assert 代码时，主动抽取 `t.Helper()` 标注的辅助函数。
+
+### Metadata
+- Source: sonarcloud
+- Pattern-Key: tests.duplicate_code_extraction
+- Recurrence-Count: 1
+- First-Seen: 2026-06-19
+- Related Files: `pkg/server/coverage_gaps_test.go`, `pkg/tunnel/mux/edge_test.go`
+
+---
+
+## [LRN-20260619-BP64] UploadStoreIface 接口设计 — 避免未导出方法
+
+**Logged**: 2026-06-19T17:45:00Z
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+`UploadStoreIface` 最初包含 `lockChunkIO/lockChunkMerge` 未导出方法，导致外部包（如 `testutil/mockserver`）无法实现该接口。
+
+### Details
+- 初始设计：将 `lockChunkIO/lockChunkMerge` 放入接口，注释说明"实现必须位于本包内"
+- 问题：`MockUploadStore` 在 `mockserver` 包中，无法实现未导出方法，成为死代码
+- 临时处理：类型断言 `h.uploadStore.(interface{ lockChunkIO(string) func() })`，SonarCloud 标注为 hack
+- 最终方案：将方法改为大写导出 `LockChunkIO/LockChunkMerge`，同时将核心逻辑提取为 `ChunkFileLocker` 类型，不再需要类型断言
+
+### Suggested Action
+设计接口时，避免依赖未导出方法。如果方法必须同包私有，考虑用类型断言或导出工具类型做委托。
+
+### Metadata
+- Source: code_review
+- Pattern-Key: design.interface_exported_methods
+- Recurrence-Count: 1
+- First-Seen: 2026-06-19
+- Related Files: `pkg/server/upload_store.go`, `pkg/server/chunked_upload.go`, `pkg/testutil/mockserver/upload.go`
+
+---
