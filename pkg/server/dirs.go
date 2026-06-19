@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 )
 
 // mkdir 创建指定子目录。?dirname=path
@@ -23,8 +22,11 @@ func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := h.cfgPtr.Load()
-	targetDir := filepath.Join(cfg.UploadsDir, remotePath)
+	targetDir := h.safePath(remotePath)
+	if targetDir == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
+		return
+	}
 
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		h.logger.Error("创建目录失败", "dir", remotePath, "error", err)
@@ -49,8 +51,11 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := h.cfgPtr.Load()
-	targetDir := filepath.Join(cfg.UploadsDir, remotePath)
+	targetDir := h.safePath(remotePath)
+	if targetDir == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
+		return
+	}
 
 	stat, err := os.Stat(targetDir)
 	if err != nil {

@@ -203,6 +203,16 @@ func (h *Handlers) Handler() http.Handler {
 	return h.handler
 }
 
+// safePath 在 UploadsDir 下安全拼接 remotePath，结果不越界。
+// remotePath 必须已通过 ValidateFilePath 校验。返回安全绝对路径，失败时返回空字符串。
+func (h *Handlers) safePath(remotePath string) string {
+	if remotePath == "" {
+		return ""
+	}
+	cfg := h.cfgPtr.Load()
+	return joinSafePath(cfg.UploadsDir, remotePath)
+}
+
 // requestLogMiddleware 记录 HTTP 请求的基本信息：方法、路径、远程地址、耗时。
 func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -333,10 +343,9 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Debug("上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
 
-	uploadDir := cfg.UploadsDir
-	filePath := joinSafePath(uploadDir, remotePath)
+	filePath := h.safePath(remotePath)
 	if filePath == "" {
-		logger.Error("路径安全校验失败", "upload_dir", uploadDir, "remote_path", remotePath)
+		logger.Error("路径安全校验失败", "remote_path", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
 		return
 	}
@@ -458,8 +467,11 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}
-	cfg := h.cfgPtr.Load()
-	filePath := filepath.Join(cfg.UploadsDir, remotePath)
+	filePath := h.safePath(remotePath)
+	if filePath == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -521,8 +533,11 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
 		return
 	}
-	cfg := h.cfgPtr.Load()
-	filePath := filepath.Join(cfg.UploadsDir, remotePath)
+	filePath := h.safePath(remotePath)
+	if filePath == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 		return
@@ -566,7 +581,6 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "files 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	cfg := h.cfgPtr.Load()
 	logger := h.logger.With("batch", "delete")
 	results := make([]BatchOperationResult, 0, len(req.Files))
 	for _, f := range req.Files {
@@ -577,7 +591,12 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 			results = append(results, result)
 			continue
 		}
-		filePath := filepath.Join(cfg.UploadsDir, remotePath)
+		filePath := h.safePath(remotePath)
+		if filePath == "" {
+			result.Message = "无效的文件路径"
+			results = append(results, result)
+			continue
+		}
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
 			// 文件不存在视为成功（幂等删除）
 			result.Success = true
@@ -623,7 +642,6 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "operations 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	cfg := h.cfgPtr.Load()
 	logger := h.logger.With("batch", "rename")
 	results := make([]BatchOperationResult, 0, len(req.Operations))
 	for _, op := range req.Operations {
@@ -646,8 +664,13 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 			results = append(results, result)
 			continue
 		}
-		fromPath := filepath.Join(cfg.UploadsDir, from)
-		toPath := filepath.Join(cfg.UploadsDir, to)
+		fromPath := h.safePath(from)
+		toPath := h.safePath(to)
+		if fromPath == "" || toPath == "" {
+			result.Message = "无效的文件路径"
+			results = append(results, result)
+			continue
+		}
 		if _, err := os.Stat(fromPath); os.IsNotExist(err) {
 			result.Message = "源文件不存在"
 			results = append(results, result)
@@ -717,7 +740,12 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
 			return
 		}
-		targetDir = filepath.Join(cfg.UploadsDir, subdir)
+		targetDir = h.safePath(subdir)
+		if targetDir == "" {
+			h.logger.Warn("无效的子目录路径", "subdir", subdir)
+			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+			return
+		}
 	}
 
 	// 分页参数
@@ -921,9 +949,12 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := h.cfgPtr.Load()
-	fromPath := filepath.Join(cfg.UploadsDir, from)
-	toPath := filepath.Join(cfg.UploadsDir, to)
+	fromPath := h.safePath(from)
+	toPath := h.safePath(to)
+	if fromPath == "" || toPath == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 
 	if _, err := os.Stat(fromPath); os.IsNotExist(err) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
@@ -974,8 +1005,11 @@ func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
-	cfg := h.cfgPtr.Load()
-	fullPath := filepath.Join(cfg.UploadsDir, remotePath)
+	fullPath := h.safePath(remotePath)
+	if fullPath == "" {
+		http.Error(w, "invalid file path", http.StatusBadRequest)
+		return
+	}
 	info, err := os.Stat(fullPath)
 	if err != nil {
 		if os.IsNotExist(err) {

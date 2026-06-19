@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 
 	"github.com/cocomhub/sproxy/internal/size"
 )
@@ -63,7 +62,11 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	filePath := filepath.Join(cfg.UploadsDir, filename)
+	filePath := h.safePath(filename)
+	if filePath == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 	stat, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
