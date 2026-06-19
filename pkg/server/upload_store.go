@@ -51,20 +51,64 @@ type UploadStoreIface interface {
 	LockChunkMerge(uploadID string) func()
 }
 
+// ChunkFileLocker 管理分块文件的并发读写锁。
+// 提取为独立导出类型，使 UploadStore 和 MockUploadStore 共享同一份真实锁定逻辑。
+type ChunkFileLocker struct {
+	fileLocks   map[string]*sync.RWMutex
+	fileLocksMu sync.Mutex
+}
+
+// NewChunkFileLocker 创建一个新的 ChunkFileLocker。
+func NewChunkFileLocker() *ChunkFileLocker {
+	return &ChunkFileLocker{fileLocks: make(map[string]*sync.RWMutex)}
+}
+
+func newChunkFileLocker() *ChunkFileLocker {
+	return NewChunkFileLocker()
+}
+
+// LockChunkIO 获取 chunk 文件写入锁（读锁）。
+// uploadChunk 在写入 chunk 文件前调用，允许多个 uploadChunk 并发写入不同 chunk。
+func (l *ChunkFileLocker) LockChunkIO(uploadID string) func() {
+	l.fileLocksMu.Lock()
+	f, ok := l.fileLocks[uploadID]
+	if !ok {
+		f = new(sync.RWMutex)
+		l.fileLocks[uploadID] = f
+	}
+	l.fileLocksMu.Unlock()
+	f.RLock()
+	return f.RUnlock
+}
+
+// LockChunkMerge 获取 chunk 文件合并锁（写锁）。
+// mergeOneChunk 在读取 chunk 文件前调用，排他地等待所有正在写入的 chunk 完成后才允许读取，
+// 同时阻塞新的 chunk 写入，避免读到不完整的 chunk。
+func (l *ChunkFileLocker) LockChunkMerge(uploadID string) func() {
+	l.fileLocksMu.Lock()
+	f, ok := l.fileLocks[uploadID]
+	if !ok {
+		f = new(sync.RWMutex)
+		l.fileLocks[uploadID] = f
+	}
+	l.fileLocksMu.Unlock()
+	f.Lock()
+	return f.Unlock
+}
+
 // UploadStore 管理分块上传会话的持久化与并发安全。
 type UploadStore struct {
-	mu          sync.RWMutex
-	writeMu     sync.Mutex // 串行化 writeSessionJSON，防止 Windows rename 竞争
-	baseDir     string     // <uploadsDir>/.__chunked__/
-	sessions    map[string]*ChunkedUploadSession
-	fileLocks   map[string]*sync.RWMutex // 按 uploadID 保护的 chunk 文件读写锁
-	fileLocksMu sync.Mutex               // 保护 fileLocks map 本身
-	persistCh   chan string              // uploadID → 异步持久化
-	stopCh      chan struct{}            // 关闭后台 goroutine
-	stopOnce    sync.Once                // 保证 Stop 幂等
-	wg          sync.WaitGroup
-	sessionTTL  time.Duration // 未完成上传会话的保留时间
-	logger      *slog.Logger
+	mu         sync.RWMutex
+	writeMu    sync.Mutex // 串行化 writeSessionJSON，防止 Windows rename 竞争
+	baseDir    string     // <uploadsDir>/.__chunked__/
+	sessions   map[string]*ChunkedUploadSession
+	locker     *ChunkFileLocker // chunk 文件并发锁
+	persistCh  chan string      // uploadID → 异步持久化
+	stopCh     chan struct{}    // 关闭后台 goroutine
+	stopOnce   sync.Once        // 保证 Stop 幂等
+	wg         sync.WaitGroup
+	sessionTTL time.Duration // 未完成上传会话的保留时间
+	logger     *slog.Logger
 }
 
 const (
@@ -90,7 +134,7 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	us := &UploadStore{
 		baseDir:    storeDir,
 		sessions:   make(map[string]*ChunkedUploadSession),
-		fileLocks:  make(map[string]*sync.RWMutex),
+		locker:     newChunkFileLocker(),
 		persistCh:  make(chan string, 64),
 		stopCh:     make(chan struct{}),
 		sessionTTL: sessionTTL,
@@ -327,10 +371,6 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 	delete(us.sessions, uploadID)
 	us.mu.Unlock()
 
-	us.fileLocksMu.Lock()
-	delete(us.fileLocks, uploadID)
-	us.fileLocksMu.Unlock()
-
 	dir := filepath.Join(us.baseDir, uploadID)
 	if err := os.RemoveAll(dir); err != nil {
 		us.logger.Warn("删除会话目录失败", "upload_id", uploadID, "error", err)
@@ -340,30 +380,14 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 // LockChunkIO 获取 chunk 文件写入锁（读锁）。
 // uploadChunk 在写入 chunk 文件前调用，允许多个 uploadChunk 并发写入不同 chunk。
 func (us *UploadStore) LockChunkIO(uploadID string) func() {
-	us.fileLocksMu.Lock()
-	f, ok := us.fileLocks[uploadID]
-	if !ok {
-		f = new(sync.RWMutex)
-		us.fileLocks[uploadID] = f
-	}
-	us.fileLocksMu.Unlock()
-	f.RLock()
-	return f.RUnlock
+	return us.locker.LockChunkIO(uploadID)
 }
 
 // LockChunkMerge 获取 chunk 文件合并锁（写锁）。
 // mergeOneChunk 在读取 chunk 文件前调用，排他地等待所有正在写入的 chunk 完成后才允许读取，
 // 同时阻塞新的 chunk 写入，避免读到不完整的 chunk。
 func (us *UploadStore) LockChunkMerge(uploadID string) func() {
-	us.fileLocksMu.Lock()
-	f, ok := us.fileLocks[uploadID]
-	if !ok {
-		f = new(sync.RWMutex)
-		us.fileLocks[uploadID] = f
-	}
-	us.fileLocksMu.Unlock()
-	f.Lock()
-	return f.Unlock
+	return us.locker.LockChunkMerge(uploadID)
 }
 
 // persistLoop 异步持久化 goroutine。

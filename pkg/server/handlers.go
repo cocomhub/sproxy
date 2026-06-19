@@ -334,18 +334,9 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
 
 	uploadDir := cfg.UploadsDir
-	filePath := filepath.Join(uploadDir, remotePath)
-
-	// 安全检查：确认最终路径在 uploads 目录内，防止路径穿越绕过 ValidateFilePath。
-	absPath, absErr := filepath.Abs(filePath)
-	if absErr != nil {
-		logger.Error("路径解析失败", "error", absErr.Error(), "file_path", filePath)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
-		return
-	}
-	absBase, _ := filepath.Abs(uploadDir)
-	if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
-		logger.Error("路径安全校验失败", "upload_dir", uploadDir, "file_path", filePath)
+	filePath := joinSafePath(uploadDir, remotePath)
+	if filePath == "" {
+		logger.Error("路径安全校验失败", "upload_dir", uploadDir, "remote_path", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
 		return
 	}

@@ -67,3 +67,18 @@ func ValidateFilePath(filename string) (string, error) {
 	// 统一分隔符为 / 用于 API 序列化
 	return filepath.ToSlash(cleaned), nil
 }
+
+// joinSafePath 在 baseDir 下安全拼接 userPath，确认结果不越界。
+// userPath 必须已通过 ValidateFilePath 校验。返回安全绝对路径，失败时返回空字符串。
+func joinSafePath(baseDir, userPath string) string {
+	fullPath := filepath.Join(baseDir, userPath)
+	absPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		return ""
+	}
+	absBase, _ := filepath.Abs(baseDir)
+	if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
+		return ""
+	}
+	return absPath
+}

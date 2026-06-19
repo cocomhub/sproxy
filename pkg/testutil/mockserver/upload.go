@@ -15,11 +15,15 @@ import (
 type MockUploadStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*server.ChunkedUploadSession
+	locker   *server.ChunkFileLocker
 }
 
 // NewUploadStore 创建一个空的 MockUploadStore。
 func NewUploadStore() *MockUploadStore {
-	return &MockUploadStore{sessions: make(map[string]*server.ChunkedUploadSession)}
+	return &MockUploadStore{
+		sessions: make(map[string]*server.ChunkedUploadSession),
+		locker:   server.NewChunkFileLocker(),
+	}
 }
 
 // CreateSession 创建新的分块上传会话。
@@ -197,16 +201,14 @@ func (m *MockUploadStore) Stop() {
 // Health 返回存储健康状态（mock 始终健康）。
 func (m *MockUploadStore) Health() error { return nil }
 
-// LockChunkIO 获取 chunk IO 锁的模拟实现：始终不阻塞，返回空操作函数。
+// LockChunkIO 获取 chunk IO 锁：委托给真实 ChunkFileLocker 实现。
 func (m *MockUploadStore) LockChunkIO(uploadID string) func() {
-	/* No-op: in-memory mock does not need chunk-level locking; always non-blocking. */
-	return func() {}
+	return m.locker.LockChunkIO(uploadID)
 }
 
-// LockChunkMerge 获取 chunk 合并锁的模拟实现：始终不阻塞，返回空操作函数。
+// LockChunkMerge 获取 chunk 合并锁：委托给真实 ChunkFileLocker 实现。
 func (m *MockUploadStore) LockChunkMerge(uploadID string) func() {
-	/* No-op: in-memory mock does not need merge-level locking; always non-blocking. */
-	return func() {}
+	return m.locker.LockChunkMerge(uploadID)
 }
 
 // Ensure interface compliance.

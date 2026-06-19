@@ -21,10 +21,9 @@ RUN GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 \
 # ─── runtime ───────────────────────────────────────────
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata
-
 # 非 root 用户
-RUN adduser -D -h /app sproxy
+RUN apk add --no-cache ca-certificates tzdata && adduser -D -h /app sproxy
+
 WORKDIR /app
 USER sproxy
 
