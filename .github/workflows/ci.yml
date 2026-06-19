@@ -67,6 +67,15 @@ jobs:
           path: build/cover.out
         if: matrix.os == 'ubuntu-latest'
 
+      - name: Upload coverage to CodeCov
+        uses: codecov/codecov-action@v7
+        with:
+          files: build/cover.out
+          flags: unittests
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+        if: matrix.os == 'ubuntu-latest'
+
   build:
     name: Build
     strategy:
