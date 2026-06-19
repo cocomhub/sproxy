@@ -83,7 +83,11 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 已存在同名文件的检查：如果文件已在，且 checksum 匹配，返回成功
-	existingPath := filepath.Join(cfg.UploadsDir, req.Filename)
+	existingPath := h.safePath(req.Filename)
+	if existingPath == "" {
+		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 	if stat, err := os.Stat(existingPath); err == nil {
 		if verifyFileWithChecksum(existingPath, req.FileChecksum) {
 			h.logger.Info("文件已存在，跳过上传", "file_name", req.Filename, "size", stat.Size(), "checksum", shortid.ShortHash(req.FileChecksum))
@@ -348,8 +352,11 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 3. 检查磁盘上文件是否已存在且 checksum 匹配
-		cfg := h.cfgPtr.Load()
-		filePath := filepath.Join(cfg.UploadsDir, filename)
+		filePath := h.safePath(filename)
+		if filePath == "" {
+			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+			return
+		}
 		if stat, err := os.Stat(filePath); err == nil {
 			if checksum, ok := h.checksumStore.Get(filename); ok {
 				sendJSONResponse(w, ChunkStatusResponse{
@@ -383,8 +390,6 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 
 // uploadComplete 合并所有分块完成上传。
 func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
-	cfg := h.cfgPtr.Load()
-
 	r.Body = http.MaxBytesReader(w, r.Body, size.CompleteBodyLimit) // 1KB 足够
 	var req struct {
 		UploadID string `json:"upload_id"`
@@ -433,7 +438,11 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 合并分块
-	filePath := filepath.Join(cfg.UploadsDir, session.Filename)
+	filePath := h.safePath(session.Filename)
+	if filePath == "" {
+		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 
 	// 确保目标文件的父目录存在（支持子目录路径）
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {

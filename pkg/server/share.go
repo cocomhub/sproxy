@@ -136,8 +136,11 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := h.cfgPtr.Load()
-	fullPath := filepath.Join(cfg.UploadsDir, remotePath)
+	fullPath := h.safePath(remotePath)
+	if fullPath == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 	if _, err = os.Stat(fullPath); os.IsNotExist(err) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 		return

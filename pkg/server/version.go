@@ -29,13 +29,19 @@ type VersionInfo struct {
 // saveVersion 在上传覆盖前保存当前文件版本。
 // 返回保存的版本 ID（UnixNano），如果没有旧文件则返回 0。
 func (h *Handlers) saveVersion(remotePath, uploadsDir string) (int64, error) {
-	fullPath := filepath.Join(uploadsDir, remotePath)
+	fullPath := joinSafePath(uploadsDir, remotePath)
+	if fullPath == "" {
+		return 0, fmt.Errorf("保存版本: 无效的文件路径: %s", remotePath)
+	}
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 		return 0, nil // 新文件，无需保存版本
 	}
 
 	versionID := time.Now().UnixNano()
-	verDir := filepath.Join(uploadsDir, versionsDirName, remotePath)
+	verDir := joinSafePath(uploadsDir, filepath.Join(versionsDirName, remotePath))
+	if verDir == "" {
+		return 0, fmt.Errorf("保存版本: 无效的版本目录路径: %s/%s", versionsDirName, remotePath)
+	}
 	if err := os.MkdirAll(verDir, 0755); err != nil {
 		return 0, fmt.Errorf("创建版本目录失败: %w", err)
 	}
@@ -73,7 +79,10 @@ func (h *Handlers) cleanupOldVersions(remotePath, uploadsDir string) {
 		return
 	}
 
-	verDir := filepath.Join(uploadsDir, versionsDirName, remotePath)
+	verDir := joinSafePath(uploadsDir, filepath.Join(versionsDirName, remotePath))
+	if verDir == "" {
+		return
+	}
 	entries, err := os.ReadDir(verDir)
 	if err != nil {
 		return
@@ -112,7 +121,11 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verDir := filepath.Join(cfg.UploadsDir, versionsDirName, remotePath)
+	verDir := h.safePath(filepath.Join(versionsDirName, remotePath))
+	if verDir == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 	entries, err := os.ReadDir(verDir)
 	if os.IsNotExist(err) {
 		sendJSONResponse(w, map[string]any{"versions": []VersionInfo{}}, http.StatusOK)
@@ -170,13 +183,21 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	verFile := filepath.Join(cfg.UploadsDir, versionsDirName, remotePath, versionIDStr)
+	verFile := h.safePath(filepath.Join(versionsDirName, remotePath, versionIDStr))
+	if verFile == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 	if _, err = os.Stat(verFile); os.IsNotExist(err) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "版本文件不存在"}, http.StatusNotFound)
 		return
 	}
 
-	targetPath := filepath.Join(cfg.UploadsDir, remotePath)
+	targetPath := h.safePath(remotePath)
+	if targetPath == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 
 	// 先保存当前版本（回滚前备份）
 	_, _ = h.saveVersion(remotePath, cfg.UploadsDir)
@@ -234,7 +255,11 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	verFile := filepath.Join(cfg.UploadsDir, versionsDirName, remotePath, versionIDStr)
+	verFile := h.safePath(filepath.Join(versionsDirName, remotePath, versionIDStr))
+	if verFile == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
 	if err := os.Remove(verFile); err != nil {
 		if os.IsNotExist(err) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "版本文件不存在"}, http.StatusNotFound)
@@ -254,7 +279,11 @@ func (h *Handlers) saveVersionBeforeOverwrite(remotePath string) {
 	if !cfg.Versioning.Enabled {
 		return
 	}
-	fullPath := filepath.Join(cfg.UploadsDir, remotePath)
+	fullPath := h.safePath(remotePath)
+	if fullPath == "" {
+		h.logger.Warn("saveVersionBeforeOverwrite: 无效路径", "remote_path", remotePath)
+		return
+	}
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 		return
 	}
