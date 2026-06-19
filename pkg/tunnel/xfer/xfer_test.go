@@ -9,6 +9,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
 func TestRegisterAndGet(t *testing.T) {
@@ -85,4 +86,28 @@ func TestRegisterEmptyNamePanics(t *testing.T) {
 		}
 	}()
 	xfer.Register(&xfer.Transport{Name: ""})
+}
+
+func TestConnSendAfterClose(t *testing.T) {
+	client, server := xfertest.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	client.Close()
+	err := client.Send(context.Background(), []byte("after close"))
+	if err == nil {
+		t.Fatal("expected error sending after close")
+	}
+}
+
+func TestConnReceiveAfterClose(t *testing.T) {
+	client, server := xfertest.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	client.Close()
+	_, err := client.Receive(context.Background())
+	if err == nil {
+		t.Fatal("expected error receiving after close")
+	}
 }
