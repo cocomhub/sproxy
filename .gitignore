@@ -8,6 +8,7 @@ certs
 *.exe
 *.out
 *.cover
+cover*.html
 cover
 .claude/worktrees/
 .trae/
