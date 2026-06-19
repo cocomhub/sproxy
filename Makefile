@@ -123,7 +123,13 @@ lint:
 	golangci-lint run
 
 .PHONY: bench
-bench: prepare
+bench:
+	@mkdir -p $(BUILD_DIR)/bench
+	$(GO) test -bench=. -benchmem -count=5 -run=^$$ ./... 2>&1 | tee $(BUILD_DIR)/bench/output.txt
+
+# 本地基准测试（保留 metadata 头，供 benchstat 本地对比用）
+.PHONY: bench-local
+bench-local: prepare
 	@mkdir -p $(BENCH_DATA_DIR)
 	@echo "=== Running benchmarks ==="
 	@outfile="$(BENCH_DATA_DIR)/$(shell git rev-parse --abbrev-ref HEAD)-$(shell git rev-parse --short HEAD)-$(shell date +%Y%m%dT%H%M%S).txt"; \
@@ -142,6 +148,8 @@ bench: prepare
 	  cd $(BENCH_DATA_DIR) && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm -f; \
 	  echo "Done. Records in $(BENCH_DATA_DIR): $$(ls $(BENCH_DATA_DIR)/*.txt 2>/dev/null | wc -l)"; \
 	  exit $$rc
+
+bench-old: bench-local
 
 .PHONY: check-loopback
 check-loopback:
@@ -248,7 +256,8 @@ help:
 	@echo "  notest          Verify all packages have test files"
 	@echo "  vet             Run go vet"
 	@echo "  lint            Run golangci-lint"
-	@echo "  bench           Run benchmarks"
+t@echo "  bench-local     Run benchmarks with metadata (local use)"
+	@echo "  bench           Run benchmarks (CI, output to build/bench/output.txt)"
 	@echo "  check-loopback  Check for unsafe listen addresses"
 	@echo "  gofix           Run go fix"
 	@echo "  addlicense      Add license headers"
@@ -265,7 +274,7 @@ help:
 	@echo "  test-packages   Run tests grouped by package (with vet + check-loopback)"
 	@echo "  cover-html      Generate coverage HTML report"
 	@echo "  cover-trend     Coverage trend visualization"
-	@echo "  bench-old       Run benchmarks record data"
+	@echo "  bench-old       Alias for bench-local"
 	@echo "  bench-compare   Compare two benchmark runs"
 	@echo "  bench-web       Benchmark web report"
 	@echo "  timing-trend    Timing trend visualization"
