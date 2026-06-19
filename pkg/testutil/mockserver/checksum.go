@@ -4,6 +4,7 @@
 package mockserver
 
 import (
+	"maps"
 	"strings"
 	"sync"
 
@@ -82,9 +83,7 @@ func (m *MockChecksumStore) GetAll() map[string]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	cp := make(map[string]string, len(m.data))
-	for k, v := range m.data {
-		cp[k] = v
-	}
+	maps.Copy(cp, m.data)
 	return cp
 }
 

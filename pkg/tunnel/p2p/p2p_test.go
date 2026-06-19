@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/testutil/mockdht"
-	"github.com/cocomhub/sproxy/pkg/testutil/mockxfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/p2p"
@@ -227,22 +226,6 @@ func TestP2PNodeAccept(t *testing.T) {
 	if got := string(buf[:n]); got != "pong" {
 		t.Fatalf("expected 'pong', got %q", got)
 	}
-}
-
-// registerFakeWebRTCWithMock registers a fake "webrtc" transport using mockxfer.MockListener.
-func registerFakeWebRTCWithMock(t *testing.T, ml *mockxfer.MockListener) {
-	xfer.Register(&xfer.Transport{
-		Name: "webrtc",
-		Dial: func(_ context.Context, _ string) (xfer.Conn, error) {
-			return &mockxfer.MockConn{}, nil
-		},
-		Listen: func(_ context.Context, _ string) (xfer.Listener, error) {
-			return ml, nil
-		},
-	})
-	t.Cleanup(func() {
-		xfer.TransportRegistry.Clear()
-	})
 }
 
 func TestDial_TransportNotFound(t *testing.T) {

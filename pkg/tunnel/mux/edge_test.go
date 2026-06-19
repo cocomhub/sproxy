@@ -40,8 +40,8 @@ func TestStream_ReadEOFAfterCloseWrite(t *testing.T) {
 	}
 
 	// 半关闭：发送 FrameCloseWrite
-	if err := stream.CloseWrite(); err != nil {
-		t.Fatalf("CloseWrite failed: %v", err)
+	if closeWriteErr := stream.CloseWrite(); closeWriteErr != nil {
+		t.Fatalf("CloseWrite failed: %v", closeWriteErr)
 	}
 
 	// 接受端应读到数据，然后读到 io.EOF

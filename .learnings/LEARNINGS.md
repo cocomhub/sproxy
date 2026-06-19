@@ -1622,3 +1622,140 @@ CI 的 benchmark 配置应显著低于本地开发配置。建议 CI 使用 `cou
 - See Also: LRN-20260618-GC18 (pipefail), LRN-20260618-GC20 (benchmark exclude tests)
 
 ---
+
+## [LRN-20260619-BP56] Registry 变量化模式 — 全局测试隔离
+
+**Logged**: 2026-06-19T10:15:00Z
+**Priority**: high
+**Status**: pending
+**Area**: tests
+
+### Summary
+全局插件注册表（如 `xfer.TransportRegistry`）被测试污染时，必须提供包级封装函数 + `Clear()` 方法供测试 cleanup 使用。
+
+### Details
+逐步演进：
+1. 将 `xfer.TransportRegistry` 通过包级函数（`Register`/`Get`/`Active`/`IsDefault`）封装，生产代码调用包级函数
+2. 在 `plugin.Registry` 上添加 `Clear()` 方法，测试用 `t.Cleanup` 恢复
+3. 测试中优先使用独立 `plugin.New[*xfer.Transport]("test", builtin)` 创建局部 registry
+4. 当无法使用局部 registry（如 `init` 时间注册或跨包消费），用 `Clear()` + `t.Cleanup` 在全局上操作
+
+### Suggested Action
+- 设计新插件/registry 时，内置此模式
+- p2p 测试使用 `t.Cleanup(func(){ xfer.TransportRegistry.Clear() })` 确保隔离
+
+### Metadata
+- Source: conversation
+- Pattern-Key: tests.registry_isolation
+- Recurrence-Count: 1
+- First-Seen: 2026-06-19
+
+---
+
+## [LRN-20260619-BP57] 子代理生成的测试代码需审查 import 和 lint
+
+**Logged**: 2026-06-19T10:20:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: tests
+
+### Summary
+子代理并行生成测试代码后，经常遗留未使用的 import、shadow 变量、残留函数。需在 merge 前统一跑 `make lint` 修复。
+
+### Details
+本次子代理开发中出现的问题：
+1. p2p_test.go 留下未使用的 `mockxfer` import 和残留函数体
+2. edge_test.go 中 `err` 变量 shadow（`if err := stream.CloseWrite()...` 外用同名 err）
+3. coverage_gaps_test.go 中部分测试未正确挂钩 handler（如 path 用 `/batch-rename` 而非 `/api/batch/rename`）
+
+### Suggested Action
+子代理任务完成后，主流程代理必须先跑 `make lint` 和 `go build ./...` 再标记完成。
+
+### Metadata
+- Source: conversation
+- Pattern-Key: tests.subagent_lint_check
+- Recurrence-Count: 1
+- First-Seen: 2026-06-19
+
+---
+
+## [LRN-20260619-BP58] server 包 74% 覆盖率瓶颈 — chunked/version/share 独立模块需专项测试
+
+**Logged**: 2026-06-19T10:25:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: tests
+
+### Summary
+server 包覆盖率从 71.4% 提升到 74.3% 后遇到平台期。剩余未覆盖代码集中在 chunked upload/download、version 管理、share 分享、hub 功能等独立功能模块，非普通 handler 边界测试可覆盖。
+
+### Details
+新增 13 个测试后覆盖提升了 2.9%，但核心 handler 路径已基本覆盖（stat 85.2%、rename 79.2%、mkdir 81.2%、rmdir 76.9%、authMiddleware 80.6%）。剩余缺口需要各模块的专项测试文件。
+
+### Suggested Action
+下一阶段需单独补：
+- `chunked_upload_test.go` — 补充 `uploadInit`/`uploadChunk`/`uploadStatus`/`uploadComplete` 的 error 路径
+- `version_test.go` — 补充 version 恢复/删除/列表的边界
+- `share_test.go` — 补充 share token 的过期/不存在路径
+- `hub_test.go` — hub 功能独立测试
+
+### Metadata
+- Source: conversation
+- Pattern-Key: tests.server_coverage_plateau
+- Recurrence-Count: 1
+- First-Seen: 2026-06-19
+
+---
+
+## [LRN-20260619-BP59] 无效测试的反模式 — 请求发到错误路由
+
+**Logged**: 2026-06-19T10:30:00Z
+**Priority**: high
+**Status**: pending
+**Area**: tests
+
+### Summary
+`server_extra_test.go` 中的 `TestBatchRenameHandler_HappyPath` 将重命名请求发送到 `/batch-rename` 而非 `/api/batch/rename`，导致 `batchRename` handler 覆盖率始终为 0%。这是典型的"不 panic 就算通过"占位测试。
+
+### Details
+该测试用了错误的路径（`/batch-rename`），handler 没有被命中，但测试仍然通过了。这导致子代理补 `coverage_gaps_test.go` 时还得专门写 `TestBatchRename_Success` 等 7 个测试来覆盖正确路由。
+
+另外 `server_extra_test.go` 用的 `NewChecksumStore` 创建真实文件存储，而该文件从未被断言读取（`_ = cs`），浪费 IO。
+
+同时 `metrics_test_extra.go` 中的 `TestBatchRenameHandler` 测试也是无效的——它发送 `nil` 请求体到 `/batch-rename`（错误路由），返回值也不做正经断言。
+
+### Suggested Action
+- 无效/占位测试必须删除或修复，不能留在仓库中欺骗覆盖率工具
+- 子代理开发周期中应安排专门的"覆盖率验证"步骤
+- `server_extra_test.go` 和 `metrics_test_extra.go` 中遗留的占位测试应评估是否值得修复
+
+### Metadata
+- Source: code_review
+- Pattern-Key: tests.dead_test_routes
+- Recurrence-Count: 1
+- First-Seen: 2026-06-19
+- Related Files: `pkg/server/server_extra_test.go`, `pkg/server/metrics_test_extra.go`
+
+---
+
+## [LRN-20260619-BP60] mock 子包应放在 testutil/ 下，用外部测试包
+
+**Logged**: 2026-06-19T10:35:00Z
+**Priority**: low
+**Status**: pending
+**Area**: tests
+
+### Summary
+mock 子包（`mockxfer`/`mockdht`/`mockserver`）使用 `package xxxx`（非 `_test` 后缀）和 `package xxxx_test` 外部测试包的双重结构，确保 mock 本身既是可导出的生产代码，又能通过外部测试包验证其行为。
+
+### Details
+- 生产代码用 `package mockxfer` → 可被其他包 `import "github.com/cocomhub/sproxy/pkg/testutil/mockxfer"`
+- 测试用 `package mockxfer_test` → 从消费者视角验证 mock 行为，不依赖内部实现
+- mock 子包在 `pkg/testutil/` 下，可被 `go get` 安装
+
+### Metadata
+- Source: experience
+- Pattern-Key: tests.mock_package_structure
+- Recurrence-Count: 1
+- First-Seen: 2026-06-19
+- Related Files: `pkg/testutil/mockxfer/`, `pkg/testutil/mockdht/`, `pkg/testutil/mockserver/`
