@@ -63,10 +63,6 @@ func NewChunkFileLocker() *ChunkFileLocker {
 	return &ChunkFileLocker{fileLocks: make(map[string]*sync.RWMutex)}
 }
 
-func newChunkFileLocker() *ChunkFileLocker {
-	return NewChunkFileLocker()
-}
-
 // LockChunkIO 获取 chunk 文件写入锁（读锁）。
 // uploadChunk 在写入 chunk 文件前调用，允许多个 uploadChunk 并发写入不同 chunk。
 func (l *ChunkFileLocker) LockChunkIO(uploadID string) func() {
@@ -134,7 +130,7 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	us := &UploadStore{
 		baseDir:    storeDir,
 		sessions:   make(map[string]*ChunkedUploadSession),
-		locker:     newChunkFileLocker(),
+		locker:     NewChunkFileLocker(),
 		persistCh:  make(chan string, 64),
 		stopCh:     make(chan struct{}),
 		sessionTTL: sessionTTL,
