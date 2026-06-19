@@ -10,37 +10,66 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
-func TestStream_ReadEOFAfterCloseWrite(t *testing.T) {
-	client, server := xfertest.Pipe()
-	t.Cleanup(func() { client.Close(); server.Close() })
+// newPipePair creates a connected pair of xfer.Conn (client, server) via xfertest.Pipe.
+func newPipePair(t *testing.T) (client, server xfer.Conn) {
+	t.Helper()
+	c, s := xfertest.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+	return c, s
+}
 
-	lm := mux.New(server, mux.RoleListener)
-	dm := mux.New(client, mux.RoleDialer)
-	t.Cleanup(func() { lm.Close(); dm.Close() })
+// newMuxPair creates a connected pair of mux.Mux (dialer, listener) on a Pipe.
+func newMuxPair(t *testing.T) (dialer, listener *mux.Mux) {
+	t.Helper()
+	c, s := newPipePair(t)
+	dm := mux.New(c, mux.RoleDialer)
+	lm := mux.New(s, mux.RoleListener)
+	t.Cleanup(func() { dm.Close(); lm.Close() })
+	return dm, lm
+}
 
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
+// newMuxPairWithTimeout creates a connected pair of mux.Mux (dialer, listener) with timeout context.
+func newMuxPairWithTimeout(t *testing.T, timeout time.Duration) (dialer, listener *mux.Mux, ctx context.Context, cancel context.CancelFunc) {
+	t.Helper()
+	d, l := newMuxPair(t)
+	ctx, cancel = context.WithTimeout(t.Context(), timeout)
+	t.Cleanup(cancel)
+	return d, l, ctx, cancel
+}
 
-	stream, err := dm.Open(ctx)
+// openStreamWithAccept is a helper that opens a stream on the dialer and accepts on the listener.
+// Returns (stream, accepted, ctx).
+func openStreamWithAccept(t *testing.T, dm, lm *mux.Mux, ctx context.Context) (stream, accepted mux.Stream) {
+	t.Helper()
+	s, err := dm.Open(ctx)
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
-
-	accepted, err := lm.Accept(ctx)
+	t.Cleanup(func() { s.Close() })
+	a, err := lm.Accept(ctx)
 	if err != nil {
 		t.Fatalf("Accept failed: %v", err)
 	}
+	t.Cleanup(func() { a.Close() })
+	return s, a
+}
 
-	_, err = stream.Write([]byte("hello"))
+func TestStream_ReadEOFAfterCloseWrite(t *testing.T) {
+	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
+
+	_, err := stream.Write([]byte("hello"))
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
 	// 半关闭：发送 FrameCloseWrite
-	if closeWriteErr := stream.CloseWrite(); closeWriteErr != nil {
+	var closeWriteErr error
+	if closeWriteErr = stream.CloseWrite(); closeWriteErr != nil {
 		t.Fatalf("CloseWrite failed: %v", closeWriteErr)
 	}
 
@@ -62,31 +91,12 @@ func TestStream_ReadEOFAfterCloseWrite(t *testing.T) {
 }
 
 func TestFlowControl_WriteBlocked(t *testing.T) {
-	client, server := xfertest.Pipe()
-	t.Cleanup(func() { client.Close(); server.Close() })
-
-	lm := mux.New(server, mux.RoleListener)
-	dm := mux.New(client, mux.RoleDialer)
-	t.Cleanup(func() { lm.Close(); dm.Close() })
-
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-
-	stream, err := dm.Open(ctx)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	t.Cleanup(func() { stream.Close() })
-
-	accepted, err := lm.Accept(ctx)
-	if err != nil {
-		t.Fatalf("Accept failed: %v", err)
-	}
-	_ = accepted
+	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+	stream, _ := openStreamWithAccept(t, dm, lm, ctx)
 
 	// 写满发送窗口（默认 64KB），触发流控阻塞
 	payload := make([]byte, 65536)
-	_, err = stream.Write(payload)
+	_, err := stream.Write(payload)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -148,7 +158,7 @@ func TestHandleFrame_CloseWriteUnknownStream(t *testing.T) {
 	b.Close()
 }
 
-// TestHandleFrame_WindowUpdateUnknownStream 测试 handleFrame 中 FrameWindowUpdate 对未知流的处理
+// TestHandleFrame_WindowUpdateUnknownStream …
 func TestHandleFrame_WindowUpdateUnknownStream(t *testing.T) {
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
@@ -166,7 +176,7 @@ func TestHandleFrame_WindowUpdateUnknownStream(t *testing.T) {
 	b.Close()
 }
 
-// TestHandleFrame_UnknownFrameType 测试 handleFrame 对未知帧类型的处理
+// TestHandleFrame_UnknownFrameType …
 func TestHandleFrame_UnknownFrameType(t *testing.T) {
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
@@ -198,7 +208,7 @@ func TestOpenAfterConnClose_Dialer(t *testing.T) {
 	muxA.Close()
 }
 
-// TestHandleFrame_DuplicateOpen 测试 handleFrame 对重复 FrameOpen 的处理
+// TestHandleFrame_DuplicateOpen …
 func TestHandleFrame_DuplicateOpen(t *testing.T) {
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
@@ -264,31 +274,12 @@ func TestHandleFrame_Pong(t *testing.T) {
 
 // TestWrite_BiggerThanWindow 测试写超过窗口大小的数据，应触发 writeLen 截断
 func TestWrite_BiggerThanWindow(t *testing.T) {
-	client, server := xfertest.Pipe()
-	t.Cleanup(func() { client.Close(); server.Close() })
-
-	lm := mux.New(server, mux.RoleListener)
-	dm := mux.New(client, mux.RoleDialer)
-	t.Cleanup(func() { lm.Close(); dm.Close() })
-
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-
-	stream, err := dm.Open(ctx)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	t.Cleanup(func() { stream.Close() })
-
-	accepted, err := lm.Accept(ctx)
-	if err != nil {
-		t.Fatalf("Accept failed: %v", err)
-	}
-	_ = accepted
+	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+	stream, _ := openStreamWithAccept(t, dm, lm, ctx)
 
 	// 写超过默认窗口大小（65536）的数据
 	payload := make([]byte, 70000)
-	_, err = stream.Write(payload)
+	_, err := stream.Write(payload)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}

@@ -23,6 +23,32 @@ import (
 // 但该测试发送到错误的路由 "/batch-rename"（应为 "/api/batch/rename"），
 // 导致 batchRename handler 实际覆盖率为 0。以下测试修正此问题。
 
+// doBatchRename POST /api/batch/rename 并解码响应。
+func doBatchRename(t *testing.T, url, reqBody string) (int, BatchRenameResponse) {
+	t.Helper()
+	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	var result BatchRenameResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return resp.StatusCode, result
+}
+
+// assertBatchRenameOK 断言批量重命名返回 200 且指定索引的结果成功。
+func assertBatchRenameOK(t *testing.T, result BatchRenameResponse, index int) {
+	t.Helper()
+	if len(result.Results) <= index {
+		t.Fatalf("expected at least %d results, got %d", index+1, len(result.Results))
+	}
+	if !result.Results[index].Success {
+		t.Fatalf("result[%d] expected success, got message: %s", index, result.Results[index].Message)
+	}
+}
+
 func TestBatchRename_Success(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
@@ -32,24 +58,11 @@ func TestBatchRename_Success(t *testing.T) {
 	uploadFile(t, url, "old.txt", body, map[string]string{"X-File-Checksum": cs})
 
 	reqBody := fmt.Sprintf(`{"operations":[{"from":"old.txt","to":"new.txt","checksum":"%s"}]}`, cs)
-	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader(reqBody))
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
+	code, result := doBatchRename(t, url, reqBody)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var result BatchRenameResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(result.Results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(result.Results))
-	}
-	if !result.Results[0].Success {
-		t.Fatalf("expected success, got message: %s", result.Results[0].Message)
-	}
+	assertBatchRenameOK(t, result, 0)
 }
 
 func TestBatchRename_InvalidJSON(t *testing.T) {
@@ -85,24 +98,11 @@ func TestBatchRename_SameFile(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	reqBody := `{"operations":[{"from":"a.txt","to":"a.txt","checksum":"abc"}]}`
-	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader(reqBody))
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
+	code, result := doBatchRename(t, url, reqBody)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var result BatchRenameResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(result.Results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(result.Results))
-	}
-	if !result.Results[0].Success {
-		t.Fatalf("expected success for same file, got: %s", result.Results[0].Message)
-	}
+	assertBatchRenameOK(t, result, 0)
 }
 
 func TestBatchRename_MissingChecksum(t *testing.T) {
@@ -113,18 +113,10 @@ func TestBatchRename_MissingChecksum(t *testing.T) {
 	cs := sha256hex(body)
 	uploadFile(t, url, "check.txt", body, map[string]string{"X-File-Checksum": cs})
 
-	resp, err := http.Post(url+"/api/batch/rename", "application/json",
-		strings.NewReader(`{"operations":[{"from":"check.txt","to":"moved.txt"}]}`))
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var result BatchRenameResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
+	reqBody := `{"operations":[{"from":"check.txt","to":"moved.txt"}]}`
+	code, result := doBatchRename(t, url, reqBody)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
 	}
 	if len(result.Results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(result.Results))
@@ -139,17 +131,9 @@ func TestBatchRename_SourceNotFound(t *testing.T) {
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	reqBody := `{"operations":[{"from":"nonexistent.txt","to":"new.txt","checksum":"abc"}]}`
-	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader(reqBody))
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var result BatchRenameResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
+	code, result := doBatchRename(t, url, reqBody)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
 	}
 	if len(result.Results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(result.Results))
@@ -167,17 +151,9 @@ func TestBatchRename_PathTraversal(t *testing.T) {
 		{"from":"../a.txt","to":"b.txt","checksum":"abc"},
 		{"from":"c.txt","to":"../d.txt","checksum":"abc"}
 	]}`
-	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader(reqBody))
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var result BatchRenameResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
+	code, result := doBatchRename(t, url, reqBody)
+	if code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
 	}
 	if len(result.Results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(result.Results))
