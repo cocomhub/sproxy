@@ -73,33 +73,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// 确保 cfgProvider 已初始化（测试可能未经 PersistentPreRunE 直接调用 runServer）
-	if cfgProvider == nil {
-		configPath := cfgFile
-		if configPath == "" {
-			configPath = "sproxy.yaml"
-		}
-		cfgProvider = sproxycfg.New(configPath)
-		cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-		cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
-		cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
-		if cfgFile == "" {
-			cfgFile = configPath
-		}
-	}
-
-	// 用 Provider 解码配置
-	cfg, err := server.LoadFromProvider(cfgProvider)
+	cfg, err := buildServerConfig(cmd)
 	if err != nil {
-		return fmt.Errorf("配置解析失败: %w", err)
+		return err
 	}
 	cfgPtr.Store(cfg)
 
-	// 启动日志
 	logger := initLogger(cfg)
 	slog.Info("config loaded", "path", cfgFile, "log_level", levelString(cfg.LogLevel), "log_format", formatString(cfg.LogFormat))
 
-	// 隧道密钥处理
 	tunnelKey, err := resolveTunnelKey(cfg)
 	if err != nil {
 		return fmt.Errorf("隧道密钥处理失败: %w", err)
@@ -126,7 +108,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if cfg.TLS.Enabled {
 		protocol = "https"
 	}
-	// 提取 host 和 port，host 为空时补 127.0.0.1 用于展示
 	displayHost, displayPort, _ := net.SplitHostPort(cfg.Addr)
 	if displayHost == "" {
 		displayHost = "127.0.0.1"
@@ -134,31 +115,125 @@ func runServer(cmd *cobra.Command, args []string) error {
 	fmt.Printf("downserver start at: %s://%s:%s\n", protocol, displayHost, displayPort)
 	fmt.Printf("uploads dir: %s\n", cfg.UploadsDir)
 
-	maxHeaderBytes := cfg.MaxHeaderBytes
-	if maxHeaderBytes <= 0 {
-		maxHeaderBytes = 1 << 20
+	srv := createHTTPServer(cfg, h.Handler())
+	stopSigCh, shutdownDone := runSignalHandler(cancel, srv, h, logger, cfg)
+
+	if cfg.TLS.Enabled {
+		if err := startTLSListener(cfg, srv, stopSigCh); err != nil {
+			return err
+		}
+	} else {
+		if err := srv.ListenAndServe(); err != nil {
+			if err == http.ErrServerClosed {
+				slog.Info("listen and serve closed", "error", err.Error())
+			} else {
+				close(stopSigCh)
+				return fmt.Errorf("listen and serve error: %w", err)
+			}
+		}
 	}
 
-	s := &http.Server{
+	<-shutdownDone
+	slog.Info("downserver exit")
+	return nil
+}
+
+// buildServerConfig 从 CLI 标志和配置文件构建服务器配置。
+func buildServerConfig(cmd *cobra.Command) (*server.Config, error) {
+	if cfgProvider == nil {
+		configPath := cfgFile
+		if configPath == "" {
+			configPath = "sproxy.yaml"
+		}
+		cfgProvider = sproxycfg.New(configPath)
+		cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+		cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+		cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+		if cfgFile == "" {
+			cfgFile = configPath
+		}
+	}
+	cfg, err := server.LoadFromProvider(cfgProvider)
+	if err != nil {
+		return nil, fmt.Errorf("配置解析失败: %w", err)
+	}
+	return cfg, nil
+}
+
+// createHTTPServer 根据配置创建 *http.Server。
+func createHTTPServer(cfg *server.Config, handler http.Handler) *http.Server {
+	maxHeaderBytes := cfg.MaxHeaderBytes
+	if maxHeaderBytes <= 0 {
+		maxHeaderBytes = 1 << 20 // 1 MiB
+	}
+	return &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           h.Handler(),
-		ReadHeaderTimeout: cfg.ServerTimeouts.ReadHeader,
+		Handler:           handler,
 		ReadTimeout:       cfg.ServerTimeouts.Read,
 		WriteTimeout:      cfg.ServerTimeouts.Write,
 		IdleTimeout:       cfg.ServerTimeouts.Idle,
+		ReadHeaderTimeout: cfg.ServerTimeouts.ReadHeader,
 		MaxHeaderBytes:    maxHeaderBytes,
 	}
+}
 
+// startTLSListener 启动 TLS/HTTPS 监听，包含自签证书生成和 mTLS 配置。
+func startTLSListener(cfg *server.Config, s *http.Server, stopSigCh chan struct{}) error {
+	certFile := cfg.TLS.CertFile
+	keyFile := cfg.TLS.KeyFile
+	if certFile == "" {
+		certFile = "certs/_wildcard.sproxy.local.pem"
+	}
+	if keyFile == "" {
+		keyFile = "certs/_wildcard.sproxy.local-key.pem"
+	}
+	if cfg.TLS.AutoTLS {
+		if _, err := os.Stat(certFile); os.IsNotExist(err) {
+			slog.Info("自动生成自签证书", "cert", certFile, "key", keyFile)
+			if err := server.GenerateSelfSignedCert(certFile, keyFile); err != nil {
+				return fmt.Errorf("自动生成自签证书失败: %w", err)
+			}
+		}
+	}
+	slog.Info("TLS enabled", "cert", certFile, "key", keyFile)
+
+	if cfg.TLS.ClientCA != "" {
+		caCert, err := os.ReadFile(cfg.TLS.ClientCA)
+		if err != nil {
+			return fmt.Errorf("读取 ClientCA 证书失败: %w", err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return fmt.Errorf("ClientCA 证书解析失败（非 PEM 格式）")
+		}
+		s.TLSConfig = &tls.Config{
+			ClientAuth: tls.RequireAndVerifyClientCert,
+			ClientCAs:  caPool,
+			MinVersion: tls.VersionTLS12,
+		}
+		slog.Info("mTLS enabled", "client_ca", cfg.TLS.ClientCA)
+	}
+
+	if err := s.ListenAndServeTLS(certFile, keyFile); err != nil {
+		if err == http.ErrServerClosed {
+			slog.Info("listen and serve closed", "error", err.Error())
+		} else {
+			close(stopSigCh)
+			return fmt.Errorf("listen and serve error: %w", err)
+		}
+	}
+	return nil
+}
+
+// runSignalHandler 启动信号处理 goroutine，返回 stopSigCh（关闭后通知 goroutine 退出）和 shutdownDone（清理完成后关闭）。
+func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handlers, logger *slog.Logger, cfg *server.Config) (chan struct{}, chan struct{}) {
 	signalChan := make(chan os.Signal, 1)
 	if testSignalCh != nil {
 		signalChan = testSignalCh
 	}
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGHUP)
 
-	// stopSigCh 在 ListenAndServe 失败时关闭，通知信号 goroutine 退出（避免泄漏）。
 	stopSigCh := make(chan struct{})
-
-	// shutdownDone 在 graceful shutdown 流程完成后被关闭，便于主 goroutine 等待清理动作真正执行完成。
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
@@ -192,7 +267,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 					slog.Error("shutdown error", "error", err.Error(), "timeout", shutdownTimeout)
 				}
 				shutdownCancel()
-				// http.Server 已停止 → 关闭 UploadStore 后台 goroutine
 				if err := h.Close(); err != nil {
 					slog.Warn("handlers close error", "error", err.Error())
 				}
@@ -200,68 +274,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}()
-
-	if cfg.TLS.Enabled {
-		certFile := cfg.TLS.CertFile
-		keyFile := cfg.TLS.KeyFile
-		if certFile == "" {
-			certFile = "certs/_wildcard.sproxy.local.pem"
-		}
-		if keyFile == "" {
-			keyFile = "certs/_wildcard.sproxy.local-key.pem"
-		}
-		if cfg.TLS.AutoTLS {
-			if _, err := os.Stat(certFile); os.IsNotExist(err) {
-				slog.Info("自动生成自签证书", "cert", certFile, "key", keyFile)
-				if err := server.GenerateSelfSignedCert(certFile, keyFile); err != nil {
-					return fmt.Errorf("自动生成自签证书失败: %w", err)
-				}
-			}
-		}
-		slog.Info("TLS enabled", "cert", certFile, "key", keyFile)
-
-		// mTLS: 配置客户端证书验证
-		if cfg.TLS.ClientCA != "" {
-			caCert, err := os.ReadFile(cfg.TLS.ClientCA)
-			if err != nil {
-				return fmt.Errorf("读取 ClientCA 证书失败: %w", err)
-			}
-			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(caCert) {
-				return fmt.Errorf("ClientCA 证书解析失败（非 PEM 格式）")
-			}
-			s.TLSConfig = &tls.Config{
-				ClientAuth: tls.RequireAndVerifyClientCert,
-				ClientCAs:  caPool,
-				MinVersion: tls.VersionTLS12,
-			}
-			slog.Info("mTLS enabled", "client_ca", cfg.TLS.ClientCA)
-		}
-
-		if err := s.ListenAndServeTLS(certFile, keyFile); err != nil {
-			if err == http.ErrServerClosed {
-				slog.Info("listen and serve closed", "error", err.Error())
-			} else {
-				close(stopSigCh)
-				return fmt.Errorf("listen and serve error: %w", err)
-			}
-		}
-	} else {
-		if err := s.ListenAndServe(); err != nil {
-			if err == http.ErrServerClosed {
-				slog.Info("listen and serve closed", "error", err.Error())
-			} else {
-				close(stopSigCh)
-				return fmt.Errorf("listen and serve error: %w", err)
-			}
-		}
-	}
-
-	// 走到这里说明 ListenAndServe 已被 Shutdown 关闭（ErrServerClosed 路径）。
-	// 等 signal handler goroutine 完成清理，避免 defer h.Close() 抢在 Shutdown 真正释放连接前执行。
-	<-shutdownDone
-	slog.Info("downserver exit")
-	return nil
+	return stopSigCh, shutdownDone
 }
 
 // resolveTunnelKey 处理隧道密钥：已配置则校验，未配置则自动生成并回写配置文件。
