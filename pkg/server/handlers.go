@@ -213,6 +213,320 @@ func (h *Handlers) safePath(remotePath string) string {
 	return joinSafePath(cfg.UploadsDir, remotePath)
 }
 
+// writeFileAtomically 将 src 原子写入 dstPath，同时计算 SHA-256 哈希。
+// 先写到临时文件，再 os.Rename，防止部分写入。
+func writeFileAtomically(dstPath string, src io.Reader) (checksum string, written int64, err error) {
+	tmpPath := dstPath + ".tmp"
+	tmpFile, err := os.Create(tmpPath)
+	if err != nil {
+		return "", 0, fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	defer os.Remove(tmpPath)
+
+	hash := sha256.New()
+	mw := io.MultiWriter(tmpFile, hash)
+	written, err = io.Copy(mw, src)
+	if err != nil {
+		tmpFile.Close()
+		return "", written, fmt.Errorf("写入临时文件失败: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return "", written, fmt.Errorf("关闭临时文件失败: %w", err)
+	}
+	checksum = hex.EncodeToString(hash.Sum(nil))
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		// Windows: 如果目标存在则重命名失败，尝试先删除再重命名
+		if rmErr := os.Remove(dstPath); rmErr == nil {
+			err = os.Rename(tmpPath, dstPath)
+		}
+		if err != nil {
+			return checksum, written, fmt.Errorf("重命名临时文件失败: %w", err)
+		}
+	}
+	return checksum, written, nil
+}
+
+// resolveFilePath 校验 filename 并生成安全的 UploadsDir 下完整路径。
+// 返回已验证的相对路径和绝对路径。校验失败时返回 false。
+func (h *Handlers) resolveFilePath(w http.ResponseWriter, filename string) (remotePath, fullPath string, ok bool) {
+	remotePath, err := ValidateFilePath(filename)
+	if err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+		return "", "", false
+	}
+	fullPath = h.safePath(remotePath)
+	if fullPath == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return "", "", false
+	}
+	return remotePath, fullPath, true
+}
+
+// resolveFilePathHTTP 供非 JSON handler 使用（如 stat 返回普通 http.Error）。
+func (h *Handlers) resolveFilePathHTTP(w http.ResponseWriter, filename string) (remotePath, fullPath string, ok bool) {
+	remotePath, err := ValidateFilePath(filename)
+	if err != nil {
+		http.Error(w, "invalid filename", http.StatusBadRequest)
+		return "", "", false
+	}
+	fullPath = h.safePath(remotePath)
+	if fullPath == "" {
+		http.Error(w, "invalid file path", http.StatusBadRequest)
+		return "", "", false
+	}
+	return remotePath, fullPath, true
+}
+
+// handleDuplicateFile 检查文件是否存在，处理重复上传和版本管理逻辑。
+// 返回 true 表示已处理（调用方应 return）。
+func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, filePath, expectedChecksum, remotePath string) bool {
+	stat, statErr := os.Stat(filePath)
+	if statErr != nil {
+		return false // 文件不存在，继续正常上传
+	}
+	if verifyFileWithChecksum(filePath, expectedChecksum) {
+		// 幂等上传：文件已存在且 checksum 匹配，先保存版本后返回
+		h.saveVersionBeforeOverwrite(remotePath)
+		sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件已上传成功, size: %d", stat.Size()), Checksum: expectedChecksum}, http.StatusOK)
+		return true
+	}
+	cfg := h.cfgPtr.Load()
+	if cfg.Versioning.Enabled {
+		// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本
+		h.saveVersionBeforeOverwrite(remotePath)
+		return false // 继续执行写入流程，用新内容覆盖现有文件
+	}
+	// checksum 不匹配：冲突，需保留现有文件
+	h.logger.Warn("文件已存在，但校验失败", "file_name", remotePath)
+	sendJSONResponse(w, UploadResponse{Success: false, Message: "文件已存在，但校验失败"}, http.StatusConflict)
+	return true
+}
+
+// parseRenameParams 从请求中提取重命名参数：from、to 和 X-File-Checksum。
+func parseRenameParams(r *http.Request) (from, to, checksum string, err error) {
+	from = r.URL.Query().Get("from")
+	to = r.URL.Query().Get("to")
+	if from == "" || to == "" {
+		return "", "", "", fmt.Errorf("from 和 to 都不能为空")
+	}
+	from, err = ValidateFilePath(from)
+	if err != nil {
+		return "", "", "", fmt.Errorf("无效的源路径")
+	}
+	to, err = ValidateFilePath(to)
+	if err != nil {
+		return "", "", "", fmt.Errorf("无效的目标路径")
+	}
+	checksum = r.Header.Get("X-File-Checksum")
+	return from, to, checksum, nil
+}
+
+// resolveRenamePaths 计算 from 和 to 对应的安全绝对路径。
+func resolveRenamePaths(h *Handlers, w http.ResponseWriter, from, to string) (fromPath, toPath string, ok bool) {
+	fromPath = h.safePath(from)
+	toPath = h.safePath(to)
+	if fromPath == "" || toPath == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return "", "", false
+	}
+	return fromPath, toPath, true
+}
+
+// executeRename 校验 checksum、执行 Rename、更新 checksumStore。
+// 返回 nil 表示成功；返回 error 表示失败（已在内部发送响应）。
+func executeRename(h *Handlers, w http.ResponseWriter, fromPath, toPath, from, to, expectedChecksum string, logger *slog.Logger) error {
+	if _, err := os.Stat(fromPath); os.IsNotExist(err) {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
+		return err
+	}
+	if _, err := os.Stat(toPath); err == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
+		return err
+	}
+	if !verifyFileWithChecksum(fromPath, expectedChecksum) {
+		logger.Warn("rename checksum 校验失败", "from", from)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件 SHA-256 校验失败"}, http.StatusBadRequest)
+		return fmt.Errorf("checksum mismatch")
+	}
+	if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
+		logger.Error("创建目标父目录失败", "to", to, "error", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目标父目录失败"}, http.StatusInternalServerError)
+		return err
+	}
+	if err := os.Rename(fromPath, toPath); err != nil {
+		logger.Error("重命名失败", "from", from, "to", to, "error", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
+		return err
+	}
+	h.checksumStore.Rename(from, to)
+	return nil
+}
+
+// processBatchRenameItem 处理单条批量重命名操作。
+func (h *Handlers) processBatchRenameItem(op BatchRenameOp, logger *slog.Logger) BatchOperationResult {
+	result := BatchOperationResult{Filename: op.From + " -> " + op.To}
+	from, err := ValidateFilePath(op.From)
+	if err != nil {
+		result.Message = "无效的源路径"
+		return result
+	}
+	to, err := ValidateFilePath(op.To)
+	if err != nil {
+		result.Message = "无效的目标路径"
+		return result
+	}
+	if from == to {
+		result.Success = true
+		result.Message = "源与目标相同，无需移动"
+		return result
+	}
+	fromPath := h.safePath(from)
+	toPath := h.safePath(to)
+	if fromPath == "" || toPath == "" {
+		result.Message = "无效的文件路径"
+		return result
+	}
+	if _, err := os.Stat(fromPath); os.IsNotExist(err) {
+		result.Message = "源文件不存在"
+		return result
+	}
+	if _, err := os.Stat(toPath); err == nil {
+		result.Message = "目标路径已存在"
+		return result
+	}
+	if op.Checksum == "" {
+		result.Message = "缺少 checksum"
+		return result
+	}
+	if !verifyFileWithChecksum(fromPath, op.Checksum) {
+		logger.Warn("batch rename checksum 不匹配", "from", op.From)
+		result.Message = "源文件 SHA-256 校验失败"
+		return result
+	}
+	if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
+		logger.Error("创建目标父目录失败", "to", to, "error", err.Error())
+		result.Message = "创建父目录失败"
+		return result
+	}
+	if err := os.Rename(fromPath, toPath); err != nil {
+		logger.Error("batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
+		result.Message = "重命名失败"
+		return result
+	}
+	h.checksumStore.Rename(from, to)
+	return BatchOperationResult{
+		Filename: op.From + " -> " + op.To,
+		Success:  true,
+		Message:  "重命名成功",
+	}
+}
+
+// resolveListDir 处理 listFiles 的 subdir 参数，返回目标目录。
+func (h *Handlers) resolveListDir(w http.ResponseWriter, r *http.Request) (targetDir string, ok bool) {
+	cfg := h.cfgPtr.Load()
+	targetDir = cfg.UploadsDir
+	if subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/"); subdir != "" {
+		if _, err := ValidateFilePath(subdir); err != nil {
+			h.logger.Warn("无效的子目录", "subdir", subdir, "error", err.Error())
+			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+			return "", false
+		}
+		targetDir = h.safePath(subdir)
+		if targetDir == "" {
+			h.logger.Warn("无效的子目录路径", "subdir", subdir)
+			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+			return "", false
+		}
+	}
+	return targetDir, true
+}
+
+// sortFileEntries 按指定字段和顺序排序文件条目。
+func sortFileEntries(entries []fileInfo, sortBy, sortOrder string) {
+	switch sortBy {
+	case "size":
+		sort.SliceStable(entries, func(i, j int) bool {
+			if sortOrder == "desc" {
+				return entries[i].Size > entries[j].Size
+			}
+			return entries[i].Size < entries[j].Size
+		})
+	case "time":
+		sort.SliceStable(entries, func(i, j int) bool {
+			if sortOrder == "desc" {
+				return entries[i].ModTime > entries[j].ModTime
+			}
+			return entries[i].ModTime < entries[j].ModTime
+		})
+	default: // "name"
+		if sortOrder == "desc" {
+			sort.SliceStable(entries, func(i, j int) bool {
+				return entries[i].Name > entries[j].Name
+			})
+		} else {
+			sort.SliceStable(entries, func(i, j int) bool {
+				return entries[i].Name < entries[j].Name
+			})
+		}
+	}
+}
+
+// paginateEntries 对文件列表进行分页。
+func paginateEntries(entries []fileInfo, offset, limit int) []fileInfo {
+	total := len(entries)
+	start := min(offset, total)
+	end := total
+	if limit > 0 && start+limit < end {
+		end = start + limit
+	}
+	return entries[start:end]
+}
+
+// collectSearchResults 递归搜索 uploads_dir 下文件名包含 queryLower 的文件。
+func (h *Handlers) collectSearchResults(rootsDir, queryLower string, csMap map[string]string) []fileInfo {
+	var results []fileInfo
+	_ = filepath.WalkDir(rootsDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(rootsDir, path)
+		if rel == "." {
+			return nil
+		}
+		if d.Name() == ".checksums.json" || d.Name() == chunkedDirName {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.Contains(strings.ToLower(d.Name()), queryLower) {
+			return nil
+		}
+		if d.IsDir() {
+			results = append(results, fileInfo{
+				Name:  filepath.ToSlash(rel),
+				IsDir: true,
+			})
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		fi := fileInfo{
+			Name:    filepath.ToSlash(rel),
+			Size:    info.Size(),
+			ModTime: info.ModTime().UnixNano(),
+		}
+		if cs, ok := csMap[filepath.ToSlash(rel)]; ok {
+			fi.Checksum = cs
+		}
+		results = append(results, fi)
+		return nil
+	})
+	return results
+}
+
 // requestLogMiddleware 记录 HTTP 请求的基本信息：方法、路径、远程地址、耗时。
 func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +616,6 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	logger := h.logger.With("req_id", reqID)
 
-	cfg := h.cfgPtr.Load()
 	// 限制请求体大小，防止 OOM；超过 MaxBytesReader 会向客户端返回 413
 	r.Body = http.MaxBytesReader(w, r.Body, size.UploadBodyLimit)
 	// 仅在内存中缓冲 MultipartBufSize，超出部分由 stdlib 落临时文件
@@ -335,20 +648,11 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	if remotePathStr == "" {
 		remotePathStr = handler.Filename
 	}
-	remotePath, err := ValidateFilePath(remotePathStr)
-	if err != nil {
-		logger.Warn("无效的文件名", "file_name", remotePathStr, "error", err)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+	remotePath, filePath, ok := h.resolveFilePath(w, remotePathStr)
+	if !ok {
 		return
 	}
 	logger.Debug("上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
-
-	filePath := h.safePath(remotePath)
-	if filePath == "" {
-		logger.Error("路径安全校验失败", "remote_path", remotePath)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
-		return
-	}
 
 	if err = os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		logger.Error("创建目录失败", "error", err.Error())
@@ -356,80 +660,28 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if stat, statErr := os.Stat(filePath); statErr == nil {
-		if verifyFileWithChecksum(filePath, expectedChecksum) {
-			// 幂等上传：文件已存在且 checksum 匹配，先保存版本后返回
-			h.saveVersionBeforeOverwrite(remotePath)
-			sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件已上传成功, size: %d", stat.Size()), Checksum: expectedChecksum}, http.StatusOK)
-			return
-		}
-		if cfg.Versioning.Enabled {
-			// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本
-			h.saveVersionBeforeOverwrite(remotePath)
-			// 继续执行下面的写入流程，用新内容覆盖现有文件
-		} else {
-			// checksum 不匹配：冲突，需保留现有文件
-			logger.Warn("文件已存在，但校验失败", "file_name", remotePath)
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件已存在，但校验失败"}, http.StatusConflict)
-			return
-		}
-	}
-
-	dir := filepath.Dir(filePath)
-	if err = os.MkdirAll(dir, 0755); err != nil {
-		logger.Error("创建目录失败", "error", err.Error(), "file_name", remotePath)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
+	// 重复检测与版本管理：文件已存在且 checksum 匹配则幂等返回，
+	// 版本管理启用时 checksum 不匹配也继续执行覆盖
+	if h.handleDuplicateFile(w, filePath, expectedChecksum, remotePath) {
 		return
 	}
-	tempFile, err := os.CreateTemp(dir, filepath.Base(filePath)+".tmp.*")
+
+	// 原子写入 + 流式哈希
+	serverChecksum, _, err := writeFileAtomically(filePath, file)
 	if err != nil {
-		logger.Error("创建文件失败", "error", err.Error(), "file_name", remotePath)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建文件失败"}, http.StatusInternalServerError)
-		return
-	}
-	tmpPath := tempFile.Name()
-	// .tmp 文件统一在错误路径或 rename 成功后由 defer os.Remove 兜底清理；
-	// rename 成功后 .tmp 已不在原位，os.Remove 会无声失败，不影响成品文件。
-	// 不使用 defer tempFile.Close()，因为正常路径需要在 rename 前显式 Close，
-	// 双 close 在 Windows 上有句柄复用风险。下方错误路径手动 Close 后再 return。
-	defer os.Remove(tmpPath)
-
-	// 边写边算 SHA-256，复用同一份字节流
-	sha256Hash := sha256.New()
-	multiWriter := io.MultiWriter(tempFile, sha256Hash)
-
-	if _, err := io.Copy(multiWriter, file); err != nil {
-		_ = tempFile.Close()
 		logger.Error("保存文件失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "保存文件失败"}, http.StatusInternalServerError)
 		return
 	}
-	if err := tempFile.Close(); err != nil {
-		logger.Error("关闭临时文件失败", "error", err.Error(), "file_name", remotePath)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "保存文件失败"}, http.StatusInternalServerError)
-		return
-	}
 
-	serverChecksum := hex.EncodeToString(sha256Hash.Sum(nil))
 	if serverChecksum != expectedChecksum {
+		// 清理已重命名的文件（writeFileAtomically 在 Rename 成功后返回，
+		// 但校验失败时不应保留目标文件）
+		os.Remove(filePath)
 		logger.Warn("文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件 SHA-256 校验失败"}, http.StatusBadRequest)
 		return
 	}
-
-	// filePath 已通过 ValidateFilePath 校验，不会路径穿越。
-	if err := os.Rename(tmpPath, filePath); err != nil {
-		// Windows cannot rename over an existing file; remove and retry.
-		if rmErr := os.Remove(filePath); rmErr == nil {
-			if err2 := os.Rename(tmpPath, filePath); err2 == nil {
-				goto afterRename
-			}
-		}
-		logger.Error("重命名文件失败", "error", err.Error(), "file_name", remotePath)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "重命名文件失败"}, http.StatusInternalServerError)
-		return
-	}
-afterRename:
 
 	w.Header().Set("X-File-Checksum", serverChecksum)
 	h.checksumStore.Set(remotePath, serverChecksum)
@@ -645,71 +897,8 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger.With("batch", "rename")
 	results := make([]BatchOperationResult, 0, len(req.Operations))
 	for _, op := range req.Operations {
-		result := BatchOperationResult{Filename: op.From + " -> " + op.To}
-		from, err := ValidateFilePath(op.From)
-		if err != nil {
-			result.Message = "无效的源路径"
-			results = append(results, result)
-			continue
-		}
-		to, err := ValidateFilePath(op.To)
-		if err != nil {
-			result.Message = "无效的目标路径"
-			results = append(results, result)
-			continue
-		}
-		if from == to {
-			result.Success = true
-			result.Message = "源与目标相同，无需移动"
-			results = append(results, result)
-			continue
-		}
-		fromPath := h.safePath(from)
-		toPath := h.safePath(to)
-		if fromPath == "" || toPath == "" {
-			result.Message = "无效的文件路径"
-			results = append(results, result)
-			continue
-		}
-		if _, err := os.Stat(fromPath); os.IsNotExist(err) {
-			result.Message = "源文件不存在"
-			results = append(results, result)
-			continue
-		}
-		if _, err := os.Stat(toPath); err == nil {
-			result.Message = "目标路径已存在"
-			results = append(results, result)
-			continue
-		}
-		if op.Checksum == "" {
-			result.Message = "缺少 checksum"
-			results = append(results, result)
-			continue
-		}
-		if !verifyFileWithChecksum(fromPath, op.Checksum) {
-			logger.Warn("batch rename checksum 不匹配", "from", op.From)
-			result.Message = "源文件 SHA-256 校验失败"
-			results = append(results, result)
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
-			logger.Error("创建目标父目录失败", "to", to, "error", err.Error())
-			result.Message = "创建父目录失败"
-			results = append(results, result)
-			continue
-		}
-		if err := os.Rename(fromPath, toPath); err != nil {
-			logger.Error("batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
-			result.Message = "重命名失败"
-			results = append(results, result)
-			continue
-		}
-		h.checksumStore.Rename(from, to)
-		results = append(results, BatchOperationResult{
-			Filename: op.From + " -> " + op.To,
-			Success:  true,
-			Message:  "重命名成功",
-		})
+		result := h.processBatchRenameItem(op, logger)
+		results = append(results, result)
 	}
 	sendJSONResponse(w, BatchRenameResponse{Results: results}, http.StatusOK)
 }
@@ -730,22 +919,10 @@ type listResponse struct {
 }
 
 func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
-	cfg := h.cfgPtr.Load()
-
 	// 支持按层级查询：?subdir=path 列出指定子目录，默认列出根目录
-	targetDir := cfg.UploadsDir
-	if subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/"); subdir != "" {
-		if _, err := ValidateFilePath(subdir); err != nil {
-			h.logger.Warn("无效的子目录", "subdir", subdir, "error", err.Error())
-			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
-			return
-		}
-		targetDir = h.safePath(subdir)
-		if targetDir == "" {
-			h.logger.Warn("无效的子目录路径", "subdir", subdir)
-			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
-			return
-		}
+	targetDir, ok := h.resolveListDir(w, r)
+	if !ok {
+		return
 	}
 
 	// 分页参数
@@ -806,43 +983,12 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 排序
-	switch sortBy {
-	case "size":
-		sort.SliceStable(allFiles, func(i, j int) bool {
-			if sortOrder == "desc" {
-				return allFiles[i].Size > allFiles[j].Size
-			}
-			return allFiles[i].Size < allFiles[j].Size
-		})
-	case "time":
-		sort.SliceStable(allFiles, func(i, j int) bool {
-			if sortOrder == "desc" {
-				return allFiles[i].ModTime > allFiles[j].ModTime
-			}
-			return allFiles[i].ModTime < allFiles[j].ModTime
-		})
-	default: // "name"
-		if sortOrder == "desc" {
-			sort.SliceStable(allFiles, func(i, j int) bool {
-				return allFiles[i].Name > allFiles[j].Name
-			})
-		} else {
-			sort.SliceStable(allFiles, func(i, j int) bool {
-				return allFiles[i].Name < allFiles[j].Name
-			})
-		}
-	}
+	sortFileEntries(allFiles, sortBy, sortOrder)
 
 	total := len(allFiles)
 
 	// 分页
-	var files []fileInfo
-	start := min(offset, total)
-	end := total
-	if limit > 0 && start+limit < end {
-		end = start + limit
-	}
-	files = allFiles[start:end]
+	files := paginateEntries(allFiles, offset, limit)
 	sendJSONResponse(w, listResponse{Files: files, Total: total, Offset: offset, Limit: limit}, http.StatusOK)
 }
 
@@ -864,51 +1010,7 @@ func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 	csMap := h.checksumStore.GetAll()
 
-	var results []fileInfo
-	if err := filepath.WalkDir(cfg.UploadsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip inaccessible entries
-		}
-		rel, _ := filepath.Rel(cfg.UploadsDir, path)
-		if rel == "." {
-			return nil
-		}
-		// 跳过内部目录
-		if d.Name() == ".checksums.json" || d.Name() == chunkedDirName {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.Contains(strings.ToLower(d.Name()), qLower) {
-			return nil
-		}
-		if d.IsDir() {
-			results = append(results, fileInfo{
-				Name:  filepath.ToSlash(rel),
-				IsDir: true,
-			})
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		fi := fileInfo{
-			Name:    filepath.ToSlash(rel),
-			Size:    info.Size(),
-			ModTime: info.ModTime().UnixNano(),
-		}
-		if cs, ok := csMap[filepath.ToSlash(rel)]; ok {
-			fi.Checksum = cs
-		}
-		results = append(results, fi)
-		return nil
-	}); err != nil {
-		h.logger.Error("搜索文件失败", "error", err.Error())
-		sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusInternalServerError)
-		return
-	}
+	results := h.collectSearchResults(cfg.UploadsDir, qLower, csMap)
 	sendJSONResponse(w, map[string]any{"files": results}, http.StatusOK)
 }
 
@@ -922,66 +1024,30 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 	}
 	logger := h.logger.With("req_id", reqID)
 
-	fromRaw := r.URL.Query().Get("from")
-	toRaw := r.URL.Query().Get("to")
-	if fromRaw == "" || toRaw == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "from 和 to 都不能为空"}, http.StatusBadRequest)
-		return
-	}
-	from, err := ValidateFilePath(fromRaw)
+	from, to, expectedChecksum, err := parseRenameParams(r)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的源路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
 		return
 	}
-	to, err := ValidateFilePath(toRaw)
-	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目标路径"}, http.StatusBadRequest)
-		return
-	}
+
 	if from == to {
 		sendJSONResponse(w, UploadResponse{Success: true, Message: "源与目标相同，无需移动"}, http.StatusOK)
 		return
 	}
 
-	expectedChecksum := r.Header.Get("X-File-Checksum")
 	if expectedChecksum == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "缺少 X-File-Checksum 请求头"}, http.StatusBadRequest)
 		return
 	}
 
-	fromPath := h.safePath(from)
-	toPath := h.safePath(to)
-	if fromPath == "" || toPath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+	fromPath, toPath, ok := resolveRenamePaths(h, w, from, to)
+	if !ok {
 		return
 	}
 
-	if _, err := os.Stat(fromPath); os.IsNotExist(err) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
+	if err := executeRename(h, w, fromPath, toPath, from, to, expectedChecksum, logger); err != nil {
 		return
 	}
-	if _, err := os.Stat(toPath); err == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
-		return
-	}
-
-	if !verifyFileWithChecksum(fromPath, expectedChecksum) {
-		logger.Warn("rename checksum 校验失败", "from", from)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件 SHA-256 校验失败"}, http.StatusBadRequest)
-		return
-	}
-
-	if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
-		logger.Error("创建目标父目录失败", "to", to, "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目标父目录失败"}, http.StatusInternalServerError)
-		return
-	}
-	if err := os.Rename(fromPath, toPath); err != nil {
-		logger.Error("重命名失败", "from", from, "to", to, "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
-		return
-	}
-	h.checksumStore.Rename(from, to)
 
 	logger.Info("文件已重命名", "from", from, "to", to, "checksum", expectedChecksum)
 	sendJSONResponse(w, UploadResponse{
@@ -1000,14 +1066,8 @@ func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing filename", http.StatusBadRequest)
 		return
 	}
-	remotePath, err := ValidateFilePath(filename)
-	if err != nil {
-		http.Error(w, "invalid filename", http.StatusBadRequest)
-		return
-	}
-	fullPath := h.safePath(remotePath)
-	if fullPath == "" {
-		http.Error(w, "invalid file path", http.StatusBadRequest)
+	remotePath, fullPath, ok := h.resolveFilePathHTTP(w, filename)
+	if !ok {
 		return
 	}
 	info, err := os.Stat(fullPath)

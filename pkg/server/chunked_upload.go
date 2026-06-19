@@ -18,6 +18,75 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 )
 
+// validateChunkChecksum 校验 chunk_checksum 是否为有效的 64 位 hex 字符串。
+func validateChunkChecksum(checksum string) bool {
+	if len(checksum) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(checksum)
+	return err == nil
+}
+
+// negotiateChunkSize 协商分块大小：使用客户端传入的值，但不超过服务端上限。
+func negotiateChunkSize(clientChunkSize int64, cfgChunkSize int64) (chunkSize int64, adjusted bool) {
+	chunkSize = clientChunkSize
+	if chunkSize <= 0 {
+		chunkSize = cfgChunkSize
+	}
+	if chunkSize <= 0 {
+		chunkSize = size.DefaultChunkSize
+	}
+	if chunkSize > size.DefaultChunkBodyLimit-1024 {
+		chunkSize = size.DefaultChunkBodyLimit - 1024
+		adjusted = true
+	}
+	return chunkSize, adjusted
+}
+
+// checkExistingFileForInit 检查目标文件是否已存在。返回 true 表示已处理（调用方应 return）。
+func (h *Handlers) checkExistingFileForInit(w http.ResponseWriter, filename, fileChecksum string) bool {
+	existingPath := h.safePath(filename)
+	if existingPath == "" {
+		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return true
+	}
+	stat, err := os.Stat(existingPath)
+	if err != nil {
+		return false // 文件不存在，继续正常流程
+	}
+	if verifyFileWithChecksum(existingPath, fileChecksum) {
+		h.logger.Info("文件已存在，跳过上传", "file_name", filename, "size", stat.Size(), "checksum", shortid.ShortHash(fileChecksum))
+		sendJSONResponse(w, ChunkedInitResponse{
+			Success:  true,
+			UploadID: "already_exists",
+			Message:  fmt.Sprintf("文件已存在, size: %d", stat.Size()),
+		}, http.StatusOK)
+		return true
+	}
+	// 文件存在但 checksum 不匹配，不允许覆盖
+	h.logger.Warn("同名文件已存在但 checksum 不匹配", "file_name", filename)
+	sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "同名文件已存在但 checksum 不匹配"}, http.StatusConflict)
+	return true
+}
+
+// parseChunkFormParams 解析分块上传请求中的表单参数。
+func parseChunkFormParams(r *http.Request) (uploadID string, chunkIndex int, chunkChecksum string, ok bool) {
+	uploadID = r.FormValue("upload_id")
+	chunkIndexStr := r.FormValue("chunk_index")
+	chunkChecksum = r.FormValue("chunk_checksum")
+
+	if uploadID == "" || chunkIndexStr == "" {
+		return "", 0, "", false
+	}
+	if !validateChunkChecksum(chunkChecksum) {
+		return "", 0, "", false
+	}
+	if _, err := fmt.Sscanf(chunkIndexStr, "%d", &chunkIndex); err != nil {
+		return "", 0, "", false
+	}
+	return uploadID, chunkIndex, chunkChecksum, true
+}
+
 // uploadInit 初始化一个分块上传会话。
 func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
@@ -31,7 +100,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		ChunkSize    int64  `json:"chunk_size"`
 		TotalChunks  int    `json:"total_chunks"`
 		FileChecksum string `json:"file_checksum"`
-		FileModTime  int64  `json:"file_mod_time"` // UnixNano, 0 = unknown
+		FileModTime  int64  `json:"file_mod_time"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
@@ -67,11 +136,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "chunk_size * total_chunks 应 >= total_size"}, http.StatusBadRequest)
 		return
 	}
-	if len(req.FileChecksum) != 64 {
-		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "file_checksum 必须是 64 位 hex"}, http.StatusBadRequest)
-		return
-	}
-	if _, err := hex.DecodeString(req.FileChecksum); err != nil {
+	if !validateChunkChecksum(req.FileChecksum) {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "file_checksum 不是有效的 hex"}, http.StatusBadRequest)
 		return
 	}
@@ -82,46 +147,19 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 已存在同名文件的检查：如果文件已在，且 checksum 匹配，返回成功
-	existingPath := h.safePath(req.Filename)
-	if existingPath == "" {
-		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
-		return
-	}
-	if stat, err := os.Stat(existingPath); err == nil {
-		if verifyFileWithChecksum(existingPath, req.FileChecksum) {
-			h.logger.Info("文件已存在，跳过上传", "file_name", req.Filename, "size", stat.Size(), "checksum", shortid.ShortHash(req.FileChecksum))
-			sendJSONResponse(w, ChunkedInitResponse{
-				Success:  true,
-				UploadID: "already_exists",
-				Message:  fmt.Sprintf("文件已存在, size: %d", stat.Size()),
-			}, http.StatusOK)
-			return
-		}
-		// 文件存在但 checksum 不匹配，不允许覆盖
-		h.logger.Warn("同名文件已存在但 checksum 不匹配", "file_name", req.Filename)
-		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "同名文件已存在但 checksum 不匹配"}, http.StatusConflict)
+	// 已存在同名文件的检查
+	if h.checkExistingFileForInit(w, req.Filename, req.FileChecksum) {
 		return
 	}
 
-	// 分块大小：使用客户端传入的 chunk_size，由客户端自适应计算
-	chunkSize := req.ChunkSize
-	if chunkSize <= 0 {
-		chunkSize = cfg.ChunkSize
-	}
-	if chunkSize <= 0 {
-		chunkSize = size.DefaultChunkSize // 4 MiB 保底
-	}
-
-	// 确保客户端 chunk 不超过服务端单块请求上限
-	// 预留 1024 字节用于 multipart 边界与表单字段开销，避免 body 略超限制导致 413
-	if chunkSize > size.DefaultChunkBodyLimit-1024 {
+	// 分块大小协商
+	chunkSize, adjusted := negotiateChunkSize(req.ChunkSize, cfg.ChunkSize)
+	if adjusted {
 		h.logger.Info("chunk_size 超出服务端上限，自动裁剪",
-			"client_chunk_size", chunkSize,
+			"client_chunk_size", req.ChunkSize,
 			"max_chunk_upload_bytes", size.DefaultChunkBodyLimit,
 			"file_name", req.Filename,
 			"upload_id", shortid.ShortHash(req.UploadID))
-		chunkSize = size.DefaultChunkBodyLimit - 1024
 		req.TotalChunks = int((req.TotalSize + chunkSize - 1) / chunkSize)
 	}
 
@@ -158,35 +196,14 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, size.DefaultChunkBodyLimit)
 
 	// 解析 multipart
-	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil { // 超过 DefaultChunkBodyLimit 由 MaxBytesReader 拦截
+	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil {
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败"}, http.StatusRequestEntityTooLarge)
 		return
 	}
 
-	uploadID := r.FormValue("upload_id")
-	chunkIndexStr := r.FormValue("chunk_index")
-	chunkChecksum := r.FormValue("chunk_checksum")
-
-	if uploadID == "" || chunkIndexStr == "" {
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "缺少 upload_id 或 chunk_index"}, http.StatusBadRequest)
-		return
-	}
-	if chunkChecksum == "" {
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "缺少 chunk_checksum"}, http.StatusBadRequest)
-		return
-	}
-	if len(chunkChecksum) != 64 {
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "chunk_checksum 必须是 64 位 hex"}, http.StatusBadRequest)
-		return
-	}
-	if _, err := hex.DecodeString(chunkChecksum); err != nil {
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "chunk_checksum 不是有效的 hex"}, http.StatusBadRequest)
-		return
-	}
-
-	chunkIndex := 0
-	if _, err := fmt.Sscanf(chunkIndexStr, "%d", &chunkIndex); err != nil {
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "无效的 chunk_index"}, http.StatusBadRequest)
+	uploadID, chunkIndex, chunkChecksum, ok := parseChunkFormParams(r)
+	if !ok {
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "缺少 upload_id、chunk_index 或 chunk_checksum 无效"}, http.StatusBadRequest)
 		return
 	}
 
@@ -223,44 +240,25 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 写入 chunk 文件并计算 SHA-256
+	// 获取 chunk 写入路径与IO读锁
 	chunkPath := h.uploadStore.ChunkFilePath(uploadID, chunkIndex)
-	// 获取 chunk IO 读锁：允许多个 uploadChunk 并发写入不同 chunk，
-	// 但阻塞 mergeOneChunk 的写锁，直到本 chunk 重命名完成。
 	unlockIO := h.uploadStore.LockChunkIO(uploadID)
 	defer unlockIO()
+
 	// 确保 session 目录存在
 	if err = os.MkdirAll(filepath.Dir(chunkPath), 0755); err != nil {
 		h.logger.Warn("创建 session 目录失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 	}
 
-	tmpPath := chunkPath + ".tmp"
-	tempFile, err := os.Create(tmpPath)
+	// 原子写入 + 流式哈希（复用 writeFileAtomically 写临时文件）
+	serverChecksum, _, err := writeFileAtomically(chunkPath, file)
 	if err != nil {
-		h.logger.Error("创建 chunk 临时文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "创建临时文件失败"}, http.StatusInternalServerError)
-		return
-	}
-	defer tempFile.Close()
-	defer os.Remove(tmpPath)
-
-	// 边写边算 SHA-256
-	sha256Hash := sha256.New()
-	multiWriter := io.MultiWriter(tempFile, sha256Hash)
-	if _, err := io.Copy(multiWriter, file); err != nil {
 		h.logger.Error("写入 chunk 失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "写入分块失败"}, http.StatusInternalServerError)
 		return
 	}
 
-	if err := tempFile.Close(); err != nil {
-		h.logger.Error("关闭 chunk 临时文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "关闭临时文件失败"}, http.StatusInternalServerError)
-		return
-	}
-
 	// 校验 SHA-256
-	serverChecksum := hex.EncodeToString(sha256Hash.Sum(nil))
 	if serverChecksum != chunkChecksum {
 		h.logger.Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", chunkIndex,
 			"server", shortid.ShortHash(serverChecksum), "client", shortid.ShortHash(chunkChecksum))
@@ -270,13 +268,6 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 			ShouldRetry: true,
 			Message:     "SHA-256 校验不匹配",
 		}, http.StatusOK)
-		return
-	}
-
-	// 原子重命名
-	if err := os.Rename(tmpPath, chunkPath); err != nil {
-		h.logger.Error("重命名 chunk 文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "保存分块失败"}, http.StatusInternalServerError)
 		return
 	}
 
@@ -390,7 +381,7 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 
 // uploadComplete 合并所有分块完成上传。
 func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, size.CompleteBodyLimit) // 1KB 足够
+	r.Body = http.MaxBytesReader(w, r.Body, size.CompleteBodyLimit)
 	var req struct {
 		UploadID string `json:"upload_id"`
 	}
@@ -426,7 +417,6 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	// 检查所有分块是否已接收
 	if !h.uploadStore.AllChunksReceived(req.UploadID) {
-		// 刷新 session 获取最新状态
 		session = h.uploadStore.GetSession(req.UploadID)
 		missing := MissingChunks(session)
 		h.logger.Warn("合并请求时还有分块未接收", "upload_id", req.UploadID, "missing", len(missing))
@@ -437,20 +427,20 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 合并分块
 	filePath := h.safePath(session.Filename)
 	if filePath == "" {
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
 		return
 	}
 
-	// 确保目标文件的父目录存在（支持子目录路径）
+	// 确保目标文件的父目录存在
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		h.logger.Error("创建目标父目录失败", "upload_id", req.UploadID, "file_name", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "创建目标目录失败"}, http.StatusInternalServerError)
 		return
 	}
 
+	// 合并分块到临时文件，同时计算 SHA-256
 	tmpPath := filePath + ".tmp"
 	outFile, err := os.Create(tmpPath)
 	if err != nil {
@@ -461,15 +451,9 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	defer outFile.Close()
 	defer os.Remove(tmpPath)
 
-	hasher := sha256.New()
-	multiWriter := io.MultiWriter(outFile, hasher)
-
-	for i := 0; i < session.TotalChunks; i++ {
-		if err := h.mergeOneChunk(req.UploadID, i, multiWriter); err != nil {
-			h.logger.Error("合并 chunk 失败", "upload_id", req.UploadID, "chunk_index", i, "error", err)
-			sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: fmt.Sprintf("合并分块 %d 失败", i)}, http.StatusInternalServerError)
-			return
-		}
+	finalChecksum, err := h.mergeChunksWithHash(req.UploadID, session, outFile)
+	if err != nil {
+		return
 	}
 
 	if err := outFile.Close(); err != nil {
@@ -479,7 +463,6 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 校验最终文件的 SHA-256
-	finalChecksum := hex.EncodeToString(hasher.Sum(nil))
 	if finalChecksum != session.FileChecksum {
 		h.logger.Error("最终文件 SHA-256 校验失败", "server", finalChecksum, "client", session.FileChecksum)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "最终文件 SHA-256 校验失败，文件未保存"}, http.StatusBadRequest)
@@ -509,7 +492,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("标记 session 完成失败", "upload_id", req.UploadID, "error", err)
 	}
 
-	// 异步清理 session 目录（由 wg 追踪，支持优雅停止）
+	// 异步清理 session 目录
 	h.uploadStore.CleanupSessionAfter(req.UploadID, 5*time.Second)
 
 	h.logger.Info("文件合并完成", "file_name", session.Filename, "checksum", shortid.ShortHash(finalChecksum), "size", session.TotalSize)
@@ -519,6 +502,21 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		FileChecksum: finalChecksum,
 		Message:      "文件合并并校验通过",
 	}, http.StatusOK)
+}
+
+// mergeChunksWithHash 读取所有分块顺序写入 outFile，同时计算 SHA-256 并返回 hex 摘要。
+func (h *Handlers) mergeChunksWithHash(uploadID string, session *ChunkedUploadSession, outFile *os.File) (string, error) {
+	hasher := sha256.New()
+	multiWriter := io.MultiWriter(outFile, hasher)
+
+	for i := 0; i < session.TotalChunks; i++ {
+		if err := h.mergeOneChunk(uploadID, i, multiWriter); err != nil {
+			h.logger.Error("合并 chunk 失败", "upload_id", uploadID, "chunk_index", i, "error", err)
+			return "", err
+		}
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // mergeOneChunk 读取单个 chunk 文件并把内容拷贝到 dst。
