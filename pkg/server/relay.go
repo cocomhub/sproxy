@@ -10,6 +10,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -57,6 +59,11 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Target == "" {
 		writeRelayError(w, "缺少 target 字段", http.StatusBadRequest)
+		return
+	}
+
+	if err := validateRelayPath(req.Path); err != nil {
+		writeRelayError(w, fmt.Sprintf("非法 path: %v", err), http.StatusBadRequest)
 		return
 	}
 
@@ -109,6 +116,28 @@ func bodyToString(body []byte) string {
 		return string(body)
 	}
 	return base64.StdEncoding.EncodeToString(body)
+}
+
+// validateRelayPath 校验中继请求的 path 字段，防止 SSRF 攻击。
+// 拒绝空 path、完整 URL（含 scheme）、路径穿越和绝对路径。
+func validateRelayPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("path 不能为空")
+	}
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("path 不能包含路径穿越")
+	}
+	u, err := url.Parse(path)
+	if err != nil {
+		return fmt.Errorf("path 解析失败: %w", err)
+	}
+	if u.Scheme != "" {
+		return fmt.Errorf("path 不能包含 scheme")
+	}
+	if u.Host != "" {
+		return fmt.Errorf("path 不能包含 host")
+	}
+	return nil
 }
 
 func writeRelayError(w http.ResponseWriter, msg string, code int) {

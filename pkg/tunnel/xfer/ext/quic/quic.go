@@ -38,6 +38,8 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -146,12 +148,39 @@ func (l *QuicListener) Close() error {
 	return l.ln.Close()
 }
 
+// DialTLSConfig 根据 addr 构建 TLS 配置，供 Dial 使用。
+// 从 addr 提取 host 设置 ServerName，支持通过 SPROXY_QUIC_CA_CERT
+// 环境变量指定 CA 证书文件路径验证服务端证书。
+// 未设置环境变量时使用系统默认 CA 池。
+func DialTLSConfig(addr string) (*tls.Config, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("quic dial: %w", err)
+	}
+	tlsConf := &tls.Config{
+		ServerName: host,
+		NextProtos: []string{"sproxy-quic"},
+	}
+	if caPath := os.Getenv("SPROXY_QUIC_CA_CERT"); caPath != "" {
+		caCert, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("quic dial: CA 证书读取失败: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("quic dial: 无效的 CA 证书")
+		}
+		tlsConf.RootCAs = pool
+	}
+	return tlsConf, nil
+}
+
 // Dial 建立 QUIC 连接到 addr 并打开双向 stream。
 // addr 格式：host:port（如 "127.0.0.1:9000"）。
 func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
-	tlsConf := &tls.Config{
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"sproxy-quic"},
+	tlsConf, err := DialTLSConfig(addr)
+	if err != nil {
+		return nil, err
 	}
 	qconn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
 		HandshakeIdleTimeout: 30 * time.Second,
@@ -162,7 +191,7 @@ func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
 	}
 	stream, err := qconn.OpenStreamSync(ctx)
 	if err != nil {
-		qconn.CloseWithError(0, "stream failed")
+		_ = qconn.CloseWithError(0, "stream failed")
 		return nil, fmt.Errorf("quic open stream: %w", err)
 	}
 	return &quicConn{stream: stream}, nil
