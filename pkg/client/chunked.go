@@ -92,6 +92,234 @@ func generateUploadID(filename string, fileSize int64, modTime time.Time, fileCh
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
+// ChunkedUploader 封装分块上传的并发控制和进度追踪。
+type ChunkedUploader struct {
+	client      *FileClient
+	chunkSize   int64
+	concurrency int
+	fileSize    int64
+	totalChunks int
+	filePath    string
+	filename    string
+	uploadID    string
+	checksum    string
+	failed      atomic.Bool
+	mu          sync.Mutex
+	progress    int64
+}
+
+// newChunkedUploader 创建分块上传器。
+func newChunkedUploader(client *FileClient, filePath, uploadID string, chunkSize, fileSize int64, totalChunks int, checksum, filename string, concurrency int) *ChunkedUploader {
+	return &ChunkedUploader{
+		client:      client,
+		chunkSize:   chunkSize,
+		concurrency: concurrency,
+		fileSize:    fileSize,
+		totalChunks: totalChunks,
+		filePath:    filePath,
+		filename:    filename,
+		uploadID:    uploadID,
+		checksum:    checksum,
+	}
+}
+
+// run 执行分块上传循环，上传指定索引列表的分块，然后完成上传。
+func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*ChunkedUploadResult, error) {
+	sem := make(chan struct{}, u.concurrency)
+	var wg sync.WaitGroup
+
+	taskCh := make(chan int, len(chunkIndices))
+	for _, idx := range chunkIndices {
+		taskCh <- idx
+	}
+	close(taskCh)
+
+	for idx := range taskCh {
+		if u.failed.Load() {
+			break
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+
+		go func(chunkIdx int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			for range maxRetries {
+				if u.failed.Load() {
+					return
+				}
+
+				if u.uploadChunk(ctx, chunkIdx) {
+					return // 上传成功
+				}
+				if u.failed.Load() {
+					return // 非重试错误
+				}
+				// should_retry: 继续重试
+			}
+			// 重试耗尽
+			u.client.logger.Warn("chunk 重试耗尽", "chunk_index", chunkIdx,
+				"upload_id", shortid.ShortHash(u.uploadID))
+			u.failed.Store(true)
+		}(idx)
+	}
+
+	wg.Wait()
+
+	if u.failed.Load() {
+		return nil, fmt.Errorf("上传失败：部分分块上传失败，可使用 --resume 续传")
+	}
+
+	// 完成上传
+	completeBody, _ := json.Marshal(chunkedCompleteRequest{UploadID: u.uploadID})
+	resp, err := u.client.doRequest(ctx, "POST", "/upload/complete", bytes.NewReader(completeBody), http.Header{
+		"Content-Type": {"application/json"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("完成上传请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var completeResult ChunkedUploadResult
+	if err := json.NewDecoder(resp.Body).Decode(&completeResult); err != nil {
+		return nil, fmt.Errorf("解析 complete 响应失败: %w", err)
+	}
+
+	if !completeResult.Success {
+		return nil, fmt.Errorf("文件合并失败: %s", completeResult.Message)
+	}
+
+	u.client.logger.Info("分块上传完成", "file_name", u.filename, "checksum", shortid.ShortHash(u.checksum))
+	return &completeResult, nil
+}
+
+// uploadChunk 执行一个分块的完整上传流程（打开文件、读取、构建请求、发送、解析响应）。
+// 返回 true 表示上传成功，false 表示需要重试（对于不可重试的错误，内部调用 u.failed.Store(true)）。
+func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
+	f, err := u.openAndSeekChunk(chunkIdx)
+	if err != nil {
+		u.client.logger.Warn("chunk 打开文件失败", "chunk_index", chunkIdx,
+			"upload_id", shortid.ShortHash(u.uploadID), "file", u.filePath, "error", err)
+		return false
+	}
+
+	offset := int64(chunkIdx) * int64(u.chunkSize)
+	chunkData := make([]byte, u.chunkSize)
+	n, readErr := io.ReadFull(f, chunkData)
+	f.Close()
+	if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
+		u.client.logger.Warn("chunk 读取失败", "chunk_index", chunkIdx,
+			"upload_id", shortid.ShortHash(u.uploadID), "offset", offset, "error", readErr)
+		return false
+	}
+	chunkData = chunkData[:n]
+
+	// 计算分块 SHA-256
+	chunkHash := sha256.Sum256(chunkData)
+	chunkChecksum := hex.EncodeToString(chunkHash[:])
+
+	// 构造 multipart 请求
+	body, ct, err := u.buildChunkRequest(chunkIdx, chunkData, chunkChecksum)
+	if err != nil {
+		u.client.logger.Warn("chunk 构建请求失败", "chunk_index", chunkIdx,
+			"upload_id", shortid.ShortHash(u.uploadID), "error", err)
+		return false
+	}
+
+	success, shouldRetry, statusCode, message := u.sendChunkRequest(ctx, chunkIdx, body, ct)
+	if success {
+		u.mu.Lock()
+		u.progress += int64(n)
+		if u.client.progressFn != nil {
+			u.client.progressFn("上传", u.progress, u.fileSize)
+		}
+		u.client.logger.Debug("chunk 上传成功", "chunk_index", chunkIdx, "checksum", shortid.ShortHash(chunkChecksum))
+		u.mu.Unlock()
+		return true
+	}
+
+	if !shouldRetry {
+		// 非重试错误（如 upload_id 过期），标记失败
+		u.client.logger.Warn("chunk 非重试错误", "chunk_index", chunkIdx,
+			"upload_id", shortid.ShortHash(u.uploadID), "status", statusCode,
+			"message", message)
+		u.failed.Store(true)
+	}
+	return false
+}
+
+// openAndSeekChunk 打开文件并寻道到指定分块的偏移位置。
+func (u *ChunkedUploader) openAndSeekChunk(index int) (*os.File, error) {
+	offset := int64(index) * int64(u.chunkSize)
+	u.mu.Lock()
+	f, err := os.Open(u.filePath)
+	u.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if _, err = f.Seek(offset, io.SeekStart); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// buildChunkRequest 构建分块上传的 multipart 请求体，返回 body reader 和 Content-Type。
+func (u *ChunkedUploader) buildChunkRequest(chunkIdx int, chunkData []byte, chunkChecksum string) (io.Reader, string, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+
+	if err := mw.WriteField("upload_id", u.uploadID); err != nil {
+		return nil, "", fmt.Errorf("写入 upload_id: %w", err)
+	}
+	if err := mw.WriteField("chunk_index", fmt.Sprintf("%d", chunkIdx)); err != nil {
+		return nil, "", fmt.Errorf("写入 chunk_index: %w", err)
+	}
+	if err := mw.WriteField("chunk_checksum", chunkChecksum); err != nil {
+		return nil, "", fmt.Errorf("写入 chunk_checksum: %w", err)
+	}
+
+	part, err := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", chunkIdx))
+	if err != nil {
+		return nil, "", fmt.Errorf("创建 form file: %w", err)
+	}
+	if _, err = part.Write(chunkData); err != nil {
+		return nil, "", fmt.Errorf("写入 form part: %w", err)
+	}
+	mw.Close()
+
+	return &buf, mw.FormDataContentType(), nil
+}
+
+// sendChunkRequest 发送分块上传请求并解析响应，返回 success、shouldRetry、statusCode、message。
+func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, body io.Reader, contentType string) (success, shouldRetry bool, statusCode int, message string) {
+	headers := make(http.Header)
+	headers.Set("Content-Type", contentType)
+
+	chunkResp, err := u.client.doRequest(ctx, "POST", "/upload/chunk", body, headers)
+	if err != nil {
+		u.client.logger.Warn("chunk 上传请求失败", "chunk_index", chunkIdx,
+			"upload_id", shortid.ShortHash(u.uploadID), "error", err)
+		return false, true, 0, ""
+	}
+	defer chunkResp.Body.Close()
+
+	var chunkResult struct {
+		Success     bool   `json:"success"`
+		ShouldRetry bool   `json:"should_retry"`
+		Message     string `json:"message"`
+	}
+	if decodeErr := json.NewDecoder(chunkResp.Body).Decode(&chunkResult); decodeErr != nil {
+		u.client.logger.Warn("chunk 响应解析失败", "chunk_index", chunkIdx,
+			"upload_id", shortid.ShortHash(u.uploadID), "status", chunkResp.StatusCode,
+			"error", decodeErr)
+		return false, true, chunkResp.StatusCode, ""
+	}
+
+	return chunkResult.Success, chunkResult.ShouldRetry, chunkResp.StatusCode, chunkResult.Message
+}
+
 // ChunkedUpload 分块上传文件到指定的远端路径。支持续传。
 //
 // 参数：
@@ -292,189 +520,19 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 
 // uploadChunks 上传指定索引列表的分块，然后完成上传。
 func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string, chunkSize, fileSize int64, totalChunks int, fileChecksum, filename string, chunkIndices []int, concurrency int) (*ChunkedUploadResult, error) {
-	var (
-		mu       sync.Mutex
-		failed   atomic.Bool
-		wg       sync.WaitGroup
-		progress int64
-	)
-
-	sem := make(chan struct{}, concurrency)
-
-	type chunkTask struct {
-		index int
-	}
-
-	taskCh := make(chan chunkTask, len(chunkIndices))
-	for _, i := range chunkIndices {
-		taskCh <- chunkTask{index: i}
-	}
-	close(taskCh)
-
-	for task := range taskCh {
-		if failed.Load() {
-			break
-		}
-		idx := task.index
-
-		sem <- struct{}{}
-		wg.Add(1)
-
-		go func(chunkIdx int) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			for range maxRetries {
-				if failed.Load() {
-					return
-				}
-				// 读取分块数据
-				chunkData := make([]byte, chunkSize)
-				offset := int64(chunkIdx) * int64(chunkSize)
-
-				mu.Lock()
-				f, err := os.Open(filePath)
-				mu.Unlock()
-				if err != nil {
-					c.logger.Warn("chunk 打开文件失败", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "file", filePath, "error", err)
-					return
-				}
-				if _, err = f.Seek(offset, io.SeekStart); err != nil {
-					c.logger.Warn("chunk seek 失败", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "offset", offset, "error", err)
-					f.Close()
-					continue
-				}
-				n, readErr := io.ReadFull(f, chunkData)
-				f.Close()
-				if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
-					c.logger.Warn("chunk 读取失败", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "offset", offset, "error", readErr)
-					continue
-				}
-				chunkData = chunkData[:n]
-
-				// 计算分块 SHA-256
-				chunkHash := sha256.Sum256(chunkData)
-				chunkChecksum := hex.EncodeToString(chunkHash[:])
-
-				// 构造 multipart 请求
-				var buf bytes.Buffer
-				mw := multipart.NewWriter(&buf)
-				if err = mw.WriteField("upload_id", uploadID); err != nil {
-					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "error", err)
-					continue
-				}
-				if err = mw.WriteField("chunk_index", fmt.Sprintf("%d", chunkIdx)); err != nil {
-					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "error", err)
-					continue
-				}
-				if err = mw.WriteField("chunk_checksum", chunkChecksum); err != nil {
-					c.logger.Warn("chunk 写入 form field 失败", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "error", err)
-					continue
-				}
-
-				part, err := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", chunkIdx))
-				if err != nil {
-					c.logger.Warn("chunk 创建 form 失败", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "error", err)
-					continue
-				}
-				if _, err = part.Write(chunkData); err != nil {
-					c.logger.Warn("chunk 写入 form part 失败", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "error", err)
-					continue
-				}
-				mw.Close()
-
-				headers := make(http.Header)
-				headers.Set("Content-Type", mw.FormDataContentType())
-
-				chunkResp, err := c.doRequest(ctx, "POST", "/upload/chunk", &buf, headers)
-				if err != nil {
-					c.logger.Warn("chunk 上传请求失败", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "error", err)
-					continue
-				}
-
-				var chunkResult struct {
-					Success     bool   `json:"success"`
-					ShouldRetry bool   `json:"should_retry"`
-					Message     string `json:"message"`
-				}
-				if decodeErr := json.NewDecoder(chunkResp.Body).Decode(&chunkResult); decodeErr != nil {
-					c.logger.Warn("chunk 响应解析失败", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "status", chunkResp.StatusCode,
-						"error", decodeErr)
-					chunkResp.Body.Close()
-					continue
-				}
-				chunkResp.Body.Close()
-
-				if chunkResult.Success {
-					// 更新进度
-					mu.Lock()
-					progress += int64(n)
-					if c.progressFn != nil {
-						c.progressFn("上传", progress, fileSize)
-					}
-					c.logger.Debug("chunk 上传成功", "chunk_index", chunkIdx, "checksum", shortid.ShortHash(chunkChecksum))
-					mu.Unlock()
-					return // 上传成功
-				}
-
-				if !chunkResult.ShouldRetry {
-					// 非重试错误（如 upload_id 过期），标记失败
-					c.logger.Warn("chunk 非重试错误", "chunk_index", chunkIdx,
-						"upload_id", shortid.ShortHash(uploadID), "status", chunkResp.StatusCode,
-						"message", chunkResult.Message)
-					failed.Store(true)
-					return
-				}
-				// should_retry: 继续重试
-			}
-			// 重试耗尽
-			c.logger.Warn("chunk 重试耗尽", "chunk_index", chunkIdx,
-				"upload_id", shortid.ShortHash(uploadID))
-			failed.Store(true)
-		}(idx)
-	}
-
-	wg.Wait()
-
-	if failed.Load() {
-		return nil, fmt.Errorf("上传失败：部分分块上传失败，可使用 --resume 续传")
-	}
-
-	// 完成上传
-	completeBody, _ := json.Marshal(chunkedCompleteRequest{UploadID: uploadID})
-	resp, err := c.doRequest(ctx, "POST", "/upload/complete", bytes.NewReader(completeBody), http.Header{
-		"Content-Type": {"application/json"},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("完成上传请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var completeResult ChunkedUploadResult
-	if err := json.NewDecoder(resp.Body).Decode(&completeResult); err != nil {
-		return nil, fmt.Errorf("解析 complete 响应失败: %w", err)
-	}
-
-	if !completeResult.Success {
-		return nil, fmt.Errorf("文件合并失败: %s", completeResult.Message)
-	}
-
-	c.logger.Info("分块上传完成", "file_name", filename, "checksum", shortid.ShortHash(fileChecksum))
-	return &completeResult, nil
+	uploader := newChunkedUploader(c, filePath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, concurrency)
+	return uploader.run(ctx, chunkIndices)
 }
 
-// ChunkedDownload 分块下载文件，支持并行下载和 checksum 校验。
-func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath string, opts ...ChunkedOption) error {
+// downloadParams 分块下载的参数。
+type downloadParams struct {
+	chunkSize   int64
+	concurrency int
+	maxChunk    int64
+}
+
+// getDownloadParams 解析分块下载的选项参数。
+func getDownloadParams(c *FileClient, opts ...ChunkedOption) *downloadParams {
 	opt := &chunkedOpts{
 		chunkSize:   c.ChunkSize,
 		concurrency: defaultConcurrency,
@@ -486,24 +544,23 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	if maxChunk <= 0 {
 		maxChunk = size.DefaultMaxChunkSize
 	}
-
-	if outputPath == "" {
-		outputPath = filename
+	return &downloadParams{
+		chunkSize:   opt.chunkSize,
+		concurrency: opt.concurrency,
+		maxChunk:    maxChunk,
 	}
+}
 
-	// 获取文件信息（直接 Stat）
-	var fileSize int64
-	var expectedChecksum string
-	var fileModTime int64
-
+// getFileStat 通过 HEAD 请求获取远端文件的元信息。
+func getFileStat(ctx context.Context, c *FileClient, filename string) (fileSize int64, checksum string, modTime int64, err error) {
 	statResp, err := c.doRequest(ctx, "HEAD", "/api/files/stat?filename="+url.QueryEscape(filename), nil, nil)
 	if err == nil && statResp.StatusCode == http.StatusOK {
 		if s := statResp.Header.Get("X-File-Size"); s != "" {
 			fileSize, _ = strconv.ParseInt(s, 10, 64)
 		}
-		expectedChecksum = statResp.Header.Get("X-File-Checksum")
+		checksum = statResp.Header.Get("X-File-Checksum")
 		if m := statResp.Header.Get("X-File-MTime"); m != "" {
-			fileModTime, _ = strconv.ParseInt(m, 10, 64)
+			modTime, _ = strconv.ParseInt(m, 10, 64)
 		}
 	}
 	if statResp != nil {
@@ -511,10 +568,26 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	}
 
 	if fileSize <= 0 {
-		return fmt.Errorf("无法获取文件信息: %s", filename)
+		return 0, "", 0, fmt.Errorf("无法获取文件信息: %s", filename)
+	}
+	return fileSize, checksum, modTime, nil
+}
+
+// ChunkedDownload 分块下载文件，支持并行下载和 checksum 校验。
+func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath string, opts ...ChunkedOption) error {
+	params := getDownloadParams(c, opts...)
+
+	if outputPath == "" {
+		outputPath = filename
 	}
 
-	chunkSize := calcChunkSize(fileSize, opt.chunkSize, maxChunk)
+	// 获取文件信息（直接 Stat）
+	fileSize, expectedChecksum, fileModTime, err := getFileStat(ctx, c, filename)
+	if err != nil {
+		return err
+	}
+
+	chunkSize := calcChunkSize(fileSize, params.chunkSize, params.maxChunk)
 	totalChunks := int((fileSize + chunkSize - 1) / chunkSize)
 
 	outFile, err := os.Create(outputPath)
@@ -535,7 +608,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		wg          sync.WaitGroup
 	)
 
-	sem := make(chan struct{}, opt.concurrency)
+	sem := make(chan struct{}, params.concurrency)
 
 	for i := range totalChunks {
 		sem <- struct{}{}
