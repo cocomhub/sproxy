@@ -174,3 +174,53 @@ func TestBodyToString_Empty(t *testing.T) {
 		t.Errorf("expected empty string, got %q", got)
 	}
 }
+
+func TestValidateRelayPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{
+			name:    "normal path",
+			path:    "/api/v1/resource",
+			wantErr: false,
+		},
+		{
+			name:    "empty path",
+			path:    "",
+			wantErr: true,
+		},
+		{
+			name:    "http URL",
+			path:    "http://internal-service/admin",
+			wantErr: true,
+		},
+		{
+			name:    "https URL",
+			path:    "https://evil.com/api",
+			wantErr: true,
+		},
+		{
+			name:    "path traversal",
+			path:    "../../etc/passwd",
+			wantErr: true,
+		},
+		{
+			name:    "path with query string",
+			path:    "/api/v1/resource?key=value",
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRelayPath(tt.path)
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected error for path %q, got nil", tt.path)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error for path %q: %v", tt.path, err)
+			}
+		})
+	}
+}
