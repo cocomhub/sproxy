@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -96,26 +97,9 @@ func tunnelRequest(cfg *client.Config, method, targetURL string, headers []strin
 		}
 	}
 
-	finalOutputFile := outputFile
-	if finalOutputFile == "" {
-		// 无输出路径时写入临时目录，避免污染 CWD
-		baseDir := currentDir
-		if baseDir == "" {
-			baseDir = os.TempDir()
-		}
-		baseOutputFile := path.Base(req.URL.Path)
-		if baseOutputFile == "." || baseOutputFile == "" || baseOutputFile == "/" {
-			baseOutputFile = "index.html"
-		}
-		finalOutputFile = filepath.Join(baseDir, baseOutputFile)
-		no := 1
-		for {
-			if _, err := os.Stat(finalOutputFile); errors.Is(err, os.ErrNotExist) {
-				break
-			}
-			finalOutputFile = filepath.Join(baseDir, fmt.Sprintf("%s.%d", baseOutputFile, no))
-			no++
-		}
+	finalOutputFile, err := resolveOutputPath(targetURL, outputFile)
+	if err != nil {
+		return err
 	}
 
 	f, err := os.Create(finalOutputFile)
@@ -153,17 +137,69 @@ func tunnelRequest(cfg *client.Config, method, targetURL string, headers []strin
 		fmt.Fprintf(os.Stderr, "正在保存至: '%s'\n\n", finalOutputFile)
 	}
 
+	totalRead, err := writeWithProgress(resp.Body, f, contentLength)
+	if err != nil {
+		return err
+	}
+
+	if contentLength > 0 {
+		fmt.Fprintf(os.Stderr, "\n'%s' saved [%d/%d]\n", finalOutputFile, totalRead, contentLength)
+	}
+
+	modTimeStr := resp.Header.Get("Last-Modified")
+	if modTimeStr != "" {
+		modTime, err := time.Parse(time.RFC1123, modTimeStr)
+		if err == nil {
+			_ = os.Chtimes(finalOutputFile, modTime, modTime)
+		}
+	}
+	return nil
+}
+
+// resolveOutputPath 计算输出文件路径。若已指定 outputFile 则直接返回；
+// 否则从 URL 路径提取 basename，处理同名冲突后返回。
+func resolveOutputPath(targetURL string, outputFile string) (string, error) {
+	if outputFile != "" {
+		return outputFile, nil
+	}
+	baseDir := currentDir
+	if baseDir == "" {
+		baseDir = os.TempDir()
+	}
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return "", fmt.Errorf("解析 URL 失败: %w", err)
+	}
+	baseOutputFile := path.Base(u.Path)
+	if baseOutputFile == "." || baseOutputFile == "" || baseOutputFile == "/" {
+		baseOutputFile = "index.html"
+	}
+	finalOutputFile := filepath.Join(baseDir, baseOutputFile)
+	no := 1
+	for {
+		if _, err := os.Stat(finalOutputFile); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		finalOutputFile = filepath.Join(baseDir, fmt.Sprintf("%s.%d", baseOutputFile, no))
+		no++
+	}
+	return finalOutputFile, nil
+}
+
+// writeWithProgress 从 r 读取数据写入 w，同时以进度条形式显示进度。
+// contentLength 为 -1 时不显示进度条。
+func writeWithProgress(r io.Reader, w io.Writer, contentLength int64) (int64, error) {
 	barWidth := 50
 	var totalRead int64
 	startAt := time.Now()
 	lastPrintAt := time.Now()
 	buf := make([]byte, 32*1024)
 	for {
-		n, err := resp.Body.Read(buf)
+		n, err := r.Read(buf)
 		if n > 0 {
-			written, writeErr := f.Write(buf[:n])
+			written, writeErr := w.Write(buf[:n])
 			if writeErr != nil {
-				return fmt.Errorf("写入文件失败: %w", writeErr)
+				return totalRead, fmt.Errorf("写入文件失败: %w", writeErr)
 			}
 			totalRead += int64(written)
 
@@ -180,7 +216,7 @@ func tunnelRequest(cfg *client.Config, method, targetURL string, headers []strin
 			if err == io.EOF {
 				break
 			}
-			return fmt.Errorf("读取响应体失败: %w", err)
+			return totalRead, fmt.Errorf("读取响应体失败: %w", err)
 		}
 	}
 
@@ -191,15 +227,7 @@ func tunnelRequest(cfg *client.Config, method, targetURL string, headers []strin
 		bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
 		fmt.Fprintf(os.Stderr, "\r%6.2f%% [%s] %s   in %s    \n",
 			percent, bar, client.FormatByte(float64(totalRead)), endAt.Sub(startAt))
-		fmt.Fprintf(os.Stderr, "\n'%s' saved [%d/%d]\n", finalOutputFile, totalRead, contentLength)
 	}
 
-	modTimeStr := resp.Header.Get("Last-Modified")
-	if modTimeStr != "" {
-		modTime, err := time.Parse(time.RFC1123, modTimeStr)
-		if err == nil {
-			os.Chtimes(finalOutputFile, modTime, modTime)
-		}
-	}
-	return nil
+	return totalRead, nil
 }
