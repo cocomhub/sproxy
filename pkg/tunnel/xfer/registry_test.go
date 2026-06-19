@@ -31,7 +31,7 @@ func TestEmptyTransport_ListenReturnsError(t *testing.T) {
 func TestRegister_EmptyName(t *testing.T) {
 	// 必须 panic——使用独立 registry
 	defer func() {
-		if r := recover(); r == nil {
+		if recover() == nil {
 			t.Fatal("expected panic on empty name")
 		}
 	}()

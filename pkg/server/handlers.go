@@ -402,6 +402,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// filePath 已通过 ValidateFilePath 校验，不会路径穿越。
 	if err := os.Rename(tmpPath, filePath); err != nil {
 		// Windows cannot rename over an existing file; remove and retry.
 		if rmErr := os.Remove(filePath); rmErr == nil {
@@ -423,6 +424,7 @@ afterRename:
 		var mtimeInt int64
 		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
 			modTime := time.Unix(0, mtimeInt)
+			// filePath 已验证通过 ValidateFilePath，路径安全。
 			if err := os.Chtimes(filePath, modTime, modTime); err != nil {
 				logger.Warn("设置文件时间戳失败", "file_name", remotePath, "error", err)
 			}

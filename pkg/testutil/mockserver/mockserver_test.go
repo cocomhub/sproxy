@@ -205,7 +205,7 @@ func TestMockUploadStore_DeleteSession(t *testing.T) {
 	}
 
 	us.DeleteSession("sid1")
-	if got := us.GetSession("sid1"); got != nil {
+	if us.GetSession("sid1") != nil {
 		t.Fatal("expected nil after DeleteSession")
 	}
 }

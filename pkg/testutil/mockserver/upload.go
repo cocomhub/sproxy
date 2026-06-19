@@ -193,7 +193,7 @@ func (m *MockUploadStore) CleanupSessionAfter(uploadID string, delay time.Durati
 	})
 }
 
-// Stop 停止后台任务（mock 空实现）。
+// Stop 停止后台任务（mock 空实现，无后台 goroutine 需要停止）。
 func (m *MockUploadStore) Stop() {}
 
 // Health 返回存储健康状态（mock 始终健康）。
