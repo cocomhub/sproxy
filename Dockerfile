@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # 多架构静态编译
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 \
+RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" CGO_ENABLED=0 \
     go build -ldflags="-w -s" -o /build/sproxy ./cmd/sproxy/ && \
     go build -ldflags="-w -s" -o /build/sclient ./cmd/sclient/
 

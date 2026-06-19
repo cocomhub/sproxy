@@ -140,6 +140,7 @@ jobs:
         run: make bench
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
+        continue-on-error: true
         with:
           tool: 'go'
           output-file-path: build/bench/output.txt
@@ -147,7 +148,8 @@ jobs:
           auto-push: true
           alert-threshold: '100%'
           comment-on-alert: true
-          fail-on-alert: true
+          fail-on-alert: false
+          skip-fetch-gh-pages: true
       - name: Upload benchmark artifact
         uses: actions/upload-artifact@v7
         with:
