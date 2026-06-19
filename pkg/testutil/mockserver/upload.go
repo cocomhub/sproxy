@@ -11,11 +11,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 )
 
-// MockUploadStore 内存版 UploadStore，实现大部分 server.UploadStoreIface 方法。
-//
-// 注意：UploadStoreIface 包含未导出方法 lockChunkIO/lockChunkMerge（源码注释说明
-// "接口实现必须位于本包内"），因此 MockUploadStore 无法通过编译期接口断言。
-// 可用于需要调用导出方法的测试场景，所有导出方法均以 sync.RWMutex 保证并发安全。
+// MockUploadStore 内存版 UploadStore，实现 server.UploadStoreIface 全部方法。
 type MockUploadStore struct {
 	mu       sync.RWMutex
 	sessions map[string]*server.ChunkedUploadSession
@@ -198,3 +194,12 @@ func (m *MockUploadStore) Stop() {}
 
 // Health 返回存储健康状态（mock 始终健康）。
 func (m *MockUploadStore) Health() error { return nil }
+
+// LockChunkIO 获取 chunk IO 锁的模拟实现：始终不阻塞，返回空操作函数。
+func (m *MockUploadStore) LockChunkIO(uploadID string) func() { return func() {} }
+
+// LockChunkMerge 获取 chunk 合并锁的模拟实现：始终不阻塞，返回空操作函数。
+func (m *MockUploadStore) LockChunkMerge(uploadID string) func() { return func() {} }
+
+// Ensure interface compliance.
+var _ server.UploadStoreIface = (*MockUploadStore)(nil)

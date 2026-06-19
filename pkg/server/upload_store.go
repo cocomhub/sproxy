@@ -33,9 +33,6 @@ type ChunkedUploadSession struct {
 }
 
 // UploadStoreIface 定义 UploadStore 的业务接口，方便测试替身。
-//
-// 注意：lockChunkIO/lockChunkMerge 因含有未导出方法签名而未包含在接口中，
-// handler 代码通过类型断言 (*UploadStore) 访问它们。
 type UploadStoreIface interface {
 	Health() error
 	Stop()
@@ -50,6 +47,8 @@ type UploadStoreIface interface {
 	DeleteSession(uploadID string)
 	CleanupSessionAfter(uploadID string, delay time.Duration)
 	GetOrCreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, bool, error)
+	LockChunkIO(uploadID string) func()
+	LockChunkMerge(uploadID string) func()
 }
 
 // UploadStore 管理分块上传会话的持久化与并发安全。
@@ -338,9 +337,9 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 	}
 }
 
-// lockChunkIO 获取 chunk 文件写入锁（读锁）。
+// LockChunkIO 获取 chunk 文件写入锁（读锁）。
 // uploadChunk 在写入 chunk 文件前调用，允许多个 uploadChunk 并发写入不同 chunk。
-func (us *UploadStore) lockChunkIO(uploadID string) func() {
+func (us *UploadStore) LockChunkIO(uploadID string) func() {
 	us.fileLocksMu.Lock()
 	f, ok := us.fileLocks[uploadID]
 	if !ok {
@@ -352,10 +351,10 @@ func (us *UploadStore) lockChunkIO(uploadID string) func() {
 	return f.RUnlock
 }
 
-// lockChunkMerge 获取 chunk 文件合并锁（写锁）。
+// LockChunkMerge 获取 chunk 文件合并锁（写锁）。
 // mergeOneChunk 在读取 chunk 文件前调用，排他地等待所有正在写入的 chunk 完成后才允许读取，
 // 同时阻塞新的 chunk 写入，避免读到不完整的 chunk。
-func (us *UploadStore) lockChunkMerge(uploadID string) func() {
+func (us *UploadStore) LockChunkMerge(uploadID string) func() {
 	us.fileLocksMu.Lock()
 	f, ok := us.fileLocks[uploadID]
 	if !ok {
