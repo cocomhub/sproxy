@@ -8,6 +8,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -72,61 +73,11 @@ func EncryptStream(key []byte, r io.Reader, w io.Writer) (int64, error) {
 // chunkSize 每块的明文大小。较大的块可降低帧头（4 字节长度 + nonce）开销，
 // 但会增大单次分配和加密延迟。
 func EncryptStreamWithChunkSize(key []byte, r io.Reader, w io.Writer, chunkSize int) (int64, error) {
-	block, err := aes.NewCipher(key)
+	enc, err := NewStreamEncryptor(key, chunkSize)
 	if err != nil {
-		return 0, fmt.Errorf("encrypt stream: create cipher: %w", err)
+		return 0, err
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return 0, fmt.Errorf("encrypt stream: create gcm: %w", err)
-	}
-
-	var written int64
-	nonce := make([]byte, gcm.NonceSize())
-	lenBuf := make([]byte, 4)
-
-	for {
-		buf := getBuf(chunkSize)
-		n, readErr := io.ReadFull(r, buf)
-		if n == 0 && readErr == io.EOF {
-			putBuf(buf, 0)
-			break
-		}
-		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
-			putBuf(buf, n)
-			return written, fmt.Errorf("encrypt stream: read: %w", readErr)
-		}
-
-		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-			putBuf(buf, n)
-			return written, fmt.Errorf("encrypt stream: generate nonce: %w", err)
-		}
-
-		// Seal 将密文+tag 追加到 nonce 之后，返回 [nonce | ciphertext | tag]
-		// nonce 变量本身不受 Seal 影响（cap=12，不够容纳密文，会分配新内存），
-		// 因此可在下一轮循环中安全地覆写 nonce。
-		sealed := gcm.Seal(nonce, nonce, buf[:n], nil)
-
-		binary.BigEndian.PutUint32(lenBuf, uint32(len(sealed)))
-		if _, err := w.Write(lenBuf); err != nil {
-			putBuf(buf, n)
-			return written, fmt.Errorf("encrypt stream: write length: %w", err)
-		}
-		written += 4
-
-		nw, err := w.Write(sealed)
-		written += int64(nw)
-		putBuf(buf, n)
-		if err != nil {
-			return written, fmt.Errorf("encrypt stream: write chunk: %w", err)
-		}
-
-		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-			break
-		}
-	}
-
-	return written, nil
+	return enc.EncryptStream(r, w)
 }
 
 // DecryptStream 从 r 中读取 EncryptStream 生成的帧格式密文，
@@ -148,58 +99,151 @@ func DecryptStream(key []byte, r io.Reader, w io.Writer) (int64, error) {
 //
 // maxChunkSize 为单帧密文最大允许字节数，超出时返回错误，防止恶意超大帧触发 OOM。
 func DecryptStreamWithChunkSize(key []byte, r io.Reader, w io.Writer, maxChunkSize int) (int64, error) {
+	dec, err := NewStreamDecryptor(key, maxChunkSize)
+	if err != nil {
+		return 0, err
+	}
+	return dec.DecryptStream(r, w)
+}
+
+// StreamEncryptor 封装 AES-256-GCM 流式加密。
+type StreamEncryptor struct {
+	gcm       cipher.AEAD
+	chunkSize int
+	lenBuf    []byte
+}
+
+// NewStreamEncryptor 创建流加密器。
+func NewStreamEncryptor(key []byte, chunkSize int) (*StreamEncryptor, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return 0, fmt.Errorf("decrypt stream: create cipher: %w", err)
+		return nil, fmt.Errorf("encrypt stream: create cipher: %w", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return 0, fmt.Errorf("decrypt stream: create gcm: %w", err)
+		return nil, fmt.Errorf("encrypt stream: create gcm: %w", err)
 	}
+	return &StreamEncryptor{gcm: gcm, chunkSize: chunkSize, lenBuf: make([]byte, 4)}, nil
+}
 
+// EncryptChunk 加密 single plaintext 块并写入 w。
+// 返回写入的字节数（4B 长度前缀 + nonce + ciphertext + tag）。
+func (e *StreamEncryptor) EncryptChunk(plaintext []byte, w io.Writer) (int, error) {
+	nonce := make([]byte, e.gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return 0, fmt.Errorf("encrypt stream: generate nonce: %w", err)
+	}
+	// Seal 将密文+tag 追加到 nonce 之后，返回 [nonce | ciphertext | tag]
+	sealed := e.gcm.Seal(nonce, nonce, plaintext, nil)
+	binary.BigEndian.PutUint32(e.lenBuf, uint32(len(sealed)))
+	if _, err := w.Write(e.lenBuf); err != nil {
+		return 0, fmt.Errorf("encrypt stream: write length: %w", err)
+	}
+	total := 4
+	nw, err := w.Write(sealed)
+	total += nw
+	if err != nil {
+		return total, fmt.Errorf("encrypt stream: write chunk: %w", err)
+	}
+	return total, nil
+}
+
+// EncryptStream 使用流加密器从 r 中分块读取数据并加密写入 w。
+// 返回写入 w 的总字节数。
+func (e *StreamEncryptor) EncryptStream(r io.Reader, w io.Writer) (int64, error) {
 	var written int64
-	lenBuf := make([]byte, 4)
-
 	for {
-		_, err := io.ReadFull(r, lenBuf)
-		if err == io.EOF {
+		buf := getBuf(e.chunkSize)
+		n, readErr := io.ReadFull(r, buf)
+		if n == 0 && readErr == io.EOF {
+			putBuf(buf, 0)
 			break
 		}
-		if err != nil {
-			return written, fmt.Errorf("decrypt stream: read length: %w", err)
+		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+			putBuf(buf, n)
+			return written, fmt.Errorf("encrypt stream: read: %w", readErr)
 		}
 
-		chunkLen := binary.BigEndian.Uint32(lenBuf)
-		if chunkLen > uint32(maxChunkSize) {
-			return written, fmt.Errorf("decrypt stream: chunk too large: %d > %d", chunkLen, maxChunkSize)
-		}
-
-		chunk := getBuf(int(chunkLen))
-		if _, err = io.ReadFull(r, chunk); err != nil {
-			putBuf(chunk, len(chunk))
-			return written, fmt.Errorf("decrypt stream: read chunk: %w", err)
-		}
-
-		nonceSize := gcm.NonceSize()
-		if len(chunk) < nonceSize {
-			putBuf(chunk, len(chunk))
-			return written, fmt.Errorf("decrypt stream: chunk too short")
-		}
-
-		nonce, ciphertext := chunk[:nonceSize], chunk[nonceSize:]
-		plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-		// chunk 中的内容已通过 gcm.Open 消费完毕，立即归还到池中
-		putBuf(chunk, len(chunk))
-		if err != nil {
-			return written, fmt.Errorf("decrypt stream: decrypt chunk: %w", err)
-		}
-
-		nw, err := w.Write(plaintext)
+		nw, err := e.EncryptChunk(buf[:n], w)
 		written += int64(nw)
+		putBuf(buf, n)
 		if err != nil {
-			return written, fmt.Errorf("decrypt stream: write: %w", err)
+			return written, err
+		}
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			break
 		}
 	}
-
 	return written, nil
+}
+
+// StreamDecryptor 封装 AES-256-GCM 流式解密。
+type StreamDecryptor struct {
+	gcm         cipher.AEAD
+	maxChunkLen int
+	lenBuf      []byte
+}
+
+// NewStreamDecryptor 创建流解密器。
+func NewStreamDecryptor(key []byte, maxChunkLen int) (*StreamDecryptor, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt stream: create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt stream: create gcm: %w", err)
+	}
+	return &StreamDecryptor{gcm: gcm, maxChunkLen: maxChunkLen, lenBuf: make([]byte, 4)}, nil
+}
+
+// DecryptChunk 从 r 中读取一个加密块并解密，将明文写入 w。
+func (d *StreamDecryptor) DecryptChunk(r io.Reader, w io.Writer) (int, error) {
+	if _, err := io.ReadFull(r, d.lenBuf); err != nil {
+		return 0, fmt.Errorf("decrypt stream: read length: %w", err)
+	}
+	chunkLen := binary.BigEndian.Uint32(d.lenBuf)
+	if chunkLen > uint32(d.maxChunkLen) {
+		return 0, fmt.Errorf("decrypt stream: chunk too large: %d > %d", chunkLen, d.maxChunkLen)
+	}
+
+	chunk := getBuf(int(chunkLen))
+	if _, err := io.ReadFull(r, chunk); err != nil {
+		putBuf(chunk, len(chunk))
+		return 0, fmt.Errorf("decrypt stream: read chunk: %w", err)
+	}
+
+	nonceSize := d.gcm.NonceSize()
+	if len(chunk) < nonceSize {
+		putBuf(chunk, len(chunk))
+		return 0, fmt.Errorf("decrypt stream: chunk too short")
+	}
+
+	nonce, ciphertext := chunk[:nonceSize], chunk[nonceSize:]
+	plaintext, err := d.gcm.Open(nil, nonce, ciphertext, nil)
+	putBuf(chunk, len(chunk))
+	if err != nil {
+		return 0, fmt.Errorf("decrypt stream: decrypt chunk: %w", err)
+	}
+
+	nw, err := w.Write(plaintext)
+	if err != nil {
+		return nw, fmt.Errorf("decrypt stream: write: %w", err)
+	}
+	return nw, nil
+}
+
+// DecryptStream 从 r 中读取并解密流，将明文写入 w。
+func (d *StreamDecryptor) DecryptStream(r io.Reader, w io.Writer) (int64, error) {
+	var written int64
+	for {
+		nw, err := d.DecryptChunk(r, w)
+		written += int64(nw)
+		if err != nil {
+			if errors.Is(err, io.EOF) && err.Error() == "decrypt stream: read length: EOF" {
+				return written, nil
+			}
+			return written, err
+		}
+	}
 }
