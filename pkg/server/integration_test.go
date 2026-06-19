@@ -41,38 +41,15 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	cs := NewChecksumStore(cfg.UploadsDir, nil)
-	h := &Handlers{
-		cfgPtr:        &cfgPtr,
-		version:       "test",
-		buildAt:       "test",
-		checksumStore: cs,
-		logger:        slog.Default(),
-		metrics:       NewMetrics(),
-		shareStore:    NewShareStore(),
-	}
-
+	key := make([]byte, 32) // 32 字节 tunnel key，测试用零值
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
-	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
-	mux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
-	mux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
-	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
-	mux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
-	mux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
-	mux.HandleFunc("POST /api/archive", h.authMiddleware(h.archiveHandler))
-	mux.HandleFunc("GET /api/archive-dir", h.authMiddleware(h.archiveDirHandler))
-	mux.HandleFunc("GET /api/versions", h.authMiddleware(h.listVersionsHandler))
-	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
-	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
-	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
-	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
-	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
-	mux.HandleFunc("GET /healthz", h.healthz)
-	mux.HandleFunc("GET /", h.webRedirect)
+	h := RegisterRoutes(t.Context(), mux, &cfgPtr, "test", "test", key, slog.Default(), nil)
 
-	ts := httptest.NewServer(mux)
-	t.Cleanup(ts.Close)
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		_ = h.Close()
+	})
 	// 兼容旧的 `defer cleanup()` 调用语义，仍返回一个 no-op cleanup（实际工作交给 t.Cleanup）。
 	cleanup := func() {}
 	return ts.URL, &cfgPtr, cleanup

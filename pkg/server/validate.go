@@ -5,6 +5,7 @@ package server
 
 import (
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -66,4 +67,22 @@ func ValidateFilePath(filename string) (string, error) {
 
 	// 统一分隔符为 / 用于 API 序列化
 	return filepath.ToSlash(cleaned), nil
+}
+
+// joinSafePath 在 baseDir 下安全拼接 userPath，确认结果不越界。
+// userPath 必须已通过 ValidateFilePath 校验。返回安全绝对路径，失败时返回空字符串。
+// 内部记录 warn 日志以便追踪非法访问尝试。
+func joinSafePath(baseDir, userPath string) string {
+	fullPath := filepath.Join(baseDir, userPath)
+	absPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		slog.Warn("joinSafePath: Abs 解析失败", "full_path", fullPath, "error", err)
+		return ""
+	}
+	absBase, _ := filepath.Abs(baseDir)
+	if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
+		slog.Warn("joinSafePath: 路径越界", "upload_dir", absBase, "resolved_path", absPath)
+		return ""
+	}
+	return absPath
 }

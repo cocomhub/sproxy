@@ -13,6 +13,16 @@ import (
 	"sync"
 )
 
+// ChecksumStoreIface 定义 ChecksumStore 的业务接口，方便测试替身。
+type ChecksumStoreIface interface {
+	Get(filename string) (string, bool)
+	Set(filename, checksum string)
+	Delete(filename string)
+	Rename(from, to string)
+	DeletePrefix(prefix string)
+	GetAll() map[string]string
+}
+
 // ChecksumStore 在 uploads 目录下维护一个 .checksums.json 侧边文件，
 // 持久化每个文件的 SHA-256 摘要，供 upload/download/delete 操作复用。
 type ChecksumStore struct {

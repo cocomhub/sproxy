@@ -49,8 +49,8 @@ type Handlers struct {
 	cfgPtr        *atomic.Pointer[Config]
 	version       string
 	buildAt       string
-	checksumStore *ChecksumStore
-	uploadStore   *UploadStore
+	checksumStore ChecksumStoreIface
+	uploadStore   UploadStoreIface
 	tunnelHandler http.Handler
 	logger        *slog.Logger
 	metrics       *Metrics
@@ -334,7 +334,13 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	logger.Debug("上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
 
 	uploadDir := cfg.UploadsDir
-	filePath := filepath.Join(uploadDir, remotePath)
+	filePath := joinSafePath(uploadDir, remotePath)
+	if filePath == "" {
+		logger.Error("路径安全校验失败", "upload_dir", uploadDir, "remote_path", remotePath)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		return
+	}
+
 	if err = os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		logger.Error("创建目录失败", "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
@@ -402,6 +408,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// filePath 已通过 ValidateFilePath 校验，不会路径穿越。
 	if err := os.Rename(tmpPath, filePath); err != nil {
 		// Windows cannot rename over an existing file; remove and retry.
 		if rmErr := os.Remove(filePath); rmErr == nil {
@@ -423,6 +430,7 @@ afterRename:
 		var mtimeInt int64
 		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
 			modTime := time.Unix(0, mtimeInt)
+			// filePath 已验证通过 ValidateFilePath，路径安全。
 			if err := os.Chtimes(filePath, modTime, modTime); err != nil {
 				logger.Warn("设置文件时间戳失败", "file_name", remotePath, "error", err)
 			}

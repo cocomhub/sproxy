@@ -14,17 +14,16 @@ RUN go mod download
 COPY . .
 
 # 多架构静态编译
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH CGO_ENABLED=0 \
+RUN GOOS="$TARGETOS" GOARCH="$TARGETARCH" CGO_ENABLED=0 \
     go build -ldflags="-w -s" -o /build/sproxy ./cmd/sproxy/ && \
     go build -ldflags="-w -s" -o /build/sclient ./cmd/sclient/
 
 # ─── runtime ───────────────────────────────────────────
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata
-
 # 非 root 用户
-RUN adduser -D -h /app sproxy
+RUN apk add --no-cache ca-certificates tzdata && adduser -D -h /app sproxy
+
 WORKDIR /app
 USER sproxy
 

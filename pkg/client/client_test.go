@@ -507,8 +507,14 @@ func TestClient_BatchDelete(t *testing.T) {
 
 	// 先 stat 获取 checksum
 	c := NewFileClient(ts.URL)
-	info1, _ := c.Stat(t.Context(), "del1.txt")
-	info2, _ := c.Stat(t.Context(), "del2.txt")
+	info1, err := c.Stat(t.Context(), "del1.txt")
+	if err != nil {
+		t.Fatalf("Stat del1.txt: %v", err)
+	}
+	info2, err := c.Stat(t.Context(), "del2.txt")
+	if err != nil {
+		t.Fatalf("Stat del2.txt: %v", err)
+	}
 
 	results, err := c.BatchDelete(t.Context(), []BatchDeleteFile{
 		{Filename: "del1.txt", Checksum: info1.Checksum},
@@ -633,9 +639,12 @@ func TestClient_BatchRename_MissingChecksum(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	info, _ := c.Stat(t.Context(), "a.txt")
+	info, err := c.Stat(t.Context(), "a.txt")
+	if err != nil {
+		t.Fatalf("Stat a.txt: %v", err)
+	}
 
-	// 第一条缺 checksum，第二条合法
+	// 第一条合法，第二条缺 checksum
 	results, err := c.BatchRename(t.Context(), []BatchRenameOp{
 		{From: "a.txt", To: "a_renamed.txt", Checksum: info.Checksum},
 		{From: "b.txt", To: "b_renamed.txt", Checksum: ""},
