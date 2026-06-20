@@ -251,12 +251,12 @@ func writeFileAtomically(dstPath string, src io.Reader) (checksum string, writte
 func (h *Handlers) resolveFilePath(w http.ResponseWriter, filename string) (remotePath, fullPath string, ok bool) {
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return "", "", false
 	}
 	fullPath = h.safePath(remotePath)
 	if fullPath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return "", "", false
 	}
 	return remotePath, fullPath, true
@@ -317,7 +317,7 @@ func parseRenameParams(r *http.Request) (from, to, checksum string, err error) {
 	if err != nil {
 		return "", "", "", fmt.Errorf("无效的目标路径")
 	}
-	checksum = r.Header.Get("X-File-Checksum")
+	checksum = r.Header.Get(headerFileChecksum)
 	return from, to, checksum, nil
 }
 
@@ -326,7 +326,7 @@ func resolveRenamePaths(h *Handlers, w http.ResponseWriter, from, to string) (fr
 	fromPath = h.safePath(from)
 	toPath = h.safePath(to)
 	if fromPath == "" || toPath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return "", "", false
 	}
 	return fromPath, toPath, true
@@ -538,7 +538,7 @@ func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 }
 
 func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set(headerContentType, contentTypeTextPlain)
 	if h.uploadStore != nil {
 		if err := h.uploadStore.Health(); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -551,7 +551,7 @@ func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) versionHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set(headerContentType, contentTypeTextPlain)
 	w.WriteHeader(http.StatusOK)
 	_, _ = fmt.Fprintf(w, "Version: %s\nBuildAt: %s\n", h.version, h.buildAt)
 }
@@ -576,7 +576,7 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 			Connected: n.Connected.Format("2006-01-02T15:04:05Z07:00"),
 		})
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
@@ -592,7 +592,7 @@ func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	h.routeTable.Remove(id)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "removed", "node": string(id)})
 }
 
@@ -603,7 +603,7 @@ func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	count := h.routeTable.NodeCount()
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"nodes_connected": count,
 	})
@@ -633,10 +633,10 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	expectedChecksum := r.Header.Get("X-File-Checksum")
+	expectedChecksum := r.Header.Get(headerFileChecksum)
 	if expectedChecksum == "" {
 		logger.Warn("缺少 X-File-Checksum 请求头")
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "缺少 X-File-Checksum 请求头"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgMissingChecksum}, http.StatusBadRequest)
 		return
 	}
 
@@ -670,7 +670,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	serverChecksum, _, err := writeFileAtomically(filePath, file)
 	if err != nil {
 		logger.Error("保存文件失败", "error", err.Error(), "file_name", remotePath)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "保存文件失败"}, http.StatusInternalServerError)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
 		return
 	}
 
@@ -683,7 +683,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("X-File-Checksum", serverChecksum)
+	w.Header().Set(headerFileChecksum, serverChecksum)
 	h.checksumStore.Set(remotePath, serverChecksum)
 
 	// 处理文件修改时间
@@ -711,7 +711,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件名不能为空"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgEmptyFilename}, http.StatusBadRequest)
 		return
 	}
 	remotePath, err := ValidateFilePath(filename)
@@ -721,17 +721,17 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	}
 	filePath := h.safePath(remotePath)
 	if filePath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		} else {
 			h.logger.Error("打开文件失败", "file_name", remotePath, "error", err.Error())
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "打开文件失败"}, http.StatusInternalServerError)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
 		}
 		return
 	}
@@ -745,14 +745,14 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", remotePath))
-	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Type", contentTypeOctetStream)
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算
 	if cs, ok := h.checksumStore.Get(remotePath); ok {
-		w.Header().Set("X-File-Checksum", cs)
+		w.Header().Set(headerFileChecksum, cs)
 	} else if cs, err := FileChecksum(filePath); err == nil {
-		w.Header().Set("X-File-Checksum", cs)
+		w.Header().Set(headerFileChecksum, cs)
 	} else {
 		h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "file_name", remotePath)
 	}
@@ -777,7 +777,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件名不能为空"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgEmptyFilename}, http.StatusBadRequest)
 		return
 	}
 	remotePath, err := ValidateFilePath(filename)
@@ -787,7 +787,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	filePath := h.safePath(remotePath)
 	if filePath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -795,9 +795,9 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expectedChecksum := r.Header.Get("X-File-Checksum")
+	expectedChecksum := r.Header.Get(headerFileChecksum)
 	if expectedChecksum == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "缺少 X-File-Checksum 请求头"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgMissingChecksum}, http.StatusBadRequest)
 		logger.Warn("X-File-Checksum 为空", "file_name", remotePath)
 		return
 	}
@@ -1036,7 +1036,7 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if expectedChecksum == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "缺少 X-File-Checksum 请求头"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgMissingChecksum}, http.StatusBadRequest)
 		return
 	}
 
@@ -1086,10 +1086,10 @@ func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
 	w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
 	if cs, ok := h.checksumStore.Get(remotePath); ok {
-		w.Header().Set("X-File-Checksum", cs)
+		w.Header().Set(headerFileChecksum, cs)
 	} else if !info.IsDir() {
 		if cs, err := FileChecksum(fullPath); err == nil {
-			w.Header().Set("X-File-Checksum", cs)
+			w.Header().Set(headerFileChecksum, cs)
 		}
 	}
 	w.WriteHeader(http.StatusOK)

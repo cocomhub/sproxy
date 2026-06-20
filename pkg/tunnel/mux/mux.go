@@ -29,6 +29,12 @@ const retryBaseDelay = 100 * time.Millisecond
 // maxRecvRetries 是读取循环遇到临时错误时的最大重试次数。
 const maxRecvRetries = 5
 
+// errFmtMuxStreamErr 是流相关错误的格式化字符串。
+const errFmtMuxStreamErr = "mux: stream %d: %w"
+
+// errFmtMuxClosed 是 mux 关闭错误的格式化字符串。
+const errFmtMuxClosed = "mux: %w"
+
 // Sentinel errors.
 var (
 	ErrStreamRejected = errors.New("mux: stream rejected")
@@ -158,7 +164,7 @@ func (s *stream) reject() {
 
 func (s *stream) rejectedOrClosedErr() error {
 	if s.rejected.Load() {
-		return fmt.Errorf("mux: stream %d: %w", s.id, ErrStreamRejected)
+		return fmt.Errorf(errFmtMuxStreamErr, s.id, ErrStreamRejected)
 	}
 	return fmt.Errorf("mux: stream %d: %w", s.id, xfer.ErrConnClosed)
 }
@@ -240,7 +246,7 @@ func (s *stream) CloseWrite() error {
 	case s.mux.writeCh <- writeMsg{streamID: s.id, data: nil}:
 		return nil
 	case <-s.done:
-		return fmt.Errorf("mux: stream %d: %w", s.id, xfer.ErrConnClosed)
+		return fmt.Errorf(errFmtMuxStreamErr, s.id, xfer.ErrConnClosed)
 	}
 }
 
@@ -249,7 +255,7 @@ func (s *stream) Close() error {
 	case s.mux.writeCh <- writeMsg{streamID: s.id, data: closeMarker}:
 		return nil
 	case <-s.done:
-		return fmt.Errorf("mux: stream %d: %w", s.id, xfer.ErrConnClosed)
+		return fmt.Errorf(errFmtMuxStreamErr, s.id, xfer.ErrConnClosed)
 	}
 }
 
@@ -324,7 +330,7 @@ func (m *Mux) Open(ctx context.Context) (Stream, error) {
 	if m.isClosed() {
 		m.mu.Unlock()
 		m.metrics.Streams.Errors.Add(1)
-		return nil, fmt.Errorf("mux: %w", xfer.ErrConnClosed)
+		return nil, fmt.Errorf(errFmtMuxClosed, xfer.ErrConnClosed)
 	}
 	if m.maxStreams > 0 && m.activeStreams.Load() >= m.maxStreams {
 		m.mu.Unlock()
@@ -358,7 +364,7 @@ func (m *Mux) Accept(ctx context.Context) (Stream, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-m.done:
-		return nil, fmt.Errorf("mux: %w", xfer.ErrConnClosed)
+		return nil, fmt.Errorf(errFmtMuxClosed, xfer.ErrConnClosed)
 	}
 }
 

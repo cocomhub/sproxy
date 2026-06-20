@@ -29,6 +29,11 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
+const (
+	errFmtRequestFailed = "请求失败: %w"
+	errFmtParseResponse = "解析响应失败: %w"
+)
+
 // UploadResult 表示上传操作的响应结果。
 type UploadResult struct {
 	Success  bool   `json:"success"`
@@ -258,7 +263,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 
 	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -269,7 +274,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 
 	var result UploadResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+		return nil, fmt.Errorf(errFmtParseResponse, err)
 	}
 
 	if !result.Success {
@@ -284,7 +289,7 @@ func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
 	urlPath := "/mkdir?dirname=" + url.QueryEscape(dirname)
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
-		return fmt.Errorf("请求失败: %w", err)
+		return fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -299,7 +304,7 @@ func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
 	urlPath := "/rmdir?dirname=" + url.QueryEscape(dirname)
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
-		return fmt.Errorf("请求失败: %w", err)
+		return fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -324,7 +329,7 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 
 	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)
 	if err != nil {
-		return fmt.Errorf("请求失败: %w", err)
+		return fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -416,7 +421,7 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, headers)
 	if err != nil {
-		return fmt.Errorf("请求失败: %w", err)
+		return fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -427,7 +432,7 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 
 	var result serverResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("解析响应失败: %w", err)
+		return fmt.Errorf(errFmtParseResponse, err)
 	}
 
 	if !result.Success {
@@ -464,7 +469,7 @@ func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) 
 
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, headers)
 	if err != nil {
-		return fmt.Errorf("请求失败: %w", err)
+		return fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -485,7 +490,7 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 	urlPath := "/api/files/stat?" + url.Values{"filename": {filename}}.Encode()
 	resp, err := c.doRequest(ctx, "HEAD", urlPath, nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -519,7 +524,7 @@ func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, e
 	subdir := path.Join(append([]string{"/"}, subdirs...)...)
 	resp, err := c.doRequest(ctx, "GET", "/api/files?subdir="+url.QueryEscape(subdir), nil, headers)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -532,7 +537,7 @@ func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, e
 		Files []FileInfo `json:"files"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+		return nil, fmt.Errorf(errFmtParseResponse, err)
 	}
 
 	return result.Files, nil
@@ -546,7 +551,7 @@ func (c *FileClient) ListWithPagination(ctx context.Context, offset, limit int, 
 	urlPath := fmt.Sprintf("/api/files?subdir=%s&offset=%d&limit=%d", url.QueryEscape(subdir), offset, limit)
 	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)
 	if err != nil {
-		return nil, 0, fmt.Errorf("请求失败: %w", err)
+		return nil, 0, fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -562,7 +567,7 @@ func (c *FileClient) ListWithPagination(ctx context.Context, offset, limit int, 
 		Limit  int        `json:"limit"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, 0, fmt.Errorf("解析响应失败: %w", err)
+		return nil, 0, fmt.Errorf(errFmtParseResponse, err)
 	}
 
 	return result.Files, result.Total, nil
@@ -574,7 +579,7 @@ func (c *FileClient) Search(ctx context.Context, q string) ([]FileInfo, error) {
 	headers := make(http.Header)
 	resp, err := c.doRequest(ctx, "GET", "/api/files/search?q="+url.QueryEscape(q), nil, headers)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 
@@ -587,7 +592,7 @@ func (c *FileClient) Search(ctx context.Context, q string) ([]FileInfo, error) {
 		Files []FileInfo `json:"files"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+		return nil, fmt.Errorf(errFmtParseResponse, err)
 	}
 
 	return result.Files, nil
@@ -632,7 +637,7 @@ func (c *FileClient) BatchDelete(ctx context.Context, files []BatchDeleteFile) (
 	}
 	resp, err := c.doRequest(ctx, "POST", "/api/batch/delete", bytes.NewReader(body), nil)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -643,7 +648,7 @@ func (c *FileClient) BatchDelete(ctx context.Context, files []BatchDeleteFile) (
 		Results []BatchOperationResult `json:"results"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+		return nil, fmt.Errorf(errFmtParseResponse, err)
 	}
 	return result.Results, nil
 }
@@ -657,7 +662,7 @@ func (c *FileClient) BatchRename(ctx context.Context, operations []BatchRenameOp
 	}
 	resp, err := c.doRequest(ctx, "POST", "/api/batch/rename", bytes.NewReader(body), nil)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
+		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -668,7 +673,7 @@ func (c *FileClient) BatchRename(ctx context.Context, operations []BatchRenameOp
 		Results []BatchOperationResult `json:"results"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+		return nil, fmt.Errorf(errFmtParseResponse, err)
 	}
 	return result.Results, nil
 }

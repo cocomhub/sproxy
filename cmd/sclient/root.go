@@ -15,6 +15,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	flagServer    = "server"
+	flagChunkSize = "chunk-size"
+)
+
 var (
 	cfgFile     string
 	currentDir  string
@@ -27,8 +32,8 @@ var rootCmd = &cobra.Command{
 	Short: "文件上传下载客户端",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		cfgProvider = sclientcfg.New(cfgFile)
-		cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup("server"))
-		cfgProvider.BindPFlag("chunk_size", cmd.Flags().Lookup("chunk-size"))
+		cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup(flagServer))
+		cfgProvider.BindPFlag("chunk_size", cmd.Flags().Lookup(flagChunkSize))
 		// 加载缓存的当前目录
 		loadCurrentDir()
 		return nil
@@ -67,11 +72,11 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", defaultCfgPath, "配置文件路径")
 
 	// 全局选项（persistent flags）
-	rootCmd.PersistentFlags().StringP("server", "s", "", "服务器地址 (覆盖配置中的 server_url)")
+	rootCmd.PersistentFlags().StringP(flagServer, "s", "", "服务器地址 (覆盖配置中的 server_url)")
 	rootCmd.PersistentFlags().StringP("output", "o", "", "指定下载文件的输出路径")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "显示详细输出")
 	rootCmd.PersistentFlags().Bool("chunked", false, "启用分块上传/下载模式")
-	rootCmd.PersistentFlags().Int64("chunk-size", 0, "分块大小 (默认 4MB)")
+	rootCmd.PersistentFlags().Int64(flagChunkSize, 0, "分块大小 (默认 4MB)")
 	rootCmd.PersistentFlags().Int("concurrency", 0, "上传/下载并发数 (默认 4)")
 	rootCmd.PersistentFlags().Bool("resume", false, "续传模式 (默认启用)")
 
@@ -97,7 +102,7 @@ func buildFileClient(cmd *cobra.Command) (*client.FileClient, error) {
 	}
 
 	serverURL := cfg.ServerURL
-	if s, _ := cmd.Flags().GetString("server"); s != "" {
+	if s, _ := cmd.Flags().GetString(flagServer); s != "" {
 		serverURL = s
 	}
 
@@ -121,11 +126,11 @@ func buildFileClient(cmd *cobra.Command) (*client.FileClient, error) {
 	}
 	if cfg.TunnelKey != "" {
 		// 当 --server flag 显式指定时，绕过隧道直接 HTTP
-		if s, _ := cmd.Flags().GetString("server"); s == "" {
+		if s, _ := cmd.Flags().GetString(flagServer); s == "" {
 			opts = append(opts, client.WithTunnel(cfg.TunnelKey))
 		}
 	}
-	if cs, _ := cmd.Flags().GetInt64("chunk-size"); cs > 0 {
+	if cs, _ := cmd.Flags().GetInt64(flagChunkSize); cs > 0 {
 		opts = append(opts, func(c *client.FileClient) {
 			c.ChunkSize = cs
 		})
