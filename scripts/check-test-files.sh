@@ -11,11 +11,11 @@ set -euo pipefail
 IGNORE_FILE=".notestignore"
 
 EXCLUDE_ARGS=()
-if [ -f "$IGNORE_FILE" ]; then
-  while IFS= read -r line || [ -n "$line" ]; do
+if [[ -f "$IGNORE_FILE" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%%#*}"
     line="$(echo "$line" | xargs)"
-    [ -z "$line" ] && continue
+    [[ -z "$line" ]] && continue
     EXCLUDE_ARGS+=(-not -path "./$line")
   done < "$IGNORE_FILE"
 fi
@@ -26,16 +26,16 @@ missing_list=""
 
 for pkg in "$@"; do
   pkg="${pkg%/}"
-  [ -z "$pkg" ] || [ "$pkg" = "." ] || [ ! -d "$pkg" ] && continue
+  [[ -z "$pkg" ]] || [[ "$pkg" == "." ]] || [[ ! -d "$pkg" ]] && continue
 
   test_files=$(find "$pkg" -maxdepth 1 -name '*_test.go' -print -quit 2>/dev/null)
-  if [ -n "$test_files" ]; then
+  if [[ -n "$test_files" ]]; then
     continue
   fi
 
-  if [ ${#EXCLUDE_ARGS[@]} -gt 0 ]; then
+  if [[ ${#EXCLUDE_ARGS[@]} -gt 0 ]]; then
     excluded_file=$(find "$pkg" -maxdepth 0 "${EXCLUDE_ARGS[@]}" -print -quit 2>/dev/null)
-    [ -z "$excluded_file" ] || continue
+    [[ -z "$excluded_file" ]] || continue
   fi
 
   echo "FAIL: $pkg has no test files" >&2
@@ -44,7 +44,7 @@ for pkg in "$@"; do
   missing_list="$missing_list $pkg"
 done
 
-if [ $exit_code -eq 0 ]; then
+if [[ $exit_code -eq 0 ]]; then
   echo "OK: all packages have test files"
 else
   echo "FAIL: $missing_count package(s) missing test files:$missing_list" >&2
