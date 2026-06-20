@@ -111,7 +111,7 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 
@@ -123,7 +123,7 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	verDir := h.safePath(filepath.Join(versionsDirName, remotePath))
 	if verDir == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 	entries, err := os.ReadDir(verDir)
@@ -173,7 +173,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 
@@ -185,7 +185,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	verFile := h.safePath(filepath.Join(versionsDirName, remotePath, versionIDStr))
 	if verFile == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 	if _, err = os.Stat(verFile); os.IsNotExist(err) {
@@ -195,7 +195,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	targetPath := h.safePath(remotePath)
 	if targetPath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 
@@ -245,7 +245,7 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 
@@ -257,7 +257,7 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 
 	verFile := h.safePath(filepath.Join(versionsDirName, remotePath, versionIDStr))
 	if verFile == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 	if err := os.Remove(verFile); err != nil {

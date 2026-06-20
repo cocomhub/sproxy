@@ -132,17 +132,17 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	remotePath, err := ValidateFilePath(req.Filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 
 	fullPath := h.safePath(remotePath)
 	if fullPath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 	if _, err = os.Stat(fullPath); os.IsNotExist(err) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		return
 	}
 
@@ -198,7 +198,7 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set(headerContentType, contentTypeOctetStream)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(link.Filename)))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")

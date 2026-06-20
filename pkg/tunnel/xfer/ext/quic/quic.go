@@ -22,7 +22,7 @@
 //   - Windows 上尝试关闭防火墙或添加 UDP 入站规则
 //   - 使用 `go test -run TestQuicRegistration` 测试注册逻辑
 //
-// TODO: 待 quic-go 对 Windows UDP 的兼容性改善后，可移除本限制。
+// TODO: 待 quic-go 对 Windows UDP 的兼容性改善后，可移除本限制。 //nolint:godox
 package quic
 
 import (
@@ -46,6 +46,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/quic-go/quic-go"
 )
+
+// alpnSproxyQuic 是 QUIC 的 ALPN 协议标识符。
+const alpnSproxyQuic = "sproxy-quic"
 
 func init() {
 	xfer.Register(&xfer.Transport{
@@ -159,7 +162,7 @@ func DialTLSConfig(addr string) (*tls.Config, error) {
 	}
 	tlsConf := &tls.Config{
 		ServerName: host,
-		NextProtos: []string{"sproxy-quic"},
+		NextProtos: []string{alpnSproxyQuic},
 	}
 	if caPath := os.Getenv("SPROXY_QUIC_CA_CERT"); caPath != "" {
 		caCert, err := os.ReadFile(caPath)
@@ -206,7 +209,7 @@ func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
 	}
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"sproxy-quic"},
+		NextProtos:   []string{alpnSproxyQuic},
 	}
 	ln, err := quic.ListenAddr(addr, tlsConf, &quic.Config{
 		HandshakeIdleTimeout: 30 * time.Second,
@@ -227,7 +230,7 @@ func selfSignedCert() (tls.Certificate, error) {
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{Organization: []string{"sproxy-quic"}},
+		Subject:               pkix.Name{Organization: []string{alpnSproxyQuic}},
 		NotBefore:             now,
 		NotAfter:              now.Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature,

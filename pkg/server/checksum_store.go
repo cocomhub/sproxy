@@ -13,6 +13,8 @@ import (
 	"sync"
 )
 
+const chkStorePersistFailed = "checksum 存储持久化失败"
+
 // ChecksumStoreIface 定义 ChecksumStore 的业务接口，方便测试替身。
 type ChecksumStoreIface interface {
 	Get(filename string) (string, bool)
@@ -87,7 +89,7 @@ func (cs *ChecksumStore) Set(filename, checksum string) {
 	cs.mu.Unlock()
 
 	if err := cs.save(); err != nil {
-		cs.logger.Error("checksum 存储持久化失败", "op", "set", "file_name", filename, "error", err)
+		cs.logger.Error(chkStorePersistFailed, "op", "set", "file_name", filename, "error", err)
 	}
 }
 
@@ -98,7 +100,7 @@ func (cs *ChecksumStore) Delete(filename string) {
 	cs.mu.Unlock()
 
 	if err := cs.save(); err != nil {
-		cs.logger.Error("checksum 存储持久化失败", "op", "delete", "file_name", filename, "error", err)
+		cs.logger.Error(chkStorePersistFailed, "op", "delete", "file_name", filename, "error", err)
 	}
 }
 
@@ -116,7 +118,7 @@ func (cs *ChecksumStore) Rename(from, to string) {
 	cs.mu.Unlock()
 
 	if err := cs.save(); err != nil {
-		cs.logger.Error("checksum 存储持久化失败", "op", "rename", "from", from, "to", to, "error", err)
+		cs.logger.Error(chkStorePersistFailed, "op", "rename", "from", from, "to", to, "error", err)
 	}
 }
 
@@ -131,7 +133,7 @@ func (cs *ChecksumStore) DeletePrefix(prefix string) {
 	cs.mu.Unlock()
 
 	if err := cs.save(); err != nil {
-		cs.logger.Error("checksum 存储持久化失败", "op", "deletePrefix", "prefix", prefix, "error", err)
+		cs.logger.Error(chkStorePersistFailed, "op", "deletePrefix", "prefix", prefix, "error", err)
 	}
 }
 

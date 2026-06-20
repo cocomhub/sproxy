@@ -25,6 +25,21 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	flagConfig          = "config"
+	flagAddr            = "addr"
+	flagUploadsDir      = "uploads-dir"
+	flagTunnelKey       = "tunnel-key"
+	flagVersion         = "version"
+	defaultConfig       = "sproxy.yaml"
+	cfgAddr             = "addr"
+	cfgUploadsDir       = "uploads_dir"
+	cfgTunnelKey        = "tunnel_key"
+	logListenClosed     = "listen and serve closed"
+	logHandlersCloseErr = "handlers close error"
+	errFmtListenServe   = "listen and serve error: %w"
+)
+
 var (
 	cfgFile             string
 	cfgPtr              atomic.Pointer[server.Config]
@@ -40,9 +55,9 @@ var rootCmd = &cobra.Command{
 	Short: "轻量文件上传/下载/删除服务 + 加密隧道",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		cfgProvider = sproxycfg.New(cfgFile)
-		cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-		cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
-		cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+		cfgProvider.BindPFlag(cfgAddr, cmd.Flags().Lookup(flagAddr))
+		cfgProvider.BindPFlag(cfgUploadsDir, cmd.Flags().Lookup(flagUploadsDir))
+		cfgProvider.BindPFlag(cfgTunnelKey, cmd.Flags().Lookup(flagTunnelKey))
 		return nil
 	},
 	RunE: runServer,
@@ -57,17 +72,17 @@ func Execute() {
 func init() {
 	cobra.OnInitialize()
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "sproxy.yaml", "配置文件路径")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, flagConfig, defaultConfig, "配置文件路径")
 
-	rootCmd.Flags().String("addr", ":18083", "监听地址")
-	rootCmd.Flags().String("uploads-dir", "./uploads", "上传目录")
-	rootCmd.Flags().String("tunnel-key", "", "隧道密钥 (64 hex chars)")
-	rootCmd.Flags().Bool("version", false, "打印版本与构建信息后退出")
+	rootCmd.Flags().String(flagAddr, ":18083", "监听地址")
+	rootCmd.Flags().String(flagUploadsDir, "./uploads", "上传目录")
+	rootCmd.Flags().String(flagTunnelKey, "", "隧道密钥 (64 hex chars)")
+	rootCmd.Flags().Bool(flagVersion, false, "打印版本与构建信息后退出")
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
 	// --version 处理
-	if showVer, _ := cmd.Flags().GetBool("version"); showVer {
+	if showVer, _ := cmd.Flags().GetBool(flagVersion); showVer {
 		fmt.Printf("Version: %s\n", Version)
 		fmt.Printf("BuildAt: %s\n", BuildAt)
 		return nil
@@ -100,7 +115,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	h := server.RegisterRoutes(ctx, mux, &cfgPtr, Version, BuildAt, tunnelKey, logger, routeTable)
 	defer func() {
 		if err := h.Close(); err != nil {
-			slog.Warn("handlers close error", "error", err.Error())
+			slog.Warn(logHandlersCloseErr, "error", err.Error())
 		}
 	}()
 
@@ -125,10 +140,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 	} else {
 		if err := srv.ListenAndServe(); err != nil {
 			if err == http.ErrServerClosed {
-				slog.Info("listen and serve closed", "error", err.Error())
+				slog.Info(logListenClosed, "error", err.Error())
 			} else {
 				close(stopSigCh)
-				return fmt.Errorf("listen and serve error: %w", err)
+				return fmt.Errorf(errFmtListenServe, err)
 			}
 		}
 	}
@@ -143,12 +158,12 @@ func buildServerConfig(cmd *cobra.Command) (*server.Config, error) {
 	if cfgProvider == nil {
 		configPath := cfgFile
 		if configPath == "" {
-			configPath = "sproxy.yaml"
+			configPath = defaultConfig
 		}
 		cfgProvider = sproxycfg.New(configPath)
-		cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-		cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
-		cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+		cfgProvider.BindPFlag(cfgAddr, cmd.Flags().Lookup(flagAddr))
+		cfgProvider.BindPFlag(cfgUploadsDir, cmd.Flags().Lookup(flagUploadsDir))
+		cfgProvider.BindPFlag(cfgTunnelKey, cmd.Flags().Lookup(flagTunnelKey))
 		if cfgFile == "" {
 			cfgFile = configPath
 		}
@@ -216,10 +231,10 @@ func startTLSListener(cfg *server.Config, s *http.Server, stopSigCh chan struct{
 
 	if err := s.ListenAndServeTLS(certFile, keyFile); err != nil {
 		if err == http.ErrServerClosed {
-			slog.Info("listen and serve closed", "error", err.Error())
+			slog.Info(logListenClosed, "error", err.Error())
 		} else {
 			close(stopSigCh)
-			return fmt.Errorf("listen and serve error: %w", err)
+			return fmt.Errorf(errFmtListenServe, err)
 		}
 	}
 	return nil
@@ -268,7 +283,7 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 				}
 				shutdownCancel()
 				if err := h.Close(); err != nil {
-					slog.Warn("handlers close error", "error", err.Error())
+					slog.Warn(logHandlersCloseErr, "error", err.Error())
 				}
 				return
 			}

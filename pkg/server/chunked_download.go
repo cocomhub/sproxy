@@ -30,11 +30,11 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件名不能为空"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgEmptyFilename}, http.StatusBadRequest)
 		return
 	}
 	if _, err := ValidateFilePath(filename); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 
@@ -64,13 +64,13 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 
 	filePath := h.safePath(filename)
 	if filePath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 	stat, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		} else {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
 		}
@@ -95,8 +95,8 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		h.logger.Error("打开文件失败", "error", err, "file_name", filename)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "打开文件失败"}, http.StatusInternalServerError)
+		h.logger.Error(errMsgOpenFileFailed, "error", err, "file_name", filename)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
 		return
 	}
 	defer file.Close()
@@ -108,14 +108,14 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 设置响应头（length 已截断完毕）
-	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set(headerContentType, contentTypeOctetStream)
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+length-1, fileSize))
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", length))
 
 	// 如果 ChecksumStore 有记录，返回完整文件 checksum
 	if cs, ok := h.checksumStore.Get(filename); ok {
-		w.Header().Set("X-File-Checksum", cs)
+		w.Header().Set(headerFileChecksum, cs)
 	}
 
 	// 计算本块 SHA-256：先读入缓冲区，计算 hash，再写入 ResponseWriter

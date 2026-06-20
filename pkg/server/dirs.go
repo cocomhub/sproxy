@@ -29,8 +29,8 @@ func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		h.logger.Error("创建目录失败", "dir", remotePath, "error", err)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
+		h.logger.Error(errMsgCreateDirFailed, "dir", remotePath, "error", err)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgCreateDirFailed}, http.StatusInternalServerError)
 		return
 	}
 

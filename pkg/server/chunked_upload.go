@@ -47,7 +47,7 @@ func negotiateChunkSize(clientChunkSize int64, cfgChunkSize int64) (chunkSize in
 func (h *Handlers) checkExistingFileForInit(w http.ResponseWriter, filename, fileChecksum string) bool {
 	existingPath := h.safePath(filename)
 	if existingPath == "" {
-		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return true
 	}
 	stat, err := os.Stat(existingPath)
@@ -117,7 +117,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := ValidateFilePath(req.Filename); err != nil {
-		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 	if req.TotalSize <= 0 {
@@ -323,7 +323,7 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 	if filename != "" {
 		// 防御性校验：防止路径穿越
 		if _, err := ValidateFilePath(filename); err != nil {
-			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 			return
 		}
 		session := h.uploadStore.GetSessionByFilename(filename)
@@ -345,7 +345,7 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		// 3. 检查磁盘上文件是否已存在且 checksum 匹配
 		filePath := h.safePath(filename)
 		if filePath == "" {
-			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 			return
 		}
 		if stat, err := os.Stat(filePath); err == nil {
@@ -429,7 +429,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	filePath := h.safePath(session.Filename)
 	if filePath == "" {
-		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "无效的文件路径"}, http.StatusBadRequest)
+		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 
