@@ -158,7 +158,7 @@ func tunnelRequest(cfg *client.Config, method, targetURL string, headers []strin
 
 // resolveOutputPath 计算输出文件路径。若已指定 outputFile 则直接返回；
 // 否则从 URL 路径提取 basename，处理同名冲突后返回。
-func resolveOutputPath(targetURL string, outputFile string) (string, error) {
+func resolveOutputPath(targetURL, outputFile string) (string, error) {
 	if outputFile != "" {
 		return outputFile, nil
 	}

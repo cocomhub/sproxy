@@ -28,7 +28,7 @@ func validateChunkChecksum(checksum string) bool {
 }
 
 // negotiateChunkSize 协商分块大小：使用客户端传入的值，但不超过服务端上限。
-func negotiateChunkSize(clientChunkSize int64, cfgChunkSize int64) (chunkSize int64, adjusted bool) {
+func negotiateChunkSize(clientChunkSize, cfgChunkSize int64) (chunkSize int64, adjusted bool) {
 	chunkSize = clientChunkSize
 	if chunkSize <= 0 {
 		chunkSize = cfgChunkSize
