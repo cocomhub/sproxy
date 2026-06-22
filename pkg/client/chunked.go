@@ -108,7 +108,7 @@ type ChunkedUploader struct {
 	progress    int64
 }
 
-// chunkedUploaderOpts 是 newChunkedUploader 的参数集合，减少函数参数数量。
+// chunkedUploaderOpts 是 newChunkedUploader 的参数集合，用于减少函数参数数量（go:S107）。
 type chunkedUploaderOpts struct {
 	client      *FileClient
 	filePath    string
@@ -549,7 +549,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	})
 }
 
-// chunkUploadOpts 是 uploadChunks 的参数集合，减少函数参数数量。
+// chunkUploadOpts 是 uploadChunks 的参数集合，用于减少函数参数数量（go:S107）。
 type chunkUploadOpts struct {
 	filePath     string
 	uploadID     string

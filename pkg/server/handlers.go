@@ -332,7 +332,7 @@ func resolveRenamePaths(h *Handlers, w http.ResponseWriter, from, to string) (fr
 	return fromPath, toPath, true
 }
 
-// renameOpCtx 是 executeRename 的参数集合，减少函数参数数量。
+// renameOpCtx 是 executeRename 的参数集合，用于减少函数参数数量（go:S107）。
 type renameOpCtx struct {
 	h                *Handlers
 	w                http.ResponseWriter

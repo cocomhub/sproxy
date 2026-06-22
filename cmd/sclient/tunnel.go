@@ -65,15 +65,15 @@ var tunnelCmd = &cobra.Command{
 		targetURL := args[0]
 
 		return tunnelRequest(tunnelReqOpts{
-		cfg:        cfg,
-		method:     method,
-		targetURL:  targetURL,
-		headers:    headers,
-		body:       body,
-		outputFile: outputPath,
-		verbose:    verbose,
-		include:    include,
-	})
+			cfg:        cfg,
+			method:     method,
+			targetURL:  targetURL,
+			headers:    headers,
+			body:       body,
+			outputFile: outputPath,
+			verbose:    verbose,
+			include:    include,
+		})
 	},
 }
 
@@ -84,7 +84,7 @@ func init() {
 	tunnelCmd.Flags().BoolP("include", "i", false, "显示响应头")
 }
 
-// tunnelReqOpts 是 tunnelRequest 的参数集合，减少函数参数数量。
+// tunnelReqOpts 是 tunnelRequest 的参数集合，用于减少函数参数数量（go:S107）。
 type tunnelReqOpts struct {
 	cfg        *client.Config
 	method     string
