@@ -2567,3 +2567,79 @@ Task 2（S1192 常量提取）的规格审查发现 3 类遗漏（9 处缺失替
 - First-Seen: 2026-06-22
 - See Also: LRN-20260619-BP74, LRN-20260622-BP88
 
+---
+
+## [LRN-20260622-BP92] subagent 的 S8242 context 字段修复需区分 context 存储和 cancel 两种模式
+
+**Logged**: 2026-06-22T18:00:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: backend
+
+### Summary
+修复 `godre:S8242` 时 subagent 在 struct 中添加了 `ctxCancel context.CancelFunc` 字段，而非预期的移除 context 字段改为方法参数传递。
+
+### Details
+S8242 要求"不要将 `context.Context` 存储为字段，改为方法参数传递"。subagent 的修复添加了 `ctxCancel context.CancelFunc` 字段（属于 S8188 的修复模式，不是 S8242）。这两个规则表达的是不同意图但被合并理解了。
+
+正确做法：
+1. 从 struct 中删除 `context.Context` 字段
+2. 需要 context 的方法添加 `ctx context.Context` 参数
+3. 用 `WithCancel(parent)` 派生 context 控制生命周期
+
+### Suggested Action
+修复 S8242 时，subagent 必须明确区分"存储 context 字段"和"存储 cancel 函数字段"是两种不同的架构模式，不能混用。
+
+### Metadata
+- Source: code_review
+- Pattern-Key: lint.godre_S8242_context_field
+- Recurrence-Count: 1
+- First-Seen: 2026-06-22
+- Related Files: `pkg/tunnel/mux/mux.go`
+
+---
+
+## [LRN-20260622-BP93] subagent 对 S5144 的"已有校验"结论需逐行确认
+
+**Logged**: 2026-06-22T18:05:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: backend
+
+### Summary
+subagent 处理 `gosecurity:S5144` 时，发现 `validateRelayPath` 已存在即认为无需修改。应逐行读取验证函数确认校验逻辑确实覆盖了 SonarQube 报告的安全风险。
+
+### Details
+`relay.go` 中构造转发的目标 URL 时拼接用户输入的 path。需确认 `validateRelayPath` 的函数体是否覆盖了 scheme/host 注入、路径穿越等风险，而不仅是非空校验。
+
+### Suggested Action
+处理安全规则时 subagent 必须阅读完整的校验函数逻辑，确认覆盖了对应风险场景，并在报告中附上验证依据。
+
+### Metadata
+- Source: code_review
+- Pattern-Key: security.validate_before_close
+- Recurrence-Count: 1
+- First-Seen: 2026-06-22
+- Related Files: `pkg/server/relay.go`
+
+---
+
+## [LRN-20260622-BP94] 任务 3 godre+小修 subagent 成功完成
+
+**Logged**: 2026-06-22T18:10:00Z
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+任务 3（godre + 小修）通过 subagent 成功实现，9 个文件 18 增 12 删，提交 `0b4499b`。编译和测试全部通过，无 lint 残留。
+
+### Metadata
+- Source: workflow
+- Pattern-Key: workflow.subagent_godre_success
+- Recurrence-Count: 1
+- First-Seen: 2026-06-22
+
+---
+
+
