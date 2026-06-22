@@ -67,7 +67,8 @@ import (
 )
 
 const (
-	frameContentType = "application/x-tunnel-frame"
+	frameContentType  = "application/x-tunnel-frame"
+	headerContentType = "Content-Type"
 
 	// MaxMetadataBytes 限制 metadata 帧的最大长度（1 MiB），防止远程攻击者通过伪造的 metaLen 触发 OOM。
 	// 合法 metadata 通常仅几百字节到几 KiB，1 MiB 已留足上限。
@@ -402,7 +403,7 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 		h.keyMu.RUnlock()
 		metaFrame, _ := encodeMetadataFrame(encKey, respMetaJSON)
 
-		w.Header().Set("Content-Type", frameContentType)
+		w.Header().Set(headerContentType, frameContentType)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(metaFrame)
 		_, _ = EncryptStream(encKey, bodyPr, w)
@@ -450,7 +451,7 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 		encKey := h.primaryKey
 		h.keyMu.RUnlock()
 		errMetaFrame, _ := encodeMetadataFrame(encKey, errMetaJSON)
-		w.Header().Set("Content-Type", frameContentType)
+		w.Header().Set(headerContentType, frameContentType)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(errMetaFrame)
 		if _, err = EncryptStream(encKey, strings.NewReader(err.Error()), w); err != nil {
@@ -480,7 +481,7 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 		return
 	}
 
-	w.Header().Set("Content-Type", frameContentType)
+	w.Header().Set(headerContentType, frameContentType)
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(metaFrame); err != nil {
 		return
@@ -624,7 +625,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		pr.Close()
 		return nil, fmt.Errorf("create tunnel request: %w", err)
 	}
-	tunnelReq.Header.Set("Content-Type", frameContentType)
+	tunnelReq.Header.Set(headerContentType, frameContentType)
 	httpResp, err := c.HTTPClient.Do(tunnelReq)
 	if err != nil {
 		return nil, fmt.Errorf("post request: %w", err)

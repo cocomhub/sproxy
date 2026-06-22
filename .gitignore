@@ -10,6 +10,7 @@ certs
 *.cover
 cover*.html
 cover
+.claude/*py
 .claude/worktrees/
 .trae/
 *.out.txt

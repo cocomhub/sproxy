@@ -103,7 +103,7 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
 		h.logger.Error("文件 seek 失败", "error", err)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件读取失败"}, http.StatusInternalServerError)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
 		return
 	}
 
@@ -128,19 +128,19 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		file2, openErr := os.Open(filePath)
 		if openErr != nil {
 			h.logger.Error("重新打开文件失败", "error", openErr)
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件读取失败"}, http.StatusInternalServerError)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
 			return
 		}
 		defer file2.Close()
 		if _, seekErr := file2.Seek(offset, io.SeekStart); seekErr != nil {
 			h.logger.Error("文件 seek 失败", "error", seekErr)
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件读取失败"}, http.StatusInternalServerError)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
 			return
 		}
 		data2 := make([]byte, length)
 		if _, readErr := io.ReadFull(file2, data2); readErr != nil {
 			h.logger.Error("读取文件失败", "error", readErr)
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件读取失败"}, http.StatusInternalServerError)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
 			return
 		}
 		chunkHash := sha256.Sum256(data2)

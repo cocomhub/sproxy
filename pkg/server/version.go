@@ -117,7 +117,7 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	cfg := h.cfgPtr.Load()
 	if !cfg.Versioning.Enabled {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "版本管理未启用"}, http.StatusNotImplemented)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgVersioningDisabled}, http.StatusNotImplemented)
 		return
 	}
 
@@ -179,7 +179,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	cfg := h.cfgPtr.Load()
 	if !cfg.Versioning.Enabled {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "版本管理未启用"}, http.StatusNotImplemented)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgVersioningDisabled}, http.StatusNotImplemented)
 		return
 	}
 
@@ -251,7 +251,7 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 
 	cfg := h.cfgPtr.Load()
 	if !cfg.Versioning.Enabled {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "版本管理未启用"}, http.StatusNotImplemented)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgVersioningDisabled}, http.StatusNotImplemented)
 		return
 	}
 
