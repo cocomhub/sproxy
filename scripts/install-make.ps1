@@ -16,7 +16,13 @@ if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
     Write-Host "Chocolatey not found. Installing Chocolatey..."
     Set-ExecutionPolicy Bypass -Scope Process -Force
     [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-    Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+    $tempFile = [System.IO.Path]::GetTempFileName() + '.ps1'
+    try {
+        Invoke-RestMethod -Uri 'https://community.chocolatey.org/install.ps1' -OutFile $tempFile
+        & $tempFile
+    } finally {
+        if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+    }
 }
 
 choco install make -y --no-progress

@@ -2370,3 +2370,73 @@ sproxy 包：
 
 ---
 
+## [LRN-20260620-BP86] 子代理常创建 .claude/analyze_sonar.py 临时文件需在 commit 前移除
+
+**Logged**: 2026-06-20T03:00:00Z
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+多次（PR1~PR6）子代理在实现过程中在 `.claude/` 目录下创建了 `analyze_sonar.py`、`analyze_sonar2.py`、`temp_analyze_sonar.py` 等临时脚本文件，每次都需要主流程手动 `git reset HEAD` 或 `git rm --cached` 移除，否则会污染 commit。
+
+### Details
+问题出现在多个 PR 中：
+- PR1: 手动 `git rm --cached` + amend
+- PR2: 同样手动 reset
+- PR3: commit 后再次发现同样的文件被 include
+- PR4/5/6: 使用 `git add -A -- ':!.claude/'` 参数规避
+
+根本原因：Bash/Python 临时分析脚本写入 `.claude/` 目录，但没有被 `.gitignore` 忽略。`git add -A` 自然会包含它们。
+
+解决方式：
+1. 使用 `git add -A -- ':!.claude/'` 排除该目录（PR4+ 已采用）
+2. 或者在 `.gitignore` 中添加 `.claude/`（但会忽略其中的 settings.json 等重要文件）
+3. 推荐方案：只对临时 `.py` 文件做 `git add` 时用 `-- ':!.claude/*.py'`
+
+### Metadata
+- Source: workflow
+- Pattern-Key: infra.temp_file_cleanup
+- Recurrence-Count: 1
+
+---
+
+## [LRN-20260620-BP87] SonarQube 6 PR 修复工程总结 — 整体经验
+
+**Logged**: 2026-06-20T03:30:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+本次 SonarQube 修复工程覆盖 6 个 PR、33 个文件修改、消除约 121 个 Go issues。总结整体执行的模式和经验。
+
+### Details
+
+**6 PR 范围**：
+| PR | 范围 | 策略 | 文件数 |
+|----|------|------|--------|
+| PR1 | S2083 路径注入 | safePath 二层模式提取 | 8 |
+| PR2 | S5144 SSRF + S4830/S5527 TLS | validateRelayPath + DialTLSConfig | 4 |
+| PR3 | 服务端认知复杂度（8 S3776） | 公共辅助函数先提取再替换 | 2 |
+| PR4 | 客户端+隧道认知复杂度（6 S3776） | ChunkedUploader/帧分发表/struct 包装 | 3 |
+| PR5 | CLI 认知复杂度（2 S3776） | 顺序阶段提取 | 3 |
+| PR6 | S1192 字符串重复 + MINOR | 共享常量文件 + 全文件替换 | 13 |
+
+**整体模式**：
+1. 安全类修复（PR1/2）：提取通用防御函数，全量替换 + 空守卫
+2. 认知复杂度重构（PR3-5）：提取函数/结构体 → 逐步替换 → 主函数缩编
+3. 代码质量（PR6）：新建常量文件 → 批量替换 → 校验无遗漏
+4. 所有 PR 都保持了"零测试修改"原则，仅重构不改行为
+
+**关键经验**：
+- 子代理 + 两阶段审查模式可捕获 3-5 个遗漏问题/PR，审查不是形式主义
+- gofmt/errcheck/gocritic 是子代理最常见的 lint 盲区
+- 测试文件不要在生产 PR 中修改（嵌套结构复杂，容易出错）
+- pre-commit hook（go vet + gofmt + check-loopback）有效，但 golangci-lint 需要手动跑
+
+### Metadata
+- Source: conversation
+- Pattern-Key: project.sonarqube_6pr_summary
+- Recurrence-Count: 1
+
