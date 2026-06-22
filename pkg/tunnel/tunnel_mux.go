@@ -34,84 +34,25 @@ func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("tunnel: open stream: %w", err)
 	}
 
-	reqMeta, err := json.Marshal(&Request{
-		Method:  req.Method,
-		URL:     req.URL.RequestURI(),
-		Headers: flattenHeaders(req.Header),
-	})
-	if err != nil {
+	if err = t.sendRequestMeta(stream, req); err != nil {
 		stream.Close()
-		return nil, fmt.Errorf("tunnel: marshal request: %w", err)
+		return nil, err
 	}
 
-	var metaBytes []byte
-	if t.key != nil {
-		metaBytes, err = Encrypt(t.key, reqMeta)
-	} else {
-		metaBytes = reqMeta
-	}
-	if err != nil {
+	if err = t.sendRequestBody(stream, req); err != nil {
 		stream.Close()
-		return nil, fmt.Errorf("tunnel: encrypt: %w", err)
+		return nil, err
 	}
 
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(metaBytes)))
-	if _, err := stream.Write(lenBuf); err != nil {
-		stream.Close()
-		return nil, fmt.Errorf("tunnel: write meta len: %w", err)
-	}
-	if _, err := stream.Write(metaBytes); err != nil {
-		stream.Close()
-		return nil, fmt.Errorf("tunnel: write meta: %w", err)
-	}
-
-	if req.Body != nil {
-		if t.key != nil {
-			if _, err := EncryptStream(t.key, req.Body, stream); err != nil {
-				stream.Close()
-				return nil, fmt.Errorf("tunnel: encrypt body: %w", err)
-			}
-		} else {
-			if _, err := io.Copy(stream, req.Body); err != nil {
-				stream.Close()
-				return nil, fmt.Errorf("tunnel: write body: %w", err)
-			}
-		}
-	}
-
-	if err := stream.CloseWrite(); err != nil {
+	if err = stream.CloseWrite(); err != nil {
 		stream.Close()
 		return nil, fmt.Errorf("tunnel: close write: %w", err)
 	}
 
-	if _, err := io.ReadFull(stream, lenBuf); err != nil {
+	respMeta, err := t.readResponseMeta(stream)
+	if err != nil {
 		stream.Close()
-		return nil, fmt.Errorf("tunnel: read resp meta len: %w", err)
-	}
-	metaLen := binary.BigEndian.Uint32(lenBuf)
-	respMetaRaw := make([]byte, metaLen)
-	if _, err := io.ReadFull(stream, respMetaRaw); err != nil {
-		stream.Close()
-		return nil, fmt.Errorf("tunnel: read resp meta: %w", err)
-	}
-
-	var respMeta Response
-	if t.key != nil {
-		plainMeta, err := Decrypt(t.key, respMetaRaw)
-		if err != nil {
-			stream.Close()
-			return nil, fmt.Errorf("tunnel: decrypt resp: %w", err)
-		}
-		if err := json.Unmarshal(plainMeta, &respMeta); err != nil {
-			stream.Close()
-			return nil, fmt.Errorf("tunnel: unmarshal resp: %w", err)
-		}
-	} else {
-		if err := json.Unmarshal(respMetaRaw, &respMeta); err != nil {
-			stream.Close()
-			return nil, fmt.Errorf("tunnel: unmarshal resp: %w", err)
-		}
+		return nil, err
 	}
 
 	return &http.Response{
@@ -122,6 +63,84 @@ func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
 		Body:          &streamBody{stream: stream, key: t.key},
 		ContentLength: respMeta.ContentLength,
 	}, nil
+}
+
+// sendRequestMeta 将请求元数据（方法、URL、Header）序列化、加密并写入流。
+func (t *Tunnel) sendRequestMeta(stream mux.Stream, req *http.Request) error {
+	reqMeta, err := json.Marshal(&Request{
+		Method:  req.Method,
+		URL:     req.URL.RequestURI(),
+		Headers: flattenHeaders(req.Header),
+	})
+	if err != nil {
+		return fmt.Errorf("tunnel: marshal request: %w", err)
+	}
+
+	var metaBytes []byte
+	if t.key != nil {
+		metaBytes, err = Encrypt(t.key, reqMeta)
+	} else {
+		metaBytes = reqMeta
+	}
+	if err != nil {
+		return fmt.Errorf("tunnel: encrypt: %w", err)
+	}
+
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(metaBytes)))
+	if _, err := stream.Write(lenBuf); err != nil {
+		return fmt.Errorf("tunnel: write meta len: %w", err)
+	}
+	if _, err := stream.Write(metaBytes); err != nil {
+		return fmt.Errorf("tunnel: write meta: %w", err)
+	}
+	return nil
+}
+
+// sendRequestBody 将请求体写入流（加密或明文）。
+func (t *Tunnel) sendRequestBody(stream mux.Stream, req *http.Request) error {
+	if req.Body == nil {
+		return nil
+	}
+	if t.key != nil {
+		if _, err := EncryptStream(t.key, req.Body, stream); err != nil {
+			return fmt.Errorf("tunnel: encrypt body: %w", err)
+		}
+	} else {
+		if _, err := io.Copy(stream, req.Body); err != nil {
+			return fmt.Errorf("tunnel: write body: %w", err)
+		}
+	}
+	return nil
+}
+
+// readResponseMeta 从流中读取响应元数据（长度前缀 + 数据 + 解密 + 反序列化）。
+func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
+	lenBuf := make([]byte, 4)
+	if _, err := io.ReadFull(stream, lenBuf); err != nil {
+		return nil, fmt.Errorf("tunnel: read resp meta len: %w", err)
+	}
+	metaLen := binary.BigEndian.Uint32(lenBuf)
+	respMetaRaw := make([]byte, metaLen)
+	if _, err := io.ReadFull(stream, respMetaRaw); err != nil {
+		return nil, fmt.Errorf("tunnel: read resp meta: %w", err)
+	}
+
+	var respMeta Response
+	if t.key != nil {
+		plainMeta, err := Decrypt(t.key, respMetaRaw)
+		if err != nil {
+			return nil, fmt.Errorf("tunnel: decrypt resp: %w", err)
+		}
+		if err := json.Unmarshal(plainMeta, &respMeta); err != nil {
+			return nil, fmt.Errorf("tunnel: unmarshal resp: %w", err)
+		}
+	} else {
+		if err := json.Unmarshal(respMetaRaw, &respMeta); err != nil {
+			return nil, fmt.Errorf("tunnel: unmarshal resp: %w", err)
+		}
+	}
+	return &respMeta, nil
 }
 
 // streamBody 包装 mux.Stream 为 io.ReadCloser，用于响应体。

@@ -102,20 +102,9 @@ func tunnelRequest(opts tunnelReqOpts) error {
 	tunnelOpt := client.WithTunnel(opts.cfg.TunnelKey)
 	tunnelCli := client.NewFileClient(opts.cfg.ServerURL, tunnelOpt)
 
-	var bodyReader io.Reader
-	if opts.body != "" {
-		bodyReader = strings.NewReader(opts.body)
-	}
-
-	req, err := http.NewRequest(opts.method, opts.targetURL, bodyReader)
+	req, err := buildTunnelRequest(opts)
 	if err != nil {
-		return fmt.Errorf("创建请求失败: %w", err)
-	}
-	for _, h := range opts.headers {
-		parts := strings.SplitN(h, ":", 2)
-		if len(parts) == 2 {
-			req.Header.Set(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
-		}
+		return err
 	}
 
 	finalOutputFile, err := resolveOutputPath(opts.targetURL, opts.outputFile)
@@ -130,12 +119,7 @@ func tunnelRequest(opts tunnelReqOpts) error {
 	defer f.Close()
 
 	if opts.verbose {
-		fmt.Fprintf(os.Stderr, "--%s-- #Tunnel %s/tunnel\n", time.Now().Format("2006-01-02 15:04:05"), opts.cfg.ServerURL)
-		fmt.Fprintf(os.Stderr, "[请求] %s %s\n", opts.method, opts.targetURL)
-		for k := range req.Header {
-			fmt.Fprintf(os.Stderr, "%s: %s\n", k, req.Header.Get(k))
-		}
-		fmt.Fprintln(os.Stderr)
+		printTunnelVerbose(opts, req)
 	}
 
 	resp, err := tunnelCli.TunnelDo(req)
@@ -144,6 +128,41 @@ func tunnelRequest(opts tunnelReqOpts) error {
 	}
 	defer resp.Body.Close()
 
+	return writeTunnelResponse(opts, resp, f, finalOutputFile)
+}
+
+// buildTunnelRequest 构建 HTTP 请求并设置自定义头。
+func buildTunnelRequest(opts tunnelReqOpts) (*http.Request, error) {
+	var bodyReader io.Reader
+	if opts.body != "" {
+		bodyReader = strings.NewReader(opts.body)
+	}
+
+	req, err := http.NewRequest(opts.method, opts.targetURL, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	for _, h := range opts.headers {
+		parts := strings.SplitN(h, ":", 2)
+		if len(parts) == 2 {
+			req.Header.Set(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+		}
+	}
+	return req, nil
+}
+
+// printTunnelVerbose 输出 verbose 模式的请求详情。
+func printTunnelVerbose(opts tunnelReqOpts, req *http.Request) {
+	fmt.Fprintf(os.Stderr, "--%s-- #Tunnel %s/tunnel\n", time.Now().Format("2006-01-02 15:04:05"), opts.cfg.ServerURL)
+	fmt.Fprintf(os.Stderr, "[请求] %s %s\n", opts.method, opts.targetURL)
+	for k := range req.Header {
+		fmt.Fprintf(os.Stderr, "%s: %s\n", k, req.Header.Get(k))
+	}
+	fmt.Fprintln(os.Stderr)
+}
+
+// writeTunnelResponse 处理并写出隧道响应。
+func writeTunnelResponse(opts tunnelReqOpts, resp *http.Response, f *os.File, finalOutputFile string) error {
 	if opts.include || opts.verbose {
 		fmt.Fprintf(os.Stderr, "[响应状态] %s\n", resp.Status)
 		for k := range resp.Header {
