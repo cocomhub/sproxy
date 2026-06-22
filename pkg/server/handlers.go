@@ -236,7 +236,7 @@ func writeFileAtomically(dstPath string, src io.Reader) (checksum string, writte
 	checksum = hex.EncodeToString(hash.Sum(nil))
 	if err := os.Rename(tmpPath, dstPath); err != nil {
 		// Windows: 如果目标存在则重命名失败，尝试先删除再重命名
-		if rmErr := os.Remove(dstPath); rmErr == nil {
+		if os.Remove(dstPath) == nil {
 			err = os.Rename(tmpPath, dstPath)
 		}
 		if err != nil {

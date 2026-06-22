@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-func TestMetricsHandler_MuxMetrics(t *testing.T) {
+func TestMetricsHandlerMuxMetrics(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
@@ -46,7 +46,7 @@ func TestMetricsHandler_MuxMetrics(t *testing.T) {
 	}
 }
 
-func TestMetricsHandler_NilMetrics(t *testing.T) {
+func TestMetricsHandlerNilMetrics(t *testing.T) {
 	tmpDir := t.TempDir()
 	cs := NewChecksumStore(tmpDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h := &Handlers{

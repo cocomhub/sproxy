@@ -454,8 +454,8 @@ func (us *UploadStore) writeSessionJSON(s *ChunkedUploadSession) error {
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		// Windows cannot rename over an existing file; remove and retry.
-		if rmErr := os.Remove(finalPath); rmErr == nil {
-			if err2 := os.Rename(tmpPath, finalPath); err2 == nil {
+		if os.Remove(finalPath) == nil {
+			if os.Rename(tmpPath, finalPath) == nil {
 				return nil
 			}
 		}

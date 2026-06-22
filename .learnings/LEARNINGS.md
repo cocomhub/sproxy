@@ -2567,3 +2567,97 @@ Task 2（S1192 常量提取）的规格审查发现 3 类遗漏（9 处缺失替
 - First-Seen: 2026-06-22
 - See Also: LRN-20260619-BP74, LRN-20260622-BP88
 
+---
+
+## [LRN-20260622-BP92] S8242 不适用于内部 lifecycle context — subagent 的 ctxCancel 修复正确
+
+**Logged**: 2026-06-22T18:00:00Z
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+澄清 S8242 规则范围：`mux.ctx` 是内部 lifecycle context（`context.Background()` 派生），不是外部传入的 request-scoped context。subagent 添加 `ctxCancel` 是 S8188 的正确修复，S8242 对此处不适用。
+
+### Details
+SonarQube `godre:S8242` 的完整描述是"Remove this 'context.Context' field and pass context as a parameter"。它针对的是**外部传入**的 request-scoped context（如 HTTP handler 中的 `r.Context()`），因为存储为字段会导致调用者取消后 struct 持有过期 context。
+
+而 `mux.ctx` 是 mux 内部通过 `context.WithCancel(context.Background())` 创建的**生命周期 context**：
+- 不是外部调用者传入的
+- 生命周期与 mux 本身绑定
+- 通过 `sync.Once` 惰性初始化，线程安全
+
+本次修复实际上是 **S8188 的补全**——`Context()` 创建了 cancel 但未在 `Close()` 中调用。通过 `ctxCancel` 字段在 `Close()` 时显式取消，确保 `<-m.ctx.Done()` 能立即感知关闭。
+
+### Corrected Understanding
+- S8242 不应盲目应用于所有 `context.Context` 字段
+- 内部 lifecycle context（自己创建、自己管理生命周期的）存储为字段是合理且常见的 Go 模式
+- subagent 的修复（`ctxCancel` + `Close()` 中调用 + `NewWithOpts` 中调用 `m.Context()`）对 S8188 正确且完整
+
+### Suggested Action
+S8242 修复策略应区分：
+1. **Request-scoped context**（外部传入的）→ 移除字段，改为方法参数
+2. **Lifecycle context**（内部创建的）→ 保留字段，确保 Close 时 cancel 即可
+
+### Metadata
+- Source: code_review
+- Pattern-Key: lint.godre_S8242_lifecycle_context
+- Recurrence-Count: 1
+- First-Seen: 2026-06-22
+- Related Files: `pkg/tunnel/mux/mux.go`
+
+---
+
+## [LRN-20260622-BP93] S5144 validateRelayPath 校验覆盖充分，需记录确认流程
+
+**Logged**: 2026-06-22T18:05:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: backend
+
+### Summary
+验证 `relay.go` 的 `validateRelayPath` 函数：它逐项检查了空 path、路径穿越（`..`）、scheme 注入、host 注入，覆盖了 S5144 报告的全部风险场景。subagent 的"无需修改"结论正确。
+
+### Details
+`validateRelayPath` 函数：
+1. `path == ""` → 拒绝空路径
+2. `strings.Contains(path, "..")` → 拒绝路径穿越
+3. `url.Parse` + `u.Scheme != ""` → 拒绝 scheme 注入（如 `http://evil.com/path`）
+4. `u.Host != ""` → 拒绝 host 注入
+
+注意：该函数校验的是 `req.Path`（请求路径），不是 `req.Target`（目标节点 ID）。Target 用来查 hub 路由表，Path 才是实际请求路径。两段独立校验，不存在绕过。
+
+### Suggested Action
+处理安全规则时必须：
+1. 逐行读取完整的校验函数
+2. 列出被覆盖的风险场景
+3. 确认无遗漏后在报告中说明
+
+### Metadata
+- Source: code_review
+- Pattern-Key: security.validate_before_close
+- Recurrence-Count: 1
+- First-Seen: 2026-06-22
+- Related Files: `pkg/server/relay.go`
+
+---
+
+## [LRN-20260622-BP94] 任务 3 godre+小修 subagent 成功完成
+
+**Logged**: 2026-06-22T18:10:00Z
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+任务 3（godre + 小修）通过 subagent 成功实现，9 个文件 18 增 12 删，提交 `0b4499b`。编译和测试全部通过，无 lint 残留。
+
+### Metadata
+- Source: workflow
+- Pattern-Key: workflow.subagent_godre_success
+- Recurrence-Count: 1
+- First-Seen: 2026-06-22
+
+---
+
+

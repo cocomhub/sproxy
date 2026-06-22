@@ -287,8 +287,9 @@ type Mux struct {
 
 	lastPongNano atomic.Int64
 
-	ctx     context.Context
-	ctxOnce sync.Once
+	ctxOnce   sync.Once
+	ctx       context.Context
+	ctxCancel context.CancelFunc
 }
 
 // New 创建 Mux，启动事件循环 goroutine。
@@ -318,6 +319,7 @@ func NewWithOpts(conn xfer.Conn, role Role, opts ...Option) *Mux {
 	go m.readLoop()
 	go m.writeLoop()
 	go m.pingLoop()
+	m.Context()
 	return m
 }
 
@@ -376,6 +378,9 @@ func (m *Mux) Close() error {
 		return nil
 	}
 	close(m.done)
+	if m.ctxCancel != nil {
+		m.ctxCancel()
+	}
 	for id, s := range m.streams {
 		delete(m.streams, id)
 		s.closeChannels()
@@ -693,6 +698,7 @@ func (m *Mux) Context() context.Context {
 	m.ctxOnce.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		m.ctx = ctx
+		m.ctxCancel = cancel
 		go func() {
 			<-m.done
 			cancel()

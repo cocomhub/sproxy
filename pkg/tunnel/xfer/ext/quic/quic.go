@@ -22,7 +22,7 @@
 //   - Windows 上尝试关闭防火墙或添加 UDP 入站规则
 //   - 使用 `go test -run TestQuicRegistration` 测试注册逻辑
 //
-// TODO: 待 quic-go 对 Windows UDP 的兼容性改善后，可移除本限制。 //nolint:godox
+// Note: 待 quic-go 对 Windows UDP 的兼容性改善后，可移除本限制 (https://github.com/quic-go/quic-go/wiki/UDP-&-Windows)。 //nolint:godox
 package quic
 
 import (
