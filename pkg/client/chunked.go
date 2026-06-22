@@ -108,18 +108,31 @@ type ChunkedUploader struct {
 	progress    int64
 }
 
+// chunkedUploaderOpts 是 newChunkedUploader 的参数集合，减少函数参数数量。
+type chunkedUploaderOpts struct {
+	client      *FileClient
+	filePath    string
+	uploadID    string
+	chunkSize   int64
+	fileSize    int64
+	totalChunks int
+	checksum    string
+	filename    string
+	concurrency int
+}
+
 // newChunkedUploader 创建分块上传器。
-func newChunkedUploader(client *FileClient, filePath, uploadID string, chunkSize, fileSize int64, totalChunks int, checksum, filename string, concurrency int) *ChunkedUploader {
+func newChunkedUploader(opts chunkedUploaderOpts) *ChunkedUploader {
 	return &ChunkedUploader{
-		client:      client,
-		chunkSize:   chunkSize,
-		concurrency: concurrency,
-		fileSize:    fileSize,
-		totalChunks: totalChunks,
-		filePath:    filePath,
-		filename:    filename,
-		uploadID:    uploadID,
-		checksum:    checksum,
+		client:      opts.client,
+		chunkSize:   opts.chunkSize,
+		concurrency: opts.concurrency,
+		fileSize:    opts.fileSize,
+		totalChunks: opts.totalChunks,
+		filePath:    opts.filePath,
+		filename:    opts.filename,
+		uploadID:    opts.uploadID,
+		checksum:    opts.checksum,
 	}
 }
 
@@ -438,7 +451,16 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 
 					// 只上传缺失分块
 					var chunkResult *ChunkedUploadResult
-					chunkResult, err = c.uploadChunks(ctx, localPath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, statusData.MissingChunks, opt.concurrency)
+					chunkResult, err = c.uploadChunks(ctx, statusData.MissingChunks, chunkUploadOpts{
+						filePath:     localPath,
+						uploadID:     uploadID,
+						chunkSize:    chunkSize,
+						fileSize:     fileSize,
+						totalChunks:  totalChunks,
+						fileChecksum: fileChecksum,
+						filename:     filename,
+						concurrency:  opt.concurrency,
+					})
 					if err != nil {
 						return nil, err
 					}
@@ -515,12 +537,43 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	for i := 0; i < totalChunks; i++ {
 		allChunks[i] = i
 	}
-	return c.uploadChunks(ctx, localPath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, allChunks, opt.concurrency)
+	return c.uploadChunks(ctx, allChunks, chunkUploadOpts{
+		filePath:     localPath,
+		uploadID:     uploadID,
+		chunkSize:    chunkSize,
+		fileSize:     fileSize,
+		totalChunks:  totalChunks,
+		fileChecksum: fileChecksum,
+		filename:     filename,
+		concurrency:  opt.concurrency,
+	})
+}
+
+// chunkUploadOpts 是 uploadChunks 的参数集合，减少函数参数数量。
+type chunkUploadOpts struct {
+	filePath     string
+	uploadID     string
+	chunkSize    int64
+	fileSize     int64
+	totalChunks  int
+	fileChecksum string
+	filename     string
+	concurrency  int
 }
 
 // uploadChunks 上传指定索引列表的分块，然后完成上传。
-func (c *FileClient) uploadChunks(ctx context.Context, filePath, uploadID string, chunkSize, fileSize int64, totalChunks int, fileChecksum, filename string, chunkIndices []int, concurrency int) (*ChunkedUploadResult, error) {
-	uploader := newChunkedUploader(c, filePath, uploadID, chunkSize, fileSize, totalChunks, fileChecksum, filename, concurrency)
+func (c *FileClient) uploadChunks(ctx context.Context, chunkIndices []int, opts chunkUploadOpts) (*ChunkedUploadResult, error) {
+	uploader := newChunkedUploader(chunkedUploaderOpts{
+		client:      c,
+		filePath:    opts.filePath,
+		uploadID:    opts.uploadID,
+		chunkSize:   opts.chunkSize,
+		fileSize:    opts.fileSize,
+		totalChunks: opts.totalChunks,
+		checksum:    opts.fileChecksum,
+		filename:    opts.filename,
+		concurrency: opts.concurrency,
+	})
 	return uploader.run(ctx, chunkIndices)
 }
 
