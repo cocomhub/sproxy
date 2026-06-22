@@ -34,17 +34,17 @@ func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("tunnel: open stream: %w", err)
 	}
 
-	if err := t.sendRequestMeta(stream, req); err != nil {
+	if err = t.sendRequestMeta(stream, req); err != nil {
 		stream.Close()
 		return nil, err
 	}
 
-	if err := t.sendRequestBody(stream, req); err != nil {
+	if err = t.sendRequestBody(stream, req); err != nil {
 		stream.Close()
 		return nil, err
 	}
 
-	if err := stream.CloseWrite(); err != nil {
+	if err = stream.CloseWrite(); err != nil {
 		stream.Close()
 		return nil, fmt.Errorf("tunnel: close write: %w", err)
 	}
