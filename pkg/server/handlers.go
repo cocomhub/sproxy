@@ -345,12 +345,12 @@ func executeRename(h *Handlers, w http.ResponseWriter, fromPath, toPath, from, t
 	}
 	if !verifyFileWithChecksum(fromPath, expectedChecksum) {
 		logger.Warn("rename checksum 校验失败", "from", from)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件 SHA-256 校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgSrcChecksumFailed}, http.StatusBadRequest)
 		return fmt.Errorf("checksum mismatch")
 	}
 	if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
-		logger.Error("创建目标父目录失败", "to", to, "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目标父目录失败"}, http.StatusInternalServerError)
+		logger.Error(errMsgCreateParentDirFailed, "to", to, "error", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgCreateParentDirFailed}, http.StatusInternalServerError)
 		return err
 	}
 	if err := os.Rename(fromPath, toPath); err != nil {
@@ -400,11 +400,11 @@ func (h *Handlers) processBatchRenameItem(op BatchRenameOp, logger *slog.Logger)
 	}
 	if !verifyFileWithChecksum(fromPath, op.Checksum) {
 		logger.Warn("batch rename checksum 不匹配", "from", op.From)
-		result.Message = "源文件 SHA-256 校验失败"
+		result.Message = errMsgSrcChecksumFailed
 		return result
 	}
 	if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
-		logger.Error("创建目标父目录失败", "to", to, "error", err.Error())
+		logger.Error(errMsgCreateParentDirFailed, "to", to, "error", err.Error())
 		result.Message = "创建父目录失败"
 		return result
 	}
@@ -559,7 +559,7 @@ func (h *Handlers) versionHandler(w http.ResponseWriter, r *http.Request) {
 // hubNodesHandler 返回在线节点列表。
 func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	if h.routeTable == nil {
-		http.Error(w, "hub not enabled", http.StatusNotFound)
+		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
 		return
 	}
 	nodes := h.routeTable.List()
@@ -583,7 +583,7 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 // hubRemoveNodeHandler 踢出指定节点。
 func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) {
 	if h.routeTable == nil {
-		http.Error(w, "hub not enabled", http.StatusNotFound)
+		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
 		return
 	}
 	id := hub.NodeID(r.PathValue("id"))
@@ -599,7 +599,7 @@ func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) 
 // hubStatsHandler 返回中继统计。
 func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 	if h.routeTable == nil {
-		http.Error(w, "hub not enabled", http.StatusNotFound)
+		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
 		return
 	}
 	count := h.routeTable.NodeCount()
@@ -610,7 +610,7 @@ func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
-	reqID := r.Header.Get("X-Request-ID")
+	reqID := r.Header.Get(headerRequestID)
 	if reqID == "" {
 		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
@@ -687,7 +687,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	h.checksumStore.Set(remotePath, serverChecksum)
 
 	// 处理文件修改时间
-	if mtimeStr := r.Header.Get("X-File-MTime"); mtimeStr != "" {
+	if mtimeStr := r.Header.Get(headerFileMTime); mtimeStr != "" {
 		var mtimeInt int64
 		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
 			modTime := time.Unix(0, mtimeInt)
@@ -716,7 +716,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	}
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 	filePath := h.safePath(remotePath)
@@ -745,7 +745,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", remotePath))
-	w.Header().Set("Content-Type", contentTypeOctetStream)
+	w.Header().Set(headerContentType, contentTypeOctetStream)
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算
@@ -757,7 +757,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "file_name", remotePath)
 	}
 
-	w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
+	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", info.ModTime().UnixNano()))
 
 	// 使用 http.ServeContent 替代 http.ServeFile：
 	//   - 自动处理 Range header（返回 206 + Content-Range，旧客户端不带 Range 仍 200 全量）
@@ -769,7 +769,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
-	reqID := r.Header.Get("X-Request-ID")
+	reqID := r.Header.Get(headerRequestID)
 	if reqID == "" {
 		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
@@ -782,7 +782,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件名"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 	filePath := h.safePath(remotePath)
@@ -839,7 +839,7 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 		result := BatchOperationResult{Filename: f.Filename}
 		remotePath, err := ValidateFilePath(f.Filename)
 		if err != nil {
-			result.Message = "无效的文件名"
+			result.Message = errMsgInvalidFilename
 			results = append(results, result)
 			continue
 		}
@@ -1018,7 +1018,7 @@ func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 // 与 delete 对称，要求 X-File-Checksum 头校验源文件，避免误覆盖。
 // 目标路径已存在时返回 409；服务端会自动 mkdir -p 中间目录。
 func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
-	reqID := r.Header.Get("X-Request-ID")
+	reqID := r.Header.Get(headerRequestID)
 	if reqID == "" {
 		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
 	}
@@ -1084,7 +1084,7 @@ func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-File-IsDir", "true")
 	}
 	w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
-	w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
+	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", info.ModTime().UnixNano()))
 	if cs, ok := h.checksumStore.Get(remotePath); ok {
 		w.Header().Set(headerFileChecksum, cs)
 	} else if !info.IsDir() {

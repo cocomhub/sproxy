@@ -27,7 +27,7 @@ var uploadCmd = &cobra.Command{
 		cli, err := buildFileClient(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
-			return fmt.Errorf("初始化客户端失败: %w", err)
+			return fmt.Errorf(errFmtInitClient, err)
 		}
 
 		chunkedMode, _ := cmd.Flags().GetBool("chunked")

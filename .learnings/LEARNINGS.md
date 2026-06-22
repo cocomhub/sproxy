@@ -2440,3 +2440,130 @@ sproxy 包：
 - Pattern-Key: project.sonarqube_6pr_summary
 - Recurrence-Count: 1
 
+---
+
+## [LRN-20260622-BP88] S1192 常量提取后必须全文件 grep 确认无遗漏
+
+**Logged**: 2026-06-22T15:30:00Z
+**Priority**: high
+**Status**: pending
+**Area**: config
+
+### Summary
+`go:S1192` 重复字符串提取常量时，实现代理只替换了 SonarQube 报告中标记的精确行，但同一文件中相同字面量出现超过阈值时 SonarQube 只报告一处。需要全文件 grep 确认所有出现都被替换。
+
+### Details
+SonarQube 的 S1192 规则报告的是"某字面量出现了 X 次，请提取常量"，只标记第一次出现的位置。实现代理根据报告中的行号替换后，文件中同一字面量的其他出现可能遗漏。
+
+本次修复中发现的遗漏：
+- `pkg/server/handlers.go L748`："Content-Type" 字面量（已在 errors.go 中定义了常量）
+- `pkg/client/client.go`：6 处 "X-File-Checksum"/"X-File-MTime" 字面量（常量已定义但未使用）
+- `pkg/client/chunked.go L561-562`：同上
+
+这些遗漏全部被规格审查捕获并修复。
+
+### Suggested Action
+S1192 替换的步骤应为：
+1. 从 SonarQube 获取重复字面量列表
+2. 定义新常量
+3. **全文件 grep 搜索该字面量**（不仅限于 SonarQube 标记的行号）
+4. 全部替换
+5. 重新 grep 确认无残留
+
+### Metadata
+- Source: code_review
+- Pattern-Key: refactor.const_extract_full_grep
+- Recurrence-Count: 1
+- First-Seen: 2026-06-22
+- Related Files: `pkg/server/handlers.go`, `pkg/client/client.go`, `pkg/client/chunked.go`
+
+---
+
+## [LRN-20260622-BP89] subagent 开发中常量提取必须在独立 errors.go 文件
+
+**Logged**: 2026-06-22T15:35:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: config
+
+### Summary
+多 module 项目（Go workspace）中常量不能跨 package 共享。`cmd/sclient/` 是独立 go.mod，不能引用根 module 的常量。必须为每个独立 module 创建各自的 `errors.go` 或 `const.go`。
+
+### Details
+sproxy 的 Module 结构：
+- 根 module：`pkg/server/`、`pkg/client/`、`pkg/tunnel/` 等
+- `cmd/sproxy/`（独立 go.mod）
+- `cmd/sclient/`（独立 go.mod）
+
+常量放置规则：
+- `pkg/server/errors.go` — server 包内常量（历史已有集群）
+- `pkg/client/client.go` — client 包 HTTP 头常量（`headerFileChecksum` 等）
+- `cmd/sclient/errors.go` — 新建，CLI 错误格式化常量
+- `pkg/tunnel/tunnel.go` — tunnel 包常量（`headerContentType`）
+
+### Suggested Action
+跨 module 常量提取时，先规划常量文件位置。依赖链：常量只在本 module 内可见，不能跨独立 go.mod 引用。
+
+### Metadata
+- Source: workflow
+- Pattern-Key: go.const_module_isolation
+- Recurrence-Count: 1
+- First-Seen: 2026-06-22
+
+---
+
+## [LRN-20260622-BP90] Windows Python UTF-8 编码 + heredoc 双重陷阱
+
+**Logged**: 2026-06-22T15:40:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+Windows 上处理 SonarQube JSON 输出时遇到两个编码问题：
+1. `open(file)` 默认用 GBK 编码，但 JSON 是 UTF-8 → `UnicodeDecodeError`
+2. `python3 -c "..."` 多行 heredoc 在 Git Bash 中被 `|| goto :error` 陷阱打断
+
+### Details
+**问题 1**：Sonar CLI JSON 输出为 UTF-8，但 Windows Python 3.12 的 `open()` 默认用 `gbk`。修复：始终指定 `encoding='utf-8'`。
+
+**问题 2**：通过 Bash tool 执行 `python3 -c "..."` 时传入多行 Python 脚本，Git Bash 的 `|| goto :error` 机制触发。修复：用 Write tool 将 Python 代码写到 `.py` 文件，再 `python3 file.py` 执行。
+
+### Suggested Action
+Windows 环境中处理外部工具输出时：
+1. 始终 `open(file, encoding='utf-8')`
+2. 不要用 `python3 -c "..."` 执行多行 Python，改用 Write 到 `.py` 文件
+
+### Metadata
+- Source: tool_error
+- Pattern-Key: windows.python_encoding_and_heredoc
+- Recurrence-Count: 1
+- First-Seen: 2026-06-22
+
+---
+
+## [LRN-20260622-BP91] 规格审查在 subagent 流程中捕获了真实遗漏
+
+**Logged**: 2026-06-22T15:45:00Z
+**Priority**: medium
+**Status**: pending
+**Area**: tests
+
+### Summary
+Task 2（S1192 常量提取）的规格审查发现 3 类遗漏（9 处缺失替换）。这验证了 subagent-driven-development 的两阶段审查不是形式主义。
+
+### Details
+实现代理报告"全部完成"，但实际上：
+- `handlers.go L748` 的 `"Content-Type"` 字面量未替换为 `headerContentType`
+- `client.go` 中 6 处 `X-File-Checksum`/`X-File-MTime` 字面量未替换为已定义的常量
+- `chunked.go L561-562` 同上
+
+规格审查代理通过逐行阅读代码发现了这些问题，要求修复后再继续。
+
+### Metadata
+- Source: workflow
+- Pattern-Key: workflow.spec_review_real_value
+- Recurrence-Count: 1
+- First-Seen: 2026-06-22
+- See Also: LRN-20260619-BP74, LRN-20260622-BP88
+

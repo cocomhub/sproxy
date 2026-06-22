@@ -98,17 +98,17 @@ var mkdirCmd = &cobra.Command{
 		cli, err := buildFileClient(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
-			return fmt.Errorf("初始化客户端失败: %w", err)
+			return fmt.Errorf(errFmtInitClient, err)
 		}
 
 		dirname, err := resolveRemotePath(args[0])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "无效的路径: %v\n", err)
-			return fmt.Errorf("无效的路径: %w", err)
+			return fmt.Errorf(errFmtInvalidPath, err)
 		}
 		if err := cli.Mkdir(context.Background(), dirname); err != nil {
 			fmt.Fprintf(os.Stderr, "创建目录失败: %v\n", err)
-			return fmt.Errorf("创建目录失败: %w", err)
+			return fmt.Errorf(errFmtMkdirFailed, err)
 		}
 		fmt.Printf("目录已创建: %s\n", dirname)
 		return nil
@@ -126,13 +126,13 @@ var rmdirCmd = &cobra.Command{
 		cli, err := buildFileClient(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
-			return fmt.Errorf("初始化客户端失败: %w", err)
+			return fmt.Errorf(errFmtInitClient, err)
 		}
 
 		dirname, err := resolveRemotePath(args[0])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "无效的路径: %v\n", err)
-			return fmt.Errorf("无效的路径: %w", err)
+			return fmt.Errorf(errFmtInvalidPath, err)
 		}
 
 		// 检查目录是否为空：先 list 子目录
@@ -235,7 +235,7 @@ func resolveRemotePath(userPath string) (string, error) {
 func resolveRemotePathOrErr(userPath string) (string, error) {
 	cleaned, err := resolveRemotePath(userPath)
 	if err != nil {
-		return "", fmt.Errorf("无效的路径: %w", err)
+		return "", fmt.Errorf(errFmtInvalidPath, err)
 	}
 	return cleaned, nil
 }

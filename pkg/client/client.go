@@ -32,6 +32,9 @@ import (
 const (
 	errFmtRequestFailed = "请求失败: %w"
 	errFmtParseResponse = "解析响应失败: %w"
+	headerFileChecksum  = "X-File-Checksum"
+	headerFileMTime     = "X-File-MTime"
+	headerContentType   = "Content-Type"
 )
 
 // UploadResult 表示上传操作的响应结果。
@@ -256,10 +259,10 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	}()
 
 	headers := make(http.Header)
-	headers.Set("Content-Type", mw.FormDataContentType())
-	headers.Set("X-File-Checksum", fileChecksum)
+	headers.Set(headerContentType, mw.FormDataContentType())
+	headers.Set(headerFileChecksum, fileChecksum)
 	headers.Set("X-File-Path", remoteClean)
-	headers.Set("X-File-MTime", fmt.Sprintf("%d", stat.ModTime().UnixNano()))
+	headers.Set(headerFileMTime, fmt.Sprintf("%d", stat.ModTime().UnixNano()))
 
 	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
 	if err != nil {
@@ -339,7 +342,7 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	}
 
 	// 从响应解析收到的 checksum（服务端在 X-File-Checksum 返回）
-	serverCS := resp.Header.Get("X-File-Checksum")
+	serverCS := resp.Header.Get(headerFileChecksum)
 	contentLength := resp.ContentLength
 
 	out, err := os.Create(outputPath)
@@ -372,7 +375,7 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	}
 
 	// 恢复文件修改时间
-	if mtimeStr := resp.Header.Get("X-File-MTime"); mtimeStr != "" {
+	if mtimeStr := resp.Header.Get(headerFileMTime); mtimeStr != "" {
 		var mtimeInt int64
 		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
 			modTime := time.Unix(0, mtimeInt)
@@ -417,7 +420,7 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 		c.logger.Debug("本地文件校验通过", "local_path", localPath, "checksum", shortid.ShortHash(fileChecksum))
 	}
 
-	headers.Set("X-File-Checksum", fileChecksum)
+	headers.Set(headerFileChecksum, fileChecksum)
 
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, headers)
 	if err != nil {
@@ -465,7 +468,7 @@ func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) 
 
 	urlPath := "/rename?" + url.Values{"from": {from}, "to": {to}}.Encode()
 	headers := make(http.Header)
-	headers.Set("X-File-Checksum", fromChecksum)
+	headers.Set(headerFileChecksum, fromChecksum)
 
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, headers)
 	if err != nil {
@@ -503,13 +506,13 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 
 	info := &FileInfo{
 		Name:     filepath.Base(filename),
-		Checksum: resp.Header.Get("X-File-Checksum"),
+		Checksum: resp.Header.Get(headerFileChecksum),
 		IsDir:    resp.Header.Get("X-File-IsDir") == "true",
 	}
 	if s := resp.Header.Get("X-File-Size"); s != "" {
 		_, _ = fmt.Sscanf(s, "%d", &info.Size)
 	}
-	if s := resp.Header.Get("X-File-MTime"); s != "" {
+	if s := resp.Header.Get(headerFileMTime); s != "" {
 		_, _ = fmt.Sscanf(s, "%d", &info.ModTime)
 	}
 	return info, nil

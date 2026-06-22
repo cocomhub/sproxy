@@ -174,7 +174,7 @@ func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*Chunked
 	// 完成上传
 	completeBody, _ := json.Marshal(chunkedCompleteRequest{UploadID: u.uploadID})
 	resp, err := u.client.doRequest(ctx, "POST", "/upload/complete", bytes.NewReader(completeBody), http.Header{
-		"Content-Type": {"application/json"},
+		headerContentType: {"application/json"},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("完成上传请求失败: %w", err)
@@ -295,7 +295,7 @@ func (u *ChunkedUploader) buildChunkRequest(chunkIdx int, chunkData []byte, chun
 // sendChunkRequest 发送分块上传请求并解析响应，返回 success、shouldRetry、statusCode、message。
 func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, body io.Reader, contentType string) (success, shouldRetry bool, statusCode int, message string) {
 	headers := make(http.Header)
-	headers.Set("Content-Type", contentType)
+	headers.Set(headerContentType, contentType)
 
 	chunkResp, err := u.client.doRequest(ctx, "POST", "/upload/chunk", body, headers)
 	if err != nil {
@@ -467,7 +467,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	initJSON, _ := json.Marshal(initBody)
 
 	resp, err := c.doRequest(ctx, "POST", "/upload/init", bytes.NewReader(initJSON), http.Header{
-		"Content-Type": {"application/json"},
+		headerContentType: {"application/json"},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("初始化上传失败: %w", err)
@@ -558,8 +558,8 @@ func getFileStat(ctx context.Context, c *FileClient, filename string) (fileSize 
 		if s := statResp.Header.Get("X-File-Size"); s != "" {
 			fileSize, _ = strconv.ParseInt(s, 10, 64)
 		}
-		checksum = statResp.Header.Get("X-File-Checksum")
-		if m := statResp.Header.Get("X-File-MTime"); m != "" {
+		checksum = statResp.Header.Get(headerFileChecksum)
+		if m := statResp.Header.Get(headerFileMTime); m != "" {
 			modTime, _ = strconv.ParseInt(m, 10, 64)
 		}
 	}

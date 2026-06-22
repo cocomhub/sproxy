@@ -24,7 +24,7 @@ var searchCmd = &cobra.Command{
 		cli, err := buildFileClient(cmd)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "初始化客户端失败: %v\n", err)
-			return fmt.Errorf("初始化客户端失败: %w", err)
+			return fmt.Errorf(errFmtInitClient, err)
 		}
 
 		files, err := cli.Search(context.Background(), args[0])

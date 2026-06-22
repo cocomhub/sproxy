@@ -59,7 +59,7 @@ func (h *Handlers) checkExistingFileForInit(w http.ResponseWriter, filename, fil
 		sendJSONResponse(w, ChunkedInitResponse{
 			Success:  true,
 			UploadID: "already_exists",
-			Message:  fmt.Sprintf("文件已存在, size: %d", stat.Size()),
+			Message:  fmt.Sprintf(errFmtFileExists, stat.Size()),
 		}, http.StatusOK)
 		return true
 	}
@@ -212,7 +212,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	// 获取 session
 	session := h.uploadStore.GetSession(uploadID)
 	if session == nil {
-		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "upload_id 不存在或已过期"}, http.StatusNotFound)
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
 		return
 	}
 
@@ -314,7 +314,7 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		// upload_id 存在但 session 不存在
 		if filename == "" {
-			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: "upload_id 不存在或已过期"}, http.StatusNotFound)
+			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
 			return
 		}
 	}
@@ -356,7 +356,7 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 					Completed:    true,
 					FileChecksum: checksum,
 					Filename:     filename,
-					Message:      fmt.Sprintf("文件已存在, size: %d", stat.Size()),
+					Message:      fmt.Sprintf(errFmtFileExists, stat.Size()),
 				}, http.StatusOK)
 				return
 			}
@@ -368,7 +368,7 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 					Completed:    true,
 					FileChecksum: cs,
 					Filename:     filename,
-					Message:      fmt.Sprintf("文件已存在, size: %d", stat.Size()),
+					Message:      fmt.Sprintf(errFmtFileExists, stat.Size()),
 				}, http.StatusOK)
 				return
 			}
@@ -397,7 +397,7 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	session := h.uploadStore.GetSession(req.UploadID)
 	if session == nil {
-		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "upload_id 不存在或已过期"}, http.StatusNotFound)
+		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
 		return
 	}
 
