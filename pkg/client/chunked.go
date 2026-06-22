@@ -333,6 +333,149 @@ func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, bo
 	return chunkResult.Success, chunkResult.ShouldRetry, chunkResp.StatusCode, chunkResult.Message
 }
 
+// calcFileChecksum 计算文件的 SHA-256 checksum，同时处理缓存。
+// 返回校验和、是否从缓存获取、错误。
+func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize int64, modTime time.Time) (string, bool, error) {
+	absPath, _ := filepath.Abs(localPath)
+	if cached, ok := c.uploadCache.Load(absPath); ok {
+		entry := cached.(*uploadCacheEntry) //nolint:errcheck
+		if entry.fileSize == fileSize && entry.modTime.Equal(modTime) {
+			c.logger.Debug("checksum 缓存命中", "file_path", localPath)
+			return entry.fileChecksum, true, nil
+		}
+	}
+
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return "", false, fmt.Errorf("计算 SHA-256 失败: %w", err)
+	}
+	fileChecksum := hex.EncodeToString(h.Sum(nil))
+	c.uploadCache.Store(absPath, &uploadCacheEntry{
+		fileSize:     fileSize,
+		modTime:      modTime,
+		fileChecksum: fileChecksum,
+	})
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", false, fmt.Errorf("重置文件指针失败: %w", err)
+	}
+	c.logger.Debug("文件 SHA-256 计算完毕", "file_path", localPath, "checksum", shortid.ShortHash(fileChecksum))
+	return fileChecksum, false, nil
+}
+
+// tryResumeSession 尝试续传已有的上传会话。
+// 返回值：
+//   - *ChunkedUploadResult: 非 nil 表示已处理完毕（文件已存在或续传完成），调用方应 return
+//   - error: 续传过程中的错误
+//   - bool: true 表示应继续执行（新 session 或续传不可用）
+func (c *FileClient) tryResumeSession(ctx context.Context, uploadID, filename, localPath, fileChecksum string, fileSize, chunkSize int64, totalChunks int, concurrency int) (*ChunkedUploadResult, error, bool) {
+	statusResp, statusErr := c.doRequest(ctx, "GET",
+		fmt.Sprintf("/upload/status?upload_id=%s&filename=%s", uploadID, url.QueryEscape(filename)), nil, nil)
+	if statusErr != nil || statusResp.StatusCode != http.StatusOK {
+		if statusResp != nil {
+			statusResp.Body.Close()
+		}
+		return nil, nil, true
+	}
+
+	var statusData struct {
+		Success       bool   `json:"success"`
+		Finished      bool   `json:"finished"`
+		UploadID      string `json:"upload_id"`
+		ReceivedCount int    `json:"received_count"`
+		TotalChunks   int    `json:"total_chunks"`
+		MissingChunks []int  `json:"missing_chunks"`
+		Completed     bool   `json:"completed"`
+		FileChecksum  string `json:"file_checksum"`
+		Message       string `json:"message"`
+	}
+	if json.NewDecoder(statusResp.Body).Decode(&statusData) != nil || !statusData.Success {
+		statusResp.Body.Close()
+		return nil, nil, true
+	}
+	statusResp.Body.Close()
+
+	if statusData.Finished || statusData.Completed {
+		c.logger.Info("文件已存在，直接返回成功", "file_name", filename, "checksum", shortid.ShortHash(fileChecksum))
+		return &ChunkedUploadResult{
+			Success:      true,
+			UploadID:     uploadID,
+			Filename:     filename,
+			FileChecksum: fileChecksum,
+			Message:      "文件已存在",
+		}, nil, false
+	}
+
+	if statusData.UploadID != "" {
+		c.logger.Info("续传会话已恢复", "upload_id", shortid.ShortHash(uploadID),
+			"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
+		result, err := c.uploadChunks(ctx, statusData.MissingChunks, chunkUploadOpts{
+			filePath:     localPath,
+			uploadID:     uploadID,
+			chunkSize:    chunkSize,
+			fileSize:     fileSize,
+			totalChunks:  totalChunks,
+			fileChecksum: fileChecksum,
+			filename:     filename,
+			concurrency:  concurrency,
+		})
+		return result, err, false
+	}
+
+	return nil, nil, true
+}
+
+// initNewUploadSession 创建新的上传 session，并返回服务端 chunk_size。
+func (c *FileClient) initNewUploadSession(ctx context.Context, uploadID, filename, fileChecksum string, fileSize, chunkSize int64, totalChunks int, modTime time.Time) (int64, int, error) {
+	initBody := chunkedInitRequest{
+		UploadID:     uploadID,
+		Filename:     filename,
+		TotalSize:    fileSize,
+		ChunkSize:    chunkSize,
+		TotalChunks:  totalChunks,
+		FileChecksum: fileChecksum,
+		FileModTime:  modTime.UnixNano(),
+	}
+	initJSON, _ := json.Marshal(initBody)
+
+	resp, err := c.doRequest(ctx, "POST", "/upload/init", bytes.NewReader(initJSON), http.Header{
+		headerContentType: {"application/json"},
+	})
+	if err != nil {
+		return 0, 0, fmt.Errorf("初始化上传失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return 0, 0, fmt.Errorf("初始化上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var initResult struct {
+		Success   bool   `json:"success"`
+		UploadID  string `json:"upload_id"`
+		ChunkSize int64  `json:"chunk_size"`
+		Message   string `json:"message"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&initResult); err != nil {
+		return 0, 0, fmt.Errorf("解析 init 响应失败: %w", err)
+	}
+	if !initResult.Success {
+		return 0, 0, fmt.Errorf("初始化上传失败: %s", initResult.Message)
+	}
+
+	// 如果 upload_id = "already_exists"，说明文件已存在且 checksum 匹配
+	if initResult.UploadID == "already_exists" {
+		return 0, -1, nil // -1 表示已存在
+	}
+
+	newChunkSize := chunkSize
+	if initResult.ChunkSize > 0 {
+		newChunkSize = initResult.ChunkSize
+	}
+	newTotalChunks := int((fileSize + newChunkSize - 1) / newChunkSize)
+	return newChunkSize, newTotalChunks, nil
+}
+
 // ChunkedUpload 分块上传文件到指定的远端路径。支持续传。
 //
 // 参数：
@@ -373,34 +516,10 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	fileSize := stat.Size()
 	modTime := stat.ModTime()
 
-	// 检查 checksum 缓存
 	var fileChecksum string
-	absPath, _ := filepath.Abs(localPath)
-	if cached, ok := c.uploadCache.Load(absPath); ok {
-		entry := cached.(*uploadCacheEntry) //nolint:errcheck
-		if entry.fileSize == fileSize && entry.modTime.Equal(modTime) {
-			fileChecksum = entry.fileChecksum
-			c.logger.Debug("checksum 缓存命中", "file_path", localPath)
-		}
-	}
-
-	if fileChecksum == "" {
-		// 计算完整文件 SHA-256
-		h := sha256.New()
-		if _, err = io.Copy(h, file); err != nil {
-			return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
-		}
-		fileChecksum = hex.EncodeToString(h.Sum(nil))
-		// 写入缓存
-		c.uploadCache.Store(absPath, &uploadCacheEntry{
-			fileSize:     fileSize,
-			modTime:      modTime,
-			fileChecksum: fileChecksum,
-		})
-		if _, err = file.Seek(0, io.SeekStart); err != nil {
-			return nil, fmt.Errorf("重置文件指针失败: %w", err)
-		}
-		c.logger.Debug("文件 SHA-256 计算完毕", "file_path", localPath, "checksum", shortid.ShortHash(fileChecksum))
+	fileChecksum, _, err = c.calcFileChecksum(localPath, file, fileSize, modTime)
+	if err != nil {
+		return nil, err
 	}
 
 	// 自适应分块大小
@@ -412,110 +531,24 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	c.logger.Info("分块上传开始", "file_name", filename, "file_size", fileSize,
 		"chunk_size", chunkSize, "total_chunks", totalChunks, "upload_id", shortid.ShortHash(uploadID))
 
-	// 当 resume=false 时，跳过续传查询，直接走新建 session 路径
+	// 尝试续传
 	if opt.resume {
-		// 统一查询：先通过 upload_id + filename 查询文件状态
-		statusResp, statusErr := c.doRequest(ctx, "GET",
-			fmt.Sprintf("/upload/status?upload_id=%s&filename=%s", uploadID, url.QueryEscape(filename)), nil, nil)
-		if statusErr == nil && statusResp.StatusCode == http.StatusOK {
-			var statusData struct {
-				Success       bool   `json:"success"`
-				Finished      bool   `json:"finished"`
-				UploadID      string `json:"upload_id"`
-				ReceivedCount int    `json:"received_count"`
-				TotalChunks   int    `json:"total_chunks"`
-				MissingChunks []int  `json:"missing_chunks"`
-				Completed     bool   `json:"completed"`
-				FileChecksum  string `json:"file_checksum"`
-				Message       string `json:"message"`
-			}
-			if json.NewDecoder(statusResp.Body).Decode(&statusData) == nil && statusData.Success {
-				statusResp.Body.Close()
-
-				// 状态1：文件已完整上传
-				if statusData.Finished || statusData.Completed {
-					c.logger.Info("文件已存在，直接返回成功", "file_name", filename, "checksum", shortid.ShortHash(fileChecksum))
-					return &ChunkedUploadResult{
-						Success:      true,
-						UploadID:     uploadID,
-						Filename:     filename,
-						FileChecksum: fileChecksum,
-						Message:      "文件已存在",
-					}, nil
-				}
-
-				// 状态2：有未完成的 session，续传
-				if statusData.UploadID != "" {
-					c.logger.Info("续传会话已恢复", "upload_id", shortid.ShortHash(uploadID),
-						"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
-
-					// 只上传缺失分块
-					var chunkResult *ChunkedUploadResult
-					chunkResult, err = c.uploadChunks(ctx, statusData.MissingChunks, chunkUploadOpts{
-						filePath:     localPath,
-						uploadID:     uploadID,
-						chunkSize:    chunkSize,
-						fileSize:     fileSize,
-						totalChunks:  totalChunks,
-						fileChecksum: fileChecksum,
-						filename:     filename,
-						concurrency:  opt.concurrency,
-					})
-					if err != nil {
-						return nil, err
-					}
-					return chunkResult, nil
-				}
-			} else {
-				statusResp.Body.Close()
-			}
-		} else if statusErr == nil {
-			statusResp.Body.Close()
+		result, resumeErr, shouldContinue := c.tryResumeSession(ctx, uploadID, filename, localPath,
+			fileChecksum, fileSize, chunkSize, totalChunks, opt.concurrency)
+		if !shouldContinue {
+			return result, resumeErr
 		}
 	}
 
-	// 状态3：新文件 / 不在上传中，创建新 session
+	// 新文件 / 不在上传中，创建新 session
 	c.logger.Info("新上传", "file_name", filename, "upload_id", shortid.ShortHash(uploadID))
 
-	initBody := chunkedInitRequest{
-		UploadID:     uploadID,
-		Filename:     filename,
-		TotalSize:    fileSize,
-		ChunkSize:    chunkSize,
-		TotalChunks:  totalChunks,
-		FileChecksum: fileChecksum,
-		FileModTime:  modTime.UnixNano(),
-	}
-	initJSON, _ := json.Marshal(initBody)
-
-	resp, err := c.doRequest(ctx, "POST", "/upload/init", bytes.NewReader(initJSON), http.Header{
-		headerContentType: {"application/json"},
-	})
+	newChunkSize, newTotalChunks, err := c.initNewUploadSession(ctx, uploadID, filename, fileChecksum,
+		fileSize, chunkSize, totalChunks, modTime)
 	if err != nil {
-		return nil, fmt.Errorf("初始化上传失败: %w", err)
+		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, fmt.Errorf("初始化上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-
-	var initResult struct {
-		Success   bool   `json:"success"`
-		UploadID  string `json:"upload_id"`
-		ChunkSize int64  `json:"chunk_size"`
-		Message   string `json:"message"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&initResult); err != nil {
-		return nil, fmt.Errorf("解析 init 响应失败: %w", err)
-	}
-	if !initResult.Success {
-		return nil, fmt.Errorf("初始化上传失败: %s", initResult.Message)
-	}
-
-	// 如果 upload_id = "already_exists"，说明文件已存在且 checksum 匹配
-	if initResult.UploadID == "already_exists" {
+	if newTotalChunks == -1 {
 		c.logger.Info("文件已存在，直接返回成功", "file_name", filename)
 		return &ChunkedUploadResult{
 			Success:      true,
@@ -524,11 +557,9 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 			FileChecksum: fileChecksum,
 		}, nil
 	}
-
-	// 使用服务端返回的 chunk_size
-	if initResult.ChunkSize > 0 {
-		chunkSize = initResult.ChunkSize
-		totalChunks = int((fileSize + chunkSize - 1) / chunkSize)
+	if newChunkSize != chunkSize {
+		chunkSize = newChunkSize
+		totalChunks = newTotalChunks
 		c.logger.Info("服务端返回的 chunk_size", "chunk_size", chunkSize, "total_chunks", totalChunks)
 	}
 
@@ -670,44 +701,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		go func(chunkIdx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-
-			offset := int64(chunkIdx) * int64(chunkSize)
-			length := chunkSize
-			if offset+length > fileSize {
-				length = fileSize - offset
-			}
-
-			urlPath := fmt.Sprintf("/download/chunk?filename=%s&offset=%d&length=%d",
-				url.QueryEscape(filename), offset, length)
-
-			for range maxRetries {
-				if downloadErr != nil {
-					return
-				}
-
-				data, ok := c.tryDownloadChunk(ctx, urlPath, length)
-				if !ok {
-					continue
-				}
-
-				mu.Lock()
-				if _, writeErr := outFile.WriteAt(data, offset); writeErr != nil {
-					mu.Unlock()
-					continue
-				}
-				progress += int64(len(data))
-				if c.progressFn != nil {
-					c.progressFn("下载", progress, fileSize)
-				}
-				mu.Unlock()
-				return
-			}
-
-			mu.Lock()
-			if downloadErr == nil {
-				downloadErr = fmt.Errorf("分块 %d 下载失败（重试耗尽）", chunkIdx)
-			}
-			mu.Unlock()
+			c.downloadOneChunk(ctx, filename, chunkIdx, chunkSize, fileSize, outFile, &mu, &progress, &downloadErr)
 		}(i)
 	}
 
@@ -718,28 +712,84 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		return downloadErr
 	}
 
-	// 校验完整文件 checksum
-	if expectedChecksum != "" {
-		c.logger.Debug("分块下载文件校验", "file_name", outputPath, "checksum", shortid.ShortHash(expectedChecksum))
-		localCS, err := calculateChecksum(outputPath)
-		if err != nil {
-			return fmt.Errorf("计算本地 SHA-256 失败: %w", err)
-		}
-		if localCS != expectedChecksum {
-			return fmt.Errorf("文件校验失败: 服务端 %s, 本地 %s", expectedChecksum, localCS)
-		}
+	if err := c.verifyDownloadChecksum(outputPath, expectedChecksum); err != nil {
+		return err
 	}
 
-	// 恢复文件修改时间
-	if fileModTime > 0 {
-		modTime := time.Unix(0, fileModTime)
-		if err := os.Chtimes(outputPath, modTime, modTime); err != nil {
-			c.logger.Warn("设置文件时间戳失败", "file_name", outputPath, "error", err)
-		}
-	}
+	c.restoreDownloadModTime(outputPath, fileModTime)
 
 	c.logger.Info("分块下载完成", "file_name", outputPath)
 	return nil
+}
+
+// downloadOneChunk 下载单个分块并写入文件指定偏移位置，内部包含重试逻辑。
+func (c *FileClient) downloadOneChunk(ctx context.Context, filename string, chunkIdx int,
+	chunkSize int64, fileSize int64, outFile *os.File,
+	mu *sync.Mutex, progress *int64, downloadErr *error) {
+	offset := int64(chunkIdx) * int64(chunkSize)
+	length := chunkSize
+	if offset+length > fileSize {
+		length = fileSize - offset
+	}
+
+	urlPath := fmt.Sprintf("/download/chunk?filename=%s&offset=%d&length=%d",
+		url.QueryEscape(filename), offset, length)
+
+	for range maxRetries {
+		if *downloadErr != nil {
+			return
+		}
+
+		data, ok := c.tryDownloadChunk(ctx, urlPath, length)
+		if !ok {
+			continue
+		}
+
+		mu.Lock()
+		if _, writeErr := outFile.WriteAt(data, offset); writeErr != nil {
+			mu.Unlock()
+			continue
+		}
+		*progress += int64(len(data))
+		if c.progressFn != nil {
+			c.progressFn("下载", *progress, fileSize)
+		}
+		mu.Unlock()
+		return
+	}
+
+	mu.Lock()
+	if *downloadErr == nil {
+		*downloadErr = fmt.Errorf("分块 %d 下载失败（重试耗尽）", chunkIdx)
+	}
+	mu.Unlock()
+}
+
+// verifyDownloadChecksum 校验下载后的文件 checksum 是否与预期一致。
+func (c *FileClient) verifyDownloadChecksum(outputPath, expectedChecksum string) error {
+	if expectedChecksum == "" {
+		return nil
+	}
+	c.logger.Debug("分块下载文件校验", "file_name", outputPath, "checksum", shortid.ShortHash(expectedChecksum))
+	localCS, err := calculateChecksum(outputPath)
+	if err != nil {
+		return fmt.Errorf("计算本地 SHA-256 失败: %w", err)
+	}
+	if localCS != expectedChecksum {
+		return fmt.Errorf("文件校验失败: 服务端 %s, 本地 %s", expectedChecksum, localCS)
+	}
+	return nil
+}
+
+// restoreDownloadModTime 尝试恢复文件的修改时间（非致命错误仅记录日志）。
+func (c *FileClient) restoreDownloadModTime(outputPath string, fileModTime int64) {
+	if fileModTime <= 0 {
+		return
+	}
+	modTime := time.Unix(0, fileModTime)
+	if err := os.Chtimes(outputPath, modTime, modTime); err != nil {
+		c.logger.Warn("设置文件时间戳失败", "file_name", outputPath, "error", err)
+	}
 }
 
 // tryDownloadChunk 执行一次分块下载尝试：发请求、按需校验 X-Chunk-Checksum，返回 (data, true) 表示成功。

@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -621,6 +622,49 @@ func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// parseUploadMultipart 解析上传请求的 multipart 表单，返回文件、文件信息、期望的 checksum 和错误。
+func (h *Handlers) parseUploadMultipart(w http.ResponseWriter, r *http.Request, logger *slog.Logger) (file multipart.File, handler *multipart.FileHeader, expectedChecksum string, ok bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, size.UploadBodyLimit)
+	if err := r.ParseMultipartForm(size.MultipartBufSize); err != nil {
+		logger.Warn("解析 multipart 失败", "error", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体过大或解析失败"}, http.StatusRequestEntityTooLarge)
+		return nil, nil, "", false
+	}
+
+	file, handler, err := r.FormFile("file")
+	if err != nil {
+		logger.Error("读取文件失败", "error", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "读取文件失败"}, http.StatusBadRequest)
+		return nil, nil, "", false
+	}
+
+	expectedChecksum = r.Header.Get(headerFileChecksum)
+	if expectedChecksum == "" {
+		file.Close()
+		logger.Warn("缺少 X-File-Checksum 请求头")
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgMissingChecksum}, http.StatusBadRequest)
+		return nil, nil, "", false
+	}
+	return file, handler, expectedChecksum, true
+}
+
+// setUploadResponseHeaders 设置上传成功后的响应头（checksum、mtime）。
+func (h *Handlers) setUploadResponseHeaders(w http.ResponseWriter, r *http.Request, remotePath, filePath, serverChecksum string, logger *slog.Logger) {
+	w.Header().Set(headerFileChecksum, serverChecksum)
+	h.checksumStore.Set(remotePath, serverChecksum)
+
+	// 处理文件修改时间
+	if mtimeStr := r.Header.Get(headerFileMTime); mtimeStr != "" {
+		var mtimeInt int64
+		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
+			modTime := time.Unix(0, mtimeInt)
+			if err := os.Chtimes(filePath, modTime, modTime); err != nil {
+				logger.Warn("设置文件时间戳失败", "file_name", remotePath, "error", err)
+			}
+		}
+	}
+}
+
 func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	reqID := r.Header.Get(headerRequestID)
 	if reqID == "" {
@@ -628,34 +672,13 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	logger := h.logger.With("req_id", reqID)
 
-	// 限制请求体大小，防止 OOM；超过 MaxBytesReader 会向客户端返回 413
-	r.Body = http.MaxBytesReader(w, r.Body, size.UploadBodyLimit)
-	// 仅在内存中缓冲 MultipartBufSize，超出部分由 stdlib 落临时文件
-	if err := r.ParseMultipartForm(size.MultipartBufSize); err != nil {
-		logger.Warn("解析 multipart 失败", "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体过大或解析失败"}, http.StatusRequestEntityTooLarge)
-		return
-	}
-
-	file, handler, err := r.FormFile("file")
-	if err != nil {
-		logger.Error("读取文件失败", "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "读取文件失败"}, http.StatusBadRequest)
+	file, handler, expectedChecksum, ok := h.parseUploadMultipart(w, r, logger)
+	if !ok {
 		return
 	}
 	defer file.Close()
 
-	expectedChecksum := r.Header.Get(headerFileChecksum)
-	if expectedChecksum == "" {
-		logger.Warn("缺少 X-File-Checksum 请求头")
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgMissingChecksum}, http.StatusBadRequest)
-		return
-	}
-
 	// 路径校验（支持子目录）
-	// Go >=1.26 的 mime/multipart 会对 Content-Disposition 中的 filename 调用
-	// filepath.Base，导致 "dir/file.txt" 被截断为 "file.txt"。
-	// 因此优先使用 X-File-Path 头获取完整路径，回退到 handler.Filename 兼容旧客户端。
 	remotePathStr := r.Header.Get("X-File-Path")
 	if remotePathStr == "" {
 		remotePathStr = handler.Filename
@@ -666,14 +689,13 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.Debug("上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
 
-	if err = os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		logger.Error("创建目录失败", "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
 		return
 	}
 
-	// 重复检测与版本管理：文件已存在且 checksum 匹配则幂等返回，
-	// 版本管理启用时 checksum 不匹配也继续执行覆盖
+	// 重复检测与版本管理
 	if h.handleDuplicateFile(w, filePath, expectedChecksum, remotePath) {
 		return
 	}
@@ -687,28 +709,13 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if serverChecksum != expectedChecksum {
-		// 清理已重命名的文件（writeFileAtomically 在 Rename 成功后返回，
-		// 但校验失败时不应保留目标文件）
 		os.Remove(filePath)
 		logger.Warn("文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件 SHA-256 校验失败"}, http.StatusBadRequest)
 		return
 	}
 
-	w.Header().Set(headerFileChecksum, serverChecksum)
-	h.checksumStore.Set(remotePath, serverChecksum)
-
-	// 处理文件修改时间
-	if mtimeStr := r.Header.Get(headerFileMTime); mtimeStr != "" {
-		var mtimeInt int64
-		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
-			modTime := time.Unix(0, mtimeInt)
-			// filePath 已验证通过 ValidateFilePath，路径安全。
-			if err := os.Chtimes(filePath, modTime, modTime); err != nil {
-				logger.Warn("设置文件时间戳失败", "file_name", remotePath, "error", err)
-			}
-		}
-	}
+	h.setUploadResponseHeaders(w, r, remotePath, filePath, serverChecksum, logger)
 
 	sendJSONResponse(w, UploadResponse{
 		Success:  true,

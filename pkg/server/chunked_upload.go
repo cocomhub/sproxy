@@ -379,102 +379,105 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: "未找到文件或上传会话"}, http.StatusNotFound)
 }
 
-// uploadComplete 合并所有分块完成上传。
-func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, size.CompleteBodyLimit)
-	var req struct {
-		UploadID string `json:"upload_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
-		return
-	}
-
-	if req.UploadID == "" {
+// validateCompleteSession 校验 complete 请求的 session 是否有效。
+// 如果校验失败，已发送错误响应，返回 (nil, false)。
+func (h *Handlers) validateCompleteSession(w http.ResponseWriter, uploadID string) (*ChunkedUploadSession, bool) {
+	if uploadID == "" {
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "缺少 upload_id"}, http.StatusBadRequest)
-		return
+		return nil, false
 	}
 
-	session := h.uploadStore.GetSession(req.UploadID)
+	session := h.uploadStore.GetSession(uploadID)
 	if session == nil {
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
-		return
+		return nil, false
 	}
 
-	h.logger.Info("uploadComplete 开始", "upload_id", req.UploadID, "file_name", session.Filename,
+	h.logger.Info("uploadComplete 开始", "upload_id", uploadID, "file_name", session.Filename,
 		"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
 
 	if session.Completed {
-		h.logger.Info("上传已完成（幂等）", "upload_id", req.UploadID, "file_name", session.Filename)
+		h.logger.Info("上传已完成（幂等）", "upload_id", uploadID, "file_name", session.Filename)
 		sendJSONResponse(w, ChunkCompleteResponse{
 			Success:      true,
 			Filename:     session.Filename,
 			FileChecksum: session.FileChecksum,
 			Message:      "上传已完成",
 		}, http.StatusOK)
-		return
+		return nil, false
 	}
 
-	// 检查所有分块是否已接收
-	if !h.uploadStore.AllChunksReceived(req.UploadID) {
-		session = h.uploadStore.GetSession(req.UploadID)
+	if !h.uploadStore.AllChunksReceived(uploadID) {
+		session = h.uploadStore.GetSession(uploadID)
 		missing := MissingChunks(session)
-		h.logger.Warn("合并请求时还有分块未接收", "upload_id", req.UploadID, "missing", len(missing))
+		h.logger.Warn("合并请求时还有分块未接收", "upload_id", uploadID, "missing", len(missing))
 		sendJSONResponse(w, ChunkCompleteResponse{
 			Success: false,
 			Message: fmt.Sprintf("还有 %d 个分块未接收", len(missing)),
 		}, http.StatusBadRequest)
-		return
+		return nil, false
 	}
 
+	return session, true
+}
+
+// mergeAndRenameFile 合并分块到临时文件，校验 SHA-256，然后原子重命名。
+// 如果操作失败，已发送错误响应，返回 ("", false)。
+func (h *Handlers) mergeAndRenameFile(w http.ResponseWriter, uploadID string, session *ChunkedUploadSession) (string, bool) {
 	filePath := h.safePath(session.Filename)
 	if filePath == "" {
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return
+		return "", false
 	}
 
 	// 确保目标文件的父目录存在
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-		h.logger.Error("创建目标父目录失败", "upload_id", req.UploadID, "file_name", session.Filename, "error", err)
+		h.logger.Error("创建目标父目录失败", "upload_id", uploadID, "file_name", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "创建目标目录失败"}, http.StatusInternalServerError)
-		return
+		return "", false
 	}
 
-	// 合并分块到临时文件，同时计算 SHA-256
 	tmpPath := filePath + ".tmp"
 	outFile, err := os.Create(tmpPath)
 	if err != nil {
-		h.logger.Error("创建合并文件失败", "upload_id", req.UploadID, "file_name", session.Filename, "error", err)
+		h.logger.Error("创建合并文件失败", "upload_id", uploadID, "file_name", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "创建目标文件失败"}, http.StatusInternalServerError)
-		return
+		return "", false
 	}
 	defer outFile.Close()
 	defer os.Remove(tmpPath)
 
-	finalChecksum, err := h.mergeChunksWithHash(req.UploadID, session, outFile)
+	finalChecksum, err := h.mergeChunksWithHash(uploadID, session, outFile)
 	if err != nil {
-		return
+		return "", false
 	}
 
 	if err := outFile.Close(); err != nil {
-		h.logger.Error("关闭合并文件失败", "upload_id", req.UploadID, "error", err)
+		h.logger.Error("关闭合并文件失败", "upload_id", uploadID, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "关闭目标文件失败"}, http.StatusInternalServerError)
-		return
+		return "", false
 	}
 
 	// 校验最终文件的 SHA-256
 	if finalChecksum != session.FileChecksum {
 		h.logger.Error("最终文件 SHA-256 校验失败", "server", finalChecksum, "client", session.FileChecksum)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "最终文件 SHA-256 校验失败，文件未保存"}, http.StatusBadRequest)
-		return
+		return "", false
 	}
 
 	// 原子重命名为最终文件名
 	if err := os.Rename(tmpPath, filePath); err != nil {
-		h.logger.Error("重命名最终文件失败", "upload_id", req.UploadID, "file_name", session.Filename, "error", err)
+		h.logger.Error("重命名最终文件失败", "upload_id", uploadID, "file_name", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "重命名文件失败"}, http.StatusInternalServerError)
-		return
+		return "", false
 	}
+
+	return finalChecksum, true
+}
+
+// recordCompleteMetadata 记录文件 checksum、保留时间戳并清理上传 session。
+func (h *Handlers) recordCompleteMetadata(uploadID string, session *ChunkedUploadSession, finalChecksum string) {
+	filePath := h.safePath(session.Filename)
 
 	// 保留文件原始修改时间
 	if session.FileModTime > 0 {
@@ -488,12 +491,36 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	h.checksumStore.Set(session.Filename, finalChecksum)
 
 	// 标记完成（延迟清理 session 目录）
-	if err := h.uploadStore.CompleteSession(req.UploadID); err != nil {
-		h.logger.Warn("标记 session 完成失败", "upload_id", req.UploadID, "error", err)
+	if err := h.uploadStore.CompleteSession(uploadID); err != nil {
+		h.logger.Warn("标记 session 完成失败", "upload_id", uploadID, "error", err)
 	}
 
 	// 异步清理 session 目录
-	h.uploadStore.CleanupSessionAfter(req.UploadID, 5*time.Second)
+	h.uploadStore.CleanupSessionAfter(uploadID, 5*time.Second)
+}
+
+// uploadComplete 合并所有分块完成上传。
+func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, size.CompleteBodyLimit)
+	var req struct {
+		UploadID string `json:"upload_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
+		return
+	}
+
+	session, ok := h.validateCompleteSession(w, req.UploadID)
+	if !ok {
+		return
+	}
+
+	finalChecksum, ok := h.mergeAndRenameFile(w, req.UploadID, session)
+	if !ok {
+		return
+	}
+
+	h.recordCompleteMetadata(req.UploadID, session, finalChecksum)
 
 	h.logger.Info("文件合并完成", "file_name", session.Filename, "checksum", shortid.ShortHash(finalChecksum), "size", session.TotalSize)
 	sendJSONResponse(w, ChunkCompleteResponse{
