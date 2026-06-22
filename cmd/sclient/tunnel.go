@@ -64,7 +64,16 @@ var tunnelCmd = &cobra.Command{
 
 		targetURL := args[0]
 
-		return tunnelRequest(cfg, method, targetURL, headers, body, outputPath, verbose, include)
+		return tunnelRequest(tunnelReqOpts{
+			cfg:        cfg,
+			method:     method,
+			targetURL:  targetURL,
+			headers:    headers,
+			body:       body,
+			outputFile: outputPath,
+			verbose:    verbose,
+			include:    include,
+		})
 	},
 }
 
@@ -75,29 +84,41 @@ func init() {
 	tunnelCmd.Flags().BoolP("include", "i", false, "显示响应头")
 }
 
+// tunnelReqOpts 是 tunnelRequest 的参数集合，用于减少函数参数数量（go:S107）。
+type tunnelReqOpts struct {
+	cfg        *client.Config
+	method     string
+	targetURL  string
+	headers    []string
+	body       string
+	outputFile string
+	verbose    bool
+	include    bool
+}
+
 // tunnelRequest 是 CLI 专用的隧道请求函数，包含 curl 风格的进度条输出。
-func tunnelRequest(cfg *client.Config, method, targetURL string, headers []string, body, outputFile string, verbose, include bool) error {
+func tunnelRequest(opts tunnelReqOpts) error {
 	// 创建带隧道配置的新客户端
-	tunnelOpt := client.WithTunnel(cfg.TunnelKey)
-	tunnelCli := client.NewFileClient(cfg.ServerURL, tunnelOpt)
+	tunnelOpt := client.WithTunnel(opts.cfg.TunnelKey)
+	tunnelCli := client.NewFileClient(opts.cfg.ServerURL, tunnelOpt)
 
 	var bodyReader io.Reader
-	if body != "" {
-		bodyReader = strings.NewReader(body)
+	if opts.body != "" {
+		bodyReader = strings.NewReader(opts.body)
 	}
 
-	req, err := http.NewRequest(method, targetURL, bodyReader)
+	req, err := http.NewRequest(opts.method, opts.targetURL, bodyReader)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
-	for _, h := range headers {
+	for _, h := range opts.headers {
 		parts := strings.SplitN(h, ":", 2)
 		if len(parts) == 2 {
 			req.Header.Set(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
 		}
 	}
 
-	finalOutputFile, err := resolveOutputPath(targetURL, outputFile)
+	finalOutputFile, err := resolveOutputPath(opts.targetURL, opts.outputFile)
 	if err != nil {
 		return err
 	}
@@ -108,9 +129,9 @@ func tunnelRequest(cfg *client.Config, method, targetURL string, headers []strin
 	}
 	defer f.Close()
 
-	if verbose {
-		fmt.Fprintf(os.Stderr, "--%s-- #Tunnel %s/tunnel\n", time.Now().Format("2006-01-02 15:04:05"), cfg.ServerURL)
-		fmt.Fprintf(os.Stderr, "[请求] %s %s\n", method, targetURL)
+	if opts.verbose {
+		fmt.Fprintf(os.Stderr, "--%s-- #Tunnel %s/tunnel\n", time.Now().Format("2006-01-02 15:04:05"), opts.cfg.ServerURL)
+		fmt.Fprintf(os.Stderr, "[请求] %s %s\n", opts.method, opts.targetURL)
 		for k := range req.Header {
 			fmt.Fprintf(os.Stderr, "%s: %s\n", k, req.Header.Get(k))
 		}
@@ -123,7 +144,7 @@ func tunnelRequest(cfg *client.Config, method, targetURL string, headers []strin
 	}
 	defer resp.Body.Close()
 
-	if include || verbose {
+	if opts.include || opts.verbose {
 		fmt.Fprintf(os.Stderr, "[响应状态] %s\n", resp.Status)
 		for k := range resp.Header {
 			fmt.Fprintf(os.Stderr, "%s: %s\n", k, resp.Header.Get(k))

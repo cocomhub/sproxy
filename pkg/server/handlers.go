@@ -332,33 +332,45 @@ func resolveRenamePaths(h *Handlers, w http.ResponseWriter, from, to string) (fr
 	return fromPath, toPath, true
 }
 
+// renameOpCtx 是 executeRename 的参数集合，用于减少函数参数数量（go:S107）。
+type renameOpCtx struct {
+	h                *Handlers
+	w                http.ResponseWriter
+	fromPath         string
+	toPath           string
+	from             string
+	to               string
+	expectedChecksum string
+	logger           *slog.Logger
+}
+
 // executeRename 校验 checksum、执行 Rename、更新 checksumStore。
 // 返回 nil 表示成功；返回 error 表示失败（已在内部发送响应）。
-func executeRename(h *Handlers, w http.ResponseWriter, fromPath, toPath, from, to, expectedChecksum string, logger *slog.Logger) error {
-	if _, err := os.Stat(fromPath); os.IsNotExist(err) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
+func executeRename(ctx renameOpCtx) error {
+	if _, err := os.Stat(ctx.fromPath); os.IsNotExist(err) {
+		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
 		return err
 	}
-	if _, err := os.Stat(toPath); err == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
+	if _, err := os.Stat(ctx.toPath); err == nil {
+		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
 		return err
 	}
-	if !verifyFileWithChecksum(fromPath, expectedChecksum) {
-		logger.Warn("rename checksum 校验失败", "from", from)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgSrcChecksumFailed}, http.StatusBadRequest)
+	if !verifyFileWithChecksum(ctx.fromPath, ctx.expectedChecksum) {
+		ctx.logger.Warn("rename checksum 校验失败", "from", ctx.from)
+		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: errMsgSrcChecksumFailed}, http.StatusBadRequest)
 		return fmt.Errorf("checksum mismatch")
 	}
-	if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
-		logger.Error(errMsgCreateParentDirFailed, "to", to, "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgCreateParentDirFailed}, http.StatusInternalServerError)
+	if err := os.MkdirAll(filepath.Dir(ctx.toPath), 0755); err != nil {
+		ctx.logger.Error(errMsgCreateParentDirFailed, "to", ctx.to, "error", err.Error())
+		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: errMsgCreateParentDirFailed}, http.StatusInternalServerError)
 		return err
 	}
-	if err := os.Rename(fromPath, toPath); err != nil {
-		logger.Error("重命名失败", "from", from, "to", to, "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
+	if err := os.Rename(ctx.fromPath, ctx.toPath); err != nil {
+		ctx.logger.Error("重命名失败", "from", ctx.from, "to", ctx.to, "error", err.Error())
+		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
 		return err
 	}
-	h.checksumStore.Rename(from, to)
+	ctx.h.checksumStore.Rename(ctx.from, ctx.to)
 	return nil
 }
 
@@ -1045,7 +1057,16 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := executeRename(h, w, fromPath, toPath, from, to, expectedChecksum, logger); err != nil {
+	if err := executeRename(renameOpCtx{
+		h:                h,
+		w:                w,
+		fromPath:         fromPath,
+		toPath:           toPath,
+		from:             from,
+		to:               to,
+		expectedChecksum: expectedChecksum,
+		logger:           logger,
+	}); err != nil {
 		return
 	}
 
