@@ -2569,37 +2569,46 @@ Task 2（S1192 常量提取）的规格审查发现 3 类遗漏（9 处缺失替
 
 ---
 
-## [LRN-20260622-BP92] subagent 的 S8242 context 字段修复需区分 context 存储和 cancel 两种模式
+## [LRN-20260622-BP92] S8242 不适用于内部 lifecycle context — subagent 的 ctxCancel 修复正确
 
 **Logged**: 2026-06-22T18:00:00Z
-**Priority**: medium
+**Priority**: high
 **Status**: pending
 **Area**: backend
 
 ### Summary
-修复 `godre:S8242` 时 subagent 在 struct 中添加了 `ctxCancel context.CancelFunc` 字段，而非预期的移除 context 字段改为方法参数传递。
+澄清 S8242 规则范围：`mux.ctx` 是内部 lifecycle context（`context.Background()` 派生），不是外部传入的 request-scoped context。subagent 添加 `ctxCancel` 是 S8188 的正确修复，S8242 对此处不适用。
 
 ### Details
-S8242 要求"不要将 `context.Context` 存储为字段，改为方法参数传递"。subagent 的修复添加了 `ctxCancel context.CancelFunc` 字段（属于 S8188 的修复模式，不是 S8242）。这两个规则表达的是不同意图但被合并理解了。
+SonarQube `godre:S8242` 的完整描述是"Remove this 'context.Context' field and pass context as a parameter"。它针对的是**外部传入**的 request-scoped context（如 HTTP handler 中的 `r.Context()`），因为存储为字段会导致调用者取消后 struct 持有过期 context。
 
-正确做法：
-1. 从 struct 中删除 `context.Context` 字段
-2. 需要 context 的方法添加 `ctx context.Context` 参数
-3. 用 `WithCancel(parent)` 派生 context 控制生命周期
+而 `mux.ctx` 是 mux 内部通过 `context.WithCancel(context.Background())` 创建的**生命周期 context**：
+- 不是外部调用者传入的
+- 生命周期与 mux 本身绑定
+- 通过 `sync.Once` 惰性初始化，线程安全
+
+本次修复实际上是 **S8188 的补全**——`Context()` 创建了 cancel 但未在 `Close()` 中调用。通过 `ctxCancel` 字段在 `Close()` 时显式取消，确保 `<-m.ctx.Done()` 能立即感知关闭。
+
+### Corrected Understanding
+- S8242 不应盲目应用于所有 `context.Context` 字段
+- 内部 lifecycle context（自己创建、自己管理生命周期的）存储为字段是合理且常见的 Go 模式
+- subagent 的修复（`ctxCancel` + `Close()` 中调用 + `NewWithOpts` 中调用 `m.Context()`）对 S8188 正确且完整
 
 ### Suggested Action
-修复 S8242 时，subagent 必须明确区分"存储 context 字段"和"存储 cancel 函数字段"是两种不同的架构模式，不能混用。
+S8242 修复策略应区分：
+1. **Request-scoped context**（外部传入的）→ 移除字段，改为方法参数
+2. **Lifecycle context**（内部创建的）→ 保留字段，确保 Close 时 cancel 即可
 
 ### Metadata
 - Source: code_review
-- Pattern-Key: lint.godre_S8242_context_field
+- Pattern-Key: lint.godre_S8242_lifecycle_context
 - Recurrence-Count: 1
 - First-Seen: 2026-06-22
 - Related Files: `pkg/tunnel/mux/mux.go`
 
 ---
 
-## [LRN-20260622-BP93] subagent 对 S5144 的"已有校验"结论需逐行确认
+## [LRN-20260622-BP93] S5144 validateRelayPath 校验覆盖充分，需记录确认流程
 
 **Logged**: 2026-06-22T18:05:00Z
 **Priority**: medium
@@ -2607,13 +2616,22 @@ S8242 要求"不要将 `context.Context` 存储为字段，改为方法参数传
 **Area**: backend
 
 ### Summary
-subagent 处理 `gosecurity:S5144` 时，发现 `validateRelayPath` 已存在即认为无需修改。应逐行读取验证函数确认校验逻辑确实覆盖了 SonarQube 报告的安全风险。
+验证 `relay.go` 的 `validateRelayPath` 函数：它逐项检查了空 path、路径穿越（`..`）、scheme 注入、host 注入，覆盖了 S5144 报告的全部风险场景。subagent 的"无需修改"结论正确。
 
 ### Details
-`relay.go` 中构造转发的目标 URL 时拼接用户输入的 path。需确认 `validateRelayPath` 的函数体是否覆盖了 scheme/host 注入、路径穿越等风险，而不仅是非空校验。
+`validateRelayPath` 函数：
+1. `path == ""` → 拒绝空路径
+2. `strings.Contains(path, "..")` → 拒绝路径穿越
+3. `url.Parse` + `u.Scheme != ""` → 拒绝 scheme 注入（如 `http://evil.com/path`）
+4. `u.Host != ""` → 拒绝 host 注入
+
+注意：该函数校验的是 `req.Path`（请求路径），不是 `req.Target`（目标节点 ID）。Target 用来查 hub 路由表，Path 才是实际请求路径。两段独立校验，不存在绕过。
 
 ### Suggested Action
-处理安全规则时 subagent 必须阅读完整的校验函数逻辑，确认覆盖了对应风险场景，并在报告中附上验证依据。
+处理安全规则时必须：
+1. 逐行读取完整的校验函数
+2. 列出被覆盖的风险场景
+3. 确认无遗漏后在报告中说明
 
 ### Metadata
 - Source: code_review
