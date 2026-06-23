@@ -363,18 +363,34 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	}
 
 	if serverCS != "" {
-		c.logger.Debug("下载文件校验", "file_name", outputPath, "checksum", serverCS)
-		localCS, err := calculateChecksum(outputPath)
-		if err != nil {
-			return fmt.Errorf("计算本地 SHA-256 失败: %w", err)
+		if err := c.verifyChecksumAfterDownload(outputPath, serverCS); err != nil {
+			return err
 		}
-		if serverCS != localCS {
-			return fmt.Errorf("文件校验失败: 服务端 %s, 本地 %s", serverCS, localCS)
-		}
-		c.logger.Debug("文件校验通过", "checksum", serverCS)
 	}
 
 	// 恢复文件修改时间
+	c.restoreFileMTimeAfterDownload(outputPath, resp)
+
+	return nil
+}
+
+// processDownloadResponse 处理下载响应中的数据写入和校验。
+// 从响应读取数据写入输出文件，校验 checksum，并恢复修改时间。// verifyChecksumAfterDownload 验证下载文件的 SHA-256 与服务端返回的一致。
+func (c *FileClient) verifyChecksumAfterDownload(outputPath, serverCS string) error {
+	c.logger.Debug("下载文件校验", "file_name", outputPath, "checksum", serverCS)
+	localCS, err := calculateChecksum(outputPath)
+	if err != nil {
+		return fmt.Errorf("计算本地 SHA-256 失败: %w", err)
+	}
+	if serverCS != localCS {
+		return fmt.Errorf("文件校验失败: 服务端 %s, 本地 %s", serverCS, localCS)
+	}
+	c.logger.Debug("文件校验通过", "checksum", serverCS)
+	return nil
+}
+
+// restoreFileMTimeAfterDownload 从响应头恢复下载文件的修改时间。
+func (c *FileClient) restoreFileMTimeAfterDownload(outputPath string, resp *http.Response) {
 	if mtimeStr := resp.Header.Get(headerFileMTime); mtimeStr != "" {
 		var mtimeInt int64
 		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
@@ -384,8 +400,6 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 			}
 		}
 	}
-
-	return nil
 }
 
 // Delete 从 sproxy 服务端删除文件。

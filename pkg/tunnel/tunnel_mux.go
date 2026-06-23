@@ -213,66 +213,40 @@ func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	}
 }
 
-func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
-	defer stream.CloseWrite()
-	// 注意：不 defer stream.Close() — 由客户端读完响应后主动 Close
-
+// readAndDecryptMeta 从流中读取请求元数据（长度前缀 + 数据 + 解密 + 反序列化）。
+func (t *Tunnel) readAndDecryptMeta(stream mux.Stream) (*Request, error) {
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(stream, lenBuf); err != nil {
-		return
+		return nil, err
 	}
 	metaLen := binary.BigEndian.Uint32(lenBuf)
 	if metaLen > MaxMetadataBytes {
-		return
+		return nil, ErrMetadataTooLarge
 	}
 	metaRaw := make([]byte, metaLen)
 	if _, err := io.ReadFull(stream, metaRaw); err != nil {
-		return
+		return nil, err
 	}
 
 	var reqMeta Request
 	if t.key != nil {
 		plain, err := Decrypt(t.key, metaRaw)
 		if err != nil {
-			return
+			return nil, err
 		}
 		if err := json.Unmarshal(plain, &reqMeta); err != nil {
-			return
+			return nil, err
 		}
 	} else {
 		if err := json.Unmarshal(metaRaw, &reqMeta); err != nil {
-			return
+			return nil, err
 		}
 	}
+	return &reqMeta, nil
+}
 
-	var bodyReader io.ReadCloser
-	if t.key != nil {
-		pr, pw := io.Pipe()
-		bodyReader = pr
-		go func() {
-			_, err := DecryptStream(t.key, stream, pw)
-			pw.CloseWithError(err)
-		}()
-	} else {
-		bodyReader = &noopCloseReader{Reader: stream}
-	}
-
-	localReq, err := http.NewRequest(reqMeta.Method, reqMeta.URL, bodyReader)
-	if err != nil {
-		return
-	}
-	for k, v := range reqMeta.Headers {
-		localReq.Header.Set(k, v)
-	}
-
-	// 缓冲整个响应 body
-	buf := new(bytes.Buffer)
-	code := http.StatusOK
-	hdrs := make(http.Header)
-	rw := &bufferedResponseWriter{buf: buf, code: &code, hdrs: &hdrs}
-	handler.ServeHTTP(rw, localReq)
-	bodyReader.Close()
-
+// writeEncryptedResponse 将响应 metadata（序列化+加密）和 body（加密或明文）写入流。
+func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.Header, buf *bytes.Buffer) {
 	respMetaJSON, _ := json.Marshal(Response{
 		Proto:         "HTTP/1.1",
 		Status:        code,
@@ -297,6 +271,46 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 	} else {
 		io.Copy(stream, buf)
 	}
+}
+
+func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
+	defer stream.CloseWrite()
+	// 注意：不 defer stream.Close() — 由客户端读完响应后主动 Close
+
+	reqMeta, err := t.readAndDecryptMeta(stream)
+	if err != nil {
+		return
+	}
+
+	var bodyReader io.ReadCloser
+	if t.key != nil {
+		pr, pw := io.Pipe()
+		bodyReader = pr
+		go func() {
+			_, decErr := DecryptStream(t.key, stream, pw)
+			pw.CloseWithError(decErr)
+		}()
+	} else {
+		bodyReader = &noopCloseReader{Reader: stream}
+	}
+
+	localReq, err := http.NewRequest(reqMeta.Method, reqMeta.URL, bodyReader)
+	if err != nil {
+		return
+	}
+	for k, v := range reqMeta.Headers {
+		localReq.Header.Set(k, v)
+	}
+
+	// 缓冲整个响应 body
+	buf := new(bytes.Buffer)
+	code := http.StatusOK
+	hdrs := make(http.Header)
+	rw := &bufferedResponseWriter{buf: buf, code: &code, hdrs: &hdrs}
+	handler.ServeHTTP(rw, localReq)
+	bodyReader.Close()
+
+	t.writeEncryptedResponse(stream, code, hdrs, buf)
 }
 
 // noopCloseReader 包装 io.Reader 为 io.ReadCloser，Close 是空操作。

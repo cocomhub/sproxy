@@ -119,8 +119,18 @@ func runRelayOnce(ctx context.Context, nodeID string, logger *slog.Logger) error
 	tun := tunnel.NewTunnel(m, nil)
 	logger.Info("等待中继请求...")
 
-	err = tun.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 转发请求到本地服务
+	err = tun.Serve(ctx, buildRelayHandler(ctx, localAddr, httpClient, logger))
+
+	if err != nil {
+		logger.Warn("中继服务停止", "error", err)
+	}
+	return err
+}
+
+// buildRelayHandler 创建用于转发中继请求的 HTTP handler。
+// 将远程隧道请求转发到本地 HTTP 服务并返回响应。
+func buildRelayHandler(ctx context.Context, localAddr string, httpClient *http.Client, logger *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		forwardURL := localAddr + r.URL.Path
 		if r.URL.RawQuery != "" {
 			forwardURL += "?" + r.URL.RawQuery
@@ -149,10 +159,5 @@ func runRelayOnce(ctx context.Context, nodeID string, logger *slog.Logger) error
 		}
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
-	}))
-
-	if err != nil {
-		logger.Warn("中继服务停止", "error", err)
-	}
-	return err
+	})
 }

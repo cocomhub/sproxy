@@ -212,21 +212,8 @@ func startTLSListener(cfg *server.Config, s *http.Server, stopSigCh chan struct{
 	}
 	slog.Info("TLS enabled", "cert", certFile, "key", keyFile)
 
-	if cfg.TLS.ClientCA != "" {
-		caCert, err := os.ReadFile(cfg.TLS.ClientCA)
-		if err != nil {
-			return fmt.Errorf("读取 ClientCA 证书失败: %w", err)
-		}
-		caPool := x509.NewCertPool()
-		if !caPool.AppendCertsFromPEM(caCert) {
-			return fmt.Errorf("ClientCA 证书解析失败（非 PEM 格式）")
-		}
-		s.TLSConfig = &tls.Config{
-			ClientAuth: tls.RequireAndVerifyClientCert,
-			ClientCAs:  caPool,
-			MinVersion: tls.VersionTLS12,
-		}
-		slog.Info("mTLS enabled", "client_ca", cfg.TLS.ClientCA)
+	if err := setupMTLSConfig(cfg, s); err != nil {
+		return err
 	}
 
 	if err := s.ListenAndServeTLS(certFile, keyFile); err != nil {
@@ -237,6 +224,28 @@ func startTLSListener(cfg *server.Config, s *http.Server, stopSigCh chan struct{
 			return fmt.Errorf(errFmtListenServe, err)
 		}
 	}
+	return nil
+}
+
+// setupMTLSConfig 配置 mTLS（双向 TLS）：读取 ClientCA 证书并设置 tls.Config。
+func setupMTLSConfig(cfg *server.Config, s *http.Server) error {
+	if cfg.TLS.ClientCA == "" {
+		return nil
+	}
+	caCert, err := os.ReadFile(cfg.TLS.ClientCA)
+	if err != nil {
+		return fmt.Errorf("读取 ClientCA 证书失败: %w", err)
+	}
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caCert) {
+		return fmt.Errorf("ClientCA 证书解析失败（非 PEM 格式）")
+	}
+	s.TLSConfig = &tls.Config{
+		ClientAuth: tls.RequireAndVerifyClientCert,
+		ClientCAs:  caPool,
+		MinVersion: tls.VersionTLS12,
+	}
+	slog.Info("mTLS enabled", "client_ca", cfg.TLS.ClientCA)
 	return nil
 }
 
@@ -262,34 +271,44 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 					return
 				}
 				if sig == syscall.SIGHUP {
-					tunUpdater, ok := h.TunnelHandler().(server.TunnelUpdater)
-					if !ok {
-						slog.Warn("tunnel handler does not support UpdateKey")
-						handleSighup(cfg, nil)
-					} else {
-						handleSighup(cfg, tunUpdater)
-					}
+					handleSignalSighup(h, cfg)
 					continue
 				}
-				cancel()
-				currentCfg := cfgPtr.Load()
-				shutdownTimeout := currentCfg.ServerTimeouts.Shutdown
-				if shutdownTimeout <= 0 {
-					shutdownTimeout = 30 * time.Second
-				}
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
-				if err := s.Shutdown(shutdownCtx); err != nil {
-					slog.Error("shutdown error", "error", err.Error(), "timeout", shutdownTimeout)
-				}
-				shutdownCancel()
-				if err := h.Close(); err != nil {
-					slog.Warn(logHandlersCloseErr, "error", err.Error())
-				}
+				handleSignalShutdown(cancel, s, h)
 				return
 			}
 		}
 	}()
 	return stopSigCh, shutdownDone
+}
+
+// handleSignalSighup 处理 SIGHUP 信号：重新加载配置并热替换可动态变更的字段。
+func handleSignalSighup(h *server.Handlers, cfg *server.Config) {
+	tunUpdater, ok := h.TunnelHandler().(server.TunnelUpdater)
+	if !ok {
+		slog.Warn("tunnel handler does not support UpdateKey")
+		handleSighup(cfg, nil)
+	} else {
+		handleSighup(cfg, tunUpdater)
+	}
+}
+
+// handleSignalShutdown 执行优雅关闭：取消 context、关闭 HTTP 服务器和 handlers。
+func handleSignalShutdown(cancel context.CancelFunc, s *http.Server, h *server.Handlers) {
+	cancel()
+	currentCfg := cfgPtr.Load()
+	shutdownTimeout := currentCfg.ServerTimeouts.Shutdown
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = 30 * time.Second
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	if err := s.Shutdown(shutdownCtx); err != nil {
+		slog.Error("shutdown error", "error", err.Error(), "timeout", shutdownTimeout)
+	}
+	shutdownCancel()
+	if err := h.Close(); err != nil {
+		slog.Warn(logHandlersCloseErr, "error", err.Error())
+	}
 }
 
 // resolveTunnelKey 处理隧道密钥：已配置则校验，未配置则自动生成并回写配置文件。

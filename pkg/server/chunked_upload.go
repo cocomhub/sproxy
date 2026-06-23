@@ -294,89 +294,111 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 
 	// 1. 按 upload_id 查 session
 	if uploadID != "" {
-		session := h.uploadStore.GetSession(uploadID)
-		if session != nil {
-			missing := MissingChunks(session)
-			finished := session.Completed
-			sendJSONResponse(w, ChunkStatusResponse{
-				Success:       true,
-				Finished:      finished,
-				UploadID:      session.UploadID,
-				ReceivedCount: len(session.ReceivedChunks) - len(missing),
-				TotalChunks:   session.TotalChunks,
-				MissingChunks: missing,
-				Completed:     session.Completed,
-				FileChecksum:  session.FileChecksum,
-				Filename:      session.Filename,
-				Message:       fmt.Sprintf("会话%d/%d分块已接收", len(session.ReceivedChunks)-len(missing), session.TotalChunks),
-			}, http.StatusOK)
-			return
-		}
-		// upload_id 存在但 session 不存在
-		if filename == "" {
-			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
+		if h.lookupUploadIDStatus(w, uploadID, filename) {
 			return
 		}
 	}
 
 	// 2. 按 filename 查找未完成的 session
 	if filename != "" {
-		// 防御性校验：防止路径穿越
-		if _, err := ValidateFilePath(filename); err != nil {
-			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+		if h.lookupFilenameStatus(w, filename) {
 			return
-		}
-		session := h.uploadStore.GetSessionByFilename(filename)
-		if session != nil {
-			missing := MissingChunks(session)
-			sendJSONResponse(w, ChunkStatusResponse{
-				Success:       true,
-				UploadID:      session.UploadID,
-				ReceivedCount: len(session.ReceivedChunks) - len(missing),
-				TotalChunks:   session.TotalChunks,
-				MissingChunks: missing,
-				Completed:     session.Completed,
-				FileChecksum:  session.FileChecksum,
-				Filename:      session.Filename,
-			}, http.StatusOK)
-			return
-		}
-
-		// 3. 检查磁盘上文件是否已存在且 checksum 匹配
-		filePath := h.safePath(filename)
-		if filePath == "" {
-			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-			return
-		}
-		if stat, err := os.Stat(filePath); err == nil {
-			if checksum, ok := h.checksumStore.Get(filename); ok {
-				sendJSONResponse(w, ChunkStatusResponse{
-					Success:      true,
-					Finished:     true,
-					Completed:    true,
-					FileChecksum: checksum,
-					Filename:     filename,
-					Message:      fmt.Sprintf(errFmtFileExists, stat.Size()),
-				}, http.StatusOK)
-				return
-			}
-			// 有文件但无 checksum 记录（意外情况），实时计算
-			if cs, err := FileChecksum(filePath); err == nil {
-				sendJSONResponse(w, ChunkStatusResponse{
-					Success:      true,
-					Finished:     true,
-					Completed:    true,
-					FileChecksum: cs,
-					Filename:     filename,
-					Message:      fmt.Sprintf(errFmtFileExists, stat.Size()),
-				}, http.StatusOK)
-				return
-			}
 		}
 	}
 
 	// 什么都没找到
 	sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: "未找到文件或上传会话"}, http.StatusNotFound)
+}
+
+// lookupUploadIDStatus 按 upload_id 查询上传会话状态。返回 true 表示已处理请求。
+func (h *Handlers) lookupUploadIDStatus(w http.ResponseWriter, uploadID, filename string) bool {
+	session := h.uploadStore.GetSession(uploadID)
+	if session != nil {
+		missing := MissingChunks(session)
+		finished := session.Completed
+		sendJSONResponse(w, ChunkStatusResponse{
+			Success:       true,
+			Finished:      finished,
+			UploadID:      session.UploadID,
+			ReceivedCount: len(session.ReceivedChunks) - len(missing),
+			TotalChunks:   session.TotalChunks,
+			MissingChunks: missing,
+			Completed:     session.Completed,
+			FileChecksum:  session.FileChecksum,
+			Filename:      session.Filename,
+			Message:       fmt.Sprintf("会话%d/%d分块已接收", len(session.ReceivedChunks)-len(missing), session.TotalChunks),
+		}, http.StatusOK)
+		return true
+	}
+	// upload_id 存在但 session 不存在
+	if filename == "" {
+		sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
+		return true
+	}
+	return false
+}
+
+// lookupFilenameStatus 按 filename 查找上传会话或检查文件是否已存在。返回 true 表示已处理请求。
+func (h *Handlers) lookupFilenameStatus(w http.ResponseWriter, filename string) bool {
+	// 防御性校验：防止路径穿越
+	if _, err := ValidateFilePath(filename); err != nil {
+		sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+		return true
+	}
+	session := h.uploadStore.GetSessionByFilename(filename)
+	if session != nil {
+		missing := MissingChunks(session)
+		sendJSONResponse(w, ChunkStatusResponse{
+			Success:       true,
+			UploadID:      session.UploadID,
+			ReceivedCount: len(session.ReceivedChunks) - len(missing),
+			TotalChunks:   session.TotalChunks,
+			MissingChunks: missing,
+			Completed:     session.Completed,
+			FileChecksum:  session.FileChecksum,
+			Filename:      session.Filename,
+		}, http.StatusOK)
+		return true
+	}
+
+	return h.checkFileExistsStatus(w, filename)
+}
+
+// checkFileExistsStatus 检查磁盘上文件是否已存在且 checksum 匹配。返回 true 表示已处理请求。
+func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, filename string) bool {
+	filePath := h.safePath(filename)
+	if filePath == "" {
+		sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return true
+	}
+	stat, err := os.Stat(filePath)
+	if err != nil {
+		return false
+	}
+	if checksum, ok := h.checksumStore.Get(filename); ok {
+		sendJSONResponse(w, ChunkStatusResponse{
+			Success:      true,
+			Finished:     true,
+			Completed:    true,
+			FileChecksum: checksum,
+			Filename:     filename,
+			Message:      fmt.Sprintf(errFmtFileExists, stat.Size()),
+		}, http.StatusOK)
+		return true
+	}
+	// 有文件但无 checksum 记录（意外情况），实时计算
+	if cs, err := FileChecksum(filePath); err == nil {
+		sendJSONResponse(w, ChunkStatusResponse{
+			Success:      true,
+			Finished:     true,
+			Completed:    true,
+			FileChecksum: cs,
+			Filename:     filename,
+			Message:      fmt.Sprintf(errFmtFileExists, stat.Size()),
+		}, http.StatusOK)
+		return true
+	}
+	return false
 }
 
 // validateCompleteSession 校验 complete 请求的 session 是否有效。

@@ -105,10 +105,15 @@ func TestP2PNodeRegisterAndLookup(t *testing.T) {
 // TestP2PNodeDial verifies that a P2PNode.Dial discovers a peer in DHT,
 // establishes a fake transport connection, and returns a working mux.Mux.
 func TestP2PNodeDial(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping P2P dial test in short mode")
+	}
+
 	_ = registerFakeWebRTC()
 
 	dht := hub.NewDHT()
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	// -race 下 mux 握手显著变慢，30s timeout 确保不 flaky
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	// 注册目标节点 DHT
