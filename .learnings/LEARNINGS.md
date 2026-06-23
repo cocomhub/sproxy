@@ -2660,4 +2660,38 @@ S8242 修复策略应区分：
 
 ---
 
+## [LRN-20260623-BP95] Windows 并发 Rename 修复：os.CreateTemp + 退避重试
 
+**Logged**: 2026-06-23T14:30:00Z
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+Windows 上并发文件写入时，`os.Rename` 固定临时路径会导致 `"Access is denied"` / `"The process cannot access the file because it is being used by another process."` 错误。修复方案：用 `os.CreateTemp` 生成唯一临时文件 + 指数退避 `atomicRename` 重试。
+
+### Details
+`TestConcurrent_UploadSameFile`（10 个 goroutine 上传同一文件）在 windows-latest CI 上持续失败：
+
+1. **根因 1** — `writeFileAtomically` 使用 `dstPath + ".tmp"` 作为固定临时路径。多 goroutine 同时写同一个 `.tmp` 文件，导致文件句柄冲突，`os.Rename` 失败。
+2. **根因 2** — `writeFileAtomically` 的 Rename 失败后只做一次 `os.Remove` + 重试，Windows 句柄释放是异步的，单次重试不够。
+3. **波及范围** — 同文件的 `executeRename`（POST /rename）和 `processBatchRenameItem`（POST /api/batch/rename）也有类似的并发 Rename 问题。
+
+修复方案：
+- 临时文件生成：`os.CreateTemp(dir, name+".tmp.*")` → 每次生成唯一临时文件名，彻底消除冲突
+- Rename 重试：新增 `atomicRename(src, dst)` 函数，使用指数退避（2ms→4ms→8ms→16ms→32ms），`os.Remove` + `os.Rename` 最多重试 5 次
+- 覆盖全部 4 处：`writeFileAtomically`、`executeRename`（rename handler）、`processBatchRenameItem`（batch rename）、`mergeAndRenameFile`（chunked upload）
+
+### Suggested Action
+如果其他包中也存在对同一文件的并发 Rename（如 `upload_store.go` 的 `saveJSON`），也应当改用类似模式。
+
+### Metadata
+- Source: conversation
+- Related Files: pkg/server/handlers.go, pkg/server/chunked_upload.go
+- Tags: windows, concurrency, rename, flaky-test
+- Pattern-Key: win32.atomic_rename_retry
+- Recurrence-Count: 1
+- First-Seen: 2026-06-23
+- Last-Seen: 2026-06-23
+
+---

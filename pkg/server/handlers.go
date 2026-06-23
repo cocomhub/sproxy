@@ -227,13 +227,13 @@ func (h *Handlers) safePath(remotePath string) string {
 }
 
 // writeFileAtomically 将 src 原子写入 dstPath，同时计算 SHA-256 哈希。
-// 先写到临时文件，再 os.Rename，防止部分写入。
+// 先写到唯一临时文件，再 os.Rename，防止部分写入与并发冲突。
 func writeFileAtomically(dstPath string, src io.Reader) (checksum string, written int64, err error) {
-	tmpPath := dstPath + ".tmp"
-	tmpFile, err := os.Create(tmpPath)
+	tmpFile, err := os.CreateTemp(filepath.Dir(dstPath), filepath.Base(dstPath)+".tmp.*")
 	if err != nil {
 		return "", 0, fmt.Errorf("创建临时文件失败: %w", err)
 	}
+	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
 	hash := sha256.New()
@@ -247,16 +247,31 @@ func writeFileAtomically(dstPath string, src io.Reader) (checksum string, writte
 		return "", written, fmt.Errorf("关闭临时文件失败: %w", err)
 	}
 	checksum = hex.EncodeToString(hash.Sum(nil))
-	if err := os.Rename(tmpPath, dstPath); err != nil {
-		// Windows: 如果目标存在则重命名失败，尝试先删除再重命名
-		if os.Remove(dstPath) == nil {
-			err = os.Rename(tmpPath, dstPath)
-		}
-		if err != nil {
-			return checksum, written, fmt.Errorf("重命名临时文件失败: %w", err)
-		}
+	if err := atomicRename(tmpPath, dstPath); err != nil {
+		return checksum, written, fmt.Errorf("重命名临时文件失败: %w", err)
 	}
 	return checksum, written, nil
+}
+
+// atomicRename 尝试 os.Rename，如果失败（Windows 并发场景），
+// 先删除目标再重命名，并使用短退避重试以应对 Windows 句柄释放延迟。
+func atomicRename(src, dst string) error {
+	// 快速路径：直接重命名
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	// 慢速路径：删除目标文件，然后重命名临时文件
+	// 使用短退避重试，解决 Windows 上并发 Rename 导致的"Access is denied"
+	const maxAttempts = 5
+	const baseDelay = 2 * time.Millisecond
+	for i := range maxAttempts {
+		_ = os.Remove(dst)
+		if err := os.Rename(src, dst); err == nil {
+			return nil
+		}
+		time.Sleep(baseDelay << i)
+	}
+	return os.Rename(src, dst) // 最后一次尝试，返回最终错误
 }
 
 // resolveFilePath 校验 filename 并生成安全的 UploadsDir 下完整路径。
@@ -378,7 +393,7 @@ func executeRename(ctx renameOpCtx) error {
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: errMsgCreateParentDirFailed}, http.StatusInternalServerError)
 		return err
 	}
-	if err := os.Rename(ctx.fromPath, ctx.toPath); err != nil {
+	if err := atomicRename(ctx.fromPath, ctx.toPath); err != nil {
 		ctx.logger.Error("重命名失败", "from", ctx.from, "to", ctx.to, "error", err.Error())
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
 		return err
@@ -433,7 +448,7 @@ func (h *Handlers) processBatchRenameItem(op BatchRenameOp, logger *slog.Logger)
 		result.Message = "创建父目录失败"
 		return result
 	}
-	if err := os.Rename(fromPath, toPath); err != nil {
+	if err := atomicRename(fromPath, toPath); err != nil {
 		logger.Error("batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
 		result.Message = "重命名失败"
 		return result
