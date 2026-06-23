@@ -488,7 +488,7 @@ func (h *Handlers) mergeAndRenameFile(w http.ResponseWriter, uploadID string, se
 	}
 
 	// 原子重命名为最终文件名
-	if err := os.Rename(tmpPath, filePath); err != nil {
+	if err := atomicRename(tmpPath, filePath); err != nil {
 		h.logger.Error("重命名最终文件失败", "upload_id", uploadID, "file_name", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "重命名文件失败"}, http.StatusInternalServerError)
 		return "", false
