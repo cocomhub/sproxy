@@ -142,7 +142,7 @@ jobs:
       - name: Run benchmark
         run: make bench
       - name: Store benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
+        uses: benchmark-action/github-action-benchmark@8358ad9c7f2ffcd73b6dc0f96defe1d0292cab03 # v1.11.0
         continue-on-error: true
         with:
           tool: 'go'
@@ -178,6 +178,6 @@ jobs:
         run: make cover-check
 
       - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@v8
+        uses: sonarsource/sonarqube-scan-action@59db25f34e16620e48ab4bb9e4a5dce155cb5432 # v8.0.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
