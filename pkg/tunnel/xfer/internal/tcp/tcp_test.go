@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/internal/tcp"
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/internal/tcp" // 注册 tcp transport（init）
 )
 
 // TestTcpConnRoundTrip 测试 TCP 传输的基本消息往返。

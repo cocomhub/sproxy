@@ -39,7 +39,7 @@ func TestGzipMiddleware_FallbackOnCompressError(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+	if rec.Header().Get("Content-Encoding") != "gzip" {
 		// Even without compression, the handler should still work
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200, got %d", rec.Code)

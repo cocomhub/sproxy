@@ -179,7 +179,7 @@ func TestE2E_RangeDownload(t *testing.T) {
 	if resp.StatusCode != http.StatusPartialContent {
 		t.Fatalf("want 206, got %d", resp.StatusCode)
 	}
-	if got := resp.Header.Get("Content-Range"); got == "" {
+	if resp.Header.Get("Content-Range") == "" {
 		t.Fatal("missing Content-Range header")
 	}
 	buf := make([]byte, 32)

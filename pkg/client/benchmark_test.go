@@ -43,7 +43,7 @@ func newMockServerBench(tb testing.TB) (*httptest.Server, string) {
 		}
 		defer f.Close()
 
-		out, _ := os.Create(filepath.Join(dir, h.Filename))
+		out, _ := os.Create(filepath.Join(dir, filepath.Base(h.Filename)))
 		defer out.Close()
 		hasher := sha256.New()
 		buf := make([]byte, 4096)
@@ -77,7 +77,7 @@ func newMockServerBench(tb testing.TB) (*httptest.Server, string) {
 			http.Error(w, "missing filename", http.StatusBadRequest)
 			return
 		}
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		data, err := os.ReadFile(filepath.Join(dir, filepath.Base(name)))
 		if err != nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
