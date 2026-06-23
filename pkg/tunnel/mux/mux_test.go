@@ -182,6 +182,13 @@ func TestMuxMultipleStreams(t *testing.T) {
 		streamsA[i] = s
 	}
 
+	verifyMuxMultipleStreams(t, muxB, streamsA, ctx)
+}
+
+// verifyMuxMultipleStreams 验证多个流可以同时打开并正确收发。
+func verifyMuxMultipleStreams(t *testing.T, muxB *mux.Mux, streamsA []mux.Stream, ctx context.Context) {
+	t.Helper()
+	n := len(streamsA)
 	bMap := make(map[mux.StreamID]mux.Stream)
 	for range n {
 		s, err := muxB.Accept(ctx)

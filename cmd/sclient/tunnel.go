@@ -243,10 +243,7 @@ func writeWithProgress(r io.Reader, w io.Writer, contentLength int64) (int64, er
 			}
 			totalRead += int64(written)
 
-			if contentLength > 0 && time.Since(lastPrintAt) > time.Second {
-				printProgressBar(os.Stderr, totalRead, contentLength, barWidth)
-				lastPrintAt = time.Now()
-			}
+			maybePrintProgress(contentLength, totalRead, barWidth, &lastPrintAt)
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -261,6 +258,14 @@ func writeWithProgress(r io.Reader, w io.Writer, contentLength int64) (int64, er
 	}
 
 	return totalRead, nil
+}
+
+// maybePrintProgress 如果满足条件（有总长度且距上次打印超过 1 秒）则打印进度条。
+func maybePrintProgress(contentLength, totalRead int64, barWidth int, lastPrintAt *time.Time) {
+	if contentLength > 0 && time.Since(*lastPrintAt) > time.Second {
+		printProgressBar(os.Stderr, totalRead, contentLength, barWidth)
+		*lastPrintAt = time.Now()
+	}
 }
 
 // printProgressBar 在 stderr 上打印单行进度条。

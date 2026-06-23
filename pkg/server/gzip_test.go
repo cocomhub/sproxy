@@ -73,35 +73,41 @@ func TestGzipMiddleware_TableDriven(t *testing.T) {
 
 			handler.ServeHTTP(rec, req)
 
-			if tt.wantGzip {
-				if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
-					t.Fatalf("expected Content-Encoding: gzip, got: %q", enc)
-				}
-				found := slices.Contains(rec.Header().Values("Vary"), "Accept-Encoding")
-				if !found {
-					t.Fatal("expected Vary: Accept-Encoding header")
-				}
-				gr, err := gzip.NewReader(rec.Body)
-				if err != nil {
-					t.Fatalf("failed to create gzip reader: %v", err)
-				}
-				defer gr.Close()
-				body, err := io.ReadAll(gr)
-				if err != nil {
-					t.Fatalf("failed to read decompressed body: %v", err)
-				}
-				if string(body) != tt.body {
-					t.Fatalf("expected decompressed body %q, got: %q", tt.body, string(body))
-				}
-			} else {
-				if enc := rec.Header().Get("Content-Encoding"); enc != "" {
-					t.Fatalf("expected no Content-Encoding, got: %q", enc)
-				}
-				if rec.Body.String() != tt.body {
-					t.Fatalf("expected body %q, got: %q", tt.body, rec.Body.String())
-				}
-			}
+			assertGzipResult(t, rec, tt.body, tt.wantGzip)
 		})
+	}
+}
+
+// assertGzipResult 验证 gzip 中间件的响应是否符合预期。
+func assertGzipResult(t *testing.T, rec *httptest.ResponseRecorder, wantBody string, wantGzip bool) {
+	t.Helper()
+	if wantGzip {
+		if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+			t.Fatalf("expected Content-Encoding: gzip, got: %q", enc)
+		}
+		found := slices.Contains(rec.Header().Values("Vary"), "Accept-Encoding")
+		if !found {
+			t.Fatal("expected Vary: Accept-Encoding header")
+		}
+		gr, err := gzip.NewReader(rec.Body)
+		if err != nil {
+			t.Fatalf("failed to create gzip reader: %v", err)
+		}
+		defer gr.Close()
+		body, err := io.ReadAll(gr)
+		if err != nil {
+			t.Fatalf("failed to read decompressed body: %v", err)
+		}
+		if string(body) != wantBody {
+			t.Fatalf("expected decompressed body %q, got: %q", wantBody, string(body))
+		}
+	} else {
+		if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+			t.Fatalf("expected no Content-Encoding, got: %q", enc)
+		}
+		if rec.Body.String() != wantBody {
+			t.Fatalf("expected body %q, got: %q", wantBody, rec.Body.String())
+		}
 	}
 }
 

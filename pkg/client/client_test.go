@@ -19,15 +19,11 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 )
 
-// newMockServer 构造一个最小化的 sproxy 风格服务端，仅实现测试所需的路由。
-// 返回服务器与一个工作目录（已在 t.TempDir() 中）。
-func newMockServer(t *testing.T) (*httptest.Server, string) {
+// mockUploadHandler returns an http.HandlerFunc that handles POST /upload requests
+// for the mock server, verifying checksums and writing uploaded files to dir.
+func mockUploadHandler(t *testing.T, dir string) http.HandlerFunc {
 	t.Helper()
-	dir := t.TempDir()
-
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("POST /upload", func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		cs := r.Header.Get("X-File-Checksum")
 		if cs == "" {
 			http.Error(w, `{"success":false,"message":"missing X-File-Checksum"}`, http.StatusBadRequest)
@@ -70,7 +66,50 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 			"message":       "ok",
 			"file_checksum": serverCS,
 		})
-	})
+	}
+}
+
+// mockListFilesHandler returns an http.HandlerFunc that handles GET /api/files requests
+// for the mock server, listing files in dir with optional offset/limit pagination.
+func mockListFilesHandler(t *testing.T, dir string) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		entries, _ := os.ReadDir(dir)
+		var allFiles []FileInfo
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			info, _ := e.Info()
+			allFiles = append(allFiles, FileInfo{Name: e.Name(), Size: info.Size()})
+		}
+
+		offset := 0
+		limit := 0
+		fmt.Sscanf(r.URL.Query().Get("offset"), "%d", &offset)
+		fmt.Sscanf(r.URL.Query().Get("limit"), "%d", &limit)
+
+		var files []FileInfo
+		if limit > 0 && offset < len(allFiles) {
+			end := min(offset+limit, len(allFiles))
+			files = allFiles[offset:end]
+		} else {
+			files = allFiles
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": files, "total": len(allFiles)})
+	}
+}
+
+// newMockServer 构造一个最小化的 sproxy 风格服务端，仅实现测试所需的路由。
+// 返回服务器与一个工作目录（已在 t.TempDir() 中）。
+func newMockServer(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	dir := t.TempDir()
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("POST /upload", mockUploadHandler(t, dir))
 
 	mux.HandleFunc("GET /download", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
@@ -103,32 +142,7 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "deleted"})
 	})
 
-	mux.HandleFunc("GET /api/files", func(w http.ResponseWriter, r *http.Request) {
-		entries, _ := os.ReadDir(dir)
-		var allFiles []FileInfo
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			info, _ := e.Info()
-			allFiles = append(allFiles, FileInfo{Name: e.Name(), Size: info.Size()})
-		}
-
-		offset := 0
-		limit := 0
-		fmt.Sscanf(r.URL.Query().Get("offset"), "%d", &offset)
-		fmt.Sscanf(r.URL.Query().Get("limit"), "%d", &limit)
-
-		var files []FileInfo
-		if limit > 0 && offset < len(allFiles) {
-			end := min(offset+limit, len(allFiles))
-			files = allFiles[offset:end]
-		} else {
-			files = allFiles
-		}
-
-		_ = json.NewEncoder(w).Encode(map[string]any{"files": files, "total": len(allFiles)})
-	})
+	mux.HandleFunc("GET /api/files", mockListFilesHandler(t, dir))
 
 	mux.HandleFunc("POST /rename", func(w http.ResponseWriter, r *http.Request) {
 		from := r.URL.Query().Get("from")

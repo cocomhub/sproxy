@@ -266,38 +266,47 @@ func TestInitLogger_Combinations(t *testing.T) {
 						t.Error("initLogger returned nil")
 						return
 					}
-					// Log at the configured level so the output is always visible
-					switch level {
-					case "debug":
-						logger.Debug("test message", "key", "value")
-					case "info":
-						logger.Info("test message", "key", "value")
-					case "warn":
-						logger.Warn("test message", "key", "value")
-					case "error":
-						logger.Error("test message", "key", "value")
-					}
+					doLogAtLevel(logger, level)
 				})
 
-				if format == "json" {
-					// JSON output should be valid JSON
-					if len(output) == 0 {
-						t.Error("expected JSON output, got empty")
-						return
-					}
-					if output[0] != '{' {
-						t.Errorf("expected JSON object (starts with '{'), got: %s", output[:min(len(output), 50)])
-					}
-					if !bytes.Contains([]byte(output), []byte("test message")) {
-						t.Errorf("expected log message in JSON output, got: %s", output[:min(len(output), 100)])
-					}
-				} else {
-					// Text output should contain the message
-					if !bytes.Contains([]byte(output), []byte("test message")) {
-						t.Errorf("expected 'test message' in text output, got: %s", output[:min(len(output), 100)])
-					}
-				}
+				assertLogOutput(t, output, format)
 			})
+		}
+	}
+}
+
+// doLogAtLevel 使用对应级别的 logger 输出测试消息。
+func doLogAtLevel(logger *slog.Logger, level string) {
+	switch level {
+	case "debug":
+		logger.Debug("test message", "key", "value")
+	case "info":
+		logger.Info("test message", "key", "value")
+	case "warn":
+		logger.Warn("test message", "key", "value")
+	case "error":
+		logger.Error("test message", "key", "value")
+	}
+}
+
+// assertLogOutput 验证日志输出是否符合预期格式。
+func assertLogOutput(t *testing.T, output string, format string) {
+	t.Helper()
+	if format == "json" {
+		if len(output) == 0 {
+			t.Error("expected JSON output, got empty")
+			return
+		}
+		if output[0] != '{' {
+			t.Errorf("expected JSON object (starts with '{'), got: %s", output[:min(len(output), 50)])
+		}
+		if !bytes.Contains([]byte(output), []byte("test message")) {
+			t.Errorf("expected log message in JSON output, got: %s", output[:min(len(output), 100)])
+		}
+	} else {
+		// Text output should contain the message
+		if !bytes.Contains([]byte(output), []byte("test message")) {
+			t.Errorf("expected 'test message' in text output, got: %s", output[:min(len(output), 100)])
 		}
 	}
 }

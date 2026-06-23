@@ -4,6 +4,7 @@
 package quic
 
 import (
+	"crypto/tls"
 	"testing"
 )
 
@@ -47,28 +48,34 @@ func TestDialTLSConfig_ValidateAddress(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conf, err := DialTLSConfig(tt.addr)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error for addr %q, got nil", tt.addr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error for addr %q: %v", tt.addr, err)
-			}
-			if conf == nil {
-				t.Fatal("expected non-nil tls.Config")
-			}
-			if conf.ServerName != tt.wantServer {
-				t.Fatalf("expected ServerName %q, got %q", tt.wantServer, conf.ServerName)
-			}
-			if conf.NextProtos == nil || len(conf.NextProtos) != 1 || conf.NextProtos[0] != "sproxy-quic" {
-				t.Fatalf("expected NextProtos [\"sproxy-quic\"], got %v", conf.NextProtos)
-			}
-			if conf.InsecureSkipVerify {
-				t.Fatal("InsecureSkipVerify should be false in production")
-			}
+			assertDialTLSResult(t, conf, err, tt.addr, tt.wantServer, tt.wantErr)
 		})
+	}
+}
+
+// assertDialTLSResult 验证 DialTLSConfig 的返回结果。
+func assertDialTLSResult(t *testing.T, conf *tls.Config, err error, addr, wantServer string, wantErr bool) {
+	t.Helper()
+	if wantErr {
+		if err == nil {
+			t.Fatalf("expected error for addr %q, got nil", addr)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error for addr %q: %v", addr, err)
+	}
+	if conf == nil {
+		t.Fatal("expected non-nil tls.Config")
+	}
+	if conf.ServerName != wantServer {
+		t.Fatalf("expected ServerName %q, got %q", wantServer, conf.ServerName)
+	}
+	if conf.NextProtos == nil || len(conf.NextProtos) != 1 || conf.NextProtos[0] != "sproxy-quic" {
+		t.Fatalf("expected NextProtos [\"sproxy-quic\"], got %v", conf.NextProtos)
+	}
+	if conf.InsecureSkipVerify {
+		t.Fatal("InsecureSkipVerify should be false in production")
 	}
 }
 
