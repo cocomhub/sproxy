@@ -89,7 +89,7 @@ async function refreshList() {
     } else {
       const resp = await fetch(BASE + listUrl, { headers: headers() });
       data = await resp.json();
-      if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + (data.message || resp.status) + '</div>'; return; }
+      if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + escHtml(data.message || String(resp.status)) + '</div>'; return; }
       files = data.files || [];
     }
     _currentOffset = files.length;
@@ -137,7 +137,7 @@ async function loadMore() {
         container.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">已加载全部 ' + data.total + ' 个文件</div>';
       }
     }
-  } catch (e) { /* 静默处理 */ }
+  } catch { /* 静默处理 */ }
 }
 
 function buildFileTableHtml(files, subdir) {
