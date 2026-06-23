@@ -157,24 +157,7 @@ func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*Chunked
 		go func(chunkIdx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-
-			for range maxRetries {
-				if u.failed.Load() {
-					return
-				}
-
-				if u.uploadChunk(ctx, chunkIdx) {
-					return // 上传成功
-				}
-				if u.failed.Load() {
-					return // 非重试错误
-				}
-				// should_retry: 继续重试
-			}
-			// 重试耗尽
-			u.client.logger.Warn("chunk 重试耗尽", "chunk_index", chunkIdx,
-				"upload_id", shortid.ShortHash(u.uploadID))
-			u.failed.Store(true)
+			u.uploadChunkWithRetry(ctx, chunkIdx)
 		}(idx)
 	}
 
@@ -205,6 +188,26 @@ func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*Chunked
 
 	u.client.logger.Info("分块上传完成", "file_name", u.filename, "checksum", shortid.ShortHash(u.checksum))
 	return &completeResult, nil
+}
+
+// uploadChunkWithRetry 在 goroutine 中执行分块上传，包含重试逻辑。
+// 成功时直接返回；失败且需要重试时继续重试循环；非重试错误或重试耗尽时标记 failed。
+func (u *ChunkedUploader) uploadChunkWithRetry(ctx context.Context, chunkIdx int) {
+	for range maxRetries {
+		if u.failed.Load() {
+			return
+		}
+
+		if u.uploadChunk(ctx, chunkIdx) {
+			return
+		}
+		if u.failed.Load() {
+			return
+		}
+	}
+	u.client.logger.Warn("chunk 重试耗尽", "chunk_index", chunkIdx,
+		"upload_id", shortid.ShortHash(u.uploadID))
+	u.failed.Store(true)
 }
 
 // uploadChunk 执行一个分块的完整上传流程（打开文件、读取、构建请求、发送、解析响应）。

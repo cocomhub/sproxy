@@ -38,15 +38,9 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 
 	logger := h.logger.With("archive", "create")
 
-	// 验证所有文件路径
-	validated := make([]string, 0, len(req.Files))
-	for _, f := range req.Files {
-		relPath, err := ValidateFilePath(f)
-		if err != nil {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径: " + f}, http.StatusBadRequest)
-			return
-		}
-		validated = append(validated, relPath)
+	validated, ok := validateArchiveFiles(req.Files, w)
+	if !ok {
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/gzip")
@@ -81,6 +75,21 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	_, _ = io.Copy(w, pr)
+}
+
+// validateArchiveFiles 验证归档请求中的文件路径，返回有效路径列表。
+// 如果校验失败，已发送错误响应。
+func validateArchiveFiles(files []string, w http.ResponseWriter) ([]string, bool) {
+	validated := make([]string, 0, len(files))
+	for _, f := range files {
+		relPath, err := ValidateFilePath(f)
+		if err != nil {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径: " + f}, http.StatusBadRequest)
+			return nil, false
+		}
+		validated = append(validated, relPath)
+	}
+	return validated, true
 }
 
 // addFileToTar 将单个文件（或目录）添加到 tar writer 中。

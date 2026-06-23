@@ -244,11 +244,7 @@ func writeWithProgress(r io.Reader, w io.Writer, contentLength int64) (int64, er
 			totalRead += int64(written)
 
 			if contentLength > 0 && time.Since(lastPrintAt) > time.Second {
-				percent := float64(totalRead) / float64(contentLength) * 100
-				filled := int(percent / 100 * float64(barWidth))
-				bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
-				fmt.Fprintf(os.Stderr, "\r%6.2f%% [%s] %s      ",
-					percent, bar, client.FormatByte(float64(totalRead)))
+				printProgressBar(os.Stderr, totalRead, contentLength, barWidth)
 				lastPrintAt = time.Now()
 			}
 		}
@@ -261,13 +257,27 @@ func writeWithProgress(r io.Reader, w io.Writer, contentLength int64) (int64, er
 	}
 
 	if contentLength > 0 {
-		endAt := time.Now()
-		percent := float64(totalRead) / float64(contentLength) * 100
-		filled := int(percent / 100 * float64(barWidth))
-		bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
-		fmt.Fprintf(os.Stderr, "\r%6.2f%% [%s] %s   in %s    \n",
-			percent, bar, client.FormatByte(float64(totalRead)), endAt.Sub(startAt))
+		printProgressBarDone(os.Stderr, totalRead, contentLength, barWidth, startAt)
 	}
 
 	return totalRead, nil
+}
+
+// printProgressBar 在 stderr 上打印单行进度条。
+func printProgressBar(w io.Writer, current, total int64, barWidth int) {
+	percent := float64(current) / float64(total) * 100
+	filled := int(percent / 100 * float64(barWidth))
+	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+	fmt.Fprintf(w, "\r%6.2f%% [%s] %s      ",
+		percent, bar, client.FormatByte(float64(current)))
+}
+
+// printProgressBarDone 打印进度条终态（包含总耗时）。
+func printProgressBarDone(w io.Writer, current, total int64, barWidth int, startAt time.Time) {
+	endAt := time.Now()
+	percent := float64(current) / float64(total) * 100
+	filled := int(percent / 100 * float64(barWidth))
+	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+	fmt.Fprintf(w, "\r%6.2f%% [%s] %s   in %s    \n",
+		percent, bar, client.FormatByte(float64(current)), endAt.Sub(startAt))
 }

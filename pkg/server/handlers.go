@@ -499,45 +499,50 @@ func paginateEntries(entries []fileInfo, offset, limit int) []fileInfo {
 func (h *Handlers) collectSearchResults(rootsDir, queryLower string, csMap map[string]string) []fileInfo {
 	var results []fileInfo
 	_ = filepath.WalkDir(rootsDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		rel, _ := filepath.Rel(rootsDir, path)
-		if rel == "." {
-			return nil
-		}
-		if d.Name() == ".checksums.json" || d.Name() == chunkedDirName {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.Contains(strings.ToLower(d.Name()), queryLower) {
-			return nil
-		}
-		if d.IsDir() {
-			results = append(results, fileInfo{
-				Name:  filepath.ToSlash(rel),
-				IsDir: true,
-			})
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		fi := fileInfo{
-			Name:    filepath.ToSlash(rel),
-			Size:    info.Size(),
-			ModTime: info.ModTime().UnixNano(),
-		}
-		if cs, ok := csMap[filepath.ToSlash(rel)]; ok {
-			fi.Checksum = cs
-		}
-		results = append(results, fi)
-		return nil
+		return h.searchWalkDirCallback(rootsDir, path, d, err, queryLower, csMap, &results)
 	})
 	return results
+}
+
+// searchWalkDirCallback 是 collectSearchResults 中 filepath.WalkDir 的回调函数。
+func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, err error, queryLower string, csMap map[string]string, results *[]fileInfo) error {
+	if err != nil {
+		return nil
+	}
+	rel, _ := filepath.Rel(rootsDir, path)
+	if rel == "." {
+		return nil
+	}
+	if d.Name() == ".checksums.json" || d.Name() == chunkedDirName {
+		if d.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(d.Name()), queryLower) {
+		return nil
+	}
+	if d.IsDir() {
+		*results = append(*results, fileInfo{
+			Name:  filepath.ToSlash(rel),
+			IsDir: true,
+		})
+		return nil
+	}
+	info, err := d.Info()
+	if err != nil {
+		return nil
+	}
+	fi := fileInfo{
+		Name:    filepath.ToSlash(rel),
+		Size:    info.Size(),
+		ModTime: info.ModTime().UnixNano(),
+	}
+	if cs, ok := csMap[filepath.ToSlash(rel)]; ok {
+		fi.Checksum = cs
+	}
+	*results = append(*results, fi)
+	return nil
 }
 
 // requestLogMiddleware 记录 HTTP 请求的基本信息：方法、路径、远程地址、耗时。
@@ -841,6 +846,48 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 // batchDelete 处理 POST /api/batch/delete。
 // 请求体 JSON：{"files": [{"file_name": "...", "checksum": "..."}]}
 // 继续处理模式：单条失败不影响其余文件。
+// processBatchDeleteItem 处理单条文件删除操作。
+func (h *Handlers) processBatchDeleteItem(f BatchDeleteFile, logger *slog.Logger) BatchOperationResult {
+	result := BatchOperationResult{Filename: f.Filename}
+	remotePath, err := ValidateFilePath(f.Filename)
+	if err != nil {
+		result.Message = errMsgInvalidFilename
+		return result
+	}
+	filePath := h.safePath(remotePath)
+	if filePath == "" {
+		result.Message = "无效的文件路径"
+		return result
+	}
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		result.Success = true
+		result.Message = "文件不存在（幂等删除）"
+		return result
+	}
+	if f.Checksum == "" {
+		result.Message = "缺少 checksum"
+		return result
+	}
+	// 校验 checksum
+	valid := verifyFileWithChecksum(filePath, f.Checksum)
+	// 仍然执行删除，但标记校验失败
+	if err := os.Remove(filePath); err != nil {
+		result.Message = "删除失败"
+	} else {
+		h.checksumStore.Delete(remotePath)
+		result.Success = true
+		result.Message = "删除成功"
+		if !valid {
+			result.Message = "删除成功（checksum 不匹配，文件内容可能已变更）"
+			logger.Warn("删除时 checksum 不匹配", "file_name", remotePath)
+		}
+	}
+	return result
+}
+
+// batchDelete 处理 POST /api/batch/delete。
+// 请求体 JSON：{"files": [{"file_name": "...", "checksum": "..."}]}
+// 继续处理模式：单条失败不影响其余文件。
 func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB
 	var req BatchDeleteRequest
@@ -855,46 +902,7 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger.With("batch", "delete")
 	results := make([]BatchOperationResult, 0, len(req.Files))
 	for _, f := range req.Files {
-		result := BatchOperationResult{Filename: f.Filename}
-		remotePath, err := ValidateFilePath(f.Filename)
-		if err != nil {
-			result.Message = errMsgInvalidFilename
-			results = append(results, result)
-			continue
-		}
-		filePath := h.safePath(remotePath)
-		if filePath == "" {
-			result.Message = "无效的文件路径"
-			results = append(results, result)
-			continue
-		}
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			// 文件不存在视为成功（幂等删除）
-			result.Success = true
-			result.Message = "文件不存在（幂等删除）"
-			results = append(results, result)
-			continue
-		}
-		if f.Checksum == "" {
-			result.Message = "缺少 checksum"
-			results = append(results, result)
-			continue
-		}
-		// 校验 checksum
-		valid := verifyFileWithChecksum(filePath, f.Checksum)
-		// 仍然执行删除，但标记校验失败
-		if err := os.Remove(filePath); err != nil {
-			result.Message = "删除失败"
-		} else {
-			h.checksumStore.Delete(remotePath)
-			result.Success = true
-			result.Message = "删除成功"
-			if !valid {
-				result.Message = "删除成功（checksum 不匹配，文件内容可能已变更）"
-				logger.Warn("删除时 checksum 不匹配", "file_name", remotePath)
-			}
-		}
-		results = append(results, result)
+		results = append(results, h.processBatchDeleteItem(f, logger))
 	}
 	sendJSONResponse(w, BatchDeleteResponse{Results: results}, http.StatusOK)
 }
@@ -969,6 +977,21 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	csMap := h.checksumStore.GetAll()
 
 	// 收集所有条目（跳过内部目录）
+	subdir := r.URL.Query().Get("subdir")
+	allFiles := h.buildFileListEntries(entries, csMap, subdir)
+
+	// 排序
+	sortFileEntries(allFiles, sortBy, sortOrder)
+
+	total := len(allFiles)
+
+	// 分页
+	files := paginateEntries(allFiles, offset, limit)
+	sendJSONResponse(w, listResponse{Files: files, Total: total, Offset: offset, Limit: limit}, http.StatusOK)
+}
+
+// buildFileListEntries 从目录条目构建文件信息列表，排除内部目录并附加 checksum。
+func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]string, subdir string) []fileInfo {
 	allFiles := make([]fileInfo, 0, len(entries))
 	for _, e := range entries {
 		if e.Name() == ".checksums.json" || e.Name() == chunkedDirName {
@@ -991,7 +1014,7 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 			ModTime: info.ModTime().UnixNano(),
 		}
 		relName := e.Name()
-		if subdir := r.URL.Query().Get("subdir"); subdir != "" {
+		if subdir != "" {
 			cleaned, _ := ValidateFilePath(subdir)
 			relName = filepath.ToSlash(filepath.Join(cleaned, e.Name()))
 		}
@@ -1000,15 +1023,7 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		allFiles = append(allFiles, fi)
 	}
-
-	// 排序
-	sortFileEntries(allFiles, sortBy, sortOrder)
-
-	total := len(allFiles)
-
-	// 分页
-	files := paginateEntries(allFiles, offset, limit)
-	sendJSONResponse(w, listResponse{Files: files, Total: total, Offset: offset, Limit: limit}, http.StatusOK)
+	return allFiles
 }
 
 func (h *Handlers) webRedirect(w http.ResponseWriter, r *http.Request) {
