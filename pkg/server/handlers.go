@@ -72,25 +72,37 @@ func (h *Handlers) TunnelHandler() http.Handler {
 	return h.tunnelHandler
 }
 
+// RegisterRoutesOpts 是 RegisterRoutes 的选项参数结构体。
+type RegisterRoutesOpts struct {
+	Mux        *http.ServeMux
+	CfgPtr     *atomic.Pointer[Config]
+	Version    string
+	BuildAt    string
+	TunnelKey  []byte
+	Logger     *slog.Logger
+	RouteTable *hub.RouteTable
+}
+
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
 // 调用方应在进程退出前调用 (*Handlers).Close() 以释放后台 goroutine 与持久化资源。
-func RegisterRoutes(_ context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointer[Config], version, buildAt string, tunnelKey []byte, logger *slog.Logger, routeTable *hub.RouteTable) *Handlers {
-	cfg := cfgPtr.Load()
-	log := defaultLogger(logger)
+func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
+	mux := opts.Mux
+	cfg := opts.CfgPtr.Load()
+	log := defaultLogger(opts.Logger)
 
 	// 初始化 ChecksumStore
 	cs := NewChecksumStore(cfg.UploadsDir, log.With("component", "checksum_store"))
 
 	h := &Handlers{
-		cfgPtr:        cfgPtr,
-		version:       version,
-		buildAt:       buildAt,
+		cfgPtr:        opts.CfgPtr,
+		version:       opts.Version,
+		buildAt:       opts.BuildAt,
 		checksumStore: cs,
 		uploadStore:   NewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, log.With("component", "upload_store")),
 		logger:        log,
 		metrics:       NewMetrics(),
 		shareStore:    NewShareStore(),
-		routeTable:    routeTable,
+		routeTable:    opts.RouteTable,
 	}
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
@@ -130,7 +142,7 @@ func RegisterRoutes(_ context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointe
 	}
 	apiHandler = CORSMiddleware(cfg.CORS, log.With("component", "cors"))(apiHandler)
 
-	h.tunnelHandler = tunnel.NewLocalHandler(tunnelKey, requestLogMiddleware(log.With("component", "request"), apiHandler), log.With("component", "tunnel"))
+	h.tunnelHandler = tunnel.NewLocalHandler(opts.TunnelKey, requestLogMiddleware(log.With("component", "request"), apiHandler), log.With("component", "tunnel"))
 
 	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
 	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
@@ -158,7 +170,7 @@ func RegisterRoutes(_ context.Context, mux *http.ServeMux, cfgPtr *atomic.Pointe
 	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 
 	// Hub 管理 API（中继系统），需鉴权
-	if routeTable != nil {
+	if opts.RouteTable != nil {
 		mux.HandleFunc("GET /api/hub/nodes", h.authMiddleware(h.hubNodesHandler))
 		mux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
 		mux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))

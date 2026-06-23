@@ -42,7 +42,13 @@ func startTestServer(t *testing.T) (string, string) {
 
 	key, _ := hex.DecodeString(cfg.TunnelKey)
 	mux := http.NewServeMux()
-	h := server.RegisterRoutes(t.Context(), mux, &cfgPtr, "v", "t", key, nil, nil)
+	h := server.RegisterRoutes(t.Context(), server.RegisterRoutesOpts{
+		Mux:       mux,
+		CfgPtr:    &cfgPtr,
+		Version:   "v",
+		BuildAt:   "t",
+		TunnelKey: key,
+	})
 	t.Cleanup(func() { _ = h.Close() })
 
 	ts := httptest.NewServer(mux)

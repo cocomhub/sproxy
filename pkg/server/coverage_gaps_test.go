@@ -253,7 +253,14 @@ func TestHealthz_UploadStoreStopped(t *testing.T) {
 
 	mux := http.NewServeMux()
 	key := make([]byte, 32)
-	h := RegisterRoutes(t.Context(), mux, &cfgPtr, "test", "now", key, testLogger(), nil)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:       mux,
+		CfgPtr:    &cfgPtr,
+		Version:   "test",
+		BuildAt:   "now",
+		TunnelKey: key,
+		Logger:    testLogger(),
+	})
 
 	// 停止 uploadStore 使其 Health() 返回错误
 	_ = h.Close()

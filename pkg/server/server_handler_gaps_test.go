@@ -20,7 +20,13 @@ func TestHandlers_Close(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:     mux,
+		CfgPtr:  cfgPtr,
+		Version: "test",
+		BuildAt: "now",
+		Logger:  testLogger(),
+	})
 	h.Close()
 	// 再次 Close 不应 panic
 	h.Close()
@@ -32,7 +38,13 @@ func TestTunnelHandler_ReturnsHandler(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:     mux,
+		CfgPtr:  cfgPtr,
+		Version: "test",
+		BuildAt: "now",
+		Logger:  testLogger(),
+	})
 	defer h.Close()
 	th := h.TunnelHandler()
 	if th == nil {
@@ -53,7 +65,13 @@ func TestHandler_ReturnsNonNil(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:     mux,
+		CfgPtr:  cfgPtr,
+		Version: "test",
+		BuildAt: "now",
+		Logger:  testLogger(),
+	})
 	defer h.Close()
 	handler := h.Handler()
 	if handler == nil {
@@ -67,7 +85,13 @@ func TestHandler_HealthzRoute(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:     mux,
+		CfgPtr:  cfgPtr,
+		Version: "test",
+		BuildAt: "now",
+		Logger:  testLogger(),
+	})
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)
@@ -93,7 +117,13 @@ func TestHandler_VersionRoute(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "v1.0.0", "2026-06-13", nil, testLogger(), nil)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:     mux,
+		CfgPtr:  cfgPtr,
+		Version: "v1.0.0",
+		BuildAt: "2026-06-13",
+		Logger:  testLogger(),
+	})
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)
@@ -121,7 +151,13 @@ func TestHandler_UploadRouteRequiresAuth(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:     mux,
+		CfgPtr:  cfgPtr,
+		Version: "test",
+		BuildAt: "now",
+		Logger:  testLogger(),
+	})
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)

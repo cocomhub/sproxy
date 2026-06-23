@@ -112,7 +112,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 		routeTable = hub.NewRouteTable()
 		logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
 	}
-	h := server.RegisterRoutes(ctx, mux, &cfgPtr, Version, BuildAt, tunnelKey, logger, routeTable)
+	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
+		Mux:        mux,
+		CfgPtr:     &cfgPtr,
+		Version:    Version,
+		BuildAt:    BuildAt,
+		TunnelKey:  tunnelKey,
+		Logger:     logger,
+		RouteTable: routeTable,
+	})
 	defer func() {
 		if err := h.Close(); err != nil {
 			slog.Warn(logHandlersCloseErr, "error", err.Error())
