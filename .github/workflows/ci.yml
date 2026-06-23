@@ -133,6 +133,7 @@ jobs:
     permissions:
       contents: write   # auto-push 需要
       deployments: write
+      pull-requests: write # 允许创建PR Review评论
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
@@ -142,7 +143,7 @@ jobs:
       - name: Run benchmark
         run: make bench
       - name: Store benchmark result
-        uses: benchmark-action/github-action-benchmark@8358ad9c7f2ffcd73b6dc0f96defe1d0292cab03 # v1.11.0
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         continue-on-error: true
         with:
           tool: 'go'
@@ -152,7 +153,11 @@ jobs:
           alert-threshold: '100%'
           comment-on-alert: true
           fail-on-alert: false
-          skip-fetch-gh-pages: true
+          skip-fetch-gh-pages: false
+          comment-always: true
+          summary-always: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
       - name: Upload benchmark artifact
         uses: actions/upload-artifact@v7
         with:
