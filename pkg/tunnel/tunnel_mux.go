@@ -287,8 +287,8 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 		pr, pw := io.Pipe()
 		bodyReader = pr
 		go func() {
-			_, err := DecryptStream(t.key, stream, pw)
-			pw.CloseWithError(err)
+			_, decErr := DecryptStream(t.key, stream, pw)
+			pw.CloseWithError(decErr)
 		}()
 	} else {
 		bodyReader = &noopCloseReader{Reader: stream}
