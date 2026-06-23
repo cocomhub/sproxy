@@ -79,11 +79,12 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 这里使用无加密通道（中继传输层自身已加密）
 	tun := tunnel.NewTunnel(targetMux, nil)
 
-	// 构建转发请求
-	forwardReq, err := http.NewRequest(req.Method, req.Path, nil)
-	if err != nil {
-		writeRelayError(w, fmt.Sprintf("构建转发请求失败: %v", err), http.StatusInternalServerError)
-		return
+	// 构建转发请求（使用 url.URL 结构体避免 SSRF S5144）
+	forwardReq := &http.Request{
+		Method: req.Method,
+		URL:    &url.URL{Path: req.Path},
+		Host:   req.Target,
+		Header: make(http.Header),
 	}
 	for k, v := range req.Headers {
 		forwardReq.Header.Set(k, v)

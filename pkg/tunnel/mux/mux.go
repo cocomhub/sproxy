@@ -288,8 +288,8 @@ type Mux struct {
 	lastPongNano atomic.Int64
 
 	ctxOnce   sync.Once
-	ctx       context.Context
-	ctxCancel context.CancelFunc
+	ctx       context.Context    // NOSONAR S8242 - mux 生命周期 context, 非请求级, sync.Once 懒初始化
+	ctxCancel context.CancelFunc // NOSONAR S8242 - Close() 中调用 cancel
 }
 
 // New 创建 Mux，启动事件循环 goroutine。
