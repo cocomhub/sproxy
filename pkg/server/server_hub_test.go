@@ -29,7 +29,13 @@ func TestHubNodesHandler_Disabled(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:     mux,
+		CfgPtr:  cfgPtr,
+		Version: "test",
+		BuildAt: "now",
+		Logger:  testLogger(),
+	})
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)
@@ -54,7 +60,13 @@ func TestHubStatsHandler_Disabled(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(Default())
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "test", "now", nil, testLogger(), nil)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:     mux,
+		CfgPtr:  cfgPtr,
+		Version: "test",
+		BuildAt: "now",
+		Logger:  testLogger(),
+	})
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)
@@ -83,7 +95,14 @@ func TestHubNodesHandler_Enabled(t *testing.T) {
 	rt := hub.NewRouteTable()
 
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "test", "now", nil, testLogger(), rt)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:        mux,
+		CfgPtr:     cfgPtr,
+		Version:    "test",
+		BuildAt:    "now",
+		Logger:     testLogger(),
+		RouteTable: rt,
+	})
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)
@@ -121,7 +140,14 @@ func TestHubRemoveNodeHandler_Enabled(t *testing.T) {
 	rt := hub.NewRouteTable()
 
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "test", "now", nil, testLogger(), rt)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:        mux,
+		CfgPtr:     cfgPtr,
+		Version:    "test",
+		BuildAt:    "now",
+		Logger:     testLogger(),
+		RouteTable: rt,
+	})
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)
@@ -154,7 +180,14 @@ func TestHubStatsHandler_Enabled(t *testing.T) {
 	rt := hub.NewRouteTable()
 
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), mux, cfgPtr, "test", "now", nil, testLogger(), rt)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:        mux,
+		CfgPtr:     cfgPtr,
+		Version:    "test",
+		BuildAt:    "now",
+		Logger:     testLogger(),
+		RouteTable: rt,
+	})
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)

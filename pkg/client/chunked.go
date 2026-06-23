@@ -63,6 +63,32 @@ type uploadCacheEntry struct {
 	fileChecksum string
 }
 
+// resumeSessionParams 是 tryResumeSession 和 initNewUploadSession 的参数结构体，
+// 用于减少函数参数数量（S107）。
+type resumeSessionParams struct {
+	UploadID     string
+	Filename     string
+	LocalPath    string
+	FileChecksum string
+	FileSize     int64
+	ChunkSize    int64
+	TotalChunks  int
+	Concurrency  int
+	ModTime      time.Time
+}
+
+// downloadChunkParams 是 downloadOneChunk 的参数结构体，用于减少函数参数数量（S107）。
+type downloadChunkParams struct {
+	Filename    string
+	ChunkIdx    int
+	ChunkSize   int64
+	FileSize    int64
+	OutFile     *os.File
+	Mu          *sync.Mutex
+	Progress    *int64
+	DownloadErr *error
+}
+
 // calcChunkSize 根据文件大小自适应计算分块大小。
 // preferred 为首选分块大小（默认 4 MiB），maxChunk 为最大限制（默认 64 MiB）。
 func calcChunkSize(fileSize, preferred, maxChunk int64) int64 {
@@ -370,9 +396,9 @@ func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize 
 //   - *ChunkedUploadResult: 非 nil 表示已处理完毕（文件已存在或续传完成），调用方应 return
 //   - error: 续传过程中的错误
 //   - bool: true 表示应继续执行（新 session 或续传不可用）
-func (c *FileClient) tryResumeSession(ctx context.Context, uploadID, filename, localPath, fileChecksum string, fileSize, chunkSize int64, totalChunks int, concurrency int) (*ChunkedUploadResult, error, bool) {
+func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams) (*ChunkedUploadResult, error, bool) {
 	statusResp, statusErr := c.doRequest(ctx, "GET",
-		fmt.Sprintf("/upload/status?upload_id=%s&filename=%s", uploadID, url.QueryEscape(filename)), nil, nil)
+		fmt.Sprintf("/upload/status?upload_id=%s&filename=%s", p.UploadID, url.QueryEscape(p.Filename)), nil, nil)
 	if statusErr != nil || statusResp.StatusCode != http.StatusOK {
 		if statusResp != nil {
 			statusResp.Body.Close()
@@ -398,28 +424,28 @@ func (c *FileClient) tryResumeSession(ctx context.Context, uploadID, filename, l
 	statusResp.Body.Close()
 
 	if statusData.Finished || statusData.Completed {
-		c.logger.Info("文件已存在，直接返回成功", "file_name", filename, "checksum", shortid.ShortHash(fileChecksum))
+		c.logger.Info("文件已存在，直接返回成功", "file_name", p.Filename, "checksum", shortid.ShortHash(p.FileChecksum))
 		return &ChunkedUploadResult{
 			Success:      true,
-			UploadID:     uploadID,
-			Filename:     filename,
-			FileChecksum: fileChecksum,
+			UploadID:     p.UploadID,
+			Filename:     p.Filename,
+			FileChecksum: p.FileChecksum,
 			Message:      "文件已存在",
 		}, nil, false
 	}
 
 	if statusData.UploadID != "" {
-		c.logger.Info("续传会话已恢复", "upload_id", shortid.ShortHash(uploadID),
+		c.logger.Info("续传会话已恢复", "upload_id", shortid.ShortHash(p.UploadID),
 			"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
 		result, err := c.uploadChunks(ctx, statusData.MissingChunks, chunkUploadOpts{
-			filePath:     localPath,
-			uploadID:     uploadID,
-			chunkSize:    chunkSize,
-			fileSize:     fileSize,
-			totalChunks:  totalChunks,
-			fileChecksum: fileChecksum,
-			filename:     filename,
-			concurrency:  concurrency,
+			filePath:     p.LocalPath,
+			uploadID:     p.UploadID,
+			chunkSize:    p.ChunkSize,
+			fileSize:     p.FileSize,
+			totalChunks:  p.TotalChunks,
+			fileChecksum: p.FileChecksum,
+			filename:     p.Filename,
+			concurrency:  p.Concurrency,
 		})
 		return result, err, false
 	}
@@ -428,15 +454,15 @@ func (c *FileClient) tryResumeSession(ctx context.Context, uploadID, filename, l
 }
 
 // initNewUploadSession 创建新的上传 session，并返回服务端 chunk_size。
-func (c *FileClient) initNewUploadSession(ctx context.Context, uploadID, filename, fileChecksum string, fileSize, chunkSize int64, totalChunks int, modTime time.Time) (int64, int, error) {
+func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionParams) (int64, int, error) {
 	initBody := chunkedInitRequest{
-		UploadID:     uploadID,
-		Filename:     filename,
-		TotalSize:    fileSize,
-		ChunkSize:    chunkSize,
-		TotalChunks:  totalChunks,
-		FileChecksum: fileChecksum,
-		FileModTime:  modTime.UnixNano(),
+		UploadID:     p.UploadID,
+		Filename:     p.Filename,
+		TotalSize:    p.FileSize,
+		ChunkSize:    p.ChunkSize,
+		TotalChunks:  p.TotalChunks,
+		FileChecksum: p.FileChecksum,
+		FileModTime:  p.ModTime.UnixNano(),
 	}
 	initJSON, _ := json.Marshal(initBody)
 
@@ -471,11 +497,11 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, uploadID, filenam
 		return 0, -1, nil // -1 表示已存在
 	}
 
-	newChunkSize := chunkSize
+	newChunkSize := p.ChunkSize
 	if initResult.ChunkSize > 0 {
 		newChunkSize = initResult.ChunkSize
 	}
-	newTotalChunks := int((fileSize + newChunkSize - 1) / newChunkSize)
+	newTotalChunks := int((p.FileSize + newChunkSize - 1) / newChunkSize)
 	return newChunkSize, newTotalChunks, nil
 }
 
@@ -536,8 +562,16 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 
 	// 尝试续传
 	if opt.resume {
-		result, resumeErr, shouldContinue := c.tryResumeSession(ctx, uploadID, filename, localPath,
-			fileChecksum, fileSize, chunkSize, totalChunks, opt.concurrency)
+		result, resumeErr, shouldContinue := c.tryResumeSession(ctx, resumeSessionParams{
+			UploadID:     uploadID,
+			Filename:     filename,
+			LocalPath:    localPath,
+			FileChecksum: fileChecksum,
+			FileSize:     fileSize,
+			ChunkSize:    chunkSize,
+			TotalChunks:  totalChunks,
+			Concurrency:  opt.concurrency,
+		})
 		if !shouldContinue {
 			return result, resumeErr
 		}
@@ -546,8 +580,15 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	// 新文件 / 不在上传中，创建新 session
 	c.logger.Info("新上传", "file_name", filename, "upload_id", shortid.ShortHash(uploadID))
 
-	newChunkSize, newTotalChunks, err := c.initNewUploadSession(ctx, uploadID, filename, fileChecksum,
-		fileSize, chunkSize, totalChunks, modTime)
+	newChunkSize, newTotalChunks, err := c.initNewUploadSession(ctx, resumeSessionParams{
+		UploadID:     uploadID,
+		Filename:     filename,
+		FileChecksum: fileChecksum,
+		FileSize:     fileSize,
+		ChunkSize:    chunkSize,
+		TotalChunks:  totalChunks,
+		ModTime:      modTime,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -704,7 +745,16 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		go func(chunkIdx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			c.downloadOneChunk(ctx, filename, chunkIdx, chunkSize, fileSize, outFile, &mu, &progress, &downloadErr)
+			c.downloadOneChunk(ctx, downloadChunkParams{
+				Filename:    filename,
+				ChunkIdx:    chunkIdx,
+				ChunkSize:   chunkSize,
+				FileSize:    fileSize,
+				OutFile:     outFile,
+				Mu:          &mu,
+				Progress:    &progress,
+				DownloadErr: &downloadErr,
+			})
 		}(i)
 	}
 
@@ -726,20 +776,18 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 }
 
 // downloadOneChunk 下载单个分块并写入文件指定偏移位置，内部包含重试逻辑。
-func (c *FileClient) downloadOneChunk(ctx context.Context, filename string, chunkIdx int,
-	chunkSize int64, fileSize int64, outFile *os.File,
-	mu *sync.Mutex, progress *int64, downloadErr *error) {
-	offset := int64(chunkIdx) * int64(chunkSize)
-	length := chunkSize
-	if offset+length > fileSize {
-		length = fileSize - offset
+func (c *FileClient) downloadOneChunk(ctx context.Context, p downloadChunkParams) {
+	offset := int64(p.ChunkIdx) * int64(p.ChunkSize)
+	length := p.ChunkSize
+	if offset+length > p.FileSize {
+		length = p.FileSize - offset
 	}
 
 	urlPath := fmt.Sprintf("/download/chunk?filename=%s&offset=%d&length=%d",
-		url.QueryEscape(filename), offset, length)
+		url.QueryEscape(p.Filename), offset, length)
 
 	for range maxRetries {
-		if *downloadErr != nil {
+		if *p.DownloadErr != nil {
 			return
 		}
 
@@ -748,24 +796,24 @@ func (c *FileClient) downloadOneChunk(ctx context.Context, filename string, chun
 			continue
 		}
 
-		mu.Lock()
-		if _, writeErr := outFile.WriteAt(data, offset); writeErr != nil {
-			mu.Unlock()
+		p.Mu.Lock()
+		if _, writeErr := p.OutFile.WriteAt(data, offset); writeErr != nil {
+			p.Mu.Unlock()
 			continue
 		}
-		*progress += int64(len(data))
+		*p.Progress += int64(len(data))
 		if c.progressFn != nil {
-			c.progressFn("下载", *progress, fileSize)
+			c.progressFn("下载", *p.Progress, p.FileSize)
 		}
-		mu.Unlock()
+		p.Mu.Unlock()
 		return
 	}
 
-	mu.Lock()
-	if *downloadErr == nil {
-		*downloadErr = fmt.Errorf("分块 %d 下载失败（重试耗尽）", chunkIdx)
+	p.Mu.Lock()
+	if *p.DownloadErr == nil {
+		*p.DownloadErr = fmt.Errorf("分块 %d 下载失败（重试耗尽）", p.ChunkIdx)
 	}
-	mu.Unlock()
+	p.Mu.Unlock()
 }
 
 // verifyDownloadChecksum 校验下载后的文件 checksum 是否与预期一致。
