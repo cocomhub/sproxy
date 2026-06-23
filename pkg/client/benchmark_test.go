@@ -18,15 +18,10 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 )
 
-// newMockServerBench 是 newMockServer 的 testing.TB 版本，兼容 *testing.B。
-// 逻辑与 newMockServer 相同：提供 /upload、/download、/api/files 等路由。
-func newMockServerBench(tb testing.TB) (*httptest.Server, string) {
-	tb.Helper()
-	dir := tb.TempDir()
-
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("POST /upload", func(w http.ResponseWriter, r *http.Request) {
+// mockBenchUploadHandler 处理 /upload 路由，由 newMockServerBench 注册。
+// 校验 X-File-Checksum、解析 multipart 表单、写入文件到 dir 并比对 checksum。
+func mockBenchUploadHandler(dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		cs := r.Header.Get("X-File-Checksum")
 		if cs == "" {
 			http.Error(w, `{"success":false,"message":"missing X-File-Checksum"}`, http.StatusBadRequest)
@@ -69,9 +64,13 @@ func newMockServerBench(tb testing.TB) (*httptest.Server, string) {
 			"message":       "ok",
 			"file_checksum": serverCS,
 		})
-	})
+	}
+}
 
-	mux.HandleFunc("GET /download", func(w http.ResponseWriter, r *http.Request) {
+// mockBenchDownloadHandler 处理 /download 路由，由 newMockServerBench 注册。
+// 读取 dir 下文件并返回内容，响应头附带 SHA-256 checksum。
+func mockBenchDownloadHandler(dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
 		if name == "" {
 			http.Error(w, "missing filename", http.StatusBadRequest)
@@ -85,7 +84,19 @@ func newMockServerBench(tb testing.TB) (*httptest.Server, string) {
 		sum := sha256.Sum256(data)
 		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
 		w.Write(data)
-	})
+	}
+}
+
+// newMockServerBench 是 newMockServer 的 testing.TB 版本，兼容 *testing.B。
+// 逻辑与 newMockServer 相同：提供 /upload、/download、/api/files 等路由。
+func newMockServerBench(tb testing.TB) (*httptest.Server, string) {
+	tb.Helper()
+	dir := tb.TempDir()
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("POST /upload", mockBenchUploadHandler(dir))
+	mux.HandleFunc("GET /download", mockBenchDownloadHandler(dir))
 
 	mux.HandleFunc("GET /api/files", func(w http.ResponseWriter, r *http.Request) {
 		entries, _ := os.ReadDir(dir)

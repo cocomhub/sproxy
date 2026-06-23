@@ -14,6 +14,30 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
+// startEchoServer 启动 echo server goroutine，将接收到的数据原样写回。
+func startEchoServer(ctx context.Context, m *mux.Mux) {
+	go func() {
+		for {
+			s, err := m.Accept(ctx)
+			if err != nil {
+				return
+			}
+			go func() {
+				buf := make([]byte, 65536)
+				for {
+					n, err := s.Read(buf)
+					if err != nil {
+						return
+					}
+					if _, err := s.Write(buf[:n]); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+}
+
 // BenchmarkMuxThroughput 测试不同负载大小下的吞吐性能。
 func BenchmarkMuxThroughput(b *testing.B) {
 	sizes := []int{64, 1024, 65536, 1048576} // 64B, 1KB, 64KB, 1MB
@@ -27,29 +51,9 @@ func BenchmarkMuxThroughput(b *testing.B) {
 
 			payload := make([]byte, size)
 
-			// echo server：将收到的数据写回
 			ctx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
 			defer cancel()
-			go func() {
-				for {
-					s, err := muxB.Accept(ctx)
-					if err != nil {
-						return
-					}
-					go func() {
-						buf := make([]byte, 65536)
-						for {
-							n, err := s.Read(buf)
-							if err != nil {
-								return
-							}
-							if _, err := s.Write(buf[:n]); err != nil {
-								return
-							}
-						}
-					}()
-				}
-			}()
+			startEchoServer(ctx, muxB)
 
 			b.SetBytes(int64(size))
 			b.ResetTimer()
@@ -87,28 +91,7 @@ func BenchmarkMuxConcurrentStreams(b *testing.B) {
 
 			ctx, cancel := context.WithTimeout(b.Context(), 30*time.Second)
 			defer cancel()
-
-			// echo server：每个 Accept 的流启动一个 echo goroutine
-			go func() {
-				for {
-					s, err := muxB.Accept(ctx)
-					if err != nil {
-						return
-					}
-					go func(stream mux.Stream) {
-						buf := make([]byte, 65536)
-						for {
-							n, err := stream.Read(buf)
-							if err != nil {
-								return
-							}
-							if _, err := stream.Write(buf[:n]); err != nil {
-								return
-							}
-						}
-					}(s)
-				}
-			}()
+			startEchoServer(ctx, muxB)
 
 			b.ResetTimer()
 

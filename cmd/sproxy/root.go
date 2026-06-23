@@ -138,13 +138,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	} else {
-		if err := srv.ListenAndServe(); err != nil {
-			if err == http.ErrServerClosed {
-				slog.Info(logListenClosed, "error", err.Error())
-			} else {
-				close(stopSigCh)
-				return fmt.Errorf(errFmtListenServe, err)
-			}
+		if err := startPlainListener(srv, stopSigCh); err != nil {
+			return err
 		}
 	}
 
@@ -217,6 +212,19 @@ func startTLSListener(cfg *server.Config, s *http.Server, stopSigCh chan struct{
 	}
 
 	if err := s.ListenAndServeTLS(certFile, keyFile); err != nil {
+		if err == http.ErrServerClosed {
+			slog.Info(logListenClosed, "error", err.Error())
+		} else {
+			close(stopSigCh)
+			return fmt.Errorf(errFmtListenServe, err)
+		}
+	}
+	return nil
+}
+
+// startPlainListener 启动非 TLS HTTP 监听。
+func startPlainListener(s *http.Server, stopSigCh chan struct{}) error {
+	if err := s.ListenAndServe(); err != nil {
 		if err == http.ErrServerClosed {
 			slog.Info(logListenClosed, "error", err.Error())
 		} else {

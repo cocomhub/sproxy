@@ -46,56 +46,61 @@ func FuzzValidateFilePath(f *testing.F) {
 		result, err := ValidateFilePath(name)
 
 		if err != nil {
-			// 拒绝的路径必须满足以下条件之一：
-			// - 包含空字节
-			// - 以 / 或 \ 开头
-			// - 含有 ..
-			// - Windows 非法字符
-			// - 空字符串
-			// - . 或 ..
-			if name == "" {
+			if isExpectedRejection(name) {
 				return
-			}
-			if name[0] == '/' || name[0] == '\\' {
-				return
-			}
-			if strings.Contains(name, "\x00") {
-				return
-			}
-			if strings.Contains(name, "..") {
-				return
-			}
-			// 注意：filepath.Clean 可能把某些路径变成 "." 或 "../xxx"
-			cleaned := filepath.Clean(name)
-			if cleaned == "." {
-				return
-			}
-			// 不确认的 error — 检查是否 Windows 非法字符
-			if runtime.GOOS == "windows" {
-				const invalidChars = `<>:"|?*`
-				for _, c := range name {
-					if strings.ContainsRune(invalidChars, c) {
-						return
-					}
-				}
 			}
 			// 没命中已知拒绝条件 — 可能是 regressions
 			t.Logf("unexpected error for input %q: %v", name, err)
 			return
 		}
 
-		// 不变量 1：成功时 result 非空
-		if result == "" {
-			t.Errorf("empty result for input %q", name)
-		}
-
-		// 不变量 2：result 必须是相对路径（ToSlash 格式）
-		if filepath.IsAbs(result) {
-			t.Errorf("result is absolute path: %q (input: %q)", result, name)
-		}
-		if !strings.ContainsRune(result, '\\') && result != filepath.ToSlash(result) {
-			// 应该已经是 ToSlash 格式
-			t.Errorf("result should be ToSlash format, got %q (input: %q)", result, name)
-		}
+		assertValidPath(t, result, name)
 	})
+}
+
+// isExpectedRejection 检查 name 是否属于已知的合法拒绝条件。
+func isExpectedRejection(name string) bool {
+	if name == "" {
+		return true
+	}
+	if name[0] == '/' || name[0] == '\\' {
+		return true
+	}
+	if strings.Contains(name, "\x00") {
+		return true
+	}
+	if strings.Contains(name, "..") {
+		return true
+	}
+	cleaned := filepath.Clean(name)
+	if cleaned == "." {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		const invalidChars = `<>:"|?*`
+		for _, c := range name {
+			if strings.ContainsRune(invalidChars, c) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// assertValidPath 验证 ValidateFilePath 成功返回的结果满足不变量。
+func assertValidPath(t *testing.T, result, name string) {
+	t.Helper()
+	// 不变量 1：成功时 result 非空
+	if result == "" {
+		t.Errorf("empty result for input %q", name)
+	}
+
+	// 不变量 2：result 必须是相对路径（ToSlash 格式）
+	if filepath.IsAbs(result) {
+		t.Errorf("result is absolute path: %q (input: %q)", result, name)
+	}
+	if !strings.ContainsRune(result, '\\') && result != filepath.ToSlash(result) {
+		// 应该已经是 ToSlash 格式
+		t.Errorf("result should be ToSlash format, got %q (input: %q)", result, name)
+	}
 }
