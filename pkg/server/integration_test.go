@@ -1267,13 +1267,13 @@ func TestStat_HappyPath(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	if got := resp.Header.Get("X-File-Size"); got == "" {
+	if resp.Header.Get("X-File-Size") == "" {
 		t.Fatal("missing X-File-Size")
 	}
 	if got := resp.Header.Get("X-File-Checksum"); got != cs {
 		t.Fatalf("X-File-Checksum mismatch: got %q, want %q", got, cs)
 	}
-	if got := resp.Header.Get("X-File-MTime"); got == "" {
+	if resp.Header.Get("X-File-MTime") == "" {
 		t.Fatal("missing X-File-MTime")
 	}
 }

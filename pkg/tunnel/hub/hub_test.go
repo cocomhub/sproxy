@@ -21,15 +21,15 @@ func TestRouteTableAddAndRemove(t *testing.T) {
 	_ = b
 
 	rt.Add("node-1", m)
-	if got := rt.Lookup("node-1"); got == nil {
+	if rt.Lookup("node-1") == nil {
 		t.Fatal("expected to find node-1")
 	}
-	if got := rt.Lookup("unknown"); got != nil {
+	if rt.Lookup("unknown") != nil {
 		t.Fatal("expected nil for unknown node")
 	}
 
 	rt.Remove("node-1")
-	if got := rt.Lookup("node-1"); got != nil {
+	if rt.Lookup("node-1") != nil {
 		t.Fatal("expected nil after remove")
 	}
 }
@@ -81,7 +81,7 @@ func TestRouteTableAddWithInfo(t *testing.T) {
 	})
 
 	// Lookup should work
-	if got := rt.Lookup("node-with-info"); got == nil {
+	if rt.Lookup("node-with-info") == nil {
 		t.Fatal("expected to find node-with-info")
 	}
 
@@ -115,7 +115,7 @@ func TestRouteTableDuplicateReplace(t *testing.T) {
 	rt.Add("same-node", m2)
 
 	// Should point to m2 now
-	if got := rt.Lookup("same-node"); got != m2 {
+	if rt.Lookup("same-node") != m2 {
 		t.Fatal("expected lookup to return new mux after replace")
 	}
 }

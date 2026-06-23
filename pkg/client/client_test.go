@@ -44,7 +44,7 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 		}
 		defer f.Close()
 
-		out, _ := os.Create(filepath.Join(dir, h.Filename))
+		out, _ := os.Create(filepath.Join(dir, filepath.Base(h.Filename)))
 		defer out.Close()
 		hasher := sha256.New()
 		buf := make([]byte, 4096)
@@ -78,7 +78,7 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 			http.Error(w, "missing filename", http.StatusBadRequest)
 			return
 		}
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		data, err := os.ReadFile(filepath.Join(dir, filepath.Base(name)))
 		if err != nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -95,7 +95,7 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 			return
 		}
 		name := r.URL.Query().Get("filename")
-		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+		if err := os.Remove(filepath.Join(dir, filepath.Base(name))); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -137,8 +137,8 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 			http.Error(w, "missing checksum", http.StatusBadRequest)
 			return
 		}
-		fromPath := filepath.Join(dir, from)
-		toPath := filepath.Join(dir, to)
+		fromPath := filepath.Join(dir, filepath.Base(from))
+		toPath := filepath.Join(dir, filepath.Base(to))
 		_ = os.MkdirAll(filepath.Dir(toPath), 0755)
 		if err := os.Rename(fromPath, toPath); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -150,7 +150,7 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
-		info, err := os.Stat(filepath.Join(dir, name))
+		info, err := os.Stat(filepath.Join(dir, filepath.Base(name)))
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -158,7 +158,7 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 		w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
 		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
 		if !info.IsDir() {
-			data, _ := os.ReadFile(filepath.Join(dir, name))
+			data, _ := os.ReadFile(filepath.Join(dir, filepath.Base(name)))
 			sum := sha256.Sum256(data)
 			w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
 		}
@@ -204,7 +204,7 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 		}
 		var results []map[string]any
 		for _, f := range req.Files {
-			p := filepath.Join(dir, f.Filename)
+			p := filepath.Join(dir, filepath.Base(f.Filename))
 			err := os.Remove(p)
 			r := map[string]any{"filename": f.Filename, "success": true, "message": "deleted"}
 			if err != nil {
@@ -240,8 +240,8 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 				})
 				continue
 			}
-			fromPath := filepath.Join(dir, op.From)
-			toPath := filepath.Join(dir, op.To)
+			fromPath := filepath.Join(dir, filepath.Base(op.From))
+			toPath := filepath.Join(dir, filepath.Base(op.To))
 			_ = os.MkdirAll(filepath.Dir(toPath), 0755)
 			err := os.Rename(fromPath, toPath)
 			r := map[string]any{"filename": op.From, "success": true, "message": "renamed"}

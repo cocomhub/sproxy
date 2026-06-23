@@ -126,7 +126,7 @@ func TestUploadStore_GetSessionByFilename(t *testing.T) {
 		t.Fatalf("expected id1, got %s", s.UploadID)
 	}
 
-	if got := us.GetSessionByFilename("nonexistent.txt"); got != nil {
+	if us.GetSessionByFilename("nonexistent.txt") != nil {
 		t.Fatal("expected nil for nonexistent filename")
 	}
 }
@@ -283,7 +283,7 @@ func TestUploadStore_CleanupSessionAfter(t *testing.T) {
 	us.CreateSession(sessionID, "cleanup.txt", 1024, 256, 4, "abcd", 0)
 
 	// 检查 session 存在
-	if session := us.GetSession(sessionID); session == nil {
+	if us.GetSession(sessionID) == nil {
 		t.Fatal("expected session to exist")
 	}
 
@@ -293,7 +293,7 @@ func TestUploadStore_CleanupSessionAfter(t *testing.T) {
 	// 验证 50ms 后 session 被移除
 	time.Sleep(100 * time.Millisecond)
 
-	if session := us.GetSession(sessionID); session != nil {
+	if us.GetSession(sessionID) != nil {
 		t.Error("expected session to be cleaned up after TTL")
 	}
 }
