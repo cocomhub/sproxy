@@ -48,7 +48,7 @@ function escHtml(s) {
 }
 
 function escJsStr(s) {
-  return String.raw`${String(s).replaceAll('\\', '\\\\').replaceAll("'", "\\'").replaceAll('"', '\\"')}`;
+  return String(s).replaceAll('\\', '\\\\').replaceAll("'", "\\'").replaceAll('"', '\\"');
 }
 
 function headers(extra) {
@@ -300,12 +300,12 @@ async function downloadFile(name, expectedChecksum) {
       triggerDownload(name, result.body);
       showToast(name + ' 下载完成' + (serverCS ? '，校验通过' : ''), 'success');
     } else {
-      await directDownload(name, expectedChecksum);
+      await directDownload(name);
     }
   } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
 }
 
-async function directDownload(name, expectedChecksum) {
+async function directDownload(name) {
   var resp = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
   if (!resp.ok) {
     var data = await resp.json().catch(function() { return {}; });
