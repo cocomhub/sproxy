@@ -4,13 +4,13 @@
 // 主逻辑：文件列表、CRUD、批量操作、导航、UI 工具。
 // 依赖 sha256.js, tunnel.js, upload.js（先加载）。
 
-var BASE = '';
-var token = localStorage.getItem('sproxy_token') || '';
-var currentSubdir = localStorage.getItem('sproxy_subdir') || '';
-var _searchActive = false;
-var _currentOffset = 0;
-var _hasMore = false;
-var PAGE_LIMIT = 500;
+const BASE = '';
+let token = localStorage.getItem('sproxy_token') || '';
+let currentSubdir = localStorage.getItem('sproxy_subdir') || '';
+let _searchActive = false;
+let _currentOffset = 0;
+let _hasMore = false;
+const PAGE_LIMIT = 500;
 
 document.getElementById('token').value = token;
 document.getElementById('tunnel-key').value = tunnelHexKey || '';
@@ -30,7 +30,7 @@ function saveTunnelKey() {
 
 // --- UI 工具 ---
 function showToast(msg, type) {
-  var el = document.getElementById('toast');
+  const el = document.getElementById('toast');
   el.textContent = msg;
   el.className = 'toast toast-' + type + ' show';
   clearTimeout(el._timer);
@@ -52,7 +52,7 @@ function escJsStr(s) {
 }
 
 function headers(extra) {
-  var h = extra || {};
+  const h = extra || {};
   if (token && !tunnelHexKey) h['Authorization'] = 'Bearer ' + token;
   return h;
 }
@@ -72,21 +72,22 @@ function copyChecksum(cs) {
 
 // --- 文件列表 ---
 async function refreshList() {
-  var el = document.getElementById('file-list');
+  const el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">加载中...</div>';
   updateBreadcrumb();
   _currentOffset = 0;
   _hasMore = false;
   try {
-    var files, data;
-    var qs = (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) + '&' : '?') + 'offset=0&limit=' + PAGE_LIMIT;
-    var listUrl = '/api/files' + qs;
+    let files;
+    let data;
+    const qs = (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) + '&' : '?') + 'offset=0&limit=' + PAGE_LIMIT;
+    const listUrl = '/api/files' + qs;
     if (tunnelHexKey) {
-      var result = await tunnelRequest('GET', listUrl, {}, null);
+      const result = await tunnelRequest('GET', listUrl, {}, null);
       data = JSON.parse(new TextDecoder().decode(result.body));
       files = data.files || [];
     } else {
-      var resp = await fetch(BASE + listUrl, { headers: headers() });
+      const resp = await fetch(BASE + listUrl, { headers: headers() });
       data = await resp.json();
       if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + (data.message || resp.status) + '</div>'; return; }
       files = data.files || [];
@@ -102,17 +103,18 @@ async function refreshList() {
 }
 
 async function loadMore() {
-  var el = document.getElementById('file-list');
-  var qs = (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) + '&' : '?') + 'offset=' + _currentOffset + '&limit=' + PAGE_LIMIT;
-  var listUrl = '/api/files' + qs;
+  const el = document.getElementById('file-list');
+  const qs = (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) + '&' : '?') + 'offset=' + _currentOffset + '&limit=' + PAGE_LIMIT;
+  const listUrl = '/api/files' + qs;
   try {
-    var files, data;
+    let files;
+    let data;
     if (tunnelHexKey) {
-      var result = await tunnelRequest('GET', listUrl, {}, null);
+      const result = await tunnelRequest('GET', listUrl, {}, null);
       data = JSON.parse(new TextDecoder().decode(result.body));
       files = data.files || [];
     } else {
-      var resp = await fetch(BASE + listUrl, { headers: headers() });
+      const resp = await fetch(BASE + listUrl, { headers: headers() });
       data = await resp.json();
       if (!resp.ok) return;
       files = data.files || [];
@@ -120,16 +122,16 @@ async function loadMore() {
     _currentOffset += files.length;
     _hasMore = (data.total || 0) > _currentOffset;
 
-    var tbody = el.querySelector('table tbody');
+    const tbody = el.querySelector('table tbody');
     if (!tbody) { refreshList(); return; }
-    for (var fi of files) {
-      var fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
+    for (const fi of files) {
+      const fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
       tbody.insertAdjacentHTML('beforeend', buildFileRowHtml(fi, fullName));
     }
-    var container = document.getElementById('load-more-container');
+    const container = document.getElementById('load-more-container');
     if (container) {
       if (_hasMore) {
-        var remaining = (data.total || 0) - _currentOffset;
+        const remaining = (data.total || 0) - _currentOffset;
         container.innerHTML = '<button class="btn btn-primary" onclick="loadMore()">加载更多 (' + remaining + ')</button>';
       } else {
         container.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">已加载全部 ' + data.total + ' 个文件</div>';
@@ -139,9 +141,9 @@ async function loadMore() {
 }
 
 function buildFileTableHtml(files, subdir) {
-  var html = '<table><thead><tr><th class="check-col"><input type="checkbox" onchange="toggleSelectAll(this.checked)"></th><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
-  for (var fi of files) {
-    var fullName = subdir ? subdir + '/' + fi.name : fi.name;
+  let html = '<table><thead><tr><th class="check-col"><input type="checkbox" onchange="toggleSelectAll(this.checked)"></th><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
+  for (const fi of files) {
+    const fullName = subdir ? subdir + '/' + fi.name : fi.name;
     html += buildFileRowHtml(fi, fullName);
   }
   html += '</tbody></table>';
@@ -155,8 +157,8 @@ function buildFileRowHtml(fi, fullName) {
       '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
       '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
   }
-  var cs = fi.checksum || '';
-  var csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
+  const cs = fi.checksum || '';
+  const csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
   return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '" onchange="updateBatchToolbar()"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
     '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
     '<td>' + csDisplay + '</td>' +
@@ -169,32 +171,32 @@ function buildFileRowHtml(fi, fullName) {
 
 function buildLoadMoreHtml(total) {
   if (!_hasMore) return '';
-  var remaining = (total || 0) - _currentOffset;
+  const remaining = (total || 0) - _currentOffset;
   return '<div id="load-more-container" style="text-align:center;padding:12px;">' +
     '<button class="btn btn-primary" onclick="loadMore()">加载更多 (' + remaining + ')</button></div>';
 }
 
 // --- 搜索 ---
 async function searchFiles() {
-  var q = document.getElementById('search-input').value.trim();
+  const q = document.getElementById('search-input').value.trim();
   if (!q) { clearSearch(); return; }
-  var el = document.getElementById('file-list');
+  const el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">搜索中...</div>';
   try {
-    var files;
-    var searchUrl = '/api/files/search?q=' + encodeURIComponent(q);
+    let files;
+    const searchUrl = '/api/files/search?q=' + encodeURIComponent(q);
     if (tunnelHexKey) {
-      var result = await tunnelRequest('GET', searchUrl, {}, null);
-      var data = JSON.parse(new TextDecoder().decode(result.body));
+      const result = await tunnelRequest('GET', searchUrl, {}, null);
+      const data = JSON.parse(new TextDecoder().decode(result.body));
       files = data.files || [];
     } else {
-      var resp = await fetch(BASE + searchUrl, { headers: headers() });
+      const resp = await fetch(BASE + searchUrl, { headers: headers() });
       if (!resp.ok) {
-        var errData = await resp.json().catch(function() { return {}; });
+        const errData = await resp.json().catch(function() { return {}; });
         el.innerHTML = '<div class="empty-msg">搜索失败: ' + (errData.message || resp.status) + '</div>';
         return;
       }
-      var data = await resp.json();
+      const data = await resp.json();
       files = data.files || [];
     }
     _searchActive = true;
@@ -222,15 +224,15 @@ function navigateDir(subdir) {
 }
 
 function updateBreadcrumb() {
-  var el = document.getElementById('dir-breadcrumb');
+  const el = document.getElementById('dir-breadcrumb');
   if (!currentSubdir) {
     el.innerHTML = '<a href="javascript:void(0)" onclick="navigateDir(\'\')">/</a>';
     return;
   }
-  var parts = currentSubdir.split('/');
-  var html = '<a href="javascript:void(0)" onclick="navigateDir(\'\')">/</a>';
-  var accumulated = '';
-  for (var p of parts) {
+  const parts = currentSubdir.split('/');
+  let html = '<a href="javascript:void(0)" onclick="navigateDir(\'\')">/</a>';
+  let accumulated = '';
+  for (const p of parts) {
     accumulated = accumulated ? accumulated + '/' + p : p;
     html += ' <span style="color:#999">›</span> <a href="javascript:void(0)" onclick="navigateDir(\'' + escJsStr(accumulated) + '\')">' + escHtml(p) + '</a>';
   }
@@ -239,22 +241,22 @@ function updateBreadcrumb() {
 
 // --- 目录操作 ---
 async function mkdirDir() {
-  var input = document.getElementById('new-dir-name');
-  var name = input.value.trim();
+  const input = document.getElementById('new-dir-name');
+  const name = input.value.trim();
   if (!name) { showToast('请输入目录名', 'warning'); return; }
-  var dirPath = currentSubdir ? currentSubdir + '/' + name : name;
+  const dirPath = currentSubdir ? currentSubdir + '/' + name : name;
   try {
     if (tunnelHexKey) {
-      var result = await tunnelRequest('POST', '/mkdir?dirname=' + encodeURIComponent(dirPath), {}, null);
-      var data = JSON.parse(new TextDecoder().decode(result.body));
+      const result = await tunnelRequest('POST', '/mkdir?dirname=' + encodeURIComponent(dirPath), {}, null);
+      const data = JSON.parse(new TextDecoder().decode(result.body));
       if (result.status >= 200 && result.status < 300 && data.success) {
         showToast('目录已创建: ' + dirPath, 'success');
         input.value = '';
         refreshList();
       } else { showToast('创建目录失败: ' + (data.message || result.status), 'error'); }
     } else {
-      var resp = await fetch(BASE + '/mkdir?dirname=' + encodeURIComponent(dirPath), { method: 'POST', headers: headers() });
-      var data = await resp.json();
+      const resp = await fetch(BASE + '/mkdir?dirname=' + encodeURIComponent(dirPath), { method: 'POST', headers: headers() });
+      const data = await resp.json();
       if (resp.ok && data.success) {
         showToast('目录已创建: ' + dirPath, 'success');
         input.value = '';
@@ -268,13 +270,13 @@ async function rmdirDir(dirPath) {
   if (!confirm('确认删除目录 "' + dirPath + '" 及其所有内容?')) return;
   try {
     if (tunnelHexKey) {
-      var result = await tunnelRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirPath), {}, null);
-      var data = JSON.parse(new TextDecoder().decode(result.body));
+      const result = await tunnelRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirPath), {}, null);
+      const data = JSON.parse(new TextDecoder().decode(result.body));
       if (result.status >= 200 && result.status < 300 && data.success) { showToast('目录已删除: ' + dirPath, 'success'); refreshList(); }
       else { showToast('删除目录失败: ' + (data.message || result.status), 'error'); }
     } else {
-      var resp = await fetch(BASE + '/rmdir?dirname=' + encodeURIComponent(dirPath), { method: 'POST', headers: headers() });
-      var data = await resp.json();
+      const resp = await fetch(BASE + '/rmdir?dirname=' + encodeURIComponent(dirPath), { method: 'POST', headers: headers() });
+      const data = await resp.json();
       if (resp.ok && data.success) { showToast('目录已删除: ' + dirPath, 'success'); refreshList(); }
       else { showToast('删除目录失败: ' + (data.message || resp.status), 'error'); }
     }
@@ -285,13 +287,13 @@ async function rmdirDir(dirPath) {
 async function downloadFile(name, expectedChecksum) {
   try {
     if (tunnelHexKey) {
-      var result = await tunnelDownloadStream(name);
+      let result = await tunnelDownloadStream(name);
       if (!result) result = await tunnelRequest('GET', '/download?filename=' + encodeURIComponent(name), {}, null);
-      var serverCS = (result.headers['X-File-Checksum'] || [''])[0];
+      const serverCS = (result.headers['X-File-Checksum'] || [''])[0];
       if (serverCS) {
-        var sha256 = new Sha256();
+        const sha256 = new Sha256();
         sha256.update(new Uint8Array(result.body));
-        var localCS = sha256.digest();
+        const localCS = sha256.digest();
         if (localCS !== serverCS) {
           showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
           return;
@@ -306,37 +308,37 @@ async function downloadFile(name, expectedChecksum) {
 }
 
 async function directDownload(name) {
-  var resp = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
+  const resp = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
   if (!resp.ok) {
-    var data = await resp.json().catch(function() { return {}; });
+    const data = await resp.json().catch(function() { return {}; });
     showToast('下载失败: ' + (data.message || resp.status), 'error');
     return;
   }
-  var serverCS = resp.headers.get('X-File-Checksum') || '';
-  var contentLength = Number.parseInt(resp.headers.get('Content-Length') || '0');
+  const serverCS = resp.headers.get('X-File-Checksum') || '';
+  const contentLength = Number.parseInt(resp.headers.get('Content-Length') || '0');
 
   if (serverCS) {
-    var sha256 = new Sha256();
+    const sha256 = new Sha256();
     if (contentLength > 100 * 1024 * 1024) {
-      var reader = resp.body.getReader();
-      var readResult = await reader.read();
+      const reader = resp.body.getReader();
+      let readResult = await reader.read();
       while (!readResult.done) {
         sha256.update(new Uint8Array(readResult.value));
         readResult = await reader.read();
       }
-      var localCS = sha256.digest();
+      const localCS = sha256.digest();
       if (localCS !== serverCS) {
         showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
         return;
       }
-      var resp2 = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
+      const resp2 = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
       triggerDownload(name, await resp2.blob());
       showToast(name + ' 下载完成，校验通过', 'success');
       return;
     }
-    var buffer = await resp.arrayBuffer();
+    const buffer = await resp.arrayBuffer();
     sha256.update(new Uint8Array(buffer));
-    var localCS = sha256.digest();
+    const localCS = sha256.digest();
     if (localCS !== serverCS) {
       showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
       return;
@@ -350,9 +352,9 @@ async function directDownload(name) {
 }
 
 function triggerDownload(fileName, data) {
-  var blob = data instanceof Blob ? data : new Blob([data]);
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
+  const blob = data instanceof Blob ? data : new Blob([data]);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
   a.href = url;
   a.download = fileName;
   document.body.appendChild(a);
@@ -367,15 +369,15 @@ async function deleteFile(name, checksum) {
   if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
   try {
     if (tunnelHexKey) {
-      var result = await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(name), { 'X-File-Checksum': checksum }, null);
-      var data = JSON.parse(new TextDecoder().decode(result.body));
+      const result = await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(name), { 'X-File-Checksum': checksum }, null);
+      const data = JSON.parse(new TextDecoder().decode(result.body));
       if (result.status >= 200 && result.status < 300 && data.success) { showToast('删除成功: ' + name, 'success'); refreshList(); }
       else { showToast('删除失败: ' + (data.message || result.status), 'error'); }
     } else {
-      var resp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(name), {
+      const resp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(name), {
         method: 'POST', headers: headers({ 'X-File-Checksum': checksum })
       });
-      var data = await resp.json();
+      const data = await resp.json();
       if (resp.ok && data.success) { showToast('删除成功: ' + name, 'success'); refreshList(); }
       else { showToast('删除失败: ' + (data.message || resp.status), 'error'); }
     }
@@ -385,19 +387,19 @@ async function deleteFile(name, checksum) {
 // --- 重命名 ---
 async function renameFile(name, checksum) {
   if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
-  var newName = prompt('新的文件名（路径）:', name);
+  const newName = prompt('新的文件名（路径）:', name);
   if (!newName || newName === name) return;
   try {
     if (tunnelHexKey) {
-      var result = await tunnelRequest('POST', '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), { 'X-File-Checksum': checksum }, null);
-      var data = JSON.parse(new TextDecoder().decode(result.body));
+      const result = await tunnelRequest('POST', '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), { 'X-File-Checksum': checksum }, null);
+      const data = JSON.parse(new TextDecoder().decode(result.body));
       if (result.status >= 200 && result.status < 300 && data.success) { showToast('重命名成功: ' + newName, 'success'); refreshList(); }
       else { showToast('重命名失败: ' + (data.message || result.status), 'error'); }
     } else {
-      var resp = await fetch(BASE + '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), {
+      const resp = await fetch(BASE + '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), {
         method: 'POST', headers: headers({ 'X-File-Checksum': checksum })
       });
-      var data = await resp.json();
+      const data = await resp.json();
       if (resp.ok && data.success) { showToast('重命名成功: ' + newName, 'success'); refreshList(); }
       else { showToast('重命名失败: ' + (data.message || resp.status), 'error'); }
     }
@@ -406,53 +408,53 @@ async function renameFile(name, checksum) {
 
 // --- 批量操作 ---
 function toggleSelectAll(checked) {
-  for (var cb of document.querySelectorAll('.file-select')) { cb.checked = checked; }
+  for (const cb of document.querySelectorAll('.file-select')) { cb.checked = checked; }
   updateBatchToolbar();
 }
 
 function updateBatchToolbar() {
-  var cbs = document.querySelectorAll('.file-select:checked');
-  var count = cbs.length;
-  var toolbar = document.getElementById('batch-toolbar');
-  var label = document.getElementById('batch-count');
+  const cbs = document.querySelectorAll('.file-select:checked');
+  const count = cbs.length;
+  const toolbar = document.getElementById('batch-toolbar');
+  const label = document.getElementById('batch-count');
   if (!toolbar || !label) return;
   label.textContent = '已选 ' + count + ' 个文件';
   if (count > 0) { toolbar.classList.add('show'); } else { toolbar.classList.remove('show'); }
 }
 
 function clearSelection() {
-  for (var cb of document.querySelectorAll('.file-select:checked')) { cb.checked = false; }
+  for (const cb of document.querySelectorAll('.file-select:checked')) { cb.checked = false; }
   updateBatchToolbar();
 }
 
 function getSelectedFiles() {
-  var results = [];
-  for (var cb of document.querySelectorAll('.file-select:checked')) {
-    var filename = cb.dataset.filename;
-    var checksum = cb.dataset.checksum;
+  const results = [];
+  for (const cb of document.querySelectorAll('.file-select:checked')) {
+    const filename = cb.dataset.filename;
+    const checksum = cb.dataset.checksum;
     if (filename) results.push({ filename: filename, checksum: checksum });
   }
   return results;
 }
 
 async function batchDelete() {
-  var files = getSelectedFiles();
+  const files = getSelectedFiles();
   if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
   if (!confirm('确定要删除选中的 ' + files.length + ' 个文件吗？')) return;
-  var body = JSON.stringify({ files: files });
+  const body = JSON.stringify({ files: files });
   try {
-    var data = await sendBatchRequest('/api/batch/delete', body);
+    const data = await sendBatchRequest('/api/batch/delete', body);
     if (data.success) { showToast(data.message || '删除完成', 'success'); refreshList(); }
     else { showToast(data.message || '批量删除失败', 'error'); }
   } catch (e) { showToast('批量删除失败: ' + e.message, 'error'); }
 }
 
 async function batchRename() {
-  var files = getSelectedFiles();
+  const files = getSelectedFiles();
   if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
-  var operations = [];
-  for (var f of files) {
-    var newName = prompt('重命名 "' + f.filename + '"\n请输入新文件名（取消跳过）:', f.filename);
+  const operations = [];
+  for (const f of files) {
+    const newName = prompt('重命名 "' + f.filename + '"\n请输入新文件名（取消跳过）:', f.filename);
     if (newName === null) continue;
     if (newName.trim() === '') { showToast('文件名不能为空', 'error'); return; }
     if (newName === f.filename) continue;
@@ -460,7 +462,7 @@ async function batchRename() {
   }
   if (operations.length === 0) { showToast('没有需要重命名的文件', 'info'); return; }
   try {
-    var data = await sendBatchRequest('/api/batch/rename', JSON.stringify({ operations: operations }));
+    const data = await sendBatchRequest('/api/batch/rename', JSON.stringify({ operations: operations }));
     if (data.success) { showToast(data.message || '重命名完成', 'success'); clearSelection(); refreshList(); }
     else { showToast(data.message || '批量重命名失败', 'error'); }
   } catch (e) { showToast('批量重命名失败: ' + e.message, 'error'); }
@@ -468,26 +470,26 @@ async function batchRename() {
 
 async function sendBatchRequest(url, body) {
   if (tunnelHexKey) {
-    var result = await tunnelRequest('POST', url, { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
+    const result = await tunnelRequest('POST', url, { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
     return JSON.parse(new TextDecoder().decode(result.body));
   }
-  var resp = await fetch(BASE + url, { method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: body });
+  const resp = await fetch(BASE + url, { method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: body });
   return resp.json();
 }
 
 function batchDownloadArchive() {
-  var selected = getSelectedFiles();
+  const selected = getSelectedFiles();
   if (selected.length === 0) { showToast('请选择文件', 'warning'); return; }
-  var files = selected.map(function(f) { return f.filename; });
-  var headersObj = headers();
+  const files = selected.map(function(f) { return f.filename; });
+  const headersObj = headers();
   headersObj['Content-Type'] = 'application/json';
   fetch(BASE + '/api/archive', {
     method: 'POST', headers: headersObj, body: JSON.stringify({ files: files })
   }).then(function(resp) {
     if (!resp.ok) return resp.text().then(function(t) { throw new Error(t); });
-    var disposition = resp.headers.get('Content-Disposition') || '';
-    var match = disposition.match(/filename="?(.+?)"?$/);
-    var filename = match ? match[1] : 'archive.tar.gz';
+    const disposition = resp.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?(.+?)"?$/);
+    const filename = match ? match[1] : 'archive.tar.gz';
     return resp.blob().then(function(blob) { triggerDownload(filename, blob); showToast('归档下载完成: ' + filename, 'success'); });
   }).catch(function(err) { showToast('归档失败: ' + err.message, 'error'); });
 }
@@ -497,12 +499,12 @@ async function showStats() {
   document.getElementById('stats-modal').style.display = 'flex';
   document.getElementById('stats-body').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
   try {
-    var hdrs = token ? { 'Authorization': 'Bearer ' + token } : {};
-    var resp = await fetch(BASE + '/api/stats', { headers: hdrs });
+    const hdrs = token ? { 'Authorization': 'Bearer ' + token } : {};
+    const resp = await fetch(BASE + '/api/stats', { headers: hdrs });
     if (!resp.ok) { document.getElementById('stats-body').innerHTML = '<div style="color:red">请求失败: ' + resp.status + '</div>'; return; }
-    var s = await resp.json();
-    var du = s.disk_usage || {};
-    var rc = s.request_counts || {};
+    const s = await resp.json();
+    const du = s.disk_usage || {};
+    const rc = s.request_counts || {};
     document.getElementById('stats-body').innerHTML = statsTableHtml(du, rc, s);
   } catch (e) { document.getElementById('stats-body').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
 }
@@ -536,7 +538,7 @@ function statsTableHtml(du, rc, s) {
     '<tr><td style="padding:5px 0;color:#777">上传字节数</td><td style="text-align:right">' + formatBytes(s.bytes_uploaded) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">下载文件数</td><td style="text-align:right">' + (s.files_downloaded ?? 0) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">下载字节数</td><td style="text-align:right">' + formatBytes(s.bytes_downloaded) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
+    '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="content/rich:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
 }
 
 // --- 初始化 ---

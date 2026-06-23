@@ -6,8 +6,8 @@
 
 function rot(x, n) { return (x >>> n) | (x << (32 - n)); }
 
-var Sha256 = (function() {
-  var K = [
+const Sha256 = (function() {
+  const K = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
     0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
@@ -36,7 +36,7 @@ var Sha256 = (function() {
   Sha256.prototype.update = function(data) {
     if (!data || !data.length) return this;
     this._len += data.length * 8;
-    for (var i = 0; i < data.length; i++) {
+    for (let i = 0; i < data.length; i++) {
       this._buf[this._buf.length] = data[i];
       if (this._buf.length === 64) {
         this._transform(this._buf);
@@ -46,42 +46,42 @@ var Sha256 = (function() {
     return this;
   };
   Sha256.prototype.digest = function() {
-    var bits = this._len;
-    var buf = this._buf.slice();
+    const bits = this._len;
+    let buf = this._buf.slice();
     buf.push(0x80);
     while (buf.length % 64 !== 56) buf.push(0x00);
-    for (var bi = 7; bi >= 0; bi--) buf.push((bits >>> (bi * 8)) & 0xff);
-    for (var di = 0; di < buf.length; di += 64) {
+    for (let bi = 7; bi >= 0; bi--) buf.push((bits >>> (bi * 8)) & 0xff);
+    for (let di = 0; di < buf.length; di += 64) {
       this._transform(buf.slice(di, di + 64));
     }
-    var hex = '';
-    for (var hi = 0; hi < 8; hi++) {
-      for (var hj = 3; hj >= 0; hj--) {
-        var b = (this.h[hi] >>> (hj * 8)) & 0xff;
+    let hex = '';
+    for (let hi = 0; hi < 8; hi++) {
+      for (let hj = 3; hj >= 0; hj--) {
+        const b = (this.h[hi] >>> (hj * 8)) & 0xff;
         hex += (b < 16 ? '0' : '') + b.toString(16);
       }
     }
     return hex;
   };
   Sha256.prototype._transform = function(m) {
-    var w = new Array(64);
-    for (var ti = 0; ti < 16; ti++) {
+    const w = new Array(64);
+    for (let ti = 0; ti < 16; ti++) {
       w[ti] = (m[ti * 4] << 24) | (m[ti * 4 + 1] << 16) | (m[ti * 4 + 2] << 8) | m[ti * 4 + 3];
     }
-    for (var ti = 16; ti < 64; ti++) {
-      var s0 = rot(w[ti - 15], 7) ^ rot(w[ti - 15], 18) ^ (w[ti - 15] >>> 3);
-      var s1 = rot(w[ti - 2], 17) ^ rot(w[ti - 2], 19) ^ (w[ti - 2] >>> 10);
+    for (let ti = 16; ti < 64; ti++) {
+      const s0 = rot(w[ti - 15], 7) ^ rot(w[ti - 15], 18) ^ (w[ti - 15] >>> 3);
+      const s1 = rot(w[ti - 2], 17) ^ rot(w[ti - 2], 19) ^ (w[ti - 2] >>> 10);
       w[ti] = (w[ti - 16] + s0 + w[ti - 7] + s1) >>> 0;
     }
-    var a = this.h[0], b = this.h[1], c = this.h[2], d = this.h[3];
-    var e = this.h[4], f = this.h[5], g = this.h[6], hh = this.h[7];
-    for (var ti = 0; ti < 64; ti++) {
-      var S1 = rot(e, 6) ^ rot(e, 11) ^ rot(e, 25);
-      var ch = (e & f) ^ ((~e) & g);
-      var t1 = (hh + S1 + ch + K[ti] + w[ti]) >>> 0;
-      var S0 = rot(a, 2) ^ rot(a, 13) ^ rot(a, 22);
-      var maj = (a & b) ^ (a & c) ^ (b & c);
-      var t2 = (S0 + maj) >>> 0;
+    let a = this.h[0]; let b = this.h[1]; let c = this.h[2]; let d = this.h[3];
+    let e = this.h[4]; let f = this.h[5]; let g = this.h[6]; let hh = this.h[7];
+    for (let ti = 0; ti < 64; ti++) {
+      const S1 = rot(e, 6) ^ rot(e, 11) ^ rot(e, 25);
+      const ch = (e & f) ^ ((~e) & g);
+      const t1 = (hh + S1 + ch + K[ti] + w[ti]) >>> 0;
+      const S0 = rot(a, 2) ^ rot(a, 13) ^ rot(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + maj) >>> 0;
       hh = g; g = f; f = e; e = (d + t1) >>> 0;
       d = c; c = b; b = a; a = (t1 + t2) >>> 0;
     }
