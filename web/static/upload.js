@@ -8,11 +8,11 @@ const SESSIONS_KEY = 'sproxy_upload_sessions';
 function loadSessions() {
   try {
     return JSON.parse(localStorage.getItem(SESSIONS_KEY)) || {};
-  } catch (e) { return {}; }
+  } catch { return {}; }
 }
 
 function saveSessions(sessions) {
-  try { localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions)); } catch (e) { /* ignore */ }
+  try { localStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions)); } catch { /* ignore */ }
 }
 
 function saveUploadSession(uploadId, data) {
@@ -150,7 +150,7 @@ async function chunkedUpload(file, tunnelMode, resumeSession) {
       }
       uploadedBytes += (end - start);
       updateProg(uploadedBytes, totalSize, idx);
-      if (sessionData.completedChunks.indexOf(idx) === -1) {
+      if (!sessionData.completedChunks.includes(idx)) {
         sessionData.completedChunks.push(idx);
         saveUploadSession(actualUploadId, sessionData);
       }
@@ -172,8 +172,9 @@ async function chunkedUpload(file, tunnelMode, resumeSession) {
 
 // --- 辅助函数 ---
 
+let _progCounter = 0;
 function createProgressBar(fileName, totalSize, totalChunks) {
-  const progId = 'prog-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+  const progId = 'prog-' + Date.now() + '-' + (++_progCounter);
   const container = document.getElementById('upload-progress-container');
   container.insertAdjacentHTML('beforeend',
     '<div id="' + progId + '-wrap"><small>' + escHtml(fileName) + ' (' + formatSize(totalSize) + ', ' + totalChunks + ' 分块)</small>' +
@@ -225,7 +226,7 @@ function buildChunkIndices(totalChunks, missingChunks, resumeSession) {
   } else if (resumeSession && resumeSession.completedChunks) {
     indices = [];
     for (let i = 0; i < totalChunks; i++) {
-      if (resumeSession.completedChunks.indexOf(i) === -1) indices.push(i);
+      if (!resumeSession.completedChunks.includes(i)) indices.push(i);
     }
   } else {
     indices = [];
@@ -261,7 +262,7 @@ async function uploadChunk(uploadID, idx, chunkBytes, chunkChecksum, tunnelMode)
 }
 
 async function uploadChunkViaTunnel(uploadID, idx, chunkBytes, chunkChecksum) {
-  const boundary = '----WebKitFormBoundary' + Math.random().toString(36).slice(2, 10);
+  const boundary = '----WebKitFormBoundary' + crypto.getRandomValues(new Uint32Array(1))[0].toString(36);
   const encoder = new TextEncoder();
   const parts = [
     encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="upload_id"\r\n\r\n' + uploadID + '\r\n'),
