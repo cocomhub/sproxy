@@ -1,9 +1,4 @@
 #!/usr/bin/env node
-/**
- * Copyright 2026 The Cocomhub Authors. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- */
-
 
 /**
  * Render graphviz diagrams from a skill's SKILL.md to SVG files.
