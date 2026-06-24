@@ -1,8 +1,3 @@
-/**
- * Copyright 2026 The Cocomhub Authors. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- */
-
 // Complete implementation of condition-based waiting utilities
 // From: Lace test infrastructure improvements (2025-10-03)
 // Context: Fixed 15 flaky tests by replacing arbitrary timeouts
