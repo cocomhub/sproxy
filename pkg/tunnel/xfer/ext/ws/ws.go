@@ -28,7 +28,9 @@ func init() {
 }
 
 // wsConn 将 *websocket.Conn 包装为 xfer.Conn。
-// 内部使用有界 channel + 后台发送 goroutine，提供发送背压支持。
+// 使用 buffered channel + 后台发送 goroutine 提供发送背压。
+// Send 采用两级检查：发送前先检查关闭/取消状态，入 channel 后再次验证，
+// 解决 select 非确定性导致的 ContextCancellation/CloseWhileBlocking 竞态。
 type wsConn struct {
 	conn    *websocket.Conn
 	sendCh  chan []byte
@@ -64,17 +66,23 @@ func (c *wsConn) sendLoop() {
 }
 
 // Send 发送一条二进制消息。关闭后返回 ErrConnClosed。
+// 两级检查：第一步非阻塞检查 closeCh/ctx.Done() 过滤已关闭/已取消场景；
+// 第二步阻塞 select 仅在 sendCh 满时等待 closeCh 或 ctx.Done()。
 func (c *wsConn) Send(ctx context.Context, msg []byte) error {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
+	// 第一步：非阻塞前置检查——如果已关闭或 context 已取消，立即返回。
+	// 此步骤消除 select 非确定性：ctx 已取消时一定返回错误而非入 channel。
+	select {
+	case <-c.closeCh:
 		return xfer.ErrConnClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
-	c.mu.Unlock()
 
 	cp := make([]byte, len(msg))
 	copy(cp, msg)
 
+	// 第二步：阻塞发送到 channel，同时监听 closeCh 和 ctx.Done()。
 	select {
 	case c.sendCh <- cp:
 		return nil
@@ -96,7 +104,9 @@ func (c *wsConn) Receive(ctx context.Context) ([]byte, error) {
 }
 
 // Close 关闭 WebSocket 连接。
-// 先关闭 closeCh 释放所有阻塞在 Send 上的 goroutine，再关闭底层连接。
+// 先 close(closeCh) 广播关闭信号释放阻塞在 Send 上的 goroutine，
+// 再 CloseNow() 关闭底层 socket 中断 sendLoop 中阻塞的 Write，
+// 最后等待 sendLoop 退出。
 func (c *wsConn) Close() error {
 	c.mu.Lock()
 	if c.closed {
@@ -106,16 +116,19 @@ func (c *wsConn) Close() error {
 	c.closed = true
 	c.mu.Unlock()
 
-	// 先关闭 closeCh 释放阻塞的 Send（它们读到 closeCh 后返回 ErrConnClosed）。
+	// 关闭 closeCh 释放阻塞在 Send 上的 goroutine。
 	select {
 	case <-c.closeCh:
 	default:
 		close(c.closeCh)
 	}
 
-	// 再关闭底层连接：sendLoop 发现 closeCh 已关闭后退出循环。
+	// CloseNow() 关闭底层 socket，中断 sendLoop 中阻塞的 Write。
 	err := c.conn.CloseNow()
+
+	// 等待 sendLoop 退出。
 	c.wg.Wait()
+
 	return err
 }
 
