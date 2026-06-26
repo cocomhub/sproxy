@@ -25,6 +25,11 @@ type mockQUICListener struct {
 func (m *mockQUICListener) Addr() net.Addr { return m.addr }
 
 func (m *mockQUICListener) Accept(ctx context.Context) (quic.Connection, error) {
+	// 先检查 context 是否已取消，避免 goroutine 完成过快导致
+	// select 在 ch、ctx.Done()、closeCh 之间竞态。
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if m.acceptErr != nil {
 		return nil, m.acceptErr
 	}
