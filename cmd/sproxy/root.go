@@ -140,13 +140,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	srv := createHTTPServer(cfg, h.Handler())
 	stopSigCh, shutdownDone := runSignalHandler(cancel, srv, h, logger, cfg)
+	defer close(stopSigCh) // 确保所有退出路径上信号 goroutine 退出
 
 	if cfg.TLS.Enabled {
-		if err := startTLSListener(cfg, srv, stopSigCh); err != nil {
+		if err := startTLSListener(cfg, srv); err != nil {
 			return err
 		}
 	} else {
-		if err := startPlainListener(srv, stopSigCh); err != nil {
+		if err := startPlainListener(srv); err != nil {
 			return err
 		}
 	}
@@ -196,7 +197,7 @@ func createHTTPServer(cfg *server.Config, handler http.Handler) *http.Server {
 }
 
 // startTLSListener 启动 TLS/HTTPS 监听，包含自签证书生成和 mTLS 配置。
-func startTLSListener(cfg *server.Config, s *http.Server, stopSigCh chan struct{}) error {
+func startTLSListener(cfg *server.Config, s *http.Server) error {
 	certFile := cfg.TLS.CertFile
 	keyFile := cfg.TLS.KeyFile
 	if certFile == "" {
@@ -223,7 +224,6 @@ func startTLSListener(cfg *server.Config, s *http.Server, stopSigCh chan struct{
 		if err == http.ErrServerClosed {
 			slog.Info(logListenClosed, "error", err.Error())
 		} else {
-			close(stopSigCh)
 			return fmt.Errorf(errFmtListenServe, err)
 		}
 	}
@@ -231,12 +231,11 @@ func startTLSListener(cfg *server.Config, s *http.Server, stopSigCh chan struct{
 }
 
 // startPlainListener 启动非 TLS HTTP 监听。
-func startPlainListener(s *http.Server, stopSigCh chan struct{}) error {
+func startPlainListener(s *http.Server) error {
 	if err := s.ListenAndServe(); err != nil {
 		if err == http.ErrServerClosed {
 			slog.Info(logListenClosed, "error", err.Error())
 		} else {
-			close(stopSigCh)
 			return fmt.Errorf(errFmtListenServe, err)
 		}
 	}
