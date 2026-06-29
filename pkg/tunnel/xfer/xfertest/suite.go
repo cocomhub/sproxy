@@ -147,15 +147,23 @@ func testCloseWhileBlocking(t *testing.T, factory ConnFactory) {
 
 	ctx := context.Background()
 
-	// 持续发送消息直到 channel 饱和。发送足够多以确保后台 sender
-	// 即使在工作，channel 也保持满状态。
-	for range 2000 {
-		if err := client.Send(ctx, []byte("fill")); err != nil {
-			break
+	// 在后台 goroutine 中持续填充 channel 直到满。
+	// 当 channel 满时 Send 阻塞，填充 goroutine 自然挂起。
+	// 等 Close 释放后才继续（返回 error）。
+	fillDone := make(chan struct{})
+	go func() {
+		defer close(fillDone)
+		for range 2000 {
+			if err := client.Send(ctx, []byte("fill")); err != nil {
+				return
+			}
 		}
-	}
+	}()
 
-	// 启动 goroutine，在 sendCh 满时阻塞在 select 上。
+	// 给填充 goroutine 时间填满 channel（channel 容量 256）。
+	time.Sleep(100 * time.Millisecond)
+
+	// 启动另一个 goroutine，在 channel 满时阻塞。
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- client.Send(ctx, []byte("should block"))
@@ -163,14 +171,12 @@ func testCloseWhileBlocking(t *testing.T, factory ConnFactory) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Close 应中断阻塞的 Send。channel 模式下 Go select 非确定性
-	// 意味着 goroutine 可能在 closeCh 关闭前成功入队，因此不强制
-	// 要求 error，只确保不超时不挂起。
+	// Close 中断所有阻塞的 Send。pipe 同步 close(closeCh) 释放等待的 goroutine；
+	// WebSocket CloseNow() 中断 IO；QUIC/TCP close socket 后 Write 返回 error。
 	client.Close()
 
 	select {
 	case <-errCh:
-		// goroutine 已返回——Close 生效
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for blocked Send to return after Close")
 	}
