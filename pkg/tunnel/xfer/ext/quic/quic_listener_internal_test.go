@@ -115,6 +115,11 @@ func TestQuicListenerClose(t *testing.T) {
 	default:
 		t.Fatal("closeCh should be closed, but it's still open")
 	}
+
+	// 幂等 Close：第二次调用不应 panic。
+	if err := ln.Close(); err != nil {
+		t.Fatalf("second close failed: %v", err)
+	}
 }
 
 func TestQuicListenerAcceptSuccess(t *testing.T) {

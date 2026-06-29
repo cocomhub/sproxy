@@ -1,0 +1,24 @@
+func testContextCancellation(t *testing.T, factory ConnFactory) {
+	t.Helper()
+	t.Parallel()
+	client, _, cleanup := factory(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// 尝试多次——Go select 的非确定性意味着消息可能入 channel
+	// 而非选择 ctx.Done()，尽管 ctx 已取消。
+	var lastErr error
+	for range 10 {
+		err := client.Send(ctx, []byte("cancel"))
+		if err != nil {
+			return // 成功检测到取消
+		}
+		lastErr = err
+		time.Sleep(time.Millisecond)
+	}
+	if lastErr == nil {
+		t.Fatal("expected error for cancelled context after 10 attempts")
+	}
+}

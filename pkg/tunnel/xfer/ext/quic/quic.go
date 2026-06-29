@@ -119,6 +119,7 @@ type quicListener interface {
 type QuicListener struct {
 	ln      quicListener
 	closeCh chan struct{}
+	closeMu sync.Once
 }
 
 func (l *QuicListener) Addr() string {
@@ -155,7 +156,9 @@ func (l *QuicListener) Accept(ctx context.Context) (xfer.Conn, error) {
 }
 
 func (l *QuicListener) Close() error {
-	close(l.closeCh)
+	l.closeMu.Do(func() {
+		close(l.closeCh)
+	})
 	return l.ln.Close()
 }
 
