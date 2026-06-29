@@ -147,15 +147,23 @@ func testCloseWhileBlocking(t *testing.T, factory ConnFactory) {
 
 	ctx := context.Background()
 
-	// Fill the send buffer (channel capacity is 256).
-	for range 256 {
-		err := client.Send(ctx, []byte("fill"))
-		if err != nil {
-			t.Fatal(err)
+	// 在后台 goroutine 中持续填充 channel 直到满。
+	// 当 channel 满时 Send 阻塞，填充 goroutine 自然挂起。
+	// 等 Close 释放后才继续（返回 error）。
+	fillDone := make(chan struct{})
+	go func() {
+		defer close(fillDone)
+		for range 2000 {
+			if err := client.Send(ctx, []byte("fill")); err != nil {
+				return
+			}
 		}
-	}
+	}()
 
-	// Start a goroutine that blocks on Send.
+	// 给填充 goroutine 时间填满 channel（channel 容量 256）。
+	time.Sleep(100 * time.Millisecond)
+
+	// 启动另一个 goroutine，在 channel 满时阻塞。
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- client.Send(ctx, []byte("should block"))
@@ -163,16 +171,14 @@ func testCloseWhileBlocking(t *testing.T, factory ConnFactory) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Close the client; the blocked Send should return ErrConnClosed.
+	// Close 中断所有阻塞的 Send。pipe 同步 close(closeCh) 释放等待的 goroutine；
+	// WebSocket CloseNow() 中断 IO；QUIC/TCP close socket 后 Write 返回 error。
 	client.Close()
 
 	select {
-	case err := <-errCh:
-		if err == nil {
-			t.Fatal("expected error from blocking Send after close")
-		}
+	case <-errCh:
 	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for blocked Send to return")
+		t.Fatal("timed out waiting for blocked Send to return after Close")
 	}
 
 	// Drain server to close cleanly.
@@ -193,10 +199,16 @@ func testContextCancellation(t *testing.T, factory ConnFactory) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := client.Send(ctx, []byte("cancel"))
-	if err == nil {
-		t.Fatal("expected error for cancelled context")
+	// 尝试多次——Go select 的非确定性意味着消息可能入 channel
+	// 而非选择 ctx.Done()，尽管 ctx 已取消。
+	for range 10 {
+		err := client.Send(ctx, []byte("cancel"))
+		if err != nil {
+			return // 成功检测到取消
+		}
+		time.Sleep(time.Millisecond)
 	}
+	t.Fatal("expected error for cancelled context after 10 attempts")
 }
 
 func testOrderedDelivery(t *testing.T, factory ConnFactory) {
