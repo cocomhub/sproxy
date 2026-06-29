@@ -55,3 +55,67 @@ func TestListenNotImplemented(t *testing.T) {
 		t.Errorf("unexpected error message: %q", err.Error())
 	}
 }
+
+// TestRegisterNilPanics verifies that registering a nil Transport panics.
+func TestRegisterNilPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when registering nil Transport")
+		}
+	}()
+	Register(nil)
+}
+
+// TestRegisterEmptyNamePanics verifies that registering a Transport with empty
+// name panics.
+func TestRegisterEmptyNamePanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when registering Transport with empty Name")
+		}
+	}()
+	Register(&Transport{Name: ""})
+}
+
+// TestRegisterDuplicatePanics verifies that registering a duplicate transport
+// name panics.
+func TestRegisterDuplicatePanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic when registering duplicate transport")
+		}
+	}()
+	Register(&Transport{Name: "grpc"})
+}
+
+// TestGetNonExistent verifies that getting a non-existent transport returns nil.
+func TestGetNonExistent(t *testing.T) {
+	if tr := Get("nonexistent"); tr != nil {
+		t.Errorf("expected nil for nonexistent transport, got %v", tr)
+	}
+}
+
+// TestGrpcConnInterface verifies that grpcConn satisfies the Conn interface at
+// compile time.
+func TestGrpcConnInterface(t *testing.T) {
+	var _ Conn = (*grpcConn)(nil)
+}
+
+// TestXferMsgZeroValue verifies that a zero-value XferMsg is safe to use.
+func TestXferMsgZeroValue(t *testing.T) {
+	msg := &XferMsg{}
+	if msg.Payload != nil {
+		t.Errorf("expected nil payload for zero-value XferMsg, got %v", msg.Payload)
+	}
+}
+
+// TestTransportStruct verifies Transport fields are set correctly after init().
+func TestTransportStruct(t *testing.T) {
+	tr := Get("grpc")
+	if tr.Dial == nil {
+		t.Error("Dial is nil")
+	}
+	if tr.Listen == nil {
+		t.Error("Listen is nil")
+	}
+}
