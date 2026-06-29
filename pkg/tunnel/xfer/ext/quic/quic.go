@@ -107,10 +107,19 @@ func (c *quicConn) Close() error {
 	return c.stream.Close()
 }
 
-// QuicListener 实现 xfer.Listener，包装 quic-go Listener。
+// quicListener 是 QuicListener 所需的底层 QUIC listener 的最小接口。
+// 将 *quic.Listener（具体类型）解耦为接口，方便 QuicListener 的 Addr/Close/Accept 单元测试。
+type quicListener interface {
+	Accept(ctx context.Context) (quic.Connection, error)
+	Addr() net.Addr
+	Close() error
+}
+
+// QuicListener 实现 xfer.Listener，包装 quicListener。
 type QuicListener struct {
-	ln      *quic.Listener
+	ln      quicListener
 	closeCh chan struct{}
+	closeMu sync.Once
 }
 
 func (l *QuicListener) Addr() string {
@@ -147,7 +156,9 @@ func (l *QuicListener) Accept(ctx context.Context) (xfer.Conn, error) {
 }
 
 func (l *QuicListener) Close() error {
-	close(l.closeCh)
+	l.closeMu.Do(func() {
+		close(l.closeCh)
+	})
 	return l.ln.Close()
 }
 
