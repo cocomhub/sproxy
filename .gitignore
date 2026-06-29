@@ -19,3 +19,6 @@ data*
 cov2.html
 coverage.html
 sproxy.yaml
+
+# playwright browsers
+ms-playwright/
