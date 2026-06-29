@@ -898,7 +898,8 @@ func TestRegisterRoutes_Smoke(t *testing.T) {
 	t.Cleanup(func() { _ = h.Close() })
 }
 
-// newTestServerWithAllRoutes 启动包含全部路由的测试服务器（委托给 RegisterRoutes 注册路由）。
+// newTestServerWithAllRoutes 启动包含全部路由的测试服务器。
+// 路由通过 RegisterRoutes 注册（无手动路由表副本），使用 httptest.NewServer 包装。
 // 返回服务地址与 cfgPtr。使用 t.Cleanup 自动关闭服务与释放资源。
 func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config]) {
 	t.Helper()
