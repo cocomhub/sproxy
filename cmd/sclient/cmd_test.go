@@ -132,6 +132,81 @@ func TestListCmd(t *testing.T) {
 	}
 }
 
+// ---- relay command ----
+
+func TestRelayCmd_Registered(t *testing.T) {
+	for _, sub := range rootCmd.Commands() {
+		if sub.Name() == "relay" {
+			return
+		}
+	}
+	t.Error("relay command not registered")
+}
+
+// ---- diag command ----
+
+func TestDiagCmd_Registered(t *testing.T) {
+	for _, sub := range rootCmd.Commands() {
+		if sub.Name() == "diag" {
+			return
+		}
+	}
+	t.Error("diag command not registered")
+}
+
+// ---- batch-delete command ----
+
+func TestBatchDeleteCmd_Registered(t *testing.T) {
+	for _, sub := range rootCmd.Commands() {
+		if sub.Name() == "batch-delete" {
+			return
+		}
+	}
+	t.Error("batch-delete command not registered")
+}
+
+// ---- archive command ----
+
+func TestArchiveCmd_Registered(t *testing.T) {
+	for _, sub := range rootCmd.Commands() {
+		if sub.Name() == "archive" {
+			return
+		}
+	}
+	t.Error("archive command not registered")
+}
+
+// ---- saveCurrentDir ----
+
+func TestSaveCurrentDir(t *testing.T) {
+	old := currentDir
+	t.Cleanup(func() { currentDir = old })
+	currentDir = "/test/dir"
+	saveCurrentDir()
+}
+
+// ---- writeArchiveResponse ----
+
+func TestWriteArchiveResponse(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("archive-content"))
+	}))
+	defer mock.Close()
+
+	resp, _ := http.Get(mock.URL)
+	defer resp.Body.Close()
+
+	dst := filepath.Join(t.TempDir(), "archive.tar.gz")
+	if err := writeArchiveResponse(resp, dst); err != nil {
+		t.Fatalf("writeArchiveResponse: %v", err)
+	}
+	data, _ := os.ReadFile(dst)
+	if string(data) != "archive-content" {
+		t.Errorf("got %q, want archive-content", string(data))
+	}
+}
+
 // ---- mv command ----
 
 func TestMvCmd(t *testing.T) {
