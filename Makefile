@@ -208,6 +208,7 @@ fmt: gofix addlicense
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR) $(VERSION_DIR)
+	rm -f cover*.out coverage.tmp *.cover coverage.out
 
 .PHONY: test-all
 test-all:
