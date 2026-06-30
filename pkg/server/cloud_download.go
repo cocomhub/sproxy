@@ -444,12 +444,14 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) {
 }
 
 // recoverTasks 从磁盘恢复所有任务。
+// downloading 状态的任务自动重启下载。
 func (m *CloudDownloadManager) recoverTasks() {
 	entries, err := os.ReadDir(m.persistDir)
 	if err != nil {
 		return
 	}
 	recovered := 0
+	restarted := 0
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -464,9 +466,16 @@ func (m *CloudDownloadManager) recoverTasks() {
 		}
 		m.tasks[task.ID] = &task
 		recovered++
+
+		// 重启正在下载的任务
+		if task.Status == "downloading" {
+			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
+			go m.executeDownload(context.Background(), &task)
+			restarted++
+		}
 	}
 	if recovered > 0 {
-		m.logger.Info("cloud download tasks recovered", "count", recovered)
+		m.logger.Info("cloud download tasks recovered", "count", recovered, "restarted", restarted)
 	}
 }
 
