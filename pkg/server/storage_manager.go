@@ -26,6 +26,9 @@ const (
 	CategoryCloud
 )
 
+// cloudDirName 是云端下载文件的存储子目录名。
+const cloudDirName = ".__cloud__"
+
 // StorageManager 管理上传目录的存储空间使用情况。
 // 通过原子计数器跟踪各分类和总使用量，支持配置上限和运行时调整。
 type StorageManager struct {
@@ -36,17 +39,15 @@ type StorageManager struct {
 	versionsSize  atomic.Int64
 	cloudSize     atomic.Int64
 	totalUsage    atomic.Int64
-	checksumStore ChecksumStoreIface
 	logger        *slog.Logger
 	scanMu        sync.Mutex
 }
 
 // NewStorageManager 创建存储管理器，启动时自动扫描目录统计大小。
-func NewStorageManager(dir string, maxBytes int64, cs ChecksumStoreIface, logger *slog.Logger) *StorageManager {
+func NewStorageManager(dir string, maxBytes int64, _ ChecksumStoreIface, logger *slog.Logger) *StorageManager {
 	sm := &StorageManager{
-		uploadsDir:    dir,
-		checksumStore: cs,
-		logger:        logger,
+		uploadsDir: dir,
+		logger:     defaultLogger(logger),
 	}
 	sm.maxBytes.Store(maxBytes)
 	_ = sm.ScanAndRecalculate()
@@ -59,8 +60,8 @@ func (s *StorageManager) TryReserve(size int64, cat StorageCategory) error {
 	if size <= 0 {
 		return nil
 	}
-	max := s.maxBytes.Load()
 	for {
+		max := s.maxBytes.Load()
 		current := s.totalUsage.Load()
 		if max > 0 && current+size > max {
 			return ErrStorageFull
@@ -79,8 +80,8 @@ func (s *StorageManager) Release(size int64, cat StorageCategory) {
 	if size <= 0 {
 		return
 	}
-	s.addCategory(cat, -size)
 	s.totalUsage.Add(-size)
+	s.addCategory(cat, -size)
 }
 
 // SetMaxBytes 运行时动态调整存储上限。
@@ -130,8 +131,10 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		}
 		if d.IsDir() {
 			base := filepath.Base(path)
-			// 跳过内部元数据目录
-			if strings.HasPrefix(base, ".__") {
+			// 内部存储目录（.__chunked__、.__versions__、.__cloud__）需要进入统计
+			// 其他 .__ 开头的元数据目录跳过
+			if strings.HasPrefix(base, ".__") &&
+				base != chunkedDirName && base != versionsDirName && base != cloudDirName {
 				return filepath.SkipDir
 			}
 			return nil
@@ -148,11 +151,11 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		size := info.Size()
 
 		switch {
-		case strings.HasPrefix(rel, "__chunked__/"):
+		case strings.HasPrefix(rel, chunkedDirName+"/"):
 			chunked += size
-		case strings.HasPrefix(rel, "__versions__/"):
+		case strings.HasPrefix(rel, versionsDirName+"/"):
 			versions += size
-		case strings.HasPrefix(rel, "__cloud__/"):
+		case strings.HasPrefix(rel, cloudDirName+"/"):
 			cloud += size
 		default:
 			// 跳过元数据文件
