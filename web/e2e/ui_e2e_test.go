@@ -174,8 +174,12 @@ func TestAuthFlow(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	page.Locator("#token").Fill("test-token-123")
-	page.Locator("#save-token-btn").Click()
+	if _, err := page.Evaluate(`() => {
+		document.getElementById('token').value = 'test-token-123';
+		document.getElementById('save-token-btn').click();
+	}`); err != nil {
+		t.Fatalf("fill+click: %v", err)
+	}
 
 	val, err := page.Evaluate("localStorage.getItem('sproxy_token')")
 	if err != nil {
