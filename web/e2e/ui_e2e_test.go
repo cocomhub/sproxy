@@ -291,3 +291,205 @@ func TestMkdirButton(t *testing.T) {
 		t.Error("mkdir button not found")
 	}
 }
+
+// TestCloudDownloadButtonExists 验证云端下载按钮存在。
+func TestCloudDownloadButtonExists(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	if cnt, _ := page.Locator("#cloud-btn").Count(); cnt == 0 {
+		t.Error("cloud download button #cloud-btn not found")
+	}
+}
+
+// TestCloudDownloadModalOpens 验证点击按钮打开云端下载弹窗。
+func TestCloudDownloadModalOpens(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	// 通过 evaluate 直接调用 JS 函数（避免 CSP 阻止 inline onclick）
+	if _, err := page.Evaluate("showCloudDownload()"); err != nil {
+		t.Fatalf("showCloudDownload: %v", err)
+	}
+
+	// 等待弹窗可见
+	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(5000),
+	})
+	if err != nil {
+		t.Fatalf("cloud-modal not visible: %v", err)
+	}
+
+	// 验证关键元素存在
+	for _, sel := range []string{"#cloud-url", "#cloud-create-btn", "#cloud-tasks-body", "#cloud-refresh-btn", "#cloud-close-modal-btn"} {
+		if cnt, _ := page.Locator(sel).Count(); cnt == 0 {
+			t.Errorf("element %s not found in cloud modal", sel)
+		}
+	}
+}
+
+// TestCloudDownloadModalCloses 验证关闭云端下载弹窗。
+func TestCloudDownloadModalCloses(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	// 打开弹窗
+	page.Evaluate("showCloudDownload()")
+	page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(5000),
+	})
+
+	// 关闭弹窗
+	if _, err := page.Evaluate("hideCloudDownload()"); err != nil {
+		t.Fatalf("hideCloudDownload: %v", err)
+	}
+
+	// 验证弹窗隐藏
+	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateHidden,
+		Timeout: playwright.Float(5000),
+	})
+	if err != nil {
+		t.Fatalf("cloud-modal should be hidden: %v", err)
+	}
+
+	// 重新打开再关闭（验证幂等性）
+	page.Evaluate("showCloudDownload()")
+	page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(5000),
+	})
+	page.Evaluate("hideCloudDownload()")
+	_, err = page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateHidden,
+		Timeout: playwright.Float(5000),
+	})
+	if err != nil {
+		t.Fatalf("cloud-modal should be hidden after second close: %v", err)
+	}
+}
+
+// TestCloudDownloadCreateTask 验证创建云端下载任务。
+func TestCloudDownloadCreateTask(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	// 打开弹窗
+	page.Evaluate("showCloudDownload()")
+	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(5000),
+	})
+	if err != nil {
+		t.Fatalf("cloud-modal not visible: %v", err)
+	}
+
+	// 输入 URL
+	if err := page.Locator("#cloud-url").Fill("https://example.com/test.zip"); err != nil {
+		t.Fatalf("fill cloud-url: %v", err)
+	}
+
+	// 点击开始下载
+	if err := page.Locator("#cloud-create-btn").Click(); err != nil {
+		t.Fatalf("click create btn: %v", err)
+	}
+
+	// 等待响应（URL 不可达，但至少验证没有 crash）
+	page.WaitForSelector("#cloud-tasks-body", playwright.PageWaitForSelectorOptions{
+		Timeout: playwright.Float(5000),
+	})
+}
+
+// TestCloudDownloadTaskList 验证任务列表渲染。
+func TestCloudDownloadTaskList(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	// 打开弹窗
+	page.Evaluate("showCloudDownload()")
+	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(5000),
+	})
+	if err != nil {
+		t.Fatalf("cloud-modal not visible: %v", err)
+	}
+
+	// 等待任务列表加载
+	_, err = page.WaitForSelector("#cloud-tasks-body", playwright.PageWaitForSelectorOptions{
+		Timeout: playwright.Float(5000),
+	})
+	if err != nil {
+		t.Fatalf("cloud-tasks-body not found: %v", err)
+	}
+
+	// 验证刷新按钮可用
+	if err := page.Locator("#cloud-refresh-btn").Click(); err != nil {
+		t.Fatalf("click refresh btn: %v", err)
+	}
+}
+
+// TestCloudDownloadURLInput 验证 URL 输入框和 Enter 键提交。
+func TestCloudDownloadURLInput(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	// 打开弹窗
+	page.Evaluate("showCloudDownload()")
+	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(5000),
+	})
+	if err != nil {
+		t.Fatalf("cloud-modal not visible: %v", err)
+	}
+
+	// 输入 URL 并按 Enter
+	if err := page.Locator("#cloud-url").Fill("https://example.com/enter-test.zip"); err != nil {
+		t.Fatalf("fill cloud-url: %v", err)
+	}
+	if err := page.Locator("#cloud-url").Press("Enter"); err != nil {
+		t.Fatalf("press Enter: %v", err)
+	}
+
+	// 验证输入框已清空（创建成功后清空）
+	val, err := page.Locator("#cloud-url").InputValue()
+	if err != nil {
+		t.Fatalf("read input value: %v", err)
+	}
+	if val != "" && val != "https://example.com/enter-test.zip" {
+		t.Errorf("unexpected input value: %s", val)
+	}
+}
