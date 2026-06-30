@@ -100,3 +100,23 @@ type BatchRenameOp struct {
 	To       string `json:"to"`
 	Checksum string `json:"checksum"`
 }
+
+// CloudBatchRequest 批量云端下载请求。
+type CloudBatchRequest struct {
+	URLs []CloudBatchURL `json:"urls"`
+}
+
+// CloudBatchURL 批量下载中的单个 URL 条目。
+type CloudBatchURL struct {
+	URL      string `json:"url"`
+	Filename string `json:"filename,omitempty"`
+}
+
+// CloudBatchTaskResult 批量下载单个任务结果。
+type CloudBatchTaskResult struct {
+	ID       string `json:"id"`
+	URL      string `json:"url"`
+	Filename string `json:"filename"`
+	Status   string `json:"status"`
+	Error    string `json:"error,omitempty"`
+}

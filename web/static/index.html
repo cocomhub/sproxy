@@ -73,7 +73,7 @@
       <button type="button" id="cloud-close-btn" onclick="hideCloudDownload()" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1;">&times;</button>
     </div>
     <div style="display:flex;gap:8px;margin-bottom:12px;">
-      <input type="text" id="cloud-url" placeholder="输入 HTTP/HTTPS 下载链接" aria-label="下载链接" style="flex:1;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;" onkeydown="if(event.key==='Enter') createCloudTask()">
+      <textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;" onkeydown="if(event.key==='Enter' && !event.shiftKey) { event.preventDefault(); createCloudTask(); }"></textarea>
       <button type="button" id="cloud-create-btn" class="btn btn-primary" onclick="createCloudTask()">开始下载</button>
     </div>
     <div id="cloud-tasks-body" style="max-height:400px;overflow-y:auto;">

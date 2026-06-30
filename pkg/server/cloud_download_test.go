@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -553,5 +554,72 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 				t.Fatalf("recovered task failed: %s", cur.Error)
 			}
 		}
+	}
+}
+
+func TestValidateCloudDownloadURL_Valid(t *testing.T) {
+	url, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if url != "https://example.com/file.zip" {
+		t.Fatalf("expected URL unchanged, got %q", url)
+	}
+	if filename != "file.zip" {
+		t.Fatalf("expected extracted filename 'file.zip', got %q", filename)
+	}
+}
+
+func TestValidateCloudDownloadURL_WithFilename(t *testing.T) {
+	url, filename, err := validateCloudDownloadURL("https://example.com/data.bin", "custom.dat")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if filename != "custom.dat" {
+		t.Fatalf("expected 'custom.dat', got %q", filename)
+	}
+	if url != "https://example.com/data.bin" {
+		t.Fatalf("expected URL unchanged, got %q", url)
+	}
+}
+
+func TestValidateCloudDownloadURL_EmptyURL(t *testing.T) {
+	_, _, err := validateCloudDownloadURL("", "")
+	if err == nil {
+		t.Fatal("expected error for empty URL")
+	}
+}
+
+func TestValidateCloudDownloadURL_InvalidScheme(t *testing.T) {
+	_, _, err := validateCloudDownloadURL("ftp://example.com/file.zip", "")
+	if err == nil {
+		t.Fatal("expected error for ftp URL")
+	}
+}
+
+func TestValidateCloudDownloadURL_PathTraversal(t *testing.T) {
+	_, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "../../../etc/passwd")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
+		t.Fatalf("expected sanitized filename, got %q", filename)
+	}
+}
+
+func TestValidateCloudDownloadURL_NoHost(t *testing.T) {
+	_, _, err := validateCloudDownloadURL("not-a-url", "")
+	if err == nil {
+		t.Fatal("expected error for malformed URL")
+	}
+}
+
+func TestValidateCloudDownloadURL_QueryString(t *testing.T) {
+	_, filename, err := validateCloudDownloadURL("https://example.com/download?file=test.zip&token=abc", "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if filename != "download" {
+		t.Fatalf("expected extracted filename 'download', got %q", filename)
 	}
 }
