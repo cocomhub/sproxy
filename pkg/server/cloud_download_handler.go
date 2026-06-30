@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/cocomhub/sproxy/pkg/server/downloader"
 )
 
 // cloudCreateDownload 处理 POST /api/cloud/download。
@@ -33,6 +35,11 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	if parsed.Host == "" {
 		sendJSONResponse(w, map[string]string{"error": "invalid URL: missing host"}, http.StatusBadRequest)
+		return
+	}
+	// SSRF 深层防护：检查 host 不解析到内部 IP
+	if hostErr := downloader.ValidateURLHost(req.URL); hostErr != nil {
+		sendJSONResponse(w, map[string]string{"error": "unsafe URL: " + hostErr.Error()}, http.StatusBadRequest)
 		return
 	}
 
