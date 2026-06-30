@@ -257,12 +257,12 @@ func TestStorageManager_ScanAndRecalculateEmptyDir(t *testing.T) {
 func TestStorageManager_ScanAndRecalculateSkipsHiddenDirs(t *testing.T) {
 	dir := t.TempDir()
 
-	// 创建隐藏目录（以 .__ 开头）和普通文件
-	hiddenDir := filepath.Join(dir, ".__chunked__")
-	if err := os.MkdirAll(hiddenDir, 0755); err != nil {
+	// 创建隐藏目录（以 .__ 开头，但不是已知的存储目录）和普通文件
+	unknownHiddenDir := filepath.Join(dir, ".__unknown_meta__")
+	if err := os.MkdirAll(unknownHiddenDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hiddenDir, "chunk.dat"), []byte("hidden"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(unknownHiddenDir, "meta.dat"), []byte("hidden"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("hello"), 0644); err != nil {
@@ -270,10 +270,55 @@ func TestStorageManager_ScanAndRecalculateSkipsHiddenDirs(t *testing.T) {
 	}
 
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	// 隐藏目录下的文件不应计入 userFiles
+	// 未知的 .__ 目录下的文件不应计入
 	// visible.txt = 5 bytes
 	if sm.Usage() != 5 {
 		t.Fatalf("expected Usage=5 (only visible files), got %d", sm.Usage())
+	}
+}
+
+func TestStorageManager_ScanAndRecalculateCountsInternalDirs(t *testing.T) {
+	dir := t.TempDir()
+
+	// 创建内部存储目录并放入文件
+	chunkedDir := filepath.Join(dir, ".__chunked__")
+	versionsDir := filepath.Join(dir, ".__versions__")
+	cloudDir := filepath.Join(dir, ".__cloud__")
+	for _, d := range []string{chunkedDir, versionsDir, cloudDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(chunkedDir, "chunk.dat"), []byte("12345"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(versionsDir, "v1.bin"), []byte("1234567890"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cloudDir, "download.zip"), []byte("abc"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "user.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	// chunked=5 + versions=10 + cloud=3 + user=5 = 23
+	if sm.Usage() != 23 {
+		t.Fatalf("expected Usage=23, got %d", sm.Usage())
+	}
+	u := sm.UsageByCategory()
+	if u[CategoryChunked] != 5 {
+		t.Fatalf("expected Chunked=5, got %d", u[CategoryChunked])
+	}
+	if u[CategoryVersions] != 10 {
+		t.Fatalf("expected Versions=10, got %d", u[CategoryVersions])
+	}
+	if u[CategoryCloud] != 3 {
+		t.Fatalf("expected Cloud=3, got %d", u[CategoryCloud])
+	}
+	if u[CategoryUserFiles] != 5 {
+		t.Fatalf("expected UserFiles=5, got %d", u[CategoryUserFiles])
 	}
 }
 
