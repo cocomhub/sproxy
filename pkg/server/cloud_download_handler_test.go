@@ -5,8 +5,10 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +30,7 @@ func setupCloudTestServer(t *testing.T) (*httptest.Server, *CloudDownloadManager
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
+	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
 	mux.HandleFunc("GET /api/cloud/tasks", h.cloudListTasks)
 	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudGetTask)
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudCancelTask)
@@ -234,5 +237,282 @@ func TestCloudHandler_PathTraversalBlocked(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&task)
 	if strings.Contains(task.Filename, "/") || strings.Contains(task.Filename, "\\") {
 		t.Fatalf("filename should be sanitized, got %q", task.Filename)
+	}
+}
+
+// --- 批量下载 handler 测试 ---
+
+func TestCloudHandler_BatchCreateDownload_Success(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	body := strings.NewReader(`{"urls": [{"url": "https://example.com/a.zip"}, {"url": "https://example.com/b.zip"}]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var batchResp struct {
+		Tasks []CloudBatchTaskResult `json:"tasks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(batchResp.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(batchResp.Tasks))
+	}
+	for _, tr := range batchResp.Tasks {
+		if tr.ID == "" {
+			t.Fatal("expected non-empty task ID")
+		}
+		if tr.Status != "pending" {
+			t.Fatalf("expected status 'pending', got %q", tr.Status)
+		}
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_Empty(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	body := strings.NewReader(`{"urls": []}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_InvalidJSON(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	body := strings.NewReader(`not json`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_MixedResults(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	body := strings.NewReader(`{"urls": [{"url": "https://example.com/valid.zip"}, {"url": "ftp://example.com/bad.zip"}]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var batchResp struct {
+		Tasks []CloudBatchTaskResult `json:"tasks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(batchResp.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(batchResp.Tasks))
+	}
+	// 第一个有效 URL 应成功
+	if batchResp.Tasks[0].Status != "pending" {
+		t.Fatalf("expected first task status 'pending', got %q", batchResp.Tasks[0].Status)
+	}
+	if batchResp.Tasks[0].ID == "" {
+		t.Fatal("expected non-empty ID for valid URL")
+	}
+	// 第二个无效 URL 应失败
+	if batchResp.Tasks[1].Status != "failed" {
+		t.Fatalf("expected second task status 'failed', got %q", batchResp.Tasks[1].Status)
+	}
+	if batchResp.Tasks[1].Error == "" {
+		t.Fatal("expected error message for invalid URL")
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_EmptyURL(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	body := strings.NewReader(`{"urls": [{"url": ""}]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var batchResp struct {
+		Tasks []CloudBatchTaskResult `json:"tasks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		t.Fatal(err)
+	}
+	if batchResp.Tasks[0].Status != "failed" {
+		t.Fatalf("expected 'failed' status for empty URL, got %q", batchResp.Tasks[0].Status)
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_PathTraversal(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	body := strings.NewReader(`{"urls": [{"url": "https://example.com/file.zip", "filename": "../../../etc/passwd"}]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var batchResp struct {
+		Tasks []CloudBatchTaskResult `json:"tasks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		t.Fatal(err)
+	}
+	if batchResp.Tasks[0].Status != "pending" && batchResp.Tasks[0].Status != "downloading" {
+		t.Fatalf("expected 'pending' or 'downloading', got %q", batchResp.Tasks[0].Status)
+	}
+	if strings.Contains(batchResp.Tasks[0].Filename, "/") || strings.Contains(batchResp.Tasks[0].Filename, "\\") {
+		t.Fatalf("filename should be sanitized, got %q", batchResp.Tasks[0].Filename)
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_Dedup(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 提交相同 URL 两次
+	body := strings.NewReader(`{"urls": [{"url": "https://example.com/same.zip"}, {"url": "https://example.com/same.zip"}]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var batchResp struct {
+		Tasks []CloudBatchTaskResult `json:"tasks"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		t.Fatal(err)
+	}
+	if batchResp.Tasks[0].ID != batchResp.Tasks[1].ID {
+		t.Fatalf("expected same task ID for dedup, got %q and %q",
+			batchResp.Tasks[0].ID, batchResp.Tasks[1].ID)
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_AlwaysAsync(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 小文件（< 20 MiB）在批量模式下也应返回 pending（异步）
+	body := strings.NewReader(`{"urls": [{"url": "https://example.com/small.zip"}]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var batchResp struct {
+		Tasks []CloudBatchTaskResult `json:"tasks"`
+	}
+	json.NewDecoder(resp.Body).Decode(&batchResp)
+	if batchResp.Tasks[0].Status != "pending" {
+		t.Fatalf("expected batch mode to always be async, got status %q", batchResp.Tasks[0].Status)
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
+	dir := t.TempDir()
+	// 创建存储空间仅 50 字节的 manager
+	sm := NewStorageManager(dir, 50, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+
+	h := &Handlers{cloudMgr: mgr}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	// 请求 100 字节，超过 50 字节上限
+	body := strings.NewReader(`{"urls": [{"url": "https://example.com/big.zip"}]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var batchResp struct {
+		Tasks []CloudBatchTaskResult `json:"tasks"`
+	}
+	json.NewDecoder(resp.Body).Decode(&batchResp)
+	if batchResp.Tasks[0].Status != "failed" {
+		t.Fatalf("expected 'failed' for storage full, got %q", batchResp.Tasks[0].Status)
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_MaxLimit(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 101 URLs should be rejected
+	urls := make([]string, 101)
+	for i := range urls {
+		urls[i] = `{"url": "https://example.com/file` + strconv.Itoa(i) + `.zip"}`
+	}
+	body := strings.NewReader(`{"urls": [` + strings.Join(urls, ",") + `]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for 101 URLs, got %d", resp.StatusCode)
 	}
 }

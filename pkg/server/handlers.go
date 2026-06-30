@@ -182,12 +182,14 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// 云端下载 API（localMux：隧道认证）
 	localMux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
+	localMux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
 	localMux.HandleFunc("GET /api/cloud/tasks", h.cloudListTasks)
 	localMux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudGetTask)
 	localMux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudCancelTask)
 	localMux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudDeleteTask)
 	// 云端下载 API（主 mux：Bearer auth）
 	mux.HandleFunc("POST /api/cloud/download", h.authMiddleware(h.cloudCreateDownload))
+	mux.HandleFunc("POST /api/cloud/download/batch", h.authMiddleware(h.cloudCreateBatchDownload))
 	mux.HandleFunc("GET /api/cloud/tasks", h.authMiddleware(h.cloudListTasks))
 	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.authMiddleware(h.cloudGetTask))
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.authMiddleware(h.cloudCancelTask))

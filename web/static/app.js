@@ -596,21 +596,49 @@ async function refreshCloudTasks() {
 
 async function createCloudTask() {
   const input = document.getElementById('cloud-url');
-  const url = input.value.trim();
-  if (!url) { showToast('请输入下载链接', 'warning'); return; }
+  const text = input.value.trim();
+  if (!text) { showToast('请输入下载链接', 'warning'); return; }
+
+  const lines = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+  if (lines.length === 0) { showToast('请输入下载链接', 'warning'); return; }
+
   try {
     const hdrs = headers({ 'Content-Type': 'application/json' });
-    let task;
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/api/cloud/download', hdrs, JSON.stringify({ url: url }));
-      task = JSON.parse(new TextDecoder().decode(result.body));
-    } else {
-      const resp = await fetch(BASE + '/api/cloud/download', { method: 'POST', headers: hdrs, body: JSON.stringify({ url: url }) });
-      task = await resp.json();
-      if (!resp.ok) { showToast('创建失败: ' + (task.error || resp.status), 'error'); return; }
-    }
-    showToast('任务已创建: ' + task.id, 'success');
     input.value = '';
+
+    if (lines.length === 1) {
+      // 单 URL：使用原有 API
+      let task;
+      if (tunnelHexKey) {
+        const result = await tunnelRequest('POST', '/api/cloud/download', hdrs, JSON.stringify({ url: lines[0] }));
+        task = JSON.parse(new TextDecoder().decode(result.body));
+      } else {
+        const resp = await fetch(BASE + '/api/cloud/download', { method: 'POST', headers: hdrs, body: JSON.stringify({ url: lines[0] }) });
+        task = await resp.json();
+        if (!resp.ok) { showToast('创建失败: ' + (task.error || resp.status), 'error'); return; }
+      }
+      showToast('任务已创建: ' + task.id, 'success');
+    } else {
+      // 多 URL：使用批量 API
+      const urls = lines.map(function(url) { return { url: url }; });
+      let data;
+      if (tunnelHexKey) {
+        const result = await tunnelRequest('POST', '/api/cloud/download/batch', hdrs, JSON.stringify({ urls: urls }));
+        data = JSON.parse(new TextDecoder().decode(result.body));
+      } else {
+        const resp = await fetch(BASE + '/api/cloud/download/batch', { method: 'POST', headers: hdrs, body: JSON.stringify({ urls: urls }) });
+        data = await resp.json();
+        if (!resp.ok) { showToast('创建失败: ' + (data.error || resp.status), 'error'); return; }
+      }
+      const tasks = data.tasks || [];
+      const failed = tasks.filter(function(t) { return t.status === 'failed'; });
+      const succeeded = tasks.filter(function(t) { return t.status !== 'failed'; });
+      if (failed.length > 0) {
+        showToast(succeeded.length + ' 个任务已创建, ' + failed.length + ' 个失败', 'warning');
+      } else {
+        showToast(tasks.length + ' 个任务已创建', 'success');
+      }
+    }
     refreshCloudTasks();
   } catch (e) { showToast('创建失败: ' + e.message, 'error'); }
 }
