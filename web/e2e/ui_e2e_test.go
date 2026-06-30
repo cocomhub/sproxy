@@ -174,14 +174,12 @@ func TestAuthFlow(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	if _, err := page.Evaluate(`() => {
+	// 在单次 Evaluate 中完成：设值 → 点击 → 读取 localStorage，避免跨调用时序问题。
+	val, err := page.Evaluate(`(() => {
 		document.getElementById('token').value = 'test-token-123';
 		document.getElementById('save-token-btn').click();
-	}`); err != nil {
-		t.Fatalf("fill+click: %v", err)
-	}
-
-	val, err := page.Evaluate("localStorage.getItem('sproxy_token')")
+		return localStorage.getItem('sproxy_token');
+	})()`)
 	if err != nil {
 		t.Fatal(err)
 	}
