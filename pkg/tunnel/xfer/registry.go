@@ -6,7 +6,7 @@ package xfer
 import (
 	"context"
 
-	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
+	"github.com/cocomhub/sproxy/pkg/plugin"
 )
 
 // TransportRegistry 是传输层实现的插件注册表。

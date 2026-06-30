@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package plugin 提供通用泛型注册框架 Registry[T]。
-// 各子系统（xfer、hub、tracing）基于 Registry[T] 定义自己的插件注册表。
+// 各子系统（xfer、hub、downloader 等）基于 Registry[T] 定义自己的插件注册表。
 package plugin
 
 import (
