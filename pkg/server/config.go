@@ -92,6 +92,13 @@ type Config struct {
 
 	// 存储空间控制
 	MaxStorageBytes int64 `yaml:"max_storage_bytes" mapstructure:"max_storage_bytes"` // 存储上限（字节），0 = 不限制
+
+	// 云端下载配置
+	CloudSyncThreshold int64  `yaml:"cloud_sync_threshold" mapstructure:"cloud_sync_threshold"`   // 同步模式阈值（字节），默认 20 MiB
+	CloudDownloader    string `yaml:"cloud_downloader" mapstructure:"cloud_downloader"`           // 下载器名称，默认 "http"
+	CloudTaskTTL       string `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`               // 完成任务保留时间，默认 "24h"
+	CloudFailedTaskTTL string `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"` // 失败任务保留时间，默认 "1h"
+	CloudMaxConcurrent int    `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`   // 最大并发下载数，默认 3
 }
 
 func Default() *Config {
@@ -111,8 +118,13 @@ func Default() *Config {
 		CORS: CORSConfig{
 			MaxAge: 86400,
 		},
-		ChunkSize:        size.DefaultChunkSize,
-		UploadSessionTTL: 24 * time.Hour,
+		ChunkSize:          size.DefaultChunkSize,
+		UploadSessionTTL:   24 * time.Hour,
+		CloudSyncThreshold: 20 * 1024 * 1024, // 20 MiB
+		CloudDownloader:    "http",
+		CloudTaskTTL:       "24h",
+		CloudFailedTaskTTL: "1h",
+		CloudMaxConcurrent: 3,
 	}
 }
 
@@ -132,6 +144,15 @@ func (c *Config) Validate() error {
 	}
 	if c.ServerTimeouts.Shutdown <= 0 {
 		c.ServerTimeouts.Shutdown = 30 * time.Second
+	}
+	if c.CloudSyncThreshold <= 0 {
+		c.CloudSyncThreshold = 20 * 1024 * 1024
+	}
+	if c.CloudDownloader == "" {
+		c.CloudDownloader = "http"
+	}
+	if c.CloudMaxConcurrent <= 0 {
+		c.CloudMaxConcurrent = 3
 	}
 	if c.TunnelKey != "" {
 		// 同时校验长度与 hex 格式，避免运行时 hex.DecodeString 报错才发现。
