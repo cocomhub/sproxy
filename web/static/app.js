@@ -544,3 +544,206 @@ function statsTableHtml(du, rc, s) {
 // --- 初始化 ---
 refreshList();
 checkResumableUploads();
+
+// --- 云端下载 ---
+let _cloudTasks = [];
+let _cloudPollTimer = null;
+
+function showCloudDownload() {
+  document.getElementById('cloud-modal').style.display = 'flex';
+  refreshCloudTasks();
+  startCloudPolling();
+}
+
+function hideCloudDownload() {
+  document.getElementById('cloud-modal').style.display = 'none';
+  stopCloudPolling();
+}
+
+function startCloudPolling() {
+  stopCloudPolling();
+  _cloudPollTimer = setInterval(refreshCloudTasks, 3000);
+}
+
+function stopCloudPolling() {
+  if (_cloudPollTimer) { clearInterval(_cloudPollTimer); _cloudPollTimer = null; }
+}
+
+async function refreshCloudTasks() {
+  const body = document.getElementById('cloud-tasks-body');
+  try {
+    let tasks;
+    const url = '/api/cloud/tasks';
+    if (tunnelHexKey) {
+      const result = await tunnelRequest('GET', url, {}, null);
+      const data = JSON.parse(new TextDecoder().decode(result.body));
+      tasks = data || [];
+    } else {
+      const resp = await fetch(BASE + url, { headers: headers() });
+      if (!resp.ok) { body.innerHTML = '<div class="empty-msg">请求失败: ' + resp.status + '</div>'; return; }
+      tasks = await resp.json();
+    }
+    _cloudTasks = tasks || [];
+    if (_cloudTasks.length === 0) {
+      body.innerHTML = '<div class="empty-msg">暂无下载任务</div>';
+      return;
+    }
+    body.innerHTML = buildCloudTaskTableHtml(_cloudTasks);
+  } catch (e) {
+    body.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
+  }
+}
+
+async function createCloudTask() {
+  const input = document.getElementById('cloud-url');
+  const url = input.value.trim();
+  if (!url) { showToast('请输入下载链接', 'warning'); return; }
+  try {
+    const hdrs = headers({ 'Content-Type': 'application/json' });
+    let task;
+    if (tunnelHexKey) {
+      const result = await tunnelRequest('POST', '/api/cloud/download', hdrs, JSON.stringify({ url: url }));
+      task = JSON.parse(new TextDecoder().decode(result.body));
+    } else {
+      const resp = await fetch(BASE + '/api/cloud/download', { method: 'POST', headers: hdrs, body: JSON.stringify({ url: url }) });
+      task = await resp.json();
+      if (!resp.ok) { showToast('创建失败: ' + (task.error || resp.status), 'error'); return; }
+    }
+    showToast('任务已创建: ' + task.id, 'success');
+    input.value = '';
+    refreshCloudTasks();
+  } catch (e) { showToast('创建失败: ' + e.message, 'error'); }
+}
+
+async function downloadCloudFile(taskId, filename, checksum) {
+  try {
+    // 先下载云端文件
+    const cloudPath = '.__cloud__/' + taskId + '/' + filename;
+    const downloadUrl = '/download?filename=' + encodeURIComponent(cloudPath);
+    let buffer, serverCS;
+    if (tunnelHexKey) {
+      const result = await tunnelDownloadStream(cloudPath);
+      if (result) {
+        buffer = result.body;
+        serverCS = (result.headers['X-File-Checksum'] || [''])[0];
+      } else {
+        const result2 = await tunnelRequest('GET', downloadUrl, {}, null);
+        buffer = result2.body;
+        serverCS = (result2.headers['X-File-Checksum'] || [''])[0];
+      }
+    } else {
+      const resp = await fetch(BASE + downloadUrl, { headers: headers() });
+      if (!resp.ok) { showToast('下载失败: HTTP ' + resp.status, 'error'); return; }
+      buffer = await resp.arrayBuffer();
+      serverCS = resp.headers.get('X-File-Checksum') || checksum;
+    }
+
+    // 校验 checksum
+    if (serverCS) {
+      const sha256 = new Sha256();
+      sha256.update(new Uint8Array(buffer));
+      const localCS = sha256.digest();
+      if (localCS !== serverCS) {
+        showToast('校验失败: ' + filename, 'error');
+        return;
+      }
+    }
+
+    // 触发浏览器下载
+    const blob = new Blob([buffer], { type: 'application/octet-stream' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    showToast('下载完成: ' + filename, 'success');
+
+    // 清理云端副本
+    await deleteCloudTask(taskId, filename, serverCS);
+  } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
+}
+
+async function deleteCloudTask(taskId, filename, checksum) {
+  try {
+    // 删除云端文件
+    const cloudPath = '.__cloud__/' + taskId + '/' + filename;
+    if (tunnelHexKey) {
+      await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(cloudPath), { 'X-File-Checksum': checksum }, null);
+      await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskId, {}, null);
+    } else {
+      const hdrs = headers({ 'X-File-Checksum': checksum });
+      await fetch(BASE + '/delete?filename=' + encodeURIComponent(cloudPath), { method: 'POST', headers: hdrs });
+      await fetch(BASE + '/api/cloud/tasks/' + taskId, { method: 'DELETE', headers: headers() });
+    }
+    refreshCloudTasks();
+  } catch (e) { /* 静默处理 */ }
+}
+
+async function cancelCloudTask(taskId) {
+  try {
+    const url = '/api/cloud/tasks/' + taskId + '/cancel';
+    if (tunnelHexKey) {
+      await tunnelRequest('POST', url, {}, null);
+    } else {
+      await fetch(BASE + url, { method: 'POST', headers: headers() });
+    }
+    showToast('任务已取消', 'success');
+    refreshCloudTasks();
+  } catch (e) { showToast('取消失败: ' + e.message, 'error'); }
+}
+
+async function removeCloudTask(taskId) {
+  try {
+    const url = '/api/cloud/tasks/' + taskId;
+    if (tunnelHexKey) {
+      await tunnelRequest('DELETE', url, {}, null);
+    } else {
+      await fetch(BASE + url, { method: 'DELETE', headers: headers() });
+    }
+    showToast('任务已删除', 'success');
+    refreshCloudTasks();
+  } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
+}
+
+function buildCloudTaskTableHtml(tasks) {
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">文件名</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">状态</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">大小</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">操作</th></tr></thead><tbody>';
+  for (const t of tasks) {
+    const statusLabel = statusText(t.status);
+    const rowClass = t.status === 'downloading' ? ' style="background:#f0f4ff;"' : '';
+    html += '<tr' + rowClass + '><td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(t.filename || '') + '">' + escHtml(t.filename || '-') + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;">' + statusLabel + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + (t.total_size > 0 ? formatSize(t.total_size) : '-') + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' +
+      cloudTaskActions(t.id, t.filename, t.status, t.checksum) + '</td></tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+function statusText(status) {
+  switch (status) {
+    case 'pending': return '⏳ 等待中';
+    case 'downloading': return '⬇ 下载中';
+    case 'completed': return '✅ 已完成';
+    case 'failed': return '❌ 失败';
+    case 'cancelled': return '🚫 已取消';
+    default: return status;
+  }
+}
+
+function cloudTaskActions(id, filename, status, checksum) {
+  let actions = '';
+  if (status === 'completed') {
+    actions += '<button class="btn btn-primary btn-sm" onclick="downloadCloudFile(\'' + escJsStr(id) + '\',\'' + escJsStr(filename) + '\',\'' + escJsStr(checksum || '') + '\')" style="margin-right:4px;">下载到本地</button>';
+    actions += '<button class="btn btn-danger btn-sm" onclick="removeCloudTask(\'' + escJsStr(id) + '\')">删除</button>';
+  } else if (status === 'failed' || status === 'cancelled') {
+    actions += '<button class="btn btn-danger btn-sm" onclick="removeCloudTask(\'' + escJsStr(id) + '\')">删除</button>';
+  } else {
+    actions += '<button class="btn btn-warning btn-sm" onclick="cancelCloudTask(\'' + escJsStr(id) + '\')">取消</button>';
+  }
+  return actions;
+}
