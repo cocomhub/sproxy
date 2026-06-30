@@ -6,7 +6,7 @@ package plugin_test
 import (
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
+	"github.com/cocomhub/sproxy/pkg/plugin"
 )
 
 type executor interface {
@@ -85,4 +85,25 @@ func TestRegistryRegisterEmptyNamePanics(t *testing.T) {
 	}()
 	r := plugin.New[executor]("test", builtinImpl{})
 	r.Register(plugin.Plugin[executor]{Name: "", Instance: externalImpl{"x"}, Priority: 1})
+}
+
+func TestRegistryClear(t *testing.T) {
+	r := plugin.New[executor]("test", builtinImpl{})
+	r.Register(plugin.Plugin[executor]{Name: "x", Instance: externalImpl{"x"}, Priority: 1})
+	if r.IsDefault() {
+		t.Fatal("expected IsDefault=false after registering plugin")
+	}
+	r.Clear()
+	if !r.IsDefault() {
+		t.Fatal("expected IsDefault=true after Clear")
+	}
+	names := r.Names()
+	if len(names) != 0 {
+		t.Fatalf("expected 0 names after Clear, got %d", len(names))
+	}
+	// Active should return builtin after Clear
+	active := r.Active()
+	if active.Execute() != "builtin" {
+		t.Fatalf("expected builtin after Clear, got %q", active.Execute())
+	}
 }

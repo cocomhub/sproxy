@@ -6,7 +6,7 @@ package xfer_test
 import (
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
+	"github.com/cocomhub/sproxy/pkg/plugin"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 

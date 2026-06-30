@@ -4,7 +4,7 @@
 package hub
 
 import (
-	"github.com/cocomhub/sproxy/pkg/tunnel/plugin"
+	"github.com/cocomhub/sproxy/pkg/plugin"
 )
 
 // DHTRegistry 是节点发现实现的插件注册表。
