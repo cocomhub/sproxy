@@ -89,6 +89,9 @@ type Config struct {
 
 	// Hub 中继系统（默认关闭）
 	Hub HubConfig `yaml:"hub" mapstructure:"hub"`
+
+	// 存储空间控制
+	MaxStorageBytes int64 `yaml:"max_storage_bytes" mapstructure:"max_storage_bytes"` // 存储上限（字节），0 = 不限制
 }
 
 func Default() *Config {
