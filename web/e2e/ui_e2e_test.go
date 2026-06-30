@@ -6,7 +6,6 @@
 package e2e
 
 import (
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -63,28 +62,42 @@ func testFile(t *testing.T, uploadsDir, name, content string) {
 	}
 }
 
-// TestUILoads 验证首页加载和静态资源可访问。
-func TestUILoads(t *testing.T) {
-	baseURL, _, cleanup := testServer(t)
-	defer cleanup()
+// pageFixture 创建 Playwright browser+page，返回 cleanup 函数。
+func pageFixture(t *testing.T) (playwright.Page, func()) {
+	t.Helper()
 
 	pw, err := playwright.Run()
 	if err != nil {
 		t.Skipf("playwright unavailable: %v", err)
 	}
-	defer pw.Stop()
 
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
 	if err != nil {
+		pw.Stop()
 		t.Skipf("browser launch failed: %v", err)
 	}
-	defer browser.Close()
 
 	page, err := browser.NewPage()
 	if err != nil {
+		browser.Close()
+		pw.Stop()
 		t.Fatal(err)
 	}
-	defer page.Close()
+
+	return page, func() {
+		page.Close()
+		browser.Close()
+		pw.Stop()
+	}
+}
+
+// TestUILoads 验证首页加载和静态资源可访问。
+func TestUILoads(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
 
 	resp, err := page.Goto(baseURL+"/", playwright.PageGotoOptions{
 		Timeout: playwright.Float(10000),
@@ -117,21 +130,12 @@ func TestFileList(t *testing.T) {
 
 	testFile(t, cfg.UploadsDir, "hello.txt", "hello world")
 
-	pw, err := playwright.Run()
-	if err != nil {
-		t.Skipf("playwright unavailable: %v", err)
-	}
-	defer pw.Stop()
-
-	browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
-	defer browser.Close()
-
-	page, _ := browser.NewPage()
-	defer page.Close()
+	page, stop := pageFixture(t)
+	defer stop()
 
 	page.Goto(baseURL + "/ui/")
 
-	_, err = page.WaitForSelector("table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
+	_, err := page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
 	if err != nil {
 		t.Fatalf("file table not loaded: %v", err)
 	}
@@ -149,21 +153,12 @@ func TestDirectoryNavigation(t *testing.T) {
 
 	testFile(t, cfg.UploadsDir, "sub/deep.txt", "deep")
 
-	pw, err := playwright.Run()
-	if err != nil {
-		t.Skipf("playwright unavailable: %v", err)
-	}
-	defer pw.Stop()
-
-	browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
-	defer browser.Close()
-
-	page, _ := browser.NewPage()
-	defer page.Close()
+	page, stop := pageFixture(t)
+	defer stop()
 
 	page.Goto(baseURL + "/ui/")
 
-	_, err = page.WaitForSelector("#dir-bar", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
+	_, err := page.WaitForSelector("#dir-bar", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
 	if err != nil {
 		t.Fatalf("dir-bar not found: %v", err)
 	}
@@ -174,22 +169,13 @@ func TestAuthFlow(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
 
-	pw, err := playwright.Run()
-	if err != nil {
-		t.Skipf("playwright unavailable: %v", err)
-	}
-	defer pw.Stop()
-
-	browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
-	defer browser.Close()
-
-	page, _ := browser.NewPage()
-	defer page.Close()
+	page, stop := pageFixture(t)
+	defer stop()
 
 	page.Goto(baseURL + "/ui/")
 
 	page.Locator("#token").Fill("test-token-123")
-	page.Locator("button:has-text(\"保存\")").Click()
+	page.Locator("#save-token-btn").Click()
 
 	val, err := page.Evaluate("localStorage.getItem('sproxy_token')")
 	if err != nil {
@@ -205,17 +191,8 @@ func TestUploadButton(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
 
-	pw, err := playwright.Run()
-	if err != nil {
-		t.Skipf("playwright unavailable: %v", err)
-	}
-	defer pw.Stop()
-
-	browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
-	defer browser.Close()
-
-	page, _ := browser.NewPage()
-	defer page.Close()
+	page, stop := pageFixture(t)
+	defer stop()
 
 	page.Goto(baseURL + "/ui/")
 
@@ -226,29 +203,20 @@ func TestUploadButton(t *testing.T) {
 	}
 }
 
-// TestDownloadLink 验证下载链接存在。
+// TestDownloadLink 验证下载按钮存在。
 func TestDownloadLink(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t)
 	defer cleanup()
 
 	testFile(t, cfg.UploadsDir, "dl-test.txt", "downloadable")
 
-	pw, err := playwright.Run()
-	if err != nil {
-		t.Skipf("playwright unavailable: %v", err)
-	}
-	defer pw.Stop()
-
-	browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
-	defer browser.Close()
-
-	page, _ := browser.NewPage()
-	defer page.Close()
+	page, stop := pageFixture(t)
+	defer stop()
 
 	page.Goto(baseURL + "/ui/")
-	page.WaitForSelector("table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
+	page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
 
-	links := page.Locator("button:has-text(\"下载\")")
+	links := page.Locator(".file-download-btn")
 	if cnt, _ := links.Count(); cnt == 0 {
 		t.Error("no download buttons found")
 	}
@@ -259,17 +227,8 @@ func TestBatchToolbar(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
 
-	pw, err := playwright.Run()
-	if err != nil {
-		t.Skipf("playwright unavailable: %v", err)
-	}
-	defer pw.Stop()
-
-	browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
-	defer browser.Close()
-
-	page, _ := browser.NewPage()
-	defer page.Close()
+	page, stop := pageFixture(t)
+	defer stop()
 
 	page.Goto(baseURL + "/ui/")
 
@@ -277,10 +236,9 @@ func TestBatchToolbar(t *testing.T) {
 		t.Error("batch toolbar #batch-toolbar not found")
 	}
 
-	for _, text := range []string{"批量删除", "批量重命名", "下载归档"} {
-		btn := page.Locator(fmt.Sprintf("button:has-text(%q)", text))
-		if cnt, _ := btn.Count(); cnt == 0 {
-			t.Errorf("batch button %q not found", text)
+	for _, sel := range []string{"#batch-delete-btn", "#batch-rename-btn", "#batch-archive-btn"} {
+		if cnt, _ := page.Locator(sel).Count(); cnt == 0 {
+			t.Errorf("batch button %s not found", sel)
 		}
 	}
 }
@@ -290,23 +248,13 @@ func TestStatsPanel(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
 
-	pw, err := playwright.Run()
-	if err != nil {
-		t.Skipf("playwright unavailable: %v", err)
-	}
-	defer pw.Stop()
-
-	browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
-	defer browser.Close()
-
-	page, _ := browser.NewPage()
-	defer page.Close()
+	page, stop := pageFixture(t)
+	defer stop()
 
 	page.Goto(baseURL + "/ui/")
 
-	monitorBtn := page.Locator("button:has-text(\"监控\")")
-	if cnt, _ := monitorBtn.Count(); cnt == 0 {
-		t.Error("monitor button not found")
+	if cnt, _ := page.Locator("#stats-btn").Count(); cnt == 0 {
+		t.Error("stats button not found")
 	}
 }
 
@@ -315,22 +263,12 @@ func TestMkdirButton(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
 
-	pw, err := playwright.Run()
-	if err != nil {
-		t.Skipf("playwright unavailable: %v", err)
-	}
-	defer pw.Stop()
-
-	browser, _ := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(true)})
-	defer browser.Close()
-
-	page, _ := browser.NewPage()
-	defer page.Close()
+	page, stop := pageFixture(t)
+	defer stop()
 
 	page.Goto(baseURL + "/ui/")
 
-	mkdirBtn := page.Locator("button:has-text(\"新建\")")
-	if cnt, _ := mkdirBtn.Count(); cnt == 0 {
+	if cnt, _ := page.Locator("#mkdir-btn").Count(); cnt == 0 {
 		t.Error("mkdir button not found")
 	}
 }
