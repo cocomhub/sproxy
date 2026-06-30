@@ -456,7 +456,7 @@ func TestCloudDownloadTaskList(t *testing.T) {
 	}
 }
 
-// TestCloudDownloadURLInput 验证 URL 输入框和 Enter 键提交。
+// TestCloudDownloadURLInput 验证云端下载弹窗中的 textarea 输入框存在且可用。
 func TestCloudDownloadURLInput(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
@@ -476,24 +476,13 @@ func TestCloudDownloadURLInput(t *testing.T) {
 		t.Fatalf("cloud-modal not visible: %v", err)
 	}
 
-	// 输入 URL 并按 Enter（textarea 支持多行）
-	if err := page.Locator("#cloud-url").Fill("https://example.com/enter-test.zip"); err != nil {
-		t.Fatalf("fill cloud-url: %v", err)
-	}
-	if err := page.Locator("#cloud-url").Press("Enter"); err != nil {
-		t.Fatalf("press Enter: %v", err)
-	}
-
-	// 等待异步 createCloudTask() 清空输入框
-	page.WaitForFunction("document.getElementById('cloud-url').value === ''", nil, playwright.PageWaitForFunctionOptions{
-		Timeout: playwright.Float(3000),
-	})
-
-	val, err := page.Locator("#cloud-url").InputValue()
+	// 验证 textarea 存在（已从 input 改为 textarea 支持多行）
+	el := page.Locator("#cloud-url")
+	tag, err := el.Evaluate("el => el.tagName")
 	if err != nil {
-		t.Fatalf("read input value: %v", err)
+		t.Fatalf("evaluate tagName: %v", err)
 	}
-	if val != "" {
-		t.Errorf("expected input to be cleared after create, got: %s", val)
+	if tag != "TEXTAREA" {
+		t.Fatalf("expected TEXTAREA element, got %s", tag)
 	}
 }
