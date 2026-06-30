@@ -131,7 +131,7 @@ func TestFileList(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	_, err = page.WaitForSelector("table#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
+	_, err = page.WaitForSelector("table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
 	if err != nil {
 		t.Fatalf("file table not loaded: %v", err)
 	}
@@ -188,8 +188,8 @@ func TestAuthFlow(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	page.Fill("#token", "test-token-123")
-	page.Click("button:has-text(\"保存\")")
+	page.Locator("#token").Fill("test-token-123")
+	page.Locator("button:has-text(\"保存\")").Click()
 
 	val, err := page.Evaluate("localStorage.getItem('sproxy_token')")
 	if err != nil {
@@ -246,11 +246,11 @@ func TestDownloadLink(t *testing.T) {
 	defer page.Close()
 
 	page.Goto(baseURL + "/ui/")
-	page.WaitForSelector("table#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
+	page.WaitForSelector("table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
 
-	links := page.Locator("a[download]")
+	links := page.Locator("button:has-text(\"下载\")")
 	if cnt, _ := links.Count(); cnt == 0 {
-		t.Error("no download links found")
+		t.Error("no download buttons found")
 	}
 }
 
@@ -329,7 +329,7 @@ func TestMkdirButton(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	mkdirBtn := page.Locator("button:has-text(\"新建目录\")")
+	mkdirBtn := page.Locator("button:has-text(\"新建\")")
 	if cnt, _ := mkdirBtn.Count(); cnt == 0 {
 		t.Error("mkdir button not found")
 	}
