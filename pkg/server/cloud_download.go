@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
@@ -55,6 +56,17 @@ type CloudDownloadManager struct {
 	config        *CloudDownloadConfig
 	dl            downloader.Downloader
 	cancelFuncs   map[string]context.CancelFunc // 任务取消函数
+	metrics       *CloudMetrics
+}
+
+// CloudMetrics 云端下载 Prometheus 指标。
+type CloudMetrics struct {
+	TasksCreated    atomic.Int64 // 创建的任务总数
+	TasksCompleted  atomic.Int64 // 完成的任务数
+	TasksFailed     atomic.Int64 // 失败的任务数
+	TasksCancelled  atomic.Int64 // 取消的任务数
+	BytesDownloaded atomic.Int64 // 云端下载总字节数
+	ActiveDownloads atomic.Int64 // 当前活跃下载数
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
@@ -76,6 +88,7 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 		config:        cfg,
 		dl:            downloader.NewFromConfig("http"),
 		cancelFuncs:   make(map[string]context.CancelFunc),
+		metrics:       &CloudMetrics{},
 	}
 
 	mgr.logger.Info("cloud download manager initialized",
@@ -144,6 +157,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		"filename", filename,
 		"reserved_size", totalSize,
 	)
+	m.metrics.TasksCreated.Add(1)
 	return task, nil
 }
 
@@ -179,6 +193,8 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 
 // executeDownload 执行实际下载逻辑。
 func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudTask) {
+	defer m.metrics.ActiveDownloads.Add(-1)
+
 	// 获取信号量
 	select {
 	case m.semaphore <- struct{}{}:
@@ -199,6 +215,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	m.saveTask(task)
 
 	m.logger.Info("download started", "task_id", task.ID, "url", task.URL, "filename", task.Filename)
+	m.metrics.ActiveDownloads.Add(1)
 
 	// 构建目标文件路径
 	taskDir := filepath.Join(m.cloudDir, task.ID)
@@ -283,6 +300,8 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		"size", result.Size,
 		"checksum", result.Checksum[:16]+"...",
 	)
+	m.metrics.TasksCompleted.Add(1)
+	m.metrics.BytesDownloaded.Add(result.Size)
 }
 
 // failTask 将任务标记为失败。
@@ -294,6 +313,7 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 	m.mu.Unlock()
 	m.saveTask(task)
+	m.metrics.TasksFailed.Add(1)
 }
 
 // findByURL 查找相同 URL 的活跃任务（去重）。
