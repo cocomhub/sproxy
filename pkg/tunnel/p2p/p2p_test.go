@@ -6,7 +6,6 @@ package p2p_test
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 
@@ -16,11 +15,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/p2p"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
-)
-
-var (
-	registerFakeOnce sync.Once
-	fakeListenerPtr  *fakeListener
 )
 
 // fakeListener wraps a channel-based accept for use as xfer.Listener.
@@ -46,31 +40,28 @@ func (l *fakeListener) Accept(ctx context.Context) (xfer.Conn, error) {
 func (l *fakeListener) Close() error { return nil }
 func (l *fakeListener) Addr() string { return l.addr }
 
-// registerFakeWebRTC registers a fake "webrtc" transport using xfertest.Pipe.
-// Dial creates a pipe pair, queues one end into the corresponding listener's
-// acceptCh, and returns the other end for the dialer. The registration is
-// safe for concurrent calls — it happens exactly once.
+// registerFakeWebRTC registers a fresh fake "webrtc" transport that uses
+// xfertest.Pipe for in-memory connections. Each call creates a new fakeListener
+// instance to avoid shared acceptCh across tests.
 func registerFakeWebRTC() *fakeListener {
-	registerFakeOnce.Do(func() {
-		fl := &fakeListener{
-			acceptCh: make(chan fakeAcceptResult, 16),
-			addr:     "pipe://webrtc-fake",
-		}
-		fakeListenerPtr = fl
+	fl := &fakeListener{
+		acceptCh: make(chan fakeAcceptResult, 16),
+		addr:     "pipe://webrtc-fake",
+	}
 
-		xfer.Register(&xfer.Transport{
-			Name: "webrtc",
-			Dial: func(_ context.Context, _ string) (xfer.Conn, error) {
-				a, b := xfertest.Pipe()
-				fl.acceptCh <- fakeAcceptResult{conn: b}
-				return a, nil
-			},
-			Listen: func(_ context.Context, _ string) (xfer.Listener, error) {
-				return fl, nil
-			},
-		})
+	xfer.Register(&xfer.Transport{
+		Name: "webrtc",
+		Dial: func(_ context.Context, _ string) (xfer.Conn, error) {
+			a, b := xfertest.Pipe()
+			fl.acceptCh <- fakeAcceptResult{conn: b}
+			return a, nil
+		},
+		Listen: func(_ context.Context, _ string) (xfer.Listener, error) {
+			return fl, nil
+		},
 	})
-	return fakeListenerPtr
+
+	return fl
 }
 
 // TestP2PNodeRegisterAndLookup verifies that a node registered via Listen

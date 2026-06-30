@@ -141,7 +141,7 @@ async function loadMore() {
 }
 
 function buildFileTableHtml(files, subdir) {
-  let html = '<table><thead><tr><th class="check-col"><input type="checkbox" onchange="toggleSelectAll(this.checked)"></th><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
+  let html = '<table id="file-table"><thead><tr><th class="check-col"><input type="checkbox" id="select-all-checkbox" onchange="toggleSelectAll(this.checked)"></th><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
   for (const fi of files) {
     const fullName = subdir ? subdir + '/' + fi.name : fi.name;
     html += buildFileRowHtml(fi, fullName);
@@ -152,10 +152,10 @@ function buildFileTableHtml(files, subdir) {
 
 function buildFileRowHtml(fi, fullName) {
   if (fi.is_dir) {
-    return '<tr style="cursor:pointer;background:#f8f9fa;"><td class="check-col"></td><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
+    return '<tr style="cursor:pointer;background:#f8f9fa;" class="dir-row"><td class="check-col"></td><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
       '<td>-</td><td>-</td><td>' +
-      '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
-      '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
+      '<button class="btn btn-sm btn-secondary dir-enter-btn" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
+      '<button class="btn btn-sm btn-danger dir-delete-btn" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
   }
   const cs = fi.checksum || '';
   const csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
@@ -163,9 +163,9 @@ function buildFileRowHtml(fi, fullName) {
     '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
     '<td>' + csDisplay + '</td>' +
     '<td class="file-actions">' +
-    '<button class="btn btn-primary btn-sm" onclick="downloadFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">下载</button>' +
-    '<button class="btn btn-danger btn-sm" onclick="deleteFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">删除</button>' +
-    '<button class="btn btn-warning btn-sm" onclick="renameFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">重命名</button>' +
+    '<button class="btn btn-primary btn-sm file-download-btn" onclick="downloadFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">下载</button>' +
+    '<button class="btn btn-danger btn-sm file-delete-btn" onclick="deleteFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">删除</button>' +
+    '<button class="btn btn-warning btn-sm file-rename-btn" onclick="renameFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">重命名</button>' +
     '</td></tr>';
 }
 

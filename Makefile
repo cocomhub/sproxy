@@ -26,6 +26,7 @@ SUB_MODULE_DIRS := $(shell find . -name 'go.mod' \
   -not -path './$(BUILD_DIR)/*' \
   -not -path './.claude/*' \
   -not -path './vendor/*' \
+  -not -path './web/e2e/*' \
   -exec dirname {} \; | sort -u | grep -v '^\.$$')
 
 # ═══════════════════════════════════════════════════════════════════════════════
