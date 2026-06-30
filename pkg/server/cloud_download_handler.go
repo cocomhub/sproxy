@@ -42,13 +42,16 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	// 路径穿越防护：清理文件名中的路径分隔符
 	req.Filename = filepathSafe(req.Filename)
 
-	task, err := h.cloudMgr.CreateTask("url", req.URL, req.Filename, -1)
+	// 创建任务并启动下载（同步模式使用 r.Context()）
+	task, err := h.cloudMgr.SubmitAndStart("url", req.URL, req.Filename, -1, r.Context())
 	if err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
 		return
 	}
 
-	sendJSONResponse(w, task, http.StatusOK)
+	// 返回任务快照（避免并发修改 data race）
+	snapshot, _ := h.cloudMgr.SnapshotTask(task.ID)
+	sendJSONResponse(w, snapshot, http.StatusOK)
 }
 
 // cloudListTasks 处理 GET /api/cloud/tasks。
