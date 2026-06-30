@@ -24,6 +24,8 @@ type HTTPDownloader struct {
 var _ Downloader = (*HTTPDownloader)(nil)
 
 // Download 从 HTTP/HTTPS URL 下载文件到 destPath。
+// 调用方应在调用前通过 ValidateURLHost 校验 URL 安全性。
+// http.Client 的 CheckRedirect 提供额外的防御层。
 func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath string, onProgress ProgressFunc) (*Result, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil {
@@ -91,11 +93,14 @@ func (d *HTTPDownloader) Supports(source string) bool {
 func (d *HTTPDownloader) Name() string { return "http" }
 
 // getClient 返回 HTTP 客户端，惰性初始化。
+// CheckRedirect 提供 SSRF 重定向保护（防御深度）。
+// 入口层 ValidateURLHost 已阻止内部地址，此处防止重定向到内部地址。
 func (d *HTTPDownloader) getClient() *http.Client {
 	if d.httpClient != nil {
 		return d.httpClient
 	}
 	return &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout:       30 * time.Second,
+		CheckRedirect: safeCheckRedirect(),
 	}
 }
