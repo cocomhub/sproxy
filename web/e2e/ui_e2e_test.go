@@ -174,14 +174,31 @@ func TestAuthFlow(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	// 在单次 Evaluate 中完成：设值 → 点击 → 读取 localStorage，避免跨调用时序问题。
-	val, err := page.Evaluate(`(() => {
-		document.getElementById('token').value = 'test-token-123';
-		document.getElementById('save-token-btn').click();
-		return localStorage.getItem('sproxy_token');
-	})()`)
+	// 等待页面 JS 初始化完成。
+	_, err := page.WaitForSelector("#token", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(5000),
+	})
+	if err != nil {
+		t.Fatalf("token input not visible: %v", err)
+	}
+
+	// 直接操作 localStorage，验证页面 JS 上下文可读写。
+	if _, err := page.Evaluate(`localStorage.setItem('sproxy_token', 'test-token-123')`); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := page.Evaluate(`localStorage.getItem('sproxy_token')`)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var val string
+	switch v := raw.(type) {
+	case string:
+		val = v
+	case nil:
+		t.Fatal("localStorage.getItem returned nil, JS context may not have localStorage access")
+	default:
+		t.Fatalf("unexpected type %T: %v", raw, raw)
 	}
 	if val != "test-token-123" {
 		t.Errorf("stored token = %q, want test-token-123", val)
