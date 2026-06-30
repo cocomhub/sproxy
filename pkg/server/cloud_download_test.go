@@ -508,3 +508,50 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
+	content := []byte("resume test content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}
+
+	// 创建 mgr1，创建任务，手动设置为 downloading 并持久化
+	mgr1 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	task, _ := mgr1.CreateTask("url", srv.URL, "resume.bin", int64(len(content)))
+	task.Status = "downloading"
+	task.UpdatedAt = time.Now()
+	mgr1.saveTask(task)
+
+	// 创建 mgr2 模拟重启，应自动恢复 downloading 任务
+	mgr2 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+
+	// 等待恢复的任务完成
+	deadline := time.After(10 * time.Second)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for recovered task to complete")
+		case <-ticker.C:
+			cur, _ := mgr2.GetTask(task.ID)
+			if cur.Status == "completed" {
+				return
+			}
+			if cur.Status == "failed" {
+				t.Fatalf("recovered task failed: %s", cur.Error)
+			}
+		}
+	}
+}
