@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -492,5 +493,55 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&batchResp)
 	if batchResp.Tasks[0].Status != "failed" {
 		t.Fatalf("expected 'failed' for storage full, got %q", batchResp.Tasks[0].Status)
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_MaxLimit(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 101 URLs should be rejected
+	urls := make([]string, 101)
+	for i := range urls {
+		urls[i] = `{"url": "https://example.com/file` + fmt.Sprintf("%d", i) + `.zip"}`
+	}
+	body := strings.NewReader(`{"urls": [` + strings.Join(urls, ",") + `]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for 101 URLs, got %d", resp.StatusCode)
+	}
+}
+
+func TestCloudHandler_BatchCreateDownload_ExactlyMax(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 100 URLs should be accepted
+	urls := make([]string, 100)
+	for i := range urls {
+		urls[i] = `{"url": "https://example.com/file` + fmt.Sprintf("%d", i) + `.zip"}`
+	}
+	body := strings.NewReader(`{"urls": [` + strings.Join(urls, ",") + `]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for 100 URLs, got %d", resp.StatusCode)
+	}
+
+	var batchResp struct {
+		Tasks []CloudBatchTaskResult `json:"tasks"`
+	}
+	json.NewDecoder(resp.Body).Decode(&batchResp)
+	if len(batchResp.Tasks) != 100 {
+		t.Fatalf("expected 100 tasks, got %d", len(batchResp.Tasks))
 	}
 }

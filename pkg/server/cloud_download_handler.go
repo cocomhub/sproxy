@@ -15,6 +15,8 @@ import (
 
 // cloudCreateDownload 处理 POST /api/cloud/download。
 func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 限 1 MiB
+
 	var req struct {
 		URL      string `json:"url"`
 		Filename string `json:"filename,omitempty"`
@@ -38,7 +40,11 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 返回任务快照（避免并发修改 data race）
-	snapshot, _ := h.cloudMgr.SnapshotTask(task.ID)
+	snapshot, ok := h.cloudMgr.SnapshotTask(task.ID)
+	if !ok {
+		sendJSONResponse(w, map[string]string{"error": "task created but not found"}, http.StatusInternalServerError)
+		return
+	}
 	sendJSONResponse(w, snapshot, http.StatusOK)
 }
 
@@ -76,6 +82,8 @@ func validateCloudDownloadURL(rawURL, rawFilename string) (string, string, error
 // cloudCreateBatchDownload 处理 POST /api/cloud/download/batch。
 // 批量创建下载任务，始终异步执行。部分失败不中断，每项返回独立结果。
 func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 限 1 MiB
+
 	var req CloudBatchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
@@ -115,7 +123,16 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		// 使用快照避免并发读写 data race
-		snapshot, _ := h.cloudMgr.SnapshotTask(task.ID)
+		snapshot, ok := h.cloudMgr.SnapshotTask(task.ID)
+		if !ok {
+			results = append(results, CloudBatchTaskResult{
+				URL:      cleanedURL,
+				Filename: cleanedFilename,
+				Status:   "failed",
+				Error:    "task created but not found",
+			})
+			continue
+		}
 		results = append(results, CloudBatchTaskResult{
 			ID:       snapshot.ID,
 			URL:      cleanedURL,
