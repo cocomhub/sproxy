@@ -165,6 +165,33 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE sproxy_hub_nodes_connected gauge\n")
 		fmt.Fprintf(w, "sproxy_hub_nodes_connected %d\n\n", rt.NodeCount())
 	}
+	// 云端下载指标
+	if cm := h.cloudMgr; cm != nil && cm.metrics != nil {
+		m := cm.metrics
+		fmt.Fprintf(w, "# HELP sproxy_cloud_tasks_created Total cloud download tasks created\n")
+		fmt.Fprintf(w, "# TYPE sproxy_cloud_tasks_created counter\n")
+		fmt.Fprintf(w, "sproxy_cloud_tasks_created %d\n\n", m.TasksCreated.Load())
+
+		fmt.Fprintf(w, "# HELP sproxy_cloud_tasks_completed Total cloud download tasks completed\n")
+		fmt.Fprintf(w, "# TYPE sproxy_cloud_tasks_completed counter\n")
+		fmt.Fprintf(w, "sproxy_cloud_tasks_completed %d\n\n", m.TasksCompleted.Load())
+
+		fmt.Fprintf(w, "# HELP sproxy_cloud_tasks_failed Total cloud download tasks failed\n")
+		fmt.Fprintf(w, "# TYPE sproxy_cloud_tasks_failed counter\n")
+		fmt.Fprintf(w, "sproxy_cloud_tasks_failed %d\n\n", m.TasksFailed.Load())
+
+		fmt.Fprintf(w, "# HELP sproxy_cloud_tasks_cancelled Total cloud download tasks cancelled\n")
+		fmt.Fprintf(w, "# TYPE sproxy_cloud_tasks_cancelled counter\n")
+		fmt.Fprintf(w, "sproxy_cloud_tasks_cancelled %d\n\n", m.TasksCancelled.Load())
+
+		fmt.Fprintf(w, "# HELP sproxy_cloud_bytes_downloaded Total bytes downloaded by cloud downloader\n")
+		fmt.Fprintf(w, "# TYPE sproxy_cloud_bytes_downloaded counter\n")
+		fmt.Fprintf(w, "sproxy_cloud_bytes_downloaded %d\n\n", m.BytesDownloaded.Load())
+
+		fmt.Fprintf(w, "# HELP sproxy_cloud_active_downloads Currently active cloud downloads\n")
+		fmt.Fprintf(w, "# TYPE sproxy_cloud_active_downloads gauge\n")
+		fmt.Fprintf(w, "sproxy_cloud_active_downloads %d\n\n", m.ActiveDownloads.Load())
+	}
 }
 
 // metricsResponseWriter 包装 http.ResponseWriter，捕获状态码。
