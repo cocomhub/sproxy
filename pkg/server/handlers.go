@@ -59,6 +59,7 @@ type Handlers struct {
 	shareStore    *ShareStore
 	routeTable    *hub.RouteTable
 	handler       http.Handler // mux wrapped with metricsMiddleware
+	cloudMgr      *CloudDownloadManager
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -104,6 +105,16 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 		shareStore:    NewShareStore(),
 		routeTable:    opts.RouteTable,
 	}
+
+	// 初始化 StorageManager 和 CloudDownloadManager
+	sm := NewStorageManager(cfg.UploadsDir, cfg.MaxStorageBytes, cs, log.With("component", "storage"))
+	cloudCfg := &CloudDownloadConfig{
+		SyncThreshold: cfg.CloudSyncThreshold,
+		MaxConcurrent: cfg.CloudMaxConcurrent,
+		TaskTTL:       parseDuration(cfg.CloudTaskTTL, 24*time.Hour),
+		FailedTaskTTL: parseDuration(cfg.CloudFailedTaskTTL, 1*time.Hour),
+	}
+	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, cs, log.With("component", "cloud"), cloudCfg)
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
 	localMux := http.NewServeMux()
@@ -168,6 +179,19 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
 	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
+
+	// 云端下载 API（localMux：隧道认证）
+	localMux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
+	localMux.HandleFunc("GET /api/cloud/tasks", h.cloudListTasks)
+	localMux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudGetTask)
+	localMux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudCancelTask)
+	localMux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudDeleteTask)
+	// 云端下载 API（主 mux：Bearer auth）
+	mux.HandleFunc("POST /api/cloud/download", h.authMiddleware(h.cloudCreateDownload))
+	mux.HandleFunc("GET /api/cloud/tasks", h.authMiddleware(h.cloudListTasks))
+	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.authMiddleware(h.cloudGetTask))
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.authMiddleware(h.cloudCancelTask))
+	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.authMiddleware(h.cloudDeleteTask))
 
 	// Hub 管理 API（中继系统），需鉴权
 	if opts.RouteTable != nil {
@@ -540,7 +564,7 @@ func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, e
 	if rel == "." {
 		return nil
 	}
-	if d.Name() == ".checksums.json" || d.Name() == chunkedDirName {
+	if d.Name() == ".checksums.json" || d.Name() == chunkedDirName || d.Name() == versionsDirName || d.Name() == cloudDirName || d.Name() == ".__downloads__" {
 		if d.IsDir() {
 			return filepath.SkipDir
 		}
@@ -1021,7 +1045,7 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]string, subdir string) []fileInfo {
 	allFiles := make([]fileInfo, 0, len(entries))
 	for _, e := range entries {
-		if e.Name() == ".checksums.json" || e.Name() == chunkedDirName {
+		if e.Name() == ".checksums.json" || e.Name() == chunkedDirName || e.Name() == versionsDirName || e.Name() == cloudDirName || e.Name() == ".__downloads__" {
 			continue
 		}
 		if e.IsDir() {
