@@ -476,7 +476,7 @@ func TestCloudDownloadURLInput(t *testing.T) {
 		t.Fatalf("cloud-modal not visible: %v", err)
 	}
 
-	// 输入 URL 并按 Enter
+	// 输入 URL 并按 Enter（textarea 支持多行）
 	if err := page.Locator("#cloud-url").Fill("https://example.com/enter-test.zip"); err != nil {
 		t.Fatalf("fill cloud-url: %v", err)
 	}
@@ -484,12 +484,16 @@ func TestCloudDownloadURLInput(t *testing.T) {
 		t.Fatalf("press Enter: %v", err)
 	}
 
-	// 验证输入框已清空（创建成功后清空）
+	// 等待异步 createCloudTask() 清空输入框
+	page.WaitForFunction("document.getElementById('cloud-url').value === ''", nil, playwright.PageWaitForFunctionOptions{
+		Timeout: playwright.Float(3000),
+	})
+
 	val, err := page.Locator("#cloud-url").InputValue()
 	if err != nil {
 		t.Fatalf("read input value: %v", err)
 	}
-	if val != "" && val != "https://example.com/enter-test.zip" {
-		t.Errorf("unexpected input value: %s", val)
+	if val != "" {
+		t.Errorf("expected input to be cleared after create, got: %s", val)
 	}
 }

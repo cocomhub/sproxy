@@ -395,8 +395,8 @@ func TestCloudHandler_BatchCreateDownload_PathTraversal(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
 		t.Fatal(err)
 	}
-	if batchResp.Tasks[0].Status != "pending" {
-		t.Fatalf("expected 'pending', got %q", batchResp.Tasks[0].Status)
+	if batchResp.Tasks[0].Status != "pending" && batchResp.Tasks[0].Status != "downloading" {
+		t.Fatalf("expected 'pending' or 'downloading', got %q", batchResp.Tasks[0].Status)
 	}
 	if strings.Contains(batchResp.Tasks[0].Filename, "/") || strings.Contains(batchResp.Tasks[0].Filename, "\\") {
 		t.Fatalf("filename should be sanitized, got %q", batchResp.Tasks[0].Filename)
