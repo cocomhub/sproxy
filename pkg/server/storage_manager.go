@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ErrStorageFull 存储空间已满，拒绝写入。
@@ -41,6 +42,8 @@ type StorageManager struct {
 	totalUsage    atomic.Int64
 	logger        *slog.Logger
 	scanMu        sync.Mutex
+	stopCh        chan struct{}
+	stopOnce      sync.Once
 }
 
 // NewStorageManager 创建存储管理器，启动时自动扫描目录统计大小。
@@ -48,9 +51,14 @@ func NewStorageManager(dir string, maxBytes int64, _ ChecksumStoreIface, logger 
 	sm := &StorageManager{
 		uploadsDir: dir,
 		logger:     defaultLogger(logger),
+		stopCh:     make(chan struct{}),
 	}
 	sm.maxBytes.Store(maxBytes)
 	_ = sm.ScanAndRecalculate()
+
+	// 每 30 分钟定期扫描校准
+	go sm.periodicScan()
+
 	return sm
 }
 
@@ -191,4 +199,34 @@ func (s *StorageManager) addCategory(cat StorageCategory, delta int64) {
 	case CategoryCloud:
 		s.cloudSize.Add(delta)
 	}
+}
+
+// periodicScan 每 30 分钟执行一次全量扫描，校准存储计数器。
+func (s *StorageManager) periodicScan() {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			before := s.totalUsage.Load()
+			if err := s.ScanAndRecalculate(); err != nil {
+				s.logger.Warn("periodic storage scan failed", "error", err)
+				continue
+			}
+			after := s.totalUsage.Load()
+			if before != after {
+				s.logger.Info("storage usage recalibrated by periodic scan",
+					"before", before, "after", after, "delta", after-before)
+			}
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+// Stop 停止定期扫描 goroutine，释放资源。多次调用安全。
+func (s *StorageManager) Stop() {
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
 }
