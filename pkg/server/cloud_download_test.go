@@ -438,7 +438,10 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timeout waiting for async download to complete")
 		case <-ticker.C:
-			cur, _ := mgr.GetTask(task.ID)
+			cur, ok := mgr.SnapshotTask(task.ID)
+			if !ok {
+				t.Fatal("task not found")
+			}
 			if cur.Status == "completed" {
 				return
 			}
