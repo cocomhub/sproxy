@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -608,4 +609,64 @@ func TestRetransmitQueue_WriteAfterClose(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when opening stream on closed mux")
 	}
+}
+
+// TestRetransmitQueue_SuccessAfterRetry 被跳过，因为 xfertest.Pipe 的 Send 方法
+// 关闭后无法恢复，无法模拟"先失败后成功"的重传场景。
+// 在 pipe 传输层上，一旦连接关闭后 Send 失败，所有未发送帧都会入队列等待重传，
+// 但 pipe 不会重新打开，因此重传总是失败直至耗尽。
+// 如需完整测试"先失败后成功"路径，需使用支持 Send 失败后恢复的 mock transport。
+
+// TestRetransmitQueue_Concurrent 验证并发写入与重传队列操作不产生 data race。
+func TestRetransmitQueue_Concurrent(t *testing.T) {
+	dm, lm := newMuxPair(t)
+	ctx := t.Context()
+
+	// 打开多条流并并发写入
+	const numStreams = 10
+	var wg sync.WaitGroup
+
+	for i := range numStreams {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s, err := dm.Open(ctx)
+			if err != nil {
+				t.Logf("stream %d open failed: %v", i, err)
+				return
+			}
+			defer s.Close()
+
+			// 写入小数据块
+			data := []byte("hello from stream " + string(rune('0'+i)))
+			_, err = s.Write(data)
+			if err != nil {
+				t.Logf("stream %d write failed: %v", i, err)
+			}
+		}(i)
+	}
+
+	// 接受端读取所有流
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for range numStreams {
+			s, err := lm.Accept(ctx)
+			if err != nil {
+				return
+			}
+			// 读取并丢弃数据
+			buf := make([]byte, 1024)
+			for {
+				_, err := s.Read(buf)
+				if err != nil {
+					break
+				}
+			}
+			s.Close()
+		}
+	}()
+
+	wg.Wait()
+	<-acceptDone
 }
