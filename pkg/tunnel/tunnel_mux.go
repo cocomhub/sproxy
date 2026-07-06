@@ -153,7 +153,7 @@ type streamBody struct {
 	pr     *io.PipeReader
 	pw     *io.PipeWriter
 
-	// 预读缓冲（非加密模式）
+	// 预读缓冲（加密与非加密模式共用）
 	rdBuf []byte
 	rdOff int
 }
@@ -162,17 +162,33 @@ const streamBodyBufSize = 65536 // 64 KB 预读缓冲
 
 func (b *streamBody) Read(p []byte) (int, error) {
 	if b.key != nil {
-		b.once.Do(func() {
-			b.pr, b.pw = io.Pipe()
-			go func() {
-				_, err := DecryptStream(b.key, b.stream, b.pw)
-				b.pw.CloseWithError(err)
-			}()
-		})
-		return b.pr.Read(p)
+		// 加密模式：使用预读缓冲
+		if len(b.rdBuf) == 0 || b.rdOff >= len(b.rdBuf) {
+			b.rdBuf = make([]byte, streamBodyBufSize)
+			// 懒初始化 Pipe + goroutine 解密（仅一次）
+			b.once.Do(func() {
+				b.pr, b.pw = io.Pipe()
+				go func() {
+					_, err := DecryptStream(b.key, b.stream, b.pw)
+					b.pw.CloseWithError(err)
+				}()
+			})
+			n, err := b.pr.Read(b.rdBuf)
+			if err != nil && err != io.EOF {
+				return 0, err
+			}
+			b.rdBuf = b.rdBuf[:n]
+			b.rdOff = 0
+			if n == 0 {
+				return 0, io.EOF
+			}
+		}
+		n := copy(p, b.rdBuf[b.rdOff:])
+		b.rdOff += n
+		return n, nil
 	}
 
-	// 非加密模式：预读缓冲
+	// 非加密模式：预读缓冲（原逻辑不变）
 	if b.rdOff >= len(b.rdBuf) {
 		b.rdBuf = make([]byte, streamBodyBufSize)
 		n, err := io.ReadAtLeast(b.stream, b.rdBuf, 1)

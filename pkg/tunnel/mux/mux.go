@@ -551,10 +551,7 @@ func (m *Mux) scanRetransmitQ() {
 }
 
 func backoffDuration(retries int) time.Duration {
-	d := retryBaseDelay << min(retries-1, 5)
-	if d > retryMaxDelay {
-		d = retryMaxDelay
-	}
+	d := min(retryBaseDelay<<min(retries-1, 5), retryMaxDelay)
 	return d
 }
 
