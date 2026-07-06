@@ -21,10 +21,13 @@ import (
 const DefaultWindowSize = 65536 // 64 KB
 
 // maxRetries 是帧重传的最大次数。
-const maxRetries = 3
+const maxRetries = 5
 
 // retryBaseDelay 是重传的基础延迟。
 const retryBaseDelay = 100 * time.Millisecond
+
+// retryMaxDelay 是重传的最大延迟。
+const retryMaxDelay = 3 * time.Second
 
 // maxRecvRetries 是读取循环遇到临时错误时的最大重试次数。
 const maxRecvRetries = 5
@@ -288,8 +291,11 @@ type Mux struct {
 	lastPongNano atomic.Int64
 
 	ctxOnce   sync.Once
-	ctx       context.Context    // NOSONAR S8242 - mux 生命周期 context, 非请求级, sync.Once 懒初始化
-	ctxCancel context.CancelFunc // NOSONAR S8242 - Close() 中调用 cancel
+	ctx       context.Context // NOSONAR S8242 - mux 生命周期 context, 非请求级, sync.Once 懒初始化
+	ctxCancel context.CancelFunc
+
+	retransmitMu sync.Mutex
+	retransmitQ  []retransmitEntry
 }
 
 // New 创建 Mux，启动事件循环 goroutine。
@@ -325,6 +331,11 @@ func NewWithOpts(conn xfer.Conn, role Role, opts ...Option) *Mux {
 
 // Metrics 返回指向 mux 统计信息的指针。
 func (m *Mux) Metrics() *Metrics { return &m.metrics }
+
+// Done 返回一个 channel，当 mux 关闭时关闭（用于测试）。
+func (m *Mux) Done() <-chan struct{} {
+	return m.done
+}
 
 // Open 创建一条新流。
 func (m *Mux) Open(ctx context.Context) (Stream, error) {
@@ -446,6 +457,13 @@ func (m *Mux) rejectStream(sid StreamID, acceptChFull bool) {
 	}
 }
 
+// retransmitEntry 存储待重传的帧。
+type retransmitEntry struct {
+	frame    []byte
+	retries  int
+	deadline time.Time
+}
+
 func (m *Mux) sendFrame(msg writeMsg) {
 	m.metrics.FramesSent.Add(1)
 	if msg.isRaw {
@@ -468,18 +486,15 @@ func (m *Mux) sendFrame(msg writeMsg) {
 	}
 
 	if len(msg.data) > 0 {
-		for i := range maxRetries {
-			if err := m.conn.Send(m.Context(), frame); err == nil {
-				return
-			}
-			time.Sleep(retryBaseDelay << i)
+		// 数据帧：尝试发送，失败时入重传队列
+		if err := m.conn.Send(m.Context(), frame); err != nil {
+			m.enqueueRetransmit(frame, 0)
+			return
 		}
-		m.metrics.Errors.Add(1)
-		m.logger.Error("mux: send error, retries exhausted", "stream", msg.streamID)
-		m.Close()
 		return
 	}
 
+	// 控制帧（CloseWrite/Close）：不重传，失败直接关闭
 	if err := m.conn.Send(m.Context(), frame); err != nil {
 		m.metrics.Errors.Add(1)
 		m.logger.Error("mux: send error, closing mux", "stream", msg.streamID, "err", err)
@@ -491,6 +506,58 @@ func (m *Mux) sendFrame(msg writeMsg) {
 	}
 }
 
+// enqueueRetransmit 将失败帧加入重传队列。
+func (m *Mux) enqueueRetransmit(frame []byte, retries int) {
+	entry := retransmitEntry{
+		frame:    frame,
+		retries:  retries,
+		deadline: time.Now().Add(retryBaseDelay),
+	}
+	m.retransmitMu.Lock()
+	if len(m.retransmitQ) >= 256 {
+		m.retransmitQ = m.retransmitQ[1:]
+	}
+	m.retransmitQ = append(m.retransmitQ, entry)
+	m.retransmitMu.Unlock()
+}
+
+// scanRetransmitQ 扫描重传队列，重试到期的条目。
+func (m *Mux) scanRetransmitQ() {
+	m.retransmitMu.Lock()
+	defer m.retransmitMu.Unlock()
+
+	now := time.Now()
+	remaining := make([]retransmitEntry, 0, len(m.retransmitQ))
+
+	for _, entry := range m.retransmitQ {
+		if entry.deadline.After(now) {
+			remaining = append(remaining, entry)
+			continue
+		}
+		if err := m.conn.Send(m.Context(), entry.frame); err == nil {
+			continue
+		}
+		entry.retries++
+		if entry.retries >= maxRetries {
+			m.metrics.Errors.Add(1)
+			m.logger.Error("mux: retransmit exhausted", "retries", entry.retries)
+			go m.Close()
+			return
+		}
+		entry.deadline = now.Add(backoffDuration(entry.retries))
+		remaining = append(remaining, entry)
+	}
+	m.retransmitQ = remaining
+}
+
+func backoffDuration(retries int) time.Duration {
+	d := retryBaseDelay << min(retries-1, 5)
+	if d > retryMaxDelay {
+		d = retryMaxDelay
+	}
+	return d
+}
+
 func (m *Mux) writeLoop() {
 	for {
 		select {
@@ -498,7 +565,9 @@ func (m *Mux) writeLoop() {
 			return
 		case msg := <-m.writeCh:
 			m.sendFrame(msg)
+		case <-time.After(50 * time.Millisecond):
 		}
+		m.scanRetransmitQ()
 	}
 }
 
