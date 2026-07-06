@@ -477,7 +477,7 @@ func TestCloudDownloadURLInput(t *testing.T) {
 	}
 
 	// 验证 textarea 存在（已从 input 改为 textarea 支持多行）
-	tag, err := page.Locator("#cloud-url").Evaluate("el => el.tagName")
+	tag, err := page.Evaluate("document.querySelector('#cloud-url').tagName")
 	if err != nil {
 		t.Fatalf("evaluate tagName: %v", err)
 	}
