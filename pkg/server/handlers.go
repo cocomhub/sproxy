@@ -60,6 +60,7 @@ type Handlers struct {
 	routeTable    *hub.RouteTable
 	handler       http.Handler // mux wrapped with metricsMiddleware
 	cloudMgr      *CloudDownloadManager
+	storageMgr    *StorageManager
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -115,6 +116,7 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 		FailedTaskTTL: parseDuration(cfg.CloudFailedTaskTTL, 1*time.Hour),
 	}
 	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, cs, log.With("component", "cloud"), cloudCfg)
+	h.storageMgr = sm
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
 	localMux := http.NewServeMux()
@@ -136,6 +138,7 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/versions/restore", h.restoreVersionHandler)
 	localMux.HandleFunc("DELETE /api/versions", h.deleteVersionHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
+	localMux.HandleFunc("PUT /api/storage/config", h.storageConfigHandler)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -177,6 +180,7 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
 	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
 	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
+	mux.HandleFunc("PUT /api/storage/config", h.authMiddleware(h.storageConfigHandler))
 	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
 	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 
@@ -228,11 +232,14 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	return h
 }
 
-// Close 释放 Handlers 持有的后台资源：停止 UploadStore 的 persist/cleanup goroutine。
+// Close 释放 Handlers 持有的后台资源：停止 UploadStore 的 persist/cleanup goroutine 和 StorageManager 的定期扫描。
 // 在进程退出前应调用一次（通常通过 defer h.Close()）。多次调用是安全的。
 func (h *Handlers) Close() error {
 	if h.uploadStore != nil {
 		h.uploadStore.Stop()
+	}
+	if h.storageMgr != nil {
+		h.storageMgr.Stop()
 	}
 	return nil
 }

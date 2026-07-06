@@ -57,6 +57,12 @@ type CloudDownloadManager struct {
 	dl            downloader.Downloader
 	cancelFuncs   map[string]context.CancelFunc // 任务取消函数
 	metrics       *CloudMetrics
+
+	// 批量持久化进度更新
+	dirtyTasks map[string]struct{}
+	dirtyMu    sync.Mutex
+	flushNow   chan struct{}
+	stopFlush  chan struct{}
 }
 
 // CloudMetrics 云端下载 Prometheus 指标。
@@ -89,6 +95,9 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 		dl:            downloader.NewFromConfig("http"),
 		cancelFuncs:   make(map[string]context.CancelFunc),
 		metrics:       &CloudMetrics{},
+		dirtyTasks:    make(map[string]struct{}),
+		flushNow:      make(chan struct{}, 1),
+		stopFlush:     make(chan struct{}),
 	}
 
 	mgr.logger.Info("cloud download manager initialized",
@@ -103,6 +112,8 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 
 	// 启动过期任务清理
 	go mgr.cleanupExpired()
+	// 启动批量持久化 goroutine
+	go mgr.flushLoop()
 
 	return mgr
 }
@@ -233,6 +244,8 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			task.TotalSize = total
 		}
 		m.mu.Unlock()
+		// 标记为脏，由 flushLoop 每 30 秒批量持久化
+		m.markDirty(task.ID)
 	})
 
 	m.mu.Lock()
@@ -549,4 +562,66 @@ func newTaskID() string {
 	n := taskIDCounter.n
 	taskIDCounter.mu.Unlock()
 	return fmt.Sprintf("cloud-%d-%d", time.Now().UnixNano(), n)
+}
+
+// markDirty 将任务标记为"脏"（进度已更新），由 flushLoop 批量持久化。
+func (m *CloudDownloadManager) markDirty(id string) {
+	m.dirtyMu.Lock()
+	m.dirtyTasks[id] = struct{}{}
+	m.dirtyMu.Unlock()
+}
+
+// flushLoop 每 30 秒批量持久化脏任务的进度更新。
+func (m *CloudDownloadManager) flushLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.flushDirty()
+		case <-m.flushNow:
+			m.flushDirty()
+		case <-m.stopFlush:
+			m.flushDirty()
+			return
+		}
+	}
+}
+
+// flushDirty 将所有脏任务的当前状态持久化到磁盘。
+func (m *CloudDownloadManager) flushDirty() {
+	m.dirtyMu.Lock()
+	ids := make([]string, 0, len(m.dirtyTasks))
+	for id := range m.dirtyTasks {
+		ids = append(ids, id)
+	}
+	m.dirtyTasks = make(map[string]struct{})
+	m.dirtyMu.Unlock()
+
+	if len(ids) == 0 {
+		return
+	}
+
+	for _, id := range ids {
+		m.mu.RLock()
+		task, ok := m.tasks[id]
+		m.mu.RUnlock()
+		if !ok {
+			continue
+		}
+		m.saveTask(task)
+	}
+}
+
+// FlushNow 立即触发一次批量持久化（测试用）。
+func (m *CloudDownloadManager) FlushNow() {
+	select {
+	case m.flushNow <- struct{}{}:
+	default:
+	}
+}
+
+// StopFlush 停止批量持久化 goroutine（测试用）。
+func (m *CloudDownloadManager) StopFlush() {
+	close(m.stopFlush)
 }

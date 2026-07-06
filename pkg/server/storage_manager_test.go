@@ -379,3 +379,12 @@ func TestStorageManager_Release_AllCategories(t *testing.T) {
 		t.Fatalf("expected Versions=200, got %d", u[CategoryVersions])
 	}
 }
+
+func TestStorageManager_PeriodicScan_Stop(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1000, nil, testLogger())
+
+	// 验证 Stop 不 panic（多次调用安全）
+	sm.Stop()
+	sm.Stop()
+}

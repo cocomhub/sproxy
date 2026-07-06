@@ -35,6 +35,19 @@ type StatsResponse struct {
 	FilesDeleted    int64          `json:"files_deleted"`
 	BytesUploaded   int64          `json:"bytes_uploaded"`
 	BytesDownloaded int64          `json:"bytes_downloaded"`
+
+	// 存储空间统计
+	MaxStorageBytes  int64 `json:"max_storage_bytes"`
+	StorageUsage     int64 `json:"storage_usage"`
+	StorageUserFiles int64 `json:"storage_user_files"`
+	StorageChunked   int64 `json:"storage_chunked"`
+	StorageVersions  int64 `json:"storage_versions"`
+	StorageCloud     int64 `json:"storage_cloud"`
+
+	// 磁盘统计
+	DiskTotal int64 `json:"disk_total"`
+	DiskFree  int64 `json:"disk_free"`
+	DiskUsed  int64 `json:"disk_used"`
 }
 
 // statsHandler 处理 GET /api/stats。
@@ -94,6 +107,23 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 			Xx5:   m.Requests5XX.Load(),
 		}
 	}
+
+	// 存储空间统计
+	if h.storageMgr != nil {
+		resp.MaxStorageBytes = h.storageMgr.MaxBytes()
+		resp.StorageUsage = h.storageMgr.Usage()
+		usageByCat := h.storageMgr.UsageByCategory()
+		resp.StorageUserFiles = usageByCat[CategoryUserFiles]
+		resp.StorageChunked = usageByCat[CategoryChunked]
+		resp.StorageVersions = usageByCat[CategoryVersions]
+		resp.StorageCloud = usageByCat[CategoryCloud]
+	}
+
+	// 磁盘统计
+	total, free, used := diskStats(cfg.UploadsDir)
+	resp.DiskTotal = total
+	resp.DiskFree = free
+	resp.DiskUsed = used
 
 	sendJSONResponse(w, resp, http.StatusOK)
 }
