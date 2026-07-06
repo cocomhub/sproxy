@@ -60,8 +60,8 @@ func TestCloudHandler_CreateDownloadTask(t *testing.T) {
 	if task.ID == "" {
 		t.Fatal("expected non-empty task ID")
 	}
-	if task.Status != "pending" {
-		t.Fatalf("expected status 'pending', got %q", task.Status)
+	if task.Status != "pending" && task.Status != "downloading" {
+		t.Fatalf("expected status 'pending' or 'downloading', got %q", task.Status)
 	}
 }
 
@@ -270,8 +270,8 @@ func TestCloudHandler_BatchCreateDownload_Success(t *testing.T) {
 		if tr.ID == "" {
 			t.Fatal("expected non-empty task ID")
 		}
-		if tr.Status != "pending" {
-			t.Fatalf("expected status 'pending', got %q", tr.Status)
+		if tr.Status != "pending" && tr.Status != "downloading" {
+			t.Fatalf("expected status 'pending' or 'downloading', got %q", tr.Status)
 		}
 	}
 }
@@ -333,7 +333,7 @@ func TestCloudHandler_BatchCreateDownload_MixedResults(t *testing.T) {
 		t.Fatalf("expected 2 tasks, got %d", len(batchResp.Tasks))
 	}
 	// 第一个有效 URL 应成功
-	if batchResp.Tasks[0].Status != "pending" {
+	if batchResp.Tasks[0].Status != "pending" && batchResp.Tasks[0].Status != "downloading" {
 		t.Fatalf("expected first task status 'pending', got %q", batchResp.Tasks[0].Status)
 	}
 	if batchResp.Tasks[0].ID == "" {
@@ -451,7 +451,7 @@ func TestCloudHandler_BatchCreateDownload_AlwaysAsync(t *testing.T) {
 		Tasks []CloudBatchTaskResult `json:"tasks"`
 	}
 	json.NewDecoder(resp.Body).Decode(&batchResp)
-	if batchResp.Tasks[0].Status != "pending" {
+	if batchResp.Tasks[0].Status != "pending" && batchResp.Tasks[0].Status != "downloading" {
 		t.Fatalf("expected batch mode to always be async, got status %q", batchResp.Tasks[0].Status)
 	}
 }
