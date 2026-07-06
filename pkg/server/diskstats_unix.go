@@ -13,8 +13,9 @@ func diskStats(dir string) (total, free, used int64) {
 	if err := syscall.Statfs(dir, &stat); err != nil {
 		return 0, 0, 0
 	}
-	total = int64(stat.Blocks) * stat.Bsize
-	free = int64(stat.Bfree) * stat.Bsize
+	// stat.Blocks/stat.Bfree 类型因平台而异（uint64 或 int64），统一转换
+	total = int64(stat.Blocks) * int64(stat.Bsize)
+	free = int64(stat.Bfree) * int64(stat.Bsize)
 	used = total - free
 	return
 }
