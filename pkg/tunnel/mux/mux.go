@@ -488,8 +488,9 @@ func (m *Mux) sendFrame(msg writeMsg) {
 	if len(msg.data) > 0 {
 		// 数据帧：尝试发送，失败时入重传队列
 		if err := m.conn.Send(m.Context(), frame); err != nil {
-			m.enqueueRetransmit(frame, 0)
-			return
+			m.logger.Warn("mux: send failed, queued for retransmit", "stream", msg.streamID, "err", err)
+				m.enqueueRetransmit(frame, 0)
+				return
 		}
 		return
 	}
@@ -524,7 +525,10 @@ func (m *Mux) enqueueRetransmit(frame []byte, retries int) {
 // scanRetransmitQ 扫描重传队列，重试到期的条目。
 func (m *Mux) scanRetransmitQ() {
 	m.retransmitMu.Lock()
-	defer m.retransmitMu.Unlock()
+	if len(m.retransmitQ) == 0 {
+		m.retransmitMu.Unlock()
+		return
+	}
 
 	now := time.Now()
 	remaining := make([]retransmitEntry, 0, len(m.retransmitQ))
@@ -541,6 +545,7 @@ func (m *Mux) scanRetransmitQ() {
 		if entry.retries >= maxRetries {
 			m.metrics.Errors.Add(1)
 			m.logger.Error("mux: retransmit exhausted", "retries", entry.retries)
+			m.retransmitMu.Unlock()
 			go m.Close()
 			return
 		}
@@ -548,6 +553,7 @@ func (m *Mux) scanRetransmitQ() {
 		remaining = append(remaining, entry)
 	}
 	m.retransmitQ = remaining
+	m.retransmitMu.Unlock()
 }
 
 func backoffDuration(retries int) time.Duration {

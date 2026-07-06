@@ -563,34 +563,41 @@ func TestMuxWithMaxStreams_Bounded(t *testing.T) {
 	}
 }
 
-// TestRetransmitQueue_Exhausted 验证重试耗尽后 mux 关闭。
-// 使用一个会持续失败的 conn.Send 来触发重传队列耗尽。
+// TestRetransmitQueue_Exhausted 验证重传耗尽后 mux 关闭。
+// 先建立流再关闭底层连接，使 Stream.Write 入重传队列，最终耗尽触发 mux.Close。
 func TestRetransmitQueue_Exhausted(t *testing.T) {
-	// 使用 pipe pair 创建 mux pair
 	c, s := xfertest.Pipe()
 	dm := mux.New(c, mux.RoleDialer)
 	lm := mux.New(s, mux.RoleListener)
 	t.Cleanup(func() { dm.Close(); lm.Close() })
 
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	// 先建立流（pipe 正常）
+	stream, err := dm.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// 接受端接受流
+	acc, err := lm.Accept(ctx)
+	if err != nil {
+		t.Fatalf("Accept failed: %v", err)
+	}
+
 	// 关闭底层连接，使 conn.Send 失败
 	c.Close()
 	s.Close()
 
-	// 尝试写入数据，触发重传
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-
-	stream, err := lm.Open(ctx)
-	if err != nil {
-		// 可能在 Open 阶段就失败，这是合理的
-		t.Logf("Open failed (expected): %v", err)
-		return
-	}
-
+	// 写入数据，触发重传
 	_, err = stream.Write([]byte("test data"))
 	if err != nil {
 		t.Logf("Write failed (expected): %v", err)
 	}
+
+	// 接受端也会感知到错误
+	acc.Close()
 
 	// 等待 mux 关闭（重传耗尽后应自动关闭）
 	<-dm.Done()
