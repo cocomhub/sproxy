@@ -8,4 +8,5 @@ use (
 	./pkg/tunnel/xfer/ext/quic
 	./pkg/tunnel/xfer/ext/webrtc
 	./pkg/tunnel/xfer/ext/ws
+		./pkg/tunnel/xfer/ext/kad
 )
