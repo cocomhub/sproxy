@@ -1,4 +1,4 @@
-module github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/kad
+module github.com/cocomhub/sproxy/pkg/tunnel/hub/ext/kad
 
 go 1.26
 
