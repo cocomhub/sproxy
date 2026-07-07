@@ -25,6 +25,7 @@ func setupCloudTestServer(t *testing.T) (*httptest.Server, *CloudDownloadManager
 		FailedTaskTTL: 1 * time.Hour,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.StopFlush() })
 
 	h := &Handlers{cloudMgr: mgr}
 
@@ -467,6 +468,7 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.StopFlush() })
 
 	h := &Handlers{cloudMgr: mgr}
 	mux := http.NewServeMux()

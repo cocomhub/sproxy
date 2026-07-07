@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -560,4 +561,119 @@ func TestMuxWithMaxStreams_Bounded(t *testing.T) {
 	if string(buf[:n]) != string(payload) {
 		t.Fatalf("expected %q, got %q", payload, buf[:n])
 	}
+}
+
+// TestRetransmitQueue_Exhausted 验证重传耗尽后 mux 关闭。
+// 先建立流再关闭底层连接，使 Stream.Write 入重传队列，最终耗尽触发 mux.Close。
+func TestRetransmitQueue_Exhausted(t *testing.T) {
+	c, s := xfertest.Pipe()
+	dm := mux.New(c, mux.RoleDialer)
+	lm := mux.New(s, mux.RoleListener)
+	t.Cleanup(func() { dm.Close(); lm.Close() })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	// 先建立流（pipe 正常）
+	stream, err := dm.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+
+	// 接受端接受流
+	acc, err := lm.Accept(ctx)
+	if err != nil {
+		t.Fatalf("Accept failed: %v", err)
+	}
+
+	// 关闭底层连接，使 conn.Send 失败
+	c.Close()
+	s.Close()
+
+	// 写入数据，触发重传
+	_, err = stream.Write([]byte("test data"))
+	if err != nil {
+		t.Logf("Write failed (expected): %v", err)
+	}
+
+	// 接受端也会感知到错误
+	acc.Close()
+
+	// 等待 mux 关闭（重传耗尽后应自动关闭）
+	<-dm.Done()
+	<-lm.Done()
+}
+
+// TestRetransmitQueue_WriteAfterClose 验证 mux 关闭后写入返回错误。
+func TestRetransmitQueue_WriteAfterClose(t *testing.T) {
+	c, s := xfertest.Pipe()
+	dm := mux.New(c, mux.RoleDialer)
+	lm := mux.New(s, mux.RoleListener)
+	dm.Close()
+	lm.Close()
+
+	_, err := dm.Open(t.Context())
+	if err == nil {
+		t.Fatal("expected error when opening stream on closed mux")
+	}
+}
+
+// TestRetransmitQueue_SuccessAfterRetry 被跳过，因为 xfertest.Pipe 的 Send 方法
+// 关闭后无法恢复，无法模拟"先失败后成功"的重传场景。
+// 在 pipe 传输层上，一旦连接关闭后 Send 失败，所有未发送帧都会入队列等待重传，
+// 但 pipe 不会重新打开，因此重传总是失败直至耗尽。
+// 如需完整测试"先失败后成功"路径，需使用支持 Send 失败后恢复的 mock transport。
+
+// TestRetransmitQueue_Concurrent 验证并发写入与重传队列操作不产生 data race。
+func TestRetransmitQueue_Concurrent(t *testing.T) {
+	dm, lm := newMuxPair(t)
+	ctx := t.Context()
+
+	// 打开多条流并并发写入
+	const numStreams = 10
+	var wg sync.WaitGroup
+
+	for i := range numStreams {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s, err := dm.Open(ctx)
+			if err != nil {
+				t.Logf("stream %d open failed: %v", i, err)
+				return
+			}
+			defer s.Close()
+
+			// 写入小数据块
+			data := []byte("hello from stream " + string(rune('0'+i)))
+			_, err = s.Write(data)
+			if err != nil {
+				t.Logf("stream %d write failed: %v", i, err)
+			}
+		}(i)
+	}
+
+	// 接受端读取所有流
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		for range numStreams {
+			s, err := lm.Accept(ctx)
+			if err != nil {
+				return
+			}
+			// 读取并丢弃数据
+			buf := make([]byte, 1024)
+			for {
+				_, err := s.Read(buf)
+				if err != nil {
+					break
+				}
+			}
+			s.Close()
+		}
+	}()
+
+	wg.Wait()
+	<-acceptDone
 }
