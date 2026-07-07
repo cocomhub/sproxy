@@ -158,6 +158,7 @@ check-loopback:
 	issues=0; \
 	# Check non-test source files for 0.0.0.0 (excluding pkg/server/config.go which has intentional defaults); \
 	if grep -rn '0\.0\.0\.0' --include='*.go' . \
+		| grep -v 'pkg/server/downloader/ssrf.go' \
 		| grep -v '_test.go' \
 		| grep -v 'vendor/' \
 		| grep -v 'testdata/' \
@@ -182,7 +183,6 @@ check-loopback:
 	# Check test files for unsafe listen addresses; \
 	if grep -rn --include='*_test.go' 'Listen.*0\.0\.0\.0\|\.Addr\s*=\s*"localhost' . 2>/dev/null \
 		| grep -v './.claude/' \
-		| grep -v 'xfer/grpc' \
 		| grep '.' > /dev/null 2>&1; then \
 		echo "FAIL: test files contain unsafe listen addresses:"; \
 		grep -rn --include='*_test.go' 'Listen.*0\.0\.0\.0\|\.Addr\s*=\s*"localhost' . 2>/dev/null \

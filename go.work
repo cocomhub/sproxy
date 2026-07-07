@@ -4,8 +4,8 @@ use (
 	.
 	./cmd/sclient
 	./cmd/sproxy
+	./pkg/tunnel/xfer/ext/grpc
 	./pkg/tunnel/xfer/ext/quic
+	./pkg/tunnel/xfer/ext/webrtc
 	./pkg/tunnel/xfer/ext/ws
-	./xfer/grpc
-	./xfer/webrtc
 )
