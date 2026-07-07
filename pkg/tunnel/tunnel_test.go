@@ -13,6 +13,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
 // testKey 是一个固定的 32 字节密钥（64 十六进制字符），用于测试。
@@ -368,6 +371,80 @@ func BenchmarkEncryptDecrypt(b *testing.B) {
 		if !bytes.Equal(decrypted, plaintext) {
 			b.Fatal("decrypted != plaintext")
 		}
+	}
+}
+
+// BenchmarkTunnelRoundTrip 测试 Tunnel 在加密和不加密模式下的往返延迟。
+func BenchmarkTunnelRoundTrip(b *testing.B) {
+	payloadSizes := []int{64, 1024, 32768}
+	for _, size := range payloadSizes {
+		payload := make([]byte, size)
+		b.Run(fmt.Sprintf("encrypted_%d", size), func(b *testing.B) {
+			a, bConn := xfertest.Pipe()
+			muxA := mux.New(a, mux.RoleDialer)
+			muxB := mux.New(bConn, mux.RoleListener)
+			defer muxA.Close()
+			defer muxB.Close()
+
+			serverTun := NewTunnel(muxB, testKey)
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(w, r.Body)
+			})
+			go serverTun.Serve(b.Context(), handler)
+
+			tun := NewTunnel(muxA, testKey)
+			b.SetBytes(int64(len(payload)))
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				req, err := http.NewRequest("POST", "/echo", bytes.NewReader(payload))
+				if err != nil {
+					b.Fatal(err)
+				}
+				resp, err := tun.Do(req)
+				if err != nil {
+					b.Fatalf("Do: %v", err)
+				}
+				_, err = io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					b.Fatalf("ReadAll: %v", err)
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("plain_%d", size), func(b *testing.B) {
+			a, bConn := xfertest.Pipe()
+			muxA := mux.New(a, mux.RoleDialer)
+			muxB := mux.New(bConn, mux.RoleListener)
+			defer muxA.Close()
+			defer muxB.Close()
+
+			serverTun := NewTunnel(muxB, nil)
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(w, r.Body)
+			})
+			go serverTun.Serve(b.Context(), handler)
+
+			tun := NewTunnel(muxA, nil)
+			b.SetBytes(int64(len(payload)))
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				req, err := http.NewRequest("POST", "/echo", bytes.NewReader(payload))
+				if err != nil {
+					b.Fatal(err)
+				}
+				resp, err := tun.Do(req)
+				if err != nil {
+					b.Fatalf("Do: %v", err)
+				}
+				_, err = io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					b.Fatalf("ReadAll: %v", err)
+				}
+			}
+		})
 	}
 }
 
