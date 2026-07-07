@@ -489,8 +489,8 @@ func (m *Mux) sendFrame(msg writeMsg) {
 		// 数据帧：尝试发送，失败时入重传队列
 		if err := m.conn.Send(m.Context(), frame); err != nil {
 			m.logger.Warn("mux: send failed, queued for retransmit", "stream", msg.streamID, "err", err)
-				m.enqueueRetransmit(frame, 0)
-				return
+			m.enqueueRetransmit(frame, 0)
+			return
 		}
 		return
 	}
