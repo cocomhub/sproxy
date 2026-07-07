@@ -1,4 +1,4 @@
-module github.com/cocomhub/sproxy/xfer/webrtc
+module github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc
 
 go 1.26
 
@@ -28,4 +28,4 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 )
 
-replace github.com/cocomhub/sproxy => ../../
+replace github.com/cocomhub/sproxy => ../../../../..
