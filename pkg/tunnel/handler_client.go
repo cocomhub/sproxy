@@ -16,16 +16,28 @@ import (
 )
 
 // Handler 处理加密隧道请求，支持外部转发和本地路由两种模式。
+//
+// 外部转发（默认）：将加密请求解密后转发到外部目标 URL。
+// 本地路由：当配置了 localHandler 且请求 URL 为相对路径时，将请求直接路由到本地 handler。
+//
+// 两种模式统一使用流式帧协议，响应体通过 Pipe 流式加密，不缓冲在内存中。
+//
+// 密钥轮换：通过 UpdateKey 可运行时热替换密钥，旧密钥保留短时窗口供存量连接完成。
+// 所有新加密使用新密钥；解密时先尝试新密钥，不匹配则尝试旧密钥。
 type Handler struct {
 	keyMu        sync.RWMutex
-	primaryKey   []byte
-	oldKey       []byte
+	primaryKey   []byte // 当前活跃密钥，用于加密和解密
+	oldKey       []byte // 前一个密钥，仅用于解密存量连接（短时窗口）
 	httpClient   *http.Client
 	localHandler http.Handler
 	logger       *slog.Logger
 }
 
 // NewHandler 创建一个仅支持外部转发的加密隧道处理器。
+//
+// 行为同旧版闭包实现。如果 key 为空，处理器直接返回 403 Forbidden。
+// logger 为 nil 时使用 slog.Default()。
+// 使用方式：mux.Handle("POST /tunnel", tunnel.NewHandler(key))
 func NewHandler(key []byte, logger *slog.Logger) http.Handler {
 	log := logger
 	if log == nil {
@@ -45,6 +57,10 @@ func NewHandler(key []byte, logger *slog.Logger) http.Handler {
 }
 
 // NewLocalHandler 创建一个支持本地路由和外部转发的加密隧道处理器。
+//
+// 当请求 URL 为绝对路径（如 /upload）且在 local 中注册时，直接在当前进程中转发到 local handler；
+// 当请求 URL 为绝对 URL（如 https://example.com/api）时，与原 NewHandler 行为一致。
+// logger 为 nil 时使用 slog.Default()。
 func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.Handler {
 	log := logger
 	if log == nil {
@@ -65,6 +81,9 @@ func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.H
 }
 
 // UpdateKey 热替换隧道加密密钥。
+//
+// 调用后，新连接使用 newKey 加密；存量连接仍可用旧密钥解密（写入者已使用旧密钥加密的流）。
+// 多次调用只保留最近两代密钥（当前 + 前一代），更早的密钥不再接受。
 func (h *Handler) UpdateKey(newKey []byte) {
 	h.keyMu.Lock()
 	defer h.keyMu.Unlock()
@@ -73,6 +92,9 @@ func (h *Handler) UpdateKey(newKey []byte) {
 }
 
 // resolveKey 从请求体解析 metadata 帧并尝试所有可用密钥解密。
+//
+// 返回：解密后的 metadata JSON、匹配的密钥（用于后续 body 流解密）、错误。
+// 先尝试 primaryKey，失败后再尝试 oldKey。
 func (h *Handler) resolveKey(r io.Reader) ([]byte, []byte, error) {
 	encMeta, err := readEncMeta(r)
 	if err != nil {
@@ -105,6 +127,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.logger.Debug("隧道请求", "method", r.Method, "remote_addr", r.RemoteAddr)
+
+	// 1. 解析 metadata 帧，使用 resolveKey 尝试 primary + old 密钥
 	metaJSON, resolvedKey, err := h.resolveKey(r.Body)
 	if err != nil {
 		h.logger.Error("解析隧道 metadata 失败", "error", err)
@@ -118,12 +143,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.logger.Debug("隧道请求 metadata", "method", req.Method, "url", req.URL)
+
+	// 2. r.Body 剩余部分为流式加密 body，通过 Pipe + DecryptStream 流式解密
+	//    使用 resolveKey 匹配成功的 resolvedKey（兼容正在轮换中的旧密钥）
 	bodyPr, bodyPw := io.Pipe()
 	go func() {
 		_, decErr := DecryptStream(resolvedKey, r.Body, bodyPw)
 		bodyPw.CloseWithError(decErr)
 	}()
 
+	// 分支：本地路由 vs 外部转发
 	if h.localHandler != nil && isRelativePath(req.URL) {
 		h.dispatchLocal(w, r, &req, bodyPr)
 	} else {
@@ -131,7 +161,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// dispatchLocal 将加密请求路由到本地 handler。
+// dispatchLocal 将加密请求路由到本地 handler，响应体通过 Pipe 流式加密。
 func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader) {
 	localReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, body)
 	if err != nil {
@@ -142,9 +172,11 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 		localReq.Header.Set(k, v)
 	}
 
+	// Pipe：本地 handler 写入 body，流式加密 goroutine 读取
 	bodyPr, bodyPw := io.Pipe()
 	sr := newStreamRecorder(bodyPw)
 
+	// Goroutine：等待 metadata 就绪，写出 metadata 帧 + 流式加密 body
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -167,6 +199,7 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 			Headers:       hdrs,
 			ContentLength: -1,
 		})
+		// 用 primaryKey 加密响应（始终使用最新密钥）
 		h.keyMu.RLock()
 		encKey := h.primaryKey
 		h.keyMu.RUnlock()
@@ -178,6 +211,9 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 		_, _ = EncryptStream(encKey, bodyPr, w)
 	}()
 
+	// 同步运行本地 handler。
+	// 使用 defer + recover 兜底：handler 即便 panic，也能保证 metaReady 被关闭 + bodyPw 被 Close，
+	// 避免上方 goroutine 永远阻塞在 <-sr.metaReady 而导致整个隧道 goroutine 泄漏。
 	func() {
 		defer func() {
 			sr.once.Do(func() { close(sr.metaReady) })
@@ -192,7 +228,7 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 	<-done
 }
 
-// forwardExternal 将加密请求转发到外部目标 URL。
+// forwardExternal 将加密请求转发到外部目标 URL，保持原 NewHandler 的完整行为。
 func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader) {
 	proxyReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, body)
 	if err != nil {
@@ -247,7 +283,9 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 	}
 }
 
-// Client 是加密隧道客户端。
+// Client 是加密隧道客户端，用于向隧道服务端发送加密请求并接收解密响应。
+//
+// 零值不可用，必须通过 NewClient 创建。
 type Client struct {
 	Key        []byte
 	TunnelURL  string
@@ -256,6 +294,14 @@ type Client struct {
 }
 
 // NewClient 创建一个加密隧道客户端。
+//
+// 参数：
+//   - hexKey: 64 位十六进制密钥字符串，与 sproxy 服务端 tunnel_key 一致
+//   - tunnelURL: 隧道服务端地址，如 "http://proxy:8080/tunnel"
+//   - timeout: HTTP 客户端超时时间
+//   - logger: 日志记录器，为 nil 时使用 slog.Default()
+//
+// 如果 hexKey 格式无效（非 64 位十六进制），返回错误。
 func NewClient(hexKey, tunnelURL string, timeout time.Duration, logger *slog.Logger) (*Client, error) {
 	key, err := ParseKey(hexKey)
 	if err != nil {
@@ -281,6 +327,11 @@ func NewClient(hexKey, tunnelURL string, timeout time.Duration, logger *slog.Log
 }
 
 // Do 接受标准 *http.Request，通过加密隧道转发并返回标准 *http.Response。
+//
+// 使用标准库类型，调用方零学习成本。
+// 所有请求/响应统一使用流式帧协议，内存占用恒定（不超过单个加密块大小）。
+// 返回的 *http.Response.Body 为流式 Reader，调用方可边读边消费，关闭时自动释放底层连接。
+// 目标返回非 2xx 状态码时，仍返回 *http.Response（非 error），StatusCode 正确反映目标状态。
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	headers := make(map[string]string)
 	for k := range req.Header {

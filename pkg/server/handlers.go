@@ -37,6 +37,7 @@ type Handlers struct {
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
+// cmd/sproxy 的 SIGHUP 处理流程通过此接口在运行时替换隧道密钥。
 type TunnelUpdater interface {
 	UpdateKey(key []byte)
 }
@@ -58,11 +59,13 @@ type RegisterRoutesOpts struct {
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
+// 调用方应在进程退出前调用 (*Handlers).Close() 以释放后台 goroutine 与持久化资源。
 func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	mux := opts.Mux
 	cfg := opts.CfgPtr.Load()
 	log := defaultLogger(opts.Logger)
 
+	// 初始化 ChecksumStore
 	cs := NewChecksumStore(cfg.UploadsDir, log.With("component", "checksum_store"))
 
 	h := &Handlers{
@@ -77,6 +80,7 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 		routeTable:    opts.RouteTable,
 	}
 
+	// 初始化 StorageManager 和 CloudDownloadManager
 	sm := NewStorageManager(cfg.UploadsDir, cfg.MaxStorageBytes, cs, log.With("component", "storage"))
 	cloudCfg := &CloudDownloadConfig{
 		SyncThreshold: cfg.CloudSyncThreshold,
@@ -201,7 +205,8 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	return h
 }
 
-// Close 释放 Handlers 持有的后台资源。
+// Close 释放 Handlers 持有的后台资源：停止 UploadStore 的 persist/cleanup goroutine 和 StorageManager 的定期扫描。
+// 在进程退出前应调用一次（通常通过 defer h.Close()）。多次调用是安全的。
 func (h *Handlers) Close() error {
 	if h.uploadStore != nil {
 		h.uploadStore.Stop()
@@ -212,7 +217,7 @@ func (h *Handlers) Close() error {
 	return nil
 }
 
-// Handler 返回包装了 metricsMiddleware 的 HTTP handler。
+// Handler 返回包装了 metricsMiddleware 的 HTTP handler，用于 http.Server.Handler。
 func (h *Handlers) Handler() http.Handler {
 	return h.handler
 }

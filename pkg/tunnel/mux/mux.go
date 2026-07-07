@@ -251,6 +251,9 @@ func (m *Mux) removeStream(id StreamID, closeCh bool) {
 }
 
 // rejectStream 向 dialer 发送 FrameReject 拒绝流的创建请求。
+// acceptChFull 为 true 表示因 acceptCh 满而拒绝，false 表示因 maxStreams 限制。
+// 调用来自 handleFrame（readLoop goroutine），writeCh 满时静默丢弃拒绝帧
+// 以防止 readLoop 阻塞影响后续帧处理。调用方已清理流，丢弃拒绝帧是安全的。
 func (m *Mux) rejectStream(sid StreamID, acceptChFull bool) {
 	var reason byte = 0x01
 	if !acceptChFull {
