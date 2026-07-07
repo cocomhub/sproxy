@@ -2,7 +2,10 @@ module github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc
 
 go 1.26
 
-require github.com/pion/webrtc/v4 v4.2.16
+require (
+	github.com/cocomhub/sproxy v0.0.0-00010101000000-000000000000
+	github.com/pion/webrtc/v4 v4.2.16
+)
 
 require (
 	github.com/google/uuid v1.6.0 // indirect

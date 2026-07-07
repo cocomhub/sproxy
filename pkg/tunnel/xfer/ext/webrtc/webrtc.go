@@ -1,6 +1,4 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
-// Use of this source code is governed by an Apache-2.0 style license that
-// can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
 // Package webrtc provides a WebRTC-based peer-to-peer transport layer built on
@@ -23,6 +21,7 @@
 package webrtc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,8 +29,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/pion/webrtc/v4"
 )
+
+func init() {
+	xfer.Register(&xfer.Transport{
+		Name:   "webrtc",
+		Dial:   xferDial,
+		Listen: xferListen,
+	})
+}
 
 const stunServer = "stun:stun.l.google.com:19302"
 const defaultICETimeout = 30 * time.Second
@@ -229,4 +237,117 @@ func Listen(signal *Signal) (*Conn, error) {
 		return nil, fmt.Errorf("listen: detach: %w", err)
 	}
 	return &Conn{raw: raw, pc: pc}, nil
+}
+
+// ---------------------------------------------------------------------------
+// xfer.Conn / xfer.Transport adapter
+// ---------------------------------------------------------------------------
+
+// webrtcXferConn wraps *Conn to implement xfer.Conn.
+type webrtcXferConn struct {
+	raw *Conn
+}
+
+func (c *webrtcXferConn) Send(_ context.Context, msg []byte) error {
+	_, err := c.raw.Write(msg)
+	return err
+}
+
+func (c *webrtcXferConn) Receive(_ context.Context) ([]byte, error) {
+	buf := make([]byte, 65536)
+	n, err := c.raw.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
+func (c *webrtcXferConn) Close() error {
+	return c.raw.Close()
+}
+
+// globalSignals stores signal channels indexed by address, for xfer.Dial/Listen.
+var (
+	signals   = make(map[string]*Signal)
+	signalsMu sync.Mutex
+)
+
+func getOrCreateSignal(addr string) *Signal {
+	signalsMu.Lock()
+	defer signalsMu.Unlock()
+	if s, ok := signals[addr]; ok {
+		return s
+	}
+	s := NewSignal()
+	signals[addr] = s
+	return s
+}
+
+// xferDial implements xfer.Transport.Dial.
+func xferDial(ctx context.Context, addr string) (xfer.Conn, error) {
+	signal := getOrCreateSignal(addr)
+	conn, err := Dial(signal)
+	if err != nil {
+		return nil, err
+	}
+	return &webrtcXferConn{raw: conn}, nil
+}
+
+// webrtcListener implements xfer.Listener.
+type webrtcListener struct {
+	signal   *Signal
+	addr     string
+	acceptCh chan *webrtcXferConn
+	done     chan struct{}
+}
+
+func (l *webrtcListener) Accept(ctx context.Context) (xfer.Conn, error) {
+	select {
+	case c := <-l.acceptCh:
+		return c, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-l.done:
+		return nil, fmt.Errorf("webrtc: listener closed")
+	}
+}
+
+func (l *webrtcListener) Close() error {
+	close(l.done)
+	return nil
+}
+
+func (l *webrtcListener) Addr() string { return l.addr }
+
+// xferListen implements xfer.Transport.Listen.
+func xferListen(ctx context.Context, addr string) (xfer.Listener, error) {
+	signal := getOrCreateSignal(addr)
+	l := &webrtcListener{
+		signal:   signal,
+		addr:     addr,
+		acceptCh: make(chan *webrtcXferConn, 16),
+		done:     make(chan struct{}),
+	}
+	go l.acceptLoop(ctx)
+	return l, nil
+}
+
+func (l *webrtcListener) acceptLoop(ctx context.Context) {
+	for {
+		conn, err := Listen(l.signal)
+		if err != nil {
+			select {
+			case <-l.done:
+				return
+			default:
+				continue
+			}
+		}
+		select {
+		case l.acceptCh <- &webrtcXferConn{raw: conn}:
+		case <-l.done:
+			conn.Close()
+			return
+		}
+	}
 }
