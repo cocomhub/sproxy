@@ -212,9 +212,6 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 
 ### 已知的技术债务
 - `cmd/sproxy/root.go` 中 `runServer` 的信号处理 goroutine 在 `ListenAndServe` 失败时泄漏（`for sig := range signalChan` 永不退出）
-- `cmd/sclient/` 多个子命令在配置缺失时调用 `os.Exit(1)`，导致无法在常规测试中覆盖这些路径（已 `t.Skip`）
-- `captureStdout`/`captureStderr` 在 `cmd/sclient/cmd_test.go` 和 `cmd/sproxy/root_test.go` 中存在私有副本，因 `package main` 无法导入 `pkg/testutil`
-- `integration_test.go` 的 `newTestServerWithAllRoutes` 手动重复了 `RegisterRoutes` 的路由注册，新增路由时容易不同步
 - `test/e2e_test.go` 的 `findModuleRoot` 用文件系统遍历定位 `go.mod`，与已有的 `runtime.Caller` 方案冗余
 
 <!-- superpowers-zh:begin (do not edit between these markers) -->

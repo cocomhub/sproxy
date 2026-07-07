@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/spf13/cobra"
 )
 
@@ -134,7 +135,7 @@ func TestRunServer_VersionFlag(t *testing.T) {
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
 	_ = cmd.Flags().Set("version", "true")
 
-	stdout := captureOutput(func() {
+	stdout := testutil.CaptureStdout(func() {
 		_ = runServer(cmd, nil)
 	})
 	if !strings.Contains(stdout, "Version:") {
@@ -248,27 +249,4 @@ func waitForConfig(t testing.TB, timeout time.Duration) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("config did not become ready within %v", timeout)
-}
-
-func captureOutput(fn func()) string {
-	r, w, _ := os.Pipe()
-	old := os.Stdout
-	os.Stdout = w
-	defer func() { os.Stdout = old }()
-
-	fn()
-	_ = w.Close()
-
-	var buf strings.Builder
-	var dst [4096]byte
-	for {
-		n, err := r.Read(dst[:])
-		if n > 0 {
-			buf.Write(dst[:n])
-		}
-		if err != nil {
-			break
-		}
-	}
-	return buf.String()
 }
