@@ -115,12 +115,30 @@ func GenerateKey() (string, error) {
 	return hex.EncodeToString(key), nil
 }
 
+// blockCache 缓存 AES cipher.Block 实例，避免同一密钥重复做密钥扩展。
+// cipher.Block 接口是 goroutine-safe 的，可安全并发使用。
+var blockCache sync.Map
+
+// getCipherBlock 从缓存中获取 cipher.Block，缓存未命中时创建并缓存。
+func getCipherBlock(key []byte) (cipher.Block, error) {
+	k := string(key)
+	if v, ok := blockCache.Load(k); ok {
+		return v.(cipher.Block), nil //nolint:errcheck
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	blockCache.Store(k, block)
+	return block, nil
+}
+
 // Encrypt 使用 AES-256-GCM 加密明文。
 //
 // 返回的密文格式为：nonce（12 字节） + ciphertext + auth_tag（16 字节）。
 // 每次调用生成随机 nonce，相同明文产生不同密文。
 func Encrypt(key, plaintext []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
+	block, err := getCipherBlock(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
 	}
@@ -141,7 +159,7 @@ func Encrypt(key, plaintext []byte) ([]byte, error) {
 // 自动从密文中提取 nonce（前 12 字节），然后进行 GCM 解密和认证。
 // 如果密文被篡改或密钥不匹配，返回错误。
 func Decrypt(key, data []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
+	block, err := getCipherBlock(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
 	}

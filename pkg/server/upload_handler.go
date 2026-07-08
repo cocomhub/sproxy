@@ -7,16 +7,23 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 )
+
+// hashPool 复用 SHA-256 hash 对象，减少每次上传的分配。
+var hashPool = sync.Pool{
+	New: func() any { return sha256.New() },
+}
 
 // parseUploadMultipart 解析上传请求的 multipart 表单，返回文件、文件信息、期望的 checksum 和错误。
 func (h *Handlers) parseUploadMultipart(w http.ResponseWriter, r *http.Request, logger *slog.Logger) (file multipart.File, handler *multipart.FileHeader, expectedChecksum string, ok bool) {
@@ -133,17 +140,21 @@ func writeFileAtomically(dstPath string, src io.Reader) (checksum string, writte
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	hash := sha256.New()
+	hash := hashPool.Get().(hash.Hash) //nolint:errcheck
+	hash.Reset()
 	mw := io.MultiWriter(tmpFile, hash)
 	written, err = io.Copy(mw, src)
 	if err != nil {
+		hashPool.Put(hash)
 		tmpFile.Close()
 		return "", written, fmt.Errorf("写入临时文件失败: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
+		hashPool.Put(hash)
 		return "", written, fmt.Errorf("关闭临时文件失败: %w", err)
 	}
 	checksum = hex.EncodeToString(hash.Sum(nil))
+	hashPool.Put(hash)
 	if err := atomicRename(tmpPath, dstPath); err != nil {
 		return checksum, written, fmt.Errorf("重命名临时文件失败: %w", err)
 	}
