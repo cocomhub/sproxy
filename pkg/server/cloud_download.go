@@ -512,42 +512,49 @@ func (m *CloudDownloadManager) recoverTasks() {
 	}
 }
 
+// cleanupExpiredOnce 执行一次性的过期任务清理，返回清理的任务数量。
+// 不包含循环，供测试直接调用。
+func (m *CloudDownloadManager) cleanupExpiredOnce() int {
+	now := time.Now()
+	m.mu.Lock()
+	cleaned := 0
+	for id, t := range m.tasks {
+		var ttl time.Duration
+		switch t.Status {
+		case "completed":
+			ttl = m.config.TaskTTL
+		case "failed", "cancelled":
+			ttl = m.config.FailedTaskTTL
+		default:
+			continue
+		}
+		if now.After(t.UpdatedAt.Add(ttl)) {
+			delete(m.tasks, id)
+			_ = os.Remove(filepath.Join(m.persistDir, id+".json"))
+			_ = os.RemoveAll(filepath.Join(m.cloudDir, t.ID))
+			if t.TotalSize > 0 {
+				m.storage.Release(t.TotalSize, CategoryCloud)
+			}
+			if m.checksumStore != nil {
+				remotePath := filepath.Join(cloudDirName, t.ID, t.Filename)
+				m.checksumStore.Delete(remotePath)
+			}
+			cleaned++
+		}
+	}
+	m.mu.Unlock()
+	if cleaned > 0 {
+		m.logger.Info("expired cloud download tasks cleaned up", "count", cleaned)
+	}
+	return cleaned
+}
+
 // cleanupExpired 定期清理过期任务。
 func (m *CloudDownloadManager) cleanupExpired() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
-		now := time.Now()
-		m.mu.Lock()
-		cleaned := 0
-		for id, t := range m.tasks {
-			var ttl time.Duration
-			switch t.Status {
-			case "completed":
-				ttl = m.config.TaskTTL
-			case "failed", "cancelled":
-				ttl = m.config.FailedTaskTTL
-			default:
-				continue
-			}
-			if now.After(t.UpdatedAt.Add(ttl)) {
-				delete(m.tasks, id)
-				_ = os.Remove(filepath.Join(m.persistDir, id+".json"))
-				_ = os.RemoveAll(filepath.Join(m.cloudDir, t.ID))
-				if t.TotalSize > 0 {
-					m.storage.Release(t.TotalSize, CategoryCloud)
-				}
-				if m.checksumStore != nil {
-					remotePath := filepath.Join(cloudDirName, t.ID, t.Filename)
-					m.checksumStore.Delete(remotePath)
-				}
-				cleaned++
-			}
-		}
-		m.mu.Unlock()
-		if cleaned > 0 {
-			m.logger.Info("expired cloud download tasks cleaned up", "count", cleaned)
-		}
+		m.cleanupExpiredOnce()
 	}
 }
 

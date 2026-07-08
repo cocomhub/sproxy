@@ -430,3 +430,18 @@ func TestStoragePeriodicScan_RecalculatesUsage(t *testing.T) {
 		t.Errorf("expected usage to increase after scan, before=%d after=%d", before, after)
 	}
 }
+
+func TestStorageScanOnce_Error(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+
+	// scanOnce 在空目录下不应报错
+	before, after, err := sm.scanOnce()
+	if err != nil {
+		t.Fatalf("scanOnce on empty dir should succeed: %v", err)
+	}
+	if before != 0 || after != 0 {
+		t.Errorf("expected 0/0 for empty dir, got %d/%d", before, after)
+	}
+}

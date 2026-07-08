@@ -626,3 +626,104 @@ func TestValidateCloudDownloadURL_QueryString(t *testing.T) {
 		t.Fatalf("expected extracted filename 'download', got %q", filename)
 	}
 }
+
+func TestCloudCleanupExpiredOnce_ClearsCompleted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := defaultCloudDownloadConfig()
+	cfg.TaskTTL = 1 * time.Millisecond
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr.StopFlush)
+
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status = "completed"
+	task.UpdatedAt = time.Now().Add(-time.Hour)
+	mgr.markDirty(task.ID)
+	mgr.flushDirty()
+
+	cleaned := mgr.cleanupExpiredOnce()
+	if cleaned == 0 {
+		t.Error("expected 1 task to be cleaned up")
+	}
+	mgr.mu.Lock()
+	_, exists := mgr.tasks[task.ID]
+	mgr.mu.Unlock()
+	if exists {
+		t.Error("expected completed task to be cleaned up after TTL")
+	}
+}
+
+func TestCloudCleanupExpiredOnce_SkipsRunning(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := defaultCloudDownloadConfig()
+	cfg.TaskTTL = 1 * time.Millisecond
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr.StopFlush)
+
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status = "downloading"
+
+	cleaned := mgr.cleanupExpiredOnce()
+	if cleaned != 0 {
+		t.Errorf("expected 0 cleanup for downloading task, got %d", cleaned)
+	}
+	mgr.mu.Lock()
+	_, exists := mgr.tasks[task.ID]
+	mgr.mu.Unlock()
+	if !exists {
+		t.Error("expected downloading task to persist after cleanupExpiredOnce")
+	}
+}
+
+func TestCloudFlushDirty_PersistsTasks(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := defaultCloudDownloadConfig()
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr.StopFlush)
+
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mgr.markDirty(task.ID)
+	mgr.flushDirty()
+
+	taskPath := filepath.Join(dir, ".__downloads__", task.ID+".json")
+	if _, err := os.Stat(taskPath); os.IsNotExist(err) {
+		t.Error("expected task persistence file after flushDirty")
+	}
+}
+
+func TestCloudFlushNow_TriggersFlush(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := defaultCloudDownloadConfig()
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr.StopFlush)
+
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mgr.markDirty(task.ID)
+	mgr.FlushNow()
+
+	taskPath := filepath.Join(dir, ".__downloads__", task.ID+".json")
+	if _, err := os.Stat(taskPath); os.IsNotExist(err) {
+		t.Error("expected task persistence file after FlushNow")
+	}
+}

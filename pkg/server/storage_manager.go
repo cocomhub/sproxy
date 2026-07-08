@@ -201,6 +201,16 @@ func (s *StorageManager) addCategory(cat StorageCategory, delta int64) {
 	}
 }
 
+// scanOnce 执行一次全量扫描，校准存储计数器。返回 (before, after, error)。
+func (s *StorageManager) scanOnce() (int64, int64, error) {
+	before := s.totalUsage.Load()
+	if err := s.ScanAndRecalculate(); err != nil {
+		return before, 0, err
+	}
+	after := s.totalUsage.Load()
+	return before, after, nil
+}
+
 // periodicScan 每 30 分钟执行一次全量扫描，校准存储计数器。
 func (s *StorageManager) periodicScan() {
 	ticker := time.NewTicker(30 * time.Minute)
@@ -208,12 +218,11 @@ func (s *StorageManager) periodicScan() {
 	for {
 		select {
 		case <-ticker.C:
-			before := s.totalUsage.Load()
-			if err := s.ScanAndRecalculate(); err != nil {
+			before, after, err := s.scanOnce()
+			if err != nil {
 				s.logger.Warn("periodic storage scan failed", "error", err)
 				continue
 			}
-			after := s.totalUsage.Load()
 			if before != after {
 				s.logger.Info("storage usage recalibrated by periodic scan",
 					"before", before, "after", after, "delta", after-before)
