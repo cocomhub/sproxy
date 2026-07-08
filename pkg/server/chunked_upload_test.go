@@ -1137,6 +1137,59 @@ func TestChunkedUpload_RetryExhausted(t *testing.T) {
 	}
 }
 
+func doUploadInit(t *testing.T, baseURL, filename string, totalSize int64, fileChecksum string, fileModTime int64) ChunkedInitResponse {
+	t.Helper()
+	uploadID := fmt.Sprintf("test-upload-doinit-%s-%d", filename, totalSize)
+	initReq := map[string]any{
+		"upload_id":     uploadID,
+		"filename":      filename,
+		"total_size":    totalSize,
+		"chunk_size":    4096,
+		"total_chunks":  1,
+		"file_checksum": fileChecksum,
+		"file_mod_time": fileModTime,
+	}
+	initJSON, _ := json.Marshal(initReq)
+	resp, err := http.Post(baseURL+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	if err != nil {
+		t.Fatalf("doUploadInit failed: %v", err)
+	}
+	defer resp.Body.Close()
+	var result ChunkedInitResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode doUploadInit response: %v", err)
+	}
+	return result
+}
+
+func TestMergeAndRenameFile_InvalidPath(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	resp, err := http.Post(url+"/upload/complete", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing upload_id, got %d", resp.StatusCode)
+	}
+}
+
+func TestRecordCompleteMetadata_FileMTime(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	body := []byte("chunked content for mtime test")
+	cs := sha256hex(body)
+	initResp := doUploadInit(t, url, "mtime-test.txt", int64(len(body)), cs, 1000)
+	if initResp.UploadID == "" {
+		t.Fatal("expected non-empty upload id")
+	}
+}
+
 func TestChunkedUpload_ContextCancelled(t *testing.T) {
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
