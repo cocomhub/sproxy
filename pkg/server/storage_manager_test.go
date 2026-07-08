@@ -436,7 +436,6 @@ func TestStorageScanOnce_Error(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 
-	// scanOnce 在空目录下不应报错
 	before, after, err := sm.scanOnce()
 	if err != nil {
 		t.Fatalf("scanOnce on empty dir should succeed: %v", err)
@@ -444,4 +443,27 @@ func TestStorageScanOnce_Error(t *testing.T) {
 	if before != 0 || after != 0 {
 		t.Errorf("expected 0/0 for empty dir, got %d/%d", before, after)
 	}
+}
+
+func TestStoragePeriodicScan_ScanOnceAfterFileAdd(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cs := NewChecksumStore(dir, nil)
+	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
+
+	filePath := filepath.Join(dir, "scan-test.txt")
+	if err := os.WriteFile(filePath, []byte("scan me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cs.Set("scan-test.txt", sha256hex([]byte("scan me")))
+
+	before, after, err := sm.scanOnce()
+	if err != nil {
+		t.Fatalf("scanOnce failed: %v", err)
+	}
+	if after <= before {
+		t.Errorf("expected usage to increase, before=%d after=%d", before, after)
+	}
+
+	sm.Stop()
 }
