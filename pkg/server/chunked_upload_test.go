@@ -1223,3 +1223,39 @@ func TestChunkedUpload_ContextCancelled(t *testing.T) {
 	// 如果能拿到响应，应该是有效的 HTTP 状态码（而不是 panic）
 	t.Logf("context cancelled init returned status %d", resp.StatusCode)
 }
+
+// TestMergeAndRenameFile_FullFlow 通过完整的端到端分块上传流程间接覆盖 mergeAndRenameFile 成功路径。
+func TestMergeAndRenameFile_FullFlow(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	content := []byte("full flow merge test content for mergeAndRenameFile")
+	cs := sha256hex(content)
+
+	// 初始化分块上传
+	initResp := doUploadInit(t, url, "merge-full-test.txt", int64(len(content)), cs, 0)
+	if initResp.UploadID == "" {
+		t.Fatal("expected non-empty upload id")
+	}
+
+	// 上传单个分块（分块上传流程）
+	uploadChunk(t, url, initResp.UploadID, 0, cs, content)
+
+	// 完成上传 -> 触发 mergeAndRenameFile
+	completeBody, _ := json.Marshal(map[string]string{"upload_id": initResp.UploadID})
+	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var result ChunkCompleteResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if !result.Success {
+		t.Fatalf("merge and rename failed: %v", result)
+	}
+	if result.FileChecksum != cs {
+		t.Fatalf("checksum mismatch: got %s, want %s", result.FileChecksum, cs)
+	}
+}

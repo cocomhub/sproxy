@@ -53,3 +53,19 @@ func TestResolveFilePath_AbsolutePath(t *testing.T) {
 		t.Errorf("expected 400 for absolute path, got %d: %s", status, respBody)
 	}
 }
+
+// TestAtomicRename_SuccessPath 通过正常文件上传间接测试 atomicRename 的成功路径。
+// upload -> writeFileAtomically -> atomicRename(src, dst)，覆盖快速路径（os.Rename 直接成功）。
+func TestAtomicRename_SuccessPath(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("test atomic rename success")
+	cs := sha256hex(body)
+	status, respBody := uploadFile(t, url, "atomic-test.txt", body, map[string]string{
+		"X-File-Checksum": cs,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", status, respBody)
+	}
+}
