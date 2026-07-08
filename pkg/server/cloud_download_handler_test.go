@@ -525,3 +525,32 @@ func TestCloudHandler_BatchCreateDownload_MaxLimit(t *testing.T) {
 		t.Fatalf("expected 400 for 101 URLs, got %d", resp.StatusCode)
 	}
 }
+
+func TestCloudHandler_CancelNonexistent(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/nonexistent/cancel", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for nonexistent task, got %d", resp.StatusCode)
+	}
+}
+
+func TestCloudHandler_DeleteNonexistent(t *testing.T) {
+	ts, _ := setupCloudTestServer(t)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/api/cloud/tasks/nonexistent", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for nonexistent task, got %d", resp.StatusCode)
+	}
+}

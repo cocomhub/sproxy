@@ -166,7 +166,11 @@ func (h *Handlers) cloudGetTask(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) cloudCancelTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.cloudMgr.CancelTask(id); err != nil {
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
 		return
 	}
 	sendJSONResponse(w, map[string]string{"status": "cancelled"}, http.StatusOK)
