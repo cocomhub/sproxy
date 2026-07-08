@@ -65,7 +65,7 @@ func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-// sendRequestMeta 将请求元数据（方法、URL、Header）序列化、加密并写入流。
+// sendRequestMeta 将请求元数据序列化、加密并写入流。
 func (t *Tunnel) sendRequestMeta(stream mux.Stream, req *http.Request) error {
 	reqMeta, err := json.Marshal(&Request{
 		Method:  req.Method,
@@ -97,7 +97,7 @@ func (t *Tunnel) sendRequestMeta(stream mux.Stream, req *http.Request) error {
 	return nil
 }
 
-// sendRequestBody 将请求体写入流（加密或明文）。
+// sendRequestBody 将请求体写入流。
 func (t *Tunnel) sendRequestBody(stream mux.Stream, req *http.Request) error {
 	if req.Body == nil {
 		return nil
@@ -114,7 +114,7 @@ func (t *Tunnel) sendRequestBody(stream mux.Stream, req *http.Request) error {
 	return nil
 }
 
-// readResponseMeta 从流中读取响应元数据（长度前缀 + 数据 + 解密 + 反序列化）。
+// readResponseMeta 从流中读取响应元数据。
 func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(stream, lenBuf); err != nil {
@@ -143,82 +143,7 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 	return &respMeta, nil
 }
 
-// streamBody 包装 mux.Stream 为 io.ReadCloser，用于响应体。
-// 当 key 非 nil 时，自动解密流。
-// 使用预读缓冲优化大文件读取性能，减少 mux 内部消息传递次数。
-type streamBody struct {
-	stream mux.Stream
-	key    []byte
-	once   sync.Once
-	pr     *io.PipeReader
-	pw     *io.PipeWriter
-
-	// 预读缓冲（加密与非加密模式共用）
-	rdBuf []byte
-	rdOff int
-}
-
-const streamBodyBufSize = 65536 // 64 KB 预读缓冲
-
-func (b *streamBody) Read(p []byte) (int, error) {
-	if b.key != nil {
-		// 加密模式：使用预读缓冲
-		if len(b.rdBuf) == 0 || b.rdOff >= len(b.rdBuf) {
-			b.rdBuf = make([]byte, streamBodyBufSize)
-			// 懒初始化 Pipe + goroutine 解密（仅一次）
-			b.once.Do(func() {
-				b.pr, b.pw = io.Pipe()
-				go func() {
-					_, err := DecryptStream(b.key, b.stream, b.pw)
-					b.pw.CloseWithError(err)
-				}()
-			})
-			n, err := b.pr.Read(b.rdBuf)
-			if err != nil && err != io.EOF {
-				return 0, err
-			}
-			b.rdBuf = b.rdBuf[:n]
-			b.rdOff = 0
-			if n == 0 {
-				return 0, io.EOF
-			}
-		}
-		n := copy(p, b.rdBuf[b.rdOff:])
-		b.rdOff += n
-		return n, nil
-	}
-
-	// 非加密模式：预读缓冲（原逻辑不变）
-	if b.rdOff >= len(b.rdBuf) {
-		b.rdBuf = make([]byte, streamBodyBufSize)
-		n, err := io.ReadAtLeast(b.stream, b.rdBuf, 1)
-		if err != nil && err != io.EOF {
-			return 0, err
-		}
-		b.rdBuf = b.rdBuf[:n]
-		b.rdOff = 0
-		if n == 0 {
-			return 0, io.EOF
-		}
-	}
-
-	n := copy(p, b.rdBuf[b.rdOff:])
-	b.rdOff += n
-	return n, nil
-}
-
-func (b *streamBody) Close() error {
-	b.once.Do(func() {
-		if b.pr != nil {
-			b.pr.Close()
-			return
-		}
-		b.stream.Close()
-	})
-	return nil
-}
-
-// Serve 在隧道上提供 HTTP 服务（服务端）。
+// Serve 在隧道上提供 HTTP 服务。
 func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	for {
 		stream, err := t.mux.Accept(ctx)
@@ -229,7 +154,46 @@ func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	}
 }
 
-// readAndDecryptMeta 从流中读取请求元数据（长度前缀 + 数据 + 解密 + 反序列化）。
+// handleStream 处理一条隧道流。
+func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
+	defer stream.CloseWrite()
+
+	reqMeta, err := t.readAndDecryptMeta(stream)
+	if err != nil {
+		return
+	}
+
+	var bodyReader io.ReadCloser
+	if t.key != nil {
+		pr, pw := io.Pipe()
+		bodyReader = pr
+		go func() {
+			_, decErr := DecryptStream(t.key, stream, pw)
+			pw.CloseWithError(decErr)
+		}()
+	} else {
+		bodyReader = &noopCloseReader{Reader: stream}
+	}
+
+	localReq, err := http.NewRequest(reqMeta.Method, reqMeta.URL, bodyReader)
+	if err != nil {
+		return
+	}
+	for k, v := range reqMeta.Headers {
+		localReq.Header.Set(k, v)
+	}
+
+	buf := new(bytes.Buffer)
+	code := http.StatusOK
+	hdrs := make(http.Header)
+	rw := &bufferedResponseWriter{buf: buf, code: &code, hdrs: &hdrs}
+	handler.ServeHTTP(rw, localReq)
+	bodyReader.Close()
+
+	t.writeEncryptedResponse(stream, code, hdrs, buf)
+}
+
+// readAndDecryptMeta 从流中读取请求元数据。
 func (t *Tunnel) readAndDecryptMeta(stream mux.Stream) (*Request, error) {
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(stream, lenBuf); err != nil {
@@ -261,7 +225,7 @@ func (t *Tunnel) readAndDecryptMeta(stream mux.Stream) (*Request, error) {
 	return &reqMeta, nil
 }
 
-// writeEncryptedResponse 将响应 metadata（序列化+加密）和 body（加密或明文）写入流。
+// writeEncryptedResponse 将响应 metadata 和 body 写入流。
 func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.Header, buf *bytes.Buffer) {
 	respMetaJSON, _ := json.Marshal(Response{
 		Proto:         "HTTP/1.1",
@@ -289,91 +253,71 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 	}
 }
 
-func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
-	defer stream.CloseWrite()
-	// 注意：不 defer stream.Close() — 由客户端读完响应后主动 Close
+// streamBody 包装 mux.Stream 为 io.ReadCloser，用于响应体。
+type streamBody struct {
+	stream mux.Stream
+	key    []byte
+	once   sync.Once
+	pr     *io.PipeReader
+	pw     *io.PipeWriter
 
-	reqMeta, err := t.readAndDecryptMeta(stream)
-	if err != nil {
-		return
-	}
-
-	var bodyReader io.ReadCloser
-	if t.key != nil {
-		pr, pw := io.Pipe()
-		bodyReader = pr
-		go func() {
-			_, decErr := DecryptStream(t.key, stream, pw)
-			pw.CloseWithError(decErr)
-		}()
-	} else {
-		bodyReader = &noopCloseReader{Reader: stream}
-	}
-
-	localReq, err := http.NewRequest(reqMeta.Method, reqMeta.URL, bodyReader)
-	if err != nil {
-		return
-	}
-	for k, v := range reqMeta.Headers {
-		localReq.Header.Set(k, v)
-	}
-
-	// 缓冲整个响应 body
-	buf := new(bytes.Buffer)
-	code := http.StatusOK
-	hdrs := make(http.Header)
-	rw := &bufferedResponseWriter{buf: buf, code: &code, hdrs: &hdrs}
-	handler.ServeHTTP(rw, localReq)
-	bodyReader.Close()
-
-	t.writeEncryptedResponse(stream, code, hdrs, buf)
+	rdBuf []byte
+	rdOff int
 }
 
-// noopCloseReader 包装 io.Reader 为 io.ReadCloser，Close 是空操作。
-type noopCloseReader struct{ io.Reader }
+const streamBodyBufSize = 65536 // 64 KB 预读缓冲
 
-func (noopCloseReader) Close() error { return nil }
-
-// bufferedResponseWriter 缓冲整个响应。
-type bufferedResponseWriter struct {
-	buf      *bytes.Buffer
-	code     *int
-	hdrs     *http.Header
-	mu       sync.Mutex
-	wroteHdr bool
-}
-
-func (rw *bufferedResponseWriter) Header() http.Header { return *rw.hdrs }
-
-func (rw *bufferedResponseWriter) WriteHeader(code int) {
-	rw.mu.Lock()
-	defer rw.mu.Unlock()
-	if !rw.wroteHdr {
-		*rw.code = code
-		rw.wroteHdr = true
+func (b *streamBody) Read(p []byte) (int, error) {
+	if b.key != nil {
+		if len(b.rdBuf) == 0 || b.rdOff >= len(b.rdBuf) {
+			b.rdBuf = make([]byte, streamBodyBufSize)
+			b.once.Do(func() {
+				b.pr, b.pw = io.Pipe()
+				go func() {
+					_, err := DecryptStream(b.key, b.stream, b.pw)
+					b.pw.CloseWithError(err)
+				}()
+			})
+			n, err := b.pr.Read(b.rdBuf)
+			if err != nil && err != io.EOF {
+				return 0, err
+			}
+			b.rdBuf = b.rdBuf[:n]
+			b.rdOff = 0
+			if n == 0 {
+				return 0, io.EOF
+			}
+		}
+		n := copy(p, b.rdBuf[b.rdOff:])
+		b.rdOff += n
+		return n, nil
 	}
-}
 
-func (rw *bufferedResponseWriter) Write(data []byte) (int, error) {
-	rw.mu.Lock()
-	if !rw.wroteHdr {
-		*rw.code = http.StatusOK
-		rw.wroteHdr = true
-	}
-	rw.mu.Unlock()
-	return rw.buf.Write(data)
-}
-
-// flattenHeaders 将 http.Header（map[string][]string）转为 map[string]string。
-func flattenHeaders(h http.Header) map[string]string {
-	if h == nil {
-		return nil
-	}
-	r := make(map[string]string, len(h))
-	for k, v := range h {
-		if len(v) > 0 {
-			r[k] = v[0]
+	if b.rdOff >= len(b.rdBuf) {
+		b.rdBuf = make([]byte, streamBodyBufSize)
+		n, err := io.ReadAtLeast(b.stream, b.rdBuf, 1)
+		if err != nil && err != io.EOF {
+			return 0, err
+		}
+		b.rdBuf = b.rdBuf[:n]
+		b.rdOff = 0
+		if n == 0 {
+			return 0, io.EOF
 		}
 	}
-	return r
+
+	n := copy(p, b.rdBuf[b.rdOff:])
+	b.rdOff += n
+	return n, nil
+}
+
+func (b *streamBody) Close() error {
+	b.once.Do(func() {
+		if b.pr != nil {
+			b.pr.Close()
+			return
+		}
+		b.stream.Close()
+	})
+	return nil
 }
