@@ -538,7 +538,7 @@ function statsTableHtml(du, rc, s) {
     '<tr><td style="padding:5px 0;color:#777">上传字节数</td><td style="text-align:right">' + formatBytes(s.bytes_uploaded) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">下载文件数</td><td style="text-align:right">' + (s.files_downloaded ?? 0) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">下载字节数</td><td style="text-align:right">' + formatBytes(s.bytes_downloaded) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="content/rich:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
+    '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
 }
 
 // --- 初始化 ---
