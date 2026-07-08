@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
 
 // newTestServerWithMetrics 创建带 Metrics 的测试服务，并挂载 /metrics 路由。
@@ -218,5 +220,97 @@ func TestMetricsSnapshot_Nil(t *testing.T) {
 	s := m.Snapshot()
 	if s != nil {
 		t.Errorf("nil metrics: expected nil snapshot, got %v", s)
+	}
+}
+
+func TestMetricsHandler_FullOutput(t *testing.T) {
+	ts, h := newTestServerWithMetrics(t)
+	h.metrics.RequestsTotal.Add(10)
+	h.metrics.Requests2XX.Add(5)
+	h.metrics.Requests4XX.Add(3)
+	h.metrics.Requests5XX.Add(1)
+	h.metrics.BytesUploaded.Add(1000)
+	h.metrics.BytesDownloaded.Add(500)
+	h.metrics.ActiveConnections.Store(1) // middleware 会在请求期间 +1，最终输出 2
+	h.metrics.FilesUploaded.Add(3)
+	h.metrics.FilesDownloaded.Add(2)
+	h.metrics.FilesDeleted.Add(1)
+
+	resp, err := http.Get(ts.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	output := string(body)
+
+	checks := []string{
+		"sproxy_requests_total 10",
+		"sproxy_requests_2xx 5",
+		"sproxy_requests_4xx 3",
+		"sproxy_requests_5xx 1",
+		"sproxy_bytes_uploaded 1000",
+		"sproxy_bytes_downloaded 500",
+		"sproxy_active_connections 2",
+		"sproxy_files_uploaded 3",
+		"sproxy_files_downloaded 2",
+		"sproxy_files_deleted 1",
+	}
+	for _, c := range checks {
+		if !strings.Contains(output, c) {
+			t.Errorf("expected metrics output to contain %q", c)
+		}
+	}
+}
+
+func TestMetricsHandler_NilMetrics(t *testing.T) {
+	h := &Handlers{}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/metrics", nil)
+	h.MetricsHandler(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "No metrics collected") {
+		t.Errorf("expected 'No metrics collected' message")
+	}
+}
+
+func TestMetricsHandler_WithMuxMetrics(t *testing.T) {
+	ts, h := newTestServerWithMetrics(t)
+	mm := &mux.Metrics{}
+	mm.Streams.Opened.Add(5)
+	mm.Streams.BytesRead.Add(1000)
+	mm.Streams.BytesWritten.Add(2000)
+	mm.Streams.Errors.Add(1)
+	mm.FramesSent.Add(10)
+	mm.FramesReceived.Add(8)
+	mm.PingsSent.Add(2)
+	mm.PongsReceived.Add(2)
+	mm.Errors.Add(0)
+	h.muxMetrics = mm
+
+	resp, err := http.Get(ts.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	output := string(body)
+
+	checks := []string{
+		"sproxy_mux_streams_opened 5",
+		"sproxy_mux_bytes_read 1000",
+		"sproxy_mux_bytes_written 2000",
+		"sproxy_mux_stream_errors 1",
+		"sproxy_mux_frames_sent 10",
+		"sproxy_mux_frames_received 8",
+		"sproxy_mux_pings_sent 2",
+		"sproxy_mux_pongs_received 2",
+	}
+	for _, c := range checks {
+		if !strings.Contains(output, c) {
+			t.Errorf("expected metrics output to contain %q", c)
+		}
 	}
 }

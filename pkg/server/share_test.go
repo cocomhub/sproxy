@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -136,6 +137,49 @@ func TestShare_NonExistentFile(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for non-existent file, got %d", resp.StatusCode)
+	}
+}
+
+func TestShare_CreateEviction(t *testing.T) {
+	t.Parallel()
+	ss := NewShareStore()
+	// 填满上限，所有条目立即过期（TTL=0 => ExpiresAt ≈ now，eviction 时已过期）
+	for i := range maxShareEntries {
+		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "/tmp/file", 0, 0, false)
+		if err != nil {
+			t.Fatalf("unexpected error at iteration %d: %v", i, err)
+		}
+	}
+	// 触发 eviction：应该成功删除过期条目再新增
+	link, err := ss.Create("newfile.txt", "/tmp/file", time.Hour, 0, false)
+	if err != nil {
+		t.Fatalf("expected eviction to succeed, got: %v", err)
+	}
+	if link.Token == "" {
+		t.Fatal("expected non-empty token")
+	}
+	ss.mu.Lock()
+	count := len(ss.links)
+	ss.mu.Unlock()
+	if count > maxShareEntries {
+		t.Errorf("expected at most %d entries after eviction, got %d", maxShareEntries, count)
+	}
+}
+
+func TestShare_CreateEvictionNoExpired(t *testing.T) {
+	t.Parallel()
+	ss := NewShareStore()
+	// 填满上限，所有条目 1 小时后才过期（eviction 时无过期条目）
+	for i := range maxShareEntries {
+		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "/tmp/file", time.Hour, 0, false)
+		if err != nil {
+			t.Fatalf("unexpected error at iteration %d: %v", i, err)
+		}
+	}
+	// 无过期条目可淘汰，应该返回错误
+	_, err := ss.Create("overflow.txt", "/tmp/file", time.Hour, 0, false)
+	if err == nil {
+		t.Error("expected error when share store is full with no expired entries")
 	}
 }
 

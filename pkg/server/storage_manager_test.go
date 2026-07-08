@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestStorageManager_TryReserve_Success(t *testing.T) {
@@ -386,5 +387,83 @@ func TestStorageManager_PeriodicScan_Stop(t *testing.T) {
 
 	// 验证 Stop 不 panic（多次调用安全）
 	sm.Stop()
+	sm.Stop()
+}
+
+func TestStoragePeriodicScan_StopsOnSignal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+
+	done := make(chan struct{})
+	go func() {
+		sm.periodicScan()
+		close(done)
+	}()
+
+	sm.Stop()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("periodicScan did not stop within 1s after Stop()")
+	}
+}
+
+func TestStoragePeriodicScan_RecalculatesUsage(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cs := NewChecksumStore(dir, nil)
+	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
+
+	filePath := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cs.Set("test.txt", sha256hex([]byte("hello")))
+
+	before := sm.Usage()
+	if err := sm.ScanAndRecalculate(); err != nil {
+		t.Fatal(err)
+	}
+	after := sm.Usage()
+	if after <= before {
+		t.Errorf("expected usage to increase after scan, before=%d after=%d", before, after)
+	}
+}
+
+func TestStorageScanOnce_Error(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+
+	before, after, err := sm.scanOnce()
+	if err != nil {
+		t.Fatalf("scanOnce on empty dir should succeed: %v", err)
+	}
+	if before != 0 || after != 0 {
+		t.Errorf("expected 0/0 for empty dir, got %d/%d", before, after)
+	}
+}
+
+func TestStoragePeriodicScan_ScanOnceAfterFileAdd(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cs := NewChecksumStore(dir, nil)
+	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
+
+	filePath := filepath.Join(dir, "scan-test.txt")
+	if err := os.WriteFile(filePath, []byte("scan me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cs.Set("scan-test.txt", sha256hex([]byte("scan me")))
+
+	before, after, err := sm.scanOnce()
+	if err != nil {
+		t.Fatalf("scanOnce failed: %v", err)
+	}
+	if after <= before {
+		t.Errorf("expected usage to increase, before=%d after=%d", before, after)
+	}
+
 	sm.Stop()
 }

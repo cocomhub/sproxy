@@ -1,12 +1,12 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package downloader_test
+package downloader
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
-
-	"github.com/cocomhub/sproxy/pkg/server/downloader"
 )
 
 func TestValidateURLHost_RejectsPrivateIPs(t *testing.T) {
@@ -46,7 +46,7 @@ func TestValidateURLHost_RejectsPrivateIPs(t *testing.T) {
 		{"not-a-url", true},
 	}
 	for _, tt := range tests {
-		err := downloader.ValidateURLHost(tt.url)
+		err := ValidateURLHost(tt.url)
 		if (err != nil) != tt.wantErr {
 			t.Errorf("ValidateURLHost(%q) error=%v, wantErr=%v", tt.url, err, tt.wantErr)
 		}
@@ -54,32 +54,32 @@ func TestValidateURLHost_RejectsPrivateIPs(t *testing.T) {
 }
 
 func TestValidateURLHost_IPv6Loopback(t *testing.T) {
-	err := downloader.ValidateURLHost("http://[::1]:80/path")
+	err := ValidateURLHost("http://[::1]:80/path")
 	if err == nil {
 		t.Error("expected error for IPv6 loopback")
 	}
 }
 
 func TestValidateURLHost_IPv4MappedIPv6(t *testing.T) {
-	err := downloader.ValidateURLHost("http://[::ffff:127.0.0.1]:80/path")
+	err := ValidateURLHost("http://[::ffff:127.0.0.1]:80/path")
 	if err == nil {
 		t.Error("expected error for IPv4-mapped IPv6 loopback")
 	}
 }
 
 func TestValidateURLHost_PublicHostname(t *testing.T) {
-	err := downloader.ValidateURLHost("https://example.com/file.zip")
+	err := ValidateURLHost("https://example.com/file.zip")
 	if err != nil {
 		t.Logf("ValidateURLHost for example.com: %v (may need network)", err)
 	}
 }
 
 func TestValidateURLHost_InvalidURL(t *testing.T) {
-	err := downloader.ValidateURLHost("")
+	err := ValidateURLHost("")
 	if err == nil {
 		t.Error("expected error for empty URL")
 	}
-	err = downloader.ValidateURLHost("://")
+	err = ValidateURLHost("://")
 	if err == nil {
 		t.Error("expected error for malformed URL")
 	}
@@ -87,28 +87,59 @@ func TestValidateURLHost_InvalidURL(t *testing.T) {
 
 func TestValidateURLHost_ReservedRanges(t *testing.T) {
 	// 0.0.0.0/8 范围内的地址
-	err := downloader.ValidateURLHost("http://0.1.2.3/file")
+	err := ValidateURLHost("http://0.1.2.3/file")
 	if err == nil {
 		t.Error("expected error for 0.0.0.0/8 address")
 	}
 	// 广播地址
-	err = downloader.ValidateURLHost("http://255.255.255.255:80/file")
+	err = ValidateURLHost("http://255.255.255.255:80/file")
 	if err == nil {
 		t.Error("expected error for broadcast address")
 	}
 	// CGNAT
-	err = downloader.ValidateURLHost("http://100.64.0.1:80/file")
+	err = ValidateURLHost("http://100.64.0.1:80/file")
 	if err == nil {
 		t.Error("expected error for CGNAT address")
 	}
 	// 198.18.0.0/15 benchmark
-	err = downloader.ValidateURLHost("http://198.18.0.1:80/file")
+	err = ValidateURLHost("http://198.18.0.1:80/file")
 	if err == nil {
 		t.Error("expected error for benchmark address")
 	}
 	// 240.0.0.0/4 reserved
-	err = downloader.ValidateURLHost("http://240.0.0.1:80/file")
+	err = ValidateURLHost("http://240.0.0.1:80/file")
 	if err == nil {
 		t.Error("expected error for 240.0.0.0/4 reserved address")
+	}
+}
+
+func TestSafeCheckRedirect_TooManyRedirects(t *testing.T) {
+	fn := safeCheckRedirect()
+	req := httptest.NewRequest("GET", "http://example.com", nil)
+	via := make([]*http.Request, 10)
+	for i := range via {
+		via[i] = httptest.NewRequest("GET", "http://example.com", nil)
+	}
+	err := fn(req, via)
+	if err == nil {
+		t.Error("expected error after 10 redirects")
+	}
+}
+
+func TestSafeCheckRedirect_ExternalURLValidates(t *testing.T) {
+	fn := safeCheckRedirect()
+	req := httptest.NewRequest("GET", "http://127.0.0.1:8080/evil", nil)
+	err := fn(req, nil)
+	if err == nil {
+		t.Error("expected error for loopback redirect")
+	}
+}
+
+func TestSafeCheckRedirect_InternalPathOK(t *testing.T) {
+	fn := safeCheckRedirect()
+	req := httptest.NewRequest("GET", "/local/path", nil)
+	err := fn(req, nil)
+	if err != nil {
+		t.Errorf("expected no error for internal path, got: %v", err)
 	}
 }

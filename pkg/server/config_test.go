@@ -166,3 +166,23 @@ func TestSaveConfig_ReadOnlyDir(t *testing.T) {
 		t.Fatal("expected error when saving to read-only directory")
 	}
 }
+
+func TestSaveConfig_InvalidPath(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	err := SaveConfig(cfg, "/nonexistent/dir/config.yaml")
+	if err == nil {
+		t.Error("expected error saving to nonexistent directory")
+	}
+}
+
+func TestLoadConfig_FileNotFound(t *testing.T) {
+	t.Parallel()
+	cfg, err := LoadConfig("/nonexistent/config.yaml")
+	if err != nil {
+		t.Logf("LoadConfig for nonexistent file returned error: %v (acceptable)", err)
+	}
+	if cfg == nil {
+		t.Log("LoadConfig returned nil config (acceptable)")
+	}
+}

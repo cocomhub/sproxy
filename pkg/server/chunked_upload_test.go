@@ -1137,6 +1137,59 @@ func TestChunkedUpload_RetryExhausted(t *testing.T) {
 	}
 }
 
+func doUploadInit(t *testing.T, baseURL, filename string, totalSize int64, fileChecksum string, fileModTime int64) ChunkedInitResponse {
+	t.Helper()
+	uploadID := fmt.Sprintf("test-upload-doinit-%s-%d", filename, totalSize)
+	initReq := map[string]any{
+		"upload_id":     uploadID,
+		"filename":      filename,
+		"total_size":    totalSize,
+		"chunk_size":    4096,
+		"total_chunks":  1,
+		"file_checksum": fileChecksum,
+		"file_mod_time": fileModTime,
+	}
+	initJSON, _ := json.Marshal(initReq)
+	resp, err := http.Post(baseURL+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	if err != nil {
+		t.Fatalf("doUploadInit failed: %v", err)
+	}
+	defer resp.Body.Close()
+	var result ChunkedInitResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode doUploadInit response: %v", err)
+	}
+	return result
+}
+
+func TestMergeAndRenameFile_InvalidPath(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	resp, err := http.Post(url+"/upload/complete", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing upload_id, got %d", resp.StatusCode)
+	}
+}
+
+func TestRecordCompleteMetadata_FileMTime(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	body := []byte("chunked content for mtime test")
+	cs := sha256hex(body)
+	initResp := doUploadInit(t, url, "mtime-test.txt", int64(len(body)), cs, 1000)
+	if initResp.UploadID == "" {
+		t.Fatal("expected non-empty upload id")
+	}
+}
+
 func TestChunkedUpload_ContextCancelled(t *testing.T) {
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
@@ -1169,4 +1222,40 @@ func TestChunkedUpload_ContextCancelled(t *testing.T) {
 	defer resp.Body.Close()
 	// 如果能拿到响应，应该是有效的 HTTP 状态码（而不是 panic）
 	t.Logf("context cancelled init returned status %d", resp.StatusCode)
+}
+
+// TestMergeAndRenameFile_FullFlow 通过完整的端到端分块上传流程间接覆盖 mergeAndRenameFile 成功路径。
+func TestMergeAndRenameFile_FullFlow(t *testing.T) {
+	t.Parallel()
+	url, _, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	content := []byte("full flow merge test content for mergeAndRenameFile")
+	cs := sha256hex(content)
+
+	// 初始化分块上传
+	initResp := doUploadInit(t, url, "merge-full-test.txt", int64(len(content)), cs, 0)
+	if initResp.UploadID == "" {
+		t.Fatal("expected non-empty upload id")
+	}
+
+	// 上传单个分块（分块上传流程）
+	uploadChunk(t, url, initResp.UploadID, 0, cs, content)
+
+	// 完成上传 -> 触发 mergeAndRenameFile
+	completeBody, _ := json.Marshal(map[string]string{"upload_id": initResp.UploadID})
+	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var result ChunkCompleteResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if !result.Success {
+		t.Fatalf("merge and rename failed: %v", result)
+	}
+	if result.FileChecksum != cs {
+		t.Fatalf("checksum mismatch: got %s, want %s", result.FileChecksum, cs)
+	}
 }

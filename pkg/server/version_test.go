@@ -6,7 +6,10 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"testing"
 )
 
@@ -289,4 +292,90 @@ func TestDeleteVersion_NonExistent(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for non-existent version, got %d", resp.StatusCode)
 	}
+}
+
+// ---- restoreVersionHandler tests ----
+
+func TestRestoreVersionHandler_DisabledVersioning(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+	cfg := cfgPtr.Load()
+	cfg.Versioning.Enabled = false
+	cfgPtr.Store(cfg)
+
+	resp, err := http.Post(url+"/api/versions/restore?filename=test.txt&version_id=1", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("expected 501 for disabled versioning, got %d", resp.StatusCode)
+	}
+}
+
+func TestRestoreVersionHandler_MissingParams(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	resp, err := http.Post(url+"/api/versions/restore?version_id=1", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing filename, got %d", resp.StatusCode)
+	}
+
+	resp, err = http.Post(url+"/api/versions/restore?filename=test.txt", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for missing version_id, got %d", resp.StatusCode)
+	}
+}
+
+// ---- private method tests ----
+
+func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.UploadsDir = t.TempDir()
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	mux := http.NewServeMux()
+	key := make([]byte, 32)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:       mux,
+		CfgPtr:    &cfgPtr,
+		Version:   "test",
+		BuildAt:   "test",
+		TunnelKey: key,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() { _ = h.Close() })
+
+	h.saveVersionBeforeOverwrite("")
+}
+
+func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.UploadsDir = t.TempDir()
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	mux := http.NewServeMux()
+	key := make([]byte, 32)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:       mux,
+		CfgPtr:    &cfgPtr,
+		Version:   "test",
+		BuildAt:   "test",
+		TunnelKey: key,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	t.Cleanup(func() { _ = h.Close() })
+
+	h.cleanupOldVersions("test.txt", t.TempDir())
 }
