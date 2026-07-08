@@ -123,7 +123,7 @@ var blockCache sync.Map
 func getCipherBlock(key []byte) (cipher.Block, error) {
 	k := string(key)
 	if v, ok := blockCache.Load(k); ok {
-		return v.(cipher.Block), nil
+		return v.(cipher.Block), nil //nolint:errcheck
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {

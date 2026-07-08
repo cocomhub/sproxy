@@ -140,7 +140,7 @@ func writeFileAtomically(dstPath string, src io.Reader) (checksum string, writte
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	hash := hashPool.Get().(hash.Hash)
+	hash := hashPool.Get().(hash.Hash) //nolint:errcheck
 	hash.Reset()
 	mw := io.MultiWriter(tmpFile, hash)
 	written, err = io.Copy(mw, src)
