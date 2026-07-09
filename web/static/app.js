@@ -815,3 +815,98 @@ function cloudTaskActions(id, filename, status, checksum) {
   }
   return actions;
 }
+
+// --- 文件版本管理 ---
+function showVersioning() {
+  document.getElementById('version-modal').style.display = 'flex';
+  document.getElementById('version-filename').value = '';
+  document.getElementById('version-body').innerHTML = '<div class="empty-msg">输入文件名查看版本历史</div>';
+}
+
+function hideVersioning() {
+  document.getElementById('version-modal').style.display = 'none';
+}
+
+async function loadVersions() {
+  var filename = document.getElementById('version-filename').value.trim();
+  if (!filename) { showToast('请输入文件名', 'warning'); return; }
+  var body = document.getElementById('version-body');
+  body.innerHTML = '<div class="empty-msg">加载中...</div>';
+  try {
+    var versions;
+    var url = '/api/versions?filename=' + encodeURIComponent(filename);
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('GET', url, {}, null);
+      var data = JSON.parse(new TextDecoder().decode(result.body));
+      versions = data.versions || [];
+    } else {
+      var resp = await fetch(BASE + url, { headers: headers() });
+      if (!resp.ok) {
+        var errData = await resp.json().catch(function() { return {}; });
+        if (resp.status === 501) { body.innerHTML = '<div class="empty-msg">版本管理未启用（需在配置中设置 versioning.enabled: true）</div>'; return; }
+        body.innerHTML = '<div class="empty-msg">加载失败: ' + (errData.message || resp.status) + '</div>'; return;
+      }
+      var data = await resp.json();
+      versions = data.versions || [];
+    }
+    if (versions.length === 0) { body.innerHTML = '<div class="empty-msg">该文件没有版本历史</div>'; return; }
+    body.innerHTML = buildVersionTableHtml(versions, filename);
+  } catch (e) { body.innerHTML = '<div class="empty-msg">加载失败: ' + e.message + '</div>'; }
+}
+
+function buildVersionTableHtml(versions, filename) {
+  var html = '<div style="margin-bottom:8px;font-size:13px;color:#666;">文件: <strong>' + escHtml(filename) + '</strong>，共 ' + versions.length + ' 个版本</div>';
+  html += '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">版本 ID</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">时间</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">大小</th>' +
+    '<th style="text-align:right;padding:4px 8px;border-bottom:1px solid #eee;">操作</th></tr></thead><tbody>';
+  for (var i = 0; i < versions.length; i++) {
+    var v = versions[i];
+    var versionTime = v.created_at || '-';
+    html += '<tr><td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px;">' + escHtml(String(v.version_id || '-')) + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + escHtml(versionTime) + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + formatSize(v.size) + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;white-space:nowrap;">' +
+      '<button class="btn btn-primary btn-sm" onclick="restoreVersion(\'' + escJsStr(filename) + '\',\'' + escJsStr(v.version_id) + '\')" style="margin-right:4px;">恢复</button>' +
+      '<button class="btn btn-danger btn-sm" onclick="deleteVersion(\'' + escJsStr(filename) + '\',\'' + escJsStr(v.version_id) + '\')">删除</button></td></tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+async function restoreVersion(filename, versionId) {
+  if (!confirm('确认恢复版本 ' + versionId + ' ？\n当前文件将被备份为新版本。')) return;
+  try {
+    var url = '/api/versions/restore?filename=' + encodeURIComponent(filename) + '&version_id=' + encodeURIComponent(versionId);
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('POST', url, {}, null);
+      var data = JSON.parse(new TextDecoder().decode(result.body));
+      if (data.success) { showToast('版本恢复成功', 'success'); loadVersions(); refreshList(); }
+      else { showToast('恢复失败: ' + (data.message || 'unknown'), 'error'); }
+    } else {
+      var resp = await fetch(BASE + url, { method: 'POST', headers: headers() });
+      var data = await resp.json();
+      if (resp.ok && data.success) { showToast('版本恢复成功', 'success'); loadVersions(); refreshList(); }
+      else { showToast('恢复失败: ' + (data.message || resp.status), 'error'); }
+    }
+  } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
+}
+
+async function deleteVersion(filename, versionId) {
+  if (!confirm('确认删除版本 ' + versionId + ' ？\n此操作不可恢复。')) return;
+  try {
+    var url = '/api/versions?filename=' + encodeURIComponent(filename) + '&version_id=' + encodeURIComponent(versionId);
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('DELETE', url, {}, null);
+      var data = JSON.parse(new TextDecoder().decode(result.body));
+      if (data.success) { showToast('版本已删除', 'success'); loadVersions(); }
+      else { showToast('删除失败: ' + (data.message || 'unknown'), 'error'); }
+    } else {
+      var resp = await fetch(BASE + url, { method: 'DELETE', headers: headers() });
+      var data = await resp.json();
+      if (resp.ok && data.success) { showToast('版本已删除', 'success'); loadVersions(); }
+      else { showToast('删除失败: ' + (data.message || resp.status), 'error'); }
+    }
+  } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
+}
