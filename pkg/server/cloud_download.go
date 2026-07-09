@@ -622,10 +622,7 @@ func (m *CloudDownloadManager) flushDirty() {
 
 // FlushNow 立即触发一次批量持久化（测试用）。
 func (m *CloudDownloadManager) FlushNow() {
-	select {
-	case m.flushNow <- struct{}{}:
-	default:
-	}
+	m.flushDirty()
 }
 
 // StopFlush 停止批量持久化 goroutine（测试用）。

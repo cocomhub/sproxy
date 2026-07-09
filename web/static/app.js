@@ -155,6 +155,7 @@ function buildFileRowHtml(fi, fullName) {
     return '<tr style="cursor:pointer;background:#f8f9fa;" class="dir-row"><td class="check-col"></td><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
       '<td>-</td><td>-</td><td>' +
       '<button class="btn btn-sm btn-secondary dir-enter-btn" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
+      '<button class="btn btn-sm btn-primary dir-archive-btn" onclick="event.stopPropagation();downloadDirArchive(\'' + escJsStr(fullName) + '\')">打包下载</button>' +
       '<button class="btn btn-sm btn-danger dir-delete-btn" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
   }
   const cs = fi.checksum || '';
@@ -495,6 +496,31 @@ function batchDownloadArchive() {
   }).catch(function(err) { showToast('归档失败: ' + err.message, 'error'); });
 }
 
+// 目录打包下载（GET /api/archive-dir）
+async function downloadDirArchive(dirPath) {
+  try {
+    var url = '/api/archive-dir?dirname=' + encodeURIComponent(dirPath);
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('GET', url, {}, null);
+      triggerDownload(dirPath.replace('/', '_') + '.tar.gz', result.body);
+      showToast('目录打包下载完成', 'success');
+    } else {
+      var resp = await fetch(BASE + url, { headers: headers() });
+      if (!resp.ok) {
+        var errData = await resp.json().catch(function() { return {}; });
+        showToast('打包下载失败: ' + (errData.message || resp.status), 'error');
+        return;
+      }
+      var disposition = resp.headers.get('Content-Disposition') || '';
+      var match = disposition.match(/filename="?(.+?)"?$/);
+      var filename = match ? match[1] : dirPath.replace('/', '_') + '.tar.gz';
+      var blob = await resp.blob();
+      triggerDownload(filename, blob);
+      showToast('目录打包下载完成: ' + filename, 'success');
+    }
+  } catch (e) { showToast('打包下载失败: ' + e.message, 'error'); }
+}
+
 // --- 监控 ---
 async function showStats() {
   document.getElementById('stats-modal').style.display = 'flex';
@@ -512,6 +538,28 @@ async function showStats() {
 
 function hideStats() {
   document.getElementById('stats-modal').style.display = 'none';
+}
+
+async function updateStorageConfig() {
+  var input = document.getElementById('max-storage-input');
+  var maxBytes = Number.parseInt(input.value) || 0;
+  if (maxBytes < 0) { showToast('存储限制不能为负数', 'error'); return; }
+  try {
+    var body = JSON.stringify({ max_storage_bytes: maxBytes });
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('PUT', '/api/storage/config', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
+      var data = JSON.parse(new TextDecoder().decode(result.body));
+      if (data.success) { showToast('存储限制已更新: ' + formatBytes(data.max_storage_bytes || 0), 'success'); }
+      else { showToast('更新失败', 'error'); }
+    } else {
+      var resp = await fetch(BASE + '/api/storage/config', {
+        method: 'PUT', headers: headers({ 'Content-Type': 'application/json' }), body: body
+      });
+      var data = await resp.json();
+      if (resp.ok && data.success) { showToast('存储限制已更新: ' + formatBytes(data.max_storage_bytes || 0), 'success'); }
+      else { showToast('更新失败: ' + (data.error || resp.status), 'error'); }
+    }
+  } catch (e) { showToast('更新失败: ' + e.message, 'error'); }
 }
 
 function formatBytes(n) {
@@ -539,7 +587,14 @@ function statsTableHtml(du, rc, s) {
     '<tr><td style="padding:5px 0;color:#777">上传字节数</td><td style="text-align:right">' + formatBytes(s.bytes_uploaded) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">下载文件数</td><td style="text-align:right">' + (s.files_downloaded ?? 0) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">下载字节数</td><td style="text-align:right">' + formatBytes(s.bytes_downloaded) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
+    '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>' +
+    '<div style="margin-top:16px;padding-top:12px;border-top:1px solid #eee;">' +
+    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+    '<span style="font-size:13px;font-weight:600;color:#555;">存储限制:</span>' +
+    '<input type="number" id="max-storage-input" style="width:140px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;" value="' + (s.max_storage_bytes ?? 0) + '" min="0" step="1048576">' +
+    '<span style="font-size:12px;color:#999;">字节（0=不限）</span>' +
+    '<button class="btn btn-sm btn-primary" onclick="updateStorageConfig()">更新</button>' +
+    '</div></div>';
 }
 
 // --- 初始化 ---
