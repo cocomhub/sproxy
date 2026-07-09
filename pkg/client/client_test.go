@@ -571,7 +571,10 @@ func TestClient_BatchDelete_ContinueOnError(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	info, _ := c.Stat(t.Context(), "a.txt")
+	info, errStat := c.Stat(t.Context(), "a.txt")
+	if errStat != nil {
+		t.Fatalf("Stat a.txt: %v", errStat)
+	}
 
 	// 在批量删除中包含不存在的文件
 	results, err := c.BatchDelete(t.Context(), []BatchDeleteFile{
@@ -607,8 +610,14 @@ func TestClient_BatchRename(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	info1, _ := c.Stat(t.Context(), "old1.txt")
-	info2, _ := c.Stat(t.Context(), "old2.txt")
+	info1, err1 := c.Stat(t.Context(), "old1.txt")
+	if err1 != nil {
+		t.Fatalf("Stat old1.txt: %v", err1)
+	}
+	info2, err2 := c.Stat(t.Context(), "old2.txt")
+	if err2 != nil {
+		t.Fatalf("Stat old2.txt: %v", err2)
+	}
 
 	results, err := c.BatchRename(t.Context(), []BatchRenameOp{
 		{From: "old1.txt", To: "new1.txt", Checksum: info1.Checksum},
