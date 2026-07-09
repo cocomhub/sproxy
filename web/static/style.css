@@ -20,6 +20,8 @@ h1 { margin: 0 0 20px; font-size: 24px; }
 .btn-warning:hover { background: #945800; }
 .btn-sm { padding: 4px 10px; font-size: 13px; }
 .btn:disabled { opacity: .6; cursor: not-allowed; }
+.btn-share { background: #2c7a7b; color: #fff; }
+.btn-share:hover { background: #236b6c; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #eee; font-size: 14px; }
 th { font-weight: 600; background: #f8f9fa; white-space: nowrap; }

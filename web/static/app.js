@@ -166,6 +166,7 @@ function buildFileRowHtml(fi, fullName) {
     '<button class="btn btn-primary btn-sm file-download-btn" onclick="downloadFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">下载</button>' +
     '<button class="btn btn-danger btn-sm file-delete-btn" onclick="deleteFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">删除</button>' +
     '<button class="btn btn-warning btn-sm file-rename-btn" onclick="renameFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">重命名</button>' +
+    '<button class="btn btn-sm btn-share" onclick="shareFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">分享</button>' +
     '</td></tr>';
 }
 
@@ -544,6 +545,45 @@ function statsTableHtml(du, rc, s) {
 // --- 初始化 ---
 refreshList();
 checkResumableUploads();
+
+// --- 文件分享 ---
+function shareFile(name) {
+  var ttl = prompt('分享有效期（例如 1h, 24h, 7d，留空=24h）:', '24h');
+  if (ttl === null) return;
+  ttl = ttl.trim() || '24h';
+  var maxDownloads = prompt('最大下载次数（0=不限）:', '0');
+  if (maxDownloads === null) return;
+  maxDownloads = Number.parseInt(maxDownloads) || 0;
+  var oneTime = confirm('一次性分享（下载一次后自动失效）？\n确定=是，取消=否');
+  var body = JSON.stringify({
+    filename: name,
+    ttl: ttl,
+    max_downloads: maxDownloads,
+    one_time: oneTime
+  });
+  (async function() {
+    try {
+      var data;
+      if (tunnelHexKey) {
+        var result = await tunnelRequest('POST', '/api/share', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
+        data = JSON.parse(new TextDecoder().decode(result.body));
+      } else {
+        var resp = await fetch(BASE + '/api/share', {
+          method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: body
+        });
+        data = await resp.json();
+        if (!resp.ok) { showToast('创建分享失败: ' + (data.message || resp.status), 'error'); return; }
+      }
+      var shareUrl = location.origin + '/s/' + data.token;
+      if (navigator.clipboard) {
+        await navigator.clipboard.writeText(shareUrl);
+        showToast('分享链接已复制到剪贴板: ' + shareUrl, 'success');
+      } else {
+        showToast('分享链接: ' + shareUrl, 'success');
+      }
+    } catch (e) { showToast('创建分享失败: ' + e.message, 'error'); }
+  })();
+}
 
 // --- 云端下载 ---
 let _cloudTasks = [];
