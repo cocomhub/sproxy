@@ -316,17 +316,28 @@ function checkResumableUploads() {
     hasResumable = true;
     (function(sessionData, sessUploadId) {
       const statusUrl = '/upload/status?upload_id=' + sessUploadId + '&filename=' + encodeURIComponent(sessionData.filename);
-      fetch(BASE + statusUrl, { headers: headers() })
-        .then(function(r) { return r.json(); })
-        .then(function(status) {
-          if (status.success && !status.finished && status.missing_chunks && status.missing_chunks.length > 0) {
-            showResumePrompt(sessionData, sessUploadId);
-          } else if (status.success && status.finished) {
-            removeUploadSession(sessUploadId);
-          } else {
-            removeUploadSession(sessUploadId);
-          }
-        }).catch(function() { removeUploadSession(sessUploadId); });
+      function handleStatusResponse(status) {
+        if (status.success && !status.finished && status.missing_chunks && status.missing_chunks.length > 0) {
+          showResumePrompt(sessionData, sessUploadId);
+        } else if (status.success && status.finished) {
+          removeUploadSession(sessUploadId);
+        } else {
+          removeUploadSession(sessUploadId);
+        }
+      }
+      if (tunnelHexKey) {
+        tunnelRequest('GET', statusUrl, {}, null)
+          .then(function(result) {
+            var data = JSON.parse(new TextDecoder().decode(result.body));
+            handleStatusResponse(data);
+          })
+          .catch(function() { removeUploadSession(sessUploadId); });
+      } else {
+        fetch(BASE + statusUrl, { headers: headers() })
+          .then(function(r) { return r.json(); })
+          .then(handleStatusResponse)
+          .catch(function() { removeUploadSession(sessUploadId); });
+      }
     })(data, uploadId);
   }
   if (!hasResumable) {
