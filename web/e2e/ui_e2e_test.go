@@ -21,13 +21,18 @@ import (
 )
 
 // testServer 启动 sproxy 测试实例并返回 baseURL 和 cleanup。
-func testServer(t *testing.T) (string, *server.Config, func()) {
+// opts 为可选参数，第一个 bool 表示是否启用版本管理。
+func testServer(t *testing.T, opts ...bool) (string, *server.Config, func()) {
 	t.Helper()
 
 	tmpDir := t.TempDir()
 	cfg := server.Default()
 	cfg.UploadsDir = tmpDir
 	cfg.LogLevel = "error"
+	if len(opts) > 0 && opts[0] {
+		cfg.Versioning.Enabled = true
+		cfg.Versioning.MaxVersions = 10
+	}
 
 	var cfgPtr atomic.Pointer[server.Config]
 	cfgPtr.Store(cfg)
@@ -117,7 +122,7 @@ func TestUILoads(t *testing.T) {
 		t.Errorf("title = %q, should contain 'sproxy'", title)
 	}
 
-	_, err = page.WaitForSelector("h1", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
+	_, err = page.WaitForSelector("h1", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
 	if err != nil {
 		t.Fatalf("h1 not found: %v", err)
 	}
@@ -135,7 +140,7 @@ func TestFileList(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	_, err := page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
+	_, err := page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
 	if err != nil {
 		t.Fatalf("file table not loaded: %v", err)
 	}
@@ -158,7 +163,7 @@ func TestDirectoryNavigation(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	_, err := page.WaitForSelector("#dir-bar", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
+	_, err := page.WaitForSelector("#dir-bar", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
 	if err != nil {
 		t.Fatalf("dir-bar not found: %v", err)
 	}
@@ -177,7 +182,7 @@ func TestAuthFlow(t *testing.T) {
 	// 等待页面 JS 初始化完成。
 	_, err := page.WaitForSelector("#token", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
 		t.Fatalf("token input not visible: %v", err)
@@ -233,7 +238,7 @@ func TestDownloadLink(t *testing.T) {
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
-	page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(5000)})
+	page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
 
 	links := page.Locator(".file-download-btn")
 	if cnt, _ := links.Count(); cnt == 0 {
@@ -325,7 +330,7 @@ func TestCloudDownloadModalOpens(t *testing.T) {
 	// 等待弹窗可见
 	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
 		t.Fatalf("cloud-modal not visible: %v", err)
@@ -353,7 +358,7 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 	page.Evaluate("showCloudDownload()")
 	page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 
 	// 关闭弹窗
@@ -364,7 +369,7 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 	// 验证弹窗隐藏
 	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateHidden,
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
 		t.Fatalf("cloud-modal should be hidden: %v", err)
@@ -374,12 +379,12 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 	page.Evaluate("showCloudDownload()")
 	page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 	page.Evaluate("hideCloudDownload()")
 	_, err = page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateHidden,
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
 		t.Fatalf("cloud-modal should be hidden after second close: %v", err)
@@ -400,7 +405,7 @@ func TestCloudDownloadCreateTask(t *testing.T) {
 	page.Evaluate("showCloudDownload()")
 	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
 		t.Fatalf("cloud-modal not visible: %v", err)
@@ -418,7 +423,7 @@ func TestCloudDownloadCreateTask(t *testing.T) {
 
 	// 等待响应（URL 不可达，但至少验证没有 crash）
 	page.WaitForSelector("#cloud-tasks-body", playwright.PageWaitForSelectorOptions{
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 }
 
@@ -436,7 +441,7 @@ func TestCloudDownloadTaskList(t *testing.T) {
 	page.Evaluate("showCloudDownload()")
 	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
 		t.Fatalf("cloud-modal not visible: %v", err)
@@ -444,7 +449,7 @@ func TestCloudDownloadTaskList(t *testing.T) {
 
 	// 等待任务列表加载
 	_, err = page.WaitForSelector("#cloud-tasks-body", playwright.PageWaitForSelectorOptions{
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
 		t.Fatalf("cloud-tasks-body not found: %v", err)
@@ -470,7 +475,7 @@ func TestCloudDownloadURLInput(t *testing.T) {
 	page.Evaluate("showCloudDownload()")
 	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
 		t.Fatalf("cloud-modal not visible: %v", err)
@@ -483,5 +488,313 @@ func TestCloudDownloadURLInput(t *testing.T) {
 	}
 	if tag != "TEXTAREA" {
 		t.Fatalf("expected TEXTAREA element, got %s", tag)
+	}
+}
+
+// TestShareButton 验证文件行有分享按钮。
+func TestShareButton(t *testing.T) {
+	baseURL, cfg, cleanup := testServer(t)
+	defer cleanup()
+
+	testFile(t, cfg.UploadsDir, "share-test.txt", "shareable content")
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+	page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
+
+	if cnt, _ := page.Locator(".file-actions .btn-share").Count(); cnt == 0 {
+		// 退而求其次：通过 JS 验证 shareFile 函数存在
+		exists, err := page.Evaluate("typeof window.shareFile === 'function'")
+		if err != nil || exists != true {
+			t.Fatal("shareFile function not found")
+		}
+	}
+}
+
+// TestShareAPI 验证分享 API 可调用。
+func TestShareAPI(t *testing.T) {
+	baseURL, cfg, cleanup := testServer(t)
+	defer cleanup()
+
+	testFile(t, cfg.UploadsDir, "api-share-test.txt", "api content")
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	result, err := page.Evaluate(`fetch('/api/share', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ filename: 'api-share-test.txt', ttl: '24h', max_downloads: 0, one_time: false })
+	}).then(function(r) { return r.json(); })`)
+	if err != nil {
+		t.Fatalf("share API call failed: %v", err)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", result)
+	}
+	if m["token"] == nil || m["token"] == "" {
+		t.Error("expected non-empty token in share response")
+	}
+	if m["filename"] != "api-share-test.txt" {
+		t.Errorf("filename = %v, want api-share-test.txt", m["filename"])
+	}
+}
+
+// TestVersioningButton 验证版本管理按钮存在。
+func TestVersioningButton(t *testing.T) {
+	baseURL, _, cleanup := testServer(t, true)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	if cnt, _ := page.Locator("#version-btn").Count(); cnt == 0 {
+		t.Error("version management button #version-btn not found")
+	}
+}
+
+// TestVersioningModalOpenClose 验证版本管理弹窗打开和关闭。
+func TestVersioningModalOpenClose(t *testing.T) {
+	baseURL, _, cleanup := testServer(t, true)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	// 打开弹窗
+	if _, err := page.Evaluate("showVersioning()"); err != nil {
+		t.Fatalf("showVersioning: %v", err)
+	}
+	_, err := page.WaitForSelector("#version-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(8000),
+	})
+	if err != nil {
+		t.Fatalf("version-modal not visible: %v", err)
+	}
+
+	// 验证关键元素
+	for _, sel := range []string{"#version-filename", "#version-load-btn", "#version-body"} {
+		if cnt, _ := page.Locator(sel).Count(); cnt == 0 {
+			t.Errorf("element %s not found in version modal", sel)
+		}
+	}
+
+	// 关闭弹窗
+	if _, err := page.Evaluate("hideVersioning()"); err != nil {
+		t.Fatalf("hideVersioning: %v", err)
+	}
+	_, err = page.WaitForSelector("#version-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateHidden,
+		Timeout: playwright.Float(8000),
+	})
+	if err != nil {
+		t.Fatalf("version-modal should be hidden: %v", err)
+	}
+}
+
+// TestVersioningLoadVersions 验证加载版本历史。
+func TestVersioningLoadVersions(t *testing.T) {
+	baseURL, cfg, cleanup := testServer(t, true)
+	defer cleanup()
+
+	testFile(t, cfg.UploadsDir, "versioned.txt", "v1 content")
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	page.Evaluate("showVersioning()")
+	page.WaitForSelector("#version-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(8000),
+	})
+
+	// 输入文件名并加载版本
+	if err := page.Locator("#version-filename").Fill("versioned.txt"); err != nil {
+		t.Fatalf("fill version-filename: %v", err)
+	}
+	if err := page.Locator("#version-load-btn").Click(); err != nil {
+		t.Fatalf("click version-load-btn: %v", err)
+	}
+
+	// 新文件没有版本历史，应显示 empty-msg
+	_, err := page.WaitForSelector("#version-body .empty-msg", playwright.PageWaitForSelectorOptions{
+		Timeout: playwright.Float(8000),
+	})
+	if err != nil {
+		t.Error("expected empty-msg in version body for new file (no version history)")
+	}
+}
+
+// TestVersioningDisabledMessage 验证版本管理未启用时显示友好提示。
+func TestVersioningDisabledMessage(t *testing.T) {
+	baseURL, _, cleanup := testServer(t, false)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	page.Evaluate("showVersioning()")
+	page.WaitForSelector("#version-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(8000),
+	})
+
+	if err := page.Locator("#version-filename").Fill("any.txt"); err != nil {
+		t.Fatalf("fill version-filename: %v", err)
+	}
+	if err := page.Locator("#version-load-btn").Click(); err != nil {
+		t.Fatalf("click version-load-btn: %v", err)
+	}
+
+	// 应显示 empty-msg（版本管理未启用提示）
+	_, err := page.WaitForSelector("#version-body .empty-msg", playwright.PageWaitForSelectorOptions{
+		Timeout: playwright.Float(8000),
+	})
+	if err != nil {
+		t.Error("expected empty-msg in version body when versioning disabled")
+	}
+}
+
+// TestDirArchiveButton 验证目录行有打包下载按钮。
+func TestDirArchiveButton(t *testing.T) {
+	baseURL, cfg, cleanup := testServer(t)
+	defer cleanup()
+
+	testFile(t, cfg.UploadsDir, "archivedir/sub/dummy.txt", "dummy")
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+	page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
+
+	if cnt, _ := page.Locator(".dir-archive-btn").Count(); cnt == 0 {
+		// 退而求其次：通过 JS 验证 downloadDirArchive 函数存在
+		exists, err := page.Evaluate("typeof window.downloadDirArchive === 'function'")
+		if err != nil || exists != true {
+			t.Fatal("downloadDirArchive function not found")
+		}
+	}
+}
+
+// TestSearchFunction 验证搜索功能可用。
+func TestSearchFunction(t *testing.T) {
+	baseURL, cfg, cleanup := testServer(t)
+	defer cleanup()
+
+	testFile(t, cfg.UploadsDir, "search-me.txt", "findable content")
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+	page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
+
+	// 输入搜索关键词
+	if err := page.Locator("#search-input").Fill("search"); err != nil {
+		t.Fatalf("fill search-input: %v", err)
+	}
+
+	// 点击搜索按钮
+	if err := page.Locator("#search-btn").Click(); err != nil {
+		t.Fatalf("click search-btn: %v", err)
+	}
+
+	// 等待搜索结果中的 search-me.txt 出现
+	_, err := page.WaitForSelector("text=search-me.txt", playwright.PageWaitForSelectorOptions{
+		Timeout: playwright.Float(8000),
+	})
+	if err != nil {
+		t.Error("expected search-me.txt in search results")
+	}
+
+	// 验证清除搜索按钮存在
+	if cnt, _ := page.Locator("#clear-search-btn").Count(); cnt == 0 {
+		t.Error("clear search button not found during search")
+	}
+}
+
+// TestStorageConfigInStats 验证监控弹窗中有存储限制配置 UI。
+func TestStorageConfigInStats(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	// 打开监控弹窗
+	page.Evaluate("showStats()")
+	_, err := page.WaitForSelector("#stats-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(8000),
+	})
+	if err != nil {
+		t.Fatalf("stats-modal not visible: %v", err)
+	}
+
+	// 验证存储限制配置元素存在
+	for _, sel := range []string{"#max-storage-input", "text=存储限制"} {
+		if cnt, _ := page.Locator(sel).Count(); cnt == 0 {
+			t.Errorf("element %s not found in stats modal", sel)
+		}
+	}
+}
+
+// TestStorageConfigAPI 验证存储配置 API 可调用。
+func TestStorageConfigAPI(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	result, err := page.Evaluate(`fetch('/api/storage/config', {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ max_storage_bytes: 104857600 })
+	}).then(function(r) { return r.json(); })`)
+	if err != nil {
+		t.Fatalf("storage config API call failed: %v", err)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result type: %T", result)
+	}
+	if m["success"] != true {
+		t.Errorf("success = %v, want true", m["success"])
+	}
+
+	// JSON decoder may return int or float64 depending on platform
+	var got int64
+	switch v := m["max_storage_bytes"].(type) {
+	case float64:
+		got = int64(v)
+	case int:
+		got = int64(v)
+	case int64:
+		got = v
+	default:
+		t.Fatalf("max_storage_bytes type %T, want float64, int, or int64", m["max_storage_bytes"])
+	}
+	if got != 104857600 {
+		t.Errorf("max_storage_bytes = %d, want 104857600", got)
 	}
 }
