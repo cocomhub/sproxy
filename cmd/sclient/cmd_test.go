@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
+	"github.com/spf13/cobra"
 )
 
 // ---- root command ----
@@ -437,6 +440,15 @@ func captureRootCmdArgs() func() {
 	oldCfgProvider := cfgProvider
 	currentDir = ""
 	cfgProvider = nil
+
+	// 替换 PersistentPreRunE 为简化版：初始化 cfgProvider 但不触发 loadCurrentDir
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		cfgProvider = sclientcfg.New(cfgFile)
+		cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup(flagServer))
+		cfgProvider.BindPFlag("chunk_size", cmd.Flags().Lookup(flagChunkSize))
+		// 不调用 loadCurrentDir()，防止从磁盘覆盖测试设置的 currentDir
+		return nil
+	}
 
 	rootCmd.SetArgs(nil)
 	return func() {
