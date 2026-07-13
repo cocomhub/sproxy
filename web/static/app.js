@@ -132,7 +132,7 @@ async function loadMore() {
     if (container) {
       if (_hasMore) {
         const remaining = (data.total || 0) - _currentOffset;
-        container.innerHTML = '<button class="btn btn-primary" onclick="loadMore()">加载更多 (' + remaining + ')</button>';
+        container.innerHTML = '<button class="btn btn-primary">加载更多 (' + remaining + ')</button>';
       } else {
         container.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">已加载全部 ' + data.total + ' 个文件</div>';
       }
@@ -141,7 +141,7 @@ async function loadMore() {
 }
 
 function buildFileTableHtml(files, subdir) {
-  let html = '<table id="file-table"><thead><tr><th class="check-col"><input type="checkbox" id="select-all-checkbox" onchange="toggleSelectAll(this.checked)"></th><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
+  let html = '<table id="file-table"><thead><tr><th class="check-col"><input type="checkbox" id="select-all-checkbox"></th><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
   for (const fi of files) {
     const fullName = subdir ? subdir + '/' + fi.name : fi.name;
     html += buildFileRowHtml(fi, fullName);
@@ -152,22 +152,22 @@ function buildFileTableHtml(files, subdir) {
 
 function buildFileRowHtml(fi, fullName) {
   if (fi.is_dir) {
-    return '<tr style="cursor:pointer;background:#f8f9fa;" class="dir-row"><td class="check-col"></td><td onclick="navigateDir(\'' + escJsStr(fullName) + '\')"><strong>' + escHtml(fi.name) + '/</strong></td>' +
+    return '<tr style="cursor:pointer;background:#f8f9fa;" class="dir-row" data-subdir="' + escHtml(fullName) + '"><td class="check-col"></td><td><strong>' + escHtml(fi.name) + '/</strong></td>' +
       '<td>-</td><td>-</td><td>' +
-      '<button class="btn btn-sm btn-secondary dir-enter-btn" onclick="event.stopPropagation();navigateDir(\'' + escJsStr(fullName) + '\')">进入</button>' +
-      '<button class="btn btn-sm btn-primary dir-archive-btn" onclick="event.stopPropagation();downloadDirArchive(\'' + escJsStr(fullName) + '\')">打包下载</button>' +
-      '<button class="btn btn-sm btn-danger dir-delete-btn" onclick="event.stopPropagation();rmdirDir(\'' + escJsStr(fullName) + '\')">删除</button></td></tr>';
+      '<button class="btn btn-sm btn-secondary dir-enter-btn" data-subdir="' + escHtml(fullName) + '">进入</button>' +
+      '<button class="btn btn-sm btn-primary dir-archive-btn" data-subdir="' + escHtml(fullName) + '">打包下载</button>' +
+      '<button class="btn btn-sm btn-danger dir-delete-btn" data-subdir="' + escHtml(fullName) + '">删除</button></td></tr>';
   }
   const cs = fi.checksum || '';
-  const csDisplay = cs ? '<span class="checksum-cell" title="' + escHtml(cs) + '" onclick="copyChecksum(\'' + escHtml(cs) + '\')">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
-  return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '" onchange="updateBatchToolbar()"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
+  const csDisplay = cs ? '<span class="checksum-cell" data-checksum="' + escHtml(cs) + '" title="' + escHtml(cs) + '">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
+  return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
     '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
     '<td>' + csDisplay + '</td>' +
     '<td class="file-actions">' +
-    '<button class="btn btn-primary btn-sm file-download-btn" onclick="downloadFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">下载</button>' +
-    '<button class="btn btn-danger btn-sm file-delete-btn" onclick="deleteFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">删除</button>' +
-    '<button class="btn btn-warning btn-sm file-rename-btn" onclick="renameFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">重命名</button>' +
-    '<button class="btn btn-sm btn-share" onclick="shareFile(\'' + escJsStr(fullName) + '\', \'' + escJsStr(cs) + '\')">分享</button>' +
+    '<button class="btn btn-primary btn-sm file-download-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">下载</button>' +
+    '<button class="btn btn-danger btn-sm file-delete-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">删除</button>' +
+    '<button class="btn btn-warning btn-sm file-rename-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">重命名</button>' +
+    '<button class="btn btn-sm btn-share file-share-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">分享</button>' +
     '</td></tr>';
 }
 
@@ -175,7 +175,7 @@ function buildLoadMoreHtml(total) {
   if (!_hasMore) return '';
   const remaining = (total || 0) - _currentOffset;
   return '<div id="load-more-container" style="text-align:center;padding:12px;">' +
-    '<button class="btn btn-primary" onclick="loadMore()">加载更多 (' + remaining + ')</button></div>';
+    '<button class="btn btn-primary">加载更多 (' + remaining + ')</button></div>';
 }
 
 // --- 搜索 ---
@@ -228,15 +228,15 @@ function navigateDir(subdir) {
 function updateBreadcrumb() {
   const el = document.getElementById('dir-breadcrumb');
   if (!currentSubdir) {
-    el.innerHTML = '<a href="javascript:void(0)" onclick="navigateDir(\'\')">/</a>';
+    el.innerHTML = '<a href="#" data-subdir="">/</a>';
     return;
   }
   const parts = currentSubdir.split('/');
-  let html = '<a href="javascript:void(0)" onclick="navigateDir(\'\')">/</a>';
+  let html = '<a href="#" data-subdir="">/</a>';
   let accumulated = '';
   for (const p of parts) {
     accumulated = accumulated ? accumulated + '/' + p : p;
-    html += ' <span style="color:#999">›</span> <a href="javascript:void(0)" onclick="navigateDir(\'' + escJsStr(accumulated) + '\')">' + escHtml(p) + '</a>';
+    html += ' <span style="color:#999">›</span> <a href="#" data-subdir="' + escHtml(accumulated) + '">' + escHtml(p) + '</a>';
   }
   el.innerHTML = html;
 }
@@ -593,7 +593,7 @@ function statsTableHtml(du, rc, s) {
     '<span style="font-size:13px;font-weight:600;color:#555;">存储限制:</span>' +
     '<input type="number" id="max-storage-input" style="width:140px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;" value="' + (s.max_storage_bytes ?? 0) + '" min="0" step="1048576">' +
     '<span style="font-size:12px;color:#999;">字节（0=不限）</span>' +
-    '<button class="btn btn-sm btn-primary" onclick="updateStorageConfig()">更新</button>' +
+    '<button class="btn btn-sm btn-primary" id="stats-update-btn">更新</button>' +
     '</div></div>';
 }
 
@@ -861,12 +861,12 @@ function statusText(status) {
 function cloudTaskActions(id, filename, status, checksum) {
   let actions = '';
   if (status === 'completed') {
-    actions += '<button class="btn btn-primary btn-sm" onclick="downloadCloudFile(\'' + escJsStr(id) + '\',\'' + escJsStr(filename) + '\',\'' + escJsStr(checksum || '') + '\')" style="margin-right:4px;">下载到本地</button>';
-    actions += '<button class="btn btn-danger btn-sm" onclick="removeCloudTask(\'' + escJsStr(id) + '\')">删除</button>';
+    actions += '<button class="btn btn-primary btn-sm cloud-download-btn" data-id="' + escHtml(id) + '" data-filename="' + escHtml(filename) + '" data-checksum="' + escHtml(checksum || '') + '" style="margin-right:4px;">下载到本地</button>';
+    actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
   } else if (status === 'failed' || status === 'cancelled') {
-    actions += '<button class="btn btn-danger btn-sm" onclick="removeCloudTask(\'' + escJsStr(id) + '\')">删除</button>';
+    actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
   } else {
-    actions += '<button class="btn btn-warning btn-sm" onclick="cancelCloudTask(\'' + escJsStr(id) + '\')">取消</button>';
+    actions += '<button class="btn btn-warning btn-sm cloud-cancel-btn" data-id="' + escHtml(id) + '">取消</button>';
   }
   return actions;
 }
@@ -923,8 +923,8 @@ function buildVersionTableHtml(versions, filename) {
       '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + escHtml(versionTime) + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + formatSize(v.size) + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;white-space:nowrap;">' +
-      '<button class="btn btn-primary btn-sm" onclick="restoreVersion(\'' + escJsStr(filename) + '\',\'' + escJsStr(v.version_id) + '\')" style="margin-right:4px;">恢复</button>' +
-      '<button class="btn btn-danger btn-sm" onclick="deleteVersion(\'' + escJsStr(filename) + '\',\'' + escJsStr(v.version_id) + '\')">删除</button></td></tr>';
+      '<button class="btn btn-primary btn-sm version-restore-btn" data-filename="' + escHtml(filename) + '" data-version-id="' + escHtml(v.version_id) + '" style="margin-right:4px;">恢复</button>' +
+      '<button class="btn btn-danger btn-sm version-delete-btn" data-filename="' + escHtml(filename) + '" data-version-id="' + escHtml(v.version_id) + '">删除</button></td></tr>';
   }
   html += '</tbody></table>';
   return html;
@@ -965,3 +965,207 @@ async function deleteVersion(filename, versionId) {
     }
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
+
+// --- DOMContentLoaded 初始化：用 addEventListener 绑定所有静态 HTML 元素 ---
+document.addEventListener('DOMContentLoaded', function() {
+  // 认证栏
+  document.getElementById('save-token-btn').addEventListener('click', saveToken);
+  document.getElementById('save-tunnel-key-btn').addEventListener('click', saveTunnelKey);
+
+  // 文件输入
+  document.getElementById('file-input').addEventListener('change', function() {
+    uploadFiles(this.files);
+  });
+
+  // 工具栏
+  document.getElementById('refresh-btn').addEventListener('click', refreshList);
+  document.getElementById('search-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') searchFiles();
+  });
+  document.getElementById('search-btn').addEventListener('click', searchFiles);
+  document.getElementById('clear-search-btn').addEventListener('click', clearSearch);
+  document.getElementById('stats-btn').addEventListener('click', showStats);
+  document.getElementById('cloud-btn').addEventListener('click', showCloudDownload);
+  document.getElementById('version-btn').addEventListener('click', showVersioning);
+
+  // 批量操作
+  document.getElementById('batch-delete-btn').addEventListener('click', batchDelete);
+  document.getElementById('batch-rename-btn').addEventListener('click', batchRename);
+  document.getElementById('batch-archive-btn').addEventListener('click', batchDownloadArchive);
+  document.getElementById('batch-clear-btn').addEventListener('click', clearSelection);
+
+  // 目录操作
+  document.getElementById('mkdir-btn').addEventListener('click', mkdirDir);
+
+  // 监控弹窗
+  document.getElementById('stats-close-btn').addEventListener('click', hideStats);
+  document.getElementById('stats-refresh-btn').addEventListener('click', showStats);
+  document.getElementById('stats-close-modal-btn').addEventListener('click', hideStats);
+
+  // 云端下载弹窗
+  document.getElementById('cloud-close-btn').addEventListener('click', hideCloudDownload);
+  document.getElementById('cloud-url').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createCloudTask(); }
+  });
+  document.getElementById('cloud-create-btn').addEventListener('click', createCloudTask);
+  document.getElementById('cloud-refresh-btn').addEventListener('click', refreshCloudTasks);
+  document.getElementById('cloud-close-modal-btn').addEventListener('click', hideCloudDownload);
+
+  // 版本管理弹窗
+  document.getElementById('version-close-btn').addEventListener('click', hideVersioning);
+  document.getElementById('version-filename').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') loadVersions();
+  });
+  document.getElementById('version-load-btn').addEventListener('click', loadVersions);
+  document.getElementById('version-close-modal-btn').addEventListener('click', hideVersioning);
+
+  // 事件委托：动态内容
+  initDynamicEventDelegation();
+});
+
+// --- 事件委托：动态生成的 HTML 内容 ---
+function initDynamicEventDelegation() {
+  // 文件列表内的动态内容
+  const fileList = document.getElementById('file-list');
+  if (fileList) {
+    // 文件行中的操作按钮
+    fileList.addEventListener('click', function(e) {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+
+      // 文件操作按钮
+      if (btn.classList.contains('file-download-btn')) {
+        downloadFile(btn.dataset.filename, btn.dataset.checksum);
+        return;
+      }
+      if (btn.classList.contains('file-delete-btn')) {
+        deleteFile(btn.dataset.filename, btn.dataset.checksum);
+        return;
+      }
+      if (btn.classList.contains('file-rename-btn')) {
+        renameFile(btn.dataset.filename, btn.dataset.checksum);
+        return;
+      }
+      if (btn.classList.contains('file-share-btn')) {
+        shareFile(btn.dataset.filename, btn.dataset.checksum);
+        return;
+      }
+
+      // 目录操作按钮（需要阻止冒泡到行点击事件）
+      if (btn.classList.contains('dir-enter-btn')) {
+        e.stopPropagation();
+        navigateDir(btn.dataset.subdir);
+        return;
+      }
+      if (btn.classList.contains('dir-archive-btn')) {
+        e.stopPropagation();
+        downloadDirArchive(btn.dataset.subdir);
+        return;
+      }
+      if (btn.classList.contains('dir-delete-btn')) {
+        e.stopPropagation();
+        rmdirDir(btn.dataset.subdir);
+        return;
+      }
+
+      // 加载更多按钮
+      if (btn.closest('#load-more-container')) {
+        loadMore();
+        return;
+      }
+    });
+
+    // 目录行点击（导航到目录）
+    fileList.addEventListener('click', function(e) {
+      const dirRow = e.target.closest('.dir-row');
+      if (dirRow && !e.target.closest('button')) {
+        navigateDir(dirRow.dataset.subdir);
+      }
+    });
+
+    // 全选复选框
+    fileList.addEventListener('change', function(e) {
+      if (e.target.id === 'select-all-checkbox') {
+        toggleSelectAll(e.target.checked);
+      }
+    });
+
+    // 单个文件选择复选框
+    fileList.addEventListener('change', function(e) {
+      if (e.target.classList.contains('file-select')) {
+        updateBatchToolbar();
+      }
+    });
+  }
+
+  // checksum 点击复制
+  document.addEventListener('click', function(e) {
+    const cell = e.target.closest('.checksum-cell');
+    if (cell) {
+      copyChecksum(cell.dataset.checksum);
+    }
+  });
+
+  // 云端下载任务操作
+  const cloudBody = document.getElementById('cloud-tasks-body');
+  if (cloudBody) {
+    cloudBody.addEventListener('click', function(e) {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      if (btn.classList.contains('cloud-download-btn')) {
+        downloadCloudFile(btn.dataset.id, btn.dataset.filename, btn.dataset.checksum);
+        return;
+      }
+      if (btn.classList.contains('cloud-remove-btn')) {
+        removeCloudTask(btn.dataset.id);
+        return;
+      }
+      if (btn.classList.contains('cloud-cancel-btn')) {
+        cancelCloudTask(btn.dataset.id);
+        return;
+      }
+    });
+  }
+
+  // 版本管理操作
+  const versionBody = document.getElementById('version-body');
+  if (versionBody) {
+    versionBody.addEventListener('click', function(e) {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      if (btn.classList.contains('version-restore-btn')) {
+        restoreVersion(btn.dataset.filename, btn.dataset.versionId);
+        return;
+      }
+      if (btn.classList.contains('version-delete-btn')) {
+        deleteVersion(btn.dataset.filename, btn.dataset.versionId);
+        return;
+      }
+    });
+  }
+
+  // 存储配置更新
+  const statsBody = document.getElementById('stats-body');
+  if (statsBody) {
+    statsBody.addEventListener('click', function(e) {
+      const btn = e.target.closest('button');
+      if (btn && btn.id === 'stats-update-btn') {
+        updateStorageConfig();
+      }
+    });
+  }
+}
+
+// 面包屑事件委托
+document.addEventListener('DOMContentLoaded', function() {
+  const breadcrumb = document.getElementById('dir-breadcrumb');
+  if (breadcrumb) {
+    breadcrumb.addEventListener('click', function(e) {
+      const link = e.target.closest('a');
+      if (link) {
+        e.preventDefault();
+        navigateDir(link.dataset.subdir || '');
+      }
+    });
+  }
+});

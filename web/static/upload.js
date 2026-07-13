@@ -353,9 +353,9 @@ function showResumePrompt(data, uploadId) {
   const div = document.createElement('div');
   div.style.cssText = 'padding:8px 12px;background:#f0fff0;border-radius:4px;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
   div.innerHTML = '<span style="flex:1;">📦 未完成的上传: <strong>' + escHtml(data.filename) + '</strong> (' + (data.completedChunks ? data.completedChunks.length : 0) + '/' + data.totalChunks + ' 分块)</span>' +
-    '<input type="file" id="resume-file-' + uploadId + '" style="display:none" onchange="resumeUpload(\'' + uploadId + '\', this.files[0])">' +
-    '<button class="resume-btn" onclick="document.getElementById(\'resume-file-' + uploadId + '\').click()">选择文件续传</button>' +
-    '<button class="btn btn-sm btn-secondary" onclick="dismissResume(\'' + uploadId + '\')">忽略</button>';
+    '<input type="file" id="resume-file-' + uploadId + '" style="display:none" data-upload-id="' + uploadId + '">' +
+    '<button class="resume-btn" data-upload-id="' + uploadId + '">选择文件续传</button>' +
+    '<button class="btn btn-sm btn-secondary dismiss-btn" data-upload-id="' + uploadId + '">忽略</button>';
   el.appendChild(div);
 }
 
@@ -388,3 +388,40 @@ async function resumeUpload(uploadId, file) {
   checkResumableUploads();
   refreshList();
 }
+
+// --- 续传容器事件委托 ---
+document.addEventListener('DOMContentLoaded', function() {
+  const resumeContainer = document.getElementById('resume-container');
+  if (!resumeContainer) return;
+
+  // 点击"选择文件续传"按钮 → 触发隐藏的 file input
+  resumeContainer.addEventListener('click', function(e) {
+    const btn = e.target.closest('.resume-btn');
+    if (btn) {
+      const uploadId = btn.dataset.uploadId;
+      const fileInput = document.getElementById('resume-file-' + uploadId);
+      if (fileInput) fileInput.click();
+      return;
+    }
+  });
+
+  // 点击"忽略"按钮
+  resumeContainer.addEventListener('click', function(e) {
+    const btn = e.target.closest('.dismiss-btn');
+    if (btn) {
+      dismissResume(btn.dataset.uploadId);
+      return;
+    }
+  });
+
+  // 文件选择变化 → 触发续传
+  resumeContainer.addEventListener('change', function(e) {
+    const fileInput = e.target.closest('input[type="file"]');
+    if (fileInput && fileInput.id && fileInput.id.startsWith('resume-file-')) {
+      const uploadId = fileInput.dataset.uploadId;
+      if (uploadId && fileInput.files && fileInput.files[0]) {
+        resumeUpload(uploadId, fileInput.files[0]);
+      }
+    }
+  });
+});
