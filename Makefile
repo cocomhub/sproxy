@@ -399,3 +399,35 @@ tools:
 githooks:
 	@git config core.hooksPath .githooks
 	@echo "Git hooks configured: .githooks/"
+
+# 达尔文-哥德尔机（Goedel-Go）— 自动优化工具
+GOEDEL_DIR := $(abspath $(dir $(firstword $(MAKEFILE_LIST)))/../goedel-go)
+GOEDEL_BIN := $(GOEDEL_DIR)/goedel-go
+GOEDEL_DATA := $(abspath $(BUILD_DIR)/optimize)
+
+.PHONY: optimize optimize-scan optimize-baseline optimize-report optimize-compare
+
+$(GOEDEL_BIN):
+	cd $(GOEDEL_DIR) && go build -o goedel-go .
+
+optimize: $(GOEDEL_BIN)
+	@mkdir -p $(GOEDEL_DATA)
+	cd $(GOEDEL_DIR) && ./goedel-go --project $(realpath .) --data-dir $(GOEDEL_DATA) baseline && \
+		./goedel-go --project $(realpath .) --data-dir $(GOEDEL_DATA) scan && \
+		./goedel-go --project $(realpath .) --data-dir $(GOEDEL_DATA) report
+
+optimize-scan: $(GOEDEL_BIN)
+	@mkdir -p $(GOEDEL_DATA)
+	cd $(GOEDEL_DIR) && ./goedel-go --project $(realpath .) --data-dir $(GOEDEL_DATA) scan
+
+optimize-baseline: $(GOEDEL_BIN)
+	@mkdir -p $(GOEDEL_DATA)
+	cd $(GOEDEL_DIR) && ./goedel-go --project $(realpath .) --data-dir $(GOEDEL_DATA) baseline
+
+optimize-report: $(GOEDEL_BIN)
+	@mkdir -p $(GOEDEL_DATA)
+	cd $(GOEDEL_DIR) && ./goedel-go --project $(realpath .) --data-dir $(GOEDEL_DATA) report
+
+optimize-compare: $(GOEDEL_BIN)
+	@mkdir -p $(GOEDEL_DATA)
+	cd $(GOEDEL_DIR) && ./goedel-go --project $(realpath .) --data-dir $(GOEDEL_DATA) compare
