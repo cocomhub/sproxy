@@ -191,7 +191,17 @@ async function chunkedUpload(file, tunnelMode, resumeSession) {
 
     const chunkIndices = buildChunkIndices(adjustedTotalChunks, missingChunks, resumeSession);
     console.log('[upload] 待上传分块索引', chunkIndices);
+
+    // 计算已上传的字节数（续传场景下已有部分分块上传完成）
     let uploadedBytes = 0;
+    if (resumeSession && resumeSession.completedChunks) {
+      for (const ci of resumeSession.completedChunks) {
+        uploadedBytes += adjustedChunkSize;
+      }
+      if (uploadedBytes > totalSize) uploadedBytes = totalSize;
+    }
+    // 更新进度条显示已上传的部分
+    updateProg(uploadedBytes, totalSize, chunkIndices.length > 0 ? chunkIndices[0] : 0);
 
     saveUploadSession(actualUploadId, {
       filename: fileName, totalSize: totalSize, chunkSize: adjustedChunkSize,
