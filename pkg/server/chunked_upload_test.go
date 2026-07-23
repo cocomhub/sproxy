@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/client"
 )
 
@@ -1257,5 +1258,69 @@ func TestMergeAndRenameFile_FullFlow(t *testing.T) {
 	}
 	if result.FileChecksum != cs {
 		t.Fatalf("checksum mismatch: got %s, want %s", result.FileChecksum, cs)
+	}
+}
+
+func TestNegotiateChunkSize_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name       string
+		clientSize int64
+		cfgSize    int64
+		want       int64
+		wantAdj    bool
+	}{
+		{
+			name:       "client 64 MiB exact",
+			clientSize: 64 * 1024 * 1024,
+			cfgSize:    0,
+			want:       size.DefaultChunkBodyLimit - chunkOverheadMargin,
+			wantAdj:    true,
+		},
+		{
+			name:       "client 0, cfg 4 MiB",
+			clientSize: 0,
+			cfgSize:    4 * 1024 * 1024,
+			want:       4 * 1024 * 1024,
+			wantAdj:    false,
+		},
+		{
+			name:       "client 0, cfg 0",
+			clientSize: 0,
+			cfgSize:    0,
+			want:       size.DefaultChunkSize,
+			wantAdj:    false,
+		},
+		{
+			name:       "client below margin",
+			clientSize: size.DefaultChunkBodyLimit - chunkOverheadMargin - 1,
+			cfgSize:    0,
+			want:       size.DefaultChunkBodyLimit - chunkOverheadMargin - 1,
+			wantAdj:    false,
+		},
+		{
+			name:       "client at margin",
+			clientSize: size.DefaultChunkBodyLimit - chunkOverheadMargin,
+			cfgSize:    0,
+			want:       size.DefaultChunkBodyLimit - chunkOverheadMargin,
+			wantAdj:    false,
+		},
+		{
+			name:       "client above margin",
+			clientSize: size.DefaultChunkBodyLimit - chunkOverheadMargin + 1,
+			cfgSize:    0,
+			want:       size.DefaultChunkBodyLimit - chunkOverheadMargin,
+			wantAdj:    true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, adj := negotiateChunkSize(tt.clientSize, tt.cfgSize)
+			if got != tt.want {
+				t.Errorf("negotiateChunkSize(%d, %d) = %d, want %d", tt.clientSize, tt.cfgSize, got, tt.want)
+			}
+			if adj != tt.wantAdj {
+				t.Errorf("negotiateChunkSize(%d, %d) adjusted = %v, want %v", tt.clientSize, tt.cfgSize, adj, tt.wantAdj)
+			}
+		})
 	}
 }

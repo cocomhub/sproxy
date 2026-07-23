@@ -27,6 +27,10 @@ func validateChunkChecksum(checksum string) bool {
 	return err == nil
 }
 
+// chunkOverheadMargin 是 multipart 表单开销的预估余量，超过此值的 chunk 会被服务端裁剪。
+// 客户端 chunk 实际数据 + 此余量必须 ≤ DefaultChunkBodyLimit。
+const chunkOverheadMargin = 4 * 1024 // 4 KiB
+
 // negotiateChunkSize 协商分块大小：使用客户端传入的值，但不超过服务端上限。
 func negotiateChunkSize(clientChunkSize, cfgChunkSize int64) (chunkSize int64, adjusted bool) {
 	chunkSize = clientChunkSize
@@ -36,8 +40,8 @@ func negotiateChunkSize(clientChunkSize, cfgChunkSize int64) (chunkSize int64, a
 	if chunkSize <= 0 {
 		chunkSize = size.DefaultChunkSize
 	}
-	if chunkSize > size.DefaultChunkBodyLimit-1024 {
-		chunkSize = size.DefaultChunkBodyLimit - 1024
+	if chunkSize > size.DefaultChunkBodyLimit-chunkOverheadMargin {
+		chunkSize = size.DefaultChunkBodyLimit - chunkOverheadMargin
 		adjusted = true
 	}
 	return chunkSize, adjusted
@@ -192,14 +196,18 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 
 // uploadChunk 上传单个分块。
 func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	// 限制请求体大小（含 multipart 开销）
 	r.Body = http.MaxBytesReader(w, r.Body, size.DefaultChunkBodyLimit)
 
 	// 解析 multipart
 	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil {
+		h.logger.Warn("uploadChunk parse multipart 失败", "error", err.Error(), "content_type", r.Header.Get("Content-Type"), "content_length", r.ContentLength)
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败"}, http.StatusRequestEntityTooLarge)
 		return
 	}
+	h.logger.Debug("uploadChunk multipart 解析完成", "content_type", r.Header.Get("Content-Type"))
 
 	uploadID, chunkIndex, chunkChecksum, ok := parseChunkFormParams(r)
 	if !ok {
@@ -207,7 +215,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Debug("uploadChunk 请求", "upload_id", uploadID, "chunk_index", chunkIndex)
+	h.logger.Debug("uploadChunk 请求", "upload_id", uploadID, "chunk_index", chunkIndex, "content_type", r.Header.Get("Content-Type"))
 
 	// 获取 session
 	session := h.uploadStore.GetSession(uploadID)
@@ -251,7 +259,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 原子写入 + 流式哈希（复用 writeFileAtomically 写临时文件）
-	serverChecksum, _, err := writeFileAtomically(chunkPath, file)
+	serverChecksum, written, err := writeFileAtomically(chunkPath, file)
 	if err != nil {
 		h.logger.Error("写入 chunk 失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "写入分块失败"}, http.StatusInternalServerError)
@@ -261,7 +269,9 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	// 校验 SHA-256
 	if serverChecksum != chunkChecksum {
 		h.logger.Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", chunkIndex,
-			"server", shortid.ShortHash(serverChecksum), "client", shortid.ShortHash(chunkChecksum))
+			"server", serverChecksum, "server_short", shortid.ShortHash(serverChecksum),
+			"client", chunkChecksum, "client_short", shortid.ShortHash(chunkChecksum),
+			"written", written, "session_chunk_size", session.ChunkSize)
 		sendJSONResponse(w, ChunkUploadResponse{
 			Success:     false,
 			ChunkIndex:  chunkIndex,
@@ -278,7 +288,8 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Debug("chunk 上传成功", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortid.ShortHash(serverChecksum))
+	h.logger.Info("uploadChunk 耗时", "upload_id", uploadID, "chunk_index", chunkIndex,
+		"total", time.Since(start).String(), "size", written)
 	sendJSONResponse(w, ChunkUploadResponse{
 		Success:    true,
 		ChunkIndex: chunkIndex,

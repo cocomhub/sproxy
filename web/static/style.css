@@ -40,6 +40,7 @@ tr:hover td { background: #f8f9fa; }
 .toast-success { background: #1e8449; }
 .toast-error { background: #c0392b; }
 .toast-warning { background: #d68910; }
+.toast-info { background: #2b6cb5; }
 .size-cell { white-space: nowrap; }
 .breadcrumb-btn { background: none; border: none; color: #2b6cb5; cursor: pointer; padding: 0; font: inherit; }
 .chunk-progress-text { font-size: 12px; color: #666; margin-top: 2px; }
