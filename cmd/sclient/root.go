@@ -81,6 +81,7 @@ func init() {
 	rootCmd.PersistentFlags().Int64(flagChunkSize, 0, "分块大小 (默认 4MB)")
 	rootCmd.PersistentFlags().Int("concurrency", 0, "上传/下载并发数 (默认 4)")
 	rootCmd.PersistentFlags().Bool("resume", false, "续传模式 (默认启用)")
+	rootCmd.PersistentFlags().Bool("json", false, "以 JSON 格式输出")
 
 	// 注册子命令
 	rootCmd.AddCommand(uploadCmd)

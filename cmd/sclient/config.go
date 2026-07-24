@@ -62,20 +62,8 @@ var configRemoteCmd = &cobra.Command{
 			return fmt.Errorf("获取远程配置失败: %w", err)
 		}
 
-		fmt.Printf("远程服务器配置:\n")
-		fmt.Printf("  log_level:              %s\n", cfg.LogLevel)
-		fmt.Printf("  log_format:             %s\n", cfg.LogFormat)
-		fmt.Printf("  auth_token:             %s\n", boolStr(cfg.AuthTokenSet))
-		fmt.Printf("  tunnel_key:             %s\n", boolStr(cfg.TunnelKeySet))
-		fmt.Printf("  rate_limit_requests:    %d\n", cfg.RateLimitRequests)
-		fmt.Printf("  rate_limit_window:      %s\n", cfg.RateLimitWindow)
-		fmt.Printf("  max_storage_bytes:      %d\n", cfg.MaxStorageBytes)
-		fmt.Printf("  chunk_size:             %d\n", cfg.ChunkSize)
-		fmt.Printf("  upload_session_ttl:     %s\n", cfg.UploadSessionTTL)
-		fmt.Printf("  versioning_enabled:     %v\n", cfg.VersioningEnabled)
-		fmt.Printf("  cloud_max_concurrent:   %d\n", cfg.CloudMaxConcurrent)
-		fmt.Printf("  addr:                   %s\n", cfg.Addr)
-		fmt.Printf("  uploads_dir:            %s\n", cfg.UploadsDir)
+		fm := buildFormatter(cmd)
+		fm.PrintConfig(cfg)
 		return nil
 	},
 }
@@ -102,13 +90,6 @@ var configRemoteSetCmd = &cobra.Command{
 		fmt.Printf("远程配置已更新: %s = %s\n", key, value)
 		return nil
 	},
-}
-
-func boolStr(v bool) string {
-	if v {
-		return "已设置"
-	}
-	return "未设置"
 }
 
 func init() {

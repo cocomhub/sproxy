@@ -33,10 +33,11 @@ var searchCmd = &cobra.Command{
 			return fmt.Errorf("搜索失败: %w", err)
 		}
 
+		fm := buildFormatter(cmd)
 		if len(files) == 0 {
-			fmt.Println("no files found")
+			fm.Println("no files found")
 		} else {
-			printFileList(files, os.Stdout)
+			fm.PrintFileList(files)
 		}
 		return nil
 	},

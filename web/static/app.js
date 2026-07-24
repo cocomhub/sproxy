@@ -165,6 +165,7 @@ function buildFileRowHtml(fi, fullName) {
     '<td>' + csDisplay + '</td>' +
     '<td class="file-actions">' +
     '<button class="btn btn-primary btn-sm file-download-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">下载</button>' +
+    '<button class="btn btn-sm btn-secondary file-preview-btn" data-filename="' + escHtml(fullName) + '">预览</button>' +
     '<button class="btn btn-danger btn-sm file-delete-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">删除</button>' +
     '<button class="btn btn-warning btn-sm file-rename-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">重命名</button>' +
     '<button class="btn btn-sm btn-share file-share-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">分享</button>' +
@@ -796,7 +797,94 @@ function statsTableHtml(du, rc, s) {
     '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
 }
 
+// --- 暗色模式 ---
+function initTheme() {
+  var saved = localStorage.getItem('sproxy_theme');
+  if (saved === 'dark') {
+    document.documentElement.setAttribute('data-theme', 'dark');
+    document.getElementById('theme-toggle-btn').textContent = '☀️';
+  } else if (saved === 'light') {
+    document.documentElement.removeAttribute('data-theme');
+    document.getElementById('theme-toggle-btn').textContent = '🌙';
+  } else {
+    // 未保存时跟随系统
+    if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      document.getElementById('theme-toggle-btn').textContent = '☀️';
+    }
+  }
+}
+
+function toggleTheme() {
+  var current = document.documentElement.getAttribute('data-theme');
+  if (current === 'dark') {
+    document.documentElement.removeAttribute('data-theme');
+    localStorage.setItem('sproxy_theme', 'light');
+    document.getElementById('theme-toggle-btn').textContent = '🌙';
+  } else {
+    document.documentElement.setAttribute('data-theme', 'dark');
+    localStorage.setItem('sproxy_theme', 'dark');
+    document.getElementById('theme-toggle-btn').textContent = '☀️';
+  }
+}
+
+// --- 键盘快捷键 ---
+document.addEventListener('keydown', function(e) {
+  // 忽略输入框内的快捷键
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+
+  switch (e.key) {
+    case 'u': case 'U':
+      // u: 上传文件
+      e.preventDefault();
+      document.getElementById('file-input').click();
+      break;
+    case 'r': case 'R':
+      // r: 刷新列表（非 Ctrl+R）
+      if (!e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        refreshList();
+      }
+      break;
+    case '/':
+      // /: 搜索框聚焦
+      e.preventDefault();
+      document.getElementById('search-input').focus();
+      break;
+    case 'Escape':
+      // Esc: 关闭所有弹窗
+      hideStats();
+      hideCloudDownload();
+      hideVersioning();
+      hideShareModal();
+      break;
+  }
+});
+
+// Ctrl+A: 全选/取消全选
+document.addEventListener('keydown', function(e) {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    var selectAll = document.getElementById('select-all-checkbox');
+    if (selectAll) {
+      e.preventDefault();
+      selectAll.click();
+    }
+  }
+});
+
+// Delete: 批量删除选中文件
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Delete' && !e.target.tagName.match(/INPUT|TEXTAREA|SELECT/i)) {
+    var batchDelete = document.getElementById('batch-delete-btn');
+    if (batchDelete && batchDelete.style.display !== 'none') {
+      e.preventDefault();
+      batchDelete.click();
+    }
+  }
+});
+
 // --- 初始化 ---
+initTheme();
 refreshList();
 checkResumableUploads();
 
@@ -1333,6 +1421,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('stats-btn').addEventListener('click', showStats);
   document.getElementById('cloud-btn').addEventListener('click', showCloudDownload);
   document.getElementById('version-btn').addEventListener('click', showVersioning);
+  document.getElementById('theme-toggle-btn').addEventListener('click', toggleTheme);
 
   // 批量操作
   document.getElementById('batch-delete-btn').addEventListener('click', batchDelete);
@@ -1378,6 +1467,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // 事件委托：动态内容
   initDynamicEventDelegation();
+
+  // 拖拽上传初始化
+  initDragAndDrop();
 });
 
 // --- 事件委托：动态生成的 HTML 内容 ---
@@ -1405,6 +1497,10 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('file-share-btn')) {
         showShareModal(btn.dataset.filename);
+        return;
+      }
+      if (btn.classList.contains('file-preview-btn')) {
+        previewFile(btn.dataset.filename);
         return;
       }
 
@@ -1564,3 +1660,134 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 });
+
+// --- 拖拽上传 ---
+var dragCounter = 0;
+
+function initDragAndDrop() {
+  var container = document.getElementById('app');
+
+  container.addEventListener('dragenter', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter++;
+    if (dragCounter === 1) {
+      container.style.outline = '3px dashed var(--btn-primary-bg, #2b6cb5)';
+      container.style.outlineOffset = '-8px';
+      container.style.backgroundColor = 'var(--bg-auth, #f0f4ff)';
+    }
+  });
+
+  container.addEventListener('dragover', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  container.addEventListener('dragleave', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter--;
+    if (dragCounter === 0) {
+      container.style.outline = 'none';
+      container.style.backgroundColor = '';
+    }
+  });
+
+  container.addEventListener('drop', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounter = 0;
+    container.style.outline = 'none';
+    container.style.backgroundColor = '';
+
+    var files = e.dataTransfer.files;
+    if (files.length > 0) {
+      handleDroppedFiles(files);
+    }
+  });
+}
+
+function handleDroppedFiles(files) {
+  var fileInput = document.getElementById('file-input');
+
+  var dataTransfer = new DataTransfer();
+  for (var i = 0; i < files.length; i++) {
+    dataTransfer.items.add(files[i]);
+  }
+  fileInput.files = dataTransfer.files;
+
+  var event = new Event('change', { bubbles: true });
+  fileInput.dispatchEvent(event);
+}
+
+// --- 文件预览 ---
+function previewFile(filename) {
+  var ext = filename.split('.').pop().toLowerCase();
+
+  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].indexOf(ext) !== -1) {
+    previewImage(filename);
+  } else if (['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'].indexOf(ext) !== -1) {
+    previewText(filename);
+  } else {
+    downloadFile(filename);
+  }
+}
+
+function previewImage(filename) {
+  var url = '/download?filename=' + encodeURIComponent(filename);
+  var modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:2000;display:flex;align-items:center;justify-content:center;cursor:pointer;';
+
+  var img = document.createElement('img');
+  img.style.cssText = 'max-width:90vw;max-height:90vh;object-fit:contain;border-radius:4px;box-shadow:0 4px 24px rgba(0,0,0,.5);';
+  img.src = url;
+  img.alt = filename;
+
+  modal.appendChild(img);
+  modal.addEventListener('click', function() { if (document.body.contains(modal)) document.body.removeChild(modal); });
+  document.body.appendChild(modal);
+}
+
+async function previewText(filename) {
+  try {
+    var url = '/download?filename=' + encodeURIComponent(filename);
+    var text;
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('GET', url, {}, null);
+      text = new TextDecoder().decode(result.body);
+    } else {
+      var resp = await fetch(BASE + url, { headers: headers() });
+      if (!resp.ok) { showToast('预览失败: ' + resp.status, 'error'); return; }
+      text = await resp.text();
+    }
+    var lines = text.split('\n');
+    if (lines.length > 100) {
+      text = lines.slice(0, 100).join('\n') + '\n\n... (共 ' + lines.length + ' 行，仅显示前 100 行)';
+    }
+    showTextPreview(filename, text);
+  } catch (e) { showToast('预览失败: ' + e.message, 'error'); }
+}
+
+function showTextPreview(filename, text) {
+  var modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2000;display:flex;align-items:center;justify-content:center;';
+
+  var content = document.createElement('div');
+  content.style.cssText = 'background:var(--modal-bg,#fff);border-radius:8px;padding:16px;width:700px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;';
+
+  var header = document.createElement('div');
+  header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;';
+  header.innerHTML = '<span style="font-size:14px;font-weight:600;color:var(--text-primary,#333);">' + escHtml(filename) + '</span>' +
+    '<button style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-secondary,#888);line-height:1;">&times;</button>';
+  header.querySelector('button').addEventListener('click', function() { if (document.body.contains(modal)) document.body.removeChild(modal); });
+
+  var pre = document.createElement('pre');
+  pre.style.cssText = 'margin:0;padding:12px;background:var(--bg-hover,#f8f9fa);border-radius:4px;font-size:13px;line-height:1.5;overflow:auto;white-space:pre-wrap;word-break:break-all;max-height:60vh;color:var(--text-primary,#333);';
+  pre.textContent = text;
+
+  content.appendChild(header);
+  content.appendChild(pre);
+  modal.appendChild(content);
+  modal.addEventListener('click', function(e) { if (e.target === modal && document.body.contains(modal)) document.body.removeChild(modal); });
+  document.body.appendChild(modal);
+}
