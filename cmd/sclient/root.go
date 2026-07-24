@@ -34,6 +34,7 @@ var rootCmd = &cobra.Command{
 		cfgProvider = sclientcfg.New(cfgFile)
 		cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup(flagServer))
 		cfgProvider.BindPFlag("chunk_size", cmd.Flags().Lookup(flagChunkSize))
+		cfgProvider.BindPFlag("auth_token", cmd.Flags().Lookup("auth-token"))
 		// 加载缓存的当前目录
 		loadCurrentDir()
 		return nil
@@ -73,6 +74,7 @@ func init() {
 
 	// 全局选项（persistent flags）
 	rootCmd.PersistentFlags().StringP(flagServer, "s", "", "服务器地址 (覆盖配置中的 server_url)")
+	rootCmd.PersistentFlags().String("auth-token", "", "Bearer Token 认证令牌 (服务端配置了 auth_token 时需要)")
 	rootCmd.PersistentFlags().StringP("output", "o", "", "指定下载文件的输出路径")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "显示详细输出")
 	rootCmd.PersistentFlags().Bool("chunked", false, "启用分块上传/下载模式")
@@ -142,6 +144,12 @@ func buildFileClient(cmd *cobra.Command) (*client.FileClient, error) {
 	}
 	if ms := cfg.MaxChunkSize; ms > 0 {
 		opts = append(opts, client.WithMaxChunkSize(ms))
+	}
+	if cfg.AuthToken != "" {
+		opts = append(opts, client.WithAuthToken(cfg.AuthToken))
+	}
+	if t, _ := cmd.Flags().GetString("auth-token"); t != "" {
+		opts = append(opts, client.WithAuthToken(t))
 	}
 
 	return client.NewFileClient(serverURL, opts...), nil

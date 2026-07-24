@@ -48,6 +48,15 @@ func runCloudDownload(cmd *cobra.Command, args []string) error {
 	outputPath, _ := cmd.Flags().GetString("output")
 	batchFile, _ := cmd.Flags().GetString("batch")
 
+	// 获取 auth token: 优先 --auth-token flag，其次配置文件
+	authToken, _ := cmd.Flags().GetString("auth-token")
+	if authToken == "" && cfgProvider != nil {
+		cfg, err := client.LoadFromProvider(cfgProvider)
+		if err == nil {
+			authToken = cfg.AuthToken
+		}
+	}
+
 	// 收集所有 URL
 	urls := args
 	if batchFile != "" {
@@ -84,7 +93,7 @@ func runCloudDownload(cmd *cobra.Command, args []string) error {
 		}
 
 		// 1. 创建云端下载任务
-		task, err := createCloudDownloadTask(serverURL, urlStr)
+		task, err := createCloudDownloadTask(serverURL, urlStr, authToken)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  创建云端下载任务失败: %v\n", err)
 			failed++
@@ -98,7 +107,7 @@ func runCloudDownload(cmd *cobra.Command, args []string) error {
 
 		// 2. 如果同步模式完成，直接进入下载
 		if task.Status == "completed" {
-			if dlErr := downloadAndCleanup(serverURL, task, outputPath, noCleanup); dlErr != nil {
+			if dlErr := downloadAndCleanup(serverURL, task, outputPath, noCleanup, authToken); dlErr != nil {
 				fmt.Fprintf(os.Stderr, "  %v\n", dlErr)
 				failed++
 			} else {
@@ -114,7 +123,7 @@ func runCloudDownload(cmd *cobra.Command, args []string) error {
 			fmt.Println("  异步模式，轮询任务状态...")
 		}
 
-		task, err = pollCloudTask(serverURL, task.ID, pollInterval)
+		task, err = pollCloudTask(serverURL, task.ID, pollInterval, authToken)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  云端下载任务失败: %v\n", err)
 			failed++
@@ -122,7 +131,7 @@ func runCloudDownload(cmd *cobra.Command, args []string) error {
 		}
 
 		// 4. 下载到本地并清理云端
-		if err := downloadAndCleanup(serverURL, task, outputPath, noCleanup); err != nil {
+		if err := downloadAndCleanup(serverURL, task, outputPath, noCleanup, authToken); err != nil {
 			fmt.Fprintf(os.Stderr, "  %v\n", err)
 			failed++
 		} else {
@@ -168,7 +177,7 @@ type cloudTaskResponse struct {
 	Error      string `json:"error"`
 }
 
-func createCloudDownloadTask(serverURL, sourceURL string) (*cloudTaskResponse, error) {
+func createCloudDownloadTask(serverURL, sourceURL, authToken string) (*cloudTaskResponse, error) {
 	// 使用 json.Marshal 构建请求体，防止 JSON 注入
 	body, _ := json.Marshal(struct {
 		URL string `json:"url"`
@@ -180,6 +189,9 @@ func createCloudDownloadTask(serverURL, sourceURL string) (*cloudTaskResponse, e
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -199,7 +211,7 @@ func createCloudDownloadTask(serverURL, sourceURL string) (*cloudTaskResponse, e
 	return &task, nil
 }
 
-func pollCloudTask(serverURL, taskID string, interval time.Duration) (*cloudTaskResponse, error) {
+func pollCloudTask(serverURL, taskID string, interval time.Duration, authToken string) (*cloudTaskResponse, error) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -207,6 +219,9 @@ func pollCloudTask(serverURL, taskID string, interval time.Duration) (*cloudTask
 		req, err := http.NewRequest(http.MethodGet, serverURL+"/api/cloud/tasks/"+taskID, nil)
 		if err != nil {
 			return nil, err
+		}
+		if authToken != "" {
+			req.Header.Set("Authorization", "Bearer "+authToken)
 		}
 
 		resp, err := http.DefaultClient.Do(req)
@@ -240,7 +255,7 @@ func pollCloudTask(serverURL, taskID string, interval time.Duration) (*cloudTask
 	return nil, fmt.Errorf("polling ended unexpectedly")
 }
 
-func downloadAndCleanup(serverURL string, task *cloudTaskResponse, outputPath string, noCleanup bool) error {
+func downloadAndCleanup(serverURL string, task *cloudTaskResponse, outputPath string, noCleanup bool, authToken string) error {
 	// 确定输出路径：默认仅使用文件名，拒绝路径穿越
 	if outputPath == "" {
 		outputPath = filepathSafe(filepath.Base(task.Filename))
@@ -249,7 +264,14 @@ func downloadAndCleanup(serverURL string, task *cloudTaskResponse, outputPath st
 	// 1. 下载文件：URL 编码路径参数，防止路径注入
 	downloadURL := fmt.Sprintf("%s/download?filename=%s",
 		serverURL, url.QueryEscape(".__cloud__/"+task.ID+"/"+task.Filename))
-	resp, err := http.Get(downloadURL)
+	req, err := http.NewRequest(http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return fmt.Errorf("创建下载请求失败: %w", err)
+	}
+	if authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("下载文件失败: %w", err)
 	}

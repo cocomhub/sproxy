@@ -79,12 +79,24 @@ func TestConfigValidate(t *testing.T) {
 	if err := cfg6.Validate(); err != nil {
 		t.Fatalf("Validate() on config with 64-char tunnel_key: %v", err)
 	}
+
+	// auth_token 任意字符串都合法
+	cfg7 := &Config{ServerURL: "http://x", Timeout: 30, AuthToken: "my-token"}
+	if err := cfg7.Validate(); err != nil {
+		t.Fatalf("Validate() on config with AuthToken: %v", err)
+	}
+
+	// auth_token 空字符串也合法
+	cfg8 := &Config{ServerURL: "http://x", Timeout: 30, AuthToken: ""}
+	if err := cfg8.Validate(); err != nil {
+		t.Fatalf("Validate() on config with empty AuthToken: %v", err)
+	}
 }
 
 func TestLoadFromProvider(t *testing.T) {
 	t.Parallel()
 
-	p := mapProvider{m: map[string]any{"server_url": "http://test:8080", "timeout": 60}}
+	p := mapProvider{m: map[string]any{"server_url": "http://test:8080", "timeout": 60, "auth_token": "secret"}}
 
 	cfg, err := LoadFromProvider(p)
 	if err != nil {
@@ -98,6 +110,9 @@ func TestLoadFromProvider(t *testing.T) {
 	}
 	if cfg.ChunkSize != size.DefaultChunkSize {
 		t.Errorf("ChunkSize = %d, want %d", cfg.ChunkSize, size.DefaultChunkSize)
+	}
+	if cfg.AuthToken != "secret" {
+		t.Errorf("AuthToken = %q, want %q", cfg.AuthToken, "secret")
 	}
 }
 
@@ -167,6 +182,7 @@ func TestHandleConfigShow(_ *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ServerURL = "https://example.com"
 	cfg.TunnelKey = strings.Repeat("d", 64)
+	cfg.AuthToken = "my-secret-token"
 	cfg.ChunkSize = 8 << 20
 	cfg.MaxChunkSize = 32 << 20
 
