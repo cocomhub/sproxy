@@ -550,11 +550,13 @@ function hideStats() {
 function switchStatsTab(tab) {
   document.getElementById('stats-panel').style.display = tab === 'stats' ? 'block' : 'none';
   document.getElementById('config-panel').style.display = tab === 'config' ? 'block' : 'none';
+  document.getElementById('hub-panel').style.display = tab === 'hub' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
     el.style.borderBottomColor = el.id === tab + '-tab' ? '#4a90d9' : 'transparent';
     el.style.color = el.id === tab + '-tab' ? '#333' : '#666';
   });
   if (tab === 'config') showConfig();
+  if (tab === 'hub') showHub();
 }
 
 async function showConfig() {
@@ -571,6 +573,86 @@ async function showConfig() {
     }
     document.getElementById('config-panel').innerHTML = configTableHtml(data);
   } catch (e) { document.getElementById('config-panel').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
+}
+
+// --- Hub 管理 ---
+async function showHub() {
+  document.getElementById('hub-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
+  try {
+    var nodes, stats;
+    if (tunnelHexKey) {
+      var nResult = await tunnelRequest('GET', '/api/hub/nodes', {}, null);
+      nodes = JSON.parse(new TextDecoder().decode(nResult.body)) || [];
+      var sResult = await tunnelRequest('GET', '/api/hub/stats', {}, null);
+      stats = JSON.parse(new TextDecoder().decode(sResult.body));
+    } else {
+      var nResp = await fetch(BASE + '/api/hub/nodes', { headers: headers() });
+      if (!nResp.ok) {
+        document.getElementById('hub-panel').innerHTML = '<div class="empty-msg">Hub 未启用或请求失败</div>';
+        return;
+      }
+      nodes = await nResp.json();
+      var sResp = await fetch(BASE + '/api/hub/stats', { headers: headers() });
+      stats = await sResp.json();
+    }
+    document.getElementById('hub-panel').innerHTML = hubTableHtml(nodes, stats);
+  } catch (e) {
+    document.getElementById('hub-panel').innerHTML = '<div class="empty-msg">Hub 未启用或请求失败: ' + e.message + '</div>';
+  }
+}
+
+function hubTableHtml(nodes, stats) {
+  var html = '';
+  // 统计概要
+  if (stats) {
+    html += '<div style="margin-bottom:12px;padding:8px 12px;background:#f0f8ff;border-radius:4px;font-size:13px;">';
+    html += '已连接节点: <strong>' + (stats.nodes_connected ?? 0) + '</strong></div>';
+  }
+
+  if (!nodes || nodes.length === 0) {
+    html += '<div class="empty-msg">暂无已连接节点</div>';
+    return html;
+  }
+
+  html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+  html += '<thead><tr style="background:#f5f5f5;">';
+  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">节点 ID</th>';
+  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">地址</th>';
+  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">连接时间</th>';
+  html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid #ddd;">操作</th>';
+  html += '</tr></thead><tbody>';
+
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i];
+    var connected = n.connected ? new Date(n.connected).toLocaleString() : '-';
+    html += '<tr>';
+    html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px;">' + escHtml(n.id) + '</td>';
+    html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + escHtml(n.addr || '-') + '</td>';
+    html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px;">' + connected + '</td>';
+    html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:center;">';
+    html += '<button class="btn btn-danger btn-sm hub-remove-btn" data-node-id="' + escHtml(n.id) + '">移除</button>';
+    html += '</td></tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+async function removeHubNode(nodeId) {
+  if (!confirm('确定移除节点 ' + nodeId + '？')) return;
+  try {
+    if (tunnelHexKey) {
+      await tunnelRequest('DELETE', '/api/hub/nodes/' + encodeURIComponent(nodeId), {}, null);
+    } else {
+      var resp = await fetch(BASE + '/api/hub/nodes/' + encodeURIComponent(nodeId), { method: 'DELETE', headers: headers() });
+      if (!resp.ok) {
+        var data = await resp.json().catch(function() { return {}; });
+        showToast('移除失败: ' + (data.error || resp.status), 'error');
+        return;
+      }
+    }
+    showToast('节点 ' + nodeId + ' 已移除', 'success');
+    showHub();
+  } catch (e) { showToast('移除失败: ' + e.message, 'error'); }
 }
 
 function configTableHtml(cfg) {
@@ -1264,6 +1346,7 @@ document.addEventListener('DOMContentLoaded', function() {
   // 监控弹窗标签页切换
   document.getElementById('stats-tab').addEventListener('click', function() { switchStatsTab('stats'); });
   document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
+  document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
 
   // 云端下载弹窗
   document.getElementById('cloud-close-btn').addEventListener('click', hideCloudDownload);
@@ -1449,6 +1532,16 @@ function initDynamicEventDelegation() {
       } else if (e.target.id === 'cfg-update-storage') {
         var val = document.getElementById('cfg-max-storage').value;
         updateConfigField('max_storage_bytes', parseInt(val) || 0);
+      }
+    });
+  }
+
+  // Hub 面板事件委托（移除节点按钮）
+  const hubPanel = document.getElementById('hub-panel');
+  if (hubPanel) {
+    hubPanel.addEventListener('click', function(e) {
+      if (e.target.classList.contains('hub-remove-btn')) {
+        removeHubNode(e.target.getAttribute('data-node-id'));
       }
     });
   }
