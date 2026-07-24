@@ -224,3 +224,135 @@ func TestShare_OneTime(t *testing.T) {
 		t.Fatalf("expected 404 for second download, got %d", resp3.StatusCode)
 	}
 }
+
+func TestShare_List(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	// 先上传文件
+	body := []byte("list test content")
+	uploadFile(t, url, "list_test.txt", body, map[string]string{
+		"X-File-Checksum": sha256hex(body),
+	})
+
+	// 创建分享链接
+	reqBody := `{"filename":"list_test.txt","ttl":"1h"}`
+	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// 列出分享
+	resp2, err := http.Get(url + "/api/shares")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp2.StatusCode)
+	}
+
+	var result struct {
+		Shares []struct {
+			Token        string `json:"token"`
+			Filename     string `json:"filename"`
+			CreatedAt    string `json:"created_at"`
+			ExpiresAt    string `json:"expires_at"`
+			MaxDownloads int    `json:"max_downloads"`
+			Downloads    int    `json:"downloads"`
+			OneTime      bool   `json:"one_time"`
+			Expired      bool   `json:"expired"`
+		} `json:"shares"`
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Shares) == 0 {
+		t.Fatal("expected at least 1 share")
+	}
+	found := false
+	for _, s := range result.Shares {
+		if s.Filename == "list_test.txt" {
+			found = true
+			if s.Token == "" {
+				t.Error("expected non-empty token")
+			}
+			if s.CreatedAt == "" {
+				t.Error("expected non-empty created_at")
+			}
+			if s.Expired {
+				t.Error("expected expired=false for a valid share")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("share for list_test.txt not found in list")
+	}
+}
+
+func TestShare_Revoke(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("revoke test content")
+	uploadFile(t, url, "revoke_test.txt", body, map[string]string{
+		"X-File-Checksum": sha256hex(body),
+	})
+
+	// 创建分享
+	reqBody := `{"filename":"revoke_test.txt","ttl":"1h"}`
+	resp, err := http.Post(url+"/api/share", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var shareResp map[string]any
+	json.NewDecoder(resp.Body).Decode(&shareResp)
+	resp.Body.Close()
+	token := shareResp["token"].(string)
+
+	// 撤销分享
+	req2, err := http.NewRequest(http.MethodDelete, url+"/api/shares/"+token, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 revoking share, got %d", resp2.StatusCode)
+	}
+
+	// 确认访问返回 404
+	resp3, err := http.Get(url + "/s/" + token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 after revoke, got %d", resp3.StatusCode)
+	}
+}
+
+func TestShare_RevokeNotFound(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	req, err := http.NewRequest(http.MethodDelete, url+"/api/shares/nonexistent_token", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-existent token, got %d", resp.StatusCode)
+	}
+}

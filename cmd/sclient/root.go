@@ -94,6 +94,7 @@ func init() {
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(relayCmd)
 	rootCmd.AddCommand(cloudDownloadCmd)
+	rootCmd.AddCommand(shareCmd)
 }
 
 // buildFileClient 根据 cfgProvider 配置和 persistent flag 构造 FileClient。

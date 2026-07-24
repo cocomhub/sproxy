@@ -27,6 +27,7 @@ type ShareLink struct {
 	Token        string    `json:"token"`
 	Filename     string    `json:"filename"`
 	AbsPath      string    `json:"-"` // 创建时解析的绝对路径
+	CreatedAt    time.Time `json:"created_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	MaxDownloads int       `json:"max_downloads"` // 0 = 不限
 	Downloads    int       `json:"downloads"`
@@ -55,6 +56,7 @@ func (s *ShareStore) Create(filename, absPath string, ttl time.Duration, maxDown
 		Token:        token,
 		Filename:     filename,
 		AbsPath:      absPath,
+		CreatedAt:    time.Now(),
 		ExpiresAt:    time.Now().Add(ttl),
 		MaxDownloads: maxDownloads,
 		OneTime:      oneTime,
@@ -109,6 +111,31 @@ func (s *ShareStore) Consume(token string) *ShareLink {
 	}
 
 	return link
+}
+
+// List 返回所有分享链接的副本。
+func (s *ShareStore) List() []*ShareLink {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]*ShareLink, 0, len(s.links))
+	for _, link := range s.links {
+		cp := *link
+		result = append(result, &cp)
+	}
+	return result
+}
+
+// Revoke 删除指定 token 的分享链接。链接不存在时返回 error。
+func (s *ShareStore) Revoke(token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.links[token]; !ok {
+		return fmt.Errorf("分享链接不存在: %s", token)
+	}
+	delete(s.links, token)
+	return nil
 }
 
 // createShareHandler 处理 POST /api/share。
@@ -205,4 +232,54 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, f)
+}
+
+// listSharesHandler 处理 GET /api/shares，返回所有分享链接。
+func (h *Handlers) listSharesHandler(w http.ResponseWriter, r *http.Request) {
+	links := h.shareStore.List()
+
+	type shareItem struct {
+		Token        string `json:"token"`
+		Filename     string `json:"filename"`
+		CreatedAt    string `json:"created_at"`
+		ExpiresAt    string `json:"expires_at"`
+		MaxDownloads int    `json:"max_downloads"`
+		Downloads    int    `json:"downloads"`
+		OneTime      bool   `json:"one_time"`
+		Expired      bool   `json:"expired"`
+	}
+
+	now := time.Now()
+	items := make([]shareItem, 0, len(links))
+	for _, l := range links {
+		expired := now.After(l.ExpiresAt) || (l.MaxDownloads > 0 && l.Downloads >= l.MaxDownloads)
+		items = append(items, shareItem{
+			Token:        l.Token,
+			Filename:     l.Filename,
+			CreatedAt:    l.CreatedAt.Format(time.RFC3339),
+			ExpiresAt:    l.ExpiresAt.Format(time.RFC3339),
+			MaxDownloads: l.MaxDownloads,
+			Downloads:    l.Downloads,
+			OneTime:      l.OneTime,
+			Expired:      expired,
+		})
+	}
+
+	sendJSONResponse(w, map[string]any{"shares": items}, http.StatusOK)
+}
+
+// revokeShareHandler 处理 DELETE /api/shares/{token}，撤销指定分享链接。
+func (h *Handlers) revokeShareHandler(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	if token == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "token 不能为空"}, http.StatusBadRequest)
+		return
+	}
+
+	if err := h.shareStore.Revoke(token); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: err.Error()}, http.StatusNotFound)
+		return
+	}
+
+	sendJSONResponse(w, UploadResponse{Success: true, Message: "分享链接已撤销"}, http.StatusOK)
 }

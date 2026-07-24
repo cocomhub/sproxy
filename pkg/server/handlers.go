@@ -157,6 +157,14 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
 	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 
+	// 分享管理 API（localMux：隧道内部使用）
+	localMux.HandleFunc("GET /api/shares", h.listSharesHandler)
+	localMux.HandleFunc("DELETE /api/shares/{token}", h.revokeShareHandler)
+
+	// 分享管理 API（主 mux：Bearer auth）
+	mux.HandleFunc("GET /api/shares", h.authMiddleware(h.listSharesHandler))
+	mux.HandleFunc("DELETE /api/shares/{token}", h.authMiddleware(h.revokeShareHandler))
+
 	// 云端下载 API（localMux：隧道认证）
 	localMux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
 	localMux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
