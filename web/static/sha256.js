@@ -1,10 +1,11 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// 纯 JS 增量 SHA-256 实现。
-// 支持 update(Uint8Array) / digest('hex') 模式，避免 Web Crypto 需要完整 buffer。
+// Pure JS incremental SHA-256 implementation.
+// Supports update(Uint8Array) / digest() pattern.
+// All intermediate results use >>> 0 to ensure unsigned 32-bit integer operations.
 
-function rot(x, n) { return (x >>> n) | (x << (32 - n)); }
+function rot(x, n) { return ((x >>> n) | (x << (32 - n))) >>> 0; }
 
 const Sha256 = (function() {
   const K = [
@@ -23,16 +24,18 @@ const Sha256 = (function() {
     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
     0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
   ];
+
   function Sha256() {
     this.h = [
       0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
     ];
     this._buf = [];
     this._len = 0;
   }
+
   Sha256.prototype.update = function(data) {
     if (!data || !data.length) return this;
     this._len += data.length * 8;
@@ -45,54 +48,69 @@ const Sha256 = (function() {
     }
     return this;
   };
+
   Sha256.prototype.digest = function() {
-    const bits = this._len;
+    const lo = (this._len >>> 0) & 0xFFFFFFFF;
+    const hi = Math.floor(this._len / 0x100000000) & 0xFFFFFFFF;
+
     let buf = this._buf.slice();
     buf.push(0x80);
-    while (buf.length % 64 !== 56) buf.push(0x00);
-    for (let bi = 7; bi >= 0; bi--) buf.push((bits >>> (bi * 8)) & 0xff);
+    while (buf.length % 64 !== 56) { buf.push(0x00); }
+    buf.push((hi >>> 24) & 0xff);
+    buf.push((hi >>> 16) & 0xff);
+    buf.push((hi >>> 8) & 0xff);
+    buf.push(hi & 0xff);
+    buf.push((lo >>> 24) & 0xff);
+    buf.push((lo >>> 16) & 0xff);
+    buf.push((lo >>> 8) & 0xff);
+    buf.push(lo & 0xff);
+
     for (let di = 0; di < buf.length; di += 64) {
       this._transform(buf.slice(di, di + 64));
     }
     let hex = '';
-    for (let hi = 0; hi < 8; hi++) {
-      for (let hj = 3; hj >= 0; hj--) {
-        const b = (this.h[hi] >>> (hj * 8)) & 0xff;
-        hex += (b < 16 ? '0' : '') + b.toString(16);
-      }
+    for (let i = 0; i < 8; i++) {
+      hex += ((this.h[i] >>> 24) & 0xff).toString(16).padStart(2, '0');
+      hex += ((this.h[i] >>> 16) & 0xff).toString(16).padStart(2, '0');
+      hex += ((this.h[i] >>> 8) & 0xff).toString(16).padStart(2, '0');
+      hex += (this.h[i] & 0xff).toString(16).padStart(2, '0');
     }
     return hex;
   };
+
   Sha256.prototype._transform = function(m) {
     const w = new Array(64);
     for (let ti = 0; ti < 16; ti++) {
-      w[ti] = (m[ti * 4] << 24) | (m[ti * 4 + 1] << 16) | (m[ti * 4 + 2] << 8) | m[ti * 4 + 3];
+      w[ti] = ((m[ti * 4] << 24) | (m[ti * 4 + 1] << 16) | (m[ti * 4 + 2] << 8) | m[ti * 4 + 3]) >>> 0;
     }
     for (let ti = 16; ti < 64; ti++) {
       const s0 = rot(w[ti - 15], 7) ^ rot(w[ti - 15], 18) ^ (w[ti - 15] >>> 3);
       const s1 = rot(w[ti - 2], 17) ^ rot(w[ti - 2], 19) ^ (w[ti - 2] >>> 10);
-      w[ti] = (w[ti - 16] + s0 + w[ti - 7] + s1) >>> 0;
+      w[ti] = ((w[ti - 16] + s0 + w[ti - 7] + s1) & 0xFFFFFFFF) >>> 0;
     }
-    let a = this.h[0]; let b = this.h[1]; let c = this.h[2]; let d = this.h[3];
-    let e = this.h[4]; let f = this.h[5]; let g = this.h[6]; let hh = this.h[7];
+    let a = this.h[0], b = this.h[1], c = this.h[2], d = this.h[3];
+    let e = this.h[4], f = this.h[5], g = this.h[6], hh = this.h[7];
     for (let ti = 0; ti < 64; ti++) {
       const S1 = rot(e, 6) ^ rot(e, 11) ^ rot(e, 25);
-      const ch = (e & f) ^ ((~e) & g);
-      const t1 = (hh + S1 + ch + K[ti] + w[ti]) >>> 0;
+      const ch = ((e & f) ^ ((~e) & g)) >>> 0;
+      const t1 = ((hh + S1 + ch + K[ti] + w[ti]) & 0xFFFFFFFF) >>> 0;
       const S0 = rot(a, 2) ^ rot(a, 13) ^ rot(a, 22);
-      const maj = (a & b) ^ (a & c) ^ (b & c);
-      const t2 = (S0 + maj) >>> 0;
-      hh = g; g = f; f = e; e = (d + t1) >>> 0;
-      d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+      const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+      const t2 = ((S0 + maj) & 0xFFFFFFFF) >>> 0;
+      hh = g; g = f; f = e;
+      e = ((d + t1) & 0xFFFFFFFF) >>> 0;
+      d = c; c = b; b = a;
+      a = ((t1 + t2) & 0xFFFFFFFF) >>> 0;
     }
-    this.h[0] = (this.h[0] + a) >>> 0;
-    this.h[1] = (this.h[1] + b) >>> 0;
-    this.h[2] = (this.h[2] + c) >>> 0;
-    this.h[3] = (this.h[3] + d) >>> 0;
-    this.h[4] = (this.h[4] + e) >>> 0;
-    this.h[5] = (this.h[5] + f) >>> 0;
-    this.h[6] = (this.h[6] + g) >>> 0;
-    this.h[7] = (this.h[7] + hh) >>> 0;
+    this.h[0] = ((this.h[0] + a) & 0xFFFFFFFF) >>> 0;
+    this.h[1] = ((this.h[1] + b) & 0xFFFFFFFF) >>> 0;
+    this.h[2] = ((this.h[2] + c) & 0xFFFFFFFF) >>> 0;
+    this.h[3] = ((this.h[3] + d) & 0xFFFFFFFF) >>> 0;
+    this.h[4] = ((this.h[4] + e) & 0xFFFFFFFF) >>> 0;
+    this.h[5] = ((this.h[5] + f) & 0xFFFFFFFF) >>> 0;
+    this.h[6] = ((this.h[6] + g) & 0xFFFFFFFF) >>> 0;
+    this.h[7] = ((this.h[7] + hh) & 0xFFFFFFFF) >>> 0;
   };
+
   return Sha256;
 })();
