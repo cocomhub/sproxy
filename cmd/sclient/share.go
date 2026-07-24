@@ -58,11 +58,7 @@ var shareCreateCmd = &cobra.Command{
 		shareURL := strings.TrimRight(serverURL, "/") + "/s/" + link.Token
 
 		fm := buildFormatter(cmd)
-		fm.Printf("分享链接: %s\n", shareURL)
-		fm.Printf("Token: %s\n", link.Token)
-		fm.Printf("有效期至: %s\n", link.ExpiresAt)
-		fm.Printf("最大下载次数: %d\n", link.MaxDownloads)
-		fm.Printf("一次性: %v\n", link.OneTime)
+		fm.PrintShareCreated(link, shareURL)
 		return nil
 	},
 }
@@ -105,7 +101,7 @@ var shareRevokeCmd = &cobra.Command{
 		}
 
 		fm := buildFormatter(cmd)
-		fm.Printf("已撤销分享: %s\n", args[0])
+		fm.PrintShareRevoked(args[0])
 		return nil
 	},
 }

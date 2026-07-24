@@ -20,13 +20,19 @@ type OutputFormatter interface {
 	PrintFileList(files []client.FileInfo)
 	// PrintShareList 输出分享列表。
 	PrintShareList(shares []*client.ShareLink)
+	// PrintShareCreated 输出创建分享的结果。
+	PrintShareCreated(link *client.ShareLink, shareURL string)
+	// PrintShareRevoked 输出撤销分享的结果。
+	PrintShareRevoked(token string)
 	// PrintStats 输出统计信息。
 	PrintStats(stats *client.StatsResponse)
 	// PrintConfig 输出配置信息。
 	PrintConfig(cfg *client.ConfigResponse)
-	// Printf 输出格式化字符串。
+	// PrintUpdateResult 输出配置更新结果。
+	PrintUpdateResult(key, value string)
+	// Printf 输出格式化字符串（JSON 模式忽略）。
 	Printf(format string, args ...interface{})
-	// Println 输出一行。
+	// Println 输出一行（JSON 模式忽略）。
 	Println(args ...interface{})
 }
 
@@ -65,6 +71,22 @@ func (f *TextFormatter) PrintShareList(shares []*client.ShareLink) {
 		}
 		fmt.Fprintf(f.w, "%-36s  %-40s  %-10s  %s\n", shortToken, s.Filename, status, downloads)
 	}
+}
+
+func (f *TextFormatter) PrintShareCreated(link *client.ShareLink, shareURL string) {
+	fmt.Fprintf(f.w, "分享链接: %s\n", shareURL)
+	fmt.Fprintf(f.w, "Token: %s\n", link.Token)
+	fmt.Fprintf(f.w, "有效期至: %s\n", link.ExpiresAt)
+	fmt.Fprintf(f.w, "最大下载次数: %d\n", link.MaxDownloads)
+	fmt.Fprintf(f.w, "一次性: %v\n", link.OneTime)
+}
+
+func (f *TextFormatter) PrintShareRevoked(token string) {
+	fmt.Fprintf(f.w, "已撤销分享: %s\n", token)
+}
+
+func (f *TextFormatter) PrintUpdateResult(key, value string) {
+	fmt.Fprintf(f.w, "远程配置已更新: %s = %s\n", key, value)
 }
 
 func (f *TextFormatter) PrintStats(stats *client.StatsResponse) {
@@ -149,6 +171,28 @@ func (f *JSONFormatter) PrintFileList(files []client.FileInfo) {
 func (f *JSONFormatter) PrintShareList(shares []*client.ShareLink) {
 	enc := json.NewEncoder(f.w)
 	_ = enc.Encode(map[string]any{"shares": shares})
+}
+
+func (f *JSONFormatter) PrintShareCreated(link *client.ShareLink, shareURL string) {
+	enc := json.NewEncoder(f.w)
+	_ = enc.Encode(map[string]any{
+		"token":         link.Token,
+		"url":           shareURL,
+		"filename":      link.Filename,
+		"expires_at":    link.ExpiresAt,
+		"max_downloads": link.MaxDownloads,
+		"one_time":      link.OneTime,
+	})
+}
+
+func (f *JSONFormatter) PrintShareRevoked(token string) {
+	enc := json.NewEncoder(f.w)
+	_ = enc.Encode(map[string]string{"token": token, "status": "revoked"})
+}
+
+func (f *JSONFormatter) PrintUpdateResult(key, value string) {
+	enc := json.NewEncoder(f.w)
+	_ = enc.Encode(map[string]string{"key": key, "value": value, "status": "updated"})
 }
 
 func (f *JSONFormatter) PrintStats(stats *client.StatsResponse) {
