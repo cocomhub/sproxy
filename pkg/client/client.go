@@ -98,6 +98,7 @@ type FileClient struct {
 	progressFn   func(label string, read, total int64)
 	ChunkSize    int64
 	MaxChunkSize int64
+	authToken    string
 	logger       *slog.Logger
 	uploadCache  sync.Map // key = absFilePath, value = *uploadCacheEntry
 }
@@ -174,6 +175,15 @@ func WithProgress(fn func(label string, read, total int64)) Option {
 func WithMaxChunkSize(n int64) Option {
 	return func(c *FileClient) {
 		c.MaxChunkSize = n
+	}
+}
+
+// WithAuthToken 设置 Bearer Token 认证。
+// 当服务端配置了 auth_token 或 api_keys 时，需要此 token 通过认证。
+// 隧道模式下不需要（隧道密钥已提供认证），但直连模式必须。
+func WithAuthToken(token string) Option {
+	return func(c *FileClient) {
+		c.authToken = token
 	}
 }
 
@@ -778,6 +788,10 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	req.URL, err = url.Parse(fullURL)
 	if err != nil {
 		return nil, fmt.Errorf("解析 URL 失败: %w", err)
+	}
+	// 直连模式且配置了 auth token 时注入 Authorization 头
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
 	resp, err = c.httpClient.Do(req)
 	return closeBodyIfErr(resp, err)

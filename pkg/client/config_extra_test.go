@@ -21,6 +21,7 @@ func TestHandleConfigSet(t *testing.T) {
 		wantErr bool
 	}{
 		{"set server_url", "server_url", "http://test:8080", false},
+		{"set auth_token", "auth_token", "my-token", false},
 		{"set tunnel_key", "tunnel_key", "abcd1234", false},
 		{"set timeout", "timeout", "60", false},
 		{"set chunk_size", "chunk_size", "4194304", false},

@@ -46,6 +46,22 @@ func TestWithMaxChunkSize(t *testing.T) {
 	}
 }
 
+func TestWithAuthToken(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	WithAuthToken("my-token")(c)
+	if c.authToken != "my-token" {
+		t.Errorf("authToken = %q, want %q", c.authToken, "my-token")
+	}
+}
+
+func TestWithAuthToken_Empty(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	WithAuthToken("")(c)
+	if c.authToken != "" {
+		t.Errorf("authToken should be empty, got %q", c.authToken)
+	}
+}
+
 func TestWithLogger(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:18083")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
