@@ -122,7 +122,8 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	}
 
 	if sessionTTL < 0 {
-		sessionTTL = 0
+		// 负 TTL：保留原值，用于测试"已过期"场景。
+		// ExpiresAt = now.Add(negative) 保证为过去时间，cleanupExpired 可立即清理。
 	} else if sessionTTL == 0 {
 		sessionTTL = 24 * time.Hour
 	}

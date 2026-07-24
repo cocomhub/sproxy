@@ -1261,6 +1261,9 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('stats-close-btn').addEventListener('click', hideStats);
   document.getElementById('stats-refresh-btn').addEventListener('click', showStats);
   document.getElementById('stats-close-modal-btn').addEventListener('click', hideStats);
+  // 监控弹窗标签页切换
+  document.getElementById('stats-tab').addEventListener('click', function() { switchStatsTab('stats'); });
+  document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
 
   // 云端下载弹窗
   document.getElementById('cloud-close-btn').addEventListener('click', hideCloudDownload);

@@ -753,13 +753,15 @@ func TestStorageConfigInStats(t *testing.T) {
 		t.Fatalf("config tab not clickable: %v", err)
 	}
 
-	// 等待配置面板可见
-	_, err = page.WaitForSelector("#config-panel", playwright.PageWaitForSelectorOptions{
+	// 等待配置面板加载完成（含异步渲染的配置内容）
+	_, err = page.WaitForSelector("#cfg-max-storage", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(5000),
+		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
-		t.Fatalf("config-panel not visible after click: %v", err)
+		// 获取面板内容帮助调试
+		content, _ := page.Locator("#config-panel").InnerText()
+		t.Fatalf("cfg-max-storage not visible in config panel, panel content: %s", content)
 	}
 
 	// 验证存储限制配置元素存在（配置面板中）
