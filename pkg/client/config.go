@@ -4,7 +4,12 @@
 package client
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 
 	"github.com/cocomhub/sproxy/internal/size"
@@ -135,4 +140,80 @@ func HandleConfigSet(cfg *Config, configPath, key, value string) error {
 		return fmt.Errorf("未知配置键: %s", key)
 	}
 	return SaveConfig(cfg, configPath)
+}
+
+// ConfigResponse 是 GET /api/config 的响应结构体。
+type ConfigResponse struct {
+	LogLevel           string `json:"log_level"`
+	LogFormat          string `json:"log_format"`
+	AuthTokenSet       bool   `json:"auth_token_set"`
+	TunnelKeySet       bool   `json:"tunnel_key_set"`
+	RateLimitRequests  int    `json:"rate_limit_requests"`
+	RateLimitWindow    string `json:"rate_limit_window"`
+	MaxStorageBytes    int64  `json:"max_storage_bytes"`
+	ChunkSize          int64  `json:"chunk_size"`
+	UploadSessionTTL   string `json:"upload_session_ttl"`
+	VersioningEnabled  bool   `json:"versioning_enabled"`
+	VersioningMax      int    `json:"versioning_max_versions"`
+	CloudMaxConcurrent int    `json:"cloud_max_concurrent"`
+	CloudSyncThreshold int64  `json:"cloud_sync_threshold"`
+	HubEnabled         bool   `json:"hub_enabled"`
+	TLSEnabled         bool   `json:"tls_enabled"`
+	Addr               string `json:"addr"`
+	UploadsDir         string `json:"uploads_dir"`
+}
+
+// GetConfig 获取远程服务器配置。
+func (c *FileClient) GetConfig(ctx context.Context) (*ConfigResponse, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/config", nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("获取配置失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("获取配置失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	var cfg ConfigResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+	return &cfg, nil
+}
+
+// UpdateConfig 更新远程服务器运行时配置。
+// 只更新指定的字段，未指定的字段保持不变。
+// 可更新的字段：log_level, log_format, auth_token, rate_limit_requests, rate_limit_window。
+func (c *FileClient) UpdateConfig(ctx context.Context, updates map[string]interface{}) error {
+	body, err := json.Marshal(updates)
+	if err != nil {
+		return fmt.Errorf("序列化请求体失败: %w", err)
+	}
+
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	resp, err := c.doRequest(ctx, "PUT", "/api/config", bytes.NewReader(body), headers)
+	if err != nil {
+		return fmt.Errorf("更新配置失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("更新配置失败 (HTTP %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Success bool `json:"success"`
+		Changed bool `json:"changed"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return fmt.Errorf("解析响应失败: %s", string(respBody))
+	}
+	if !result.Success {
+		return fmt.Errorf("更新配置失败")
+	}
+	return nil
 }
