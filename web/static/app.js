@@ -601,7 +601,7 @@ function statsTableHtml(du, rc, s) {
 refreshList();
 checkResumableUploads();
 
-// --- 文件分享 ---
+// --- 文件分享（旧版，改用弹窗） ---
 function shareFile(name) {
   var ttl = prompt('分享有效期（例如 1h, 24h, 7d，留空=24h）:', '24h');
   if (ttl === null) return;
@@ -638,6 +638,153 @@ function shareFile(name) {
       }
     } catch (e) { showToast('创建分享失败: ' + e.message, 'error'); }
   })();
+}
+
+// --- 分享管理 ---
+var _shareModalVisible = false;
+
+function showShareModal(name) {
+  _shareModalVisible = true;
+  document.getElementById('share-modal').style.display = 'flex';
+  document.getElementById('share-filename').value = name || '';
+  document.getElementById('share-ttl').value = '24h';
+  document.getElementById('share-max-downloads').value = '0';
+  document.getElementById('share-one-time').checked = false;
+  switchShareTab('create');
+  refreshShareList();
+}
+
+function hideShareModal() {
+  _shareModalVisible = false;
+  document.getElementById('share-modal').style.display = 'none';
+}
+
+function switchShareTab(tab) {
+  document.getElementById('share-create-panel').style.display = tab === 'create' ? 'block' : 'none';
+  document.getElementById('share-list-panel').style.display = tab === 'list' ? 'block' : 'none';
+  document.querySelectorAll('.share-tab').forEach(function(el) {
+    el.style.borderBottomColor = el.id === 'share-' + tab + '-tab' ? '#4a90d9' : 'transparent';
+    el.style.color = el.id === 'share-' + tab + '-tab' ? '#333' : '#666';
+  });
+}
+
+async function createShare() {
+  var filename = document.getElementById('share-filename').value.trim();
+  if (!filename) { showToast('请输入文件名', 'error'); return; }
+  var ttl = document.getElementById('share-ttl').value.trim() || '24h';
+  var maxDownloads = Number.parseInt(document.getElementById('share-max-downloads').value) || 0;
+  var oneTime = document.getElementById('share-one-time').checked;
+
+  var body = JSON.stringify({ filename: filename, ttl: ttl, max_downloads: maxDownloads, one_time: oneTime });
+
+  try {
+    var data;
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('POST', '/api/share', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
+      data = JSON.parse(new TextDecoder().decode(result.body));
+      if (data.message && data.message !== 'ok') { showToast('创建分享失败: ' + data.message, 'error'); return; }
+    } else {
+      var resp = await fetch(BASE + '/api/share', {
+        method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: body
+      });
+      data = await resp.json();
+      if (!resp.ok) { showToast('创建分享失败: ' + (data.message || resp.status), 'error'); return; }
+    }
+    var shareUrl = location.origin + '/s/' + data.token;
+    if (navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        showToast('分享链接已复制到剪贴板: ' + shareUrl, 'success');
+      } catch (_) {
+        showToast('分享链接: ' + shareUrl, 'success');
+      }
+    } else {
+      showToast('分享链接: ' + shareUrl, 'success');
+    }
+    refreshShareList();
+  } catch (e) { showToast('创建分享失败: ' + e.message, 'error'); }
+}
+
+async function refreshShareList() {
+  if (!_shareModalVisible) return;
+  var body = document.getElementById('share-list-body');
+  try {
+    var shares;
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('GET', '/api/shares', {}, null);
+      shares = (JSON.parse(new TextDecoder().decode(result.body))).shares || [];
+    } else {
+      var resp = await fetch(BASE + '/api/shares', { headers: headers() });
+      if (!resp.ok) { body.innerHTML = '<div class="empty-msg">请求失败: ' + resp.status + '</div>'; return; }
+      shares = (await resp.json()).shares || [];
+    }
+
+    if (shares.length === 0) {
+      body.innerHTML = '<div class="empty-msg">暂无分享链接</div>';
+      return;
+    }
+
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+    html += '<thead><tr style="background:#f5f5f5;"><th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">文件名</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">状态</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">下载次数</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">过期时间</th>';
+    html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid #ddd;">操作</th></tr></thead><tbody>';
+
+    for (var i = 0; i < shares.length; i++) {
+      var s = shares[i];
+      var statusText = s.expired ? '已过期' : (s.one_time ? '一次性' : '活跃');
+      var statusColor = s.expired ? '#999' : (s.one_time ? '#e67e22' : '#27ae60');
+      var downloads = s.max_downloads > 0 ? s.downloads + '/' + s.max_downloads : s.downloads + '/∞';
+      var expiresLabel = s.expired ? '-' : (s.expires_at ? new Date(s.expires_at).toLocaleString() : '-');
+
+      html += '<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + escHtml(s.filename) + '">' + escHtml(s.filename) + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;color:' + statusColor + ';">' + statusText + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + downloads + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px;">' + expiresLabel + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:center;">';
+      if (!s.expired) {
+        html += '<button class="btn btn-danger btn-sm share-revoke-btn" data-token="' + escHtml(s.token) + '">撤销</button>';
+      }
+      html += '<button class="btn btn-sm btn-secondary share-copy-btn" data-token="' + escHtml(s.token) + '" style="margin-left:4px;">复制</button>';
+      html += '</td></tr>';
+    }
+    html += '</tbody></table>';
+    body.innerHTML = html;
+  } catch (e) {
+    body.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
+  }
+}
+
+async function revokeShare(token) {
+  if (!confirm('确定撤销此分享链接？撤销后链接将立即失效。')) return;
+  try {
+    if (tunnelHexKey) {
+      await tunnelRequest('DELETE', '/api/shares/' + token, {}, null);
+    } else {
+      var resp = await fetch(BASE + '/api/shares/' + token, { method: 'DELETE', headers: headers() });
+      if (!resp.ok) {
+        var data = await resp.json().catch(function() { return {}; });
+        showToast('撤销失败: ' + (data.message || resp.status), 'error');
+        return;
+      }
+    }
+    showToast('分享链接已撤销', 'success');
+    refreshShareList();
+  } catch (e) { showToast('撤销失败: ' + e.message, 'error'); }
+}
+
+function copyShareLink(token) {
+  var url = location.origin + '/s/' + token;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(url).then(function() {
+      showToast('链接已复制到剪贴板', 'success');
+    }).catch(function() {
+      showToast('复制失败', 'error');
+    });
+  } else {
+    showToast(url, 'success');
+  }
 }
 
 // --- 云端下载 ---
@@ -1019,6 +1166,13 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('version-load-btn').addEventListener('click', loadVersions);
   document.getElementById('version-close-modal-btn').addEventListener('click', hideVersioning);
 
+  // 分享弹窗事件绑定
+  document.getElementById('share-close-btn').addEventListener('click', hideShareModal);
+  document.getElementById('share-create-tab').addEventListener('click', function() { switchShareTab('create'); });
+  document.getElementById('share-list-tab').addEventListener('click', function() { switchShareTab('list'); });
+  document.getElementById('share-create-btn').addEventListener('click', createShare);
+  document.getElementById('share-list-refresh-btn').addEventListener('click', refreshShareList);
+
   // 事件委托：动态内容
   initDynamicEventDelegation();
 });
@@ -1047,7 +1201,7 @@ function initDynamicEventDelegation() {
         return;
       }
       if (btn.classList.contains('file-share-btn')) {
-        shareFile(btn.dataset.filename, btn.dataset.checksum);
+        showShareModal(btn.dataset.filename);
         return;
       }
 
@@ -1139,6 +1293,23 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('version-delete-btn')) {
         deleteVersion(btn.dataset.filename, btn.dataset.versionId);
+        return;
+      }
+    });
+  }
+
+  // 分享列表操作（事件委托）
+  const shareListBody = document.getElementById('share-list-body');
+  if (shareListBody) {
+    shareListBody.addEventListener('click', function(e) {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      if (btn.classList.contains('share-revoke-btn')) {
+        revokeShare(btn.getAttribute('data-token'));
+        return;
+      }
+      if (btn.classList.contains('share-copy-btn')) {
+        copyShareLink(btn.getAttribute('data-token'));
         return;
       }
     });

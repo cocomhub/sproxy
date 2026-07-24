@@ -87,6 +87,48 @@
   </div>
 </div>
 
+<!-- 分享管理弹窗 -->
+<div id="share-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:#fff;border-radius:8px;padding:24px;width:600px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;font-size:16px;">分享管理</h3>
+      <button type="button" id="share-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1;">&times;</button>
+    </div>
+    <div id="share-tab-bar" style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid #e0e0e0;">
+      <button type="button" id="share-create-tab" class="share-tab active" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid #4a90d9;margin-bottom:-2px;font-size:14px;color:#333;">创建分享</button>
+      <button type="button" id="share-list-tab" class="share-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:#666;">管理分享</button>
+    </div>
+    <div id="share-create-panel">
+      <div style="margin-bottom:12px;">
+        <label style="display:block;margin-bottom:4px;font-size:13px;color:#555;">文件名</label>
+        <input type="text" id="share-filename" placeholder="输入文件名..." style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;box-sizing:border-box;">
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:12px;">
+        <div style="flex:1;">
+          <label style="display:block;margin-bottom:4px;font-size:13px;color:#555;">有效期</label>
+          <input type="text" id="share-ttl" value="24h" placeholder="如 1h, 24h, 7d" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;box-sizing:border-box;">
+        </div>
+        <div style="flex:1;">
+          <label style="display:block;margin-bottom:4px;font-size:13px;color:#555;">最大下载次数</label>
+          <input type="number" id="share-max-downloads" value="0" min="0" placeholder="0=不限" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;box-sizing:border-box;">
+        </div>
+      </div>
+      <div style="margin-bottom:12px;">
+        <label><input type="checkbox" id="share-one-time"> 一次性分享（下载一次后自动失效）</label>
+      </div>
+      <button type="button" id="share-create-btn" class="btn btn-primary" style="width:100%;">创建分享链接</button>
+    </div>
+    <div id="share-list-panel" style="display:none;">
+      <div id="share-list-body" style="max-height:400px;overflow-y:auto;">
+        <div class="empty-msg">暂无分享链接</div>
+      </div>
+      <div style="margin-top:12px;text-align:right;">
+        <button type="button" id="share-list-refresh-btn" class="btn btn-secondary" style="margin-right:8px;">刷新</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- 版本管理弹窗 -->
 <div id="version-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center;">
   <div style="background:#fff;border-radius:8px;padding:24px;width:600px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
