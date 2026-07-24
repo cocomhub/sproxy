@@ -1,6 +1,10 @@
 .idea
 logs
 *.bak
+*.tgz
+*.tar
+*.gz
+*.zip
 build
 local
 *.local

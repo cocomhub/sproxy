@@ -524,22 +524,142 @@ async function downloadDirArchive(dirPath) {
 // --- 监控 ---
 async function showStats() {
   document.getElementById('stats-modal').style.display = 'flex';
-  document.getElementById('stats-body').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
+  switchStatsTab('stats');
+  document.getElementById('stats-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
   try {
-    const hdrs = token ? { 'Authorization': 'Bearer ' + token } : {};
-    const resp = await fetch(BASE + '/api/stats', { headers: hdrs });
-    if (!resp.ok) { document.getElementById('stats-body').innerHTML = '<div style="color:red">请求失败: ' + resp.status + '</div>'; return; }
-    const s = await resp.json();
-    const du = s.disk_usage || {};
-    const rc = s.request_counts || {};
-    document.getElementById('stats-body').innerHTML = statsTableHtml(du, rc, s);
-  } catch (e) { document.getElementById('stats-body').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
+    var data;
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('GET', '/api/stats', {}, null);
+      data = JSON.parse(new TextDecoder().decode(result.body));
+    } else {
+      var resp = await fetch(BASE + '/api/stats', { headers: headers() });
+      if (!resp.ok) { document.getElementById('stats-panel').innerHTML = '<div style="color:red">请求失败: ' + resp.status + '</div>'; return; }
+      data = await resp.json();
+    }
+    var du = data.disk_usage || {};
+    var rc = data.request_counts || {};
+    document.getElementById('stats-panel').innerHTML = statsTableHtml(du, rc, data);
+  } catch (e) { document.getElementById('stats-panel').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
 }
 
 function hideStats() {
   document.getElementById('stats-modal').style.display = 'none';
 }
 
+// --- 监控弹窗标签页切换 ---
+function switchStatsTab(tab) {
+  document.getElementById('stats-panel').style.display = tab === 'stats' ? 'block' : 'none';
+  document.getElementById('config-panel').style.display = tab === 'config' ? 'block' : 'none';
+  document.querySelectorAll('.stats-tab').forEach(function(el) {
+    el.style.borderBottomColor = el.id === tab + '-tab' ? '#4a90d9' : 'transparent';
+    el.style.color = el.id === tab + '-tab' ? '#333' : '#666';
+  });
+  if (tab === 'config') showConfig();
+}
+
+async function showConfig() {
+  document.getElementById('config-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
+  try {
+    var data;
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('GET', '/api/config', {}, null);
+      data = JSON.parse(new TextDecoder().decode(result.body));
+    } else {
+      var resp = await fetch(BASE + '/api/config', { headers: headers() });
+      if (!resp.ok) { document.getElementById('config-panel').innerHTML = '<div style="color:red">请求失败: ' + resp.status + '</div>'; return; }
+      data = await resp.json();
+    }
+    document.getElementById('config-panel').innerHTML = configTableHtml(data);
+  } catch (e) { document.getElementById('config-panel').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
+}
+
+function configTableHtml(cfg) {
+  var html = '<table style="width:100%;border-collapse:collapse;font-size:14px;">';
+  html += '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555">运行时配置</th></tr>';
+
+  function row(label, value) {
+    return '<tr><td style="padding:5px 0;color:#777">' + label + '</td><td style="text-align:right">' + (value ?? '-') + '</td></tr>';
+  }
+
+  html += row('日志级别', cfg.log_level);
+  html += row('日志格式', cfg.log_format);
+  html += row('认证令牌', cfg.auth_token_set ? '✅ 已设置' : '❌ 未设置');
+  html += row('隧道密钥', cfg.tunnel_key_set ? '✅ 已设置' : '❌ 未设置');
+  html += row('速率限制', cfg.rate_limit_requests + ' req / ' + (cfg.rate_limit_window || '-'));
+  html += row('存储上限', cfg.max_storage_bytes > 0 ? formatBytes(cfg.max_storage_bytes) : '不限');
+  html += row('分块大小', formatBytes(cfg.chunk_size));
+  html += row('上传会话 TTL', cfg.upload_session_ttl || '-');
+  html += row('版本管理', cfg.versioning_enabled ? '✅ 启用' : '❌ 关闭');
+  html += row('云端并发', cfg.cloud_max_concurrent);
+  html += row('地址', cfg.addr);
+  html += row('上传目录', cfg.uploads_dir);
+  html += row('TLS', cfg.tls_enabled ? '✅ 启用' : '❌ 关闭');
+  html += row('Hub 中继', cfg.hub_enabled ? '✅ 启用' : '❌ 关闭');
+  html += '</table>';
+
+  // 配置编辑区
+  html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid #eee;">';
+  html += '<div style="font-size:13px;font-weight:600;color:#555;margin-bottom:8px;">快速编辑</div>';
+
+  // 日志级别
+  html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
+  html += '<span style="font-size:13px;color:#777;">日志级别:</span>';
+  html += '<select id="cfg-log-level" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
+  var levels = ['debug','info','warn','error'];
+  for (var i = 0; i < levels.length; i++) {
+    html += '<option value="' + levels[i] + '"' + (cfg.log_level === levels[i] ? ' selected' : '') + '>' + levels[i] + '</option>';
+  }
+  html += '</select>';
+  html += '<button class="btn btn-sm btn-primary" id="cfg-update-log-level">更新</button></div>';
+
+  // 日志格式
+  html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
+  html += '<span style="font-size:13px;color:#777;">日志格式:</span>';
+  html += '<select id="cfg-log-format" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
+  html += '<option value="text"' + (cfg.log_format === 'text' ? ' selected' : '') + '>text</option>';
+  html += '<option value="json"' + (cfg.log_format === 'json' ? ' selected' : '') + '>json</option>';
+  html += '</select>';
+  html += '<button class="btn btn-sm btn-primary" id="cfg-update-log-format">更新</button></div>';
+
+  // 速率限制
+  html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
+  html += '<span style="font-size:13px;color:#777;">速率限制:</span>';
+  html += '<input type="number" id="cfg-rate-limit" value="' + (cfg.rate_limit_requests ?? 10) + '" style="width:60px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
+  html += '<span style="font-size:12px;color:#999;">req / </span>';
+  html += '<input type="text" id="cfg-rate-window" value="' + (cfg.rate_limit_window || '1s') + '" style="width:60px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
+  html += '<button class="btn btn-sm btn-primary" id="cfg-update-rate-limit">更新</button></div>';
+
+  // 存储限制
+  html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+  html += '<span style="font-size:13px;color:#777;">存储上限:</span>';
+  html += '<input type="number" id="cfg-max-storage" value="' + (cfg.max_storage_bytes ?? 0) + '" style="width:140px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;" min="0">';
+  html += '<span style="font-size:12px;color:#999;">字节（0=不限）</span>';
+  html += '<button class="btn btn-sm btn-primary" id="cfg-update-storage">更新</button></div>';
+
+  html += '</div>';
+  return html;
+}
+
+async function updateConfigField(key, value) {
+  var body = JSON.stringify((function() { var o = {}; o[key] = value; return o; })());
+  try {
+    if (tunnelHexKey) {
+      var result = await tunnelRequest('PUT', '/api/config', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
+      var data = JSON.parse(new TextDecoder().decode(result.body));
+      if (data.success) { showToast('配置已更新', 'success'); showConfig(); }
+      else { showToast('更新失败', 'error'); }
+    } else {
+      var resp = await fetch(BASE + '/api/config', {
+        method: 'PUT', headers: headers({ 'Content-Type': 'application/json' }), body: body
+      });
+      var data = await resp.json();
+      if (resp.ok && data.success) { showToast('配置已更新', 'success'); showConfig(); }
+      else { showToast('更新失败: ' + (data.error || resp.status), 'error'); }
+    }
+  } catch (e) { showToast('更新失败: ' + e.message, 'error'); }
+}
+
+// 旧版 updateStorageConfig，改用配置面板中的 cfg-update-storage 代替
 async function updateStorageConfig() {
   var input = document.getElementById('max-storage-input');
   var maxBytes = Number.parseInt(input.value) || 0;
@@ -587,14 +707,7 @@ function statsTableHtml(du, rc, s) {
     '<tr><td style="padding:5px 0;color:#777">上传字节数</td><td style="text-align:right">' + formatBytes(s.bytes_uploaded) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">下载文件数</td><td style="text-align:right">' + (s.files_downloaded ?? 0) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">下载字节数</td><td style="text-align:right">' + formatBytes(s.bytes_downloaded) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>' +
-    '<div style="margin-top:16px;padding-top:12px;border-top:1px solid #eee;">' +
-    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
-    '<span style="font-size:13px;font-weight:600;color:#555;">存储限制:</span>' +
-    '<input type="number" id="max-storage-input" style="width:140px;padding:6px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;" value="' + (s.max_storage_bytes ?? 0) + '" min="0" step="1048576">' +
-    '<span style="font-size:12px;color:#999;">字节（0=不限）</span>' +
-    '<button class="btn btn-sm btn-primary" id="stats-update-btn">更新</button>' +
-    '</div></div>';
+    '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
 }
 
 // --- 初始化 ---
@@ -1148,6 +1261,9 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('stats-close-btn').addEventListener('click', hideStats);
   document.getElementById('stats-refresh-btn').addEventListener('click', showStats);
   document.getElementById('stats-close-modal-btn').addEventListener('click', hideStats);
+  // 监控弹窗标签页切换
+  document.getElementById('stats-tab').addEventListener('click', function() { switchStatsTab('stats'); });
+  document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
 
   // 云端下载弹窗
   document.getElementById('cloud-close-btn').addEventListener('click', hideCloudDownload);
@@ -1315,13 +1431,24 @@ function initDynamicEventDelegation() {
     });
   }
 
-  // 存储配置更新
-  const statsBody = document.getElementById('stats-body');
-  if (statsBody) {
-    statsBody.addEventListener('click', function(e) {
-      const btn = e.target.closest('button');
-      if (btn && btn.id === 'stats-update-btn') {
-        updateStorageConfig();
+  // 配置面板更新按钮（事件委托）
+  const configPanel = document.getElementById('config-panel');
+  if (configPanel) {
+    configPanel.addEventListener('click', function(e) {
+      if (e.target.id === 'cfg-update-log-level') {
+        var val = document.getElementById('cfg-log-level').value;
+        updateConfigField('log_level', val);
+      } else if (e.target.id === 'cfg-update-log-format') {
+        var val = document.getElementById('cfg-log-format').value;
+        updateConfigField('log_format', val);
+      } else if (e.target.id === 'cfg-update-rate-limit') {
+        var req = document.getElementById('cfg-rate-limit').value;
+        updateConfigField('rate_limit_requests', parseInt(req) || 0);
+        var win = document.getElementById('cfg-rate-window').value;
+        updateConfigField('rate_limit_window', win);
+      } else if (e.target.id === 'cfg-update-storage') {
+        var val = document.getElementById('cfg-max-storage').value;
+        updateConfigField('max_storage_bytes', parseInt(val) || 0);
       }
     });
   }

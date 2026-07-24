@@ -728,7 +728,7 @@ func TestSearchFunction(t *testing.T) {
 	}
 }
 
-// TestStorageConfigInStats 验证监控弹窗中有存储限制配置 UI。
+// TestStorageConfigInStats 验证监控弹窗中有存储限制配置 UI（配置标签页）。
 func TestStorageConfigInStats(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
@@ -748,10 +748,26 @@ func TestStorageConfigInStats(t *testing.T) {
 		t.Fatalf("stats-modal not visible: %v", err)
 	}
 
-	// 验证存储限制配置元素存在
-	for _, sel := range []string{"#max-storage-input", "text=存储限制"} {
+	// 点击"配置"标签页切换到配置面板
+	if err := page.Locator("#config-tab").Click(); err != nil {
+		t.Fatalf("config tab not clickable: %v", err)
+	}
+
+	// 等待配置面板加载完成（含异步渲染的配置内容）
+	_, err = page.WaitForSelector("#cfg-max-storage", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(8000),
+	})
+	if err != nil {
+		// 获取面板内容帮助调试
+		content, _ := page.Locator("#config-panel").InnerText()
+		t.Fatalf("cfg-max-storage not visible in config panel, panel content: %s", content)
+	}
+
+	// 验证存储限制配置元素存在（配置面板中）
+	for _, sel := range []string{"#cfg-max-storage", "text=存储上限"} {
 		if cnt, _ := page.Locator(sel).Count(); cnt == 0 {
-			t.Errorf("element %s not found in stats modal", sel)
+			t.Errorf("element %s not found in config panel", sel)
 		}
 	}
 }

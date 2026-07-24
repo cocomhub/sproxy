@@ -112,6 +112,8 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("DELETE /api/versions", h.deleteVersionHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("PUT /api/storage/config", h.storageConfigHandler)
+	localMux.HandleFunc("GET /api/config", h.configHandler)
+	localMux.HandleFunc("PUT /api/config", h.updateConfigHandler)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -154,6 +156,8 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
 	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	mux.HandleFunc("PUT /api/storage/config", h.authMiddleware(h.storageConfigHandler))
+	mux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
+	mux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
 	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
 	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 
