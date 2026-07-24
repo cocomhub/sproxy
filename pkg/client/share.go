@@ -99,9 +99,14 @@ func (c *FileClient) RevokeShare(ctx context.Context, token string) error {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("撤销分享链接失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
 	var result UploadResult
 	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("解析响应失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("解析响应失败: %s", string(body))
 	}
 	if !result.Success {
 		return fmt.Errorf("撤销失败: %s", result.Message)

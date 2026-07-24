@@ -682,6 +682,7 @@ async function createShare() {
     if (tunnelHexKey) {
       var result = await tunnelRequest('POST', '/api/share', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
       data = JSON.parse(new TextDecoder().decode(result.body));
+      if (data.message && data.message !== 'ok') { showToast('创建分享失败: ' + data.message, 'error'); return; }
     } else {
       var resp = await fetch(BASE + '/api/share', {
         method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: body
@@ -691,8 +692,12 @@ async function createShare() {
     }
     var shareUrl = location.origin + '/s/' + data.token;
     if (navigator.clipboard) {
-      await navigator.clipboard.writeText(shareUrl);
-      showToast('分享链接已复制到剪贴板: ' + shareUrl, 'success');
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        showToast('分享链接已复制到剪贴板: ' + shareUrl, 'success');
+      } catch (_) {
+        showToast('分享链接: ' + shareUrl, 'success');
+      }
     } else {
       showToast('分享链接: ' + shareUrl, 'success');
     }

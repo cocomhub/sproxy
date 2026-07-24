@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -54,7 +55,7 @@ var shareCreateCmd = &cobra.Command{
 				serverURL = cfg.ServerURL
 			}
 		}
-		shareURL := serverURL + "/s/" + link.Token
+		shareURL := strings.TrimRight(serverURL, "/") + "/s/" + link.Token
 
 		fmt.Printf("分享链接: %s\n", shareURL)
 		fmt.Printf("Token: %s\n", link.Token)
@@ -127,7 +128,7 @@ var shareRevokeCmd = &cobra.Command{
 }
 
 func init() {
-	shareCreateCmd.Flags().String("ttl", "24h", "有效期（例如 1h, 24h, 7d, 30d）")
+	shareCreateCmd.Flags().String("ttl", "24h", "有效期（例如 1h, 24h, 168h, 720h，不支持 d 天）")
 	shareCreateCmd.Flags().Int("max-downloads", 0, "最大下载次数（0=不限）")
 	shareCreateCmd.Flags().Bool("one-time", false, "一次性分享（下载一次后自动失效）")
 
