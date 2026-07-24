@@ -581,18 +581,22 @@ async function showHub() {
   try {
     var nodes, stats;
     if (tunnelHexKey) {
-      var nResult = await tunnelRequest('GET', '/api/hub/nodes', {}, null);
+      var [nResult, sResult] = await Promise.all([
+        tunnelRequest('GET', '/api/hub/nodes', {}, null),
+        tunnelRequest('GET', '/api/hub/stats', {}, null)
+      ]);
       nodes = JSON.parse(new TextDecoder().decode(nResult.body)) || [];
-      var sResult = await tunnelRequest('GET', '/api/hub/stats', {}, null);
       stats = JSON.parse(new TextDecoder().decode(sResult.body));
     } else {
-      var nResp = await fetch(BASE + '/api/hub/nodes', { headers: headers() });
+      var [nResp, sResp] = await Promise.all([
+        fetch(BASE + '/api/hub/nodes', { headers: headers() }),
+        fetch(BASE + '/api/hub/stats', { headers: headers() })
+      ]);
       if (!nResp.ok) {
         document.getElementById('hub-panel').innerHTML = '<div class="empty-msg">Hub 未启用或请求失败</div>';
         return;
       }
       nodes = await nResp.json();
-      var sResp = await fetch(BASE + '/api/hub/stats', { headers: headers() });
       stats = await sResp.json();
     }
     document.getElementById('hub-panel').innerHTML = hubTableHtml(nodes, stats);

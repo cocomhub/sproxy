@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -202,10 +203,12 @@ func runRelayStatus(cmd *cobra.Command, args []string) error {
 	serverURL, _ := cmd.Flags().GetString("server")
 	if serverURL == "" {
 		if hubURL, _ := cmd.Flags().GetString("hub"); hubURL != "" {
-			// ws://host:port/ws -> http://host:port
-			serverURL = strings.TrimSuffix(hubURL, "/ws")
-			serverURL = strings.Replace(serverURL, "ws://", "http://", 1)
-			serverURL = strings.Replace(serverURL, "wss://", "https://", 1)
+			// ws://host:port/path -> http://host:port
+			if u, parseErr := url.Parse(hubURL); parseErr == nil {
+				u.Scheme = "http"
+				u.Path = ""
+				serverURL = u.String()
+			}
 		}
 	}
 	if serverURL == "" && cfgProvider != nil {
@@ -236,7 +239,8 @@ func runRelayStatus(cmd *cobra.Command, args []string) error {
 	if authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+authToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("查询 Hub 状态失败: %w", err)
 	}
