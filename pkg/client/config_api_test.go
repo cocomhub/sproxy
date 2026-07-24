@@ -65,7 +65,7 @@ func TestUpdateConfig(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	err := c.UpdateConfig(context.Background(), map[string]interface{}{
+	err := c.UpdateConfig(context.Background(), map[string]any{
 		"log_level": "debug",
 	})
 	if err != nil {

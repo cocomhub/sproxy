@@ -42,11 +42,6 @@ var configCmd = &cobra.Command{
 			return nil
 		}
 
-		if args[0] == "remote" {
-			_ = cmd.Help()
-			return nil
-		}
-
 		fmt.Fprintf(os.Stderr, "未知的 config 子命令: %s\n", args[0])
 		return fmt.Errorf("用法: sclient config [show|set <键> <值>|remote]")
 	},

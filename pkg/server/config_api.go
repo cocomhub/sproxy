@@ -5,9 +5,38 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
 )
+
+// 日志级别字符串映射，用于运行时切换日志级别。
+var levelStrings = map[string]slog.Level{
+	"debug": slog.LevelDebug,
+	"info":  slog.LevelInfo,
+	"warn":  slog.LevelWarn,
+	"error": slog.LevelError,
+}
+
+// rebuildLogger 根据配置重建 slog.Logger 并替换全局默认值和 Handlers.logger。
+func (h *Handlers) rebuildLogger(cfg *Config) {
+	level := slog.LevelInfo
+	if l, ok := levelStrings[cfg.LogLevel]; ok {
+		level = l
+	}
+	opts := &slog.HandlerOptions{Level: level}
+	var handler slog.Handler
+	switch cfg.LogFormat {
+	case "json":
+		handler = slog.NewJSONHandler(os.Stdout, opts)
+	default:
+		handler = slog.NewTextHandler(os.Stdout, opts)
+	}
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
+	h.logger = logger
+}
 
 // configResponse 是 GET /api/config 的响应体，脱敏返回运行时配置。
 type configResponse struct {
@@ -59,11 +88,12 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 
 // updateConfigRequest 是 PUT /api/config 的请求体。
 type updateConfigRequest struct {
-	LogLevel     *string `json:"log_level,omitempty"`
-	LogFormat    *string `json:"log_format,omitempty"`
-	AuthToken    *string `json:"auth_token,omitempty"`
-	RateLimitReq *int    `json:"rate_limit_requests,omitempty"`
-	RateLimitWin *string `json:"rate_limit_window,omitempty"`
+	LogLevel        *string `json:"log_level,omitempty"`
+	LogFormat       *string `json:"log_format,omitempty"`
+	AuthToken       *string `json:"auth_token,omitempty"`
+	RateLimitReq    *int    `json:"rate_limit_requests,omitempty"`
+	RateLimitWin    *string `json:"rate_limit_window,omitempty"`
+	MaxStorageBytes *int64  `json:"max_storage_bytes,omitempty"`
 }
 
 // updateConfigHandler 处理 PUT /api/config，更新运行时配置项。
@@ -123,8 +153,24 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 
+	if req.MaxStorageBytes != nil {
+		if *req.MaxStorageBytes < 0 {
+			sendJSONResponse(w, map[string]string{"error": "max_storage_bytes must be non-negative"}, http.StatusBadRequest)
+			return
+		}
+		cfg.MaxStorageBytes = *req.MaxStorageBytes
+		if h.storageMgr != nil {
+			h.storageMgr.SetMaxBytes(*req.MaxStorageBytes)
+		}
+		changed = true
+	}
+
 	if changed {
 		h.cfgPtr.Store(cfg)
+		// 日志级别或格式变更时，立即重建 logger 使生效
+		if req.LogLevel != nil || req.LogFormat != nil {
+			h.rebuildLogger(cfg)
+		}
 	}
 
 	sendJSONResponse(w, map[string]any{

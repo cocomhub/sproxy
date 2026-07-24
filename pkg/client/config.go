@@ -186,7 +186,7 @@ func (c *FileClient) GetConfig(ctx context.Context) (*ConfigResponse, error) {
 // UpdateConfig 更新远程服务器运行时配置。
 // 只更新指定的字段，未指定的字段保持不变。
 // 可更新的字段：log_level, log_format, auth_token, rate_limit_requests, rate_limit_window。
-func (c *FileClient) UpdateConfig(ctx context.Context, updates map[string]interface{}) error {
+func (c *FileClient) UpdateConfig(ctx context.Context, updates map[string]any) error {
 	body, err := json.Marshal(updates)
 	if err != nil {
 		return fmt.Errorf("序列化请求体失败: %w", err)
