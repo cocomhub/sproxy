@@ -57,11 +57,12 @@ var shareCreateCmd = &cobra.Command{
 		}
 		shareURL := strings.TrimRight(serverURL, "/") + "/s/" + link.Token
 
-		fmt.Printf("分享链接: %s\n", shareURL)
-		fmt.Printf("Token: %s\n", link.Token)
-		fmt.Printf("有效期至: %s\n", link.ExpiresAt)
-		fmt.Printf("最大下载次数: %d\n", link.MaxDownloads)
-		fmt.Printf("一次性: %v\n", link.OneTime)
+		fm := buildFormatter(cmd)
+		fm.Printf("分享链接: %s\n", shareURL)
+		fm.Printf("Token: %s\n", link.Token)
+		fm.Printf("有效期至: %s\n", link.ExpiresAt)
+		fm.Printf("最大下载次数: %d\n", link.MaxDownloads)
+		fm.Printf("一次性: %v\n", link.OneTime)
 		return nil
 	},
 }
@@ -82,27 +83,8 @@ var shareListCmd = &cobra.Command{
 			return fmt.Errorf("获取分享列表失败: %w", err)
 		}
 
-		if len(shares) == 0 {
-			fmt.Println("暂无分享链接")
-			return nil
-		}
-
-		fmt.Printf("%-36s  %-40s  %-10s  %s\n", "TOKEN", "FILENAME", "STATUS", "DOWNLOADS")
-		for _, s := range shares {
-			status := "活跃"
-			if s.Expired {
-				status = "已过期"
-			}
-			downloads := fmt.Sprintf("%d/%d", s.Downloads, s.MaxDownloads)
-			if s.MaxDownloads == 0 {
-				downloads = fmt.Sprintf("%d/∞", s.Downloads)
-			}
-			shortToken := s.Token
-			if len(shortToken) > 36 {
-				shortToken = shortToken[:16] + "..." + shortToken[len(shortToken)-16:]
-			}
-			fmt.Printf("%-36s  %-40s  %-10s  %s\n", shortToken, s.Filename, status, downloads)
-		}
+		fm := buildFormatter(cmd)
+		fm.PrintShareList(shares)
 		return nil
 	},
 }
@@ -122,7 +104,8 @@ var shareRevokeCmd = &cobra.Command{
 			return fmt.Errorf("撤销分享链接失败: %w", err)
 		}
 
-		fmt.Printf("已撤销分享: %s\n", args[0])
+		fm := buildFormatter(cmd)
+		fm.Printf("已撤销分享: %s\n", args[0])
 		return nil
 	},
 }

@@ -41,10 +41,11 @@ var listCmd = &cobra.Command{
 			return fmt.Errorf("列出文件失败: %w", err)
 		}
 
+		fm := buildFormatter(cmd)
 		if len(files) == 0 {
-			fmt.Println("no files found")
+			fm.Println("no files found")
 		} else {
-			printFileList(files, os.Stdout)
+			fm.PrintFileList(files)
 		}
 		return nil
 	},
