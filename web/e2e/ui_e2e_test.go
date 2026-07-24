@@ -814,3 +814,34 @@ func TestStorageConfigAPI(t *testing.T) {
 		t.Errorf("max_storage_bytes = %d, want 104857600", got)
 	}
 }
+
+// TestHubTab 验证监控弹窗中 Hub 标签页存在。
+func TestHubTab(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	page.Goto(baseURL + "/ui/")
+
+	// 打开监控弹窗
+	page.Evaluate("showStats()")
+	_, err := page.WaitForSelector("#stats-modal", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(8000),
+	})
+	if err != nil {
+		t.Fatalf("stats-modal not visible: %v", err)
+	}
+
+	// 验证 Hub 标签页按钮存在
+	if cnt, _ := page.Locator("#hub-tab").Count(); cnt == 0 {
+		t.Error("hub tab button not found")
+	}
+
+	// 点击 Hub 标签页
+	if err := page.Locator("#hub-tab").Click(); err != nil {
+		t.Fatalf("hub tab not clickable: %v", err)
+	}
+}
