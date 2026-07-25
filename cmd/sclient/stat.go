@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -16,13 +15,13 @@ var statCmd = &cobra.Command{
 	Use:   "stat <filename>",
 	Short: "查询远端文件元信息（不下载）",
 	Long: `通过 HEAD /api/files/stat 获取远端单个文件的元信息：
-	size、checksum、mod_time。不下载文件内容。
+		size、checksum、mod_time。不下载文件内容。
 
-	filename 受当前目录 (cd) 影响：相对路径自动拼接前缀，绝对路径 (/开头) 绕过。
+		filename 受当前目录 (cd) 影响：相对路径自动拼接前缀，绝对路径 (/开头) 绕过。
 
-	示例:
-	  sclient stat README.md
-	  sclient stat sub/dir/file.txt`,
+		示例:
+		  sclient stat README.md
+		  sclient stat sub/dir/file.txt`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cli, err := buildFileClient(cmd)
@@ -41,20 +40,8 @@ var statCmd = &cobra.Command{
 			return fmt.Errorf("获取文件信息失败: %w", err)
 		}
 
-		fmt.Printf("name:     %s\n", filename)
-		if info.IsDir {
-			fmt.Println("type:     directory")
-		} else {
-			fmt.Println("type:     file")
-			fmt.Printf("size:     %d 字节\n", info.Size)
-		}
-		if info.Checksum != "" {
-			fmt.Printf("checksum: %s\n", info.Checksum)
-		}
-		if info.ModTime > 0 {
-			mt := time.Unix(0, info.ModTime)
-			fmt.Printf("mtime:    %s\n", mt.Format(time.RFC3339))
-		}
+		fm := buildFormatter(cmd)
+		fm.PrintStat(info, filename)
 		return nil
 	},
 }

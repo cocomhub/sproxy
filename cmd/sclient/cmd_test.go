@@ -197,7 +197,10 @@ func TestWriteArchiveResponse(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resp, _ := http.Get(mock.URL)
+	resp, err := http.Get(mock.URL)
+	if err != nil {
+		t.Fatalf("http.Get: %v", err)
+	}
 	defer resp.Body.Close()
 
 	dst := filepath.Join(t.TempDir(), "archive.tar.gz")

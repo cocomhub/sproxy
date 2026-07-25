@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
@@ -30,6 +31,14 @@ type OutputFormatter interface {
 	PrintConfig(cfg *client.ConfigResponse)
 	// PrintUpdateResult 输出配置更新结果。
 	PrintUpdateResult(key, value string)
+	// PrintCloudTaskList 输出云端下载任务列表。
+	PrintCloudTaskList(tasks []cloudTaskInfo)
+	// PrintCloudTaskCancelResult 输出取消云端下载任务的结果。
+	PrintCloudTaskCancelResult(taskID string, success bool, message string)
+	// PrintVersionList 输出版本历史列表。
+	PrintVersionList(filename string, versions []client.VersionInfo)
+	// PrintStat 输出文件元信息。
+	PrintStat(info *client.FileInfo, filename string)
 	// Printf 输出格式化字符串（JSON 模式忽略）。
 	Printf(format string, args ...interface{})
 	// Println 输出一行（JSON 模式忽略）。
@@ -87,6 +96,75 @@ func (f *TextFormatter) PrintShareRevoked(token string) {
 
 func (f *TextFormatter) PrintUpdateResult(key, value string) {
 	fmt.Fprintf(f.w, "远程配置已更新: %s = %s\n", key, value)
+}
+
+func (f *TextFormatter) PrintCloudTaskList(tasks []cloudTaskInfo) {
+	if len(tasks) == 0 {
+		fmt.Fprintln(f.w, "暂无云端下载任务")
+		return
+	}
+	fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %s\n", "任务ID", "文件名", "状态", "URL")
+	for _, t := range tasks {
+		shortID := t.ID
+		if len(shortID) > 36 {
+			shortID = shortID[:16] + "..." + shortID[len(shortID)-16:]
+		}
+		shortName := t.Filename
+		if len(shortName) > 20 {
+			shortName = shortName[:17] + "..."
+		}
+		status := t.Status
+		if t.TotalSize > 0 && t.Status == "downloading" {
+			pct := t.Downloaded * 100 / t.TotalSize
+			status = fmt.Sprintf("%s (%d%%)", t.Status, pct)
+		}
+		shortURL := t.URL
+		if len(shortURL) > 50 {
+			shortURL = shortURL[:47] + "..."
+		}
+		fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %s\n", shortID, shortName, status, shortURL)
+	}
+}
+
+func (f *TextFormatter) PrintCloudTaskCancelResult(taskID string, success bool, message string) {
+	if success {
+		fmt.Fprintf(f.w, "已取消云端下载任务: %s\n", taskID)
+	} else {
+		fmt.Fprintf(f.w, "取消云端下载任务失败: %s (%s)\n", taskID, message)
+	}
+}
+
+func (f *TextFormatter) PrintVersionList(filename string, versions []client.VersionInfo) {
+	if len(versions) == 0 {
+		fmt.Fprintf(f.w, "文件 '%s' 没有历史版本\n", filename)
+		return
+	}
+	fmt.Fprintf(f.w, "文件 '%s' 的版本历史:\n", filename)
+	for _, v := range versions {
+		checksum := v.Checksum
+		if len(checksum) > 16 {
+			checksum = checksum[:16] + "..."
+		}
+		fmt.Fprintf(f.w, "  ID: %d  Size: %d  Created: %s  Checksum: %s\n",
+			v.VersionID, v.Size, v.CreatedAt, checksum)
+	}
+}
+
+func (f *TextFormatter) PrintStat(info *client.FileInfo, filename string) {
+	fmt.Fprintf(f.w, "name:     %s\n", filename)
+	if info.IsDir {
+		fmt.Fprintln(f.w, "type:     directory")
+	} else {
+		fmt.Fprintln(f.w, "type:     file")
+		fmt.Fprintf(f.w, "size:     %d 字节\n", info.Size)
+	}
+	if info.Checksum != "" {
+		fmt.Fprintf(f.w, "checksum: %s\n", info.Checksum)
+	}
+	if info.ModTime > 0 {
+		mt := time.Unix(0, info.ModTime)
+		fmt.Fprintf(f.w, "mtime:    %s\n", mt.Format(time.RFC3339))
+	}
 }
 
 func (f *TextFormatter) PrintStats(stats *client.StatsResponse) {
@@ -211,6 +289,44 @@ func (f *JSONFormatter) Printf(format string, args ...interface{}) {
 
 func (f *JSONFormatter) Println(args ...interface{}) {
 	// JSON 模式下忽略 Println
+}
+
+func (f *JSONFormatter) PrintCloudTaskList(tasks []cloudTaskInfo) {
+	enc := json.NewEncoder(f.w)
+	_ = enc.Encode(map[string]any{"tasks": tasks})
+}
+
+func (f *JSONFormatter) PrintCloudTaskCancelResult(taskID string, success bool, message string) {
+	enc := json.NewEncoder(f.w)
+	_ = enc.Encode(map[string]any{
+		"task_id": taskID,
+		"success": success,
+		"message": message,
+	})
+}
+
+func (f *JSONFormatter) PrintVersionList(filename string, versions []client.VersionInfo) {
+	enc := json.NewEncoder(f.w)
+	_ = enc.Encode(map[string]any{
+		"filename": filename,
+		"versions": versions,
+	})
+}
+
+func (f *JSONFormatter) PrintStat(info *client.FileInfo, filename string) {
+	enc := json.NewEncoder(f.w)
+	_ = enc.Encode(map[string]any{
+		"name": filename,
+		"type": func() string {
+			if info.IsDir {
+				return "directory"
+			}
+			return "file"
+		}(),
+		"size":     info.Size,
+		"checksum": info.Checksum,
+		"mod_time": info.ModTime,
+	})
 }
 
 // buildFormatter 根据 --json flag 创建 OutputFormatter。
