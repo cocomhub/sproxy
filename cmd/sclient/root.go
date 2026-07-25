@@ -30,34 +30,10 @@ var (
 	cliState    = &state.State{}
 )
 
-// rootCmd 是所有子命令的根命令
-var rootCmd = &cobra.Command{
-	Use:   "sclient",
-	Short: "文件上传下载客户端",
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		cfgProvider = sclientcfg.New(cfgFile)
-		cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup(flagServer))
-		cfgProvider.BindPFlag("chunk_size", cmd.Flags().Lookup(flagChunkSize))
-		cfgProvider.BindPFlag("auth_token", cmd.Flags().Lookup("auth-token"))
-		// 加载缓存的当前目录
-		loadCurrentDir()
-		cliState.CurrentDir = currentDir
-		return nil
-	},
-	Run: func(cmd *cobra.Command, args []string) {
-		_ = cmd.Help()
-	},
-}
-
-func Execute() error {
-	return rootCmd.Execute()
-}
-
-func init() {
-	// XDG 默认配置路径
+// NewRootCmd 创建完整的 sclient 根命令，包含所有 flags 和子命令。
+func NewRootCmd() *cobra.Command {
 	defaultCfgPath, err := xdg.ConfigFile(filepath.Join("sproxy", "sclient.yaml"))
 	if err != nil {
-		// fallback 到 ~/.sclient.yaml
 		home, _ := os.UserHomeDir()
 		defaultCfgPath = filepath.Join(home, ".sclient.yaml")
 	}
@@ -68,58 +44,77 @@ func init() {
 		return home
 	}(), ".sclient.yaml")
 	if _, statErr := os.Stat(oldPath); statErr == nil {
-		// 旧文件存在，优先使用旧文件并打印迁移提示
 		if defaultCfgPath != oldPath {
 			fmt.Fprintf(os.Stderr, "检测到旧配置 %s，将优先使用；建议迁移到 %s\n", oldPath, defaultCfgPath)
 			defaultCfgPath = oldPath
 		}
 	}
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", defaultCfgPath, "配置文件路径")
+	root := &cobra.Command{
+		Use:   "sclient",
+		Short: "文件上传下载客户端",
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			cfgProvider = sclientcfg.New(cfgFile)
+			cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup(flagServer))
+			cfgProvider.BindPFlag("chunk_size", cmd.Flags().Lookup(flagChunkSize))
+			cfgProvider.BindPFlag("auth_token", cmd.Flags().Lookup("auth-token"))
+			loadCurrentDir()
+			cliState.CurrentDir = currentDir
+			return nil
+		},
+		Run: func(cmd *cobra.Command, args []string) {
+			_ = cmd.Help()
+		},
+	}
 
-	// 全局选项（persistent flags）
-	rootCmd.PersistentFlags().StringP(flagServer, "s", "", "服务器地址 (覆盖配置中的 server_url)")
-	rootCmd.PersistentFlags().String("auth-token", "", "Bearer Token 认证令牌 (服务端配置了 auth_token 时需要)")
-	rootCmd.PersistentFlags().StringP("output", "o", "", "指定下载文件的输出路径")
-	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "显示详细输出")
-	rootCmd.PersistentFlags().Bool("chunked", false, "启用分块上传/下载模式")
-	rootCmd.PersistentFlags().Int64(flagChunkSize, 0, "分块大小 (默认 4MB)")
-	rootCmd.PersistentFlags().Int("concurrency", 0, "上传/下载并发数 (默认 4)")
-	rootCmd.PersistentFlags().Bool("resume", false, "续传模式 (默认启用)")
-	rootCmd.PersistentFlags().Bool("json", false, "以 JSON 格式输出")
+	root.PersistentFlags().StringVar(&cfgFile, "config", defaultCfgPath, "配置文件路径")
+	root.PersistentFlags().StringP(flagServer, "s", "", "服务器地址 (覆盖配置中的 server_url)")
+	root.PersistentFlags().String("auth-token", "", "Bearer Token 认证令牌 (服务端配置了 auth_token 时需要)")
+	root.PersistentFlags().StringP("output", "o", "", "指定下载文件的输出路径")
+	root.PersistentFlags().BoolP("verbose", "v", false, "显示详细输出")
+	root.PersistentFlags().Bool("chunked", false, "启用分块上传/下载模式")
+	root.PersistentFlags().Int64(flagChunkSize, 0, "分块大小 (默认 4MB)")
+	root.PersistentFlags().Int("concurrency", 0, "上传/下载并发数 (默认 4)")
+	root.PersistentFlags().Bool("resume", false, "续传模式 (默认启用)")
+	root.PersistentFlags().Bool("json", false, "以 JSON 格式输出")
 
-	// 注册子命令（新模式 — 工厂函数）
+	// 注册子命令
 	ios := cli.SystemIOStreams()
 	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return cfgProvider })
-	rootCmd.AddCommand(NewCmdCd(cliState, ios))
-	rootCmd.AddCommand(NewCmdPwd(cliState, ios))
-	rootCmd.AddCommand(NewCmdMkdir(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdRmdir(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdGenkey(ios))
-	rootCmd.AddCommand(NewCmdConfig(factory, ios, &cfgFile))
-	rootCmd.AddCommand(NewCmdVersion(factory, ios))
-	rootCmd.AddCommand(NewCmdStats(factory, ios))
-	rootCmd.AddCommand(NewCmdDiag(ios))
-	rootCmd.AddCommand(NewCmdPreview(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdTunnel(factory, ios))
-	rootCmd.AddCommand(NewCmdShare(factory, ios))
-	rootCmd.AddCommand(NewCmdRelay(factory, ios))
-	rootCmd.AddCommand(NewCmdCloudDownload(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdUpload(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdDownload(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdDelete(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdList(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdSearch(factory, ios))
-	rootCmd.AddCommand(NewCmdStat(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdMv(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdArchive(factory, ios))
-	rootCmd.AddCommand(NewCmdArchiveDir(factory, ios))
-	rootCmd.AddCommand(NewCmdBatchDelete(factory, ios, cliState))
-	rootCmd.AddCommand(NewCmdBatchRename(factory, ios))
+	root.AddCommand(NewCmdCd(cliState, ios))
+	root.AddCommand(NewCmdPwd(cliState, ios))
+	root.AddCommand(NewCmdMkdir(factory, ios, cliState))
+	root.AddCommand(NewCmdRmdir(factory, ios, cliState))
+	root.AddCommand(NewCmdGenkey(ios))
+	root.AddCommand(NewCmdConfig(factory, ios, &cfgFile))
+	root.AddCommand(NewCmdVersion(factory, ios))
+	root.AddCommand(NewCmdStats(factory, ios))
+	root.AddCommand(NewCmdDiag(ios))
+	root.AddCommand(NewCmdUpload(factory, ios, cliState))
+	root.AddCommand(NewCmdDownload(factory, ios, cliState))
+	root.AddCommand(NewCmdDelete(factory, ios, cliState))
+	root.AddCommand(NewCmdList(factory, ios, cliState))
+	root.AddCommand(NewCmdSearch(factory, ios))
+	root.AddCommand(NewCmdStat(factory, ios, cliState))
+	root.AddCommand(NewCmdMv(factory, ios, cliState))
+	root.AddCommand(NewCmdArchive(factory, ios))
+	root.AddCommand(NewCmdArchiveDir(factory, ios))
+	root.AddCommand(NewCmdBatchDelete(factory, ios, cliState))
+	root.AddCommand(NewCmdBatchRename(factory, ios))
+	root.AddCommand(NewCmdPreview(factory, ios, cliState))
+	root.AddCommand(NewCmdTunnel(factory, ios))
+	root.AddCommand(NewCmdShare(factory, ios))
+	root.AddCommand(NewCmdRelay(factory, ios))
+	root.AddCommand(NewCmdCloudDownload(factory, ios, cliState))
+
+	return root
+}
+
+func Execute() error {
+	return NewRootCmd().Execute()
 }
 
 // buildFileClient 根据 cfgProvider 配置和 persistent flag 构造 FileClient。
-// 从配置中加载 server_url、tunnel_key、chunk_size 等，persistent flag 可覆盖。
 func buildFileClient(cmd *cobra.Command) (*client.FileClient, error) {
 	cfg, err := client.LoadFromProvider(cfgProvider)
 	if err != nil {
@@ -150,7 +145,6 @@ func buildFileClient(cmd *cobra.Command) (*client.FileClient, error) {
 		}),
 	}
 	if cfg.TunnelKey != "" {
-		// 当 --server flag 显式指定时，绕过隧道直接 HTTP
 		if s, _ := cmd.Flags().GetString(flagServer); s == "" {
 			opts = append(opts, client.WithTunnel(cfg.TunnelKey))
 		}

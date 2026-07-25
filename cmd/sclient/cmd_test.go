@@ -23,8 +23,9 @@ import (
 // ---- root command ----
 
 func TestRootCmd_Use(t *testing.T) {
-	if rootCmd.Use != "sclient" {
-		t.Errorf("rootCmd.Use = %q, want %q", rootCmd.Use, "sclient")
+	cmd := NewRootCmd()
+	if cmd.Use != "sclient" {
+		t.Errorf("rootCmd.Use = %q, want %q", cmd.Use, "sclient")
 	}
 }
 
@@ -67,9 +68,10 @@ func TestRootCmd_SubCommands(t *testing.T) {
 
 func TestRootCmd_PersistentFlags(t *testing.T) {
 	// 验证 persistent flags 已注册
+	cmd := NewRootCmd()
 	flagNames := []string{"config", "server", "output", "verbose", "chunked", "chunk-size", "concurrency", "resume"}
 	for _, name := range flagNames {
-		f := rootCmd.PersistentFlags().Lookup(name)
+		f := cmd.PersistentFlags().Lookup(name)
 		if f == nil {
 			t.Errorf("missing persistent flag: %q", name)
 		}
