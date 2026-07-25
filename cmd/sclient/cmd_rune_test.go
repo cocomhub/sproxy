@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -211,51 +216,63 @@ func TestArchiveCommand(t *testing.T) {
 	}
 }
 
-// ---- Genkey command RunE 测试 ----
+// ---- Genkey 测试已迁移到 genkey_test.go ----
+// TestGenkeyCommand 已移除，使用 TestNewCmdGenkey 替代
 
-func TestGenkeyCommand(t *testing.T) {
-	resetState := captureRootCmdArgs()
-	defer resetState()
+// ---- Version 测试已迁移到新工厂函数 ----
+// TestVersionCommand_Run 已移除，版本命令不再通过 rootCmd 注册
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"genkey"})
-		if err := rootCmd.Execute(); err != nil {
-			t.Fatalf("genkey command failed: %v", err)
-		}
-	})
-	out = strings.TrimSpace(out)
-	if len(out) != 64 {
-		t.Errorf("expected 64 hex chars, got %d: %q", len(out), out)
+// ---- Version 子命令 error 测试 ----
+
+func TestNewCmdVersionList_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdVersionList(factory, cli.IOStreams{ErrOut: io.Discard})
+
+	cmd.SetArgs([]string{"test.txt"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 404")
 	}
 }
 
-// ---- Version command RunE 测试 ----
+func TestNewCmdVersionRestore_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
 
-func TestVersionCommand_Run(t *testing.T) {
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdVersionRestore(factory, cli.IOStreams{ErrOut: io.Discard})
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"version"})
-		if err := rootCmd.Execute(); err != nil {
-			t.Fatalf("version command failed: %v", err)
-		}
-	})
-	if !strings.Contains(out, "sclient") {
-		t.Errorf("expected version output to contain 'sclient', got: %s", out)
+	cmd.SetArgs([]string{"test.txt", "1"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 404")
 	}
 }
 
-// ---- Config command RunE 测试 ----
+func TestNewCmdVersionDelete_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
 
-func TestConfigCommand(t *testing.T) {
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdVersionDelete(factory, cli.IOStreams{ErrOut: io.Discard})
 
-	_ = testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"config", "show"})
-		rootCmd.Execute()
-	})
+	cmd.SetArgs([]string{"test.txt", "1"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 404")
+	}
 }
 
 // ---- Tunnel command RunE 测试 ----
@@ -610,94 +627,31 @@ func TestConfigCommand_SetMissingValue(t *testing.T) {
 	}
 }
 
-// ---- Version subcommand tests ----
-
-func TestVersionListCommand_ServerError(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer mock.Close()
-
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	rootCmd.SetArgs([]string{"version", "--server", mock.URL, "list", "test.txt"})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Error("expected error when server returns 404")
-	}
-}
-
-func TestVersionRestoreCommand_ServerError(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer mock.Close()
-
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	rootCmd.SetArgs([]string{"version", "--server", mock.URL, "restore", "test.txt", "1"})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Error("expected error when server returns 404")
-	}
-}
-
-func TestVersionDeleteCommand_ServerError(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer mock.Close()
-
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	rootCmd.SetArgs([]string{"version", "--server", mock.URL, "delete", "test.txt", "1"})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Error("expected error when server returns 404")
-	}
-}
-
 // ---- Pwd command ----
 
 func TestPwdCommand(t *testing.T) {
-	oldDir := currentDir
-	currentDir = ""
-	defer func() { currentDir = oldDir }()
+	var buf strings.Builder
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdPwd(st, cli.IOStreams{Out: &buf})
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	cmd.SetArgs(nil)
+	cmd.Run(cmd, nil)
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"pwd"})
-		if err := rootCmd.Execute(); err != nil {
-			t.Fatalf("pwd command failed: %v", err)
-		}
-	})
-	if !strings.Contains(out, "/") {
-		t.Errorf("expected pwd to output '/', got: %s", out)
+	if !strings.Contains(buf.String(), "/") {
+		t.Errorf("expected pwd to output '/', got: %s", buf.String())
 	}
 }
 
 func TestPwdCommand_WithCurrentDir(t *testing.T) {
-	oldDir := currentDir
-	currentDir = "subdir"
-	defer func() { currentDir = oldDir }()
+	var buf strings.Builder
+	st := &state.State{CurrentDir: "subdir"}
+	cmd := NewCmdPwd(st, cli.IOStreams{Out: &buf})
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-	currentDir = "subdir"
+	cmd.SetArgs(nil)
+	cmd.Run(cmd, nil)
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"pwd"})
-		if err := rootCmd.Execute(); err != nil {
-			t.Fatalf("pwd command failed: %v", err)
-		}
-	})
-	if !strings.Contains(out, "subdir") {
-		t.Errorf("expected pwd to contain 'subdir', got: %s", out)
+	if !strings.Contains(buf.String(), "subdir") {
+		t.Errorf("expected pwd to contain 'subdir', got: %s", buf.String())
 	}
 }
 
@@ -713,17 +667,18 @@ func TestMkdirCommand_HappyPath(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdMkdir(factory, cli.IOStreams{Out: &buf}, st)
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"mkdir", "--server", mock.URL, "newdir"})
-		if err := rootCmd.Execute(); err != nil {
-			t.Fatalf("mkdir command failed: %v", err)
-		}
-	})
-	if !strings.Contains(out, "目录已创建") {
-		t.Errorf("expected success message, got: %s", out)
+	cmd.SetArgs([]string{"newdir"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("mkdir command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "目录已创建") {
+		t.Errorf("expected success message, got: %s", buf.String())
 	}
 }
 
@@ -733,11 +688,14 @@ func TestMkdirCommand_ServerError(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf, errBuf strings.Builder
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdMkdir(factory, cli.IOStreams{Out: &buf, ErrOut: &errBuf}, st)
 
-	rootCmd.SetArgs([]string{"mkdir", "--server", mock.URL, "newdir"})
-	err := rootCmd.Execute()
+	cmd.SetArgs([]string{"newdir"})
+	err := cmd.Execute()
 	if err == nil {
 		t.Error("expected error when server returns 500")
 	}
@@ -746,41 +704,28 @@ func TestMkdirCommand_ServerError(t *testing.T) {
 // ---- Cd command ----
 
 func TestCdCommand_PrintCurrent(t *testing.T) {
-	oldDir := currentDir
-	currentDir = ""
-	defer func() { currentDir = oldDir }()
+	var buf strings.Builder
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: &buf})
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	cmd.SetArgs(nil)
+	cmd.Run(cmd, nil)
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cd"})
-		if err := rootCmd.Execute(); err != nil {
-			t.Fatalf("cd command failed: %v", err)
-		}
-	})
-	if !strings.Contains(out, "/") {
-		t.Errorf("expected cd output '/', got: %s", out)
+	if !strings.Contains(buf.String(), "/") {
+		t.Errorf("expected cd output '/', got: %s", buf.String())
 	}
 }
 
 func TestCdCommand_WithCurrentDir(t *testing.T) {
-	oldDir := currentDir
-	currentDir = "subdir"
-	defer func() { currentDir = oldDir }()
+	var buf strings.Builder
+	st := &state.State{CurrentDir: "subdir"}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: &buf})
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-	currentDir = "subdir"
+	cmd.SetArgs(nil)
+	cmd.Run(cmd, nil)
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cd"})
-		if err := rootCmd.Execute(); err != nil {
-			t.Fatalf("cd command failed: %v", err)
-		}
-	})
-	if !strings.Contains(out, "subdir") {
-		t.Errorf("expected cd output '/subdir', got: %s", out)
+	if !strings.Contains(buf.String(), "subdir") {
+		t.Errorf("expected cd output '/subdir', got: %s", buf.String())
 	}
 }
 

@@ -30,7 +30,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 	for i, c := range cmds {
 		names[i] = c.Use
 	}
-	for _, want := range []string{"upload", "download", "delete", "list", "search", "tunnel", "genkey", "config", "version"} {
+	for _, want := range []string{"upload", "download", "delete", "list", "search", "tunnel", "cd", "pwd", "genkey", "config", "version", "stats", "diag"} {
 		found := false
 		for _, name := range names {
 			if strings.HasPrefix(name, want) {
@@ -154,6 +154,7 @@ func TestDiagCmd_Registered(t *testing.T) {
 			return
 		}
 	}
+	// diag 通过 NewCmdDiag 在 root.go 中注册
 	t.Error("diag command not registered")
 }
 
@@ -258,7 +259,7 @@ func TestSearchCmd(t *testing.T) {
 // ---- version command ----
 
 func TestVersionCmd(t *testing.T) {
-	// version command is not registered via init() but via rootCmd init directly
+	// version command is now registered via NewCmdVersion factory function
 	var found bool
 	for _, c := range rootCmd.Commands() {
 		if strings.HasPrefix(c.Use, "version") {

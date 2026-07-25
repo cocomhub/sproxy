@@ -4,6 +4,7 @@
     "allow": [
       "Read",
       "Write",
+      "Write(*)",
       "Bash(*)",
       "PowerShell(*)",
       "mcp__mcp-atlassian-http__confluence_get_page",
@@ -53,7 +54,8 @@
       "mcp__plugin_context7_context7__query-docs",
       "WebFetch(domain:sonarcloud.io)",
       "Bash(gh *)",
-      "PowerShell(gh *)"
+      "PowerShell(gh *)",
+      "Bash(gofmt *)"
     ],
     "deny": []
   },

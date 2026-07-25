@@ -7,49 +7,50 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层
 	"github.com/spf13/cobra"
 )
 
-var diagCmd = &cobra.Command{
-	Use:   "diag",
-	Short: "中继诊断工具",
-	Long: `检测 Hub 连通性和查看中继节点状态。
+// NewCmdDiag 创建 diag 命令的工厂函数。
+// 使用 ioStreams 替代 fmt.Printf / os.Stderr 进行输出。
+func NewCmdDiag(ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "diag",
+		Short: "中继诊断工具",
+		Long: `检测 Hub 连通性和查看中继节点状态。
 
-使用示例:
-  sclient diag --ping ws://hub.example.com/ws
-  sclient diag --hub-status ws://hub.example.com/ws`,
-	RunE: runDiag,
-}
+	使用示例:
+	  sclient diag --ping ws://hub.example.com/ws
+	  sclient diag --hub-status ws://hub.example.com/ws`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pingURL, _ := cmd.Flags().GetString("ping")
+			hubURL, _ := cmd.Flags().GetString("hub-status")
 
-var (
-	diagPing      string
-	diagHubStatus string
-)
-
-func init() {
-	diagCmd.Flags().StringVar(&diagPing, "ping", "", "检测 Hub 连通性和延迟，参数为 WebSocket 地址")
-	diagCmd.Flags().StringVar(&diagHubStatus, "hub-status", "", "查看 Hub 在线节点列表，参数为 WebSocket 地址")
-	rootCmd.AddCommand(diagCmd)
-}
-
-func runDiag(cmd *cobra.Command, args []string) error {
-	switch {
-	case diagPing != "":
-		return runPing(cmd.Context(), diagPing)
-	case diagHubStatus != "":
-		return runHubStatus(cmd.Context(), diagHubStatus)
-	default:
-		return cmd.Help()
+			switch {
+			case pingURL != "":
+				return runPingWithIO(cmd.Context(), pingURL, ios.Out)
+			case hubURL != "":
+				return runHubStatusWithIO(cmd.Context(), hubURL, ios.Out)
+			default:
+				return cmd.Help()
+			}
+		},
 	}
+
+	cmd.Flags().String("ping", "", "检测 Hub 连通性和延迟，参数为 WebSocket 地址")
+	cmd.Flags().String("hub-status", "", "查看 Hub 在线节点列表，参数为 WebSocket 地址")
+	return cmd
 }
 
-func runPing(ctx context.Context, hubAddr string) error {
+// runPingWithIO 检测 Hub 连通性，使用 w 替代 fmt.Printf。
+func runPingWithIO(ctx context.Context, hubAddr string, w io.Writer) error {
 	logger := slog.With("hub", hubAddr)
 	logger.Info("正在检测 Hub 连通性...")
 
@@ -78,14 +79,15 @@ func runPing(ctx context.Context, hubAddr string) error {
 	}
 	rtt := time.Since(sendStart)
 
-	fmt.Printf("✅ Hub 可达\n")
-	fmt.Printf("   连接延迟: %s\n", dialDur.Round(time.Millisecond))
-	fmt.Printf("   消息往返: %s\n", rtt.Round(time.Millisecond))
-	fmt.Printf("   地址: %s\n", hubAddr)
+	fmt.Fprintf(w, "✅ Hub 可达\n")
+	fmt.Fprintf(w, "   连接延迟: %s\n", dialDur.Round(time.Millisecond))
+	fmt.Fprintf(w, "   消息往返: %s\n", rtt.Round(time.Millisecond))
+	fmt.Fprintf(w, "   地址: %s\n", hubAddr)
 	return nil
 }
 
-func runHubStatus(ctx context.Context, hubAddr string) error {
+// runHubStatusWithIO 获取 Hub 节点列表，使用 w 替代 fmt.Printf。
+func runHubStatusWithIO(ctx context.Context, hubAddr string, w io.Writer) error {
 	logger := slog.With("hub", hubAddr)
 	logger.Info("正在获取 Hub 节点列表...")
 
@@ -121,14 +123,14 @@ func runHubStatus(ctx context.Context, hubAddr string) error {
 		return fmt.Errorf("解析响应失败: %w", err)
 	}
 
-	fmt.Printf("在线节点数量: %d\n", len(nodes))
+	fmt.Fprintf(w, "在线节点数量: %d\n", len(nodes))
 	for _, n := range nodes {
-		fmt.Printf("  - ID: %s\n", n.ID)
+		fmt.Fprintf(w, "  - ID: %s\n", n.ID)
 		if n.Addr != "" {
-			fmt.Printf("    地址: %s\n", n.Addr)
+			fmt.Fprintf(w, "    地址: %s\n", n.Addr)
 		}
 		if n.Connected != "" {
-			fmt.Printf("    连接时间: %s\n", n.Connected)
+			fmt.Fprintf(w, "    连接时间: %s\n", n.Connected)
 		}
 	}
 	return nil

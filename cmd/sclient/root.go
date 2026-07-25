@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 
 	"github.com/adrg/xdg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
@@ -24,6 +27,7 @@ var (
 	cfgFile     string
 	currentDir  string
 	cfgProvider *sclientcfg.ViperProvider
+	cliState    = &state.State{}
 )
 
 // rootCmd 是所有子命令的根命令
@@ -37,6 +41,7 @@ var rootCmd = &cobra.Command{
 		cfgProvider.BindPFlag("auth_token", cmd.Flags().Lookup("auth-token"))
 		// 加载缓存的当前目录
 		loadCurrentDir()
+		cliState.CurrentDir = currentDir
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
@@ -83,19 +88,29 @@ func init() {
 	rootCmd.PersistentFlags().Bool("resume", false, "续传模式 (默认启用)")
 	rootCmd.PersistentFlags().Bool("json", false, "以 JSON 格式输出")
 
-	// 注册子命令
+	// 注册子命令（旧模式）
 	rootCmd.AddCommand(uploadCmd)
 	rootCmd.AddCommand(downloadCmd)
 	rootCmd.AddCommand(deleteCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(tunnelCmd)
-	rootCmd.AddCommand(genkeyCmd)
-	rootCmd.AddCommand(configCmd)
-	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(relayCmd)
 	rootCmd.AddCommand(cloudDownloadCmd)
 	rootCmd.AddCommand(shareCmd)
+
+	// 注册子命令（新模式 — 工厂函数）
+	ios := cli.SystemIOStreams()
+	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return cfgProvider })
+	rootCmd.AddCommand(NewCmdCd(cliState, ios))
+	rootCmd.AddCommand(NewCmdPwd(cliState, ios))
+	rootCmd.AddCommand(NewCmdMkdir(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdRmdir(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdGenkey(ios))
+	rootCmd.AddCommand(NewCmdConfig(factory, ios, &cfgFile))
+	rootCmd.AddCommand(NewCmdVersion(factory, ios))
+	rootCmd.AddCommand(NewCmdStats(factory, ios))
+	rootCmd.AddCommand(NewCmdDiag(ios))
 }
 
 // buildFileClient 根据 cfgProvider 配置和 persistent flag 构造 FileClient。

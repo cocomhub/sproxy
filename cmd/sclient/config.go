@@ -5,94 +5,145 @@ package main
 
 import (
 	"fmt"
-	"os"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
-var configCmd = &cobra.Command{
-	Use:   "config [show|set <key> <value>]",
-	Short: "配置管理",
-	Long:  "查看或修改 sclient 配置。\n\n可用配置项:\n  server_url      服务器地址 (如 http://localhost:18083)\n  auth_token      Bearer Token 认证令牌\n  timeout         HTTP 超时秒数\n  tunnel_key      隧道密钥 (64 位 hex)\n  chunk_size      分块上传/下载块大小 (字节)\n  max_chunk_size  最大分块大小 (字节)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if cfgProvider == nil {
-			return fmt.Errorf("配置未初始化，请通过 sclient --config 指定配置文件")
-		}
-		cfg, err := client.LoadFromProvider(cfgProvider)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
-			return fmt.Errorf("加载配置失败: %w", err)
-		}
-
-		if len(args) == 0 || args[0] == "show" {
-			client.HandleConfigShow(cfg)
-			return nil
-		}
-
-		if args[0] == "set" {
-			if len(args) < 3 {
-				return fmt.Errorf("用法: sclient config set <键> <值>")
+// NewCmdConfig 创建独立的 config 命令工厂函数，接收 IOStreams 用于输出。
+// cfgFile 为配置文件路径指针，用于 config set 时的回写。
+func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "config [show|set <key> <value>|remote]",
+		Short: "配置管理",
+		Long:  "查看或修改 sclient 配置。\n\n可用配置项:\n  server_url      服务器地址 (如 http://localhost:18083)\n  auth_token      Bearer Token 认证令牌\n  timeout         HTTP 超时秒数\n  tunnel_key      隧道密钥 (64 位 hex)\n  chunk_size      分块上传/下载块大小 (字节)\n  max_chunk_size  最大分块大小 (字节)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cfgProvider == nil {
+				return fmt.Errorf("配置未初始化，请通过 sclient --config 指定配置文件")
 			}
-			if err := client.HandleConfigSet(cfg, cfgFile, args[1], args[2]); err != nil {
-				fmt.Fprintf(os.Stderr, "设置配置失败: %v\n", err)
-				return fmt.Errorf("设置配置失败: %w", err)
+			cfg, err := client.LoadFromProvider(cfgProvider)
+			if err != nil {
+				errMsg := fmt.Sprintf("加载配置失败: %v", err)
+				ios.WriteErrLine(errMsg)
+				return fmt.Errorf("加载配置失败: %w", err)
 			}
-			fmt.Printf("配置已更新: %s = %s\n", args[1], args[2])
+
+			if len(args) == 0 || args[0] == "show" {
+				client.HandleConfigShow(cfg)
+				return nil
+			}
+
+			if args[0] == "set" {
+				if len(args) < 3 {
+					return fmt.Errorf("用法: sclient config set <键> <值>")
+				}
+				if err := client.HandleConfigSet(cfg, *cfgFile, args[1], args[2]); err != nil {
+					ios.WriteErrLine("设置配置失败: %v", err)
+					return fmt.Errorf("设置配置失败: %w", err)
+				}
+				fmt.Fprintf(ios.Out, "配置已更新: %s = %s\n", args[1], args[2])
+				return nil
+			}
+
+			ios.WriteErrLine("未知的 config 子命令: %s", args[0])
+			return fmt.Errorf("用法: sclient config [show|set <键> <值>|remote]")
+		},
+	}
+	cmd.AddCommand(NewCmdConfigRemote(factory, ios))
+	return cmd
+}
+
+// NewCmdConfigRemote 创建独立的 config remote 命令工厂函数。
+func NewCmdConfigRemote(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "remote",
+		Short: "查看或修改远程服务器配置",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				return err
+			}
+			// 生产 Factory 当前为占位实现（返回 nil, nil），回退到 buildFileClient
+			if svc == nil {
+				return runConfigRemoteFallback(cmd, ios)
+			}
+
+			cfg, err := svc.GetConfig(cmd.Context())
+			if err != nil {
+				ios.WriteErrLine("获取远程配置失败: %v", err)
+				return fmt.Errorf("获取远程配置失败: %w", err)
+			}
+			fm := buildFormatterWithWriter(ios.Out, cmd)
+			fm.PrintConfig(cfg)
 			return nil
-		}
-
-		fmt.Fprintf(os.Stderr, "未知的 config 子命令: %s\n", args[0])
-		return fmt.Errorf("用法: sclient config [show|set <键> <值>|remote]")
-	},
+		},
+	}
+	cmd.AddCommand(NewCmdConfigRemoteSet(factory, ios))
+	return cmd
 }
 
-var configRemoteCmd = &cobra.Command{
-	Use:   "remote",
-	Short: "查看或修改远程服务器配置",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cli, err := buildFileClient(cmd)
-		if err != nil {
-			return err
-		}
+// NewCmdConfigRemoteSet 创建独立的 config remote set 命令工厂函数。
+func NewCmdConfigRemoteSet(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+	return &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "更新远程服务器运行时配置",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				return err
+			}
+			// 生产 Factory 当前为占位实现（返回 nil, nil），回退到 buildFileClient
+			if svc == nil {
+				return runConfigRemoteSetFallback(cmd, ios, args)
+			}
 
-		cfg, err := cli.GetConfig(cmd.Context())
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "获取远程配置失败: %v\n", err)
-			return fmt.Errorf("获取远程配置失败: %w", err)
-		}
-
-		fm := buildFormatter(cmd)
-		fm.PrintConfig(cfg)
-		return nil
-	},
+			key := args[0]
+			value := args[1]
+			updates := map[string]interface{}{key: value}
+			if err := svc.UpdateConfig(cmd.Context(), updates); err != nil {
+				ios.WriteErrLine("更新远程配置失败: %v", err)
+				return fmt.Errorf("更新远程配置失败: %w", err)
+			}
+			fmt.Fprintf(ios.Out, "远程配置已更新: %s = %s\n", key, value)
+			return nil
+		},
+	}
 }
 
-var configRemoteSetCmd = &cobra.Command{
-	Use:   "set <key> <value>",
-	Short: "更新远程服务器运行时配置",
-	Args:  cobra.ExactArgs(2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cli, err := buildFileClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		key := args[0]
-		value := args[1]
-
-		updates := map[string]interface{}{key: value}
-		if err := cli.UpdateConfig(cmd.Context(), updates); err != nil {
-			fmt.Fprintf(os.Stderr, "更新远程配置失败: %v\n", err)
-			return fmt.Errorf("更新远程配置失败: %w", err)
-		}
-
-		fmt.Printf("远程配置已更新: %s = %s\n", key, value)
-		return nil
-	},
+// runConfigRemoteFallback 是 config remote 的 buildFileClient 回退路径，
+// 用于生产 Factory 尚未实现时的过渡期。
+func runConfigRemoteFallback(cmd *cobra.Command, ios cli.IOStreams) error {
+	cli, err := buildFileClient(cmd)
+	if err != nil {
+		return err
+	}
+	cfg, err := cli.GetConfig(cmd.Context())
+	if err != nil {
+		ios.WriteErrLine("获取远程配置失败: %v", err)
+		return fmt.Errorf("获取远程配置失败: %w", err)
+	}
+	fm := buildFormatterWithWriter(ios.Out, cmd)
+	fm.PrintConfig(cfg)
+	return nil
 }
 
-func init() {
-	configCmd.AddCommand(configRemoteCmd)
-	configRemoteCmd.AddCommand(configRemoteSetCmd)
+// runConfigRemoteSetFallback 是 config remote set 的 buildFileClient 回退路径，
+// 用于生产 Factory 尚未实现时的过渡期。
+func runConfigRemoteSetFallback(cmd *cobra.Command, ios cli.IOStreams, args []string) error {
+	cli, err := buildFileClient(cmd)
+	if err != nil {
+		return err
+	}
+	key := args[0]
+	value := args[1]
+	updates := map[string]interface{}{key: value}
+	if err := cli.UpdateConfig(cmd.Context(), updates); err != nil {
+		ios.WriteErrLine("更新远程配置失败: %v", err)
+		return fmt.Errorf("更新远程配置失败: %w", err)
+	}
+	fmt.Fprintf(ios.Out, "远程配置已更新: %s = %s\n", key, value)
+	return nil
 }

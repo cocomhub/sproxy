@@ -18,6 +18,18 @@ func TestFactory_Constructor(t *testing.T) {
 	_ = clientfactory.NewMock(nil, nil)
 }
 
+func TestFactoryLazy_GetProvider(t *testing.T) {
+	// 验证延迟获取：init 时传入 nil provider，PersistentPreRunE 后提供真实值
+	var called bool
+	_ = clientfactory.New("", func() clientfactory.CfgBinder {
+		called = true
+		return nil
+	})
+	if called {
+		t.Error("CfgBinder function should not be called during New()")
+	}
+}
+
 func TestMockFactory_NilService(t *testing.T) {
 	cmd := &cobra.Command{}
 	factory := clientfactory.NewMock(nil, nil)
