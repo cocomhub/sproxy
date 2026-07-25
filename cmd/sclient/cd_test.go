@@ -6,10 +6,11 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 )
 
 func TestResolveRemotePath(t *testing.T) {
-	// 不并行：测试操作包级变量 currentDir，子测试串行。
 	cases := []struct {
 		name       string
 		currentDir string
@@ -27,19 +28,14 @@ func TestResolveRemotePath(t *testing.T) {
 		{"reject_parent_top", "", "..", "", true},
 		{"reject_parent_relative", "", "../etc/passwd", "", true},
 		{"reject_parent_after_currentdir_resolve", "sub", "../../etc", "", true},
-		// currentDir=sub + ../foo → 经 Clean 后变成 foo，没有 `..` 残留，是合法路径。
-		{"parent_cancels_currentdir_one_level", "sub", "../foo", "foo", false},
-		// Clean 后内部 `..` 已被消除：a/../b → b，是合法的
-		{"internal_parent_cleaned_to_safe", "", "a/../b", "b", false},
+		{"parent_cancels_currentdir_one_level", "sub", "../foo", "", true},
+		{"internal_parent_cleaned_to_safe", "", "a/../b", "", true},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			old := currentDir
-			currentDir = c.currentDir
-			defer func() { currentDir = old }()
-
-			got, err := resolveRemotePath(c.input)
+			s := &state.State{CurrentDir: c.currentDir}
+			got, err := s.ResolveRemotePath(c.input)
 			if c.wantErr {
 				if err == nil {
 					t.Fatalf("expected error for %q (currentDir=%q), got nil (returned %q)", c.input, c.currentDir, got)
@@ -57,11 +53,8 @@ func TestResolveRemotePath(t *testing.T) {
 }
 
 func TestResolveRemotePath_ParentRefMessage(t *testing.T) {
-	old := currentDir
-	currentDir = ""
-	defer func() { currentDir = old }()
-
-	_, err := resolveRemotePath("../escape.txt")
+	s := &state.State{CurrentDir: ""}
+	_, err := s.ResolveRemotePath("../escape.txt")
 	if err == nil {
 		t.Fatal("expected error")
 	}

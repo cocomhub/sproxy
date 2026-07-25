@@ -338,6 +338,15 @@ func buildFormatter(cmd *cobra.Command) OutputFormatter {
 	return NewTextFormatter(os.Stdout)
 }
 
+// buildFormatterWithWriter 根据 --json flag 创建 OutputFormatter，输出到指定 writer。
+func buildFormatterWithWriter(w io.Writer, cmd *cobra.Command) OutputFormatter {
+	useJSON, _ := cmd.Flags().GetBool("json")
+	if useJSON {
+		return NewJSONFormatter(w)
+	}
+	return NewTextFormatter(w)
+}
+
 // boolStr 返回布尔值的"已设置"/"未设置"文本。
 func boolStr(v bool) string {
 	if v {
