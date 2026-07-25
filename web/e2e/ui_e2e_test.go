@@ -52,6 +52,9 @@ func testServer(t *testing.T, opts ...bool) (string, *server.Config, func()) {
 	return ts.URL, cfg, func() {
 		ts.Close()
 		h.Close()
+		// 清理云端下载目录，防止 TempDir RemoveAll 失败
+		os.RemoveAll(filepath.Join(tmpDir, ".__cloud__"))
+		os.RemoveAll(filepath.Join(tmpDir, ".__downloads__"))
 	}
 }
 
