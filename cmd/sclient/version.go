@@ -16,7 +16,7 @@ import (
 func NewCmdVersion(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "version [subcommand]",
-		Short: "显示版本信息",
+		Short: "显示版本信息或管理文件版本",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(ios.Out, "sclient version %s (build: %s)\n", Version, BuildAt)
 			// 尝试显示配置信息（如果 cfgProvider 可用）
