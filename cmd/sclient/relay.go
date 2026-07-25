@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -278,4 +280,140 @@ func runRelayStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("    连接时间: %s\n", connected)
 	}
 	return nil
+}
+
+// ---- 工厂函数 ----
+
+// NewCmdRelay 创建 relay 父命令的工厂函数。
+func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "relay",
+		Short: "中继节点管理",
+		Run: func(cmd *cobra.Command, args []string) {
+			_ = cmd.Help()
+		},
+	}
+	cmd.AddCommand(NewCmdRelayStart(ios))
+	cmd.AddCommand(NewCmdRelayStatus(ios))
+	cmd.AddCommand(NewCmdRelayStop(ios))
+	cmd.AddCommand(NewCmdRelayRemoveNode(ios))
+	cmd.AddCommand(NewCmdRelayStats(ios))
+	return cmd
+}
+
+// NewCmdRelayStart 创建 relay start 命令的工厂函数。
+func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "start",
+		Short: "启动中继节点，连接到 Hub",
+		Long: `作为中继节点连接到 Hub，注册自身，然后等待远程请求并通过隧道转发到本地 HTTP 服务。
+
+使用示例:
+  sclient relay start --hub ws://hub.example.com/ws --local http://127.0.0.1:8080 --node-id my-node`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			relayFl.hubURL, _ = cmd.Flags().GetString("hub")
+			relayFl.local, _ = cmd.Flags().GetString("local")
+			relayFl.nodeID, _ = cmd.Flags().GetString("node-id")
+			return runRelayStart(cmd, args)
+		},
+	}
+	cmd.Flags().String("hub", "ws://127.0.0.1:18084/ws", "Hub 的 WebSocket 地址")
+	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
+	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
+	return cmd
+}
+
+// NewCmdRelayStatus 创建 relay status 命令的工厂函数。
+func NewCmdRelayStatus(ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "查看 Hub 节点状态",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// 获取服务器地址（从根命令的 persistent flag 或 --hub flag）
+			serverURL, _ := cmd.Flags().GetString("server")
+			if serverURL == "" {
+				if hubURL, _ := cmd.Flags().GetString("hub"); hubURL != "" {
+					if u, parseErr := url.Parse(hubURL); parseErr == nil {
+						u.Scheme = "http"
+						u.Path = ""
+						serverURL = u.String()
+					}
+				}
+			}
+			if serverURL == "" {
+				return fmt.Errorf("未指定服务器地址，请使用 --server 或 --hub 或配置 server_url")
+			}
+
+			// 获取 auth token（从根命令的 persistent flag）
+			authToken, _ := cmd.Flags().GetString("auth-token")
+
+			// 查询节点列表
+			nodesURL := strings.TrimRight(serverURL, "/") + "/api/hub/nodes"
+			req, err := http.NewRequest("GET", nodesURL, nil)
+			if err != nil {
+				return fmt.Errorf("创建请求失败: %w", err)
+			}
+			if authToken != "" {
+				req.Header.Set("Authorization", "Bearer "+authToken)
+			}
+			httpClient := &http.Client{Timeout: 10 * time.Second}
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("查询 Hub 状态失败: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+				return fmt.Errorf("查询 Hub 状态失败 (HTTP %d): %s", resp.StatusCode, string(body))
+			}
+
+			var nodes []struct {
+				ID        string `json:"id"`
+				Addr      string `json:"addr,omitempty"`
+				Connected string `json:"connected,omitempty"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+				return fmt.Errorf("解析响应失败: %w", err)
+			}
+
+			if len(nodes) == 0 {
+				ios.WriteOutLine("暂无已连接节点")
+				return nil
+			}
+
+			ios.WriteOutLine("已连接节点 (%d):", len(nodes))
+			for _, n := range nodes {
+				connected := n.Connected
+				if connected != "" {
+					if t, parseErr := time.Parse(time.RFC3339, connected); parseErr == nil {
+						connected = t.Format("2006-01-02 15:04:05")
+					}
+				}
+				ios.WriteOutLine("  - ID:       %s", n.ID)
+				ios.WriteOutLine("    地址:     %s", n.Addr)
+				ios.WriteOutLine("    连接时间: %s", connected)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().String("hub", "", "Hub 的 HTTP 地址 (如 http://127.0.0.1:18083)")
+	return cmd
+}
+
+// NewCmdRelayStop 创建 relay stop 命令的工厂函数。
+func NewCmdRelayStop(ios cli.IOStreams) *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "停止中继节点",
+		Long: `向正在运行的中继节点发送停止信号。
+
+中继节点作为独立进程运行时，请使用 kill 或 SIGINT 停止。
+如果通过 sclient relay start 前台运行，按 Ctrl+C 即可停止。`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ios.WriteOutLine("请向中继进程发送 SIGINT 信号以优雅停止。")
+			ios.WriteOutLine("如果中继在前台运行，请按 Ctrl+C。")
+			return nil
+		},
+	}
 }
