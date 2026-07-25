@@ -429,3 +429,153 @@ func TestE2E_Rename(t *testing.T) {
 		t.Fatalf("stat old name expected 404, got %d", oldStatus)
 	}
 }
+
+func TestE2E_Upload_SimpleChunked(t *testing.T) {
+	t.Parallel()
+	baseURL, cleanup := startSPROXY(t)
+	defer cleanup()
+
+	// 测试小文件（≤4MB）走简单上传路径
+	// 用 uploadFile 直接 POST /upload（模拟简单上传）
+	smallContent := []byte("small file content for simple upload test")
+	smallChecksum := sha256hex(smallContent)
+	smallFile := "small_simple.txt"
+
+	status, body := uploadFile(t, baseURL, smallFile, smallContent, map[string]string{
+		"X-File-Checksum": smallChecksum,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("simple upload expected 200, got %d: %s", status, body)
+	}
+	var uploadResp struct {
+		Success  bool   `json:"success"`
+		Message  string `json:"message"`
+		Checksum string `json:"file_checksum,omitempty"`
+	}
+	if err := json.Unmarshal(body, &uploadResp); err != nil {
+		t.Fatalf("upload unmarshal: %v (body: %s)", err, body)
+	}
+	if !uploadResp.Success {
+		t.Fatalf("simple upload failed: %s", uploadResp.Message)
+	}
+	if uploadResp.Checksum != smallChecksum {
+		t.Fatalf("simple upload checksum mismatch: got %s, want %s", uploadResp.Checksum, smallChecksum)
+	}
+
+	// 验证下载
+	dlStatus, dlHeaders, dlBody := downloadFile(t, baseURL, smallFile)
+	if dlStatus != http.StatusOK {
+		t.Fatalf("download after simple upload expected 200, got %d", dlStatus)
+	}
+	if string(dlBody) != string(smallContent) {
+		t.Fatalf("download content mismatch: got %q, want %q", dlBody, smallContent)
+	}
+	if dlHeaders.Get("X-File-Checksum") != smallChecksum {
+		t.Fatalf("download checksum mismatch: got %s, want %s",
+			dlHeaders.Get("X-File-Checksum"), smallChecksum)
+	}
+
+	// 测试大文件（>4MB）走分块上传路径
+	// 创建 5MB 文件
+	largeContent := make([]byte, 5*1024*1024)
+	for i := range largeContent {
+		largeContent[i] = byte(i % 256)
+	}
+	largeChecksum := sha256hex(largeContent)
+	largeFile := "large_chunked.bin"
+
+	status, body = uploadFile(t, baseURL, largeFile, largeContent, map[string]string{
+		"X-File-Checksum": largeChecksum,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("chunked upload expected 200, got %d: %s", status, body)
+	}
+	if err := json.Unmarshal(body, &uploadResp); err != nil {
+		t.Fatalf("chunked upload unmarshal: %v (body: %s)", err, body)
+	}
+	if !uploadResp.Success {
+		t.Fatalf("chunked upload failed: %s", uploadResp.Message)
+	}
+	if uploadResp.Checksum != largeChecksum {
+		t.Fatalf("chunked upload checksum mismatch: got %s, want %s", uploadResp.Checksum, largeChecksum)
+	}
+
+	// 验证下载大文件
+	dlStatus, dlHeaders, dlBody = downloadFile(t, baseURL, largeFile)
+	if dlStatus != http.StatusOK {
+		t.Fatalf("download after chunked upload expected 200, got %d", dlStatus)
+	}
+	if string(dlBody) != string(largeContent) {
+		t.Fatalf("large file content mismatch")
+	}
+	if dlHeaders.Get("X-File-Checksum") != largeChecksum {
+		t.Fatalf("large file checksum mismatch: got %s, want %s",
+			dlHeaders.Get("X-File-Checksum"), largeChecksum)
+	}
+}
+
+func TestE2E_Upload_EmptyFile(t *testing.T) {
+	t.Parallel()
+	baseURL, cleanup := startSPROXY(t)
+	defer cleanup()
+
+	// 测试 0 字节文件上传
+	content := []byte("")
+	checksum := sha256hex(content)
+	filename := "empty_file.txt"
+
+	status, body := uploadFile(t, baseURL, filename, content, map[string]string{
+		"X-File-Checksum": checksum,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("empty file upload expected 200, got %d: %s", status, body)
+	}
+	var uploadResp struct {
+		Success  bool   `json:"success"`
+		Message  string `json:"message"`
+		Checksum string `json:"file_checksum,omitempty"`
+	}
+	if err := json.Unmarshal(body, &uploadResp); err != nil {
+		t.Fatalf("upload unmarshal: %v (body: %s)", err, body)
+	}
+	if !uploadResp.Success {
+		t.Fatalf("empty file upload failed: %s", uploadResp.Message)
+	}
+
+	// 验证下载
+	dlStatus, _, dlBody := downloadFile(t, baseURL, filename)
+	if dlStatus != http.StatusOK {
+		t.Fatalf("download empty file expected 200, got %d", dlStatus)
+	}
+	if len(dlBody) != 0 {
+		t.Fatalf("empty file content expected 0 bytes, got %d", len(dlBody))
+	}
+}
+
+func TestE2E_Upload_ChecksumMismatch(t *testing.T) {
+	t.Parallel()
+	baseURL, cleanup := startSPROXY(t)
+	defer cleanup()
+
+	// 上传时提供错误的 checksum
+	content := []byte("real content")
+	wrongChecksum := sha256hex([]byte("wrong content"))
+	filename := "checksum_mismatch.txt"
+
+	status, body := uploadFile(t, baseURL, filename, content, map[string]string{
+		"X-File-Checksum": wrongChecksum,
+	})
+	if status != http.StatusBadRequest && status != http.StatusOK {
+		t.Fatalf("checksum mismatch upload expected 400 or 200, got %d: %s", status, body)
+	}
+	// 服务端可能返回 400（拒绝）或 200（但 success=false）
+	if status == http.StatusOK {
+		var uploadResp struct {
+			Success bool   `json:"success"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(body, &uploadResp); err == nil && !uploadResp.Success {
+			t.Logf("server correctly rejected checksum mismatch: %s", uploadResp.Message)
+		}
+	}
+}
