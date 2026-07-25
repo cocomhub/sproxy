@@ -10,7 +10,10 @@ import (
 	"path/filepath"
 
 	"github.com/adrg/xdg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
@@ -83,7 +86,7 @@ func init() {
 	rootCmd.PersistentFlags().Bool("resume", false, "续传模式 (默认启用)")
 	rootCmd.PersistentFlags().Bool("json", false, "以 JSON 格式输出")
 
-	// 注册子命令
+	// 注册子命令（旧模式）
 	rootCmd.AddCommand(uploadCmd)
 	rootCmd.AddCommand(downloadCmd)
 	rootCmd.AddCommand(deleteCmd)
@@ -93,6 +96,20 @@ func init() {
 	rootCmd.AddCommand(relayCmd)
 	rootCmd.AddCommand(cloudDownloadCmd)
 	rootCmd.AddCommand(shareCmd)
+
+	// 注册子命令（新模式 — 工厂函数）
+	ios := cli.SystemIOStreams()
+	cliState := &state.State{}
+	factory := clientfactory.New(cfgFile, cfgProvider)
+	rootCmd.AddCommand(NewCmdCd(cliState, ios))
+	rootCmd.AddCommand(NewCmdPwd(cliState, ios))
+	rootCmd.AddCommand(NewCmdMkdir(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdRmdir(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdGenkey(ios))
+	rootCmd.AddCommand(NewCmdConfig(factory, ios, &cfgFile))
+	rootCmd.AddCommand(NewCmdVersion(factory, ios))
+	rootCmd.AddCommand(NewCmdStats(factory, ios))
+	rootCmd.AddCommand(NewCmdDiag(ios))
 }
 
 // buildFileClient 根据 cfgProvider 配置和 persistent flag 构造 FileClient。

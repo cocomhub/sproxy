@@ -30,7 +30,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 	for i, c := range cmds {
 		names[i] = c.Use
 	}
-	for _, want := range []string{"upload", "download", "delete", "list", "search", "tunnel"} {
+	for _, want := range []string{"upload", "download", "delete", "list", "search", "tunnel", "cd", "pwd", "genkey", "config", "version", "stats", "diag"} {
 		found := false
 		for _, name := range names {
 			if strings.HasPrefix(name, want) {
@@ -155,7 +155,7 @@ func TestDiagCmd_Registered(t *testing.T) {
 		}
 	}
 	// diag 命令现在通过 NewCmdDiag 工厂函数创建，不通过 rootCmd 注册
-	t.Log("diag command is not registered via rootCmd (expected: uses NewCmdDiag)")
+	t.Error("diag command not registered")
 }
 
 // ---- batch-delete command ----
@@ -259,8 +259,17 @@ func TestSearchCmd(t *testing.T) {
 // ---- version command ----
 
 func TestVersionCmd(t *testing.T) {
-	// version 命令现在通过 NewCmdVersion 工厂函数创建，不通过 rootCmd 注册
-	t.Log("version command is now created via NewCmdVersion factory function")
+	// version command is now registered via NewCmdVersion factory function
+	var found bool
+	for _, c := range rootCmd.Commands() {
+		if strings.HasPrefix(c.Use, "version") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("version command not registered in rootCmd")
+	}
 }
 
 // ---- initLogger ----

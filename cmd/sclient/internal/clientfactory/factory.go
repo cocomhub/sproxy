@@ -10,6 +10,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // Factory 抽象客户端创建，生产/测试可替换。
@@ -26,7 +27,7 @@ type factory struct {
 
 // cfgBinder 抽象 flag 绑定能力，避免直接依赖 *pflag.Flag 类型。
 type cfgBinder interface {
-	BindPFlag(key string, flag any)
+	BindPFlag(key string, flag *pflag.Flag)
 }
 
 // New 创建生产实现的 Factory。
