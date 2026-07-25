@@ -329,7 +329,7 @@ func NewCmdRelayStatus(ios cli.IOStreams) *cobra.Command {
 		Use:   "status",
 		Short: "查看 Hub 节点状态",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// 获取服务器地址（从根命令的 persistent flag 或 --hub flag）
+			// 获取服务器地址（从根命令的 persistent flag 或 --hub flag 或配置文件）
 			serverURL, _ := cmd.Flags().GetString("server")
 			if serverURL == "" {
 				if hubURL, _ := cmd.Flags().GetString("hub"); hubURL != "" {
@@ -340,12 +340,24 @@ func NewCmdRelayStatus(ios cli.IOStreams) *cobra.Command {
 					}
 				}
 			}
+			if serverURL == "" && cfgProvider != nil {
+				cfg, err := client.LoadFromProvider(cfgProvider)
+				if err == nil {
+					serverURL = cfg.ServerURL
+				}
+			}
 			if serverURL == "" {
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或 --hub 或配置 server_url")
 			}
 
-			// 获取 auth token（从根命令的 persistent flag）
+			// 获取 auth token
 			authToken, _ := cmd.Flags().GetString("auth-token")
+			if authToken == "" && cfgProvider != nil {
+				cfg, err := client.LoadFromProvider(cfgProvider)
+				if err == nil {
+					authToken = cfg.AuthToken
+				}
+			}
 
 			// 查询节点列表
 			nodesURL := strings.TrimRight(serverURL, "/") + "/api/hub/nodes"
