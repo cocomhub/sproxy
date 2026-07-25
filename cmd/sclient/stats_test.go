@@ -16,7 +16,7 @@ import (
 
 func TestStatsCmd_Usage(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdStats(nil, cli.IOStreams{})
+	cmd := NewCmdStats(clientfactory.NewMock(nil, nil), cli.IOStreams{})
 	if cmd.Use != "stats" {
 		t.Errorf("expected Use=stats, got %s", cmd.Use)
 	}

@@ -154,7 +154,7 @@ func TestDiagCmd_Registered(t *testing.T) {
 			return
 		}
 	}
-	// diag 命令现在通过 NewCmdDiag 工厂函数创建，不通过 rootCmd 注册
+	// diag 通过 NewCmdDiag 在 root.go 中注册
 	t.Error("diag command not registered")
 }
 

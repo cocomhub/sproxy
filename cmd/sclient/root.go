@@ -27,6 +27,7 @@ var (
 	cfgFile     string
 	currentDir  string
 	cfgProvider *sclientcfg.ViperProvider
+	cliState    = &state.State{}
 )
 
 // rootCmd 是所有子命令的根命令
@@ -40,6 +41,7 @@ var rootCmd = &cobra.Command{
 		cfgProvider.BindPFlag("auth_token", cmd.Flags().Lookup("auth-token"))
 		// 加载缓存的当前目录
 		loadCurrentDir()
+		cliState.CurrentDir = currentDir
 		return nil
 	},
 	Run: func(cmd *cobra.Command, args []string) {
@@ -99,7 +101,6 @@ func init() {
 
 	// 注册子命令（新模式 — 工厂函数）
 	ios := cli.SystemIOStreams()
-	cliState := &state.State{}
 	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return cfgProvider })
 	rootCmd.AddCommand(NewCmdCd(cliState, ios))
 	rootCmd.AddCommand(NewCmdPwd(cliState, ios))
