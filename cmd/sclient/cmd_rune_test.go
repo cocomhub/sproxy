@@ -52,6 +52,8 @@ func TestSearchCommand_NoResults(t *testing.T) {
 	resetState := captureRootCmdArgs()
 	defer resetState()
 
+	rootCmd.PersistentFlags().Set("json", "false")
+
 	out := testutil.CaptureStdout(func() {
 		rootCmd.SetArgs([]string{"search", "--server", mock.URL, "nonexistent"})
 		if err := rootCmd.Execute(); err != nil {

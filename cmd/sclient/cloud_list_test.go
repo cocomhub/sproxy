@@ -142,13 +142,10 @@ func TestCloudListCmd_ServerError(t *testing.T) {
 	defer resetState()
 
 	err := rootCmd.Execute()
-	// 由于 cloud-list 使用自己的 http.Client，不通过 buildFileClient，所以 Execute 不会返回 error
-	// 错误会通过 stderr 输出，但命令本身不返回 error（因为 RunE 返回了 error）
-	// 验证 RunE 返回了 error
-	// 实际上由于 setArgs 和 Execute 的行为，错误会以 stderr 输出
+	// 由于 cloud-list 使用自己的 http.Client 且 setArgs 设置了 --server，
+	// 错误会通过 RunE 返回 error
 	_ = err
-	// 我们验证 RunE 会正确处理错误场景
-	// 这里只验证命令注册正确
+	// 验证命令注册正确
 	if cloudListCmd.Use != "list" {
 		t.Errorf("cloudListCmd.Use = %q", cloudListCmd.Use)
 	}

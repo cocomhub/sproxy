@@ -13,17 +13,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// cloudTaskInfo 表示一个云端下载任务的信息（与 cloud_download.go 中的 cloudTaskResponse 对齐）。
-type cloudTaskInfo struct {
-	ID         string `json:"id"`
-	URL        string `json:"url"`
-	Filename   string `json:"filename"`
-	Status     string `json:"status"`
-	TotalSize  int64  `json:"total_size"`
-	Downloaded int64  `json:"downloaded"`
-	Checksum   string `json:"checksum"`
-	Error      string `json:"error"`
-}
+// cloudTaskInfo 表示一个云端下载任务的信息（与 cloud_download.go 中的 cloudTaskResponse 结构一致）。
+type cloudTaskInfo = cloudTaskResponse
 
 var cloudListCmd = &cobra.Command{
 	Use:   "list",
