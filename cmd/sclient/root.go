@@ -111,6 +111,7 @@ func init() {
 	rootCmd.AddCommand(NewCmdVersion(factory, ios))
 	rootCmd.AddCommand(NewCmdStats(factory, ios))
 	rootCmd.AddCommand(NewCmdDiag(ios))
+	rootCmd.AddCommand(NewCmdPreview(factory, ios, cliState))
 }
 
 // buildFileClient 根据 cfgProvider 配置和 persistent flag 构造 FileClient。
