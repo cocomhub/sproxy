@@ -18,7 +18,7 @@ import (
 
 func TestCloudListCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{})
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{}, nil)
 	if cmd.Use != "list" {
 		t.Fatalf("expected Use 'list', got %q", cmd.Use)
 	}
@@ -48,7 +48,7 @@ func TestCloudListCmd_ListTasks(t *testing.T) {
 	root.PersistentFlags().String("auth-token", "", "")
 
 	var buf strings.Builder
-	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	root.AddCommand(cmd)
 
 	root.SetArgs([]string{"list", "--server", mock.URL})
@@ -79,7 +79,7 @@ func TestCloudListCmd_EmptyList(t *testing.T) {
 	root.PersistentFlags().String("auth-token", "", "")
 
 	var buf strings.Builder
-	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	root.AddCommand(cmd)
 
 	root.SetArgs([]string{"list", "--server", mock.URL})
@@ -107,7 +107,7 @@ func TestCloudListCmd_JSONOutput(t *testing.T) {
 	root.PersistentFlags().Bool("json", false, "")
 
 	var buf strings.Builder
-	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	root.AddCommand(cmd)
 
 	root.SetArgs([]string{"list", "--server", mock.URL, "--json"})
@@ -143,7 +143,7 @@ func TestCloudListCmd_StatusFilter(t *testing.T) {
 	root.PersistentFlags().String("auth-token", "", "")
 
 	var buf strings.Builder
-	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	root.AddCommand(cmd)
 
 	root.SetArgs([]string{"list", "--server", mock.URL, "--status", "completed"})
@@ -168,7 +168,7 @@ func TestCloudListCmd_ServerError(t *testing.T) {
 	root.PersistentFlags().String("auth-token", "", "")
 
 	var buf strings.Builder
-	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	root.AddCommand(cmd)
 
 	root.SetArgs([]string{"list", "--server", mock.URL})

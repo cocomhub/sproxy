@@ -21,7 +21,7 @@ import (
 
 func TestRelayRemoveNodeCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdRelayRemoveNode(cli.IOStreams{})
+	cmd := NewCmdRelayRemoveNode(cli.IOStreams{}, nil)
 	if cmd.Use != "remove-node <node-id>" {
 		t.Fatalf("expected Use 'remove-node <node-id>', got %q", cmd.Use)
 	}
@@ -45,7 +45,7 @@ func TestRelayRemoveNodeCmd_Success(t *testing.T) {
 	defer mock.Close()
 
 	var buf strings.Builder
-	cmd := NewCmdRelayRemoveNode(cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdRelayRemoveNode(cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", mock.URL)
 	cmd.SetArgs([]string{"test-node"})
 	if err := cmd.Execute(); err != nil {
@@ -62,7 +62,7 @@ func TestRelayRemoveNodeCmd_NotFound(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cmd := NewCmdRelayRemoveNode(cli.IOStreams{ErrOut: io.Discard})
+	cmd := NewCmdRelayRemoveNode(cli.IOStreams{ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", mock.URL)
 	cmd.SetArgs([]string{"nonexistent-node"})
 	err := cmd.Execute()
@@ -76,7 +76,7 @@ func TestRelayRemoveNodeCmd_NotFound(t *testing.T) {
 
 func TestRelayStatsCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdRelayStats(cli.IOStreams{})
+	cmd := NewCmdRelayStats(cli.IOStreams{}, nil)
 	if cmd.Use != "stats" {
 		t.Fatalf("expected Use 'stats', got %q", cmd.Use)
 	}
@@ -93,7 +93,7 @@ func TestRelayStatsCmd_Success(t *testing.T) {
 	defer mock.Close()
 
 	var buf strings.Builder
-	cmd := NewCmdRelayStats(cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdRelayStats(cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", mock.URL)
 	cmd.SetArgs(nil)
 	if err := cmd.Execute(); err != nil {
@@ -110,7 +110,7 @@ func TestRelayStatsCmd_ServerError(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	cmd := NewCmdRelayStats(cli.IOStreams{ErrOut: io.Discard})
+	cmd := NewCmdRelayStats(cli.IOStreams{ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", mock.URL)
 	cmd.SetArgs(nil)
 	err := cmd.Execute()
@@ -121,7 +121,7 @@ func TestRelayStatsCmd_ServerError(t *testing.T) {
 
 func TestPreviewCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdPreview(clientfactory.NewMock(nil, nil), cli.IOStreams{}, &state.State{})
+	cmd := NewCmdPreview(clientfactory.NewMock(nil, nil), cli.IOStreams{}, &state.State{}, nil)
 	if cmd.Use != "preview <filename>" {
 		t.Fatalf("expected Use 'preview <filename>', got %q", cmd.Use)
 	}
@@ -147,7 +147,7 @@ func TestPreviewCmd_TextFile(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdPreview(factory, cli.IOStreams{}, st)
+	cmd := NewCmdPreview(factory, cli.IOStreams{}, st, nil)
 	cmd.PersistentFlags().String("server", "", "server address")
 	cmd.PersistentFlags().Set("server", mock.URL)
 
@@ -181,7 +181,7 @@ func TestPreviewCmd_ImageFile(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdPreview(factory, cli.IOStreams{}, st)
+	cmd := NewCmdPreview(factory, cli.IOStreams{}, st, nil)
 	cmd.PersistentFlags().String("server", "", "server address")
 	cmd.PersistentFlags().Set("server", mock.URL)
 

@@ -14,18 +14,36 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
-var (
-	cfgFile     string
-	currentDir  string
-	cfgProvider *sclientcfg.ViperProvider
-	cliState    = &state.State{}
-)
+var cfgFile string
+
+// ConfigProvider 抽象配置加载，供命令工厂函数注入。
+type ConfigProvider interface {
+	LoadConfig() (*client.Config, error)
+}
+
+// cliConfigProvider 是生产实现的 ConfigProvider，基于 sclientcfg.ViperProvider。
+type cliConfigProvider struct {
+	provider *sclientcfg.ViperProvider
+}
+
+func (c *cliConfigProvider) LoadConfig() (*client.Config, error) {
+	if c.provider == nil {
+		return nil, fmt.Errorf("配置未初始化")
+	}
+	return client.LoadFromProvider(c.provider)
+}
 
 // NewRootCmd 创建完整的 sclient 根命令，包含所有 flags 和子命令。
 func NewRootCmd() *cobra.Command {
+	var (
+		currentDir  string
+		cfgProvider *sclientcfg.ViperProvider
+		cliState    = &state.State{}
+	)
 	defaultCfgPath, err := xdg.ConfigFile(filepath.Join("sproxy", "sclient.yaml"))
 	if err != nil {
 		home, _ := os.UserHomeDir()
@@ -52,7 +70,7 @@ func NewRootCmd() *cobra.Command {
 			cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup("server"))
 			cfgProvider.BindPFlag("chunk_size", cmd.Flags().Lookup("chunk-size"))
 			cfgProvider.BindPFlag("auth_token", cmd.Flags().Lookup("auth-token"))
-			loadCurrentDir()
+			currentDir = loadCurrentDir()
 			cliState.CurrentDir = currentDir
 			return nil
 		},
@@ -75,13 +93,14 @@ func NewRootCmd() *cobra.Command {
 	// 注册子命令
 	ios := cli.SystemIOStreams()
 	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return cfgProvider })
+	cfgSvc := &cliConfigProvider{provider: cfgProvider}
 	root.AddCommand(NewCmdCd(cliState, ios))
 	root.AddCommand(NewCmdPwd(cliState, ios))
 	root.AddCommand(NewCmdMkdir(factory, ios, cliState))
 	root.AddCommand(NewCmdRmdir(factory, ios, cliState))
 	root.AddCommand(NewCmdGenkey(ios))
-	root.AddCommand(NewCmdConfig(factory, ios, &cfgFile))
-	root.AddCommand(NewCmdVersion(factory, ios))
+	root.AddCommand(NewCmdConfig(factory, ios, &cfgFile, cfgSvc))
+	root.AddCommand(NewCmdVersion(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdStats(factory, ios))
 	root.AddCommand(NewCmdDiag(ios))
 	root.AddCommand(NewCmdUpload(factory, ios, cliState))
@@ -95,11 +114,11 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdArchiveDir(factory, ios))
 	root.AddCommand(NewCmdBatchDelete(factory, ios, cliState))
 	root.AddCommand(NewCmdBatchRename(factory, ios))
-	root.AddCommand(NewCmdPreview(factory, ios, cliState))
+	root.AddCommand(NewCmdPreview(factory, ios, cliState, cfgSvc))
 	root.AddCommand(NewCmdTunnel(factory, ios))
 	root.AddCommand(NewCmdShare(factory, ios))
-	root.AddCommand(NewCmdRelay(factory, ios))
-	root.AddCommand(NewCmdCloudDownload(factory, ios, cliState))
+	root.AddCommand(NewCmdRelay(factory, ios, cfgSvc))
+	root.AddCommand(NewCmdCloudDownload(factory, ios, cliState, cfgSvc))
 
 	return root
 }

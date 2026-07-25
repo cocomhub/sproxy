@@ -16,7 +16,6 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
-	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -155,7 +154,7 @@ func buildRelayHandler(ctx context.Context, localAddr string, httpClient *http.C
 // ---- 工厂函数 ----
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "relay",
 		Short: "中继节点管理",
@@ -164,10 +163,10 @@ func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comman
 		},
 	}
 	cmd.AddCommand(NewCmdRelayStart(ios))
-	cmd.AddCommand(NewCmdRelayStatus(ios))
+	cmd.AddCommand(NewCmdRelayStatus(ios, cfgSvc))
 	cmd.AddCommand(NewCmdRelayStop(ios))
-	cmd.AddCommand(NewCmdRelayRemoveNode(ios))
-	cmd.AddCommand(NewCmdRelayStats(ios))
+	cmd.AddCommand(NewCmdRelayRemoveNode(ios, cfgSvc))
+	cmd.AddCommand(NewCmdRelayStats(ios, cfgSvc))
 	return cmd
 }
 
@@ -194,7 +193,7 @@ func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
 }
 
 // NewCmdRelayStatus 创建 relay status 命令的工厂函数。
-func NewCmdRelayStatus(ios cli.IOStreams) *cobra.Command {
+func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "查看 Hub 节点状态",
@@ -210,9 +209,8 @@ func NewCmdRelayStatus(ios cli.IOStreams) *cobra.Command {
 					}
 				}
 			}
-			if serverURL == "" && cfgProvider != nil {
-				cfg, err := client.LoadFromProvider(cfgProvider)
-				if err == nil {
+			if serverURL == "" && cfgSvc != nil {
+				if cfg, err := cfgSvc.LoadConfig(); err == nil {
 					serverURL = cfg.ServerURL
 				}
 			}
@@ -222,9 +220,8 @@ func NewCmdRelayStatus(ios cli.IOStreams) *cobra.Command {
 
 			// 获取 auth token
 			authToken, _ := cmd.Flags().GetString("auth-token")
-			if authToken == "" && cfgProvider != nil {
-				cfg, err := client.LoadFromProvider(cfgProvider)
-				if err == nil {
+			if authToken == "" && cfgSvc != nil {
+				if cfg, err := cfgSvc.LoadConfig(); err == nil {
 					authToken = cfg.AuthToken
 				}
 			}

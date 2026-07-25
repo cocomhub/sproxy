@@ -153,7 +153,7 @@ func previewImage(serverURL, authToken, filename string) error {
 // NewCmdPreview 创建 preview 命令的工厂函数版本。
 // preview 命令不使用 client.Service 接口，而是直接使用 http.DefaultClient
 // 通过 /download 端点获取文件内容进行预览。
-func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
+func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "preview <filename>",
 		Short: "预览服务端文件",
@@ -171,7 +171,7 @@ func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.S
 				return err
 			}
 
-			serverURL, authToken := getCloudServerURL(cmd)
+			serverURL, authToken := getCloudServerURL(cmd, cfgSvc)
 			if serverURL == "" {
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或配置 server_url")
 			}

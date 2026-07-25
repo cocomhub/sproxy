@@ -16,7 +16,7 @@ import (
 )
 
 // getHubServerURL 从 flag 和配置中获取 Hub 服务器地址和 auth token。
-func getHubServerURL(cmd *cobra.Command) (serverURL, authToken string) {
+func getHubServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, authToken string) {
 	serverURL, _ = cmd.Root().PersistentFlags().GetString("server")
 	if serverURL == "" {
 		if hubURL, _ := cmd.Flags().GetString("hub"); hubURL != "" {
@@ -28,9 +28,8 @@ func getHubServerURL(cmd *cobra.Command) (serverURL, authToken string) {
 			}
 		}
 	}
-	if serverURL == "" && cfgProvider != nil {
-		cfg, _ := loadConfigSimple()
-		if cfg != nil {
+	if serverURL == "" && cfgSvc != nil {
+		if cfg, err := cfgSvc.LoadConfig(); err == nil {
 			serverURL = cfg.ServerURL
 			authToken = cfg.AuthToken
 		}
@@ -42,7 +41,7 @@ func getHubServerURL(cmd *cobra.Command) (serverURL, authToken string) {
 }
 
 // NewCmdRelayRemoveNode 创建 relay remove-node 命令的工厂函数。
-func NewCmdRelayRemoveNode(ios cli.IOStreams) *cobra.Command {
+func NewCmdRelayRemoveNode(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove-node <node-id>",
 		Short: "从 Hub 移除指定节点",
@@ -50,7 +49,7 @@ func NewCmdRelayRemoveNode(ios cli.IOStreams) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			nodeID := args[0]
 
-			serverURL, authToken := getHubServerURL(cmd)
+			serverURL, authToken := getHubServerURL(cmd, cfgSvc)
 			if serverURL == "" {
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或 --hub 或配置 server_url")
 			}
@@ -90,13 +89,13 @@ func NewCmdRelayRemoveNode(ios cli.IOStreams) *cobra.Command {
 }
 
 // NewCmdRelayStats 创建 relay stats 命令的工厂函数。
-func NewCmdRelayStats(ios cli.IOStreams) *cobra.Command {
+func NewCmdRelayStats(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stats",
 		Short: "查看 Hub 统计信息",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			serverURL, authToken := getHubServerURL(cmd)
+			serverURL, authToken := getHubServerURL(cmd, cfgSvc)
 			if serverURL == "" {
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或 --hub 或配置 server_url")
 			}

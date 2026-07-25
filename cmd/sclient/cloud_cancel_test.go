@@ -18,7 +18,7 @@ import (
 
 func TestCloudCancelCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdCloudCancel(nil, cli.IOStreams{})
+	cmd := NewCmdCloudCancel(nil, cli.IOStreams{}, nil)
 	if cmd.Use != "cancel <task-id>" {
 		t.Fatalf("expected Use 'cancel <task-id>', got %q", cmd.Use)
 	}
@@ -47,7 +47,7 @@ func TestCloudCancelCmd_Success(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.Flags().Bool("json", false, "")
@@ -69,7 +69,7 @@ func TestCloudCancelCmd_NotFound(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.Flags().Bool("json", false, "")
@@ -92,7 +92,7 @@ func TestCloudCancelCmd_AlreadyCompleted(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.Flags().Bool("json", false, "")
@@ -115,7 +115,7 @@ func TestCloudCancelCmd_JSONOutput(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.Flags().Bool("json", false, "")
@@ -138,7 +138,7 @@ func TestCloudCancelCmd_ServerError(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.Flags().Bool("json", false, "")
