@@ -35,9 +35,13 @@ func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *str
 				if len(args) < 3 {
 					return fmt.Errorf("用法: sclient config set <键> <值>")
 				}
-				if err := client.HandleConfigSet(cfg, *cfgFile, args[1], args[2]); err != nil {
+				if err := client.ApplyConfigSet(cfg, args[1], args[2]); err != nil {
 					ios.WriteErrLine("设置配置失败: %v", err)
 					return fmt.Errorf("设置配置失败: %w", err)
+				}
+				if err := client.SaveConfig(cfg, *cfgFile); err != nil {
+					ios.WriteErrLine("保存配置失败: %v", err)
+					return fmt.Errorf("保存配置失败: %w", err)
 				}
 				fmt.Fprintf(ios.Out, "配置已更新: %s = %s\n", args[1], args[2])
 				return nil

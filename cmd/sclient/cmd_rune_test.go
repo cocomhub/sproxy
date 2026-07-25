@@ -877,8 +877,6 @@ func TestCdCommand_CleanDots(t *testing.T) {
 // ---- resolveOutputPath 测试 ----
 
 func TestResolveOutputPath_SpecifiedFile(t *testing.T) {
-	_ = t.TempDir()
-
 	got, err := resolveOutputPath("http://example.com/data/file.txt", "/tmp/out.txt", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

@@ -28,6 +28,7 @@ func TestCloudListCmd_UseAndArgs(t *testing.T) {
 }
 
 func TestCloudListCmd_ListTasks(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/tasks" && r.Method == http.MethodGet {
 			tasks := []cloudTaskInfo{
@@ -68,6 +69,7 @@ func TestCloudListCmd_ListTasks(t *testing.T) {
 }
 
 func TestCloudListCmd_EmptyList(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"tasks": []cloudTaskInfo{}})
@@ -93,6 +95,7 @@ func TestCloudListCmd_EmptyList(t *testing.T) {
 }
 
 func TestCloudListCmd_JSONOutput(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"tasks": []cloudTaskInfo{
@@ -124,6 +127,7 @@ func TestCloudListCmd_JSONOutput(t *testing.T) {
 }
 
 func TestCloudListCmd_StatusFilter(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		status := r.URL.Query().Get("status")
 		if status != "completed" {
@@ -157,6 +161,7 @@ func TestCloudListCmd_StatusFilter(t *testing.T) {
 }
 
 func TestCloudListCmd_ServerError(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("server error"))

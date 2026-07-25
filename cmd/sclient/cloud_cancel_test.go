@@ -34,6 +34,7 @@ func TestCloudCancelCmd_UseAndArgs(t *testing.T) {
 }
 
 func TestCloudCancelCmd_Success(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/tasks/task-1/cancel" && r.Method == http.MethodPost {
 			w.Header().Set("Content-Type", "application/json")
@@ -61,6 +62,7 @@ func TestCloudCancelCmd_Success(t *testing.T) {
 }
 
 func TestCloudCancelCmd_NotFound(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
@@ -83,6 +85,7 @@ func TestCloudCancelCmd_NotFound(t *testing.T) {
 }
 
 func TestCloudCancelCmd_AlreadyCompleted(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "task already completed"})
@@ -106,6 +109,7 @@ func TestCloudCancelCmd_AlreadyCompleted(t *testing.T) {
 }
 
 func TestCloudCancelCmd_JSONOutput(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "cancelled"})
@@ -129,6 +133,7 @@ func TestCloudCancelCmd_JSONOutput(t *testing.T) {
 }
 
 func TestCloudCancelCmd_ServerError(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("internal error"))

@@ -34,6 +34,7 @@ func TestRelayRemoveNodeCmd_UseAndArgs(t *testing.T) {
 }
 
 func TestRelayRemoveNodeCmd_Success(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/nodes/test-node" && r.Method == http.MethodDelete {
 			w.WriteHeader(http.StatusOK)
@@ -57,6 +58,7 @@ func TestRelayRemoveNodeCmd_Success(t *testing.T) {
 }
 
 func TestRelayRemoveNodeCmd_NotFound(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
@@ -83,6 +85,7 @@ func TestRelayStatsCmd_UseAndArgs(t *testing.T) {
 }
 
 func TestRelayStatsCmd_Success(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/stats" && r.Method == http.MethodGet {
 			json.NewEncoder(w).Encode(map[string]any{"node_count": 3})
@@ -105,6 +108,7 @@ func TestRelayStatsCmd_Success(t *testing.T) {
 }
 
 func TestRelayStatsCmd_ServerError(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -164,6 +168,7 @@ func TestPreviewCmd_TextFile(t *testing.T) {
 }
 
 func TestPreviewCmd_ImageFile(t *testing.T) {
+
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/files/stat" {
 			w.Header().Set("X-File-Checksum", "abc")
@@ -198,6 +203,7 @@ func TestPreviewCmd_ImageFile(t *testing.T) {
 }
 
 func TestPreviewCmd_UnknownExt(t *testing.T) {
+	t.Parallel()
 	// 验证 isTextExt 和 isImageExt 对未知扩展名返回 false
 	ext := ".bin"
 	if isImageExt(ext) || isTextExt(ext) {

@@ -68,6 +68,7 @@ func TestRelayStopCmd_UseAndArgs(t *testing.T) {
 }
 
 func TestRelayStatsCmd_Integration(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/stats" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
@@ -92,6 +93,7 @@ func TestRelayStatsCmd_Integration(t *testing.T) {
 }
 
 func TestRelayStatusCmd_Integration(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/nodes" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
@@ -116,6 +118,7 @@ func TestRelayStatusCmd_Integration(t *testing.T) {
 }
 
 func TestRelayStatusCmd_Empty(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/nodes" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")

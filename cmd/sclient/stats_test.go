@@ -26,6 +26,7 @@ func TestStatsCmd_Usage(t *testing.T) {
 }
 
 func TestNewCmdStats_Integration(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/stats" {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -63,6 +64,7 @@ func TestNewCmdStats_Integration(t *testing.T) {
 }
 
 func TestNewCmdConfigRemote_Integration(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/config" {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -99,6 +101,7 @@ func TestNewCmdConfigRemote_Integration(t *testing.T) {
 }
 
 func TestNewCmdConfigRemoteSet_Integration(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "PUT" || r.URL.Path != "/api/config" {
 			http.Error(w, "not found", http.StatusNotFound)
