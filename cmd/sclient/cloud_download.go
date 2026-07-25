@@ -17,6 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
@@ -354,4 +357,119 @@ func filepathSafe(name string) string {
 		return "download"
 	}
 	return name
+}
+
+// NewCmdCloudDownload 创建云端下载命令的工厂函数。
+func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cloud-download <url> [url...]",
+		Short: "从云端下载文件（服务端先拉取，再下载到本地）",
+		Long: `通过 sproxy 服务端从外部 URL 下载文件，完成后自动下载到本地并清理云端副本。
+
+	小文件（< 20 MiB）默认同步等待，大文件自动切换异步模式。
+	如果同步下载过程中连接断开，服务端自动转为异步模式继续下载。
+
+	支持多个 URL 参数或通过 --batch 从文件读取 URL 列表。`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			forceAsync, _ := cmd.Flags().GetBool("force-async")
+			noCleanup, _ := cmd.Flags().GetBool("no-cleanup")
+			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+			outputPath, _ := cmd.Flags().GetString("output")
+			batchFile, _ := cmd.Flags().GetString("batch")
+
+			serverURL, authToken := getCloudServerURL(cmd)
+			if serverURL == "" {
+				return fmt.Errorf("未指定服务器地址，请使用 --server 或配置 server_url")
+			}
+
+			// 收集所有 URL
+			urls := args
+			if batchFile != "" {
+				fileURLs, err := readURLsFromFile(batchFile)
+				if err != nil {
+					return fmt.Errorf("读取 batch 文件失败: %w", err)
+				}
+				urls = append(urls, fileURLs...)
+			}
+			if len(urls) == 0 {
+				return fmt.Errorf("未指定下载 URL，请提供 URL 参数或使用 --batch 指定文件")
+			}
+			if len(urls) > 1 && outputPath != "" {
+				return fmt.Errorf("多个 URL 不支持 --output 标志，每个文件将使用其原始文件名保存")
+			}
+
+			succeeded := 0
+			failed := 0
+			for i, urlStr := range urls {
+				if len(urls) > 1 {
+					ios.WriteOutLine("[%d/%d] %s", i+1, len(urls), urlStr)
+				}
+
+				// 1. 创建云端下载任务
+				task, err := createCloudDownloadTask(serverURL, urlStr, authToken)
+				if err != nil {
+					ios.WriteErrLine("  创建云端下载任务失败: %v", err)
+					failed++
+					continue
+				}
+
+				if len(urls) == 1 {
+					ios.WriteOutLine("任务 ID: %s", task.ID)
+					ios.WriteOutLine("状态: %s", task.Status)
+				}
+
+				// 2. 如果同步模式完成，直接进入下载
+				if task.Status == "completed" {
+					if dlErr := downloadAndCleanup(serverURL, task, outputPath, noCleanup, authToken); dlErr != nil {
+						ios.WriteErrLine("  %v", dlErr)
+						failed++
+					} else {
+						succeeded++
+					}
+					continue
+				}
+
+				// 3. 异步模式：轮询等待完成
+				if forceAsync {
+					ios.WriteOutLine("  强制异步模式，轮询任务状态...")
+				} else {
+					ios.WriteOutLine("  异步模式，轮询任务状态...")
+				}
+
+				task, err = pollCloudTask(serverURL, task.ID, pollInterval, authToken)
+				if err != nil {
+					ios.WriteErrLine("  云端下载任务失败: %v", err)
+					failed++
+					continue
+				}
+
+				// 4. 下载到本地并清理云端
+				if err := downloadAndCleanup(serverURL, task, outputPath, noCleanup, authToken); err != nil {
+					ios.WriteErrLine("  %v", err)
+					failed++
+				} else {
+					succeeded++
+				}
+			}
+
+			if len(urls) > 1 {
+				ios.WriteOutLine("\nSummary: %d/%d succeeded", succeeded, len(urls))
+			}
+			if failed > 0 {
+				return fmt.Errorf("%d/%d tasks failed", failed, len(urls))
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().Bool("force-async", false, "强制使用异步模式（即使文件小于阈值）")
+	cmd.Flags().Bool("no-cleanup", false, "下载到本地后不删除云端副本")
+	cmd.Flags().Duration("poll-interval", 2*time.Second, "异步模式轮询间隔")
+	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
+
+	cmd.AddCommand(NewCmdCloudList(factory, ios))
+	cmd.AddCommand(NewCmdCloudCancel(factory, ios))
+
+	return cmd
 }
