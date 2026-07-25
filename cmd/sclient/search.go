@@ -79,7 +79,3 @@ func NewCmdSearch(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 		},
 	}
 }
-
-func init() {
-	rootCmd.AddCommand(searchCmd)
-}

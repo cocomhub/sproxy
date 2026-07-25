@@ -88,17 +88,6 @@ func init() {
 	rootCmd.PersistentFlags().Bool("resume", false, "续传模式 (默认启用)")
 	rootCmd.PersistentFlags().Bool("json", false, "以 JSON 格式输出")
 
-	// 注册子命令（旧模式）
-	rootCmd.AddCommand(uploadCmd)
-	rootCmd.AddCommand(downloadCmd)
-	rootCmd.AddCommand(deleteCmd)
-	rootCmd.AddCommand(listCmd)
-	rootCmd.AddCommand(searchCmd)
-	rootCmd.AddCommand(tunnelCmd)
-	rootCmd.AddCommand(relayCmd)
-	rootCmd.AddCommand(cloudDownloadCmd)
-	rootCmd.AddCommand(shareCmd)
-
 	// 注册子命令（新模式 — 工厂函数）
 	ios := cli.SystemIOStreams()
 	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return cfgProvider })
@@ -116,6 +105,17 @@ func init() {
 	rootCmd.AddCommand(NewCmdShare(factory, ios))
 	rootCmd.AddCommand(NewCmdRelay(factory, ios))
 	rootCmd.AddCommand(NewCmdCloudDownload(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdUpload(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdDownload(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdDelete(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdList(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdSearch(factory, ios))
+	rootCmd.AddCommand(NewCmdStat(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdMv(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdArchive(factory, ios))
+	rootCmd.AddCommand(NewCmdArchiveDir(factory, ios))
+	rootCmd.AddCommand(NewCmdBatchDelete(factory, ios, cliState))
+	rootCmd.AddCommand(NewCmdBatchRename(factory, ios))
 }
 
 // buildFileClient 根据 cfgProvider 配置和 persistent flag 构造 FileClient。

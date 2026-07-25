@@ -75,10 +75,6 @@ var batchRenameCmd = &cobra.Command{
 	},
 }
 
-func init() {
-	rootCmd.AddCommand(batchRenameCmd)
-}
-
 // NewCmdBatchRename 创建独立的 batch-rename 命令工厂函数。
 // 注意：batch-rename 不需要 st *state.State，因为参数是成对的 from/to 路径。
 func NewCmdBatchRename(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {

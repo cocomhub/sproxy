@@ -4,17 +4,20 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 )
 
 func TestShareCmd_Usage(t *testing.T) {
 	t.Parallel()
-	cmd := shareCmd
+	cmd := NewCmdShare(clientfactory.NewMock(nil, nil), cli.IOStreams{})
 	if cmd.Use != "share" {
 		t.Errorf("expected Use=share, got %s", cmd.Use)
 	}
@@ -25,7 +28,8 @@ func TestShareCmd_Usage(t *testing.T) {
 
 func TestShareCmd_HasSubcommands(t *testing.T) {
 	t.Parallel()
-	cmds := shareCmd.Commands()
+	cmd := NewCmdShare(clientfactory.NewMock(nil, nil), cli.IOStreams{})
+	cmds := cmd.Commands()
 	names := make(map[string]bool)
 	for _, c := range cmds {
 		names[c.Name()] = true
@@ -39,7 +43,8 @@ func TestShareCmd_HasSubcommands(t *testing.T) {
 
 func TestShareCreateCmd_Flags(t *testing.T) {
 	t.Parallel()
-	f := shareCreateCmd.Flags()
+	cmd := NewCmdShareCreate(clientfactory.NewMock(nil, nil), cli.IOStreams{})
+	f := cmd.Flags()
 	ttl, err := f.GetString("ttl")
 	if err != nil || ttl != "24h" {
 		t.Errorf("expected --ttl default 24h, got %v", ttl)
@@ -56,7 +61,6 @@ func TestShareCreateCmd_Flags(t *testing.T) {
 
 func TestShareCmd_Integration(t *testing.T) {
 	// 不使用 t.Parallel() — 与 cmd_test.go 中其他集成测试保持一致
-	defer captureRootCmdArgs()()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -74,29 +78,33 @@ func TestShareCmd_Integration(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	// 测试 share create
-	output := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"--server", ts.URL, "share", "create", "file.txt", "--ttl", "24h"})
-		_ = rootCmd.Execute()
-	})
+	svc := client.NewFileClient(ts.URL)
+	factory := clientfactory.NewMock(svc, nil)
 
-	if !strings.Contains(output, "test123") {
-		t.Errorf("expected output to contain token, got: %s", output)
+	// 测试 share create
+	var buf strings.Builder
+	cmd := NewCmdShareCreate(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.SetArgs([]string{"file.txt", "--ttl", "24h"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("share create failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "test123") {
+		t.Errorf("expected output to contain token, got: %s", buf.String())
 	}
 
 	// 测试 share list
-	output2 := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"--server", ts.URL, "share", "list"})
-		_ = rootCmd.Execute()
-	})
-	if !strings.Contains(output2, "file.txt") {
-		t.Errorf("expected output to contain filename, got: %s", output2)
+	var buf2 strings.Builder
+	cmd2 := NewCmdShareList(factory, cli.IOStreams{Out: &buf2, ErrOut: io.Discard})
+	cmd2.SetArgs(nil)
+	if err := cmd2.Execute(); err != nil {
+		t.Fatalf("share list failed: %v", err)
+	}
+	if !strings.Contains(buf2.String(), "file.txt") {
+		t.Errorf("expected output to contain filename, got: %s", buf2.String())
 	}
 }
 
 func TestShareCmd_Revoke(t *testing.T) {
-	defer captureRootCmdArgs()()
-
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "DELETE" && r.URL.Path == "/api/shares/test123" {
 			w.Header().Set("Content-Type", "application/json")
@@ -108,12 +116,17 @@ func TestShareCmd_Revoke(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	output := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"--server", ts.URL, "share", "revoke", "test123"})
-		_ = rootCmd.Execute()
-	})
+	svc := client.NewFileClient(ts.URL)
+	factory := clientfactory.NewMock(svc, nil)
 
-	if !strings.Contains(output, "test123") {
-		t.Errorf("expected output to contain token, got: %s", output)
+	var buf strings.Builder
+	cmd := NewCmdShareRevoke(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.SetArgs([]string{"test123"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("share revoke failed: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "test123") {
+		t.Errorf("expected output to contain token, got: %s", buf.String())
 	}
 }

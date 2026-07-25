@@ -4,6 +4,7 @@
 package main
 
 import (
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -25,21 +29,38 @@ func TestRootCmd_Use(t *testing.T) {
 }
 
 func TestRootCmd_SubCommands(t *testing.T) {
-	cmds := rootCmd.Commands()
-	names := make([]string, len(cmds))
-	for i, c := range cmds {
-		names[i] = c.Use
+	factory := clientfactory.NewMock(nil, nil)
+	st := &state.State{CurrentDir: ""}
+	ios := cli.IOStreams{Out: io.Discard}
+
+	// 验证关键命令可通过工厂函数正确创建
+	cmds := []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"upload", NewCmdUpload(factory, ios, st)},
+		{"download", NewCmdDownload(factory, ios, st)},
+		{"delete", NewCmdDelete(factory, ios, st)},
+		{"list", NewCmdList(factory, ios, st)},
+		{"search", NewCmdSearch(factory, ios)},
+		{"version", NewCmdVersion(factory, ios)},
+		{"stats", NewCmdStats(factory, ios)},
+		{"diag", NewCmdDiag(ios)},
+		{"relay", NewCmdRelay(factory, ios)},
+		{"archive", NewCmdArchive(factory, ios)},
+		{"batch-delete", NewCmdBatchDelete(factory, ios, st)},
+		{"batch-rename", NewCmdBatchRename(factory, ios)},
+		{"mv", NewCmdMv(factory, ios, st)},
+		{"stat", NewCmdStat(factory, ios, st)},
+		{"genkey", NewCmdGenkey(ios)},
+		{"tunnel", NewCmdTunnel(factory, ios)},
+		{"cd", NewCmdCd(st, ios)},
+		{"pwd", NewCmdPwd(st, ios)},
+		{"mkdir", NewCmdMkdir(factory, ios, st)},
 	}
-	for _, want := range []string{"upload", "download", "delete", "list", "search", "tunnel", "cd", "pwd", "genkey", "config", "version", "stats", "diag"} {
-		found := false
-		for _, name := range names {
-			if strings.HasPrefix(name, want) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("missing subcommand: %q in %v", want, names)
+	for _, c := range cmds {
+		if !strings.HasPrefix(c.cmd.Use, c.name) {
+			t.Errorf("command %q: Use = %q, want prefix %q", c.name, c.cmd.Use, c.name)
 		}
 	}
 }
@@ -58,23 +79,27 @@ func TestRootCmd_PersistentFlags(t *testing.T) {
 // ---- upload command ----
 
 func TestUploadCmd(t *testing.T) {
-	if uploadCmd.Use != "upload <file1> [file2...]" {
-		t.Errorf("uploadCmd.Use = %q", uploadCmd.Use)
+	factory := clientfactory.NewMock(nil, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdUpload(factory, cli.IOStreams{Out: io.Discard}, st)
+
+	if cmd.Use != "upload <file1> [file2...]" {
+		t.Errorf("uploadCmd.Use = %q", cmd.Use)
 	}
-	if uploadCmd.Short != "上传一个或多个文件" {
-		t.Errorf("uploadCmd.Short = %q", uploadCmd.Short)
+	if cmd.Short != "上传一个或多个文件" {
+		t.Errorf("uploadCmd.Short = %q", cmd.Short)
 	}
 	// MinimumNArgs(1)
-	if err := uploadCmd.Args(uploadCmd, []string{}); err == nil {
+	if err := cmd.Args(cmd, []string{}); err == nil {
 		t.Error("upload should require at least 1 arg")
 	}
-	if err := uploadCmd.Args(uploadCmd, []string{"a.txt"}); err != nil {
+	if err := cmd.Args(cmd, []string{"a.txt"}); err != nil {
 		t.Errorf("upload with 1 arg should be ok: %v", err)
 	}
 	// 验证 flags
 	flagNames := []string{"chunked", "chunk-size", "concurrency", "resume"}
 	for _, name := range flagNames {
-		f := uploadCmd.Flags().Lookup(name)
+		f := cmd.Flags().Lookup(name)
 		if f == nil {
 			t.Errorf("uploadCmd missing flag: %q", name)
 		}
@@ -84,18 +109,22 @@ func TestUploadCmd(t *testing.T) {
 // ---- download command ----
 
 func TestDownloadCmd(t *testing.T) {
-	if downloadCmd.Use != "download <filename> [output]" {
-		t.Errorf("downloadCmd.Use = %q", downloadCmd.Use)
+	factory := clientfactory.NewMock(nil, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdDownload(factory, cli.IOStreams{Out: io.Discard}, st)
+
+	if cmd.Use != "download <filename> [output]" {
+		t.Errorf("downloadCmd.Use = %q", cmd.Use)
 	}
-	if err := downloadCmd.Args(downloadCmd, []string{}); err == nil {
+	if err := cmd.Args(cmd, []string{}); err == nil {
 		t.Error("download should require at least 1 arg")
 	}
-	if err := downloadCmd.Args(downloadCmd, []string{"file.txt"}); err != nil {
+	if err := cmd.Args(cmd, []string{"file.txt"}); err != nil {
 		t.Errorf("download with 1 arg should be ok: %v", err)
 	}
 	flagNames := []string{"chunked", "chunk-size", "concurrency", "resume"}
 	for _, name := range flagNames {
-		f := downloadCmd.Flags().Lookup(name)
+		f := cmd.Flags().Lookup(name)
 		if f == nil {
 			t.Errorf("downloadCmd missing flag: %q", name)
 		}
@@ -105,19 +134,23 @@ func TestDownloadCmd(t *testing.T) {
 // ---- delete command ----
 
 func TestDeleteCmd(t *testing.T) {
-	if deleteCmd.Use != "delete <filename>" {
-		t.Errorf("deleteCmd.Use = %q", deleteCmd.Use)
+	factory := clientfactory.NewMock(nil, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdDelete(factory, cli.IOStreams{Out: io.Discard}, st)
+
+	if cmd.Use != "delete <filename>" {
+		t.Errorf("deleteCmd.Use = %q", cmd.Use)
 	}
-	if err := deleteCmd.Args(deleteCmd, []string{}); err == nil {
+	if err := cmd.Args(cmd, []string{}); err == nil {
 		t.Error("delete should require exactly 1 arg")
 	}
-	if err := deleteCmd.Args(deleteCmd, []string{"a.txt"}); err != nil {
+	if err := cmd.Args(cmd, []string{"a.txt"}); err != nil {
 		t.Errorf("delete with 1 arg should be ok: %v", err)
 	}
-	if err := deleteCmd.Args(deleteCmd, []string{"a", "b"}); err == nil {
+	if err := cmd.Args(cmd, []string{"a", "b"}); err == nil {
 		t.Error("delete should reject 2 args")
 	}
-	f := deleteCmd.Flags().Lookup("check-local")
+	f := cmd.Flags().Lookup("check-local")
 	if f == nil {
 		t.Error("deleteCmd missing flag: check-local")
 	}
@@ -126,10 +159,14 @@ func TestDeleteCmd(t *testing.T) {
 // ---- list command ----
 
 func TestListCmd(t *testing.T) {
-	if listCmd.Use != "list" {
-		t.Errorf("listCmd.Use = %q", listCmd.Use)
+	factory := clientfactory.NewMock(nil, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdList(factory, cli.IOStreams{Out: io.Discard}, st)
+
+	if cmd.Use != "list" {
+		t.Errorf("listCmd.Use = %q", cmd.Use)
 	}
-	f := listCmd.Flags().Lookup("subdir")
+	f := cmd.Flags().Lookup("subdir")
 	if f == nil {
 		t.Error("listCmd missing flag: subdir")
 	}
@@ -138,46 +175,41 @@ func TestListCmd(t *testing.T) {
 // ---- relay command ----
 
 func TestRelayCmd_Registered(t *testing.T) {
-	for _, sub := range rootCmd.Commands() {
-		if sub.Name() == "relay" {
-			return
-		}
+	factory := clientfactory.NewMock(nil, nil)
+	cmd := NewCmdRelay(factory, cli.IOStreams{Out: io.Discard})
+	if cmd.Use != "relay" {
+		t.Errorf("relayCmd.Use = %q, want 'relay'", cmd.Use)
 	}
-	t.Error("relay command not registered")
 }
 
 // ---- diag command ----
 
 func TestDiagCmd_Registered(t *testing.T) {
-	for _, sub := range rootCmd.Commands() {
-		if sub.Name() == "diag" {
-			return
-		}
+	cmd := NewCmdDiag(cli.IOStreams{Out: io.Discard})
+	if cmd.Use != "diag" {
+		t.Errorf("diagCmd.Use = %q, want 'diag'", cmd.Use)
 	}
-	// diag 通过 NewCmdDiag 在 root.go 中注册
-	t.Error("diag command not registered")
 }
 
 // ---- batch-delete command ----
 
 func TestBatchDeleteCmd_Registered(t *testing.T) {
-	for _, sub := range rootCmd.Commands() {
-		if sub.Name() == "batch-delete" {
-			return
-		}
+	factory := clientfactory.NewMock(nil, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdBatchDelete(factory, cli.IOStreams{Out: io.Discard}, st)
+	if cmd.Use != "batch-delete <file1> [file2...]" {
+		t.Errorf("batchDeleteCmd.Use = %q", cmd.Use)
 	}
-	t.Error("batch-delete command not registered")
 }
 
 // ---- archive command ----
 
 func TestArchiveCmd_Registered(t *testing.T) {
-	for _, sub := range rootCmd.Commands() {
-		if sub.Name() == "archive" {
-			return
-		}
+	factory := clientfactory.NewMock(nil, nil)
+	cmd := NewCmdArchive(factory, cli.IOStreams{Out: io.Discard})
+	if cmd.Use != "archive [flags] <file...>" {
+		t.Errorf("archiveCmd.Use = %q", cmd.Use)
 	}
-	t.Error("archive command not registered")
 }
 
 // ---- saveCurrentDir ----
@@ -217,13 +249,17 @@ func TestWriteArchiveResponse(t *testing.T) {
 // ---- mv command ----
 
 func TestMvCmd(t *testing.T) {
-	if mvCmd.Use != "mv <from> <to>" {
-		t.Errorf("mvCmd.Use = %q", mvCmd.Use)
+	factory := clientfactory.NewMock(nil, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdMv(factory, cli.IOStreams{Out: io.Discard}, st)
+
+	if cmd.Use != "mv <from> <to>" {
+		t.Errorf("mvCmd.Use = %q", cmd.Use)
 	}
-	if err := mvCmd.Args(mvCmd, []string{}); err == nil {
+	if err := cmd.Args(cmd, []string{}); err == nil {
 		t.Error("mv should require exactly 2 args")
 	}
-	if err := mvCmd.Args(mvCmd, []string{"a", "b"}); err != nil {
+	if err := cmd.Args(cmd, []string{"a", "b"}); err != nil {
 		t.Errorf("mv with 2 args should be ok: %v", err)
 	}
 }
@@ -231,13 +267,17 @@ func TestMvCmd(t *testing.T) {
 // ---- stat command ----
 
 func TestStatCmd(t *testing.T) {
-	if statCmd.Use != "stat <filename>" {
-		t.Errorf("statCmd.Use = %q", statCmd.Use)
+	factory := clientfactory.NewMock(nil, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdStat(factory, cli.IOStreams{Out: io.Discard}, st)
+
+	if cmd.Use != "stat <filename>" {
+		t.Errorf("statCmd.Use = %q", cmd.Use)
 	}
-	if err := statCmd.Args(statCmd, []string{}); err == nil {
+	if err := cmd.Args(cmd, []string{}); err == nil {
 		t.Error("stat should require exactly 1 arg")
 	}
-	if err := statCmd.Args(statCmd, []string{"f.txt"}); err != nil {
+	if err := cmd.Args(cmd, []string{"f.txt"}); err != nil {
 		t.Errorf("stat with 1 arg should be ok: %v", err)
 	}
 }
@@ -245,13 +285,16 @@ func TestStatCmd(t *testing.T) {
 // ---- search command ----
 
 func TestSearchCmd(t *testing.T) {
-	if searchCmd.Use != "search <keyword>" {
-		t.Errorf("searchCmd.Use = %q", searchCmd.Use)
+	factory := clientfactory.NewMock(nil, nil)
+	cmd := NewCmdSearch(factory, cli.IOStreams{Out: io.Discard})
+
+	if cmd.Use != "search <keyword>" {
+		t.Errorf("searchCmd.Use = %q", cmd.Use)
 	}
-	if err := searchCmd.Args(searchCmd, []string{}); err == nil {
+	if err := cmd.Args(cmd, []string{}); err == nil {
 		t.Error("search should require exactly 1 arg")
 	}
-	if err := searchCmd.Args(searchCmd, []string{"keyword"}); err != nil {
+	if err := cmd.Args(cmd, []string{"keyword"}); err != nil {
 		t.Errorf("search with 1 arg should be ok: %v", err)
 	}
 }
@@ -259,16 +302,10 @@ func TestSearchCmd(t *testing.T) {
 // ---- version command ----
 
 func TestVersionCmd(t *testing.T) {
-	// version command is now registered via NewCmdVersion factory function
-	var found bool
-	for _, c := range rootCmd.Commands() {
-		if strings.HasPrefix(c.Use, "version") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("version command not registered in rootCmd")
+	factory := clientfactory.NewMock(nil, nil)
+	cmd := NewCmdVersion(factory, cli.IOStreams{Out: io.Discard})
+	if !strings.HasPrefix(cmd.Use, "version") {
+		t.Errorf("versionCmd.Use = %q, want prefix 'version'", cmd.Use)
 	}
 }
 
@@ -326,11 +363,12 @@ func TestUploadCommand(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	rootCmd.SetArgs([]string{"upload", "--server", mock.URL, srcFile})
-	if err := rootCmd.Execute(); err != nil {
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdUpload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd.SetArgs([]string{srcFile})
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("upload command failed: %v", err)
 	}
 }
@@ -356,11 +394,12 @@ func TestDownloadCommand_Success(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	rootCmd.SetArgs([]string{"download", "--server", mock.URL, "test.txt", dst})
-	if err := rootCmd.Execute(); err != nil {
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd.SetArgs([]string{"test.txt", dst})
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("download command failed: %v", err)
 	}
 	data, err := os.ReadFile(dst)
@@ -388,12 +427,12 @@ func TestDeleteCommand_Success(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	// 使用绝对路径绕过 currentDir
-	rootCmd.SetArgs([]string{"delete", "--server", mock.URL, "/test.txt"})
-	if err := rootCmd.Execute(); err != nil {
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdDelete(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd.SetArgs([]string{"test.txt"})
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("delete command failed: %v", err)
 	}
 }
@@ -406,11 +445,12 @@ func TestListCommand(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	rootCmd.SetArgs([]string{"list", "--server", mock.URL})
-	if err := rootCmd.Execute(); err != nil {
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdList(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("list command failed: %v", err)
 	}
 }
@@ -421,50 +461,15 @@ func TestListCommand_WithSubdirFlag(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	// --subdir 使用绝对路径绕过 currentDir
-	rootCmd.SetArgs([]string{"list", "--server", mock.URL, "--subdir", "/sub"})
-	if err := rootCmd.Execute(); err != nil {
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdList(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd.SetArgs([]string{"/sub"})
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("list command with subdir failed: %v", err)
 	}
 }
 
-// ---- 共享辅助函数 ----
-
-// captureRootCmdArgs 保存并重置 rootCmd 的 args、PersistentPreRunE 状态，
-// 以及全局 cfgFile、cfgProvider、currentDir。
-// 返回的恢复函数应在测试结束时 defer 调用。
-func captureRootCmdArgs() func() {
-	oldArgs := rootCmd.Args
-	oldPreRunE := rootCmd.PersistentPreRunE
-	oldCurrentDir := currentDir
-	oldCfgFile := cfgFile
-	oldCfgProvider := cfgProvider
-	currentDir = ""
-	cfgProvider = nil
-
-	// 替换 PersistentPreRunE 为简化版：初始化 cfgProvider 但不触发 loadCurrentDir
-	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		cfgProvider = sclientcfg.New(cfgFile)
-		cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup(flagServer))
-		cfgProvider.BindPFlag("chunk_size", cmd.Flags().Lookup(flagChunkSize))
-		// 不调用 loadCurrentDir()，防止从磁盘覆盖测试设置的 currentDir
-		return nil
-	}
-
-	rootCmd.SetArgs(nil)
-	return func() {
-		rootCmd.Args = oldArgs
-		rootCmd.PersistentPreRunE = oldPreRunE
-		currentDir = oldCurrentDir
-		cfgFile = oldCfgFile
-		cfgProvider = oldCfgProvider
-	}
-}
-
-// 重置 cobra.Command 的 help func 避免在测试中意外触发帮助输出
-func init() {
-	// 不修改生产代码，为测试预设一些状态
-}
+// ---- 已迁移完 ----
+// captureRootCmdArgs 已删除，所有测试已迁移到工厂函数模式。

@@ -183,10 +183,6 @@ func previewImage(serverURL, authToken, filename string) error {
 	return nil
 }
 
-func init() {
-	rootCmd.AddCommand(previewCmd)
-}
-
 // NewCmdPreview 创建 preview 命令的工厂函数版本。
 // preview 命令不使用 client.Service 接口，而是直接使用 http.DefaultClient
 // 通过 /download 端点获取文件内容进行预览。

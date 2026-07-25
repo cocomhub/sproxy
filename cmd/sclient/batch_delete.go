@@ -46,10 +46,6 @@ var batchDeleteCmd = &cobra.Command{
 	},
 }
 
-func init() {
-	rootCmd.AddCommand(batchDeleteCmd)
-}
-
 // NewCmdBatchDelete 创建独立的 batch-delete 命令工厂函数，使用 state.State 替代全局 currentDir。
 func NewCmdBatchDelete(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	return &cobra.Command{
