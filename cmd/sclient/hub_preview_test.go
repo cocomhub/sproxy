@@ -6,23 +6,29 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func TestRelayRemoveNodeCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	if relayRemoveNodeCmd.Use != "remove-node <node-id>" {
-		t.Fatalf("expected Use 'remove-node <node-id>', got %q", relayRemoveNodeCmd.Use)
+	cmd := NewCmdRelayRemoveNode(cli.IOStreams{})
+	if cmd.Use != "remove-node <node-id>" {
+		t.Fatalf("expected Use 'remove-node <node-id>', got %q", cmd.Use)
 	}
-	if relayRemoveNodeCmd.Args == nil {
+	if cmd.Args == nil {
 		t.Fatal("expected Args to be set")
 	}
-	if err := relayRemoveNodeCmd.Args(relayRemoveNodeCmd, []string{}); err == nil {
+	if err := cmd.Args(cmd, []string{}); err == nil {
 		t.Error("remove-node should require exactly 1 arg")
 	}
 }
@@ -38,16 +44,15 @@ func TestRelayRemoveNodeCmd_Success(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"relay", "remove-node", "--server", mock.URL, "test-node"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "已移除节点") {
-		t.Fatalf("expected success message, got: %s", out)
+	var buf strings.Builder
+	cmd := NewCmdRelayRemoveNode(cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.Flags().Set("hub", mock.URL)
+	cmd.SetArgs([]string{"test-node"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("remove-node command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "已移除节点") {
+		t.Fatalf("expected success message, got: %s", buf.String())
 	}
 }
 
@@ -57,11 +62,10 @@ func TestRelayRemoveNodeCmd_NotFound(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	rootCmd.SetArgs([]string{"relay", "remove-node", "--server", mock.URL, "nonexistent-node"})
-	err := rootCmd.Execute()
+	cmd := NewCmdRelayRemoveNode(cli.IOStreams{ErrOut: io.Discard})
+	cmd.Flags().Set("hub", mock.URL)
+	cmd.SetArgs([]string{"nonexistent-node"})
+	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error for non-existent node")
 	}
@@ -72,8 +76,9 @@ func TestRelayRemoveNodeCmd_NotFound(t *testing.T) {
 
 func TestRelayStatsCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	if relayStatsCmd.Use != "stats" {
-		t.Fatalf("expected Use 'stats', got %q", relayStatsCmd.Use)
+	cmd := NewCmdRelayStats(cli.IOStreams{})
+	if cmd.Use != "stats" {
+		t.Fatalf("expected Use 'stats', got %q", cmd.Use)
 	}
 }
 
@@ -87,16 +92,15 @@ func TestRelayStatsCmd_Success(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"relay", "stats", "--server", mock.URL})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "3") {
-		t.Fatalf("expected output to contain node count, got: %s", out)
+	var buf strings.Builder
+	cmd := NewCmdRelayStats(cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.Flags().Set("hub", mock.URL)
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("stats command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "3") {
+		t.Fatalf("expected output to contain node count, got: %s", buf.String())
 	}
 }
 
@@ -106,11 +110,10 @@ func TestRelayStatsCmd_ServerError(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	rootCmd.SetArgs([]string{"relay", "stats", "--server", mock.URL})
-	err := rootCmd.Execute()
+	cmd := NewCmdRelayStats(cli.IOStreams{ErrOut: io.Discard})
+	cmd.Flags().Set("hub", mock.URL)
+	cmd.SetArgs(nil)
+	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error for server error")
 	}
@@ -118,13 +121,14 @@ func TestRelayStatsCmd_ServerError(t *testing.T) {
 
 func TestPreviewCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	if previewCmd.Use != "preview <filename>" {
-		t.Fatalf("expected Use 'preview <filename>', got %q", previewCmd.Use)
+	cmd := NewCmdPreview(clientfactory.NewMock(nil, nil), cli.IOStreams{}, &state.State{})
+	if cmd.Use != "preview <filename>" {
+		t.Fatalf("expected Use 'preview <filename>', got %q", cmd.Use)
 	}
-	if previewCmd.Args == nil {
+	if cmd.Args == nil {
 		t.Fatal("expected Args to be set")
 	}
-	if err := previewCmd.Args(previewCmd, []string{}); err == nil {
+	if err := cmd.Args(cmd, []string{}); err == nil {
 		t.Error("preview should require exactly 1 arg")
 	}
 }
@@ -140,12 +144,18 @@ func TestPreviewCmd_TextFile(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdPreview(factory, cli.IOStreams{}, st)
+	cmd.PersistentFlags().String("server", "", "server address")
+	cmd.PersistentFlags().Set("server", mock.URL)
 
 	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"preview", "--server", mock.URL, "test.txt"})
-		rootCmd.Execute()
+		cmd.SetArgs([]string{"test.txt"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("preview command failed: %v", err)
+		}
 	})
 
 	if !strings.Contains(out, "line1") {
@@ -168,12 +178,18 @@ func TestPreviewCmd_ImageFile(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdPreview(factory, cli.IOStreams{}, st)
+	cmd.PersistentFlags().String("server", "", "server address")
+	cmd.PersistentFlags().Set("server", mock.URL)
 
 	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"preview", "--server", mock.URL, "test.png"})
-		rootCmd.Execute()
+		cmd.SetArgs([]string{"test.png"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("preview command failed: %v", err)
+		}
 	})
 
 	if !strings.Contains(out, "正在打开图片预览") {

@@ -15,15 +15,21 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 )
 
 func TestCloudDownloadCmd_UseAndArgs(t *testing.T) {
-	if cloudDownloadCmd.Use != "cloud-download <url> [url...]" {
-		t.Fatalf("expected Use 'cloud-download <url> [url...]', got %q", cloudDownloadCmd.Use)
+	svc := client.NewFileClient("http://test.local")
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{})
+	if cmd.Use != "cloud-download <url> [url...]" {
+		t.Fatalf("expected Use 'cloud-download <url> [url...]', got %q", cmd.Use)
 	}
 	// Args 应为非 nil（ArbitraryArgs 是有效的验证函数）
-	if cloudDownloadCmd.Args == nil {
+	if cmd.Args == nil {
 		t.Fatal("expected Args to be set")
 	}
 }
@@ -58,16 +64,19 @@ func TestCloudDownloadCmd_CreateTask(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "--server", mock.URL, "https://example.com/file.zip"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "cloud-test-1") {
-		t.Fatalf("expected output to contain task ID, got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.PersistentFlags().String("output", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "https://example.com/file.zip"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cloud-download command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "cloud-test-1") {
+		t.Fatalf("expected output to contain task ID, got: %s", buf.String())
 	}
 }
 
@@ -119,16 +128,19 @@ func TestCloudDownloadCmd_AsyncPolling(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "--server", mock.URL, "--poll-interval", "100ms", "https://example.com/large.zip"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "cloud-async-1") {
-		t.Fatalf("expected output to contain task ID, got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.PersistentFlags().String("output", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "--poll-interval", "100ms", "https://example.com/large.zip"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cloud-download command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "cloud-async-1") {
+		t.Fatalf("expected output to contain task ID, got: %s", buf.String())
 	}
 }
 
@@ -169,16 +181,16 @@ func TestCloudDownloadCmd_TaskFailed(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStderr(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "--server", mock.URL, "--poll-interval", "100ms", "https://example.com/fail.zip"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "failed") && !strings.Contains(out, "失败") {
-		t.Fatalf("expected error output about failed task, got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.PersistentFlags().String("output", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "--poll-interval", "100ms", "https://example.com/fail.zip"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when task fails")
 	}
 }
 
@@ -207,16 +219,16 @@ func TestCloudDownloadCmd_ChecksumMismatch(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStderr(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "--server", mock.URL, "https://example.com/file.zip"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "checksum") && !strings.Contains(out, "校验") {
-		t.Fatalf("expected checksum mismatch error, got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.PersistentFlags().String("output", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "https://example.com/file.zip"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when checksum mismatch")
 	}
 }
 
@@ -254,15 +266,17 @@ func TestCloudDownloadCmd_NoCleanupFlag(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
 	outPath := filepath.Join(t.TempDir(), "file.zip")
-	testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "--server", mock.URL, "--no-cleanup", "--output", outPath, "https://example.com/file.zip"})
-		rootCmd.Execute()
-	})
-
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.PersistentFlags().String("output", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "--no-cleanup", "--output", outPath, "https://example.com/file.zip"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cloud-download command failed: %v", err)
+	}
 	if deletedCloud {
 		t.Fatal("expected no cloud delete with --no-cleanup flag")
 	}
@@ -310,17 +324,20 @@ func TestCloudDownloadCmd_ForceAsync(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
 	outPath := filepath.Join(t.TempDir(), "small.zip")
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "--server", mock.URL, "--force-async", "--poll-interval", "100ms", "--output", outPath, "https://example.com/small.zip"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "Downloaded") && !strings.Contains(out, "下载") {
-		t.Fatalf("expected download completion message, got: %s", out)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.PersistentFlags().String("output", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "--force-async", "--poll-interval", "100ms", "--output", outPath, "https://example.com/small.zip"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cloud-download command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "cloud-forceasync-1") {
+		t.Fatalf("expected download completion message, got: %s", buf.String())
 	}
 }
 
@@ -356,15 +373,17 @@ func TestCloudDownloadCmd_OutputFlag(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
 	outPath := filepath.Join(t.TempDir(), "custom-name.bin")
-	testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "--server", mock.URL, "--output", outPath, "https://example.com/file.zip"})
-		rootCmd.Execute()
-	})
-
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.PersistentFlags().String("output", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "--output", outPath, "https://example.com/file.zip"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cloud-download command failed: %v", err)
+	}
 	if _, err := os.Stat(outPath); err != nil {
 		t.Fatalf("expected file at %s to exist: %v", outPath, err)
 	}
@@ -451,21 +470,22 @@ func TestCloudDownloadCmd_MultipleURLs(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStdout(func() {
-		// 重置 --output flag 避免上一测试的状态泄漏
-		rootCmd.PersistentFlags().Set("output", "")
-		rootCmd.SetArgs([]string{"cloud-download", "--server", mock.URL, "https://example.com/a.zip", "https://example.com/b.zip"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "https://example.com/a.zip") {
-		t.Fatalf("expected output to contain first URL, got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.PersistentFlags().String("output", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "https://example.com/a.zip", "https://example.com/b.zip"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cloud-download command failed: %v", err)
 	}
-	if !strings.Contains(out, "https://example.com/b.zip") {
-		t.Fatalf("expected output to contain second URL, got: %s", out)
+	if !strings.Contains(buf.String(), "https://example.com/a.zip") {
+		t.Fatalf("expected output to contain first URL, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "https://example.com/b.zip") {
+		t.Fatalf("expected output to contain second URL, got: %s", buf.String())
 	}
 }
 
@@ -503,16 +523,19 @@ func TestCloudDownloadCmd_BatchFileFlag(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "--server", mock.URL, "--batch", batchFile})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "cloud-batch-file-1") {
-		t.Fatalf("expected output to contain task ID, got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.PersistentFlags().String("output", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "--batch", batchFile})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cloud-download command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "cloud-batch-file-1") {
+		t.Fatalf("expected output to contain task ID, got: %s", buf.String())
 	}
 }
 
@@ -556,18 +579,15 @@ func TestCloudDownloadCmd_PartialFailure(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	stderrOut := testutil.CaptureStderr(func() {
-		testutil.CaptureStdout(func() {
-			rootCmd.SetArgs([]string{"cloud-download", "--server", mock.URL, "https://example.com/good.zip", "https://example.com/bad.zip"})
-			rootCmd.Execute()
-		})
-	})
-
-	// 应该包含失败信息
-	if !strings.Contains(stderrOut, "bad") && !strings.Contains(stderrOut, "失败") {
-		t.Fatalf("expected stderr to contain failure info, got: %s", stderrOut)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.PersistentFlags().String("output", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "https://example.com/good.zip", "https://example.com/bad.zip"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when partial failure")
 	}
 }

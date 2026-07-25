@@ -108,11 +108,6 @@ type configSimple struct {
 	AuthToken string `mapstructure:"auth_token"`
 }
 
-func init() {
-	cloudListCmd.Flags().String("status", "", "按状态过滤（pending/downloading/completed/failed/cancelled）")
-	cloudDownloadCmd.AddCommand(cloudListCmd)
-}
-
 // NewCmdCloudList 创建 cloud list 命令的工厂函数。
 func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{

@@ -214,13 +214,3 @@ func NewCmdShareRevoke(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 		},
 	}
 }
-
-func init() {
-	shareCreateCmd.Flags().String("ttl", "24h", "有效期（例如 1h, 24h, 168h, 720h，不支持 d 天）")
-	shareCreateCmd.Flags().Int("max-downloads", 0, "最大下载次数（0=不限）")
-	shareCreateCmd.Flags().Bool("one-time", false, "一次性分享（下载一次后自动失效）")
-
-	shareCmd.AddCommand(shareCreateCmd)
-	shareCmd.AddCommand(shareListCmd)
-	shareCmd.AddCommand(shareRevokeCmd)
-}

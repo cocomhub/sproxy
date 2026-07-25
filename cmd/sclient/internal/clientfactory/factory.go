@@ -7,6 +7,7 @@ package clientfactory
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
@@ -19,9 +20,10 @@ type Factory interface {
 	NewClient(cmd *cobra.Command) (client.Service, error)
 }
 
-// CfgBinder 抽象 flag 绑定能力，避免直接依赖 *pflag.Flag 类型。
+// CfgBinder 抽象配置提供者能力，避免直接依赖 sclientcfg.ViperProvider 类型。
 type CfgBinder interface {
 	BindPFlag(key string, flag *pflag.Flag)
+	Unmarshal(obj any) error
 }
 
 // factory 是生产实现，封装配置加载 + flag 覆盖 + 客户端构造。
@@ -39,9 +41,50 @@ func New(cfgFile string, cfgProviderFn func() CfgBinder) Factory {
 	}
 }
 
-// NewClient 当前为占位实现，后续 PR 中完善。
+// NewClient 从配置加载和 flag 覆盖创建 client.Service。
 func (f *factory) NewClient(cmd *cobra.Command) (client.Service, error) {
-	return nil, fmt.Errorf("生产 Factory 尚未实现，请使用 mockFactory 进行测试")
+	p := f.cfgProvider()
+	if p == nil {
+		return nil, fmt.Errorf("配置未初始化")
+	}
+	cfg, err := client.LoadFromProvider(p)
+	if err != nil {
+		return nil, fmt.Errorf("加载配置失败: %w", err)
+	}
+
+	serverURL := cfg.ServerURL
+	if s, _ := cmd.Flags().GetString("server"); s != "" {
+		serverURL = s
+	}
+
+	opts := []client.Option{
+		client.WithTimeout(time.Duration(cfg.Timeout) * time.Second),
+	}
+	if cfg.TunnelKey != "" {
+		if s, _ := cmd.Flags().GetString("server"); s == "" {
+			opts = append(opts, client.WithTunnel(cfg.TunnelKey))
+		}
+	}
+	if cs, _ := cmd.Flags().GetInt64("chunk-size"); cs > 0 {
+		opts = append(opts, func(c *client.FileClient) {
+			c.ChunkSize = cs
+		})
+	} else if cfg.ChunkSize > 0 {
+		opts = append(opts, func(c *client.FileClient) {
+			c.ChunkSize = cfg.ChunkSize
+		})
+	}
+	if cfg.MaxChunkSize > 0 {
+		opts = append(opts, client.WithMaxChunkSize(cfg.MaxChunkSize))
+	}
+	if cfg.AuthToken != "" {
+		opts = append(opts, client.WithAuthToken(cfg.AuthToken))
+	}
+	if t, _ := cmd.Flags().GetString("auth-token"); t != "" {
+		opts = append(opts, client.WithAuthToken(t))
+	}
+
+	return client.NewFileClient(serverURL, opts...), nil
 }
 
 // mockFactory 是测试实现，直接返回预配置的 client。

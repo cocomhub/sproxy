@@ -132,14 +132,6 @@ func getHubServerURL(cmd *cobra.Command) (serverURL, authToken string) {
 	return
 }
 
-func init() {
-	relayRemoveNodeCmd.Flags().String("hub", "", "Hub 的 HTTP 地址 (如 http://127.0.0.1:18083)")
-	relayStatsCmd.Flags().String("hub", "", "Hub 的 HTTP 地址 (如 http://127.0.0.1:18083)")
-
-	relayCmd.AddCommand(relayRemoveNodeCmd)
-	relayCmd.AddCommand(relayStatsCmd)
-}
-
 // NewCmdRelayRemoveNode 创建 relay remove-node 命令的工厂函数。
 func NewCmdRelayRemoveNode(ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{

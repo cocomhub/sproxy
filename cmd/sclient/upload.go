@@ -181,10 +181,3 @@ var uploadCmd = &cobra.Command{
 		return nil
 	},
 }
-
-func init() {
-	uploadCmd.Flags().Bool("chunked", false, "启用分块上传模式")
-	uploadCmd.Flags().Int64("chunk-size", 0, "分块大小 (默认 4MB)")
-	uploadCmd.Flags().Int("concurrency", 0, "上传并发数 (默认 4)")
-	uploadCmd.Flags().Bool("resume", true, "续传模式")
-}

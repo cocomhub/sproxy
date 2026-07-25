@@ -54,10 +54,6 @@ var listCmd = &cobra.Command{
 	},
 }
 
-func init() {
-	listCmd.Flags().String("subdir", "", "列出指定子目录下的文件")
-}
-
 // NewCmdList 创建独立的 list 命令工厂函数，使用 factory 创建客户端。
 func NewCmdList(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	cmd := &cobra.Command{

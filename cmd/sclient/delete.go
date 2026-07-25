@@ -46,10 +46,6 @@ var deleteCmd = &cobra.Command{
 	},
 }
 
-func init() {
-	deleteCmd.Flags().String("check-local", "", "指定本地文件路径，校验其 SHA-256 与远端一致后才执行删除")
-}
-
 // NewCmdDelete 创建独立的 delete 命令工厂函数，使用 state.State 替代全局 currentDir。
 func NewCmdDelete(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	cmd := &cobra.Command{

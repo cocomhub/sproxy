@@ -90,14 +90,6 @@ func writeArchiveResponse(resp *http.Response, outputPath string) error {
 	return nil
 }
 
-func init() {
-	archiveCmd.Flags().StringP("output", "o", "", "输出文件路径（默认 archive.tar.gz）")
-	archiveDirCmd.Flags().StringP("output", "o", "", "输出文件路径（默认 <dirname>.tar.gz）")
-
-	rootCmd.AddCommand(archiveCmd)
-	rootCmd.AddCommand(archiveDirCmd)
-}
-
 // NewCmdArchive 创建独立的 archive 命令工厂函数。
 func NewCmdArchive(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{

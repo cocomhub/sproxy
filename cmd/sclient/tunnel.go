@@ -79,13 +79,6 @@ var tunnelCmd = &cobra.Command{
 	},
 }
 
-func init() {
-	tunnelCmd.Flags().StringP("method", "X", "GET", "请求方法")
-	tunnelCmd.Flags().StringArrayP("header", "H", nil, "自定义请求头 (可重复)")
-	tunnelCmd.Flags().StringP("data", "d", "", "请求体 (@file 从文件读取)")
-	tunnelCmd.Flags().BoolP("include", "i", false, "显示响应头")
-}
-
 // tunnelReqOpts 是 tunnelRequest 的参数集合，用于减少函数参数数量（go:S107）。
 type tunnelReqOpts struct {
 	cfg        *client.Config

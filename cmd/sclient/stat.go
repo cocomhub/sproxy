@@ -49,10 +49,6 @@ var statCmd = &cobra.Command{
 	},
 }
 
-func init() {
-	rootCmd.AddCommand(statCmd)
-}
-
 // NewCmdStat 创建 stat 命令的工厂函数，使用 state.State 替代全局变量。
 func NewCmdStat(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	return &cobra.Command{

@@ -122,7 +122,3 @@ var mvCmd = &cobra.Command{
 		return nil
 	},
 }
-
-func init() {
-	rootCmd.AddCommand(mvCmd)
-}

@@ -5,20 +5,24 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/spf13/cobra"
 )
 
 func TestCloudListCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	if cloudListCmd.Use != "list" {
-		t.Fatalf("expected Use 'list', got %q", cloudListCmd.Use)
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{})
+	if cmd.Use != "list" {
+		t.Fatalf("expected Use 'list', got %q", cmd.Use)
 	}
-	if cloudListCmd.Args == nil {
+	if cmd.Args == nil {
 		t.Fatal("expected Args to be set")
 	}
 }
@@ -39,22 +43,27 @@ func TestCloudListCmd_ListTasks(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	root := &cobra.Command{}
+	root.PersistentFlags().String("server", "", "")
+	root.PersistentFlags().String("auth-token", "", "")
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "list", "--server", mock.URL})
-		rootCmd.Execute()
-	})
+	var buf strings.Builder
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	root.AddCommand(cmd)
 
-	if !strings.Contains(out, "task-1") {
-		t.Fatalf("expected output to contain task-1, got: %s", out)
+	root.SetArgs([]string{"list", "--server", mock.URL})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
 	}
-	if !strings.Contains(out, "task-2") {
-		t.Fatalf("expected output to contain task-2, got: %s", out)
+
+	if !strings.Contains(buf.String(), "task-1") {
+		t.Fatalf("expected output to contain task-1, got: %s", buf.String())
 	}
-	if !strings.Contains(out, "task-3") {
-		t.Fatalf("expected output to contain task-3, got: %s", out)
+	if !strings.Contains(buf.String(), "task-2") {
+		t.Fatalf("expected output to contain task-2, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "task-3") {
+		t.Fatalf("expected output to contain task-3, got: %s", buf.String())
 	}
 }
 
@@ -65,16 +74,21 @@ func TestCloudListCmd_EmptyList(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	root := &cobra.Command{}
+	root.PersistentFlags().String("server", "", "")
+	root.PersistentFlags().String("auth-token", "", "")
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"--server", mock.URL, "cloud-download", "list"})
-		rootCmd.Execute()
-	})
+	var buf strings.Builder
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	root.AddCommand(cmd)
 
-	if !strings.Contains(out, "暂无云端下载任务") {
-		t.Fatalf("expected '暂无云端下载任务', got: %q", out)
+	root.SetArgs([]string{"list", "--server", mock.URL})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "暂无云端下载任务") {
+		t.Fatalf("expected '暂无云端下载任务', got: %q", buf.String())
 	}
 }
 
@@ -87,19 +101,25 @@ func TestCloudListCmd_JSONOutput(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	root := &cobra.Command{}
+	root.PersistentFlags().String("server", "", "")
+	root.PersistentFlags().String("auth-token", "", "")
+	root.PersistentFlags().Bool("json", false, "")
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "list", "--server", mock.URL, "--json"})
-		rootCmd.Execute()
-	})
+	var buf strings.Builder
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	root.AddCommand(cmd)
 
-	if !strings.Contains(out, `"task-1"`) {
-		t.Fatalf("expected JSON output with task-1, got: %s", out)
+	root.SetArgs([]string{"list", "--server", mock.URL, "--json"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
 	}
-	if !strings.Contains(out, `"tasks"`) {
-		t.Fatalf("expected JSON output with tasks key, got: %s", out)
+
+	if !strings.Contains(buf.String(), `"task-1"`) {
+		t.Fatalf("expected JSON output with task-1, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"tasks"`) {
+		t.Fatalf("expected JSON output with tasks key, got: %s", buf.String())
 	}
 }
 
@@ -118,16 +138,21 @@ func TestCloudListCmd_StatusFilter(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	root := &cobra.Command{}
+	root.PersistentFlags().String("server", "", "")
+	root.PersistentFlags().String("auth-token", "", "")
 
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "list", "--server", mock.URL, "--status", "completed"})
-		rootCmd.Execute()
-	})
+	var buf strings.Builder
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	root.AddCommand(cmd)
 
-	if !strings.Contains(out, "task-completed") {
-		t.Fatalf("expected output to contain task-completed, got: %s", out)
+	root.SetArgs([]string{"list", "--server", mock.URL, "--status", "completed"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "task-completed") {
+		t.Fatalf("expected output to contain task-completed, got: %s", buf.String())
 	}
 }
 
@@ -138,15 +163,17 @@ func TestCloudListCmd_ServerError(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
+	root := &cobra.Command{}
+	root.PersistentFlags().String("server", "", "")
+	root.PersistentFlags().String("auth-token", "", "")
 
-	err := rootCmd.Execute()
-	// 由于 cloud-list 使用自己的 http.Client 且 setArgs 设置了 --server，
-	// 错误会通过 RunE 返回 error
-	_ = err
-	// 验证命令注册正确
-	if cloudListCmd.Use != "list" {
-		t.Errorf("cloudListCmd.Use = %q", cloudListCmd.Use)
+	var buf strings.Builder
+	cmd := NewCmdCloudList(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	root.AddCommand(cmd)
+
+	root.SetArgs([]string{"list", "--server", mock.URL})
+	err := root.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 500")
 	}
 }

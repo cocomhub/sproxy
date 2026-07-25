@@ -4,27 +4,31 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/pkg/cli"
 )
 
 func TestRelayCmd_Usage(t *testing.T) {
 	t.Parallel()
-	if relayCmd.Use != "relay" {
-		t.Errorf("expected Use=relay, got %s", relayCmd.Use)
+	cmd := NewCmdRelay(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard})
+	if cmd.Use != "relay" {
+		t.Errorf("expected Use=relay, got %s", cmd.Use)
 	}
-	if relayCmd.Short != "中继节点管理" {
-		t.Errorf("expected Short=中继节点管理, got %s", relayCmd.Short)
+	if cmd.Short != "中继节点管理" {
+		t.Errorf("expected Short=中继节点管理, got %s", cmd.Short)
 	}
 }
 
 func TestRelayCmd_HasSubcommands(t *testing.T) {
 	t.Parallel()
-	cmds := relayCmd.Commands()
+	cmd := NewCmdRelay(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard})
+	cmds := cmd.Commands()
 	names := make(map[string]bool)
 	for _, c := range cmds {
 		names[c.Name()] = true
@@ -37,8 +41,6 @@ func TestRelayCmd_HasSubcommands(t *testing.T) {
 }
 
 func TestRelayStatusCmd_Integration(t *testing.T) {
-	defer captureRootCmdArgs()()
-
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/nodes" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
@@ -50,19 +52,19 @@ func TestRelayStatusCmd_Integration(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	output := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"--server", ts.URL, "relay", "status"})
-		_ = rootCmd.Execute()
-	})
-
-	if !strings.Contains(output, "node-1") {
-		t.Errorf("expected output to contain node-1, got: %s", output)
+	var buf strings.Builder
+	cmd := NewCmdRelayStatus(cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.Flags().Set("hub", ts.URL)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "node-1") {
+		t.Errorf("expected output to contain node-1, got: %s", buf.String())
 	}
 }
 
 func TestRelayStatusCmd_Empty(t *testing.T) {
-	defer captureRootCmdArgs()()
-
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/nodes" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
@@ -74,23 +76,27 @@ func TestRelayStatusCmd_Empty(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	output := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"--server", ts.URL, "relay", "status"})
-		_ = rootCmd.Execute()
-	})
-
-	if !strings.Contains(output, "暂无已连接节点") {
-		t.Errorf("expected empty message, got: %s", output)
+	var buf strings.Builder
+	cmd := NewCmdRelayStatus(cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.Flags().Set("hub", ts.URL)
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "暂无已连接节点") {
+		t.Errorf("expected empty message, got: %s", buf.String())
 	}
 }
 
 func TestRelayStopCmd(t *testing.T) {
 	t.Parallel()
-	output := testutil.CaptureStdout(func() {
-		relayStopCmd.RunE(relayStopCmd, nil)
-	})
-
-	if !strings.Contains(output, "SIGINT") {
-		t.Errorf("expected output to contain SIGINT, got: %s", output)
+	var buf strings.Builder
+	cmd := NewCmdRelayStop(cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "SIGINT") {
+		t.Errorf("expected output to contain SIGINT, got: %s", buf.String())
 	}
 }

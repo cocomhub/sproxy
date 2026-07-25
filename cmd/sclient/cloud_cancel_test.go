@@ -5,26 +5,30 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 )
 
 func TestCloudCancelCmd_UseAndArgs(t *testing.T) {
 	t.Parallel()
-	if cloudCancelCmd.Use != "cancel <task-id>" {
-		t.Fatalf("expected Use 'cancel <task-id>', got %q", cloudCancelCmd.Use)
+	cmd := NewCmdCloudCancel(nil, cli.IOStreams{})
+	if cmd.Use != "cancel <task-id>" {
+		t.Fatalf("expected Use 'cancel <task-id>', got %q", cmd.Use)
 	}
-	if cloudCancelCmd.Args == nil {
+	if cmd.Args == nil {
 		t.Fatal("expected Args to be set")
 	}
-	if err := cloudCancelCmd.Args(cloudCancelCmd, []string{}); err == nil {
+	if err := cmd.Args(cmd, []string{}); err == nil {
 		t.Error("cancel should require exactly 1 arg")
 	}
-	if err := cloudCancelCmd.Args(cloudCancelCmd, []string{"task-1"}); err != nil {
+	if err := cmd.Args(cmd, []string{"task-1"}); err != nil {
 		t.Errorf("cancel with 1 arg should be ok: %v", err)
 	}
 }
@@ -40,16 +44,19 @@ func TestCloudCancelCmd_Success(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "cancel", "--server", mock.URL, "task-1"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "已取消") {
-		t.Fatalf("expected success message, got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.Flags().Bool("json", false, "")
+	cmd.SetArgs([]string{"--server", mock.URL, "task-1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "已取消") {
+		t.Fatalf("expected success message, got: %s", buf.String())
 	}
 }
 
@@ -59,16 +66,19 @@ func TestCloudCancelCmd_NotFound(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "cancel", "--server", mock.URL, "nonexistent-task"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "任务不存在") {
-		t.Fatalf("expected '任务不存在', got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.Flags().Bool("json", false, "")
+	cmd.SetArgs([]string{"--server", mock.URL, "nonexistent-task"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "任务不存在") {
+		t.Fatalf("expected '任务不存在', got: %s", buf.String())
 	}
 }
 
@@ -79,16 +89,19 @@ func TestCloudCancelCmd_AlreadyCompleted(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "cancel", "--server", mock.URL, "completed-task"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "失败") {
-		t.Fatalf("expected failure message, got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.Flags().Bool("json", false, "")
+	cmd.SetArgs([]string{"--server", mock.URL, "completed-task"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "失败") {
+		t.Fatalf("expected failure message, got: %s", buf.String())
 	}
 }
 
@@ -99,16 +112,19 @@ func TestCloudCancelCmd_JSONOutput(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "cancel", "--server", mock.URL, "--json", "task-json"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, `"success"`) && !strings.Contains(out, `"task_id"`) {
-		t.Fatalf("expected JSON output, got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.Flags().Bool("json", false, "")
+	cmd.SetArgs([]string{"--server", mock.URL, "--json", "task-json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"success"`) && !strings.Contains(buf.String(), `"task_id"`) {
+		t.Fatalf("expected JSON output, got: %s", buf.String())
 	}
 }
 
@@ -119,18 +135,18 @@ func TestCloudCancelCmd_ServerError(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	resetState := captureRootCmdArgs()
-	defer resetState()
-
-	// 确保 --json flag 被重置（防止前序测试污染）
-	rootCmd.PersistentFlags().Set("json", "false")
-
-	out := testutil.CaptureStdout(func() {
-		rootCmd.SetArgs([]string{"cloud-download", "cancel", "--server", mock.URL, "error-task"})
-		rootCmd.Execute()
-	})
-
-	if !strings.Contains(out, "失败") && !strings.Contains(out, "HTTP 500") {
-		t.Fatalf("expected failure message, got: %s", out)
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.Flags().Bool("json", false, "")
+	cmd.SetArgs([]string{"--server", mock.URL, "error-task"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "失败") && !strings.Contains(buf.String(), "HTTP 500") {
+		t.Fatalf("expected failure message, got: %s", buf.String())
 	}
 }
