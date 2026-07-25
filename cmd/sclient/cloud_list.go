@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/spf13/cobra"
 )
 
@@ -109,4 +111,65 @@ type configSimple struct {
 func init() {
 	cloudListCmd.Flags().String("status", "", "按状态过滤（pending/downloading/completed/failed/cancelled）")
 	cloudDownloadCmd.AddCommand(cloudListCmd)
+}
+
+// NewCmdCloudList 创建 cloud list 命令的工厂函数。
+func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "列出所有云端下载任务",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			statusFilter, _ := cmd.Flags().GetString("status")
+
+			serverURL, authToken := getCloudServerURL(cmd)
+			if serverURL == "" {
+				return fmt.Errorf("未指定服务器地址，请使用 --server 或配置 server_url")
+			}
+
+			apiPath := "/api/cloud/tasks"
+			if statusFilter != "" {
+				apiPath += "?status=" + url.QueryEscape(statusFilter)
+			}
+
+			req, err := http.NewRequest(http.MethodGet, serverURL+apiPath, nil)
+			if err != nil {
+				return fmt.Errorf("创建请求失败: %w", err)
+			}
+			if authToken != "" {
+				req.Header.Set("Authorization", "Bearer "+authToken)
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("获取云端下载任务列表失败: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+				return fmt.Errorf("获取云端下载任务列表失败 (HTTP %d): %s", resp.StatusCode, string(body))
+			}
+
+			var result struct {
+				Tasks []cloudTaskInfo `json:"tasks"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				return fmt.Errorf("解析响应失败: %w", err)
+			}
+
+			fm := buildFormatterWithWriter(ios.Out, cmd)
+			if len(result.Tasks) == 0 {
+				fm.Println("暂无云端下载任务")
+				return nil
+			}
+
+			fm.PrintCloudTaskList(result.Tasks)
+			return nil
+		},
+	}
+
+	cmd.Flags().String("status", "", "按状态过滤（pending/downloading/completed/failed/cancelled）")
+
+	return cmd
 }
