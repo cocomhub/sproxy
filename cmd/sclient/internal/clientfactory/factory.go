@@ -58,3 +58,6 @@ func (f *mockFactory) NewClient(cmd *cobra.Command) (client.Service, error) {
 
 // 编译期检查 mockFactory 实现 Factory 接口
 var _ Factory = (*mockFactory)(nil)
+
+// 编译期检查 factory 实现 Factory 接口
+var _ Factory = (*factory)(nil)
