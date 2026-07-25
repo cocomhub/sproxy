@@ -765,3 +765,191 @@ func TestCdCommand_WithCurrentDir(t *testing.T) {
 		t.Errorf("expected cd output '/subdir', got: %s", buf.String())
 	}
 }
+
+func TestCdCommand_ChangeToSubdir(t *testing.T) {
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs([]string{"newdir"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cd command failed: %v", err)
+	}
+	if st.CurrentDir != "newdir" {
+		t.Fatalf("expected currentDir 'newdir', got %q", st.CurrentDir)
+	}
+}
+
+func TestCdCommand_ChangeToRoot(t *testing.T) {
+	st := &state.State{CurrentDir: "subdir"}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs([]string{"/"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cd command failed: %v", err)
+	}
+	if st.CurrentDir != "" {
+		t.Fatalf("expected currentDir '', got %q", st.CurrentDir)
+	}
+}
+
+func TestCdCommand_ChangeToParent(t *testing.T) {
+	st := &state.State{CurrentDir: "subdir"}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs([]string{".."})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cd command failed: %v", err)
+	}
+	if st.CurrentDir != "" {
+		t.Fatalf("expected currentDir '', got %q", st.CurrentDir)
+	}
+}
+
+func TestCdCommand_ChangeToParentFromNested(t *testing.T) {
+	st := &state.State{CurrentDir: "a/b/c"}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs([]string{".."})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cd command failed: %v", err)
+	}
+	if st.CurrentDir != "a/b" {
+		t.Fatalf("expected currentDir 'a/b', got %q", st.CurrentDir)
+	}
+}
+
+func TestCdCommand_ChangeToDot(t *testing.T) {
+	st := &state.State{CurrentDir: "subdir"}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs([]string{"."})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cd command failed: %v", err)
+	}
+	if st.CurrentDir != "subdir" {
+		t.Fatalf("expected currentDir 'subdir', got %q", st.CurrentDir)
+	}
+}
+
+func TestCdCommand_InvalidPath(t *testing.T) {
+	var errBuf strings.Builder
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: &errBuf})
+	cmd.SetArgs([]string{"../outside"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cd command failed: %v", err)
+	}
+	if !strings.Contains(errBuf.String(), "无效的路径") {
+		t.Errorf("expected error message '无效的路径', got %q", errBuf.String())
+	}
+	if st.CurrentDir != "" {
+		t.Fatalf("expected currentDir to remain unchanged '', got %q", st.CurrentDir)
+	}
+}
+
+func TestCdCommand_FromRootToParent(t *testing.T) {
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs([]string{".."})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cd command failed: %v", err)
+	}
+	if st.CurrentDir != "" {
+		t.Fatalf("expected currentDir '', got %q", st.CurrentDir)
+	}
+}
+
+func TestCdCommand_ChangeToNested(t *testing.T) {
+	st := &state.State{CurrentDir: "subdir"}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs([]string{"nested"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cd command failed: %v", err)
+	}
+	if st.CurrentDir != "subdir/nested" {
+		t.Fatalf("expected currentDir 'subdir/nested', got %q", st.CurrentDir)
+	}
+}
+
+func TestCdCommand_CleanDots(t *testing.T) {
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs([]string{"././subdir"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cd command failed: %v", err)
+	}
+	if st.CurrentDir != "subdir" {
+		t.Fatalf("expected currentDir 'subdir', got %q", st.CurrentDir)
+	}
+}
+
+// ---- resolveOutputPath 测试 ----
+
+func TestResolveOutputPath_SpecifiedFile(t *testing.T) {
+	oldDir := currentDir
+	currentDir = t.TempDir()
+	t.Cleanup(func() { currentDir = oldDir })
+
+	got, err := resolveOutputPath("http://example.com/data/file.txt", "/tmp/out.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "/tmp/out.txt" {
+		t.Errorf("expected /tmp/out.txt, got %s", got)
+	}
+}
+
+func TestResolveOutputPath_FromURLPath(t *testing.T) {
+	oldDir := currentDir
+	currentDir = t.TempDir()
+	t.Cleanup(func() { currentDir = oldDir })
+
+	got, err := resolveOutputPath("http://example.com/data/report.pdf", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != filepath.Join(currentDir, "report.pdf") {
+		t.Errorf("expected %s, got %s", filepath.Join(currentDir, "report.pdf"), got)
+	}
+}
+
+func TestResolveOutputPath_RootPathDefaultsToIndexHTML(t *testing.T) {
+	oldDir := currentDir
+	currentDir = t.TempDir()
+	t.Cleanup(func() { currentDir = oldDir })
+
+	got, err := resolveOutputPath("http://example.com/", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != filepath.Join(currentDir, "index.html") {
+		t.Errorf("expected %s, got %s", filepath.Join(currentDir, "index.html"), got)
+	}
+}
+
+func TestResolveOutputPath_InvalidURL(t *testing.T) {
+	oldDir := currentDir
+	currentDir = t.TempDir()
+	t.Cleanup(func() { currentDir = oldDir })
+
+	_, err := resolveOutputPath("://invalid-url\t", "")
+	if err == nil {
+		t.Error("expected error for invalid URL")
+	}
+}
+
+func TestResolveOutputPath_ConflictAppendsSuffix(t *testing.T) {
+	oldDir := currentDir
+	currentDir = t.TempDir()
+	t.Cleanup(func() { currentDir = oldDir })
+
+	// Create a file that conflicts
+	conflict := filepath.Join(currentDir, "data.txt")
+	if err := os.WriteFile(conflict, []byte("existing"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveOutputPath("http://example.com/data.txt", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := filepath.Join(currentDir, "data.txt.1")
+	if got != expected {
+		t.Errorf("expected %s, got %s", expected, got)
+	}
+}

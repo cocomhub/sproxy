@@ -174,11 +174,6 @@ func NewCmdRmdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
 const cacheDirName = "sproxy"
 const cacheFile = "current_dir"
 
-// saveCurrentDir 将当前目录持久化到 XDG 缓存目录。
-func saveCurrentDir() {
-	saveCurrentDirValue(currentDir)
-}
-
 // saveCurrentDirValue 将指定目录持久化到 XDG 缓存目录。
 func saveCurrentDirValue(dir string) {
 	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFile))
@@ -200,43 +195,4 @@ func loadCurrentDir() {
 		return
 	}
 	currentDir = strings.TrimSpace(string(data))
-}
-
-// ---- 远端路径解析 ----
-
-// resolveRemotePath 根据当前目录和用户传入的路径，返回完整的远端路径。
-// 若用户传入绝对路径（以 / 开头）：直接使用清洗后的路径（脱掉前导 /）；
-// 否则拼接 currentDir。
-func resolveRemotePath(userPath string) (string, error) {
-	if userPath == "" {
-		return currentDir, nil
-	}
-
-	var raw string
-	if strings.HasPrefix(userPath, "/") {
-		raw = userPath[1:]
-	} else if currentDir != "" {
-		raw = currentDir + "/" + userPath
-	} else {
-		raw = userPath
-	}
-
-	cleaned := filepath.ToSlash(filepath.Clean(raw))
-	if cleaned == "." {
-		cleaned = ""
-	}
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
-		return "", fmt.Errorf("路径包含父级引用 '..'，禁止访问上层目录: %s", userPath)
-	}
-	return cleaned, nil
-}
-
-// resolveRemotePathOrErr 是 resolveRemotePath 的便捷封装，供 RunE 命令使用。
-// 路径校验失败时返回 error。
-func resolveRemotePathOrErr(userPath string) (string, error) {
-	cleaned, err := resolveRemotePath(userPath)
-	if err != nil {
-		return "", fmt.Errorf(errFmtInvalidPath, err)
-	}
-	return cleaned, nil
 }

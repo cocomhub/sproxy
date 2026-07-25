@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -40,9 +39,9 @@ type OutputFormatter interface {
 	// PrintStat 输出文件元信息。
 	PrintStat(info *client.FileInfo, filename string)
 	// Printf 输出格式化字符串（JSON 模式忽略）。
-	Printf(format string, args ...interface{})
+	Printf(format string, args ...any)
 	// Println 输出一行（JSON 模式忽略）。
-	Println(args ...interface{})
+	Println(args ...any)
 }
 
 // TextFormatter 是文本格式输出。
@@ -222,11 +221,11 @@ func (f *TextFormatter) PrintConfig(cfg *client.ConfigResponse) {
 	fmt.Fprintf(f.w, "  uploads_dir:            %s\n", cfg.UploadsDir)
 }
 
-func (f *TextFormatter) Printf(format string, args ...interface{}) {
+func (f *TextFormatter) Printf(format string, args ...any) {
 	fmt.Fprintf(f.w, format, args...)
 }
 
-func (f *TextFormatter) Println(args ...interface{}) {
+func (f *TextFormatter) Println(args ...any) {
 	fmt.Fprintln(f.w, args...)
 }
 
@@ -283,11 +282,11 @@ func (f *JSONFormatter) PrintConfig(cfg *client.ConfigResponse) {
 	_ = enc.Encode(cfg)
 }
 
-func (f *JSONFormatter) Printf(format string, args ...interface{}) {
+func (f *JSONFormatter) Printf(format string, args ...any) {
 	// JSON 模式下忽略 Printf
 }
 
-func (f *JSONFormatter) Println(args ...interface{}) {
+func (f *JSONFormatter) Println(args ...any) {
 	// JSON 模式下忽略 Println
 }
 
@@ -327,15 +326,6 @@ func (f *JSONFormatter) PrintStat(info *client.FileInfo, filename string) {
 		"checksum": info.Checksum,
 		"mod_time": info.ModTime,
 	})
-}
-
-// buildFormatter 根据 --json flag 创建 OutputFormatter。
-func buildFormatter(cmd *cobra.Command) OutputFormatter {
-	useJSON, _ := cmd.Flags().GetBool("json")
-	if useJSON {
-		return NewJSONFormatter(os.Stdout)
-	}
-	return NewTextFormatter(os.Stdout)
 }
 
 // buildFormatterWithWriter 根据 --json flag 创建 OutputFormatter，输出到指定 writer。

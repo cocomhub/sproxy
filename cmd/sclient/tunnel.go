@@ -16,114 +16,17 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
-	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
-var tunnelCmd = &cobra.Command{
-	Use:   "tunnel [flags] <url>",
-	Short: "通过加密隧道转发请求",
-	Long: `通过加密隧道发送 HTTP 请求。
-需要配置 tunnel_key 才能使用。
-
-示例:
-  sclient tunnel https://api.example.com/data
-  sclient tunnel -X POST -H "Content-Type: application/json" -d '{"key":"val"}' https://api.example.com/echo`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		// tunnel 命令可能没有通过 PersistentPreRunE，所以 fallback 初始化 cfgProvider
-		if cfgProvider == nil {
-			cfgProvider = sclientcfg.New(cfgFile)
-			cfgProvider.BindPFlag("server_url", cmd.Flags().Lookup("server"))
-		}
-
-		cfg, err := client.LoadFromProvider(cfgProvider)
-		if err != nil {
-			return fmt.Errorf("加载配置失败: %w", err)
-		}
-
-		if cfg.TunnelKey == "" {
-			return fmt.Errorf("请先配置 tunnel_key: sclient config set tunnel_key <64位hex密钥>")
-		}
-
-		method, _ := cmd.Flags().GetString("method")
-		headers, _ := cmd.Flags().GetStringArray("header")
-		body, _ := cmd.Flags().GetString("data")
-		include, _ := cmd.Flags().GetBool("include")
-		outputPath, _ := cmd.Flags().GetString("output")
-		verbose, _ := cmd.Flags().GetBool("verbose")
-
-		// 处理 @file 格式的 body
-		if strings.HasPrefix(body, "@") {
-			data, err := os.ReadFile(body[1:])
-			if err != nil {
-				return fmt.Errorf("读取文件失败: %w", err)
-			}
-			body = string(data)
-		}
-
-		targetURL := args[0]
-
-		return tunnelRequest(tunnelReqOpts{
-			cfg:        cfg,
-			method:     method,
-			targetURL:  targetURL,
-			headers:    headers,
-			body:       body,
-			outputFile: outputPath,
-			verbose:    verbose,
-			include:    include,
-		})
-	},
-}
-
-// tunnelReqOpts 是 tunnelRequest 的参数集合，用于减少函数参数数量（go:S107）。
+// tunnelReqOpts 是 buildTunnelRequest 的参数集合。
 type tunnelReqOpts struct {
-	cfg        *client.Config
-	method     string
-	targetURL  string
-	headers    []string
-	body       string
-	outputFile string
-	verbose    bool
-	include    bool
-}
-
-// tunnelRequest 是 CLI 专用的隧道请求函数，包含 curl 风格的进度条输出。
-func tunnelRequest(opts tunnelReqOpts) error {
-	// 创建带隧道配置的新客户端
-	tunnelOpt := client.WithTunnel(opts.cfg.TunnelKey)
-	tunnelCli := client.NewFileClient(opts.cfg.ServerURL, tunnelOpt)
-
-	req, err := buildTunnelRequest(opts)
-	if err != nil {
-		return err
-	}
-
-	finalOutputFile, err := resolveOutputPath(opts.targetURL, opts.outputFile)
-	if err != nil {
-		return err
-	}
-
-	f, err := os.Create(finalOutputFile)
-	if err != nil {
-		return fmt.Errorf("创建结果文件失败: %w", err)
-	}
-	defer f.Close()
-
-	if opts.verbose {
-		printTunnelVerbose(opts, req)
-	}
-
-	resp, err := tunnelCli.TunnelDo(req)
-	if err != nil {
-		return fmt.Errorf("tunnel 请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	return writeTunnelResponse(opts, resp, f, finalOutputFile)
+	method    string
+	targetURL string
+	headers   []string
+	body      string
 }
 
 // buildTunnelRequest 构建 HTTP 请求并设置自定义头。
@@ -144,51 +47,6 @@ func buildTunnelRequest(opts tunnelReqOpts) (*http.Request, error) {
 		}
 	}
 	return req, nil
-}
-
-// printTunnelVerbose 输出 verbose 模式的请求详情。
-func printTunnelVerbose(opts tunnelReqOpts, req *http.Request) {
-	fmt.Fprintf(os.Stderr, "--%s-- #Tunnel %s/tunnel\n", time.Now().Format("2006-01-02 15:04:05"), opts.cfg.ServerURL)
-	fmt.Fprintf(os.Stderr, "[请求] %s %s\n", opts.method, opts.targetURL)
-	for k := range req.Header {
-		fmt.Fprintf(os.Stderr, "%s: %s\n", k, req.Header.Get(k))
-	}
-	fmt.Fprintln(os.Stderr)
-}
-
-// writeTunnelResponse 处理并写出隧道响应。
-func writeTunnelResponse(opts tunnelReqOpts, resp *http.Response, f *os.File, finalOutputFile string) error {
-	if opts.include || opts.verbose {
-		fmt.Fprintf(os.Stderr, "[响应状态] %s\n", resp.Status)
-		for k := range resp.Header {
-			fmt.Fprintf(os.Stderr, "%s: %s\n", k, resp.Header.Get(k))
-		}
-		fmt.Fprintln(os.Stderr)
-	}
-
-	contentLength := resp.ContentLength
-	if contentLength > 0 {
-		fmt.Fprintf(os.Stderr, "长度：%d (%s) [%s]\n", contentLength, client.FormatByte(float64(contentLength)), resp.Header.Get("Content-Type"))
-		fmt.Fprintf(os.Stderr, "正在保存至: '%s'\n\n", finalOutputFile)
-	}
-
-	totalRead, err := writeWithProgress(resp.Body, f, contentLength)
-	if err != nil {
-		return err
-	}
-
-	if contentLength > 0 {
-		fmt.Fprintf(os.Stderr, "\n'%s' saved [%d/%d]\n", finalOutputFile, totalRead, contentLength)
-	}
-
-	modTimeStr := resp.Header.Get("Last-Modified")
-	if modTimeStr != "" {
-		modTime, err := time.Parse(time.RFC1123, modTimeStr)
-		if err == nil {
-			_ = os.Chtimes(finalOutputFile, modTime, modTime)
-		}
-	}
-	return nil
 }
 
 // resolveOutputPath 计算输出文件路径。若已指定 outputFile 则直接返回；
@@ -227,11 +85,11 @@ func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 		Use:   "tunnel [flags] <url>",
 		Short: "通过加密隧道转发请求",
 		Long: `通过加密隧道发送 HTTP 请求。
-需要配置 tunnel_key 才能使用。
+	需要配置 tunnel_key 才能使用。
 
-示例:
-  sclient tunnel https://api.example.com/data
-  sclient tunnel -X POST -H "Content-Type: application/json" -d '{"key":"val"}' https://api.example.com/echo`,
+	示例:
+	  sclient tunnel https://api.example.com/data
+	  sclient tunnel -X POST -H "Content-Type: application/json" -d '{"key":"val"}' https://api.example.com/echo`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)

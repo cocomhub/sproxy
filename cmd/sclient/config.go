@@ -65,10 +65,6 @@ func NewCmdConfigRemote(factory clientfactory.Factory, ios cli.IOStreams) *cobra
 			if err != nil {
 				return err
 			}
-			// 生产 Factory 当前为占位实现（返回 nil, nil），回退到 buildFileClient
-			if svc == nil {
-				return runConfigRemoteFallback(cmd, ios)
-			}
 
 			cfg, err := svc.GetConfig(cmd.Context())
 			if err != nil {
@@ -95,14 +91,9 @@ func NewCmdConfigRemoteSet(factory clientfactory.Factory, ios cli.IOStreams) *co
 			if err != nil {
 				return err
 			}
-			// 生产 Factory 当前为占位实现（返回 nil, nil），回退到 buildFileClient
-			if svc == nil {
-				return runConfigRemoteSetFallback(cmd, ios, args)
-			}
-
 			key := args[0]
 			value := args[1]
-			updates := map[string]interface{}{key: value}
+			updates := map[string]any{key: value}
 			if err := svc.UpdateConfig(cmd.Context(), updates); err != nil {
 				ios.WriteErrLine("更新远程配置失败: %v", err)
 				return fmt.Errorf("更新远程配置失败: %w", err)
@@ -111,39 +102,4 @@ func NewCmdConfigRemoteSet(factory clientfactory.Factory, ios cli.IOStreams) *co
 			return nil
 		},
 	}
-}
-
-// runConfigRemoteFallback 是 config remote 的 buildFileClient 回退路径，
-// 用于生产 Factory 尚未实现时的过渡期。
-func runConfigRemoteFallback(cmd *cobra.Command, ios cli.IOStreams) error {
-	cli, err := buildFileClient(cmd)
-	if err != nil {
-		return err
-	}
-	cfg, err := cli.GetConfig(cmd.Context())
-	if err != nil {
-		ios.WriteErrLine("获取远程配置失败: %v", err)
-		return fmt.Errorf("获取远程配置失败: %w", err)
-	}
-	fm := buildFormatterWithWriter(ios.Out, cmd)
-	fm.PrintConfig(cfg)
-	return nil
-}
-
-// runConfigRemoteSetFallback 是 config remote set 的 buildFileClient 回退路径，
-// 用于生产 Factory 尚未实现时的过渡期。
-func runConfigRemoteSetFallback(cmd *cobra.Command, ios cli.IOStreams, args []string) error {
-	cli, err := buildFileClient(cmd)
-	if err != nil {
-		return err
-	}
-	key := args[0]
-	value := args[1]
-	updates := map[string]interface{}{key: value}
-	if err := cli.UpdateConfig(cmd.Context(), updates); err != nil {
-		ios.WriteErrLine("更新远程配置失败: %v", err)
-		return fmt.Errorf("更新远程配置失败: %w", err)
-	}
-	fmt.Fprintf(ios.Out, "远程配置已更新: %s = %s\n", key, value)
-	return nil
 }

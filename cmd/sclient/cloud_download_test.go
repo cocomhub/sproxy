@@ -39,7 +39,7 @@ func TestCloudDownloadCmd_CreateTask(t *testing.T) {
 	chk := sha256.Sum256(content)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download" && r.Method == http.MethodPost {
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-test-1",
 				"url":        "https://example.com/file.zip",
 				"filename":   "file.zip",
@@ -86,7 +86,7 @@ func TestCloudDownloadCmd_AsyncPolling(t *testing.T) {
 	chk := sha256.Sum256(content)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download" && r.Method == http.MethodPost {
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-async-1",
 				"url":        "https://example.com/large.zip",
 				"filename":   "large.zip",
@@ -103,7 +103,7 @@ func TestCloudDownloadCmd_AsyncPolling(t *testing.T) {
 			if pollCount >= 2 {
 				status = "completed"
 			}
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-async-1",
 				"url":        "https://example.com/large.zip",
 				"filename":   "large.zip",
@@ -148,7 +148,7 @@ func TestCloudDownloadCmd_TaskFailed(t *testing.T) {
 	pollCount := 0
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download" && r.Method == http.MethodPost {
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-fail-1",
 				"url":        "https://example.com/fail.zip",
 				"filename":   "fail.zip",
@@ -165,7 +165,7 @@ func TestCloudDownloadCmd_TaskFailed(t *testing.T) {
 			if pollCount >= 2 {
 				status = "failed"
 			}
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-fail-1",
 				"url":        "https://example.com/fail.zip",
 				"filename":   "fail.zip",
@@ -198,7 +198,7 @@ func TestCloudDownloadCmd_ChecksumMismatch(t *testing.T) {
 	content := []byte("content")
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download" && r.Method == http.MethodPost {
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-chk-1",
 				"url":        "https://example.com/file.zip",
 				"filename":   "file.zip",
@@ -240,7 +240,7 @@ func TestCloudDownloadCmd_NoCleanupFlag(t *testing.T) {
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download" && r.Method == http.MethodPost {
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-noclean-1",
 				"url":        "https://example.com/file.zip",
 				"filename":   "file.zip",
@@ -287,7 +287,7 @@ func TestCloudDownloadCmd_ForceAsync(t *testing.T) {
 	chk := sha256.Sum256(content)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download" && r.Method == http.MethodPost {
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-forceasync-1",
 				"url":        "https://example.com/small.zip",
 				"filename":   "small.zip",
@@ -299,7 +299,7 @@ func TestCloudDownloadCmd_ForceAsync(t *testing.T) {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/cloud-forceasync-1") {
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-forceasync-1",
 				"url":        "https://example.com/small.zip",
 				"filename":   "small.zip",
@@ -348,7 +348,7 @@ func TestCloudDownloadCmd_OutputFlag(t *testing.T) {
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download" && r.Method == http.MethodPost {
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-out-1",
 				"url":        "https://example.com/file.zip",
 				"filename":   "file.zip",
@@ -445,7 +445,7 @@ func TestCloudDownloadCmd_MultipleURLs(t *testing.T) {
 				URL string `json:"url"`
 			}
 			json.NewDecoder(io.NopCloser(r.Body)).Decode(&body)
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-multi-" + body.URL[len(body.URL)-1:],
 				"url":        body.URL,
 				"filename":   "file" + body.URL[len(body.URL)-1:] + ".zip",
@@ -498,7 +498,7 @@ func TestCloudDownloadCmd_BatchFileFlag(t *testing.T) {
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download" && r.Method == http.MethodPost {
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-batch-file-1",
 				"url":        "https://example.com/batch-file.zip",
 				"filename":   "batch-file.zip",
@@ -554,7 +554,7 @@ func TestCloudDownloadCmd_PartialFailure(t *testing.T) {
 				json.NewEncoder(w).Encode(map[string]string{"error": "bad URL"})
 				return
 			}
-			task := map[string]interface{}{
+			task := map[string]any{
 				"id":         "cloud-partial-1",
 				"url":        body.URL,
 				"filename":   "partial.zip",
