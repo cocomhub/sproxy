@@ -38,19 +38,9 @@ var versionListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if len(versions) == 0 {
-			fmt.Printf("文件 '%s' 没有历史版本\n", args[0])
-			return nil
-		}
-		fmt.Printf("文件 '%s' 的版本历史:\n", args[0])
-		for _, v := range versions {
-			checksum := v.Checksum
-			if len(checksum) > 16 {
-				checksum = checksum[:16] + "..."
-			}
-			fmt.Printf("  ID: %d  Size: %d  Created: %s  Checksum: %s\n",
-				v.VersionID, v.Size, v.CreatedAt, checksum)
-		}
+
+		fm := buildFormatter(cmd)
+		fm.PrintVersionList(args[0], versions)
 		return nil
 	},
 }
