@@ -27,6 +27,10 @@ func TestStatsCmd_Usage(t *testing.T) {
 
 func TestNewCmdStats_Integration(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/stats" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{
@@ -60,6 +64,10 @@ func TestNewCmdStats_Integration(t *testing.T) {
 
 func TestNewCmdConfigRemote_Integration(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/config" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{
@@ -92,6 +100,10 @@ func TestNewCmdConfigRemote_Integration(t *testing.T) {
 
 func TestNewCmdConfigRemoteSet_Integration(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PUT" || r.URL.Path != "/api/config" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"success":true,"changed":true}`))

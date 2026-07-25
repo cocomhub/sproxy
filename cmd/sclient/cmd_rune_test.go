@@ -221,6 +221,59 @@ func TestArchiveCommand(t *testing.T) {
 // ---- Version 测试已迁移到新工厂函数 ----
 // TestVersionCommand_Run 已移除，版本命令不再通过 rootCmd 注册
 
+// ---- Version 子命令 error 测试 ----
+
+func TestNewCmdVersionList_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdVersionList(factory, cli.IOStreams{})
+
+	cmd.SetArgs([]string{"test.txt"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 404")
+	}
+}
+
+func TestNewCmdVersionRestore_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdVersionRestore(factory, cli.IOStreams{})
+
+	cmd.SetArgs([]string{"test.txt", "1"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 404")
+	}
+}
+
+func TestNewCmdVersionDelete_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdVersionDelete(factory, cli.IOStreams{})
+
+	cmd.SetArgs([]string{"test.txt", "1"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 404")
+	}
+}
+
 // ---- Tunnel command RunE 测试 ----
 
 func TestTunnelCommand_MissingKey(t *testing.T) {
