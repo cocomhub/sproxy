@@ -96,7 +96,6 @@ func init() {
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(tunnelCmd)
 	rootCmd.AddCommand(relayCmd)
-	rootCmd.AddCommand(cloudDownloadCmd)
 	rootCmd.AddCommand(shareCmd)
 
 	// 注册子命令（新模式 — 工厂函数）
@@ -114,6 +113,7 @@ func init() {
 	rootCmd.AddCommand(NewCmdPreview(factory, ios, cliState))
 	rootCmd.AddCommand(NewCmdTunnel(factory, ios))
 	rootCmd.AddCommand(NewCmdShare(factory, ios))
+	rootCmd.AddCommand(NewCmdCloudDownload(factory, ios, cliState))
 }
 
 // buildFileClient 根据 cfgProvider 配置和 persistent flag 构造 FileClient。
