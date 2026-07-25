@@ -6,6 +6,8 @@
 package clientfactory
 
 import (
+	"fmt"
+
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
@@ -37,8 +39,7 @@ func New(cfgFile string, cfgProvider cfgBinder) Factory {
 
 // NewClient 当前为占位实现，后续 PR 中完善。
 func (f *factory) NewClient(cmd *cobra.Command) (client.Service, error) {
-	// 生产实现需要从配置加载，flag 覆盖等
-	return nil, nil
+	return nil, fmt.Errorf("生产 Factory 尚未实现，请使用 mockFactory 进行测试")
 }
 
 // mockFactory 是测试实现，直接返回预配置的 client。

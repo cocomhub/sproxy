@@ -68,3 +68,38 @@ func TestState_ResolveRemotePathOrErr_Invalid(t *testing.T) {
 		t.Error("expected error for invalid path")
 	}
 }
+
+func TestState_ResolveRemotePath_CurrentDirWithParentRef(t *testing.T) {
+	s := &state.State{CurrentDir: "a/../b"}
+	_, err := s.ResolveRemotePath("file.txt")
+	if err == nil {
+		t.Error("expected error when CurrentDir contains parent ref")
+	}
+}
+
+func TestState_ResolveRemotePath_PathEndsWithParentRef(t *testing.T) {
+	s := &state.State{CurrentDir: "base"}
+	_, err := s.ResolveRemotePath("a/..")
+	if err == nil {
+		t.Error("expected error for path ending with ..")
+	}
+}
+
+func TestState_ResolveRemotePath_PathMidParentRef(t *testing.T) {
+	s := &state.State{CurrentDir: "base"}
+	_, err := s.ResolveRemotePath("a/../b/file.txt")
+	if err == nil {
+		t.Error("expected error for path with mid ..")
+	}
+}
+
+func TestState_ResolveRemotePath_NotParentRef(t *testing.T) {
+	s := &state.State{CurrentDir: ""}
+	got, err := s.ResolveRemotePath("...file")
+	if err != nil {
+		t.Fatalf("should not error for '...file': %v", err)
+	}
+	if got != "...file" {
+		t.Errorf("got %q, want %q", got, "...file")
+	}
+}

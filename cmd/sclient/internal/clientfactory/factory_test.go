@@ -12,13 +12,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestFactory_Interface(t *testing.T) {
-	// New 返回 Factory 接口 — 编译期检查构造函数签名正确
+func TestFactory_Constructor(t *testing.T) {
+	// New 和 NewMock 返回 Factory 接口 — 编译期检查构造函数签名正确
 	_ = clientfactory.New("", nil)
 	_ = clientfactory.NewMock(nil, nil)
 }
 
-func TestMockFactory_Success(t *testing.T) {
+func TestMockFactory_NilService(t *testing.T) {
 	cmd := &cobra.Command{}
 	factory := clientfactory.NewMock(nil, nil)
 	svc, err := factory.NewClient(cmd)
@@ -26,7 +26,7 @@ func TestMockFactory_Success(t *testing.T) {
 		t.Fatalf("NewClient should not error: %v", err)
 	}
 	if svc != nil {
-		t.Error("NewClient should return the mock service as-is")
+		t.Error("NewClient should return nil service as-is")
 	}
 }
 
