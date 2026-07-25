@@ -42,7 +42,7 @@ func NewCmdCd(st *state.State, ios cli.IOStreams) *cobra.Command {
 			switch path {
 			case "/":
 				st.CurrentDir = ""
-				saveCurrentDir()
+				saveCurrentDirValue(st.CurrentDir)
 				return
 			case ".":
 				return
@@ -56,7 +56,7 @@ func NewCmdCd(st *state.State, ios cli.IOStreams) *cobra.Command {
 				} else {
 					st.CurrentDir = strings.Join(parts[:len(parts)-1], "/")
 				}
-				saveCurrentDir()
+				saveCurrentDirValue(st.CurrentDir)
 				return
 			}
 
@@ -73,7 +73,7 @@ func NewCmdCd(st *state.State, ios cli.IOStreams) *cobra.Command {
 				return
 			}
 			st.CurrentDir = cleaned
-			saveCurrentDir()
+			saveCurrentDirValue(st.CurrentDir)
 		},
 	}
 }
@@ -176,12 +176,17 @@ const cacheFile = "current_dir"
 
 // saveCurrentDir 将当前目录持久化到 XDG 缓存目录。
 func saveCurrentDir() {
+	saveCurrentDirValue(currentDir)
+}
+
+// saveCurrentDirValue 将指定目录持久化到 XDG 缓存目录。
+func saveCurrentDirValue(dir string) {
 	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFile))
 	if err != nil {
 		return
 	}
 	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
-	_ = os.WriteFile(cachePath, []byte(currentDir), 0644)
+	_ = os.WriteFile(cachePath, []byte(dir), 0644)
 }
 
 // loadCurrentDir 从 XDG 缓存目录加载当前目录。

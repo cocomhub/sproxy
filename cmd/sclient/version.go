@@ -43,25 +43,15 @@ func NewCmdVersionList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return err
 			}
 			versions, err := svc.ListVersions(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
-			if len(versions) == 0 {
-				fmt.Fprintf(ios.Out, "文件 '%s' 没有历史版本\n", args[0])
-				return nil
-			}
-			fmt.Fprintf(ios.Out, "文件 '%s' 的版本历史:\n", args[0])
-			for _, v := range versions {
-				checksum := v.Checksum
-				if len(checksum) > 16 {
-					checksum = checksum[:16] + "..."
-				}
-				fmt.Fprintf(ios.Out, "  ID: %d  Size: %d  Created: %s  Checksum: %s\n",
-					v.VersionID, v.Size, v.CreatedAt, checksum)
-			}
+			fm := buildFormatterWithWriter(ios.Out, cmd)
+			fm.PrintVersionList(args[0], versions)
 			return nil
 		},
 	}
@@ -76,6 +66,7 @@ func NewCmdVersionRestore(factory clientfactory.Factory, ios cli.IOStreams) *cob
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return err
 			}
 			if err := svc.RestoreVersion(cmd.Context(), args[0], args[1]); err != nil {
@@ -96,6 +87,7 @@ func NewCmdVersionDelete(factory clientfactory.Factory, ios cli.IOStreams) *cobr
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return err
 			}
 			if err := svc.DeleteVersion(cmd.Context(), args[0], args[1]); err != nil {

@@ -12,7 +12,6 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
-	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func TestStatsCmd_Usage(t *testing.T) {
@@ -102,9 +101,13 @@ func TestNewCmdConfigRemoteSet_Integration(t *testing.T) {
 	svc := client.NewFileClient(ts.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	ios := cli.IOStreams{Out: &buf}
-	_ = ios
-	_ = factory
-	_ = testutil.CaptureStdout
-	// Skip config remote set test for now - needs NewCmdConfig wrapper
+	cmd := NewCmdConfigRemoteSet(factory, cli.IOStreams{Out: &buf})
+
+	cmd.SetArgs([]string{"log_level", "debug"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("config remote set failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "debug") {
+		t.Errorf("expected output to contain 'debug', got: %s", buf.String())
+	}
 }
