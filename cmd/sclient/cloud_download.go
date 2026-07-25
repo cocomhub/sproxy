@@ -37,13 +37,6 @@ var cloudDownloadCmd = &cobra.Command{
 	RunE: runCloudDownload,
 }
 
-func init() {
-	cloudDownloadCmd.Flags().Bool("force-async", false, "强制使用异步模式（即使文件小于阈值）")
-	cloudDownloadCmd.Flags().Bool("no-cleanup", false, "下载到本地后不删除云端副本")
-	cloudDownloadCmd.Flags().Duration("poll-interval", 2*time.Second, "异步模式轮询间隔")
-	cloudDownloadCmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
-}
-
 func runCloudDownload(cmd *cobra.Command, args []string) error {
 	forceAsync, _ := cmd.Flags().GetBool("force-async")
 	noCleanup, _ := cmd.Flags().GetBool("no-cleanup")

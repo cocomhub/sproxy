@@ -75,18 +75,6 @@ type relayFlags struct {
 
 var relayFl relayFlags
 
-func init() {
-	relayStartCmd.Flags().StringVar(&relayFl.hubURL, "hub", "ws://127.0.0.1:18084/ws", "Hub 的 WebSocket 地址")
-	relayStartCmd.Flags().StringVar(&relayFl.local, "local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
-	relayStartCmd.Flags().StringVar(&relayFl.nodeID, "node-id", "", "节点唯一标识 (默认使用时间戳)")
-
-	relayStatusCmd.Flags().String("hub", "", "Hub 的 HTTP 地址 (如 http://127.0.0.1:18083)")
-
-	relayCmd.AddCommand(relayStartCmd)
-	relayCmd.AddCommand(relayStatusCmd)
-	relayCmd.AddCommand(relayStopCmd)
-}
-
 func runRelayStart(cmd *cobra.Command, args []string) error {
 	nodeID := relayFl.nodeID
 	if nodeID == "" {

@@ -70,10 +70,6 @@ var cloudCancelCmd = &cobra.Command{
 	},
 }
 
-func init() {
-	cloudDownloadCmd.AddCommand(cloudCancelCmd)
-}
-
 // NewCmdCloudCancel 创建 cloud cancel 命令的工厂函数。
 func NewCmdCloudCancel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	return &cobra.Command{

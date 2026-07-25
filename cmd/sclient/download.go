@@ -77,13 +77,6 @@ var downloadCmd = &cobra.Command{
 	},
 }
 
-func init() {
-	downloadCmd.Flags().Bool("chunked", false, "启用分块下载模式")
-	downloadCmd.Flags().Int64("chunk-size", 0, "分块大小 (默认 4MB)")
-	downloadCmd.Flags().Int("concurrency", 0, "下载并发数 (默认 4)")
-	downloadCmd.Flags().Bool("resume", true, "续传模式")
-}
-
 // NewCmdDownload 创建独立的 download 命令工厂函数，使用 state.State 替代全局 currentDir。
 func NewCmdDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	cmd := &cobra.Command{
