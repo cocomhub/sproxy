@@ -19,22 +19,23 @@ type Factory interface {
 	NewClient(cmd *cobra.Command) (client.Service, error)
 }
 
-// factory 是生产实现，封装配置加载 + flag 覆盖 + 客户端构造。
-type factory struct {
-	cfgFile     string
-	cfgProvider cfgBinder
-}
-
-// cfgBinder 抽象 flag 绑定能力，避免直接依赖 *pflag.Flag 类型。
-type cfgBinder interface {
+// CfgBinder 抽象 flag 绑定能力，避免直接依赖 *pflag.Flag 类型。
+type CfgBinder interface {
 	BindPFlag(key string, flag *pflag.Flag)
 }
 
+// factory 是生产实现，封装配置加载 + flag 覆盖 + 客户端构造。
+type factory struct {
+	cfgFile     string
+	cfgProvider func() CfgBinder
+}
+
 // New 创建生产实现的 Factory。
-func New(cfgFile string, cfgProvider cfgBinder) Factory {
+// cfgProviderFn 是延迟获取配置提供者的函数，在 PersistentPreRunE 之后才有效。
+func New(cfgFile string, cfgProviderFn func() CfgBinder) Factory {
 	return &factory{
 		cfgFile:     cfgFile,
-		cfgProvider: cfgProvider,
+		cfgProvider: cfgProviderFn,
 	}
 }
 

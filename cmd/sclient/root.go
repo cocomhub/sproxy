@@ -100,7 +100,7 @@ func init() {
 	// 注册子命令（新模式 — 工厂函数）
 	ios := cli.SystemIOStreams()
 	cliState := &state.State{}
-	factory := clientfactory.New(cfgFile, cfgProvider)
+	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return cfgProvider })
 	rootCmd.AddCommand(NewCmdCd(cliState, ios))
 	rootCmd.AddCommand(NewCmdPwd(cliState, ios))
 	rootCmd.AddCommand(NewCmdMkdir(factory, ios, cliState))

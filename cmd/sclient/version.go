@@ -15,7 +15,7 @@ import (
 // NewCmdVersion 创建 version 命令。
 func NewCmdVersion(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "version",
+		Use:   "version [subcommand]",
 		Short: "显示版本信息",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(ios.Out, "sclient version %s (build: %s)\n", Version, BuildAt)

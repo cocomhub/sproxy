@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -231,7 +232,7 @@ func TestNewCmdVersionList_ServerError(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdVersionList(factory, cli.IOStreams{})
+	cmd := NewCmdVersionList(factory, cli.IOStreams{ErrOut: io.Discard})
 
 	cmd.SetArgs([]string{"test.txt"})
 	err := cmd.Execute()
@@ -248,7 +249,7 @@ func TestNewCmdVersionRestore_ServerError(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdVersionRestore(factory, cli.IOStreams{})
+	cmd := NewCmdVersionRestore(factory, cli.IOStreams{ErrOut: io.Discard})
 
 	cmd.SetArgs([]string{"test.txt", "1"})
 	err := cmd.Execute()
@@ -265,7 +266,7 @@ func TestNewCmdVersionDelete_ServerError(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdVersionDelete(factory, cli.IOStreams{})
+	cmd := NewCmdVersionDelete(factory, cli.IOStreams{ErrOut: io.Discard})
 
 	cmd.SetArgs([]string{"test.txt", "1"})
 	err := cmd.Execute()
