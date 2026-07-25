@@ -392,11 +392,92 @@ async function completeUpload(uploadID, tunnelMode) {
   return resp.json();
 }
 
+// --- 简单上传（小文件直接 POST /upload，跳过分块流程）---
+async function simpleUpload(file, tunnelMode) {
+  const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
+  const totalSize = file.size;
+  const progId = 'prog-' + Date.now() + '-' + (++_progCounter);
+  const container = document.getElementById('upload-progress-container');
+  container.insertAdjacentHTML('beforeend',
+    '<div id="' + progId + '-wrap"><small>' + escHtml(fileName) + ' (' + formatSize(totalSize) + ')</small>' +
+    '<div class="upload-progress"><div class="upload-progress-bar" id="' + progId + '"></div></div>' +
+    '<div class="chunk-progress-text" id="' + progId + '-text">计算 SHA-256…</div></div>');
+
+  try {
+    // 计算 SHA-256
+    const fileChecksum = await computeSHA256(file, function(loaded, total) {
+      const pct = total > 0 ? Math.round(loaded / total * 100) : 0;
+      document.getElementById(progId).style.width = pct + '%';
+      document.getElementById(progId + '-text').textContent = '计算 SHA-256… ' + pct + '%';
+    });
+
+    document.getElementById(progId + '-text').textContent = '上传中…';
+
+    // 直接用 POST /upload 上传
+    const formData = new FormData();
+    formData.append('file', file, fileName);
+
+    if (tunnelMode) {
+      // 隧道模式下构建 multipart 请求
+      const boundary = '----WebKitFormBoundary' + crypto.getRandomValues(new Uint32Array(1))[0].toString(36);
+      const encoder = new TextEncoder();
+      const parts = [];
+      const fileData = await file.arrayBuffer();
+      parts.push(encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + escHtml(fileName) + '"\r\nContent-Type: application/octet-stream\r\n\r\n'));
+      parts.push(new Uint8Array(fileData));
+      parts.push(encoder.encode('\r\n--' + boundary + '--\r\n'));
+      const tlen = parts.reduce(function(s, p) { return s + p.byteLength; }, 0);
+      const fullBody = new Uint8Array(tlen);
+      let off = 0;
+      for (let pi = 0; pi < parts.length; pi++) { fullBody.set(parts[pi], off); off += parts[pi].byteLength; }
+      const treq = await tunnelRequest('POST', '/upload',
+        { 'Content-Type': 'multipart/form-data; boundary=' + boundary,
+          'X-File-Checksum': fileChecksum,
+          'X-File-Path': fileName,
+          'X-File-MTime': String((file.lastModified || Date.now()) * 1_000_000) }, fullBody);
+      const result = JSON.parse(new TextDecoder().decode(treq.body));
+      if (result.success) {
+        showToast(fileName + ' 上传成功', 'success');
+      } else {
+        showToast(fileName + ' 上传失败: ' + (result.message || 'unknown'), 'error');
+      }
+    } else {
+      // 直接 HTTP 上传
+      const resp = await fetch(BASE + '/upload', {
+        method: 'POST',
+        headers: headers({
+          'X-File-Checksum': fileChecksum,
+          'X-File-Path': fileName,
+          'X-File-MTime': String((file.lastModified || Date.now()) * 1_000_000)
+        }),
+        body: formData
+      });
+      const result = await resp.json();
+      if (result.success) {
+        showToast(fileName + ' 上传成功', 'success');
+      } else {
+        showToast(fileName + ' 上传失败: ' + (result.message || 'unknown'), 'error');
+      }
+    }
+  } catch (e) {
+    console.error('[upload] 简单上传异常', e);
+    showToast(fileName + ' 上传失败: ' + e.message, 'error');
+  }
+  const wrap = document.getElementById(progId + '-wrap');
+  if (wrap) wrap.remove();
+}
+
 // --- 上传入口 ---
 async function uploadFiles(files) {
   if (!files || files.length === 0) return;
   for (let i = 0; i < files.length; i++) {
-    await chunkedUpload(files[i], !!tunnelHexKey, null);
+    const file = files[i];
+    // 小文件（≤4MB）走简单上传，大文件走分块上传
+    if (file.size <= BASE_CHUNK_SIZE) {
+      await simpleUpload(file, !!tunnelHexKey);
+    } else {
+      await chunkedUpload(file, !!tunnelHexKey, null);
+    }
   }
   refreshList();
 }
