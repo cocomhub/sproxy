@@ -1281,7 +1281,7 @@ func TestLoadConfig_NotExistWithCreateError(t *testing.T) {
 // TestHandleConfigSet_InvalidTimeout 验证 HandleConfigSet 无效 timeout。
 func TestHandleConfigSet_InvalidTimeout(t *testing.T) {
 	cfg := DefaultConfig()
-	err := HandleConfigSet(cfg, "", "timeout", "bad-value")
+	err := ApplyConfigSet(cfg, "timeout", "bad-value")
 	if err == nil {
 		t.Fatal("expected error for invalid timeout value")
 	}
@@ -1290,7 +1290,7 @@ func TestHandleConfigSet_InvalidTimeout(t *testing.T) {
 // TestHandleConfigSet_InvalidChunkSize 验证 HandleConfigSet 无效 chunk_size。
 func TestHandleConfigSet_InvalidChunkSize(t *testing.T) {
 	cfg := DefaultConfig()
-	err := HandleConfigSet(cfg, "", "chunk_size", "bad-value")
+	err := ApplyConfigSet(cfg, "chunk_size", "bad-value")
 	if err == nil {
 		t.Fatal("expected error for invalid chunk_size value")
 	}
@@ -1299,7 +1299,7 @@ func TestHandleConfigSet_InvalidChunkSize(t *testing.T) {
 // TestHandleConfigSet_InvalidMaxChunkSize 验证 HandleConfigSet 无效 max_chunk_size。
 func TestHandleConfigSet_InvalidMaxChunkSize(t *testing.T) {
 	cfg := DefaultConfig()
-	err := HandleConfigSet(cfg, "", "max_chunk_size", "bad-value")
+	err := ApplyConfigSet(cfg, "max_chunk_size", "bad-value")
 	if err == nil {
 		t.Fatal("expected error for invalid max_chunk_size value")
 	}
@@ -1308,7 +1308,7 @@ func TestHandleConfigSet_InvalidMaxChunkSize(t *testing.T) {
 // TestHandleConfigSet_UnknownKey 验证 HandleConfigSet 未知 key。
 func TestHandleConfigSet_UnknownKey(t *testing.T) {
 	cfg := DefaultConfig()
-	err := HandleConfigSet(cfg, "", "unknown_key", "value")
+	err := ApplyConfigSet(cfg, "unknown_key", "value")
 	if err == nil {
 		t.Fatal("expected error for unknown key")
 	}

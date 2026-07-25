@@ -19,13 +19,10 @@ import (
 type cloudTaskInfo = cloudTaskResponse
 
 // getCloudServerURL 从 flag 和配置中获取 server URL 和 auth token。
-// 与 cloud_download.go 中的 getCloudServerURL 共享逻辑。
-func getCloudServerURL(cmd *cobra.Command) (serverURL, authToken string) {
-	// 从 root 的 persistent flags 获取（子命令的 Flags() 不包含 inherited flags）
+func getCloudServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, authToken string) {
 	serverURL, _ = cmd.Root().PersistentFlags().GetString("server")
-	if serverURL == "" && cfgProvider != nil {
-		cfg, err := loadConfigSimple()
-		if err == nil {
+	if serverURL == "" && cfgSvc != nil {
+		if cfg, err := cfgSvc.LoadConfig(); err == nil {
 			serverURL = cfg.ServerURL
 			authToken = cfg.AuthToken
 		}
@@ -36,26 +33,8 @@ func getCloudServerURL(cmd *cobra.Command) (serverURL, authToken string) {
 	return
 }
 
-// loadConfigSimple 从 cfgProvider 加载配置。
-func loadConfigSimple() (*configSimple, error) {
-	if cfgProvider == nil {
-		return nil, fmt.Errorf("配置未初始化")
-	}
-	var cfg configSimple
-	if err := cfgProvider.Unmarshal(&cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
-}
-
-// configSimple 是配置提供者使用的结构体（仅 server_url 和 auth_token）。
-type configSimple struct {
-	ServerURL string `mapstructure:"server_url"`
-	AuthToken string `mapstructure:"auth_token"`
-}
-
 // NewCmdCloudList 创建 cloud list 命令的工厂函数。
-func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出所有云端下载任务",
@@ -63,7 +42,7 @@ func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
 		RunE: func(cmd *cobra.Command, args []string) error {
 			statusFilter, _ := cmd.Flags().GetString("status")
 
-			serverURL, authToken := getCloudServerURL(cmd)
+			serverURL, authToken := getCloudServerURL(cmd, cfgSvc)
 			if serverURL == "" {
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或配置 server_url")
 			}

@@ -637,12 +637,10 @@ func TestListCommand_ServerError(t *testing.T) {
 // ---- Config command error paths ----
 
 func TestConfigCommand_UnknownSubcommand(t *testing.T) {
-	oldCfgProvider := cfgProvider
-	cfgProvider = sclientcfg.New("")
-	t.Cleanup(func() { cfgProvider = oldCfgProvider })
+	cfgSvc := &cliConfigProvider{provider: sclientcfg.New("")}
 
 	var buf strings.Builder
-	cmd := NewCmdConfig(nil, cli.IOStreams{ErrOut: &buf}, new(string))
+	cmd := NewCmdConfig(nil, cli.IOStreams{ErrOut: &buf}, new(string), cfgSvc)
 	cmd.SetArgs([]string{"unknown"})
 	err := cmd.Execute()
 	if err == nil {
@@ -651,12 +649,10 @@ func TestConfigCommand_UnknownSubcommand(t *testing.T) {
 }
 
 func TestConfigCommand_SetMissingValue(t *testing.T) {
-	oldCfgProvider := cfgProvider
-	cfgProvider = sclientcfg.New("")
-	t.Cleanup(func() { cfgProvider = oldCfgProvider })
+	cfgSvc := &cliConfigProvider{provider: sclientcfg.New("")}
 
 	var buf strings.Builder
-	cmd := NewCmdConfig(nil, cli.IOStreams{ErrOut: &buf}, new(string))
+	cmd := NewCmdConfig(nil, cli.IOStreams{ErrOut: &buf}, new(string), cfgSvc)
 	cmd.SetArgs([]string{"set", "server_url"})
 	err := cmd.Execute()
 	if err == nil {
@@ -881,11 +877,7 @@ func TestCdCommand_CleanDots(t *testing.T) {
 // ---- resolveOutputPath 测试 ----
 
 func TestResolveOutputPath_SpecifiedFile(t *testing.T) {
-	oldDir := currentDir
-	currentDir = t.TempDir()
-	t.Cleanup(func() { currentDir = oldDir })
-
-	got, err := resolveOutputPath("http://example.com/data/file.txt", "/tmp/out.txt")
+	got, err := resolveOutputPath("http://example.com/data/file.txt", "/tmp/out.txt", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -895,60 +887,52 @@ func TestResolveOutputPath_SpecifiedFile(t *testing.T) {
 }
 
 func TestResolveOutputPath_FromURLPath(t *testing.T) {
-	oldDir := currentDir
-	currentDir = t.TempDir()
-	t.Cleanup(func() { currentDir = oldDir })
+	baseDir := t.TempDir()
 
-	got, err := resolveOutputPath("http://example.com/data/report.pdf", "")
+	got, err := resolveOutputPath("http://example.com/data/report.pdf", "", baseDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != filepath.Join(currentDir, "report.pdf") {
-		t.Errorf("expected %s, got %s", filepath.Join(currentDir, "report.pdf"), got)
+	if got != filepath.Join(baseDir, "report.pdf") {
+		t.Errorf("expected %s, got %s", filepath.Join(baseDir, "report.pdf"), got)
 	}
 }
 
 func TestResolveOutputPath_RootPathDefaultsToIndexHTML(t *testing.T) {
-	oldDir := currentDir
-	currentDir = t.TempDir()
-	t.Cleanup(func() { currentDir = oldDir })
+	baseDir := t.TempDir()
 
-	got, err := resolveOutputPath("http://example.com/", "")
+	got, err := resolveOutputPath("http://example.com/", "", baseDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != filepath.Join(currentDir, "index.html") {
-		t.Errorf("expected %s, got %s", filepath.Join(currentDir, "index.html"), got)
+	if got != filepath.Join(baseDir, "index.html") {
+		t.Errorf("expected %s, got %s", filepath.Join(baseDir, "index.html"), got)
 	}
 }
 
 func TestResolveOutputPath_InvalidURL(t *testing.T) {
-	oldDir := currentDir
-	currentDir = t.TempDir()
-	t.Cleanup(func() { currentDir = oldDir })
+	baseDir := t.TempDir()
 
-	_, err := resolveOutputPath("://invalid-url\t", "")
+	_, err := resolveOutputPath("://invalid-url\t", "", baseDir)
 	if err == nil {
 		t.Error("expected error for invalid URL")
 	}
 }
 
 func TestResolveOutputPath_ConflictAppendsSuffix(t *testing.T) {
-	oldDir := currentDir
-	currentDir = t.TempDir()
-	t.Cleanup(func() { currentDir = oldDir })
+	baseDir := t.TempDir()
 
 	// Create a file that conflicts
-	conflict := filepath.Join(currentDir, "data.txt")
+	conflict := filepath.Join(baseDir, "data.txt")
 	if err := os.WriteFile(conflict, []byte("existing"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := resolveOutputPath("http://example.com/data.txt", "")
+	got, err := resolveOutputPath("http://example.com/data.txt", "", baseDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	expected := filepath.Join(currentDir, "data.txt.1")
+	expected := filepath.Join(baseDir, "data.txt.1")
 	if got != expected {
 		t.Errorf("expected %s, got %s", expected, got)
 	}

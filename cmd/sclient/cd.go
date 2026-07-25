@@ -185,14 +185,14 @@ func saveCurrentDirValue(dir string) {
 }
 
 // loadCurrentDir 从 XDG 缓存目录加载当前目录。
-func loadCurrentDir() {
+func loadCurrentDir() string {
 	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFile))
 	if err != nil {
-		return
+		return ""
 	}
 	data, err := os.ReadFile(cachePath)
 	if err != nil {
-		return
+		return ""
 	}
-	currentDir = strings.TrimSpace(string(data))
+	return strings.TrimSpace(string(data))
 }

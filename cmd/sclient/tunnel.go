@@ -51,11 +51,10 @@ func buildTunnelRequest(opts tunnelReqOpts) (*http.Request, error) {
 
 // resolveOutputPath 计算输出文件路径。若已指定 outputFile 则直接返回；
 // 否则从 URL 路径提取 basename，处理同名冲突后返回。
-func resolveOutputPath(targetURL, outputFile string) (string, error) {
+func resolveOutputPath(targetURL, outputFile, baseDir string) (string, error) {
 	if outputFile != "" {
 		return outputFile, nil
 	}
-	baseDir := currentDir
 	if baseDir == "" {
 		baseDir = os.TempDir()
 	}
@@ -127,7 +126,7 @@ func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 				return err
 			}
 
-			finalOutputFile, err := resolveOutputPath(targetURL, outputPath)
+			finalOutputFile, err := resolveOutputPath(targetURL, outputPath, "")
 			if err != nil {
 				return err
 			}

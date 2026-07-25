@@ -14,19 +14,15 @@ import (
 
 // NewCmdConfig 创建独立的 config 命令工厂函数，接收 IOStreams 用于输出。
 // cfgFile 为配置文件路径指针，用于 config set 时的回写。
-func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *string) *cobra.Command {
+func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *string, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config [show|set <key> <value>|remote]",
 		Short: "配置管理",
 		Long:  "查看或修改 sclient 配置。\n\n可用配置项:\n  server_url      服务器地址 (如 http://localhost:18083)\n  auth_token      Bearer Token 认证令牌\n  timeout         HTTP 超时秒数\n  tunnel_key      隧道密钥 (64 位 hex)\n  chunk_size      分块上传/下载块大小 (字节)\n  max_chunk_size  最大分块大小 (字节)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if cfgProvider == nil {
-				return fmt.Errorf("配置未初始化，请通过 sclient --config 指定配置文件")
-			}
-			cfg, err := client.LoadFromProvider(cfgProvider)
+			cfg, err := cfgSvc.LoadConfig()
 			if err != nil {
-				errMsg := fmt.Sprintf("加载配置失败: %v", err)
-				ios.WriteErrLine(errMsg)
+				ios.WriteErrLine("加载配置失败: %v", err)
 				return fmt.Errorf("加载配置失败: %w", err)
 			}
 
@@ -39,9 +35,13 @@ func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *str
 				if len(args) < 3 {
 					return fmt.Errorf("用法: sclient config set <键> <值>")
 				}
-				if err := client.HandleConfigSet(cfg, *cfgFile, args[1], args[2]); err != nil {
+				if err := client.ApplyConfigSet(cfg, args[1], args[2]); err != nil {
 					ios.WriteErrLine("设置配置失败: %v", err)
 					return fmt.Errorf("设置配置失败: %w", err)
+				}
+				if err := client.SaveConfig(cfg, *cfgFile); err != nil {
+					ios.WriteErrLine("保存配置失败: %v", err)
+					return fmt.Errorf("保存配置失败: %w", err)
 				}
 				fmt.Fprintf(ios.Out, "配置已更新: %s = %s\n", args[1], args[2])
 				return nil

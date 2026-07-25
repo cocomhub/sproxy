@@ -16,7 +16,7 @@ import (
 
 func TestRelayCmd_Usage(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdRelay(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard})
+	cmd := NewCmdRelay(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, nil)
 	if cmd.Use != "relay" {
 		t.Errorf("expected Use=relay, got %s", cmd.Use)
 	}
@@ -27,7 +27,7 @@ func TestRelayCmd_Usage(t *testing.T) {
 
 func TestRelayCmd_HasSubcommands(t *testing.T) {
 	t.Parallel()
-	cmd := NewCmdRelay(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard})
+	cmd := NewCmdRelay(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, nil)
 	cmds := cmd.Commands()
 	names := make(map[string]bool)
 	for _, c := range cmds {
@@ -68,6 +68,7 @@ func TestRelayStopCmd_UseAndArgs(t *testing.T) {
 }
 
 func TestRelayStatsCmd_Integration(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/stats" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
@@ -80,7 +81,7 @@ func TestRelayStatsCmd_Integration(t *testing.T) {
 	defer ts.Close()
 
 	var buf strings.Builder
-	cmd := NewCmdRelayStats(cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdRelayStats(cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", ts.URL)
 	cmd.SetArgs(nil)
 	if err := cmd.Execute(); err != nil {
@@ -92,6 +93,7 @@ func TestRelayStatsCmd_Integration(t *testing.T) {
 }
 
 func TestRelayStatusCmd_Integration(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/nodes" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
@@ -104,7 +106,7 @@ func TestRelayStatusCmd_Integration(t *testing.T) {
 	defer ts.Close()
 
 	var buf strings.Builder
-	cmd := NewCmdRelayStatus(cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdRelayStatus(cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", ts.URL)
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
@@ -116,6 +118,7 @@ func TestRelayStatusCmd_Integration(t *testing.T) {
 }
 
 func TestRelayStatusCmd_Empty(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/nodes" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
@@ -128,7 +131,7 @@ func TestRelayStatusCmd_Empty(t *testing.T) {
 	defer ts.Close()
 
 	var buf strings.Builder
-	cmd := NewCmdRelayStatus(cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd := NewCmdRelayStatus(cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.Flags().Set("hub", ts.URL)
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {

@@ -16,7 +16,7 @@ import (
 )
 
 // NewCmdCloudCancel 创建 cloud cancel 命令的工厂函数。
-func NewCmdCloudCancel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func NewCmdCloudCancel(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	return &cobra.Command{
 		Use:   "cancel <task-id>",
 		Short: "取消云端下载任务",
@@ -24,7 +24,7 @@ func NewCmdCloudCancel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			taskID := args[0]
 
-			serverURL, authToken := getCloudServerURL(cmd)
+			serverURL, authToken := getCloudServerURL(cmd, cfgSvc)
 			if serverURL == "" {
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或配置 server_url")
 			}

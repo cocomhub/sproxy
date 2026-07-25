@@ -44,10 +44,10 @@ func TestRootCmd_SubCommands(t *testing.T) {
 		{"delete", NewCmdDelete(factory, ios, st)},
 		{"list", NewCmdList(factory, ios, st)},
 		{"search", NewCmdSearch(factory, ios)},
-		{"version", NewCmdVersion(factory, ios)},
+		{"version", NewCmdVersion(factory, ios, nil)},
 		{"stats", NewCmdStats(factory, ios)},
 		{"diag", NewCmdDiag(ios)},
-		{"relay", NewCmdRelay(factory, ios)},
+		{"relay", NewCmdRelay(factory, ios, nil)},
 		{"archive", NewCmdArchive(factory, ios)},
 		{"batch-delete", NewCmdBatchDelete(factory, ios, st)},
 		{"batch-rename", NewCmdBatchRename(factory, ios)},
@@ -178,7 +178,7 @@ func TestListCmd(t *testing.T) {
 
 func TestRelayCmd_Registered(t *testing.T) {
 	factory := clientfactory.NewMock(nil, nil)
-	cmd := NewCmdRelay(factory, cli.IOStreams{Out: io.Discard})
+	cmd := NewCmdRelay(factory, cli.IOStreams{Out: io.Discard}, nil)
 	if cmd.Use != "relay" {
 		t.Errorf("relayCmd.Use = %q, want 'relay'", cmd.Use)
 	}
@@ -296,7 +296,7 @@ func TestSearchCmd(t *testing.T) {
 
 func TestVersionCmd(t *testing.T) {
 	factory := clientfactory.NewMock(nil, nil)
-	cmd := NewCmdVersion(factory, cli.IOStreams{Out: io.Discard})
+	cmd := NewCmdVersion(factory, cli.IOStreams{Out: io.Discard}, nil)
 	if !strings.HasPrefix(cmd.Use, "version") {
 		t.Errorf("versionCmd.Use = %q, want prefix 'version'", cmd.Use)
 	}

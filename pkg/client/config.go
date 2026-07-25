@@ -116,7 +116,8 @@ func HandleConfigShow(cfg *Config) {
 	fmt.Printf("MaxChunkSize:  %d\n", cfg.MaxChunkSize)
 }
 
-func HandleConfigSet(cfg *Config, configPath, key, value string) error {
+// ApplyConfigSet 在内存中更新配置，不写文件。返回更新后的配置和错误。
+func ApplyConfigSet(cfg *Config, key, value string) error {
 	switch key {
 	case "server_url":
 		cfg.ServerURL = value
@@ -138,6 +139,14 @@ func HandleConfigSet(cfg *Config, configPath, key, value string) error {
 		}
 	default:
 		return fmt.Errorf("未知配置键: %s", key)
+	}
+	return nil
+}
+
+// HandleConfigSet 更新配置并写入文件。
+func HandleConfigSet(cfg *Config, configPath, key, value string) error {
+	if err := ApplyConfigSet(cfg, key, value); err != nil {
+		return err
 	}
 	return SaveConfig(cfg, configPath)
 }

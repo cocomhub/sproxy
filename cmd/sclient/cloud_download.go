@@ -232,7 +232,7 @@ func filepathSafe(name string) string {
 }
 
 // NewCmdCloudDownload 创建云端下载命令的工厂函数。
-func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
+func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cloud-download <url> [url...]",
 		Short: "从云端下载文件（服务端先拉取，再下载到本地）",
@@ -250,7 +250,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 			outputPath, _ := cmd.Flags().GetString("output")
 			batchFile, _ := cmd.Flags().GetString("batch")
 
-			serverURL, authToken := getCloudServerURL(cmd)
+			serverURL, authToken := getCloudServerURL(cmd, cfgSvc)
 			if serverURL == "" {
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或配置 server_url")
 			}
@@ -340,8 +340,8 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.Flags().Duration("poll-interval", 2*time.Second, "异步模式轮询间隔")
 	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
 
-	cmd.AddCommand(NewCmdCloudList(factory, ios))
-	cmd.AddCommand(NewCmdCloudCancel(factory, ios))
+	cmd.AddCommand(NewCmdCloudList(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudCancel(factory, ios, cfgSvc))
 
 	return cmd
 }

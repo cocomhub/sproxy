@@ -24,7 +24,7 @@ import (
 func TestCloudDownloadCmd_UseAndArgs(t *testing.T) {
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{}, nil)
 	if cmd.Use != "cloud-download <url> [url...]" {
 		t.Fatalf("expected Use 'cloud-download <url> [url...]', got %q", cmd.Use)
 	}
@@ -67,7 +67,7 @@ func TestCloudDownloadCmd_CreateTask(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.PersistentFlags().String("output", "", "")
@@ -131,7 +131,7 @@ func TestCloudDownloadCmd_AsyncPolling(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.PersistentFlags().String("output", "", "")
@@ -183,7 +183,7 @@ func TestCloudDownloadCmd_TaskFailed(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.PersistentFlags().String("output", "", "")
@@ -221,7 +221,7 @@ func TestCloudDownloadCmd_ChecksumMismatch(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.PersistentFlags().String("output", "", "")
@@ -269,7 +269,7 @@ func TestCloudDownloadCmd_NoCleanupFlag(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	outPath := filepath.Join(t.TempDir(), "file.zip")
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.PersistentFlags().String("output", "", "")
@@ -328,7 +328,7 @@ func TestCloudDownloadCmd_ForceAsync(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	outPath := filepath.Join(t.TempDir(), "small.zip")
 	var buf strings.Builder
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.PersistentFlags().String("output", "", "")
@@ -376,7 +376,7 @@ func TestCloudDownloadCmd_OutputFlag(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	outPath := filepath.Join(t.TempDir(), "custom-name.bin")
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.PersistentFlags().String("output", "", "")
@@ -473,7 +473,7 @@ func TestCloudDownloadCmd_MultipleURLs(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.PersistentFlags().String("output", "", "")
@@ -526,7 +526,7 @@ func TestCloudDownloadCmd_BatchFileFlag(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.PersistentFlags().String("output", "", "")
@@ -581,7 +581,7 @@ func TestCloudDownloadCmd_PartialFailure(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.PersistentFlags().String("server", "", "")
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.PersistentFlags().String("output", "", "")
