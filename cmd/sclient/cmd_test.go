@@ -214,15 +214,6 @@ func TestArchiveCmd_Registered(t *testing.T) {
 	}
 }
 
-// ---- saveCurrentDir ----
-
-func TestSaveCurrentDir(t *testing.T) {
-	old := currentDir
-	t.Cleanup(func() { currentDir = old })
-	currentDir = "/test/dir"
-	saveCurrentDir()
-}
-
 // ---- writeArchiveResponse ----
 
 func TestWriteArchiveResponse(t *testing.T) {
@@ -337,16 +328,13 @@ func TestCLientInitLogger(t *testing.T) {
 // ---- helper tests ----
 
 func TestResolveRemotePathOrErr(t *testing.T) {
-	old := currentDir
-	currentDir = ""
-	defer func() { currentDir = old }()
-
-	got, err := resolveRemotePathOrErr("test.txt")
+	st := &state.State{CurrentDir: ""}
+	got, err := st.ResolveRemotePathOrErr("test.txt")
 	if err != nil {
-		t.Fatalf("resolveRemotePathOrErr('test.txt') unexpected error: %v", err)
+		t.Fatalf("ResolveRemotePathOrErr('test.txt') unexpected error: %v", err)
 	}
 	if got != "test.txt" {
-		t.Errorf("resolveRemotePathOrErr('test.txt') = %q, want 'test.txt'", got)
+		t.Errorf("ResolveRemotePathOrErr('test.txt') = %q, want 'test.txt'", got)
 	}
 }
 

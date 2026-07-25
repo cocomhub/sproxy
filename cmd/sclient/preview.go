@@ -22,39 +22,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var previewCmd = &cobra.Command{
-	Use:   "preview <filename>",
-	Short: "预览服务端文件",
-	Long: `预览服务端上的文件内容。
-
-	文本文件（.txt, .md, .json, .yaml, .log, .csv, .go, .py, .js 等）：
-	下载前 100 行输出到终端。
-
-	图片文件（.png, .jpg, .jpeg, .gif, .bmp, .webp, .svg）：
-	下载到临时目录并使用系统图片查看器打开。`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		filename, err := resolveRemotePathOrErr(args[0])
-		if err != nil {
-			return err
-		}
-
-		serverURL, authToken := getCloudServerURL(cmd)
-		if serverURL == "" {
-			return fmt.Errorf("未指定服务器地址，请使用 --server 或配置 server_url")
-		}
-
-		ext := strings.ToLower(filepath.Ext(filename))
-		if isImageExt(ext) {
-			return previewImage(serverURL, authToken, filename)
-		}
-		if isTextExt(ext) {
-			return previewText(serverURL, authToken, filename)
-		}
-		return fmt.Errorf("无法预览此文件类型: %s", ext)
-	},
-}
-
 func isImageExt(ext string) bool {
 	switch ext {
 	case ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg":
