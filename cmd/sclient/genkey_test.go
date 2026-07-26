@@ -33,7 +33,7 @@ func TestNewCmdGenkey(t *testing.T) {
 		t.Errorf("output length = %d, want 64", len(got))
 	}
 	for _, ch := range got {
-		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) { //nolint:staticcheck // QF1001: explicit for clarity
 			t.Errorf("non-hex character %q in output", ch)
 		}
 	}

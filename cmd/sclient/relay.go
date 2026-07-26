@@ -83,8 +83,8 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local string, logger *slo
 	if err != nil {
 		return fmt.Errorf("创建控制流失败: %w", err)
 	}
-	if _, err := ctrl.Write([]byte(nodeID)); err != nil {
-		return fmt.Errorf("发送注册帧失败: %w", err)
+	if _, writeErr := ctrl.Write([]byte(nodeID)); writeErr != nil {
+		return fmt.Errorf("发送注册帧失败: %w", writeErr)
 	}
 	ctrl.Close()
 	logger.Info("已注册到 Hub")
@@ -115,7 +115,7 @@ func buildRelayHandler(ctx context.Context, localAddr string, httpClient *http.C
 			forwardURL += "?" + r.URL.RawQuery
 		}
 
-		forwardReq, err := http.NewRequestWithContext(ctx, r.Method, forwardURL, r.Body)
+		forwardReq, err := http.NewRequestWithContext(ctx, r.Method, forwardURL, r.Body) //nolint:gosec // G704: SSRF is intentional (relay proxy)
 		if err != nil {
 			logger.Warn("构建转发请求失败", "error", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
@@ -137,7 +137,7 @@ func buildRelayHandler(ctx context.Context, localAddr string, httpClient *http.C
 			}
 		}
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		_, _ = io.Copy(w, resp.Body)
 	})
 }
 

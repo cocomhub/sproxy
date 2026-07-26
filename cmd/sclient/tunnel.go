@@ -105,11 +105,11 @@ func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 
 			// 处理 @file 格式的 body
 			if strings.HasPrefix(body, "@") {
-				data, err := os.ReadFile(body[1:])
-				if err != nil {
-					return fmt.Errorf("读取文件失败: %w", err)
+				fileData, fileErr := os.ReadFile(body[1:])
+				if fileErr != nil {
+					return fmt.Errorf("读取文件失败: %w", fileErr)
 				}
-				body = string(data)
+				body = string(fileData)
 			}
 
 			targetURL := args[0]

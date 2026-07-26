@@ -70,8 +70,8 @@ func runPingWithIO(ctx context.Context, hubAddr string, w io.Writer) error {
 	logger.Info("Hub 连接成功", "延迟", dialDur.Round(time.Millisecond))
 
 	sendStart := time.Now()
-	if err := conn.Send(ctx, []byte("ping")); err != nil {
-		return fmt.Errorf("发送 ping 失败: %w", err)
+	if sendErr := conn.Send(ctx, []byte("ping")); sendErr != nil {
+		return fmt.Errorf("发送 ping 失败: %w", sendErr)
 	}
 	_, err = conn.Receive(ctx)
 	if err != nil {
