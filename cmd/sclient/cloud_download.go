@@ -178,7 +178,6 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	}
 
 	// 注册 flags
-	cmd.Flags().Bool("force-async", false, "强制使用异步模式（即使文件小于阈值）")
 	cmd.Flags().Bool("no-cleanup", false, "下载到本地后不删除云端副本")
 	cmd.Flags().Duration("poll-interval", 2*time.Second, "异步模式轮询间隔")
 	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")

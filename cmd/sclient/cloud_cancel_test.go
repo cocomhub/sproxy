@@ -93,8 +93,9 @@ func TestCloudCancelCmd_JSONOutput(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("failed: %v", err)
 	}
-	if !strings.Contains(buf.String(), "task-json") {
-		t.Errorf("expected output to contain task-json, got: %s", buf.String())
+	// JSON 输出应包含 task_id 或 success 等 JSON 字段
+	if !strings.Contains(buf.String(), `"task_id"`) && !strings.Contains(buf.String(), `"success"`) {
+		t.Errorf("expected JSON output with task_id or success field, got: %s", buf.String())
 	}
 }
 
@@ -114,6 +115,8 @@ func TestCloudCancelCmd_ServerError(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil {
 		t.Error("expected error for server 500, got nil")
+	} else if !strings.Contains(err.Error(), "HTTP 500") && !strings.Contains(err.Error(), "internal error") {
+		t.Errorf("expected error to mention HTTP 500 or internal error, got: %v", err)
 	}
 }
 
