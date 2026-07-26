@@ -87,7 +87,7 @@ func createCloudDownloadTask(serverURL, sourceURL, authToken string) (*cloudTask
 	return &task, nil
 }
 
-func pollCloudTask(ctx context.Context, serverURL, taskID string, interval time.Duration, authToken string) (*cloudTaskResponse, error) {
+func pollCloudTask(ctx context.Context, ios cli.IOStreams, serverURL, taskID string, interval time.Duration, authToken string) (*cloudTaskResponse, error) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -104,7 +104,7 @@ func pollCloudTask(ctx context.Context, serverURL, taskID string, interval time.
 
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "轮询失败: %v\n", err)
+				fmt.Fprintf(ios.ErrOut, "轮询失败: %v\n", err)
 				continue
 			}
 
@@ -127,7 +127,7 @@ func pollCloudTask(ctx context.Context, serverURL, taskID string, interval time.
 				if task.TotalSize > 0 {
 					pct = task.Downloaded * 100 / task.TotalSize
 				}
-				fmt.Printf("\r下载进度: %d%% (%d/%d bytes)", pct, task.Downloaded, task.TotalSize)
+				fmt.Fprintf(ios.Out, "\r下载进度: %d%% (%d/%d bytes)", pct, task.Downloaded, task.TotalSize)
 			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -135,7 +135,7 @@ func pollCloudTask(ctx context.Context, serverURL, taskID string, interval time.
 	}
 }
 
-func downloadAndCleanup(serverURL string, task *cloudTaskResponse, outputPath string, noCleanup bool, authToken string) error {
+func downloadAndCleanup(ios cli.IOStreams, serverURL string, task *cloudTaskResponse, outputPath string, noCleanup bool, authToken string) error {
 	// 确定输出路径：默认仅使用文件名，拒绝路径穿越
 	if outputPath == "" {
 		outputPath = filepathSafe(filepath.Base(task.Filename))
@@ -190,7 +190,7 @@ func downloadAndCleanup(serverURL string, task *cloudTaskResponse, outputPath st
 	}
 
 	if expectedChecksum != "" && localChecksum != expectedChecksum {
-		fmt.Fprintf(os.Stderr, "checksum 不匹配: 期望 %s, 实际 %s\n", expectedChecksum, localChecksum)
+		fmt.Fprintf(ios.ErrOut, "checksum 不匹配: 期望 %s, 实际 %s\n", expectedChecksum, localChecksum)
 		return fmt.Errorf("checksum 不匹配")
 	}
 
@@ -204,7 +204,7 @@ func downloadAndCleanup(serverURL string, task *cloudTaskResponse, outputPath st
 		delReq.Header.Set("X-File-Checksum", localChecksum)
 		delResp, err := http.DefaultClient.Do(delReq)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "清理云端文件失败: %v\n", err)
+			fmt.Fprintf(ios.ErrOut, "清理云端文件失败: %v\n", err)
 		} else {
 			delResp.Body.Close()
 		}
@@ -214,13 +214,13 @@ func downloadAndCleanup(serverURL string, task *cloudTaskResponse, outputPath st
 			fmt.Sprintf("%s/api/cloud/tasks/%s", serverURL, task.ID), nil)
 		delTaskResp, err := http.DefaultClient.Do(delTaskReq)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "清理云端任务失败: %v\n", err)
+			fmt.Fprintf(ios.ErrOut, "清理云端任务失败: %v\n", err)
 		} else {
 			delTaskResp.Body.Close()
 		}
 	}
 
-	fmt.Printf("Downloaded %s (%d bytes)\n", outputPath, task.TotalSize)
+	fmt.Fprintf(ios.Out, "Downloaded %s (%d bytes)\n", outputPath, task.TotalSize)
 	return nil
 }
 
@@ -298,7 +298,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 
 				// 2. 如果同步模式完成，直接进入下载
 				if task.Status == "completed" {
-					if dlErr := downloadAndCleanup(serverURL, task, outputPath, noCleanup, authToken); dlErr != nil {
+					if dlErr := downloadAndCleanup(ios, serverURL, task, outputPath, noCleanup, authToken); dlErr != nil {
 						ios.WriteErrLine("  %v", dlErr)
 						failed++
 					} else {
@@ -314,7 +314,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 					ios.WriteOutLine("  异步模式，轮询任务状态...")
 				}
 
-				task, err = pollCloudTask(cmd.Context(), serverURL, task.ID, pollInterval, authToken)
+				task, err = pollCloudTask(cmd.Context(), ios, serverURL, task.ID, pollInterval, authToken)
 				if err != nil {
 					ios.WriteErrLine("  云端下载任务失败: %v", err)
 					failed++
@@ -322,7 +322,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 				}
 
 				// 4. 下载到本地并清理云端
-				if err := downloadAndCleanup(serverURL, task, outputPath, noCleanup, authToken); err != nil {
+				if err := downloadAndCleanup(ios, serverURL, task, outputPath, noCleanup, authToken); err != nil {
 					ios.WriteErrLine("  %v", err)
 					failed++
 				} else {

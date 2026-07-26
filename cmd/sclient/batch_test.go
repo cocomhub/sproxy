@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -99,7 +100,7 @@ func TestPrintBatchResults(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testutil.CaptureStdout(func() {
-				printBatchResults(tt.results)
+				printBatchResults(tt.results, io.Discard)
 			})
 		})
 	}

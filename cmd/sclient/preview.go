@@ -43,7 +43,7 @@ func isTextExt(ext string) bool {
 	return false
 }
 
-func previewText(serverURL, authToken, filename string) error {
+func previewText(ios cli.IOStreams, serverURL, authToken, filename string) error {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
 		serverURL+"/download?filename="+url.QueryEscape(filename), nil)
 	if err != nil {
@@ -72,9 +72,9 @@ func previewText(serverURL, authToken, filename string) error {
 	maxLines := 100
 	lineCount := 0
 
-	fmt.Printf("--- 文件预览: %s ---\n", filename)
+	fmt.Fprintf(ios.Out, "--- 文件预览: %s ---\n", filename)
 	for scanner.Scan() && lineCount < maxLines {
-		fmt.Println(scanner.Text())
+		fmt.Fprintln(ios.Out, scanner.Text())
 		lineCount++
 	}
 
@@ -86,13 +86,13 @@ func previewText(serverURL, authToken, filename string) error {
 	}
 
 	if hasMore || lineCount >= maxLines {
-		fmt.Printf("\n... (仅显示前 %d 行)\n", maxLines)
+		fmt.Fprintf(ios.Out, "\n... (仅显示前 %d 行)\n", maxLines)
 	}
 
 	return nil
 }
 
-func previewImage(serverURL, authToken, filename string) error {
+func previewImage(ios cli.IOStreams, serverURL, authToken, filename string) error {
 	tmpDir, err := os.MkdirTemp("", "sproxy-preview-*")
 	if err != nil {
 		return fmt.Errorf("创建临时目录失败: %w", err)
@@ -130,7 +130,7 @@ func previewImage(serverURL, authToken, filename string) error {
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
 
-	fmt.Printf("正在打开图片预览: %s\n", tmpFile)
+	fmt.Fprintf(ios.Out, "正在打开图片预览: %s\n", tmpFile)
 
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -146,16 +146,16 @@ func previewImage(serverURL, authToken, filename string) error {
 		return fmt.Errorf("打开图片查看器失败: %w", err)
 	}
 
-	fmt.Println("图片查看器已打开，按 Enter 键清理临时文件（5 秒后自动清理）...")
+	fmt.Fprintln(ios.Out, "图片查看器已打开，按 Enter 键清理临时文件（5 秒后自动清理）...")
 	done := make(chan struct{})
 	go func() {
-		_, _ = fmt.Scanln()
+		_, _ = fmt.Fscanln(ios.In)
 		close(done)
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		fmt.Println("超时，自动清理临时文件")
+		fmt.Fprintln(ios.Out, "超时，自动清理临时文件")
 	}
 
 	return nil
@@ -189,10 +189,10 @@ func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.S
 
 			ext := strings.ToLower(filepath.Ext(filename))
 			if isImageExt(ext) {
-				return previewImage(serverURL, authToken, filename)
+				return previewImage(ios, serverURL, authToken, filename)
 			}
 			if isTextExt(ext) {
-				return previewText(serverURL, authToken, filename)
+				return previewText(ios, serverURL, authToken, filename)
 			}
 			return fmt.Errorf("无法预览此文件类型: %s", ext)
 		},

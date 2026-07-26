@@ -4,6 +4,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -228,6 +229,7 @@ func TestWriteWithProgress(t *testing.T) {
 		strings.NewReader(string(content)),
 		&wBuf,
 		int64(len(content)),
+		io.Discard,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -247,6 +249,7 @@ func TestWriteWithProgress_NoLength(t *testing.T) {
 		strings.NewReader(string(content)),
 		&wBuf,
 		-1,
+		io.Discard,
 	)
 	if err != nil {
 		t.Fatal(err)
