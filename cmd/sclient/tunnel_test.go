@@ -70,8 +70,10 @@ func TestBuildTunnelRequest_InvalidHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Invalid header format should be silently skipped
-	_ = req
+	// 验证无效 header 被静默跳过，且没有空的 header 值被设置
+	if len(req.Header) > 0 {
+		t.Errorf("expected no headers to be set for invalid input, got %d headers", len(req.Header))
+	}
 }
 
 func TestBuildTunnelRequest_EmptyBody(t *testing.T) {
