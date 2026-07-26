@@ -808,8 +808,11 @@ func (c *FileClient) downloadOneChunk(ctx context.Context, p downloadChunkParams
 
 		p.Mu.Lock()
 		if _, writeErr := p.OutFile.WriteAt(data, offset); writeErr != nil {
+			if *p.DownloadErr == nil {
+				*p.DownloadErr = fmt.Errorf("分块 %d 写入文件失败: %w", p.ChunkIdx, writeErr)
+			}
 			p.Mu.Unlock()
-			continue
+			return
 		}
 		*p.Progress += int64(len(data))
 		if c.progressFn != nil {

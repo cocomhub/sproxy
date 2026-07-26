@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,20 +131,18 @@ func TestHTTPDownloader_Download_Progress(t *testing.T) {
 	d := &downloader.HTTPDownloader{}
 	dest := filepath.Join(t.TempDir(), "progress.bin")
 
-	var progressCalls []downloader.ProgressFunc
-	progress := func(downloaded, total int64) {
-		progressCalls = append(progressCalls, nil)
-		t.Logf("progress: %d/%d", downloaded, total)
-	}
-	_ = progress
-
+	var progressCount atomic.Int32
 	_, err := d.Download(t.Context(), srv.URL, dest, func(downloaded, total int64) {
-		t.Logf("progress: %d/%d", downloaded, total)
+		progressCount.Add(1)
+		_ = downloaded
+		_ = total
 	})
 	if err != nil {
 		t.Fatalf("Download failed: %v", err)
 	}
-	// 只要有进度回调被调用即可
+	if progressCount.Load() == 0 {
+		t.Fatal("expected progress callback to be called at least once")
+	}
 }
 
 func TestHTTPDownloader_PreservesMTime(t *testing.T) {

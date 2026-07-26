@@ -236,6 +236,7 @@ func TestDownloadOneChunk_ContextCancel(t *testing.T) {
 	var progress int64
 	var downloadErr error
 
+	// 上下文已取消，downloadOneChunk 应提前返回且不设置 downloadErr
 	c.downloadOneChunk(ctx, downloadChunkParams{
 		Filename:    "f.txt",
 		ChunkIdx:    0,
@@ -247,8 +248,12 @@ func TestDownloadOneChunk_ContextCancel(t *testing.T) {
 		DownloadErr: &downloadErr,
 	})
 
-	// 上下文已取消，应该不设置 downloadErr（提前 return）或未做任何成功写入
-	_ = downloadErr
+	if downloadErr != nil {
+		t.Errorf("expected no downloadErr after context cancellation, got: %v", downloadErr)
+	}
+	if progress != 0 {
+		t.Errorf("expected no progress after context cancellation, got %d", progress)
+	}
 }
 
 func TestCalcChunkSize_SmallFile(t *testing.T) {
