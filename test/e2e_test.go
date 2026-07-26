@@ -6,7 +6,10 @@
 package sproxy_test
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +18,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +27,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/client"
 )
 
 // ---- helpers ----
@@ -576,6 +582,94 @@ func TestE2E_Upload_ChecksumMismatch(t *testing.T) {
 		}
 		if err := json.Unmarshal(body, &uploadResp); err == nil && !uploadResp.Success {
 			t.Logf("server correctly rejected checksum mismatch: %s", uploadResp.Message)
+		}
+	}
+}
+
+func TestE2E_CloudDownloadChain(t *testing.T) {
+	t.Parallel()
+	baseURL, cleanup := startSPROXY(t)
+	defer cleanup()
+
+	fc := client.NewFileClient(baseURL, client.WithCacheDir(t.TempDir()))
+
+	// 创建一个测试 HTTP 服务器提供下载文件，并返回 Last-Modified 头
+	fileContent := []byte("test file content for cloud download chain e2e")
+	expectedMTime := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	fileTs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Last-Modified", expectedMTime.Format(time.RFC1123))
+		w.Write(fileContent)
+	}))
+	defer fileTs.Close()
+
+	// 执行链式操作
+	ctx := context.Background()
+	result, err := fc.CloudDownloadChain(ctx,
+		[]string{fileTs.URL},
+		"test-archive.tar.gz",
+		t.TempDir(),
+		client.WithChainPollInterval(1*time.Second),
+		client.WithChainTimeout(2*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Status != client.StatusCompleted {
+		t.Errorf("expected completed, got %s", result.Status)
+	}
+
+	// 验证本地文件存在
+	cdc := result.Raw.(*client.CloudDownloadChain)
+	if cdc.LocalPath == "" {
+		t.Fatal("expected local path to be set")
+	}
+	if _, err := os.Stat(cdc.LocalPath); os.IsNotExist(err) {
+		t.Errorf("local file not found: %s", cdc.LocalPath)
+	}
+
+	// 验证文件内容正确（解压 tar.gz 检查）
+	f, err := os.Open(cdc.LocalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	header, err := tr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, _ := io.ReadAll(tr)
+	if string(content) != string(fileContent) {
+		t.Errorf("archive content mismatch: got %q, want %q", string(content), string(fileContent))
+	}
+
+	// 验证 tar header 中的 mtime 与原始文件一致
+	diff := header.ModTime.Sub(expectedMTime)
+	if diff < -time.Second || diff > time.Second {
+		t.Errorf("tar header ModTime %v differs from original %v (diff: %v)",
+			header.ModTime, expectedMTime, diff)
+	}
+
+	// 验证远端文件已被清理（默认 keepFiles=false）
+	// 通过尝试访问云任务列表验证
+	resp, err := http.Get(baseURL + "/api/cloud/tasks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var taskList struct {
+		Tasks []any `json:"tasks"`
+	}
+	if err := json.Unmarshal(body, &taskList); err == nil {
+		if len(taskList.Tasks) > 0 {
+			t.Errorf("expected no cloud tasks after cleanup, got %d", len(taskList.Tasks))
 		}
 	}
 }

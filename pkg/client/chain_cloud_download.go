@@ -257,11 +257,14 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 	timeoutCtx, cancel := context.WithTimeout(ctx, c.opts.timeout)
 	defer cancel()
 
+	ticker := time.NewTicker(c.opts.pollInterval)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-timeoutCtx.Done():
 			return nil, timeoutCtx.Err()
-		case <-time.After(c.opts.pollInterval):
+		case <-ticker.C:
 			allDone := true
 			var results []*CloudTask
 			for _, taskID := range c.TaskIDs {

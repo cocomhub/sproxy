@@ -105,19 +105,7 @@ func NewChainManager(store KVStore) *ChainManager {
 
 // Run 执行链式操作（自动持久化，支持恢复）。
 func (m *ChainManager) Run(ctx context.Context, runner ChainRunner) error {
-	m.saveState(ctx, runner)
-	reportFn := func(ctx context.Context, phase string, msg string, current, total int) {
-		m.saveState(ctx, runner)
-	}
-	err := runner.Run(ctx, reportFn)
-	if err != nil {
-		state := runner.State()
-		state["status"] = StatusFailed
-		_ = m.store.Save(ctx, "chain:"+runner.ID(), state)
-		return err
-	}
-	_ = m.store.Delete(ctx, "chain:"+runner.ID())
-	return nil
+	return m.RunWithProgress(ctx, runner, nil)
 }
 
 // RunWithProgress 执行链式操作，并支持外部进度回调。
