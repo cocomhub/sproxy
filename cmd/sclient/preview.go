@@ -149,7 +149,7 @@ func previewImage(serverURL, authToken, filename string) error {
 	fmt.Println("图片查看器已打开，按 Enter 键清理临时文件（5 秒后自动清理）...")
 	done := make(chan struct{})
 	go func() {
-		fmt.Scanln()
+		_, _ = fmt.Scanln()
 		close(done)
 	}()
 	select {
