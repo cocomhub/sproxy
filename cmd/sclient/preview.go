@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
@@ -145,8 +146,17 @@ func previewImage(serverURL, authToken, filename string) error {
 		return fmt.Errorf("打开图片查看器失败: %w", err)
 	}
 
-	fmt.Println("图片查看器已打开，按 Enter 键清理临时文件...")
-	fmt.Scanln()
+	fmt.Println("图片查看器已打开，按 Enter 键清理临时文件（5 秒后自动清理）...")
+	done := make(chan struct{})
+	go func() {
+		fmt.Scanln()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		fmt.Println("超时，自动清理临时文件")
+	}
 
 	return nil
 }
