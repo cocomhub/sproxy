@@ -727,3 +727,41 @@ func TestCloudFlushNow_TriggersFlush(t *testing.T) {
 		t.Error("expected task persistence file after FlushNow")
 	}
 }
+
+func TestCloudDownloadManager_DeleteTaskCleansAndReleases(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.StopFlush)
+
+	task := &CloudTask{
+		ID:        "cloud-test-1",
+		URL:       "https://example.com/file.txt",
+		Status:    "completed",
+		Filename:  "file.txt",
+		TotalSize: 1000,
+		Checksum:  "abc123",
+	}
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	taskDir := filepath.Join(mgr.cloudDir, task.ID)
+	os.MkdirAll(taskDir, 0755)
+	os.WriteFile(filepath.Join(taskDir, task.Filename), []byte("test"), 0644)
+	mgr.storage.TryReserve(1000, CategoryCloud)
+
+	if err := mgr.DeleteTask(task.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
+		t.Error("task dir should be deleted")
+	}
+
+	usage := mgr.storage.UsageByCategory()
+	if usage[CategoryCloud] != 0 {
+		t.Errorf("expected cloud size 0, got %d", usage[CategoryCloud])
+	}
+}
