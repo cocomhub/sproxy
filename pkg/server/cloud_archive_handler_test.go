@@ -275,9 +275,6 @@ func TestCloudArchive_DefaultArchiveName(t *testing.T) {
 	if !strings.HasSuffix(result.File, ".tar.gz") {
 		t.Fatalf("expected default archive name ending with '.tar.gz', got %q", result.File)
 	}
-	if !strings.HasSuffix(result.File, ".tar.gz") {
-		t.Fatalf("expected archive name ending with '.tar.gz', got %q", result.File)
-	}
 	if result.Size <= 0 {
 		t.Fatalf("expected positive size, got %d", result.Size)
 	}
