@@ -119,6 +119,12 @@ type Service interface {
 	// === Cloud Archive ===
 	ArchiveCloudTask(ctx context.Context, taskID, archiveName string) (*ArchiveResult, error)
 	ArchiveCloudTasks(ctx context.Context, taskIDs []string, archiveName string) (*ArchiveResult, error)
+	// === Storage Config ===
+	UpdateStorageConfig(ctx context.Context, maxStorageBytes int64) error
+	// === Hub Management ===
+	ListHubNodes(ctx context.Context) ([]HubNodeInfo, error)
+	RemoveHubNode(ctx context.Context, nodeID string) error
+	GetHubStats(ctx context.Context) (*HubStats, error)
 	TunnelDo(req *http.Request) (*http.Response, error)
 }
 
