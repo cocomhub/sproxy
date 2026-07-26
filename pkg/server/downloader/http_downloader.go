@@ -45,9 +45,9 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	// 从 Last-Modified 响应头提取原始文件修改时间
 	var modTime time.Time
 	if lm := resp.Header.Get("Last-Modified"); lm != "" {
-		if t, err := time.Parse(time.RFC1123, lm); err == nil {
+		if t, parseErr := time.Parse(time.RFC1123, lm); parseErr == nil {
 			modTime = t
-		} else if t, err := time.Parse(time.RFC1123Z, lm); err == nil {
+		} else if t, parseErr := time.Parse(time.RFC1123Z, lm); parseErr == nil {
 			modTime = t
 		}
 	}

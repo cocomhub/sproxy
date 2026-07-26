@@ -927,7 +927,6 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 func (c *FileClient) CloudDownloadChain(ctx context.Context,
 	urls []string, archiveName, localDir string,
 	opts ...ChainOption) (*ChainResult, error) {
-
 	options := defaultChainOptions()
 	for _, o := range opts {
 		o(&options)
