@@ -56,6 +56,12 @@ func TestCloudListCmd_ListTasks(t *testing.T) {
 	if !strings.Contains(buf.String(), "task-1") {
 		t.Fatalf("expected output to contain task-1, got: %s", buf.String())
 	}
+	if !strings.Contains(buf.String(), "task-2") {
+		t.Fatalf("expected output to contain task-2, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "task-3") {
+		t.Fatalf("expected output to contain task-3, got: %s", buf.String())
+	}
 }
 
 func TestCloudListCmd_EmptyList(t *testing.T) {

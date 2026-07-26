@@ -207,10 +207,25 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		files = append(files, fileWithRelPath{fullPath: sourceFile, relPath: relPath})
 	}
 
-	// 确定归档文件名
+	// 确定归档文件名（路径穿越防护 + 合法性检查）
 	archiveName := req.ArchiveName
 	if archiveName == "" {
 		archiveName = fmt.Sprintf("cloud-batch-%d.tar.gz", time.Now().Unix())
+	}
+	// 路径穿越防护：仅允许文件名，拒绝 ../ 和 /
+	archiveName = filepath.Base(archiveName)
+	if archiveName == "" || archiveName == "." || archiveName == ".." {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive name"}, http.StatusBadRequest)
+		return
+	}
+	// 确保以 .tar.gz 结尾
+	if !strings.HasSuffix(archiveName, ".tar.gz") {
+		archiveName += ".tar.gz"
+	}
+	// 长度限制
+	if len(archiveName) > 255 {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive name too long"}, http.StatusBadRequest)
+		return
 	}
 
 	// 确保输出目录存在
@@ -221,6 +236,11 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outputPath := filepath.Join(archiveDir, archiveName)
+	// 二次验证：确保 outputPath 仍在 archiveDir 内
+	if !strings.HasPrefix(filepath.Clean(outputPath), filepath.Clean(archiveDir)+string(filepath.Separator)) {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
+		return
+	}
 
 	// 多文件打包
 	logger := h.logger.With("archive", "cloud_batch")
