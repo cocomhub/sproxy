@@ -1383,7 +1383,9 @@ func TestGetTunnelMux(t *testing.T) {
 		Name: "pipe-test",
 		Dial: func(_ context.Context, _ string) (xfer.Conn, error) {
 			a, b := xfertest.Pipe()
-			// 丢弃 b 端（作为 server 端，由 mux 的 listener 侧使用）
+			// 丢弃 b 端（作为 server 端，由 mux 的 listener 侧使用）。
+			// 注意：当前测试只验证 getTunnelMux 创建和缓存，不发送数据，所以丢弃 b 端不影响。
+			// 如果将来要扩展为发送请求的测试，需要在独立 goroutine 中运行 b 端作为 server。
 			_ = b
 			return a, nil
 		},
