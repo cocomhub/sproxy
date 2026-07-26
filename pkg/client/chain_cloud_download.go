@@ -199,6 +199,7 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 		c.Completed = 0
 		c.Failed = 0
 		var storageFullURLs []string
+		var storageFullIDs []string
 		for _, r := range results {
 			switch r.Status {
 			case "completed":
@@ -206,6 +207,7 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			case "failed":
 				if isStorageFullError(r.Error) {
 					storageFullURLs = append(storageFullURLs, r.URL)
+					storageFullIDs = append(storageFullIDs, r.ID)
 				} else {
 					c.Failed++
 				}
@@ -215,6 +217,19 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			return nil
 		}
 		if attempt < maxRetries {
+			// 移除旧失败任务 ID，后续追加新提交的 ID
+			failedSet := make(map[string]struct{}, len(storageFullIDs))
+			for _, id := range storageFullIDs {
+				failedSet[id] = struct{}{}
+			}
+			var remaining []string
+			for _, id := range c.TaskIDs {
+				if _, ok := failedSet[id]; !ok {
+					remaining = append(remaining, id)
+				}
+			}
+			c.TaskIDs = remaining
+
 			timer := time.NewTimer(30 * time.Second)
 			select {
 			case <-timer.C:

@@ -487,8 +487,15 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	if chain.Phase() != PhaseCompleted {
 		t.Errorf("expected phase=completed, got %s", chain.Phase())
 	}
-	if len(chain.TaskIDs) <= 2 {
-		t.Errorf("expected at least 3 task IDs after retry, got %d", len(chain.TaskIDs))
+	// 验证发生了存储超限重试（总任务数 > 初始 URL 数）
+	if taskIDCounter.Load() <= 2 {
+		t.Errorf("expected retry to create more tasks, got %d total", taskIDCounter.Load())
+	}
+	// 验证旧失败任务 ID 已被移除（TaskIDs 中不应包含已失败的任务）
+	for _, id := range chain.TaskIDs {
+		if strings.HasPrefix(id, "cloud-") {
+			t.Errorf("unexpected old-style task ID %q in TaskIDs", id)
+		}
 	}
 }
 
