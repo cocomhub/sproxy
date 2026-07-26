@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,7 +44,7 @@ func isTextExt(ext string) bool {
 
 func previewText(serverURL, authToken, filename string) error {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
-		serverURL+"/download?filename="+filename, nil)
+		serverURL+"/download?filename="+url.QueryEscape(filename), nil)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
@@ -100,7 +101,7 @@ func previewImage(serverURL, authToken, filename string) error {
 	tmpFile := filepath.Join(tmpDir, filepath.Base(filename))
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
-		serverURL+"/download?filename="+filename, nil)
+		serverURL+"/download?filename="+url.QueryEscape(filename), nil)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
