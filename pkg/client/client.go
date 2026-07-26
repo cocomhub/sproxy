@@ -149,7 +149,8 @@ type FileClient struct {
 	MaxChunkSize int64
 	authToken    string
 	logger       *slog.Logger
-	uploadCache  sync.Map // key = absFilePath, value = *uploadCacheEntry
+	uploadCache  sync.Map       // key = absFilePath, value = *uploadCacheEntry
+	chainManager *ChainManager // 链式操作管理器，nil=不启用
 }
 
 // 编译期检查 FileClient 实现 Service 接口
@@ -246,6 +247,26 @@ func WithLogger(logger *slog.Logger) Option {
 		if logger != nil {
 			c.logger = logger
 		}
+	}
+}
+
+// WithKVStore 设置自定义 KVStore 实现，启用链式操作持久化。
+func WithKVStore(store KVStore) Option {
+	return func(c *FileClient) {
+		c.chainManager = NewChainManager(store)
+	}
+}
+
+// WithCacheDir 使用默认 JSONKVStore 并指定缓存目录，启用链式操作持久化。
+func WithCacheDir(dir string) Option {
+	return func(c *FileClient) {
+		store, err := NewJSONKVStore(context.Background(), dir, c.logger)
+		if err != nil {
+			c.logger.Warn("创建缓存目录失败，使用内存存储", "dir", dir, "error", err)
+			c.chainManager = NewChainManager(NewMemoryKVStore())
+			return
+		}
+		c.chainManager = NewChainManager(store)
 	}
 }
 
@@ -895,4 +916,98 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 		}
 	}
 	return nil
+}
+
+// CloudDownloadChain 一键链式操作：提交任务 → 等待完成 → 打包 → 下载到本地 → 清理远端。
+func (c *FileClient) CloudDownloadChain(ctx context.Context,
+	urls []string, archiveName, localDir string,
+	opts ...ChainOption) (*ChainResult, error) {
+
+	options := defaultChainOptions()
+	for _, o := range opts {
+		o(&options)
+	}
+
+	runner := NewCloudDownloadChain(c, urls, archiveName, localDir, options)
+
+	if c.chainManager != nil {
+		if err := c.chainManager.Run(ctx, runner); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := runner.Run(ctx, func(ctx context.Context, phase string, msg string, current, total int) {
+			c.logger.DebugContext(ctx, "链式操作进度", "phase", phase, "msg", msg, "current", current, "total", total)
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	return &ChainResult{
+		ChainID: runner.ChainID,
+		Phase:   runner.Phase(),
+		Status:  runner.Status(),
+		Raw:     runner,
+	}, nil
+}
+
+// ResumeChain 从缓存恢复链式操作。
+func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainResult, error) {
+	if c.chainManager == nil {
+		return nil, fmt.Errorf("链式操作未启用持久化，请使用 WithCacheDir 或 WithKVStore 创建客户端")
+	}
+
+	runner, err := c.chainManager.Resume(ctx, chainID)
+	if err != nil {
+		return nil, err
+	}
+
+	if cdc, ok := runner.(*CloudDownloadChain); ok {
+		cdc.setClient(c)
+	}
+
+	if err := c.chainManager.Run(ctx, runner); err != nil {
+		return nil, err
+	}
+
+	return &ChainResult{
+		ChainID: runner.ID(),
+		Phase:   runner.Phase(),
+		Status:  runner.Status(),
+		Raw:     runner,
+	}, nil
+}
+
+// ListChains 列出所有活跃链式操作。
+func (c *FileClient) ListChains(ctx context.Context) ([]*ChainState, error) {
+	if c.chainManager == nil {
+		return nil, nil
+	}
+	runners, err := c.chainManager.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var states []*ChainState
+	for _, r := range runners {
+		states = append(states, &ChainState{
+			ChainID: r.ID(),
+			Phase:   r.Phase(),
+			Status:  r.Status(),
+		})
+	}
+	return states, nil
+}
+
+// DeleteChain 删除链式操作缓存。
+func (c *FileClient) DeleteChain(ctx context.Context, chainID string) error {
+	if c.chainManager == nil {
+		return nil
+	}
+	return c.chainManager.Delete(ctx, chainID)
+}
+
+// ChainState 链式操作摘要状态。
+type ChainState struct {
+	ChainID string `json:"chain_id"`
+	Phase   string `json:"phase"`
+	Status  string `json:"status"`
 }
