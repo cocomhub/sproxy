@@ -42,6 +42,16 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 		return nil, fmt.Errorf("http status %d", resp.StatusCode)
 	}
 
+	// 从 Last-Modified 响应头提取原始文件修改时间
+	var modTime time.Time
+	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+		if t, err := time.Parse(time.RFC1123, lm); err == nil {
+			modTime = t
+		} else if t, err := time.Parse(time.RFC1123Z, lm); err == nil {
+			modTime = t
+		}
+	}
+
 	f, err := os.Create(destPath)
 	if err != nil {
 		return nil, fmt.Errorf("create file: %w", err)
@@ -81,7 +91,16 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	}
 
 	checksum := hex.EncodeToString(h.Sum(nil))
-	return &Result{Size: downloaded, Checksum: checksum}, nil
+
+	// 设置文件修改时间
+	if modTime != (time.Time{}) {
+		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
+			// 非致命错误，仅记录
+			_ = err
+		}
+	}
+
+	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime}, nil
 }
 
 // Supports 判断是否支持 HTTP/HTTPS 协议。

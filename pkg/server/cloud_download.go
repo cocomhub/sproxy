@@ -22,12 +22,13 @@ import (
 type CloudTask struct {
 	ID         string    `json:"id"`
 	URL        string    `json:"url"`
-	Method     string    `json:"method"`     // "url" | "upload"
-	Filename   string    `json:"filename"`   // 云端存储文件名
-	Status     string    `json:"status"`     // pending | downloading | completed | failed | cancelled
-	TotalSize  int64     `json:"total_size"` // -1 表示未知
+	Method     string    `json:"method"`                // "url" | "upload"
+	Filename   string    `json:"filename"`              // 云端存储文件名
+	Status     string    `json:"status"`                 // pending | downloading | completed | failed | cancelled
+	TotalSize  int64     `json:"total_size"`             // -1 表示未知
 	Downloaded int64     `json:"downloaded"`
 	Checksum   string    `json:"checksum"`
+	FileMTime  int64     `json:"file_mtime,omitempty"`   // 原始文件修改时间（UnixNano），从 URL 的 Last-Modified 提取
 	Error      string    `json:"error"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
@@ -269,6 +270,17 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			m.logger.Error("download failed", "task_id", task.ID, "url", task.URL, "error", err)
 		}
 		return
+	}
+
+	// 恢复原始文件 mtime
+	if result.ModTime != (time.Time{}) {
+		modTime := result.ModTime
+		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
+			m.logger.Warn("设置文件修改时间失败", "task_id", task.ID, "error", err)
+		}
+		m.mu.Lock()
+		task.FileMTime = result.ModTime.UnixNano()
+		m.mu.Unlock()
 	}
 
 	// 补偿存储空间（实际大小可能与预估值不同）

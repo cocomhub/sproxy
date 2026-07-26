@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
 )
@@ -143,4 +144,49 @@ func TestHTTPDownloader_Download_Progress(t *testing.T) {
 		t.Fatalf("Download failed: %v", err)
 	}
 	// 只要有进度回调被调用即可
+}
+
+func TestHTTPDownloader_PreservesMTime(t *testing.T) {
+	t.Parallel()
+	expectedTime := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Last-Modified", expectedTime.Format(time.RFC1123))
+		w.Write([]byte("test content"))
+	}))
+	defer ts.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "output.txt")
+	result, err := dl.Download(t.Context(), ts.URL, dest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ModTime.Equal(expectedTime) {
+		t.Errorf("expected ModTime %v, got %v", expectedTime, result.ModTime)
+	}
+	info, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(expectedTime) {
+		t.Errorf("expected file mtime %v, got %v", expectedTime, info.ModTime())
+	}
+}
+
+func TestHTTPDownloader_NoLastModified(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("no last-modified header"))
+	}))
+	defer ts.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "output.txt")
+	result, err := dl.Download(t.Context(), ts.URL, dest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ModTime.IsZero() {
+		t.Errorf("expected zero ModTime, got %v", result.ModTime)
+	}
 }

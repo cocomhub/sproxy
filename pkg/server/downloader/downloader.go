@@ -5,7 +5,10 @@
 // 各下载器实现（HTTP、FTP 等）通过 Registry 注册，按 source URL 匹配调度。
 package downloader
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // ProgressFunc 是下载进度回调函数。
 // downloaded 是已下载字节数，total 是总大小（-1 表示未知）。
@@ -13,8 +16,9 @@ type ProgressFunc func(downloaded, total int64)
 
 // Result 是下载完成的结果。
 type Result struct {
-	Size     int64  // 实际下载大小
-	Checksum string // SHA-256 十六进制
+	Size     int64     // 实际下载大小
+	Checksum string    // SHA-256 十六进制
+	ModTime  time.Time // 原始文件修改时间（从 HTTP Last-Modified 提取）
 }
 
 // Downloader 是云端下载器接口。
