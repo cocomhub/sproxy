@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -159,5 +160,60 @@ func TestTunnelCmd_WithConfigKey(t *testing.T) {
 	// The tunnel will fail (connection refused), but shouldn't be a "tunnel_key" missing error
 	if err != nil && strings.Contains(err.Error(), "tunnel_key") {
 		t.Errorf("unexpected missing key error after config: %v", err)
+	}
+}
+
+// ---- printProgressBar tests ----
+
+func TestPrintProgressBar(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		current  int64
+		total    int64
+		barWidth int
+		contains []string
+	}{
+		{"zero_percent", 0, 100, 20, []string{"0.00%", "[", "]"}},
+		{"fifty_percent", 50, 100, 20, []string{"50.00%", "[", "]"}},
+		{"hundred_percent", 100, 100, 20, []string{"100.00%", "[", "]"}},
+		{"partial_fill", 25, 200, 40, []string{"12.50%", "[", "]"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			printProgressBar(&buf, tt.current, tt.total, tt.barWidth)
+			output := buf.String()
+			for _, want := range tt.contains {
+				if !strings.Contains(output, want) {
+					t.Errorf("expected output to contain %q, got %q", want, output)
+				}
+			}
+		})
+	}
+}
+
+func TestPrintProgressBarDone(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	start := time.Now()
+	printProgressBarDone(&buf, 100, 100, 20, start)
+	output := buf.String()
+	if !strings.Contains(output, "100.00%") {
+		t.Errorf("expected output to contain '100.00%%', got %q", output)
+	}
+	if !strings.Contains(output, "in ") {
+		t.Errorf("expected output to contain 'in ' (duration), got %q", output)
+	}
+}
+
+func TestPrintProgressBarDone_Partial(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	start := time.Now()
+	printProgressBarDone(&buf, 75, 200, 40, start)
+	output := buf.String()
+	if !strings.Contains(output, "37.50%") {
+		t.Errorf("expected output to contain '37.50%%', got %q", output)
 	}
 }
