@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -29,8 +30,11 @@ func NewCmdCloudCancel(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 
 			if err := svc.CancelCloudTask(cmd.Context(), taskID); err != nil {
 				fm.PrintCloudTaskCancelResult(taskID, false, err.Error())
-				// 任务不存在时保持旧行为：不返回错误，仅打印消息
-				return nil
+				// 任务不存在时（404）保持旧行为：不返回错误，仅打印消息
+				if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
+					return nil
+				}
+				return fmt.Errorf("取消云端下载任务失败: %w", err)
 			}
 
 			fm.PrintCloudTaskCancelResult(taskID, true, "已取消")
