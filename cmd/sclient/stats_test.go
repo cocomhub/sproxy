@@ -4,6 +4,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -124,5 +125,22 @@ func TestNewCmdConfigRemoteSet_Integration(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "debug") {
 		t.Errorf("expected output to contain 'debug', got: %s", buf.String())
+	}
+}
+
+func TestStatsCmd_ServerError(t *testing.T) {
+	t.Parallel()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdStats(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error for server 500")
 	}
 }

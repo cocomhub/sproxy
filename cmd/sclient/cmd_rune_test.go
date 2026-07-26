@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,17 @@ import (
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
+
+// ---- testConfigProvider ----
+
+type testConfigProvider struct {
+	cfg *client.Config
+	err error
+}
+
+func (p *testConfigProvider) LoadConfig() (*client.Config, error) {
+	return p.cfg, p.err
+}
 
 // ---- Search command RunE 测试 ----
 
@@ -935,5 +947,70 @@ func TestResolveOutputPath_ConflictAppendsSuffix(t *testing.T) {
 	expected := filepath.Join(baseDir, "data.txt.1")
 	if got != expected {
 		t.Errorf("expected %s, got %s", expected, got)
+	}
+}
+
+// ---- Version command RunE 测试 ----
+
+func TestVersionCommand_ListVersions(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"versions": []client.VersionInfo{
+				{VersionID: 1, Size: 100, CreatedAt: "2026-01-01T00:00:00Z", Checksum: "abc123"},
+			},
+		})
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdVersionList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.SetArgs([]string{"test.txt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("version list command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "abc123") {
+		t.Errorf("expected output to contain checksum, got: %s", buf.String())
+	}
+}
+
+func TestVersionCommand_ListEmpty(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"versions": []client.VersionInfo{},
+		})
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdVersionList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.SetArgs([]string{"test.txt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("version list command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "没有历史版本") {
+		t.Errorf("expected '没有历史版本', got: %s", buf.String())
+	}
+}
+
+// ---- Config show RunE 测试 ----
+// 注意：config 命令有 remote 子命令，直接调用 SetArgs 会被 cobra 解析为子命令查找
+// 因此测试直接调用 RunE 函数
+
+func TestConfigShowCmd_Integration(t *testing.T) {
+	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://test:18083"}}
+	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil, cfgSvc)
+	out := testutil.CaptureStdout(func() {
+		// 直接调用 RunE 模拟 "config show" 行为
+		err := cmd.RunE(cmd, []string{"show"})
+		if err != nil {
+			t.Fatalf("config show command failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "http://test:18083") {
+		t.Errorf("expected output to contain server URL, got: %s", out)
 	}
 }
