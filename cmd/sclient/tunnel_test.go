@@ -305,3 +305,38 @@ func TestPrintProgressBarDone_Partial(t *testing.T) {
 		t.Errorf("expected output to contain '37.50%%', got %q", output)
 	}
 }
+
+// ---- maybePrintProgress tests ----
+
+func TestMaybePrintProgress_Enabled(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	lastPrintAt := time.Now().Add(-2 * time.Second) // 超过 1 秒间隔
+	maybePrintProgress(100, 50, 20, &lastPrintAt, &buf)
+	output := buf.String()
+	if !strings.Contains(output, "50.00%") {
+		t.Errorf("expected progress output, got %q", output)
+	}
+}
+
+func TestMaybePrintProgress_Disabled(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	lastPrintAt := time.Now() // 刚打印过，不应输出
+	maybePrintProgress(100, 50, 20, &lastPrintAt, &buf)
+	output := buf.String()
+	if output != "" {
+		t.Errorf("expected no progress output when recently printed, got %q", output)
+	}
+}
+
+func TestMaybePrintProgress_ZeroContentLength(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	lastPrintAt := time.Now().Add(-2 * time.Second) // 超过 1 秒间隔
+	maybePrintProgress(0, 50, 20, &lastPrintAt, &buf)
+	output := buf.String()
+	if output != "" {
+		t.Errorf("expected no progress output when contentLength is 0, got %q", output)
+	}
+}
