@@ -29,6 +29,8 @@ func TestVersionCmd_HasSubcommands(t *testing.T) {
 	for _, c := range cmds {
 		names[c.Name()] = true
 	}
+	// 注意："version" 命令既是"显示程序版本"又是"文件版本管理"的入口。
+	// 这里的子命令是文件版本管理（list/restore/delete），而非程序版本子命令。
 	for _, name := range []string{"list", "restore", "delete"} {
 		if !names[name] {
 			t.Errorf("expected subcommand %s, not found", name)

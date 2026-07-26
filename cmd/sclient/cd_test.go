@@ -66,7 +66,7 @@ func TestResolveRemotePath_ParentRefMessage(t *testing.T) {
 	}
 }
 
-// loadCurrentDirCachePath 返回 loadCurrentDir 使用的缓存文件路径。
+// loadCurrentDirCachePath 返回 loadCurrentDir 使用的缓存文件路径（基于 XDG_CACHE_HOME）。
 func loadCurrentDirCachePath() string {
 	path, err := xdg.CacheFile(filepath.Join("sproxy", "current_dir"))
 	if err != nil {
@@ -75,22 +75,32 @@ func loadCurrentDirCachePath() string {
 	return path
 }
 
+// setCacheDirForTest 设置 XDG_CACHE_HOME 环境变量并调用 xdg.Reload()，
+// 使 loadCurrentDir 使用隔离的临时目录。
+// 返回 cleanup 函数，恢复原始环境变量。
+func setCacheDirForTest(t *testing.T) string {
+	t.Helper()
+	oldCacheHome := os.Getenv("XDG_CACHE_HOME")
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", tmpDir)
+	xdg.Reload()
+	t.Cleanup(func() {
+		os.Setenv("XDG_CACHE_HOME", oldCacheHome)
+		xdg.Reload()
+	})
+	return tmpDir
+}
+
 func TestLoadCurrentDir_FileExists(t *testing.T) {
+	_ = setCacheDirForTest(t)
 	cachePath := loadCurrentDirCachePath()
 	if cachePath == "" {
 		t.Skip("xdg.CacheFile 返回空路径")
 	}
 
-	// 保存原始内容
-	prevContent, _ := os.ReadFile(cachePath)
-	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
-	t.Cleanup(func() {
-		_ = os.RemoveAll(filepath.Dir(cachePath))
-		if len(prevContent) > 0 {
-			_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
-			_ = os.WriteFile(cachePath, prevContent, 0644)
-		}
-	})
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(cachePath, []byte("subdir"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -101,20 +111,7 @@ func TestLoadCurrentDir_FileExists(t *testing.T) {
 }
 
 func TestLoadCurrentDir_FileNotExists(t *testing.T) {
-	cachePath := loadCurrentDirCachePath()
-	if cachePath == "" {
-		t.Skip("xdg.CacheFile 返回空路径")
-	}
-
-	// 保存原始内容，然后删除
-	prevContent, _ := os.ReadFile(cachePath)
-	_ = os.RemoveAll(filepath.Dir(cachePath))
-	t.Cleanup(func() {
-		if len(prevContent) > 0 {
-			_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
-			_ = os.WriteFile(cachePath, prevContent, 0644)
-		}
-	})
+	_ = setCacheDirForTest(t)
 	got := loadCurrentDir()
 	if got != "" {
 		t.Errorf("expected empty string for missing file, got %q", got)
@@ -122,20 +119,15 @@ func TestLoadCurrentDir_FileNotExists(t *testing.T) {
 }
 
 func TestLoadCurrentDir_FileWithWhitespace(t *testing.T) {
+	_ = setCacheDirForTest(t)
 	cachePath := loadCurrentDirCachePath()
 	if cachePath == "" {
 		t.Skip("xdg.CacheFile 返回空路径")
 	}
 
-	prevContent, _ := os.ReadFile(cachePath)
-	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
-	t.Cleanup(func() {
-		_ = os.RemoveAll(filepath.Dir(cachePath))
-		if len(prevContent) > 0 {
-			_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
-			_ = os.WriteFile(cachePath, prevContent, 0644)
-		}
-	})
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(cachePath, []byte("  nested/path  \n"), 0644); err != nil {
 		t.Fatal(err)
 	}
