@@ -463,3 +463,60 @@ func TestListCommand_WithSubdirFlag(t *testing.T) {
 
 // ---- 已迁移完 ----
 // captureRootCmdArgs 已删除，所有测试已迁移到工厂函数模式。
+
+// ---- Error path tests ----
+
+func TestUploadCommand_FileNotFound(t *testing.T) {
+	// 使用真实的 HTTP 客户端但指向无法连接的地址
+	svc := client.NewFileClient("http://127.0.0.1:1")
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdUpload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd.SetArgs([]string{"/nonexistent/file.txt"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error for nonexistent file")
+	}
+}
+
+func TestDeleteCommand_ChecksumMismatch(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/files/stat" {
+			w.Header().Set("X-File-Checksum", "abc123")
+			w.Header().Set("X-File-Size", "5")
+			w.Header().Set("X-File-IsDir", "false")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"success":false,"message":"checksum mismatch"}`))
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdDelete(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{})
+	cmd.SetArgs([]string{"test.txt"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error for checksum mismatch")
+	}
+}
+
+func TestListCommand_EmptyResult(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"files":[],"total":0}`))
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{})
+	cmd.SetArgs([]string{})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("list command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "no files found") {
+		t.Errorf("expected 'no files found', got: %s", buf.String())
+	}
+}
