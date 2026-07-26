@@ -34,7 +34,7 @@ func getCloudServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, au
 }
 
 // NewCmdCloudList 创建 cloud list 命令的工厂函数。
-func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+func NewCmdCloudList(_ clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "列出所有云端下载任务",

@@ -16,7 +16,6 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
-	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func TestRelayRemoveNodeCmd_UseAndArgs(t *testing.T) {
@@ -151,32 +150,28 @@ func TestPreviewCmd_TextFile(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdPreview(factory, cli.IOStreams{}, st, nil)
+	var buf strings.Builder
+	cmd := NewCmdPreview(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, st, nil)
 	cmd.PersistentFlags().String("server", "", "server address")
 	cmd.PersistentFlags().Set("server", mock.URL)
 
-	out := testutil.CaptureStdout(func() {
-		cmd.SetArgs([]string{"test.txt"})
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("preview command failed: %v", err)
-		}
-	})
+	cmd.SetArgs([]string{"test.txt"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("preview command failed: %v", err)
+	}
 
-	if !strings.Contains(out, "line1") {
-		t.Fatalf("expected output to contain file content, got: %s", out)
+	if !strings.Contains(buf.String(), "line1") {
+		t.Fatalf("expected output to contain file content, got: %s", buf.String())
 	}
 }
 
 func TestPreviewCmd_ImageFile(t *testing.T) {
+	// 替换 openViewer 为无操作函数，避免依赖系统图片查看器
+	oldViewer := openViewer
+	openViewer = func(path string) error { return nil }
+	t.Cleanup(func() { openViewer = oldViewer })
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/files/stat" {
-			w.Header().Set("X-File-Checksum", "abc")
-			w.Header().Set("X-File-Size", "100")
-			w.Header().Set("X-File-IsDir", "false")
-			w.WriteHeader(http.StatusOK)
-			return
-		}
 		w.Header().Set("X-File-Checksum", "abc")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("fake-image-data"))
@@ -186,19 +181,21 @@ func TestPreviewCmd_ImageFile(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdPreview(factory, cli.IOStreams{}, st, nil)
+	var buf strings.Builder
+	cmd := NewCmdPreview(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard, In: strings.NewReader("\n")}, st, nil)
 	cmd.PersistentFlags().String("server", "", "server address")
 	cmd.PersistentFlags().Set("server", mock.URL)
 
-	out := testutil.CaptureStdout(func() {
-		cmd.SetArgs([]string{"test.png"})
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("preview command failed: %v", err)
-		}
-	})
+	cmd.SetArgs([]string{"test.png"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("preview command failed: %v", err)
+	}
 
-	if !strings.Contains(out, "正在打开图片预览") {
-		t.Fatalf("expected image preview message, got: %s", out)
+	if !strings.Contains(buf.String(), "正在打开图片预览") {
+		t.Fatalf("expected image preview message, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "已打开") {
+		t.Fatalf("expected viewer opened message, got: %s", buf.String())
 	}
 }
 

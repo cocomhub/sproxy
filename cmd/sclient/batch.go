@@ -3,7 +3,10 @@
 
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"io"
+)
 
 // batchOperationResult holds result of a single batch operation.
 type batchOperationResult struct {
@@ -28,14 +31,14 @@ func runBatchOperation(items []string, op func(item string) error) []batchOperat
 	return results
 }
 
-// printBatchResults prints batch operation results to stdout.
-func printBatchResults(results []batchOperationResult) {
+// printBatchResults prints batch operation results to the given writer.
+func printBatchResults(results []batchOperationResult, w io.Writer) {
 	for _, r := range results {
 		status := "OK"
 		if !r.Success {
 			status = "FAIL"
 		}
-		fmt.Printf("[%s] %s: %s\n", status, r.Name, r.Message)
+		fmt.Fprintf(w, "[%s] %s: %s\n", status, r.Name, r.Message)
 	}
 }
 

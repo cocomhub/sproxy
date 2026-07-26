@@ -16,7 +16,7 @@ import (
 )
 
 // NewCmdCloudCancel 创建 cloud cancel 命令的工厂函数。
-func NewCmdCloudCancel(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+func NewCmdCloudCancel(_ clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	return &cobra.Command{
 		Use:   "cancel <task-id>",
 		Short: "取消云端下载任务",
@@ -54,8 +54,9 @@ func NewCmdCloudCancel(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				fm.PrintCloudTaskCancelResult(taskID, false, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body)))
-				return nil
+				msg := fmt.Sprintf("取消云端下载任务失败: HTTP %d: %s", resp.StatusCode, string(body))
+				fm.PrintCloudTaskCancelResult(taskID, false, msg)
+				return fmt.Errorf("%s", msg)
 			}
 
 			var result struct {

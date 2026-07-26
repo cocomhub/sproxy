@@ -29,34 +29,24 @@ const (
 )
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-
-type relayFlags struct {
-	hubURL string
-	local  string
-	nodeID string
-}
-
-var relayFl relayFlags
-
-func runRelayStart(cmd *cobra.Command, args []string) error {
-	nodeID := relayFl.nodeID
+func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID string) error {
 	if nodeID == "" {
 		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
 
-	logger := slog.With("node", nodeID, "hub", relayFl.hubURL, "local", relayFl.local)
+	logger := slog.With("node", nodeID, "hub", hubURL, "local", local)
 	logger.Info("中继节点启动")
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
-	return runRelayWithRetry(ctx, nodeID, logger)
+	return runRelayWithRetry(ctx, nodeID, hubURL, local, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, nodeID string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, nodeID, logger)
+		err := runRelayOnce(ctx, nodeID, hubURL, local, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -73,13 +63,13 @@ func runRelayWithRetry(ctx context.Context, nodeID string, logger *slog.Logger) 
 	}
 }
 
-func runRelayOnce(ctx context.Context, nodeID string, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, nodeID, hubURL, local string, logger *slog.Logger) error {
 	tp := xfer.Get("ws")
 	if tp == nil {
 		return fmt.Errorf("ws 传输层未注册")
 	}
 
-	conn, err := tp.Dial(ctx, relayFl.hubURL)
+	conn, err := tp.Dial(ctx, hubURL)
 	if err != nil {
 		return fmt.Errorf("连接到 Hub 失败: %w", err)
 	}
@@ -100,7 +90,7 @@ func runRelayOnce(ctx context.Context, nodeID string, logger *slog.Logger) error
 	logger.Info("已注册到 Hub")
 
 	// 使用 Tunnel.Serve 接受中继请求，转发到本地 HTTP 服务
-	localAddr := relayFl.local
+	localAddr := local
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
@@ -180,10 +170,10 @@ func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
 使用示例:
   sclient relay start --hub ws://hub.example.com/ws --local http://127.0.0.1:8080 --node-id my-node`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			relayFl.hubURL, _ = cmd.Flags().GetString("hub")
-			relayFl.local, _ = cmd.Flags().GetString("local")
-			relayFl.nodeID, _ = cmd.Flags().GetString("node-id")
-			return runRelayStart(cmd, args)
+			hubURL, _ := cmd.Flags().GetString("hub")
+			local, _ := cmd.Flags().GetString("local")
+			nodeID, _ := cmd.Flags().GetString("node-id")
+			return runRelayStart(cmd, hubURL, local, nodeID)
 		},
 	}
 	cmd.Flags().String("hub", "ws://127.0.0.1:18084/ws", "Hub 的 WebSocket 地址")

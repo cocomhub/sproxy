@@ -166,7 +166,7 @@ func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 				fmt.Fprintf(ios.ErrOut, "正在保存至: '%s'\n\n", finalOutputFile)
 			}
 
-			totalRead, err := writeWithProgress(resp.Body, f, contentLength)
+			totalRead, err := writeWithProgress(resp.Body, f, contentLength, ios.ErrOut)
 			if err != nil {
 				return err
 			}
@@ -193,8 +193,8 @@ func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 }
 
 // writeWithProgress 从 r 读取数据写入 w，同时以进度条形式显示进度。
-// contentLength 为 -1 时不显示进度条。
-func writeWithProgress(r io.Reader, w io.Writer, contentLength int64) (int64, error) {
+// contentLength 为 -1 时不显示进度条。progressWriter 用于输出进度条（通常为 stderr）。
+func writeWithProgress(r io.Reader, w io.Writer, contentLength int64, progressWriter io.Writer) (int64, error) {
 	barWidth := 50
 	var totalRead int64
 	startAt := time.Now()
@@ -209,7 +209,7 @@ func writeWithProgress(r io.Reader, w io.Writer, contentLength int64) (int64, er
 			}
 			totalRead += int64(written)
 
-			maybePrintProgress(contentLength, totalRead, barWidth, &lastPrintAt)
+			maybePrintProgress(contentLength, totalRead, barWidth, &lastPrintAt, progressWriter)
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -220,16 +220,16 @@ func writeWithProgress(r io.Reader, w io.Writer, contentLength int64) (int64, er
 	}
 
 	if contentLength > 0 {
-		printProgressBarDone(os.Stderr, totalRead, contentLength, barWidth, startAt)
+		printProgressBarDone(progressWriter, totalRead, contentLength, barWidth, startAt)
 	}
 
 	return totalRead, nil
 }
 
 // maybePrintProgress 如果满足条件（有总长度且距上次打印超过 1 秒）则打印进度条。
-func maybePrintProgress(contentLength, totalRead int64, barWidth int, lastPrintAt *time.Time) {
+func maybePrintProgress(contentLength, totalRead int64, barWidth int, lastPrintAt *time.Time, progressWriter io.Writer) {
 	if contentLength > 0 && time.Since(*lastPrintAt) > time.Second {
-		printProgressBar(os.Stderr, totalRead, contentLength, barWidth)
+		printProgressBar(progressWriter, totalRead, contentLength, barWidth)
 		*lastPrintAt = time.Now()
 	}
 }
