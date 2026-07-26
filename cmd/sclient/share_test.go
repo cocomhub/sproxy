@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -128,5 +129,29 @@ func TestShareCmd_Revoke(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "test123") {
 		t.Errorf("expected output to contain token, got: %s", buf.String())
+	}
+}
+
+func TestShareCreateCmd_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/share" && r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdShareCreate(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.Flags().Set("ttl", "24h")
+	cmd.SetArgs([]string{"test.txt"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 500")
 	}
 }
