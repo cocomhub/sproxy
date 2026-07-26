@@ -520,3 +520,139 @@ func TestListCommand_EmptyResult(t *testing.T) {
 		t.Errorf("expected 'no files found', got: %s", buf.String())
 	}
 }
+
+// ---- rmdir command ----
+
+func TestRmdirCmd_Use(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdRmdir(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, &state.State{})
+	if cmd.Use != "rmdir <dirname>" {
+		t.Errorf("rmdirCmd.Use = %q", cmd.Use)
+	}
+}
+
+func TestRmdirCmd_HappyPath(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true,"message":"deleted"}`))
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdRmdir(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, st)
+	cmd.SetArgs([]string{"mydir"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("rmdir command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "目录已删除") {
+		t.Errorf("expected success message, got: %s", buf.String())
+	}
+}
+
+func TestRmdirCmd_Force(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"success":true,"message":"deleted"}`))
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdRmdir(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, st)
+	cmd.SetArgs([]string{"--force", "mydir"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("rmdir --force command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "目录已删除") {
+		t.Errorf("expected success message, got: %s", buf.String())
+	}
+}
+
+func TestRmdirCmd_ServerError(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdRmdir(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd.SetArgs([]string{"mydir"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when server returns 500")
+	}
+}
+
+// ---- mv command additional tests ----
+
+func TestMvCommand_StatNotFound(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	st := &state.State{CurrentDir: ""}
+	var buf, errBuf strings.Builder
+	cmd := NewCmdMv(factory, cli.IOStreams{Out: &buf, ErrOut: &errBuf}, st)
+	cmd.SetArgs([]string{"nonexistent.txt", "new.txt"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when stat returns 404")
+	}
+}
+
+func TestMvCommand_ChecksumEmpty(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-File-Checksum", "")
+		w.Header().Set("X-File-Size", "0")
+		w.Header().Set("X-File-IsDir", "false")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdMv(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd.SetArgs([]string{"old.txt", "new.txt"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error when checksum is empty")
+	}
+}
+
+func TestMvCommand_PathTraversal(t *testing.T) {
+	factory := clientfactory.NewMock(nil, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdMv(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
+	cmd.SetArgs([]string{"../outside.txt", "new.txt"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error for path traversal")
+	}
+}
+
+func TestMvCommand_Args(t *testing.T) {
+	t.Parallel()
+	factory := clientfactory.NewMock(nil, nil)
+	st := &state.State{CurrentDir: ""}
+	cmd := NewCmdMv(factory, cli.IOStreams{Out: io.Discard}, st)
+	if err := cmd.Args(cmd, []string{}); err == nil {
+		t.Error("mv should require exactly 2 args")
+	}
+	if err := cmd.Args(cmd, []string{"a.txt"}); err == nil {
+		t.Error("mv should reject 1 arg")
+	}
+	if err := cmd.Args(cmd, []string{"a", "b", "c"}); err == nil {
+		t.Error("mv should reject 3 args")
+	}
+}

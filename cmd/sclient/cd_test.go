@@ -4,9 +4,12 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 )
 
@@ -60,5 +63,84 @@ func TestResolveRemotePath_ParentRefMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "父级引用") {
 		t.Fatalf("error message should mention parent ref: %v", err)
+	}
+}
+
+// loadCurrentDirCachePath 返回 loadCurrentDir 使用的缓存文件路径。
+func loadCurrentDirCachePath() string {
+	path, err := xdg.CacheFile(filepath.Join("sproxy", "current_dir"))
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
+func TestLoadCurrentDir_FileExists(t *testing.T) {
+	cachePath := loadCurrentDirCachePath()
+	if cachePath == "" {
+		t.Skip("xdg.CacheFile 返回空路径")
+	}
+
+	// 保存原始内容
+	prevContent, _ := os.ReadFile(cachePath)
+	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
+	t.Cleanup(func() {
+		_ = os.RemoveAll(filepath.Dir(cachePath))
+		if len(prevContent) > 0 {
+			_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
+			_ = os.WriteFile(cachePath, prevContent, 0644)
+		}
+	})
+	if err := os.WriteFile(cachePath, []byte("subdir"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := loadCurrentDir()
+	if got != "subdir" {
+		t.Errorf("expected 'subdir', got %q", got)
+	}
+}
+
+func TestLoadCurrentDir_FileNotExists(t *testing.T) {
+	cachePath := loadCurrentDirCachePath()
+	if cachePath == "" {
+		t.Skip("xdg.CacheFile 返回空路径")
+	}
+
+	// 保存原始内容，然后删除
+	prevContent, _ := os.ReadFile(cachePath)
+	_ = os.RemoveAll(filepath.Dir(cachePath))
+	t.Cleanup(func() {
+		if len(prevContent) > 0 {
+			_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
+			_ = os.WriteFile(cachePath, prevContent, 0644)
+		}
+	})
+	got := loadCurrentDir()
+	if got != "" {
+		t.Errorf("expected empty string for missing file, got %q", got)
+	}
+}
+
+func TestLoadCurrentDir_FileWithWhitespace(t *testing.T) {
+	cachePath := loadCurrentDirCachePath()
+	if cachePath == "" {
+		t.Skip("xdg.CacheFile 返回空路径")
+	}
+
+	prevContent, _ := os.ReadFile(cachePath)
+	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
+	t.Cleanup(func() {
+		_ = os.RemoveAll(filepath.Dir(cachePath))
+		if len(prevContent) > 0 {
+			_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
+			_ = os.WriteFile(cachePath, prevContent, 0644)
+		}
+	})
+	if err := os.WriteFile(cachePath, []byte("  nested/path  \n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := loadCurrentDir()
+	if got != "nested/path" {
+		t.Errorf("expected 'nested/path', got %q", got)
 	}
 }
