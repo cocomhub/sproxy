@@ -92,6 +92,20 @@ func previewText(ios cli.IOStreams, serverURL, authToken, filename string) error
 	return nil
 }
 
+// openViewer 使用系统默认程序打开文件。可在测试中替换，避免依赖系统行为。
+var openViewer = func(path string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	return cmd.Start()
+}
+
 func previewImage(ios cli.IOStreams, serverURL, authToken, filename string) error {
 	tmpDir, err := os.MkdirTemp("", "sproxy-preview-*")
 	if err != nil {
@@ -132,17 +146,7 @@ func previewImage(ios cli.IOStreams, serverURL, authToken, filename string) erro
 
 	fmt.Fprintf(ios.Out, "正在打开图片预览: %s\n", tmpFile)
 
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", tmpFile)
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", tmpFile)
-	default:
-		cmd = exec.Command("xdg-open", tmpFile)
-	}
-
-	if err := cmd.Start(); err != nil {
+	if err := openViewer(tmpFile); err != nil {
 		return fmt.Errorf("打开图片查看器失败: %w", err)
 	}
 

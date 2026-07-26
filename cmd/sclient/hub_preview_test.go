@@ -166,15 +166,12 @@ func TestPreviewCmd_TextFile(t *testing.T) {
 }
 
 func TestPreviewCmd_ImageFile(t *testing.T) {
+	// 替换 openViewer 为无操作函数，避免依赖系统图片查看器
+	oldViewer := openViewer
+	openViewer = func(path string) error { return nil }
+	t.Cleanup(func() { openViewer = oldViewer })
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/files/stat" {
-			w.Header().Set("X-File-Checksum", "abc")
-			w.Header().Set("X-File-Size", "100")
-			w.Header().Set("X-File-IsDir", "false")
-			w.WriteHeader(http.StatusOK)
-			return
-		}
 		w.Header().Set("X-File-Checksum", "abc")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("fake-image-data"))
@@ -196,6 +193,9 @@ func TestPreviewCmd_ImageFile(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "正在打开图片预览") {
 		t.Fatalf("expected image preview message, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "已打开") {
+		t.Fatalf("expected viewer opened message, got: %s", buf.String())
 	}
 }
 
