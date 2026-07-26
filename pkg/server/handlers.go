@@ -176,6 +176,8 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudGetTask)
 	localMux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudCancelTask)
 	localMux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudDeleteTask)
+	localMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
+	localMux.HandleFunc("POST /api/cloud/archive", h.cloudArchiveBatch)
 	// 云端下载 API（主 mux：Bearer auth）
 	mux.HandleFunc("POST /api/cloud/download", h.authMiddleware(h.cloudCreateDownload))
 	mux.HandleFunc("POST /api/cloud/download/batch", h.authMiddleware(h.cloudCreateBatchDownload))
@@ -183,6 +185,8 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.authMiddleware(h.cloudGetTask))
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.authMiddleware(h.cloudCancelTask))
 	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.authMiddleware(h.cloudDeleteTask))
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.authMiddleware(h.cloudArchiveTask))
+	mux.HandleFunc("POST /api/cloud/archive", h.authMiddleware(h.cloudArchiveBatch))
 
 	// Hub 管理 API（中继系统），需鉴权
 	if opts.RouteTable != nil {
