@@ -73,7 +73,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	sourceDir := filepath.Join(cloudDir, task.ID)
 
 	// 路径穿越防护
-	if !isPathWithin(sourceFile, sourceDir) {
+	if !IsPathWithin(sourceFile, sourceDir) {
 		h.logger.Error("path traversal detected in cloud archive",
 			"task_id", taskID, "source_file", sourceFile)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid file path"}, http.StatusInternalServerError)
@@ -194,7 +194,7 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		sourceDir := filepath.Join(cloudDir, task.ID)
 
 		// 路径穿越防护
-		if !isPathWithin(sourceFile, sourceDir) {
+		if !IsPathWithin(sourceFile, sourceDir) {
 			h.logger.Error("path traversal detected in cloud batch archive",
 				"task_id", taskID, "source_file", sourceFile)
 			sendJSONResponse(w, CloudArchiveResult{
@@ -328,16 +328,4 @@ func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *sl
 	}
 
 	return nil
-}
-
-// isPathWithin 检查 child 路径是否在 parent 目录内（路径穿越防护）。
-func isPathWithin(child, parent string) bool {
-	cleanChild := filepath.Clean(child)
-	cleanParent := filepath.Clean(parent)
-	// 确保 parent 以分隔符结尾，避免 /a/b 误判 /a/bb 为子路径
-	prefix := cleanParent
-	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
-		prefix += string(filepath.Separator)
-	}
-	return strings.HasPrefix(cleanChild, prefix)
 }

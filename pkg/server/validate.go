@@ -86,3 +86,15 @@ func joinSafePath(baseDir, userPath string) string {
 	}
 	return absPath
 }
+
+// IsPathWithin 检查 child 路径是否在 parent 目录内（路径穿越防护）。
+// 使用 filepath.Clean 标准化后通过前缀匹配判断，确保 parent 以分隔符结尾避免误判。
+func IsPathWithin(child, parent string) bool {
+	cleanChild := filepath.Clean(child)
+	cleanParent := filepath.Clean(parent)
+	prefix := cleanParent
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	return strings.HasPrefix(cleanChild, prefix)
+}
