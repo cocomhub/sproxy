@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -86,48 +87,52 @@ func createCloudDownloadTask(serverURL, sourceURL, authToken string) (*cloudTask
 	return &task, nil
 }
 
-func pollCloudTask(serverURL, taskID string, interval time.Duration, authToken string) (*cloudTaskResponse, error) {
+func pollCloudTask(ctx context.Context, serverURL, taskID string, interval time.Duration, authToken string) (*cloudTaskResponse, error) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		req, err := http.NewRequest(http.MethodGet, serverURL+"/api/cloud/tasks/"+taskID, nil)
-		if err != nil {
-			return nil, err
-		}
-		if authToken != "" {
-			req.Header.Set("Authorization", "Bearer "+authToken)
-		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "轮询失败: %v\n", err)
-			continue
-		}
-
-		var task cloudTaskResponse
-		if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
-			resp.Body.Close()
-			continue
-		}
-		resp.Body.Close()
-
-		switch task.Status {
-		case "completed":
-			return &task, nil
-		case "failed":
-			return nil, fmt.Errorf("task failed: %s", task.Error)
-		case "cancelled":
-			return nil, fmt.Errorf("task was cancelled")
-		case "downloading":
-			pct := int64(0)
-			if task.TotalSize > 0 {
-				pct = task.Downloaded * 100 / task.TotalSize
+	for {
+		select {
+		case <-ticker.C:
+			req, err := http.NewRequest(http.MethodGet, serverURL+"/api/cloud/tasks/"+taskID, nil)
+			if err != nil {
+				return nil, err
 			}
-			fmt.Printf("\r下载进度: %d%% (%d/%d bytes)", pct, task.Downloaded, task.TotalSize)
+			if authToken != "" {
+				req.Header.Set("Authorization", "Bearer "+authToken)
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "轮询失败: %v\n", err)
+				continue
+			}
+
+			var task cloudTaskResponse
+			if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+				resp.Body.Close()
+				continue
+			}
+			resp.Body.Close()
+
+			switch task.Status {
+			case "completed":
+				return &task, nil
+			case "failed":
+				return nil, fmt.Errorf("task failed: %s", task.Error)
+			case "cancelled":
+				return nil, fmt.Errorf("task was cancelled")
+			case "downloading":
+				pct := int64(0)
+				if task.TotalSize > 0 {
+					pct = task.Downloaded * 100 / task.TotalSize
+				}
+				fmt.Printf("\r下载进度: %d%% (%d/%d bytes)", pct, task.Downloaded, task.TotalSize)
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
-	return nil, fmt.Errorf("polling ended unexpectedly")
 }
 
 func downloadAndCleanup(serverURL string, task *cloudTaskResponse, outputPath string, noCleanup bool, authToken string) error {
@@ -309,7 +314,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 					ios.WriteOutLine("  异步模式，轮询任务状态...")
 				}
 
-				task, err = pollCloudTask(serverURL, task.ID, pollInterval, authToken)
+				task, err = pollCloudTask(cmd.Context(), serverURL, task.ID, pollInterval, authToken)
 				if err != nil {
 					ios.WriteErrLine("  云端下载任务失败: %v", err)
 					failed++
