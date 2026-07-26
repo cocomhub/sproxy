@@ -6,10 +6,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/cli"
 )
 
 func TestRunHubStatusWithIO(t *testing.T) {
@@ -99,4 +102,27 @@ func TestRunHubStatusWithIO(t *testing.T) {
 			t.Errorf("expected error message about parse failure, got %v", err)
 		}
 	})
+}
+
+func TestNewCmdDiag_Flags(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdDiag(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	if cmd.Use != "diag" {
+		t.Errorf("expected Use 'diag', got %q", cmd.Use)
+	}
+	for _, name := range []string{"ping", "hub-status"} {
+		if f := cmd.Flags().Lookup(name); f == nil {
+			t.Errorf("missing flag: %s", name)
+		}
+	}
+}
+
+func TestNewCmdDiag_HelpOnNoFlag(t *testing.T) {
+	cmd := NewCmdDiag(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs(nil)
+	err := cmd.Execute()
+	// cmd.Help() 返回 nil，所以 err 应为 nil
+	if err != nil {
+		t.Errorf("expected no error when no flags provided, got: %v", err)
+	}
 }

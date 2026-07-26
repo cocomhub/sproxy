@@ -156,3 +156,32 @@ func TestCloudCancelCmd_ServerError(t *testing.T) {
 		t.Errorf("expected error to mention HTTP 500, got: %v", err)
 	}
 }
+
+func TestCloudCancelCmd_InvalidJSON(t *testing.T) {
+	t.Parallel()
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/cloud/tasks/task-1/cancel" && r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("not json"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd.PersistentFlags().String("server", "", "")
+	cmd.PersistentFlags().String("auth-token", "", "")
+	cmd.SetArgs([]string{"--server", mock.URL, "task-1"})
+	// 即使服务端返回无效 JSON，cancel 命令也会返回 nil（错误已打印到输出里）
+	// 但输出应包含"解析响应失败"的提示
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cancel should not return error for invalid JSON: %v", err)
+	}
+	if !strings.Contains(buf.String(), "解析响应失败") {
+		t.Errorf("expected output to contain '解析响应失败', got: %s", buf.String())
+	}
+}

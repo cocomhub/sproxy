@@ -13,6 +13,7 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -180,5 +181,65 @@ func TestCloudListCmd_ServerError(t *testing.T) {
 	err := root.Execute()
 	if err == nil {
 		t.Error("expected error when server returns 500")
+	}
+}
+
+func TestGetCloudServerURL_FromFlag(t *testing.T) {
+	t.Parallel()
+	root := &cobra.Command{}
+	root.PersistentFlags().String("server", "", "")
+	root.PersistentFlags().String("auth-token", "", "")
+	root.PersistentFlags().Set("server", "http://test-server:18083")
+	root.PersistentFlags().Set("auth-token", "test-token")
+
+	cmd := &cobra.Command{Use: "test"}
+	root.AddCommand(cmd)
+
+	serverURL, authToken := getCloudServerURL(cmd, nil)
+	if serverURL != "http://test-server:18083" {
+		t.Errorf("expected server URL from flag, got %q", serverURL)
+	}
+	if authToken != "test-token" {
+		t.Errorf("expected auth token from flag, got %q", authToken)
+	}
+}
+
+func TestGetCloudServerURL_FromConfig(t *testing.T) {
+	t.Parallel()
+	root := &cobra.Command{}
+	root.PersistentFlags().String("server", "", "")
+	root.PersistentFlags().String("auth-token", "", "")
+
+	cmd := &cobra.Command{Use: "test"}
+	root.AddCommand(cmd)
+
+	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://cfg-server:18083", AuthToken: "cfg-token"}}
+	serverURL, authToken := getCloudServerURL(cmd, cfgSvc)
+	if serverURL != "http://cfg-server:18083" {
+		t.Errorf("expected server URL from config, got %q", serverURL)
+	}
+	if authToken != "cfg-token" {
+		t.Errorf("expected auth token from config, got %q", authToken)
+	}
+}
+
+func TestGetCloudServerURL_FlagOverridesConfig(t *testing.T) {
+	t.Parallel()
+	root := &cobra.Command{}
+	root.PersistentFlags().String("server", "", "")
+	root.PersistentFlags().String("auth-token", "", "")
+	root.PersistentFlags().Set("server", "http://flag-server:18083")
+	root.PersistentFlags().Set("auth-token", "flag-token")
+
+	cmd := &cobra.Command{Use: "test"}
+	root.AddCommand(cmd)
+
+	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://cfg-server:18083", AuthToken: "cfg-token"}}
+	serverURL, authToken := getCloudServerURL(cmd, cfgSvc)
+	if serverURL != "http://flag-server:18083" {
+		t.Errorf("expected flag to override config, got %q", serverURL)
+	}
+	if authToken != "flag-token" {
+		t.Errorf("expected flag to override config token, got %q", authToken)
 	}
 }

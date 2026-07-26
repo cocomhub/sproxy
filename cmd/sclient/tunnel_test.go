@@ -70,8 +70,10 @@ func TestBuildTunnelRequest_InvalidHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Invalid header format should be silently skipped
-	_ = req
+	// 验证无效 header 被静默跳过，且没有空的 header 值被设置
+	if len(req.Header) > 0 {
+		t.Errorf("expected no headers to be set for invalid input, got %d headers", len(req.Header))
+	}
 }
 
 func TestBuildTunnelRequest_EmptyBody(t *testing.T) {
@@ -301,5 +303,40 @@ func TestPrintProgressBarDone_Partial(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "37.50%") {
 		t.Errorf("expected output to contain '37.50%%', got %q", output)
+	}
+}
+
+// ---- maybePrintProgress tests ----
+
+func TestMaybePrintProgress_Enabled(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	lastPrintAt := time.Now().Add(-2 * time.Second) // 超过 1 秒间隔
+	maybePrintProgress(100, 50, 20, &lastPrintAt, &buf)
+	output := buf.String()
+	if !strings.Contains(output, "50.00%") {
+		t.Errorf("expected progress output, got %q", output)
+	}
+}
+
+func TestMaybePrintProgress_Disabled(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	lastPrintAt := time.Now() // 刚打印过，不应输出
+	maybePrintProgress(100, 50, 20, &lastPrintAt, &buf)
+	output := buf.String()
+	if output != "" {
+		t.Errorf("expected no progress output when recently printed, got %q", output)
+	}
+}
+
+func TestMaybePrintProgress_ZeroContentLength(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	lastPrintAt := time.Now().Add(-2 * time.Second) // 超过 1 秒间隔
+	maybePrintProgress(0, 50, 20, &lastPrintAt, &buf)
+	output := buf.String()
+	if output != "" {
+		t.Errorf("expected no progress output when contentLength is 0, got %q", output)
 	}
 }

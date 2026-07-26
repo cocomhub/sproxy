@@ -4,13 +4,17 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/spf13/cobra"
 )
 
 func TestVersionCmd_Use(t *testing.T) {
@@ -81,5 +85,98 @@ func TestVersionCmd_NilConfigSvc(t *testing.T) {
 	output := buf.String()
 	if !strings.Contains(output, "1.0.0") {
 		t.Errorf("expected output to contain version, got: %s", output)
+	}
+}
+
+func TestVersionRestoreCmd_Use(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdVersionRestore(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard})
+	if cmd.Use != "restore <filename> <version_id>" {
+		t.Errorf("expected Use 'restore <filename> <version_id>', got %q", cmd.Use)
+	}
+	if err := cmd.Args(cmd, []string{}); err == nil {
+		t.Error("expected error for 0 args")
+	}
+	if err := cmd.Args(cmd, []string{"f.txt"}); err == nil {
+		t.Error("expected error for 1 arg")
+	}
+	if err := cmd.Args(cmd, []string{"f.txt", "v1"}); err != nil {
+		t.Errorf("expected no error for 2 args, got: %v", err)
+	}
+}
+
+func TestVersionDeleteCmd_Use(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdVersionDelete(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard})
+	if cmd.Use != "delete <filename> <version_id>" {
+		t.Errorf("expected Use 'delete <filename> <version_id>', got %q", cmd.Use)
+	}
+	if err := cmd.Args(cmd, []string{}); err == nil {
+		t.Error("expected error for 0 args")
+	}
+	if err := cmd.Args(cmd, []string{"f.txt", "v1"}); err != nil {
+		t.Errorf("expected no error for 2 args, got: %v", err)
+	}
+}
+
+func TestVersionRestoreCmd_Integration(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/versions/restore" && r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "restored"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	ios := cli.IOStreams{Out: &buf, ErrOut: io.Discard}
+
+	root := &cobra.Command{}
+	root.PersistentFlags().String("server", "", "")
+	root.PersistentFlags().String("auth-token", "", "")
+	cmd := NewCmdVersionRestore(factory, ios)
+	root.AddCommand(cmd)
+
+	root.SetArgs([]string{"restore", "test.txt", "v1", "--server", mock.URL})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("version restore failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "已恢复文件") {
+		t.Errorf("expected success message, got: %s", buf.String())
+	}
+}
+
+func TestVersionDeleteCmd_Integration(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/versions" && r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "deleted"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	ios := cli.IOStreams{Out: &buf, ErrOut: io.Discard}
+
+	root := &cobra.Command{}
+	root.PersistentFlags().String("server", "", "")
+	root.PersistentFlags().String("auth-token", "", "")
+	cmd := NewCmdVersionDelete(factory, ios)
+	root.AddCommand(cmd)
+
+	root.SetArgs([]string{"delete", "test.txt", "v1", "--server", mock.URL})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("version delete failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "已删除文件") {
+		t.Errorf("expected success message, got: %s", buf.String())
 	}
 }
