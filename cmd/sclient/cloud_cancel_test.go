@@ -148,10 +148,11 @@ func TestCloudCancelCmd_ServerError(t *testing.T) {
 	cmd.PersistentFlags().String("auth-token", "", "")
 	cmd.Flags().Bool("json", false, "")
 	cmd.SetArgs([]string{"--server", mock.URL, "error-task"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("failed: %v", err)
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error for server 500, got nil")
 	}
-	if !strings.Contains(buf.String(), "失败") && !strings.Contains(buf.String(), "HTTP 500") {
-		t.Fatalf("expected failure message, got: %s", buf.String())
+	if !strings.Contains(err.Error(), "HTTP 500") {
+		t.Errorf("expected error to mention HTTP 500, got: %v", err)
 	}
 }
