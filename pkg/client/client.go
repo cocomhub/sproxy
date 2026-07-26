@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -36,6 +37,9 @@ const (
 	headerFileMTime     = "X-File-MTime"
 	headerContentType   = "Content-Type"
 )
+
+// ErrNotFound 表示请求的资源不存在（HTTP 404）。
+var ErrNotFound = errors.New("not found")
 
 // UploadResult 表示上传操作的响应结果。
 type UploadResult struct {
@@ -872,7 +876,11 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("请求失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("请求失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("%w: %s", ErrNotFound, err.Error())
+		}
+		return err
 	}
 
 	if respBody != nil {
