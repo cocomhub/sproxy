@@ -163,8 +163,8 @@ func downloadAndCleanup(ios cli.IOStreams, serverURL string, task *cloudTaskResp
 
 	// 确保输出目录存在
 	if dir := filepath.Dir(outputPath); dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("创建输出目录失败: %w", err)
+		if mkdirErr := os.MkdirAll(dir, 0755); mkdirErr != nil {
+			return fmt.Errorf("创建输出目录失败: %w", mkdirErr)
 		}
 	}
 

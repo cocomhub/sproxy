@@ -273,6 +273,24 @@ func TestJSONFormatter_PrintfAndPrintln(t *testing.T) {
 	}
 }
 
+func TestJSONFormatter_Printf(t *testing.T) {
+	var buf strings.Builder
+	fm := NewJSONFormatter(&buf)
+	fm.Printf("format %s", "should be ignored")
+	if buf.Len() != 0 {
+		t.Errorf("expected empty output for JSONFormatter.Printf, got %q", buf.String())
+	}
+}
+
+func TestJSONFormatter_Println(t *testing.T) {
+	var buf strings.Builder
+	fm := NewJSONFormatter(&buf)
+	fm.Println("should be ignored")
+	if buf.Len() != 0 {
+		t.Errorf("expected empty output for JSONFormatter.Println, got %q", buf.String())
+	}
+}
+
 // ---- TextFormatter tests ----
 
 func TestTextFormatter_PrintShareList(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/spf13/pflag"
 )
 
 func TestNew_NoConfigFile(t *testing.T) {
@@ -113,4 +114,35 @@ func TestInterfaceCheck(t *testing.T) {
 
 	var _ provider.Provider = vp
 	var _ provider.Refresher = vp
+}
+
+func TestBindPFlag(t *testing.T) {
+	vp := sclientcfg.New(filepath.Join(t.TempDir(), "nonexistent.yaml"))
+
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	serverURL := fs.String("server-url", "http://default:8080", "")
+
+	vp.BindPFlag("server_url", fs.Lookup("server-url"))
+
+	var cfg struct {
+		ServerURL string `mapstructure:"server_url"`
+	}
+	if err := vp.Unmarshal(&cfg); err != nil {
+		t.Fatalf("Unmarshal 应成功: %v", err)
+	}
+	if cfg.ServerURL != "http://default:8080" {
+		t.Errorf("默认值应为 'http://default:8080', 实际为 %q", cfg.ServerURL)
+	}
+
+	// 修改 flag 值，验证 Viper 同步
+	*serverURL = "http://override:9090"
+	if err := fs.Set("server-url", "http://override:9090"); err != nil {
+		t.Fatal(err)
+	}
+	if err := vp.Unmarshal(&cfg); err != nil {
+		t.Fatalf("Unmarshal 应成功: %v", err)
+	}
+	if cfg.ServerURL != "http://override:9090" {
+		t.Errorf("flag 覆盖后应为 'http://override:9090', 实际为 %q", cfg.ServerURL)
+	}
 }

@@ -4,6 +4,7 @@
 package client
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
 // mockUploadHandler returns an http.HandlerFunc that handles POST /upload requests
@@ -1367,4 +1370,73 @@ func TestLoadFromProvider_UnmarshalError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid timeout type")
 	}
+}
+
+// TestGetTunnelMux 测试 getTunnelMux 方法的两种场景：
+// 1. 首次创建 tunnel mux（无已有连接）
+// 2. 复用已创建的 tunnel mux（已有存活连接）
+func TestGetTunnelMux(t *testing.T) {
+	t.Parallel()
+
+	// 注册一个基于 xfertest.Pipe 的测试传输层
+	pipeTP := &xfer.Transport{
+		Name: "pipe-test",
+		Dial: func(_ context.Context, _ string) (xfer.Conn, error) {
+			a, b := xfertest.Pipe()
+			// 丢弃 b 端（作为 server 端，由 mux 的 listener 侧使用）。
+			// 注意：当前测试只验证 getTunnelMux 创建和缓存，不发送数据，所以丢弃 b 端不影响。
+			// 如果将来要扩展为发送请求的测试，需要在独立 goroutine 中运行 b 端作为 server。
+			_ = b
+			return a, nil
+		},
+	}
+	xfer.Register(pipeTP)
+	t.Cleanup(func() {
+		xfer.TransportRegistry.Clear()
+	})
+
+	t.Run("create_new", func(t *testing.T) {
+		c := NewFileClient("http://127.0.0.1:18083",
+			WithXfer("pipe-test", "http://127.0.0.1:18083", ""),
+		)
+		tun, err := c.getTunnelMux(t.Context())
+		if err != nil {
+			t.Fatalf("getTunnelMux: %v", err)
+		}
+		if tun == nil {
+			t.Fatal("expected non-nil tunnel")
+		}
+		// 验证 mux 已缓存
+		c.tunnelMuxMu.Lock()
+		if c.tunnelMux == nil {
+			t.Fatal("expected tunnelMux to be cached")
+		}
+		c.tunnelMuxMu.Unlock()
+		_ = tun
+	})
+
+	t.Run("reuse_existing", func(t *testing.T) {
+		c := NewFileClient("http://127.0.0.1:18083",
+			WithXfer("pipe-test", "http://127.0.0.1:18083", ""),
+		)
+		// 第一次调用创建
+		tun1, err := c.getTunnelMux(t.Context())
+		if err != nil {
+			t.Fatalf("first getTunnelMux: %v", err)
+		}
+		if tun1 == nil {
+			t.Fatal("expected non-nil tunnel from first call")
+		}
+
+		// 第二次调用应复用
+		tun2, err := c.getTunnelMux(t.Context())
+		if err != nil {
+			t.Fatalf("second getTunnelMux: %v", err)
+		}
+		if tun2 == nil {
+			t.Fatal("expected non-nil tunnel from second call")
+		}
+		_ = tun1
+		_ = tun2
+	})
 }

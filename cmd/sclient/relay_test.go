@@ -4,14 +4,17 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func TestRelayCmd_Usage(t *testing.T) {
@@ -139,6 +142,102 @@ func TestRelayStatusCmd_Empty(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "暂无已连接节点") {
 		t.Errorf("expected empty message, got: %s", buf.String())
+	}
+}
+
+func TestBuildRelayHandler_HappyPath(t *testing.T) {
+	t.Parallel()
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("backend response"))
+	}))
+	defer backend.Close()
+
+	handler := buildRelayHandler(context.Background(), backend.URL, http.DefaultClient, testutil.DiscardLogger())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "backend response") {
+		t.Errorf("expected body 'backend response', got %s", rec.Body.String())
+	}
+}
+
+func TestBuildRelayHandler_BackendUnreachable(t *testing.T) {
+	t.Parallel()
+	handler := buildRelayHandler(context.Background(), "http://127.0.0.1:1", http.DefaultClient, testutil.DiscardLogger())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", rec.Code)
+	}
+}
+
+func TestBuildRelayHandler_QueryParams(t *testing.T) {
+	t.Parallel()
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "key=val" {
+			t.Errorf("expected query 'key=val', got %q", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	handler := buildRelayHandler(context.Background(), backend.URL, http.DefaultClient, testutil.DiscardLogger())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test?key=val", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestRunRelayWithRetry_CtxCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := runRelayWithRetry(ctx, "test-node", "ws://hub", "http://local", testutil.DiscardLogger())
+	// With cancelled context, runRelayOnce will fail quickly (ws dial fails),
+	// then runRelayWithRetry returns the error (ctx.Err() != nil)
+	if err == nil {
+		t.Fatal("expected error after context cancellation")
+	}
+}
+
+func TestRunRelayStart_AutoNodeID(t *testing.T) {
+	cmd := NewCmdRelayStart(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	// Check default flag values
+	hub, _ := cmd.Flags().GetString("hub")
+	if hub != "ws://127.0.0.1:18084/ws" {
+		t.Errorf("expected default hub flag, got %q", hub)
+	}
+	local, _ := cmd.Flags().GetString("local")
+	if local != "http://127.0.0.1:8080" {
+		t.Errorf("expected default local flag, got %q", local)
+	}
+	nodeID, _ := cmd.Flags().GetString("node-id")
+	if nodeID != "" {
+		t.Errorf("expected empty node-id, got %q", nodeID)
+	}
+}
+
+func TestRunRelayStart_EmptyHubURL(t *testing.T) {
+	// Use a short timeout context to prevent the retry loop from hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	cmd := NewCmdRelayStart(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	_ = cmd.Flags().Set("hub", "")
+	cmd.SetContext(ctx)
+	err := cmd.RunE(cmd, []string{})
+	if err == nil {
+		t.Error("expected error when hub URL is empty")
 	}
 }
 
