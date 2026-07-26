@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 )
 
 // HubNodeInfo 表示 Hub 中继节点信息。
@@ -47,7 +48,7 @@ func (c *FileClient) ListHubNodes(ctx context.Context) ([]HubNodeInfo, error) {
 
 // RemoveHubNode 移除指定 Hub 中继节点。
 func (c *FileClient) RemoveHubNode(ctx context.Context, nodeID string) error {
-	return c.doJSON(ctx, http.MethodDelete, "/api/hub/nodes/"+nodeID, nil, nil)
+	return c.doJSON(ctx, http.MethodDelete, "/api/hub/nodes/"+url.PathEscape(nodeID), nil, nil)
 }
 
 // GetHubStats 获取 Hub 中继统计信息。
