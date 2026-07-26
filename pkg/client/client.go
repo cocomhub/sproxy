@@ -126,6 +126,11 @@ type Service interface {
 	RemoveHubNode(ctx context.Context, nodeID string) error
 	GetHubStats(ctx context.Context) (*HubStats, error)
 	TunnelDo(req *http.Request) (*http.Response, error)
+	// === Chain Operations ===
+	CloudDownloadChain(ctx context.Context, urls []string, archiveName, localDir string, opts ...ChainOption) (*ChainResult, error)
+	ResumeChain(ctx context.Context, chainID string) (*ChainResult, error)
+	ListChains(ctx context.Context) ([]*ChainState, error)
+	DeleteChain(ctx context.Context, chainID string) error
 }
 
 // FileClient 是 sproxy 文件服务和加密隧道的 Go 客户端。
@@ -931,13 +936,17 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 	runner := NewCloudDownloadChain(c, urls, archiveName, localDir, options)
 
 	if c.chainManager != nil {
-		if err := c.chainManager.Run(ctx, runner); err != nil {
+		if err := c.chainManager.RunWithProgress(ctx, runner, options.progressFn); err != nil {
 			return nil, err
 		}
 	} else {
-		if err := runner.Run(ctx, func(ctx context.Context, phase string, msg string, current, total int) {
+		reportFn := func(ctx context.Context, phase string, msg string, current, total int) {
 			c.logger.DebugContext(ctx, "链式操作进度", "phase", phase, "msg", msg, "current", current, "total", total)
-		}); err != nil {
+			if options.progressFn != nil {
+				options.progressFn(ctx, phase, msg, current, total)
+			}
+		}
+		if err := runner.Run(ctx, reportFn); err != nil {
 			return nil, err
 		}
 	}

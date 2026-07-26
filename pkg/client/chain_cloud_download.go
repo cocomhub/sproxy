@@ -100,12 +100,24 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.
 		return fmt.Errorf("cloud download chain: client is nil, use setClient() before Run()")
 	}
 
+	// 统一错误处理：任何阶段失败都设置状态
+	var runErr error
+	defer func() {
+		if runErr != nil {
+			c.CurStatus = StatusFailed
+			c.CurrentPhase = PhaseFailed
+			c.Error = runErr.Error()
+			c.UpdatedAt = time.Now()
+		}
+	}()
+
 	switch c.CurrentPhase {
 	case "":
 		fallthrough
 	case PhaseSubmitting:
 		reportFn(ctx, PhaseSubmitting, "提交云端下载任务", 0, len(c.URLs))
 		if err := c.submitTasks(ctx); err != nil {
+			runErr = err
 			return err
 		}
 		c.CurrentPhase = PhaseWaiting
@@ -115,6 +127,7 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.
 
 	case PhaseWaiting:
 		if err := c.waitForTasks(ctx); err != nil {
+			runErr = err
 			return err
 		}
 		c.CurrentPhase = PhaseArchiving
@@ -124,6 +137,7 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.
 
 	case PhaseArchiving:
 		if err := c.archiveTasks(ctx); err != nil {
+			runErr = err
 			return err
 		}
 		c.CurrentPhase = PhaseDownloading
@@ -133,6 +147,7 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.
 
 	case PhaseDownloading:
 		if err := c.downloadToLocal(ctx); err != nil {
+			runErr = err
 			return err
 		}
 		// 默认清理远端文件，keepFiles 时跳过
@@ -145,6 +160,9 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.
 		fallthrough
 
 	case PhaseCleaning:
+		if c.KeepFiles {
+			break
+		}
 		_ = c.cleanupRemote(ctx) // 清理失败不影响主流程成功
 	}
 

@@ -19,11 +19,6 @@ import (
 	"time"
 )
 
-func init() {
-	// 确保注册 cloud_download runner
-	RegisterRunner("cloud_download", func() ChainRunner { return &CloudDownloadChain{} })
-}
-
 func TestCloudDownloadChain_ImplementsChainRunner(t *testing.T) {
 	t.Parallel()
 	var _ ChainRunner = (*CloudDownloadChain)(nil)

@@ -436,6 +436,7 @@ func TestJSONKVStore_Close(t *testing.T) {
 }
 
 func TestMemoryKVStore_Close(t *testing.T) {
+	t.Parallel()
 	s := NewMemoryKVStore()
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)

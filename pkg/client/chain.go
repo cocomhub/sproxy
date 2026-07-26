@@ -120,6 +120,26 @@ func (m *ChainManager) Run(ctx context.Context, runner ChainRunner) error {
 	return nil
 }
 
+// RunWithProgress 执行链式操作，并支持外部进度回调。
+func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, progressFn func(ctx context.Context, phase string, msg string, current, total int)) error {
+	m.saveState(ctx, runner)
+	reportFn := func(ctx context.Context, phase string, msg string, current, total int) {
+		m.saveState(ctx, runner)
+		if progressFn != nil {
+			progressFn(ctx, phase, msg, current, total)
+		}
+	}
+	err := runner.Run(ctx, reportFn)
+	if err != nil {
+		state := runner.State()
+		state["status"] = StatusFailed
+		_ = m.store.Save(ctx, "chain:"+runner.ID(), state)
+		return err
+	}
+	_ = m.store.Delete(ctx, "chain:"+runner.ID())
+	return nil
+}
+
 func (m *ChainManager) Resume(ctx context.Context, chainID string) (ChainRunner, error) {
 	state, err := m.store.Load(ctx, "chain:"+chainID)
 	if err != nil {
