@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -57,7 +58,7 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			c := NewFileClient(ts.URL)
-			remoteName := "concurrent_" + itoa(n) + ".dat"
+			remoteName := "concurrent_" + strconv.Itoa(n) + ".dat"
 			result, err := c.ChunkedUpload(t.Context(), filePath, remoteName,
 				WithChunkedChunkSize(testChunkSize),
 				WithChunkedConcurrency(2),
@@ -117,17 +118,4 @@ func TestConcurrentFileOperations(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-}
-
-// itoa 是一个简单的 int→string 辅助，用于避免引入 strconv。
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	s := ""
-	for n > 0 {
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
-	return s
 }

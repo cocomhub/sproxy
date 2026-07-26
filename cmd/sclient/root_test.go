@@ -44,13 +44,10 @@ func TestLoadConfig_WithProviderDefaults(t *testing.T) {
 	}
 }
 
-func TestExecute_ReturnsError(t *testing.T) {
-	// Execute() creates a new root cmd and runs it. Without args it should show help.
-	// Help should not return an error, but we need to test that Execute returns non-nil
-	// when an invalid flag is passed.
+func TestExecute_Help(t *testing.T) {
+	// Execute() creates a new root cmd and runs it. Without args it should show help and return nil.
 	err := Execute()
-	// Execute() without args just shows help, which returns nil
 	if err != nil {
-		t.Fatalf("unexpected error from Execute(): %v", err)
+		t.Fatalf("unexpected error from Execute() (help should not return error): %v", err)
 	}
 }

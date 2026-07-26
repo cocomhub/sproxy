@@ -236,10 +236,8 @@ func TestRunRelayStart_EmptyHubURL(t *testing.T) {
 	_ = cmd.Flags().Set("hub", "")
 	cmd.SetContext(ctx)
 	err := cmd.RunE(cmd, []string{})
-	// runRelayStart calls runRelayWithRetry which tries to Dial, so it will fail
-	// but we just verify it doesn't panic
-	if err != nil {
-		t.Logf("runRelayStart with empty hub returned error (expected): %v", err)
+	if err == nil {
+		t.Error("expected error when hub URL is empty")
 	}
 }
 

@@ -5,6 +5,7 @@ package main
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,6 +38,8 @@ func TestConfigCmd_HasSubcommands(t *testing.T) {
 }
 
 func TestConfigCmd_ShowWithConfig(t *testing.T) {
+	// 注意：HandleConfigShow 内部使用 fmt.Printf 写入 os.Stdout，
+	// 因为 CaptureStdout 替换全局 os.Stdout，此测试不能使用 t.Parallel()
 	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://test:18083"}}
 	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, new(string), cfgSvc)
 	out := testutil.CaptureStdout(func() {
@@ -60,6 +63,15 @@ func TestConfigCmd_Set(t *testing.T) {
 	err := cmd.RunE(cmd, []string{"set", "server_url", "http://new:18083"})
 	if err != nil {
 		t.Fatalf("config set failed: %v", err)
+	}
+
+	// 验证文件已被写入磁盘且内容正确
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("config file was not written: %v", err)
+	}
+	if !strings.Contains(string(data), "http://new:18083") {
+		t.Errorf("expected config file to contain new server_url, got: %s", string(data))
 	}
 }
 
