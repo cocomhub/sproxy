@@ -253,13 +253,13 @@ func TestJSONKVStore_AtomicWrite(t *testing.T) {
 		t.Errorf("expected data=atomic, got %v", loaded["data"])
 	}
 
-	// Verify no .tmp files remain
+	// Verify no .tmp.json files remain
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		t.Fatalf("ReadDir failed: %v", err)
 	}
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".tmp") {
+		if strings.HasSuffix(e.Name(), ".tmp.json") {
 			t.Errorf("found leftover tmp file: %s", e.Name())
 		}
 	}
@@ -391,6 +391,11 @@ func TestJSONKVStore_List_SkipsTmpFiles(t *testing.T) {
 	tmpContent := []byte(`{"fake": true}`)
 	if err := os.WriteFile(filepath.Join(s.dir, "fake.tmp.json"), tmpContent, 0644); err != nil {
 		t.Fatalf("failed to create tmp file: %v", err)
+	}
+
+	// Also create a .json.tmp file that should be skipped
+	if err := os.WriteFile(filepath.Join(s.dir, "also_fake.json.tmp"), tmpContent, 0644); err != nil {
+		t.Fatalf("failed to create json.tmp file: %v", err)
 	}
 
 	// List should only return "real"

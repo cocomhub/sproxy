@@ -34,7 +34,7 @@ func (s *JSONKVStore) Save(ctx context.Context, key string, value map[string]any
 		return fmt.Errorf("序列化失败: %w", err)
 	}
 	path := filepath.Join(s.dir, key+".json")
-	tmpPath := path + ".tmp"
+	tmpPath := filepath.Join(s.dir, key+".tmp.json")
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
