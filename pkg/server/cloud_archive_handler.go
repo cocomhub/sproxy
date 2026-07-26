@@ -144,7 +144,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 
 	sendJSONResponse(w, CloudArchiveResult{
 		Success:   true,
-		File:      archiveName,
+		File:      filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
 		Size:      size,
 		Checksum:  checksum,
 		TaskCount: 1,
@@ -271,7 +271,7 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 
 	sendJSONResponse(w, CloudArchiveResult{
 		Success:   true,
-		File:      archiveName,
+		File:      filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
 		Size:      size,
 		Checksum:  checksum,
 		TaskCount: len(files),

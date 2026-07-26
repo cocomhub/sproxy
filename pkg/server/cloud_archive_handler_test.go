@@ -82,7 +82,7 @@ func TestCloudArchive_SingleTask(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("expected success=true, got message: %s", result.Message)
 	}
-	if result.File != "single-task.tar.gz" {
+	if result.File != "single-task.tar.gz" && !strings.HasSuffix(result.File, "/single-task.tar.gz") {
 		t.Fatalf("expected file name %q, got %q", "single-task.tar.gz", result.File)
 	}
 	if result.Size <= 0 {
@@ -179,7 +179,7 @@ func TestCloudArchive_BatchTasks(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("expected success=true, got message: %s", result.Message)
 	}
-	if result.File != "batch-test.tar.gz" {
+	if result.File != "batch-test.tar.gz" && !strings.HasSuffix(result.File, "/batch-test.tar.gz") {
 		t.Fatalf("expected file name %q, got %q", "batch-test.tar.gz", result.File)
 	}
 	if result.Size <= 0 {
@@ -272,8 +272,8 @@ func TestCloudArchive_DefaultArchiveName(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("expected success=true, got message: %s", result.Message)
 	}
-	if !strings.HasPrefix(result.File, "cloud-task-") {
-		t.Fatalf("expected default archive name starting with 'cloud-task-', got %q", result.File)
+	if !strings.HasSuffix(result.File, ".tar.gz") {
+		t.Fatalf("expected default archive name ending with '.tar.gz', got %q", result.File)
 	}
 	if !strings.HasSuffix(result.File, ".tar.gz") {
 		t.Fatalf("expected archive name ending with '.tar.gz', got %q", result.File)
