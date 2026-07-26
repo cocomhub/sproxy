@@ -29,7 +29,7 @@ func NewCmdCloudCancel(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 
 			if err := svc.CancelCloudTask(cmd.Context(), taskID); err != nil {
 				fm.PrintCloudTaskCancelResult(taskID, false, err.Error())
-				return nil
+				return fmt.Errorf("取消云端下载任务失败: %w", err)
 			}
 
 			fm.PrintCloudTaskCancelResult(taskID, true, "已取消")

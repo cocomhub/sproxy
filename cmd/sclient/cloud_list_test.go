@@ -47,10 +47,14 @@ func TestCloudListCmd_ListTasks(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudList(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "task-1") {
+		t.Fatalf("expected output to contain task-1, got: %s", buf.String())
 	}
 }
 
@@ -121,10 +125,14 @@ func TestCloudListCmd_StatusFilter(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdCloudList(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.SetArgs([]string{"--status", "completed"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "task-completed") {
+		t.Fatalf("expected output to contain task-completed, got: %s", buf.String())
 	}
 }
 

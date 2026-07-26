@@ -63,15 +63,12 @@ func TestCloudCancelCmd_NotFound(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	var buf strings.Builder
-	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
 	cmd.Flags().Bool("json", false, "")
 	cmd.SetArgs([]string{"nonexistent-task"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("failed: %v", err)
-	}
-	if !strings.Contains(buf.String(), "任务不存在") && !strings.Contains(buf.String(), "not found") {
-		t.Logf("output: %s", buf.String())
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error for not found task")
 	}
 }
 
@@ -107,15 +104,13 @@ func TestCloudCancelCmd_ServerError(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
-	var buf strings.Builder
-	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd := NewCmdCloudCancel(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
 	cmd.Flags().Bool("json", false, "")
 	cmd.SetArgs([]string{"error-task"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("cancel should not return error for server error: %v", err)
+	err := cmd.Execute()
+	if err == nil {
+		t.Error("expected error for server 500, got nil")
 	}
-	// 新实现：SDK 返回错误，但命令层打印错误信息并返回 nil
-	t.Logf("output: %s", buf.String())
 }
 
 func TestCloudCancelCmd_InvalidJSON(t *testing.T) {

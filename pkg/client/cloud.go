@@ -43,6 +43,7 @@ func WithCloudDownloadFilename(name string) CloudDownloadOption {
 // ArchiveResult 表示归档操作的结果。
 type ArchiveResult struct {
 	Success   bool   `json:"success"`
+	Message   string `json:"message,omitempty"`
 	File      string `json:"file"`
 	Size      int64  `json:"size"`
 	Checksum  string `json:"checksum"`
@@ -52,6 +53,9 @@ type ArchiveResult struct {
 // CloudDownload 创建云端下载任务。
 // 小文件（<20MB）同步完成，大文件异步执行。
 func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...CloudDownloadOption) (*CloudTask, error) {
+	if urlStr == "" {
+		return nil, fmt.Errorf("cloud download: url is required")
+	}
 	cfg := &cloudDownloadOptions{}
 	for _, opt := range opts {
 		opt(cfg)
