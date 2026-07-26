@@ -149,7 +149,7 @@ type FileClient struct {
 	MaxChunkSize int64
 	authToken    string
 	logger       *slog.Logger
-	uploadCache  sync.Map       // key = absFilePath, value = *uploadCacheEntry
+	uploadCache  sync.Map      // key = absFilePath, value = *uploadCacheEntry
 	chainManager *ChainManager // 链式操作管理器，nil=不启用
 }
 
