@@ -4,11 +4,8 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
+	"strings"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -16,60 +13,34 @@ import (
 )
 
 // NewCmdCloudCancel 创建 cloud cancel 命令的工厂函数。
-func NewCmdCloudCancel(_ clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	return &cobra.Command{
+func NewCmdCloudCancel(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+	cmd := &cobra.Command{
 		Use:   "cancel <task-id>",
 		Short: "取消云端下载任务",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
+				return fmt.Errorf(errFmtInitClient, err)
+			}
+
 			taskID := args[0]
-
-			serverURL, authToken := getCloudServerURL(cmd, cfgSvc)
-			if serverURL == "" {
-				return fmt.Errorf("未指定服务器地址，请使用 --server 或配置 server_url")
-			}
-
-			apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/cancel"
-			req, err := http.NewRequest(http.MethodPost, serverURL+apiPath, nil)
-			if err != nil {
-				return fmt.Errorf("创建请求失败: %w", err)
-			}
-			if authToken != "" {
-				req.Header.Set("Authorization", "Bearer "+authToken)
-			}
-
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return fmt.Errorf("取消云端下载任务失败: %w", err)
-			}
-			defer resp.Body.Close()
-
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-
 			fm := buildFormatterWithWriter(ios.Out, cmd)
 
-			if resp.StatusCode == http.StatusNotFound {
-				fm.PrintCloudTaskCancelResult(taskID, false, "任务不存在")
-				return nil
+			if err := svc.CancelCloudTask(cmd.Context(), taskID); err != nil {
+				fm.PrintCloudTaskCancelResult(taskID, false, err.Error())
+				// 任务不存在时（404）保持旧行为：不返回错误，仅打印消息
+				if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
+					return nil
+				}
+				return fmt.Errorf("取消云端下载任务失败: %w", err)
 			}
 
-			if resp.StatusCode != http.StatusOK {
-				msg := fmt.Sprintf("取消云端下载任务失败: HTTP %d: %s", resp.StatusCode, string(body))
-				fm.PrintCloudTaskCancelResult(taskID, false, msg)
-				return fmt.Errorf("%s", msg)
-			}
-
-			var result struct {
-				Success bool   `json:"success"`
-				Message string `json:"message"`
-			}
-			if err := json.Unmarshal(body, &result); err != nil {
-				fm.PrintCloudTaskCancelResult(taskID, false, "解析响应失败")
-				return nil
-			}
-
-			fm.PrintCloudTaskCancelResult(taskID, result.Success, result.Message)
+			fm.PrintCloudTaskCancelResult(taskID, true, "已取消")
 			return nil
 		},
 	}
+
+	return cmd
 }

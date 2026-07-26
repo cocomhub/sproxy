@@ -241,12 +241,14 @@ func TestE2E_BatchDelete(t *testing.T) {
 // ---- E2E: sclient CLI commands via subprocess ----
 
 func TestE2E_SclientCLI(t *testing.T) {
-	t.Parallel()
 	baseURL, cleanup := startSPROXY(t)
 	defer cleanup()
 
 	// Build sclient binary
 	tmpDir := t.TempDir()
+	// Isolate XDG_CACHE_HOME to avoid loadCurrentDir() reading user's local cache,
+	// which would cause `list` to filter by a stale subdirectory path.
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmpDir, "cache"))
 	binName := "sclient"
 	if runtime.GOOS == "windows" {
 		binName += ".exe"

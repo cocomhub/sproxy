@@ -105,6 +105,16 @@ type Service interface {
 	ArchiveDir(ctx context.Context, dirname, outputPath string) error
 	BatchDelete(ctx context.Context, files []BatchDeleteFile) ([]BatchOperationResult, error)
 	BatchRename(ctx context.Context, operations []BatchRenameOp) ([]BatchOperationResult, error)
+	// === Cloud Download ===
+	CloudDownload(ctx context.Context, url string, opts ...CloudDownloadOption) (*CloudTask, error)
+	CloudDownloadBatch(ctx context.Context, urls []string) ([]CloudTask, error)
+	ListCloudTasks(ctx context.Context, status string) ([]CloudTask, error)
+	GetCloudTask(ctx context.Context, taskID string) (*CloudTask, error)
+	CancelCloudTask(ctx context.Context, taskID string) error
+	DeleteCloudTask(ctx context.Context, taskID string) error
+	// === Cloud Archive ===
+	ArchiveCloudTask(ctx context.Context, taskID, archiveName string) (*ArchiveResult, error)
+	ArchiveCloudTasks(ctx context.Context, taskIDs []string, archiveName string) (*ArchiveResult, error)
 	TunnelDo(req *http.Request) (*http.Response, error)
 }
 
@@ -838,4 +848,37 @@ func closeBodyIfErr(resp *http.Response, err error) (*http.Response, error) {
 		return nil, err
 	}
 	return resp, err
+}
+
+// doJSON 发送 JSON 请求体并解析 JSON 响应。
+// 自动设置 Content-Type: application/json，在非 2xx 时返回错误。
+func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody, respBody any) error {
+	var bodyReader io.Reader
+	if reqBody != nil {
+		data, err := json.Marshal(reqBody)
+		if err != nil {
+			return fmt.Errorf("序列化请求体失败: %w", err)
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	resp, err := c.doRequest(ctx, method, urlPath, bodyReader, headers)
+	if err != nil {
+		return fmt.Errorf("请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("请求失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+
+	if respBody != nil {
+		if err := json.NewDecoder(resp.Body).Decode(respBody); err != nil {
+			return fmt.Errorf("解析响应失败: %w", err)
+		}
+	}
+	return nil
 }

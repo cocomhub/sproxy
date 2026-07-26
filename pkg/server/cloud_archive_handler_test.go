@@ -1,0 +1,287 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// setupCloudArchiveTest 创建归档 handler 测试所需的临时服务器、CloudDownloadManager 和临时目录。
+func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManager, string) {
+	t.Helper()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() {
+		mgr.StopFlush()
+		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
+		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
+	})
+
+	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
+	mux.HandleFunc("POST /api/cloud/archive", h.cloudArchiveBatch)
+	return httptest.NewServer(mux), mgr, dir
+}
+
+// createCompletedTask 创建一个已完成的任务，并在 __cloud__/<id>/ 下创建测试文件。
+func createCompletedTask(t *testing.T, mgr *CloudDownloadManager, filename string) string {
+	t.Helper()
+	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status = "completed"
+	cloudDir := filepath.Join(mgr.uploadsDir, cloudDirName)
+	taskDir := filepath.Join(cloudDir, task.ID)
+	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, filename), []byte("test content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return task.ID
+}
+
+func TestCloudArchive_SingleTask(t *testing.T) {
+	ts, mgr, _ := setupCloudArchiveTest(t)
+	defer ts.Close()
+
+	id := createCompletedTask(t, mgr, "test.zip")
+
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json", strings.NewReader(`{"archive_name":"single-task.tar.gz"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result CloudArchiveResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success=true, got message: %s", result.Message)
+	}
+	if result.File != "single-task.tar.gz" && !strings.HasSuffix(result.File, "/single-task.tar.gz") {
+		t.Fatalf("expected file name %q, got %q", "single-task.tar.gz", result.File)
+	}
+	if result.Size <= 0 {
+		t.Fatalf("expected positive size, got %d", result.Size)
+	}
+	if result.Checksum == "" {
+		t.Fatal("expected non-empty checksum")
+	}
+	if result.TaskCount != 1 {
+		t.Fatalf("expected task_count=1, got %d", result.TaskCount)
+	}
+}
+
+func TestCloudArchive_TaskNotFound(t *testing.T) {
+	ts, _, _ := setupCloudArchiveTest(t)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/nonexistent/archive", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+
+	var result CloudArchiveResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Success {
+		t.Fatal("expected success=false")
+	}
+	if result.Message != "task not found" {
+		t.Fatalf("expected message %q, got %q", "task not found", result.Message)
+	}
+}
+
+func TestCloudArchive_TaskNotCompleted(t *testing.T) {
+	ts, mgr, _ := setupCloudArchiveTest(t)
+	defer ts.Close()
+
+	// 创建一个未完成的任务（默认 status = "pending"）
+	task, err := mgr.CreateTask("url", "https://example.com/test.zip", "test.zip", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/archive", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+
+	var result CloudArchiveResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Success {
+		t.Fatal("expected success=false")
+	}
+	if !strings.Contains(result.Message, "completed") {
+		t.Fatalf("expected message to contain 'completed', got %q", result.Message)
+	}
+}
+
+func TestCloudArchive_BatchTasks(t *testing.T) {
+	ts, mgr, _ := setupCloudArchiveTest(t)
+	defer ts.Close()
+
+	id1 := createCompletedTask(t, mgr, "file1.zip")
+	id2 := createCompletedTask(t, mgr, "file2.zip")
+
+	body := `{"task_ids":["` + id1 + `","` + id2 + `"],"archive_name":"batch-test.tar.gz"}`
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result CloudArchiveResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success=true, got message: %s", result.Message)
+	}
+	if result.File != "batch-test.tar.gz" && !strings.HasSuffix(result.File, "/batch-test.tar.gz") {
+		t.Fatalf("expected file name %q, got %q", "batch-test.tar.gz", result.File)
+	}
+	if result.Size <= 0 {
+		t.Fatalf("expected positive size, got %d", result.Size)
+	}
+	if result.Checksum == "" {
+		t.Fatal("expected non-empty checksum")
+	}
+	if result.TaskCount != 2 {
+		t.Fatalf("expected task_count=2, got %d", result.TaskCount)
+	}
+}
+
+func TestCloudArchive_BatchEmptyTaskIDs(t *testing.T) {
+	ts, _, _ := setupCloudArchiveTest(t)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(`{"task_ids":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+
+	var result CloudArchiveResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Success {
+		t.Fatal("expected success=false")
+	}
+	if result.Message != "task_ids is required" {
+		t.Fatalf("expected message %q, got %q", "task_ids is required", result.Message)
+	}
+}
+
+func TestCloudArchive_BatchTaskNotFound(t *testing.T) {
+	ts, mgr, _ := setupCloudArchiveTest(t)
+	defer ts.Close()
+
+	id := createCompletedTask(t, mgr, "valid.zip")
+
+	body := `{"task_ids":["` + id + `","nonexistent-id"]}`
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+
+	var result CloudArchiveResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Success {
+		t.Fatal("expected success=false")
+	}
+	if !strings.Contains(result.Message, "task not found") {
+		t.Fatalf("expected message to contain 'task not found', got %q", result.Message)
+	}
+}
+
+func TestCloudArchive_DefaultArchiveName(t *testing.T) {
+	ts, mgr, _ := setupCloudArchiveTest(t)
+	defer ts.Close()
+
+	id := createCompletedTask(t, mgr, "test.zip")
+
+	// 不指定 archive_name，使用默认名称
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result CloudArchiveResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success=true, got message: %s", result.Message)
+	}
+	if !strings.HasSuffix(result.File, ".tar.gz") {
+		t.Fatalf("expected default archive name ending with '.tar.gz', got %q", result.File)
+	}
+	if result.Size <= 0 {
+		t.Fatalf("expected positive size, got %d", result.Size)
+	}
+	if result.Checksum == "" {
+		t.Fatal("expected non-empty checksum")
+	}
+	if result.TaskCount != 1 {
+		t.Fatalf("expected task_count=1, got %d", result.TaskCount)
+	}
+}
