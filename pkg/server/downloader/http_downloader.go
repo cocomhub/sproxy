@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -95,8 +96,7 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	// 设置文件修改时间
 	if modTime != (time.Time{}) {
 		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
-			// 非致命错误，仅记录
-			_ = err
+			slog.Warn("设置文件修改时间失败", "path", destPath, "error", err)
 		}
 	}
 

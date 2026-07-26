@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// cloudArchiveDirName 是服务端云任务归档文件存储子目录，与服务端 cloudArchiveDirName 保持一致。
+const cloudArchiveDirName = ".__cloud_archives__"
+
 func init() {
 	RegisterRunner("cloud_download", func() ChainRunner { return &CloudDownloadChain{} })
 }
@@ -212,11 +215,14 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			return nil
 		}
 		if attempt < maxRetries {
+			timer := time.NewTimer(30 * time.Second)
 			select {
-			case <-time.After(30 * time.Second):
+			case <-timer.C:
 			case <-ctx.Done():
+				timer.Stop()
 				return ctx.Err()
 			}
+			timer.Stop()
 			for _, url := range storageFullURLs {
 				task, err := c.client.CloudDownload(ctx, url)
 				if err != nil {
@@ -244,7 +250,7 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 			allDone := true
 			var results []*CloudTask
 			for _, taskID := range c.TaskIDs {
-				status, err := c.client.GetCloudTask(ctx, taskID)
+				status, err := c.client.GetCloudTask(timeoutCtx, taskID)
 				if err != nil {
 					return nil, fmt.Errorf("查询任务 %s 失败: %w", taskID, err)
 				}
@@ -274,7 +280,7 @@ func (c *CloudDownloadChain) archiveTasks(ctx context.Context) error {
 
 // downloadToLocal 分块下载归档文件到本地。
 func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
-	archivePath := filepath.ToSlash(filepath.Join("__cloud_archives__", c.ArchiveName))
+	archivePath := filepath.ToSlash(filepath.Join(cloudArchiveDirName, c.ArchiveName))
 	if !strings.HasSuffix(c.ArchiveName, ".tar.gz") {
 		archivePath += ".tar.gz"
 	}

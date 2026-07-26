@@ -506,7 +506,7 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 	task, _ := mgr.SubmitAndStart("url", srv.URL, "cancel-test.bin", 104857600, nil) // nil context = async
 	// 等待进入 downloading 状态
 	for i := 0; i < 30; i++ {
-		task, _ = mgr.GetTask(task.ID)
+		task, _ = mgr.SnapshotTask(task.ID)
 		if task.Status == "downloading" {
 			break
 		}

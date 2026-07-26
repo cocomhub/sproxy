@@ -393,7 +393,7 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	archiveDir := filepath.Join(dir, "__cloud_archives__")
+	archiveDir := filepath.Join(dir, ".__cloud_archives__")
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +440,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		json.NewEncoder(w).Encode(ArchiveResult{
 			Success:  true,
 			Message:  "ok",
-			File:     filepath.ToSlash(filepath.Join("__cloud_archives__", "retry-archive.tar.gz")),
+			File:     filepath.ToSlash(filepath.Join(".__cloud_archives__", "retry-archive.tar.gz")),
 			Size:     15,
 			Checksum: hex.EncodeToString(sum[:]),
 		})
@@ -498,7 +498,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 	dir := t.TempDir()
 	mux := http.NewServeMux()
 
-	archiveDir := filepath.Join(dir, "__cloud_archives__")
+	archiveDir := filepath.Join(dir, ".__cloud_archives__")
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +541,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 		json.NewEncoder(w).Encode(ArchiveResult{
 			Success:  true,
 			Message:  "ok",
-			File:     filepath.ToSlash(filepath.Join("__cloud_archives__", req.ArchiveName+".tar.gz")),
+			File:     filepath.ToSlash(filepath.Join(".__cloud_archives__", req.ArchiveName+".tar.gz")),
 			Size:     15,
 			Checksum: hex.EncodeToString(sum[:]),
 		})
