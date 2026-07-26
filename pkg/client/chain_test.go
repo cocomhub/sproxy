@@ -6,6 +6,7 @@ package client
 import (
 	"context"
 	"errors"
+	"maps"
 	"sync/atomic"
 	"testing"
 )
@@ -35,9 +36,7 @@ func (r *testChainRunner) State() map[string]any {
 		"phase":  r.phase,
 		"status": r.status,
 	}
-	for k, v := range r.stateMap {
-		state[k] = v
-	}
+	maps.Copy(state, r.stateMap)
 	return state
 }
 func (r *testChainRunner) Restore(state map[string]any) error {

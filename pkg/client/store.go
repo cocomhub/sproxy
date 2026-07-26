@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,9 +91,7 @@ func (s *MemoryKVStore) Save(_ context.Context, key string, value map[string]any
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	clone := make(map[string]any, len(value))
-	for k, v := range value {
-		clone[k] = v
-	}
+	maps.Copy(clone, value)
 	s.data[key] = clone
 	return nil
 }
@@ -105,9 +104,7 @@ func (s *MemoryKVStore) Load(_ context.Context, key string) (map[string]any, err
 		return nil, fmt.Errorf("key not found: %s", key)
 	}
 	clone := make(map[string]any, len(v))
-	for k, v := range v {
-		clone[k] = v
-	}
+	maps.Copy(clone, v)
 	return clone, nil
 }
 
