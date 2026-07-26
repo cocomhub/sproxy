@@ -96,6 +96,10 @@ func (c *CloudDownloadChain) setOptions(opts chainOptions) {
 // Run 执行云端下载链式操作，按阶段推进：
 // submitting → waiting → archiving → downloading → [cleaning] → completed。
 func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.Context, phase string, msg string, current, total int)) error {
+	if c.client == nil {
+		return fmt.Errorf("cloud download chain: client is nil, use setClient() before Run()")
+	}
+
 	switch c.CurrentPhase {
 	case "":
 		fallthrough
@@ -202,6 +206,8 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 				}
 				c.TaskIDs = append(c.TaskIDs, task.ID)
 			}
+		} else {
+			c.Failed += len(storageFullURLs)
 		}
 	}
 	return fmt.Errorf("存储空间不足，已重试 %d 次", maxRetries)
@@ -225,7 +231,7 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 					return nil, fmt.Errorf("查询任务 %s 失败: %w", taskID, err)
 				}
 				results = append(results, status)
-				if status.Status == "pending" || status.Status == "downloading" {
+				if status.Status != "completed" && status.Status != "failed" && status.Status != "cancelled" {
 					allDone = false
 				}
 			}
@@ -265,18 +271,25 @@ func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
 	return nil
 }
 
-// cleanupRemote 清理远端任务及关联文件。
+// cleanupRemote 清理远端任务及关联文件。清理失败时继续处理剩余任务。
 func (c *CloudDownloadChain) cleanupRemote(ctx context.Context) error {
+	var firstErr error
 	for _, taskID := range c.TaskIDs {
 		if err := c.client.DeleteCloudTask(ctx, taskID); err != nil {
-			return fmt.Errorf("清理云端任务 %s 失败: %w", taskID, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("清理云端任务 %s 失败: %w", taskID, err)
+			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
-// isStorageFullError 判断错误消息是否为存储空间不足。
+// isStorageFullError 判断错误消息是否为存储空间不足（大小写不敏感子串匹配）。
 func isStorageFullError(errMsg string) bool {
-	return errMsg == "storage full" || errMsg == "507" ||
-		errMsg == "Insufficient Storage" || errMsg == "insufficient storage"
+	lower := strings.ToLower(errMsg)
+	return strings.Contains(lower, "storage full") ||
+		strings.Contains(lower, "insufficient storage") ||
+		strings.Contains(lower, "507") ||
+		strings.Contains(lower, "disk quota") ||
+		strings.Contains(lower, "no space left")
 }

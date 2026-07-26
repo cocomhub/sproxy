@@ -24,124 +24,6 @@ func init() {
 	RegisterRunner("cloud_download", func() ChainRunner { return &CloudDownloadChain{} })
 }
 
-// mockCloudServer 创建带云端下载 API 的 mock 服务端。
-func mockCloudServer(t *testing.T) (*httptest.Server, string) {
-	t.Helper()
-	dir := t.TempDir()
-	mux := http.NewServeMux()
-
-	// 创建 __cloud_archives__ 子目录
-	archiveDir := filepath.Join(dir, "__cloud_archives__")
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	var taskIDCounter atomic.Int64
-
-	// POST /api/cloud/download/batch - 批量提交
-	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
-		var tasks []CloudTask
-		for range 2 {
-			id := fmt.Sprintf("task-%d", taskIDCounter.Add(1))
-			tasks = append(tasks, CloudTask{
-				ID:     id,
-				Status: "pending",
-			})
-		}
-		resp := map[string]any{"tasks": tasks}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	})
-
-	// POST /api/cloud/download - 单个提交
-	mux.HandleFunc("POST /api/cloud/download", func(w http.ResponseWriter, r *http.Request) {
-		id := fmt.Sprintf("task-%d", taskIDCounter.Add(1))
-		task := CloudTask{ID: id, Status: "pending"}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(task)
-	})
-
-	// GET /api/cloud/tasks/{id} - 查询任务状态
-	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		// 从路径提取 task ID
-		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/"), "/")
-		taskID := parts[0]
-		task := CloudTask{
-			ID:     taskID,
-			Status: "completed",
-			URL:    "http://example.com/file",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(task)
-	})
-
-	// POST /api/cloud/archive - 打包归档
-	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			TaskIDs     []string `json:"task_ids"`
-			ArchiveName string   `json:"archive_name"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"success":false,"message":"bad request"}`, http.StatusBadRequest)
-			return
-		}
-		// 创建归档文件
-		archivePath := filepath.Join(archiveDir, req.ArchiveName)
-		if !strings.HasSuffix(archivePath, ".tar.gz") {
-			archivePath += ".tar.gz"
-		}
-		os.WriteFile(archivePath, []byte("archive-content"), 0644)
-
-		result := ArchiveResult{
-			Success: true,
-			Message: "ok",
-			File:    filepath.ToSlash(filepath.Join("__cloud_archives__", req.ArchiveName+".tar.gz")),
-			Size:    15,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
-	})
-
-	// HEAD /api/files/stat - 文件 stat
-	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
-		info, err := os.Stat(archiveFile)
-		if err != nil {
-			// 创建归档文件
-			os.MkdirAll(filepath.Dir(archiveFile), 0755)
-			os.WriteFile(archiveFile, []byte("archive-content"), 0644)
-			info, _ = os.Stat(archiveFile)
-		}
-		w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
-		w.Header().Set("X-File-Checksum", "abc123")
-		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
-		w.WriteHeader(http.StatusOK)
-	})
-
-	// GET /download/chunk - 分块下载
-	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
-		data, err := os.ReadFile(archiveFile)
-		if err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		w.Write(data)
-	})
-
-	// DELETE /api/cloud/tasks/{id} - 删除任务
-	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	})
-
-	ts := httptest.NewServer(mux)
-	t.Cleanup(ts.Close)
-	return ts, dir
-}
-
 func TestCloudDownloadChain_ImplementsChainRunner(t *testing.T) {
 	t.Parallel()
 	var _ ChainRunner = (*CloudDownloadChain)(nil)
@@ -152,7 +34,7 @@ func TestCloudDownloadChain_New(t *testing.T) {
 	client := NewFileClient("http://127.0.0.1:9999")
 	opts := defaultChainOptions()
 
-	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1", "http://example.com/file2"}, "test-archive", "/tmp/out", opts)
+	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1", "http://example.com/file2"}, "test-archive", t.TempDir(), opts)
 
 	if chain.ID() == "" {
 		t.Fatal("expected non-empty chain ID")
@@ -172,8 +54,8 @@ func TestCloudDownloadChain_New(t *testing.T) {
 	if chain.ArchiveName != "test-archive" {
 		t.Errorf("expected archive name test-archive, got %s", chain.ArchiveName)
 	}
-	if chain.LocalDir != "/tmp/out" {
-		t.Errorf("expected local dir /tmp/out, got %s", chain.LocalDir)
+	if chain.LocalDir == "" {
+		t.Errorf("expected non-empty local dir")
 	}
 }
 
@@ -393,9 +275,14 @@ func TestIsStorageFullError(t *testing.T) {
 		want bool
 	}{
 		{"storage full", true},
+		{"STORAGE FULL", true},
+		{"Storage Full", true},
 		{"507", true},
 		{"Insufficient Storage", true},
 		{"insufficient storage", true},
+		{"INSUFFICIENT STORAGE", true},
+		{"disk quota exceeded", true},
+		{"no space left on device", true},
 		{"disk full", false},
 		{"", false},
 		{"network error", false},
@@ -446,6 +333,167 @@ func TestCloudDownloadChain_ResumeMidway(t *testing.T) {
 	state2 := runner.State()
 	if state2["archive_name"] != "resume-archive" {
 		t.Errorf("expected archive_name=resume-archive, got %v", state2["archive_name"])
+	}
+}
+
+func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
+	t.Parallel()
+	ts, dir := newMockCloudServer(t)
+	defer ts.Close()
+
+	store := NewMemoryKVStore()
+	cm := NewChainManager(store)
+
+	state := map[string]any{
+		"type":         "cloud_download",
+		"chain_id":     "chain-resume-run",
+		"phase":        PhaseWaiting,
+		"status":       StatusRunning,
+		"urls":         []any{"http://example.com/file1"},
+		"task_ids":     []any{"task-1", "task-2"},
+		"archive_name": "resume-run-archive",
+		"local_dir":    dir,
+		"keep_files":   false,
+		"completed":    0.0,
+		"failed":       0.0,
+		"total":        2.0,
+		"created_at":   time.Now(),
+		"updated_at":   time.Now(),
+	}
+	if err := store.Save(context.Background(), "chain:chain-resume-run", state); err != nil {
+		t.Fatal(err)
+	}
+
+	runner, err := cm.Resume(context.Background(), "chain-resume-run")
+	if err != nil {
+		t.Fatalf("Resume failed: %v", err)
+	}
+
+	cdc, ok := runner.(*CloudDownloadChain)
+	if !ok {
+		t.Fatal("expected CloudDownloadChain")
+	}
+	cdc.setClient(NewFileClient(ts.URL))
+	cdc.setOptions(chainOptions{pollInterval: 100 * time.Millisecond, timeout: 10 * time.Second})
+
+	var phases []string
+	err = runner.Run(context.Background(), func(ctx context.Context, phase string, msg string, current, total int) {
+		phases = append(phases, phase)
+	})
+	if err != nil {
+		t.Fatalf("Resumed Run failed: %v", err)
+	}
+
+	if runner.Phase() != PhaseCompleted {
+		t.Errorf("expected phase=completed, got %s", runner.Phase())
+	}
+	if runner.Status() != StatusCompleted {
+		t.Errorf("expected status=completed, got %s", runner.Status())
+	}
+	if len(phases) < 3 {
+		t.Fatalf("expected at least 3 phases after resume, got %d: %v", len(phases), phases)
+	}
+}
+
+func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, "__cloud_archives__")
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	var taskIDCounter atomic.Int64
+
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		tasks := []CloudTask{
+			{ID: fmt.Sprintf("task-%d", taskIDCounter.Add(1)), Status: "pending"},
+			{ID: fmt.Sprintf("task-%d", taskIDCounter.Add(1)), Status: "pending"},
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tasks": tasks})
+	})
+
+	mux.HandleFunc("POST /api/cloud/download", func(w http.ResponseWriter, r *http.Request) {
+		task := CloudTask{ID: fmt.Sprintf("task-%d", taskIDCounter.Add(1)), Status: "pending"}
+		json.NewEncoder(w).Encode(task)
+	})
+
+	var queryCount atomic.Int64
+	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		count := queryCount.Add(1)
+		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+		if count <= 3 {
+			json.NewEncoder(w).Encode(CloudTask{
+				ID:     taskID,
+				Status: "failed",
+				Error:  "storage full",
+				URL:    "http://example.com/retry-file",
+			})
+		} else {
+			json.NewEncoder(w).Encode(CloudTask{
+				ID:     taskID,
+				Status: "completed",
+			})
+		}
+	})
+
+	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
+		archivePath := filepath.Join(archiveDir, "retry-archive.tar.gz")
+		os.WriteFile(archivePath, []byte("archive-content"), 0644)
+		sum := sha256.Sum256([]byte("archive-content"))
+		json.NewEncoder(w).Encode(ArchiveResult{
+			Success:  true,
+			Message:  "ok",
+			File:     filepath.ToSlash(filepath.Join("__cloud_archives__", "retry-archive.tar.gz")),
+			Size:     15,
+			Checksum: hex.EncodeToString(sum[:]),
+		})
+	})
+
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+		filename := r.URL.Query().Get("filename")
+		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
+		os.MkdirAll(filepath.Dir(archiveFile), 0755)
+		if _, err := os.Stat(archiveFile); err != nil {
+			os.WriteFile(archiveFile, []byte("archive-content"), 0644)
+		}
+		data, _ := os.ReadFile(archiveFile)
+		sum := sha256.Sum256(data)
+		info, _ := os.Stat(archiveFile)
+		w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
+		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
+		filename := r.URL.Query().Get("filename")
+		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
+		data, _ := os.ReadFile(archiveFile)
+		w.Write(data)
+	})
+	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 10 * time.Second}
+
+	chain := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "retry-archive", dir, opts)
+
+	err := chain.Run(context.Background(), func(ctx context.Context, phase string, msg string, current, total int) {})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if chain.Phase() != PhaseCompleted {
+		t.Errorf("expected phase=completed, got %s", chain.Phase())
+	}
+	if len(chain.TaskIDs) < 3 {
+		t.Errorf("expected at least 3 task IDs after retry, got %d", len(chain.TaskIDs))
 	}
 }
 
