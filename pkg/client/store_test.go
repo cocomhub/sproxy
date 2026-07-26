@@ -485,10 +485,9 @@ func TestStructCodec_ToMap_NonStruct(t *testing.T) {
 	t.Parallel()
 	codec := StructCodec{}
 
-	// Passing a non-struct should work (JSON marshal handles it)
 	_, err := codec.ToMap("not a struct")
-	if err != nil {
-		t.Logf("ToMap with non-struct returned error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for non-struct input")
 	}
 }
 

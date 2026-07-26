@@ -487,7 +487,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	if chain.Phase() != PhaseCompleted {
 		t.Errorf("expected phase=completed, got %s", chain.Phase())
 	}
-	if len(chain.TaskIDs) < 3 {
+	if len(chain.TaskIDs) <= 2 {
 		t.Errorf("expected at least 3 task IDs after retry, got %d", len(chain.TaskIDs))
 	}
 }
