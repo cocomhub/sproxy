@@ -152,6 +152,10 @@ func TestRunServer_SignalShutdown(t *testing.T) {
 		t.Skip("skipping signal shutdown test in short mode")
 	}
 
+	// 清除全局状态，避免之前测试的残留
+	cfgPtr.Store(nil)
+	cfgProvider = nil
+
 	sigCh := make(chan os.Signal, 1)
 	testSignalCh = sigCh
 	t.Cleanup(func() { testSignalCh = nil })
@@ -159,6 +163,8 @@ func TestRunServer_SignalShutdown(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
 	cmd.Flags().Bool("version", false, "")
+	cmd.Flags().Bool("no-tls", false, "")
+	_ = cmd.Flags().Set("no-tls", "true")
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -168,7 +174,7 @@ func TestRunServer_SignalShutdown(t *testing.T) {
 	// 轮询等待 cfgPtr 被初始化（server 启动成功），然后用实际地址连接
 	waitForConfig(t, 5*time.Second)
 	addr := cfgPtr.Load().Addr
-	waitForServer(t, addr, 5*time.Second)
+	waitForServerReady(t, addr, 5*time.Second)
 	sigCh <- syscall.SIGTERM
 
 	select {
@@ -192,6 +198,10 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 		t.Skip("skipping goroutine leak test in short mode")
 	}
 
+	// 清除全局状态，避免之前测试的残留
+	cfgPtr.Store(nil)
+	cfgProvider = nil
+
 	sigCh := make(chan os.Signal, 1)
 	testSignalCh = sigCh
 	t.Cleanup(func() { testSignalCh = nil })
@@ -200,6 +210,8 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("version", false, "")
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
+	cmd.Flags().Bool("no-tls", false, "")
+	_ = cmd.Flags().Set("no-tls", "true")
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -209,7 +221,7 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 	// 轮询等待 cfgPtr 被初始化（server 启动成功），然后用实际地址连接
 	waitForConfig(t, 5*time.Second)
 	addr := cfgPtr.Load().Addr
-	waitForServer(t, addr, 5*time.Second)
+	waitForServerReady(t, addr, 5*time.Second)
 	sigCh <- syscall.SIGTERM
 
 	select {
@@ -357,6 +369,24 @@ func waitForServer(t testing.TB, addr string, timeout time.Duration) {
 		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
 			conn.Close()
 			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("server did not become ready within %v (addr=%s)", timeout, addr)
+}
+
+// waitForServerReady 轮询等待 HTTP 服务器就绪（通过 HTTP 连接，支持 TLS 和 HTTP）。
+func waitForServerReady(t testing.TB, addr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 100 * time.Millisecond}
+	for time.Now().Before(deadline) {
+		resp, err := client.Get("http://" + addr + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
