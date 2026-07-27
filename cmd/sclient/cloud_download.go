@@ -40,18 +40,21 @@ func readURLsFromFile(path string) ([]string, error) {
 }
 
 // NewCmdCloudDownload 创建云端下载命令的工厂函数。
+// 默认行为是完整链式操作：提交 → 等待 → 打包 → 下载 → 清理。
 func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cloud-download <url> [url...]",
-		Short: "从云端下载文件（服务端先拉取，再下载到本地）",
-		Long: `通过 sproxy 服务端从外部 URL 下载文件，完成后自动下载到本地并清理云端副本。
+		Short: "从云端下载文件（链式操作：提交→等待→打包→下载→清理）",
+		Long: `通过 sproxy 服务端从外部 URL 下载文件，自动执行完整链式操作：
 
-小文件（< 20 MiB）默认同步等待，大文件自动切换异步模式。
-如果同步下载过程中连接断开，服务端自动转为异步模式继续下载。
+  1. 提交云端下载任务
+  2. 等待下载完成
+  3. 打包归档为 tar.gz
+  4. 下载到本地
+  5. 清理远端文件
 
-支持多个 URL 参数或通过 --batch 从文件读取 URL 列表。
-
-使用 --wait 可等待所有任务完成后自动进入归档/下载/解压链式操作。`,
+使用 --keep-files 跳过清理步骤。
+使用子命令（submit, wait, archive, fetch, list, cancel, resume）执行单个步骤。`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
@@ -60,14 +63,11 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
-			wait, _ := cmd.Flags().GetBool("wait")
-			archive, _ := cmd.Flags().GetBool("archive")
-			download, _ := cmd.Flags().GetBool("download")
-			extract, _ := cmd.Flags().GetBool("extract")
 			archiveName, _ := cmd.Flags().GetString("archive-name")
 			outputDir, _ := cmd.Flags().GetString("output-dir")
-			noCleanup, _ := cmd.Flags().GetBool("no-cleanup")
+			keepFiles, _ := cmd.Flags().GetBool("keep-files")
 			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+			timeout, _ := cmd.Flags().GetDuration("timeout")
 			batchFile, _ := cmd.Flags().GetString("batch")
 
 			// 收集 URL
@@ -84,14 +84,89 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 				return fmt.Errorf("未指定下载 URL，请提供 URL 参数或使用 --batch 指定文件")
 			}
 
-			// 创建任务
+			ios.WriteOutLine("链式下载 %d 个 URL...", len(urls))
+
+			opts := []client.ChainOption{
+				client.WithChainPollInterval(pollInterval),
+				client.WithChainTimeout(timeout),
+			}
+			if keepFiles {
+				opts = append(opts, client.WithChainKeepFiles())
+			}
+
+			result, err := svc.CloudDownloadChain(cmd.Context(), urls, archiveName, outputDir, opts...)
+			if err != nil {
+				return fmt.Errorf("链式下载失败: %w", err)
+			}
+
+			cdc := result.Raw.(*client.CloudDownloadChain)
+			ios.WriteOutLine("链式下载完成!")
+			ios.WriteOutLine("  本地路径: %s", cdc.LocalPath)
+			if !cdc.KeepFiles {
+				ios.WriteOutLine("  远端文件: 已清理")
+			}
+			return nil
+		},
+	}
+
+	// 注册 flags
+	cmd.Flags().String("archive-name", "", "归档文件名（默认自动生成）")
+	cmd.Flags().String("output-dir", ".", "本地输出目录")
+	cmd.Flags().Bool("keep-files", false, "下载到本地后不删除云端副本")
+	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
+	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
+	cmd.Flags().Bool("no-cache", false, "不使用缓存（重新下载）")
+	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
+
+	// 注册子命令
+	cmd.AddCommand(NewCmdCloudSubmit(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudWait(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudArchive(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudFetch(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudResume(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudList(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudCancel(factory, ios, cfgSvc))
+
+	return cmd
+}
+
+// NewCmdCloudSubmit 创建 submit 子命令，仅提交云端下载任务。
+func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "submit <url> [url...]",
+		Short: "提交云端下载任务（不等待完成）",
+		Long: `提交 URL 到服务端进行云端下载，返回任务 ID 和状态。
+不等待任务完成，使用 wait 子命令轮询。
+支持多个 URL 参数或通过 --batch 从文件读取 URL 列表。`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
+				return fmt.Errorf(errFmtInitClient, err)
+			}
+
+			batchFile, _ := cmd.Flags().GetString("batch")
+
+			urls := args
+			if batchFile != "" {
+				var fileURLs []string
+				fileURLs, err = readURLsFromFile(batchFile)
+				if err != nil {
+					return fmt.Errorf("读取 batch 文件失败: %w", err)
+				}
+				urls = append(urls, fileURLs...)
+			}
+			if len(urls) == 0 {
+				return fmt.Errorf("未指定下载 URL，请提供 URL 参数或使用 --batch 指定文件")
+			}
+
 			ios.WriteOutLine("创建云端下载任务...")
 			tasks, err := svc.CloudDownloadBatch(cmd.Context(), urls)
 			if err != nil {
 				return fmt.Errorf("创建云端下载任务失败: %w", err)
 			}
 
-			// 输出任务信息
 			for _, t := range tasks {
 				statusLine := fmt.Sprintf("  %s: %s", t.ID, t.Status)
 				if t.Filename != "" {
@@ -102,75 +177,105 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 				}
 				ios.WriteOutLine(statusLine)
 			}
+			return nil
+		},
+	}
 
-			// 等待模式
-			if wait {
-				completedTasks, waitErr := waitForCompletion(cmd.Context(), svc, ios, tasks, pollInterval)
-				if waitErr != nil {
-					return waitErr
+	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
+	return cmd
+}
+
+// NewCmdCloudWait 创建 wait 子命令，等待云端下载任务完成。
+func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "wait <task-id> [task-id...]",
+		Short: "等待云端下载任务完成",
+		Long:  `轮询等待指定云端下载任务完成，显示下载进度。`,
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
+				return fmt.Errorf(errFmtInitClient, err)
+			}
+
+			// 从 wait 子命令自身的 flags 读取
+			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+			timeout, _ := cmd.Flags().GetDuration("timeout")
+
+			// 获取初始任务状态
+			tasks := make([]client.CloudTask, len(args))
+			for i, id := range args {
+				task, getErr := svc.GetCloudTask(cmd.Context(), id)
+				if getErr != nil {
+					ios.WriteErrLine("获取任务 %s 信息失败: %v", id, getErr)
+					tasks[i] = client.CloudTask{ID: id, Status: "failed"}
+					continue
 				}
+				tasks[i] = *task
+			}
 
-				// 收集成功任务
-				var succeededIDs []string
-				var succeededTask *client.CloudTask
-				for _, t := range completedTasks {
-					if t.Status == "completed" {
-						succeededIDs = append(succeededIDs, t.ID)
-						if succeededTask == nil {
-							succeededTask = &t
-						}
-					}
+			// 收集待轮询任务
+			pending := make(map[string]client.CloudTask)
+			for _, t := range tasks {
+				if t.Status == "pending" || t.Status == "downloading" {
+					pending[t.ID] = t
 				}
-				if len(succeededIDs) == 0 {
-					return fmt.Errorf("所有任务均未成功完成")
+			}
+
+			if len(pending) == 0 {
+				for _, t := range tasks {
+					ios.WriteOutLine("  %s: %s", t.ID, t.Status)
 				}
+				return nil
+			}
 
-				// 归档模式
-				if archive {
-					name := archiveName
-					if name == "" {
-						if len(succeededIDs) == 1 && succeededTask != nil {
-							name = succeededTask.Filename
-						} else {
-							name = fmt.Sprintf("cloud-batch-%d", time.Now().Unix())
+			ios.WriteOutLine("等待 %d 个任务完成...", len(pending))
+
+			pollCtx, cancel := context.WithTimeout(cmd.Context(), timeout)
+			defer cancel()
+
+			ticker := time.NewTicker(pollInterval)
+			defer ticker.Stop()
+
+			results := make(map[string]client.CloudTask)
+			for _, t := range tasks {
+				results[t.ID] = t
+			}
+
+			for len(pending) > 0 {
+				select {
+				case <-pollCtx.Done():
+					if len(pending) > 0 {
+						return pollCtx.Err()
+					}
+					return nil
+				case <-ticker.C:
+					for id := range pending {
+						task, pollErr := svc.GetCloudTask(pollCtx, id)
+						if pollErr != nil {
+							ios.WriteOutLine("  轮询任务 %s 失败: %v", id, pollErr)
+							delete(pending, id)
+							continue
 						}
-					}
-					ios.WriteOutLine("打包归档中...")
-					var result *client.ArchiveResult
-					if len(succeededIDs) == 1 {
-						result, err = svc.ArchiveCloudTask(cmd.Context(), succeededIDs[0], name)
-					} else {
-						result, err = svc.ArchiveCloudTasks(cmd.Context(), succeededIDs, name)
-					}
-					if err != nil {
-						return fmt.Errorf("归档失败: %w", err)
-					}
-					ios.WriteOutLine("  归档完成: %s (%d bytes)", result.File, result.Size)
-
-					// 下载模式
-					if download {
-						outputPath := filepath.Join(outputDir, result.File)
-						ios.WriteOutLine("下载归档到本地: %s", outputPath)
-						if err := svc.Download(cmd.Context(), result.File, outputPath); err != nil {
-							return fmt.Errorf("下载归档失败: %w", err)
-						}
-						ios.WriteOutLine("  下载完成")
-
-						// 解压模式
-						if extract {
-							ios.WriteOutLine("解压中...")
-							if err := extractTarGz(outputPath, outputDir); err != nil {
-								return fmt.Errorf("解压失败: %w", err)
+						results[id] = *task
+						switch task.Status {
+						case "completed":
+							delete(pending, id)
+							ios.WriteOutLine("  ✓ %s: 完成 (%s, %d bytes)", id, task.Filename, task.TotalSize)
+						case "failed":
+							delete(pending, id)
+							ios.WriteOutLine("  ✗ %s: 失败 - %s", id, task.Error)
+						case "cancelled":
+							delete(pending, id)
+							ios.WriteOutLine("  ✗ %s: 已取消", id)
+						default:
+							pct := int64(0)
+							if task.TotalSize > 0 {
+								pct = task.Downloaded * 100 / task.TotalSize
 							}
-							ios.WriteOutLine("  解压完成: %s", outputDir)
+							ios.WriteOutLine("  ⟳ %s: %d%% (%d/%d bytes)", id, pct, task.Downloaded, task.TotalSize)
 						}
-					}
-				}
-
-				// 清理云端任务
-				if !noCleanup {
-					for _, id := range succeededIDs {
-						_ = svc.DeleteCloudTask(cmd.Context(), id)
 					}
 				}
 			}
@@ -178,90 +283,120 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 		},
 	}
 
-	// 注册 flags
-	cmd.Flags().Bool("no-cleanup", false, "下载到本地后不删除云端副本")
-	cmd.Flags().Duration("poll-interval", 2*time.Second, "异步模式轮询间隔")
-	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
-	cmd.Flags().Bool("wait", false, "等待所有任务完成后自动进入归档/下载/解压链式操作")
-	cmd.Flags().Bool("archive", false, "完成后打包归档")
-	cmd.Flags().String("archive-name", "", "归档文件名（默认自动生成）")
-	cmd.Flags().Bool("download", false, "下载归档到本地")
-	cmd.Flags().String("output-dir", ".", "本地输出目录")
-	cmd.Flags().Bool("extract", false, "解压归档（仅与 --download 同时使用）")
+	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
+	cmd.Flags().Duration("timeout", 30*time.Minute, "等待超时时间")
+	return cmd
+}
 
-	// 注册子命令
-	cmd.AddCommand(NewCmdCloudList(factory, ios, cfgSvc))
-	cmd.AddCommand(NewCmdCloudCancel(factory, ios, cfgSvc))
+// NewCmdCloudFetch 创建 fetch 子命令，执行完整链式下载。
+func NewCmdCloudFetch(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "fetch <url> [url...]",
+		Short: "完整链式下载（提交→等待→打包→下载→清理）",
+		Long: `完整链式操作：提交云端下载任务，等待完成，打包归档，下载到本地，清理远端文件。
+与 cloud-download 主命令行为相同，作为子命令提供以方便在脚本中使用。`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
+				return fmt.Errorf(errFmtInitClient, err)
+			}
+
+			archiveName, _ := cmd.Flags().GetString("archive-name")
+			outputDir, _ := cmd.Flags().GetString("output-dir")
+			keepFiles, _ := cmd.Flags().GetBool("keep-files")
+			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+			timeout, _ := cmd.Flags().GetDuration("timeout")
+			batchFile, _ := cmd.Flags().GetString("batch")
+
+			urls := args
+			if batchFile != "" {
+				var fileURLs []string
+				fileURLs, err = readURLsFromFile(batchFile)
+				if err != nil {
+					return fmt.Errorf("读取 batch 文件失败: %w", err)
+				}
+				urls = append(urls, fileURLs...)
+			}
+			if len(urls) == 0 {
+				return fmt.Errorf("未指定下载 URL，请提供 URL 参数或使用 --batch 指定文件")
+			}
+
+			ios.WriteOutLine("链式下载 %d 个 URL...", len(urls))
+
+			opts := []client.ChainOption{
+				client.WithChainPollInterval(pollInterval),
+				client.WithChainTimeout(timeout),
+			}
+			if keepFiles {
+				opts = append(opts, client.WithChainKeepFiles())
+			}
+
+			result, err := svc.CloudDownloadChain(cmd.Context(), urls, archiveName, outputDir, opts...)
+			if err != nil {
+				return fmt.Errorf("链式下载失败: %w", err)
+			}
+
+			cdc := result.Raw.(*client.CloudDownloadChain)
+			ios.WriteOutLine("链式下载完成!")
+			ios.WriteOutLine("  本地路径: %s", cdc.LocalPath)
+			if !cdc.KeepFiles {
+				ios.WriteOutLine("  远端文件: 已清理")
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().String("archive-name", "", "归档文件名（默认自动生成）")
+	cmd.Flags().String("output-dir", ".", "本地输出目录")
+	cmd.Flags().Bool("keep-files", false, "下载到本地后不删除云端副本")
+	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
+	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
+	cmd.Flags().Bool("no-cache", false, "不使用缓存（重新下载）")
+	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
 
 	return cmd
 }
 
-// waitForCompletion 轮询等待所有云端任务完成。
-func waitForCompletion(ctx context.Context, fc *client.FileClient, ios cli.IOStreams, tasks []client.CloudTask, interval time.Duration) ([]client.CloudTask, error) {
-	if interval <= 0 {
-		interval = 2 * time.Second
-	}
-
-	pending := make(map[string]client.CloudTask)
-	for _, t := range tasks {
-		if t.Status == "pending" || t.Status == "downloading" {
-			pending[t.ID] = t
-		}
-	}
-
-	if len(pending) == 0 {
-		return tasks, nil
-	}
-
-	ios.WriteOutLine("等待 %d 个任务完成...", len(pending))
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	results := make([]client.CloudTask, 0, len(tasks))
-	for _, t := range tasks {
-		if t.Status == "pending" || t.Status == "downloading" {
-			continue
-		}
-		results = append(results, t)
-	}
-
-	for len(pending) > 0 {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-ticker.C:
-			for id := range pending {
-				task, err := fc.GetCloudTask(ctx, id)
-				if err != nil {
-					ios.WriteErrLine("  轮询任务 %s 失败: %v", id, err)
-					delete(pending, id)
-					continue
-				}
-				switch task.Status {
-				case "completed":
-					delete(pending, id)
-					results = append(results, *task)
-					ios.WriteOutLine("  ✓ %s: 完成 (%s, %d bytes)", id, task.Filename, task.TotalSize)
-				case "failed":
-					delete(pending, id)
-					results = append(results, *task)
-					ios.WriteErrLine("  ✗ %s: 失败 - %s", id, task.Error)
-				case "cancelled":
-					delete(pending, id)
-					results = append(results, *task)
-					ios.WriteErrLine("  ✗ %s: 已取消", id)
-				default:
-					pct := int64(0)
-					if task.TotalSize > 0 {
-						pct = task.Downloaded * 100 / task.TotalSize
-					}
-					ios.WriteOutLine("  ⟳ %s: %d%% (%d/%d bytes)", id, pct, task.Downloaded, task.TotalSize)
-				}
+// NewCmdCloudResume 创建 resume 子命令，恢复中断的链式操作。
+func NewCmdCloudResume(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "resume <chain-id>",
+		Short: "恢复中断的链式操作",
+		Long: `从缓存恢复并继续执行中断的链式操作。
+需要客户端配置了 cache_dir 以启用链式操作持久化。`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
+				return fmt.Errorf(errFmtInitClient, err)
 			}
-		}
+
+			chainID := args[0]
+			ios.WriteOutLine("恢复链式操作: %s", chainID)
+
+			result, err := svc.ResumeChain(cmd.Context(), chainID)
+			if err != nil {
+				return fmt.Errorf("恢复链式操作失败: %w", err)
+			}
+
+			cdc, ok := result.Raw.(*client.CloudDownloadChain)
+			if ok {
+				ios.WriteOutLine("链式操作完成!")
+				ios.WriteOutLine("  本地路径: %s", cdc.LocalPath)
+				if !cdc.KeepFiles {
+					ios.WriteOutLine("  远端文件: 已清理")
+				}
+			} else {
+				ios.WriteOutLine("链式操作完成: %s", result.ChainID)
+			}
+			return nil
+		},
 	}
-	return results, nil
+
+	return cmd
 }
 
 // extractTarGz 解压 tar.gz 文件到指定目录。
