@@ -803,9 +803,9 @@ func TestReplayProtector_Cleanup(t *testing.T) {
 	rp := NewReplayProtector()
 	now := time.Now().Unix()
 
-	// 插入一个早期条目，仍在窗口内（180 秒前）
+	// 插入一个在窗口内的条目
 	oldJTI := "aaaa0000000000000000000000000000"
-	if err := rp.Validate(oldJTI, now-180); err != nil {
+	if err := rp.Validate(oldJTI, now-240); err != nil {
 		t.Fatalf("expected pass, got: %v", err)
 	}
 
@@ -815,10 +815,14 @@ func TestReplayProtector_Cleanup(t *testing.T) {
 		_ = rp.Validate(jti, now)
 	}
 
-	// 过期的旧条目应被清理，可以重新插入
-	// 旧条目可能已过期（被清理），也可能仍在窗口内
-	if err := rp.Validate(oldJTI, now); err != nil {
-		t.Logf("old entry already cleaned up: %v", err)
+	// 旧的但仍在窗口内的条目不应被重复插入
+	if err := rp.Validate(oldJTI, now); err == nil {
+		t.Error("expected duplicate jti to be rejected, got nil")
+	}
+
+	// 验证清理后 map 大小合理（不应超过 1002）
+	if rp.Len() > 1002 {
+		t.Errorf("expected len <= 1002 after cleanup, got %d", rp.Len())
 	}
 }
 

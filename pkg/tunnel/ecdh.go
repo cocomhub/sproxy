@@ -18,6 +18,7 @@ import (
 const (
 	ecdhPublicKeyLen = 32 // X25519 public key 长度
 	sessionKeyLen    = 32 // AES-256 会话密钥长度
+	ecdhSalt         = "sproxy-ecdh-salt-v1"
 )
 
 // performHandshake 执行 ECDH X25519 密钥交换，返回会话密钥。
@@ -84,7 +85,7 @@ func performHandshake(ctx context.Context, m *mux.Mux, dialer bool) ([]byte, err
 		return nil, fmt.Errorf("ecdh: compute shared secret: %w", eErr)
 	}
 
-	sessionKey, kErr := hkdf.Key(sha256.New, sharedSecret, nil, "sproxy-tunnel-ecdh-v1", sessionKeyLen)
+	sessionKey, kErr := hkdf.Key(sha256.New, sharedSecret, []byte(ecdhSalt), "sproxy-tunnel-ecdh-v1", sessionKeyLen)
 	if kErr != nil {
 		return nil, fmt.Errorf("ecdh: derive session key: %w", kErr)
 	}

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -55,6 +56,8 @@ func (t *Tunnel) ensureHandshake() {
 			t.skMu.Lock()
 			t.sessionKey = sk
 			t.skMu.Unlock()
+		} else {
+			slog.Warn("ECDH 握手失败（dialer），回退到静态密钥", "error", err)
 		}
 	})
 }
@@ -213,6 +216,8 @@ func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 			t.skMu.Lock()
 			t.sessionKey = sk
 			t.skMu.Unlock()
+		} else {
+			slog.Warn("ECDH 握手失败（listener），回退到静态密钥", "error", err)
 		}
 		// 即使握手失败，Serve 也继续运行（向后兼容）
 	}

@@ -72,7 +72,7 @@ func (rp *ReplayProtector) Validate(jti string, iat int64) error {
 func (rp *ReplayProtector) cleanup() {
 	now := time.Now().Unix()
 	for jti, iat := range rp.seen {
-		if iat < now-replayWindowSize {
+		if iat < now-replayWindowSize || iat > now+replayWindowSize {
 			delete(rp.seen, jti)
 		}
 	}
