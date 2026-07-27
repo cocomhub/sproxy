@@ -1,4 +1,4 @@
-﻿// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // 涓婚€昏緫锛氭枃浠跺垪琛ㄣ€丆RUD銆佹壒閲忔搷浣溿€佸鑸€乁I 宸ュ叿銆?// 渚濊禆 sha256.js, tunnel.js, upload.js锛堝厛鍔犺浇锛夈€?

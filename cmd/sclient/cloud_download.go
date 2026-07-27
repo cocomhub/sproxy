@@ -99,11 +99,15 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 				return fmt.Errorf("链式下载失败: %w", err)
 			}
 
-			cdc := result.Raw.(*client.CloudDownloadChain)
-			ios.WriteOutLine("链式下载完成!")
-			ios.WriteOutLine("  本地路径: %s", cdc.LocalPath)
-			if !cdc.KeepFiles {
-				ios.WriteOutLine("  远端文件: 已清理")
+			cdc, ok := result.Raw.(*client.CloudDownloadChain)
+			if ok {
+				ios.WriteOutLine("链式下载完成!")
+				ios.WriteOutLine("  本地路径: %s", cdc.LocalPath)
+				if !cdc.KeepFiles {
+					ios.WriteOutLine("  远端文件: 已清理")
+				}
+			} else {
+				ios.WriteOutLine("链式下载完成: %s", result.ChainID)
 			}
 			return nil
 		},
@@ -338,11 +342,15 @@ func NewCmdCloudFetch(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 				return fmt.Errorf("链式下载失败: %w", err)
 			}
 
-			cdc := result.Raw.(*client.CloudDownloadChain)
-			ios.WriteOutLine("链式下载完成!")
-			ios.WriteOutLine("  本地路径: %s", cdc.LocalPath)
-			if !cdc.KeepFiles {
-				ios.WriteOutLine("  远端文件: 已清理")
+			cdc, ok := result.Raw.(*client.CloudDownloadChain)
+			if ok {
+				ios.WriteOutLine("链式下载完成!")
+				ios.WriteOutLine("  本地路径: %s", cdc.LocalPath)
+				if !cdc.KeepFiles {
+					ios.WriteOutLine("  远端文件: 已清理")
+				}
+			} else {
+				ios.WriteOutLine("链式下载完成: %s", result.ChainID)
 			}
 			return nil
 		},

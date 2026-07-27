@@ -87,7 +87,7 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 		MaxConcurrent: cfg.CloudMaxConcurrent,
 		TaskTTL:       parseDuration(cfg.CloudTaskTTL, 24*time.Hour),
 		FailedTaskTTL: parseDuration(cfg.CloudFailedTaskTTL, 1*time.Hour),
-		AllowPrivate:  true, // 允许私有 IP（E2E 测试使用本地服务器）
+		AllowPrivate:  cfg.CloudDownloadAllowPrivate,
 	}
 	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, cs, log.With("component", "cloud"), cloudCfg)
 	h.storageMgr = sm

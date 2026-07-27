@@ -175,9 +175,8 @@ func TestCloudDownloadCmd_KeepFiles(t *testing.T) {
 	if !strings.Contains(buf.String(), "链式下载完成") {
 		t.Fatalf("expected completion message, got: %s", buf.String())
 	}
-	if !strings.Contains(buf.String(), "远端文件") {
-		// 当 keep-files 时，不显示"已清理"
-		// 但应该仍然显示完成信息
+	if strings.Contains(buf.String(), "远端文件") {
+		t.Error("expected no remote cleanup message when keep-files is set")
 	}
 }
 
