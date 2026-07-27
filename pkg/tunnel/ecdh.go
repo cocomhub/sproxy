@@ -31,62 +31,62 @@ const (
 // 6. 双方计算 HKDF(ECDH(shared_secret)) 作为会话密钥
 func performHandshake(ctx context.Context, m *mux.Mux, dialer bool) ([]byte, error) {
 	curve := ecdh.X25519()
-	privateKey, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("ecdh: generate key: %w", err)
+	privateKey, gErr := curve.GenerateKey(rand.Reader)
+	if gErr != nil {
+		return nil, fmt.Errorf("ecdh: generate key: %w", gErr)
 	}
 	publicKey := privateKey.PublicKey()
 
 	var peerPublic []byte
 
 	if dialer {
-		stream, err := m.Open(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("ecdh: open stream: %w", err)
+		s, openErr := m.Open(ctx)
+		if openErr != nil {
+			return nil, fmt.Errorf("ecdh: open stream: %w", openErr)
 		}
-		defer stream.Close()
+		defer s.Close()
 
 		ourPub := publicKey.Bytes()
-		if _, err := stream.Write(ourPub); err != nil {
-			return nil, fmt.Errorf("ecdh: write pubkey: %w", err)
+		if _, wErr := s.Write(ourPub); wErr != nil {
+			return nil, fmt.Errorf("ecdh: write pubkey: %w", wErr)
 		}
 
 		peerPub := make([]byte, ecdhPublicKeyLen)
-		if _, err := io.ReadFull(stream, peerPub); err != nil {
-			return nil, fmt.Errorf("ecdh: read peer pubkey: %w", err)
+		if _, rErr := io.ReadFull(s, peerPub); rErr != nil {
+			return nil, fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
 		}
 		peerPublic = peerPub
 	} else {
-		stream, err := m.Accept(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("ecdh: accept stream: %w", err)
+		s, acceptErr := m.Accept(ctx)
+		if acceptErr != nil {
+			return nil, fmt.Errorf("ecdh: accept stream: %w", acceptErr)
 		}
-		defer stream.Close()
+		defer s.Close()
 
 		peerPub := make([]byte, ecdhPublicKeyLen)
-		if _, err := io.ReadFull(stream, peerPub); err != nil {
-			return nil, fmt.Errorf("ecdh: read peer pubkey: %w", err)
+		if _, rErr := io.ReadFull(s, peerPub); rErr != nil {
+			return nil, fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
 		}
 
 		ourPub := publicKey.Bytes()
-		if _, err := stream.Write(ourPub); err != nil {
-			return nil, fmt.Errorf("ecdh: write pubkey: %w", err)
+		if _, wErr := s.Write(ourPub); wErr != nil {
+			return nil, fmt.Errorf("ecdh: write pubkey: %w", wErr)
 		}
 		peerPublic = peerPub
 	}
 
-	peerKey, err := curve.NewPublicKey(peerPublic)
-	if err != nil {
-		return nil, fmt.Errorf("ecdh: invalid peer public key: %w", err)
+	peerKey, pErr := curve.NewPublicKey(peerPublic)
+	if pErr != nil {
+		return nil, fmt.Errorf("ecdh: invalid peer public key: %w", pErr)
 	}
-	sharedSecret, err := privateKey.ECDH(peerKey)
-	if err != nil {
-		return nil, fmt.Errorf("ecdh: compute shared secret: %w", err)
+	sharedSecret, eErr := privateKey.ECDH(peerKey)
+	if eErr != nil {
+		return nil, fmt.Errorf("ecdh: compute shared secret: %w", eErr)
 	}
 
-	sessionKey, err := hkdf.Key(sha256.New, sharedSecret, nil, "sproxy-tunnel-ecdh-v1", sessionKeyLen)
-	if err != nil {
-		return nil, fmt.Errorf("ecdh: derive session key: %w", err)
+	sessionKey, kErr := hkdf.Key(sha256.New, sharedSecret, nil, "sproxy-tunnel-ecdh-v1", sessionKeyLen)
+	if kErr != nil {
+		return nil, fmt.Errorf("ecdh: derive session key: %w", kErr)
 	}
 
 	return sessionKey, nil
