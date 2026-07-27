@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -800,6 +801,44 @@ func TestFileClient_NewFileClient_EmptyURL(t *testing.T) {
 	c := NewFileClient("")
 	if c == nil {
 		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestWithInsecureTLS(t *testing.T) {
+	c := NewFileClient("https://127.0.0.1:18083", WithInsecureTLS())
+	if c.httpClient == nil {
+		t.Fatal("httpClient should not be nil")
+	}
+	transport, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("expected *http.Transport")
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("expected TLSClientConfig to be set")
+	}
+	if !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("expected InsecureSkipVerify to be true")
+	}
+	// 验证 timeout 被保留
+	if c.httpClient.Timeout != 300*time.Second {
+		t.Errorf("expected timeout 300s, got %v", c.httpClient.Timeout)
+	}
+}
+
+func TestWithInsecureTLS_PreservesCustomTimeout(t *testing.T) {
+	c := NewFileClient("https://127.0.0.1:18083",
+		WithTimeout(10*time.Second),
+		WithInsecureTLS(),
+	)
+	if c.httpClient.Timeout != 10*time.Second {
+		t.Errorf("expected timeout 10s, got %v", c.httpClient.Timeout)
+	}
+	transport, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("expected *http.Transport")
+	}
+	if !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("expected InsecureSkipVerify to be true")
 	}
 }
 

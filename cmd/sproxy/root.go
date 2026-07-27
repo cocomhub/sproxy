@@ -409,6 +409,10 @@ func handleSighup(oldCfg *server.Config, tunUpdater server.TunnelUpdater) {
 	if oldCfg.MaxHeaderBytes != newCfg.MaxHeaderBytes {
 		slog.Warn("max_header_bytes 修改在 SIGHUP 后不会生效（http.Server 未重建），需要重启进程")
 	}
+	if oldCfg.TLS.Enabled != newCfg.TLS.Enabled {
+		slog.Warn("tls.enabled 修改在 SIGHUP 后不会生效（http.Server 未重建），需要重启进程",
+			"old", oldCfg.TLS.Enabled, "new", newCfg.TLS.Enabled)
+	}
 
 	initLogger(newCfg)
 	slog.Info("config reloaded via SIGHUP", "path", cfgFile, "log_level", levelString(newCfg.LogLevel))
