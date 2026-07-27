@@ -160,6 +160,9 @@ func NewWithOpts(conn xfer.Conn, role Role, opts ...Option) *Mux {
 // Metrics 返回指向 mux 统计信息的指针。
 func (m *Mux) Metrics() *Metrics { return &m.metrics }
 
+// Role 返回 mux 的角色（RoleDialer 或 RoleListener）。
+func (m *Mux) Role() Role { return m.role }
+
 // Done 返回一个 channel，当 mux 关闭时关闭（用于测试）。
 func (m *Mux) Done() <-chan struct{} {
 	return m.done

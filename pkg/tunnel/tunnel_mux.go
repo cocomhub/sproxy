@@ -12,22 +12,68 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
 
+const handshakeTimeout = 3 * time.Second
+
 // Tunnel 在一条 mux 多路复用连接之上提供 HTTP 请求-响应交换。
 type Tunnel struct {
-	mux *mux.Mux
-	key []byte
+	mux        *mux.Mux
+	key        []byte
+	handshake  sync.Once
+	sessionKey []byte
+	skMu       sync.Mutex
 }
 
 func NewTunnel(m *mux.Mux, key []byte) *Tunnel {
 	return &Tunnel{mux: m, key: key}
 }
 
+// ensureHandshake 确保 ECDH 握手已完成。
+// 在 dialer 侧：首次调用时发起握手（m.Open），返回握手完成。
+// 在 listener 侧：握手由 Serve 在进入 accept 循环前完成。
+func (t *Tunnel) ensureHandshake() {
+	if t.key == nil {
+		return
+	}
+	t.handshake.Do(func() {
+		if t.mux.Role() != mux.RoleDialer {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
+		defer cancel()
+		sk, err := performHandshake(ctx, t.mux, true)
+		if err == nil {
+			t.skMu.Lock()
+			t.sessionKey = sk
+			t.skMu.Unlock()
+		}
+	})
+}
+
+// encryptionKey 返回用于加密的密钥。
+// 必须确保 handshake 已完成后调用。
+func (t *Tunnel) encryptionKey() []byte {
+	if t.key == nil {
+		return nil
+	}
+	t.skMu.Lock()
+	sk := t.sessionKey
+	t.skMu.Unlock()
+	if sk != nil {
+		return sk
+	}
+	return t.key
+}
+
 // Do 发送 HTTP 请求并返回响应。
 func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
+	// 在打开请求流之前确保握手已完成
+	t.ensureHandshake()
+
 	ctx := req.Context()
 	stream, err := t.mux.Open(ctx)
 	if err != nil {
@@ -60,7 +106,7 @@ func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
 		StatusCode:    respMeta.Status,
 		Proto:         respMeta.Proto,
 		Header:        respMeta.Headers.Clone(),
-		Body:          &streamBody{stream: stream, key: t.key},
+		Body:          &streamBody{stream: stream, key: t.encryptionKey()},
 		ContentLength: respMeta.ContentLength,
 	}, nil
 }
@@ -76,9 +122,10 @@ func (t *Tunnel) sendRequestMeta(stream mux.Stream, req *http.Request) error {
 		return fmt.Errorf("tunnel: marshal request: %w", err)
 	}
 
+	encKey := t.encryptionKey()
 	var metaBytes []byte
-	if t.key != nil {
-		metaBytes, err = Encrypt(t.key, reqMeta, []byte(AADMeta))
+	if encKey != nil {
+		metaBytes, err = Encrypt(encKey, reqMeta, []byte(AADMeta))
 	} else {
 		metaBytes = reqMeta
 	}
@@ -102,8 +149,9 @@ func (t *Tunnel) sendRequestBody(stream mux.Stream, req *http.Request) error {
 	if req.Body == nil {
 		return nil
 	}
-	if t.key != nil {
-		if _, err := EncryptStream(t.key, req.Body, stream, []byte(AADStream)); err != nil {
+	encKey := t.encryptionKey()
+	if encKey != nil {
+		if _, err := EncryptStream(encKey, req.Body, stream, []byte(AADStream)); err != nil {
 			return fmt.Errorf("tunnel: encrypt body: %w", err)
 		}
 	} else {
@@ -127,8 +175,9 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 	}
 
 	var respMeta Response
-	if t.key != nil {
-		plainMeta, err := Decrypt(t.key, respMetaRaw, []byte(AADMeta))
+	encKey := t.encryptionKey()
+	if encKey != nil {
+		plainMeta, err := Decrypt(encKey, respMetaRaw, []byte(AADMeta))
 		if err != nil {
 			return nil, fmt.Errorf("tunnel: decrypt resp: %w", err)
 		}
@@ -144,7 +193,20 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 }
 
 // Serve 在隧道上提供 HTTP 服务。
+// 在进入 accept 循环前，先执行 ECDH 握手（listener 侧）。
 func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
+	if t.key != nil && t.mux.Role() == mux.RoleListener {
+		hctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
+		sk, err := performHandshake(hctx, t.mux, false)
+		cancel()
+		if err == nil {
+			t.skMu.Lock()
+			t.sessionKey = sk
+			t.skMu.Unlock()
+		}
+		// 即使握手失败，Serve 也继续运行（向后兼容）
+	}
+
 	for {
 		stream, err := t.mux.Accept(ctx)
 		if err != nil {
@@ -164,11 +226,12 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 	}
 
 	var bodyReader io.ReadCloser
-	if t.key != nil {
+	encKey := t.encryptionKey()
+	if encKey != nil {
 		pr, pw := io.Pipe()
 		bodyReader = pr
 		go func() {
-			_, decErr := DecryptStream(t.key, stream, pw, []byte(AADStream))
+			_, decErr := DecryptStream(encKey, stream, pw, []byte(AADStream))
 			pw.CloseWithError(decErr)
 		}()
 	} else {
@@ -209,8 +272,9 @@ func (t *Tunnel) readAndDecryptMeta(stream mux.Stream) (*Request, error) {
 	}
 
 	var reqMeta Request
-	if t.key != nil {
-		plain, err := Decrypt(t.key, metaRaw, []byte(AADMeta))
+	encKey := t.encryptionKey()
+	if encKey != nil {
+		plain, err := Decrypt(encKey, metaRaw, []byte(AADMeta))
 		if err != nil {
 			return nil, err
 		}
@@ -234,9 +298,10 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 		ContentLength: -1,
 	})
 
+	encKey := t.encryptionKey()
 	var metaBytes []byte
-	if t.key != nil {
-		metaBytes, _ = Encrypt(t.key, respMetaJSON, []byte(AADMeta))
+	if encKey != nil {
+		metaBytes, _ = Encrypt(encKey, respMetaJSON, []byte(AADMeta))
 	} else {
 		metaBytes = respMetaJSON
 	}
@@ -246,8 +311,8 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 	stream.Write(lb)
 	stream.Write(metaBytes)
 
-	if t.key != nil {
-		EncryptStream(t.key, buf, stream, []byte(AADStream))
+	if encKey != nil {
+		EncryptStream(encKey, buf, stream, []byte(AADStream))
 	} else {
 		io.Copy(stream, buf)
 	}
