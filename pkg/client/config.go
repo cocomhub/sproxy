@@ -29,7 +29,7 @@ type Config struct {
 
 func DefaultConfig() *Config {
 	return &Config{
-		ServerURL: "http://localhost:18083",
+		ServerURL: "https://127.0.0.1:18083",
 		Timeout:   300,
 		ChunkSize: size.DefaultChunkSize, // 4 MiB
 	}
@@ -38,7 +38,7 @@ func DefaultConfig() *Config {
 // Validate 校验配置合理性，设置零值字段为默认值。
 func (c *Config) Validate() error {
 	if c.ServerURL == "" {
-		c.ServerURL = "http://localhost:18083"
+		c.ServerURL = "https://127.0.0.1:18083"
 	}
 	if c.Timeout <= 0 {
 		c.Timeout = 300

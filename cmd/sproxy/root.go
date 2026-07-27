@@ -97,6 +97,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 	logger := initLogger(cfg)
 	slog.Info("config loaded", "path", cfgFile, "log_level", levelString(cfg.LogLevel), "log_format", formatString(cfg.LogFormat))
 
+	// 无认证警告：auth_token 为空且 api_keys 未启用时，所有 HTTP API 端点无保护
+	if cfg.AuthToken == "" && !cfg.APIKeys.Enabled {
+		slog.Warn("未配置认证 (auth_token 为空, api_keys 未启用) — 所有 HTTP API 端点无访问保护，建议设置 auth_token 或启用 api_keys")
+	}
+
 	tunnelKey, err := resolveTunnelKey(cfg)
 	if err != nil {
 		return fmt.Errorf("隧道密钥处理失败: %w", err)

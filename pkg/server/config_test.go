@@ -38,6 +38,12 @@ func TestConfig_DefaultsFilled(t *testing.T) {
 	if cfg.ServerTimeouts.Shutdown != 30*time.Second {
 		t.Fatalf("ServerTimeouts.Shutdown default want 30s, got %v", cfg.ServerTimeouts.Shutdown)
 	}
+	if !cfg.TLS.Enabled {
+		t.Fatal("TLS.Enabled default should be true")
+	}
+	if !cfg.TLS.AutoTLS {
+		t.Fatal("TLS.AutoTLS default should be true")
+	}
 }
 
 func TestConfig_Validate_FillsZeroes(t *testing.T) {

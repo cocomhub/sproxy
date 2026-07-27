@@ -18,7 +18,7 @@ func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *str
 	cmd := &cobra.Command{
 		Use:   "config [show|set <key> <value>|remote]",
 		Short: "配置管理",
-		Long:  "查看或修改 sclient 配置。\n\n可用配置项:\n  server_url      服务器地址 (如 http://localhost:18083)\n  auth_token      Bearer Token 认证令牌\n  timeout         HTTP 超时秒数\n  tunnel_key      隧道密钥 (64 位 hex)\n  chunk_size      分块上传/下载块大小 (字节)\n  max_chunk_size  最大分块大小 (字节)",
+		Long:  "查看或修改 sclient 配置。\n\n可用配置项:\n  server_url      服务器地址 (如 https://127.0.0.1:18083)\n  auth_token      Bearer Token 认证令牌\n  timeout         HTTP 超时秒数\n  tunnel_key      隧道密钥 (64 位 hex)\n  chunk_size      分块上传/下载块大小 (字节)\n  max_chunk_size  最大分块大小 (字节)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := cfgSvc.LoadConfig()
 			if err != nil {

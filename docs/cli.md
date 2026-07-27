@@ -13,7 +13,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | 选项 | 默认值 | 说明 |
 |---|---|---|
 | `--config` | XDG 路径 | 指定客户端配置文件路径 |
-| `--server` | `http://localhost:18083` | sproxy 服务端地址（覆盖 server_url 配置） |
+| `--server` | `https://127.0.0.1:18083` | sproxy 服务端地址（覆盖 server_url 配置） |
 | `--tunnel-key` | (空) | 启用 tunnel 模式；64 位 hex AES-256 密钥 |
 | `--no-checksum` | false | 跳过 SHA-256 校验（不推荐） |
 

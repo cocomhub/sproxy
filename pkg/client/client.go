@@ -87,7 +87,7 @@ type Option func(*FileClient)
 //
 // 使用方式：
 //
-//	client := NewFileClient("http://localhost:18083")
+//	client := NewFileClient("https://127.0.0.1:18083")
 //	result, err := client.Upload(ctx, "file.txt")
 //	err := client.Download(ctx, "file.txt", "/tmp/file.txt")
 type FileClient struct {
@@ -110,7 +110,7 @@ type FileClient struct {
 
 // NewFileClient 创建一个新的 sproxy 客户端。
 //
-// serverURL 是 sproxy 服务端地址，如 "http://localhost:18083"。
+// serverURL 是 sproxy 服务端地址，如 "https://127.0.0.1:18083"。
 // 可以通过 Option 设置自定义 HTTP 客户端、隧道加密、超时等。
 func NewFileClient(serverURL string, opts ...Option) *FileClient {
 	c := &FileClient{

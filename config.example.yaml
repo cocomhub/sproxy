@@ -24,14 +24,14 @@ log_level: "info"
 log_format: "text"
 max_header_bytes: 1048576
 
-# TLS 配置（默认关闭）
-# tls:
-#   enabled: true
-#   cert_file: "certs/_wildcard.sproxy.local.pem"
-#   key_file: "certs/_wildcard.sproxy.local-key.pem"
-#   # auto_tls: true  # 默认 false；true 时证书/私钥缺失自动生成 ECDSA P-256 自签证书
+# TLS 配置（默认启用）
+tls:
+  enabled: true
+  # cert_file: "certs/_wildcard.sproxy.local.pem"
+  # key_file: "certs/_wildcard.sproxy.local-key.pem"
+  # auto_tls: true  # 默认 true；证书/私钥缺失自动生成 ECDSA P-256 自签证书
 
-# Bearer Token 认证（默认关闭，留空 = 无认证）
+# Bearer Token 认证（默认关闭，强烈建议设置）
 # 启用后，除 /healthz、/version、/ui/、POST /tunnel 之外所有路由都要求
 # Authorization: Bearer <token> 请求头。
 # auth_token: "your-secret-token"

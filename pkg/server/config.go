@@ -114,7 +114,8 @@ func Default() *Config {
 			Window:   time.Second,
 		},
 		TLS: TLSConfig{
-			AutoTLS: false,
+			Enabled: true,
+			AutoTLS: true,
 		},
 		CORS: CORSConfig{
 			MaxAge: 86400,

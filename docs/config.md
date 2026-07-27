@@ -98,7 +98,7 @@ sclient 的配置默认路径基于 XDG：
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `server_url` | string | `http://localhost:18083` | sproxy 服务端地址 |
+| `server_url` | string | `https://127.0.0.1:18083` | sproxy 服务端地址 |
 | `check_checksum` | bool | `true` | 上传/下载启用 SHA-256 校验 |
 | `timeout` | int | `300` | HTTP 客户端超时（秒） |
 | `tunnel_key` | string | (空) | 64 位 hex；非空时通过 `POST /tunnel` 加密信道访问 |
