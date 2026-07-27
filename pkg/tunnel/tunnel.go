@@ -69,6 +69,12 @@ const (
 	// MaxMetadataBytes 限制 metadata 帧的最大长度（1 MiB），防止远程攻击者通过伪造的 metaLen 触发 OOM。
 	// 合法 metadata 通常仅几百字节到几 KiB，1 MiB 已留足上限。
 	MaxMetadataBytes = 1 << 20
+	// AADMeta 是 metadata 加密使用的 AAD（Additional Authenticated Data）上下文标签。
+	// 将密文绑定到"隧道 metadata 帧"这一特定上下文，防止密文被重放到其他上下文（如 stream body）。
+	AADMeta = "tunnel:meta:v1"
+	// AADStream 是流式 body 加密使用的 AAD 上下文标签。
+	// 将密文绑定到"隧道流式 body"这一特定上下文，防止密文被重放到其他上下文（如 metadata 帧）。
+	AADStream = "tunnel:stream:v1"
 )
 
 // ErrMetadataTooLarge 表示 metadata 帧长度超过 MaxMetadataBytes。
@@ -133,11 +139,13 @@ func getCipherBlock(key []byte) (cipher.Block, error) {
 	return block, nil
 }
 
-// Encrypt 使用 AES-256-GCM 加密明文。
+// Encrypt 使用 AES-256-GCM 加密明文，并通过 aad 将密文绑定到特定上下文。
 //
 // 返回的密文格式为：nonce（12 字节） + ciphertext + auth_tag（16 字节）。
 // 每次调用生成随机 nonce，相同明文产生不同密文。
-func Encrypt(key, plaintext []byte) ([]byte, error) {
+// aad 是额外认证数据（Additional Authenticated Data），不需要保密，但任何修改都会导致解密失败。
+// 用于防止密文混淆攻击：将密文绑定到特定上下文（如协议版本、流方向）。
+func Encrypt(key, plaintext, aad []byte) ([]byte, error) {
 	block, err := getCipherBlock(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
@@ -150,7 +158,7 @@ func Encrypt(key, plaintext []byte) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
-	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+	ciphertext := gcm.Seal(nonce, nonce, plaintext, aad)
 	return ciphertext, nil
 }
 
@@ -158,7 +166,8 @@ func Encrypt(key, plaintext []byte) ([]byte, error) {
 //
 // 自动从密文中提取 nonce（前 12 字节），然后进行 GCM 解密和认证。
 // 如果密文被篡改或密钥不匹配，返回错误。
-func Decrypt(key, data []byte) ([]byte, error) {
+// aad 必须与加密时使用的 aad 一致，否则解密失败。
+func Decrypt(key, data, aad []byte) ([]byte, error) {
 	block, err := getCipherBlock(key)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)
@@ -172,7 +181,7 @@ func Decrypt(key, data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("ciphertext too short")
 	}
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt: %w", err)
 	}
@@ -180,8 +189,9 @@ func Decrypt(key, data []byte) ([]byte, error) {
 }
 
 // encodeMetadataFrame 将 metadata JSON 加密后生成帧头：[4B big-endian metaLen][encrypted metadata]。
+// 使用 AADMeta 作为 AAD 上下文标签，将密文绑定到 metadata 帧上下文。
 func encodeMetadataFrame(key, metadataJSON []byte) ([]byte, error) {
-	encMeta, err := Encrypt(key, metadataJSON)
+	encMeta, err := Encrypt(key, metadataJSON, []byte(AADMeta))
 	if err != nil {
 		return nil, fmt.Errorf("encrypt metadata: %w", err)
 	}
@@ -194,12 +204,13 @@ func encodeMetadataFrame(key, metadataJSON []byte) ([]byte, error) {
 // decodeMetadataFrame 从 r 中读取 [4B metaLen][encrypted metadata]，解密后返回 metadata JSON。
 // 读取完成后 r 的当前位置指向 stream chunks 的起始处。
 // 如果 metaLen 超过 MaxMetadataBytes，返回 ErrMetadataTooLarge，防止恶意输入触发 OOM。
+// 使用 AADMeta 作为 AAD 上下文标签，确保密文是针对 metadata 帧加密的。
 func decodeMetadataFrame(r io.Reader, key []byte) ([]byte, error) {
 	encMeta, err := readEncMeta(r)
 	if err != nil {
 		return nil, err
 	}
-	return Decrypt(key, encMeta)
+	return Decrypt(key, encMeta, []byte(AADMeta))
 }
 
 // readEncMeta 从 r 中读取 [4B metaLen][encrypted metadata] 原始密文（不解密）。

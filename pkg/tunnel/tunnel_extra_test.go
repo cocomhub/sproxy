@@ -125,7 +125,7 @@ func TestResolveKey_PrimaryKeyEmpty(t *testing.T) {
 	metaContent := []byte(`{"method":"GET","url":"/api/test","headers":{}}`)
 
 	// Encrypt metadata with oldKey (testKey)
-	encMeta, err := Encrypt(testKey, metaContent)
+	encMeta, err := Encrypt(testKey, metaContent, []byte(AADMeta))
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}

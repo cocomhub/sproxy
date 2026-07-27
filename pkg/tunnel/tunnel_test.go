@@ -316,11 +316,11 @@ var _ = GenerateKey
 
 func TestEncryptDecrypt_Roundtrip(t *testing.T) {
 	plaintext := []byte("hello encryption!")
-	ciphertext, err := Encrypt(testKey, plaintext)
+	ciphertext, err := Encrypt(testKey, plaintext, []byte(AADMeta))
 	if err != nil {
 		t.Fatal(err)
 	}
-	decrypted, err := Decrypt(testKey, ciphertext)
+	decrypted, err := Decrypt(testKey, ciphertext, []byte(AADMeta))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,11 +330,11 @@ func TestEncryptDecrypt_Roundtrip(t *testing.T) {
 }
 
 func TestEncryptDecrypt_EmptyPlaintext(t *testing.T) {
-	ciphertext, err := Encrypt(testKey, nil)
+	ciphertext, err := Encrypt(testKey, nil, []byte(AADMeta))
 	if err != nil {
 		t.Fatal(err)
 	}
-	decrypted, err := Decrypt(testKey, ciphertext)
+	decrypted, err := Decrypt(testKey, ciphertext, []byte(AADMeta))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,11 +344,11 @@ func TestEncryptDecrypt_EmptyPlaintext(t *testing.T) {
 }
 
 func TestEncryptDecrypt_ShortKey(t *testing.T) {
-	_, err := Encrypt([]byte("short"), []byte("data"))
+	_, err := Encrypt([]byte("short"), []byte("data"), []byte(AADMeta))
 	if err == nil {
 		t.Error("expected error for short key")
 	}
-	_, err = Decrypt([]byte("short"), []byte("data"))
+	_, err = Decrypt([]byte("short"), []byte("data"), []byte(AADMeta))
 	if err == nil {
 		t.Error("expected error for short key")
 	}
@@ -360,11 +360,11 @@ func BenchmarkEncryptDecrypt(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ciphertext, err := Encrypt(key, plaintext)
+		ciphertext, err := Encrypt(key, plaintext, []byte(AADMeta))
 		if err != nil {
 			b.Fatal(err)
 		}
-		decrypted, err := Decrypt(key, ciphertext)
+		decrypted, err := Decrypt(key, ciphertext, []byte(AADMeta))
 		if err != nil {
 			b.Fatal(err)
 		}

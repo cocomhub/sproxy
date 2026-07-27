@@ -78,7 +78,7 @@ func (t *Tunnel) sendRequestMeta(stream mux.Stream, req *http.Request) error {
 
 	var metaBytes []byte
 	if t.key != nil {
-		metaBytes, err = Encrypt(t.key, reqMeta)
+		metaBytes, err = Encrypt(t.key, reqMeta, []byte(AADMeta))
 	} else {
 		metaBytes = reqMeta
 	}
@@ -103,7 +103,7 @@ func (t *Tunnel) sendRequestBody(stream mux.Stream, req *http.Request) error {
 		return nil
 	}
 	if t.key != nil {
-		if _, err := EncryptStream(t.key, req.Body, stream); err != nil {
+		if _, err := EncryptStream(t.key, req.Body, stream, []byte(AADStream)); err != nil {
 			return fmt.Errorf("tunnel: encrypt body: %w", err)
 		}
 	} else {
@@ -128,7 +128,7 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 
 	var respMeta Response
 	if t.key != nil {
-		plainMeta, err := Decrypt(t.key, respMetaRaw)
+		plainMeta, err := Decrypt(t.key, respMetaRaw, []byte(AADMeta))
 		if err != nil {
 			return nil, fmt.Errorf("tunnel: decrypt resp: %w", err)
 		}
@@ -168,7 +168,7 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 		pr, pw := io.Pipe()
 		bodyReader = pr
 		go func() {
-			_, decErr := DecryptStream(t.key, stream, pw)
+			_, decErr := DecryptStream(t.key, stream, pw, []byte(AADStream))
 			pw.CloseWithError(decErr)
 		}()
 	} else {
@@ -210,7 +210,7 @@ func (t *Tunnel) readAndDecryptMeta(stream mux.Stream) (*Request, error) {
 
 	var reqMeta Request
 	if t.key != nil {
-		plain, err := Decrypt(t.key, metaRaw)
+		plain, err := Decrypt(t.key, metaRaw, []byte(AADMeta))
 		if err != nil {
 			return nil, err
 		}
@@ -236,7 +236,7 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 
 	var metaBytes []byte
 	if t.key != nil {
-		metaBytes, _ = Encrypt(t.key, respMetaJSON)
+		metaBytes, _ = Encrypt(t.key, respMetaJSON, []byte(AADMeta))
 	} else {
 		metaBytes = respMetaJSON
 	}
@@ -247,7 +247,7 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 	stream.Write(metaBytes)
 
 	if t.key != nil {
-		EncryptStream(t.key, buf, stream)
+		EncryptStream(t.key, buf, stream, []byte(AADStream))
 	} else {
 		io.Copy(stream, buf)
 	}
@@ -274,7 +274,7 @@ func (b *streamBody) Read(p []byte) (int, error) {
 			b.once.Do(func() {
 				b.pr, b.pw = io.Pipe()
 				go func() {
-					_, err := DecryptStream(b.key, b.stream, b.pw)
+					_, err := DecryptStream(b.key, b.stream, b.pw, []byte(AADStream))
 					b.pw.CloseWithError(err)
 				}()
 			})

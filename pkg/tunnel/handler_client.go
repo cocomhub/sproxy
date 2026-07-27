@@ -111,7 +111,7 @@ func (h *Handler) resolveKey(r io.Reader) ([]byte, []byte, error) {
 
 	var lastErr error
 	for _, key := range keys {
-		data, err := Decrypt(key, encMeta)
+		data, err := Decrypt(key, encMeta, []byte(AADMeta))
 		if err == nil {
 			return data, key, nil
 		}
@@ -149,7 +149,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//    使用 resolveKey 匹配成功的 resolvedKey（兼容正在轮换中的旧密钥）
 	bodyPr, bodyPw := io.Pipe()
 	go func() {
-		_, decErr := DecryptStream(resolvedKey, r.Body, bodyPw)
+		_, decErr := DecryptStream(resolvedKey, r.Body, bodyPw, []byte(AADStream))
 		bodyPw.CloseWithError(decErr)
 	}()
 
@@ -208,7 +208,7 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 		w.Header().Set(headerContentType, frameContentType)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(metaFrame)
-		_, _ = EncryptStream(encKey, bodyPr, w)
+		_, _ = EncryptStream(encKey, bodyPr, w, []byte(AADStream))
 	}()
 
 	// 同步运行本地 handler。
@@ -249,7 +249,7 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 		w.Header().Set(headerContentType, frameContentType)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(errMetaFrame)
-		if _, err = EncryptStream(encKey, strings.NewReader(err.Error()), w); err != nil {
+		if _, err = EncryptStream(encKey, strings.NewReader(err.Error()), w, []byte(AADStream)); err != nil {
 			h.logger.Error("隧道错误响应加密失败", "error", err)
 		}
 		return
@@ -278,7 +278,7 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 	w.Header().Set(headerContentType, frameContentType)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(metaFrame)
-	if _, err := EncryptStream(encKey, resp.Body, w); err != nil {
+	if _, err := EncryptStream(encKey, resp.Body, w, []byte(AADStream)); err != nil {
 		h.logger.Error("隧道响应加密失败", "error", err)
 	}
 }
@@ -357,7 +357,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			defer req.Body.Close()
 			src = req.Body
 		}
-		_, encErr := EncryptStream(c.Key, src, pw)
+		_, encErr := EncryptStream(c.Key, src, pw, []byte(AADStream))
 		pw.CloseWithError(encErr)
 	}()
 
@@ -392,7 +392,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 
 	rpr, rpw := io.Pipe()
 	go func() {
-		_, decErr := DecryptStream(c.Key, httpResp.Body, rpw)
+		_, decErr := DecryptStream(c.Key, httpResp.Body, rpw, []byte(AADStream))
 		rpw.CloseWithError(decErr)
 		httpResp.Body.Close()
 	}()
