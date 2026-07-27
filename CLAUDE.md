@@ -270,9 +270,9 @@ type Conn interface {
 | `server_timeouts.write` | duration | `30s` | |
 | `server_timeouts.idle` | duration | `60s` | |
 | `server_timeouts.shutdown` | duration | `30s` | graceful shutdown 超时 |
-| `tls.enabled` | bool | false | |
+| `tls.enabled` | bool | true | |
 | `tls.cert_file` / `tls.key_file` | string | | |
-| `tls.auto_tls` | bool | false | 自动生成 ECDSA P-256 自签证书 |
+| `tls.auto_tls` | bool | true | 自动生成 ECDSA P-256 自签证书 |
 | `tls.client_ca` | string | | mTLS CA 证书路径 |
 | `auth_token` | string | 空 | Bearer token 认证 |
 | `rate_limit.enabled` / `.requests` / `.window` | | 关闭 | tunnel handler 限流 |

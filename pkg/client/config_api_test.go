@@ -28,7 +28,7 @@ func TestGetConfig(t *testing.T) {
 			"upload_session_ttl":"24h0m0s",
 			"versioning_enabled":false,"versioning_max_versions":0,
 			"cloud_max_concurrent":3,"cloud_sync_threshold":20971520,
-			"hub_enabled":false,"tls_enabled":false,
+			"hub_enabled":false,"tls_enabled":true,
 			"addr":":18083","uploads_dir":"./uploads"
 		}`))
 	}))

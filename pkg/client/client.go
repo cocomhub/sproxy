@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -166,6 +167,24 @@ func WithXfer(name, hubURL, hexKey string) Option {
 func WithTimeout(d time.Duration) Option {
 	return func(c *FileClient) {
 		c.httpClient.Timeout = d
+	}
+}
+
+// WithInsecureTLS 跳过 TLS 证书验证（仅用于自签证书开发/测试环境）。
+//
+// 生产环境应使用正式 CA 签发的证书，而非此选项。
+// 此选项仅影响直连模式（HTTP 客户端），不影响隧道模式。
+func WithInsecureTLS() Option {
+	return func(c *FileClient) {
+		transport := &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec
+			},
+		}
+		c.httpClient = &http.Client{
+			Timeout:   c.httpClient.Timeout,
+			Transport: transport,
+		}
 	}
 }
 

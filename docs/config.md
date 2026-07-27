@@ -35,10 +35,10 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `server_timeouts.idle` | duration | `0` | keep-alive 空闲超时 |
 | `server_timeouts.shutdown` | duration | `30s` | graceful shutdown 等待活跃请求结束的最长时间 |
 | **tls** | object |  | TLS 配置 |
-| `tls.enabled` | bool | `false` | 启用 TLS |
+| `tls.enabled` | bool | `true` | 启用 TLS |
 | `tls.cert_file` | string | (空) | 证书路径（启用 TLS 时生效） |
 | `tls.key_file` | string | (空) | 私钥路径 |
-| `tls.auto_tls` | bool | `false` | `true` 时证书/私钥缺失自动生成 ECDSA P-256 自签证书 |
+| `tls.auto_tls` | bool | `true` | `true` 时证书/私钥缺失自动生成 ECDSA P-256 自签证书 |
 | **rate_limit** | object |  | 速率限制（仅限制 `POST /tunnel` 入口） |
 | `rate_limit.enabled` | bool | `false` | 启用 |
 | `rate_limit.requests` | int | `10` | 窗口内允许请求数 |

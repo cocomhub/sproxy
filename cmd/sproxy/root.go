@@ -31,6 +31,7 @@ const (
 	flagUploadsDir      = "uploads-dir"
 	flagTunnelKey       = "tunnel-key"
 	flagVersion         = "version"
+	flagNoTLS           = "no-tls"
 	defaultConfig       = "sproxy.yaml"
 	cfgAddr             = "addr"
 	cfgUploadsDir       = "uploads_dir"
@@ -58,6 +59,7 @@ var rootCmd = &cobra.Command{
 		cfgProvider.BindPFlag(cfgAddr, cmd.Flags().Lookup(flagAddr))
 		cfgProvider.BindPFlag(cfgUploadsDir, cmd.Flags().Lookup(flagUploadsDir))
 		cfgProvider.BindPFlag(cfgTunnelKey, cmd.Flags().Lookup(flagTunnelKey))
+		// --no-tls 不绑定到 viper，在 buildServerConfig 中直接处理
 		return nil
 	},
 	RunE: runServer,
@@ -78,6 +80,7 @@ func init() {
 	rootCmd.Flags().String(flagUploadsDir, "./uploads", "上传目录")
 	rootCmd.Flags().String(flagTunnelKey, "", "隧道密钥 (64 hex chars)")
 	rootCmd.Flags().Bool(flagVersion, false, "打印版本与构建信息后退出")
+	rootCmd.Flags().Bool(flagNoTLS, false, "禁用 TLS（覆盖 tls.enabled 配置）")
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
@@ -100,6 +103,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// 无认证警告：auth_token 为空且 api_keys 未启用时，所有 HTTP API 端点无保护
 	if cfg.AuthToken == "" && !cfg.APIKeys.Enabled {
 		slog.Warn("未配置认证 (auth_token 为空, api_keys 未启用) — 所有 HTTP API 端点无访问保护，建议设置 auth_token 或启用 api_keys")
+		fmt.Fprintf(os.Stderr, "\n*** WARNING: No authentication configured (auth_token empty, api_keys disabled) ***\n")
+		fmt.Fprintf(os.Stderr, "*** All HTTP API endpoints are unprotected. Set auth_token or enable api_keys. ***\n\n")
 	}
 
 	tunnelKey, err := resolveTunnelKey(cfg)
@@ -181,6 +186,12 @@ func buildServerConfig(cmd *cobra.Command) (*server.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("配置解析失败: %w", err)
 	}
+
+	// --no-tls flag 覆盖 tls.enabled 配置
+	if noTLS, _ := cmd.Flags().GetBool(flagNoTLS); noTLS {
+		cfg.TLS.Enabled = false
+	}
+
 	return cfg, nil
 }
 
