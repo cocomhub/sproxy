@@ -346,11 +346,12 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 
 // streamBody 包装 mux.Stream 为 io.ReadCloser，用于响应体。
 type streamBody struct {
-	stream mux.Stream
-	key    []byte
-	once   sync.Once
-	pr     *io.PipeReader
-	pw     *io.PipeWriter
+	stream    mux.Stream
+	key       []byte
+	initOnce  sync.Once // 仅用于 pipe 初始化
+	closeOnce sync.Once // 仅用于关闭
+	pr        *io.PipeReader
+	pw        *io.PipeWriter
 
 	rdBuf []byte
 	rdOff int
@@ -362,7 +363,7 @@ func (b *streamBody) Read(p []byte) (int, error) {
 	if b.key != nil {
 		if len(b.rdBuf) == 0 || b.rdOff >= len(b.rdBuf) {
 			b.rdBuf = make([]byte, streamBodyBufSize)
-			b.once.Do(func() {
+			b.initOnce.Do(func() {
 				b.pr, b.pw = io.Pipe()
 				go func() {
 					_, err := DecryptStream(b.key, b.stream, b.pw, []byte(AADStream))
@@ -403,7 +404,7 @@ func (b *streamBody) Read(p []byte) (int, error) {
 }
 
 func (b *streamBody) Close() error {
-	b.once.Do(func() {
+	b.closeOnce.Do(func() {
 		if b.pr != nil {
 			b.pr.Close()
 			return

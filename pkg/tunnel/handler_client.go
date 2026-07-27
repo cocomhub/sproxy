@@ -152,6 +152,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 3. 重放保护检查：如果 metadata 中包含 IAT/JTI，则验证
 	if req.IAT > 0 || req.JTI != "" {
 		if err := h.replayProtector.Validate(req.JTI, req.IAT); err != nil {
+			_, _ = io.Copy(io.Discard, r.Body)
+			r.Body.Close()
 			h.logger.Warn("重放检测失败", "error", err, "jti", req.JTI)
 			w.WriteHeader(http.StatusTooEarly) // 425 Too Early
 			return
