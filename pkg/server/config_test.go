@@ -48,7 +48,7 @@ func TestConfig_DefaultsFilled(t *testing.T) {
 
 func TestConfig_Validate_FillsZeroes(t *testing.T) {
 	t.Parallel()
-	c := &Config{}
+	c := &Config{TLS: TLSConfig{Enabled: true}}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestConfig_Validate_TunnelKey_HexCheck(t *testing.T) {
 		key     string
 		wantErr bool
 	}{
-		{"empty_ok", "", false},
+		{"empty_ok_tls_enabled", "", false},
 		{"valid_64hex", strings.Repeat("a", 64), false},
 		{"too_short", strings.Repeat("a", 32), true},
 		{"too_long", strings.Repeat("a", 65), true},
@@ -84,6 +84,17 @@ func TestConfig_Validate_TunnelKey_HexCheck(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestConfig_Validate_EmptyTunnelKeyNoTLS(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.TunnelKey = ""
+	cfg.TLS.Enabled = false
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for empty tunnel_key with TLS disabled, got nil")
 	}
 }
 
