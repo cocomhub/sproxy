@@ -89,7 +89,9 @@ func (rp *ReplayProtector) Len() int {
 func generateJTI() string {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
-		// 极端情况下 fallback 到时间戳加随机数
+		// 注意：crypto/rand.Read 失败时，Encrypt 中的 nonce 生成也会失败，
+		// 请求在加密阶段就已终止，此 fallback 路径实际不可达。
+		// 保留 fallback 仅用于防御性编程，避免 panic 导致全服务中断。
 		return fmt.Sprintf("%x", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(buf)
