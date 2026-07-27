@@ -1,7 +1,9 @@
-// Copyright 2026 The Cocomhub Authors. All rights reserved.
+﻿// Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// 涓婚€昏緫锛氭枃浠跺垪琛ㄣ€丆RUD銆佹壒閲忔搷浣溿€佸鑸€乁I 宸ュ叿銆?// 渚濊禆 sha256.js, tunnel.js, upload.js锛堝厛鍔犺浇锛夈€?
+// 主逻辑：文件列表、CRUD、批量操作、导航、UI 工具。
+// 依赖 sha256.js, tunnel.js, upload.js（先加载）。
+
 const BASE = '';
 let token = localStorage.getItem('sproxy_token') || '';
 let currentSubdir = localStorage.getItem('sproxy_subdir') || '';
@@ -16,17 +18,17 @@ document.getElementById('tunnel-key').value = tunnelHexKey || '';
 function saveToken() {
   token = document.getElementById('token').value;
   localStorage.setItem('sproxy_token', token);
-  showToast('Token 宸蹭繚瀛?, 'success');
+  showToast('Token 已保存', 'success');
 }
 
 function saveTunnelKey() {
   tunnelHexKey = document.getElementById('tunnel-key').value;
   localStorage.setItem('sproxy_tunnel_key', tunnelHexKey);
   _tunnelCryptoKey = null;
-  showToast('Tunnel Key 宸蹭繚瀛?, 'success');
+  showToast('Tunnel Key 已保存', 'success');
 }
 
-// --- UI 宸ュ叿 ---
+// --- UI 工具 ---
 function showToast(msg, type) {
   const el = document.getElementById('toast');
   el.textContent = msg;
@@ -57,21 +59,21 @@ function headers(extra) {
 
 function getChecksumPrefix(cs) {
   if (!cs) return '-';
-  return cs.substring(0, 16) + '鈥?;
+  return cs.substring(0, 16) + '…';
 }
 
 function copyChecksum(cs) {
   navigator.clipboard.writeText(cs).then(function() {
-    showToast('Checksum 宸插鍒跺埌鍓创鏉?, 'success');
+    showToast('Checksum 已复制到剪贴板', 'success');
   }).catch(function() {
-    showToast('澶嶅埗澶辫触', 'error');
+    showToast('复制失败', 'error');
   });
 }
 
-// --- 鏂囦欢鍒楄〃 ---
+// --- 文件列表 ---
 async function refreshList() {
   const el = document.getElementById('file-list');
-  el.innerHTML = '<div class="empty-msg">鍔犺浇涓?..</div>';
+  el.innerHTML = '<div class="empty-msg">加载中...</div>';
   updateBreadcrumb();
   _currentOffset = 0;
   _hasMore = false;
@@ -87,16 +89,16 @@ async function refreshList() {
     } else {
       const resp = await fetch(BASE + listUrl, { headers: headers() });
       data = await resp.json();
-      if (!resp.ok) { el.innerHTML = '<div class="empty-msg">鍔犺浇澶辫触: ' + escHtml(data.message || String(resp.status)) + '</div>'; return; }
+      if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + escHtml(data.message || String(resp.status)) + '</div>'; return; }
       files = data.files || [];
     }
     _currentOffset = files.length;
     _hasMore = (data.total || 0) > _currentOffset;
-    if (files.length === 0) { el.innerHTML = '<div class="empty-msg">鏆傛棤鏂囦欢</div>'; return; }
+    if (files.length === 0) { el.innerHTML = '<div class="empty-msg">暂无文件</div>'; return; }
     el.innerHTML = buildFileTableHtml(files, currentSubdir) + buildLoadMoreHtml(data.total);
     updateBatchToolbar();
   } catch (e) {
-    el.innerHTML = '<div class="empty-msg">璇锋眰澶辫触: ' + e.message + '</div>';
+    el.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
   }
 }
 
@@ -130,16 +132,16 @@ async function loadMore() {
     if (container) {
       if (_hasMore) {
         const remaining = (data.total || 0) - _currentOffset;
-        container.innerHTML = '<button class="btn btn-primary">鍔犺浇鏇村 (' + remaining + ')</button>';
+        container.innerHTML = '<button class="btn btn-primary">加载更多 (' + remaining + ')</button>';
       } else {
-        container.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">宸插姞杞藉叏閮?' + data.total + ' 涓枃浠?/div>';
+        container.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">已加载全部 ' + data.total + ' 个文件</div>';
       }
     }
-  } catch { /* 闈欓粯澶勭悊 */ }
+  } catch { /* 静默处理 */ }
 }
 
 function buildFileTableHtml(files, subdir) {
-  let html = '<table id="file-table"><thead><tr><th class="check-col"><input type="checkbox" id="select-all-checkbox"></th><th>鏂囦欢鍚?/th><th>澶у皬</th><th>Checksum (SHA-256)</th><th>鎿嶄綔</th></tr></thead><tbody>';
+  let html = '<table id="file-table"><thead><tr><th class="check-col"><input type="checkbox" id="select-all-checkbox"></th><th>文件名</th><th>大小</th><th>Checksum (SHA-256)</th><th>操作</th></tr></thead><tbody>';
   for (const fi of files) {
     const fullName = subdir ? subdir + '/' + fi.name : fi.name;
     html += buildFileRowHtml(fi, fullName);
@@ -152,21 +154,21 @@ function buildFileRowHtml(fi, fullName) {
   if (fi.is_dir) {
     return '<tr style="cursor:pointer;background:#f8f9fa;" class="dir-row" data-subdir="' + escHtml(fullName) + '"><td class="check-col"></td><td><strong>' + escHtml(fi.name) + '/</strong></td>' +
       '<td>-</td><td>-</td><td>' +
-      '<button class="btn btn-sm btn-secondary dir-enter-btn" data-subdir="' + escHtml(fullName) + '">杩涘叆</button>' +
-      '<button class="btn btn-sm btn-primary dir-archive-btn" data-subdir="' + escHtml(fullName) + '">鎵撳寘涓嬭浇</button>' +
-      '<button class="btn btn-sm btn-danger dir-delete-btn" data-subdir="' + escHtml(fullName) + '">鍒犻櫎</button></td></tr>';
+      '<button class="btn btn-sm btn-secondary dir-enter-btn" data-subdir="' + escHtml(fullName) + '">进入</button>' +
+      '<button class="btn btn-sm btn-primary dir-archive-btn" data-subdir="' + escHtml(fullName) + '">打包下载</button>' +
+      '<button class="btn btn-sm btn-danger dir-delete-btn" data-subdir="' + escHtml(fullName) + '">删除</button></td></tr>';
   }
   const cs = fi.checksum || '';
-  const csDisplay = cs ? '<span class="checksum-cell" data-checksum="' + escHtml(cs) + '" title="' + escHtml(cs) + '">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">馃搵</span></span>' : '-';
+  const csDisplay = cs ? '<span class="checksum-cell" data-checksum="' + escHtml(cs) + '" title="' + escHtml(cs) + '">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
   return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
     '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
     '<td>' + csDisplay + '</td>' +
     '<td class="file-actions">' +
-    '<button class="btn btn-primary btn-sm file-download-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">涓嬭浇</button>' +
-    '<button class="btn btn-sm btn-secondary file-preview-btn" data-filename="' + escHtml(fullName) + '">棰勮</button>' +
-    '<button class="btn btn-danger btn-sm file-delete-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">鍒犻櫎</button>' +
-    '<button class="btn btn-warning btn-sm file-rename-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">閲嶅懡鍚?/button>' +
-    '<button class="btn btn-sm btn-share file-share-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">鍒嗕韩</button>' +
+    '<button class="btn btn-primary btn-sm file-download-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">下载</button>' +
+    '<button class="btn btn-sm btn-secondary file-preview-btn" data-filename="' + escHtml(fullName) + '">预览</button>' +
+    '<button class="btn btn-danger btn-sm file-delete-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">删除</button>' +
+    '<button class="btn btn-warning btn-sm file-rename-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">重命名</button>' +
+    '<button class="btn btn-sm btn-share file-share-btn" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '">分享</button>' +
     '</td></tr>';
 }
 
@@ -174,15 +176,15 @@ function buildLoadMoreHtml(total) {
   if (!_hasMore) return '';
   const remaining = (total || 0) - _currentOffset;
   return '<div id="load-more-container" style="text-align:center;padding:12px;">' +
-    '<button class="btn btn-primary">鍔犺浇鏇村 (' + remaining + ')</button></div>';
+    '<button class="btn btn-primary">加载更多 (' + remaining + ')</button></div>';
 }
 
-// --- 鎼滅储 ---
+// --- 搜索 ---
 async function searchFiles() {
   const q = document.getElementById('search-input').value.trim();
   if (!q) { clearSearch(); return; }
   const el = document.getElementById('file-list');
-  el.innerHTML = '<div class="empty-msg">鎼滅储涓?..</div>';
+  el.innerHTML = '<div class="empty-msg">搜索中...</div>';
   try {
     let files;
     const searchUrl = '/api/files/search?q=' + encodeURIComponent(q);
@@ -194,7 +196,7 @@ async function searchFiles() {
       const resp = await fetch(BASE + searchUrl, { headers: headers() });
       if (!resp.ok) {
         const errData = await resp.json().catch(function() { return {}; });
-        el.innerHTML = '<div class="empty-msg">鎼滅储澶辫触: ' + (errData.message || resp.status) + '</div>';
+        el.innerHTML = '<div class="empty-msg">搜索失败: ' + (errData.message || resp.status) + '</div>';
         return;
       }
       const data = await resp.json();
@@ -202,11 +204,11 @@ async function searchFiles() {
     }
     _searchActive = true;
     document.getElementById('clear-search-btn').style.display = '';
-    if (files.length === 0) { el.innerHTML = '<div class="empty-msg">鏈壘鍒板尮閰嶆枃浠?/div>'; return; }
+    if (files.length === 0) { el.innerHTML = '<div class="empty-msg">未找到匹配文件</div>'; return; }
     el.innerHTML = buildFileTableHtml(files, '');
     updateBatchToolbar();
   } catch (e) {
-    el.innerHTML = '<div class="empty-msg">鎼滅储澶辫触: ' + e.message + '</div>';
+    el.innerHTML = '<div class="empty-msg">搜索失败: ' + e.message + '</div>';
   }
 }
 
@@ -217,7 +219,7 @@ function clearSearch() {
   refreshList();
 }
 
-// --- 鐩綍瀵艰埅 ---
+// --- 目录导航 ---
 function navigateDir(subdir) {
   currentSubdir = subdir;
   localStorage.setItem('sproxy_subdir', subdir);
@@ -235,56 +237,56 @@ function updateBreadcrumb() {
   let accumulated = '';
   for (const p of parts) {
     accumulated = accumulated ? accumulated + '/' + p : p;
-    html += ' <span style="color:#999">鈥?/span> <a href="#" data-subdir="' + escHtml(accumulated) + '">' + escHtml(p) + '</a>';
+    html += ' <span style="color:#999">›</span> <a href="#" data-subdir="' + escHtml(accumulated) + '">' + escHtml(p) + '</a>';
   }
   el.innerHTML = html;
 }
 
-// --- 鐩綍鎿嶄綔 ---
+// --- 目录操作 ---
 async function mkdirDir() {
   const input = document.getElementById('new-dir-name');
   const name = input.value.trim();
-  if (!name) { showToast('璇疯緭鍏ョ洰褰曞悕', 'warning'); return; }
+  if (!name) { showToast('请输入目录名', 'warning'); return; }
   const dirPath = currentSubdir ? currentSubdir + '/' + name : name;
   try {
     if (tunnelHexKey) {
       const result = await tunnelRequest('POST', '/mkdir?dirname=' + encodeURIComponent(dirPath), {}, null);
       const data = JSON.parse(new TextDecoder().decode(result.body));
       if (result.status >= 200 && result.status < 300 && data.success) {
-        showToast('鐩綍宸插垱寤? ' + dirPath, 'success');
+        showToast('目录已创建: ' + dirPath, 'success');
         input.value = '';
         refreshList();
-      } else { showToast('鍒涘缓鐩綍澶辫触: ' + (data.message || result.status), 'error'); }
+      } else { showToast('创建目录失败: ' + (data.message || result.status), 'error'); }
     } else {
       const resp = await fetch(BASE + '/mkdir?dirname=' + encodeURIComponent(dirPath), { method: 'POST', headers: headers() });
       const data = await resp.json();
       if (resp.ok && data.success) {
-        showToast('鐩綍宸插垱寤? ' + dirPath, 'success');
+        showToast('目录已创建: ' + dirPath, 'success');
         input.value = '';
         refreshList();
-      } else { showToast('鍒涘缓鐩綍澶辫触: ' + (data.message || resp.status), 'error'); }
+      } else { showToast('创建目录失败: ' + (data.message || resp.status), 'error'); }
     }
-  } catch (e) { showToast('鍒涘缓鐩綍澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('创建目录失败: ' + e.message, 'error'); }
 }
 
 async function rmdirDir(dirPath) {
-  if (!confirm('纭鍒犻櫎鐩綍 "' + dirPath + '" 鍙婂叾鎵€鏈夊唴瀹?')) return;
+  if (!confirm('确认删除目录 "' + dirPath + '" 及其所有内容?')) return;
   try {
     if (tunnelHexKey) {
       const result = await tunnelRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirPath), {}, null);
       const data = JSON.parse(new TextDecoder().decode(result.body));
-      if (result.status >= 200 && result.status < 300 && data.success) { showToast('鐩綍宸插垹闄? ' + dirPath, 'success'); refreshList(); }
-      else { showToast('鍒犻櫎鐩綍澶辫触: ' + (data.message || result.status), 'error'); }
+      if (result.status >= 200 && result.status < 300 && data.success) { showToast('目录已删除: ' + dirPath, 'success'); refreshList(); }
+      else { showToast('删除目录失败: ' + (data.message || result.status), 'error'); }
     } else {
       const resp = await fetch(BASE + '/rmdir?dirname=' + encodeURIComponent(dirPath), { method: 'POST', headers: headers() });
       const data = await resp.json();
-      if (resp.ok && data.success) { showToast('鐩綍宸插垹闄? ' + dirPath, 'success'); refreshList(); }
-      else { showToast('鍒犻櫎鐩綍澶辫触: ' + (data.message || resp.status), 'error'); }
+      if (resp.ok && data.success) { showToast('目录已删除: ' + dirPath, 'success'); refreshList(); }
+      else { showToast('删除目录失败: ' + (data.message || resp.status), 'error'); }
     }
-  } catch (e) { showToast('鍒犻櫎鐩綍澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('删除目录失败: ' + e.message, 'error'); }
 }
 
-// --- 涓嬭浇 ---
+// --- 下载 ---
 async function downloadFile(name, expectedChecksum) {
   try {
     if (tunnelHexKey) {
@@ -296,23 +298,23 @@ async function downloadFile(name, expectedChecksum) {
         sha256.update(new Uint8Array(result.body));
         const localCS = sha256.digest();
         if (localCS !== serverCS) {
-          showToast(name + ' 鏍￠獙澶辫触: 鏈嶅姟绔?' + serverCS.substring(0, 16) + '鈥? 鏈湴 ' + localCS.substring(0, 16) + '鈥?, 'error');
+          showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
           return;
         }
       }
       triggerDownload(name, result.body);
-      showToast(name + ' 涓嬭浇瀹屾垚' + (serverCS ? '锛屾牎楠岄€氳繃' : ''), 'success');
+      showToast(name + ' 下载完成' + (serverCS ? '，校验通过' : ''), 'success');
     } else {
       await directDownload(name);
     }
-  } catch (e) { showToast('涓嬭浇澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
 }
 
 async function directDownload(name) {
   const resp = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
   if (!resp.ok) {
     const data = await resp.json().catch(function() { return {}; });
-    showToast('涓嬭浇澶辫触: ' + (data.message || resp.status), 'error');
+    showToast('下载失败: ' + (data.message || resp.status), 'error');
     return;
   }
   const serverCS = resp.headers.get('X-File-Checksum') || '';
@@ -329,27 +331,27 @@ async function directDownload(name) {
       }
       const localCS = sha256.digest();
       if (localCS !== serverCS) {
-        showToast(name + ' 鏍￠獙澶辫触: 鏈嶅姟绔?' + serverCS.substring(0, 16) + '鈥? 鏈湴 ' + localCS.substring(0, 16) + '鈥?, 'error');
+        showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
         return;
       }
       const resp2 = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: headers() });
       triggerDownload(name, await resp2.blob());
-      showToast(name + ' 涓嬭浇瀹屾垚锛屾牎楠岄€氳繃', 'success');
+      showToast(name + ' 下载完成，校验通过', 'success');
       return;
     }
     const buffer = await resp.arrayBuffer();
     sha256.update(new Uint8Array(buffer));
     const localCS = sha256.digest();
     if (localCS !== serverCS) {
-      showToast(name + ' 鏍￠獙澶辫触: 鏈嶅姟绔?' + serverCS.substring(0, 16) + '鈥? 鏈湴 ' + localCS.substring(0, 16) + '鈥?, 'error');
+      showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
       return;
     }
     triggerDownload(name, buffer);
-    showToast(name + ' 涓嬭浇瀹屾垚锛屾牎楠岄€氳繃', 'success');
+    showToast(name + ' 下载完成，校验通过', 'success');
     return;
   }
   triggerDownload(name, await resp.blob());
-  showToast(name + ' 涓嬭浇瀹屾垚', 'success');
+  showToast(name + ' 下载完成', 'success');
 }
 
 function triggerDownload(fileName, data) {
@@ -364,50 +366,50 @@ function triggerDownload(fileName, data) {
   URL.revokeObjectURL(url);
 }
 
-// --- 鍒犻櫎 ---
+// --- 删除 ---
 async function deleteFile(name, checksum) {
-  if (!confirm('纭鍒犻櫎 "' + name + '"?')) return;
-  if (!checksum) { showToast('缂哄皯 checksum锛屾棤娉曟牎楠屽畬鏁存€?, 'error'); return; }
+  if (!confirm('确认删除 "' + name + '"?')) return;
+  if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
   try {
     if (tunnelHexKey) {
       const result = await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(name), { 'X-File-Checksum': checksum }, null);
       const data = JSON.parse(new TextDecoder().decode(result.body));
-      if (result.status >= 200 && result.status < 300 && data.success) { showToast('鍒犻櫎鎴愬姛: ' + name, 'success'); refreshList(); }
-      else { showToast('鍒犻櫎澶辫触: ' + (data.message || result.status), 'error'); }
+      if (result.status >= 200 && result.status < 300 && data.success) { showToast('删除成功: ' + name, 'success'); refreshList(); }
+      else { showToast('删除失败: ' + (data.message || result.status), 'error'); }
     } else {
       const resp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(name), {
         method: 'POST', headers: headers({ 'X-File-Checksum': checksum })
       });
       const data = await resp.json();
-      if (resp.ok && data.success) { showToast('鍒犻櫎鎴愬姛: ' + name, 'success'); refreshList(); }
-      else { showToast('鍒犻櫎澶辫触: ' + (data.message || resp.status), 'error'); }
+      if (resp.ok && data.success) { showToast('删除成功: ' + name, 'success'); refreshList(); }
+      else { showToast('删除失败: ' + (data.message || resp.status), 'error'); }
     }
-  } catch (e) { showToast('鍒犻櫎澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
 
-// --- 閲嶅懡鍚?---
+// --- 重命名 ---
 async function renameFile(name, checksum) {
-  if (!checksum) { showToast('缂哄皯 checksum锛屾棤娉曟牎楠屽畬鏁存€?, 'error'); return; }
-  const newName = prompt('鏂扮殑鏂囦欢鍚嶏紙璺緞锛?', name);
+  if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
+  const newName = prompt('新的文件名（路径）:', name);
   if (!newName || newName === name) return;
   try {
     if (tunnelHexKey) {
       const result = await tunnelRequest('POST', '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), { 'X-File-Checksum': checksum }, null);
       const data = JSON.parse(new TextDecoder().decode(result.body));
-      if (result.status >= 200 && result.status < 300 && data.success) { showToast('閲嶅懡鍚嶆垚鍔? ' + newName, 'success'); refreshList(); }
-      else { showToast('閲嶅懡鍚嶅け璐? ' + (data.message || result.status), 'error'); }
+      if (result.status >= 200 && result.status < 300 && data.success) { showToast('重命名成功: ' + newName, 'success'); refreshList(); }
+      else { showToast('重命名失败: ' + (data.message || result.status), 'error'); }
     } else {
       const resp = await fetch(BASE + '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), {
         method: 'POST', headers: headers({ 'X-File-Checksum': checksum })
       });
       const data = await resp.json();
-      if (resp.ok && data.success) { showToast('閲嶅懡鍚嶆垚鍔? ' + newName, 'success'); refreshList(); }
-      else { showToast('閲嶅懡鍚嶅け璐? ' + (data.message || resp.status), 'error'); }
+      if (resp.ok && data.success) { showToast('重命名成功: ' + newName, 'success'); refreshList(); }
+      else { showToast('重命名失败: ' + (data.message || resp.status), 'error'); }
     }
-  } catch (e) { showToast('閲嶅懡鍚嶅け璐? ' + e.message, 'error'); }
+  } catch (e) { showToast('重命名失败: ' + e.message, 'error'); }
 }
 
-// --- 鎵归噺鎿嶄綔 ---
+// --- 批量操作 ---
 function toggleSelectAll(checked) {
   for (const cb of document.querySelectorAll('.file-select')) { cb.checked = checked; }
   updateBatchToolbar();
@@ -419,7 +421,7 @@ function updateBatchToolbar() {
   const toolbar = document.getElementById('batch-toolbar');
   const label = document.getElementById('batch-count');
   if (!toolbar || !label) return;
-  label.textContent = '宸查€?' + count + ' 涓枃浠?;
+  label.textContent = '已选 ' + count + ' 个文件';
   if (count > 0) { toolbar.classList.add('show'); } else { toolbar.classList.remove('show'); }
 }
 
@@ -440,33 +442,33 @@ function getSelectedFiles() {
 
 async function batchDelete() {
   const files = getSelectedFiles();
-  if (files.length === 0) { showToast('璇峰厛閫夋嫨鏂囦欢', 'error'); return; }
-  if (!confirm('纭畾瑕佸垹闄ら€変腑鐨?' + files.length + ' 涓枃浠跺悧锛?)) return;
+  if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
+  if (!confirm('确定要删除选中的 ' + files.length + ' 个文件吗？')) return;
   const body = JSON.stringify({ files: files });
   try {
     const data = await sendBatchRequest('/api/batch/delete', body);
-    if (data.success) { showToast(data.message || '鍒犻櫎瀹屾垚', 'success'); refreshList(); }
-    else { showToast(data.message || '鎵归噺鍒犻櫎澶辫触', 'error'); }
-  } catch (e) { showToast('鎵归噺鍒犻櫎澶辫触: ' + e.message, 'error'); }
+    if (data.success) { showToast(data.message || '删除完成', 'success'); refreshList(); }
+    else { showToast(data.message || '批量删除失败', 'error'); }
+  } catch (e) { showToast('批量删除失败: ' + e.message, 'error'); }
 }
 
 async function batchRename() {
   const files = getSelectedFiles();
-  if (files.length === 0) { showToast('璇峰厛閫夋嫨鏂囦欢', 'error'); return; }
+  if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
   const operations = [];
   for (const f of files) {
-    const newName = prompt('閲嶅懡鍚?"' + f.filename + '"\n璇疯緭鍏ユ柊鏂囦欢鍚嶏紙鍙栨秷璺宠繃锛?', f.filename);
+    const newName = prompt('重命名 "' + f.filename + '"\n请输入新文件名（取消跳过）:', f.filename);
     if (newName === null) continue;
-    if (newName.trim() === '') { showToast('鏂囦欢鍚嶄笉鑳戒负绌?, 'error'); return; }
+    if (newName.trim() === '') { showToast('文件名不能为空', 'error'); return; }
     if (newName === f.filename) continue;
     operations.push({ from: f.filename, to: newName, checksum: f.checksum });
   }
-  if (operations.length === 0) { showToast('娌℃湁闇€瑕侀噸鍛藉悕鐨勬枃浠?, 'info'); return; }
+  if (operations.length === 0) { showToast('没有需要重命名的文件', 'info'); return; }
   try {
     const data = await sendBatchRequest('/api/batch/rename', JSON.stringify({ operations: operations }));
-    if (data.success) { showToast(data.message || '閲嶅懡鍚嶅畬鎴?, 'success'); clearSelection(); refreshList(); }
-    else { showToast(data.message || '鎵归噺閲嶅懡鍚嶅け璐?, 'error'); }
-  } catch (e) { showToast('鎵归噺閲嶅懡鍚嶅け璐? ' + e.message, 'error'); }
+    if (data.success) { showToast(data.message || '重命名完成', 'success'); clearSelection(); refreshList(); }
+    else { showToast(data.message || '批量重命名失败', 'error'); }
+  } catch (e) { showToast('批量重命名失败: ' + e.message, 'error'); }
 }
 
 async function sendBatchRequest(url, body) {
@@ -480,7 +482,7 @@ async function sendBatchRequest(url, body) {
 
 function batchDownloadArchive() {
   const selected = getSelectedFiles();
-  if (selected.length === 0) { showToast('璇烽€夋嫨鏂囦欢', 'warning'); return; }
+  if (selected.length === 0) { showToast('请选择文件', 'warning'); return; }
   const files = selected.map(function(f) { return f.filename; });
   const headersObj = headers();
   headersObj['Content-Type'] = 'application/json';
@@ -491,22 +493,23 @@ function batchDownloadArchive() {
     const disposition = resp.headers.get('Content-Disposition') || '';
     const match = disposition.match(/filename="?(.+?)"?$/);
     const filename = match ? match[1] : 'archive.tar.gz';
-    return resp.blob().then(function(blob) { triggerDownload(filename, blob); showToast('褰掓。涓嬭浇瀹屾垚: ' + filename, 'success'); });
-  }).catch(function(err) { showToast('褰掓。澶辫触: ' + err.message, 'error'); });
+    return resp.blob().then(function(blob) { triggerDownload(filename, blob); showToast('归档下载完成: ' + filename, 'success'); });
+  }).catch(function(err) { showToast('归档失败: ' + err.message, 'error'); });
 }
 
-// 鐩綍鎵撳寘涓嬭浇锛圙ET /api/archive-dir锛?async function downloadDirArchive(dirPath) {
+// 目录打包下载（GET /api/archive-dir）
+async function downloadDirArchive(dirPath) {
   try {
     var url = '/api/archive-dir?dirname=' + encodeURIComponent(dirPath);
     if (tunnelHexKey) {
       var result = await tunnelRequest('GET', url, {}, null);
       triggerDownload(dirPath.replace('/', '_') + '.tar.gz', result.body);
-      showToast('鐩綍鎵撳寘涓嬭浇瀹屾垚', 'success');
+      showToast('目录打包下载完成', 'success');
     } else {
       var resp = await fetch(BASE + url, { headers: headers() });
       if (!resp.ok) {
         var errData = await resp.json().catch(function() { return {}; });
-        showToast('鎵撳寘涓嬭浇澶辫触: ' + (errData.message || resp.status), 'error');
+        showToast('打包下载失败: ' + (errData.message || resp.status), 'error');
         return;
       }
       var disposition = resp.headers.get('Content-Disposition') || '';
@@ -514,16 +517,16 @@ function batchDownloadArchive() {
       var filename = match ? match[1] : dirPath.replace('/', '_') + '.tar.gz';
       var blob = await resp.blob();
       triggerDownload(filename, blob);
-      showToast('鐩綍鎵撳寘涓嬭浇瀹屾垚: ' + filename, 'success');
+      showToast('目录打包下载完成: ' + filename, 'success');
     }
-  } catch (e) { showToast('鎵撳寘涓嬭浇澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('打包下载失败: ' + e.message, 'error'); }
 }
 
-// --- 鐩戞帶 ---
+// --- 监控 ---
 async function showStats() {
   document.getElementById('stats-modal').style.display = 'flex';
   switchStatsTab('stats');
-  document.getElementById('stats-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">鍔犺浇涓?..</div>';
+  document.getElementById('stats-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
   try {
     var data;
     if (tunnelHexKey) {
@@ -531,20 +534,20 @@ async function showStats() {
       data = JSON.parse(new TextDecoder().decode(result.body));
     } else {
       var resp = await fetch(BASE + '/api/stats', { headers: headers() });
-      if (!resp.ok) { document.getElementById('stats-panel').innerHTML = '<div style="color:red">璇锋眰澶辫触: ' + resp.status + '</div>'; return; }
+      if (!resp.ok) { document.getElementById('stats-panel').innerHTML = '<div style="color:red">请求失败: ' + resp.status + '</div>'; return; }
       data = await resp.json();
     }
     var du = data.disk_usage || {};
     var rc = data.request_counts || {};
     document.getElementById('stats-panel').innerHTML = statsTableHtml(du, rc, data);
-  } catch (e) { document.getElementById('stats-panel').innerHTML = '<div style="color:red">閿欒: ' + e.message + '</div>'; }
+  } catch (e) { document.getElementById('stats-panel').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
 }
 
 function hideStats() {
   document.getElementById('stats-modal').style.display = 'none';
 }
 
-// --- 鐩戞帶寮圭獥鏍囩椤靛垏鎹?---
+// --- 监控弹窗标签页切换 ---
 function switchStatsTab(tab) {
   document.getElementById('stats-panel').style.display = tab === 'stats' ? 'block' : 'none';
   document.getElementById('config-panel').style.display = tab === 'config' ? 'block' : 'none';
@@ -558,7 +561,7 @@ function switchStatsTab(tab) {
 }
 
 async function showConfig() {
-  document.getElementById('config-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">鍔犺浇涓?..</div>';
+  document.getElementById('config-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
   try {
     var data;
     if (tunnelHexKey) {
@@ -566,16 +569,16 @@ async function showConfig() {
       data = JSON.parse(new TextDecoder().decode(result.body));
     } else {
       var resp = await fetch(BASE + '/api/config', { headers: headers() });
-      if (!resp.ok) { document.getElementById('config-panel').innerHTML = '<div style="color:red">璇锋眰澶辫触: ' + resp.status + '</div>'; return; }
+      if (!resp.ok) { document.getElementById('config-panel').innerHTML = '<div style="color:red">请求失败: ' + resp.status + '</div>'; return; }
       data = await resp.json();
     }
     document.getElementById('config-panel').innerHTML = configTableHtml(data);
-  } catch (e) { document.getElementById('config-panel').innerHTML = '<div style="color:red">閿欒: ' + e.message + '</div>'; }
+  } catch (e) { document.getElementById('config-panel').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
 }
 
-// --- Hub 绠＄悊 ---
+// --- Hub 管理 ---
 async function showHub() {
-  document.getElementById('hub-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">鍔犺浇涓?..</div>';
+  document.getElementById('hub-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
   try {
     var nodes, stats;
     if (tunnelHexKey) {
@@ -591,7 +594,7 @@ async function showHub() {
         fetch(BASE + '/api/hub/stats', { headers: headers() })
       ]);
       if (!nResp.ok) {
-        document.getElementById('hub-panel').innerHTML = '<div class="empty-msg">Hub 鏈惎鐢ㄦ垨璇锋眰澶辫触</div>';
+        document.getElementById('hub-panel').innerHTML = '<div class="empty-msg">Hub 未启用或请求失败</div>';
         return;
       }
       nodes = await nResp.json();
@@ -599,29 +602,29 @@ async function showHub() {
     }
     document.getElementById('hub-panel').innerHTML = hubTableHtml(nodes, stats);
   } catch (e) {
-    document.getElementById('hub-panel').innerHTML = '<div class="empty-msg">Hub 鏈惎鐢ㄦ垨璇锋眰澶辫触: ' + e.message + '</div>';
+    document.getElementById('hub-panel').innerHTML = '<div class="empty-msg">Hub 未启用或请求失败: ' + e.message + '</div>';
   }
 }
 
 function hubTableHtml(nodes, stats) {
   var html = '';
-  // 缁熻姒傝
+  // 统计概要
   if (stats) {
     html += '<div style="margin-bottom:12px;padding:8px 12px;background:#f0f8ff;border-radius:4px;font-size:13px;">';
-    html += '宸茶繛鎺ヨ妭鐐? <strong>' + (stats.nodes_connected ?? 0) + '</strong></div>';
+    html += '已连接节点: <strong>' + (stats.nodes_connected ?? 0) + '</strong></div>';
   }
 
   if (!nodes || nodes.length === 0) {
-    html += '<div class="empty-msg">鏆傛棤宸茶繛鎺ヨ妭鐐?/div>';
+    html += '<div class="empty-msg">暂无已连接节点</div>';
     return html;
   }
 
   html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
   html += '<thead><tr style="background:#f5f5f5;">';
-  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">鑺傜偣 ID</th>';
-  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">鍦板潃</th>';
-  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">杩炴帴鏃堕棿</th>';
-  html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid #ddd;">鎿嶄綔</th>';
+  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">节点 ID</th>';
+  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">地址</th>';
+  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">连接时间</th>';
+  html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid #ddd;">操作</th>';
   html += '</tr></thead><tbody>';
 
   for (var i = 0; i < nodes.length; i++) {
@@ -632,7 +635,7 @@ function hubTableHtml(nodes, stats) {
     html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + escHtml(n.addr || '-') + '</td>';
     html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px;">' + connected + '</td>';
     html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:center;">';
-    html += '<button class="btn btn-danger btn-sm hub-remove-btn" data-node-id="' + escHtml(n.id) + '">绉婚櫎</button>';
+    html += '<button class="btn btn-danger btn-sm hub-remove-btn" data-node-id="' + escHtml(n.id) + '">移除</button>';
     html += '</td></tr>';
   }
   html += '</tbody></table>';
@@ -640,7 +643,7 @@ function hubTableHtml(nodes, stats) {
 }
 
 async function removeHubNode(nodeId) {
-  if (!confirm('纭畾绉婚櫎鑺傜偣 ' + nodeId + '锛?)) return;
+  if (!confirm('确定移除节点 ' + nodeId + '？')) return;
   try {
     if (tunnelHexKey) {
       await tunnelRequest('DELETE', '/api/hub/nodes/' + encodeURIComponent(nodeId), {}, null);
@@ -648,76 +651,77 @@ async function removeHubNode(nodeId) {
       var resp = await fetch(BASE + '/api/hub/nodes/' + encodeURIComponent(nodeId), { method: 'DELETE', headers: headers() });
       if (!resp.ok) {
         var data = await resp.json().catch(function() { return {}; });
-        showToast('绉婚櫎澶辫触: ' + (data.error || resp.status), 'error');
+        showToast('移除失败: ' + (data.error || resp.status), 'error');
         return;
       }
     }
-    showToast('鑺傜偣 ' + nodeId + ' 宸茬Щ闄?, 'success');
+    showToast('节点 ' + nodeId + ' 已移除', 'success');
     showHub();
-  } catch (e) { showToast('绉婚櫎澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('移除失败: ' + e.message, 'error'); }
 }
 
 function configTableHtml(cfg) {
   var html = '<table style="width:100%;border-collapse:collapse;font-size:14px;">';
-  html += '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555">杩愯鏃堕厤缃?/th></tr>';
+  html += '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555">运行时配置</th></tr>';
 
   function row(label, value) {
     return '<tr><td style="padding:5px 0;color:#777">' + label + '</td><td style="text-align:right">' + (value ?? '-') + '</td></tr>';
   }
 
-  html += row('鏃ュ織绾у埆', cfg.log_level);
-  html += row('鏃ュ織鏍煎紡', cfg.log_format);
-  html += row('璁よ瘉浠ょ墝', cfg.auth_token_set ? '鉁?宸茶缃? : '鉂?鏈缃?);
-  html += row('闅ч亾瀵嗛挜', cfg.tunnel_key_set ? '鉁?宸茶缃? : '鉂?鏈缃?);
-  html += row('閫熺巼闄愬埗', cfg.rate_limit_requests + ' req / ' + (cfg.rate_limit_window || '-'));
-  html += row('瀛樺偍涓婇檺', cfg.max_storage_bytes > 0 ? formatBytes(cfg.max_storage_bytes) : '涓嶉檺');
-  html += row('鍒嗗潡澶у皬', formatBytes(cfg.chunk_size));
-  html += row('涓婁紶浼氳瘽 TTL', cfg.upload_session_ttl || '-');
-  html += row('鐗堟湰绠＄悊', cfg.versioning_enabled ? '鉁?鍚敤' : '鉂?鍏抽棴');
-  html += row('浜戠骞跺彂', cfg.cloud_max_concurrent);
-  html += row('鍦板潃', cfg.addr);
-  html += row('涓婁紶鐩綍', cfg.uploads_dir);
-  html += row('TLS', cfg.tls_enabled ? '鉁?鍚敤' : '鉂?鍏抽棴');
-  html += row('Hub 涓户', cfg.hub_enabled ? '鉁?鍚敤' : '鉂?鍏抽棴');
+  html += row('日志级别', cfg.log_level);
+  html += row('日志格式', cfg.log_format);
+  html += row('认证令牌', cfg.auth_token_set ? '✅ 已设置' : '❌ 未设置');
+  html += row('隧道密钥', cfg.tunnel_key_set ? '✅ 已设置' : '❌ 未设置');
+  html += row('速率限制', cfg.rate_limit_requests + ' req / ' + (cfg.rate_limit_window || '-'));
+  html += row('存储上限', cfg.max_storage_bytes > 0 ? formatBytes(cfg.max_storage_bytes) : '不限');
+  html += row('分块大小', formatBytes(cfg.chunk_size));
+  html += row('上传会话 TTL', cfg.upload_session_ttl || '-');
+  html += row('版本管理', cfg.versioning_enabled ? '✅ 启用' : '❌ 关闭');
+  html += row('云端并发', cfg.cloud_max_concurrent);
+  html += row('地址', cfg.addr);
+  html += row('上传目录', cfg.uploads_dir);
+  html += row('TLS', cfg.tls_enabled ? '✅ 启用' : '❌ 关闭');
+  html += row('Hub 中继', cfg.hub_enabled ? '✅ 启用' : '❌ 关闭');
   html += '</table>';
 
-  // 閰嶇疆缂栬緫鍖?  html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid #eee;">';
-  html += '<div style="font-size:13px;font-weight:600;color:#555;margin-bottom:8px;">蹇€熺紪杈?/div>';
+  // 配置编辑区
+  html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid #eee;">';
+  html += '<div style="font-size:13px;font-weight:600;color:#555;margin-bottom:8px;">快速编辑</div>';
 
-  // 鏃ュ織绾у埆
+  // 日志级别
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
-  html += '<span style="font-size:13px;color:#777;">鏃ュ織绾у埆:</span>';
+  html += '<span style="font-size:13px;color:#777;">日志级别:</span>';
   html += '<select id="cfg-log-level" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
   var levels = ['debug','info','warn','error'];
   for (var i = 0; i < levels.length; i++) {
     html += '<option value="' + levels[i] + '"' + (cfg.log_level === levels[i] ? ' selected' : '') + '>' + levels[i] + '</option>';
   }
   html += '</select>';
-  html += '<button class="btn btn-sm btn-primary" id="cfg-update-log-level">鏇存柊</button></div>';
+  html += '<button class="btn btn-sm btn-primary" id="cfg-update-log-level">更新</button></div>';
 
-  // 鏃ュ織鏍煎紡
+  // 日志格式
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
-  html += '<span style="font-size:13px;color:#777;">鏃ュ織鏍煎紡:</span>';
+  html += '<span style="font-size:13px;color:#777;">日志格式:</span>';
   html += '<select id="cfg-log-format" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
   html += '<option value="text"' + (cfg.log_format === 'text' ? ' selected' : '') + '>text</option>';
   html += '<option value="json"' + (cfg.log_format === 'json' ? ' selected' : '') + '>json</option>';
   html += '</select>';
-  html += '<button class="btn btn-sm btn-primary" id="cfg-update-log-format">鏇存柊</button></div>';
+  html += '<button class="btn btn-sm btn-primary" id="cfg-update-log-format">更新</button></div>';
 
-  // 閫熺巼闄愬埗
+  // 速率限制
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
-  html += '<span style="font-size:13px;color:#777;">閫熺巼闄愬埗:</span>';
+  html += '<span style="font-size:13px;color:#777;">速率限制:</span>';
   html += '<input type="number" id="cfg-rate-limit" value="' + (cfg.rate_limit_requests ?? 10) + '" style="width:60px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
   html += '<span style="font-size:12px;color:#999;">req / </span>';
   html += '<input type="text" id="cfg-rate-window" value="' + (cfg.rate_limit_window || '1s') + '" style="width:60px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
-  html += '<button class="btn btn-sm btn-primary" id="cfg-update-rate-limit">鏇存柊</button></div>';
+  html += '<button class="btn btn-sm btn-primary" id="cfg-update-rate-limit">更新</button></div>';
 
-  // 瀛樺偍闄愬埗
+  // 存储限制
   html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
-  html += '<span style="font-size:13px;color:#777;">瀛樺偍涓婇檺:</span>';
+  html += '<span style="font-size:13px;color:#777;">存储上限:</span>';
   html += '<input type="number" id="cfg-max-storage" value="' + (cfg.max_storage_bytes ?? 0) + '" style="width:140px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;" min="0">';
-  html += '<span style="font-size:12px;color:#999;">瀛楄妭锛?=涓嶉檺锛?/span>';
-  html += '<button class="btn btn-sm btn-primary" id="cfg-update-storage">鏇存柊</button></div>';
+  html += '<span style="font-size:12px;color:#999;">字节（0=不限）</span>';
+  html += '<button class="btn btn-sm btn-primary" id="cfg-update-storage">更新</button></div>';
 
   html += '</div>';
   return html;
@@ -729,40 +733,40 @@ async function updateConfigField(key, value) {
     if (tunnelHexKey) {
       var result = await tunnelRequest('PUT', '/api/config', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
       var data = JSON.parse(new TextDecoder().decode(result.body));
-      if (data.success) { showToast('閰嶇疆宸叉洿鏂?, 'success'); showConfig(); }
-      else { showToast('鏇存柊澶辫触', 'error'); }
+      if (data.success) { showToast('配置已更新', 'success'); showConfig(); }
+      else { showToast('更新失败', 'error'); }
     } else {
       var resp = await fetch(BASE + '/api/config', {
         method: 'PUT', headers: headers({ 'Content-Type': 'application/json' }), body: body
       });
       var data = await resp.json();
-      if (resp.ok && data.success) { showToast('閰嶇疆宸叉洿鏂?, 'success'); showConfig(); }
-      else { showToast('鏇存柊澶辫触: ' + (data.error || resp.status), 'error'); }
+      if (resp.ok && data.success) { showToast('配置已更新', 'success'); showConfig(); }
+      else { showToast('更新失败: ' + (data.error || resp.status), 'error'); }
     }
-  } catch (e) { showToast('鏇存柊澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('更新失败: ' + e.message, 'error'); }
 }
 
-// 鏃х増 updateStorageConfig锛屾敼鐢ㄩ厤缃潰鏉夸腑鐨?cfg-update-storage 浠ｆ浛
+// 旧版 updateStorageConfig，改用配置面板中的 cfg-update-storage 代替
 async function updateStorageConfig() {
   var input = document.getElementById('max-storage-input');
   var maxBytes = Number.parseInt(input.value) || 0;
-  if (maxBytes < 0) { showToast('瀛樺偍闄愬埗涓嶈兘涓鸿礋鏁?, 'error'); return; }
+  if (maxBytes < 0) { showToast('存储限制不能为负数', 'error'); return; }
   try {
     var body = JSON.stringify({ max_storage_bytes: maxBytes });
     if (tunnelHexKey) {
       var result = await tunnelRequest('PUT', '/api/storage/config', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
       var data = JSON.parse(new TextDecoder().decode(result.body));
-      if (data.success) { showToast('瀛樺偍闄愬埗宸叉洿鏂? ' + formatBytes(data.max_storage_bytes || 0), 'success'); }
-      else { showToast('鏇存柊澶辫触', 'error'); }
+      if (data.success) { showToast('存储限制已更新: ' + formatBytes(data.max_storage_bytes || 0), 'success'); }
+      else { showToast('更新失败', 'error'); }
     } else {
       var resp = await fetch(BASE + '/api/storage/config', {
         method: 'PUT', headers: headers({ 'Content-Type': 'application/json' }), body: body
       });
       var data = await resp.json();
-      if (resp.ok && data.success) { showToast('瀛樺偍闄愬埗宸叉洿鏂? ' + formatBytes(data.max_storage_bytes || 0), 'success'); }
-      else { showToast('鏇存柊澶辫触: ' + (data.error || resp.status), 'error'); }
+      if (resp.ok && data.success) { showToast('存储限制已更新: ' + formatBytes(data.max_storage_bytes || 0), 'success'); }
+      else { showToast('更新失败: ' + (data.error || resp.status), 'error'); }
     }
-  } catch (e) { showToast('鏇存柊澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('更新失败: ' + e.message, 'error'); }
 }
 
 function formatBytes(n) {
@@ -775,37 +779,37 @@ function formatBytes(n) {
 
 function statsTableHtml(du, rc, s) {
   return '<table style="width:100%;border-collapse:collapse;font-size:14px;">' +
-    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555">纾佺洏浣跨敤</th></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">鐩綍</td><td style="text-align:right">' + (du.uploads_dir || '-') + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">鏂囦欢鏁?/td><td style="text-align:right">' + (du.total_files ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">鎬诲ぇ灏?/td><td style="text-align:right">' + formatBytes(du.total_size) + '</td></tr>' +
-    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555;padding-top:14px">璇锋眰缁熻锛堣嚜鍚姩锛?/th></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">鎬昏姹傛暟</td><td style="text-align:right">' + (rc.total ?? 0) + '</td></tr>' +
+    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555">磁盘使用</th></tr>' +
+    '<tr><td style="padding:5px 0;color:#777">目录</td><td style="text-align:right">' + (du.uploads_dir || '-') + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:#777">文件数</td><td style="text-align:right">' + (du.total_files ?? 0) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:#777">总大小</td><td style="text-align:right">' + formatBytes(du.total_size) + '</td></tr>' +
+    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555;padding-top:14px">请求统计（自启动）</th></tr>' +
+    '<tr><td style="padding:5px 0;color:#777">总请求数</td><td style="text-align:right">' + (rc.total ?? 0) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">2xx</td><td style="text-align:right">' + (rc['2xx'] ?? 0) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">4xx</td><td style="text-align:right">' + (rc['4xx'] ?? 0) + '</td></tr>' +
     '<tr><td style="padding:5px 0;color:#777">5xx</td><td style="text-align:right">' + (rc['5xx'] ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">娲昏穬杩炴帴</td><td style="text-align:right">' + (s.active_connections ?? 0) + '</td></tr>' +
-    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555;padding-top:14px">浼犺緭缁熻锛堣嚜鍚姩锛?/th></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">涓婁紶鏂囦欢鏁?/td><td style="text-align:right">' + (s.files_uploaded ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">涓婁紶瀛楄妭鏁?/td><td style="text-align:right">' + formatBytes(s.bytes_uploaded) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">涓嬭浇鏂囦欢鏁?/td><td style="text-align:right">' + (s.files_downloaded ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">涓嬭浇瀛楄妭鏁?/td><td style="text-align:right">' + formatBytes(s.bytes_downloaded) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">鍒犻櫎鏂囦欢鏁?/td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
+    '<tr><td style="padding:5px 0;color:#777">活跃连接</td><td style="text-align:right">' + (s.active_connections ?? 0) + '</td></tr>' +
+    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555;padding-top:14px">传输统计（自启动）</th></tr>' +
+    '<tr><td style="padding:5px 0;color:#777">上传文件数</td><td style="text-align:right">' + (s.files_uploaded ?? 0) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:#777">上传字节数</td><td style="text-align:right">' + formatBytes(s.bytes_uploaded) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:#777">下载文件数</td><td style="text-align:right">' + (s.files_downloaded ?? 0) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:#777">下载字节数</td><td style="text-align:right">' + formatBytes(s.bytes_downloaded) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
 }
 
-// --- 鏆楄壊妯″紡 ---
+// --- 暗色模式 ---
 function initTheme() {
   var saved = localStorage.getItem('sproxy_theme');
   if (saved === 'dark') {
     document.documentElement.setAttribute('data-theme', 'dark');
-    document.getElementById('theme-toggle-btn').textContent = '鈽€锔?;
+    document.getElementById('theme-toggle-btn').textContent = '☀️';
   } else if (saved === 'light') {
     document.documentElement.removeAttribute('data-theme');
-    document.getElementById('theme-toggle-btn').textContent = '馃寵';
+    document.getElementById('theme-toggle-btn').textContent = '🌙';
   } else {
-    // 鏈繚瀛樻椂璺熼殢绯荤粺
+    // 未保存时跟随系统
     if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-      document.getElementById('theme-toggle-btn').textContent = '鈽€锔?;
+      document.getElementById('theme-toggle-btn').textContent = '☀️';
     }
   }
 }
@@ -815,37 +819,40 @@ function toggleTheme() {
   if (current === 'dark') {
     document.documentElement.removeAttribute('data-theme');
     localStorage.setItem('sproxy_theme', 'light');
-    document.getElementById('theme-toggle-btn').textContent = '馃寵';
+    document.getElementById('theme-toggle-btn').textContent = '🌙';
   } else {
     document.documentElement.setAttribute('data-theme', 'dark');
     localStorage.setItem('sproxy_theme', 'dark');
-    document.getElementById('theme-toggle-btn').textContent = '鈽€锔?;
+    document.getElementById('theme-toggle-btn').textContent = '☀️';
   }
 }
 
-// --- 閿洏蹇嵎閿?---
+// --- 键盘快捷键 ---
 document.addEventListener('keydown', function(e) {
-  // 蹇界暐杈撳叆妗嗗唴鐨勫揩鎹烽敭
+  // 忽略输入框内的快捷键
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
   switch (e.key) {
     case 'u': case 'U':
-      // u: 涓婁紶鏂囦欢
+      // u: 上传文件
       e.preventDefault();
       document.getElementById('file-input').click();
       break;
     case 'r': case 'R':
-      // r: 鍒锋柊鍒楄〃锛堥潪 Ctrl+R锛?      if (!e.ctrlKey && !e.metaKey) {
+      // r: 刷新列表（非 Ctrl+R）
+      if (!e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         refreshList();
       }
       break;
     case '/':
-      // /: 鎼滅储妗嗚仛鐒?      e.preventDefault();
+      // /: 搜索框聚焦
+      e.preventDefault();
       document.getElementById('search-input').focus();
       break;
     case 'Escape':
-      // Esc: 鍏抽棴鎵€鏈夊脊绐?      hideStats();
+      // Esc: 关闭所有弹窗
+      hideStats();
       hideCloudDownload();
       hideVersioning();
       hideShareModal();
@@ -853,7 +860,8 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-// Ctrl+A: 鍏ㄩ€?鍙栨秷鍏ㄩ€?document.addEventListener('keydown', function(e) {
+// Ctrl+A: 全选/取消全选
+document.addEventListener('keydown', function(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
     var selectAll = document.getElementById('select-all-checkbox');
@@ -864,7 +872,7 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-// Delete: 鎵归噺鍒犻櫎閫変腑鏂囦欢
+// Delete: 批量删除选中文件
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Delete' && !e.target.tagName.match(/INPUT|TEXTAREA|SELECT/i)) {
     var batchDelete = document.getElementById('batch-delete-btn');
@@ -875,20 +883,20 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-// --- 鍒濆鍖?---
+// --- 初始化 ---
 initTheme();
 refreshList();
 checkResumableUploads();
 
-// --- 鏂囦欢鍒嗕韩锛堟棫鐗堬紝鏀圭敤寮圭獥锛?---
+// --- 文件分享（旧版，改用弹窗） ---
 function shareFile(name) {
-  var ttl = prompt('鍒嗕韩鏈夋晥鏈燂紙渚嬪 1h, 24h, 7d锛岀暀绌?24h锛?', '24h');
+  var ttl = prompt('分享有效期（例如 1h, 24h, 7d，留空=24h）:', '24h');
   if (ttl === null) return;
   ttl = ttl.trim() || '24h';
-  var maxDownloads = prompt('鏈€澶т笅杞芥鏁帮紙0=涓嶉檺锛?', '0');
+  var maxDownloads = prompt('最大下载次数（0=不限）:', '0');
   if (maxDownloads === null) return;
   maxDownloads = Number.parseInt(maxDownloads) || 0;
-  var oneTime = confirm('涓€娆℃€у垎浜紙涓嬭浇涓€娆″悗鑷姩澶辨晥锛夛紵\n纭畾=鏄紝鍙栨秷=鍚?);
+  var oneTime = confirm('一次性分享（下载一次后自动失效）？\n确定=是，取消=否');
   var body = JSON.stringify({
     filename: name,
     ttl: ttl,
@@ -906,20 +914,20 @@ function shareFile(name) {
           method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: body
         });
         data = await resp.json();
-        if (!resp.ok) { showToast('鍒涘缓鍒嗕韩澶辫触: ' + (data.message || resp.status), 'error'); return; }
+        if (!resp.ok) { showToast('创建分享失败: ' + (data.message || resp.status), 'error'); return; }
       }
       var shareUrl = location.origin + '/s/' + data.token;
       if (navigator.clipboard) {
         await navigator.clipboard.writeText(shareUrl);
-        showToast('鍒嗕韩閾炬帴宸插鍒跺埌鍓创鏉? ' + shareUrl, 'success');
+        showToast('分享链接已复制到剪贴板: ' + shareUrl, 'success');
       } else {
-        showToast('鍒嗕韩閾炬帴: ' + shareUrl, 'success');
+        showToast('分享链接: ' + shareUrl, 'success');
       }
-    } catch (e) { showToast('鍒涘缓鍒嗕韩澶辫触: ' + e.message, 'error'); }
+    } catch (e) { showToast('创建分享失败: ' + e.message, 'error'); }
   })();
 }
 
-// --- 鍒嗕韩绠＄悊 ---
+// --- 分享管理 ---
 var _shareModalVisible = false;
 
 function showShareModal(name) {
@@ -949,7 +957,7 @@ function switchShareTab(tab) {
 
 async function createShare() {
   var filename = document.getElementById('share-filename').value.trim();
-  if (!filename) { showToast('璇疯緭鍏ユ枃浠跺悕', 'error'); return; }
+  if (!filename) { showToast('请输入文件名', 'error'); return; }
   var ttl = document.getElementById('share-ttl').value.trim() || '24h';
   var maxDownloads = Number.parseInt(document.getElementById('share-max-downloads').value) || 0;
   var oneTime = document.getElementById('share-one-time').checked;
@@ -961,27 +969,27 @@ async function createShare() {
     if (tunnelHexKey) {
       var result = await tunnelRequest('POST', '/api/share', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
       data = JSON.parse(new TextDecoder().decode(result.body));
-      if (data.message && data.message !== 'ok') { showToast('鍒涘缓鍒嗕韩澶辫触: ' + data.message, 'error'); return; }
+      if (data.message && data.message !== 'ok') { showToast('创建分享失败: ' + data.message, 'error'); return; }
     } else {
       var resp = await fetch(BASE + '/api/share', {
         method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: body
       });
       data = await resp.json();
-      if (!resp.ok) { showToast('鍒涘缓鍒嗕韩澶辫触: ' + (data.message || resp.status), 'error'); return; }
+      if (!resp.ok) { showToast('创建分享失败: ' + (data.message || resp.status), 'error'); return; }
     }
     var shareUrl = location.origin + '/s/' + data.token;
     if (navigator.clipboard) {
       try {
         await navigator.clipboard.writeText(shareUrl);
-        showToast('鍒嗕韩閾炬帴宸插鍒跺埌鍓创鏉? ' + shareUrl, 'success');
+        showToast('分享链接已复制到剪贴板: ' + shareUrl, 'success');
       } catch (_) {
-        showToast('鍒嗕韩閾炬帴: ' + shareUrl, 'success');
+        showToast('分享链接: ' + shareUrl, 'success');
       }
     } else {
-      showToast('鍒嗕韩閾炬帴: ' + shareUrl, 'success');
+      showToast('分享链接: ' + shareUrl, 'success');
     }
     refreshShareList();
-  } catch (e) { showToast('鍒涘缓鍒嗕韩澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('创建分享失败: ' + e.message, 'error'); }
 }
 
 async function refreshShareList() {
@@ -994,27 +1002,27 @@ async function refreshShareList() {
       shares = (JSON.parse(new TextDecoder().decode(result.body))).shares || [];
     } else {
       var resp = await fetch(BASE + '/api/shares', { headers: headers() });
-      if (!resp.ok) { body.innerHTML = '<div class="empty-msg">璇锋眰澶辫触: ' + resp.status + '</div>'; return; }
+      if (!resp.ok) { body.innerHTML = '<div class="empty-msg">请求失败: ' + resp.status + '</div>'; return; }
       shares = (await resp.json()).shares || [];
     }
 
     if (shares.length === 0) {
-      body.innerHTML = '<div class="empty-msg">鏆傛棤鍒嗕韩閾炬帴</div>';
+      body.innerHTML = '<div class="empty-msg">暂无分享链接</div>';
       return;
     }
 
     var html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
-    html += '<thead><tr style="background:#f5f5f5;"><th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">鏂囦欢鍚?/th>';
-    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">鐘舵€?/th>';
-    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">涓嬭浇娆℃暟</th>';
-    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">杩囨湡鏃堕棿</th>';
-    html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid #ddd;">鎿嶄綔</th></tr></thead><tbody>';
+    html += '<thead><tr style="background:#f5f5f5;"><th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">文件名</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">状态</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">下载次数</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">过期时间</th>';
+    html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid #ddd;">操作</th></tr></thead><tbody>';
 
     for (var i = 0; i < shares.length; i++) {
       var s = shares[i];
-      var statusText = s.expired ? '宸茶繃鏈? : (s.one_time ? '涓€娆℃€? : '娲昏穬');
+      var statusText = s.expired ? '已过期' : (s.one_time ? '一次性' : '活跃');
       var statusColor = s.expired ? '#999' : (s.one_time ? '#e67e22' : '#27ae60');
-      var downloads = s.max_downloads > 0 ? s.downloads + '/' + s.max_downloads : s.downloads + '/鈭?;
+      var downloads = s.max_downloads > 0 ? s.downloads + '/' + s.max_downloads : s.downloads + '/∞';
       var expiresLabel = s.expired ? '-' : (s.expires_at ? new Date(s.expires_at).toLocaleString() : '-');
 
       html += '<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + escHtml(s.filename) + '">' + escHtml(s.filename) + '</td>';
@@ -1023,20 +1031,20 @@ async function refreshShareList() {
       html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px;">' + expiresLabel + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:center;">';
       if (!s.expired) {
-        html += '<button class="btn btn-danger btn-sm share-revoke-btn" data-token="' + escHtml(s.token) + '">鎾ら攢</button>';
+        html += '<button class="btn btn-danger btn-sm share-revoke-btn" data-token="' + escHtml(s.token) + '">撤销</button>';
       }
-      html += '<button class="btn btn-sm btn-secondary share-copy-btn" data-token="' + escHtml(s.token) + '" style="margin-left:4px;">澶嶅埗</button>';
+      html += '<button class="btn btn-sm btn-secondary share-copy-btn" data-token="' + escHtml(s.token) + '" style="margin-left:4px;">复制</button>';
       html += '</td></tr>';
     }
     html += '</tbody></table>';
     body.innerHTML = html;
   } catch (e) {
-    body.innerHTML = '<div class="empty-msg">璇锋眰澶辫触: ' + e.message + '</div>';
+    body.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
   }
 }
 
 async function revokeShare(token) {
-  if (!confirm('纭畾鎾ら攢姝ゅ垎浜摼鎺ワ紵鎾ら攢鍚庨摼鎺ュ皢绔嬪嵆澶辨晥銆?)) return;
+  if (!confirm('确定撤销此分享链接？撤销后链接将立即失效。')) return;
   try {
     if (tunnelHexKey) {
       await tunnelRequest('DELETE', '/api/shares/' + token, {}, null);
@@ -1044,29 +1052,29 @@ async function revokeShare(token) {
       var resp = await fetch(BASE + '/api/shares/' + token, { method: 'DELETE', headers: headers() });
       if (!resp.ok) {
         var data = await resp.json().catch(function() { return {}; });
-        showToast('鎾ら攢澶辫触: ' + (data.message || resp.status), 'error');
+        showToast('撤销失败: ' + (data.message || resp.status), 'error');
         return;
       }
     }
-    showToast('鍒嗕韩閾炬帴宸叉挙閿€', 'success');
+    showToast('分享链接已撤销', 'success');
     refreshShareList();
-  } catch (e) { showToast('鎾ら攢澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('撤销失败: ' + e.message, 'error'); }
 }
 
 function copyShareLink(token) {
   var url = location.origin + '/s/' + token;
   if (navigator.clipboard) {
     navigator.clipboard.writeText(url).then(function() {
-      showToast('閾炬帴宸插鍒跺埌鍓创鏉?, 'success');
+      showToast('链接已复制到剪贴板', 'success');
     }).catch(function() {
-      showToast('澶嶅埗澶辫触', 'error');
+      showToast('复制失败', 'error');
     });
   } else {
     showToast(url, 'success');
   }
 }
 
-// --- 浜戠涓嬭浇 ---
+// --- 云端下载 ---
 let _cloudTasks = [];
 let _cloudPollTimer = null;
 
@@ -1101,17 +1109,17 @@ async function refreshCloudTasks() {
       tasks = data || [];
     } else {
       const resp = await fetch(BASE + url, { headers: headers() });
-      if (!resp.ok) { body.innerHTML = '<div class="empty-msg">璇锋眰澶辫触: ' + resp.status + '</div>'; return; }
+      if (!resp.ok) { body.innerHTML = '<div class="empty-msg">请求失败: ' + resp.status + '</div>'; return; }
       tasks = await resp.json();
     }
     _cloudTasks = tasks || [];
     if (_cloudTasks.length === 0) {
-      body.innerHTML = '<div class="empty-msg">鏆傛棤涓嬭浇浠诲姟</div>';
+      body.innerHTML = '<div class="empty-msg">暂无下载任务</div>';
       return;
     }
     body.innerHTML = buildCloudTaskTableHtml(_cloudTasks);
   } catch (e) {
-    body.innerHTML = '<div class="empty-msg">璇锋眰澶辫触: ' + e.message + '</div>';
+    body.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
   }
 }
 
@@ -1140,51 +1148,57 @@ async function chainDownloadCloud() {
     refreshCloudTasks();
     showToast(tasks.length + ' 个任务已提交', 'success');
     showToast('等待任务完成...', 'info');
-    for (var i = 0; i < 300; i++) {
+    for (let i = 0; i < 600; i++) {
       await new Promise(function(r) { setTimeout(r, 2000); });
       refreshCloudTasks();
-      var allDone = true;
-      for (var j = 0; j < tasks.length; j++) {
+      let allDone = true;
+      for (let j = 0; j < tasks.length; j++) {
         try {
-          var t;
+          let t;
           if (tunnelHexKey) {
-            var r = await tunnelRequest('GET', '/api/cloud/tasks/' + tasks[j].id, {}, null);
+            const r = await tunnelRequest('GET', '/api/cloud/tasks/' + tasks[j].id, {}, null);
             t = JSON.parse(new TextDecoder().decode(r.body));
           } else {
-            var r = await fetch(BASE + '/api/cloud/tasks/' + tasks[j].id, { headers: headers() });
+            const r = await fetch(BASE + '/api/cloud/tasks/' + tasks[j].id, { headers: headers() });
             t = await r.json();
           }
           tasks[j] = t;
           if (t.status === 'pending' || t.status === 'downloading') { allDone = false; }
-        } catch(e) {}
+        } catch(e) {
+          allDone = false;
+        }
       }
       if (allDone) { break; }
     }
-    var succeeded = tasks.filter(function(t) { return t.status === 'completed'; });
+    const succeeded = tasks.filter(function(t) { return t.status === 'completed'; });
     if (succeeded.length === 0) { showToast('所有任务均未成功完成', 'error'); return; }
     showToast('打包归档中...', 'info');
-    var taskIds = succeeded.map(function(t) { return t.id; });
-    var archiveHdrs = headers({ 'Content-Type': 'application/json' });
-    var archiveResult;
+    const taskIds = succeeded.map(function(t) { return t.id; });
+    const archiveHdrs = headers({ 'Content-Type': 'application/json' });
+    let archiveResult;
     if (tunnelHexKey) {
-      var r = await tunnelRequest('POST', '/api/cloud/archive', archiveHdrs, JSON.stringify({ task_ids: taskIds }));
+      const r = await tunnelRequest('POST', '/api/cloud/archive', archiveHdrs, JSON.stringify({ task_ids: taskIds }));
       archiveResult = JSON.parse(new TextDecoder().decode(r.body));
     } else {
-      var r = await fetch(BASE + '/api/cloud/archive', { method: 'POST', headers: archiveHdrs, body: JSON.stringify({ task_ids: taskIds }) });
+      const r = await fetch(BASE + '/api/cloud/archive', { method: 'POST', headers: archiveHdrs, body: JSON.stringify({ task_ids: taskIds }) });
       archiveResult = await r.json();
     }
     if (!archiveResult.success) { showToast('归档失败', 'error'); return; }
-    showToast('下载归档中...', 'info');
-    if (tunnelHexKey) {
-      await tunnelDownloadStream(archiveResult.file);
-    } else {
-      window.open(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), '_blank');
-    }
-    showToast('清理远端文件...', 'info');
-    for (var i = 0; i < taskIds.length; i++) {
+    showToast('下载归档并清理中...', 'info');
+    // 先下载再清理（非隧道模式用 fetch blob 确保下载完成）
+    for (let i = 0; i < taskIds.length; i++) {
       if (tunnelHexKey) {
+        await tunnelDownloadStream(archiveResult.file);
         await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskIds[i], {}, null);
       } else {
+        const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: headers() });
+        const blob = await dlResp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = archiveResult.file.split('/').pop();
+        a.click();
+        URL.revokeObjectURL(url);
         await fetch(BASE + '/api/cloud/tasks/' + taskIds[i], { method: 'DELETE', headers: headers() });
       }
     }
@@ -1195,17 +1209,17 @@ async function chainDownloadCloud() {
 async function createCloudTask() {
   const input = document.getElementById('cloud-url');
   const text = input.value.trim();
-  if (!text) { showToast('璇疯緭鍏ヤ笅杞介摼鎺?, 'warning'); return; }
+  if (!text) { showToast('请输入下载链接', 'warning'); return; }
 
   const lines = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
-  if (lines.length === 0) { showToast('璇疯緭鍏ヤ笅杞介摼鎺?, 'warning'); return; }
+  if (lines.length === 0) { showToast('请输入下载链接', 'warning'); return; }
 
   try {
     const hdrs = headers({ 'Content-Type': 'application/json' });
     input.value = '';
 
     if (lines.length === 1) {
-      // 鍗?URL锛氫娇鐢ㄥ師鏈?API
+      // 单 URL：使用原有 API
       let task;
       if (tunnelHexKey) {
         const result = await tunnelRequest('POST', '/api/cloud/download', hdrs, JSON.stringify({ url: lines[0] }));
@@ -1213,11 +1227,11 @@ async function createCloudTask() {
       } else {
         const resp = await fetch(BASE + '/api/cloud/download', { method: 'POST', headers: hdrs, body: JSON.stringify({ url: lines[0] }) });
         task = await resp.json();
-        if (!resp.ok) { showToast('鍒涘缓澶辫触: ' + (task.error || resp.status), 'error'); return; }
+        if (!resp.ok) { showToast('创建失败: ' + (task.error || resp.status), 'error'); return; }
       }
-      showToast('浠诲姟宸插垱寤? ' + task.id, 'success');
+      showToast('任务已创建: ' + task.id, 'success');
     } else {
-      // 澶?URL锛氫娇鐢ㄦ壒閲?API
+      // 多 URL：使用批量 API
       const urls = lines.map(function(url) { return { url: url }; });
       let data;
       if (tunnelHexKey) {
@@ -1226,24 +1240,25 @@ async function createCloudTask() {
       } else {
         const resp = await fetch(BASE + '/api/cloud/download/batch', { method: 'POST', headers: hdrs, body: JSON.stringify({ urls: urls }) });
         data = await resp.json();
-        if (!resp.ok) { showToast('鍒涘缓澶辫触: ' + (data.error || resp.status), 'error'); return; }
+        if (!resp.ok) { showToast('创建失败: ' + (data.error || resp.status), 'error'); return; }
       }
       const tasks = data.tasks || [];
       const failed = tasks.filter(function(t) { return t.status === 'failed'; });
       const succeeded = tasks.filter(function(t) { return t.status !== 'failed'; });
       if (failed.length > 0) {
-        showToast(succeeded.length + ' 涓换鍔″凡鍒涘缓, ' + failed.length + ' 涓け璐?, 'warning');
+        showToast(succeeded.length + ' 个任务已创建, ' + failed.length + ' 个失败', 'warning');
       } else {
-        showToast(tasks.length + ' 涓换鍔″凡鍒涘缓', 'success');
+        showToast(tasks.length + ' 个任务已创建', 'success');
       }
     }
     refreshCloudTasks();
-  } catch (e) { showToast('鍒涘缓澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('创建失败: ' + e.message, 'error'); }
 }
 
 async function downloadCloudFile(taskId, filename, checksum) {
   try {
-    // 鍏堜笅杞戒簯绔枃浠?    const cloudPath = '.__cloud__/' + taskId + '/' + filename;
+    // 先下载云端文件
+    const cloudPath = '.__cloud__/' + taskId + '/' + filename;
     const downloadUrl = '/download?filename=' + encodeURIComponent(cloudPath);
     let buffer, serverCS;
     if (tunnelHexKey) {
@@ -1258,38 +1273,39 @@ async function downloadCloudFile(taskId, filename, checksum) {
       }
     } else {
       const resp = await fetch(BASE + downloadUrl, { headers: headers() });
-      if (!resp.ok) { showToast('涓嬭浇澶辫触: HTTP ' + resp.status, 'error'); return; }
+      if (!resp.ok) { showToast('下载失败: HTTP ' + resp.status, 'error'); return; }
       buffer = await resp.arrayBuffer();
       serverCS = resp.headers.get('X-File-Checksum') || checksum;
     }
 
-    // 鏍￠獙 checksum
+    // 校验 checksum
     if (serverCS) {
       const sha256 = new Sha256();
       sha256.update(new Uint8Array(buffer));
       const localCS = sha256.digest();
       if (localCS !== serverCS) {
-        showToast('鏍￠獙澶辫触: ' + filename, 'error');
+        showToast('校验失败: ' + filename, 'error');
         return;
       }
     }
 
-    // 瑙﹀彂娴忚鍣ㄤ笅杞?    const blob = new Blob([buffer], { type: 'application/octet-stream' });
+    // 触发浏览器下载
+    const blob = new Blob([buffer], { type: 'application/octet-stream' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = filename;
     a.click();
     URL.revokeObjectURL(a.href);
-    showToast('涓嬭浇瀹屾垚: ' + filename, 'success');
+    showToast('下载完成: ' + filename, 'success');
 
-    // 娓呯悊浜戠鍓湰
+    // 清理云端副本
     await deleteCloudTask(taskId, filename, serverCS);
-  } catch (e) { showToast('涓嬭浇澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
 }
 
 async function deleteCloudTask(taskId, filename, checksum) {
   try {
-    // 鍒犻櫎浜戠鏂囦欢
+    // 删除云端文件
     const cloudPath = '.__cloud__/' + taskId + '/' + filename;
     if (tunnelHexKey) {
       await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(cloudPath), { 'X-File-Checksum': checksum }, null);
@@ -1300,7 +1316,7 @@ async function deleteCloudTask(taskId, filename, checksum) {
       await fetch(BASE + '/api/cloud/tasks/' + taskId, { method: 'DELETE', headers: headers() });
     }
     refreshCloudTasks();
-  } catch (e) { /* 闈欓粯澶勭悊 */ }
+  } catch (e) { /* 静默处理 */ }
 }
 
 async function cancelCloudTask(taskId) {
@@ -1311,9 +1327,9 @@ async function cancelCloudTask(taskId) {
     } else {
       await fetch(BASE + url, { method: 'POST', headers: headers() });
     }
-    showToast('浠诲姟宸插彇娑?, 'success');
+    showToast('任务已取消', 'success');
     refreshCloudTasks();
-  } catch (e) { showToast('鍙栨秷澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('取消失败: ' + e.message, 'error'); }
 }
 
 async function removeCloudTask(taskId) {
@@ -1324,17 +1340,17 @@ async function removeCloudTask(taskId) {
     } else {
       await fetch(BASE + url, { method: 'DELETE', headers: headers() });
     }
-    showToast('浠诲姟宸插垹闄?, 'success');
+    showToast('任务已删除', 'success');
     refreshCloudTasks();
-  } catch (e) { showToast('鍒犻櫎澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
 
 function buildCloudTaskTableHtml(tasks) {
   let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">鏂囦欢鍚?/th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">鐘舵€?/th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">澶у皬</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">鎿嶄綔</th></tr></thead><tbody>';
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">文件名</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">状态</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">大小</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">操作</th></tr></thead><tbody>';
   for (const t of tasks) {
     const statusLabel = statusText(t.status);
     const rowClass = t.status === 'downloading' ? ' style="background:#f0f4ff;"' : '';
@@ -1350,11 +1366,11 @@ function buildCloudTaskTableHtml(tasks) {
 
 function statusText(status) {
   switch (status) {
-    case 'pending': return '鈴?绛夊緟涓?;
-    case 'downloading': return '猬?涓嬭浇涓?;
-    case 'completed': return '鉁?宸插畬鎴?;
-    case 'failed': return '鉂?澶辫触';
-    case 'cancelled': return '馃毇 宸插彇娑?;
+    case 'pending': return '⏳ 等待中';
+    case 'downloading': return '⬇ 下载中';
+    case 'completed': return '✅ 已完成';
+    case 'failed': return '❌ 失败';
+    case 'cancelled': return '🚫 已取消';
     default: return status;
   }
 }
@@ -1362,21 +1378,21 @@ function statusText(status) {
 function cloudTaskActions(id, filename, status, checksum) {
   let actions = '';
   if (status === 'completed') {
-    actions += '<button class="btn btn-primary btn-sm cloud-download-btn" data-id="' + escHtml(id) + '" data-filename="' + escHtml(filename) + '" data-checksum="' + escHtml(checksum || '') + '" style="margin-right:4px;">涓嬭浇鍒版湰鍦?/button>';
-    actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">鍒犻櫎</button>';
+    actions += '<button class="btn btn-primary btn-sm cloud-download-btn" data-id="' + escHtml(id) + '" data-filename="' + escHtml(filename) + '" data-checksum="' + escHtml(checksum || '') + '" style="margin-right:4px;">下载到本地</button>';
+    actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
   } else if (status === 'failed' || status === 'cancelled') {
-    actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">鍒犻櫎</button>';
+    actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
   } else {
-    actions += '<button class="btn btn-warning btn-sm cloud-cancel-btn" data-id="' + escHtml(id) + '">鍙栨秷</button>';
+    actions += '<button class="btn btn-warning btn-sm cloud-cancel-btn" data-id="' + escHtml(id) + '">取消</button>';
   }
   return actions;
 }
 
-// --- 鏂囦欢鐗堟湰绠＄悊 ---
+// --- 文件版本管理 ---
 function showVersioning() {
   document.getElementById('version-modal').style.display = 'flex';
   document.getElementById('version-filename').value = '';
-  document.getElementById('version-body').innerHTML = '<div class="empty-msg">杈撳叆鏂囦欢鍚嶆煡鐪嬬増鏈巻鍙?/div>';
+  document.getElementById('version-body').innerHTML = '<div class="empty-msg">输入文件名查看版本历史</div>';
 }
 
 function hideVersioning() {
@@ -1385,9 +1401,9 @@ function hideVersioning() {
 
 async function loadVersions() {
   var filename = document.getElementById('version-filename').value.trim();
-  if (!filename) { showToast('璇疯緭鍏ユ枃浠跺悕', 'warning'); return; }
+  if (!filename) { showToast('请输入文件名', 'warning'); return; }
   var body = document.getElementById('version-body');
-  body.innerHTML = '<div class="empty-msg">鍔犺浇涓?..</div>';
+  body.innerHTML = '<div class="empty-msg">加载中...</div>';
   try {
     var versions;
     var url = '/api/versions?filename=' + encodeURIComponent(filename);
@@ -1399,24 +1415,24 @@ async function loadVersions() {
       var resp = await fetch(BASE + url, { headers: headers() });
       if (!resp.ok) {
         var errData = await resp.json().catch(function() { return {}; });
-        if (resp.status === 501) { body.innerHTML = '<div class="empty-msg">鐗堟湰绠＄悊鏈惎鐢紙闇€鍦ㄩ厤缃腑璁剧疆 versioning.enabled: true锛?/div>'; return; }
-        body.innerHTML = '<div class="empty-msg">鍔犺浇澶辫触: ' + (errData.message || resp.status) + '</div>'; return;
+        if (resp.status === 501) { body.innerHTML = '<div class="empty-msg">版本管理未启用（需在配置中设置 versioning.enabled: true）</div>'; return; }
+        body.innerHTML = '<div class="empty-msg">加载失败: ' + (errData.message || resp.status) + '</div>'; return;
       }
       var data = await resp.json();
       versions = data.versions || [];
     }
-    if (versions.length === 0) { body.innerHTML = '<div class="empty-msg">璇ユ枃浠舵病鏈夌増鏈巻鍙?/div>'; return; }
+    if (versions.length === 0) { body.innerHTML = '<div class="empty-msg">该文件没有版本历史</div>'; return; }
     body.innerHTML = buildVersionTableHtml(versions, filename);
-  } catch (e) { body.innerHTML = '<div class="empty-msg">鍔犺浇澶辫触: ' + e.message + '</div>'; }
+  } catch (e) { body.innerHTML = '<div class="empty-msg">加载失败: ' + e.message + '</div>'; }
 }
 
 function buildVersionTableHtml(versions, filename) {
-  var html = '<div style="margin-bottom:8px;font-size:13px;color:#666;">鏂囦欢: <strong>' + escHtml(filename) + '</strong>锛屽叡 ' + versions.length + ' 涓増鏈?/div>';
+  var html = '<div style="margin-bottom:8px;font-size:13px;color:#666;">文件: <strong>' + escHtml(filename) + '</strong>，共 ' + versions.length + ' 个版本</div>';
   html += '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">鐗堟湰 ID</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">鏃堕棿</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">澶у皬</th>' +
-    '<th style="text-align:right;padding:4px 8px;border-bottom:1px solid #eee;">鎿嶄綔</th></tr></thead><tbody>';
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">版本 ID</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">时间</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">大小</th>' +
+    '<th style="text-align:right;padding:4px 8px;border-bottom:1px solid #eee;">操作</th></tr></thead><tbody>';
   for (var i = 0; i < versions.length; i++) {
     var v = versions[i];
     var versionTime = v.created_at || '-';
@@ -1424,60 +1440,62 @@ function buildVersionTableHtml(versions, filename) {
       '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + escHtml(versionTime) + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + formatSize(v.size) + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;white-space:nowrap;">' +
-      '<button class="btn btn-primary btn-sm version-restore-btn" data-filename="' + escHtml(filename) + '" data-version-id="' + escHtml(v.version_id) + '" style="margin-right:4px;">鎭㈠</button>' +
-      '<button class="btn btn-danger btn-sm version-delete-btn" data-filename="' + escHtml(filename) + '" data-version-id="' + escHtml(v.version_id) + '">鍒犻櫎</button></td></tr>';
+      '<button class="btn btn-primary btn-sm version-restore-btn" data-filename="' + escHtml(filename) + '" data-version-id="' + escHtml(v.version_id) + '" style="margin-right:4px;">恢复</button>' +
+      '<button class="btn btn-danger btn-sm version-delete-btn" data-filename="' + escHtml(filename) + '" data-version-id="' + escHtml(v.version_id) + '">删除</button></td></tr>';
   }
   html += '</tbody></table>';
   return html;
 }
 
 async function restoreVersion(filename, versionId) {
-  if (!confirm('纭鎭㈠鐗堟湰 ' + versionId + ' 锛焅n褰撳墠鏂囦欢灏嗚澶囦唤涓烘柊鐗堟湰銆?)) return;
+  if (!confirm('确认恢复版本 ' + versionId + ' ？\n当前文件将被备份为新版本。')) return;
   try {
     var url = '/api/versions/restore?filename=' + encodeURIComponent(filename) + '&version_id=' + encodeURIComponent(versionId);
     if (tunnelHexKey) {
       var result = await tunnelRequest('POST', url, {}, null);
       var data = JSON.parse(new TextDecoder().decode(result.body));
-      if (data.success) { showToast('鐗堟湰鎭㈠鎴愬姛', 'success'); loadVersions(); refreshList(); }
-      else { showToast('鎭㈠澶辫触: ' + (data.message || 'unknown'), 'error'); }
+      if (data.success) { showToast('版本恢复成功', 'success'); loadVersions(); refreshList(); }
+      else { showToast('恢复失败: ' + (data.message || 'unknown'), 'error'); }
     } else {
       var resp = await fetch(BASE + url, { method: 'POST', headers: headers() });
       var data = await resp.json();
-      if (resp.ok && data.success) { showToast('鐗堟湰鎭㈠鎴愬姛', 'success'); loadVersions(); refreshList(); }
-      else { showToast('鎭㈠澶辫触: ' + (data.message || resp.status), 'error'); }
+      if (resp.ok && data.success) { showToast('版本恢复成功', 'success'); loadVersions(); refreshList(); }
+      else { showToast('恢复失败: ' + (data.message || resp.status), 'error'); }
     }
-  } catch (e) { showToast('鎭㈠澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
 }
 
 async function deleteVersion(filename, versionId) {
-  if (!confirm('纭鍒犻櫎鐗堟湰 ' + versionId + ' 锛焅n姝ゆ搷浣滀笉鍙仮澶嶃€?)) return;
+  if (!confirm('确认删除版本 ' + versionId + ' ？\n此操作不可恢复。')) return;
   try {
     var url = '/api/versions?filename=' + encodeURIComponent(filename) + '&version_id=' + encodeURIComponent(versionId);
     if (tunnelHexKey) {
       var result = await tunnelRequest('DELETE', url, {}, null);
       var data = JSON.parse(new TextDecoder().decode(result.body));
-      if (data.success) { showToast('鐗堟湰宸插垹闄?, 'success'); loadVersions(); }
-      else { showToast('鍒犻櫎澶辫触: ' + (data.message || 'unknown'), 'error'); }
+      if (data.success) { showToast('版本已删除', 'success'); loadVersions(); }
+      else { showToast('删除失败: ' + (data.message || 'unknown'), 'error'); }
     } else {
       var resp = await fetch(BASE + url, { method: 'DELETE', headers: headers() });
       var data = await resp.json();
-      if (resp.ok && data.success) { showToast('鐗堟湰宸插垹闄?, 'success'); loadVersions(); }
-      else { showToast('鍒犻櫎澶辫触: ' + (data.message || resp.status), 'error'); }
+      if (resp.ok && data.success) { showToast('版本已删除', 'success'); loadVersions(); }
+      else { showToast('删除失败: ' + (data.message || resp.status), 'error'); }
     }
-  } catch (e) { showToast('鍒犻櫎澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
 
-// --- DOMContentLoaded 鍒濆鍖栵細鐢?addEventListener 缁戝畾鎵€鏈夐潤鎬?HTML 鍏冪礌 ---
+// --- DOMContentLoaded 初始化：用 addEventListener 绑定所有静态 HTML 元素 ---
 document.addEventListener('DOMContentLoaded', function() {
-  // 璁よ瘉鏍?  document.getElementById('save-token-btn').addEventListener('click', saveToken);
+  // 认证栏
+  document.getElementById('save-token-btn').addEventListener('click', saveToken);
   document.getElementById('save-tunnel-key-btn').addEventListener('click', saveTunnelKey);
 
-  // 鏂囦欢杈撳叆
+  // 文件输入
   document.getElementById('file-input').addEventListener('change', function() {
     uploadFiles(this.files);
   });
 
-  // 宸ュ叿鏍?  document.getElementById('refresh-btn').addEventListener('click', refreshList);
+  // 工具栏
+  document.getElementById('refresh-btn').addEventListener('click', refreshList);
   document.getElementById('search-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') searchFiles();
   });
@@ -1488,24 +1506,25 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('version-btn').addEventListener('click', showVersioning);
   document.getElementById('theme-toggle-btn').addEventListener('click', toggleTheme);
 
-  // 鎵归噺鎿嶄綔
+  // 批量操作
   document.getElementById('batch-delete-btn').addEventListener('click', batchDelete);
   document.getElementById('batch-rename-btn').addEventListener('click', batchRename);
   document.getElementById('batch-archive-btn').addEventListener('click', batchDownloadArchive);
   document.getElementById('batch-clear-btn').addEventListener('click', clearSelection);
 
-  // 鐩綍鎿嶄綔
+  // 目录操作
   document.getElementById('mkdir-btn').addEventListener('click', mkdirDir);
 
-  // 鐩戞帶寮圭獥
+  // 监控弹窗
   document.getElementById('stats-close-btn').addEventListener('click', hideStats);
   document.getElementById('stats-refresh-btn').addEventListener('click', showStats);
   document.getElementById('stats-close-modal-btn').addEventListener('click', hideStats);
-  // 鐩戞帶寮圭獥鏍囩椤靛垏鎹?  document.getElementById('stats-tab').addEventListener('click', function() { switchStatsTab('stats'); });
+  // 监控弹窗标签页切换
+  document.getElementById('stats-tab').addEventListener('click', function() { switchStatsTab('stats'); });
   document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
 
-  // 浜戠涓嬭浇寮圭獥
+  // 云端下载弹窗
   document.getElementById('cloud-close-btn').addEventListener('click', hideCloudDownload);
   document.getElementById('cloud-url').addEventListener('keydown', function(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createCloudTask(); }
@@ -1515,7 +1534,7 @@ document.getElementById('cloud-submit-btn').addEventListener('click', createClou
   document.getElementById('cloud-refresh-btn').addEventListener('click', refreshCloudTasks);
   document.getElementById('cloud-close-modal-btn').addEventListener('click', hideCloudDownload);
 
-  // 鐗堟湰绠＄悊寮圭獥
+  // 版本管理弹窗
   document.getElementById('version-close-btn').addEventListener('click', hideVersioning);
   document.getElementById('version-filename').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') loadVersions();
@@ -1523,27 +1542,31 @@ document.getElementById('cloud-submit-btn').addEventListener('click', createClou
   document.getElementById('version-load-btn').addEventListener('click', loadVersions);
   document.getElementById('version-close-modal-btn').addEventListener('click', hideVersioning);
 
-  // 鍒嗕韩寮圭獥浜嬩欢缁戝畾
+  // 分享弹窗事件绑定
   document.getElementById('share-close-btn').addEventListener('click', hideShareModal);
   document.getElementById('share-create-tab').addEventListener('click', function() { switchShareTab('create'); });
   document.getElementById('share-list-tab').addEventListener('click', function() { switchShareTab('list'); });
   document.getElementById('share-create-btn').addEventListener('click', createShare);
   document.getElementById('share-list-refresh-btn').addEventListener('click', refreshShareList);
 
-  // 浜嬩欢濮旀墭锛氬姩鎬佸唴瀹?  initDynamicEventDelegation();
+  // 事件委托：动态内容
+  initDynamicEventDelegation();
 
-  // 鎷栨嫿涓婁紶鍒濆鍖?  initDragAndDrop();
+  // 拖拽上传初始化
+  initDragAndDrop();
 });
 
-// --- 浜嬩欢濮旀墭锛氬姩鎬佺敓鎴愮殑 HTML 鍐呭 ---
+// --- 事件委托：动态生成的 HTML 内容 ---
 function initDynamicEventDelegation() {
-  // 鏂囦欢鍒楄〃鍐呯殑鍔ㄦ€佸唴瀹?  const fileList = document.getElementById('file-list');
+  // 文件列表内的动态内容
+  const fileList = document.getElementById('file-list');
   if (fileList) {
-    // 鏂囦欢琛屼腑鐨勬搷浣滄寜閽?    fileList.addEventListener('click', function(e) {
+    // 文件行中的操作按钮
+    fileList.addEventListener('click', function(e) {
       const btn = e.target.closest('button');
       if (!btn) return;
 
-      // 鏂囦欢鎿嶄綔鎸夐挳
+      // 文件操作按钮
       if (btn.classList.contains('file-download-btn')) {
         downloadFile(btn.dataset.filename, btn.dataset.checksum);
         return;
@@ -1565,7 +1588,7 @@ function initDynamicEventDelegation() {
         return;
       }
 
-      // 鐩綍鎿嶄綔鎸夐挳锛堥渶瑕侀樆姝㈠啋娉″埌琛岀偣鍑讳簨浠讹級
+      // 目录操作按钮（需要阻止冒泡到行点击事件）
       if (btn.classList.contains('dir-enter-btn')) {
         e.stopPropagation();
         navigateDir(btn.dataset.subdir);
@@ -1582,14 +1605,14 @@ function initDynamicEventDelegation() {
         return;
       }
 
-      // 鍔犺浇鏇村鎸夐挳
+      // 加载更多按钮
       if (btn.closest('#load-more-container')) {
         loadMore();
         return;
       }
     });
 
-    // 鐩綍琛岀偣鍑伙紙瀵艰埅鍒扮洰褰曪級
+    // 目录行点击（导航到目录）
     fileList.addEventListener('click', function(e) {
       const dirRow = e.target.closest('.dir-row');
       if (dirRow && !e.target.closest('button')) {
@@ -1597,14 +1620,14 @@ function initDynamicEventDelegation() {
       }
     });
 
-    // 鍏ㄩ€夊閫夋
+    // 全选复选框
     fileList.addEventListener('change', function(e) {
       if (e.target.id === 'select-all-checkbox') {
         toggleSelectAll(e.target.checked);
       }
     });
 
-    // 鍗曚釜鏂囦欢閫夋嫨澶嶉€夋
+    // 单个文件选择复选框
     fileList.addEventListener('change', function(e) {
       if (e.target.classList.contains('file-select')) {
         updateBatchToolbar();
@@ -1612,7 +1635,7 @@ function initDynamicEventDelegation() {
     });
   }
 
-  // checksum 鐐瑰嚮澶嶅埗
+  // checksum 点击复制
   document.addEventListener('click', function(e) {
     const cell = e.target.closest('.checksum-cell');
     if (cell) {
@@ -1620,7 +1643,7 @@ function initDynamicEventDelegation() {
     }
   });
 
-  // 浜戠涓嬭浇浠诲姟鎿嶄綔
+  // 云端下载任务操作
   const cloudBody = document.getElementById('cloud-tasks-body');
   if (cloudBody) {
     cloudBody.addEventListener('click', function(e) {
@@ -1641,7 +1664,7 @@ function initDynamicEventDelegation() {
     });
   }
 
-  // 鐗堟湰绠＄悊鎿嶄綔
+  // 版本管理操作
   const versionBody = document.getElementById('version-body');
   if (versionBody) {
     versionBody.addEventListener('click', function(e) {
@@ -1658,7 +1681,7 @@ function initDynamicEventDelegation() {
     });
   }
 
-  // 鍒嗕韩鍒楄〃鎿嶄綔锛堜簨浠跺鎵橈級
+  // 分享列表操作（事件委托）
   const shareListBody = document.getElementById('share-list-body');
   if (shareListBody) {
     shareListBody.addEventListener('click', function(e) {
@@ -1675,7 +1698,7 @@ function initDynamicEventDelegation() {
     });
   }
 
-  // 閰嶇疆闈㈡澘鏇存柊鎸夐挳锛堜簨浠跺鎵橈級
+  // 配置面板更新按钮（事件委托）
   const configPanel = document.getElementById('config-panel');
   if (configPanel) {
     configPanel.addEventListener('click', function(e) {
@@ -1697,7 +1720,7 @@ function initDynamicEventDelegation() {
     });
   }
 
-  // Hub 闈㈡澘浜嬩欢濮旀墭锛堢Щ闄よ妭鐐规寜閽級
+  // Hub 面板事件委托（移除节点按钮）
   const hubPanel = document.getElementById('hub-panel');
   if (hubPanel) {
     hubPanel.addEventListener('click', function(e) {
@@ -1708,7 +1731,8 @@ function initDynamicEventDelegation() {
   }
 }
 
-// 闈㈠寘灞戜簨浠跺鎵?document.addEventListener('DOMContentLoaded', function() {
+// 面包屑事件委托
+document.addEventListener('DOMContentLoaded', function() {
   const breadcrumb = document.getElementById('dir-breadcrumb');
   if (breadcrumb) {
     breadcrumb.addEventListener('click', function(e) {
@@ -1721,7 +1745,7 @@ function initDynamicEventDelegation() {
   }
 });
 
-// --- 鎷栨嫿涓婁紶 ---
+// --- 拖拽上传 ---
 var dragCounter = 0;
 
 function initDragAndDrop() {
@@ -1780,7 +1804,7 @@ function handleDroppedFiles(files) {
   fileInput.dispatchEvent(event);
 }
 
-// --- 鏂囦欢棰勮 ---
+// --- 文件预览 ---
 function previewFile(filename) {
   var ext = filename.split('.').pop().toLowerCase();
 
@@ -1817,15 +1841,15 @@ async function previewText(filename) {
       text = new TextDecoder().decode(result.body);
     } else {
       var resp = await fetch(BASE + url, { headers: headers() });
-      if (!resp.ok) { showToast('棰勮澶辫触: ' + resp.status, 'error'); return; }
+      if (!resp.ok) { showToast('预览失败: ' + resp.status, 'error'); return; }
       text = await resp.text();
     }
     var lines = text.split('\n');
     if (lines.length > 100) {
-      text = lines.slice(0, 100).join('\n') + '\n\n... (鍏?' + lines.length + ' 琛岋紝浠呮樉绀哄墠 100 琛?';
+      text = lines.slice(0, 100).join('\n') + '\n\n... (共 ' + lines.length + ' 行，仅显示前 100 行)';
     }
     showTextPreview(filename, text);
-  } catch (e) { showToast('棰勮澶辫触: ' + e.message, 'error'); }
+  } catch (e) { showToast('预览失败: ' + e.message, 'error'); }
 }
 
 function showTextPreview(filename, text) {
@@ -1851,5 +1875,4 @@ function showTextPreview(filename, text) {
   modal.addEventListener('click', function(e) { if (e.target === modal && document.body.contains(modal)) document.body.removeChild(modal); });
   document.body.appendChild(modal);
 }
-
 
