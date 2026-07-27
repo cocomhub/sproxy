@@ -819,10 +819,10 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
 	hc := c.httpClient
-		if hc == nil {
-			hc = http.DefaultClient
-		}
-		resp, err = hc.Do(req)
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	resp, err = hc.Do(req)
 	return closeBodyIfErr(resp, err)
 }
 
