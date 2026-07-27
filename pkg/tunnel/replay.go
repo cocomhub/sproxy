@@ -14,6 +14,7 @@ import (
 const (
 	replayWindowSize = 5 * 60 // 5 分钟窗口（秒）
 	replayMaxJTILen  = 32     // jti hex 最大长度（16 字节）
+	replayMaxEntries = 100000 // 最大条目数，防止内存泄漏
 )
 
 // ReplayProtector 用于检测和拒绝重放的隧道帧。
@@ -63,6 +64,14 @@ func (rp *ReplayProtector) Validate(jti string, iat int64) error {
 	if rp.cleanupN >= 1000 {
 		rp.cleanup()
 		rp.cleanupN = 0
+	}
+
+	// 上限保护，防止内存泄漏
+	if len(rp.seen) >= replayMaxEntries {
+		rp.cleanup()
+		if len(rp.seen) >= replayMaxEntries {
+			return fmt.Errorf("replay: too many entries")
+		}
 	}
 
 	return nil

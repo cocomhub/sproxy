@@ -18,7 +18,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
 
-const handshakeTimeout = 3 * time.Second
+const handshakeTimeout = 30 * time.Second
 
 // Tunnel 在一条 mux 多路复用连接之上提供 HTTP 请求-响应交换。
 type Tunnel struct {
@@ -206,10 +206,10 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 }
 
 // Serve 在隧道上提供 HTTP 服务。
-// 在进入 accept 循环前，先执行 ECDH 握手（listener 侧）。
+// 在进入 accept 循环前，同步执行 ECDH 握手（listener 侧），超时后回退到静态密钥。
 func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	if t.key != nil && t.mux.Role() == mux.RoleListener {
-		hctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
+		hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 		sk, err := performHandshake(hctx, t.mux, false)
 		cancel()
 		if err == nil {
@@ -243,6 +243,10 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 	// 重放保护：当有密钥时检查 IAT/JTI
 	if t.key != nil && (reqMeta.IAT > 0 || reqMeta.JTI != "") {
 		if vErr := t.replayProtector.Validate(reqMeta.JTI, reqMeta.IAT); vErr != nil {
+			slog.Warn("mux 重放检测失败", "error", vErr, "jti", reqMeta.JTI)
+			// 写回错误响应，避免 dialer 侧 Do() 阻塞等待
+			errResp := bytes.NewBufferString(vErr.Error())
+			t.writeEncryptedResponse(stream, http.StatusTooEarly, make(http.Header), errResp)
 			return
 		}
 	}
