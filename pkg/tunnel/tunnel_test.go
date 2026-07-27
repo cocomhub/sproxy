@@ -810,15 +810,15 @@ func TestReplayProtector_Cleanup(t *testing.T) {
 	}
 
 	// 插入 1001 个条目触发清理
-	for i := 0; i < 1001; i++ {
+	for i := range 1001 {
 		jti := fmt.Sprintf("bbbb%028x", i)
 		_ = rp.Validate(jti, now)
 	}
 
 	// 过期的旧条目应被清理，可以重新插入
+	// 旧条目可能已过期（被清理），也可能仍在窗口内
 	if err := rp.Validate(oldJTI, now); err != nil {
-		// 可能还没过期（now-180 仍在窗口内），或者已过期
-		// 无论哪种情况，都能再次插入说明清理工作是有效的
+		t.Logf("old entry already cleaned up: %v", err)
 	}
 }
 

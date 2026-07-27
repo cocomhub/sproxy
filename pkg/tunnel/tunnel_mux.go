@@ -237,7 +237,7 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 
 	// 重放保护：当有密钥时检查 IAT/JTI
 	if t.key != nil && (reqMeta.IAT > 0 || reqMeta.JTI != "") {
-		if err := t.replayProtector.Validate(reqMeta.JTI, reqMeta.IAT); err != nil {
+		if vErr := t.replayProtector.Validate(reqMeta.JTI, reqMeta.IAT); vErr != nil {
 			return
 		}
 	}
