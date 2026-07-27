@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -87,7 +88,7 @@ type Option func(*FileClient)
 //
 // 使用方式：
 //
-//	client := NewFileClient("http://localhost:18083")
+//	client := NewFileClient("https://127.0.0.1:18083")
 //	result, err := client.Upload(ctx, "file.txt")
 //	err := client.Download(ctx, "file.txt", "/tmp/file.txt")
 type FileClient struct {
@@ -110,7 +111,7 @@ type FileClient struct {
 
 // NewFileClient 创建一个新的 sproxy 客户端。
 //
-// serverURL 是 sproxy 服务端地址，如 "http://localhost:18083"。
+// serverURL 是 sproxy 服务端地址，如 "https://127.0.0.1:18083"。
 // 可以通过 Option 设置自定义 HTTP 客户端、隧道加密、超时等。
 func NewFileClient(serverURL string, opts ...Option) *FileClient {
 	c := &FileClient{
@@ -166,6 +167,24 @@ func WithXfer(name, hubURL, hexKey string) Option {
 func WithTimeout(d time.Duration) Option {
 	return func(c *FileClient) {
 		c.httpClient.Timeout = d
+	}
+}
+
+// WithInsecureTLS 跳过 TLS 证书验证（仅用于自签证书开发/测试环境）。
+//
+// 生产环境应使用正式 CA 签发的证书，而非此选项。
+// 此选项仅影响直连模式（HTTP 客户端），不影响隧道模式。
+func WithInsecureTLS() Option {
+	return func(c *FileClient) {
+		transport := &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec
+			},
+		}
+		c.httpClient = &http.Client{
+			Timeout:   c.httpClient.Timeout,
+			Transport: transport,
+		}
 	}
 }
 

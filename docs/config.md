@@ -35,10 +35,10 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `server_timeouts.idle` | duration | `0` | keep-alive 空闲超时 |
 | `server_timeouts.shutdown` | duration | `30s` | graceful shutdown 等待活跃请求结束的最长时间 |
 | **tls** | object |  | TLS 配置 |
-| `tls.enabled` | bool | `false` | 启用 TLS |
+| `tls.enabled` | bool | `true` | 启用 TLS |
 | `tls.cert_file` | string | (空) | 证书路径（启用 TLS 时生效） |
 | `tls.key_file` | string | (空) | 私钥路径 |
-| `tls.auto_tls` | bool | `false` | `true` 时证书/私钥缺失自动生成 ECDSA P-256 自签证书 |
+| `tls.auto_tls` | bool | `true` | `true` 时证书/私钥缺失自动生成 ECDSA P-256 自签证书 |
 | **rate_limit** | object |  | 速率限制（仅限制 `POST /tunnel` 入口） |
 | `rate_limit.enabled` | bool | `false` | 启用 |
 | `rate_limit.requests` | int | `10` | 窗口内允许请求数 |
@@ -98,7 +98,7 @@ sclient 的配置默认路径基于 XDG：
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `server_url` | string | `http://localhost:18083` | sproxy 服务端地址 |
+| `server_url` | string | `https://127.0.0.1:18083` | sproxy 服务端地址 |
 | `check_checksum` | bool | `true` | 上传/下载启用 SHA-256 校验 |
 | `timeout` | int | `300` | HTTP 客户端超时（秒） |
 | `tunnel_key` | string | (空) | 64 位 hex；非空时通过 `POST /tunnel` 加密信道访问 |

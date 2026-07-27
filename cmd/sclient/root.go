@@ -89,6 +89,7 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().Int("concurrency", 0, "上传/下载并发数 (默认 4)")
 	root.PersistentFlags().Bool("resume", false, "续传模式 (默认启用)")
 	root.PersistentFlags().Bool("json", false, "以 JSON 格式输出")
+	root.PersistentFlags().Bool("insecure", false, "跳过 TLS 证书验证（用于自签证书开发/测试环境）")
 
 	// 注册子命令
 	ios := cli.SystemIOStreams()

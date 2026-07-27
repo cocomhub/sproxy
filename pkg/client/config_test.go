@@ -46,7 +46,7 @@ func TestConfigValidate(t *testing.T) {
 	if err := cfg2.Validate(); err != nil {
 		t.Fatalf("Validate() on config with empty ServerURL: %v", err)
 	}
-	if cfg2.ServerURL != "http://localhost:18083" {
+	if cfg2.ServerURL != "https://127.0.0.1:18083" {
 		t.Errorf("expected ServerURL to default, got %q", cfg2.ServerURL)
 	}
 
@@ -134,7 +134,7 @@ func TestLoadConfig_EmptyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig(\"\"): %v", err)
 	}
-	if cfg.ServerURL != "http://localhost:18083" {
+	if cfg.ServerURL != "https://127.0.0.1:18083" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
 }
@@ -148,7 +148,7 @@ func TestLoadConfig_NonexistentPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig on nonexistent path should not error, got: %v", err)
 	}
-	if cfg.ServerURL != "http://localhost:18083" {
+	if cfg.ServerURL != "https://127.0.0.1:18083" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
 	// config file should have been created
@@ -229,7 +229,7 @@ func TestLoadConfig_EmptyFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig on empty file: %v", err)
 	}
-	if cfg.ServerURL != "http://localhost:18083" {
+	if cfg.ServerURL != "https://127.0.0.1:18083" {
 		t.Errorf("expected defaults for empty file, got %q", cfg.ServerURL)
 	}
 }

@@ -4,7 +4,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/spf13/cobra"
@@ -149,6 +152,10 @@ func TestRunServer_SignalShutdown(t *testing.T) {
 		t.Skip("skipping signal shutdown test in short mode")
 	}
 
+	// 清除全局状态，避免之前测试的残留
+	cfgPtr.Store(nil)
+	cfgProvider = nil
+
 	sigCh := make(chan os.Signal, 1)
 	testSignalCh = sigCh
 	t.Cleanup(func() { testSignalCh = nil })
@@ -156,14 +163,18 @@ func TestRunServer_SignalShutdown(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
 	cmd.Flags().Bool("version", false, "")
+	cmd.Flags().Bool("no-tls", false, "")
+	_ = cmd.Flags().Set("no-tls", "true")
 
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- runServer(cmd, nil)
 	}()
 
-	// waitForServer 轮询等待服务器就绪
-	waitForServer(t, "127.0.0.1:18083", 5*time.Second)
+	// 轮询等待 cfgPtr 被初始化（server 启动成功），然后用实际地址连接
+	waitForConfig(t, 5*time.Second)
+	addr := cfgPtr.Load().Addr
+	waitForServerReady(t, addr, 5*time.Second)
 	sigCh <- syscall.SIGTERM
 
 	select {
@@ -187,6 +198,10 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 		t.Skip("skipping goroutine leak test in short mode")
 	}
 
+	// 清除全局状态，避免之前测试的残留
+	cfgPtr.Store(nil)
+	cfgProvider = nil
+
 	sigCh := make(chan os.Signal, 1)
 	testSignalCh = sigCh
 	t.Cleanup(func() { testSignalCh = nil })
@@ -195,6 +210,8 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("version", false, "")
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
+	cmd.Flags().Bool("no-tls", false, "")
+	_ = cmd.Flags().Set("no-tls", "true")
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -204,7 +221,7 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 	// 轮询等待 cfgPtr 被初始化（server 启动成功），然后用实际地址连接
 	waitForConfig(t, 5*time.Second)
 	addr := cfgPtr.Load().Addr
-	waitForServer(t, addr, 5*time.Second)
+	waitForServerReady(t, addr, 5*time.Second)
 	sigCh <- syscall.SIGTERM
 
 	select {
@@ -222,6 +239,126 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 	}
 }
 
+// ---- buildServerConfig 测试 ----
+
+func TestBuildServerConfig_NoTLSFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldCfgFile := cfgFile
+	t.Cleanup(func() { cfgFile = oldCfgFile })
+	cfgFile = filepath.Join(tmpDir, "nonexistent.yaml")
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("no-tls", false, "")
+	cmd.Flags().String("addr", ":18083", "")
+	cmd.Flags().String("uploads-dir", tmpDir, "")
+	cmd.Flags().String("tunnel-key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "")
+	_ = cmd.Flags().Set("no-tls", "true")
+
+	cfgProvider = sproxycfg.New(cfgFile)
+	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+	t.Cleanup(func() { cfgProvider = nil })
+
+	cfg, err := buildServerConfig(cmd)
+	if err != nil {
+		t.Fatalf("buildServerConfig: %v", err)
+	}
+	if cfg.TLS.Enabled {
+		t.Error("expected TLS.Enabled to be false when --no-tls is set")
+	}
+}
+
+func TestBuildServerConfig_NoTLSFlagDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldCfgFile := cfgFile
+	t.Cleanup(func() { cfgFile = oldCfgFile })
+	cfgFile = filepath.Join(tmpDir, "nonexistent.yaml")
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("no-tls", false, "")
+	cmd.Flags().String("addr", ":18083", "")
+	cmd.Flags().String("uploads-dir", tmpDir, "")
+	cmd.Flags().String("tunnel-key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "")
+	// 不设置 --no-tls，验证 TLS 默认启用
+
+	cfgProvider = sproxycfg.New(cfgFile)
+	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+	t.Cleanup(func() { cfgProvider = nil })
+
+	cfg, err := buildServerConfig(cmd)
+	if err != nil {
+		t.Fatalf("buildServerConfig: %v", err)
+	}
+	if !cfg.TLS.Enabled {
+		t.Error("expected TLS.Enabled to be true by default")
+	}
+}
+
+// ---- 无认证警告测试 ----
+
+func TestRunServer_AuthWarning(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping auth warning test in short mode")
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	testSignalCh = sigCh
+	t.Cleanup(func() { testSignalCh = nil })
+
+	tmpDir := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.Flags().String("addr", "127.0.0.1:0", "")
+	cmd.Flags().Bool("version", false, "")
+	cmd.Flags().String("uploads-dir", tmpDir, "")
+	cmd.Flags().String("tunnel-key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "")
+
+	oldCfgFile := cfgFile
+	cfgFile = filepath.Join(tmpDir, "sproxy.yaml")
+	t.Cleanup(func() { cfgFile = oldCfgFile })
+
+	cfgProvider = sproxycfg.New(cfgFile)
+	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
+	cfgProvider.Set("tls.enabled", false)
+	t.Cleanup(func() { cfgProvider = nil })
+
+	// 捕获 stderr
+	var stderrBuf bytes.Buffer
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = oldStderr })
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServer(cmd, nil)
+	}()
+
+	waitForConfig(t, 5*time.Second)
+	sigCh <- syscall.SIGTERM
+
+	select {
+	case <-errCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not shut down within 5s")
+	}
+
+	w.Close()
+	stderrData, _ := io.ReadAll(r)
+	stderrBuf.Write(stderrData)
+
+	if !strings.Contains(stderrBuf.String(), "WARNING") {
+		t.Error("expected auth warning containing 'WARNING' on stderr when AuthToken empty and APIKeys disabled")
+	}
+	if !strings.Contains(stderrBuf.String(), "unprotected") {
+		t.Error("expected 'unprotected' in auth warning output")
+	}
+}
+
 // ---- 测试辅助函数 ----
 
 // waitForServer 轮询等待 TCP 服务器就绪。
@@ -232,6 +369,24 @@ func waitForServer(t testing.TB, addr string, timeout time.Duration) {
 		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
 			conn.Close()
 			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("server did not become ready within %v (addr=%s)", timeout, addr)
+}
+
+// waitForServerReady 轮询等待 HTTP 服务器就绪（通过 HTTP 连接，支持 TLS 和 HTTP）。
+func waitForServerReady(t testing.TB, addr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 100 * time.Millisecond}
+	for time.Now().Before(deadline) {
+		resp, err := client.Get("http://" + addr + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

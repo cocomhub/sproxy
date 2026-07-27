@@ -83,6 +83,9 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	if t, _ := cmd.Flags().GetString("auth-token"); t != "" {
 		opts = append(opts, client.WithAuthToken(t))
 	}
+	if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {
+		opts = append(opts, client.WithInsecureTLS())
+	}
 
 	return client.NewFileClient(serverURL, opts...), nil
 }
