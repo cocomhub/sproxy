@@ -627,7 +627,7 @@ func TestE2E_CloudDownloadChain(t *testing.T) {
 	if cdc.LocalPath == "" {
 		t.Fatal("expected local path to be set")
 	}
-	if _, err := os.Stat(cdc.LocalPath); os.IsNotExist(err) {
+	if _, statErr := os.Stat(cdc.LocalPath); os.IsNotExist(statErr) {
 		t.Errorf("local file not found: %s", cdc.LocalPath)
 	}
 

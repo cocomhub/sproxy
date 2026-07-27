@@ -73,7 +73,8 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 			// 收集 URL
 			urls := args
 			if batchFile != "" {
-				fileURLs, err := readURLsFromFile(batchFile)
+				var fileURLs []string
+				fileURLs, err = readURLsFromFile(batchFile)
 				if err != nil {
 					return fmt.Errorf("读取 batch 文件失败: %w", err)
 				}
