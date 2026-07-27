@@ -246,7 +246,7 @@ func (d *StreamDecryptor) DecryptStream(r io.Reader, w io.Writer, aad []byte) (i
 		nw, err := d.DecryptChunk(r, w, aad)
 		written += int64(nw)
 		if err != nil {
-			if errors.Is(err, io.EOF) && err.Error() == "decrypt stream: read length: EOF" {
+			if errors.Is(err, io.EOF) {
 				return written, nil
 			}
 			return written, err

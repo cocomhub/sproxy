@@ -40,6 +40,21 @@ func TestEncryptStream_DecryptStream_Roundtrip(t *testing.T) {
 	}
 }
 
+// AAD mismatch test
+func TestEncryptStream_DecryptStream_AADMismatch(t *testing.T) {
+	key := make([]byte, 32)
+	var buf bytes.Buffer
+	_, err := EncryptStream(key, strings.NewReader("test data"), &buf, []byte(AADStream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	_, err = DecryptStream(key, &buf, &out, []byte(AADMeta))
+	if err == nil {
+		t.Error("expected error for AAD mismatch in stream, got nil")
+	}
+}
+
 func TestEncryptStream_DecryptStream_LargePayload(t *testing.T) {
 	key := make([]byte, 32)
 	// 大于 1 个 chunk 的大 payload

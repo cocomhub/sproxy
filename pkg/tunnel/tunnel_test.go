@@ -354,6 +354,28 @@ func TestEncryptDecrypt_ShortKey(t *testing.T) {
 	}
 }
 
+func TestEncryptDecrypt_AADMismatch(t *testing.T) {
+	ciphertext, err := Encrypt(testKey, []byte("secret"), []byte(AADMeta))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 用错误的 AAD 解密应失败
+	_, err = Decrypt(testKey, ciphertext, []byte(AADStream))
+	if err == nil {
+		t.Error("expected error for AAD mismatch (AADMeta vs AADStream), got nil")
+	}
+	// 用 nil AAD 解密应失败
+	_, err = Decrypt(testKey, ciphertext, nil)
+	if err == nil {
+		t.Error("expected error for nil AAD, got nil")
+	}
+	// 用空的 AAD 解密应失败
+	_, err = Decrypt(testKey, ciphertext, []byte{})
+	if err == nil {
+		t.Error("expected error for empty AAD, got nil")
+	}
+}
+
 func BenchmarkEncryptDecrypt(b *testing.B) {
 	key := testKey
 	plaintext := []byte(`{"method":"GET","url":"/api/files","headers":{}}`)

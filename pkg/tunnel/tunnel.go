@@ -20,7 +20,7 @@
 //
 //	[4B big-endian metaLen][encrypted metadata][stream chunks...]
 //
-// 其中 encrypted metadata = Encrypt(key, metaJSON)，stream chunks 由 EncryptStream 生成，
+// 其中 encrypted metadata = Encrypt(key, metaJSON, AADMeta)，stream chunks 由 EncryptStream(key, body, writer, AADStream) 生成，
 // 格式为 [2B chunkLen][nonce|ciphertext|tag]，每块独立加密。
 // body 为空时 stream chunks 部分为零字节。
 //
