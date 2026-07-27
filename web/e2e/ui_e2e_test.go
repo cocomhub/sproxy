@@ -340,7 +340,7 @@ func TestCloudDownloadModalOpens(t *testing.T) {
 	}
 
 	// 验证关键元素存在
-	for _, sel := range []string{"#cloud-url", "#cloud-create-btn", "#cloud-tasks-body", "#cloud-refresh-btn", "#cloud-close-modal-btn"} {
+	for _, sel := range []string{"#cloud-url", "#cloud-chain-btn", "#cloud-submit-btn", "#cloud-tasks-body", "#cloud-refresh-btn", "#cloud-close-modal-btn"} {
 		if cnt, _ := page.Locator(sel).Count(); cnt == 0 {
 			t.Errorf("element %s not found in cloud modal", sel)
 		}
@@ -419,9 +419,9 @@ func TestCloudDownloadCreateTask(t *testing.T) {
 		t.Fatalf("fill cloud-url: %v", err)
 	}
 
-	// 点击开始下载
-	if err := page.Locator("#cloud-create-btn").Click(); err != nil {
-		t.Fatalf("click create btn: %v", err)
+	// 点击仅提交按钮
+	if err := page.Locator("#cloud-submit-btn").Click(); err != nil {
+		t.Fatalf("click submit btn: %v", err)
 	}
 
 	// 等待响应（URL 不可达，但至少验证没有 crash）
