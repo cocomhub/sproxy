@@ -21,15 +21,20 @@ const handshakeTimeout = 3 * time.Second
 
 // Tunnel 在一条 mux 多路复用连接之上提供 HTTP 请求-响应交换。
 type Tunnel struct {
-	mux        *mux.Mux
-	key        []byte
-	handshake  sync.Once
-	sessionKey []byte
-	skMu       sync.Mutex
+	mux             *mux.Mux
+	key             []byte
+	handshake       sync.Once
+	sessionKey      []byte
+	skMu            sync.Mutex
+	replayProtector *ReplayProtector
 }
 
 func NewTunnel(m *mux.Mux, key []byte) *Tunnel {
-	return &Tunnel{mux: m, key: key}
+	return &Tunnel{
+		mux:             m,
+		key:             key,
+		replayProtector: NewReplayProtector(),
+	}
 }
 
 // ensureHandshake 确保 ECDH 握手已完成。
@@ -113,21 +118,26 @@ func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
 
 // sendRequestMeta 将请求元数据序列化、加密并写入流。
 func (t *Tunnel) sendRequestMeta(stream mux.Stream, req *http.Request) error {
-	reqMeta, err := json.Marshal(&Request{
+	encKey := t.encryptionKey()
+	reqMeta := &Request{
 		Method:  req.Method,
 		URL:     req.URL.RequestURI(),
 		Headers: flattenHeaders(req.Header),
-	})
+	}
+	// 有密钥时填充重放保护字段
+	if encKey != nil {
+		reqMeta.IAT = time.Now().Unix()
+		reqMeta.JTI = generateJTI()
+	}
+	reqMetaJSON, err := json.Marshal(reqMeta)
 	if err != nil {
 		return fmt.Errorf("tunnel: marshal request: %w", err)
 	}
-
-	encKey := t.encryptionKey()
 	var metaBytes []byte
 	if encKey != nil {
-		metaBytes, err = Encrypt(encKey, reqMeta, []byte(AADMeta))
+		metaBytes, err = Encrypt(encKey, reqMetaJSON, []byte(AADMeta))
 	} else {
-		metaBytes = reqMeta
+		metaBytes = reqMetaJSON
 	}
 	if err != nil {
 		return fmt.Errorf("tunnel: encrypt: %w", err)
@@ -223,6 +233,13 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 	reqMeta, err := t.readAndDecryptMeta(stream)
 	if err != nil {
 		return
+	}
+
+	// 重放保护：当有密钥时检查 IAT/JTI
+	if t.key != nil && (reqMeta.IAT > 0 || reqMeta.JTI != "") {
+		if err := t.replayProtector.Validate(reqMeta.JTI, reqMeta.IAT); err != nil {
+			return
+		}
 	}
 
 	var bodyReader io.ReadCloser

@@ -24,13 +24,15 @@ import (
 //
 // 密钥轮换：通过 UpdateKey 可运行时热替换密钥，旧密钥保留短时窗口供存量连接完成。
 // 所有新加密使用新密钥；解密时先尝试新密钥，不匹配则尝试旧密钥。
+// 重放保护：ServiceHTTP 中解析 metadata 后调用 replayProtector.Validate 检测重放攻击。
 type Handler struct {
-	keyMu        sync.RWMutex
-	primaryKey   []byte // 当前活跃密钥，用于加密和解密
-	oldKey       []byte // 前一个密钥，仅用于解密存量连接（短时窗口）
-	httpClient   *http.Client
-	localHandler http.Handler
-	logger       *slog.Logger
+	keyMu           sync.RWMutex
+	primaryKey      []byte // 当前活跃密钥，用于加密和解密
+	oldKey          []byte // 前一个密钥，仅用于解密存量连接（短时窗口）
+	httpClient      *http.Client
+	localHandler    http.Handler
+	logger          *slog.Logger
+	replayProtector *ReplayProtector
 }
 
 // NewHandler 创建一个仅支持外部转发的加密隧道处理器。
@@ -52,7 +54,8 @@ func NewHandler(key []byte, logger *slog.Logger) http.Handler {
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		logger: log,
+		logger:          log,
+		replayProtector: NewReplayProtector(),
 	}
 }
 
@@ -75,8 +78,9 @@ func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.H
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		localHandler: local,
-		logger:       log,
+		localHandler:    local,
+		logger:          log,
+		replayProtector: NewReplayProtector(),
 	}
 }
 
@@ -145,7 +149,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Debug("隧道请求 metadata", "method", req.Method, "url", req.URL)
 
-	// 2. r.Body 剩余部分为流式加密 body，通过 Pipe + DecryptStream 流式解密
+	// 3. 重放保护检查：如果 metadata 中包含 IAT/JTI，则验证
+	if req.IAT > 0 || req.JTI != "" {
+		if err := h.replayProtector.Validate(req.JTI, req.IAT); err != nil {
+			h.logger.Warn("重放检测失败", "error", err, "jti", req.JTI)
+			w.WriteHeader(http.StatusTooEarly) // 425 Too Early
+			return
+		}
+	}
+
+	// 4. r.Body 剩余部分为流式加密 body，通过 Pipe + DecryptStream 流式解密
 	//    使用 resolveKey 匹配成功的 resolvedKey（兼容正在轮换中的旧密钥）
 	bodyPr, bodyPw := io.Pipe()
 	go func() {
@@ -337,10 +350,15 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	for k := range req.Header {
 		headers[k] = req.Header.Get(k)
 	}
+	// 生成重放保护字段
+	now := time.Now().Unix()
+	jti := generateJTI()
 	metaJSON, err := json.Marshal(&Request{
 		Method:  req.Method,
 		URL:     req.URL.String(),
 		Headers: headers,
+		IAT:     now,
+		JTI:     jti,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal metadata: %w", err)

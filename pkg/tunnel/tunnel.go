@@ -85,6 +85,8 @@ type Request struct {
 	Method  string            `json:"method"`
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers"`
+	IAT     int64             `json:"iat,omitempty"` // 签发时间（Unix 秒），用于重放保护
+	JTI     string            `json:"jti,omitempty"` // 请求唯一 ID（hex 16 字节），用于重放保护
 }
 
 // Response 表示加密隧道响应，包含目标服务器返回的 HTTP 响应信息。

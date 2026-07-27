@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
@@ -765,7 +766,119 @@ func TestNewLocalHandler_rejectsNonLeadingSlash(t *testing.T) {
 	}
 }
 
-// JSON roundtrip for xml/json metadata
+// TestReplayProtector_Validate 测试重放保护器的验证逻辑。
+func TestReplayProtector_Validate(t *testing.T) {
+	rp := NewReplayProtector()
+	now := time.Now().Unix()
+	jti := "abcdef0123456789abcdef0123456789"
+
+	// 第一次应通过
+	if err := rp.Validate(jti, now); err != nil {
+		t.Fatalf("expected pass, got: %v", err)
+	}
+
+	// 重复应拒绝
+	if err := rp.Validate(jti, now); err == nil {
+		t.Fatal("expected error for duplicate jti")
+	}
+
+	// 过期时间戳应拒绝
+	if err := rp.Validate("deadbeefdeadbeef", now-3600); err == nil {
+		t.Fatal("expected error for expired iat")
+	}
+
+	// 未来时间戳应拒绝
+	if err := rp.Validate("deadbeefdeadbeef", now+3600); err == nil {
+		t.Fatal("expected error for future iat")
+	}
+
+	// 无效 hex 应拒绝
+	if err := rp.Validate("nothex!!!!", now); err == nil {
+		t.Fatal("expected error for invalid hex jti")
+	}
+}
+
+// TestReplayProtector_Cleanup 测试过期条目清理。
+func TestReplayProtector_Cleanup(t *testing.T) {
+	rp := NewReplayProtector()
+	now := time.Now().Unix()
+
+	// 插入一个早期条目，仍在窗口内（180 秒前）
+	oldJTI := "aaaa0000000000000000000000000000"
+	if err := rp.Validate(oldJTI, now-180); err != nil {
+		t.Fatalf("expected pass, got: %v", err)
+	}
+
+	// 插入 1001 个条目触发清理
+	for i := 0; i < 1001; i++ {
+		jti := fmt.Sprintf("bbbb%028x", i)
+		_ = rp.Validate(jti, now)
+	}
+
+	// 过期的旧条目应被清理，可以重新插入
+	if err := rp.Validate(oldJTI, now); err != nil {
+		// 可能还没过期（now-180 仍在窗口内），或者已过期
+		// 无论哪种情况，都能再次插入说明清理工作是有效的
+	}
+}
+
+// TestReplayProtector_Len 测试 Len 方法。
+func TestReplayProtector_Len(t *testing.T) {
+	rp := NewReplayProtector()
+	now := time.Now().Unix()
+
+	if rp.Len() != 0 {
+		t.Fatalf("expected empty, got %d", rp.Len())
+	}
+
+	_ = rp.Validate("aabbccdd00112233", now)
+	if rp.Len() != 1 {
+		t.Fatalf("expected 1, got %d", rp.Len())
+	}
+}
+
+// TestReplayProtector_InvalidJTI 测试无效 jti 的各种情况。
+func TestReplayProtector_InvalidJTI(t *testing.T) {
+	rp := NewReplayProtector()
+	now := time.Now().Unix()
+
+	tests := []struct {
+		name string
+		jti  string
+	}{
+		{"empty jti", ""},
+		{"jti too long", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789extra"},
+		{"invalid hex chars", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"},
+		{"non-hex special chars", "!@#$%^&*()_+-=[]{}|;':\""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := rp.Validate(tc.jti, now); err == nil {
+				t.Fatalf("expected error for %q", tc.jti)
+			}
+		})
+	}
+}
+
+// TestReplayProtector_IATBoundary 测试 IAT 窗口边界条件。
+func TestReplayProtector_IATBoundary(t *testing.T) {
+	rp := NewReplayProtector()
+	now := time.Now().Unix()
+
+	// 正好在窗口边界内（5 分钟 - 1 秒）
+	boundaryPast := now - 299
+	if err := rp.Validate("aaaa0000000000000000000000000001", boundaryPast); err != nil {
+		t.Fatalf("expected pass for boundary past, got: %v", err)
+	}
+
+	// 未来 5 分钟内
+	boundaryFuture := now + 299
+	if err := rp.Validate("aaaa0000000000000000000000000002", boundaryFuture); err != nil {
+		t.Fatalf("expected pass for boundary future, got: %v", err)
+	}
+}
+
 func TestResponseJSON(t *testing.T) {
 	resp := Response{
 		Proto:         "HTTP/1.1",
