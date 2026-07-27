@@ -289,7 +289,7 @@ func TestCloudDownloadCmd_Subcommands(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{}, nil)
 
-	subcommands := []string{"submit", "wait", "cloud-archive", "fetch", "resume", "list", "cancel"}
+	subcommands := []string{"submit", "wait", "archive", "fetch", "resume", "list", "cancel"}
 	for _, name := range subcommands {
 		sub := findSubCommand(cmd, name)
 		if sub == nil {
@@ -430,7 +430,7 @@ func TestCloudDownloadCmd_ArchiveSubcommand(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"cloud-archive", "task-1", "task-2"})
+	cmd.SetArgs([]string{"archive", "task-1", "task-2"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("archive subcommand failed: %v", err)
 	}
@@ -704,7 +704,7 @@ func TestCloudDownloadCmd_ArchiveSubcommandSingle(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"cloud-archive", "task-1"})
+	cmd.SetArgs([]string{"archive", "task-1"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("archive subcommand failed: %v", err)
 	}
@@ -733,7 +733,7 @@ func TestCloudDownloadCmd_ArchiveSubcommandNoName(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"cloud-archive", "task-1", "task-2"})
+	cmd.SetArgs([]string{"archive", "task-1", "task-2"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("archive subcommand failed: %v", err)
 	}
