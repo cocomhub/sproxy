@@ -55,7 +55,8 @@
       "WebFetch(domain:sonarcloud.io)",
       "Bash(gh *)",
       "PowerShell(gh *)",
-      "Bash(gofmt *)"
+      "Bash(gofmt *)",
+      "Skill(code-review:code-review)"
     ],
     "deny": []
   },

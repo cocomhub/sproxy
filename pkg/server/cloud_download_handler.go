@@ -156,7 +156,7 @@ func (h *Handlers) cloudListTasks(w http.ResponseWriter, r *http.Request) {
 // cloudGetTask 处理 GET /api/cloud/tasks/{id}。
 func (h *Handlers) cloudGetTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	task, ok := h.cloudMgr.GetTask(id)
+	task, ok := h.cloudMgr.SnapshotTask(id)
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "task not found"}, http.StatusNotFound)
 		return

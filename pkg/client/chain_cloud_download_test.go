@@ -59,7 +59,7 @@ func TestCloudDownloadChain_State(t *testing.T) {
 	client := NewFileClient("http://127.0.0.1:9999")
 	opts := defaultChainOptions()
 
-	chain := NewCloudDownloadChain(client, []string{"http://example.com/file"}, "archive", "/tmp/out", opts)
+	chain := NewCloudDownloadChain(client, []string{"http://example.com/file"}, "archive", t.TempDir(), opts)
 	chain.CurrentPhase = PhaseWaiting
 	chain.TaskIDs = []string{"task-1", "task-2"}
 	chain.Completed = 1
@@ -94,7 +94,7 @@ func TestCloudDownloadChain_Restore(t *testing.T) {
 		"urls":         []any{"http://example.com/file"},
 		"task_ids":     []any{"task-1", "task-2"},
 		"archive_name": "my-archive",
-		"local_dir":    "/tmp/out",
+		"local_dir":    t.TempDir(),
 		"keep_files":   false,
 		"completed":    1.0,
 		"failed":       0.0,

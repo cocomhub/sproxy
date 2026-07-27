@@ -19,6 +19,20 @@ import (
 // HTTPDownloader 是内置 HTTP/HTTPS 下载器。
 type HTTPDownloader struct {
 	httpClient *http.Client
+	logger     *slog.Logger
+}
+
+// NewHTTPDownloader 创建 HTTPDownloader。
+func NewHTTPDownloader() *HTTPDownloader {
+	return &HTTPDownloader{logger: slog.Default()}
+}
+
+// getLogger 返回 logger，nil 时使用 slog.Default。
+func (d *HTTPDownloader) getLogger() *slog.Logger {
+	if d.logger != nil {
+		return d.logger
+	}
+	return slog.Default()
 }
 
 // 确保 HTTPDownloader 实现了 Downloader 接口。
@@ -96,7 +110,7 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	// 设置文件修改时间
 	if modTime != (time.Time{}) {
 		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
-			slog.Warn("设置文件修改时间失败", "path", destPath, "error", err)
+			d.getLogger().Warn("设置文件修改时间失败", "path", destPath, "error", err)
 		}
 	}
 
