@@ -41,6 +41,7 @@ type CloudDownloadConfig struct {
 	MaxConcurrent int           // 最大并发下载数，默认 3
 	TaskTTL       time.Duration // 完成任务保留时间，默认 24h
 	FailedTaskTTL time.Duration // 失败任务保留时间，默认 1h
+	AllowPrivate  bool          // 允许私有 IP 下载（仅测试用）
 }
 
 // CloudDownloadManager 管理云端下载任务。

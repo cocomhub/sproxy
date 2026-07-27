@@ -570,7 +570,7 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_Valid(t *testing.T) {
-	url, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "")
+	url, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -583,7 +583,7 @@ func TestValidateCloudDownloadURL_Valid(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_WithFilename(t *testing.T) {
-	url, filename, err := validateCloudDownloadURL("https://example.com/data.bin", "custom.dat")
+	url, filename, err := validateCloudDownloadURL("https://example.com/data.bin", "custom.dat", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -596,21 +596,21 @@ func TestValidateCloudDownloadURL_WithFilename(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_EmptyURL(t *testing.T) {
-	_, _, err := validateCloudDownloadURL("", "")
+	_, _, err := validateCloudDownloadURL("", "", false)
 	if err == nil {
 		t.Fatal("expected error for empty URL")
 	}
 }
 
 func TestValidateCloudDownloadURL_InvalidScheme(t *testing.T) {
-	_, _, err := validateCloudDownloadURL("ftp://example.com/file.zip", "")
+	_, _, err := validateCloudDownloadURL("ftp://example.com/file.zip", "", false)
 	if err == nil {
 		t.Fatal("expected error for ftp URL")
 	}
 }
 
 func TestValidateCloudDownloadURL_PathTraversal(t *testing.T) {
-	_, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "../../../etc/passwd")
+	_, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "../../../etc/passwd", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -620,14 +620,14 @@ func TestValidateCloudDownloadURL_PathTraversal(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_NoHost(t *testing.T) {
-	_, _, err := validateCloudDownloadURL("not-a-url", "")
+	_, _, err := validateCloudDownloadURL("not-a-url", "", false)
 	if err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
 }
 
 func TestValidateCloudDownloadURL_QueryString(t *testing.T) {
-	_, filename, err := validateCloudDownloadURL("https://example.com/download?file=test.zip&token=abc", "")
+	_, filename, err := validateCloudDownloadURL("https://example.com/download?file=test.zip&token=abc", "", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
