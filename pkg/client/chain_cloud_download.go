@@ -185,7 +185,9 @@ func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
 		return fmt.Errorf("批量提交云端下载失败: %w", err)
 	}
 	for _, t := range tasks {
-		c.TaskIDs = append(c.TaskIDs, t.ID)
+		if t.ID != "" {
+			c.TaskIDs = append(c.TaskIDs, t.ID)
+		}
 	}
 	c.Total = len(c.TaskIDs)
 	return nil
