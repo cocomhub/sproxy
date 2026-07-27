@@ -36,6 +36,9 @@ type CloudDownloadChain struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 
+	// 服务端返回的归档文件路径（用于下载）
+	archiveServerPath string `json:"-"`
+
 	client *FileClient  `json:"-"`
 	opts   chainOptions `json:"-"`
 }
@@ -293,14 +296,17 @@ func (c *CloudDownloadChain) archiveTasks(ctx context.Context) error {
 	if !result.Success {
 		return fmt.Errorf("打包归档失败: %s", result.Message)
 	}
+	// 保存服务端返回的归档文件路径，供 downloadToLocal 使用
+	c.archiveServerPath = result.File
 	return nil
 }
 
 // downloadToLocal 分块下载归档文件到本地。
 func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
-	archivePath := filepath.ToSlash(filepath.Join(cloudArchiveDirName, c.ArchiveName))
-	if !strings.HasSuffix(c.ArchiveName, ".tar.gz") {
-		archivePath += ".tar.gz"
+	// 优先使用服务端返回的路径，兜底使用本地构造
+	archivePath := c.archiveServerPath
+	if archivePath == "" {
+		archivePath = filepath.ToSlash(filepath.Join(cloudArchiveDirName, c.ArchiveName))
 	}
 	localPath := filepath.Join(c.LocalDir, c.ArchiveName)
 	if !strings.HasSuffix(localPath, ".tar.gz") {

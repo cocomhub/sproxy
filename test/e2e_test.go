@@ -620,7 +620,10 @@ func TestE2E_CloudDownloadChain(t *testing.T) {
 	}
 
 	// 验证本地文件存在
-	cdc := result.Raw.(*client.CloudDownloadChain)
+	cdc, ok := result.Raw.(*client.CloudDownloadChain)
+	if !ok {
+		t.Fatalf("expected result.Raw to be *CloudDownloadChain, got %T", result.Raw)
+	}
 	if cdc.LocalPath == "" {
 		t.Fatal("expected local path to be set")
 	}
