@@ -14,7 +14,7 @@ import (
 // NewCmdCloudArchive 创建 cloud-archive 命令的工厂函数。
 func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "cloud-archive <task-id> [task-id...]",
+		Use:   "archive <task-id> [task-id...]",
 		Short: "打包云端下载已完成的任务文件",
 		Long: `将指定已完成云端下载任务的文件打包为 tar.gz 并存放到服务端 uploads 目录。
 

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -18,6 +19,20 @@ import (
 // HTTPDownloader 是内置 HTTP/HTTPS 下载器。
 type HTTPDownloader struct {
 	httpClient *http.Client
+	logger     *slog.Logger
+}
+
+// NewHTTPDownloader 创建 HTTPDownloader。
+func NewHTTPDownloader() *HTTPDownloader {
+	return &HTTPDownloader{logger: slog.Default()}
+}
+
+// getLogger 返回 logger，nil 时使用 slog.Default。
+func (d *HTTPDownloader) getLogger() *slog.Logger {
+	if d.logger != nil {
+		return d.logger
+	}
+	return slog.Default()
 }
 
 // 确保 HTTPDownloader 实现了 Downloader 接口。
@@ -40,6 +55,16 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("http status %d", resp.StatusCode)
+	}
+
+	// 从 Last-Modified 响应头提取原始文件修改时间
+	var modTime time.Time
+	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+		if t, parseErr := time.Parse(time.RFC1123, lm); parseErr == nil {
+			modTime = t
+		} else if t, parseErr := time.Parse(time.RFC1123Z, lm); parseErr == nil {
+			modTime = t
+		}
 	}
 
 	f, err := os.Create(destPath)
@@ -81,7 +106,15 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	}
 
 	checksum := hex.EncodeToString(h.Sum(nil))
-	return &Result{Size: downloaded, Checksum: checksum}, nil
+
+	// 设置文件修改时间
+	if modTime != (time.Time{}) {
+		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
+			d.getLogger().Warn("设置文件修改时间失败", "path", destPath, "error", err)
+		}
+	}
+
+	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime}, nil
 }
 
 // Supports 判断是否支持 HTTP/HTTPS 协议。

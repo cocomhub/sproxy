@@ -5,10 +5,14 @@ package client
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,6 +41,218 @@ func TestCalcChunkSize_EdgeCases(t *testing.T) {
 				t.Errorf("calcChunkSize(%d, %d, %d) = %d, expected > 0", tt.fileSize, tt.preferred, tt.maxChunk, cs)
 			}
 		})
+	}
+}
+
+func sha256hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func TestDownloadOneChunk_ExponentialBackoff(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	var attempt atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempt.Add(1)
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("X-Chunk-Checksum", sha256hex([]byte("test data")))
+		w.Write([]byte("test data"))
+	}))
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+
+	tmpDir := t.TempDir()
+	outPath := filepath.Join(tmpDir, "out.dat")
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outFile.Close()
+	if err := outFile.Truncate(9); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var progress int64
+	var downloadErr error
+
+	c.downloadOneChunk(ctx, downloadChunkParams{
+		Filename:    "f.txt",
+		ChunkIdx:    0,
+		ChunkSize:   1024,
+		FileSize:    9,
+		OutFile:     outFile,
+		Mu:          &mu,
+		Progress:    &progress,
+		DownloadErr: &downloadErr,
+	})
+
+	if downloadErr != nil {
+		t.Fatalf("unexpected error: %v", downloadErr)
+	}
+
+	got := make([]byte, 9)
+	if _, err := outFile.ReadAt(got, 0); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "test data" {
+		t.Errorf("expected 'test data', got %s", string(got))
+	}
+	if n := attempt.Load(); n != 3 {
+		t.Errorf("expected 3 attempts, got %d", n)
+	}
+}
+
+func TestDownloadOneChunk_RetryThenSuccess(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	var attempt atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempt.Add(1)
+		if n <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("X-Chunk-Checksum", sha256hex([]byte("data")))
+		w.Write([]byte("data"))
+	}))
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+
+	tmpDir := t.TempDir()
+	outPath := filepath.Join(tmpDir, "out.dat")
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outFile.Close()
+	if err := outFile.Truncate(4); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var progress int64
+	var downloadErr error
+
+	c.downloadOneChunk(ctx, downloadChunkParams{
+		Filename:    "f.txt",
+		ChunkIdx:    0,
+		ChunkSize:   1024,
+		FileSize:    4,
+		OutFile:     outFile,
+		Mu:          &mu,
+		Progress:    &progress,
+		DownloadErr: &downloadErr,
+	})
+
+	if downloadErr != nil {
+		t.Fatalf("unexpected error: %v", downloadErr)
+	}
+
+	got := make([]byte, 4)
+	if _, err := outFile.ReadAt(got, 0); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "data" {
+		t.Errorf("expected 'data', got %s", string(got))
+	}
+	if n := attempt.Load(); n != 3 {
+		t.Errorf("expected 3 attempts, got %d", n)
+	}
+}
+
+func TestDownloadOneChunk_AllRetriesFail(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+
+	tmpDir := t.TempDir()
+	outPath := filepath.Join(tmpDir, "out.dat")
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outFile.Close()
+
+	var mu sync.Mutex
+	var progress int64
+	var downloadErr error
+
+	c.downloadOneChunk(ctx, downloadChunkParams{
+		Filename:    "f.txt",
+		ChunkIdx:    0,
+		ChunkSize:   1024,
+		FileSize:    9,
+		OutFile:     outFile,
+		Mu:          &mu,
+		Progress:    &progress,
+		DownloadErr: &downloadErr,
+	})
+
+	if downloadErr == nil {
+		t.Fatal("expected error after all retries exhausted")
+	}
+}
+
+func TestDownloadOneChunk_ContextCancel(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // 立即取消
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL)
+	c.logger = testLogger()
+
+	tmpDir := t.TempDir()
+	outPath := filepath.Join(tmpDir, "out.dat")
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outFile.Close()
+
+	var mu sync.Mutex
+	var progress int64
+	var downloadErr error
+
+	// 上下文已取消，downloadOneChunk 应提前返回且不设置 downloadErr
+	c.downloadOneChunk(ctx, downloadChunkParams{
+		Filename:    "f.txt",
+		ChunkIdx:    0,
+		ChunkSize:   1024,
+		FileSize:    9,
+		OutFile:     outFile,
+		Mu:          &mu,
+		Progress:    &progress,
+		DownloadErr: &downloadErr,
+	})
+
+	if downloadErr != nil {
+		t.Errorf("expected no downloadErr after context cancellation, got: %v", downloadErr)
+	}
+	if progress != 0 {
+		t.Errorf("expected no progress after context cancellation, got %d", progress)
 	}
 }
 

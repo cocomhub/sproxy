@@ -8,8 +8,11 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestArchive_SingleFile(t *testing.T) {
@@ -235,5 +238,40 @@ func TestArchiveDir_EmptyDirname(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for empty dirname, got %d", resp.StatusCode)
+	}
+}
+
+func TestArchive_PreservesMTime(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("hello world")
+	uploadFile(t, url, "test.txt", body, map[string]string{
+		"X-File-Checksum": sha256hex(body),
+	})
+
+	// 获取上传后的文件 mtime
+	info, _ := os.Stat(filepath.Join(cfgPtr.Load().UploadsDir, "test.txt"))
+	originalMTime := info.ModTime()
+
+	resp, err := http.Post(url+"/api/archive", "application/json",
+		strings.NewReader(`{"files":["test.txt"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	gr, _ := gzip.NewReader(resp.Body)
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	header, err := tr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	diff := header.ModTime.Sub(originalMTime)
+	if diff < -time.Second || diff > time.Second {
+		t.Errorf("tar header ModTime %v differs from original %v (diff: %v)",
+			header.ModTime, originalMTime, diff)
 	}
 }

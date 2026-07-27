@@ -786,20 +786,33 @@ func (c *FileClient) downloadOneChunk(ctx context.Context, p downloadChunkParams
 	urlPath := fmt.Sprintf("/download/chunk?filename=%s&offset=%d&length=%d",
 		url.QueryEscape(p.Filename), offset, length)
 
-	for range maxRetries {
+	baseDelay := 500 * time.Millisecond
+
+	for attempt := range maxRetries {
 		if *p.DownloadErr != nil {
 			return
 		}
 
 		data, ok := c.tryDownloadChunk(ctx, urlPath, length)
 		if !ok {
+			if attempt < maxRetries-1 {
+				delay := baseDelay * (1 << attempt) // 500ms, 1s, 2s
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return
+				}
+			}
 			continue
 		}
 
 		p.Mu.Lock()
 		if _, writeErr := p.OutFile.WriteAt(data, offset); writeErr != nil {
+			if *p.DownloadErr == nil {
+				*p.DownloadErr = fmt.Errorf("分块 %d 写入文件失败: %w", p.ChunkIdx, writeErr)
+			}
 			p.Mu.Unlock()
-			continue
+			return
 		}
 		*p.Progress += int64(len(data))
 		if c.progressFn != nil {

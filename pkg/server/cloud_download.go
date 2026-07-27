@@ -28,6 +28,7 @@ type CloudTask struct {
 	TotalSize  int64     `json:"total_size"` // -1 表示未知
 	Downloaded int64     `json:"downloaded"`
 	Checksum   string    `json:"checksum"`
+	FileMTime  int64     `json:"file_mtime,omitempty"` // 原始文件修改时间（UnixNano），从 URL 的 Last-Modified 提取
 	Error      string    `json:"error"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
@@ -40,6 +41,7 @@ type CloudDownloadConfig struct {
 	MaxConcurrent int           // 最大并发下载数，默认 3
 	TaskTTL       time.Duration // 完成任务保留时间，默认 24h
 	FailedTaskTTL time.Duration // 失败任务保留时间，默认 1h
+	AllowPrivate  bool          // 允许私有 IP 下载（仅测试用）
 }
 
 // CloudDownloadManager 管理云端下载任务。
@@ -269,6 +271,17 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			m.logger.Error("download failed", "task_id", task.ID, "url", task.URL, "error", err)
 		}
 		return
+	}
+
+	// 恢复原始文件 mtime
+	if result.ModTime != (time.Time{}) {
+		modTime := result.ModTime
+		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
+			m.logger.Warn("设置文件修改时间失败", "task_id", task.ID, "error", err)
+		}
+		m.mu.Lock()
+		task.FileMTime = result.ModTime.UnixNano()
+		m.mu.Unlock()
 	}
 
 	// 补偿存储空间（实际大小可能与预估值不同）

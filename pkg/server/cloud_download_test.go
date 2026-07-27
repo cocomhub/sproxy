@@ -505,7 +505,16 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 
 	task, _ := mgr.SubmitAndStart("url", srv.URL, "cancel-test.bin", 104857600, nil) // nil context = async
 	// 等待进入 downloading 状态
-	time.Sleep(300 * time.Millisecond)
+	for range 30 {
+		task, _ = mgr.SnapshotTask(task.ID)
+		if task.Status == "downloading" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if task.Status != "downloading" {
+		t.Fatalf("expected task to be downloading, got %s", task.Status)
+	}
 
 	// 取消任务
 	if err := mgr.CancelTask(task.ID); err != nil {
@@ -561,7 +570,7 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_Valid(t *testing.T) {
-	url, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "")
+	url, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -574,7 +583,7 @@ func TestValidateCloudDownloadURL_Valid(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_WithFilename(t *testing.T) {
-	url, filename, err := validateCloudDownloadURL("https://example.com/data.bin", "custom.dat")
+	url, filename, err := validateCloudDownloadURL("https://example.com/data.bin", "custom.dat", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -587,21 +596,21 @@ func TestValidateCloudDownloadURL_WithFilename(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_EmptyURL(t *testing.T) {
-	_, _, err := validateCloudDownloadURL("", "")
+	_, _, err := validateCloudDownloadURL("", "", false)
 	if err == nil {
 		t.Fatal("expected error for empty URL")
 	}
 }
 
 func TestValidateCloudDownloadURL_InvalidScheme(t *testing.T) {
-	_, _, err := validateCloudDownloadURL("ftp://example.com/file.zip", "")
+	_, _, err := validateCloudDownloadURL("ftp://example.com/file.zip", "", false)
 	if err == nil {
 		t.Fatal("expected error for ftp URL")
 	}
 }
 
 func TestValidateCloudDownloadURL_PathTraversal(t *testing.T) {
-	_, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "../../../etc/passwd")
+	_, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "../../../etc/passwd", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -611,14 +620,14 @@ func TestValidateCloudDownloadURL_PathTraversal(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_NoHost(t *testing.T) {
-	_, _, err := validateCloudDownloadURL("not-a-url", "")
+	_, _, err := validateCloudDownloadURL("not-a-url", "", false)
 	if err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
 }
 
 func TestValidateCloudDownloadURL_QueryString(t *testing.T) {
-	_, filename, err := validateCloudDownloadURL("https://example.com/download?file=test.zip&token=abc", "")
+	_, filename, err := validateCloudDownloadURL("https://example.com/download?file=test.zip&token=abc", "", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -725,5 +734,43 @@ func TestCloudFlushNow_TriggersFlush(t *testing.T) {
 	taskPath := filepath.Join(dir, ".__downloads__", task.ID+".json")
 	if _, err := os.Stat(taskPath); os.IsNotExist(err) {
 		t.Error("expected task persistence file after FlushNow")
+	}
+}
+
+func TestCloudDownloadManager_DeleteTaskCleansAndReleases(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.StopFlush)
+
+	task := &CloudTask{
+		ID:        "cloud-test-1",
+		URL:       "https://example.com/file.txt",
+		Status:    "completed",
+		Filename:  "file.txt",
+		TotalSize: 1000,
+		Checksum:  "abc123",
+	}
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	taskDir := filepath.Join(mgr.cloudDir, task.ID)
+	os.MkdirAll(taskDir, 0755)
+	os.WriteFile(filepath.Join(taskDir, task.Filename), []byte("test"), 0644)
+	mgr.storage.TryReserve(1000, CategoryCloud)
+
+	if err := mgr.DeleteTask(task.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
+		t.Error("task dir should be deleted")
+	}
+
+	usage := mgr.storage.UsageByCategory()
+	if usage[CategoryCloud] != 0 {
+		t.Errorf("expected cloud size 0, got %d", usage[CategoryCloud])
 	}
 }

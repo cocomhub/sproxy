@@ -4,6 +4,8 @@
 package server
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -283,5 +285,41 @@ func TestCloudArchive_DefaultArchiveName(t *testing.T) {
 	}
 	if result.TaskCount != 1 {
 		t.Fatalf("expected task_count=1, got %d", result.TaskCount)
+	}
+}
+
+func TestCloudArchive_PreservesMTime(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("archive mtime test")
+	uploadFile(t, url, "mtime-test.txt", body, map[string]string{
+		"X-File-Checksum": sha256hex(body),
+	})
+
+	// 获取原始文件 mtime
+	info, _ := os.Stat(filepath.Join(cfgPtr.Load().UploadsDir, "mtime-test.txt"))
+	originalMTime := info.ModTime()
+
+	// 创建普通归档验证 mtime
+	resp, err := http.Post(url+"/api/archive", "application/json",
+		strings.NewReader(`{"files":["mtime-test.txt"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	gr, _ := gzip.NewReader(resp.Body)
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	header, err := tr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	diff := header.ModTime.Sub(originalMTime)
+	if diff < -time.Second || diff > time.Second {
+		t.Errorf("tar header ModTime %v differs from original %v (diff: %v)",
+			header.ModTime, originalMTime, diff)
 	}
 }

@@ -26,7 +26,7 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanedURL, cleanedFilename, err := validateCloudDownloadURL(req.URL, req.Filename)
+	cleanedURL, cleanedFilename, err := validateCloudDownloadURL(req.URL, req.Filename, h.cloudMgr.config.AllowPrivate)
 	if err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
@@ -49,9 +49,9 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // validateCloudDownloadURL 校验下载 URL 和可选的文件名。
-// 执行 scheme 检查、SSRF 防护、文件名提取和路径穿越防护。
+// 执行 scheme 检查、可选 SSRF 防护、文件名提取和路径穿越防护。
 // 返回 (cleanedURL, cleanedFilename, error)。
-func validateCloudDownloadURL(rawURL, rawFilename string) (string, string, error) {
+func validateCloudDownloadURL(rawURL, rawFilename string, allowPrivate bool) (string, string, error) {
 	if rawURL == "" {
 		return "", "", fmt.Errorf("url is required")
 	}
@@ -64,9 +64,11 @@ func validateCloudDownloadURL(rawURL, rawFilename string) (string, string, error
 	if parsed.Host == "" {
 		return "", "", fmt.Errorf("invalid URL: missing host")
 	}
-	// SSRF 深层防护：检查 host 不解析到内部 IP
-	if hostErr := downloader.ValidateURLHost(rawURL); hostErr != nil {
-		return "", "", fmt.Errorf("unsafe URL: %w", hostErr)
+	// SSRF 深层防护：检查 host 不解析到内部 IP（除非 allowPrivate）
+	if !allowPrivate {
+		if hostErr := downloader.ValidateURLHost(rawURL); hostErr != nil {
+			return "", "", fmt.Errorf("unsafe URL: %w", hostErr)
+		}
 	}
 
 	filename := rawFilename
@@ -100,7 +102,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 
 	results := make([]CloudBatchTaskResult, 0, len(req.URLs))
 	for _, entry := range req.URLs {
-		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename)
+		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.config.AllowPrivate)
 		if err != nil {
 			results = append(results, CloudBatchTaskResult{
 				URL:      entry.URL,
@@ -154,7 +156,7 @@ func (h *Handlers) cloudListTasks(w http.ResponseWriter, r *http.Request) {
 // cloudGetTask 处理 GET /api/cloud/tasks/{id}。
 func (h *Handlers) cloudGetTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	task, ok := h.cloudMgr.GetTask(id)
+	task, ok := h.cloudMgr.SnapshotTask(id)
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "task not found"}, http.StatusNotFound)
 		return

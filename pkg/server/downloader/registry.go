@@ -12,7 +12,7 @@ type Plugin[T any] = plugin.Plugin[T]
 
 // Registry 是下载器插件的全局注册表。
 // 内置兜底实现为 HTTPDownloader。
-var Registry = plugin.New[Downloader]("downloader", &HTTPDownloader{})
+var Registry = plugin.New[Downloader]("downloader", NewHTTPDownloader())
 
 // Find 查找第一个 Supports 该 source 的下载器。
 // 按注册顺序查找，未找到返回 nil。

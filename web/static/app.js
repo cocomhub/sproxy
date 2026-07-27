@@ -1123,6 +1123,89 @@ async function refreshCloudTasks() {
   }
 }
 
+async function chainDownloadCloud() {
+  const input = document.getElementById('cloud-url');
+  const text = input.value.trim();
+  if (!text) { showToast('请输入下载链接', 'warning'); return; }
+  const lines = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+  if (lines.length === 0) { showToast('请输入下载链接', 'warning'); return; }
+  try {
+    const hdrs = headers({ 'Content-Type': 'application/json' });
+    input.value = '';
+    showToast('提交任务中...', 'info');
+    const urls = lines.map(function(url) { return { url: url }; });
+    let tasks;
+    if (tunnelHexKey) {
+      const result = await tunnelRequest('POST', '/api/cloud/download/batch', hdrs, JSON.stringify({ urls: urls }));
+      const data = JSON.parse(new TextDecoder().decode(result.body));
+      tasks = data.tasks || [];
+    } else {
+      const resp = await fetch(BASE + '/api/cloud/download/batch', { method: 'POST', headers: hdrs, body: JSON.stringify({ urls: urls }) });
+      const data = await resp.json();
+      if (!resp.ok) { showToast('提交失败', 'error'); return; }
+      tasks = data.tasks || [];
+    }
+    refreshCloudTasks();
+    showToast(tasks.length + ' 个任务已提交', 'success');
+    showToast('等待任务完成...', 'info');
+    for (let i = 0; i < 600; i++) {
+      await new Promise(function(r) { setTimeout(r, 2000); });
+      refreshCloudTasks();
+      let allDone = true;
+      for (let j = 0; j < tasks.length; j++) {
+        try {
+          let t;
+          if (tunnelHexKey) {
+            const r = await tunnelRequest('GET', '/api/cloud/tasks/' + tasks[j].id, {}, null);
+            t = JSON.parse(new TextDecoder().decode(r.body));
+          } else {
+            const r = await fetch(BASE + '/api/cloud/tasks/' + tasks[j].id, { headers: headers() });
+            t = await r.json();
+          }
+          tasks[j] = t;
+          if (t.status === 'pending' || t.status === 'downloading') { allDone = false; }
+        } catch(e) {
+          allDone = false;
+        }
+      }
+      if (allDone) { break; }
+    }
+    const succeeded = tasks.filter(function(t) { return t.status === 'completed'; });
+    if (succeeded.length === 0) { showToast('所有任务均未成功完成', 'error'); return; }
+    showToast('打包归档中...', 'info');
+    const taskIds = succeeded.map(function(t) { return t.id; });
+    const archiveHdrs = headers({ 'Content-Type': 'application/json' });
+    let archiveResult;
+    if (tunnelHexKey) {
+      const r = await tunnelRequest('POST', '/api/cloud/archive', archiveHdrs, JSON.stringify({ task_ids: taskIds }));
+      archiveResult = JSON.parse(new TextDecoder().decode(r.body));
+    } else {
+      const r = await fetch(BASE + '/api/cloud/archive', { method: 'POST', headers: archiveHdrs, body: JSON.stringify({ task_ids: taskIds }) });
+      archiveResult = await r.json();
+    }
+    if (!archiveResult.success) { showToast('归档失败', 'error'); return; }
+    showToast('下载归档并清理中...', 'info');
+    // 先下载再清理（非隧道模式用 fetch blob 确保下载完成）
+    for (let i = 0; i < taskIds.length; i++) {
+      if (tunnelHexKey) {
+        await tunnelDownloadStream(archiveResult.file);
+        await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskIds[i], {}, null);
+      } else {
+        const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: headers() });
+        const blob = await dlResp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = archiveResult.file.split('/').pop();
+        a.click();
+        URL.revokeObjectURL(url);
+        await fetch(BASE + '/api/cloud/tasks/' + taskIds[i], { method: 'DELETE', headers: headers() });
+      }
+    }
+    refreshCloudTasks();
+    showToast('链式下载完成!', 'success');
+  } catch (e) { showToast('链式下载失败: ' + e.message, 'error'); }
+}
 async function createCloudTask() {
   const input = document.getElementById('cloud-url');
   const text = input.value.trim();
@@ -1446,7 +1529,8 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('cloud-url').addEventListener('keydown', function(e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createCloudTask(); }
   });
-  document.getElementById('cloud-create-btn').addEventListener('click', createCloudTask);
+  document.getElementById('cloud-chain-btn').addEventListener('click', chainDownloadCloud);
+document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
   document.getElementById('cloud-refresh-btn').addEventListener('click', refreshCloudTasks);
   document.getElementById('cloud-close-modal-btn').addEventListener('click', hideCloudDownload);
 
@@ -1791,3 +1875,4 @@ function showTextPreview(filename, text) {
   modal.addEventListener('click', function(e) { if (e.target === modal && document.body.contains(modal)) document.body.removeChild(modal); });
   document.body.appendChild(modal);
 }
+

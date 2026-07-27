@@ -36,7 +36,7 @@ func TestConcurrentFileOperations(t *testing.T) {
 	var wg sync.WaitGroup
 	// 使用 error 收集而非直接 t.Fatalf（goroutine 中 t.Fatal 不安全）
 	errCh := make(chan error, 10)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
@@ -79,7 +79,7 @@ func TestConcurrentDownload(t *testing.T) {
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 5)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
