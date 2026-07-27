@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package clientfactory 提供客户端创建工厂的接口和实现。
-// 生产实现通过配置加载创建 client.Service，测试实现直接返回 mock。
+// 生产实现通过配置加载创建 *client.FileClient，测试实现直接返回 mock。
 package clientfactory
 
 import (
@@ -16,8 +16,8 @@ import (
 
 // Factory 抽象客户端创建，生产/测试可替换。
 type Factory interface {
-	// NewClient 从 cobra 命令和配置创建 client.Service。
-	NewClient(cmd *cobra.Command) (client.Service, error)
+	// NewClient 从 cobra 命令和配置创建 *client.FileClient。
+	NewClient(cmd *cobra.Command) (*client.FileClient, error)
 }
 
 // CfgBinder 抽象配置提供者能力，避免直接依赖 sclientcfg.ViperProvider 类型。
@@ -41,8 +41,8 @@ func New(cfgFile string, cfgProviderFn func() CfgBinder) Factory {
 	}
 }
 
-// NewClient 从配置加载和 flag 覆盖创建 client.Service。
-func (f *factory) NewClient(cmd *cobra.Command) (client.Service, error) {
+// NewClient 从配置加载和 flag 覆盖创建 *client.FileClient。
+func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	p := f.cfgProvider()
 	if p == nil {
 		return nil, fmt.Errorf("配置未初始化")
@@ -89,17 +89,17 @@ func (f *factory) NewClient(cmd *cobra.Command) (client.Service, error) {
 
 // mockFactory 是测试实现，直接返回预配置的 client。
 type mockFactory struct {
-	svc client.Service
-	err error
+	client *client.FileClient
+	err    error
 }
 
 // NewMock 创建测试实现的 Factory。
-func NewMock(svc client.Service, err error) Factory {
-	return &mockFactory{svc: svc, err: err}
+func NewMock(client *client.FileClient, err error) Factory {
+	return &mockFactory{client: client, err: err}
 }
 
-func (f *mockFactory) NewClient(cmd *cobra.Command) (client.Service, error) {
-	return f.svc, f.err
+func (f *mockFactory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
+	return f.client, f.err
 }
 
 // 编译期检查 mockFactory 实现 Factory 接口

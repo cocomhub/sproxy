@@ -83,51 +83,6 @@ func (pr *ProgressReader) Read(p []byte) (int, error) {
 // Option 是 FileClient 构造选项。
 type Option func(*FileClient)
 
-// Service 是文件操作接口，所有 sclient 命令通过此接口操作。
-type Service interface {
-	Upload(ctx context.Context, localPath, remotePath string) (*UploadResult, error)
-	ChunkedUpload(ctx context.Context, localPath, remotePath string, opts ...ChunkedOption) (*ChunkedUploadResult, error)
-	Download(ctx context.Context, filename, outputPath string) error
-	ChunkedDownload(ctx context.Context, filename, outputPath string, opts ...ChunkedOption) error
-	Delete(ctx context.Context, filename string, localPath string) error
-	Stat(ctx context.Context, filename string) (*FileInfo, error)
-	List(ctx context.Context, subdirs ...string) ([]FileInfo, error)
-	Search(ctx context.Context, q string) ([]FileInfo, error)
-	Rename(ctx context.Context, from, to, fromChecksum string) error
-	Mkdir(ctx context.Context, dirname string) error
-	Rmdir(ctx context.Context, dirname string) error
-	CreateShare(ctx context.Context, filename string, ttl time.Duration, maxDownloads int, oneTime bool) (*ShareLink, error)
-	ListShares(ctx context.Context) ([]*ShareLink, error)
-	RevokeShare(ctx context.Context, token string) error
-	ListVersions(ctx context.Context, filename string) ([]VersionInfo, error)
-	RestoreVersion(ctx context.Context, filename, versionID string) error
-	DeleteVersion(ctx context.Context, filename, versionID string) error
-	GetConfig(ctx context.Context) (*ConfigResponse, error)
-	UpdateConfig(ctx context.Context, updates map[string]any) error
-	GetStats(ctx context.Context) (*StatsResponse, error)
-	Archive(ctx context.Context, files []string, outputPath string) error
-	ArchiveDir(ctx context.Context, dirname, outputPath string) error
-	BatchDelete(ctx context.Context, files []BatchDeleteFile) ([]BatchOperationResult, error)
-	BatchRename(ctx context.Context, operations []BatchRenameOp) ([]BatchOperationResult, error)
-	// === Cloud Download ===
-	CloudDownload(ctx context.Context, url string, opts ...CloudDownloadOption) (*CloudTask, error)
-	CloudDownloadBatch(ctx context.Context, urls []string) ([]CloudTask, error)
-	ListCloudTasks(ctx context.Context, status string) ([]CloudTask, error)
-	GetCloudTask(ctx context.Context, taskID string) (*CloudTask, error)
-	CancelCloudTask(ctx context.Context, taskID string) error
-	DeleteCloudTask(ctx context.Context, taskID string) error
-	// === Cloud Archive ===
-	ArchiveCloudTask(ctx context.Context, taskID, archiveName string) (*ArchiveResult, error)
-	ArchiveCloudTasks(ctx context.Context, taskIDs []string, archiveName string) (*ArchiveResult, error)
-	// === Storage Config ===
-	UpdateStorageConfig(ctx context.Context, maxStorageBytes int64) error
-	// === Hub Management ===
-	ListHubNodes(ctx context.Context) ([]HubNodeInfo, error)
-	RemoveHubNode(ctx context.Context, nodeID string) error
-	GetHubStats(ctx context.Context) (*HubStats, error)
-	TunnelDo(req *http.Request) (*http.Response, error)
-}
-
 // FileClient 是 sproxy 文件服务和加密隧道的 Go 客户端。
 //
 // 使用方式：
@@ -152,9 +107,6 @@ type FileClient struct {
 	uploadCache  sync.Map      // key = absFilePath, value = *uploadCacheEntry
 	chainManager *ChainManager // 链式操作管理器，nil=不启用
 }
-
-// 编译期检查 FileClient 实现 Service 接口
-var _ Service = (*FileClient)(nil)
 
 // NewFileClient 创建一个新的 sproxy 客户端。
 //
@@ -866,7 +818,11 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	if c.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
-	resp, err = c.httpClient.Do(req)
+	hc := c.httpClient
+		if hc == nil {
+			hc = http.DefaultClient
+		}
+		resp, err = hc.Do(req)
 	return closeBodyIfErr(resp, err)
 }
 

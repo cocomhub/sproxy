@@ -196,7 +196,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 }
 
 // waitForCompletion 轮询等待所有云端任务完成。
-func waitForCompletion(ctx context.Context, svc client.Service, ios cli.IOStreams, tasks []client.CloudTask, interval time.Duration) ([]client.CloudTask, error) {
+func waitForCompletion(ctx context.Context, fc *client.FileClient, ios cli.IOStreams, tasks []client.CloudTask, interval time.Duration) ([]client.CloudTask, error) {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
@@ -231,7 +231,7 @@ func waitForCompletion(ctx context.Context, svc client.Service, ios cli.IOStream
 			return nil, ctx.Err()
 		case <-ticker.C:
 			for id := range pending {
-				task, err := svc.GetCloudTask(ctx, id)
+				task, err := fc.GetCloudTask(ctx, id)
 				if err != nil {
 					ios.WriteErrLine("  轮询任务 %s 失败: %v", id, err)
 					delete(pending, id)
