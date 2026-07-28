@@ -7,6 +7,7 @@ package clientfactory
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -90,6 +91,13 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		clientKey, _ := cmd.Flags().GetString("client-key")
 		if clientKey == "" {
 			return nil, fmt.Errorf("--client-cert 需要配合 --client-key 使用")
+		}
+		// 验证证书文件存在，避免 WithClientCert 在 CLI 中 panic
+		if _, err := os.Stat(clientCert); err != nil {
+			return nil, fmt.Errorf("客户端证书文件不存在: %s", clientCert)
+		}
+		if _, err := os.Stat(clientKey); err != nil {
+			return nil, fmt.Errorf("客户端私钥文件不存在: %s", clientKey)
 		}
 		opts = append(opts, client.WithClientCert(clientCert, clientKey))
 	} else if clientKey, _ := cmd.Flags().GetString("client-key"); clientKey != "" {

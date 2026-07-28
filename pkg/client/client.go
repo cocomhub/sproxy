@@ -195,11 +195,42 @@ func WithInsecureTLS() Option {
 //
 // 与 WithInsecureTLS 的先后顺序不影响结果：WithClientCert 会保留
 // InsecureSkipVerify 状态，不会因顺序问题导致证书验证失效。
+//
+// 注意：证书加载失败时会 panic（行为明确），使用 WithClientCertOptional 可静默降级。
 func WithClientCert(certFile, keyFile string) Option {
 	return func(c *FileClient) {
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
-			c.logger.Warn("加载客户端证书失败", "cert_file", certFile, "error", err)
+			panic(fmt.Sprintf("证书加载失败（请检查文件路径或使用 WithClientCertOptional 静默降级）: cert_file=%s, error=%v", certFile, err))
+		}
+		// 保留当前 transport 的 InsecureSkipVerify 状态
+		var insecureSkipVerify bool
+		if c.httpClient != nil && c.httpClient.Transport != nil {
+			if transport, ok := c.httpClient.Transport.(*http.Transport); ok && transport.TLSClientConfig != nil {
+				insecureSkipVerify = transport.TLSClientConfig.InsecureSkipVerify
+			}
+		}
+		c.httpClient = &http.Client{
+			Timeout: c.httpClient.Timeout,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					Certificates:       []tls.Certificate{cert},
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: insecureSkipVerify, //nolint:gosec
+				},
+			},
+		}
+	}
+}
+
+// WithClientCertOptional 设置客户端证书用于 mTLS 双向认证。
+// 与 WithClientCert 的区别：证书加载失败时仅记录警告，不 panic，客户端继续使用无证书配置。
+// 适用于证书文件可能不存在的场景（如首次启动时尚未生成客户端证书）。
+func WithClientCertOptional(certFile, keyFile string) Option {
+	return func(c *FileClient) {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			c.logger.Warn("加载客户端证书失败（已忽略，使用无证书直连）", "cert_file", certFile, "error", err)
 			return
 		}
 		// 保留当前 transport 的 InsecureSkipVerify 状态

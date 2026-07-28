@@ -57,37 +57,58 @@ type ACMEConfig struct {
 }
 
 // Config 是证书管理的通用配置。
+//
+// 优先级说明（从高到低）：
+//  1. CertFile + KeyFile：显式指定证书文件路径时，优先使用文件证书管理器
+//  2. ACME.Enabled：启用 ACME 自动证书时，使用 autocert 管理器
+//  3. AutoTLS：以上均未配置时，自动生成 ECDSA P-256 自签证书
 type Config struct {
-	// 方式 1：静态文件证书
+	// 方式 1：静态文件证书（最高优先级）
+	// 显式指定了证书文件路径时，优先使用文件证书，忽略其他配置。
 	CertFile string
 	KeyFile  string
 
 	// 方式 2：ACME 自动证书
+	// 启用 ACME 时需要配置 Domains（域名列表），支持 HTTP-01 和 TLS-ALPN-01 挑战。
+	// DNS-01 挑战支持通过 DNSProvider + DNSConfig 扩展（预留，当前版本未集成）。
 	ACME ACMEConfig
 
 	// 方式 3：自签证书（默认 fallback）
+	// 开发环境或内网服务使用，自动生成到 certs/ 目录。
 	AutoTLS bool
 
 	// mTLS 支持
 	ClientCA string // CA 证书路径，非空时启用客户端证书验证
 
-	// DNS Provider 插件名称（如 "dnspod"）
+	// DNSProvider 是 ACME DNS-01 挑战的 DNS 提供者名称。
+	// 预留字段：当前版本未集成到 autocert 流程中，未来可通过注册表实现
+	// 插件化 DNS-01 挑战（如 dnspod、cloudflare 等）。
+	// 使用方式：DNSProvider: "dnspod", DNSConfig: { "secret_id": "...", "secret_key": "..." }
 	DNSProvider string
 	DNSConfig   map[string]string
 }
 
 // New 根据配置创建对应的 Manager。
+//
+// 优先级规则（避免歧义）：
+//  1. CertFile + KeyFile 同时非空 → 文件证书管理器
+//  2. ACME.Enabled == true → ACME 自动证书管理器
+//  3. AutoTLS == true → 自签证书管理器
+//  4. 以上均不匹配 → 返回错误
+//
+// 注意：如果同时配置了 CertFile+KeyFile 和 ACME.Enabled，
+// 文件证书优先，ACME 配置被忽略。如需切换模式，请清空对应字段。
 func New(cfg *Config) (Manager, error) {
 	switch {
+	case cfg.CertFile != "" && cfg.KeyFile != "":
+		// 优先级 1：显式指定了证书文件
+		return newFileCertManager(cfg)
 	case cfg.ACME.Enabled:
-		if len(cfg.ACME.Domains) == 0 {
-			return nil, fmt.Errorf("acme.enabled 为 true 但 acme.domains 为空")
-		}
+		// 优先级 2：ACME 自动证书（域名校验在工厂函数中执行）
 		return newACMEManager(cfg)
 	case cfg.AutoTLS:
+		// 优先级 3：自签证书（开发/内网环境）
 		return newSelfSignedManager(cfg)
-	case cfg.CertFile != "" && cfg.KeyFile != "":
-		return newFileCertManager(cfg)
 	default:
 		return nil, fmt.Errorf("no TLS configuration provided: specify cert_file+key_file, acme, or auto_tls")
 	}

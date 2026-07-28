@@ -100,6 +100,101 @@ func TestNew_ACMEManager(t *testing.T) {
 	}
 }
 
+func TestNew_ACMEManager_HTTP01(t *testing.T) {
+	cfg := &Config{
+		ACME: ACMEConfig{
+			Enabled: true,
+			Domains: []string{"example.com"},
+			Email:   "admin@example.com",
+			HTTP01:  true,
+		},
+	}
+	m, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if m == nil {
+		t.Fatal("New() returned nil")
+	}
+	// TLSConfig creates the HTTP-01 server lazily
+	tc, err := m.TLSConfig()
+	if err != nil {
+		t.Fatalf("TLSConfig() failed: %v", err)
+	}
+	if tc.MinVersion != tls.VersionTLS12 {
+		t.Errorf("expected MinVersion TLS 1.2, got %v", tc.MinVersion)
+	}
+	// Verify HTTP-01 server is created after TLSConfig call
+	am, ok := m.(*acmeManager)
+	if !ok {
+		t.Fatal("expected *acmeManager type")
+	}
+	if am.httpSrv == nil {
+		t.Error("expected httpSrv to be set when HTTP01 is enabled")
+	} else {
+		if am.httpSrv.Addr != ":80" {
+			t.Errorf("expected httpSrv Addr :80, got %s", am.httpSrv.Addr)
+		}
+	}
+	// Close should shutdown the HTTP-01 server
+	if err := m.Close(); err != nil {
+		t.Errorf("Close() failed: %v", err)
+	}
+}
+
+func TestNew_Priority_FileCertOverACMEMemory(t *testing.T) {
+	// Test that CertFile+KeyFile takes priority over ACME.Enabled
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "cert.pem")
+	keyFile := filepath.Join(dir, "key.pem")
+	if err := GenerateSelfSignedCert(certFile, keyFile); err != nil {
+		t.Fatalf("failed to generate cert: %v", err)
+	}
+
+	cfg := &Config{
+		CertFile: certFile,
+		KeyFile:  keyFile,
+		ACME: ACMEConfig{
+			Enabled: true,
+			Domains: []string{"example.com"},
+		},
+	}
+	m, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	// Should be fileCertManager, not acmeManager
+	if _, ok := m.(*fileCertManager); !ok {
+		t.Fatal("expected *fileCertManager type when CertFile+KeyFile are set even with ACME.Enabled")
+	}
+}
+
+func TestNew_ACMEManager_EmptyDomains(t *testing.T) {
+	cfg := &Config{
+		ACME: ACMEConfig{
+			Enabled: true,
+			Domains: nil,
+		},
+	}
+	_, err := New(cfg)
+	if err == nil {
+		t.Fatal("expected error for ACME with empty domains")
+	}
+}
+
+func TestNew_ACMEManager_EmptyDomainsList(t *testing.T) {
+	cfg := &Config{
+		ACME: ACMEConfig{
+			Enabled: true,
+			Domains: []string{},
+		},
+	}
+	_, err := New(cfg)
+	if err == nil {
+		t.Fatal("expected error for ACME with empty domains list")
+	}
+}
+
 func TestNew_SelfSignedManager(t *testing.T) {
 	// 使用临时目录作为工作目录，避免污染 CWD
 	origDir, wErr := os.Getwd()

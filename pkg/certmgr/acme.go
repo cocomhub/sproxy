@@ -23,6 +23,7 @@ type acmeManager struct {
 }
 
 // newACMEManager 创建 ACME 证书管理器。
+// 注意：域名列表由 New() 保证非空后再调用此函数，但保留防御性校验。
 func newACMEManager(cfg *Config) (*acmeManager, error) {
 	if len(cfg.ACME.Domains) == 0 {
 		return nil, fmt.Errorf("acme.domains 不能为空")

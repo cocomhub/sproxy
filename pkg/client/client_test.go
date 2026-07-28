@@ -1543,13 +1543,27 @@ func keyPEM(der []byte) []byte {
 	return buf.Bytes()
 }
 
-// TestWithClientCert_FileNotExist 验证证书文件不存在时日志 warn 但不崩溃。
+// TestWithClientCert_FileNotExist 验证证书文件不存在时 WithClientCert panic。
 func TestWithClientCert_FileNotExist(t *testing.T) {
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "nonexistent.pem")
 	keyFile := filepath.Join(dir, "nonexistent-key.pem")
 
-	c := NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile))
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when cert file does not exist with WithClientCert")
+		}
+	}()
+	NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile))
+}
+
+// TestWithClientCertOptional_FileNotExist 验证证书文件不存在时 WithClientCertOptional 静默降级。
+func TestWithClientCertOptional_FileNotExist(t *testing.T) {
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "nonexistent.pem")
+	keyFile := filepath.Join(dir, "nonexistent-key.pem")
+
+	c := NewFileClient("https://127.0.0.1:18083", WithClientCertOptional(certFile, keyFile))
 	if c == nil {
 		t.Fatal("expected non-nil client")
 	}
