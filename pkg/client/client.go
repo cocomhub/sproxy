@@ -493,8 +493,7 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	return nil
 }
 
-// processDownloadResponse 处理下载响应中的数据写入和校验。
-// 从响应读取数据写入输出文件，校验 checksum，并恢复修改时间。// verifyChecksumAfterDownload 验证下载文件的 SHA-256 与服务端返回的一致。
+// verifyChecksumAfterDownload 验证下载文件的 SHA-256 与服务端返回的一致。
 func (c *FileClient) verifyChecksumAfterDownload(outputPath, serverCS string) error {
 	c.logger.Debug("下载文件校验", "file_name", outputPath, "checksum", serverCS)
 	localCS, err := calculateChecksum(outputPath)

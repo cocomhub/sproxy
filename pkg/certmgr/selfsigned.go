@@ -133,8 +133,8 @@ func GenerateSelfSignedCert(certFile, keyFile string) error {
 		return fmt.Errorf("encode cert PEM: %w", err)
 	}
 
-	// Write key PEM
-	keyOut, err := os.Create(keyFile)
+	// Write key PEM with restricted permissions (0600)
+	keyOut, err := os.OpenFile(keyFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("create key file %s: %w", keyFile, err)
 	}

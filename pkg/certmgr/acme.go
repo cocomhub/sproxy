@@ -62,7 +62,7 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 		m.mTLSFn(tc)
 	}
 	// 如果启用 HTTP-01，启动挑战监听
-	if m.http01 {
+	if m.http01 && m.httpSrv == nil {
 		m.httpSrv = &http.Server{
 			Addr:              ":80",
 			Handler:           m.m.HTTPHandler(nil),
