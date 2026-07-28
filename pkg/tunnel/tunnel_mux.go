@@ -41,6 +41,9 @@ func NewTunnel(m *mux.Mux, key []byte) *Tunnel {
 // ensureHandshake 确保 ECDH 握手已完成。
 // 在 dialer 侧：首次调用时发起握手（m.Open），返回握手完成。
 // 在 listener 侧：握手由 Serve 在进入 accept 循环前完成。
+// 注意：握手受 sync.Once 保护只执行一次，因此使用 context.Background()
+// 而非请求级 context——握手是一次性操作，影响整个隧道生命周期，
+// 不应被单个请求的生命周期取消。
 func (t *Tunnel) ensureHandshake() {
 	if t.key == nil {
 		return
