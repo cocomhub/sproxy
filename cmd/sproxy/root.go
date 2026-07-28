@@ -224,6 +224,11 @@ func startTLSListener(cfg *server.Config, s *http.Server) error {
 	if err != nil {
 		return fmt.Errorf("创建证书管理器失败: %w", err)
 	}
+	defer func() {
+		if closeErr := mgr.Close(); closeErr != nil {
+			slog.Warn("证书管理器关闭失败", "error", closeErr)
+		}
+	}()
 	tlsCfg, err := mgr.TLSConfig()
 	if err != nil {
 		return fmt.Errorf("获取 TLS 配置失败: %w", err)

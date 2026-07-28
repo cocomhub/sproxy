@@ -1515,7 +1515,7 @@ func generateTestCert(t *testing.T) (certFile, keyFile string) {
 	certFile = filepath.Join(dir, "test.crt")
 	keyFile = filepath.Join(dir, "test.key")
 
-	if wErr := os.WriteFile(certFile, certPEM(certDER), 0644); err != nil {
+	if wErr := os.WriteFile(certFile, certPEM(certDER), 0644); wErr != nil {
 		t.Fatalf("写入证书文件失败: %v", wErr)
 	}
 

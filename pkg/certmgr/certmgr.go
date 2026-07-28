@@ -79,7 +79,10 @@ type Config struct {
 // New 根据配置创建对应的 Manager。
 func New(cfg *Config) (Manager, error) {
 	switch {
-	case cfg.ACME.Enabled && len(cfg.ACME.Domains) > 0:
+	case cfg.ACME.Enabled:
+		if len(cfg.ACME.Domains) == 0 {
+			return nil, fmt.Errorf("acme.enabled 为 true 但 acme.domains 为空")
+		}
 		return newACMEManager(cfg)
 	case cfg.AutoTLS:
 		return newSelfSignedManager(cfg)
