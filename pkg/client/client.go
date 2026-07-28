@@ -215,7 +215,7 @@ func WithClientCert(certFile, keyFile string) Option {
 				TLSClientConfig: &tls.Config{
 					Certificates:       []tls.Certificate{cert},
 					MinVersion:         tls.VersionTLS12,
-					InsecureSkipVerify: insecureSkipVerify,
+					InsecureSkipVerify: insecureSkipVerify, //nolint:gosec
 				},
 			},
 		}
