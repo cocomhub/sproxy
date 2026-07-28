@@ -23,6 +23,20 @@ type acmeManager struct {
 	http01     bool
 	http01Addr string
 	httpSrv    *http.Server // HTTP-01 挑战服务器，Close() 时关闭
+	httpSrvErr chan error   // 用于传递 HTTP-01 服务器启动错误（缓冲 1）
+}
+
+// http01Serve 启动 HTTP-01 挑战服务器（在 goroutine 中运行）。
+func (m *acmeManager) http01Serve(srv *http.Server) {
+	slog.Info("ACME HTTP-01 challenge listener started", "addr", srv.Addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Warn("ACME HTTP-01 listener stopped", "error", err)
+		// 非阻塞发送启动/运行时错误到 channel
+		select {
+		case m.httpSrvErr <- err:
+		default:
+		}
+	}
 }
 
 // newACMEManager 创建 ACME 证书管理器。
@@ -50,6 +64,7 @@ func newACMEManager(cfg *Config) (*acmeManager, error) {
 		mTLSFn:     mTLSFn,
 		http01:     cfg.ACME.HTTP01,
 		http01Addr: cfg.ACME.HTTP01Port,
+		httpSrvErr: make(chan error, 1),
 	}, nil
 }
 
@@ -78,12 +93,7 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
 		}
-		go func() {
-			slog.Info("ACME HTTP-01 challenge listener started", "addr", addr)
-			if err := m.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Warn("ACME HTTP-01 listener stopped", "error", err)
-			}
-		}()
+		go m.http01Serve(m.httpSrv)
 	}
 	m.mu.Unlock()
 	return tc, nil

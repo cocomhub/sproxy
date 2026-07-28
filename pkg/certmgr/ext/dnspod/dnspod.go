@@ -15,8 +15,10 @@ package dnspod
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha1" //nolint:gosec // DNSPod API 要求 HMAC-SHA1 签名，无安全替代
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -141,7 +143,13 @@ func (p *Provider) callAPIWithResult(ctx context.Context, params map[string]stri
 	// 添加公共参数
 	params["SecretId"] = p.config.SecretId
 	params["Timestamp"] = fmt.Sprintf("%d", time.Now().Unix())
-	params["Nonce"] = fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+	// 生成随机 Nonce
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return fmt.Errorf("生成 Nonce 失败: %w", err)
+	}
+	nonceInt := int64(binary.LittleEndian.Uint64(nonce) % 100000)
+	params["Nonce"] = fmt.Sprintf("%d", nonceInt)
 	params["SignatureMethod"] = "HmacSHA1"
 
 	// 排序参数键

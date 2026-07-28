@@ -31,14 +31,20 @@ type selfSignedManager struct {
 func newSelfSignedManager(cfg *Config) (*selfSignedManager, error) {
 	certFile := cfg.CertFile
 	keyFile := cfg.KeyFile
-	if certFile == "" {
+	if certFile == "" && keyFile == "" {
 		certFile = "certs/_wildcard.sproxy.local.pem"
-	}
-	if keyFile == "" {
 		keyFile = "certs/_wildcard.sproxy.local-key.pem"
+	} else if certFile == "" || keyFile == "" {
+		return nil, fmt.Errorf("cert_file 和 key_file 必须同时设置或同时为空")
 	}
-	// 检查证书文件是否存在，不存在则自动生成
+	// 检查证书文件是否存在，只要任一缺失就重新生成
 	if _, err := os.Stat(certFile); os.IsNotExist(err) {
+		if err := GenerateSelfSignedCert(certFile, keyFile); err != nil {
+			return nil, err
+		}
+	} else if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+		// keyFile 存在但 certFile 不存在的情况已在上面处理
+		// 这里处理 certFile 存在但 keyFile 不存在的情况
 		if err := GenerateSelfSignedCert(certFile, keyFile); err != nil {
 			return nil, err
 		}

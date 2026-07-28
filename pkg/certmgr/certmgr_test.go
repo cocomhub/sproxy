@@ -50,9 +50,10 @@ func TestNew_FileCertManager(t *testing.T) {
 }
 
 func TestNew_FileCertManager_FileNotExist(t *testing.T) {
+	dir := t.TempDir()
 	cfg := &Config{
-		CertFile: "/nonexistent/cert.pem",
-		KeyFile:  "/nonexistent/key.pem",
+		CertFile: filepath.Join(dir, "nonexistent.pem"),
+		KeyFile:  filepath.Join(dir, "nonexistent-key.pem"),
 	}
 	m, err := New(cfg)
 	if err != nil {
@@ -291,6 +292,59 @@ func TestNew_NoConfig(t *testing.T) {
 	_, err := New(cfg)
 	if err == nil {
 		t.Fatal("expected error for empty config")
+	}
+}
+
+// TestNew_FileCertCertOnly 验证仅设置 certFile 时 New() 不会创建文件证书管理器。
+func TestNew_FileCertCertOnly(t *testing.T) {
+	cfg := &Config{
+		CertFile: "/some/path/cert.pem",
+		// KeyFile is empty
+	}
+	_, err := New(cfg)
+	if err == nil {
+		t.Fatal("expected error when only certFile is set without keyFile")
+	}
+}
+
+// TestNew_FileCertKeyOnly 验证仅设置 keyFile 时 New() 不会创建文件证书管理器。
+func TestNew_FileCertKeyOnly(t *testing.T) {
+	cfg := &Config{
+		KeyFile: "/some/path/key.pem",
+	}
+	_, err := New(cfg)
+	if err == nil {
+		t.Fatal("expected error when only keyFile is set without certFile")
+	}
+}
+
+// TestNew_SelfSignedManager_OnlyCertFile 验证自签模式下仅设置 certFile 时报错。
+func TestNew_SelfSignedManager_OnlyCertFile(t *testing.T) {
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "cert.pem")
+	cfg := &Config{
+		AutoTLS:  true,
+		CertFile: certFile,
+		// KeyFile is empty — should error
+	}
+	_, err := newSelfSignedManager(cfg)
+	if err == nil {
+		t.Fatal("expected error when only certFile is set for self-signed manager")
+	}
+}
+
+// TestNew_SelfSignedManager_OnlyKeyFile 验证自签模式下仅设置 keyFile 时报错。
+func TestNew_SelfSignedManager_OnlyKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "key.pem")
+	cfg := &Config{
+		AutoTLS: true,
+		// CertFile is empty
+		KeyFile: keyFile,
+	}
+	_, err := newSelfSignedManager(cfg)
+	if err == nil {
+		t.Fatal("expected error when only keyFile is set for self-signed manager")
 	}
 }
 
