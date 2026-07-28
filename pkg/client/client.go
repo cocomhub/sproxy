@@ -174,12 +174,26 @@ func WithTimeout(d time.Duration) Option {
 //
 // 生产环境应使用正式 CA 签发的证书，而非此选项。
 // 此选项仅影响直连模式（HTTP 客户端），不影响隧道模式。
+//
+// 注意：与 WithClientCert 的先后顺序不影响结果：WithInsecureTLS 会保留
+// 已有 Transport 中的 Certificates 配置，不会因顺序问题导致证书丢失。
 func WithInsecureTLS() Option {
 	return func(c *FileClient) {
-		transport := &http.Transport{
-			TLSClientConfig: &tls.Config{
+		var transport *http.Transport
+		if c.httpClient != nil && c.httpClient.Transport != nil {
+			if existingTransport, ok := c.httpClient.Transport.(*http.Transport); ok {
+				transport = existingTransport.Clone()
+			}
+		}
+		if transport == nil {
+			transport = &http.Transport{}
+		}
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{
 				InsecureSkipVerify: true, //nolint:gosec
-			},
+			}
+		} else {
+			transport.TLSClientConfig.InsecureSkipVerify = true
 		}
 		c.httpClient = &http.Client{
 			Timeout:   c.httpClient.Timeout,

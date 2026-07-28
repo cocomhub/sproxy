@@ -1651,8 +1651,8 @@ func TestWithClientCert_ReverseOrder(t *testing.T) {
 	if !transport.TLSClientConfig.InsecureSkipVerify {
 		t.Error("expected InsecureSkipVerify to be true")
 	}
-	// 反向顺序时，证书被 WithInsecureTLS 覆盖（预期行为，因为 WithInsecureTLS 后执行）
-	if len(transport.TLSClientConfig.Certificates) != 0 {
-		t.Log("证书被 WithInsecureTLS 覆盖（预期行为，因为 WithInsecureTLS 后执行）")
+	// 验证反向顺序时证书仍然保留（WithInsecureTLS 使用 Clone() 保留已有配置）
+	if len(transport.TLSClientConfig.Certificates) != 1 {
+		t.Errorf("expected 1 certificate preserved after WithInsecureTLS, got %d", len(transport.TLSClientConfig.Certificates))
 	}
 }
