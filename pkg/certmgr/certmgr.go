@@ -14,7 +14,8 @@
 //	})
 //	if err != nil { ... }
 //	tc, err := mgr.TLSConfig()
-//	http.ListenAndServeTLS(":443", tc)
+//	srv := &http.Server{Addr: ":443", TLSConfig: tc}
+//	srv.ListenAndServeTLS("", "")
 package certmgr
 
 import (

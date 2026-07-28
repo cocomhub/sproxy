@@ -69,12 +69,15 @@ func New(cfg Config) *Provider {
 
 // SetDNSRecord 设置 DNS TXT 记录用于 ACME 域名验证。
 // ACME 挑战格式：_acme-challenge.<domain> TXT "<keyAuth>"
+// domain 参数是完整域名（如 sub.example.com），自动提取根域名并设置 SubDomain。
 func (p *Provider) SetDNSRecord(ctx context.Context, domain, token, keyAuth string) error {
-	rootDomain := domain
+	rootDomain, subDomain := splitDomain(domain)
+	subDomain = subDomainPrefix(subDomain)
+
 	params := map[string]string{
 		"Action":     "CreateRecord",
 		"Domain":     rootDomain,
-		"SubDomain":  "_acme-challenge",
+		"SubDomain":  subDomain,
 		"RecordType": "TXT",
 		"RecordLine": "默认",
 		"Value":      keyAuth,
@@ -84,14 +87,16 @@ func (p *Provider) SetDNSRecord(ctx context.Context, domain, token, keyAuth stri
 }
 
 // CleanupDNSRecord 清理 ACME 验证记录。
+// domain 参数是完整域名，自动提取根域名并设置 SubDomain。
 func (p *Provider) CleanupDNSRecord(ctx context.Context, domain, token, keyAuth string) error {
-	rootDomain := domain
+	rootDomain, subDomain := splitDomain(domain)
+	subDomain = subDomainPrefix(subDomain)
 
 	// 先查找 TXT 记录
 	listParams := map[string]string{
 		"Action":     "RecordList",
 		"Domain":     rootDomain,
-		"SubDomain":  "_acme-challenge",
+		"SubDomain":  subDomain,
 		"RecordType": "TXT",
 	}
 	var result struct {
@@ -207,4 +212,31 @@ func (p *Provider) callAPIWithResult(ctx context.Context, params map[string]stri
 	}
 
 	return nil
+}
+
+// splitDomain 将完整域名拆分为根域名和子域名前缀。
+// 例如 "sub.example.com" -> ("example.com", "sub")。
+// 顶级域名如 "example.com" -> ("example.com", "").
+// 注意：未处理多级 TLD（如 .co.uk），但 ACME 证书场景下通常涉及
+// 公共域名，根域名提取符合 DNSPod API 要求。
+func splitDomain(domain string) (root, sub string) {
+	parts := strings.Split(domain, ".")
+	if len(parts) <= 2 {
+		return domain, ""
+	}
+	// 取最后两级作为根域名
+	root = strings.Join(parts[len(parts)-2:], ".")
+	// 前面部分作为子域名前缀
+	sub = strings.Join(parts[:len(parts)-2], ".")
+	return
+}
+
+// subDomainPrefix 为子域名添加 _acme-challenge 前缀。
+// 如果 sub 为空（根域名），返回 "_acme-challenge"。
+// 如果 sub 非空（子域名），返回 "_acme-challenge.子域名"。
+func subDomainPrefix(sub string) string {
+	if sub == "" {
+		return "_acme-challenge"
+	}
+	return "_acme-challenge." + sub
 }

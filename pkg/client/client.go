@@ -191,28 +191,34 @@ func WithInsecureTLS() Option {
 // applyClientCert 加载客户端证书并应用到 FileClient 的 httpClient。
 // 如果 certFile 或 keyFile 为空，不执行任何操作。
 // 保留已有 transport 的 InsecureSkipVerify 状态，避免被 WithInsecureTLS 的先后顺序影响。
+// 使用 transport.Clone() 保留其他传输层配置（如代理、DialContext）。
 func applyClientCert(c *FileClient, certFile, keyFile string, onError func(err error)) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		onError(err)
 		return
 	}
-	// 保留当前 transport 的 InsecureSkipVerify 状态
-	var insecureSkipVerify bool
+	// 保留当前 transport 的 InsecureSkipVerify 状态及其他配置
+	var transport *http.Transport
 	if c.httpClient != nil && c.httpClient.Transport != nil {
-		if transport, ok := c.httpClient.Transport.(*http.Transport); ok && transport.TLSClientConfig != nil {
-			insecureSkipVerify = transport.TLSClientConfig.InsecureSkipVerify
+		if existingTransport, ok := c.httpClient.Transport.(*http.Transport); ok {
+			transport = existingTransport.Clone()
 		}
 	}
+	if transport == nil {
+		transport = &http.Transport{}
+	}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+	transport.TLSClientConfig.Certificates = []tls.Certificate{cert}
+	// 保留 InsecureSkipVerify 状态（如果已有配置）
+	// 注意：transport 是 Clone() 来的，已经包含了原有的 TLSClientConfig
 	c.httpClient = &http.Client{
-		Timeout: c.httpClient.Timeout,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				Certificates:       []tls.Certificate{cert},
-				MinVersion:         tls.VersionTLS12,
-				InsecureSkipVerify: insecureSkipVerify, //nolint:gosec
-			},
-		},
+		Timeout:   c.httpClient.Timeout,
+		Transport: transport,
 	}
 }
 

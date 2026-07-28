@@ -219,6 +219,13 @@ func startTLSListener(cfg *server.Config, s *http.Server) error {
 		KeyFile:  cfg.TLS.KeyFile,
 		AutoTLS:  cfg.TLS.AutoTLS,
 		ClientCA: cfg.TLS.ClientCA,
+		ACME: certmgr.ACMEConfig{
+			Enabled:  cfg.TLS.ACME.Enabled,
+			Domains:  cfg.TLS.ACME.Domains,
+			Email:    cfg.TLS.ACME.Email,
+			CacheDir: cfg.TLS.ACME.CacheDir,
+			HTTP01:   cfg.TLS.ACME.HTTP01,
+		},
 	}
 	mgr, err := certmgr.New(cmCfg)
 	if err != nil {
@@ -234,7 +241,7 @@ func startTLSListener(cfg *server.Config, s *http.Server) error {
 		return fmt.Errorf("获取 TLS 配置失败: %w", err)
 	}
 	s.TLSConfig = tlsCfg
-	slog.Info("TLS enabled", "cert_file", cfg.TLS.CertFile, "auto_tls", cfg.TLS.AutoTLS, "client_ca", cfg.TLS.ClientCA)
+	slog.Info("TLS enabled", "cert_file", cfg.TLS.CertFile, "auto_tls", cfg.TLS.AutoTLS, "client_ca", cfg.TLS.ClientCA, "acme", cfg.TLS.ACME.Enabled)
 
 	if err := s.ListenAndServeTLS("", ""); err != nil {
 		if err == http.ErrServerClosed {
