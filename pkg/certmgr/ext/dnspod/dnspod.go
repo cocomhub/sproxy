@@ -31,19 +31,39 @@ import (
 type Config struct {
 	SecretId  string
 	SecretKey string
+	// Endpoint 可选，默认 "dnspod.tencentcloudapi.com"。
+	// 测试时设为 mock 服务器的 host:port（使用 http:// 前缀）。
+	Endpoint string
 }
 
 // Provider 实现 certmgr.DNSProvider 接口。
 type Provider struct {
-	config Config
-	client *http.Client
+	config   Config
+	client   *http.Client
+	endpoint string
+	scheme   string
 }
 
 // New 创建 DNSPod Provider。
 func New(cfg Config) *Provider {
+	endpoint := cfg.Endpoint
+	scheme := "https"
+	if endpoint == "" {
+		endpoint = "dnspod.tencentcloudapi.com"
+	}
+	// 支持测试时传入完整 URL（如 http://127.0.0.1:port），提取 scheme 和 host
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		parts := strings.SplitN(endpoint, "://", 2)
+		if len(parts) == 2 {
+			scheme = parts[0]
+			endpoint = parts[1]
+		}
+	}
 	return &Provider{
-		config: cfg,
-		client: &http.Client{Timeout: 30 * time.Second},
+		config:   cfg,
+		client:   &http.Client{Timeout: 30 * time.Second},
+		endpoint: endpoint,
+		scheme:   scheme,
 	}
 }
 
@@ -135,13 +155,18 @@ func (p *Provider) callAPIWithResult(ctx context.Context, params map[string]stri
 
 	// 计算签名（HmacSHA1）
 	mac := hmac.New(sha1.New, []byte(p.config.SecretKey))
-	signStr := "GETdnspod.tencentcloudapi.com/?" + srcStr
+	signStr := "GET" + p.endpoint + "/?" + srcStr
 	mac.Write([]byte(signStr))
 	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
-	// 构建完整 URL
-	reqURL := fmt.Sprintf("https://dnspod.tencentcloudapi.com/?%s&Signature=%s", srcStr, url.QueryEscape(signature))
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	// 使用 url.URL 构建完整请求 URL
+	u := &url.URL{
+		Scheme:   p.scheme,
+		Host:     p.endpoint,
+		Path:     "/",
+		RawQuery: srcStr + "&Signature=" + url.QueryEscape(signature),
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
@@ -155,6 +180,11 @@ func (p *Provider) callAPIWithResult(ctx context.Context, params map[string]stri
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("读取响应失败: %w", err)
+	}
+
+	// 检查 HTTP 状态码
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("DNSPod API 返回非 200 状态码: %d, body: %s", resp.StatusCode, string(body))
 	}
 
 	// 检查错误

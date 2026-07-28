@@ -79,12 +79,12 @@ type Config struct {
 // New 根据配置创建对应的 Manager。
 func New(cfg *Config) (Manager, error) {
 	switch {
-	case cfg.CertFile != "" && cfg.KeyFile != "":
-		return newFileCertManager(cfg)
 	case cfg.ACME.Enabled && len(cfg.ACME.Domains) > 0:
 		return newACMEManager(cfg)
 	case cfg.AutoTLS:
 		return newSelfSignedManager(cfg)
+	case cfg.CertFile != "" && cfg.KeyFile != "":
+		return newFileCertManager(cfg)
 	default:
 		return nil, fmt.Errorf("no TLS configuration provided: specify cert_file+key_file, acme, or auto_tls")
 	}

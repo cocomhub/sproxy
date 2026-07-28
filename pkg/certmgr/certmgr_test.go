@@ -11,9 +11,18 @@ import (
 )
 
 func TestNew_FileCertManager(t *testing.T) {
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "cert.pem")
+	keyFile := filepath.Join(dir, "key.pem")
+
+	// Generate real cert files first
+	if err := GenerateSelfSignedCert(certFile, keyFile); err != nil {
+		t.Fatalf("failed to generate cert: %v", err)
+	}
+
 	cfg := &Config{
-		CertFile: "/path/to/cert.pem",
-		KeyFile:  "/path/to/key.pem",
+		CertFile: certFile,
+		KeyFile:  keyFile,
 	}
 	m, err := New(cfg)
 	if err != nil {
@@ -29,11 +38,32 @@ func TestNew_FileCertManager(t *testing.T) {
 	if tc.MinVersion != tls.VersionTLS12 {
 		t.Errorf("expected MinVersion TLS 1.2, got %v", tc.MinVersion)
 	}
+	if len(tc.Certificates) == 0 {
+		t.Error("expected at least one certificate")
+	}
 	if !m.Ready() {
 		t.Error("Ready() should return true")
 	}
 	if err := m.Close(); err != nil {
 		t.Errorf("Close() failed: %v", err)
+	}
+}
+
+func TestNew_FileCertManager_FileNotExist(t *testing.T) {
+	cfg := &Config{
+		CertFile: "/nonexistent/cert.pem",
+		KeyFile:  "/nonexistent/key.pem",
+	}
+	m, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if m == nil {
+		t.Fatal("New() returned nil")
+	}
+	// TLSConfig should fail because cert files don't exist
+	if _, err := m.TLSConfig(); err == nil {
+		t.Error("expected error for non-existent cert files")
 	}
 }
 

@@ -31,10 +31,15 @@ func newFileCertManager(cfg *Config) (*fileCertManager, error) {
 	}, nil
 }
 
-// TLSConfig 返回 tls.Config，使用 GetCertificate 动态加载证书。
+// TLSConfig 返回 tls.Config，加载证书文件。
 func (m *fileCertManager) TLSConfig() (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(m.certFile, m.keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("加载文件证书失败: %w", err)
+	}
 	tc := &tls.Config{
-		MinVersion: tls.VersionTLS12,
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
 	}
 	if m.mTLSFn != nil {
 		m.mTLSFn(tc)

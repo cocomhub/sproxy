@@ -5,6 +5,8 @@
       "Read",
       "Write",
       "Write(*)",
+      "Read(**/*)",
+      "Edit(**/*)",
       "Bash(*)",
       "PowerShell(*)",
       "mcp__mcp-atlassian-http__confluence_get_page",

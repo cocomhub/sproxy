@@ -87,9 +87,13 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		opts = append(opts, client.WithInsecureTLS())
 	}
 	if clientCert, _ := cmd.Flags().GetString("client-cert"); clientCert != "" {
-		if clientKey, _ := cmd.Flags().GetString("client-key"); clientKey != "" {
-			opts = append(opts, client.WithClientCert(clientCert, clientKey))
+		clientKey, _ := cmd.Flags().GetString("client-key")
+		if clientKey == "" {
+			return nil, fmt.Errorf("--client-cert 需要配合 --client-key 使用")
 		}
+		opts = append(opts, client.WithClientCert(clientCert, clientKey))
+	} else if clientKey, _ := cmd.Flags().GetString("client-key"); clientKey != "" {
+		return nil, fmt.Errorf("--client-key 需要配合 --client-cert 使用")
 	}
 
 	return client.NewFileClient(serverURL, opts...), nil

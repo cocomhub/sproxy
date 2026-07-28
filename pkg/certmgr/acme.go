@@ -4,6 +4,7 @@
 package certmgr
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -15,9 +16,10 @@ import (
 
 // acmeManager 管理 ACME 自动证书。
 type acmeManager struct {
-	m      *autocert.Manager
-	mTLSFn func(*tls.Config)
-	http01 bool
+	m       *autocert.Manager
+	mTLSFn  func(*tls.Config)
+	http01  bool
+	httpSrv *http.Server // HTTP-01 挑战服务器，Close() 时关闭
 }
 
 // newACMEManager 创建 ACME 证书管理器。
@@ -60,15 +62,15 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 	}
 	// 如果启用 HTTP-01，启动挑战监听
 	if m.http01 {
+		m.httpSrv = &http.Server{
+			Addr:              ":80",
+			Handler:           m.m.HTTPHandler(nil),
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+		}
 		go func() {
 			slog.Info("ACME HTTP-01 challenge listener started on :80")
-			httpSrv := &http.Server{
-				Addr:              ":80",
-				Handler:           m.m.HTTPHandler(nil),
-				ReadHeaderTimeout: 10 * time.Second,
-				ReadTimeout:       30 * time.Second,
-			}
-			if err := httpSrv.ListenAndServe(); err != nil {
+			if err := m.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Warn("ACME HTTP-01 listener stopped", "error", err)
 			}
 		}()
@@ -79,5 +81,12 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 // Ready 返回证书是否就绪。
 func (m *acmeManager) Ready() bool { return true }
 
-// Close 释放资源。
-func (m *acmeManager) Close() error { return nil }
+// Close 释放资源，关闭 HTTP-01 挑战服务器。
+func (m *acmeManager) Close() error {
+	if m.httpSrv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return m.httpSrv.Shutdown(ctx)
+	}
+	return nil
+}
