@@ -188,6 +188,34 @@ func WithInsecureTLS() Option {
 	}
 }
 
+// applyClientCert 加载客户端证书并应用到 FileClient 的 httpClient。
+// 如果 certFile 或 keyFile 为空，不执行任何操作。
+// 保留已有 transport 的 InsecureSkipVerify 状态，避免被 WithInsecureTLS 的先后顺序影响。
+func applyClientCert(c *FileClient, certFile, keyFile string, onError func(err error)) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		onError(err)
+		return
+	}
+	// 保留当前 transport 的 InsecureSkipVerify 状态
+	var insecureSkipVerify bool
+	if c.httpClient != nil && c.httpClient.Transport != nil {
+		if transport, ok := c.httpClient.Transport.(*http.Transport); ok && transport.TLSClientConfig != nil {
+			insecureSkipVerify = transport.TLSClientConfig.InsecureSkipVerify
+		}
+	}
+	c.httpClient = &http.Client{
+		Timeout: c.httpClient.Timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				Certificates:       []tls.Certificate{cert},
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: insecureSkipVerify, //nolint:gosec
+			},
+		},
+	}
+}
+
 // WithClientCert 设置客户端证书用于 mTLS 双向认证。
 // certFile 和 keyFile 分别是 PEM 编码的客户端证书和私钥文件路径。
 // 当服务端配置了 tls.client_ca 时，需要客户端证书才能通过验证。
@@ -199,27 +227,9 @@ func WithInsecureTLS() Option {
 // 注意：证书加载失败时会 panic（行为明确），使用 WithClientCertOptional 可静默降级。
 func WithClientCert(certFile, keyFile string) Option {
 	return func(c *FileClient) {
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
+		applyClientCert(c, certFile, keyFile, func(err error) {
 			panic(fmt.Sprintf("证书加载失败（请检查文件路径或使用 WithClientCertOptional 静默降级）: cert_file=%s, error=%v", certFile, err))
-		}
-		// 保留当前 transport 的 InsecureSkipVerify 状态
-		var insecureSkipVerify bool
-		if c.httpClient != nil && c.httpClient.Transport != nil {
-			if transport, ok := c.httpClient.Transport.(*http.Transport); ok && transport.TLSClientConfig != nil {
-				insecureSkipVerify = transport.TLSClientConfig.InsecureSkipVerify
-			}
-		}
-		c.httpClient = &http.Client{
-			Timeout: c.httpClient.Timeout,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					Certificates:       []tls.Certificate{cert},
-					MinVersion:         tls.VersionTLS12,
-					InsecureSkipVerify: insecureSkipVerify, //nolint:gosec
-				},
-			},
-		}
+		})
 	}
 }
 
@@ -228,28 +238,9 @@ func WithClientCert(certFile, keyFile string) Option {
 // 适用于证书文件可能不存在的场景（如首次启动时尚未生成客户端证书）。
 func WithClientCertOptional(certFile, keyFile string) Option {
 	return func(c *FileClient) {
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
+		applyClientCert(c, certFile, keyFile, func(err error) {
 			c.logger.Warn("加载客户端证书失败（已忽略，使用无证书直连）", "cert_file", certFile, "error", err)
-			return
-		}
-		// 保留当前 transport 的 InsecureSkipVerify 状态
-		var insecureSkipVerify bool
-		if c.httpClient != nil && c.httpClient.Transport != nil {
-			if transport, ok := c.httpClient.Transport.(*http.Transport); ok && transport.TLSClientConfig != nil {
-				insecureSkipVerify = transport.TLSClientConfig.InsecureSkipVerify
-			}
-		}
-		c.httpClient = &http.Client{
-			Timeout: c.httpClient.Timeout,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					Certificates:       []tls.Certificate{cert},
-					MinVersion:         tls.VersionTLS12,
-					InsecureSkipVerify: insecureSkipVerify, //nolint:gosec
-				},
-			},
-		}
+		})
 	}
 }
 

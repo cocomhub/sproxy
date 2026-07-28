@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
@@ -16,6 +17,7 @@ import (
 
 // acmeManager 管理 ACME 自动证书。
 type acmeManager struct {
+	mu      sync.Mutex
 	m       *autocert.Manager
 	mTLSFn  func(*tls.Config)
 	http01  bool
@@ -61,7 +63,8 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 	if m.mTLSFn != nil {
 		m.mTLSFn(tc)
 	}
-	// 如果启用 HTTP-01，启动挑战监听
+	// 如果启用 HTTP-01，启动挑战监听（互斥保护防止多次启动）
+	m.mu.Lock()
 	if m.http01 && m.httpSrv == nil {
 		m.httpSrv = &http.Server{
 			Addr:              ":80",
@@ -76,6 +79,7 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 			}
 		}()
 	}
+	m.mu.Unlock()
 	return tc, nil
 }
 
@@ -84,6 +88,8 @@ func (m *acmeManager) Ready() bool { return true }
 
 // Close 释放资源，关闭 HTTP-01 挑战服务器。
 func (m *acmeManager) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.httpSrv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

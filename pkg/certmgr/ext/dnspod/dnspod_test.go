@@ -274,7 +274,7 @@ func TestSetDNSRecord_HTTPError(t *testing.T) {
 	}
 }
 
-func TestSetDNSRecord_InvalidJSONResponse(t *testing.T) {
+func TestCleanupDNSRecord_InvalidJSONResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
