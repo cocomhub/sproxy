@@ -131,10 +131,8 @@ func TestNew_ACMEManager_HTTP01(t *testing.T) {
 	}
 	if am.httpSrv == nil {
 		t.Error("expected httpSrv to be set when HTTP01 is enabled")
-	} else {
-		if am.httpSrv.Addr != ":80" {
-			t.Errorf("expected httpSrv Addr :80, got %s", am.httpSrv.Addr)
-		}
+	} else if am.httpSrv.Addr != ":80" {
+		t.Errorf("expected httpSrv Addr :80, got %s", am.httpSrv.Addr)
 	}
 	// Close should shutdown the HTTP-01 server
 	if err := m.Close(); err != nil {
