@@ -220,11 +220,12 @@ func startTLSListener(cfg *server.Config, s *http.Server) error {
 		AutoTLS:  cfg.TLS.AutoTLS,
 		ClientCA: cfg.TLS.ClientCA,
 		ACME: certmgr.ACMEConfig{
-			Enabled:  cfg.TLS.ACME.Enabled,
-			Domains:  cfg.TLS.ACME.Domains,
-			Email:    cfg.TLS.ACME.Email,
-			CacheDir: cfg.TLS.ACME.CacheDir,
-			HTTP01:   cfg.TLS.ACME.HTTP01,
+			Enabled:    cfg.TLS.ACME.Enabled,
+			Domains:    cfg.TLS.ACME.Domains,
+			Email:      cfg.TLS.ACME.Email,
+			CacheDir:   cfg.TLS.ACME.CacheDir,
+			HTTP01:     cfg.TLS.ACME.HTTP01,
+			HTTP01Port: cfg.TLS.ACME.HTTP01Port,
 		},
 	}
 	mgr, err := certmgr.New(cmCfg)

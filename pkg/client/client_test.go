@@ -1567,10 +1567,9 @@ func TestWithClientCertOptional_FileNotExist(t *testing.T) {
 	if c == nil {
 		t.Fatal("expected non-nil client")
 	}
-	// 验证 httpClient 仍然使用默认配置（未被替换）
-	transport, ok := c.httpClient.Transport.(*http.Transport)
-	if ok && transport.TLSClientConfig != nil {
-		t.Fatal("expected TLSClientConfig to be nil when cert loading fails")
+	// 验证 httpClient 仍然使用默认配置（未被替换为自定义 Transport）
+	if c.httpClient.Transport != nil {
+		t.Fatal("expected Transport to be nil (default) when cert loading fails")
 	}
 }
 

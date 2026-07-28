@@ -55,6 +55,10 @@ type ACMEConfig struct {
 	Email    string
 	CacheDir string // 默认 "certs/acme"
 	HTTP01   bool   // 启用 HTTP-01 挑战（需 80 端口）
+	// HTTP01Port 指定 HTTP-01 挑战服务器的监听端口。
+	// 设置为空时使用默认值 ":80"。
+	// 测试时可设为 "127.0.0.1:0" 使用随机端口。
+	HTTP01Port string
 }
 
 // Config 是证书管理的通用配置。

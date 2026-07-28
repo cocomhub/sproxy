@@ -133,7 +133,8 @@ func TestCleanupDNSRecord_Success(t *testing.T) {
 		callCount++
 		q := r.URL.Query()
 
-		if callCount == 1 {
+		switch callCount {
+		case 1:
 			// First call: RecordList
 			if q.Get("Action") != "RecordList" {
 				t.Errorf("expected Action=RecordList, got %s", q.Get("Action"))
@@ -148,7 +149,7 @@ func TestCleanupDNSRecord_Success(t *testing.T) {
 					},
 				},
 			})
-		} else if callCount == 2 {
+		case 2:
 			// Second call: DeleteRecord
 			if q.Get("Action") != "DeleteRecord" {
 				t.Errorf("expected Action=DeleteRecord, got %s", q.Get("Action"))
@@ -399,7 +400,8 @@ func TestCleanupDNSRecord_Subdomain(t *testing.T) {
 		callCount++
 		q := r.URL.Query()
 
-		if callCount == 1 {
+		switch callCount {
+		case 1:
 			// RecordList
 			if q.Get("Domain") != "example.com" {
 				t.Errorf("expected Domain=example.com, got %s", q.Get("Domain"))
@@ -416,7 +418,7 @@ func TestCleanupDNSRecord_Subdomain(t *testing.T) {
 					},
 				},
 			})
-		} else if callCount == 2 {
+		case 2:
 			// DeleteRecord
 			if q.Get("Action") != "DeleteRecord" {
 				t.Errorf("expected Action=DeleteRecord, got %s", q.Get("Action"))

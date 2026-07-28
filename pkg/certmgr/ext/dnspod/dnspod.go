@@ -15,7 +15,7 @@ package dnspod
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // DNSPod API 要求 HMAC-SHA1 签名，无安全替代
 	"encoding/base64"
 	"encoding/json"
 	"fmt"

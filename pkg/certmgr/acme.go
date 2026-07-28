@@ -17,11 +17,12 @@ import (
 
 // acmeManager 管理 ACME 自动证书。
 type acmeManager struct {
-	mu      sync.Mutex
-	m       *autocert.Manager
-	mTLSFn  func(*tls.Config)
-	http01  bool
-	httpSrv *http.Server // HTTP-01 挑战服务器，Close() 时关闭
+	mu         sync.Mutex
+	m          *autocert.Manager
+	mTLSFn     func(*tls.Config)
+	http01     bool
+	http01Addr string
+	httpSrv    *http.Server // HTTP-01 挑战服务器，Close() 时关闭
 }
 
 // newACMEManager 创建 ACME 证书管理器。
@@ -45,9 +46,10 @@ func newACMEManager(cfg *Config) (*acmeManager, error) {
 		HostPolicy: autocert.HostWhitelist(cfg.ACME.Domains...),
 	}
 	return &acmeManager{
-		m:      m,
-		mTLSFn: mTLSFn,
-		http01: cfg.ACME.HTTP01,
+		m:          m,
+		mTLSFn:     mTLSFn,
+		http01:     cfg.ACME.HTTP01,
+		http01Addr: cfg.ACME.HTTP01Port,
 	}, nil
 }
 
@@ -66,14 +68,18 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 	// 如果启用 HTTP-01，启动挑战监听（互斥保护防止多次启动）
 	m.mu.Lock()
 	if m.http01 && m.httpSrv == nil {
+		addr := m.http01Addr
+		if addr == "" {
+			addr = ":80"
+		}
 		m.httpSrv = &http.Server{
-			Addr:              ":80",
+			Addr:              addr,
 			Handler:           m.m.HTTPHandler(nil),
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       30 * time.Second,
 		}
 		go func() {
-			slog.Info("ACME HTTP-01 challenge listener started on :80")
+			slog.Info("ACME HTTP-01 challenge listener started", "addr", addr)
 			if err := m.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Warn("ACME HTTP-01 listener stopped", "error", err)
 			}
