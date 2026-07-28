@@ -4,9 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > 上级目录 `../CLAUDE.md` 与 `../AGENTS.md` 为工作区通用指南（中文回复、UTF-8 无 BOM、SPDX 许可证头、最小改动等），全部适用于本子项目；以下内容仅补充 sproxy 专属要点，与上级冲突时以本文件为准。
 
-## 项目定位
+## 依赖策略
 
-`github.com/cocomhub/sproxy` 是一个**轻量文件上传/下载/删除服务 + 加密隧道**，附带 `sclient` 客户端二进制。Go 1.26，依赖（新增）`github.com/spf13/cobra`、`github.com/spf13/viper`、`github.com/adrg/xdg` + 原有 `gopkg.in/yaml.v3`。
+- **Go 标准库优先**：功能可用标准库实现时优先使用标准库。
+- **`golang.org/x/` 系列**：Go 团队维护的准标准库（如 `golang.org/x/crypto`、`golang.org/x/sys`、`golang.org/x/net` 等）可自由使用，无需额外评审。
+- **第三方库**：新增非 `golang.org/x/` 的第三方依赖需审慎评估，优先选择纯 Go 实现、API 稳定、社区活跃的库。
+
+`github.com/cocomhub/sproxy` 是一个**轻量文件上传/下载/删除服务 + 加密隧道**，附带 `sclient` 客户端二进制。Go 1.26，依赖（新增）`github.com/spf13/cobra`、`github.com/spf13/viper`、`github.com/adrg/xdg` + `gopkg.in/yaml.v3` + `golang.org/x/sys` + `golang.org/x/crypto`。
 
 > 历史：早期版本曾包含 `/{host}/{filepath...}` HTTPS 透明转发与 `/bandwidth` 端点，已于重构移除，定位收敛为文件服务 + 隧道。
 
@@ -80,7 +84,7 @@ go test -coverprofile=cover.out ./internal/... ./pkg/... ./cmd/...
 
 | 模块路径 | 说明 |
 |----------|------|
-| `.` | 核心库（`go.mod`，仅 `gopkg.in/yaml.v3` + `golang.org/x/sys`） |
+| `.` | 核心库（`go.mod`，`gopkg.in/yaml.v3` + `golang.org/x/sys` + `golang.org/x/crypto`） |
 | `./cmd/sproxy` | sproxy 服务端二进制（cobra+viper，replace 指向根 module） |
 | `./cmd/sclient` | sclient 客户端二进制（cobra+viper+xdg，replace 指向根 module） |
 | `./pkg/tunnel/xfer/ext/ws` | WebSocket 传输层子模块（独立的 go.mod） |
