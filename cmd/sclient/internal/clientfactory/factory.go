@@ -86,6 +86,11 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {
 		opts = append(opts, client.WithInsecureTLS())
 	}
+	if clientCert, _ := cmd.Flags().GetString("client-cert"); clientCert != "" {
+		if clientKey, _ := cmd.Flags().GetString("client-key"); clientKey != "" {
+			opts = append(opts, client.WithClientCert(clientCert, clientKey))
+		}
+	}
 
 	return client.NewFileClient(serverURL, opts...), nil
 }

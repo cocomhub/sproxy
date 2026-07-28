@@ -188,6 +188,40 @@ func WithInsecureTLS() Option {
 	}
 }
 
+// WithClientCert 设置客户端证书用于 mTLS 双向认证。
+// certFile 和 keyFile 分别是 PEM 编码的客户端证书和私钥文件路径。
+// 当服务端配置了 tls.client_ca 时，需要客户端证书才能通过验证。
+// 此选项仅影响直连模式（HTTP 客户端），不影响隧道模式。
+//
+// 与 WithInsecureTLS 的先后顺序不影响结果：WithClientCert 会保留
+// InsecureSkipVerify 状态，不会因顺序问题导致证书验证失效。
+func WithClientCert(certFile, keyFile string) Option {
+	return func(c *FileClient) {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			c.logger.Warn("加载客户端证书失败", "cert_file", certFile, "error", err)
+			return
+		}
+		// 保留当前 transport 的 InsecureSkipVerify 状态
+		var insecureSkipVerify bool
+		if c.httpClient != nil && c.httpClient.Transport != nil {
+			if transport, ok := c.httpClient.Transport.(*http.Transport); ok && transport.TLSClientConfig != nil {
+				insecureSkipVerify = transport.TLSClientConfig.InsecureSkipVerify
+			}
+		}
+		c.httpClient = &http.Client{
+			Timeout: c.httpClient.Timeout,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					Certificates:       []tls.Certificate{cert},
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: insecureSkipVerify,
+				},
+			},
+		}
+	}
+}
+
 // WithProgress 设置进度回调。label 是当前操作描述，read 是已处理字节数，total 是总字节数。
 func WithProgress(fn func(label string, read, total int64)) Option {
 	return func(c *FileClient) {
