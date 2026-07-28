@@ -18,11 +18,22 @@
 package certmgr
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"os"
 )
+
+// DNSProvider 抽象 DNS-01 ACME 挑战的 DNS 记录操作。
+type DNSProvider interface {
+	// SetDNSRecord 设置 DNS TXT 记录用于域名验证。
+	// domain 是待验证的域名，token 是 ACME 挑战令牌，keyAuth 是 key authorization。
+	SetDNSRecord(ctx context.Context, domain, token, keyAuth string) error
+
+	// CleanupDNSRecord 清理验证记录。
+	CleanupDNSRecord(ctx context.Context, domain, token, keyAuth string) error
+}
 
 // Manager 统一证书生命周期管理接口。
 type Manager interface {
