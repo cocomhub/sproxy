@@ -72,13 +72,13 @@ func TestNew_ACMEManager(t *testing.T) {
 
 func TestNew_SelfSignedManager(t *testing.T) {
 	// 使用临时目录作为工作目录，避免污染 CWD
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("failed to get CWD: %v", err)
+	origDir, wErr := os.Getwd()
+	if wErr != nil {
+		t.Fatalf("failed to get CWD: %v", wErr)
 	}
 	dir := t.TempDir()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("failed to chdir: %v", err)
+	if wErr := os.Chdir(dir); wErr != nil {
+		t.Fatalf("failed to chdir: %v", wErr)
 	}
 	t.Cleanup(func() { os.Chdir(origDir) })
 
@@ -98,10 +98,10 @@ func TestNew_SelfSignedManager(t *testing.T) {
 	if !ok {
 		t.Fatal("expected *selfSignedManager type")
 	}
-	if _, err := os.Stat(sm.certFile); os.IsNotExist(err) {
+	if _, sErr := os.Stat(sm.certFile); os.IsNotExist(sErr) {
 		t.Errorf("cert file was not created at %s", sm.certFile)
 	}
-	if _, err := os.Stat(sm.keyFile); os.IsNotExist(err) {
+	if _, sErr := os.Stat(sm.keyFile); os.IsNotExist(sErr) {
 		t.Errorf("key file was not created at %s", sm.keyFile)
 	}
 
@@ -183,12 +183,12 @@ func TestSetupMTLS(t *testing.T) {
 		t.Fatalf("failed to generate cert: %v", err)
 	}
 	// Copy the cert as CA cert
-	data, err := os.ReadFile(certFile)
-	if err != nil {
-		t.Fatalf("failed to read cert: %v", err)
+	data, rErr := os.ReadFile(certFile)
+	if rErr != nil {
+		t.Fatalf("failed to read cert: %v", rErr)
 	}
-	if err := os.WriteFile(caFile, data, 0644); err != nil {
-		t.Fatalf("failed to write CA file: %v", err)
+	if wErr := os.WriteFile(caFile, data, 0644); wErr != nil {
+		t.Fatalf("failed to write CA file: %v", wErr)
 	}
 
 	cfg := &Config{

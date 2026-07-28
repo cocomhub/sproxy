@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -50,11 +51,9 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 	tc := m.m.TLSConfig()
 	if tc == nil {
 		tc = &tls.Config{MinVersion: tls.VersionTLS12}
-	} else {
+	} else if tc.MinVersion == 0 {
 		// 确保最低 TLS 版本
-		if tc.MinVersion == 0 {
-			tc.MinVersion = tls.VersionTLS12
-		}
+		tc.MinVersion = tls.VersionTLS12
 	}
 	if m.mTLSFn != nil {
 		m.mTLSFn(tc)
@@ -63,7 +62,13 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 	if m.http01 {
 		go func() {
 			slog.Info("ACME HTTP-01 challenge listener started on :80")
-			if err := http.ListenAndServe(":80", m.m.HTTPHandler(nil)); err != nil {
+			httpSrv := &http.Server{
+				Addr:              ":80",
+				Handler:           m.m.HTTPHandler(nil),
+				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       30 * time.Second,
+			}
+			if err := httpSrv.ListenAndServe(); err != nil {
 				slog.Warn("ACME HTTP-01 listener stopped", "error", err)
 			}
 		}()
