@@ -10,24 +10,81 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
 
+const handshakeTimeout = 30 * time.Second
+
 // Tunnel 在一条 mux 多路复用连接之上提供 HTTP 请求-响应交换。
 type Tunnel struct {
-	mux *mux.Mux
-	key []byte
+	mux             *mux.Mux
+	key             []byte
+	handshake       sync.Once
+	sessionKey      []byte
+	skMu            sync.Mutex
+	replayProtector *ReplayProtector
 }
 
 func NewTunnel(m *mux.Mux, key []byte) *Tunnel {
-	return &Tunnel{mux: m, key: key}
+	return &Tunnel{
+		mux:             m,
+		key:             key,
+		replayProtector: NewReplayProtector(),
+	}
+}
+
+// ensureHandshake 确保 ECDH 握手已完成。
+// 在 dialer 侧：首次调用时发起握手（m.Open），返回握手完成。
+// 在 listener 侧：握手由 Serve 在进入 accept 循环前完成。
+// 注意：握手受 sync.Once 保护只执行一次，因此使用 context.Background()
+// 而非请求级 context——握手是一次性操作，影响整个隧道生命周期，
+// 不应被单个请求的生命周期取消。
+func (t *Tunnel) ensureHandshake() {
+	if t.key == nil {
+		return
+	}
+	t.handshake.Do(func() {
+		if t.mux.Role() != mux.RoleDialer {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
+		defer cancel()
+		sk, err := performHandshake(ctx, t.mux, true)
+		if err == nil {
+			t.skMu.Lock()
+			t.sessionKey = sk
+			t.skMu.Unlock()
+		} else {
+			slog.Warn("ECDH 握手失败（dialer），回退到静态密钥", "error", err)
+		}
+	})
+}
+
+// encryptionKey 返回用于加密的密钥。
+// 必须确保 handshake 已完成后调用。
+func (t *Tunnel) encryptionKey() []byte {
+	if t.key == nil {
+		return nil
+	}
+	t.skMu.Lock()
+	sk := t.sessionKey
+	t.skMu.Unlock()
+	if sk != nil {
+		return sk
+	}
+	return t.key
 }
 
 // Do 发送 HTTP 请求并返回响应。
 func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
+	// 在打开请求流之前确保握手已完成
+	t.ensureHandshake()
+
 	ctx := req.Context()
 	stream, err := t.mux.Open(ctx)
 	if err != nil {
@@ -60,27 +117,33 @@ func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
 		StatusCode:    respMeta.Status,
 		Proto:         respMeta.Proto,
 		Header:        respMeta.Headers.Clone(),
-		Body:          &streamBody{stream: stream, key: t.key},
+		Body:          &streamBody{stream: stream, key: t.encryptionKey()},
 		ContentLength: respMeta.ContentLength,
 	}, nil
 }
 
 // sendRequestMeta 将请求元数据序列化、加密并写入流。
 func (t *Tunnel) sendRequestMeta(stream mux.Stream, req *http.Request) error {
-	reqMeta, err := json.Marshal(&Request{
+	encKey := t.encryptionKey()
+	reqMeta := &Request{
 		Method:  req.Method,
 		URL:     req.URL.RequestURI(),
 		Headers: flattenHeaders(req.Header),
-	})
+	}
+	// 有密钥时填充重放保护字段
+	if encKey != nil {
+		reqMeta.IAT = time.Now().Unix()
+		reqMeta.JTI = generateJTI()
+	}
+	reqMetaJSON, err := json.Marshal(reqMeta)
 	if err != nil {
 		return fmt.Errorf("tunnel: marshal request: %w", err)
 	}
-
 	var metaBytes []byte
-	if t.key != nil {
-		metaBytes, err = Encrypt(t.key, reqMeta)
+	if encKey != nil {
+		metaBytes, err = Encrypt(encKey, reqMetaJSON, []byte(AADMeta))
 	} else {
-		metaBytes = reqMeta
+		metaBytes = reqMetaJSON
 	}
 	if err != nil {
 		return fmt.Errorf("tunnel: encrypt: %w", err)
@@ -102,8 +165,9 @@ func (t *Tunnel) sendRequestBody(stream mux.Stream, req *http.Request) error {
 	if req.Body == nil {
 		return nil
 	}
-	if t.key != nil {
-		if _, err := EncryptStream(t.key, req.Body, stream); err != nil {
+	encKey := t.encryptionKey()
+	if encKey != nil {
+		if _, err := EncryptStream(encKey, req.Body, stream, []byte(AADStream)); err != nil {
 			return fmt.Errorf("tunnel: encrypt body: %w", err)
 		}
 	} else {
@@ -127,8 +191,9 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 	}
 
 	var respMeta Response
-	if t.key != nil {
-		plainMeta, err := Decrypt(t.key, respMetaRaw)
+	encKey := t.encryptionKey()
+	if encKey != nil {
+		plainMeta, err := Decrypt(encKey, respMetaRaw, []byte(AADMeta))
 		if err != nil {
 			return nil, fmt.Errorf("tunnel: decrypt resp: %w", err)
 		}
@@ -144,7 +209,22 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 }
 
 // Serve 在隧道上提供 HTTP 服务。
+// 在进入 accept 循环前，同步执行 ECDH 握手（listener 侧），超时后回退到静态密钥。
 func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
+	if t.key != nil && t.mux.Role() == mux.RoleListener {
+		hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+		sk, err := performHandshake(hctx, t.mux, false)
+		cancel()
+		if err == nil {
+			t.skMu.Lock()
+			t.sessionKey = sk
+			t.skMu.Unlock()
+		} else {
+			slog.Warn("ECDH 握手失败（listener），回退到静态密钥", "error", err)
+		}
+		// 即使握手失败，Serve 也继续运行（向后兼容）
+	}
+
 	for {
 		stream, err := t.mux.Accept(ctx)
 		if err != nil {
@@ -163,12 +243,24 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 		return
 	}
 
+	// 重放保护：当有密钥时检查 IAT/JTI
+	if t.key != nil && (reqMeta.IAT > 0 || reqMeta.JTI != "") {
+		if vErr := t.replayProtector.Validate(reqMeta.JTI, reqMeta.IAT); vErr != nil {
+			slog.Warn("mux 重放检测失败", "error", vErr, "jti", reqMeta.JTI)
+			// 写回错误响应，避免 dialer 侧 Do() 阻塞等待
+			errResp := bytes.NewBufferString(vErr.Error())
+			t.writeEncryptedResponse(stream, http.StatusTooEarly, make(http.Header), errResp)
+			return
+		}
+	}
+
 	var bodyReader io.ReadCloser
-	if t.key != nil {
+	encKey := t.encryptionKey()
+	if encKey != nil {
 		pr, pw := io.Pipe()
 		bodyReader = pr
 		go func() {
-			_, decErr := DecryptStream(t.key, stream, pw)
+			_, decErr := DecryptStream(encKey, stream, pw, []byte(AADStream))
 			pw.CloseWithError(decErr)
 		}()
 	} else {
@@ -209,8 +301,9 @@ func (t *Tunnel) readAndDecryptMeta(stream mux.Stream) (*Request, error) {
 	}
 
 	var reqMeta Request
-	if t.key != nil {
-		plain, err := Decrypt(t.key, metaRaw)
+	encKey := t.encryptionKey()
+	if encKey != nil {
+		plain, err := Decrypt(encKey, metaRaw, []byte(AADMeta))
 		if err != nil {
 			return nil, err
 		}
@@ -234,9 +327,10 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 		ContentLength: -1,
 	})
 
+	encKey := t.encryptionKey()
 	var metaBytes []byte
-	if t.key != nil {
-		metaBytes, _ = Encrypt(t.key, respMetaJSON)
+	if encKey != nil {
+		metaBytes, _ = Encrypt(encKey, respMetaJSON, []byte(AADMeta))
 	} else {
 		metaBytes = respMetaJSON
 	}
@@ -246,8 +340,8 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 	stream.Write(lb)
 	stream.Write(metaBytes)
 
-	if t.key != nil {
-		EncryptStream(t.key, buf, stream)
+	if encKey != nil {
+		EncryptStream(encKey, buf, stream, []byte(AADStream))
 	} else {
 		io.Copy(stream, buf)
 	}
@@ -255,11 +349,12 @@ func (t *Tunnel) writeEncryptedResponse(stream mux.Stream, code int, hdrs http.H
 
 // streamBody 包装 mux.Stream 为 io.ReadCloser，用于响应体。
 type streamBody struct {
-	stream mux.Stream
-	key    []byte
-	once   sync.Once
-	pr     *io.PipeReader
-	pw     *io.PipeWriter
+	stream    mux.Stream
+	key       []byte
+	initOnce  sync.Once // 仅用于 pipe 初始化
+	closeOnce sync.Once // 仅用于关闭
+	pr        *io.PipeReader
+	pw        *io.PipeWriter
 
 	rdBuf []byte
 	rdOff int
@@ -271,10 +366,10 @@ func (b *streamBody) Read(p []byte) (int, error) {
 	if b.key != nil {
 		if len(b.rdBuf) == 0 || b.rdOff >= len(b.rdBuf) {
 			b.rdBuf = make([]byte, streamBodyBufSize)
-			b.once.Do(func() {
+			b.initOnce.Do(func() {
 				b.pr, b.pw = io.Pipe()
 				go func() {
-					_, err := DecryptStream(b.key, b.stream, b.pw)
+					_, err := DecryptStream(b.key, b.stream, b.pw, []byte(AADStream))
 					b.pw.CloseWithError(err)
 				}()
 			})
@@ -312,7 +407,7 @@ func (b *streamBody) Read(p []byte) (int, error) {
 }
 
 func (b *streamBody) Close() error {
-	b.once.Do(func() {
+	b.closeOnce.Do(func() {
 		if b.pr != nil {
 			b.pr.Close()
 			return

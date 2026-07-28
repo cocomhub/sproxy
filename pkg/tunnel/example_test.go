@@ -45,13 +45,13 @@ func Example_encryptDecrypt() {
 	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	plaintext := []byte("hello secure tunnel")
 
-	encrypted, err := tunnel.Encrypt(key, plaintext)
+	encrypted, err := tunnel.Encrypt(key, plaintext, []byte(tunnel.AADMeta))
 	if err != nil {
 		fmt.Println("encrypt error:", err)
 		return
 	}
 
-	decrypted, err := tunnel.Decrypt(key, encrypted)
+	decrypted, err := tunnel.Decrypt(key, encrypted, []byte(tunnel.AADMeta))
 	if err != nil {
 		fmt.Println("decrypt error:", err)
 		return
@@ -65,8 +65,8 @@ func Example_randomNonce() {
 	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	plaintext := []byte("same plaintext")
 
-	c1, _ := tunnel.Encrypt(key, plaintext)
-	c2, _ := tunnel.Encrypt(key, plaintext)
+	c1, _ := tunnel.Encrypt(key, plaintext, []byte(tunnel.AADMeta))
+	c2, _ := tunnel.Encrypt(key, plaintext, []byte(tunnel.AADMeta))
 
 	fmt.Println(string(c1) != string(c2))
 	// Output: true
@@ -319,7 +319,7 @@ func Example_encryptStreamDecryptStream() {
 	original := []byte("hello streaming world with chunked AES-256-GCM encryption")
 	var encrypted bytes.Buffer
 
-	n, err := tunnel.EncryptStream(key, bytes.NewReader(original), &encrypted)
+	n, err := tunnel.EncryptStream(key, bytes.NewReader(original), &encrypted, []byte(tunnel.AADStream))
 	if err != nil {
 		fmt.Println("encrypt error:", err)
 		return
@@ -327,7 +327,7 @@ func Example_encryptStreamDecryptStream() {
 	_ = n
 
 	var decrypted bytes.Buffer
-	n2, err := tunnel.DecryptStream(key, bytes.NewReader(encrypted.Bytes()), &decrypted)
+	n2, err := tunnel.DecryptStream(key, bytes.NewReader(encrypted.Bytes()), &decrypted, []byte(tunnel.AADStream))
 	if err != nil {
 		fmt.Println("decrypt error:", err)
 		return
@@ -350,12 +350,12 @@ func Example() {
 		return
 	}
 
-	plaintext, err := tunnel.Encrypt(key, []byte("hello"))
+	plaintext, err := tunnel.Encrypt(key, []byte("hello"), []byte(tunnel.AADMeta))
 	if err != nil {
 		return
 	}
 
-	decrypted, err := tunnel.Decrypt(key, plaintext)
+	decrypted, err := tunnel.Decrypt(key, plaintext, []byte(tunnel.AADMeta))
 	if err != nil {
 		return
 	}

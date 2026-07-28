@@ -157,6 +157,9 @@ func (c *Config) Validate() error {
 	if c.CloudMaxConcurrent <= 0 {
 		c.CloudMaxConcurrent = 3
 	}
+	if c.TunnelKey == "" && !c.TLS.Enabled {
+		return fmt.Errorf("tunnel_key 为空且 TLS 未启用，传输将完全明文，请配置 tunnel_key 或启用 TLS")
+	}
 	if c.TunnelKey != "" {
 		// 同时校验长度与 hex 格式，避免运行时 hex.DecodeString 报错才发现。
 		// 复用 pkg/tunnel.ParseKey 保持单一来源。

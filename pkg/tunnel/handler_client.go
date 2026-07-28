@@ -24,13 +24,15 @@ import (
 //
 // 密钥轮换：通过 UpdateKey 可运行时热替换密钥，旧密钥保留短时窗口供存量连接完成。
 // 所有新加密使用新密钥；解密时先尝试新密钥，不匹配则尝试旧密钥。
+// 重放保护：ServiceHTTP 中解析 metadata 后调用 replayProtector.Validate 检测重放攻击。
 type Handler struct {
-	keyMu        sync.RWMutex
-	primaryKey   []byte // 当前活跃密钥，用于加密和解密
-	oldKey       []byte // 前一个密钥，仅用于解密存量连接（短时窗口）
-	httpClient   *http.Client
-	localHandler http.Handler
-	logger       *slog.Logger
+	keyMu           sync.RWMutex
+	primaryKey      []byte // 当前活跃密钥，用于加密和解密
+	oldKey          []byte // 前一个密钥，仅用于解密存量连接（短时窗口）
+	httpClient      *http.Client
+	localHandler    http.Handler
+	logger          *slog.Logger
+	replayProtector *ReplayProtector
 }
 
 // NewHandler 创建一个仅支持外部转发的加密隧道处理器。
@@ -52,7 +54,8 @@ func NewHandler(key []byte, logger *slog.Logger) http.Handler {
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		logger: log,
+		logger:          log,
+		replayProtector: NewReplayProtector(),
 	}
 }
 
@@ -75,8 +78,9 @@ func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.H
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		localHandler: local,
-		logger:       log,
+		localHandler:    local,
+		logger:          log,
+		replayProtector: NewReplayProtector(),
 	}
 }
 
@@ -111,7 +115,7 @@ func (h *Handler) resolveKey(r io.Reader) ([]byte, []byte, error) {
 
 	var lastErr error
 	for _, key := range keys {
-		data, err := Decrypt(key, encMeta)
+		data, err := Decrypt(key, encMeta, []byte(AADMeta))
 		if err == nil {
 			return data, key, nil
 		}
@@ -145,11 +149,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Debug("隧道请求 metadata", "method", req.Method, "url", req.URL)
 
-	// 2. r.Body 剩余部分为流式加密 body，通过 Pipe + DecryptStream 流式解密
+	// 3. 重放保护检查：如果 metadata 中包含 IAT/JTI，则验证
+	if req.IAT > 0 || req.JTI != "" {
+		if err := h.replayProtector.Validate(req.JTI, req.IAT); err != nil {
+			_, _ = io.Copy(io.Discard, r.Body)
+			r.Body.Close()
+			h.logger.Warn("重放检测失败", "error", err, "jti", req.JTI)
+			w.WriteHeader(http.StatusTooEarly) // 425 Too Early
+			return
+		}
+	}
+
+	// 4. r.Body 剩余部分为流式加密 body，通过 Pipe + DecryptStream 流式解密
 	//    使用 resolveKey 匹配成功的 resolvedKey（兼容正在轮换中的旧密钥）
 	bodyPr, bodyPw := io.Pipe()
 	go func() {
-		_, decErr := DecryptStream(resolvedKey, r.Body, bodyPw)
+		_, decErr := DecryptStream(resolvedKey, r.Body, bodyPw, []byte(AADStream))
 		bodyPw.CloseWithError(decErr)
 	}()
 
@@ -208,7 +223,7 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 		w.Header().Set(headerContentType, frameContentType)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(metaFrame)
-		_, _ = EncryptStream(encKey, bodyPr, w)
+		_, _ = EncryptStream(encKey, bodyPr, w, []byte(AADStream))
 	}()
 
 	// 同步运行本地 handler。
@@ -249,7 +264,7 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 		w.Header().Set(headerContentType, frameContentType)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(errMetaFrame)
-		if _, err = EncryptStream(encKey, strings.NewReader(err.Error()), w); err != nil {
+		if _, err = EncryptStream(encKey, strings.NewReader(err.Error()), w, []byte(AADStream)); err != nil {
 			h.logger.Error("隧道错误响应加密失败", "error", err)
 		}
 		return
@@ -278,7 +293,7 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 	w.Header().Set(headerContentType, frameContentType)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(metaFrame)
-	if _, err := EncryptStream(encKey, resp.Body, w); err != nil {
+	if _, err := EncryptStream(encKey, resp.Body, w, []byte(AADStream)); err != nil {
 		h.logger.Error("隧道响应加密失败", "error", err)
 	}
 }
@@ -337,10 +352,15 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	for k := range req.Header {
 		headers[k] = req.Header.Get(k)
 	}
+	// 生成重放保护字段
+	now := time.Now().Unix()
+	jti := generateJTI()
 	metaJSON, err := json.Marshal(&Request{
 		Method:  req.Method,
 		URL:     req.URL.String(),
 		Headers: headers,
+		IAT:     now,
+		JTI:     jti,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal metadata: %w", err)
@@ -357,7 +377,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			defer req.Body.Close()
 			src = req.Body
 		}
-		_, encErr := EncryptStream(c.Key, src, pw)
+		_, encErr := EncryptStream(c.Key, src, pw, []byte(AADStream))
 		pw.CloseWithError(encErr)
 	}()
 
@@ -392,7 +412,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 
 	rpr, rpw := io.Pipe()
 	go func() {
-		_, decErr := DecryptStream(c.Key, httpResp.Body, rpw)
+		_, decErr := DecryptStream(c.Key, httpResp.Body, rpw, []byte(AADStream))
 		rpw.CloseWithError(decErr)
 		httpResp.Body.Close()
 	}()

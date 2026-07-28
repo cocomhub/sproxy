@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
@@ -316,11 +317,11 @@ var _ = GenerateKey
 
 func TestEncryptDecrypt_Roundtrip(t *testing.T) {
 	plaintext := []byte("hello encryption!")
-	ciphertext, err := Encrypt(testKey, plaintext)
+	ciphertext, err := Encrypt(testKey, plaintext, []byte(AADMeta))
 	if err != nil {
 		t.Fatal(err)
 	}
-	decrypted, err := Decrypt(testKey, ciphertext)
+	decrypted, err := Decrypt(testKey, ciphertext, []byte(AADMeta))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,11 +331,11 @@ func TestEncryptDecrypt_Roundtrip(t *testing.T) {
 }
 
 func TestEncryptDecrypt_EmptyPlaintext(t *testing.T) {
-	ciphertext, err := Encrypt(testKey, nil)
+	ciphertext, err := Encrypt(testKey, nil, []byte(AADMeta))
 	if err != nil {
 		t.Fatal(err)
 	}
-	decrypted, err := Decrypt(testKey, ciphertext)
+	decrypted, err := Decrypt(testKey, ciphertext, []byte(AADMeta))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,13 +345,35 @@ func TestEncryptDecrypt_EmptyPlaintext(t *testing.T) {
 }
 
 func TestEncryptDecrypt_ShortKey(t *testing.T) {
-	_, err := Encrypt([]byte("short"), []byte("data"))
+	_, err := Encrypt([]byte("short"), []byte("data"), []byte(AADMeta))
 	if err == nil {
 		t.Error("expected error for short key")
 	}
-	_, err = Decrypt([]byte("short"), []byte("data"))
+	_, err = Decrypt([]byte("short"), []byte("data"), []byte(AADMeta))
 	if err == nil {
 		t.Error("expected error for short key")
+	}
+}
+
+func TestEncryptDecrypt_AADMismatch(t *testing.T) {
+	ciphertext, err := Encrypt(testKey, []byte("secret"), []byte(AADMeta))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 用错误的 AAD 解密应失败
+	_, err = Decrypt(testKey, ciphertext, []byte(AADStream))
+	if err == nil {
+		t.Error("expected error for AAD mismatch (AADMeta vs AADStream), got nil")
+	}
+	// 用 nil AAD 解密应失败
+	_, err = Decrypt(testKey, ciphertext, nil)
+	if err == nil {
+		t.Error("expected error for nil AAD, got nil")
+	}
+	// 用空的 AAD 解密应失败
+	_, err = Decrypt(testKey, ciphertext, []byte{})
+	if err == nil {
+		t.Error("expected error for empty AAD, got nil")
 	}
 }
 
@@ -360,11 +383,11 @@ func BenchmarkEncryptDecrypt(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ciphertext, err := Encrypt(key, plaintext)
+		ciphertext, err := Encrypt(key, plaintext, []byte(AADMeta))
 		if err != nil {
 			b.Fatal(err)
 		}
-		decrypted, err := Decrypt(key, ciphertext)
+		decrypted, err := Decrypt(key, ciphertext, []byte(AADMeta))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -743,7 +766,123 @@ func TestNewLocalHandler_rejectsNonLeadingSlash(t *testing.T) {
 	}
 }
 
-// JSON roundtrip for xml/json metadata
+// TestReplayProtector_Validate 测试重放保护器的验证逻辑。
+func TestReplayProtector_Validate(t *testing.T) {
+	rp := NewReplayProtector()
+	now := time.Now().Unix()
+	jti := "abcdef0123456789abcdef0123456789"
+
+	// 第一次应通过
+	if err := rp.Validate(jti, now); err != nil {
+		t.Fatalf("expected pass, got: %v", err)
+	}
+
+	// 重复应拒绝
+	if err := rp.Validate(jti, now); err == nil {
+		t.Fatal("expected error for duplicate jti")
+	}
+
+	// 过期时间戳应拒绝
+	if err := rp.Validate("deadbeefdeadbeef", now-3600); err == nil {
+		t.Fatal("expected error for expired iat")
+	}
+
+	// 未来时间戳应拒绝
+	if err := rp.Validate("deadbeefdeadbeef", now+3600); err == nil {
+		t.Fatal("expected error for future iat")
+	}
+
+	// 无效 hex 应拒绝
+	if err := rp.Validate("nothex!!!!", now); err == nil {
+		t.Fatal("expected error for invalid hex jti")
+	}
+}
+
+// TestReplayProtector_Cleanup 测试过期条目清理。
+func TestReplayProtector_Cleanup(t *testing.T) {
+	rp := NewReplayProtector()
+	now := time.Now().Unix()
+
+	// 插入一个在窗口内的条目
+	oldJTI := "aaaa0000000000000000000000000000"
+	if err := rp.Validate(oldJTI, now-240); err != nil {
+		t.Fatalf("expected pass, got: %v", err)
+	}
+
+	// 插入 1001 个条目触发清理
+	for i := range 1001 {
+		jti := fmt.Sprintf("bbbb%028x", i)
+		_ = rp.Validate(jti, now)
+	}
+
+	// 旧的但仍在窗口内的条目不应被重复插入
+	if err := rp.Validate(oldJTI, now); err == nil {
+		t.Error("expected duplicate jti to be rejected, got nil")
+	}
+
+	// 验证清理后 map 大小合理（不应超过 1002）
+	if rp.Len() > 1002 {
+		t.Errorf("expected len <= 1002 after cleanup, got %d", rp.Len())
+	}
+}
+
+// TestReplayProtector_Len 测试 Len 方法。
+func TestReplayProtector_Len(t *testing.T) {
+	rp := NewReplayProtector()
+	now := time.Now().Unix()
+
+	if rp.Len() != 0 {
+		t.Fatalf("expected empty, got %d", rp.Len())
+	}
+
+	_ = rp.Validate("aabbccdd00112233", now)
+	if rp.Len() != 1 {
+		t.Fatalf("expected 1, got %d", rp.Len())
+	}
+}
+
+// TestReplayProtector_InvalidJTI 测试无效 jti 的各种情况。
+func TestReplayProtector_InvalidJTI(t *testing.T) {
+	rp := NewReplayProtector()
+	now := time.Now().Unix()
+
+	tests := []struct {
+		name string
+		jti  string
+	}{
+		{"empty jti", ""},
+		{"jti too long", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789extra"},
+		{"invalid hex chars", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"},
+		{"non-hex special chars", "!@#$%^&*()_+-=[]{}|;':\""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := rp.Validate(tc.jti, now); err == nil {
+				t.Fatalf("expected error for %q", tc.jti)
+			}
+		})
+	}
+}
+
+// TestReplayProtector_IATBoundary 测试 IAT 窗口边界条件。
+func TestReplayProtector_IATBoundary(t *testing.T) {
+	rp := NewReplayProtector()
+	now := time.Now().Unix()
+
+	// 正好在窗口边界内（5 分钟 - 1 秒）
+	boundaryPast := now - 299
+	if err := rp.Validate("aaaa0000000000000000000000000001", boundaryPast); err != nil {
+		t.Fatalf("expected pass for boundary past, got: %v", err)
+	}
+
+	// 未来 5 分钟内
+	boundaryFuture := now + 299
+	if err := rp.Validate("aaaa0000000000000000000000000002", boundaryFuture); err != nil {
+		t.Fatalf("expected pass for boundary future, got: %v", err)
+	}
+}
+
 func TestResponseJSON(t *testing.T) {
 	resp := Response{
 		Proto:         "HTTP/1.1",

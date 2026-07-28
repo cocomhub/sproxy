@@ -19,7 +19,7 @@ func TestEncryptStream_DecryptStream_Roundtrip(t *testing.T) {
 	plaintext := []byte("hello streaming encryption!")
 
 	var buf bytes.Buffer
-	n, err := EncryptStream(key, bytes.NewReader(plaintext), &buf)
+	n, err := EncryptStream(key, bytes.NewReader(plaintext), &buf, []byte(AADStream))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestEncryptStream_DecryptStream_Roundtrip(t *testing.T) {
 	}
 
 	var decrypted bytes.Buffer
-	dn, err := DecryptStream(key, &buf, &decrypted)
+	dn, err := DecryptStream(key, &buf, &decrypted, []byte(AADStream))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,19 +40,34 @@ func TestEncryptStream_DecryptStream_Roundtrip(t *testing.T) {
 	}
 }
 
+// AAD mismatch test
+func TestEncryptStream_DecryptStream_AADMismatch(t *testing.T) {
+	key := make([]byte, 32)
+	var buf bytes.Buffer
+	_, err := EncryptStream(key, strings.NewReader("test data"), &buf, []byte(AADStream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	_, err = DecryptStream(key, &buf, &out, []byte(AADMeta))
+	if err == nil {
+		t.Error("expected error for AAD mismatch in stream, got nil")
+	}
+}
+
 func TestEncryptStream_DecryptStream_LargePayload(t *testing.T) {
 	key := make([]byte, 32)
 	// 大于 1 个 chunk 的大 payload
 	plaintext := make([]byte, DefaultChunkSize*3+1234)
 
 	var buf bytes.Buffer
-	_, err := EncryptStream(key, bytes.NewReader(plaintext), &buf)
+	_, err := EncryptStream(key, bytes.NewReader(plaintext), &buf, []byte(AADStream))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var decrypted bytes.Buffer
-	_, err = DecryptStream(key, &buf, &decrypted)
+	_, err = DecryptStream(key, &buf, &decrypted, []byte(AADStream))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,27 +79,27 @@ func TestEncryptStream_DecryptStream_LargePayload(t *testing.T) {
 func TestEncryptStream_DecryptStream_Empty(t *testing.T) {
 	key := make([]byte, 32)
 	var buf bytes.Buffer
-	_, err := EncryptStream(key, bytes.NewReader(nil), &buf)
+	_, err := EncryptStream(key, bytes.NewReader(nil), &buf, []byte(AADStream))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var decrypted bytes.Buffer
-	_, err = DecryptStream(key, &buf, &decrypted)
+	_, err = DecryptStream(key, &buf, &decrypted, []byte(AADStream))
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestEncryptStream_ShortKey(t *testing.T) {
-	_, err := EncryptStream([]byte("short"), bytes.NewReader([]byte("data")), io.Discard)
+	_, err := EncryptStream([]byte("short"), bytes.NewReader([]byte("data")), io.Discard, []byte(AADStream))
 	if err == nil {
 		t.Error("expected error for short key")
 	}
 }
 
 func TestDecryptStream_ShortKey(t *testing.T) {
-	_, err := DecryptStream([]byte("short"), bytes.NewReader([]byte("data")), io.Discard)
+	_, err := DecryptStream([]byte("short"), bytes.NewReader([]byte("data")), io.Discard, []byte(AADStream))
 	if err == nil {
 		t.Error("expected error for short key")
 	}
@@ -117,7 +132,7 @@ func TestDecryptStream_ChunkTooLarge(t *testing.T) {
 	// 不需要真的写 16 MiB 数据：DecryptStream 应在 ReadFull 前的长度检查就 reject
 
 	var out bytes.Buffer
-	_, err := DecryptStream(key, &attack, &out)
+	_, err := DecryptStream(key, &attack, &out, []byte(AADStream))
 	if err == nil {
 		t.Fatalf("expected error for oversized chunk, got nil")
 	}
@@ -136,7 +151,7 @@ func TestDecryptStream_TruncatedFrame(t *testing.T) {
 	attack.Write(make([]byte, 10))
 
 	var out bytes.Buffer
-	_, err := DecryptStream(key, &attack, &out)
+	_, err := DecryptStream(key, &attack, &out, []byte(AADStream))
 	if err == nil {
 		t.Fatalf("expected error for truncated frame, got nil")
 	}
@@ -169,7 +184,7 @@ func TestStreamBodyEncryptedReadBuffer(t *testing.T) {
 
 	// 预加密数据
 	var encryptedBuf bytes.Buffer
-	if _, err := EncryptStream(key, bytes.NewReader(data), &encryptedBuf); err != nil {
+	if _, err := EncryptStream(key, bytes.NewReader(data), &encryptedBuf, []byte(AADStream)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -212,7 +227,7 @@ func TestStreamBodyEncryptedReadBuffer_SmallData(t *testing.T) {
 
 	data := []byte("small data")
 	var encryptedBuf bytes.Buffer
-	if _, err := EncryptStream(key, bytes.NewReader(data), &encryptedBuf); err != nil {
+	if _, err := EncryptStream(key, bytes.NewReader(data), &encryptedBuf, []byte(AADStream)); err != nil {
 		t.Fatal(err)
 	}
 
