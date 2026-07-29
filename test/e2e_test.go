@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // ---- helpers ----
@@ -679,5 +680,39 @@ func TestE2E_CloudDownloadChain(t *testing.T) {
 		t.Logf("unmarshal tasks failed (may be empty already): %v", err)
 	} else if len(tasks) > 0 {
 		t.Errorf("expected no cloud tasks after cleanup, got %d", len(tasks))
+	}
+}
+
+func TestE2E_TunnelEncryption(t *testing.T) {
+	t.Parallel()
+	baseURL, cleanup := startSPROXY(t)
+	defer cleanup()
+
+	key := testutil.TestKey()
+
+	fc := client.NewFileClient(baseURL,
+		client.WithTunnel(key),
+	)
+
+	content := []byte("tunnel encrypted test content")
+	localPath := filepath.Join(t.TempDir(), "tunnel-test.txt")
+	if err := os.WriteFile(localPath, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fc.Upload(context.Background(), localPath, "tunnel-test.txt")
+	if err != nil {
+		t.Fatalf("upload via tunnel failed: %v", err)
+	}
+
+	downloadPath := filepath.Join(t.TempDir(), "tunnel-download.txt")
+	if err := fc.Download(context.Background(), "tunnel-test.txt", downloadPath); err != nil {
+		t.Fatalf("download via tunnel failed: %v", err)
+	}
+	downloaded, err := os.ReadFile(downloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(downloaded) != string(content) {
+		t.Fatalf("content mismatch: got %q, want %q", string(downloaded), string(content))
 	}
 }

@@ -61,12 +61,12 @@ type CloudDownloadManager struct {
 	metrics       *CloudMetrics
 
 	// 批量持久化进度更新
-	dirtyTasks map[string]struct{}
-	dirtyMu    sync.Mutex
-	flushNow   chan struct{}
-	stopFlush  chan struct{}
+	dirtyTasks  map[string]struct{}
+	dirtyMu     sync.Mutex
+	flushNow    chan struct{}
+	stopFlush   chan struct{}
 	stopCleanup chan struct{} // 停止 cleanupExpired 后台 goroutine
-	closeOnce   sync.Once    // 确保 Close 只执行一次
+	closeOnce   sync.Once     // 确保 Close 只执行一次
 }
 
 // CloudMetrics 云端下载 Prometheus 指标。

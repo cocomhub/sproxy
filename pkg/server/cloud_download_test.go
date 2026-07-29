@@ -781,7 +781,7 @@ func TestCloudDownloadManager_ClientDisconnectAsyncRetry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
 		w.WriteHeader(http.StatusOK)
-		for i := 0; i < len(content); i++ {
+		for i := range content {
 			w.Write(content[i : i+1])
 			time.Sleep(5 * time.Millisecond)
 		}
