@@ -220,8 +220,8 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		return
 	}
 
-	// 创建可取消的 context
-	dlCtx, cancel := context.WithCancel(ctx)
+	// 创建可取消的 context（从 Background 派生，使客户端断连后下载可继续异步重试）
+	dlCtx, cancel := context.WithCancel(context.Background())
 	defer cancel() // 确保 cancel 在函数返回时被调用（linter: G118）
 	m.mu.Lock()
 	m.cancelFuncs[task.ID] = cancel
