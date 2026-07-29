@@ -231,6 +231,9 @@ func (h *Handlers) Close() error {
 	if h.storageMgr != nil {
 		h.storageMgr.Stop()
 	}
+	if h.cloudMgr != nil {
+		h.cloudMgr.Close()
+	}
 	return nil
 }
 

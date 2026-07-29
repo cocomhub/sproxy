@@ -50,6 +50,19 @@ func TestGetConfig(t *testing.T) {
 	}
 }
 
+func TestGetConfig_ServerError(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+	c := NewFileClient(ts.URL)
+	_, err := c.GetConfig(context.Background())
+	if err == nil {
+		t.Fatal("expected error for server error")
+	}
+}
+
 func TestUpdateConfig(t *testing.T) {
 	t.Parallel()
 
@@ -70,5 +83,18 @@ func TestUpdateConfig(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUpdateConfig_ServerError(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer ts.Close()
+	c := NewFileClient(ts.URL)
+	err := c.UpdateConfig(context.Background(), map[string]any{"log_level": "invalid"})
+	if err == nil {
+		t.Fatal("expected error for bad request")
 	}
 }

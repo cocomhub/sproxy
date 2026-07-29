@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -643,7 +644,7 @@ func TestCloudCleanupExpiredOnce_ClearsCompleted(t *testing.T) {
 	cfg := defaultCloudDownloadConfig()
 	cfg.TaskTTL = 1 * time.Millisecond
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(mgr.StopFlush)
+	t.Cleanup(mgr.Close)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
 	if err != nil {
@@ -673,7 +674,7 @@ func TestCloudCleanupExpiredOnce_SkipsRunning(t *testing.T) {
 	cfg := defaultCloudDownloadConfig()
 	cfg.TaskTTL = 1 * time.Millisecond
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(mgr.StopFlush)
+	t.Cleanup(mgr.Close)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
 	if err != nil {
@@ -699,7 +700,7 @@ func TestCloudFlushDirty_PersistsTasks(t *testing.T) {
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := defaultCloudDownloadConfig()
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(mgr.StopFlush)
+	t.Cleanup(mgr.Close)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
 	if err != nil {
@@ -721,7 +722,7 @@ func TestCloudFlushNow_TriggersFlush(t *testing.T) {
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := defaultCloudDownloadConfig()
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(mgr.StopFlush)
+	t.Cleanup(mgr.Close)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
 	if err != nil {
@@ -742,7 +743,7 @@ func TestCloudDownloadManager_DeleteTaskCleansAndReleases(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
-	t.Cleanup(mgr.StopFlush)
+	t.Cleanup(mgr.Close)
 
 	task := &CloudTask{
 		ID:        "cloud-test-1",
@@ -772,5 +773,159 @@ func TestCloudDownloadManager_DeleteTaskCleansAndReleases(t *testing.T) {
 	usage := mgr.storage.UsageByCategory()
 	if usage[CategoryCloud] != 0 {
 		t.Errorf("expected cloud size 0, got %d", usage[CategoryCloud])
+	}
+}
+
+func TestCloudDownloadManager_ClientDisconnectAsyncRetry(t *testing.T) {
+	content := []byte("client disconnect async retry test")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < len(content); i++ {
+			w.Write(content[i : i+1])
+			time.Sleep(5 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.Close() })
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	task, _ := mgr.SubmitAndStart("url", srv.URL, "disconnect.bin", int64(len(content)), ctx)
+
+	cancel()
+
+	deadline := time.After(15 * time.Second)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			cur, _ := mgr.SnapshotTask(task.ID)
+			t.Fatalf("timeout waiting for async retry: status=%s, error=%s", cur.Status, cur.Error)
+		case <-ticker.C:
+			cur, _ := mgr.SnapshotTask(task.ID)
+			if cur.Status == "completed" {
+				return
+			}
+			if cur.Status == "failed" {
+				t.Fatalf("async retry failed: %s", cur.Error)
+			}
+		}
+	}
+}
+
+func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
+	t.Parallel()
+	blockCh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "104857600")
+		w.WriteHeader(http.StatusOK)
+		<-blockCh
+	}))
+	defer func() {
+		close(blockCh)
+		srv.Close()
+	}()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 2,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.Close() })
+
+	task1, _ := mgr.SubmitAndStart("url", srv.URL+"?1", "block1.bin", 104857600, nil)
+	task2, _ := mgr.SubmitAndStart("url", srv.URL+"?2", "block2.bin", 104857600, nil)
+	task3, _ := mgr.SubmitAndStart("url", srv.URL+"?3", "block3.bin", 104857600, nil)
+
+	// 等待前两个任务启动
+	started := 0
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timeout: started %d/2 tasks", started)
+		default:
+			s1, _ := mgr.SnapshotTask(task1.ID)
+			s2, _ := mgr.SnapshotTask(task2.ID)
+			if s1.Status == "downloading" {
+				started = 1
+			}
+			if s2.Status == "downloading" {
+				started = 2
+			}
+			if started == 2 {
+				s3, _ := mgr.SnapshotTask(task3.ID)
+				t.Logf("task3 status when semaphore full: %s", s3.Status)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestCloudDownloadManager_MetricsTracking(t *testing.T) {
+	content := []byte("metrics test")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.Close() })
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "metrics.bin", int64(len(content)), t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for download")
+		default:
+			cur, _ := mgr.SnapshotTask(task.ID)
+			if cur.Status == "completed" {
+				if mgr.metrics.TasksCreated.Load() < 1 {
+					t.Errorf("TasksCreated should be >= 1, got %d", mgr.metrics.TasksCreated.Load())
+				}
+				if mgr.metrics.TasksCompleted.Load() < 1 {
+					t.Errorf("TasksCompleted should be >= 1, got %d", mgr.metrics.TasksCompleted.Load())
+				}
+				if mgr.metrics.BytesDownloaded.Load() < 1 {
+					t.Errorf("BytesDownloaded should be >= 1, got %d", mgr.metrics.BytesDownloaded.Load())
+				}
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 }
