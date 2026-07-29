@@ -26,6 +26,16 @@ type ShareLink struct {
 	Expired      bool   `json:"expired"`
 }
 
+// CreatedAtTime 返回 CreatedAt 的 time.Time 表示。
+func (s *ShareLink) CreatedAtTime() (time.Time, error) {
+	return time.Parse(time.RFC3339, s.CreatedAt)
+}
+
+// ExpiresAtTime 返回 ExpiresAt 的 time.Time 表示。
+func (s *ShareLink) ExpiresAtTime() (time.Time, error) {
+	return time.Parse(time.RFC3339, s.ExpiresAt)
+}
+
 // CreateShare 创建文件分享链接，返回分享链接信息。
 func (c *FileClient) CreateShare(ctx context.Context, filename string, ttl time.Duration, maxDownloads int, oneTime bool) (*ShareLink, error) {
 	body := map[string]any{

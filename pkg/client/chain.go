@@ -133,10 +133,14 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 	if err != nil {
 		state := runner.State()
 		state["status"] = StatusFailed
-		_ = m.store.Save(ctx, "chain:"+runner.ID(), state)
+		if saveErr := m.store.Save(ctx, "chain:"+runner.ID(), state); saveErr != nil {
+			return fmt.Errorf("链操作失败 (%w)，保存状态也失败: %v", err, saveErr)
+		}
 		return err
 	}
-	_ = m.store.Delete(ctx, "chain:"+runner.ID())
+	if delErr := m.store.Delete(ctx, "chain:"+runner.ID()); delErr != nil {
+		return fmt.Errorf("链操作成功但清理状态失败: %w", delErr)
+	}
 	return nil
 }
 

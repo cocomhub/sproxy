@@ -27,17 +27,37 @@ type CloudTask struct {
 	ExpiresAt  time.Time `json:"expires_at"`
 }
 
+// CloudTask 状态常量。
+const (
+	TaskStatusPending     = "pending"
+	TaskStatusDownloading = "downloading"
+	TaskStatusCompleted   = "completed"
+	TaskStatusFailed      = "failed"
+	TaskStatusCancelled   = "cancelled"
+)
+
 // CloudDownloadOption 配置云端下载行为。
 type CloudDownloadOption func(*cloudDownloadOptions)
 
 type cloudDownloadOptions struct {
-	filename string
+	filename     string
+	maxBatchURLs int
 }
 
 // WithCloudDownloadFilename 设置云端下载的文件名（覆盖 URL 自动提取的文件名）。
 func WithCloudDownloadFilename(name string) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		o.filename = name
+	}
+}
+
+// WithCloudDownloadMaxBatchURLs 设置批量下载的最大 URL 数量上限。
+// 默认 100，服务端也限制 100 URL。设置为 0 使用默认值。
+func WithCloudDownloadMaxBatchURLs(n int) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		if n > 0 {
+			o.maxBatchURLs = n
+		}
 	}
 }
 
@@ -57,6 +77,10 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	if urlStr == "" {
 		return nil, fmt.Errorf("cloud download: url is required")
 	}
+	// 基本 URL 格式校验：避免无效 URL 浪费服务端资源
+	if _, err := url.Parse(urlStr); err != nil {
+		return nil, fmt.Errorf("cloud download: invalid URL %q: %w", urlStr, err)
+	}
 	cfg := &cloudDownloadOptions{}
 	for _, opt := range opts {
 		opt(cfg)
@@ -74,7 +98,22 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 }
 
 // CloudDownloadBatch 批量创建云端下载任务（最多 100 URL）。
-func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string) ([]CloudTask, error) {
+// 可以用 WithCloudDownloadMaxBatchURLs 调整上限，但不能超过服务端限制。
+func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts ...CloudDownloadOption) ([]CloudTask, error) {
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("cloud download batch: urls is required")
+	}
+	cfg := &cloudDownloadOptions{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	maxBatch := 100
+	if cfg.maxBatchURLs > 0 && cfg.maxBatchURLs <= 100 {
+		maxBatch = cfg.maxBatchURLs
+	}
+	if len(urls) > maxBatch {
+		return nil, fmt.Errorf("cloud download batch: 最多 %d 个 URL，收到 %d 个", maxBatch, len(urls))
+	}
 	entries := make([]map[string]string, len(urls))
 	for i, u := range urls {
 		entries[i] = map[string]string{"url": u}

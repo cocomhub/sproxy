@@ -110,18 +110,17 @@ func (c *CloudDownloadChain) setOptions(opts chainOptions) {
 
 // Run 执行云端下载链式操作，按阶段推进：
 // submitting → waiting → archiving → downloading → [cleaning] → completed。
-func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) error {
+func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (err error) {
 	if c.client == nil {
 		return fmt.Errorf("cloud download chain: client is nil, use setClient() before Run()")
 	}
 
 	// 统一错误处理：任何阶段失败都设置状态
-	var runErr error
 	defer func() {
-		if runErr != nil {
+		if err != nil {
 			c.CurStatus = StatusFailed
 			c.CurrentPhase = PhaseFailed
-			c.Error = runErr.Error()
+			c.Error = err.Error()
 			c.UpdatedAt = time.Now()
 		}
 	}()
@@ -132,7 +131,6 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) err
 	case PhaseSubmitting:
 		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "提交云端下载任务", Current: 0, Total: len(c.URLs)})
 		if err := c.submitTasks(ctx); err != nil {
-			runErr = err
 			return err
 		}
 		c.CurrentPhase = PhaseWaiting
@@ -142,7 +140,6 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) err
 
 	case PhaseWaiting:
 		if err := c.waitForTasks(ctx); err != nil {
-			runErr = err
 			return err
 		}
 		c.CurrentPhase = PhaseArchiving
@@ -152,7 +149,6 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) err
 
 	case PhaseArchiving:
 		if err := c.archiveTasks(ctx); err != nil {
-			runErr = err
 			return err
 		}
 		c.CurrentPhase = PhaseDownloading
@@ -162,7 +158,6 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) err
 
 	case PhaseDownloading:
 		if err := c.downloadToLocal(ctx); err != nil {
-			runErr = err
 			return err
 		}
 		// 默认清理远端文件，keepFiles 时跳过
@@ -319,7 +314,9 @@ func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
 	if archivePath == "" {
 		archivePath = filepath.ToSlash(filepath.Join(cloudArchiveDirName, c.ArchiveName))
 	}
-	localPath := filepath.Join(c.LocalDir, c.ArchiveName)
+	// 路径穿越防护：使用 filepath.Base 确保 ArchiveName 不含路径分隔符
+	archiveName := filepath.Base(c.ArchiveName)
+	localPath := filepath.Join(c.LocalDir, archiveName)
 	if !strings.HasSuffix(localPath, ".tar.gz") {
 		localPath += ".tar.gz"
 	}
