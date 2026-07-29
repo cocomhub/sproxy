@@ -356,7 +356,8 @@ func TestNew_SelfSignedManager_OnlyKeyFile(t *testing.T) {
 	}
 }
 
-func TestSetupMTLS(t *testing.T) {
+// TestSelfSignedManager_WithMTLS 验证自签证书 + mTLS 组合正确配置 ClientAuth 和 ClientCAs。
+func TestSelfSignedManager_WithMTLS(t *testing.T) {
 	dir := t.TempDir()
 	caFile := filepath.Join(dir, "ca.pem")
 	certFile := filepath.Join(dir, "cert.pem")
@@ -394,5 +395,36 @@ func TestSetupMTLS(t *testing.T) {
 	}
 	if tc.ClientCAs == nil {
 		t.Error("expected ClientCAs to be set")
+	}
+}
+
+// TestSetupMTLS_InvalidCAFile 验证 ClientCA 文件不存在或无效时返回错误。
+func TestSetupMTLS_InvalidCAFile(t *testing.T) {
+	dir := t.TempDir()
+	// 文件不存在
+	_, err := setupMTLS(filepath.Join(dir, "nonexistent.pem"))
+	if err == nil {
+		t.Error("expected error for non-existent CA file")
+	}
+
+	// 无效 PEM 内容
+	badFile := filepath.Join(dir, "bad.pem")
+	if wErr := os.WriteFile(badFile, []byte("not a pem"), 0644); wErr != nil {
+		t.Fatal(wErr)
+	}
+	_, err = setupMTLS(badFile)
+	if err == nil {
+		t.Error("expected error for invalid PEM content")
+	}
+}
+
+// TestSetupMTLS_EmptyCA 验证空 ClientCA 不报错也不返回修改函数。
+func TestSetupMTLS_EmptyCA(t *testing.T) {
+	fn, err := setupMTLS("")
+	if err != nil {
+		t.Fatalf("expected nil error for empty CA, got %v", err)
+	}
+	if fn != nil {
+		t.Error("expected nil mTLS fn for empty CA")
 	}
 }

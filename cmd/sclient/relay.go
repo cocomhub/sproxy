@@ -123,7 +123,7 @@ func buildRelayHandler(ctx context.Context, localAddr string, httpClient *http.C
 		}
 		forwardReq.Header = r.Header.Clone()
 
-		resp, err := httpClient.Do(forwardReq)
+		resp, err := httpClient.Do(forwardReq) //nolint:gosec // G704: SSRF is intentional (relay proxy)
 		if err != nil {
 			logger.Warn("转发到本地失败", "path", r.URL.Path, "error", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)

@@ -203,7 +203,7 @@ func WithInsecureTLS() Option {
 }
 
 // applyClientCert 加载客户端证书并应用到 FileClient 的 httpClient。
-// 如果 certFile 或 keyFile 为空，不执行任何操作。
+// certFile 和 keyFile 必须指向有效的 PEM 文件；加载失败时调用 onError 回调。
 // 保留已有 transport 的 InsecureSkipVerify 状态，避免被 WithInsecureTLS 的先后顺序影响。
 // 使用 transport.Clone() 保留其他传输层配置（如代理、DialContext）。
 func applyClientCert(c *FileClient, certFile, keyFile string, onError func(err error)) {

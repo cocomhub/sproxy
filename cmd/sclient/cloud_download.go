@@ -450,7 +450,7 @@ func extractTarGz(src, destDir string) error {
 			if err != nil {
 				return fmt.Errorf("创建文件失败: %w", err)
 			}
-			if _, err := io.Copy(outFile, tr); err != nil {
+			if _, err := io.CopyN(outFile, tr, header.Size); err != nil {
 				outFile.Close()
 				return fmt.Errorf("写入文件失败: %w", err)
 			}
