@@ -272,7 +272,7 @@ func TestIsStorageFullError(t *testing.T) {
 		{"storage full", true},
 		{"STORAGE FULL", true},
 		{"Storage Full", true},
-		{"507", true},
+		{"507", false},
 		{"Insufficient Storage", true},
 		{"insufficient storage", true},
 		{"INSUFFICIENT STORAGE", true},

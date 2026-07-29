@@ -339,7 +339,6 @@ func isStorageFullError(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	return strings.Contains(lower, "storage full") ||
 		strings.Contains(lower, "insufficient storage") ||
-		strings.Contains(lower, "507") ||
 		strings.Contains(lower, "disk quota") ||
 		strings.Contains(lower, "no space left")
 }

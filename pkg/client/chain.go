@@ -6,6 +6,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -180,9 +181,14 @@ func (m *ChainManager) saveState(ctx context.Context, runner ChainRunner) {
 }
 
 // runnerRegistry 是 ChainRunner 类型注册表。
-var runnerRegistry = map[string]func() ChainRunner{}
+var (
+	runnerRegistryMu sync.RWMutex
+	runnerRegistry   = map[string]func() ChainRunner{}
+)
 
 func RegisterRunner(typeName string, factory func() ChainRunner) {
+	runnerRegistryMu.Lock()
+	defer runnerRegistryMu.Unlock()
 	runnerRegistry[typeName] = factory
 }
 
@@ -191,7 +197,9 @@ func resolveRunner(ctx context.Context, state map[string]any) (ChainRunner, erro
 	if !ok {
 		return nil, fmt.Errorf("state 缺少 type 字段")
 	}
+	runnerRegistryMu.RLock()
 	factory, ok := runnerRegistry[typeName]
+	runnerRegistryMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("未知的 runner 类型: %s", typeName)
 	}

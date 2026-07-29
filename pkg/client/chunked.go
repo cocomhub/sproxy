@@ -789,9 +789,12 @@ func (c *FileClient) downloadOneChunk(ctx context.Context, p downloadChunkParams
 	baseDelay := 500 * time.Millisecond
 
 	for attempt := range maxRetries {
+		p.Mu.Lock()
 		if *p.DownloadErr != nil {
+			p.Mu.Unlock()
 			return
 		}
+		p.Mu.Unlock()
 
 		data, ok := c.tryDownloadChunk(ctx, urlPath, length)
 		if !ok {
