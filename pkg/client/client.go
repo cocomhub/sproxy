@@ -327,6 +327,12 @@ func calculateChecksum(filePath string) (string, error) {
 // 并通过 X-File-Checksum 请求头发送给服务端进行完整性校验。
 // 同时通过 X-File-MTime 请求头传递文件的修改时间。
 // 如果配置了 tunnel_key，上传数据将通过加密隧道传输。
+//
+// 设计说明：X-File-Checksum 请求头必须在 doRequest 调用前设置，而 body 的 SHA-256
+// 需要在 multipart 写入过程中流式计算。标准库的 net/http 在发送请求时先发 header 再发 body，
+// 因此无法在 body 流式写入的同时获取 checksum 并设置 header。io.TeeReader 方案在此不适用。
+// 对于 ≤ 100 MiB 的文件（本方法的适用范围，大文件走 ChunkedUpload），两次读取的 I/O 开销
+// 在 SSD 和 OS 缓存下可接受。
 func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (*UploadResult, error) {
 	file, err := os.Open(localPath)
 	if err != nil {
