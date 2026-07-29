@@ -1543,7 +1543,7 @@ func keyPEM(der []byte) []byte {
 	return buf.Bytes()
 }
 
-// TestWithClientCert_FileNotExist 验证证书文件不存在时 WithClientCert panic。
+// TestWithClientCert_FileNotExist 验证证书文件不存在时 WithClientCert(strict=true) panic。
 func TestWithClientCert_FileNotExist(t *testing.T) {
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "nonexistent.pem")
@@ -1551,19 +1551,19 @@ func TestWithClientCert_FileNotExist(t *testing.T) {
 
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("expected panic when cert file does not exist with WithClientCert")
+			t.Fatal("expected panic when cert file does not exist with WithClientCert(strict=true)")
 		}
 	}()
-	NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile))
+	NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile, true))
 }
 
-// TestWithClientCertOptional_FileNotExist 验证证书文件不存在时 WithClientCertOptional 静默降级。
-func TestWithClientCertOptional_FileNotExist(t *testing.T) {
+// TestWithClientCert_FileNotExist_Warn 验证证书文件不存在时 WithClientCert(strict=false) 静默降级。
+func TestWithClientCert_FileNotExist_Warn(t *testing.T) {
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "nonexistent.pem")
 	keyFile := filepath.Join(dir, "nonexistent-key.pem")
 
-	c := NewFileClient("https://127.0.0.1:18083", WithClientCertOptional(certFile, keyFile))
+	c := NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile, false))
 	if c == nil {
 		t.Fatal("expected non-nil client")
 	}
@@ -1577,7 +1577,7 @@ func TestWithClientCertOptional_FileNotExist(t *testing.T) {
 func TestWithClientCert_Exists(t *testing.T) {
 	certFile, keyFile := generateTestCert(t)
 
-	c := NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile))
+	c := NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile, true))
 	if c == nil {
 		t.Fatal("expected non-nil client")
 	}
@@ -1612,7 +1612,7 @@ func TestWithClientCert_PreservesInsecureTLS(t *testing.T) {
 	// 先 WithInsecureTLS 再 WithClientCert
 	c := NewFileClient("https://127.0.0.1:18083",
 		WithInsecureTLS(),
-		WithClientCert(certFile, keyFile),
+		WithClientCert(certFile, keyFile, true),
 	)
 
 	transport, ok := c.httpClient.Transport.(*http.Transport)
@@ -1636,7 +1636,7 @@ func TestWithClientCert_ReverseOrder(t *testing.T) {
 
 	// 先 WithClientCert 再 WithInsecureTLS
 	c := NewFileClient("https://127.0.0.1:18083",
-		WithClientCert(certFile, keyFile),
+		WithClientCert(certFile, keyFile, true),
 		WithInsecureTLS(),
 	)
 

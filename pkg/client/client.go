@@ -170,6 +170,22 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
+// cloneOrNewTransport 从 FileClient 克隆现有 Transport 或创建新实例。
+// 保留已有传输层配置（代理、DialContext、TLSClientConfig 等），供
+// WithInsecureTLS 和 WithClientCert 复用，确保两者顺序无关。
+func cloneOrNewTransport(c *FileClient) *http.Transport {
+	var transport *http.Transport
+	if c.httpClient != nil && c.httpClient.Transport != nil {
+		if existingTransport, ok := c.httpClient.Transport.(*http.Transport); ok {
+			transport = existingTransport.Clone()
+		}
+	}
+	if transport == nil {
+		transport = &http.Transport{}
+	}
+	return transport
+}
+
 // WithInsecureTLS 跳过 TLS 证书验证（仅用于自签证书开发/测试环境）。
 //
 // 生产环境应使用正式 CA 签发的证书，而非此选项。
@@ -179,15 +195,7 @@ func WithTimeout(d time.Duration) Option {
 // 已有 Transport 中的 Certificates 配置，不会因顺序问题导致证书丢失。
 func WithInsecureTLS() Option {
 	return func(c *FileClient) {
-		var transport *http.Transport
-		if c.httpClient != nil && c.httpClient.Transport != nil {
-			if existingTransport, ok := c.httpClient.Transport.(*http.Transport); ok {
-				transport = existingTransport.Clone()
-			}
-		}
-		if transport == nil {
-			transport = &http.Transport{}
-		}
+		transport := cloneOrNewTransport(c)
 		if transport.TLSClientConfig == nil {
 			transport.TLSClientConfig = &tls.Config{
 				InsecureSkipVerify: true, //nolint:gosec
@@ -202,65 +210,41 @@ func WithInsecureTLS() Option {
 	}
 }
 
-// applyClientCert 加载客户端证书并应用到 FileClient 的 httpClient。
-// certFile 和 keyFile 必须指向有效的 PEM 文件；加载失败时调用 onError 回调。
-// 保留已有 transport 的 InsecureSkipVerify 状态，避免被 WithInsecureTLS 的先后顺序影响。
-// 使用 transport.Clone() 保留其他传输层配置（如代理、DialContext）。
-func applyClientCert(c *FileClient, certFile, keyFile string, onError func(err error)) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		onError(err)
-		return
-	}
-	// 保留当前 transport 的 InsecureSkipVerify 状态及其他配置
-	var transport *http.Transport
-	if c.httpClient != nil && c.httpClient.Transport != nil {
-		if existingTransport, ok := c.httpClient.Transport.(*http.Transport); ok {
-			transport = existingTransport.Clone()
-		}
-	}
-	if transport == nil {
-		transport = &http.Transport{}
-	}
-	if transport.TLSClientConfig == nil {
-		transport.TLSClientConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-	}
-	transport.TLSClientConfig.Certificates = []tls.Certificate{cert}
-	// 保留 InsecureSkipVerify 状态（如果已有配置）
-	// 注意：transport 是 Clone() 来的，已经包含了原有的 TLSClientConfig
-	c.httpClient = &http.Client{
-		Timeout:   c.httpClient.Timeout,
-		Transport: transport,
-	}
-}
-
 // WithClientCert 设置客户端证书用于 mTLS 双向认证。
 // certFile 和 keyFile 分别是 PEM 编码的客户端证书和私钥文件路径。
 // 当服务端配置了 tls.client_ca 时，需要客户端证书才能通过验证。
 // 此选项仅影响直连模式（HTTP 客户端），不影响隧道模式。
 //
+// strict 参数控制证书加载失败时的行为：
+//   - true：panic（适用于 CLI 等确定性场景）
+//   - false：仅记录警告，客户端继续使用无证书配置（适用于证书可能不存在的场景）
+//
 // 与 WithInsecureTLS 的先后顺序不影响结果：WithClientCert 会保留
 // InsecureSkipVerify 状态，不会因顺序问题导致证书验证失效。
-//
-// 注意：证书加载失败时会 panic（行为明确），使用 WithClientCertOptional 可静默降级。
-func WithClientCert(certFile, keyFile string) Option {
+// 使用 cloneOrNewTransport 保留其他传输层配置（如代理、DialContext）。
+func WithClientCert(certFile, keyFile string, strict bool) Option {
 	return func(c *FileClient) {
-		applyClientCert(c, certFile, keyFile, func(err error) {
-			panic(fmt.Sprintf("证书加载失败（请检查文件路径或使用 WithClientCertOptional 静默降级）: cert_file=%s, error=%v", certFile, err))
-		})
-	}
-}
-
-// WithClientCertOptional 设置客户端证书用于 mTLS 双向认证。
-// 与 WithClientCert 的区别：证书加载失败时仅记录警告，不 panic，客户端继续使用无证书配置。
-// 适用于证书文件可能不存在的场景（如首次启动时尚未生成客户端证书）。
-func WithClientCertOptional(certFile, keyFile string) Option {
-	return func(c *FileClient) {
-		applyClientCert(c, certFile, keyFile, func(err error) {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			if strict {
+				panic(fmt.Sprintf("证书加载失败: cert_file=%s, error=%v", certFile, err))
+			}
 			c.logger.Warn("加载客户端证书失败（已忽略，使用无证书直连）", "cert_file", certFile, "error", err)
-		})
+			return
+		}
+		transport := cloneOrNewTransport(c)
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			}
+		}
+		transport.TLSClientConfig.Certificates = []tls.Certificate{cert}
+		// 注意：transport 是 Clone() 来的，已经包含了原有的 TLSClientConfig
+		// 包括 InsecureSkipVerify 状态，无需额外处理
+		c.httpClient = &http.Client{
+			Timeout:   c.httpClient.Timeout,
+			Transport: transport,
+		}
 	}
 }
 
