@@ -55,8 +55,8 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 	}
 
 	c := NewFileClient(url)
-	c.ChunkSize = 4096
-	c.MaxChunkSize = 4096
+	c.chunkSize = 4096
+	c.maxChunkSize = 4096
 
 	// 分块上传
 	result, err := c.ChunkedUpload(t.Context(), srcPath, "upload.bin")
@@ -91,8 +91,8 @@ func TestClientChunkedUpload_Resume(t *testing.T) {
 	}
 
 	c := NewFileClient(url)
-	c.ChunkSize = 4096
-	c.MaxChunkSize = 4096
+	c.chunkSize = 4096
+	c.maxChunkSize = 4096
 
 	// 分块上传（允许续传）
 	result, err := c.ChunkedUpload(t.Context(), srcPath, "resume.bin")

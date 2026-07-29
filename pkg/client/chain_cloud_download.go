@@ -41,8 +41,8 @@ type CloudDownloadChain struct {
 	Timeout      time.Duration `json:"timeout"`       // 超时时间，恢复时保持
 
 	// 非持久化字段：恢复后需手动设置
-	archiveServerPath string      `json:"-"` // 服务端返回的归档文件路径
-	client            *FileClient `json:"-"`
+	archiveServerPath string       `json:"-"` // 服务端返回的归档文件路径
+	client            *FileClient  `json:"-"`
 	opts              chainOptions `json:"-"` // 仅运行时使用，非持久字段由独立字段覆盖
 }
 
@@ -72,24 +72,24 @@ func (c *CloudDownloadChain) Phase() string  { return c.CurrentPhase }
 func (c *CloudDownloadChain) Status() string { return c.CurStatus }
 func (c *CloudDownloadChain) State() map[string]any {
 	return map[string]any{
-		"type":         "cloud_download",
-		"chain_id":     c.ChainID,
-		"phase":        c.CurrentPhase,
-		"status":       c.CurStatus,
-		"urls":         c.URLs,
-		"task_ids":     c.TaskIDs,
-		"archive_name": c.ArchiveName,
-		"local_dir":    c.LocalDir,
-		"local_path":   c.LocalPath,
-		"keep_files":   c.KeepFiles,
-		"completed":    c.Completed,
-		"failed":       c.Failed,
-		"total":        c.Total,
-		"error":        c.Error,
-		"created_at":   c.CreatedAt,
-		"updated_at":   c.UpdatedAt,
-			"poll_interval": c.PollInterval,
-			"timeout":       c.Timeout,
+		"type":          "cloud_download",
+		"chain_id":      c.ChainID,
+		"phase":         c.CurrentPhase,
+		"status":        c.CurStatus,
+		"urls":          c.URLs,
+		"task_ids":      c.TaskIDs,
+		"archive_name":  c.ArchiveName,
+		"local_dir":     c.LocalDir,
+		"local_path":    c.LocalPath,
+		"keep_files":    c.KeepFiles,
+		"completed":     c.Completed,
+		"failed":        c.Failed,
+		"total":         c.Total,
+		"error":         c.Error,
+		"created_at":    c.CreatedAt,
+		"updated_at":    c.UpdatedAt,
+		"poll_interval": c.PollInterval,
+		"timeout":       c.Timeout,
 	}
 }
 

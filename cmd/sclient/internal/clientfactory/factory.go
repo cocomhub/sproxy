@@ -66,13 +66,9 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		}
 	}
 	if cs, _ := cmd.Flags().GetInt64("chunk-size"); cs > 0 {
-		opts = append(opts, func(c *client.FileClient) {
-			c.ChunkSize = cs
-		})
+		opts = append(opts, client.WithChunkSize(cs))
 	} else if cfg.ChunkSize > 0 {
-		opts = append(opts, func(c *client.FileClient) {
-			c.ChunkSize = cfg.ChunkSize
-		})
+		opts = append(opts, client.WithChunkSize(cfg.ChunkSize))
 	}
 	if cfg.MaxChunkSize > 0 {
 		opts = append(opts, client.WithMaxChunkSize(cfg.MaxChunkSize))

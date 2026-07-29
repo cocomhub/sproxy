@@ -101,8 +101,8 @@ type FileClient struct {
 	tunnelMux       *mux.Mux
 	tunnelMuxMu     sync.Mutex
 	progressFn      func(label string, read, total int64)
-	ChunkSize       int64
-	MaxChunkSize    int64
+	chunkSize       int64
+	maxChunkSize    int64
 	authToken       string
 	logger          *slog.Logger
 	uploadCache     sync.Map      // key = absFilePath, value = *uploadCacheEntry
@@ -119,7 +119,7 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 	c := &FileClient{
 		serverURL:       strings.TrimRight(serverURL, "/"),
 		httpClient:      &http.Client{Timeout: 300 * time.Second},
-		ChunkSize:       size.DefaultChunkSize, // 4 MiB
+		chunkSize:       size.DefaultChunkSize, // 4 MiB
 		logger:          slog.Default(),
 		maxCacheEntries: defaultMaxCacheEntries,
 		cacheTTL:        defaultCacheTTL,
@@ -266,7 +266,14 @@ func WithProgress(fn func(label string, read, total int64)) Option {
 // WithMaxChunkSize 设置最大分块大小。当设置为 0 时使用默认值 64MB。
 func WithMaxChunkSize(n int64) Option {
 	return func(c *FileClient) {
-		c.MaxChunkSize = n
+		c.maxChunkSize = n
+	}
+}
+
+// WithChunkSize 设置首选分块大小。当设置为 0 时使用默认值 4MB。
+func WithChunkSize(n int64) Option {
+	return func(c *FileClient) {
+		c.chunkSize = n
 	}
 }
 

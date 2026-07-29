@@ -201,7 +201,7 @@ func BenchmarkChunkedUpload(b *testing.B) {
 
 	// 手动设 ChunkSize = 1MB，不自适应分块
 	c := NewFileClient(ts.URL)
-	c.ChunkSize = 1 * size.MiB
+	c.chunkSize = 1 * size.MiB
 
 	b.SetBytes(int64(len(data)))
 	b.ResetTimer()

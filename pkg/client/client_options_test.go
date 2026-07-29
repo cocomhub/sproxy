@@ -41,8 +41,8 @@ func TestWithTimeout(t *testing.T) {
 func TestWithMaxChunkSize(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithMaxChunkSize(8888)(c)
-	if c.MaxChunkSize != 8888 {
-		t.Errorf("MaxChunkSize = %d, want 8888", c.MaxChunkSize)
+	if c.maxChunkSize != 8888 {
+		t.Errorf("MaxChunkSize = %d, want 8888", c.maxChunkSize)
 	}
 }
 

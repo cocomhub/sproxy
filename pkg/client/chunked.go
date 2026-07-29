@@ -566,14 +566,14 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath string, opts ...ChunkedOption) (*ChunkedUploadResult, error) {
 	// 解析选项
 	opt := &chunkedOpts{
-		chunkSize:   c.ChunkSize,
+		chunkSize:   c.chunkSize,
 		concurrency: defaultConcurrency,
 		resume:      true,
 	}
 	for _, o := range opts {
 		o(opt)
 	}
-	maxChunk := c.MaxChunkSize
+	maxChunk := c.maxChunkSize
 	if maxChunk <= 0 {
 		maxChunk = size.DefaultMaxChunkSize
 	}
@@ -708,13 +708,13 @@ type downloadParams struct {
 // getDownloadParams 解析分块下载的选项参数。
 func getDownloadParams(c *FileClient, opts ...ChunkedOption) *downloadParams {
 	opt := &chunkedOpts{
-		chunkSize:   c.ChunkSize,
+		chunkSize:   c.chunkSize,
 		concurrency: defaultConcurrency,
 	}
 	for _, o := range opts {
 		o(opt)
 	}
-	maxChunk := c.MaxChunkSize
+	maxChunk := c.maxChunkSize
 	if maxChunk <= 0 {
 		maxChunk = size.DefaultMaxChunkSize
 	}
