@@ -4,12 +4,20 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1478,4 +1486,172 @@ func TestGetTunnelMux(t *testing.T) {
 		_ = tun1
 		_ = tun2
 	})
+}
+
+// generateTestCert 使用标准库生成临时自签证书，用于 mTLS 测试。
+func generateTestCert(t *testing.T) (certFile, keyFile string) {
+	t.Helper()
+	dir := t.TempDir()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("生成 ECDSA 密钥失败: %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(1 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("创建证书失败: %v", err)
+	}
+
+	certFile = filepath.Join(dir, "test.crt")
+	keyFile = filepath.Join(dir, "test.key")
+
+	if wErr := os.WriteFile(certFile, certPEM(certDER), 0644); wErr != nil {
+		t.Fatalf("写入证书文件失败: %v", wErr)
+	}
+
+	privBytes, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatalf("编码私钥失败: %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM(privBytes), 0600); err != nil {
+		t.Fatalf("写入私钥文件失败: %v", err)
+	}
+	return certFile, keyFile
+}
+
+// certPEM 将 DER 编码的证书包装为 PEM 格式。
+func certPEM(der []byte) []byte {
+	var buf bytes.Buffer
+	pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: der})
+	return buf.Bytes()
+}
+
+// keyPEM 将 DER 编码的私钥包装为 PEM 格式。
+func keyPEM(der []byte) []byte {
+	var buf bytes.Buffer
+	pem.Encode(&buf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	return buf.Bytes()
+}
+
+// TestWithClientCert_FileNotExist 验证证书文件不存在时 WithClientCert(strict=true) panic。
+func TestWithClientCert_FileNotExist(t *testing.T) {
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "nonexistent.pem")
+	keyFile := filepath.Join(dir, "nonexistent-key.pem")
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when cert file does not exist with WithClientCert(strict=true)")
+		}
+	}()
+	NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile, true))
+}
+
+// TestWithClientCert_FileNotExist_Warn 验证证书文件不存在时 WithClientCert(strict=false) 静默降级。
+func TestWithClientCert_FileNotExist_Warn(t *testing.T) {
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "nonexistent.pem")
+	keyFile := filepath.Join(dir, "nonexistent-key.pem")
+
+	c := NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile, false))
+	if c == nil {
+		t.Fatal("expected non-nil client")
+	}
+	// 验证 httpClient 仍然使用默认配置（未被替换为自定义 Transport）
+	if c.httpClient.Transport != nil {
+		t.Fatal("expected Transport to be nil (default) when cert loading fails")
+	}
+}
+
+// TestWithClientCert_Exists 验证有效的证书文件能正确加载到 TLSClientConfig。
+func TestWithClientCert_Exists(t *testing.T) {
+	certFile, keyFile := generateTestCert(t)
+
+	c := NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile, true))
+	if c == nil {
+		t.Fatal("expected non-nil client")
+	}
+
+	transport, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("expected *http.Transport")
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("expected TLSClientConfig to be set")
+	}
+	if len(transport.TLSClientConfig.Certificates) != 1 {
+		t.Fatalf("expected 1 certificate, got %d", len(transport.TLSClientConfig.Certificates))
+	}
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("expected MinVersion TLS 1.2, got %d", transport.TLSClientConfig.MinVersion)
+	}
+	// 验证 InsecureSkipVerify 默认为 false
+	if transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("expected InsecureSkipVerify to be false")
+	}
+	// 验证 timeout 被保留
+	if c.httpClient.Timeout != 300*time.Second {
+		t.Errorf("expected timeout 300s, got %v", c.httpClient.Timeout)
+	}
+}
+
+// TestWithClientCert_PreservesInsecureTLS 验证 WithInsecureTLS + WithClientCert 顺序不丢失 InsecureSkipVerify。
+func TestWithClientCert_PreservesInsecureTLS(t *testing.T) {
+	certFile, keyFile := generateTestCert(t)
+
+	// 先 WithInsecureTLS 再 WithClientCert
+	c := NewFileClient("https://127.0.0.1:18083",
+		WithInsecureTLS(),
+		WithClientCert(certFile, keyFile, true),
+	)
+
+	transport, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("expected *http.Transport")
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("expected TLSClientConfig to be set")
+	}
+	if !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("expected InsecureSkipVerify to be preserved as true")
+	}
+	if len(transport.TLSClientConfig.Certificates) != 1 {
+		t.Fatalf("expected 1 certificate, got %d", len(transport.TLSClientConfig.Certificates))
+	}
+}
+
+// TestWithClientCert_ReverseOrder 验证 WithClientCert + WithInsecureTLS 顺序后 InsecureSkipVerify 为 true。
+func TestWithClientCert_ReverseOrder(t *testing.T) {
+	certFile, keyFile := generateTestCert(t)
+
+	// 先 WithClientCert 再 WithInsecureTLS
+	c := NewFileClient("https://127.0.0.1:18083",
+		WithClientCert(certFile, keyFile, true),
+		WithInsecureTLS(),
+	)
+
+	transport, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("expected *http.Transport")
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("expected TLSClientConfig to be set")
+	}
+	if !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("expected InsecureSkipVerify to be true")
+	}
+	// 验证反向顺序时证书仍然保留（WithInsecureTLS 使用 Clone() 保留已有配置）
+	if len(transport.TLSClientConfig.Certificates) != 1 {
+		t.Errorf("expected 1 certificate preserved after WithInsecureTLS, got %d", len(transport.TLSClientConfig.Certificates))
+	}
 }

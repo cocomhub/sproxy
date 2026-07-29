@@ -10,13 +10,12 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	"github.com/quic-go/quic-go"
 )
 
 // mockQUICListener 实现 quicListener 接口，用于 QuicListener 单元测试。
 type mockQUICListener struct {
 	addr       net.Addr
-	acceptConn quic.Connection
+	acceptConn connInterface
 	acceptErr  error
 	closeErr   error
 	closed     bool
@@ -24,7 +23,7 @@ type mockQUICListener struct {
 
 func (m *mockQUICListener) Addr() net.Addr { return m.addr }
 
-func (m *mockQUICListener) Accept(ctx context.Context) (quic.Connection, error) {
+func (m *mockQUICListener) Accept(ctx context.Context) (connInterface, error) {
 	// 先检查 context 是否已取消，避免 goroutine 完成过快导致
 	// select 在 ch、ctx.Done()、closeCh 之间竞态。
 	if ctx.Err() != nil {
@@ -44,44 +43,17 @@ func (m *mockQUICListener) Close() error {
 	return m.closeErr
 }
 
-// stubConnection 是一个最小 quic.Connection 实现，只返回固定的 stream。
+// stubConnection 是一个最小 connInterface 实现，只返回固定的 stream。
 type stubConnection struct {
-	stream    quic.Stream
+	stream    streamInterface
 	streamErr error
 }
 
-func (s *stubConnection) AcceptStream(ctx context.Context) (quic.Stream, error) {
+func (s *stubConnection) AcceptStream(ctx context.Context) (streamInterface, error) {
 	if s.streamErr != nil {
 		return nil, s.streamErr
 	}
 	return s.stream, nil
-}
-
-func (s *stubConnection) AcceptUniStream(ctx context.Context) (quic.ReceiveStream, error) {
-	return nil, errors.New("not implemented")
-}
-func (s *stubConnection) OpenStream() (quic.Stream, error) {
-	return nil, errors.New("not implemented")
-}
-func (s *stubConnection) OpenStreamSync(ctx context.Context) (quic.Stream, error) {
-	return nil, errors.New("not implemented")
-}
-func (s *stubConnection) OpenUniStream() (quic.SendStream, error) {
-	return nil, errors.New("not implemented")
-}
-func (s *stubConnection) OpenUniStreamSync(ctx context.Context) (quic.SendStream, error) {
-	return nil, errors.New("not implemented")
-}
-func (s *stubConnection) LocalAddr() net.Addr  { return &net.TCPAddr{} }
-func (s *stubConnection) RemoteAddr() net.Addr { return &net.TCPAddr{} }
-func (s *stubConnection) CloseWithError(_ quic.ApplicationErrorCode, _ string) error {
-	return nil
-}
-func (s *stubConnection) Context() context.Context              { return context.Background() }
-func (s *stubConnection) ConnectionState() quic.ConnectionState { return quic.ConnectionState{} }
-func (s *stubConnection) SendDatagram(_ []byte) error           { return errors.New("not implemented") }
-func (s *stubConnection) ReceiveDatagram(_ context.Context) ([]byte, error) {
-	return nil, errors.New("not implemented")
 }
 
 func TestQuicListenerAddr(t *testing.T) {

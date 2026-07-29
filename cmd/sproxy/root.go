@@ -5,8 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -19,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
+	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -212,31 +211,40 @@ func createHTTPServer(cfg *server.Config, handler http.Handler) *http.Server {
 	}
 }
 
-// startTLSListener 启动 TLS/HTTPS 监听，包含自签证书生成和 mTLS 配置。
+// startTLSListener 启动 TLS/HTTPS 监听，使用 certmgr 管理证书生命周期。
+// 支持自签证书、文件证书和 mTLS 配置。
 func startTLSListener(cfg *server.Config, s *http.Server) error {
-	certFile := cfg.TLS.CertFile
-	keyFile := cfg.TLS.KeyFile
-	if certFile == "" {
-		certFile = "certs/_wildcard.sproxy.local.pem"
+	cmCfg := &certmgr.Config{
+		CertFile: cfg.TLS.CertFile,
+		KeyFile:  cfg.TLS.KeyFile,
+		AutoTLS:  cfg.TLS.AutoTLS,
+		ClientCA: cfg.TLS.ClientCA,
+		ACME: certmgr.ACMEConfig{
+			Enabled:    cfg.TLS.ACME.Enabled,
+			Domains:    cfg.TLS.ACME.Domains,
+			Email:      cfg.TLS.ACME.Email,
+			CacheDir:   cfg.TLS.ACME.CacheDir,
+			HTTP01:     cfg.TLS.ACME.HTTP01,
+			HTTP01Port: cfg.TLS.ACME.HTTP01Port,
+		},
 	}
-	if keyFile == "" {
-		keyFile = "certs/_wildcard.sproxy.local-key.pem"
+	mgr, err := certmgr.New(cmCfg)
+	if err != nil {
+		return fmt.Errorf("创建证书管理器失败: %w", err)
 	}
-	if cfg.TLS.AutoTLS {
-		if _, err := os.Stat(certFile); os.IsNotExist(err) {
-			slog.Info("自动生成自签证书", "cert", certFile, "key", keyFile)
-			if err := server.GenerateSelfSignedCert(certFile, keyFile); err != nil {
-				return fmt.Errorf("自动生成自签证书失败: %w", err)
-			}
+	defer func() {
+		if closeErr := mgr.Close(); closeErr != nil {
+			slog.Warn("证书管理器关闭失败", "error", closeErr)
 		}
+	}()
+	tlsCfg, err := mgr.TLSConfig()
+	if err != nil {
+		return fmt.Errorf("获取 TLS 配置失败: %w", err)
 	}
-	slog.Info("TLS enabled", "cert", certFile, "key", keyFile)
+	s.TLSConfig = tlsCfg
+	slog.Info("TLS enabled", "cert_file", cfg.TLS.CertFile, "auto_tls", cfg.TLS.AutoTLS, "client_ca", cfg.TLS.ClientCA, "acme", cfg.TLS.ACME.Enabled)
 
-	if err := setupMTLSConfig(cfg, s); err != nil {
-		return err
-	}
-
-	if err := s.ListenAndServeTLS(certFile, keyFile); err != nil {
+	if err := s.ListenAndServeTLS("", ""); err != nil {
 		if err == http.ErrServerClosed {
 			slog.Info(logListenClosed, "error", err.Error())
 		} else {
@@ -255,28 +263,6 @@ func startPlainListener(s *http.Server) error {
 			return fmt.Errorf(errFmtListenServe, err)
 		}
 	}
-	return nil
-}
-
-// setupMTLSConfig 配置 mTLS（双向 TLS）：读取 ClientCA 证书并设置 tls.Config。
-func setupMTLSConfig(cfg *server.Config, s *http.Server) error {
-	if cfg.TLS.ClientCA == "" {
-		return nil
-	}
-	caCert, err := os.ReadFile(cfg.TLS.ClientCA)
-	if err != nil {
-		return fmt.Errorf("读取 ClientCA 证书失败: %w", err)
-	}
-	caPool := x509.NewCertPool()
-	if !caPool.AppendCertsFromPEM(caCert) {
-		return fmt.Errorf("ClientCA 证书解析失败（非 PEM 格式）")
-	}
-	s.TLSConfig = &tls.Config{
-		ClientAuth: tls.RequireAndVerifyClientCert,
-		ClientCAs:  caPool,
-		MinVersion: tls.VersionTLS12,
-	}
-	slog.Info("mTLS enabled", "client_ca", cfg.TLS.ClientCA)
 	return nil
 }
 

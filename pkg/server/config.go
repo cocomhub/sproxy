@@ -14,12 +14,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// TLSConfig 是 TLS 相关配置，支持三种证书模式：
+//   - CertFile + KeyFile：静态文件证书（最高优先级）
+//   - ACME.Enabled：ACME 自动证书
+//   - AutoTLS：自签证书（默认 fallback）
 type TLSConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	CertFile string `yaml:"cert_file"`
-	KeyFile  string `yaml:"key_file"`
-	AutoTLS  bool   `yaml:"auto_tls"`
-	ClientCA string `yaml:"client_ca"` // mTLS: CA 证书路径，非空时启用客户端证书验证
+	Enabled  bool       `yaml:"enabled"`
+	CertFile string     `yaml:"cert_file"`
+	KeyFile  string     `yaml:"key_file"`
+	AutoTLS  bool       `yaml:"auto_tls"`
+	ClientCA string     `yaml:"client_ca"` // mTLS: CA 证书路径，非空时启用客户端证书验证
+	ACME     ACMEConfig `yaml:"acme"`      // ACME 自动证书配置（可选）
+}
+
+// ACMEConfig 是 ACME 自动证书的配置。
+type ACMEConfig struct {
+	Enabled    bool     `yaml:"enabled"`
+	Domains    []string `yaml:"domains"`
+	Email      string   `yaml:"email"`
+	CacheDir   string   `yaml:"cache_dir"`
+	HTTP01     bool     `yaml:"http01"`
+	HTTP01Port string   `yaml:"http01_port"`
 }
 
 type RateLimitConfig struct {

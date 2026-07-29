@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -360,20 +359,6 @@ func TestRunServer_AuthWarning(t *testing.T) {
 }
 
 // ---- 测试辅助函数 ----
-
-// waitForServer 轮询等待 TCP 服务器就绪。
-func waitForServer(t testing.TB, addr string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
-			conn.Close()
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("server did not become ready within %v (addr=%s)", timeout, addr)
-}
 
 // waitForServerReady 轮询等待 HTTP 服务器就绪（通过 HTTP 连接，支持 TLS 和 HTTP）。
 func waitForServerReady(t testing.TB, addr string, timeout time.Duration) {

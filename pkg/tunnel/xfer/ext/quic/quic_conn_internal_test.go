@@ -10,13 +10,11 @@ import (
 	"errors"
 	"io"
 	"testing"
-	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
-	"github.com/quic-go/quic-go"
 )
 
-// mockStream 实现 quic.Stream 接口，用于 quicConn 单元测试。
+// mockStream 实现 streamInterface（io.Reader + io.Writer + io.Closer），用于 quicConn 单元测试。
 type mockStream struct {
 	readBuf  bytes.Buffer
 	writeBuf bytes.Buffer
@@ -43,15 +41,6 @@ func (m *mockStream) Close() error {
 	m.closed = true
 	return nil
 }
-
-func (m *mockStream) Context() context.Context { return context.Background() }
-
-func (m *mockStream) StreamID() quic.StreamID            { return 0 }
-func (m *mockStream) CancelRead(_ quic.StreamErrorCode)  {}
-func (m *mockStream) CancelWrite(_ quic.StreamErrorCode) {}
-func (m *mockStream) SetDeadline(_ time.Time) error      { return nil }
-func (m *mockStream) SetReadDeadline(_ time.Time) error  { return nil }
-func (m *mockStream) SetWriteDeadline(_ time.Time) error { return nil }
 
 func writeFrame(buf *bytes.Buffer, msg []byte) {
 	frame := make([]byte, 4+len(msg))

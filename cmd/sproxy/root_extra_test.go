@@ -303,11 +303,9 @@ func assertLogOutput(t *testing.T, output string, format string) {
 		if !bytes.Contains([]byte(output), []byte("test message")) {
 			t.Errorf("expected log message in JSON output, got: %s", output[:min(len(output), 100)])
 		}
-	} else {
+	} else if !bytes.Contains([]byte(output), []byte("test message")) {
 		// Text output should contain the message
-		if !bytes.Contains([]byte(output), []byte("test message")) {
-			t.Errorf("expected 'test message' in text output, got: %s", output[:min(len(output), 100)])
-		}
+		t.Errorf("expected 'test message' in text output, got: %s", output[:min(len(output), 100)])
 	}
 }
 
