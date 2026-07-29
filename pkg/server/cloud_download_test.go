@@ -776,7 +776,7 @@ func TestCloudDownloadManager_DeleteTaskCleansAndReleases(t *testing.T) {
 	}
 }
 
-func TestCloudDownloadManager_ClientDisconnectAsyncRetry(t *testing.T) {
+func TestCloudDownloadManager_ClientDisconnectDownloadContinues(t *testing.T) {
 	content := []byte("client disconnect async retry test")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
