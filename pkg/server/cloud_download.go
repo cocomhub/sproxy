@@ -655,11 +655,3 @@ func (m *CloudDownloadManager) Close() {
 func (m *CloudDownloadManager) FlushNow() {
 	m.flushDirty()
 }
-
-// StopFlush 停止批量持久化 goroutine（测试用）。
-func (m *CloudDownloadManager) StopFlush() {
-	m.closeOnce.Do(func() {
-		close(m.stopFlush)
-		close(m.stopCleanup)
-	})
-}
