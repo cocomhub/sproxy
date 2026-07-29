@@ -239,7 +239,17 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			}
 			c.TaskIDs = remaining
 
-			timer := time.NewTimer(30 * time.Second)
+			// 指数退避等待：10s, 20s, 40s
+			baseDelay := 10 * time.Second
+			delay := baseDelay * (1 << attempt)
+			// 检查上下文剩余时间，避免超时
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining := time.Until(deadline)
+				if remaining < delay {
+					delay = remaining
+				}
+			}
+			timer := time.NewTimer(delay)
 			select {
 			case <-timer.C:
 			case <-ctx.Done():
@@ -262,6 +272,7 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 }
 
 // pollAllTasks 轮询所有任务状态直到全部完成。
+// 使用并发查询减少多任务时的总等待时间。
 func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
@@ -274,15 +285,29 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 		case <-timeoutCtx.Done():
 			return nil, timeoutCtx.Err()
 		case <-ticker.C:
+			// 并发查询所有任务状态
+			type taskResult struct {
+				index int
+				task  *CloudTask
+				err   error
+			}
+			resultCh := make(chan taskResult, len(c.TaskIDs))
+			for i, taskID := range c.TaskIDs {
+				go func() {
+					status, err := c.client.GetCloudTask(timeoutCtx, taskID)
+					resultCh <- taskResult{i, status, err}
+				}()
+			}
+
+			results := make([]*CloudTask, len(c.TaskIDs))
 			allDone := true
-			var results []*CloudTask
-			for _, taskID := range c.TaskIDs {
-				status, err := c.client.GetCloudTask(timeoutCtx, taskID)
-				if err != nil {
-					return nil, fmt.Errorf("查询任务 %s 失败: %w", taskID, err)
+			for range c.TaskIDs {
+				r := <-resultCh
+				if r.err != nil {
+					return nil, fmt.Errorf("查询任务 %s 失败: %w", c.TaskIDs[r.index], r.err)
 				}
-				results = append(results, status)
-				if status.Status != "completed" && status.Status != "failed" && status.Status != "cancelled" {
+				results[r.index] = r.task
+				if r.task.Status != "completed" && r.task.Status != "failed" && r.task.Status != "cancelled" {
 					allDone = false
 				}
 			}

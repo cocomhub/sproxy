@@ -133,8 +133,12 @@ func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts
 // status 可选过滤：pending/downloading/completed/failed/cancelled，为空时返回全部。
 func (c *FileClient) ListCloudTasks(ctx context.Context, status string) ([]CloudTask, error) {
 	urlPath := "/api/cloud/tasks"
+	params := url.Values{}
 	if status != "" {
-		urlPath += "?status=" + url.QueryEscape(status)
+		params.Set("status", status)
+	}
+	if len(params) > 0 {
+		urlPath += "?" + params.Encode()
 	}
 	var tasks []CloudTask
 	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &tasks); err != nil {

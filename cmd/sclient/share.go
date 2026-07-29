@@ -10,6 +10,7 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -51,7 +52,18 @@ func NewCmdShareCreate(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			maxDownloads, _ := cmd.Flags().GetInt("max-downloads")
 			oneTime, _ := cmd.Flags().GetBool("one-time")
 
-			link, err := svc.CreateShare(cmd.Context(), args[0], ttl, maxDownloads, oneTime)
+			var shareOpts []client.ShareOption
+			if ttl > 0 {
+				shareOpts = append(shareOpts, client.WithShareTTL(ttl))
+			}
+			if oneTime {
+				shareOpts = append(shareOpts, client.WithShareOneTime())
+			}
+			if maxDownloads > 0 {
+				shareOpts = append(shareOpts, client.WithShareMaxDownloads(maxDownloads))
+			}
+
+			link, err := svc.CreateShare(cmd.Context(), args[0], shareOpts...)
 			if err != nil {
 				ios.WriteErrLine("创建分享链接失败: %v", err)
 				return fmt.Errorf("创建分享链接失败: %w", err)

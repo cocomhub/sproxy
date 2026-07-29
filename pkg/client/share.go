@@ -14,6 +14,37 @@ import (
 	"time"
 )
 
+// ShareOption 配置分享链接行为。
+type ShareOption func(*shareOptions)
+
+type shareOptions struct {
+	ttl          time.Duration
+	maxDownloads int
+	oneTime      bool
+}
+
+func WithShareTTL(d time.Duration) ShareOption {
+	return func(o *shareOptions) {
+		if d > 0 {
+			o.ttl = d
+		}
+	}
+}
+
+func WithShareMaxDownloads(n int) ShareOption {
+	return func(o *shareOptions) {
+		if n > 0 {
+			o.maxDownloads = n
+		}
+	}
+}
+
+func WithShareOneTime() ShareOption {
+	return func(o *shareOptions) {
+		o.oneTime = true
+	}
+}
+
 // ShareLink 表示服务端返回的分享链接信息。
 type ShareLink struct {
 	Token        string `json:"token"`
@@ -36,13 +67,19 @@ func (s *ShareLink) ExpiresAtTime() (time.Time, error) {
 	return time.Parse(time.RFC3339, s.ExpiresAt)
 }
 
-// CreateShare 创建文件分享链接，返回分享链接信息。
-func (c *FileClient) CreateShare(ctx context.Context, filename string, ttl time.Duration, maxDownloads int, oneTime bool) (*ShareLink, error) {
+// CreateShare 创建文件分享链接，支持 Option 模式配置参数。
+func (c *FileClient) CreateShare(ctx context.Context, filename string, opts ...ShareOption) (*ShareLink, error) {
+	cfg := &shareOptions{
+		ttl: 24 * time.Hour, // 默认 24 小时
+	}
+	for _, o := range opts {
+		o(cfg)
+	}
 	body := map[string]any{
 		"filename":      filename,
-		"ttl":           ttl.String(),
-		"max_downloads": maxDownloads,
-		"one_time":      oneTime,
+		"ttl":           cfg.ttl.String(),
+		"max_downloads": cfg.maxDownloads,
+		"one_time":      cfg.oneTime,
 	}
 	jsonBody, err := json.Marshal(body)
 	if err != nil {

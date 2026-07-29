@@ -26,7 +26,7 @@ func TestCreateShare(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	link, err := c.CreateShare(context.Background(), "test.txt", time.Hour, 0, false)
+	link, err := c.CreateShare(context.Background(), "test.txt", WithShareTTL(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
