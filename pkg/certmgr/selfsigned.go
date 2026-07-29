@@ -38,13 +38,21 @@ func newSelfSignedManager(cfg *Config) (*selfSignedManager, error) {
 		return nil, fmt.Errorf("cert_file 和 key_file 必须同时设置或同时为空")
 	}
 	// 检查证书文件是否存在，只要任一缺失就重新生成
-	if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		if err := GenerateSelfSignedCert(certFile, keyFile); err != nil {
-			return nil, err
+	certExists := true
+	if _, err := os.Stat(certFile); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("检查证书文件 %s 失败: %w", certFile, err)
 		}
-	} else if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		// keyFile 存在但 certFile 不存在的情况已在上面处理
-		// 这里处理 certFile 存在但 keyFile 不存在的情况
+		certExists = false
+	}
+	keyExists := true
+	if _, err := os.Stat(keyFile); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("检查私钥文件 %s 失败: %w", keyFile, err)
+		}
+		keyExists = false
+	}
+	if !certExists || !keyExists {
 		if err := GenerateSelfSignedCert(certFile, keyFile); err != nil {
 			return nil, err
 		}

@@ -22,21 +22,20 @@ type acmeManager struct {
 	mTLSFn     func(*tls.Config)
 	http01     bool
 	http01Addr string
-	httpSrv    *http.Server // HTTP-01 挑战服务器，Close() 时关闭
-	httpSrvErr chan error   // 用于传递 HTTP-01 服务器启动错误（缓冲 1）
+	httpSrv    *http.Server // HTTP-01 挑战服务器，Close() 时关闭，置 nil 防止重复释放
+	http01Done chan error   // 缓冲1，goroutine 退出时发送错误，Close() 等待
 }
 
 // http01Serve 启动 HTTP-01 挑战服务器（在 goroutine 中运行）。
+// 退出时一定会向 http01Done 发送（nil 表示正常退出，非 nil 表示运行时错误）。
 func (m *acmeManager) http01Serve(srv *http.Server) {
 	slog.Info("ACME HTTP-01 challenge listener started", "addr", srv.Addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Warn("ACME HTTP-01 listener stopped", "error", err)
-		// 非阻塞发送启动/运行时错误到 channel
-		select {
-		case m.httpSrvErr <- err:
-		default:
-		}
+		m.http01Done <- err
+		return
 	}
+	m.http01Done <- nil
 }
 
 // newACMEManager 创建 ACME 证书管理器。
@@ -64,7 +63,7 @@ func newACMEManager(cfg *Config) (*acmeManager, error) {
 		mTLSFn:     mTLSFn,
 		http01:     cfg.ACME.HTTP01,
 		http01Addr: cfg.ACME.HTTP01Port,
-		httpSrvErr: make(chan error, 1),
+		http01Done: make(chan error, 1),
 	}, nil
 }
 
@@ -103,13 +102,28 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 func (m *acmeManager) Ready() bool { return true }
 
 // Close 释放资源，关闭 HTTP-01 挑战服务器。
+// 关闭后会等待 goroutine 退出并返回运行时错误（如果有）。
 func (m *acmeManager) Close() error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.httpSrv != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return m.httpSrv.Shutdown(ctx)
+	srv := m.httpSrv
+	m.httpSrv = nil // 防止重复释放
+	m.mu.Unlock()
+
+	if srv == nil {
+		return nil
+	}
+
+	// 关闭 HTTP-01 服务器，触发 ListenAndServe 返回
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		return err
+	}
+
+	// 等待 goroutine 退出并获取运行时错误
+	// Shutdown 成功后 listener 已关闭，goroutine 应立即退出
+	if err := <-m.http01Done; err != nil {
+		return fmt.Errorf("HTTP-01 服务器错误: %w", err)
 	}
 	return nil
 }

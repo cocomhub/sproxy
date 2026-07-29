@@ -104,6 +104,9 @@ type Config struct {
 // 注意：如果同时配置了 CertFile+KeyFile 和 ACME.Enabled，
 // 文件证书优先，ACME 配置被忽略。如需切换模式，请清空对应字段。
 func New(cfg *Config) (Manager, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config 不能为 nil")
+	}
 	switch {
 	case cfg.CertFile != "" && cfg.KeyFile != "":
 		// 优先级 1：显式指定了证书文件

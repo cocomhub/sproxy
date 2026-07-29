@@ -295,6 +295,14 @@ func TestNew_NoConfig(t *testing.T) {
 	}
 }
 
+// TestNew_NilConfig 验证 nil 配置返回错误，不 panic。
+func TestNew_NilConfig(t *testing.T) {
+	_, err := New(nil)
+	if err == nil {
+		t.Fatal("expected error for nil config")
+	}
+}
+
 // TestNew_FileCertCertOnly 验证仅设置 certFile 时 New() 不会创建文件证书管理器。
 func TestNew_FileCertCertOnly(t *testing.T) {
 	cfg := &Config{
