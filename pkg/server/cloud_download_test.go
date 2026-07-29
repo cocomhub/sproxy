@@ -878,7 +878,11 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 			}
 			if started == 2 {
 				s3, _ := mgr.SnapshotTask(task3.ID)
-				t.Logf("task3 status when semaphore full: %s", s3.Status)
+				if s3.Status == "pending" {
+					t.Logf("task3 correctly blocked: %s", s3.Status)
+				} else {
+					t.Errorf("task3 should be pending, got %s", s3.Status)
+				}
 				// 释放 blockCh 让 goroutine 退出，避免 TempDir 清理失败
 				close(blockCh)
 				return
