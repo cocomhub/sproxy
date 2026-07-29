@@ -705,7 +705,7 @@ func TestE2E_TunnelEncryption(t *testing.T) {
 	}
 
 	downloadPath := filepath.Join(t.TempDir(), "tunnel-download.txt")
-	if err := fc.Download(context.Background(), "tunnel-test.txt", downloadPath); err != nil {
+	if err = fc.Download(context.Background(), "tunnel-test.txt", downloadPath); err != nil {
 		t.Fatalf("download via tunnel failed: %v", err)
 	}
 	downloaded, err := os.ReadFile(downloadPath)
