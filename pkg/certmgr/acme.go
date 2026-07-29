@@ -116,14 +116,21 @@ func (m *acmeManager) Close() error {
 	// 关闭 HTTP-01 服务器，触发 ListenAndServe 返回
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		return err
+	shutdownErr := srv.Shutdown(ctx)
+	if shutdownErr != nil && shutdownErr != http.ErrServerClosed {
+		// Shutdown 超时或失败时强制关闭 listener，确保 goroutine 退出
+		_ = srv.Close()
 	}
 
-	// 等待 goroutine 退出并获取运行时错误
-	// Shutdown 成功后 listener 已关闭，goroutine 应立即退出
+	// 始终等待 goroutine 退出并获取运行时错误
+	// 注意：即使 Shutdown 失败，srv.Close() 后 ListenAndServe 也会返回
 	if err := <-m.http01Done; err != nil {
 		return fmt.Errorf("HTTP-01 服务器错误: %w", err)
+	}
+
+	// Shutdown 失败时返回原始错误，但 goroutine 已安全退出
+	if shutdownErr != nil && shutdownErr != http.ErrServerClosed {
+		return shutdownErr
 	}
 	return nil
 }

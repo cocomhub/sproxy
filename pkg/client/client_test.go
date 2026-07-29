@@ -1523,7 +1523,7 @@ func generateTestCert(t *testing.T) (certFile, keyFile string) {
 	if err != nil {
 		t.Fatalf("编码私钥失败: %v", err)
 	}
-	if err := os.WriteFile(keyFile, keyPEM(privBytes), 0644); err != nil {
+	if err := os.WriteFile(keyFile, keyPEM(privBytes), 0600); err != nil {
 		t.Fatalf("写入私钥文件失败: %v", err)
 	}
 	return certFile, keyFile

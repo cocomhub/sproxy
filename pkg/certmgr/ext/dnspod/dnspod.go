@@ -135,34 +135,39 @@ func (p *Provider) callAPI(ctx context.Context, params map[string]string) error 
 }
 
 // callAPIWithResult 调用 DNSPod API 并解析响应。
+// 签名计算和 URL 构建均使用 URL-encoded 参数值，确保中文和特殊字符正确处理。
 func (p *Provider) callAPIWithResult(ctx context.Context, params map[string]string, result interface{}) error {
 	if p.config.SecretId == "" || p.config.SecretKey == "" {
 		return fmt.Errorf("SecretId 和 SecretKey 不能为空")
 	}
 
-	// 添加公共参数
-	params["SecretId"] = p.config.SecretId
-	params["Timestamp"] = fmt.Sprintf("%d", time.Now().Unix())
+	// 添加公共参数（不修改入参 map）
+	allParams := make(map[string]string, len(params)+4)
+	for k, v := range params {
+		allParams[k] = v
+	}
+	allParams["SecretId"] = p.config.SecretId
+	allParams["Timestamp"] = fmt.Sprintf("%d", time.Now().Unix())
 	// 生成随机 Nonce
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("生成 Nonce 失败: %w", err)
 	}
 	nonceInt := int64(binary.LittleEndian.Uint64(nonce) % 100000)
-	params["Nonce"] = fmt.Sprintf("%d", nonceInt)
-	params["SignatureMethod"] = "HmacSHA1"
+	allParams["Nonce"] = fmt.Sprintf("%d", nonceInt)
+	allParams["SignatureMethod"] = "HmacSHA1"
 
 	// 排序参数键
-	keys := make([]string, 0, len(params))
-	for k := range params {
+	keys := make([]string, 0, len(allParams))
+	for k := range allParams {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
-	// 构建签名源字符串
+	// 构建签名源字符串（URL-encoded 值）
 	var srcParts []string
 	for _, k := range keys {
-		srcParts = append(srcParts, k+"="+params[k])
+		srcParts = append(srcParts, url.QueryEscape(k)+"="+url.QueryEscape(allParams[k]))
 	}
 	srcStr := strings.Join(srcParts, "&")
 
