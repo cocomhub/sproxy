@@ -60,9 +60,16 @@ func init() {
 
 // quicConn 包装 quic.Stream 为 xfer.Conn，使用 4B 大端长度前缀帧。
 type quicConn struct {
-	stream quic.Stream
+	stream streamInterface
 	mu     sync.Mutex
 	closed bool
+}
+
+// streamInterface 是 quic.Stream 的最小接口，*quic.Stream 和测试 mock 均满足。
+type streamInterface interface {
+	io.Reader
+	io.Writer
+	io.Closer
 }
 
 func (c *quicConn) Send(ctx context.Context, msg []byte) error {
@@ -110,9 +117,44 @@ func (c *quicConn) Close() error {
 // quicListener 是 QuicListener 所需的底层 QUIC listener 的最小接口。
 // 将 *quic.Listener（具体类型）解耦为接口，方便 QuicListener 的 Addr/Close/Accept 单元测试。
 type quicListener interface {
-	Accept(ctx context.Context) (quic.Connection, error)
+	Accept(ctx context.Context) (connInterface, error)
 	Addr() net.Addr
 	Close() error
+}
+
+// connInterface 是 *quic.Conn 的最小接口，用于 Accept 后获取 stream。
+type connInterface interface {
+	AcceptStream(ctx context.Context) (streamInterface, error)
+}
+
+// quicListenerAdapter 适配 *quic.Listener 到 quicListener 接口。
+type quicListenerAdapter struct {
+	ln *quic.Listener
+}
+
+func (a *quicListenerAdapter) Accept(ctx context.Context) (connInterface, error) {
+	conn, err := a.ln.Accept(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &quicConnAdapter{conn: conn}, nil
+}
+
+func (a *quicListenerAdapter) Addr() net.Addr { return a.ln.Addr() }
+
+func (a *quicListenerAdapter) Close() error { return a.ln.Close() }
+
+// quicConnAdapter 适配 *quic.Conn 到 connInterface 接口。
+type quicConnAdapter struct {
+	conn *quic.Conn
+}
+
+func (a *quicConnAdapter) AcceptStream(ctx context.Context) (streamInterface, error) {
+	stream, err := a.conn.AcceptStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return stream, nil
 }
 
 // QuicListener 实现 xfer.Listener，包装 quicListener。
@@ -230,7 +272,7 @@ func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("quic listen: %w", err)
 	}
-	return &QuicListener{ln: ln, closeCh: make(chan struct{})}, nil
+	return &QuicListener{ln: &quicListenerAdapter{ln: ln}, closeCh: make(chan struct{})}, nil
 }
 
 func selfSignedCert() (tls.Certificate, error) {
