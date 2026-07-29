@@ -780,7 +780,7 @@ func TestCalcFileChecksum_FileChanged(t *testing.T) {
 	}
 
 	// 修改文件内容
-	if err := os.WriteFile(filePath, []byte("world"), 0644); err != nil {
+	if fErr := os.WriteFile(filePath, []byte("world"), 0644); fErr != nil {
 		t.Fatal(err)
 	}
 
