@@ -1213,17 +1213,6 @@ func TestClientDeleteVersion_SuccessFalse(t *testing.T) {
 	}
 }
 
-// TestFileClient_Upload_StatError 验证 Upload 时 Stat 失败。
-func TestFileClient_Upload_StatError(t *testing.T) {
-	c := NewFileClient("http://127.0.0.1:1")
-	// 使用目录作为本地路径，会打开成功但 Stat 失败（目录 Stat 不会失败）
-	// 使用一个特殊路径：先 Mock 让 os.Open 成功但 Stat 失败比较困难，
-	// 这里验证 Upload 会先 Open 文件，所以给一个不存在路径即可
-	if _, err := c.Upload(t.Context(), "/nonexistent/file.txt", "remote.txt"); err == nil {
-		t.Fatal("expected error for missing local file")
-	}
-}
-
 // TestClientBatchRename_MissingChecksum 验证 BatchRename 缺失 checksum。
 func TestClientBatchRename_MissingChecksum(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:9999")

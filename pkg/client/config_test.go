@@ -11,6 +11,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -141,7 +142,7 @@ func TestLoadConfig_EmptyPath(t *testing.T) {
 
 func TestLoadConfig_NonexistentPath(t *testing.T) {
 	dir := t.TempDir()
-	// Use a path where parent dir exists but the file itself does not
+	// 父目录存在但文件本身不存在，LoadConfig 应创建默认配置文件并返回默认值
 	path := filepath.Join(dir, "sclient.yaml")
 
 	cfg, err := LoadConfig(path)
@@ -177,8 +178,7 @@ func TestLoadConfig_ValidFile(t *testing.T) {
 	}
 }
 
-func TestHandleConfigShow(_ *testing.T) {
-	// HandleConfigShow prints to stdout — verify it doesn't panic
+func TestHandleConfigShow(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ServerURL = "https://example.com"
 	cfg.TunnelKey = strings.Repeat("d", 64)
@@ -186,7 +186,19 @@ func TestHandleConfigShow(_ *testing.T) {
 	cfg.ChunkSize = 8 << 20
 	cfg.MaxChunkSize = 32 << 20
 
-	HandleConfigShow(cfg)
+	out := testutil.CaptureStdout(func() {
+		HandleConfigShow(cfg)
+	})
+
+	if !strings.Contains(out, "ServerURL:     https://example.com") {
+		t.Errorf("expected ServerURL in output, got: %s", out)
+	}
+	if !strings.Contains(out, "dddd****") {
+		t.Errorf("expected masked TunnelKey in output, got: %s", out)
+	}
+	if !strings.Contains(out, "my-s****oken") {
+		t.Errorf("expected masked AuthToken in output, got: %s", out)
+	}
 }
 
 func TestSaveConfig_Error(t *testing.T) {
@@ -234,9 +246,15 @@ func TestLoadConfig_EmptyFile(t *testing.T) {
 	}
 }
 
-func TestHandleConfigShow_MaskedShortKey(_ *testing.T) {
+func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.TunnelKey = "short"
-	// Should not panic when key is <= 8 chars
-	HandleConfigShow(cfg)
+
+	out := testutil.CaptureStdout(func() {
+		HandleConfigShow(cfg)
+	})
+
+	if !strings.Contains(out, "short") {
+		t.Errorf("expected unmasked short key in output, got: %s", out)
+	}
 }

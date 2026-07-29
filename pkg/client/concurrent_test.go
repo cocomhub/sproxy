@@ -5,6 +5,7 @@ package client
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,6 +53,7 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	errCh := make(chan string, 5)
 	var wg sync.WaitGroup
 	for i := range 5 {
 		wg.Add(1)
@@ -65,15 +67,20 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 				WithChunkedResume(false),
 			)
 			if err != nil {
-				t.Errorf("ChunkedUpload #%d failed: %v", n, err)
+				errCh <- fmt.Sprintf("ChunkedUpload #%d failed: %v", n, err)
 				return
 			}
 			if result == nil || !result.Success {
-				t.Errorf("ChunkedUpload #%d result not successful: %+v", n, result)
+				errCh <- fmt.Sprintf("ChunkedUpload #%d result not successful: %+v", n, result)
 			}
 		}(i)
 	}
 	wg.Wait()
+	close(errCh)
+
+	for msg := range errCh {
+		t.Error(msg)
+	}
 
 	mu.Lock()
 	if chunkCalls == 0 {
@@ -101,6 +108,7 @@ func TestConcurrentFileOperations(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
+	errCh := make(chan string, 10)
 	var wg sync.WaitGroup
 	for i := range 10 {
 		wg.Add(1)
@@ -109,13 +117,18 @@ func TestConcurrentFileOperations(t *testing.T) {
 			c := NewFileClient(ts.URL)
 			info, err := c.Stat(t.Context(), "test.txt")
 			if err != nil {
-				t.Errorf("concurrent stat #%d failed: %v", n, err)
+				errCh <- fmt.Sprintf("concurrent stat #%d failed: %v", n, err)
 				return
 			}
 			if info.Size != 42 {
-				t.Errorf("concurrent stat #%d: expected size 42, got %d", n, info.Size)
+				errCh <- fmt.Sprintf("concurrent stat #%d: expected size 42, got %d", n, info.Size)
 			}
 		}(i)
 	}
 	wg.Wait()
+	close(errCh)
+
+	for msg := range errCh {
+		t.Error(msg)
+	}
 }
