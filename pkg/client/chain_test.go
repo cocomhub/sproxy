@@ -5,10 +5,14 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // testChainRunner 用于测试的简单 ChainRunner 实现。
@@ -195,5 +199,157 @@ func TestChainManager_ContextCancellation(t *testing.T) {
 	}
 	if !ran.Load() {
 		t.Fatal("expected runner to be started")
+	}
+}
+
+// ---- ChainOption functions ----
+
+func TestWithChainPollInterval(t *testing.T) {
+	o := defaultChainOptions()
+	opt := WithChainPollInterval(5 * time.Second)
+	opt(&o)
+	if o.pollInterval != 5*time.Second {
+		t.Errorf("pollInterval = %v, want 5s", o.pollInterval)
+	}
+}
+
+func TestWithChainPollInterval_Zero(t *testing.T) {
+	o := defaultChainOptions()
+	orig := o.pollInterval
+	opt := WithChainPollInterval(0)
+	opt(&o)
+	if o.pollInterval != orig {
+		t.Errorf("pollInterval should remain %v, got %v", orig, o.pollInterval)
+	}
+}
+
+func TestWithChainTimeout(t *testing.T) {
+	o := defaultChainOptions()
+	opt := WithChainTimeout(10 * time.Minute)
+	opt(&o)
+	if o.timeout != 10*time.Minute {
+		t.Errorf("timeout = %v, want 10m", o.timeout)
+	}
+}
+
+func TestWithChainTimeout_Zero(t *testing.T) {
+	o := defaultChainOptions()
+	orig := o.timeout
+	opt := WithChainTimeout(0)
+	opt(&o)
+	if o.timeout != orig {
+		t.Errorf("timeout should remain %v, got %v", orig, o.timeout)
+	}
+}
+
+func TestWithChainKeepFiles(t *testing.T) {
+	o := defaultChainOptions()
+	opt := WithChainKeepFiles()
+	opt(&o)
+	if !o.keepFiles {
+		t.Error("expected keepFiles=true")
+	}
+}
+
+func TestWithChainProgress(t *testing.T) {
+	o := defaultChainOptions()
+	var called bool
+	fn := func(ctx context.Context, info ProgressInfo) {
+		called = true
+	}
+	opt := WithChainProgress(fn)
+	opt(&o)
+	if o.progressFn == nil {
+		t.Fatal("expected progressFn to be set")
+	}
+	o.progressFn(context.Background(), ProgressInfo{Phase: "test"})
+	if !called {
+		t.Error("progress callback was not called")
+	}
+}
+
+// ---- FileClient methods on chain ----
+
+func TestFileClient_CloudDownloadChain_NoManager(t *testing.T) {
+	// 未配置 chainManager 时，CloudDownloadChain 应回退到直接 Run
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{}})
+	})
+	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(ArchiveResult{Success: true, File: "test.tar.gz", Size: 100, Checksum: "abc"})
+	})
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	_, err := client.CloudDownloadChain(t.Context(), []string{}, "test", t.TempDir())
+	// 空 URL 列表本身不会导致 SubmitError——CloudDownloadBatch 会返回 "urls is required" 错误
+	if err == nil {
+		t.Fatal("expected error for empty URL list")
+	}
+}
+
+func TestFileClient_ListChains_NoManager(t *testing.T) {
+	client := NewFileClient("http://127.0.0.1:9999")
+	states, err := client.ListChains(t.Context())
+	if err != nil {
+		t.Fatalf("ListChains without manager: %v", err)
+	}
+	if states != nil {
+		t.Fatalf("expected nil, got %v", states)
+	}
+}
+
+func TestFileClient_DeleteChain_NoManager(t *testing.T) {
+	client := NewFileClient("http://127.0.0.1:9999")
+	err := client.DeleteChain(t.Context(), "some-id")
+	if err != nil {
+		t.Fatalf("DeleteChain without manager: %v", err)
+	}
+}
+
+func TestFileClient_ResumeChain_NoManager(t *testing.T) {
+	client := NewFileClient("http://127.0.0.1:9999")
+	_, err := client.ResumeChain(t.Context(), "some-id")
+	if err == nil {
+		t.Fatal("expected error when chainManager is nil")
+	}
+}
+
+func TestFileClient_ListChains_WithManager(t *testing.T) {
+	store := NewMemoryKVStore()
+	client := NewFileClient("http://127.0.0.1:9999", WithKVStore(store))
+	// 先保存两条活跃链
+	store.Save(t.Context(), "chain:active-1", map[string]any{
+		"type": "test_chain", "id": "active-1", "phase": "phase1", "status": StatusRunning,
+	})
+	store.Save(t.Context(), "chain:active-2", map[string]any{
+		"type": "test_chain", "id": "active-2", "phase": "phase2", "status": StatusRunning,
+	})
+	states, err := client.ListChains(t.Context())
+	if err != nil {
+		t.Fatalf("ListChains: %v", err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("expected 2 states, got %d", len(states))
+	}
+}
+
+func TestFileClient_DeleteChain_WithManager(t *testing.T) {
+	store := NewMemoryKVStore()
+	client := NewFileClient("http://127.0.0.1:9999", WithKVStore(store))
+	store.Save(t.Context(), "chain:to-delete", map[string]any{
+		"type": "test_chain", "id": "to-delete",
+	})
+	if err := client.DeleteChain(t.Context(), "to-delete"); err != nil {
+		t.Fatalf("DeleteChain: %v", err)
+	}
+	_, err := store.Load(t.Context(), "chain:to-delete")
+	if err == nil {
+		t.Fatal("expected chain to be deleted")
 	}
 }

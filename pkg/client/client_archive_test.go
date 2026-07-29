@@ -105,3 +105,56 @@ func TestClientArchive_ServerError(t *testing.T) {
 		t.Error("expected error for server 500, got nil")
 	}
 }
+
+// TestClientArchive_HTTPError 测试 downloadToFile 中的 HTTP 错误路径。
+func TestClientArchive_HTTPError(t *testing.T) {
+	t.Parallel()
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`bad request`))
+	}))
+	defer mock.Close()
+
+	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
+	err := c.Archive(t.Context(), []string{"x.txt"}, filepath.Join(t.TempDir(), "out.tar"))
+	if err == nil {
+		t.Error("expected error for HTTP 400, got nil")
+	}
+}
+
+// TestClientArchive_WriteError 测试 downloadToFile 中写入失败（只读目录）时的清理。
+func TestClientArchive_WriteError(t *testing.T) {
+	t.Parallel()
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// 返回大量数据，但尝试写入只读目录
+		_, _ = w.Write([]byte("some archive data"))
+	}))
+	defer mock.Close()
+
+	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
+	// 用不存在的目录路径，os.Create 会失败
+	err := c.Archive(t.Context(), []string{"x.txt"}, filepath.Join(t.TempDir(), "nonexistent", "out.tar"))
+	if err == nil {
+		t.Error("expected error for write failure, got nil")
+	}
+}
+
+// TestClientArchive_DirHTTPError 测试 ArchiveDir 中 HTTP 错误路径。
+func TestClientArchive_DirHTTPError(t *testing.T) {
+	t.Parallel()
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`not found`))
+	}))
+	defer mock.Close()
+
+	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
+	err := c.ArchiveDir(t.Context(), "nonexistent", filepath.Join(t.TempDir(), "out.tar"))
+	if err == nil {
+		t.Error("expected error for HTTP 404, got nil")
+	}
+}

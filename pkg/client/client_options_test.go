@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -199,6 +201,81 @@ func TestWithChunkedResume(t *testing.T) {
 	WithChunkedResume(false)(o)
 	if o.resume {
 		t.Error("resume should be false")
+	}
+}
+
+// ---- Missing Option functions ----
+
+func TestWithChunkSize(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	WithChunkSize(8888)(c)
+	if c.chunkSize != 8888 {
+		t.Errorf("chunkSize = %d, want 8888", c.chunkSize)
+	}
+}
+
+func TestWithChunkSize_Zero(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	WithChunkSize(0)(c)
+	if c.chunkSize != 0 {
+		t.Errorf("chunkSize should be 0 when passed 0, got %d", c.chunkSize)
+	}
+}
+
+func TestWithCacheOptions(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	WithCacheOptions(500, 5*time.Minute)(c)
+	if c.maxCacheEntries != 500 {
+		t.Errorf("maxCacheEntries = %d, want 500", c.maxCacheEntries)
+	}
+	if c.cacheTTL != 5*time.Minute {
+		t.Errorf("cacheTTL = %v, want 5m", c.cacheTTL)
+	}
+}
+
+func TestWithCacheOptions_ZeroValues(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	origMax := c.maxCacheEntries
+	origTTL := c.cacheTTL
+	WithCacheOptions(0, 0)(c)
+	if c.maxCacheEntries != origMax {
+		t.Errorf("maxCacheEntries should remain %d, got %d", origMax, c.maxCacheEntries)
+	}
+	if c.cacheTTL != origTTL {
+		t.Errorf("cacheTTL should remain %v, got %v", origTTL, c.cacheTTL)
+	}
+}
+
+func TestWithKVStore(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	store := NewMemoryKVStore()
+	WithKVStore(store)(c)
+	if c.chainManager == nil {
+		t.Fatal("expected chainManager to be set")
+	}
+}
+
+func TestWithCacheDir(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	dir := t.TempDir()
+	WithCacheDir(dir)(c)
+	if c.chainManager == nil {
+		t.Fatal("expected chainManager to be set with valid dir")
+	}
+}
+
+func TestWithCacheDir_InvalidDir(t *testing.T) {
+	// 使用一个已存在的文件路径作为"目录"（会失败，降级为内存存储而非 panic）
+	existingFile := filepath.Join(t.TempDir(), "existing_file")
+	if err := os.WriteFile(existingFile, []byte("not a dir"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewFileClient("http://127.0.0.1:18083",
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithCacheDir(existingFile),
+	)
+	if c.chainManager == nil {
+		t.Fatal("expected chainManager to be set (fallback to memory store)")
 	}
 }
 

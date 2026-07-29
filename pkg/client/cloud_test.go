@@ -408,3 +408,96 @@ func TestCloudArchive_ArchiveTasks(t *testing.T) {
 		t.Fatalf("want TaskCount 2, got %d", result.TaskCount)
 	}
 }
+
+// ---- CloudDownloadOption functions ----
+
+func TestWithCloudDownloadMaxBatchURLs(t *testing.T) {
+	o := &cloudDownloadOptions{}
+	WithCloudDownloadMaxBatchURLs(50)(o)
+	if o.maxBatchURLs != 50 {
+		t.Errorf("maxBatchURLs = %d, want 50", o.maxBatchURLs)
+	}
+}
+
+func TestWithCloudDownloadMaxBatchURLs_Zero(t *testing.T) {
+	o := &cloudDownloadOptions{maxBatchURLs: 30}
+	WithCloudDownloadMaxBatchURLs(0)(o)
+	if o.maxBatchURLs != 30 {
+		t.Errorf("maxBatchURLs should remain unchanged, got %d", o.maxBatchURLs)
+	}
+}
+
+// ---- CloudDownload URL validation ----
+
+func TestCloudDownload_InvalidURL(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	// 无效 URL 转义序列
+	_, err := c.CloudDownload(t.Context(), "https://example.com/%zz")
+	if err == nil {
+		t.Fatal("expected error for invalid URL")
+	}
+}
+
+func TestCloudDownload_Batch_EmptyList(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	_, err := c.CloudDownloadBatch(t.Context(), []string{})
+	if err == nil {
+		t.Fatal("expected error for empty URL list")
+	}
+}
+
+func TestCloudDownload_Batch_ExceedsLimit(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	// 101 个 URL，超过默认 100 上限
+	urls := make([]string, 101)
+	for i := range 101 {
+		urls[i] = "https://example.com/file"
+	}
+	_, err := c.CloudDownloadBatch(t.Context(), urls)
+	if err == nil {
+		t.Fatal("expected error for exceeding batch limit")
+	}
+}
+
+func TestCloudDownload_Batch_CustomLimit(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	// 用自定义上限 5 来限制
+	urls := make([]string, 6)
+	for i := range 6 {
+		urls[i] = "https://example.com/file"
+	}
+	_, err := c.CloudDownloadBatch(t.Context(), urls, WithCloudDownloadMaxBatchURLs(5))
+	if err == nil {
+		t.Fatal("expected error for exceeding custom batch limit of 5")
+	}
+}
+
+func TestCloudDownload_Batch_UnderCustomLimit(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	urls := make([]string, 3)
+	for i := range 3 {
+		urls[i] = "https://example.com/file"
+	}
+	tasks, err := c.CloudDownloadBatch(t.Context(), urls, WithCloudDownloadMaxBatchURLs(5))
+	if err != nil {
+		t.Fatalf("expected success for 3 URLs under limit of 5: %v", err)
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("expected 3 tasks, got %d", len(tasks))
+	}
+}

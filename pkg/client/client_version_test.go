@@ -149,3 +149,46 @@ func TestClientDeleteVersion_Failure(t *testing.T) {
 		t.Error("expected error for failed delete, got nil")
 	}
 }
+
+// TestClientVersionID_Int64Boundary 测试 VersionID 的 int64 边界值。
+func TestClientVersionID_Int64Boundary(t *testing.T) {
+	// VersionID 在 JSON 中是 int64，验证边界值能被正确解析
+	validJSON := `{"versions":[{"filename":"test.txt","version_id":9223372036854775807,"size":100,"created_at":"2026-01-01T00:00:00Z"}]}`
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(validJSON))
+	}))
+	defer mock.Close()
+
+	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
+	versions, err := c.ListVersions(t.Context(), "test.txt")
+	if err != nil {
+		t.Fatalf("ListVersions: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("expected 1 version, got %d", len(versions))
+	}
+	if versions[0].VersionID != 9223372036854775807 {
+		t.Errorf("expected VersionID 9223372036854775807, got %d", versions[0].VersionID)
+	}
+}
+
+// TestClientVersionID_Zero 测试 VersionID 为 0 的场景。
+func TestClientVersionID_Zero(t *testing.T) {
+	validJSON := `{"versions":[{"filename":"test.txt","version_id":0,"size":0,"created_at":"2026-01-01T00:00:00Z"}]}`
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(validJSON))
+	}))
+	defer mock.Close()
+
+	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
+	versions, err := c.ListVersions(t.Context(), "test.txt")
+	if err != nil {
+		t.Fatalf("ListVersions: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("expected 1 version, got %d", len(versions))
+	}
+	if versions[0].VersionID != 0 {
+		t.Errorf("expected VersionID 0, got %d", versions[0].VersionID)
+	}
+}
