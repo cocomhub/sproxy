@@ -36,11 +36,14 @@ type CloudDownloadChain struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 
-	// 服务端返回的归档文件路径（用于下载）
-	archiveServerPath string `json:"-"`
+	// 持久化字段：恢复时自动恢复（区别于 opts 中的非持久化字段）
+	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
+	Timeout      time.Duration `json:"timeout"`       // 超时时间，恢复时保持
 
-	client *FileClient  `json:"-"`
-	opts   chainOptions `json:"-"`
+	// 非持久化字段：恢复后需手动设置
+	archiveServerPath string      `json:"-"` // 服务端返回的归档文件路径
+	client            *FileClient `json:"-"`
+	opts              chainOptions `json:"-"` // 仅运行时使用，非持久字段由独立字段覆盖
 }
 
 // NewCloudDownloadChain 创建云端下载链式操作。
@@ -57,6 +60,8 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		Total:        len(urls),
 		CreatedAt:    now,
 		UpdatedAt:    now,
+		PollInterval: opts.pollInterval,
+		Timeout:      opts.timeout,
 		client:       client,
 		opts:         opts,
 	}
@@ -83,6 +88,8 @@ func (c *CloudDownloadChain) State() map[string]any {
 		"error":        c.Error,
 		"created_at":   c.CreatedAt,
 		"updated_at":   c.UpdatedAt,
+			"poll_interval": c.PollInterval,
+			"timeout":       c.Timeout,
 	}
 }
 
@@ -97,11 +104,13 @@ func (c *CloudDownloadChain) setClient(client *FileClient) {
 
 func (c *CloudDownloadChain) setOptions(opts chainOptions) {
 	c.opts = opts
+	c.PollInterval = opts.pollInterval
+	c.Timeout = opts.timeout
 }
 
 // Run 执行云端下载链式操作，按阶段推进：
 // submitting → waiting → archiving → downloading → [cleaning] → completed。
-func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.Context, phase string, msg string, current, total int)) error {
+func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) error {
 	if c.client == nil {
 		return fmt.Errorf("cloud download chain: client is nil, use setClient() before Run()")
 	}
@@ -121,14 +130,14 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.
 	case "":
 		fallthrough
 	case PhaseSubmitting:
-		reportFn(ctx, PhaseSubmitting, "提交云端下载任务", 0, len(c.URLs))
+		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "提交云端下载任务", Current: 0, Total: len(c.URLs)})
 		if err := c.submitTasks(ctx); err != nil {
 			runErr = err
 			return err
 		}
 		c.CurrentPhase = PhaseWaiting
 		c.UpdatedAt = time.Now()
-		reportFn(ctx, PhaseWaiting, "等待下载完成", c.Completed, c.Total)
+		reportFn(ctx, ProgressInfo{Phase: PhaseWaiting, Message: "等待下载完成", Current: c.Completed, Total: c.Total})
 		fallthrough
 
 	case PhaseWaiting:
@@ -138,7 +147,7 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.
 		}
 		c.CurrentPhase = PhaseArchiving
 		c.UpdatedAt = time.Now()
-		reportFn(ctx, PhaseArchiving, "打包归档", 0, 1)
+		reportFn(ctx, ProgressInfo{Phase: PhaseArchiving, Message: "打包归档", Current: 0, Total: 1})
 		fallthrough
 
 	case PhaseArchiving:
@@ -148,7 +157,7 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.
 		}
 		c.CurrentPhase = PhaseDownloading
 		c.UpdatedAt = time.Now()
-		reportFn(ctx, PhaseDownloading, "下载到本地", 0, 1)
+		reportFn(ctx, ProgressInfo{Phase: PhaseDownloading, Message: "下载到本地", Current: 0, Total: 1})
 		fallthrough
 
 	case PhaseDownloading:
@@ -162,7 +171,7 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn func(ctx context.
 		}
 		c.CurrentPhase = PhaseCleaning
 		c.UpdatedAt = time.Now()
-		reportFn(ctx, PhaseCleaning, "清理远端文件", 0, len(c.TaskIDs)+1)
+		reportFn(ctx, ProgressInfo{Phase: PhaseCleaning, Message: "清理远端文件", Current: 0, Total: len(c.TaskIDs) + 1})
 		fallthrough
 
 	case PhaseCleaning:
@@ -259,10 +268,10 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 
 // pollAllTasks 轮询所有任务状态直到全部完成。
 func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, error) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, c.opts.timeout)
+	timeoutCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
 
-	ticker := time.NewTicker(c.opts.pollInterval)
+	ticker := time.NewTicker(c.PollInterval)
 	defer ticker.Stop()
 
 	for {

@@ -28,12 +28,23 @@ const (
 	StatusFailed    = "failed"
 )
 
+// ProgressInfo 表示链式操作进度信息。
+type ProgressInfo struct {
+	Phase   string // 当前阶段（submitting/waiting/archiving 等）
+	Message string // 人类可读的描述
+	Current int    // 当前进度
+	Total   int    // 总进度
+}
+
+// ProgressFunc 是进度回调函数类型。
+type ProgressFunc func(ctx context.Context, info ProgressInfo)
+
 // ChainRunner 链式操作执行器接口。
 type ChainRunner interface {
 	ID() string
 	Phase() string
 	Status() string
-	Run(ctx context.Context, reportFn func(ctx context.Context, phase string, msg string, current, total int)) error
+	Run(ctx context.Context, reportFn ProgressFunc) error
 	State() map[string]any
 	Restore(state map[string]any) error
 }
@@ -52,7 +63,7 @@ type chainOptions struct {
 	pollInterval time.Duration
 	timeout      time.Duration
 	keepFiles    bool
-	progressFn   func(ctx context.Context, phase string, msg string, current, total int)
+	progressFn   ProgressFunc
 }
 
 // ChainOption 链式操作选项函数。
@@ -80,7 +91,7 @@ func WithChainKeepFiles() ChainOption {
 	}
 }
 
-func WithChainProgress(fn func(ctx context.Context, phase string, msg string, current, total int)) ChainOption {
+func WithChainProgress(fn ProgressFunc) ChainOption {
 	return func(o *chainOptions) {
 		o.progressFn = fn
 	}
@@ -110,12 +121,12 @@ func (m *ChainManager) Run(ctx context.Context, runner ChainRunner) error {
 }
 
 // RunWithProgress 执行链式操作，并支持外部进度回调。
-func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, progressFn func(ctx context.Context, phase string, msg string, current, total int)) error {
+func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, progressFn ProgressFunc) error {
 	m.saveState(ctx, runner)
-	reportFn := func(ctx context.Context, phase string, msg string, current, total int) {
+	reportFn := func(ctx context.Context, info ProgressInfo) {
 		m.saveState(ctx, runner)
 		if progressFn != nil {
-			progressFn(ctx, phase, msg, current, total)
+			progressFn(ctx, info)
 		}
 	}
 	err := runner.Run(ctx, reportFn)

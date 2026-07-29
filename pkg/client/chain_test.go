@@ -16,14 +16,14 @@ type testChainRunner struct {
 	id       string
 	phase    string
 	status   string
-	runFn    func(ctx context.Context, reportFn func(ctx context.Context, phase string, msg string, current, total int)) error
+	runFn    func(ctx context.Context, reportFn ProgressFunc) error
 	stateMap map[string]any
 }
 
 func (r *testChainRunner) ID() string     { return r.id }
 func (r *testChainRunner) Phase() string  { return r.phase }
 func (r *testChainRunner) Status() string { return r.status }
-func (r *testChainRunner) Run(ctx context.Context, reportFn func(ctx context.Context, phase string, msg string, current, total int)) error {
+func (r *testChainRunner) Run(ctx context.Context, reportFn ProgressFunc) error {
 	if r.runFn != nil {
 		return r.runFn(ctx, reportFn)
 	}
@@ -60,8 +60,8 @@ func TestChainManager_Run_Success(t *testing.T) {
 		id:     "test-run-1",
 		phase:  "running",
 		status: StatusRunning,
-		runFn: func(ctx context.Context, reportFn func(ctx context.Context, phase string, msg string, current, total int)) error {
-			reportFn(ctx, "phase1", "doing work", 1, 2)
+		runFn: func(ctx context.Context, reportFn ProgressFunc) error {
+			reportFn(ctx, ProgressInfo{Phase: "phase1", Message: "doing work", Current: 1, Total: 2})
 			return nil
 		},
 	}
@@ -87,7 +87,7 @@ func TestChainManager_Run_Failure(t *testing.T) {
 		id:     "test-run-2",
 		phase:  "running",
 		status: StatusRunning,
-		runFn: func(ctx context.Context, reportFn func(ctx context.Context, phase string, msg string, current, total int)) error {
+		runFn: func(ctx context.Context, reportFn ProgressFunc) error {
 			return expectedErr
 		},
 	}
@@ -181,7 +181,7 @@ func TestChainManager_ContextCancellation(t *testing.T) {
 		id:     "test-cancel",
 		phase:  "running",
 		status: StatusRunning,
-		runFn: func(ctx context.Context, reportFn func(ctx context.Context, phase string, msg string, current, total int)) error {
+		runFn: func(ctx context.Context, reportFn ProgressFunc) error {
 			ran.Store(true)
 			<-ctx.Done()
 			return ctx.Err()

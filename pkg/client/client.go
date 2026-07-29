@@ -995,10 +995,10 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 			return nil, err
 		}
 	} else {
-		reportFn := func(ctx context.Context, phase string, msg string, current, total int) {
-			c.logger.DebugContext(ctx, "链式操作进度", "phase", phase, "msg", msg, "current", current, "total", total)
+		reportFn := func(ctx context.Context, info ProgressInfo) {
+			c.logger.DebugContext(ctx, "链式操作进度", "phase", info.Phase, "msg", info.Message, "current", info.Current, "total", info.Total)
 			if options.progressFn != nil {
-				options.progressFn(ctx, phase, msg, current, total)
+				options.progressFn(ctx, info)
 			}
 		}
 		if err := runner.Run(ctx, reportFn); err != nil {
