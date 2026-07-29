@@ -834,10 +834,7 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		<-blockCh
 	}))
-	defer func() {
-		close(blockCh)
-		srv.Close()
-	}()
+	defer srv.Close()
 
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
@@ -849,19 +846,27 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 		AllowPrivate:  true,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() { mgr.Close() })
+	t.Cleanup(func() {
+		mgr.Close()
+		// 清理可能遗留的临时文件，避免 Windows TempDir 清理失败
+		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
+		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
+	})
 
 	task1, _ := mgr.SubmitAndStart("url", srv.URL+"?1", "block1.bin", 104857600, nil)
 	task2, _ := mgr.SubmitAndStart("url", srv.URL+"?2", "block2.bin", 104857600, nil)
 	task3, _ := mgr.SubmitAndStart("url", srv.URL+"?3", "block3.bin", 104857600, nil)
 
-	// 等待前两个任务启动
+	// 等待前两个任务启动（进入 downloading 状态）
 	started := 0
 	deadline := time.After(5 * time.Second)
 	for {
 		select {
 		case <-deadline:
-			t.Fatalf("timeout: started %d/2 tasks", started)
+			t.Fatalf("timeout: started %d/2 tasks, task3=%s", started, func() string {
+				s3, _ := mgr.SnapshotTask(task3.ID)
+				return s3.Status
+			}())
 		default:
 			s1, _ := mgr.SnapshotTask(task1.ID)
 			s2, _ := mgr.SnapshotTask(task2.ID)
@@ -874,6 +879,8 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 			if started == 2 {
 				s3, _ := mgr.SnapshotTask(task3.ID)
 				t.Logf("task3 status when semaphore full: %s", s3.Status)
+				// 释放 blockCh 让 goroutine 退出，避免 TempDir 清理失败
+				close(blockCh)
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
