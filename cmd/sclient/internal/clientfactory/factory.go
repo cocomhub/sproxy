@@ -91,7 +91,8 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		if clientKey == "" {
 			return nil, fmt.Errorf("--client-cert 需要配合 --client-key 使用")
 		}
-		opts = append(opts, client.WithClientCert(clientCert, clientKey, false))
+		allowMissing, _ := cmd.Flags().GetBool("client-cert-allow-missing")
+		opts = append(opts, client.WithClientCert(clientCert, clientKey, !allowMissing))
 	} else if clientKey, _ := cmd.Flags().GetString("client-key"); clientKey != "" {
 		return nil, fmt.Errorf("--client-key 需要配合 --client-cert 使用")
 	}

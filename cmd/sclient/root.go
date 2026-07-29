@@ -92,6 +92,7 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().Bool("insecure", false, "跳过 TLS 证书验证（用于自签证书开发/测试环境）")
 	root.PersistentFlags().String("client-cert", "", "mTLS 客户端证书路径（PEM 格式）")
 	root.PersistentFlags().String("client-key", "", "mTLS 客户端私钥路径（PEM 格式）")
+	root.PersistentFlags().Bool("client-cert-allow-missing", false, "当客户端证书加载失败时，不中断程序执行")
 
 	// 注册子命令
 	ios := cli.SystemIOStreams()
