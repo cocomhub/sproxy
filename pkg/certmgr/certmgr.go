@@ -138,6 +138,6 @@ func setupMTLS(clientCA string) (func(*tls.Config), error) {
 	return func(tc *tls.Config) {
 		tc.ClientAuth = tls.RequireAndVerifyClientCert
 		tc.ClientCAs = caPool
-		tc.MinVersion = tls.VersionTLS12
+		// 注意：MinVersion 由各子类的 TLSConfig() 设置，此处不重复设置
 	}, nil
 }

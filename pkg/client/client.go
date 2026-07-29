@@ -173,11 +173,15 @@ func WithTimeout(d time.Duration) Option {
 // cloneOrNewTransport 从 FileClient 克隆现有 Transport 或创建新实例。
 // 保留已有传输层配置（代理、DialContext、TLSClientConfig 等），供
 // WithInsecureTLS 和 WithClientCert 复用，确保两者顺序无关。
+// 注意：如果 Transport 不是 *http.Transport 类型（如自定义 Transport），
+// 会创建新实例并记录调试日志，原有自定义配置不保留。
 func cloneOrNewTransport(c *FileClient) *http.Transport {
 	var transport *http.Transport
 	if c.httpClient != nil && c.httpClient.Transport != nil {
 		if existingTransport, ok := c.httpClient.Transport.(*http.Transport); ok {
 			transport = existingTransport.Clone()
+		} else {
+			c.logger.Debug("Transport 不是 *http.Transport 类型，将创建新实例", "type", fmt.Sprintf("%T", c.httpClient.Transport))
 		}
 	}
 	if transport == nil {

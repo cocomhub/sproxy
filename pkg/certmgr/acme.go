@@ -99,6 +99,8 @@ func (m *acmeManager) TLSConfig() (*tls.Config, error) {
 }
 
 // Ready 返回证书是否就绪。
+// ACME 模式下证书通过 autocert 懒加载，首次 TLS 握手时获取，
+// 因此始终返回 true。如需精确就绪状态可检查缓存目录。
 func (m *acmeManager) Ready() bool { return true }
 
 // Close 释放资源，关闭 HTTP-01 挑战服务器。
