@@ -1150,7 +1150,7 @@ func TestClientRestoreVersion_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.RestoreVersion(t.Context(), "test.txt", "1"); err == nil {
+	if err := c.RestoreVersion(t.Context(), "test.txt", 1); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -1166,7 +1166,7 @@ func TestClientDeleteVersion_ServerError(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.DeleteVersion(t.Context(), "test.txt", "1"); err == nil {
+	if err := c.DeleteVersion(t.Context(), "test.txt", 1); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -1191,7 +1191,7 @@ func TestClientRestoreVersion_SuccessFalse(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.RestoreVersion(t.Context(), "test.txt", "999"); err == nil {
+	if err := c.RestoreVersion(t.Context(), "test.txt", 999); err == nil {
 		t.Fatal("expected error for success=false response")
 	}
 }
@@ -1208,7 +1208,7 @@ func TestClientDeleteVersion_SuccessFalse(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
-	if err := c.DeleteVersion(t.Context(), "test.txt", "999"); err == nil {
+	if err := c.DeleteVersion(t.Context(), "test.txt", 999); err == nil {
 		t.Fatal("expected error for success=false response")
 	}
 }

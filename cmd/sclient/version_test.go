@@ -141,7 +141,7 @@ func TestVersionRestoreCmd_Integration(t *testing.T) {
 	cmd := NewCmdVersionRestore(factory, ios)
 	root.AddCommand(cmd)
 
-	root.SetArgs([]string{"restore", "test.txt", "v1", "--server", mock.URL})
+	root.SetArgs([]string{"restore", "test.txt", "1", "--server", mock.URL})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("version restore failed: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestVersionDeleteCmd_Integration(t *testing.T) {
 	cmd := NewCmdVersionDelete(factory, ios)
 	root.AddCommand(cmd)
 
-	root.SetArgs([]string{"delete", "test.txt", "v1", "--server", mock.URL})
+	root.SetArgs([]string{"delete", "test.txt", "42", "--server", mock.URL})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("version delete failed: %v", err)
 	}

@@ -84,7 +84,7 @@ func TestClientRestoreVersion(t *testing.T) {
 	defer mock.Close()
 
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
-	err := c.RestoreVersion(t.Context(), "test.txt", "1")
+	err := c.RestoreVersion(t.Context(), "test.txt", 1)
 	if err != nil {
 		t.Fatalf("RestoreVersion() = %v", err)
 	}
@@ -100,7 +100,7 @@ func TestClientRestoreVersion_Failure(t *testing.T) {
 	defer mock.Close()
 
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
-	err := c.RestoreVersion(t.Context(), "test.txt", "999")
+	err := c.RestoreVersion(t.Context(), "test.txt", 999)
 	if err == nil {
 		t.Error("expected error for failed restore, got nil")
 	}
@@ -128,7 +128,7 @@ func TestClientDeleteVersion(t *testing.T) {
 	defer mock.Close()
 
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
-	err := c.DeleteVersion(t.Context(), "test.txt", "1")
+	err := c.DeleteVersion(t.Context(), "test.txt", 1)
 	if err != nil {
 		t.Fatalf("DeleteVersion() = %v", err)
 	}
@@ -144,7 +144,7 @@ func TestClientDeleteVersion_Failure(t *testing.T) {
 	defer mock.Close()
 
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
-	err := c.DeleteVersion(t.Context(), "test.txt", "999")
+	err := c.DeleteVersion(t.Context(), "test.txt", 999)
 	if err == nil {
 		t.Error("expected error for failed delete, got nil")
 	}

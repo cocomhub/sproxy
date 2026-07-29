@@ -46,9 +46,9 @@ func (c *FileClient) ListVersions(ctx context.Context, filename string) ([]Versi
 }
 
 // RestoreVersion 恢复文件到指定版本。
-func (c *FileClient) RestoreVersion(ctx context.Context, filename, versionID string) error {
-	apiPath := fmt.Sprintf("/api/versions/restore?filename=%s&version_id=%s",
-		url.QueryEscape(filename), url.QueryEscape(versionID))
+func (c *FileClient) RestoreVersion(ctx context.Context, filename string, versionID int64) error {
+	apiPath := fmt.Sprintf("/api/versions/restore?filename=%s&version_id=%d",
+		url.QueryEscape(filename), versionID)
 	resp, err := c.doRequest(ctx, "POST", apiPath, nil, nil)
 	if err != nil {
 		return fmt.Errorf("恢复版本失败: %w", err)
@@ -67,9 +67,9 @@ func (c *FileClient) RestoreVersion(ctx context.Context, filename, versionID str
 }
 
 // DeleteVersion 删除文件的指定版本。
-func (c *FileClient) DeleteVersion(ctx context.Context, filename, versionID string) error {
-	apiPath := fmt.Sprintf("/api/versions?filename=%s&version_id=%s",
-		url.QueryEscape(filename), url.QueryEscape(versionID))
+func (c *FileClient) DeleteVersion(ctx context.Context, filename string, versionID int64) error {
+	apiPath := fmt.Sprintf("/api/versions?filename=%s&version_id=%d",
+		url.QueryEscape(filename), versionID)
 	resp, err := c.doRequest(ctx, "DELETE", apiPath, nil, nil)
 	if err != nil {
 		return fmt.Errorf("删除版本失败: %w", err)
