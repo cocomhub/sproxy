@@ -66,8 +66,8 @@ type uploadCacheEntry struct {
 }
 
 const (
-	maxCacheEntries = 10000                // 缓存最大条目数，超过时触发过期清理
-	cacheTTL        = 30 * time.Minute     // 缓存条目 TTL
+	defaultMaxCacheEntries = 1000             // 默认缓存最大条目数，超过时触发过期清理
+	defaultCacheTTL        = 10 * time.Minute // 默认缓存条目 TTL
 )
 
 // resumeSessionParams 是 tryResumeSession 和 initNewUploadSession 的参数结构体，
@@ -384,17 +384,21 @@ func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, bo
 // 返回校验和、是否从缓存获取、错误。
 //
 // 缓存策略：使用 TTL + 容量上限的主动淘汰机制。
-// - 缓存命中时检查 mtime+size 和 TTL（懒清理），过期则重新计算
-// - 写入缓存时检查条目数，超过 maxCacheEntries 时触发 Range 清理过期条目
-// - 选择此方案而非纯懒清理：纯懒清理在 SDK 长时间运行场景下，不命中的条目
-//   永不清除，导致内存泄漏。主动淘汰确保内存上限可预测。
-// - 选择此方案而非后台 goroutine 定期清理：避免 goroutine 生命周期管理，
-//   且 Range 清理只在写入时触发，对正常上传路径无额外开销。
+//   - 缓存命中时检查 mtime+size 和 TTL（懒清理），过期则重新计算
+//   - 写入缓存时检查条目数，超过缓存上限时清理过期条目
+//
+// 选择在 Store 时 Range 清理而非后台 goroutine，避免 goroutine 生命周期管理
+// 注意：sync.Map 无内置 Len()，因此每次写入都 Range 遍历
+// 对于 maxCacheEntries=1000 的默认值，Range 遍历开销可忽略
+//   - 选择此方案而非纯懒清理：纯懒清理在 SDK 长时间运行场景下，不命中的条目
+//     永不清除，导致内存泄漏。主动淘汰确保内存上限可预测。
+//   - 选择此方案而非后台 goroutine 定期清理：避免 goroutine 生命周期管理，
+//     且 Range 清理只在写入时触发，对正常上传路径无额外开销。
 func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize int64, modTime time.Time) (string, bool, error) {
 	absPath, _ := filepath.Abs(localPath)
 	if cached, ok := c.uploadCache.Load(absPath); ok {
 		entry := cached.(*uploadCacheEntry) //nolint:errcheck
-		if time.Since(entry.createdAt) > cacheTTL {
+		if time.Since(entry.createdAt) > c.cacheTTL {
 			c.uploadCache.Delete(absPath)
 			c.logger.Debug("checksum 缓存过期", "file_path", localPath)
 		} else if entry.fileSize == fileSize && entry.modTime.Equal(modTime) {
@@ -414,7 +418,7 @@ func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize 
 	// 注意：计数不是精确的（并发写入时可能偏差），但足以触发清理
 	c.uploadCache.Range(func(k, v any) bool {
 		entry := v.(*uploadCacheEntry) //nolint:errcheck
-		if time.Since(entry.createdAt) > cacheTTL {
+		if time.Since(entry.createdAt) > c.cacheTTL {
 			c.uploadCache.Delete(k)
 		}
 		return true

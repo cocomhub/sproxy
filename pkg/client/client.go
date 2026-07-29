@@ -92,21 +92,23 @@ type Option func(*FileClient)
 //	result, err := client.Upload(ctx, "file.txt")
 //	err := client.Download(ctx, "file.txt", "/tmp/file.txt")
 type FileClient struct {
-	serverURL    string
-	httpClient   *http.Client
-	tunnelClient *tunnel.Client
-	xferName     string
-	hubURL       string
-	tunnelKey    []byte
-	tunnelMux    *mux.Mux
-	tunnelMuxMu  sync.Mutex
-	progressFn   func(label string, read, total int64)
-	ChunkSize    int64
-	MaxChunkSize int64
-	authToken    string
-	logger       *slog.Logger
-	uploadCache  sync.Map      // key = absFilePath, value = *uploadCacheEntry
-	chainManager *ChainManager // 链式操作管理器，nil=不启用
+	serverURL       string
+	httpClient      *http.Client
+	tunnelClient    *tunnel.Client
+	xferName        string
+	hubURL          string
+	tunnelKey       []byte
+	tunnelMux       *mux.Mux
+	tunnelMuxMu     sync.Mutex
+	progressFn      func(label string, read, total int64)
+	ChunkSize       int64
+	MaxChunkSize    int64
+	authToken       string
+	logger          *slog.Logger
+	uploadCache     sync.Map      // key = absFilePath, value = *uploadCacheEntry
+	maxCacheEntries int           // checksum 缓存最大条目数，0=使用默认值 1000
+	cacheTTL        time.Duration // checksum 缓存 TTL，0=使用默认值 10m
+	chainManager    *ChainManager // 链式操作管理器，nil=不启用
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
@@ -115,10 +117,12 @@ type FileClient struct {
 // 可以通过 Option 设置自定义 HTTP 客户端、隧道加密、超时等。
 func NewFileClient(serverURL string, opts ...Option) *FileClient {
 	c := &FileClient{
-		serverURL:  strings.TrimRight(serverURL, "/"),
-		httpClient: &http.Client{Timeout: 300 * time.Second},
-		ChunkSize:  size.DefaultChunkSize, // 4 MiB
-		logger:     slog.Default(),
+		serverURL:       strings.TrimRight(serverURL, "/"),
+		httpClient:      &http.Client{Timeout: 300 * time.Second},
+		ChunkSize:       size.DefaultChunkSize, // 4 MiB
+		logger:          slog.Default(),
+		maxCacheEntries: defaultMaxCacheEntries,
+		cacheTTL:        defaultCacheTTL,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -302,6 +306,19 @@ func WithCacheDir(dir string) Option {
 			return
 		}
 		c.chainManager = NewChainManager(store)
+	}
+}
+
+// WithCacheOptions 设置 checksum 缓存参数。
+// maxEntries 为缓存最大条目数（0=使用默认值 1000），ttl 为缓存条目过期时间（0=使用默认值 10m）。
+func WithCacheOptions(maxEntries int, ttl time.Duration) Option {
+	return func(c *FileClient) {
+		if maxEntries > 0 {
+			c.maxCacheEntries = maxEntries
+		}
+		if ttl > 0 {
+			c.cacheTTL = ttl
+		}
 	}
 }
 
