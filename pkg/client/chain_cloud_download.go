@@ -143,6 +143,10 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 	case "":
 		fallthrough
 	case PhaseSubmitting:
+		// 在提交任务前先持久化状态，确保崩溃恢复后不会重复提交
+		c.CurrentPhase = PhaseSubmitting
+		c.UpdatedAt = time.Now()
+		c.saveState(ctx)
 		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "submit cloud download tasks", Current: 0, Total: len(c.URLs)})
 		if err := c.submitTasks(ctx); err != nil {
 			return err
@@ -411,6 +415,10 @@ func (c *CloudDownloadChain) cleanupRemote(ctx context.Context) error {
 //
 // 此函数作为后备方案，通过错误消息文本匹配判断存储超限。
 // 未来应使用 HTTP 507 (Insufficient Storage) 状态码进行精确判断。
+//
+// 注意：此方法依赖服务端错误消息字符串，不同版本的服务端可能返回不同格式的
+// 错误消息。建议未来使用结构化错误码（如 HTTP 507 状态码或 JSON 错误体中的
+// error_code 字段）替代文本匹配，以提高健壮性和可维护性。
 func isStorageFullError(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	return strings.Contains(lower, "storage full") ||

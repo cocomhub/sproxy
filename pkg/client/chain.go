@@ -60,8 +60,17 @@ type ChainResult struct {
 	Phase   string         `json:"phase"`
 	Status  string         `json:"status"`
 	Error   string         `json:"error,omitempty"`
-	Raw     ChainRunner    `json:"-"`               // 原始 runner
+	raw     ChainRunner    `json:"-"`               // 原始 runner
 	Extra   map[string]any `json:"extra,omitempty"` // 额外元数据
+}
+
+// AsCloudDownloadChain 返回原始 runner 的 CloudDownloadChain 引用。
+// 如果原始 runner 不是 CloudDownloadChain 类型，返回 nil。
+func (r *ChainResult) AsCloudDownloadChain() *CloudDownloadChain {
+	if cdc, ok := r.raw.(*CloudDownloadChain); ok {
+		return cdc
+	}
+	return nil
 }
 
 // LocalPath 获取本地路径（仅 CloudDownloadChain 支持）。
@@ -137,6 +146,7 @@ type ChainManager struct {
 	codec      StructCodec
 	registry   map[string]func() ChainRunner
 	registryMu sync.RWMutex
+	logger     *slog.Logger
 }
 
 func NewChainManager(store KVStore) *ChainManager {
@@ -144,6 +154,7 @@ func NewChainManager(store KVStore) *ChainManager {
 		store:    store,
 		codec:    StructCodec{},
 		registry: make(map[string]func() ChainRunner),
+		logger:   slog.Default(),
 	}
 	// 从全局注册表拷贝默认值
 	runnerRegistryMu.RLock()
@@ -214,7 +225,7 @@ func (m *ChainManager) List(ctx context.Context) ([]ChainRunner, error) {
 	for _, key := range keys {
 		state, err := m.store.Load(ctx, key)
 		if err != nil {
-			slog.Debug("加载链状态失败", "key", key, "error", err)
+			m.logger.DebugContext(ctx, "加载链状态失败", "key", key, "error", err)
 			continue
 		}
 		status, _ := state["status"].(string)
@@ -223,7 +234,7 @@ func (m *ChainManager) List(ctx context.Context) ([]ChainRunner, error) {
 		}
 		runner, err := m.resolveRunner(ctx, state)
 		if err != nil {
-			slog.Debug("解析链 runner 失败", "key", key, "error", err)
+			m.logger.DebugContext(ctx, "解析链 runner 失败", "key", key, "error", err)
 			continue
 		}
 		if err := runner.Restore(state); err != nil {
@@ -241,23 +252,40 @@ func (m *ChainManager) Delete(ctx context.Context, chainID string) error {
 func (m *ChainManager) saveState(ctx context.Context, runner ChainRunner) {
 	state := runner.State()
 	if err := m.store.Save(ctx, "chain:"+runner.ID(), state); err != nil {
-		slog.Warn("保存链状态失败", "chain_id", runner.ID(), "error", err)
+		m.logger.Warn("保存链状态失败", "chain_id", runner.ID(), "error", err)
 	}
 }
 
 // resolveRunner 使用实例注册表解析 runner 类型。
+// 先查实例注册表，未找到时回退到全局注册表。
 func (m *ChainManager) resolveRunner(ctx context.Context, state map[string]any) (ChainRunner, error) {
-	m.registryMu.RLock()
-	defer m.registryMu.RUnlock()
 	typeName, ok := state["type"].(string)
 	if !ok {
 		return nil, fmt.Errorf("state 缺少 type 字段")
 	}
+	// 先查实例注册表
+	m.registryMu.RLock()
 	factory, ok := m.registry[typeName]
+	m.registryMu.RUnlock()
+	if ok {
+		return factory(), nil
+	}
+	// 未找到时回退到全局注册表
+	runnerRegistryMu.RLock()
+	factory, ok = runnerRegistry[typeName]
+	runnerRegistryMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("未知的 runner 类型: %s", typeName)
 	}
 	return factory(), nil
+}
+
+// ResetRunners 清空实例注册表，用于测试隔离。
+// 注意：仅清除实例注册表，不影响全局注册表。
+func (m *ChainManager) ResetRunners() {
+	m.registryMu.Lock()
+	defer m.registryMu.Unlock()
+	m.registry = make(map[string]func() ChainRunner)
 }
 
 // runnerRegistry 是 ChainRunner 类型全局注册表。

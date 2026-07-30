@@ -44,6 +44,7 @@ func (c *FileClient) ArchiveDir(ctx context.Context, dirname, outputPath string)
 }
 
 // downloadToFile 执行 HTTP 请求并将响应体保存到本地文件。
+// 使用原子写入模式：先写入 .tmp 临时文件，成功后再重命名为目标路径。
 // 如果请求失败或写入失败，自动清理不完整文件。
 func (c *FileClient) downloadToFile(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header, outputPath string) error {
 	resp, err := c.doRequest(ctx, method, urlPath, body, headers)
@@ -57,15 +58,21 @@ func (c *FileClient) downloadToFile(ctx context.Context, method, urlPath string,
 		return fmt.Errorf("请求失败 (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
 
-	out, err := os.Create(outputPath)
+	tmpPath := outputPath + ".tmp"
+	out, err := os.Create(tmpPath)
 	if err != nil {
-		return fmt.Errorf("创建输出文件失败: %w", err)
+		return fmt.Errorf("创建临时文件失败: %w", err)
 	}
-	defer out.Close()
 
 	if _, err = io.Copy(out, resp.Body); err != nil {
-		os.Remove(outputPath)
+		out.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("写入文件失败: %w", err)
+	}
+	out.Close()
+	if err = os.Rename(tmpPath, outputPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("重命名文件失败: %w", err)
 	}
 	return nil
 }

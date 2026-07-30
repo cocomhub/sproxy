@@ -42,8 +42,9 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatalf("Validate() on valid config: %v", err)
 	}
 
-	// empty ServerURL → defaults to localhost
+	// empty ServerURL + SetDefaults → defaults to localhost
 	cfg2 := &Config{Timeout: 30}
+	cfg2.SetDefaults()
 	if err := cfg2.Validate(); err != nil {
 		t.Fatalf("Validate() on config with empty ServerURL: %v", err)
 	}
@@ -51,8 +52,9 @@ func TestConfigValidate(t *testing.T) {
 		t.Errorf("expected ServerURL to default, got %q", cfg2.ServerURL)
 	}
 
-	// zero Timeout → defaults to 300
+	// zero Timeout + SetDefaults → defaults to 300
 	cfg3 := &Config{ServerURL: "http://x", Timeout: 0}
+	cfg3.SetDefaults()
 	if err := cfg3.Validate(); err != nil {
 		t.Fatalf("Validate() on config with zero Timeout: %v", err)
 	}
@@ -60,8 +62,9 @@ func TestConfigValidate(t *testing.T) {
 		t.Errorf("expected Timeout to default to 300, got %d", cfg3.Timeout)
 	}
 
-	// zero ChunkSize → defaults to DefaultChunkSize
+	// zero ChunkSize + SetDefaults → defaults to DefaultChunkSize
 	cfg4 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: 0}
+	cfg4.SetDefaults()
 	if err := cfg4.Validate(); err != nil {
 		t.Fatalf("Validate() on config with zero ChunkSize: %v", err)
 	}
@@ -70,25 +73,25 @@ func TestConfigValidate(t *testing.T) {
 	}
 
 	// invalid tunnel_key length → error
-	cfg5 := &Config{ServerURL: "http://x", Timeout: 30, TunnelKey: "too-short"}
+	cfg5 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, TunnelKey: "too-short"}
 	if err := cfg5.Validate(); err == nil {
 		t.Fatal("expected error for invalid tunnel_key length, got nil")
 	}
 
 	// valid tunnel_key length → no error
-	cfg6 := &Config{ServerURL: "http://x", Timeout: 30, TunnelKey: strings.Repeat("a", 64)}
+	cfg6 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, TunnelKey: strings.Repeat("a", 64)}
 	if err := cfg6.Validate(); err != nil {
 		t.Fatalf("Validate() on config with 64-char tunnel_key: %v", err)
 	}
 
 	// auth_token 任意字符串都合法
-	cfg7 := &Config{ServerURL: "http://x", Timeout: 30, AuthToken: "my-token"}
+	cfg7 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AuthToken: "my-token"}
 	if err := cfg7.Validate(); err != nil {
 		t.Fatalf("Validate() on config with AuthToken: %v", err)
 	}
 
 	// auth_token 空字符串也合法
-	cfg8 := &Config{ServerURL: "http://x", Timeout: 30, AuthToken: ""}
+	cfg8 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AuthToken: ""}
 	if err := cfg8.Validate(); err != nil {
 		t.Fatalf("Validate() on config with empty AuthToken: %v", err)
 	}

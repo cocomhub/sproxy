@@ -418,8 +418,10 @@ func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize 
 		return "", false, fmt.Errorf("计算绝对路径失败: %w", err)
 	}
 	if cached, ok := c.uploadCache.Load(absPath); ok {
-		entry := cached.(*uploadCacheEntry) //nolint:errcheck
-		if time.Since(entry.createdAt) > c.cacheTTL {
+		entry, ok := cached.(*uploadCacheEntry)
+		if !ok {
+			c.uploadCache.Delete(absPath)
+		} else if time.Since(entry.createdAt) > c.cacheTTL {
 			c.uploadCache.Delete(absPath)
 			c.logger.Debug("checksum 缓存过期", "file_path", localPath)
 		} else if entry.fileSize == fileSize && entry.modTime.Equal(modTime) {

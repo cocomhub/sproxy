@@ -36,12 +36,10 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Validate 校验配置合理性，设置零值字段为默认值（副作用）。
-// 注意：此方法会修改接收者的零值字段，不仅是校验功能。
-// 若仅需校验不修改，请在调用前保存副本。
-func (c *Config) Validate() error {
+// SetDefaults 设置零值字段为默认值（副作用）。调用 Validate 前必须调用此方法。
+func (c *Config) SetDefaults() {
 	if c == nil {
-		return fmt.Errorf("config is nil")
+		return
 	}
 	if c.ServerURL == "" {
 		c.ServerURL = "https://127.0.0.1:18083"
@@ -52,18 +50,36 @@ func (c *Config) Validate() error {
 	if c.ChunkSize <= 0 {
 		c.ChunkSize = size.DefaultChunkSize
 	}
+}
+
+// Validate 校验配置合理性，不修改字段值。
+// 设置默认值请在调用 Validate 前先调用 SetDefaults()。
+func (c *Config) Validate() error {
+	if c == nil {
+		return fmt.Errorf("config is nil")
+	}
+	if c.ServerURL == "" {
+		return fmt.Errorf("server_url 不能为空")
+	}
+	if c.Timeout <= 0 {
+		return fmt.Errorf("timeout 必须大于 0")
+	}
+	if c.ChunkSize <= 0 {
+		return fmt.Errorf("chunk_size 必须大于 0")
+	}
 	if c.TunnelKey != "" && len(c.TunnelKey) != 64 {
 		return fmt.Errorf("tunnel_key 必须是 64 位 hex 字符")
 	}
 	return nil
 }
 
-// LoadFromProvider 从 provider.Provider 解码配置，合并默认值并校验。
+// LoadFromProvider 从 provider.Provider 解码配置，设置默认值并校验。
 func LoadFromProvider(p provider.Provider) (*Config, error) {
 	cfg := DefaultConfig()
 	if err := p.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("配置解码失败: %w", err)
 	}
+	cfg.SetDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -88,6 +104,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
+	cfg.SetDefaults()
 	return cfg, nil
 }
 

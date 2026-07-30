@@ -63,7 +63,10 @@ func mockUploadHandler(t *testing.T, dir string) http.HandlerFunc {
 		for {
 			n, rerr := f.Read(buf)
 			if n > 0 {
-				out.Write(buf[:n])
+				if _, err := out.Write(buf[:n]); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 				hasher.Write(buf[:n])
 			}
 			if rerr != nil {
@@ -90,7 +93,11 @@ func mockUploadHandler(t *testing.T, dir string) http.HandlerFunc {
 func mockListFilesHandler(t *testing.T, dir string) http.HandlerFunc {
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
-		entries, _ := os.ReadDir(dir)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		var allFiles []FileInfo
 		for _, e := range entries {
 			if e.IsDir() {

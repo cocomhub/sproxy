@@ -1042,7 +1042,7 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 		ChainID: runner.ChainID,
 		Phase:   runner.Phase(),
 		Status:  runner.Status(),
-		Raw:     runner,
+		raw:     runner,
 		Extra: map[string]any{
 			"local_path": runner.LocalPath,
 			"keep_files": runner.KeepFiles,
@@ -1092,7 +1092,7 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 		ChainID: runner.ID(),
 		Phase:   runner.Phase(),
 		Status:  runner.Status(),
-		Raw:     runner,
+		raw:     runner,
 		Extra:   extra,
 	}, nil
 }
