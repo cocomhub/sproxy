@@ -779,9 +779,12 @@ func TestCalcFileChecksum_FileChanged(t *testing.T) {
 		t.Fatalf("first call: %v", err)
 	}
 
-	// 修改文件内容
-	if fErr := os.WriteFile(filePath, []byte("world"), 0644); fErr != nil {
-		t.Fatal(err)
+	// 确保 mtime 发生变化（Windows 上 mtime 精度可能较低）
+	time.Sleep(10 * time.Millisecond)
+
+	// 写入不同大小的内容使 mtime 和 size 都变化，确保缓存失效
+	if fErr := os.WriteFile(filePath, []byte("world!"), 0644); fErr != nil {
+		t.Fatal(fErr)
 	}
 
 	f2, err := os.Open(filePath)

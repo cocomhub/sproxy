@@ -848,7 +848,6 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 	t.Cleanup(func() {
 		mgr.Close()
-		// 清理可能遗留的临时文件，避免 Windows TempDir 清理失败
 		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
 		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
 	})
@@ -857,33 +856,48 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 	task2, _ := mgr.SubmitAndStart("url", srv.URL+"?2", "block2.bin", 104857600, nil)
 	task3, _ := mgr.SubmitAndStart("url", srv.URL+"?3", "block3.bin", 104857600, nil)
 
-	// 等待前两个任务启动（进入 downloading 状态）
-	started := 0
+	allTasks := []*CloudTask{task1, task2, task3}
+
+	// 等待任意 2 个任务进入 downloading 状态
 	deadline := time.After(5 * time.Second)
 	for {
 		select {
 		case <-deadline:
-			t.Fatalf("timeout: started %d/2 tasks, task3=%s", started, func() string {
-				s3, _ := mgr.SnapshotTask(task3.ID)
-				return s3.Status
-			}())
+			t.Fatal("timeout waiting for 2 tasks to start downloading")
 		default:
-			s1, _ := mgr.SnapshotTask(task1.ID)
-			s2, _ := mgr.SnapshotTask(task2.ID)
-			if s1.Status == "downloading" {
-				started = 1
-			}
-			if s2.Status == "downloading" {
-				started = 2
-			}
-			if started == 2 {
-				s3, _ := mgr.SnapshotTask(task3.ID)
-				if s3.Status == "pending" {
-					t.Logf("task3 correctly blocked: %s", s3.Status)
-				} else {
-					t.Errorf("task3 should be pending, got %s", s3.Status)
+			downloading := 0
+			for _, t := range allTasks {
+				s, _ := mgr.SnapshotTask(t.ID)
+				if s.Status == "downloading" {
+					downloading++
 				}
-				// 释放 blockCh 让 goroutine 退出，避免 TempDir 清理失败
+			}
+			if downloading >= 2 {
+				// 继续检查 10 轮，确认并发数始终不超过 2
+				stableDeadline := time.After(2 * time.Second)
+				stable := true
+				for i := 0; i < 10; i++ {
+					select {
+					case <-stableDeadline:
+						break
+					default:
+						time.Sleep(20 * time.Millisecond)
+						downloading = 0
+						for _, t := range allTasks {
+							s, _ := mgr.SnapshotTask(t.ID)
+							if s.Status == "downloading" {
+								downloading++
+							}
+						}
+						if downloading > 2 {
+							stable = false
+							t.Errorf("并发数超过限制: %d > 2", downloading)
+						}
+					}
+				}
+				if stable {
+					t.Logf("并发限制正常: 始终不超过 2 个 downloading")
+				}
 				close(blockCh)
 				return
 			}
