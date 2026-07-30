@@ -56,9 +56,12 @@ func (c *FileClient) RestoreVersion(ctx context.Context, filename string, versio
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("恢复版本失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
 	var result UploadResult
 	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("解析响应失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("解析响应失败: %s", string(body))
 	}
 	if !result.Success {
 		return fmt.Errorf("恢复失败: %s", result.Message)
@@ -77,9 +80,12 @@ func (c *FileClient) DeleteVersion(ctx context.Context, filename string, version
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("删除版本失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
 	var result UploadResult
 	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("解析响应失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		return fmt.Errorf("解析响应失败: %s", string(body))
 	}
 	if !result.Success {
 		return fmt.Errorf("删除失败: %s", result.Message)

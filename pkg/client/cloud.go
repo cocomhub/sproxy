@@ -118,6 +118,18 @@ func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts
 	if len(urls) > maxBatch {
 		return nil, fmt.Errorf("cloud download batch: 最多 %d 个 URL，收到 %d 个", maxBatch, len(urls))
 	}
+
+	// 校验每个 URL 的格式
+	for _, urlStr := range urls {
+		u, err := url.Parse(urlStr)
+		if err != nil {
+			return nil, fmt.Errorf("cloud download batch: invalid URL %q: %w", urlStr, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return nil, fmt.Errorf("cloud download batch: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
+		}
+	}
+
 	entries := make([]map[string]string, len(urls))
 	for i, u := range urls {
 		entries[i] = map[string]string{"url": u}

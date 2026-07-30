@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
@@ -37,6 +38,9 @@ func DefaultConfig() *Config {
 
 // Validate 校验配置合理性，设置零值字段为默认值。
 func (c *Config) Validate() error {
+	if c == nil {
+		return fmt.Errorf("config is nil")
+	}
 	if c.ServerURL == "" {
 		c.ServerURL = "https://127.0.0.1:18083"
 	}
@@ -125,19 +129,25 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 	case "auth_token":
 		cfg.AuthToken = value
 	case "timeout":
-		if _, err := fmt.Sscanf(value, "%d", &cfg.Timeout); err != nil {
+		if timeout, err := strconv.Atoi(value); err != nil {
 			return fmt.Errorf("无效的超时值: %w", err)
+		} else {
+			cfg.Timeout = timeout
 		}
 	case "tunnel_key":
 		cfg.TunnelKey = value
 	case "chunk_size":
-		if _, err := fmt.Sscanf(value, "%d", &cfg.ChunkSize); err != nil {
+		chunkSize, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
 			return fmt.Errorf("无效的分块大小: %w", err)
 		}
+		cfg.ChunkSize = chunkSize
 	case "max_chunk_size":
-		if _, err := fmt.Sscanf(value, "%d", &cfg.MaxChunkSize); err != nil {
+		maxChunkSize, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
 			return fmt.Errorf("无效的最大分块大小: %w", err)
 		}
+		cfg.MaxChunkSize = maxChunkSize
 	default:
 		return fmt.Errorf("未知配置键: %s", key)
 	}

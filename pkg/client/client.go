@@ -361,6 +361,9 @@ func calculateChecksum(filePath string) (string, error) {
 // 对于 ≤ 100 MiB 的文件（本方法的适用范围，大文件走 ChunkedUpload），两次读取的 I/O 开销
 // 在 SSD 和 OS 缓存下可接受。
 func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (*UploadResult, error) {
+	if remotePath == "" {
+		return nil, fmt.Errorf("remotePath 不能为空")
+	}
 	file, err := os.Open(localPath)
 	if err != nil {
 		return nil, fmt.Errorf("打开文件失败: %w", err)
@@ -515,7 +518,8 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 
 	if serverCS != "" {
 		if err := c.verifyChecksumAfterDownload(outputPath, serverCS); err != nil {
-			return err
+			os.Remove(outputPath)
+			return fmt.Errorf("校验和验证失败: %w", err)
 		}
 	}
 
