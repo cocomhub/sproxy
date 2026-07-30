@@ -52,7 +52,11 @@ func mockUploadHandler(t *testing.T, dir string) http.HandlerFunc {
 		}
 		defer f.Close()
 
-		out, _ := os.Create(filepath.Join(dir, filepath.Base(h.Filename)))
+		out, err := os.Create(filepath.Join(dir, filepath.Base(h.Filename)))
+		if err != nil {
+			http.Error(w, `{"success":false,"message":"failed to create file"}`, http.StatusInternalServerError)
+			return
+		}
 		defer out.Close()
 		hasher := sha256.New()
 		buf := make([]byte, 4096)

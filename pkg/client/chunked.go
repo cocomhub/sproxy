@@ -397,22 +397,26 @@ func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, bo
 }
 
 // calcFileChecksum 计算文件的 SHA-256 checksum，同时处理缓存。
-// 与 calculateChecksum（无缓存，位于 client.go）不同，此函数使用 TTL + 容量上限的缓存机制。
+// 与 calculateChecksum（无缓存，位于 client.go）不同，此函数使用 TTL 过期清理的缓存机制。
 // 返回校验和、是否从缓存获取、错误。
 //
-// 缓存策略：使用 TTL + 容量上限的主动淘汰机制。
+// 缓存策略：使用 TTL 过期 + 每次 Store 触发清理的主动淘汰机制。
 //   - 缓存命中时检查 mtime+size 和 TTL（懒清理），过期则重新计算
-//   - 写入缓存时检查条目数，超过缓存上限时清理过期条目
+//   - 写入缓存时 Range 清理过期条目
 //
 // 选择在 Store 时 Range 清理而非后台 goroutine，避免 goroutine 生命周期管理
-// 注意：sync.Map 无内置 Len()，因此每次写入都 Range 遍历
-// 对于 maxCacheEntries=1000 的默认值，Range 遍历开销可忽略
+// 注意：sync.Map 无内置 Len()，无法精确控制条目数上限。
+// 当前方案通过 TTL 过期 + 每次 Store 触发清理来防止缓存无限增长。
+// 对于 maxCacheEntries=1000 的默认值，即使有少量偏差，内存开销也可控。
 //   - 选择此方案而非纯懒清理：纯懒清理在 SDK 长时间运行场景下，不命中的条目
 //     永不清除，导致内存泄漏。主动淘汰确保内存上限可预测。
 //   - 选择此方案而非后台 goroutine 定期清理：避免 goroutine 生命周期管理，
 //     且 Range 清理只在写入时触发，对正常上传路径无额外开销。
 func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize int64, modTime time.Time) (string, bool, error) {
-	absPath, _ := filepath.Abs(localPath)
+	absPath, err := filepath.Abs(localPath)
+	if err != nil {
+		return "", false, fmt.Errorf("计算绝对路径失败: %w", err)
+	}
 	if cached, ok := c.uploadCache.Load(absPath); ok {
 		entry := cached.(*uploadCacheEntry) //nolint:errcheck
 		if time.Since(entry.createdAt) > c.cacheTTL {
