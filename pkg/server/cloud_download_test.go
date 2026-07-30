@@ -876,7 +876,7 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 				// 继续检查 10 轮，确认并发数始终不超过 2
 				stableDeadline := time.After(2 * time.Second)
 				stable := true
-				for i := 0; i < 10; i++ {
+				for range 10 {
 					select {
 					case <-stableDeadline:
 						break
