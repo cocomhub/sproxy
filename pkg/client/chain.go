@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 )
@@ -139,9 +140,7 @@ func NewChainManager(store KVStore) *ChainManager {
 	}
 	// 从全局注册表拷贝默认值
 	runnerRegistryMu.RLock()
-	for k, v := range runnerRegistry {
-		m.registry[k] = v
-	}
+	maps.Copy(m.registry, runnerRegistry)
 	runnerRegistryMu.RUnlock()
 	return m
 }

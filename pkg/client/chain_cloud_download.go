@@ -316,16 +316,13 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 			resultCh := make(chan taskResult, len(c.TaskIDs))
 			var wg sync.WaitGroup
 			for i, taskID := range c.TaskIDs {
-				i, taskID := i, taskID
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					status, err := c.client.GetCloudTask(timeoutCtx, taskID)
 					select {
 					case resultCh <- taskResult{index: i, task: status, err: err}:
 					case <-timeoutCtx.Done():
 					}
-				}()
+				})
 			}
 			go func() {
 				wg.Wait()
