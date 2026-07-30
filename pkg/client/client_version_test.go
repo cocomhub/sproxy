@@ -5,6 +5,7 @@ package client
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,15 +15,19 @@ import (
 func TestClientListVersions(t *testing.T) {
 	t.Parallel()
 
+	errCh := make(chan error, 3)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
-			t.Errorf("expected GET, got %s", r.Method)
+			errCh <- fmt.Errorf("expected GET, got %s", r.Method)
+			return
 		}
 		if r.URL.Path != "/api/versions" {
-			t.Errorf("expected /api/versions, got %s", r.URL.Path)
+			errCh <- fmt.Errorf("expected /api/versions, got %s", r.URL.Path)
+			return
 		}
 		if r.URL.Query().Get("filename") != "test.txt" {
-			t.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename"))
+			errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename"))
+			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{
 			"versions": []VersionInfo{
@@ -47,6 +52,11 @@ func TestClientListVersions(t *testing.T) {
 	if versions[0].Checksum != "abc123" {
 		t.Errorf("versions[0].Checksum = %q, want abc123", versions[0].Checksum)
 	}
+
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
 }
 
 func TestClientListVersions_NotFound(t *testing.T) {
@@ -68,15 +78,19 @@ func TestClientListVersions_NotFound(t *testing.T) {
 func TestClientRestoreVersion(t *testing.T) {
 	t.Parallel()
 
+	errCh := make(chan error, 3)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
-			t.Errorf("expected POST, got %s", r.Method)
+			errCh <- fmt.Errorf("expected POST, got %s", r.Method)
+			return
 		}
 		if r.URL.Query().Get("filename") != "test.txt" {
-			t.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename"))
+			errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename"))
+			return
 		}
 		if r.URL.Query().Get("version_id") != "1" {
-			t.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id"))
+			errCh <- fmt.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id"))
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{"Success": true, "Message": "restored"})
@@ -87,6 +101,11 @@ func TestClientRestoreVersion(t *testing.T) {
 	err := c.RestoreVersion(t.Context(), "test.txt", 1)
 	if err != nil {
 		t.Fatalf("RestoreVersion() = %v", err)
+	}
+
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
 	}
 }
 
@@ -109,18 +128,23 @@ func TestClientRestoreVersion_Failure(t *testing.T) {
 func TestClientDeleteVersion(t *testing.T) {
 	t.Parallel()
 
+	errCh := make(chan error, 4)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "DELETE" {
-			t.Errorf("expected DELETE, got %s", r.Method)
+			errCh <- fmt.Errorf("expected DELETE, got %s", r.Method)
+			return
 		}
 		if r.URL.Path != "/api/versions" {
-			t.Errorf("expected /api/versions, got %s", r.URL.Path)
+			errCh <- fmt.Errorf("expected /api/versions, got %s", r.URL.Path)
+			return
 		}
 		if r.URL.Query().Get("filename") != "test.txt" {
-			t.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename"))
+			errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename"))
+			return
 		}
 		if r.URL.Query().Get("version_id") != "1" {
-			t.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id"))
+			errCh <- fmt.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id"))
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{"Success": true, "Message": "deleted"})
@@ -131,6 +155,11 @@ func TestClientDeleteVersion(t *testing.T) {
 	err := c.DeleteVersion(t.Context(), "test.txt", 1)
 	if err != nil {
 		t.Fatalf("DeleteVersion() = %v", err)
+	}
+
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
 	}
 }
 

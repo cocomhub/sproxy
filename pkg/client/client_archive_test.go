@@ -6,6 +6,7 @@ package client
 import (
 	"archive/tar"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,9 +18,10 @@ import (
 func TestClientArchive_SingleFile(t *testing.T) {
 	t.Parallel()
 
+	errCh := make(chan error, 1)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" || r.URL.Path != "/api/archive" {
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			errCh <- fmt.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			return
 		}
 		// 检查请求体包含 {"files":["test.txt"]}
@@ -48,15 +50,21 @@ func TestClientArchive_SingleFile(t *testing.T) {
 	if fi.Size() == 0 {
 		t.Error("archive file is empty")
 	}
+
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
 }
 
 func TestClientArchiveDir(t *testing.T) {
 	t.Parallel()
 
+	errCh := make(chan error, 1)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// ArchiveDir 发送 GET /api/archive-dir?dirname=xxx
 		if r.Method != "GET" || r.URL.Path != "/api/archive-dir" {
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			errCh <- fmt.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			return
 		}
 		tw := tar.NewWriter(w)
@@ -87,6 +95,11 @@ func TestClientArchiveDir(t *testing.T) {
 	}
 	if fi.Size() == 0 {
 		t.Error("archive dir file is empty")
+	}
+
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
 	}
 }
 

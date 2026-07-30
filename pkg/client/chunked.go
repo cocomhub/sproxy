@@ -171,6 +171,9 @@ func newChunkedUploader(opts chunkedUploaderOpts) *ChunkedUploader {
 
 // run 执行分块上传循环，上传指定索引列表的分块，然后完成上传。
 func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*ChunkedUploadResult, error) {
+	if u.concurrency <= 0 {
+		u.concurrency = 1
+	}
 	sem := make(chan struct{}, u.concurrency)
 	var wg sync.WaitGroup
 
@@ -782,6 +785,9 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		wg          sync.WaitGroup
 	)
 
+	if params.concurrency <= 0 {
+		params.concurrency = 1
+	}
 	sem := make(chan struct{}, params.concurrency)
 
 	for i := range totalChunks {
@@ -957,8 +963,12 @@ func WithChunkedChunkSize(size int64) ChunkedOption {
 }
 
 // WithChunkedConcurrency 设置并发数。
+// 传入 0 或负数时自动调整为 1，避免无缓冲信号量导致死锁。
 func WithChunkedConcurrency(n int) ChunkedOption {
 	return func(o *chunkedOpts) {
+		if n <= 0 {
+			n = 1
+		}
 		o.concurrency = n
 	}
 }

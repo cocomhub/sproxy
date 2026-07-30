@@ -127,9 +127,10 @@ func defaultChainOptions() chainOptions {
 
 // ChainManager 链式操作管理器。
 type ChainManager struct {
-	store    KVStore
-	codec    StructCodec
-	registry map[string]func() ChainRunner
+	store      KVStore
+	codec      StructCodec
+	registry   map[string]func() ChainRunner
+	registryMu sync.RWMutex
 }
 
 func NewChainManager(store KVStore) *ChainManager {
@@ -147,6 +148,8 @@ func NewChainManager(store KVStore) *ChainManager {
 
 // RegisterRunner 注册 runner 类型到实例注册表。
 func (m *ChainManager) RegisterRunner(typeName string, factory func() ChainRunner) {
+	m.registryMu.Lock()
+	defer m.registryMu.Unlock()
 	m.registry[typeName] = factory
 }
 
@@ -240,6 +243,8 @@ func (m *ChainManager) saveState(ctx context.Context, runner ChainRunner) {
 
 // resolveRunner 使用实例注册表解析 runner 类型。
 func (m *ChainManager) resolveRunner(ctx context.Context, state map[string]any) (ChainRunner, error) {
+	m.registryMu.RLock()
+	defer m.registryMu.RUnlock()
 	typeName, ok := state["type"].(string)
 	if !ok {
 		return nil, fmt.Errorf("state 缺少 type 字段")

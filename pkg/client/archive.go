@@ -55,7 +55,6 @@ func (c *FileClient) downloadToFile(ctx context.Context, method, urlPath string,
 	defer out.Close()
 
 	if _, err = io.Copy(out, resp.Body); err != nil {
-		out.Close()
 		os.Remove(outputPath)
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
