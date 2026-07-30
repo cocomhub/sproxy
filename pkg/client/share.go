@@ -80,7 +80,7 @@ func (c *FileClient) CreateShare(ctx context.Context, filename string, opts ...S
 	}
 	body := map[string]any{
 		"filename":      filename,
-		"ttl":           cfg.ttl.String(),
+		"ttl":           fmt.Sprintf("%ds", int64(cfg.ttl.Seconds())),
 		"max_downloads": cfg.maxDownloads,
 		"one_time":      cfg.oneTime,
 	}
