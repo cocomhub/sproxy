@@ -55,7 +55,7 @@ type serverResponse struct {
 	FileCS  string `json:"file_checksum"`
 }
 
-// ProgressReader 是一个带进度回调的 io.ReadCloser 包装。
+// ProgressReader 是一个带进度回调的 io.Reader 包装。
 type ProgressReader struct {
 	reader     io.Reader
 	total      int64
@@ -109,6 +109,7 @@ type FileClient struct {
 	maxCacheEntries int           // checksum 缓存最大条目数，0=使用默认值 1000
 	cacheTTL        time.Duration // checksum 缓存 TTL，0=使用默认值 10m
 	chainManager    *ChainManager // 链式操作管理器，nil=不启用
+	initError       error         // WithTunnel/WithXfer 初始化错误
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
@@ -143,6 +144,7 @@ func WithTunnel(hexKey string) Option {
 		tc, err := tunnel.NewClient(hexKey, c.serverURL+"/tunnel", c.httpClient.Timeout, c.logger)
 		if err != nil {
 			c.logger.Warn("创建隧道客户端失败", "error", err)
+			c.initError = fmt.Errorf("创建隧道客户端失败: %w", err)
 			return
 		}
 		c.tunnelClient = tc
@@ -160,6 +162,7 @@ func WithXfer(name, hubURL, hexKey string) Option {
 			key, err := tunnel.ParseKey(hexKey)
 			if err != nil {
 				c.logger.Warn("解析 xfer 密钥失败", "error", err)
+				c.initError = fmt.Errorf("解析 xfer 密钥失败: %w", err)
 				return
 			}
 			c.tunnelKey = key
@@ -400,8 +403,8 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 				c.progressFn("上传", read, total)
 			})
 		}
-		if _, err = io.Copy(part, src); err != nil {
-			pw.CloseWithError(err)
+		if _, copyErr := io.Copy(part, src); copyErr != nil {
+			pw.CloseWithError(copyErr)
 			return
 		}
 	}()
@@ -666,7 +669,7 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 	}
 
 	info := &FileInfo{
-		Name:     filepath.Base(filename),
+		Name:     filename,
 		Checksum: resp.Header.Get(headerFileChecksum),
 		IsDir:    resp.Header.Get("X-File-IsDir") == "true",
 	}
@@ -892,6 +895,12 @@ func (c *FileClient) getTunnelMux(ctx context.Context) (*tunnel.Tunnel, error) {
 	return tunnel.NewTunnel(m, c.tunnelKey), nil
 }
 
+// InitError 返回初始化过程中的错误，如 WithTunnel/WithXfer 初始化失败。
+// 如果返回 nil，表示所有初始化操作均成功完成。
+func (c *FileClient) InitError() error {
+	return c.initError
+}
+
 // doRequest 统一发送 HTTP 请求：当配置了隧道客户端时走加密隧道，否则直连。
 //
 // urlPath 是相对路径，如 "/upload" 或 "/download?filename=test.txt"。
@@ -1032,9 +1041,12 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 		return nil, err
 	}
 
-	if cdc, ok := runner.(*CloudDownloadChain); ok {
-		cdc.setClient(c)
-	}
+	runner.SetClient(c)
+	runner.SetOptions(chainOptions{
+		pollInterval: 3 * time.Second,
+		timeout:      30 * time.Minute,
+		keepFiles:    false,
+	})
 
 	if err := c.chainManager.Run(ctx, runner); err != nil {
 		return nil, err

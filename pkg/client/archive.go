@@ -17,7 +17,10 @@ import (
 // Archive 将服务器端指定的文件列表打包下载到本地文件。
 // files: 服务端文件路径列表；outputPath: 本地目标 .tar.gz 文件路径。
 func (c *FileClient) Archive(ctx context.Context, files []string, outputPath string) error {
-	body, _ := json.Marshal(map[string]any{"files": files})
+	body, err := json.Marshal(map[string]any{"files": files})
+	if err != nil {
+		return fmt.Errorf("序列化请求失败: %w", err)
+	}
 
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
@@ -52,6 +55,7 @@ func (c *FileClient) downloadToFile(ctx context.Context, method, urlPath string,
 	defer out.Close()
 
 	if _, err = io.Copy(out, resp.Body); err != nil {
+		out.Close()
 		os.Remove(outputPath)
 		return fmt.Errorf("写入文件失败: %w", err)
 	}

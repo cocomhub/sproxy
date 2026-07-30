@@ -78,8 +78,12 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 		return nil, fmt.Errorf("cloud download: url is required")
 	}
 	// 基本 URL 格式校验：避免无效 URL 浪费服务端资源
-	if _, err := url.Parse(urlStr); err != nil {
+	u, err := url.Parse(urlStr)
+	if err != nil {
 		return nil, fmt.Errorf("cloud download: invalid URL %q: %w", urlStr, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("cloud download: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
 	}
 	cfg := &cloudDownloadOptions{}
 	for _, opt := range opts {

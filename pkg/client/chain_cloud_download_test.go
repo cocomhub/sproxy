@@ -393,8 +393,8 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 	if !ok {
 		t.Fatal("expected CloudDownloadChain")
 	}
-	cdc.setClient(NewFileClient(ts.URL))
-	cdc.setOptions(chainOptions{pollInterval: 100 * time.Millisecond, timeout: 10 * time.Second})
+	cdc.SetClient(NewFileClient(ts.URL))
+	cdc.SetOptions(chainOptions{pollInterval: 100 * time.Millisecond, timeout: 10 * time.Second})
 
 	var phases []string
 	err = runner.Run(context.Background(), func(ctx context.Context, info ProgressInfo) {
@@ -693,24 +693,6 @@ func TestCloudDownloadChain_DownloadToLocal_PathTraversal(t *testing.T) {
 		if strings.Contains(chain.LocalPath, "..") {
 			t.Errorf("localPath should not contain path traversal: %s", chain.LocalPath)
 		}
-	})
-
-	t.Run("normal_archive_name", func(t *testing.T) {
-		chain := &CloudDownloadChain{
-			client:            client,
-			LocalDir:          dir,
-			ArchiveName:       "my-archive",
-			archiveServerPath: ".__cloud_archives__/my-archive.tar.gz",
-		}
-		// 需要创建一个文件让 stat 成功
-		archiveFile := filepath.Join(dir, "my-archive.tar.gz")
-		os.WriteFile(archiveFile, []byte("test-data"), 0644)
-
-		// 但 HEAD 请求会返回 404，因为 archiveServerPath 指向的是 .__cloud_archives__/ 目录
-		// 实际场景中 ChunkedDownload 会通过 HEAD /api/files/stat 获取文件信息
-		// 我们需要 mock 服务端返回成功
-		_ = chain
-		_ = archiveFile
 	})
 }
 

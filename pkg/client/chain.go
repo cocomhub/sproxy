@@ -6,6 +6,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -47,6 +48,8 @@ type ChainRunner interface {
 	Run(ctx context.Context, reportFn ProgressFunc) error
 	State() map[string]any
 	Restore(state map[string]any) error
+	SetClient(client *FileClient)
+	SetOptions(opts chainOptions)
 }
 
 // ChainResult 链式操作结果。
@@ -56,6 +59,22 @@ type ChainResult struct {
 	Status  string      `json:"status"`
 	Error   string      `json:"error,omitempty"`
 	Raw     ChainRunner `json:"-"` // 原始 runner
+}
+
+// LocalPath 获取本地路径（仅 CloudDownloadChain 支持）。
+func (r *ChainResult) LocalPath() string {
+	if cdc, ok := r.Raw.(*CloudDownloadChain); ok {
+		return cdc.LocalPath
+	}
+	return ""
+}
+
+// KeepFiles 返回是否保留远端文件（仅 CloudDownloadChain 支持）。
+func (r *ChainResult) KeepFiles() bool {
+	if cdc, ok := r.Raw.(*CloudDownloadChain); ok {
+		return cdc.KeepFiles
+	}
+	return false
 }
 
 // chainOptions 链式操作选项。
@@ -107,12 +126,29 @@ func defaultChainOptions() chainOptions {
 
 // ChainManager 链式操作管理器。
 type ChainManager struct {
-	store KVStore
-	codec StructCodec
+	store    KVStore
+	codec    StructCodec
+	registry map[string]func() ChainRunner
 }
 
 func NewChainManager(store KVStore) *ChainManager {
-	return &ChainManager{store: store, codec: StructCodec{}}
+	m := &ChainManager{
+		store:    store,
+		codec:    StructCodec{},
+		registry: make(map[string]func() ChainRunner),
+	}
+	// 从全局注册表拷贝默认值
+	runnerRegistryMu.RLock()
+	for k, v := range runnerRegistry {
+		m.registry[k] = v
+	}
+	runnerRegistryMu.RUnlock()
+	return m
+}
+
+// RegisterRunner 注册 runner 类型到实例注册表。
+func (m *ChainManager) RegisterRunner(typeName string, factory func() ChainRunner) {
+	m.registry[typeName] = factory
 }
 
 // Run 执行链式操作（自动持久化，支持恢复）。
@@ -123,8 +159,12 @@ func (m *ChainManager) Run(ctx context.Context, runner ChainRunner) error {
 // RunWithProgress 执行链式操作，并支持外部进度回调。
 func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, progressFn ProgressFunc) error {
 	m.saveState(ctx, runner)
+	// 注入 chainMgr 引用，使 runner 在阶段切换时能自行持久化状态
+	if cdc, ok := runner.(*CloudDownloadChain); ok {
+		cdc.SetChainManager(m)
+	}
 	reportFn := func(ctx context.Context, info ProgressInfo) {
-		m.saveState(ctx, runner)
+		m.saveState(context.Background(), runner)
 		if progressFn != nil {
 			progressFn(ctx, info)
 		}
@@ -149,7 +189,7 @@ func (m *ChainManager) Resume(ctx context.Context, chainID string) (ChainRunner,
 	if err != nil {
 		return nil, fmt.Errorf("加载链状态失败: %w", err)
 	}
-	runner, err := resolveRunner(ctx, state)
+	runner, err := m.resolveRunner(ctx, state)
 	if err != nil {
 		return nil, fmt.Errorf("解析 runner 类型失败: %w", err)
 	}
@@ -168,14 +208,16 @@ func (m *ChainManager) List(ctx context.Context) ([]ChainRunner, error) {
 	for _, key := range keys {
 		state, err := m.store.Load(ctx, key)
 		if err != nil {
+			slog.Debug("加载链状态失败", "key", key, "error", err)
 			continue
 		}
 		status, _ := state["status"].(string)
 		if status == StatusCompleted || status == StatusFailed {
 			continue
 		}
-		runner, err := resolveRunner(ctx, state)
+		runner, err := m.resolveRunner(ctx, state)
 		if err != nil {
+			slog.Debug("解析链 runner 失败", "key", key, "error", err)
 			continue
 		}
 		if err := runner.Restore(state); err != nil {
@@ -192,10 +234,25 @@ func (m *ChainManager) Delete(ctx context.Context, chainID string) error {
 
 func (m *ChainManager) saveState(ctx context.Context, runner ChainRunner) {
 	state := runner.State()
-	_ = m.store.Save(ctx, "chain:"+runner.ID(), state)
+	if err := m.store.Save(ctx, "chain:"+runner.ID(), state); err != nil {
+		slog.Warn("保存链状态失败", "chain_id", runner.ID(), "error", err)
+	}
 }
 
-// runnerRegistry 是 ChainRunner 类型注册表。
+// resolveRunner 使用实例注册表解析 runner 类型。
+func (m *ChainManager) resolveRunner(ctx context.Context, state map[string]any) (ChainRunner, error) {
+	typeName, ok := state["type"].(string)
+	if !ok {
+		return nil, fmt.Errorf("state 缺少 type 字段")
+	}
+	factory, ok := m.registry[typeName]
+	if !ok {
+		return nil, fmt.Errorf("未知的 runner 类型: %s", typeName)
+	}
+	return factory(), nil
+}
+
+// runnerRegistry 是 ChainRunner 类型全局注册表。
 var (
 	runnerRegistryMu sync.RWMutex
 	runnerRegistry   = map[string]func() ChainRunner{}
@@ -207,16 +264,8 @@ func RegisterRunner(typeName string, factory func() ChainRunner) {
 	runnerRegistry[typeName] = factory
 }
 
-func resolveRunner(ctx context.Context, state map[string]any) (ChainRunner, error) {
-	typeName, ok := state["type"].(string)
-	if !ok {
-		return nil, fmt.Errorf("state 缺少 type 字段")
-	}
-	runnerRegistryMu.RLock()
-	factory, ok := runnerRegistry[typeName]
-	runnerRegistryMu.RUnlock()
-	if !ok {
-		return nil, fmt.Errorf("未知的 runner 类型: %s", typeName)
-	}
-	return factory(), nil
+func UnregisterRunner(typeName string) {
+	runnerRegistryMu.Lock()
+	defer runnerRegistryMu.Unlock()
+	delete(runnerRegistry, typeName)
 }

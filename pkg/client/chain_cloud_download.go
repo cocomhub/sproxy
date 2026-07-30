@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,9 +42,10 @@ type CloudDownloadChain struct {
 	Timeout      time.Duration `json:"timeout"`       // 超时时间，恢复时保持
 
 	// 非持久化字段：恢复后需手动设置
-	archiveServerPath string       `json:"-"` // 服务端返回的归档文件路径
-	client            *FileClient  `json:"-"`
-	opts              chainOptions `json:"-"` // 仅运行时使用，非持久字段由独立字段覆盖
+	archiveServerPath string        `json:"-"` // 服务端返回的归档文件路径
+	client            *FileClient   `json:"-"`
+	opts              chainOptions  `json:"-"` // 仅运行时使用，非持久字段由独立字段覆盖
+	chainMgr          *ChainManager `json:"-"` // 链式操作管理器，用于阶段间持久化状态
 }
 
 // NewCloudDownloadChain 创建云端下载链式操作。
@@ -98,21 +100,33 @@ func (c *CloudDownloadChain) Restore(state map[string]any) error {
 	return codec.FromMap(state, c)
 }
 
-func (c *CloudDownloadChain) setClient(client *FileClient) {
+func (c *CloudDownloadChain) SetClient(client *FileClient) {
 	c.client = client
 }
 
-func (c *CloudDownloadChain) setOptions(opts chainOptions) {
+func (c *CloudDownloadChain) SetOptions(opts chainOptions) {
 	c.opts = opts
 	c.PollInterval = opts.pollInterval
 	c.Timeout = opts.timeout
 }
 
+// SetChainManager 设置链式操作管理器引用，用于阶段间持久化状态。
+func (c *CloudDownloadChain) SetChainManager(mgr *ChainManager) {
+	c.chainMgr = mgr
+}
+
+// saveState 通过 chainMgr 持久化当前状态到 KVStore。
+func (c *CloudDownloadChain) saveState(ctx context.Context) {
+	if c.chainMgr != nil {
+		c.chainMgr.saveState(ctx, c)
+	}
+}
+
 // Run 执行云端下载链式操作，按阶段推进：
-// submitting → waiting → archiving → downloading → [cleaning] → completed。
+// submitting -> waiting -> archiving -> downloading -> [cleaning] -> completed。
 func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (err error) {
 	if c.client == nil {
-		return fmt.Errorf("cloud download chain: client is nil, use setClient() before Run()")
+		return fmt.Errorf("cloud download chain: client is nil, use SetClient() before Run()")
 	}
 
 	// 统一错误处理：任何阶段失败都设置状态
@@ -129,13 +143,14 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 	case "":
 		fallthrough
 	case PhaseSubmitting:
-		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "提交云端下载任务", Current: 0, Total: len(c.URLs)})
+		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "submit cloud download tasks", Current: 0, Total: len(c.URLs)})
 		if err := c.submitTasks(ctx); err != nil {
 			return err
 		}
 		c.CurrentPhase = PhaseWaiting
 		c.UpdatedAt = time.Now()
-		reportFn(ctx, ProgressInfo{Phase: PhaseWaiting, Message: "等待下载完成", Current: c.Completed, Total: c.Total})
+		c.saveState(ctx)
+		reportFn(ctx, ProgressInfo{Phase: PhaseWaiting, Message: "waiting for downloads to complete", Current: c.Completed, Total: c.Total})
 		fallthrough
 
 	case PhaseWaiting:
@@ -144,7 +159,8 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 		}
 		c.CurrentPhase = PhaseArchiving
 		c.UpdatedAt = time.Now()
-		reportFn(ctx, ProgressInfo{Phase: PhaseArchiving, Message: "打包归档", Current: 0, Total: 1})
+		c.saveState(ctx)
+		reportFn(ctx, ProgressInfo{Phase: PhaseArchiving, Message: "packaging archive", Current: 0, Total: 1})
 		fallthrough
 
 	case PhaseArchiving:
@@ -153,7 +169,8 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 		}
 		c.CurrentPhase = PhaseDownloading
 		c.UpdatedAt = time.Now()
-		reportFn(ctx, ProgressInfo{Phase: PhaseDownloading, Message: "下载到本地", Current: 0, Total: 1})
+		c.saveState(ctx)
+		reportFn(ctx, ProgressInfo{Phase: PhaseDownloading, Message: "downloading to local", Current: 0, Total: 1})
 		fallthrough
 
 	case PhaseDownloading:
@@ -166,7 +183,8 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 		}
 		c.CurrentPhase = PhaseCleaning
 		c.UpdatedAt = time.Now()
-		reportFn(ctx, ProgressInfo{Phase: PhaseCleaning, Message: "清理远端文件", Current: 0, Total: len(c.TaskIDs) + 1})
+		c.saveState(ctx)
+		reportFn(ctx, ProgressInfo{Phase: PhaseCleaning, Message: "cleaning remote files", Current: 0, Total: len(c.TaskIDs) + 1})
 		fallthrough
 
 	case PhaseCleaning:
@@ -257,12 +275,16 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 				return ctx.Err()
 			}
 			timer.Stop()
-			for _, url := range storageFullURLs {
-				task, err := c.client.CloudDownload(ctx, url)
+			if len(storageFullURLs) > 0 {
+				tasks, err := c.client.CloudDownloadBatch(ctx, storageFullURLs)
 				if err != nil {
-					return fmt.Errorf("重试提交失败: %w", err)
+					return fmt.Errorf("重试批量提交失败: %w", err)
 				}
-				c.TaskIDs = append(c.TaskIDs, task.ID)
+				for _, t := range tasks {
+					if t.ID != "" {
+						c.TaskIDs = append(c.TaskIDs, t.ID)
+					}
+				}
 			}
 		} else {
 			c.Failed += len(storageFullURLs)
@@ -292,18 +314,31 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 				err   error
 			}
 			resultCh := make(chan taskResult, len(c.TaskIDs))
+			var wg sync.WaitGroup
 			for i, taskID := range c.TaskIDs {
+				i, taskID := i, taskID
+				wg.Add(1)
 				go func() {
+					defer wg.Done()
 					status, err := c.client.GetCloudTask(timeoutCtx, taskID)
-					resultCh <- taskResult{i, status, err}
+					select {
+					case resultCh <- taskResult{index: i, task: status, err: err}:
+					case <-timeoutCtx.Done():
+					}
 				}()
 			}
+			go func() {
+				wg.Wait()
+				close(resultCh)
+			}()
 
 			results := make([]*CloudTask, len(c.TaskIDs))
 			allDone := true
-			for range c.TaskIDs {
-				r := <-resultCh
+			for r := range resultCh {
 				if r.err != nil {
+					// 消费剩余结果，避免 goroutine 泄漏
+					for range resultCh {
+					}
 					return nil, fmt.Errorf("查询任务 %s 失败: %w", c.TaskIDs[r.index], r.err)
 				}
 				results[r.index] = r.task

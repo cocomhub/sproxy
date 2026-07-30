@@ -85,9 +85,11 @@ func TestWithTunnel_ValidKey(t *testing.T) {
 	t.Parallel()
 
 	c := NewFileClient("http://127.0.0.1:18083")
-	WithTunnel(strings.Repeat("abcdef", 11))(c) // 66 chars → invalid, logged as warn
-	if c.tunnelClient != nil {
-		t.Fatal("tunnelClient should be nil for invalid key")
+	// 64 hex chars = 32 bytes = valid AES-256 key
+	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	WithTunnel(validKey)(c)
+	if c.tunnelClient == nil {
+		t.Fatal("tunnelClient should not be nil for valid key")
 	}
 }
 
@@ -95,11 +97,9 @@ func TestWithTunnel_InvalidKey(t *testing.T) {
 	t.Parallel()
 
 	c := NewFileClient("http://127.0.0.1:18083")
-	// 64 hex chars = 32 bytes = valid AES-256 key
-	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	WithTunnel(validKey)(c)
-	if c.tunnelClient == nil {
-		t.Fatal("tunnelClient should not be nil for valid key")
+	WithTunnel(strings.Repeat("abcdef", 11))(c) // 66 chars → invalid, logged as warn
+	if c.tunnelClient != nil {
+		t.Fatal("tunnelClient should be nil for invalid key")
 	}
 }
 
@@ -506,7 +506,11 @@ func TestXferTunnelRoundTrip(t *testing.T) {
 		t.Fatalf("expected %q, got %q", "e2e", string(body))
 	}
 	cancel()
-	<-srvErr
+	select {
+	case <-srvErr:
+	case <-time.After(2 * time.Second):
+		t.Error("tunB.Serve did not exit after cancel")
+	}
 }
 
 func TestXferTunnelConcurrentStreams(t *testing.T) {
@@ -551,7 +555,11 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 		}
 	}
 	cancel()
-	<-srvErr
+	select {
+	case <-srvErr:
+	case <-time.After(2 * time.Second):
+		t.Error("tunB.Serve did not exit after cancel")
+	}
 }
 
 func TestXferTunnelEncrypted(t *testing.T) {
@@ -588,7 +596,11 @@ func TestXferTunnelEncrypted(t *testing.T) {
 		t.Fatalf("expected TEST, got %q", string(body))
 	}
 	cancel()
-	<-srvErr
+	select {
+	case <-srvErr:
+	case <-time.After(2 * time.Second):
+		t.Error("tunB.Serve did not exit after cancel")
+	}
 }
 
 func TestXferTunnelLargeBody(t *testing.T) {
@@ -623,8 +635,12 @@ func TestXferTunnelLargeBody(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if len(body) != 65000 {
-		t.Fatalf("expected 100000 bytes, got %d", len(body))
+		t.Fatalf("expected %d bytes, got %d", len(payload), len(body))
 	}
 	cancel()
-	<-srvErr
+	select {
+	case <-srvErr:
+	case <-time.After(2 * time.Second):
+		t.Error("tunB.Serve did not exit after cancel")
+	}
 }

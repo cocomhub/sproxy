@@ -280,11 +280,13 @@ func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
 	if success {
 		u.mu.Lock()
 		u.progress += int64(n)
+		progress := u.progress
+		u.mu.Unlock()
+
 		if u.client.progressFn != nil {
-			u.client.progressFn("上传", u.progress, u.fileSize)
+			u.client.progressFn("上传", progress, u.fileSize)
 		}
 		u.client.logger.Debug("chunk 上传成功", "chunk_index", chunkIdx, "checksum", shortid.ShortHash(chunkChecksum))
-		u.mu.Unlock()
 		return true
 	}
 
@@ -301,9 +303,7 @@ func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
 // openAndSeekChunk 打开文件并寻道到指定分块的偏移位置。
 func (u *ChunkedUploader) openAndSeekChunk(index int) (*os.File, error) {
 	offset := int64(index) * int64(u.chunkSize)
-	u.mu.Lock()
 	f, err := os.Open(u.filePath)
-	u.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}

@@ -47,14 +47,14 @@ func WithShareOneTime() ShareOption {
 
 // ShareLink 表示服务端返回的分享链接信息。
 type ShareLink struct {
-	Token        string `json:"token"`
-	Filename     string `json:"filename"`
-	CreatedAt    string `json:"created_at"`
-	ExpiresAt    string `json:"expires_at"`
-	MaxDownloads int    `json:"max_downloads"`
-	Downloads    int    `json:"downloads"`
-	OneTime      bool   `json:"one_time"`
-	Expired      bool   `json:"expired"`
+	Token        string `json:"token"`         // 分享链接的唯一标识符
+	Filename     string `json:"filename"`      // 被分享的文件名
+	CreatedAt    string `json:"created_at"`    // 创建时间（RFC3339 格式）
+	ExpiresAt    string `json:"expires_at"`    // 过期时间（RFC3339 格式）
+	MaxDownloads int    `json:"max_downloads"` // 最大下载次数（0=不限）
+	Downloads    int    `json:"downloads"`     // 已下载次数
+	OneTime      bool   `json:"one_time"`      // 是否一次性链接
+	Expired      bool   `json:"expired"`       // 是否已过期
 }
 
 // CreatedAtTime 返回 CreatedAt 的 time.Time 表示。

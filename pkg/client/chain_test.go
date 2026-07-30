@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,9 +50,14 @@ func (r *testChainRunner) Restore(state map[string]any) error {
 	r.status, _ = state["status"].(string)
 	return nil
 }
+func (r *testChainRunner) SetClient(client *FileClient) {}
+func (r *testChainRunner) SetOptions(opts chainOptions) {}
 
-func init() {
+func TestMain(m *testing.M) {
 	RegisterRunner("test_chain", func() ChainRunner { return &testChainRunner{} })
+	code := m.Run()
+	UnregisterRunner("test_chain")
+	os.Exit(code)
 }
 
 func TestChainManager_Run_Success(t *testing.T) {

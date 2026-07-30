@@ -1223,8 +1223,8 @@ func TestClientBatchRename_MissingChecksum(t *testing.T) {
 	}
 }
 
-// TestFileClient_Upload_RequestError 验证 Upload 连接层面的错误。
-func TestFileClient_Upload_RequestError(t *testing.T) {
+// TestFileClient_Upload_BusinessError 验证 Upload 业务层面的错误。
+func TestFileClient_Upload_BusinessError(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /upload", func(w http.ResponseWriter, r *http.Request) {
@@ -1248,40 +1248,6 @@ func TestFileClient_Upload_RequestError(t *testing.T) {
 	}
 }
 
-// TestFileClient_Upload_WithTunnel 验证 Upload 走隧道路径。
-func TestFileClient_Upload_WithTunnel(t *testing.T) {
-	t.Parallel()
-	validKey := strings.Repeat("a", 64)
-	mux := http.NewServeMux()
-	ts := httptest.NewServer(mux)
-	t.Cleanup(ts.Close)
-
-	mux.HandleFunc("GET /tunnel", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusSwitchingProtocols)
-		hijacker, ok := w.(http.Hijacker)
-		if !ok {
-			http.Error(w, "hijacking not supported", http.StatusInternalServerError)
-			return
-		}
-		conn, _, _ := hijacker.Hijack()
-		conn.Close()
-	})
-
-	srcDir := t.TempDir()
-	src := filepath.Join(srcDir, "a.txt")
-	if err := os.WriteFile(src, []byte("test data"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	c := NewFileClient(ts.URL, WithTunnel(validKey))
-	// WithTunnel creates tunnelClient silently, but Upload still goes through doRequest
-	// which calls c.tunnelClient.Do(req) when set.
-	// This should error because tunnel path doesn't match /upload.
-	if _, err := c.Upload(t.Context(), src, "remote.txt"); err == nil {
-		t.Log("upload via tunnel succeeded (may depend on tunnel setup)")
-	}
-}
-
 // TestFileClient_Upload_ProgressCallback 验证 Upload 带进度回调用不 panic。
 func TestFileClient_Upload_ProgressCallback(t *testing.T) {
 	t.Parallel()
@@ -1301,19 +1267,25 @@ func TestFileClient_Upload_ProgressCallback(t *testing.T) {
 		t.Fatalf("Upload failed: %v", err)
 	}
 	if !called {
-		t.Log("progress callback was not called during upload")
+		t.Error("progress callback was not called during upload")
 	}
 }
 
 // TestLoadConfig_NotExistWithCreateError 验证配置文件不存在且创建失败的情况。
 func TestLoadConfig_NotExistWithCreateError(t *testing.T) {
-	// 在只读目录中尝试创建配置文件应失败
+	// 父目录不存在时，LoadConfig 应返回默认配置，不创建文件
 	readOnlyDir := t.TempDir()
 	nonexistentPath := filepath.Join(readOnlyDir, "subdir", "sclient.yaml")
-	// 父目录不存在，os.WriteFile 在子目录不存在时也会失败
-	_, err := LoadConfig(nonexistentPath)
-	if err == nil {
-		t.Fatal("expected error for path with nonexistent parent dir")
+	cfg, err := LoadConfig(nonexistentPath)
+	if err != nil {
+		t.Fatalf("LoadConfig on nonexistent path should not error, got: %v", err)
+	}
+	if cfg.ServerURL != "https://127.0.0.1:18083" {
+		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
+	}
+	// 文件不应被创建
+	if _, err := os.Stat(nonexistentPath); !os.IsNotExist(err) {
+		t.Errorf("expected config file to not be created at %s", nonexistentPath)
 	}
 }
 

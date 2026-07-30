@@ -718,7 +718,7 @@ func TestCalcFileChecksum_CacheTTLExpiry(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:9999")
 	c.logger = testLogger()
 	// 设置极短 TTL，使缓存立即过期
-	c.cacheTTL = 1 * time.Nanosecond
+	c.cacheTTL = 50 * time.Millisecond
 
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -735,7 +735,7 @@ func TestCalcFileChecksum_CacheTTLExpiry(t *testing.T) {
 	}
 
 	// 稍等让 TTL 过期
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// 第二次调用：因 TTL 过期，应重新计算
 	f2, err := os.Open(filePath)

@@ -142,7 +142,7 @@ func TestLoadConfig_EmptyPath(t *testing.T) {
 
 func TestLoadConfig_NonexistentPath(t *testing.T) {
 	dir := t.TempDir()
-	// 父目录存在但文件本身不存在，LoadConfig 应创建默认配置文件并返回默认值
+	// 父目录存在但文件本身不存在，LoadConfig 应返回默认配置，不创建文件
 	path := filepath.Join(dir, "sclient.yaml")
 
 	cfg, err := LoadConfig(path)
@@ -152,9 +152,9 @@ func TestLoadConfig_NonexistentPath(t *testing.T) {
 	if cfg.ServerURL != "https://127.0.0.1:18083" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
-	// config file should have been created
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Errorf("expected LoadConfig to create default config file at %s", path)
+	// config file should NOT have been created
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected LoadConfig to NOT create config file at %s", path)
 	}
 }
 
@@ -196,7 +196,7 @@ func TestHandleConfigShow(t *testing.T) {
 	if !strings.Contains(out, "dddd****") {
 		t.Errorf("expected masked TunnelKey in output, got: %s", out)
 	}
-	if !strings.Contains(out, "my-s****oken") {
+	if !strings.Contains(out, "my-s****") {
 		t.Errorf("expected masked AuthToken in output, got: %s", out)
 	}
 }
@@ -254,7 +254,7 @@ func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
 		HandleConfigShow(cfg)
 	})
 
-	if !strings.Contains(out, "short") {
-		t.Errorf("expected unmasked short key in output, got: %s", out)
+	if !strings.Contains(out, "shor****") {
+		t.Errorf("expected masked short key (shor****) in output, got: %s", out)
 	}
 }
