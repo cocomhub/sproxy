@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +30,10 @@ import (
 const (
 	defaultConcurrency = 4
 	maxRetries         = 3
+
+	// UploadIDAlreadyExists 是服务端返回的特殊 upload_id 值，表示文件已存在（通过 checksum 匹配）。
+	// 此值由服务端协议定义，变更需同步更新。
+	UploadIDAlreadyExists = "already_exists"
 )
 
 // ChunkedUploadResult 表示分块上传的结果。
@@ -107,12 +113,19 @@ func calcChunkSize(fileSize, preferred, maxChunk int64) int64 {
 	}
 	chunkSize := min(preferred, maxChunk)
 	if fileSize > 0 {
-		// 逐步增大分块大小，但不超过 maxChunk
-		for chunkSize*512 < fileSize && chunkSize < maxChunk {
+		for chunkSize < maxChunk {
+			if chunkSize > math.MaxInt64/512 {
+				chunkSize = maxChunk
+				break
+			}
+			if chunkSize*512 >= fileSize {
+				break
+			}
 			chunkSize *= 2
-		}
-		if chunkSize > maxChunk {
-			chunkSize = maxChunk
+			if chunkSize > maxChunk {
+				chunkSize = maxChunk
+				break
+			}
 		}
 	}
 	return chunkSize
@@ -384,6 +397,7 @@ func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, bo
 }
 
 // calcFileChecksum 计算文件的 SHA-256 checksum，同时处理缓存。
+// 与 calculateChecksum（无缓存，位于 client.go）不同，此函数使用 TTL + 容量上限的缓存机制。
 // 返回校验和、是否从缓存获取、错误。
 //
 // 缓存策略：使用 TTL + 容量上限的主动淘汰机制。
@@ -542,7 +556,7 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 	}
 
 	// 如果 upload_id = "already_exists"，说明文件已存在且 checksum 匹配
-	if initResult.UploadID == "already_exists" {
+	if initResult.UploadID == UploadIDAlreadyExists {
 		return 0, -1, nil // -1 表示已存在
 	}
 
@@ -645,7 +659,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 		c.logger.Info("文件已存在，直接返回成功", "file_name", filename)
 		return &ChunkedUploadResult{
 			Success:      true,
-			UploadID:     "already_exists",
+			UploadID:     UploadIDAlreadyExists,
 			Filename:     filename,
 			FileChecksum: fileChecksum,
 		}, nil
@@ -756,6 +770,9 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 
 	if outputPath == "" {
 		outputPath = filename
+		if strings.Contains(filepath.Clean(outputPath), "..") {
+			return fmt.Errorf("文件名不能包含路径穿越符 '..'")
+		}
 	}
 
 	// 获取文件信息（直接 Stat）

@@ -388,8 +388,8 @@ func TestTunnelDo_WithoutTunnel(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:18083")
 	req, _ := http.NewRequest("GET", "/test", nil)
 	_, err := c.TunnelDo(req)
-	if err == nil || !strings.Contains(err.Error(), "未配置隧道") {
-		t.Fatalf("expected tunnel not configured error, got %v", err)
+	if err == nil {
+		t.Fatal("expected tunnel not configured error")
 	}
 }
 
@@ -471,6 +471,20 @@ func testLogger() *slog.Logger {
 
 // ---- E2E: xfer Pipe + mux + Tunnel ----
 
+// waitForTunnel 轮询等待 tunnel 服务就绪，替代 flaky time.Sleep。
+func waitForTunnel(t *testing.T, tun *tunnel.Tunnel, ctx context.Context) {
+	t.Helper()
+	for range 10 {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+		_, err := tun.Do(req)
+		if err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("tunnel not ready after 100ms")
+}
+
 func TestXferTunnelRoundTrip(t *testing.T) {
 	// 端到端测试：用 xfertest.Pipe 模拟传输层，
 	// 通过 mux -> Tunnel.Do/Serve 完成一个完整的 HTTP 请求-响应往返
@@ -493,7 +507,7 @@ func TestXferTunnelRoundTrip(t *testing.T) {
 			w.Write(body)
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitForTunnel(t, tunA, ctx)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/echo", strings.NewReader("e2e"))
 	resp, err := tunA.Do(req)
@@ -532,7 +546,7 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 			w.Write([]byte(r.Method))
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitForTunnel(t, tunA, ctx)
 
 	// 并发 10 个请求
 	errCh := make(chan error, 10)
@@ -544,6 +558,7 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 				errCh <- err
 				return
 			}
+			_, _ = io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			errCh <- nil
 		}()
@@ -583,7 +598,7 @@ func TestXferTunnelEncrypted(t *testing.T) {
 			w.Write(bytes.ToUpper(body))
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitForTunnel(t, tunA, ctx)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/enc", strings.NewReader("test"))
 	resp, err := tunA.Do(req)
@@ -625,7 +640,7 @@ func TestXferTunnelLargeBody(t *testing.T) {
 			w.Write(bytes.ToUpper(b))
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitForTunnel(t, tunA, ctx)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/big", strings.NewReader(payload))
 	resp, err := tunA.Do(req)

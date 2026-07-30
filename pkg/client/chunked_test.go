@@ -8,8 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,17 +28,21 @@ func TestCalcChunkSize_EdgeCases(t *testing.T) {
 		preferred      int64
 		maxChunk       int64
 		expectPositive bool
+		want           int64
 	}{
-		{"zero file size", 0, 4 * 1024 * 1024, 64 * 1024 * 1024, true},
-		{"preferred zero", 1024, 0, 64 * 1024 * 1024, true},
-		{"maxChunk zero", 1024, 4 * 1024 * 1024, 0, true},
-		{"all zero", 0, 0, 0, true},
+		{"zero file size", 0, 4 * 1024 * 1024, 64 * 1024 * 1024, true, 4 * 1024 * 1024},
+		{"preferred zero", 1024, 0, 64 * 1024 * 1024, true, 4 * 1024 * 1024},
+		{"maxChunk zero", 1024, 4 * 1024 * 1024, 0, true, 4 * 1024 * 1024},
+		{"all zero", 0, 0, 0, true, 4 * 1024 * 1024},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cs := calcChunkSize(tt.fileSize, tt.preferred, tt.maxChunk)
 			if tt.expectPositive && cs <= 0 {
 				t.Errorf("calcChunkSize(%d, %d, %d) = %d, expected > 0", tt.fileSize, tt.preferred, tt.maxChunk, cs)
+			}
+			if cs != tt.want {
+				t.Errorf("calcChunkSize(%d, %d, %d) = %d, want %d", tt.fileSize, tt.preferred, tt.maxChunk, cs, tt.want)
 			}
 		})
 	}
@@ -717,8 +719,8 @@ func TestCalcFileChecksum_CacheTTLExpiry(t *testing.T) {
 
 	c := NewFileClient("http://127.0.0.1:9999")
 	c.logger = testLogger()
-	// 设置极短 TTL，使缓存立即过期
-	c.cacheTTL = 50 * time.Millisecond
+	// 设置 cacheTTL 为负值使缓存立即过期
+	c.cacheTTL = -1 * time.Nanosecond
 
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -734,10 +736,7 @@ func TestCalcFileChecksum_CacheTTLExpiry(t *testing.T) {
 		t.Fatalf("first call: %v", err)
 	}
 
-	// 稍等让 TTL 过期
-	time.Sleep(100 * time.Millisecond)
-
-	// 第二次调用：因 TTL 过期，应重新计算
+	// 第二次调用：因 TTL 为负值，应重新计算
 	f2, err := os.Open(filePath)
 	if err != nil {
 		t.Fatal(err)
@@ -749,7 +748,7 @@ func TestCalcFileChecksum_CacheTTLExpiry(t *testing.T) {
 		t.Fatalf("second call: %v", err)
 	}
 	if fromCache {
-		t.Fatal("expected cache miss due to TTL expiry")
+		t.Fatal("expected cache miss due to negative TTL")
 	}
 	if cs1 != cs2 {
 		t.Errorf("checksum should be same for same file: %s vs %s", cs1, cs2)
@@ -803,37 +802,5 @@ func TestCalcFileChecksum_FileChanged(t *testing.T) {
 	}
 	if cs1 == cs2 {
 		t.Fatal("expected different checksum for changed file")
-	}
-}
-
-// TestBuildChunkRequest_PipeError 测试 buildChunkRequest 中 io.Pipe 写入错误路径。
-func TestBuildChunkRequest_PipeError(t *testing.T) {
-	t.Parallel()
-	uploader := &ChunkedUploader{
-		uploadID: "test-upload-id",
-	}
-	// 传递 nil chunkData，触发 goroutine 中的 part.Write 错误
-	// 但我们需要的是 goroutine 中的 pw.CloseWithError 被调用
-	// 实际上点：构造一个会在 mw.WriteField 中失败的场景不容易直接触发。
-	// 我们模拟一个提前关闭的 pipe 来触发错误路径。
-	pr, pw := io.Pipe()
-	pw.Close() // 提前关闭 pipe
-
-	// 使用 io.Pipe 已被关闭的 reader
-	_, _, err := func() (io.Reader, string, error) {
-		mw := multipart.NewWriter(pw)
-		// 在 goroutine 中写入时 pipe 已关闭，会触发错误
-		go func() {
-			defer pw.Close()
-			defer mw.Close()
-			_ = mw.WriteField("upload_id", uploader.uploadID)
-		}()
-		// 从已关闭的 pipe 读取会立即返回 io.ErrClosedPipe
-		buf := make([]byte, 1)
-		_, readErr := pr.Read(buf)
-		return nil, "", readErr
-	}()
-	if err == nil {
-		t.Fatal("expected error from closed pipe, but got nil")
 	}
 }

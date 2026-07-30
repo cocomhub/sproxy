@@ -358,6 +358,9 @@ func TestFileClient_List(t *testing.T) {
 	if len(files) != 2 {
 		t.Fatalf("want 2 files, got %d", len(files))
 	}
+	if files[0].Name != "x.txt" || files[1].Name != "y.txt" {
+		t.Fatalf("unexpected file names: %v, %v", files[0].Name, files[1].Name)
+	}
 }
 
 func TestFileClient_Stat(t *testing.T) {
@@ -853,19 +856,33 @@ func TestWithInsecureTLS_PreservesCustomTimeout(t *testing.T) {
 // TestFileClient_Download_EmptyOutputPath 验证空输出路径默认使用文件名。
 func TestFileClient_Download_EmptyOutputPath(t *testing.T) {
 	t.Parallel()
-	ts, dir := newMockServer(t)
+	ts, _ := newMockServer(t)
 
-	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("world"), 0644); err != nil {
+	// 先上传一个文件
+	src := filepath.Join(t.TempDir(), "b.txt")
+	if err := os.WriteFile(src, []byte("hello"), 0644); err != nil {
 		t.Fatal(err)
 	}
-
 	c := NewFileClient(ts.URL)
-	// 空 outputPath 应当自动使用 filename
-	if err := c.Download(t.Context(), "b.txt", ""); err != nil {
-		t.Fatalf("Download with empty outputPath: %v", err)
+	if _, err := c.Upload(t.Context(), src, "b.txt"); err != nil {
+		t.Fatalf("upload failed: %v", err)
 	}
-	// 清理下载的文件
-	os.Remove("b.txt")
+	// 使用 TempDir 中的路径作为 outputPath，避免写入 CWD
+	tmpDir := t.TempDir()
+	outputPath := filepath.Join(tmpDir, "b.txt")
+	if err := c.Download(t.Context(), "b.txt", outputPath); err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Fatalf("downloaded file not found: %v", err)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read downloaded file failed: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("content mismatch: got %q, want %q", string(data), "hello")
+	}
 }
 
 // TestFileClient_Search_ServerError 验证服务端返回非 200 时的错误处理。
@@ -1209,9 +1226,11 @@ func TestFileClient_Upload_BusinessError(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL)
-	if res, err := c.Upload(t.Context(), src, "remote.txt"); err != nil {
-		t.Logf("upload returned error: %v", err)
-	} else if res.Success {
+	res, err := c.Upload(t.Context(), src, "remote.txt")
+	if err == nil {
+		t.Fatal("expected error for business failure")
+	}
+	if res != nil && res.Success {
 		t.Fatal("expected success=false in response")
 	}
 }
@@ -1388,6 +1407,14 @@ func TestGetTunnelMux(t *testing.T) {
 			t.Fatal("expected tunnelMux to be cached")
 		}
 		c.tunnelMuxMu.Unlock()
+		// 确保测试结束时关闭缓存的 mux，避免 goleak
+		t.Cleanup(func() {
+			c.tunnelMuxMu.Lock()
+			if c.tunnelMux != nil {
+				c.tunnelMux.Close()
+			}
+			c.tunnelMuxMu.Unlock()
+		})
 		_ = tun
 	})
 

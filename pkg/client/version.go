@@ -27,7 +27,7 @@ func (c *FileClient) ListVersions(ctx context.Context, filename string) ([]Versi
 	if filename == "" {
 		return nil, fmt.Errorf("filename 不能为空")
 	}
-	apiPath := "/api/versions?filename=" + url.QueryEscape(filename)
+	apiPath := "/api/versions?" + url.Values{"filename": {filename}}.Encode()
 	resp, err := c.doRequest(ctx, "GET", apiPath, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("获取版本列表失败: %w", err)
@@ -53,8 +53,10 @@ func (c *FileClient) RestoreVersion(ctx context.Context, filename string, versio
 	if filename == "" {
 		return fmt.Errorf("filename 不能为空")
 	}
-	apiPath := fmt.Sprintf("/api/versions/restore?filename=%s&version_id=%d",
-		url.QueryEscape(filename), versionID)
+	apiPath := "/api/versions/restore?" + url.Values{
+		"filename":   {filename},
+		"version_id": {fmt.Sprintf("%d", versionID)},
+	}.Encode()
 	resp, err := c.doRequest(ctx, "POST", apiPath, nil, nil)
 	if err != nil {
 		return fmt.Errorf("恢复版本失败: %w", err)
@@ -80,8 +82,10 @@ func (c *FileClient) DeleteVersion(ctx context.Context, filename string, version
 	if filename == "" {
 		return fmt.Errorf("filename 不能为空")
 	}
-	apiPath := fmt.Sprintf("/api/versions?filename=%s&version_id=%d",
-		url.QueryEscape(filename), versionID)
+	apiPath := "/api/versions?" + url.Values{
+		"filename":   {filename},
+		"version_id": {fmt.Sprintf("%d", versionID)},
+	}.Encode()
 	resp, err := c.doRequest(ctx, "DELETE", apiPath, nil, nil)
 	if err != nil {
 		return fmt.Errorf("删除版本失败: %w", err)

@@ -316,12 +316,20 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 			}
 			resultCh := make(chan taskResult, len(c.TaskIDs))
 			var wg sync.WaitGroup
+			cancelCtx, cancelAll := context.WithCancel(timeoutCtx)
+			defer cancelAll()
+
 			for i, taskID := range c.TaskIDs {
 				wg.Go(func() {
-					status, err := c.client.GetCloudTask(timeoutCtx, taskID)
+					select {
+					case <-cancelCtx.Done():
+						return
+					default:
+					}
+					status, err := c.client.GetCloudTask(cancelCtx, taskID)
 					select {
 					case resultCh <- taskResult{index: i, task: status, err: err}:
-					case <-timeoutCtx.Done():
+					case <-cancelCtx.Done():
 					}
 				})
 			}
@@ -334,6 +342,7 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 			allDone := true
 			for r := range resultCh {
 				if r.err != nil {
+					cancelAll()
 					// 消费剩余结果，避免 goroutine 泄漏
 					for range resultCh {
 					}
@@ -399,10 +408,15 @@ func (c *CloudDownloadChain) cleanupRemote(ctx context.Context) error {
 }
 
 // isStorageFullError 判断错误消息是否为存储空间不足（大小写不敏感子串匹配）。
+//
+// 此函数作为后备方案，通过错误消息文本匹配判断存储超限。
+// 未来应使用 HTTP 507 (Insufficient Storage) 状态码进行精确判断。
 func isStorageFullError(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	return strings.Contains(lower, "storage full") ||
 		strings.Contains(lower, "insufficient storage") ||
 		strings.Contains(lower, "disk quota") ||
-		strings.Contains(lower, "no space left")
+		strings.Contains(lower, "no space left") ||
+		strings.Contains(lower, "disk full") ||
+		strings.Contains(lower, "out of disk space")
 }

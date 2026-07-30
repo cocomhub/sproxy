@@ -3,11 +3,14 @@
 
 package client
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // FormatByte 格式化字节数为人类可读字符串。
 func FormatByte(size float64) string {
-	if size <= 0 {
+	if size <= 0 || math.IsNaN(size) || math.IsInf(size, 0) {
 		return "0 B"
 	}
 	if size >= 1024*1024*1024*1024 {
@@ -29,10 +32,10 @@ func FormatETA(seconds int64) string {
 	if seconds <= 0 {
 		return "--:--"
 	}
-	if seconds > 3600 {
+	if seconds >= 3600 {
 		return fmt.Sprintf("%dh %dm", seconds/3600, (seconds%3600)/60)
 	}
-	if seconds > 60 {
+	if seconds >= 60 {
 		return fmt.Sprintf("%dm %ds", seconds/60, seconds%60)
 	}
 	return fmt.Sprintf("%ds", seconds)

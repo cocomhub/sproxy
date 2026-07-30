@@ -36,7 +36,9 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Validate 校验配置合理性，设置零值字段为默认值。
+// Validate 校验配置合理性，设置零值字段为默认值（副作用）。
+// 注意：此方法会修改接收者的零值字段，不仅是校验功能。
+// 若仅需校验不修改，请在调用前保存副本。
 func (c *Config) Validate() error {
 	if c == nil {
 		return fmt.Errorf("config is nil")
@@ -94,7 +96,7 @@ func SaveConfig(cfg *Config, path string) error {
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
 	return nil

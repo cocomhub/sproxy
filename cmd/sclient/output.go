@@ -183,9 +183,9 @@ func (f *TextFormatter) PrintStats(stats *client.StatsResponse) {
 
 	fmt.Fprintf(f.w, "\n请求统计:\n")
 	fmt.Fprintf(f.w, "  总请求数: %d\n", stats.RequestCounts.Total)
-	fmt.Fprintf(f.w, "  2xx:      %d\n", stats.RequestCounts.Xx2)
-	fmt.Fprintf(f.w, "  4xx:      %d\n", stats.RequestCounts.Xx4)
-	fmt.Fprintf(f.w, "  5xx:      %d\n", stats.RequestCounts.Xx5)
+	fmt.Fprintf(f.w, "  2xx:      %d\n", stats.RequestCounts.Status2xx)
+	fmt.Fprintf(f.w, "  4xx:      %d\n", stats.RequestCounts.Status4xx)
+	fmt.Fprintf(f.w, "  5xx:      %d\n", stats.RequestCounts.Status5xx)
 	fmt.Fprintf(f.w, "  活跃连接: %d\n", stats.ActiveConns)
 
 	fmt.Fprintf(f.w, "\n传输统计:\n")

@@ -110,6 +110,10 @@ type FileClient struct {
 //
 // serverURL 是 sproxy 服务端地址，如 "https://127.0.0.1:18083"。
 // 可以通过 Option 设置自定义 HTTP 客户端、隧道加密、超时等。
+//
+// 注意：如果使用了 WithTunnel 或 WithXfer 等选项，初始化失败时不会立即 panic，
+// 而是将错误记录在 FileClient 内部。调用 InitError() 方法可确认初始化状态，
+// 确保所有配置项均已正确应用。
 func NewFileClient(serverURL string, opts ...Option) *FileClient {
 	c := &FileClient{
 		serverURL:       strings.TrimRight(serverURL, "/"),
@@ -326,7 +330,8 @@ func WithCacheOptions(maxEntries int, ttl time.Duration) Option {
 	}
 }
 
-// calculateChecksum 计算文件的 SHA-256 十六进制摘要。
+// calculateChecksum 计算文件的 SHA-256 十六进制摘要（无缓存版本）。
+// 与 calcFileChecksum（带缓存，位于 chunked.go）不同，此函数每次调用都重新计算。
 func calculateChecksum(filePath string) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -473,6 +478,9 @@ func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
 func (c *FileClient) Download(ctx context.Context, filename, outputPath string) error {
 	if outputPath == "" {
 		outputPath = filename
+		if strings.Contains(filepath.Clean(outputPath), "..") {
+			return fmt.Errorf("文件名不能包含路径穿越符 '..'")
+		}
 	}
 
 	urlPath := "/download?" + url.Values{"filename": {filename}}.Encode()
@@ -660,7 +668,7 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("文件不存在: %s", filename)
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, filename)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("stat 失败 (HTTP %d)", resp.StatusCode)
@@ -687,6 +695,9 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, error) {
 	headers := make(http.Header)
 	subdir := path.Join(append([]string{"/"}, subdirs...)...)
+	if strings.Contains(subdir, "..") {
+		return nil, fmt.Errorf("路径不能包含 '..'")
+	}
 	resp, err := c.doRequest(ctx, "GET", "/api/files?subdir="+url.QueryEscape(subdir), nil, headers)
 	if err != nil {
 		return nil, fmt.Errorf(errFmtRequestFailed, err)
@@ -713,6 +724,9 @@ func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, e
 func (c *FileClient) ListWithPagination(ctx context.Context, offset, limit int, subdirs ...string) ([]FileInfo, int, error) {
 	headers := make(http.Header)
 	subdir := path.Join(append([]string{"/"}, subdirs...)...)
+	if strings.Contains(subdir, "..") {
+		return nil, 0, fmt.Errorf("路径不能包含 '..'")
+	}
 	urlPath := fmt.Sprintf("/api/files?subdir=%s&offset=%d&limit=%d", url.QueryEscape(subdir), offset, limit)
 	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)
 	if err != nil {
@@ -922,6 +936,10 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		return closeBodyIfErr(resp, err)
 	}
 
+	if c.initError != nil {
+		c.logger.Warn("隧道不可用，回退到直连模式", "init_error", c.initError)
+	}
+
 	if c.xferName != "" {
 		resp, err = c.doRequestViaXfer(req)
 		return closeBodyIfErr(resp, err)
@@ -1025,6 +1043,10 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 		Phase:   runner.Phase(),
 		Status:  runner.Status(),
 		Raw:     runner,
+		Extra: map[string]any{
+			"local_path": runner.LocalPath,
+			"keep_files": runner.KeepFiles,
+		},
 	}, nil
 }
 
@@ -1040,14 +1062,30 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 	}
 
 	runner.SetClient(c)
-	runner.SetOptions(chainOptions{
+	opts := chainOptions{
 		pollInterval: 3 * time.Second,
 		timeout:      30 * time.Minute,
 		keepFiles:    false,
-	})
+	}
+	if cdc, ok := runner.(*CloudDownloadChain); ok {
+		if cdc.PollInterval > 0 {
+			opts.pollInterval = cdc.PollInterval
+		}
+		if cdc.Timeout > 0 {
+			opts.timeout = cdc.Timeout
+		}
+		opts.keepFiles = cdc.KeepFiles
+	}
+	runner.SetOptions(opts)
 
 	if err := c.chainManager.Run(ctx, runner); err != nil {
 		return nil, err
+	}
+
+	extra := map[string]any{}
+	if cdc, ok := runner.(*CloudDownloadChain); ok {
+		extra["local_path"] = cdc.LocalPath
+		extra["keep_files"] = cdc.KeepFiles
 	}
 
 	return &ChainResult{
@@ -1055,6 +1093,7 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 		Phase:   runner.Phase(),
 		Status:  runner.Status(),
 		Raw:     runner,
+		Extra:   extra,
 	}, nil
 }
 

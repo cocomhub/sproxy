@@ -90,12 +90,19 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 		t.Error(msg)
 	}
 
+	// 5 个并发上传，每个 4 个 chunk，关闭 resume
+	// 预期每个上传：init(1) + chunk(4) + complete(1) = 6 次调用
+	// 总 chunkCalls = 5 * 4 = 20
+	// 总 completeCalls = 5 * 1 = 5
+	expectedChunkCalls := 5 * 4
+	expectedCompleteCalls := 5 * 1
+
 	mu.Lock()
-	if chunkCalls == 0 {
-		t.Error("expected at least one chunk upload call")
+	if chunkCalls != expectedChunkCalls {
+		t.Errorf("expected %d chunk upload calls, got %d", expectedChunkCalls, chunkCalls)
 	}
-	if completeCalls == 0 {
-		t.Error("expected at least one complete call")
+	if completeCalls != expectedCompleteCalls {
+		t.Errorf("expected %d complete calls, got %d", expectedCompleteCalls, completeCalls)
 	}
 	mu.Unlock()
 }

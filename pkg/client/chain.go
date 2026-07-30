@@ -51,29 +51,35 @@ type ChainRunner interface {
 	Restore(state map[string]any) error
 	SetClient(client *FileClient)
 	SetOptions(opts chainOptions)
+	SetChainManager(mgr *ChainManager)
 }
 
 // ChainResult 链式操作结果。
 type ChainResult struct {
-	ChainID string      `json:"chain_id"`
-	Phase   string      `json:"phase"`
-	Status  string      `json:"status"`
-	Error   string      `json:"error,omitempty"`
-	Raw     ChainRunner `json:"-"` // 原始 runner
+	ChainID string         `json:"chain_id"`
+	Phase   string         `json:"phase"`
+	Status  string         `json:"status"`
+	Error   string         `json:"error,omitempty"`
+	Raw     ChainRunner    `json:"-"`               // 原始 runner
+	Extra   map[string]any `json:"extra,omitempty"` // 额外元数据
 }
 
 // LocalPath 获取本地路径（仅 CloudDownloadChain 支持）。
 func (r *ChainResult) LocalPath() string {
-	if cdc, ok := r.Raw.(*CloudDownloadChain); ok {
-		return cdc.LocalPath
+	if r.Extra != nil {
+		if v, ok := r.Extra["local_path"].(string); ok {
+			return v
+		}
 	}
 	return ""
 }
 
 // KeepFiles 返回是否保留远端文件（仅 CloudDownloadChain 支持）。
 func (r *ChainResult) KeepFiles() bool {
-	if cdc, ok := r.Raw.(*CloudDownloadChain); ok {
-		return cdc.KeepFiles
+	if r.Extra != nil {
+		if v, ok := r.Extra["keep_files"].(bool); ok {
+			return v
+		}
 	}
 	return false
 }
@@ -162,9 +168,7 @@ func (m *ChainManager) Run(ctx context.Context, runner ChainRunner) error {
 func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, progressFn ProgressFunc) error {
 	m.saveState(ctx, runner)
 	// 注入 chainMgr 引用，使 runner 在阶段切换时能自行持久化状态
-	if cdc, ok := runner.(*CloudDownloadChain); ok {
-		cdc.SetChainManager(m)
-	}
+	runner.SetChainManager(m)
 	reportFn := func(ctx context.Context, info ProgressInfo) {
 		m.saveState(context.WithoutCancel(ctx), runner)
 		if progressFn != nil {

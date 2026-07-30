@@ -5,6 +5,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -69,6 +70,16 @@ func TestUpdateConfig(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "PUT" || r.URL.Path != "/api/config" {
 			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// 解析请求体并验证 log_level 字段
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if body["log_level"] != "debug" {
+			http.Error(w, "unexpected body", http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

@@ -4,6 +4,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -35,13 +36,17 @@ func (StructCodec) ToMap(v any) (map[string]any, error) {
 		return nil, fmt.Errorf("结构体序列化失败: %w", err)
 	}
 	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("JSON 解码为 map 失败: %w", err)
 	}
 	return m, nil
 }
 
 func (StructCodec) FromMap(m map[string]any, v any) error {
+	// 将 map 中的 json.Number 转回原始数值类型
+	m = convertNumbers(m)
 	data, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("map 序列化失败: %w", err)
@@ -50,6 +55,28 @@ func (StructCodec) FromMap(m map[string]any, v any) error {
 		return fmt.Errorf("JSON 解码到结构体失败: %w", err)
 	}
 	return nil
+}
+
+// convertNumbers 递归将 map 中的 json.Number 转为 int64 或 float64
+func convertNumbers(m map[string]any) map[string]any {
+	result := make(map[string]any, len(m))
+	for k, v := range m {
+		switch val := v.(type) {
+		case json.Number:
+			if i, err := val.Int64(); err == nil {
+				result[k] = i
+			} else if f, err := val.Float64(); err == nil {
+				result[k] = f
+			} else {
+				result[k] = val.String()
+			}
+		case map[string]any:
+			result[k] = convertNumbers(val)
+		default:
+			result[k] = v
+		}
+	}
+	return result
 }
 
 // KVStoreRegistry 是可插拔的 KVStore 注册表。

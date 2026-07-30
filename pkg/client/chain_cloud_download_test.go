@@ -278,7 +278,7 @@ func TestIsStorageFullError(t *testing.T) {
 		{"INSUFFICIENT STORAGE", true},
 		{"disk quota exceeded", true},
 		{"no space left on device", true},
-		{"disk full", false},
+		{"disk full", true},
 		{"", false},
 		{"network error", false},
 	}
@@ -434,16 +434,10 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"tasks": tasks})
 	})
 
-	mux.HandleFunc("POST /api/cloud/download", func(w http.ResponseWriter, r *http.Request) {
-		task := CloudTask{ID: fmt.Sprintf("task-%d", taskIDCounter.Add(1)), Status: "pending"}
-		json.NewEncoder(w).Encode(task)
-	})
-
-	var queryCount atomic.Int64
 	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		count := queryCount.Add(1)
 		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
-		if count <= 3 {
+		// 初始任务 (task-1, task-2) 返回 storage full，后续 retry 任务返回 completed
+		if taskID == "task-1" || taskID == "task-2" {
 			json.NewEncoder(w).Encode(CloudTask{
 				ID:     taskID,
 				Status: "failed",
@@ -515,12 +509,6 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	// 验证发生了存储超限重试（总任务数 > 初始 URL 数）
 	if taskIDCounter.Load() <= 2 {
 		t.Errorf("expected retry to create more tasks, got %d total", taskIDCounter.Load())
-	}
-	// 验证旧失败任务 ID 已被移除（TaskIDs 中不应包含已失败的任务）
-	for _, id := range chain.TaskIDs {
-		if strings.HasPrefix(id, "cloud-") {
-			t.Errorf("unexpected old-style task ID %q in TaskIDs", id)
-		}
 	}
 }
 

@@ -15,14 +15,14 @@ import (
 type StatsResponse struct {
 	DiskUsage struct {
 		UploadsDir string `json:"uploads_dir"`
-		TotalFiles int    `json:"total_files"`
+		TotalFiles int64  `json:"total_files"`
 		TotalSize  int64  `json:"total_size"`
 	} `json:"disk_usage"`
 	RequestCounts struct {
-		Total int64 `json:"total"`
-		Xx2   int64 `json:"2xx"`
-		Xx4   int64 `json:"4xx"`
-		Xx5   int64 `json:"5xx"`
+		Total     int64 `json:"total"`
+		Status2xx int64 `json:"2xx"`
+		Status4xx int64 `json:"4xx"`
+		Status5xx int64 `json:"5xx"`
 	} `json:"request_counts"`
 	ActiveConns     int64 `json:"active_connections"`
 	FilesUploaded   int64 `json:"files_uploaded"`

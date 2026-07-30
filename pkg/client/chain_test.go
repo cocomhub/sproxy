@@ -5,6 +5,9 @@ package client
 
 import (
 	"context"
+	"testing"
+	"time"
+
 	"encoding/json"
 	"errors"
 	"maps"
@@ -12,8 +15,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"sync/atomic"
-	"testing"
-	"time"
 )
 
 // testChainRunner 用于测试的简单 ChainRunner 实现。
@@ -50,8 +51,9 @@ func (r *testChainRunner) Restore(state map[string]any) error {
 	r.status, _ = state["status"].(string)
 	return nil
 }
-func (r *testChainRunner) SetClient(client *FileClient) {}
-func (r *testChainRunner) SetOptions(opts chainOptions) {}
+func (r *testChainRunner) SetClient(client *FileClient)      {}
+func (r *testChainRunner) SetOptions(opts chainOptions)      {}
+func (r *testChainRunner) SetChainManager(mgr *ChainManager) {}
 
 func TestMain(m *testing.M) {
 	RegisterRunner("test_chain", func() ChainRunner { return &testChainRunner{} })
@@ -180,7 +182,7 @@ func TestChainManager_Delete(t *testing.T) {
 	}
 }
 
-func TestChainManager_ContextCancellation(t *testing.T) {
+func TestChainManager_RunWithCancelledContext(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	store := NewMemoryKVStore()
@@ -202,6 +204,51 @@ func TestChainManager_ContextCancellation(t *testing.T) {
 	err := cm.Run(ctx, runner)
 	if err == nil {
 		t.Fatal("expected context cancellation error")
+	}
+	if !ran.Load() {
+		t.Fatal("expected runner to be started")
+	}
+}
+
+func TestChainManager_CancelDuringRun(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	store := NewMemoryKVStore()
+	cm := NewChainManager(store)
+
+	var ran atomic.Bool
+	runner := &testChainRunner{
+		id:     "test-cancel-during",
+		phase:  "running",
+		status: StatusRunning,
+		runFn: func(ctx context.Context, reportFn ProgressFunc) error {
+			ran.Store(true)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cm.Run(ctx, runner)
+	}()
+
+	// 等待 runner 开始运行
+	for range 10 {
+		if ran.Load() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected context cancellation error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for Run to return after cancel")
 	}
 	if !ran.Load() {
 		t.Fatal("expected runner to be started")

@@ -5,6 +5,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -32,8 +33,13 @@ func TestStructCodec_ToMap(t *testing.T) {
 	if m["name"] != "hello" {
 		t.Errorf("expected name=hello, got %v", m["name"])
 	}
-	if m["value"] != float64(42) {
-		t.Errorf("expected value=42, got %v", m["value"])
+	// After UseNumber() fix, value 42 is json.Number("42"), not float64(42)
+	got, ok := m["value"].(json.Number)
+	if !ok {
+		t.Fatalf("expected value to be json.Number, got %T", m["value"])
+	}
+	if got.String() != "42" {
+		t.Errorf("expected value=42, got %s", got.String())
 	}
 	if m["tag"] != "world" {
 		t.Errorf("expected tag=world, got %v", m["tag"])
@@ -61,7 +67,7 @@ func TestStructCodec_FromMap(t *testing.T) {
 
 	m := map[string]any{
 		"name":  "world",
-		"value": float64(99),
+		"value": json.Number("99"),
 		"tag":   "golang",
 	}
 
@@ -375,6 +381,14 @@ func TestMemoryKVStore_Isolation(t *testing.T) {
 
 	if loaded["key"] != "value" {
 		t.Errorf("expected isolation: loaded key=value, got %v", loaded["key"])
+	}
+
+	// 验证 Load 返回的 map 有独立副本，修改后不影响后续 Load
+	loaded2, _ := s.Load(t.Context(), "iso")
+	loaded2["key"] = "tampered"
+	loaded3, _ := s.Load(t.Context(), "iso")
+	if loaded3["key"] != "value" {
+		t.Errorf("Load returned map that shares backing store: got %v", loaded3["key"])
 	}
 }
 
