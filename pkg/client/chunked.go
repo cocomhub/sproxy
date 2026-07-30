@@ -419,12 +419,13 @@ func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize 
 	}
 	if cached, ok := c.uploadCache.Load(absPath); ok {
 		entry, ok := cached.(*uploadCacheEntry)
-		if !ok {
+		switch {
+		case !ok:
 			c.uploadCache.Delete(absPath)
-		} else if time.Since(entry.createdAt) > c.cacheTTL {
+		case time.Since(entry.createdAt) > c.cacheTTL:
 			c.uploadCache.Delete(absPath)
 			c.logger.Debug("checksum 缓存过期", "file_path", localPath)
-		} else if entry.fileSize == fileSize && entry.modTime.Equal(modTime) {
+		case entry.fileSize == fileSize && entry.modTime.Equal(modTime):
 			c.logger.Debug("checksum 缓存命中", "file_path", localPath)
 			return entry.fileChecksum, true, nil
 		}
