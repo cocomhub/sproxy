@@ -140,7 +140,7 @@ func TestCloudDownloadChain_FullRun(t *testing.T) {
 		phases = append(phases, info.Phase)
 	}
 
-	err := chain.Run(context.Background(), reportFn)
+	err := chain.Run(t.Context(), reportFn)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestCloudDownloadChain_KeepFiles(t *testing.T) {
 		phases = append(phases, info.Phase)
 	}
 
-	err := chain.Run(context.Background(), reportFn)
+	err := chain.Run(t.Context(), reportFn)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestCloudDownloadChain_SubmitError(t *testing.T) {
 
 	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", "/tmp", opts)
 
-	err := chain.Run(context.Background(), func(ctx context.Context, info ProgressInfo) {})
+	err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {
 		t.Fatal("expected error for submit failure")
 	}
@@ -255,7 +255,7 @@ func TestCloudDownloadChain_ArchiveError(t *testing.T) {
 
 	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", "/tmp", opts)
 
-	err := chain.Run(context.Background(), func(ctx context.Context, info ProgressInfo) {})
+	err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {
 		t.Fatal("expected error for archive failure")
 	}
@@ -337,12 +337,12 @@ func TestCloudDownloadChain_ResumeMidway(t *testing.T) {
 		"created_at":   time.Now(),
 		"updated_at":   time.Now(),
 	}
-	if err := store.Save(context.Background(), "chain:chain-resume", state); err != nil {
+	if err := store.Save(t.Context(), "chain:chain-resume", state); err != nil {
 		t.Fatal(err)
 	}
 
 	// 恢复 runner
-	runner, err := cm.Resume(context.Background(), "chain-resume")
+	runner, err := cm.Resume(t.Context(), "chain-resume")
 	if err != nil {
 		t.Fatalf("Resume failed: %v", err)
 	}
@@ -380,11 +380,11 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 		"created_at":   time.Now(),
 		"updated_at":   time.Now(),
 	}
-	if err := store.Save(context.Background(), "chain:chain-resume-run", state); err != nil {
+	if err := store.Save(t.Context(), "chain:chain-resume-run", state); err != nil {
 		t.Fatal(err)
 	}
 
-	runner, err := cm.Resume(context.Background(), "chain-resume-run")
+	runner, err := cm.Resume(t.Context(), "chain-resume-run")
 	if err != nil {
 		t.Fatalf("Resume failed: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 	cdc.SetOptions(chainOptions{pollInterval: 100 * time.Millisecond, timeout: 10 * time.Second})
 
 	var phases []string
-	err = runner.Run(context.Background(), func(ctx context.Context, info ProgressInfo) {
+	err = runner.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {
 		phases = append(phases, info.Phase)
 	})
 	if err != nil {
@@ -505,7 +505,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 
 	chain := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "retry-archive", dir, opts)
 
-	err := chain.Run(context.Background(), func(ctx context.Context, info ProgressInfo) {})
+	err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
@@ -756,7 +756,7 @@ func TestCloudDownloadChain_SubmitError_StorageFull(t *testing.T) {
 // TestCloudDownloadChain_Run_NoClient 测试 Run 时 client 为 nil 的错误路径。
 func TestCloudDownloadChain_Run_NoClient(t *testing.T) {
 	chain := &CloudDownloadChain{}
-	err := chain.Run(context.Background(), func(ctx context.Context, info ProgressInfo) {})
+	err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {
 		t.Fatal("expected error for nil client")
 	}
@@ -798,7 +798,7 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second}
 	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", dir, opts)
 
-	err := chain.Run(context.Background(), func(ctx context.Context, info ProgressInfo) {})
+	err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {
 		t.Fatal("expected error after all retries exhausted")
 	}

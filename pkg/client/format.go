@@ -10,6 +10,12 @@ func FormatByte(size float64) string {
 	if size <= 0 {
 		return "0 B"
 	}
+	if size >= 1024*1024*1024*1024 {
+		return fmt.Sprintf("%.1f TB", size/1024/1024/1024/1024)
+	}
+	if size >= 1024*1024*1024 {
+		return fmt.Sprintf("%.1f GB", size/1024/1024/1024)
+	}
 	if size >= 1024*1024 {
 		return fmt.Sprintf("%.1f MB", size/1024/1024)
 	} else if size >= 1024 {

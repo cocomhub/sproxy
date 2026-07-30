@@ -62,7 +62,7 @@ func TestMain(m *testing.M) {
 
 func TestChainManager_Run_Success(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
@@ -88,7 +88,7 @@ func TestChainManager_Run_Success(t *testing.T) {
 
 func TestChainManager_Run_Failure(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
@@ -118,7 +118,7 @@ func TestChainManager_Run_Failure(t *testing.T) {
 
 func TestChainManager_Resume(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
@@ -137,7 +137,7 @@ func TestChainManager_Resume(t *testing.T) {
 
 func TestChainManager_List(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
@@ -162,7 +162,7 @@ func TestChainManager_List(t *testing.T) {
 
 func TestChainManager_Delete(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
@@ -276,8 +276,8 @@ func TestWithChainProgress(t *testing.T) {
 
 // ---- FileClient methods on chain ----
 
-func TestFileClient_CloudDownloadChain_NoManager(t *testing.T) {
-	// 未配置 chainManager 时，CloudDownloadChain 应回退到直接 Run
+func TestFileClient_CloudDownloadChain_EmptyURLs(t *testing.T) {
+	// 空 URL 列表时，CloudDownloadChain 应返回错误
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{}})

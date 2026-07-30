@@ -69,6 +69,9 @@ func (s *ShareLink) ExpiresAtTime() (time.Time, error) {
 
 // CreateShare 创建文件分享链接，支持 Option 模式配置参数。
 func (c *FileClient) CreateShare(ctx context.Context, filename string, opts ...ShareOption) (*ShareLink, error) {
+	if filename == "" {
+		return nil, fmt.Errorf("filename 不能为空")
+	}
 	cfg := &shareOptions{
 		ttl: 24 * time.Hour, // 默认 24 小时
 	}
@@ -138,6 +141,9 @@ func (c *FileClient) ListShares(ctx context.Context) ([]*ShareLink, error) {
 
 // RevokeShare 撤销指定 token 的分享链接。
 func (c *FileClient) RevokeShare(ctx context.Context, token string) error {
+	if token == "" {
+		return fmt.Errorf("token 不能为空")
+	}
 	apiPath := "/api/shares/" + url.PathEscape(token)
 	resp, err := c.doRequest(ctx, "DELETE", apiPath, nil, nil)
 	if err != nil {

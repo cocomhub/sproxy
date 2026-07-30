@@ -127,7 +127,7 @@ func TestClient_ChunkedUploadAutoThreshold(t *testing.T) {
 
 	// 验证小文件不应触发自动分块
 	if ShouldAutoChunk(int64(len(smallData))) {
-		t.Log("file below AutoChunkThreshold should not auto-chunk")
+		t.Fatal("file below AutoChunkThreshold should not auto-chunk")
 	}
 
 	c := NewFileClient(url)

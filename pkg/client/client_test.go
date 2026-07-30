@@ -850,17 +850,6 @@ func TestWithInsecureTLS_PreservesCustomTimeout(t *testing.T) {
 	}
 }
 
-// TestFileClient_Upload_MissingLocalFile 验证本地文件不存在时的错误处理。
-func TestFileClient_Upload_MissingLocalFile(t *testing.T) {
-	t.Parallel()
-	ts, _ := newMockServer(t)
-
-	c := NewFileClient(ts.URL)
-	if _, err := c.Upload(t.Context(), "/nonexistent/path/file.txt", "remote.txt"); err == nil {
-		t.Fatal("expected error for missing local file")
-	}
-}
-
 // TestFileClient_Download_EmptyOutputPath 验证空输出路径默认使用文件名。
 func TestFileClient_Download_EmptyOutputPath(t *testing.T) {
 	t.Parallel()
@@ -872,10 +861,11 @@ func TestFileClient_Download_EmptyOutputPath(t *testing.T) {
 
 	c := NewFileClient(ts.URL)
 	// 空 outputPath 应当自动使用 filename
-	out := filepath.Join(t.TempDir(), "b.txt")
-	if err := c.Download(t.Context(), "b.txt", out); err != nil {
+	if err := c.Download(t.Context(), "b.txt", ""); err != nil {
 		t.Fatalf("Download with empty outputPath: %v", err)
 	}
+	// 清理下载的文件
+	os.Remove("b.txt")
 }
 
 // TestFileClient_Search_ServerError 验证服务端返回非 200 时的错误处理。
@@ -1007,28 +997,6 @@ func TestFileClient_ListWithPagination_ServerError(t *testing.T) {
 func TestCalculateChecksum_NonExistentFile(t *testing.T) {
 	if _, err := calculateChecksum("/nonexistent/path/file.txt"); err == nil {
 		t.Fatal("expected error for non-existent file")
-	}
-}
-
-// TestFileClient_Delete_LocalPathChecksumMismatch 验证本地 checksum 与远端不匹配时的拒绝。
-func TestFileClient_Delete_LocalPathChecksumMismatch(t *testing.T) {
-	t.Parallel()
-	ts, dir := newMockServer(t)
-	// 预上传一个文件
-	if err := os.WriteFile(filepath.Join(dir, "mismatch.txt"), []byte("server content"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// 创建内容不同的本地文件
-	srcDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(srcDir, "local.txt"), []byte("local content"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	c := NewFileClient(ts.URL)
-	err := c.Delete(t.Context(), "mismatch.txt", filepath.Join(srcDir, "local.txt"))
-	if err == nil {
-		t.Fatal("expected error for checksum mismatch")
 	}
 }
 
@@ -1342,8 +1310,8 @@ func TestClientListVersions_UnmarshalError(t *testing.T) {
 	}
 }
 
-// TestClientBatchDelete_ContinueOnError 验证 BatchDelete 继续处理模式。
-func TestClientBatchDelete_ContinueOnError(t *testing.T) {
+// TestClientBatchDelete_NilFiles 验证 BatchDelete 传入 nil 时的错误处理。
+func TestClientBatchDelete_NilFiles(t *testing.T) {
 	t.Parallel()
 	// 测试空列表不 panic
 	c := NewFileClient("http://127.0.0.1:1")

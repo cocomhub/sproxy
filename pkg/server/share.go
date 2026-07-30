@@ -190,6 +190,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, map[string]any{
 		"token":         link.Token,
 		"filename":      link.Filename,
+		"created_at":    link.CreatedAt.Format(time.RFC3339),
 		"expires_at":    link.ExpiresAt.Format(time.RFC3339),
 		"max_downloads": link.MaxDownloads,
 		"one_time":      link.OneTime,

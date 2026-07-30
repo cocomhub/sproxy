@@ -166,7 +166,7 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 		cdc.SetChainManager(m)
 	}
 	reportFn := func(ctx context.Context, info ProgressInfo) {
-		m.saveState(context.Background(), runner)
+		m.saveState(context.WithoutCancel(ctx), runner)
 		if progressFn != nil {
 			progressFn(ctx, info)
 		}

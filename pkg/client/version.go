@@ -24,6 +24,9 @@ type VersionInfo struct {
 
 // ListVersions 返回指定文件的版本历史。
 func (c *FileClient) ListVersions(ctx context.Context, filename string) ([]VersionInfo, error) {
+	if filename == "" {
+		return nil, fmt.Errorf("filename 不能为空")
+	}
 	apiPath := "/api/versions?filename=" + url.QueryEscape(filename)
 	resp, err := c.doRequest(ctx, "GET", apiPath, nil, nil)
 	if err != nil {
@@ -32,7 +35,7 @@ func (c *FileClient) ListVersions(ctx context.Context, filename string) ([]Versi
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		return nil, fmt.Errorf("获取版本列表失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -47,6 +50,9 @@ func (c *FileClient) ListVersions(ctx context.Context, filename string) ([]Versi
 
 // RestoreVersion 恢复文件到指定版本。
 func (c *FileClient) RestoreVersion(ctx context.Context, filename string, versionID int64) error {
+	if filename == "" {
+		return fmt.Errorf("filename 不能为空")
+	}
 	apiPath := fmt.Sprintf("/api/versions/restore?filename=%s&version_id=%d",
 		url.QueryEscape(filename), versionID)
 	resp, err := c.doRequest(ctx, "POST", apiPath, nil, nil)
@@ -55,7 +61,7 @@ func (c *FileClient) RestoreVersion(ctx context.Context, filename string, versio
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("恢复版本失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
@@ -71,6 +77,9 @@ func (c *FileClient) RestoreVersion(ctx context.Context, filename string, versio
 
 // DeleteVersion 删除文件的指定版本。
 func (c *FileClient) DeleteVersion(ctx context.Context, filename string, versionID int64) error {
+	if filename == "" {
+		return fmt.Errorf("filename 不能为空")
+	}
 	apiPath := fmt.Sprintf("/api/versions?filename=%s&version_id=%d",
 		url.QueryEscape(filename), versionID)
 	resp, err := c.doRequest(ctx, "DELETE", apiPath, nil, nil)
@@ -79,7 +88,7 @@ func (c *FileClient) DeleteVersion(ctx context.Context, filename string, version
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("删除版本失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}

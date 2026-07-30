@@ -67,11 +67,19 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 				WithChunkedResume(false),
 			)
 			if err != nil {
-				errCh <- fmt.Sprintf("ChunkedUpload #%d failed: %v", n, err)
+				select {
+				case errCh <- fmt.Sprintf("ChunkedUpload #%d failed: %v", n, err):
+				default:
+					t.Log("error channel full, dropping message")
+				}
 				return
 			}
 			if result == nil || !result.Success {
-				errCh <- fmt.Sprintf("ChunkedUpload #%d result not successful: %+v", n, result)
+				select {
+				case errCh <- fmt.Sprintf("ChunkedUpload #%d result not successful: %+v", n, result):
+				default:
+					t.Log("error channel full, dropping message")
+				}
 			}
 		}(i)
 	}

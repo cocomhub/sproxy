@@ -417,8 +417,8 @@ func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize 
 	fileChecksum := hex.EncodeToString(h.Sum(nil))
 
 	// 主动淘汰：检查缓存条目数，超过上限时清理过期条目
-	// 使用计数方式而非每次 Store 都 Range，避免频繁遍历
-	// 注意：计数不是精确的（并发写入时可能偏差），但足以触发清理
+	// 使用 Range 而非计数器，因为 sync.Map 无内置 Len()
+	// 注意：并发写入时 Range 可能遗漏极少数条目，但足以触发清理
 	c.uploadCache.Range(func(k, v any) bool {
 		entry := v.(*uploadCacheEntry) //nolint:errcheck
 		if time.Since(entry.createdAt) > c.cacheTTL {
@@ -767,11 +767,21 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	chunkSize := calcChunkSize(fileSize, params.chunkSize, params.maxChunk)
 	totalChunks := int((fileSize + chunkSize - 1) / chunkSize)
 
+	var downloadErr error
+
 	outFile, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("创建文件失败: %w", err)
 	}
 	defer outFile.Close()
+
+	// 失败时自动清理不完整文件
+	defer func() {
+		if downloadErr != nil {
+			outFile.Close()
+			os.Remove(outputPath)
+		}
+	}()
 
 	// 预分配空间
 	if err := outFile.Truncate(fileSize); err != nil {
@@ -779,10 +789,9 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	}
 
 	var (
-		mu          sync.Mutex
-		progress    int64
-		downloadErr error
-		wg          sync.WaitGroup
+		mu       sync.Mutex
+		progress int64
+		wg       sync.WaitGroup
 	)
 
 	if params.concurrency <= 0 {

@@ -188,9 +188,7 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 		fallthrough
 
 	case PhaseCleaning:
-		if c.KeepFiles {
-			break
-		}
+		// KeepFiles=true 时不会进入此分支（下载阶段已 break）
 		_ = c.cleanupRemote(ctx) // 清理失败不影响主流程成功
 	}
 
@@ -296,6 +294,9 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 // pollAllTasks 轮询所有任务状态直到全部完成。
 // 使用并发查询减少多任务时的总等待时间。
 func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, error) {
+	if len(c.TaskIDs) == 0 {
+		return nil, fmt.Errorf("没有可轮询的任务")
+	}
 	timeoutCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
 

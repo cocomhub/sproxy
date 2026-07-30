@@ -49,12 +49,6 @@ type UploadResult struct {
 	Checksum string `json:"file_checksum,omitempty"`
 }
 
-type serverResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	FileCS  string `json:"file_checksum"`
-}
-
 // ProgressReader 是一个带进度回调的 io.Reader 包装。
 type ProgressReader struct {
 	reader     io.Reader
@@ -601,7 +595,7 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 		return fmt.Errorf("删除失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
-	var result serverResponse
+	var result UploadResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf(errFmtParseResponse, err)
 	}

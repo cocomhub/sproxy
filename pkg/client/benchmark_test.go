@@ -176,12 +176,12 @@ func BenchmarkDownload(b *testing.B) {
 	}
 }
 
-// BenchmarkChunkedUpload 测试 4MB 文件上传性能。
+// BenchmarkUpload_4MB 测试 4MB 文件上传性能。
 //
 // ShouldAutoChunk(4MB) 返回 false（阈值 100 MiB），因此走普通上传路径。
 // 手动设置 ChunkSize = 1MB 验证客户端配置正确传递。
 // 单次操作处理 4 MiB 数据，通过 b.SetBytes 记录吞吐量。
-func BenchmarkChunkedUpload(b *testing.B) {
+func BenchmarkUpload_4MB(b *testing.B) {
 	if ShouldAutoChunk(4 * size.MiB) {
 		b.Fatal("4MB 不应触发自动分块（阈值 100 MiB）")
 	}

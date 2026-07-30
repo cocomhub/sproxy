@@ -16,7 +16,7 @@ func TestFormatByte_AllUnits(t *testing.T) {
 		{1536, "1.5 KB"},
 		{1024 * 1024, "1.0 MB"},
 		{1024*1024 + 512*1024, "1.5 MB"},
-		{1024 * 1024 * 1024, "1024.0 MB"},
+		{1024 * 1024 * 1024, "1.0 GB"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {

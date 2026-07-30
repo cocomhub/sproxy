@@ -96,7 +96,7 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 
 	var task CloudTask
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/download", body, &task); err != nil {
-		return nil, fmt.Errorf("cloud download: %w", err)
+		return nil, fmt.Errorf("云端下载: %w", err)
 	}
 	return &task, nil
 }
@@ -112,7 +112,7 @@ func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts
 		opt(cfg)
 	}
 	maxBatch := 100
-	if cfg.maxBatchURLs > 0 && cfg.maxBatchURLs <= 100 {
+	if cfg.maxBatchURLs > 0 {
 		maxBatch = cfg.maxBatchURLs
 	}
 	if len(urls) > maxBatch {
@@ -140,7 +140,7 @@ func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts
 		Tasks []CloudTask `json:"tasks"`
 	}
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/download/batch", body, &result); err != nil {
-		return nil, fmt.Errorf("cloud download batch: %w", err)
+		return nil, fmt.Errorf("批量云端下载: %w", err)
 	}
 	return result.Tasks, nil
 }
@@ -165,6 +165,9 @@ func (c *FileClient) ListCloudTasks(ctx context.Context, status string) ([]Cloud
 
 // GetCloudTask 查询单个任务详情。
 func (c *FileClient) GetCloudTask(ctx context.Context, taskID string) (*CloudTask, error) {
+	if taskID == "" {
+		return nil, fmt.Errorf("cloud download: taskID 不能为空")
+	}
 	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID)
 	var task CloudTask
 	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &task); err != nil {
@@ -175,12 +178,18 @@ func (c *FileClient) GetCloudTask(ctx context.Context, taskID string) (*CloudTas
 
 // CancelCloudTask 取消云端下载任务。
 func (c *FileClient) CancelCloudTask(ctx context.Context, taskID string) error {
+	if taskID == "" {
+		return fmt.Errorf("cloud download: taskID 不能为空")
+	}
 	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/cancel"
 	return c.doJSON(ctx, http.MethodPost, apiPath, nil, nil)
 }
 
 // DeleteCloudTask 删除云端下载任务及关联文件。
 func (c *FileClient) DeleteCloudTask(ctx context.Context, taskID string) error {
+	if taskID == "" {
+		return fmt.Errorf("cloud download: taskID 不能为空")
+	}
 	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID)
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
 }

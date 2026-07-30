@@ -4,7 +4,6 @@
 package client
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,7 +25,7 @@ func TestCreateShare(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	link, err := c.CreateShare(context.Background(), "test.txt", WithShareTTL(time.Hour))
+	link, err := c.CreateShare(t.Context(), "test.txt", WithShareTTL(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +52,7 @@ func TestListShares(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	shares, err := c.ListShares(context.Background())
+	shares, err := c.ListShares(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +79,7 @@ func TestRevokeShare(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	if err := c.RevokeShare(context.Background(), "test_token"); err != nil {
+	if err := c.RevokeShare(t.Context(), "test_token"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -96,7 +95,7 @@ func TestRevokeShareNotFound(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	if err := c.RevokeShare(context.Background(), "nonexistent"); err == nil {
+	if err := c.RevokeShare(t.Context(), "nonexistent"); err == nil {
 		t.Fatal("expected error for non-existent token")
 	}
 }
@@ -200,7 +199,7 @@ func TestCreateShare_WithOptions(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	link, err := c.CreateShare(context.Background(), "test.txt",
+	link, err := c.CreateShare(t.Context(), "test.txt",
 		WithShareTTL(time.Hour),
 		WithShareMaxDownloads(5),
 		WithShareOneTime(),
@@ -229,7 +228,7 @@ func TestCreateShare_ServerError(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	_, err := c.CreateShare(context.Background(), "test.txt")
+	_, err := c.CreateShare(t.Context(), "test.txt")
 	if err == nil {
 		t.Fatal("expected error for server error")
 	}
@@ -244,7 +243,7 @@ func TestRevokeShare_ServerError(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	if err := c.RevokeShare(context.Background(), "token"); err == nil {
+	if err := c.RevokeShare(t.Context(), "token"); err == nil {
 		t.Fatal("expected error for server error")
 	}
 }
@@ -260,7 +259,7 @@ func TestRevokeShare_ResponseError(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	if err := c.RevokeShare(context.Background(), "token"); err == nil {
+	if err := c.RevokeShare(t.Context(), "token"); err == nil {
 		t.Fatal("expected error for success=false response")
 	}
 }

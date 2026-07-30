@@ -48,6 +48,9 @@ func (c *FileClient) ListHubNodes(ctx context.Context) ([]HubNodeInfo, error) {
 
 // RemoveHubNode 移除指定 Hub 中继节点。
 func (c *FileClient) RemoveHubNode(ctx context.Context, nodeID string) error {
+	if nodeID == "" {
+		return fmt.Errorf("nodeID 不能为空")
+	}
 	return c.doJSON(ctx, http.MethodDelete, "/api/hub/nodes/"+url.PathEscape(nodeID), nil, nil)
 }
 

@@ -17,6 +17,12 @@ import (
 // Archive 将服务器端指定的文件列表打包下载到本地文件。
 // files: 服务端文件路径列表；outputPath: 本地目标 .tar.gz 文件路径。
 func (c *FileClient) Archive(ctx context.Context, files []string, outputPath string) error {
+	if len(files) == 0 {
+		return fmt.Errorf("archive: files 列表不能为空")
+	}
+	if outputPath == "" {
+		return fmt.Errorf("archive: outputPath 不能为空")
+	}
 	body, err := json.Marshal(map[string]any{"files": files})
 	if err != nil {
 		return fmt.Errorf("序列化请求失败: %w", err)
@@ -30,6 +36,9 @@ func (c *FileClient) Archive(ctx context.Context, files []string, outputPath str
 
 // ArchiveDir 将服务器端指定目录打包下载到本地文件。
 func (c *FileClient) ArchiveDir(ctx context.Context, dirname, outputPath string) error {
+	if dirname == "" {
+		return fmt.Errorf("archive dir: dirname 不能为空")
+	}
 	path := "/api/archive-dir?dirname=" + url.QueryEscape(dirname)
 	return c.downloadToFile(ctx, http.MethodGet, path, nil, nil, outputPath)
 }
