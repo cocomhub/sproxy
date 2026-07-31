@@ -394,8 +394,6 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 				results[r.index] = r.task
 				switch r.task.Status {
 				case TaskStatusCancelled:
-					// cancelled 任务视为"已结束"，但不在成功列表中返回
-					allDone = true
 					return nil, fmt.Errorf("cloud download task %s was cancelled", r.task.ID)
 				case TaskStatusCompleted, TaskStatusFailed:
 					// 已完成或失败，继续等待其他任务

@@ -847,7 +847,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	totalChunks := int((fileSize + chunkSize - 1) / chunkSize)
 
 	// 创建父目录（如果不存在）
-	if mkdirErr := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+	if mkdirErr := os.MkdirAll(filepath.Dir(outputPath), 0755); mkdirErr != nil {
 		return fmt.Errorf("创建父目录失败: %w", mkdirErr)
 	}
 
