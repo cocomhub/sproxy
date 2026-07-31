@@ -613,7 +613,7 @@ func TestJsonOutput_PrintStatsIsValid(t *testing.T) {
 	fm.PrintStats(&client.StatsResponse{
 		DiskUsage: struct {
 			UploadsDir string `json:"uploads_dir"`
-			TotalFiles int64  `json:"total_files"`
+			TotalFiles int    `json:"total_files"`
 			TotalSize  int64  `json:"total_size"`
 		}{UploadsDir: "/data", TotalFiles: 10, TotalSize: 1000},
 	})
@@ -629,7 +629,7 @@ func TestTextFormatter_PrintStats(t *testing.T) {
 	fm.PrintStats(&client.StatsResponse{
 		DiskUsage: struct {
 			UploadsDir string `json:"uploads_dir"`
-			TotalFiles int64  `json:"total_files"`
+			TotalFiles int    `json:"total_files"`
 			TotalSize  int64  `json:"total_size"`
 		}{UploadsDir: "/data", TotalFiles: 10, TotalSize: 1000},
 		RequestCounts: struct {
