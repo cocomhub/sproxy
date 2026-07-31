@@ -117,7 +117,7 @@ func TestJSONFormatter_PrintShareList(t *testing.T) {
 func TestJSONFormatter_PrintShareList_WithShares(t *testing.T) {
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
-	fm.PrintShareList([]*client.ShareLink{
+	fm.PrintShareList([]client.ShareLink{
 		{Token: "tok123", Filename: "file.txt", Downloads: 5, MaxDownloads: 10},
 	})
 	output := strings.TrimSpace(buf.String())
@@ -306,7 +306,7 @@ func TestTextFormatter_PrintShareList(t *testing.T) {
 func TestTextFormatter_PrintShareList_WithShares(t *testing.T) {
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
-	fm.PrintShareList([]*client.ShareLink{
+	fm.PrintShareList([]client.ShareLink{
 		{Token: "tok123", Filename: "file.txt", Downloads: 5, MaxDownloads: 10},
 	})
 	output := buf.String()
@@ -321,7 +321,7 @@ func TestTextFormatter_PrintShareList_WithShares(t *testing.T) {
 func TestTextFormatter_PrintShareList_Expired(t *testing.T) {
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
-	fm.PrintShareList([]*client.ShareLink{
+	fm.PrintShareList([]client.ShareLink{
 		{Token: "tok-expired", Filename: "old.txt", Downloads: 5, MaxDownloads: 5, Expired: true},
 	})
 	output := buf.String()
@@ -333,7 +333,7 @@ func TestTextFormatter_PrintShareList_Expired(t *testing.T) {
 func TestTextFormatter_PrintShareList_UnlimitedDownloads(t *testing.T) {
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
-	fm.PrintShareList([]*client.ShareLink{
+	fm.PrintShareList([]client.ShareLink{
 		{Token: "tok-unlim", Filename: "f.txt", Downloads: 3, MaxDownloads: 0},
 	})
 	output := buf.String()
@@ -346,7 +346,7 @@ func TestTextFormatter_PrintShareList_LongToken(t *testing.T) {
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	longToken := "abcdefghijklmnopqrstuvwxyz1234567890ABCDEF"
-	fm.PrintShareList([]*client.ShareLink{
+	fm.PrintShareList([]client.ShareLink{
 		{Token: longToken, Filename: "f.txt", Downloads: 0, MaxDownloads: 0},
 	})
 	output := buf.String()

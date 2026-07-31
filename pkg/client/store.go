@@ -154,4 +154,9 @@ func (s *MemoryKVStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func (s *MemoryKVStore) Close() error { return nil }
+func (s *MemoryKVStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = nil
+	return nil
+}

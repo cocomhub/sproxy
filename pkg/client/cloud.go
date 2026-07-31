@@ -156,7 +156,7 @@ func (c *FileClient) ListCloudTasks(ctx context.Context, status string) ([]Cloud
 	if len(params) > 0 {
 		urlPath += "?" + params.Encode()
 	}
-	var tasks []CloudTask
+	tasks := make([]CloudTask, 0)
 	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &tasks); err != nil {
 		return nil, fmt.Errorf("list cloud tasks: %w", err)
 	}

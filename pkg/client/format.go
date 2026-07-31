@@ -8,21 +8,29 @@ import (
 	"math"
 )
 
+// 字节大小常量。
+const (
+	KB = 1024
+	MB = 1024 * KB
+	GB = 1024 * MB
+	TB = 1024 * GB
+)
+
 // FormatByte 格式化字节数为人类可读字符串。
 func FormatByte(size float64) string {
 	if size <= 0 || math.IsNaN(size) || math.IsInf(size, 0) {
 		return "0 B"
 	}
-	if size >= 1024*1024*1024*1024 {
-		return fmt.Sprintf("%.1f TB", size/1024/1024/1024/1024)
+	if size >= TB {
+		return fmt.Sprintf("%.1f TB", size/TB)
 	}
-	if size >= 1024*1024*1024 {
-		return fmt.Sprintf("%.1f GB", size/1024/1024/1024)
+	if size >= GB {
+		return fmt.Sprintf("%.1f GB", size/GB)
 	}
-	if size >= 1024*1024 {
-		return fmt.Sprintf("%.1f MB", size/1024/1024)
-	} else if size >= 1024 {
-		return fmt.Sprintf("%.1f KB", size/1024)
+	if size >= MB {
+		return fmt.Sprintf("%.1f MB", size/MB)
+	} else if size >= KB {
+		return fmt.Sprintf("%.1f KB", size/KB)
 	}
 	return fmt.Sprintf("%.0f B", size)
 }

@@ -118,7 +118,7 @@ func (c *FileClient) CreateShare(ctx context.Context, filename string, opts ...S
 }
 
 // ListShares 列出当前所有活跃的分享链接。
-func (c *FileClient) ListShares(ctx context.Context) ([]*ShareLink, error) {
+func (c *FileClient) ListShares(ctx context.Context) ([]ShareLink, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/shares", nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf("获取分享列表失败: %w", err)
@@ -131,7 +131,7 @@ func (c *FileClient) ListShares(ctx context.Context) ([]*ShareLink, error) {
 	}
 
 	var result struct {
-		Shares []*ShareLink `json:"shares"`
+		Shares []ShareLink `json:"shares"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)

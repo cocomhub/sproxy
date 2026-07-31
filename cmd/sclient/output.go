@@ -19,7 +19,7 @@ type OutputFormatter interface {
 	// PrintFileList 输出文件列表。
 	PrintFileList(files []client.FileInfo)
 	// PrintShareList 输出分享列表。
-	PrintShareList(shares []*client.ShareLink)
+	PrintShareList(shares []client.ShareLink)
 	// PrintShareCreated 输出创建分享的结果。
 	PrintShareCreated(link *client.ShareLink, shareURL string)
 	// PrintShareRevoked 输出撤销分享的结果。
@@ -58,7 +58,7 @@ func (f *TextFormatter) PrintFileList(files []client.FileInfo) {
 	printFileList(files, f.w)
 }
 
-func (f *TextFormatter) PrintShareList(shares []*client.ShareLink) {
+func (f *TextFormatter) PrintShareList(shares []client.ShareLink) {
 	if len(shares) == 0 {
 		fmt.Fprintln(f.w, "暂无分享链接")
 		return
@@ -245,7 +245,7 @@ func (f *JSONFormatter) PrintFileList(files []client.FileInfo) {
 	_ = enc.Encode(map[string]any{"files": files, "total": len(files)})
 }
 
-func (f *JSONFormatter) PrintShareList(shares []*client.ShareLink) {
+func (f *JSONFormatter) PrintShareList(shares []client.ShareLink) {
 	enc := json.NewEncoder(f.w)
 	_ = enc.Encode(map[string]any{"shares": shares})
 }

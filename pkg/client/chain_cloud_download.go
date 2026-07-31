@@ -15,8 +15,11 @@ import (
 // cloudArchiveDirName 是服务端云任务归档文件存储子目录，与服务端 cloudArchiveDirName 保持一致。
 const cloudArchiveDirName = ".__cloud_archives__"
 
+// TypeCloudDownload 是云端下载链式操作的类型标识。
+const TypeCloudDownload = "cloud_download"
+
 func init() {
-	RegisterRunner("cloud_download", func() ChainRunner { return &CloudDownloadChain{} })
+	RegisterRunner(TypeCloudDownload, func() ChainRunner { return &CloudDownloadChain{} })
 }
 
 // CloudDownloadChain 云端下载链式操作，实现 ChainRunner 接口。
@@ -74,7 +77,7 @@ func (c *CloudDownloadChain) Phase() string  { return c.CurrentPhase }
 func (c *CloudDownloadChain) Status() string { return c.CurStatus }
 func (c *CloudDownloadChain) State() map[string]any {
 	return map[string]any{
-		"type":          "cloud_download",
+		"type":          TypeCloudDownload,
 		"chain_id":      c.ChainID,
 		"phase":         c.CurrentPhase,
 		"status":        c.CurStatus,
