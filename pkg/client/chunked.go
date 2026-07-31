@@ -227,7 +227,7 @@ func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*Chunked
 	defer resp.Body.Close()
 
 	var completeResult ChunkedUploadResult
-	if err := json.NewDecoder(resp.Body).Decode(&completeResult); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&completeResult); err != nil {
 		return nil, fmt.Errorf("解析 complete 响应失败: %w", err)
 	}
 
@@ -377,6 +377,11 @@ func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, bo
 	if err != nil {
 		u.client.logger.Warn("chunk 上传请求失败", "chunk_index", chunkIdx,
 			"upload_id", shortid.ShortHash(u.uploadID), "error", err)
+		// doRequest 失败时关闭 body reader（io.Pipe），避免 buildChunkRequest 的
+		// goroutine 在 pipe 写入时阻塞泄漏
+		if closer, ok := body.(io.Closer); ok {
+			closer.Close()
+		}
 		return false, true, 0, ""
 	}
 	defer chunkResp.Body.Close()
@@ -386,7 +391,7 @@ func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, bo
 		ShouldRetry bool   `json:"should_retry"`
 		Message     string `json:"message"`
 	}
-	if decodeErr := json.NewDecoder(chunkResp.Body).Decode(&chunkResult); decodeErr != nil {
+	if decodeErr := json.NewDecoder(io.LimitReader(chunkResp.Body, 1<<20)).Decode(&chunkResult); decodeErr != nil {
 		u.client.logger.Warn("chunk 响应解析失败", "chunk_index", chunkIdx,
 			"upload_id", shortid.ShortHash(u.uploadID), "status", chunkResp.StatusCode,
 			"error", decodeErr)
@@ -487,7 +492,7 @@ func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams
 		FileChecksum  string `json:"file_checksum"`
 		Message       string `json:"message"`
 	}
-	if json.NewDecoder(statusResp.Body).Decode(&statusData) != nil || !statusData.Success {
+	if json.NewDecoder(io.LimitReader(statusResp.Body, 1<<20)).Decode(&statusData) != nil || !statusData.Success {
 		statusResp.Body.Close()
 		return nil, nil, true
 	}
@@ -555,7 +560,7 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 		ChunkSize int64  `json:"chunk_size"`
 		Message   string `json:"message"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&initResult); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&initResult); err != nil {
 		return 0, 0, fmt.Errorf("解析 init 响应失败: %w", err)
 	}
 	if !initResult.Success {
@@ -780,6 +785,11 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		if strings.Contains(filepath.Clean(outputPath), "..") {
 			return fmt.Errorf("文件名不能包含路径穿越符 '..'")
 		}
+	} else {
+		// 非空 outputPath 也做检查
+		if err := validateOutputPath(outputPath); err != nil {
+			return err
+		}
 	}
 
 	// 获取文件信息（直接 Stat）
@@ -903,10 +913,11 @@ func (c *FileClient) downloadOneChunk(ctx context.Context, p downloadChunkParams
 			return
 		}
 		*p.Progress += int64(len(data))
-		if c.progressFn != nil {
-			c.progressFn("下载", *p.Progress, p.FileSize)
-		}
+		progress := *p.Progress
 		p.Mu.Unlock()
+		if c.progressFn != nil {
+			c.progressFn("下载", progress, p.FileSize)
+		}
 		return
 	}
 
@@ -959,7 +970,12 @@ func (c *FileClient) tryDownloadChunk(ctx context.Context, urlPath string, expec
 		return nil, false
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	maxRead := expectLength
+	if maxRead <= 0 {
+		maxRead = 1
+	}
+	limitReader := io.LimitReader(resp.Body, maxRead+1<<20) // expectLength + 1 MiB
+	data, err := io.ReadAll(limitReader)
 	if err != nil {
 		return nil, false
 	}
