@@ -76,7 +76,7 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 
 	got, err := os.ReadFile(outPath)
 	if err != nil {
-		t.Fatalf("\xe8\xaf\xbb\xe5\x8f\x96\xe4\xb8\x8b\xe8\xbd\xbd\xe6\x96\x87\xe4\xbb\xb6\xe5\xa4\xb1\xe8\xb4\xa5: %v", err)
+		t.Fatalf("读取下载文件失败: %v", err)
 	}
 	if !bytes.Equal(got, fileData) {
 		t.Fatal("downloaded content mismatch after chunked round-trip")
@@ -114,7 +114,7 @@ func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
 	}
 	got, err := os.ReadFile(outPath)
 	if err != nil {
-		t.Fatalf("\xe8\xaf\xbb\xe5\x8f\x96\xe4\xb8\x8b\xe8\xbd\xbd\xe6\x96\x87\xe4\xbb\xb6\xe5\xa4\xb1\xe8\xb4\xa5: %v", err)
+		t.Fatalf("读取下载文件失败: %v", err)
 	}
 	if !bytes.Equal(got, fileData) {
 		t.Fatal("content mismatch after resume upload")

@@ -166,6 +166,7 @@ func BenchmarkDownload(b *testing.B) {
 	if _, err := rand.Read(data); err != nil {
 		b.Fatal(err)
 	}
+	expectedSum := sha256.Sum256(data)
 	if err := os.WriteFile(filepath.Join(dir, "download.dat"), data, 0644); err != nil {
 		b.Fatal(err)
 	}
@@ -179,6 +180,15 @@ func BenchmarkDownload(b *testing.B) {
 		out := filepath.Join(outDir, fmt.Sprintf("got_%d.dat", i))
 		if err := c.Download(b.Context(), "download.dat", out); err != nil {
 			b.Fatalf("Download: %v", err)
+		}
+		// 验证下载内容正确性
+		got, err := os.ReadFile(out)
+		if err != nil {
+			b.Fatalf("读取下载文件失败: %v", err)
+		}
+		gotSum := sha256.Sum256(got)
+		if gotSum != expectedSum {
+			b.Fatalf("下载内容 checksum 不匹配")
 		}
 	}
 }

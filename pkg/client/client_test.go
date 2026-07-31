@@ -54,6 +54,7 @@ func mockUploadHandler(t *testing.T, dir string) http.HandlerFunc {
 
 		out, err := os.Create(filepath.Join(dir, filepath.Base(h.Filename)))
 		if err != nil {
+			t.Error("创建输出文件失败:", err)
 			http.Error(w, `{"success":false,"message":"failed to create file"}`, http.StatusInternalServerError)
 			return
 		}
@@ -64,6 +65,7 @@ func mockUploadHandler(t *testing.T, dir string) http.HandlerFunc {
 			n, rerr := f.Read(buf)
 			if n > 0 {
 				if _, err := out.Write(buf[:n]); err != nil {
+					t.Error("写入文件失败:", err)
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
@@ -820,6 +822,7 @@ func TestClient_ShouldAutoChunk(t *testing.T) {
 
 // TestFileClient_NewFileClient_EmptyURL 验证空 URL 时创建客户端 panic。
 func TestFileClient_NewFileClient_EmptyURL(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		if r := recover(); r == nil {
 			t.Fatal("expected panic for empty serverURL")
@@ -829,6 +832,7 @@ func TestFileClient_NewFileClient_EmptyURL(t *testing.T) {
 }
 
 func TestWithInsecureTLS(t *testing.T) {
+	t.Parallel()
 	c := NewFileClient("https://127.0.0.1:18083", WithInsecureTLS())
 	if c.httpClient == nil {
 		t.Fatal("httpClient should not be nil")
@@ -850,6 +854,7 @@ func TestWithInsecureTLS(t *testing.T) {
 }
 
 func TestWithInsecureTLS_PreservesCustomTimeout(t *testing.T) {
+	t.Parallel()
 	c := NewFileClient("https://127.0.0.1:18083",
 		WithTimeout(10*time.Second),
 		WithInsecureTLS(),
@@ -866,8 +871,8 @@ func TestWithInsecureTLS_PreservesCustomTimeout(t *testing.T) {
 	}
 }
 
-// TestFileClient_Download_EmptyOutputPath 验证空输出路径默认使用文件名。
-func TestFileClient_Download_EmptyOutputPath(t *testing.T) {
+// TestFileClient_Download_ToSpecifiedPath 验证指定输出路径的下载功能。
+func TestFileClient_Download_ToSpecifiedPath(t *testing.T) {
 	t.Parallel()
 	ts, _ := newMockServer(t)
 
@@ -895,6 +900,46 @@ func TestFileClient_Download_EmptyOutputPath(t *testing.T) {
 	}
 	if string(data) != "hello" {
 		t.Fatalf("content mismatch: got %q, want %q", string(data), "hello")
+	}
+}
+
+// TestFileClient_Download_EmptyOutputPath 验证空 outputPath 默认使用 filename 作为下载路径。
+func TestFileClient_Download_EmptyOutputPath(t *testing.T) {
+	t.Parallel()
+	ts, _ := newMockServer(t)
+
+	// 先上传一个文件
+	src := filepath.Join(t.TempDir(), "empty_output_test.txt")
+	if err := os.WriteFile(src, []byte("empty output test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewFileClient(ts.URL)
+	if _, err := c.Upload(t.Context(), src, "empty_output_test.txt"); err != nil {
+		t.Fatalf("upload failed: %v", err)
+	}
+
+	// 切换到临时目录，避免下载到 CWD
+	tmpDir := t.TempDir()
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	// 传入空 outputPath，应使用 filename 作为路径
+	if err := c.Download(t.Context(), "empty_output_test.txt", ""); err != nil {
+		t.Fatalf("download with empty outputPath failed: %v", err)
+	}
+	expectedPath := filepath.Join(tmpDir, "empty_output_test.txt")
+	if _, err := os.Stat(expectedPath); err != nil {
+		t.Fatalf("downloaded file not found at default path: %v", err)
+	}
+	data, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatalf("read downloaded file failed: %v", err)
+	}
+	if string(data) != "empty output test" {
+		t.Fatalf("content mismatch: got %q, want %q", string(data), "empty output test")
 	}
 }
 
@@ -985,6 +1030,7 @@ func TestFileClient_Rename_ServerError(t *testing.T) {
 
 // TestFileClient_Rename_EmptyFrom 验证 Rename 空 from 时的校验。
 func TestFileClient_Rename_EmptyFrom(t *testing.T) {
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:9999")
 	if err := c.Rename(t.Context(), "", "b.txt", "abc"); err == nil {
 		t.Fatal("expected error for empty from")
@@ -993,6 +1039,7 @@ func TestFileClient_Rename_EmptyFrom(t *testing.T) {
 
 // TestFileClient_Rename_EmptyTo 验证 Rename 空 to 时的校验。
 func TestFileClient_Rename_EmptyTo(t *testing.T) {
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:9999")
 	if err := c.Rename(t.Context(), "a.txt", "", "abc"); err == nil {
 		t.Fatal("expected error for empty to")
@@ -1001,6 +1048,7 @@ func TestFileClient_Rename_EmptyTo(t *testing.T) {
 
 // TestFileClient_Rename_EmptyChecksum 验证 Rename 空 checksum 时的校验。
 func TestFileClient_Rename_EmptyChecksum(t *testing.T) {
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:9999")
 	if err := c.Rename(t.Context(), "a.txt", "b.txt", ""); err == nil {
 		t.Fatal("expected error for empty checksum")
@@ -1025,6 +1073,7 @@ func TestFileClient_ListWithPagination_ServerError(t *testing.T) {
 
 // TestCalculateChecksum_NonExistentFile 验证不存在的文件返回错误。
 func TestCalculateChecksum_NonExistentFile(t *testing.T) {
+	t.Parallel()
 	if _, err := calculateChecksum("/nonexistent/path/file.txt"); err == nil {
 		t.Fatal("expected error for non-existent file")
 	}
@@ -1032,6 +1081,7 @@ func TestCalculateChecksum_NonExistentFile(t *testing.T) {
 
 // TestFileClient_Stat_EmptyFilename 验证 Stat 空 filename 时的校验。
 func TestFileClient_Stat_EmptyFilename(t *testing.T) {
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:9999")
 	if _, err := c.Stat(t.Context(), ""); err == nil {
 		t.Fatal("expected error for empty filename")
@@ -1171,6 +1221,7 @@ func TestClientDeleteVersion_ServerError(t *testing.T) {
 
 // TestClientListVersions_RequestError 验证版本 API 请求层面的错误路径。
 func TestClientListVersions_RequestError(t *testing.T) {
+	t.Parallel()
 	c := NewFileClient("http://127.0.0.1:1") // 预期连接被拒
 	if _, err := c.ListVersions(t.Context(), "test.txt"); err == nil {
 		t.Fatal("expected error for connection refused")
@@ -1211,13 +1262,49 @@ func TestClientDeleteVersion_SuccessFalse(t *testing.T) {
 	}
 }
 
-// TestClientBatchRename_MissingChecksum 验证 BatchRename 缺失 checksum。
+// TestClientBatchRename_MissingChecksum 验证 BatchRename 缺失 checksum 时服务端返回错误。
 func TestClientBatchRename_MissingChecksum(t *testing.T) {
-	c := NewFileClient("http://127.0.0.1:9999")
-	if _, err := c.BatchRename(t.Context(), []BatchRenameOp{
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/batch/rename", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Operations []struct {
+				From     string `json:"from"`
+				To       string `json:"to"`
+				Checksum string `json:"checksum"`
+			} `json:"operations"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, `{"results":[]}`, http.StatusBadRequest)
+			return
+		}
+		// 检查是否有操作的 checksum 为空
+		for _, op := range req.Operations {
+			if op.Checksum == "" {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"results":[{"filename":"a.txt","success":false,"message":"missing checksum"}]}`))
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"results":[{"filename":"a.txt","success":true,"message":"renamed"}]}`))
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	c := NewFileClient(ts.URL)
+	results, err := c.BatchRename(t.Context(), []BatchRenameOp{
 		{From: "a.txt", To: "b.txt"},
-	}); err == nil {
-		t.Fatal("expected error for missing checksum")
+	})
+	if err != nil {
+		t.Fatalf("BatchRename: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Success {
+		t.Fatal("expected failure for missing checksum")
 	}
 }
 
@@ -1273,6 +1360,7 @@ func TestFileClient_Upload_ProgressCallback(t *testing.T) {
 
 // TestLoadConfig_NotExistWithCreateError 验证配置文件不存在且创建失败的情况。
 func TestLoadConfig_NotExistWithCreateError(t *testing.T) {
+	t.Parallel()
 	// 父目录不存在时，LoadConfig 应返回默认配置，不创建文件
 	readOnlyDir := t.TempDir()
 	nonexistentPath := filepath.Join(readOnlyDir, "subdir", "sclient.yaml")
@@ -1322,6 +1410,7 @@ func TestClientBatchDelete_NilFiles(t *testing.T) {
 
 // TestLoadFromViper_ValidTunnelKey 验证 LoadFromViper 正确处理有效的 tunnel key。
 func TestLoadFromProvider_ValidTunnelKey(t *testing.T) {
+	t.Parallel()
 	p := mapProvider{m: map[string]any{
 		"server_url": "http://test:8080",
 		"tunnel_key": strings.Repeat("a", 64),
@@ -1340,6 +1429,7 @@ func TestLoadFromProvider_ValidTunnelKey(t *testing.T) {
 
 // TestLoadFromProvider_UnmarshalError 验证 LoadFromProvider 在不可反序列化配置时返回错误。
 func TestLoadFromProvider_UnmarshalError(t *testing.T) {
+	t.Parallel()
 	// timeout 字段 int 类型，使用字符串触发 json 解析类型不匹配
 	p := mapProvider{m: map[string]any{"timeout": "not-a-number"}}
 	_, err := LoadFromProvider(p)
@@ -1371,6 +1461,15 @@ func TestGetTunnelMux(t *testing.T) {
 		xfer.TransportRegistry.Clear()
 	})
 
+	// cleanupMux 是关闭缓存的 mux 的公共清理函数
+	cleanupMux := func(c *FileClient) {
+		c.tunnelMuxMu.Lock()
+		if c.tunnelMux != nil {
+			c.tunnelMux.Close()
+		}
+		c.tunnelMuxMu.Unlock()
+	}
+
 	t.Run("create_new", func(t *testing.T) {
 		c := NewFileClient("http://127.0.0.1:18083",
 			WithXfer("pipe-test", "http://127.0.0.1:18083", ""),
@@ -1389,13 +1488,7 @@ func TestGetTunnelMux(t *testing.T) {
 		}
 		c.tunnelMuxMu.Unlock()
 		// 确保测试结束时关闭缓存的 mux，避免 goleak
-		t.Cleanup(func() {
-			c.tunnelMuxMu.Lock()
-			if c.tunnelMux != nil {
-				c.tunnelMux.Close()
-			}
-			c.tunnelMuxMu.Unlock()
-		})
+		t.Cleanup(func() { cleanupMux(c) })
 		_ = tun
 	})
 
@@ -1403,6 +1496,9 @@ func TestGetTunnelMux(t *testing.T) {
 		c := NewFileClient("http://127.0.0.1:18083",
 			WithXfer("pipe-test", "http://127.0.0.1:18083", ""),
 		)
+		// 确保测试结束时关闭缓存的 mux
+		t.Cleanup(func() { cleanupMux(c) })
+
 		// 第一次调用创建
 		tun1, err := c.getTunnelMux(t.Context())
 		if err != nil {
@@ -1486,6 +1582,7 @@ func keyPEM(der []byte) []byte {
 
 // TestWithClientCert_FileNotExist 验证证书文件不存在时 WithClientCert(strict=true) panic。
 func TestWithClientCert_FileNotExist(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "nonexistent.pem")
 	keyFile := filepath.Join(dir, "nonexistent-key.pem")
@@ -1500,6 +1597,7 @@ func TestWithClientCert_FileNotExist(t *testing.T) {
 
 // TestWithClientCert_FileNotExist_Warn 验证证书文件不存在时 WithClientCert(strict=false) 静默降级。
 func TestWithClientCert_FileNotExist_Warn(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "nonexistent.pem")
 	keyFile := filepath.Join(dir, "nonexistent-key.pem")
@@ -1516,6 +1614,7 @@ func TestWithClientCert_FileNotExist_Warn(t *testing.T) {
 
 // TestWithClientCert_Exists 验证有效的证书文件能正确加载到 TLSClientConfig。
 func TestWithClientCert_Exists(t *testing.T) {
+	t.Parallel()
 	certFile, keyFile := generateTestCert(t)
 
 	c := NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile, true))
@@ -1548,6 +1647,7 @@ func TestWithClientCert_Exists(t *testing.T) {
 
 // TestWithClientCert_PreservesInsecureTLS 验证 WithInsecureTLS + WithClientCert 顺序不丢失 InsecureSkipVerify。
 func TestWithClientCert_PreservesInsecureTLS(t *testing.T) {
+	t.Parallel()
 	certFile, keyFile := generateTestCert(t)
 
 	// 先 WithInsecureTLS 再 WithClientCert
@@ -1573,6 +1673,7 @@ func TestWithClientCert_PreservesInsecureTLS(t *testing.T) {
 
 // TestWithClientCert_ReverseOrder 验证 WithClientCert + WithInsecureTLS 顺序后 InsecureSkipVerify 为 true。
 func TestWithClientCert_ReverseOrder(t *testing.T) {
+	t.Parallel()
 	certFile, keyFile := generateTestCert(t)
 
 	// 先 WithClientCert 再 WithInsecureTLS

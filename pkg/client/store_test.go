@@ -240,7 +240,7 @@ func TestJSONKVStore_DeleteNotFound(t *testing.T) {
 	}
 }
 
-func TestJSONKVStore_AtomicWrite(t *testing.T) {
+func TestJSONKVStore_SaveAndLoad(t *testing.T) {
 	t.Parallel()
 	s, _ := newTestJSONKVStore(t)
 
@@ -411,6 +411,11 @@ func TestJSONKVStore_List_SkipsTmpFiles(t *testing.T) {
 		t.Fatalf("failed to create json.tmp file: %v", err)
 	}
 
+	// Create a foo.json.tmp.json — key "foo.json.tmp" ends with .tmp
+	if err := os.WriteFile(filepath.Join(s.dir, "foo.json.tmp.json"), tmpContent, 0644); err != nil {
+		t.Fatalf("failed to create foo.json.tmp.json file: %v", err)
+	}
+
 	// List should only return "real"
 	keys, err := s.List(t.Context(), "")
 	if err != nil {
@@ -474,5 +479,102 @@ func TestStructCodec_FromMap_NilTarget(t *testing.T) {
 	err := codec.FromMap(m, nil)
 	if err == nil {
 		t.Fatal("expected error for nil target")
+	}
+}
+
+type nestedStruct struct {
+	Inner  testStruct `json:"inner"`
+	Label  string     `json:"label"`
+	BigInt int64      `json:"big_int"`
+}
+
+func TestStructCodec_NestedStruct(t *testing.T) {
+	t.Parallel()
+	codec := StructCodec{}
+
+	v := nestedStruct{
+		Inner:  testStruct{Name: "inner", Value: 7, Tag: "nested"},
+		Label:  "outer",
+		BigInt: 1<<63 - 1, // max int64
+	}
+	m, err := codec.ToMap(v)
+	if err != nil {
+		t.Fatalf("ToMap failed: %v", err)
+	}
+
+	innerMap, ok := m["inner"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected inner to be map[string]any, got %T", m["inner"])
+	}
+	if innerMap["name"] != "inner" {
+		t.Errorf("expected inner.name=inner, got %v", innerMap["name"])
+	}
+	if m["label"] != "outer" {
+		t.Errorf("expected label=outer, got %v", m["label"])
+	}
+	bigInt, ok := m["big_int"].(json.Number)
+	if !ok {
+		t.Fatalf("expected big_int to be json.Number, got %T", m["big_int"])
+	}
+	if bigInt.String() != "9223372036854775807" {
+		t.Errorf("expected big_int=9223372036854775807, got %s", bigInt.String())
+	}
+
+	// Round-trip
+	var decoded nestedStruct
+	if err := codec.FromMap(m, &decoded); err != nil {
+		t.Fatalf("FromMap failed: %v", err)
+	}
+	if decoded.Inner != v.Inner {
+		t.Errorf("inner roundtrip failed: %+v vs %+v", decoded.Inner, v.Inner)
+	}
+	if decoded.Label != v.Label {
+		t.Errorf("label roundtrip failed: %q vs %q", decoded.Label, v.Label)
+	}
+	if decoded.BigInt != v.BigInt {
+		t.Errorf("big_int roundtrip failed: %d vs %d", decoded.BigInt, v.BigInt)
+	}
+}
+
+func TestJSONKVStore_Close_AfterState(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestJSONKVStore(t)
+
+	// Save states
+	if err := s.Save(t.Context(), "close_test", map[string]any{"val": 1}); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Close
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Verify Close does not panic and is idempotent
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close failed: %v", err)
+	}
+}
+
+func TestMemoryKVStore_Close_AfterState(t *testing.T) {
+	t.Parallel()
+	s := NewMemoryKVStore()
+
+	if err := s.Save(t.Context(), "close_test", map[string]any{"val": 1}); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	// Close 后 data 应已被清空
+	if s.data != nil {
+		t.Error("expected data to be nil after Close")
+	}
+
+	// 验证 Close 幂等
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close failed: %v", err)
 	}
 }

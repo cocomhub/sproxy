@@ -87,6 +87,10 @@ func (s *JSONKVStore) List(ctx context.Context, prefix string) ([]string, error)
 			continue
 		}
 		key := strings.TrimSuffix(name, ".json")
+		// 过滤掉 .tmp.json 和 .json.tmp 模式的残留文件
+		if strings.HasSuffix(key, ".tmp") {
+			continue
+		}
 		if strings.HasPrefix(key, prefix) {
 			keys = append(keys, key)
 		}

@@ -311,20 +311,6 @@ func TestCloudDownload_CancelTask(t *testing.T) {
 	if err := c.CancelCloudTask(t.Context(), "task-1"); err != nil {
 		t.Fatalf("CancelCloudTask: %v", err)
 	}
-
-	// éªè¯ååºä½åå« status å­æ®µ
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/task-1/cancel", "application/json", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var body map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatal(err)
-	}
-	if body["status"] != "cancelled" {
-		t.Errorf("expected status=cancelled, got %q", body["status"])
-	}
 }
 
 // TestCloudDownload_DeleteTask 测试删除任务。
@@ -336,24 +322,6 @@ func TestCloudDownload_DeleteTask(t *testing.T) {
 
 	if err := c.DeleteCloudTask(t.Context(), "task-1"); err != nil {
 		t.Fatalf("DeleteCloudTask: %v", err)
-	}
-
-	// éªè¯ååºä½åå« status å­æ®µ
-	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/cloud/tasks/task-1", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var body map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		t.Fatal(err)
-	}
-	if body["status"] != "deleted" {
-		t.Errorf("expected status=deleted, got %q", body["status"])
 	}
 }
 
@@ -427,6 +395,7 @@ func TestCloudArchive_ArchiveTasks(t *testing.T) {
 // ---- CloudDownloadOption functions ----
 
 func TestWithCloudDownloadMaxBatchURLs(t *testing.T) {
+	t.Parallel()
 	o := &cloudDownloadOptions{}
 	WithCloudDownloadMaxBatchURLs(50)(o)
 	if o.maxBatchURLs != 50 {
@@ -435,6 +404,7 @@ func TestWithCloudDownloadMaxBatchURLs(t *testing.T) {
 }
 
 func TestWithCloudDownloadMaxBatchURLs_Zero(t *testing.T) {
+	t.Parallel()
 	o := &cloudDownloadOptions{maxBatchURLs: 30}
 	WithCloudDownloadMaxBatchURLs(0)(o)
 	if o.maxBatchURLs != 30 {

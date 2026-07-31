@@ -558,8 +558,8 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 				errCh <- err
 				return
 			}
+			defer resp.Body.Close()
 			_, _ = io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
 			errCh <- nil
 		}()
 	}

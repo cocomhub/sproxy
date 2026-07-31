@@ -39,7 +39,7 @@ func FuzzCalcChunkSize(f *testing.F) {
 		if cs > effectiveMax {
 			t.Errorf("calcChunkSize(%d, %d, %d) = %d, expected <= %d", fileSize, preferred, maxChunk, cs, effectiveMax)
 		}
-		// \xe8\xbf\x94\xe5\x9b\x9e\xe5\x80\xbc\xe4\xb8\x8d\xe8\x83\xbd\xe5\xb0\x8f\xe4\xba\x8e preferred \xe5\x92\x8c maxChunk \xe7\x9a\x84\xe6\x9c\x89\xe6\x95\x88\xe4\xb8\x8b\xe9\x99\x90
+		// 返回值不能小于 preferred 和 maxChunk 的有效下限
 		effectivePref := preferred
 		if effectivePref <= 0 {
 			effectivePref = 4 * 1024 * 1024
@@ -51,6 +51,14 @@ func FuzzCalcChunkSize(f *testing.F) {
 		effectiveMin := min(effectivePref, effectiveMax2)
 		if cs < effectiveMin {
 			t.Errorf("calcChunkSize(%d, %d, %d) = %d, expected >= %d", fileSize, preferred, maxChunk, cs, effectiveMin)
+		}
+		// cs 必须是 effectiveMin 的 2 的幂倍（除非被 effectiveMax 截断）
+		if cs < effectiveMax && cs%effectiveMin == 0 {
+			ratio := cs / effectiveMin
+			if ratio <= 0 || (ratio&(ratio-1)) != 0 {
+				t.Errorf("calcChunkSize(%d, %d, %d) = %d: expected power-of-2 multiple of %d, got ratio %d",
+					fileSize, preferred, maxChunk, cs, effectiveMin, ratio)
+			}
 		}
 	})
 }
