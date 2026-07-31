@@ -15,6 +15,7 @@ import (
 type CloudTask struct {
 	ID         string    `json:"id"`
 	URL        string    `json:"url"`
+	Method     string    `json:"method,omitempty"`
 	Filename   string    `json:"filename"`
 	Status     string    `json:"status"`
 	TotalSize  int64     `json:"total_size"`
@@ -202,6 +203,9 @@ func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName s
 	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &result); err != nil {
 		return nil, fmt.Errorf("archive cloud task: %w", err)
 	}
+	if !result.Success {
+		return nil, fmt.Errorf("archive cloud task: %s", result.Message)
+	}
 	return &result, nil
 }
 
@@ -214,6 +218,9 @@ func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, ar
 	var result ArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/archive", body, &result); err != nil {
 		return nil, fmt.Errorf("archive cloud tasks: %w", err)
+	}
+	if !result.Success {
+		return nil, fmt.Errorf("archive cloud tasks: %s", result.Message)
 	}
 	return &result, nil
 }

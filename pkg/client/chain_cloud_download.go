@@ -109,8 +109,16 @@ func (c *CloudDownloadChain) SetClient(client *FileClient) {
 
 func (c *CloudDownloadChain) SetOptions(opts chainOptions) {
 	c.opts = opts
-	c.PollInterval = opts.pollInterval
+	c.PollInterval = fixPollInterval(opts.pollInterval)
 	c.Timeout = opts.timeout
+}
+
+// fixPollInterval 确保轮询间隔不为零，零值时使用默认值（5s）。
+func fixPollInterval(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 5 * time.Second
+	}
+	return d
 }
 
 // SetChainManager 设置链式操作管理器引用，用于阶段间持久化状态。
@@ -386,7 +394,7 @@ func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
 	// 优先使用服务端返回的路径，兜底使用本地构造
 	archivePath := c.archiveServerPath
 	if archivePath == "" {
-		archivePath = filepath.ToSlash(filepath.Join(cloudArchiveDirName, c.ArchiveName))
+		archivePath = filepath.ToSlash(filepath.Join(cloudArchiveDirName, filepath.Base(c.ArchiveName)))
 	}
 	// 路径穿越防护：使用 filepath.Base 确保 ArchiveName 不含路径分隔符
 	archiveName := filepath.Base(c.ArchiveName)

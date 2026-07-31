@@ -150,13 +150,16 @@ type ChainManager struct {
 }
 
 func NewChainManager(store KVStore) *ChainManager {
+	if store == nil {
+		panic("NewChainManager: store 不能为 nil")
+	}
 	m := &ChainManager{
 		store:    store,
 		codec:    StructCodec{},
 		registry: make(map[string]func() ChainRunner),
 		logger:   slog.Default(),
 	}
-	// 从全局注册表拷贝默认值
+	// 从全局注册表拷贝默认值（实例注册表是全局注册表的一次快照）
 	runnerRegistryMu.RLock()
 	maps.Copy(m.registry, runnerRegistry)
 	runnerRegistryMu.RUnlock()
@@ -177,7 +180,7 @@ func (m *ChainManager) Run(ctx context.Context, runner ChainRunner) error {
 
 // RunWithProgress 执行链式操作，并支持外部进度回调。
 func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, progressFn ProgressFunc) error {
-	m.saveState(ctx, runner)
+	m.saveState(context.WithoutCancel(ctx), runner)
 	// 注入 chainMgr 引用，使 runner 在阶段切换时能自行持久化状态
 	runner.SetChainManager(m)
 	reportFn := func(ctx context.Context, info ProgressInfo) {
@@ -191,7 +194,7 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 		state := runner.State()
 		state["status"] = StatusFailed
 		if saveErr := m.store.Save(ctx, "chain:"+runner.ID(), state); saveErr != nil {
-			return fmt.Errorf("链操作失败 (%w)，保存状态也失败: %v", err, saveErr)
+			return fmt.Errorf("链操作失败: %w（保存状态也失败: %v）", err, saveErr)
 		}
 		return err
 	}
@@ -225,7 +228,7 @@ func (m *ChainManager) List(ctx context.Context) ([]ChainRunner, error) {
 	for _, key := range keys {
 		state, err := m.store.Load(ctx, key)
 		if err != nil {
-			m.logger.DebugContext(ctx, "加载链状态失败", "key", key, "error", err)
+			m.logger.WarnContext(ctx, "加载链状态失败", "key", key, "error", err)
 			continue
 		}
 		status, _ := state["status"].(string)
@@ -234,10 +237,11 @@ func (m *ChainManager) List(ctx context.Context) ([]ChainRunner, error) {
 		}
 		runner, err := m.resolveRunner(ctx, state)
 		if err != nil {
-			m.logger.DebugContext(ctx, "解析链 runner 失败", "key", key, "error", err)
+			m.logger.WarnContext(ctx, "解析链 runner 失败", "key", key, "error", err)
 			continue
 		}
 		if err := runner.Restore(state); err != nil {
+			m.logger.WarnContext(ctx, "恢复链 runner 状态失败", "key", key, "error", err)
 			continue
 		}
 		runners = append(runners, runner)
