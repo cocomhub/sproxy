@@ -47,8 +47,8 @@ type CloudDownloadChain struct {
 	Failed       int       `json:"failed"`
 	Total        int       `json:"total"`
 	Error        string    `json:"error,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	CreatedAt    time.Time `json:"created_at,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 
 	// 持久化字段：恢复时自动恢复（区别于 opts 中的非持久化字段）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -476,5 +476,9 @@ func isStorageFullError(errMsg string) bool {
 		strings.Contains(lower, "no space left") ||
 		strings.Contains(lower, "disk full") ||
 		strings.Contains(lower, "out of disk space") ||
-		(strings.Contains(lower, "quota") && strings.Contains(lower, "exceeded"))
+		(strings.Contains(lower, "quota") && strings.Contains(lower, "exceeded")) ||
+		strings.Contains(lower, "存储空间") ||
+		strings.Contains(lower, "存储已满") ||
+		strings.Contains(lower, "超出配额") ||
+		strings.Contains(lower, "磁盘空间")
 }

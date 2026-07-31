@@ -23,9 +23,9 @@ type CloudTask struct {
 	Checksum   string    `json:"checksum"`
 	Error      string    `json:"error"`
 	FileMTime  int64     `json:"file_mtime,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	ExpiresAt  time.Time `json:"expires_at,omitempty"`
 }
 
 // CloudTask 状态常量。
@@ -197,6 +197,12 @@ func (c *FileClient) DeleteCloudTask(ctx context.Context, taskID string) error {
 
 // ArchiveCloudTask 将单任务文件打包为 tar.gz 并存放到 uploads 目录。
 func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName string) (*ArchiveResult, error) {
+	if taskID == "" {
+		return nil, fmt.Errorf("cloud download: taskID is required")
+	}
+	if archiveName == "" {
+		return nil, fmt.Errorf("cloud download: archiveName is required for archive operation")
+	}
 	body := map[string]string{"archive_name": archiveName}
 	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/archive"
 	var result ArchiveResult
@@ -211,6 +217,9 @@ func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName s
 
 // ArchiveCloudTasks 将多个任务的文件打包为一个 tar.gz。
 func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, archiveName string) (*ArchiveResult, error) {
+	if archiveName == "" {
+		return nil, fmt.Errorf("cloud download: archiveName is required for archive operation")
+	}
 	body := map[string]any{
 		"task_ids":     taskIDs,
 		"archive_name": archiveName,
