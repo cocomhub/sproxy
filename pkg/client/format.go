@@ -17,6 +17,7 @@ const (
 )
 
 // FormatByte 格式化字节数为人类可读字符串。
+// 注意：float64 精度损失在 9 PB 内安全，超出此范围时精度不可保证。
 func FormatByte(size float64) string {
 	if size <= 0 || math.IsNaN(size) || math.IsInf(size, 0) {
 		return "0 B"

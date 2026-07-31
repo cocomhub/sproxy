@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // hubTestServer 返回一个模拟 Hub 和 StorageConfig handler 的测试服务器。
@@ -30,11 +31,11 @@ func hubTestServer(t *testing.T) (*httptest.Server, string) {
 
 	// GET /api/hub/nodes
 	mux.HandleFunc("GET /api/hub/nodes", func(w http.ResponseWriter, r *http.Request) {
-		nodes := []HubNodeInfo{
-			{ID: "node-1", Addr: "192.168.1.1:18083", Connected: "2026-07-26T00:00:00Z"},
-			{ID: "node-2", Addr: "192.168.1.2:18083", Connected: "2026-07-26T00:00:00Z"},
-		}
-		json.NewEncoder(w).Encode(nodes)
+		connectedTime, _ := time.Parse(time.RFC3339, "2026-07-26T00:00:00Z")
+		_ = json.NewEncoder(w).Encode([]HubNodeInfo{
+			{ID: "node-1", Addr: "192.168.1.1:18083", Connected: connectedTime},
+			{ID: "node-2", Addr: "192.168.1.2:18083", Connected: connectedTime},
+		})
 	})
 
 	// DELETE /api/hub/nodes/{id}

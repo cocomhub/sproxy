@@ -39,6 +39,9 @@ func (c *FileClient) RestoreVersion(ctx context.Context, filename string, versio
 	if filename == "" {
 		return fmt.Errorf("filename 不能为空")
 	}
+	if versionID <= 0 {
+		return fmt.Errorf("version_id must be positive")
+	}
 	apiPath := "/api/versions/restore?" + url.Values{
 		"filename":   {filename},
 		"version_id": {fmt.Sprintf("%d", versionID)},
@@ -54,6 +57,9 @@ func (c *FileClient) RestoreVersion(ctx context.Context, filename string, versio
 func (c *FileClient) DeleteVersion(ctx context.Context, filename string, versionID int64) error {
 	if filename == "" {
 		return fmt.Errorf("filename 不能为空")
+	}
+	if versionID <= 0 {
+		return fmt.Errorf("version_id must be positive")
 	}
 	apiPath := "/api/versions?" + url.Values{
 		"filename":   {filename},

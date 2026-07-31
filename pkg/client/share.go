@@ -55,15 +55,22 @@ type ShareLink struct {
 
 // CreatedAtTime 返回 CreatedAt 的 time.Time 表示。
 func (s *ShareLink) CreatedAtTime() (time.Time, error) {
+	if s == nil {
+		return time.Time{}, fmt.Errorf("ShareLink is nil")
+	}
 	return time.Parse(time.RFC3339, s.CreatedAt)
 }
 
 // ExpiresAtTime 返回 ExpiresAt 的 time.Time 表示。
 func (s *ShareLink) ExpiresAtTime() (time.Time, error) {
+	if s == nil {
+		return time.Time{}, fmt.Errorf("ShareLink is nil")
+	}
 	return time.Parse(time.RFC3339, s.ExpiresAt)
 }
 
 // CreateShare 创建文件分享链接，支持 Option 模式配置参数。
+// TTL 参数通过 WithShareTTL 设置，以秒数格式（%ds）发送至服务端。
 func (c *FileClient) CreateShare(ctx context.Context, filename string, opts ...ShareOption) (*ShareLink, error) {
 	if filename == "" {
 		return nil, fmt.Errorf("filename 不能为空")
