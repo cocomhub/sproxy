@@ -333,8 +333,8 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 				if err != nil {
 					return fmt.Errorf("重试批量提交失败: %w", err)
 				}
-				// 保留已完成的任务 ID + 新提交的任务 ID
-				c.TaskIDs = append(remaining, c.TaskIDs[len(remaining):]...)
+				// 新提交的任务添加回 TaskIDs
+				c.TaskIDs = remaining
 				for _, t := range tasks {
 					if t.ID != "" {
 						c.TaskIDs = append(c.TaskIDs, t.ID)
