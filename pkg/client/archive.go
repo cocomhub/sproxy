@@ -74,7 +74,7 @@ func (c *FileClient) downloadToFile(ctx context.Context, method, urlPath string,
 	}
 	if closeErr := out.Close(); closeErr != nil {
 		os.Remove(tmpPath)
-		return fmt.Errorf("关闭文件失败: %w", err)
+		return fmt.Errorf("关闭文件失败: %w", closeErr)
 	}
 	if err = os.Rename(tmpPath, outputPath); err != nil {
 		os.Remove(tmpPath)

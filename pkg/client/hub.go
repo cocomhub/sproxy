@@ -30,9 +30,7 @@ func (c *FileClient) UpdateStorageConfig(ctx context.Context, maxStorageBytes in
 		return fmt.Errorf("max_storage_bytes must be non-negative")
 	}
 	body := map[string]any{"max_storage_bytes": maxStorageBytes}
-	var result struct {
-		Success bool `json:"success"`
-	}
+	var result doJSONResp
 	if err := c.doJSON(ctx, http.MethodPut, "/api/storage/config", body, &result); err != nil {
 		return fmt.Errorf("更新存储配置失败: %w", err)
 	}
