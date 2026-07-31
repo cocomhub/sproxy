@@ -93,6 +93,12 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		return nil, fmt.Errorf("--client-key 需要配合 --client-cert 使用")
 	}
 
+	if allowFallback, _ := cmd.Flags().GetBool("allow-transport-fallback"); allowFallback {
+		opts = append(opts, client.WithTransportFallback())
+	} else if cfg.AllowTransportFallback {
+		opts = append(opts, client.WithTransportFallback())
+	}
+
 	return client.NewFileClient(serverURL, opts...), nil
 }
 

@@ -15,7 +15,7 @@ import (
 type HubNodeInfo struct {
 	ID        string    `json:"id"`
 	Addr      string    `json:"addr,omitempty"`
-	Connected time.Time `json:"connected,omitempty"`
+	Connected time.Time `json:"connected"`
 }
 
 // HubStats 表示 Hub 中继统计信息。

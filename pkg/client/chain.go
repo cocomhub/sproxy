@@ -5,12 +5,32 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"maps"
 	"sync"
 	"time"
 )
+
+// Codec 在 struct（带 json tag）和 map[string]any 之间转换的接口。
+type Codec interface {
+	ToMap(v any) (map[string]any, error)
+	FromMap(m map[string]any, v any) error
+}
+
+// DefaultStructCodec 是默认的 Codec 实现。
+var DefaultStructCodec = StructCodec{}
+
+// ChainManagerOption 配置 ChainManager 的选项函数。
+type ChainManagerOption func(*ChainManager)
+
+// WithStructCodec 设置 ChainManager 使用的 Codec 实现。
+func WithStructCodec(codec Codec) ChainManagerOption {
+	return func(m *ChainManager) {
+		m.codec = codec
+	}
+}
 
 // Phase 常量
 const (
@@ -60,8 +80,39 @@ type ChainResult struct {
 	Phase   string         `json:"phase"`
 	Status  string         `json:"status"`
 	Error   string         `json:"error,omitempty"`
-	raw     ChainRunner    `json:"-"`               // 原始 runner
-	Extra   map[string]any `json:"extra,omitempty"` // 额外元数据
+	raw     ChainRunner    `json:"-"` // 原始 runner
+	extra   map[string]any `json:"-"` // 额外元数据（内部字段，通过自定义序列化保持 JSON 兼容）
+}
+
+// GetExtraValue 获取额外元数据中指定 key 的值。
+func (r *ChainResult) GetExtraValue(key string) any {
+	if r.extra != nil {
+		return r.extra[key]
+	}
+	return nil
+}
+
+// MarshalJSON 自定义序列化，保持 JSON 兼容。
+func (r *ChainResult) MarshalJSON() ([]byte, error) {
+	type alias ChainResult
+	return json.Marshal(struct {
+		Extra map[string]any `json:"extra,omitempty"`
+		*alias
+	}{Extra: r.extra, alias: (*alias)(r)})
+}
+
+// UnmarshalJSON 自定义反序列化，保持 JSON 兼容。
+func (r *ChainResult) UnmarshalJSON(data []byte) error {
+	type alias ChainResult
+	aux := struct {
+		Extra map[string]any `json:"extra,omitempty"`
+		*alias
+	}{alias: (*alias)(r)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	r.extra = aux.Extra
+	return nil
 }
 
 // AsCloudDownloadChain 返回原始 runner 的 CloudDownloadChain 引用。
@@ -75,8 +126,8 @@ func (r *ChainResult) AsCloudDownloadChain() *CloudDownloadChain {
 
 // LocalPath 获取本地路径（仅 CloudDownloadChain 支持）。
 func (r *ChainResult) LocalPath() string {
-	if r.Extra != nil {
-		if v, ok := r.Extra["local_path"].(string); ok {
+	if r.extra != nil {
+		if v, ok := r.extra["local_path"].(string); ok {
 			return v
 		}
 	}
@@ -85,8 +136,8 @@ func (r *ChainResult) LocalPath() string {
 
 // KeepFiles 返回是否保留远端文件（仅 CloudDownloadChain 支持）。
 func (r *ChainResult) KeepFiles() bool {
-	if r.Extra != nil {
-		if v, ok := r.Extra["keep_files"].(bool); ok {
+	if r.extra != nil {
+		if v, ok := r.extra["keep_files"].(bool); ok {
 			return v
 		}
 	}
@@ -143,19 +194,19 @@ func defaultChainOptions() chainOptions {
 // ChainManager 链式操作管理器。
 type ChainManager struct {
 	store      KVStore
-	codec      StructCodec
+	codec      Codec
 	registry   map[string]func() ChainRunner
 	registryMu sync.RWMutex
 	logger     *slog.Logger
 }
 
-func NewChainManager(store KVStore) *ChainManager {
+func NewChainManager(store KVStore, opts ...ChainManagerOption) *ChainManager {
 	if store == nil {
 		panic("NewChainManager: store 不能为 nil")
 	}
 	m := &ChainManager{
 		store:    store,
-		codec:    StructCodec{},
+		codec:    DefaultStructCodec,
 		registry: make(map[string]func() ChainRunner),
 		logger:   slog.Default(),
 	}
@@ -163,6 +214,9 @@ func NewChainManager(store KVStore) *ChainManager {
 	runnerRegistryMu.RLock()
 	maps.Copy(m.registry, runnerRegistry)
 	runnerRegistryMu.RUnlock()
+	for _, opt := range opts {
+		opt(m)
+	}
 	return m
 }
 
@@ -170,6 +224,9 @@ func NewChainManager(store KVStore) *ChainManager {
 func (m *ChainManager) RegisterRunner(typeName string, factory func() ChainRunner) {
 	m.registryMu.Lock()
 	defer m.registryMu.Unlock()
+	if _, ok := m.registry[typeName]; ok {
+		m.logger.Warn("RegisterRunner: 重复注册 runner 类型，将覆盖已有注册", "type", typeName)
+	}
 	m.registry[typeName] = factory
 }
 
@@ -193,7 +250,7 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 	if err != nil {
 		state := runner.State()
 		state["status"] = StatusFailed
-		if saveErr := m.store.Save(ctx, "chain:"+runner.ID(), state); saveErr != nil {
+		if saveErr := m.store.Save(context.WithoutCancel(ctx), "chain:"+runner.ID(), state); saveErr != nil {
 			return fmt.Errorf("链操作失败: %w（保存状态也失败: %v）", err, saveErr)
 		}
 		return err
