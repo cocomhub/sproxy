@@ -184,10 +184,12 @@ func TestLoadConfig_ValidFile(t *testing.T) {
 func TestHandleConfigShow(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ServerURL = "https://example.com"
+	cfg.Timeout = 120
 	cfg.TunnelKey = strings.Repeat("d", 64)
 	cfg.AuthToken = "my-secret-token"
 	cfg.ChunkSize = 8 << 20
 	cfg.MaxChunkSize = 32 << 20
+	cfg.AllowTransportFallback = true
 
 	var buf bytes.Buffer
 	HandleConfigShow(cfg, &buf)
@@ -196,11 +198,23 @@ func TestHandleConfigShow(t *testing.T) {
 	if !strings.Contains(out, "ServerURL:     https://example.com") {
 		t.Errorf("expected ServerURL in output, got: %s", out)
 	}
+	if !strings.Contains(out, "Timeout:       120") {
+		t.Errorf("expected Timeout in output, got: %s", out)
+	}
 	if !strings.Contains(out, "dddd****") {
 		t.Errorf("expected masked TunnelKey in output, got: %s", out)
 	}
 	if !strings.Contains(out, "my-s****") {
 		t.Errorf("expected masked AuthToken in output, got: %s", out)
+	}
+	if !strings.Contains(out, "ChunkSize:     8388608") {
+		t.Errorf("expected ChunkSize in output, got: %s", out)
+	}
+	if !strings.Contains(out, "MaxChunkSize:  33554432") {
+		t.Errorf("expected MaxChunkSize in output, got: %s", out)
+	}
+	if !strings.Contains(out, "AllowTransportFallback: true") {
+		t.Errorf("expected AllowTransportFallback in output, got: %s", out)
 	}
 }
 
@@ -259,5 +273,13 @@ func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
 
 	if !strings.Contains(out, "shor****") {
 		t.Errorf("expected masked short key (shor****) in output, got: %s", out)
+	}
+}
+
+func TestHandleConfigShow_NilReceiver(t *testing.T) {
+	var buf bytes.Buffer
+	HandleConfigShow(nil, &buf)
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for nil config, got: %s", buf.String())
 	}
 }

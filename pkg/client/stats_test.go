@@ -26,6 +26,7 @@ func TestGetStats(t *testing.T) {
 			"files_uploaded":5,"files_downloaded":20,"files_deleted":2,
 			"bytes_uploaded":50000,"bytes_downloaded":200000,
 			"max_storage_bytes":1073741824,"storage_usage":1048576,
+			"storage_user_files":524288,"storage_chunked":262144,"storage_versions":131072,"storage_cloud":131072,
 			"disk_total":100000000000,"disk_free":50000000000,"disk_used":50000000000
 		}`))
 	}))
@@ -62,7 +63,7 @@ func TestGetStats(t *testing.T) {
 		t.Errorf("expected Status5xx=5, got %d", stats.RequestCounts.Status5xx)
 	}
 
-	// Top-level fields (11 fields)
+	// Top-level fields (15 fields)
 	if stats.ActiveConns != 3 {
 		t.Errorf("expected ActiveConns=3, got %d", stats.ActiveConns)
 	}
@@ -86,6 +87,18 @@ func TestGetStats(t *testing.T) {
 	}
 	if stats.StorageUsage != 1048576 {
 		t.Errorf("expected StorageUsage=1048576, got %d", stats.StorageUsage)
+	}
+	if stats.StorageUserFiles != 524288 {
+		t.Errorf("expected StorageUserFiles=524288, got %d", stats.StorageUserFiles)
+	}
+	if stats.StorageChunked != 262144 {
+		t.Errorf("expected StorageChunked=262144, got %d", stats.StorageChunked)
+	}
+	if stats.StorageVersions != 131072 {
+		t.Errorf("expected StorageVersions=131072, got %d", stats.StorageVersions)
+	}
+	if stats.StorageCloud != 131072 {
+		t.Errorf("expected StorageCloud=131072, got %d", stats.StorageCloud)
 	}
 	if stats.DiskTotal != 100000000000 {
 		t.Errorf("expected DiskTotal=100000000000, got %d", stats.DiskTotal)

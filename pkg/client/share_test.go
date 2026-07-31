@@ -64,6 +64,30 @@ func TestListShares(t *testing.T) {
 	}
 }
 
+func TestListShares_Empty(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/api/shares" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"shares":[]}`))
+	}))
+	t.Cleanup(ts.Close)
+
+	c := NewFileClient(ts.URL)
+	shares, err := c.ListShares(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shares) != 0 {
+		t.Errorf("expected 0 shares, got %d", len(shares))
+	}
+}
+
 func TestRevokeShare(t *testing.T) {
 	t.Parallel()
 
@@ -164,6 +188,14 @@ func TestShareLink_CreatedAtTime_Invalid(t *testing.T) {
 	}
 }
 
+func TestShareLink_CreatedAtTime_NilReceiver(t *testing.T) {
+	var s *ShareLink
+	_, err := s.CreatedAtTime()
+	if err == nil {
+		t.Fatal("expected error for nil receiver")
+	}
+}
+
 func TestShareLink_ExpiresAtTime(t *testing.T) {
 	s := &ShareLink{ExpiresAt: "2026-07-25T12:00:00Z"}
 	tm, err := s.ExpiresAtTime()
@@ -181,6 +213,14 @@ func TestShareLink_ExpiresAtTime_Invalid(t *testing.T) {
 	_, err := s.ExpiresAtTime()
 	if err == nil {
 		t.Fatal("expected error for invalid date")
+	}
+}
+
+func TestShareLink_ExpiresAtTime_NilReceiver(t *testing.T) {
+	var s *ShareLink
+	_, err := s.ExpiresAtTime()
+	if err == nil {
+		t.Fatal("expected error for nil receiver")
 	}
 }
 
@@ -231,6 +271,23 @@ func TestCreateShare_ServerError(t *testing.T) {
 	_, err := c.CreateShare(t.Context(), "test.txt")
 	if err == nil {
 		t.Fatal("expected error for server error")
+	}
+}
+
+func TestCreateShare_EmptyFilename(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 即使请求不合法，mock 服务端也返回 400
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"success":false,"message":"empty filename"}`))
+	}))
+	t.Cleanup(ts.Close)
+
+	c := NewFileClient(ts.URL)
+	_, err := c.CreateShare(t.Context(), "")
+	if err == nil {
+		t.Fatal("expected error for empty filename")
 	}
 }
 

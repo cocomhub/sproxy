@@ -26,13 +26,18 @@ func hubTestServer(t *testing.T) (*httptest.Server, string) {
 			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
 			return
 		}
+		// 验证请求体关键字段
+		if req.MaxStorageBytes <= 0 {
+			http.Error(w, `{"error":"max_storage_bytes must be positive"}`, http.StatusBadRequest)
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]any{"success": true, "max_storage_bytes": req.MaxStorageBytes})
 	})
 
 	// GET /api/hub/nodes
 	mux.HandleFunc("GET /api/hub/nodes", func(w http.ResponseWriter, r *http.Request) {
 		connectedTime, _ := time.Parse(time.RFC3339, "2026-07-26T00:00:00Z")
-		_ = json.NewEncoder(w).Encode([]HubNodeInfo{
+		json.NewEncoder(w).Encode([]HubNodeInfo{
 			{ID: "node-1", Addr: "192.168.1.1:18083", Connected: connectedTime},
 			{ID: "node-2", Addr: "192.168.1.2:18083", Connected: connectedTime},
 		})
@@ -92,6 +97,21 @@ func TestListHubNodes(t *testing.T) {
 	}
 	if nodes[0].ID != "node-1" {
 		t.Fatalf("expected node-1, got %q", nodes[0].ID)
+	}
+	if nodes[0].Addr != "192.168.1.1:18083" {
+		t.Errorf("expected Addr 192.168.1.1:18083, got %q", nodes[0].Addr)
+	}
+	if nodes[0].Connected.IsZero() {
+		t.Error("expected non-zero Connected time")
+	}
+	if nodes[1].ID != "node-2" {
+		t.Errorf("expected node-2, got %q", nodes[1].ID)
+	}
+	if nodes[1].Addr != "192.168.1.2:18083" {
+		t.Errorf("expected Addr 192.168.1.2:18083, got %q", nodes[1].Addr)
+	}
+	if nodes[1].Connected.IsZero() {
+		t.Error("expected non-zero Connected time")
 	}
 }
 

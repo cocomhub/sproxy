@@ -23,8 +23,12 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 	var mu sync.Mutex
 	chunkCalls := 0
 	completeCalls := 0
+	initCalls := 0
 
 	mux.HandleFunc("POST /upload/init", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		initCalls++
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"success":true,"upload_id":"test-concurrent"}`))
 	})
@@ -92,12 +96,17 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 
 	// 5 个并发上传，每个 4 个 chunk，关闭 resume
 	// 预期每个上传：init(1) + chunk(4) + complete(1) = 6 次调用
+	// 总 initCalls = 5 * 1 = 5
 	// 总 chunkCalls = 5 * 4 = 20
 	// 总 completeCalls = 5 * 1 = 5
+	expectedInitCalls := 5 * 1
 	expectedChunkCalls := 5 * 4
 	expectedCompleteCalls := 5 * 1
 
 	mu.Lock()
+	if initCalls != expectedInitCalls {
+		t.Errorf("expected %d init calls, got %d", expectedInitCalls, initCalls)
+	}
 	if chunkCalls != expectedChunkCalls {
 		t.Errorf("expected %d chunk upload calls, got %d", expectedChunkCalls, chunkCalls)
 	}
@@ -115,6 +124,11 @@ func TestConcurrentFileOperations(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+		// 校验 filename 参数
+		if r.URL.Query().Get("filename") == "" {
+			http.Error(w, "missing filename", http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("X-File-Checksum", "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
 		w.Header().Set("X-File-Size", "42")
 		w.Header().Set("X-File-IsDir", "false")

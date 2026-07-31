@@ -12,7 +12,9 @@ func TestHandleConfigSet(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
 	cfg := DefaultConfig()
-	_ = SaveConfig(cfg, cfgPath)
+	if err := SaveConfig(cfg, cfgPath); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
 
 	tests := []struct {
 		name    string
