@@ -82,9 +82,12 @@ func TestChainManager_Run_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := store.Load(ctx, "chain:test-run-1")
-	if err == nil {
-		t.Fatal("expected cache to be deleted after successful run")
+	state, err := store.Load(ctx, "chain:test-run-1")
+	if err != nil {
+		t.Fatal("expected cache to be preserved after successful run")
+	}
+	if status, _ := state["status"].(string); status != StatusCompleted {
+		t.Errorf("expected status=completed, got %s", status)
 	}
 }
 
@@ -216,13 +219,13 @@ func TestChainManager_CancelDuringRun(t *testing.T) {
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
-	var ran atomic.Bool
+	ready := make(chan struct{})
 	runner := &testChainRunner{
 		id:     "test-cancel-during",
 		phase:  "running",
 		status: StatusRunning,
 		runFn: func(ctx context.Context, reportFn ProgressFunc) error {
-			ran.Store(true)
+			close(ready)
 			<-ctx.Done()
 			return ctx.Err()
 		},
@@ -233,13 +236,7 @@ func TestChainManager_CancelDuringRun(t *testing.T) {
 		errCh <- cm.Run(ctx, runner)
 	}()
 
-	// 等待 runner 开始运行
-	for range 10 {
-		if ran.Load() {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	<-ready
 	cancel()
 
 	select {
@@ -249,9 +246,6 @@ func TestChainManager_CancelDuringRun(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for Run to return after cancel")
-	}
-	if !ran.Load() {
-		t.Fatal("expected runner to be started")
 	}
 }
 
