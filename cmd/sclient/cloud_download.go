@@ -64,6 +64,9 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 			}
 
 			archiveName, _ := cmd.Flags().GetString("archive-name")
+			if archiveName == "" {
+				archiveName = fmt.Sprintf("cloud-download-%d.tar.gz", time.Now().Unix())
+			}
 			outputDir, _ := cmd.Flags().GetString("output-dir")
 			keepFiles, _ := cmd.Flags().GetBool("keep-files")
 			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
@@ -303,6 +306,9 @@ func NewCmdCloudFetch(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 			}
 
 			archiveName, _ := cmd.Flags().GetString("archive-name")
+			if archiveName == "" {
+				archiveName = fmt.Sprintf("cloud-download-%d.tar.gz", time.Now().Unix())
+			}
 			outputDir, _ := cmd.Flags().GetString("output-dir")
 			keepFiles, _ := cmd.Flags().GetBool("keep-files")
 			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")

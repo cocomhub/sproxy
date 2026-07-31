@@ -18,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -827,7 +826,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 
 	if outputPath == "" {
 		outputPath = filename
-		if strings.Contains(filepath.Clean(outputPath), "..") {
+		if containsPathTraversal(outputPath) {
 			return fmt.Errorf("文件名不能包含路径穿越符 '..'")
 		}
 	} else {

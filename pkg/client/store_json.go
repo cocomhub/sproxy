@@ -50,7 +50,7 @@ func (s *JSONKVStore) Save(ctx context.Context, key string, value map[string]any
 		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("重命名文件失败: %w", err)
 	}
 	return nil

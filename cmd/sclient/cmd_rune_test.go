@@ -1002,15 +1002,13 @@ func TestVersionCommand_ListEmpty(t *testing.T) {
 
 func TestConfigShowCmd_Integration(t *testing.T) {
 	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://test:18083"}}
-	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil, cfgSvc)
-	out := testutil.CaptureStdout(func() {
-		// 直接调用 RunE 模拟 "config show" 行为
-		err := cmd.RunE(cmd, []string{"show"})
-		if err != nil {
-			t.Fatalf("config show command failed: %v", err)
-		}
-	})
-	if !strings.Contains(out, "http://test:18083") {
-		t.Errorf("expected output to contain server URL, got: %s", out)
+	var buf strings.Builder
+	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil, cfgSvc)
+	err := cmd.RunE(cmd, []string{"show"})
+	if err != nil {
+		t.Fatalf("config show command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "http://test:18083") {
+		t.Errorf("expected output to contain server URL, got: %s", buf.String())
 	}
 }

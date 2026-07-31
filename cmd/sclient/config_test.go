@@ -13,7 +13,6 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
-	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 func TestConfigCmd_Use(t *testing.T) {
@@ -38,18 +37,15 @@ func TestConfigCmd_HasSubcommands(t *testing.T) {
 }
 
 func TestConfigCmd_ShowWithConfig(t *testing.T) {
-	// 注意：HandleConfigShow 内部使用 fmt.Printf 写入 os.Stdout，
-	// 因为 CaptureStdout 替换全局 os.Stdout，此测试不能使用 t.Parallel()
 	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://test:18083"}}
-	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, new(string), cfgSvc)
-	out := testutil.CaptureStdout(func() {
-		err := cmd.RunE(cmd, []string{"show"})
-		if err != nil {
-			t.Fatalf("config show command failed: %v", err)
-		}
-	})
-	if !strings.Contains(out, "http://test:18083") {
-		t.Errorf("expected output to contain server URL, got: %s", out)
+	var buf strings.Builder
+	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, new(string), cfgSvc)
+	err := cmd.RunE(cmd, []string{"show"})
+	if err != nil {
+		t.Fatalf("config show command failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "http://test:18083") {
+		t.Errorf("expected output to contain server URL, got: %s", buf.String())
 	}
 }
 
