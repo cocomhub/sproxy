@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/shortid"
@@ -86,24 +87,25 @@ type Option func(*FileClient)
 //	result, err := client.Upload(ctx, "file.txt")
 //	err := client.Download(ctx, "file.txt", "/tmp/file.txt")
 type FileClient struct {
-	serverURL       string
-	httpClient      *http.Client
-	tunnelClient    *tunnel.Client
-	xferName        string
-	hubURL          string
-	tunnelKey       []byte
-	tunnelMux       *mux.Mux
-	tunnelMuxMu     sync.Mutex
-	progressFn      func(label string, read, total int64)
-	chunkSize       int64
-	maxChunkSize    int64
-	authToken       string
-	logger          *slog.Logger
-	uploadCache     sync.Map      // key = absFilePath, value = *uploadCacheEntry
-	maxCacheEntries int           // checksum 缓存最大条目数，0=使用默认值 1000
-	cacheTTL        time.Duration // checksum 缓存 TTL，0=使用默认值 10m
-	chainManager    *ChainManager // 链式操作管理器，nil=不启用
-	initError       error         // WithTunnel/WithXfer 初始化错误
+	serverURL              string
+	httpClient             *http.Client
+	tunnelClient           *tunnel.Client
+	xferName               string
+	hubURL                 string
+	tunnelKey              []byte
+	tunnelMux              *mux.Mux
+	tunnelMuxMu            sync.Mutex
+	progressFn             func(label string, read, total int64)
+	chunkSize              int64
+	maxChunkSize           int64
+	authToken              string
+	logger                 *slog.Logger
+	uploadCache            sync.Map      // key = absFilePath, value = *uploadCacheEntry
+	cacheCleanCounter      atomic.Int64  // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
+	maxCacheEntries        int           // checksum 缓存最大条目数，0=使用默认值 1000
+	cacheTTL               time.Duration // checksum 缓存 TTL，0=使用默认值 10m
+	chainManager           *ChainManager // 链式操作管理器，nil=不启用
+	initError              error         // WithTunnel/WithXfer 初始化错误
 	allowTransportFallback bool          // WithTransportFallback 设置后允许回退到直连模式
 }
 
@@ -1050,7 +1052,7 @@ func (r *doJSONResp) isSuccess() bool { return r.Success }
 func (r *doJSONResp) message() string { return r.Message }
 
 // UploadResult 实现 successChecker 接口，支持 doJSON 自动检查。
-func (r *UploadResult) isSuccess() bool    { return r.Success }
+func (r *UploadResult) isSuccess() bool { return r.Success }
 func (r *UploadResult) message() string { return r.Message }
 
 // doJSON 发送 JSON 请求体并解析 JSON 响应。
@@ -1133,7 +1135,7 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 		Phase:   runner.Phase(),
 		Status:  runner.Status(),
 		raw:     runner,
-		Extra: map[string]any{
+		extra: map[string]any{
 			"local_path": runner.LocalPath,
 			"keep_files": runner.KeepFiles,
 		},
@@ -1183,7 +1185,7 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 		Phase:   runner.Phase(),
 		Status:  runner.Status(),
 		raw:     runner,
-		Extra:   extra,
+		extra:   extra,
 	}, nil
 }
 

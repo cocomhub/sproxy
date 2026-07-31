@@ -27,7 +27,7 @@ func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *str
 			}
 
 			if len(args) == 0 || args[0] == "show" {
-				client.HandleConfigShow(cfg)
+				client.HandleConfigShow(cfg, ios.Out)
 				return nil
 			}
 

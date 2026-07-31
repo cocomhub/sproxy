@@ -6,10 +6,10 @@ package client
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
@@ -18,19 +18,21 @@ import (
 
 // Config 是 sclient 的配置文件结构。
 type Config struct {
-	ServerURL    string `yaml:"server_url" mapstructure:"server_url"`
-	Timeout      int    `yaml:"timeout" mapstructure:"timeout"`
-	TunnelKey    string `yaml:"tunnel_key" mapstructure:"tunnel_key"`
-	ChunkSize    int64  `yaml:"chunk_size" mapstructure:"chunk_size"`
-	MaxChunkSize int64  `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
-	AuthToken    string `yaml:"auth_token" mapstructure:"auth_token"`
+	ServerURL              string `yaml:"server_url" mapstructure:"server_url"`
+	Timeout                int    `yaml:"timeout" mapstructure:"timeout"`
+	TunnelKey              string `yaml:"tunnel_key" mapstructure:"tunnel_key"`
+	ChunkSize              int64  `yaml:"chunk_size" mapstructure:"chunk_size"`
+	MaxChunkSize           int64  `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
+	AuthToken              string `yaml:"auth_token" mapstructure:"auth_token"`
+	AllowTransportFallback bool   `yaml:"allow_transport_fallback" mapstructure:"allow_transport_fallback"`
 }
 
 func DefaultConfig() *Config {
 	return &Config{
-		ServerURL: "https://127.0.0.1:18083",
-		Timeout:   300,
-		ChunkSize: size.DefaultChunkSize, // 4 MiB
+		ServerURL:    "https://127.0.0.1:18083",
+		Timeout:      300,
+		ChunkSize:    size.DefaultChunkSize,    // 4 MiB
+		MaxChunkSize: size.DefaultMaxChunkSize, // 64 MiB
 	}
 }
 
@@ -47,6 +49,9 @@ func (c *Config) SetDefaults() {
 	}
 	if c.ChunkSize <= 0 {
 		c.ChunkSize = size.DefaultChunkSize
+	}
+	if c.MaxChunkSize <= 0 {
+		c.MaxChunkSize = size.DefaultMaxChunkSize
 	}
 }
 
@@ -107,7 +112,7 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func SaveConfig(cfg *Config, path string) error {
-	if strings.Contains(filepath.Clean(path), "..") {
+	if containsPathTraversal(path) {
 		return fmt.Errorf("配置路径包含非法路径穿越: %s", path)
 	}
 	data, err := yaml.Marshal(cfg)
@@ -120,34 +125,38 @@ func SaveConfig(cfg *Config, path string) error {
 	return nil
 }
 
-func HandleConfigShow(cfg *Config) {
+func HandleConfigShow(cfg *Config, w io.Writer) {
 	if cfg == nil {
 		return
 	}
-	fmt.Printf("ServerURL:     %s\n", cfg.ServerURL)
-	fmt.Printf("Timeout:       %d\n", cfg.Timeout)
+	fmt.Fprintf(w, "ServerURL:     %s\n", cfg.ServerURL)
+	fmt.Fprintf(w, "Timeout:       %d\n", cfg.Timeout)
 	maskedKey := cfg.TunnelKey
 	if len(maskedKey) > 4 {
 		maskedKey = maskedKey[:4] + "****"
 	} else if len(maskedKey) > 0 {
 		maskedKey = "****"
 	}
-	fmt.Printf("TunnelKey:     %s\n", maskedKey)
+	fmt.Fprintf(w, "TunnelKey:     %s\n", maskedKey)
 	maskedToken := cfg.AuthToken
 	if len(maskedToken) > 4 {
 		maskedToken = maskedToken[:4] + "****"
 	} else if len(maskedToken) > 0 {
 		maskedToken = "****"
 	}
-	fmt.Printf("AuthToken:     %s\n", maskedToken)
-	fmt.Printf("ChunkSize:     %d\n", cfg.ChunkSize)
-	fmt.Printf("MaxChunkSize:  %d\n", cfg.MaxChunkSize)
+	fmt.Fprintf(w, "AuthToken:     %s\n", maskedToken)
+	fmt.Fprintf(w, "ChunkSize:     %d\n", cfg.ChunkSize)
+	fmt.Fprintf(w, "MaxChunkSize:  %d\n", cfg.MaxChunkSize)
+	fmt.Fprintf(w, "AllowTransportFallback: %v\n", cfg.AllowTransportFallback)
 }
 
 // ApplyConfigSet 在内存中更新配置，不写文件。返回更新后的配置和错误。
 func ApplyConfigSet(cfg *Config, key, value string) error {
 	switch key {
 	case "server_url":
+		if _, err := url.Parse(value); err != nil {
+			return fmt.Errorf("无效的服务器地址: %w", err)
+		}
 		cfg.ServerURL = value
 	case "auth_token":
 		cfg.AuthToken = value
@@ -219,10 +228,7 @@ func (c *FileClient) GetConfig(ctx context.Context) (*ConfigResponse, error) {
 // 只更新指定的字段，未指定的字段保持不变。
 // 可更新的字段：log_level, log_format, auth_token, rate_limit_requests, rate_limit_window。
 func (c *FileClient) UpdateConfig(ctx context.Context, updates map[string]any) error {
-	var result struct {
-		Success bool `json:"success"`
-		Changed bool `json:"changed"`
-	}
+	var result doJSONResp
 	if err := c.doJSON(ctx, "PUT", "/api/config", updates, &result); err != nil {
 		return fmt.Errorf("更新配置失败: %w", err)
 	}

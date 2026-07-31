@@ -23,7 +23,7 @@ func NewCmdVersion(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Conf
 			fmt.Fprintln(ios.Out)
 			cfg, err := cfgSvc.LoadConfig()
 			if err == nil {
-				client.HandleConfigShow(cfg)
+				client.HandleConfigShow(cfg, ios.Out)
 			}
 			return nil
 		},

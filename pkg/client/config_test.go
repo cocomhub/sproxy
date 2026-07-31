@@ -4,6 +4,7 @@
 package client
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
-	"github.com/cocomhub/sproxy/pkg/testutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -189,9 +189,9 @@ func TestHandleConfigShow(t *testing.T) {
 	cfg.ChunkSize = 8 << 20
 	cfg.MaxChunkSize = 32 << 20
 
-	out := testutil.CaptureStdout(func() {
-		HandleConfigShow(cfg)
-	})
+	var buf bytes.Buffer
+	HandleConfigShow(cfg, &buf)
+	out := buf.String()
 
 	if !strings.Contains(out, "ServerURL:     https://example.com") {
 		t.Errorf("expected ServerURL in output, got: %s", out)
@@ -253,9 +253,9 @@ func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.TunnelKey = "short"
 
-	out := testutil.CaptureStdout(func() {
-		HandleConfigShow(cfg)
-	})
+	var buf bytes.Buffer
+	HandleConfigShow(cfg, &buf)
+	out := buf.String()
 
 	if !strings.Contains(out, "shor****") {
 		t.Errorf("expected masked short key (shor****) in output, got: %s", out)
