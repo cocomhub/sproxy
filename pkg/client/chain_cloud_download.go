@@ -5,7 +5,10 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -52,10 +55,22 @@ type CloudDownloadChain struct {
 }
 
 // NewCloudDownloadChain 创建云端下载链式操作。
-func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, localDir string, opts chainOptions) *CloudDownloadChain {
+func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, localDir string, opts chainOptions) (*CloudDownloadChain, error) {
+	if archiveName == "" {
+		return nil, fmt.Errorf("archiveName 不能为空")
+	}
+	if localDir == "" {
+		return nil, fmt.Errorf("localDir 不能为空")
+	}
 	now := time.Now()
+	// 用纳秒 + 随机后缀避免同一纳秒内的冲突
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, fmt.Errorf("生成随机数失败: %w", err)
+	}
+	chainID := fmt.Sprintf("chain-%d-%x", now.UnixNano(), buf)
 	return &CloudDownloadChain{
-		ChainID:      fmt.Sprintf("chain-%d", now.UnixNano()),
+		ChainID:      chainID,
 		CurrentPhase: "",
 		CurStatus:    StatusRunning,
 		URLs:         urls,
@@ -69,7 +84,7 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		Timeout:      opts.timeout,
 		client:       client,
 		opts:         opts,
-	}
+	}, nil
 }
 
 func (c *CloudDownloadChain) ID() string     { return c.ChainID }
@@ -158,6 +173,7 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 		c.CurrentPhase = PhaseSubmitting
 		c.UpdatedAt = time.Now()
 		c.saveState(ctx)
+		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseSubmitting)
 		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "submit cloud download tasks", Current: 0, Total: len(c.URLs)})
 		if err := c.submitTasks(ctx); err != nil {
 			return err
@@ -165,30 +181,36 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 		c.CurrentPhase = PhaseWaiting
 		c.UpdatedAt = time.Now()
 		c.saveState(ctx)
+		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseWaiting, "completed", c.Completed, "total", c.Total)
 		reportFn(ctx, ProgressInfo{Phase: PhaseWaiting, Message: "waiting for downloads to complete", Current: c.Completed, Total: c.Total})
 		fallthrough
 
 	case PhaseWaiting:
+		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseWaiting)
 		if err := c.waitForTasks(ctx); err != nil {
 			return err
 		}
 		c.CurrentPhase = PhaseArchiving
 		c.UpdatedAt = time.Now()
 		c.saveState(ctx)
+		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
 		reportFn(ctx, ProgressInfo{Phase: PhaseArchiving, Message: "packaging archive", Current: 0, Total: 1})
 		fallthrough
 
 	case PhaseArchiving:
+		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
 		if err := c.archiveTasks(ctx); err != nil {
 			return err
 		}
 		c.CurrentPhase = PhaseDownloading
 		c.UpdatedAt = time.Now()
 		c.saveState(ctx)
+		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseDownloading)
 		reportFn(ctx, ProgressInfo{Phase: PhaseDownloading, Message: "downloading to local", Current: 0, Total: 1})
 		fallthrough
 
 	case PhaseDownloading:
+		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseDownloading)
 		if err := c.downloadToLocal(ctx); err != nil {
 			return err
 		}
@@ -199,12 +221,17 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 		c.CurrentPhase = PhaseCleaning
 		c.UpdatedAt = time.Now()
 		c.saveState(ctx)
+		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
 		reportFn(ctx, ProgressInfo{Phase: PhaseCleaning, Message: "cleaning remote files", Current: 0, Total: len(c.TaskIDs) + 1})
 		fallthrough
 
 	case PhaseCleaning:
 		// KeepFiles=true 时不会进入此分支（下载阶段已 break）
+		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
 		_ = c.cleanupRemote(ctx) // 清理失败不影响主流程成功
+
+	default:
+		return fmt.Errorf("unknown phase: %s", c.CurrentPhase)
 	}
 
 	c.CurrentPhase = PhaseCompleted
@@ -236,15 +263,13 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		c.Completed = 0
-		c.Failed = 0
 		var storageFullURLs []string
 		var storageFullIDs []string
 		for _, r := range results {
 			switch r.Status {
-			case "completed":
+			case TaskStatusCompleted:
 				c.Completed++
-			case "failed":
+			case TaskStatusFailed:
 				if isStorageFullError(r.Error) {
 					storageFullURLs = append(storageFullURLs, r.URL)
 					storageFullIDs = append(storageFullIDs, r.ID)
@@ -289,7 +314,10 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			}
 			timer.Stop()
 			if len(storageFullURLs) > 0 {
-				tasks, err := c.client.CloudDownloadBatch(ctx, storageFullURLs)
+				// 使用独立超时的 context 重试，避免原始 context 过期导致重试失败
+				retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				tasks, err := c.client.CloudDownloadBatch(retryCtx, storageFullURLs)
+				cancel()
 				if err != nil {
 					return fmt.Errorf("重试批量提交失败: %w", err)
 				}
@@ -364,7 +392,14 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 					return nil, fmt.Errorf("查询任务 %s 失败: %w", c.TaskIDs[r.index], r.err)
 				}
 				results[r.index] = r.task
-				if r.task.Status != "completed" && r.task.Status != "failed" && r.task.Status != "cancelled" {
+				switch r.task.Status {
+				case TaskStatusCancelled:
+					// cancelled 任务视为"已结束"，但不在成功列表中返回
+					allDone = true
+					return nil, fmt.Errorf("cloud download task %s was cancelled", r.task.ID)
+				case TaskStatusCompleted, TaskStatusFailed:
+					// 已完成或失败，继续等待其他任务
+				default:
 					allDone = false
 				}
 			}
@@ -411,15 +446,13 @@ func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
 
 // cleanupRemote 清理远端任务及关联文件。清理失败时继续处理剩余任务。
 func (c *CloudDownloadChain) cleanupRemote(ctx context.Context) error {
-	var firstErr error
+	var errs []error
 	for _, taskID := range c.TaskIDs {
 		if err := c.client.DeleteCloudTask(ctx, taskID); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("清理云端任务 %s 失败: %w", taskID, err)
-			}
+			errs = append(errs, fmt.Errorf("清理云端任务 %s 失败: %w", taskID, err))
 		}
 	}
-	return firstErr
+	return errors.Join(errs...)
 }
 
 // isStorageFullError 判断错误消息是否为存储空间不足（大小写不敏感子串匹配）。

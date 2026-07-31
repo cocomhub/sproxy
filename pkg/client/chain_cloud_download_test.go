@@ -29,7 +29,10 @@ func TestCloudDownloadChain_New(t *testing.T) {
 	client := NewFileClient("http://127.0.0.1:9999")
 	opts := defaultChainOptions()
 
-	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1", "http://example.com/file2"}, "test-archive", t.TempDir(), opts)
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/file1", "http://example.com/file2"}, "test-archive", t.TempDir(), opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
 
 	if chain.ID() == "" {
 		t.Fatal("expected non-empty chain ID")
@@ -59,7 +62,10 @@ func TestCloudDownloadChain_State(t *testing.T) {
 	client := NewFileClient("http://127.0.0.1:9999")
 	opts := defaultChainOptions()
 
-	chain := NewCloudDownloadChain(client, []string{"http://example.com/file"}, "archive", t.TempDir(), opts)
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/file"}, "archive", t.TempDir(), opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
 	chain.CurrentPhase = PhaseWaiting
 	chain.TaskIDs = []string{"task-1", "task-2"}
 	chain.Completed = 1
@@ -133,14 +139,17 @@ func TestCloudDownloadChain_FullRun(t *testing.T) {
 	opts.pollInterval = 100 * time.Millisecond
 	opts.timeout = 10 * time.Second
 
-	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1", "http://example.com/file2"}, "test-archive", dir, opts)
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/file1", "http://example.com/file2"}, "test-archive", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
 
 	var phases []string
 	reportFn := func(ctx context.Context, info ProgressInfo) {
 		phases = append(phases, info.Phase)
 	}
 
-	err := chain.Run(t.Context(), reportFn)
+	err = chain.Run(t.Context(), reportFn)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
@@ -184,14 +193,17 @@ func TestCloudDownloadChain_KeepFiles(t *testing.T) {
 	opts.timeout = 10 * time.Second
 	opts.keepFiles = true
 
-	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "keep-archive", dir, opts)
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "keep-archive", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
 
 	var phases []string
 	reportFn := func(ctx context.Context, info ProgressInfo) {
 		phases = append(phases, info.Phase)
 	}
 
-	err := chain.Run(t.Context(), reportFn)
+	err = chain.Run(t.Context(), reportFn)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
@@ -218,9 +230,12 @@ func TestCloudDownloadChain_SubmitError(t *testing.T) {
 	opts := defaultChainOptions()
 	opts.pollInterval = 100 * time.Millisecond
 
-	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", "/tmp", opts)
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", "/tmp", opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
 
-	err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {
 		t.Fatal("expected error for submit failure")
 	}
@@ -253,9 +268,12 @@ func TestCloudDownloadChain_ArchiveError(t *testing.T) {
 	opts := defaultChainOptions()
 	opts.pollInterval = 100 * time.Millisecond
 
-	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", "/tmp", opts)
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", "/tmp", opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
 
-	err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {
 		t.Fatal("expected error for archive failure")
 	}
@@ -512,9 +530,12 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	client := NewFileClient(ts.URL)
 	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 10 * time.Second}
 
-	chain := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "retry-archive", dir, opts)
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "retry-archive", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
 
-	err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
@@ -816,9 +837,12 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 
 	client := NewFileClient(ts.URL)
 	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second}
-	chain := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", dir, opts)
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
 
-	err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {
 		t.Fatal("expected error after all retries exhausted")
 	}

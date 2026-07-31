@@ -104,6 +104,7 @@ type FileClient struct {
 	cacheTTL        time.Duration // checksum 缓存 TTL，0=使用默认值 10m
 	chainManager    *ChainManager // 链式操作管理器，nil=不启用
 	initError       error         // WithTunnel/WithXfer 初始化错误
+	allowTransportFallback bool          // WithTransportFallback 设置后允许回退到直连模式
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
@@ -340,6 +341,14 @@ func WithCacheOptions(maxEntries int, ttl time.Duration) Option {
 	}
 }
 
+// WithTransportFallback 设置当隧道/xfer 初始化失败时允许回退到直连模式。
+// 默认情况下（不设置此选项），initError 会导致 doRequest 直接返回错误。
+func WithTransportFallback() Option {
+	return func(c *FileClient) {
+		c.allowTransportFallback = true
+	}
+}
+
 // calculateChecksum 计算文件的 SHA-256 十六进制摘要（无缓存版本）。
 // 与 calcFileChecksum（带缓存，位于 chunked.go）不同，此函数每次调用都重新计算。
 func calculateChecksum(filePath string) (string, error) {
@@ -403,6 +412,11 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	go func() {
 		defer pw.Close()
 		defer mw.Close()
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		part, wErr := mw.CreateFormFile("file", remoteClean)
 		if wErr != nil {
 			pw.CloseWithError(wErr)
@@ -493,7 +507,7 @@ func validateOutputPath(path string) error {
 	if cleaned == "." {
 		return fmt.Errorf("输出路径不能为空")
 	}
-	if strings.Contains(cleaned, "..") {
+	if containsPathTraversal(cleaned) {
 		return fmt.Errorf("输出路径不能包含路径穿越符 '..'")
 	}
 	return nil
@@ -502,7 +516,7 @@ func validateOutputPath(path string) error {
 func (c *FileClient) Download(ctx context.Context, filename, outputPath string) error {
 	if outputPath == "" {
 		outputPath = filename
-		if strings.Contains(filepath.Clean(outputPath), "..") {
+		if containsPathTraversal(filepath.Clean(outputPath)) {
 			return fmt.Errorf("文件名不能包含路径穿越符 '..'")
 		}
 	} else if err := validateOutputPath(outputPath); err != nil {
@@ -526,6 +540,10 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	serverCS := resp.Header.Get(headerFileChecksum)
 	contentLength := resp.ContentLength
 
+	// 创建父目录（如果不存在）
+	if err := ensureParentDir(outputPath); err != nil {
+		return fmt.Errorf("创建输出目录失败: %w", err)
+	}
 	out, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("创建文件失败: %w", err)
@@ -713,17 +731,27 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 	return info, nil
 }
 
+// buildSubdirPath 将子目录参数拼接为路径，并检查路径穿越。
+// 返回 URL 编码后的路径字符串，可用于 URL query 参数。
+func (c *FileClient) buildSubdirPath(subdirs []string) (string, error) {
+	subdir := path.Join(append([]string{"/"}, subdirs...)...)
+	if containsPathTraversal(subdir) {
+		return "", fmt.Errorf("路径不能包含 '..'")
+	}
+	return url.QueryEscape(subdir), nil
+}
+
 // List 列出 sproxy 服务端上的文件，返回 name + size + checksum 的结构化列表。
 //
 // 支持可选的 offset 和 limit 分页参数。limit 为 0 表示不限制，offset 默认从 0 开始。
 // 如果配置了 tunnel_key，列表请求将通过加密隧道传输。
 func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, error) {
 	headers := make(http.Header)
-	subdir := path.Join(append([]string{"/"}, subdirs...)...)
-	if strings.Contains(subdir, "..") {
-		return nil, fmt.Errorf("路径不能包含 '..'")
+	subdir, err := c.buildSubdirPath(subdirs)
+	if err != nil {
+		return nil, err
 	}
-	resp, err := c.doRequest(ctx, "GET", "/api/files?subdir="+url.QueryEscape(subdir), nil, headers)
+	resp, err := c.doRequest(ctx, "GET", "/api/files?subdir="+subdir, nil, headers)
 	if err != nil {
 		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
@@ -748,11 +776,11 @@ func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, e
 // offset 从 0 开始，limit 为 0 表示不限制。
 func (c *FileClient) ListWithPagination(ctx context.Context, offset, limit int, subdirs ...string) ([]FileInfo, int, error) {
 	headers := make(http.Header)
-	subdir := path.Join(append([]string{"/"}, subdirs...)...)
-	if strings.Contains(subdir, "..") {
-		return nil, 0, fmt.Errorf("路径不能包含 '..'")
+	subdir, err := c.buildSubdirPath(subdirs)
+	if err != nil {
+		return nil, 0, err
 	}
-	urlPath := fmt.Sprintf("/api/files?subdir=%s&offset=%d&limit=%d", url.QueryEscape(subdir), offset, limit)
+	urlPath := fmt.Sprintf("/api/files?subdir=%s&offset=%d&limit=%d", subdir, offset, limit)
 	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)
 	if err != nil {
 		return nil, 0, fmt.Errorf(errFmtRequestFailed, err)
@@ -965,7 +993,10 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	}
 
 	if c.initError != nil {
-		c.logger.Warn("隧道不可用，回退到直连模式", "init_error", c.initError)
+		if !c.allowTransportFallback {
+			return nil, fmt.Errorf("transport initialization failed: %w", c.initError)
+		}
+		c.logger.Warn("transport unavailable, falling back to direct mode", "init_error", c.initError)
 	}
 
 	if c.xferName != "" {
@@ -1005,6 +1036,7 @@ func closeBodyIfErr(resp *http.Response, err error) (*http.Response, error) {
 // successChecker 接口，响应体实现此接口时 doJSON 自动检查 Success 字段。
 type successChecker interface {
 	isSuccess() bool
+	message() string
 }
 
 // doJSONResp 是 doJSON 的通用响应包装器，用于自动检查 Success 字段。
@@ -1015,11 +1047,11 @@ type doJSONResp struct {
 
 func (r *doJSONResp) isSuccess() bool { return r.Success }
 
-func (r *doJSONResp) GetMessage() string { return r.Message }
+func (r *doJSONResp) message() string { return r.Message }
 
 // UploadResult 实现 successChecker 接口，支持 doJSON 自动检查。
 func (r *UploadResult) isSuccess() bool    { return r.Success }
-func (r *UploadResult) GetMessage() string { return r.Message }
+func (r *UploadResult) message() string { return r.Message }
 
 // doJSON 发送 JSON 请求体并解析 JSON 响应。
 // 如果 respBody 实现了 successChecker 接口，会自动检查 Success 字段，
@@ -1060,11 +1092,7 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 
 		// 自动检查 Success 字段
 		if checker, ok := respBody.(successChecker); ok && !checker.isSuccess() {
-			msg := ""
-			if m, ok := respBody.(interface{ GetMessage() string }); ok {
-				msg = m.GetMessage()
-			}
-			return fmt.Errorf("请求失败: %s", msg)
+			return fmt.Errorf("请求失败: %s", checker.message())
 		}
 	}
 	return nil
@@ -1079,7 +1107,10 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 		o(&options)
 	}
 
-	runner := NewCloudDownloadChain(c, urls, archiveName, localDir, options)
+	runner, err := NewCloudDownloadChain(c, urls, archiveName, localDir, options)
+	if err != nil {
+		return nil, fmt.Errorf("创建云端下载链失败: %w", err)
+	}
 
 	if c.chainManager != nil {
 		if err := c.chainManager.RunWithProgress(ctx, runner, options.progressFn); err != nil {
