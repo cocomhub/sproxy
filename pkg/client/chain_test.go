@@ -184,7 +184,7 @@ func TestChainManager_Delete(t *testing.T) {
 
 func TestChainManager_RunWithCancelledContext(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
@@ -212,7 +212,7 @@ func TestChainManager_RunWithCancelledContext(t *testing.T) {
 
 func TestChainManager_CancelDuringRun(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
@@ -315,7 +315,7 @@ func TestWithChainProgress(t *testing.T) {
 	if o.progressFn == nil {
 		t.Fatal("expected progressFn to be set")
 	}
-	o.progressFn(context.Background(), ProgressInfo{Phase: "test"})
+	o.progressFn(t.Context(), ProgressInfo{Phase: "test"})
 	if !called {
 		t.Error("progress callback was not called")
 	}

@@ -4,7 +4,6 @@
 package client
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -36,7 +35,7 @@ func TestGetConfig(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	cfg, err := c.GetConfig(context.Background())
+	cfg, err := c.GetConfig(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +57,7 @@ func TestGetConfig_ServerError(t *testing.T) {
 	}))
 	defer ts.Close()
 	c := NewFileClient(ts.URL)
-	_, err := c.GetConfig(context.Background())
+	_, err := c.GetConfig(t.Context())
 	if err == nil {
 		t.Fatal("expected error for server error")
 	}
@@ -89,7 +88,7 @@ func TestUpdateConfig(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	err := c.UpdateConfig(context.Background(), map[string]any{
+	err := c.UpdateConfig(t.Context(), map[string]any{
 		"log_level": "debug",
 	})
 	if err != nil {
@@ -104,7 +103,7 @@ func TestUpdateConfig_ServerError(t *testing.T) {
 	}))
 	defer ts.Close()
 	c := NewFileClient(ts.URL)
-	err := c.UpdateConfig(context.Background(), map[string]any{"log_level": "invalid"})
+	err := c.UpdateConfig(t.Context(), map[string]any{"log_level": "invalid"})
 	if err == nil {
 		t.Fatal("expected error for bad request")
 	}

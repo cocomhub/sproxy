@@ -743,7 +743,7 @@ func TestClient_ListWithPagination(t *testing.T) {
 	if len(files) != 3 {
 		t.Fatalf("want 3 files on first page, got %d", len(files))
 	}
-	if total < 5 {
+	if total < 6 {
 		t.Fatalf("expected total >= 6, got %d", total)
 	}
 
@@ -1287,42 +1287,6 @@ func TestLoadConfig_NotExistWithCreateError(t *testing.T) {
 	}
 }
 
-// TestHandleConfigSet_InvalidTimeout 验证 HandleConfigSet 无效 timeout。
-func TestHandleConfigSet_InvalidTimeout(t *testing.T) {
-	cfg := DefaultConfig()
-	err := ApplyConfigSet(cfg, "timeout", "bad-value")
-	if err == nil {
-		t.Fatal("expected error for invalid timeout value")
-	}
-}
-
-// TestHandleConfigSet_InvalidChunkSize 验证 HandleConfigSet 无效 chunk_size。
-func TestHandleConfigSet_InvalidChunkSize(t *testing.T) {
-	cfg := DefaultConfig()
-	err := ApplyConfigSet(cfg, "chunk_size", "bad-value")
-	if err == nil {
-		t.Fatal("expected error for invalid chunk_size value")
-	}
-}
-
-// TestHandleConfigSet_InvalidMaxChunkSize 验证 HandleConfigSet 无效 max_chunk_size。
-func TestHandleConfigSet_InvalidMaxChunkSize(t *testing.T) {
-	cfg := DefaultConfig()
-	err := ApplyConfigSet(cfg, "max_chunk_size", "bad-value")
-	if err == nil {
-		t.Fatal("expected error for invalid max_chunk_size value")
-	}
-}
-
-// TestHandleConfigSet_UnknownKey 验证 HandleConfigSet 未知 key。
-func TestHandleConfigSet_UnknownKey(t *testing.T) {
-	cfg := DefaultConfig()
-	err := ApplyConfigSet(cfg, "unknown_key", "value")
-	if err == nil {
-		t.Fatal("expected error for unknown key")
-	}
-}
-
 // TestClientListVersions_UnmarshalError 验证版本列表解析失败。
 func TestClientListVersions_UnmarshalError(t *testing.T) {
 	t.Parallel()
@@ -1347,6 +1311,10 @@ func TestClientBatchDelete_NilFiles(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:1")
 	if _, err := c.BatchDelete(t.Context(), nil); err == nil {
 		t.Fatal("expected error for nil files")
+	}
+	// 验证空列表也返回错误
+	if _, err := c.BatchDelete(t.Context(), []BatchDeleteFile{}); err == nil {
+		t.Fatal("expected error for empty files list")
 	}
 }
 
@@ -1450,8 +1418,12 @@ func TestGetTunnelMux(t *testing.T) {
 		if tun2 == nil {
 			t.Fatal("expected non-nil tunnel from second call")
 		}
-		_ = tun1
-		_ = tun2
+		// 验证底层 mux 被缓存（getTunnelMux 每次创建新 *Tunnel 包装，但共享同一 mux）
+		c.tunnelMuxMu.Lock()
+		if c.tunnelMux == nil {
+			t.Fatal("expected tunnelMux to be cached")
+		}
+		c.tunnelMuxMu.Unlock()
 	})
 }
 

@@ -181,7 +181,7 @@ func BenchmarkDownload(b *testing.B) {
 // ShouldAutoChunk(4MB) 返回 false（阈值 100 MiB），因此走普通上传路径。
 // 手动设置 ChunkSize = 1MB 验证客户端配置正确传递。
 // 单次操作处理 4 MiB 数据，通过 b.SetBytes 记录吞吐量。
-func BenchmarkUpload_4MB(b *testing.B) {
+func BenchmarkUpload_4MB_Regular(b *testing.B) {
 	if ShouldAutoChunk(4 * size.MiB) {
 		b.Fatal("4MB 不应触发自动分块（阈值 100 MiB）")
 	}
@@ -199,9 +199,7 @@ func BenchmarkUpload_4MB(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	// 手动设 ChunkSize = 1MB，不自适应分块
 	c := NewFileClient(ts.URL)
-	c.chunkSize = 1 * size.MiB
 
 	b.SetBytes(int64(len(data)))
 	b.ResetTimer()

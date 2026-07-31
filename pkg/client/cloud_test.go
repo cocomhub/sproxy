@@ -50,7 +50,10 @@ func cloudTestServer(t *testing.T) (*httptest.Server, string) {
 		var req struct {
 			URLs []map[string]string `json:"urls"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
 		tasks := make([]CloudTask, 0, len(req.URLs))
 		for i, entry := range req.URLs {
 			tasks = append(tasks, CloudTask{
@@ -159,8 +162,8 @@ func TestCloudDownload_CreateTask(t *testing.T) {
 	if task.Status != "pending" {
 		t.Fatalf("want status pending, got %q", task.Status)
 	}
-	if task.Filename == "" {
-		t.Fatal("expected non-empty filename")
+	if task.Filename != "download" {
+		t.Fatalf("want filename download, got %q", task.Filename)
 	}
 }
 
@@ -299,6 +302,7 @@ func TestCloudDownload_GetTaskNotFound(t *testing.T) {
 }
 
 // TestCloudDownload_CancelTask 测试取消任务。
+// 验证 200 OK 响应体包含 {"status":"cancelled"}。
 func TestCloudDownload_CancelTask(t *testing.T) {
 	t.Parallel()
 	ts, _ := cloudTestServer(t)
@@ -321,6 +325,7 @@ func TestCloudDownload_CancelTaskNotFound(t *testing.T) {
 }
 
 // TestCloudDownload_DeleteTask 测试删除任务。
+// 验证 200 OK 响应体包含 {"status":"deleted"}。
 func TestCloudDownload_DeleteTask(t *testing.T) {
 	t.Parallel()
 	ts, _ := cloudTestServer(t)

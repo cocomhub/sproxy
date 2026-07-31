@@ -4,7 +4,6 @@
 package client
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -33,7 +32,7 @@ func TestGetStats(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	stats, err := c.GetStats(context.Background())
+	stats, err := c.GetStats(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +107,7 @@ func TestGetStats_ServerError(t *testing.T) {
 	defer ts.Close()
 
 	c := NewFileClient(ts.URL)
-	_, err := c.GetStats(context.Background())
+	_, err := c.GetStats(t.Context())
 	if err == nil {
 		t.Fatal("expected error for server error")
 	}

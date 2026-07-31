@@ -4,7 +4,6 @@
 package client
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -465,22 +464,20 @@ func TestJSONKVStoreFactory_Name(t *testing.T) {
 	}
 }
 
-func TestJSONKVStoreFactory_Open_DefaultDir(t *testing.T) {
+func TestJSONKVStoreFactory_Open_WithDir(t *testing.T) {
 	// Use a temp dir override - we can't easily test the default cache dir
 	// but we can verify the factory creates a valid store
 	var f jsonKVStoreFactory
 	dir := t.TempDir()
 	cfg := map[string]string{"dir": dir}
-	ctx := context.Background()
-
-	s, err := f.Open(ctx, cfg)
+	s, err := f.Open(t.Context(), cfg)
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
 	defer s.Close()
 
 	// Verify it works
-	if err := s.Save(ctx, "factory_test", map[string]any{"ok": true}); err != nil {
+	if err := s.Save(t.Context(), "factory_test", map[string]any{"ok": true}); err != nil {
 		t.Fatalf("Save via factory failed: %v", err)
 	}
 }

@@ -809,6 +809,9 @@ type BatchRenameOp struct {
 
 // BatchDelete 批量删除文件。继续处理模式：单条失败不影响其余。
 func (c *FileClient) BatchDelete(ctx context.Context, files []BatchDeleteFile) ([]BatchOperationResult, error) {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("批量删除: 文件列表为空")
+	}
 	req := BatchDeleteRequest{Files: files}
 	body, err := json.Marshal(req)
 	if err != nil {

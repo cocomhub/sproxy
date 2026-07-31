@@ -80,7 +80,7 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestClientChunkedUpload_Resume(t *testing.T) {
+func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
 	url, _ := startFullTestServer(t)
 
 	srcDir := t.TempDir()

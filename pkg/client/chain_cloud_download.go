@@ -426,5 +426,6 @@ func isStorageFullError(errMsg string) bool {
 		strings.Contains(lower, "disk quota") ||
 		strings.Contains(lower, "no space left") ||
 		strings.Contains(lower, "disk full") ||
-		strings.Contains(lower, "out of disk space")
+		strings.Contains(lower, "out of disk space") ||
+		(strings.Contains(lower, "quota") && strings.Contains(lower, "exceeded"))
 }

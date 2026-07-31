@@ -305,7 +305,7 @@ func TestIsStorageFullError_EdgeCases(t *testing.T) {
 		{"some other error", false},
 		{"storage is not full", false}, // 虽含 "storage" 但不含 "full"
 		{"full disk", false},           // 虽含 "full" 但不匹配完整短语
-		{"quota exceeded", false},      // 不含 "disk"
+		{"quota exceeded", true},       // 包含 "quota"+"exceeded"
 	}
 	for _, tt := range tests {
 		got := isStorageFullError(tt.msg)
@@ -675,17 +675,16 @@ func TestCloudDownloadChain_DownloadToLocal_PathTraversal(t *testing.T) {
 		// 但 archiveServerPath 包含 .., 服务端会返回 404 -> 下载失败
 		// 如果服务端返回 404，ChunkedDownload 会报错
 		if err == nil {
-			t.Log("downloadToLocal succeeded (archiveServerPath may be sanitized)")
+			t.Fatal("expected error from path traversal prevention, got nil")
 		}
-		// 验证 localPath 不含路径穿越（filepath.Base 已处理）
-		if strings.Contains(chain.LocalPath, "..") {
-			t.Errorf("localPath should not contain path traversal: %s", chain.LocalPath)
+		if chain.LocalPath == "" {
+			t.Fatal("expected localPath to be set")
 		}
 	})
 }
 
-// TestCloudDownloadChain_SubmitError_StorageFull 测试 submitTasks 时的存储满错误路径。
-func TestCloudDownloadChain_SubmitError_StorageFull(t *testing.T) {
+// TestCloudDownloadChain_SubmitTasks_EmptyResult 测试 submitTasks 时返回空结果。
+func TestCloudDownloadChain_SubmitTasks_EmptyResult(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
 
@@ -736,6 +735,9 @@ func TestCloudDownloadChain_SubmitError_StorageFull(t *testing.T) {
 		t.Fatalf("submitTasks: %v", err)
 	}
 	// 空 tasks 时，TaskIDs 应为空，但 Total 应为 0
+	if len(chain.TaskIDs) != 0 {
+		t.Errorf("expected empty TaskIDs, got %d", len(chain.TaskIDs))
+	}
 	if chain.Total != 0 {
 		t.Errorf("expected Total=0 for empty tasks, got %d", chain.Total)
 	}

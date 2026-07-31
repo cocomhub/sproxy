@@ -4,7 +4,6 @@
 package client
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -72,7 +71,7 @@ func TestUpdateStorageConfig(t *testing.T) {
 	defer ts.Close()
 
 	client := NewFileClient(url)
-	if err := client.UpdateStorageConfig(context.Background(), 1073741824); err != nil {
+	if err := client.UpdateStorageConfig(t.Context(), 1073741824); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -82,7 +81,7 @@ func TestListHubNodes(t *testing.T) {
 	defer ts.Close()
 
 	client := NewFileClient(url)
-	nodes, err := client.ListHubNodes(context.Background())
+	nodes, err := client.ListHubNodes(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +98,7 @@ func TestRemoveHubNode(t *testing.T) {
 	defer ts.Close()
 
 	client := NewFileClient(url)
-	if err := client.RemoveHubNode(context.Background(), "node-1"); err != nil {
+	if err := client.RemoveHubNode(t.Context(), "node-1"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -109,7 +108,7 @@ func TestRemoveHubNode_NotFound(t *testing.T) {
 	defer ts.Close()
 
 	client := NewFileClient(url)
-	err := client.RemoveHubNode(context.Background(), "notfound")
+	err := client.RemoveHubNode(t.Context(), "notfound")
 	if err == nil {
 		t.Fatal("expected error for not found node")
 	}
@@ -123,7 +122,7 @@ func TestGetHubStats(t *testing.T) {
 	defer ts.Close()
 
 	client := NewFileClient(url)
-	stats, err := client.GetHubStats(context.Background())
+	stats, err := client.GetHubStats(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +136,7 @@ func TestErrNotFound_Sentinel(t *testing.T) {
 	defer ts.Close()
 
 	client := NewFileClient(url)
-	_, err := client.GetCloudTask(context.Background(), "notfound")
+	_, err := client.GetCloudTask(t.Context(), "notfound")
 	if err == nil {
 		t.Fatal("expected error for not found task")
 	}
