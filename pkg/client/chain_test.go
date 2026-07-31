@@ -327,6 +327,16 @@ func TestFileClient_CloudDownloadChain_EmptyURLs(t *testing.T) {
 	// 空 URL 列表时，CloudDownloadChain 应返回错误
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			URLs []map[string]string `json:"urls"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if len(req.URLs) != 0 {
+			t.Errorf("expected empty URLs, got %d", len(req.URLs))
+		}
 		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{}})
 	})
 	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {

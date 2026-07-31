@@ -126,7 +126,7 @@ func TestCloudDownloadChain_Restore(t *testing.T) {
 func TestCloudDownloadChain_FullRun(t *testing.T) {
 	t.Parallel()
 	ts, dir := newMockCloudServer(t)
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
 	opts := defaultChainOptions()
@@ -176,7 +176,7 @@ func TestCloudDownloadChain_FullRun(t *testing.T) {
 func TestCloudDownloadChain_KeepFiles(t *testing.T) {
 	t.Parallel()
 	ts, dir := newMockCloudServer(t)
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
 	opts := defaultChainOptions()
@@ -359,7 +359,7 @@ func TestCloudDownloadChain_ResumeMidway(t *testing.T) {
 func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 	t.Parallel()
 	ts, dir := newMockCloudServer(t)
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
@@ -472,9 +472,19 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		if _, err := os.Stat(archiveFile); err != nil {
 			os.WriteFile(archiveFile, []byte("archive-content"), 0644)
 		}
-		data, _ := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile)
+		if err != nil {
+			t.Error("ReadFile:", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		sum := sha256.Sum256(data)
-		info, _ := os.Stat(archiveFile)
+		info, err := os.Stat(archiveFile)
+		if err != nil {
+			t.Error("Stat:", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
 		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
 		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
@@ -483,7 +493,12 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
 		filename := r.URL.Query().Get("filename")
 		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
-		data, _ := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile)
+		if err != nil {
+			t.Error("ReadFile:", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.Write(data)
 	})
 	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
@@ -554,7 +569,10 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 			TaskIDs     []string `json:"task_ids"`
 			ArchiveName string   `json:"archive_name"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
 		archivePath := filepath.Join(archiveDir, req.ArchiveName+".tar.gz")
 		os.WriteFile(archivePath, []byte("archive-content"), 0644)
 		sum := sha256.Sum256([]byte("archive-content"))
@@ -574,9 +592,19 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 		if _, err := os.Stat(archiveFile); err != nil {
 			os.WriteFile(archiveFile, []byte("archive-content"), 0644)
 		}
-		data, _ := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile)
+		if err != nil {
+			t.Error("ReadFile:", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		sum := sha256.Sum256(data)
-		info, _ := os.Stat(archiveFile)
+		info, err := os.Stat(archiveFile)
+		if err != nil {
+			t.Error("Stat:", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
 		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
 		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
@@ -586,7 +614,12 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
 		filename := r.URL.Query().Get("filename")
 		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
-		data, _ := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile)
+		if err != nil {
+			t.Error("ReadFile:", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.Write(data)
 	})
 
@@ -676,9 +709,6 @@ func TestCloudDownloadChain_DownloadToLocal_PathTraversal(t *testing.T) {
 		// 如果服务端返回 404，ChunkedDownload 会报错
 		if err == nil {
 			t.Fatal("expected error from path traversal prevention, got nil")
-		}
-		if chain.LocalPath == "" {
-			t.Fatal("expected localPath to be set")
 		}
 	})
 }

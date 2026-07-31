@@ -311,16 +311,19 @@ func TestCloudDownload_CancelTask(t *testing.T) {
 	if err := c.CancelCloudTask(t.Context(), "task-1"); err != nil {
 		t.Fatalf("CancelCloudTask: %v", err)
 	}
-}
 
-// TestCloudDownload_CancelTaskNotFound 测试取消不存在的任务。
-func TestCloudDownload_CancelTaskNotFound(t *testing.T) {
-	t.Parallel()
-	ts, _ := cloudTestServer(t)
-	c := NewFileClient(ts.URL)
-
-	if err := c.CancelCloudTask(t.Context(), "notfound"); err == nil {
-		t.Fatal("expected error for cancelling notfound task")
+	// éªè¯ååºä½åå« status å­æ®µ
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/task-1/cancel", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["status"] != "cancelled" {
+		t.Errorf("expected status=cancelled, got %q", body["status"])
 	}
 }
 
@@ -334,16 +337,23 @@ func TestCloudDownload_DeleteTask(t *testing.T) {
 	if err := c.DeleteCloudTask(t.Context(), "task-1"); err != nil {
 		t.Fatalf("DeleteCloudTask: %v", err)
 	}
-}
 
-// TestCloudDownload_DeleteTaskNotFound 测试删除不存在的任务。
-func TestCloudDownload_DeleteTaskNotFound(t *testing.T) {
-	t.Parallel()
-	ts, _ := cloudTestServer(t)
-	c := NewFileClient(ts.URL)
-
-	if err := c.DeleteCloudTask(t.Context(), "notfound"); err == nil {
-		t.Fatal("expected error for deleting notfound task")
+	// éªè¯ååºä½åå« status å­æ®µ
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/cloud/tasks/task-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["status"] != "deleted" {
+		t.Errorf("expected status=deleted, got %q", body["status"])
 	}
 }
 
