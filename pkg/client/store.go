@@ -8,14 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"maps"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
-
-	"github.com/cocomhub/sproxy/pkg/plugin"
 )
 
 // KVStore 通用键值存储接口。
@@ -77,31 +72,6 @@ func convertNumbers(m map[string]any) map[string]any {
 		}
 	}
 	return result
-}
-
-// KVStoreRegistry 是可插拔的 KVStore 注册表。
-var KVStoreRegistry = plugin.New[KVStoreFactory]("kv_store", &jsonKVStoreFactory{})
-
-// KVStoreFactory 是 KVStore 工厂接口。
-type KVStoreFactory interface {
-	Name() string
-	Open(ctx context.Context, cfg map[string]string) (KVStore, error)
-}
-
-type jsonKVStoreFactory struct{}
-
-func (f *jsonKVStoreFactory) Name() string { return "json" }
-
-func (f *jsonKVStoreFactory) Open(ctx context.Context, cfg map[string]string) (KVStore, error) {
-	dir := cfg["dir"]
-	if dir == "" {
-		cacheDir, err := os.UserCacheDir()
-		if err != nil {
-			return nil, fmt.Errorf("获取用户缓存目录失败: %w", err)
-		}
-		dir = filepath.Join(cacheDir, "sproxy", "kvstore")
-	}
-	return NewJSONKVStore(ctx, dir, slog.Default())
 }
 
 // MemoryKVStore 内存 KVStore 实现（用于测试）。

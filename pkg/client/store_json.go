@@ -24,6 +24,17 @@ func NewJSONKVStore(ctx context.Context, dir string, logger *slog.Logger) (*JSON
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("创建缓存目录失败: %w", err)
 	}
+	// 启动时清理残留的 .tmp.json 文件（上次异常退出留下的）
+	entries, err := os.ReadDir(dir)
+	if err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".tmp.json") {
+				if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+					logger.WarnContext(ctx, "清理残留临时文件失败", "file", entry.Name(), "error", err)
+				}
+			}
+		}
+	}
 	logger.DebugContext(ctx, "JSONKVStore 已创建", "dir", dir)
 	return &JSONKVStore{dir: dir, logger: logger}, nil
 }
@@ -90,6 +101,11 @@ func (s *JSONKVStore) Delete(ctx context.Context, key string) error {
 			return nil
 		}
 		return fmt.Errorf("删除缓存文件失败: %w", err)
+	}
+	// 同时清理残留的 .tmp.json 文件
+	tmpPath := filepath.Join(s.dir, key+".tmp.json")
+	if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+		s.logger.WarnContext(ctx, "清理临时文件失败", "key", key, "error", err)
 	}
 	return nil
 }

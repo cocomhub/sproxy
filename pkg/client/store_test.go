@@ -456,42 +456,6 @@ func TestMemoryKVStore_Close(t *testing.T) {
 	}
 }
 
-func TestJSONKVStoreFactory_Name(t *testing.T) {
-	t.Parallel()
-	var f jsonKVStoreFactory
-	if name := f.Name(); name != "json" {
-		t.Errorf("expected name=json, got %q", name)
-	}
-}
-
-func TestJSONKVStoreFactory_Open_WithDir(t *testing.T) {
-	// Use a temp dir override - we can't easily test the default cache dir
-	// but we can verify the factory creates a valid store
-	var f jsonKVStoreFactory
-	dir := t.TempDir()
-	cfg := map[string]string{"dir": dir}
-	s, err := f.Open(t.Context(), cfg)
-	if err != nil {
-		t.Fatalf("Open failed: %v", err)
-	}
-	defer s.Close()
-
-	// Verify it works
-	if err := s.Save(t.Context(), "factory_test", map[string]any{"ok": true}); err != nil {
-		t.Fatalf("Save via factory failed: %v", err)
-	}
-}
-
-func TestKVStoreRegistry_Default(t *testing.T) {
-	active := KVStoreRegistry.Active()
-	if active == nil {
-		t.Fatal("expected non-nil active factory")
-	}
-	if active.Name() != "json" {
-		t.Errorf("expected default name=json, got %q", active.Name())
-	}
-}
-
 func TestStructCodec_ToMap_NonStruct(t *testing.T) {
 	t.Parallel()
 	codec := StructCodec{}
