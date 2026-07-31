@@ -66,9 +66,9 @@ func WithCloudDownloadMaxBatchURLs(n int) CloudDownloadOption {
 type ArchiveResult struct {
 	Success   bool   `json:"success"`
 	Message   string `json:"message,omitempty"`
-	File      string `json:"file"`
-	Size      int64  `json:"size"`
-	Checksum  string `json:"checksum"`
+	File      string `json:"file,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	Checksum  string `json:"checksum,omitempty"`
 	TaskCount int    `json:"task_count,omitempty"`
 }
 

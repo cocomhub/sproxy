@@ -12,7 +12,7 @@ import (
 type StatsResponse struct {
 	DiskUsage struct {
 		UploadsDir string `json:"uploads_dir"`
-		TotalFiles int64  `json:"total_files"`
+		TotalFiles int    `json:"total_files"`
 		TotalSize  int64  `json:"total_size"`
 	} `json:"disk_usage"`
 	RequestCounts struct {
