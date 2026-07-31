@@ -23,9 +23,9 @@ type CloudTask struct {
 	Checksum   string    `json:"checksum"`
 	Error      string    `json:"error"`
 	FileMTime  int64     `json:"file_mtime,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	CreatedAt  time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
+	UpdatedAt  time.Time `json:"updated_at"` // 更新时间（同上）
+	ExpiresAt  time.Time `json:"expires_at"` // 过期时间（同上，与 TaskTTL 关联）
 }
 
 // CloudTask 状态常量。
