@@ -47,8 +47,8 @@ type CloudDownloadChain struct {
 	Failed       int       `json:"failed"`
 	Total        int       `json:"total"`
 	Error        string    `json:"error,omitempty"`
-	CreatedAt    time.Time `json:"created_at,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复（区别于 opts 中的非持久化字段）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -87,7 +87,7 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		Total:        len(urls),
 		CreatedAt:    now,
 		UpdatedAt:    now,
-		PollInterval: opts.pollInterval,
+		PollInterval: fixPollInterval(opts.pollInterval),
 		Timeout:      opts.timeout,
 		client:       client,
 		opts:         opts,
@@ -149,9 +149,10 @@ func (c *CloudDownloadChain) SetChainManager(mgr *ChainManager) {
 }
 
 // saveState 通过 chainMgr 持久化当前状态到 KVStore。
+// 使用 WithoutCancel 包装上下文，确保状态在上下文取消后仍可持久化。
 func (c *CloudDownloadChain) saveState(ctx context.Context) {
 	if c.chainMgr != nil {
-		c.chainMgr.saveState(ctx, c)
+		c.chainMgr.saveState(context.WithoutCancel(ctx), c)
 	}
 }
 
@@ -266,6 +267,10 @@ func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
 func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 	maxRetries := 3
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// 每次重试前归零计数器，基于本次轮询结果重新统计
+		c.Completed = 0
+		c.Failed = 0
+
 		results, err := c.pollAllTasks(ctx)
 		if err != nil {
 			return err
@@ -328,12 +333,16 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 				if err != nil {
 					return fmt.Errorf("重试批量提交失败: %w", err)
 				}
+				// 保留已完成的任务 ID + 新提交的任务 ID
+				c.TaskIDs = append(remaining, c.TaskIDs[len(remaining):]...)
 				for _, t := range tasks {
 					if t.ID != "" {
 						c.TaskIDs = append(c.TaskIDs, t.ID)
 					}
 				}
 			}
+			// 更新 Total 为本次重试后的 TaskIDs 总数
+			c.Total = len(c.TaskIDs)
 		} else {
 			c.Failed += len(storageFullURLs)
 		}
@@ -431,17 +440,19 @@ func (c *CloudDownloadChain) archiveTasks(ctx context.Context) error {
 
 // downloadToLocal 分块下载归档文件到本地。
 func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
-	// 优先使用服务端返回的路径，兜底使用本地构造
-	archivePath := c.archiveServerPath
-	if archivePath == "" {
-		archivePath = filepath.ToSlash(filepath.Join(cloudArchiveDirName, filepath.Base(c.ArchiveName)))
-	}
 	// 路径穿越防护：使用 filepath.Base 确保 ArchiveName 不含路径分隔符
 	archiveName := filepath.Base(c.ArchiveName)
-	localPath := filepath.Join(c.LocalDir, archiveName)
-	if !strings.HasSuffix(localPath, ".tar.gz") {
-		localPath += ".tar.gz"
+	if !strings.HasSuffix(archiveName, ".tar.gz") {
+		archiveName += ".tar.gz"
 	}
+
+	// 优先使用服务端返回的路径，兜底使用本地构造（保持与服务端一致的后缀逻辑）
+	archivePath := c.archiveServerPath
+	if archivePath == "" {
+		archivePath = filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName))
+	}
+
+	localPath := filepath.Join(c.LocalDir, archiveName)
 	c.LocalPath = localPath
 	if err := c.client.ChunkedDownload(ctx, archivePath, localPath); err != nil {
 		return fmt.Errorf("下载归档文件失败: %w", err)
