@@ -255,8 +255,13 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 		}
 		return err
 	}
-	if delErr := m.store.Delete(ctx, "chain:"+runner.ID()); delErr != nil {
-		return fmt.Errorf("链操作成功但清理状态失败: %w", delErr)
+	// I18: 链操作成功时保留 chain 记录（不删除），保存为 StatusCompleted 状态。
+	// 用户可通过 List/Resume 查看已完成操作的历史，而不会误报为 error。
+	state := runner.State()
+	state["status"] = StatusCompleted
+	if err := m.store.Save(context.WithoutCancel(ctx), "chain:"+runner.ID(), state); err != nil {
+		// 保存完成状态失败只记录警告，不阻断成功返回
+		slog.Warn("链操作成功但保存完成状态失败", "chain_id", runner.ID(), "error", err)
 	}
 	return nil
 }
@@ -276,6 +281,9 @@ func (m *ChainManager) Resume(ctx context.Context, chainID string) (ChainRunner,
 	return runner, nil
 }
 
+// List 返回活跃（未完成/未失败）的 ChainRunner 列表。
+// 注意：返回的 runner 仅用于查看状态（Phase, Status, State），
+// 不可直接用于执行 Run 方法——如需恢复执行请使用 Resume。
 func (m *ChainManager) List(ctx context.Context) ([]ChainRunner, error) {
 	keys, err := m.store.List(ctx, "chain:")
 	if err != nil {
@@ -324,7 +332,13 @@ func (m *ChainManager) resolveRunner(ctx context.Context, state map[string]any) 
 	if !ok {
 		return nil, fmt.Errorf("state 缺少 type 字段")
 	}
-	// 先查实例注册表
+	// I21: resolveRunner 的双锁设计：先查实例注册表（m.registry），
+	// 未命中时再查全局注册表（runnerRegistry）。两次独立的查找是安全的：
+	// - 注册表采用追加式并发安全模式（sync.RWMutex），仅新增/删除操作修改，
+	//   查找操作只读，不会因另一个 goroutine 并发注册/注销导致不一致。
+	// - 两次锁之间 runnerRegistry 可能新增条目，但最多造成一次额外的回退查找，
+	//   不影响正确性（幂等：factory() 返回的 runner 类型相同）。
+	// - 实例注册表覆盖全局注册表，为测试隔离提供精确控制。
 	m.registryMu.RLock()
 	factory, ok := m.registry[typeName]
 	m.registryMu.RUnlock()

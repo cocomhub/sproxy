@@ -27,8 +27,8 @@ type ChunkedUploadSession struct {
 	ChunkChecksums []string  `json:"chunk_checksums"`
 	FileChecksum   string    `json:"file_checksum"`
 	FileModTime    int64     `json:"file_mod_time"` // UnixNano, 0 = unknown
-	CreatedAt      time.Time `json:"created_at,omitempty"`
-	ExpiresAt      time.Time `json:"expires_at,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
 	Completed      bool      `json:"completed"`
 }
 
