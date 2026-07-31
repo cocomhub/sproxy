@@ -70,7 +70,7 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 				select {
 				case errCh <- fmt.Sprintf("ChunkedUpload #%d failed: %v", n, err):
 				default:
-					t.Log("error channel full, dropping message")
+					t.Error("error channel full, dropping message")
 				}
 				return
 			}
@@ -78,7 +78,7 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 				select {
 				case errCh <- fmt.Sprintf("ChunkedUpload #%d result not successful: %+v", n, result):
 				default:
-					t.Log("error channel full, dropping message")
+					t.Error("error channel full, dropping message")
 				}
 			}
 		}(i)

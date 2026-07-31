@@ -17,7 +17,7 @@ func FuzzCalcChunkSize(f *testing.F) {
 	}{
 		{0, 0, 0},
 		{1024, 4 * 1024 * 1024, 64 * 1024 * 1024},
-		{0, -1, 0},
+		{0, 0, -1},
 		{-100, 4 * 1024 * 1024, 64 * 1024 * 1024},
 		{math.MaxInt64, 4 * 1024 * 1024, 64 * 1024 * 1024},
 	}
@@ -38,6 +38,19 @@ func FuzzCalcChunkSize(f *testing.F) {
 		}
 		if cs > effectiveMax {
 			t.Errorf("calcChunkSize(%d, %d, %d) = %d, expected <= %d", fileSize, preferred, maxChunk, cs, effectiveMax)
+		}
+		// \xe8\xbf\x94\xe5\x9b\x9e\xe5\x80\xbc\xe4\xb8\x8d\xe8\x83\xbd\xe5\xb0\x8f\xe4\xba\x8e preferred \xe5\x92\x8c maxChunk \xe7\x9a\x84\xe6\x9c\x89\xe6\x95\x88\xe4\xb8\x8b\xe9\x99\x90
+		effectivePref := preferred
+		if effectivePref <= 0 {
+			effectivePref = 4 * 1024 * 1024
+		}
+		effectiveMax2 := maxChunk
+		if effectiveMax2 <= 0 {
+			effectiveMax2 = 64 * 1024 * 1024
+		}
+		effectiveMin := min(effectivePref, effectiveMax2)
+		if cs < effectiveMin {
+			t.Errorf("calcChunkSize(%d, %d, %d) = %d, expected >= %d", fileSize, preferred, maxChunk, cs, effectiveMin)
 		}
 	})
 }
