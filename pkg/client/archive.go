@@ -12,8 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
-	"strings"
 )
 
 // Archive 将服务器端指定的文件列表打包下载到本地文件。
@@ -49,7 +47,7 @@ func (c *FileClient) ArchiveDir(ctx context.Context, dirname, outputPath string)
 // 使用原子写入模式：先写入 .tmp 临时文件，成功后再重命名为目标路径。
 // 如果请求失败或写入失败，自动清理不完整文件。
 func (c *FileClient) downloadToFile(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header, outputPath string) error {
-	if strings.Contains(filepath.Clean(outputPath), "..") {
+	if containsPathTraversal(outputPath) {
 		return fmt.Errorf("输出路径包含非法路径穿越: %s", outputPath)
 	}
 	resp, err := c.doRequest(ctx, method, urlPath, body, headers)
@@ -59,7 +57,7 @@ func (c *FileClient) downloadToFile(ctx context.Context, method, urlPath string,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 		return fmt.Errorf("请求失败 (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
 
@@ -70,11 +68,14 @@ func (c *FileClient) downloadToFile(ctx context.Context, method, urlPath string,
 	}
 
 	if _, err = io.Copy(out, resp.Body); err != nil {
-		out.Close()
+		_ = out.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
-	out.Close()
+	if closeErr := out.Close(); closeErr != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("关闭文件失败: %w", err)
+	}
 	if err = os.Rename(tmpPath, outputPath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("重命名文件失败: %w", err)
