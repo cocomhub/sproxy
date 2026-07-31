@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -277,8 +278,8 @@ func TestCloudDownloadChain_ArchiveError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for archive failure")
 	}
-	if !strings.Contains(err.Error(), "打包归档失败") {
-		t.Errorf("expected archive error message, got %v", err)
+	if !errors.Is(err, ErrArchiveFailed) {
+		t.Errorf("expected ErrArchiveFailed, got %v", err)
 	}
 }
 
@@ -544,7 +545,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	}
 	// 验证发生了存储超限重试（总任务数 > 初始 URL 数）
 	if taskIDCounter.Load() <= 2 {
-		t.Errorf("expected retry to create more tasks, got %d total", taskIDCounter.Load())
+		t.Errorf("expected retry to create more tasks (range 3-8), got %d total", taskIDCounter.Load())
 	}
 }
 
@@ -796,13 +797,14 @@ func TestCloudDownloadChain_SubmitTasks_EmptyResult(t *testing.T) {
 
 // TestCloudDownloadChain_Run_NoClient 测试 Run 时 client 为 nil 的错误路径。
 func TestCloudDownloadChain_Run_NoClient(t *testing.T) {
+	t.Parallel()
 	chain := &CloudDownloadChain{}
 	err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {
 		t.Fatal("expected error for nil client")
 	}
-	if !strings.Contains(err.Error(), "client is nil") {
-		t.Errorf("expected client is nil error, got: %v", err)
+	if !errors.Is(err, ErrClientNil) {
+		t.Errorf("expected ErrClientNil, got: %v", err)
 	}
 }
 
@@ -846,7 +848,7 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error after all retries exhausted")
 	}
-	if !strings.Contains(err.Error(), "存储空间不足") {
-		t.Errorf("expected storage full error, got: %v", err)
+	if !errors.Is(err, ErrStorageFull) {
+		t.Errorf("expected ErrStorageFull, got: %v", err)
 	}
 }

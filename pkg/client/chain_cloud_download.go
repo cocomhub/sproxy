@@ -21,6 +21,13 @@ const cloudArchiveDirName = ".__cloud_archives__"
 // TypeCloudDownload 是云端下载链式操作的类型标识。
 const TypeCloudDownload = "cloud_download"
 
+// Sentinel errors for CloudDownloadChain.
+var (
+	ErrClientNil     = errors.New("client is nil")
+	ErrArchiveFailed = errors.New("archive failed")
+	ErrStorageFull   = errors.New("storage full")
+)
+
 func init() {
 	RegisterRunner(TypeCloudDownload, func() ChainRunner { return &CloudDownloadChain{} })
 }
@@ -152,7 +159,7 @@ func (c *CloudDownloadChain) saveState(ctx context.Context) {
 // submitting -> waiting -> archiving -> downloading -> [cleaning] -> completed。
 func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (err error) {
 	if c.client == nil {
-		return fmt.Errorf("cloud download chain: client is nil, use SetClient() before Run()")
+		return fmt.Errorf("cloud download chain: %w", ErrClientNil)
 	}
 
 	// 统一错误处理：任何阶段失败都设置状态
@@ -331,7 +338,7 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			c.Failed += len(storageFullURLs)
 		}
 	}
-	return fmt.Errorf("存储空间不足，已重试 %d 次", maxRetries)
+	return fmt.Errorf("storage full after %d retries: %w", maxRetries, ErrStorageFull)
 }
 
 // pollAllTasks 轮询所有任务状态直到全部完成。
@@ -412,10 +419,10 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 func (c *CloudDownloadChain) archiveTasks(ctx context.Context) error {
 	result, err := c.client.ArchiveCloudTasks(ctx, c.TaskIDs, c.ArchiveName)
 	if err != nil {
-		return fmt.Errorf("打包归档失败: %w", err)
+		return fmt.Errorf("archive: %w: %v", ErrArchiveFailed, err)
 	}
 	if !result.Success {
-		return fmt.Errorf("打包归档失败: %s", result.Message)
+		return fmt.Errorf("archive: %w: %s", ErrArchiveFailed, result.Message)
 	}
 	// 保存服务端返回的归档文件路径，供 downloadToLocal 使用
 	c.archiveServerPath = result.File

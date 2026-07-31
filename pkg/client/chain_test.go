@@ -258,6 +258,7 @@ func TestChainManager_CancelDuringRun(t *testing.T) {
 // ---- ChainOption functions ----
 
 func TestWithChainPollInterval(t *testing.T) {
+	t.Parallel()
 	o := defaultChainOptions()
 	opt := WithChainPollInterval(5 * time.Second)
 	opt(&o)
@@ -267,6 +268,7 @@ func TestWithChainPollInterval(t *testing.T) {
 }
 
 func TestWithChainPollInterval_Zero(t *testing.T) {
+	t.Parallel()
 	o := defaultChainOptions()
 	orig := o.pollInterval
 	opt := WithChainPollInterval(0)
@@ -277,6 +279,7 @@ func TestWithChainPollInterval_Zero(t *testing.T) {
 }
 
 func TestWithChainTimeout(t *testing.T) {
+	t.Parallel()
 	o := defaultChainOptions()
 	opt := WithChainTimeout(10 * time.Minute)
 	opt(&o)
@@ -286,6 +289,7 @@ func TestWithChainTimeout(t *testing.T) {
 }
 
 func TestWithChainTimeout_Zero(t *testing.T) {
+	t.Parallel()
 	o := defaultChainOptions()
 	orig := o.timeout
 	opt := WithChainTimeout(0)
@@ -296,6 +300,7 @@ func TestWithChainTimeout_Zero(t *testing.T) {
 }
 
 func TestWithChainKeepFiles(t *testing.T) {
+	t.Parallel()
 	o := defaultChainOptions()
 	opt := WithChainKeepFiles()
 	opt(&o)
@@ -305,6 +310,7 @@ func TestWithChainKeepFiles(t *testing.T) {
 }
 
 func TestWithChainProgress(t *testing.T) {
+	t.Parallel()
 	o := defaultChainOptions()
 	var called bool
 	fn := func(ctx context.Context, info ProgressInfo) {
@@ -324,6 +330,7 @@ func TestWithChainProgress(t *testing.T) {
 // ---- FileClient methods on chain ----
 
 func TestFileClient_CloudDownloadChain_EmptyURLs(t *testing.T) {
+	t.Parallel()
 	// 空 URL 列表时，CloudDownloadChain 应返回错误
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
@@ -357,6 +364,7 @@ func TestFileClient_CloudDownloadChain_EmptyURLs(t *testing.T) {
 }
 
 func TestFileClient_ListChains_NoManager(t *testing.T) {
+	t.Parallel()
 	client := NewFileClient("http://127.0.0.1:9999")
 	states, err := client.ListChains(t.Context())
 	if err != nil {
@@ -368,6 +376,7 @@ func TestFileClient_ListChains_NoManager(t *testing.T) {
 }
 
 func TestFileClient_DeleteChain_NoManager(t *testing.T) {
+	t.Parallel()
 	client := NewFileClient("http://127.0.0.1:9999")
 	err := client.DeleteChain(t.Context(), "some-id")
 	if err != nil {
@@ -376,6 +385,7 @@ func TestFileClient_DeleteChain_NoManager(t *testing.T) {
 }
 
 func TestFileClient_ResumeChain_NoManager(t *testing.T) {
+	t.Parallel()
 	client := NewFileClient("http://127.0.0.1:9999")
 	_, err := client.ResumeChain(t.Context(), "some-id")
 	if err == nil {
@@ -384,6 +394,7 @@ func TestFileClient_ResumeChain_NoManager(t *testing.T) {
 }
 
 func TestFileClient_ListChains_WithManager(t *testing.T) {
+	t.Parallel()
 	store := NewMemoryKVStore()
 	client := NewFileClient("http://127.0.0.1:9999", WithKVStore(store))
 	// 先保存两条活跃链
@@ -403,6 +414,7 @@ func TestFileClient_ListChains_WithManager(t *testing.T) {
 }
 
 func TestFileClient_DeleteChain_WithManager(t *testing.T) {
+	t.Parallel()
 	store := NewMemoryKVStore()
 	client := NewFileClient("http://127.0.0.1:9999", WithKVStore(store))
 	store.Save(t.Context(), "chain:to-delete", map[string]any{
