@@ -63,12 +63,13 @@ func hubTestServer(t *testing.T) (*httptest.Server, string) {
 	})
 
 	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
 	return ts, ts.URL
 }
 
 func TestUpdateStorageConfig(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
 	if err := client.UpdateStorageConfig(t.Context(), 1073741824); err != nil {
@@ -77,8 +78,8 @@ func TestUpdateStorageConfig(t *testing.T) {
 }
 
 func TestListHubNodes(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
 	nodes, err := client.ListHubNodes(t.Context())
@@ -94,8 +95,8 @@ func TestListHubNodes(t *testing.T) {
 }
 
 func TestRemoveHubNode(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
 	if err := client.RemoveHubNode(t.Context(), "node-1"); err != nil {
@@ -104,8 +105,8 @@ func TestRemoveHubNode(t *testing.T) {
 }
 
 func TestRemoveHubNode_NotFound(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
 	err := client.RemoveHubNode(t.Context(), "notfound")
@@ -118,8 +119,8 @@ func TestRemoveHubNode_NotFound(t *testing.T) {
 }
 
 func TestGetHubStats(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
 	stats, err := client.GetHubStats(t.Context())
@@ -132,8 +133,8 @@ func TestGetHubStats(t *testing.T) {
 }
 
 func TestErrNotFound_Sentinel(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
 	_, err := client.GetCloudTask(t.Context(), "notfound")

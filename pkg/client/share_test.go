@@ -22,7 +22,7 @@ func TestCreateShare(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"token":"abc123","filename":"test.txt","created_at":"2026-07-24T12:00:00Z","expires_at":"2026-07-25T12:00:00Z","max_downloads":0,"downloads":0,"one_time":false}`))
 	}))
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
 	link, err := c.CreateShare(t.Context(), "test.txt", WithShareTTL(time.Hour))
@@ -49,7 +49,7 @@ func TestListShares(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"shares":[{"token":"abc","filename":"a.txt","created_at":"2026-07-24T12:00:00Z","expires_at":"2026-07-25T12:00:00Z","max_downloads":0,"downloads":0,"one_time":false,"expired":false}]}`))
 	}))
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
 	shares, err := c.ListShares(t.Context())
@@ -76,7 +76,7 @@ func TestRevokeShare(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"success":true,"message":"分享链接已撤销"}`))
 	}))
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
 	if err := c.RevokeShare(t.Context(), "test_token"); err != nil {
@@ -92,7 +92,7 @@ func TestRevokeShareNotFound(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"success":false,"message":"分享链接不存在"}`))
 	}))
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
 	if err := c.RevokeShare(t.Context(), "nonexistent"); err == nil {
@@ -196,7 +196,7 @@ func TestCreateShare_WithOptions(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"token":"abc123","filename":"test.txt","created_at":"2026-07-24T12:00:00Z","expires_at":"2026-07-25T12:00:00Z","max_downloads":5,"downloads":0,"one_time":true,"expired":false}`))
 	}))
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
 	link, err := c.CreateShare(t.Context(), "test.txt",
@@ -225,7 +225,7 @@ func TestCreateShare_ServerError(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"success":false,"message":"server error"}`))
 	}))
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
 	_, err := c.CreateShare(t.Context(), "test.txt")
@@ -240,7 +240,7 @@ func TestRevokeShare_ServerError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
 	if err := c.RevokeShare(t.Context(), "token"); err == nil {
@@ -256,7 +256,7 @@ func TestRevokeShare_ResponseError(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"success":false,"message":"already revoked"}`))
 	}))
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
 	if err := c.RevokeShare(t.Context(), "token"); err == nil {

@@ -29,7 +29,7 @@ func TestGetStats(t *testing.T) {
 			"disk_total":100000000000,"disk_free":50000000000,"disk_used":50000000000
 		}`))
 	}))
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
 	stats, err := c.GetStats(t.Context())
@@ -104,7 +104,7 @@ func TestGetStats_ServerError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer ts.Close()
+	t.Cleanup(ts.Close)
 
 	c := NewFileClient(ts.URL)
 	_, err := c.GetStats(t.Context())
