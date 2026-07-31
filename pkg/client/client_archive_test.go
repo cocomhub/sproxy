@@ -5,6 +5,7 @@ package client
 
 import (
 	"archive/tar"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,18 +42,22 @@ func TestClientArchive_SingleFile(t *testing.T) {
 			http.Error(w, "unexpected files", http.StatusBadRequest)
 			return
 		}
-		tw := tar.NewWriter(w)
+		// 模拟真实服务端行为：先 gzip 再 tar
+		w.Header().Set("Content-Type", "application/gzip")
+		gw := gzip.NewWriter(w)
+		tw := tar.NewWriter(gw)
 		tw.WriteHeader(&tar.Header{
 			Name: "test.txt",
 			Size: 4,
 		})
 		tw.Write([]byte("data"))
 		tw.Close()
+		gw.Close()
 	}))
 	defer mock.Close()
 
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
-	dst := filepath.Join(t.TempDir(), "out.tar")
+	dst := filepath.Join(t.TempDir(), "out.tar.gz")
 
 	err := c.Archive(t.Context(), []string{"test.txt"}, dst)
 	if err != nil {
@@ -67,13 +72,18 @@ func TestClientArchive_SingleFile(t *testing.T) {
 		t.Error("archive file is empty")
 	}
 
-	// 用 tar.Reader 验证 tar 内容
+	// 用 gzip.Reader + tar.Reader 验证压缩包内容
 	f, err := os.Open(dst)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	tr := tar.NewReader(f)
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
 	hdr, err := tr.Next()
 	if err != nil {
 		t.Fatalf("tar.Next: %v", err)
@@ -104,7 +114,10 @@ func TestClientArchiveDir(t *testing.T) {
 			errCh <- fmt.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			return
 		}
-		tw := tar.NewWriter(w)
+		// 模拟真实服务端行为：先 gzip 再 tar
+		w.Header().Set("Content-Type", "application/gzip")
+		gw := gzip.NewWriter(w)
+		tw := tar.NewWriter(gw)
 		tw.WriteHeader(&tar.Header{
 			Name:     "mydir/",
 			Typeflag: tar.TypeDir,
@@ -115,11 +128,12 @@ func TestClientArchiveDir(t *testing.T) {
 		})
 		tw.Write([]byte("hello"))
 		tw.Close()
+		gw.Close()
 	}))
 	defer mock.Close()
 
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
-	dst := filepath.Join(t.TempDir(), "dir.tar")
+	dst := filepath.Join(t.TempDir(), "dir.tar.gz")
 
 	err := c.ArchiveDir(t.Context(), "mydir", dst)
 	if err != nil {
