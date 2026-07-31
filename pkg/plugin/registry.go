@@ -103,3 +103,11 @@ func (r *Registry[T]) Clear() {
 	defer r.mu.Unlock()
 	r.plugins = make(map[string]Plugin[T])
 }
+
+// Delete 按名称移除一个已注册的插件。
+// 如果插件不存在，这是空操作。
+func (r *Registry[T]) Delete(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.plugins, name)
+}

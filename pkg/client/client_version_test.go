@@ -18,15 +18,24 @@ func TestClientListVersions(t *testing.T) {
 	errCh := make(chan error, 3)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
-			errCh <- fmt.Errorf("expected GET, got %s", r.Method)
+			select {
+			case errCh <- fmt.Errorf("expected GET, got %s", r.Method):
+			default:
+			}
 			return
 		}
 		if r.URL.Path != "/api/versions" {
-			errCh <- fmt.Errorf("expected /api/versions, got %s", r.URL.Path)
+			select {
+			case errCh <- fmt.Errorf("expected /api/versions, got %s", r.URL.Path):
+			default:
+			}
 			return
 		}
 		if r.URL.Query().Get("filename") != "test.txt" {
-			errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename"))
+			select {
+			case errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename")):
+			default:
+			}
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{
@@ -81,15 +90,24 @@ func TestClientRestoreVersion(t *testing.T) {
 	errCh := make(chan error, 3)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
-			errCh <- fmt.Errorf("expected POST, got %s", r.Method)
+			select {
+			case errCh <- fmt.Errorf("expected POST, got %s", r.Method):
+			default:
+			}
 			return
 		}
 		if r.URL.Query().Get("filename") != "test.txt" {
-			errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename"))
+			select {
+			case errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename")):
+			default:
+			}
 			return
 		}
 		if r.URL.Query().Get("version_id") != "1" {
-			errCh <- fmt.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id"))
+			select {
+			case errCh <- fmt.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id")):
+			default:
+			}
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -131,19 +149,31 @@ func TestClientDeleteVersion(t *testing.T) {
 	errCh := make(chan error, 4)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "DELETE" {
-			errCh <- fmt.Errorf("expected DELETE, got %s", r.Method)
+			select {
+			case errCh <- fmt.Errorf("expected DELETE, got %s", r.Method):
+			default:
+			}
 			return
 		}
 		if r.URL.Path != "/api/versions" {
-			errCh <- fmt.Errorf("expected /api/versions, got %s", r.URL.Path)
+			select {
+			case errCh <- fmt.Errorf("expected /api/versions, got %s", r.URL.Path):
+			default:
+			}
 			return
 		}
 		if r.URL.Query().Get("filename") != "test.txt" {
-			errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename"))
+			select {
+			case errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename")):
+			default:
+			}
 			return
 		}
 		if r.URL.Query().Get("version_id") != "1" {
-			errCh <- fmt.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id"))
+			select {
+			case errCh <- fmt.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id")):
+			default:
+			}
 			return
 		}
 		w.WriteHeader(http.StatusOK)

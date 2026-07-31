@@ -818,12 +818,14 @@ func TestClient_ShouldAutoChunk(t *testing.T) {
 	}
 }
 
-// TestFileClient_NewFileClient_EmptyURL 验证空 URL 时创建客户端不 panic。
+// TestFileClient_NewFileClient_EmptyURL 验证空 URL 时创建客户端 panic。
 func TestFileClient_NewFileClient_EmptyURL(t *testing.T) {
-	c := NewFileClient("")
-	if c == nil {
-		t.Fatal("expected non-nil client")
-	}
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for empty serverURL")
+		}
+	}()
+	NewFileClient("")
 }
 
 func TestWithInsecureTLS(t *testing.T) {

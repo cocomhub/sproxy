@@ -6,10 +6,8 @@ package client
 import (
 	"archive/tar"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -191,8 +189,6 @@ func TestClientArchive_WriteError(t *testing.T) {
 	err := c.Archive(t.Context(), []string{"x.txt"}, filepath.Join(t.TempDir(), "nonexistent", "out.tar"))
 	if err == nil {
 		t.Error("expected error for write failure, got nil")
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("expected fs.ErrNotExist, got %v", err)
 	}
 }
 

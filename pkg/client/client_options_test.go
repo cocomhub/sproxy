@@ -491,8 +491,8 @@ func TestXferTunnelRoundTrip(t *testing.T) {
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
-	defer muxA.Close()
-	defer muxB.Close()
+	t.Cleanup(func() { muxA.Close() })
+	t.Cleanup(func() { muxB.Close() })
 
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
@@ -531,8 +531,8 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
-	defer muxA.Close()
-	defer muxB.Close()
+	t.Cleanup(func() { muxA.Close() })
+	t.Cleanup(func() { muxB.Close() })
 
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
@@ -578,12 +578,15 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 }
 
 func TestXferTunnelEncrypted(t *testing.T) {
-	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	key, err := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("ParseKey: %v", err)
+	}
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
-	defer muxA.Close()
-	defer muxB.Close()
+	t.Cleanup(func() { muxA.Close() })
+	t.Cleanup(func() { muxB.Close() })
 
 	tunA := tunnel.NewTunnel(muxA, key)
 	tunB := tunnel.NewTunnel(muxB, key)
@@ -624,8 +627,8 @@ func TestXferTunnelLargeBody(t *testing.T) {
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
-	defer muxA.Close()
-	defer muxB.Close()
+	t.Cleanup(func() { muxA.Close() })
+	t.Cleanup(func() { muxB.Close() })
 
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
