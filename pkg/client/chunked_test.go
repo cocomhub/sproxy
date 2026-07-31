@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,22 +24,21 @@ const testChunkSize = 1024
 func TestCalcChunkSize_EdgeCases(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name           string
-		fileSize       int64
-		preferred      int64
-		maxChunk       int64
-		expectPositive bool
-		want           int64
+		name      string
+		fileSize  int64
+		preferred int64
+		maxChunk  int64
+		want      int64
 	}{
-		{"zero file size", 0, 4 * 1024 * 1024, 64 * 1024 * 1024, true, 4 * 1024 * 1024},
-		{"preferred zero", 1024, 0, 64 * 1024 * 1024, true, 4 * 1024 * 1024},
-		{"maxChunk zero", 1024, 4 * 1024 * 1024, 0, true, 4 * 1024 * 1024},
-		{"all zero", 0, 0, 0, true, 4 * 1024 * 1024},
+		{"zero file size", 0, 4 * 1024 * 1024, 64 * 1024 * 1024, 4 * 1024 * 1024},
+		{"preferred zero", 1024, 0, 64 * 1024 * 1024, 4 * 1024 * 1024},
+		{"maxChunk zero", 1024, 4 * 1024 * 1024, 0, 4 * 1024 * 1024},
+		{"all zero", 0, 0, 0, 4 * 1024 * 1024},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cs := calcChunkSize(tt.fileSize, tt.preferred, tt.maxChunk)
-			if tt.expectPositive && cs <= 0 {
+			if cs <= 0 {
 				t.Errorf("calcChunkSize(%d, %d, %d) = %d, expected > 0", tt.fileSize, tt.preferred, tt.maxChunk, cs)
 			}
 			if cs != tt.want {
@@ -263,6 +263,19 @@ func TestDownloadOneChunk_ContextCancel(t *testing.T) {
 	}
 }
 
+func TestCalcChunkSize_OverflowProtection(t *testing.T) {
+	t.Parallel()
+	// chunkSize > math.MaxInt64/512 时触发溢出保护路径
+	preferred := int64(math.MaxInt64/512 + 1) // 超过溢出阈值
+	maxChunk := preferred + 1
+	fileSize := int64(1)
+	cs := calcChunkSize(fileSize, preferred, maxChunk)
+	// 应直接返回 maxChunk（溢出保护分支）
+	if cs != maxChunk {
+		t.Errorf("expected %d (maxChunk) for overflow protection, got %d", maxChunk, cs)
+	}
+}
+
 func TestCalcChunkSize_SmallFile(t *testing.T) {
 	t.Parallel()
 	// Small file should not increase chunk size beyond preferred
@@ -280,8 +293,8 @@ func TestCalcChunkSize_LargeFile(t *testing.T) {
 	maxChunk := int64(64 * 1024 * 1024)
 	threeTB := int64(3 * 1024 * 1024 * 1024 * 1024)
 	cs := calcChunkSize(threeTB, preferred, maxChunk)
-	if cs > maxChunk {
-		t.Errorf("expected <= %d, got %d", maxChunk, cs)
+	if cs != maxChunk {
+		t.Errorf("expected %d (maxChunk), got %d", maxChunk, cs)
 	}
 }
 
@@ -677,7 +690,10 @@ func TestCalcFileChecksum_CacheHit(t *testing.T) {
 	}
 	defer f.Close()
 
-	stat, _ := f.Stat()
+	stat, err := f.Stat()
+	if err != nil {
+		t.Fatalf("f.Stat(): %v", err)
+	}
 
 	// 第一次调用：计算并缓存
 	cs1, fromCache1, err := c.calcFileChecksum(filePath, f, stat.Size(), stat.ModTime())
@@ -731,7 +747,10 @@ func TestCalcFileChecksum_CacheTTLExpiry(t *testing.T) {
 	}
 	defer f.Close()
 
-	stat, _ := f.Stat()
+	stat, err := f.Stat()
+	if err != nil {
+		t.Fatalf("f.Stat(): %v", err)
+	}
 
 	// 第一次调用：计算并缓存
 	cs1, _, err := c.calcFileChecksum(filePath, f, stat.Size(), stat.ModTime())
@@ -774,17 +793,17 @@ func TestCalcFileChecksum_FileChanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stat, _ := f.Stat()
+	stat, err := f.Stat()
+	if err != nil {
+		t.Fatalf("f.Stat(): %v", err)
+	}
 	cs1, _, err := c.calcFileChecksum(filePath, f, stat.Size(), stat.ModTime())
 	f.Close()
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
 
-	// 确保 mtime 发生变化（Windows 上 mtime 精度可能较低）
-	time.Sleep(10 * time.Millisecond)
-
-	// 写入不同大小的内容使 mtime 和 size 都变化，确保缓存失效
+	// 写入不同大小的内容使 size 变化，确保缓存失效
 	if fErr := os.WriteFile(filePath, []byte("world!"), 0644); fErr != nil {
 		t.Fatal(fErr)
 	}
@@ -794,7 +813,10 @@ func TestCalcFileChecksum_FileChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f2.Close()
-	stat2, _ := f2.Stat()
+	stat2, err := f2.Stat()
+	if err != nil {
+		t.Fatalf("f2.Stat(): %v", err)
+	}
 
 	cs2, fromCache, err := c.calcFileChecksum(filePath, f2, stat2.Size(), stat2.ModTime())
 	if err != nil {
