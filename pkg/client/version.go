@@ -4,10 +4,7 @@
 package client
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 
 	"context"
@@ -28,22 +25,11 @@ func (c *FileClient) ListVersions(ctx context.Context, filename string) ([]Versi
 		return nil, fmt.Errorf("filename 不能为空")
 	}
 	apiPath := "/api/versions?" + url.Values{"filename": {filename}}.Encode()
-	resp, err := c.doRequest(ctx, "GET", apiPath, nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("获取版本列表失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, fmt.Errorf("获取版本列表失败 (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-
 	var result struct {
 		Versions []VersionInfo `json:"versions"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+	if err := c.doJSON(ctx, "GET", apiPath, nil, &result); err != nil {
+		return nil, fmt.Errorf("获取版本列表失败: %w", err)
 	}
 	return result.Versions, nil
 }
@@ -57,22 +43,9 @@ func (c *FileClient) RestoreVersion(ctx context.Context, filename string, versio
 		"filename":   {filename},
 		"version_id": {fmt.Sprintf("%d", versionID)},
 	}.Encode()
-	resp, err := c.doRequest(ctx, "POST", apiPath, nil, nil)
-	if err != nil {
+	var result doJSONResp
+	if err := c.doJSON(ctx, "POST", apiPath, nil, &result); err != nil {
 		return fmt.Errorf("恢复版本失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("恢复版本失败 (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-	var result UploadResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("解析响应失败: %s", string(body))
-	}
-	if !result.Success {
-		return fmt.Errorf("恢复失败: %s", result.Message)
 	}
 	return nil
 }
@@ -86,22 +59,9 @@ func (c *FileClient) DeleteVersion(ctx context.Context, filename string, version
 		"filename":   {filename},
 		"version_id": {fmt.Sprintf("%d", versionID)},
 	}.Encode()
-	resp, err := c.doRequest(ctx, "DELETE", apiPath, nil, nil)
-	if err != nil {
+	var result doJSONResp
+	if err := c.doJSON(ctx, "DELETE", apiPath, nil, &result); err != nil {
 		return fmt.Errorf("删除版本失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("删除版本失败 (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-	var result UploadResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("解析响应失败: %s", string(body))
-	}
-	if !result.Success {
-		return fmt.Errorf("删除失败: %s", result.Message)
 	}
 	return nil
 }

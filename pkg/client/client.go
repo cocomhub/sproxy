@@ -115,6 +115,9 @@ type FileClient struct {
 // 而是将错误记录在 FileClient 内部。调用 InitError() 方法可确认初始化状态，
 // 确保所有配置项均已正确应用。
 func NewFileClient(serverURL string, opts ...Option) *FileClient {
+	if serverURL == "" {
+		panic("NewFileClient: serverURL 不能为空")
+	}
 	c := &FileClient{
 		serverURL:       strings.TrimRight(serverURL, "/"),
 		httpClient:      &http.Client{Timeout: 300 * time.Second},
@@ -132,6 +135,10 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 // WithHTTPClient 设置自定义 HTTP 客户端。
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *FileClient) {
+		if hc == nil {
+			c.httpClient = &http.Client{Timeout: 30 * time.Second}
+			return
+		}
 		c.httpClient = hc
 	}
 }
@@ -300,6 +307,9 @@ func WithLogger(logger *slog.Logger) Option {
 // WithKVStore 设置自定义 KVStore 实现，启用链式操作持久化。
 func WithKVStore(store KVStore) Option {
 	return func(c *FileClient) {
+		if store == nil {
+			return
+		}
 		c.chainManager = NewChainManager(store)
 	}
 }
@@ -357,8 +367,8 @@ func calculateChecksum(filePath string) (string, error) {
 // 设计说明：X-File-Checksum 请求头必须在 doRequest 调用前设置，而 body 的 SHA-256
 // 需要在 multipart 写入过程中流式计算。标准库的 net/http 在发送请求时先发 header 再发 body，
 // 因此无法在 body 流式写入的同时获取 checksum 并设置 header。io.TeeReader 方案在此不适用。
-// 对于 ≤ 100 MiB 的文件（本方法的适用范围，大文件走 ChunkedUpload），两次读取的 I/O 开销
-// 在 SSD 和 OS 缓存下可接受。
+// 对于 ≤ 100 MiB 的文件推荐使用本方法。超过 100 MiB 的大文件请使用 ChunkedUpload
+// 分块上传以获得更好的性能与并发控制。Upload 不会自动委派到 ChunkedUpload。
 func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (*UploadResult, error) {
 	if remotePath == "" {
 		return nil, fmt.Errorf("remotePath 不能为空")
@@ -419,6 +429,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 
 	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
 	if err != nil {
+		pr.Close()
 		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
@@ -475,14 +486,28 @@ func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
 // outputPath 指定本地保存路径；为空时使用 filename。
 // 如果启用了 checksum 校验（默认开启），会在下载后验证服务端返回的 X-File-Checksum。
 // 如果配置了 tunnel_key，下载数据将通过加密隧道传输。
+
+// validateOutputPath 校验输出路径，防止路径穿越和绝对路径使用。
+func validateOutputPath(path string) error {
+	cleaned := filepath.Clean(path)
+	if cleaned == "." {
+		return fmt.Errorf("输出路径不能为空")
+	}
+	if strings.Contains(cleaned, "..") {
+		return fmt.Errorf("输出路径不能包含路径穿越符 '..'")
+	}
+	return nil
+}
+
 func (c *FileClient) Download(ctx context.Context, filename, outputPath string) error {
 	if outputPath == "" {
 		outputPath = filename
 		if strings.Contains(filepath.Clean(outputPath), "..") {
 			return fmt.Errorf("文件名不能包含路径穿越符 '..'")
 		}
+	} else if err := validateOutputPath(outputPath); err != nil {
+		return err
 	}
-
 	urlPath := "/download?" + url.Values{"filename": {filename}}.Encode()
 	headers := make(http.Header)
 
@@ -977,7 +1002,28 @@ func closeBodyIfErr(resp *http.Response, err error) (*http.Response, error) {
 	return resp, err
 }
 
+// successChecker 接口，响应体实现此接口时 doJSON 自动检查 Success 字段。
+type successChecker interface {
+	isSuccess() bool
+}
+
+// doJSONResp 是 doJSON 的通用响应包装器，用于自动检查 Success 字段。
+type doJSONResp struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+}
+
+func (r *doJSONResp) isSuccess() bool { return r.Success }
+
+func (r *doJSONResp) GetMessage() string { return r.Message }
+
+// UploadResult 实现 successChecker 接口，支持 doJSON 自动检查。
+func (r *UploadResult) isSuccess() bool    { return r.Success }
+func (r *UploadResult) GetMessage() string { return r.Message }
+
 // doJSON 发送 JSON 请求体并解析 JSON 响应。
+// 如果 respBody 实现了 successChecker 接口，会自动检查 Success 字段，
+// 当 Success 为 false 时返回错误（包含 Message 字段）。
 // 自动设置 Content-Type: application/json，在非 2xx 时返回错误。
 func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody, respBody any) error {
 	var bodyReader io.Reader
@@ -1007,8 +1053,18 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 	}
 
 	if respBody != nil {
-		if err := json.NewDecoder(resp.Body).Decode(respBody); err != nil {
+		limited := io.LimitReader(resp.Body, 10<<20) // 10MB 上限
+		if err := json.NewDecoder(limited).Decode(respBody); err != nil {
 			return fmt.Errorf("解析响应失败: %w", err)
+		}
+
+		// 自动检查 Success 字段
+		if checker, ok := respBody.(successChecker); ok && !checker.isSuccess() {
+			msg := ""
+			if m, ok := respBody.(interface{ GetMessage() string }); ok {
+				msg = m.GetMessage()
+			}
+			return fmt.Errorf("请求失败: %s", msg)
 		}
 	}
 	return nil

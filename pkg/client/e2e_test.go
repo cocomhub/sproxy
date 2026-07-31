@@ -70,7 +70,7 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 	// 分块下载
 	outDir := t.TempDir()
 	outPath := filepath.Join(outDir, "downloaded.bin")
-	if err := c.ChunkedDownload(t.Context(), "upload.bin", outPath); err != nil {
+	if err = c.ChunkedDownload(t.Context(), "upload.bin", outPath); err != nil {
 		t.Fatalf("ChunkedDownload: %v", err)
 	}
 
@@ -109,7 +109,7 @@ func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
 	// 下载验证
 	outDir := t.TempDir()
 	outPath := filepath.Join(outDir, "resume-dl.bin")
-	if err := c.Download(t.Context(), "resume.bin", outPath); err != nil {
+	if err = c.Download(t.Context(), "resume.bin", outPath); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	got, err := os.ReadFile(outPath)

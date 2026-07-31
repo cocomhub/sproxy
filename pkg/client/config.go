@@ -4,14 +4,12 @@
 package client
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
@@ -109,6 +107,9 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func SaveConfig(cfg *Config, path string) error {
+	if strings.Contains(filepath.Clean(path), "..") {
+		return fmt.Errorf("配置路径包含非法路径穿越: %s", path)
+	}
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)
@@ -120,6 +121,9 @@ func SaveConfig(cfg *Config, path string) error {
 }
 
 func HandleConfigShow(cfg *Config) {
+	if cfg == nil {
+		return
+	}
 	fmt.Printf("ServerURL:     %s\n", cfg.ServerURL)
 	fmt.Printf("Timeout:       %d\n", cfg.Timeout)
 	maskedKey := cfg.TunnelKey
@@ -204,20 +208,9 @@ type ConfigResponse struct {
 
 // GetConfig 获取远程服务器配置。
 func (c *FileClient) GetConfig(ctx context.Context) (*ConfigResponse, error) {
-	resp, err := c.doRequest(ctx, "GET", "/api/config", nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("获取配置失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, fmt.Errorf("获取配置失败 (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-
 	var cfg ConfigResponse
-	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+	if err := c.doJSON(ctx, "GET", "/api/config", nil, &cfg); err != nil {
+		return nil, fmt.Errorf("获取配置失败: %w", err)
 	}
 	return &cfg, nil
 }
@@ -226,33 +219,12 @@ func (c *FileClient) GetConfig(ctx context.Context) (*ConfigResponse, error) {
 // 只更新指定的字段，未指定的字段保持不变。
 // 可更新的字段：log_level, log_format, auth_token, rate_limit_requests, rate_limit_window。
 func (c *FileClient) UpdateConfig(ctx context.Context, updates map[string]any) error {
-	body, err := json.Marshal(updates)
-	if err != nil {
-		return fmt.Errorf("序列化请求体失败: %w", err)
-	}
-
-	headers := make(http.Header)
-	headers.Set("Content-Type", "application/json")
-	resp, err := c.doRequest(ctx, "PUT", "/api/config", bytes.NewReader(body), headers)
-	if err != nil {
-		return fmt.Errorf("更新配置失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("更新配置失败 (HTTP %d): %s", resp.StatusCode, string(respBody))
-	}
-
 	var result struct {
 		Success bool `json:"success"`
 		Changed bool `json:"changed"`
 	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return fmt.Errorf("解析响应失败: %s", string(respBody))
-	}
-	if !result.Success {
-		return fmt.Errorf("更新配置失败")
+	if err := c.doJSON(ctx, "PUT", "/api/config", updates, &result); err != nil {
+		return fmt.Errorf("更新配置失败: %w", err)
 	}
 	return nil
 }
