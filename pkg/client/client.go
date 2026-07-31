@@ -543,8 +543,8 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	contentLength := resp.ContentLength
 
 	// 创建父目录（如果不存在）
-	if err := ensureParentDir(outputPath); err != nil {
-		return fmt.Errorf("创建输出目录失败: %w", err)
+	if ensureErr := ensureParentDir(outputPath); err != nil {
+		return fmt.Errorf("创建输出目录失败: %w", ensureErr)
 	}
 	out, err := os.Create(outputPath)
 	if err != nil {

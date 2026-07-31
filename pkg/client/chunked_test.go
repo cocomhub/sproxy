@@ -55,7 +55,8 @@ func sha256hex(data []byte) string {
 
 func TestDownloadOneChunk_ExponentialBackoff(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
 	var attempt atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,21 +86,21 @@ func TestDownloadOneChunk_ExponentialBackoff(t *testing.T) {
 
 	var mu sync.Mutex
 	var progress int64
-	var downloadErr error
 
 	c.downloadOneChunk(ctx, downloadChunkParams{
-		Filename:    "f.txt",
-		ChunkIdx:    0,
-		ChunkSize:   1024,
-		FileSize:    9,
-		OutFile:     outFile,
-		Mu:          &mu,
-		Progress:    &progress,
-		DownloadErr: &downloadErr,
+		Filename:  "f.txt",
+		ChunkIdx:  0,
+		ChunkSize: 1024,
+		FileSize:  9,
+		OutFile:   outFile,
+		Mu:        &mu,
+		Progress:  &progress,
+		Cancel:    cancel,
+		Done:      ctx.Done(),
 	})
 
-	if downloadErr != nil {
-		t.Fatalf("unexpected error: %v", downloadErr)
+	if ctx.Err() != nil {
+		t.Fatalf("unexpected context cancellation: %v", ctx.Err())
 	}
 
 	got := make([]byte, 9)
@@ -116,7 +117,8 @@ func TestDownloadOneChunk_ExponentialBackoff(t *testing.T) {
 
 func TestDownloadOneChunk_RetryThenSuccess(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
 	var attempt atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,21 +148,21 @@ func TestDownloadOneChunk_RetryThenSuccess(t *testing.T) {
 
 	var mu sync.Mutex
 	var progress int64
-	var downloadErr error
 
 	c.downloadOneChunk(ctx, downloadChunkParams{
-		Filename:    "f.txt",
-		ChunkIdx:    0,
-		ChunkSize:   1024,
-		FileSize:    4,
-		OutFile:     outFile,
-		Mu:          &mu,
-		Progress:    &progress,
-		DownloadErr: &downloadErr,
+		Filename:  "f.txt",
+		ChunkIdx:  0,
+		ChunkSize: 1024,
+		FileSize:  4,
+		OutFile:   outFile,
+		Mu:        &mu,
+		Progress:  &progress,
+		Cancel:    cancel,
+		Done:      ctx.Done(),
 	})
 
-	if downloadErr != nil {
-		t.Fatalf("unexpected error: %v", downloadErr)
+	if ctx.Err() != nil {
+		t.Fatalf("unexpected context cancellation: %v", ctx.Err())
 	}
 
 	got := make([]byte, 4)
@@ -177,7 +179,8 @@ func TestDownloadOneChunk_RetryThenSuccess(t *testing.T) {
 
 func TestDownloadOneChunk_AllRetriesFail(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -197,21 +200,21 @@ func TestDownloadOneChunk_AllRetriesFail(t *testing.T) {
 
 	var mu sync.Mutex
 	var progress int64
-	var downloadErr error
 
 	c.downloadOneChunk(ctx, downloadChunkParams{
-		Filename:    "f.txt",
-		ChunkIdx:    0,
-		ChunkSize:   1024,
-		FileSize:    9,
-		OutFile:     outFile,
-		Mu:          &mu,
-		Progress:    &progress,
-		DownloadErr: &downloadErr,
+		Filename:  "f.txt",
+		ChunkIdx:  0,
+		ChunkSize: 1024,
+		FileSize:  9,
+		OutFile:   outFile,
+		Mu:        &mu,
+		Progress:  &progress,
+		Cancel:    cancel,
+		Done:      ctx.Done(),
 	})
 
-	if downloadErr == nil {
-		t.Fatal("expected error after all retries exhausted")
+	if ctx.Err() == nil {
+		t.Fatal("expected context cancellation after all retries exhausted")
 	}
 }
 
@@ -238,22 +241,22 @@ func TestDownloadOneChunk_ContextCancel(t *testing.T) {
 
 	var mu sync.Mutex
 	var progress int64
-	var downloadErr error
 
-	// 上下文已取消，downloadOneChunk 应提前返回且不设置 downloadErr
+	// 上下文已取消，downloadOneChunk 应提前返回
 	c.downloadOneChunk(ctx, downloadChunkParams{
-		Filename:    "f.txt",
-		ChunkIdx:    0,
-		ChunkSize:   1024,
-		FileSize:    9,
-		OutFile:     outFile,
-		Mu:          &mu,
-		Progress:    &progress,
-		DownloadErr: &downloadErr,
+		Filename:  "f.txt",
+		ChunkIdx:  0,
+		ChunkSize: 1024,
+		FileSize:  9,
+		OutFile:   outFile,
+		Mu:        &mu,
+		Progress:  &progress,
+		Cancel:    cancel,
+		Done:      ctx.Done(),
 	})
 
-	if downloadErr != nil {
-		t.Errorf("expected no downloadErr after context cancellation, got: %v", downloadErr)
+	if ctx.Err() == nil {
+		t.Fatal("expected context cancellation")
 	}
 	if progress != 0 {
 		t.Errorf("expected no progress after context cancellation, got %d", progress)
@@ -413,14 +416,14 @@ func TestTryResumeSession(t *testing.T) {
 			Concurrency:  1,
 			ModTime:      now,
 		}
-		result, err, shouldContinue := c.tryResumeSession(t.Context(), params)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		res := c.tryResumeSession(t.Context(), params)
+		if res.err != nil {
+			t.Fatalf("unexpected error: %v", res.err)
 		}
-		if shouldContinue {
+		if res.shouldContinue {
 			t.Fatal("expected shouldContinue=false for finished upload")
 		}
-		if result == nil || !result.Success {
+		if res.result == nil || !res.result.Success {
 			t.Fatal("expected success result for finished upload")
 		}
 	})
@@ -439,14 +442,14 @@ func TestTryResumeSession(t *testing.T) {
 			UploadID: "test-456",
 			Filename: "test.txt",
 		}
-		result, err, shouldContinue := c.tryResumeSession(t.Context(), params)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		res := c.tryResumeSession(t.Context(), params)
+		if res.err != nil {
+			t.Fatalf("unexpected error: %v", res.err)
 		}
-		if !shouldContinue {
+		if !res.shouldContinue {
 			t.Fatal("expected shouldContinue=true for missing session")
 		}
-		if result != nil {
+		if res.result != nil {
 			t.Fatal("expected nil result for missing session")
 		}
 	})
@@ -465,14 +468,14 @@ func TestTryResumeSession(t *testing.T) {
 			UploadID: "test-789",
 			Filename: "test.txt",
 		}
-		result, err, shouldContinue := c.tryResumeSession(t.Context(), params)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		res := c.tryResumeSession(t.Context(), params)
+		if res.err != nil {
+			t.Fatalf("unexpected error: %v", res.err)
 		}
-		if !shouldContinue {
+		if !res.shouldContinue {
 			t.Fatal("expected shouldContinue=true for server error")
 		}
-		if result != nil {
+		if res.result != nil {
 			t.Fatal("expected nil result for server error")
 		}
 	})
@@ -518,14 +521,14 @@ func TestTryResumeSession(t *testing.T) {
 			Concurrency:  1,
 			ModTime:      now,
 		}
-		result, err, shouldContinue := c.tryResumeSession(t.Context(), params)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		res := c.tryResumeSession(t.Context(), params)
+		if res.err != nil {
+			t.Fatalf("unexpected error: %v", res.err)
 		}
-		if shouldContinue {
+		if res.shouldContinue {
 			t.Fatal("expected shouldContinue=false for resume")
 		}
-		if result == nil || !result.Success {
+		if res.result == nil || !res.result.Success {
 			t.Fatal("expected success result after resume")
 		}
 		if callCount < 1 {
