@@ -1,4 +1,4 @@
-// Copyright 2026 The Cocomhub Authors. All rights reserved.
+﻿// Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 package client
@@ -41,7 +41,7 @@ func (StructCodec) ToMap(v any) (map[string]any, error) {
 
 func (StructCodec) FromMap(m map[string]any, v any) error {
 	// 将 map 中的 json.Number 转回原始数值类型
-	m = convertNumbers(m)
+	m = ConvertNumbers(m)
 	data, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("map 序列化失败: %w", err)
@@ -52,8 +52,8 @@ func (StructCodec) FromMap(m map[string]any, v any) error {
 	return nil
 }
 
-// convertNumbers 递归将 map 中的 json.Number 转为 int64 或 float64
-func convertNumbers(m map[string]any) map[string]any {
+// ConvertNumbers 递归将 map 中的 json.Number 转为 int64 或 float64
+func ConvertNumbers(m map[string]any) map[string]any {
 	result := make(map[string]any, len(m))
 	for k, v := range m {
 		switch val := v.(type) {
@@ -66,7 +66,7 @@ func convertNumbers(m map[string]any) map[string]any {
 				result[k] = val.String()
 			}
 		case map[string]any:
-			result[k] = convertNumbers(val)
+			result[k] = ConvertNumbers(val)
 		default:
 			result[k] = v
 		}
@@ -87,6 +87,9 @@ func NewMemoryKVStore() *MemoryKVStore {
 func (s *MemoryKVStore) Save(_ context.Context, key string, value map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.data == nil {
+		return fmt.Errorf("store is closed")
+	}
 	clone := make(map[string]any, len(value))
 	maps.Copy(clone, value)
 	s.data[key] = clone

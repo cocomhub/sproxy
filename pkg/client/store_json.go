@@ -39,7 +39,21 @@ func NewJSONKVStore(ctx context.Context, dir string, logger *slog.Logger) (*JSON
 	return &JSONKVStore{dir: dir, logger: logger}, nil
 }
 
+// validateKey 校验 key 合法性，防止路径注入
+func validateKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("key 不能为空")
+	}
+	if strings.Contains(key, "..") || strings.Contains(key, "/") || strings.Contains(key, "\\") {
+		return fmt.Errorf("key 包含非法路径字符: %q", key)
+	}
+	return nil
+}
+
 func (s *JSONKVStore) Save(ctx context.Context, key string, value map[string]any) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("序列化失败: %w", err)
@@ -57,6 +71,9 @@ func (s *JSONKVStore) Save(ctx context.Context, key string, value map[string]any
 }
 
 func (s *JSONKVStore) Load(ctx context.Context, key string) (map[string]any, error) {
+	if err := validateKey(key); err != nil {
+		return nil, err
+	}
 	path := filepath.Join(s.dir, key+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -99,6 +116,9 @@ func (s *JSONKVStore) List(ctx context.Context, prefix string) ([]string, error)
 }
 
 func (s *JSONKVStore) Delete(ctx context.Context, key string) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
 	path := filepath.Join(s.dir, key+".json")
 	if err := os.Remove(path); err != nil {
 		if os.IsNotExist(err) {
