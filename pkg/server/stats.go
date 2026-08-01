@@ -20,9 +20,9 @@ type DiskUsageStats struct {
 // RequestCounts 请求计数统计。
 type RequestCounts struct {
 	Total int64 `json:"total"`
-	Xx2   int64 `json:"2xx"`
-	Xx4   int64 `json:"4xx"`
-	Xx5   int64 `json:"5xx"`
+	Status2xx int64 `json:"2xx"`
+	Status4xx int64 `json:"4xx"`
+	Status5xx int64 `json:"5xx"`
 }
 
 // StatsResponse 是 GET /api/stats 的响应体。
@@ -102,9 +102,9 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 		resp.BytesDownloaded = m.BytesDownloaded.Load()
 		resp.RequestCounts = RequestCounts{
 			Total: m.RequestsTotal.Load(),
-			Xx2:   m.Requests2XX.Load(),
-			Xx4:   m.Requests4XX.Load(),
-			Xx5:   m.Requests5XX.Load(),
+			Status2xx: m.Requests2XX.Load(),
+			Status4xx: m.Requests4XX.Load(),
+			Status5xx: m.Requests5XX.Load(),
 		}
 	}
 
