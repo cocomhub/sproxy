@@ -61,8 +61,8 @@ func (c *Config) Validate() error {
 	if c == nil {
 		return fmt.Errorf("config is nil")
 	}
-	if c.ServerURL == "" {
-		return fmt.Errorf("server_url 不能为空")
+	if !isValidServerURL(c.ServerURL) {
+		return fmt.Errorf("server_url 无效: %s", c.ServerURL)
 	}
 	if c.Timeout <= 0 {
 		return fmt.Errorf("timeout 必须大于 0")
@@ -108,6 +108,9 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 	cfg.SetDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -123,6 +126,12 @@ func SaveConfig(cfg *Config, path string) error {
 		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
 	return nil
+}
+
+// isValidServerURL 校验 server URL 格式是否合法。
+func isValidServerURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && u.Scheme != "" && u.Host != ""
 }
 
 func HandleConfigShow(cfg *Config, w io.Writer) {
@@ -154,8 +163,8 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 func ApplyConfigSet(cfg *Config, key, value string) error {
 	switch key {
 	case "server_url":
-		if _, err := url.Parse(value); err != nil {
-			return fmt.Errorf("无效的服务器地址: %w", err)
+		if !isValidServerURL(value) {
+			return fmt.Errorf("无效的服务器地址: %s", value)
 		}
 		cfg.ServerURL = value
 	case "auth_token":

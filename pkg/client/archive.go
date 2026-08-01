@@ -39,6 +39,9 @@ func (c *FileClient) ArchiveDir(ctx context.Context, dirname, outputPath string)
 	if dirname == "" {
 		return fmt.Errorf("archive dir: dirname 不能为空")
 	}
+	if outputPath == "" {
+		return fmt.Errorf("archive dir: outputPath 不能为空")
+	}
 	path := "/api/archive-dir?dirname=" + url.QueryEscape(dirname)
 	return c.downloadToFile(ctx, http.MethodGet, path, nil, nil, outputPath)
 }
@@ -47,6 +50,9 @@ func (c *FileClient) ArchiveDir(ctx context.Context, dirname, outputPath string)
 // 使用原子写入模式：先写入 .tmp 临时文件，成功后再重命名为目标路径。
 // 如果请求失败或写入失败，自动清理不完整文件。
 func (c *FileClient) downloadToFile(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header, outputPath string) error {
+	if outputPath == "" {
+		return fmt.Errorf("输出路径不能为空")
+	}
 	if containsPathTraversal(outputPath) {
 		return fmt.Errorf("输出路径包含非法路径穿越: %s", outputPath)
 	}
@@ -62,15 +68,25 @@ func (c *FileClient) downloadToFile(ctx context.Context, method, urlPath string,
 	}
 
 	tmpPath := outputPath + ".tmp"
+	if ensureErr := ensureParentDir(outputPath); ensureErr != nil {
+		return fmt.Errorf("创建输出目录失败: %w", ensureErr)
+	}
 	out, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("创建临时文件失败: %w", err)
 	}
 
-	if _, err = io.Copy(out, resp.Body); err != nil {
+	var src io.Reader = resp.Body
+	if c.progressFn != nil {
+		c.progressFn("下载", 0, resp.ContentLength)
+		src = NewProgressReader(resp.Body, resp.ContentLength, func(read, total int64) {
+			c.progressFn("下载", read, total)
+		})
+	}
+	if _, copyErr := io.Copy(out, src); copyErr != nil {
 		_ = out.Close()
 		os.Remove(tmpPath)
-		return fmt.Errorf("写入文件失败: %w", err)
+		return fmt.Errorf("写入文件失败: %w", copyErr)
 	}
 	if closeErr := out.Close(); closeErr != nil {
 		os.Remove(tmpPath)
