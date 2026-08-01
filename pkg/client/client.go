@@ -102,7 +102,7 @@ type FileClient struct {
 	logger                 *slog.Logger
 	uploadCache            sync.Map      // key = absFilePath, value = *uploadCacheEntry
 	cacheCleanCounter      atomic.Int64  // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
-	maxCacheEntries        int           // checksum 缓存最大条目数，0=使用默认值 1000
+	maxCacheEntries        int           // checksum 缓存最大条目数，在 calcFileChecksum 的 Range 清理时统计并淘汰
 	cacheTTL               time.Duration // checksum 缓存 TTL，0=使用默认值 10m
 	chainManager           *ChainManager // 链式操作管理器，nil=不启用
 	initError              error         // WithTunnel/WithXfer 初始化错误
@@ -169,8 +169,12 @@ func WithXfer(name, hubURL, hexKey string) Option {
 		if hexKey != "" {
 			key, err := tunnel.ParseKey(hexKey)
 			if err != nil {
-				c.logger.Warn("解析 xfer 密钥失败", "error", err)
-				c.initError = fmt.Errorf("解析 xfer 密钥失败: %w", err)
+				if c.tunnelClient != nil {
+					c.logger.Warn("解析 xfer 密钥失败（已启用隧道，忽略）", "error", err)
+				} else {
+					c.logger.Warn("解析 xfer 密钥失败", "error", err)
+					c.initError = fmt.Errorf("解析 xfer 密钥失败: %w", err)
+				}
 				return
 			}
 			c.tunnelKey = key
@@ -411,11 +415,15 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 
+	var uploadWg sync.WaitGroup
+	uploadWg.Add(1)
 	go func() {
+		defer uploadWg.Done()
 		defer pw.Close()
 		defer mw.Close()
 		select {
 		case <-ctx.Done():
+			pw.CloseWithError(ctx.Err())
 			return
 		default:
 		}
@@ -444,6 +452,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	headers.Set(headerFileMTime, fmt.Sprintf("%d", stat.ModTime().UnixNano()))
 
 	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
+	uploadWg.Wait()
 	if err != nil {
 		pr.Close()
 		return nil, fmt.Errorf(errFmtRequestFailed, err)
@@ -469,6 +478,9 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 
 // Mkdir 在服务端创建指定子目录。
 func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
+	if containsPathTraversal(dirname) {
+		return fmt.Errorf("dirname 不能包含路径穿越符 '..'")
+	}
 	urlPath := "/mkdir?dirname=" + url.QueryEscape(dirname)
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
@@ -484,6 +496,9 @@ func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
 
 // Rmdir 在服务端删除指定目录（含所有内容）。
 func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
+	if containsPathTraversal(dirname) {
+		return fmt.Errorf("dirname 不能包含路径穿越符 '..'")
+	}
 	urlPath := "/rmdir?dirname=" + url.QueryEscape(dirname)
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
@@ -503,7 +518,22 @@ func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
 // 如果启用了 checksum 校验（默认开启），会在下载后验证服务端返回的 X-File-Checksum。
 // 如果配置了 tunnel_key，下载数据将通过加密隧道传输。
 
-// validateOutputPath 校验输出路径，防止路径穿越和绝对路径使用。
+// resolveOutputPath 解析输出路径：outputPath 为空时使用 filename 作为默认值，否则校验 outputPath。
+func resolveOutputPath(filename, outputPath string) (string, error) {
+	if outputPath == "" {
+		outputPath = filename
+		if containsPathTraversal(filepath.Clean(outputPath)) {
+			return "", fmt.Errorf("文件名不能包含路径穿越符 '..'")
+		}
+		return outputPath, nil
+	}
+	if err := validateOutputPath(outputPath); err != nil {
+		return "", err
+	}
+	return outputPath, nil
+}
+
+// validateOutputPath 校验输出路径，防止路径穿越。
 func validateOutputPath(path string) error {
 	cleaned := filepath.Clean(path)
 	if cleaned == "." {
@@ -516,12 +546,11 @@ func validateOutputPath(path string) error {
 }
 
 func (c *FileClient) Download(ctx context.Context, filename, outputPath string) error {
-	if outputPath == "" {
-		outputPath = filename
-		if containsPathTraversal(filepath.Clean(outputPath)) {
-			return fmt.Errorf("文件名不能包含路径穿越符 '..'")
-		}
-	} else if err := validateOutputPath(outputPath); err != nil {
+	if containsPathTraversal(filename) {
+		return fmt.Errorf("filename 不能包含路径穿越符 '..'")
+	}
+	outputPath, err := resolveOutputPath(filename, outputPath)
+	if err != nil {
 		return err
 	}
 	urlPath := "/download?" + url.Values{"filename": {filename}}.Encode()
@@ -609,6 +638,9 @@ func (c *FileClient) restoreFileMTimeAfterDownload(outputPath string, resp *http
 // 如果提供了 localPath（非空），则会计算本地文件的 SHA-256 并与远端比对，一致才执行删除。
 // 如果配置了 tunnel_key，删除请求将通过加密隧道传输。
 func (c *FileClient) Delete(ctx context.Context, filename string, localPath string) error {
+	if containsPathTraversal(filename) {
+		return fmt.Errorf("文件名不能包含路径穿越符 '..'")
+	}
 	urlPath := "/delete?" + url.Values{"filename": {filename}}.Encode()
 	headers := make(http.Header)
 
@@ -617,7 +649,10 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 	if info, statErr := c.Stat(ctx, filename); statErr == nil && info.Checksum != "" {
 		fileChecksum = info.Checksum
 	} else if statErr != nil {
-		return fmt.Errorf("获取远端文件信息失败: %w", statErr)
+		if errors.Is(statErr, ErrNotFound) {
+			return fmt.Errorf("文件不存在: %s", filename)
+		}
+		return fmt.Errorf("获取文件信息失败: %w", statErr)
 	} else {
 		return fmt.Errorf("远端文件 checksum 为空，无法删除: %s", filename)
 	}
@@ -677,6 +712,12 @@ func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) 
 	if from == "" || to == "" {
 		return fmt.Errorf("from / to 不能为空")
 	}
+	if containsPathTraversal(from) {
+		return fmt.Errorf("源文件名不能包含路径穿越符 '..'")
+	}
+	if containsPathTraversal(to) {
+		return fmt.Errorf("目标文件名不能包含路径穿越符 '..'")
+	}
 	if fromChecksum == "" {
 		return fmt.Errorf("fromChecksum 不能为空（必须传入源文件 SHA-256 以防误覆盖）")
 	}
@@ -704,6 +745,9 @@ func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) 
 func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, error) {
 	if filename == "" {
 		return nil, fmt.Errorf("filename 不能为空")
+	}
+	if containsPathTraversal(filename) {
+		return nil, fmt.Errorf("文件名不能包含路径穿越符 '..'")
 	}
 	urlPath := "/api/files/stat?" + url.Values{"filename": {filename}}.Encode()
 	resp, err := c.doRequest(ctx, "HEAD", urlPath, nil, nil)
@@ -989,6 +1033,9 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 
 	var resp *http.Response
 	if c.tunnelClient != nil {
+		if c.initError != nil {
+			return nil, c.initError
+		}
 		// 隧道模式：使用相对 URL，隧道客户端处理加密
 		resp, err = c.tunnelClient.Do(req)
 		return closeBodyIfErr(resp, err)
