@@ -491,9 +491,15 @@ func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize 
 	// 注意：并发写入时 Range 可能遗漏极少数条目，但足以触发清理
 	const cacheCleanInterval = 10
 	if c.cacheCleanCounter.Add(1)%cacheCleanInterval == 0 {
+		var entryCount int
 		c.uploadCache.Range(func(k, v any) bool {
 			entry := v.(*uploadCacheEntry) //nolint:errcheck
 			if time.Since(entry.createdAt) > c.cacheTTL {
+				c.uploadCache.Delete(k)
+				return true
+			}
+			entryCount++
+			if c.maxCacheEntries > 0 && entryCount > c.maxCacheEntries {
 				c.uploadCache.Delete(k)
 			}
 			return true
@@ -824,16 +830,12 @@ func getFileStat(ctx context.Context, c *FileClient, filename string) (fileSize 
 func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath string, opts ...ChunkedOption) error {
 	params := getDownloadParams(c, opts...)
 
-	if outputPath == "" {
-		outputPath = filename
-		if containsPathTraversal(outputPath) {
-			return fmt.Errorf("文件名不能包含路径穿越符 '..'")
-		}
-	} else {
-		// 非空 outputPath 也做检查
-		if err := validateOutputPath(outputPath); err != nil {
-			return err
-		}
+	if containsPathTraversal(filename) {
+		return fmt.Errorf("文件名不能包含路径穿越符 '..'")
+	}
+	outputPath, err := resolveOutputPath(filename, outputPath)
+	if err != nil {
+		return err
 	}
 
 	// 获取文件信息（直接 Stat）
