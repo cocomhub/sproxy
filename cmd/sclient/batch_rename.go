@@ -8,6 +8,7 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -18,7 +19,8 @@ func NewCmdBatchRename(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 		Use:   "batch-rename <from1> <to1> [from2 to2...]",
 		Short: "批量重命名文件",
 		Long: `批量重命名 sproxy 服务端上的文件。
-		参数成对传入：每对 (from, to) 构成一次重命名操作。`,
+		参数成对传入：每对 (from, to) 构成一次重命名操作。
+		先批量 Stat 获取所有文件的 checksum，然后一次性提交批量重命名请求。`,
 		Example: `  sclient batch-rename old1.txt new1.txt old2.txt new2.txt`,
 		Args:    cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -33,52 +35,129 @@ func NewCmdBatchRename(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			}
 
 			// 构造成对参数列表
-			pairs := make([]struct{ from, to string }, len(args)/2)
+			type renamePair struct {
+				from string
+				to   string
+			}
+			pairs := make([]renamePair, len(args)/2)
 			for i := 0; i < len(args); i += 2 {
 				pairs[i/2].from, pairs[i/2].to = args[i], args[i+1]
 			}
 
-			results := make([]batchOperationResult, 0, len(pairs))
-			for _, p := range pairs {
-				result := batchOperationResult{Name: fmt.Sprintf("%s -> %s", p.from, p.to)}
-				// 先 stat 获取远端 checksum
+			// 第一步：批量 Stat 获取所有文件的 checksum
+			statResults := make([]*client.FileInfo, len(pairs))
+			statErrors := make([]error, len(pairs))
+			for i, p := range pairs {
 				info, err := svc.Stat(cmd.Context(), p.from)
-				if err != nil {
-					result.Message = fmt.Sprintf("stat 失败: %v", err)
-					results = append(results, result)
-					continue
-				}
-				if info.Checksum == "" {
-					result.Message = "远端文件 checksum 为空"
-					results = append(results, result)
-					continue
-				}
+				statResults[i] = info
+				statErrors[i] = err
+			}
 
-				if err := svc.Rename(cmd.Context(), p.from, p.to, info.Checksum); err != nil {
-					result.Message = err.Error()
-				} else {
-					result.Success = true
-					result.Message = "OK"
+			// 第二步：构造批量重命名请求
+			renameOps := make([]client.BatchRenameOp, 0, len(pairs))
+			// pairBatchIdx[i] 对应 pairs[i] 在 renameOps 中的索引（-1 表示跳过）
+			pairBatchIdx := make([]int, len(pairs))
+			for i, p := range pairs {
+				if statErrors[i] != nil {
+					pairBatchIdx[i] = -1
+					continue
 				}
-				results = append(results, result)
+				if statResults[i] == nil || statResults[i].Checksum == "" {
+					pairBatchIdx[i] = -1
+					continue
+				}
+				pairBatchIdx[i] = len(renameOps)
+				renameOps = append(renameOps, client.BatchRenameOp{
+					From:     p.from,
+					To:       p.to,
+					Checksum: statResults[i].Checksum,
+				})
+			}
+
+			results := make([]batchOperationResult, len(pairs))
+			if len(renameOps) > 0 {
+				apiResults, err := svc.BatchRename(cmd.Context(), renameOps)
+				if err != nil {
+					// 批量 API 整体失败
+					for i, p := range pairs {
+						msg := ""
+						if statErrors[i] != nil {
+							msg = fmt.Sprintf("stat 失败: %v", statErrors[i])
+						} else if statResults[i] == nil || statResults[i].Checksum == "" {
+							msg = "远端文件 checksum 为空"
+						} else {
+							msg = err.Error()
+						}
+						results[i] = batchOperationResult{
+							Name:    fmt.Sprintf("%s -> %s", p.from, p.to),
+							Success: false,
+							Message: msg,
+						}
+					}
+				} else {
+					// 映射 API 返回结果
+					for i, p := range pairs {
+						idx := pairBatchIdx[i]
+						if idx < 0 {
+							msg := ""
+							if statErrors[i] != nil {
+								msg = fmt.Sprintf("stat 失败: %v", statErrors[i])
+							} else {
+								msg = "远端文件 checksum 为空"
+							}
+							results[i] = batchOperationResult{
+								Name:    fmt.Sprintf("%s -> %s", p.from, p.to),
+								Success: false,
+								Message: msg,
+							}
+							continue
+						}
+						if idx < len(apiResults) {
+							ar := apiResults[idx]
+							msg := ar.Message
+							if msg == "" {
+								if ar.Success {
+									msg = "OK"
+								} else {
+									msg = "重命名失败"
+								}
+							}
+							results[i] = batchOperationResult{
+								Name:    fmt.Sprintf("%s -> %s", p.from, p.to),
+								Success: ar.Success,
+								Message: msg,
+							}
+						} else {
+							results[i] = batchOperationResult{
+								Name:    fmt.Sprintf("%s -> %s", p.from, p.to),
+								Success: false,
+								Message: "服务端未返回结果",
+							}
+						}
+					}
+				}
+			} else {
+				// 所有 stat 都失败
+				for i, p := range pairs {
+					msg := ""
+					if statErrors[i] != nil {
+						msg = fmt.Sprintf("stat 失败: %v", statErrors[i])
+					} else {
+						msg = "远端文件 checksum 为空"
+					}
+					results[i] = batchOperationResult{
+						Name:    fmt.Sprintf("%s -> %s", p.from, p.to),
+						Success: false,
+						Message: msg,
+					}
+				}
 			}
 
 			// 打印结果
-			for _, r := range results {
-				status := "OK"
-				if !r.Success {
-					status = "FAIL"
-				}
-				fmt.Fprintf(ios.Out, "[%s] %s: %s\n", status, r.Name, r.Message)
-			}
+			printBatchResults(results, ios.Out)
 
 			total := len(results)
-			success := 0
-			for _, r := range results {
-				if r.Success {
-					success++
-				}
-			}
+			success := countBatchSuccess(results)
 			fail := total - success
 			fmt.Fprintf(ios.Out, "\n总: %d, 成功: %d, 失败: %d\n", total, success, fail)
 			if fail > 0 {

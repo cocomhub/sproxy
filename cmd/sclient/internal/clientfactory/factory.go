@@ -99,7 +99,11 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		opts = append(opts, client.WithTransportFallback())
 	}
 
-	return client.NewFileClient(serverURL, opts...), nil
+	fc := client.NewFileClient(serverURL, opts...)
+	if err := fc.InitError(); err != nil {
+		return nil, fmt.Errorf("初始化客户端失败: %w", err)
+	}
+	return fc, nil
 }
 
 // mockFactory 是测试实现，直接返回预配置的 client。
