@@ -19,9 +19,9 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	nodes := h.routeTable.List()
 	type nodeResp struct {
-		ID        string `json:"id"`
-		Addr      string `json:"addr,omitempty"`
-		Connected time.Time `json:"connected,omitempty"`
+		ID        string    `json:"id"`
+		Addr      string    `json:"addr,omitempty"`
+		Connected time.Time `json:"connected"`
 	}
 	resp := make([]nodeResp, 0, len(nodes))
 	for _, n := range nodes {

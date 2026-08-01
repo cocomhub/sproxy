@@ -416,9 +416,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	mw := multipart.NewWriter(pw)
 
 	var uploadWg sync.WaitGroup
-	uploadWg.Add(1)
-	go func() {
-		defer uploadWg.Done()
+	uploadWg.Go(func() {
 		defer pw.Close()
 		defer mw.Close()
 		select {
@@ -443,7 +441,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 			pw.CloseWithError(copyErr)
 			return
 		}
-	}()
+	})
 
 	headers := make(http.Header)
 	headers.Set(headerContentType, mw.FormDataContentType())

@@ -272,7 +272,7 @@ func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
 // waitForTasks 轮询等待所有任务完成，支持存储超限重试。
 func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 	maxAttempts := 3
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		// 每次重试前归零计数器，基于本次轮询结果重新统计
 		c.Completed = 0
 		c.Failed = 0
