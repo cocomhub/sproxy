@@ -50,14 +50,13 @@ type CloudDownloadChain struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 
-	// 持久化字段：恢复时自动恢复（区别于 opts 中的非持久化字段）
+	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
 	Timeout      time.Duration `json:"timeout"`       // 超时时间，恢复时保持
 
 	// 非持久化字段：恢复后需手动设置
 	archiveServerPath string        `json:"-"` // 服务端返回的归档文件路径
 	client            *FileClient   `json:"-"`
-	opts              chainOptions  `json:"-"` // 仅运行时使用，非持久字段由独立字段覆盖
 	chainMgr          *ChainManager `json:"-"` // 链式操作管理器，用于阶段间持久化状态
 }
 
@@ -90,7 +89,6 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		PollInterval: fixPollInterval(opts.pollInterval),
 		Timeout:      opts.timeout,
 		client:       client,
-		opts:         opts,
 	}, nil
 }
 
@@ -130,9 +128,17 @@ func (c *CloudDownloadChain) SetClient(client *FileClient) {
 }
 
 func (c *CloudDownloadChain) SetOptions(opts chainOptions) {
-	c.opts = opts
+	// SetOptions 从 chainOptions 中读取 pollInterval/timeout/keepFiles，
+	// 写入 CloudDownloadChain 的持久化字段（KeepFiles/PollInterval/Timeout），
+	// 使 struct 字段成为唯一数据源，避免 chainOptions 与持久化字段的重复问题。
+	//
+	// chainOptions 保留 pollInterval/timeout/keepFiles 字段作为 WithChain* 函数式 API
+	// 的桥接层。SetOptions 读取一次后即写入持久化字段，之后不再依赖 chainOptions。
+	// 这使得外部调用方（sclient CLI、测试等）通过 WithChain* 设置的选项能正确生效，
+	// 同时确保持久化/恢复时 CloudDownloadChain 的 struct 字段是唯一数据源。
 	c.PollInterval = fixPollInterval(opts.pollInterval)
 	c.Timeout = opts.timeout
+	c.KeepFiles = opts.keepFiles
 }
 
 // fixPollInterval 确保轮询间隔不为零，零值时使用默认值（5s）。
