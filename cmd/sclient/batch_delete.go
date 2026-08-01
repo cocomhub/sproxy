@@ -9,6 +9,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -18,7 +19,7 @@ func NewCmdBatchDelete(factory clientfactory.Factory, ios cli.IOStreams, st *sta
 		Use:   "batch-delete <file1> [file2...]",
 		Short: "批量删除文件",
 		Long: `批量删除 sproxy 服务端上的多个文件。
-		每个文件会先通过 Stat 获取远端 checksum，然后发起删除请求。`,
+		使用批量 API 一次性提交所有删除请求，避免逐文件 RTT。`,
 		Example: `  sclient batch-delete a.txt b.txt dir/file.txt`,
 		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -28,37 +29,97 @@ func NewCmdBatchDelete(factory clientfactory.Factory, ios cli.IOStreams, st *sta
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
-			results := make([]batchOperationResult, 0, len(args))
+			// 收集所有文件，先 resolve 路径
+			type fileItem struct {
+				orig   string
+				remote string
+			}
+			items := make([]fileItem, 0, len(args))
 			for _, filename := range args {
-				result := batchOperationResult{Name: filename}
 				remote, err := st.ResolveRemotePath(filename)
+				items = append(items, fileItem{orig: filename, remote: remote})
 				if err != nil {
-					result.Message = err.Error()
-				} else if err := svc.Delete(cmd.Context(), remote, filename); err != nil {
-					result.Message = err.Error()
-				} else {
-					result.Success = true
-					result.Message = "OK"
+					continue
 				}
-				results = append(results, result)
+			}
+
+			// 构建批量删除请求 — 只传成功 resolve 路径的文件
+			batchFiles := make([]client.BatchDeleteFile, 0, len(items))
+			// itemBatchIdx[i] 对应 items 中第 i 个元素在 batchFiles 中的索引（-1 表示未加入）
+			itemBatchIdx := make([]int, len(items))
+			for i, item := range items {
+				if item.remote == "" {
+					itemBatchIdx[i] = -1
+					continue
+				}
+				itemBatchIdx[i] = len(batchFiles)
+				batchFiles = append(batchFiles, client.BatchDeleteFile{Filename: item.remote})
+			}
+
+			results := make([]batchOperationResult, len(items))
+			if len(batchFiles) > 0 {
+				apiResults, err := svc.BatchDelete(cmd.Context(), batchFiles)
+				if err != nil {
+					// 批量 API 整体失败
+					for i, item := range items {
+						results[i] = batchOperationResult{
+							Name:    item.orig,
+							Success: false,
+							Message: err.Error(),
+						}
+					}
+				} else {
+					// 映射 API 返回结果到原始文件名
+					for i, item := range items {
+						idx := itemBatchIdx[i]
+						if idx < 0 {
+							results[i] = batchOperationResult{
+								Name:    item.orig,
+								Success: false,
+								Message: "路径解析失败",
+							}
+							continue
+						}
+						if idx < len(apiResults) {
+							ar := apiResults[idx]
+							msg := ar.Message
+							if msg == "" {
+								if ar.Success {
+									msg = "OK"
+								} else {
+									msg = "删除失败"
+								}
+							}
+							results[i] = batchOperationResult{
+								Name:    item.orig,
+								Success: ar.Success,
+								Message: msg,
+							}
+						} else {
+							results[i] = batchOperationResult{
+								Name:    item.orig,
+								Success: false,
+								Message: "服务端未返回结果",
+							}
+						}
+					}
+				}
+			} else {
+				// 所有路径解析都失败
+				for i, item := range items {
+					results[i] = batchOperationResult{
+						Name:    item.orig,
+						Success: false,
+						Message: "路径解析失败",
+					}
+				}
 			}
 
 			// 打印结果
-			for _, r := range results {
-				status := "OK"
-				if !r.Success {
-					status = "FAIL"
-				}
-				fmt.Fprintf(ios.Out, "[%s] %s: %s\n", status, r.Name, r.Message)
-			}
+			printBatchResults(results, ios.Out)
 
 			total := len(results)
-			success := 0
-			for _, r := range results {
-				if r.Success {
-					success++
-				}
-			}
+			success := countBatchSuccess(results)
 			fail := total - success
 			fmt.Fprintf(ios.Out, "\n总: %d, 成功: %d, 失败: %d\n", total, success, fail)
 			if fail > 0 {
