@@ -37,15 +37,22 @@ func FormatByte(size float64) string {
 }
 
 // FormatETA 格式化剩余时间为人类可读字符串。
+// 支持小时、分钟、秒级精度，1 小时以上显示到秒。
 func FormatETA(seconds int64) string {
 	if seconds <= 0 {
 		return "--:--"
 	}
-	if seconds >= 3600 {
-		return fmt.Sprintf("%dh %dm", seconds/3600, (seconds%3600)/60)
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	s := seconds % 60
+	if h > 0 {
+		if s > 0 {
+			return fmt.Sprintf("%dh %dm %ds", h, m, s)
+		}
+		return fmt.Sprintf("%dh %dm", h, m)
 	}
-	if seconds >= 60 {
-		return fmt.Sprintf("%dm %ds", seconds/60, seconds%60)
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
 	}
-	return fmt.Sprintf("%ds", seconds)
+	return fmt.Sprintf("%ds", s)
 }

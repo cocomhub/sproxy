@@ -15,7 +15,7 @@ import (
 type CloudTask struct {
 	ID         string    `json:"id"`
 	URL        string    `json:"url"`
-	Method     string    `json:"method,omitempty"`
+	Method     string    `json:"method,omitempty"` // 下载方法，如 "http"、"scraper" 等，空值表示自动选择
 	Filename   string    `json:"filename"`
 	Status     string    `json:"status"`
 	TotalSize  int64     `json:"total_size"`
@@ -62,8 +62,8 @@ func WithCloudDownloadMaxBatchURLs(n int) CloudDownloadOption {
 	}
 }
 
-// ArchiveResult 表示归档操作的结果。
-type ArchiveResult struct {
+// CloudArchiveResult 表示云端归档操作的结果。
+type CloudArchiveResult struct {
 	Success   bool   `json:"success"`
 	Message   string `json:"message,omitempty"`
 	File      string `json:"file,omitempty"`
@@ -72,19 +72,24 @@ type ArchiveResult struct {
 	TaskCount int    `json:"task_count,omitempty"`
 }
 
+// CloudArchiveResult 实现 successChecker 接口，支持 doJSON 自动检查。
+func (r *CloudArchiveResult) isSuccess() bool { return r.Success }
+
+func (r *CloudArchiveResult) message() string { return r.Message }
+
 // CloudDownload 创建云端下载任务。
 // 小文件（<20MB）同步完成，大文件异步执行。
 func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...CloudDownloadOption) (*CloudTask, error) {
 	if urlStr == "" {
-		return nil, fmt.Errorf("cloud download: url is required")
+		return nil, fmt.Errorf("云端下载: URL 不能为空")
 	}
 	// 基本 URL 格式校验：避免无效 URL 浪费服务端资源
 	u, err := url.Parse(urlStr)
 	if err != nil {
-		return nil, fmt.Errorf("cloud download: invalid URL %q: %w", urlStr, err)
+		return nil, fmt.Errorf("云端下载: 无效 URL %q: %w", urlStr, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("cloud download: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
+		return nil, fmt.Errorf("云端下载: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
 	}
 	cfg := &cloudDownloadOptions{}
 	for _, opt := range opts {
@@ -106,7 +111,7 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 // 可以用 WithCloudDownloadMaxBatchURLs 调整上限，但不能超过服务端限制。
 func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts ...CloudDownloadOption) ([]CloudTask, error) {
 	if len(urls) == 0 {
-		return nil, fmt.Errorf("cloud download batch: urls is required")
+		return nil, fmt.Errorf("批量云端下载: URL 列表不能为空")
 	}
 	cfg := &cloudDownloadOptions{}
 	for _, opt := range opts {
@@ -117,17 +122,17 @@ func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts
 		maxBatch = cfg.maxBatchURLs
 	}
 	if len(urls) > maxBatch {
-		return nil, fmt.Errorf("cloud download batch: 最多 %d 个 URL，收到 %d 个", maxBatch, len(urls))
+		return nil, fmt.Errorf("批量云端下载: 最多 %d 个 URL，收到 %d 个", maxBatch, len(urls))
 	}
 
 	// 校验每个 URL 的格式
 	for _, urlStr := range urls {
 		u, err := url.Parse(urlStr)
 		if err != nil {
-			return nil, fmt.Errorf("cloud download batch: invalid URL %q: %w", urlStr, err)
+			return nil, fmt.Errorf("批量云端下载: 无效 URL %q: %w", urlStr, err)
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
-			return nil, fmt.Errorf("cloud download batch: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
+			return nil, fmt.Errorf("批量云端下载: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
 		}
 	}
 
@@ -159,7 +164,7 @@ func (c *FileClient) ListCloudTasks(ctx context.Context, status string) ([]Cloud
 	}
 	tasks := make([]CloudTask, 0)
 	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &tasks); err != nil {
-		return nil, fmt.Errorf("list cloud tasks: %w", err)
+		return nil, fmt.Errorf("列举云端任务: %w", err)
 	}
 	return tasks, nil
 }
@@ -167,12 +172,12 @@ func (c *FileClient) ListCloudTasks(ctx context.Context, status string) ([]Cloud
 // GetCloudTask 查询单个任务详情。
 func (c *FileClient) GetCloudTask(ctx context.Context, taskID string) (*CloudTask, error) {
 	if taskID == "" {
-		return nil, fmt.Errorf("cloud download: taskID 不能为空")
+		return nil, fmt.Errorf("云端下载: taskID 不能为空")
 	}
 	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID)
 	var task CloudTask
 	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &task); err != nil {
-		return nil, fmt.Errorf("get cloud task: %w", err)
+		return nil, fmt.Errorf("获取云端任务: %w", err)
 	}
 	return &task, nil
 }
@@ -180,7 +185,7 @@ func (c *FileClient) GetCloudTask(ctx context.Context, taskID string) (*CloudTas
 // CancelCloudTask 取消云端下载任务。
 func (c *FileClient) CancelCloudTask(ctx context.Context, taskID string) error {
 	if taskID == "" {
-		return fmt.Errorf("cloud download: taskID 不能为空")
+		return fmt.Errorf("云端下载: taskID 不能为空")
 	}
 	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/cancel"
 	return c.doJSON(ctx, http.MethodPost, apiPath, nil, nil)
@@ -189,47 +194,44 @@ func (c *FileClient) CancelCloudTask(ctx context.Context, taskID string) error {
 // DeleteCloudTask 删除云端下载任务及关联文件。
 func (c *FileClient) DeleteCloudTask(ctx context.Context, taskID string) error {
 	if taskID == "" {
-		return fmt.Errorf("cloud download: taskID 不能为空")
+		return fmt.Errorf("云端下载: taskID 不能为空")
 	}
 	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID)
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
 }
 
 // ArchiveCloudTask 将单任务文件打包为 tar.gz 并存放到 uploads 目录。
-func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName string) (*ArchiveResult, error) {
+func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName string) (*CloudArchiveResult, error) {
 	if taskID == "" {
-		return nil, fmt.Errorf("cloud download: taskID is required")
+		return nil, fmt.Errorf("云端打包: taskID 不能为空")
 	}
 	if archiveName == "" {
-		return nil, fmt.Errorf("cloud download: archiveName is required for archive operation")
+		return nil, fmt.Errorf("云端打包: 归档名称不能为空")
 	}
 	body := map[string]string{"archive_name": archiveName}
 	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/archive"
-	var result ArchiveResult
+	var result CloudArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &result); err != nil {
-		return nil, fmt.Errorf("archive cloud task: %w", err)
-	}
-	if !result.Success {
-		return nil, fmt.Errorf("archive cloud task: %s", result.Message)
+		return nil, fmt.Errorf("云端打包: %w", err)
 	}
 	return &result, nil
 }
 
 // ArchiveCloudTasks 将多个任务的文件打包为一个 tar.gz。
-func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, archiveName string) (*ArchiveResult, error) {
+func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, archiveName string) (*CloudArchiveResult, error) {
+	if len(taskIDs) == 0 {
+		return nil, fmt.Errorf("云端打包: taskIDs 不能为空")
+	}
 	if archiveName == "" {
-		return nil, fmt.Errorf("cloud download: archiveName is required for archive operation")
+		return nil, fmt.Errorf("云端打包: 归档名称不能为空")
 	}
 	body := map[string]any{
 		"task_ids":     taskIDs,
 		"archive_name": archiveName,
 	}
-	var result ArchiveResult
+	var result CloudArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/archive", body, &result); err != nil {
-		return nil, fmt.Errorf("archive cloud tasks: %w", err)
-	}
-	if !result.Success {
-		return nil, fmt.Errorf("archive cloud tasks: %s", result.Message)
+		return nil, fmt.Errorf("云端打包: %w", err)
 	}
 	return &result, nil
 }

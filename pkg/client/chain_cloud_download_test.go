@@ -259,7 +259,7 @@ func TestCloudDownloadChain_ArchiveError(t *testing.T) {
 
 	// 归档失败
 	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(ArchiveResult{Success: false, Message: "archive failed"})
+		json.NewEncoder(w).Encode(CloudArchiveResult{Success: false, Message: "archive failed"})
 	})
 
 	ts := httptest.NewServer(mux)
@@ -475,7 +475,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		archivePath := filepath.Join(archiveDir, "retry-archive.tar.gz")
 		os.WriteFile(archivePath, []byte("archive-content"), 0644)
 		sum := sha256.Sum256([]byte("archive-content"))
-		json.NewEncoder(w).Encode(ArchiveResult{
+		json.NewEncoder(w).Encode(CloudArchiveResult{
 			Success:  true,
 			Message:  "ok",
 			File:     filepath.ToSlash(filepath.Join(".__cloud_archives__", "retry-archive.tar.gz")),
@@ -598,7 +598,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 		archivePath := filepath.Join(archiveDir, req.ArchiveName+".tar.gz")
 		os.WriteFile(archivePath, []byte("archive-content"), 0644)
 		sum := sha256.Sum256([]byte("archive-content"))
-		json.NewEncoder(w).Encode(ArchiveResult{
+		json.NewEncoder(w).Encode(CloudArchiveResult{
 			Success:  true,
 			Message:  "ok",
 			File:     filepath.ToSlash(filepath.Join(".__cloud_archives__", req.ArchiveName+".tar.gz")),
@@ -756,7 +756,7 @@ func TestCloudDownloadChain_SubmitTasks_EmptyResult(t *testing.T) {
 		json.NewEncoder(w).Encode(CloudTask{ID: "task-1", Status: "completed"})
 	})
 	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(ArchiveResult{Success: true, File: "test.tar.gz"})
+		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true, File: "test.tar.gz"})
 	})
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-File-Size", "10")

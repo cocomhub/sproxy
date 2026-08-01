@@ -341,7 +341,7 @@ func TestFileClient_CloudDownloadChain_EmptyURLs(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{}})
 	})
 	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(ArchiveResult{Success: true, File: "test.tar.gz", Size: 100, Checksum: "abc"})
+		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true, File: "test.tar.gz", Size: 100, Checksum: "abc"})
 	})
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

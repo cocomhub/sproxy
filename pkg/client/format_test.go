@@ -77,8 +77,8 @@ func TestFormatETA_Boundaries(t *testing.T) {
 		{3599, "59m 59s"},
 		{3600, "1h 0m"},
 		{3660, "1h 1m"},
-		{3661, "1h 1m"},
-		{100000, "27h 46m"},
+		{3661, "1h 1m 1s"},
+		{100000, "27h 46m 40s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {

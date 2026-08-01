@@ -130,12 +130,12 @@ func cloudTestServer(t *testing.T) (*httptest.Server, string) {
 			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(ArchiveResult{Success: true, File: "archive.tar.gz", Size: 1024, Checksum: "abc123", TaskCount: 1})
+		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true, File: "archive.tar.gz", Size: 1024, Checksum: "abc123", TaskCount: 1})
 	})
 
 	// POST /api/cloud/archive
 	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(ArchiveResult{Success: true, File: "combined.tar.gz", Size: 2048, Checksum: "def456", TaskCount: 2})
+		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true, File: "combined.tar.gz", Size: 2048, Checksum: "def456", TaskCount: 2})
 	})
 
 	ts := httptest.NewServer(mux)
