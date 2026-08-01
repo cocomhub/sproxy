@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/shortid"
@@ -49,13 +50,7 @@ type UploadResult struct {
 	Checksum string `json:"file_checksum,omitempty"`
 }
 
-type serverResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	FileCS  string `json:"file_checksum"`
-}
-
-// ProgressReader 是一个带进度回调的 io.ReadCloser 包装。
+// ProgressReader 是一个带进度回调的 io.Reader 包装。
 type ProgressReader struct {
 	reader     io.Reader
 	total      int64
@@ -92,33 +87,47 @@ type Option func(*FileClient)
 //	result, err := client.Upload(ctx, "file.txt")
 //	err := client.Download(ctx, "file.txt", "/tmp/file.txt")
 type FileClient struct {
-	serverURL    string
-	httpClient   *http.Client
-	tunnelClient *tunnel.Client
-	xferName     string
-	hubURL       string
-	tunnelKey    []byte
-	tunnelMux    *mux.Mux
-	tunnelMuxMu  sync.Mutex
-	progressFn   func(label string, read, total int64)
-	ChunkSize    int64
-	MaxChunkSize int64
-	authToken    string
-	logger       *slog.Logger
-	uploadCache  sync.Map      // key = absFilePath, value = *uploadCacheEntry
-	chainManager *ChainManager // 链式操作管理器，nil=不启用
+	serverURL              string
+	httpClient             *http.Client
+	tunnelClient           *tunnel.Client
+	xferName               string
+	hubURL                 string
+	tunnelKey              []byte
+	tunnelMux              *mux.Mux
+	tunnelMuxMu            sync.Mutex
+	progressFn             func(label string, read, total int64)
+	chunkSize              int64
+	maxChunkSize           int64
+	authToken              string
+	logger                 *slog.Logger
+	uploadCache            sync.Map      // key = absFilePath, value = *uploadCacheEntry
+	cacheCleanCounter      atomic.Int64  // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
+	maxCacheEntries        int           // checksum 缓存最大条目数，在 calcFileChecksum 的 Range 清理时统计并淘汰
+	cacheTTL               time.Duration // checksum 缓存 TTL，0=使用默认值 10m
+	chainManager           *ChainManager // 链式操作管理器，nil=不启用
+	initError              error         // WithTunnel/WithXfer 初始化错误
+	allowTransportFallback bool          // WithTransportFallback 设置后允许回退到直连模式
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
 //
 // serverURL 是 sproxy 服务端地址，如 "https://127.0.0.1:18083"。
 // 可以通过 Option 设置自定义 HTTP 客户端、隧道加密、超时等。
+//
+// 注意：如果使用了 WithTunnel 或 WithXfer 等选项，初始化失败时不会立即 panic，
+// 而是将错误记录在 FileClient 内部。调用 InitError() 方法可确认初始化状态，
+// 确保所有配置项均已正确应用。
 func NewFileClient(serverURL string, opts ...Option) *FileClient {
+	if serverURL == "" {
+		panic("NewFileClient: serverURL 不能为空")
+	}
 	c := &FileClient{
-		serverURL:  strings.TrimRight(serverURL, "/"),
-		httpClient: &http.Client{Timeout: 300 * time.Second},
-		ChunkSize:  size.DefaultChunkSize, // 4 MiB
-		logger:     slog.Default(),
+		serverURL:       strings.TrimRight(serverURL, "/"),
+		httpClient:      &http.Client{Timeout: 300 * time.Second},
+		chunkSize:       size.DefaultChunkSize, // 4 MiB
+		logger:          slog.Default(),
+		maxCacheEntries: defaultMaxCacheEntries,
+		cacheTTL:        defaultCacheTTL,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -129,6 +138,10 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 // WithHTTPClient 设置自定义 HTTP 客户端。
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *FileClient) {
+		if hc == nil {
+			c.httpClient = &http.Client{Timeout: 30 * time.Second}
+			return
+		}
 		c.httpClient = hc
 	}
 }
@@ -139,6 +152,7 @@ func WithTunnel(hexKey string) Option {
 		tc, err := tunnel.NewClient(hexKey, c.serverURL+"/tunnel", c.httpClient.Timeout, c.logger)
 		if err != nil {
 			c.logger.Warn("创建隧道客户端失败", "error", err)
+			c.initError = fmt.Errorf("创建隧道客户端失败: %w", err)
 			return
 		}
 		c.tunnelClient = tc
@@ -155,7 +169,12 @@ func WithXfer(name, hubURL, hexKey string) Option {
 		if hexKey != "" {
 			key, err := tunnel.ParseKey(hexKey)
 			if err != nil {
-				c.logger.Warn("解析 xfer 密钥失败", "error", err)
+				if c.tunnelClient != nil {
+					c.logger.Warn("解析 xfer 密钥失败（已启用隧道，忽略）", "error", err)
+				} else {
+					c.logger.Warn("解析 xfer 密钥失败", "error", err)
+					c.initError = fmt.Errorf("解析 xfer 密钥失败: %w", err)
+				}
 				return
 			}
 			c.tunnelKey = key
@@ -262,7 +281,14 @@ func WithProgress(fn func(label string, read, total int64)) Option {
 // WithMaxChunkSize 设置最大分块大小。当设置为 0 时使用默认值 64MB。
 func WithMaxChunkSize(n int64) Option {
 	return func(c *FileClient) {
-		c.MaxChunkSize = n
+		c.maxChunkSize = n
+	}
+}
+
+// WithChunkSize 设置首选分块大小。当设置为 0 时使用默认值 4MB。
+func WithChunkSize(n int64) Option {
+	return func(c *FileClient) {
+		c.chunkSize = n
 	}
 }
 
@@ -288,6 +314,9 @@ func WithLogger(logger *slog.Logger) Option {
 // WithKVStore 设置自定义 KVStore 实现，启用链式操作持久化。
 func WithKVStore(store KVStore) Option {
 	return func(c *FileClient) {
+		if store == nil {
+			return
+		}
 		c.chainManager = NewChainManager(store)
 	}
 }
@@ -305,7 +334,29 @@ func WithCacheDir(dir string) Option {
 	}
 }
 
-// calculateChecksum 计算文件的 SHA-256 十六进制摘要。
+// WithCacheOptions 设置 checksum 缓存参数。
+// maxEntries 为缓存最大条目数（0=使用默认值 1000），ttl 为缓存条目过期时间（0=使用默认值 10m）。
+func WithCacheOptions(maxEntries int, ttl time.Duration) Option {
+	return func(c *FileClient) {
+		if maxEntries > 0 {
+			c.maxCacheEntries = maxEntries
+		}
+		if ttl > 0 {
+			c.cacheTTL = ttl
+		}
+	}
+}
+
+// WithTransportFallback 设置当隧道/xfer 初始化失败时允许回退到直连模式。
+// 默认情况下（不设置此选项），initError 会导致 doRequest 直接返回错误。
+func WithTransportFallback() Option {
+	return func(c *FileClient) {
+		c.allowTransportFallback = true
+	}
+}
+
+// calculateChecksum 计算文件的 SHA-256 十六进制摘要（无缓存版本）。
+// 与 calcFileChecksum（带缓存，位于 chunked.go）不同，此函数每次调用都重新计算。
 func calculateChecksum(filePath string) (string, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -327,7 +378,16 @@ func calculateChecksum(filePath string) (string, error) {
 // 并通过 X-File-Checksum 请求头发送给服务端进行完整性校验。
 // 同时通过 X-File-MTime 请求头传递文件的修改时间。
 // 如果配置了 tunnel_key，上传数据将通过加密隧道传输。
+//
+// 设计说明：X-File-Checksum 请求头必须在 doRequest 调用前设置，而 body 的 SHA-256
+// 需要在 multipart 写入过程中流式计算。标准库的 net/http 在发送请求时先发 header 再发 body，
+// 因此无法在 body 流式写入的同时获取 checksum 并设置 header。io.TeeReader 方案在此不适用。
+// 对于 ≤ 100 MiB 的文件推荐使用本方法。超过 100 MiB 的大文件请使用 ChunkedUpload
+// 分块上传以获得更好的性能与并发控制。Upload 不会自动委派到 ChunkedUpload。
 func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (*UploadResult, error) {
+	if remotePath == "" {
+		return nil, fmt.Errorf("remotePath 不能为空")
+	}
 	file, err := os.Open(localPath)
 	if err != nil {
 		return nil, fmt.Errorf("打开文件失败: %w", err)
@@ -355,9 +415,16 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
 
-	go func() {
+	var uploadWg sync.WaitGroup
+	uploadWg.Go(func() {
 		defer pw.Close()
 		defer mw.Close()
+		select {
+		case <-ctx.Done():
+			pw.CloseWithError(ctx.Err())
+			return
+		default:
+		}
 		part, wErr := mw.CreateFormFile("file", remoteClean)
 		if wErr != nil {
 			pw.CloseWithError(wErr)
@@ -370,11 +437,11 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 				c.progressFn("上传", read, total)
 			})
 		}
-		if _, err = io.Copy(part, src); err != nil {
-			pw.CloseWithError(err)
+		if _, copyErr := io.Copy(part, src); copyErr != nil {
+			pw.CloseWithError(copyErr)
 			return
 		}
-	}()
+	})
 
 	headers := make(http.Header)
 	headers.Set(headerContentType, mw.FormDataContentType())
@@ -383,7 +450,9 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	headers.Set(headerFileMTime, fmt.Sprintf("%d", stat.ModTime().UnixNano()))
 
 	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
+	uploadWg.Wait()
 	if err != nil {
+		pr.Close()
 		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
@@ -407,6 +476,9 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 
 // Mkdir 在服务端创建指定子目录。
 func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
+	if containsPathTraversal(dirname) {
+		return fmt.Errorf("dirname 不能包含路径穿越符 '..'")
+	}
 	urlPath := "/mkdir?dirname=" + url.QueryEscape(dirname)
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
@@ -422,6 +494,9 @@ func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
 
 // Rmdir 在服务端删除指定目录（含所有内容）。
 func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
+	if containsPathTraversal(dirname) {
+		return fmt.Errorf("dirname 不能包含路径穿越符 '..'")
+	}
 	urlPath := "/rmdir?dirname=" + url.QueryEscape(dirname)
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
@@ -440,11 +515,42 @@ func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
 // outputPath 指定本地保存路径；为空时使用 filename。
 // 如果启用了 checksum 校验（默认开启），会在下载后验证服务端返回的 X-File-Checksum。
 // 如果配置了 tunnel_key，下载数据将通过加密隧道传输。
-func (c *FileClient) Download(ctx context.Context, filename, outputPath string) error {
+
+// resolveOutputPath 解析输出路径：outputPath 为空时使用 filename 作为默认值，否则校验 outputPath。
+func resolveOutputPath(filename, outputPath string) (string, error) {
 	if outputPath == "" {
 		outputPath = filename
+		if containsPathTraversal(filepath.Clean(outputPath)) {
+			return "", fmt.Errorf("文件名不能包含路径穿越符 '..'")
+		}
+		return outputPath, nil
 	}
+	if err := validateOutputPath(outputPath); err != nil {
+		return "", err
+	}
+	return outputPath, nil
+}
 
+// validateOutputPath 校验输出路径，防止路径穿越。
+func validateOutputPath(path string) error {
+	cleaned := filepath.Clean(path)
+	if cleaned == "." {
+		return fmt.Errorf("输出路径不能为空")
+	}
+	if containsPathTraversal(cleaned) {
+		return fmt.Errorf("输出路径不能包含路径穿越符 '..'")
+	}
+	return nil
+}
+
+func (c *FileClient) Download(ctx context.Context, filename, outputPath string) error {
+	if containsPathTraversal(filename) {
+		return fmt.Errorf("filename 不能包含路径穿越符 '..'")
+	}
+	outputPath, err := resolveOutputPath(filename, outputPath)
+	if err != nil {
+		return err
+	}
 	urlPath := "/download?" + url.Values{"filename": {filename}}.Encode()
 	headers := make(http.Header)
 
@@ -463,6 +569,10 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	serverCS := resp.Header.Get(headerFileChecksum)
 	contentLength := resp.ContentLength
 
+	// 创建父目录（如果不存在）
+	if ensureErr := ensureParentDir(outputPath); ensureErr != nil {
+		return fmt.Errorf("创建输出目录失败: %w", ensureErr)
+	}
 	out, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("创建文件失败: %w", err)
@@ -482,7 +592,8 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 
 	if serverCS != "" {
 		if err := c.verifyChecksumAfterDownload(outputPath, serverCS); err != nil {
-			return err
+			os.Remove(outputPath)
+			return fmt.Errorf("校验和验证失败: %w", err)
 		}
 	}
 
@@ -525,6 +636,9 @@ func (c *FileClient) restoreFileMTimeAfterDownload(outputPath string, resp *http
 // 如果提供了 localPath（非空），则会计算本地文件的 SHA-256 并与远端比对，一致才执行删除。
 // 如果配置了 tunnel_key，删除请求将通过加密隧道传输。
 func (c *FileClient) Delete(ctx context.Context, filename string, localPath string) error {
+	if containsPathTraversal(filename) {
+		return fmt.Errorf("文件名不能包含路径穿越符 '..'")
+	}
 	urlPath := "/delete?" + url.Values{"filename": {filename}}.Encode()
 	headers := make(http.Header)
 
@@ -533,7 +647,10 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 	if info, statErr := c.Stat(ctx, filename); statErr == nil && info.Checksum != "" {
 		fileChecksum = info.Checksum
 	} else if statErr != nil {
-		return fmt.Errorf("获取远端文件信息失败: %w", statErr)
+		if errors.Is(statErr, ErrNotFound) {
+			return fmt.Errorf("文件不存在: %s", filename)
+		}
+		return fmt.Errorf("获取文件信息失败: %w", statErr)
 	} else {
 		return fmt.Errorf("远端文件 checksum 为空，无法删除: %s", filename)
 	}
@@ -564,7 +681,7 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 		return fmt.Errorf("删除失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
-	var result serverResponse
+	var result UploadResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf(errFmtParseResponse, err)
 	}
@@ -592,6 +709,12 @@ type FileInfo struct {
 func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) error {
 	if from == "" || to == "" {
 		return fmt.Errorf("from / to 不能为空")
+	}
+	if containsPathTraversal(from) {
+		return fmt.Errorf("源文件名不能包含路径穿越符 '..'")
+	}
+	if containsPathTraversal(to) {
+		return fmt.Errorf("目标文件名不能包含路径穿越符 '..'")
 	}
 	if fromChecksum == "" {
 		return fmt.Errorf("fromChecksum 不能为空（必须传入源文件 SHA-256 以防误覆盖）")
@@ -621,6 +744,9 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 	if filename == "" {
 		return nil, fmt.Errorf("filename 不能为空")
 	}
+	if containsPathTraversal(filename) {
+		return nil, fmt.Errorf("文件名不能包含路径穿越符 '..'")
+	}
 	urlPath := "/api/files/stat?" + url.Values{"filename": {filename}}.Encode()
 	resp, err := c.doRequest(ctx, "HEAD", urlPath, nil, nil)
 	if err != nil {
@@ -629,14 +755,14 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("文件不存在: %s", filename)
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, filename)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("stat 失败 (HTTP %d)", resp.StatusCode)
 	}
 
 	info := &FileInfo{
-		Name:     filepath.Base(filename),
+		Name:     filename,
 		Checksum: resp.Header.Get(headerFileChecksum),
 		IsDir:    resp.Header.Get("X-File-IsDir") == "true",
 	}
@@ -649,14 +775,27 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 	return info, nil
 }
 
+// buildSubdirPath 将子目录参数拼接为路径，并检查路径穿越。
+// 返回 URL 编码后的路径字符串，可用于 URL query 参数。
+func (c *FileClient) buildSubdirPath(subdirs []string) (string, error) {
+	subdir := path.Join(append([]string{"/"}, subdirs...)...)
+	if containsPathTraversal(subdir) {
+		return "", fmt.Errorf("路径不能包含 '..'")
+	}
+	return url.QueryEscape(subdir), nil
+}
+
 // List 列出 sproxy 服务端上的文件，返回 name + size + checksum 的结构化列表。
 //
 // 支持可选的 offset 和 limit 分页参数。limit 为 0 表示不限制，offset 默认从 0 开始。
 // 如果配置了 tunnel_key，列表请求将通过加密隧道传输。
 func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, error) {
 	headers := make(http.Header)
-	subdir := path.Join(append([]string{"/"}, subdirs...)...)
-	resp, err := c.doRequest(ctx, "GET", "/api/files?subdir="+url.QueryEscape(subdir), nil, headers)
+	subdir, err := c.buildSubdirPath(subdirs)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.doRequest(ctx, "GET", "/api/files?subdir="+subdir, nil, headers)
 	if err != nil {
 		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
@@ -681,8 +820,11 @@ func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, e
 // offset 从 0 开始，limit 为 0 表示不限制。
 func (c *FileClient) ListWithPagination(ctx context.Context, offset, limit int, subdirs ...string) ([]FileInfo, int, error) {
 	headers := make(http.Header)
-	subdir := path.Join(append([]string{"/"}, subdirs...)...)
-	urlPath := fmt.Sprintf("/api/files?subdir=%s&offset=%d&limit=%d", url.QueryEscape(subdir), offset, limit)
+	subdir, err := c.buildSubdirPath(subdirs)
+	if err != nil {
+		return nil, 0, err
+	}
+	urlPath := fmt.Sprintf("/api/files?subdir=%s&offset=%d&limit=%d", subdir, offset, limit)
 	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)
 	if err != nil {
 		return nil, 0, fmt.Errorf(errFmtRequestFailed, err)
@@ -764,6 +906,9 @@ type BatchRenameOp struct {
 
 // BatchDelete 批量删除文件。继续处理模式：单条失败不影响其余。
 func (c *FileClient) BatchDelete(ctx context.Context, files []BatchDeleteFile) ([]BatchOperationResult, error) {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("批量删除: 文件列表为空")
+	}
 	req := BatchDeleteRequest{Files: files}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -862,6 +1007,12 @@ func (c *FileClient) getTunnelMux(ctx context.Context) (*tunnel.Tunnel, error) {
 	return tunnel.NewTunnel(m, c.tunnelKey), nil
 }
 
+// InitError 返回初始化过程中的错误，如 WithTunnel/WithXfer 初始化失败。
+// 如果返回 nil，表示所有初始化操作均成功完成。
+func (c *FileClient) InitError() error {
+	return c.initError
+}
+
 // doRequest 统一发送 HTTP 请求：当配置了隧道客户端时走加密隧道，否则直连。
 //
 // urlPath 是相对路径，如 "/upload" 或 "/download?filename=test.txt"。
@@ -880,9 +1031,19 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 
 	var resp *http.Response
 	if c.tunnelClient != nil {
+		if c.initError != nil {
+			return nil, c.initError
+		}
 		// 隧道模式：使用相对 URL，隧道客户端处理加密
 		resp, err = c.tunnelClient.Do(req)
 		return closeBodyIfErr(resp, err)
+	}
+
+	if c.initError != nil {
+		if !c.allowTransportFallback {
+			return nil, fmt.Errorf("transport initialization failed: %w", c.initError)
+		}
+		c.logger.Warn("transport unavailable, falling back to direct mode", "init_error", c.initError)
 	}
 
 	if c.xferName != "" {
@@ -919,7 +1080,29 @@ func closeBodyIfErr(resp *http.Response, err error) (*http.Response, error) {
 	return resp, err
 }
 
+// successChecker 接口，响应体实现此接口时 doJSON 自动检查 Success 字段。
+type successChecker interface {
+	isSuccess() bool
+	message() string
+}
+
+// doJSONResp 是 doJSON 的通用响应包装器，用于自动检查 Success 字段。
+type doJSONResp struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+}
+
+func (r *doJSONResp) isSuccess() bool { return r.Success }
+
+func (r *doJSONResp) message() string { return r.Message }
+
+// UploadResult 实现 successChecker 接口，支持 doJSON 自动检查。
+func (r *UploadResult) isSuccess() bool { return r.Success }
+func (r *UploadResult) message() string { return r.Message }
+
 // doJSON 发送 JSON 请求体并解析 JSON 响应。
+// 如果 respBody 实现了 successChecker 接口，会自动检查 Success 字段，
+// 当 Success 为 false 时返回错误（包含 Message 字段）。
 // 自动设置 Content-Type: application/json，在非 2xx 时返回错误。
 func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody, respBody any) error {
 	var bodyReader io.Reader
@@ -949,8 +1132,14 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 	}
 
 	if respBody != nil {
-		if err := json.NewDecoder(resp.Body).Decode(respBody); err != nil {
+		limited := io.LimitReader(resp.Body, 10<<20) // 10MB 上限
+		if err := json.NewDecoder(limited).Decode(respBody); err != nil {
 			return fmt.Errorf("解析响应失败: %w", err)
+		}
+
+		// 自动检查 Success 字段
+		if checker, ok := respBody.(successChecker); ok && !checker.isSuccess() {
+			return fmt.Errorf("请求失败: %s", checker.message())
 		}
 	}
 	return nil
@@ -965,17 +1154,20 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 		o(&options)
 	}
 
-	runner := NewCloudDownloadChain(c, urls, archiveName, localDir, options)
+	runner, err := NewCloudDownloadChain(c, urls, archiveName, localDir, options)
+	if err != nil {
+		return nil, fmt.Errorf("创建云端下载链失败: %w", err)
+	}
 
 	if c.chainManager != nil {
 		if err := c.chainManager.RunWithProgress(ctx, runner, options.progressFn); err != nil {
 			return nil, err
 		}
 	} else {
-		reportFn := func(ctx context.Context, phase string, msg string, current, total int) {
-			c.logger.DebugContext(ctx, "链式操作进度", "phase", phase, "msg", msg, "current", current, "total", total)
+		reportFn := func(ctx context.Context, info ProgressInfo) {
+			c.logger.DebugContext(ctx, "链式操作进度", "phase", info.Phase, "msg", info.Message, "current", info.Current, "total", info.Total)
 			if options.progressFn != nil {
-				options.progressFn(ctx, phase, msg, current, total)
+				options.progressFn(ctx, info)
 			}
 		}
 		if err := runner.Run(ctx, reportFn); err != nil {
@@ -987,7 +1179,11 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 		ChainID: runner.ChainID,
 		Phase:   runner.Phase(),
 		Status:  runner.Status(),
-		Raw:     runner,
+		raw:     runner,
+		extra: map[string]any{
+			"local_path": runner.LocalPath,
+			"keep_files": runner.KeepFiles,
+		},
 	}, nil
 }
 
@@ -1002,19 +1198,39 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 		return nil, err
 	}
 
-	if cdc, ok := runner.(*CloudDownloadChain); ok {
-		cdc.setClient(c)
+	runner.SetClient(c)
+	opts := chainOptions{
+		pollInterval: 3 * time.Second,
+		timeout:      30 * time.Minute,
+		keepFiles:    false,
 	}
+	if cdc, ok := runner.(*CloudDownloadChain); ok {
+		if cdc.PollInterval > 0 {
+			opts.pollInterval = cdc.PollInterval
+		}
+		if cdc.Timeout > 0 {
+			opts.timeout = cdc.Timeout
+		}
+		opts.keepFiles = cdc.KeepFiles
+	}
+	runner.SetOptions(opts)
 
 	if err := c.chainManager.Run(ctx, runner); err != nil {
 		return nil, err
+	}
+
+	extra := map[string]any{}
+	if cdc, ok := runner.(*CloudDownloadChain); ok {
+		extra["local_path"] = cdc.LocalPath
+		extra["keep_files"] = cdc.KeepFiles
 	}
 
 	return &ChainResult{
 		ChainID: runner.ID(),
 		Phase:   runner.Phase(),
 		Status:  runner.Status(),
-		Raw:     runner,
+		raw:     runner,
+		extra:   extra,
 	}, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,22 +24,25 @@ const testChunkSize = 1024
 func TestCalcChunkSize_EdgeCases(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name           string
-		fileSize       int64
-		preferred      int64
-		maxChunk       int64
-		expectPositive bool
+		name      string
+		fileSize  int64
+		preferred int64
+		maxChunk  int64
+		want      int64
 	}{
-		{"zero file size", 0, 4 * 1024 * 1024, 64 * 1024 * 1024, true},
-		{"preferred zero", 1024, 0, 64 * 1024 * 1024, true},
-		{"maxChunk zero", 1024, 4 * 1024 * 1024, 0, true},
-		{"all zero", 0, 0, 0, true},
+		{"zero file size", 0, 4 * 1024 * 1024, 64 * 1024 * 1024, 4 * 1024 * 1024},
+		{"preferred zero", 1024, 0, 64 * 1024 * 1024, 4 * 1024 * 1024},
+		{"maxChunk zero", 1024, 4 * 1024 * 1024, 0, 4 * 1024 * 1024},
+		{"all zero", 0, 0, 0, 4 * 1024 * 1024},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cs := calcChunkSize(tt.fileSize, tt.preferred, tt.maxChunk)
-			if tt.expectPositive && cs <= 0 {
+			if cs <= 0 {
 				t.Errorf("calcChunkSize(%d, %d, %d) = %d, expected > 0", tt.fileSize, tt.preferred, tt.maxChunk, cs)
+			}
+			if cs != tt.want {
+				t.Errorf("calcChunkSize(%d, %d, %d) = %d, want %d", tt.fileSize, tt.preferred, tt.maxChunk, cs, tt.want)
 			}
 		})
 	}
@@ -51,7 +55,8 @@ func sha256hex(data []byte) string {
 
 func TestDownloadOneChunk_ExponentialBackoff(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
 	var attempt atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,21 +86,21 @@ func TestDownloadOneChunk_ExponentialBackoff(t *testing.T) {
 
 	var mu sync.Mutex
 	var progress int64
-	var downloadErr error
 
 	c.downloadOneChunk(ctx, downloadChunkParams{
-		Filename:    "f.txt",
-		ChunkIdx:    0,
-		ChunkSize:   1024,
-		FileSize:    9,
-		OutFile:     outFile,
-		Mu:          &mu,
-		Progress:    &progress,
-		DownloadErr: &downloadErr,
+		Filename:  "f.txt",
+		ChunkIdx:  0,
+		ChunkSize: 1024,
+		FileSize:  9,
+		OutFile:   outFile,
+		Mu:        &mu,
+		Progress:  &progress,
+		Cancel:    cancel,
+		Done:      ctx.Done(),
 	})
 
-	if downloadErr != nil {
-		t.Fatalf("unexpected error: %v", downloadErr)
+	if ctx.Err() != nil {
+		t.Fatalf("unexpected context cancellation: %v", ctx.Err())
 	}
 
 	got := make([]byte, 9)
@@ -112,7 +117,8 @@ func TestDownloadOneChunk_ExponentialBackoff(t *testing.T) {
 
 func TestDownloadOneChunk_RetryThenSuccess(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
 	var attempt atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -142,21 +148,21 @@ func TestDownloadOneChunk_RetryThenSuccess(t *testing.T) {
 
 	var mu sync.Mutex
 	var progress int64
-	var downloadErr error
 
 	c.downloadOneChunk(ctx, downloadChunkParams{
-		Filename:    "f.txt",
-		ChunkIdx:    0,
-		ChunkSize:   1024,
-		FileSize:    4,
-		OutFile:     outFile,
-		Mu:          &mu,
-		Progress:    &progress,
-		DownloadErr: &downloadErr,
+		Filename:  "f.txt",
+		ChunkIdx:  0,
+		ChunkSize: 1024,
+		FileSize:  4,
+		OutFile:   outFile,
+		Mu:        &mu,
+		Progress:  &progress,
+		Cancel:    cancel,
+		Done:      ctx.Done(),
 	})
 
-	if downloadErr != nil {
-		t.Fatalf("unexpected error: %v", downloadErr)
+	if ctx.Err() != nil {
+		t.Fatalf("unexpected context cancellation: %v", ctx.Err())
 	}
 
 	got := make([]byte, 4)
@@ -173,7 +179,8 @@ func TestDownloadOneChunk_RetryThenSuccess(t *testing.T) {
 
 func TestDownloadOneChunk_AllRetriesFail(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -193,21 +200,21 @@ func TestDownloadOneChunk_AllRetriesFail(t *testing.T) {
 
 	var mu sync.Mutex
 	var progress int64
-	var downloadErr error
 
 	c.downloadOneChunk(ctx, downloadChunkParams{
-		Filename:    "f.txt",
-		ChunkIdx:    0,
-		ChunkSize:   1024,
-		FileSize:    9,
-		OutFile:     outFile,
-		Mu:          &mu,
-		Progress:    &progress,
-		DownloadErr: &downloadErr,
+		Filename:  "f.txt",
+		ChunkIdx:  0,
+		ChunkSize: 1024,
+		FileSize:  9,
+		OutFile:   outFile,
+		Mu:        &mu,
+		Progress:  &progress,
+		Cancel:    cancel,
+		Done:      ctx.Done(),
 	})
 
-	if downloadErr == nil {
-		t.Fatal("expected error after all retries exhausted")
+	if ctx.Err() == nil {
+		t.Fatal("expected context cancellation after all retries exhausted")
 	}
 }
 
@@ -234,25 +241,38 @@ func TestDownloadOneChunk_ContextCancel(t *testing.T) {
 
 	var mu sync.Mutex
 	var progress int64
-	var downloadErr error
 
-	// 上下文已取消，downloadOneChunk 应提前返回且不设置 downloadErr
+	// 上下文已取消，downloadOneChunk 应提前返回
 	c.downloadOneChunk(ctx, downloadChunkParams{
-		Filename:    "f.txt",
-		ChunkIdx:    0,
-		ChunkSize:   1024,
-		FileSize:    9,
-		OutFile:     outFile,
-		Mu:          &mu,
-		Progress:    &progress,
-		DownloadErr: &downloadErr,
+		Filename:  "f.txt",
+		ChunkIdx:  0,
+		ChunkSize: 1024,
+		FileSize:  9,
+		OutFile:   outFile,
+		Mu:        &mu,
+		Progress:  &progress,
+		Cancel:    cancel,
+		Done:      ctx.Done(),
 	})
 
-	if downloadErr != nil {
-		t.Errorf("expected no downloadErr after context cancellation, got: %v", downloadErr)
+	if ctx.Err() == nil {
+		t.Fatal("expected context cancellation")
 	}
 	if progress != 0 {
 		t.Errorf("expected no progress after context cancellation, got %d", progress)
+	}
+}
+
+func TestCalcChunkSize_OverflowProtection(t *testing.T) {
+	t.Parallel()
+	// chunkSize > math.MaxInt64/512 时触发溢出保护路径
+	preferred := int64(math.MaxInt64/512 + 1) // 超过溢出阈值
+	maxChunk := preferred + 1
+	fileSize := int64(1)
+	cs := calcChunkSize(fileSize, preferred, maxChunk)
+	// 应直接返回 maxChunk（溢出保护分支）
+	if cs != maxChunk {
+		t.Errorf("expected %d (maxChunk) for overflow protection, got %d", maxChunk, cs)
 	}
 }
 
@@ -273,8 +293,8 @@ func TestCalcChunkSize_LargeFile(t *testing.T) {
 	maxChunk := int64(64 * 1024 * 1024)
 	threeTB := int64(3 * 1024 * 1024 * 1024 * 1024)
 	cs := calcChunkSize(threeTB, preferred, maxChunk)
-	if cs > maxChunk {
-		t.Errorf("expected <= %d, got %d", maxChunk, cs)
+	if cs != maxChunk {
+		t.Errorf("expected %d (maxChunk), got %d", maxChunk, cs)
 	}
 }
 
@@ -409,14 +429,14 @@ func TestTryResumeSession(t *testing.T) {
 			Concurrency:  1,
 			ModTime:      now,
 		}
-		result, err, shouldContinue := c.tryResumeSession(t.Context(), params)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		res := c.tryResumeSession(t.Context(), params)
+		if res.err != nil {
+			t.Fatalf("unexpected error: %v", res.err)
 		}
-		if shouldContinue {
+		if res.shouldContinue {
 			t.Fatal("expected shouldContinue=false for finished upload")
 		}
-		if result == nil || !result.Success {
+		if res.result == nil || !res.result.Success {
 			t.Fatal("expected success result for finished upload")
 		}
 	})
@@ -435,14 +455,14 @@ func TestTryResumeSession(t *testing.T) {
 			UploadID: "test-456",
 			Filename: "test.txt",
 		}
-		result, err, shouldContinue := c.tryResumeSession(t.Context(), params)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		res := c.tryResumeSession(t.Context(), params)
+		if res.err != nil {
+			t.Fatalf("unexpected error: %v", res.err)
 		}
-		if !shouldContinue {
+		if !res.shouldContinue {
 			t.Fatal("expected shouldContinue=true for missing session")
 		}
-		if result != nil {
+		if res.result != nil {
 			t.Fatal("expected nil result for missing session")
 		}
 	})
@@ -461,14 +481,14 @@ func TestTryResumeSession(t *testing.T) {
 			UploadID: "test-789",
 			Filename: "test.txt",
 		}
-		result, err, shouldContinue := c.tryResumeSession(t.Context(), params)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		res := c.tryResumeSession(t.Context(), params)
+		if res.err != nil {
+			t.Fatalf("unexpected error: %v", res.err)
 		}
-		if !shouldContinue {
+		if !res.shouldContinue {
 			t.Fatal("expected shouldContinue=true for server error")
 		}
-		if result != nil {
+		if res.result != nil {
 			t.Fatal("expected nil result for server error")
 		}
 	})
@@ -514,14 +534,14 @@ func TestTryResumeSession(t *testing.T) {
 			Concurrency:  1,
 			ModTime:      now,
 		}
-		result, err, shouldContinue := c.tryResumeSession(t.Context(), params)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		res := c.tryResumeSession(t.Context(), params)
+		if res.err != nil {
+			t.Fatalf("unexpected error: %v", res.err)
 		}
-		if shouldContinue {
+		if res.shouldContinue {
 			t.Fatal("expected shouldContinue=false for resume")
 		}
-		if result == nil || !result.Success {
+		if res.result == nil || !res.result.Success {
 			t.Fatal("expected success result after resume")
 		}
 		if callCount < 1 {
@@ -650,4 +670,162 @@ func TestUploadChunkWithRetry(t *testing.T) {
 			t.Fatal("expected failed flag set after all retries exhausted")
 		}
 	})
+}
+
+// TestCalcFileChecksum_CacheHit 测试 calcFileChecksum 缓存命中路径。
+func TestCalcFileChecksum_CacheHit(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewFileClient("http://127.0.0.1:9999")
+	c.logger = testLogger()
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		t.Fatalf("f.Stat(): %v", err)
+	}
+
+	// 第一次调用：计算并缓存
+	cs1, fromCache1, err := c.calcFileChecksum(filePath, f, stat.Size(), stat.ModTime())
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if fromCache1 {
+		t.Fatal("expected first call to not be from cache")
+	}
+	if cs1 == "" {
+		t.Fatal("expected non-empty checksum")
+	}
+
+	// 第二次调用：应命中缓存
+	// 需要重新打开文件，因为第一次调用 seek 到了末尾
+	f2, err := os.Open(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f2.Close()
+
+	cs2, fromCache2, err := c.calcFileChecksum(filePath, f2, stat.Size(), stat.ModTime())
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if !fromCache2 {
+		t.Fatal("expected second call to be from cache")
+	}
+	if cs1 != cs2 {
+		t.Errorf("checksum mismatch: %s vs %s", cs1, cs2)
+	}
+}
+
+// TestCalcFileChecksum_CacheTTLExpiry 测试 calcFileChecksum 缓存 TTL 过期后重新计算。
+func TestCalcFileChecksum_CacheTTLExpiry(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewFileClient("http://127.0.0.1:9999")
+	c.logger = testLogger()
+	// 设置 cacheTTL 为负值使缓存立即过期
+	c.cacheTTL = -1 * time.Nanosecond
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		t.Fatalf("f.Stat(): %v", err)
+	}
+
+	// 第一次调用：计算并缓存
+	cs1, _, err := c.calcFileChecksum(filePath, f, stat.Size(), stat.ModTime())
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	// 第二次调用：因 TTL 为负值，应重新计算
+	f2, err := os.Open(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f2.Close()
+
+	cs2, fromCache, err := c.calcFileChecksum(filePath, f2, stat.Size(), stat.ModTime())
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if fromCache {
+		t.Fatal("expected cache miss due to negative TTL")
+	}
+	if cs1 != cs2 {
+		t.Errorf("checksum should be same for same file: %s vs %s", cs1, cs2)
+	}
+}
+
+// TestCalcFileChecksum_FileChanged 测试文件修改后缓存未命中。
+func TestCalcFileChecksum_FileChanged(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "test.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewFileClient("http://127.0.0.1:9999")
+	c.logger = testLogger()
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, err := f.Stat()
+	if err != nil {
+		t.Fatalf("f.Stat(): %v", err)
+	}
+	cs1, _, err := c.calcFileChecksum(filePath, f, stat.Size(), stat.ModTime())
+	f.Close()
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	// 写入不同大小的内容使 size 变化，确保缓存失效
+	if fErr := os.WriteFile(filePath, []byte("world!"), 0644); fErr != nil {
+		t.Fatal(fErr)
+	}
+
+	f2, err := os.Open(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f2.Close()
+	stat2, err := f2.Stat()
+	if err != nil {
+		t.Fatalf("f2.Stat(): %v", err)
+	}
+
+	cs2, fromCache, err := c.calcFileChecksum(filePath, f2, stat2.Size(), stat2.ModTime())
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if fromCache {
+		t.Fatal("expected cache miss for changed file")
+	}
+	if cs1 == cs2 {
+		t.Fatal("expected different checksum for changed file")
+	}
 }

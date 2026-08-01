@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -22,7 +23,7 @@ func NewCmdVersion(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Conf
 			fmt.Fprintln(ios.Out)
 			cfg, err := cfgSvc.LoadConfig()
 			if err == nil {
-				client.HandleConfigShow(cfg)
+				client.HandleConfigShow(cfg, ios.Out)
 			}
 			return nil
 		},
@@ -68,7 +69,11 @@ func NewCmdVersionRestore(factory clientfactory.Factory, ios cli.IOStreams) *cob
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return err
 			}
-			if err := svc.RestoreVersion(cmd.Context(), args[0], args[1]); err != nil {
+			versionID, err := strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				return fmt.Errorf("版本 ID 必须是数字: %w", err)
+			}
+			if err := svc.RestoreVersion(cmd.Context(), args[0], versionID); err != nil {
 				return err
 			}
 			fmt.Fprintf(ios.Out, "已恢复文件 '%s' 到版本 %s\n", args[0], args[1])
@@ -89,7 +94,11 @@ func NewCmdVersionDelete(factory clientfactory.Factory, ios cli.IOStreams) *cobr
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return err
 			}
-			if err := svc.DeleteVersion(cmd.Context(), args[0], args[1]); err != nil {
+			versionID, err := strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				return fmt.Errorf("版本 ID 必须是数字: %w", err)
+			}
+			if err := svc.DeleteVersion(cmd.Context(), args[0], versionID); err != nil {
 				return err
 			}
 			fmt.Fprintf(ios.Out, "已删除文件 '%s' 的版本 %s\n", args[0], args[1])

@@ -66,13 +66,9 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		}
 	}
 	if cs, _ := cmd.Flags().GetInt64("chunk-size"); cs > 0 {
-		opts = append(opts, func(c *client.FileClient) {
-			c.ChunkSize = cs
-		})
+		opts = append(opts, client.WithChunkSize(cs))
 	} else if cfg.ChunkSize > 0 {
-		opts = append(opts, func(c *client.FileClient) {
-			c.ChunkSize = cfg.ChunkSize
-		})
+		opts = append(opts, client.WithChunkSize(cfg.ChunkSize))
 	}
 	if cfg.MaxChunkSize > 0 {
 		opts = append(opts, client.WithMaxChunkSize(cfg.MaxChunkSize))
@@ -97,7 +93,17 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		return nil, fmt.Errorf("--client-key 需要配合 --client-cert 使用")
 	}
 
-	return client.NewFileClient(serverURL, opts...), nil
+	if allowFallback, _ := cmd.Flags().GetBool("allow-transport-fallback"); allowFallback {
+		opts = append(opts, client.WithTransportFallback())
+	} else if cfg.AllowTransportFallback {
+		opts = append(opts, client.WithTransportFallback())
+	}
+
+	fc := client.NewFileClient(serverURL, opts...)
+	if err := fc.InitError(); err != nil {
+		return nil, fmt.Errorf("初始化客户端失败: %w", err)
+	}
+	return fc, nil
 }
 
 // mockFactory 是测试实现，直接返回预配置的 client。

@@ -117,7 +117,7 @@ func TestJSONFormatter_PrintShareList(t *testing.T) {
 func TestJSONFormatter_PrintShareList_WithShares(t *testing.T) {
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
-	fm.PrintShareList([]*client.ShareLink{
+	fm.PrintShareList([]client.ShareLink{
 		{Token: "tok123", Filename: "file.txt", Downloads: 5, MaxDownloads: 10},
 	})
 	output := strings.TrimSpace(buf.String())
@@ -306,7 +306,7 @@ func TestTextFormatter_PrintShareList(t *testing.T) {
 func TestTextFormatter_PrintShareList_WithShares(t *testing.T) {
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
-	fm.PrintShareList([]*client.ShareLink{
+	fm.PrintShareList([]client.ShareLink{
 		{Token: "tok123", Filename: "file.txt", Downloads: 5, MaxDownloads: 10},
 	})
 	output := buf.String()
@@ -321,7 +321,7 @@ func TestTextFormatter_PrintShareList_WithShares(t *testing.T) {
 func TestTextFormatter_PrintShareList_Expired(t *testing.T) {
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
-	fm.PrintShareList([]*client.ShareLink{
+	fm.PrintShareList([]client.ShareLink{
 		{Token: "tok-expired", Filename: "old.txt", Downloads: 5, MaxDownloads: 5, Expired: true},
 	})
 	output := buf.String()
@@ -333,7 +333,7 @@ func TestTextFormatter_PrintShareList_Expired(t *testing.T) {
 func TestTextFormatter_PrintShareList_UnlimitedDownloads(t *testing.T) {
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
-	fm.PrintShareList([]*client.ShareLink{
+	fm.PrintShareList([]client.ShareLink{
 		{Token: "tok-unlim", Filename: "f.txt", Downloads: 3, MaxDownloads: 0},
 	})
 	output := buf.String()
@@ -346,7 +346,7 @@ func TestTextFormatter_PrintShareList_LongToken(t *testing.T) {
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	longToken := "abcdefghijklmnopqrstuvwxyz1234567890ABCDEF"
-	fm.PrintShareList([]*client.ShareLink{
+	fm.PrintShareList([]client.ShareLink{
 		{Token: longToken, Filename: "f.txt", Downloads: 0, MaxDownloads: 0},
 	})
 	output := buf.String()
@@ -633,11 +633,11 @@ func TestTextFormatter_PrintStats(t *testing.T) {
 			TotalSize  int64  `json:"total_size"`
 		}{UploadsDir: "/data", TotalFiles: 10, TotalSize: 1000},
 		RequestCounts: struct {
-			Total int64 `json:"total"`
-			Xx2   int64 `json:"2xx"`
-			Xx4   int64 `json:"4xx"`
-			Xx5   int64 `json:"5xx"`
-		}{Total: 100, Xx2: 80, Xx4: 15, Xx5: 5},
+			Total     int64 `json:"total"`
+			Status2xx int64 `json:"2xx"`
+			Status4xx int64 `json:"4xx"`
+			Status5xx int64 `json:"5xx"`
+		}{Total: 100, Status2xx: 80, Status4xx: 15, Status5xx: 5},
 		ActiveConns:     5,
 		FilesUploaded:   10,
 		BytesUploaded:   5000,

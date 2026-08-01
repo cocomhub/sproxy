@@ -55,8 +55,8 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 	}
 
 	c := NewFileClient(url)
-	c.ChunkSize = 4096
-	c.MaxChunkSize = 4096
+	c.chunkSize = 4096
+	c.maxChunkSize = 4096
 
 	// 分块上传
 	result, err := c.ChunkedUpload(t.Context(), srcPath, "upload.bin")
@@ -70,32 +70,35 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 	// 分块下载
 	outDir := t.TempDir()
 	outPath := filepath.Join(outDir, "downloaded.bin")
-	if err := c.ChunkedDownload(t.Context(), "upload.bin", outPath); err != nil {
+	if err = c.ChunkedDownload(t.Context(), "upload.bin", outPath); err != nil {
 		t.Fatalf("ChunkedDownload: %v", err)
 	}
 
-	got, _ := os.ReadFile(outPath)
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("读取下载文件失败: %v", err)
+	}
 	if !bytes.Equal(got, fileData) {
 		t.Fatal("downloaded content mismatch after chunked round-trip")
 	}
 }
 
-func TestClientChunkedUpload_Resume(t *testing.T) {
+func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
 	url, _ := startFullTestServer(t)
 
 	srcDir := t.TempDir()
-	fileData := bytes.Repeat([]byte("ResumeChunkedData"), 2048) // ~32 KiB
-	srcPath := filepath.Join(srcDir, "resume.bin")
+	fileData := bytes.Repeat([]byte("ChunkedTestData"), 2048) // ~32 KiB
+	srcPath := filepath.Join(srcDir, "chunked.bin")
 	if err := os.WriteFile(srcPath, fileData, 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
 	c := NewFileClient(url)
-	c.ChunkSize = 4096
-	c.MaxChunkSize = 4096
+	c.chunkSize = 4096
+	c.maxChunkSize = 4096
 
-	// 分块上传（允许续传）
-	result, err := c.ChunkedUpload(t.Context(), srcPath, "resume.bin")
+	// 分块上传
+	result, err := c.ChunkedUpload(t.Context(), srcPath, "chunked.bin")
 	if err != nil {
 		t.Fatalf("ChunkedUpload: %v", err)
 	}
@@ -105,17 +108,20 @@ func TestClientChunkedUpload_Resume(t *testing.T) {
 
 	// 下载验证
 	outDir := t.TempDir()
-	outPath := filepath.Join(outDir, "resume-dl.bin")
-	if err := c.Download(t.Context(), "resume.bin", outPath); err != nil {
+	outPath := filepath.Join(outDir, "dl.bin")
+	if err = c.Download(t.Context(), "chunked.bin", outPath); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	got, _ := os.ReadFile(outPath)
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("读取下载文件失败: %v", err)
+	}
 	if !bytes.Equal(got, fileData) {
-		t.Fatal("content mismatch after resume upload")
+		t.Fatal("content mismatch after chunked upload")
 	}
 }
 
-func TestClient_ChunkedUploadAutoThreshold(t *testing.T) {
+func TestClient_SmallFileUploadWithoutChunking(t *testing.T) {
 	url, _ := startFullTestServer(t)
 
 	srcDir := t.TempDir()
@@ -127,7 +133,7 @@ func TestClient_ChunkedUploadAutoThreshold(t *testing.T) {
 
 	// 验证小文件不应触发自动分块
 	if ShouldAutoChunk(int64(len(smallData))) {
-		t.Log("file below AutoChunkThreshold should not auto-chunk")
+		t.Fatal("file below AutoChunkThreshold should not auto-chunk")
 	}
 
 	c := NewFileClient(url)

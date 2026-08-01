@@ -5,6 +5,7 @@ package client
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,8 +23,12 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 	var mu sync.Mutex
 	chunkCalls := 0
 	completeCalls := 0
+	initCalls := 0
 
 	mux.HandleFunc("POST /upload/init", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		initCalls++
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"success":true,"upload_id":"test-concurrent"}`))
 	})
@@ -52,6 +57,7 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	errCh := make(chan string, 5)
 	var wg sync.WaitGroup
 	for i := range 5 {
 		wg.Add(1)
@@ -65,22 +71,47 @@ func TestConcurrentChunkedUpload(t *testing.T) {
 				WithChunkedResume(false),
 			)
 			if err != nil {
-				t.Errorf("ChunkedUpload #%d failed: %v", n, err)
+				select {
+				case errCh <- fmt.Sprintf("ChunkedUpload #%d failed: %v", n, err):
+				default:
+					t.Error("error channel full, dropping message")
+				}
 				return
 			}
 			if result == nil || !result.Success {
-				t.Errorf("ChunkedUpload #%d result not successful: %+v", n, result)
+				select {
+				case errCh <- fmt.Sprintf("ChunkedUpload #%d result not successful: %+v", n, result):
+				default:
+					t.Error("error channel full, dropping message")
+				}
 			}
 		}(i)
 	}
 	wg.Wait()
+	close(errCh)
+
+	for msg := range errCh {
+		t.Error(msg)
+	}
+
+	// 5 个并发上传，每个 4 个 chunk，关闭 resume
+	// 预期每个上传：init(1) + chunk(4) + complete(1) = 6 次调用
+	// 总 initCalls = 5 * 1 = 5
+	// 总 chunkCalls = 5 * 4 = 20
+	// 总 completeCalls = 5 * 1 = 5
+	expectedInitCalls := 5 * 1
+	expectedChunkCalls := 5 * 4
+	expectedCompleteCalls := 5 * 1
 
 	mu.Lock()
-	if chunkCalls == 0 {
-		t.Error("expected at least one chunk upload call")
+	if initCalls != expectedInitCalls {
+		t.Errorf("expected %d init calls, got %d", expectedInitCalls, initCalls)
 	}
-	if completeCalls == 0 {
-		t.Error("expected at least one complete call")
+	if chunkCalls != expectedChunkCalls {
+		t.Errorf("expected %d chunk upload calls, got %d", expectedChunkCalls, chunkCalls)
+	}
+	if completeCalls != expectedCompleteCalls {
+		t.Errorf("expected %d complete calls, got %d", expectedCompleteCalls, completeCalls)
 	}
 	mu.Unlock()
 }
@@ -93,6 +124,11 @@ func TestConcurrentFileOperations(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+		// 校验 filename 参数
+		if r.URL.Query().Get("filename") == "" {
+			http.Error(w, "missing filename", http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("X-File-Checksum", "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
 		w.Header().Set("X-File-Size", "42")
 		w.Header().Set("X-File-IsDir", "false")
@@ -101,6 +137,7 @@ func TestConcurrentFileOperations(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
+	errCh := make(chan string, 10)
 	var wg sync.WaitGroup
 	for i := range 10 {
 		wg.Add(1)
@@ -109,13 +146,18 @@ func TestConcurrentFileOperations(t *testing.T) {
 			c := NewFileClient(ts.URL)
 			info, err := c.Stat(t.Context(), "test.txt")
 			if err != nil {
-				t.Errorf("concurrent stat #%d failed: %v", n, err)
+				errCh <- fmt.Sprintf("concurrent stat #%d failed: %v", n, err)
 				return
 			}
 			if info.Size != 42 {
-				t.Errorf("concurrent stat #%d: expected size 42, got %d", n, info.Size)
+				errCh <- fmt.Sprintf("concurrent stat #%d: expected size 42, got %d", n, info.Size)
 			}
 		}(i)
 	}
 	wg.Wait()
+	close(errCh)
+
+	for msg := range errCh {
+		t.Error(msg)
+	}
 }

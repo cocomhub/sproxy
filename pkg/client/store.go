@@ -4,17 +4,13 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"maps"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
-
-	"github.com/cocomhub/sproxy/pkg/plugin"
 )
 
 // KVStore 通用键值存储接口。
@@ -35,13 +31,17 @@ func (StructCodec) ToMap(v any) (map[string]any, error) {
 		return nil, fmt.Errorf("结构体序列化失败: %w", err)
 	}
 	var m map[string]any
-	if err := json.Unmarshal(data, &m); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("JSON 解码为 map 失败: %w", err)
 	}
 	return m, nil
 }
 
 func (StructCodec) FromMap(m map[string]any, v any) error {
+	// 将 map 中的 json.Number 转回原始数值类型
+	m = ConvertNumbers(m)
 	data, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("map 序列化失败: %w", err)
@@ -52,29 +52,26 @@ func (StructCodec) FromMap(m map[string]any, v any) error {
 	return nil
 }
 
-// KVStoreRegistry 是可插拔的 KVStore 注册表。
-var KVStoreRegistry = plugin.New[KVStoreFactory]("kv_store", &jsonKVStoreFactory{})
-
-// KVStoreFactory 是 KVStore 工厂接口。
-type KVStoreFactory interface {
-	Name() string
-	Open(ctx context.Context, cfg map[string]string) (KVStore, error)
-}
-
-type jsonKVStoreFactory struct{}
-
-func (f *jsonKVStoreFactory) Name() string { return "json" }
-
-func (f *jsonKVStoreFactory) Open(ctx context.Context, cfg map[string]string) (KVStore, error) {
-	dir := cfg["dir"]
-	if dir == "" {
-		cacheDir, err := os.UserCacheDir()
-		if err != nil {
-			return nil, fmt.Errorf("获取用户缓存目录失败: %w", err)
+// ConvertNumbers 递归将 map 中的 json.Number 转为 int64 或 float64
+func ConvertNumbers(m map[string]any) map[string]any {
+	result := make(map[string]any, len(m))
+	for k, v := range m {
+		switch val := v.(type) {
+		case json.Number:
+			if i, err := val.Int64(); err == nil {
+				result[k] = i
+			} else if f, err := val.Float64(); err == nil {
+				result[k] = f
+			} else {
+				result[k] = val.String()
+			}
+		case map[string]any:
+			result[k] = ConvertNumbers(val)
+		default:
+			result[k] = v
 		}
-		dir = filepath.Join(cacheDir, "sproxy", "kvstore")
 	}
-	return NewJSONKVStore(ctx, dir, slog.Default())
+	return result
 }
 
 // MemoryKVStore 内存 KVStore 实现（用于测试）。
@@ -90,6 +87,9 @@ func NewMemoryKVStore() *MemoryKVStore {
 func (s *MemoryKVStore) Save(_ context.Context, key string, value map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.data == nil {
+		return fmt.Errorf("store is closed")
+	}
 	clone := make(map[string]any, len(value))
 	maps.Copy(clone, value)
 	s.data[key] = clone
@@ -127,4 +127,9 @@ func (s *MemoryKVStore) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-func (s *MemoryKVStore) Close() error { return nil }
+func (s *MemoryKVStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data = nil
+	return nil
+}

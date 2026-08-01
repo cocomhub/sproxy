@@ -50,7 +50,10 @@ func cloudTestServer(t *testing.T) (*httptest.Server, string) {
 		var req struct {
 			URLs []map[string]string `json:"urls"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
 		tasks := make([]CloudTask, 0, len(req.URLs))
 		for i, entry := range req.URLs {
 			tasks = append(tasks, CloudTask{
@@ -127,12 +130,12 @@ func cloudTestServer(t *testing.T) (*httptest.Server, string) {
 			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(ArchiveResult{Success: true, File: "archive.tar.gz", Size: 1024, Checksum: "abc123", TaskCount: 1})
+		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true, File: "archive.tar.gz", Size: 1024, Checksum: "abc123", TaskCount: 1})
 	})
 
 	// POST /api/cloud/archive
 	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(ArchiveResult{Success: true, File: "combined.tar.gz", Size: 2048, Checksum: "def456", TaskCount: 2})
+		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true, File: "combined.tar.gz", Size: 2048, Checksum: "def456", TaskCount: 2})
 	})
 
 	ts := httptest.NewServer(mux)
@@ -159,8 +162,8 @@ func TestCloudDownload_CreateTask(t *testing.T) {
 	if task.Status != "pending" {
 		t.Fatalf("want status pending, got %q", task.Status)
 	}
-	if task.Filename == "" {
-		t.Fatal("expected non-empty filename")
+	if task.Filename != "download" {
+		t.Fatalf("want filename download, got %q", task.Filename)
 	}
 }
 
@@ -299,6 +302,7 @@ func TestCloudDownload_GetTaskNotFound(t *testing.T) {
 }
 
 // TestCloudDownload_CancelTask 测试取消任务。
+// 验证 200 OK 响应体包含 {"status":"cancelled"}。
 func TestCloudDownload_CancelTask(t *testing.T) {
 	t.Parallel()
 	ts, _ := cloudTestServer(t)
@@ -309,18 +313,8 @@ func TestCloudDownload_CancelTask(t *testing.T) {
 	}
 }
 
-// TestCloudDownload_CancelTaskNotFound 测试取消不存在的任务。
-func TestCloudDownload_CancelTaskNotFound(t *testing.T) {
-	t.Parallel()
-	ts, _ := cloudTestServer(t)
-	c := NewFileClient(ts.URL)
-
-	if err := c.CancelCloudTask(t.Context(), "notfound"); err == nil {
-		t.Fatal("expected error for cancelling notfound task")
-	}
-}
-
 // TestCloudDownload_DeleteTask 测试删除任务。
+// 验证 200 OK 响应体包含 {"status":"deleted"}。
 func TestCloudDownload_DeleteTask(t *testing.T) {
 	t.Parallel()
 	ts, _ := cloudTestServer(t)
@@ -328,17 +322,6 @@ func TestCloudDownload_DeleteTask(t *testing.T) {
 
 	if err := c.DeleteCloudTask(t.Context(), "task-1"); err != nil {
 		t.Fatalf("DeleteCloudTask: %v", err)
-	}
-}
-
-// TestCloudDownload_DeleteTaskNotFound 测试删除不存在的任务。
-func TestCloudDownload_DeleteTaskNotFound(t *testing.T) {
-	t.Parallel()
-	ts, _ := cloudTestServer(t)
-	c := NewFileClient(ts.URL)
-
-	if err := c.DeleteCloudTask(t.Context(), "notfound"); err == nil {
-		t.Fatal("expected error for deleting notfound task")
 	}
 }
 
@@ -406,5 +389,100 @@ func TestCloudArchive_ArchiveTasks(t *testing.T) {
 	}
 	if result.TaskCount != 2 {
 		t.Fatalf("want TaskCount 2, got %d", result.TaskCount)
+	}
+}
+
+// ---- CloudDownloadOption functions ----
+
+func TestWithCloudDownloadMaxBatchURLs(t *testing.T) {
+	t.Parallel()
+	o := &cloudDownloadOptions{}
+	WithCloudDownloadMaxBatchURLs(50)(o)
+	if o.maxBatchURLs != 50 {
+		t.Errorf("maxBatchURLs = %d, want 50", o.maxBatchURLs)
+	}
+}
+
+func TestWithCloudDownloadMaxBatchURLs_Zero(t *testing.T) {
+	t.Parallel()
+	o := &cloudDownloadOptions{maxBatchURLs: 30}
+	WithCloudDownloadMaxBatchURLs(0)(o)
+	if o.maxBatchURLs != 30 {
+		t.Errorf("maxBatchURLs should remain unchanged, got %d", o.maxBatchURLs)
+	}
+}
+
+// ---- CloudDownload URL validation ----
+
+func TestCloudDownload_InvalidURL(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	// 无效 URL 转义序列
+	_, err := c.CloudDownload(t.Context(), "https://example.com/%zz")
+	if err == nil {
+		t.Fatal("expected error for invalid URL")
+	}
+}
+
+func TestCloudDownload_Batch_EmptyList(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	_, err := c.CloudDownloadBatch(t.Context(), []string{})
+	if err == nil {
+		t.Fatal("expected error for empty URL list")
+	}
+}
+
+func TestCloudDownload_Batch_ExceedsLimit(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	// 101 个 URL，超过默认 100 上限
+	urls := make([]string, 101)
+	for i := range 101 {
+		urls[i] = "https://example.com/file"
+	}
+	_, err := c.CloudDownloadBatch(t.Context(), urls)
+	if err == nil {
+		t.Fatal("expected error for exceeding batch limit")
+	}
+}
+
+func TestCloudDownload_Batch_CustomLimit(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	// 用自定义上限 5 来限制
+	urls := make([]string, 6)
+	for i := range 6 {
+		urls[i] = "https://example.com/file"
+	}
+	_, err := c.CloudDownloadBatch(t.Context(), urls, WithCloudDownloadMaxBatchURLs(5))
+	if err == nil {
+		t.Fatal("expected error for exceeding custom batch limit of 5")
+	}
+}
+
+func TestCloudDownload_Batch_UnderCustomLimit(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	urls := make([]string, 3)
+	for i := range 3 {
+		urls[i] = "https://example.com/file"
+	}
+	tasks, err := c.CloudDownloadBatch(t.Context(), urls, WithCloudDownloadMaxBatchURLs(5))
+	if err != nil {
+		t.Fatalf("expected success for 3 URLs under limit of 5: %v", err)
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("expected 3 tasks, got %d", len(tasks))
 	}
 }

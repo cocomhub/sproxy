@@ -4,12 +4,12 @@
 package client
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // hubTestServer 返回一个模拟 Hub 和 StorageConfig handler 的测试服务器。
@@ -26,16 +26,21 @@ func hubTestServer(t *testing.T) (*httptest.Server, string) {
 			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
 			return
 		}
+		// 验证请求体关键字段
+		if req.MaxStorageBytes <= 0 {
+			http.Error(w, `{"error":"max_storage_bytes must be positive"}`, http.StatusBadRequest)
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]any{"success": true, "max_storage_bytes": req.MaxStorageBytes})
 	})
 
 	// GET /api/hub/nodes
 	mux.HandleFunc("GET /api/hub/nodes", func(w http.ResponseWriter, r *http.Request) {
-		nodes := []HubNodeInfo{
-			{ID: "node-1", Addr: "192.168.1.1:18083", Connected: "2026-07-26T00:00:00Z"},
-			{ID: "node-2", Addr: "192.168.1.2:18083", Connected: "2026-07-26T00:00:00Z"},
-		}
-		json.NewEncoder(w).Encode(nodes)
+		connectedTime, _ := time.Parse(time.RFC3339, "2026-07-26T00:00:00Z")
+		json.NewEncoder(w).Encode([]HubNodeInfo{
+			{ID: "node-1", Addr: "192.168.1.1:18083", Connected: connectedTime},
+			{ID: "node-2", Addr: "192.168.1.2:18083", Connected: connectedTime},
+		})
 	})
 
 	// DELETE /api/hub/nodes/{id}
@@ -64,25 +69,26 @@ func hubTestServer(t *testing.T) (*httptest.Server, string) {
 	})
 
 	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
 	return ts, ts.URL
 }
 
 func TestUpdateStorageConfig(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
-	if err := client.UpdateStorageConfig(context.Background(), 1073741824); err != nil {
+	if err := client.UpdateStorageConfig(t.Context(), 1073741824); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestListHubNodes(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
-	nodes, err := client.ListHubNodes(context.Background())
+	nodes, err := client.ListHubNodes(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,24 +98,39 @@ func TestListHubNodes(t *testing.T) {
 	if nodes[0].ID != "node-1" {
 		t.Fatalf("expected node-1, got %q", nodes[0].ID)
 	}
+	if nodes[0].Addr != "192.168.1.1:18083" {
+		t.Errorf("expected Addr 192.168.1.1:18083, got %q", nodes[0].Addr)
+	}
+	if nodes[0].Connected.IsZero() {
+		t.Error("expected non-zero Connected time")
+	}
+	if nodes[1].ID != "node-2" {
+		t.Errorf("expected node-2, got %q", nodes[1].ID)
+	}
+	if nodes[1].Addr != "192.168.1.2:18083" {
+		t.Errorf("expected Addr 192.168.1.2:18083, got %q", nodes[1].Addr)
+	}
+	if nodes[1].Connected.IsZero() {
+		t.Error("expected non-zero Connected time")
+	}
 }
 
 func TestRemoveHubNode(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
-	if err := client.RemoveHubNode(context.Background(), "node-1"); err != nil {
+	if err := client.RemoveHubNode(t.Context(), "node-1"); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestRemoveHubNode_NotFound(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
-	err := client.RemoveHubNode(context.Background(), "notfound")
+	err := client.RemoveHubNode(t.Context(), "notfound")
 	if err == nil {
 		t.Fatal("expected error for not found node")
 	}
@@ -119,11 +140,11 @@ func TestRemoveHubNode_NotFound(t *testing.T) {
 }
 
 func TestGetHubStats(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
-	stats, err := client.GetHubStats(context.Background())
+	stats, err := client.GetHubStats(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,11 +154,11 @@ func TestGetHubStats(t *testing.T) {
 }
 
 func TestErrNotFound_Sentinel(t *testing.T) {
-	ts, url := hubTestServer(t)
-	defer ts.Close()
+	t.Parallel()
+	_, url := hubTestServer(t)
 
 	client := NewFileClient(url)
-	_, err := client.GetCloudTask(context.Background(), "notfound")
+	_, err := client.GetCloudTask(t.Context(), "notfound")
 	if err == nil {
 		t.Fatal("expected error for not found task")
 	}

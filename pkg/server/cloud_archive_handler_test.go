@@ -29,7 +29,7 @@ func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManage
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 	t.Cleanup(func() {
-		mgr.StopFlush()
+		mgr.Close()
 		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
 		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
 	})

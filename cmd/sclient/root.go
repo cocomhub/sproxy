@@ -93,6 +93,7 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().String("client-cert", "", "mTLS 客户端证书路径（PEM 格式）")
 	root.PersistentFlags().String("client-key", "", "mTLS 客户端私钥路径（PEM 格式）")
 	root.PersistentFlags().Bool("client-cert-allow-missing", false, "当客户端证书加载失败时，不中断程序执行")
+	root.PersistentFlags().Bool("allow-transport-fallback", false, "允许隧道/xfer 初始化失败时回退到直连模式（默认严格模式）")
 
 	// 注册子命令
 	ios := cli.SystemIOStreams()
@@ -123,6 +124,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdShare(factory, ios))
 	root.AddCommand(NewCmdRelay(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdCloudDownload(factory, ios, cliState, cfgSvc))
+	root.AddCommand(NewCmdCloudArchive(factory, ios, cfgSvc))
 
 	return root
 }

@@ -61,10 +61,12 @@ type CloudDownloadManager struct {
 	metrics       *CloudMetrics
 
 	// 批量持久化进度更新
-	dirtyTasks map[string]struct{}
-	dirtyMu    sync.Mutex
-	flushNow   chan struct{}
-	stopFlush  chan struct{}
+	dirtyTasks  map[string]struct{}
+	dirtyMu     sync.Mutex
+	flushNow    chan struct{}
+	stopFlush   chan struct{}
+	stopCleanup chan struct{} // 停止 cleanupExpired 后台 goroutine
+	closeOnce   sync.Once     // 确保 Close 只执行一次
 }
 
 // CloudMetrics 云端下载 Prometheus 指标。
@@ -100,6 +102,7 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 		dirtyTasks:    make(map[string]struct{}),
 		flushNow:      make(chan struct{}, 1),
 		stopFlush:     make(chan struct{}),
+		stopCleanup:   make(chan struct{}),
 	}
 
 	mgr.logger.Info("cloud download manager initialized",
@@ -217,8 +220,8 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		return
 	}
 
-	// 创建可取消的 context
-	dlCtx, cancel := context.WithCancel(ctx)
+	// 创建可取消的 context（从 Background 派生，使客户端断连后下载可继续异步重试）
+	dlCtx, cancel := context.WithCancel(context.Background())
 	defer cancel() // 确保 cancel 在函数返回时被调用（linter: G118）
 	m.mu.Lock()
 	m.cancelFuncs[task.ID] = cancel
@@ -566,8 +569,14 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 func (m *CloudDownloadManager) cleanupExpired() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		m.cleanupExpiredOnce()
+	for {
+		select {
+		case <-ticker.C:
+			m.cleanupExpiredOnce()
+		case <-m.stopCleanup:
+			m.cleanupExpiredOnce() // 退出前清理一次
+			return
+		}
 	}
 }
 
@@ -633,12 +642,16 @@ func (m *CloudDownloadManager) flushDirty() {
 	}
 }
 
+// Close 停止所有后台 goroutine（flushLoop 和 cleanupExpired）并执行一次清理。
+// 在进程退出前应调用一次。多次调用安全。
+func (m *CloudDownloadManager) Close() {
+	m.closeOnce.Do(func() {
+		close(m.stopCleanup)
+		close(m.stopFlush)
+	})
+}
+
 // FlushNow 立即触发一次批量持久化（测试用）。
 func (m *CloudDownloadManager) FlushNow() {
 	m.flushDirty()
-}
-
-// StopFlush 停止批量持久化 goroutine（测试用）。
-func (m *CloudDownloadManager) StopFlush() {
-	close(m.stopFlush)
 }

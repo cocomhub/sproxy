@@ -258,16 +258,21 @@ func TestUploadStore_ConcurrentMarkChunk(t *testing.T) {
 	us.CreateSession("concurrent-id", "concurrent.txt", int64(totalChunks*4096), 4096, totalChunks, strings.Repeat("h", 64), 0)
 
 	var wg sync.WaitGroup
+	errCh := make(chan error, totalChunks)
 	for i := range totalChunks {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
 			if err := us.MarkChunkReceived("concurrent-id", idx, fmt.Sprintf("chunk%dhash", idx)); err != nil {
-				t.Errorf("MarkChunkReceived(%d): %v", idx, err)
+				errCh <- fmt.Errorf("MarkChunkReceived(%d): %w", idx, err)
 			}
 		}(i)
 	}
 	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
 
 	if !us.AllChunksReceived("concurrent-id") {
 		t.Fatal("all chunks should be received after concurrent marking")

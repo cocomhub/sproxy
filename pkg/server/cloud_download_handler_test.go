@@ -28,7 +28,7 @@ func setupCloudTestServer(t *testing.T) (*httptest.Server, *CloudDownloadManager
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 	t.Cleanup(func() {
-		mgr.StopFlush()
+		mgr.Close()
 		// 清理异步下载可能遗留的目录，避免 Windows TempDir 清理失败
 		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
 		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
@@ -475,7 +475,7 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() { mgr.StopFlush() })
+	t.Cleanup(func() { mgr.Close() })
 
 	h := &Handlers{cloudMgr: mgr}
 	mux := http.NewServeMux()

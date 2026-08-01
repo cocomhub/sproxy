@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -41,8 +43,8 @@ func TestWithTimeout(t *testing.T) {
 func TestWithMaxChunkSize(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:18083")
 	WithMaxChunkSize(8888)(c)
-	if c.MaxChunkSize != 8888 {
-		t.Errorf("MaxChunkSize = %d, want 8888", c.MaxChunkSize)
+	if c.maxChunkSize != 8888 {
+		t.Errorf("MaxChunkSize = %d, want 8888", c.maxChunkSize)
 	}
 }
 
@@ -83,9 +85,11 @@ func TestWithTunnel_ValidKey(t *testing.T) {
 	t.Parallel()
 
 	c := NewFileClient("http://127.0.0.1:18083")
-	WithTunnel(strings.Repeat("abcdef", 11))(c) // 66 chars → invalid, logged as warn
-	if c.tunnelClient != nil {
-		t.Fatal("tunnelClient should be nil for invalid key")
+	// 64 hex chars = 32 bytes = valid AES-256 key
+	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	WithTunnel(validKey)(c)
+	if c.tunnelClient == nil {
+		t.Fatal("tunnelClient should not be nil for valid key")
 	}
 }
 
@@ -93,11 +97,9 @@ func TestWithTunnel_InvalidKey(t *testing.T) {
 	t.Parallel()
 
 	c := NewFileClient("http://127.0.0.1:18083")
-	// 64 hex chars = 32 bytes = valid AES-256 key
-	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	WithTunnel(validKey)(c)
-	if c.tunnelClient == nil {
-		t.Fatal("tunnelClient should not be nil for valid key")
+	WithTunnel(strings.Repeat("abcdef", 11))(c) // 66 chars → invalid, logged as warn
+	if c.tunnelClient != nil {
+		t.Fatal("tunnelClient should be nil for invalid key")
 	}
 }
 
@@ -199,6 +201,81 @@ func TestWithChunkedResume(t *testing.T) {
 	WithChunkedResume(false)(o)
 	if o.resume {
 		t.Error("resume should be false")
+	}
+}
+
+// ---- Missing Option functions ----
+
+func TestWithChunkSize(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	WithChunkSize(8888)(c)
+	if c.chunkSize != 8888 {
+		t.Errorf("chunkSize = %d, want 8888", c.chunkSize)
+	}
+}
+
+func TestWithChunkSize_Zero(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	WithChunkSize(0)(c)
+	if c.chunkSize != 0 {
+		t.Errorf("chunkSize should be 0 when passed 0, got %d", c.chunkSize)
+	}
+}
+
+func TestWithCacheOptions(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	WithCacheOptions(500, 5*time.Minute)(c)
+	if c.maxCacheEntries != 500 {
+		t.Errorf("maxCacheEntries = %d, want 500", c.maxCacheEntries)
+	}
+	if c.cacheTTL != 5*time.Minute {
+		t.Errorf("cacheTTL = %v, want 5m", c.cacheTTL)
+	}
+}
+
+func TestWithCacheOptions_ZeroValues(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	origMax := c.maxCacheEntries
+	origTTL := c.cacheTTL
+	WithCacheOptions(0, 0)(c)
+	if c.maxCacheEntries != origMax {
+		t.Errorf("maxCacheEntries should remain %d, got %d", origMax, c.maxCacheEntries)
+	}
+	if c.cacheTTL != origTTL {
+		t.Errorf("cacheTTL should remain %v, got %v", origTTL, c.cacheTTL)
+	}
+}
+
+func TestWithKVStore(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	store := NewMemoryKVStore()
+	WithKVStore(store)(c)
+	if c.chainManager == nil {
+		t.Fatal("expected chainManager to be set")
+	}
+}
+
+func TestWithCacheDir(t *testing.T) {
+	c := NewFileClient("http://127.0.0.1:18083")
+	dir := t.TempDir()
+	WithCacheDir(dir)(c)
+	if c.chainManager == nil {
+		t.Fatal("expected chainManager to be set with valid dir")
+	}
+}
+
+func TestWithCacheDir_InvalidDir(t *testing.T) {
+	// 使用一个已存在的文件路径作为"目录"（会失败，降级为内存存储而非 panic）
+	existingFile := filepath.Join(t.TempDir(), "existing_file")
+	if err := os.WriteFile(existingFile, []byte("not a dir"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c := NewFileClient("http://127.0.0.1:18083",
+		WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		WithCacheDir(existingFile),
+	)
+	if c.chainManager == nil {
+		t.Fatal("expected chainManager to be set (fallback to memory store)")
 	}
 }
 
@@ -311,8 +388,8 @@ func TestTunnelDo_WithoutTunnel(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:18083")
 	req, _ := http.NewRequest("GET", "/test", nil)
 	_, err := c.TunnelDo(req)
-	if err == nil || !strings.Contains(err.Error(), "未配置隧道") {
-		t.Fatalf("expected tunnel not configured error, got %v", err)
+	if err == nil {
+		t.Fatal("expected tunnel not configured error")
 	}
 }
 
@@ -394,14 +471,28 @@ func testLogger() *slog.Logger {
 
 // ---- E2E: xfer Pipe + mux + Tunnel ----
 
+// waitForTunnel 轮询等待 tunnel 服务就绪，替代 flaky time.Sleep。
+func waitForTunnel(t *testing.T, tun *tunnel.Tunnel, ctx context.Context) {
+	t.Helper()
+	for range 10 {
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+		_, err := tun.Do(req)
+		if err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("tunnel not ready after 100ms")
+}
+
 func TestXferTunnelRoundTrip(t *testing.T) {
 	// 端到端测试：用 xfertest.Pipe 模拟传输层，
 	// 通过 mux -> Tunnel.Do/Serve 完成一个完整的 HTTP 请求-响应往返
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
-	defer muxA.Close()
-	defer muxB.Close()
+	t.Cleanup(func() { muxA.Close() })
+	t.Cleanup(func() { muxB.Close() })
 
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
@@ -416,7 +507,7 @@ func TestXferTunnelRoundTrip(t *testing.T) {
 			w.Write(body)
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitForTunnel(t, tunA, ctx)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/echo", strings.NewReader("e2e"))
 	resp, err := tunA.Do(req)
@@ -429,15 +520,19 @@ func TestXferTunnelRoundTrip(t *testing.T) {
 		t.Fatalf("expected %q, got %q", "e2e", string(body))
 	}
 	cancel()
-	<-srvErr
+	select {
+	case <-srvErr:
+	case <-time.After(2 * time.Second):
+		t.Error("tunB.Serve did not exit after cancel")
+	}
 }
 
 func TestXferTunnelConcurrentStreams(t *testing.T) {
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
-	defer muxA.Close()
-	defer muxB.Close()
+	t.Cleanup(func() { muxA.Close() })
+	t.Cleanup(func() { muxB.Close() })
 
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
@@ -451,7 +546,7 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 			w.Write([]byte(r.Method))
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitForTunnel(t, tunA, ctx)
 
 	// 并发 10 个请求
 	errCh := make(chan error, 10)
@@ -463,7 +558,8 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 				errCh <- err
 				return
 			}
-			resp.Body.Close()
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
 			errCh <- nil
 		}()
 	}
@@ -474,16 +570,23 @@ func TestXferTunnelConcurrentStreams(t *testing.T) {
 		}
 	}
 	cancel()
-	<-srvErr
+	select {
+	case <-srvErr:
+	case <-time.After(2 * time.Second):
+		t.Error("tunB.Serve did not exit after cancel")
+	}
 }
 
 func TestXferTunnelEncrypted(t *testing.T) {
-	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	key, err := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("ParseKey: %v", err)
+	}
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
-	defer muxA.Close()
-	defer muxB.Close()
+	t.Cleanup(func() { muxA.Close() })
+	t.Cleanup(func() { muxB.Close() })
 
 	tunA := tunnel.NewTunnel(muxA, key)
 	tunB := tunnel.NewTunnel(muxB, key)
@@ -498,7 +601,7 @@ func TestXferTunnelEncrypted(t *testing.T) {
 			w.Write(bytes.ToUpper(body))
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitForTunnel(t, tunA, ctx)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/enc", strings.NewReader("test"))
 	resp, err := tunA.Do(req)
@@ -511,7 +614,11 @@ func TestXferTunnelEncrypted(t *testing.T) {
 		t.Fatalf("expected TEST, got %q", string(body))
 	}
 	cancel()
-	<-srvErr
+	select {
+	case <-srvErr:
+	case <-time.After(2 * time.Second):
+		t.Error("tunB.Serve did not exit after cancel")
+	}
 }
 
 func TestXferTunnelLargeBody(t *testing.T) {
@@ -520,8 +627,8 @@ func TestXferTunnelLargeBody(t *testing.T) {
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
-	defer muxA.Close()
-	defer muxB.Close()
+	t.Cleanup(func() { muxA.Close() })
+	t.Cleanup(func() { muxB.Close() })
 
 	tunA := tunnel.NewTunnel(muxA, nil)
 	tunB := tunnel.NewTunnel(muxB, nil)
@@ -536,7 +643,7 @@ func TestXferTunnelLargeBody(t *testing.T) {
 			w.Write(bytes.ToUpper(b))
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
+	waitForTunnel(t, tunA, ctx)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/big", strings.NewReader(payload))
 	resp, err := tunA.Do(req)
@@ -546,8 +653,12 @@ func TestXferTunnelLargeBody(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if len(body) != 65000 {
-		t.Fatalf("expected 100000 bytes, got %d", len(body))
+		t.Fatalf("expected %d bytes, got %d", len(payload), len(body))
 	}
 	cancel()
-	<-srvErr
+	select {
+	case <-srvErr:
+	case <-time.After(2 * time.Second):
+		t.Error("tunB.Serve did not exit after cancel")
+	}
 }

@@ -4,6 +4,7 @@
 package client
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,8 +42,9 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatalf("Validate() on valid config: %v", err)
 	}
 
-	// empty ServerURL → defaults to localhost
+	// empty ServerURL + SetDefaults → defaults to localhost
 	cfg2 := &Config{Timeout: 30}
+	cfg2.SetDefaults()
 	if err := cfg2.Validate(); err != nil {
 		t.Fatalf("Validate() on config with empty ServerURL: %v", err)
 	}
@@ -50,8 +52,9 @@ func TestConfigValidate(t *testing.T) {
 		t.Errorf("expected ServerURL to default, got %q", cfg2.ServerURL)
 	}
 
-	// zero Timeout → defaults to 300
+	// zero Timeout + SetDefaults → defaults to 300
 	cfg3 := &Config{ServerURL: "http://x", Timeout: 0}
+	cfg3.SetDefaults()
 	if err := cfg3.Validate(); err != nil {
 		t.Fatalf("Validate() on config with zero Timeout: %v", err)
 	}
@@ -59,8 +62,9 @@ func TestConfigValidate(t *testing.T) {
 		t.Errorf("expected Timeout to default to 300, got %d", cfg3.Timeout)
 	}
 
-	// zero ChunkSize → defaults to DefaultChunkSize
+	// zero ChunkSize + SetDefaults → defaults to DefaultChunkSize
 	cfg4 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: 0}
+	cfg4.SetDefaults()
 	if err := cfg4.Validate(); err != nil {
 		t.Fatalf("Validate() on config with zero ChunkSize: %v", err)
 	}
@@ -69,25 +73,25 @@ func TestConfigValidate(t *testing.T) {
 	}
 
 	// invalid tunnel_key length → error
-	cfg5 := &Config{ServerURL: "http://x", Timeout: 30, TunnelKey: "too-short"}
+	cfg5 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, TunnelKey: "too-short"}
 	if err := cfg5.Validate(); err == nil {
 		t.Fatal("expected error for invalid tunnel_key length, got nil")
 	}
 
 	// valid tunnel_key length → no error
-	cfg6 := &Config{ServerURL: "http://x", Timeout: 30, TunnelKey: strings.Repeat("a", 64)}
+	cfg6 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, TunnelKey: strings.Repeat("a", 64)}
 	if err := cfg6.Validate(); err != nil {
 		t.Fatalf("Validate() on config with 64-char tunnel_key: %v", err)
 	}
 
 	// auth_token 任意字符串都合法
-	cfg7 := &Config{ServerURL: "http://x", Timeout: 30, AuthToken: "my-token"}
+	cfg7 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AuthToken: "my-token"}
 	if err := cfg7.Validate(); err != nil {
 		t.Fatalf("Validate() on config with AuthToken: %v", err)
 	}
 
 	// auth_token 空字符串也合法
-	cfg8 := &Config{ServerURL: "http://x", Timeout: 30, AuthToken: ""}
+	cfg8 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AuthToken: ""}
 	if err := cfg8.Validate(); err != nil {
 		t.Fatalf("Validate() on config with empty AuthToken: %v", err)
 	}
@@ -141,7 +145,7 @@ func TestLoadConfig_EmptyPath(t *testing.T) {
 
 func TestLoadConfig_NonexistentPath(t *testing.T) {
 	dir := t.TempDir()
-	// Use a path where parent dir exists but the file itself does not
+	// 父目录存在但文件本身不存在，LoadConfig 应返回默认配置，不创建文件
 	path := filepath.Join(dir, "sclient.yaml")
 
 	cfg, err := LoadConfig(path)
@@ -151,9 +155,9 @@ func TestLoadConfig_NonexistentPath(t *testing.T) {
 	if cfg.ServerURL != "https://127.0.0.1:18083" {
 		t.Errorf("expected default ServerURL, got %q", cfg.ServerURL)
 	}
-	// config file should have been created
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Errorf("expected LoadConfig to create default config file at %s", path)
+	// config file should NOT have been created
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected LoadConfig to NOT create config file at %s", path)
 	}
 }
 
@@ -177,16 +181,41 @@ func TestLoadConfig_ValidFile(t *testing.T) {
 	}
 }
 
-func TestHandleConfigShow(_ *testing.T) {
-	// HandleConfigShow prints to stdout — verify it doesn't panic
+func TestHandleConfigShow(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ServerURL = "https://example.com"
+	cfg.Timeout = 120
 	cfg.TunnelKey = strings.Repeat("d", 64)
 	cfg.AuthToken = "my-secret-token"
 	cfg.ChunkSize = 8 << 20
 	cfg.MaxChunkSize = 32 << 20
+	cfg.AllowTransportFallback = true
 
-	HandleConfigShow(cfg)
+	var buf bytes.Buffer
+	HandleConfigShow(cfg, &buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "ServerURL:     https://example.com") {
+		t.Errorf("expected ServerURL in output, got: %s", out)
+	}
+	if !strings.Contains(out, "Timeout:       120") {
+		t.Errorf("expected Timeout in output, got: %s", out)
+	}
+	if !strings.Contains(out, "dddd****") {
+		t.Errorf("expected masked TunnelKey in output, got: %s", out)
+	}
+	if !strings.Contains(out, "my-s****") {
+		t.Errorf("expected masked AuthToken in output, got: %s", out)
+	}
+	if !strings.Contains(out, "ChunkSize:     8388608") {
+		t.Errorf("expected ChunkSize in output, got: %s", out)
+	}
+	if !strings.Contains(out, "MaxChunkSize:  33554432") {
+		t.Errorf("expected MaxChunkSize in output, got: %s", out)
+	}
+	if !strings.Contains(out, "AllowTransportFallback: true") {
+		t.Errorf("expected AllowTransportFallback in output, got: %s", out)
+	}
 }
 
 func TestSaveConfig_Error(t *testing.T) {
@@ -234,9 +263,23 @@ func TestLoadConfig_EmptyFile(t *testing.T) {
 	}
 }
 
-func TestHandleConfigShow_MaskedShortKey(_ *testing.T) {
+func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.TunnelKey = "short"
-	// Should not panic when key is <= 8 chars
-	HandleConfigShow(cfg)
+
+	var buf bytes.Buffer
+	HandleConfigShow(cfg, &buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "shor****") {
+		t.Errorf("expected masked short key (shor****) in output, got: %s", out)
+	}
+}
+
+func TestHandleConfigShow_NilReceiver(t *testing.T) {
+	var buf bytes.Buffer
+	HandleConfigShow(nil, &buf)
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for nil config, got: %s", buf.String())
+	}
 }

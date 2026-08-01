@@ -3,31 +3,56 @@
 
 package client
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
+
+// 字节大小常量。
+const (
+	KB = 1024
+	MB = 1024 * KB
+	GB = 1024 * MB
+	TB = 1024 * GB
+)
 
 // FormatByte 格式化字节数为人类可读字符串。
+// 注意：float64 精度损失在 9 PB 内安全，超出此范围时精度不可保证。
 func FormatByte(size float64) string {
-	if size <= 0 {
+	if size <= 0 || math.IsNaN(size) || math.IsInf(size, 0) {
 		return "0 B"
 	}
-	if size >= 1024*1024 {
-		return fmt.Sprintf("%.1f MB", size/1024/1024)
-	} else if size >= 1024 {
-		return fmt.Sprintf("%.1f KB", size/1024)
+	if size >= TB {
+		return fmt.Sprintf("%.1f TB", size/TB)
+	}
+	if size >= GB {
+		return fmt.Sprintf("%.1f GB", size/GB)
+	}
+	if size >= MB {
+		return fmt.Sprintf("%.1f MB", size/MB)
+	} else if size >= KB {
+		return fmt.Sprintf("%.1f KB", size/KB)
 	}
 	return fmt.Sprintf("%.0f B", size)
 }
 
 // FormatETA 格式化剩余时间为人类可读字符串。
+// 支持小时、分钟、秒级精度，1 小时以上显示到秒。
 func FormatETA(seconds int64) string {
 	if seconds <= 0 {
 		return "--:--"
 	}
-	if seconds > 3600 {
-		return fmt.Sprintf("%dh %dm", seconds/3600, (seconds%3600)/60)
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	s := seconds % 60
+	if h > 0 {
+		if s > 0 {
+			return fmt.Sprintf("%dh %dm %ds", h, m, s)
+		}
+		return fmt.Sprintf("%dh %dm", h, m)
 	}
-	if seconds > 60 {
-		return fmt.Sprintf("%dm %ds", seconds/60, seconds%60)
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
 	}
-	return fmt.Sprintf("%ds", seconds)
+	return fmt.Sprintf("%ds", s)
 }

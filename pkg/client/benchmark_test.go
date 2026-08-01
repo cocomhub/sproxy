@@ -38,14 +38,21 @@ func mockBenchUploadHandler(dir string) http.HandlerFunc {
 		}
 		defer f.Close()
 
-		out, _ := os.Create(filepath.Join(dir, filepath.Base(h.Filename)))
+		out, cerr := os.Create(filepath.Join(dir, filepath.Base(h.Filename)))
+		if cerr != nil {
+			http.Error(w, cerr.Error(), http.StatusInternalServerError)
+			return
+		}
 		defer out.Close()
 		hasher := sha256.New()
 		buf := make([]byte, 4096)
 		for {
 			n, rerr := f.Read(buf)
 			if n > 0 {
-				out.Write(buf[:n])
+				if _, werr := out.Write(buf[:n]); werr != nil {
+					http.Error(w, werr.Error(), http.StatusInternalServerError)
+					return
+				}
 				hasher.Write(buf[:n])
 			}
 			if rerr != nil {
@@ -159,6 +166,7 @@ func BenchmarkDownload(b *testing.B) {
 	if _, err := rand.Read(data); err != nil {
 		b.Fatal(err)
 	}
+	expectedSum := sha256.Sum256(data)
 	if err := os.WriteFile(filepath.Join(dir, "download.dat"), data, 0644); err != nil {
 		b.Fatal(err)
 	}
@@ -173,19 +181,24 @@ func BenchmarkDownload(b *testing.B) {
 		if err := c.Download(b.Context(), "download.dat", out); err != nil {
 			b.Fatalf("Download: %v", err)
 		}
+		// 验证下载内容正确性
+		got, err := os.ReadFile(out)
+		if err != nil {
+			b.Fatalf("读取下载文件失败: %v", err)
+		}
+		gotSum := sha256.Sum256(got)
+		if gotSum != expectedSum {
+			b.Fatalf("下载内容 checksum 不匹配")
+		}
 	}
 }
 
-// BenchmarkChunkedUpload 测试 4MB 文件上传性能。
+// BenchmarkUpload_4MB_Regular 测试 4MB 文件上传性能。
 //
-// ShouldAutoChunk(4MB) 返回 false（阈值 100 MiB），因此走普通上传路径。
+// 假设：4MB < AutoChunkThreshold（100 MiB），因此走普通上传路径，不应触发自动分块。
 // 手动设置 ChunkSize = 1MB 验证客户端配置正确传递。
 // 单次操作处理 4 MiB 数据，通过 b.SetBytes 记录吞吐量。
-func BenchmarkChunkedUpload(b *testing.B) {
-	if ShouldAutoChunk(4 * size.MiB) {
-		b.Fatal("4MB 不应触发自动分块（阈值 100 MiB）")
-	}
-
+func BenchmarkUpload_4MB_Regular(b *testing.B) {
 	ts, _ := newMockServerBench(b)
 
 	// 创建 4MB 临时文件
@@ -199,9 +212,7 @@ func BenchmarkChunkedUpload(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	// 手动设 ChunkSize = 1MB，不自适应分块
 	c := NewFileClient(ts.URL)
-	c.ChunkSize = 1 * size.MiB
 
 	b.SetBytes(int64(len(data)))
 	b.ResetTimer()

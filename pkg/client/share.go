@@ -4,112 +4,117 @@
 package client
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"time"
 )
 
-// ShareLink 表示服务端返回的分享链接信息。
-type ShareLink struct {
-	Token        string `json:"token"`
-	Filename     string `json:"filename"`
-	CreatedAt    string `json:"created_at"`
-	ExpiresAt    string `json:"expires_at"`
-	MaxDownloads int    `json:"max_downloads"`
-	Downloads    int    `json:"downloads"`
-	OneTime      bool   `json:"one_time"`
-	Expired      bool   `json:"expired"`
+// ShareOption 配置分享链接行为。
+type ShareOption func(*shareOptions)
+
+type shareOptions struct {
+	ttl          time.Duration
+	maxDownloads int
+	oneTime      bool
 }
 
-// CreateShare 创建文件分享链接，返回分享链接信息。
-func (c *FileClient) CreateShare(ctx context.Context, filename string, ttl time.Duration, maxDownloads int, oneTime bool) (*ShareLink, error) {
-	body := map[string]any{
-		"filename":      filename,
-		"ttl":           ttl.String(),
-		"max_downloads": maxDownloads,
-		"one_time":      oneTime,
-	}
-	jsonBody, err := json.Marshal(body)
-	if err != nil {
-		return nil, fmt.Errorf("序列化请求体失败: %w", err)
-	}
-
-	headers := make(http.Header)
-	headers.Set("Content-Type", "application/json")
-	resp, err := c.doRequest(ctx, "POST", "/api/share", bytes.NewReader(jsonBody), headers)
-	if err != nil {
-		return nil, fmt.Errorf("创建分享链接失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var result UploadResult
-		if json.Unmarshal(respBody, &result) == nil && result.Message != "" {
-			return nil, fmt.Errorf("创建分享链接失败: %s", result.Message)
+func WithShareTTL(d time.Duration) ShareOption {
+	return func(o *shareOptions) {
+		if d > 0 {
+			o.ttl = d
 		}
-		return nil, fmt.Errorf("创建分享链接失败 (HTTP %d)", resp.StatusCode)
+	}
+}
+
+func WithShareMaxDownloads(n int) ShareOption {
+	return func(o *shareOptions) {
+		if n > 0 {
+			o.maxDownloads = n
+		}
+	}
+}
+
+func WithShareOneTime() ShareOption {
+	return func(o *shareOptions) {
+		o.oneTime = true
+	}
+}
+
+// ShareLink 表示服务端返回的分享链接信息。
+type ShareLink struct {
+	Token        string `json:"token"`         // 分享链接的唯一标识符
+	Filename     string `json:"filename"`      // 被分享的文件名
+	CreatedAt    string `json:"created_at"`    // 创建时间（RFC3339 格式）
+	ExpiresAt    string `json:"expires_at"`    // 过期时间（RFC3339 格式）
+	MaxDownloads int    `json:"max_downloads"` // 最大下载次数（0=不限）
+	Downloads    int    `json:"downloads"`     // 已下载次数
+	OneTime      bool   `json:"one_time"`      // 是否一次性链接
+	Expired      bool   `json:"expired"`       // 是否已过期
+}
+
+// CreatedAtTime 返回 CreatedAt 的 time.Time 表示。
+func (s *ShareLink) CreatedAtTime() (time.Time, error) {
+	if s == nil {
+		return time.Time{}, fmt.Errorf("ShareLink is nil")
+	}
+	return time.Parse(time.RFC3339, s.CreatedAt)
+}
+
+// ExpiresAtTime 返回 ExpiresAt 的 time.Time 表示。
+func (s *ShareLink) ExpiresAtTime() (time.Time, error) {
+	if s == nil {
+		return time.Time{}, fmt.Errorf("ShareLink is nil")
+	}
+	return time.Parse(time.RFC3339, s.ExpiresAt)
+}
+
+// CreateShare 创建文件分享链接，支持 Option 模式配置参数。
+// TTL 参数通过 WithShareTTL 设置，以秒数格式（%ds）发送至服务端。
+func (c *FileClient) CreateShare(ctx context.Context, filename string, opts ...ShareOption) (*ShareLink, error) {
+	if filename == "" {
+		return nil, fmt.Errorf("filename 不能为空")
+	}
+	cfg := &shareOptions{
+		ttl: 24 * time.Hour, // 默认 24 小时
+	}
+	for _, o := range opts {
+		o(cfg)
+	}
+	reqBody := map[string]any{
+		"filename":      filename,
+		"ttl":           fmt.Sprintf("%ds", int64(cfg.ttl.Seconds())),
+		"max_downloads": cfg.maxDownloads,
+		"one_time":      cfg.oneTime,
 	}
 
 	var link ShareLink
-	if err := json.Unmarshal(respBody, &link); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+	if err := c.doJSON(ctx, "POST", "/api/share", reqBody, &link); err != nil {
+		return nil, fmt.Errorf("创建分享链接失败: %w", err)
 	}
 	return &link, nil
 }
 
 // ListShares 列出当前所有活跃的分享链接。
-func (c *FileClient) ListShares(ctx context.Context) ([]*ShareLink, error) {
-	resp, err := c.doRequest(ctx, "GET", "/api/shares", nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("获取分享列表失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, fmt.Errorf("获取分享列表失败 (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-
+func (c *FileClient) ListShares(ctx context.Context) ([]ShareLink, error) {
 	var result struct {
-		Shares []*ShareLink `json:"shares"`
+		Shares []ShareLink `json:"shares"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
+	if err := c.doJSON(ctx, "GET", "/api/shares", nil, &result); err != nil {
+		return nil, fmt.Errorf("获取分享列表失败: %w", err)
 	}
 	return result.Shares, nil
 }
 
 // RevokeShare 撤销指定 token 的分享链接。
 func (c *FileClient) RevokeShare(ctx context.Context, token string) error {
+	if token == "" {
+		return fmt.Errorf("token 不能为空")
+	}
 	apiPath := "/api/shares/" + url.PathEscape(token)
-	resp, err := c.doRequest(ctx, "DELETE", apiPath, nil, nil)
-	if err != nil {
+	var result doJSONResp
+	if err := c.doJSON(ctx, "DELETE", apiPath, nil, &result); err != nil {
 		return fmt.Errorf("撤销分享链接失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("撤销分享链接失败 (HTTP %d): %s", resp.StatusCode, string(body))
-	}
-
-	var result UploadResult
-	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("解析响应失败: %s", string(body))
-	}
-	if !result.Success {
-		return fmt.Errorf("撤销失败: %s", result.Message)
 	}
 	return nil
 }

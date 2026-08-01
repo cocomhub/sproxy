@@ -6,6 +6,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
@@ -18,16 +19,16 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	nodes := h.routeTable.List()
 	type nodeResp struct {
-		ID        string `json:"id"`
-		Addr      string `json:"addr,omitempty"`
-		Connected string `json:"connected,omitempty"`
+		ID        string    `json:"id"`
+		Addr      string    `json:"addr,omitempty"`
+		Connected time.Time `json:"connected"`
 	}
 	resp := make([]nodeResp, 0, len(nodes))
 	for _, n := range nodes {
 		resp = append(resp, nodeResp{
 			ID:        string(n.ID),
 			Addr:      n.Addr,
-			Connected: n.Connected.Format("2006-01-02T15:04:05Z07:00"),
+			Connected: n.Connected,
 		})
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)

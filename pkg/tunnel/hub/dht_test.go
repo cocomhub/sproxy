@@ -4,6 +4,7 @@
 package hub
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -153,6 +154,7 @@ func TestDhtConcurrent(t *testing.T) {
 	wg.Wait()
 
 	// Concurrent lookup
+	errCh := make(chan error, n)
 	for i := range n {
 		wg.Add(1)
 		i := i
@@ -161,11 +163,15 @@ func TestDhtConcurrent(t *testing.T) {
 			id := "node-" + string(rune('a'+i))
 			_, err := dht.Lookup(ctx, id)
 			if err != nil {
-				t.Errorf("expected to find %s", id)
+				errCh <- fmt.Errorf("expected to find %s: %w", id, err)
 			}
 		}()
 	}
 	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
 
 	// Verify all nodes were registered
 	for i := range n {
