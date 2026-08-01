@@ -187,22 +187,31 @@ func TestClientArchive_HTTPError(t *testing.T) {
 	}
 }
 
-// TestClientArchive_WriteError 测试 downloadToFile 中写入失败（只读目录）时的清理。
+// TestClientArchive_WriteError 测试 downloadToFile 中 ensureParentDir 自动创建中间目录的能力。
 func TestClientArchive_WriteError(t *testing.T) {
 	t.Parallel()
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		// 返回大量数据，但尝试写入只读目录
 		_, _ = w.Write([]byte("some archive data"))
 	}))
 	defer mock.Close()
 
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
-	// 用不存在的目录路径，os.Create 会失败
-	err := c.Archive(t.Context(), []string{"x.txt"}, filepath.Join(t.TempDir(), "nonexistent", "out.tar"))
-	if err == nil {
-		t.Error("expected error for write failure, got nil")
+	// 不存在的中间目录，ensureParentDir 会自动创建，因此应成功
+	dst := filepath.Join(t.TempDir(), "nonexistent", "out.tar")
+	err := c.Archive(t.Context(), []string{"x.txt"}, dst)
+	if err != nil {
+		t.Fatalf("expected success with auto-created parent dir, got: %v", err)
+	}
+
+	// 验证文件确实写入
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() == 0 {
+		t.Error("downloaded file is empty")
 	}
 }
 

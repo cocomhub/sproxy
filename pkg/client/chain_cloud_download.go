@@ -265,8 +265,8 @@ func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
 
 // waitForTasks 轮询等待所有任务完成，支持存储超限重试。
 func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
-	maxRetries := 3
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	maxAttempts := 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// 每次重试前归零计数器，基于本次轮询结果重新统计
 		c.Completed = 0
 		c.Failed = 0
@@ -293,7 +293,7 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 		if len(storageFullURLs) == 0 {
 			return nil
 		}
-		if attempt < maxRetries {
+		if attempt < maxAttempts-1 {
 			// 移除旧失败任务 ID，后续追加新提交的 ID
 			failedSet := make(map[string]struct{}, len(storageFullIDs))
 			for _, id := range storageFullIDs {
@@ -347,7 +347,7 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			c.Failed += len(storageFullURLs)
 		}
 	}
-	return fmt.Errorf("storage full after %d retries: %w", maxRetries, ErrStorageFull)
+	return fmt.Errorf("storage full after %d attempts: %w", maxAttempts, ErrStorageFull)
 }
 
 // pollAllTasks 轮询所有任务状态直到全部完成。
@@ -429,9 +429,6 @@ func (c *CloudDownloadChain) archiveTasks(ctx context.Context) error {
 	result, err := c.client.ArchiveCloudTasks(ctx, c.TaskIDs, c.ArchiveName)
 	if err != nil {
 		return fmt.Errorf("archive: %w: %v", ErrArchiveFailed, err)
-	}
-	if !result.Success {
-		return fmt.Errorf("archive: %w: %s", ErrArchiveFailed, result.Message)
 	}
 	// 保存服务端返回的归档文件路径，供 downloadToLocal 使用
 	c.archiveServerPath = result.File

@@ -75,12 +75,14 @@ type ChainRunner interface {
 }
 
 // ChainResult 链式操作结果。
+// 注意：raw 字段（原始 runner）仅在链式操作执行过程中填充，
+// 通过 UnmarshalJSON 反序列化后 raw 为 nil，此时 AsCloudDownloadChain() 将返回 nil。
 type ChainResult struct {
 	ChainID string         `json:"chain_id"`
 	Phase   string         `json:"phase"`
 	Status  string         `json:"status"`
 	Error   string         `json:"error,omitempty"`
-	raw     ChainRunner    `json:"-"` // 原始 runner
+	raw     ChainRunner    `json:"-"` // 原始 runner（反序列化后为 nil）
 	extra   map[string]any `json:"-"` // 额外元数据（内部字段，通过自定义序列化保持 JSON 兼容）
 }
 
