@@ -670,6 +670,10 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	fileSize := stat.Size()
 	modTime := stat.ModTime()
 
+	if fileSize <= 0 {
+		return nil, fmt.Errorf("chunked upload: 不支持空文件或空文件")
+	}
+
 	var fileChecksum string
 	fileChecksum, _, err = c.calcFileChecksum(localPath, file, fileSize, modTime)
 	if err != nil {
@@ -913,6 +917,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 	}
 
 	if err := c.verifyDownloadChecksum(outputPath, expectedChecksum); err != nil {
+		cancel()
 		return err
 	}
 
