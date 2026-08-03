@@ -159,8 +159,10 @@ func TestCloudDownloadManager_ListTasksFilterByStatus(t *testing.T) {
 
 	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100)
 	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200)
+	mgr.mu.Lock()
 	t1.Status = "completed"
 	t2.Status = "failed"
+	mgr.mu.Unlock()
 
 	completed := mgr.ListTasks("completed")
 	if len(completed) != 1 {
@@ -178,7 +180,9 @@ func TestCloudDownloadManager_CancelTask(t *testing.T) {
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
+	mgr.mu.Lock()
 	task.Status = "downloading"
+	mgr.mu.Unlock()
 
 	err := mgr.CancelTask(task.ID)
 	if err != nil {
@@ -195,7 +199,9 @@ func TestCloudDownloadManager_CancelTaskInvalidStatus(t *testing.T) {
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
+	mgr.mu.Lock()
 	task.Status = "completed"
+	mgr.mu.Unlock()
 
 	err := mgr.CancelTask(task.ID)
 	if err == nil {
@@ -209,7 +215,9 @@ func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
+	mgr.mu.Lock()
 	task.Status = "completed"
+	mgr.mu.Unlock()
 
 	// 创建云端文件
 	cloudDir := filepath.Join(dir, ".__cloud__", task.ID)
@@ -303,7 +311,9 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 
 	// 创建失败任务
 	task1, _ := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100)
+	mgr.mu.Lock()
 	task1.Status = "failed"
+	mgr.mu.Unlock()
 
 	// 相同 URL 的失败任务应允许重新创建
 	task2, err := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100)
@@ -315,7 +325,9 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 	}
 
 	// 取消任务同理
+	mgr.mu.Lock()
 	task2.Status = "cancelled"
+	mgr.mu.Unlock()
 	task3, err := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100)
 	if err != nil {
 		t.Fatal(err)
@@ -332,8 +344,10 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 	mgr := NewCloudDownloadManager(dir, sm, cs, testLogger(), defaultCloudDownloadConfig())
 
 	task, _ := mgr.CreateTask("url", "https://example.com/cleanup.zip", "cleanup.zip", 100)
+	mgr.mu.Lock()
 	task.Status = "completed"
 	task.Checksum = "abc123"
+	mgr.mu.Unlock()
 
 	// 创建云端文件
 	cloudDir := filepath.Join(dir, ".__cloud__", task.ID)
@@ -570,8 +584,10 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 	// 创建 mgr1，创建任务，手动设置为 downloading 并持久化
 	mgr1 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 	task, _ := mgr1.CreateTask("url", srv.URL, "resume.bin", int64(len(content)))
+	mgr1.mu.Lock()
 	task.Status = "downloading"
 	task.UpdatedAt = time.Now()
+	mgr1.mu.Unlock()
 	mgr1.saveTask(task)
 
 	// 创建 mgr2 模拟重启，应自动恢复 downloading 任务
@@ -586,7 +602,10 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timeout waiting for recovered task to complete")
 		case <-ticker.C:
-			cur, _ := mgr2.GetTask(task.ID)
+			cur, ok := mgr2.SnapshotTask(task.ID)
+			if !ok {
+				t.Fatal("task not found")
+			}
 			if cur.Status == "completed" {
 				return
 			}
@@ -677,8 +696,10 @@ func TestCloudCleanupExpiredOnce_ClearsCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mgr.mu.Lock()
 	task.Status = "completed"
 	task.UpdatedAt = time.Now().Add(-time.Hour)
+	mgr.mu.Unlock()
 	mgr.markDirty(task.ID)
 	mgr.flushDirty()
 
@@ -707,7 +728,9 @@ func TestCloudCleanupExpiredOnce_SkipsRunning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mgr.mu.Lock()
 	task.Status = "downloading"
+	mgr.mu.Unlock()
 
 	cleaned := mgr.cleanupExpiredOnce()
 	if cleaned != 0 {
@@ -893,8 +916,8 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 			t.Fatal("timeout waiting for 2 tasks to start downloading")
 		default:
 			downloading := 0
-			for _, t := range allTasks {
-				s, _ := mgr.SnapshotTask(t.ID)
+			for _, tk := range allTasks {
+				s, _ := mgr.SnapshotTask(tk.ID)
 				if s.Status == "downloading" {
 					downloading++
 				}
@@ -910,8 +933,8 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 					default:
 						time.Sleep(20 * time.Millisecond)
 						downloading = 0
-						for _, t := range allTasks {
-							s, _ := mgr.SnapshotTask(t.ID)
+						for _, tk := range allTasks {
+							s, _ := mgr.SnapshotTask(tk.ID)
 							if s.Status == "downloading" {
 								downloading++
 							}

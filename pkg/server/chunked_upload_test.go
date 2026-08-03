@@ -247,7 +247,8 @@ func TestUploadChunk_Idempotent(t *testing.T) {
 	chunkCS := sha256hex(fileData)
 
 	// 第一次上传
-	uploadChunk(t, url, uploadID, 0, chunkCS, fileData)
+	resp1 := uploadChunk(t, url, uploadID, 0, chunkCS, fileData)
+	resp1.Body.Close()
 
 	// 第二次上传同样的分块，应该幂等成功
 	resp := uploadChunk(t, url, uploadID, 0, chunkCS, fileData)
