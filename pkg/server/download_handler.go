@@ -50,6 +50,9 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算
+	// 注意：实时计算 SHA-256 需要完整读取文件，大文件可能阻塞响应。
+	// 这是 checksum 回退路径，仅当 ChecksumStore 无记录时触发。
+	// 大文件建议使用分块下载（GET /download/chunk），避免全量计算。
 	if cs, ok := h.checksumStore.Get(remotePath); ok {
 		w.Header().Set(headerFileChecksum, cs)
 	} else if cs, err := FileChecksum(filePath); err == nil {

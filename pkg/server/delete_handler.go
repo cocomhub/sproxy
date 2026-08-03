@@ -12,6 +12,20 @@ import (
 	"time"
 )
 
+// resolveAndValidateFile 校验文件名并返回安全的远程路径和完整路径。
+// 校验失败时返回 ("", "", false)。
+func (h *Handlers) resolveAndValidateFile(filename string) (remotePath, fullPath string, ok bool) {
+	remotePath, err := ValidateFilePath(filename)
+	if err != nil {
+		return "", "", false
+	}
+	fullPath = h.safePath(remotePath)
+	if fullPath == "" {
+		return "", "", false
+	}
+	return remotePath, fullPath, true
+}
+
 func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	reqID := r.Header.Get(headerRequestID)
 	if reqID == "" {
@@ -24,14 +38,9 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgEmptyFilename}, http.StatusBadRequest)
 		return
 	}
-	remotePath, err := ValidateFilePath(filename)
-	if err != nil {
+	remotePath, filePath, ok := h.resolveAndValidateFile(filename)
+	if !ok {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
-		return
-	}
-	filePath := h.safePath(remotePath)
-	if filePath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -66,13 +75,8 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 // processBatchDeleteItem 处理单条文件删除操作。
 func (h *Handlers) processBatchDeleteItem(f BatchDeleteFile, logger *slog.Logger) BatchOperationResult {
 	result := BatchOperationResult{Filename: f.Filename}
-	remotePath, err := ValidateFilePath(f.Filename)
-	if err != nil {
-		result.Message = errMsgInvalidFilename
-		return result
-	}
-	filePath := h.safePath(remotePath)
-	if filePath == "" {
+	remotePath, filePath, ok := h.resolveAndValidateFile(f.Filename)
+	if !ok {
 		result.Message = "无效的文件路径"
 		return result
 	}

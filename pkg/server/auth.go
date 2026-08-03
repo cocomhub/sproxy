@@ -16,6 +16,13 @@ type APIKey struct {
 	Permission string `yaml:"permission" mapstructure:"permission"` // "read" 或 "write"
 }
 
+const (
+	// PermissionRead 表示只读权限。
+	PermissionRead = "read"
+	// PermissionWrite 表示读写权限。
+	PermissionWrite = "write"
+)
+
 // APIKeyConfig 多用户 API 密钥配置。
 type APIKeyConfig struct {
 	Enabled bool     `yaml:"enabled" mapstructure:"enabled"`
@@ -32,12 +39,12 @@ const (
 )
 
 // permissionAllowed 检查给定的权限是否允许执行所需操作。
-// read 权限可执行 GET/HEAD 请求；write 权限可执行所有操作。
+// PermissionRead 权限可执行 GET/HEAD 请求；PermissionWrite 权限可执行所有操作。
 func permissionAllowed(permission, method string) bool {
-	if permission == "write" {
+	if permission == PermissionWrite {
 		return true
 	}
-	if permission == "read" {
+	if permission == PermissionRead {
 		switch method {
 		case http.MethodGet, http.MethodHead:
 			return true

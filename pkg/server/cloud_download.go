@@ -417,6 +417,11 @@ func (m *CloudDownloadManager) CancelTask(id string) error {
 	t.UpdatedAt = time.Now()
 	t.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 
+	// 释放 TryReserve 预留的存储空间
+	if t.TotalSize > 0 {
+		m.storage.Release(t.TotalSize, CategoryCloud)
+	}
+
 	// 触发下载取消
 	if cancel, ok := m.cancelFuncs[id]; ok {
 		cancel()

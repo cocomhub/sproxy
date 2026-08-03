@@ -13,6 +13,11 @@ import (
 
 // RateLimiter implements a sliding-window rate limiter using only the stdlib.
 // Thread-safe via sync.Mutex.
+//
+// 当前实现为全局限流（全局单实例），不区分客户端 IP。
+// 单个客户端可耗尽全部配额，影响其他客户端。
+// 如需要扩展为 IP 级别限流，可为每个 RemoteAddr 创建独立的 RateLimiter
+// 实例（需定期清理过期条目），或使用 per-IP 计数器 + 滑动窗口方案。
 type RateLimiter struct {
 	mu         sync.Mutex
 	limit      int

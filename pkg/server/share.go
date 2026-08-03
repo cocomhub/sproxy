@@ -106,6 +106,8 @@ func (s *ShareStore) Create(filename, absPath string, ttl time.Duration, maxDown
 	defer s.mu.Unlock()
 	if len(s.links) >= maxShareEntries {
 		// 达到上限时删除最旧的 10% 条目
+		// 注：后台清理 goroutine 已定期清理过期分享链接，这里的 eviction 仅作为兜底。
+		// O(n) 遍历在 maxShareEntries=10000 时最多扫描 10000 条，可接受。
 		evictCount := maxShareEntries / 10
 		evicted := 0
 		for k, v := range s.links {

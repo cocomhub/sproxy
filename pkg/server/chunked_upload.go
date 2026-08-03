@@ -20,6 +20,7 @@ import (
 )
 
 // validateChunkChecksum 校验 chunk_checksum 是否为有效的 64 位 hex 字符串。
+// 使用 hex.DecodeString + 长度检查实现，一次调用即可完成验证。
 func validateChunkChecksum(checksum string) bool {
 	if len(checksum) != 64 {
 		return false
