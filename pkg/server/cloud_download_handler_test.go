@@ -242,7 +242,9 @@ func TestCloudHandler_PathTraversalBlocked(t *testing.T) {
 	}
 
 	var task CloudTask
-	json.NewDecoder(resp.Body).Decode(&task)
+	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if strings.Contains(task.Filename, "/") || strings.Contains(task.Filename, "\\") {
 		t.Fatalf("filename should be sanitized, got %q", task.Filename)
 	}
@@ -458,7 +460,9 @@ func TestCloudHandler_BatchCreateDownload_AlwaysAsync(t *testing.T) {
 	var batchResp struct {
 		Tasks []CloudBatchTaskResult `json:"tasks"`
 	}
-	json.NewDecoder(resp.Body).Decode(&batchResp)
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if batchResp.Tasks[0].Status != "pending" && batchResp.Tasks[0].Status != "downloading" {
 		t.Fatalf("expected batch mode to always be async, got status %q", batchResp.Tasks[0].Status)
 	}
@@ -499,7 +503,9 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 	var batchResp struct {
 		Tasks []CloudBatchTaskResult `json:"tasks"`
 	}
-	json.NewDecoder(resp.Body).Decode(&batchResp)
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if batchResp.Tasks[0].Status != "failed" {
 		t.Fatalf("expected 'failed' for storage full, got %q", batchResp.Tasks[0].Status)
 	}

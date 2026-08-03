@@ -48,8 +48,35 @@ func TestCloudTask_JSONRoundTrip(t *testing.T) {
 	if restored.URL != task.URL {
 		t.Fatalf("expected URL %q, got %q", task.URL, restored.URL)
 	}
+	if restored.Method != task.Method {
+		t.Fatalf("expected Method %q, got %q", task.Method, restored.Method)
+	}
+	if restored.Filename != task.Filename {
+		t.Fatalf("expected Filename %q, got %q", task.Filename, restored.Filename)
+	}
 	if restored.Status != task.Status {
 		t.Fatalf("expected Status %q, got %q", task.Status, restored.Status)
+	}
+	if restored.TotalSize != task.TotalSize {
+		t.Fatalf("expected TotalSize %d, got %d", task.TotalSize, restored.TotalSize)
+	}
+	if restored.Downloaded != task.Downloaded {
+		t.Fatalf("expected Downloaded %d, got %d", task.Downloaded, restored.Downloaded)
+	}
+	if restored.Checksum != task.Checksum {
+		t.Fatalf("expected Checksum %q, got %q", task.Checksum, restored.Checksum)
+	}
+	if restored.Error != task.Error {
+		t.Fatalf("expected Error %q, got %q", task.Error, restored.Error)
+	}
+	if !restored.CreatedAt.Equal(task.CreatedAt) {
+		t.Fatalf("expected CreatedAt %v, got %v", task.CreatedAt, restored.CreatedAt)
+	}
+	if !restored.UpdatedAt.Equal(task.UpdatedAt) {
+		t.Fatalf("expected UpdatedAt %v, got %v", task.UpdatedAt, restored.UpdatedAt)
+	}
+	if !restored.ExpiresAt.Equal(task.ExpiresAt) {
+		t.Fatalf("expected ExpiresAt %v, got %v", task.ExpiresAt, restored.ExpiresAt)
 	}
 }
 

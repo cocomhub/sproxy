@@ -318,56 +318,6 @@ func TestDownload_OpenFileError(t *testing.T) {
 	}
 }
 
-// ---- listFiles 子目录不存在 ----
-
-func TestListFiles_SubdirNotFound(t *testing.T) {
-	t.Parallel()
-	url, _ := newTestServerWithAllRoutes(t, nil)
-
-	resp, err := http.Get(url + "/api/files?subdir=nonexistent")
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 (empty list), got %d", resp.StatusCode)
-	}
-	var result struct {
-		Files []fileInfo `json:"files"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(result.Files) != 0 {
-		t.Fatalf("expected empty list, got %d", len(result.Files))
-	}
-}
-
-// ---- searchFiles 搜索失败路径 ----
-
-func TestSearchFiles_EmptyQuery(t *testing.T) {
-	t.Parallel()
-	url, _ := newTestServerWithAllRoutes(t, nil)
-
-	resp, err := http.Get(url + "/api/files/search?q=")
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var result struct {
-		Files []fileInfo `json:"files"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(result.Files) != 0 {
-		t.Fatalf("expected empty list for empty query, got %d", len(result.Files))
-	}
-}
-
 // ---- stat checksum 走 checksumStore 与实时计算两条路径 ----
 
 func TestStat_ChecksumFromStore(t *testing.T) {

@@ -280,8 +280,7 @@ func TestUploadStore_ConcurrentMarkChunk(t *testing.T) {
 }
 
 func TestUploadStore_CleanupSessionAfter(t *testing.T) {
-	tmpDir := t.TempDir()
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := NewUploadStore(t.TempDir(), 0, nil)
 	defer us.Stop()
 
 	sessionID := "cleanup-test"
@@ -295,10 +294,13 @@ func TestUploadStore_CleanupSessionAfter(t *testing.T) {
 	// 计划在 50ms 后清理
 	us.CleanupSessionAfter(sessionID, 50*time.Millisecond)
 
-	// 验证 50ms 后 session 被移除
-	time.Sleep(100 * time.Millisecond)
-
-	if us.GetSession(sessionID) != nil {
-		t.Error("expected session to be cleaned up after TTL")
+	// 轮询等待 session 被移除，最多 2s
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if us.GetSession(sessionID) == nil {
+			return // 已清理，成功
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Error("expected session to be cleaned up after TTL")
 }

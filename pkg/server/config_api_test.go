@@ -220,7 +220,9 @@ func TestConfig_UpdateEmptyBody(t *testing.T) {
 	}
 
 	var result map[string]any
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 
 	if result["error"] != "empty request body: no fields to update" {
 		t.Errorf("expected error message about empty body, got %v", result["error"])

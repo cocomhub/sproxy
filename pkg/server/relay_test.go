@@ -49,7 +49,9 @@ func TestRelayHandlerMissingTarget(t *testing.T) {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 	var resp RelayResponse
-	json.NewDecoder(w.Body).Decode(&resp)
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if resp.Status != http.StatusBadRequest {
 		t.Fatalf("expected status 400, got %d", resp.Status)
 	}
@@ -99,14 +101,16 @@ func TestRelayHandlerRoundTrip(t *testing.T) {
 	defer cancel()
 
 	srvErr := make(chan error, 1)
+	srvReady := make(chan struct{})
 	go func() {
 		tunB := tunnel.NewTunnel(relayMux, nil)
+		close(srvReady)
 		srvErr <- tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Custom", "hello")
 			w.Write([]byte("relay ok"))
 		}))
 	}()
-	time.Sleep(50 * time.Millisecond)
+	<-srvReady
 
 	// 发送中继请求
 	body := `{"target":"test-node", "method":"GET", "path":"/api/test"}`

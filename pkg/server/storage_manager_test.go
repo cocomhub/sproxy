@@ -431,7 +431,7 @@ func TestStoragePeriodicScan_RecalculatesUsage(t *testing.T) {
 	}
 }
 
-func TestStorageScanOnce_Error(t *testing.T) {
+func TestStorageScanOnce_EmptyDir(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())

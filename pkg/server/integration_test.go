@@ -1087,7 +1087,9 @@ func TestRmdir_WithFiles_AlsoDeletesChecksums(t *testing.T) {
 	var listResult struct {
 		Files []fileInfo `json:"files"`
 	}
-	json.NewDecoder(listResp.Body).Decode(&listResult)
+	if err := json.NewDecoder(listResp.Body).Decode(&listResult); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	for _, f := range listResult.Files {
 		if f.Name == "a.txt" || strings.HasPrefix(f.Name, "subdir/") {
 			t.Fatalf("file from deleted subdir should not appear in root listing: %s", f.Name)
@@ -1166,7 +1168,9 @@ func TestRename_SameSourceAndTarget(t *testing.T) {
 		t.Fatalf("expected 200 (same path), got %d", resp.StatusCode)
 	}
 	var result UploadResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !result.Success {
 		t.Fatalf("expected success: %+v", result)
 	}
@@ -1369,7 +1373,9 @@ func TestListFiles_SubdirParameter(t *testing.T) {
 	var result struct {
 		Files []fileInfo `json:"files"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if len(result.Files) != 1 || result.Files[0].Name != "nested.txt" {
 		t.Fatalf("expected [nested.txt], got %+v", result.Files)
 	}

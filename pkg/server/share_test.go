@@ -78,7 +78,9 @@ func TestShare_Expired(t *testing.T) {
 	defer resp.Body.Close()
 
 	var shareResp map[string]any
-	json.NewDecoder(resp.Body).Decode(&shareResp)
+	if err := json.NewDecoder(resp.Body).Decode(&shareResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	token, _ := shareResp["token"].(string)
 
 	time.Sleep(10 * time.Millisecond)
@@ -201,7 +203,9 @@ func TestShare_OneTime(t *testing.T) {
 	defer resp.Body.Close()
 
 	var shareResp map[string]any
-	json.NewDecoder(resp.Body).Decode(&shareResp)
+	if err := json.NewDecoder(resp.Body).Decode(&shareResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	token := shareResp["token"].(string)
 
 	// 第一次下载应成功
@@ -310,7 +314,9 @@ func TestShare_Revoke(t *testing.T) {
 	}
 
 	var shareResp map[string]any
-	json.NewDecoder(resp.Body).Decode(&shareResp)
+	if err := json.NewDecoder(resp.Body).Decode(&shareResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	resp.Body.Close()
 	token := shareResp["token"].(string)
 
