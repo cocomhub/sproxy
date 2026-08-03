@@ -234,8 +234,42 @@ func TestCloudArchive_BatchTaskNotFound(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	// 新行为：跳过无效 task，继续处理有效 task，返回 200 部分成功
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result CloudArchiveResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success=true, got message: %s", result.Message)
+	}
+	if result.TaskCount != 1 {
+		t.Fatalf("expected task_count=1, got %d", result.TaskCount)
+	}
+	if result.SkippedCount != 1 {
+		t.Fatalf("expected skipped_count=1, got %d", result.SkippedCount)
+	}
+	if len(result.SkippedTasks) != 1 || result.SkippedTasks[0] != "nonexistent-id" {
+		t.Fatalf("expected skipped_tasks=[\"nonexistent-id\"], got %v", result.SkippedTasks)
+	}
+}
+
+func TestCloudArchive_BatchAllTasksSkipped(t *testing.T) {
+	ts, _, _ := setupCloudArchiveTest(t)
+	defer ts.Close()
+
+	body := `{"task_ids":["nonexistent-1","nonexistent-2"]}`
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
 	}
 
 	var result CloudArchiveResult
@@ -245,8 +279,11 @@ func TestCloudArchive_BatchTaskNotFound(t *testing.T) {
 	if result.Success {
 		t.Fatal("expected success=false")
 	}
-	if !strings.Contains(result.Message, "task not found") {
-		t.Fatalf("expected message to contain 'task not found', got %q", result.Message)
+	if result.Message != "no valid tasks to archive" {
+		t.Fatalf("expected message %q, got %q", "no valid tasks to archive", result.Message)
+	}
+	if result.SkippedCount != 2 {
+		t.Fatalf("expected skipped_count=2, got %d", result.SkippedCount)
 	}
 }
 

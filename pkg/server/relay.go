@@ -52,6 +52,7 @@ func NewRelayHandler(rt *hub.RouteTable, logger *slog.Logger) *RelayHandler {
 
 // ServeHTTP 处理中继请求：解析 JSON，查找目标节点，转发 HTTP 请求。
 func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 	var req RelayRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeRelayError(w, fmt.Sprintf("解析请求失败: %v", err), http.StatusBadRequest)

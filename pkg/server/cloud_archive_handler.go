@@ -29,12 +29,14 @@ type CloudArchiveBatchRequest struct {
 
 // CloudArchiveResult 是归档操作响应结构体。
 type CloudArchiveResult struct {
-	Success   bool   `json:"success"`
-	Message   string `json:"message,omitempty"`
-	File      string `json:"file,omitempty"`
-	Size      int64  `json:"size,omitempty"`
-	Checksum  string `json:"checksum,omitempty"`
-	TaskCount int    `json:"task_count,omitempty"`
+	Success      bool     `json:"success"`
+	Message      string   `json:"message,omitempty"`
+	File         string   `json:"file,omitempty"`
+	Size         int64    `json:"size,omitempty"`
+	Checksum     string   `json:"checksum,omitempty"`
+	TaskCount    int      `json:"task_count,omitempty"`
+	SkippedCount int      `json:"skipped_count,omitempty"`
+	SkippedTasks []string `json:"skipped_tasks,omitempty"`
 }
 
 // cloudArchiveDirName 是云任务归档文件存储子目录。
@@ -171,23 +173,23 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 收集所有已完成任务的文件信息
+	// 收集所有已完成任务的文件信息，跳过无效任务
 	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
 	var files []fileWithRelPath
+	var skippedTasks []string
 
 	for _, taskID := range req.TaskIDs {
 		task, ok := h.cloudMgr.GetTask(taskID)
 		if !ok {
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("task not found: %s", taskID),
-			}, http.StatusNotFound)
-			return
+			h.logger.Warn("cloud batch archive: skipping task not found", "task_id", taskID)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
 		}
 		if task.Status != "completed" {
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("task %q status is %q, expected \"completed\"", taskID, task.Status),
-			}, http.StatusBadRequest)
-			return
+			h.logger.Warn("cloud batch archive: skipping task with non-completed status",
+				"task_id", taskID, "status", task.Status)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
 		}
 
 		sourceFile := filepath.Join(cloudDir, task.ID, task.Filename)
@@ -197,14 +199,21 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		if !IsPathWithin(sourceFile, sourceDir) {
 			h.logger.Error("path traversal detected in cloud batch archive",
 				"task_id", taskID, "source_file", sourceFile)
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("invalid file path for task: %s", taskID),
-			}, http.StatusInternalServerError)
-			return
+			skippedTasks = append(skippedTasks, taskID)
+			continue
 		}
 
 		relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
 		files = append(files, fileWithRelPath{fullPath: sourceFile, relPath: relPath})
+	}
+
+	// 所有任务都被跳过则返回错误
+	if len(files) == 0 {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: "no valid tasks to archive",
+			SkippedCount: len(skippedTasks), SkippedTasks: skippedTasks,
+		}, http.StatusBadRequest)
+		return
 	}
 
 	// 确定归档文件名（路径穿越防护 + 合法性检查）
@@ -270,11 +279,13 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSONResponse(w, CloudArchiveResult{
-		Success:   true,
-		File:      filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
-		Size:      size,
-		Checksum:  checksum,
-		TaskCount: len(files),
+		Success:      true,
+		File:         filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
+		Size:         size,
+		Checksum:     checksum,
+		TaskCount:    len(files),
+		SkippedCount: len(skippedTasks),
+		SkippedTasks: skippedTasks,
 	}, http.StatusOK)
 }
 
