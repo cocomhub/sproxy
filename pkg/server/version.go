@@ -4,8 +4,6 @@
 package server
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -321,16 +319,7 @@ func syncParentDir(path string) error {
 }
 
 // fileChecksum 计算文件的 SHA-256 十六进制摘要。
+// 委托给 checksum.go 中的 FileChecksum 标准实现。
 func fileChecksum(filePath string) (string, error) {
-	f, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return FileChecksum(filePath)
 }

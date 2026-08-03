@@ -105,12 +105,13 @@ func (cs *ChecksumStore) Delete(filename string) {
 }
 
 // Rename 将一条 checksum 记录从 from 路径迁移到 to 路径并持久化。
-// 如果 from 不存在则是 no-op（不报错）；如果 to 已存在则被覆盖（与 os.Rename 行为对齐）。
+// 如果 to 已存在则被覆盖（与 os.Rename 行为对齐）。
 func (cs *ChecksumStore) Rename(from, to string) {
 	cs.mu.Lock()
 	v, ok := cs.checksums[from]
 	if !ok {
 		cs.mu.Unlock()
+		cs.logger.Warn("ChecksumStore.Rename: from 路径不存在，跳过重命名", "from", from, "to", to)
 		return
 	}
 	delete(cs.checksums, from)
