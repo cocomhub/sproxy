@@ -166,10 +166,6 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		case strings.HasPrefix(rel, cloudDirName+"/"):
 			cloud += size
 		default:
-			// 跳过元数据文件
-			if strings.HasPrefix(filepath.Base(path), ".") {
-				return nil
-			}
 			userFiles += size
 		}
 		return nil
@@ -213,6 +209,14 @@ func (s *StorageManager) scanOnce() (int64, int64, error) {
 
 // periodicScan 每 30 分钟执行一次全量扫描，校准存储计数器。
 func (s *StorageManager) periodicScan() {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("periodic scan panicked, restarting", "recover", r)
+			// 延迟重启，避免频繁 panic 导致 CPU 空转
+			time.Sleep(10 * time.Second)
+			go s.periodicScan()
+		}
+	}()
 	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 	for {

@@ -34,6 +34,7 @@ func (h *Handlers) storageConfigHandler(w http.ResponseWriter, r *http.Request) 
 	h.storageMgr.SetMaxBytes(req.MaxStorageBytes)
 	cfg := h.cfgPtr.Load()
 	cfg.MaxStorageBytes = req.MaxStorageBytes
+	h.cfgPtr.Store(cfg)
 
 	sendJSONResponse(w, map[string]any{
 		"success":           true,
