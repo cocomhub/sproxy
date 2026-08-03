@@ -57,6 +57,7 @@ func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 				}
 			}()
 			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Del("Content-Length")
 			w.Header().Add("Vary", "Accept-Encoding")
 			next.ServeHTTP(&gzipResponseWriter{Writer: gw, ResponseWriter: w}, r)
 		})

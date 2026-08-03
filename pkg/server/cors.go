@@ -64,7 +64,7 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 			default:
 				// origin 不在白名单中，不添加 CORS 头（浏览器会阻止请求）
 				log.Warn("rejected CORS origin", "origin", origin)
-				next.ServeHTTP(w, r)
+				http.Error(w, "origin not allowed", http.StatusForbidden)
 				return
 			}
 

@@ -72,16 +72,18 @@ func ValidateFilePath(filename string) (string, error) {
 // joinSafePath 在 baseDir 下安全拼接 userPath，确认结果不越界。
 // userPath 必须已通过 ValidateFilePath 校验。返回安全绝对路径，失败时返回空字符串。
 // 内部记录 warn 日志以便追踪非法访问尝试。
+// 注意：使用 slog.Default() 而不是注入 logger，因为此函数是无状态工具函数，
+// 即使 logger 未初始化也能输出日志（防御性编程设计）。
 func joinSafePath(baseDir, userPath string) string {
 	fullPath := filepath.Join(baseDir, userPath)
 	absPath, err := filepath.Abs(fullPath)
 	if err != nil {
-		slog.Warn("joinSafePath: Abs 解析失败", "full_path", fullPath, "error", err)
+		slog.Default().Warn("joinSafePath: Abs 解析失败", "full_path", fullPath, "error", err)
 		return ""
 	}
 	absBase, _ := filepath.Abs(baseDir)
 	if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
-		slog.Warn("joinSafePath: 路径越界", "upload_dir", absBase, "resolved_path", absPath)
+		slog.Default().Warn("joinSafePath: 路径越界", "upload_dir", absBase, "resolved_path", absPath)
 		return ""
 	}
 	// 解析符号链接：如果 absPath 是符号链接，获取其真实路径
@@ -103,8 +105,16 @@ func joinSafePath(baseDir, userPath string) string {
 // 使用 filepath.Clean 标准化后通过前缀匹配判断，确保 parent 以分隔符结尾避免误判（如 /a/b 和 /a/bb）。
 // 注意：此函数仅验证路径包含关系，不保证文件实际存在。
 func IsPathWithin(child, parent string) bool {
-	cleanChild := filepath.Clean(child)
-	cleanParent := filepath.Clean(parent)
+	absChild, err := filepath.Abs(child)
+	if err != nil {
+		return false
+	}
+	absParent, err := filepath.Abs(parent)
+	if err != nil {
+		return false
+	}
+	cleanChild := filepath.Clean(absChild)
+	cleanParent := filepath.Clean(absParent)
 	prefix := cleanParent
 	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
 		prefix += string(filepath.Separator)
