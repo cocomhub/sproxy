@@ -142,19 +142,17 @@ func writeFileAtomically(dstPath string, src io.Reader) (checksum string, writte
 
 	hash := hashPool.Get().(hash.Hash) //nolint:errcheck
 	hash.Reset()
+	defer hashPool.Put(hash)
 	mw := io.MultiWriter(tmpFile, hash)
 	written, err = io.Copy(mw, src)
 	if err != nil {
-		hashPool.Put(hash)
 		tmpFile.Close()
 		return "", written, fmt.Errorf("写入临时文件失败: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
-		hashPool.Put(hash)
 		return "", written, fmt.Errorf("关闭临时文件失败: %w", err)
 	}
 	checksum = hex.EncodeToString(hash.Sum(nil))
-	hashPool.Put(hash)
 	if err := atomicRename(tmpPath, dstPath); err != nil {
 		return checksum, written, fmt.Errorf("重命名临时文件失败: %w", err)
 	}
@@ -200,8 +198,7 @@ func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, filePath, expected
 		return false // 文件不存在，继续正常上传
 	}
 	if verifyFileWithChecksum(filePath, expectedChecksum) {
-		// 幂等上传：文件已存在且 checksum 匹配，先保存版本后返回
-		h.saveVersionBeforeOverwrite(remotePath)
+		// 幂等上传：文件已存在且 checksum 匹配，直接返回成功（不保存版本）
 		sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件已上传成功, size: %d", stat.Size()), Checksum: expectedChecksum}, http.StatusOK)
 		return true
 	}
