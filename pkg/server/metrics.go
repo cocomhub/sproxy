@@ -4,7 +4,9 @@
 package server
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"net/http"
 	"sync/atomic"
 )
@@ -218,6 +220,21 @@ func (mw *metricsResponseWriter) Write(b []byte) (int, error) {
 		mw.WriteHeader(http.StatusOK)
 	}
 	return mw.ResponseWriter.Write(b)
+}
+
+// Hijack 实现 http.Hijacker，委托给底层 ResponseWriter。
+func (mw *metricsResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := mw.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("metricsResponseWriter: underlying ResponseWriter does not implement http.Hijacker")
+}
+
+// Flush 实现 http.Flusher，委托给底层 ResponseWriter。
+func (mw *metricsResponseWriter) Flush() {
+	if f, ok := mw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // metricsMiddleware 自动记录请求状态码和活跃连接数。

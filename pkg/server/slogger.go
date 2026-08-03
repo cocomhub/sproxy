@@ -4,6 +4,7 @@
 package server
 
 import (
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -17,14 +18,14 @@ func defaultLogger(l *slog.Logger) *slog.Logger {
 	return l
 }
 
-// parseDuration 解析 duration 字符串，失败时返回默认值。
-func parseDuration(s string, def time.Duration) time.Duration {
+// parseDuration 解析 duration 字符串，失败时返回错误。
+func parseDuration(s string, def time.Duration) (time.Duration, error) {
 	if s == "" {
-		return def
+		return def, nil
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		return def
+		return def, fmt.Errorf("parse duration %q: %w", s, err)
 	}
-	return d
+	return d, nil
 }

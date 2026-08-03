@@ -51,6 +51,8 @@ type StatsResponse struct {
 }
 
 // statsHandler 处理 GET /api/stats。
+// 文件数/总大小通过轻量 WalkDir 获取（仅统计用户文件，跳过内部目录）。
+// 各分类存储使用量由 StorageManager 提供（已定期扫描缓存），避免每次请求遍历全目录计算分类大小。
 func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 	m := h.metrics
@@ -108,7 +110,7 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 存储空间统计
+	// 存储空间统计 — 从 StorageManager 缓存读取（已由定期扫描校准），避免每次请求遍历全目录计算分类大小
 	if h.storageMgr != nil {
 		resp.MaxStorageBytes = h.storageMgr.MaxBytes()
 		resp.StorageUsage = h.storageMgr.Usage()
