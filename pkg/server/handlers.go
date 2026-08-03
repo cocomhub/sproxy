@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,6 +35,7 @@ type Handlers struct {
 	handler       http.Handler
 	cloudMgr      *CloudDownloadManager
 	storageMgr    *StorageManager
+	uploadingFiles sync.Map // map[string]string — filename → uploadID，追踪正在上传的文件名
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
