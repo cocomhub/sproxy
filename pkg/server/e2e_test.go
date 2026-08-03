@@ -306,6 +306,19 @@ func TestConcurrent_RenameAndDelete(t *testing.T) {
 		})
 	}
 	wg.Wait()
+
+	// 验证：文件最终应不存在（被删除或已重命名）
+	_, err := c.Stat(t.Context(), "target.txt")
+	if err == nil {
+		t.Log("target.txt still exists (may have been renamed)")
+	}
+	// 检查 moved.txt 是否存在
+	info, err := c.Stat(t.Context(), "moved.txt")
+	if err != nil {
+		t.Log("moved.txt does not exist either, all operations completed")
+	} else {
+		t.Logf("file was renamed to moved.txt (size=%d)", info.Size)
+	}
 }
 
 // ---------- 辅助函数 ----------

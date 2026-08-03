@@ -177,18 +177,16 @@ func TestUpload_ChecksumMismatch(t *testing.T) {
 	}
 }
 
-func TestUpload_BodyTooLarge(t *testing.T) {
+func TestUpload_2MiBFileSucceeds(t *testing.T) {
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
-	// 发送一个太大但类型正确的 multipart 请求，验证服务端拒绝
-	body := bytes.Repeat([]byte("A"), 2<<20) // 2 MiB，超过 MultipartBufSize 但远小于 UploadBodyLimit
-	status, _ := uploadFile(t, url, "big.txt", body, map[string]string{
+	body := bytes.Repeat([]byte("A"), 2<<20)
+	status, msg := uploadFile(t, url, "big.txt", body, map[string]string{
 		"X-File-Checksum": sha256hex(body),
 	})
-	// 2 MiB 文件在 MultipartBufSize=1 MiB 内存缓冲下仍可处理（stdlib 落临时文件），应该返回 200
-	if status == http.StatusRequestEntityTooLarge {
-		t.Fatal("2 MiB file should not be too large")
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", status, msg)
 	}
 }
 
@@ -872,30 +870,6 @@ func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
 			t.Fatalf("temp file should not be left after atomic write: %s", e.Name())
 		}
 	}
-}
-
-// ---- 辅助：避免 context 未使用警告 ----
-
-func TestRegisterRoutes_Smoke(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	cfg := Default()
-	cfg.UploadsDir = tmpDir
-	var cfgPtr atomic.Pointer[Config]
-	cfgPtr.Store(cfg)
-
-	mux := http.NewServeMux()
-	// 32 字节占位 tunnel key
-	key := make([]byte, 32)
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "v",
-		BuildAt:   "t",
-		TunnelKey: key,
-	})
-	t.Cleanup(func() { _ = h.Close() })
 }
 
 // newTestServerWithAllRoutes 启动包含全部路由的测试服务器。

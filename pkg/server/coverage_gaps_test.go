@@ -226,23 +226,6 @@ func TestBatchDelete_MissingChecksum(t *testing.T) {
 
 // ---- healthz uploadStore 故障路径 ----
 
-func TestHealthz_UploadStoreFailure(t *testing.T) {
-	t.Parallel()
-	// 模拟 uploadStore.Health() 返回错误
-	url, _, cleanup := newTestServer(t, nil)
-	defer cleanup()
-
-	// 测试 uploadStore 存在时的健康检查
-	resp, err := http.Get(url + "/healthz")
-	if err != nil {
-		t.Fatalf("healthz: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	t.Logf("healthz response: %s", body)
-	// 正常路径应返回 OK
-}
-
 func TestHealthz_UploadStoreStopped(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -497,6 +480,6 @@ func TestUpload_ParseMultipartBodyLarge(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge && resp.StatusCode != http.StatusBadRequest {
-		t.Logf("large body test returned %d (acceptable)", resp.StatusCode)
+		t.Errorf("expected 413 or 400, got %d", resp.StatusCode)
 	}
 }
