@@ -227,7 +227,7 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set(headerContentType, contentTypeOctetStream)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(link.Filename)))
+	w.Header().Set("Content-Disposition", formatContentDisposition(filepath.Base(link.Filename)))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.Header().Set("Referrer-Policy", "no-referrer")

@@ -45,7 +45,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", remotePath))
+	w.Header().Set("Content-Disposition", formatContentDisposition(remotePath))
 	w.Header().Set(headerContentType, contentTypeOctetStream)
 	w.Header().Set("Accept-Ranges", "bytes")
 

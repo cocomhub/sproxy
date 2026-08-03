@@ -6,6 +6,7 @@ package server
 import (
 	"encoding/json"
 	"log/slog"
+	"mime"
 	"net/http"
 )
 
@@ -59,6 +60,14 @@ func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		slog.Default().Warn("Encode JSON response failed", "error", err)
 	}
+}
+
+// formatContentDisposition 使用标准库安全地构造 Content-Disposition 头。
+// 使用 mime.FormatMediaType 自动处理文件名中的特殊字符转义。
+func formatContentDisposition(filename string) string {
+	// 使用 mime.FormatMediaType 确保文件名中的 "、\ 等字符被正确转义
+	// 参数 key 必须为小写，value 为文件名
+	return mime.FormatMediaType("attachment", map[string]string{"filename": filename})
 }
 
 // BatchOperationResult 批量操作单条结果

@@ -93,7 +93,7 @@ func (h *Handlers) seekAndReadFileWithRetry(filePath string, offset, length int6
 func setChunkResponseHeaders(w http.ResponseWriter, filename string, offset, length, fileSize int64) {
 	w.Header().Set(headerContentType, contentTypeOctetStream)
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+length-1, fileSize))
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	w.Header().Set("Content-Disposition", formatContentDisposition(filename))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", length))
 }
 

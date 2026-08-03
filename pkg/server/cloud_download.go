@@ -18,6 +18,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
 )
 
+// downloadsDirName 是云端下载持久化目录名。
+const downloadsDirName = ".__downloads__"
+
 // CloudTask 表示一个云端下载任务。
 type CloudTask struct {
 	ID         string    `json:"id"`
@@ -82,7 +85,7 @@ type CloudMetrics struct {
 // NewCloudDownloadManager 创建云端下载管理器。
 func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumStoreIface, logger *slog.Logger, cfg *CloudDownloadConfig) *CloudDownloadManager {
 	cloudDir := filepath.Join(uploadsDir, cloudDirName)
-	persistDir := filepath.Join(uploadsDir, ".__downloads__")
+	persistDir := filepath.Join(uploadsDir, downloadsDirName)
 	_ = os.MkdirAll(cloudDir, 0755)
 	_ = os.MkdirAll(persistDir, 0755)
 

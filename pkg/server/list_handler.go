@@ -55,13 +55,13 @@ func (h *Handlers) resolveListDir(w http.ResponseWriter, r *http.Request) (targe
 	if subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/"); subdir != "" {
 		if _, err := ValidateFilePath(subdir); err != nil {
 			h.logger.Warn("无效的子目录", "subdir", subdir, "error", err.Error())
-			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusBadRequest)
 			return "", false
 		}
 		targetDir = h.safePath(subdir)
 		if targetDir == "" {
 			h.logger.Warn("无效的子目录路径", "subdir", subdir)
-			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusBadRequest)
 			return "", false
 		}
 	}
@@ -113,7 +113,7 @@ func paginateEntries(entries []fileInfo, offset, limit int) []fileInfo {
 func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]string, subdir string) []fileInfo {
 	allFiles := make([]fileInfo, 0, len(entries))
 	for _, e := range entries {
-		if e.Name() == ".checksums.json" || e.Name() == chunkedDirName || e.Name() == versionsDirName || e.Name() == cloudDirName || e.Name() == ".__downloads__" || e.Name() == cloudArchiveDirName {
+		if e.Name() == ".checksums.json" || e.Name() == chunkedDirName || e.Name() == versionsDirName || e.Name() == cloudDirName || e.Name() == downloadsDirName || e.Name() == cloudArchiveDirName {
 			continue
 		}
 		if e.IsDir() {
@@ -226,7 +226,7 @@ func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, e
 	if rel == "." {
 		return nil
 	}
-	if d.Name() == ".checksums.json" || d.Name() == chunkedDirName || d.Name() == versionsDirName || d.Name() == cloudDirName || d.Name() == ".__downloads__" || d.Name() == cloudArchiveDirName {
+	if d.Name() == ".checksums.json" || d.Name() == chunkedDirName || d.Name() == versionsDirName || d.Name() == cloudDirName || d.Name() == downloadsDirName || d.Name() == cloudArchiveDirName {
 		if d.IsDir() {
 			return filepath.SkipDir
 		}

@@ -64,7 +64,7 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == chunkedDirName || name == versionsDirName || name == cloudDirName || name == ".__downloads__" || name == cloudArchiveDirName {
+			if name == chunkedDirName || name == versionsDirName || name == cloudDirName || name == downloadsDirName || name == cloudArchiveDirName {
 				return filepath.SkipDir
 			}
 			return nil

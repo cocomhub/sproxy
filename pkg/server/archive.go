@@ -173,7 +173,7 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 
 	archiveName := filepath.Base(relPath) + ".tar.gz"
 	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", archiveName))
+	w.Header().Set("Content-Disposition", formatContentDisposition(archiveName))
 	w.WriteHeader(http.StatusOK)
 
 	pr, pw := io.Pipe()
