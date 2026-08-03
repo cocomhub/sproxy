@@ -403,7 +403,9 @@ func TestCloudDownloadManager_SubmitAndStart_Sync(t *testing.T) {
 	content := []byte("hello sync download")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
-		w.Write(content)
+		if _, err := w.Write(content); err != nil {
+			t.Errorf("write: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -446,7 +448,9 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 	content := make([]byte, 30*1024*1024) // 30MB > 20MB threshold
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
-		w.Write(content)
+		if _, err := w.Write(content); err != nil {
+			t.Errorf("write: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -498,7 +502,9 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 	content := []byte("dedup test")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
-		w.Write(content)
+		if _, err := w.Write(content); err != nil {
+			t.Errorf("write: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -568,7 +574,9 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 	content := []byte("resume test content")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
-		w.Write(content)
+		if _, err := w.Write(content); err != nil {
+			t.Errorf("write: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -832,7 +840,7 @@ func TestCloudDownloadManager_ClientDisconnectDownloadContinues(t *testing.T) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
 		w.WriteHeader(http.StatusOK)
 		for i := range content {
-			w.Write(content[i : i+1])
+			if _, err := w.Write(content[i : i+1]); err != nil { return }
 			time.Sleep(5 * time.Millisecond)
 		}
 	}))
@@ -960,7 +968,9 @@ func TestCloudDownloadManager_MetricsTracking(t *testing.T) {
 	content := []byte("metrics test")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
-		w.Write(content)
+		if _, err := w.Write(content); err != nil {
+			t.Errorf("write: %v", err)
+		}
 	}))
 	defer srv.Close()
 

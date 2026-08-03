@@ -642,6 +642,7 @@ func uploadChunk(t *testing.T, baseURL, uploadID string, chunkIndex int, chunkCS
 	if err != nil {
 		t.Fatalf("upload chunk %d failed: %v", chunkIndex, err)
 	}
+	t.Cleanup(func() { resp.Body.Close() })
 	return resp
 }
 
