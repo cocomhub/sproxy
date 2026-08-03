@@ -5,6 +5,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -68,8 +70,9 @@ type CloudDownloadManager struct {
 	dirtyMu     sync.Mutex
 	flushNow    chan struct{}
 	stopFlush   chan struct{}
-	stopCleanup chan struct{} // 停止 cleanupExpired 后台 goroutine
-	closeOnce   sync.Once     // 确保 Close 只执行一次
+	stopCleanup chan struct{}  // 停止 cleanupExpired 后台 goroutine
+	wg          sync.WaitGroup // 追踪所有执行中的 goroutine
+	closeOnce   sync.Once      // 确保 Close 只执行一次
 }
 
 // CloudMetrics 云端下载 Prometheus 指标。
@@ -212,6 +215,8 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 
 // executeDownload 执行实际下载逻辑。
 func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudTask) {
+	m.wg.Add(1)
+	defer m.wg.Done()
 	defer m.metrics.ActiveDownloads.Add(-1)
 
 	// 获取信号量
@@ -266,6 +271,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			m.logger.Info("sync download client disconnected, switching to async",
 				"task_id", task.ID, "url", task.URL)
 			//nolint:gosec // G118: 断线后异步继续需要独立 context
+			// executeDownload 内部已处理 wg 跟踪和信号量排队
 			go m.executeDownload(context.Background(), task)
 			return
 		}
@@ -589,11 +595,13 @@ var taskIDCounter struct {
 }
 
 func newTaskID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
 	taskIDCounter.mu.Lock()
 	taskIDCounter.n++
 	n := taskIDCounter.n
 	taskIDCounter.mu.Unlock()
-	return fmt.Sprintf("cloud-%d-%d", time.Now().UnixNano(), n)
+	return fmt.Sprintf("cloud-%s-%d", hex.EncodeToString(b), n)
 }
 
 // markDirty 将任务标记为"脏"（进度已更新），由 flushLoop 批量持久化。
@@ -649,8 +657,9 @@ func (m *CloudDownloadManager) flushDirty() {
 // 在进程退出前应调用一次。多次调用安全。
 func (m *CloudDownloadManager) Close() {
 	m.closeOnce.Do(func() {
-		close(m.stopCleanup)
 		close(m.stopFlush)
+		close(m.stopCleanup)
+		m.wg.Wait()
 	})
 }
 
