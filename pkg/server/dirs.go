@@ -38,7 +38,7 @@ func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已创建: %s", remotePath)}, http.StatusOK)
 }
 
-// rmdir 删除指定目录（含所有内容）。?dirname=path&force=true
+// rmdir 删除指定目录（含所有内容）。?dirname=path
 func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 	dirname := r.URL.Query().Get("dirname")
 	if dirname == "" {
@@ -57,13 +57,18 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stat, err := os.Stat(targetDir)
+	// 使用 Lstat 检查符号链接，拒绝操作
+	stat, err := os.Lstat(targetDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
 		} else {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "访问目录失败"}, http.StatusInternalServerError)
 		}
+		return
+	}
+	if stat.Mode()&os.ModeSymlink != 0 {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "不允许删除符号链接"}, http.StatusBadRequest)
 		return
 	}
 	if !stat.IsDir() {
@@ -79,6 +84,8 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 
 	// 清理 checksum store 中该目录下所有文件的记录
 	h.checksumStore.DeletePrefix(remotePath + "/")
+	// 清理目录自身的 checksum 记录（如果存在）
+	h.checksumStore.Delete(remotePath)
 
 	h.logger.Info("目录已删除", "dir", remotePath)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已删除: %s", remotePath)}, http.StatusOK)

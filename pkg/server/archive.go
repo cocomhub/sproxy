@@ -50,6 +50,14 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 	// 流式打包：io.Pipe 中 tar + gzip
 	pr, pw := io.Pipe()
 	go func() {
+		var pipeErr error
+		defer func() {
+			if pipeErr != nil {
+				pw.CloseWithError(pipeErr)
+			} else {
+				pw.Close()
+			}
+		}()
 		gw := gzip.NewWriter(pw)
 		tw := tar.NewWriter(gw)
 
@@ -61,17 +69,19 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := addFileToTar(tw, fullPath, relPath, logger); err != nil {
 				logger.Error("归档添加文件失败", "path", relPath, "error", err)
+				pipeErr = err
 			}
 		}
 
 		// 按序关闭
 		if err := tw.Close(); err != nil {
 			logger.Error("tar writer 关闭失败", "error", err)
+			pipeErr = err
 		}
 		if err := gw.Close(); err != nil {
 			logger.Error("gzip writer 关闭失败", "error", err)
+			pipeErr = err
 		}
-		pw.Close()
 	}()
 
 	_, _ = io.Copy(w, pr)
@@ -95,9 +105,16 @@ func validateArchiveFiles(files []string, w http.ResponseWriter) ([]string, bool
 // addFileToTar 将单个文件（或目录）添加到 tar writer 中。
 // 如果是目录则递归添加。
 func addFileToTar(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger) error {
-	info, err := os.Stat(fullPath)
+	// 使用 Lstat 检测符号链接，拒绝跟随
+	info, err := os.Lstat(fullPath)
 	if err != nil {
 		return fmt.Errorf("stat 失败: %w", err)
+	}
+
+	// 检测符号链接，拒绝归档
+	if info.Mode()&os.ModeSymlink != 0 {
+		logger.Warn("跳过符号链接", "path", relPath)
+		return nil
 	}
 
 	if info.IsDir() {
@@ -178,12 +195,25 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 
 	pr, pw := io.Pipe()
 	go func() {
+		var pipeErr error
+		defer func() {
+			if pipeErr != nil {
+				pw.CloseWithError(pipeErr)
+			} else {
+				pw.Close()
+			}
+		}()
 		gw := gzip.NewWriter(pw)
 		tw := tar.NewWriter(gw)
-		_ = addFileToTar(tw, fullPath, filepath.ToSlash(relPath), h.logger)
-		_ = tw.Close()
-		_ = gw.Close()
-		pw.Close()
+		if err := addFileToTar(tw, fullPath, filepath.ToSlash(relPath), h.logger); err != nil {
+			pipeErr = err
+		}
+		if err := tw.Close(); err != nil {
+			pipeErr = err
+		}
+		if err := gw.Close(); err != nil {
+			pipeErr = err
+		}
 	}()
 	_, _ = io.Copy(w, pr)
 }
