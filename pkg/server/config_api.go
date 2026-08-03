@@ -56,7 +56,7 @@ type configResponse struct {
 	HubEnabled         bool   `json:"hub_enabled"`
 	TLSEnabled         bool   `json:"tls_enabled"`
 	Addr               string `json:"addr"`
-	UploadsDir         string `json:"uploads_dir"`
+	UploadsDir         string `json:"uploads_dir"` // 相对路径；若配置为绝对路径则返回原值
 }
 
 // configHandler 处理 GET /api/config，返回当前运行时配置（脱敏）。
@@ -104,6 +104,13 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 	var req updateConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		return
+	}
+
+	// 检查是否所有字段均为 nil，拒绝空请求体（{}）
+	if req.LogLevel == nil && req.LogFormat == nil && req.AuthToken == nil &&
+		req.RateLimitReq == nil && req.RateLimitWin == nil && req.MaxStorageBytes == nil {
+		sendJSONResponse(w, map[string]string{"error": "empty request body: no fields to update"}, http.StatusBadRequest)
 		return
 	}
 

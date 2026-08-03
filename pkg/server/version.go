@@ -65,6 +65,17 @@ func (h *Handlers) saveVersion(remotePath, uploadsDir string) (int64, error) {
 		return 0, fmt.Errorf("复制版本文件失败: %w", err)
 	}
 
+	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
+	if err := dst.Sync(); err != nil {
+		os.Remove(verPath)
+		return 0, fmt.Errorf("同步版本文件失败: %w", err)
+	}
+
+	// 同步父目录确保目录元数据落盘
+	if err := syncParentDir(verPath); err != nil {
+		h.logger.Warn("同步版本文件父目录失败", "path", verPath, "error", err)
+	}
+
 	// 清理超出上限的旧版本
 	h.cleanupOldVersions(remotePath, uploadsDir)
 
@@ -93,6 +104,10 @@ func (h *Handlers) cleanupOldVersions(remotePath, uploadsDir string) {
 	}
 
 	// 按文件名（时间戳）排序，删除最旧的
+	// 文件名是 UnixNano 时间戳的十进制字符串表示（如 "1722694400123456789"）。
+	// 用字符串比较等价于数值比较，因为所有 UnixNano 值在当前时间范围内
+	// 具有相同的十进制位数（19 位），字符串字典序与数值序一致。
+	// 如果未来时间戳格式变化，需改用 ParseInt + 数值比较。
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Name() < entries[j].Name()
 	})
@@ -200,7 +215,9 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 先保存当前版本（回滚前备份）
-	_, _ = h.saveVersion(remotePath, cfg.UploadsDir)
+	if _, err := h.saveVersion(remotePath, cfg.UploadsDir); err != nil {
+		h.logger.Warn("恢复版本前备份失败", "file_name", remotePath, "error", err)
+	}
 
 	// 拷贝版本文件到目标位置
 	src, err := os.Open(verFile)
@@ -290,6 +307,17 @@ func (h *Handlers) saveVersionBeforeOverwrite(remotePath string) {
 	if _, err := h.saveVersion(remotePath, cfg.UploadsDir); err != nil {
 		h.logger.Warn("保存文件版本失败", "file_name", remotePath, "error", err)
 	}
+}
+
+// syncParentDir 对指定文件/目录的父目录执行 fsync，确保目录元数据落盘。
+func syncParentDir(path string) error {
+	parent := filepath.Dir(path)
+	f, err := os.Open(parent)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 
 // fileChecksum 计算文件的 SHA-256 十六进制摘要。
