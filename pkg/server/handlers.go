@@ -191,6 +191,10 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// Hub 管理 API（中继系统），需鉴权
 	if opts.RouteTable != nil {
+		relayHandler := NewRelayHandler(opts.RouteTable, log.With("component", "relay"))
+		mux.HandleFunc("POST /api/relay", h.authMiddleware(relayHandler.ServeHTTP))
+		localMux.HandleFunc("POST /api/relay", relayHandler.ServeHTTP)
+
 		mux.HandleFunc("GET /api/hub/nodes", h.authMiddleware(h.hubNodesHandler))
 		mux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
 		mux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))

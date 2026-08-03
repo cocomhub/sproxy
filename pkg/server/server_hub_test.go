@@ -139,6 +139,9 @@ func TestHubRemoveNodeHandler_Enabled(t *testing.T) {
 
 	rt := hub.NewRouteTable()
 
+	// 先注册一个节点，否则删除会返回 404（节点不存在）
+	rt.Add("node-1", nil)
+
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
 		Mux:        mux,

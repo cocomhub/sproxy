@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -44,6 +45,11 @@ func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) 
 	id := hub.NodeID(r.PathValue("id"))
 	if id == "" {
 		http.Error(w, "missing node id", http.StatusBadRequest)
+		return
+	}
+	// 先检查节点是否存在
+	if !h.routeTable.Has(id) {
+		http.Error(w, fmt.Sprintf("节点 %s 不存在", id), http.StatusNotFound)
 		return
 	}
 	h.routeTable.Remove(id)
