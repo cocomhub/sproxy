@@ -85,19 +85,18 @@ func (h *Handlers) processBatchDeleteItem(f BatchDeleteFile, logger *slog.Logger
 		result.Message = "缺少 checksum"
 		return result
 	}
-	// 校验 checksum
-	valid := verifyFileWithChecksum(filePath, f.Checksum)
-	// 仍然执行删除，但标记校验失败
+	// 校验 checksum，不匹配时拒绝删除
+	if !verifyFileWithChecksum(filePath, f.Checksum) {
+		result.Message = "文件校验失败"
+		logger.Warn("批量删除时 checksum 不匹配", "file_name", remotePath)
+		return result
+	}
 	if err := os.Remove(filePath); err != nil {
 		result.Message = "删除失败"
 	} else {
 		h.checksumStore.Delete(remotePath)
 		result.Success = true
 		result.Message = "删除成功"
-		if !valid {
-			result.Message = "删除成功（checksum 不匹配，文件内容可能已变更）"
-			logger.Warn("删除时 checksum 不匹配", "file_name", remotePath)
-		}
 	}
 	return result
 }
