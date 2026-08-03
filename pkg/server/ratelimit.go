@@ -24,6 +24,9 @@ type RateLimiter struct {
 // NewRateLimiter creates a RateLimiter allowing up to `limit` requests
 // per sliding `window` duration.
 func NewRateLimiter(limit int, window time.Duration, logger *slog.Logger) *RateLimiter {
+	if window <= 0 {
+		window = time.Second
+	}
 	return &RateLimiter{
 		limit:  limit,
 		window: window,
@@ -34,6 +37,9 @@ func NewRateLimiter(limit int, window time.Duration, logger *slog.Logger) *RateL
 // Allow reports whether the current request is within the rate limit.
 // It cleans expired entries, checks the count, and records the new timestamp.
 func (rl *RateLimiter) Allow() bool {
+	if rl.limit <= 0 {
+		return true
+	}
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 

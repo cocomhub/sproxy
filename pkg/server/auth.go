@@ -65,13 +65,12 @@ func matchAPIKey(token, method string, keys []APIKey) authResult {
 
 // handleNoBearerToken 处理缺少 Bearer Authorization 头的情况。
 // 如果任一认证配置启用则拒绝，否则放行。
-func handleNoBearerToken(w http.ResponseWriter, r *http.Request, cfg *Config, next http.HandlerFunc) bool {
+func handleNoBearerToken(w http.ResponseWriter, r *http.Request, cfg *Config, next http.HandlerFunc) {
 	if cfg.AuthToken != "" || (cfg.APIKeys.Enabled && len(cfg.APIKeys.Keys) > 0) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
+		return
 	}
 	next(w, r)
-	return true
 }
 
 // authenticateRequest 执行请求认证，返回 true 表示已处理（放行或拒绝），false 表示需要继续（仅用于 APIKeys 没有匹配时的 fallthrough）。
@@ -111,18 +110,20 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := h.cfgPtr.Load()
 		if cfg == nil {
-			next(w, r)
+			http.Error(w, "server configuration not loaded", http.StatusInternalServerError)
 			return
 		}
 
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
-			if handleNoBearerToken(w, r, cfg, next) {
-				return
-			}
+			handleNoBearerToken(w, r, cfg, next)
 			return
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
+		if token == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 
 		h.authenticateRequest(w, r, cfg, token, next)
 	}
