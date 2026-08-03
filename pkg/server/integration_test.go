@@ -1492,17 +1492,13 @@ func TestSearchFiles_InvalidSubdir(t *testing.T) {
 		t.Fatalf("list: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 (empty safe response), got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 (invalid subdir), got %d", resp.StatusCode)
 	}
-	var result struct {
-		Files []fileInfo `json:"files"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(result.Files) != 0 {
-		t.Fatalf("expected empty list for invalid subdir, got %d files", len(result.Files))
+	// 验证错误响应体
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) == 0 {
+		t.Fatal("expected non-empty error response body")
 	}
 }
 
