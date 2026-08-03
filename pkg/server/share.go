@@ -36,13 +36,54 @@ type ShareLink struct {
 
 // ShareStore 管理内存中的分享链接。
 type ShareStore struct {
-	mu    sync.RWMutex
-	links map[string]*ShareLink
+	mu       sync.RWMutex
+	links    map[string]*ShareLink
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // NewShareStore 创建 ShareStore 实例。
 func NewShareStore() *ShareStore {
-	return &ShareStore{links: make(map[string]*ShareLink)}
+	s := &ShareStore{
+		links:  make(map[string]*ShareLink),
+		stopCh: make(chan struct{}),
+	}
+	go s.cleanupLoop()
+	return s
+}
+
+// cleanupLoop 定期清理过期的分享链接。
+func (s *ShareStore) cleanupLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.cleanupExpired()
+		case <-s.stopCh:
+			s.cleanupExpired() // 退出前清理一次
+			return
+		}
+	}
+}
+
+// cleanupExpired 清理所有已过期的分享链接。
+func (s *ShareStore) cleanupExpired() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for k, v := range s.links {
+		if now.After(v.ExpiresAt) {
+			delete(s.links, k)
+		}
+	}
+}
+
+// Stop 停止后台清理 goroutine。调用后不应再使用此 ShareStore。
+func (s *ShareStore) Stop() {
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
 }
 
 // Create 生成新的分享链接并存储。
@@ -176,9 +217,16 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	// 解析并限制 TTL
 	ttl := 24 * time.Hour
 	if req.TTL != "" {
-		if d, ttlErr := time.ParseDuration(req.TTL); ttlErr == nil && d > 0 {
-			ttl = min(d, maxShareTTL)
+		d, ttlErr := time.ParseDuration(req.TTL)
+		if ttlErr != nil {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的 TTL 格式"}, http.StatusBadRequest)
+			return
 		}
+		if d <= 0 {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "TTL 必须大于 0"}, http.StatusBadRequest)
+			return
+		}
+		ttl = min(d, maxShareTTL)
 	}
 
 	link, err := h.shareStore.Create(req.Filename, fullPath, ttl, req.MaxDownloads, req.OneTime)

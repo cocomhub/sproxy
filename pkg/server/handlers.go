@@ -234,6 +234,9 @@ func (h *Handlers) Close() error {
 	if h.cloudMgr != nil {
 		h.cloudMgr.Close()
 	}
+	if h.shareStore != nil {
+		h.shareStore.Stop()
+	}
 	return nil
 }
 
