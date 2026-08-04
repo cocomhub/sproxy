@@ -37,6 +37,7 @@ type Handlers struct {
 	storageMgr    *StorageManager
 	uploadingFiles sync.Map // map[string]string — filename → uploadID，追踪正在上传的文件名
 	uploadingStop chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
+	closeOnce     sync.Once // 防止 Close() 重复关闭 channel
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -250,7 +251,9 @@ func (h *Handlers) Close() error {
 		h.shareStore.Stop()
 	}
 	// 关闭 uploadingFiles 定期清理 goroutine
-	close(h.uploadingStop)
+	h.closeOnce.Do(func() {
+		close(h.uploadingStop)
+	})
 	return nil
 }
 
