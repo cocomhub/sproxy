@@ -14,12 +14,6 @@ import (
 type gzipResponseWriter struct {
 	io.Writer
 	http.ResponseWriter
-	statusCode int
-}
-
-func (w *gzipResponseWriter) WriteHeader(statusCode int) {
-	w.statusCode = statusCode
-	w.ResponseWriter.WriteHeader(statusCode)
 }
 
 func (w *gzipResponseWriter) Write(b []byte) (int, error) {
@@ -35,8 +29,8 @@ func (w *gzipResponseWriter) Flush() {
 	}
 }
 
-// GzipMiddleware 返回一个 HTTP 中间件，当客户端支持 gzip 且响应为文本/JSON 时，
-// 透明地对响应体进行 gzip 压缩。
+// GzipMiddleware 返回一个 HTTP 中间件，对客户端支持 gzip 的所有响应体进行 gzip 压缩。
+// 注意：内容类型不限于文本；对所有 Accept-Encoding 包含 gzip 的请求均压缩。
 func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	log := defaultLogger(logger)
 	return func(next http.Handler) http.Handler {
@@ -58,7 +52,7 @@ func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			}()
 			w.Header().Set("Content-Encoding", "gzip")
 			w.Header().Del("Content-Length")
-			w.Header().Add("Vary", "Accept-Encoding")
+			w.Header().Set("Vary", "Accept-Encoding")
 			next.ServeHTTP(&gzipResponseWriter{Writer: gw, ResponseWriter: w}, r)
 		})
 	}

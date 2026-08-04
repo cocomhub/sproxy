@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // CORSConfig 定义 CORS 跨域配置。
@@ -19,6 +20,7 @@ type CORSConfig struct {
 }
 
 // CORSMiddleware 返回一个 HTTP 中间件，根据配置添加 CORS 头部并处理 OPTIONS 预检请求。
+// 支持的方法：GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS。
 // 当 AllowedOrigins 为空时直接透传，保持向后兼容。
 func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http.Handler {
 	if len(cfg.AllowedOrigins) == 0 {
@@ -34,7 +36,7 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 		maxAge = 86400
 	}
 
-	// 构建 origin 查找集合
+	// 构建 origin 查找集合，统一转为小写以实现大小写不敏感匹配
 	originSet := make(map[string]bool)
 	allowAll := false
 	for _, o := range cfg.AllowedOrigins {
@@ -42,7 +44,7 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 			allowAll = true
 			break
 		}
-		originSet[o] = true
+		originSet[strings.ToLower(o)] = true
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -54,11 +56,11 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 				return
 			}
 
-			// 判断是否允许该 origin
+			// 判断是否允许该 origin（大小写不敏感）
 			switch {
 			case allowAll:
 				w.Header().Set("Access-Control-Allow-Origin", "*")
-			case originSet[origin]:
+			case originSet[strings.ToLower(origin)]:
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
 			default:
@@ -68,7 +70,7 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 				return
 			}
 
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, HEAD, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-File-Checksum, X-File-Path, X-File-MTime, Range")
 			w.Header().Set("Access-Control-Expose-Headers", "X-File-Checksum, X-File-Size, X-File-MTime, X-File-IsDir, Content-Range, Content-Disposition")
 			w.Header().Set("Access-Control-Max-Age", strconv.Itoa(maxAge))

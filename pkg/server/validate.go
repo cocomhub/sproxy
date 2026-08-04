@@ -55,10 +55,10 @@ func ValidateFilePath(filename string) (string, error) {
 		return "", fmt.Errorf("文件名不能包含路径穿越: %s", filename)
 	}
 
-	// Windows 非法字符检查
+	// Windows 非法字符检查（在 Clean 之后执行，使用 cleaned 路径）
 	if runtime.GOOS == "windows" {
 		const invalidChars = `<>:"|?*`
-		for _, c := range filename {
+		for _, c := range cleaned {
 			if strings.ContainsRune(invalidChars, c) {
 				return "", fmt.Errorf("文件名包含非法字符 %q: %s", c, filename)
 			}
@@ -81,7 +81,11 @@ func joinSafePath(baseDir, userPath string) string {
 		slog.Default().Warn("joinSafePath: Abs 解析失败", "full_path", fullPath, "error", err)
 		return ""
 	}
-	absBase, _ := filepath.Abs(baseDir)
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		slog.Default().Warn("joinSafePath: baseDir Abs 解析失败", "base_dir", baseDir, "error", err)
+		return ""
+	}
 	if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
 		slog.Default().Warn("joinSafePath: 路径越界", "upload_dir", absBase, "resolved_path", absPath)
 		return ""
@@ -103,7 +107,9 @@ func joinSafePath(baseDir, userPath string) string {
 
 // IsPathWithin 检查 child 路径是否在 parent 目录内（路径穿越防护）。
 // 使用 filepath.Clean 标准化后通过前缀匹配判断，确保 parent 以分隔符结尾避免误判（如 /a/b 和 /a/bb）。
-// 注意：此函数仅验证路径包含关系，不保证文件实际存在。
+// 注意：
+//   - 此函数仅验证路径包含关系，不保证文件实际存在。
+//   - 不处理符号链接解析：如果 child 或 parent 包含符号链接，应在外层调用 filepath.EvalSymlinks 后再传入。
 func IsPathWithin(child, parent string) bool {
 	absChild, err := filepath.Abs(child)
 	if err != nil {

@@ -59,6 +59,8 @@ func NewChecksumStore(uploadsDir string, logger *slog.Logger) *ChecksumStore {
 	if err != nil {
 		if !os.IsNotExist(err) {
 			cs.logger.Warn("读取 checksum 存储文件失败", "path", storePath, "error", err)
+		} else {
+			cs.logger.Info("checksum 存储文件不存在，将使用空存储", "path", storePath)
 		}
 		return cs
 	}
