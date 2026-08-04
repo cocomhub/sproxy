@@ -62,6 +62,7 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	var totalSize int64
 	_ = filepath.WalkDir(cfg.UploadsDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
 			return nil
 		}
 		if d.IsDir() {
@@ -80,6 +81,7 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		info, err := d.Info()
 		if err != nil {
+			h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
 			return nil
 		}
 		totalFiles++

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -101,13 +102,15 @@ func (h *Handlers) cleanupOldVersions(remotePath, uploadsDir string) {
 		return
 	}
 
-	// 按文件名（时间戳）排序，删除最旧的
-	// 文件名是 UnixNano 时间戳的十进制字符串表示（如 "1722694400123456789"）。
-	// 用字符串比较等价于数值比较，因为所有 UnixNano 值在当前时间范围内
-	// 具有相同的十进制位数（19 位），字符串字典序与数值序一致。
-	// 如果未来时间戳格式变化，需改用 ParseInt + 数值比较。
+	// 按文件名（UnixNano 时间戳）排序，删除最旧的
+	// 使用 ParseInt 解析为 int64 后做数值比较，消除字符串字典序与数值序不一致的隐患。
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
+		vi, erri := strconv.ParseInt(entries[i].Name(), 10, 64)
+		vj, errj := strconv.ParseInt(entries[j].Name(), 10, 64)
+		if erri != nil || errj != nil {
+			return entries[i].Name() < entries[j].Name()
+		}
+		return vi < vj
 	})
 	excess := len(entries) - cfg.Versioning.MaxVersions
 	for i := range excess {

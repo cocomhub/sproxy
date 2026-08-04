@@ -8,8 +8,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
+
+// configMu 保护 rebuildLogger 和 updateConfigHandler 的并发访问。
+// rebuildLogger 调用 slog.SetDefault 有全局副作用；
+// updateConfigHandler 对同一 Config 对象做字段读写。
+var configMu sync.Mutex
 
 // 日志级别字符串映射，用于运行时切换日志级别。
 var levelStrings = map[string]slog.Level{
@@ -21,6 +27,9 @@ var levelStrings = map[string]slog.Level{
 
 // rebuildLogger 根据配置重建 slog.Logger 并替换全局默认值和 Handlers.logger。
 func (h *Handlers) rebuildLogger(cfg *Config) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
 	level := slog.LevelInfo
 	if l, ok := levelStrings[cfg.LogLevel]; ok {
 		level = l
@@ -99,6 +108,9 @@ type updateConfigRequest struct {
 // updateConfigHandler 处理 PUT /api/config，更新运行时配置项。
 // 只更新请求体中的字段，不修改未指定的字段。
 func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
+	configMu.Lock()
+	defer configMu.Unlock()
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KiB
 
 	var req updateConfigRequest
