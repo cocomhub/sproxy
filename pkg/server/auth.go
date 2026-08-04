@@ -5,6 +5,7 @@ package server
 
 import (
 	"crypto/subtle"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -13,7 +14,7 @@ import (
 type APIKey struct {
 	Name       string `yaml:"name" mapstructure:"name"`
 	Key        string `yaml:"key" mapstructure:"key"`
-	Permission string `yaml:"permission" mapstructure:"permission"` // "read" 或 "write"
+	Permission string `yaml:"permission" mapstructure:"permission"` // "read" 或 "write"；空字符串默认按 "write" 处理
 }
 
 const (
@@ -40,8 +41,9 @@ const (
 
 // permissionAllowed 检查给定的权限是否允许执行所需操作。
 // PermissionRead 权限可执行 GET/HEAD 请求；PermissionWrite 权限可执行所有操作。
+// 空字符串（""）按 PermissionWrite 处理（兼容旧配置）。
 func permissionAllowed(permission, method string) bool {
-	if permission == PermissionWrite {
+	if permission == PermissionWrite || permission == "" {
 		return true
 	}
 	if permission == PermissionRead {
@@ -72,8 +74,16 @@ func matchAPIKey(token, method string, keys []APIKey) authResult {
 
 // handleNoBearerToken 处理缺少 Bearer Authorization 头的情况。
 // 如果任一认证配置启用则拒绝，否则放行。
+// 注意：仅检查 cfg.APIKeys.Enabled，不关心 Keys 是否为空：
+//   - Validate 层已禁止 Enabled=true + Keys=[] 的配置
+//   - 即使绕过 Validate，空 Keys 也会在 authenticateRequest 中 fallthrough 到 401
 func handleNoBearerToken(w http.ResponseWriter, r *http.Request, cfg *Config, next http.HandlerFunc) {
-	if cfg.AuthToken != "" || (cfg.APIKeys.Enabled && len(cfg.APIKeys.Keys) > 0) {
+	if cfg.AuthToken != "" || cfg.APIKeys.Enabled {
+		slog.Warn("auth: missing bearer token",
+			"remote", r.RemoteAddr,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -89,6 +99,11 @@ func (h *Handlers) authenticateRequest(w http.ResponseWriter, r *http.Request, c
 			next(w, r)
 			return true
 		case authResultForbidden:
+			slog.Warn("auth: permission denied",
+				"remote", r.RemoteAddr,
+				"method", r.Method,
+				"path", r.URL.Path,
+			)
 			http.Error(w, "permission denied", http.StatusForbidden)
 			return true
 		}
@@ -101,11 +116,21 @@ func (h *Handlers) authenticateRequest(w http.ResponseWriter, r *http.Request, c
 			next(w, r)
 			return true
 		}
+		slog.Warn("auth: invalid auth_token",
+			"remote", r.RemoteAddr,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return true
 	}
 
 	// APIKeys enabled but token didn't match and no auth_token configured
+	slog.Warn("auth: no matching api key",
+		"remote", r.RemoteAddr,
+		"method", r.Method,
+		"path", r.URL.Path,
+	)
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 	return true
 }
@@ -117,6 +142,7 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := h.cfgPtr.Load()
 		if cfg == nil {
+			slog.Error("auth: server configuration not loaded")
 			http.Error(w, "server configuration not loaded", http.StatusInternalServerError)
 			return
 		}
@@ -128,6 +154,11 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
 		if token == "" {
+			slog.Warn("auth: empty bearer token",
+				"remote", r.RemoteAddr,
+				"method", r.Method,
+				"path", r.URL.Path,
+			)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

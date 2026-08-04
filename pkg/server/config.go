@@ -172,6 +172,9 @@ func (c *Config) Validate() error {
 	if c.CloudMaxConcurrent <= 0 {
 		c.CloudMaxConcurrent = 3
 	}
+	if c.APIKeys.Enabled && len(c.APIKeys.Keys) == 0 {
+		return fmt.Errorf("api_keys.enabled=true 但未配置任何密钥，认证将拒绝所有请求")
+	}
 	if c.TunnelKey == "" && !c.TLS.Enabled {
 		return fmt.Errorf("tunnel_key 为空且 TLS 未启用，传输将完全明文，请配置 tunnel_key 或启用 TLS")
 	}
@@ -180,6 +183,15 @@ func (c *Config) Validate() error {
 		// 复用 pkg/tunnel.ParseKey 保持单一来源。
 		if _, err := tunnel.ParseKey(c.TunnelKey); err != nil {
 			return fmt.Errorf("tunnel_key 校验失败（必须是 64 位十六进制字符 0-9a-fA-F）: %w", err)
+		}
+	}
+	// APIKey.Permission 合法值校验
+	for i, k := range c.APIKeys.Keys {
+		switch k.Permission {
+		case PermissionRead, PermissionWrite, "":
+			// "" 表示未设置，按 PermissionWrite 处理（兼容旧配置）
+		default:
+			return fmt.Errorf("api_keys[%d].permission=%q 无效，仅允许 %q 或 %q", i, k.Permission, PermissionRead, PermissionWrite)
 		}
 	}
 	return nil
