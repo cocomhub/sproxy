@@ -306,6 +306,7 @@ func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 }
 
 // cleanupUploadingFilesLoop 定期清理 uploadingFiles 中已过期（不存在对应 session）的条目。
+// 普通 upload 条目 value 为 "upload"（无 session），直接跳过。
 // 作为 goroutine 在 RegisterRoutes 中启动，由 Close() 通过关闭 uploadingStop 停止。
 func (h *Handlers) cleanupUploadingFilesLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
@@ -318,6 +319,10 @@ func (h *Handlers) cleanupUploadingFilesLoop() {
 			h.uploadingFiles.Range(func(key, value any) bool {
 				filename := key.(string)
 				uploadID := value.(string)
+				// 普通 upload 条目 value 为 "upload"，无对应 session，跳过
+				if uploadID == "upload" {
+					return true
+				}
 				if h.uploadStore != nil && h.uploadStore.GetSession(uploadID) == nil {
 					h.uploadingFiles.Delete(filename)
 				}

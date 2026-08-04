@@ -27,8 +27,7 @@ var levelStrings = map[string]slog.Level{
 
 // rebuildLogger 根据配置重建 slog.Logger 并替换全局默认值和 Handlers.logger。
 func (h *Handlers) rebuildLogger(cfg *Config) {
-	configMu.Lock()
-	defer configMu.Unlock()
+	// 注意：调用方必须持有 configMu（updateConfigHandler 已在入口处加锁）。
 
 	level := slog.LevelInfo
 	if l, ok := levelStrings[cfg.LogLevel]; ok {
