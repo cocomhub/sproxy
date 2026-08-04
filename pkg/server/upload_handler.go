@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -59,8 +60,8 @@ func (h *Handlers) setUploadResponseHeaders(w http.ResponseWriter, r *http.Reque
 
 	// 处理文件修改时间
 	if mtimeStr := r.Header.Get(headerFileMTime); mtimeStr != "" {
-		var mtimeInt int64
-		if _, err := fmt.Sscanf(mtimeStr, "%d", &mtimeInt); err == nil && mtimeInt > 0 {
+		mtimeInt, err := strconv.ParseInt(mtimeStr, 10, 64)
+		if err == nil && mtimeInt > 0 {
 			modTime := time.Unix(0, mtimeInt)
 			if err := os.Chtimes(filePath, modTime, modTime); err != nil {
 				logger.Warn("设置文件时间戳失败", "file_name", remotePath, "error", err)
@@ -104,6 +105,14 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 并发上传防护：防止同一文件被多个上传请求同时写入导致 OOM
+	if _, loaded := h.uploadingFiles.LoadOrStore(remotePath, "upload"); loaded {
+		logger.Warn("文件正在上传中，拒绝并发上传", "file_name", remotePath)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在上传中"}, http.StatusConflict)
+		return
+	}
+	defer h.uploadingFiles.Delete(remotePath)
+
 	// 原子写入 + 流式哈希
 	serverChecksum, _, err := writeFileAtomically(filePath, file)
 	if err != nil {
@@ -113,7 +122,8 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if serverChecksum != expectedChecksum {
-		os.Remove(filePath)
+		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomically 清理）
+		_ = os.Remove(filePath)
 		logger.Warn("文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件 SHA-256 校验失败"}, http.StatusBadRequest)
 		return
@@ -141,7 +151,11 @@ func writeFileAtomically(dstPath string, src io.Reader) (checksum string, writte
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	hash := hashPool.Get().(hash.Hash) //nolint:errcheck
+	h, ok := hashPool.Get().(hash.Hash)
+	if !ok {
+		return "", 0, fmt.Errorf("hashPool 返回非 hash.Hash 类型")
+	}
+	hash := h
 	hash.Reset()
 	defer hashPool.Put(hash)
 	mw := io.MultiWriter(tmpFile, hash)
@@ -200,6 +214,7 @@ func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, filePath, expected
 	}
 	if verifyFileWithChecksum(filePath, expectedChecksum) {
 		// 幂等上传：文件已存在且 checksum 匹配，直接返回成功（不保存版本）
+		w.Header().Set(headerFileChecksum, expectedChecksum)
 		sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件已上传成功, size: %d", stat.Size()), Checksum: expectedChecksum}, http.StatusOK)
 		return true
 	}
@@ -211,7 +226,16 @@ func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, filePath, expected
 	}
 	// checksum 不匹配：冲突，需保留现有文件
 	h.logger.Warn("文件已存在，但校验失败", "file_name", remotePath)
-	sendJSONResponse(w, UploadResponse{Success: false, Message: "文件已存在，但校验失败"}, http.StatusConflict)
+	// 附带服务端文件的实际 checksum，方便客户端决策
+	if serverCS, csErr := FileChecksum(filePath); csErr == nil {
+		sendJSONResponse(w, UploadResponse{
+			Success:  false,
+			Message:  "文件已存在，但校验失败",
+			Checksum: serverCS,
+		}, http.StatusConflict)
+	} else {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件已存在，但校验失败"}, http.StatusConflict)
+	}
 	return true
 }
 
@@ -230,8 +254,10 @@ func atomicRename(src, dst string) error {
 		_ = os.Remove(dst)
 		if err := os.Rename(src, dst); err == nil {
 			return nil
+		} else if i == maxAttempts-1 {
+			return fmt.Errorf("重命名失败（已达最大重试次数 %d）: %w", maxAttempts, err)
 		}
 		time.Sleep(baseDelay << i)
 	}
-	return os.Rename(src, dst) // 最后一次尝试，返回最终错误
+	return nil
 }
