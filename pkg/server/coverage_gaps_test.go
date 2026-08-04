@@ -404,7 +404,7 @@ func TestRmdir_RemoveAllFailure(t *testing.T) {
 		os.RemoveAll(dirPath)
 	})
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=lockeddir", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=lockeddir&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)

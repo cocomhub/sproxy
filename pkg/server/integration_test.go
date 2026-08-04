@@ -448,8 +448,8 @@ func TestSearchFiles_Empty(t *testing.T) {
 		t.Fatalf("search: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("search status: expected 200, got %d", resp.StatusCode)
+	if resp.StatusCode != 400 {
+		t.Fatalf("search status: expected 400, got %d", resp.StatusCode)
 	}
 	var result struct {
 		Files []any `json:"files"`
@@ -1037,7 +1037,7 @@ func TestRmdir_HappyPath(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=toremove", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=toremove&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
@@ -1067,7 +1067,7 @@ func TestRmdir_WithFiles_AlsoDeletesChecksums(t *testing.T) {
 		"X-File-Path":     "subdir/a.txt",
 	})
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=subdir", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=subdir&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
@@ -1101,7 +1101,7 @@ func TestRmdir_NonExistent(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=nonexistent", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=nonexistent&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
@@ -1121,7 +1121,7 @@ func TestRmdir_OnFileReturns400(t *testing.T) {
 		"X-File-Checksum": sha256hex(body),
 	})
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=notadir.txt", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=notadir.txt&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
@@ -1136,7 +1136,7 @@ func TestRmdir_PathTraversal(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=../../escape", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=../../escape&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
