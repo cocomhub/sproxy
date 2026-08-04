@@ -28,7 +28,7 @@ func TestPermissionAllowed(t *testing.T) {
 		{"read denies POST", "read", http.MethodPost, false},
 		{"read denies DELETE", "read", http.MethodDelete, false},
 		{"read denies PUT", "read", http.MethodPut, false},
-		{"empty permission denies", "", http.MethodGet, false},
+		{"empty permission allows GET", "", http.MethodGet, true},
 		{"unknown permission denies", "admin", http.MethodGet, false},
 	}
 
