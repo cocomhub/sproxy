@@ -49,8 +49,7 @@ type UploadStoreIface interface {
 	GetOrCreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, bool, error)
 	LockChunkIO(uploadID string) func()
 	LockChunkMerge(uploadID string) func()
-	SyncPersistSession(uploadID string) error
-	RollbackChunkReceived(uploadID string, chunkIndex int)
+	// TODO: 考虑添加 SyncPersistSession/RollbackChunkReceived 方法支持幂等会话持久化
 }
 
 // ChunkFileLocker 管理分块文件的并发读写锁。
