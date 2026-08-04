@@ -31,5 +31,5 @@ const (
 	contentTypeOctetStream = "application/octet-stream"
 	contentTypeTextPlain   = "text/plain; charset=utf-8"
 
-	errFmtFileExists = "文件已存在，大小: %d"
+	errMsgFileExists = "文件已存在，大小: %d"
 )

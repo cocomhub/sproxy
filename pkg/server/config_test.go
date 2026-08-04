@@ -49,12 +49,13 @@ func TestConfig_DefaultsFilled(t *testing.T) {
 func TestConfig_Validate_FillsZeroes(t *testing.T) {
 	t.Parallel()
 	c := &Config{TLS: TLSConfig{Enabled: true}}
+	c.SetDefaults()
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	if c.Addr == "" || c.UploadsDir == "" || c.ChunkSize <= 0 ||
 		c.UploadSessionTTL <= 0 || c.ServerTimeouts.Shutdown <= 0 {
-		t.Fatalf("Validate did not fill zero values: %+v", c)
+		t.Fatalf("SetDefaults did not fill zero values: %+v", c)
 	}
 }
 

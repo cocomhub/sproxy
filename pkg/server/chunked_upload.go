@@ -418,7 +418,7 @@ func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, filename string)
 			Completed:    true,
 			FileChecksum: checksum,
 			Filename:     filename,
-			Message:      fmt.Sprintf(errFmtFileExists, stat.Size()),
+			Message:      fmt.Sprintf(errMsgFileExists, stat.Size()),
 		}, http.StatusOK)
 		return true
 	}
@@ -430,7 +430,7 @@ func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, filename string)
 			Completed:    true,
 			FileChecksum: cs,
 			Filename:     filename,
-			Message:      fmt.Sprintf(errFmtFileExists, stat.Size()),
+			Message:      fmt.Sprintf(errMsgFileExists, stat.Size()),
 		}, http.StatusOK)
 		return true
 	}

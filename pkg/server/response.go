@@ -8,7 +8,21 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"sync/atomic"
 )
+
+// responseLogger 是 sendJSONResponse 使用的日志记录器，默认使用 slog.Default()。
+// 可通过 SetResponseLogger 替换，用于测试或自定义日志输出。
+var responseLogger atomic.Pointer[slog.Logger]
+
+func init() {
+	SetResponseLogger(slog.Default())
+}
+
+// SetResponseLogger 设置 sendJSONResponse 使用的日志记录器。
+func SetResponseLogger(l *slog.Logger) {
+	responseLogger.Store(l)
+}
 
 type UploadResponse struct {
 	Success  bool   `json:"success"`
@@ -58,7 +72,7 @@ func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		slog.Default().Warn("Encode JSON response failed", "error", err)
+		responseLogger.Load().Warn("Encode JSON response failed", "error", err)
 	}
 }
 
