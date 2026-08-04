@@ -23,8 +23,15 @@ type HTTPDownloader struct {
 }
 
 // NewHTTPDownloader 创建 HTTPDownloader。
+// TODO: 支持通过选项模式（Options）注入自定义 Transport、超时等参数。
 func NewHTTPDownloader() *HTTPDownloader {
-	return &HTTPDownloader{logger: slog.Default()}
+	return &HTTPDownloader{
+		logger: slog.Default(),
+		httpClient: &http.Client{
+			Timeout:       30 * time.Second,
+			CheckRedirect: safeCheckRedirect(),
+		},
+	}
 }
 
 // getLogger 返回 logger，nil 时使用 slog.Default。
@@ -84,7 +91,9 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	}
 
 	// 写入带进度回调的文件
-	buf := make([]byte, 32*1024)
+	// copyBufferSize 是下载时用于数据复制的缓冲区大小（32 KB）。
+	const copyBufferSize = 32 * 1024
+	buf := make([]byte, copyBufferSize)
 	var downloaded int64
 	for {
 		n, readErr := tee.Read(buf)
@@ -125,7 +134,9 @@ func (d *HTTPDownloader) Supports(source string) bool {
 // Name 返回下载器名称。
 func (d *HTTPDownloader) Name() string { return "http" }
 
-// getClient 返回 HTTP 客户端，惰性初始化。
+// getClient 返回 HTTP 客户端。
+// 构造函数 NewHTTPDownloader 中已初始化 httpClient；若外部直接创建结构体
+// 导致 httpClient 为 nil，则惰性回退到默认值以保持兼容。
 // CheckRedirect 提供 SSRF 重定向保护（防御深度）。
 // 入口层 ValidateURLHost 已阻止内部地址，此处防止重定向到内部地址。
 func (d *HTTPDownloader) getClient() *http.Client {
