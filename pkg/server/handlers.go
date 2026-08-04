@@ -91,19 +91,11 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// 初始化 StorageManager 和 CloudDownloadManager
 	sm := NewStorageManager(cfg.UploadsDir, cfg.MaxStorageBytes, cs, log.With("component", "storage"))
-	taskTTL, err := parseDuration(cfg.CloudTaskTTL, 24*time.Hour)
-	if err != nil {
-		log.Warn("invalid cloud_task_ttl, using default", "error", err, "value", cfg.CloudTaskTTL)
-	}
-	failedTaskTTL, err := parseDuration(cfg.CloudFailedTaskTTL, 1*time.Hour)
-	if err != nil {
-		log.Warn("invalid cloud_failed_task_ttl, using default", "error", err, "value", cfg.CloudFailedTaskTTL)
-	}
 	cloudCfg := &CloudDownloadConfig{
 		SyncThreshold: cfg.CloudSyncThreshold,
 		MaxConcurrent: cfg.CloudMaxConcurrent,
-		TaskTTL:       taskTTL,
-		FailedTaskTTL: failedTaskTTL,
+		TaskTTL:       cfg.CloudTaskTTL,
+		FailedTaskTTL: cfg.CloudFailedTaskTTL,
 		AllowPrivate:  cfg.CloudDownloadAllowPrivate,
 	}
 	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, cs, log.With("component", "cloud"), cloudCfg)
@@ -129,7 +121,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/versions/restore", h.restoreVersionHandler)
 	localMux.HandleFunc("DELETE /api/versions", h.deleteVersionHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
-	localMux.HandleFunc("PUT /api/storage/config", h.storageConfigHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
 	localMux.HandleFunc("PUT /api/config", h.updateConfigHandler)
 
@@ -173,7 +164,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
 	srvMux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
-	srvMux.HandleFunc("PUT /api/storage/config", h.authMiddleware(h.storageConfigHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	srvMux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
 	srvMux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))

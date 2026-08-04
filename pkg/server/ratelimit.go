@@ -66,12 +66,12 @@ func (rl *RateLimiter) Allow() bool {
 }
 
 // Middleware wraps an http.Handler with rate limiting.
-// When the limit is exceeded, it responds with 429 Too Many Requests.
+// When the limit is exceeded, it responds with 429 Too Many Requests (JSON).
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !rl.Allow() {
 			rl.logger.Warn("rate limit exceeded", "remote_addr", r.RemoteAddr, "path", r.URL.Path)
-			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			sendJSONResponse(w, map[string]string{"error": "rate limit exceeded"}, http.StatusTooManyRequests)
 			return
 		}
 		next.ServeHTTP(w, r)
