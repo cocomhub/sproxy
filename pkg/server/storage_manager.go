@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,9 +42,10 @@ type StorageManager struct {
 	cloudSize     atomic.Int64
 	totalUsage    atomic.Int64
 	logger        *slog.Logger
-	scanMu        sync.Mutex
+	scanMu        sync.RWMutex
 	stopCh        chan struct{}
 	stopOnce      sync.Once
+	wg            sync.WaitGroup
 }
 
 // NewStorageManager 创建存储管理器，启动时自动扫描目录统计大小。
@@ -57,6 +59,7 @@ func NewStorageManager(dir string, maxBytes int64, _ ChecksumStoreIface, logger 
 	_ = sm.ScanAndRecalculate()
 
 	// 每 30 分钟定期扫描校准
+	sm.wg.Add(1)
 	go sm.periodicScan()
 
 	return sm
@@ -77,7 +80,8 @@ func (s *StorageManager) TryReserve(size int64, cat StorageCategory) error {
 		if s.totalUsage.CompareAndSwap(current, current+size) {
 			break
 		}
-		// CAS 失败，其他 goroutine 修改了 totalUsage，重试
+		// CAS 失败，其他 goroutine 修改了 totalUsage，退避重试
+		runtime.Gosched()
 	}
 	s.addCategory(cat, size)
 	return nil
@@ -109,6 +113,8 @@ func (s *StorageManager) Usage() int64 {
 
 // UsageByCategory 返回各分类的使用量。
 func (s *StorageManager) UsageByCategory() map[StorageCategory]int64 {
+	s.scanMu.RLock()
+	defer s.scanMu.RUnlock()
 	return map[StorageCategory]int64{
 		CategoryUserFiles: s.userFilesSize.Load(),
 		CategoryChunked:   s.chunkedSize.Load(),
@@ -133,7 +139,13 @@ func (s *StorageManager) ScanAndRecalculate() error {
 
 	var userFiles, chunked, versions, cloud int64
 
-	err := filepath.WalkDir(s.uploadsDir, func(path string, d fs.DirEntry, err error) error {
+	// 解析符号链接，确保扫描的是真实路径
+	realDir, err := filepath.EvalSymlinks(s.uploadsDir)
+	if err != nil {
+		realDir = s.uploadsDir
+	}
+
+	err = filepath.WalkDir(realDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -151,7 +163,7 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		if err != nil {
 			return nil // 跳过无法读取的文件
 		}
-		rel, err := filepath.Rel(s.uploadsDir, path)
+		rel, err := filepath.Rel(realDir, path)
 		if err != nil {
 			return nil
 		}
@@ -212,10 +224,19 @@ func (s *StorageManager) periodicScan() {
 	defer func() {
 		if r := recover(); r != nil {
 			s.logger.Error("periodic scan panicked, restarting", "recover", r)
+			// 检查是否已停止，避免 goroutine 泄漏
+			select {
+			case <-s.stopCh:
+				return
+			default:
+			}
 			// 延迟重启，避免频繁 panic 导致 CPU 空转
 			time.Sleep(10 * time.Second)
+			s.wg.Add(1)
 			go s.periodicScan()
+			return
 		}
+		s.wg.Done()
 	}()
 	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
@@ -242,4 +263,5 @@ func (s *StorageManager) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
 	})
+	s.wg.Wait()
 }
