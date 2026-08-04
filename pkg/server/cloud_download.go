@@ -92,6 +92,10 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 	_ = os.MkdirAll(cloudDir, 0755)
 	_ = os.MkdirAll(persistDir, 0755)
 
+	if cfg.MaxConcurrent < 1 {
+		cfg.MaxConcurrent = 1 // 防止死锁：MaxConcurrent=0 时 semaphore 永远阻塞
+	}
+
 	mgr := &CloudDownloadManager{
 		tasks:         make(map[string]*CloudTask),
 		uploadsDir:    uploadsDir,
@@ -121,16 +125,24 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 	// 恢复持久化的任务
 	mgr.recoverTasks()
 
-	// 启动过期任务清理
-	go mgr.cleanupExpired()
-	// 启动批量持久化 goroutine
-	go mgr.flushLoop()
+	// 启动过期任务清理 (wg 跟踪)
+	mgr.wg.Add(1)
+	go func() {
+		defer mgr.wg.Done()
+		mgr.cleanupExpired()
+	}()
+	// 启动批量持久化 goroutine (wg 跟踪)
+	mgr.wg.Add(1)
+	go func() {
+		defer mgr.wg.Done()
+		mgr.flushLoop()
+	}()
 
 	return mgr
 }
 
 // CreateTask 创建云端下载任务（不启动下载）。
-// 自动去重：相同 URL 的 pending/downloading/completed 任务返回已有任务。
+// 自动去重：相同 URL 的 pending/downloading 任务返回已有任务。
 func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64) (*CloudTask, error) {
 	// URL 去重：检查是否存在相同 URL 的活跃任务
 	if existing := m.findByURL(url); existing != nil {
@@ -201,21 +213,23 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 
 	if useSync {
 		m.logger.Info("starting sync cloud download", "task_id", task.ID, "url", url, "size", totalSize)
-		// 同步下载：直接在当前 goroutine 执行
+		// 同步下载：直接在当前 goroutine 执行，wg.Add(1) 在 go 之前确保不竞态
+		m.wg.Add(1)
 		m.executeDownload(syncCtx, task)
 		return task, nil
 	}
 
 	m.logger.Info("starting async cloud download", "task_id", task.ID, "url", url, "size", totalSize)
-	// 异步下载：goroutine 执行
+	// 异步下载：goroutine 执行，wg.Add(1) 在 go 之前确保不竞态
 	//nolint:gosec // G118: 异步下载需要独立 context，不受请求生命周期限制
+	m.wg.Add(1)
 	go m.executeDownload(context.Background(), task)
 	return task, nil
 }
 
 // executeDownload 执行实际下载逻辑。
+// 注意：调用者必须保证在调用前已调 m.wg.Add(1)，函数退出时自动 m.wg.Done()。
 func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudTask) {
-	m.wg.Add(1)
 	defer m.wg.Done()
 	defer m.metrics.ActiveDownloads.Add(-1)
 
@@ -271,7 +285,8 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			m.logger.Info("sync download client disconnected, switching to async",
 				"task_id", task.ID, "url", task.URL)
 			//nolint:gosec // G118: 断线后异步继续需要独立 context
-			// executeDownload 内部已处理 wg 跟踪和信号量排队
+			// wg.Add(1) 在 go 之前确保不竞态
+			m.wg.Add(1)
 			go m.executeDownload(context.Background(), task)
 			return
 		}
@@ -355,12 +370,13 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 }
 
 // findByURL 查找相同 URL 的活跃任务（去重）。
-// 仅匹配 pending/downloading/completed 状态。
+// 仅匹配 pending/downloading 状态（排除 completed/failed/cancelled）。
+// TODO: 如果 URL 数量增长到数百级别，考虑建立 url→ID 索引避免 O(n) 遍历。
 func (m *CloudDownloadManager) findByURL(url string) *CloudTask {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, t := range m.tasks {
-		if t.URL == url && (t.Status == "pending" || t.Status == "downloading" || t.Status == "completed") {
+		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") {
 			return t
 		}
 	}
@@ -530,9 +546,10 @@ func (m *CloudDownloadManager) recoverTasks() {
 		m.tasks[task.ID] = &task
 		recovered++
 
-		// 重启正在下载的任务
+		// 重启正在下载的任务，wg.Add(1) 在 go 之前确保不竞态
 		if task.Status == "downloading" {
 			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
+			m.wg.Add(1)
 			go m.executeDownload(context.Background(), &task)
 			restarted++
 		}
@@ -544,10 +561,20 @@ func (m *CloudDownloadManager) recoverTasks() {
 
 // cleanupExpiredOnce 执行一次性的过期任务清理，返回清理的任务数量。
 // 不包含循环，供测试直接调用。
+//
+// 注意：函数内部会先释放 m.mu 再执行 I/O 删除操作，调用者不应假设调用期间 mu 一直被持有。
 func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 	now := time.Now()
+
+	// 在锁内收集需要清理的 ID 及相关信息，避免锁内 I/O 阻塞
+	type expiredItem struct {
+		id       string
+		taskID   string
+		filename string
+		totalSz  int64
+	}
 	m.mu.Lock()
-	cleaned := 0
+	var expired []expiredItem
 	for id, t := range m.tasks {
 		var ttl time.Duration
 		switch t.Status {
@@ -559,23 +586,37 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 			continue
 		}
 		if now.After(t.UpdatedAt.Add(ttl)) {
+			expired = append(expired, expiredItem{
+				id:       id,
+				taskID:   t.ID,
+				filename: t.Filename,
+				totalSz:  t.TotalSize,
+			})
 			delete(m.tasks, id)
-			_ = os.Remove(filepath.Join(m.persistDir, id+".json"))
-			_ = os.RemoveAll(filepath.Join(m.cloudDir, t.ID))
-			if t.TotalSize > 0 {
-				m.storage.Release(t.TotalSize, CategoryCloud)
-			}
-			if m.checksumStore != nil {
-				remotePath := filepath.Join(cloudDirName, t.ID, t.Filename)
-				m.checksumStore.Delete(remotePath)
-			}
-			cleaned++
 		}
 	}
 	m.mu.Unlock()
-	if cleaned > 0 {
-		m.logger.Info("expired cloud download tasks cleaned up", "count", cleaned)
+
+	if len(expired) == 0 {
+		return 0
 	}
+
+	// 锁外执行 I/O 和 checksum 操作
+	cleaned := 0
+	for _, item := range expired {
+		_ = os.Remove(filepath.Join(m.persistDir, item.id+".json"))
+		_ = os.RemoveAll(filepath.Join(m.cloudDir, item.taskID))
+		if item.totalSz > 0 {
+			m.storage.Release(item.totalSz, CategoryCloud)
+		}
+		if m.checksumStore != nil {
+			remotePath := filepath.Join(cloudDirName, item.taskID, item.filename)
+			m.checksumStore.Delete(remotePath)
+		}
+		cleaned++
+	}
+
+	m.logger.Info("expired cloud download tasks cleaned up", "count", cleaned)
 	return cleaned
 }
 

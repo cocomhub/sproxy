@@ -78,7 +78,7 @@ func validateCloudDownloadURL(rawURL, rawFilename string, allowPrivate bool) (st
 	// 路径穿越防护：清理文件名中的路径分隔符
 	filename = filepathSafe(filename)
 
-	return rawURL, filename, nil
+	return parsed.String(), filename, nil
 }
 
 // cloudCreateBatchDownload 处理 POST /api/cloud/download/batch。

@@ -36,6 +36,7 @@ type Handlers struct {
 	cloudMgr      *CloudDownloadManager
 	storageMgr    *StorageManager
 	uploadingFiles sync.Map // map[string]string — filename → uploadID，追踪正在上传的文件名
+	uploadingStop chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -62,8 +63,9 @@ type RegisterRoutesOpts struct {
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
 // 调用方应在进程退出前调用 (*Handlers).Close() 以释放后台 goroutine 与持久化资源。
-func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
-	mux := opts.Mux
+func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
+	// TODO: ctx 当前未使用，后续可用于 graceful shutdown 或请求级超时控制
+	srvMux := opts.Mux
 	cfg := opts.CfgPtr.Load()
 	log := defaultLogger(opts.Logger)
 
@@ -78,9 +80,14 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 		uploadStore:   NewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, log.With("component", "upload_store")),
 		logger:        log,
 		metrics:       NewMetrics(),
+		muxMetrics:    &mux.Metrics{}, // TODO: 当前为空指标；集成真实 mux 实例后替换为实例持有的 metrics
 		shareStore:    NewShareStore(),
 		routeTable:    opts.RouteTable,
+		uploadingStop: make(chan struct{}),
 	}
+
+	// 启动 uploadingFiles 定期清理 goroutine（OOM 防范）
+	go h.cleanupUploadingFilesLoop()
 
 	// 初始化 StorageManager 和 CloudDownloadManager
 	sm := NewStorageManager(cfg.UploadsDir, cfg.MaxStorageBytes, cs, log.With("component", "storage"))
@@ -144,41 +151,41 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	h.tunnelHandler = tunnel.NewLocalHandler(opts.TunnelKey, requestLogMiddleware(log.With("component", "request"), apiHandler), log.With("component", "tunnel"))
 
-	mux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
-	mux.HandleFunc("GET /download", h.authMiddleware(h.download))
-	mux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
-	mux.HandleFunc("POST /rename", h.authMiddleware(h.rename))
-	mux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
-	mux.HandleFunc("HEAD /api/files/stat", h.authMiddleware(h.stat))
-	mux.HandleFunc("POST /upload/init", h.authMiddleware(h.uploadInit))
-	mux.HandleFunc("POST /upload/chunk", h.authMiddleware(h.uploadChunk))
-	mux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
-	mux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
-	mux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
-	mux.HandleFunc("POST /mkdir", h.authMiddleware(h.mkdir))
-	mux.HandleFunc("POST /rmdir", h.authMiddleware(h.rmdir))
-	mux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
-	mux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
-	mux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
-	mux.HandleFunc("POST /api/archive", h.authMiddleware(h.archiveHandler))
-	mux.HandleFunc("GET /api/archive-dir", h.authMiddleware(h.archiveDirHandler))
-	mux.HandleFunc("GET /api/versions", h.authMiddleware(h.listVersionsHandler))
-	mux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
-	mux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
-	mux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
-	mux.HandleFunc("PUT /api/storage/config", h.authMiddleware(h.storageConfigHandler))
-	mux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
-	mux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
-	mux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
-	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
+	srvMux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
+	srvMux.HandleFunc("GET /download", h.authMiddleware(h.download))
+	srvMux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
+	srvMux.HandleFunc("POST /rename", h.authMiddleware(h.rename))
+	srvMux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
+	srvMux.HandleFunc("HEAD /api/files/stat", h.authMiddleware(h.stat))
+	srvMux.HandleFunc("POST /upload/init", h.authMiddleware(h.uploadInit))
+	srvMux.HandleFunc("POST /upload/chunk", h.authMiddleware(h.uploadChunk))
+	srvMux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
+	srvMux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
+	srvMux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
+	srvMux.HandleFunc("POST /mkdir", h.authMiddleware(h.mkdir))
+	srvMux.HandleFunc("POST /rmdir", h.authMiddleware(h.rmdir))
+	srvMux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
+	srvMux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
+	srvMux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
+	srvMux.HandleFunc("POST /api/archive", h.authMiddleware(h.archiveHandler))
+	srvMux.HandleFunc("GET /api/archive-dir", h.authMiddleware(h.archiveDirHandler))
+	srvMux.HandleFunc("GET /api/versions", h.authMiddleware(h.listVersionsHandler))
+	srvMux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
+	srvMux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
+	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
+	srvMux.HandleFunc("PUT /api/storage/config", h.authMiddleware(h.storageConfigHandler))
+	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
+	srvMux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
+	srvMux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
+	srvMux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 
 	// 分享管理 API（localMux：隧道内部使用）
 	localMux.HandleFunc("GET /api/shares", h.listSharesHandler)
 	localMux.HandleFunc("DELETE /api/shares/{token}", h.revokeShareHandler)
 
 	// 分享管理 API（主 mux：Bearer auth）
-	mux.HandleFunc("GET /api/shares", h.authMiddleware(h.listSharesHandler))
-	mux.HandleFunc("DELETE /api/shares/{token}", h.authMiddleware(h.revokeShareHandler))
+	srvMux.HandleFunc("GET /api/shares", h.authMiddleware(h.listSharesHandler))
+	srvMux.HandleFunc("DELETE /api/shares/{token}", h.authMiddleware(h.revokeShareHandler))
 
 	// 云端下载 API（localMux：隧道认证）
 	localMux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
@@ -190,30 +197,30 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
 	localMux.HandleFunc("POST /api/cloud/archive", h.cloudArchiveBatch)
 	// 云端下载 API（主 mux：Bearer auth）
-	mux.HandleFunc("POST /api/cloud/download", h.authMiddleware(h.cloudCreateDownload))
-	mux.HandleFunc("POST /api/cloud/download/batch", h.authMiddleware(h.cloudCreateBatchDownload))
-	mux.HandleFunc("GET /api/cloud/tasks", h.authMiddleware(h.cloudListTasks))
-	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.authMiddleware(h.cloudGetTask))
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.authMiddleware(h.cloudCancelTask))
-	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.authMiddleware(h.cloudDeleteTask))
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.authMiddleware(h.cloudArchiveTask))
-	mux.HandleFunc("POST /api/cloud/archive", h.authMiddleware(h.cloudArchiveBatch))
+	srvMux.HandleFunc("POST /api/cloud/download", h.authMiddleware(h.cloudCreateDownload))
+	srvMux.HandleFunc("POST /api/cloud/download/batch", h.authMiddleware(h.cloudCreateBatchDownload))
+	srvMux.HandleFunc("GET /api/cloud/tasks", h.authMiddleware(h.cloudListTasks))
+	srvMux.HandleFunc("GET /api/cloud/tasks/{id}", h.authMiddleware(h.cloudGetTask))
+	srvMux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.authMiddleware(h.cloudCancelTask))
+	srvMux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.authMiddleware(h.cloudDeleteTask))
+	srvMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.authMiddleware(h.cloudArchiveTask))
+	srvMux.HandleFunc("POST /api/cloud/archive", h.authMiddleware(h.cloudArchiveBatch))
 
 	// Hub 管理 API（中继系统），需鉴权
 	if opts.RouteTable != nil {
 		relayHandler := NewRelayHandler(opts.RouteTable, log.With("component", "relay"))
-		mux.HandleFunc("POST /api/relay", h.authMiddleware(relayHandler.ServeHTTP))
+		srvMux.HandleFunc("POST /api/relay", h.authMiddleware(relayHandler.ServeHTTP))
 		localMux.HandleFunc("POST /api/relay", relayHandler.ServeHTTP)
 
-		mux.HandleFunc("GET /api/hub/nodes", h.authMiddleware(h.hubNodesHandler))
-		mux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
-		mux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))
+		srvMux.HandleFunc("GET /api/hub/nodes", h.authMiddleware(h.hubNodesHandler))
+		srvMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
+		srvMux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))
 	}
 
-	mux.HandleFunc("GET /healthz", h.healthz)
-	mux.HandleFunc("GET /version", h.versionHandler)
-	mux.HandleFunc("GET /metrics", h.MetricsHandler)
-	mux.Handle("POST /tunnel", h.tunnelHandler)
+	srvMux.HandleFunc("GET /healthz", h.healthz)
+	srvMux.HandleFunc("GET /version", h.versionHandler)
+	srvMux.HandleFunc("GET /metrics", h.MetricsHandler)
+	srvMux.Handle("POST /tunnel", h.tunnelHandler)
 
 	// Web UI
 	subFS, err := fs.Sub(web.StaticFS, "static")
@@ -221,7 +228,7 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 		h.logger.Error("web static fs sub error", "error", err)
 	} else {
 		fileServer := http.StripPrefix("/ui/", http.FileServer(http.FS(subFS)))
-		mux.Handle("GET /ui/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srvMux.Handle("GET /ui/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Security-Policy",
 				"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;")
 			fileServer.ServeHTTP(w, r)
@@ -229,15 +236,16 @@ func RegisterRoutes(_ context.Context, opts RegisterRoutesOpts) *Handlers {
 	}
 
 	// GET / -> /ui/ 重定向
-	mux.HandleFunc("GET /", h.webRedirect)
+	srvMux.HandleFunc("GET /", h.webRedirect)
 
-	h.handler = h.metricsMiddleware(mux)
+	h.handler = h.metricsMiddleware(srvMux)
 
 	return h
 }
 
 // Close 释放 Handlers 持有的后台资源：停止 UploadStore 的 persist/cleanup goroutine 和 StorageManager 的定期扫描。
 // 在进程退出前应调用一次（通常通过 defer h.Close()）。多次调用是安全的。
+// TODO: 当前始终返回 nil；后续可收集各子组件关闭的错误，合并后返回。
 func (h *Handlers) Close() error {
 	if h.uploadStore != nil {
 		h.uploadStore.Stop()
@@ -251,6 +259,8 @@ func (h *Handlers) Close() error {
 	if h.shareStore != nil {
 		h.shareStore.Stop()
 	}
+	// 关闭 uploadingFiles 定期清理 goroutine
+	close(h.uploadingStop)
 	return nil
 }
 
@@ -291,12 +301,35 @@ func (h *Handlers) webRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/ui/", http.StatusMovedPermanently)
 }
 
-// requestLogMiddleware 记录 HTTP 请求的基本信息。
+// requestLogMiddleware 记录 HTTP 请求的基本信息，包括状态码。
 func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
+		mw := newMetricsResponseWriter(w)
+		next.ServeHTTP(mw, r)
 		logger.Info("请求", "method", r.Method, "path", r.URL.Path,
-			"remote_addr", r.RemoteAddr, "user_agent", r.UserAgent(), "duration", time.Since(start))
+			"status", mw.statusCode, "remote_addr", r.RemoteAddr, "user_agent", r.UserAgent(), "duration", time.Since(start))
 	})
+}
+
+// cleanupUploadingFilesLoop 定期清理 uploadingFiles 中已过期（不存在对应 session）的条目。
+// 作为 goroutine 在 RegisterRoutes 中启动，由 Close() 通过关闭 uploadingStop 停止。
+func (h *Handlers) cleanupUploadingFilesLoop() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-h.uploadingStop:
+			return
+		case <-ticker.C:
+			h.uploadingFiles.Range(func(key, value any) bool {
+				filename := key.(string)
+				uploadID := value.(string)
+				if h.uploadStore != nil && h.uploadStore.GetSession(uploadID) == nil {
+					h.uploadingFiles.Delete(filename)
+				}
+				return true
+			})
+		}
+	}
 }
