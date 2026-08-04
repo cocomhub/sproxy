@@ -96,13 +96,8 @@ type BatchRenameRequest struct {
 	Operations []BatchRenameOp `json:"operations"`
 }
 
-// BatchDeleteResponse is the JSON response for batch delete operations.
-type BatchDeleteResponse struct {
-	Results []BatchOperationResult `json:"results"`
-}
-
-// BatchRenameResponse is the JSON response for batch rename operations.
-type BatchRenameResponse struct {
+// BatchResponse is the JSON response for batch operations (delete, rename, etc.).
+type BatchResponse struct {
 	Results []BatchOperationResult `json:"results"`
 }
 

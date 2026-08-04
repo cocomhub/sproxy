@@ -124,5 +124,5 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 	for _, f := range req.Files {
 		results = append(results, h.processBatchDeleteItem(f, logger))
 	}
-	sendJSONResponse(w, BatchDeleteResponse{Results: results}, http.StatusOK)
+	sendJSONResponse(w, BatchResponse{Results: results}, http.StatusOK)
 }

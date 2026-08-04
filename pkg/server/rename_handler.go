@@ -164,7 +164,7 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 		result := h.processBatchRenameItem(op, logger)
 		results = append(results, result)
 	}
-	sendJSONResponse(w, BatchRenameResponse{Results: results}, http.StatusOK)
+	sendJSONResponse(w, BatchResponse{Results: results}, http.StatusOK)
 }
 
 // rename 处理 POST /rename?from=<old>&to=<new>。

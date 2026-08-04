@@ -24,14 +24,14 @@ import (
 // 导致 batchRename handler 实际覆盖率为 0。以下测试修正此问题。
 
 // doBatchRename POST /api/batch/rename 并解码响应。
-func doBatchRename(t *testing.T, url, reqBody string) (int, BatchRenameResponse) {
+func doBatchRename(t *testing.T, url, reqBody string) (int, BatchResponse) {
 	t.Helper()
 	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	var result BatchRenameResponse
+	var result BatchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -39,7 +39,7 @@ func doBatchRename(t *testing.T, url, reqBody string) (int, BatchRenameResponse)
 }
 
 // assertBatchRenameOK 断言批量重命名返回 200 且指定索引的结果成功。
-func assertBatchRenameOK(t *testing.T, result BatchRenameResponse, index int) {
+func assertBatchRenameOK(t *testing.T, result BatchResponse, index int) {
 	t.Helper()
 	if len(result.Results) <= index {
 		t.Fatalf("expected at least %d results, got %d", index+1, len(result.Results))
@@ -212,7 +212,7 @@ func TestBatchDelete_MissingChecksum(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var result BatchDeleteResponse
+	var result BatchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

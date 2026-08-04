@@ -112,7 +112,7 @@ type Config struct {
 	CloudSyncThreshold        int64  `yaml:"cloud_sync_threshold" mapstructure:"cloud_sync_threshold"`                 // 同步模式阈值（字节），默认 20 MiB
 	CloudDownloader           string `yaml:"cloud_downloader" mapstructure:"cloud_downloader"`                         // 下载器名称，默认 "http"
 	CloudTaskTTL              string `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`                             // 完成任务保留时间，默认 "24h"；使用 string 类型以支持 parseDuration 的灵活格式（如 "1h30m"），与其他 time.Duration 字段（如 UploadSessionTTL）的 YAML 解析方式不同
-	CloudFailedTaskTTL        string `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`               // 失败任务保留时间，默认 "1h"；同 CloudTaskTTL，使用 string 类型以支持 parseDuration 灵活格式
+	CloudFailedTaskTTL        time.Duration `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`               // 失败任务保留时间，默认 "1h"；同 CloudTaskTTL，使用 string 类型以支持 parseDuration 灵活格式
 	CloudMaxConcurrent        int    `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`                 // 最大并发下载数，默认 3
 	CloudDownloadAllowPrivate bool   `yaml:"cloud_download_allow_private" mapstructure:"cloud_download_allow_private"` // 允许私有 IP 下载（仅测试用）
 }

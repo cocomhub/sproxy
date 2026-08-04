@@ -65,7 +65,7 @@ func (h *Handlers) checkExistingFileForInit(w http.ResponseWriter, filename, fil
 		sendJSONResponse(w, ChunkedInitResponse{
 			Success:  true,
 			UploadID: "already_exists",
-			Message:  fmt.Sprintf(errFmtFileExists, stat.Size()),
+			Message:  fmt.Sprintf(errMsgFileExists, stat.Size()),
 		}, http.StatusOK)
 		return true
 	}
