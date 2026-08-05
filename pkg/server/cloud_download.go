@@ -85,6 +85,28 @@ type CloudMetrics struct {
 	ActiveDownloads atomic.Int64 // 当前活跃下载数
 }
 
+// recoveryGuard 包装一个需要 panic recovery 的 goroutine 循环函数。
+// 当 fn 发生 panic 时，记录日志并重新启动（除非 stopCh 已关闭）。
+func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh <-chan struct{}, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("goroutine panicked, restarting", "name", name, "panic", r)
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
+			time.Sleep(10 * time.Second)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				recoveryGuard(name, logger, wg, stopCh, fn)
+			}()
+		}
+	}()
+	fn()
+}
+
 // NewCloudDownloadManager 创建云端下载管理器。
 func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumStoreIface, logger *slog.Logger, cfg *CloudDownloadConfig) *CloudDownloadManager {
 	cloudDir := filepath.Join(uploadsDir, cloudDirName)
@@ -129,13 +151,14 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 	mgr.wg.Add(1)
 	go func() {
 		defer mgr.wg.Done()
-		mgr.cleanupExpired()
+		recoveryGuard("cleanupExpired", mgr.logger, &mgr.wg, mgr.stopCleanup, mgr.cleanupExpired)
 	}()
+
 	// 启动批量持久化 goroutine (wg 跟踪)
 	mgr.wg.Add(1)
 	go func() {
 		defer mgr.wg.Done()
-		mgr.flushLoop()
+		recoveryGuard("flushLoop", mgr.logger, &mgr.wg, mgr.stopFlush, mgr.flushLoop)
 	}()
 
 	return mgr
@@ -232,6 +255,12 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudTask) {
 	defer m.wg.Done()
 	defer m.metrics.ActiveDownloads.Add(-1)
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("panic in download", "task_id", task.ID, "panic", r)
+			m.failTask(task, fmt.Sprintf("panic: %v", r))
+		}
+	}()
 
 	// 获取信号量
 	select {
@@ -357,7 +386,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	m.metrics.BytesDownloaded.Add(result.Size)
 }
 
-// failTask 将任务标记为失败。
+// failTask 将任务标记为失败，并清理任务目录。
 func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	m.mu.Lock()
 	task.Status = "failed"
@@ -367,6 +396,12 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	m.mu.Unlock()
 	m.saveTask(task)
 	m.metrics.TasksFailed.Add(1)
+
+	// 清理任务目录（下载失败后不残留垃圾文件）
+	taskDir := filepath.Join(m.cloudDir, task.ID)
+	if err := os.RemoveAll(taskDir); err != nil {
+		m.logger.Warn("failed to clean up task dir on fail", "task_id", task.ID, "error", err)
+	}
 }
 
 // findByURL 查找相同 URL 的活跃任务（去重）。
@@ -377,7 +412,8 @@ func (m *CloudDownloadManager) findByURL(url string) *CloudTask {
 	defer m.mu.RUnlock()
 	for _, t := range m.tasks {
 		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") {
-			return t
+			c := *t
+			return &c
 		}
 	}
 	return nil
@@ -388,7 +424,11 @@ func (m *CloudDownloadManager) GetTask(id string) (*CloudTask, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	t, ok := m.tasks[id]
-	return t, ok
+	if !ok {
+		return nil, false
+	}
+	c := *t
+	return &c, true
 }
 
 // SnapshotTask 返回任务的快照（副本），避免并发修改导致 data race。
@@ -411,7 +451,8 @@ func (m *CloudDownloadManager) ListTasks(status string) []*CloudTask {
 	var result []*CloudTask
 	for _, t := range m.tasks {
 		if status == "" || t.Status == status {
-			result = append(result, t)
+			c := *t
+			result = append(result, &c)
 		}
 	}
 	return result
@@ -446,6 +487,7 @@ func (m *CloudDownloadManager) CancelTask(id string) error {
 	m.mu.Unlock()
 
 	m.saveTask(t)
+	m.metrics.TasksCancelled.Add(1)
 	m.logger.Info("cloud download task cancelled", "task_id", id)
 	return nil
 }
@@ -508,6 +550,15 @@ func (m *CloudDownloadManager) DeleteTask(id string) error {
 
 // saveTask 持久化单个任务到磁盘。
 func (m *CloudDownloadManager) saveTask(t *CloudTask) {
+	// 检查任务是否已被删除（避免被删除后仍持久化）
+	m.mu.RLock()
+	_, exists := m.tasks[t.ID]
+	m.mu.RUnlock()
+	if !exists {
+		m.logger.Debug("skip persisting deleted task", "id", t.ID)
+		return
+	}
+
 	// 快照关键字段避免 data race（json.Marshal 期间任务可能被并发修改）
 	m.mu.RLock()
 	data, err := json.Marshal(t)

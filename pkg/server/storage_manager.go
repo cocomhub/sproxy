@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -80,8 +79,24 @@ func (s *StorageManager) TryReserve(size int64, cat StorageCategory) error {
 		if s.totalUsage.CompareAndSwap(current, current+size) {
 			break
 		}
-		// CAS 失败，其他 goroutine 修改了 totalUsage，退避重试
-		runtime.Gosched()
+		// CAS 失败，其他 goroutine 修改了 totalUsage，指数退避重试
+		backoff := 1
+		for {
+			time.Sleep(time.Duration(backoff) * time.Microsecond)
+			backoff *= 2
+			if backoff > 64 {
+				backoff = 64
+			}
+			// 重新加载 current 和 max
+			current = s.totalUsage.Load()
+			max = s.maxBytes.Load()
+			if max > 0 && current+size > max {
+				return ErrStorageFull
+			}
+			if s.totalUsage.CompareAndSwap(current, current+size) {
+				break
+			}
+		}
 	}
 	s.addCategory(cat, size)
 	return nil
