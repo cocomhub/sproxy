@@ -114,24 +114,26 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req updateConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"success": false, "message": "invalid request body"}, http.StatusBadRequest)
 		return
 	}
 
 	// 检查是否所有字段均为 nil，拒绝空请求体（{}）
 	if req.LogLevel == nil && req.LogFormat == nil && req.AuthToken == nil &&
 		req.RateLimitReq == nil && req.RateLimitWin == nil && req.MaxStorageBytes == nil {
-		sendJSONResponse(w, map[string]string{"error": "empty request body: no fields to update"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"success": false, "message": "empty request body: no fields to update"}, http.StatusBadRequest)
 		return
 	}
 
-	cfg := h.cfgPtr.Load()
+	// Copy-on-Write: 浅拷贝 Config 后修改副本，避免与并发读取的 goroutine 产生 data race。
+	// Config 当前字段均为值类型（string、int、struct、time.Duration），浅拷贝安全。
+	cfg := *h.cfgPtr.Load()
 	changed := false
 
 	if req.LogLevel != nil {
 		validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
 		if !validLevels[*req.LogLevel] {
-			sendJSONResponse(w, map[string]string{"error": "invalid log_level, must be debug/info/warn/error"}, http.StatusBadRequest)
+			sendJSONResponse(w, map[string]any{"success": false, "message": "invalid log_level, must be debug/info/warn/error"}, http.StatusBadRequest)
 			return
 		}
 		cfg.LogLevel = *req.LogLevel
@@ -140,7 +142,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.LogFormat != nil {
 		if *req.LogFormat != "text" && *req.LogFormat != "json" {
-			sendJSONResponse(w, map[string]string{"error": "invalid log_format, must be text/json"}, http.StatusBadRequest)
+			sendJSONResponse(w, map[string]any{"success": false, "message": "invalid log_format, must be text/json"}, http.StatusBadRequest)
 			return
 		}
 		cfg.LogFormat = *req.LogFormat
@@ -154,7 +156,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.RateLimitReq != nil {
 		if *req.RateLimitReq < 0 {
-			sendJSONResponse(w, map[string]string{"error": "rate_limit_requests must be non-negative"}, http.StatusBadRequest)
+			sendJSONResponse(w, map[string]any{"success": false, "message": "rate_limit_requests must be non-negative"}, http.StatusBadRequest)
 			return
 		}
 		cfg.RateLimit.Requests = *req.RateLimitReq
@@ -164,7 +166,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if req.RateLimitWin != nil {
 		d, err := time.ParseDuration(*req.RateLimitWin)
 		if err != nil || d <= 0 {
-			sendJSONResponse(w, map[string]string{"error": "invalid rate_limit_window duration"}, http.StatusBadRequest)
+			sendJSONResponse(w, map[string]any{"success": false, "message": "invalid rate_limit_window duration"}, http.StatusBadRequest)
 			return
 		}
 		cfg.RateLimit.Window = d
@@ -173,7 +175,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.MaxStorageBytes != nil {
 		if *req.MaxStorageBytes < 0 {
-			sendJSONResponse(w, map[string]string{"error": "max_storage_bytes must be non-negative"}, http.StatusBadRequest)
+			sendJSONResponse(w, map[string]any{"success": false, "message": "max_storage_bytes must be non-negative"}, http.StatusBadRequest)
 			return
 		}
 		cfg.MaxStorageBytes = *req.MaxStorageBytes
@@ -184,10 +186,15 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if changed {
-		h.cfgPtr.Store(cfg)
+		// Copy-on-Write: 存储新配置的副本
+		h.cfgPtr.Store(&cfg)
+
+		// RateLimiter 热更新：需要批次 C/D 添加 h.rateLimiter 字段和 UpdateConfig 方法
+		// TODO: 当 h.rateLimiter 字段可用时，在此处调用 h.rateLimiter.UpdateConfig(cfg.RateLimit.Requests, cfg.RateLimit.Window)
+
 		// 日志级别或格式变更时，立即重建 logger 使生效
 		if req.LogLevel != nil || req.LogFormat != nil {
-			h.rebuildLogger(cfg)
+			h.rebuildLogger(&cfg)
 		}
 	}
 
