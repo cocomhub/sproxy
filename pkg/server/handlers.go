@@ -15,7 +15,6 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
-	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/web"
 )
 
@@ -29,7 +28,6 @@ type Handlers struct {
 	tunnelHandler http.Handler
 	logger        *slog.Logger
 	metrics       *Metrics
-	muxMetrics    *mux.Metrics
 	shareStore    *ShareStore
 	routeTable    *hub.RouteTable
 	handler       http.Handler
@@ -37,6 +35,7 @@ type Handlers struct {
 	storageMgr    *StorageManager
 	uploadingFiles sync.Map // map[string]string — filename → uploadID，追踪正在上传的文件名
 	uploadingStop chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
+	uploadingWg   sync.WaitGroup // 等待 cleanupUploadingFilesLoop 退出
 	closeOnce     sync.Once // 防止 Close() 重复关闭 channel
 }
 
@@ -81,14 +80,17 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		uploadStore:   NewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, log.With("component", "upload_store")),
 		logger:        log,
 		metrics:       NewMetrics(),
-		muxMetrics:    &mux.Metrics{}, // TODO: 当前为空指标；集成真实 mux 实例后替换为实例持有的 metrics
 		shareStore:    NewShareStore(log.With("component", "share")),
 		routeTable:    opts.RouteTable,
 		uploadingStop: make(chan struct{}),
 	}
 
 	// 启动 uploadingFiles 定期清理 goroutine（OOM 防范）
-	go h.cleanupUploadingFilesLoop()
+	h.uploadingWg.Add(1)
+	go func() {
+		defer h.uploadingWg.Done()
+		h.cleanupUploadingFilesLoop()
+	}()
 
 	// 初始化 StorageManager 和 CloudDownloadManager
 	sm := NewStorageManager(cfg.UploadsDir, cfg.MaxStorageBytes, cs, log.With("component", "storage"))
@@ -236,8 +238,15 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 // Close 释放 Handlers 持有的后台资源：停止 UploadStore 的 persist/cleanup goroutine 和 StorageManager 的定期扫描。
 // 在进程退出前应调用一次（通常通过 defer h.Close()）。多次调用是安全的。
+// 关闭顺序：先关 uploadingFiles 清理 goroutine，再关 UploadStore（后者可能还有 uploading 操作引用其 session）。
 // TODO: 当前始终返回 nil；后续可收集各子组件关闭的错误，合并后返回。
 func (h *Handlers) Close() error {
+	// 先关闭 uploadingFiles 清理 goroutine，确保不再引用 uploadStore session
+	h.closeOnce.Do(func() {
+		close(h.uploadingStop)
+	})
+	h.uploadingWg.Wait()
+
 	if h.uploadStore != nil {
 		h.uploadStore.Stop()
 	}
@@ -250,10 +259,6 @@ func (h *Handlers) Close() error {
 	if h.shareStore != nil {
 		h.shareStore.Stop()
 	}
-	// 关闭 uploadingFiles 定期清理 goroutine
-	h.closeOnce.Do(func() {
-		close(h.uploadingStop)
-	})
 	return nil
 }
 
@@ -268,6 +273,9 @@ func (h *Handlers) safePath(remotePath string) string {
 		return ""
 	}
 	cfg := h.cfgPtr.Load()
+	if cfg == nil {
+		return ""
+	}
 	return joinSafePath(cfg.UploadsDir, remotePath)
 }
 
