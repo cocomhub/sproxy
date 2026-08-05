@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/certmgr"
 )
 
 func TestGenerateSelfSignedCert(t *testing.T) {
@@ -16,7 +18,7 @@ func TestGenerateSelfSignedCert(t *testing.T) {
 	certFile := filepath.Join(dir, "cert.pem")
 	keyFile := filepath.Join(dir, "key.pem")
 
-	err := GenerateSelfSignedCert(certFile, keyFile)
+	err := certmgr.GenerateSelfSignedCert(certFile, keyFile)
 	if err != nil {
 		t.Fatalf("GenerateSelfSignedCert() failed: %v", err)
 	}

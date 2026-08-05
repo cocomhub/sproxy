@@ -277,6 +277,8 @@ func TestMetricsHandler_NilMetrics(t *testing.T) {
 }
 
 func TestMetricsHandler_WithMuxMetrics(t *testing.T) {
+	// muxMetrics 已从 MetricsHandler 中移除（改为从 RouteTable 实时聚合），
+	// 此测试保留以验证 muxMetrics 不再影响输出。
 	ts, h := newTestServerWithMetrics(t)
 	mm := &mux.Metrics{}
 	mm.Streams.Opened.Add(5)
@@ -298,19 +300,16 @@ func TestMetricsHandler_WithMuxMetrics(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	output := string(body)
 
-	checks := []string{
-		"sproxy_mux_streams_opened 5",
-		"sproxy_mux_bytes_read 1000",
-		"sproxy_mux_bytes_written 2000",
-		"sproxy_mux_stream_errors 1",
-		"sproxy_mux_frames_sent 10",
-		"sproxy_mux_frames_received 8",
-		"sproxy_mux_pings_sent 2",
-		"sproxy_mux_pongs_received 2",
+	// mux metrics 不再出现在输出中
+	absentChecks := []string{
+		"sproxy_mux_streams_opened",
+		"sproxy_mux_bytes_read",
+		"sproxy_mux_bytes_written",
+		"sproxy_mux_frames_sent",
 	}
-	for _, c := range checks {
-		if !strings.Contains(output, c) {
-			t.Errorf("expected metrics output to contain %q", c)
+	for _, c := range absentChecks {
+		if strings.Contains(output, c) {
+			t.Errorf("expected metrics output NOT to contain %q", c)
 		}
 	}
 }

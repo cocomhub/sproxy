@@ -12,7 +12,7 @@ import (
 )
 
 // Metrics 使用 atomic 计数器收集请求统计数据。
-// 所有字段对齐到 64-bit 边界，确保 32-bit 平台安全。
+// 注意：Go 1.22+ 的 atomic.Int64 自动处理对齐，无需手动对齐。
 type Metrics struct {
 	RequestsTotal     atomic.Int64
 	Requests2XX       atomic.Int64
@@ -132,35 +132,6 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP sproxy_files_deleted Total files deleted\n")
 	fmt.Fprintf(w, "# TYPE sproxy_files_deleted counter\n")
 	fmt.Fprintf(w, "sproxy_files_deleted %d\n\n", m.FilesDeleted.Load())
-	if mm := h.muxMetrics; mm != nil {
-		fmt.Fprintf(w, "# HELP sproxy_mux_streams_opened Mux streams opened\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_streams_opened counter\n")
-		fmt.Fprintf(w, "sproxy_mux_streams_opened %d\n\n", mm.Streams.Opened.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_bytes_read Mux bytes read\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_bytes_read counter\n")
-		fmt.Fprintf(w, "sproxy_mux_bytes_read %d\n\n", mm.Streams.BytesRead.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_bytes_written Mux bytes written\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_bytes_written counter\n")
-		fmt.Fprintf(w, "sproxy_mux_bytes_written %d\n\n", mm.Streams.BytesWritten.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_frames_sent Mux frames sent\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_frames_sent counter\n")
-		fmt.Fprintf(w, "sproxy_mux_frames_sent %d\n\n", mm.FramesSent.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_frames_received Mux frames received\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_frames_received counter\n")
-		fmt.Fprintf(w, "sproxy_mux_frames_received %d\n\n", mm.FramesReceived.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_pings_sent Mux pings sent\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_pings_sent counter\n")
-		fmt.Fprintf(w, "sproxy_mux_pings_sent %d\n\n", mm.PingsSent.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_pongs_received Mux pongs received\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_pongs_received counter\n")
-		fmt.Fprintf(w, "sproxy_mux_pongs_received %d\n\n", mm.PongsReceived.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_errors Mux errors\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_errors counter\n")
-		fmt.Fprintf(w, "sproxy_mux_errors %d\n\n", mm.Errors.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_stream_errors Mux stream errors\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_stream_errors counter\n")
-		fmt.Fprintf(w, "sproxy_mux_stream_errors %d\n\n", mm.Streams.Errors.Load())
-	}
 	// Hub 级指标
 	if rt := h.routeTable; rt != nil {
 		fmt.Fprintf(w, "# HELP sproxy_hub_nodes_connected Current number of connected relay nodes\n")
@@ -241,6 +212,10 @@ func (mw *metricsResponseWriter) Flush() {
 // 在 Handler 链外层使用，捕获所有响应的状态码。
 func (h *Handlers) metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.metrics == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
 		h.metrics.ActiveConnections.Add(1)
 		defer h.metrics.ActiveConnections.Add(-1)
 

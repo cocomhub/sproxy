@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 )
 
 // mkdir 创建指定子目录。?dirname=path
@@ -76,17 +77,15 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 安全确认：非空目录需要 force=true 参数
+	// force 必须为 true 才执行删除（避免误删）
 	force := r.URL.Query().Get("force") == "true"
 	if !force {
-		entries, err := os.ReadDir(targetDir)
-		if err == nil && len(entries) > 0 {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不为空，请使用 ?force=true 确认删除"}, http.StatusBadRequest)
-			return
-		}
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请使用 ?force=true 确认删除"}, http.StatusBadRequest)
+		return
 	}
 
-	if err := os.RemoveAll(targetDir); err != nil {
+	// 使用 removeDirNoFollow 安全递归删除（不跟随符号链接）
+	if err := removeDirNoFollow(targetDir); err != nil {
 		h.logger.Error("删除目录失败", "dir", remotePath, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除目录失败"}, http.StatusInternalServerError)
 		return
@@ -99,4 +98,33 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("目录已删除", "dir", remotePath)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已删除: %s", remotePath)}, http.StatusOK)
+}
+
+// removeDirNoFollow 递归删除目录树，遇到符号链接时删除链接本身而非跟随。
+// 使用深度优先后序遍历确保子目录先于父目录被删除。
+func removeDirNoFollow(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		// 符号链接：删除链接本身，不递归进入
+		if entry.Type()&os.ModeSymlink != 0 {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			continue
+		}
+		if entry.IsDir() {
+			if err := removeDirNoFollow(path); err != nil {
+				return err
+			}
+		} else {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+		}
+	}
+	return os.Remove(dir)
 }
