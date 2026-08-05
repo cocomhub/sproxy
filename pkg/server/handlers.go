@@ -82,7 +82,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		logger:        log,
 		metrics:       NewMetrics(),
 		muxMetrics:    &mux.Metrics{}, // TODO: 当前为空指标；集成真实 mux 实例后替换为实例持有的 metrics
-		shareStore:    NewShareStore(),
+		shareStore:    NewShareStore(log.With("component", "share")),
 		routeTable:    opts.RouteTable,
 		uploadingStop: make(chan struct{}),
 	}
