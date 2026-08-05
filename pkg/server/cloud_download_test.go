@@ -499,17 +499,20 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 }
 
 func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
-	content := []byte("dedup test")
+	// 使用阻塞服务器，让第一个任务停留在 downloading 状态
+	blockCh := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
-		if _, err := w.Write(content); err != nil {
-			t.Errorf("write: %v", err)
-		}
+		w.Header().Set("Content-Length", "104857600") // 100MB
+		w.WriteHeader(http.StatusOK)
+		<-blockCh // 阻塞直到测试结束
 	}))
-	defer srv.Close()
+	t.Cleanup(func() {
+		close(blockCh)
+		srv.Close()
+	})
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger()) // 1 GiB 上限
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -518,11 +521,30 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 
-	// 第一次提交
-	task1, _ := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", int64(len(content)), t.Context())
+	// 第一次提交（异步，让任务停留在 downloading 状态）
+	task1, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil)
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
 
-	// 第二次提交相同 URL → 应返回已有任务
-	task2, _ := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", int64(len(content)), t.Context())
+	// 等待任务进入 downloading 状态
+	for range 30 {
+		cur, found := mgr.SnapshotTask(task1.ID)
+		if !found {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if cur.Status == "downloading" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 第二次提交相同 URL → 应返回已有任务（pending/downloading 去重）
+	task2, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil)
+	if err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
 	if task2.ID != task1.ID {
 		t.Fatalf("expected dedup ID %q, got %q", task1.ID, task2.ID)
 	}
