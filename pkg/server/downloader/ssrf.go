@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -65,7 +66,14 @@ func ValidateURLHost(rawURL string) error {
 	if err != nil {
 		return fmt.Errorf("ssrf: invalid URL: %w", err)
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+	return validateURLParsed(parsed)
+}
+
+// validateURLParsed 对已解析的 URL 做 SSRF 校验。
+func validateURLParsed(parsed *url.URL) error {
+	// 大小写不敏感检查 scheme
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
 		return fmt.Errorf("ssrf: unsupported scheme %q", parsed.Scheme)
 	}
 
@@ -98,6 +106,35 @@ func ValidateURLHost(rawURL string) error {
 	return nil
 }
 
+// validateURLHostAfterDo 在 HTTP 请求完成后二次验证最终 URL 的 IP 是否安全。
+// 用于防御 DNS 重绑定攻击：仅对 hostname 格式的 URL 执行二次 DNS 解析，
+// 因为直接 IP 地址已在预检 ValidateURLHost 中验证过，且不可能被重绑定。
+func validateURLHostAfterDo(u *url.URL) error {
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("ssrf: empty host after request")
+	}
+
+	// 直接 IP 格式：已在预检中验证，无需二次检查
+	if net.ParseIP(host) != nil {
+		return nil
+	}
+
+	// DNS 二次解析：检查 hostname 是否在请求期间被重绑定到私有 IP
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return fmt.Errorf("ssrf: post-request hostname resolution failed for %q: %w", host, err)
+	}
+	for _, ipAddr := range ips {
+		if IsPrivateIP(ipAddr.IP) {
+			return fmt.Errorf("ssrf: post-request hostname %q resolves to private/internal IP %s", host, ipAddr.IP)
+		}
+	}
+	return nil
+}
+
 // safeCheckRedirect 返回一个 CheckRedirect 函数，验证重定向目标 URL 安全。
 func safeCheckRedirect() func(req *http.Request, via []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
@@ -107,8 +144,9 @@ func safeCheckRedirect() func(req *http.Request, via []*http.Request) error {
 		// 对外部 URL 做 host 验证，内部拼接的 URL 由调用方保证。
 		// 使用 req.URL.Scheme 进行 scheme 检查而非字符串前缀，
 		// 避免路径中含 "http" 字样的误判。
-		if req.URL.Scheme == "http" || req.URL.Scheme == "https" {
-			return ValidateURLHost(req.URL.String())
+		scheme := strings.ToLower(req.URL.Scheme)
+		if scheme == "http" || scheme == "https" {
+			return validateURLParsed(req.URL)
 		}
 		return nil
 	}
