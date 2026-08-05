@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"sync/atomic"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
 
 // Metrics 使用 atomic 计数器收集请求统计数据。
@@ -80,6 +82,35 @@ func (m *Metrics) Snapshot() map[string]int64 {
 	}
 }
 
+// aggregateMuxMetrics 从 RouteTable 中所有已注册 mux 实例聚合 mux 级指标。
+// 返回 nil 表示没有可用的 mux 实例。
+func (h *Handlers) aggregateMuxMetrics() *mux.Metrics {
+	if h.routeTable == nil {
+		return nil
+	}
+	nodes := h.routeTable.List()
+	if len(nodes) == 0 {
+		return nil
+	}
+	var total mux.Metrics
+	for _, n := range nodes {
+		if n.Mux == nil {
+			continue
+		}
+		mm := n.Mux.Metrics()
+		total.Streams.Opened.Add(mm.Streams.Opened.Load())
+		total.Streams.BytesRead.Add(mm.Streams.BytesRead.Load())
+		total.Streams.BytesWritten.Add(mm.Streams.BytesWritten.Load())
+		total.FramesSent.Add(mm.FramesSent.Load())
+		total.FramesReceived.Add(mm.FramesReceived.Load())
+		total.PingsSent.Add(mm.PingsSent.Load())
+		total.PongsReceived.Add(mm.PongsReceived.Load())
+		total.Errors.Add(mm.Errors.Load())
+		total.Streams.Errors.Add(mm.Streams.Errors.Load())
+	}
+	return &total
+}
+
 // MetricsHandler 返回 GET /metrics 的 HTTP handler。
 // 使用 Prometheus 文本格式（仅标准库，无依赖）。
 func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +163,36 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP sproxy_files_deleted Total files deleted\n")
 	fmt.Fprintf(w, "# TYPE sproxy_files_deleted counter\n")
 	fmt.Fprintf(w, "sproxy_files_deleted %d\n\n", m.FilesDeleted.Load())
+	// Mux 级指标（从 RouteTable 实时聚合）
+	if mm := h.aggregateMuxMetrics(); mm != nil {
+		fmt.Fprintf(w, "# HELP sproxy_mux_streams_opened Mux streams opened\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_streams_opened counter\n")
+		fmt.Fprintf(w, "sproxy_mux_streams_opened %d\n\n", mm.Streams.Opened.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_bytes_read Mux bytes read\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_bytes_read counter\n")
+		fmt.Fprintf(w, "sproxy_mux_bytes_read %d\n\n", mm.Streams.BytesRead.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_bytes_written Mux bytes written\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_bytes_written counter\n")
+		fmt.Fprintf(w, "sproxy_mux_bytes_written %d\n\n", mm.Streams.BytesWritten.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_frames_sent Mux frames sent\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_frames_sent counter\n")
+		fmt.Fprintf(w, "sproxy_mux_frames_sent %d\n\n", mm.FramesSent.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_frames_received Mux frames received\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_frames_received counter\n")
+		fmt.Fprintf(w, "sproxy_mux_frames_received %d\n\n", mm.FramesReceived.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_pings_sent Mux pings sent\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_pings_sent counter\n")
+		fmt.Fprintf(w, "sproxy_mux_pings_sent %d\n\n", mm.PingsSent.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_pongs_received Mux pongs received\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_pongs_received counter\n")
+		fmt.Fprintf(w, "sproxy_mux_pongs_received %d\n\n", mm.PongsReceived.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_errors Mux errors\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_errors counter\n")
+		fmt.Fprintf(w, "sproxy_mux_errors %d\n\n", mm.Errors.Load())
+		fmt.Fprintf(w, "# HELP sproxy_mux_stream_errors Mux stream errors\n")
+		fmt.Fprintf(w, "# TYPE sproxy_mux_stream_errors counter\n")
+		fmt.Fprintf(w, "sproxy_mux_stream_errors %d\n\n", mm.Streams.Errors.Load())
+	}
 	// Hub 级指标
 	if rt := h.routeTable; rt != nil {
 		fmt.Fprintf(w, "# HELP sproxy_hub_nodes_connected Current number of connected relay nodes\n")
