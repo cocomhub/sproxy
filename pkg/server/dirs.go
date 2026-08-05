@@ -38,7 +38,7 @@ func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已创建: %s", remotePath)}, http.StatusOK)
 }
 
-// rmdir 删除指定目录（含所有内容）。?dirname=path
+// rmdir 删除指定目录（含所有内容）。?dirname=path&force=true
 func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 	dirname := r.URL.Query().Get("dirname")
 	if dirname == "" {
@@ -74,6 +74,16 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 	if !stat.IsDir() {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "指定路径不是目录"}, http.StatusBadRequest)
 		return
+	}
+
+	// 安全确认：非空目录需要 force=true 参数
+	force := r.URL.Query().Get("force") == "true"
+	if !force {
+		entries, err := os.ReadDir(targetDir)
+		if err == nil && len(entries) > 0 {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不为空，请使用 ?force=true 确认删除"}, http.StatusBadRequest)
+			return
+		}
 	}
 
 	if err := os.RemoveAll(targetDir); err != nil {
