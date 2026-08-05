@@ -199,11 +199,17 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("api_keys.enabled=true 但未配置任何密钥，认证将拒绝所有请求")
 	}
 	for i, k := range c.APIKeys.Keys {
+		if k.Key == "" {
+			return fmt.Errorf("api_keys[%d].key 为空，密钥不能为空字符串", i)
+		}
 		switch k.Permission {
 		case PermissionRead, PermissionWrite, "":
 		default:
 			return fmt.Errorf("api_keys[%d].permission=%q 无效，仅允许 %q 或 %q", i, k.Permission, PermissionRead, PermissionWrite)
 		}
+	}
+	if c.RateLimit.Enabled && c.RateLimit.Requests <= 0 {
+		return fmt.Errorf("rate_limit.enabled=true 但 requests=%d 无效，请设置大于 0 的值", c.RateLimit.Requests)
 	}
 	return nil
 }
