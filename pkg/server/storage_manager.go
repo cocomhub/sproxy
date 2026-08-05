@@ -123,6 +123,13 @@ func (s *StorageManager) UsageByCategory() map[StorageCategory]int64 {
 	}
 }
 
+// FileCount 返回当前已跟踪的用户文件数量（不含内部目录）。
+// 注意：StorageManager 目前按分类统计大小但尚未单独统计文件数；
+// 返回 0 表示尚未实现文件数缓存，调用方应降级为遍历。
+func (s *StorageManager) FileCount() int {
+	return 0
+}
+
 // Clear 重置所有计数器为零。仅用于测试。
 func (s *StorageManager) Clear() {
 	s.userFilesSize.Store(0)
