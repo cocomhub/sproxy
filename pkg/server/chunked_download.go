@@ -6,10 +6,12 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/cocomhub/sproxy/internal/size"
 )
@@ -24,23 +26,23 @@ func parseChunkRange(r *http.Request, cfg *Config) (offset, length int64, ok boo
 	}
 
 	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
-		if _, err := fmt.Sscanf(offsetStr, "%d", &offset); err != nil || offset < 0 {
+		parsed, err := strconv.ParseInt(offsetStr, 10, 64)
+		if err != nil || parsed < 0 {
 			return 0, 0, false
 		}
+		offset = parsed
 	}
 	if lengthStr := r.URL.Query().Get("length"); lengthStr != "" {
-		if _, err := fmt.Sscanf(lengthStr, "%d", &length); err != nil || length <= 0 {
+		parsed, err := strconv.ParseInt(lengthStr, 10, 64)
+		if err != nil || parsed <= 0 {
 			return 0, 0, false
 		}
-		if length > size.MaxChunkHashBuf {
-			length = size.MaxChunkHashBuf
-		}
+		length = min(parsed, size.MaxChunkHashBuf)
 	}
 	return offset, length, true
 }
 
 // seekAndReadFile 打开文件、seek 到指定偏移、读取指定长度的数据。
-// 如果第一次读取失败（io.ReadFull 返回非预期错误），尝试重新打开文件重试。
 // 返回数据内容和其 SHA-256 checksum。
 func (h *Handlers) seekAndReadFile(filePath string, offset, length int64) (data []byte, checksum string, err error) {
 	file, err := os.Open(filePath)
@@ -57,32 +59,10 @@ func (h *Handlers) seekAndReadFile(filePath string, offset, length int64) (data 
 	// 读入缓冲区并计算 hash
 	data = make([]byte, length)
 	if _, err := io.ReadFull(file, data); err != nil {
-		// 文件可能被截断或读取到末尾，回退到缓冲区读取
-		return h.seekAndReadFileWithRetry(filePath, offset, length)
-	}
-
-	chunkHash := sha256.Sum256(data)
-	return data, hex.EncodeToString(chunkHash[:]), nil
-}
-
-// seekAndReadFileWithRetry 重试打开文件并读取，用于首次读取失败时的回退。
-func (h *Handlers) seekAndReadFileWithRetry(filePath string, offset, length int64) ([]byte, string, error) {
-	file2, openErr := os.Open(filePath)
-	if openErr != nil {
-		h.logger.Error("重新打开文件失败", "error", openErr)
-		return nil, "", openErr
-	}
-	defer file2.Close()
-
-	if _, seekErr := file2.Seek(offset, io.SeekStart); seekErr != nil {
-		h.logger.Error("文件 seek 失败", "error", seekErr)
-		return nil, "", seekErr
-	}
-
-	data := make([]byte, length)
-	if _, readErr := io.ReadFull(file2, data); readErr != nil {
-		h.logger.Error("读取文件失败", "error", readErr)
-		return nil, "", readErr
+		if errors.Is(err, io.EOF) {
+			return nil, "", nil
+		}
+		return nil, "", fmt.Errorf("读取分块数据失败: %w", err)
 	}
 
 	chunkHash := sha256.Sum256(data)
@@ -145,6 +125,12 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 
 	fileSize := stat.Size()
 	if offset >= fileSize {
+		if fileSize == 0 && offset == 0 {
+			// 空文件：返回 200 和 0 字节
+			setChunkResponseHeaders(w, filename, 0, 0, 0)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "offset 超出文件大小"}, http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
@@ -176,8 +162,11 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	// 写入响应
 	w.Header().Set("X-Chunk-Checksum", serverChecksum)
 	w.WriteHeader(http.StatusOK)
-	_, writeErr := w.Write(data)
+	n, writeErr := w.Write(data)
 	if writeErr != nil {
 		h.logger.Warn("写入分块响应失败", "error", writeErr)
+	}
+	if writeErr == nil && h.metrics != nil {
+		h.metrics.RecordDownload(int64(n))
 	}
 }

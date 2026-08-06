@@ -5,9 +5,24 @@ package server
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"sync/atomic"
 )
+
+// countingWriter 包装 http.ResponseWriter 并追踪实际写入的字节数。
+// 用于 http.ServeContent 写入后记录实际传输字节（而非 Content-Length）。
+type countingWriter struct {
+	http.ResponseWriter
+	count atomic.Int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.ResponseWriter.Write(p)
+	cw.count.Add(int64(n))
+	return n, err
+}
 
 func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	filename := r.URL.Query().Get("filename")
@@ -50,15 +65,19 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算
-	// 注意：实时计算 SHA-256 需要完整读取文件，大文件可能阻塞响应。
-	// 这是 checksum 回退路径，仅当 ChecksumStore 无记录时触发。
-	// 大文件建议使用分块下载（GET /download/chunk），避免全量计算。
+	// 回退路径优先复用已打开的文件句柄（零额外 I/O），仅当计算成功后才写入缓存。
 	if cs, ok := h.checksumStore.Get(remotePath); ok {
 		w.Header().Set(headerFileChecksum, cs)
-	} else if cs, err := FileChecksum(filePath); err == nil {
-		w.Header().Set(headerFileChecksum, cs)
 	} else {
-		h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "file_name", remotePath)
+		// 缓存未命中，从已打开文件句柄计算（复用 file，零额外 I/O）
+		_, _ = file.Seek(0, io.SeekStart)
+		if cs, err := Checksum(file); err == nil {
+			_, _ = file.Seek(0, io.SeekStart)
+			h.checksumStore.Set(remotePath, cs)
+			w.Header().Set(headerFileChecksum, cs)
+		} else {
+			h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "file_name", remotePath)
+		}
 	}
 
 	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", info.ModTime().UnixNano()))
@@ -66,9 +85,10 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	// 使用 http.ServeContent 替代 http.ServeFile：
 	//   - 自动处理 Range header（返回 206 + Content-Range，旧客户端不带 Range 仍 200 全量）
 	//   - 不会根据扩展名嗅探并覆盖已设置的 Content-Type（同步修复缺陷 #12）
-	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
+	cw := &countingWriter{ResponseWriter: w}
+	http.ServeContent(cw, r, info.Name(), info.ModTime(), file)
 	if h.metrics != nil {
-		h.metrics.RecordDownload(info.Size())
+		h.metrics.RecordDownload(cw.count.Load())
 	}
 }
 
