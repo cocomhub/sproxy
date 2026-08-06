@@ -19,12 +19,13 @@ import (
 func setupCloudTestServer(t *testing.T) (*httptest.Server, *CloudDownloadManager) {
 	t.Helper()
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 	t.Cleanup(func() {

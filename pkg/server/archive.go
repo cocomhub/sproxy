@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // ArchiveRequest 是 POST /api/archive 的请求体。
@@ -61,15 +62,17 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 流式打包：io.Pipe 中 tar + gzip
 	pr, pw := io.Pipe()
+	defer pr.Close()
+	var closeOnce sync.Once
 	go func() {
 		var pipeErr error
-		defer func() {
+		defer closeOnce.Do(func() {
 			if pipeErr != nil {
 				pw.CloseWithError(pipeErr)
 			} else {
 				pw.Close()
 			}
-		}()
+		})
 		gw := gzip.NewWriter(pw)
 		tw := tar.NewWriter(gw)
 
@@ -104,7 +107,10 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	_, _ = io.Copy(w, pr)
+	_, copyErr := io.Copy(w, pr)
+	if copyErr != nil {
+		logger.Warn("archive response copy interrupted", "error", copyErr)
+	}
 }
 
 // commonArchiveName 从文件路径列表中推导公共归档名。
@@ -122,7 +128,7 @@ func commonArchiveName(paths []string) string {
 	// 尝试取公共前缀目录
 	dir := filepath.Dir(paths[0])
 	for _, p := range paths[1:] {
-		for !strings.HasPrefix(p, dir) {
+		for !strings.HasPrefix(p, dir+"/") {
 			parent := filepath.Dir(dir)
 			if parent == "." || parent == "/" || parent == dir {
 				return "archive"
@@ -156,6 +162,15 @@ func validateArchiveFiles(files []string, w http.ResponseWriter) ([]string, bool
 // TOCTOU 防护：Linux 使用 O_NOFOLLOW 不跟随符号链接打开，
 // 交叉验证 os.SameFile 确保 lstat 和 open 后文件一致。
 func addFileToTar(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger) error {
+	return addFileToTarDepth(tw, fullPath, relPath, logger, 0)
+}
+
+// addFileToTarDepth 是 addFileToTar 内部实现，带 depth 参数防止递归过深。
+func addFileToTarDepth(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger, depth int) error {
+	if depth > 100 {
+		return fmt.Errorf("目录深度超过限制: %s", relPath)
+	}
+
 	// 使用 Lstat 检测符号链接，拒绝跟随
 	info, err := os.Lstat(fullPath)
 	if err != nil {
@@ -178,11 +193,16 @@ func addFileToTar(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger)
 		for _, entry := range entries {
 			childRel := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
 			childFull := filepath.Join(fullPath, entry.Name())
-			if err = addFileToTar(tw, childFull, childRel, logger); err != nil {
+			if err = addFileToTarDepth(tw, childFull, childRel, logger, depth+1); err != nil {
 				logger.Warn("归档添加子文件失败", "path", childRel, "error", err)
 			}
 		}
 		return nil
+	}
+
+	// 单个文件大小限制
+	if info.Size() > defaultMaxArchiveSize {
+		return fmt.Errorf("文件 %s 大小 (%d) 超过归档限制 (%d)，请直接下载该文件", relPath, info.Size(), defaultMaxArchiveSize)
 	}
 
 	// 打开文件：Linux 用 O_NOFOLLOW 不跟随符号链接
@@ -215,6 +235,9 @@ func addFileToTar(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger)
 	}
 	return nil
 }
+
+// defaultMaxArchiveSize 是归档中单个文件的最大大小（100MB）。
+const defaultMaxArchiveSize int64 = 100 * 1024 * 1024
 
 // archiveDirHandler 处理 GET /api/archive-dir?dirname=xxx。
 // 将指定目录及其内容打包下载。
@@ -255,15 +278,17 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	pr, pw := io.Pipe()
+	defer pr.Close()
+	var closeOnce sync.Once
 	go func() {
 		var pipeErr error
-		defer func() {
+		defer closeOnce.Do(func() {
 			if pipeErr != nil {
 				pw.CloseWithError(pipeErr)
 			} else {
 				pw.Close()
 			}
-		}()
+		})
 		gw := gzip.NewWriter(pw)
 		tw := tar.NewWriter(gw)
 
@@ -275,7 +300,7 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 
-		if err := addFileToTar(tw, fullPath, filepath.ToSlash(relPath), h.logger); err != nil {
+		if err := addFileToTarDepth(tw, fullPath, filepath.ToSlash(relPath), h.logger, 0); err != nil {
 			pipeErr = err
 		}
 		if err := tw.Close(); err != nil {
@@ -285,5 +310,8 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 			pipeErr = err
 		}
 	}()
-	_, _ = io.Copy(w, pr)
+	_, copyErr := io.Copy(w, pr)
+	if copyErr != nil {
+		h.logger.Warn("archive dir response copy interrupted", "error", copyErr)
+	}
 }

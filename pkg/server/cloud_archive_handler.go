@@ -6,8 +6,11 @@ package server
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -117,9 +120,10 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 打包
+	// 打包（流式 checksum）
 	logger := h.logger.With("archive", "cloud_task", "task_id", taskID)
-	if err := createTarGz(sourceFile, task.Filename, outputPath, logger); err != nil {
+	checksum, err := createTarGz(sourceFile, task.Filename, outputPath, logger)
+	if err != nil {
 		h.logger.Error("failed to create archive", "task_id", taskID, "error", err)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
@@ -127,13 +131,6 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 计算归档文件 checksum 和大小
-	checksum, err := FileChecksum(outputPath)
-	if err != nil {
-		h.logger.Error("failed to compute archive checksum", "task_id", taskID, "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive created but checksum failed"}, http.StatusInternalServerError)
-		return
-	}
 	info, err := os.Stat(outputPath)
 	if err != nil {
 		h.logger.Error("failed to stat archive", "task_id", taskID, "error", err)
@@ -252,9 +249,10 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 多文件打包
+	// 多文件打包（流式 checksum）
 	logger := h.logger.With("archive", "cloud_batch")
-	if err := createMultiFileTarGz(files, outputPath, logger); err != nil {
+	checksum, err := createMultiFileTarGz(files, outputPath, logger)
+	if err != nil {
 		h.logger.Error("failed to create batch archive", "error", err)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
@@ -262,13 +260,6 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 计算 checksum 和大小
-	checksum, err := FileChecksum(outputPath)
-	if err != nil {
-		h.logger.Error("failed to compute archive checksum", "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive created but checksum failed"}, http.StatusInternalServerError)
-		return
-	}
 	info, err := os.Stat(outputPath)
 	if err != nil {
 		h.logger.Error("failed to stat archive", "error", err)
@@ -296,12 +287,12 @@ type fileWithRelPath struct {
 	relPath  string
 }
 
-// createTarGz 将单个文件打包为 tar.gz。
+// createTarGz 将单个文件打包为 tar.gz 并返回流式计算的 SHA-256 checksum。
 // 使用 succeeded 标记模式确保出错时清理输出文件。
-func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger) (err error) {
+func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger) (checksum string, err error) {
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("create output file: %w", err)
+		return "", fmt.Errorf("create output file: %w", err)
 	}
 	defer outputFile.Close()
 
@@ -313,26 +304,30 @@ func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger)
 		}
 	}()
 
-	gw := gzip.NewWriter(outputFile)
+	hasher := sha256.New()
+	multiWriter := io.MultiWriter(outputFile, hasher)
+
+	gw := gzip.NewWriter(multiWriter)
 	defer gw.Close()
 
 	tw := tar.NewWriter(gw)
 	defer tw.Close()
 
 	if err := addFileToTar(tw, sourceFile, sourceName, logger); err != nil {
-		return fmt.Errorf("add file to tar: %w", err)
+		return "", fmt.Errorf("add file to tar: %w", err)
 	}
 
 	succeeded = true
-	return nil
+	checksum = hex.EncodeToString(hasher.Sum(nil))
+	return checksum, nil
 }
 
-// createMultiFileTarGz 将多个文件打包为单个 tar.gz。
+// createMultiFileTarGz 将多个文件打包为单个 tar.gz 并返回流式计算的 SHA-256 checksum。
 // 使用 succeeded 标记模式确保出错时清理输出文件。
-func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *slog.Logger) (err error) {
+func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *slog.Logger) (checksum string, err error) {
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("create output file: %w", err)
+		return "", fmt.Errorf("create output file: %w", err)
 	}
 	defer outputFile.Close()
 
@@ -344,7 +339,10 @@ func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *sl
 		}
 	}()
 
-	gw := gzip.NewWriter(outputFile)
+	hasher := sha256.New()
+	multiWriter := io.MultiWriter(outputFile, hasher)
+
+	gw := gzip.NewWriter(multiWriter)
 	defer gw.Close()
 
 	tw := tar.NewWriter(gw)
@@ -352,10 +350,11 @@ func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *sl
 
 	for _, f := range files {
 		if err := addFileToTar(tw, f.fullPath, f.relPath, logger); err != nil {
-			return fmt.Errorf("add file %q to tar: %w", f.relPath, err)
+			return "", fmt.Errorf("add file %q to tar: %w", f.relPath, err)
 		}
 	}
 
 	succeeded = true
-	return nil
+	checksum = hex.EncodeToString(hasher.Sum(nil))
+	return checksum, nil
 }

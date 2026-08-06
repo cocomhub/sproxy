@@ -137,7 +137,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		}
 		results = append(results, CloudBatchTaskResult{
 			ID:       snapshot.ID,
-			URL:      cleanedURL,
+			URL:      entry.URL,
 			Filename: cleanedFilename,
 			Status:   snapshot.Status,
 		})
@@ -214,6 +214,7 @@ func extractFilename(rawURL string) string {
 
 // filepathSafe 清理文件名中的路径分隔符，防止路径穿越。
 func filepathSafe(name string) string {
+	name = strings.ReplaceAll(name, "\x00", "")
 	name = strings.NewReplacer("\\", "_", "/", "_").Replace(name)
 	name = strings.Trim(name, " .")
 	if name == "" {

@@ -25,19 +25,20 @@ const downloadsDirName = ".__downloads__"
 
 // CloudTask 表示一个云端下载任务。
 type CloudTask struct {
-	ID         string    `json:"id"`
-	URL        string    `json:"url"`
-	Method     string    `json:"method"`     // "url" | "upload"
-	Filename   string    `json:"filename"`   // 云端存储文件名
-	Status     string    `json:"status"`     // pending | downloading | completed | failed | cancelled
-	TotalSize  int64     `json:"total_size"` // -1 表示未知
-	Downloaded int64     `json:"downloaded"`
-	Checksum   string    `json:"checksum"`
-	FileMTime  int64     `json:"file_mtime,omitempty"` // 原始文件修改时间（UnixNano），从 URL 的 Last-Modified 提取
-	Error      string    `json:"error"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	ID           string    `json:"id"`
+	URL          string    `json:"url"`
+	Method       string    `json:"method"`     // "url" | "upload"
+	Filename     string    `json:"filename"`   // 云端存储文件名
+	Status       string    `json:"status"`     // pending | downloading | completed | failed | cancelled
+	TotalSize    int64     `json:"total_size"` // -1 表示未知
+	Downloaded   int64     `json:"downloaded"`
+	Checksum     string    `json:"checksum"`
+	FileMTime    int64     `json:"file_mtime,omitempty"` // 原始文件修改时间（UnixNano），从 URL 的 Last-Modified 提取
+	Error        string    `json:"error"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	ReservedSize int64     `json:"-"` // 实际预留量，不持久化
 }
 
 // CloudDownloadConfig 云端下载配置。
@@ -94,9 +95,8 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 			select {
 			case <-stopCh:
 				return
-			default:
+			case <-time.After(10 * time.Second):
 			}
-			time.Sleep(10 * time.Second)
 			wg.Go(func() {
 				recoveryGuard(name, logger, wg, stopCh, fn)
 			})
@@ -109,8 +109,13 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumStoreIface, logger *slog.Logger, cfg *CloudDownloadConfig) *CloudDownloadManager {
 	cloudDir := filepath.Join(uploadsDir, cloudDirName)
 	persistDir := filepath.Join(uploadsDir, downloadsDirName)
-	_ = os.MkdirAll(cloudDir, 0755)
-	_ = os.MkdirAll(persistDir, 0755)
+
+	if err := os.MkdirAll(cloudDir, 0755); err != nil {
+		defaultLogger(logger).Warn("创建 cloud 目录失败", "dir", cloudDir, "error", err)
+	}
+	if err := os.MkdirAll(persistDir, 0755); err != nil {
+		defaultLogger(logger).Warn("创建 persist 目录失败", "dir", persistDir, "error", err)
+	}
 
 	if cfg.MaxConcurrent < 1 {
 		cfg.MaxConcurrent = 1 // 防止死锁：MaxConcurrent=0 时 semaphore 永远阻塞
@@ -172,10 +177,11 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	}
 
 	// 预留存储空间
-	if totalSize <= 0 {
-		totalSize = 1024 * 1024 // 默认预留 1 MiB
+	reserved := totalSize
+	if reserved <= 0 {
+		reserved = 1 * 1024 * 1024 * 1024 // 1 GiB 保底
 	}
-	if err := m.storage.TryReserve(totalSize, CategoryCloud); err != nil {
+	if err := m.storage.TryReserve(reserved, CategoryCloud); err != nil {
 		m.logger.Warn("storage full, cloud download rejected",
 			"url", url,
 			"requested_size", totalSize,
@@ -186,15 +192,16 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	}
 
 	task := &CloudTask{
-		ID:        newTaskID(),
-		URL:       url,
-		Method:    method,
-		Filename:  filename,
-		Status:    "pending",
-		TotalSize: totalSize,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(m.config.TaskTTL),
+		ID:           newTaskID(),
+		URL:          url,
+		Method:       method,
+		Filename:     filename,
+		Status:       "pending",
+		TotalSize:    totalSize,
+		ReservedSize: reserved,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(m.config.TaskTTL),
 	}
 
 	m.mu.Lock()
@@ -281,6 +288,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 构建目标文件路径
 	taskDir := filepath.Join(m.cloudDir, task.ID)
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
+		m.logger.Warn("创建任务目录失败", "task_id", task.ID, "dir", taskDir, "error", err)
 		m.failTask(task, fmt.Sprintf("create task dir: %v", err))
 		return
 	}
@@ -289,11 +297,11 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 执行下载
 	result, err := m.dl.Download(dlCtx, task.URL, destPath, func(downloaded, total int64) {
 		m.mu.Lock()
+		defer m.mu.Unlock()
 		task.Downloaded = downloaded
 		if total > 0 {
 			task.TotalSize = total
 		}
-		m.mu.Unlock()
 		// 标记为脏，由 flushLoop 每 30 秒批量持久化
 		m.markDirty(task.ID)
 	})
@@ -348,9 +356,15 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 				"task_id", task.ID, "actual_size", result.Size, "reserved", currentTotal)
 			return
 		}
+		m.mu.Lock()
+		task.ReservedSize += sizeDelta
+		m.mu.Unlock()
 	} else if sizeDelta < 0 {
 		// 实际更小，释放多余空间
 		m.storage.Release(-sizeDelta, CategoryCloud)
+		m.mu.Lock()
+		task.ReservedSize += sizeDelta
+		m.mu.Unlock()
 	}
 
 	// 写入 ChecksumStore
@@ -383,6 +397,13 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 // failTask 将任务标记为失败，并清理任务目录。
 func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	m.mu.Lock()
+	if task.Status == "failed" || task.Status == "completed" {
+		m.mu.Unlock()
+		return
+	}
+	if task.ReservedSize > 0 {
+		m.storage.Release(task.ReservedSize, CategoryCloud)
+	}
 	task.Status = "failed"
 	task.Error = errMsg
 	task.UpdatedAt = time.Now()
@@ -748,6 +769,12 @@ func (m *CloudDownloadManager) flushDirty() {
 // 在进程退出前应调用一次。多次调用安全。
 func (m *CloudDownloadManager) Close() {
 	m.closeOnce.Do(func() {
+		m.mu.Lock()
+		for id, cancel := range m.cancelFuncs {
+			cancel()
+			delete(m.cancelFuncs, id)
+		}
+		m.mu.Unlock()
 		close(m.stopFlush)
 		close(m.stopCleanup)
 		m.wg.Wait()
