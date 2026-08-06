@@ -4,6 +4,8 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -91,6 +94,28 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		forwardReq.Header.Set(k, v)
 	}
 
+	// 解码并设置请求体（BodyBase64 可能为空字符串）
+	if req.BodyBase64 != "" {
+		decodedBody, err := base64.StdEncoding.DecodeString(req.BodyBase64)
+		if err != nil {
+			h.logger.Warn("中继请求体 base64 解码失败", "target", req.Target, "error", err)
+			writeRelayError(w, fmt.Sprintf("请求体解码失败: %v", err), http.StatusBadRequest)
+			return
+		}
+		forwardReq.Body = io.NopCloser(bytes.NewReader(decodedBody))
+		forwardReq.ContentLength = int64(len(decodedBody))
+	}
+
+	// 使用请求超时，从 r.Context() 派生（客户端断开时自动取消）
+	relayCtx := r.Context()
+	const maxRelayTimeout = 30 * time.Second
+	if _, hasDeadline := relayCtx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		relayCtx, cancel = context.WithTimeout(relayCtx, maxRelayTimeout)
+		defer cancel()
+	}
+	forwardReq = forwardReq.WithContext(relayCtx)
+
 	resp, err := tun.Do(forwardReq)
 	if err != nil {
 		h.logger.Error("中继转发失败", "target", req.Target, "error", err)
@@ -99,7 +124,14 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	// 限制响应体大小：最大 8MB + 1MB 余量（确保单分块传输不被截断）
+	const maxRelayBody = 9 << 20 // 9 MB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRelayBody))
+	if err != nil {
+		h.logger.Error("读取中继响应体失败", "target", req.Target, "error", err)
+		writeRelayError(w, "读取响应体失败", http.StatusInternalServerError)
+		return
+	}
 	result := RelayResponse{
 		Status:     resp.StatusCode,
 		Headers:    resp.Header,
