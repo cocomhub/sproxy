@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,14 +24,27 @@ import (
 type HTTPDownloader struct {
 	httpClient *http.Client
 	logger     *slog.Logger
+	// ValidateURLAfterDo 在 HTTP 请求完成后二次验证最终 URL 的 IP 是否安全。
+	// 为 nil 时跳过验证（用于测试）。
+	ValidateURLAfterDo func(u *url.URL) error
 }
 
 // NewHTTPDownloader 创建 HTTPDownloader。
 // TODO: 支持通过选项模式（Options）注入自定义 Transport、超时等参数。
 func NewHTTPDownloader() *HTTPDownloader {
-	return &HTTPDownloader{
+	return newHTTPDownloaderWithClient(nil)
+}
+
+// newHTTPDownloaderWithClient 创建 HTTPDownloader，使用指定的 http.Client。
+// client 为 nil 时使用默认客户端。
+func newHTTPDownloaderWithClient(client *http.Client) *HTTPDownloader {
+	d := &HTTPDownloader{
 		logger: slog.Default(),
-		httpClient: &http.Client{
+	}
+	if client != nil {
+		d.httpClient = client
+	} else {
+		d.httpClient = &http.Client{
 			// 使用 Transport 层细粒度超时，不对整体请求设 Timeout，避免大文件过早中断。
 			Transport: &http.Transport{
 				DialContext: (&net.Dialer{
@@ -41,8 +55,10 @@ func NewHTTPDownloader() *HTTPDownloader {
 				ForceAttemptHTTP2:     true,
 			},
 			CheckRedirect: safeCheckRedirect(),
-		},
+		}
 	}
+	d.ValidateURLAfterDo = validateURLHostAfterDo
+	return d
 }
 
 // getLogger 返回 logger，nil 时使用 slog.Default。
@@ -66,6 +82,7 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+	req.Header.Set("User-Agent", "sproxy-cloud-downloader/1.0")
 
 	resp, err := d.getClient().Do(req)
 	if err != nil {
@@ -76,10 +93,12 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	// DNS 重绑定攻击防御：二次验证实际连接 IP 是否安全。
 	// 下载前 ValidateURLHost 已解析一次，但 DNS 可能在两次解析间变化。
 	// 此处验证 resp.Request.URL 的 host（可能因重定向而改变）。
-	if err2 := validateURLHostAfterDo(resp.Request.URL); err2 != nil {
-		// 排空响应体再返回
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("ssrf post-request: %w", err)
+	if fn := d.ValidateURLAfterDo; fn != nil {
+		if err2 := fn(resp.Request.URL); err2 != nil {
+			// 排空响应体再返回
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return nil, fmt.Errorf("ssrf post-request: %w", err2)
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {

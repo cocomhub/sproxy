@@ -38,8 +38,12 @@ func IsPrivateIP(ip net.IP) bool {
 		if ip4[0] == 0 {
 			return true
 		}
+		// 127.0.0.0/8 全范围环回（IsLoopback 只检查 127.0.0.1）
+		if ip4[0] == 127 {
+			return true
+		}
 		// CGNAT 100.64.0.0/10
-		if ip4[0] == 100 && ip4[1]&0xc0 == 64 {
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
 			return true
 		}
 		// 198.18.0.0/15 benchmark
@@ -82,6 +86,13 @@ func validateURLParsed(parsed *url.URL) error {
 		return fmt.Errorf("ssrf: empty host")
 	}
 
+	// 硬编码环回域名拒绝
+	if strings.EqualFold(host, "localhost") ||
+		strings.EqualFold(host, "localhost.localdomain") ||
+		host == "127.0.0.1" {
+		return fmt.Errorf("ssrf: connection to %q is blocked", host)
+	}
+
 	// 直接检查 IP 格式的 host（如 http://127.0.0.1/）
 	if ip := net.ParseIP(host); ip != nil {
 		if IsPrivateIP(ip) {
@@ -107,16 +118,19 @@ func validateURLParsed(parsed *url.URL) error {
 }
 
 // validateURLHostAfterDo 在 HTTP 请求完成后二次验证最终 URL 的 IP 是否安全。
-// 用于防御 DNS 重绑定攻击：仅对 hostname 格式的 URL 执行二次 DNS 解析，
-// 因为直接 IP 地址已在预检 ValidateURLHost 中验证过，且不可能被重绑定。
+// 用于防御 DNS 重绑定攻击：对 IP 格式直接检查是否为私有 IP，
+// 对 hostname 格式执行二次 DNS 解析，防止 DNS 在两次解析间变化。
 func validateURLHostAfterDo(u *url.URL) error {
 	host := u.Hostname()
 	if host == "" {
 		return fmt.Errorf("ssrf: empty host after request")
 	}
 
-	// 直接 IP 格式：已在预检中验证，无需二次检查
-	if net.ParseIP(host) != nil {
+	// IP 格式：直接检查是否为私有 IP
+	if ip := net.ParseIP(host); ip != nil {
+		if IsPrivateIP(ip) {
+			return fmt.Errorf("ssrf: final request target is private IP %s", ip)
+		}
 		return nil
 	}
 
@@ -148,6 +162,6 @@ func safeCheckRedirect() func(req *http.Request, via []*http.Request) error {
 		if scheme == "http" || scheme == "https" {
 			return validateURLParsed(req.URL)
 		}
-		return nil
+		return fmt.Errorf("ssrf: unsupported redirect scheme %q", req.URL.Scheme)
 	}
 }
