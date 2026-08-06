@@ -87,7 +87,7 @@ func formatContentDisposition(filename string) string {
 		return "attachment"
 	}
 	return mime.FormatMediaType("attachment", map[string]string{
-		"filename":   filename,
+		"filename":  filename,
 		"filename*": "UTF-8''" + url.PathEscape(filename),
 	})
 }

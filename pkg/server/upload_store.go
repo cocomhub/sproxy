@@ -295,11 +295,9 @@ func (us *UploadStore) MarkChunkReceived(uploadID string, chunkIndex int, checks
 		case us.persistCh <- uploadID:
 		default:
 			// 通道满时异步持久化，受 wg 追踪
-			us.wg.Add(1)
-			go func() {
-				defer us.wg.Done()
+			us.wg.Go(func() {
 				us.persistSession(uploadID)
-			}()
+			})
 		}
 	}
 	return nil
@@ -347,11 +345,9 @@ func (us *UploadStore) CompleteSession(uploadID string) error {
 		select {
 		case us.persistCh <- uploadID:
 		default:
-			us.wg.Add(1)
-			go func() {
-				defer us.wg.Done()
+			us.wg.Go(func() {
 				us.persistSession(uploadID)
-			}()
+			})
 		}
 	}
 	return nil

@@ -97,11 +97,9 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 			default:
 			}
 			time.Sleep(10 * time.Second)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				recoveryGuard(name, logger, wg, stopCh, fn)
-			}()
+			})
 		}
 	}()
 	fn()
@@ -148,18 +146,14 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 	mgr.recoverTasks()
 
 	// 启动过期任务清理 (wg 跟踪)
-	mgr.wg.Add(1)
-	go func() {
-		defer mgr.wg.Done()
+	mgr.wg.Go(func() {
 		recoveryGuard("cleanupExpired", mgr.logger, &mgr.wg, mgr.stopCleanup, mgr.cleanupExpired)
-	}()
+	})
 
 	// 启动批量持久化 goroutine (wg 跟踪)
-	mgr.wg.Add(1)
-	go func() {
-		defer mgr.wg.Done()
+	mgr.wg.Go(func() {
 		recoveryGuard("flushLoop", mgr.logger, &mgr.wg, mgr.stopFlush, mgr.flushLoop)
-	}()
+	})
 
 	return mgr
 }

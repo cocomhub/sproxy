@@ -20,23 +20,23 @@ import (
 
 // Handlers 持有所有 HTTP handler 的依赖。
 type Handlers struct {
-	cfgPtr        *atomic.Pointer[Config]
-	version       string
-	buildAt       string
-	checksumStore ChecksumStoreIface
-	uploadStore   UploadStoreIface
-	tunnelHandler http.Handler
-	logger        *slog.Logger
-	metrics       *Metrics
-	shareStore    *ShareStore
-	routeTable    *hub.RouteTable
-	handler       http.Handler
-	cloudMgr      *CloudDownloadManager
-	storageMgr    *StorageManager
-	uploadingFiles sync.Map // map[string]string — filename → uploadID，追踪正在上传的文件名
-	uploadingStop chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
-	uploadingWg   sync.WaitGroup // 等待 cleanupUploadingFilesLoop 退出
-	closeOnce     sync.Once // 防止 Close() 重复关闭 channel
+	cfgPtr         *atomic.Pointer[Config]
+	version        string
+	buildAt        string
+	checksumStore  ChecksumStoreIface
+	uploadStore    UploadStoreIface
+	tunnelHandler  http.Handler
+	logger         *slog.Logger
+	metrics        *Metrics
+	shareStore     *ShareStore
+	routeTable     *hub.RouteTable
+	handler        http.Handler
+	cloudMgr       *CloudDownloadManager
+	storageMgr     *StorageManager
+	uploadingFiles sync.Map       // map[string]string — filename → uploadID，追踪正在上传的文件名
+	uploadingStop  chan struct{}  // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
+	uploadingWg    sync.WaitGroup // 等待 cleanupUploadingFilesLoop 退出
+	closeOnce      sync.Once      // 防止 Close() 重复关闭 channel
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -86,11 +86,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	}
 
 	// 启动 uploadingFiles 定期清理 goroutine（OOM 防范）
-	h.uploadingWg.Add(1)
-	go func() {
-		defer h.uploadingWg.Done()
+	h.uploadingWg.Go(func() {
 		h.cleanupUploadingFilesLoop()
-	}()
+	})
 
 	// 初始化 StorageManager 和 CloudDownloadManager
 	sm := NewStorageManager(cfg.UploadsDir, cfg.MaxStorageBytes, cs, log.With("component", "storage"))

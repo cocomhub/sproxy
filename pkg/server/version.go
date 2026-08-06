@@ -71,9 +71,10 @@ func (h *Handlers) saveVersion(remotePath, uploadsDir string) (int64, error) {
 	}
 
 	// 同步父目录确保目录元数据落盘
+	// 注意：syncParentDir 在 Windows 上可能失败（EINVAL/Access Denied），
+	// 文件已成功写入磁盘，父目录 sync 是优化而非必要步骤，不应阻断流程。
 	if err := syncParentDir(verPath); err != nil {
-		os.Remove(verPath)
-		return 0, fmt.Errorf("同步版本文件父目录失败: %w", err)
+		h.logger.Warn("同步版本文件父目录失败", "path", verPath, "error", err)
 	}
 
 	// 清理超出上限的旧版本
