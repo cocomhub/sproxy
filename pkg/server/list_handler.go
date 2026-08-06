@@ -146,8 +146,7 @@ func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]
 		}
 		relName := e.Name()
 		if subdir != "" {
-			cleaned, _ := ValidateFilePath(subdir)
-			relName = filepath.ToSlash(filepath.Join(cleaned, e.Name()))
+			relName = filepath.ToSlash(filepath.Join(subdir, e.Name()))
 		}
 		if cs, ok := csMap[relName]; ok {
 			fi.Checksum = cs

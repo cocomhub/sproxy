@@ -72,7 +72,8 @@ func (h *Handlers) saveVersion(remotePath, uploadsDir string) (int64, error) {
 
 	// 同步父目录确保目录元数据落盘
 	if err := syncParentDir(verPath); err != nil {
-		h.logger.Warn("同步版本文件父目录失败", "path", verPath, "error", err)
+		os.Remove(verPath)
+		return 0, fmt.Errorf("同步版本文件父目录失败: %w", err)
 	}
 
 	// 清理超出上限的旧版本
@@ -107,14 +108,19 @@ func (h *Handlers) cleanupOldVersions(remotePath, uploadsDir string) {
 	sort.Slice(entries, func(i, j int) bool {
 		vi, erri := strconv.ParseInt(entries[i].Name(), 10, 64)
 		vj, errj := strconv.ParseInt(entries[j].Name(), 10, 64)
-		if erri != nil || errj != nil {
-			return entries[i].Name() < entries[j].Name()
+		if erri != nil {
+			return false
+		}
+		if errj != nil {
+			return true
 		}
 		return vi < vj
 	})
 	excess := len(entries) - cfg.Versioning.MaxVersions
 	for i := range excess {
-		_ = os.Remove(filepath.Join(verDir, entries[i].Name()))
+		if err := os.Remove(filepath.Join(verDir, entries[i].Name())); err != nil {
+			h.logger.Warn("删除旧版本文件失败", "path", filepath.Join(verDir, entries[i].Name()), "error", err)
+		}
 	}
 }
 
@@ -158,8 +164,10 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		var versionID int64
-		_, _ = fmt.Sscanf(e.Name(), "%d", &versionID)
+		versionID, err := strconv.ParseInt(e.Name(), 10, 64)
+		if err != nil {
+			continue
+		}
 
 		fi := VersionInfo{
 			Filename:  filepath.ToSlash(remotePath),
@@ -215,9 +223,11 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 先保存当前版本（回滚前备份）
+	// 先保存当前版本（回滚前备份），备份失败时返回 500 拒绝执行恢复
 	if _, err := h.saveVersion(remotePath, cfg.UploadsDir); err != nil {
-		h.logger.Warn("恢复版本前备份失败", "file_name", remotePath, "error", err)
+		h.logger.Error("恢复版本前备份失败", "file_name", remotePath, "error", err)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复版本前备份失败，已中止"}, http.StatusInternalServerError)
+		return
 	}
 
 	// 拷贝版本文件到目标位置

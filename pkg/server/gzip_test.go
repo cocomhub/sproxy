@@ -114,6 +114,8 @@ func assertGzipResult(t *testing.T, rec *httptest.ResponseRecorder, wantBody str
 // 保留 WriteHeader+status 的独立测试（无法 table-driven 化）
 func TestGzipMiddleware_WriteHeaderAndFlush(t *testing.T) {
 	t.Parallel()
+
+	// Test with error status (should NOT be gzipped per middleware logic)
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte("not found"))
@@ -132,14 +134,43 @@ func TestGzipMiddleware_WriteHeaderAndFlush(t *testing.T) {
 		t.Fatalf("expected 404, got %d", rec.Code)
 	}
 
+	// Error responses (400+) are NOT compressed; body should be plain text
+	if rec.Header().Get("Content-Encoding") == "gzip" {
+		t.Fatal("expected no Content-Encoding: gzip for error response")
+	}
+	if body := rec.Body.String(); body != "not found" {
+		t.Fatalf("expected 'not found', got: %q", body)
+	}
+}
+
+func TestGzipMiddleware_WriteHeaderAndFlush_Success(t *testing.T) {
+	t.Parallel()
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("hello world"))
+	})
+
+	mw := GzipMiddleware(slog.Default())
+	handler := mw(inner)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
 	gr, err := gzip.NewReader(rec.Body)
 	if err != nil {
 		t.Fatalf("failed to create gzip reader: %v", err)
 	}
 	defer gr.Close()
 	body, _ := io.ReadAll(gr)
-	if string(body) != "not found" {
-		t.Fatalf("expected 'not found', got: %q", string(body))
+	if string(body) != "hello world" {
+		t.Fatalf("expected 'hello world', got: %q", string(body))
 	}
 }
 

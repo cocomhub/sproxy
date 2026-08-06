@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"sync/atomic"
 )
 
@@ -24,9 +25,12 @@ func SetResponseLogger(l *slog.Logger) {
 	responseLogger.Store(l)
 }
 
+// UploadResponse 是通用响应结构。
+// Code 字段提供具体错误码，便于客户端区分不同语义。
 type UploadResponse struct {
 	Success  bool   `json:"success"`
 	Message  string `json:"message"`
+	Code     string `json:"code,omitempty"`
 	Checksum string `json:"file_checksum,omitempty"`
 }
 
@@ -41,8 +45,8 @@ type ChunkedInitResponse struct {
 // ChunkStatusResponse 分块上传状态查询响应。
 type ChunkStatusResponse struct {
 	Success       bool   `json:"success"`
-	Finished      bool   `json:"finished,omitempty"`  // 文件已完整上传（无需再传）
-	UploadID      string `json:"upload_id,omitempty"` // omitempty 以便 finished 时返回空
+	Finished      bool   `json:"finished,omitempty"`
+	UploadID      string `json:"upload_id,omitempty"`
 	ReceivedCount int    `json:"received_count,omitempty"`
 	TotalChunks   int    `json:"total_chunks,omitempty"`
 	MissingChunks []int  `json:"missing_chunks,omitempty"`
@@ -77,14 +81,15 @@ func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {
 }
 
 // formatContentDisposition 使用标准库安全地构造 Content-Disposition 头。
-// 使用 mime.FormatMediaType 自动处理文件名中的特殊字符转义。
+// 同时设置 filename（传统）和 filename*（RFC 5987）参数，以支持非 ASCII 文件名。
 func formatContentDisposition(filename string) string {
 	if filename == "" {
 		return "attachment"
 	}
-	// 使用 mime.FormatMediaType 确保文件名中的 "、\ 等字符被正确转义
-	// 参数 key 必须为小写，value 为文件名
-	return mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	return mime.FormatMediaType("attachment", map[string]string{
+		"filename":   filename,
+		"filename*": "UTF-8''" + url.PathEscape(filename),
+	})
 }
 
 // BatchOperationResult 批量操作单条结果

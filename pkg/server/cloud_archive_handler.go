@@ -47,8 +47,8 @@ const cloudArchiveDirName = ".__cloud_archives__"
 func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 
-	// 校验任务存在且状态为 completed
-	task, ok := h.cloudMgr.GetTask(taskID)
+	// 校验任务存在且状态为 completed（使用 SnapshotTask 避免 data race）
+	task, ok := h.cloudMgr.SnapshotTask(taskID)
 	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "task not found"}, http.StatusNotFound)
 		return
@@ -179,7 +179,8 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	var skippedTasks []string
 
 	for _, taskID := range req.TaskIDs {
-		task, ok := h.cloudMgr.GetTask(taskID)
+		// 使用 SnapshotTask 避免 data race
+		task, ok := h.cloudMgr.SnapshotTask(taskID)
 		if !ok {
 			h.logger.Warn("cloud batch archive: skipping task not found", "task_id", taskID)
 			skippedTasks = append(skippedTasks, taskID)
@@ -296,12 +297,21 @@ type fileWithRelPath struct {
 }
 
 // createTarGz 将单个文件打包为 tar.gz。
-func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger) error {
+// 使用 succeeded 标记模式确保出错时清理输出文件。
+func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger) (err error) {
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("create output file: %w", err)
 	}
 	defer outputFile.Close()
+
+	// 出错时清理输出文件
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			os.Remove(outputPath)
+		}
+	}()
 
 	gw := gzip.NewWriter(outputFile)
 	defer gw.Close()
@@ -310,20 +320,29 @@ func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger)
 	defer tw.Close()
 
 	if err := addFileToTar(tw, sourceFile, sourceName, logger); err != nil {
-		_ = os.Remove(outputPath)
 		return fmt.Errorf("add file to tar: %w", err)
 	}
 
+	succeeded = true
 	return nil
 }
 
 // createMultiFileTarGz 将多个文件打包为单个 tar.gz。
-func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *slog.Logger) error {
+// 使用 succeeded 标记模式确保出错时清理输出文件。
+func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *slog.Logger) (err error) {
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
 		return fmt.Errorf("create output file: %w", err)
 	}
 	defer outputFile.Close()
+
+	// 出错时清理输出文件
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			os.Remove(outputPath)
+		}
+	}()
 
 	gw := gzip.NewWriter(outputFile)
 	defer gw.Close()
@@ -333,10 +352,10 @@ func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *sl
 
 	for _, f := range files {
 		if err := addFileToTar(tw, f.fullPath, f.relPath, logger); err != nil {
-			_ = os.Remove(outputPath)
 			return fmt.Errorf("add file %q to tar: %w", f.relPath, err)
 		}
 	}
 
+	succeeded = true
 	return nil
 }

@@ -132,7 +132,7 @@ func Default() *Config {
 			AutoTLS: true,
 		},
 		CORS: CORSConfig{
-			MaxAge: 86400,
+			MaxAge: defaultMaxAge,
 		},
 		ChunkSize:                 size.DefaultChunkSize,
 		UploadSessionTTL:          24 * time.Hour,

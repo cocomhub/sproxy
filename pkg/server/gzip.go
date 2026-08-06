@@ -14,15 +14,41 @@ import (
 type gzipResponseWriter struct {
 	io.Writer
 	http.ResponseWriter
+	statusCode  int
+	wroteHeader bool
+}
+
+func (w *gzipResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	w.statusCode = statusCode
+	if statusCode >= 400 {
+		w.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
+	w.ResponseWriter.Header().Set("Content-Encoding", "gzip")
+	w.ResponseWriter.Header().Del("Content-Length")
+	w.ResponseWriter.Header().Set("Vary", "Accept-Encoding")
+	w.ResponseWriter.WriteHeader(statusCode)
 }
 
 func (w *gzipResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.statusCode >= 400 {
+		return w.ResponseWriter.Write(b)
+	}
 	return w.Writer.Write(b)
 }
 
 func (w *gzipResponseWriter) Flush() {
-	if f, ok := w.Writer.(interface{ Flush() }); ok {
-		f.Flush()
+	if w.statusCode < 400 {
+		if f, ok := w.Writer.(interface{ Flush() }); ok {
+			f.Flush()
+		}
 	}
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
@@ -43,19 +69,17 @@ func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			}
 			gw, err := gzip.NewWriterLevel(w, gzip.DefaultCompression)
 			if err != nil {
-				// fallback: 不压缩
 				next.ServeHTTP(w, r)
 				return
 			}
-			defer func() {
-				if err := gw.Close(); err != nil {
-					log.Warn("关闭 gzip writer 失败", "error", err)
-				}
-			}()
-			w.Header().Set("Content-Encoding", "gzip")
-			w.Header().Del("Content-Length")
-			w.Header().Set("Vary", "Accept-Encoding")
-			next.ServeHTTP(&gzipResponseWriter{Writer: gw, ResponseWriter: w}, r)
+			gzw := &gzipResponseWriter{Writer: gw, ResponseWriter: w}
+			next.ServeHTTP(gzw, r)
+			if gzw.statusCode >= 400 {
+				return
+			}
+			if err := gw.Close(); err != nil {
+				log.Warn("关闭 gzip writer 失败", "error", err)
+			}
 		})
 	}
 }

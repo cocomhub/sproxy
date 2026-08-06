@@ -24,12 +24,14 @@ import (
 //   - Windows 上检查 <>:"|?* 非法字符
 //   - 返回路径为 filepath.ToSlash 格式（使用 / 分隔符），适合作为 API 返回值
 func ValidateFilePath(filename string) (string, error) {
+	filename = strings.TrimSpace(filename)
+
 	if filename == "" {
 		return "", fmt.Errorf("文件名不能为空")
 	}
 
 	// 拒绝空字节
-	if strings.ContainsRune(filename, '\x00') {
+	if strings.ContainsRune(filename, 0) {
 		return "", fmt.Errorf("文件名包含空字节")
 	}
 

@@ -10,6 +10,9 @@ import (
 	"strings"
 )
 
+// defaultMaxAge 是 CORS 预检请求的默认缓存时间（秒）。
+const defaultMaxAge = 86400
+
 // CORSConfig 定义 CORS 跨域配置。
 type CORSConfig struct {
 	// AllowedOrigins 允许的跨域来源列表，设置 ["*"] 允许任意来源。
@@ -33,7 +36,7 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 	log := defaultLogger(logger)
 	maxAge := cfg.MaxAge
 	if maxAge <= 0 {
-		maxAge = 86400
+		maxAge = defaultMaxAge
 	}
 
 	// 构建 origin 查找集合，统一转为小写以实现大小写不敏感匹配
@@ -59,23 +62,31 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 			// 判断是否允许该 origin（大小写不敏感）
 			switch {
 			case allowAll:
-				w.Header().Set("Access-Control-Allow-Origin", "*")
+				// 反射实际 origin 替代通配符，以支持 Allow-Credentials
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
 			case originSet[strings.ToLower(origin)]:
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
 			default:
-				// origin 不在白名单中，不添加 CORS 头（浏览器会阻止请求）
+				// origin 不在白名单中
+				if r.Method == http.MethodOptions {
+					// OPTIONS 预检请求：返回 204，不设 CORS 头（浏览器不会缓存该结果）
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 				log.Warn("rejected CORS origin", "origin", origin)
 				http.Error(w, "origin not allowed", http.StatusForbidden)
 				return
 			}
 
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-File-Checksum, X-File-Path, X-File-MTime, Range")
 			w.Header().Set("Access-Control-Expose-Headers", "X-File-Checksum, X-File-Size, X-File-MTime, X-File-IsDir, Content-Range, Content-Disposition")
 			w.Header().Set("Access-Control-Max-Age", strconv.Itoa(maxAge))
 
-			if r.Method == "OPTIONS" {
+			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}

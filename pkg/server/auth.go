@@ -62,6 +62,9 @@ func permissionAllowed(permission, method string) bool {
 // 返回 authResultDenied — 不匹配任何 key。
 func matchAPIKey(token, method string, keys []APIKey) authResult {
 	for _, key := range keys {
+		if key.Key == "" {
+			continue
+		}
 		if subtle.ConstantTimeCompare([]byte(token), []byte(key.Key)) == 1 {
 			if permissionAllowed(key.Permission, method) {
 				return authResultOK

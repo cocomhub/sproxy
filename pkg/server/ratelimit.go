@@ -26,6 +26,9 @@ type RateLimiter struct {
 	logger     *slog.Logger
 }
 
+// maxTimestampsCap 是时间戳队列的最大容量，防止内存泄漏。
+const maxTimestampsCap = 100000
+
 // NewRateLimiter creates a RateLimiter allowing up to `limit` requests
 // per sliding `window` duration.
 func NewRateLimiter(limit int, window time.Duration, logger *slog.Logger) *RateLimiter {
@@ -41,9 +44,10 @@ func NewRateLimiter(limit int, window time.Duration, logger *slog.Logger) *RateL
 
 // Allow reports whether the current request is within the rate limit.
 // It cleans expired entries, checks the count, and records the new timestamp.
+// 当 limit <= 0 时拒绝所有请求（策略：默认拒绝，仅显式配置的正值才放行）。
 func (rl *RateLimiter) Allow() bool {
 	if rl.limit <= 0 {
-		return true
+		return false
 	}
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -56,6 +60,13 @@ func (rl *RateLimiter) Allow() bool {
 		return rl.timestamps[i].After(cutoff)
 	})
 	rl.timestamps = rl.timestamps[idx:]
+
+	// 限制切片容量上限，防止异常流量导致内存泄漏
+	if cap(rl.timestamps) > maxTimestampsCap {
+		trimmed := make([]time.Time, len(rl.timestamps))
+		copy(trimmed, rl.timestamps)
+		rl.timestamps = trimmed
+	}
 
 	if len(rl.timestamps) >= rl.limit {
 		return false
