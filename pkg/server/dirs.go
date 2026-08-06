@@ -5,10 +5,8 @@ package server
 
 import (
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
-	"path/filepath"
 )
 
 // mkdir 创建指定子目录。?dirname=path
@@ -102,3 +100,30 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 }
 
 // removeDirNoFollow 递归删除目录树，遇到符号链接时删除链接本身而非跟随。
+// 使用深度优先后序遍历确保子目录先于父目录被删除。
+func removeDirNoFollow(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		path := dir + string(os.PathSeparator) + entry.Name()
+		// 符号链接：删除链接本身，不递归进入
+		if entry.Type()&os.ModeSymlink != 0 {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			continue
+		}
+		if entry.IsDir() {
+			if err := removeDirNoFollow(path); err != nil {
+				return err
+			}
+		} else {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+		}
+	}
+	return os.Remove(dir)
+}

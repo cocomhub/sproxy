@@ -40,6 +40,7 @@ type StorageManager struct {
 	versionsSize  atomic.Int64
 	cloudSize     atomic.Int64
 	totalUsage    atomic.Int64
+	userFileCount int64 // 用户文件数量（不含内部目录），由 ScanAndRecalculate 更新
 	logger        *slog.Logger
 	scanMu        sync.RWMutex
 	stopCh        chan struct{}
@@ -140,15 +141,17 @@ func (s *StorageManager) UsageByCategory() map[StorageCategory]int64 {
 	}
 }
 
-// FileCount 返回当前已跟踪的用户文件数量（不含内部目录）。
-// 注意：StorageManager 目前按分类统计大小但尚未单独统计文件数；
-// 返回 0 表示尚未实现文件数缓存，调用方应降级为遍历。
+// FileCount 返回当前已扫描的用户文件数量（不含内部目录）。
+// 由 ScanAndRecalculate 在每次全量扫描时更新。
 func (s *StorageManager) FileCount() int {
-	return 0
+	s.scanMu.RLock()
+	defer s.scanMu.RUnlock()
+	return int(s.userFileCount)
 }
 
 // Clear 重置所有计数器为零。仅用于测试。
 func (s *StorageManager) Clear() {
+	s.userFileCount = 0
 	s.userFilesSize.Store(0)
 	s.chunkedSize.Store(0)
 	s.versionsSize.Store(0)
@@ -156,12 +159,13 @@ func (s *StorageManager) Clear() {
 	s.totalUsage.Store(0)
 }
 
-// ScanAndRecalculate 全量扫描上传目录，重新统计各分类文件大小。
+// ScanAndRecalculate 全量扫描上传目录，重新统计各分类文件大小和用户文件数量。
 func (s *StorageManager) ScanAndRecalculate() error {
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
 
 	var userFiles, chunked, versions, cloud int64
+	var userFileCount int64
 
 	// 解析符号链接，确保扫描的是真实路径
 	realDir, err := filepath.EvalSymlinks(s.uploadsDir)
@@ -203,6 +207,7 @@ func (s *StorageManager) ScanAndRecalculate() error {
 			cloud += size
 		default:
 			userFiles += size
+			userFileCount++
 		}
 		return nil
 	})
@@ -216,6 +221,7 @@ func (s *StorageManager) ScanAndRecalculate() error {
 	s.versionsSize.Store(versions)
 	s.cloudSize.Store(cloud)
 	s.totalUsage.Store(userFiles + chunked + versions + cloud)
+	s.userFileCount = userFileCount
 
 	return nil
 }
