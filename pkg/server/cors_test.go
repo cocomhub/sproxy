@@ -51,8 +51,9 @@ func TestCORSMiddleware_AllowAll(t *testing.T) {
 	if !called {
 		t.Fatal("next handler should be called")
 	}
-	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://example.com" {
-		t.Fatalf("expected 'http://example.com', got %q", got)
+	// 通配符 "*" 时直接返回 "*"，不反射 origin
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("expected '*', got %q", got)
 	}
 }
 
@@ -105,8 +106,9 @@ func TestCORSMiddleware_OPTIONS_Preflight(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", w.Code)
 	}
-	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://example.com" {
-		t.Fatalf("expected 'http://example.com', got %q", got)
+	// 通配符 "*" 时直接返回 "*"，不反射 origin
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("expected '*', got %q", got)
 	}
 }
 

@@ -24,7 +24,10 @@ func (w *gzipResponseWriter) WriteHeader(statusCode int) {
 	}
 	w.wroteHeader = true
 	w.statusCode = statusCode
-	if statusCode >= 400 {
+	if statusCode == http.StatusNoContent ||
+		statusCode == http.StatusPartialContent ||
+		statusCode == http.StatusNotModified ||
+		statusCode >= 400 {
 		w.ResponseWriter.WriteHeader(statusCode)
 		return
 	}

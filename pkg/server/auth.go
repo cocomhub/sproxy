@@ -110,7 +110,15 @@ func (h *Handlers) authenticateRequest(w http.ResponseWriter, r *http.Request, c
 			http.Error(w, "permission denied", http.StatusForbidden)
 			return true
 		}
-		// authResultDenied: 不匹配任何 key，继续回退 auth_token
+		// authResultDenied: APIKeys 已启用但 token 不匹配任何 key，直接拒绝
+		// 不回退到 auth_token，避免多用户场景下弱密钥绕过
+		slog.Warn("auth: no matching api key",
+			"remote", r.RemoteAddr,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "unauthorized"}, http.StatusUnauthorized)
+		return true
 	}
 
 	// 回退到单用户 auth_token
@@ -128,7 +136,7 @@ func (h *Handlers) authenticateRequest(w http.ResponseWriter, r *http.Request, c
 		return true
 	}
 
-	// APIKeys enabled but token didn't match and no auth_token configured
+	// 无认证配置
 	slog.Warn("auth: no matching api key",
 		"remote", r.RemoteAddr,
 		"method", r.Method,
