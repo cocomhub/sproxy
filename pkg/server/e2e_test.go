@@ -362,6 +362,7 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	s := us2.GetSession("crash-test-id")
 	if s == nil {
 		t.Fatal("session should be recovered after crash")
+		return
 	}
 	if !s.ReceivedChunks[0] || !s.ReceivedChunks[1] {
 		t.Fatal("chunks 0 and 1 should be recovered")
@@ -409,6 +410,7 @@ func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 	s := us2.GetSession("partial-id")
 	if s == nil {
 		t.Fatal("session should be recovered")
+		return
 	}
 	t.Logf("recovered session: received=%v", s.ReceivedChunks)
 }

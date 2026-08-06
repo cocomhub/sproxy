@@ -1605,6 +1605,7 @@ func TestWithClientCert_FileNotExist_Warn(t *testing.T) {
 	c := NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile, false))
 	if c == nil {
 		t.Fatal("expected non-nil client")
+		return
 	}
 	// 验证 httpClient 仍然使用默认配置（未被替换为自定义 Transport）
 	if c.httpClient.Transport != nil {
@@ -1620,6 +1621,7 @@ func TestWithClientCert_Exists(t *testing.T) {
 	c := NewFileClient("https://127.0.0.1:18083", WithClientCert(certFile, keyFile, true))
 	if c == nil {
 		t.Fatal("expected non-nil client")
+		return
 	}
 
 	transport, ok := c.httpClient.Transport.(*http.Transport)

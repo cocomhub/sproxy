@@ -31,6 +31,7 @@ func TestGenerateSelfSignedCert(t *testing.T) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
 		t.Fatal("failed to decode cert PEM block")
+		return
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
@@ -48,6 +49,7 @@ func TestGenerateSelfSignedCert(t *testing.T) {
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
 		t.Fatal("failed to decode key PEM block")
+		return
 	}
 	if keyBlock.Type != "EC PRIVATE KEY" {
 		t.Errorf("expected EC PRIVATE KEY, got %s", keyBlock.Type)

@@ -669,6 +669,7 @@ func TestUploadStore_CreateAndGet(t *testing.T) {
 	got := us.GetSession(session.UploadID)
 	if got == nil {
 		t.Fatal("GetSession returned nil")
+		return
 	}
 	if got.Filename != "test.txt" {
 		t.Fatalf("filename mismatch: %s", got.Filename)

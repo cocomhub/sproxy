@@ -121,6 +121,7 @@ func TestUploadStore_GetSessionByFilename(t *testing.T) {
 	s := us.GetSessionByFilename("file1.txt")
 	if s == nil {
 		t.Fatal("expected session for file1.txt")
+		return
 	}
 	if s.UploadID != "id1" {
 		t.Fatalf("expected id1, got %s", s.UploadID)
@@ -179,6 +180,7 @@ func TestUploadStore_RecoverFromDisk(t *testing.T) {
 	s := us2.GetSession("recover-id")
 	if s == nil {
 		t.Fatal("session should be recovered from disk")
+		return
 	}
 	if s.Filename != "recover.txt" {
 		t.Fatalf("filename mismatch: %s", s.Filename)
@@ -214,6 +216,7 @@ func TestUploadStore_ReconcileChunks(t *testing.T) {
 	s := us2.GetSession("reconcile-id")
 	if s == nil {
 		t.Fatal("session should be recovered")
+		return
 	}
 
 	// reconcileChunks should have detected the orphan chunk file on disk
