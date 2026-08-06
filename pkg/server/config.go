@@ -248,6 +248,11 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
+	cfg.SetDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("配置校验失败: %w", err)
+	}
+
 	return cfg, nil
 }
 
