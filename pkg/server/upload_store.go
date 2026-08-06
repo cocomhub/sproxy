@@ -122,11 +122,11 @@ const (
 
 // NewUploadStore 创建并启动 UploadStore，同时从磁盘恢复已有 session。
 // sessionTTL 指定未完成上传会话的过期时间，默认 24h。
-func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) *UploadStore {
+func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) (*UploadStore, error) {
 	storeDir := filepath.Join(baseDir, chunkedDirName)
 	log := defaultLogger(logger)
 	if err := os.MkdirAll(storeDir, 0755); err != nil {
-		log.Error("创建分块上传目录失败", "error", err)
+		return nil, fmt.Errorf("创建分块上传目录失败: %w", err)
 	}
 
 	if sessionTTL < 0 {
@@ -155,6 +155,18 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	us.wg.Add(1)
 	go us.cleanupLoop()
 
+	return us, nil
+}
+
+// MustNewUploadStore 创建 UploadStore，失败时 panic。
+// 仅用于 handlers.go 等无法优雅处理错误的位置。
+func MustNewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) *UploadStore {
+	us, err := NewUploadStore(baseDir, sessionTTL, logger)
+	if err != nil {
+		logger = defaultLogger(logger)
+		logger.Error("创建 UploadStore 失败", "error", err)
+		panic("创建 UploadStore 失败: " + err.Error())
+	}
 	return us
 }
 
@@ -187,23 +199,22 @@ func (us *UploadStore) Stop() {
 		// 2. 关闭 persistCh，persistLoop 将在消费完当前请求后退出
 		close(us.persistCh)
 
-		// 3. 排空 persistCh：处理所有已入列的持久化请求
-		for uploadID := range us.persistCh {
-			us.persistSession(uploadID)
-		}
+		// 3. 排空 persistCh：处理所有已入列的持久化请求（受 wg 追踪）
+		us.wg.Go(func() {
+			for uploadID := range us.persistCh {
+				us.persistSession(uploadID)
+			}
+		})
 
 		// 4. 等待所有 goroutine 完成
 		us.wg.Wait()
 	})
 }
 
-// CreateSession 创建一个新的分块上传会话，使用客户端提供的 uploadID。
-func (us *UploadStore) CreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, error) {
-	if uploadID == "" {
-		return nil, fmt.Errorf("upload_id 不能为空")
-	}
+// newSession 创建 ChunkedUploadSession 对象（不持久化）。
+func newSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64, sessionTTL time.Duration) *ChunkedUploadSession {
 	now := time.Now()
-	session := &ChunkedUploadSession{
+	return &ChunkedUploadSession{
 		UploadID:       uploadID,
 		Filename:       filename,
 		TotalSize:      totalSize,
@@ -214,27 +225,41 @@ func (us *UploadStore) CreateSession(uploadID, filename string, totalSize, chunk
 		FileChecksum:   fileChecksum,
 		FileModTime:    fileModTime,
 		CreatedAt:      now,
-		ExpiresAt:      now.Add(us.sessionTTL),
+		ExpiresAt:      now.Add(sessionTTL),
 	}
+}
+
+// saveNewSession 创建会话目录、持久化 session.json，并将 session 注册到内存 map。
+// 调用方需保证不在持锁状态（writeSessionJSON 内部会持 writeMu 做 I/O）。
+func (us *UploadStore) saveNewSession(session *ChunkedUploadSession) error {
+	sessionDir := filepath.Join(us.baseDir, session.UploadID)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return fmt.Errorf("创建会话目录失败: %w", err)
+	}
+	if err := us.writeSessionJSON(session); err != nil {
+		os.RemoveAll(sessionDir)
+		return err
+	}
+	us.mu.Lock()
+	us.sessions[session.UploadID] = session
+	us.mu.Unlock()
+	return nil
+}
+
+// CreateSession 创建一个新的分块上传会话，使用客户端提供的 uploadID。
+func (us *UploadStore) CreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, error) {
+	if uploadID == "" {
+		return nil, fmt.Errorf("upload_id 不能为空")
+	}
+
+	session := newSession(uploadID, filename, totalSize, chunkSize, totalChunks, fileChecksum, fileModTime, us.sessionTTL)
 
 	us.logger.Info("创建上传会话", "upload_id", uploadID, "file_name", filename,
 		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)
 
-	// 创建会话目录
-	sessionDir := filepath.Join(us.baseDir, uploadID)
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		return nil, fmt.Errorf("创建会话目录失败: %w", err)
-	}
-
-	// 写入 session.json
-	if err := us.writeSessionJSON(session); err != nil {
-		os.RemoveAll(sessionDir) // 清理
+	if err := us.saveNewSession(session); err != nil {
 		return nil, err
 	}
-
-	us.mu.Lock()
-	us.sessions[uploadID] = session
-	us.mu.Unlock()
 
 	return session, nil
 }
@@ -521,6 +546,7 @@ func (us *UploadStore) cleanupExpired() {
 	us.mu.Unlock()
 
 	for _, id := range expired {
+		us.locker.DeleteLock(id)
 		dir := filepath.Join(us.baseDir, id)
 		if err := os.RemoveAll(dir); err != nil {
 			us.logger.Warn("清理过期会话目录失败", "upload_id", id, "error", err)
@@ -661,20 +687,7 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 	if uploadID == "" {
 		return nil, false, fmt.Errorf("upload_id 不能为空")
 	}
-	now := time.Now()
-	session := &ChunkedUploadSession{
-		UploadID:       uploadID,
-		Filename:       filename,
-		TotalSize:      totalSize,
-		ChunkSize:      chunkSize,
-		TotalChunks:    totalChunks,
-		ReceivedChunks: make([]bool, totalChunks),
-		ChunkChecksums: make([]string, totalChunks),
-		FileChecksum:   fileChecksum,
-		FileModTime:    fileModTime,
-		CreatedAt:      now,
-		ExpiresAt:      now.Add(us.sessionTTL),
-	}
+	session := newSession(uploadID, filename, totalSize, chunkSize, totalChunks, fileChecksum, fileModTime, us.sessionTTL)
 
 	us.logger.Info("创建上传会话", "upload_id", uploadID, "file_name", filename,
 		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)

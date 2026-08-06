@@ -9,7 +9,7 @@ import (
 )
 
 func TestUploadStore_SessionDir(t *testing.T) {
-	us := NewUploadStore(t.TempDir(), 0, nil)
+	us := MustNewUploadStore(t.TempDir(), 0, nil)
 	dir := us.SessionDir("test-upload-id")
 	if dir == "" {
 		t.Fatal("expected non-empty session dir")

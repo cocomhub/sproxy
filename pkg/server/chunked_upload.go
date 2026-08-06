@@ -278,9 +278,31 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	unlockIO := h.uploadStore.LockChunkIO(uploadID)
 	defer unlockIO()
 
+	// 持锁后重新获取 session，用最新副本做幂等检查
+	session = h.uploadStore.GetSession(uploadID)
+	if session == nil {
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
+		return
+	}
+	if session.Completed {
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "上传已完成，不接受新分块"}, http.StatusGone)
+		return
+	}
+	if chunkIndex < 0 || chunkIndex >= session.TotalChunks {
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: fmt.Sprintf("chunk_index %d 超出范围 [0, %d)", chunkIndex, session.TotalChunks)}, http.StatusBadRequest)
+		return
+	}
+	if session.ReceivedChunks[chunkIndex] && session.ChunkChecksums[chunkIndex] == chunkChecksum {
+		h.logger.Debug("chunk 已存在，跳过", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortid.ShortHash(chunkChecksum))
+		sendJSONResponse(w, ChunkUploadResponse{Success: true, ChunkIndex: chunkIndex, Message: "分块已存在，跳过"}, http.StatusOK)
+		return
+	}
+
 	// 确保 session 目录存在
 	if err = os.MkdirAll(filepath.Dir(chunkPath), 0755); err != nil {
-		h.logger.Warn("创建 session 目录失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
+		h.logger.Error("创建 session 目录失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "创建目录失败"}, http.StatusInternalServerError)
+		return
 	}
 
 	// 原子写入 + 流式哈希（复用 writeFileAtomically 写临时文件）
@@ -491,13 +513,14 @@ func (h *Handlers) mergeAndRenameFile(ctx context.Context, w http.ResponseWriter
 		return "", false
 	}
 
-	tmpPath := filePath + ".tmp"
-	outFile, err := os.Create(tmpPath)
+	tmpFile, err := os.CreateTemp(filepath.Dir(filePath), filepath.Base(filePath)+".tmp.*")
 	if err != nil {
-		h.logger.Error("创建合并文件失败", "upload_id", uploadID, "file_name", session.Filename, "error", err)
+		h.logger.Error("创建合并临时文件失败", "upload_id", uploadID, "file_name", session.Filename, "error", err)
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "创建目标文件失败"}, http.StatusInternalServerError)
 		return "", false
 	}
+	tmpPath := tmpFile.Name()
+	outFile := tmpFile
 	defer outFile.Close()
 	defer os.Remove(tmpPath)
 

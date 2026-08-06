@@ -77,7 +77,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		version:       opts.Version,
 		buildAt:       opts.BuildAt,
 		checksumStore: cs,
-		uploadStore:   NewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, log.With("component", "upload_store")),
+		uploadStore:   MustNewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, log.With("component", "upload_store")),
 		logger:        log,
 		metrics:       NewMetrics(),
 		shareStore:    NewShareStore(log.With("component", "share")),

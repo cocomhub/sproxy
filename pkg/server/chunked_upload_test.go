@@ -47,7 +47,7 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 		version:       "test",
 		buildAt:       "test",
 		checksumStore: cs,
-		uploadStore:   NewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
+		uploadStore:   MustNewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
 		logger:        slog.Default(),
 	}
 
@@ -654,7 +654,7 @@ func TestUploadStore_CreateAndGet(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, err := us.CreateSession("test-upload-id", "test.txt", 100, 4096, 1, strings.Repeat("a", 64), 0)
@@ -683,7 +683,7 @@ func TestUploadStore_MarkAndCheck(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, _ := us.CreateSession("test-upload-id-2", "test.txt", 8192, 4096, 2, strings.Repeat("b", 64), 0)
@@ -710,7 +710,7 @@ func TestUploadStore_Complete(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, _ := us.CreateSession("test-upload-id-3", "test.txt", 100, 4096, 1, strings.Repeat("c", 64), 0)
@@ -736,7 +736,7 @@ func TestUploadStore_MissingChunks(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, _ := us.CreateSession("test-upload-id-4", "test.txt", 8192, 4096, 2, strings.Repeat("d", 64), 0)

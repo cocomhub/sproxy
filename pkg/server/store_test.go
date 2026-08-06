@@ -112,7 +112,7 @@ func TestChecksumStore_GetAll_Consistency(t *testing.T) {
 
 func TestUploadStore_GetSessionByFilename(t *testing.T) {
 	tmpDir := t.TempDir()
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	us.CreateSession("id1", "file1.txt", 100, 4096, 1, strings.Repeat("a", 64), 0)
@@ -134,7 +134,7 @@ func TestUploadStore_GetSessionByFilename(t *testing.T) {
 
 func TestUploadStore_DeleteSession(t *testing.T) {
 	tmpDir := t.TempDir()
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	us.CreateSession("del-id", "del.txt", 100, 4096, 1, strings.Repeat("c", 64), 0)
@@ -154,7 +154,7 @@ func TestUploadStore_DeleteSession(t *testing.T) {
 func TestUploadStore_CleanupExpired(t *testing.T) {
 	tmpDir := t.TempDir()
 	// Use a negative TTL so the session is already expired on creation
-	us := NewUploadStore(tmpDir, -time.Nanosecond, nil)
+	us := MustNewUploadStore(tmpDir, -time.Nanosecond, nil)
 	defer us.Stop()
 
 	us.CreateSession("expired-id", "expired.txt", 100, 4096, 1, strings.Repeat("d", 64), 0)
@@ -169,12 +169,12 @@ func TestUploadStore_CleanupExpired(t *testing.T) {
 func TestUploadStore_RecoverFromDisk(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	us1 := NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	us1.CreateSession("recover-id", "recover.txt", 8192, 4096, 2, strings.Repeat("e", 64), 0)
 	us1.MarkChunkReceived("recover-id", 0, "chunk0hash")
 	us1.Stop()
 
-	us2 := NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("recover-id")
@@ -196,7 +196,7 @@ func TestUploadStore_RecoverFromDisk(t *testing.T) {
 func TestUploadStore_ReconcileChunks(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	us1 := NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	us1.CreateSession("reconcile-id", "reconcile.txt", 8192, 4096, 2, strings.Repeat("f", 64), 0)
 	us1.MarkChunkReceived("reconcile-id", 0, "chunk0hash")
 	us1.Stop()
@@ -210,7 +210,7 @@ func TestUploadStore_ReconcileChunks(t *testing.T) {
 		t.Fatalf("write chunk file: %v", err)
 	}
 
-	us2 := NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("reconcile-id")
@@ -229,7 +229,7 @@ func TestUploadStore_ReconcileChunks(t *testing.T) {
 
 func TestUploadStore_GetOrCreateSession_Reuse(t *testing.T) {
 	tmpDir := t.TempDir()
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	s1, reused, err := us.GetOrCreateSession("rid", "r.txt", 100, 4096, 1, strings.Repeat("g", 64), 0)
@@ -254,7 +254,7 @@ func TestUploadStore_GetOrCreateSession_Reuse(t *testing.T) {
 
 func TestUploadStore_ConcurrentMarkChunk(t *testing.T) {
 	tmpDir := t.TempDir()
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	const totalChunks = 100
@@ -283,7 +283,7 @@ func TestUploadStore_ConcurrentMarkChunk(t *testing.T) {
 }
 
 func TestUploadStore_CleanupSessionAfter(t *testing.T) {
-	us := NewUploadStore(t.TempDir(), 0, nil)
+	us := MustNewUploadStore(t.TempDir(), 0, nil)
 	defer us.Stop()
 
 	sessionID := "cleanup-test"

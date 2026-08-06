@@ -335,7 +335,7 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// 阶段1: 创建 session 并上传部分分块
-	us1 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 
 	fileData := bytes.Repeat([]byte("ChaosTest"), 2048)
 	fileChecksum := sha256hex(fileData)
@@ -356,7 +356,7 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	us1.Stop() // 模拟 crash
 
 	// 阶段2: 新实例 recover
-	us2 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("crash-test-id")
@@ -391,7 +391,7 @@ func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	us1 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	us1.CreateSession("partial-id", "partial-recover.bin", 8192, 4096, 2, strings.Repeat("x", 64), 0)
 	us1.Stop()
 
@@ -404,7 +404,7 @@ func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), data, 0644)
 	}
 
-	us2 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("partial-id")
