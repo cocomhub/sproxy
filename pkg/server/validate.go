@@ -92,16 +92,28 @@ func joinSafePath(baseDir, userPath string) string {
 		slog.Default().Warn("joinSafePath: 路径越界", "upload_dir", absBase, "resolved_path", absPath)
 		return ""
 	}
-	// 解析符号链接：如果 absPath 是符号链接，获取其真实路径
-	realPath, err := filepath.EvalSymlinks(absPath)
+	// 递归检查父目录符号链接：如果 absPath 本身不存在，逐级向上检查父目录的符号链接是否指向 base 外
+	resolved, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
+		dir := absPath
+		for dir != absBase && dir != "." && dir != "/" {
+			dir = filepath.Dir(dir)
+			r, e := filepath.EvalSymlinks(dir)
+			if e == nil {
+				if !strings.HasPrefix(r, absBase) {
+					slog.Default().Warn("joinSafePath: 父目录符号链接指向外部路径", "upload_dir", absBase, "joined", absPath, "dir", dir, "real", r)
+					return ""
+				}
+				break
+			}
+		}
 		// 文件不存在时 EvalSymlinks 会失败，这是正常情况（例如上传前文件还不存在）
 		// 此时不返回空，直接返回已校验过的 absPath
 		return absPath
 	}
 	// 二次校验：符号链接指向的真实路径也必须在 base 内
-	if !strings.HasPrefix(realPath, absBase+string(filepath.Separator)) && realPath != absBase {
-		slog.Warn("joinSafePath: 符号链接指向外部路径", "upload_dir", absBase, "joined", absPath, "real", realPath)
+	if !strings.HasPrefix(resolved, absBase+string(filepath.Separator)) && resolved != absBase {
+		slog.Warn("joinSafePath: 符号链接指向外部路径", "upload_dir", absBase, "joined", absPath, "real", resolved)
 		return ""
 	}
 	return absPath

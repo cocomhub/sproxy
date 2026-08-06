@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"maps"
 	"os"
@@ -92,6 +93,9 @@ func (cs *ChecksumStore) Set(filename, checksum string) {
 
 	if err := cs.save(); err != nil {
 		cs.logger.Error(chkStorePersistFailed, "op", "set", "file_name", filename, "error", err)
+		if retryErr := cs.save(); retryErr != nil {
+			cs.logger.Error("重试持久化失败", "op", "set", "file_name", filename, "error", retryErr)
+		}
 	}
 }
 
@@ -103,11 +107,15 @@ func (cs *ChecksumStore) Delete(filename string) {
 
 	if err := cs.save(); err != nil {
 		cs.logger.Error(chkStorePersistFailed, "op", "delete", "file_name", filename, "error", err)
+		if retryErr := cs.save(); retryErr != nil {
+			cs.logger.Error("重试持久化失败", "op", "delete", "file_name", filename, "error", retryErr)
+		}
 	}
 }
 
 // Rename 将一条 checksum 记录从 from 路径迁移到 to 路径并持久化。
 // 如果 to 已存在则被覆盖（与 os.Rename 行为对齐）。
+// 注意：save() 内部会获取 cs.mu.RLock()，因此必须在调用 save() 前释放写锁。
 func (cs *ChecksumStore) Rename(from, to string) {
 	cs.mu.Lock()
 	v, ok := cs.checksums[from]
@@ -122,6 +130,9 @@ func (cs *ChecksumStore) Rename(from, to string) {
 
 	if err := cs.save(); err != nil {
 		cs.logger.Error(chkStorePersistFailed, "op", "rename", "from", from, "to", to, "error", err)
+		if retryErr := cs.save(); retryErr != nil {
+			cs.logger.Error("重试持久化失败", "op", "rename", "from", from, "to", to, "error", retryErr)
+		}
 	}
 }
 
@@ -137,6 +148,9 @@ func (cs *ChecksumStore) DeletePrefix(prefix string) {
 
 	if err := cs.save(); err != nil {
 		cs.logger.Error(chkStorePersistFailed, "op", "deletePrefix", "prefix", prefix, "error", err)
+		if retryErr := cs.save(); retryErr != nil {
+			cs.logger.Error("重试持久化失败", "op", "deletePrefix", "prefix", prefix, "error", retryErr)
+		}
 	}
 }
 
@@ -171,5 +185,11 @@ func (cs *ChecksumStore) save() error {
 	if err := os.WriteFile(tmp, data, 0644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, cs.storePath)
+	if err := os.Rename(tmp, cs.storePath); err != nil {
+		cs.logger.Warn("原子重命名失败，回退到直接写入", "error", err)
+		if writeErr := os.WriteFile(cs.storePath, data, 0644); writeErr != nil {
+			return fmt.Errorf("回退写入失败: %w", writeErr)
+		}
+	}
+	return nil
 }
