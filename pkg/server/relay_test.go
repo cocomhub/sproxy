@@ -128,14 +128,18 @@ func TestRelayHandlerRoundTrip(t *testing.T) {
 	if resp.Status != http.StatusOK {
 		t.Fatalf("expected relay status 200, got %d", resp.Status)
 	}
-	if resp.Body != "relay ok" {
-		t.Fatalf("expected relay body 'relay ok', got %q", resp.Body)
+	var bodyStr string
+	if err := json.Unmarshal(resp.Body, &bodyStr); err != nil {
+		t.Fatalf("failed to unmarshal body: %v", err)
+	}
+	if bodyStr != "relay ok" {
+		t.Fatalf("expected relay body 'relay ok', got %q", bodyStr)
 	}
 	cancel()
 	<-srvErr
 }
 
-func TestBodyToString(t *testing.T) {
+func TestBodyToRawMessage(t *testing.T) {
 	tests := []struct {
 		name string
 		body []byte
@@ -147,28 +151,40 @@ func TestBodyToString(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := bodyToString(tt.body)
-			if got != string(tt.body) {
-				t.Fatalf("expected %q, got %q", string(tt.body), got)
+			got := bodyToRawMessage(tt.body)
+			var s string
+			if err := json.Unmarshal(got, &s); err != nil {
+				t.Fatalf("unmarshal failed: %v", err)
+			}
+			if s != string(tt.body) {
+				t.Fatalf("expected %q, got %q", string(tt.body), s)
 			}
 		})
 	}
 }
 
-func TestBodyToString_UTF8(t *testing.T) {
+func TestBodyToRawMessage_UTF8(t *testing.T) {
 	input := []byte("hello world")
-	got := bodyToString(input)
-	if got != "hello world" {
-		t.Errorf("expected 'hello world', got %q", got)
+	got := bodyToRawMessage(input)
+	var s string
+	if err := json.Unmarshal(got, &s); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if s != "hello world" {
+		t.Errorf("expected 'hello world', got %q", s)
 	}
 }
 
-func TestBodyToString_Binary(t *testing.T) {
+func TestBodyToRawMessage_Binary(t *testing.T) {
 	input := []byte{0x00, 0x01, 0xFF, 0xFE, 0x80}
-	got := bodyToString(input)
+	got := bodyToRawMessage(input)
+	var s string
+	if err := json.Unmarshal(got, &s); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
 	expected := base64.StdEncoding.EncodeToString(input)
-	if got != expected {
-		t.Errorf("expected base64 %q, got %q", expected, got)
+	if s != expected {
+		t.Errorf("expected base64 %q, got %q", expected, s)
 	}
 }
 

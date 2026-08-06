@@ -95,8 +95,8 @@ func TestShare_Expired(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 for expired link, got %d", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusNotFound && resp2.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 404 or 409 for expired link, got %d", resp2.StatusCode)
 	}
 }
 

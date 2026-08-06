@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -101,11 +100,26 @@ func (s *ShareStore) Stop() {
 
 // Create 生成新的分享链接并存储。
 func (s *ShareStore) Create(filename, absPath string, ttl time.Duration, maxDownloads int, oneTime bool) (*ShareLink, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("生成 token 失败: %w", err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	const maxTokenRetries = 10
+
+	var token string
+	for range maxTokenRetries {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			return nil, fmt.Errorf("生成 token 失败: %w", err)
+		}
+		token = hex.EncodeToString(b)
+		if _, exists := s.links[token]; !exists {
+			break
+		}
 	}
-	token := hex.EncodeToString(b)
+	if _, exists := s.links[token]; exists {
+		return nil, fmt.Errorf("无法生成唯一的分享 token（重试 %d 次后仍冲突）", maxTokenRetries)
+	}
+
 	now := time.Now()
 	link := &ShareLink{
 		Token:        token,
@@ -116,8 +130,6 @@ func (s *ShareStore) Create(filename, absPath string, ttl time.Duration, maxDown
 		MaxDownloads: maxDownloads,
 		OneTime:      oneTime,
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(s.links) >= maxShareEntries {
 		// 先全量清理过期条目
 		cleanupNow := time.Now()
@@ -152,6 +164,18 @@ func (s *ShareStore) Create(filename, absPath string, ttl time.Duration, maxDown
 	}
 	s.links[token] = link
 	return link, nil
+}
+
+// Peek 返回指定 token 的分享链接副本，不修改状态（不计数、不删除）。
+func (s *ShareStore) Peek(token string) *ShareLink {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	link, ok := s.links[token]
+	if !ok {
+		return nil
+	}
+	c := *link
+	return &c
 }
 
 // Consume 原子性地检查并消费一个分享链接。
@@ -250,8 +274,17 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
-	if _, err = os.Stat(fullPath); os.IsNotExist(err) {
-		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+	fi, lstatErr := os.Lstat(fullPath)
+	if lstatErr != nil {
+		if os.IsNotExist(lstatErr) {
+			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+		} else {
+			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
+		}
+		return
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "不支持分享符号链接"}, http.StatusBadRequest)
 		return
 	}
 
@@ -295,10 +328,21 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 原子消费：检查有效性 + 递增计数 + 一次性删除
-	link := h.shareStore.Consume(token)
+	// Peek：先查看链接是否存在且文件有效，不修改状态
+	link := h.shareStore.Peek(token)
 	if link == nil {
-		http.Error(w, "分享链接不存在或已失效", http.StatusNotFound)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接无效或已过期"}, http.StatusNotFound)
+		return
+	}
+	// 检查文件是否存在
+	if _, err := os.Stat(link.AbsPath); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享文件已不存在"}, http.StatusGone)
+		return
+	}
+	// Consume：再消费（递增计数、一次性删除）
+	link = h.shareStore.Consume(token)
+	if link == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接已被消费"}, http.StatusConflict)
 		return
 	}
 
@@ -322,7 +366,9 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, f)
+	if _, err := copyWithContext(w, f, r.Context()); err != nil {
+		h.logger.Warn("分享文件流式传输中断", "token", token, "error", err)
+	}
 }
 
 // listSharesHandler 处理 GET /api/shares，返回所有分享链接。

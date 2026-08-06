@@ -40,7 +40,8 @@ type StorageManager struct {
 	versionsSize  atomic.Int64
 	cloudSize     atomic.Int64
 	totalUsage    atomic.Int64
-	userFileCount int64 // 用户文件数量（不含内部目录），由 ScanAndRecalculate 更新
+	userFileCount atomic.Int64              // 用户文件数量（不含内部目录），由 ScanAndRecalculate 更新
+	lastScanTime  atomic.Pointer[time.Time] // 最近一次全量扫描完成时间
 	logger        *slog.Logger
 	scanMu        sync.RWMutex
 	stopCh        chan struct{}
@@ -144,14 +145,12 @@ func (s *StorageManager) UsageByCategory() map[StorageCategory]int64 {
 // FileCount 返回当前已扫描的用户文件数量（不含内部目录）。
 // 由 ScanAndRecalculate 在每次全量扫描时更新。
 func (s *StorageManager) FileCount() int {
-	s.scanMu.RLock()
-	defer s.scanMu.RUnlock()
-	return int(s.userFileCount)
+	return int(s.userFileCount.Load())
 }
 
 // Clear 重置所有计数器为零。仅用于测试。
 func (s *StorageManager) Clear() {
-	s.userFileCount = 0
+	s.userFileCount.Store(0)
 	s.userFilesSize.Store(0)
 	s.chunkedSize.Store(0)
 	s.versionsSize.Store(0)
@@ -205,6 +204,10 @@ func (s *StorageManager) ScanAndRecalculate() error {
 			versions += size
 		case strings.HasPrefix(rel, cloudDirName+"/"):
 			cloud += size
+		case strings.HasPrefix(rel, downloadsDirName+"/"):
+			cloud += size
+		case strings.HasPrefix(rel, cloudArchiveDirName+"/"):
+			cloud += size
 		default:
 			userFiles += size
 			userFileCount++
@@ -221,7 +224,10 @@ func (s *StorageManager) ScanAndRecalculate() error {
 	s.versionsSize.Store(versions)
 	s.cloudSize.Store(cloud)
 	s.totalUsage.Store(userFiles + chunked + versions + cloud)
-	s.userFileCount = userFileCount
+	s.userFileCount.Store(userFileCount)
+
+	now := time.Now()
+	s.lastScanTime.Store(&now)
 
 	return nil
 }
@@ -284,13 +290,19 @@ func (s *StorageManager) periodicScan() {
 				s.logger.Info("storage usage recalibrated by periodic scan",
 					"before", before, "after", after, "delta", after-before)
 			}
+			now := time.Now()
+			s.lastScanTime.Store(&now)
 		case <-s.stopCh:
 			return
 		}
 	}
 }
 
-// Stop 停止定期扫描 goroutine，释放资源。多次调用安全。
+// LastScanTime 返回最近一次全量扫描完成时间。
+func (s *StorageManager) LastScanTime() *time.Time {
+	return s.lastScanTime.Load()
+}
+
 func (s *StorageManager) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)

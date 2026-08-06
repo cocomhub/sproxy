@@ -33,7 +33,9 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		h.logger.Warn("JSON encode error", "handler", "hubNodesHandler", "error", err)
+	}
 }
 
 // hubRemoveNodeHandler 踢出指定节点。
@@ -54,7 +56,9 @@ func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	h.routeTable.Remove(id)
 	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "removed", "node": string(id)})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "removed", "node": string(id)}); err != nil {
+		h.logger.Warn("JSON encode error", "handler", "hubRemoveNodeHandler", "error", err)
+	}
 }
 
 // hubStatsHandler 返回中继统计。
@@ -65,7 +69,9 @@ func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	count := h.routeTable.NodeCount()
 	w.Header().Set(headerContentType, contentTypeJSON)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"nodes_connected": count,
-	})
+	}); err != nil {
+		h.logger.Warn("JSON encode error", "handler", "hubStatsHandler", "error", err)
+	}
 }

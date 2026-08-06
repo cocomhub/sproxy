@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -32,11 +33,11 @@ type RelayRequest struct {
 
 // RelayResponse 是中继响应的 JSON 格式。
 type RelayResponse struct {
-	Status       int                 `json:"status"`
-	Headers      map[string][]string `json:"headers"`
-	Body         string              `json:"body"`
-	BodyIsBase64 bool                `json:"body_is_base64"`
-	Error        string              `json:"error,omitempty"`
+	Status       int             `json:"status"`
+	Headers      http.Header     `json:"headers"`
+	Body         json.RawMessage `json:"body"`
+	BodyIsBase64 bool            `json:"body_is_base64"`
+	Error        string          `json:"error,omitempty"`
 }
 
 // RelayHandler 通过 hub 路由表转发请求到目标节点。
@@ -123,7 +124,6 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeRelayError(w, fmt.Sprintf("转发失败: %v", err), http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
 
 	// 限制响应体大小：最大 8MB + 1MB 余量（确保单分块传输不被截断）
 	const maxRelayBody = 9 << 20 // 9 MB
@@ -133,10 +133,20 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeRelayError(w, "读取响应体失败", http.StatusInternalServerError)
 		return
 	}
+
+	// 排空剩余数据
+	if int64(len(body)) == maxRelayBody {
+		drainErr := drainWithTimeout(resp.Body, 5*time.Second)
+		if drainErr != nil {
+			h.logger.Warn("排空中继响应剩余数据失败", "target", req.Target, "error", drainErr)
+		}
+	}
+	resp.Body.Close()
+
 	result := RelayResponse{
 		Status:       resp.StatusCode,
 		Headers:      resp.Header,
-		Body:         bodyToString(body),
+		Body:         bodyToRawMessage(body),
 		BodyIsBase64: !utf8.Valid(body),
 	}
 
@@ -154,16 +164,39 @@ func bodyToString(body []byte) string {
 	return base64.StdEncoding.EncodeToString(body)
 }
 
+// bodyToRawMessage 将 body 转为 json.RawMessage。
+// 有效 UTF-8 直接返回字符串；二进制数据用 base64 编码。
+func bodyToRawMessage(body []byte) json.RawMessage {
+	if utf8.Valid(body) {
+		b, _ := json.Marshal(string(body))
+		return b
+	}
+	b, _ := json.Marshal(base64.StdEncoding.EncodeToString(body))
+	return b
+}
+
+// drainWithTimeout 在指定超时内排空 reader 的剩余数据。
+func drainWithTimeout(r io.Reader, timeout time.Duration) error {
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, r)
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("drain timeout after %v", timeout)
+	}
+}
+
 // validateRelayPath 校验中继请求的 path 字段，防止 SSRF 攻击。
 // 拒绝空 path、完整 URL（含 scheme）、路径穿越和绝对路径。
-func validateRelayPath(path string) error {
-	if path == "" {
+func validateRelayPath(relayPath string) error {
+	if relayPath == "" {
 		return fmt.Errorf("path 不能为空")
 	}
-	if strings.Contains(path, "..") {
-		return fmt.Errorf("path 不能包含路径穿越")
-	}
-	u, err := url.Parse(path)
+	u, err := url.Parse(relayPath)
 	if err != nil {
 		return fmt.Errorf("path 解析失败: %w", err)
 	}
@@ -172,6 +205,11 @@ func validateRelayPath(path string) error {
 	}
 	if u.Host != "" {
 		return fmt.Errorf("path 不能包含 host")
+	}
+	// 使用 path.Clean 清理路径，检查路径穿越
+	cleaned := path.Clean(u.Path)
+	if strings.HasPrefix(cleaned, "../") || cleaned == ".." {
+		return fmt.Errorf("path 包含路径穿越")
 	}
 	return nil
 }
