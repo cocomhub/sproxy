@@ -254,6 +254,8 @@ func (s *StorageManager) periodicScan() {
 	defer func() {
 		if r := recover(); r != nil {
 			s.logger.Error("periodic scan panicked, restarting", "recover", r)
+			// 先释放原始计数，再启动新 goroutine
+			s.wg.Done()
 			// 检查是否已停止，避免 goroutine 泄漏
 			select {
 			case <-s.stopCh:

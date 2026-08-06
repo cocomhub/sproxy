@@ -32,10 +32,11 @@ type RelayRequest struct {
 
 // RelayResponse 是中继响应的 JSON 格式。
 type RelayResponse struct {
-	Status     int                 `json:"status"`
-	Headers    map[string][]string `json:"headers"`
-	BodyBase64 string              `json:"body_base64"`
-	Error      string              `json:"error,omitempty"`
+	Status      int                 `json:"status"`
+	Headers     map[string][]string `json:"headers"`
+	Body        string              `json:"body"`
+	BodyIsBase64 bool               `json:"body_is_base64"`
+	Error       string              `json:"error,omitempty"`
 }
 
 // RelayHandler 通过 hub 路由表转发请求到目标节点。
@@ -133,10 +134,11 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := RelayResponse{
-		Status:     resp.StatusCode,
-		Headers:    resp.Header,
-		BodyBase64: bodyToString(body),
-	}
+			Status:       resp.StatusCode,
+			Headers:      resp.Header,
+			Body:         bodyToString(body),
+			BodyIsBase64: !utf8.Valid(body),
+		}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

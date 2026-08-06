@@ -323,8 +323,14 @@ func (h *Handlers) cleanupUploadingFilesLoop() {
 			return
 		case <-ticker.C:
 			h.uploadingFiles.Range(func(key, value any) bool {
-				filename := key.(string)
-				uploadID := value.(string)
+				filename, ok := key.(string)
+				if !ok {
+					return true
+				}
+				uploadID, ok := value.(string)
+				if !ok {
+					return true
+				}
 				// 普通 upload 条目 value 为 "upload"，无对应 session，跳过
 				if uploadID == "upload" {
 					return true

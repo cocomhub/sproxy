@@ -128,8 +128,8 @@ func TestRelayHandlerRoundTrip(t *testing.T) {
 	if resp.Status != http.StatusOK {
 		t.Fatalf("expected relay status 200, got %d", resp.Status)
 	}
-	if resp.BodyBase64 != "relay ok" {
-		t.Fatalf("expected relay body 'relay ok', got %q", resp.BodyBase64)
+	if resp.Body != "relay ok" {
+		t.Fatalf("expected relay body 'relay ok', got %q", resp.Body)
 	}
 	cancel()
 	<-srvErr
