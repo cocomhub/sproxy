@@ -211,6 +211,9 @@ func (c *Config) Validate() error {
 	if c.RateLimit.Enabled && c.RateLimit.Requests <= 0 {
 		return fmt.Errorf("rate_limit.enabled=true 但 requests=%d 无效，请设置大于 0 的值", c.RateLimit.Requests)
 	}
+	if c.RateLimit.Enabled && c.RateLimit.Window <= 0 {
+		return fmt.Errorf("rate_limit.enabled=true 但 window=%s 无效，请设置大于 0 的 duration", c.RateLimit.Window)
+	}
 	return nil
 }
 
@@ -257,6 +260,7 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func SaveConfig(cfg *Config, path string) error {
+	// TODO: 后续优化敏感信息管理（TunnelKey/AuthToken 脱敏）
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)

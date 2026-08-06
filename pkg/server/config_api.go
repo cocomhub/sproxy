@@ -44,6 +44,7 @@ func (h *Handlers) rebuildLogger(cfg *Config) {
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 	h.logger = logger
+	SetResponseLogger(logger)
 }
 
 // configResponse 是 GET /api/config 的响应体，脱敏返回运行时配置。
@@ -155,7 +156,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.RateLimitReq != nil {
-		if *req.RateLimitReq < 0 {
+		if *req.RateLimitReq <= 0 {
 			sendJSONResponse(w, map[string]any{"success": false, "message": "rate_limit_requests must be non-negative"}, http.StatusBadRequest)
 			return
 		}

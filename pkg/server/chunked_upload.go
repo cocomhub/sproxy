@@ -65,7 +65,7 @@ func (h *Handlers) checkExistingFileForInit(w http.ResponseWriter, filename, fil
 		sendJSONResponse(w, ChunkedInitResponse{
 			Success:  true,
 			UploadID: "already_exists",
-			Message:  fmt.Sprintf(errMsgFileExists, stat.Size()),
+			Message:  fmt.Sprintf(errFmtFileExists, stat.Size()),
 		}, http.StatusOK)
 		return true
 	}
@@ -351,10 +351,8 @@ func (h *Handlers) lookupUploadIDStatus(w http.ResponseWriter, uploadID, filenam
 	session := h.uploadStore.GetSession(uploadID)
 	if session != nil {
 		missing := MissingChunks(session)
-		finished := session.Completed
 		sendJSONResponse(w, ChunkStatusResponse{
 			Success:       true,
-			Finished:      finished,
 			UploadID:      session.UploadID,
 			ReceivedCount: len(session.ReceivedChunks) - len(missing),
 			TotalChunks:   session.TotalChunks,
@@ -414,11 +412,10 @@ func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, filename string)
 	if checksum, ok := h.checksumStore.Get(filename); ok {
 		sendJSONResponse(w, ChunkStatusResponse{
 			Success:      true,
-			Finished:     true,
 			Completed:    true,
 			FileChecksum: checksum,
 			Filename:     filename,
-			Message:      fmt.Sprintf(errMsgFileExists, stat.Size()),
+			Message:      fmt.Sprintf(errFmtFileExists, stat.Size()),
 		}, http.StatusOK)
 		return true
 	}
@@ -426,11 +423,10 @@ func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, filename string)
 	if cs, err := FileChecksum(filePath); err == nil {
 		sendJSONResponse(w, ChunkStatusResponse{
 			Success:      true,
-			Finished:     true,
 			Completed:    true,
 			FileChecksum: cs,
 			Filename:     filename,
-			Message:      fmt.Sprintf(errMsgFileExists, stat.Size()),
+			Message:      fmt.Sprintf(errFmtFileExists, stat.Size()),
 		}, http.StatusOK)
 		return true
 	}

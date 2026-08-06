@@ -26,11 +26,9 @@ func SetResponseLogger(l *slog.Logger) {
 }
 
 // UploadResponse 是通用响应结构。
-// Code 字段提供具体错误码，便于客户端区分不同语义。
 type UploadResponse struct {
 	Success  bool   `json:"success"`
 	Message  string `json:"message"`
-	Code     string `json:"code,omitempty"`
 	Checksum string `json:"file_checksum,omitempty"`
 }
 
@@ -45,7 +43,6 @@ type ChunkedInitResponse struct {
 // ChunkStatusResponse 分块上传状态查询响应。
 type ChunkStatusResponse struct {
 	Success       bool   `json:"success"`
-	Finished      bool   `json:"finished,omitempty"`
 	UploadID      string `json:"upload_id,omitempty"`
 	ReceivedCount int    `json:"received_count,omitempty"`
 	TotalChunks   int    `json:"total_chunks,omitempty"`
@@ -73,11 +70,16 @@ type ChunkCompleteResponse struct {
 }
 
 func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
+	w.Header().Set(headerContentType, contentTypeJSON)
+	buf, err := json.Marshal(response)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
 		responseLogger.Load().Warn("Encode JSON response failed", "error", err)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
+		return
 	}
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(buf)
 }
 
 // formatContentDisposition 使用标准库安全地构造 Content-Disposition 头。

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -124,108 +125,51 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 
-	fmt.Fprintf(w, "# HELP sproxy_requests_total Total HTTP requests\n")
-	fmt.Fprintf(w, "# TYPE sproxy_requests_total counter\n")
-	fmt.Fprintf(w, "sproxy_requests_total %d\n\n", m.RequestsTotal.Load())
+	var b strings.Builder
+	writeMetric(&b, "sproxy_requests_total", "counter", "Total HTTP requests", m.RequestsTotal.Load())
+	writeMetric(&b, "sproxy_requests_2xx", "counter", "HTTP 2xx requests", m.Requests2XX.Load())
+	writeMetric(&b, "sproxy_requests_4xx", "counter", "HTTP 4xx requests", m.Requests4XX.Load())
+	writeMetric(&b, "sproxy_requests_5xx", "counter", "HTTP 5xx requests", m.Requests5XX.Load())
+	writeMetric(&b, "sproxy_bytes_uploaded", "counter", "Total bytes uploaded", m.BytesUploaded.Load())
+	writeMetric(&b, "sproxy_bytes_downloaded", "counter", "Total bytes downloaded", m.BytesDownloaded.Load())
+	writeMetric(&b, "sproxy_active_connections", "gauge", "Currently active connections", m.ActiveConnections.Load())
+	writeMetric(&b, "sproxy_files_uploaded", "counter", "Total files uploaded", m.FilesUploaded.Load())
+	writeMetric(&b, "sproxy_files_downloaded", "counter", "Total files downloaded", m.FilesDownloaded.Load())
+	writeMetric(&b, "sproxy_files_deleted", "counter", "Total files deleted", m.FilesDeleted.Load())
 
-	fmt.Fprintf(w, "# HELP sproxy_requests_2xx HTTP 2xx requests\n")
-	fmt.Fprintf(w, "# TYPE sproxy_requests_2xx counter\n")
-	fmt.Fprintf(w, "sproxy_requests_2xx %d\n\n", m.Requests2XX.Load())
-
-	fmt.Fprintf(w, "# HELP sproxy_requests_4xx HTTP 4xx requests\n")
-	fmt.Fprintf(w, "# TYPE sproxy_requests_4xx counter\n")
-	fmt.Fprintf(w, "sproxy_requests_4xx %d\n\n", m.Requests4XX.Load())
-
-	fmt.Fprintf(w, "# HELP sproxy_requests_5xx HTTP 5xx requests\n")
-	fmt.Fprintf(w, "# TYPE sproxy_requests_5xx counter\n")
-	fmt.Fprintf(w, "sproxy_requests_5xx %d\n\n", m.Requests5XX.Load())
-
-	fmt.Fprintf(w, "# HELP sproxy_bytes_uploaded Total bytes uploaded\n")
-	fmt.Fprintf(w, "# TYPE sproxy_bytes_uploaded counter\n")
-	fmt.Fprintf(w, "sproxy_bytes_uploaded %d\n\n", m.BytesUploaded.Load())
-
-	fmt.Fprintf(w, "# HELP sproxy_bytes_downloaded Total bytes downloaded\n")
-	fmt.Fprintf(w, "# TYPE sproxy_bytes_downloaded counter\n")
-	fmt.Fprintf(w, "sproxy_bytes_downloaded %d\n\n", m.BytesDownloaded.Load())
-
-	fmt.Fprintf(w, "# HELP sproxy_active_connections Currently active connections\n")
-	fmt.Fprintf(w, "# TYPE sproxy_active_connections gauge\n")
-	fmt.Fprintf(w, "sproxy_active_connections %d\n\n", m.ActiveConnections.Load())
-
-	fmt.Fprintf(w, "# HELP sproxy_files_uploaded Total files uploaded\n")
-	fmt.Fprintf(w, "# TYPE sproxy_files_uploaded counter\n")
-	fmt.Fprintf(w, "sproxy_files_uploaded %d\n\n", m.FilesUploaded.Load())
-
-	fmt.Fprintf(w, "# HELP sproxy_files_downloaded Total files downloaded\n")
-	fmt.Fprintf(w, "# TYPE sproxy_files_downloaded counter\n")
-	fmt.Fprintf(w, "sproxy_files_downloaded %d\n\n", m.FilesDownloaded.Load())
-
-	fmt.Fprintf(w, "# HELP sproxy_files_deleted Total files deleted\n")
-	fmt.Fprintf(w, "# TYPE sproxy_files_deleted counter\n")
-	fmt.Fprintf(w, "sproxy_files_deleted %d\n\n", m.FilesDeleted.Load())
 	// Mux 级指标（从 RouteTable 实时聚合）
 	if mm := h.aggregateMuxMetrics(); mm != nil {
-		fmt.Fprintf(w, "# HELP sproxy_mux_streams_opened Mux streams opened\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_streams_opened counter\n")
-		fmt.Fprintf(w, "sproxy_mux_streams_opened %d\n\n", mm.Streams.Opened.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_bytes_read Mux bytes read\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_bytes_read counter\n")
-		fmt.Fprintf(w, "sproxy_mux_bytes_read %d\n\n", mm.Streams.BytesRead.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_bytes_written Mux bytes written\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_bytes_written counter\n")
-		fmt.Fprintf(w, "sproxy_mux_bytes_written %d\n\n", mm.Streams.BytesWritten.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_frames_sent Mux frames sent\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_frames_sent counter\n")
-		fmt.Fprintf(w, "sproxy_mux_frames_sent %d\n\n", mm.FramesSent.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_frames_received Mux frames received\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_frames_received counter\n")
-		fmt.Fprintf(w, "sproxy_mux_frames_received %d\n\n", mm.FramesReceived.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_pings_sent Mux pings sent\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_pings_sent counter\n")
-		fmt.Fprintf(w, "sproxy_mux_pings_sent %d\n\n", mm.PingsSent.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_pongs_received Mux pongs received\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_pongs_received counter\n")
-		fmt.Fprintf(w, "sproxy_mux_pongs_received %d\n\n", mm.PongsReceived.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_errors Mux errors\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_errors counter\n")
-		fmt.Fprintf(w, "sproxy_mux_errors %d\n\n", mm.Errors.Load())
-		fmt.Fprintf(w, "# HELP sproxy_mux_stream_errors Mux stream errors\n")
-		fmt.Fprintf(w, "# TYPE sproxy_mux_stream_errors counter\n")
-		fmt.Fprintf(w, "sproxy_mux_stream_errors %d\n\n", mm.Streams.Errors.Load())
+		writeMetric(&b, "sproxy_mux_streams_opened", "counter", "Mux streams opened", mm.Streams.Opened.Load())
+		writeMetric(&b, "sproxy_mux_bytes_read", "counter", "Mux bytes read", mm.Streams.BytesRead.Load())
+		writeMetric(&b, "sproxy_mux_bytes_written", "counter", "Mux bytes written", mm.Streams.BytesWritten.Load())
+		writeMetric(&b, "sproxy_mux_frames_sent", "counter", "Mux frames sent", mm.FramesSent.Load())
+		writeMetric(&b, "sproxy_mux_frames_received", "counter", "Mux frames received", mm.FramesReceived.Load())
+		writeMetric(&b, "sproxy_mux_pings_sent", "counter", "Mux pings sent", mm.PingsSent.Load())
+		writeMetric(&b, "sproxy_mux_pongs_received", "counter", "Mux pongs received", mm.PongsReceived.Load())
+		writeMetric(&b, "sproxy_mux_errors", "counter", "Mux errors", mm.Errors.Load())
+		writeMetric(&b, "sproxy_mux_stream_errors", "counter", "Mux stream errors", mm.Streams.Errors.Load())
 	}
 	// Hub 级指标
 	if rt := h.routeTable; rt != nil {
-		fmt.Fprintf(w, "# HELP sproxy_hub_nodes_connected Current number of connected relay nodes\n")
-		fmt.Fprintf(w, "# TYPE sproxy_hub_nodes_connected gauge\n")
-		fmt.Fprintf(w, "sproxy_hub_nodes_connected %d\n\n", rt.NodeCount())
+		writeMetric(&b, "sproxy_hub_nodes_connected", "gauge", "Current number of connected relay nodes", int64(rt.NodeCount()))
 	}
 	// 云端下载指标
 	if cm := h.cloudMgr; cm != nil && cm.metrics != nil {
-		m := cm.metrics
-		fmt.Fprintf(w, "# HELP sproxy_cloud_tasks_created Total cloud download tasks created\n")
-		fmt.Fprintf(w, "# TYPE sproxy_cloud_tasks_created counter\n")
-		fmt.Fprintf(w, "sproxy_cloud_tasks_created %d\n\n", m.TasksCreated.Load())
-
-		fmt.Fprintf(w, "# HELP sproxy_cloud_tasks_completed Total cloud download tasks completed\n")
-		fmt.Fprintf(w, "# TYPE sproxy_cloud_tasks_completed counter\n")
-		fmt.Fprintf(w, "sproxy_cloud_tasks_completed %d\n\n", m.TasksCompleted.Load())
-
-		fmt.Fprintf(w, "# HELP sproxy_cloud_tasks_failed Total cloud download tasks failed\n")
-		fmt.Fprintf(w, "# TYPE sproxy_cloud_tasks_failed counter\n")
-		fmt.Fprintf(w, "sproxy_cloud_tasks_failed %d\n\n", m.TasksFailed.Load())
-
-		fmt.Fprintf(w, "# HELP sproxy_cloud_tasks_cancelled Total cloud download tasks cancelled\n")
-		fmt.Fprintf(w, "# TYPE sproxy_cloud_tasks_cancelled counter\n")
-		fmt.Fprintf(w, "sproxy_cloud_tasks_cancelled %d\n\n", m.TasksCancelled.Load())
-
-		fmt.Fprintf(w, "# HELP sproxy_cloud_bytes_downloaded Total bytes downloaded by cloud downloader\n")
-		fmt.Fprintf(w, "# TYPE sproxy_cloud_bytes_downloaded counter\n")
-		fmt.Fprintf(w, "sproxy_cloud_bytes_downloaded %d\n\n", m.BytesDownloaded.Load())
-
-		fmt.Fprintf(w, "# HELP sproxy_cloud_active_downloads Currently active cloud downloads\n")
-		fmt.Fprintf(w, "# TYPE sproxy_cloud_active_downloads gauge\n")
-		fmt.Fprintf(w, "sproxy_cloud_active_downloads %d\n\n", m.ActiveDownloads.Load())
+		cmMetrics := cm.metrics
+		writeMetric(&b, "sproxy_cloud_tasks_created", "counter", "Total cloud download tasks created", cmMetrics.TasksCreated.Load())
+		writeMetric(&b, "sproxy_cloud_tasks_completed", "counter", "Total cloud download tasks completed", cmMetrics.TasksCompleted.Load())
+		writeMetric(&b, "sproxy_cloud_tasks_failed", "counter", "Total cloud download tasks failed", cmMetrics.TasksFailed.Load())
+		writeMetric(&b, "sproxy_cloud_tasks_cancelled", "counter", "Total cloud download tasks cancelled", cmMetrics.TasksCancelled.Load())
+		writeMetric(&b, "sproxy_cloud_bytes_downloaded", "counter", "Total bytes downloaded by cloud downloader", cmMetrics.BytesDownloaded.Load())
+		writeMetric(&b, "sproxy_cloud_active_downloads", "gauge", "Currently active cloud downloads", cmMetrics.ActiveDownloads.Load())
 	}
+
+	_, _ = w.Write([]byte(b.String()))
+}
+
+// writeMetric 写入一个 Prometheus 格式的指标到 strings.Builder。
+func writeMetric(b *strings.Builder, name, typ, help string, value int64) {
+	fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s %s\n%s %d\n\n", name, help, name, typ, name, value)
 }
 
 // metricsResponseWriter 包装 http.ResponseWriter，捕获状态码。

@@ -5,7 +5,7 @@ package server
 
 import (
 	"crypto/sha256"
-	"fmt"
+	"encoding/hex"
 	"io"
 	"os"
 )
@@ -15,10 +15,10 @@ import (
 // 返回的 hex 字符串均为小写字符。
 func Checksum(src io.Reader) (string, error) {
 	dst := sha256.New()
-	if _, err := io.Copy(dst, src); err != nil {
+	if _, err := io.CopyBuffer(dst, src, make([]byte, 256*1024)); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%x", dst.Sum(nil)), nil
+	return hex.EncodeToString(dst.Sum(nil)), nil
 }
 
 // FileChecksum 计算文件的 SHA-256 十六进制摘要。
