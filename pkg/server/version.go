@@ -225,7 +225,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 先保存当前版本（回滚前备份），备份失败时返回 500 拒绝执行恢复
-	if _, err := h.saveVersion(remotePath, cfg.UploadsDir); err != nil {
+	if _, err = h.saveVersion(remotePath, cfg.UploadsDir); err != nil {
 		h.logger.Error("恢复版本前备份失败", "file_name", remotePath, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复版本前备份失败，已中止"}, http.StatusInternalServerError)
 		return

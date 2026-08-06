@@ -28,6 +28,7 @@ func TestFormatContentDisposition_SpecialChars(t *testing.T) {
 	if strings.Contains(result, `filename="`) {
 		// 标准库 mime.FormatMediaType 会正确处理特殊字符
 		// 文件名中的 " 会被编码为 %22
+		_ = result // 静默检查，避免 SA9003
 	}
 }
 

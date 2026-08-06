@@ -253,7 +253,8 @@ func TestUploadChunk_Idempotent(t *testing.T) {
 	// 第二次上传同样的分块，应该幂等成功
 	resp := uploadChunk(t, url, uploadID, 0, chunkCS, fileData)
 	var result ChunkUploadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	var err error
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	resp.Body.Close()
@@ -618,7 +619,7 @@ func initSessionEx(t *testing.T, baseURL, filename string, totalSize, chunkSize 
 	}
 	defer resp.Body.Close()
 	var result ChunkedInitResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if !result.Success {
@@ -780,7 +781,7 @@ func TestChunkedUpload_MultiChunkLargeFile(t *testing.T) {
 	defer resp.Body.Close()
 
 	var result ChunkCompleteResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if !result.Success {
@@ -816,7 +817,7 @@ func TestChunkedUpload_ResumeAfterInterrupt(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 	var status ChunkStatusResponse
-	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+	if err = json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	statusResp.Body.Close()
@@ -844,7 +845,7 @@ func TestChunkedUpload_ResumeAfterInterrupt(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var result ChunkCompleteResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if !result.Success {
@@ -1056,7 +1057,7 @@ func TestChunkedUpload_Resume(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 	var status ChunkStatusResponse
-	if err := json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+	if err = json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	statusResp.Body.Close()
@@ -1087,7 +1088,7 @@ func TestChunkedUpload_Resume(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var result ChunkCompleteResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if !result.Success {
@@ -1191,7 +1192,7 @@ func doUploadInit(t *testing.T, baseURL, filename string, totalSize int64, fileC
 	}
 	defer resp.Body.Close()
 	var result ChunkedInitResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode doUploadInit response: %v", err)
 	}
 	return result
@@ -1286,7 +1287,7 @@ func TestMergeAndRenameFile_FullFlow(t *testing.T) {
 	defer resp.Body.Close()
 
 	var result ChunkCompleteResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if !result.Success {

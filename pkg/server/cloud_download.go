@@ -238,9 +238,9 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 
 	m.logger.Info("starting async cloud download", "task_id", task.ID, "url", url, "size", totalSize)
 	// 异步下载：goroutine 执行，wg.Add(1) 在 go 之前确保不竞态
-	//nolint:gosec // G118: 异步下载需要独立 context，不受请求生命周期限制
+	//nolint:gosec
 	m.wg.Add(1)
-	go m.executeDownload(context.Background(), task)
+	go m.executeDownload(context.Background(), task) //nolint:gosec
 	return task, nil
 }
 
@@ -310,7 +310,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			//nolint:gosec // G118: 断线后异步继续需要独立 context
 			// wg.Add(1) 在 go 之前确保不竞态
 			m.wg.Add(1)
-			go m.executeDownload(context.Background(), task)
+			go m.executeDownload(context.Background(), task) //nolint:gosec
 			return
 		}
 		if dlCtx.Err() != nil {

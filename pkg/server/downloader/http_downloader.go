@@ -76,7 +76,7 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	// DNS 重绑定攻击防御：二次验证实际连接 IP 是否安全。
 	// 下载前 ValidateURLHost 已解析一次，但 DNS 可能在两次解析间变化。
 	// 此处验证 resp.Request.URL 的 host（可能因重定向而改变）。
-	if err := validateURLHostAfterDo(resp.Request.URL); err != nil {
+	if err2 := validateURLHostAfterDo(resp.Request.URL); err2 != nil {
 		// 排空响应体再返回
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, fmt.Errorf("ssrf post-request: %w", err)
@@ -102,7 +102,7 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	tmpPath := destPath + ".tmp." + randomHex(8)
 	// 确保目标目录存在
 	if dir := filepath.Dir(destPath); dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err2 := os.MkdirAll(dir, 0755); err2 != nil {
 			return nil, fmt.Errorf("create parent dir: %w", err)
 		}
 	}

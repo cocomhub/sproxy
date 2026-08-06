@@ -79,7 +79,7 @@ func TestShare_Expired(t *testing.T) {
 	defer resp.Body.Close()
 
 	var shareResp map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&shareResp); err != nil {
+	if err2 := json.NewDecoder(resp.Body).Decode(&shareResp); err2 != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	token, _ := shareResp["token"].(string)
@@ -213,7 +213,7 @@ func TestShare_OneTime(t *testing.T) {
 	defer resp.Body.Close()
 
 	var shareResp map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&shareResp); err != nil {
+	if err2 := json.NewDecoder(resp.Body).Decode(&shareResp); err2 != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	token := shareResp["token"].(string)
@@ -324,7 +324,7 @@ func TestShare_Revoke(t *testing.T) {
 	}
 
 	var shareResp map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&shareResp); err != nil {
+	if err2 := json.NewDecoder(resp.Body).Decode(&shareResp); err2 != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	resp.Body.Close()
