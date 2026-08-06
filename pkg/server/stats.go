@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // DiskUsageStats 磁盘使用统计。
@@ -36,12 +37,13 @@ type StatsResponse struct {
 	BytesDownloaded int64          `json:"bytes_downloaded"`
 
 	// 存储空间统计
-	MaxStorageBytes  int64 `json:"max_storage_bytes"`
-	StorageUsage     int64 `json:"storage_usage"`
-	StorageUserFiles int64 `json:"storage_user_files"`
-	StorageChunked   int64 `json:"storage_chunked"`
-	StorageVersions  int64 `json:"storage_versions"`
-	StorageCloud     int64 `json:"storage_cloud"`
+	MaxStorageBytes  int64      `json:"max_storage_bytes"`
+	StorageUsage     int64      `json:"storage_usage"`
+	StorageUserFiles int64      `json:"storage_user_files"`
+	StorageChunked   int64      `json:"storage_chunked"`
+	StorageVersions  int64      `json:"storage_versions"`
+	StorageCloud     int64      `json:"storage_cloud"`
+	ScannedAt        *time.Time `json:"scanned_at"`
 
 	// 磁盘统计
 	DiskTotal int64 `json:"disk_total"`
@@ -50,8 +52,9 @@ type StatsResponse struct {
 }
 
 // statsHandler 处理 GET /api/stats。
-// 文件数/总大小通过轻量 WalkDir 遍历获取（仅统计用户文件，跳过内部目录）。
+// 文件数/总大小通过轻量 WalkDir 遍历获取（仅统计用户文件，跳过内部目录），确保实时准确性。
 // 各分类存储使用量由 StorageManager 缓存提供（已由定期扫描校准），避免每次请求遍历全目录计算分类大小。
+// 首次扫描完成前，storageMgr 相关字段返回 503 Service Unavailable。
 func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 	m := h.metrics
@@ -85,13 +88,31 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
+	scannedAt := h.storageMgr.LastScanTime()
+	if scannedAt == nil {
+		sendJSONResponse(w, map[string]any{
+			"success": false, "message": "存储统计尚未完成首次扫描，请稍后重试",
+		}, http.StatusServiceUnavailable)
+		return
+	}
+
 	resp := StatsResponse{
 		DiskUsage: DiskUsageStats{
 			UploadsDir: cfg.UploadsDir,
 			TotalFiles: totalFiles,
 			TotalSize:  totalSize,
 		},
+		MaxStorageBytes:  h.storageMgr.MaxBytes(),
+		StorageUsage:     h.storageMgr.Usage(),
+		StorageUserFiles: int64(h.storageMgr.FileCount()),
+		ScannedAt:        scannedAt,
 	}
+
+	usageByCat := h.storageMgr.UsageByCategory()
+	resp.StorageUserFiles = usageByCat[CategoryUserFiles]
+	resp.StorageChunked = usageByCat[CategoryChunked]
+	resp.StorageVersions = usageByCat[CategoryVersions]
+	resp.StorageCloud = usageByCat[CategoryCloud]
 
 	if m != nil {
 		resp.ActiveConns = m.ActiveConnections.Load()
@@ -106,17 +127,6 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 			Status4xx: m.Requests4XX.Load(),
 			Status5xx: m.Requests5XX.Load(),
 		}
-	}
-
-	// 存储空间统计 — 从 StorageManager 缓存读取（已由定期扫描校准），避免每次请求遍历全目录计算分类大小
-	if h.storageMgr != nil {
-		resp.MaxStorageBytes = h.storageMgr.MaxBytes()
-		resp.StorageUsage = h.storageMgr.Usage()
-		usageByCat := h.storageMgr.UsageByCategory()
-		resp.StorageUserFiles = usageByCat[CategoryUserFiles]
-		resp.StorageChunked = usageByCat[CategoryChunked]
-		resp.StorageVersions = usageByCat[CategoryVersions]
-		resp.StorageCloud = usageByCat[CategoryCloud]
 	}
 
 	// 磁盘统计

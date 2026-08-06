@@ -137,6 +137,7 @@ func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]
 		}
 		info, err := e.Info()
 		if err != nil {
+			h.logger.Warn("读取文件信息失败，跳过", "name", e.Name(), "error", err)
 			continue
 		}
 		fi := fileInfo{
@@ -174,7 +175,7 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entries, err := os.ReadDir(targetDir)
-	h.logger.Info("读取目录", "dir", targetDir)
+	h.logger.Debug("读取目录", "dir", targetDir)
 	if os.IsNotExist(err) {
 		sendJSONResponse(w, listResponse{Files: []fileInfo{}, Total: 0, Offset: offset, Limit: limit}, http.StatusOK)
 		return
@@ -216,7 +217,8 @@ func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	csMap := h.checksumStore.GetAll()
 
 	results := h.collectSearchResults(cfg.UploadsDir, qLower, csMap)
-	sendJSONResponse(w, map[string]any{"files": results}, http.StatusOK)
+	resp := listResponse{Files: results, Total: len(results), Offset: 0, Limit: len(results)}
+	sendJSONResponse(w, resp, http.StatusOK)
 }
 
 // collectSearchResults 递归搜索 uploads_dir 下文件名包含 queryLower 的文件。
@@ -231,6 +233,7 @@ func (h *Handlers) collectSearchResults(rootsDir, queryLower string, csMap map[s
 // searchWalkDirCallback 是 collectSearchResults 中 filepath.WalkDir 的回调函数。
 func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, err error, queryLower string, csMap map[string]string, results *[]fileInfo) error {
 	if err != nil {
+		h.logger.Warn("搜索时访问路径失败", "path", path, "error", err)
 		return nil
 	}
 	rel, _ := filepath.Rel(rootsDir, path)

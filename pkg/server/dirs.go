@@ -76,6 +76,25 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 再次检查，确认目录未被替换（TOCTOU 防御）
+	stat2, err := os.Lstat(targetDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
+		} else {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "访问目录失败"}, http.StatusInternalServerError)
+		}
+		return
+	}
+	if stat2.Mode()&os.ModeSymlink != 0 {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "不允许删除符号链接"}, http.StatusBadRequest)
+		return
+	}
+	if !stat2.IsDir() {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "指定路径不是目录"}, http.StatusBadRequest)
+		return
+	}
+
 	// force 必须为 true 才执行删除（避免误删）
 	force := r.URL.Query().Get("force") == "true"
 	if !force {
@@ -91,6 +110,7 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 清理 checksum store 中该目录下所有文件的记录
+	// 使用 "/" 分隔符，与 ChecksumStore 的 key 格式约定保持一致（所有 key 使用 filepath.ToSlash 格式）
 	h.checksumStore.DeletePrefix(remotePath + "/")
 	// 清理目录自身的 checksum 记录（如果存在）
 	h.checksumStore.Delete(remotePath)
