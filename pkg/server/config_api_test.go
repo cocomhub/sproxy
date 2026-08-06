@@ -224,7 +224,7 @@ func TestConfig_UpdateEmptyBody(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	if result["error"] != "empty request body: no fields to update" {
-		t.Errorf("expected error message about empty body, got %v", result["error"])
+	if result["message"] != "empty request body: no fields to update" {
+		t.Errorf("expected error message about empty body, got %v", result["message"])
 	}
 }

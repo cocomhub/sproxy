@@ -70,6 +70,8 @@ func (s *StorageManager) TryReserve(size int64, cat StorageCategory) error {
 	if size <= 0 {
 		return nil
 	}
+	// 使用 label break 避免内层循环 CAS 成功后回到外层再 CAS 一次导致双倍计数。
+outer:
 	for {
 		max := s.maxBytes.Load()
 		current := s.totalUsage.Load()
@@ -94,7 +96,7 @@ func (s *StorageManager) TryReserve(size int64, cat StorageCategory) error {
 				return ErrStorageFull
 			}
 			if s.totalUsage.CompareAndSwap(current, current+size) {
-				break
+				break outer
 			}
 		}
 	}
@@ -128,8 +130,8 @@ func (s *StorageManager) Usage() int64 {
 
 // UsageByCategory 返回各分类的使用量。
 func (s *StorageManager) UsageByCategory() map[StorageCategory]int64 {
-	s.scanMu.RLock()
-	defer s.scanMu.RUnlock()
+	// atomic 读取本身就线程安全，且无跨字段一致性需求，无需 scanMu 保护。
+	// 移除 scanMu 锁避免与 ScanAndRecalculate 的写锁争用。
 	return map[StorageCategory]int64{
 		CategoryUserFiles: s.userFilesSize.Load(),
 		CategoryChunked:   s.chunkedSize.Load(),
