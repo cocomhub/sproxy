@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -100,11 +101,6 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 重复检测与版本管理
-	if h.handleDuplicateFile(w, filePath, expectedChecksum, remotePath) {
-		return
-	}
-
 	// 并发上传防护：防止同一文件被多个上传请求同时写入导致 OOM
 	if _, loaded := h.uploadingFiles.LoadOrStore(remotePath, "upload"); loaded {
 		logger.Warn("文件正在上传中，拒绝并发上传", "file_name", remotePath)
@@ -113,8 +109,13 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.uploadingFiles.Delete(remotePath)
 
+	// 重复检测与版本管理
+	if h.handleDuplicateFile(w, filePath, expectedChecksum, remotePath) {
+		return
+	}
+
 	// 原子写入 + 流式哈希
-	serverChecksum, _, err := writeFileAtomically(filePath, file)
+	serverChecksum, _, err := writeFileAtomically(r.Context(), filePath, file)
 	if err != nil {
 		logger.Error("保存文件失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
@@ -143,7 +144,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 // writeFileAtomically 将 src 原子写入 dstPath，同时计算 SHA-256 哈希。
 // 先写到唯一临时文件，再 os.Rename，防止部分写入与并发冲突。
-func writeFileAtomically(dstPath string, src io.Reader) (checksum string, written int64, err error) {
+func writeFileAtomically(ctx context.Context, dstPath string, src io.Reader) (checksum string, written int64, err error) {
 	tmpFile, err := os.CreateTemp(filepath.Dir(dstPath), filepath.Base(dstPath)+".tmp.*")
 	if err != nil {
 		return "", 0, fmt.Errorf("创建临时文件失败: %w", err)
@@ -159,7 +160,7 @@ func writeFileAtomically(dstPath string, src io.Reader) (checksum string, writte
 	hash.Reset()
 	defer hashPool.Put(hash)
 	mw := io.MultiWriter(tmpFile, hash)
-	written, err = io.Copy(mw, src)
+	written, err = copyWithContext(mw, src, ctx)
 	if err != nil {
 		tmpFile.Close()
 		return "", written, fmt.Errorf("写入临时文件失败: %w", err)
@@ -179,7 +180,7 @@ func writeFileAtomically(dstPath string, src io.Reader) (checksum string, writte
 func (h *Handlers) resolveFilePath(w http.ResponseWriter, filename string) (remotePath, fullPath string, ok bool) {
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
 		return "", "", false
 	}
 	fullPath = h.safePath(remotePath)
@@ -260,4 +261,31 @@ func atomicRename(src, dst string) error {
 		time.Sleep(baseDelay << i)
 	}
 	return nil
+}
+
+// copyWithContext 是 context-aware 的 io.Copy，每次 Read/Write 前检查 ctx.Done()。
+func copyWithContext(w io.Writer, r io.Reader, ctx context.Context) (int64, error) {
+	var total int64
+	buf := make([]byte, 32*1024)
+	for {
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		default:
+		}
+		n, err := r.Read(buf)
+		if n > 0 {
+			nn, werr := w.Write(buf[:n])
+			total += int64(nn)
+			if werr != nil {
+				return total, werr
+			}
+		}
+		if err == io.EOF {
+			return total, nil
+		}
+		if err != nil {
+			return total, err
+		}
+	}
 }

@@ -284,7 +284,7 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 原子写入 + 流式哈希（复用 writeFileAtomically 写临时文件）
-	serverChecksum, written, err := writeFileAtomically(chunkPath, file)
+	serverChecksum, written, err := writeFileAtomically(r.Context(), chunkPath, file)
 	if err != nil {
 		h.logger.Error("写入 chunk 失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "写入分块失败"}, http.StatusInternalServerError)
