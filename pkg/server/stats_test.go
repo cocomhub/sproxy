@@ -151,7 +151,6 @@ func TestStorageConfig_Put(t *testing.T) {
 		t.Errorf("expected success=true, changed=true, got success=%v changed=%v", raw["success"], raw["changed"])
 	}
 
-
 	// 验证 storageMgr 上限已更新
 	cfg := cfgPtr.Load()
 	if cfg.MaxStorageBytes != 21474836480 {

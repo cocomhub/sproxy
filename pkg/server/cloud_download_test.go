@@ -862,7 +862,9 @@ func TestCloudDownloadManager_ClientDisconnectDownloadContinues(t *testing.T) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
 		w.WriteHeader(http.StatusOK)
 		for i := range content {
-			if _, err := w.Write(content[i : i+1]); err != nil { return }
+			if _, err := w.Write(content[i : i+1]); err != nil {
+				return
+			}
 			time.Sleep(5 * time.Millisecond)
 		}
 	}))
