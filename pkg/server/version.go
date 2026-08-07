@@ -8,10 +8,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -38,6 +40,8 @@ func (h *Handlers) saveVersion(remotePath, uploadsDir string) (int64, error) {
 	}
 
 	versionID := time.Now().UnixNano()
+	// 添加随机后缀（0-999），防止同一纳秒内多个请求产生冲突
+	versionID = versionID*1000 + int64(rand.IntN(1000))
 	verDir := joinSafePath(uploadsDir, filepath.Join(versionsDirName, remotePath))
 	if verDir == "" {
 		return 0, fmt.Errorf("保存版本: 无效的版本目录路径: %s/%s", versionsDirName, remotePath)
@@ -60,9 +64,30 @@ func (h *Handlers) saveVersion(remotePath, uploadsDir string) (int64, error) {
 	}
 	defer dst.Close()
 
-	if _, err = io.Copy(dst, src); err != nil {
+	// 流式计算 checksum：一边复制一边计算 SHA-256，避免重复读取
+	hasher := sha256.New()
+	multiWriter := io.MultiWriter(dst, hasher)
+	if _, err = io.Copy(multiWriter, src); err != nil {
 		os.Remove(verPath)
 		return 0, fmt.Errorf("复制版本文件失败: %w", err)
+	}
+	checksum := hex.EncodeToString(hasher.Sum(nil))
+
+	// 写入 checksumStore
+	csKey := fmt.Sprintf("__version__/%s/%d", remotePath, versionID)
+	h.checksumStore.Set(csKey, checksum)
+
+	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
+	if err := dst.Sync(); err != nil {
+		os.Remove(verPath)
+		return 0, fmt.Errorf("同步版本文件失败: %w", err)
+	}
+
+	// 同步父目录确保目录元数据落盘
+	// 注意：syncParentDir 在 Windows 上可能失败（EINVAL/Access Denied），
+	// 文件已成功写入磁盘，父目录 sync 是优化而非必要步骤，不应阻断流程。
+	if err := syncParentDir(verPath); err != nil {
+		h.logger.Warn("同步版本文件父目录失败", "path", verPath, "error", err)
 	}
 
 	// 清理超出上限的旧版本
@@ -92,13 +117,28 @@ func (h *Handlers) cleanupOldVersions(remotePath, uploadsDir string) {
 		return
 	}
 
-	// 按文件名（时间戳）排序，删除最旧的
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
+	// 按文件名（UnixNano 时间戳）排序，删除最旧的
+	// 使用 ParseInt 解析为 int64 后做数值比较，消除字符串字典序与数值序不一致的隐患。
+	// 使用 SliceStable 保持相等元素的原始顺序，避免排序不稳定带来的不确定性。
+	sort.SliceStable(entries, func(i, j int) bool {
+		vi, erri := strconv.ParseInt(entries[i].Name(), 10, 64)
+		vj, errj := strconv.ParseInt(entries[j].Name(), 10, 64)
+		if erri != nil && errj != nil {
+			return false
+		}
+		if erri != nil {
+			return false
+		}
+		if errj != nil {
+			return true
+		}
+		return vi < vj
 	})
 	excess := len(entries) - cfg.Versioning.MaxVersions
 	for i := range excess {
-		_ = os.Remove(filepath.Join(verDir, entries[i].Name()))
+		if err := os.Remove(filepath.Join(verDir, entries[i].Name())); err != nil {
+			h.logger.Warn("删除旧版本文件失败", "path", filepath.Join(verDir, entries[i].Name()), "error", err)
+		}
 	}
 }
 
@@ -142,8 +182,10 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		var versionID int64
-		_, _ = fmt.Sscanf(e.Name(), "%d", &versionID)
+		versionID, err := strconv.ParseInt(e.Name(), 10, 64)
+		if err != nil {
+			continue
+		}
 
 		fi := VersionInfo{
 			Filename:  filepath.ToSlash(remotePath),
@@ -199,8 +241,12 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 先保存当前版本（回滚前备份）
-	_, _ = h.saveVersion(remotePath, cfg.UploadsDir)
+	// 先保存当前版本（回滚前备份），备份失败时返回 500 拒绝执行恢复
+	if _, err = h.saveVersion(remotePath, cfg.UploadsDir); err != nil {
+		h.logger.Error("恢复版本前备份失败", "file_name", remotePath, "error", err)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复版本前备份失败，已中止"}, http.StatusInternalServerError)
+		return
+	}
 
 	// 拷贝版本文件到目标位置
 	src, err := os.Open(verFile)
@@ -221,9 +267,13 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
 		return
 	}
+	if syncErr := dst.Sync(); syncErr != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "同步文件失败"}, http.StatusInternalServerError)
+		return
+	}
 
 	// 更新 checksum
-	checksum, err := fileChecksum(targetPath)
+	checksum, err := FileChecksum(targetPath)
 	if err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "计算文件校验和失败"}, http.StatusInternalServerError)
 		return
@@ -269,6 +319,10 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// 清理 checksumStore 中对应的版本记录
+	verKey := fmt.Sprintf("__version__/%s/%s", remotePath, versionIDStr)
+	h.checksumStore.Delete(verKey)
+
 	sendJSONResponse(w, UploadResponse{Success: true, Message: "版本已删除"}, http.StatusOK)
 }
 
@@ -292,17 +346,13 @@ func (h *Handlers) saveVersionBeforeOverwrite(remotePath string) {
 	}
 }
 
-// fileChecksum 计算文件的 SHA-256 十六进制摘要。
-func fileChecksum(filePath string) (string, error) {
-	f, err := os.Open(filePath)
+// syncParentDir 对指定文件/目录的父目录执行 fsync，确保目录元数据落盘。
+func syncParentDir(path string) error {
+	parent := filepath.Dir(path)
+	f, err := os.Open(parent)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return f.Sync()
 }

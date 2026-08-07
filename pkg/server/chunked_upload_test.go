@@ -47,7 +47,7 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 		version:       "test",
 		buildAt:       "test",
 		checksumStore: cs,
-		uploadStore:   NewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
+		uploadStore:   MustNewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
 		logger:        slog.Default(),
 	}
 
@@ -225,7 +225,9 @@ func TestUploadChunk_ChecksumMismatch(t *testing.T) {
 	defer resp.Body.Close()
 
 	var chunkResult ChunkUploadResponse
-	json.NewDecoder(resp.Body).Decode(&chunkResult)
+	if err := json.NewDecoder(resp.Body).Decode(&chunkResult); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if chunkResult.Success {
 		t.Fatal("expected failure due to checksum mismatch")
 	}
@@ -245,12 +247,16 @@ func TestUploadChunk_Idempotent(t *testing.T) {
 	chunkCS := sha256hex(fileData)
 
 	// 第一次上传
-	uploadChunk(t, url, uploadID, 0, chunkCS, fileData)
+	resp1 := uploadChunk(t, url, uploadID, 0, chunkCS, fileData)
+	resp1.Body.Close()
 
 	// 第二次上传同样的分块，应该幂等成功
 	resp := uploadChunk(t, url, uploadID, 0, chunkCS, fileData)
 	var result ChunkUploadResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	var err error
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	resp.Body.Close()
 
 	if !result.Success {
@@ -280,7 +286,9 @@ func TestUploadStatus_Partial(t *testing.T) {
 	defer resp.Body.Close()
 
 	var status ChunkStatusResponse
-	json.NewDecoder(resp.Body).Decode(&status)
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 
 	if !status.Success {
 		t.Fatalf("expected success, got: %v", status)
@@ -326,7 +334,9 @@ func TestUploadComplete_FullFlow(t *testing.T) {
 	defer resp.Body.Close()
 
 	var completeResult ChunkCompleteResponse
-	json.NewDecoder(resp.Body).Decode(&completeResult)
+	if err := json.NewDecoder(resp.Body).Decode(&completeResult); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 
 	if !completeResult.Success {
 		t.Fatalf("expected success, got: %v", completeResult)
@@ -564,7 +574,9 @@ func TestUploadComplete_SubDir(t *testing.T) {
 	defer resp.Body.Close()
 
 	var completeResult ChunkCompleteResponse
-	json.NewDecoder(resp.Body).Decode(&completeResult)
+	if err := json.NewDecoder(resp.Body).Decode(&completeResult); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !completeResult.Success {
 		t.Fatalf("expected success, got: %v", completeResult)
 	}
@@ -607,7 +619,9 @@ func initSessionEx(t *testing.T, baseURL, filename string, totalSize, chunkSize 
 	}
 	defer resp.Body.Close()
 	var result ChunkedInitResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !result.Success {
 		t.Fatalf("init failed: %v", result)
 	}
@@ -629,6 +643,7 @@ func uploadChunk(t *testing.T, baseURL, uploadID string, chunkIndex int, chunkCS
 	if err != nil {
 		t.Fatalf("upload chunk %d failed: %v", chunkIndex, err)
 	}
+	t.Cleanup(func() { resp.Body.Close() })
 	return resp
 }
 
@@ -639,7 +654,7 @@ func TestUploadStore_CreateAndGet(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, err := us.CreateSession("test-upload-id", "test.txt", 100, 4096, 1, strings.Repeat("a", 64), 0)
@@ -654,6 +669,7 @@ func TestUploadStore_CreateAndGet(t *testing.T) {
 	got := us.GetSession(session.UploadID)
 	if got == nil {
 		t.Fatal("GetSession returned nil")
+		return
 	}
 	if got.Filename != "test.txt" {
 		t.Fatalf("filename mismatch: %s", got.Filename)
@@ -667,7 +683,7 @@ func TestUploadStore_MarkAndCheck(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, _ := us.CreateSession("test-upload-id-2", "test.txt", 8192, 4096, 2, strings.Repeat("b", 64), 0)
@@ -694,7 +710,7 @@ func TestUploadStore_Complete(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, _ := us.CreateSession("test-upload-id-3", "test.txt", 100, 4096, 1, strings.Repeat("c", 64), 0)
@@ -720,7 +736,7 @@ func TestUploadStore_MissingChunks(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	session, _ := us.CreateSession("test-upload-id-4", "test.txt", 8192, 4096, 2, strings.Repeat("d", 64), 0)
@@ -766,7 +782,9 @@ func TestChunkedUpload_MultiChunkLargeFile(t *testing.T) {
 	defer resp.Body.Close()
 
 	var result ChunkCompleteResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !result.Success {
 		t.Fatalf("complete failed: %v", result)
 	}
@@ -800,7 +818,9 @@ func TestChunkedUpload_ResumeAfterInterrupt(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 	var status ChunkStatusResponse
-	json.NewDecoder(statusResp.Body).Decode(&status)
+	if err = json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	statusResp.Body.Close()
 
 	if !status.Success {
@@ -826,7 +846,9 @@ func TestChunkedUpload_ResumeAfterInterrupt(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var result ChunkCompleteResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !result.Success {
 		t.Fatalf("resume complete failed: %v", result)
 	}
@@ -856,7 +878,9 @@ func TestChunkedUpload_AlreadyExists_ChecksumMatch(t *testing.T) {
 	defer resp.Body.Close()
 
 	var initResult ChunkedInitResponse
-	json.NewDecoder(resp.Body).Decode(&initResult)
+	if err := json.NewDecoder(resp.Body).Decode(&initResult); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !initResult.Success {
 		t.Fatalf("expected success for existing file with matching checksum: %v", initResult)
 	}
@@ -910,7 +934,9 @@ func TestChunkedUploadStatus_ByFilename(t *testing.T) {
 	defer resp.Body.Close()
 
 	var status ChunkStatusResponse
-	json.NewDecoder(resp.Body).Decode(&status)
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !status.Success {
 		t.Fatalf("status by filename failed: %v", status)
 	}
@@ -1032,7 +1058,9 @@ func TestChunkedUpload_Resume(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 	var status ChunkStatusResponse
-	json.NewDecoder(statusResp.Body).Decode(&status)
+	if err = json.NewDecoder(statusResp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	statusResp.Body.Close()
 
 	if !status.Success {
@@ -1061,7 +1089,9 @@ func TestChunkedUpload_Resume(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var result ChunkCompleteResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !result.Success {
 		t.Fatalf("resume complete failed: %v", result)
 	}
@@ -1103,7 +1133,9 @@ func TestChunkedUpload_RetryExhausted(t *testing.T) {
 	wrongCS := sha256hex([]byte("wrong data"))
 	chunkResp := uploadChunk(t, url, uploadID, 0, wrongCS, fileData)
 	var uploadResult ChunkUploadResponse
-	json.NewDecoder(chunkResp.Body).Decode(&uploadResult)
+	if err := json.NewDecoder(chunkResp.Body).Decode(&uploadResult); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	chunkResp.Body.Close()
 	if uploadResult.Success {
 		t.Fatal("expected chunk upload to fail with wrong checksum")
@@ -1115,7 +1147,9 @@ func TestChunkedUpload_RetryExhausted(t *testing.T) {
 	// 用正确的 checksum 上传正确数据，应该成功
 	correctCS := sha256hex(fileData)
 	chunkResp2 := uploadChunk(t, url, uploadID, 0, correctCS, fileData)
-	json.NewDecoder(chunkResp2.Body).Decode(&uploadResult)
+	if err := json.NewDecoder(chunkResp2.Body).Decode(&uploadResult); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	chunkResp2.Body.Close()
 	if !uploadResult.Success {
 		t.Fatalf("expected chunk upload to succeed with correct checksum: %v", uploadResult)
@@ -1129,7 +1163,9 @@ func TestChunkedUpload_RetryExhausted(t *testing.T) {
 	}
 	defer cpResp.Body.Close()
 	var completeResult ChunkCompleteResponse
-	json.NewDecoder(cpResp.Body).Decode(&completeResult)
+	if err := json.NewDecoder(cpResp.Body).Decode(&completeResult); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !completeResult.Success {
 		t.Fatalf("complete failed: %v", completeResult)
 	}
@@ -1157,7 +1193,7 @@ func doUploadInit(t *testing.T, baseURL, filename string, totalSize int64, fileC
 	}
 	defer resp.Body.Close()
 	var result ChunkedInitResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode doUploadInit response: %v", err)
 	}
 	return result
@@ -1252,7 +1288,9 @@ func TestMergeAndRenameFile_FullFlow(t *testing.T) {
 	defer resp.Body.Close()
 
 	var result ChunkCompleteResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !result.Success {
 		t.Fatalf("merge and rename failed: %v", result)
 	}

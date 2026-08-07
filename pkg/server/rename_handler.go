@@ -33,11 +33,10 @@ func parseRenameParams(r *http.Request) (from, to, checksum string, err error) {
 }
 
 // resolveRenamePaths 计算 from 和 to 对应的安全绝对路径。
-func resolveRenamePaths(h *Handlers, w http.ResponseWriter, from, to string) (fromPath, toPath string, ok bool) {
+func resolveRenamePaths(h *Handlers, from, to string) (fromPath, toPath string, ok bool) {
 	fromPath = h.safePath(from)
 	toPath = h.safePath(to)
 	if fromPath == "" || toPath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return "", "", false
 	}
 	return fromPath, toPath, true
@@ -58,10 +57,12 @@ type renameOpCtx struct {
 // executeRename 校验 checksum、执行 Rename、更新 checksumStore。
 // 返回 nil 表示成功；返回 error 表示失败（已在内部发送响应）。
 func executeRename(ctx renameOpCtx) error {
+	ctx.logger.Info("开始重命名", "from", ctx.fromPath, "to", ctx.toPath)
 	if _, err := os.Stat(ctx.fromPath); os.IsNotExist(err) {
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
 		return err
 	}
+	// TODO: 此处存在 TOCTOU 竞态窗口（Stat 与 Rename 之间），后续优化为原子操作
 	if _, err := os.Stat(ctx.toPath); err == nil {
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
 		return err
@@ -103,9 +104,8 @@ func (h *Handlers) processBatchRenameItem(op BatchRenameOp, logger *slog.Logger)
 		result.Message = "源与目标相同，无需移动"
 		return result
 	}
-	fromPath := h.safePath(from)
-	toPath := h.safePath(to)
-	if fromPath == "" || toPath == "" {
+	fromPath, toPath, ok := resolveRenamePaths(h, from, to)
+	if !ok {
 		result.Message = "无效的文件路径"
 		return result
 	}
@@ -137,6 +137,7 @@ func (h *Handlers) processBatchRenameItem(op BatchRenameOp, logger *slog.Logger)
 		return result
 	}
 	h.checksumStore.Rename(from, to)
+	logger.Info("文件已重命名", "from", op.From, "to", op.To)
 	return BatchOperationResult{
 		Filename: op.From + " -> " + op.To,
 		Success:  true,
@@ -164,7 +165,7 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 		result := h.processBatchRenameItem(op, logger)
 		results = append(results, result)
 	}
-	sendJSONResponse(w, BatchRenameResponse{Results: results}, http.StatusOK)
+	sendJSONResponse(w, BatchResponse{Results: results}, http.StatusOK)
 }
 
 // rename 处理 POST /rename?from=<old>&to=<new>。
@@ -193,8 +194,9 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromPath, toPath, ok := resolveRenamePaths(h, w, from, to)
+	fromPath, toPath, ok := resolveRenamePaths(h, from, to)
 	if !ok {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 

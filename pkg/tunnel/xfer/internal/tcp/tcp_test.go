@@ -23,6 +23,7 @@ func TestTcpConnRoundTrip(t *testing.T) {
 	tp := xfer.Get("tcp")
 	if tp == nil {
 		t.Fatal("tcp transport not registered")
+		return
 	}
 
 	listener, err := tp.Listen(ctx, "127.0.0.1:0")
@@ -149,6 +150,7 @@ func TestTcpRegistration(t *testing.T) {
 	tp := xfer.Get("tcp")
 	if tp == nil {
 		t.Fatal("tcp transport not registered via init()")
+		return
 	}
 	if tp.Name != "tcp" {
 		t.Fatalf("expected name 'tcp', got %q", tp.Name)

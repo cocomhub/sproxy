@@ -27,7 +27,7 @@ func newTestServerWithUploadInit(t *testing.T, modifyCfg func(*Config)) (*Handle
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	cs := NewChecksumStore(cfg.UploadsDir, nil)
-	store := NewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, nil)
+	store := MustNewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, nil)
 	h := &Handlers{
 		cfgPtr:        &cfgPtr,
 		uploadStore:   store,

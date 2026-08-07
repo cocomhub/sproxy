@@ -57,7 +57,8 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stat, err := os.Stat(targetDir)
+	// 使用 Lstat 检查符号链接，拒绝操作
+	stat, err := os.Lstat(targetDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
@@ -66,20 +67,83 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if stat.Mode()&os.ModeSymlink != 0 {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "不允许删除符号链接"}, http.StatusBadRequest)
+		return
+	}
 	if !stat.IsDir() {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "指定路径不是目录"}, http.StatusBadRequest)
 		return
 	}
 
-	if err := os.RemoveAll(targetDir); err != nil {
+	// 再次检查，确认目录未被替换（TOCTOU 防御）
+	stat2, err := os.Lstat(targetDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
+		} else {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "访问目录失败"}, http.StatusInternalServerError)
+		}
+		return
+	}
+	if stat2.Mode()&os.ModeSymlink != 0 {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "不允许删除符号链接"}, http.StatusBadRequest)
+		return
+	}
+	if !stat2.IsDir() {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "指定路径不是目录"}, http.StatusBadRequest)
+		return
+	}
+
+	// force 必须为 true 才执行删除（避免误删）
+	force := r.URL.Query().Get("force") == "true"
+	if !force {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请使用 ?force=true 确认删除"}, http.StatusBadRequest)
+		return
+	}
+
+	// 使用 removeDirNoFollow 安全递归删除（不跟随符号链接）
+	if err := removeDirNoFollow(targetDir); err != nil {
 		h.logger.Error("删除目录失败", "dir", remotePath, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除目录失败"}, http.StatusInternalServerError)
 		return
 	}
 
 	// 清理 checksum store 中该目录下所有文件的记录
+	// 使用 "/" 分隔符，与 ChecksumStore 的 key 格式约定保持一致（所有 key 使用 filepath.ToSlash 格式）
 	h.checksumStore.DeletePrefix(remotePath + "/")
+	// 清理目录自身的 checksum 记录（如果存在）
+	h.checksumStore.Delete(remotePath)
 
 	h.logger.Info("目录已删除", "dir", remotePath)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已删除: %s", remotePath)}, http.StatusOK)
+}
+
+// removeDirNoFollow 递归删除目录树，遇到符号链接时删除链接本身而非跟随。
+// 使用深度优先后序遍历确保子目录先于父目录被删除。
+func removeDirNoFollow(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		path := dir + string(os.PathSeparator) + entry.Name()
+		// 符号链接：删除链接本身，不递归进入
+		if entry.Type()&os.ModeSymlink != 0 {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			continue
+		}
+		if entry.IsDir() {
+			if err := removeDirNoFollow(path); err != nil {
+				return err
+			}
+		} else {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+		}
+	}
+	return os.Remove(dir)
 }

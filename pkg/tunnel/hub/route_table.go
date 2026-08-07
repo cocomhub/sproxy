@@ -66,8 +66,21 @@ func (rt *RouteTable) AddWithInfo(info NodeInfo) {
 func (rt *RouteTable) Remove(id NodeID) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	delete(rt.nodes, id)
-	delete(rt.info, id)
+	if m, ok := rt.nodes[id]; ok {
+		delete(rt.nodes, id)
+		delete(rt.info, id)
+		if m != nil {
+			go m.Close() // 异步关闭 mux 连接
+		}
+	}
+}
+
+// Has 检查节点是否存在。
+func (rt *RouteTable) Has(id NodeID) bool {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	_, ok := rt.nodes[id]
+	return ok
 }
 
 // Lookup 按 ID 查找节点的 Mux 连接。

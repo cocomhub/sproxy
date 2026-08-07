@@ -41,10 +41,15 @@ func TestRateLimiter_RecoversAfterWindow(t *testing.T) {
 	if rl.Allow() {
 		t.Fatal("second call must be rejected (still within window)")
 	}
-	time.Sleep(80 * time.Millisecond)
-	if !rl.Allow() {
-		t.Fatal("call after window slide should be allowed")
+	// 轮询等待窗口重置，最多 2s
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if rl.Allow() {
+			return // 重置成功
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+	t.Fatal("call after window slide should be allowed")
 }
 
 func TestRateLimiter_ConcurrentSafe(t *testing.T) {

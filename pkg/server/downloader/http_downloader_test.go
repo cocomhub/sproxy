@@ -26,7 +26,7 @@ func TestHTTPDownloader_SupportsHTTPSchemes(t *testing.T) {
 	}{
 		{"http://example.com/file.zip", true},
 		{"https://example.com/file.zip", true},
-		{"HTTP://EXAMPLE.COM/FILE.ZIP", false},
+		{"HTTP://EXAMPLE.COM/FILE.ZIP", true},
 		{"ftp://example.com/file.zip", false},
 		{"", false},
 		{"file:///tmp/file.zip", false},

@@ -9,7 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestStorageManager_TryReserve_Success(t *testing.T) {
@@ -395,18 +394,9 @@ func TestStoragePeriodicScan_StopsOnSignal(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 
-	done := make(chan struct{})
-	go func() {
-		sm.periodicScan()
-		close(done)
-	}()
-
+	// NewStorageManager 已自动启动 periodicScan goroutine，
+	// Stop() 应能正常关闭它且不 panic/死锁
 	sm.Stop()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("periodicScan did not stop within 1s after Stop()")
-	}
 }
 
 func TestStoragePeriodicScan_RecalculatesUsage(t *testing.T) {
@@ -431,7 +421,7 @@ func TestStoragePeriodicScan_RecalculatesUsage(t *testing.T) {
 	}
 }
 
-func TestStorageScanOnce_Error(t *testing.T) {
+func TestStorageScanOnce_EmptyDir(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())

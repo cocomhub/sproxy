@@ -5,7 +5,6 @@ package server
 
 import (
 	"log/slog"
-	"time"
 )
 
 // defaultLogger 返回一个有效的 *slog.Logger。
@@ -15,16 +14,4 @@ func defaultLogger(l *slog.Logger) *slog.Logger {
 		return slog.Default()
 	}
 	return l
-}
-
-// parseDuration 解析 duration 字符串，失败时返回默认值。
-func parseDuration(s string, def time.Duration) time.Duration {
-	if s == "" {
-		return def
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return def
-	}
-	return d
 }

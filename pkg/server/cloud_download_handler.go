@@ -78,7 +78,7 @@ func validateCloudDownloadURL(rawURL, rawFilename string, allowPrivate bool) (st
 	// 路径穿越防护：清理文件名中的路径分隔符
 	filename = filepathSafe(filename)
 
-	return rawURL, filename, nil
+	return parsed.String(), filename, nil
 }
 
 // cloudCreateBatchDownload 处理 POST /api/cloud/download/batch。
@@ -137,7 +137,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		}
 		results = append(results, CloudBatchTaskResult{
 			ID:       snapshot.ID,
-			URL:      cleanedURL,
+			URL:      entry.URL,
 			Filename: cleanedFilename,
 			Status:   snapshot.Status,
 		})
@@ -190,16 +190,20 @@ func (h *Handlers) cloudDeleteTask(w http.ResponseWriter, r *http.Request) {
 
 // extractFilename 从 URL 中提取文件名。
 func extractFilename(rawURL string) string {
-	for i := len(rawURL) - 1; i >= 0; i-- {
-		if rawURL[i] == '/' {
-			name := rawURL[i+1:]
-			for j := 0; j < len(name); j++ {
-				if name[j] == '?' || name[j] == '#' {
-					name = name[:j]
-					break
-				}
-			}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "download"
+	}
+	// 取路径最后一段
+	path := parsed.Path
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' {
+			name := path[i+1:]
 			if name != "" {
+				// 百分号解码
+				if decoded, err := url.QueryUnescape(name); err == nil {
+					return decoded
+				}
 				return name
 			}
 			break
@@ -210,6 +214,7 @@ func extractFilename(rawURL string) string {
 
 // filepathSafe 清理文件名中的路径分隔符，防止路径穿越。
 func filepathSafe(name string) string {
+	name = strings.ReplaceAll(name, "\x00", "")
 	name = strings.NewReplacer("\\", "_", "/", "_").Replace(name)
 	name = strings.Trim(name, " .")
 	if name == "" {

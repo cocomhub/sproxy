@@ -215,13 +215,16 @@ func TestConfig_UpdateEmptyBody(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var result map[string]any
-	json.NewDecoder(resp.Body).Decode(&result)
-
-	if result["success"] != true {
-		t.Error("expected success=true")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request, got %d", resp.StatusCode)
 	}
-	if result["changed"] != false {
-		t.Error("expected changed=false for empty body")
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if result["message"] != "empty request body: no fields to update" {
+		t.Errorf("expected error message about empty body, got %v", result["message"])
 	}
 }

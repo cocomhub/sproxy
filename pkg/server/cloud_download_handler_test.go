@@ -19,12 +19,13 @@ import (
 func setupCloudTestServer(t *testing.T) (*httptest.Server, *CloudDownloadManager) {
 	t.Helper()
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 	t.Cleanup(func() {
@@ -242,7 +243,9 @@ func TestCloudHandler_PathTraversalBlocked(t *testing.T) {
 	}
 
 	var task CloudTask
-	json.NewDecoder(resp.Body).Decode(&task)
+	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if strings.Contains(task.Filename, "/") || strings.Contains(task.Filename, "\\") {
 		t.Fatalf("filename should be sanitized, got %q", task.Filename)
 	}
@@ -458,7 +461,9 @@ func TestCloudHandler_BatchCreateDownload_AlwaysAsync(t *testing.T) {
 	var batchResp struct {
 		Tasks []CloudBatchTaskResult `json:"tasks"`
 	}
-	json.NewDecoder(resp.Body).Decode(&batchResp)
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if batchResp.Tasks[0].Status != "pending" && batchResp.Tasks[0].Status != "downloading" {
 		t.Fatalf("expected batch mode to always be async, got status %q", batchResp.Tasks[0].Status)
 	}
@@ -499,7 +504,9 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 	var batchResp struct {
 		Tasks []CloudBatchTaskResult `json:"tasks"`
 	}
-	json.NewDecoder(resp.Body).Decode(&batchResp)
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if batchResp.Tasks[0].Status != "failed" {
 		t.Fatalf("expected 'failed' for storage full, got %q", batchResp.Tasks[0].Status)
 	}
