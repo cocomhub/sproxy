@@ -92,11 +92,18 @@ func joinSafePath(baseDir, userPath string) string {
 	if resolvedBase, e := filepath.EvalSymlinks(absBase); e == nil {
 		absBase = resolvedBase
 	}
-	// 解析 absPath 目录部分的符号链接，获取规范路径
-	// 注意：不能解析整个 absPath，因为文件可能还不存在（上传前）
-	// 目录部分一定存在，可以安全解析
-	if resolvedDir, e := filepath.EvalSymlinks(filepath.Dir(absPath)); e == nil {
-		absPath = filepath.Join(resolvedDir, filepath.Base(absPath))
+	// 解析 absPath 中所有已存在的目录部分的符号链接，获取规范路径
+	// 文件可能还不存在（上传前），从最深的已存在目录向上解析
+	for p := absPath; ; p = filepath.Dir(p) {
+		if resolved, e := filepath.EvalSymlinks(p); e == nil {
+			// 重建路径：已解析父目录 + 剩余路径组件
+			rel, _ := filepath.Rel(p, absPath)
+			absPath = filepath.Join(resolved, rel)
+			break
+		}
+		if p == absBase || p == filepath.Dir(p) {
+			break
+		}
 	}
 	if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
 		slog.Default().Warn("joinSafePath: 路径越界", "upload_dir", absBase, "resolved_path", absPath)
