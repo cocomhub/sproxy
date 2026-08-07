@@ -92,6 +92,8 @@ func joinSafePath(baseDir, userPath string) string {
 	if resolvedBase, e := filepath.EvalSymlinks(absBase); e == nil {
 		absBase = resolvedBase
 	}
+	// 解析 absPath 的符号链接，获取规范路径（处理 Windows 短路径名如 RUNNER~1 → runneradmin）
+	absPath = resolveSymlinks(absPath)
 	if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
 		slog.Default().Warn("joinSafePath: 路径越界", "upload_dir", absBase, "resolved_path", absPath)
 		return ""
@@ -121,6 +123,16 @@ func joinSafePath(baseDir, userPath string) string {
 		return ""
 	}
 	return absPath
+}
+
+// resolveSymlinks 解析路径的符号链接，获取规范路径。
+// 如果路径不存在或解析失败，返回原路径（文件不存在是正常情况，例如上传前文件还不存在）。
+func resolveSymlinks(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
 }
 
 // IsPathWithin 检查 child 路径是否在 parent 目录内（路径穿越防护）。
