@@ -147,6 +147,13 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 		"failed_task_ttl", cfg.FailedTaskTTL,
 	)
 
+	// 允许私有 IP 时跳过 SSRF 后验证（仅测试用）
+	if cfg.AllowPrivate {
+		if hd, ok := mgr.dl.(*downloader.HTTPDownloader); ok {
+			hd.ValidateURLAfterDo = nil
+		}
+	}
+
 	// 恢复持久化的任务
 	mgr.recoverTasks()
 

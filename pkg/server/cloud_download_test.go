@@ -271,6 +271,7 @@ func defaultCloudDownloadConfig() *CloudDownloadConfig {
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
 	}
 }
 
@@ -416,6 +417,7 @@ func TestCloudDownloadManager_SubmitAndStart_Sync(t *testing.T) {
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 
@@ -460,6 +462,7 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
+		AllowPrivate:  true,
 		FailedTaskTTL: 1 * time.Hour,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
@@ -516,6 +519,7 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
+		AllowPrivate:  true,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 	}
@@ -567,6 +571,7 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
+		AllowPrivate:  true,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
@@ -606,6 +611,7 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
+		AllowPrivate:  true,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
