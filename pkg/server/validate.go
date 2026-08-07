@@ -88,6 +88,10 @@ func joinSafePath(baseDir, userPath string) string {
 		slog.Default().Warn("joinSafePath: baseDir Abs 解析失败", "base_dir", baseDir, "error", err)
 		return ""
 	}
+	// 解析 absBase 的符号链接，获取规范路径（处理 Windows 短路径名如 RUNNER~1 → runneradmin）
+	if resolvedBase, e := filepath.EvalSymlinks(absBase); e == nil {
+		absBase = resolvedBase
+	}
 	if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
 		slog.Default().Warn("joinSafePath: 路径越界", "upload_dir", absBase, "resolved_path", absPath)
 		return ""
@@ -100,7 +104,7 @@ func joinSafePath(baseDir, userPath string) string {
 			dir = filepath.Dir(dir)
 			r, e := filepath.EvalSymlinks(dir)
 			if e == nil {
-				if !strings.HasPrefix(r, absBase) {
+				if !strings.HasPrefix(r, absBase+string(filepath.Separator)) && r != absBase {
 					slog.Default().Warn("joinSafePath: 父目录符号链接指向外部路径", "upload_dir", absBase, "joined", absPath, "dir", dir, "real", r)
 					return ""
 				}

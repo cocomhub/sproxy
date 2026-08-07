@@ -148,9 +148,13 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 	)
 
 	// 允许私有 IP 时跳过 SSRF 后验证（仅测试用）
+	// 注意：必须创建副本而非修改共享注册表的下载器，避免 data race
 	if cfg.AllowPrivate {
 		if hd, ok := mgr.dl.(*downloader.HTTPDownloader); ok {
-			hd.ValidateURLAfterDo = nil
+			// 创建副本并清空 ValidateURLAfterDo
+			clone := *hd
+			clone.ValidateURLAfterDo = nil
+			mgr.dl = &clone
 		}
 	}
 
