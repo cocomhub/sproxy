@@ -95,21 +95,25 @@ func joinSafePath(baseDir, userPath string) string {
 	// 解析 absPath 中所有已存在的目录部分的符号链接，获取规范路径
 	// 注意：absBase 已被解析为规范路径（如 C:runneradmin...），
 	// 而 absPath 仍是 Windows 短格式（C:RUNNER~1...），两者不可直接比较。
-	// 从最深的已存在目录向上解析 absPath 的父目录组件。
-	for p := absPath; ; p = filepath.Dir(p) {
-		if resolved, e := filepath.EvalSymlinks(p); e == nil {
-			rel, _ := filepath.Rel(p, absPath)
-			absPath = filepath.Join(resolved, rel)
-			break
+	// 需要逐级解析所有父目录组件，因为短路径名可能出现在任意层级。
+	resolvedPath := absPath
+	for p := resolvedPath; ; p = filepath.Dir(p) {
+		if r, e := filepath.EvalSymlinks(p); e == nil {
+			rel, _ := filepath.Rel(p, resolvedPath)
+			resolvedPath = filepath.Join(r, rel)
+			// 继续解析已解析路径的父目录（短路径名可能在更高层级）
+			// 因为 EvalSymlinks 只解析当前路径的符号链接，不递归解析父目录
+			if r == p || filepath.Dir(r) == filepath.Dir(p) {
+				break
+			}
+			p = r // 继续从已解析的路径向上解析
 		}
-		// 到达根目录后仍未找到，说明 absPath 的所有父目录都无法解析
-		// （例如在测试中 t.TempDir() 的路径不可解析），此时不做处理
 		if p == filepath.Dir(p) {
 			break
 		}
 	}
-	// 路径越界检查（absBase 已解析为规范路径，absPath 也已解析）
-	if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
+	// 路径越界检查（absBase 已解析为规范路径，resolvedPath 也已解析）
+	if !strings.HasPrefix(resolvedPath, absBase+string(filepath.Separator)) && resolvedPath != absBase {
 		slog.Default().Warn("joinSafePath: 路径越界", "upload_dir", absBase, "resolved_path", absPath)
 		return ""
 	}
