@@ -235,3 +235,122 @@ func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, ar
 	}
 	return &result, nil
 }
+
+// CloudGroup 表示云端下载任务组。
+type CloudGroup struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Status      string   `json:"status"`
+	TaskIDs     []string `json:"task_ids"`
+	TotalTasks  int      `json:"total_tasks"`
+	Completed   int      `json:"completed"`
+	Failed      int      `json:"failed"`
+	Error       string   `json:"error,omitempty"`
+	ArchiveFile string   `json:"archive_file,omitempty"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+}
+
+// CloudGroupDetail 包含组详情和子任务列表。
+type CloudGroupDetail struct {
+	Group *CloudGroup `json:"group"`
+	Tasks []CloudTask `json:"tasks"`
+}
+
+// CloudCreateGroup 创建云端下载任务组。
+func (c *FileClient) CloudCreateGroup(ctx context.Context, name string, urls []string) (*CloudGroup, error) {
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("创建下载组: URL 列表不能为空")
+	}
+	entries := make([]map[string]string, len(urls))
+	for i, u := range urls {
+		entries[i] = map[string]string{"url": u}
+	}
+	body := map[string]any{
+		"name": name,
+		"urls": entries,
+	}
+	var group CloudGroup
+	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/groups", body, &group); err != nil {
+		return nil, fmt.Errorf("创建下载组: %w", err)
+	}
+	return &group, nil
+}
+
+// CloudGetGroup 获取组详情（含子任务列表）。
+func (c *FileClient) CloudGetGroup(ctx context.Context, groupID string) (*CloudGroupDetail, error) {
+	if groupID == "" {
+		return nil, fmt.Errorf("获取下载组: groupID 不能为空")
+	}
+	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID)
+	var detail CloudGroupDetail
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &detail); err != nil {
+		return nil, fmt.Errorf("获取下载组: %w", err)
+	}
+	return &detail, nil
+}
+
+// CloudListGroups 列举所有下载组。
+func (c *FileClient) CloudListGroups(ctx context.Context, status string) ([]CloudGroup, error) {
+	apiPath := "/api/cloud/groups"
+	if status != "" {
+		apiPath += "?status=" + url.QueryEscape(status)
+	}
+	var groups []CloudGroup
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &groups); err != nil {
+		return nil, fmt.Errorf("列举下载组: %w", err)
+	}
+	return groups, nil
+}
+
+// CloudCancelGroup 取消组内所有下载任务。
+func (c *FileClient) CloudCancelGroup(ctx context.Context, groupID string) error {
+	if groupID == "" {
+		return fmt.Errorf("取消下载组: groupID 不能为空")
+	}
+	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/cancel"
+	return c.doJSON(ctx, http.MethodPost, apiPath, nil, nil)
+}
+
+// CloudDeleteGroup 删除组及所有关联文件。
+func (c *FileClient) CloudDeleteGroup(ctx context.Context, groupID string) error {
+	if groupID == "" {
+		return fmt.Errorf("删除下载组: groupID 不能为空")
+	}
+	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID)
+	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
+}
+
+// CloudArchiveGroup 将组内所有文件打包为 tar.gz。
+func (c *FileClient) CloudArchiveGroup(ctx context.Context, groupID, archiveName string) (*CloudArchiveResult, error) {
+	if groupID == "" {
+		return nil, fmt.Errorf("打包下载组: groupID 不能为空")
+	}
+	body := map[string]string{"archive_name": archiveName}
+	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/archive"
+	var result CloudArchiveResult
+	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &result); err != nil {
+		return nil, fmt.Errorf("打包下载组: %w", err)
+	}
+	return &result, nil
+}
+
+// CloudResumeTask 恢复云端下载任务。
+func (c *FileClient) CloudResumeTask(ctx context.Context, taskID string, force bool) error {
+	if taskID == "" {
+		return fmt.Errorf("恢复下载任务: taskID 不能为空")
+	}
+	body := map[string]bool{"force": force}
+	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/resume"
+	return c.doJSON(ctx, http.MethodPost, apiPath, body, nil)
+}
+
+// CloudResumeGroup 恢复组内所有失败任务。
+func (c *FileClient) CloudResumeGroup(ctx context.Context, groupID string, force bool) error {
+	if groupID == "" {
+		return fmt.Errorf("恢复下载组: groupID 不能为空")
+	}
+	body := map[string]bool{"force": force}
+	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/resume"
+	return c.doJSON(ctx, http.MethodPost, apiPath, body, nil)
+}
