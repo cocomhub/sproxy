@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -808,6 +809,250 @@ func newTaskID() string {
 	return fmt.Sprintf("cloud-%s-%d", hex.EncodeToString(b), n)
 }
 
+var groupIDCounter struct {
+	mu sync.Mutex
+	n  int64
+}
+
+func newGroupID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	groupIDCounter.mu.Lock()
+	groupIDCounter.n++
+	n := groupIDCounter.n
+	groupIDCounter.mu.Unlock()
+	return fmt.Sprintf("group-%s-%d", hex.EncodeToString(b), n)
+}
+
+// CloudBatchURL 批量下载中的单个 URL 条目。
+// 定义在 response.go 中，此处仅用于类型引用。
+
+// CreateGroup 创建下载任务组。
+// 校验文件名冲突，创建子任务。
+func (m *CloudDownloadManager) CreateGroup(name string, urls []CloudBatchURL) (*CloudTaskGroup, error) {
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("at least one URL is required")
+	}
+
+	// 校验文件名冲突
+	filenameSet := make(map[string]int)
+	for _, entry := range urls {
+		fn := entry.Filename
+		if fn == "" {
+			fn = extractFilename(entry.URL)
+		}
+		fn = filepathSafe(fn)
+		filenameSet[fn]++
+	}
+	var conflicts []string
+	for fn, count := range filenameSet {
+		if count > 1 {
+			conflicts = append(conflicts, fn)
+		}
+	}
+	if len(conflicts) > 0 {
+		return nil, fmt.Errorf("filename conflicts detected: %s; please specify unique filenames via request", strings.Join(conflicts, ", "))
+	}
+
+	groupID := newGroupID()
+	now := time.Now()
+
+	group := &CloudTaskGroup{
+		ID:         groupID,
+		Name:       name,
+		Status:     "pending",
+		TotalTasks: len(urls),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		ExpiresAt:  now.Add(m.config.TaskTTL),
+	}
+
+	var taskIDs []string
+	for _, entry := range urls {
+		fn := entry.Filename
+		if fn == "" {
+			fn = extractFilename(entry.URL)
+		}
+		fn = filepathSafe(fn)
+
+		task, err := m.CreateTask("url", entry.URL, fn, -1)
+		if err != nil {
+			return nil, fmt.Errorf("create task for %s: %w", entry.URL, err)
+		}
+		taskIDs = append(taskIDs, task.ID)
+	}
+
+	group.TaskIDs = taskIDs
+
+	m.groupMu.Lock()
+	m.groups[groupID] = group
+	m.groupMu.Unlock()
+
+	m.logger.Info("cloud download group created",
+		"group_id", groupID,
+		"name", name,
+		"task_count", len(urls),
+	)
+	return group, nil
+}
+
+// SubmitAndStartGroup 创建组并启动所有子任务下载。
+func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []CloudBatchURL) (*CloudTaskGroup, error) {
+	group, err := m.CreateGroup(name, urls)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, taskID := range group.TaskIDs {
+		m.mu.RLock()
+		task, exists := m.tasks[taskID]
+		m.mu.RUnlock()
+		if !exists || task.Status != "pending" {
+			continue
+		}
+		m.wg.Add(1)
+		go m.executeDownload(context.Background(), task)
+	}
+
+	m.UpdateGroupStatus(group.ID)
+	return group, nil
+}
+
+// GetGroup 获取组详情。
+func (m *CloudDownloadManager) GetGroup(id string) (*CloudTaskGroup, bool) {
+	m.groupMu.RLock()
+	defer m.groupMu.RUnlock()
+	g, ok := m.groups[id]
+	if !ok {
+		return nil, false
+	}
+	c := *g
+	return &c, true
+}
+
+// ListGroups 列出所有组，支持按 status 过滤。
+func (m *CloudDownloadManager) ListGroups(status string) []*CloudTaskGroup {
+	m.groupMu.RLock()
+	defer m.groupMu.RUnlock()
+
+	var result []*CloudTaskGroup
+	for _, g := range m.groups {
+		if status == "" || g.Status == status {
+			c := *g
+			result = append(result, &c)
+		}
+	}
+	return result
+}
+
+// CancelGroup 取消组内所有 pending/downloading 任务。
+func (m *CloudDownloadManager) CancelGroup(groupID string) error {
+	m.groupMu.RLock()
+	group, ok := m.groups[groupID]
+	m.groupMu.RUnlock()
+	if !ok {
+		return fmt.Errorf("group not found: %s", groupID)
+	}
+
+	var errs []error
+	for _, tid := range group.TaskIDs {
+		if err := m.CancelTask(tid); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	m.groupMu.Lock()
+	group.Status = "cancelled"
+	group.UpdatedAt = time.Now()
+	m.groupMu.Unlock()
+
+	return errors.Join(errs...)
+}
+
+// DeleteGroup 删除组及所有子任务。
+func (m *CloudDownloadManager) DeleteGroup(groupID string) error {
+	m.groupMu.RLock()
+	group, ok := m.groups[groupID]
+	m.groupMu.RUnlock()
+	if !ok {
+		return fmt.Errorf("group not found: %s", groupID)
+	}
+
+	var errs []error
+	for _, tid := range group.TaskIDs {
+		if err := m.DeleteTask(tid); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	taskDir := filepath.Join(m.cloudDir, groupID)
+	if err := os.RemoveAll(taskDir); err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("remove group dir: %w", err))
+	}
+
+	m.groupMu.Lock()
+	delete(m.groups, groupID)
+	m.groupMu.Unlock()
+
+	return errors.Join(errs...)
+}
+
+// ResumeTask 恢复失败的下载任务。
+// force=true 时删除已有部分文件重新下载；force=false 时尝试续传。
+func (m *CloudDownloadManager) ResumeTask(taskID string, force bool) error {
+	m.mu.Lock()
+	task, ok := m.tasks[taskID]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("task not found: %s", taskID)
+	}
+	if task.Status != "failed" {
+		m.mu.Unlock()
+		return fmt.Errorf("task %s is in status %q, only failed tasks can be resumed", taskID, task.Status)
+	}
+
+	taskDir := filepath.Join(m.cloudDir, task.ID)
+	destPath := filepath.Join(taskDir, task.Filename)
+	if force {
+		os.Remove(destPath)
+		os.Remove(destPath + ".partial")
+	} else {
+		partialPath := destPath + ".partial"
+		if _, statErr := os.Stat(partialPath); statErr == nil {
+			_ = os.Rename(partialPath, destPath)
+		}
+	}
+
+	task.Status = "pending"
+	task.Error = ""
+	task.UpdatedAt = time.Now()
+	m.mu.Unlock()
+
+	m.saveTask(task)
+
+	m.wg.Add(1)
+	go m.executeDownload(context.Background(), task)
+	return nil
+}
+
+// ResumeGroup 恢复组内所有失败任务。
+func (m *CloudDownloadManager) ResumeGroup(groupID string, force bool) error {
+	m.groupMu.RLock()
+	group, ok := m.groups[groupID]
+	m.groupMu.RUnlock()
+	if !ok {
+		return fmt.Errorf("group not found: %s", groupID)
+	}
+
+	var errs []error
+	for _, tid := range group.TaskIDs {
+		if err := m.ResumeTask(tid, force); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // markDirty 将任务标记为"脏"（进度已更新），由 flushLoop 批量持久化。
 func (m *CloudDownloadManager) markDirty(id string) {
 	m.dirtyMu.Lock()
@@ -855,6 +1100,49 @@ func (m *CloudDownloadManager) flushDirty() {
 		}
 		m.saveTask(task)
 	}
+}
+
+// UpdateGroupStatus 根据子任务状态更新组状态（导出方法，供 handler 调用）。
+func (m *CloudDownloadManager) UpdateGroupStatus(groupID string) {
+	m.groupMu.RLock()
+	group, ok := m.groups[groupID]
+	m.groupMu.RUnlock()
+	if !ok {
+		return
+	}
+
+	m.mu.RLock()
+	completed := 0
+	failed := 0
+	for _, tid := range group.TaskIDs {
+		task, exists := m.tasks[tid]
+		if !exists {
+			continue
+		}
+		switch task.Status {
+		case "completed":
+			completed++
+		case "failed", "cancelled":
+			failed++
+		}
+	}
+	m.mu.RUnlock()
+
+	m.groupMu.Lock()
+	group.Completed = completed
+	group.Failed = failed
+	switch {
+	case completed == group.TotalTasks:
+		group.Status = "completed"
+	case failed == group.TotalTasks:
+		group.Status = "failed"
+	case completed+failed == group.TotalTasks:
+		group.Status = "partial"
+	case failed > 0:
+		group.Status = "downloading"
+	}
+	group.UpdatedAt = time.Now()
+	m.groupMu.Unlock()
 }
 
 // Close 停止所有后台 goroutine（flushLoop 和 cleanupExpired）并执行一次清理。

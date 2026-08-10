@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
 )
@@ -186,6 +189,274 @@ func (h *Handlers) cloudDeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
+}
+
+// cloudResumeTask 处理 POST /api/cloud/tasks/{id}/resume。
+func (h *Handlers) cloudResumeTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KiB
+	var req struct {
+		Force bool `json:"force"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req) // 解析失败使用默认 false
+
+	if err := h.cloudMgr.ResumeTask(id, req.Force); err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
+		return
+	}
+	sendJSONResponse(w, map[string]string{"status": "resumed"}, http.StatusOK)
+}
+
+// cloudCreateGroup 处理 POST /api/cloud/groups。
+func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
+
+	var req struct {
+		Name string          `json:"name"`
+		URLs []CloudBatchURL `json:"urls"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		return
+	}
+	if len(req.URLs) == 0 {
+		sendJSONResponse(w, map[string]string{"error": "urls is required"}, http.StatusBadRequest)
+		return
+	}
+	if len(req.URLs) > 100 {
+		sendJSONResponse(w, map[string]string{"error": "maximum 100 URLs per group"}, http.StatusBadRequest)
+		return
+	}
+
+	// 校验 URL 合法性
+	for _, entry := range req.URLs {
+		if _, _, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.config.AllowPrivate); err != nil {
+			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+			return
+		}
+	}
+
+	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, req.URLs)
+	if err != nil {
+		if strings.Contains(err.Error(), "filename conflict") {
+			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
+			return
+		}
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	sendJSONResponse(w, group, http.StatusOK)
+}
+
+// cloudGetGroup 处理 GET /api/cloud/groups/{id}。
+func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	group, ok := h.cloudMgr.GetGroup(id)
+	if !ok {
+		sendJSONResponse(w, map[string]string{"error": "group not found"}, http.StatusNotFound)
+		return
+	}
+
+	// 更新组状态
+	h.cloudMgr.UpdateGroupStatus(id)
+
+	// 获取组详情时一并返回子任务
+	h.cloudMgr.mu.RLock()
+	var tasks []*CloudTask
+	for _, tid := range group.TaskIDs {
+		if t, exists := h.cloudMgr.tasks[tid]; exists {
+			c := *t
+			tasks = append(tasks, &c)
+		}
+	}
+	h.cloudMgr.mu.RUnlock()
+
+	resp := map[string]any{
+		"group": group,
+		"tasks": tasks,
+	}
+	sendJSONResponse(w, resp, http.StatusOK)
+}
+
+// cloudListGroups 处理 GET /api/cloud/groups。
+func (h *Handlers) cloudListGroups(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	groups := h.cloudMgr.ListGroups(status)
+	// 更新每个组的状态
+	for _, g := range groups {
+		h.cloudMgr.UpdateGroupStatus(g.ID)
+	}
+	sendJSONResponse(w, groups, http.StatusOK)
+}
+
+// cloudCancelGroup 处理 POST /api/cloud/groups/{id}/cancel。
+func (h *Handlers) cloudCancelGroup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.cloudMgr.CancelGroup(id); err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
+		return
+	}
+	sendJSONResponse(w, map[string]string{"status": "cancelled"}, http.StatusOK)
+}
+
+// cloudDeleteGroup 处理 DELETE /api/cloud/groups/{id}。
+func (h *Handlers) cloudDeleteGroup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := h.cloudMgr.DeleteGroup(id); err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
+		return
+	}
+	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
+}
+
+// cloudResumeGroup 处理 POST /api/cloud/groups/{id}/resume。
+func (h *Handlers) cloudResumeGroup(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KiB
+	var req struct {
+		Force bool `json:"force"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	if err := h.cloudMgr.ResumeGroup(id, req.Force); err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
+		return
+	}
+	sendJSONResponse(w, map[string]string{"status": "resumed"}, http.StatusOK)
+}
+
+// cloudArchiveGroup 处理 POST /api/cloud/groups/{id}/archive。
+func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
+	groupID := r.PathValue("id")
+	group, ok := h.cloudMgr.GetGroup(groupID)
+	if !ok {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "group not found"}, http.StatusNotFound)
+		return
+	}
+
+	// 解析请求体
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
+	var req CloudArchiveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid request body"}, http.StatusBadRequest)
+		return
+	}
+
+	// 确定归档文件名
+	archiveName := req.ArchiveName
+	if archiveName == "" {
+		archiveName = fmt.Sprintf("group-%s-%d.tar.gz", groupID, time.Now().Unix())
+	}
+	archiveName = filepath.Base(archiveName)
+	if archiveName == "" || archiveName == "." || archiveName == ".." {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive name"}, http.StatusBadRequest)
+		return
+	}
+	if !strings.HasSuffix(archiveName, ".tar.gz") {
+		archiveName += ".tar.gz"
+	}
+	if len(archiveName) > 255 {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive name too long"}, http.StatusBadRequest)
+		return
+	}
+
+	// 收集组目录下所有已完成的文件
+	groupDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName, groupID)
+	var groupFiles []fileWithRelPath
+	var skippedTasks []string
+
+	entries, err := os.ReadDir(groupDir)
+	if err != nil {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: fmt.Sprintf("failed to read group dir: %v", err),
+		}, http.StatusInternalServerError)
+		return
+	}
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		// 跳过 .partial 和 .tmp 文件
+		if strings.HasSuffix(e.Name(), ".partial") || strings.HasSuffix(e.Name(), ".tmp.") {
+			continue
+		}
+		fullPath := filepath.Join(groupDir, e.Name())
+		if !IsPathWithin(fullPath, groupDir) {
+			h.logger.Error("path traversal detected in group archive", "group_id", groupID, "file", e.Name())
+			skippedTasks = append(skippedTasks, e.Name())
+			continue
+		}
+		groupFiles = append(groupFiles, fileWithRelPath{fullPath: fullPath, relPath: e.Name()})
+	}
+
+	if len(groupFiles) == 0 {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: "no files to archive in group",
+		}, http.StatusBadRequest)
+		return
+	}
+
+	// 确保输出目录存在
+	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName)
+	if mkErr := os.MkdirAll(archiveDir, 0755); mkErr != nil {
+		h.logger.Error("failed to create archive directory", "error", mkErr)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		return
+	}
+	outputPath := filepath.Join(archiveDir, archiveName)
+	if !strings.HasPrefix(filepath.Clean(outputPath), filepath.Clean(archiveDir)+string(filepath.Separator)) {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
+		return
+	}
+
+	// 多文件打包
+	logger := h.logger.With("archive", "group", "group_id", groupID)
+	checksum, err := createMultiFileTarGz(groupFiles, outputPath, logger)
+	if err != nil {
+		h.logger.Error("failed to create group archive", "group_id", groupID, "error", err)
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
+		}, http.StatusInternalServerError)
+		return
+	}
+
+	info, _ := os.Stat(outputPath)
+	size := int64(0)
+	if info != nil {
+		size = info.Size()
+	}
+
+	// 更新组归档路径
+	h.cloudMgr.mu.Lock()
+	group.ArchiveFile = filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName))
+	h.cloudMgr.mu.Unlock()
+
+	sendJSONResponse(w, CloudArchiveResult{
+		Success:      true,
+		File:         filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
+		Size:         size,
+		Checksum:     checksum,
+		TaskCount:    len(groupFiles),
+		SkippedCount: len(skippedTasks),
+		SkippedTasks: skippedTasks,
+	}, http.StatusOK)
 }
 
 // extractFilename 从 URL 中提取文件名。
