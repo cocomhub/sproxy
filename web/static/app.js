@@ -1076,17 +1076,32 @@ function copyShareLink(token) {
 
 // --- 云端下载 ---
 let _cloudTasks = [];
+let _cloudGroups = [];
 let _cloudPollTimer = null;
 
 function showCloudDownload() {
   document.getElementById('cloud-modal').style.display = 'flex';
+  document.getElementById('cloud-url').value = '';
   refreshCloudTasks();
+  refreshCloudGroups();
   startCloudPolling();
+  switchCloudTab('tasks');
 }
 
 function hideCloudDownload() {
   document.getElementById('cloud-modal').style.display = 'none';
   stopCloudPolling();
+}
+
+function switchCloudTab(tab) {
+  document.getElementById('cloud-tasks-body').style.display = tab === 'tasks' ? 'block' : 'none';
+  document.getElementById('cloud-groups-body').style.display = tab === 'groups' ? 'block' : 'none';
+  document.querySelectorAll('.cloud-tab').forEach(function(el) {
+    el.style.borderBottomColor = el.id === 'cloud-' + tab + '-tab' ? '#4a90d9' : 'transparent';
+    el.style.color = el.id === 'cloud-' + tab + '-tab' ? '#333' : '#666';
+  });
+  if (tab === 'groups') refreshCloudGroups();
+  if (tab === 'tasks') refreshCloudTasks();
 }
 
 function startCloudPolling() {
@@ -1354,14 +1369,22 @@ function buildCloudTaskTableHtml(tasks) {
   for (const t of tasks) {
     const statusLabel = statusText(t.status);
     const rowClass = t.status === 'downloading' ? ' style="background:#f0f4ff;"' : '';
+    const progressHtml = t.status === 'downloading' && t.total_size > 0 ? buildProgressBar(t.downloaded, t.total_size) : '';
     html += '<tr' + rowClass + '><td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(t.filename || '') + '">' + escHtml(t.filename || '-') + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;">' + statusLabel + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;">' + statusLabel + progressHtml + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + (t.total_size > 0 ? formatSize(t.total_size) : '-') + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' +
       cloudTaskActions(t.id, t.filename, t.status, t.checksum) + '</td></tr>';
   }
   html += '</tbody></table>';
   return html;
+}
+
+function buildProgressBar(downloaded, total) {
+  const pct = total > 0 ? Math.min(100, Math.round(downloaded * 100 / total)) : 0;
+  return '<div style="margin-top:4px;height:6px;background:#e0e0e0;border-radius:3px;overflow:hidden;min-width:80px;">' +
+    '<div style="height:100%;width:' + pct + '%;background:#4a90d9;border-radius:3px;transition:width 0.5s;"></div>' +
+    '</div><div style="font-size:11px;color:#666;margin-top:1px;">' + formatSize(downloaded) + ' / ' + formatSize(total) + ' (' + pct + '%)</div>';
 }
 
 function statusText(status) {
@@ -1381,6 +1404,9 @@ function cloudTaskActions(id, filename, status, checksum) {
     actions += '<button class="btn btn-primary btn-sm cloud-download-btn" data-id="' + escHtml(id) + '" data-filename="' + escHtml(filename) + '" data-checksum="' + escHtml(checksum || '') + '" style="margin-right:4px;">下载到本地</button>';
     actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
   } else if (status === 'failed' || status === 'cancelled') {
+    if (status === 'failed') {
+      actions += '<button class="btn btn-sm btn-secondary cloud-resume-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">恢复</button>';
+    }
     actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
   } else {
     actions += '<button class="btn btn-warning btn-sm cloud-cancel-btn" data-id="' + escHtml(id) + '">取消</button>';
@@ -1397,6 +1423,141 @@ function showVersioning() {
 
 function hideVersioning() {
   document.getElementById('version-modal').style.display = 'none';
+}
+
+// --- 云端下载组管理 ---
+async function refreshCloudGroups() {
+  const body = document.getElementById('cloud-groups-body');
+  if (body.style.display === 'none') return;
+  try {
+    let groups;
+    const url = '/api/cloud/groups';
+    if (tunnelHexKey) {
+      const result = await tunnelRequest('GET', url, {}, null);
+      groups = JSON.parse(new TextDecoder().decode(result.body));
+    } else {
+      const resp = await fetch(BASE + url, { headers: headers() });
+      if (!resp.ok) { body.innerHTML = '<div class="empty-msg">请求失败: ' + resp.status + '</div>'; return; }
+      groups = await resp.json();
+    }
+    _cloudGroups = groups || [];
+    if (_cloudGroups.length === 0) {
+      body.innerHTML = '<div class="empty-msg">暂无下载组</div>';
+      return;
+    }
+    body.innerHTML = buildCloudGroupTableHtml(_cloudGroups);
+  } catch (e) {
+    body.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
+  }
+}
+
+function buildCloudGroupTableHtml(groups) {
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">名称</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">状态</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">进度</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">操作</th></tr></thead><tbody>';
+  for (const g of groups) {
+    const statusLabel = statusText(g.status);
+    const progressText = g.completed + '/' + g.total_tasks;
+    html += '<tr><td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(g.name || g.id) + '">' + escHtml(g.name || g.id) + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;">' + statusLabel + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;">' + progressText + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' +
+      cloudGroupActions(g.id, g.status) + '</td></tr>';
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+function cloudGroupActions(id, status) {
+  let actions = '';
+  if (status === 'completed' || status === 'partial') {
+    actions += '<button class="btn btn-primary btn-sm group-archive-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">打包</button>';
+  }
+  if (status === 'failed' || status === 'partial') {
+    actions += '<button class="btn btn-sm btn-secondary group-resume-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">恢复</button>';
+  }
+  if (status === 'pending' || status === 'downloading') {
+    actions += '<button class="btn btn-warning btn-sm group-cancel-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">取消</button>';
+  }
+  actions += '<button class="btn btn-danger btn-sm group-delete-btn" data-id="' + escHtml(id) + '">删除</button>';
+  return actions;
+}
+
+async function archiveCloudGroup(groupId) {
+  const archiveName = prompt('归档文件名:', 'group-' + groupId + '.tar.gz');
+  if (!archiveName) return;
+  try {
+    var hdrs = headers({ 'Content-Type': 'application/json' });
+    var body = JSON.stringify({ archive_name: archiveName });
+    if (tunnelHexKey) {
+      await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', hdrs, new TextEncoder().encode(body));
+    } else {
+      var resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', { method: 'POST', headers: hdrs, body: body });
+      if (!resp.ok) { showToast('打包失败: ' + resp.status, 'error'); return; }
+    }
+    showToast('打包成功', 'success');
+    refreshCloudGroups();
+  } catch (e) { showToast('打包失败: ' + e.message, 'error'); }
+}
+
+async function resumeCloudGroup(groupId) {
+  if (!confirm('确认恢复该组内所有失败任务？')) return;
+  const force = confirm('强制重新下载（不使用续传）？\n确定=强制重新下载，取消=续传');
+  try {
+    var hdrs = headers({ 'Content-Type': 'application/json' });
+    var body = JSON.stringify({ force: force });
+    if (tunnelHexKey) {
+      await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/resume', hdrs, new TextEncoder().encode(body));
+    } else {
+      await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/resume', { method: 'POST', headers: hdrs, body: body });
+    }
+    showToast('恢复成功', 'success');
+    refreshCloudGroups();
+  } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
+}
+
+async function cancelCloudGroup(groupId) {
+  if (!confirm('确认取消该组内所有任务？')) return;
+  try {
+    if (tunnelHexKey) {
+      await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/cancel', {}, null);
+    } else {
+      await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/cancel', { method: 'POST', headers: headers() });
+    }
+    showToast('已取消', 'success');
+    refreshCloudGroups();
+  } catch (e) { showToast('取消失败: ' + e.message, 'error'); }
+}
+
+async function deleteCloudGroup(groupId) {
+  if (!confirm('确认删除该组及所有关联文件？')) return;
+  try {
+    if (tunnelHexKey) {
+      await tunnelRequest('DELETE', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
+    } else {
+      await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { method: 'DELETE', headers: headers() });
+    }
+    showToast('已删除', 'success');
+    refreshCloudGroups();
+  } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
+}
+
+// 恢复单个云端下载任务
+async function resumeCloudTask(taskId) {
+  const force = confirm('强制重新下载（不使用续传）？\n确定=强制重新下载，取消=续传');
+  try {
+    var hdrs = headers({ 'Content-Type': 'application/json' });
+    var body = JSON.stringify({ force: force });
+    if (tunnelHexKey) {
+      await tunnelRequest('POST', '/api/cloud/tasks/' + encodeURIComponent(taskId) + '/resume', hdrs, new TextEncoder().encode(body));
+    } else {
+      await fetch(BASE + '/api/cloud/tasks/' + encodeURIComponent(taskId) + '/resume', { method: 'POST', headers: hdrs, body: body });
+    }
+    showToast('任务已恢复', 'success');
+    refreshCloudTasks();
+  } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
 }
 
 async function loadVersions() {
@@ -1533,6 +1694,8 @@ document.addEventListener('DOMContentLoaded', function() {
 document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
   document.getElementById('cloud-refresh-btn').addEventListener('click', refreshCloudTasks);
   document.getElementById('cloud-close-modal-btn').addEventListener('click', hideCloudDownload);
+  document.getElementById('cloud-tasks-tab').addEventListener('click', function() { switchCloudTab('tasks'); });
+  document.getElementById('cloud-groups-tab').addEventListener('click', function() { switchCloudTab('groups'); });
 
   // 版本管理弹窗
   document.getElementById('version-close-btn').addEventListener('click', hideVersioning);
@@ -1659,6 +1822,35 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('cloud-cancel-btn')) {
         cancelCloudTask(btn.dataset.id);
+        return;
+      }
+      if (btn.classList.contains('cloud-resume-btn')) {
+        resumeCloudTask(btn.dataset.id);
+        return;
+      }
+    });
+  }
+
+  // 云端下载组操作
+  const cloudGroupsBody = document.getElementById('cloud-groups-body');
+  if (cloudGroupsBody) {
+    cloudGroupsBody.addEventListener('click', function(e) {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      if (btn.classList.contains('group-archive-btn')) {
+        archiveCloudGroup(btn.dataset.id);
+        return;
+      }
+      if (btn.classList.contains('group-resume-btn')) {
+        resumeCloudGroup(btn.dataset.id);
+        return;
+      }
+      if (btn.classList.contains('group-cancel-btn')) {
+        cancelCloudGroup(btn.dataset.id);
+        return;
+      }
+      if (btn.classList.contains('group-delete-btn')) {
+        deleteCloudGroup(btn.dataset.id);
         return;
       }
     });

@@ -84,10 +84,17 @@
     <div style="display:flex;gap:8px;margin-bottom:12px;">
       <textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>
       <button type="button" id="cloud-chain-btn" class="btn btn-primary" style="white-space:nowrap;">链式下载</button>
-        <button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>
+      <button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>
+    </div>
+    <div id="cloud-tab-bar" style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid #e0e0e0;">
+      <button type="button" id="cloud-tasks-tab" class="cloud-tab active" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid #4a90d9;margin-bottom:-2px;font-size:14px;color:#333;">任务列表</button>
+      <button type="button" id="cloud-groups-tab" class="cloud-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:#666;">组列表</button>
     </div>
     <div id="cloud-tasks-body" style="max-height:400px;overflow-y:auto;">
       <div class="empty-msg">暂无下载任务</div>
+    </div>
+    <div id="cloud-groups-body" style="max-height:400px;overflow-y:auto;display:none;">
+      <div class="empty-msg">暂无下载组</div>
     </div>
     <div style="margin-top:12px;text-align:right;">
       <button type="button" id="cloud-refresh-btn" class="btn btn-secondary" style="margin-right:8px;">刷新</button>
