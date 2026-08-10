@@ -1147,6 +1147,45 @@ func TestRmdir_PathTraversal(t *testing.T) {
 	}
 }
 
+func TestRmdir_ForceRequired(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	uploadsDir := cfgPtr.Load().UploadsDir
+	dirPath := filepath.Join(uploadsDir, "forceless")
+	if err := os.Mkdir(dirPath, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// 不带 force=true 应返回 400
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=forceless", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 without force=true, got %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+		t.Fatal("directory should NOT be removed without force=true")
+	}
+
+	// 带 force=true 应成功
+	req2, _ := http.NewRequest("POST", url+"/rmdir?dirname=forceless&force=true", nil)
+	resp2, reqErr := http.DefaultClient.Do(req2)
+	if reqErr != nil {
+		t.Fatalf("rmdir: %v", reqErr)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with force=true, got %d", resp2.StatusCode)
+	}
+	if _, err := os.Stat(dirPath); !os.IsNotExist(err) {
+		t.Fatal("directory should be removed with force=true")
+	}
+}
+
 // ---- rename 分支测试 ----
 
 func TestRename_SameSourceAndTarget(t *testing.T) {

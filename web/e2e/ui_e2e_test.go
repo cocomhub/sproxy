@@ -775,7 +775,7 @@ func TestStorageConfigInStats(t *testing.T) {
 	}
 }
 
-// TestStorageConfigAPI 验证存储配置 API 可调用。
+// TestStorageConfigAPI 验证存储配置 API 可调用（通过新的 PUT /api/config 端点）。
 func TestStorageConfigAPI(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
@@ -785,7 +785,7 @@ func TestStorageConfigAPI(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	result, err := page.Evaluate(`fetch('/api/storage/config', {
+	result, err := page.Evaluate(`fetch('/api/config', {
 		method: 'PUT',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ max_storage_bytes: 104857600 })
@@ -800,21 +800,8 @@ func TestStorageConfigAPI(t *testing.T) {
 	if m["success"] != true {
 		t.Errorf("success = %v, want true", m["success"])
 	}
-
-	// JSON decoder may return int or float64 depending on platform
-	var got int64
-	switch v := m["max_storage_bytes"].(type) {
-	case float64:
-		got = int64(v)
-	case int:
-		got = int64(v)
-	case int64:
-		got = v
-	default:
-		t.Fatalf("max_storage_bytes type %T, want float64, int, or int64", m["max_storage_bytes"])
-	}
-	if got != 104857600 {
-		t.Errorf("max_storage_bytes = %d, want 104857600", got)
+	if m["changed"] != true {
+		t.Errorf("changed = %v, want true", m["changed"])
 	}
 }
 

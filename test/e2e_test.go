@@ -191,7 +191,7 @@ func startSPROXY(t *testing.T) (string, func()) {
 	// Start server
 	// 写入临时配置文件，禁用 TLS（E2E 测试使用纯 HTTP 连接）
 	configPath := filepath.Join(tmpDir, "sproxy.yaml")
-	configContent := []byte("tls:\n  enabled: false\ntunnel_key: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n")
+	configContent := []byte("tls:\n  enabled: false\ntunnel_key: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\ncloud_download_allow_private: true\n")
 	if err := os.WriteFile(configPath, configContent, 0644); err != nil {
 		t.Fatalf("write temp config: %v", err)
 	}
