@@ -38,16 +38,37 @@ type CloudTask struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
-	ReservedSize int64     `json:"-"` // 实际预留量，不持久化
+	ReservedSize int64     `json:"-"`                  // 实际预留量，不持久化
+	GroupID      string    `json:"group_id,omitempty"` // 所属组 ID（可选）
+}
+
+// CloudTaskGroup 表示一个云端下载任务组。
+// 组内所有子任务文件下载到同一目录 .__cloud__/<groupID>/ 下。
+type CloudTaskGroup struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Status      string    `json:"status"` // pending | downloading | completed | partial | failed | cancelled
+	TaskIDs     []string  `json:"task_ids"`
+	TotalTasks  int       `json:"total_tasks"`
+	Completed   int       `json:"completed"`
+	Failed      int       `json:"failed"`
+	Error       string    `json:"error,omitempty"`
+	ArchiveFile string    `json:"archive_file,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 // CloudDownloadConfig 云端下载配置。
 type CloudDownloadConfig struct {
-	SyncThreshold int64         // 同步模式阈值（字节），默认 20 MiB
-	MaxConcurrent int           // 最大并发下载数，默认 3
-	TaskTTL       time.Duration // 完成任务保留时间，默认 24h
-	FailedTaskTTL time.Duration // 失败任务保留时间，默认 1h
-	AllowPrivate  bool          // 允许私有 IP 下载（仅测试用）
+	SyncThreshold   int64         // 同步模式阈值（字节），默认 20 MiB
+	MaxConcurrent   int           // 最大并发下载数，默认 3
+	TaskTTL         time.Duration // 完成任务保留时间，默认 24h
+	FailedTaskTTL   time.Duration // 失败任务保留时间，默认 1h
+	AllowPrivate    bool          // 允许私有 IP 下载（仅测试用）
+	DownloadTimeout time.Duration // 单次下载超时，默认 0（不限制）
+	MaxRetries      int           // 失败重试次数，默认 10
+	RetryDelay      time.Duration // 重试间隔，默认 10s
 }
 
 // CloudDownloadManager 管理云端下载任务。
@@ -74,6 +95,10 @@ type CloudDownloadManager struct {
 	stopCleanup chan struct{}  // 停止 cleanupExpired 后台 goroutine
 	wg          sync.WaitGroup // 追踪所有执行中的 goroutine
 	closeOnce   sync.Once      // 确保 Close 只执行一次
+
+	// TaskGroup 支持
+	groups  map[string]*CloudTaskGroup
+	groupMu sync.RWMutex
 }
 
 // CloudMetrics 云端下载 Prometheus 指标。
@@ -82,6 +107,7 @@ type CloudMetrics struct {
 	TasksCompleted  atomic.Int64 // 完成的任务数
 	TasksFailed     atomic.Int64 // 失败的任务数
 	TasksCancelled  atomic.Int64 // 取消的任务数
+	TasksRetried    atomic.Int64 // 重试的任务数
 	BytesDownloaded atomic.Int64 // 云端下载总字节数
 	ActiveDownloads atomic.Int64 // 当前活跃下载数
 }
@@ -138,6 +164,7 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 		flushNow:      make(chan struct{}, 1),
 		stopFlush:     make(chan struct{}),
 		stopCleanup:   make(chan struct{}),
+		groups:        make(map[string]*CloudTaskGroup),
 	}
 
 	mgr.logger.Info("cloud download manager initialized",
@@ -154,6 +181,15 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 			// 创建副本并清空 ValidateURLAfterDo
 			clone := *hd
 			clone.ValidateURLAfterDo = nil
+			mgr.dl = &clone
+		}
+	}
+
+	// 传递超时配置到 HTTPDownloader
+	if cfg.DownloadTimeout > 0 {
+		if hd, ok := mgr.dl.(*downloader.HTTPDownloader); ok {
+			clone := *hd
+			clone.Timeout = cfg.DownloadTimeout
 			mgr.dl = &clone
 		}
 	}
@@ -286,6 +322,13 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 创建可取消的 context（从 Background 派生，使客户端断连后下载可继续异步重试）
 	dlCtx, cancel := context.WithCancel(context.Background())
 	defer cancel() // 确保 cancel 在函数返回时被调用（linter: G118）
+
+	// 应用超时配置
+	if m.config.DownloadTimeout > 0 {
+		dlCtx, cancel = context.WithTimeout(dlCtx, m.config.DownloadTimeout)
+		defer cancel()
+	}
+
 	m.mu.Lock()
 	m.cancelFuncs[task.ID] = cancel
 	task.Status = "downloading"
@@ -305,23 +348,61 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	}
 	destPath := filepath.Join(taskDir, task.Filename)
 
-	// 执行下载
-	result, err := m.dl.Download(dlCtx, task.URL, destPath, func(downloaded, total int64) {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		task.Downloaded = downloaded
-		if total > 0 {
-			task.TotalSize = total
+	// 执行下载（带重试）
+	maxRetries := max(m.config.MaxRetries,
+		// 至少执行一次
+		1)
+	var result *downloader.Result
+	var downloadErr error
+	for attempt := range maxRetries {
+		if attempt > 0 {
+			// 重试等待
+			m.metrics.TasksRetried.Add(1)
+			delay := m.config.RetryDelay
+			if delay <= 0 {
+				delay = 10 * time.Second
+			}
+			select {
+			case <-time.After(delay):
+			case <-dlCtx.Done():
+				downloadErr = dlCtx.Err()
+				goto downloadDone
+			}
+			m.logger.Info("retrying download", "task_id", task.ID, "url", task.URL, "attempt", attempt+1, "max", maxRetries)
 		}
-		// 标记为脏，由 flushLoop 每 30 秒批量持久化
-		m.markDirty(task.ID)
-	})
 
+		result, downloadErr = m.dl.Download(dlCtx, task.URL, destPath, func(downloaded, total int64) {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			task.Downloaded = downloaded
+			if total > 0 {
+				task.TotalSize = total
+			}
+			// 标记为脏，由 flushLoop 每 30 秒批量持久化
+			m.markDirty(task.ID)
+		})
+
+		if downloadErr == nil {
+			break
+		}
+
+		// 检查是否应该重试
+		if dlCtx.Err() != nil {
+			// 上下文取消或超时，不再重试
+			break
+		}
+		// 最后一次尝试失败，不再重试
+		if attempt >= maxRetries-1 {
+			break
+		}
+	}
+
+downloadDone:
 	m.mu.Lock()
 	delete(m.cancelFuncs, task.ID)
 	m.mu.Unlock()
 
-	if err != nil {
+	if downloadErr != nil {
 		if ctx.Err() != nil && dlCtx.Err() == nil {
 			// 客户端断开（只有外层 ctx 取消，内层 dlCtx 未取消），转为异步继续
 			m.logger.Info("sync download client disconnected, switching to async",
@@ -336,8 +417,8 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			m.failTask(task, "cancelled")
 			m.logger.Info("download cancelled", "task_id", task.ID)
 		} else {
-			m.failTask(task, err.Error())
-			m.logger.Error("download failed", "task_id", task.ID, "url", task.URL, "error", err)
+			m.failTask(task, downloadErr.Error())
+			m.logger.Error("download failed", "task_id", task.ID, "url", task.URL, "error", downloadErr)
 		}
 		return
 	}
