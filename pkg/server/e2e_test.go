@@ -306,6 +306,19 @@ func TestConcurrent_RenameAndDelete(t *testing.T) {
 		})
 	}
 	wg.Wait()
+
+	// 验证：文件最终应不存在（被删除或已重命名）
+	_, err := c.Stat(t.Context(), "target.txt")
+	if err == nil {
+		t.Log("target.txt still exists (may have been renamed)")
+	}
+	// 检查 moved.txt 是否存在
+	info, err := c.Stat(t.Context(), "moved.txt")
+	if err != nil {
+		t.Log("moved.txt does not exist either, all operations completed")
+	} else {
+		t.Logf("file was renamed to moved.txt (size=%d)", info.Size)
+	}
 }
 
 // ---------- 辅助函数 ----------
@@ -322,7 +335,7 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// 阶段1: 创建 session 并上传部分分块
-	us1 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 
 	fileData := bytes.Repeat([]byte("ChaosTest"), 2048)
 	fileChecksum := sha256hex(fileData)
@@ -343,12 +356,13 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	us1.Stop() // 模拟 crash
 
 	// 阶段2: 新实例 recover
-	us2 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("crash-test-id")
 	if s == nil {
 		t.Fatal("session should be recovered after crash")
+		return
 	}
 	if !s.ReceivedChunks[0] || !s.ReceivedChunks[1] {
 		t.Fatal("chunks 0 and 1 should be recovered")
@@ -377,7 +391,7 @@ func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	us1 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	us1.CreateSession("partial-id", "partial-recover.bin", 8192, 4096, 2, strings.Repeat("x", 64), 0)
 	us1.Stop()
 
@@ -390,12 +404,13 @@ func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), data, 0644)
 	}
 
-	us2 := server.NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("partial-id")
 	if s == nil {
 		t.Fatal("session should be recovered")
+		return
 	}
 	t.Logf("recovered session: received=%v", s.ReceivedChunks)
 }

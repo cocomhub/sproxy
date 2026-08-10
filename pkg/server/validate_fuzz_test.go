@@ -99,7 +99,7 @@ func assertValidPath(t *testing.T, result, name string) {
 	if filepath.IsAbs(result) {
 		t.Errorf("result is absolute path: %q (input: %q)", result, name)
 	}
-	if !strings.ContainsRune(result, '\\') && result != filepath.ToSlash(result) {
+	if strings.ContainsRune(result, '\\') && result != filepath.ToSlash(result) {
 		// 应该已经是 ToSlash 格式
 		t.Errorf("result should be ToSlash format, got %q (input: %q)", result, name)
 	}

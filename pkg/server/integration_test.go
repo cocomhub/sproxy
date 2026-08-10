@@ -177,18 +177,16 @@ func TestUpload_ChecksumMismatch(t *testing.T) {
 	}
 }
 
-func TestUpload_BodyTooLarge(t *testing.T) {
+func TestUpload_2MiBFileSucceeds(t *testing.T) {
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
-	// 发送一个太大但类型正确的 multipart 请求，验证服务端拒绝
-	body := bytes.Repeat([]byte("A"), 2<<20) // 2 MiB，超过 MultipartBufSize 但远小于 UploadBodyLimit
-	status, _ := uploadFile(t, url, "big.txt", body, map[string]string{
+	body := bytes.Repeat([]byte("A"), 2<<20)
+	status, msg := uploadFile(t, url, "big.txt", body, map[string]string{
 		"X-File-Checksum": sha256hex(body),
 	})
-	// 2 MiB 文件在 MultipartBufSize=1 MiB 内存缓冲下仍可处理（stdlib 落临时文件），应该返回 200
-	if status == http.StatusRequestEntityTooLarge {
-		t.Fatal("2 MiB file should not be too large")
+	if status != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", status, msg)
 	}
 }
 
@@ -450,8 +448,8 @@ func TestSearchFiles_Empty(t *testing.T) {
 		t.Fatalf("search: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("search status: expected 200, got %d", resp.StatusCode)
+	if resp.StatusCode != 400 {
+		t.Fatalf("search status: expected 400, got %d", resp.StatusCode)
 	}
 	var result struct {
 		Files []any `json:"files"`
@@ -874,30 +872,6 @@ func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
 	}
 }
 
-// ---- 辅助：避免 context 未使用警告 ----
-
-func TestRegisterRoutes_Smoke(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	cfg := Default()
-	cfg.UploadsDir = tmpDir
-	var cfgPtr atomic.Pointer[Config]
-	cfgPtr.Store(cfg)
-
-	mux := http.NewServeMux()
-	// 32 字节占位 tunnel key
-	key := make([]byte, 32)
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "v",
-		BuildAt:   "t",
-		TunnelKey: key,
-	})
-	t.Cleanup(func() { _ = h.Close() })
-}
-
 // newTestServerWithAllRoutes 启动包含全部路由的测试服务器。
 // 路由通过 RegisterRoutes 注册（无手动路由表副本），使用 httptest.NewServer 包装。
 // 返回服务地址与 cfgPtr。使用 t.Cleanup 自动关闭服务与释放资源。
@@ -1063,7 +1037,7 @@ func TestRmdir_HappyPath(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=toremove", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=toremove&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
@@ -1093,7 +1067,7 @@ func TestRmdir_WithFiles_AlsoDeletesChecksums(t *testing.T) {
 		"X-File-Path":     "subdir/a.txt",
 	})
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=subdir", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=subdir&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
@@ -1113,7 +1087,9 @@ func TestRmdir_WithFiles_AlsoDeletesChecksums(t *testing.T) {
 	var listResult struct {
 		Files []fileInfo `json:"files"`
 	}
-	json.NewDecoder(listResp.Body).Decode(&listResult)
+	if err := json.NewDecoder(listResp.Body).Decode(&listResult); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	for _, f := range listResult.Files {
 		if f.Name == "a.txt" || strings.HasPrefix(f.Name, "subdir/") {
 			t.Fatalf("file from deleted subdir should not appear in root listing: %s", f.Name)
@@ -1125,7 +1101,7 @@ func TestRmdir_NonExistent(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=nonexistent", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=nonexistent&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
@@ -1145,7 +1121,7 @@ func TestRmdir_OnFileReturns400(t *testing.T) {
 		"X-File-Checksum": sha256hex(body),
 	})
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=notadir.txt", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=notadir.txt&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
@@ -1160,7 +1136,7 @@ func TestRmdir_PathTraversal(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=../../escape", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=../../escape&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
@@ -1168,6 +1144,45 @@ func TestRmdir_PathTraversal(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRmdir_ForceRequired(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	uploadsDir := cfgPtr.Load().UploadsDir
+	dirPath := filepath.Join(uploadsDir, "forceless")
+	if err := os.Mkdir(dirPath, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// 不带 force=true 应返回 400
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=forceless", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 without force=true, got %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
+		t.Fatal("directory should NOT be removed without force=true")
+	}
+
+	// 带 force=true 应成功
+	req2, _ := http.NewRequest("POST", url+"/rmdir?dirname=forceless&force=true", nil)
+	resp2, reqErr := http.DefaultClient.Do(req2)
+	if reqErr != nil {
+		t.Fatalf("rmdir: %v", reqErr)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 with force=true, got %d", resp2.StatusCode)
+	}
+	if _, err := os.Stat(dirPath); !os.IsNotExist(err) {
+		t.Fatal("directory should be removed with force=true")
 	}
 }
 
@@ -1192,7 +1207,9 @@ func TestRename_SameSourceAndTarget(t *testing.T) {
 		t.Fatalf("expected 200 (same path), got %d", resp.StatusCode)
 	}
 	var result UploadResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if !result.Success {
 		t.Fatalf("expected success: %+v", result)
 	}
@@ -1395,7 +1412,9 @@ func TestListFiles_SubdirParameter(t *testing.T) {
 	var result struct {
 		Files []fileInfo `json:"files"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if len(result.Files) != 1 || result.Files[0].Name != "nested.txt" {
 		t.Fatalf("expected [nested.txt], got %+v", result.Files)
 	}
@@ -1492,17 +1511,13 @@ func TestSearchFiles_InvalidSubdir(t *testing.T) {
 		t.Fatalf("list: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 (empty safe response), got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 (invalid subdir), got %d", resp.StatusCode)
 	}
-	var result struct {
-		Files []fileInfo `json:"files"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(result.Files) != 0 {
-		t.Fatalf("expected empty list for invalid subdir, got %d files", len(result.Files))
+	// 验证错误响应体
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) == 0 {
+		t.Fatal("expected non-empty error response body")
 	}
 }
 

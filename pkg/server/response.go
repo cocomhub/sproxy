@@ -6,9 +6,26 @@ package server
 import (
 	"encoding/json"
 	"log/slog"
+	"mime"
 	"net/http"
+	"net/url"
+	"sync/atomic"
 )
 
+// responseLogger 是 sendJSONResponse 使用的日志记录器，默认使用 slog.Default()。
+// 可通过 SetResponseLogger 替换，用于测试或自定义日志输出。
+var responseLogger atomic.Pointer[slog.Logger]
+
+func init() {
+	SetResponseLogger(slog.Default())
+}
+
+// SetResponseLogger 设置 sendJSONResponse 使用的日志记录器。
+func SetResponseLogger(l *slog.Logger) {
+	responseLogger.Store(l)
+}
+
+// UploadResponse 是通用响应结构。
 type UploadResponse struct {
 	Success  bool   `json:"success"`
 	Message  string `json:"message"`
@@ -26,8 +43,7 @@ type ChunkedInitResponse struct {
 // ChunkStatusResponse 分块上传状态查询响应。
 type ChunkStatusResponse struct {
 	Success       bool   `json:"success"`
-	Finished      bool   `json:"finished,omitempty"`  // 文件已完整上传（无需再传）
-	UploadID      string `json:"upload_id,omitempty"` // omitempty 以便 finished 时返回空
+	UploadID      string `json:"upload_id,omitempty"`
 	ReceivedCount int    `json:"received_count,omitempty"`
 	TotalChunks   int    `json:"total_chunks,omitempty"`
 	MissingChunks []int  `json:"missing_chunks,omitempty"`
@@ -54,11 +70,28 @@ type ChunkCompleteResponse struct {
 }
 
 func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		slog.Default().Warn("Encode JSON response failed", "error", err)
+	w.Header().Set(headerContentType, contentTypeJSON)
+	buf, err := json.Marshal(response)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		responseLogger.Load().Warn("Encode JSON response failed", "error", err)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
+		return
 	}
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(buf)
+}
+
+// formatContentDisposition 使用标准库安全地构造 Content-Disposition 头。
+// 同时设置 filename（传统）和 filename*（RFC 5987）参数，以支持非 ASCII 文件名。
+func formatContentDisposition(filename string) string {
+	if filename == "" {
+		return "attachment"
+	}
+	return mime.FormatMediaType("attachment", map[string]string{
+		"filename":  filename,
+		"filename*": "UTF-8''" + url.PathEscape(filename),
+	})
 }
 
 // BatchOperationResult 批量操作单条结果
@@ -84,13 +117,8 @@ type BatchRenameRequest struct {
 	Operations []BatchRenameOp `json:"operations"`
 }
 
-// BatchDeleteResponse is the JSON response for batch delete operations.
-type BatchDeleteResponse struct {
-	Results []BatchOperationResult `json:"results"`
-}
-
-// BatchRenameResponse is the JSON response for batch rename operations.
-type BatchRenameResponse struct {
+// BatchResponse is the JSON response for batch operations (delete, rename, etc.).
+type BatchResponse struct {
 	Results []BatchOperationResult `json:"results"`
 }
 

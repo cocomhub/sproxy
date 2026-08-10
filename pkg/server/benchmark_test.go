@@ -78,7 +78,7 @@ func benchServerWithChunked(tb testing.TB, modifyCfg func(*Config)) (string, *at
 		version:       "bench",
 		buildAt:       "bench",
 		checksumStore: cs,
-		uploadStore:   NewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
+		uploadStore:   MustNewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
 		logger:        slog.Default(),
 	}
 

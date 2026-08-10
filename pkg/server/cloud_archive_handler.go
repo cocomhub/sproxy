@@ -6,8 +6,11 @@ package server
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,12 +32,14 @@ type CloudArchiveBatchRequest struct {
 
 // CloudArchiveResult 是归档操作响应结构体。
 type CloudArchiveResult struct {
-	Success   bool   `json:"success"`
-	Message   string `json:"message,omitempty"`
-	File      string `json:"file,omitempty"`
-	Size      int64  `json:"size,omitempty"`
-	Checksum  string `json:"checksum,omitempty"`
-	TaskCount int    `json:"task_count,omitempty"`
+	Success      bool     `json:"success"`
+	Message      string   `json:"message,omitempty"`
+	File         string   `json:"file,omitempty"`
+	Size         int64    `json:"size,omitempty"`
+	Checksum     string   `json:"checksum,omitempty"`
+	TaskCount    int      `json:"task_count,omitempty"`
+	SkippedCount int      `json:"skipped_count,omitempty"`
+	SkippedTasks []string `json:"skipped_tasks,omitempty"`
 }
 
 // cloudArchiveDirName 是云任务归档文件存储子目录。
@@ -45,8 +50,8 @@ const cloudArchiveDirName = ".__cloud_archives__"
 func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 
-	// 校验任务存在且状态为 completed
-	task, ok := h.cloudMgr.GetTask(taskID)
+	// 校验任务存在且状态为 completed（使用 SnapshotTask 避免 data race）
+	task, ok := h.cloudMgr.SnapshotTask(taskID)
 	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "task not found"}, http.StatusNotFound)
 		return
@@ -115,9 +120,10 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 打包
+	// 打包（流式 checksum）
 	logger := h.logger.With("archive", "cloud_task", "task_id", taskID)
-	if err := createTarGz(sourceFile, task.Filename, outputPath, logger); err != nil {
+	checksum, err := createTarGz(sourceFile, task.Filename, outputPath, logger)
+	if err != nil {
 		h.logger.Error("failed to create archive", "task_id", taskID, "error", err)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
@@ -125,13 +131,6 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 计算归档文件 checksum 和大小
-	checksum, err := FileChecksum(outputPath)
-	if err != nil {
-		h.logger.Error("failed to compute archive checksum", "task_id", taskID, "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive created but checksum failed"}, http.StatusInternalServerError)
-		return
-	}
 	info, err := os.Stat(outputPath)
 	if err != nil {
 		h.logger.Error("failed to stat archive", "task_id", taskID, "error", err)
@@ -171,23 +170,24 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 收集所有已完成任务的文件信息
+	// 收集所有已完成任务的文件信息，跳过无效任务
 	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
 	var files []fileWithRelPath
+	var skippedTasks []string
 
 	for _, taskID := range req.TaskIDs {
-		task, ok := h.cloudMgr.GetTask(taskID)
+		// 使用 SnapshotTask 避免 data race
+		task, ok := h.cloudMgr.SnapshotTask(taskID)
 		if !ok {
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("task not found: %s", taskID),
-			}, http.StatusNotFound)
-			return
+			h.logger.Warn("cloud batch archive: skipping task not found", "task_id", taskID)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
 		}
 		if task.Status != "completed" {
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("task %q status is %q, expected \"completed\"", taskID, task.Status),
-			}, http.StatusBadRequest)
-			return
+			h.logger.Warn("cloud batch archive: skipping task with non-completed status",
+				"task_id", taskID, "status", task.Status)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
 		}
 
 		sourceFile := filepath.Join(cloudDir, task.ID, task.Filename)
@@ -197,14 +197,21 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		if !IsPathWithin(sourceFile, sourceDir) {
 			h.logger.Error("path traversal detected in cloud batch archive",
 				"task_id", taskID, "source_file", sourceFile)
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("invalid file path for task: %s", taskID),
-			}, http.StatusInternalServerError)
-			return
+			skippedTasks = append(skippedTasks, taskID)
+			continue
 		}
 
 		relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
 		files = append(files, fileWithRelPath{fullPath: sourceFile, relPath: relPath})
+	}
+
+	// 所有任务都被跳过则返回错误
+	if len(files) == 0 {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: "no valid tasks to archive",
+			SkippedCount: len(skippedTasks), SkippedTasks: skippedTasks,
+		}, http.StatusBadRequest)
+		return
 	}
 
 	// 确定归档文件名（路径穿越防护 + 合法性检查）
@@ -242,9 +249,10 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 多文件打包
+	// 多文件打包（流式 checksum）
 	logger := h.logger.With("archive", "cloud_batch")
-	if err := createMultiFileTarGz(files, outputPath, logger); err != nil {
+	checksum, err := createMultiFileTarGz(files, outputPath, logger)
+	if err != nil {
 		h.logger.Error("failed to create batch archive", "error", err)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
@@ -252,13 +260,6 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 计算 checksum 和大小
-	checksum, err := FileChecksum(outputPath)
-	if err != nil {
-		h.logger.Error("failed to compute archive checksum", "error", err)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive created but checksum failed"}, http.StatusInternalServerError)
-		return
-	}
 	info, err := os.Stat(outputPath)
 	if err != nil {
 		h.logger.Error("failed to stat archive", "error", err)
@@ -270,11 +271,13 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSONResponse(w, CloudArchiveResult{
-		Success:   true,
-		File:      filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
-		Size:      size,
-		Checksum:  checksum,
-		TaskCount: len(files),
+		Success:      true,
+		File:         filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
+		Size:         size,
+		Checksum:     checksum,
+		TaskCount:    len(files),
+		SkippedCount: len(skippedTasks),
+		SkippedTasks: skippedTasks,
 	}, http.StatusOK)
 }
 
@@ -284,37 +287,62 @@ type fileWithRelPath struct {
 	relPath  string
 }
 
-// createTarGz 将单个文件打包为 tar.gz。
-func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger) error {
+// createTarGz 将单个文件打包为 tar.gz 并返回流式计算的 SHA-256 checksum。
+// 使用 succeeded 标记模式确保出错时清理输出文件。
+func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger) (checksum string, err error) {
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("create output file: %w", err)
+		return "", fmt.Errorf("create output file: %w", err)
 	}
 	defer outputFile.Close()
 
-	gw := gzip.NewWriter(outputFile)
+	// 出错时清理输出文件
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			os.Remove(outputPath)
+		}
+	}()
+
+	hasher := sha256.New()
+	multiWriter := io.MultiWriter(outputFile, hasher)
+
+	gw := gzip.NewWriter(multiWriter)
 	defer gw.Close()
 
 	tw := tar.NewWriter(gw)
 	defer tw.Close()
 
 	if err := addFileToTar(tw, sourceFile, sourceName, logger); err != nil {
-		_ = os.Remove(outputPath)
-		return fmt.Errorf("add file to tar: %w", err)
+		return "", fmt.Errorf("add file to tar: %w", err)
 	}
 
-	return nil
+	succeeded = true
+	checksum = hex.EncodeToString(hasher.Sum(nil))
+	return checksum, nil
 }
 
-// createMultiFileTarGz 将多个文件打包为单个 tar.gz。
-func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *slog.Logger) error {
+// createMultiFileTarGz 将多个文件打包为单个 tar.gz 并返回流式计算的 SHA-256 checksum。
+// 使用 succeeded 标记模式确保出错时清理输出文件。
+func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *slog.Logger) (checksum string, err error) {
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("create output file: %w", err)
+		return "", fmt.Errorf("create output file: %w", err)
 	}
 	defer outputFile.Close()
 
-	gw := gzip.NewWriter(outputFile)
+	// 出错时清理输出文件
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			os.Remove(outputPath)
+		}
+	}()
+
+	hasher := sha256.New()
+	multiWriter := io.MultiWriter(outputFile, hasher)
+
+	gw := gzip.NewWriter(multiWriter)
 	defer gw.Close()
 
 	tw := tar.NewWriter(gw)
@@ -322,10 +350,11 @@ func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *sl
 
 	for _, f := range files {
 		if err := addFileToTar(tw, f.fullPath, f.relPath, logger); err != nil {
-			_ = os.Remove(outputPath)
-			return fmt.Errorf("add file %q to tar: %w", f.relPath, err)
+			return "", fmt.Errorf("add file %q to tar: %w", f.relPath, err)
 		}
 	}
 
-	return nil
+	succeeded = true
+	checksum = hex.EncodeToString(hasher.Sum(nil))
+	return checksum, nil
 }

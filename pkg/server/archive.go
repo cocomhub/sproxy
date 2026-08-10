@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 )
 
 // ArchiveRequest 是 POST /api/archive 的请求体。
@@ -44,16 +46,45 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", "attachment; filename=\"archive.tar.gz\"")
+
+	// 根据请求文件列表推导归档名：单文件保留原文件名，多文件用公共前缀目录名
+	if len(validated) == 1 {
+		baseName := filepath.Base(validated[0])
+		if baseName == "" || baseName == "." {
+			baseName = "file"
+		}
+		w.Header().Set("Content-Disposition", formatContentDisposition(baseName+".tar.gz"))
+	} else {
+		name := commonArchiveName(validated)
+		w.Header().Set("Content-Disposition", formatContentDisposition(name+".tar.gz"))
+	}
 	w.WriteHeader(http.StatusOK)
 
 	// 流式打包：io.Pipe 中 tar + gzip
 	pr, pw := io.Pipe()
+	defer pr.Close()
+	var closeOnce sync.Once
 	go func() {
+		var pipeErr error
+		defer closeOnce.Do(func() {
+			if pipeErr != nil {
+				pw.CloseWithError(pipeErr)
+			} else {
+				pw.Close()
+			}
+		})
 		gw := gzip.NewWriter(pw)
 		tw := tar.NewWriter(gw)
 
 		for _, relPath := range validated {
+			// 检查客户端是否断开连接，避免 goroutine 泄漏
+			select {
+			case <-r.Context().Done():
+				pipeErr = r.Context().Err()
+				return
+			default:
+			}
+
 			fullPath := h.safePath(relPath)
 			if fullPath == "" {
 				logger.Error("归档添加文件失败：无效的文件路径", "path", relPath)
@@ -61,20 +92,54 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := addFileToTar(tw, fullPath, relPath, logger); err != nil {
 				logger.Error("归档添加文件失败", "path", relPath, "error", err)
+				pipeErr = err
 			}
 		}
 
 		// 按序关闭
 		if err := tw.Close(); err != nil {
 			logger.Error("tar writer 关闭失败", "error", err)
+			pipeErr = err
 		}
 		if err := gw.Close(); err != nil {
 			logger.Error("gzip writer 关闭失败", "error", err)
+			pipeErr = err
 		}
-		pw.Close()
 	}()
 
-	_, _ = io.Copy(w, pr)
+	_, copyErr := io.Copy(w, pr)
+	if copyErr != nil {
+		logger.Warn("archive response copy interrupted", "error", copyErr)
+	}
+}
+
+// commonArchiveName 从文件路径列表中推导公共归档名。
+func commonArchiveName(paths []string) string {
+	if len(paths) == 0 {
+		return "archive"
+	}
+	if len(paths) == 1 {
+		base := filepath.Base(paths[0])
+		if base == "" || base == "." {
+			return "archive"
+		}
+		return strings.TrimSuffix(base, filepath.Ext(base))
+	}
+	// 尝试取公共前缀目录
+	dir := filepath.Dir(paths[0])
+	for _, p := range paths[1:] {
+		for !strings.HasPrefix(p, dir+"/") {
+			parent := filepath.Dir(dir)
+			if parent == "." || parent == "/" || parent == dir {
+				return "archive"
+			}
+			dir = parent
+		}
+	}
+	if dir == "." || dir == "/" {
+		return "archive"
+	}
+	return filepath.Base(dir)
 }
 
 // validateArchiveFiles 验证归档请求中的文件路径，返回有效路径列表。
@@ -94,10 +159,28 @@ func validateArchiveFiles(files []string, w http.ResponseWriter) ([]string, bool
 
 // addFileToTar 将单个文件（或目录）添加到 tar writer 中。
 // 如果是目录则递归添加。
+// TOCTOU 防护：Linux 使用 O_NOFOLLOW 不跟随符号链接打开，
+// 交叉验证 os.SameFile 确保 lstat 和 open 后文件一致。
 func addFileToTar(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger) error {
-	info, err := os.Stat(fullPath)
+	return addFileToTarDepth(tw, fullPath, relPath, logger, 0)
+}
+
+// addFileToTarDepth 是 addFileToTar 内部实现，带 depth 参数防止递归过深。
+func addFileToTarDepth(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger, depth int) error {
+	if depth > 100 {
+		return fmt.Errorf("目录深度超过限制: %s", relPath)
+	}
+
+	// 使用 Lstat 检测符号链接，拒绝跟随
+	info, err := os.Lstat(fullPath)
 	if err != nil {
 		return fmt.Errorf("stat 失败: %w", err)
+	}
+
+	// 检测符号链接，拒绝归档
+	if info.Mode()&os.ModeSymlink != 0 {
+		logger.Warn("跳过符号链接", "path", relPath)
+		return nil
 	}
 
 	if info.IsDir() {
@@ -110,18 +193,33 @@ func addFileToTar(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger)
 		for _, entry := range entries {
 			childRel := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
 			childFull := filepath.Join(fullPath, entry.Name())
-			if err = addFileToTar(tw, childFull, childRel, logger); err != nil {
+			if err = addFileToTarDepth(tw, childFull, childRel, logger, depth+1); err != nil {
 				logger.Warn("归档添加子文件失败", "path", childRel, "error", err)
 			}
 		}
 		return nil
 	}
 
-	file, err := os.Open(fullPath)
+	// 单个文件大小限制
+	if info.Size() > defaultMaxArchiveSize {
+		return fmt.Errorf("文件 %s 大小 (%d) 超过归档限制 (%d)，请直接下载该文件", relPath, info.Size(), defaultMaxArchiveSize)
+	}
+
+	// 打开文件：Linux 用 O_NOFOLLOW 不跟随符号链接
+	file, err := openFileNoFollow(fullPath)
 	if err != nil {
 		return fmt.Errorf("打开文件失败: %w", err)
 	}
 	defer file.Close()
+
+	// 交叉验证：lstat 得到的文件信息与打开后的文件信息一致
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat 已打开文件失败: %w", err)
+	}
+	if !os.SameFile(info, openedInfo) {
+		return fmt.Errorf("文件在 lstat 和 open 之间被替换（TOCTOU）: %s", relPath)
+	}
 
 	header, err := tar.FileInfoHeader(info, "")
 	if err != nil {
@@ -137,6 +235,9 @@ func addFileToTar(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger)
 	}
 	return nil
 }
+
+// defaultMaxArchiveSize 是归档中单个文件的最大大小（100MB）。
+const defaultMaxArchiveSize int64 = 100 * 1024 * 1024
 
 // archiveDirHandler 处理 GET /api/archive-dir?dirname=xxx。
 // 将指定目录及其内容打包下载。
@@ -173,17 +274,44 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 
 	archiveName := filepath.Base(relPath) + ".tar.gz"
 	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", archiveName))
+	w.Header().Set("Content-Disposition", formatContentDisposition(archiveName))
 	w.WriteHeader(http.StatusOK)
 
 	pr, pw := io.Pipe()
+	defer pr.Close()
+	var closeOnce sync.Once
 	go func() {
+		var pipeErr error
+		defer closeOnce.Do(func() {
+			if pipeErr != nil {
+				pw.CloseWithError(pipeErr)
+			} else {
+				pw.Close()
+			}
+		})
 		gw := gzip.NewWriter(pw)
 		tw := tar.NewWriter(gw)
-		_ = addFileToTar(tw, fullPath, filepath.ToSlash(relPath), h.logger)
-		_ = tw.Close()
-		_ = gw.Close()
-		pw.Close()
+
+		// 检查客户端是否断开连接
+		select {
+		case <-r.Context().Done():
+			pipeErr = r.Context().Err()
+			return
+		default:
+		}
+
+		if err := addFileToTarDepth(tw, fullPath, filepath.ToSlash(relPath), h.logger, 0); err != nil {
+			pipeErr = err
+		}
+		if err := tw.Close(); err != nil {
+			pipeErr = err
+		}
+		if err := gw.Close(); err != nil {
+			pipeErr = err
+		}
 	}()
-	_, _ = io.Copy(w, pr)
+	_, copyErr := io.Copy(w, pr)
+	if copyErr != nil {
+		h.logger.Warn("archive dir response copy interrupted", "error", copyErr)
+	}
 }

@@ -130,7 +130,7 @@ func TestE2E_MkdirRmdir(t *testing.T) {
 	}
 
 	// Rmdir (force remove)
-	req, err := http.NewRequest("POST", baseURL+"/rmdir?dirname=e2e_testdir", nil)
+	req, err := http.NewRequest("POST", baseURL+"/rmdir?dirname=e2e_testdir"+"&force=true", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

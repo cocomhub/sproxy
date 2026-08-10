@@ -129,7 +129,7 @@ func TestStorageConfig_Put(t *testing.T) {
 
 	// 请求体
 	body := bytes.NewReader([]byte(`{"max_storage_bytes": 21474836480}`))
-	req, err := http.NewRequest(http.MethodPut, url+"/api/storage/config", body)
+	req, err := http.NewRequest(http.MethodPut, url+"/api/config", body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,16 +143,12 @@ func TestStorageConfig_Put(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-
 	var raw map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		t.Fatal(err)
 	}
-
-	// 验证响应包含更新后的值
-	got, ok := raw["max_storage_bytes"].(float64)
-	if !ok || int64(got) != 21474836480 {
-		t.Errorf("expected max_storage_bytes=21474836480, got %v", raw["max_storage_bytes"])
+	if raw["success"] != true || raw["changed"] != true {
+		t.Errorf("expected success=true, changed=true, got success=%v changed=%v", raw["success"], raw["changed"])
 	}
 
 	// 验证 storageMgr 上限已更新
@@ -168,7 +164,7 @@ func TestStorageConfig_Put_BadRequest(t *testing.T) {
 
 	// 无效请求体
 	body := bytes.NewReader([]byte(`invalid json`))
-	req, _ := http.NewRequest(http.MethodPut, url+"/api/storage/config", body)
+	req, _ := http.NewRequest(http.MethodPut, url+"/api/config", body)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -188,7 +184,7 @@ func TestStorageConfig_Put_NegativeValue(t *testing.T) {
 	})
 
 	body := bytes.NewReader([]byte(`{"max_storage_bytes": -1}`))
-	req, _ := http.NewRequest(http.MethodPut, url+"/api/storage/config", body)
+	req, _ := http.NewRequest(http.MethodPut, url+"/api/config", body)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

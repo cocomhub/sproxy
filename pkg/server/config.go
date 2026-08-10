@@ -58,22 +58,22 @@ type VersionConfig struct {
 
 // HubConfig 配置 Hub 中继系统。
 type HubConfig struct {
-	Enabled    bool             "yaml:\"enabled\""
-	NodeID     string           "yaml:\"node_id\""
-	RelayToken string           "yaml:\"relay_token\""
-	Transports TransportConfigs "yaml:\"transports\""
+	Enabled    bool             `yaml:"enabled"`
+	NodeID     string           `yaml:"node_id"`
+	RelayToken string           `yaml:"relay_token"`
+	Transports TransportConfigs `yaml:"transports"`
 }
 
-// TransportConfigs 聚合所有可用的传输层配置。
+// TransportConfigs 聚合所有可用的传输层配置，当前为预留扩展，暂无产品代码消费。
 type TransportConfigs struct {
-	WS WSTransportConfig "yaml:\"ws\""
+	WS WSTransportConfig `yaml:"ws"` // 预留：WebSocket 传输监听配置
 }
 
-// WSTransportConfig 配置 WebSocket 传输监听。
+// WSTransportConfig 配置 WebSocket 传输监听，当前为预留扩展，暂无产品代码消费。
 type WSTransportConfig struct {
-	Enabled bool   "yaml:\"enabled\""
-	Listen  string "yaml:\"listen\""
-	Path    string "yaml:\"path\""
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
+	Path    string `yaml:"path"`
 }
 
 type Config struct {
@@ -93,7 +93,6 @@ type Config struct {
 
 	// 分块上传配置
 	ChunkSize        int64         `yaml:"chunk_size" mapstructure:"chunk_size"`
-	MaxChunkSize     int64         `yaml:"max_chunk_size" mapstructure:"max_chunk_size"` // 仅 sclient 使用；服务端按 DefaultChunkBodyLimit 限制
 	UploadSessionTTL time.Duration `yaml:"upload_session_ttl" mapstructure:"upload_session_ttl"`
 
 	// 文件版本管理（默认关闭）
@@ -109,12 +108,12 @@ type Config struct {
 	MaxStorageBytes int64 `yaml:"max_storage_bytes" mapstructure:"max_storage_bytes"` // 存储上限（字节），0 = 不限制
 
 	// 云端下载配置
-	CloudSyncThreshold        int64  `yaml:"cloud_sync_threshold" mapstructure:"cloud_sync_threshold"`                 // 同步模式阈值（字节），默认 20 MiB
-	CloudDownloader           string `yaml:"cloud_downloader" mapstructure:"cloud_downloader"`                         // 下载器名称，默认 "http"
-	CloudTaskTTL              string `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`                             // 完成任务保留时间，默认 "24h"
-	CloudFailedTaskTTL        string `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`               // 失败任务保留时间，默认 "1h"
-	CloudMaxConcurrent        int    `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`                 // 最大并发下载数，默认 3
-	CloudDownloadAllowPrivate bool   `yaml:"cloud_download_allow_private" mapstructure:"cloud_download_allow_private"` // 允许私有 IP 下载（仅测试用）
+	CloudSyncThreshold        int64         `yaml:"cloud_sync_threshold" mapstructure:"cloud_sync_threshold"`
+	CloudDownloader           string        `yaml:"cloud_downloader" mapstructure:"cloud_downloader"`
+	CloudTaskTTL              time.Duration `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`
+	CloudFailedTaskTTL        time.Duration `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`
+	CloudMaxConcurrent        int           `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`
+	CloudDownloadAllowPrivate bool          `yaml:"cloud_download_allow_private" mapstructure:"cloud_download_allow_private"`
 }
 
 func Default() *Config {
@@ -133,21 +132,21 @@ func Default() *Config {
 			AutoTLS: true,
 		},
 		CORS: CORSConfig{
-			MaxAge: 86400,
+			MaxAge: defaultMaxAge,
 		},
 		ChunkSize:                 size.DefaultChunkSize,
 		UploadSessionTTL:          24 * time.Hour,
 		CloudSyncThreshold:        20 * 1024 * 1024, // 20 MiB
 		CloudDownloader:           "http",
-		CloudTaskTTL:              "24h",
-		CloudFailedTaskTTL:        "1h",
+		CloudTaskTTL:              24 * time.Hour,
+		CloudFailedTaskTTL:        1 * time.Hour,
 		CloudMaxConcurrent:        3,
-		CloudDownloadAllowPrivate: true, // 默认允许（E2E 测试需要），生产环境建议设为 false
+		CloudDownloadAllowPrivate: false,
 	}
 }
 
-// Validate 校验配置合理性，设置零值字段为默认值。
-func (c *Config) Validate() error {
+// SetDefaults 设置零值字段为默认值。
+func (c *Config) SetDefaults() {
 	if c.Addr == "" {
 		c.Addr = ":18083"
 	}
@@ -172,31 +171,66 @@ func (c *Config) Validate() error {
 	if c.CloudMaxConcurrent <= 0 {
 		c.CloudMaxConcurrent = 3
 	}
+	if c.CloudTaskTTL <= 0 {
+		c.CloudTaskTTL = 24 * time.Hour
+	}
+	if c.CloudFailedTaskTTL <= 0 {
+		c.CloudFailedTaskTTL = 1 * time.Hour
+	}
+}
+
+// Validate 校验配置合理性。
+func (c *Config) Validate() error {
+	if c.Addr == "" {
+		return fmt.Errorf("addr 为空，请配置监听地址")
+	}
+	if c.UploadsDir == "" {
+		return fmt.Errorf("uploads_dir 为空，请配置上传目录")
+	}
 	if c.TunnelKey == "" && !c.TLS.Enabled {
 		return fmt.Errorf("tunnel_key 为空且 TLS 未启用，传输将完全明文，请配置 tunnel_key 或启用 TLS")
 	}
 	if c.TunnelKey != "" {
-		// 同时校验长度与 hex 格式，避免运行时 hex.DecodeString 报错才发现。
-		// 复用 pkg/tunnel.ParseKey 保持单一来源。
 		if _, err := tunnel.ParseKey(c.TunnelKey); err != nil {
 			return fmt.Errorf("tunnel_key 校验失败（必须是 64 位十六进制字符 0-9a-fA-F）: %w", err)
 		}
 	}
+	if c.APIKeys.Enabled && len(c.APIKeys.Keys) == 0 {
+		return fmt.Errorf("api_keys.enabled=true 但未配置任何密钥，认证将拒绝所有请求")
+	}
+	for i, k := range c.APIKeys.Keys {
+		if k.Key == "" {
+			return fmt.Errorf("api_keys[%d].key 为空，密钥不能为空字符串", i)
+		}
+		switch k.Permission {
+		case PermissionRead, PermissionWrite, "":
+		default:
+			return fmt.Errorf("api_keys[%d].permission=%q 无效，仅允许 %q 或 %q", i, k.Permission, PermissionRead, PermissionWrite)
+		}
+	}
+	if c.RateLimit.Enabled && c.RateLimit.Requests <= 0 {
+		return fmt.Errorf("rate_limit.enabled=true 但 requests=%d 无效，请设置大于 0 的值", c.RateLimit.Requests)
+	}
+	if c.RateLimit.Enabled && c.RateLimit.Window <= 0 {
+		return fmt.Errorf("rate_limit.enabled=true 但 window=%s 无效，请设置大于 0 的 duration", c.RateLimit.Window)
+	}
 	return nil
 }
 
-// LoadFromProvider 从 provider.Provider 解码配置，合并默认值并校验。
+// LoadFromProvider 从 provider.Provider 解码配置，设置默认值并校验。
 func LoadFromProvider(p provider.Provider) (*Config, error) {
 	cfg := Default()
 	if err := p.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("配置解码失败: %w", err)
 	}
+	cfg.SetDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
 }
 
+// LoadConfig 加载配置文件。路径为空或文件不存在时返回默认配置，不自动创建文件。
 func LoadConfig(path string) (*Config, error) {
 	cfg := Default()
 	if path == "" {
@@ -205,9 +239,6 @@ func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if saveErr := SaveConfig(cfg, path); saveErr != nil {
-				return nil, fmt.Errorf("创建默认配置文件失败: %w", saveErr)
-			}
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)
@@ -220,16 +251,22 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 
+	cfg.SetDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("配置校验失败: %w", err)
+	}
+
 	return cfg, nil
 }
 
 func SaveConfig(cfg *Config, path string) error {
+	// TODO: 后续优化敏感信息管理（TunnelKey/AuthToken 脱敏）
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("写入配置文件失败: %w", err)
 	}
 

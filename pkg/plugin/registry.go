@@ -25,6 +25,7 @@ type Registry[T any] struct {
 	mu      sync.RWMutex
 	builtin T
 	plugins map[string]Plugin[T]
+	order   []string // 注册顺序，用于 Names() 按序返回
 }
 
 // New 创建一个新的注册表。
@@ -38,12 +39,15 @@ func New[T any](name string, builtin T) *Registry[T] {
 }
 
 // Register 注册一个插件。
-// 同名插件以最后一次注册为准（后注册覆盖前注册）。
+// 同名插件以最后一次注册为准（后注册覆盖前注册），顺序不变（首次注册位置）。
 func (r *Registry[T]) Register(p Plugin[T]) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if p.Name == "" {
 		panic(fmt.Sprintf("plugin[%s]: Register called with empty name", r.name))
+	}
+	if _, exists := r.plugins[p.Name]; !exists {
+		r.order = append(r.order, p.Name)
 	}
 	r.plugins[p.Name] = p
 }
@@ -78,14 +82,12 @@ func (r *Registry[T]) Get(name string) (T, bool) {
 	return p.Instance, true
 }
 
-// Names 返回所有已注册插件的名称列表。
+// Names 返回所有已注册插件的名称列表（按注册顺序）。
 func (r *Registry[T]) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	names := make([]string, 0, len(r.plugins))
-	for name := range r.plugins {
-		names = append(names, name)
-	}
+	names := make([]string, len(r.order))
+	copy(names, r.order)
 	return names
 }
 
@@ -102,6 +104,7 @@ func (r *Registry[T]) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.plugins = make(map[string]Plugin[T])
+	r.order = nil
 }
 
 // Delete 按名称移除一个已注册的插件。
@@ -110,4 +113,10 @@ func (r *Registry[T]) Delete(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.plugins, name)
+	for i, n := range r.order {
+		if n == name {
+			r.order = append(r.order[:i], r.order[i+1:]...)
+			break
+		}
+	}
 }

@@ -51,6 +51,7 @@ func TestCORSMiddleware_AllowAll(t *testing.T) {
 	if !called {
 		t.Fatal("next handler should be called")
 	}
+	// 通配符 "*" 时直接返回 "*"，不反射 origin
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Fatalf("expected '*', got %q", got)
 	}
@@ -105,6 +106,7 @@ func TestCORSMiddleware_OPTIONS_Preflight(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", w.Code)
 	}
+	// 通配符 "*" 时直接返回 "*"，不反射 origin
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Fatalf("expected '*', got %q", got)
 	}
@@ -128,8 +130,11 @@ func TestCORSMiddleware_RejectedOrigin(t *testing.T) {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
-	if !called {
-		t.Fatal("next handler should still be called for rejected origin")
+	if called {
+		t.Fatal("next handler should NOT be called for rejected origin")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden, got %d", w.Code)
 	}
 	if w.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatal("no CORS headers should be set for rejected origin")

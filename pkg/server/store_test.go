@@ -112,7 +112,7 @@ func TestChecksumStore_GetAll_Consistency(t *testing.T) {
 
 func TestUploadStore_GetSessionByFilename(t *testing.T) {
 	tmpDir := t.TempDir()
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	us.CreateSession("id1", "file1.txt", 100, 4096, 1, strings.Repeat("a", 64), 0)
@@ -121,6 +121,7 @@ func TestUploadStore_GetSessionByFilename(t *testing.T) {
 	s := us.GetSessionByFilename("file1.txt")
 	if s == nil {
 		t.Fatal("expected session for file1.txt")
+		return
 	}
 	if s.UploadID != "id1" {
 		t.Fatalf("expected id1, got %s", s.UploadID)
@@ -133,7 +134,7 @@ func TestUploadStore_GetSessionByFilename(t *testing.T) {
 
 func TestUploadStore_DeleteSession(t *testing.T) {
 	tmpDir := t.TempDir()
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	us.CreateSession("del-id", "del.txt", 100, 4096, 1, strings.Repeat("c", 64), 0)
@@ -153,7 +154,7 @@ func TestUploadStore_DeleteSession(t *testing.T) {
 func TestUploadStore_CleanupExpired(t *testing.T) {
 	tmpDir := t.TempDir()
 	// Use a negative TTL so the session is already expired on creation
-	us := NewUploadStore(tmpDir, -time.Nanosecond, nil)
+	us := MustNewUploadStore(tmpDir, -time.Nanosecond, nil)
 	defer us.Stop()
 
 	us.CreateSession("expired-id", "expired.txt", 100, 4096, 1, strings.Repeat("d", 64), 0)
@@ -168,17 +169,18 @@ func TestUploadStore_CleanupExpired(t *testing.T) {
 func TestUploadStore_RecoverFromDisk(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	us1 := NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	us1.CreateSession("recover-id", "recover.txt", 8192, 4096, 2, strings.Repeat("e", 64), 0)
 	us1.MarkChunkReceived("recover-id", 0, "chunk0hash")
 	us1.Stop()
 
-	us2 := NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("recover-id")
 	if s == nil {
 		t.Fatal("session should be recovered from disk")
+		return
 	}
 	if s.Filename != "recover.txt" {
 		t.Fatalf("filename mismatch: %s", s.Filename)
@@ -194,7 +196,7 @@ func TestUploadStore_RecoverFromDisk(t *testing.T) {
 func TestUploadStore_ReconcileChunks(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	us1 := NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	us1.CreateSession("reconcile-id", "reconcile.txt", 8192, 4096, 2, strings.Repeat("f", 64), 0)
 	us1.MarkChunkReceived("reconcile-id", 0, "chunk0hash")
 	us1.Stop()
@@ -208,12 +210,13 @@ func TestUploadStore_ReconcileChunks(t *testing.T) {
 		t.Fatalf("write chunk file: %v", err)
 	}
 
-	us2 := NewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("reconcile-id")
 	if s == nil {
 		t.Fatal("session should be recovered")
+		return
 	}
 
 	// reconcileChunks should have detected the orphan chunk file on disk
@@ -226,7 +229,7 @@ func TestUploadStore_ReconcileChunks(t *testing.T) {
 
 func TestUploadStore_GetOrCreateSession_Reuse(t *testing.T) {
 	tmpDir := t.TempDir()
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	s1, reused, err := us.GetOrCreateSession("rid", "r.txt", 100, 4096, 1, strings.Repeat("g", 64), 0)
@@ -251,7 +254,7 @@ func TestUploadStore_GetOrCreateSession_Reuse(t *testing.T) {
 
 func TestUploadStore_ConcurrentMarkChunk(t *testing.T) {
 	tmpDir := t.TempDir()
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(tmpDir, 0, nil)
 	defer us.Stop()
 
 	const totalChunks = 100
@@ -280,8 +283,7 @@ func TestUploadStore_ConcurrentMarkChunk(t *testing.T) {
 }
 
 func TestUploadStore_CleanupSessionAfter(t *testing.T) {
-	tmpDir := t.TempDir()
-	us := NewUploadStore(tmpDir, 0, nil)
+	us := MustNewUploadStore(t.TempDir(), 0, nil)
 	defer us.Stop()
 
 	sessionID := "cleanup-test"
@@ -295,10 +297,13 @@ func TestUploadStore_CleanupSessionAfter(t *testing.T) {
 	// 计划在 50ms 后清理
 	us.CleanupSessionAfter(sessionID, 50*time.Millisecond)
 
-	// 验证 50ms 后 session 被移除
-	time.Sleep(100 * time.Millisecond)
-
-	if us.GetSession(sessionID) != nil {
-		t.Error("expected session to be cleaned up after TTL")
+	// 轮询等待 session 被移除，最多 2s
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if us.GetSession(sessionID) == nil {
+			return // 已清理，成功
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Error("expected session to be cleaned up after TTL")
 }

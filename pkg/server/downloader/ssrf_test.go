@@ -135,11 +135,11 @@ func TestSafeCheckRedirect_ExternalURLValidates(t *testing.T) {
 	}
 }
 
-func TestSafeCheckRedirect_InternalPathOK(t *testing.T) {
+func TestSafeCheckRedirect_EmptyScheme(t *testing.T) {
 	fn := safeCheckRedirect()
 	req := httptest.NewRequest("GET", "/local/path", nil)
 	err := fn(req, nil)
-	if err != nil {
-		t.Errorf("expected no error for internal path, got: %v", err)
+	if err == nil {
+		t.Error("expected error for redirect with empty scheme")
 	}
 }

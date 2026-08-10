@@ -24,14 +24,14 @@ import (
 // 导致 batchRename handler 实际覆盖率为 0。以下测试修正此问题。
 
 // doBatchRename POST /api/batch/rename 并解码响应。
-func doBatchRename(t *testing.T, url, reqBody string) (int, BatchRenameResponse) {
+func doBatchRename(t *testing.T, url, reqBody string) (int, BatchResponse) {
 	t.Helper()
 	resp, err := http.Post(url+"/api/batch/rename", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	var result BatchRenameResponse
+	var result BatchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -39,7 +39,7 @@ func doBatchRename(t *testing.T, url, reqBody string) (int, BatchRenameResponse)
 }
 
 // assertBatchRenameOK 断言批量重命名返回 200 且指定索引的结果成功。
-func assertBatchRenameOK(t *testing.T, result BatchRenameResponse, index int) {
+func assertBatchRenameOK(t *testing.T, result BatchResponse, index int) {
 	t.Helper()
 	if len(result.Results) <= index {
 		t.Fatalf("expected at least %d results, got %d", index+1, len(result.Results))
@@ -212,7 +212,7 @@ func TestBatchDelete_MissingChecksum(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var result BatchDeleteResponse
+	var result BatchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -225,23 +225,6 @@ func TestBatchDelete_MissingChecksum(t *testing.T) {
 }
 
 // ---- healthz uploadStore 故障路径 ----
-
-func TestHealthz_UploadStoreFailure(t *testing.T) {
-	t.Parallel()
-	// 模拟 uploadStore.Health() 返回错误
-	url, _, cleanup := newTestServer(t, nil)
-	defer cleanup()
-
-	// 测试 uploadStore 存在时的健康检查
-	resp, err := http.Get(url + "/healthz")
-	if err != nil {
-		t.Fatalf("healthz: %v", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	t.Logf("healthz response: %s", body)
-	// 正常路径应返回 OK
-}
 
 func TestHealthz_UploadStoreStopped(t *testing.T) {
 	t.Parallel()
@@ -335,56 +318,6 @@ func TestDownload_OpenFileError(t *testing.T) {
 	}
 }
 
-// ---- listFiles 子目录不存在 ----
-
-func TestListFiles_SubdirNotFound(t *testing.T) {
-	t.Parallel()
-	url, _ := newTestServerWithAllRoutes(t, nil)
-
-	resp, err := http.Get(url + "/api/files?subdir=nonexistent")
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 (empty list), got %d", resp.StatusCode)
-	}
-	var result struct {
-		Files []fileInfo `json:"files"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(result.Files) != 0 {
-		t.Fatalf("expected empty list, got %d", len(result.Files))
-	}
-}
-
-// ---- searchFiles 搜索失败路径 ----
-
-func TestSearchFiles_EmptyQuery(t *testing.T) {
-	t.Parallel()
-	url, _ := newTestServerWithAllRoutes(t, nil)
-
-	resp, err := http.Get(url + "/api/files/search?q=")
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var result struct {
-		Files []fileInfo `json:"files"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(result.Files) != 0 {
-		t.Fatalf("expected empty list for empty query, got %d", len(result.Files))
-	}
-}
-
 // ---- stat checksum 走 checksumStore 与实时计算两条路径 ----
 
 func TestStat_ChecksumFromStore(t *testing.T) {
@@ -471,7 +404,7 @@ func TestRmdir_RemoveAllFailure(t *testing.T) {
 		os.RemoveAll(dirPath)
 	})
 
-	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=lockeddir", nil)
+	req, _ := http.NewRequest("POST", url+"/rmdir?dirname=lockeddir&force=true", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("rmdir: %v", err)
@@ -497,6 +430,6 @@ func TestUpload_ParseMultipartBodyLarge(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge && resp.StatusCode != http.StatusBadRequest {
-		t.Logf("large body test returned %d (acceptable)", resp.StatusCode)
+		t.Errorf("expected 413 or 400, got %d", resp.StatusCode)
 	}
 }

@@ -4,12 +4,12 @@
 package server
 
 import (
-	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -34,10 +34,14 @@ type listResponse struct {
 // offset 默认 0，limit 默认 1000（上限 10000）。
 func parsePagination(r *http.Request) (offset, limit int) {
 	if o := r.URL.Query().Get("offset"); o != "" {
-		_, _ = fmt.Sscanf(o, "%d", &offset)
+		if n, err := strconv.Atoi(o); err == nil {
+			offset = n
+		}
 	}
 	if l := r.URL.Query().Get("limit"); l != "" {
-		_, _ = fmt.Sscanf(l, "%d", &limit)
+		if n, err := strconv.Atoi(l); err == nil {
+			limit = n
+		}
 	}
 	if offset < 0 {
 		offset = 0
@@ -55,21 +59,29 @@ func (h *Handlers) resolveListDir(w http.ResponseWriter, r *http.Request) (targe
 	if subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/"); subdir != "" {
 		if _, err := ValidateFilePath(subdir); err != nil {
 			h.logger.Warn("无效的子目录", "subdir", subdir, "error", err.Error())
-			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+			sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
 			return "", false
 		}
 		targetDir = h.safePath(subdir)
 		if targetDir == "" {
 			h.logger.Warn("无效的子目录路径", "subdir", subdir)
-			sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+			sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
 			return "", false
 		}
 	}
 	return targetDir, true
 }
 
+// isInternalDir 检查是否为内部管理目录或文件，应跳过列表显示。
+func isInternalDir(name string) bool {
+	return name == ".checksums.json" || name == chunkedDirName || name == versionsDirName || name == cloudDirName || name == downloadsDirName || name == cloudArchiveDirName
+}
+
 // sortFileEntries 按指定字段和顺序排序文件条目。
 func sortFileEntries(entries []fileInfo, sortBy, sortOrder string) {
+	if sortOrder != "desc" {
+		sortOrder = "asc"
+	}
 	switch sortBy {
 	case "size":
 		sort.SliceStable(entries, func(i, j int) bool {
@@ -113,7 +125,7 @@ func paginateEntries(entries []fileInfo, offset, limit int) []fileInfo {
 func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]string, subdir string) []fileInfo {
 	allFiles := make([]fileInfo, 0, len(entries))
 	for _, e := range entries {
-		if e.Name() == ".checksums.json" || e.Name() == chunkedDirName || e.Name() == versionsDirName || e.Name() == cloudDirName || e.Name() == ".__downloads__" || e.Name() == cloudArchiveDirName {
+		if isInternalDir(e.Name()) {
 			continue
 		}
 		if e.IsDir() {
@@ -125,6 +137,7 @@ func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]
 		}
 		info, err := e.Info()
 		if err != nil {
+			h.logger.Warn("读取文件信息失败，跳过", "name", e.Name(), "error", err)
 			continue
 		}
 		fi := fileInfo{
@@ -134,8 +147,7 @@ func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]
 		}
 		relName := e.Name()
 		if subdir != "" {
-			cleaned, _ := ValidateFilePath(subdir)
-			relName = filepath.ToSlash(filepath.Join(cleaned, e.Name()))
+			relName = filepath.ToSlash(filepath.Join(subdir, e.Name()))
 		}
 		if cs, ok := csMap[relName]; ok {
 			fi.Checksum = cs
@@ -163,7 +175,7 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entries, err := os.ReadDir(targetDir)
-	h.logger.Info("读取目录", "dir", targetDir)
+	h.logger.Debug("读取目录", "dir", targetDir)
 	if os.IsNotExist(err) {
 		sendJSONResponse(w, listResponse{Files: []fileInfo{}, Total: 0, Offset: offset, Limit: limit}, http.StatusOK)
 		return
@@ -196,7 +208,7 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
-		sendJSONResponse(w, map[string]any{"files": []fileInfo{}}, http.StatusOK)
+		sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
 		return
 	}
 	qLower := strings.ToLower(q)
@@ -205,7 +217,8 @@ func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	csMap := h.checksumStore.GetAll()
 
 	results := h.collectSearchResults(cfg.UploadsDir, qLower, csMap)
-	sendJSONResponse(w, map[string]any{"files": results}, http.StatusOK)
+	resp := listResponse{Files: results, Total: len(results), Offset: 0, Limit: len(results)}
+	sendJSONResponse(w, resp, http.StatusOK)
 }
 
 // collectSearchResults 递归搜索 uploads_dir 下文件名包含 queryLower 的文件。
@@ -220,13 +233,14 @@ func (h *Handlers) collectSearchResults(rootsDir, queryLower string, csMap map[s
 // searchWalkDirCallback 是 collectSearchResults 中 filepath.WalkDir 的回调函数。
 func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, err error, queryLower string, csMap map[string]string, results *[]fileInfo) error {
 	if err != nil {
+		h.logger.Warn("搜索时访问路径失败", "path", path, "error", err)
 		return nil
 	}
 	rel, _ := filepath.Rel(rootsDir, path)
 	if rel == "." {
 		return nil
 	}
-	if d.Name() == ".checksums.json" || d.Name() == chunkedDirName || d.Name() == versionsDirName || d.Name() == cloudDirName || d.Name() == ".__downloads__" || d.Name() == cloudArchiveDirName {
+	if isInternalDir(d.Name()) {
 		if d.IsDir() {
 			return filepath.SkipDir
 		}

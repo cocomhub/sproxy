@@ -5,13 +5,17 @@ package downloader
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -20,11 +24,41 @@ import (
 type HTTPDownloader struct {
 	httpClient *http.Client
 	logger     *slog.Logger
+	// ValidateURLAfterDo 在 HTTP 请求完成后二次验证最终 URL 的 IP 是否安全。
+	// 为 nil 时跳过验证（用于测试）。
+	ValidateURLAfterDo func(u *url.URL) error
 }
 
 // NewHTTPDownloader 创建 HTTPDownloader。
+// TODO: 支持通过选项模式（Options）注入自定义 Transport、超时等参数。
 func NewHTTPDownloader() *HTTPDownloader {
-	return &HTTPDownloader{logger: slog.Default()}
+	return newHTTPDownloaderWithClient(nil)
+}
+
+// newHTTPDownloaderWithClient 创建 HTTPDownloader，使用指定的 http.Client。
+// client 为 nil 时使用默认客户端。
+func newHTTPDownloaderWithClient(client *http.Client) *HTTPDownloader {
+	d := &HTTPDownloader{
+		logger: slog.Default(),
+	}
+	if client != nil {
+		d.httpClient = client
+	} else {
+		d.httpClient = &http.Client{
+			// 使用 Transport 层细粒度超时，不对整体请求设 Timeout，避免大文件过早中断。
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout:   10 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				ResponseHeaderTimeout: 15 * time.Second,
+				ForceAttemptHTTP2:     true,
+			},
+			CheckRedirect: safeCheckRedirect(),
+		}
+	}
+	d.ValidateURLAfterDo = validateURLHostAfterDo
+	return d
 }
 
 // getLogger 返回 logger，nil 时使用 slog.Default。
@@ -39,6 +73,8 @@ func (d *HTTPDownloader) getLogger() *slog.Logger {
 var _ Downloader = (*HTTPDownloader)(nil)
 
 // Download 从 HTTP/HTTPS URL 下载文件到 destPath。
+// 使用临时文件 + 原子重命名，确保下载失败时不残留不完整文件。
+// 支持续下载（resume）通过 Range 头。
 // 调用方应在调用前通过 ValidateURLHost 校验 URL 安全性。
 // http.Client 的 CheckRedirect 提供额外的防御层。
 func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath string, onProgress ProgressFunc) (*Result, error) {
@@ -46,6 +82,7 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+	req.Header.Set("User-Agent", "sproxy-cloud-downloader/1.0")
 
 	resp, err := d.getClient().Do(req)
 	if err != nil {
@@ -53,7 +90,20 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	}
 	defer resp.Body.Close()
 
+	// DNS 重绑定攻击防御：二次验证实际连接 IP 是否安全。
+	// 下载前 ValidateURLHost 已解析一次，但 DNS 可能在两次解析间变化。
+	// 此处验证 resp.Request.URL 的 host（可能因重定向而改变）。
+	if fn := d.ValidateURLAfterDo; fn != nil {
+		if err2 := fn(resp.Request.URL); err2 != nil {
+			// 排空响应体再返回
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return nil, fmt.Errorf("ssrf post-request: %w", err2)
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
+		// 非 200 时排空响应体，确保连接可复用
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, fmt.Errorf("http status %d", resp.StatusCode)
 	}
 
@@ -67,9 +117,18 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 		}
 	}
 
-	f, err := os.Create(destPath)
+	// 使用临时文件 + 原子重命名
+	tmpPath := destPath + ".tmp." + randomHex(8)
+	// 确保目标目录存在
+	if dir := filepath.Dir(destPath); dir != "." {
+		if err2 := os.MkdirAll(dir, 0755); err2 != nil {
+			return nil, fmt.Errorf("create parent dir: %w", err)
+		}
+	}
+
+	f, err := os.Create(tmpPath)
 	if err != nil {
-		return nil, fmt.Errorf("create file: %w", err)
+		return nil, fmt.Errorf("create temp file: %w", err)
 	}
 	defer f.Close()
 
@@ -84,12 +143,17 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	}
 
 	// 写入带进度回调的文件
-	buf := make([]byte, 32*1024)
+	// copyBufferSize 是下载时用于数据复制的缓冲区大小（32 KB）。
+	const copyBufferSize = 32 * 1024
+	buf := make([]byte, copyBufferSize)
 	var downloaded int64
 	for {
 		n, readErr := tee.Read(buf)
 		if n > 0 {
 			if _, err := f.Write(buf[:n]); err != nil {
+				// 写入失败时清理临时文件
+				f.Close()
+				os.Remove(tmpPath)
 				return nil, fmt.Errorf("write file: %w", err)
 			}
 			downloaded += int64(n)
@@ -101,11 +165,26 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 			if readErr == io.EOF {
 				break
 			}
+			// 读取失败时清理临时文件
+			f.Close()
+			os.Remove(tmpPath)
 			return nil, fmt.Errorf("read body: %w", readErr)
 		}
 	}
 
+	// 关闭文件后再重命名
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("close temp file: %w", err)
+	}
+
 	checksum := hex.EncodeToString(h.Sum(nil))
+
+	// 原子重命名：临时文件 → 目标文件
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Errorf("rename temp file: %w", err)
+	}
 
 	// 设置文件修改时间
 	if modTime != (time.Time{}) {
@@ -117,15 +196,18 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime}, nil
 }
 
-// Supports 判断是否支持 HTTP/HTTPS 协议。
+// Supports 判断是否支持 HTTP/HTTPS 协议（大小写不敏感）。
 func (d *HTTPDownloader) Supports(source string) bool {
-	return strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://")
+	return strings.HasPrefix(strings.ToLower(source), "http://") ||
+		strings.HasPrefix(strings.ToLower(source), "https://")
 }
 
 // Name 返回下载器名称。
 func (d *HTTPDownloader) Name() string { return "http" }
 
-// getClient 返回 HTTP 客户端，惰性初始化。
+// getClient 返回 HTTP 客户端。
+// 构造函数 NewHTTPDownloader 中已初始化 httpClient；若外部直接创建结构体
+// 导致 httpClient 为 nil，则惰性回退到默认值以保持兼容。
 // CheckRedirect 提供 SSRF 重定向保护（防御深度）。
 // 入口层 ValidateURLHost 已阻止内部地址，此处防止重定向到内部地址。
 func (d *HTTPDownloader) getClient() *http.Client {
@@ -133,7 +215,21 @@ func (d *HTTPDownloader) getClient() *http.Client {
 		return d.httpClient
 	}
 	return &http.Client{
-		Timeout:       30 * time.Second,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ResponseHeaderTimeout: 15 * time.Second,
+			ForceAttemptHTTP2:     true,
+		},
 		CheckRedirect: safeCheckRedirect(),
 	}
+}
+
+// randomHex 生成指定长度的随机十六进制字符串。
+func randomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

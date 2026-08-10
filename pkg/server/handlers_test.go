@@ -65,7 +65,7 @@ func TestParsePagination_NonNumeric(t *testing.T) {
 	}
 }
 
-func TestParsePagination_Partial(t *testing.T) {
+func TestParsePagination_OffsetOnly(t *testing.T) {
 	r := httptest.NewRequest("GET", "/api/files?offset=5", nil)
 	offset, limit := parsePagination(r)
 	if offset != 5 {

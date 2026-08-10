@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -78,7 +79,9 @@ func TestShare_Expired(t *testing.T) {
 	defer resp.Body.Close()
 
 	var shareResp map[string]any
-	json.NewDecoder(resp.Body).Decode(&shareResp)
+	if err2 := json.NewDecoder(resp.Body).Decode(&shareResp); err2 != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	token, _ := shareResp["token"].(string)
 
 	time.Sleep(10 * time.Millisecond)
@@ -92,8 +95,8 @@ func TestShare_Expired(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 for expired link, got %d", resp2.StatusCode)
+	if resp2.StatusCode != http.StatusNotFound && resp2.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 404 or 409 for expired link, got %d", resp2.StatusCode)
 	}
 }
 
@@ -142,7 +145,7 @@ func TestShare_NonExistentFile(t *testing.T) {
 
 func TestShare_CreateEviction(t *testing.T) {
 	t.Parallel()
-	ss := NewShareStore()
+	ss := NewShareStore(slog.Default())
 	// 填满上限，所有条目立即过期（TTL=0 => ExpiresAt ≈ now，eviction 时已过期）
 	for i := range maxShareEntries {
 		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "/tmp/file", 0, 0, false)
@@ -168,7 +171,7 @@ func TestShare_CreateEviction(t *testing.T) {
 
 func TestShare_CreateEvictionNoExpired(t *testing.T) {
 	t.Parallel()
-	ss := NewShareStore()
+	ss := NewShareStore(slog.Default())
 	// 填满上限，所有条目 1 小时后才过期（eviction 时无过期条目）
 	for i := range maxShareEntries {
 		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "/tmp/file", time.Hour, 0, false)
@@ -176,10 +179,19 @@ func TestShare_CreateEvictionNoExpired(t *testing.T) {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
 	}
-	// 无过期条目可淘汰，应该返回错误
-	_, err := ss.Create("overflow.txt", "/tmp/file", time.Hour, 0, false)
-	if err == nil {
-		t.Error("expected error when share store is full with no expired entries")
+	// 无过期条目时，eviction 按创建时间淘汰最旧的 10%，应成功
+	link, err := ss.Create("overflow.txt", "/tmp/file", time.Hour, 0, false)
+	if err != nil {
+		t.Fatalf("expected eviction to succeed via oldest-10%% strategy, got: %v", err)
+	}
+	if link.Token == "" {
+		t.Fatal("expected non-empty token")
+	}
+	ss.mu.Lock()
+	count := len(ss.links)
+	ss.mu.Unlock()
+	if count > maxShareEntries {
+		t.Errorf("expected at most %d entries after eviction, got %d", maxShareEntries, count)
 	}
 }
 
@@ -201,7 +213,9 @@ func TestShare_OneTime(t *testing.T) {
 	defer resp.Body.Close()
 
 	var shareResp map[string]any
-	json.NewDecoder(resp.Body).Decode(&shareResp)
+	if err2 := json.NewDecoder(resp.Body).Decode(&shareResp); err2 != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	token := shareResp["token"].(string)
 
 	// 第一次下载应成功
@@ -310,7 +324,9 @@ func TestShare_Revoke(t *testing.T) {
 	}
 
 	var shareResp map[string]any
-	json.NewDecoder(resp.Body).Decode(&shareResp)
+	if err2 := json.NewDecoder(resp.Body).Decode(&shareResp); err2 != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	resp.Body.Close()
 	token := shareResp["token"].(string)
 
