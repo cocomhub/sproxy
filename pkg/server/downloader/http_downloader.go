@@ -27,6 +27,8 @@ type HTTPDownloader struct {
 	// ValidateURLAfterDo 在 HTTP 请求完成后二次验证最终 URL 的 IP 是否安全。
 	// 为 nil 时跳过验证（用于测试）。
 	ValidateURLAfterDo func(u *url.URL) error
+	// Timeout 是单次下载的整体超时时间。0 表示不限制。
+	Timeout time.Duration
 }
 
 // NewHTTPDownloader 创建 HTTPDownloader。
@@ -73,16 +75,34 @@ func (d *HTTPDownloader) getLogger() *slog.Logger {
 var _ Downloader = (*HTTPDownloader)(nil)
 
 // Download 从 HTTP/HTTPS URL 下载文件到 destPath。
-// 使用临时文件 + 原子重命名，确保下载失败时不残留不完整文件。
 // 支持续下载（resume）通过 Range 头。
 // 调用方应在调用前通过 ValidateURLHost 校验 URL 安全性。
 // http.Client 的 CheckRedirect 提供额外的防御层。
 func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath string, onProgress ProgressFunc) (*Result, error) {
+	// 应用超时配置
+	if d.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d.Timeout)
+		defer cancel()
+	}
+
+	// 检查是否存在部分文件，用于 Range 续传
+	partialPath := destPath + ".partial"
+	var existingSize int64
+	if fi, err := os.Stat(partialPath); err == nil && fi.Size() > 0 {
+		existingSize = fi.Size()
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("User-Agent", "sproxy-cloud-downloader/1.0")
+
+	// 如果存在部分文件，添加 Range 请求头
+	if existingSize > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existingSize))
+	}
 
 	resp, err := d.getClient().Do(req)
 	if err != nil {
@@ -98,6 +118,25 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 			// 排空响应体再返回
 			_, _ = io.Copy(io.Discard, resp.Body)
 			return nil, fmt.Errorf("ssrf post-request: %w", err2)
+		}
+	}
+
+	// 处理 Range 续传响应
+	if existingSize > 0 {
+		switch resp.StatusCode {
+		case http.StatusPartialContent:
+			return d.handleRangeResume(ctx, resp, partialPath, destPath, existingSize, onProgress)
+		case http.StatusOK:
+			// 服务端不支持 Range，删除部分文件，走全量下载路径
+			os.Remove(partialPath)
+
+		case http.StatusRequestedRangeNotSatisfiable:
+			// 416，删除部分文件，走全量下载路径
+			os.Remove(partialPath)
+
+		default:
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return nil, fmt.Errorf("http status %d", resp.StatusCode)
 		}
 	}
 
@@ -194,6 +233,102 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	}
 
 	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime}, nil
+}
+
+// handleRangeResume 处理 Range 续传场景：追加写入部分文件并校验。
+func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Response, partialPath, destPath string, existingSize int64, onProgress ProgressFunc) (*Result, error) {
+	// 验证 Content-Range 头
+	cr := resp.Header.Get("Content-Range")
+	if cr == "" {
+		return nil, fmt.Errorf("missing Content-Range header for 206 response")
+	}
+	// 解析 Content-Range 格式: "bytes <start>-<end>/<total>"
+	var startByte, endByte, totalSize int64
+	if n, err := fmt.Sscanf(cr, "bytes %d-%d/%d", &startByte, &endByte, &totalSize); err != nil || n != 3 {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("invalid Content-Range header: %q", cr)
+	}
+	if startByte != existingSize {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("Content-Range start %d does not match expected %d", startByte, existingSize)
+	}
+
+	// 从 Last-Modified 响应头提取原始文件修改时间
+	var modTime time.Time
+	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+		if t, parseErr := time.Parse(time.RFC1123, lm); parseErr == nil {
+			modTime = t
+		} else if t, parseErr := time.Parse(time.RFC1123Z, lm); parseErr == nil {
+			modTime = t
+		}
+	}
+
+	// 计算已有部分文件的 SHA-256
+	partialData, err := os.ReadFile(partialPath)
+	if err != nil {
+		return nil, fmt.Errorf("read partial file: %w", err)
+	}
+
+	// 创建统一的 hasher，写入已有部分数据
+	h := sha256.New()
+	h.Write(partialData)
+
+	// 以追加模式打开部分文件
+	f, err := os.OpenFile(partialPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open partial file for append: %w", err)
+	}
+	defer f.Close()
+
+	// 使用 TeeReader 同时计算追加部分的 SHA-256
+	tee := io.TeeReader(resp.Body, h)
+
+	const copyBufferSize = 32 * 1024
+	buf := make([]byte, copyBufferSize)
+	var downloaded int64
+	for {
+		n, readErr := tee.Read(buf)
+		if n > 0 {
+			if _, err := f.Write(buf[:n]); err != nil {
+				f.Close()
+				return nil, fmt.Errorf("write to partial file: %w", err)
+			}
+			downloaded += int64(n)
+			if onProgress != nil {
+				onProgress(existingSize+downloaded, totalSize)
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			f.Close()
+			return nil, fmt.Errorf("read body: %w", readErr)
+		}
+	}
+
+	// 关闭文件
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("close partial file: %w", err)
+	}
+
+	// 计算完整文件的 SHA-256（已有部分 + 新增部分已在同一个 hasher 中）
+	fullChecksum := hex.EncodeToString(h.Sum(nil))
+
+	// 重命名部分文件为目标文件
+	if err := os.Rename(partialPath, destPath); err != nil {
+		return nil, fmt.Errorf("rename partial to dest: %w", err)
+	}
+
+	// 设置文件修改时间
+	if modTime != (time.Time{}) {
+		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
+			d.getLogger().Warn("设置文件修改时间失败", "path", destPath, "error", err)
+		}
+	}
+
+	downloadedTotal := existingSize + downloaded
+	return &Result{Size: downloadedTotal, Checksum: fullChecksum, ModTime: modTime}, nil
 }
 
 // Supports 判断是否支持 HTTP/HTTPS 协议（大小写不敏感）。
