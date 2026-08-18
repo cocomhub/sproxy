@@ -1106,7 +1106,11 @@ function switchCloudTab(tab) {
 
 function startCloudPolling() {
   stopCloudPolling();
-  _cloudPollTimer = setInterval(refreshCloudTasks, 3000);
+  // 任务与组列表一起轮询，保证组进度同步刷新
+  _cloudPollTimer = setInterval(function() {
+    refreshCloudTasks();
+    refreshCloudGroups();
+  }, 3000);
 }
 
 function stopCloudPolling() {
@@ -1268,6 +1272,44 @@ async function createCloudTask() {
     }
     refreshCloudTasks();
   } catch (e) { showToast('创建失败: ' + e.message, 'error'); }
+}
+
+// 创建云端下载任务组：把输入框中的所有 URL 作为一个组提交
+async function createCloudGroup() {
+  const input = document.getElementById('cloud-url');
+  const text = input.value.trim();
+  if (!text) { showToast('请输入下载链接', 'warning'); return; }
+
+  const lines = text.split('
+').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+  if (lines.length === 0) { showToast('请输入下载链接', 'warning'); return; }
+  if (lines.length === 1) { showToast('创建组至少需要 2 个 URL（单 URL 请用“仅提交”）', 'warning'); return; }
+
+  const name = prompt('组名称（可选）:', 'group-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
+  if (name === null) return;
+
+  try {
+    const hdrs = headers({ 'Content-Type': 'application/json' });
+    const body = JSON.stringify({
+      name: name,
+      urls: lines.map(function(url) { return { url: url }; })
+    });
+    if (tunnelHexKey) {
+      await tunnelRequest('POST', '/api/cloud/groups', hdrs, new TextEncoder().encode(body));
+    } else {
+      const resp = await fetch(BASE + '/api/cloud/groups', { method: 'POST', headers: hdrs, body: body });
+      if (!resp.ok) {
+        let errMsg = '创建组失败: ' + resp.status;
+        try { const data = await resp.json(); if (data.error) errMsg = data.error; } catch (e) { /* ignore */ }
+        showToast(errMsg, 'error');
+        return;
+      }
+    }
+    input.value = '';
+    showToast('下载组已创建', 'success');
+    switchCloudTab('groups');
+    refreshCloudGroups();
+  } catch (e) { showToast('创建组失败: ' + e.message, 'error'); }
 }
 
 async function downloadCloudFile(taskId, filename, checksum) {
@@ -1691,7 +1733,8 @@ document.addEventListener('DOMContentLoaded', function() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createCloudTask(); }
   });
   document.getElementById('cloud-chain-btn').addEventListener('click', chainDownloadCloud);
-document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
+  document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
+  document.getElementById('cloud-create-group-btn').addEventListener('click', createCloudGroup);
   document.getElementById('cloud-refresh-btn').addEventListener('click', refreshCloudTasks);
   document.getElementById('cloud-close-modal-btn').addEventListener('click', hideCloudDownload);
   document.getElementById('cloud-tasks-tab').addEventListener('click', function() { switchCloudTab('tasks'); });

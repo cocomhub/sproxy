@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -28,6 +29,10 @@ func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc
 			}
 
 			archiveName, _ := cmd.Flags().GetString("name")
+			if archiveName == "" {
+				// 客户端要求非空名称，未指定时自动生成
+				archiveName = fmt.Sprintf("cloud-archive-%d.tar.gz", time.Now().Unix())
+			}
 
 			if len(args) == 1 {
 				result, err := svc.ArchiveCloudTask(cmd.Context(), args[0], archiveName)

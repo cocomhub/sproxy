@@ -22,6 +22,7 @@ type CloudTask struct {
 	Downloaded int64     `json:"downloaded"`
 	Checksum   string    `json:"checksum"`
 	Error      string    `json:"error"`
+	GroupID    string    `json:"group_id,omitempty"` // 所属下载组 ID（可选）
 	FileMTime  int64     `json:"file_mtime,omitempty"`
 	CreatedAt  time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
 	UpdatedAt  time.Time `json:"updated_at"` // 更新时间（同上）

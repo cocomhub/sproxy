@@ -55,3 +55,14 @@ tls:
 # versioning:
 #   enabled: true
 #   max_versions: 10                # 保留最近的 N 个版本，超出自动清理
+
+# 云端离线下载（多任务/任务组）配置
+# cloud_sync_threshold: 20971520            # 小于该字节数的任务同步返回，其余异步（默认 20 MiB）
+# cloud_max_concurrent: 3                   # 最大并发下载数
+# cloud_task_ttl: "24h"                     # 完成任务保留时间，过期自动清理
+# cloud_failed_task_ttl: "1h"               # 失败/取消任务保留时间
+# cloud_download_timeout: "30m"             # 单次下载尝试整体超时（超时后自动重试续传）
+# cloud_download_idle_timeout: "1m"         # 响应体读取空闲超时：超过该时长未收到数据即中断本次尝试
+# cloud_max_retries: 10                     # 瞬时失败（网络/5xx/超时）最大重试次数
+# cloud_retry_delay: "10s"                  # 重试间隔
+# cloud_download_allow_private: false       # 允许下载私有 IP 地址（默认关闭，SSRF 防护）
