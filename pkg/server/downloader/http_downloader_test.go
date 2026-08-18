@@ -7,6 +7,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -306,7 +308,7 @@ func TestHTTPDownloader_RangeResume_Append(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		w.Header().Set("Content-Range", "bytes 10-49/50")
+		w.Header().Set("Content-Range", "bytes 10-44/45")
 		w.WriteHeader(http.StatusPartialContent)
 		w.Write(remainingContent)
 	}))
@@ -406,6 +408,219 @@ func TestHTTPDownloader_RangeResume_ChecksumCorrect(t *testing.T) {
 	expectedChecksum := hex.EncodeToString(h[:])
 	if result.Checksum != expectedChecksum {
 		t.Fatalf("checksum mismatch: expected %s, got %s", expectedChecksum, result.Checksum)
+	}
+	if result.Size != int64(len(fullContent)) {
+		t.Fatalf("expected size %d, got %d", len(fullContent), result.Size)
+	}
+}
+
+// --- Idle timeout & retryable error tests ---
+
+func TestHTTPDownloader_IdleTimeout_StalledBody(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1048576")
+		w.WriteHeader(http.StatusOK)
+		// 发送一部分数据后永久停流，等待 idle 超时触发
+		_, _ = w.Write([]byte("partial-data"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-release
+	}))
+	defer func() {
+		close(release)
+		srv.Close()
+	}()
+
+	dl := &downloader.HTTPDownloader{IdleTimeout: 100 * time.Millisecond}
+	dest := filepath.Join(t.TempDir(), "stalled.bin")
+	_, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err == nil {
+		t.Fatal("expected idle timeout error")
+	}
+	var retryable *downloader.RetryableError
+	if !errors.As(err, &retryable) {
+		t.Fatalf("expected RetryableError, got %T: %v", err, err)
+	}
+}
+
+func TestHTTPDownloader_Status5xx_Retryable(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "5xx.bin")
+	_, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err == nil {
+		t.Fatal("expected error for 502")
+	}
+	var retryable *downloader.RetryableError
+	if !errors.As(err, &retryable) {
+		t.Fatalf("expected RetryableError for 5xx, got %T: %v", err, err)
+	}
+}
+
+func TestHTTPDownloader_Status4xx_NotRetryable(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "4xx.bin")
+	_, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err == nil {
+		t.Fatal("expected error for 403")
+	}
+	var retryable *downloader.RetryableError
+	if errors.As(err, &retryable) {
+		t.Fatalf("4xx must not be retryable, got %v", err)
+	}
+}
+
+// --- Range resume edge cases ---
+
+func TestHTTPDownloader_RangeResume_MismatchFallsBackToFull(t *testing.T) {
+	t.Parallel()
+	fullContent := []byte("the complete and correct full file content")
+	partialContent := fullContent[:6]
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Range") == "bytes=6-" {
+			// 服务端文件已变化：返回与本地不一致的 Content-Range
+			w.Header().Set("Content-Range", "bytes 0-39/40")
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write([]byte("different content from another file"))
+			return
+		}
+		w.Write(fullContent)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "mismatch.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, partialContent, 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("expected fallback full download to succeed, got %v", err)
+	}
+	if requests < 2 {
+		t.Fatalf("expected at least 2 requests (resume + full fallback), got %d", requests)
+	}
+	if _, err := os.Stat(partialPath); !os.IsNotExist(err) {
+		t.Fatal("expected partial file removed after mismatch fallback")
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(fullContent) {
+		t.Fatalf("expected %q, got %q", string(fullContent), string(got))
+	}
+	h := sha256.Sum256(fullContent)
+	if result.Checksum != hex.EncodeToString(h[:]) {
+		t.Fatalf("checksum mismatch")
+	}
+}
+
+func TestHTTPDownloader_RangeResume_416FinalizePartial(t *testing.T) {
+	t.Parallel()
+	fullContent := []byte("already downloaded complete file")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(fullContent)))
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "finalize.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, fullContent, 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("expected 416 finalize to succeed, got %v", err)
+	}
+	if result.Size != int64(len(fullContent)) {
+		t.Fatalf("expected size %d, got %d", len(fullContent), result.Size)
+	}
+	if _, err := os.Stat(partialPath); !os.IsNotExist(err) {
+		t.Fatal("expected partial renamed away")
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(fullContent) {
+		t.Fatalf("expected %q, got %q", string(fullContent), string(got))
+	}
+	h := sha256.Sum256(fullContent)
+	if result.Checksum != hex.EncodeToString(h[:]) {
+		t.Fatalf("checksum mismatch")
+	}
+}
+
+func TestHTTPDownloader_RangeResume_416FullRedownload(t *testing.T) {
+	t.Parallel()
+	partialContent := []byte("stale partial data")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes */100")
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "416-redownload.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, partialContent, 0644)
+
+	_, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err == nil {
+		t.Fatal("expected error for 416 full redownload against a server that never returns 200")
+	}
+}
+
+func TestHTTPDownloader_LargePartialResume_MemorySafe(t *testing.T) {
+	t.Parallel()
+	// 1 MiB 内容验证流式续传哈希正确（旧实现用 os.ReadFile 会整体读入内存）
+	fullContent := make([]byte, 1024*1024)
+	for i := range fullContent {
+		fullContent[i] = byte(i % 251)
+	}
+	partialSize := 300 * 1024
+	partialContent := fullContent[:partialSize]
+	remainingContent := fullContent[partialSize:]
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") == fmt.Sprintf("bytes=%d-", partialSize) {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", partialSize, len(fullContent)-1, len(fullContent)))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(remainingContent)
+			return
+		}
+		w.Write(fullContent)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "large-resume.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, partialContent, 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if len(got) != len(fullContent) {
+		t.Fatalf("expected %d bytes, got %d", len(fullContent), len(got))
+	}
+	h := sha256.Sum256(fullContent)
+	if result.Checksum != hex.EncodeToString(h[:]) {
+		t.Fatalf("checksum mismatch")
 	}
 	if result.Size != int64(len(fullContent)) {
 		t.Fatalf("expected size %d, got %d", len(fullContent), result.Size)
