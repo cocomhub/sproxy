@@ -93,11 +93,15 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 初始化 StorageManager 和 CloudDownloadManager
 	sm := NewStorageManager(cfg.UploadsDir, cfg.MaxStorageBytes, cs, log.With("component", "storage"))
 	cloudCfg := &CloudDownloadConfig{
-		SyncThreshold: cfg.CloudSyncThreshold,
-		MaxConcurrent: cfg.CloudMaxConcurrent,
-		TaskTTL:       cfg.CloudTaskTTL,
-		FailedTaskTTL: cfg.CloudFailedTaskTTL,
-		AllowPrivate:  cfg.CloudDownloadAllowPrivate,
+		SyncThreshold:   cfg.CloudSyncThreshold,
+		MaxConcurrent:   cfg.CloudMaxConcurrent,
+		TaskTTL:         cfg.CloudTaskTTL,
+		FailedTaskTTL:   cfg.CloudFailedTaskTTL,
+		AllowPrivate:    cfg.CloudDownloadAllowPrivate,
+		DownloadTimeout: cfg.CloudDownloadTimeout,
+		IdleTimeout:     cfg.CloudDownloadIdleTimeout,
+		MaxRetries:      cfg.CloudMaxRetries,
+		RetryDelay:      cfg.CloudRetryDelay,
 	}
 	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, cs, log.With("component", "cloud"), cloudCfg)
 	h.storageMgr = sm

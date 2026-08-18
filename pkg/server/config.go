@@ -115,6 +115,7 @@ type Config struct {
 	CloudMaxConcurrent        int           `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`
 	CloudDownloadAllowPrivate bool          `yaml:"cloud_download_allow_private" mapstructure:"cloud_download_allow_private"`
 	CloudDownloadTimeout      time.Duration `yaml:"cloud_download_timeout" mapstructure:"cloud_download_timeout"`
+	CloudDownloadIdleTimeout  time.Duration `yaml:"cloud_download_idle_timeout" mapstructure:"cloud_download_idle_timeout"`
 	CloudMaxRetries           int           `yaml:"cloud_max_retries" mapstructure:"cloud_max_retries"`
 	CloudRetryDelay           time.Duration `yaml:"cloud_retry_delay" mapstructure:"cloud_retry_delay"`
 }
@@ -145,6 +146,8 @@ func Default() *Config {
 		CloudFailedTaskTTL:        1 * time.Hour,
 		CloudMaxConcurrent:        3,
 		CloudDownloadAllowPrivate: false,
+		CloudDownloadTimeout:      30 * time.Minute,
+		CloudDownloadIdleTimeout:  1 * time.Minute,
 		CloudMaxRetries:           10,
 		CloudRetryDelay:           10 * time.Second,
 	}
@@ -173,13 +176,19 @@ func (c *Config) SetDefaults() {
 	if c.CloudDownloader == "" {
 		c.CloudDownloader = "http"
 	}
+	if c.CloudDownloadTimeout <= 0 {
+		c.CloudDownloadTimeout = 30 * time.Minute
+	}
+	if c.CloudDownloadIdleTimeout <= 0 {
+		c.CloudDownloadIdleTimeout = 1 * time.Minute
+	}
+	if c.CloudMaxRetries < 1 {
+		c.CloudMaxRetries = 10
+	}
+	if c.CloudRetryDelay <= 0 {
+		c.CloudRetryDelay = 10 * time.Second
+	}
 	if c.CloudMaxConcurrent <= 0 {
-		if c.CloudMaxRetries < 1 {
-			c.CloudMaxRetries = 10
-		}
-		if c.CloudRetryDelay <= 0 {
-			c.CloudRetryDelay = 10 * time.Second
-		}
 		c.CloudMaxConcurrent = 3
 	}
 	if c.CloudTaskTTL <= 0 {

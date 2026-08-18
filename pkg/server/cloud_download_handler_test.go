@@ -35,7 +35,7 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
 	})
 
-	h := &Handlers{cloudMgr: mgr}
+	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
@@ -44,6 +44,15 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudGetTask)
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudCancelTask)
 	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudDeleteTask)
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.cloudResumeTask)
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
+	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
+	mux.HandleFunc("GET /api/cloud/groups", h.cloudListGroups)
+	mux.HandleFunc("GET /api/cloud/groups/{id}", h.cloudGetGroup)
+	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.cloudCancelGroup)
+	mux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudDeleteGroup)
+	mux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.cloudResumeGroup)
+	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudArchiveGroup)
 	return httptest.NewServer(mux), mgr
 }
 
@@ -578,4 +587,169 @@ func TestCloudHandler_DeleteNonexistent(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for nonexistent task, got %d", resp.StatusCode)
 	}
+}
+
+// --- 组路由与 resume 路由 ---
+
+func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
+	contentA := []byte("handler group A content")
+	contentB := []byte("handler group B content")
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(contentA) }))
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(contentB) }))
+	defer srvA.Close()
+	defer srvB.Close()
+
+	ts, mgr := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 创建组
+	body, _ := json.Marshal(map[string]any{
+		"name": "handler-group",
+		"urls": []map[string]string{
+			{"url": srvA.URL, "filename": "a.bin"},
+			{"url": srvB.URL, "filename": "b.bin"},
+		},
+	})
+	resp, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 creating group, got %d", resp.StatusCode)
+	}
+	var group CloudTaskGroup
+	if err2 := json.NewDecoder(resp.Body).Decode(&group); err2 != nil {
+		t.Fatal(err2)
+	}
+	resp.Body.Close()
+	if len(group.TaskIDs) != 2 {
+		t.Fatalf("expected 2 tasks in group, got %d", len(group.TaskIDs))
+	}
+
+	// 等待子任务完成
+	for _, tid := range group.TaskIDs {
+		waitTaskDone(t, mgr, tid)
+	}
+
+	// 组详情
+	resp, err = http.Get(ts.URL + "/api/cloud/groups/" + group.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 getting group, got %d", resp.StatusCode)
+	}
+	var detail struct {
+		Group *CloudTaskGroup `json:"group"`
+		Tasks []*CloudTask    `json:"tasks"`
+	}
+	if err2 := json.NewDecoder(resp.Body).Decode(&detail); err2 != nil {
+		t.Fatal(err2)
+	}
+	resp.Body.Close()
+	if detail.Group == nil || detail.Group.Status != "completed" {
+		t.Fatalf("expected completed group, got %+v", detail.Group)
+	}
+	if len(detail.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks in detail, got %d", len(detail.Tasks))
+	}
+
+	// 组列表
+	resp, err = http.Get(ts.URL + "/api/cloud/groups")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var groups []CloudTaskGroup
+	if err2 := json.NewDecoder(resp.Body).Decode(&groups); err2 != nil {
+		t.Fatal(err2)
+	}
+	resp.Body.Close()
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group in list, got %d", len(groups))
+	}
+
+	// 组归档（按子任务目录收集已完成文件）
+	archiveBody := `{"archive_name": "handler-group.tar.gz"}`
+	resp, err = http.Post(ts.URL+"/api/cloud/groups/"+group.ID+"/archive", "application/json", strings.NewReader(archiveBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 archiving group, got %d", resp.StatusCode)
+	}
+	var arch CloudArchiveResult
+	if err2 := json.NewDecoder(resp.Body).Decode(&arch); err2 != nil {
+		t.Fatal(err2)
+	}
+	resp.Body.Close()
+	if !arch.Success || arch.File == "" || arch.TaskCount != 2 {
+		t.Fatalf("unexpected archive result: %+v", arch)
+	}
+	// 归档文件真实存在
+	archivePath := filepath.Join(mgr.uploadsDir, filepath.FromSlash(arch.File))
+	if _, err2 := os.Stat(archivePath); err2 != nil {
+		t.Fatalf("expected archive file on disk: %v", err2)
+	}
+
+	// archive_file 已落库到真实组对象
+	resp, err = http.Get(ts.URL + "/api/cloud/groups/" + group.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var detail2 struct {
+		Group *CloudTaskGroup `json:"group"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&detail2)
+	resp.Body.Close()
+	if detail2.Group == nil || detail2.Group.ArchiveFile != arch.File {
+		t.Fatalf("expected archive_file %q persisted, got %q", arch.File, detail2.Group.ArchiveFile)
+	}
+}
+
+func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
+	srv404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv404.Close()
+
+	ts, mgr := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 提交一个必然失败的异步任务
+	body := strings.NewReader(`{"url": "` + srv404.URL + `"}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var task CloudTask
+	if err2 := json.NewDecoder(resp.Body).Decode(&task); err2 != nil {
+		t.Fatal(err2)
+	}
+	resp.Body.Close()
+
+	// 等待失败
+	waitTaskDone(t, mgr, task.ID)
+	if cur, _ := mgr.SnapshotTask(task.ID); cur.Status != "failed" {
+		t.Fatalf("expected failed task, got %q", cur.Status)
+	}
+
+	// resume 失败任务 → 200
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/resume", "application/json", strings.NewReader(`{"force": true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 resuming failed task, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// resume 不存在任务 → 404
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/nonexistent/resume", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 resuming nonexistent task, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
 }

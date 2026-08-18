@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -253,12 +254,19 @@ func TestCloudDownloadManager_RecoverTasks(t *testing.T) {
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr1 := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
 
-	// 创建两个任务
-	mgr1.CreateTask("url", "https://example.com/a.zip", "a.zip", 100)
-	mgr1.CreateTask("url", "https://example.com/b.zip", "b.zip", 200)
+	// 创建两个任务并置为 completed（避免恢复时触发 pending 任务重启下载）
+	t1, _ := mgr1.CreateTask("url", "https://example.com/a.zip", "a.zip", 100)
+	t2, _ := mgr1.CreateTask("url", "https://example.com/b.zip", "b.zip", 200)
+	mgr1.mu.Lock()
+	t1.Status = "completed"
+	t2.Status = "completed"
+	mgr1.mu.Unlock()
+	mgr1.saveTask(t1)
+	mgr1.saveTask(t2)
 
 	// 新建一个 manager 模拟重启
 	mgr2 := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr2.Close()
 	tasks := mgr2.ListTasks("")
 	if len(tasks) != 2 {
 		t.Fatalf("expected 2 recovered tasks, got %d", len(tasks))
@@ -457,7 +465,7 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -515,7 +523,7 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 	})
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger()) // 1 GiB 上限
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger()) // 1 GiB 上限
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -568,7 +576,7 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 	}()
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		AllowPrivate:  true,
@@ -832,12 +840,13 @@ func TestCloudDownloadManager_DeleteTaskCleansAndReleases(t *testing.T) {
 	t.Cleanup(mgr.Close)
 
 	task := &CloudTask{
-		ID:        "cloud-test-1",
-		URL:       "https://example.com/file.txt",
-		Status:    "completed",
-		Filename:  "file.txt",
-		TotalSize: 1000,
-		Checksum:  "abc123",
+		ID:           "cloud-test-1",
+		URL:          "https://example.com/file.txt",
+		Status:       "completed",
+		Filename:     "file.txt",
+		TotalSize:    1000,
+		ReservedSize: 1000, // ReservedSize 是存储账本的权威字段，删除时按它释放
+		Checksum:     "abc123",
 	}
 	mgr.mu.Lock()
 	mgr.tasks[task.ID] = task
@@ -925,7 +934,7 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 2,
@@ -1042,5 +1051,552 @@ func TestCloudDownloadManager_MetricsTracking(t *testing.T) {
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
+	}
+}
+
+// --- 可靠性：重试 / 超时 / 排队取消 / 存储账本 / 续传 ---
+
+func TestCloudDownloadManager_RetryOnTransientFailure(t *testing.T) {
+	var attempts atomic.Int32
+	content := []byte("retry success content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 1,
+		MaxConcurrent: 3,
+		TaskTTL:       time.Hour,
+		FailedTaskTTL: time.Hour,
+		AllowPrivate:  true,
+		MaxRetries:    5,
+		RetryDelay:    10 * time.Millisecond,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.Close() })
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "retry.bin", -1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for retry download to complete")
+		default:
+			cur, ok := mgr.SnapshotTask(task.ID)
+			if !ok {
+				t.Fatal("task not found")
+			}
+			if cur.Status == "completed" {
+				if attempts.Load() < 3 {
+					t.Fatalf("expected >=3 attempts, got %d", attempts.Load())
+				}
+				if mgr.metrics.TasksRetried.Load() < 2 {
+					t.Fatalf("expected TasksRetried >= 2, got %d", mgr.metrics.TasksRetried.Load())
+				}
+				return
+			}
+			if cur.Status == "failed" {
+				t.Fatalf("task failed: %s", cur.Error)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func TestCloudDownloadManager_TimeoutThenSuccess(t *testing.T) {
+	var attempts atomic.Int32
+	content := []byte("slow then fast content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			time.Sleep(500 * time.Millisecond) // 超过 DownloadTimeout
+		}
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   3,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 100 * time.Millisecond,
+		MaxRetries:      3,
+		RetryDelay:      10 * time.Millisecond,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.Close() })
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "timeout-retry.bin", -1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for timeout-retry download to complete")
+		default:
+			cur, _ := mgr.SnapshotTask(task.ID)
+			if cur.Status == "completed" {
+				if attempts.Load() < 2 {
+					t.Fatalf("expected >=2 attempts, got %d", attempts.Load())
+				}
+				return
+			}
+			if cur.Status == "failed" {
+				t.Fatalf("task failed: %s", cur.Error)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
+	blockCh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "104857600")
+		w.WriteHeader(http.StatusOK)
+		<-blockCh // 阻塞第一个任务，占满唯一并发槽
+	}))
+	t.Cleanup(func() {
+		close(blockCh)
+		srv.Close()
+	})
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 1,
+		TaskTTL:       time.Hour,
+		FailedTaskTTL: time.Hour,
+		AllowPrivate:  true,
+		MaxRetries:    1,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.Close() })
+
+	task1, err := mgr.SubmitAndStart("url", srv.URL, "block.bin", 104857600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 等待 task1 进入 downloading
+	waitStatus(t, mgr, task1.ID, "downloading")
+
+	// 第二个任务排队（唯一并发槽被占）
+	task2, err := mgr.SubmitAndStart("url", srv.URL+"/queued", "queued.bin", -1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if cur, _ := mgr.SnapshotTask(task2.ID); cur.Status != "pending" {
+		t.Fatalf("expected queued task to be pending, got %q", cur.Status)
+	}
+
+	// 排队任务应可取消
+	if err := mgr.CancelTask(task2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := mgr.SnapshotTask(task2.ID); cur.Status != "cancelled" {
+		t.Fatalf("expected queued task to be cancelled, got %q", cur.Status)
+	}
+
+	// Close 应能及时返回（排队任务已注册 cancelFuncs）
+	done := make(chan struct{})
+	go func() {
+		mgr.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() hung: queued task not cancellable")
+	}
+}
+
+func waitStatus(t *testing.T, mgr *CloudDownloadManager, id, want string) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			cur, _ := mgr.SnapshotTask(id)
+			t.Fatalf("timeout waiting for %s status %q, got %q", id, want, cur.Status)
+		default:
+			if cur, ok := mgr.SnapshotTask(id); ok && cur.Status == want {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func waitTaskDone(t *testing.T, mgr *CloudDownloadManager, id string) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			cur, _ := mgr.SnapshotTask(id)
+			t.Fatalf("timeout waiting for task %s terminal status, got %q (%s)", id, cur.Status, cur.Error)
+		default:
+			cur, ok := mgr.SnapshotTask(id)
+			if !ok {
+				t.Fatal("task not found")
+			}
+			if cur.Status == "completed" || cur.Status == "failed" || cur.Status == "cancelled" {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+func TestCloudDownloadManager_StorageAccountingNoLeak(t *testing.T) {
+	content := []byte("small unknown-size file")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), &CloudDownloadConfig{
+		SyncThreshold: 1,
+		MaxConcurrent: 3,
+		TaskTTL:       time.Hour,
+		FailedTaskTTL: time.Hour,
+		AllowPrivate:  true,
+	})
+	t.Cleanup(func() { mgr.Close() })
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "a.bin", -1, nil) // 未知大小 → 1 GiB 占位
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if cur, _ := mgr.SnapshotTask(task.ID); cur.Status != "completed" {
+		t.Fatalf("expected completed, got %q (%s)", cur.Status, cur.Error)
+	}
+	// 完成后账本应对齐实际大小，而不是泄漏 1 GiB 占位
+	if usage := sm.UsageByCategory()[CategoryCloud]; usage != int64(len(content)) {
+		t.Fatalf("expected cloud usage %d after completion, got %d", len(content), usage)
+	}
+
+	// 取消一个未知大小任务：占位立即回收
+	t2, err := mgr.CreateTask("url", "https://example.com/cancel-unknown.bin", "c.bin", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.CancelTask(t2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if usage := sm.UsageByCategory()[CategoryCloud]; usage != int64(len(content)) {
+		t.Fatalf("expected cloud usage %d after cancel, got %d", len(content), usage)
+	}
+
+	// 删除完成任务：占用归零
+	if err := mgr.DeleteTask(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if usage := sm.UsageByCategory()[CategoryCloud]; usage != 0 {
+		t.Fatalf("expected cloud usage 0 after delete, got %d", usage)
+	}
+}
+
+func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
+	full := make([]byte, 1000)
+	for i := range full {
+		full[i] = byte(i % 251)
+	}
+	var sawRange atomic.Bool
+	var firstAttempt atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			if r.Header.Get("Range") != "bytes=10-" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			sawRange.Store(true)
+			w.Header().Set("Content-Range", "bytes 10-999/1000")
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(full[10:])
+			return
+		}
+		if firstAttempt.CompareAndSwap(false, true) {
+			// 首次：只发送 10 字节后停流，触发超时
+			w.Header().Set("Content-Length", "1000")
+			w.WriteHeader(http.StatusOK)
+			w.Write(full[:10])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			time.Sleep(2 * time.Second)
+			return
+		}
+		w.Write(full)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   1,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 300 * time.Millisecond,
+		MaxRetries:      1, // 首次失败后不再自动重试，等待手动 resume
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.Close() })
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "resume.bin", -1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if cur, _ := mgr.SnapshotTask(task.ID); cur.Status != "failed" {
+		t.Fatalf("expected failed after first timeout, got %q (%s)", cur.Status, cur.Error)
+	}
+
+	// 失败后应保留 .partial（10 字节）供续传
+	partialPath := filepath.Join(mgr.cloudDir, task.ID, "resume.bin.partial")
+	fi, err := os.Stat(partialPath)
+	if err != nil {
+		t.Fatalf("expected partial file to be kept after failure: %v", err)
+	}
+	if fi.Size() != 10 {
+		t.Fatalf("expected partial size 10, got %d", fi.Size())
+	}
+
+	// 手动续传：force=false 走 Range
+	if err2 := mgr.ResumeTask(task.ID, false); err2 != nil {
+		t.Fatal(err2)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if cur, _ := mgr.SnapshotTask(task.ID); cur.Status != "completed" {
+		t.Fatalf("expected completed after resume, got %q (%s)", cur.Status, cur.Error)
+	}
+	if !sawRange.Load() {
+		t.Fatal("expected Range header on resume request")
+	}
+	dest := filepath.Join(mgr.cloudDir, task.ID, "resume.bin")
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(full) {
+		t.Fatal("resumed file content mismatch")
+	}
+	if usage := sm.UsageByCategory()[CategoryCloud]; usage != int64(len(full)) {
+		t.Fatalf("expected cloud usage %d after resume, got %d", len(full), usage)
+	}
+}
+
+func TestCloudDownloadManager_ResumeTaskForceTrueFullRedownload(t *testing.T) {
+	full := []byte("force full redownload content")
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			t.Errorf("force resume must not send Range header")
+		}
+		requests.Add(1)
+		w.Write(full)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), &CloudDownloadConfig{
+		SyncThreshold: 1, MaxConcurrent: 1, TaskTTL: time.Hour, FailedTaskTTL: time.Hour,
+		AllowPrivate: true, MaxRetries: 1,
+	})
+	t.Cleanup(func() { mgr.Close() })
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "force.bin", -1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	// 手动置 failed 再 force resume
+	mgr.mu.Lock()
+	task.Status = "failed"
+	task.ReservedSize = 0
+	mgr.mu.Unlock()
+	if err := mgr.ResumeTask(task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if cur, _ := mgr.SnapshotTask(task.ID); cur.Status != "completed" {
+		t.Fatalf("expected completed, got %q (%s)", cur.Status, cur.Error)
+	}
+	if requests.Load() < 2 {
+		t.Fatalf("expected >=2 full requests, got %d", requests.Load())
+	}
+}
+
+// --- 任务组 ---
+
+func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
+	contentA := []byte("group file A content")
+	contentB := []byte("group file B content")
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(contentA) }))
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(contentB) }))
+	defer srvA.Close()
+	defer srvB.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true}
+	mgr1 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr1.Close() })
+
+	group, err := mgr1.SubmitAndStartGroup("persist-group", []CloudBatchURL{
+		{URL: srvA.URL, Filename: "a.bin"},
+		{URL: srvB.URL, Filename: "b.bin"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tid := range group.TaskIDs {
+		waitTaskDone(t, mgr1, tid)
+		if cur, _ := mgr1.SnapshotTask(tid); cur.Status != "completed" {
+			t.Fatalf("expected completed task %s, got %q", tid, cur.Status)
+		}
+		// 子任务应带 GroupID
+		mgr1.mu.RLock()
+		stored := mgr1.tasks[tid]
+		gid := stored.GroupID
+		mgr1.mu.RUnlock()
+		if gid != group.ID {
+			t.Fatalf("expected task GroupID %q, got %q", group.ID, gid)
+		}
+	}
+
+	// 组状态 completed
+	mgr1.UpdateGroupStatus(group.ID)
+	g, ok := mgr1.GetGroup(group.ID)
+	if !ok {
+		t.Fatal("group not found")
+	}
+	if g.Status != "completed" || g.Completed != 2 {
+		t.Fatalf("expected group completed(2/2), got %s (%d/%d)", g.Status, g.Completed, g.TotalTasks)
+	}
+
+	// 组持久化文件存在
+	if _, err := os.Stat(filepath.Join(dir, ".__downloads__", "groups", group.ID+".json")); err != nil {
+		t.Fatalf("expected group persist file: %v", err)
+	}
+
+	// ArchiveFile 落库
+	mgr1.SetGroupArchiveFile(group.ID, ".__cloud_archives__/g1.tar.gz")
+	if g, _ := mgr1.GetGroup(group.ID); g.ArchiveFile != ".__cloud_archives__/g1.tar.gz" {
+		t.Fatalf("expected archive_file set, got %q", g.ArchiveFile)
+	}
+
+	// 模拟重启：新 manager 恢复组
+	mgr1.Close()
+	mgr2 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr2.Close() })
+	g2, ok := mgr2.GetGroup(group.ID)
+	if !ok {
+		t.Fatal("group not recovered after restart")
+	}
+	if g2.Status != "completed" || len(g2.TaskIDs) != 2 || g2.ArchiveFile != ".__cloud_archives__/g1.tar.gz" {
+		t.Fatalf("unexpected recovered group: %+v", g2)
+	}
+	if tasks := mgr2.ListTasks(""); len(tasks) != 2 {
+		t.Fatalf("expected 2 recovered tasks, got %d", len(tasks))
+	}
+
+	// 删除组：任务、文件、组记录全部清理
+	if err := mgr2.DeleteGroup(group.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mgr2.GetGroup(group.ID); ok {
+		t.Fatal("group should be deleted")
+	}
+	if tasks := mgr2.ListTasks(""); len(tasks) != 0 {
+		t.Fatalf("expected 0 tasks after group delete, got %d", len(tasks))
+	}
+	if usage := sm.UsageByCategory()[CategoryCloud]; usage != 0 {
+		t.Fatalf("expected cloud usage 0 after group delete, got %d", usage)
+	}
+}
+
+func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), &CloudDownloadConfig{
+		SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true,
+	})
+	t.Cleanup(func() { mgr.Close() })
+
+	// 同一 URL 使用不同文件名 → 触发组内去重冲突（而非文件名冲突）
+	_, err := mgr.SubmitAndStartGroup("dup", []CloudBatchURL{
+		{URL: "https://example.com/a.zip", Filename: "one.zip"},
+		{URL: "https://example.com/a.zip", Filename: "two.zip"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("expected duplicate URL error, got %v", err)
+	}
+}
+
+func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {
+	content := []byte("ok file")
+	srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(content) }))
+	srv404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srvOK.Close()
+	defer srv404.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.Close() })
+
+	group, err := mgr.SubmitAndStartGroup("partial", []CloudBatchURL{
+		{URL: srvOK.URL, Filename: "ok.bin"},
+		{URL: srv404.URL, Filename: "bad.bin"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tid := range group.TaskIDs {
+		waitTaskDone(t, mgr, tid)
+	}
+	mgr.UpdateGroupStatus(group.ID)
+	g, _ := mgr.GetGroup(group.ID)
+	if g.Status != "partial" || g.Completed != 1 || g.Failed != 1 {
+		t.Fatalf("expected partial(1 completed, 1 failed), got %s (%d/%d)", g.Status, g.Completed, g.Failed)
+	}
+
+	// 取消已完成/已失败任务：组状态不应被强制改为 cancelled
+	if err := mgr.CancelGroup(group.ID); err != nil {
+		t.Fatal(err)
+	}
+	mgr.UpdateGroupStatus(group.ID)
+	g, _ = mgr.GetGroup(group.ID)
+	if g.Status != "partial" {
+		t.Fatalf("expected partial after cancelling terminal tasks, got %q", g.Status)
 	}
 }

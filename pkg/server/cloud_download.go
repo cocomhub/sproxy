@@ -44,7 +44,8 @@ type CloudTask struct {
 }
 
 // CloudTaskGroup 表示一个云端下载任务组。
-// 组内所有子任务文件下载到同一目录 .__cloud__/<groupID>/ 下。
+// 每个子任务仍是独立的 CloudTask（文件保存在 .__cloud__/<taskID>/ 下），
+// 组只负责聚合元数据与组级操作（归档/取消/恢复）。
 type CloudTaskGroup struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
@@ -67,9 +68,41 @@ type CloudDownloadConfig struct {
 	TaskTTL         time.Duration // 完成任务保留时间，默认 24h
 	FailedTaskTTL   time.Duration // 失败任务保留时间，默认 1h
 	AllowPrivate    bool          // 允许私有 IP 下载（仅测试用）
-	DownloadTimeout time.Duration // 单次下载超时，默认 0（不限制）
+	DownloadTimeout time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
+	IdleTimeout     time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
 	MaxRetries      int           // 失败重试次数，默认 10
 	RetryDelay      time.Duration // 重试间隔，默认 10s
+}
+
+// cloudReservePlaceholder 未知大小任务的存储占位大小（1 GiB）。
+const cloudReservePlaceholder = int64(1024 * 1024 * 1024)
+
+// applyCloudConfigDefaults 为 CloudDownloadConfig 的零值字段填充默认值。
+func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
+	if cfg.SyncThreshold <= 0 {
+		cfg.SyncThreshold = 20 * 1024 * 1024
+	}
+	if cfg.MaxConcurrent < 1 {
+		cfg.MaxConcurrent = 3
+	}
+	if cfg.TaskTTL <= 0 {
+		cfg.TaskTTL = 24 * time.Hour
+	}
+	if cfg.FailedTaskTTL <= 0 {
+		cfg.FailedTaskTTL = 1 * time.Hour
+	}
+	if cfg.DownloadTimeout <= 0 {
+		cfg.DownloadTimeout = 30 * time.Minute
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = 1 * time.Minute
+	}
+	if cfg.MaxRetries < 1 {
+		cfg.MaxRetries = 10
+	}
+	if cfg.RetryDelay <= 0 {
+		cfg.RetryDelay = 10 * time.Second
+	}
 }
 
 // CloudDownloadManager 管理云端下载任务。
@@ -144,9 +177,8 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 		defaultLogger(logger).Warn("创建 persist 目录失败", "dir", persistDir, "error", err)
 	}
 
-	if cfg.MaxConcurrent < 1 {
-		cfg.MaxConcurrent = 1 // 防止死锁：MaxConcurrent=0 时 semaphore 永远阻塞
-	}
+	// 零值字段填充默认值（超时/重试等必须在这里生效，不依赖调用方接线）
+	applyCloudConfigDefaults(cfg)
 
 	mgr := &CloudDownloadManager{
 		tasks:         make(map[string]*CloudTask),
@@ -173,30 +205,31 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 		"sync_threshold", cfg.SyncThreshold,
 		"task_ttl", cfg.TaskTTL,
 		"failed_task_ttl", cfg.FailedTaskTTL,
+		"download_timeout", cfg.DownloadTimeout,
+		"idle_timeout", cfg.IdleTimeout,
+		"max_retries", cfg.MaxRetries,
+		"retry_delay", cfg.RetryDelay,
 	)
 
 	// 允许私有 IP 时跳过 SSRF 后验证（仅测试用）
 	// 注意：必须创建副本而非修改共享注册表的下载器，避免 data race
-	if cfg.AllowPrivate {
-		if hd, ok := mgr.dl.(*downloader.HTTPDownloader); ok {
-			// 创建副本并清空 ValidateURLAfterDo
-			clone := *hd
+	if hd, ok := mgr.dl.(*downloader.HTTPDownloader); ok {
+		clone := *hd
+		if cfg.AllowPrivate {
 			clone.ValidateURLAfterDo = nil
-			mgr.dl = &clone
 		}
-	}
-
-	// 传递超时配置到 HTTPDownloader
-	if cfg.DownloadTimeout > 0 {
-		if hd, ok := mgr.dl.(*downloader.HTTPDownloader); ok {
-			clone := *hd
+		if cfg.DownloadTimeout > 0 {
 			clone.Timeout = cfg.DownloadTimeout
-			mgr.dl = &clone
 		}
+		if cfg.IdleTimeout > 0 {
+			clone.IdleTimeout = cfg.IdleTimeout
+		}
+		mgr.dl = &clone
 	}
 
-	// 恢复持久化的任务
+	// 恢复持久化的任务与任务组
 	mgr.recoverTasks()
+	mgr.recoverGroups()
 
 	// 启动过期任务清理 (wg 跟踪)
 	mgr.wg.Go(func() {
@@ -227,7 +260,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	// 预留存储空间
 	reserved := totalSize
 	if reserved <= 0 {
-		reserved = 1 * 1024 * 1024 * 1024 // 1 GiB 保底
+		reserved = cloudReservePlaceholder // 1 GiB 保底
 	}
 	if err := m.storage.TryReserve(reserved, CategoryCloud); err != nil {
 		m.logger.Warn("storage full, cloud download rejected",
@@ -303,7 +336,6 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 // 注意：调用者必须保证在调用前已调 m.wg.Add(1)，函数退出时自动 m.wg.Done()。
 func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudTask) {
 	defer m.wg.Done()
-	defer m.metrics.ActiveDownloads.Add(-1)
 	defer func() {
 		if r := recover(); r != nil {
 			m.logger.Error("panic in download", "task_id", task.ID, "panic", r)
@@ -311,34 +343,51 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		}
 	}()
 
-	// 获取信号量
+	// 创建可取消的 context（从 Background 派生，使客户端断连后下载可继续异步重试）。
+	// 必须在等待信号量之前注册 cancelFuncs：排队中的任务也能被取消/删除。
+	dlCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m.mu.Lock()
+	m.cancelFuncs[task.ID] = cancel
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.cancelFuncs, task.ID)
+		m.mu.Unlock()
+	}()
+
+	// 排队等待信号量（排队期间可取消）
 	select {
 	case m.semaphore <- struct{}{}:
 		defer func() { <-m.semaphore }()
-	case <-ctx.Done():
+	case <-dlCtx.Done():
+		// 排队期间被取消：CancelTask 已置 cancelled 并释放存储，直接退出
+		m.mu.RLock()
+		_, exists := m.tasks[task.ID]
+		status := task.Status
+		m.mu.RUnlock()
+		if !exists {
+			return
+		}
+		if status == "cancelled" {
+			m.logger.Info("queued download cancelled", "task_id", task.ID)
+			return
+		}
 		m.failTask(task, "cancelled before start")
 		return
 	}
 
-	// 创建可取消的 context（从 Background 派生，使客户端断连后下载可继续异步重试）
-	dlCtx, cancel := context.WithCancel(context.Background())
-	defer cancel() // 确保 cancel 在函数返回时被调用（linter: G118）
-
-	// 应用超时配置
-	if m.config.DownloadTimeout > 0 {
-		dlCtx, cancel = context.WithTimeout(dlCtx, m.config.DownloadTimeout)
-		defer cancel()
-	}
+	m.metrics.ActiveDownloads.Add(1)
+	defer m.metrics.ActiveDownloads.Add(-1)
 
 	m.mu.Lock()
-	m.cancelFuncs[task.ID] = cancel
 	task.Status = "downloading"
 	task.UpdatedAt = time.Now()
 	m.mu.Unlock()
 	m.saveTask(task)
 
 	m.logger.Info("download started", "task_id", task.ID, "url", task.URL, "filename", task.Filename)
-	m.metrics.ActiveDownloads.Add(1)
 
 	// 构建目标文件路径
 	taskDir := filepath.Join(m.cloudDir, task.ID)
@@ -350,21 +399,15 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	destPath := filepath.Join(taskDir, task.Filename)
 
 	// 执行下载（带重试）
-	maxRetries := max(m.config.MaxRetries,
-		// 至少执行一次
-		1)
+	maxRetries := m.config.MaxRetries
 	var result *downloader.Result
 	var downloadErr error
 	for attempt := range maxRetries {
 		if attempt > 0 {
-			// 重试等待
+			// 重试等待（等待期间用户取消则立即停止）
 			m.metrics.TasksRetried.Add(1)
-			delay := m.config.RetryDelay
-			if delay <= 0 {
-				delay = 10 * time.Second
-			}
 			select {
-			case <-time.After(delay):
+			case <-time.After(m.config.RetryDelay):
 			case <-dlCtx.Done():
 				downloadErr = dlCtx.Err()
 				goto downloadDone
@@ -372,7 +415,15 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			m.logger.Info("retrying download", "task_id", task.ID, "url", task.URL, "attempt", attempt+1, "max", maxRetries)
 		}
 
-		result, downloadErr = m.dl.Download(dlCtx, task.URL, destPath, func(downloaded, total int64) {
+		// 每次尝试独立超时：超时可重试续传，用户取消不可重试
+		attemptCtx := dlCtx
+		if m.config.DownloadTimeout > 0 {
+			var attemptCancel context.CancelFunc
+			attemptCtx, attemptCancel = context.WithTimeout(dlCtx, m.config.DownloadTimeout)
+			defer attemptCancel()
+		}
+
+		result, downloadErr = m.dl.Download(attemptCtx, task.URL, destPath, func(downloaded, total int64) {
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			task.Downloaded = downloaded
@@ -387,9 +438,14 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			break
 		}
 
-		// 检查是否应该重试
+		// 用户取消/任务删除：停止重试
 		if dlCtx.Err() != nil {
-			// 上下文取消或超时，不再重试
+			downloadErr = dlCtx.Err()
+			break
+		}
+		// 仅重试可重试错误（网络/5xx）或本次尝试超时
+		var retryable *downloader.RetryableError
+		if !errors.As(downloadErr, &retryable) && attemptCtx.Err() != context.DeadlineExceeded {
 			break
 		}
 		// 最后一次尝试失败，不再重试
@@ -399,9 +455,15 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	}
 
 downloadDone:
-	m.mu.Lock()
-	delete(m.cancelFuncs, task.ID)
-	m.mu.Unlock()
+	// 任务删除竞态守卫：删除后完成/失败的下载不再触碰存储与状态
+	m.mu.RLock()
+	_, exists := m.tasks[task.ID]
+	m.mu.RUnlock()
+	if !exists {
+		m.logger.Info("download finished after task deletion, skipping completion", "task_id", task.ID)
+		_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
+		return
+	}
 
 	if downloadErr != nil {
 		if ctx.Err() != nil && dlCtx.Err() == nil {
@@ -414,8 +476,8 @@ downloadDone:
 			go m.executeDownload(context.Background(), task) //nolint:gosec
 			return
 		}
-		if dlCtx.Err() != nil {
-			m.failTask(task, "cancelled")
+		if dlCtx.Err() == context.Canceled {
+			// 用户取消：CancelTask 已更新状态并释放存储，这里不重复处理
 			m.logger.Info("download cancelled", "task_id", task.ID)
 		} else {
 			m.failTask(task, downloadErr.Error())
@@ -435,28 +497,28 @@ downloadDone:
 		m.mu.Unlock()
 	}
 
-	// 补偿存储空间（实际大小可能与预估值不同）
+	// 存储账本补偿：以 ReservedSize 为基准对齐到实际大小
 	m.mu.Lock()
-	currentTotal := task.TotalSize
+	reserved := task.ReservedSize
 	m.mu.Unlock()
-	sizeDelta := result.Size - currentTotal
+	sizeDelta := result.Size - reserved
 	if sizeDelta > 0 {
 		// 实际更大，需要追加预留
 		if err := m.storage.TryReserve(sizeDelta, CategoryCloud); err != nil {
 			m.failTask(task, "storage full after download")
 			os.Remove(destPath)
 			m.logger.Error("storage full after download, cannot fit actual size",
-				"task_id", task.ID, "actual_size", result.Size, "reserved", currentTotal)
+				"task_id", task.ID, "actual_size", result.Size, "reserved", reserved)
 			return
 		}
 		m.mu.Lock()
-		task.ReservedSize += sizeDelta
+		task.ReservedSize = result.Size
 		m.mu.Unlock()
 	} else if sizeDelta < 0 {
 		// 实际更小，释放多余空间
 		m.storage.Release(-sizeDelta, CategoryCloud)
 		m.mu.Lock()
-		task.ReservedSize += sizeDelta
+		task.ReservedSize = result.Size
 		m.mu.Unlock()
 	}
 
@@ -487,15 +549,17 @@ downloadDone:
 	m.metrics.BytesDownloaded.Add(result.Size)
 }
 
-// failTask 将任务标记为失败，并清理任务目录。
+// failTask 将任务标记为失败，释放存储并保留 .partial 文件供续传。
+// 已处于 failed/completed/cancelled 的任务直接返回（防止二次释放与状态回滚）。
 func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	m.mu.Lock()
-	if task.Status == "failed" || task.Status == "completed" {
+	if task.Status == "failed" || task.Status == "completed" || task.Status == "cancelled" {
 		m.mu.Unlock()
 		return
 	}
 	if task.ReservedSize > 0 {
 		m.storage.Release(task.ReservedSize, CategoryCloud)
+		task.ReservedSize = 0
 	}
 	task.Status = "failed"
 	task.Error = errMsg
@@ -505,10 +569,29 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	m.saveTask(task)
 	m.metrics.TasksFailed.Add(1)
 
-	// 清理任务目录（下载失败后不残留垃圾文件）
+	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录
 	taskDir := filepath.Join(m.cloudDir, task.ID)
-	if err := os.RemoveAll(taskDir); err != nil {
-		m.logger.Warn("failed to clean up task dir on fail", "task_id", task.ID, "error", err)
+	entries, err := os.ReadDir(taskDir)
+	if err != nil {
+		return
+	}
+	hasPartial := false
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".partial") {
+			hasPartial = true
+			continue
+		}
+		if strings.Contains(e.Name(), ".tmp.") {
+			_ = os.Remove(filepath.Join(taskDir, e.Name()))
+		}
+	}
+	if !hasPartial {
+		if err := os.RemoveAll(taskDir); err != nil {
+			m.logger.Warn("failed to clean up task dir on fail", "task_id", task.ID, "error", err)
+		}
 	}
 }
 
@@ -582,12 +665,13 @@ func (m *CloudDownloadManager) CancelTask(id string) error {
 	t.UpdatedAt = time.Now()
 	t.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 
-	// 释放 TryReserve 预留的存储空间
-	if t.TotalSize > 0 {
-		m.storage.Release(t.TotalSize, CategoryCloud)
+	// 释放实际预留的存储空间（ReservedSize 为准，释放后归零防二次释放）
+	if t.ReservedSize > 0 {
+		m.storage.Release(t.ReservedSize, CategoryCloud)
+		t.ReservedSize = 0
 	}
 
-	// 触发下载取消
+	// 触发下载取消（排队中任务也已在 cancelFuncs 注册，可立即生效）
 	if cancel, ok := m.cancelFuncs[id]; ok {
 		cancel()
 		delete(m.cancelFuncs, id)
@@ -639,10 +723,11 @@ func (m *CloudDownloadManager) DeleteTask(id string) error {
 		m.logger.Warn("failed to remove persist file", "task_id", id, "error", err)
 	}
 
-	// 释放存储空间
-	if t.TotalSize > 0 {
-		m.storage.Release(t.TotalSize, CategoryCloud)
-		m.logger.Debug("storage released", "task_id", id, "size", t.TotalSize)
+	// 释放实际预留的存储空间（ReservedSize 为准，释放后归零防二次释放）
+	if t.ReservedSize > 0 {
+		m.storage.Release(t.ReservedSize, CategoryCloud)
+		m.logger.Debug("storage released", "task_id", id, "size", t.ReservedSize)
+		t.ReservedSize = 0
 	}
 
 	// 清理 checksum
@@ -682,7 +767,7 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) {
 }
 
 // recoverTasks 从磁盘恢复所有任务。
-// downloading 状态的任务自动重启下载。
+// downloading 与 pending 状态的任务自动重启下载（pending 可能因崩溃停在排队阶段）。
 func (m *CloudDownloadManager) recoverTasks() {
 	entries, err := os.ReadDir(m.persistDir)
 	if err != nil {
@@ -702,12 +787,15 @@ func (m *CloudDownloadManager) recoverTasks() {
 		if err := json.Unmarshal(data, &task); err != nil {
 			continue
 		}
+		// 重启后以磁盘实际占用为基准重算 ReservedSize，
+		// 与 StorageManager 启动扫描的计数器保持一致（不信任崩溃前持久化的占位值）
+		m.reconcileReservedSize(&task)
 		m.tasks[task.ID] = &task
 		recovered++
 
-		// 重启正在下载的任务，wg.Add(1) 在 go 之前确保不竞态
-		if task.Status == "downloading" {
-			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
+		// 重启中断/排队的下载，wg.Add(1) 在 go 之前确保不竞态
+		if task.Status == "downloading" || task.Status == "pending" {
+			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL, "status", task.Status)
 			m.wg.Add(1)
 			go m.executeDownload(context.Background(), &task)
 			restarted++
@@ -716,6 +804,133 @@ func (m *CloudDownloadManager) recoverTasks() {
 	if recovered > 0 {
 		m.logger.Info("cloud download tasks recovered", "count", recovered, "restarted", restarted)
 	}
+}
+
+// reconcileReservedSize 以任务目录实际占用为基准重算 ReservedSize。
+// 进程重启后 StorageManager 的计数器来自磁盘扫描，这里让每个任务的预留量
+// 与扫描结果一致，避免后续删除/清理时多退或少退。
+func (m *CloudDownloadManager) reconcileReservedSize(task *CloudTask) {
+	dir := filepath.Join(m.cloudDir, task.ID)
+	var total int64
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		task.ReservedSize = 0
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			total += info.Size()
+		}
+	}
+	task.ReservedSize = total
+}
+
+// recoverGroups 从磁盘恢复任务组，并修剪已不存在的任务引用。
+func (m *CloudDownloadManager) recoverGroups() {
+	groupsDir := filepath.Join(m.persistDir, "groups")
+	entries, err := os.ReadDir(groupsDir)
+	if err != nil {
+		return
+	}
+	recovered := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(groupsDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var group CloudTaskGroup
+		if err := json.Unmarshal(data, &group); err != nil {
+			continue
+		}
+		group.TaskIDs = m.pruneGroupTaskIDs(group.TaskIDs)
+		if len(group.TaskIDs) == 0 {
+			_ = os.Remove(filepath.Join(groupsDir, e.Name()))
+			continue
+		}
+		m.groups[group.ID] = &group
+		recovered++
+	}
+
+	// 兼容旧数据：为带 GroupID 但缺少组记录的孤儿任务重建最小组
+	var orphanGroups []*CloudTaskGroup
+	m.mu.RLock()
+	for _, t := range m.tasks {
+		if t.GroupID == "" {
+			continue
+		}
+		if _, ok := m.groups[t.GroupID]; ok {
+			continue
+		}
+		group := &CloudTaskGroup{
+			ID:         t.GroupID,
+			Name:       t.GroupID,
+			Status:     "pending",
+			TaskIDs:    []string{t.ID},
+			TotalTasks: 1,
+			CreatedAt:  t.CreatedAt,
+			UpdatedAt:  t.UpdatedAt,
+			ExpiresAt:  t.ExpiresAt,
+		}
+		orphanGroups = append(orphanGroups, group)
+	}
+	m.mu.RUnlock()
+	for _, group := range orphanGroups {
+		m.groups[group.ID] = group
+		m.saveGroup(group)
+		recovered++
+	}
+
+	if recovered > 0 {
+		m.logger.Info("cloud download groups recovered", "count", recovered)
+	}
+}
+
+// pruneGroupTaskIDs 返回仍存在于 tasks 中的任务 ID 列表。
+func (m *CloudDownloadManager) pruneGroupTaskIDs(ids []string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var kept []string
+	for _, id := range ids {
+		if _, ok := m.tasks[id]; ok {
+			kept = append(kept, id)
+		}
+	}
+	return kept
+}
+
+// groupsDirPath 返回组持久化目录。
+func (m *CloudDownloadManager) groupsDirPath() string {
+	return filepath.Join(m.persistDir, "groups")
+}
+
+// saveGroup 持久化任务组到磁盘。
+func (m *CloudDownloadManager) saveGroup(g *CloudTaskGroup) {
+	m.groupMu.RLock()
+	data, err := json.Marshal(g)
+	m.groupMu.RUnlock()
+	if err != nil {
+		m.logger.Warn("failed to marshal group", "id", g.ID, "error", err)
+		return
+	}
+	dir := m.groupsDirPath()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		m.logger.Warn("failed to create groups dir", "dir", dir, "error", err)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, g.ID+".json"), data, 0644); err != nil {
+		m.logger.Warn("failed to persist group", "id", g.ID, "error", err)
+	}
+}
+
+// removeGroupFile 删除组的持久化文件。
+func (m *CloudDownloadManager) removeGroupFile(groupID string) {
+	_ = os.Remove(filepath.Join(m.groupsDirPath(), groupID+".json"))
 }
 
 // cleanupExpiredOnce 执行一次性的过期任务清理，返回清理的任务数量。
@@ -727,10 +942,10 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 
 	// 在锁内收集需要清理的 ID 及相关信息，避免锁内 I/O 阻塞
 	type expiredItem struct {
-		id       string
-		taskID   string
-		filename string
-		totalSz  int64
+		id           string
+		taskID       string
+		filename     string
+		reservedSize int64
 	}
 	m.mu.Lock()
 	var expired []expiredItem
@@ -746,11 +961,12 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 		}
 		if now.After(t.UpdatedAt.Add(ttl)) {
 			expired = append(expired, expiredItem{
-				id:       id,
-				taskID:   t.ID,
-				filename: t.Filename,
-				totalSz:  t.TotalSize,
+				id:           id,
+				taskID:       t.ID,
+				filename:     t.Filename,
+				reservedSize: t.ReservedSize,
 			})
+			t.ReservedSize = 0 // 释放后归零，防二次释放
 			delete(m.tasks, id)
 		}
 	}
@@ -765,14 +981,33 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 	for _, item := range expired {
 		_ = os.Remove(filepath.Join(m.persistDir, item.id+".json"))
 		_ = os.RemoveAll(filepath.Join(m.cloudDir, item.taskID))
-		if item.totalSz > 0 {
-			m.storage.Release(item.totalSz, CategoryCloud)
+		if item.reservedSize > 0 {
+			m.storage.Release(item.reservedSize, CategoryCloud)
 		}
 		if m.checksumStore != nil {
 			remotePath := filepath.Join(cloudDirName, item.taskID, item.filename)
 			m.checksumStore.Delete(remotePath)
 		}
 		cleaned++
+	}
+
+	// 清理引用已全部过期任务的空组（saveGroup 在锁外调用，避免 RLock 重入死锁）
+	var toSave []*CloudTaskGroup
+	m.groupMu.Lock()
+	for gid, g := range m.groups {
+		kept := m.pruneGroupTaskIDs(g.TaskIDs)
+		if len(kept) == 0 {
+			delete(m.groups, gid)
+			m.removeGroupFile(gid)
+		} else if len(kept) != len(g.TaskIDs) {
+			g.TaskIDs = kept
+			g.TotalTasks = len(kept)
+			toSave = append(toSave, g)
+		}
+	}
+	m.groupMu.Unlock()
+	for _, g := range toSave {
+		m.saveGroup(g)
 	}
 
 	m.logger.Info("expired cloud download tasks cleaned up", "count", cleaned)
@@ -868,6 +1103,7 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []CloudBatchURL) (*
 	}
 
 	var taskIDs []string
+	seen := make(map[string]bool, len(urls))
 	for _, entry := range urls {
 		fn := entry.Filename
 		if fn == "" {
@@ -879,7 +1115,21 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []CloudBatchURL) (*
 		if err != nil {
 			return nil, fmt.Errorf("create task for %s: %w", entry.URL, err)
 		}
+		// 去重命中：同组重复 URL 或已属其他组的活跃任务不允许重复入组
+		m.mu.Lock()
+		if task.GroupID != "" && task.GroupID != groupID {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("duplicate URL %s already belongs to group %s", entry.URL, task.GroupID)
+		}
+		if seen[task.ID] {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("duplicate URL in group: %s", entry.URL)
+		}
+		task.GroupID = groupID
+		m.mu.Unlock()
+		m.saveTask(task)
 		taskIDs = append(taskIDs, task.ID)
+		seen[task.ID] = true
 	}
 
 	group.TaskIDs = taskIDs
@@ -887,6 +1137,7 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []CloudBatchURL) (*
 	m.groupMu.Lock()
 	m.groups[groupID] = group
 	m.groupMu.Unlock()
+	m.saveGroup(group)
 
 	m.logger.Info("cloud download group created",
 		"group_id", groupID,
@@ -945,7 +1196,7 @@ func (m *CloudDownloadManager) ListGroups(status string) []*CloudTaskGroup {
 	return result
 }
 
-// CancelGroup 取消组内所有 pending/downloading 任务。
+// CancelGroup 取消组内所有 pending/downloading 任务（已完成任务跳过）。
 func (m *CloudDownloadManager) CancelGroup(groupID string) error {
 	m.groupMu.RLock()
 	group, ok := m.groups[groupID]
@@ -957,19 +1208,18 @@ func (m *CloudDownloadManager) CancelGroup(groupID string) error {
 	var errs []error
 	for _, tid := range group.TaskIDs {
 		if err := m.CancelTask(tid); err != nil {
+			// 已完成/已失败任务不可取消属正常情况，不视为组取消失败
+			if strings.Contains(err.Error(), "cannot cancel") {
+				continue
+			}
 			errs = append(errs, err)
 		}
 	}
-
-	m.groupMu.Lock()
-	group.Status = "cancelled"
-	group.UpdatedAt = time.Now()
-	m.groupMu.Unlock()
-
+	m.UpdateGroupStatus(groupID)
 	return errors.Join(errs...)
 }
 
-// DeleteGroup 删除组及所有子任务。
+// DeleteGroup 删除组记录及所有子任务。
 func (m *CloudDownloadManager) DeleteGroup(groupID string) error {
 	m.groupMu.RLock()
 	group, ok := m.groups[groupID]
@@ -985,20 +1235,17 @@ func (m *CloudDownloadManager) DeleteGroup(groupID string) error {
 		}
 	}
 
-	taskDir := filepath.Join(m.cloudDir, groupID)
-	if err := os.RemoveAll(taskDir); err != nil && !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("remove group dir: %w", err))
-	}
-
 	m.groupMu.Lock()
 	delete(m.groups, groupID)
 	m.groupMu.Unlock()
+	m.removeGroupFile(groupID)
 
 	return errors.Join(errs...)
 }
 
 // ResumeTask 恢复失败的下载任务。
-// force=true 时删除已有部分文件重新下载；force=false 时尝试续传。
+// force=true 时删除已有部分文件重新下载；force=false 时保留 .partial 由下载器
+// 通过 Range 续传（不再改名成 destPath，避免续传退化为全量下载）。
 func (m *CloudDownloadManager) ResumeTask(taskID string, force bool) error {
 	m.mu.Lock()
 	task, ok := m.tasks[taskID]
@@ -1006,27 +1253,36 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool) error {
 		m.mu.Unlock()
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	if task.Status != "failed" {
+	if task.Status != "failed" && task.Status != "cancelled" {
 		m.mu.Unlock()
-		return fmt.Errorf("task %s is in status %q, only failed tasks can be resumed", taskID, task.Status)
+		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, task.Status)
 	}
+
+	// 状态先切 pending（防并发双 resume 启动两个下载 goroutine）
+	task.Status = "pending"
+	task.Error = ""
+	task.UpdatedAt = time.Now()
+	task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
+
+	// 释放过存储的任务需要重新占位
+	if task.ReservedSize == 0 {
+		if err := m.storage.TryReserve(cloudReservePlaceholder, CategoryCloud); err != nil {
+			task.Status = "failed"
+			task.Error = "storage full, cannot resume"
+			m.mu.Unlock()
+			m.saveTask(task)
+			return err
+		}
+		task.ReservedSize = cloudReservePlaceholder
+	}
+	m.mu.Unlock()
 
 	taskDir := filepath.Join(m.cloudDir, task.ID)
 	destPath := filepath.Join(taskDir, task.Filename)
 	if force {
-		os.Remove(destPath)
-		os.Remove(destPath + ".partial")
-	} else {
-		partialPath := destPath + ".partial"
-		if _, statErr := os.Stat(partialPath); statErr == nil {
-			_ = os.Rename(partialPath, destPath)
-		}
+		_ = os.Remove(destPath)
+		_ = os.Remove(destPath + ".partial")
 	}
-
-	task.Status = "pending"
-	task.Error = ""
-	task.UpdatedAt = time.Now()
-	m.mu.Unlock()
 
 	m.saveTask(task)
 
@@ -1035,7 +1291,7 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool) error {
 	return nil
 }
 
-// ResumeGroup 恢复组内所有失败任务。
+// ResumeGroup 恢复组内所有失败/取消任务。
 func (m *CloudDownloadManager) ResumeGroup(groupID string, force bool) error {
 	m.groupMu.RLock()
 	group, ok := m.groups[groupID]
@@ -1050,7 +1306,22 @@ func (m *CloudDownloadManager) ResumeGroup(groupID string, force bool) error {
 			errs = append(errs, err)
 		}
 	}
+	m.UpdateGroupStatus(groupID)
 	return errors.Join(errs...)
+}
+
+// SetGroupArchiveFile 记录组的归档文件路径并持久化。
+func (m *CloudDownloadManager) SetGroupArchiveFile(groupID, archiveFile string) {
+	m.groupMu.Lock()
+	g, ok := m.groups[groupID]
+	if !ok {
+		m.groupMu.Unlock()
+		return
+	}
+	g.ArchiveFile = archiveFile
+	g.UpdatedAt = time.Now()
+	m.groupMu.Unlock()
+	m.saveGroup(g)
 }
 
 // markDirty 将任务标记为"脏"（进度已更新），由 flushLoop 批量持久化。
@@ -1112,8 +1383,7 @@ func (m *CloudDownloadManager) UpdateGroupStatus(groupID string) {
 	}
 
 	m.mu.RLock()
-	completed := 0
-	failed := 0
+	completed, failed, cancelled, active, pending := 0, 0, 0, 0, 0
 	for _, tid := range group.TaskIDs {
 		task, exists := m.tasks[tid]
 		if !exists {
@@ -1122,27 +1392,44 @@ func (m *CloudDownloadManager) UpdateGroupStatus(groupID string) {
 		switch task.Status {
 		case "completed":
 			completed++
-		case "failed", "cancelled":
+		case "failed":
 			failed++
+		case "cancelled":
+			cancelled++
+		case "downloading":
+			active++
+		default:
+			pending++
 		}
 	}
+	total := completed + failed + cancelled + active + pending
 	m.mu.RUnlock()
 
 	m.groupMu.Lock()
 	group.Completed = completed
-	group.Failed = failed
+	group.Failed = failed + cancelled
+	group.TotalTasks = total
 	switch {
-	case completed == group.TotalTasks:
+	case total == 0:
+		// 所有子任务均不存在（已删除），保留原状态
+	case completed == total:
 		group.Status = "completed"
-	case failed == group.TotalTasks:
+	case failed+cancelled == total && cancelled == total:
+		group.Status = "cancelled"
+	case failed+cancelled == total:
 		group.Status = "failed"
-	case completed+failed == group.TotalTasks:
+	case completed > 0 && failed+cancelled > 0:
 		group.Status = "partial"
-	case failed > 0:
+	case active > 0:
+		group.Status = "downloading"
+	case pending == total:
+		group.Status = "pending"
+	default:
 		group.Status = "downloading"
 	}
 	group.UpdatedAt = time.Now()
 	m.groupMu.Unlock()
+	m.saveGroup(group)
 }
 
 // Close 停止所有后台 goroutine（flushLoop 和 cleanupExpired）并执行一次清理。

@@ -255,14 +255,14 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 // cloudGetGroup 处理 GET /api/cloud/groups/{id}。
 func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
+	// 先刷新组状态，再读取最新快照（避免返回更新前的副本）
+	h.cloudMgr.UpdateGroupStatus(id)
 	group, ok := h.cloudMgr.GetGroup(id)
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "group not found"}, http.StatusNotFound)
 		return
 	}
-
-	// 更新组状态
-	h.cloudMgr.UpdateGroupStatus(id)
 
 	// 获取组详情时一并返回子任务
 	h.cloudMgr.mu.RLock()
@@ -285,11 +285,17 @@ func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 // cloudListGroups 处理 GET /api/cloud/groups。
 func (h *Handlers) cloudListGroups(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
-	groups := h.cloudMgr.ListGroups(status)
-	// 更新每个组的状态
-	for _, g := range groups {
-		h.cloudMgr.UpdateGroupStatus(g.ID)
+	// 先更新每个组的状态，再取最新快照列表
+	if status == "" {
+		for _, g := range h.cloudMgr.ListGroups("") {
+			h.cloudMgr.UpdateGroupStatus(g.ID)
+		}
+	} else {
+		for _, g := range h.cloudMgr.ListGroups(status) {
+			h.cloudMgr.UpdateGroupStatus(g.ID)
+		}
 	}
+	groups := h.cloudMgr.ListGroups(status)
 	sendJSONResponse(w, groups, http.StatusOK)
 }
 
@@ -342,10 +348,10 @@ func (h *Handlers) cloudResumeGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 // cloudArchiveGroup 处理 POST /api/cloud/groups/{id}/archive。
+// 收集组内所有已完成子任务的文件打包为单个 tar.gz（未完成任务跳过并记录）。
 func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	groupID := r.PathValue("id")
-	group, ok := h.cloudMgr.GetGroup(groupID)
-	if !ok {
+	if _, ok := h.cloudMgr.GetGroup(groupID); !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "group not found"}, http.StatusNotFound)
 		return
 	}
@@ -376,39 +382,46 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 收集组目录下所有已完成的文件
-	groupDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName, groupID)
+	// 按子任务目录收集已完成文件（子任务文件实际保存在 .__cloud__/<taskID>/ 下）
+	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
 	var groupFiles []fileWithRelPath
 	var skippedTasks []string
 
-	entries, err := os.ReadDir(groupDir)
-	if err != nil {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("failed to read group dir: %v", err),
-		}, http.StatusInternalServerError)
+	group, ok := h.cloudMgr.GetGroup(groupID)
+	if !ok {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "group not found"}, http.StatusNotFound)
 		return
 	}
+	for _, taskID := range group.TaskIDs {
+		task, found := h.cloudMgr.SnapshotTask(taskID)
+		if !found {
+			h.logger.Warn("cloud group archive: skipping task not found", "group_id", groupID, "task_id", taskID)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
+		}
+		if task.Status != "completed" {
+			h.logger.Warn("cloud group archive: skipping task with non-completed status",
+				"group_id", groupID, "task_id", taskID, "status", task.Status)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
+		}
 
-	for _, e := range entries {
-		if e.IsDir() {
+		sourceFile := filepath.Join(cloudDir, task.ID, task.Filename)
+		sourceDir := filepath.Join(cloudDir, task.ID)
+		if !IsPathWithin(sourceFile, sourceDir) {
+			h.logger.Error("path traversal detected in group archive",
+				"group_id", groupID, "task_id", taskID, "source_file", sourceFile)
+			skippedTasks = append(skippedTasks, taskID)
 			continue
 		}
-		// 跳过 .partial 和 .tmp 文件
-		if strings.HasSuffix(e.Name(), ".partial") || strings.HasSuffix(e.Name(), ".tmp.") {
-			continue
-		}
-		fullPath := filepath.Join(groupDir, e.Name())
-		if !IsPathWithin(fullPath, groupDir) {
-			h.logger.Error("path traversal detected in group archive", "group_id", groupID, "file", e.Name())
-			skippedTasks = append(skippedTasks, e.Name())
-			continue
-		}
-		groupFiles = append(groupFiles, fileWithRelPath{fullPath: fullPath, relPath: e.Name()})
+		relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
+		groupFiles = append(groupFiles, fileWithRelPath{fullPath: sourceFile, relPath: relPath})
 	}
 
 	if len(groupFiles) == 0 {
 		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: "no files to archive in group",
+			Success: false, Message: "no completed files to archive in group",
+			SkippedCount: len(skippedTasks), SkippedTasks: skippedTasks,
 		}, http.StatusBadRequest)
 		return
 	}
@@ -443,14 +456,13 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		size = info.Size()
 	}
 
-	// 更新组归档路径
-	h.cloudMgr.mu.Lock()
-	group.ArchiveFile = filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName))
-	h.cloudMgr.mu.Unlock()
+	// 更新组归档路径（落库到真实组对象）
+	archiveFile := filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName))
+	h.cloudMgr.SetGroupArchiveFile(groupID, archiveFile)
 
 	sendJSONResponse(w, CloudArchiveResult{
 		Success:      true,
-		File:         filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
+		File:         archiveFile,
 		Size:         size,
 		Checksum:     checksum,
 		TaskCount:    len(groupFiles),
