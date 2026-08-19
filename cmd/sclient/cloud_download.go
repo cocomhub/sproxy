@@ -668,7 +668,12 @@ func extractTarGz(src, destDir string) error {
 		}
 
 		targetPath := filepath.Join(destDir, filepath.Clean(header.Name))
-		if !strings.HasPrefix(targetPath, filepath.Clean(destDir)+string(filepath.Separator)) {
+		// 路径穿越防护：filepath.Clean 不会解开 .. 段（../../evil 原样保留），仅做
+		// 前缀检查会被 Join(destDir, ../../evil)=destDir/../../evil 逃过。必须用
+		// filepath.Rel 校验规范化后的最终路径仍位于 destDir 之内，否则 tar 内的
+		// 恶意 header.Name 可写出 destDir（任意文件写）。
+		rel, relErr := filepath.Rel(destDir, targetPath)
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			// 路径穿越保护
 			continue
 		}

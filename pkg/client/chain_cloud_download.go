@@ -284,6 +284,9 @@ func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
 // waitForTasks 轮询等待所有任务完成，支持存储超限重试。
 func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 	maxAttempts := 3
+	// 重试提交再次失败（无 ID）的 URL 数。它在循环内被归零的 c.Failed 之外单独
+	// 累积，保证任何一次重试提交失败都被计入最终结果，不被静默丢弃（禁止静默失败）。
+	var submitFailedCount int
 	for attempt := range maxAttempts {
 		// 每次重试前归零计数器，基于本次轮询结果重新统计
 		c.Completed = 0
@@ -309,9 +312,10 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			}
 		}
 		if len(storageFullURLs) == 0 {
-			// 无存储超限重试：若仍有失败任务，链式操作不得声称成功（禁止静默失败）
-			if c.Failed > 0 {
-				return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed, c.Total)
+			// 无存储超限重试：若仍有失败任务（含重试提交失败的 URL），链式操作不得
+			// 声称成功（禁止静默失败）
+			if c.Failed+submitFailedCount > 0 {
+				return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed+submitFailedCount, c.Total+submitFailedCount)
 			}
 			return nil
 		}
@@ -355,12 +359,21 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 				if err != nil {
 					return fmt.Errorf("重试批量提交失败: %w", err)
 				}
-				// 新提交的任务添加回 TaskIDs
+				// 新提交的任务添加回 TaskIDs；无 ID = 提交再次失败，计入 submitFailedCount
+				// 而非静默丢弃（否则该 URL 从 TaskIDs 消失、下一轮统计全完成后链式操作
+				// 会错误报告成功）
 				c.TaskIDs = remaining
 				for _, t := range tasks {
 					if t.ID != "" {
 						c.TaskIDs = append(c.TaskIDs, t.ID)
+						continue
 					}
+					submitFailedCount++
+				}
+				if len(c.TaskIDs) == 0 && submitFailedCount > 0 {
+					// 所有重试提交都再次失败、没有可轮询的任务：直接报错，
+					// 避免下一轮空轮询返回误导性的"没有可轮询的任务"
+					return fmt.Errorf("%d 个云端下载任务重试提交失败（存储空间不足）", submitFailedCount)
 				}
 			}
 			// 更新 Total 为本次重试后的 TaskIDs 总数

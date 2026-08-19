@@ -562,6 +562,65 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 	}
 }
 
+// TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject 回归测试：
+// CreateGroup 创建的任务停在 pending（尚无 goroutine），随后 SubmitAndStart 去重命中
+// 该 pending 任务时必须用 m.tasks 中的真实对象启动。旧代码用 findByURL 的快照副本
+// 启动，executeDownload 只写副本、真实对象永远停在 pending（findByURL 持续命中使
+// 同 URL 无法再下载、任务卡死，直到进程重启自愈）。
+func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testing.T) {
+	content := []byte("dedup pending real object content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	// CreateTask 对未知大小任务预留 cloudReservePlaceholder（1 GiB），上限需大于该值
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		AllowPrivate:  true,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr.Close)
+
+	// 仅创建组（不启动），子任务停在 pending
+	group, err := mgr.CreateGroup("g", []CloudBatchURL{{URL: srv.URL, Filename: "real.bin"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID := group.TaskIDs[0]
+
+	// 对组内同一 URL 提交下载：去重命中 pending 任务，应启动真实对象
+	task, err := mgr.SubmitAndStart("url", srv.URL, "real.bin", -1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.ID != taskID {
+		t.Fatalf("expected dedup to same task %q, got %q", taskID, task.ID)
+	}
+
+	// 等待真实对象离开 pending（旧 bug：真实对象永远停在 pending）
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mgr.mu.RLock()
+		real := mgr.tasks[taskID]
+		mgr.mu.RUnlock()
+		if real != nil && real.Status != "pending" {
+			if real.Status == "completed" {
+				return
+			}
+			t.Fatalf("real task %s reached %q instead of completed: %s", taskID, real.Status, real.Error)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("real task %s never left pending (dedup goroutine ran on a snapshot copy)", taskID)
+}
+
 func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 	// 模拟慢速下载：服务端阻塞不发送数据，等待取消
 	blockCh := make(chan struct{})
@@ -602,6 +661,73 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 	// 取消任务
 	if err := mgr.CancelTask(task.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestCloudDownloadManager_CancelCleansUpTaskDir 回归测试：取消下载后任务目录
+// （含 .partial）必须被清理。旧代码只删最终文件，.partial 残留但存储账本已释放
+// 归零，磁盘占用不被记账，可累计突破 max_storage_bytes 配额。
+func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
+	// 服务端写入少量数据（使 .partial 落盘）后阻塞，等待取消
+	blockCh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "104857600") // 100MB
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("some partial data"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-blockCh
+	}))
+	t.Cleanup(func() {
+		close(blockCh)
+		srv.Close()
+	})
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		AllowPrivate:  true,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr.Close)
+
+	task, submitErr := mgr.SubmitAndStart("url", srv.URL, "cancel.bin", 104857600, nil)
+	if submitErr != nil {
+		t.Fatal(submitErr)
+	}
+
+	// 等待 .partial 文件出现（确认下载已开始写盘）
+	taskDir := filepath.Join(dir, ".__cloud__", task.ID)
+	deadline := time.Now().Add(5 * time.Second)
+	partialWritten := false
+	for time.Now().Before(deadline) {
+		if _, statErr := os.Stat(filepath.Join(taskDir, "cancel.bin.partial")); statErr == nil {
+			partialWritten = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !partialWritten {
+		t.Fatal("expected partial file to be written before cancel")
+	}
+
+	// 取消任务，等待下载 goroutine 完全退出（旧 goroutine 停止写盘）
+	if cancelErr := mgr.CancelTask(task.ID); cancelErr != nil {
+		t.Fatal(cancelErr)
+	}
+	if !mgr.waitTaskStopped(task.ID, 2*time.Second) {
+		t.Fatal("download goroutine did not stop after cancel")
+	}
+
+	// 任务目录应被清理（无 .partial/.partial.etag 残留；目录不存在或为空均可）
+	entries, readErr := os.ReadDir(taskDir)
+	if readErr == nil && len(entries) > 0 {
+		t.Fatalf("expected task dir cleaned after cancel, found %d entries", len(entries))
 	}
 }
 

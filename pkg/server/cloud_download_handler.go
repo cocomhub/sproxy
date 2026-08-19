@@ -233,15 +233,21 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 校验 URL 合法性
-	for _, entry := range req.URLs {
-		if _, _, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.config.AllowPrivate); err != nil {
+	// 校验并规范化 URL：必须把规范化后的 URL/Filename 传给 CreateGroup，与单条/
+	// 批量路径保持一致——否则同一内容的不同拼写（如 http://host/a 与 http://host/a/）
+	// 在单条路径会被去重、在组路径会生成两个下载，组内文件名冲突判定也基于未
+	// 规范化的值，导致与 UI/CLI 本地预检偶发不一致。
+	normalized := make([]CloudBatchURL, len(req.URLs))
+	for i, entry := range req.URLs {
+		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.config.AllowPrivate)
+		if err != nil {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
 		}
+		normalized[i] = CloudBatchURL{URL: cleanedURL, Filename: cleanedFilename}
 	}
 
-	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, req.URLs)
+	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized)
 	if err != nil {
 		// 文件名冲突与重复 URL 均属客户端输入错误，映射 409 而非 500
 		if strings.Contains(err.Error(), "filename conflict") ||

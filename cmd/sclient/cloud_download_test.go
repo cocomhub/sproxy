@@ -1097,3 +1097,42 @@ func TestCloudDownloadCmd_Group_UrlFileFilenames(t *testing.T) {
 		t.Fatalf("expected plan output to show index.html, got: %s", buf.String())
 	}
 }
+
+// TestExtractTarGz_PathTraversalPrevented 回归测试：extractTarGz 必须阻止 tar 内
+// header.Name 为 ../../ 的路径穿越。旧代码仅对未 Clean 的 Join 结果做前缀检查，
+// ../../evil 的 Join 结果仍以 destDir 为前缀，会写出 destDir（任意文件写）。
+func TestExtractTarGz_PathTraversalPrevented(t *testing.T) {
+	dir := t.TempDir()
+	destDir := filepath.Join(dir, "a", "b")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	content := []byte("evil")
+	hdr := &tar.Header{Name: "../../evil.txt", Mode: 0644, Size: int64(len(content)), Typeflag: tar.TypeReg}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	tw.Close()
+	gw.Close()
+
+	src := filepath.Join(dir, "evil.tar.gz")
+	if err := os.WriteFile(src, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := extractTarGz(src, destDir); err != nil {
+		t.Fatalf("extractTarGz failed: %v", err)
+	}
+
+	// ../../evil.txt 从 destDir 逃逸的目标是 dir/evil.txt，必须被拦截
+	if _, err := os.Stat(filepath.Join(dir, "evil.txt")); !os.IsNotExist(err) {
+		t.Fatal("path traversal escaped destDir")
+	}
+}

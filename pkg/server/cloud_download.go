@@ -316,32 +316,36 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 		return nil, err
 	}
 
-	// 去重命中（CreateTask 返回已有任务）或任务已被启动：若该 URL 已有执行中的
-	// 下载 goroutine（含排队），跳过启动。running 在 go 之前同步置位，闭合
-	// "检查→启动" 竞态窗口，避免对同一 URL 并发下载同一目标文件（Critical 修复）。
+	// 启动必须使用 m.tasks 中的真实对象，而非 CreateTask 返回的对象：
+	// CreateTask 去重命中时返回 findByURL 的快照副本，对副本启动 goroutine 会
+	// 导致 executeDownload 全程只写副本、真实对象永远停在 pending（findByURL
+	// 持续命中使同 URL 无法再下载、任务卡死，直到进程重启自愈）。
+	// 在写锁内检查 Status 并同步置位 running，闭合"检查→启动"竞态窗口，避免
+	// 对同一 URL 并发启动两个 goroutine 写同一 .partial（Critical 修复）。
 	m.mu.Lock()
-	if task.Status != "pending" || m.running[task.ID] {
+	realTask, ok := m.tasks[task.ID]
+	if !ok || realTask.Status != "pending" || m.running[realTask.ID] {
 		m.mu.Unlock()
 		return task, nil
 	}
-	m.running[task.ID] = true
+	m.running[realTask.ID] = true
 	m.mu.Unlock()
 
 	useSync := syncCtx != nil && totalSize > 0 && totalSize < m.config.SyncThreshold
 
 	if useSync {
-		m.logger.Info("starting sync cloud download", "task_id", task.ID, "url", url, "size", totalSize)
+		m.logger.Info("starting sync cloud download", "task_id", realTask.ID, "url", url, "size", totalSize)
 		// 同步下载：直接在当前 goroutine 执行，wg.Add(1) 在 go 之前确保不竞态
 		m.wg.Add(1)
-		m.executeDownload(syncCtx, task)
+		m.executeDownload(syncCtx, realTask)
 		return task, nil
 	}
 
-	m.logger.Info("starting async cloud download", "task_id", task.ID, "url", url, "size", totalSize)
+	m.logger.Info("starting async cloud download", "task_id", realTask.ID, "url", url, "size", totalSize)
 	// 异步下载：goroutine 执行，wg.Add(1) 在 go 之前确保不竞态
 	//nolint:gosec
 	m.wg.Add(1)
-	go m.executeDownload(context.Background(), task) //nolint:gosec
+	go m.executeDownload(context.Background(), realTask) //nolint:gosec
 	return task, nil
 }
 
@@ -523,7 +527,9 @@ downloadDone:
 	m.mu.RUnlock()
 	if storedStatus == "cancelled" {
 		m.logger.Info("download finished after cancel, discarding result", "task_id", task.ID)
-		_ = os.Remove(filepath.Join(m.cloudDir, task.ID, task.Filename))
+		// 取消即放弃：连同 .partial/.partial.etag 一并清理（CancelTask 已释放存储
+		// 并尝试删除，这里兜底），保持磁盘与已归零账本一致。
+		_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
 		return
 	}
 
@@ -792,6 +798,14 @@ func (m *CloudDownloadManager) CancelTask(id string) error {
 	}
 	m.mu.Unlock()
 
+	// 取消即放弃：清理任务文件（含 .partial/.partial.etag），使磁盘占用与已归零
+	// 的存储账本一致——否则 partial 残留但账本释放，可累计突破 max_storage_bytes
+	// 配额。goroutine 可能仍在响应 cancel 收尾（Windows 下删除被占用文件会失败），
+	// 删除失败时由 executeDownload 的取消路径（RemoveAll）兜底。
+	if err := os.RemoveAll(filepath.Join(m.cloudDir, id)); err != nil && !os.IsNotExist(err) {
+		m.logger.Warn("failed to clean up task dir on cancel", "task_id", id, "error", err)
+	}
+
 	// 终态持久化失败会丢失 cancelled 状态（重启后可能被当作 downloading 重启），必须显式报错
 	if err := m.saveTask(t); err != nil {
 		m.logger.Error("persist cancelled task state, state may be lost on restart",
@@ -917,9 +931,13 @@ func (m *CloudDownloadManager) recoverTasks() {
 		m.tasks[task.ID] = &task
 		recovered++
 
-		// 重启中断/排队的下载，wg.Add(1) 在 go 之前确保不竞态
+		// 重启中断/排队的下载：在 go 之前同步置位 running（与 SubmitAndStart 等
+		// 启动路径一致，闭合"检查→启动"竞态窗口），wg.Add(1) 在 go 之前确保不竞态
 		if task.Status == "downloading" || task.Status == "pending" {
 			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL, "status", task.Status)
+			m.mu.Lock()
+			m.running[task.ID] = true
+			m.mu.Unlock()
 			m.wg.Add(1)
 			go m.executeDownload(context.Background(), &task)
 			restarted++
@@ -1335,13 +1353,19 @@ func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []CloudBatc
 	}
 
 	for _, taskID := range group.TaskIDs {
-		m.mu.RLock()
+		// 在写锁内检查 Status + 同步置位 running，闭合"检查→启动"竞态窗口：
+		// 并发 SubmitAndStartGroup 对同一任务会有一个拿到 running 后另一个跳过，
+		// 避免两个 goroutine 并发写同一 .partial。已在 running 的任务（可能是
+		// 去重命中的既有任务）跳过启动。
+		m.mu.Lock()
 		task, exists := m.tasks[taskID]
-		// 已在 cancelFuncs/running 中的任务已有活跃 goroutine（可能是去重命中
-		// 的既有任务），跳过启动，避免两个 goroutine 并发写同一 .partial。
-		alreadyRunning := m.running[taskID]
-		m.mu.RUnlock()
-		if !exists || task.Status != "pending" || alreadyRunning {
+		if exists && task.Status == "pending" && !m.running[taskID] {
+			m.running[taskID] = true
+		} else {
+			task = nil
+		}
+		m.mu.Unlock()
+		if task == nil {
 			continue
 		}
 		m.wg.Add(1)
@@ -1485,9 +1509,15 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool) error {
 		m.mu.Unlock()
 		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, task.Status)
 	}
+	if m.running[taskID] {
+		m.mu.Unlock()
+		return fmt.Errorf("task %s is still running, cannot resume now", taskID)
+	}
 
-	// 状态先切 pending（防并发双 resume 启动两个下载 goroutine）
+	// 状态先切 pending + running 同步置位：并发双 resume 中第二个会因 running 已置
+	// 被上面的检查拦截，避免两个 goroutine 并发写同一 .partial（Critical 修复）。
 	task.Status = "pending"
+	m.running[taskID] = true
 	task.Error = ""
 	task.UpdatedAt = time.Now()
 	task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
@@ -1495,8 +1525,11 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool) error {
 	// 释放过存储的任务需要重新占位
 	if task.ReservedSize == 0 {
 		if err := m.storage.TryReserve(cloudReservePlaceholder, CategoryCloud); err != nil {
+			// 占位失败：撤销 pending 切换并清除 running，避免 running 残留
+			// 永久阻止后续 resume（goroutine 从未启动）。
 			task.Status = "failed"
 			task.Error = "storage full, cannot resume"
+			delete(m.running, taskID)
 			m.mu.Unlock()
 			if saveErr := m.saveTask(task); saveErr != nil {
 				m.logger.Error("persist resume-failure task state, state may be lost on restart",

@@ -1132,16 +1132,9 @@ async function showCloudDownloadPreview(action) {
 
   // 绑定按钮事件
   document.getElementById('cloud-preview-cancel-btn').addEventListener('click', function() {
-    // 恢复输入框
-    urlRow.innerHTML = '<textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>' +
-      '<button type="button" id="cloud-chain-btn" class="btn btn-primary" style="white-space:nowrap;">链式下载</button>' +
-      '<button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>' +
-      '<button type="button" id="cloud-create-group-btn" class="btn btn-secondary" style="white-space:nowrap;">创建组</button>';
+    // 恢复输入框（含重新绑定三个按钮事件）
+    restoreCloudUrlRow();
     document.getElementById('cloud-url').value = text;
-    // 重新绑定事件
-    document.getElementById('cloud-chain-btn').addEventListener('click', chainDownloadCloud);
-    document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
-    document.getElementById('cloud-create-group-btn').addEventListener('click', createCloudGroup);
   });
 
   document.getElementById('cloud-preview-confirm-btn').addEventListener('click', function() {
@@ -1187,8 +1180,32 @@ async function showCloudDownloadPreview(action) {
 let _cloudGroups = [];
 let _cloudPollTimer = null;
 
+// bindCloudUrlRowEvents 为云端下载输入行的三个按钮绑定事件。
+function bindCloudUrlRowEvents() {
+  document.getElementById('cloud-chain-btn').addEventListener('click', chainDownloadCloud);
+  document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
+  document.getElementById('cloud-create-group-btn').addEventListener('click', createCloudGroup);
+}
+
+// restoreCloudUrlRow 恢复云端下载输入行。预览界面（showCloudDownloadPreview）把
+// #cloud-url 所在行的 innerHTML 替换为预览列表；若用户不点预览的"取消"而直接关闭
+// 弹窗，输入行不会自动恢复。再次打开弹窗时 showCloudDownload 依赖 #cloud-url 存在，
+// 缺失会导致 .value 抛 TypeError、弹窗空白。这里重建输入行并重新绑定按钮事件。
+function restoreCloudUrlRow() {
+  var urlRow = document.querySelector('#cloud-modal .cloud-url-row');
+  if (!urlRow || document.getElementById('cloud-url')) return;
+  // 静态可信模板，无用户输入拼接；用户内容通过 .value 赋值，不进入 innerHTML
+  urlRow.innerHTML = '<textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>' +
+    '<button type="button" id="cloud-chain-btn" class="btn btn-primary" style="white-space:nowrap;">链式下载</button>' +
+    '<button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>' +
+    '<button type="button" id="cloud-create-group-btn" class="btn btn-secondary" style="white-space:nowrap;">创建组</button>';
+  bindCloudUrlRowEvents();
+}
+
 function showCloudDownload() {
   document.getElementById('cloud-modal').style.display = 'flex';
+  // 先恢复可能的预览残留，确保 #cloud-url 存在（否则 .value 抛 TypeError）
+  restoreCloudUrlRow();
   document.getElementById('cloud-url').value = '';
   refreshCloudTasks();
   refreshCloudGroups();

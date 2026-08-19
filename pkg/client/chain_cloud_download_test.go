@@ -852,3 +852,50 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 		t.Errorf("expected ErrStorageFull, got: %v", err)
 	}
 }
+
+// TestCloudDownloadChain_StorageFullRetry_ResubmitFailsNotSilent 验证：存储超限重试时，
+// 重试提交再次失败（返回无 ID 的 failed 条目）的 URL 不得被静默丢弃——链式操作必须
+// 报错，而非在下一轮统计全完成后错误声称成功（禁止静默失败）。
+func TestCloudDownloadChain_StorageFullRetry_ResubmitFailsNotSilent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mux := http.NewServeMux()
+
+	var batchCalls atomic.Int32
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		if batchCalls.Add(1) == 1 {
+			// 初始提交：两个任务
+			json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{
+				{ID: "task-1", Status: "pending"},
+				{ID: "task-2", Status: "pending"},
+			}})
+			return
+		}
+		// 重试提交：仍存储不足，返回无 ID 的 failed 条目（提交再次失败）
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{
+			{ID: "", URL: "http://example.com/f1", Error: "storage full"},
+			{ID: "", URL: "http://example.com/f2", Error: "storage full"},
+		}})
+	})
+	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+		json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "failed", Error: "storage full", URL: "http://example.com/f1"})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second}
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "archive", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
+
+	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	if err == nil {
+		t.Fatal("expected error when resubmit fails; dropped URLs must not report success")
+	}
+	if !strings.Contains(err.Error(), "重试提交失败") {
+		t.Errorf("expected error mentioning resubmit failure, got: %v", err)
+	}
+}

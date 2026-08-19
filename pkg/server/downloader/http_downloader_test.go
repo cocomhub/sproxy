@@ -673,9 +673,9 @@ func TestHTTPDownloader_IfRange_ETagMatchContinuesResume(t *testing.T) {
 	if result.Checksum != hex.EncodeToString(h[:]) {
 		t.Fatalf("checksum mismatch")
 	}
-	// Verify .etag file still exists
-	if _, err := os.Stat(etagPath); os.IsNotExist(err) {
-		t.Fatal("expected etag file to persist after resume")
+	// 续传成功（partial 已 rename）后 companion 应清理，不残留
+	if _, err := os.Stat(etagPath); !os.IsNotExist(err) {
+		t.Fatal("expected etag companion file removed after resume")
 	}
 }
 
@@ -808,23 +808,21 @@ func TestHTTPDownloader_IfRange_NoCachedETag_SendsRangeOnly(t *testing.T) {
 	if string(got) != string(fullContent) {
 		t.Fatalf("expected %q, got %q", string(fullContent), string(got))
 	}
-	// 续传成功后 ETag 应写入 companion 文件，供下一次 If-Range 使用
+	// 续传成功（partial 已 rename）后 companion 文件应被清理，不残留
 	etagPath := partialPath + ".etag"
-	data, err := os.ReadFile(etagPath)
-	if err != nil {
-		t.Fatalf("expected etag file written after resume: %v", err)
-	}
-	if string(data) != `"etag-1"` {
-		t.Fatalf("expected etag %q in file, got %q", `"etag-1"`, string(data))
+	if _, err := os.Stat(etagPath); !os.IsNotExist(err) {
+		t.Fatalf("expected etag companion file removed after resume, still exists")
 	}
 	if result.ETag != `"etag-1"` {
 		t.Fatalf("expected result.ETag %q, got %q", `"etag-1"`, result.ETag)
 	}
 }
 
-// TestHTTPDownloader_FullDownload_SavesETag 验证全量下载成功后：
-// 1) result.ETag 被填充；2) ETag 写入 .partial.etag companion 文件供后续续传使用。
-func TestHTTPDownloader_FullDownload_SavesETag(t *testing.T) {
+// TestHTTPDownloader_FullDownload_NoStaleETag 验证全量下载成功后：
+// 1) result.ETag 被填充；2) .partial.etag companion 文件在成功后清理，不残留
+// （partial 已 rename 为最终文件，companion 不再被读取；残留会污染 diskUsageOfTask
+// 账本并在下次普通续传时触发无谓的全量重下）。
+func TestHTTPDownloader_FullDownload_NoStaleETag(t *testing.T) {
 	t.Parallel()
 	content := []byte("full download with etag")
 	etag := `"full-etag-v1"`
@@ -846,12 +844,8 @@ func TestHTTPDownloader_FullDownload_SavesETag(t *testing.T) {
 		t.Fatalf("expected result.ETag %q, got %q", etag, result.ETag)
 	}
 	etagPath := dest + ".partial.etag"
-	data, err := os.ReadFile(etagPath)
-	if err != nil {
-		t.Fatalf("expected etag companion file: %v", err)
-	}
-	if string(data) != etag {
-		t.Fatalf("expected etag %q in file, got %q", etag, string(data))
+	if _, err := os.Stat(etagPath); !os.IsNotExist(err) {
+		t.Fatalf("expected etag companion file removed after success, still exists")
 	}
 }
 
@@ -913,13 +907,10 @@ func TestHTTPDownloader_FinalizePartial_ResultETag(t *testing.T) {
 	if result.ETag != etag {
 		t.Fatalf("expected result.ETag %q, got %q", etag, result.ETag)
 	}
+	// 收尾成功（partial 已 rename）后 companion 应清理，不残留
 	etagPath := partialPath + ".etag"
-	data, err := os.ReadFile(etagPath)
-	if err != nil {
-		t.Fatalf("expected etag companion file: %v", err)
-	}
-	if string(data) != etag {
-		t.Fatalf("expected etag %q in file, got %q", etag, string(data))
+	if _, err := os.Stat(etagPath); !os.IsNotExist(err) {
+		t.Fatalf("expected etag companion file removed after finalize, still exists")
 	}
 }
 
@@ -966,9 +957,9 @@ func TestHTTPDownloader_IfRange_ServerIgnores_206NewETag(t *testing.T) {
 	if result.Size != int64(len(newFull)) {
 		t.Fatalf("expected size %d, got %d", len(newFull), result.Size)
 	}
-	// 全量重下后 ETag 应以新值落盘
-	if data, _ := os.ReadFile(partialPath + ".etag"); string(data) != newETag {
-		t.Fatalf("expected new etag %q in companion, got %q", newETag, string(data))
+	// 全量重下成功（partial 已 rename）后 companion 应清理，不残留
+	if _, err := os.Stat(partialPath + ".etag"); !os.IsNotExist(err) {
+		t.Fatalf("expected etag companion file removed after full redownload, still exists")
 	}
 }
 

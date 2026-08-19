@@ -850,3 +850,47 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 		t.Fatalf("expected error mentioning limit 2, got: %s", body3)
 	}
 }
+
+// TestCloudHandler_CreateGroup_NormalizesURL 回归测试：cloudCreateGroup 校验后必须把
+// 规范化后的 URL/Filename 传给 SubmitAndStartGroup。旧代码丢弃规范化结果，组路径用
+// 原始 URL 做去重与文件名推导，与单条/批量路径不一致（同一内容不同拼写在组路径会
+// 生成重复下载、组内冲突判定与 UI/CLI 本地预检偶发不一致）。
+func TestCloudHandler_CreateGroup_NormalizesURL(t *testing.T) {
+	ts, mgr := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 大写 scheme 应被规范化为小写 http://；端口 1 使下载连接被拒、快速失败，
+	// 不依赖外部网络（断言只看任务创建时的 URL）
+	body := strings.NewReader(`{"name":"g1","urls":[{"url":"HTTP://127.0.0.1:1/file.zip"}]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, respBody)
+	}
+
+	var group CloudTaskGroup
+	if err := json.Unmarshal(respBody, &group); err != nil {
+		t.Fatal(err)
+	}
+	if len(group.TaskIDs) == 0 {
+		t.Fatal("expected group to have tasks")
+	}
+
+	// 组内子任务的 URL 应为规范化后的值
+	mgr.mu.RLock()
+	var taskURL string
+	for _, tid := range group.TaskIDs {
+		if t2, ok := mgr.tasks[tid]; ok {
+			taskURL = t2.URL
+			break
+		}
+	}
+	mgr.mu.RUnlock()
+	if taskURL != "http://127.0.0.1:1/file.zip" {
+		t.Fatalf("expected normalized URL %q, got %q", "http://127.0.0.1:1/file.zip", taskURL)
+	}
+}

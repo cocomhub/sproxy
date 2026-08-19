@@ -335,6 +335,14 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	}
 
 	checksum := hex.EncodeToString(h.Sum(nil))
+	etag := extractETag(resp)
+	// 在 rename 之前保存 ETag 伴侣：若下载在此后中断（partial 保留），伴侣已存在
+	// 供续传的 If-Range 一致性校验。rename 之后 partial 已不存在，伴侣文件不再被
+	// 读取，需删除避免残留（.partial.etag 会被 diskUsageOfTask 计入造成账本偏差，
+	// 且陈旧值会在下次普通续传时触发一次无谓的全量重下）。
+	if etag != "" {
+		saveETag(etagPath(partialPath), etag)
+	}
 
 	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove existing dest: %w", err)
@@ -342,16 +350,12 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	if err := os.Rename(partialPath, destPath); err != nil {
 		return nil, fmt.Errorf("rename partial to dest: %w", err)
 	}
+	_ = os.Remove(etagPath(partialPath))
 
 	if modTime != (time.Time{}) {
 		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
 			d.getLogger().Warn("设置文件修改时间失败", "path", destPath, "error", err)
 		}
-	}
-
-	etag := extractETag(resp)
-	if etag != "" {
-		saveETag(etagPath(partialPath), etag)
 	}
 
 	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime, ETag: etag}, nil
@@ -445,6 +449,12 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	}
 
 	fullChecksum := hex.EncodeToString(h.Sum(nil))
+	etag := extractETag(resp)
+	// 与 writeFullBody/finalizePartial 一致：rename 前保存 ETag 伴侣供中断续传，
+	// rename 后 partial 不存在，删除伴侣避免残留（三条完成路径行为必须一致）。
+	if etag != "" {
+		saveETag(etagPath(partialPath), etag)
+	}
 
 	// 重命名部分文件为目标文件（先清理可能残留的目标文件，兼容 Windows）
 	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
@@ -453,16 +463,12 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	if err := os.Rename(partialPath, destPath); err != nil {
 		return nil, fmt.Errorf("rename partial to dest: %w", err)
 	}
+	_ = os.Remove(etagPath(partialPath))
 
 	if modTime != (time.Time{}) {
 		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
 			d.getLogger().Warn("设置文件修改时间失败", "path", destPath, "error", err)
 		}
-	}
-
-	etag := extractETag(resp)
-	if etag != "" {
-		saveETag(etagPath(partialPath), etag)
 	}
 
 	return &Result{Size: downloadedTotal, Checksum: fullChecksum, ModTime: modTime, ETag: etag}, nil
@@ -491,12 +497,20 @@ func (d *HTTPDownloader) finalizePartial(partialPath, destPath string, resp *htt
 	}
 	pf.Close()
 
+	etag := extractETag(resp)
+	// 与 writeFullBody/handleRangeResume 一致：rename 前保存 ETag 伴侣供中断续传，
+	// rename 后 partial 不存在，删除伴侣避免残留（三条完成路径行为必须一致）。
+	if etag != "" {
+		saveETag(etagPath(partialPath), etag)
+	}
+
 	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove existing dest: %w", err)
 	}
 	if err := os.Rename(partialPath, destPath); err != nil {
 		return nil, fmt.Errorf("rename partial to dest: %w", err)
 	}
+	_ = os.Remove(etagPath(partialPath))
 
 	if modTime != (time.Time{}) {
 		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
@@ -504,10 +518,6 @@ func (d *HTTPDownloader) finalizePartial(partialPath, destPath string, resp *htt
 		}
 	}
 
-	etag := extractETag(resp)
-	if etag != "" {
-		saveETag(etagPath(partialPath), etag)
-	}
 	return &Result{Size: existingSize, Checksum: hex.EncodeToString(h.Sum(nil)), ModTime: modTime, ETag: etag}, nil
 }
 
