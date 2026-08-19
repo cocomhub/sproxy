@@ -95,6 +95,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	cloudCfg := &CloudDownloadConfig{
 		SyncThreshold:   cfg.CloudSyncThreshold,
 		MaxConcurrent:   cfg.CloudMaxConcurrent,
+		MaxBatchURLs:    cfg.CloudMaxBatchURLs,
 		TaskTTL:         cfg.CloudTaskTTL,
 		FailedTaskTTL:   cfg.CloudFailedTaskTTL,
 		AllowPrivate:    cfg.CloudDownloadAllowPrivate,

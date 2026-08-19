@@ -38,9 +38,6 @@ const (
 	TaskStatusCancelled   = "cancelled"
 )
 
-// maxBatchURLsLimit 是批量/组下载的 URL 数量上限，与服务端限制一致。
-const maxBatchURLsLimit = 100
-
 // CloudDownloadOption 配置云端下载行为。
 type CloudDownloadOption func(*cloudDownloadOptions)
 
@@ -56,15 +53,13 @@ func WithCloudDownloadFilename(name string) CloudDownloadOption {
 	}
 }
 
-// WithCloudDownloadMaxBatchURLs 设置批量下载的最大 URL 数量上限。
-// 默认 100，服务端也限制 100 URL；传入值超过 100 会被钳制到 100，
-// 避免客户端放行后服务端 400（"maximum 100 URLs per batch"）。设置为 0 使用默认值。
+// WithCloudDownloadMaxBatchURLs 设置批量下载的客户端侧 URL 数量上限（可选）。
+// 上限由服务端配置 cloud_max_batch_urls 强制（默认 100）；客户端默认不预检数量，
+// 发送超过服务端上限的请求会收到 400 错误并使创建失败。
+// 传入 n>0 时作为客户端本地护栏，在发送前拦截；n<=0 表示不限制（交给服务端）。
 func WithCloudDownloadMaxBatchURLs(n int) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		if n > 0 {
-			if n > maxBatchURLsLimit {
-				n = maxBatchURLsLimit
-			}
 			o.maxBatchURLs = n
 		}
 	}
@@ -143,12 +138,10 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []Cl
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	maxBatch := 100
-	if cfg.maxBatchURLs > 0 {
-		maxBatch = cfg.maxBatchURLs
-	}
-	if len(entries) > maxBatch {
-		return nil, fmt.Errorf("批量云端下载: 最多 %d 个 URL，收到 %d 个", maxBatch, len(entries))
+	// 数量上限由服务端 cloud_max_batch_urls 强制；客户端仅在显式设置
+	// WithCloudDownloadMaxBatchURLs 时做本地预检，默认发送后由服务端 400 报错。
+	if cfg.maxBatchURLs > 0 && len(entries) > cfg.maxBatchURLs {
+		return nil, fmt.Errorf("批量云端下载: 最多 %d 个 URL，收到 %d 个", cfg.maxBatchURLs, len(entries))
 	}
 
 	// 校验每个 URL 的格式（scheme + host，与服务端 validateCloudDownloadURL 对齐，

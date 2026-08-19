@@ -99,8 +99,8 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		sendJSONResponse(w, map[string]string{"error": "urls is required"}, http.StatusBadRequest)
 		return
 	}
-	if len(req.URLs) > 100 {
-		sendJSONResponse(w, map[string]string{"error": "maximum 100 URLs per batch"}, http.StatusBadRequest)
+	if maxBatch := h.cloudMgr.config.MaxBatchURLs; maxBatch > 0 && len(req.URLs) > maxBatch {
+		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("maximum %d URLs per batch", maxBatch)}, http.StatusBadRequest)
 		return
 	}
 
@@ -228,8 +228,8 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": "urls is required"}, http.StatusBadRequest)
 		return
 	}
-	if len(req.URLs) > 100 {
-		sendJSONResponse(w, map[string]string{"error": "maximum 100 URLs per group"}, http.StatusBadRequest)
+	if maxBatch := h.cloudMgr.config.MaxBatchURLs; maxBatch > 0 && len(req.URLs) > maxBatch {
+		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("maximum %d URLs per group", maxBatch)}, http.StatusBadRequest)
 		return
 	}
 

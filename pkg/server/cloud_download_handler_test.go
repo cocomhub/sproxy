@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -777,5 +778,75 @@ func TestGenDefaultFilename(t *testing.T) {
 				t.Errorf("genDefaultFilename(%q) = %q, want %q", tt.url, got, tt.expected)
 			}
 		})
+	}
+}
+
+// TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit 验证批量/组上限来自服务端配置
+// MaxBatchURLs（而非硬编码 100）：配置为 2 时 3 个 URL 被 400 拒绝，2 个 URL 正常通过。
+func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		MaxBatchURLs:  2,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.Close() })
+	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
+	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	urlsArrayJSON := func(n int) string {
+		var parts []string
+		for i := range n {
+			parts = append(parts, fmt.Sprintf(`{"url": "https://example.com/f%d.zip"}`, i))
+		}
+		return `[` + strings.Join(parts, ",") + `]`
+	}
+
+	// 批量：3 个 URL 超过配置上限 2 → 400
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", strings.NewReader(`{"urls": `+urlsArrayJSON(3)+`}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("batch 3 URLs: expected 400, got %d (%s)", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "maximum 2 URLs per batch") {
+		t.Fatalf("expected error mentioning limit 2, got: %s", body)
+	}
+
+	// 批量：2 个 URL 未超限 → 200
+	resp2, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", strings.NewReader(`{"urls": `+urlsArrayJSON(2)+`}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("batch 2 URLs: expected 200, got %d", resp2.StatusCode)
+	}
+
+	// 组：3 个 URL 超过配置上限 2 → 400
+	resp3, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", strings.NewReader(`{"name":"g","urls": `+urlsArrayJSON(3)+`}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body3, _ := io.ReadAll(resp3.Body)
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusBadRequest {
+		t.Fatalf("group 3 URLs: expected 400, got %d (%s)", resp3.StatusCode, body3)
+	}
+	if !strings.Contains(string(body3), "maximum 2 URLs per group") {
+		t.Fatalf("expected error mentioning limit 2, got: %s", body3)
 	}
 }

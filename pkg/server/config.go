@@ -113,6 +113,7 @@ type Config struct {
 	CloudTaskTTL              time.Duration `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`
 	CloudFailedTaskTTL        time.Duration `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`
 	CloudMaxConcurrent        int           `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`
+	CloudMaxBatchURLs         int           `yaml:"cloud_max_batch_urls" mapstructure:"cloud_max_batch_urls"`
 	CloudDownloadAllowPrivate bool          `yaml:"cloud_download_allow_private" mapstructure:"cloud_download_allow_private"`
 	CloudDownloadTimeout      time.Duration `yaml:"cloud_download_timeout" mapstructure:"cloud_download_timeout"`
 	CloudDownloadIdleTimeout  time.Duration `yaml:"cloud_download_idle_timeout" mapstructure:"cloud_download_idle_timeout"`
@@ -145,6 +146,7 @@ func Default() *Config {
 		CloudTaskTTL:              24 * time.Hour,
 		CloudFailedTaskTTL:        1 * time.Hour,
 		CloudMaxConcurrent:        3,
+		CloudMaxBatchURLs:         100,
 		CloudDownloadAllowPrivate: false,
 		CloudDownloadTimeout:      30 * time.Minute,
 		CloudDownloadIdleTimeout:  1 * time.Minute,

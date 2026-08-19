@@ -65,6 +65,7 @@ type CloudTaskGroup struct {
 type CloudDownloadConfig struct {
 	SyncThreshold   int64         // 同步模式阈值（字节），默认 20 MiB
 	MaxConcurrent   int           // 最大并发下载数，默认 3
+	MaxBatchURLs    int           // 批量/组下载单次最大 URL 数，默认 100；0 使用默认值
 	TaskTTL         time.Duration // 完成任务保留时间，默认 24h
 	FailedTaskTTL   time.Duration // 失败任务保留时间，默认 1h
 	AllowPrivate    bool          // 允许私有 IP 下载（仅测试用）
@@ -84,6 +85,9 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 	}
 	if cfg.MaxConcurrent < 1 {
 		cfg.MaxConcurrent = 3
+	}
+	if cfg.MaxBatchURLs == 0 {
+		cfg.MaxBatchURLs = 100
 	}
 	if cfg.TaskTTL <= 0 {
 		cfg.TaskTTL = 24 * time.Hour
@@ -204,6 +208,7 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 
 	mgr.logger.Info("cloud download manager initialized",
 		"max_concurrent", cfg.MaxConcurrent,
+		"max_batch_urls", cfg.MaxBatchURLs,
 		"sync_threshold", cfg.SyncThreshold,
 		"task_ttl", cfg.TaskTTL,
 		"failed_task_ttl", cfg.FailedTaskTTL,

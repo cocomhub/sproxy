@@ -290,6 +290,7 @@ type Conn interface {
 | `cors.allowed_origins` | []string | | CORS 配置 |
 | `cloud_download.concurrent` | int | 3 | 云端下载并发数 |
 | `cloud_download.sync_threshold` | size | 100MB | 同步阈值 |
+| `cloud_max_batch_urls` | int | 100 | 批量/组下载单次最大 URL 数；超过服务端返回 400 使创建失败 |
 | `provider.default` | string | | 云端下载提供者 |
 | `provider.timeout` / `.retry` | | | 提供者超时/重试 |
 | `max_storage_bytes` | int64 | 0（不限） | 存储上限 |

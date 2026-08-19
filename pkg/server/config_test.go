@@ -56,6 +56,9 @@ func TestConfig_DefaultsFilled(t *testing.T) {
 	if cfg.CloudRetryDelay != 10*time.Second {
 		t.Fatalf("CloudRetryDelay default want 10s, got %v", cfg.CloudRetryDelay)
 	}
+	if cfg.CloudMaxBatchURLs != 100 {
+		t.Fatalf("CloudMaxBatchURLs default want 100, got %d", cfg.CloudMaxBatchURLs)
+	}
 }
 
 func TestConfig_Validate_FillsZeroes(t *testing.T) {

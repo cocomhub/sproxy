@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -527,19 +528,43 @@ func TestCloudDownload_Batch_EmptyList(t *testing.T) {
 	}
 }
 
-func TestCloudDownload_Batch_ExceedsLimit(t *testing.T) {
+// TestCloudDownload_Batch_ServerRejectsOverLimit 验证：数量上限由服务端强制
+// （cloud_max_batch_urls 配置），客户端发送超过服务端上限时收到 400，创建任务失败。
+func TestCloudDownload_Batch_ServerRejectsOverLimit(t *testing.T) {
 	t.Parallel()
-	ts, _ := cloudTestServer(t)
-	c := NewFileClient(ts.URL)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/cloud/download/batch" && r.Method == http.MethodPost {
+			var req struct {
+				URLs []map[string]string `json:"urls"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+				return
+			}
+			if len(req.URLs) > 5 {
+				http.Error(w, `{"error":"maximum 5 URLs per batch"}`, http.StatusBadRequest)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"tasks": []any{}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mock.Close()
 
-	// 101 个 URL，超过默认 100 上限
-	urls := make([]string, 101)
-	for i := range 101 {
+	c := NewFileClient(mock.URL)
+
+	// 6 个 URL，超过服务端配置上限 5 → 服务端 400 → 客户端返回 error（创建失败）
+	urls := make([]string, 6)
+	for i := range 6 {
 		urls[i] = "https://example.com/file"
 	}
 	_, err := c.CloudDownloadBatch(t.Context(), urls)
 	if err == nil {
-		t.Fatal("expected error for exceeding batch limit")
+		t.Fatal("expected error when server rejects batch over its configured limit")
+	}
+	if !strings.Contains(err.Error(), "maximum 5") {
+		t.Fatalf("expected server error message surfaced, got: %v", err)
 	}
 }
 
