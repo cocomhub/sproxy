@@ -517,9 +517,16 @@ func TestBatchRenameCommand_AllSuccess(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		// 然后 POST /rename
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"success":true,"message":"renamed"}`))
+		// 然后 POST /api/batch/rename：响应必须是 {"results":[...]} 格式，否则客户端
+		// 解析不到 Results，所有操作都会显示"服务端未返回结果"而失败
+		w.Header().Set("Content-Type", "application/json")
+		var req client.BatchRenameRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		results := make([]client.BatchOperationResult, 0, len(req.Operations))
+		for _, op := range req.Operations {
+			results = append(results, client.BatchOperationResult{Filename: op.To, Success: true, Message: "renamed"})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"results": results})
 	}))
 	defer mock.Close()
 
