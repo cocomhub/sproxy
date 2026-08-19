@@ -255,15 +255,27 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 }
 
 // submitTasks 批量提交云端下载任务。
+// 任何条目提交失败（返回空 ID + error）都立即报错，不静默丢弃后继续——否则链式
+// 下载会"完成"但缺少这些文件，用户毫不知情（禁止静默失败）。
 func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
 	tasks, err := c.client.CloudDownloadBatch(ctx, c.URLs)
 	if err != nil {
 		return fmt.Errorf("批量提交云端下载失败: %w", err)
 	}
+	var submitFailed []string
 	for _, t := range tasks {
 		if t.ID != "" {
 			c.TaskIDs = append(c.TaskIDs, t.ID)
+			continue
 		}
+		if t.Error != "" {
+			submitFailed = append(submitFailed, fmt.Sprintf("%s: %s", t.URL, t.Error))
+		} else {
+			submitFailed = append(submitFailed, t.URL)
+		}
+	}
+	if len(submitFailed) > 0 {
+		return fmt.Errorf("%d 个云端下载任务提交失败：%s", len(submitFailed), strings.Join(submitFailed, "; "))
 	}
 	c.Total = len(c.TaskIDs)
 	return nil
@@ -297,6 +309,10 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			}
 		}
 		if len(storageFullURLs) == 0 {
+			// 无存储超限重试：若仍有失败任务，链式操作不得声称成功（禁止静默失败）
+			if c.Failed > 0 {
+				return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed, c.Total)
+			}
 			return nil
 		}
 		if attempt < maxAttempts-1 {

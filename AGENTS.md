@@ -1,8 +1,8 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
-> 上级目录 `../CLAUDE.md` 与 `../AGENTS.md` 为工作区通用指南（中文回复、UTF-8 无 BOM、SPDX 许可证头、最小改动等），全部适用于本子项目；以下内容仅补充 sproxy 专属要点，与上级冲突时以本文件为准。
+> 上级目录 `../AGENTS.md` 与 `../AGENTS.md` 为工作区通用指南（中文回复、UTF-8 无 BOM、SPDX 许可证头、最小改动等），全部适用于本子项目；以下内容仅补充 sproxy 专属要点，与上级冲突时以本文件为准。
 
 ## 依赖策略
 
@@ -440,7 +440,7 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 
 ## 可用 Skills
 
-Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` 文件。
+Skills 位于 `.Codex/skills/` 目录，每个 skill 有独立的 `SKILL.md` 文件。
 
 <details>
 <summary>展开查看 20 个 skills 列表</summary>
@@ -462,7 +462,7 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 - **using-git-worktrees**: 当需要开始与当前工作区隔离的功能开发，或在执行实现计划之前使用——通过原生工具或 git worktree 回退机制确保隔离工作区存在
 - **using-superpowers**: 在开始任何对话时使用——确立如何查找和使用技能，要求在任何响应（包括澄清性问题）之前调用 Skill 工具
 - **verification-before-completion**: 在宣称工作完成、已修复或测试通过之前使用，在提交或创建 PR 之前——必须运行验证命令并确认输出后才能声称成功；始终用证据支撑断言
-- **workflow-runner**: 在 Claude Code / OpenClaw / Cursor 中直接运行 agency-orchestrator YAML 工作流——无需 API key，使用当前会话的 LLM 作为执行引擎。当用户提供 .yaml 工作流文件或要求多角色协作完成任务时触发。
+- **workflow-runner**: 在 Codex / OpenClaw / Cursor 中直接运行 agency-orchestrator YAML 工作流——无需 API key，使用当前会话的 LLM 作为执行引擎。当用户提供 .yaml 工作流文件或要求多角色协作完成任务时触发。
 - **writing-plans**: 当你有规格说明或需求用于多步骤任务时使用，在动手写代码之前
 - **writing-skills**: 当创建新技能、编辑现有技能或在部署前验证技能是否有效时使用
 
@@ -474,62 +474,3 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 
 如果你认为哪怕只有 1% 的可能性某个 skill 适用于你正在做的事情，你必须调用该 skill 检查。
 <!-- superpowers-zh:end -->
-
-## 记录
-
-### 云端下载文件名生成规则（双端共享）
-- 规则唯一实现：Go `pkg/cloudfilename`（`DefaultFromURL` / `Safe`）+ JS `web/static/cloudfilename.js`（UMD，浏览器全局 `cloudfilename` 与 Node 导出双用）。
-- **一致性靠共享语料保证**：`pkg/cloudfilename/testdata/cases.json` 是权威语料，Go 测试 `TestDefaultFromURL_FromFixture` 与 JS 测试 `web/static/cloudfilename.test.js`（`make web-test`）都断言它 → 双端任一改规则导致不一致，测试立即失败。
-- wget 行为：路径以 `/` 结尾 → `index.html`（`/xx/?a=v` → `index.html?a=v`）；raw query 直接附加在文件名后；路径最后一段百分号解码。
-- Go 用 `url.Parse`（path 已解码一次）+ `url.PathUnescape`（二次解码，**不把 `+` 转空格**）；JS 用 `decodeURIComponent(pathname)` 对齐。
-- **Go/JS 语义差异（已对齐并录入语料）**：
-  - 非法百分号编码 → 两端都返回 `"download"`，但 **Go 只校验 path 与 fragment**，query 原样保留（`?x=100%` → `file.txt?x=100%`）。JS 正则必须只查 `rawPath + hash`，**不能查整个 href**（否则 query 非法 `%` 误判 download）。
-  - Go `url.Parse` **不做点段归一化**（`/dir/..` 保留）；WHATWG `new URL().pathname` 会把 `/dir/..` 折叠为 `/`。JS 必须用 `rawPathFromURL(rawUrl)` 从原始字符串提取未归一化路径，不能直接读 `pathname`。
-  - 已知接受的分歧（畸形输入，不入语料）：query 空格被 JS 序列化为 `%20`（Go 保留原始空格）；非法 UTF-8 字节序列（`%FF`）Go 按字节解码、JS decodeURIComponent 抛错返回 download。
-- `Safe` 替换 `\ / ? : < > | " *` 与 NUL 为 `_`；`=` `&` 保留；Trim 首尾空格与点；结果为空返回 `"download"`。
-- 注意：`url.QueryUnescape` 会把 `+` 转空格，**不要**用它做路径段解码（历史上导致与 wget/JS 不一致）。
-
-### If-Range 续传一致性校验
-- `Result.ETag` 字段已加入；`writeFullBody` / `handleRangeResume` / `finalizePartial` 三条完成路径都会把 ETag 写入 `.partial.etag` 伴侣文件。
-- 续传时发送 `If-Range` 头；服务端返回 200 = 不匹配 → 删除 partial+etag 回退全量下载；416 三条分支（finalize / 全量重下 / stale partial 全量重下）。
-- **416 收尾必须有内容身份确认**：`416 + total==existingSize` 只有在**缓存 ETag 与 416 响应 ETag 匹配**时才走 `finalizePartial`；否则回退全量重下。否则"同尺寸但内容已变"的陈旧 partial 会被静默收尾为错误文件（数据损坏）。回归测试：`TestHTTPDownloader_RangeResume_416SameSizeStalePartialRedownloads`。
-- **206 续传必须交叉校验 ETag**：`handleRangeResume` 接收 cachedETag，若响应 ETag 非空且与发送的 If-Range 不同（服务端忽略 If-Range），回退全量下载，防止新旧内容拼接成混合文件。回归测试：`TestHTTPDownloader_IfRange_ServerIgnores_206NewETag`。
-- 教训：`finalizePartial` 曾只返回 ETag 却不 saveETag，被测试捕获——**三条完成路径的 ETag 落盘必须一致**。
-
-### 文件名预览流程（Web UI）
-- 用户输入 URL → 预览界面显示每个 URL 的自动生成文件名（已做 `filepathSafe`，**预览即最终保存名**，避免"预览 a/b 实际保存 a_b"）→ 用户可修改 → 确认后提交。
-- 三个按钮（链式下载/仅提交/创建组）都经过预览确认流程；批量/组下载每个 URL 可独立指定保存文件名。
-- 创建组时前端本地预检文件名冲突（与服务端 `CreateGroup` 规则一致），冲突在发送前拦截，避免 409 往返。
-
-### 暗色模式对比度（WCAG AA）
-- 文字 token：`--text-primary` #e8e8f0、`--text-secondary` #c0c4d0、`--text-muted` #989aad；背景层次 `--bg-page` #12122a / `--bg-container` #1a1a3e / `--bg-hover` #252550。
-- 按钮/提示 token 全部按**白字 ≥4.5:1** 校准：primary `#3a6ea5`、danger `#b84040`、warning `#9c6a10`、share `#2e6f70`、toast-success `#1e8449`/error `#c0392b`/warning `#9c6a10`/info `#2b6cb5`。改暗色 token 时用相对亮度公式逐色验证（勿用原 #4a8cd6 之类浅色配白字）。
-- **陷阱 1**：`style.css` 中 `@media (prefers-color-scheme: dark)` 块用 4 空格缩进、`[data-theme="dark"]` 块用 2 空格缩进 → `Edit` 的 `replace_all` 只能命中一种缩进。改暗色 token 必须**同时更新两处**并 curl 验证（`grep -c` 应为 2）。
-- **陷阱 2**：index.html 内联样式与 app.js 动态 HTML 曾硬编码亮色（`#dir-bar` 背景 `#f0f4ff`、目录行 `#f8f9fa`、tab 激活 `#4a90d9`、`#333/#666/#888/#777/#555/#eee/#ccc`），暗色下直接不可读且被 Lighthouse 标记。新 UI 一律走 CSS 变量，禁止内联亮色。验证：`chrome lighthouse snapshot (dark)` 的 color-contrast 必须 score=1。
-- 三个 tab 切换函数（stats/share/cloud）的 JS 里 `el.style.color` 也要用 `var(--tab-active)/var(--text-primary)/var(--text-secondary)`，不能硬编码。
-
-### 组创建保证无文件冲突
-- `CreateGroup` 在创建子任务前先校验所有 URL 的文件名（`Safe(DefaultFromURL(url))` 或显式 filename）是否唯一，冲突返回 409 并回滚（不泄漏任务与存储预留）。
-- 去重命中（相同 URL 已属其他组）同样拒绝并入组；客户端可指定 `filename` 字段消除冲突。
-- CLI `group` 命令在发送前用共享 `cloudfilename` 本地预校验并打印 URL→文件名计划；`--url-file` 每行 `URL<TAB>FILENAME` 可指定保存文件名。
-
-### 禁止静默失败（原则 + 已修复清单）
-- 任务终态（completed/failed/cancelled）的持久化失败不能只打 Warn：`saveTask`/`saveGroup` 写盘失败意味着重启后状态回滚。已改为**返回 error**，终态调用点（完成/fail/cancel/resume、组状态变更）记 **Error 日志**；进度类 dirty flush 仍容忍。
-- 清理类 I/O（`_ = os.Remove(...)`）可容忍失败，但**状态流转与存储账本（ReservedSize）不能静默不一致**；释放前先归零防二次释放。
-- 网络/超时错误要显式分类（可重试 vs 终态），避免"失败被吞掉后任务永久挂起"或"不可重试错误反复重试"。
-- **已修复的静默失败/可靠性缺陷**（审查确认）：
-  - 去重命中对副本重复启动下载（Critical）：`SubmitAndStart` 现在同步置 `running` 再 `go`，`running` 已置即跳过启动——防止同一 URL 无限并发下载 + 存储账本变负。
-  - 完成路径覆盖取消/删除（Important）：写 `completed` 前复查任务存在且未被取消，取消的任务丢弃已下载文件。
-  - 取消/启动边界竞态（Important）：executeDownload 启动前、取得信号量后复查 `cancelled`；排队取消不再 `failTask`（避免 cancelled→failed 反转）。
-  - 组回滚误删既有任务（Important）：`CreateGroup` 回滚只删本次新建任务，去重吸收的既有任务仅清除组归属。
-  - 失败任务存储账本欠计（Important）：`failTask` 按磁盘实际占用对账，保留 `.partial` 时账本不欠计。
-  - CLI `wait` 静默吞轮询错误（Important）：轮询/初始获取失败改为返回 error，不伪造 failed。
-  - 链式下载部分失败静默成功（Important）：`submitTasks` 提交失败即报错、`waitForTasks` 有失败任务即返回错误，不再无条件打印"完成"。
-
-### 开发环境陷阱：sproxy 双进程
-- `go build -o build/bin/sproxy`（无扩展名）与 `build/bin/sproxy.exe` 是两个可执行体；旧进程会一直占用端口，导致新二进制不生效（curl 拿到旧 CSS/旧行为）。
-- 重启前必须**两个都杀**：`taskkill //F //IM sproxy.exe` 和 `taskkill //F //IM sproxy`；然后确认 `curl /healthz` 无响应再起新进程。
-
-### 字符串转义注意事项
-- Go 源文件中 `"\\"` 在 JSON/JS 编辑时需要双重转义。
-- `tools.edit` 的 `old_string` 必须精确匹配源文件内容。

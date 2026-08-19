@@ -18,6 +18,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/spf13/cobra"
 )
 
@@ -37,6 +38,72 @@ func readURLsFromFile(path string) ([]string, error) {
 		urls = append(urls, line)
 	}
 	return urls, nil
+}
+
+// readEntriesFromFile 从文件中读取云端下载条目（每行一个）。
+// 每行格式为 "URL" 或 "URL<TAB>FILENAME"（Tab 分隔的可选保存文件名，
+// 因为 URL 本身可能包含空格，文件名与 URL 之间必须用 Tab 分隔）。
+// 忽略空行和 # 开头的注释行。
+func readEntriesFromFile(path string) ([]client.CloudDownloadEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var entries []client.CloudDownloadEntry
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) > 2 {
+			return nil, fmt.Errorf("url-file 行格式错误（最多 URL<TAB>FILENAME 两列，多余 Tab 会被忽略）：%q", line)
+		}
+		entry := client.CloudDownloadEntry{URL: strings.TrimSpace(parts[0])}
+		if len(parts) > 1 {
+			entry.Filename = strings.TrimSpace(parts[1])
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// collectCloudEntries 汇总位置参数与 --batch/--url-file 指定的条目为统一条目列表。
+// --url-file 支持每行 "URL" 或 "URL<TAB>FILENAME" 指定保存文件名。
+func collectCloudEntries(args []string, batchFile, urlFile string) ([]client.CloudDownloadEntry, error) {
+	var entries []client.CloudDownloadEntry
+	for _, u := range args {
+		entries = append(entries, client.CloudDownloadEntry{URL: u})
+	}
+	if batchFile != "" {
+		fileURLs, err := readURLsFromFile(batchFile)
+		if err != nil {
+			return nil, fmt.Errorf("读取 batch 文件失败: %w", err)
+		}
+		for _, u := range fileURLs {
+			entries = append(entries, client.CloudDownloadEntry{URL: u})
+		}
+	}
+	if urlFile != "" {
+		fileEntries, err := readEntriesFromFile(urlFile)
+		if err != nil {
+			return nil, fmt.Errorf("读取 url-file 失败: %w", err)
+		}
+		entries = append(entries, fileEntries...)
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("未指定下载 URL，请提供 URL 参数或使用 --batch/--url-file 指定文件")
+	}
+	return entries, nil
+}
+
+// resolvedFilename 返回条目最终保存的文件名（客户端侧预览，与服务端规则一致）：
+// 显式指定则清理，否则按 URL 自动生成后再清理。
+func resolvedFilename(entry client.CloudDownloadEntry) string {
+	if entry.Filename != "" {
+		return cloudfilename.Safe(entry.Filename)
+	}
+	return cloudfilename.Safe(cloudfilename.DefaultFromURL(entry.URL))
 }
 
 // NewCmdCloudDownload 创建云端下载命令的工厂函数。
@@ -117,7 +184,6 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.Flags().Bool("keep-files", false, "下载到本地后不删除云端副本")
 	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
-	cmd.Flags().Bool("no-cache", false, "不使用缓存（重新下载）")
 	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
 
 	// 注册子命令
@@ -143,17 +209,50 @@ func NewCmdCloudGroup(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 		Use:   "group <name> <url> [url...]",
 		Short: "创建云端下载任务组",
 		Long:  `创建一组云端下载任务，文件下载到同一目录，支持组级打包。`,
-		Args:  cobra.MinimumNArgs(2),
+		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
+			if len(args) == 0 {
+				return fmt.Errorf("请提供组名称: group <name> <url> [url...]")
+			}
 			name := args[0]
-			urls := args[1:]
-			ios.WriteOutLine("创建下载组 %q (%d 个 URL)...", name, len(urls))
-			group, err := svc.CloudCreateGroup(cmd.Context(), name, urls)
+			batchFile, _ := cmd.Flags().GetString("batch")
+			urlFile, _ := cmd.Flags().GetString("url-file")
+			entries, err := collectCloudEntries(args[1:], batchFile, urlFile)
+			if err != nil {
+				return err
+			}
+
+			// 客户端预校验：组内保存文件名必须唯一（与服务端 CreateGroup 规则一致），
+			// 且同一 URL 不允许出现两次（服务端 CreateTask 会去重并返回 409）。
+			// 冲突在发送前拦截，避免服务端 409 往返；同时展示每个 URL 的最终保存文件名。
+			ios.WriteOutLine("创建下载组 %q (%d 个条目):", name, len(entries))
+			filenameSeen := make(map[string]string, len(entries))
+			urlSeen := make(map[string]bool, len(entries))
+			var conflicts []string
+			for _, e := range entries {
+				fn := resolvedFilename(e)
+				if prev, ok := filenameSeen[fn]; ok {
+					conflicts = append(conflicts, fmt.Sprintf("文件名 %q (URL: %s 与 %s)", fn, prev, e.URL))
+				} else {
+					filenameSeen[fn] = e.URL
+				}
+				if urlSeen[e.URL] {
+					conflicts = append(conflicts, fmt.Sprintf("重复 URL %s（可指定不同保存文件名也无法消除）", e.URL))
+				}
+				urlSeen[e.URL] = true
+				ios.WriteOutLine("  %s -> %s", e.URL, fn)
+			}
+			if len(conflicts) > 0 {
+				return fmt.Errorf("组内条目冲突，无法创建：%s；请在 --url-file 中为冲突条目指定不同的保存文件名（URL<TAB>FILENAME）",
+					strings.Join(conflicts, ", "))
+			}
+
+			group, err := svc.CloudCreateGroupEntries(cmd.Context(), name, entries)
 			if err != nil {
 				return fmt.Errorf("创建下载组失败: %w", err)
 			}
@@ -163,6 +262,8 @@ func NewCmdCloudGroup(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 			return nil
 		},
 	}
+	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
+	cmd.Flags().String("url-file", "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
 	return cmd
 }
 
@@ -211,7 +312,9 @@ func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, c
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			groupID := args[0]
-			archiveName := "group-archive.tar.gz"
+			// 未指定归档名时不传（空串），由服务端生成唯一名 group-<id>-<unix>.tar.gz，
+			// 避免客户端静态名导致多次归档互相覆盖
+			archiveName := ""
 			if len(args) > 1 {
 				archiveName = args[1]
 			}
@@ -290,22 +393,14 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			}
 
 			batchFile, _ := cmd.Flags().GetString("batch")
-
-			urls := args
-			if batchFile != "" {
-				var fileURLs []string
-				fileURLs, err = readURLsFromFile(batchFile)
-				if err != nil {
-					return fmt.Errorf("读取 batch 文件失败: %w", err)
-				}
-				urls = append(urls, fileURLs...)
-			}
-			if len(urls) == 0 {
-				return fmt.Errorf("未指定下载 URL，请提供 URL 参数或使用 --batch 指定文件")
+			urlFile, _ := cmd.Flags().GetString("url-file")
+			entries, err := collectCloudEntries(args, batchFile, urlFile)
+			if err != nil {
+				return err
 			}
 
 			ios.WriteOutLine("创建云端下载任务...")
-			tasks, err := svc.CloudDownloadBatch(cmd.Context(), urls)
+			tasks, err := svc.CloudDownloadBatchEntries(cmd.Context(), entries)
 			if err != nil {
 				return fmt.Errorf("创建云端下载任务失败: %w", err)
 			}
@@ -320,11 +415,23 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 				}
 				ios.WriteOutLine(statusLine)
 			}
+
+			// 全部条目提交失败时返回非零，避免脚本把"全部失败"当成成功
+			failedCount := 0
+			for _, t := range tasks {
+				if t.Status == "failed" {
+					failedCount++
+				}
+			}
+			if len(tasks) > 0 && failedCount == len(tasks) {
+				return fmt.Errorf("全部 %d 个云端下载任务创建失败", failedCount)
+			}
 			return nil
 		},
 	}
 
 	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
+	cmd.Flags().String("url-file", "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
 	return cmd
 }
 
@@ -351,9 +458,8 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 			for i, id := range args {
 				task, getErr := svc.GetCloudTask(cmd.Context(), id)
 				if getErr != nil {
-					ios.WriteErrLine("获取任务 %s 信息失败: %v", id, getErr)
-					tasks[i] = client.CloudTask{ID: id, Status: "failed"}
-					continue
+					// 初始获取失败说明无法确认任务真实状态，不能伪造 failed 假装完成
+					return fmt.Errorf("获取任务 %s 信息失败: %w", id, getErr)
 				}
 				tasks[i] = *task
 			}
@@ -397,9 +503,8 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 					for id := range pending {
 						task, pollErr := svc.GetCloudTask(pollCtx, id)
 						if pollErr != nil {
-							ios.WriteOutLine("  轮询任务 %s 失败: %v", id, pollErr)
-							delete(pending, id)
-							continue
+							// 轮询失败无法确认任务完成，不能静默丢弃后返回成功
+							return fmt.Errorf("轮询任务 %s 状态失败: %w", id, pollErr)
 						}
 						results[id] = *task
 						switch task.Status {
@@ -498,7 +603,6 @@ func NewCmdCloudFetch(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 	cmd.Flags().Bool("keep-files", false, "下载到本地后不删除云端副本")
 	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
-	cmd.Flags().Bool("no-cache", false, "不使用缓存（重新下载）")
 	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
 
 	return cmd

@@ -753,3 +753,29 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+func TestGenDefaultFilename(t *testing.T) {
+	tests := []struct {
+		url      string
+		expected string
+	}{
+		{"https://example.com/file.zip", "file.zip"},
+		{"https://example.com/path/to/file.txt", "file.txt"},
+		{"https://example.com/", "index.html"},
+		{"https://example.com/path/", "index.html"},
+		{"https://example.com/xx/?a=v", "index.html?a=v"},
+		{"https://example.com/file.txt?query=val&other=2", "file.txt?query=val&other=2"},
+		{"https://example.com/file%20name.txt", "file name.txt"},
+		{"", "download"},
+		{"not-a-url", "download"},
+		{"https://example.com/path/file.html#fragment", "file.html"}, // fragment should be ignored
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			got := genDefaultFilename(tt.url)
+			if got != tt.expected {
+				t.Errorf("genDefaultFilename(%q) = %q, want %q", tt.url, got, tt.expected)
+			}
+		})
+	}
+}

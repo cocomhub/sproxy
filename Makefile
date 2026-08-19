@@ -102,6 +102,12 @@ test-ci test-cover: prepare
 notest:
 	@scripts/check-test-files.sh
 
+.PHONY: web-test
+web-test:
+	@node --check web/static/app.js
+	@node --check web/static/cloudfilename.js
+	node --test web/static/cloudfilename.test.js
+
 .PHONY: cover-check
 cover-check: test-cover
 	@total=$$(go tool cover -func=$(BUILD_DIR)/cover.out | tail -1 | awk '{print $$NF}' | sed 's/%//'); \
@@ -255,6 +261,7 @@ help:
 	@echo "  test-ci         Run tests with coverage (alias: test-cover)"
 	@echo "  test-cover      Run tests with coverage"
 	@echo "  cover-check     Check coverage meets threshold"
+	@echo "  web-test        Run Web UI JS unit tests (node --test)"
 	@echo "  notest          Verify all packages have test files"
 	@echo "  vet             Run go vet"
 	@echo "  lint            Run golangci-lint"

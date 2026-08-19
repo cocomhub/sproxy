@@ -38,6 +38,9 @@ const (
 	TaskStatusCancelled   = "cancelled"
 )
 
+// maxBatchURLsLimit 是批量/组下载的 URL 数量上限，与服务端限制一致。
+const maxBatchURLsLimit = 100
+
 // CloudDownloadOption 配置云端下载行为。
 type CloudDownloadOption func(*cloudDownloadOptions)
 
@@ -54,10 +57,14 @@ func WithCloudDownloadFilename(name string) CloudDownloadOption {
 }
 
 // WithCloudDownloadMaxBatchURLs 设置批量下载的最大 URL 数量上限。
-// 默认 100，服务端也限制 100 URL。设置为 0 使用默认值。
+// 默认 100，服务端也限制 100 URL；传入值超过 100 会被钳制到 100，
+// 避免客户端放行后服务端 400（"maximum 100 URLs per batch"）。设置为 0 使用默认值。
 func WithCloudDownloadMaxBatchURLs(n int) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		if n > 0 {
+			if n > maxBatchURLsLimit {
+				n = maxBatchURLsLimit
+			}
 			o.maxBatchURLs = n
 		}
 	}
@@ -108,10 +115,28 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	return &task, nil
 }
 
+// CloudDownloadEntry 批量/组下载中的单个 URL 条目，可携带自定义保存文件名。
+// Filename 为空时服务端按 URL 自动生成（wget 行为，见 pkg/cloudfilename）。
+type CloudDownloadEntry struct {
+	URL      string `json:"url"`
+	Filename string `json:"filename,omitempty"`
+}
+
 // CloudDownloadBatch 批量创建云端下载任务（最多 100 URL）。
 // 可以用 WithCloudDownloadMaxBatchURLs 调整上限，但不能超过服务端限制。
+// 如需为每个 URL 指定保存文件名，使用 CloudDownloadBatchEntries。
 func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts ...CloudDownloadOption) ([]CloudTask, error) {
-	if len(urls) == 0 {
+	entries := make([]CloudDownloadEntry, len(urls))
+	for i, u := range urls {
+		entries[i] = CloudDownloadEntry{URL: u}
+	}
+	return c.CloudDownloadBatchEntries(ctx, entries, opts...)
+}
+
+// CloudDownloadBatchEntries 批量创建云端下载任务，每个条目可单独指定保存文件名。
+// Filename 为空时由服务端按 URL 自动生成。
+func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []CloudDownloadEntry, opts ...CloudDownloadOption) ([]CloudTask, error) {
+	if len(entries) == 0 {
 		return nil, fmt.Errorf("批量云端下载: URL 列表不能为空")
 	}
 	cfg := &cloudDownloadOptions{}
@@ -122,25 +147,28 @@ func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts
 	if cfg.maxBatchURLs > 0 {
 		maxBatch = cfg.maxBatchURLs
 	}
-	if len(urls) > maxBatch {
-		return nil, fmt.Errorf("批量云端下载: 最多 %d 个 URL，收到 %d 个", maxBatch, len(urls))
+	if len(entries) > maxBatch {
+		return nil, fmt.Errorf("批量云端下载: 最多 %d 个 URL，收到 %d 个", maxBatch, len(entries))
 	}
 
-	// 校验每个 URL 的格式
-	for _, urlStr := range urls {
-		u, err := url.Parse(urlStr)
+	// 校验每个 URL 的格式（scheme + host，与服务端 validateCloudDownloadURL 对齐，
+	// 缺 host 的 URL 如 http:///path 在发送前拦截，避免服务端 400 往返）
+	for _, e := range entries {
+		if e.URL == "" {
+			return nil, fmt.Errorf("批量云端下载: URL 不能为空")
+		}
+		u, err := url.Parse(e.URL)
 		if err != nil {
-			return nil, fmt.Errorf("批量云端下载: 无效 URL %q: %w", urlStr, err)
+			return nil, fmt.Errorf("批量云端下载: 无效 URL %q: %w", e.URL, err)
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
 			return nil, fmt.Errorf("批量云端下载: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
 		}
+		if u.Host == "" {
+			return nil, fmt.Errorf("批量云端下载: 无效 URL %q (缺少 host)", e.URL)
+		}
 	}
 
-	entries := make([]map[string]string, len(urls))
-	for i, u := range urls {
-		entries[i] = map[string]string{"url": u}
-	}
 	body := map[string]any{"urls": entries}
 
 	var result struct {
@@ -259,13 +287,35 @@ type CloudGroupDetail struct {
 }
 
 // CloudCreateGroup 创建云端下载任务组。
+// 如需为每个 URL 指定保存文件名，使用 CloudCreateGroupEntries。
 func (c *FileClient) CloudCreateGroup(ctx context.Context, name string, urls []string) (*CloudGroup, error) {
-	if len(urls) == 0 {
+	entries := make([]CloudDownloadEntry, len(urls))
+	for i, u := range urls {
+		entries[i] = CloudDownloadEntry{URL: u}
+	}
+	return c.CloudCreateGroupEntries(ctx, name, entries)
+}
+
+// CloudCreateGroupEntries 创建云端下载任务组，每个条目可单独指定保存文件名。
+// Filename 为空时由服务端按 URL 自动生成；服务端在创建前校验文件名冲突（重复返回 409）。
+func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, entries []CloudDownloadEntry) (*CloudGroup, error) {
+	if len(entries) == 0 {
 		return nil, fmt.Errorf("创建下载组: URL 列表不能为空")
 	}
-	entries := make([]map[string]string, len(urls))
-	for i, u := range urls {
-		entries[i] = map[string]string{"url": u}
+	for _, e := range entries {
+		if e.URL == "" {
+			return nil, fmt.Errorf("创建下载组: URL 不能为空")
+		}
+		u, err := url.Parse(e.URL)
+		if err != nil {
+			return nil, fmt.Errorf("创建下载组: 无效 URL %q: %w", e.URL, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return nil, fmt.Errorf("创建下载组: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
+		}
+		if u.Host == "" {
+			return nil, fmt.Errorf("创建下载组: 无效 URL %q (缺少 host)", e.URL)
+		}
 	}
 	body := map[string]any{
 		"name": name,

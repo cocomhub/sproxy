@@ -134,7 +134,7 @@ async function loadMore() {
         const remaining = (data.total || 0) - _currentOffset;
         container.innerHTML = '<button class="btn btn-primary">加载更多 (' + remaining + ')</button>';
       } else {
-        container.innerHTML = '<div style="text-align:center;padding:12px;color:#999;">已加载全部 ' + data.total + ' 个文件</div>';
+        container.innerHTML = '<div style="text-align:center;padding:12px;color:var(--text-muted);">已加载全部 ' + data.total + ' 个文件</div>';
       }
     }
   } catch { /* 静默处理 */ }
@@ -152,7 +152,7 @@ function buildFileTableHtml(files, subdir) {
 
 function buildFileRowHtml(fi, fullName) {
   if (fi.is_dir) {
-    return '<tr style="cursor:pointer;background:#f8f9fa;" class="dir-row" data-subdir="' + escHtml(fullName) + '"><td class="check-col"></td><td><strong>' + escHtml(fi.name) + '/</strong></td>' +
+    return '<tr style="cursor:pointer;background:var(--bg-dir);" class="dir-row" data-subdir="' + escHtml(fullName) + '"><td class="check-col"></td><td><strong>' + escHtml(fi.name) + '/</strong></td>' +
       '<td>-</td><td>-</td><td>' +
       '<button class="btn btn-sm btn-secondary dir-enter-btn" data-subdir="' + escHtml(fullName) + '">进入</button>' +
       '<button class="btn btn-sm btn-primary dir-archive-btn" data-subdir="' + escHtml(fullName) + '">打包下载</button>' +
@@ -237,7 +237,7 @@ function updateBreadcrumb() {
   let accumulated = '';
   for (const p of parts) {
     accumulated = accumulated ? accumulated + '/' + p : p;
-    html += ' <span style="color:#999">›</span> <a href="#" data-subdir="' + escHtml(accumulated) + '">' + escHtml(p) + '</a>';
+    html += ' <span style="color:var(--text-muted)">›</span> <a href="#" data-subdir="' + escHtml(accumulated) + '">' + escHtml(p) + '</a>';
   }
   el.innerHTML = html;
 }
@@ -526,7 +526,7 @@ async function downloadDirArchive(dirPath) {
 async function showStats() {
   document.getElementById('stats-modal').style.display = 'flex';
   switchStatsTab('stats');
-  document.getElementById('stats-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
+  document.getElementById('stats-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
     var data;
     if (tunnelHexKey) {
@@ -553,15 +553,15 @@ function switchStatsTab(tab) {
   document.getElementById('config-panel').style.display = tab === 'config' ? 'block' : 'none';
   document.getElementById('hub-panel').style.display = tab === 'hub' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
-    el.style.borderBottomColor = el.id === tab + '-tab' ? '#4a90d9' : 'transparent';
-    el.style.color = el.id === tab + '-tab' ? '#333' : '#666';
+    el.style.borderBottomColor = el.id === tab + '-tab' ? 'var(--tab-active)' : 'transparent';
+    el.style.color = el.id === tab + '-tab' ? 'var(--text-primary)' : 'var(--text-secondary)';
   });
   if (tab === 'config') showConfig();
   if (tab === 'hub') showHub();
 }
 
 async function showConfig() {
-  document.getElementById('config-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
+  document.getElementById('config-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
     var data;
     if (tunnelHexKey) {
@@ -578,7 +578,7 @@ async function showConfig() {
 
 // --- Hub 管理 ---
 async function showHub() {
-  document.getElementById('hub-panel').innerHTML = '<div style="text-align:center;padding:20px;color:#999;">加载中...</div>';
+  document.getElementById('hub-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
     var nodes, stats;
     if (tunnelHexKey) {
@@ -610,7 +610,7 @@ function hubTableHtml(nodes, stats) {
   var html = '';
   // 统计概要
   if (stats) {
-    html += '<div style="margin-bottom:12px;padding:8px 12px;background:#f0f8ff;border-radius:4px;font-size:13px;">';
+    html += '<div style="margin-bottom:12px;padding:8px 12px;background:var(--stats-summary);border-radius:4px;font-size:13px;">';
     html += '已连接节点: <strong>' + (stats.nodes_connected ?? 0) + '</strong></div>';
   }
 
@@ -620,21 +620,21 @@ function hubTableHtml(nodes, stats) {
   }
 
   html += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
-  html += '<thead><tr style="background:#f5f5f5;">';
-  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">节点 ID</th>';
-  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">地址</th>';
-  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">连接时间</th>';
-  html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid #ddd;">操作</th>';
+  html += '<thead><tr style="background:var(--bg-hover);">';
+  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">节点 ID</th>';
+  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">地址</th>';
+  html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">连接时间</th>';
+  html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid var(--border-color);">操作</th>';
   html += '</tr></thead><tbody>';
 
   for (var i = 0; i < nodes.length; i++) {
     var n = nodes[i];
     var connected = n.connected ? new Date(n.connected).toLocaleString() : '-';
     html += '<tr>';
-    html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px;">' + escHtml(n.id) + '</td>';
-    html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + escHtml(n.addr || '-') + '</td>';
-    html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px;">' + connected + '</td>';
-    html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:center;">';
+    html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-family:monospace;font-size:12px;">' + escHtml(n.id) + '</td>';
+    html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(n.addr || '-') + '</td>';
+    html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;">' + connected + '</td>';
+    html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">';
     html += '<button class="btn btn-danger btn-sm hub-remove-btn" data-node-id="' + escHtml(n.id) + '">移除</button>';
     html += '</td></tr>';
   }
@@ -662,10 +662,10 @@ async function removeHubNode(nodeId) {
 
 function configTableHtml(cfg) {
   var html = '<table style="width:100%;border-collapse:collapse;font-size:14px;">';
-  html += '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555">运行时配置</th></tr>';
+  html += '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid var(--border-color);color:var(--text-secondary)">运行时配置</th></tr>';
 
   function row(label, value) {
-    return '<tr><td style="padding:5px 0;color:#777">' + label + '</td><td style="text-align:right">' + (value ?? '-') + '</td></tr>';
+    return '<tr><td style="padding:5px 0;color:var(--text-secondary)">' + label + '</td><td style="text-align:right">' + (value ?? '-') + '</td></tr>';
   }
 
   html += row('日志级别', cfg.log_level);
@@ -685,13 +685,13 @@ function configTableHtml(cfg) {
   html += '</table>';
 
   // 配置编辑区
-  html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid #eee;">';
-  html += '<div style="font-size:13px;font-weight:600;color:#555;margin-bottom:8px;">快速编辑</div>';
+  html += '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border-color);">';
+  html += '<div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;">快速编辑</div>';
 
   // 日志级别
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
-  html += '<span style="font-size:13px;color:#777;">日志级别:</span>';
-  html += '<select id="cfg-log-level" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
+  html += '<span style="font-size:13px;color:var(--text-secondary);">日志级别:</span>';
+  html += '<select id="cfg-log-level" style="padding:4px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;">';
   var levels = ['debug','info','warn','error'];
   for (var i = 0; i < levels.length; i++) {
     html += '<option value="' + levels[i] + '"' + (cfg.log_level === levels[i] ? ' selected' : '') + '>' + levels[i] + '</option>';
@@ -701,8 +701,8 @@ function configTableHtml(cfg) {
 
   // 日志格式
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
-  html += '<span style="font-size:13px;color:#777;">日志格式:</span>';
-  html += '<select id="cfg-log-format" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
+  html += '<span style="font-size:13px;color:var(--text-secondary);">日志格式:</span>';
+  html += '<select id="cfg-log-format" style="padding:4px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;">';
   html += '<option value="text"' + (cfg.log_format === 'text' ? ' selected' : '') + '>text</option>';
   html += '<option value="json"' + (cfg.log_format === 'json' ? ' selected' : '') + '>json</option>';
   html += '</select>';
@@ -710,17 +710,17 @@ function configTableHtml(cfg) {
 
   // 速率限制
   html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">';
-  html += '<span style="font-size:13px;color:#777;">速率限制:</span>';
-  html += '<input type="number" id="cfg-rate-limit" value="' + (cfg.rate_limit_requests ?? 10) + '" style="width:60px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
-  html += '<span style="font-size:12px;color:#999;">req / </span>';
-  html += '<input type="text" id="cfg-rate-window" value="' + (cfg.rate_limit_window || '1s') + '" style="width:60px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;">';
+  html += '<span style="font-size:13px;color:var(--text-secondary);">速率限制:</span>';
+  html += '<input type="number" id="cfg-rate-limit" value="' + (cfg.rate_limit_requests ?? 10) + '" style="width:60px;padding:4px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;">';
+  html += '<span style="font-size:12px;color:var(--text-muted);">req / </span>';
+  html += '<input type="text" id="cfg-rate-window" value="' + (cfg.rate_limit_window || '1s') + '" style="width:60px;padding:4px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;">';
   html += '<button class="btn btn-sm btn-primary" id="cfg-update-rate-limit">更新</button></div>';
 
   // 存储限制
   html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
-  html += '<span style="font-size:13px;color:#777;">存储上限:</span>';
-  html += '<input type="number" id="cfg-max-storage" value="' + (cfg.max_storage_bytes ?? 0) + '" style="width:140px;padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;" min="0">';
-  html += '<span style="font-size:12px;color:#999;">字节（0=不限）</span>';
+  html += '<span style="font-size:13px;color:var(--text-secondary);">存储上限:</span>';
+  html += '<input type="number" id="cfg-max-storage" value="' + (cfg.max_storage_bytes ?? 0) + '" style="width:140px;padding:4px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;" min="0">';
+  html += '<span style="font-size:12px;color:var(--text-muted);">字节（0=不限）</span>';
   html += '<button class="btn btn-sm btn-primary" id="cfg-update-storage">更新</button></div>';
 
   html += '</div>';
@@ -779,22 +779,22 @@ function formatBytes(n) {
 
 function statsTableHtml(du, rc, s) {
   return '<table style="width:100%;border-collapse:collapse;font-size:14px;">' +
-    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555">磁盘使用</th></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">目录</td><td style="text-align:right">' + (du.uploads_dir || '-') + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">文件数</td><td style="text-align:right">' + (du.total_files ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">总大小</td><td style="text-align:right">' + formatBytes(du.total_size) + '</td></tr>' +
-    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555;padding-top:14px">请求统计（自启动）</th></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">总请求数</td><td style="text-align:right">' + (rc.total ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">2xx</td><td style="text-align:right">' + (rc['2xx'] ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">4xx</td><td style="text-align:right">' + (rc['4xx'] ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">5xx</td><td style="text-align:right">' + (rc['5xx'] ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">活跃连接</td><td style="text-align:right">' + (s.active_connections ?? 0) + '</td></tr>' +
-    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid #eee;color:#555;padding-top:14px">传输统计（自启动）</th></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">上传文件数</td><td style="text-align:right">' + (s.files_uploaded ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">上传字节数</td><td style="text-align:right">' + formatBytes(s.bytes_uploaded) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">下载文件数</td><td style="text-align:right">' + (s.files_downloaded ?? 0) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">下载字节数</td><td style="text-align:right">' + formatBytes(s.bytes_downloaded) + '</td></tr>' +
-    '<tr><td style="padding:5px 0;color:#777">删除文件数</td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
+    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid var(--border-color);color:var(--text-secondary)">磁盘使用</th></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">目录</td><td style="text-align:right">' + (du.uploads_dir || '-') + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">文件数</td><td style="text-align:right">' + (du.total_files ?? 0) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">总大小</td><td style="text-align:right">' + formatBytes(du.total_size) + '</td></tr>' +
+    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid var(--border-color);color:var(--text-secondary);padding-top:14px">请求统计（自启动）</th></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">总请求数</td><td style="text-align:right">' + (rc.total ?? 0) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">2xx</td><td style="text-align:right">' + (rc['2xx'] ?? 0) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">4xx</td><td style="text-align:right">' + (rc['4xx'] ?? 0) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">5xx</td><td style="text-align:right">' + (rc['5xx'] ?? 0) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">活跃连接</td><td style="text-align:right">' + (s.active_connections ?? 0) + '</td></tr>' +
+    '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid var(--border-color);color:var(--text-secondary);padding-top:14px">传输统计（自启动）</th></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">上传文件数</td><td style="text-align:right">' + (s.files_uploaded ?? 0) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">上传字节数</td><td style="text-align:right">' + formatBytes(s.bytes_uploaded) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">下载文件数</td><td style="text-align:right">' + (s.files_downloaded ?? 0) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">下载字节数</td><td style="text-align:right">' + formatBytes(s.bytes_downloaded) + '</td></tr>' +
+    '<tr><td style="padding:5px 0;color:var(--text-secondary)">删除文件数</td><td style="text-align:right">' + (s.files_deleted ?? 0) + '</td></tr></table>';
 }
 
 // --- 暗色模式 ---
@@ -950,8 +950,8 @@ function switchShareTab(tab) {
   document.getElementById('share-create-panel').style.display = tab === 'create' ? 'block' : 'none';
   document.getElementById('share-list-panel').style.display = tab === 'list' ? 'block' : 'none';
   document.querySelectorAll('.share-tab').forEach(function(el) {
-    el.style.borderBottomColor = el.id === 'share-' + tab + '-tab' ? '#4a90d9' : 'transparent';
-    el.style.color = el.id === 'share-' + tab + '-tab' ? '#333' : '#666';
+    el.style.borderBottomColor = el.id === 'share-' + tab + '-tab' ? 'var(--tab-active)' : 'transparent';
+    el.style.color = el.id === 'share-' + tab + '-tab' ? 'var(--text-primary)' : 'var(--text-secondary)';
   });
 }
 
@@ -1012,24 +1012,24 @@ async function refreshShareList() {
     }
 
     var html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
-    html += '<thead><tr style="background:#f5f5f5;"><th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">文件名</th>';
-    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">状态</th>';
-    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">下载次数</th>';
-    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid #ddd;">过期时间</th>';
-    html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid #ddd;">操作</th></tr></thead><tbody>';
+    html += '<thead><tr style="background:var(--bg-hover);"><th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">文件名</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">状态</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">下载次数</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">过期时间</th>';
+    html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid var(--border-color);">操作</th></tr></thead><tbody>';
 
     for (var i = 0; i < shares.length; i++) {
       var s = shares[i];
       var statusText = s.expired ? '已过期' : (s.one_time ? '一次性' : '活跃');
-      var statusColor = s.expired ? '#999' : (s.one_time ? '#e67e22' : '#27ae60');
+      var statusColor = s.expired ? 'var(--text-muted)' : (s.one_time ? '#e67e22' : '#27ae60');
       var downloads = s.max_downloads > 0 ? s.downloads + '/' + s.max_downloads : s.downloads + '/∞';
       var expiresLabel = s.expired ? '-' : (s.expires_at ? new Date(s.expires_at).toLocaleString() : '-');
 
-      html += '<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + escHtml(s.filename) + '">' + escHtml(s.filename) + '</td>';
-      html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;color:' + statusColor + ';">' + statusText + '</td>';
-      html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;">' + downloads + '</td>';
-      html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:12px;">' + expiresLabel + '</td>';
-      html += '<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:center;">';
+      html += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + escHtml(s.filename) + '">' + escHtml(s.filename) + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);color:' + statusColor + ';">' + statusText + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + downloads + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;">' + expiresLabel + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">';
       if (!s.expired) {
         html += '<button class="btn btn-danger btn-sm share-revoke-btn" data-token="' + escHtml(s.token) + '">撤销</button>';
       }
@@ -1076,6 +1076,114 @@ function copyShareLink(token) {
 
 // --- 云端下载 ---
 let _cloudTasks = [];
+let _cloudFilenames = []; // 保存每个 URL 对应的预览文件名，用于提交时发送
+
+// genDefaultFilename 从 URL 推断默认文件名，委托给共享模块 cloudfilename.js。
+// 与 Go 端 pkg/cloudfilename 使用同一套规则（wget 行为），由共享语料测试保证双端一致。
+function genDefaultFilename(rawUrl) {
+  return cloudfilename.genDefaultFilename(rawUrl);
+}
+
+// filepathSafe 清理文件名中的路径分隔符，委托给共享模块，与 Go 端 pkg/cloudfilename.Safe 一致。
+function filepathSafe(name) {
+  return cloudfilename.filepathSafe(name);
+}
+
+// showCloudDownloadPreview 在提交前展示每个 URL 的默认文件名，供用户确认或修改。
+async function showCloudDownloadPreview(action) {
+  const input = document.getElementById('cloud-url');
+  const text = input.value.trim();
+  if (!text) { showToast('请输入下载链接', 'warning'); return; }
+
+  const lines = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+  if (lines.length === 0) { showToast('请输入下载链接', 'warning'); return; }
+
+  if (action === 'group' && lines.length < 2) {
+    showToast('创建组至少需要 2 个 URL（单 URL 请用"仅提交"）', 'warning');
+    return;
+  }
+
+  // 生成预览信息
+  var previewHtml = '<div style="margin-bottom:12px;font-size:13px;color:var(--text-secondary);">共 ' + lines.length + ' 个链接，请确认或修改保存文件名：</div>';
+  previewHtml += '<div style="max-height:300px;overflow-y:auto;margin-bottom:12px;">';
+
+  for (var i = 0; i < lines.length; i++) {
+    // 与服务端保存规则一致：展示清理后的最终文件名，避免"预览 a/b 实际保存 a_b"的落差
+    var defaultName = filepathSafe(genDefaultFilename(lines[i]));
+    previewHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:4px 0;border-bottom:1px solid var(--border-color);">';
+    previewHtml += '<span style="flex-shrink:0;font-size:12px;color:var(--text-muted);min-width:28px;">' + (i + 1) + '.</span>';
+    previewHtml += '<input type="text" class="cloud-preview-filename" data-index="' + i + '" value="' + escHtml(defaultName) + '" style="flex:1;padding:4px 6px;border:1px solid var(--border-input);border-radius:3px;font-size:13px;font-family:monospace;">';
+    previewHtml += '<span style="font-size:11px;color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(lines[i]) + '">' + escHtml(lines[i]) + '</span>';
+    previewHtml += '</div>';
+  }
+  previewHtml += '</div>';
+
+  previewHtml += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
+  previewHtml += '<button type="button" id="cloud-preview-cancel-btn" class="btn btn-secondary">取消</button>';
+  previewHtml += '<button type="button" id="cloud-preview-confirm-btn" class="btn btn-primary">确认提交</button>';
+  previewHtml += '</div>';
+
+  // 保存 action，用于确认后执行
+  window._cloudPreviewAction = action;
+
+  // 替换 cloud-url 区域为预览界面
+  var urlRow = input.parentElement;
+  urlRow.innerHTML = previewHtml;
+
+  // 绑定按钮事件
+  document.getElementById('cloud-preview-cancel-btn').addEventListener('click', function() {
+    // 恢复输入框
+    urlRow.innerHTML = '<textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>' +
+      '<button type="button" id="cloud-chain-btn" class="btn btn-primary" style="white-space:nowrap;">链式下载</button>' +
+      '<button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>' +
+      '<button type="button" id="cloud-create-group-btn" class="btn btn-secondary" style="white-space:nowrap;">创建组</button>';
+    document.getElementById('cloud-url').value = text;
+    // 重新绑定事件
+    document.getElementById('cloud-chain-btn').addEventListener('click', chainDownloadCloud);
+    document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
+    document.getElementById('cloud-create-group-btn').addEventListener('click', createCloudGroup);
+  });
+
+  document.getElementById('cloud-preview-confirm-btn').addEventListener('click', function() {
+    // 收集用户指定的文件名
+    var filenameInputs = document.querySelectorAll('.cloud-preview-filename');
+    var filenames = [];
+    for (var j = 0; j < filenameInputs.length; j++) {
+      // 与服务端一致做 filepathSafe：用户输入的非法字符也会被清理，预览即最终保存名
+      filenames.push(filepathSafe(filenameInputs[j].value.trim() || genDefaultFilename(lines[j])));
+    }
+    window._cloudPreviewFilenames = filenames;
+    window._cloudPreviewUrls = lines;
+
+    // 执行对应操作
+    var act = window._cloudPreviewAction;
+    if (act === 'group') {
+      // 客户端预校验：组内保存文件名必须唯一（服务端 CreateGroup 也会校验并返回 409），
+      // 这里在发送前拦截，避免 409 往返，直接提示用户修改冲突条目。
+      // 用 Map 判重，避免普通对象把 constructor/toString 等原型属性误判为冲突。
+      var seenNames = new Map();
+      var conflicts = [];
+      for (var k = 0; k < filenames.length; k++) {
+        if (seenNames.has(filenames[k])) {
+          conflicts.push(filenames[k]);
+        } else {
+          seenNames.set(filenames[k], k);
+        }
+      }
+      if (conflicts.length > 0) {
+        showToast('组内文件名冲突: ' + conflicts.join(', ') + '，请修改保存文件名', 'error');
+        return;
+      }
+    }
+    if (act === 'submit') {
+      doSubmitCloudTasks(lines, filenames);
+    } else if (act === 'group') {
+      doCreateCloudGroup(lines, filenames);
+    } else if (act === 'chain') {
+      doChainDownloadCloud(lines, filenames);
+    }
+  });
+}
 let _cloudGroups = [];
 let _cloudPollTimer = null;
 
@@ -1093,15 +1201,24 @@ function hideCloudDownload() {
   stopCloudPolling();
 }
 
+let _cloudActiveTab = 'tasks';
+
 function switchCloudTab(tab) {
+  _cloudActiveTab = tab;
   document.getElementById('cloud-tasks-body').style.display = tab === 'tasks' ? 'block' : 'none';
   document.getElementById('cloud-groups-body').style.display = tab === 'groups' ? 'block' : 'none';
   document.querySelectorAll('.cloud-tab').forEach(function(el) {
-    el.style.borderBottomColor = el.id === 'cloud-' + tab + '-tab' ? '#4a90d9' : 'transparent';
-    el.style.color = el.id === 'cloud-' + tab + '-tab' ? '#333' : '#666';
+    el.style.borderBottomColor = el.id === 'cloud-' + tab + '-tab' ? 'var(--tab-active)' : 'transparent';
+    el.style.color = el.id === 'cloud-' + tab + '-tab' ? 'var(--text-primary)' : 'var(--text-secondary)';
   });
   if (tab === 'groups') refreshCloudGroups();
   if (tab === 'tasks') refreshCloudTasks();
+}
+
+// 刷新当前激活 Tab 的内容（刷新按钮按激活 Tab 分发）
+function refreshCloudCurrentTab() {
+  if (_cloudActiveTab === 'groups') refreshCloudGroups();
+  else refreshCloudTasks();
 }
 
 function startCloudPolling() {
@@ -1143,16 +1260,16 @@ async function refreshCloudTasks() {
 }
 
 async function chainDownloadCloud() {
+  showCloudDownloadPreview('chain');
+}
+
+async function doChainDownloadCloud(lines, filenames) {
+  const text = lines.join('\n');
   const input = document.getElementById('cloud-url');
-  const text = input.value.trim();
-  if (!text) { showToast('请输入下载链接', 'warning'); return; }
-  const lines = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
-  if (lines.length === 0) { showToast('请输入下载链接', 'warning'); return; }
   try {
     const hdrs = headers({ 'Content-Type': 'application/json' });
-    input.value = '';
     showToast('提交任务中...', 'info');
-    const urls = lines.map(function(url) { return { url: url }; });
+    const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
     let tasks;
     if (tunnelHexKey) {
       const result = await tunnelRequest('POST', '/api/cloud/download/batch', hdrs, JSON.stringify({ urls: urls }));
@@ -1226,32 +1343,29 @@ async function chainDownloadCloud() {
   } catch (e) { showToast('链式下载失败: ' + e.message, 'error'); }
 }
 async function createCloudTask() {
-  const input = document.getElementById('cloud-url');
-  const text = input.value.trim();
-  if (!text) { showToast('请输入下载链接', 'warning'); return; }
+  showCloudDownloadPreview('submit');
+}
 
-  const lines = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
-  if (lines.length === 0) { showToast('请输入下载链接', 'warning'); return; }
-
+async function doSubmitCloudTasks(lines, filenames) {
   try {
     const hdrs = headers({ 'Content-Type': 'application/json' });
-    input.value = '';
 
     if (lines.length === 1) {
-      // 单 URL：使用原有 API
+      // 单 URL：使用原有 API，携带 filename
       let task;
+      const body = JSON.stringify({ url: lines[0], filename: filenames[0] });
       if (tunnelHexKey) {
-        const result = await tunnelRequest('POST', '/api/cloud/download', hdrs, JSON.stringify({ url: lines[0] }));
+        const result = await tunnelRequest('POST', '/api/cloud/download', hdrs, body);
         task = JSON.parse(new TextDecoder().decode(result.body));
       } else {
-        const resp = await fetch(BASE + '/api/cloud/download', { method: 'POST', headers: hdrs, body: JSON.stringify({ url: lines[0] }) });
+        const resp = await fetch(BASE + '/api/cloud/download', { method: 'POST', headers: hdrs, body: body });
         task = await resp.json();
         if (!resp.ok) { showToast('创建失败: ' + (task.error || resp.status), 'error'); return; }
       }
       showToast('任务已创建: ' + task.id, 'success');
     } else {
-      // 多 URL：使用批量 API
-      const urls = lines.map(function(url) { return { url: url }; });
+      // 多 URL：使用批量 API，携带每个 URL 的 filename
+      const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
       let data;
       if (tunnelHexKey) {
         const result = await tunnelRequest('POST', '/api/cloud/download/batch', hdrs, JSON.stringify({ urls: urls }));
@@ -1276,23 +1390,19 @@ async function createCloudTask() {
 
 // 创建云端下载任务组：把输入框中的所有 URL 作为一个组提交
 async function createCloudGroup() {
-  const input = document.getElementById('cloud-url');
-  const text = input.value.trim();
-  if (!text) { showToast('请输入下载链接', 'warning'); return; }
+  showCloudDownloadPreview('group');
+}
 
-  const lines = text.split('
-').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
-  if (lines.length === 0) { showToast('请输入下载链接', 'warning'); return; }
-  if (lines.length === 1) { showToast('创建组至少需要 2 个 URL（单 URL 请用“仅提交”）', 'warning'); return; }
-
+async function doCreateCloudGroup(lines, filenames) {
   const name = prompt('组名称（可选）:', 'group-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
   if (name === null) return;
 
   try {
     const hdrs = headers({ 'Content-Type': 'application/json' });
+    const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
     const body = JSON.stringify({
       name: name,
-      urls: lines.map(function(url) { return { url: url }; })
+      urls: urls
     });
     if (tunnelHexKey) {
       await tunnelRequest('POST', '/api/cloud/groups', hdrs, new TextEncoder().encode(body));
@@ -1305,7 +1415,6 @@ async function createCloudGroup() {
         return;
       }
     }
-    input.value = '';
     showToast('下载组已创建', 'success');
     switchCloudTab('groups');
     refreshCloudGroups();
@@ -1404,18 +1513,18 @@ async function removeCloudTask(taskId) {
 
 function buildCloudTaskTableHtml(tasks) {
   let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">文件名</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">状态</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">大小</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">操作</th></tr></thead><tbody>';
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">文件名</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">状态</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">大小</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">操作</th></tr></thead><tbody>';
   for (const t of tasks) {
     const statusLabel = statusText(t.status);
-    const rowClass = t.status === 'downloading' ? ' style="background:#f0f4ff;"' : '';
+    const rowClass = t.status === 'downloading' ? ' style="background:var(--bg-auth);"' : '';
     const progressHtml = t.status === 'downloading' && t.total_size > 0 ? buildProgressBar(t.downloaded, t.total_size) : '';
-    html += '<tr' + rowClass + '><td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(t.filename || '') + '">' + escHtml(t.filename || '-') + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;">' + statusLabel + progressHtml + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + (t.total_size > 0 ? formatSize(t.total_size) : '-') + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' +
+    html += '<tr' + rowClass + '><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(t.filename || '') + '">' + escHtml(t.filename || '-') + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + statusLabel + progressHtml + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' + (t.total_size > 0 ? formatSize(t.total_size) : '-') + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' +
       cloudTaskActions(t.id, t.filename, t.status, t.checksum) + '</td></tr>';
   }
   html += '</tbody></table>';
@@ -1424,9 +1533,9 @@ function buildCloudTaskTableHtml(tasks) {
 
 function buildProgressBar(downloaded, total) {
   const pct = total > 0 ? Math.min(100, Math.round(downloaded * 100 / total)) : 0;
-  return '<div style="margin-top:4px;height:6px;background:#e0e0e0;border-radius:3px;overflow:hidden;min-width:80px;">' +
-    '<div style="height:100%;width:' + pct + '%;background:#4a90d9;border-radius:3px;transition:width 0.5s;"></div>' +
-    '</div><div style="font-size:11px;color:#666;margin-top:1px;">' + formatSize(downloaded) + ' / ' + formatSize(total) + ' (' + pct + '%)</div>';
+  return '<div style="margin-top:4px;height:6px;background:var(--progress-bg);border-radius:3px;overflow:hidden;min-width:80px;">' +
+    '<div style="height:100%;width:' + pct + '%;background:var(--progress-bar);border-radius:3px;transition:width 0.5s;"></div>' +
+    '</div><div style="font-size:11px;color:var(--text-secondary);margin-top:1px;">' + formatSize(downloaded) + ' / ' + formatSize(total) + ' (' + pct + '%)</div>';
 }
 
 function statusText(status) {
@@ -1495,17 +1604,17 @@ async function refreshCloudGroups() {
 
 function buildCloudGroupTableHtml(groups) {
   let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">名称</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">状态</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">进度</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">操作</th></tr></thead><tbody>';
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">名称</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">状态</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">进度</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">操作</th></tr></thead><tbody>';
   for (const g of groups) {
     const statusLabel = statusText(g.status);
     const progressText = g.completed + '/' + g.total_tasks;
-    html += '<tr><td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(g.name || g.id) + '">' + escHtml(g.name || g.id) + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;">' + statusLabel + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;">' + progressText + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' +
+    html += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(g.name || g.id) + '">' + escHtml(g.name || g.id) + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + statusLabel + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + progressText + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' +
       cloudGroupActions(g.id, g.status) + '</td></tr>';
   }
   html += '</tbody></table>';
@@ -1630,19 +1739,19 @@ async function loadVersions() {
 }
 
 function buildVersionTableHtml(versions, filename) {
-  var html = '<div style="margin-bottom:8px;font-size:13px;color:#666;">文件: <strong>' + escHtml(filename) + '</strong>，共 ' + versions.length + ' 个版本</div>';
+  var html = '<div style="margin-bottom:8px;font-size:13px;color:var(--text-secondary);">文件: <strong>' + escHtml(filename) + '</strong>，共 ' + versions.length + ' 个版本</div>';
   html += '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">版本 ID</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">时间</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #eee;">大小</th>' +
-    '<th style="text-align:right;padding:4px 8px;border-bottom:1px solid #eee;">操作</th></tr></thead><tbody>';
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">版本 ID</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">时间</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">大小</th>' +
+    '<th style="text-align:right;padding:4px 8px;border-bottom:1px solid var(--border-color);">操作</th></tr></thead><tbody>';
   for (var i = 0; i < versions.length; i++) {
     var v = versions[i];
     var versionTime = v.created_at || '-';
-    html += '<tr><td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px;">' + escHtml(String(v.version_id || '-')) + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + escHtml(versionTime) + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;white-space:nowrap;">' + formatSize(v.size) + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;text-align:right;white-space:nowrap;">' +
+    html += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-family:monospace;font-size:12px;">' + escHtml(String(v.version_id || '-')) + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' + escHtml(versionTime) + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' + formatSize(v.size) + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:right;white-space:nowrap;">' +
       '<button class="btn btn-primary btn-sm version-restore-btn" data-filename="' + escHtml(filename) + '" data-version-id="' + escHtml(v.version_id) + '" style="margin-right:4px;">恢复</button>' +
       '<button class="btn btn-danger btn-sm version-delete-btn" data-filename="' + escHtml(filename) + '" data-version-id="' + escHtml(v.version_id) + '">删除</button></td></tr>';
   }
@@ -1735,7 +1844,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('cloud-chain-btn').addEventListener('click', chainDownloadCloud);
   document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
   document.getElementById('cloud-create-group-btn').addEventListener('click', createCloudGroup);
-  document.getElementById('cloud-refresh-btn').addEventListener('click', refreshCloudTasks);
+  document.getElementById('cloud-refresh-btn').addEventListener('click', refreshCloudCurrentTab);
   document.getElementById('cloud-close-modal-btn').addEventListener('click', hideCloudDownload);
   document.getElementById('cloud-tasks-tab').addEventListener('click', function() { switchCloudTab('tasks'); });
   document.getElementById('cloud-groups-tab').addEventListener('click', function() { switchCloudTab('groups'); });

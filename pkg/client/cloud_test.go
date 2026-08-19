@@ -56,14 +56,42 @@ func cloudTestServer(t *testing.T) (*httptest.Server, string) {
 		}
 		tasks := make([]CloudTask, 0, len(req.URLs))
 		for i, entry := range req.URLs {
+			filename := entry["filename"]
+			if filename == "" {
+				filename = "download"
+			}
 			tasks = append(tasks, CloudTask{
 				ID:       fmt.Sprintf("task-%d", i+1),
 				URL:      entry["url"],
-				Filename: "download",
+				Filename: filename,
 				Status:   "pending",
 			})
 		}
 		json.NewEncoder(w).Encode(map[string]any{"tasks": tasks})
+	})
+
+	// POST /api/cloud/groups
+	mux.HandleFunc("POST /api/cloud/groups", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Name string              `json:"name"`
+			URLs []map[string]string `json:"urls"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+		group := CloudGroup{
+			ID:         "group-1",
+			Name:       req.Name,
+			Status:     "pending",
+			TotalTasks: len(req.URLs),
+			CreatedAt:  time.Now().Format(time.RFC3339),
+			UpdatedAt:  time.Now().Format(time.RFC3339),
+		}
+		for i := range req.URLs {
+			group.TaskIDs = append(group.TaskIDs, fmt.Sprintf("task-%d", i+1))
+		}
+		json.NewEncoder(w).Encode(group)
 	})
 
 	// GET /api/cloud/tasks
@@ -222,6 +250,68 @@ func TestCloudDownload_Batch(t *testing.T) {
 	}
 	if tasks[0].URL != "https://example.com/a.zip" {
 		t.Fatalf("want URL https://example.com/a.zip, got %q", tasks[0].URL)
+	}
+}
+
+// TestCloudDownload_BatchEntries 测试批量创建任务时每个 URL 可单独指定保存文件名。
+func TestCloudDownload_BatchEntries(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	entries := []CloudDownloadEntry{
+		{URL: "https://example.com/a.zip", Filename: "a-custom.zip"},
+		{URL: "https://example.com/b.zip"}, // 未指定，由服务端自动生成
+	}
+	tasks, err := c.CloudDownloadBatchEntries(t.Context(), entries)
+	if err != nil {
+		t.Fatalf("CloudDownloadBatchEntries: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("want 2 tasks, got %d", len(tasks))
+	}
+	if tasks[0].Filename != "a-custom.zip" {
+		t.Fatalf("want first task filename a-custom.zip, got %q", tasks[0].Filename)
+	}
+	if tasks[1].Filename != "download" {
+		t.Fatalf("want second task auto filename download, got %q", tasks[1].Filename)
+	}
+}
+
+// TestCloudDownload_BatchEntries_InvalidURL 校验 entries 中的非法 URL 在发送前被拦截。
+func TestCloudDownload_BatchEntries_InvalidURL(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	_, err := c.CloudDownloadBatchEntries(t.Context(), []CloudDownloadEntry{{URL: "ftp://example.com/a.zip"}})
+	if err == nil {
+		t.Fatal("expected error for unsupported scheme, got nil")
+	}
+}
+
+// TestCloudCreateGroupEntries 测试创建下载组时每个 URL 可单独指定保存文件名。
+func TestCloudCreateGroupEntries(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	entries := []CloudDownloadEntry{
+		{URL: "https://example.com/a.zip"},
+		{URL: "https://example.com/b.zip", Filename: "b-named.zip"},
+	}
+	group, err := c.CloudCreateGroupEntries(t.Context(), "test-group", entries)
+	if err != nil {
+		t.Fatalf("CloudCreateGroupEntries: %v", err)
+	}
+	if group.ID != "group-1" {
+		t.Fatalf("want group ID group-1, got %q", group.ID)
+	}
+	if group.Name != "test-group" {
+		t.Fatalf("want group name test-group, got %q", group.Name)
+	}
+	if group.TotalTasks != 2 {
+		t.Fatalf("want 2 tasks in group, got %d", group.TotalTasks)
 	}
 }
 

@@ -532,8 +532,10 @@ func TestHTTPDownloader_RangeResume_MismatchFallsBackToFull(t *testing.T) {
 func TestHTTPDownloader_RangeResume_416FinalizePartial(t *testing.T) {
 	t.Parallel()
 	fullContent := []byte("already downloaded complete file")
+	etag := `"etag-416"`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(fullContent)))
+		w.Header().Set("ETag", etag)
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 	}))
 	defer srv.Close()
@@ -542,6 +544,8 @@ func TestHTTPDownloader_RangeResume_416FinalizePartial(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "finalize.bin")
 	partialPath := dest + ".partial"
 	os.WriteFile(partialPath, fullContent, 0644)
+	// 416 收尾要求缓存 ETag 与响应 ETag 一致（内容身份确认）
+	os.WriteFile(partialPath+".etag", []byte(etag), 0644)
 
 	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
 	if err != nil {
@@ -580,6 +584,146 @@ func TestHTTPDownloader_RangeResume_416FullRedownload(t *testing.T) {
 	_, err := dl.Download(t.Context(), srv.URL, dest, nil)
 	if err == nil {
 		t.Fatal("expected error for 416 full redownload against a server that never returns 200")
+	}
+}
+
+func TestHTTPDownloader_RangeResume_416StalePartialRedownloads(t *testing.T) {
+	t.Parallel()
+	// 远程文件被替换成更小的版本：partial 比服务端当前文件大。
+	// 首次带 Range 请求返回 416（bytes */<newTotal>，newTotal < partialSize），
+	// 下载器应删除陈旧 partial 并全量重下；第二次无 Range 请求返回 200 + 新内容。
+	newContent := []byte("new smaller content")
+	partialSize := 100
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(newContent)))
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.Write(newContent)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "416-stale.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, make([]byte, partialSize), 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("expected full redownload after stale 416, got %v", err)
+	}
+	if result.Size != int64(len(newContent)) {
+		t.Fatalf("expected size %d, got %d", len(newContent), result.Size)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(newContent) {
+		t.Fatalf("expected %q, got %q", string(newContent), string(got))
+	}
+	if _, err := os.Stat(partialPath); !os.IsNotExist(err) {
+		t.Fatal("expected stale partial removed")
+	}
+	h := sha256.Sum256(newContent)
+	if result.Checksum != hex.EncodeToString(h[:]) {
+		t.Fatalf("checksum mismatch")
+	}
+}
+
+func TestHTTPDownloader_IfRange_ETagMatchContinuesResume(t *testing.T) {
+	t.Parallel()
+	fullContent := []byte("hello world this is the complete file content")
+	partialContent := fullContent[:10]
+	remainingContent := fullContent[10:]
+	etag := `"abc123"`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-Range") == etag && r.Header.Get("Range") == "bytes=10-" {
+			// ETag match, continue range resume
+			w.Header().Set("Content-Range", "bytes 10-44/45")
+			w.Header().Set("ETag", etag)
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(remainingContent)
+			return
+		}
+		if r.Header.Get("Range") != "" {
+			// If-Range mismatch or missing, return full content
+			w.Write(fullContent)
+			return
+		}
+		w.Write(fullContent)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{ValidateURLAfterDo: nil}
+	dest := filepath.Join(t.TempDir(), "if-range-match.bin")
+	partialPath := dest + ".partial"
+	etagPath := partialPath + ".etag"
+	_ = os.WriteFile(partialPath, partialContent, 0644)
+	_ = os.WriteFile(etagPath, []byte(etag), 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(fullContent) {
+		t.Fatalf("expected %q, got %q", string(fullContent), string(got))
+	}
+	h := sha256.Sum256(fullContent)
+	if result.Checksum != hex.EncodeToString(h[:]) {
+		t.Fatalf("checksum mismatch")
+	}
+	// Verify .etag file still exists
+	if _, err := os.Stat(etagPath); os.IsNotExist(err) {
+		t.Fatal("expected etag file to persist after resume")
+	}
+}
+
+func TestHTTPDownloader_IfRange_ETagMismatchFallsBack(t *testing.T) {
+	t.Parallel()
+	fullContent := []byte("this is the new full content after server file changed")
+	partialContent := []byte("old partial data from previous version")
+	oldETag := `"old-etag"`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-Range") == oldETag {
+			// If-Range matches old ETag, but server has new content:
+			// per HTTP spec, server returns 200 with full content
+			// Actually proper behavior: If-Range match should return 206;
+			// If-Range mismatch should return 200 full.
+			// Let's simulate: If-Range != current ETag -> return 200
+			w.Write(fullContent)
+			return
+		}
+		w.Write(fullContent)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{ValidateURLAfterDo: nil}
+	dest := filepath.Join(t.TempDir(), "if-range-mismatch.bin")
+	partialPath := dest + ".partial"
+	etagPath := partialPath + ".etag"
+	_ = os.WriteFile(partialPath, partialContent, 0644)
+	_ = os.WriteFile(etagPath, []byte(oldETag), 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("Download failed on ETag mismatch fallback: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(fullContent) {
+		t.Fatalf("expected %q, got %q", string(fullContent), string(got))
+	}
+	h := sha256.Sum256(fullContent)
+	if result.Checksum != hex.EncodeToString(h[:]) {
+		t.Fatalf("checksum mismatch")
+	}
+	// Verify .etag and .partial are removed after fallback
+	if _, err := os.Stat(partialPath); !os.IsNotExist(err) {
+		t.Fatal("expected partial file to be removed after fallback")
+	}
+	if _, err := os.Stat(etagPath); !os.IsNotExist(err) {
+		t.Fatal("expected etag file to be removed after fallback")
 	}
 }
 
@@ -624,5 +768,249 @@ func TestHTTPDownloader_LargePartialResume_MemorySafe(t *testing.T) {
 	}
 	if result.Size != int64(len(fullContent)) {
 		t.Fatalf("expected size %d, got %d", len(fullContent), result.Size)
+	}
+}
+
+// TestHTTPDownloader_IfRange_NoCachedETag_SendsRangeOnly 验证：有 partial 但无缓存 ETag 时，
+// 续传请求只携带 Range，不携带 If-Range。
+func TestHTTPDownloader_IfRange_NoCachedETag_SendsRangeOnly(t *testing.T) {
+	t.Parallel()
+	fullContent := []byte("hello world this is the complete file content")
+	partialContent := fullContent[:10]
+	remainingContent := fullContent[10:]
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "bytes=10-" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if r.Header.Get("If-Range") != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Range", "bytes 10-44/45")
+		w.Header().Set("ETag", `"etag-1"`)
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(remainingContent)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "range-only.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, partialContent, 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(fullContent) {
+		t.Fatalf("expected %q, got %q", string(fullContent), string(got))
+	}
+	// 续传成功后 ETag 应写入 companion 文件，供下一次 If-Range 使用
+	etagPath := partialPath + ".etag"
+	data, err := os.ReadFile(etagPath)
+	if err != nil {
+		t.Fatalf("expected etag file written after resume: %v", err)
+	}
+	if string(data) != `"etag-1"` {
+		t.Fatalf("expected etag %q in file, got %q", `"etag-1"`, string(data))
+	}
+	if result.ETag != `"etag-1"` {
+		t.Fatalf("expected result.ETag %q, got %q", `"etag-1"`, result.ETag)
+	}
+}
+
+// TestHTTPDownloader_FullDownload_SavesETag 验证全量下载成功后：
+// 1) result.ETag 被填充；2) ETag 写入 .partial.etag companion 文件供后续续传使用。
+func TestHTTPDownloader_FullDownload_SavesETag(t *testing.T) {
+	t.Parallel()
+	content := []byte("full download with etag")
+	etag := `"full-etag-v1"`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", etag)
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "full-etag.bin")
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if result.ETag != etag {
+		t.Fatalf("expected result.ETag %q, got %q", etag, result.ETag)
+	}
+	etagPath := dest + ".partial.etag"
+	data, err := os.ReadFile(etagPath)
+	if err != nil {
+		t.Fatalf("expected etag companion file: %v", err)
+	}
+	if string(data) != etag {
+		t.Fatalf("expected etag %q in file, got %q", etag, string(data))
+	}
+}
+
+// TestHTTPDownloader_Resume_ResultETag 验证 Range 续传（206）成功后 result.ETag 被填充。
+func TestHTTPDownloader_Resume_ResultETag(t *testing.T) {
+	t.Parallel()
+	fullContent := []byte("hello world this is the complete file content")
+	partialContent := fullContent[:10]
+	remainingContent := fullContent[10:]
+	etag := `"resume-etag"`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 10-44/45")
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(remainingContent)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "resume-etag.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, partialContent, 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	if result.ETag != etag {
+		t.Fatalf("expected result.ETag %q, got %q", etag, result.ETag)
+	}
+}
+
+// TestHTTPDownloader_FinalizePartial_ResultETag 验证 416 且 total==existingSize 的收尾路径
+// result.ETag 与 companion 文件正确。
+func TestHTTPDownloader_FinalizePartial_ResultETag(t *testing.T) {
+	t.Parallel()
+	fullContent := []byte("already downloaded complete file")
+	etag := `"finalize-etag"`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", len(fullContent)))
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "finalize-etag.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, fullContent, 0644)
+	// 缓存 ETag 与 416 响应 ETag 一致时才走收尾路径
+	os.WriteFile(partialPath+".etag", []byte(etag), 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("expected 416 finalize to succeed, got %v", err)
+	}
+	if result.ETag != etag {
+		t.Fatalf("expected result.ETag %q, got %q", etag, result.ETag)
+	}
+	etagPath := partialPath + ".etag"
+	data, err := os.ReadFile(etagPath)
+	if err != nil {
+		t.Fatalf("expected etag companion file: %v", err)
+	}
+	if string(data) != etag {
+		t.Fatalf("expected etag %q in file, got %q", etag, string(data))
+	}
+}
+
+// TestHTTPDownloader_IfRange_ServerIgnores_206NewETag 验证：非合规服务端忽略 If-Range
+// 直接返回 206 且携带不同 ETag 时，必须回退全量下载，绝不能把新内容追加到旧 partial
+// 产生混合文件（F2 回归）。
+func TestHTTPDownloader_IfRange_ServerIgnores_206NewETag(t *testing.T) {
+	t.Parallel()
+	oldPartial := []byte("AAAAAAAAAA")                    // 10 字节旧内容
+	newFull := []byte("XXXXXXYYZZWWQQPPRRSSUUVVWWXXYYZZ") // 30 字节全新内容
+	newRemaining := newFull[10:]
+	oldETag := `"old-etag"`
+	newETag := `"new-etag"`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			// 服务端忽略 If-Range（非合规）：仍返回 206 + 不同 ETag
+			w.Header().Set("Content-Range", "bytes 10-29/30")
+			w.Header().Set("ETag", newETag)
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(newRemaining)
+			return
+		}
+		// 全量下载请求
+		w.Header().Set("ETag", newETag)
+		w.Write(newFull)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "ignore-ifrange.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, oldPartial, 0644)
+	os.WriteFile(partialPath+".etag", []byte(oldETag), 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(newFull) {
+		t.Fatalf("expected full new content %q (not mixed), got %q", string(newFull), string(got))
+	}
+	if result.Size != int64(len(newFull)) {
+		t.Fatalf("expected size %d, got %d", len(newFull), result.Size)
+	}
+	// 全量重下后 ETag 应以新值落盘
+	if data, _ := os.ReadFile(partialPath + ".etag"); string(data) != newETag {
+		t.Fatalf("expected new etag %q in companion, got %q", newETag, string(data))
+	}
+}
+
+// TestHTTPDownloader_RangeResume_416SameSizeStalePartialRedownloads 验证：partial 与服务端
+// 同尺寸但无缓存 ETag 佐证内容一致时，416 不得直接收尾（防止"同尺寸内容已变"的陈旧
+// partial 被静默收尾为错误文件），必须全量重下（F1 回归）。
+func TestHTTPDownloader_RangeResume_416SameSizeStalePartialRedownloads(t *testing.T) {
+	t.Parallel()
+	stalePartial := []byte("STALE-PART") // 10 字节陈旧内容
+	fullContent := []byte("new content replaced on server side completely")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			w.Header().Set("Content-Range", "bytes */10")
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.Write(fullContent)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "416-stale-same.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, stalePartial, 0644)
+
+	result, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err != nil {
+		t.Fatalf("expected full redownload, got %v", err)
+	}
+	if result.Size != int64(len(fullContent)) {
+		t.Fatalf("expected size %d, got %d", len(fullContent), result.Size)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(fullContent) {
+		t.Fatalf("expected %q, got %q", string(fullContent), string(got))
+	}
+	if _, err := os.Stat(partialPath); !os.IsNotExist(err) {
+		t.Fatal("expected stale partial removed")
+	}
+	h := sha256.Sum256(fullContent)
+	if result.Checksum != hex.EncodeToString(h[:]) {
+		t.Fatalf("checksum mismatch")
 	}
 }

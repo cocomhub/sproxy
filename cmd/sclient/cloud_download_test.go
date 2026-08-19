@@ -268,14 +268,14 @@ func TestCloudDownloadCmd_NewFlags(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{}, nil)
 
-	oldFlags := []string{"wait", "archive", "download", "extract", "no-cleanup"}
+	oldFlags := []string{"wait", "archive", "download", "extract", "no-cleanup", "no-cache"}
 	for _, name := range oldFlags {
 		if cmd.Flags().Lookup(name) != nil {
 			t.Errorf("old flag --%s should have been removed", name)
 		}
 	}
 
-	newFlags := []string{"keep-files", "timeout", "no-cache", "archive-name", "output-dir", "poll-interval", "batch"}
+	newFlags := []string{"keep-files", "timeout", "archive-name", "output-dir", "poll-interval", "batch"}
 	for _, name := range newFlags {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("expected new flag --%s to exist", name)
@@ -919,5 +919,181 @@ func TestCloudDownloadCmd_WaitTaskCancelled(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "已取消") {
 		t.Fatalf("expected cancelled message in output, got: %s", buf.String())
+	}
+}
+
+func TestReadEntriesFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "urls.txt")
+	content := "# comment line\n" +
+		"https://example.com/a.zip\tcustom-a.zip\n" +
+		"\n" +
+		"https://example.com/b.zip\n" +
+		"https://example.com/my%20file.txt\t我的文件.txt\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := readEntriesFromFile(path)
+	if err != nil {
+		t.Fatalf("readEntriesFromFile: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("want 3 entries, got %d", len(entries))
+	}
+	if entries[0].URL != "https://example.com/a.zip" || entries[0].Filename != "custom-a.zip" {
+		t.Fatalf("entry[0] = %+v, want url a.zip + filename custom-a.zip", entries[0])
+	}
+	if entries[1].URL != "https://example.com/b.zip" || entries[1].Filename != "" {
+		t.Fatalf("entry[1] = %+v, want url b.zip + empty filename", entries[1])
+	}
+	if entries[2].Filename != "我的文件.txt" {
+		t.Fatalf("entry[2].Filename = %q, want 我的文件.txt", entries[2].Filename)
+	}
+}
+
+func TestResolvedFilename(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry client.CloudDownloadEntry
+		want  string
+	}{
+		{name: "显式文件名清理", entry: client.CloudDownloadEntry{URL: "https://e.com/a.zip", Filename: "a/b.zip"}, want: "a_b.zip"},
+		{name: "自动生成普通文件", entry: client.CloudDownloadEntry{URL: "https://e.com/file.zip"}, want: "file.zip"},
+		{name: "目录结尾index.html", entry: client.CloudDownloadEntry{URL: "https://e.com/xx/?a=v"}, want: "index.html_a=v"},
+		{name: "空文件名回退download", entry: client.CloudDownloadEntry{URL: "https://e.com/"}, want: "index.html"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolvedFilename(tt.entry); got != tt.want {
+				t.Errorf("resolvedFilename(%+v) = %q, want %q", tt.entry, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCloudDownloadCmd_Group_PreflightConflict(t *testing.T) {
+	// 两个目录结尾 URL 自动生成相同文件名 index.html → 客户端预校验应拦截，服务端不应被调用。
+	serverHit := false
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverHit = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"group", "g1", "https://example.com/a/", "https://example.com/b/"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected conflict error from preflight, got nil")
+	}
+	if !strings.Contains(err.Error(), "冲突") {
+		t.Fatalf("expected conflict error, got: %v", err)
+	}
+	if serverHit {
+		t.Fatal("server should not be called when preflight detects filename conflict")
+	}
+	if !strings.Contains(buf.String(), "-> index.html") {
+		t.Fatalf("expected plan output to show index.html filenames, got: %s", buf.String())
+	}
+}
+
+func TestCloudDownloadCmd_Group_Success(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/cloud/groups" && r.Method == http.MethodPost {
+			var req struct {
+				Name string              `json:"name"`
+				URLs []map[string]string `json:"urls"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			// 校验请求确实携带了每个 URL 的 filename
+			if len(req.URLs) != 2 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			group := map[string]any{
+				"id":          "group-1",
+				"name":        req.Name,
+				"status":      "pending",
+				"total_tasks": len(req.URLs),
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(group)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"group", "g1", "https://example.com/a.zip", "https://example.com/b.zip"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("group subcommand failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "group-1") {
+		t.Fatalf("expected group ID in output, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "-> a.zip") || !strings.Contains(buf.String(), "-> b.zip") {
+		t.Fatalf("expected plan output to show auto filenames, got: %s", buf.String())
+	}
+}
+
+func TestCloudDownloadCmd_Group_UrlFileFilenames(t *testing.T) {
+	var gotURLs []map[string]string
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/cloud/groups" && r.Method == http.MethodPost {
+			var req struct {
+				Name string              `json:"name"`
+				URLs []map[string]string `json:"urls"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			gotURLs = req.URLs
+			group := map[string]any{"id": "group-1", "name": req.Name, "status": "pending", "total_tasks": len(req.URLs)}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(group)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	dir := t.TempDir()
+	urlFile := filepath.Join(dir, "entries.txt")
+	if err := os.WriteFile(urlFile, []byte("https://example.com/a.zip\tcustom.zip\nhttps://example.com/b/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"group", "g1", "--url-file", urlFile})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("group subcommand with url-file failed: %v", err)
+	}
+	if len(gotURLs) != 2 {
+		t.Fatalf("want 2 URLs sent, got %d", len(gotURLs))
+	}
+	if gotURLs[0]["filename"] != "custom.zip" {
+		t.Fatalf("want first entry filename custom.zip, got %q", gotURLs[0]["filename"])
+	}
+	// 第二条自动生成 index.html（目录结尾），由客户端预校验后发送
+	if gotURLs[1]["filename"] != "" {
+		t.Fatalf("want second entry empty filename (server auto-generates), got %q", gotURLs[1]["filename"])
+	}
+	if !strings.Contains(buf.String(), "-> index.html") {
+		t.Fatalf("expected plan output to show index.html, got: %s", buf.String())
 	}
 }

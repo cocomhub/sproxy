@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
 )
 
@@ -242,7 +243,9 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 
 	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, req.URLs)
 	if err != nil {
-		if strings.Contains(err.Error(), "filename conflict") {
+		// 文件名冲突与重复 URL 均属客户端输入错误，映射 409 而非 500
+		if strings.Contains(err.Error(), "filename conflict") ||
+			strings.Contains(err.Error(), "duplicate URL") {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
 			return
 		}
@@ -407,10 +410,17 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		}
 
 		sourceFile := filepath.Join(cloudDir, task.ID, task.Filename)
-		sourceDir := filepath.Join(cloudDir, task.ID)
-		if !IsPathWithin(sourceFile, sourceDir) {
+		// 校验目标文件位于 cloud 根目录内（防御 task.Filename 含路径穿越）
+		if !IsPathWithin(sourceFile, cloudDir) {
 			h.logger.Error("path traversal detected in group archive",
 				"group_id", groupID, "task_id", taskID, "source_file", sourceFile)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
+		}
+		// 收集后、打包前文件可能被删除/替换，先确认存在
+		if _, statErr := os.Stat(sourceFile); statErr != nil {
+			h.logger.Warn("cloud group archive: skipping missing file",
+				"group_id", groupID, "task_id", taskID, "source_file", sourceFile, "error", statErr)
 			skippedTasks = append(skippedTasks, taskID)
 			continue
 		}
@@ -471,37 +481,25 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
-// extractFilename 从 URL 中提取文件名。
+// genDefaultFilename 从 URL 中提取默认文件名，遵循 wget 行为。
+// 逻辑委托给共享包 pkg/cloudfilename，保证与客户端 (sclient / Web UI) 一致：
+//   - 路径末尾为 / 时使用 "index.html"
+//   - 查询参数（?后的 raw query）直接附加到文件名后
+//   - 路径最后一段做百分号解码
+//
+// 返回的文件名未经 filepathSafe 处理，调用方应自行 sanitize。
+func genDefaultFilename(rawURL string) string {
+	return cloudfilename.DefaultFromURL(rawURL)
+}
+
+// extractFilename 从 URL 中提取文件名（保留向后兼容）。
+// 新代码请使用 genDefaultFilename。
 func extractFilename(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return "download"
-	}
-	// 取路径最后一段
-	path := parsed.Path
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' {
-			name := path[i+1:]
-			if name != "" {
-				// 百分号解码
-				if decoded, err := url.QueryUnescape(name); err == nil {
-					return decoded
-				}
-				return name
-			}
-			break
-		}
-	}
-	return "download"
+	return genDefaultFilename(rawURL)
 }
 
 // filepathSafe 清理文件名中的路径分隔符，防止路径穿越。
+// 逻辑委托给共享包 pkg/cloudfilename，保证双端规则一致。
 func filepathSafe(name string) string {
-	name = strings.ReplaceAll(name, "\x00", "")
-	name = strings.NewReplacer("\\", "_", "/", "_").Replace(name)
-	name = strings.Trim(name, " .")
-	if name == "" {
-		return "download"
-	}
-	return name
+	return cloudfilename.Safe(name)
 }

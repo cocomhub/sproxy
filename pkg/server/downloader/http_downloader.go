@@ -81,6 +81,36 @@ var _ Downloader = (*HTTPDownloader)(nil)
 // 调用方应删除部分文件并回退到全量下载。
 var errRangeMismatch = errors.New("range resume mismatch, fallback to full download")
 
+// etagPath 返回与 partial 文件对应的 ETag 缓存文件路径。
+func etagPath(partialPath string) string {
+	return partialPath + ".etag"
+}
+
+// saveETag 将 ETag 写入 companion 文件（不检查 etag 是否为空，为空时删除文件）。
+func saveETag(etagPath, etag string) {
+	if etag == "" {
+		_ = os.Remove(etagPath)
+		return
+	}
+	_ = os.WriteFile(etagPath, []byte(etag), 0644)
+}
+
+// loadETag 从 companion 文件读取缓存的 ETag。文件不存在或读取失败返回空字符串。
+func loadETag(etagPath string) string {
+	data, err := os.ReadFile(etagPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// extractETag 从响应头提取 ETag（保留原始值，含引号）。
+// 注：ETag 在 HTTP 头中通常以双引号包裹（如 "abc123"），
+// 完整保留以便 If-Range 发送时服务端能正确识别。
+func extractETag(resp *http.Response) string {
+	return strings.TrimSpace(resp.Header.Get("ETag"))
+}
+
 // Download 从 HTTP/HTTPS URL 下载文件到 destPath。
 // 支持续下载（resume）通过 Range 头：存在 destPath+".partial" 且服务端支持
 // Range 时追加写入；服务端不支持或文件已变化时回退全量下载。
@@ -97,31 +127,34 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	// 检查是否存在部分文件，用于 Range 续传
 	partialPath := destPath + ".partial"
 	var existingSize int64
+	var cachedETag string
 	if fi, err := os.Stat(partialPath); err == nil {
 		if fi.Size() > 0 {
 			existingSize = fi.Size()
+			cachedETag = loadETag(etagPath(partialPath))
 		} else {
-			// 空的部分文件没有续传价值，直接清理
+			// 空的部分文件没有续传价值，直接清理（连同 ETag 伴侣文件）
 			_ = os.Remove(partialPath)
+			_ = os.Remove(etagPath(partialPath))
 		}
 	}
 
-	// 第一次请求：存在部分文件时携带 Range
-	resp, err := d.doGet(ctx, source, existingSize)
+	// 第一次请求：存在部分文件时携带 Range 和 If-Range（如果有缓存的 ETag）
+	resp, err := d.doGet(ctx, source, existingSize, cachedETag)
 	if err != nil {
 		return nil, retryablef("http get: %w", err)
 	}
-	defer resp.Body.Close()
-
 	if err2 := d.validateAfterDo(resp); err2 != nil {
 		return nil, err2
 	}
+	// 在 defer 前包 idleReadCloser，使正常路径的 Close 能停止空闲定时器
 	resp.Body = newIdleReadCloser(resp.Body, d.IdleTimeout)
+	defer resp.Body.Close()
 
 	if existingSize > 0 {
 		switch resp.StatusCode {
 		case http.StatusPartialContent:
-			result, rerr := d.handleRangeResume(ctx, resp, partialPath, destPath, existingSize, onProgress)
+			result, rerr := d.handleRangeResume(ctx, resp, partialPath, destPath, existingSize, cachedETag, onProgress)
 			if !errors.Is(rerr, errRangeMismatch) {
 				return result, rerr
 			}
@@ -130,23 +163,39 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 				"url", source, "partial_size", existingSize)
 			_ = resp.Body.Close()
 			_ = os.Remove(partialPath)
+			_ = os.Remove(etagPath(partialPath))
 			return d.downloadFull(ctx, source, destPath, onProgress)
 
 		case http.StatusOK:
-			// 服务端不支持 Range，删除部分文件，走全量下载路径
+			// 服务端不支持 Range（或 If-Range 验证失败导致回退 200），
+			// 删除部分文件和 ETag 缓存，走全量下载路径
 			_ = os.Remove(partialPath)
+			_ = os.Remove(etagPath(partialPath))
 
 		case http.StatusRequestedRangeNotSatisfiable:
-			// 416：若部分文件已等于服务端总大小则直接收尾，否则全量重下
+			// 416：若部分文件已等于服务端总大小，仅当能确认内容一致（缓存的
+			// ETag 与 416 响应 ETag 匹配）时才收尾；否则回退全量重下，防止
+			// "同尺寸但内容已变"的陈旧 partial 被静默收尾为错误文件（数据损坏）。
 			if total := parseSuffixRange(resp.Header.Get("Content-Range")); total == existingSize {
-				result, rerr := d.finalizePartial(partialPath, destPath, resp, existingSize)
-				if rerr != nil {
-					_ = os.Remove(partialPath)
-					return nil, rerr
+				respETag := extractETag(resp)
+				if cachedETag != "" && respETag == cachedETag {
+					result, rerr := d.finalizePartial(partialPath, destPath, resp, existingSize)
+					if rerr != nil {
+						_ = os.Remove(partialPath)
+						_ = os.Remove(etagPath(partialPath))
+						return nil, rerr
+					}
+					return result, nil
 				}
-				return result, nil
+				d.getLogger().Info("416 finalize skipped: cannot verify partial content identity, fallback to full download",
+					"url", source, "partial_size", existingSize, "cached_etag", cachedETag != "", "resp_etag", respETag)
 			}
+			// 部分文件比服务端当前文件大（远程文件被替换/变短）或无法确认内容一致：
+			// 删除陈旧 partial 后全量重下，而不是返回 416 让任务永久失败
+			_ = resp.Body.Close()
 			_ = os.Remove(partialPath)
+			_ = os.Remove(etagPath(partialPath))
+			return d.downloadFull(ctx, source, destPath, onProgress)
 
 		default:
 			_, _ = io.Copy(io.Discard, resp.Body)
@@ -165,16 +214,16 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 
 // downloadFull 发起不带 Range 的全量下载（续传信息不一致时回退使用）。
 func (d *HTTPDownloader) downloadFull(ctx context.Context, source, destPath string, onProgress ProgressFunc) (*Result, error) {
-	resp, err := d.doGet(ctx, source, 0)
+	resp, err := d.doGet(ctx, source, 0, "")
 	if err != nil {
 		return nil, retryablef("http get: %w", err)
 	}
-	defer resp.Body.Close()
-
 	if err2 := d.validateAfterDo(resp); err2 != nil {
 		return nil, err2
 	}
+	// 在 defer 前包 idleReadCloser，使正常路径的 Close 能停止空闲定时器
 	resp.Body = newIdleReadCloser(resp.Body, d.IdleTimeout)
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -183,8 +232,9 @@ func (d *HTTPDownloader) downloadFull(ctx context.Context, source, destPath stri
 	return d.writeFullBody(ctx, resp, destPath, onProgress)
 }
 
-// doGet 发起 GET 请求；existingSize>0 时携带 Range 头。
-func (d *HTTPDownloader) doGet(ctx context.Context, source string, existingSize int64) (*http.Response, error) {
+// doGet 发起 GET 请求；existingSize>0 时携带 Range 和 If-Range 头。
+// etag 为空时仅发送 Range；etag 非空时同时发送 If-Range 以校验远程内容未变。
+func (d *HTTPDownloader) doGet(ctx context.Context, source string, existingSize int64, etag string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -192,6 +242,9 @@ func (d *HTTPDownloader) doGet(ctx context.Context, source string, existingSize 
 	req.Header.Set("User-Agent", "sproxy-cloud-downloader/1.0")
 	if existingSize > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existingSize))
+		if etag != "" {
+			req.Header.Set("If-Range", etag)
+		}
 	}
 	return d.getClient().Do(req)
 }
@@ -296,13 +349,18 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 		}
 	}
 
-	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime}, nil
+	etag := extractETag(resp)
+	if etag != "" {
+		saveETag(etagPath(partialPath), etag)
+	}
+
+	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime, ETag: etag}, nil
 }
 
 // handleRangeResume 处理 Range 续传场景：追加写入部分文件并校验。
 // 当服务端返回的 Content-Range 与本地部分文件不一致时返回 errRangeMismatch，
 // 由调用方回退全量下载。
-func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Response, partialPath, destPath string, existingSize int64, onProgress ProgressFunc) (*Result, error) {
+func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Response, partialPath, destPath string, existingSize int64, cachedETag string, onProgress ProgressFunc) (*Result, error) {
 	cr := resp.Header.Get("Content-Range")
 	if cr == "" {
 		return nil, errRangeMismatch
@@ -313,6 +371,12 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 		return nil, errRangeMismatch
 	}
 	if startByte != existingSize {
+		return nil, errRangeMismatch
+	}
+	// 交叉校验响应 ETag 与发送的 If-Range：合规服务端在 If-Range 匹配时返回相同
+	// ETag 的 206；若返回不同 ETag，说明服务端忽略 If-Range 且内容已变，继续追加
+	// 会产生混合文件，必须回退全量下载。
+	if respETag := extractETag(resp); respETag != "" && cachedETag != "" && respETag != cachedETag {
 		return nil, errRangeMismatch
 	}
 
@@ -326,15 +390,16 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	}
 
 	// 流式计算已有部分文件的 SHA-256（不整体读入内存）
+	// 本地文件 I/O 错误不可重试（与 write to partial file 的分类一致），重试只会空耗
 	h := sha256.New()
 	if pf, err := os.Open(partialPath); err == nil {
 		if _, copyErr := io.Copy(h, pf); copyErr != nil {
 			pf.Close()
-			return nil, retryablef("hash existing partial: %w", copyErr)
+			return nil, fmt.Errorf("hash existing partial: %w", copyErr)
 		}
 		pf.Close()
 	} else {
-		return nil, retryablef("open partial file: %w", err)
+		return nil, fmt.Errorf("open partial file: %w", err)
 	}
 
 	// 以追加模式打开部分文件
@@ -395,7 +460,12 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 		}
 	}
 
-	return &Result{Size: downloadedTotal, Checksum: fullChecksum, ModTime: modTime}, nil
+	etag := extractETag(resp)
+	if etag != "" {
+		saveETag(etagPath(partialPath), etag)
+	}
+
+	return &Result{Size: downloadedTotal, Checksum: fullChecksum, ModTime: modTime, ETag: etag}, nil
 }
 
 // finalizePartial 处理服务端返回 416 且 total==existingSize 的场景：
@@ -434,7 +504,11 @@ func (d *HTTPDownloader) finalizePartial(partialPath, destPath string, resp *htt
 		}
 	}
 
-	return &Result{Size: existingSize, Checksum: hex.EncodeToString(h.Sum(nil)), ModTime: modTime}, nil
+	etag := extractETag(resp)
+	if etag != "" {
+		saveETag(etagPath(partialPath), etag)
+	}
+	return &Result{Size: existingSize, Checksum: hex.EncodeToString(h.Sum(nil)), ModTime: modTime, ETag: etag}, nil
 }
 
 // parseSuffixRange 解析 416 响应中的 "bytes */<total>" 形式 Content-Range。
