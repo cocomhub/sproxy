@@ -1850,8 +1850,8 @@ function buildCloudGroupTableHtml(groups) {
       '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + progressText + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' +
       cloudGroupActions(g.id, g.status) + '</td>' +
-      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);"><button class="btn btn-small" onclick="toggleGroupTasks(\'' + g.id + '\', this)">展开</button></td></tr>' +
-      '<tr id="group-detail-' + g.id + '" style="display:none;"><td colspan="5"><div class="group-task-list" style="padding:8px;font-size:13px;">加载中...</div></td></tr>';
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);"><button class="btn btn-small group-toggle-btn" data-id="' + escHtml(g.id) + '">展开</button></td></tr>' +
+      '<tr id="group-detail-' + escHtml(g.id) + '" style="display:none;"><td colspan="5"><div class="group-task-list" style="padding:8px;font-size:13px;">加载中...</div></td></tr>';
   }
   html += '</tbody></table>';
   return html;
@@ -1912,6 +1912,9 @@ async function toggleGroupTasks(groupId, btn) {
     container.innerHTML = html;
   } catch (e) {
     container.innerHTML = '<span style="color:var(--text-danger);">加载失败</span>';
+    // 失败时恢复按钮文本和行状态
+    detailRow.style.display = 'none';
+    btn.textContent = '展开';
   }
 }
 
@@ -2290,6 +2293,10 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('group-delete-btn')) {
         deleteCloudGroup(btn.dataset.id);
+        return;
+      }
+      if (btn.classList.contains('group-toggle-btn')) {
+        toggleGroupTasks(btn.dataset.id, btn);
         return;
       }
     });
