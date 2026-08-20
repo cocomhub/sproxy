@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -112,29 +114,25 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	return &task, nil
 }
 
-// CloudDownloadEntry 批量/组下载中的单个 URL 条目，可携带自定义保存文件名。
-// Filename 为空时服务端按 URL 自动生成（wget 行为，见 pkg/cloudfilename）。
-type CloudDownloadEntry struct {
-	URL      string `json:"url"`
-	Filename string `json:"filename,omitempty"`
-}
-
 // CloudDownloadBatch 批量创建云端下载任务（最多 100 URL）。
 // 可以用 WithCloudDownloadMaxBatchURLs 调整上限，但不能超过服务端限制。
 // 如需为每个 URL 指定保存文件名，使用 CloudDownloadBatchEntries。
 func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts ...CloudDownloadOption) ([]CloudTask, error) {
-	entries := make([]CloudDownloadEntry, len(urls))
+	entries := make([]cloudfilename.Entry, len(urls))
 	for i, u := range urls {
-		entries[i] = CloudDownloadEntry{URL: u}
+		entries[i] = cloudfilename.Entry{URL: u}
 	}
 	return c.CloudDownloadBatchEntries(ctx, entries, opts...)
 }
 
 // CloudDownloadBatchEntries 批量创建云端下载任务，每个条目可单独指定保存文件名。
 // Filename 为空时由服务端按 URL 自动生成。
-func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []CloudDownloadEntry, opts ...CloudDownloadOption) ([]CloudTask, error) {
+func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cloudfilename.Entry, opts ...CloudDownloadOption) ([]CloudTask, error) {
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("批量云端下载: URL 列表不能为空")
+	}
+	if err := cloudfilename.ValidateEntries(entries); err != nil {
+		return nil, err
 	}
 	cfg := &cloudDownloadOptions{}
 	for _, opt := range opts {
@@ -144,24 +142,6 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []Cl
 	// WithCloudDownloadMaxBatchURLs 时做本地预检，默认发送后由服务端 400 报错。
 	if cfg.maxBatchURLs > 0 && len(entries) > cfg.maxBatchURLs {
 		return nil, fmt.Errorf("批量云端下载: 最多 %d 个 URL，收到 %d 个", cfg.maxBatchURLs, len(entries))
-	}
-
-	// 校验每个 URL 的格式（scheme + host，与服务端 validateCloudDownloadURL 对齐，
-	// 缺 host 的 URL 如 http:///path 在发送前拦截，避免服务端 400 往返）
-	for _, e := range entries {
-		if e.URL == "" {
-			return nil, fmt.Errorf("批量云端下载: URL 不能为空")
-		}
-		u, err := url.Parse(e.URL)
-		if err != nil {
-			return nil, fmt.Errorf("批量云端下载: 无效 URL %q: %w", e.URL, err)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return nil, fmt.Errorf("批量云端下载: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
-		}
-		if u.Host == "" {
-			return nil, fmt.Errorf("批量云端下载: 无效 URL %q (缺少 host)", e.URL)
-		}
 	}
 
 	body := map[string]any{"urls": entries}
@@ -284,33 +264,23 @@ type CloudGroupDetail struct {
 // CloudCreateGroup 创建云端下载任务组。
 // 如需为每个 URL 指定保存文件名，使用 CloudCreateGroupEntries。
 func (c *FileClient) CloudCreateGroup(ctx context.Context, name string, urls []string) (*CloudGroup, error) {
-	entries := make([]CloudDownloadEntry, len(urls))
+	entries := make([]cloudfilename.Entry, len(urls))
 	for i, u := range urls {
-		entries[i] = CloudDownloadEntry{URL: u}
+		entries[i] = cloudfilename.Entry{URL: u}
 	}
 	return c.CloudCreateGroupEntries(ctx, name, entries)
 }
 
 // CloudCreateGroupEntries 创建云端下载任务组，每个条目可单独指定保存文件名。
 // Filename 为空时由服务端按 URL 自动生成；服务端在创建前校验文件名冲突（重复返回 409）。
-func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, entries []CloudDownloadEntry) (*CloudGroup, error) {
+func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, entries []cloudfilename.Entry) (*CloudGroup, error) {
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("创建下载组: URL 列表不能为空")
 	}
-	for _, e := range entries {
-		if e.URL == "" {
-			return nil, fmt.Errorf("创建下载组: URL 不能为空")
-		}
-		u, err := url.Parse(e.URL)
-		if err != nil {
-			return nil, fmt.Errorf("创建下载组: 无效 URL %q: %w", e.URL, err)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return nil, fmt.Errorf("创建下载组: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
-		}
-		if u.Host == "" {
-			return nil, fmt.Errorf("创建下载组: 无效 URL %q (缺少 host)", e.URL)
-		}
+	// 校验每个条目的 URL 格式（scheme + host）与同 URL 不同 Filename 冲突，
+	// 与服务端规则对齐（cloudfilename.ValidateEntries），避免服务端 400/409 往返
+	if err := cloudfilename.ValidateEntries(entries); err != nil {
+		return nil, err
 	}
 	body := map[string]any{
 		"name": name,

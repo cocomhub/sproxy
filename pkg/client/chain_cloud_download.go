@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
 // cloudArchiveDirName 是服务端云任务归档文件存储子目录，与服务端 cloudArchiveDirName 保持一致。
@@ -34,22 +36,22 @@ func init() {
 
 // CloudDownloadChain 云端下载链式操作，实现 ChainRunner 接口。
 type CloudDownloadChain struct {
-	ChainID      string               `json:"chain_id"`
-	CurrentPhase string               `json:"phase"`
-	CurStatus    string               `json:"status"`
-	URLs         []string             `json:"urls"`
-	Entries      []CloudDownloadEntry `json:"entries,omitempty"` // URL→可选保存文件名；空则回退 URLs
-	TaskIDs      []string             `json:"task_ids,omitempty"`
-	ArchiveName  string               `json:"archive_name"`
-	LocalDir     string               `json:"local_dir"`
-	LocalPath    string               `json:"local_path,omitempty"`
-	KeepFiles    bool                 `json:"keep_files"`
-	Completed    int                  `json:"completed"`
-	Failed       int                  `json:"failed"`
-	Total        int                  `json:"total"`
-	Error        string               `json:"error,omitempty"`
-	CreatedAt    time.Time            `json:"created_at"`
-	UpdatedAt    time.Time            `json:"updated_at"`
+	ChainID      string                `json:"chain_id"`
+	CurrentPhase string                `json:"phase"`
+	CurStatus    string                `json:"status"`
+	URLs         []string              `json:"urls"`
+	Entries      []cloudfilename.Entry `json:"entries,omitempty"` // URL→可选保存文件名；空则回退 URLs
+	TaskIDs      []string              `json:"task_ids,omitempty"`
+	ArchiveName  string                `json:"archive_name"`
+	LocalDir     string                `json:"local_dir"`
+	LocalPath    string                `json:"local_path,omitempty"`
+	KeepFiles    bool                  `json:"keep_files"`
+	Completed    int                   `json:"completed"`
+	Failed       int                   `json:"failed"`
+	Total        int                   `json:"total"`
+	Error        string                `json:"error,omitempty"`
+	CreatedAt    time.Time             `json:"created_at"`
+	UpdatedAt    time.Time             `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -81,7 +83,7 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 	entries := opts.entries
 	if len(entries) == 0 {
 		for _, u := range urls {
-			entries = append(entries, CloudDownloadEntry{URL: u})
+			entries = append(entries, cloudfilename.Entry{URL: u})
 		}
 	}
 	return &CloudDownloadChain{
@@ -278,7 +280,7 @@ func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
 	entries := c.Entries
 	if len(entries) == 0 {
 		for _, u := range c.URLs {
-			entries = append(entries, CloudDownloadEntry{URL: u})
+			entries = append(entries, cloudfilename.Entry{URL: u})
 		}
 	}
 	tasks, err := c.client.CloudDownloadBatchEntries(ctx, entries)
@@ -312,13 +314,13 @@ func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
 // 仅含 URL 的条目（filename 为空，服务端自动生成）。
 // 用于存储超限重试提交：服务端返回的任务 URL 可能是规范化后的，与原始 Entries
 // 不完全一致，匹配失败时按 URL 重新提交即可。
-func (c *CloudDownloadChain) entryForURL(url string) CloudDownloadEntry {
+func (c *CloudDownloadChain) entryForURL(url string) cloudfilename.Entry {
 	for _, e := range c.Entries {
 		if e.URL == url {
 			return e
 		}
 	}
-	return CloudDownloadEntry{URL: url}
+	return cloudfilename.Entry{URL: url}
 }
 
 // waitForTasks 轮询等待所有任务完成，支持存储超限重试。
@@ -395,7 +397,7 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 				// 使用独立超时的 context 重试，避免原始 context 过期导致重试失败。
 				// 重试条目保留原 URL 在 Entries 中指定的保存文件名（若指定过）。
 				retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-				retryEntries := make([]CloudDownloadEntry, 0, len(storageFullURLs))
+				retryEntries := make([]cloudfilename.Entry, 0, len(storageFullURLs))
 				for _, u := range storageFullURLs {
 					retryEntries = append(retryEntries, c.entryForURL(u))
 				}

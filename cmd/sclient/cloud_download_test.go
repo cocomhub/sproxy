@@ -191,49 +191,50 @@ func TestCloudDownloadCmd_NoURLs(t *testing.T) {
 	}
 }
 
-func TestCloudDownloadCmd_ReadURLsFromFile(t *testing.T) {
+func TestCloudDownloadCmd_ReadEntriesFromFile(t *testing.T) {
 	dir := t.TempDir()
 
 	f1 := filepath.Join(dir, "urls.txt")
 	os.WriteFile(f1, []byte("https://example.com/a.zip\nhttps://example.com/b.zip\n"), 0644)
-	urls, err := readURLsFromFile(f1)
+	entries, err := readEntriesFromFile(f1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(urls) != 2 {
-		t.Fatalf("expected 2 URLs, got %d", len(urls))
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
 	}
-	if urls[0] != "https://example.com/a.zip" {
-		t.Fatalf("expected first URL, got %q", urls[0])
+	if entries[0].URL != "https://example.com/a.zip" {
+		t.Fatalf("expected first URL, got %q", entries[0].URL)
 	}
 
 	f2 := filepath.Join(dir, "with-comments.txt")
 	os.WriteFile(f2, []byte("# comment\n\nhttps://example.com/valid.zip\n  # another comment\n"), 0644)
-	urls, err = readURLsFromFile(f2)
+	entries, err = readEntriesFromFile(f2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(urls) != 1 {
-		t.Fatalf("expected 1 URL, got %d", len(urls))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
 
 	f3 := filepath.Join(dir, "empty.txt")
 	os.WriteFile(f3, []byte(""), 0644)
-	urls, err = readURLsFromFile(f3)
+	entries, err = readEntriesFromFile(f3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(urls) != 0 {
-		t.Fatalf("expected 0 URLs, got %d", len(urls))
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries, got %d", len(entries))
 	}
 
-	_, err = readURLsFromFile(filepath.Join(dir, "nonexistent.txt"))
+	_, err = readEntriesFromFile(filepath.Join(dir, "nonexistent.txt"))
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
 }
 
 func TestCloudDownloadCmd_BatchFileFlag(t *testing.T) {
+	// --batch 已随 readURLsFromFile 一同移除，改用 --url-file 验证等价行为。
 	tasks := []map[string]any{
 		{
 			"id":         "batch-chain-1",
@@ -246,15 +247,15 @@ func TestCloudDownloadCmd_BatchFileFlag(t *testing.T) {
 	mock := newChainMockServer(t, tasks, []byte("batch content"))
 	defer mock.Close()
 
-	batchFile := filepath.Join(t.TempDir(), "batch-urls.txt")
-	os.WriteFile(batchFile, []byte("https://example.com/batch-file.zip\n"), 0644)
+	urlFile := filepath.Join(t.TempDir(), "batch-urls.txt")
+	os.WriteFile(urlFile, []byte("https://example.com/batch-file.zip\n"), 0644)
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	outDir := t.TempDir()
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"--batch", batchFile, "--output-dir", outDir, "--poll-interval", "100ms", "--timeout", "30s"})
+	cmd.SetArgs([]string{"--url-file", urlFile, "--output-dir", outDir, "--poll-interval", "100ms", "--timeout", "30s"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("cloud-download command failed: %v", err)
 	}
@@ -275,11 +276,14 @@ func TestCloudDownloadCmd_NewFlags(t *testing.T) {
 		}
 	}
 
-	newFlags := []string{"keep-files", "timeout", "archive-name", "output-dir", "poll-interval", "batch"}
+	newFlags := []string{"keep-files", "timeout", "archive-name", "output-dir", "poll-interval", "url-file"}
 	for _, name := range newFlags {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("expected new flag --%s to exist", name)
 		}
+	}
+	if cmd.Flags().Lookup("batch") != nil {
+		t.Errorf("old flag --batch should have been removed")
 	}
 }
 
@@ -562,8 +566,8 @@ func TestCloudDownloadCmd_CancelSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_SubmitBatchCommand(t *testing.T) {
-	batchFile := filepath.Join(t.TempDir(), "batch-submit.txt")
-	os.WriteFile(batchFile, []byte("https://example.com/batch-submit.zip\n"), 0644)
+	urlFile := filepath.Join(t.TempDir(), "batch-submit.txt")
+	os.WriteFile(urlFile, []byte("https://example.com/batch-submit.zip\n"), 0644)
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download/batch" && r.Method == http.MethodPost {
@@ -590,7 +594,7 @@ func TestCloudDownloadCmd_SubmitBatchCommand(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"submit", "--batch", batchFile})
+	cmd.SetArgs([]string{"submit", "--url-file", urlFile})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("submit subcommand failed: %v", err)
 	}
@@ -954,26 +958,6 @@ func TestReadEntriesFromFile(t *testing.T) {
 	}
 	if entries[2].Filename != "我的文件.txt" {
 		t.Fatalf("entry[2].Filename = %q, want 我的文件.txt", entries[2].Filename)
-	}
-}
-
-func TestResolvedFilename(t *testing.T) {
-	tests := []struct {
-		name  string
-		entry client.CloudDownloadEntry
-		want  string
-	}{
-		{name: "显式文件名清理", entry: client.CloudDownloadEntry{URL: "https://e.com/a.zip", Filename: "a/b.zip"}, want: "a_b.zip"},
-		{name: "自动生成普通文件", entry: client.CloudDownloadEntry{URL: "https://e.com/file.zip"}, want: "file.zip"},
-		{name: "目录结尾index.html", entry: client.CloudDownloadEntry{URL: "https://e.com/xx/?a=v"}, want: "index.html_a=v"},
-		{name: "空文件名回退download", entry: client.CloudDownloadEntry{URL: "https://e.com/"}, want: "index.html"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := resolvedFilename(tt.entry); got != tt.want {
-				t.Errorf("resolvedFilename(%+v) = %q, want %q", tt.entry, got, tt.want)
-			}
-		})
 	}
 }
 

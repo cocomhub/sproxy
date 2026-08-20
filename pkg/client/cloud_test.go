@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
 // cloudTestServer 返回一个模拟 cloud download handler 的测试服务器。
@@ -260,7 +262,7 @@ func TestCloudDownload_BatchEntries(t *testing.T) {
 	ts, _ := cloudTestServer(t)
 	c := NewFileClient(ts.URL)
 
-	entries := []CloudDownloadEntry{
+	entries := []cloudfilename.Entry{
 		{URL: "https://example.com/a.zip", Filename: "a-custom.zip"},
 		{URL: "https://example.com/b.zip"}, // 未指定，由服务端自动生成
 	}
@@ -279,25 +281,13 @@ func TestCloudDownload_BatchEntries(t *testing.T) {
 	}
 }
 
-// TestCloudDownload_BatchEntries_InvalidURL 校验 entries 中的非法 URL 在发送前被拦截。
-func TestCloudDownload_BatchEntries_InvalidURL(t *testing.T) {
-	t.Parallel()
-	ts, _ := cloudTestServer(t)
-	c := NewFileClient(ts.URL)
-
-	_, err := c.CloudDownloadBatchEntries(t.Context(), []CloudDownloadEntry{{URL: "ftp://example.com/a.zip"}})
-	if err == nil {
-		t.Fatal("expected error for unsupported scheme, got nil")
-	}
-}
-
 // TestCloudCreateGroupEntries 测试创建下载组时每个 URL 可单独指定保存文件名。
 func TestCloudCreateGroupEntries(t *testing.T) {
 	t.Parallel()
 	ts, _ := cloudTestServer(t)
 	c := NewFileClient(ts.URL)
 
-	entries := []CloudDownloadEntry{
+	entries := []cloudfilename.Entry{
 		{URL: "https://example.com/a.zip"},
 		{URL: "https://example.com/b.zip", Filename: "b-named.zip"},
 	}

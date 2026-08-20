@@ -5,55 +5,9 @@ package main
 
 import (
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// ---- readURLsFromFile ----
-
-func TestReadURLsFromFile(t *testing.T) {
-	t.Parallel()
-
-	t.Run("normal_lines", func(t *testing.T) {
-		f := filepath.Join(t.TempDir(), "urls.txt")
-		if err := os.WriteFile(f, []byte("https://example.com/file1\nhttps://example.com/file2\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		urls, err := readURLsFromFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(urls) != 2 {
-			t.Fatalf("expected 2 URLs, got %d", len(urls))
-		}
-		if urls[0] != "https://example.com/file1" {
-			t.Errorf("expected first URL, got %q", urls[0])
-		}
-	})
-
-	t.Run("skips_comments_and_empty", func(t *testing.T) {
-		f := filepath.Join(t.TempDir(), "urls2.txt")
-		if err := os.WriteFile(f, []byte("# comment\n\nhttps://example.com/file1\n  \n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		urls, err := readURLsFromFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(urls) != 1 {
-			t.Fatalf("expected 1 URL, got %d", len(urls))
-		}
-	})
-
-	t.Run("file_not_found", func(t *testing.T) {
-		_, err := readURLsFromFile("/nonexistent/file.txt")
-		if err == nil {
-			t.Fatal("expected error for nonexistent file")
-		}
-	})
-}
 
 // ---- isImageExt ----
 
