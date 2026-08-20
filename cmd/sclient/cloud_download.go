@@ -175,6 +175,15 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.AddCommand(migratedGroupSubcommand("group-resume", "resume-download",
 		"group-resume <group-id>", "恢复下载组内所有失败任务"))
 
+	// 兼容性 stub：resume 已改名 resume-chain，保留空壳提示迁移路径
+	cmd.AddCommand(&cobra.Command{
+		Use:   "resume <chain-id>",
+		Short: "恢复中断的链式操作",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return fmt.Errorf("命令 \"resume\" 已改名：请使用 'sclient cloud-download resume-chain <chain-id>' 代替")
+		},
+	})
+
 	return cmd
 }
 
@@ -417,6 +426,10 @@ func NewCmdCloudDownloadFile(factory clientfactory.Factory, ios cli.IOStreams, c
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
+			concurrency, _ := cmd.Flags().GetInt("concurrency")
+
+			// 先获取所有任务信息，构造下载条目（需要 Filename 拼远端路径）
+			items := make([]client.DownloadItem, 0, len(args))
 			for _, taskID := range args {
 				task, err := svc.GetCloudTask(cmd.Context(), taskID)
 				if err != nil {
@@ -426,15 +439,19 @@ func NewCmdCloudDownloadFile(factory clientfactory.Factory, ios cli.IOStreams, c
 					return fmt.Errorf("任务 %s 未完成（当前 %s），无法下载原始文件", taskID, task.Status)
 				}
 				cloudPath := ".__cloud__/" + taskID + "/" + task.Filename
-				ios.WriteOutLine("下载任务 %s 的原始文件: %s", taskID, task.Filename)
-				if err := svc.Download(cmd.Context(), cloudPath, task.Filename); err != nil {
-					return fmt.Errorf("下载任务 %s 原始文件失败: %w", taskID, err)
-				}
-				ios.WriteOutLine("  ✓ 已保存到: %s", task.Filename)
+				items = append(items, client.DownloadItem{RemotePath: cloudPath, LocalPath: task.Filename})
 			}
+
+			ios.WriteOutLine("下载 %d 个任务的原始文件...", len(items))
+			opts := []client.DownloadOption{client.WithDownloadConcurrency(concurrency)}
+			if err := svc.DownloadItems(cmd.Context(), items, opts...); err != nil {
+				return fmt.Errorf("批量下载失败: %w", err)
+			}
+			ios.WriteOutLine("  ✓ 全部下载完成")
 			return nil
 		},
 	}
+	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
 	return cmd
 }
 
@@ -450,17 +467,23 @@ func NewCmdCloudDownloadArchive(factory clientfactory.Factory, ios cli.IOStreams
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
+			concurrency, _ := cmd.Flags().GetInt("concurrency")
+
+			items := make([]client.DownloadItem, 0, len(args))
 			for _, archiveFile := range args {
-				localPath := filepath.Base(archiveFile)
-				ios.WriteOutLine("下载归档文件: %s", archiveFile)
-				if err := svc.Download(cmd.Context(), archiveFile, localPath); err != nil {
-					return fmt.Errorf("下载归档文件 %s 失败: %w", archiveFile, err)
-				}
-				ios.WriteOutLine("  ✓ 已保存到: %s", localPath)
+				items = append(items, client.DownloadItem{RemotePath: archiveFile})
 			}
+
+			ios.WriteOutLine("下载 %d 个归档文件...", len(items))
+			opts := []client.DownloadOption{client.WithDownloadConcurrency(concurrency)}
+			if err := svc.DownloadItems(cmd.Context(), items, opts...); err != nil {
+				return fmt.Errorf("批量下载归档文件失败: %w", err)
+			}
+			ios.WriteOutLine("  ✓ 全部下载完成")
 			return nil
 		},
 	}
+	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
 	return cmd
 }
 

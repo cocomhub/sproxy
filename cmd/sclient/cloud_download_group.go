@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -380,6 +379,8 @@ func NewCmdCloudGroupDownload(factory clientfactory.Factory, ios cli.IOStreams, 
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
+			concurrency, _ := cmd.Flags().GetInt("concurrency")
+
 			groupID := args[0]
 			detail, err := svc.CloudGetGroup(cmd.Context(), groupID)
 			if err != nil {
@@ -389,6 +390,8 @@ func NewCmdCloudGroupDownload(factory clientfactory.Factory, ios cli.IOStreams, 
 			for _, t := range detail.Tasks {
 				taskByID[t.ID] = t
 			}
+
+			items := make([]client.DownloadItem, 0, len(args)-1)
 			for _, subID := range args[1:] {
 				task, ok := taskByID[subID]
 				if !ok {
@@ -398,14 +401,19 @@ func NewCmdCloudGroupDownload(factory clientfactory.Factory, ios cli.IOStreams, 
 					return fmt.Errorf("子任务 %s 未完成（当前 %s），无法下载原始文件", subID, task.Status)
 				}
 				cloudPath := ".__cloud__/" + subID + "/" + task.Filename
-				ios.WriteOutLine("下载子任务 %s (%s)...", subID, task.Filename)
-				if err := svc.Download(cmd.Context(), cloudPath, task.Filename); err != nil {
-					return fmt.Errorf("下载子任务 %s 失败: %w", subID, err)
-				}
+				items = append(items, client.DownloadItem{RemotePath: cloudPath, LocalPath: task.Filename})
 			}
+
+			ios.WriteOutLine("下载组 %s 中 %d 个子任务原始文件...", groupID, len(items))
+			opts := []client.DownloadOption{client.WithDownloadConcurrency(concurrency)}
+			if err := svc.DownloadItems(cmd.Context(), items, opts...); err != nil {
+				return fmt.Errorf("批量下载失败: %w", err)
+			}
+			ios.WriteOutLine("  ✓ 全部下载完成")
 			return nil
 		},
 	}
+	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
 	return cmd
 }
 
@@ -421,16 +429,23 @@ func NewCmdCloudGroupDownloadArchive(factory clientfactory.Factory, ios cli.IOSt
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
+			concurrency, _ := cmd.Flags().GetInt("concurrency")
+
+			items := make([]client.DownloadItem, 0, len(args))
 			for _, archiveFile := range args {
-				localName := filepath.Base(archiveFile)
-				ios.WriteOutLine("下载归档文件 %s...", archiveFile)
-				if err := svc.Download(cmd.Context(), archiveFile, localName); err != nil {
-					return fmt.Errorf("下载归档文件 %s 失败: %w", archiveFile, err)
-				}
+				items = append(items, client.DownloadItem{RemotePath: archiveFile})
 			}
+
+			ios.WriteOutLine("下载 %d 个归档文件...", len(items))
+			opts := []client.DownloadOption{client.WithDownloadConcurrency(concurrency)}
+			if err := svc.DownloadItems(cmd.Context(), items, opts...); err != nil {
+				return fmt.Errorf("批量下载归档文件失败: %w", err)
+			}
+			ios.WriteOutLine("  ✓ 全部下载完成")
 			return nil
 		},
 	}
+	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
 	return cmd
 }
 

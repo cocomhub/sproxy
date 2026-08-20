@@ -550,17 +550,35 @@ func TestCloudDownloadCmd_ResumeChainSubcommand(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
 
-	if sub := findSubCommand(cmd, "resume"); sub != nil {
-		t.Fatalf("expected resume subcommand to be renamed to resume-chain, found it registered with Use %q", sub.Use)
+	// resume 的迁移 stub 应存在（旧命令名 stub 提示用户使用 resume-chain）
+	resumeStub := findSubCommand(cmd, "resume")
+	if resumeStub == nil {
+		t.Fatal("expected resume migration stub subcommand")
 	}
-	resume := findSubCommand(cmd, "resume-chain")
-	if resume == nil {
+	if resumeStub.Use != "resume <chain-id>" {
+		t.Fatalf("expected Use 'resume <chain-id>', got %q", resumeStub.Use)
+	}
+	// 执行 stub 应返回迁移提示错误
+	var buf strings.Builder
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"resume", "chain-123"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected migration stub to return error")
+	}
+	if !strings.Contains(err.Error(), "resume-chain") {
+		t.Errorf("expected error to mention resume-chain, got: %v", err)
+	}
+	// resume-chain 是实际实现
+	resumeChain := findSubCommand(cmd, "resume-chain")
+	if resumeChain == nil {
 		t.Fatal("expected resume-chain subcommand")
 	}
-	if resume.Use != "resume-chain <chain-id>" {
-		t.Fatalf("expected Use 'resume-chain <chain-id>', got %q", resume.Use)
+	if resumeChain.Use != "resume-chain <chain-id>" {
+		t.Fatalf("expected Use 'resume-chain <chain-id>', got %q", resumeChain.Use)
 	}
-	if resume.Args == nil {
+	if resumeChain.Args == nil {
 		t.Fatal("expected Args to be set")
 	}
 }
@@ -621,8 +639,8 @@ func TestCloudDownloadCmd_DownloadSubcommand(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("download subcommand failed: %v", err)
 	}
-	if !strings.Contains(buf.String(), "original.zip") {
-		t.Fatalf("expected output to contain filename, got: %s", buf.String())
+	if !strings.Contains(buf.String(), "全部下载完成") {
+		t.Fatalf("expected output to contain completion message, got: %s", buf.String())
 	}
 	got, err := os.ReadFile(filepath.Join(outDir, "original.zip"))
 	if err != nil {

@@ -5,8 +5,6 @@ package client
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,13 +18,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
-
-// sha256Hex 计算数据的 SHA-256 十六进制字符串。
-func sha256Hex(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
-}
 
 // newMockGroupChainServer 创建覆盖组链式操作完整 API 的 mock 服务端。
 // groupStatusFn 每次查询组详情时调用，返回组状态与子任务列表。
@@ -124,7 +117,7 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		sum := sha256Hex(data)
+		sum := testutil.SHA256Hex(data)
 		info, err := os.Stat(archiveFile)
 		if err != nil {
 			t.Error("Stat:", err)

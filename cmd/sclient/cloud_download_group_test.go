@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -421,6 +422,8 @@ func TestCloudDownloadGroupCmd_DownloadSubcommandNotCompleted(t *testing.T) {
 
 func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 	var calledDownload bool
+	archiveContent := []byte("archive content")
+	archiveChecksum := sha256Hex(archiveContent)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/download" && r.Method == http.MethodGet {
 			calledDownload = true
@@ -428,7 +431,9 @@ func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			w.Write([]byte("archive content"))
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-File-Checksum", archiveChecksum)
+			w.Write(archiveContent)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -445,6 +450,15 @@ func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 	}
 	if !calledDownload {
 		t.Fatal("expected Download call")
+	}
+	// 响应带 X-File-Checksum 时客户端校验文件完整性，下载内容必须落盘正确
+	outDir, _ := os.Getwd()
+	got, err := os.ReadFile(filepath.Join(outDir, "archive.tar.gz"))
+	if err != nil {
+		t.Fatalf("expected downloaded archive on disk: %v", err)
+	}
+	if !bytes.Equal(got, archiveContent) {
+		t.Fatalf("downloaded content mismatch: got %q, want %q", got, archiveContent)
 	}
 }
 
