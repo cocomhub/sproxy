@@ -56,12 +56,11 @@ func WithCloudDownloadFilename(name string) CloudDownloadOption {
 // WithCloudDownloadMaxBatchURLs 设置批量下载的客户端侧 URL 数量上限（可选）。
 // 上限由服务端配置 cloud_max_batch_urls 强制（默认 100）；客户端默认不预检数量，
 // 发送超过服务端上限的请求会收到 400 错误并使创建失败。
-// 传入 n>0 时作为客户端本地护栏，在发送前拦截；n<=0 表示不限制（交给服务端）。
+// 传入 n>0 时作为客户端本地护栏，在发送前拦截；传入 n<=0 表示不限制（交给服务端），
+// 且可覆盖此前设置的任何值（复位为"不预检"）。
 func WithCloudDownloadMaxBatchURLs(n int) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
-		if n > 0 {
-			o.maxBatchURLs = n
-		}
+		o.maxBatchURLs = n
 	}
 }
 
@@ -93,6 +92,9 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("云端下载: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("云端下载: 无效 URL %q (缺少 host)", urlStr)
 	}
 	cfg := &cloudDownloadOptions{}
 	for _, opt := range opts {

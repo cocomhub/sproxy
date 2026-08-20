@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -78,6 +79,13 @@ func TestSafe(t *testing.T) {
 		{name: "首尾点去除", in: "..file.txt..", want: "file.txt"},
 		{name: "仅点与空白", in: "... ...", want: "download"},
 		{name: "空串", in: "", want: "download"},
+		{name: "Windows保留名CON", in: "CON", want: "_CON"},
+		{name: "Windows保留名小写带扩展", in: "con.txt", want: "_con.txt"},
+		{name: "Windows保留名COM1", in: "COM1", want: "_COM1"},
+		{name: "Windows保留名LPT9", in: "lpt9", want: "_lpt9"},
+		{name: "CON后接字符不命中", in: "CONtext.txt", want: "CONtext.txt"},
+		{name: "超长文件名截断保留扩展名", in: strings.Repeat("a", 300) + ".txt", want: strings.Repeat("a", 250) + ".txt"},
+		{name: "超长多字节不劈开UTF-8", in: strings.Repeat("好", 100) + ".zip", want: strings.Repeat("好", 83) + ".zip"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

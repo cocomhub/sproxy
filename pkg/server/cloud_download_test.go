@@ -604,13 +604,12 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 		t.Fatalf("expected dedup to same task %q, got %q", taskID, task.ID)
 	}
 
-	// 等待真实对象离开 pending（旧 bug：真实对象永远停在 pending）
+	// 等待真实对象离开 pending（旧 bug：真实对象永远停在 pending）。
+	// 用 SnapshotTask 取快照副本读取，避免锁外读共享对象与 executeDownload 写状态竞争。
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		mgr.mu.RLock()
-		real := mgr.tasks[taskID]
-		mgr.mu.RUnlock()
-		if real != nil && real.Status != "pending" {
+		real, ok := mgr.SnapshotTask(taskID)
+		if ok && real.Status != "pending" {
 			if real.Status == "completed" {
 				return
 			}

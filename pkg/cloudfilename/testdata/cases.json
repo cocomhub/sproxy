@@ -25,5 +25,12 @@
   "https://example.com/my%20file.txt": "my file.txt",
   "https://example.com/path/file.html#fragment": "file.html",
   "https://example.com/xx/?a=v": "index.html?a=v",
-  "https://example.com?a=v": "index.html?a=v"
+  "https://example.com?a=v": "index.html?a=v",
+  "https://example.com/file.txt?x=中文": "file.txt?x=中文",
+  "https://example.com/file.txt?a=b c": "file.txt?a=b c",
+  "https://example.com/file.txt?x=%E4%B8%AD%E6%96%87": "file.txt?x=%E4%B8%AD%E6%96%87",
+  "//example.com/file": "file",
+  "mailto:foo@example.com": "download",
+  "data:text/plain,hello": "download",
+  "example.com/file.txt": "download"
 }

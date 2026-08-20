@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -86,13 +87,14 @@ func etagPath(partialPath string) string {
 	return partialPath + ".etag"
 }
 
-// saveETag 将 ETag 写入 companion 文件（不检查 etag 是否为空，为空时删除文件）。
-func saveETag(etagPath, etag string) {
+// saveETag 将 ETag 写入 companion 文件（etag 为空时删除文件），返回写盘错误。
+// 写盘失败意味着下次续传退化为"仅 Range 无 If-Range"，无法再校验远程内容一致性，
+// 服务端文件已变时会拼接出混合文件，因此调用方必须显式记录失败。
+func saveETag(etagPath, etag string) error {
 	if etag == "" {
-		_ = os.Remove(etagPath)
-		return
+		return os.Remove(etagPath)
 	}
-	_ = os.WriteFile(etagPath, []byte(etag), 0644)
+	return os.WriteFile(etagPath, []byte(etag), 0644)
 }
 
 // loadETag 从 companion 文件读取缓存的 ETag。文件不存在或读取失败返回空字符串。
@@ -109,6 +111,36 @@ func loadETag(etagPath string) string {
 // 完整保留以便 If-Range 发送时服务端能正确识别。
 func extractETag(resp *http.Response) string {
 	return strings.TrimSpace(resp.Header.Get("ETag"))
+}
+
+// finalizeDownload 将 .partial 文件收尾为最终文件：
+//   - rename 前保存 ETag 伴侣（供中断续传的 If-Range 一致性校验；写盘失败必须记录，
+//     否则续传退化为无 If-Range，服务端内容已变时可能拼接出混合文件）
+//   - rename 后删除伴侣，避免残留被 diskUsageOfTask 计入账本偏差
+//   - 恢复原始 mtime
+//
+// 三条完成路径（writeFullBody/handleRangeResume/finalizePartial）必须共用本函数，
+// 防止某条路径漏写/漏删 ETag 伴侣导致续传拼接损坏。
+func (d *HTTPDownloader) finalizeDownload(partialPath, destPath string, modTime time.Time, etag string) error {
+	if etag != "" {
+		if err := saveETag(etagPath(partialPath), etag); err != nil {
+			d.getLogger().Warn("保存 ETag 伴侣失败，续传将无 If-Range 一致性校验",
+				"path", etagPath(partialPath), "error", err)
+		}
+	}
+	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove existing dest: %w", err)
+	}
+	if err := os.Rename(partialPath, destPath); err != nil {
+		return fmt.Errorf("rename partial to dest: %w", err)
+	}
+	_ = os.Remove(etagPath(partialPath))
+	if modTime != (time.Time{}) {
+		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
+			d.getLogger().Warn("设置文件修改时间失败", "path", destPath, "error", err)
+		}
+	}
+	return nil
 }
 
 // Download 从 HTTP/HTTPS URL 下载文件到 destPath。
@@ -142,7 +174,8 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	// 第一次请求：存在部分文件时携带 Range 和 If-Range（如果有缓存的 ETag）
 	resp, err := d.doGet(ctx, source, existingSize, cachedETag)
 	if err != nil {
-		return nil, retryablef("http get: %w", err)
+		// doGet 已按确定性/网络错误分类（RetryableError 与非重试错误）
+		return nil, err
 	}
 	if err2 := d.validateAfterDo(resp); err2 != nil {
 		return nil, err2
@@ -216,7 +249,7 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 func (d *HTTPDownloader) downloadFull(ctx context.Context, source, destPath string, onProgress ProgressFunc) (*Result, error) {
 	resp, err := d.doGet(ctx, source, 0, "")
 	if err != nil {
-		return nil, retryablef("http get: %w", err)
+		return nil, err
 	}
 	if err2 := d.validateAfterDo(resp); err2 != nil {
 		return nil, err2
@@ -234,6 +267,8 @@ func (d *HTTPDownloader) downloadFull(ctx context.Context, source, destPath stri
 
 // doGet 发起 GET 请求；existingSize>0 时携带 Range 和 If-Range 头。
 // etag 为空时仅发送 Range；etag 非空时同时发送 If-Range 以校验远程内容未变。
+// 错误分类：建请求错误（非法 URL 等，确定性）返回普通错误，Do 的网络错误返回
+// RetryableError——避免管理器对不可能成功的请求空耗重试。
 func (d *HTTPDownloader) doGet(ctx context.Context, source string, existingSize int64, etag string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil {
@@ -246,7 +281,11 @@ func (d *HTTPDownloader) doGet(ctx context.Context, source string, existingSize 
 			req.Header.Set("If-Range", etag)
 		}
 	}
-	return d.getClient().Do(req)
+	resp, err := d.getClient().Do(req)
+	if err != nil {
+		return nil, retryablef("http get: %w", err)
+	}
+	return resp, nil
 }
 
 // validateAfterDo 在请求完成后二次验证最终 URL 的 IP 是否安全（DNS 重绑定防御）。
@@ -336,28 +375,9 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 
 	checksum := hex.EncodeToString(h.Sum(nil))
 	etag := extractETag(resp)
-	// 在 rename 之前保存 ETag 伴侣：若下载在此后中断（partial 保留），伴侣已存在
-	// 供续传的 If-Range 一致性校验。rename 之后 partial 已不存在，伴侣文件不再被
-	// 读取，需删除避免残留（.partial.etag 会被 diskUsageOfTask 计入造成账本偏差，
-	// 且陈旧值会在下次普通续传时触发一次无谓的全量重下）。
-	if etag != "" {
-		saveETag(etagPath(partialPath), etag)
+	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
+		return nil, err
 	}
-
-	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("remove existing dest: %w", err)
-	}
-	if err := os.Rename(partialPath, destPath); err != nil {
-		return nil, fmt.Errorf("rename partial to dest: %w", err)
-	}
-	_ = os.Remove(etagPath(partialPath))
-
-	if modTime != (time.Time{}) {
-		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
-			d.getLogger().Warn("设置文件修改时间失败", "path", destPath, "error", err)
-		}
-	}
-
 	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime, ETag: etag}, nil
 }
 
@@ -450,27 +470,9 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 
 	fullChecksum := hex.EncodeToString(h.Sum(nil))
 	etag := extractETag(resp)
-	// 与 writeFullBody/finalizePartial 一致：rename 前保存 ETag 伴侣供中断续传，
-	// rename 后 partial 不存在，删除伴侣避免残留（三条完成路径行为必须一致）。
-	if etag != "" {
-		saveETag(etagPath(partialPath), etag)
+	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
+		return nil, err
 	}
-
-	// 重命名部分文件为目标文件（先清理可能残留的目标文件，兼容 Windows）
-	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("remove existing dest: %w", err)
-	}
-	if err := os.Rename(partialPath, destPath); err != nil {
-		return nil, fmt.Errorf("rename partial to dest: %w", err)
-	}
-	_ = os.Remove(etagPath(partialPath))
-
-	if modTime != (time.Time{}) {
-		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
-			d.getLogger().Warn("设置文件修改时间失败", "path", destPath, "error", err)
-		}
-	}
-
 	return &Result{Size: downloadedTotal, Checksum: fullChecksum, ModTime: modTime, ETag: etag}, nil
 }
 
@@ -489,35 +491,20 @@ func (d *HTTPDownloader) finalizePartial(partialPath, destPath string, resp *htt
 	h := sha256.New()
 	pf, err := os.Open(partialPath)
 	if err != nil {
-		return nil, retryablef("open partial file: %w", err)
+		// 本地文件 I/O 错误不可重试（与 handleRangeResume 的注释一致），重试只会
+		// 在每次 Download 里先 os.Remove(partialPath) 丢弃唯一可续传的资产。
+		return nil, fmt.Errorf("open partial file: %w", err)
 	}
 	if _, copyErr := io.Copy(h, pf); copyErr != nil {
 		pf.Close()
-		return nil, retryablef("hash partial file: %w", copyErr)
+		return nil, fmt.Errorf("hash partial file: %w", copyErr)
 	}
 	pf.Close()
 
 	etag := extractETag(resp)
-	// 与 writeFullBody/handleRangeResume 一致：rename 前保存 ETag 伴侣供中断续传，
-	// rename 后 partial 不存在，删除伴侣避免残留（三条完成路径行为必须一致）。
-	if etag != "" {
-		saveETag(etagPath(partialPath), etag)
+	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
+		return nil, err
 	}
-
-	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("remove existing dest: %w", err)
-	}
-	if err := os.Rename(partialPath, destPath); err != nil {
-		return nil, fmt.Errorf("rename partial to dest: %w", err)
-	}
-	_ = os.Remove(etagPath(partialPath))
-
-	if modTime != (time.Time{}) {
-		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
-			d.getLogger().Warn("设置文件修改时间失败", "path", destPath, "error", err)
-		}
-	}
-
 	return &Result{Size: existingSize, Checksum: hex.EncodeToString(h.Sum(nil)), ModTime: modTime, ETag: etag}, nil
 }
 
@@ -567,8 +554,11 @@ func (d *HTTPDownloader) getClient() *http.Client {
 
 // idleReadCloser 在响应体读取超过 IdleTimeout 无数据时主动关闭底层连接，
 // 使阻塞的 Read 返回错误，避免下载永久挂起。
+// 定时器在首次 Read 时才启动（而非响应头到达时），因此下载前的本地工作
+// （如续传时哈希已有 partial）不计入空闲预算，避免大文件续传被误判超时活锁。
 type idleReadCloser struct {
 	io.ReadCloser
+	mu    sync.Mutex
 	timer *time.Timer
 	idle  time.Duration
 }
@@ -577,17 +567,31 @@ func newIdleReadCloser(body io.ReadCloser, idle time.Duration) io.ReadCloser {
 	if idle <= 0 {
 		return body
 	}
-	timer := time.AfterFunc(idle, func() { _ = body.Close() })
-	return &idleReadCloser{ReadCloser: body, timer: timer, idle: idle}
+	return &idleReadCloser{ReadCloser: body, idle: idle}
 }
 
 func (r *idleReadCloser) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	if r.timer == nil {
+		r.timer = time.AfterFunc(r.idle, func() { _ = r.ReadCloser.Close() })
+	}
+	r.mu.Unlock()
 	n, err := r.ReadCloser.Read(p)
-	r.timer.Reset(r.idle)
+	if n > 0 && err == nil {
+		r.mu.Lock()
+		if r.timer != nil {
+			r.timer.Reset(r.idle)
+		}
+		r.mu.Unlock()
+	}
 	return n, err
 }
 
 func (r *idleReadCloser) Close() error {
-	r.timer.Stop()
+	r.mu.Lock()
+	if r.timer != nil {
+		r.timer.Stop()
+	}
+	r.mu.Unlock()
 	return r.ReadCloser.Close()
 }

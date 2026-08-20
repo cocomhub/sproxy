@@ -73,6 +73,7 @@ type CloudDownloadConfig struct {
 	IdleTimeout     time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
 	MaxRetries      int           // 失败重试次数，默认 10
 	RetryDelay      time.Duration // 重试间隔，默认 10s
+	Downloader      string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
 }
 
 // cloudReservePlaceholder 未知大小任务的存储占位大小（1 GiB）。
@@ -106,6 +107,9 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 	}
 	if cfg.RetryDelay <= 0 {
 		cfg.RetryDelay = 10 * time.Second
+	}
+	if cfg.Downloader == "" {
+		cfg.Downloader = "http"
 	}
 }
 
@@ -195,7 +199,7 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 		logger:        defaultLogger(logger),
 		semaphore:     make(chan struct{}, cfg.MaxConcurrent),
 		config:        cfg,
-		dl:            downloader.NewFromConfig("http"),
+		dl:            downloader.NewFromConfig(cfg.Downloader),
 		cancelFuncs:   make(map[string]context.CancelFunc),
 		running:       make(map[string]bool),
 		metrics:       &CloudMetrics{},
@@ -308,8 +312,10 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 }
 
 // SubmitAndStart 创建任务并立即启动下载。
-// 小文件（< syncThreshold）同步执行，大文件异步执行。
-// syncCtx 为 nil 时始终异步。
+// 仅当调用方已知 totalSize > 0 且 < syncThreshold 且 syncCtx 非 nil 时才同步执行
+// （在调用方 goroutine 内完成，便于小文件请求同步返回）；否则始终异步。
+// 注意：服务端 handler 提交时大小未知（传 -1），因此实际请求恒异步；
+// 同步路径主要供调用方在已知小文件大小时使用。
 func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context) (*CloudTask, error) {
 	task, err := m.CreateTask(method, url, filename, totalSize)
 	if err != nil {
@@ -379,8 +385,11 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
-		delete(m.cancelFuncs, task.ID)
+		// handedOff 表示下载已移交给新 goroutine（同步断连转异步）：新 goroutine 已
+		// 重新注册 cancelFuncs/running，旧 defer 不得清除——否则 CancelTask/Close 会
+		// 丢失取消句柄，取消后下载继续写盘直至完成。
 		if !handedOff {
+			delete(m.cancelFuncs, task.ID)
 			delete(m.running, task.ID)
 		}
 		m.mu.Unlock()
@@ -509,7 +518,8 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	}
 
 downloadDone:
-	// 任务删除竞态守卫：删除后完成/失败的下载不再触碰存储与状态
+	// 任务删除竞态守卫：删除后完成/失败的下载不再触碰存储与状态。
+	// 注意：真正的终态提交在下方锁内统一复查，这里仅避免无谓的 failTask/对账。
 	m.mu.RLock()
 	_, exists := m.tasks[task.ID]
 	m.mu.RUnlock()
@@ -518,28 +528,14 @@ downloadDone:
 		_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
 		return
 	}
-	// 任务下载期间被取消：取消路径已释放存储并置 cancelled，这里不覆盖终态，
-	// 并丢弃刚下载的文件（否则取消的任务文件残留在磁盘上，账本与磁盘不符）。
-	// 注意：task 与 m.tasks[task.ID] 为同一指针（去重路径不再启动副本），
-	// 但仍以存储对象的状态为准，防御未来改动引入副本。
-	m.mu.RLock()
-	storedStatus := m.tasks[task.ID].Status
-	m.mu.RUnlock()
-	if storedStatus == "cancelled" {
-		m.logger.Info("download finished after cancel, discarding result", "task_id", task.ID)
-		// 取消即放弃：连同 .partial/.partial.etag 一并清理（CancelTask 已释放存储
-		// 并尝试删除，这里兜底），保持磁盘与已归零账本一致。
-		_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
-		return
-	}
 
 	if downloadErr != nil {
+		// 客户端断开（只有外层 ctx 取消，内层 dlCtx 未取消），转为异步继续。
+		// running/cancelFuncs 由新 goroutine 接管：同步置位并标记 handedOff，使旧
+		// goroutine 的 defer 不清除二者，避免新 goroutine 短暂丢失运行标记与取消句柄。
 		if ctx.Err() != nil && dlCtx.Err() == nil {
-			// 客户端断开（只有外层 ctx 取消，内层 dlCtx 未取消），转为异步继续
 			m.logger.Info("sync download client disconnected, switching to async",
 				"task_id", task.ID, "url", task.URL)
-			// running 由新 goroutine 接管：同步置位并标记 handedOff，使旧 goroutine
-			// 的 defer 不清除 running，避免新 goroutine 短暂丢失运行标记。
 			//nolint:gosec // G118: 断线后异步继续需要独立 context
 			m.mu.Lock()
 			m.running[task.ID] = true
@@ -550,70 +546,102 @@ downloadDone:
 			go m.executeDownload(context.Background(), task) //nolint:gosec
 			return
 		}
+		// 用户取消：CancelTask 已更新状态并释放存储，这里不重复处理，仅兜底清理
+		// 可能残留的任务文件（CancelTask 的 RemoveAll 在 Windows 下可能因文件被占用失败）。
 		if dlCtx.Err() == context.Canceled {
-			// 用户取消：CancelTask 已更新状态并释放存储，这里不重复处理
 			m.logger.Info("download cancelled", "task_id", task.ID)
-		} else {
-			m.failTask(task, downloadErr.Error())
-			m.logger.Error("download failed", "task_id", task.ID, "url", task.URL, "error", downloadErr)
+			_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
+			return
 		}
+		m.failTask(task, downloadErr.Error())
+		m.logger.Error("download failed", "task_id", task.ID, "url", task.URL, "error", downloadErr)
 		return
 	}
 
-	// 恢复原始文件 mtime
-	if result.ModTime != (time.Time{}) {
-		modTime := result.ModTime
-		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
-			m.logger.Warn("设置文件修改时间失败", "task_id", task.ID, "error", err)
-		}
-		m.mu.Lock()
-		task.FileMTime = result.ModTime.UnixNano()
+	// 终态提交：在 m.mu 写锁内原子完成"复查存在/未取消 → 账本对账 → 置 completed"，
+	// 与 CancelTask/DeleteTask 的写锁互斥，消除完成路径 TOCTOU：
+	//   - 任务恰在此前被取消/删除时不会覆盖终态（取消后任务仍会残留文件的场景被移除）；
+	//   - 不再出现对已删除任务写状态或对 m.tasks[id]（可能为 nil）解引用 panic；
+	//   - 账本对账与置位同临界区，避免"CancelTask 释放预留后完成路径又补预留"的二次记账。
+	m.mu.Lock()
+	stored, ok := m.tasks[task.ID]
+	if !ok {
 		m.mu.Unlock()
+		m.logger.Info("download finished after task deletion, skipping completion", "task_id", task.ID)
+		_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
+		return
+	}
+	if stored.Status == "cancelled" {
+		m.mu.Unlock()
+		m.logger.Info("download finished after cancel, discarding result", "task_id", task.ID)
+		// 取消即放弃：连同 .partial/.partial.etag 一并清理（CancelTask 已释放存储
+		// 并尝试删除，这里兜底），保持磁盘与已归零账本一致。
+		_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
+		return
 	}
 
-	// 存储账本补偿：以 ReservedSize 为基准对齐到实际大小
-	m.mu.Lock()
-	reserved := task.ReservedSize
-	m.mu.Unlock()
+	// 恢复原始文件 mtime（先记录，锁外执行 Chtimes）
+	var fileMTime int64
+	if result.ModTime != (time.Time{}) {
+		fileMTime = result.ModTime.UnixNano()
+		stored.FileMTime = fileMTime
+	}
+
+	// 存储账本补偿：以 ReservedSize 为基准对齐到实际大小。TryReserve/Release 均为
+	// 内存计数，锁内调用与 failTask/CancelTask 的锁内存储操作保持一致锁序。
+	reserved := stored.ReservedSize
 	sizeDelta := result.Size - reserved
 	if sizeDelta > 0 {
 		// 实际更大，需要追加预留
 		if err := m.storage.TryReserve(sizeDelta, CategoryCloud); err != nil {
-			m.failTask(task, "storage full after download")
-			os.Remove(destPath)
+			// 存储已满无法容纳实际大小：释放旧占位并删文件，避免账本虚高/磁盘残留。
+			if reserved > 0 {
+				m.storage.Release(reserved, CategoryCloud)
+			}
+			stored.ReservedSize = 0
+			stored.Status = "failed"
+			stored.Error = "storage full after download"
+			stored.UpdatedAt = time.Now()
+			stored.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
+			m.mu.Unlock()
+			_ = os.Remove(destPath)
 			m.logger.Error("storage full after download, cannot fit actual size",
 				"task_id", task.ID, "actual_size", result.Size, "reserved", reserved)
+			_ = m.saveTask(stored)
+			m.metrics.TasksFailed.Add(1)
 			return
 		}
-		m.mu.Lock()
-		task.ReservedSize = result.Size
-		m.mu.Unlock()
+		stored.ReservedSize = result.Size
 	} else if sizeDelta < 0 {
 		// 实际更小，释放多余空间
 		m.storage.Release(-sizeDelta, CategoryCloud)
-		m.mu.Lock()
-		task.ReservedSize = result.Size
-		m.mu.Unlock()
+		stored.ReservedSize = result.Size
 	}
 
 	// 写入 ChecksumStore
-	remotePath := filepath.Join(cloudDirName, task.ID, task.Filename)
+	remotePath := filepath.Join(cloudDirName, stored.ID, stored.Filename)
 	if m.checksumStore != nil {
 		m.checksumStore.Set(remotePath, result.Checksum)
 	}
 
 	// 更新任务状态
-	m.mu.Lock()
-	task.Status = "completed"
-	task.TotalSize = result.Size
-	task.Downloaded = result.Size
-	task.Checksum = result.Checksum
-	task.UpdatedAt = time.Now()
-	task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
+	stored.Status = "completed"
+	stored.TotalSize = result.Size
+	stored.Downloaded = result.Size
+	stored.Checksum = result.Checksum
+	stored.UpdatedAt = time.Now()
+	stored.ExpiresAt = time.Now().Add(m.config.TaskTTL)
 	m.mu.Unlock()
 
+	// 锁外 I/O：恢复文件 mtime 与终态持久化
+	if fileMTime != 0 {
+		modTime := result.ModTime
+		if err := os.Chtimes(destPath, modTime, modTime); err != nil {
+			m.logger.Warn("设置文件修改时间失败", "task_id", task.ID, "error", err)
+		}
+	}
 	// 终态持久化失败会丢失"已完成"状态（重启后任务回到 downloading 被重启下载），必须显式报错
-	if err := m.saveTask(task); err != nil {
+	if err := m.saveTask(stored); err != nil {
 		m.logger.Error("persist completed task failed, state may be lost on restart",
 			"task_id", task.ID, "error", err)
 	}
@@ -646,6 +674,11 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 		if err := m.storage.TryReserve(actual-oldReserved, CategoryCloud); err != nil {
 			m.logger.Warn("storage full, cannot keep partial for resume, removing task files",
 				"task_id", task.ID, "actual", actual, "reserved", oldReserved, "error", err)
+			// 文件将被整体删除：先释放旧占位，避免磁盘清空后账本仍虚高
+			// （TryReserve 已失败、未增加任何预留）。
+			if oldReserved > 0 {
+				m.storage.Release(oldReserved, CategoryCloud)
+			}
 			task.ReservedSize = 0
 			task.Status = "failed"
 			task.Error = errMsg
@@ -1571,6 +1604,11 @@ func (m *CloudDownloadManager) ResumeGroup(groupID string, force bool) error {
 	var errs []error
 	for _, tid := range group.TaskIDs {
 		if err := m.ResumeTask(tid, force); err != nil {
+			// 组内任务被单独删除后，组级恢复不应因此报错（与 CancelGroup/DeleteGroup 一致，
+			// 否则整个组 resume 会误返回 404 让用户以为组不存在）。
+			if strings.Contains(err.Error(), "task not found") {
+				continue
+			}
 			errs = append(errs, err)
 		}
 	}

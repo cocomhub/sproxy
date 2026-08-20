@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -36,10 +37,17 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 创建任务并启动下载（同步模式使用 r.Context()）
+	// 创建任务并启动下载。提交时文件大小未知（-1），SubmitAndStart 的同步条件
+	// （totalSize > 0 且 < syncThreshold）不满足，因此恒异步执行：客户端断连后
+	// 服务端继续异步下载，不阻塞 handler。
 	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context())
 	if err != nil {
-		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
+		// 存储不足（ErrStorageFull）映射 507，其余视为 400（URL 等输入问题已提前拦截）
+		if errors.Is(err, ErrStorageFull) {
+			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
+			return
+		}
+		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
 
@@ -99,7 +107,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		sendJSONResponse(w, map[string]string{"error": "urls is required"}, http.StatusBadRequest)
 		return
 	}
-	if maxBatch := h.cloudMgr.config.MaxBatchURLs; maxBatch > 0 && len(req.URLs) > maxBatch {
+	if maxBatch := h.cloudMgr.config.MaxBatchURLs; len(req.URLs) > maxBatch {
 		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("maximum %d URLs per batch", maxBatch)}, http.StatusBadRequest)
 		return
 	}
@@ -108,6 +116,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 	for _, entry := range req.URLs {
 		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.config.AllowPrivate)
 		if err != nil {
+			// 校验失败阶段：返回用户原始 URL/Filename（此时尚无规范化值）
 			results = append(results, CloudBatchTaskResult{
 				URL:      entry.URL,
 				Filename: entry.Filename,
@@ -139,9 +148,10 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 			})
 			continue
 		}
+		// 成功项 URL 使用规范化值，与 GET /api/cloud/tasks/{id} 的详情一致
 		results = append(results, CloudBatchTaskResult{
 			ID:       snapshot.ID,
-			URL:      entry.URL,
+			URL:      cleanedURL,
 			Filename: cleanedFilename,
 			Status:   snapshot.Status,
 		})
@@ -228,7 +238,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": "urls is required"}, http.StatusBadRequest)
 		return
 	}
-	if maxBatch := h.cloudMgr.config.MaxBatchURLs; maxBatch > 0 && len(req.URLs) > maxBatch {
+	if maxBatch := h.cloudMgr.config.MaxBatchURLs; len(req.URLs) > maxBatch {
 		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("maximum %d URLs per group", maxBatch)}, http.StatusBadRequest)
 		return
 	}
@@ -255,10 +265,22 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusConflict)
 			return
 		}
+		// 存储不足映射 507（与单条/批量路径一致）
+		if errors.Is(err, ErrStorageFull) {
+			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
+			return
+		}
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	sendJSONResponse(w, group, http.StatusOK)
+	// 返回快照副本：SubmitAndStartGroup 返回的指针与 m.groups 共享，下载 goroutine
+	// 可能在 json.Marshal 期间并发写组状态字段（UpdateGroupStatus），需副本隔离防 data race。
+	snapshot, ok := h.cloudMgr.GetGroup(group.ID)
+	if !ok {
+		sendJSONResponse(w, map[string]string{"error": "group created but not found"}, http.StatusInternalServerError)
+		return
+	}
+	sendJSONResponse(w, snapshot, http.StatusOK)
 }
 
 // cloudGetGroup 处理 GET /api/cloud/groups/{id}。
@@ -294,15 +316,10 @@ func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 // cloudListGroups 处理 GET /api/cloud/groups。
 func (h *Handlers) cloudListGroups(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
-	// 先更新每个组的状态，再取最新快照列表
-	if status == "" {
-		for _, g := range h.cloudMgr.ListGroups("") {
-			h.cloudMgr.UpdateGroupStatus(g.ID)
-		}
-	} else {
-		for _, g := range h.cloudMgr.ListGroups(status) {
-			h.cloudMgr.UpdateGroupStatus(g.ID)
-		}
+	// 先刷新所有组的最新状态，再按 status 过滤返回。否则只刷新"当前已处于该状态"
+	// 的组，刚转换到目标状态的组会被过滤查询漏掉，客户端看到的状态滞后。
+	for _, g := range h.cloudMgr.ListGroups("") {
+		h.cloudMgr.UpdateGroupStatus(g.ID)
 	}
 	groups := h.cloudMgr.ListGroups(status)
 	sendJSONResponse(w, groups, http.StatusOK)
@@ -373,10 +390,15 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确定归档文件名
+	// 确定归档文件名。groupID 本身带 "group-" 前缀，需剥离避免生成
+	// "group-group-xxx" 的冗余命名。
 	archiveName := req.ArchiveName
 	if archiveName == "" {
-		archiveName = fmt.Sprintf("group-%s-%d.tar.gz", groupID, time.Now().Unix())
+		base := strings.TrimPrefix(groupID, "group-")
+		if base == "" {
+			base = groupID // 防御性兜底（正常 newGroupID 恒带前缀）
+		}
+		archiveName = fmt.Sprintf("group-%s-%d.tar.gz", base, time.Now().Unix())
 	}
 	archiveName = filepath.Base(archiveName)
 	if archiveName == "" || archiveName == "." || archiveName == ".." {
@@ -415,9 +437,12 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		sourceFile := filepath.Join(cloudDir, task.ID, task.Filename)
-		// 校验目标文件位于 cloud 根目录内（防御 task.Filename 含路径穿越）
-		if !IsPathWithin(sourceFile, cloudDir) {
+		sourceDir := filepath.Join(cloudDir, task.ID)
+		sourceFile := filepath.Join(sourceDir, task.Filename)
+		// 校验目标文件位于任务子目录内（防御 task.Filename 含路径穿越）。
+		// 与单任务/批量归档的校验基准（IsPathWithin(sourceDir)）对齐，更严格——
+		// 仅校验落在 cloud 根目录内允许 task.Filename 带 ../ 逃出任务目录。
+		if !IsPathWithin(sourceFile, sourceDir) {
 			h.logger.Error("path traversal detected in group archive",
 				"group_id", groupID, "task_id", taskID, "source_file", sourceFile)
 			skippedTasks = append(skippedTasks, taskID)

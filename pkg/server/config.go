@@ -193,6 +193,9 @@ func (c *Config) SetDefaults() {
 	if c.CloudMaxConcurrent <= 0 {
 		c.CloudMaxConcurrent = 3
 	}
+	if c.CloudMaxBatchURLs == 0 {
+		c.CloudMaxBatchURLs = 100
+	}
 	if c.CloudTaskTTL <= 0 {
 		c.CloudTaskTTL = 24 * time.Hour
 	}

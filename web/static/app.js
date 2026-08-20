@@ -1076,7 +1076,6 @@ function copyShareLink(token) {
 
 // --- 云端下载 ---
 let _cloudTasks = [];
-let _cloudFilenames = []; // 保存每个 URL 对应的预览文件名，用于提交时发送
 
 // genDefaultFilename 从 URL 推断默认文件名，委托给共享模块 cloudfilename.js。
 // 与 Go 端 pkg/cloudfilename 使用同一套规则（wget 行为），由共享语料测试保证双端一致。
@@ -1145,8 +1144,6 @@ async function showCloudDownloadPreview(action) {
       // 与服务端一致做 filepathSafe：用户输入的非法字符也会被清理，预览即最终保存名
       filenames.push(filepathSafe(filenameInputs[j].value.trim() || genDefaultFilename(lines[j])));
     }
-    window._cloudPreviewFilenames = filenames;
-    window._cloudPreviewUrls = lines;
 
     // 执行对应操作
     var act = window._cloudPreviewAction;
@@ -1168,6 +1165,11 @@ async function showCloudDownloadPreview(action) {
         return;
       }
     }
+    // 提交前立即恢复输入行，使"确认提交"按钮消失，防止链式等待（最长 20 分钟）期间
+    // 用户重复点击同一批 URL；doXxx 使用已收集的 lines/filenames 局部变量，不受影响。
+    restoreCloudUrlRow();
+    var restoredInput = document.getElementById('cloud-url');
+    if (restoredInput) restoredInput.value = '';
     if (act === 'submit') {
       doSubmitCloudTasks(lines, filenames);
     } else if (act === 'group') {
@@ -1180,11 +1182,19 @@ async function showCloudDownloadPreview(action) {
 let _cloudGroups = [];
 let _cloudPollTimer = null;
 
-// bindCloudUrlRowEvents 为云端下载输入行的三个按钮绑定事件。
+// bindCloudUrlRowEvents 为云端下载输入行的按钮与 Enter 快捷键绑定事件。
+// 必须在 restoreCloudUrlRow 重建输入行后也调用：重建的 textarea 是全新元素，
+// 若不在此处补绑 keydown，Enter 只插入换行而不提交，与首次打开行为不一致。
 function bindCloudUrlRowEvents() {
   document.getElementById('cloud-chain-btn').addEventListener('click', chainDownloadCloud);
   document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
   document.getElementById('cloud-create-group-btn').addEventListener('click', createCloudGroup);
+  var urlInput = document.getElementById('cloud-url');
+  if (urlInput) {
+    urlInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createCloudTask(); }
+    });
+  }
 }
 
 // restoreCloudUrlRow 恢复云端下载输入行。预览界面（showCloudDownloadPreview）把
@@ -1251,7 +1261,12 @@ function stopCloudPolling() {
   if (_cloudPollTimer) { clearInterval(_cloudPollTimer); _cloudPollTimer = null; }
 }
 
+let _cloudTasksInFlight = false;
+
 async function refreshCloudTasks() {
+  // 防重入：3s 轮询与手动刷新可能重叠，慢网络下后到的旧响应会覆盖新数据
+  if (_cloudTasksInFlight) return;
+  _cloudTasksInFlight = true;
   const body = document.getElementById('cloud-tasks-body');
   try {
     let tasks;
@@ -1273,6 +1288,8 @@ async function refreshCloudTasks() {
     body.innerHTML = buildCloudTaskTableHtml(_cloudTasks);
   } catch (e) {
     body.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
+  } finally {
+    _cloudTasksInFlight = false;
   }
 }
 
@@ -1282,7 +1299,6 @@ async function chainDownloadCloud() {
 
 async function doChainDownloadCloud(lines, filenames) {
   const text = lines.join('\n');
-  const input = document.getElementById('cloud-url');
   try {
     const hdrs = headers({ 'Content-Type': 'application/json' });
     showToast('提交任务中...', 'info');
@@ -1290,6 +1306,7 @@ async function doChainDownloadCloud(lines, filenames) {
     let tasks;
     if (tunnelHexKey) {
       const result = await tunnelRequest('POST', '/api/cloud/download/batch', hdrs, JSON.stringify({ urls: urls }));
+      assertTunnelOk(result, '提交');
       const data = JSON.parse(new TextDecoder().decode(result.body));
       tasks = data.tasks || [];
     } else {
@@ -1373,6 +1390,7 @@ async function doSubmitCloudTasks(lines, filenames) {
       const body = JSON.stringify({ url: lines[0], filename: filenames[0] });
       if (tunnelHexKey) {
         const result = await tunnelRequest('POST', '/api/cloud/download', hdrs, body);
+        assertTunnelOk(result, '创建任务');
         task = JSON.parse(new TextDecoder().decode(result.body));
       } else {
         const resp = await fetch(BASE + '/api/cloud/download', { method: 'POST', headers: hdrs, body: body });
@@ -1386,6 +1404,7 @@ async function doSubmitCloudTasks(lines, filenames) {
       let data;
       if (tunnelHexKey) {
         const result = await tunnelRequest('POST', '/api/cloud/download/batch', hdrs, JSON.stringify({ urls: urls }));
+        assertTunnelOk(result, '创建任务');
         data = JSON.parse(new TextDecoder().decode(result.body));
       } else {
         const resp = await fetch(BASE + '/api/cloud/download/batch', { method: 'POST', headers: hdrs, body: JSON.stringify({ urls: urls }) });
@@ -1422,7 +1441,8 @@ async function doCreateCloudGroup(lines, filenames) {
       urls: urls
     });
     if (tunnelHexKey) {
-      await tunnelRequest('POST', '/api/cloud/groups', hdrs, new TextEncoder().encode(body));
+      const result = await tunnelRequest('POST', '/api/cloud/groups', hdrs, new TextEncoder().encode(body));
+      assertTunnelOk(result, '创建组');
     } else {
       const resp = await fetch(BASE + '/api/cloud/groups', { method: 'POST', headers: hdrs, body: body });
       if (!resp.ok) {
@@ -1562,6 +1582,7 @@ function statusText(status) {
     case 'completed': return '✅ 已完成';
     case 'failed': return '❌ 失败';
     case 'cancelled': return '🚫 已取消';
+    case 'partial': return '🟡 部分完成';
     default: return status;
   }
 }
@@ -1572,14 +1593,30 @@ function cloudTaskActions(id, filename, status, checksum) {
     actions += '<button class="btn btn-primary btn-sm cloud-download-btn" data-id="' + escHtml(id) + '" data-filename="' + escHtml(filename) + '" data-checksum="' + escHtml(checksum || '') + '" style="margin-right:4px;">下载到本地</button>';
     actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
   } else if (status === 'failed' || status === 'cancelled') {
-    if (status === 'failed') {
-      actions += '<button class="btn btn-sm btn-secondary cloud-resume-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">恢复</button>';
-    }
+    // failed 与 cancelled 都可恢复（服务端 ResumeTask 支持 cancelled），
+    // 恢复时保留 .partial 续传；需要重下时用户可先删除再新建。
+    actions += '<button class="btn btn-sm btn-secondary cloud-resume-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">恢复</button>';
     actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
   } else {
     actions += '<button class="btn btn-warning btn-sm cloud-cancel-btn" data-id="' + escHtml(id) + '">取消</button>';
   }
   return actions;
+}
+
+// assertTunnelOk 检查隧道请求的内层 HTTP 状态。
+// tunnelRequest 只在外层 /tunnel 传输失败时抛错，内层状态码放在返回的 result.status，
+// 必须显式检查——否则服务端 4xx/5xx（如组内文件名冲突 409）会被当作成功并误报 toast。
+// 提取 JSON body 中的 error 字段作为详情，优先返回可读的服务端错误信息。
+function assertTunnelOk(result, label) {
+  if (!result || result.status < 200 || result.status >= 300) {
+    let detail = '';
+    try {
+      const body = new TextDecoder().decode(result && result.body ? result.body : new Uint8Array(0));
+      const data = JSON.parse(body);
+      detail = data && data.error ? data.error : body.slice(0, 200);
+    } catch (e) { /* 非 JSON 响应，忽略详情 */ }
+    throw new Error(label + '失败: HTTP ' + (result ? result.status : '?') + (detail ? ' - ' + detail : ''));
+  }
 }
 
 // --- 文件版本管理 ---
@@ -1594,9 +1631,14 @@ function hideVersioning() {
 }
 
 // --- 云端下载组管理 ---
+let _cloudGroupsInFlight = false;
+
 async function refreshCloudGroups() {
   const body = document.getElementById('cloud-groups-body');
   if (body.style.display === 'none') return;
+  // 防重入：与任务刷新同一策略，跳过重叠请求避免旧响应覆盖新数据
+  if (_cloudGroupsInFlight) return;
+  _cloudGroupsInFlight = true;
   try {
     let groups;
     const url = '/api/cloud/groups';
@@ -1616,6 +1658,8 @@ async function refreshCloudGroups() {
     body.innerHTML = buildCloudGroupTableHtml(_cloudGroups);
   } catch (e) {
     body.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
+  } finally {
+    _cloudGroupsInFlight = false;
   }
 }
 
@@ -1660,10 +1704,11 @@ async function archiveCloudGroup(groupId) {
     var hdrs = headers({ 'Content-Type': 'application/json' });
     var body = JSON.stringify({ archive_name: archiveName });
     if (tunnelHexKey) {
-      await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', hdrs, new TextEncoder().encode(body));
+      const result = await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', hdrs, new TextEncoder().encode(body));
+      assertTunnelOk(result, '打包');
     } else {
       var resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', { method: 'POST', headers: hdrs, body: body });
-      if (!resp.ok) { showToast('打包失败: ' + resp.status, 'error'); return; }
+      if (!resp.ok) { throw new Error('打包失败: HTTP ' + resp.status); }
     }
     showToast('打包成功', 'success');
     refreshCloudGroups();
@@ -1671,15 +1716,19 @@ async function archiveCloudGroup(groupId) {
 }
 
 async function resumeCloudGroup(groupId) {
-  if (!confirm('确认恢复该组内所有失败任务？')) return;
-  const force = confirm('强制重新下载（不使用续传）？\n确定=强制重新下载，取消=续传');
+  // 第一个确认框决定"是否恢复"：取消则完全不做任何操作。
+  if (!confirm('确认恢复该组内所有失败/取消任务？\n（默认使用断点续传，已下载的部分不重复下载）')) return;
+  // 第二个确认框仅决定是否"强制重下"：确定=强制，取消=续传恢复（仍会执行恢复）。
+  const force = confirm('是否强制重新下载（不使用续传）？\n点「确定」= 强制重新下载\n点「取消」= 使用续传恢复');
   try {
     var hdrs = headers({ 'Content-Type': 'application/json' });
     var body = JSON.stringify({ force: force });
     if (tunnelHexKey) {
-      await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/resume', hdrs, new TextEncoder().encode(body));
+      const result = await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/resume', hdrs, new TextEncoder().encode(body));
+      assertTunnelOk(result, '恢复');
     } else {
-      await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/resume', { method: 'POST', headers: hdrs, body: body });
+      const resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/resume', { method: 'POST', headers: hdrs, body: body });
+      if (!resp.ok) { throw new Error('恢复失败: HTTP ' + resp.status); }
     }
     showToast('恢复成功', 'success');
     refreshCloudGroups();
@@ -1690,9 +1739,11 @@ async function cancelCloudGroup(groupId) {
   if (!confirm('确认取消该组内所有任务？')) return;
   try {
     if (tunnelHexKey) {
-      await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/cancel', {}, null);
+      const result = await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/cancel', {}, null);
+      assertTunnelOk(result, '取消');
     } else {
-      await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/cancel', { method: 'POST', headers: headers() });
+      const resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/cancel', { method: 'POST', headers: headers() });
+      if (!resp.ok) { throw new Error('取消失败: HTTP ' + resp.status); }
     }
     showToast('已取消', 'success');
     refreshCloudGroups();
@@ -1703,9 +1754,11 @@ async function deleteCloudGroup(groupId) {
   if (!confirm('确认删除该组及所有关联文件？')) return;
   try {
     if (tunnelHexKey) {
-      await tunnelRequest('DELETE', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
+      const result = await tunnelRequest('DELETE', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
+      assertTunnelOk(result, '删除');
     } else {
-      await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { method: 'DELETE', headers: headers() });
+      const resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { method: 'DELETE', headers: headers() });
+      if (!resp.ok) { throw new Error('删除失败: HTTP ' + resp.status); }
     }
     showToast('已删除', 'success');
     refreshCloudGroups();
@@ -1714,14 +1767,18 @@ async function deleteCloudGroup(groupId) {
 
 // 恢复单个云端下载任务
 async function resumeCloudTask(taskId) {
-  const force = confirm('强制重新下载（不使用续传）？\n确定=强制重新下载，取消=续传');
+  // 与组恢复一致：第一个确认决定是否恢复，第二个仅决定是否强制重下（取消=续传恢复）。
+  if (!confirm('确认恢复该任务？\n（默认使用断点续传，已下载的部分不重复下载）')) return;
+  const force = confirm('是否强制重新下载（不使用续传）？\n点「确定」= 强制重新下载\n点「取消」= 使用续传恢复');
   try {
     var hdrs = headers({ 'Content-Type': 'application/json' });
     var body = JSON.stringify({ force: force });
     if (tunnelHexKey) {
-      await tunnelRequest('POST', '/api/cloud/tasks/' + encodeURIComponent(taskId) + '/resume', hdrs, new TextEncoder().encode(body));
+      const result = await tunnelRequest('POST', '/api/cloud/tasks/' + encodeURIComponent(taskId) + '/resume', hdrs, new TextEncoder().encode(body));
+      assertTunnelOk(result, '恢复');
     } else {
-      await fetch(BASE + '/api/cloud/tasks/' + encodeURIComponent(taskId) + '/resume', { method: 'POST', headers: hdrs, body: body });
+      const resp = await fetch(BASE + '/api/cloud/tasks/' + encodeURIComponent(taskId) + '/resume', { method: 'POST', headers: hdrs, body: body });
+      if (!resp.ok) { throw new Error('恢复失败: HTTP ' + resp.status); }
     }
     showToast('任务已恢复', 'success');
     refreshCloudTasks();
@@ -1853,14 +1910,9 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
 
-  // 云端下载弹窗
+  // 云端下载弹窗（按钮 + Enter 快捷键统一走 bindCloudUrlRowEvents，避免重复绑定）
   document.getElementById('cloud-close-btn').addEventListener('click', hideCloudDownload);
-  document.getElementById('cloud-url').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createCloudTask(); }
-  });
-  document.getElementById('cloud-chain-btn').addEventListener('click', chainDownloadCloud);
-  document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
-  document.getElementById('cloud-create-group-btn').addEventListener('click', createCloudGroup);
+  bindCloudUrlRowEvents();
   document.getElementById('cloud-refresh-btn').addEventListener('click', refreshCloudCurrentTab);
   document.getElementById('cloud-close-modal-btn').addEventListener('click', hideCloudDownload);
   document.getElementById('cloud-tasks-tab').addEventListener('click', function() { switchCloudTab('tasks'); });

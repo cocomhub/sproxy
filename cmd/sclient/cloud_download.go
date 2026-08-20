@@ -43,6 +43,8 @@ func readURLsFromFile(path string) ([]string, error) {
 // readEntriesFromFile 从文件中读取云端下载条目（每行一个）。
 // 每行格式为 "URL" 或 "URL<TAB>FILENAME"（Tab 分隔的可选保存文件名，
 // 因为 URL 本身可能包含空格，文件名与 URL 之间必须用 Tab 分隔）。
+// 若一行含多个 Tab，仅取前两列（URL 与 FILENAME），多余 Tab 忽略——FILENAME 本身
+// 允许包含 Tab 字符，不应因额外 Tab 拒绝整份文件。
 // 忽略空行和 # 开头的注释行。
 func readEntriesFromFile(path string) ([]client.CloudDownloadEntry, error) {
 	data, err := os.ReadFile(path)
@@ -56,9 +58,6 @@ func readEntriesFromFile(path string) ([]client.CloudDownloadEntry, error) {
 			continue
 		}
 		parts := strings.Split(line, "\t")
-		if len(parts) > 2 {
-			return nil, fmt.Errorf("url-file 行格式错误（最多 URL<TAB>FILENAME 两列，多余 Tab 会被忽略）：%q", line)
-		}
 		entry := client.CloudDownloadEntry{URL: strings.TrimSpace(parts[0])}
 		if len(parts) > 1 {
 			entry.Filename = strings.TrimSpace(parts[1])
@@ -139,32 +138,35 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			batchFile, _ := cmd.Flags().GetString("batch")
+			urlFile, _ := cmd.Flags().GetString("url-file")
 
-			// 收集 URL
-			urls := args
-			if batchFile != "" {
-				var fileURLs []string
-				fileURLs, err = readURLsFromFile(batchFile)
-				if err != nil {
-					return fmt.Errorf("读取 batch 文件失败: %w", err)
-				}
-				urls = append(urls, fileURLs...)
-			}
-			if len(urls) == 0 {
-				return fmt.Errorf("未指定下载 URL，请提供 URL 参数或使用 --batch 指定文件")
+			// 收集 URL 条目（--url-file 每行 URL 或 URL<TAB>FILENAME 指定保存文件名）
+			entries, err := collectCloudEntries(args, batchFile, urlFile)
+			if err != nil {
+				return err
 			}
 
-			ios.WriteOutLine("链式下载 %d 个 URL...", len(urls))
+			ios.WriteOutLine("链式下载 %d 个 URL...", len(entries))
 
 			opts := []client.ChainOption{
 				client.WithChainPollInterval(pollInterval),
 				client.WithChainTimeout(timeout),
+				client.WithChainEntries(entries),
 			}
 			if keepFiles {
 				opts = append(opts, client.WithChainKeepFiles())
 			}
 
-			result, err := svc.CloudDownloadChain(cmd.Context(), urls, archiveName, outputDir, opts...)
+			// --timeout 约束整个链式操作（含存储超限重试的退避 sleep），
+			// 避免 10s/20s/40s 退避使总时长远超用户配置
+			chainCtx := cmd.Context()
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				chainCtx, cancel = context.WithTimeout(cmd.Context(), timeout)
+				defer cancel()
+			}
+			// URLs 由 opts 中的 entries 承载（WithChainEntries），这里传 nil
+			result, err := svc.CloudDownloadChain(chainCtx, nil, archiveName, outputDir, opts...)
 			if err != nil {
 				return fmt.Errorf("链式下载失败: %w", err)
 			}
@@ -185,6 +187,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
 	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
+	cmd.Flags().String("url-file", "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
 
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudSubmit(factory, ios, cfgSvc))
@@ -416,15 +419,16 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 				ios.WriteOutLine(statusLine)
 			}
 
-			// 全部条目提交失败时返回非零，避免脚本把"全部失败"当成成功
+			// 任一条目提交失败即返回非零，避免脚本把"部分失败"误判为成功
+			//（与链式操作 waitForTasks 的"任何失败即报错"语义保持一致）
 			failedCount := 0
 			for _, t := range tasks {
 				if t.Status == "failed" {
 					failedCount++
 				}
 			}
-			if len(tasks) > 0 && failedCount == len(tasks) {
-				return fmt.Errorf("全部 %d 个云端下载任务创建失败", failedCount)
+			if failedCount > 0 {
+				return fmt.Errorf("%d/%d 个云端下载任务创建失败", failedCount, len(tasks))
 			}
 			return nil
 		},
@@ -473,8 +477,17 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 			}
 
 			if len(pending) == 0 {
+				var failedIDs []string
 				for _, t := range tasks {
 					ios.WriteOutLine("  %s: %s", t.ID, t.Status)
+					if t.Status == "failed" {
+						failedIDs = append(failedIDs, t.ID)
+					}
+				}
+				// 初始状态即含失败任务时返回非零（与链式 waitForTasks 语义一致：
+				// 仅 failed 视为失败，cancelled 属用户主动取消，不算失败）
+				if len(failedIDs) > 0 {
+					return fmt.Errorf("%d 个任务失败: %s", len(failedIDs), strings.Join(failedIDs, ", "))
 				}
 				return nil
 			}
@@ -492,11 +505,15 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 				results[t.ID] = t
 			}
 
+			var failedIDs []string
 			for len(pending) > 0 {
 				select {
 				case <-pollCtx.Done():
 					if len(pending) > 0 {
 						return pollCtx.Err()
+					}
+					if len(failedIDs) > 0 {
+						return fmt.Errorf("%d 个任务失败: %s", len(failedIDs), strings.Join(failedIDs, ", "))
 					}
 					return nil
 				case <-ticker.C:
@@ -514,7 +531,9 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 						case "failed":
 							delete(pending, id)
 							ios.WriteOutLine("  ✗ %s: 失败 - %s", id, task.Error)
+							failedIDs = append(failedIDs, id)
 						case "cancelled":
+							// cancelled 属用户主动取消，不算失败（与链式 waitForTasks 语义一致）
 							delete(pending, id)
 							ios.WriteOutLine("  ✗ %s: 已取消", id)
 						default:
@@ -526,6 +545,11 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 						}
 					}
 				}
+			}
+			// 任一任务失败即返回非零（与链式 waitForTasks 语义一致），
+			// 避免脚本把部分失败误判为全部成功
+			if len(failedIDs) > 0 {
+				return fmt.Errorf("%d 个任务失败: %s", len(failedIDs), strings.Join(failedIDs, ", "))
 			}
 			return nil
 		},
@@ -560,31 +584,35 @@ func NewCmdCloudFetch(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			batchFile, _ := cmd.Flags().GetString("batch")
+			urlFile, _ := cmd.Flags().GetString("url-file")
 
-			urls := args
-			if batchFile != "" {
-				var fileURLs []string
-				fileURLs, err = readURLsFromFile(batchFile)
-				if err != nil {
-					return fmt.Errorf("读取 batch 文件失败: %w", err)
-				}
-				urls = append(urls, fileURLs...)
-			}
-			if len(urls) == 0 {
-				return fmt.Errorf("未指定下载 URL，请提供 URL 参数或使用 --batch 指定文件")
+			// 收集 URL 条目（--url-file 每行 URL 或 URL<TAB>FILENAME 指定保存文件名）
+			entries, err := collectCloudEntries(args, batchFile, urlFile)
+			if err != nil {
+				return err
 			}
 
-			ios.WriteOutLine("链式下载 %d 个 URL...", len(urls))
+			ios.WriteOutLine("链式下载 %d 个 URL...", len(entries))
 
 			opts := []client.ChainOption{
 				client.WithChainPollInterval(pollInterval),
 				client.WithChainTimeout(timeout),
+				client.WithChainEntries(entries),
 			}
 			if keepFiles {
 				opts = append(opts, client.WithChainKeepFiles())
 			}
 
-			result, err := svc.CloudDownloadChain(cmd.Context(), urls, archiveName, outputDir, opts...)
+			// --timeout 约束整个链式操作（含存储超限重试的退避 sleep），
+			// 避免 10s/20s/40s 退避使总时长远超用户配置
+			chainCtx := cmd.Context()
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				chainCtx, cancel = context.WithTimeout(cmd.Context(), timeout)
+				defer cancel()
+			}
+			// URLs 由 opts 中的 entries 承载（WithChainEntries），这里传 nil
+			result, err := svc.CloudDownloadChain(chainCtx, nil, archiveName, outputDir, opts...)
 			if err != nil {
 				return fmt.Errorf("链式下载失败: %w", err)
 			}
@@ -604,6 +632,7 @@ func NewCmdCloudFetch(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
 	cmd.Flags().String("batch", "", "从文件读取 URL 列表（每行一个 URL，忽略空行和 # 注释行）")
+	cmd.Flags().String("url-file", "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
 
 	return cmd
 }

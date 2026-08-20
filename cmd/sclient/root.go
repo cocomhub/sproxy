@@ -72,6 +72,9 @@ func NewRootCmd() *cobra.Command {
 			cfgProvider.BindPFlag("auth_token", cmd.Flags().Lookup("auth-token"))
 			currentDir = loadCurrentDir()
 			cliState.CurrentDir = currentDir
+
+			verbose, _ := cmd.Flags().GetBool("verbose")
+			initLogger(verbose)
 			return nil
 		},
 		Run: func(cmd *cobra.Command, args []string) {
@@ -124,7 +127,6 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdShare(factory, ios))
 	root.AddCommand(NewCmdRelay(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdCloudDownload(factory, ios, cliState, cfgSvc))
-	root.AddCommand(NewCmdCloudArchive(factory, ios, cfgSvc))
 
 	return root
 }

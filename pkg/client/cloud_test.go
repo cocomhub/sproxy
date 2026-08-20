@@ -498,8 +498,9 @@ func TestWithCloudDownloadMaxBatchURLs_Zero(t *testing.T) {
 	t.Parallel()
 	o := &cloudDownloadOptions{maxBatchURLs: 30}
 	WithCloudDownloadMaxBatchURLs(0)(o)
-	if o.maxBatchURLs != 30 {
-		t.Errorf("maxBatchURLs should remain unchanged, got %d", o.maxBatchURLs)
+	// n<=0 表示复位为"不限制"（覆盖先前设置），交给服务端强制上限
+	if o.maxBatchURLs != 0 {
+		t.Errorf("maxBatchURLs should be reset to 0 (unlimited), got %d", o.maxBatchURLs)
 	}
 }
 

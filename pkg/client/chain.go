@@ -152,6 +152,7 @@ type chainOptions struct {
 	timeout      time.Duration
 	keepFiles    bool
 	progressFn   ProgressFunc
+	entries      []CloudDownloadEntry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
 }
 
 // ChainOption 链式操作选项函数。
@@ -182,6 +183,15 @@ func WithChainKeepFiles() ChainOption {
 func WithChainProgress(fn ProgressFunc) ChainOption {
 	return func(o *chainOptions) {
 		o.progressFn = fn
+	}
+}
+
+// WithChainEntries 指定链式下载每个 URL 的可选保存文件名（URL→FILENAME 条目）。
+// 未指定时由服务端按 URL 自动生成文件名（wget 行为）。
+// 与 sclient --url-file 的 URL<TAB>FILENAME 格式对齐。
+func WithChainEntries(entries []CloudDownloadEntry) ChainOption {
+	return func(o *chainOptions) {
+		o.entries = entries
 	}
 }
 

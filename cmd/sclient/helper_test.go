@@ -55,32 +55,6 @@ func TestReadURLsFromFile(t *testing.T) {
 	})
 }
 
-// ---- filepathSafe ----
-
-func TestFilepathSafe(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"normal.txt", "normal.txt"},
-		{"with/path/sep", "with_path_sep"},
-		{"with\\backslash", "with_backslash"},
-		{"  spaces  ", "spaces"},
-		{"  .hidden", "hidden"},
-		{"", "download"},
-		{"/../../etc/passwd", "_.._.._etc_passwd"},
-		{"onlydots...", "onlydots"},
-		{"  .  ", "download"},
-	}
-	for _, tt := range tests {
-		got := filepathSafe(tt.input)
-		if got != tt.expected {
-			t.Errorf("filepathSafe(%q) = %q, want %q", tt.input, got, tt.expected)
-		}
-	}
-}
-
 // ---- isImageExt ----
 
 func TestIsImageExt(t *testing.T) {

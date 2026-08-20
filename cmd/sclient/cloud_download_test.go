@@ -878,11 +878,16 @@ func TestCloudDownloadCmd_WaitTaskFailed(t *testing.T) {
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.SetArgs([]string{"wait", "--poll-interval", "100ms", "--timeout", "30s", "fail-1"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("wait subcommand should not fail on partial failure: %v", err)
+	err := cmd.Execute()
+	// 任务失败时 wait 必须返回非零（与链式 waitForTasks 语义一致），避免脚本误判成功
+	if err == nil {
+		t.Fatalf("wait subcommand should fail when a task fails, got no error")
 	}
-	if !strings.Contains(buf.String(), "fail-1") {
-		t.Fatalf("expected output to contain task ID, got: %s", buf.String())
+	if !strings.Contains(err.Error(), "fail-1") {
+		t.Fatalf("expected error to mention task ID, got: %v", err)
+	}
+	if !strings.Contains(buf.String(), "失败") {
+		t.Fatalf("expected failure message in output, got: %s", buf.String())
 	}
 }
 

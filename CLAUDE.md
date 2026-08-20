@@ -482,12 +482,13 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 - 规则唯一实现：Go `pkg/cloudfilename`（`DefaultFromURL` / `Safe`）+ JS `web/static/cloudfilename.js`（UMD，浏览器全局 `cloudfilename` 与 Node 导出双用）。
 - **一致性靠共享语料保证**：`pkg/cloudfilename/testdata/cases.json` 是权威语料，Go 测试 `TestDefaultFromURL_FromFixture` 与 JS 测试 `web/static/cloudfilename.test.js`（`make web-test`）都断言它 → 双端任一改规则导致不一致，测试立即失败。
 - wget 行为：路径以 `/` 结尾 → `index.html`（`/xx/?a=v` → `index.html?a=v`）；raw query 直接附加在文件名后；路径最后一段百分号解码。
-- Go 用 `url.Parse`（path 已解码一次）+ `url.PathUnescape`（二次解码，**不把 `+` 转空格**）；JS 用 `decodeURIComponent(pathname)` 对齐。
+- Go 用 `url.Parse`（path 已解码一次）+ `url.PathUnescape`（二次解码，**不把 `+` 转空格**）；JS 用 `parseURL`（从原始字符串提取 rawPath/rawQuery/hash）对齐 Go url.Parse，**不能**用 `new URL().pathname`（WHATWG 会折叠点段、归一化 query）。
 - **Go/JS 语义差异（已对齐并录入语料）**：
   - 非法百分号编码 → 两端都返回 `"download"`，但 **Go 只校验 path 与 fragment**，query 原样保留（`?x=100%` → `file.txt?x=100%`）。JS 正则必须只查 `rawPath + hash`，**不能查整个 href**（否则 query 非法 `%` 误判 download）。
-  - Go `url.Parse` **不做点段归一化**（`/dir/..` 保留）；WHATWG `new URL().pathname` 会把 `/dir/..` 折叠为 `/`。JS 必须用 `rawPathFromURL(rawUrl)` 从原始字符串提取未归一化路径，不能直接读 `pathname`。
-  - 已知接受的分歧（畸形输入，不入语料）：query 空格被 JS 序列化为 `%20`（Go 保留原始空格）；非法 UTF-8 字节序列（`%FF`）Go 按字节解码、JS decodeURIComponent 抛错返回 download。
-- `Safe` 替换 `\ / ? : < > | " *` 与 NUL 为 `_`；`=` `&` 保留；Trim 首尾空格与点；结果为空返回 `"download"`。
+  - Go `url.Parse` **不做点段归一化**（`/dir/..` 保留）；JS 从原始字符串提取未归一化路径，不能直接读 `pathname`。
+  - **query 原样保留（两端一致）**：JS 用 raw query（不做归一化），与 Go `parsed.RawQuery` 一致——`?x=中文`、`?x=a b`、`?x=%E4%B8%AD%E6%96%87` 均已入语料（历史曾因 JS 用 WHATWG `search` 归一化产生分歧，已修复）。
+  - 已知接受的分歧（畸形输入，不入语料）：非法 UTF-8 字节序列（`%FF`）首次解码时 Go `url.Parse` 按字节解码、JS `decodeURIComponent` 抛错返回 download；双重编码 `%25FF` 二次解码时 Go `PathUnescape` 解出原始字节、JS 保留字面 `%FF`（JS 无法表示非法 UTF-8 字节）。
+- `Safe` 替换 `\ / ? : < > | " *` 与 NUL 为 `_`；`=` `&` 保留；Trim 首尾空格与点；**抵御 Windows 保留设备名**（CON/NUL/PRN/AUX/COM1-9/LPT1-9 加 `_` 前缀）；**按 254 字节截断**（优先保留扩展名、不劈开 UTF-8 字符）；结果为空返回 `"download"`。
 - 注意：`url.QueryUnescape` 会把 `+` 转空格，**不要**用它做路径段解码（历史上导致与 wget/JS 不一致）。
 
 ### If-Range 续传一致性校验

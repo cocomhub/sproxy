@@ -103,6 +103,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		IdleTimeout:     cfg.CloudDownloadIdleTimeout,
 		MaxRetries:      cfg.CloudMaxRetries,
 		RetryDelay:      cfg.CloudRetryDelay,
+		Downloader:      cfg.CloudDownloader,
 	}
 	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, cs, log.With("component", "cloud"), cloudCfg)
 	h.storageMgr = sm
