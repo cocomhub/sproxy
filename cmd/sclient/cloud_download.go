@@ -69,15 +69,6 @@ func collectCloudEntries(args []string, urlFile string) ([]cloudfilename.Entry, 
 	return entries, nil
 }
 
-// resolvedFilename 返回条目最终保存的文件名（客户端侧预览，与服务端规则一致）：
-// 显式指定则清理，否则按 URL 自动生成后再清理。
-func resolvedFilename(entry cloudfilename.Entry) string {
-	if entry.Filename != "" {
-		return cloudfilename.Safe(entry.Filename)
-	}
-	return cloudfilename.Safe(cloudfilename.DefaultFromURL(entry.URL))
-}
-
 // NewCmdCloudDownload 创建云端下载命令的工厂函数。
 // 默认行为是完整链式操作：提交 → 等待 → 打包 → 下载 → 清理。
 func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
@@ -207,9 +198,9 @@ func NewCmdCloudGroup(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 			urlSeen := make(map[string]bool, len(entries))
 			var conflicts []string
 			for _, e := range entries {
-				fn, err := cloudfilename.ResolveFilename(e)
-				if err != nil {
-					return fmt.Errorf("条目 %s 文件名无效: %w", e.URL, err)
+				fn, resolveErr := cloudfilename.ResolveFilename(e)
+				if resolveErr != nil {
+					return fmt.Errorf("条目 %s 文件名无效: %w", e.URL, resolveErr)
 				}
 				if prev, ok := filenameSeen[fn]; ok {
 					conflicts = append(conflicts, fmt.Sprintf("文件名 %q (URL: %s 与 %s)", fn, prev, e.URL))
@@ -390,7 +381,7 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 			}
 
 			// 任一条目提交失败即返回非零，避免脚本把"部分失败"误判为成功
-			//（与链式操作 waitForTasks 的"任何失败即报错"语义保持一致）
+			// （与链式操作 waitForTasks 的"任何失败即报错"语义保持一致）
 			failedCount := 0
 			for _, t := range tasks {
 				if t.Status == "failed" {
