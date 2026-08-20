@@ -1262,6 +1262,17 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 		}
 		opts.keepFiles = cdc.KeepFiles
 	}
+	// CloudDownloadGroupChain 恢复同样需要取回持久化的轮询/超时/keepFiles 选项，
+	// 否则中断的组链式操作恢复后会退回默认值（3s/30m/false）。
+	if gdc, ok := runner.(*CloudDownloadGroupChain); ok {
+		if gdc.PollInterval > 0 {
+			opts.pollInterval = gdc.PollInterval
+		}
+		if gdc.Timeout > 0 {
+			opts.timeout = gdc.Timeout
+		}
+		opts.keepFiles = gdc.KeepFiles
+	}
 	runner.SetOptions(opts)
 
 	if err := c.chainManager.Run(ctx, runner); err != nil {
@@ -1272,6 +1283,13 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 	if cdc, ok := runner.(*CloudDownloadChain); ok {
 		extra["local_path"] = cdc.LocalPath
 		extra["keep_files"] = cdc.KeepFiles
+	}
+	if gdc, ok := runner.(*CloudDownloadGroupChain); ok {
+		extra["local_path"] = gdc.LocalPath
+		extra["keep_files"] = gdc.KeepFiles
+		if gdc.GroupID != "" {
+			extra["group_id"] = gdc.GroupID
+		}
 	}
 
 	return &ChainResult{

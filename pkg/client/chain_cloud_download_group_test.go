@@ -635,3 +635,61 @@ func TestCloudDownloadGroupChain_WaitNilGroup(t *testing.T) {
 		t.Errorf("expected error mentioning group not found, got: %v", err)
 	}
 }
+
+// TestCloudDownloadGroupChain_ResumeRestoresOptions 验证 ResumeChain 能正确恢复
+// CloudDownloadGroupChain 的轮询间隔/超时/keepFiles 选项（此前 ResumeChain 只识别
+// CloudDownloadChain，组链式操作恢复后会退回默认值 3s/30m/false）。
+//
+// 测试方法：直接在 KVStore 中保存一个中间状态（PhaseWaiting），模拟链式操作被中断后
+// 恢复的场景，验证恢复后的 runner 能正确取回非默认选项并继续运行。
+func TestCloudDownloadGroupChain_ResumeRestoresOptions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ts := newMockGroupChainServer(t, dir, func(poll int) (string, []CloudTask) {
+		return "completed", completedGroupTasks()
+	})
+
+	store := NewMemoryKVStore()
+	client := NewFileClient(ts.URL, WithKVStore(store))
+
+	// 模拟一个组链式操作在 PhaseWaiting 阶段中断后的持久化状态，使用非默认选项
+	phaseState := map[string]any{
+		"type":          TypeCloudDownloadGroup,
+		"chain_id":      "group-chain-resume-options",
+		"phase":         PhaseWaiting,
+		"status":        StatusRunning,
+		"group_name":    "resume-group",
+		"group_id":      "group-test",
+		"entries":       nil,
+		"archive_name":  "group-resume-archive",
+		"local_dir":     dir,
+		"keep_files":    true,
+		"total_tasks":   2.0,
+		"completed":     0.0,
+		"failed":        0.0,
+		"cancelled":     0.0,
+		"created_at":    time.Now(),
+		"updated_at":    time.Now(),
+		"poll_interval": int64(100 * time.Millisecond),
+		"timeout":       int64(10 * time.Second),
+	}
+	if err := store.Save(t.Context(), "chain:group-chain-resume-options", phaseState); err != nil {
+		t.Fatal(err)
+	}
+
+	// 通过 ResumeChain 恢复
+	resumed, err := client.ResumeChain(t.Context(), "group-chain-resume-options")
+	if err != nil {
+		t.Fatalf("ResumeChain failed: %v", err)
+	}
+	if !resumed.KeepFiles() {
+		t.Error("expected keep_files=true restored from group chain")
+	}
+	if resumed.GetExtraValue("group_id") != "group-test" {
+		t.Errorf("expected group_id group-test, got %v", resumed.GetExtraValue("group_id"))
+	}
+	// 验证返回的 extra 字段包含 local_path
+	if resumed.LocalPath() == "" {
+		t.Error("expected non-empty local_path after resume")
+	}
+}

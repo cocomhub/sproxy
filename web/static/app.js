@@ -1089,6 +1089,10 @@ function filepathSafe(name) {
 }
 
 // showCloudDownloadPreview 在提交前展示每个 URL 的默认文件名，供用户确认或修改。
+// 支持每行 "URL" 或 "URL<TAB>FILENAME"（Tab 分隔的可选保存文件名，与 CLI --url-file
+// 格式对齐；URL 本身可能含空格，文件名与 URL 之间必须用 Tab 分隔）。
+// 含 Tab 的行把 FILENAME 预填入编辑框，用户仍可修改；确认时对所有 filename 走
+// filepathSafe 保证最终保存名可靠。
 async function showCloudDownloadPreview(action) {
   const input = document.getElementById('cloud-url');
   const text = input.value.trim();
@@ -1097,22 +1101,34 @@ async function showCloudDownloadPreview(action) {
   const lines = text.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
   if (lines.length === 0) { showToast('请输入下载链接', 'warning'); return; }
 
-  if (action === 'group' && lines.length < 2) {
+  if ((action === 'group' || action === 'chain_group') && lines.length < 2) {
     showToast('创建组至少需要 2 个 URL（单 URL 请用"仅提交"）', 'warning');
     return;
   }
 
+  // 解析每行：含 Tab 时按前两列拆分出 URL 与预填文件名（多余 Tab 忽略，与 CLI readEntriesFromFile 一致）
+  var parsedLines = [];
+  for (var i = 0; i < lines.length; i++) {
+    var parts = lines[i].split('\t');
+    var url = parts[0].trim();
+    var presetFilename = parts.length > 1 ? parts[1].trim() : '';
+    parsedLines.push({ url: url, preset: presetFilename });
+  }
+
   // 生成预览信息
-  var previewHtml = '<div style="margin-bottom:12px;font-size:13px;color:var(--text-secondary);">共 ' + lines.length + ' 个链接，请确认或修改保存文件名：</div>';
+  var previewHtml = '<div style="margin-bottom:12px;font-size:13px;color:var(--text-secondary);">共 ' + parsedLines.length + ' 个链接，请确认或修改保存文件名：</div>';
   previewHtml += '<div style="max-height:300px;overflow-y:auto;margin-bottom:12px;">';
 
-  for (var i = 0; i < lines.length; i++) {
+  for (var i = 0; i < parsedLines.length; i++) {
     // 与服务端保存规则一致：展示清理后的最终文件名，避免"预览 a/b 实际保存 a_b"的落差
-    var defaultName = cloudfilename.safeDefaultFromURL(lines[i]);
+    // 显式指定的文件名也先 safe 化，保证预览即最终保存名
+    var defaultName = parsedLines[i].preset
+      ? cloudfilename.filepathSafe(parsedLines[i].preset)
+      : cloudfilename.safeDefaultFromURL(parsedLines[i].url);
     previewHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:4px 0;border-bottom:1px solid var(--border-color);">';
     previewHtml += '<span style="flex-shrink:0;font-size:12px;color:var(--text-muted);min-width:28px;">' + (i + 1) + '.</span>';
     previewHtml += '<input type="text" class="cloud-preview-filename" data-index="' + i + '" value="' + escHtml(defaultName) + '" style="flex:1;padding:4px 6px;border:1px solid var(--border-input);border-radius:3px;font-size:13px;font-family:monospace;">';
-    previewHtml += '<span style="font-size:11px;color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(lines[i]) + '">' + escHtml(lines[i]) + '</span>';
+    previewHtml += '<span style="font-size:11px;color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(parsedLines[i].url) + '">' + escHtml(parsedLines[i].url) + '</span>';
     previewHtml += '</div>';
   }
   previewHtml += '</div>';
@@ -1122,8 +1138,9 @@ async function showCloudDownloadPreview(action) {
   previewHtml += '<button type="button" id="cloud-preview-confirm-btn" class="btn btn-primary">确认提交</button>';
   previewHtml += '</div>';
 
-  // 保存 action，用于确认后执行
+  // 保存 action 与解析后的行数据，用于确认后执行
   window._cloudPreviewAction = action;
+  window._cloudPreviewLines = parsedLines;
 
   // 替换 cloud-url 区域为预览界面
   var urlRow = input.parentElement;
@@ -1131,7 +1148,7 @@ async function showCloudDownloadPreview(action) {
 
   // 绑定按钮事件
   document.getElementById('cloud-preview-cancel-btn').addEventListener('click', function() {
-    // 恢复输入框（含重新绑定三个按钮事件）
+    // 恢复输入框（含重新绑定四个按钮事件）
     restoreCloudUrlRow();
     document.getElementById('cloud-url').value = text;
   });
@@ -1139,16 +1156,19 @@ async function showCloudDownloadPreview(action) {
   document.getElementById('cloud-preview-confirm-btn').addEventListener('click', function() {
     // 收集用户指定的文件名
     var filenameInputs = document.querySelectorAll('.cloud-preview-filename');
+    var urls = [];
     var filenames = [];
     for (var j = 0; j < filenameInputs.length; j++) {
+      var url = window._cloudPreviewLines[j].url;
+      urls.push(url);
       // 与服务端一致做 filepathSafe：用户输入的非法字符也会被清理，预览即最终保存名
-      var name = filenameInputs[j].value.trim() || cloudfilename.safeDefaultFromURL(lines[j]);
+      var name = filenameInputs[j].value.trim() || cloudfilename.safeDefaultFromURL(url);
       filenames.push(filepathSafe(name));
     }
 
     // 执行对应操作
     var act = window._cloudPreviewAction;
-    if (act === 'group') {
+    if (act === 'group' || act === 'chain_group') {
       // 客户端预校验：组内保存文件名必须唯一（服务端 CreateGroup 也会校验并返回 409），
       // 这里在发送前拦截，避免 409 往返，直接提示用户修改冲突条目。
       // 用 Map 判重，避免普通对象把 constructor/toString 等原型属性误判为冲突。
@@ -1172,11 +1192,13 @@ async function showCloudDownloadPreview(action) {
     var restoredInput = document.getElementById('cloud-url');
     if (restoredInput) restoredInput.value = '';
     if (act === 'submit') {
-      doSubmitCloudTasks(lines, filenames);
+      doSubmitCloudTasks(urls, filenames);
     } else if (act === 'group') {
-      doCreateCloudGroup(lines, filenames);
+      doCreateCloudGroup(urls, filenames);
     } else if (act === 'chain') {
-      doChainDownloadCloud(lines, filenames);
+      doChainDownloadCloud(urls, filenames);
+    } else if (act === 'chain_group') {
+      doChainDownloadCloudGroup(urls, filenames);
     }
   });
 }
@@ -1190,6 +1212,8 @@ function bindCloudUrlRowEvents() {
   document.getElementById('cloud-chain-btn').addEventListener('click', chainDownloadCloud);
   document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
   document.getElementById('cloud-create-group-btn').addEventListener('click', createCloudGroup);
+  var chainGroupBtn = document.getElementById('cloud-chain-group-btn');
+  if (chainGroupBtn) chainGroupBtn.addEventListener('click', chainDownloadCloudGroup);
   var urlInput = document.getElementById('cloud-url');
   if (urlInput) {
     urlInput.addEventListener('keydown', function(e) {
@@ -1209,7 +1233,8 @@ function restoreCloudUrlRow() {
   urlRow.innerHTML = '<textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>' +
     '<button type="button" id="cloud-chain-btn" class="btn btn-primary" style="white-space:nowrap;">链式下载</button>' +
     '<button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>' +
-    '<button type="button" id="cloud-create-group-btn" class="btn btn-secondary" style="white-space:nowrap;">创建组</button>';
+    '<button type="button" id="cloud-create-group-btn" class="btn btn-secondary" style="white-space:nowrap;">创建组</button>' +
+    '<button type="button" id="cloud-chain-group-btn" class="btn btn-primary" style="white-space:nowrap;">组链式下载</button>';
   bindCloudUrlRowEvents();
 }
 
@@ -1294,6 +1319,19 @@ async function refreshCloudTasks() {
   }
 }
 
+// triggerBrowserDownload 把已下载的数据触发浏览器保存。
+// 隧道模式的 tunnelDownloadStream 返回 Uint8Array，需手动构造 Blob 触发下载；
+// 非隧道模式的 fetch blob 路径也复用它，消除两处链式下载中的重复模板。
+function triggerBrowserDownload(data, filename) {
+  const blob = new Blob([data], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 async function chainDownloadCloud() {
   showCloudDownloadPreview('chain');
 }
@@ -1354,28 +1392,161 @@ async function doChainDownloadCloud(lines, filenames) {
       const r = await fetch(BASE + '/api/cloud/archive', { method: 'POST', headers: archiveHdrs, body: JSON.stringify({ task_ids: taskIds }) });
       archiveResult = await r.json();
     }
-    if (!archiveResult.success) { showToast('归档失败', 'error'); return; }
+    if (!archiveResult.success) { showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error'); return; }
     showToast('下载归档并清理中...', 'info');
-    // 先下载再清理（非隧道模式用 fetch blob 确保下载完成）
+    const downloadName = archiveResult.file.split('/').pop();
+    // 先下载再清理（隧道模式 tunnelDownloadStream 返回归档数据，需触发浏览器保存）
     for (let i = 0; i < taskIds.length; i++) {
       if (tunnelHexKey) {
-        await tunnelDownloadStream(archiveResult.file);
+        const streamResult = await tunnelDownloadStream(archiveResult.file);
+        if (streamResult && streamResult.body) {
+          triggerBrowserDownload(streamResult.body, downloadName);
+        } else {
+          showToast('归档下载失败', 'error');
+          return;
+        }
         await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskIds[i], {}, null);
       } else {
         const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: headers() });
+        if (!dlResp.ok) { showToast('归档下载失败: HTTP ' + dlResp.status, 'error'); return; }
         const blob = await dlResp.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = archiveResult.file.split('/').pop();
-        a.click();
-        URL.revokeObjectURL(url);
+        triggerBrowserDownload(blob, downloadName);
         await fetch(BASE + '/api/cloud/tasks/' + taskIds[i], { method: 'DELETE', headers: headers() });
       }
     }
     refreshCloudTasks();
     showToast('链式下载完成!', 'success');
   } catch (e) { showToast('链式下载失败: ' + e.message, 'error'); }
+}
+
+// 组链式下载入口：复用预览界面，action 为 'chain_group'
+async function chainDownloadCloudGroup() {
+  showCloudDownloadPreview('chain_group');
+}
+
+// doChainDownloadCloudGroup 执行组链式下载完整流程：创建组→等待→组级打包→下载→删除组。
+// 与 batch chain 的语义一致：任一子任务 failed/cancelled → 整体失败。
+async function doChainDownloadCloudGroup(urls, filenames) {
+  // 先 prompt 组名（与现有"创建组"行为一致）
+  const name = prompt('组名称（可选）:', 'group-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
+  if (name === null) return;
+
+  try {
+    const hdrs = headers({ 'Content-Type': 'application/json' });
+    showToast('创建下载组...', 'info');
+
+    // 阶段 1: 创建组
+    const entries = urls.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
+    const body = JSON.stringify({ name: name, urls: entries });
+    let groupId;
+    let totalTasks;
+    if (tunnelHexKey) {
+      const result = await tunnelRequest('POST', '/api/cloud/groups', hdrs, new TextEncoder().encode(body));
+      assertTunnelOk(result, '创建组');
+      const data = JSON.parse(new TextDecoder().decode(result.body));
+      groupId = data.id;
+      totalTasks = data.total_tasks || urls.length;
+    } else {
+      const resp = await fetch(BASE + '/api/cloud/groups', { method: 'POST', headers: hdrs, body: body });
+      if (!resp.ok) {
+        let errMsg = '创建组失败: ' + resp.status;
+        try { const data = await resp.json(); if (data.error) errMsg = data.error; } catch (e) { /* ignore */ }
+        showToast(errMsg, 'error');
+        return;
+      }
+      const data = await resp.json();
+      groupId = data.id;
+      totalTasks = data.total_tasks || urls.length;
+    }
+    refreshCloudGroups();
+    showToast('下载组已创建: ' + groupId, 'success');
+
+    // 阶段 2: 等待组内全部任务完成（轮询组详情，与 CLI CloudDownloadGroupChain.waitForGroup 逻辑对齐）
+    showToast('等待 ' + totalTasks + ' 个任务完成...', 'info');
+    let allDone = false;
+    for (let i = 0; i < 600; i++) {
+      await new Promise(function(r) { setTimeout(r, 2000); });
+      refreshCloudGroups().catch(function() { /* 轮询失败忽略，主轮询继续 */ });
+      try {
+        let detail;
+        if (tunnelHexKey) {
+          const r = await tunnelRequest('GET', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
+          detail = JSON.parse(new TextDecoder().decode(r.body));
+        } else {
+          const r = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { headers: headers() });
+          detail = await r.json();
+        }
+        const group = detail.group || detail;
+        // 检查是否有失败/取消的子任务
+        let failed = 0, cancelled = 0, completed = 0, active = 0;
+        const tasks = detail.tasks || [];
+        for (let j = 0; j < tasks.length; j++) {
+          switch (tasks[j].status) {
+            case 'completed': completed++; break;
+            case 'failed': failed++; break;
+            case 'cancelled': cancelled++; break;
+            default: active++;
+          }
+        }
+        if (failed + cancelled > 0) {
+          showToast('组内 ' + (failed + cancelled) + ' 个任务失败/取消，无法完成链式下载', 'error');
+          return;
+        }
+        if (group.status === 'completed' || (active === 0 && completed > 0)) {
+          allDone = true;
+          break;
+        }
+      } catch(e) {
+        // 轮询失败继续尝试
+      }
+    }
+    if (!allDone) { showToast('等待超时', 'error'); return; }
+    showToast('所有任务已完成', 'success');
+
+    // 阶段 3: 组级打包
+    showToast('打包归档中...', 'info');
+    const archiveName = 'group-' + groupId + '-' + Date.now() + '.tar.gz';
+    const archiveHdrs = headers({ 'Content-Type': 'application/json' });
+    const archiveBody = JSON.stringify({ archive_name: archiveName });
+    let archiveResult;
+    if (tunnelHexKey) {
+      const r = await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', archiveHdrs, new TextEncoder().encode(archiveBody));
+      archiveResult = JSON.parse(new TextDecoder().decode(r.body));
+    } else {
+      const r = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', { method: 'POST', headers: archiveHdrs, body: archiveBody });
+      archiveResult = await r.json();
+    }
+    if (!archiveResult.success) {
+      showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error');
+      return;
+    }
+    showToast('下载归档并清理中...', 'info');
+
+    // 阶段 4: 下载归档文件（先下载再删除组）
+    if (tunnelHexKey) {
+      const streamResult = await tunnelDownloadStream(archiveResult.file);
+      if (streamResult && streamResult.body) {
+        triggerBrowserDownload(streamResult.body, archiveName);
+      } else {
+        showToast('归档下载失败', 'error');
+        return;
+      }
+    } else {
+      const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: headers() });
+      if (!dlResp.ok) { showToast('归档下载失败: HTTP ' + dlResp.status, 'error'); return; }
+      const blob = await dlResp.blob();
+      triggerBrowserDownload(blob, archiveName);
+    }
+
+    // 阶段 5: 删除组（清理远端文件）
+    if (tunnelHexKey) {
+      await tunnelRequest('DELETE', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
+    } else {
+      await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { method: 'DELETE', headers: headers() });
+    }
+    refreshCloudGroups();
+    showToast('组链式下载完成!', 'success');
+  } catch (e) { showToast('组链式下载失败: ' + e.message, 'error'); }
 }
 async function createCloudTask() {
   showCloudDownloadPreview('submit');
