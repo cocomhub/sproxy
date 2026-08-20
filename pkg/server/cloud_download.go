@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
 )
 
@@ -1232,12 +1233,9 @@ var idCounter struct {
 	n  int64
 }
 
-// CloudBatchURL 批量下载中的单个 URL 条目。
-// 定义在 response.go 中，此处仅用于类型引用。
-
 // CreateGroup 创建下载任务组。
 // 校验文件名冲突，创建子任务。
-func (m *CloudDownloadManager) CreateGroup(name string, urls []CloudBatchURL) (*CloudTaskGroup, error) {
+func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Entry) (*CloudTaskGroup, error) {
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("at least one URL is required")
 	}
@@ -1245,11 +1243,10 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []CloudBatchURL) (*
 	// 校验文件名冲突
 	filenameSet := make(map[string]int)
 	for _, entry := range urls {
-		fn := entry.Filename
-		if fn == "" {
-			fn = extractFilename(entry.URL)
+		fn, err := cloudfilename.ResolveFilename(entry)
+		if err != nil {
+			return nil, fmt.Errorf("invalid filename for %s: %w", entry.URL, err)
 		}
-		fn = filepathSafe(fn)
 		filenameSet[fn]++
 	}
 	var conflicts []string
@@ -1301,11 +1298,11 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []CloudBatchURL) (*
 		}
 	}
 	for _, entry := range urls {
-		fn := entry.Filename
-		if fn == "" {
-			fn = extractFilename(entry.URL)
+		fn, err := cloudfilename.ResolveFilename(entry)
+		if err != nil {
+			rollback()
+			return nil, fmt.Errorf("invalid filename for %s: %w", entry.URL, err)
 		}
-		fn = filepathSafe(fn)
 		// 该 URL 已有活跃任务 → 本次是去重吸收既有任务，回滚时不删除
 		absorbed := m.findByURL(entry.URL) != nil
 
@@ -1365,7 +1362,7 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []CloudBatchURL) (*
 }
 
 // SubmitAndStartGroup 创建组并启动所有子任务下载。
-func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []CloudBatchURL) (*CloudTaskGroup, error) {
+func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []cloudfilename.Entry) (*CloudTaskGroup, error) {
 	group, err := m.CreateGroup(name, urls)
 	if err != nil {
 		return nil, err

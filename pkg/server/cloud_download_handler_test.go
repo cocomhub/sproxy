@@ -266,16 +266,8 @@ func TestCloudHandler_PathTraversalBlocked(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-
-	var task CloudTask
-	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if strings.Contains(task.Filename, "/") || strings.Contains(task.Filename, "\\") {
-		t.Fatalf("filename should be sanitized, got %q", task.Filename)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unsafe filename, got %d", resp.StatusCode)
 	}
 }
 
@@ -434,11 +426,11 @@ func TestCloudHandler_BatchCreateDownload_PathTraversal(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
 		t.Fatal(err)
 	}
-	if batchResp.Tasks[0].Status != "pending" && batchResp.Tasks[0].Status != "downloading" {
-		t.Fatalf("expected 'pending' or 'downloading', got %q", batchResp.Tasks[0].Status)
+	if batchResp.Tasks[0].Status != "failed" {
+		t.Fatalf("expected 'failed' for unsafe filename, got %q", batchResp.Tasks[0].Status)
 	}
-	if strings.Contains(batchResp.Tasks[0].Filename, "/") || strings.Contains(batchResp.Tasks[0].Filename, "\\") {
-		t.Fatalf("filename should be sanitized, got %q", batchResp.Tasks[0].Filename)
+	if batchResp.Tasks[0].Error == "" {
+		t.Fatal("expected error message for unsafe filename")
 	}
 }
 
@@ -753,32 +745,6 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 		t.Fatalf("expected 404 resuming nonexistent task, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
-}
-
-func TestExtractFilename(t *testing.T) {
-	tests := []struct {
-		url      string
-		expected string
-	}{
-		{"https://example.com/file.zip", "file.zip"},
-		{"https://example.com/path/to/file.txt", "file.txt"},
-		{"https://example.com/", "index.html"},
-		{"https://example.com/path/", "index.html"},
-		{"https://example.com/xx/?a=v", "index.html?a=v"},
-		{"https://example.com/file.txt?query=val&other=2", "file.txt?query=val&other=2"},
-		{"https://example.com/file%20name.txt", "file name.txt"},
-		{"", "download"},
-		{"not-a-url", "download"},
-		{"https://example.com/path/file.html#fragment", "file.html"}, // fragment should be ignored
-	}
-	for _, tt := range tests {
-		t.Run(tt.url, func(t *testing.T) {
-			got := extractFilename(tt.url)
-			if got != tt.expected {
-				t.Errorf("extractFilename(%q) = %q, want %q", tt.url, got, tt.expected)
-			}
-		})
-	}
 }
 
 // TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit 验证批量/组上限来自服务端配置

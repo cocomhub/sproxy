@@ -64,17 +64,9 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 // 执行 scheme 检查、可选 SSRF 防护、文件名提取和路径穿越防护。
 // 返回 (cleanedURL, cleanedFilename, error)。
 func validateCloudDownloadURL(rawURL, rawFilename string, allowPrivate bool) (string, string, error) {
-	if rawURL == "" {
-		return "", "", fmt.Errorf("url is required")
-	}
-
-	// SSRF 防护：校验 URL scheme 和 host
-	parsed, err := url.Parse(rawURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", "", fmt.Errorf("only http/https URLs are allowed")
-	}
-	if parsed.Host == "" {
-		return "", "", fmt.Errorf("invalid URL: missing host")
+	entry := cloudfilename.Entry{URL: rawURL, Filename: rawFilename}
+	if err := cloudfilename.ValidateEntry(entry); err != nil {
+		return "", "", err
 	}
 	// SSRF 深层防护：检查 host 不解析到内部 IP（除非 allowPrivate）
 	if !allowPrivate {
@@ -82,15 +74,12 @@ func validateCloudDownloadURL(rawURL, rawFilename string, allowPrivate bool) (st
 			return "", "", fmt.Errorf("unsafe URL: %w", hostErr)
 		}
 	}
-
-	filename := rawFilename
-	if filename == "" {
-		filename = extractFilename(rawURL)
+	fn, err := cloudfilename.ResolveFilename(entry)
+	if err != nil {
+		return "", "", err
 	}
-	// 路径穿越防护：清理文件名中的路径分隔符
-	filename = filepathSafe(filename)
-
-	return parsed.String(), filename, nil
+	parsed, _ := url.Parse(rawURL)
+	return parsed.String(), fn, nil
 }
 
 // cloudCreateBatchDownload 处理 POST /api/cloud/download/batch。
@@ -98,7 +87,9 @@ func validateCloudDownloadURL(rawURL, rawFilename string, allowPrivate bool) (st
 func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 限 1 MiB
 
-	var req CloudBatchRequest
+	var req struct {
+		URLs []cloudfilename.Entry `json:"urls"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
 		return
@@ -227,8 +218,8 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB
 
 	var req struct {
-		Name string          `json:"name"`
-		URLs []CloudBatchURL `json:"urls"`
+		Name string                `json:"name"`
+		URLs []cloudfilename.Entry `json:"urls"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
@@ -247,14 +238,14 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 	// 批量路径保持一致——否则同一内容的不同拼写（如 http://host/a 与 http://host/a/）
 	// 在单条路径会被去重、在组路径会生成两个下载，组内文件名冲突判定也基于未
 	// 规范化的值，导致与 UI/CLI 本地预检偶发不一致。
-	normalized := make([]CloudBatchURL, len(req.URLs))
+	normalized := make([]cloudfilename.Entry, len(req.URLs))
 	for i, entry := range req.URLs {
 		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.config.AllowPrivate)
 		if err != nil {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
 		}
-		normalized[i] = CloudBatchURL{URL: cleanedURL, Filename: cleanedFilename}
+		normalized[i] = cloudfilename.Entry{URL: cleanedURL, Filename: cleanedFilename}
 	}
 
 	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized)
@@ -510,15 +501,4 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		SkippedCount: len(skippedTasks),
 		SkippedTasks: skippedTasks,
 	}, http.StatusOK)
-}
-
-// extractFilename 从 URL 中提取文件名（委托给 genDefaultFilename）。
-func extractFilename(rawURL string) string {
-	return cloudfilename.DefaultFromURL(rawURL)
-}
-
-// filepathSafe 清理文件名中的路径分隔符，防止路径穿越。
-// 逻辑委托给共享包 pkg/cloudfilename，保证双端规则一致。
-func filepathSafe(name string) string {
-	return cloudfilename.Safe(name)
 }

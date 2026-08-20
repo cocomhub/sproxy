@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
 func TestCloudTask_JSONRoundTrip(t *testing.T) {
@@ -590,7 +592,7 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 	t.Cleanup(mgr.Close)
 
 	// 仅创建组（不启动），子任务停在 pending
-	group, err := mgr.CreateGroup("g", []CloudBatchURL{{URL: srv.URL, Filename: "real.bin"}})
+	group, err := mgr.CreateGroup("g", []cloudfilename.Entry{{URL: srv.URL, Filename: "real.bin"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -827,12 +829,9 @@ func TestValidateCloudDownloadURL_InvalidScheme(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_PathTraversal(t *testing.T) {
-	_, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "../../../etc/passwd", false)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
-		t.Fatalf("expected sanitized filename, got %q", filename)
+	_, _, err := validateCloudDownloadURL("https://example.com/file.zip", "../../../etc/passwd", false)
+	if err == nil {
+		t.Fatal("expected error for unsafe filename")
 	}
 }
 
@@ -1605,7 +1604,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	mgr1 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 	t.Cleanup(func() { mgr1.Close() })
 
-	group, err := mgr1.SubmitAndStartGroup("persist-group", []CloudBatchURL{
+	group, err := mgr1.SubmitAndStartGroup("persist-group", []cloudfilename.Entry{
 		{URL: srvA.URL, Filename: "a.bin"},
 		{URL: srvB.URL, Filename: "b.bin"},
 	})
@@ -1687,7 +1686,7 @@ func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
 	t.Cleanup(func() { mgr.Close() })
 
 	// 同一 URL 使用不同文件名 → 触发组内去重冲突（而非文件名冲突）
-	_, err := mgr.SubmitAndStartGroup("dup", []CloudBatchURL{
+	_, err := mgr.SubmitAndStartGroup("dup", []cloudfilename.Entry{
 		{URL: "https://example.com/a.zip", Filename: "one.zip"},
 		{URL: "https://example.com/a.zip", Filename: "two.zip"},
 	})
@@ -1716,7 +1715,7 @@ func TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion(t *testing.T) {
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	group, err := mgr.SubmitAndStartGroup("auto", []CloudBatchURL{
+	group, err := mgr.SubmitAndStartGroup("auto", []cloudfilename.Entry{
 		{URL: srv.URL + "/a.bin", Filename: "a.bin"},
 		{URL: srv.URL + "/b.bin", Filename: "b.bin"},
 	})
@@ -1757,7 +1756,7 @@ func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	group, err := mgr.SubmitAndStartGroup("partial", []CloudBatchURL{
+	group, err := mgr.SubmitAndStartGroup("partial", []cloudfilename.Entry{
 		{URL: srvOK.URL, Filename: "ok.bin"},
 		{URL: srv404.URL, Filename: "bad.bin"},
 	})
@@ -1795,7 +1794,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	t.Cleanup(func() { mgr.Close() })
 
 	// 两个目录结尾 URL → 自动文件名都是 index.html → 冲突
-	_, err := mgr.CreateGroup("conflict", []CloudBatchURL{
+	_, err := mgr.CreateGroup("conflict", []cloudfilename.Entry{
 		{URL: "https://example.com/a/"},
 		{URL: "https://example.com/b/"},
 	})
@@ -1811,7 +1810,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	}
 
 	// 显式指定不同保存文件名可消除冲突
-	group, err := mgr.CreateGroup("ok", []CloudBatchURL{
+	group, err := mgr.CreateGroup("ok", []cloudfilename.Entry{
 		{URL: "https://example.com/a/", Filename: "a-index.html"},
 		{URL: "https://example.com/b/", Filename: "b-index.html"},
 	})
@@ -1822,29 +1821,29 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 		t.Fatalf("expected 2 tasks, got %d", group.TotalTasks)
 	}
 
-	// 显式文件名冲突判定基于清理后名字：a/b.zip 与 a_b.zip 都清理为 a_b.zip → 仍冲突
-	_, err = mgr.CreateGroup("still-conflict", []CloudBatchURL{
+	// 显式 Filename 含路径分隔符 → ResolveFilename 返回不安全文件名错误（只校验不修改）
+	_, err = mgr.CreateGroup("still-conflict", []cloudfilename.Entry{
 		{URL: "https://example.com/c/", Filename: "a/b.zip"},
 		{URL: "https://example.com/d/", Filename: "a_b.zip"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "filename conflict") {
-		t.Fatalf("expected filename conflict after sanitize, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "unsafe characters") {
+		t.Fatalf("expected unsafe filename error, got %v", err)
 	}
 
 	// 清理后真正唯一的文件名可创建成功（保证清理规则一致生效）
-	g2, err := mgr.CreateGroup("ok2", []CloudBatchURL{
-		{URL: "https://example.com/e/", Filename: "c/d.zip"},
+	g2, err := mgr.CreateGroup("ok2", []cloudfilename.Entry{
+		{URL: "https://example.com/e/", Filename: "c_d.zip"},
 		{URL: "https://example.com/f/", Filename: "cd.zip"},
 	})
 	if err != nil {
 		t.Fatalf("expected group creation after sanitize makes names unique, got %v", err)
 	}
-	_ = g2
 
 	// 清理已创建组（避免影响测试隔离）
-	for _, g := range []string{group.ID, g2.ID} {
-		if err := mgr.DeleteGroup(g); err != nil {
-			t.Fatalf("DeleteGroup %s: %v", g, err)
-		}
+	if err := mgr.DeleteGroup(group.ID); err != nil {
+		t.Fatalf("DeleteGroup %s: %v", group.ID, err)
+	}
+	if err := mgr.DeleteGroup(g2.ID); err != nil {
+		t.Fatalf("DeleteGroup %s: %v", g2.ID, err)
 	}
 }
