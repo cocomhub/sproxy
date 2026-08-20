@@ -479,9 +479,13 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 ## 记录
 
 ### 云端下载文件名生成规则（双端共享）
-- 规则唯一实现：Go `pkg/cloudfilename`（`DefaultFromURL` / `Safe`）+ JS `web/static/cloudfilename.js`（UMD，浏览器全局 `cloudfilename` 与 Node 导出双用）。
+- 规则唯一实现：Go `pkg/cloudfilename`（`DefaultFromURL` / `Safe` / `ResolveFilename` / `ValidateEntries`）+ JS `web/static/cloudfilename.js`（UMD，浏览器全局 `cloudfilename` 与 Node 导出双用）。
 - **一致性靠共享语料保证**：`pkg/cloudfilename/testdata/cases.json` 是权威语料，Go 测试 `TestDefaultFromURL_FromFixture` 与 JS 测试 `web/static/cloudfilename.test.js`（`make web-test`）都断言它 → 双端任一改规则导致不一致，测试立即失败。
-- wget 行为：路径以 `/` 结尾 → `index.html`（`/xx/?a=v` → `index.html?a=v`）；raw query 直接附加在文件名后；路径最后一段百分号解码。
+- **`DefaultFromURL` 返回即安全文件名**（内部已调用 `Safe`），调用方无需再额外包装；JS 对应 `safeDefaultFromURL`。
+- **`Entry` 类型**（URL + Filename）定义在 `pkg/cloudfilename`，client 与 server 共用（不再各自定义 CloudDownloadEntry / CloudBatchURL）。
+- **`ResolveFilename(e Entry)`** 校验+解析文件名：显式 Filename 含非法字符返回哨兵错误 `ErrEntryUnsafeFilename`（**只校验不修改**，不静默改写保存名）；Filename 为空则按 URL 自动生成。
+- **`ValidateEntries(entries)`** 统一做 URL scheme/host 校验 + 同 URL 不同 filename 去重（`ErrEntryDupURL`）；client 批量/组创建前调用，server `validateCloudDownloadURL` 用 `ValidateEntry` + `ResolveFilename`。
+- wget 行为：路径以 `/` 结尾 → `index.html`（`/xx/?a=v` → `index.html_a=v`，`?` 被 Safe 替换为 `_`）；raw query 直接附加在文件名后；路径最后一段百分号解码。
 - Go 用 `url.Parse`（path 已解码一次）+ `url.PathUnescape`（二次解码，**不把 `+` 转空格**）；JS 用 `parseURL`（从原始字符串提取 rawPath/rawQuery/hash）对齐 Go url.Parse，**不能**用 `new URL().pathname`（WHATWG 会折叠点段、归一化 query）。
 - **Go/JS 语义差异（已对齐并录入语料）**：
   - 非法百分号编码 → 两端都返回 `"download"`，但 **Go 只校验 path 与 fragment**，query 原样保留（`?x=100%` → `file.txt?x=100%`）。JS 正则必须只查 `rawPath + hash`，**不能查整个 href**（否则 query 非法 `%` 误判 download）。
@@ -511,9 +515,9 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 - 三个 tab 切换函数（stats/share/cloud）的 JS 里 `el.style.color` 也要用 `var(--tab-active)/var(--text-primary)/var(--text-secondary)`，不能硬编码。
 
 ### 组创建保证无文件冲突
-- `CreateGroup` 在创建子任务前先校验所有 URL 的文件名（`Safe(DefaultFromURL(url))` 或显式 filename）是否唯一，冲突返回 409 并回滚（不泄漏任务与存储预留）。
+- `CreateGroup` 在创建子任务前先校验所有 URL 的文件名（`ResolveFilename`：显式 filename 或按 URL 自动生成）是否唯一，冲突返回 409 并回滚（不泄漏任务与存储预留）。
 - 去重命中（相同 URL 已属其他组）同样拒绝并入组；客户端可指定 `filename` 字段消除冲突。
-- CLI `group` 命令在发送前用共享 `cloudfilename` 本地预校验并打印 URL→文件名计划；`--url-file` 每行 `URL<TAB>FILENAME` 可指定保存文件名。
+- CLI `group` 命令在发送前用共享 `cloudfilename.ResolveFilename` 本地预校验并打印 URL→文件名计划；`--url-file` 每行 `URL<TAB>FILENAME` 可指定保存文件名。
 
 ### 禁止静默失败（原则 + 已修复清单）
 - 任务终态（completed/failed/cancelled）的持久化失败不能只打 Warn：`saveTask`/`saveGroup` 写盘失败意味着重启后状态回滚。已改为**返回 error**，终态调用点（完成/fail/cancel/resume、组状态变更）记 **Error 日志**；进度类 dirty flush 仍容忍。
