@@ -763,16 +763,9 @@ func (m *CloudDownloadManager) findByURL(url string) *CloudTask {
 	return nil
 }
 
-// GetTask 按 ID 获取任务。
+// GetTask 返回任务的快照（副本），避免并发修改导致 data race。
 func (m *CloudDownloadManager) GetTask(id string) (*CloudTask, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	t, ok := m.tasks[id]
-	if !ok {
-		return nil, false
-	}
-	c := *t
-	return &c, true
+	return m.SnapshotTask(id)
 }
 
 // SnapshotTask 返回任务的快照（副本），避免并发修改导致 data race。
@@ -1216,34 +1209,27 @@ func (m *CloudDownloadManager) cleanupExpired() {
 	}
 }
 
-var taskIDCounter struct {
-	mu sync.Mutex
-	n  int64
+func newGroupID() string {
+	return newIDWithPrefix("group")
 }
 
 func newTaskID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	taskIDCounter.mu.Lock()
-	taskIDCounter.n++
-	n := taskIDCounter.n
-	taskIDCounter.mu.Unlock()
-	return fmt.Sprintf("cloud-%s-%d", hex.EncodeToString(b), n)
+	return newIDWithPrefix("cloud")
 }
 
-var groupIDCounter struct {
+func newIDWithPrefix(prefix string) string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	idCounter.mu.Lock()
+	idCounter.n++
+	n := idCounter.n
+	idCounter.mu.Unlock()
+	return fmt.Sprintf("%s-%s-%d", prefix, hex.EncodeToString(b), n)
+}
+
+var idCounter struct {
 	mu sync.Mutex
 	n  int64
-}
-
-func newGroupID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	groupIDCounter.mu.Lock()
-	groupIDCounter.n++
-	n := groupIDCounter.n
-	groupIDCounter.mu.Unlock()
-	return fmt.Sprintf("group-%s-%d", hex.EncodeToString(b), n)
 }
 
 // CloudBatchURL 批量下载中的单个 URL 条目。

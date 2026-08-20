@@ -755,7 +755,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestGenDefaultFilename(t *testing.T) {
+func TestExtractFilename(t *testing.T) {
 	tests := []struct {
 		url      string
 		expected string
@@ -773,9 +773,9 @@ func TestGenDefaultFilename(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.url, func(t *testing.T) {
-			got := genDefaultFilename(tt.url)
+			got := extractFilename(tt.url)
 			if got != tt.expected {
-				t.Errorf("genDefaultFilename(%q) = %q, want %q", tt.url, got, tt.expected)
+				t.Errorf("extractFilename(%q) = %q, want %q", tt.url, got, tt.expected)
 			}
 		})
 	}

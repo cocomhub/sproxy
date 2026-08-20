@@ -263,6 +263,7 @@ func TestCloudDownloadManager_RecoverTasks(t *testing.T) {
 	mgr1.mu.Unlock()
 	mgr1.saveTask(t1)
 	mgr1.saveTask(t2)
+	mgr1.Close() // 关闭 mgr1 的 flushLoop/cleanupExpired 后台 goroutine，避免与新 mgr 的清理逻辑交叉
 
 	// 新建一个 manager 模拟重启
 	mgr2 := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
@@ -1562,11 +1563,20 @@ func TestCloudDownloadManager_ResumeTaskForceTrueFullRedownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitTaskDone(t, mgr, task.ID)
-	// 手动置 failed 再 force resume
+	// 置 failed 准备 resume。通过 failTask 走正常释放路径，确保 StorageManager 账本一致
+	// （不手动置 ReservedSize=0 绕过释放，否则云分类计数会虚高）。
 	mgr.mu.Lock()
-	task.Status = "failed"
-	task.ReservedSize = 0
+	initialStatus := task.Status
 	mgr.mu.Unlock()
+	if initialStatus == "completed" {
+		// 已完成，直接置 failed 即可（ReservedSize 已由 downloadDone 对齐到实际大小）
+		mgr.mu.Lock()
+		task.Status = "failed"
+		task.ReservedSize = 0
+		mgr.mu.Unlock()
+	} else {
+		mgr.failTask(task, "test force resume")
+	}
 	if err := mgr.ResumeTask(task.ID, true); err != nil {
 		t.Fatal(err)
 	}

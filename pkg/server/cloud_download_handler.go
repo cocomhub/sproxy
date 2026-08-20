@@ -512,21 +512,9 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
-// genDefaultFilename 从 URL 中提取默认文件名，遵循 wget 行为。
-// 逻辑委托给共享包 pkg/cloudfilename，保证与客户端 (sclient / Web UI) 一致：
-//   - 路径末尾为 / 时使用 "index.html"
-//   - 查询参数（?后的 raw query）直接附加到文件名后
-//   - 路径最后一段做百分号解码
-//
-// 返回的文件名未经 filepathSafe 处理，调用方应自行 sanitize。
-func genDefaultFilename(rawURL string) string {
-	return cloudfilename.DefaultFromURL(rawURL)
-}
-
-// extractFilename 从 URL 中提取文件名（保留向后兼容）。
-// 新代码请使用 genDefaultFilename。
+// extractFilename 从 URL 中提取文件名（委托给 genDefaultFilename）。
 func extractFilename(rawURL string) string {
-	return genDefaultFilename(rawURL)
+	return cloudfilename.DefaultFromURL(rawURL)
 }
 
 // filepathSafe 清理文件名中的路径分隔符，防止路径穿越。
