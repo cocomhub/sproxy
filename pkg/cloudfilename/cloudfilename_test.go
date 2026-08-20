@@ -5,6 +5,7 @@ package cloudfilename
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,15 +34,15 @@ func TestDefaultFromURL_KeyRules(t *testing.T) {
 		{name: "普通文件", url: "https://example.com/file.txt", want: "file.txt"},
 		{name: "多级目录取最后一段", url: "https://example.com/a/b/c.jpg", want: "c.jpg"},
 		{name: "根路径", url: "https://example.com/", want: "index.html"},
-		{name: "根路径带查询", url: "https://example.com/?a=v", want: "index.html?a=v"},
+		{name: "根路径带查询", url: "https://example.com/?a=v", want: "index.html_a=v"},
 		{name: "目录结尾使用index.html", url: "https://example.com/foo/", want: "index.html"},
-		{name: "目录结尾带查询", url: "https://example.com/xx/?a=v", want: "index.html?a=v"},
-		{name: "查询参数直接附加", url: "https://example.com/file.txt?token=abc&x=1", want: "file.txt?token=abc&x=1"},
+		{name: "目录结尾带查询", url: "https://example.com/xx/?a=v", want: "index.html_a=v"},
+		{name: "查询参数直接附加", url: "https://example.com/file.txt?token=abc&x=1", want: "file.txt_token=abc&x=1"},
 		{name: "百分号解码", url: "https://example.com/my%20file.txt", want: "my file.txt"},
 		{name: "百分号解码不转加号", url: "https://example.com/a+b.txt", want: "a+b.txt"},
 		{name: "双重编码", url: "https://example.com/a%2520b.txt", want: "a b.txt"},
 		{name: "无路径", url: "https://example.com", want: "index.html"},
-		{name: "无路径带查询", url: "https://example.com?a=v", want: "index.html?a=v"},
+		{name: "无路径带查询", url: "https://example.com?a=v", want: "index.html_a=v"},
 		{name: "非法百分号编码回退download", url: "https://example.com/100%.txt", want: "download"},
 		{name: "中文路径解码", url: "https://example.com/%E4%B8%AD%E6%96%87.txt", want: "中文.txt"},
 		{name: "无效URL", url: "not a url", want: "download"},
@@ -54,6 +55,92 @@ func TestDefaultFromURL_KeyRules(t *testing.T) {
 				t.Errorf("DefaultFromURL(%q) = %q, want %q", tt.url, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveFilename_ExplicitValid(t *testing.T) {
+	got, err := ResolveFilename(Entry{URL: "https://e.com/a.zip", Filename: "valid.zip"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "valid.zip" {
+		t.Fatalf("want valid.zip, got %q", got)
+	}
+}
+
+func TestResolveFilename_ExplicitUnsafe(t *testing.T) {
+	_, err := ResolveFilename(Entry{URL: "https://e.com/a.zip", Filename: "a/b.zip"})
+	if err == nil {
+		t.Fatal("expected error for unsafe filename")
+	}
+	if !errors.Is(err, ErrEntryUnsafeFilename) {
+		t.Fatalf("want ErrEntryUnsafeFilename, got %v", err)
+	}
+}
+
+func TestResolveFilename_AutoFromURL(t *testing.T) {
+	got, err := ResolveFilename(Entry{URL: "https://e.com/xx/?a=v"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// DefaultFromURL 现在是安全版，? 被替换为 _
+	if got != "index.html_a=v" {
+		t.Fatalf("want index.html_a=v, got %q", got)
+	}
+}
+
+func TestValidateEntry(t *testing.T) {
+	tests := []struct {
+		name string
+		e    Entry
+		err  error
+	}{
+		{name: "空 URL", e: Entry{URL: ""}, err: ErrEntryEmptyURL},
+		{name: "非法 scheme", e: Entry{URL: "ftp://e.com/a.zip"}, err: ErrEntryBadScheme},
+		{name: "缺 host", e: Entry{URL: "http:///path"}, err: ErrEntryMissingHost},
+		{name: "合法 URL", e: Entry{URL: "https://e.com/a.zip"}, err: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ValidateEntry(tt.e)
+			if tt.err == nil && got != nil {
+				t.Fatalf("unexpected error: %v", got)
+			}
+			if tt.err != nil && !errors.Is(got, tt.err) {
+				t.Fatalf("want %v, got %v", tt.err, got)
+			}
+		})
+	}
+}
+
+func TestValidateEntries_DupURL_DiffFilename(t *testing.T) {
+	entries := []Entry{
+		{URL: "https://e.com/a.zip", Filename: "a.zip"},
+		{URL: "https://e.com/a.zip", Filename: "b.zip"},
+	}
+	err := ValidateEntries(entries)
+	if !errors.Is(err, ErrEntryDupURL) {
+		t.Fatalf("want ErrEntryDupURL, got %v", err)
+	}
+}
+
+func TestValidateEntries_DupURL_SameFilenameOK(t *testing.T) {
+	entries := []Entry{
+		{URL: "https://e.com/a.zip", Filename: "a.zip"},
+		{URL: "https://e.com/a.zip", Filename: "a.zip"},
+	}
+	if err := ValidateEntries(entries); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateEntries_Valid(t *testing.T) {
+	entries := []Entry{
+		{URL: "https://e.com/a.zip"},
+		{URL: "https://e.com/b.zip", Filename: "b.zip"},
+	}
+	if err := ValidateEntries(entries); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -96,7 +183,28 @@ func TestSafe(t *testing.T) {
 	}
 }
 
+func TestDefaultFromURL_SafeOutput(t *testing.T) {
+	tests := []struct{ url, want string }{
+		{"https://e.com/path/file.txt?x=1&y=2", "file.txt_x=1&y=2"},
+		{"https://e.com/a?b/c", "a_b_c"},
+	}
+	for _, tt := range tests {
+		if got := DefaultFromURL(tt.url); got != tt.want {
+			t.Errorf("DefaultFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
+func TestDefaultFromURL_UnsafeRaw(t *testing.T) {
+	// defaultFromURLUnsafe 保留原始 wget 语义：? 不会被替换
+	got := defaultFromURLUnsafe("https://e.com/xx/?a=v")
+	if want := "index.html?a=v"; got != want {
+		t.Errorf("defaultFromURLUnsafe = %q, want %q", got, want)
+	}
+}
+
 // TestDefaultFromURLThenSafe 验证"生成 + 清理"的完整链路（与 server 端一致）。
+// DefaultFromURL 已内置 Safe，双重包装退化为单层 Safe，结果不变。
 func TestDefaultFromURLThenSafe(t *testing.T) {
 	tests := []struct {
 		url  string

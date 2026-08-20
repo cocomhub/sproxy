@@ -13,14 +13,21 @@ import (
 	"unicode/utf8"
 )
 
-// DefaultFromURL 遵循 wget 行为从 URL 推导默认文件名：
+// DefaultFromURL 遵循 wget 行为从 URL 推导默认文件名并做安全清理。
+// 返回即为可安全落盘的文件名，调用方无需再调用 Safe。
+// 内部先将不安全版通过 Safe 清理，保证"生成即安全"。
+func DefaultFromURL(rawURL string) string {
+	return Safe(defaultFromURLUnsafe(rawURL))
+}
+
+// defaultFromURLUnsafe 保留原始 wget 推导逻辑（仅供内部精确测试）：
 //   - 路径末尾为 / 时使用 "index.html"（如 /xx/?a=v → index.html?a=v）
 //   - 查询参数（? 后的 raw query）直接附加到文件名后
 //   - 路径最后一段做百分号解码
 //
 // 无效 URL 或非绝对 URL（无 host）返回 "download"。
 // 返回值未做路径穿越清理，调用方应自行调用 Safe。
-func DefaultFromURL(rawURL string) string {
+func defaultFromURLUnsafe(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	// 无效 URL 或非绝对 URL（无 host）返回 "download"
 	if err != nil || parsed.Host == "" {
