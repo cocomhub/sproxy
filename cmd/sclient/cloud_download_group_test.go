@@ -32,7 +32,7 @@ func TestCloudDownloadGroupCmd_Subcommands(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{}, nil)
 
-	subcommands := []string{"submit", "wait", "list", "archive", "cancel", "resume", "delete"}
+	subcommands := []string{"submit", "wait", "download", "download-archive", "list", "archive", "cancel", "delete", "resume-chain", "resume-download"}
 	for _, name := range subcommands {
 		sub := findSubCommand(cmd, name)
 		if sub == nil {
@@ -303,14 +303,120 @@ func TestCloudDownloadGroupCmd_Resume(t *testing.T) {
 
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+
+	resume := findSubCommand(cmd, "resume-download")
+	if resume == nil {
+		t.Fatal("expected resume-download subcommand")
+	}
+	if resume.Use != "resume-download <group-id>" {
+		t.Fatalf("expected Use 'resume-download <group-id>', got %q", resume.Use)
+	}
+	// 验证命令能实际执行
 	var buf strings.Builder
-	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
-	cmd.SetArgs([]string{"resume", "group-1"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("resume subcommand failed: %v", err)
+	cmdResume := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmdResume.SetArgs([]string{"resume-download", "group-1"})
+	if err := cmdResume.Execute(); err != nil {
+		t.Fatalf("resume-download subcommand failed: %v", err)
 	}
 	if !strings.Contains(buf.String(), "恢复成功") {
 		t.Fatalf("expected resume success message, got: %s", buf.String())
+	}
+}
+
+func TestCloudDownloadGroupCmd_DownloadSubcommand(t *testing.T) {
+	// mock group detail + download endpoint
+	var calledGroup, calledDownload bool
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/cloud/groups/group-dl" && r.Method == http.MethodGet {
+			calledGroup = true
+			detail := map[string]any{
+				"group": map[string]any{
+					"id":          "group-dl",
+					"name":        "dl-group",
+					"status":      "completed",
+					"total_tasks": 1,
+				},
+				"tasks": []map[string]any{
+					{"id": "task-1", "status": "completed", "filename": "file.zip"},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(detail)
+			return
+		}
+		if r.URL.Path == "/download" && r.Method == http.MethodGet {
+			calledDownload = true
+			if r.URL.Query().Get("filename") != ".__cloud__/task-1/file.zip" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.Write([]byte("file content"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd.SetArgs([]string{"download", "group-dl", "task-1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("download subcommand failed: %v", err)
+	}
+	if !calledGroup {
+		t.Fatal("expected CloudGetGroup call")
+	}
+	if !calledDownload {
+		t.Fatal("expected Download call")
+	}
+}
+
+func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
+	var calledDownload bool
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/download" && r.Method == http.MethodGet {
+			calledDownload = true
+			if r.URL.Query().Get("filename") != "archive.tar.gz" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.Write([]byte("archive content"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
+	cmd.SetArgs([]string{"download-archive", "archive.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("download-archive subcommand failed: %v", err)
+	}
+	if !calledDownload {
+		t.Fatal("expected Download call")
+	}
+}
+
+func TestCloudDownloadGroupCmd_ResumeChainSubcommand(t *testing.T) {
+	svc := client.NewFileClient("http://test.local")
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+
+	resumeChain := findSubCommand(cmd, "resume-chain")
+	if resumeChain == nil {
+		t.Fatal("expected resume-chain subcommand")
+	}
+	if resumeChain.Use != "resume-chain <chain-id>" {
+		t.Fatalf("expected Use 'resume-chain <chain-id>', got %q", resumeChain.Use)
+	}
+	if resumeChain.Args == nil {
+		t.Fatal("expected Args to be set")
 	}
 }
 

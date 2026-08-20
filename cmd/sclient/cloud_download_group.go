@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,7 +32,7 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
   5. 清理远端组
 
 使用 --keep-files 跳过清理步骤。
-使用子命令（submit, wait, archive, list, cancel, resume, delete）执行单个步骤。`,
+使用子命令（submit, wait, archive, download, download-archive, list, cancel, delete, resume-chain, resume-download）执行单个步骤。`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
@@ -100,9 +101,12 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 	cmd.AddCommand(NewCmdCloudGroupSubmit(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupWait(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupArchive(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudGroupDownload(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudGroupDownloadArchive(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupList(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupCancel(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupResume(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudGroupResumeChain(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupDelete(factory, ios, cfgSvc))
 
 	return cmd
@@ -339,11 +343,11 @@ func NewCmdCloudGroupCancel(factory clientfactory.Factory, ios cli.IOStreams, cf
 	return cmd
 }
 
-// NewCmdCloudGroupResume 创建 resume 子命令。
+// NewCmdCloudGroupResume 创建 resume-download 子命令。
 func NewCmdCloudGroupResume(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "resume <group-id>",
-		Short: "恢复下载组内所有失败任务",
+		Use:   "resume-download <group-id>",
+		Short: "恢复组内失败下载任务",
 		Long:  `恢复组内所有失败任务，支持续传或强制重新下载。`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -361,6 +365,107 @@ func NewCmdCloudGroupResume(factory clientfactory.Factory, ios cli.IOStreams, cf
 		},
 	}
 	cmd.Flags().Bool("force", false, "强制删除后重新下载，不使用续传")
+	return cmd
+}
+
+// NewCmdCloudGroupDownload 创建 download 子命令，下载组内指定子任务的原始文件。
+func NewCmdCloudGroupDownload(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "download <group-id> <sub-task-id> [sub-task-id...]",
+		Short: "下载组内指定子任务的原始文件",
+		Args:  cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
+				return fmt.Errorf(errFmtInitClient, err)
+			}
+			groupID := args[0]
+			detail, err := svc.CloudGetGroup(cmd.Context(), groupID)
+			if err != nil {
+				return fmt.Errorf("获取下载组 %s 信息失败: %w", groupID, err)
+			}
+			taskByID := make(map[string]client.CloudTask, len(detail.Tasks))
+			for _, t := range detail.Tasks {
+				taskByID[t.ID] = t
+			}
+			for _, subID := range args[1:] {
+				task, ok := taskByID[subID]
+				if !ok {
+					return fmt.Errorf("子任务 %s 不在组 %s 中", subID, groupID)
+				}
+				if task.Status != client.TaskStatusCompleted {
+					return fmt.Errorf("子任务 %s 未完成（当前 %s），无法下载原始文件", subID, task.Status)
+				}
+				cloudPath := ".__cloud__/" + subID + "/" + task.Filename
+				ios.WriteOutLine("下载子任务 %s (%s)...", subID, task.Filename)
+				if err := svc.Download(cmd.Context(), cloudPath, task.Filename); err != nil {
+					return fmt.Errorf("下载子任务 %s 失败: %w", subID, err)
+				}
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+// NewCmdCloudGroupDownloadArchive 创建 download-archive 子命令，下载归档文件。
+func NewCmdCloudGroupDownloadArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "download-archive <archive-file> [archive-file...]",
+		Short: "下载归档文件到本地",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
+				return fmt.Errorf(errFmtInitClient, err)
+			}
+			for _, archiveFile := range args {
+				localName := filepath.Base(archiveFile)
+				ios.WriteOutLine("下载归档文件 %s...", archiveFile)
+				if err := svc.Download(cmd.Context(), archiveFile, localName); err != nil {
+					return fmt.Errorf("下载归档文件 %s 失败: %w", archiveFile, err)
+				}
+			}
+			return nil
+		},
+	}
+	return cmd
+}
+
+// NewCmdCloudGroupResumeChain 创建 resume-chain 子命令，恢复中断的链式操作。
+func NewCmdCloudGroupResumeChain(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "resume-chain <chain-id>",
+		Short: "恢复中断的组链式操作",
+		Long: `从缓存恢复并继续执行中断的组链式操作。
+需要客户端配置了 cache_dir 以启用链式操作持久化。`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			svc, err := factory.NewClient(cmd)
+			if err != nil {
+				ios.WriteErrLine("初始化客户端失败: %v", err)
+				return fmt.Errorf(errFmtInitClient, err)
+			}
+
+			chainID := args[0]
+			ios.WriteOutLine("恢复组链式操作: %s", chainID)
+
+			result, err := svc.ResumeChain(cmd.Context(), chainID)
+			if err != nil {
+				return fmt.Errorf("恢复组链式操作失败: %w", err)
+			}
+
+			ios.WriteOutLine("组链式操作完成!")
+			ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			if !result.KeepFiles() {
+				ios.WriteOutLine("  远端文件: 已清理")
+			}
+			return nil
+		},
+	}
+
 	return cmd
 }
 
