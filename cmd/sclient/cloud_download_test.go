@@ -292,7 +292,7 @@ func TestCloudDownloadCmd_Subcommands(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{}, nil)
 
-	subcommands := []string{"submit", "wait", "archive", "fetch", "resume", "list", "cancel"}
+	subcommands := []string{"submit", "wait", "archive", "download", "download-archive", "delete", "resume-chain", "resume-download", "list", "cancel"}
 	for _, name := range subcommands {
 		sub := findSubCommand(cmd, name)
 		if sub == nil {
@@ -412,31 +412,25 @@ func TestCloudDownloadCmd_WaitSubcommand(t *testing.T) {
 	}
 }
 
-func TestCloudDownloadCmd_FetchSubcommand(t *testing.T) {
-	tasks := []map[string]any{
-		{
-			"id":         "fetch-1",
-			"url":        "https://example.com/file.zip",
-			"filename":   "file.zip",
-			"status":     "completed",
-			"total_size": int64(100),
-		},
-	}
-	mock := newChainMockServer(t, tasks, []byte("fetch content"))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
+func TestCloudDownloadCmd_FetchSubcommandRemoved(t *testing.T) {
+	// fetch 子命令已移除：注册表中不应存在名为 fetch 的子命令
+	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
-	outDir := t.TempDir()
-	var buf strings.Builder
-	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"fetch", "--output-dir", outDir, "--poll-interval", "100ms", "--timeout", "30s",
-		"https://example.com/file.zip"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("fetch subcommand failed: %v", err)
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+
+	if sub := findSubCommand(cmd, "fetch"); sub != nil {
+		t.Fatalf("expected fetch subcommand to be removed, found it registered with Use %q", sub.Use)
 	}
-	if !strings.Contains(buf.String(), "链式下载完成") {
-		t.Fatalf("expected completion message, got: %s", buf.String())
+	// 帮助文本也不应再列出 fetch
+	var buf strings.Builder
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--help"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("help execution failed: %v", err)
+	}
+	if strings.Contains(buf.String(), "fetch") {
+		t.Fatalf("help text should not mention fetch, got: %s", buf.String())
 	}
 }
 
@@ -550,18 +544,21 @@ func TestExtractTarGz_PathTraversal(t *testing.T) {
 	}
 }
 
-func TestCloudDownloadCmd_ResumeSubcommand(t *testing.T) {
-	// resume 需要 cache_dir 或 KVStore，直接测试会失败，只验证命令存在性
+func TestCloudDownloadCmd_ResumeChainSubcommand(t *testing.T) {
+	// resume-chain 需要 cache_dir 或 KVStore，直接测试会失败，只验证命令存在性与 Use
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
 
-	resume := findSubCommand(cmd, "resume")
-	if resume == nil {
-		t.Fatal("expected resume subcommand")
+	if sub := findSubCommand(cmd, "resume"); sub != nil {
+		t.Fatalf("expected resume subcommand to be renamed to resume-chain, found it registered with Use %q", sub.Use)
 	}
-	if resume.Use != "resume <chain-id>" {
-		t.Fatalf("expected Use 'resume <chain-id>', got %q", resume.Use)
+	resume := findSubCommand(cmd, "resume-chain")
+	if resume == nil {
+		t.Fatal("expected resume-chain subcommand")
+	}
+	if resume.Use != "resume-chain <chain-id>" {
+		t.Fatalf("expected Use 'resume-chain <chain-id>', got %q", resume.Use)
 	}
 	if resume.Args == nil {
 		t.Fatal("expected Args to be set")
@@ -577,6 +574,200 @@ func TestCloudDownloadCmd_ListSubcommand(t *testing.T) {
 	list := findSubCommand(cmd, "list")
 	if list == nil {
 		t.Fatal("expected list subcommand")
+	}
+}
+
+func TestCloudDownloadCmd_DownloadSubcommand(t *testing.T) {
+	fileContent := []byte("original file content")
+	fileChecksum := sha256Hex(fileContent)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/cloud/tasks/task-dl-1" && r.Method == http.MethodGet:
+			task := map[string]any{
+				"id":       "task-dl-1",
+				"url":      "https://example.com/original.zip",
+				"filename": "original.zip",
+				"status":   "completed",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(task)
+		case strings.HasPrefix(r.URL.Path, "/download") && r.Method == http.MethodGet:
+			// 校验远端路径为 .__cloud__/<taskID>/<filename>
+			got := r.URL.Query().Get("filename")
+			if got != ".__cloud__/task-dl-1/original.zip" {
+				t.Errorf("expected download filename '.__cloud__/task-dl-1/original.zip', got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-File-Checksum", fileChecksum)
+			w.Write(fileContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	outDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(origWd) }()
+	if err := os.Chdir(outDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"download", "task-dl-1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("download subcommand failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "original.zip") {
+		t.Fatalf("expected output to contain filename, got: %s", buf.String())
+	}
+	got, err := os.ReadFile(filepath.Join(outDir, "original.zip"))
+	if err != nil {
+		t.Fatalf("expected downloaded file on disk: %v", err)
+	}
+	if !bytes.Equal(got, fileContent) {
+		t.Fatalf("downloaded content mismatch: got %q, want %q", got, fileContent)
+	}
+}
+
+func TestCloudDownloadCmd_DownloadSubcommandNotCompleted(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/cloud/tasks/task-pending-1" && r.Method == http.MethodGet {
+			task := map[string]any{
+				"id":       "task-pending-1",
+				"url":      "https://example.com/pending.zip",
+				"filename": "pending.zip",
+				"status":   "downloading",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(task)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"download", "task-pending-1"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when task not completed")
+	}
+	if !strings.Contains(err.Error(), "未完成") {
+		t.Fatalf("expected error to mention not completed, got: %v", err)
+	}
+}
+
+func TestCloudDownloadCmd_DownloadArchiveSubcommand(t *testing.T) {
+	archiveContent := []byte("archive content")
+	archiveChecksum := sha256Hex(archiveContent)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/download") && r.Method == http.MethodGet {
+			got := r.URL.Query().Get("filename")
+			if got != ".__cloud_archives__/my-archive.tar.gz" {
+				t.Errorf("expected download filename '.__cloud_archives__/my-archive.tar.gz', got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("X-File-Checksum", archiveChecksum)
+			w.Write(archiveContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	outDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(origWd) }()
+	if err := os.Chdir(outDir); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"download-archive", ".__cloud_archives__/my-archive.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("download-archive subcommand failed: %v", err)
+	}
+	// 本地保存名为 filepath.Base(archiveFile)
+	got, err := os.ReadFile(filepath.Join(outDir, "my-archive.tar.gz"))
+	if err != nil {
+		t.Fatalf("expected downloaded archive on disk: %v", err)
+	}
+	if !bytes.Equal(got, archiveContent) {
+		t.Fatalf("downloaded content mismatch: got %q, want %q", got, archiveContent)
+	}
+}
+
+func TestCloudDownloadCmd_DeleteSubcommand(t *testing.T) {
+	var gotPath string
+	var gotMethod string
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && r.Method == http.MethodDelete {
+			gotPath = r.URL.Path
+			gotMethod = r.Method
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"delete", "task-del-1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("delete subcommand failed: %v", err)
+	}
+	if gotPath != "/api/cloud/tasks/task-del-1" {
+		t.Fatalf("expected DELETE /api/cloud/tasks/task-del-1, got %s %s", gotMethod, gotPath)
+	}
+	if !strings.Contains(buf.String(), "task-del-1") {
+		t.Fatalf("expected output to contain task ID, got: %s", buf.String())
+	}
+}
+
+func TestCloudDownloadCmd_ResumeDownloadSubcommand(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]bool
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && strings.HasSuffix(r.URL.Path, "/resume") && r.Method == http.MethodPost {
+			gotPath = r.URL.Path
+			if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+				t.Fatalf("decode resume body: %v", err)
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var buf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"resume-download", "--force", "task-resume-1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("resume-download subcommand failed: %v", err)
+	}
+	if gotPath != "/api/cloud/tasks/task-resume-1/resume" {
+		t.Fatalf("expected POST /api/cloud/tasks/task-resume-1/resume, got %s", gotPath)
+	}
+	if gotBody == nil || !gotBody["force"] {
+		t.Fatalf("expected force=true in resume body, got %v", gotBody)
+	}
+	if !strings.Contains(buf.String(), "task-resume-1") {
+		t.Fatalf("expected output to contain task ID, got: %s", buf.String())
 	}
 }
 
