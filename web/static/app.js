@@ -1840,7 +1840,8 @@ function buildCloudGroupTableHtml(groups) {
     '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">名称</th>' +
     '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">状态</th>' +
     '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">进度</th>' +
-    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">操作</th></tr></thead><tbody>';
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">操作</th>' +
+    '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);"></th></tr></thead><tbody>';
   for (const g of groups) {
     const statusLabel = statusText(g.status);
     const progressText = g.completed + '/' + g.total_tasks;
@@ -1848,7 +1849,9 @@ function buildCloudGroupTableHtml(groups) {
       '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + statusLabel + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + progressText + '</td>' +
       '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' +
-      cloudGroupActions(g.id, g.status) + '</td></tr>';
+      cloudGroupActions(g.id, g.status) + '</td>' +
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);"><button class="btn btn-small" onclick="toggleGroupTasks(\'' + g.id + '\', this)">展开</button></td></tr>' +
+      '<tr id="group-detail-' + g.id + '" style="display:none;"><td colspan="5"><div class="group-task-list" style="padding:8px;font-size:13px;">加载中...</div></td></tr>';
   }
   html += '</tbody></table>';
   return html;
@@ -1867,6 +1870,49 @@ function cloudGroupActions(id, status) {
   }
   actions += '<button class="btn btn-danger btn-sm group-delete-btn" data-id="' + escHtml(id) + '">删除</button>';
   return actions;
+}
+
+// toggleGroupTasks 展开/收起组内子任务详情。
+async function toggleGroupTasks(groupId, btn) {
+  var detailRow = document.getElementById('group-detail-' + groupId);
+  if (!detailRow) return;
+  if (detailRow.style.display !== 'none') {
+    detailRow.style.display = 'none';
+    btn.textContent = '展开';
+    return;
+  }
+  detailRow.style.display = 'table-row';
+  btn.textContent = '收起';
+  var container = detailRow.querySelector('.group-task-list');
+  try {
+    var detail;
+    if (tunnelHexKey) {
+      var r = await tunnelRequest('GET', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
+      detail = JSON.parse(new TextDecoder().decode(r.body));
+    } else {
+      var r = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { headers: headers() });
+      detail = await r.json();
+    }
+    var tasks = detail.tasks || [];
+    if (tasks.length === 0) {
+      container.innerHTML = '<span style="color:var(--text-muted);">暂无子任务数据</span>';
+      return;
+    }
+    var html = '<table class="file-table" style="width:100%;"><thead><tr><th style="text-align:left;padding:4px 8px;">ID</th><th style="text-align:left;padding:4px 8px;">URL</th><th style="text-align:left;padding:4px 8px;">状态</th><th style="text-align:left;padding:4px 8px;">进度</th></tr></thead><tbody>';
+    for (var i = 0; i < tasks.length; i++) {
+      var t = tasks[i];
+      html += '<tr>' +
+        '<td style="padding:4px 8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;">' + escHtml(t.id || '') + '</td>' +
+        '<td style="padding:4px 8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + escHtml(t.url || '') + '">' + escHtml(t.url || '') + '</td>' +
+        '<td style="padding:4px 8px;">' + statusText(t.status) + '</td>' +
+        '<td style="padding:4px 8px;">' + (t.total_size > 0 ? buildProgressBar(t.downloaded, t.total_size) : '-') + '</td>' +
+        '</tr>';
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  } catch (e) {
+    container.innerHTML = '<span style="color:var(--text-danger);">加载失败</span>';
+  }
 }
 
 async function archiveCloudGroup(groupId) {
