@@ -847,8 +847,8 @@ func TestValidateCloudDownloadURL_QueryString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	// 新行为：查询参数附加在文件名后，经过 filepathSafe 后 ? 和 = 被替换为 _
-	// 查询参数中的 = 和 & 在文件名中合法（多数系统允许），filepathSafe 保留它们
+	// 新行为：查询参数附加在文件名后，经过 cloudfilename.Safe 后 ? 和 = 被替换为 _
+	// 查询参数中的 = 和 & 在文件名中合法（多数系统允许），Safe 保留它们
 	if filename != "download_file=test.zip&token=abc" {
 		t.Fatalf("expected extracted filename 'download_file=test.zip&token=abc', got %q", filename)
 	}

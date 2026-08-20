@@ -84,19 +84,10 @@ func (r *CloudArchiveResult) message() string { return r.Message }
 // CloudDownload 创建云端下载任务。
 // 小文件（<20MB）同步完成，大文件异步执行。
 func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...CloudDownloadOption) (*CloudTask, error) {
-	if urlStr == "" {
-		return nil, fmt.Errorf("云端下载: URL 不能为空")
-	}
 	// 基本 URL 格式校验：避免无效 URL 浪费服务端资源
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return nil, fmt.Errorf("云端下载: 无效 URL %q: %w", urlStr, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("云端下载: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
-	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("云端下载: 无效 URL %q (缺少 host)", urlStr)
+	// （与批量/组路径共用 cloudfilename.ValidateEntry，规则单一来源）
+	if err := cloudfilename.ValidateEntry(cloudfilename.Entry{URL: urlStr}); err != nil {
+		return nil, fmt.Errorf("云端下载: %w", err)
 	}
 	cfg := &cloudDownloadOptions{}
 	for _, opt := range opts {
