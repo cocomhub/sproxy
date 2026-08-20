@@ -16,14 +16,14 @@ const assert = require('node:assert');
 const path = require('node:path');
 const fs = require('node:fs');
 
-const { genDefaultFilename, filepathSafe } = require('./cloudfilename.js');
+const { genDefaultFilename, filepathSafe, safeDefaultFromURL, validateEntry } = require('./cloudfilename.js');
 
 const fixturePath = path.join(__dirname, '../../pkg/cloudfilename/testdata/cases.json');
 const cases = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
 
-test('genDefaultFilename 与 Go pkg/cloudfilename 共享语料一致', () => {
+test('safeDefaultFromURL 与 Go pkg/cloudfilename 共享语料一致', () => {
   for (const [url, want] of Object.entries(cases)) {
-    assert.strictEqual(genDefaultFilename(url), want, `URL: ${url}`);
+    assert.strictEqual(safeDefaultFromURL(url), want, `URL: ${url}`);
   }
 });
 
@@ -64,4 +64,15 @@ test('genDefaultFilename + filepathSafe 完整链路', () => {
   for (const [url, want] of chainCases) {
     assert.strictEqual(filepathSafe(genDefaultFilename(url)), want, `URL: ${url}`);
   }
+});
+
+test('safeDefaultFromURL 安全语义（? 被替换为 _）', () => {
+  assert.strictEqual(safeDefaultFromURL('https://example.com/xx/?a=v'), 'index.html_a=v');
+  assert.strictEqual(safeDefaultFromURL('https://example.com/file.txt?x=1'), 'file.txt_x=1');
+});
+
+test('validateEntry URL 格式校验', () => {
+  assert.strictEqual(validateEntry(''), 'URL is empty');
+  assert.strictEqual(validateEntry('ftp://e.com/a.zip'), 'unsupported URL scheme (only http/https)');
+  assert.strictEqual(validateEntry('https://e.com/a.zip'), null);
 });

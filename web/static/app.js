@@ -1108,7 +1108,7 @@ async function showCloudDownloadPreview(action) {
 
   for (var i = 0; i < lines.length; i++) {
     // 与服务端保存规则一致：展示清理后的最终文件名，避免"预览 a/b 实际保存 a_b"的落差
-    var defaultName = filepathSafe(genDefaultFilename(lines[i]));
+    var defaultName = cloudfilename.safeDefaultFromURL(lines[i]);
     previewHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:4px 0;border-bottom:1px solid var(--border-color);">';
     previewHtml += '<span style="flex-shrink:0;font-size:12px;color:var(--text-muted);min-width:28px;">' + (i + 1) + '.</span>';
     previewHtml += '<input type="text" class="cloud-preview-filename" data-index="' + i + '" value="' + escHtml(defaultName) + '" style="flex:1;padding:4px 6px;border:1px solid var(--border-input);border-radius:3px;font-size:13px;font-family:monospace;">';
@@ -1142,7 +1142,8 @@ async function showCloudDownloadPreview(action) {
     var filenames = [];
     for (var j = 0; j < filenameInputs.length; j++) {
       // 与服务端一致做 filepathSafe：用户输入的非法字符也会被清理，预览即最终保存名
-      filenames.push(filepathSafe(filenameInputs[j].value.trim() || genDefaultFilename(lines[j])));
+      var name = filenameInputs[j].value.trim() || cloudfilename.safeDefaultFromURL(lines[j]);
+      filenames.push(filepathSafe(name));
     }
 
     // 执行对应操作

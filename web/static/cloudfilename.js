@@ -158,5 +158,19 @@
     return name;
   }
 
-  return { genDefaultFilename: genDefaultFilename, filepathSafe: filepathSafe };
+  // safeDefaultFromURL = genDefaultFilename + filepathSafe 一步完成
+  function safeDefaultFromURL(rawUrl) {
+    return filepathSafe(genDefaultFilename(rawUrl));
+  }
+
+  // validateEntry 校验 URL 格式（对齐 Go cloudfilename.ValidateEntry）
+  function validateEntry(url) {
+    if (!url) return 'URL is empty';
+    const parsed = parseURL(url);
+    if (!parsed) return 'unsupported URL scheme or missing host';
+    if (!/^https?:\/\//i.test(url)) return 'unsupported URL scheme (only http/https)';
+    return null; // 无错误
+  }
+
+  return { genDefaultFilename: genDefaultFilename, filepathSafe: filepathSafe, safeDefaultFromURL: safeDefaultFromURL, validateEntry: validateEntry };
 });
