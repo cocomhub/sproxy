@@ -27,6 +27,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -1184,6 +1185,54 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 			"local_path": runner.LocalPath,
 			"keep_files": runner.KeepFiles,
 		},
+	}, nil
+}
+
+// CloudDownloadGroupChain 云端组下载一键链式操作：创建组 → 等待完成 → 打包 → 下载到本地 → 清理远端组。
+// 与 CloudDownloadChain 不同：提交阶段创建命名组（文件名冲突预检在调用方做），
+// 等待阶段轮询组状态，归档阶段调组级打包，清理阶段删除整个组。
+func (c *FileClient) CloudDownloadGroupChain(ctx context.Context,
+	groupName string, entries []cloudfilename.Entry, archiveName, localDir string,
+	opts ...ChainOption) (*ChainResult, error) {
+	options := defaultChainOptions()
+	for _, o := range opts {
+		o(&options)
+	}
+
+	runner, err := NewCloudDownloadGroupChain(c, groupName, entries, archiveName, localDir, options)
+	if err != nil {
+		return nil, fmt.Errorf("创建云端组下载链失败: %w", err)
+	}
+
+	if c.chainManager != nil {
+		if err := c.chainManager.RunWithProgress(ctx, runner, options.progressFn); err != nil {
+			return nil, err
+		}
+	} else {
+		reportFn := func(ctx context.Context, info ProgressInfo) {
+			c.logger.DebugContext(ctx, "链式操作进度", "phase", info.Phase, "msg", info.Message, "current", info.Current, "total", info.Total)
+			if options.progressFn != nil {
+				options.progressFn(ctx, info)
+			}
+		}
+		if err := runner.Run(ctx, reportFn); err != nil {
+			return nil, err
+		}
+	}
+
+	extra := map[string]any{
+		"local_path": runner.LocalPath,
+		"keep_files": runner.KeepFiles,
+	}
+	if runner.GroupID != "" {
+		extra["group_id"] = runner.GroupID
+	}
+	return &ChainResult{
+		ChainID: runner.ChainID,
+		Phase:   runner.Phase(),
+		Status:  runner.Status(),
+		raw:     runner,
+		extra:   extra,
 	}, nil
 }
 

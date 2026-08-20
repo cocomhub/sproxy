@@ -158,187 +158,34 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.AddCommand(NewCmdCloudResume(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudList(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudCancel(factory, ios, cfgSvc))
-	cmd.AddCommand(NewCmdCloudGroup(factory, ios, cfgSvc))
-	cmd.AddCommand(NewCmdCloudGroupList(factory, ios, cfgSvc))
-	cmd.AddCommand(NewCmdCloudGroupArchive(factory, ios, cfgSvc))
-	cmd.AddCommand(NewCmdCloudGroupCancel(factory, ios, cfgSvc))
-	cmd.AddCommand(NewCmdCloudGroupResume(factory, ios, cfgSvc))
+
+	// 兼容性 stub：group 相关子命令已迁移到独立命令 cloud-download-group，
+	// 保留空壳提示迁移路径，避免存量脚本静默收到 unknown command。
+	cmd.AddCommand(migratedGroupSubcommand("group", "submit",
+		"group <name> <url> [url...]", "创建云端下载任务组"))
+	cmd.AddCommand(migratedGroupSubcommand("group-list", "list",
+		"group-list", "列出所有下载组"))
+	cmd.AddCommand(migratedGroupSubcommand("group-archive", "archive",
+		"group-archive <group-id> [archive-name]", "打包下载组文件为 tar.gz"))
+	cmd.AddCommand(migratedGroupSubcommand("group-cancel", "cancel",
+		"group-cancel <group-id>", "取消下载组内所有任务"))
+	cmd.AddCommand(migratedGroupSubcommand("group-resume", "resume",
+		"group-resume <group-id>", "恢复下载组内所有失败任务"))
 
 	return cmd
 }
 
-// NewCmdCloudGroup 创建 group-submit 子命令。
-func NewCmdCloudGroup(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "group <name> <url> [url...]",
-		Short: "创建云端下载任务组",
-		Long:  `创建一组云端下载任务，文件下载到同一目录，支持组级打包。`,
-		Args:  cobra.MinimumNArgs(1),
+// migratedGroupSubcommand 为已迁移到 cloud-download-group 的子命令创建兼容 stub。
+// 用户执行旧命令时打印迁移指引并返回非零退出码，避免静默 unknown command。
+func migratedGroupSubcommand(name, newName, use, short string) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-			if len(args) == 0 {
-				return fmt.Errorf("请提供组名称: group <name> <url> [url...]")
-			}
-			name := args[0]
-			urlFile, _ := cmd.Flags().GetString("url-file")
-			entries, err := collectCloudEntries(args[1:], urlFile)
-			if err != nil {
-				return err
-			}
-
-			// 客户端预校验：组内保存文件名必须唯一（与服务端 CreateGroup 规则一致），
-			// 且同一 URL 不允许出现两次（服务端 CreateTask 会去重并返回 409）。
-			// 冲突在发送前拦截，避免服务端 409 往返；同时展示每个 URL 的最终保存文件名。
-			ios.WriteOutLine("创建下载组 %q (%d 个条目):", name, len(entries))
-			filenameSeen := make(map[string]string, len(entries))
-			urlSeen := make(map[string]bool, len(entries))
-			var conflicts []string
-			for _, e := range entries {
-				fn, resolveErr := cloudfilename.ResolveFilename(e)
-				if resolveErr != nil {
-					return fmt.Errorf("条目 %s 文件名无效: %w", e.URL, resolveErr)
-				}
-				if prev, ok := filenameSeen[fn]; ok {
-					conflicts = append(conflicts, fmt.Sprintf("文件名 %q (URL: %s 与 %s)", fn, prev, e.URL))
-				} else {
-					filenameSeen[fn] = e.URL
-				}
-				if urlSeen[e.URL] {
-					conflicts = append(conflicts, fmt.Sprintf("重复 URL %s（可指定不同保存文件名也无法消除）", e.URL))
-				}
-				urlSeen[e.URL] = true
-				ios.WriteOutLine("  %s -> %s", e.URL, fn)
-			}
-			if len(conflicts) > 0 {
-				return fmt.Errorf("组内条目冲突，无法创建：%s；请在 --url-file 中为冲突条目指定不同的保存文件名（URL<TAB>FILENAME）",
-					strings.Join(conflicts, ", "))
-			}
-
-			group, err := svc.CloudCreateGroupEntries(cmd.Context(), name, entries)
-			if err != nil {
-				return fmt.Errorf("创建下载组失败: %w", err)
-			}
-			ios.WriteOutLine("  组 ID: %s", group.ID)
-			ios.WriteOutLine("  状态: %s", group.Status)
-			ios.WriteOutLine("  任务数: %d", group.TotalTasks)
-			return nil
+			return fmt.Errorf("命令 %q 已迁移：请使用 'sclient cloud-download-group %s' 代替（%s 相关子命令现归 cloud-download-group 管理）",
+				name, newName, name)
 		},
 	}
-	cmd.Flags().String("url-file", "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
-	return cmd
-}
-
-// NewCmdCloudGroupList 创建 group-list 子命令。
-func NewCmdCloudGroupList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "group-list",
-		Short: "列出所有下载组",
-		Long:  `列出所有云端下载任务组及其状态。`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-			status, _ := cmd.Flags().GetString("status")
-			groups, err := svc.CloudListGroups(cmd.Context(), status)
-			if err != nil {
-				return fmt.Errorf("列举下载组失败: %w", err)
-			}
-			if len(groups) == 0 {
-				ios.WriteOutLine("暂无下载组")
-				return nil
-			}
-			for _, g := range groups {
-				ios.WriteOutLine("  %s: %s (%s) %d/%d 完成", g.ID, g.Name, g.Status, g.Completed, g.TotalTasks)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().String("status", "", "按状态过滤 (pending|downloading|completed|partial|failed|cancelled)")
-	return cmd
-}
-
-// NewCmdCloudGroupArchive 创建 group-archive 子命令。
-func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "group-archive <group-id> [archive-name]",
-		Short: "打包下载组文件为 tar.gz",
-		Long:  `将下载组内所有已完成的文件打包为单个 tar.gz 归档文件。`,
-		Args:  cobra.RangeArgs(1, 2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-			groupID := args[0]
-			// 未指定归档名时不传（空串），由服务端生成唯一名 group-<id>-<unix>.tar.gz，
-			// 避免客户端静态名导致多次归档互相覆盖
-			archiveName := ""
-			if len(args) > 1 {
-				archiveName = args[1]
-			}
-			result, err := svc.CloudArchiveGroup(cmd.Context(), groupID, archiveName)
-			if err != nil {
-				return fmt.Errorf("打包下载组失败: %w", err)
-			}
-			ios.WriteOutLine("打包完成: %s (%d bytes)", result.File, result.Size)
-			return nil
-		},
-	}
-	return cmd
-}
-
-// NewCmdCloudGroupCancel 创建 group-cancel 子命令。
-func NewCmdCloudGroupCancel(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "group-cancel <group-id>",
-		Short: "取消下载组内所有任务",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-			if err := svc.CloudCancelGroup(cmd.Context(), args[0]); err != nil {
-				return fmt.Errorf("取消下载组失败: %w", err)
-			}
-			ios.WriteOutLine("下载组已取消")
-			return nil
-		},
-	}
-	return cmd
-}
-
-// NewCmdCloudGroupResume 创建 group-resume 子命令。
-func NewCmdCloudGroupResume(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "group-resume <group-id>",
-		Short: "恢复下载组内所有失败任务",
-		Long:  `恢复组内所有失败任务，支持续传或强制重新下载。`,
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-			force, _ := cmd.Flags().GetBool("force")
-			if err := svc.CloudResumeGroup(cmd.Context(), args[0], force); err != nil {
-				return fmt.Errorf("恢复下载组失败: %w", err)
-			}
-			ios.WriteOutLine("下载组恢复成功")
-			return nil
-		},
-	}
-	cmd.Flags().Bool("force", false, "强制删除后重新下载，不使用续传")
-	return cmd
 }
 
 // NewCmdCloudSubmit 创建 submit 子命令，仅提交云端下载任务。

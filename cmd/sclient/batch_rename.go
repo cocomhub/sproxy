@@ -12,6 +12,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// renameFailureMsg 生成批量重命名单条失败的消息。
+// apiErr 非空表示批量 API 整体失败；否则说明该条目未进入请求（stat 失败或 checksum 为空）。
+func renameFailureMsg(statErr error, info *client.FileInfo, apiErr string) string {
+	if statErr != nil {
+		return fmt.Sprintf("stat 失败: %v", statErr)
+	}
+	if info == nil || info.Checksum == "" {
+		return "远端文件 checksum 为空"
+	}
+	return apiErr
+}
+
 // NewCmdBatchRename 创建独立的 batch-rename 命令工厂函数。
 // 注意：batch-rename 不需要 st *state.State，因为参数是成对的 from/to 路径。
 func NewCmdBatchRename(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
@@ -80,18 +92,10 @@ func NewCmdBatchRename(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 				if err != nil {
 					// 批量 API 整体失败
 					for i, p := range pairs {
-						msg := ""
-						if statErrors[i] != nil {
-							msg = fmt.Sprintf("stat 失败: %v", statErrors[i])
-						} else if statResults[i] == nil || statResults[i].Checksum == "" {
-							msg = "远端文件 checksum 为空"
-						} else {
-							msg = err.Error()
-						}
 						results[i] = batchOperationResult{
 							Name:    fmt.Sprintf("%s -> %s", p.from, p.to),
 							Success: false,
-							Message: msg,
+							Message: renameFailureMsg(statErrors[i], statResults[i], err.Error()),
 						}
 					}
 				} else {
@@ -99,16 +103,10 @@ func NewCmdBatchRename(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 					for i, p := range pairs {
 						idx := pairBatchIdx[i]
 						if idx < 0 {
-							msg := ""
-							if statErrors[i] != nil {
-								msg = fmt.Sprintf("stat 失败: %v", statErrors[i])
-							} else {
-								msg = "远端文件 checksum 为空"
-							}
 							results[i] = batchOperationResult{
 								Name:    fmt.Sprintf("%s -> %s", p.from, p.to),
 								Success: false,
-								Message: msg,
+								Message: renameFailureMsg(statErrors[i], statResults[i], ""),
 							}
 							continue
 						}
@@ -139,16 +137,10 @@ func NewCmdBatchRename(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			} else {
 				// 所有 stat 都失败
 				for i, p := range pairs {
-					msg := ""
-					if statErrors[i] != nil {
-						msg = fmt.Sprintf("stat 失败: %v", statErrors[i])
-					} else {
-						msg = "远端文件 checksum 为空"
-					}
 					results[i] = batchOperationResult{
 						Name:    fmt.Sprintf("%s -> %s", p.from, p.to),
 						Success: false,
-						Message: msg,
+						Message: renameFailureMsg(statErrors[i], statResults[i], ""),
 					}
 				}
 			}
