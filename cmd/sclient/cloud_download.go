@@ -172,7 +172,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 		"group-archive <group-id> [archive-name]", "打包下载组文件为 tar.gz"))
 	cmd.AddCommand(migratedGroupSubcommand("group-cancel", "cancel",
 		"group-cancel <group-id>", "取消下载组内所有任务"))
-	cmd.AddCommand(migratedGroupSubcommand("group-resume", "resume",
+	cmd.AddCommand(migratedGroupSubcommand("group-resume", "resume-download",
 		"group-resume <group-id>", "恢复下载组内所有失败任务"))
 
 	return cmd
@@ -422,7 +422,7 @@ func NewCmdCloudDownloadFile(factory clientfactory.Factory, ios cli.IOStreams, c
 				if err != nil {
 					return fmt.Errorf("获取任务 %s 信息失败: %w", taskID, err)
 				}
-				if task.Status != "completed" {
+				if task.Status != client.TaskStatusCompleted {
 					return fmt.Errorf("任务 %s 未完成（当前 %s），无法下载原始文件", taskID, task.Status)
 				}
 				cloudPath := ".__cloud__/" + taskID + "/" + task.Filename

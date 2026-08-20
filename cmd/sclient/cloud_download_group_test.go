@@ -374,6 +374,51 @@ func TestCloudDownloadGroupCmd_DownloadSubcommand(t *testing.T) {
 	}
 }
 
+func TestCloudDownloadGroupCmd_DownloadSubcommandNotCompleted(t *testing.T) {
+	// mock group detail 返回 downloading 状态子任务，download 不应被调用
+	var calledDownload bool
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/cloud/groups/group-dl-pending" && r.Method == http.MethodGet {
+			detail := map[string]any{
+				"group": map[string]any{
+					"id":          "group-dl-pending",
+					"name":        "pending-group",
+					"status":      "downloading",
+					"total_tasks": 1,
+				},
+				"tasks": []map[string]any{
+					{"id": "task-pending", "status": "downloading", "filename": "file.zip"},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(detail)
+			return
+		}
+		if r.URL.Path == "/download" && r.Method == http.MethodGet {
+			calledDownload = true
+			w.Write([]byte("should not be called"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil)
+	cmd.SetArgs([]string{"download", "group-dl-pending", "task-pending"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for not-completed subtask")
+	}
+	if !strings.Contains(err.Error(), "未完成") {
+		t.Fatalf("expected '未完成' in error, got: %v", err)
+	}
+	if calledDownload {
+		t.Fatal("download should not be called for not-completed subtask")
+	}
+}
+
 func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 	var calledDownload bool
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
