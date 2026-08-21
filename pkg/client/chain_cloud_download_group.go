@@ -311,22 +311,19 @@ func (c *CloudDownloadGroupChain) waitForGroup(ctx context.Context) error {
 			c.Failed = failed
 			c.Cancelled = cancelled
 
-			// 任一子任务失败/取消 → 整体失败（与 batch 链 waitForTasks 语义一致，
-			// 不打包下载缺文件的归档）
-			if failed+cancelled > 0 {
-				return fmt.Errorf("下载组 %s 有 %d 个任务失败/取消（%d/%d 完成），无法完成链式下载",
-					c.GroupID, failed+cancelled, completed, c.TotalTasks)
-			}
+			// 不提前中断：即使已有任务失败/取消，仍继续轮询等待所有活跃任务进入终态，
+			// 与 batch 链 waitForTasks 语义一致（等全部终态后整体判定，不打包缺文件的归档）。
 			// 防御：服务端在极早期返回空 tasks 但组状态非终态（如 downloading）时，
 			// 空列表不应被误判为"全部完成"。只有组状态为 completed 或活跃计数为 0
 			// 且已完成数 >= 组总任务数时才视为完成。
 			if active == 0 {
-				if detail.Group.Status == "completed" {
+				if detail.Group.Status == "completed" && failed+cancelled == 0 {
 					return nil
 				}
 				// 组状态为 failed/cancelled 且无活跃任务 → 终态，视为异常报错，避免转圈到超时（C7）。
-				if detail.Group.Status == "failed" || detail.Group.Status == "cancelled" {
-					return fmt.Errorf("下载组 %s 已终止（状态 %s），无法完成链式下载", c.GroupID, detail.Group.Status)
+				if detail.Group.Status == "failed" || detail.Group.Status == "cancelled" || failed+cancelled > 0 {
+					return fmt.Errorf("下载组 %s 有 %d 个任务失败/取消（%d/%d 完成），无法完成链式下载",
+						c.GroupID, failed+cancelled, completed, c.TotalTasks)
 				}
 				// 空 tasks + 非 completed 组状态：继续轮询（避免误判完成）
 				if len(detail.Tasks) == 0 {

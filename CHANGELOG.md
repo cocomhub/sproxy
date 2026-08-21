@@ -18,6 +18,11 @@ SPDX-License-Identifier: Apache-2.0
 - 任务恢复支持 `cancelled` 状态；`force=false` 真正走 Range 续传（不再把 `.partial` 改名成目标文件）。
 - Web UI 云端下载新增"创建组"按钮，任务/组列表统一 3s 轮询。
 - 配置键 `cloud_download_timeout`/`cloud_max_retries`/`cloud_retry_delay` 从 `Config` 接线到 `CloudDownloadManager`（此前未生效），默认值：30m / 10 次 / 10s。
+- 任务/组列表分页：`ListTasks`/`ListGroups` 支持 `offset`/`limit`（CreatedAt 降序 + ID tie-break），API 返回 `{tasks, total}` 容器；SDK 新增 `WithTotal` 变体，CLI `list` 增加 `--offset`/`--limit`。
+- 云归档加固：三处归档（单任务/批量/组）`O_EXCL` 防覆盖（同名 409），新增 `cloud_archive_max_bytes` 总量限制，打包前 `TryReserve` 配额预占、打包后按实际大小对账。
+- cancelled 语义统一为失败：batch/group 链与 CLI `wait` 均把取消计入失败并等所有任务终态后整体报错；`submitTasks`/`submitGroup` 幂等（提交阶段崩溃恢复不重复提交）。
+- CLI 易用性：`list` 展示 ETag/GroupID 字段，`download`/`download-archive`/组 `download` 增加 `--output-dir`，`delete`/`delete-group` 增加 `--yes` 确认，task/group cancel 404 幂等统一，`--timeout 0` 表示不限时。
+- Web UI：任务清理失败不再静默（toast 提示），链式下载防重入 + 组失败保留供 resume，`validateEntries` 改 Map 防原型键误判，host 含空格/非法字符的 URL 双端一致拒绝。
 
 ### Fixed
 - 下载卡住：默认单次尝试超时 + 空闲超时兜底，信号量不再被挂死任务占满。

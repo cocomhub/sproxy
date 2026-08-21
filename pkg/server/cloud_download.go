@@ -848,7 +848,9 @@ func (m *CloudDownloadManager) ListTasks(status string, offset, limit int) ([]*C
 	if offset >= total {
 		return nil, total
 	}
-	end := min(offset+limit, total)
+	// 防止 offset+limit 溢出（limit 极大如 MaxInt64 时偏移相加可能回绕为负，导致
+	// all[offset:end] slice bounds panic）。先钳制 limit 到剩余条数再相加。
+	end := offset + min(limit, total-offset)
 	return all[offset:end], total
 }
 
@@ -1506,7 +1508,8 @@ func (m *CloudDownloadManager) ListGroups(status string, offset, limit int) ([]*
 	if offset >= total {
 		return nil, total
 	}
-	end := min(offset+limit, total)
+	// 防止 offset+limit 溢出（同 ListTasks）
+	end := offset + min(limit, total-offset)
 	return all[offset:end], total
 }
 

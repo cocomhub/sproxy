@@ -316,7 +316,7 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 			ios.WriteOutLine("等待 %d 个任务完成...", len(pending))
 
 			// timeout>0 才设超时；timeout=0 表示不限时（与链式入口一致）
-			pollCtx := cmd.Context()
+			var pollCtx context.Context
 			var cancel context.CancelFunc
 			if timeout > 0 {
 				pollCtx, cancel = context.WithTimeout(cmd.Context(), timeout)

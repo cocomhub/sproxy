@@ -1395,7 +1395,12 @@ async function doChainDownloadCloud(lines, filenames) {
       if (allDone) { break; }
     }
     const succeeded = tasks.filter(function(t) { return t.status === 'completed'; });
+    const failedCount = tasks.filter(function(t) { return t.status === 'failed' || t.status === 'cancelled'; }).length;
     if (succeeded.length === 0) { showToast('所有任务均未成功完成', 'error'); return; }
+    // 部分失败不再静默：提示用户只打包已完成的（禁止静默失败，I4）
+    if (failedCount > 0) {
+      showToast(failedCount + ' 个任务失败/取消，仅打包 ' + succeeded.length + ' 个已完成', 'warning');
+    }
     showToast('打包归档中...', 'info');
     const taskIds = succeeded.map(function(t) { return t.id; });
     const archiveHdrs = headers({ 'Content-Type': 'application/json' });
@@ -1410,28 +1415,39 @@ async function doChainDownloadCloud(lines, filenames) {
     if (!archiveResult.success) { showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error'); return; }
     showToast('下载归档并清理中...', 'info');
     const downloadName = archiveResult.file.split('/').pop();
-    // 先下载再清理（隧道模式 tunnelDownloadStream 返回归档数据，需触发浏览器保存）
+    // 先下载一次归档（I5：此前循环内重复下载 N 次同一归档），再逐个清理任务
+    let downloaded = false;
+    if (tunnelHexKey) {
+      const streamResult = await tunnelDownloadStream(archiveResult.file);
+      if (streamResult && streamResult.body) {
+        triggerBrowserDownload(streamResult.body, downloadName);
+        downloaded = true;
+      } else {
+        showToast('归档下载失败', 'error');
+        return;
+      }
+    } else {
+      const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: headers() });
+      if (!dlResp.ok) { showToast('归档下载失败: HTTP ' + dlResp.status, 'error'); return; }
+      const blob = await dlResp.blob();
+      triggerBrowserDownload(blob, downloadName);
+      downloaded = true;
+    }
     for (let i = 0; i < taskIds.length; i++) {
       if (tunnelHexKey) {
-        const streamResult = await tunnelDownloadStream(archiveResult.file);
-        if (streamResult && streamResult.body) {
-          triggerBrowserDownload(streamResult.body, downloadName);
-        } else {
-          showToast('归档下载失败', 'error');
-          return;
-        }
-        await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskIds[i], {}, null);
+        const r = await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskIds[i], {}, null);
+        assertTunnelOk(r, '清理任务');
       } else {
-        const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: headers() });
-        if (!dlResp.ok) { showToast('归档下载失败: HTTP ' + dlResp.status, 'error'); return; }
-        const blob = await dlResp.blob();
-        triggerBrowserDownload(blob, downloadName);
         const cleanResp = await fetch(BASE + '/api/cloud/tasks/' + taskIds[i], { method: 'DELETE', headers: headers() });
         if (!cleanResp.ok) showToast('清理任务 ' + taskIds[i] + ' 失败: HTTP ' + cleanResp.status, 'error');
       }
     }
     refreshCloudTasks();
-    showToast('链式下载完成!', 'success');
+    if (failedCount > 0) {
+      showToast('链式下载完成（' + succeeded.length + ' 成功, ' + failedCount + ' 失败/取消）', 'success');
+    } else {
+      showToast('链式下载完成!', 'success');
+    }
   } catch (e) {
     showToast('链式下载失败: ' + e.message, 'error');
   } finally {
@@ -1514,7 +1530,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
         }
         if (failed + cancelled > 0) {
           showToast('组内 ' + (failed + cancelled) + ' 个任务失败/取消，无法完成链式下载', 'error');
-          await deleteCloudGroupForCleanup(groupId);
+          // 保留组供 resume（与 CLI 链语义一致，不因失败丢弃已下载文件）
           return;
         }
         if (group.status === 'completed' || (active === 0 && completed > 0)) {
@@ -1527,7 +1543,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
     }
     if (!allDone) {
       showToast('等待超时', 'error');
-      await deleteCloudGroupForCleanup(groupId);
+      // 保留组供 resume（与 CLI 链语义一致）
       return;
     }
     showToast('所有任务已完成', 'success');
@@ -1547,7 +1563,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
     }
     if (!archiveResult.success) {
       showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error');
-      await deleteCloudGroupForCleanup(groupId);
+      // 保留组供 resume（与 CLI 链语义一致）
       return;
     }
     showToast('下载归档并清理中...', 'info');
@@ -1559,14 +1575,14 @@ async function doChainDownloadCloudGroup(urls, filenames) {
         triggerBrowserDownload(streamResult.body, archiveName);
       } else {
         showToast('归档下载失败', 'error');
-        await deleteCloudGroupForCleanup(groupId);
+        // 保留组供 resume（与 CLI 链语义一致）
         return;
       }
     } else {
       const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: headers() });
       if (!dlResp.ok) {
         showToast('归档下载失败: HTTP ' + dlResp.status, 'error');
-        await deleteCloudGroupForCleanup(groupId);
+        // 保留组供 resume（与 CLI 链语义一致）
         return;
       }
       const blob = await dlResp.blob();
@@ -1579,10 +1595,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
     showToast('组链式下载完成!', 'success');
   } catch (e) {
     showToast('组链式下载失败: ' + e.message, 'error');
-    // 失败时尝试清理已创建的组，避免孤儿组+云端文件残留（CLI 链 PhaseCleaning 语义对齐）
-    if (typeof groupId !== 'undefined') {
-      await deleteCloudGroupForCleanup(groupId);
-    }
+    // 失败保留组供 resume（与 CLI 链语义一致，不因异常丢弃已下载文件）
   } finally {
     window._busyChain = false;
   }
@@ -1740,8 +1753,10 @@ async function deleteCloudTask(taskId, filename, checksum) {
     // 删除云端文件
     const cloudPath = '.__cloud__/' + taskId + '/' + filename;
     if (tunnelHexKey) {
-      await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(cloudPath), { 'X-File-Checksum': checksum }, null);
-      await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskId, {}, null);
+      const delR = await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(cloudPath), { 'X-File-Checksum': checksum }, null);
+      assertTunnelOk(delR, '删除云端文件');
+      const taskR = await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskId, {}, null);
+      assertTunnelOk(taskR, '删除任务');
     } else {
       const hdrs = headers({ 'X-File-Checksum': checksum });
       const delResp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(cloudPath), { method: 'POST', headers: hdrs });

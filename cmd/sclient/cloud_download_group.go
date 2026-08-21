@@ -209,7 +209,7 @@ func NewCmdCloudGroupWait(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 			ios.WriteOutLine("等待下载组 %s (%q) 完成...", groupID, detail.Group.Name)
 
 			// timeout>0 才设超时；timeout=0 表示不限时（与链式入口一致）
-			pollCtx := cmd.Context()
+			var pollCtx context.Context
 			var cancel context.CancelFunc
 			if timeout > 0 {
 				pollCtx, cancel = context.WithTimeout(cmd.Context(), timeout)

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1947,5 +1948,37 @@ func TestCloudDownloadManager_ListGroupsPagination(t *testing.T) {
 	page, total := mgr.ListGroups("", 0, 2)
 	if len(page) != 2 || total != 4 {
 		t.Fatalf("expected page len=2 total=4, got len=%d total=%d", len(page), total)
+	}
+}
+
+// TestCloudDownloadManager_ListTasksLimitOverflow 回归：limit=MaxInt64 时 offset+limit 溢出，
+// 不得 panic（此前 slice bounds out of range）。
+func TestCloudDownloadManager_ListTasksLimitOverflow(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
+
+	for i := range 3 {
+		if _, err := mgr.CreateTask("url", fmt.Sprintf("https://example.com/f%d.zip", i), fmt.Sprintf("f%d.zip", i), 100); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// offset=1, limit=MaxInt64 → 不 panic，返回剩余 2 条，total=3
+	tasks, total := mgr.ListTasks("", 1, math.MaxInt64)
+	if len(tasks) != 2 || total != 3 {
+		t.Fatalf("expected len=2 total=3, got len=%d total=%d", len(tasks), total)
+	}
+
+	// 组列表同
+	group := &CloudTaskGroup{ID: "g0", Name: "g0", Status: "completed", TotalTasks: 1,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}
+	mgr.groupMu.Lock()
+	mgr.groups["g0"] = group
+	mgr.groupMu.Unlock()
+	groups, gtotal := mgr.ListGroups("", 0, math.MaxInt64)
+	if len(groups) != 1 || gtotal != 1 {
+		t.Fatalf("expected groups len=1 total=1, got len=%d total=%d", len(groups), gtotal)
 	}
 }
