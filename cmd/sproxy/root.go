@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	"github.com/spf13/cobra"
 )
 
@@ -117,9 +119,34 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	mux := http.NewServeMux()
 	var routeTable *hub.RouteTable
+	// Hub 中继：先注册 xfer/ws 传输（开启 transports.ws 时），
+	// 创建 RouteTable + HubServer 收口，再注册 HTTP 路由。
 	if cfg.Hub.Enabled {
 		routeTable = hub.NewRouteTable()
 		logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
+
+		if cfg.Hub.Transports.WS.Enabled {
+			hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(cfg.Hub.RelayToken), logger.With("component", "hub"))
+			wsPath := cfg.Hub.Transports.WS.Path
+			if wsPath == "" {
+				wsPath = "/ws"
+			}
+			if strings.HasPrefix(wsPath, "/") == false {
+				wsPath = "/" + wsPath
+			}
+			// 挂载 WebSocket 升级端点到主 mux；连接后由 HubServer 处理注册与转发。
+			hubNode := wsxfer.NewHandlerNode()
+			hubNode.AddToMux(mux, wsPath)
+			go func() {
+				for {
+					conn, aerr := hubNode.Accept(ctx)
+					if aerr != nil {
+						return
+					}
+					go hubSrv.HandleConn(ctx, conn)
+				}
+			}()
+		}
 	}
 	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
 		Mux:        mux,

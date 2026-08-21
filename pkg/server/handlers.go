@@ -225,6 +225,11 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		srvMux.HandleFunc("POST /api/relay", h.authMiddleware(relayHandler.ServeHTTP))
 		localMux.HandleFunc("POST /api/relay", relayHandler.ServeHTTP)
 
+		// 任意 TCP 流中继（SSH/长连接）：升级为双向字节流
+		streamHandler := NewRelayStreamHandler(opts.RouteTable, log.With("component", "relay_stream"))
+		srvMux.HandleFunc("POST /api/relay/stream", h.authMiddleware(streamHandler.ServeHTTP))
+		localMux.HandleFunc("POST /api/relay/stream", streamHandler.ServeHTTP)
+
 		srvMux.HandleFunc("GET /api/hub/nodes", h.authMiddleware(h.hubNodesHandler))
 		srvMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
 		srvMux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))

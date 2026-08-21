@@ -147,7 +147,8 @@ func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
 	return newWSConn(conn), nil
 }
 
-// wsListener 实现 xfer.Listener，基于 HTTP Server 接收 WebSocket 连接。
+// wsListener is the shared implementation for both standalone Listen and
+// mounted HandlerNode: it exposes Accept/Close/Addr against a connCh feed.
 type wsListener struct {
 	srv     *http.Server
 	netLn   net.Listener
@@ -180,6 +181,64 @@ func (l *wsListener) Close() error {
 func (l *wsListener) Addr() net.Addr {
 	if l.netLn != nil {
 		return l.netLn.Addr()
+	}
+	return nil
+}
+
+// HandlerNode 是可直接挂载到既有 HTTP mux 的 WebSocket 传输节点。
+// 与 Listen 不同，它不创建独立 HTTP server，而是把 /{path} 升级端点
+// 注册到调用方提供的 mux 上——这样节点连接与文件服务共用同一
+// HTTP server（同一端口、TLS 与 Bearer 鉴权），避免孤儿端口。
+type HandlerNode struct {
+	connCh  chan xfer.Conn
+	closeCh chan struct{}
+}
+
+// NewHandlerNode 创建一个可挂载的 WebSocket 传输节点。
+// 调用方随后调用 AddToMux 注册升级端点，并循环 Accept 处理连接。
+func NewHandlerNode() *HandlerNode {
+	return &HandlerNode{
+		connCh:  make(chan xfer.Conn, 16),
+		closeCh: make(chan struct{}),
+	}
+}
+
+// AddToMux 将升级端点注册到指定 http.ServeMux 的 path 上。
+func (n *HandlerNode) AddToMux(mux *http.ServeMux, path string) {
+	if path == "" {
+		path = "/ws"
+	}
+	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		select {
+		case n.connCh <- newWSConn(conn):
+		case <-n.closeCh:
+			conn.CloseNow()
+		}
+	})
+}
+
+// Accept 阻塞等待一个新的 WebSocket 连接。
+func (n *HandlerNode) Accept(ctx context.Context) (xfer.Conn, error) {
+	select {
+	case c := <-n.connCh:
+		return c, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-n.closeCh:
+		return nil, xfer.ErrConnClosed
+	}
+}
+
+// Close 关闭节点，不再接受新连接。
+func (n *HandlerNode) Close() error {
+	select {
+	case <-n.closeCh:
+	default:
+		close(n.closeCh)
 	}
 	return nil
 }

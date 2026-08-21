@@ -8,6 +8,8 @@
 package hub
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -28,16 +30,79 @@ type NodeInfo struct {
 
 // RouteTable 是线程安全的节点路由表。
 type RouteTable struct {
-	mu    sync.RWMutex
-	nodes map[NodeID]*mux.Mux
-	info  map[NodeID]NodeInfo // 扩展信息
+	mu       sync.RWMutex
+	nodes    map[NodeID]*mux.Mux
+	info     map[NodeID]NodeInfo        // 扩展信息
+	returnCh map[NodeID]chan mux.Stream // 非 dial 帧回放队列（供 Tunnel.Serve/JitAccept 接收）
+	services map[NodeID][]Service       // 节点宣告的服务（mesh 选路）
 }
 
 // NewRouteTable 创建路由表。
 func NewRouteTable() *RouteTable {
 	return &RouteTable{
-		nodes: make(map[NodeID]*mux.Mux),
-		info:  make(map[NodeID]NodeInfo),
+		nodes:    make(map[NodeID]*mux.Mux),
+		info:     make(map[NodeID]NodeInfo),
+		returnCh: make(map[NodeID]chan mux.Stream),
+		services: make(map[NodeID][]Service),
+	}
+}
+
+// ReturnStream 将非 dial 帧流回放到该节点的 accept 队列，
+// 使既有 tunnel.NewTunnel（Tunnel.Serve）与该流配套完成 HTTP 请求-响应交换。
+// 流量较大时队列满则直接关闭流（避免 goroutine 泄漏）。
+func (rt *RouteTable) ReturnStream(m *mux.Mux, s mux.Stream) {
+	// 回放队列全局池：直接取 mux 自己的 Accept 通道来源不可用
+	// （mux.acceptCh 是私有的），这里用每连接队列按需创建并复用。
+	var ch chan mux.Stream
+	id := rt.muxNodeID(m)
+	rt.mu.Lock()
+	if id != "" {
+		ch = rt.returnCh[id]
+		if ch == nil {
+			ch = make(chan mux.Stream, 64)
+			rt.returnCh[id] = ch
+		}
+	} else {
+		rt.mu.Unlock()
+		s.Close()
+		return
+	}
+	rt.mu.Unlock()
+
+	select {
+	case ch <- s:
+	default:
+		s.Close() // 队列满，直接丢弃
+	}
+}
+
+// muxNodeID 返回持有给定 mux 的节点 ID（仅用于 ReturnStream 路由）。
+func (rt *RouteTable) muxNodeID(m *mux.Mux) NodeID {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	for id, nm := range rt.nodes {
+		if nm == m {
+			return id
+		}
+	}
+	return ""
+}
+
+// AcceptStream 返回该节点上被 ReturnStream 回放的流（JitAccept）。
+// 由 HubServer 的流处理循环与 tunnel.NewTunnel 之间桥接使用。
+func (rt *RouteTable) AcceptStream(ctx context.Context, m *mux.Mux) (mux.Stream, error) {
+	id := rt.muxNodeID(m)
+	rt.mu.RLock()
+	ch := rt.returnCh[id]
+	rt.mu.RUnlock()
+	if ch == nil {
+		return nil, fmt.Errorf("hub: no return queue for node")
+	}
+	select {
+	case s := <-ch:
+		return s, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
@@ -65,14 +130,16 @@ func (rt *RouteTable) AddWithInfo(info NodeInfo) {
 // Remove 移除一个节点。
 func (rt *RouteTable) Remove(id NodeID) {
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
 	if m, ok := rt.nodes[id]; ok {
 		delete(rt.nodes, id)
 		delete(rt.info, id)
+		delete(rt.returnCh, id)
+		delete(rt.services, id)
 		if m != nil {
-			go m.Close() // 异步关闭 mux 连接
+			go func() { _ = m.Close() }()
 		}
 	}
+	rt.mu.Unlock()
 }
 
 // Has 检查节点是否存在。

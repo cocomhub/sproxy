@@ -16,8 +16,9 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
-	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层
 	"github.com/spf13/cobra"
@@ -29,24 +30,24 @@ const (
 )
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID string) error {
+func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, dialAllow bool) error {
 	if nodeID == "" {
 		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
 
-	logger := slog.With("node", nodeID, "hub", hubURL, "local", local)
+	logger := slog.With("node", nodeID, "hub", hubURL, "local", local, "dial_allow", dialAllow)
 	logger.Info("中继节点启动")
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
-	return runRelayWithRetry(ctx, nodeID, hubURL, local, logger)
+	return runRelayWithRetry(ctx, nodeID, hubURL, local, token, dialAllow, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string, dialAllow bool, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, nodeID, hubURL, local, logger)
+		err := runRelayOnce(ctx, nodeID, hubURL, local, token, dialAllow, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -63,7 +64,7 @@ func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local string, logger
 	}
 }
 
-func runRelayOnce(ctx context.Context, nodeID, hubURL, local string, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dialAllow bool, logger *slog.Logger) error {
 	tp := xfer.Get("ws")
 	if tp == nil {
 		return fmt.Errorf("ws 传输层未注册")
@@ -75,31 +76,30 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local string, logger *slo
 	}
 	logger.Info("已连接到 Hub")
 
+	// 注册协议：连接建立后，在 xfer 层直接发送一条注册帧（JSON 或裸 nodeID）。
+	// 与 HubServer.readRegisterFrame 对齐：hub 在创建 mux 前通过 conn.Receive 读取，
+	// 因此这里也必须用 conn.Send，而非 mux 控制流。
+	meta := hub.Meta{}
+	if dialAllow {
+		meta.Tags = append(meta.Tags, "exit")
+	}
+	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta)); err != nil {
+		return fmt.Errorf("发送注册帧失败: %w", err)
+	}
+	logger.Info("已注册到 Hub")
+
 	m := mux.New(conn, mux.RoleListener)
 	defer m.Close()
 
-	// 注册节点：在控制流上发送 NodeID
-	ctrl, err := m.Open(ctx)
-	if err != nil {
-		return fmt.Errorf("创建控制流失败: %w", err)
-	}
-	if _, writeErr := ctrl.Write([]byte(nodeID)); writeErr != nil {
-		return fmt.Errorf("发送注册帧失败: %w", writeErr)
-	}
-	ctrl.Close()
-	logger.Info("已注册到 Hub")
-
-	// 使用 Tunnel.Serve 接受中继请求，转发到本地 HTTP 服务
+	// 本地 HTTP 服务地址（HTTP 中继转发目标）
 	localAddr := local
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 
-	tun := tunnel.NewTunnel(m, nil)
 	logger.Info("等待中继请求...")
-
-	err = tun.Serve(ctx, buildRelayHandler(ctx, localAddr, httpClient, logger))
+	err = relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger)
 	if err != nil {
 		logger.Warn("中继服务停止", "error", err)
 	}
@@ -157,6 +157,7 @@ func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 	cmd.AddCommand(NewCmdRelayStop(ios))
 	cmd.AddCommand(NewCmdRelayRemoveNode(ios, cfgSvc))
 	cmd.AddCommand(NewCmdRelayStats(ios, cfgSvc))
+	cmd.AddCommand(NewCmdRelayDial(factory, ios))
 	return cmd
 }
 
@@ -173,12 +174,16 @@ func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
 			hubURL, _ := cmd.Flags().GetString("hub")
 			local, _ := cmd.Flags().GetString("local")
 			nodeID, _ := cmd.Flags().GetString("node-id")
-			return runRelayStart(cmd, hubURL, local, nodeID)
+			token, _ := cmd.Flags().GetString("token")
+			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
+			return runRelayStart(cmd, hubURL, local, nodeID, token, dialAllow)
 		},
 	}
 	cmd.Flags().String("hub", "ws://127.0.0.1:18084/ws", "Hub 的 WebSocket 地址")
 	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
 	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
+	cmd.Flags().String("token", "", "中继注册 token（与 hub.relay_token 一致；未配置 hub token 时可不填）")
+	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供公司电脑充当出口网关）")
 	return cmd
 }
 
