@@ -423,7 +423,7 @@ async function simpleUpload(file, tunnelMode) {
       const encoder = new TextEncoder();
       const parts = [];
       const fileData = await file.arrayBuffer();
-      parts.push(encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + escHtml(fileName) + '"\r\nContent-Type: application/octet-stream\r\n\r\n'));
+      parts.push(encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + fileName.replace(/"/g, '') + '"\r\nContent-Type: application/octet-stream\r\n\r\n'));
       parts.push(new Uint8Array(fileData));
       parts.push(encoder.encode('\r\n--' + boundary + '--\r\n'));
       const tlen = parts.reduce(function(s, p) { return s + p.byteLength; }, 0);

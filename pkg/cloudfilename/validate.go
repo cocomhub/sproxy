@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 var (
@@ -27,7 +28,8 @@ func ValidateEntry(e Entry) error {
 	if err != nil {
 		return fmt.Errorf("%w: %q", ErrEntryInvalidURL, e.URL)
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
 		return ErrEntryBadScheme
 	}
 	if u.Host == "" {

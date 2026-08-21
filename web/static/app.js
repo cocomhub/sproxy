@@ -2458,7 +2458,8 @@ function previewFile(filename) {
 function previewImage(filename) {
   var url = '/download?filename=' + encodeURIComponent(filename);
   var modal = document.createElement('div');
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:2000;display:flex;align-items:center;justify-content:center;cursor:pointer;';
+  modal.className = 'modal-overlay-img';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;cursor:pointer;';
 
   var img = document.createElement('img');
   img.style.cssText = 'max-width:90vw;max-height:90vh;object-fit:contain;border-radius:4px;box-shadow:0 4px 24px rgba(0,0,0,.5);';
@@ -2492,7 +2493,8 @@ async function previewText(filename) {
 
 function showTextPreview(filename, text) {
   var modal = document.createElement('div');
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:2000;display:flex;align-items:center;justify-content:center;';
+  modal.className = 'modal-overlay';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;';
 
   var content = document.createElement('div');
   content.style.cssText = 'background:var(--modal-bg,#fff);border-radius:8px;padding:16px;width:700px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;';

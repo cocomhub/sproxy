@@ -67,9 +67,9 @@
     --btn-share-bg: #2e6f70;
     --btn-share-hover: #387b7c;
     --btn-success-hover: #1a6b3c;
-    --toast-success: #1e8449;
+    --toast-success: #1a6b3c;
     --toast-error: #c0392b;
-    --toast-warning: #9c6a10;
+    --toast-warning: #8a5a0e;
     --toast-info: #2b6cb5;
     --progress-bg: #3a3a60;
     --progress-bar: #5a9fd4;
@@ -108,9 +108,9 @@
   --btn-share-bg: #2e6f70;
   --btn-share-hover: #387b7c;
   --btn-success-hover: #1a6b3c;
-  --toast-success: #1e8449;
+  --toast-success: #1a6b3c;
   --toast-error: #c0392b;
-  --toast-warning: #9c6a10;
+  --toast-warning: #8a5a0e;
   --toast-info: #2b6cb5;
   --progress-bg: #3a3a60;
   --progress-bar: #5a9fd4;
@@ -171,3 +171,21 @@ tr:hover td { background: var(--bg-hover); }
 #batch-toolbar { display:none; margin-bottom:8px; padding:8px 12px; background:var(--bg-batch); border-radius:4px; align-items:center; gap:8px; flex-wrap:wrap; }
 #batch-toolbar.show { display:flex; }
 .check-col { width:36px; text-align:center; }
+
+/* 预览遮罩层 — 与 modal-overlay CSS 变量保持一致，不受 JS 内联硬编码影响 */
+.modal-overlay {
+  background: rgba(0,0,0,.45);
+  box-shadow: 0 4px 24px rgba(0,0,0,.5);
+}
+@media (prefers-color-scheme: dark) {
+  .modal-overlay { background: rgba(0,0,0,.65); }
+}
+[data-theme="dark"] .modal-overlay { background: rgba(0,0,0,.65); }
+/* 图片预览遮罩透明度略高于文字预览遮罩，确保图片全屏时背景更暗 */
+.modal-overlay-img {
+  background: rgba(0,0,0,.8);
+}
+@media (prefers-color-scheme: dark) {
+  .modal-overlay-img { background: rgba(0,0,0,.85); }
+}
+[data-theme="dark"] .modal-overlay-img { background: rgba(0,0,0,.85); }
