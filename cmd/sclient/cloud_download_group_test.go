@@ -445,14 +445,23 @@ func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 	var buf strings.Builder
 	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	cmd.SetArgs([]string{"download-archive", "archive.tar.gz"})
+	// 切到临时目录为工作目录：下载命令默认输出到当前目录，避免落到真实工作目录。
+	// 必须在 Execute 之前切换（Execute 内部的 DownloadItems 默认写到 cwd）。
+	outDir := t.TempDir()
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(origWd) }()
+	if err := os.Chdir(outDir); err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("download-archive subcommand failed: %v", err)
 	}
 	if !calledDownload {
 		t.Fatal("expected Download call")
 	}
-	// 响应带 X-File-Checksum 时客户端校验文件完整性，下载内容必须落盘正确
-	outDir, _ := os.Getwd()
 	got, err := os.ReadFile(filepath.Join(outDir, "archive.tar.gz"))
 	if err != nil {
 		t.Fatalf("expected downloaded archive on disk: %v", err)

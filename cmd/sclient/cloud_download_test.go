@@ -48,7 +48,9 @@ func TestCloudDownloadCmd_UseAndArgs(t *testing.T) {
 // tasks 是要返回的任务列表，archiveFile 是归档文件内容。
 func newChainMockServer(t *testing.T, tasks []map[string]any, archiveFile []byte) *httptest.Server {
 	t.Helper()
-	pollCount := 0
+	// 按任务 ID 独立计数轮询次数（避免多任务并发轮询时共享单个计数器导致
+	// 某个任务的早期轮询提前把所有任务置为 completed）
+	pollCounts := make(map[string]int)
 
 	// 计算归档文件的真实 SHA-256 校验和
 	archiveChecksum := sha256Hex(archiveFile)
@@ -66,14 +68,14 @@ func newChainMockServer(t *testing.T, tasks []map[string]any, archiveFile []byte
 			// 找到对应的任务
 			for _, t := range tasks {
 				if t["id"] == taskID {
-					pollCount++
+					pollCounts[taskID]++
 					status := t["status"].(string)
 					totalSize := int64(100)
 					if s, ok := t["total_size"].(int64); ok {
 						totalSize = s
 					}
 					if status == "pending" || status == "downloading" {
-						if pollCount >= 2 {
+						if pollCounts[taskID] >= 2 {
 							t["status"] = "completed"
 						}
 					}

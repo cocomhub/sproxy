@@ -87,6 +87,7 @@ func TestCloudDownloadManager_CreateTask(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
 	if err != nil {
@@ -107,6 +108,7 @@ func TestCloudDownloadManager_CreateTaskReservesStorage(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 100, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	_, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 200)
 	if err != ErrStorageFull {
@@ -118,6 +120,7 @@ func TestCloudDownloadManager_GetTask(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
 
@@ -134,6 +137,7 @@ func TestCloudDownloadManager_GetTaskMissing(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	_, ok := mgr.GetTask("nonexistent")
 	if ok {
@@ -145,6 +149,7 @@ func TestCloudDownloadManager_ListTasks(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100)
 	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200)
@@ -159,6 +164,7 @@ func TestCloudDownloadManager_ListTasksFilterByStatus(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100)
 	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200)
@@ -181,6 +187,7 @@ func TestCloudDownloadManager_CancelTask(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
 	mgr.mu.Lock()
@@ -200,6 +207,7 @@ func TestCloudDownloadManager_CancelTaskInvalidStatus(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
 	mgr.mu.Lock()
@@ -216,6 +224,7 @@ func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
 	mgr.mu.Lock()
@@ -241,6 +250,7 @@ func TestCloudDownloadManager_TaskPersistence(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024)
 
@@ -290,6 +300,7 @@ func TestCloudDownloadManager_URLDedup(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	// 第一次创建
 	task1, err := mgr.CreateTask("url", "https://example.com/same.zip", "same.zip", 100)
@@ -320,6 +331,7 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	// 创建失败任务
 	task1, _ := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100)
@@ -354,6 +366,7 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 	cs := NewChecksumStore(dir, testLogger())
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr := NewCloudDownloadManager(dir, sm, cs, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/cleanup.zip", "cleanup.zip", 100)
 	mgr.mu.Lock()
@@ -431,6 +444,7 @@ func TestCloudDownloadManager_SubmitAndStart_Sync(t *testing.T) {
 		AllowPrivate:  true,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr.Close)
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "sync-test.bin", int64(len(content)), t.Context())
 	if err != nil {
@@ -477,6 +491,7 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr.Close)
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "async-test.bin", int64(len(content)), t.Context())
 	if err != nil {
@@ -535,6 +550,7 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr.Close)
 
 	// 第一次提交（异步，让任务停留在 downloading 状态）
 	task1, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil)
@@ -646,6 +662,7 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.SubmitAndStart("url", srv.URL, "cancel-test.bin", 104857600, nil) // nil context = async
 	// 等待进入 downloading 状态
@@ -663,6 +680,10 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 	// 取消任务
 	if err := mgr.CancelTask(task.ID); err != nil {
 		t.Fatal(err)
+	}
+	// 验证下载 goroutine 真正退出（running 标记清除），而非仅 CancelTask API 返回成功
+	if !mgr.waitTaskStopped(task.ID, 2*time.Second) {
+		t.Fatal("download goroutine did not stop after cancel")
 	}
 }
 
@@ -755,6 +776,7 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 
 	// 创建 mgr1，创建任务，手动设置为 downloading 并持久化
 	mgr1 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr1.Close)
 	task, _ := mgr1.CreateTask("url", srv.URL, "resume.bin", int64(len(content)))
 	mgr1.mu.Lock()
 	task.Status = "downloading"
@@ -764,6 +786,7 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 
 	// 创建 mgr2 模拟重启，应自动恢复 downloading 任务
 	mgr2 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(mgr2.Close)
 
 	// 等待恢复的任务完成
 	deadline := time.After(10 * time.Second)
