@@ -195,10 +195,13 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub
 			}
 			conn := res.conn
 			defer conn.Close()
-			// webrtc 连接已是纯字节流；relay 连接需写 dial 帧（出口节点拨目标）
-			if res.kind == "relay" {
+			// 路径语义：
+			//   - relay：hub 的 RelayStreamHandler 已写好 dial 帧（叶子拨目标），
+			//     客户端直接透传字节，不得再写帧；
+			//   - webrtc：打洞直连对端，需要手动写 dial 帧让对端出口拨目标。
+			if meshDialFrameNeeded(res.kind) {
 				if werr := meshRelayDial(conn, target.Addr); werr != nil {
-					ios.WriteErrLine("写 relay dial 帧失败: %v", werr)
+					ios.WriteErrLine("写 webrtc dial 帧失败: %v", werr)
 					return
 				}
 			}
@@ -220,7 +223,8 @@ func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler *hub.Hub
 	}
 	conn := res.conn
 	defer conn.Close()
-	if res.kind == "relay" {
+	// 同 meshForwardListen：webrtc 直连需写 dial 帧；relay 中继 handler 已写。
+	if meshDialFrameNeeded(res.kind) {
 		if err := meshRelayDial(conn, target.Addr); err != nil {
 			return err
 		}
@@ -234,7 +238,15 @@ func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler *hub.Hub
 	return nil
 }
 
-// meshRelayDial 在 relay 连接上写 [4B len][{"dial":addr}] 帧，指示出口节点拨目标。
+// meshDialFrameNeeded 报告该路径是否需要在连接上额外写 dial 帧。
+//   - webrtc：打洞直连对端，对端出口需知道拨哪个目标 → 写帧；
+//   - relay：hub 的 RelayStreamHandler 已写好 dial 帧（叶子拨目标），客户端
+//     直接透传，不得再写（否则帧头污染数据流——实测发现的 bug）。
+func meshDialFrameNeeded(kind string) bool {
+	return kind == "webrtc"
+}
+
+// meshRelayDial 在连接上写 [4B len][{"dial":addr}] 帧，指示出口节点拨目标。
 // 与 relay_stream.go / relay.leaf.go / p2p.writeDialFrame 的帧格式一致。
 func meshRelayDial(conn net.Conn, addr string) error {
 	head, err := json.Marshal(hub.DialRequest{Dial: addr})
