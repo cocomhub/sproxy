@@ -4,8 +4,25 @@
 package relay
 
 import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
+
+// testLogger 返回丢弃日志的 logger。
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func TestDialAllowed(t *testing.T) {
 	tests := []struct {
@@ -33,41 +50,211 @@ func TestDialAllowed(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := DialAllowed(tc.addr); got != tc.want {
-				t.Fatalf("DialAllowed(%q) = %v, want %v", tc.addr, got, tc.want)
+			_, ok := DialAllowed(tc.addr)
+			if ok != tc.want {
+				t.Fatalf("DialAllowed(%q) ok = %v, want %v", tc.addr, ok, tc.want)
 			}
 		})
+	}
+}
+
+// TestDialAllowed_ResolvedAddress 验证主机名放行时返回解析后的 IP:port（防 rebinding TOCTOU）。
+func TestDialAllowed_ResolvedAddress(t *testing.T) {
+	resolved, ok := DialAllowed("8.8.8.8:53")
+	if !ok {
+		t.Fatal("expected public IP allowed")
+	}
+	if resolved != "8.8.8.8:53" {
+		t.Fatalf("expected IP:port passthrough, got %q", resolved)
 	}
 }
 
 func TestNewDialPolicy(t *testing.T) {
 	// 默认（无白名单）等价 DialAllowed：私网拒绝
 	def := NewDialPolicy(nil)
-	if def("192.168.1.10:22") {
+	if _, ok := def("192.168.1.10:22"); ok {
 		t.Fatal("default policy should reject private")
 	}
-	if !def("8.8.8.8:53") {
+	if _, ok := def("8.8.8.8:53"); !ok {
 		t.Fatal("default policy should allow public")
 	}
 
 	// 显式白名单：放行内网网段
 	withCidr := NewDialPolicy([]string{"192.168.0.0/16", "10.0.0.0/8"})
-	if !withCidr("192.168.1.10:22") {
+	if _, ok := withCidr("192.168.1.10:22"); !ok {
 		t.Fatal("policy with cidr should allow 192.168.1.10")
 	}
-	if !withCidr("10.1.2.3:8080") {
+	if _, ok := withCidr("10.1.2.3:8080"); !ok {
 		t.Fatal("policy with cidr should allow 10.x")
 	}
 	// 白名单之外的内网仍拒绝
-	if withCidr("172.16.0.5:80") {
+	if _, ok := withCidr("172.16.0.5:80"); ok {
 		t.Fatal("policy with cidr should reject non-whitelisted private 172.x")
 	}
 	// 公网仍放行
-	if !withCidr("8.8.8.8:53") {
+	if _, ok := withCidr("8.8.8.8:53"); !ok {
 		t.Fatal("policy with cidr should still allow public")
 	}
 	// 非法输入拒绝
-	if withCidr("no-port") {
+	if _, ok := withCidr("no-port"); ok {
 		t.Fatal("invalid addr should be rejected")
+	}
+}
+
+// TestNewDialPolicy_ResolvedCIDR 验证白名单命中时返回解析后的 IP:port。
+func TestNewDialPolicy_ResolvedCIDR(t *testing.T) {
+	withCidr := NewDialPolicy([]string{"192.168.0.0/16"})
+	resolved, ok := withCidr("192.168.5.100:22")
+	if !ok {
+		t.Fatal("expected CIDR-whitelisted addr allowed")
+	}
+	if resolved != "192.168.5.100:22" {
+		t.Fatalf("expected resolved IP:port, got %q", resolved)
+	}
+}
+
+// TestServeHTTP_RelaysToLocal 验证 serveHTTP 分支：把 [4B len][tunnel.Request]
+// 元数据帧解析后转发到本地 HTTP 服务，并把响应 metadata+body 写回流。
+func TestServeHTTP_RelaysToLocal(t *testing.T) {
+	// 本地 HTTP 服务（验证转发目标）
+	var gotPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("X-Backend", "relay")
+		_, _ = w.Write([]byte("backend-ok"))
+	}))
+	defer backend.Close()
+
+	// 双端流：serveHTTP 端 + 模拟调用方端
+	pipeA, pipeB := xfertest.Pipe()
+	serverMux := mux.New(pipeA, mux.RoleListener)
+	clientMux := mux.New(pipeB, mux.RoleDialer)
+	defer serverMux.Close()
+	defer clientMux.Close()
+
+	// serveHTTP 端：开一条流处理。注意不 defer Close——由测试读完响应后再关闭，
+	// 避免 serveHTTP 返回时关流与客户端读 body 竞争（-race 下必现）。
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	serverDone := make(chan error, 1)
+	streamCh := make(chan mux.Stream, 1)
+	go func() {
+		stream, aerr := serverMux.Accept(ctx)
+		if aerr != nil {
+			serverDone <- aerr
+			return
+		}
+		streamCh <- stream
+		httpClient := &http.Client{Timeout: 5 * time.Second}
+		serveHTTP(ctx, stream, backend.URL, tunnel.Request{Method: http.MethodGet, URL: "/relayed"}, httpClient, testLogger())
+		serverDone <- nil
+	}()
+
+	// 调用方端：构造 HTTP 请求 metadata 帧，写入流并读响应
+	clientStream, oerr := clientMux.Open(ctx)
+	if oerr != nil {
+		t.Fatal(oerr)
+	}
+	defer clientStream.Close()
+
+	reqMeta, _ := json.Marshal(tunnel.Request{Method: http.MethodGet, URL: "/relayed"})
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(reqMeta)))
+	if _, werr := clientStream.Write(lenBuf); werr != nil {
+		t.Fatal(werr)
+	}
+	if _, werr := clientStream.Write(reqMeta); werr != nil {
+		t.Fatal(werr)
+	}
+	_ = clientStream.CloseWrite()
+
+	// 读响应 metadata（[4B len][json]）。serveHTTP 写 meta 先于 body，
+	// 客户端应能读到 meta（此时 serveHTTP 可能仍在写 body 或已返回）。
+	metaLenBuf := make([]byte, 4)
+	if _, rerr := io.ReadFull(clientStream, metaLenBuf); rerr != nil {
+		t.Fatal(rerr)
+	}
+	metaLen := binary.BigEndian.Uint32(metaLenBuf)
+	metaRaw := make([]byte, metaLen)
+	if _, rerr := io.ReadFull(clientStream, metaRaw); rerr != nil {
+		t.Fatal(rerr)
+	}
+	var respMeta tunnel.Response
+	if err := json.Unmarshal(metaRaw, &respMeta); err != nil {
+		t.Fatal(err)
+	}
+	if respMeta.Status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", respMeta.Status)
+	}
+	if respMeta.Headers.Get("X-Backend") != "relay" {
+		t.Fatalf("expected X-Backend header relayed, got %q", respMeta.Headers.Get("X-Backend"))
+	}
+	// 读 body（固定长度，服务端不关流所以不能 ReadAll 等 EOF）
+	body := make([]byte, len("backend-ok"))
+	if _, rerr := io.ReadFull(clientStream, body); rerr != nil {
+		t.Fatalf("read body: %v", rerr)
+	}
+	if string(body) != "backend-ok" {
+		t.Fatalf("expected body backend-ok, got %q", body)
+	}
+	if gotPath != "/relayed" {
+		t.Fatalf("expected backend path /relayed, got %q", gotPath)
+	}
+
+	// 确认 serveHTTP 端正常完成，然后关闭服务端流
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatalf("serveHTTP 端失败: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("serveHTTP 未完成")
+	}
+	select {
+	case s := <-streamCh:
+		_ = s.Close()
+	default:
+	}
+}
+
+// TestServeHTTP_BadMeta 验证非法 metadata 不 panic 且关闭流。
+func TestServeHTTP_BadMeta(t *testing.T) {
+	pipeA, pipeB := xfertest.Pipe()
+	serverMux := mux.New(pipeA, mux.RoleListener)
+	clientMux := mux.New(pipeB, mux.RoleDialer)
+	defer serverMux.Close()
+	defer clientMux.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	// 写入垃圾 metadata（长度 5，内容不是 JSON）
+	clientStream, oerr := clientMux.Open(ctx)
+	if oerr != nil {
+		t.Fatal(oerr)
+	}
+	defer clientStream.Close()
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, 5)
+	_, _ = clientStream.Write(lenBuf)
+	_, _ = clientStream.Write([]byte("12345"))
+	_ = clientStream.CloseWrite()
+
+	// serveHTTP 端应正常返回（无 panic）
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		stream, aerr := serverMux.Accept(ctx)
+		if aerr != nil {
+			return
+		}
+		defer stream.Close()
+		httpClient := &http.Client{Timeout: 5 * time.Second}
+		serveHTTP(ctx, stream, "http://127.0.0.1:1", tunnel.Request{Method: "GET", URL: "/x"}, httpClient, testLogger())
+	}()
+	select {
+	case <-serverDone:
+	case <-ctx.Done():
+		t.Fatal("serveHTTP 应返回而未返回")
 	}
 }

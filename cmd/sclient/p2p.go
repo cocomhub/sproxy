@@ -13,7 +13,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
@@ -28,7 +30,7 @@ func discardLogger() *slog.Logger {
 
 // NewCmdP2P 创建 p2p 父命令：基于 WebRTC 打洞的点对点连接。
 // 信令经 hub 的 /api/signal/* 桥，数据面打洞成功后直连（不经过 hub）。
-func NewCmdP2P() *cobra.Command {
+func NewCmdP2P(ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "p2p",
 		Short: "WebRTC 点对点直连（经 hub 信令桥打洞）",
@@ -36,8 +38,8 @@ func NewCmdP2P() *cobra.Command {
 			_ = cmd.Help()
 		},
 	}
-	cmd.AddCommand(newCmdP2PConnect())
-	cmd.AddCommand(newCmdP2PListen())
+	cmd.AddCommand(newCmdP2PConnect(ios))
+	cmd.AddCommand(newCmdP2PListen(ios))
 	return cmd
 }
 
@@ -70,7 +72,7 @@ func (f *p2pFlags) localNode() string {
 }
 
 // newCmdP2PConnect 创建 p2p connect：拨号到对端建立 WebRTC 直连。
-func newCmdP2PConnect() *cobra.Command {
+func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 	var f p2pFlags
 	cmd := &cobra.Command{
 		Use:   "connect --peer <id> --tcp <addr> [-l :port]",
@@ -89,16 +91,16 @@ func newCmdP2PConnect() *cobra.Command {
 				return fmt.Errorf("p2p 打洞失败: %w", err)
 			}
 			defer conn.Close()
-			fmt.Printf("p2p 直连已建立: %s ⇄ %s（数据面不经过 hub）\n", f.localNode(), peer)
+			ios.WriteOutLine("p2p 直连已建立: %s ⇄ %s（数据面不经过 hub）", f.localNode(), peer)
 
 			m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
 			defer m.Close()
 
 			if listenAddr != "" {
-				return p2pForward(ctx, m, peer, tcpAddr, listenAddr)
+				return p2pForward(ctx, m, peer, tcpAddr, listenAddr, ios)
 			}
 			// 单次模式：stdin/stdout 直通
-			return p2pStdio(ctx, m, tcpAddr)
+			return p2pStdio(ctx, m, tcpAddr, ios)
 		},
 	}
 	cmd.Flags().String("peer", "", "对端节点 ID")
@@ -111,7 +113,7 @@ func newCmdP2PConnect() *cobra.Command {
 }
 
 // newCmdP2PListen 创建 p2p listen：作为对端等待入站 WebRTC 直连。
-func newCmdP2PListen() *cobra.Command {
+func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 	var f p2pFlags
 	cmd := &cobra.Command{
 		Use:   "listen",
@@ -119,20 +121,35 @@ func newCmdP2PListen() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
-			httpClient := &http.Client{Timeout: 30 * 1_000_000_000}
+			httpClient := &http.Client{Timeout: 30 * time.Second}
 
-			// 循环 accept：每条 p2p 连接交给 relay.Serve 分发（dial 帧 / HTTP 中继）
+			// 循环 accept：每条 p2p 连接交给 relay.Serve 分发（dial 帧 / HTTP 中继）。
+			// 信令失败（如临时网络抖动）时带退避重试，作为常驻服务不应轻易退出。
+			delay := reconnectBaseDelay
 			for {
 				conn, err := webrtc.ListenWithSignaler(f.localNode(), f.signaler())
 				if err != nil {
-					fmt.Printf("p2p 监听失败: %v\n", err)
-					return err
+					if ctx.Err() != nil {
+						return nil
+					}
+					ios.WriteErrLine("p2p 监听失败，%v 后重试: %v", delay, err)
+					select {
+					case <-time.After(delay):
+						delay *= 2
+						if delay > reconnectMaxDelay {
+							delay = reconnectMaxDelay
+						}
+					case <-ctx.Done():
+						return nil
+					}
+					continue
 				}
+				delay = reconnectBaseDelay
 				m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleListener)
 				go func() {
 					defer m.Close()
 					if err := relay.Serve(ctx, m, "http://127.0.0.1:8080", true, httpClient, discardLogger()); err != nil {
-						fmt.Printf("p2p 会话结束: %v\n", err)
+						ios.WriteErrLine("p2p 会话结束: %v", err)
 					}
 				}()
 			}
@@ -143,16 +160,19 @@ func newCmdP2PListen() *cobra.Command {
 }
 
 // p2pForward 在已建立的 p2p mux 上做本地端口转发。
-func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr string) error {
+func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr string, ios cli.IOStreams) error {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听本地端口失败: %w", err)
 	}
 	defer ln.Close()
-	fmt.Printf("端口转发: %s ⇄ p2p(%s) ⇄ %s\n", listenAddr, peer, tcpAddr)
+	ios.WriteOutLine("端口转发: %s ⇄ p2p(%s) ⇄ %s", listenAddr, peer, tcpAddr)
 	for {
 		c, aerr := ln.Accept()
 		if aerr != nil {
+			if ctx.Err() != nil {
+				return nil // 优雅取消
+			}
 			return aerr
 		}
 		go func(local net.Conn) {
@@ -171,7 +191,7 @@ func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr strin
 }
 
 // p2pStdio 单次模式：stdin/stdout 与远端直通。
-func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string) error {
+func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams) error {
 	stream, err := m.Open(ctx)
 	if err != nil {
 		return err
@@ -180,10 +200,10 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string) error {
 	if err := writeDialFrame(stream, tcpAddr); err != nil {
 		return err
 	}
-	fmt.Printf("已连接: stdin/stdout ⇄ p2p ⇄ %s (Ctrl+D / EOF 断开)\n", tcpAddr)
+	ios.WriteOutLine("已连接: stdin/stdout ⇄ p2p ⇄ %s (Ctrl+D / EOF 断开)", tcpAddr)
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(stream, os.Stdin); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(os.Stdout, stream); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(stream, ios.In); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(ios.Out, stream); done <- struct{}{} }()
 	<-done
 	<-done
 	return nil

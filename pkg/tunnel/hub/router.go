@@ -23,6 +23,12 @@ const registerFrameTTL = 10 * time.Second
 // maxRegisterFrameBytes 是注册帧的最大字节数（防恶意大帧耗尽内存）。
 const maxRegisterFrameBytes = 64 << 10 // 64 KiB
 
+// 注册 ACK 帧常量（xfer 层一条消息）。导出供 sclient 注册后等待。
+const (
+	RegisterAckOK  = "REG_OK"
+	RegisterAckErr = "REG_ERR:"
+)
+
 // RegisterFrame 是节点连接后的注册帧（JSON）。
 // 向后兼容：若首个流上收到的是非 JSON 裸字符串（旧版仅发 nodeID），
 // 则等价于仅携带 NodeID 且无 token 的注册帧。
@@ -206,18 +212,25 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 	// 在 mux 创建前 return，不 close 会导致 WS 连接泄漏）。
 	defer conn.Close()
 
+	// sendRegErr 回发错误 ACK（尽力而为，客户端据此判断注册失败）
+	sendRegErr := func(reason string) error {
+		_ = conn.Send(ctx, []byte(RegisterAckErr+reason))
+		return fmt.Errorf("注册失败: %s", reason)
+	}
+
 	reg, err := s.readRegisterFrame(ctx, conn)
 	if err != nil {
 		s.logger.Warn("读取注册帧失败", "error", err)
-		return err
+		return sendRegErr("bad register frame")
 	}
 	if reg.NodeID == "" {
-		return fmt.Errorf("注册帧缺少 node_id")
+		return sendRegErr("missing node_id")
 	}
 	if s.auth != nil {
 		if err := s.auth.Authenticate(reg.Token); err != nil {
 			s.logger.Warn("中继节点鉴权失败", "node", reg.NodeID)
-			return err
+			_ = conn.Send(ctx, []byte(RegisterAckErr+"invalid token"))
+			return err // 保留原始错误（ErrInvalidToken）供调用方/测试识别
 		}
 	}
 
@@ -226,6 +239,13 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 
 	info := s.registerNode(reg, m)
 	s.logger.Info("中继节点已注册", "node", reg.NodeID, "addr", info.Addr)
+
+	// 回发注册 ACK：让客户端尽早感知注册成功（而非等到建流失败才发现）。
+	// 鉴权失败路径在 mux 创建前 return，不经过这里。
+	if ackErr := conn.Send(ctx, []byte(RegisterAckOK)); ackErr != nil {
+		s.logger.Warn("回发注册 ACK 失败", "node", reg.NodeID, "error", ackErr)
+		return ackErr
+	}
 
 	// 持续 handle 新到达的流直到连接关闭：
 	// 1. 由旧版 relay 等调用方发起的隧道请求（HTTP 请求-响应交换）
@@ -247,11 +267,13 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 	return nil
 }
 
-// readRegisterFrame 读取节点注册信息，兼容两种格式：
-//   - JSON（新版）{node_id, token, meta}
-//   - 裸字节串（旧版）即 nodeID
+// readRegisterFrame 读取节点注册信息。
+// 协议：连接建立后，节点在 xfer 层发送一条 JSON 注册帧 {node_id, token, meta}
+// （由 hub.NewRegisterFrame 构建；为容错，裸字符串 nodeID 也接受）。
 //
 // 注意：在 xfer 层（conn.Receive）读取，不占用 mux 流的创建。
+// 与旧版（base 399ff89）的「mux 控制流发 nodeID」协议不兼容——分支未发布，
+// 属协议升级而非破坏。
 func (s *HubServer) readRegisterFrame(ctx context.Context, conn xfer.Conn) (*RegisterFrame, error) {
 	regCtx, cancel := context.WithTimeout(ctx, registerFrameTTL)
 	defer cancel()
@@ -267,7 +289,7 @@ func (s *HubServer) readRegisterFrame(ctx context.Context, conn xfer.Conn) (*Reg
 
 	reg := &RegisterFrame{}
 	if err := json.Unmarshal(raw, reg); err != nil || reg.NodeID == "" {
-		// 裸字符串兼容
+		// 裸字符串容错
 		reg = &RegisterFrame{NodeID: strings.TrimSpace(string(raw))}
 	}
 	return reg, nil

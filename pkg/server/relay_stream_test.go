@@ -92,7 +92,7 @@ func TestRelayStream_EndToEnd_Echo(t *testing.T) {
 	leafErr := make(chan error, 1)
 	go func() {
 		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
-			relay.ServeOptions{DialPolicy: func(string) bool { return true }})
+			relay.ServeOptions{DialPolicy: func(addr string) (string, bool) { return addr, true }})
 	}()
 
 	// caller 侧：注册到 RouteTable 并用 RelayStreamHandler 服务

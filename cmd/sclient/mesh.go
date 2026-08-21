@@ -111,6 +111,11 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, target *clien
 	ios.WriteOutLine("端口转发: %s ⇄ mesh(%s) ⇄ %s", listenAddr, target.Node, target.Addr)
 
 	ctx := cmd.Context()
+	// ctx 取消时关闭 listener，使 Accept 立即返回（优雅停止端口转发）。
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
 	for {
 		local, aerr := ln.Accept()
 		if aerr != nil {
