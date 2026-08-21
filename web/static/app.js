@@ -1454,6 +1454,8 @@ async function doChainDownloadCloudGroup(urls, filenames) {
   const name = prompt('组名称（可选）:', 'group-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
   if (name === null) { window._busyChain = false; return; }
 
+  // groupId 提升到函数作用域：catch 块（独立块作用域）也需访问以清理已创建的组
+  let groupId;
   try {
     const hdrs = headers({ 'Content-Type': 'application/json' });
     showToast('创建下载组...', 'info');
@@ -1461,7 +1463,6 @@ async function doChainDownloadCloudGroup(urls, filenames) {
     // 阶段 1: 创建组
     const entries = urls.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
     const body = JSON.stringify({ name: name, urls: entries });
-    let groupId;
     let totalTasks;
     if (tunnelHexKey) {
       const result = await tunnelRequest('POST', '/api/cloud/groups', hdrs, new TextEncoder().encode(body));

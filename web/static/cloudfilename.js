@@ -75,8 +75,10 @@
     if (/%/.test(hostForValidation)) return null;
     // host 中 Go url.Parse 会报错的字符（实测）：空白/控制字符、|、反引号、非法端口。
     // 这些输入 Go 侧返回 download，JS 也必须拒绝，避免双端分歧。
-    // 注意：< > ' & ( ) $ ~ + _ ] ! * 等 Go 合法，不得拒绝；[ 单独报错但边界复杂，暂不处理。
-    if (/[\s|`]/.test(hostForValidation)) return null;
+    // 注意：用显式 ASCII 空白集合而非 \s——\s 会匹配 U+00A0/U+3000 等 Unicode 空白，
+    // 而 Go url.Parse 接受这些字符作 host（实测 http://example.com /file → file）。
+    // < > ' & ( ) $ ~ + _ ] ! * 等 Go 合法，不得拒绝；[ 单独报错但边界复杂，暂不处理。
+    if (/[ \t\n\r\f\v|`]/.test(hostForValidation)) return null;
     // 非法端口（: 后非纯数字）→ Go url.Parse 报 invalid port。合法端口（如 :8080）保留。
     // 仅检查 [ 之后的冒号（IPv6 字面量 [::1] 内的冒号属于地址，不算端口）。
     const closeBracketIdx = hostForValidation.lastIndexOf(']');
