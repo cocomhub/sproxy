@@ -216,6 +216,8 @@ func pump(local net.Conn, s mux.Stream) {
 		_, _ = io.Copy(local, s)
 		done <- struct{}{}
 	}()
+	// 一个方向完成即解除另一方向阻塞，防非合作对端永久挂起
 	<-done
+	_ = local.Close()
 	<-done
 }

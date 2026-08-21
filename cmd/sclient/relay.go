@@ -30,7 +30,7 @@ const (
 )
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, dialAllow bool) error {
+func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, dialAllow bool, services, dialAllowCIDRs []string) error {
 	if nodeID == "" {
 		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
@@ -41,13 +41,13 @@ func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, dial
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
-	return runRelayWithRetry(ctx, nodeID, hubURL, local, token, dialAllow, logger)
+	return runRelayWithRetry(ctx, nodeID, hubURL, local, token, dialAllow, services, dialAllowCIDRs, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string, dialAllow bool, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, nodeID, hubURL, local, token, dialAllow, logger)
+		err := runRelayOnce(ctx, nodeID, hubURL, local, token, dialAllow, services, dialAllowCIDRs, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -64,7 +64,7 @@ func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string,
 	}
 }
 
-func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dialAllow bool, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
 	tp := xfer.Get("ws")
 	if tp == nil {
 		return fmt.Errorf("ws 传输层未注册")
@@ -83,6 +83,14 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 	if dialAllow {
 		meta.Tags = append(meta.Tags, "exit")
 	}
+	for _, svc := range services {
+		name, addr, ok := strings.Cut(svc, ":")
+		if !ok || name == "" || addr == "" {
+			logger.Warn("忽略无效服务宣告（应为 name:addr）", "raw", svc)
+			continue
+		}
+		meta.Services = append(meta.Services, hub.Service{Name: name, Addr: addr})
+	}
 	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta)); err != nil {
 		return fmt.Errorf("发送注册帧失败: %w", err)
 	}
@@ -99,7 +107,11 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 
 	logger.Info("等待中继请求...")
-	err = relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger)
+	var opts []relay.ServeOptions
+	if len(dialAllowCIDRs) > 0 {
+		opts = append(opts, relay.ServeOptions{DialPolicy: relay.NewDialPolicy(dialAllowCIDRs)})
+	}
+	err = relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
 	if err != nil {
 		logger.Warn("中继服务停止", "error", err)
 	}
@@ -176,7 +188,9 @@ func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
 			nodeID, _ := cmd.Flags().GetString("node-id")
 			token, _ := cmd.Flags().GetString("token")
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
-			return runRelayStart(cmd, hubURL, local, nodeID, token, dialAllow)
+			services, _ := cmd.Flags().GetStringArray("service")
+			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
+			return runRelayStart(cmd, hubURL, local, nodeID, token, dialAllow, services, dialAllowCIDRs)
 		},
 	}
 	cmd.Flags().String("hub", "ws://127.0.0.1:18084/ws", "Hub 的 WebSocket 地址")
@@ -184,6 +198,8 @@ func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
 	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
 	cmd.Flags().String("token", "", "中继注册 token（与 hub.relay_token 一致；未配置 hub token 时可不填）")
 	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供公司电脑充当出口网关）")
+	cmd.Flags().StringArray("service", nil, "宣告一个 mesh 服务（格式 name:addr，可重复；供 sclient mesh connect 发现）")
+	cmd.Flags().StringArray("dial-allow-cidr", nil, "出口拨号白名单网段（如 192.168.0.0/16；配合 --dial-allow 放行内网服务，默认仅公网）")
 	return cmd
 }
 
