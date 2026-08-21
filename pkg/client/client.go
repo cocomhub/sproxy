@@ -1014,6 +1014,11 @@ func (c *FileClient) InitError() error {
 	return c.initError
 }
 
+// ServerURL 返回客户端配置的服务端地址。
+func (c *FileClient) ServerURL() string {
+	return c.serverURL
+}
+
 // doRequest 统一发送 HTTP 请求：当配置了隧道客户端时走加密隧道，否则直连。
 //
 // urlPath 是相对路径，如 "/upload" 或 "/download?filename=test.txt"。
