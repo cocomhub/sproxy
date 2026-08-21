@@ -5,8 +5,10 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -46,7 +48,7 @@ func defaultDownloadItemsOptions() downloadItemsOptions {
 // 并发控制：concurrency=0 表示不限制，concurrency=1 顺序下载，
 // concurrency=N 最多 N 个并发。默认并发 2（避免全部并发对服务端与
 // 本地 IO 造成过大压力，也不至于串行太慢）。
-// 单文件失败不影响其余文件，失败信息合并后一并返回。
+// 单文件失败不影响其余文件；全部完成后将所有失败信息合并为一个错误返回。
 func (c *FileClient) DownloadItems(ctx context.Context, items []DownloadItem, opts ...DownloadOption) error {
 	cfg := defaultDownloadItemsOptions()
 	for _, o := range opts {
@@ -63,22 +65,38 @@ func (c *FileClient) DownloadItems(ctx context.Context, items []DownloadItem, op
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.SetLimit(limit)
 
+	// 错误聚合：errgroup.Wait 只返回第一个错误，用带锁的收集器累积全部失败，
+	// 与"失败信息合并后一并返回"的文档承诺一致。
+	var mu sync.Mutex
+	var errs []error
 	for _, item := range items {
 		eg.Go(func() error {
 			if item.RemotePath == "" {
-				return fmt.Errorf("远程路径为空")
+				err := fmt.Errorf("远程路径为空")
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+				return nil
 			}
 			local := item.LocalPath
 			if local == "" {
 				local = filepath.Base(item.RemotePath)
 			}
 			if err := c.Download(egCtx, item.RemotePath, local); err != nil {
-				return fmt.Errorf("下载 %s 失败: %w", item.RemotePath, err)
+				wrapped := fmt.Errorf("下载 %s 失败: %w", item.RemotePath, err)
+				mu.Lock()
+				errs = append(errs, wrapped)
+				mu.Unlock()
 			}
 			return nil
 		})
 	}
-	return eg.Wait()
+	// 等待全部完成；不直接返回 errgroup 错误（首个错误），而返回聚合后的完整错误
+	_ = eg.Wait()
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 // DownloadItemsSequential 顺序下载多个文件。
