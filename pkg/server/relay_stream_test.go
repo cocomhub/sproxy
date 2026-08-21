@@ -86,11 +86,13 @@ func TestRelayStream_EndToEnd_Echo(t *testing.T) {
 	leafMux := mux.New(pipeB, mux.RoleListener)
 
 	// leaf 侧：relay.Serve 出口模式（dialAllow=true），拨号到 echo
+	// 测试用回环 echo server，因此用宽松拨号策略（允许回环）；生产默认严格（DialAllowed）。
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
 	leafErr := make(chan error, 1)
 	go func() {
-		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger())
+		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
+			relay.ServeOptions{DialPolicy: func(string) bool { return true }})
 	}()
 
 	// caller 侧：注册到 RouteTable 并用 RelayStreamHandler 服务

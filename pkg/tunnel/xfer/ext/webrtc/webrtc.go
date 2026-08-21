@@ -59,6 +59,40 @@ func NewSignal() *Signal {
 	}
 }
 
+// Signaler 抽象 SDP Offer/Answer（以及可选 ICE candidate）的交换通道。
+// 进程内实现用 Signal channel；跨机器实现可走 hub 的 HTTP 存转信令桥。
+type Signaler interface {
+	// SendOffer 发送 Offer SDP 给对端 peer。
+	SendOffer(peer string, sdp string) error
+	// WaitOffer 阻塞等待对端 peer 发来的 Offer SDP。
+	WaitOffer(ctx context.Context, peer string) (string, error)
+	// SendAnswer 发送 Answer SDP 给对端 peer。
+	SendAnswer(peer string, sdp string) error
+	// WaitAnswer 阻塞等待对端 peer 发来的 Answer SDP。
+	WaitAnswer(ctx context.Context, peer string) (string, error)
+}
+
+// signalerAdapter 把内存 Signal channel 包装成 Signaler，
+// 使既有 Dial/Listen 兼容新接口（peer 参数忽略，单进程共享）。
+type signalerAdapter struct {
+	signal *Signal
+}
+
+func (a signalerAdapter) SendOffer(_ string, sdp string) error {
+	a.signal.Offer <- sdp
+	return nil
+}
+func (a signalerAdapter) WaitOffer(_ context.Context, _ string) (string, error) {
+	return <-a.signal.Offer, nil
+}
+func (a signalerAdapter) SendAnswer(_ string, sdp string) error {
+	a.signal.Answer <- sdp
+	return nil
+}
+func (a signalerAdapter) WaitAnswer(_ context.Context, _ string) (string, error) {
+	return <-a.signal.Answer, nil
+}
+
 type webrtcAddr struct{}
 
 func (webrtcAddr) Network() string { return "webrtc" }
@@ -111,6 +145,17 @@ func marshalLD(pc *webrtc.PeerConnection) (string, error) {
 
 // Dial initiates a connection. Listen must be started first.
 func Dial(signal *Signal) (*Conn, error) {
+	return DialWithSignaler("", signalerAdapter{signal: signal})
+}
+
+// Listen waits for an incoming connection. Must be started before Dial.
+func Listen(signal *Signal) (*Conn, error) {
+	return ListenWithSignaler("", signalerAdapter{signal: signal})
+}
+
+// DialWithSignaler 通过指定的 Signaler 建立连接（跨机器可用）。
+// peer 是远端节点标识，Signaler 负责 Offer/Answer 的传输。
+func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	pc, err := newPC()
 	if err != nil {
 		return nil, fmt.Errorf("dial: new pc: %w", err)
@@ -140,9 +185,16 @@ func Dial(signal *Signal) (*Conn, error) {
 		pc.Close()
 		return nil, fmt.Errorf("dial: %w", err)
 	}
-	signal.Offer <- oJSON
+	if err := sig.SendOffer(peer, oJSON); err != nil {
+		pc.Close()
+		return nil, fmt.Errorf("dial: send offer: %w", err)
+	}
 
-	aJSON := <-signal.Answer
+	aJSON, err := sig.WaitAnswer(context.Background(), peer)
+	if err != nil {
+		pc.Close()
+		return nil, fmt.Errorf("dial: wait answer: %w", err)
+	}
 	var answer webrtc.SessionDescription
 	if err := json.Unmarshal([]byte(aJSON), &answer); err != nil {
 		pc.Close()
@@ -168,8 +220,9 @@ func Dial(signal *Signal) (*Conn, error) {
 	return &Conn{raw: raw, pc: pc}, nil
 }
 
-// Listen waits for an incoming connection. Must be started before Dial.
-func Listen(signal *Signal) (*Conn, error) {
+// ListenWithSignaler 通过指定的 Signaler 等待连接（跨机器可用）。
+// peer 是本地节点标识，Signaler 负责 Offer/Answer 的传输。
+func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	pc, err := newPC()
 	if err != nil {
 		return nil, fmt.Errorf("listen: new pc: %w", err)
@@ -184,7 +237,11 @@ func Listen(signal *Signal) (*Conn, error) {
 		}
 	})
 
-	oJSON := <-signal.Offer
+	oJSON, err := sig.WaitOffer(context.Background(), peer)
+	if err != nil {
+		pc.Close()
+		return nil, fmt.Errorf("listen: wait offer: %w", err)
+	}
 	var offer webrtc.SessionDescription
 	if err := json.Unmarshal([]byte(oJSON), &offer); err != nil {
 		pc.Close()
@@ -210,7 +267,10 @@ func Listen(signal *Signal) (*Conn, error) {
 		pc.Close()
 		return nil, fmt.Errorf("listen: %w", err)
 	}
-	signal.Answer <- aJSON
+	if err := sig.SendAnswer(peer, aJSON); err != nil {
+		pc.Close()
+		return nil, fmt.Errorf("listen: send answer: %w", err)
+	}
 
 	// Wait for the DataChannel to arrive.
 	var dc *webrtc.DataChannel
@@ -264,6 +324,12 @@ func (c *webrtcXferConn) Receive(_ context.Context) ([]byte, error) {
 
 func (c *webrtcXferConn) Close() error {
 	return c.raw.Close()
+}
+
+// ConnAsXfer 把一个已建立的 WebRTC *Conn 包装成 xfer.Conn，
+// 供上层 mux 复用（网络信令建立后，把 DataChannel 当作 xfer 消息通道）。
+func ConnAsXfer(c *Conn) xfer.Conn {
+	return &webrtcXferConn{raw: c}
 }
 
 // globalSignals stores signal channels indexed by address, for xfer.Dial/Listen.

@@ -142,6 +142,23 @@ func (rt *RouteTable) Remove(id NodeID) {
 	rt.mu.Unlock()
 }
 
+// RemoveIfOwned 仅当该节点 ID 当前绑定到给定 mux（即本连接）时才移除。
+// 防止旧连接断开时误删新注册的同名节点（stale identity 防护）。
+// 返回是否真正移除。
+func (rt *RouteTable) RemoveIfOwned(id NodeID, m *mux.Mux) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	cur, ok := rt.nodes[id]
+	if !ok || cur != m {
+		return false
+	}
+	delete(rt.nodes, id)
+	delete(rt.info, id)
+	delete(rt.returnCh, id)
+	delete(rt.services, id)
+	return true
+}
+
 // Has 检查节点是否存在。
 func (rt *RouteTable) Has(id NodeID) bool {
 	rt.mu.RLock()

@@ -30,6 +30,7 @@ type Handlers struct {
 	metrics        *Metrics
 	shareStore     *ShareStore
 	routeTable     *hub.RouteTable
+	signalBroker   *SignalBroker
 	handler        http.Handler
 	cloudMgr       *CloudDownloadManager
 	storageMgr     *StorageManager
@@ -82,6 +83,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		metrics:       NewMetrics(),
 		shareStore:    NewShareStore(log.With("component", "share")),
 		routeTable:    opts.RouteTable,
+		signalBroker:  NewSignalBroker(),
 		uploadingStop: make(chan struct{}),
 	}
 
@@ -229,6 +231,29 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		streamHandler := NewRelayStreamHandler(opts.RouteTable, log.With("component", "relay_stream"))
 		srvMux.HandleFunc("POST /api/relay/stream", h.authMiddleware(streamHandler.ServeHTTP))
 		localMux.HandleFunc("POST /api/relay/stream", streamHandler.ServeHTTP)
+
+		// WebRTC 信令桥：SDP Offer/Answer/Candidate 存转 + 长轮询
+		broker := h.signalBroker
+		srvMux.HandleFunc("POST /api/signal/offer", h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			broker.handleSignalPost(w, r, hub.SignalOffer)
+		}))
+		srvMux.HandleFunc("POST /api/signal/answer", h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			broker.handleSignalPost(w, r, hub.SignalAnswer)
+		}))
+		srvMux.HandleFunc("POST /api/signal/candidate", h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+			broker.handleSignalPost(w, r, hub.SignalCandidate)
+		}))
+		srvMux.HandleFunc("GET /api/signal/poll/{peer}", h.authMiddleware(broker.handleSignalPoll))
+		localMux.HandleFunc("POST /api/signal/offer", func(w http.ResponseWriter, r *http.Request) {
+			broker.handleSignalPost(w, r, hub.SignalOffer)
+		})
+		localMux.HandleFunc("POST /api/signal/answer", func(w http.ResponseWriter, r *http.Request) {
+			broker.handleSignalPost(w, r, hub.SignalAnswer)
+		})
+		localMux.HandleFunc("POST /api/signal/candidate", func(w http.ResponseWriter, r *http.Request) {
+			broker.handleSignalPost(w, r, hub.SignalCandidate)
+		})
+		localMux.HandleFunc("GET /api/signal/poll/{peer}", broker.handleSignalPoll)
 
 		srvMux.HandleFunc("GET /api/hub/nodes", h.authMiddleware(h.hubNodesHandler))
 		srvMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))

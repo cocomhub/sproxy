@@ -34,6 +34,43 @@ func TestRouteTableAddAndRemove(t *testing.T) {
 	}
 }
 
+// TestRouteTableRemoveIfOwned 验证 ownership 防护：
+// 仅当节点当前绑定到给定 mux 时才移除，防止旧连接误删同名新注册。
+func TestRouteTableRemoveIfOwned(t *testing.T) {
+	rt := hub.NewRouteTable()
+
+	// 两个不同的 mux
+	a1, _ := xfertest.Pipe()
+	m1 := mux.New(a1, mux.RoleDialer)
+	defer m1.Close()
+	a2, _ := xfertest.Pipe()
+	m2 := mux.New(a2, mux.RoleDialer)
+	defer m2.Close()
+
+	rt.Add("node-1", m1)
+
+	// 用错误的 mux（m2）尝试移除：不应成功
+	if rt.RemoveIfOwned("node-1", m2) {
+		t.Fatal("RemoveIfOwned with wrong mux should return false")
+	}
+	if rt.Lookup("node-1") == nil {
+		t.Fatal("node-1 should still exist after failed RemoveIfOwned")
+	}
+
+	// 用正确的 mux（m1）移除：应成功
+	if !rt.RemoveIfOwned("node-1", m1) {
+		t.Fatal("RemoveIfOwned with owning mux should return true")
+	}
+	if rt.Lookup("node-1") != nil {
+		t.Fatal("node-1 should be gone after owning RemoveIfOwned")
+	}
+
+	// 再次移除（已不存在）：返回 false
+	if rt.RemoveIfOwned("node-1", m1) {
+		t.Fatal("RemoveIfOwned of absent node should return false")
+	}
+}
+
 func TestRouteTableConcurrent(t *testing.T) {
 	rt := hub.NewRouteTable()
 	var wg sync.WaitGroup
