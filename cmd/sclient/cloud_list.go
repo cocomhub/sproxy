@@ -45,7 +45,8 @@ func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 			}
 
 			statusFilter, _ := cmd.Flags().GetString("status")
-			tasks, err := svc.ListCloudTasks(cmd.Context(), statusFilter)
+			// offset/limit <0 表示不限制（返回全部）
+			tasks, err := svc.ListCloudTasks(cmd.Context(), statusFilter, -1, -1)
 			if err != nil {
 				return fmt.Errorf("获取云端下载任务列表失败: %w", err)
 			}

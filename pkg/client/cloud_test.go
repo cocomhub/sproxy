@@ -312,7 +312,7 @@ func TestCloudDownload_ListTasks(t *testing.T) {
 	ts, _ := cloudTestServer(t)
 	c := NewFileClient(ts.URL)
 
-	tasks, err := c.ListCloudTasks(t.Context(), "")
+	tasks, err := c.ListCloudTasks(t.Context(), "", -1, -1)
 	if err != nil {
 		t.Fatalf("ListCloudTasks: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestCloudDownload_ListTasksFiltered(t *testing.T) {
 	c := NewFileClient(ts.URL)
 
 	// 过滤 completed 状态
-	tasks, err := c.ListCloudTasks(t.Context(), "completed")
+	tasks, err := c.ListCloudTasks(t.Context(), "completed", -1, -1)
 	if err != nil {
 		t.Fatalf("ListCloudTasks with status=completed: %v", err)
 	}

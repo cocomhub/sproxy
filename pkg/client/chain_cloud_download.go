@@ -390,10 +390,12 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			select {
 			case <-timer.C:
 			case <-ctx.Done():
-				timer.Stop()
+				// timer 可能已触发，drain channel 防阻塞
+				if !timer.Stop() {
+					<-timer.C
+				}
 				return ctx.Err()
 			}
-			timer.Stop()
 			if len(storageFullURLs) > 0 {
 				// 使用独立超时的 context 重试，避免原始 context 过期导致重试失败。
 				// 重试条目保留原 URL 在 Entries 中指定的保存文件名（若指定过）。
@@ -551,14 +553,11 @@ func (c *CloudDownloadChain) cleanupRemote(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// isStorageFullError 判断错误消息是否为存储空间不足（大小写不敏感子串匹配）。
+// isStorageFullError 判断任务错误消息是否为存储空间不足（大小写不敏感子串匹配）。
 //
-// 此函数作为后备方案，通过错误消息文本匹配判断存储超限。
-// 未来应使用 HTTP 507 (Insufficient Storage) 状态码进行精确判断。
-//
-// 注意：此方法依赖服务端错误消息字符串，不同版本的服务端可能返回不同格式的
-// 错误消息。建议未来使用结构化错误码（如 HTTP 507 状态码或 JSON 错误体中的
-// error_code 字段）替代文本匹配，以提高健壮性和可维护性。
+// 注意：创建阶段的存储满已由 doJSON 的 HTTP 507 映射为 ErrStorageFull（errors.Is 精确
+// 判断，见 client.go doJSON）。本函数是轮询到的失败任务（r.Error 为任务状态字符串而非
+// error 对象）的兜底判断，两者覆盖不同数据路径，均保留。
 func isStorageFullError(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	return strings.Contains(lower, "storage full") ||

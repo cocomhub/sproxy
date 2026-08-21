@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
@@ -146,13 +147,18 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cl
 	return result.Tasks, nil
 }
 
-// ListCloudTasks 列举云端下载任务。
+// CloudListTasks 列举云端下载任务。
 // status 可选过滤：pending/downloading/completed/failed/cancelled，为空时返回全部。
-func (c *FileClient) ListCloudTasks(ctx context.Context, status string) ([]CloudTask, error) {
+// offset/limit 可选分页：offset<0 或 limit<=0 表示不限制（返回全部）。
+func (c *FileClient) ListCloudTasks(ctx context.Context, status string, offset, limit int) ([]CloudTask, error) {
 	urlPath := "/api/cloud/tasks"
 	params := url.Values{}
 	if status != "" {
 		params.Set("status", status)
+	}
+	if offset >= 0 && limit > 0 {
+		params.Set("offset", strconv.Itoa(offset))
+		params.Set("limit", strconv.Itoa(limit))
 	}
 	if len(params) > 0 {
 		urlPath += "?" + params.Encode()
@@ -298,13 +304,18 @@ func (c *FileClient) CloudGetGroup(ctx context.Context, groupID string) (*CloudG
 }
 
 // CloudListGroups 列举所有下载组。
+// status 可选过滤：pending/downloading/completed/partial/failed/cancelled，为空时返回全部。
 func (c *FileClient) CloudListGroups(ctx context.Context, status string) ([]CloudGroup, error) {
-	apiPath := "/api/cloud/groups"
+	urlPath := "/api/cloud/groups"
+	params := url.Values{}
 	if status != "" {
-		apiPath += "?status=" + url.QueryEscape(status)
+		params.Set("status", status)
+	}
+	if len(params) > 0 {
+		urlPath += "?" + params.Encode()
 	}
 	var groups []CloudGroup
-	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &groups); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &groups); err != nil {
 		return nil, fmt.Errorf("列举下载组: %w", err)
 	}
 	return groups, nil

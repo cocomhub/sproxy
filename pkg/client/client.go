@@ -1129,6 +1129,11 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 		if resp.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("%w: %s", ErrNotFound, err.Error())
 		}
+		// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
+		// （链式操作的存储满退避重试依赖此判断，不再退化为脆弱的字符串匹配）
+		if resp.StatusCode == http.StatusInsufficientStorage {
+			return fmt.Errorf("%w: %s", ErrStorageFull, err.Error())
+		}
 		return err
 	}
 
