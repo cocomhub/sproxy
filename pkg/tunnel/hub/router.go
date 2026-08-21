@@ -45,6 +45,19 @@ type Service struct {
 	Layer string `json:"layer,omitempty"` // 用途标注（debug/info）
 }
 
+// ServicesOf 返回指定节点宣告的服务列表。
+func (rt *RouteTable) ServicesOf(id NodeID) []Service {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	if rt.services == nil {
+		return nil
+	}
+	svcs := rt.services[id]
+	out := make([]Service, len(svcs))
+	copy(out, svcs)
+	return out
+}
+
 // HasService 返回节点是否宣告了指定名称的服务。
 func (rt *RouteTable) HasService(id NodeID, name string) bool {
 	_, ok := rt.lookupService(id, name)

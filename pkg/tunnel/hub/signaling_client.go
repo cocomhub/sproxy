@@ -26,22 +26,26 @@ type HubSignaler struct {
 	baseURL string
 	// authToken 是可选的 Bearer token。
 	authToken string
+	// nodeID 是本节点已注册的节点 ID（信令 from；服务端校验其已注册）。
+	nodeID string
 	// httpClient 用于调用 hub API。
 	httpClient *http.Client
 }
 
 // NewHubSignaler 创建经 hub 信令桥的 Signaler。
-func NewHubSignaler(baseURL, authToken string) *HubSignaler {
+// nodeID 是本节点在 hub 上注册的节点 ID（信令来源，服务端校验已注册）。
+func NewHubSignaler(baseURL, authToken, nodeID string) *HubSignaler {
 	return &HubSignaler{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		authToken:  authToken,
+		nodeID:     nodeID,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
 // post 向 hub 发送一条信令消息。
-func (s *HubSignaler) post(ctx context.Context, kind SignalKind, from, to, sdp, cand string) error {
-	msg := SignalMsg{Kind: kind, From: from, To: to, SDP: sdp, Cand: cand, At: time.Now().UnixMilli()}
+func (s *HubSignaler) post(ctx context.Context, kind SignalKind, to, sdp, cand string) error {
+	msg := SignalMsg{Kind: kind, From: s.nodeID, To: to, SDP: sdp, Cand: cand, At: time.Now().UnixMilli()}
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -90,10 +94,12 @@ func (s *HubSignaler) poll(ctx context.Context, peer string) ([]SignalMsg, error
 
 // SendOffer 发送 Offer SDP。
 func (s *HubSignaler) SendOffer(peer string, sdp string) error {
-	return s.post(context.Background(), SignalOffer, "", peer, sdp, "")
+	return s.post(context.Background(), SignalOffer, peer, sdp, "")
 }
 
 // WaitOffer 阻塞等待 Offer SDP。
+// 仅接受来自指定 peer（From == peer）的消息，拒绝伪装来源的信令，
+// 防止攻击者冒充对端注入伪造的 Offer。
 func (s *HubSignaler) WaitOffer(ctx context.Context, peer string) (string, error) {
 	for {
 		msgs, err := s.poll(ctx, peer)
@@ -101,7 +107,7 @@ func (s *HubSignaler) WaitOffer(ctx context.Context, peer string) (string, error
 			return "", err
 		}
 		for _, m := range msgs {
-			if m.Kind == SignalOffer && m.SDP != "" {
+			if m.From == peer && m.Kind == SignalOffer && m.SDP != "" {
 				return m.SDP, nil
 			}
 		}
@@ -115,10 +121,11 @@ func (s *HubSignaler) WaitOffer(ctx context.Context, peer string) (string, error
 
 // SendAnswer 发送 Answer SDP。
 func (s *HubSignaler) SendAnswer(peer string, sdp string) error {
-	return s.post(context.Background(), SignalAnswer, "", peer, sdp, "")
+	return s.post(context.Background(), SignalAnswer, peer, sdp, "")
 }
 
 // WaitAnswer 阻塞等待 Answer SDP。
+// 仅接受来自指定 peer（From == peer）的消息，拒绝伪装来源的信令。
 func (s *HubSignaler) WaitAnswer(ctx context.Context, peer string) (string, error) {
 	for {
 		msgs, err := s.poll(ctx, peer)
@@ -126,7 +133,7 @@ func (s *HubSignaler) WaitAnswer(ctx context.Context, peer string) (string, erro
 			return "", err
 		}
 		for _, m := range msgs {
-			if m.Kind == SignalAnswer && m.SDP != "" {
+			if m.From == peer && m.Kind == SignalAnswer && m.SDP != "" {
 				return m.SDP, nil
 			}
 		}
