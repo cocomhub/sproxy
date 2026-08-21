@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,7 +36,7 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
 	})
 
-	h := &Handlers{cloudMgr: mgr}
+	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: newTestCfgPtr(dir)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
@@ -44,6 +45,15 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudGetTask)
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudCancelTask)
 	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudDeleteTask)
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.cloudResumeTask)
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
+	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
+	mux.HandleFunc("GET /api/cloud/groups", h.cloudListGroups)
+	mux.HandleFunc("GET /api/cloud/groups/{id}", h.cloudGetGroup)
+	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.cloudCancelGroup)
+	mux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudDeleteGroup)
+	mux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.cloudResumeGroup)
+	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudArchiveGroup)
 	return httptest.NewServer(mux), mgr
 }
 
@@ -101,12 +111,15 @@ func TestCloudHandler_ListTasks(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	var tasks []*CloudTask
-	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+	var listResp struct {
+		Tasks []*CloudTask `json:"tasks"`
+		Total int          `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 2 {
-		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	if len(listResp.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(listResp.Tasks))
 	}
 }
 
@@ -202,12 +215,15 @@ func TestCloudHandler_ListTasksFilterByStatus(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var tasks []*CloudTask
-	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+	var listResp struct {
+		Tasks []*CloudTask `json:"tasks"`
+		Total int          `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected 1 completed task, got %d", len(tasks))
+	if len(listResp.Tasks) != 1 {
+		t.Fatalf("expected 1 completed task, got %d", len(listResp.Tasks))
 	}
 }
 
@@ -256,16 +272,8 @@ func TestCloudHandler_PathTraversalBlocked(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-
-	var task CloudTask
-	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if strings.Contains(task.Filename, "/") || strings.Contains(task.Filename, "\\") {
-		t.Fatalf("filename should be sanitized, got %q", task.Filename)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unsafe filename, got %d", resp.StatusCode)
 	}
 }
 
@@ -424,11 +432,11 @@ func TestCloudHandler_BatchCreateDownload_PathTraversal(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
 		t.Fatal(err)
 	}
-	if batchResp.Tasks[0].Status != "pending" && batchResp.Tasks[0].Status != "downloading" {
-		t.Fatalf("expected 'pending' or 'downloading', got %q", batchResp.Tasks[0].Status)
+	if batchResp.Tasks[0].Status != "failed" {
+		t.Fatalf("expected 'failed' for unsafe filename, got %q", batchResp.Tasks[0].Status)
 	}
-	if strings.Contains(batchResp.Tasks[0].Filename, "/") || strings.Contains(batchResp.Tasks[0].Filename, "\\") {
-		t.Fatalf("filename should be sanitized, got %q", batchResp.Tasks[0].Filename)
+	if batchResp.Tasks[0].Error == "" {
+		t.Fatal("expected error message for unsafe filename")
 	}
 }
 
@@ -577,5 +585,287 @@ func TestCloudHandler_DeleteNonexistent(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected 404 for nonexistent task, got %d", resp.StatusCode)
+	}
+}
+
+// --- 组路由与 resume 路由 ---
+
+func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
+	contentA := []byte("handler group A content")
+	contentB := []byte("handler group B content")
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(contentA) }))
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(contentB) }))
+	defer srvA.Close()
+	defer srvB.Close()
+
+	ts, mgr := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 创建组
+	body, _ := json.Marshal(map[string]any{
+		"name": "handler-group",
+		"urls": []map[string]string{
+			{"url": srvA.URL, "filename": "a.bin"},
+			{"url": srvB.URL, "filename": "b.bin"},
+		},
+	})
+	resp, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 creating group, got %d", resp.StatusCode)
+	}
+	var group CloudTaskGroup
+	if err2 := json.NewDecoder(resp.Body).Decode(&group); err2 != nil {
+		t.Fatal(err2)
+	}
+	resp.Body.Close()
+	if len(group.TaskIDs) != 2 {
+		t.Fatalf("expected 2 tasks in group, got %d", len(group.TaskIDs))
+	}
+
+	// 等待子任务完成
+	for _, tid := range group.TaskIDs {
+		waitTaskDone(t, mgr, tid)
+	}
+
+	// 组详情
+	resp, err = http.Get(ts.URL + "/api/cloud/groups/" + group.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 getting group, got %d", resp.StatusCode)
+	}
+	var detail struct {
+		Group *CloudTaskGroup `json:"group"`
+		Tasks []*CloudTask    `json:"tasks"`
+	}
+	if err2 := json.NewDecoder(resp.Body).Decode(&detail); err2 != nil {
+		t.Fatal(err2)
+	}
+	resp.Body.Close()
+	if detail.Group == nil || detail.Group.Status != "completed" {
+		t.Fatalf("expected completed group, got %+v", detail.Group)
+	}
+	if len(detail.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks in detail, got %d", len(detail.Tasks))
+	}
+
+	// 组列表
+	resp, err = http.Get(ts.URL + "/api/cloud/groups")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listResp struct {
+		Groups []CloudTaskGroup `json:"groups"`
+		Total  int              `json:"total"`
+	}
+	if err2 := json.NewDecoder(resp.Body).Decode(&listResp); err2 != nil {
+		t.Fatal(err2)
+	}
+	resp.Body.Close()
+	if len(listResp.Groups) != 1 {
+		t.Fatalf("expected 1 group in list, got %d", len(listResp.Groups))
+	}
+
+	// 组归档（按子任务目录收集已完成文件）
+	archiveBody := `{"archive_name": "handler-group.tar.gz"}`
+	resp, err = http.Post(ts.URL+"/api/cloud/groups/"+group.ID+"/archive", "application/json", strings.NewReader(archiveBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 archiving group, got %d", resp.StatusCode)
+	}
+	var arch CloudArchiveResult
+	if err2 := json.NewDecoder(resp.Body).Decode(&arch); err2 != nil {
+		t.Fatal(err2)
+	}
+	resp.Body.Close()
+	if !arch.Success || arch.File == "" || arch.TaskCount != 2 {
+		t.Fatalf("unexpected archive result: %+v", arch)
+	}
+	// 归档文件真实存在
+	archivePath := filepath.Join(mgr.uploadsDir, filepath.FromSlash(arch.File))
+	if _, err2 := os.Stat(archivePath); err2 != nil {
+		t.Fatalf("expected archive file on disk: %v", err2)
+	}
+
+	// archive_file 已落库到真实组对象
+	resp, err = http.Get(ts.URL + "/api/cloud/groups/" + group.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var detail2 struct {
+		Group *CloudTaskGroup `json:"group"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&detail2)
+	resp.Body.Close()
+	if detail2.Group == nil || detail2.Group.ArchiveFile != arch.File {
+		t.Fatalf("expected archive_file %q persisted, got %q", arch.File, detail2.Group.ArchiveFile)
+	}
+}
+
+func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
+	srv404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv404.Close()
+
+	ts, mgr := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 提交一个必然失败的异步任务
+	body := strings.NewReader(`{"url": "` + srv404.URL + `"}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var task CloudTask
+	if err2 := json.NewDecoder(resp.Body).Decode(&task); err2 != nil {
+		t.Fatal(err2)
+	}
+	resp.Body.Close()
+
+	// 等待失败
+	waitTaskDone(t, mgr, task.ID)
+	if cur, _ := mgr.SnapshotTask(task.ID); cur.Status != "failed" {
+		t.Fatalf("expected failed task, got %q", cur.Status)
+	}
+
+	// resume 失败任务 → 200
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/resume", "application/json", strings.NewReader(`{"force": true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 resuming failed task, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// resume 不存在任务 → 404
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/nonexistent/resume", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 resuming nonexistent task, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit 验证批量/组上限来自服务端配置
+// MaxBatchURLs（而非硬编码 100）：配置为 2 时 3 个 URL 被 400 拒绝，2 个 URL 正常通过。
+func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		MaxBatchURLs:  2,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
+	}
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	t.Cleanup(func() { mgr.Close() })
+	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
+	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	urlsArrayJSON := func(n int) string {
+		var parts []string
+		for i := range n {
+			parts = append(parts, fmt.Sprintf(`{"url": "https://example.com/f%d.zip"}`, i))
+		}
+		return `[` + strings.Join(parts, ",") + `]`
+	}
+
+	// 批量：3 个 URL 超过配置上限 2 → 400
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", strings.NewReader(`{"urls": `+urlsArrayJSON(3)+`}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("batch 3 URLs: expected 400, got %d (%s)", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "maximum 2 URLs per batch") {
+		t.Fatalf("expected error mentioning limit 2, got: %s", body)
+	}
+
+	// 批量：2 个 URL 未超限 → 200
+	resp2, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", strings.NewReader(`{"urls": `+urlsArrayJSON(2)+`}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("batch 2 URLs: expected 200, got %d", resp2.StatusCode)
+	}
+
+	// 组：3 个 URL 超过配置上限 2 → 400
+	resp3, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", strings.NewReader(`{"name":"g","urls": `+urlsArrayJSON(3)+`}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body3, _ := io.ReadAll(resp3.Body)
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusBadRequest {
+		t.Fatalf("group 3 URLs: expected 400, got %d (%s)", resp3.StatusCode, body3)
+	}
+	if !strings.Contains(string(body3), "maximum 2 URLs per group") {
+		t.Fatalf("expected error mentioning limit 2, got: %s", body3)
+	}
+}
+
+// TestCloudHandler_CreateGroup_NormalizesURL 回归测试：cloudCreateGroup 校验后必须把
+// 规范化后的 URL/Filename 传给 SubmitAndStartGroup。旧代码丢弃规范化结果，组路径用
+// 原始 URL 做去重与文件名推导，与单条/批量路径不一致（同一内容不同拼写在组路径会
+// 生成重复下载、组内冲突判定与 UI/CLI 本地预检偶发不一致）。
+func TestCloudHandler_CreateGroup_NormalizesURL(t *testing.T) {
+	ts, mgr := setupCloudTestServer(t)
+	defer ts.Close()
+
+	// 大写 scheme 应被规范化为小写 http://；端口 1 使下载连接被拒、快速失败，
+	// 不依赖外部网络（断言只看任务创建时的 URL）
+	body := strings.NewReader(`{"name":"g1","urls":[{"url":"HTTP://127.0.0.1:1/file.zip"}]}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", resp.StatusCode, respBody)
+	}
+
+	var group CloudTaskGroup
+	if err := json.Unmarshal(respBody, &group); err != nil {
+		t.Fatal(err)
+	}
+	if len(group.TaskIDs) == 0 {
+		t.Fatal("expected group to have tasks")
+	}
+
+	// 组内子任务的 URL 应为规范化后的值
+	mgr.mu.RLock()
+	var taskURL string
+	for _, tid := range group.TaskIDs {
+		if t2, ok := mgr.tasks[tid]; ok {
+			taskURL = t2.URL
+			break
+		}
+	}
+	mgr.mu.RUnlock()
+	if taskURL != "http://127.0.0.1:1/file.zip" {
+		t.Fatalf("expected normalized URL %q, got %q", "http://127.0.0.1:1/file.zip", taskURL)
 	}
 }

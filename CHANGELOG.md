@@ -8,6 +8,31 @@ SPDX-License-Identifier: Apache-2.0
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格。
 版本号遵循 [SemVer 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+- 云端离线下载任务组：`CloudTask` 增加 `group_id`，组持久化到 `.__downloads__/groups/`，重启后自动恢复（含孤儿任务重建最小组）。
+- 响应体读取空闲超时 `cloud_download_idle_timeout`（默认 1m），远端停流不再永久挂起。
+- 全量下载也写入 `.partial` 文件：任意中断（网络/超时/进程重启）后均可 Range 续传。
+- 排队中的下载任务可取消（`cancelFuncs` 在等信号量前注册），`Close()` 不再因排队任务卡死。
+- 任务恢复支持 `cancelled` 状态；`force=false` 真正走 Range 续传（不再把 `.partial` 改名成目标文件）。
+- Web UI 云端下载新增"创建组"按钮，任务/组列表统一 3s 轮询。
+- 配置键 `cloud_download_timeout`/`cloud_max_retries`/`cloud_retry_delay` 从 `Config` 接线到 `CloudDownloadManager`（此前未生效），默认值：30m / 10 次 / 10s。
+- 任务/组列表分页：`ListTasks`/`ListGroups` 支持 `offset`/`limit`（CreatedAt 降序 + ID tie-break），API 返回 `{tasks, total}` 容器；SDK 新增 `WithTotal` 变体，CLI `list` 增加 `--offset`/`--limit`。
+- 云归档加固：三处归档（单任务/批量/组）`O_EXCL` 防覆盖（同名 409），新增 `cloud_archive_max_bytes` 总量限制，打包前 `TryReserve` 配额预占、打包后按实际大小对账。
+- cancelled 语义统一为失败：batch/group 链与 CLI `wait` 均把取消计入失败并等所有任务终态后整体报错；`submitTasks`/`submitGroup` 幂等（提交阶段崩溃恢复不重复提交）。
+- CLI 易用性：`list` 展示 ETag/GroupID 字段，`download`/`download-archive`/组 `download` 增加 `--output-dir`，`delete`/`delete-group` 增加 `--yes` 确认，task/group cancel 404 幂等统一，`--timeout 0` 表示不限时。
+- Web UI：任务清理失败不再静默（toast 提示），链式下载防重入 + 组失败保留供 resume，`validateEntries` 改 Map 防原型键误判，host 含空格/非法字符的 URL 双端一致拒绝。
+
+### Fixed
+- 下载卡住：默认单次尝试超时 + 空闲超时兜底，信号量不再被挂死任务占满。
+- 重试语义：超时/网络/5xx 自动重试（续传），4xx/SSRF 等确定性失败不重试；用户取消不重试且状态不被 `failTask` 覆盖。
+- 存储账本：以 `ReservedSize` 为唯一权威，完成/取消/删除/清理按实际预留释放并归零，消除每个任务约 1 GiB 的占位泄漏；重启后按磁盘扫描结果重算，避免多退/少退。
+- 失败任务保留 `.partial` 供续传（此前 `failTask` 用 `RemoveAll` 连同部分文件一起删除）。
+- 组归档改为按子任务目录收集已完成文件（此前读不存在的 `.__cloud__/<groupID>/` 恒报错），`archive_file` 落库到真实组对象。
+- 组状态机修正（completed/partial/failed/cancelled/pending/downloading），`CancelGroup` 不再强制把含已完成任务的组改为 cancelled。
+- 任务删除竞态：删除后完成的下载不再触碰存储/checksum/状态。
+
 ## [0.3.0] - 2026-06-04
 
 ### Added

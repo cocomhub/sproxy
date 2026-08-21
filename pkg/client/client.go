@@ -27,6 +27,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -1128,6 +1129,11 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 		if resp.StatusCode == http.StatusNotFound {
 			return fmt.Errorf("%w: %s", ErrNotFound, err.Error())
 		}
+		// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
+		// （链式操作的存储满退避重试依赖此判断，不再退化为脆弱的字符串匹配）
+		if resp.StatusCode == http.StatusInsufficientStorage {
+			return fmt.Errorf("%w: %s", ErrStorageFull, err.Error())
+		}
 		return err
 	}
 
@@ -1187,6 +1193,54 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 	}, nil
 }
 
+// CloudDownloadGroupChain 云端组下载一键链式操作：创建组 → 等待完成 → 打包 → 下载到本地 → 清理远端组。
+// 与 CloudDownloadChain 不同：提交阶段创建命名组（文件名冲突预检在调用方做），
+// 等待阶段轮询组状态，归档阶段调组级打包，清理阶段删除整个组。
+func (c *FileClient) CloudDownloadGroupChain(ctx context.Context,
+	groupName string, entries []cloudfilename.Entry, archiveName, localDir string,
+	opts ...ChainOption) (*ChainResult, error) {
+	options := defaultChainOptions()
+	for _, o := range opts {
+		o(&options)
+	}
+
+	runner, err := NewCloudDownloadGroupChain(c, groupName, entries, archiveName, localDir, options)
+	if err != nil {
+		return nil, fmt.Errorf("创建云端组下载链失败: %w", err)
+	}
+
+	if c.chainManager != nil {
+		if err := c.chainManager.RunWithProgress(ctx, runner, options.progressFn); err != nil {
+			return nil, err
+		}
+	} else {
+		reportFn := func(ctx context.Context, info ProgressInfo) {
+			c.logger.DebugContext(ctx, "链式操作进度", "phase", info.Phase, "msg", info.Message, "current", info.Current, "total", info.Total)
+			if options.progressFn != nil {
+				options.progressFn(ctx, info)
+			}
+		}
+		if err := runner.Run(ctx, reportFn); err != nil {
+			return nil, err
+		}
+	}
+
+	extra := map[string]any{
+		"local_path": runner.LocalPath,
+		"keep_files": runner.KeepFiles,
+	}
+	if runner.GroupID != "" {
+		extra["group_id"] = runner.GroupID
+	}
+	return &ChainResult{
+		ChainID: runner.ChainID,
+		Phase:   runner.Phase(),
+		Status:  runner.Status(),
+		raw:     runner,
+		extra:   extra,
+	}, nil
+}
+
 // ResumeChain 从缓存恢复链式操作。
 func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainResult, error) {
 	if c.chainManager == nil {
@@ -1213,6 +1267,17 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 		}
 		opts.keepFiles = cdc.KeepFiles
 	}
+	// CloudDownloadGroupChain 恢复同样需要取回持久化的轮询/超时/keepFiles 选项，
+	// 否则中断的组链式操作恢复后会退回默认值（3s/30m/false）。
+	if gdc, ok := runner.(*CloudDownloadGroupChain); ok {
+		if gdc.PollInterval > 0 {
+			opts.pollInterval = gdc.PollInterval
+		}
+		if gdc.Timeout > 0 {
+			opts.timeout = gdc.Timeout
+		}
+		opts.keepFiles = gdc.KeepFiles
+	}
 	runner.SetOptions(opts)
 
 	if err := c.chainManager.Run(ctx, runner); err != nil {
@@ -1223,6 +1288,13 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 	if cdc, ok := runner.(*CloudDownloadChain); ok {
 		extra["local_path"] = cdc.LocalPath
 		extra["keep_files"] = cdc.KeepFiles
+	}
+	if gdc, ok := runner.(*CloudDownloadGroupChain); ok {
+		extra["local_path"] = gdc.LocalPath
+		extra["keep_files"] = gdc.KeepFiles
+		if gdc.GroupID != "" {
+			extra["group_id"] = gdc.GroupID
+		}
 	}
 
 	return &ChainResult{

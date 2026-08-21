@@ -55,3 +55,22 @@ tls:
 # versioning:
 #   enabled: true
 #   max_versions: 10                # 保留最近的 N 个版本，超出自动清理
+
+# 云端离线下载（多任务/任务组）配置
+# cloud_sync_threshold: 20971520            # 同步下载阈值（默认 20 MiB；当前 handler 提交时大小未知恒异步，字段保留供未来按大小同步）
+# cloud_max_concurrent: 3                   # 最大并发下载数
+# cloud_max_batch_urls: 100                 # 批量/组下载单次最大 URL 数，超过服务端返回 400（默认 100）
+# cloud_downloader: "http"                  # 云端下载器名称（默认 http；当前仅内置 http 实现）
+# cloud_task_ttl: "24h"                     # 完成任务保留时间，过期自动清理
+# cloud_failed_task_ttl: "1h"               # 失败/取消任务保留时间
+# cloud_download_timeout: "30m"             # 单次下载尝试整体超时（超时后自动重试续传）
+# cloud_download_idle_timeout: "1m"         # 响应体读取空闲超时：超过该时长未收到数据即中断本次尝试
+# cloud_max_retries: 10                     # 瞬时失败（网络/5xx/超时）最大重试次数
+# cloud_retry_delay: "10s"                  # 重试间隔
+# cloud_download_allow_private: false       # 允许下载私有 IP 地址（默认关闭，SSRF 防护）
+
+# 云端下载任务归档（tar.gz）加固：
+# cloud_archive_max_bytes 限制单次云归档打包的原始文件大小总和（字节），0 或不填=不限制。
+# 无论是否设置，都受 max_storage_bytes（TryReserve）兜底；归档文件计入 __cloud_archives__/ 目录空间。
+# 同名归档文件已存在时返回 409（O_EXCL 防覆盖）；打包完成后按磁盘实际大小对账预留配额。
+# cloud_archive_max_bytes: 10737418240   # 10 GiB 示例

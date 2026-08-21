@@ -110,6 +110,20 @@ max_header_bytes: 1048576
 ```
 
 
+## 云端离线下载（多任务 / 任务组）
+
+sproxy 服务端可代替客户端从外部 URL 下载文件（云端离线下载），支持单任务、批量任务与任务组：
+
+- **单任务 / 批量**：`POST /api/cloud/download`、`POST /api/cloud/download/batch`，提交后任务进入服务端队列异步下载（客户端轮询 `GET /api/cloud/tasks` 查看进度）。
+- **任务组**：`POST /api/cloud/groups` 将多个 URL 作为一个组提交，组级支持状态聚合、取消、恢复、打包归档（`GET/POST/DELETE /api/cloud/groups[/{id}...]`）。
+- **断点续传**：下载写入 `.partial` 文件，网络中断/超时后自动重试续传；最终失败的任务保留 `.partial`，可通过 `POST /api/cloud/tasks/{id}/resume`（`{"force":false}` 续传 / `{"force":true}` 重下）恢复。进程重启后 `pending`/`downloading` 任务自动恢复。
+- **可靠性**：默认单次尝试超时 30m、响应体空闲超时 1m、最多重试 10 次（间隔 10s）；瞬时错误（网络/5xx/超时）自动重试，4xx/SSRF 等确定性错误不重试；排队中的任务可取消；存储账本按实际大小结算，不泄漏占位空间。
+- **Web UI**：云端下载弹窗含任务/组双 Tab、进度条、恢复/取消/打包按钮，输入多行 URL 可"创建组"。
+- **CLI**：`sclient cloud-download`（链式）、`submit/wait/fetch/resume` 及 `group/group-list/group-archive/group-cancel/group-resume` 子命令。
+
+相关配置键（见 `config.example.yaml`）：`cloud_max_concurrent`、`cloud_max_batch_urls`、`cloud_sync_threshold`、`cloud_download_timeout`、`cloud_download_idle_timeout`、`cloud_max_retries`、`cloud_retry_delay`、`cloud_task_ttl`、`cloud_failed_task_ttl`、`cloud_download_allow_private`、`cloud_downloader` 等。
+
+
 ## 典型用法
 
 - 查看版本

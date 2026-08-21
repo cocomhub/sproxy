@@ -102,7 +102,7 @@ func (f *TextFormatter) PrintCloudTaskList(tasks []cloudTaskInfo) {
 		fmt.Fprintln(f.w, "暂无云端下载任务")
 		return
 	}
-	fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %s\n", "任务ID", "文件名", "状态", "URL")
+	fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %-20s  %-8s  %s\n", "任务ID", "文件名", "状态", "ETag", "组ID", "URL")
 	for _, t := range tasks {
 		shortID := t.ID
 		if len(shortID) > 36 {
@@ -117,11 +117,22 @@ func (f *TextFormatter) PrintCloudTaskList(tasks []cloudTaskInfo) {
 			pct := t.Downloaded * 100 / t.TotalSize
 			status = fmt.Sprintf("%s (%d%%)", t.Status, pct)
 		}
-		shortURL := t.URL
-		if len(shortURL) > 50 {
-			shortURL = shortURL[:47] + "..."
+		etag := t.ETag
+		if len(etag) > 20 {
+			etag = etag[:17] + "..."
 		}
-		fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %s\n", shortID, shortName, status, shortURL)
+		if etag == "" {
+			etag = "-"
+		}
+		groupID := t.GroupID
+		if groupID == "" {
+			groupID = "-"
+		}
+		shortURL := t.URL
+		if len(shortURL) > 40 {
+			shortURL = shortURL[:37] + "..."
+		}
+		fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %-20s  %-8s  %s\n", shortID, shortName, status, etag, groupID, shortURL)
 	}
 }
 

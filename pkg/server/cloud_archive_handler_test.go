@@ -12,12 +12,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// setupCloudArchiveTest 创建归档 handler 测试所需的临时服务器、CloudDownloadManager 和临时目录。
-func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManager, string) {
+// newTestCfgPtr 返回指向默认配置（uploadsDir=dir）的 atomic.Pointer[Config]，供 handler 测试写入 cfgPtr。
+func newTestCfgPtr(dir string) *atomic.Pointer[Config] {
+	var p atomic.Pointer[Config]
+	cfg := Default()
+	cfg.UploadsDir = dir
+	p.Store(cfg)
+	return &p
+}
+
+func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest.Server, *CloudDownloadManager, string) {
 	t.Helper()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
@@ -34,12 +43,26 @@ func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManage
 		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
 	})
 
-	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
+	var cfgPtr atomic.Pointer[Config]
+	serverCfg := Default()
+	serverCfg.UploadsDir = dir
+	if modify != nil {
+		modify(serverCfg)
+	}
+	cfgPtr.Store(serverCfg)
+
+	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: &cfgPtr}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
 	mux.HandleFunc("POST /api/cloud/archive", h.cloudArchiveBatch)
 	return httptest.NewServer(mux), mgr, dir
+}
+
+// setupCloudArchiveTest 创建归档 handler 测试所需的临时服务器、CloudDownloadManager 和临时目录。
+func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManager, string) {
+	t.Helper()
+	return setupCloudArchiveTestWithCfg(t, nil)
 }
 
 // createCompletedTask 创建一个已完成的任务，并在 __cloud__/<id>/ 下创建测试文件。
@@ -359,4 +382,98 @@ func TestCloudArchive_PreservesMTime(t *testing.T) {
 		t.Errorf("tar header ModTime %v differs from original %v (diff: %v)",
 			header.ModTime, originalMTime, diff)
 	}
+}
+
+// TestCloudArchive_SameNameConflict 验证同名归档已存在时返回 409（O_EXCL 防覆盖）。
+func TestCloudArchive_SameNameConflict(t *testing.T) {
+	ts, mgr, _ := setupCloudArchiveTest(t)
+	defer ts.Close()
+
+	id := createCompletedTask(t, mgr, "test.zip")
+
+	// 第一次归档成功
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
+		strings.NewReader(`{"archive_name":"conflict.tar.gz"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected first archive 200, got %d", resp.StatusCode)
+	}
+
+	// 同名再次归档 → 409
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
+		strings.NewReader(`{"archive_name":"conflict.tar.gz"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 on same-name archive, got %d", resp.StatusCode)
+	}
+}
+
+// TestCloudArchive_SizeLimit 验证超过 cloud_archive_max_bytes 时返回 400。
+func TestCloudArchive_SizeLimit(t *testing.T) {
+	ts, mgr, _ := setupCloudArchiveTestWithCfg(t, func(c *Config) {
+		c.CloudArchiveMaxBytes = 5 // 极小额限制，任何文件都超限
+	})
+	defer ts.Close()
+
+	id := createCompletedTask(t, mgr, "test.zip")
+
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
+		strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 on size limit, got %d", resp.StatusCode)
+	}
+
+	var result CloudArchiveResult
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	if result.Success {
+		t.Fatal("expected success=false")
+	}
+	if !strings.Contains(result.Message, "cloud_archive_max_bytes") {
+		t.Fatalf("expected message to mention cloud_archive_max_bytes, got %q", result.Message)
+	}
+}
+
+// TestCloudArchive_QuotaRejected 验证存储配额不足时返回 507 且不泄漏预留。
+func TestCloudArchive_QuotaRejected(t *testing.T) {
+	ts, mgr, dir := setupCloudArchiveTest(t)
+	defer ts.Close()
+
+	id := createCompletedTask(t, mgr, "test.zip")
+
+	// 占用配额至只剩少量余量（createCompletedTask 的 CreateTask 已预留 100 字节）：
+	// 使归档预占（文件大小 + 100MB）必然超限。预留 MaxBytes()-1100 后剩余 ~1000 字节，
+	// 归档预占失败后这 1000 字节仍可用——验证 507 时账本未被拖高（预占被正确释放）。
+	sm := mgr.storage
+	reserved := sm.MaxBytes() - 1100
+	if err := sm.TryReserve(reserved, CategoryCloud); err != nil {
+		t.Fatal(err)
+	}
+	defer sm.Release(reserved, CategoryCloud)
+
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
+		strings.NewReader(`{"archive_name":"quota.tar.gz"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInsufficientStorage {
+		t.Fatalf("expected 507 on quota, got %d", resp.StatusCode)
+	}
+
+	// 预留未泄漏：507 后仍可预留 100 字节（若预占泄漏，此处会再超限）
+	if err := sm.TryReserve(100, CategoryCloud); err != nil {
+		t.Fatalf("expected ledger not leaked after 507, got: %v", err)
+	}
+	sm.Release(100, CategoryCloud)
+	_ = dir
 }

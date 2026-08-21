@@ -40,56 +40,86 @@
   --stats-summary: #f0f8ff;
 }
 
-/* 暗色模式（系统偏好） */
+/* 暗色模式（系统偏好）—— 改进对比度，确保 WCAG AA 合规 */
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg-page: #1a1a2e;
-    --bg-container: #16213e;
-    --bg-auth: #1a1a3e;
-    --bg-hover: #1e2d4a;
+    --bg-page: #12122a;
+    --bg-container: #1a1a3e;
+    --bg-auth: #1e1e45;
+    --bg-hover: #252550;
     --bg-batch: #2a2a1e;
-    --bg-dir: #1e2d4a;
-    --text-primary: #e0e0e0;
-    --text-secondary: #aaa;
-    --text-muted: #777;
-    --text-link: #5a9fd4;
-    --border-color: #2a3a5a;
-    --border-input: #3a4a6a;
-    --btn-primary-bg: #3a7bcd;
-    --btn-primary-hover: #4a8bdd;
-    --btn-secondary-bg: #4a5a6d;
-    --btn-secondary-hover: #5a6a7d;
-    --toast-success: #27ae60;
-    --modal-overlay: rgba(0,0,0,.7);
-    --modal-bg: #1e2d4a;
-    --shadow: rgba(0,0,0,.3);
-    --stats-summary: #1a2a4a;
+    --bg-dir: #202048;
+    --text-primary: #e8e8f0;
+    --text-secondary: #c0c4d0;
+    --text-muted: #989aad;
+    --text-link: #6db3f0;
+    --border-color: #3a3a60;
+    --border-input: #4a4a70;
+    /* 以下按钮/提示色均按白字 ≥4.5:1 校准（WCAG AA），通过 python 计算相对亮度验证 */
+    --btn-primary-bg: #3a6ea5;
+    --btn-primary-hover: #4476ab;
+    --btn-secondary-bg: #5a6a7d;
+    --btn-secondary-hover: #64758a;
+    --btn-danger-bg: #b84040;
+    --btn-danger-hover: #c04a4a;
+    --btn-warning-bg: #9c6a10;
+    --btn-warning-hover: #9a6a1e;
+    --btn-share-bg: #2e6f70;
+    --btn-share-hover: #387b7c;
+    --btn-success-hover: #1a6b3c;
+    --toast-success: #1a6b3c;
+    --toast-error: #c0392b;
+    --toast-warning: #8a5a0e;
+    --toast-info: #2b6cb5;
+    --progress-bg: #3a3a60;
+    --progress-bar: #5a9fd4;
+    --modal-overlay: rgba(0,0,0,.65);
+    --modal-bg: #1e1e45;
+    --shadow: rgba(0,0,0,.4);
+    --tab-active: #5a9fd4;
+    --tab-border: #3a3a60;
+    --stats-summary: #1a1a3e;
   }
 }
 
 /* 手动切换暗色模式 */
 [data-theme="dark"] {
-  --bg-page: #1a1a2e;
-  --bg-container: #16213e;
-  --bg-auth: #1a1a3e;
-  --bg-hover: #1e2d4a;
+  --bg-page: #12122a;
+  --bg-container: #1a1a3e;
+  --bg-auth: #1e1e45;
+  --bg-hover: #252550;
   --bg-batch: #2a2a1e;
-  --bg-dir: #1e2d4a;
-  --text-primary: #e0e0e0;
-  --text-secondary: #aaa;
-  --text-muted: #777;
-  --text-link: #5a9fd4;
-  --border-color: #2a3a5a;
-  --border-input: #3a4a6a;
-  --btn-primary-bg: #3a7bcd;
-  --btn-primary-hover: #4a8bdd;
-  --btn-secondary-bg: #4a5a6d;
-  --btn-secondary-hover: #5a6a7d;
-  --toast-success: #27ae60;
-  --modal-overlay: rgba(0,0,0,.7);
-  --modal-bg: #1e2d4a;
-  --shadow: rgba(0,0,0,.3);
-  --stats-summary: #1a2a4a;
+  --bg-dir: #202048;
+  --text-primary: #e8e8f0;
+  --text-secondary: #c0c4d0;
+  --text-muted: #989aad;
+  --text-link: #6db3f0;
+  --border-color: #3a3a60;
+  --border-input: #4a4a70;
+  /* 以下按钮/提示色均按白字 ≥4.5:1 校准（WCAG AA），与 @media 暗色块保持一致 */
+  --btn-primary-bg: #3a6ea5;
+  --btn-primary-hover: #4476ab;
+  --btn-secondary-bg: #5a6a7d;
+  --btn-secondary-hover: #64758a;
+  --btn-danger-bg: #b84040;
+  --btn-danger-hover: #c04a4a;
+  --btn-warning-bg: #9c6a10;
+  --btn-warning-hover: #9a6a1e;
+  --btn-share-bg: #2e6f70;
+  --btn-share-hover: #387b7c;
+  --btn-success-hover: #1a6b3c;
+  --toast-success: #1a6b3c;
+  --toast-error: #c0392b;
+  --toast-warning: #8a5a0e;
+  --toast-info: #2b6cb5;
+  --progress-bg: #3a3a60;
+  --progress-bar: #5a9fd4;
+  --modal-overlay: rgba(0,0,0,.65);
+  --modal-bg: #1e1e45;
+  --shadow: rgba(0,0,0,.4);
+  --tab-active: #5a9fd4;
+  --tab-border: #3a3a60;
+  --stats-summary: #1a1a3e;
 }
 
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 0; padding: 20px; background: var(--bg-page); color: var(--text-primary); }
@@ -141,3 +171,21 @@ tr:hover td { background: var(--bg-hover); }
 #batch-toolbar { display:none; margin-bottom:8px; padding:8px 12px; background:var(--bg-batch); border-radius:4px; align-items:center; gap:8px; flex-wrap:wrap; }
 #batch-toolbar.show { display:flex; }
 .check-col { width:36px; text-align:center; }
+
+/* 预览遮罩层 — 与 modal-overlay CSS 变量保持一致，不受 JS 内联硬编码影响 */
+.modal-overlay {
+  background: rgba(0,0,0,.45);
+  box-shadow: 0 4px 24px rgba(0,0,0,.5);
+}
+@media (prefers-color-scheme: dark) {
+  .modal-overlay { background: rgba(0,0,0,.65); }
+}
+[data-theme="dark"] .modal-overlay { background: rgba(0,0,0,.65); }
+/* 图片预览遮罩透明度略高于文字预览遮罩，确保图片全屏时背景更暗 */
+.modal-overlay-img {
+  background: rgba(0,0,0,.8);
+}
+@media (prefers-color-scheme: dark) {
+  .modal-overlay-img { background: rgba(0,0,0,.85); }
+}
+[data-theme="dark"] .modal-overlay-img { background: rgba(0,0,0,.85); }

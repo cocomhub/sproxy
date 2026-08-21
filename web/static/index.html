@@ -25,7 +25,7 @@
     <label class="btn btn-primary" for="file-input" id="upload-btn-label">上传文件</label>
     <input type="file" id="file-input" multiple style="display:none">
     <button type="button" id="refresh-btn" class="btn btn-secondary">刷新列表</button>
-    <input type="text" id="search-input" placeholder="搜索文件…" aria-label="搜索文件" style="padding:6px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px;flex:1;min-width:160px;">
+    <input type="text" id="search-input" placeholder="搜索文件…" aria-label="搜索文件" style="padding:6px 10px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;flex:1;min-width:160px;">
     <button type="button" id="search-btn" class="btn btn-primary">搜索</button>
     <button type="button" class="btn btn-secondary" id="clear-search-btn" style="display:none;">清除搜索</button>
     <button type="button" id="stats-btn" class="btn btn-secondary">监控</button>
@@ -40,9 +40,9 @@
     <button type="button" id="batch-archive-btn" class="btn btn-primary btn-sm">下载归档</button>
     <button type="button" id="batch-clear-btn" class="btn btn-secondary btn-sm">取消选择</button>
   </div>
-  <div id="dir-bar" style="margin-bottom:12px;padding:6px 12px;background:#f0f4ff;border-radius:4px;font-size:14px;display:flex;align-items:center;gap:8px;">
+  <div id="dir-bar" style="margin-bottom:12px;padding:6px 12px;background:var(--bg-auth);border-radius:4px;font-size:14px;display:flex;align-items:center;gap:8px;">
     <strong>目录：</strong><span id="dir-breadcrumb" style="flex:1;"><button type="button" class="breadcrumb-btn" id="breadcrumb-root-btn">/</button></span>
-    <input type="text" id="new-dir-name" placeholder="新建目录名" aria-label="新建目录名" style="padding:4px 8px;border:1px solid #ccc;border-radius:4px;font-size:13px;width:150px;">
+    <input type="text" id="new-dir-name" placeholder="新建目录名" aria-label="新建目录名" style="padding:4px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;width:150px;">
     <button type="button" id="mkdir-btn" class="btn btn-sm btn-primary">新建</button>
   </div>
   <div id="upload-progress-container"></div>
@@ -57,12 +57,12 @@
   <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:500px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
       <h3 style="margin:0;font-size:16px;">服务器监控</h3>
-      <button type="button" id="stats-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1;">&times;</button>
+      <button type="button" id="stats-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
     </div>
-    <div id="stats-tab-bar" style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid #e0e0e0;">
-      <button type="button" id="stats-tab" class="stats-tab active" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid #4a90d9;margin-bottom:-2px;font-size:14px;color:#333;">统计</button>
-      <button type="button" id="config-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:#666;">配置</button>
-      <button type="button" id="hub-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:#666;">Hub</button>
+    <div id="stats-tab-bar" style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid var(--tab-border);">
+      <button type="button" id="stats-tab" class="stats-tab active" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid var(--tab-active);margin-bottom:-2px;font-size:14px;color:var(--text-primary);">统计</button>
+      <button type="button" id="config-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">配置</button>
+      <button type="button" id="hub-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Hub</button>
     </div>
     <div id="stats-panel"></div>
     <div id="config-panel" style="display:none;"></div>
@@ -79,15 +79,24 @@
   <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:600px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
       <h3 style="margin:0;font-size:16px;">云端下载</h3>
-      <button type="button" id="cloud-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1;">&times;</button>
+      <button type="button" id="cloud-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
     </div>
-    <div style="display:flex;gap:8px;margin-bottom:12px;">
-      <textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>
+    <div class="cloud-url-row" style="display:flex;gap:8px;margin-bottom:12px;">
+      <textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>
       <button type="button" id="cloud-chain-btn" class="btn btn-primary" style="white-space:nowrap;">链式下载</button>
-        <button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>
+      <button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>
+      <button type="button" id="cloud-create-group-btn" class="btn btn-secondary" style="white-space:nowrap;">创建组</button>
+      <button type="button" id="cloud-chain-group-btn" class="btn btn-primary" style="white-space:nowrap;">组链式下载</button>
+    </div>
+    <div id="cloud-tab-bar" style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid var(--tab-border);">
+      <button type="button" id="cloud-tasks-tab" class="cloud-tab active" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid var(--tab-active);margin-bottom:-2px;font-size:14px;color:var(--text-primary);">任务列表</button>
+      <button type="button" id="cloud-groups-tab" class="cloud-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">组列表</button>
     </div>
     <div id="cloud-tasks-body" style="max-height:400px;overflow-y:auto;">
       <div class="empty-msg">暂无下载任务</div>
+    </div>
+    <div id="cloud-groups-body" style="max-height:400px;overflow-y:auto;display:none;">
+      <div class="empty-msg">暂无下载组</div>
     </div>
     <div style="margin-top:12px;text-align:right;">
       <button type="button" id="cloud-refresh-btn" class="btn btn-secondary" style="margin-right:8px;">刷新</button>
@@ -101,25 +110,25 @@
   <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:600px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
       <h3 style="margin:0;font-size:16px;">分享管理</h3>
-      <button type="button" id="share-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1;">&times;</button>
+      <button type="button" id="share-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
     </div>
-    <div id="share-tab-bar" style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid #e0e0e0;">
-      <button type="button" id="share-create-tab" class="share-tab active" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid #4a90d9;margin-bottom:-2px;font-size:14px;color:#333;">创建分享</button>
-      <button type="button" id="share-list-tab" class="share-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:#666;">管理分享</button>
+    <div id="share-tab-bar" style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid var(--tab-border);">
+      <button type="button" id="share-create-tab" class="share-tab active" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid var(--tab-active);margin-bottom:-2px;font-size:14px;color:var(--text-primary);">创建分享</button>
+      <button type="button" id="share-list-tab" class="share-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">管理分享</button>
     </div>
     <div id="share-create-panel">
       <div style="margin-bottom:12px;">
-        <label style="display:block;margin-bottom:4px;font-size:13px;color:#555;">文件名</label>
-        <input type="text" id="share-filename" placeholder="输入文件名..." style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;box-sizing:border-box;">
+        <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">文件名</label>
+        <input type="text" id="share-filename" placeholder="输入文件名..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
       </div>
       <div style="display:flex;gap:8px;margin-bottom:12px;">
         <div style="flex:1;">
-          <label style="display:block;margin-bottom:4px;font-size:13px;color:#555;">有效期</label>
-          <input type="text" id="share-ttl" value="24h" placeholder="如 1h, 24h, 7d" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">有效期</label>
+          <input type="text" id="share-ttl" value="24h" placeholder="如 1h, 24h, 7d" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
         <div style="flex:1;">
-          <label style="display:block;margin-bottom:4px;font-size:13px;color:#555;">最大下载次数</label>
-          <input type="number" id="share-max-downloads" value="0" min="0" placeholder="0=不限" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">最大下载次数</label>
+          <input type="number" id="share-max-downloads" value="0" min="0" placeholder="0=不限" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
       </div>
       <div style="margin-bottom:12px;">
@@ -143,10 +152,10 @@
   <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:600px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
       <h3 style="margin:0;font-size:16px;">文件版本管理</h3>
-      <button type="button" id="version-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:#888;line-height:1;">&times;</button>
+      <button type="button" id="version-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
     </div>
     <div style="margin-bottom:12px;display:flex;gap:8px;">
-      <input type="text" id="version-filename" placeholder="输入文件名查看版本历史..." aria-label="文件名" style="flex:1;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;">
+      <input type="text" id="version-filename" placeholder="输入文件名查看版本历史..." aria-label="文件名" style="flex:1;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;">
       <button type="button" id="version-load-btn" class="btn btn-primary">查看版本</button>
     </div>
     <div id="version-body" style="max-height:400px;overflow-y:auto;">
@@ -160,6 +169,7 @@
 
 <script src="sha256.js"></script>
 <script src="tunnel.js"></script>
+<script src="cloudfilename.js"></script>
 <script src="upload.js"></script>
 <script src="app.js"></script>
 </body>

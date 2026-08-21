@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -21,7 +24,9 @@ type CloudTask struct {
 	TotalSize  int64     `json:"total_size"`
 	Downloaded int64     `json:"downloaded"`
 	Checksum   string    `json:"checksum"`
+	ETag       string    `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
 	Error      string    `json:"error"`
+	GroupID    string    `json:"group_id,omitempty"` // 所属下载组 ID（可选）
 	FileMTime  int64     `json:"file_mtime,omitempty"`
 	CreatedAt  time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
 	UpdatedAt  time.Time `json:"updated_at"` // 更新时间（同上）
@@ -52,24 +57,27 @@ func WithCloudDownloadFilename(name string) CloudDownloadOption {
 	}
 }
 
-// WithCloudDownloadMaxBatchURLs 设置批量下载的最大 URL 数量上限。
-// 默认 100，服务端也限制 100 URL。设置为 0 使用默认值。
+// WithCloudDownloadMaxBatchURLs 设置批量下载的客户端侧 URL 数量上限（可选）。
+// 上限由服务端配置 cloud_max_batch_urls 强制（默认 100）；客户端默认不预检数量，
+// 发送超过服务端上限的请求会收到 400 错误并使创建失败。
+// 传入 n>0 时作为客户端本地护栏，在发送前拦截；传入 n<=0 表示不限制（交给服务端），
+// 且可覆盖此前设置的任何值（复位为"不预检"）。
 func WithCloudDownloadMaxBatchURLs(n int) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
-		if n > 0 {
-			o.maxBatchURLs = n
-		}
+		o.maxBatchURLs = n
 	}
 }
 
 // CloudArchiveResult 表示云端归档操作的结果。
 type CloudArchiveResult struct {
-	Success   bool   `json:"success"`
-	Message   string `json:"message,omitempty"`
-	File      string `json:"file,omitempty"`
-	Size      int64  `json:"size,omitempty"`
-	Checksum  string `json:"checksum,omitempty"`
-	TaskCount int    `json:"task_count,omitempty"`
+	Success      bool     `json:"success"`
+	Message      string   `json:"message,omitempty"`
+	File         string   `json:"file,omitempty"`
+	Size         int64    `json:"size,omitempty"`
+	Checksum     string   `json:"checksum,omitempty"`
+	TaskCount    int      `json:"task_count,omitempty"`
+	SkippedCount int      `json:"skipped_count,omitempty"`
+	SkippedTasks []string `json:"skipped_tasks,omitempty"`
 }
 
 // CloudArchiveResult 实现 successChecker 接口，支持 doJSON 自动检查。
@@ -80,16 +88,10 @@ func (r *CloudArchiveResult) message() string { return r.Message }
 // CloudDownload 创建云端下载任务。
 // 小文件（<20MB）同步完成，大文件异步执行。
 func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...CloudDownloadOption) (*CloudTask, error) {
-	if urlStr == "" {
-		return nil, fmt.Errorf("云端下载: URL 不能为空")
-	}
 	// 基本 URL 格式校验：避免无效 URL 浪费服务端资源
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return nil, fmt.Errorf("云端下载: 无效 URL %q: %w", urlStr, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("云端下载: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
+	// （与批量/组路径共用 cloudfilename.ValidateEntry，规则单一来源）
+	if err := cloudfilename.ValidateEntry(cloudfilename.Entry{URL: urlStr}); err != nil {
+		return nil, fmt.Errorf("云端下载: %w", err)
 	}
 	cfg := &cloudDownloadOptions{}
 	for _, opt := range opts {
@@ -109,37 +111,34 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 
 // CloudDownloadBatch 批量创建云端下载任务（最多 100 URL）。
 // 可以用 WithCloudDownloadMaxBatchURLs 调整上限，但不能超过服务端限制。
+// 如需为每个 URL 指定保存文件名，使用 CloudDownloadBatchEntries。
 func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts ...CloudDownloadOption) ([]CloudTask, error) {
-	if len(urls) == 0 {
+	entries := make([]cloudfilename.Entry, len(urls))
+	for i, u := range urls {
+		entries[i] = cloudfilename.Entry{URL: u}
+	}
+	return c.CloudDownloadBatchEntries(ctx, entries, opts...)
+}
+
+// CloudDownloadBatchEntries 批量创建云端下载任务，每个条目可单独指定保存文件名。
+// Filename 为空时由服务端按 URL 自动生成。
+func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cloudfilename.Entry, opts ...CloudDownloadOption) ([]CloudTask, error) {
+	if len(entries) == 0 {
 		return nil, fmt.Errorf("批量云端下载: URL 列表不能为空")
+	}
+	if err := cloudfilename.ValidateEntries(entries); err != nil {
+		return nil, err
 	}
 	cfg := &cloudDownloadOptions{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	maxBatch := 100
-	if cfg.maxBatchURLs > 0 {
-		maxBatch = cfg.maxBatchURLs
-	}
-	if len(urls) > maxBatch {
-		return nil, fmt.Errorf("批量云端下载: 最多 %d 个 URL，收到 %d 个", maxBatch, len(urls))
+	// 数量上限由服务端 cloud_max_batch_urls 强制；客户端仅在显式设置
+	// WithCloudDownloadMaxBatchURLs 时做本地预检，默认发送后由服务端 400 报错。
+	if cfg.maxBatchURLs > 0 && len(entries) > cfg.maxBatchURLs {
+		return nil, fmt.Errorf("批量云端下载: 最多 %d 个 URL，收到 %d 个", cfg.maxBatchURLs, len(entries))
 	}
 
-	// 校验每个 URL 的格式
-	for _, urlStr := range urls {
-		u, err := url.Parse(urlStr)
-		if err != nil {
-			return nil, fmt.Errorf("批量云端下载: 无效 URL %q: %w", urlStr, err)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return nil, fmt.Errorf("批量云端下载: 不支持的 URL scheme %q (仅支持 http/https)", u.Scheme)
-		}
-	}
-
-	entries := make([]map[string]string, len(urls))
-	for i, u := range urls {
-		entries[i] = map[string]string{"url": u}
-	}
 	body := map[string]any{"urls": entries}
 
 	var result struct {
@@ -151,22 +150,50 @@ func (c *FileClient) CloudDownloadBatch(ctx context.Context, urls []string, opts
 	return result.Tasks, nil
 }
 
+// CloudTaskList 是 GET /api/cloud/tasks 的响应容器（服务端统一返回该形态）。
+type CloudTaskList struct {
+	Tasks []CloudTask `json:"tasks"`
+	Total int         `json:"total"`
+}
+
+// CloudGroupList 是 GET /api/cloud/groups 的响应容器（服务端统一返回该形态）。
+type CloudGroupList struct {
+	Groups []CloudGroup `json:"groups"`
+	Total  int          `json:"total"`
+}
+
 // ListCloudTasks 列举云端下载任务。
 // status 可选过滤：pending/downloading/completed/failed/cancelled，为空时返回全部。
-func (c *FileClient) ListCloudTasks(ctx context.Context, status string) ([]CloudTask, error) {
+// offset/limit 可选分页：offset<0 或 limit<=0 表示不限制（返回全部）。
+// 旧版语义保持：解析 {tasks, total} 容器并返回 tasks（返回全部条目）。
+func (c *FileClient) ListCloudTasks(ctx context.Context, status string, offset, limit int) ([]CloudTask, error) {
+	tasks, _, err := c.ListCloudTasksWithTotal(ctx, status, offset, limit)
+	return tasks, err
+}
+
+// ListCloudTasksWithTotal 列举云端下载任务并返回过滤后的总数（不受分页影响）。
+func (c *FileClient) ListCloudTasksWithTotal(ctx context.Context, status string, offset, limit int) ([]CloudTask, int, error) {
 	urlPath := "/api/cloud/tasks"
 	params := url.Values{}
 	if status != "" {
 		params.Set("status", status)
 	}
+	// offset/limit 各自独立生效：只传 limit（offset 保持 -1）时也要发送 limit，
+	// 否则 CLI 默认 offset=-1 会让 --limit 静默失效返回全量。
+	if offset >= 0 {
+		params.Set("offset", strconv.Itoa(offset))
+	}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
 	if len(params) > 0 {
 		urlPath += "?" + params.Encode()
 	}
-	tasks := make([]CloudTask, 0)
-	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &tasks); err != nil {
-		return nil, fmt.Errorf("列举云端任务: %w", err)
+	var list CloudTaskList
+	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &list); err != nil {
+		return nil, 0, fmt.Errorf("列举云端任务: %w", err)
 	}
-	return tasks, nil
+	return list.Tasks, list.Total, nil
 }
 
 // GetCloudTask 查询单个任务详情。
@@ -234,4 +261,165 @@ func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, ar
 		return nil, fmt.Errorf("云端打包: %w", err)
 	}
 	return &result, nil
+}
+
+// CloudGroup 表示云端下载任务组。
+// 时间戳与服务端 CloudTaskGroup 一致使用 time.Time（RFC3339 序列化）。
+type CloudGroup struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Status      string    `json:"status"`
+	TaskIDs     []string  `json:"task_ids"`
+	TotalTasks  int       `json:"total_tasks"`
+	Completed   int       `json:"completed"`
+	Failed      int       `json:"failed"`
+	Cancelled   int       `json:"cancelled"`
+	Error       string    `json:"error,omitempty"`
+	ArchiveFile string    `json:"archive_file,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// CloudGroupDetail 包含组详情和子任务列表。
+type CloudGroupDetail struct {
+	Group *CloudGroup `json:"group"`
+	Tasks []CloudTask `json:"tasks"`
+}
+
+// CloudCreateGroup 创建云端下载任务组。
+// 如需为每个 URL 指定保存文件名，使用 CloudCreateGroupEntries。
+func (c *FileClient) CloudCreateGroup(ctx context.Context, name string, urls []string) (*CloudGroup, error) {
+	entries := make([]cloudfilename.Entry, len(urls))
+	for i, u := range urls {
+		entries[i] = cloudfilename.Entry{URL: u}
+	}
+	return c.CloudCreateGroupEntries(ctx, name, entries)
+}
+
+// CloudCreateGroupEntries 创建云端下载任务组，每个条目可单独指定保存文件名。
+// Filename 为空时由服务端按 URL 自动生成；服务端在创建前校验文件名冲突（重复返回 409）。
+// 可通过 WithCloudDownloadMaxBatchURLs 设置客户端侧 URL 数量上限预检（与批量路径一致）。
+func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, entries []cloudfilename.Entry, opts ...CloudDownloadOption) (*CloudGroup, error) {
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("创建下载组: URL 列表不能为空")
+	}
+	// 校验每个条目的 URL 格式（scheme + host）与同 URL 不同 Filename 冲突，
+	// 与服务端规则对齐（cloudfilename.ValidateEntries），避免服务端 400/409 往返
+	if err := cloudfilename.ValidateEntries(entries); err != nil {
+		return nil, err
+	}
+	cfg := &cloudDownloadOptions{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	if cfg.maxBatchURLs > 0 && len(entries) > cfg.maxBatchURLs {
+		return nil, fmt.Errorf("创建下载组: 最多 %d 个 URL，收到 %d 个", cfg.maxBatchURLs, len(entries))
+	}
+	body := map[string]any{
+		"name": name,
+		"urls": entries,
+	}
+	var group CloudGroup
+	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/groups", body, &group); err != nil {
+		return nil, fmt.Errorf("创建下载组: %w", err)
+	}
+	return &group, nil
+}
+
+// CloudGetGroup 获取组详情（含子任务列表）。
+func (c *FileClient) CloudGetGroup(ctx context.Context, groupID string) (*CloudGroupDetail, error) {
+	if groupID == "" {
+		return nil, fmt.Errorf("获取下载组: groupID 不能为空")
+	}
+	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID)
+	var detail CloudGroupDetail
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &detail); err != nil {
+		return nil, fmt.Errorf("获取下载组: %w", err)
+	}
+	return &detail, nil
+}
+
+// CloudListGroups 列举所有下载组。
+// status 可选过滤：pending/downloading/completed/partial/failed/cancelled，为空时返回全部。
+// 旧版语义保持：解析 {groups, total} 容器并返回 groups。
+func (c *FileClient) CloudListGroups(ctx context.Context, status string) ([]CloudGroup, error) {
+	groups, _, err := c.CloudListGroupsWithTotal(ctx, status, -1, 0)
+	return groups, err
+}
+
+// CloudListGroupsWithTotal 列举下载组并返回过滤后的总数（不受分页影响）。
+// offset<0 或 limit<=0 表示不限制（返回全部）。
+func (c *FileClient) CloudListGroupsWithTotal(ctx context.Context, status string, offset, limit int) ([]CloudGroup, int, error) {
+	urlPath := "/api/cloud/groups"
+	params := url.Values{}
+	if status != "" {
+		params.Set("status", status)
+	}
+	// offset/limit 各自独立生效（同 ListCloudTasksWithTotal）：只传 limit 也要发送。
+	if offset >= 0 {
+		params.Set("offset", strconv.Itoa(offset))
+	}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	if len(params) > 0 {
+		urlPath += "?" + params.Encode()
+	}
+	var list CloudGroupList
+	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &list); err != nil {
+		return nil, 0, fmt.Errorf("列举下载组: %w", err)
+	}
+	return list.Groups, list.Total, nil
+}
+
+// CloudCancelGroup 取消组内所有下载任务。
+func (c *FileClient) CloudCancelGroup(ctx context.Context, groupID string) error {
+	if groupID == "" {
+		return fmt.Errorf("取消下载组: groupID 不能为空")
+	}
+	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/cancel"
+	return c.doJSON(ctx, http.MethodPost, apiPath, nil, nil)
+}
+
+// CloudDeleteGroup 删除组及所有关联文件。
+func (c *FileClient) CloudDeleteGroup(ctx context.Context, groupID string) error {
+	if groupID == "" {
+		return fmt.Errorf("删除下载组: groupID 不能为空")
+	}
+	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID)
+	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
+}
+
+// CloudArchiveGroup 将组内所有文件打包为 tar.gz。
+func (c *FileClient) CloudArchiveGroup(ctx context.Context, groupID, archiveName string) (*CloudArchiveResult, error) {
+	if groupID == "" {
+		return nil, fmt.Errorf("打包下载组: groupID 不能为空")
+	}
+	body := map[string]string{"archive_name": archiveName}
+	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/archive"
+	var result CloudArchiveResult
+	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &result); err != nil {
+		return nil, fmt.Errorf("打包下载组: %w", err)
+	}
+	return &result, nil
+}
+
+// CloudResumeTask 恢复云端下载任务。
+func (c *FileClient) CloudResumeTask(ctx context.Context, taskID string, force bool) error {
+	if taskID == "" {
+		return fmt.Errorf("恢复下载任务: taskID 不能为空")
+	}
+	body := map[string]bool{"force": force}
+	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/resume"
+	return c.doJSON(ctx, http.MethodPost, apiPath, body, nil)
+}
+
+// CloudResumeGroup 恢复组内所有失败任务。
+func (c *FileClient) CloudResumeGroup(ctx context.Context, groupID string, force bool) error {
+	if groupID == "" {
+		return fmt.Errorf("恢复下载组: groupID 不能为空")
+	}
+	body := map[string]bool{"force": force}
+	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/resume"
+	return c.doJSON(ctx, http.MethodPost, apiPath, body, nil)
 }

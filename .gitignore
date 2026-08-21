@@ -26,6 +26,7 @@ sproxy.yaml
 
 # playwright browsers
 ms-playwright/
+.playwright-mcp/
 
 # superpowers review artifacts (generated, not committed)
 .superpowers/

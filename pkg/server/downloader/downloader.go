@@ -19,6 +19,7 @@ type Result struct {
 	Size     int64     // 实际下载大小
 	Checksum string    // SHA-256 十六进制
 	ModTime  time.Time // 原始文件修改时间（从 HTTP Last-Modified 提取）
+	ETag     string    // 服务器 ETag（用于 If-Range 续传一致性校验）
 }
 
 // Downloader 是云端下载器接口。

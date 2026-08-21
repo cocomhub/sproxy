@@ -178,10 +178,14 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		}
 		if d.IsDir() {
 			base := filepath.Base(path)
-			// 内部存储目录（.__chunked__、.__versions__、.__cloud__）需要进入统计
-			// 其他 .__ 开头的元数据目录跳过
+			// 内部存储目录（.__chunked__、.__versions__、.__cloud__、.__cloud_archives__）
+			// 需要进入统计；其他 .__ 开头的元数据目录跳过。
+			// 注意：__cloud_archives__ 归档文件必须计入 cloud 分类（下方
+			// case strings.HasPrefix(rel, cloudArchiveDirName+"/") 依赖此处不跳过），
+			// 否则 max_storage_bytes 配额会漏计归档文件。
 			if strings.HasPrefix(base, ".__") &&
-				base != chunkedDirName && base != versionsDirName && base != cloudDirName {
+				base != chunkedDirName && base != versionsDirName && base != cloudDirName &&
+				base != cloudArchiveDirName {
 				return filepath.SkipDir
 			}
 			return nil

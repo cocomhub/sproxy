@@ -113,7 +113,14 @@ type Config struct {
 	CloudTaskTTL              time.Duration `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`
 	CloudFailedTaskTTL        time.Duration `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`
 	CloudMaxConcurrent        int           `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`
+	CloudMaxBatchURLs         int           `yaml:"cloud_max_batch_urls" mapstructure:"cloud_max_batch_urls"`
 	CloudDownloadAllowPrivate bool          `yaml:"cloud_download_allow_private" mapstructure:"cloud_download_allow_private"`
+	CloudDownloadTimeout      time.Duration `yaml:"cloud_download_timeout" mapstructure:"cloud_download_timeout"`
+	CloudDownloadIdleTimeout  time.Duration `yaml:"cloud_download_idle_timeout" mapstructure:"cloud_download_idle_timeout"`
+	CloudMaxRetries           int           `yaml:"cloud_max_retries" mapstructure:"cloud_max_retries"`
+	CloudRetryDelay           time.Duration `yaml:"cloud_retry_delay" mapstructure:"cloud_retry_delay"`
+	// CloudArchiveMaxBytes 单次云归档允许的最大字节数（原始文件大小总和），0 = 不限制（仍受 max_storage_bytes 与 TryReserve 兜底）。
+	CloudArchiveMaxBytes int64 `yaml:"cloud_archive_max_bytes" mapstructure:"cloud_archive_max_bytes"`
 }
 
 func Default() *Config {
@@ -141,7 +148,12 @@ func Default() *Config {
 		CloudTaskTTL:              24 * time.Hour,
 		CloudFailedTaskTTL:        1 * time.Hour,
 		CloudMaxConcurrent:        3,
+		CloudMaxBatchURLs:         100,
 		CloudDownloadAllowPrivate: false,
+		CloudDownloadTimeout:      30 * time.Minute,
+		CloudDownloadIdleTimeout:  1 * time.Minute,
+		CloudMaxRetries:           10,
+		CloudRetryDelay:           10 * time.Second,
 	}
 }
 
@@ -168,8 +180,23 @@ func (c *Config) SetDefaults() {
 	if c.CloudDownloader == "" {
 		c.CloudDownloader = "http"
 	}
+	if c.CloudDownloadTimeout <= 0 {
+		c.CloudDownloadTimeout = 30 * time.Minute
+	}
+	if c.CloudDownloadIdleTimeout <= 0 {
+		c.CloudDownloadIdleTimeout = 1 * time.Minute
+	}
+	if c.CloudMaxRetries < 1 {
+		c.CloudMaxRetries = 10
+	}
+	if c.CloudRetryDelay <= 0 {
+		c.CloudRetryDelay = 10 * time.Second
+	}
 	if c.CloudMaxConcurrent <= 0 {
 		c.CloudMaxConcurrent = 3
+	}
+	if c.CloudMaxBatchURLs == 0 {
+		c.CloudMaxBatchURLs = 100
 	}
 	if c.CloudTaskTTL <= 0 {
 		c.CloudTaskTTL = 24 * time.Hour

@@ -93,11 +93,17 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 初始化 StorageManager 和 CloudDownloadManager
 	sm := NewStorageManager(cfg.UploadsDir, cfg.MaxStorageBytes, cs, log.With("component", "storage"))
 	cloudCfg := &CloudDownloadConfig{
-		SyncThreshold: cfg.CloudSyncThreshold,
-		MaxConcurrent: cfg.CloudMaxConcurrent,
-		TaskTTL:       cfg.CloudTaskTTL,
-		FailedTaskTTL: cfg.CloudFailedTaskTTL,
-		AllowPrivate:  cfg.CloudDownloadAllowPrivate,
+		SyncThreshold:   cfg.CloudSyncThreshold,
+		MaxConcurrent:   cfg.CloudMaxConcurrent,
+		MaxBatchURLs:    cfg.CloudMaxBatchURLs,
+		TaskTTL:         cfg.CloudTaskTTL,
+		FailedTaskTTL:   cfg.CloudFailedTaskTTL,
+		AllowPrivate:    cfg.CloudDownloadAllowPrivate,
+		DownloadTimeout: cfg.CloudDownloadTimeout,
+		IdleTimeout:     cfg.CloudDownloadIdleTimeout,
+		MaxRetries:      cfg.CloudMaxRetries,
+		RetryDelay:      cfg.CloudRetryDelay,
+		Downloader:      cfg.CloudDownloader,
 	}
 	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, cs, log.With("component", "cloud"), cloudCfg)
 	h.storageMgr = sm
@@ -187,6 +193,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudDeleteTask)
 	localMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
 	localMux.HandleFunc("POST /api/cloud/archive", h.cloudArchiveBatch)
+	localMux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.cloudResumeTask)
+	localMux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
+	localMux.HandleFunc("GET /api/cloud/groups", h.cloudListGroups)
+	localMux.HandleFunc("GET /api/cloud/groups/{id}", h.cloudGetGroup)
+	localMux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.cloudCancelGroup)
+	localMux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudDeleteGroup)
+	localMux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.cloudResumeGroup)
+	localMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudArchiveGroup)
 	// 云端下载 API（主 mux：Bearer auth）
 	srvMux.HandleFunc("POST /api/cloud/download", h.authMiddleware(h.cloudCreateDownload))
 	srvMux.HandleFunc("POST /api/cloud/download/batch", h.authMiddleware(h.cloudCreateBatchDownload))
@@ -196,6 +210,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.authMiddleware(h.cloudDeleteTask))
 	srvMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.authMiddleware(h.cloudArchiveTask))
 	srvMux.HandleFunc("POST /api/cloud/archive", h.authMiddleware(h.cloudArchiveBatch))
+	srvMux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.authMiddleware(h.cloudResumeTask))
+	srvMux.HandleFunc("POST /api/cloud/groups", h.authMiddleware(h.cloudCreateGroup))
+	srvMux.HandleFunc("GET /api/cloud/groups", h.authMiddleware(h.cloudListGroups))
+	srvMux.HandleFunc("GET /api/cloud/groups/{id}", h.authMiddleware(h.cloudGetGroup))
+	srvMux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.authMiddleware(h.cloudCancelGroup))
+	srvMux.HandleFunc("DELETE /api/cloud/groups/{id}", h.authMiddleware(h.cloudDeleteGroup))
+	srvMux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.authMiddleware(h.cloudResumeGroup))
+	srvMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.authMiddleware(h.cloudArchiveGroup))
 
 	// Hub 管理 API（中继系统），需鉴权
 	if opts.RouteTable != nil {

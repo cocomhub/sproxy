@@ -44,6 +44,21 @@ func TestConfig_DefaultsFilled(t *testing.T) {
 	if !cfg.TLS.AutoTLS {
 		t.Fatal("TLS.AutoTLS default should be true")
 	}
+	if cfg.CloudDownloadTimeout != 30*time.Minute {
+		t.Fatalf("CloudDownloadTimeout default want 30m, got %v", cfg.CloudDownloadTimeout)
+	}
+	if cfg.CloudDownloadIdleTimeout != 1*time.Minute {
+		t.Fatalf("CloudDownloadIdleTimeout default want 1m, got %v", cfg.CloudDownloadIdleTimeout)
+	}
+	if cfg.CloudMaxRetries != 10 {
+		t.Fatalf("CloudMaxRetries default want 10, got %d", cfg.CloudMaxRetries)
+	}
+	if cfg.CloudRetryDelay != 10*time.Second {
+		t.Fatalf("CloudRetryDelay default want 10s, got %v", cfg.CloudRetryDelay)
+	}
+	if cfg.CloudMaxBatchURLs != 100 {
+		t.Fatalf("CloudMaxBatchURLs default want 100, got %d", cfg.CloudMaxBatchURLs)
+	}
 }
 
 func TestConfig_Validate_FillsZeroes(t *testing.T) {

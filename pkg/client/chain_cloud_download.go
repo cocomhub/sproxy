@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
 // cloudArchiveDirName 是服务端云任务归档文件存储子目录，与服务端 cloudArchiveDirName 保持一致。
@@ -34,21 +36,22 @@ func init() {
 
 // CloudDownloadChain 云端下载链式操作，实现 ChainRunner 接口。
 type CloudDownloadChain struct {
-	ChainID      string    `json:"chain_id"`
-	CurrentPhase string    `json:"phase"`
-	CurStatus    string    `json:"status"`
-	URLs         []string  `json:"urls"`
-	TaskIDs      []string  `json:"task_ids,omitempty"`
-	ArchiveName  string    `json:"archive_name"`
-	LocalDir     string    `json:"local_dir"`
-	LocalPath    string    `json:"local_path,omitempty"`
-	KeepFiles    bool      `json:"keep_files"`
-	Completed    int       `json:"completed"`
-	Failed       int       `json:"failed"`
-	Total        int       `json:"total"`
-	Error        string    `json:"error,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ChainID      string                `json:"chain_id"`
+	CurrentPhase string                `json:"phase"`
+	CurStatus    string                `json:"status"`
+	URLs         []string              `json:"urls"`
+	Entries      []cloudfilename.Entry `json:"entries,omitempty"` // URL→可选保存文件名；空则回退 URLs
+	TaskIDs      []string              `json:"task_ids,omitempty"`
+	ArchiveName  string                `json:"archive_name"`
+	LocalDir     string                `json:"local_dir"`
+	LocalPath    string                `json:"local_path,omitempty"`
+	KeepFiles    bool                  `json:"keep_files"`
+	Completed    int                   `json:"completed"`
+	Failed       int                   `json:"failed"`
+	Total        int                   `json:"total"`
+	Error        string                `json:"error,omitempty"`
+	CreatedAt    time.Time             `json:"created_at"`
+	UpdatedAt    time.Time             `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -58,6 +61,10 @@ type CloudDownloadChain struct {
 	archiveServerPath string        `json:"-"` // 服务端返回的归档文件路径
 	client            *FileClient   `json:"-"`
 	chainMgr          *ChainManager `json:"-"` // 链式操作管理器，用于阶段间持久化状态
+
+	// backoffFn 存储超限重试的退避间隔（attempt 从 0 起）。nil 时用默认 10s*(1<<attempt)。
+	// 测试注入小退避避免慢 CI（如 10ms）。
+	backoffFn func(attempt int) time.Duration
 }
 
 // NewCloudDownloadChain 创建云端下载链式操作。
@@ -75,15 +82,24 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		return nil, fmt.Errorf("生成随机数失败: %w", err)
 	}
 	chainID := fmt.Sprintf("chain-%d-%x", now.UnixNano(), buf)
+	// Entries：显式指定（WithChainEntries / --url-file）优先；否则由 urls 构造
+	// （filename 为空，提交时由服务端按 URL 自动生成）。submitTasks 统一走 Entries。
+	entries := opts.entries
+	if len(entries) == 0 {
+		for _, u := range urls {
+			entries = append(entries, cloudfilename.Entry{URL: u})
+		}
+	}
 	return &CloudDownloadChain{
 		ChainID:      chainID,
 		CurrentPhase: "",
 		CurStatus:    StatusRunning,
-		URLs:         urls,
+		URLs:         urls, // 兼容旧持久化状态；新状态以 Entries 为准
+		Entries:      entries,
 		ArchiveName:  archiveName,
 		LocalDir:     localDir,
 		KeepFiles:    opts.keepFiles,
-		Total:        len(urls),
+		Total:        len(entries),
 		CreatedAt:    now,
 		UpdatedAt:    now,
 		PollInterval: fixPollInterval(opts.pollInterval),
@@ -102,6 +118,7 @@ func (c *CloudDownloadChain) State() map[string]any {
 		"phase":         c.CurrentPhase,
 		"status":        c.CurStatus,
 		"urls":          c.URLs,
+		"entries":       c.Entries,
 		"task_ids":      c.TaskIDs,
 		"archive_name":  c.ArchiveName,
 		"local_dir":     c.LocalDir,
@@ -190,6 +207,10 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseSubmitting)
 		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "submit cloud download tasks", Current: 0, Total: len(c.URLs)})
 		if err := c.submitTasks(ctx); err != nil {
+			// 部分提交失败时清理已成功提交的任务：它们已在服务端开始下载，若本链
+			// 中止且用户不再重试，会成为孤儿持续占用服务端存储直到 TTL。
+			// 清理失败不影响主错误返回（主错误已足够用户了解失败原因）。
+			_ = c.cleanupRemote(context.WithoutCancel(ctx))
 			return err
 		}
 		c.CurrentPhase = PhaseWaiting
@@ -255,27 +276,73 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 }
 
 // submitTasks 批量提交云端下载任务。
+// 任何条目提交失败（返回空 ID + error）都立即报错，不静默丢弃后继续——否则链式
+// 下载会"完成"但缺少这些文件，用户毫不知情（禁止静默失败）。
 func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
-	tasks, err := c.client.CloudDownloadBatch(ctx, c.URLs)
+	// 幂等守卫：恢复时若 TaskIDs 已非空（submit 阶段完成、phase 尚未写入 waiting 前崩溃），
+	// 跳过重复提交，避免同一批 URL 被再次提交导致双倍任务/轮询（C5）。
+	if len(c.TaskIDs) > 0 {
+		return nil
+	}
+	// 统一走带保存文件名的 Entries；为防御直接构造/旧持久化状态（Entries 为空），
+	// 回退为从 URLs 生成条目（filename 为空，服务端自动生成）。
+	entries := c.Entries
+	if len(entries) == 0 {
+		for _, u := range c.URLs {
+			entries = append(entries, cloudfilename.Entry{URL: u})
+		}
+	}
+	tasks, err := c.client.CloudDownloadBatchEntries(ctx, entries)
 	if err != nil {
 		return fmt.Errorf("批量提交云端下载失败: %w", err)
 	}
+	var submitFailed []string
+	taskIDSeen := make(map[string]bool, len(tasks))
 	for _, t := range tasks {
 		if t.ID != "" {
-			c.TaskIDs = append(c.TaskIDs, t.ID)
+			if !taskIDSeen[t.ID] {
+				c.TaskIDs = append(c.TaskIDs, t.ID)
+				taskIDSeen[t.ID] = true
+			}
+			continue
 		}
+		if t.Error != "" {
+			submitFailed = append(submitFailed, fmt.Sprintf("%s: %s", t.URL, t.Error))
+		} else {
+			submitFailed = append(submitFailed, t.URL)
+		}
+	}
+	if len(submitFailed) > 0 {
+		return fmt.Errorf("%d 个云端下载任务提交失败：%s", len(submitFailed), strings.Join(submitFailed, "; "))
 	}
 	c.Total = len(c.TaskIDs)
 	return nil
 }
 
+// entryForURL 返回 URL 对应的条目（保留其保存文件名）；Entries 中未找到时返回
+// 仅含 URL 的条目（filename 为空，服务端自动生成）。
+// 用于存储超限重试提交：服务端返回的任务 URL 可能是规范化后的，与原始 Entries
+// 不完全一致，匹配失败时按 URL 重新提交即可。
+func (c *CloudDownloadChain) entryForURL(url string) cloudfilename.Entry {
+	for _, e := range c.Entries {
+		if e.URL == url {
+			return e
+		}
+	}
+	return cloudfilename.Entry{URL: url}
+}
+
 // waitForTasks 轮询等待所有任务完成，支持存储超限重试。
 func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 	maxAttempts := 3
+	// 重试提交再次失败（无 ID）的 URL 数。它在循环内被归零的 c.Failed 之外单独
+	// 累积，保证任何一次重试提交失败都被计入最终结果，不被静默丢弃（禁止静默失败）。
+	var submitFailedCount int
 	for attempt := range maxAttempts {
 		// 每次重试前归零计数器，基于本次轮询结果重新统计
 		c.Completed = 0
 		c.Failed = 0
+		submitFailedCount = 0
 
 		results, err := c.pollAllTasks(ctx)
 		if err != nil {
@@ -283,10 +350,13 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 		}
 		var storageFullURLs []string
 		var storageFullIDs []string
+		cancelled := 0
 		for _, r := range results {
 			switch r.Status {
 			case TaskStatusCompleted:
 				c.Completed++
+			case TaskStatusCancelled:
+				cancelled++
 			case TaskStatusFailed:
 				if isStorageFullError(r.Error) {
 					storageFullURLs = append(storageFullURLs, r.URL)
@@ -297,6 +367,15 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			}
 		}
 		if len(storageFullURLs) == 0 {
+			// 无存储超限重试：若仍有失败/取消任务（含重试提交失败的 URL），链式操作不得
+			// 声称成功（禁止静默失败）。cancelled 计入失败（用户确认 cancelled=失败）。
+			if c.Failed+cancelled+submitFailedCount > 0 {
+				if cancelled > 0 {
+					return fmt.Errorf("%d 个云端下载任务失败（其中 %d 个被取消，共 %d 个）",
+						c.Failed+cancelled+submitFailedCount, cancelled, c.Total+submitFailedCount)
+				}
+				return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed+submitFailedCount, c.Total+submitFailedCount)
+			}
 			return nil
 		}
 		if attempt < maxAttempts-1 {
@@ -313,9 +392,11 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			}
 			c.TaskIDs = remaining
 
-			// 指数退避等待：10s, 20s, 40s
-			baseDelay := 10 * time.Second
-			delay := baseDelay * (1 << attempt)
+			// 指数退避等待：默认 10s, 20s, 40s；测试可注入 backoffFn 缩短
+			delay := 10 * time.Second * (1 << attempt)
+			if c.backoffFn != nil {
+				delay = c.backoffFn(attempt)
+			}
 			// 检查上下文剩余时间，避免超时
 			if deadline, ok := ctx.Deadline(); ok {
 				remaining := time.Until(deadline)
@@ -327,24 +408,40 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			select {
 			case <-timer.C:
 			case <-ctx.Done():
-				timer.Stop()
+				// timer 可能已触发，drain channel 防阻塞
+				if !timer.Stop() {
+					<-timer.C
+				}
 				return ctx.Err()
 			}
-			timer.Stop()
 			if len(storageFullURLs) > 0 {
-				// 使用独立超时的 context 重试，避免原始 context 过期导致重试失败
+				// 使用独立超时的 context 重试，避免原始 context 过期导致重试失败。
+				// 重试条目保留原 URL 在 Entries 中指定的保存文件名（若指定过）。
 				retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-				tasks, err := c.client.CloudDownloadBatch(retryCtx, storageFullURLs)
+				retryEntries := make([]cloudfilename.Entry, 0, len(storageFullURLs))
+				for _, u := range storageFullURLs {
+					retryEntries = append(retryEntries, c.entryForURL(u))
+				}
+				tasks, err := c.client.CloudDownloadBatchEntries(retryCtx, retryEntries)
 				cancel()
 				if err != nil {
 					return fmt.Errorf("重试批量提交失败: %w", err)
 				}
-				// 新提交的任务添加回 TaskIDs
+				// 新提交的任务添加回 TaskIDs；无 ID = 提交再次失败，计入 submitFailedCount
+				// 而非静默丢弃（否则该 URL 从 TaskIDs 消失、下一轮统计全完成后链式操作
+				// 会错误报告成功）
 				c.TaskIDs = remaining
 				for _, t := range tasks {
 					if t.ID != "" {
 						c.TaskIDs = append(c.TaskIDs, t.ID)
+						continue
 					}
+					submitFailedCount++
+				}
+				if len(c.TaskIDs) == 0 && submitFailedCount > 0 {
+					// 所有重试提交都再次失败、没有可轮询的任务：直接报错，
+					// 避免下一轮空轮询返回误导性的"没有可轮询的任务"
+					return fmt.Errorf("%d 个云端下载任务重试提交失败（存储空间不足）", submitFailedCount)
 				}
 			}
 			// 更新 Total 为本次重试后的 TaskIDs 总数
@@ -362,7 +459,14 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 	if len(c.TaskIDs) == 0 {
 		return nil, fmt.Errorf("没有可轮询的任务")
 	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, c.Timeout)
+	// c.Timeout>0 才设超时；0 表示不限时（与 waitForTasks 的 ctx 约束保持一致）
+	timeoutCtx := ctx
+	var cancel context.CancelFunc
+	if c.Timeout > 0 {
+		timeoutCtx, cancel = context.WithTimeout(ctx, c.Timeout)
+	} else {
+		timeoutCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	ticker := time.NewTicker(c.PollInterval)
@@ -415,10 +519,10 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 				}
 				results[r.index] = r.task
 				switch r.task.Status {
-				case TaskStatusCancelled:
-					return nil, fmt.Errorf("cloud download task %s was cancelled", r.task.ID)
-				case TaskStatusCompleted, TaskStatusFailed:
-					// 已完成或失败，继续等待其他任务
+				case TaskStatusCompleted, TaskStatusFailed, TaskStatusCancelled:
+					// 已完成/失败/取消均为终态：继续等待其他任务，不立即中止。
+					// 取消不再立即失败整链——与组链 waitForGroup 的"等所有任务终态后
+					// 整体报错"语义对齐（用户确认 cancelled=失败，但失败时机延后到终态收敛）。
 				default:
 					allDone = false
 				}
@@ -474,14 +578,11 @@ func (c *CloudDownloadChain) cleanupRemote(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// isStorageFullError 判断错误消息是否为存储空间不足（大小写不敏感子串匹配）。
+// isStorageFullError 判断任务错误消息是否为存储空间不足（大小写不敏感子串匹配）。
 //
-// 此函数作为后备方案，通过错误消息文本匹配判断存储超限。
-// 未来应使用 HTTP 507 (Insufficient Storage) 状态码进行精确判断。
-//
-// 注意：此方法依赖服务端错误消息字符串，不同版本的服务端可能返回不同格式的
-// 错误消息。建议未来使用结构化错误码（如 HTTP 507 状态码或 JSON 错误体中的
-// error_code 字段）替代文本匹配，以提高健壮性和可维护性。
+// 注意：创建阶段的存储满已由 doJSON 的 HTTP 507 映射为 ErrStorageFull（errors.Is 精确
+// 判断，见 client.go doJSON）。本函数是轮询到的失败任务（r.Error 为任务状态字符串而非
+// error 对象）的兜底判断，两者覆盖不同数据路径，均保留。
 func isStorageFullError(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
 	return strings.Contains(lower, "storage full") ||

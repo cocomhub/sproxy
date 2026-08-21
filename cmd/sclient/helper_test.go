@@ -5,81 +5,9 @@ package main
 
 import (
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// ---- readURLsFromFile ----
-
-func TestReadURLsFromFile(t *testing.T) {
-	t.Parallel()
-
-	t.Run("normal_lines", func(t *testing.T) {
-		f := filepath.Join(t.TempDir(), "urls.txt")
-		if err := os.WriteFile(f, []byte("https://example.com/file1\nhttps://example.com/file2\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		urls, err := readURLsFromFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(urls) != 2 {
-			t.Fatalf("expected 2 URLs, got %d", len(urls))
-		}
-		if urls[0] != "https://example.com/file1" {
-			t.Errorf("expected first URL, got %q", urls[0])
-		}
-	})
-
-	t.Run("skips_comments_and_empty", func(t *testing.T) {
-		f := filepath.Join(t.TempDir(), "urls2.txt")
-		if err := os.WriteFile(f, []byte("# comment\n\nhttps://example.com/file1\n  \n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		urls, err := readURLsFromFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(urls) != 1 {
-			t.Fatalf("expected 1 URL, got %d", len(urls))
-		}
-	})
-
-	t.Run("file_not_found", func(t *testing.T) {
-		_, err := readURLsFromFile("/nonexistent/file.txt")
-		if err == nil {
-			t.Fatal("expected error for nonexistent file")
-		}
-	})
-}
-
-// ---- filepathSafe ----
-
-func TestFilepathSafe(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"normal.txt", "normal.txt"},
-		{"with/path/sep", "with_path_sep"},
-		{"with\\backslash", "with_backslash"},
-		{"  spaces  ", "spaces"},
-		{"  .hidden", "hidden"},
-		{"", "download"},
-		{"/../../etc/passwd", "_.._.._etc_passwd"},
-		{"onlydots...", "onlydots"},
-		{"  .  ", "download"},
-	}
-	for _, tt := range tests {
-		got := filepathSafe(tt.input)
-		if got != tt.expected {
-			t.Errorf("filepathSafe(%q) = %q, want %q", tt.input, got, tt.expected)
-		}
-	}
-}
 
 // ---- isImageExt ----
 

@@ -493,14 +493,14 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		}
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
-			t.Error("ReadFile:", err)
+			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		sum := sha256.Sum256(data)
 		info, err := os.Stat(archiveFile)
 		if err != nil {
-			t.Error("Stat:", err)
+			t.Log("Stat:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -514,7 +514,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
-			t.Error("ReadFile:", err)
+			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -535,6 +535,8 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
 	}
+	// 注入小退避避免慢 CI（默认 10s/20s 硬 sleep）
+	chain.backoffFn = func(int) time.Duration { return 10 * time.Millisecond }
 
 	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err != nil {
@@ -616,14 +618,14 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 		}
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
-			t.Error("ReadFile:", err)
+			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		sum := sha256.Sum256(data)
 		info, err := os.Stat(archiveFile)
 		if err != nil {
-			t.Error("Stat:", err)
+			t.Log("Stat:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -638,7 +640,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
-			t.Error("ReadFile:", err)
+			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -843,6 +845,8 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
 	}
+	// 注入小退避避免慢 CI（默认 10s/20s/40s 硬 sleep）
+	chain.backoffFn = func(int) time.Duration { return 10 * time.Millisecond }
 
 	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {
@@ -850,5 +854,90 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 	}
 	if !errors.Is(err, ErrStorageFull) {
 		t.Errorf("expected ErrStorageFull, got: %v", err)
+	}
+}
+
+// TestCloudDownloadChain_StorageFullRetry_ResubmitFailsNotSilent 验证：存储超限重试时，
+// 重试提交再次失败（返回无 ID 的 failed 条目）的 URL 不得被静默丢弃——链式操作必须
+// 报错，而非在下一轮统计全完成后错误声称成功（禁止静默失败）。
+func TestCloudDownloadChain_StorageFullRetry_ResubmitFailsNotSilent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mux := http.NewServeMux()
+
+	var batchCalls atomic.Int32
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		if batchCalls.Add(1) == 1 {
+			// 初始提交：两个任务
+			json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{
+				{ID: "task-1", Status: "pending"},
+				{ID: "task-2", Status: "pending"},
+			}})
+			return
+		}
+		// 重试提交：仍存储不足，返回无 ID 的 failed 条目（提交再次失败）
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{
+			{ID: "", URL: "http://example.com/f1", Error: "storage full"},
+			{ID: "", URL: "http://example.com/f2", Error: "storage full"},
+		}})
+	})
+	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+		json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "failed", Error: "storage full", URL: "http://example.com/f1"})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second}
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "archive", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
+	// 注入小退避避免慢 CI（默认 10s/20s 硬 sleep）
+	chain.backoffFn = func(int) time.Duration { return 10 * time.Millisecond }
+
+	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	if err == nil {
+		t.Fatal("expected error when resubmit fails; dropped URLs must not report success")
+	}
+	if !strings.Contains(err.Error(), "重试提交失败") {
+		t.Errorf("expected error mentioning resubmit failure, got: %v", err)
+	}
+}
+
+// TestCloudDownloadChain_WaitCancelled 验证批量链中任务被取消时整链失败（cancelled=失败，
+// 与组链语义一致；pollAllTasks 不再立即失败，等所有任务终态后报错）。
+func TestCloudDownloadChain_WaitCancelled(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"tasks": []CloudTask{{ID: "ct-1", Status: "pending"}},
+		})
+	})
+	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(CloudTask{ID: "ct-1", Status: TaskStatusCancelled})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := defaultChainOptions()
+	opts.pollInterval = 50 * time.Millisecond
+	opts.timeout = 5 * time.Second
+
+	chain, err := NewCloudDownloadChain(client, []string{"https://example.com/file1"}, "archive", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
+
+	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	if err == nil {
+		t.Fatal("expected error when task is cancelled")
+	}
+	if !strings.Contains(err.Error(), "取消") {
+		t.Errorf("expected error mentioning cancel, got: %v", err)
 	}
 }

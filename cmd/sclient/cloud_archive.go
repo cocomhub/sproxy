@@ -5,13 +5,14 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/spf13/cobra"
 )
 
-// NewCmdCloudArchive 创建 cloud-archive 命令的工厂函数。
+// NewCmdCloudArchive 创建 cloud-download archive 子命令的工厂函数。
 func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "archive <task-id> [task-id...]",
@@ -28,21 +29,29 @@ func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc
 			}
 
 			archiveName, _ := cmd.Flags().GetString("name")
+			if archiveName == "" {
+				// 客户端要求非空名称，未指定时自动生成
+				archiveName = fmt.Sprintf("cloud-archive-%d.tar.gz", time.Now().Unix())
+			}
 
 			if len(args) == 1 {
 				result, err := svc.ArchiveCloudTask(cmd.Context(), args[0], archiveName)
 				if err != nil {
-					ios.WriteErrLine("归档失败: %v", err)
 					return fmt.Errorf("归档失败: %w", err)
 				}
 				ios.WriteOutLine("归档完成: %s (%d bytes)", result.File, result.Size)
 			} else {
 				result, err := svc.ArchiveCloudTasks(cmd.Context(), args, archiveName)
 				if err != nil {
-					ios.WriteErrLine("归档失败: %v", err)
 					return fmt.Errorf("归档失败: %w", err)
 				}
-				ios.WriteOutLine("归档完成: %s (%d bytes, %d files)", result.File, result.Size, result.TaskCount)
+				// SkippedCount>0 时提示部分跳过（服务端批量归档会跳过无效/未完成任务）
+				if result.SkippedCount > 0 {
+					ios.WriteOutLine("归档完成: %s (%d bytes, %d files, 跳过 %d 个任务)",
+						result.File, result.Size, result.TaskCount, result.SkippedCount)
+				} else {
+					ios.WriteOutLine("归档完成: %s (%d bytes, %d files)", result.File, result.Size, result.TaskCount)
+				}
 			}
 			return nil
 		},

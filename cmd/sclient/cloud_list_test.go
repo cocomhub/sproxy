@@ -38,7 +38,7 @@ func TestCloudListCmd_ListTasks(t *testing.T) {
 				{"id": "task-3", "url": "https://example.com/c.zip", "filename": "c.zip", "status": "pending", "total_size": 2000},
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(tasks)
+			json.NewEncoder(w).Encode(map[string]any{"tasks": tasks, "total": len(tasks)})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -68,7 +68,7 @@ func TestCloudListCmd_EmptyList(t *testing.T) {
 	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]cloudTaskInfo{})
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []cloudTaskInfo{}, "total": 0})
 	}))
 	defer mock.Close()
 
@@ -89,9 +89,9 @@ func TestCloudListCmd_JSONOutput(t *testing.T) {
 	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]cloudTaskInfo{
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []cloudTaskInfo{
 			{ID: "task-1", URL: "https://example.com/f.zip", Filename: "f.zip", Status: "completed"},
-		})
+		}, "total": 1})
 	}))
 	defer mock.Close()
 
@@ -123,9 +123,9 @@ func TestCloudListCmd_StatusFilter(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]cloudTaskInfo{
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []cloudTaskInfo{
 			{ID: "task-completed", Status: "completed"},
-		})
+		}, "total": 1})
 	}))
 	defer mock.Close()
 

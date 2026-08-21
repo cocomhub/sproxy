@@ -8,8 +8,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
 // cloudTestServer 返回一个模拟 cloud download handler 的测试服务器。
@@ -56,34 +60,81 @@ func cloudTestServer(t *testing.T) (*httptest.Server, string) {
 		}
 		tasks := make([]CloudTask, 0, len(req.URLs))
 		for i, entry := range req.URLs {
+			filename := entry["filename"]
+			if filename == "" {
+				filename = "download"
+			}
 			tasks = append(tasks, CloudTask{
 				ID:       fmt.Sprintf("task-%d", i+1),
 				URL:      entry["url"],
-				Filename: "download",
+				Filename: filename,
 				Status:   "pending",
 			})
 		}
 		json.NewEncoder(w).Encode(map[string]any{"tasks": tasks})
 	})
 
-	// GET /api/cloud/tasks
+	// POST /api/cloud/groups
+	mux.HandleFunc("POST /api/cloud/groups", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Name string              `json:"name"`
+			URLs []map[string]string `json:"urls"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+			return
+		}
+		group := CloudGroup{
+			ID:         "group-1",
+			Name:       req.Name,
+			Status:     "pending",
+			TotalTasks: len(req.URLs),
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+		}
+		for i := range req.URLs {
+			group.TaskIDs = append(group.TaskIDs, fmt.Sprintf("task-%d", i+1))
+		}
+		json.NewEncoder(w).Encode(group)
+	})
+
+	// GET /api/cloud/tasks — 服务端统一返回 {tasks, total} 容器
 	mux.HandleFunc("GET /api/cloud/tasks", func(w http.ResponseWriter, r *http.Request) {
 		status := r.URL.Query().Get("status")
-		tasks := []CloudTask{
-			{ID: "task-1", URL: "https://example.com/a.zip", Filename: "a.zip", Status: "completed"},
+		all := []CloudTask{
+			{ID: "task-1", URL: "https://example.com/a.zip", Filename: "a.zip", Status: "completed", ETag: `"abc123"`, GroupID: "group-9", FileMTime: 1700000000000000000},
 			{ID: "task-2", URL: "https://example.com/b.zip", Filename: "b.zip", Status: "downloading"},
+			{ID: "task-3", URL: "https://example.com/c.zip", Filename: "c.zip", Status: "completed"},
 		}
+		filtered := all
 		if status != "" {
-			filtered := make([]CloudTask, 0)
-			for _, t := range tasks {
+			filtered = make([]CloudTask, 0)
+			for _, t := range all {
 				if t.Status == status {
 					filtered = append(filtered, t)
 				}
 			}
-			json.NewEncoder(w).Encode(filtered)
-			return
 		}
-		json.NewEncoder(w).Encode(tasks)
+		offset, limit := -1, 0
+		if v := r.URL.Query().Get("offset"); v != "" {
+			offset, _ = strconv.Atoi(v)
+		}
+		if v := r.URL.Query().Get("limit"); v != "" {
+			limit, _ = strconv.Atoi(v)
+		}
+		var resp []CloudTask
+		if limit <= 0 {
+			resp = filtered
+		} else {
+			start := max(offset, 0)
+			if start >= len(filtered) {
+				resp = nil
+			} else {
+				end := min(start+limit, len(filtered))
+				resp = filtered[start:end]
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tasks": resp, "total": len(filtered)})
 	})
 
 	// GET /api/cloud/tasks/{id}
@@ -225,40 +276,124 @@ func TestCloudDownload_Batch(t *testing.T) {
 	}
 }
 
-// TestCloudDownload_ListTasks 测试列举任务。
+// TestCloudDownload_BatchEntries 测试批量创建任务时每个 URL 可单独指定保存文件名。
+func TestCloudDownload_BatchEntries(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	entries := []cloudfilename.Entry{
+		{URL: "https://example.com/a.zip", Filename: "a-custom.zip"},
+		{URL: "https://example.com/b.zip"}, // 未指定，由服务端自动生成
+	}
+	tasks, err := c.CloudDownloadBatchEntries(t.Context(), entries)
+	if err != nil {
+		t.Fatalf("CloudDownloadBatchEntries: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("want 2 tasks, got %d", len(tasks))
+	}
+	if tasks[0].Filename != "a-custom.zip" {
+		t.Fatalf("want first task filename a-custom.zip, got %q", tasks[0].Filename)
+	}
+	if tasks[1].Filename != "download" {
+		t.Fatalf("want second task auto filename download, got %q", tasks[1].Filename)
+	}
+}
+
+// TestCloudCreateGroupEntries 测试创建下载组时每个 URL 可单独指定保存文件名。
+func TestCloudCreateGroupEntries(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	entries := []cloudfilename.Entry{
+		{URL: "https://example.com/a.zip"},
+		{URL: "https://example.com/b.zip", Filename: "b-named.zip"},
+	}
+	group, err := c.CloudCreateGroupEntries(t.Context(), "test-group", entries)
+	if err != nil {
+		t.Fatalf("CloudCreateGroupEntries: %v", err)
+	}
+	if group.ID != "group-1" {
+		t.Fatalf("want group ID group-1, got %q", group.ID)
+	}
+	if group.Name != "test-group" {
+		t.Fatalf("want group name test-group, got %q", group.Name)
+	}
+	if group.TotalTasks != 2 {
+		t.Fatalf("want 2 tasks in group, got %d", group.TotalTasks)
+	}
+}
+
+// TestCloudDownload_ListTasks 测试列举任务（服务端返回 {tasks, total} 容器）。
 func TestCloudDownload_ListTasks(t *testing.T) {
 	t.Parallel()
 	ts, _ := cloudTestServer(t)
 	c := NewFileClient(ts.URL)
 
-	tasks, err := c.ListCloudTasks(t.Context(), "")
+	tasks, total, err := c.ListCloudTasksWithTotal(t.Context(), "", -1, -1)
 	if err != nil {
-		t.Fatalf("ListCloudTasks: %v", err)
+		t.Fatalf("ListCloudTasksWithTotal: %v", err)
 	}
-	if len(tasks) != 2 {
-		t.Fatalf("want 2 tasks, got %d", len(tasks))
+	if len(tasks) != 3 {
+		t.Fatalf("want 3 tasks, got %d", len(tasks))
+	}
+	if total != 3 {
+		t.Fatalf("want total 3, got %d", total)
 	}
 	if tasks[0].ID != "task-1" {
 		t.Fatalf("want first task ID task-1, got %q", tasks[0].ID)
 	}
-	if tasks[1].ID != "task-2" {
-		t.Fatalf("want second task ID task-2, got %q", tasks[1].ID)
+
+	// 旧版 ListCloudTasks 兼容：同样解析容器并返回全部 tasks
+	all, err := c.ListCloudTasks(t.Context(), "", -1, -1)
+	if err != nil {
+		t.Fatalf("ListCloudTasks: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("want 3 tasks from legacy ListCloudTasks, got %d", len(all))
 	}
 }
 
-// TestCloudDownload_ListTasksFiltered 测试按状态过滤任务列表。
+// TestCloudDownload_ListTasksPaginated 测试分页：limit 截断 + offset 跳过，total 为完整数。
+func TestCloudDownload_ListTasksPaginated(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	// offset=1, limit=1 → 只取第 2 条，total 仍为过滤后总数 3
+	tasks, total, err := c.ListCloudTasksWithTotal(t.Context(), "", 1, 1)
+	if err != nil {
+		t.Fatalf("ListCloudTasksWithTotal paginated: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task on page, got %d", len(tasks))
+	}
+	if tasks[0].ID != "task-2" {
+		t.Fatalf("want page task ID task-2, got %q", tasks[0].ID)
+	}
+	if total != 3 {
+		t.Fatalf("want total 3 across pages, got %d", total)
+	}
+}
+
+// TestCloudDownload_ListTasksFiltered 测试按状态过滤任务列表（total 与过滤一致）。
 func TestCloudDownload_ListTasksFiltered(t *testing.T) {
 	t.Parallel()
 	ts, _ := cloudTestServer(t)
 	c := NewFileClient(ts.URL)
 
 	// 过滤 completed 状态
-	tasks, err := c.ListCloudTasks(t.Context(), "completed")
+	tasks, total, err := c.ListCloudTasksWithTotal(t.Context(), "completed", -1, -1)
 	if err != nil {
-		t.Fatalf("ListCloudTasks with status=completed: %v", err)
+		t.Fatalf("ListCloudTasksWithTotal with status=completed: %v", err)
 	}
-	if len(tasks) != 1 {
-		t.Fatalf("want 1 completed task, got %d", len(tasks))
+	if len(tasks) != 2 {
+		t.Fatalf("want 2 completed tasks, got %d", len(tasks))
+	}
+	if total != 2 {
+		t.Fatalf("want total 2, got %d", total)
 	}
 	if tasks[0].ID != "task-1" {
 		t.Fatalf("want task ID task-1, got %q", tasks[0].ID)
@@ -407,8 +542,9 @@ func TestWithCloudDownloadMaxBatchURLs_Zero(t *testing.T) {
 	t.Parallel()
 	o := &cloudDownloadOptions{maxBatchURLs: 30}
 	WithCloudDownloadMaxBatchURLs(0)(o)
-	if o.maxBatchURLs != 30 {
-		t.Errorf("maxBatchURLs should remain unchanged, got %d", o.maxBatchURLs)
+	// n<=0 表示复位为"不限制"（覆盖先前设置），交给服务端强制上限
+	if o.maxBatchURLs != 0 {
+		t.Errorf("maxBatchURLs should be reset to 0 (unlimited), got %d", o.maxBatchURLs)
 	}
 }
 
@@ -437,19 +573,43 @@ func TestCloudDownload_Batch_EmptyList(t *testing.T) {
 	}
 }
 
-func TestCloudDownload_Batch_ExceedsLimit(t *testing.T) {
+// TestCloudDownload_Batch_ServerRejectsOverLimit 验证：数量上限由服务端强制
+// （cloud_max_batch_urls 配置），客户端发送超过服务端上限时收到 400，创建任务失败。
+func TestCloudDownload_Batch_ServerRejectsOverLimit(t *testing.T) {
 	t.Parallel()
-	ts, _ := cloudTestServer(t)
-	c := NewFileClient(ts.URL)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/cloud/download/batch" && r.Method == http.MethodPost {
+			var req struct {
+				URLs []map[string]string `json:"urls"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+				return
+			}
+			if len(req.URLs) > 5 {
+				http.Error(w, `{"error":"maximum 5 URLs per batch"}`, http.StatusBadRequest)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"tasks": []any{}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mock.Close()
 
-	// 101 个 URL，超过默认 100 上限
-	urls := make([]string, 101)
-	for i := range 101 {
+	c := NewFileClient(mock.URL)
+
+	// 6 个 URL，超过服务端配置上限 5 → 服务端 400 → 客户端返回 error（创建失败）
+	urls := make([]string, 6)
+	for i := range 6 {
 		urls[i] = "https://example.com/file"
 	}
 	_, err := c.CloudDownloadBatch(t.Context(), urls)
 	if err == nil {
-		t.Fatal("expected error for exceeding batch limit")
+		t.Fatal("expected error when server rejects batch over its configured limit")
+	}
+	if !strings.Contains(err.Error(), "maximum 5") {
+		t.Fatalf("expected server error message surfaced, got: %v", err)
 	}
 }
 
@@ -484,5 +644,62 @@ func TestCloudDownload_Batch_UnderCustomLimit(t *testing.T) {
 	}
 	if len(tasks) != 3 {
 		t.Fatalf("expected 3 tasks, got %d", len(tasks))
+	}
+}
+
+// TestCloudDownload_ListTasksLimitOnly 回归：只传 limit（offset 保持 -1）时也必须发送 limit 参数，
+// 否则 CLI 默认 offset=-1 会让 --limit 静默失效返回全量。
+func TestCloudDownload_ListTasksLimitOnly(t *testing.T) {
+	t.Parallel()
+	var gotQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/cloud/tasks", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{}, "total": 0})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL)
+	if _, _, err := c.ListCloudTasksWithTotal(t.Context(), "", -1, 5); err != nil {
+		t.Fatalf("ListCloudTasksWithTotal limit-only: %v", err)
+	}
+	if !strings.Contains(gotQuery, "limit=5") {
+		t.Fatalf("expected limit=5 in query, got %q", gotQuery)
+	}
+	if strings.Contains(gotQuery, "offset=") {
+		t.Fatalf("expected no offset param when offset=-1, got %q", gotQuery)
+	}
+}
+
+// TestCloudDownload_ListTasksFullFields 验证 ETag/GroupID/FileMTime 通过 JSON 往返完整保留
+// （服务端返回完整字段，client 必须反序列化到 CloudTask，CLI list 展示依赖此契约）。
+func TestCloudDownload_ListTasksFullFields(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	tasks, _, err := c.ListCloudTasksWithTotal(t.Context(), "", -1, 0)
+	if err != nil {
+		t.Fatalf("ListCloudTasksWithTotal: %v", err)
+	}
+	var found bool
+	for _, task := range tasks {
+		if task.ID == "task-1" {
+			found = true
+			if task.ETag != `"abc123"` {
+				t.Errorf("expected ETag preserved, got %q", task.ETag)
+			}
+			if task.GroupID != "group-9" {
+				t.Errorf("expected GroupID preserved, got %q", task.GroupID)
+			}
+			if task.FileMTime != 1700000000000000000 {
+				t.Errorf("expected FileMTime preserved, got %d", task.FileMTime)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected task-1 in full list")
 	}
 }
