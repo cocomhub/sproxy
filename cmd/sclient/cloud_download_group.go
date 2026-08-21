@@ -272,9 +272,15 @@ func NewCmdCloudGroupList(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			status, _ := cmd.Flags().GetString("status")
-			groups, err := svc.CloudListGroups(cmd.Context(), status)
+			offset, _ := cmd.Flags().GetInt("offset")
+			limit, _ := cmd.Flags().GetInt("limit")
+			groups, total, err := svc.CloudListGroupsWithTotal(cmd.Context(), status, offset, limit)
 			if err != nil {
 				return fmt.Errorf("列举下载组失败: %w", err)
+			}
+			// 分页时展示总数（total=0 时不显示，避免每次都在空列表旁打印 0）
+			if total > 0 && (offset > 0 || limit > 0) {
+				ios.WriteOutLine("下载组总数: %d", total)
 			}
 			if len(groups) == 0 {
 				ios.WriteOutLine("暂无下载组")
@@ -287,6 +293,8 @@ func NewCmdCloudGroupList(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 		},
 	}
 	cmd.Flags().String("status", "", "按状态过滤 (pending|downloading|completed|failed|cancelled)")
+	cmd.Flags().Int("offset", -1, "跳过前 N 条（默认 -1 不偏移）")
+	cmd.Flags().Int("limit", 0, "返回条数上限（默认 0 返回全部）")
 	return cmd
 }
 

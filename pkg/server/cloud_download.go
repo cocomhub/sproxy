@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -813,19 +814,40 @@ func (m *CloudDownloadManager) SnapshotTask(id string) (*CloudTask, bool) {
 	return &c, true
 }
 
-// ListTasks 列出所有任务，支持按 status 过滤。
-func (m *CloudDownloadManager) ListTasks(status string) []*CloudTask {
+// ListTasks 列出任务，支持按 status 过滤与 offset/limit 分页。
+// offset<0 时不偏移；limit<=0 时返回全部（兼容现有语义）。
+// 排序：CreatedAt 降序 + ID 降序 tie-break（newIDWithPrefix 单调序号保证稳定）。
+// total 为按 status 过滤后的任务总数（不受分页影响）。
+func (m *CloudDownloadManager) ListTasks(status string, offset, limit int) ([]*CloudTask, int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var result []*CloudTask
+	var all []*CloudTask
 	for _, t := range m.tasks {
 		if status == "" || t.Status == status {
 			c := *t
-			result = append(result, &c)
+			all = append(all, &c)
 		}
 	}
-	return result
+	// CreatedAt 降序，ID 降序 tie-break（保持稳定排序）
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].CreatedAt.Equal(all[j].CreatedAt) {
+			return all[i].ID > all[j].ID
+		}
+		return all[i].CreatedAt.After(all[j].CreatedAt)
+	})
+	total := len(all)
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		return all, total
+	}
+	if offset >= total {
+		return nil, total
+	}
+	end := min(offset+limit, total)
+	return all[offset:end], total
 }
 
 // CancelTask 取消正在进行的任务。
@@ -1450,19 +1472,40 @@ func (m *CloudDownloadManager) GetGroup(id string) (*CloudTaskGroup, bool) {
 	return &c, true
 }
 
-// ListGroups 列出所有组，支持按 status 过滤。
-func (m *CloudDownloadManager) ListGroups(status string) []*CloudTaskGroup {
+// ListGroups 列出组，支持按 status 过滤与 offset/limit 分页。
+// offset<0 时不偏移；limit<=0 时返回全部（兼容现有语义）。
+// 排序：CreatedAt 降序 + ID 降序 tie-break（保持稳定排序）。
+// total 为按 status 过滤后的组总数（不受分页影响）。
+func (m *CloudDownloadManager) ListGroups(status string, offset, limit int) ([]*CloudTaskGroup, int) {
 	m.groupMu.RLock()
 	defer m.groupMu.RUnlock()
 
-	var result []*CloudTaskGroup
+	var all []*CloudTaskGroup
 	for _, g := range m.groups {
 		if status == "" || g.Status == status {
 			c := *g
-			result = append(result, &c)
+			all = append(all, &c)
 		}
 	}
-	return result
+	// CreatedAt 降序，ID 降序 tie-break（保持稳定排序）
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].CreatedAt.Equal(all[j].CreatedAt) {
+			return all[i].ID > all[j].ID
+		}
+		return all[i].CreatedAt.After(all[j].CreatedAt)
+	})
+	total := len(all)
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		return all, total
+	}
+	if offset >= total {
+		return nil, total
+	}
+	end := min(offset+limit, total)
+	return all[offset:end], total
 }
 
 // CancelGroup 取消组内所有 pending/downloading 任务（已完成任务跳过）。

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -97,24 +98,43 @@ func cloudTestServer(t *testing.T) (*httptest.Server, string) {
 		json.NewEncoder(w).Encode(group)
 	})
 
-	// GET /api/cloud/tasks
+	// GET /api/cloud/tasks — 服务端统一返回 {tasks, total} 容器
 	mux.HandleFunc("GET /api/cloud/tasks", func(w http.ResponseWriter, r *http.Request) {
 		status := r.URL.Query().Get("status")
-		tasks := []CloudTask{
+		all := []CloudTask{
 			{ID: "task-1", URL: "https://example.com/a.zip", Filename: "a.zip", Status: "completed"},
 			{ID: "task-2", URL: "https://example.com/b.zip", Filename: "b.zip", Status: "downloading"},
+			{ID: "task-3", URL: "https://example.com/c.zip", Filename: "c.zip", Status: "completed"},
 		}
+		filtered := all
 		if status != "" {
-			filtered := make([]CloudTask, 0)
-			for _, t := range tasks {
+			filtered = make([]CloudTask, 0)
+			for _, t := range all {
 				if t.Status == status {
 					filtered = append(filtered, t)
 				}
 			}
-			json.NewEncoder(w).Encode(filtered)
-			return
 		}
-		json.NewEncoder(w).Encode(tasks)
+		offset, limit := -1, 0
+		if v := r.URL.Query().Get("offset"); v != "" {
+			offset, _ = strconv.Atoi(v)
+		}
+		if v := r.URL.Query().Get("limit"); v != "" {
+			limit, _ = strconv.Atoi(v)
+		}
+		var resp []CloudTask
+		if limit <= 0 {
+			resp = filtered
+		} else {
+			start := max(offset, 0)
+			if start >= len(filtered) {
+				resp = nil
+			} else {
+				end := min(start+limit, len(filtered))
+				resp = filtered[start:end]
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tasks": resp, "total": len(filtered)})
 	})
 
 	// GET /api/cloud/tasks/{id}
@@ -306,40 +326,74 @@ func TestCloudCreateGroupEntries(t *testing.T) {
 	}
 }
 
-// TestCloudDownload_ListTasks 测试列举任务。
+// TestCloudDownload_ListTasks 测试列举任务（服务端返回 {tasks, total} 容器）。
 func TestCloudDownload_ListTasks(t *testing.T) {
 	t.Parallel()
 	ts, _ := cloudTestServer(t)
 	c := NewFileClient(ts.URL)
 
-	tasks, err := c.ListCloudTasks(t.Context(), "", -1, -1)
+	tasks, total, err := c.ListCloudTasksWithTotal(t.Context(), "", -1, -1)
 	if err != nil {
-		t.Fatalf("ListCloudTasks: %v", err)
+		t.Fatalf("ListCloudTasksWithTotal: %v", err)
 	}
-	if len(tasks) != 2 {
-		t.Fatalf("want 2 tasks, got %d", len(tasks))
+	if len(tasks) != 3 {
+		t.Fatalf("want 3 tasks, got %d", len(tasks))
+	}
+	if total != 3 {
+		t.Fatalf("want total 3, got %d", total)
 	}
 	if tasks[0].ID != "task-1" {
 		t.Fatalf("want first task ID task-1, got %q", tasks[0].ID)
 	}
-	if tasks[1].ID != "task-2" {
-		t.Fatalf("want second task ID task-2, got %q", tasks[1].ID)
+
+	// 旧版 ListCloudTasks 兼容：同样解析容器并返回全部 tasks
+	all, err := c.ListCloudTasks(t.Context(), "", -1, -1)
+	if err != nil {
+		t.Fatalf("ListCloudTasks: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("want 3 tasks from legacy ListCloudTasks, got %d", len(all))
 	}
 }
 
-// TestCloudDownload_ListTasksFiltered 测试按状态过滤任务列表。
+// TestCloudDownload_ListTasksPaginated 测试分页：limit 截断 + offset 跳过，total 为完整数。
+func TestCloudDownload_ListTasksPaginated(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	// offset=1, limit=1 → 只取第 2 条，total 仍为过滤后总数 3
+	tasks, total, err := c.ListCloudTasksWithTotal(t.Context(), "", 1, 1)
+	if err != nil {
+		t.Fatalf("ListCloudTasksWithTotal paginated: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("want 1 task on page, got %d", len(tasks))
+	}
+	if tasks[0].ID != "task-2" {
+		t.Fatalf("want page task ID task-2, got %q", tasks[0].ID)
+	}
+	if total != 3 {
+		t.Fatalf("want total 3 across pages, got %d", total)
+	}
+}
+
+// TestCloudDownload_ListTasksFiltered 测试按状态过滤任务列表（total 与过滤一致）。
 func TestCloudDownload_ListTasksFiltered(t *testing.T) {
 	t.Parallel()
 	ts, _ := cloudTestServer(t)
 	c := NewFileClient(ts.URL)
 
 	// 过滤 completed 状态
-	tasks, err := c.ListCloudTasks(t.Context(), "completed", -1, -1)
+	tasks, total, err := c.ListCloudTasksWithTotal(t.Context(), "completed", -1, -1)
 	if err != nil {
-		t.Fatalf("ListCloudTasks with status=completed: %v", err)
+		t.Fatalf("ListCloudTasksWithTotal with status=completed: %v", err)
 	}
-	if len(tasks) != 1 {
-		t.Fatalf("want 1 completed task, got %d", len(tasks))
+	if len(tasks) != 2 {
+		t.Fatalf("want 2 completed tasks, got %d", len(tasks))
+	}
+	if total != 2 {
+		t.Fatalf("want total 2, got %d", total)
 	}
 	if tasks[0].ID != "task-1" {
 		t.Fatalf("want task ID task-1, got %q", tasks[0].ID)

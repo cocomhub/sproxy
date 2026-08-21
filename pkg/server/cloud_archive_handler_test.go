@@ -12,12 +12,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// setupCloudArchiveTest 创建归档 handler 测试所需的临时服务器、CloudDownloadManager 和临时目录。
-func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManager, string) {
+// newTestCfgPtr 返回指向默认配置（uploadsDir=dir）的 atomic.Pointer[Config]，供 handler 测试写入 cfgPtr。
+func newTestCfgPtr(dir string) *atomic.Pointer[Config] {
+	var p atomic.Pointer[Config]
+	cfg := Default()
+	cfg.UploadsDir = dir
+	p.Store(cfg)
+	return &p
+}
+
+func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest.Server, *CloudDownloadManager, string) {
 	t.Helper()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024*1024, nil, testLogger())
@@ -34,12 +43,26 @@ func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManage
 		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
 	})
 
-	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
+	var cfgPtr atomic.Pointer[Config]
+	serverCfg := Default()
+	serverCfg.UploadsDir = dir
+	if modify != nil {
+		modify(serverCfg)
+	}
+	cfgPtr.Store(serverCfg)
+
+	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: &cfgPtr}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
 	mux.HandleFunc("POST /api/cloud/archive", h.cloudArchiveBatch)
 	return httptest.NewServer(mux), mgr, dir
+}
+
+// setupCloudArchiveTest 创建归档 handler 测试所需的临时服务器、CloudDownloadManager 和临时目录。
+func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManager, string) {
+	t.Helper()
+	return setupCloudArchiveTestWithCfg(t, nil)
 }
 
 // createCompletedTask 创建一个已完成的任务，并在 __cloud__/<id>/ 下创建测试文件。

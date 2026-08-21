@@ -170,7 +170,7 @@ func TestCloudDownloadGroupCmd_List(t *testing.T) {
 				{"id": "group-1", "name": "g1", "status": "completed", "total_tasks": 2, "completed": 2},
 			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(groups)
+			json.NewEncoder(w).Encode(map[string]any{"groups": groups, "total": len(groups)})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -194,7 +194,7 @@ func TestCloudDownloadGroupCmd_ListEmpty(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/groups" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode([]map[string]any{})
+			json.NewEncoder(w).Encode(map[string]any{"groups": []map[string]any{}, "total": 0})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)

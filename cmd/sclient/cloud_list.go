@@ -45,13 +45,18 @@ func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 			}
 
 			statusFilter, _ := cmd.Flags().GetString("status")
-			// offset/limit <0 表示不限制（返回全部）
-			tasks, err := svc.ListCloudTasks(cmd.Context(), statusFilter, -1, -1)
+			offset, _ := cmd.Flags().GetInt("offset")
+			limit, _ := cmd.Flags().GetInt("limit")
+			tasks, total, err := svc.ListCloudTasksWithTotal(cmd.Context(), statusFilter, offset, limit)
 			if err != nil {
 				return fmt.Errorf("获取云端下载任务列表失败: %w", err)
 			}
 
 			fm := buildFormatterWithWriter(ios.Out, cmd)
+			// 分页时展示总数（total=0 时不显示，避免每次都在空列表旁打印 0）
+			if total > 0 && (offset > 0 || limit > 0) {
+				fm.Printf("云任务总数: %d", total)
+			}
 			if len(tasks) == 0 {
 				fm.Println("暂无云端下载任务")
 				return nil
@@ -68,6 +73,8 @@ func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 	}
 
 	cmd.Flags().String("status", "", "按状态过滤（pending/downloading/completed/failed/cancelled）")
+	cmd.Flags().Int("offset", -1, "跳过前 N 条（默认 -1 不偏移）")
+	cmd.Flags().Int("limit", 0, "返回条数上限（默认 0 返回全部）")
 
 	return cmd
 }

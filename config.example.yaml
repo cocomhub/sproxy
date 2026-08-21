@@ -68,3 +68,9 @@ tls:
 # cloud_max_retries: 10                     # 瞬时失败（网络/5xx/超时）最大重试次数
 # cloud_retry_delay: "10s"                  # 重试间隔
 # cloud_download_allow_private: false       # 允许下载私有 IP 地址（默认关闭，SSRF 防护）
+
+# 云端下载任务归档（tar.gz）加固：
+# cloud_archive_max_bytes 限制单次云归档打包的原始文件大小总和（字节），0 或不填=不限制。
+# 无论是否设置，都受 max_storage_bytes（TryReserve）兜底；归档文件计入 __cloud_archives__/ 目录空间。
+# 同名归档文件已存在时返回 409（O_EXCL 防覆盖）；打包完成后按磁盘实际大小对账预留配额。
+# cloud_archive_max_bytes: 10737418240   # 10 GiB 示例

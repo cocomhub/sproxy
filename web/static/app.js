@@ -1314,11 +1314,13 @@ async function refreshCloudTasks() {
     if (tunnelHexKey) {
       const result = await tunnelRequest('GET', url, {}, null);
       const data = JSON.parse(new TextDecoder().decode(result.body));
-      tasks = data || [];
+      // 服务端返回 {tasks, total} 容器（保持对旧裸数组的兼容）
+      tasks = Array.isArray(data) ? data : (data && data.tasks) || [];
     } else {
       const resp = await fetch(BASE + url, { headers: headers() });
       if (!resp.ok) { body.innerHTML = '<div class="empty-msg">请求失败: ' + resp.status + '</div>'; return; }
-      tasks = await resp.json();
+      const data = await resp.json();
+      tasks = Array.isArray(data) ? data : (data && data.tasks) || [];
     }
     _cloudTasks = tasks || [];
     if (_cloudTasks.length === 0) {
@@ -1829,11 +1831,14 @@ async function refreshCloudGroups() {
     const url = '/api/cloud/groups';
     if (tunnelHexKey) {
       const result = await tunnelRequest('GET', url, {}, null);
-      groups = JSON.parse(new TextDecoder().decode(result.body));
+      const data = JSON.parse(new TextDecoder().decode(result.body));
+      // 服务端返回 {groups, total} 容器（保持对旧裸数组的兼容）
+      groups = Array.isArray(data) ? data : (data && data.groups) || [];
     } else {
       const resp = await fetch(BASE + url, { headers: headers() });
       if (!resp.ok) { body.innerHTML = '<div class="empty-msg">请求失败: ' + resp.status + '</div>'; return; }
-      groups = await resp.json();
+      const data = await resp.json();
+      groups = Array.isArray(data) ? data : (data && data.groups) || [];
     }
     _cloudGroups = groups || [];
     if (_cloudGroups.length === 0) {

@@ -36,7 +36,7 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
 	})
 
-	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
+	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: newTestCfgPtr(dir)}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
@@ -111,12 +111,15 @@ func TestCloudHandler_ListTasks(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	var tasks []*CloudTask
-	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+	var listResp struct {
+		Tasks []*CloudTask `json:"tasks"`
+		Total int          `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 2 {
-		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	if len(listResp.Tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(listResp.Tasks))
 	}
 }
 
@@ -212,12 +215,15 @@ func TestCloudHandler_ListTasksFilterByStatus(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var tasks []*CloudTask
-	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+	var listResp struct {
+		Tasks []*CloudTask `json:"tasks"`
+		Total int          `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 1 {
-		t.Fatalf("expected 1 completed task, got %d", len(tasks))
+	if len(listResp.Tasks) != 1 {
+		t.Fatalf("expected 1 completed task, got %d", len(listResp.Tasks))
 	}
 }
 
@@ -652,13 +658,16 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var groups []CloudTaskGroup
-	if err2 := json.NewDecoder(resp.Body).Decode(&groups); err2 != nil {
+	var listResp struct {
+		Groups []CloudTaskGroup `json:"groups"`
+		Total  int              `json:"total"`
+	}
+	if err2 := json.NewDecoder(resp.Body).Decode(&listResp); err2 != nil {
 		t.Fatal(err2)
 	}
 	resp.Body.Close()
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group in list, got %d", len(groups))
+	if len(listResp.Groups) != 1 {
+		t.Fatalf("expected 1 group in list, got %d", len(listResp.Groups))
 	}
 
 	// 组归档（按子任务目录收集已完成文件）

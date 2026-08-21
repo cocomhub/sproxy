@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,11 +152,31 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 	sendJSONResponse(w, map[string][]CloudBatchTaskResult{"tasks": results}, http.StatusOK)
 }
 
+// parseOffsetLimit 解析 ?offset=&limit= 查询参数。
+// 解析失败（缺失或非整数）返回默认值：offset=-1（不偏移）、limit=0（返回全部）。
+func parseOffsetLimit(r *http.Request) (offset, limit int) {
+	offset = -1
+	limit = 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			offset = n
+		}
+	}
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	return offset, limit
+}
+
 // cloudListTasks 处理 GET /api/cloud/tasks。
+// 返回 {tasks, total} 容器；total 为按 status 过滤后的任务总数（不受分页影响）。
 func (h *Handlers) cloudListTasks(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
-	tasks := h.cloudMgr.ListTasks(status)
-	sendJSONResponse(w, tasks, http.StatusOK)
+	offset, limit := parseOffsetLimit(r)
+	tasks, total := h.cloudMgr.ListTasks(status, offset, limit)
+	sendJSONResponse(w, map[string]any{"tasks": tasks, "total": total}, http.StatusOK)
 }
 
 // cloudGetTask 处理 GET /api/cloud/tasks/{id}。
@@ -305,15 +326,19 @@ func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 // cloudListGroups 处理 GET /api/cloud/groups。
+// 返回 {groups, total} 容器；total 为按 status 过滤后的组总数（不受分页影响）。
 func (h *Handlers) cloudListGroups(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
+	offset, limit := parseOffsetLimit(r)
 	// 先刷新所有组的最新状态，再按 status 过滤返回。否则只刷新"当前已处于该状态"
 	// 的组，刚转换到目标状态的组会被过滤查询漏掉，客户端看到的状态滞后。
-	for _, g := range h.cloudMgr.ListGroups("") {
+	allGroups, _ := h.cloudMgr.ListGroups("", -1, 0)
+	for _, g := range allGroups {
 		h.cloudMgr.UpdateGroupStatus(g.ID)
 	}
-	groups := h.cloudMgr.ListGroups(status)
-	sendJSONResponse(w, groups, http.StatusOK)
+	// total 需按同 status 过滤后的总数计算（ListGroups 内部过滤后统计）
+	groups, total := h.cloudMgr.ListGroups(status, offset, limit)
+	sendJSONResponse(w, map[string]any{"groups": groups, "total": total}, http.StatusOK)
 }
 
 // cloudCancelGroup 处理 POST /api/cloud/groups/{id}/cancel。
@@ -411,6 +436,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
 	var groupFiles []fileWithRelPath
 	var skippedTasks []string
+	var totalSourceSize int64
 
 	group, ok := h.cloudMgr.GetGroup(groupID)
 	if !ok {
@@ -442,12 +468,14 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 			skippedTasks = append(skippedTasks, taskID)
 			continue
 		}
-		// 收集后、打包前文件可能被删除/替换，先确认存在
-		if _, statErr := os.Stat(sourceFile); statErr != nil {
+		// 收集后、打包前文件可能被删除/替换，先确认存在并统计大小（用于总量限制与配额预估）
+		if info, statErr := os.Stat(sourceFile); statErr != nil {
 			h.logger.Warn("cloud group archive: skipping missing file",
 				"group_id", groupID, "task_id", taskID, "source_file", sourceFile, "error", statErr)
 			skippedTasks = append(skippedTasks, taskID)
 			continue
+		} else {
+			totalSourceSize += info.Size()
 		}
 		relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
 		groupFiles = append(groupFiles, fileWithRelPath{fullPath: sourceFile, relPath: relPath})
@@ -474,15 +502,54 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
+	if maxBytes := h.cloudArchiveMaxBytes(); maxBytes > 0 && totalSourceSize > maxBytes {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: fmt.Sprintf("archive exceeds cloud_archive_max_bytes: %d > %d", totalSourceSize, maxBytes),
+		}, http.StatusBadRequest)
+		return
+	}
+	pre := totalSourceSize + cloudArchiveReservePlaceholder
+	if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
+		sendJSONResponse(w, CloudArchiveResult{
+			Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+		}, http.StatusInsufficientStorage)
+		return
+	}
+
 	// 多文件打包
+	created := false
 	logger := h.logger.With("archive", "group", "group_id", groupID)
-	checksum, err := createMultiFileTarGz(groupFiles, outputPath, logger)
+	checksum, err := createMultiFileTarGz(groupFiles, outputPath, logger, &created)
 	if err != nil {
+		if !created {
+			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
+			h.storageMgr.Release(pre, CategoryCloud)
+			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
+			return
+		}
 		h.logger.Error("failed to create group archive", "group_id", groupID, "error", err)
+		_ = os.Remove(outputPath)
+		h.storageMgr.Release(pre, CategoryCloud)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
 		}, http.StatusInternalServerError)
 		return
+	}
+
+	// 按磁盘实际大小对账预留配额：释放预占后按实际 size 重新预留，账本收敛到 actual。
+	// 注意不能只释放 pre 而不补留——压缩后 actual 通常远小于 pre，若账本净为 0 会少计
+	// actual 字节（配额窗口被放大，直到 30min 扫描校准）。
+	h.storageMgr.Release(pre, CategoryCloud)
+	if actual, statErr := os.Stat(outputPath); statErr == nil {
+		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
+			h.logger.Error("storage full, removing archive to keep ledger consistent", "group_id", groupID, "error", rErr)
+			_ = os.Remove(outputPath)
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
 	}
 
 	info, _ := os.Stat(outputPath)

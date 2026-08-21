@@ -148,10 +148,29 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cl
 	return result.Tasks, nil
 }
 
-// CloudListTasks 列举云端下载任务。
+// CloudTaskList 是 GET /api/cloud/tasks 的响应容器（服务端统一返回该形态）。
+type CloudTaskList struct {
+	Tasks []CloudTask `json:"tasks"`
+	Total int         `json:"total"`
+}
+
+// CloudGroupList 是 GET /api/cloud/groups 的响应容器（服务端统一返回该形态）。
+type CloudGroupList struct {
+	Groups []CloudGroup `json:"groups"`
+	Total  int          `json:"total"`
+}
+
+// ListCloudTasks 列举云端下载任务。
 // status 可选过滤：pending/downloading/completed/failed/cancelled，为空时返回全部。
 // offset/limit 可选分页：offset<0 或 limit<=0 表示不限制（返回全部）。
+// 旧版语义保持：解析 {tasks, total} 容器并返回 tasks（返回全部条目）。
 func (c *FileClient) ListCloudTasks(ctx context.Context, status string, offset, limit int) ([]CloudTask, error) {
+	tasks, _, err := c.ListCloudTasksWithTotal(ctx, status, offset, limit)
+	return tasks, err
+}
+
+// ListCloudTasksWithTotal 列举云端下载任务并返回过滤后的总数（不受分页影响）。
+func (c *FileClient) ListCloudTasksWithTotal(ctx context.Context, status string, offset, limit int) ([]CloudTask, int, error) {
 	urlPath := "/api/cloud/tasks"
 	params := url.Values{}
 	if status != "" {
@@ -164,11 +183,11 @@ func (c *FileClient) ListCloudTasks(ctx context.Context, status string, offset, 
 	if len(params) > 0 {
 		urlPath += "?" + params.Encode()
 	}
-	tasks := make([]CloudTask, 0)
-	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &tasks); err != nil {
-		return nil, fmt.Errorf("列举云端任务: %w", err)
+	var list CloudTaskList
+	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &list); err != nil {
+		return nil, 0, fmt.Errorf("列举云端任务: %w", err)
 	}
-	return tasks, nil
+	return list.Tasks, list.Total, nil
 }
 
 // GetCloudTask 查询单个任务详情。
@@ -316,20 +335,32 @@ func (c *FileClient) CloudGetGroup(ctx context.Context, groupID string) (*CloudG
 
 // CloudListGroups 列举所有下载组。
 // status 可选过滤：pending/downloading/completed/partial/failed/cancelled，为空时返回全部。
+// 旧版语义保持：解析 {groups, total} 容器并返回 groups。
 func (c *FileClient) CloudListGroups(ctx context.Context, status string) ([]CloudGroup, error) {
+	groups, _, err := c.CloudListGroupsWithTotal(ctx, status, -1, 0)
+	return groups, err
+}
+
+// CloudListGroupsWithTotal 列举下载组并返回过滤后的总数（不受分页影响）。
+// offset<0 或 limit<=0 表示不限制（返回全部）。
+func (c *FileClient) CloudListGroupsWithTotal(ctx context.Context, status string, offset, limit int) ([]CloudGroup, int, error) {
 	urlPath := "/api/cloud/groups"
 	params := url.Values{}
 	if status != "" {
 		params.Set("status", status)
 	}
+	if offset >= 0 && limit > 0 {
+		params.Set("offset", strconv.Itoa(offset))
+		params.Set("limit", strconv.Itoa(limit))
+	}
 	if len(params) > 0 {
 		urlPath += "?" + params.Encode()
 	}
-	var groups []CloudGroup
-	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &groups); err != nil {
-		return nil, fmt.Errorf("列举下载组: %w", err)
+	var list CloudGroupList
+	if err := c.doJSON(ctx, http.MethodGet, urlPath, nil, &list); err != nil {
+		return nil, 0, fmt.Errorf("列举下载组: %w", err)
 	}
-	return groups, nil
+	return list.Groups, list.Total, nil
 }
 
 // CloudCancelGroup 取消组内所有下载任务。

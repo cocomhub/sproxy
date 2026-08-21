@@ -158,7 +158,7 @@ func TestCloudDownloadManager_ListTasks(t *testing.T) {
 	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100)
 	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200)
 
-	tasks := mgr.ListTasks("")
+	tasks, _ := mgr.ListTasks("", -1, 0)
 	if len(tasks) != 2 {
 		t.Fatalf("expected 2 tasks, got %d", len(tasks))
 	}
@@ -177,11 +177,11 @@ func TestCloudDownloadManager_ListTasksFilterByStatus(t *testing.T) {
 	t2.Status = "failed"
 	mgr.mu.Unlock()
 
-	completed := mgr.ListTasks("completed")
+	completed, _ := mgr.ListTasks("completed", -1, 0)
 	if len(completed) != 1 {
 		t.Fatalf("expected 1 completed task, got %d", len(completed))
 	}
-	failed := mgr.ListTasks("failed")
+	failed, _ := mgr.ListTasks("failed", -1, 0)
 	if len(failed) != 1 {
 		t.Fatalf("expected 1 failed task, got %d", len(failed))
 	}
@@ -284,7 +284,7 @@ func TestCloudDownloadManager_RecoverTasks(t *testing.T) {
 	// 新建一个 manager 模拟重启
 	mgr2 := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
 	mgr2.Close()
-	tasks := mgr2.ListTasks("")
+	tasks, _ := mgr2.ListTasks("", -1, 0)
 	if len(tasks) != 2 {
 		t.Fatalf("expected 2 recovered tasks, got %d", len(tasks))
 	}
@@ -1686,7 +1686,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	if g2.Status != "completed" || len(g2.TaskIDs) != 2 || g2.ArchiveFile != ".__cloud_archives__/g1.tar.gz" {
 		t.Fatalf("unexpected recovered group: %+v", g2)
 	}
-	if tasks := mgr2.ListTasks(""); len(tasks) != 2 {
+	if tasks, _ := mgr2.ListTasks("", -1, 0); len(tasks) != 2 {
 		t.Fatalf("expected 2 recovered tasks, got %d", len(tasks))
 	}
 
@@ -1697,7 +1697,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	if _, ok := mgr2.GetGroup(group.ID); ok {
 		t.Fatal("group should be deleted")
 	}
-	if tasks := mgr2.ListTasks(""); len(tasks) != 0 {
+	if tasks, _ := mgr2.ListTasks("", -1, 0); len(tasks) != 0 {
 		t.Fatalf("expected 0 tasks after group delete, got %d", len(tasks))
 	}
 	if usage := sm.UsageByCategory()[CategoryCloud]; usage != 0 {
@@ -1722,7 +1722,7 @@ func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
 		t.Fatalf("expected duplicate URL error, got %v", err)
 	}
 	// 组创建失败后不应泄漏已创建的子任务（Critical #2 回归）
-	if tasks := mgr.ListTasks(""); len(tasks) != 0 {
+	if tasks, _ := mgr.ListTasks("", -1, 0); len(tasks) != 0 {
 		t.Fatalf("expected 0 tasks after failed group creation (rollback), got %d", len(tasks))
 	}
 	if usage := sm.UsageByCategory()[CategoryCloud]; usage != 0 {
@@ -1831,7 +1831,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 		t.Fatalf("expected filename conflict error, got %v", err)
 	}
 	// 创建失败不应泄漏已创建的子任务与存储预留
-	if tasks := mgr.ListTasks(""); len(tasks) != 0 {
+	if tasks, _ := mgr.ListTasks("", -1, 0); len(tasks) != 0 {
 		t.Fatalf("expected 0 tasks after conflict, got %d", len(tasks))
 	}
 	if usage := sm.UsageByCategory()[CategoryCloud]; usage != 0 {
