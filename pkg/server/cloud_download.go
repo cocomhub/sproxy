@@ -364,15 +364,6 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 转交时 running 标记由新 goroutine 接管，旧 goroutine 的 defer 不得清除，
 	// 否则新 goroutine 会短暂丢失 running，导致 ResumeTask 并发启动。
 	var handedOff bool
-	defer func() {
-		if r := recover(); r != nil {
-			m.logger.Error("panic in download", "task_id", task.ID, "panic", r)
-			m.failTask(task, fmt.Sprintf("panic: %v", r))
-			// failTask 之后刷新组状态（panic 时 refreshTaskGroup defer 先于本处执行时状态未到终态）
-			m.refreshTaskGroup(task)
-		}
-	}()
-
 	// 创建可取消的 context（从 Background 派生，使客户端断连后下载可继续异步重试）。
 	// 必须在等待信号量之前注册 cancelFuncs：排队中的任务也能被取消/删除。
 	dlCtx, cancel := context.WithCancel(context.Background())
@@ -384,19 +375,35 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	m.cancelFuncs[task.ID] = cancel
 	m.running[task.ID] = true
 	m.mu.Unlock()
-	defer func() {
-		m.mu.Lock()
-		// handedOff 表示下载已移交给新 goroutine（同步断连转异步）：新 goroutine 已
-		// 重新注册 cancelFuncs/running，旧 defer 不得清除——否则 CancelTask/Close 会
-		// 丢失取消句柄，取消后下载继续写盘直至完成。
-		if !handedOff {
-			delete(m.cancelFuncs, task.ID)
-			delete(m.running, task.ID)
+
+	// cleanupRunning 清理 running/cancelFuncs 标记。
+	// 拆为独立函数，让 panic recovery 可先调用 failTask 再清理。
+	cleanupRunning := func() {
+		if handedOff {
+			return
 		}
+		m.mu.Lock()
+		delete(m.cancelFuncs, task.ID)
+		delete(m.running, task.ID)
 		m.mu.Unlock()
-	}()
+	}
+	defer cleanupRunning()
+
 	// 任务进入终态后刷新所属组状态，保证持久化的组状态不滞后于子任务实际进展
 	defer m.refreshTaskGroup(task)
+
+	// panic recovery 放在最后（最外层 defer，最先执行），
+	// 确保 panic 时先调用 failTask 再清理 running（避免 ResumeTask 在 failTask
+	// 完成前误判 goroutine 已退出并发起重写 .partial）。
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("panic in download", "task_id", task.ID, "panic", r)
+			m.failTask(task, fmt.Sprintf("panic: %v", r))
+			// failTask 之后刷新组状态（panic 时 refreshTaskGroup 已先执行，但那时状态是
+			// downloading 非终态，这里再调一次确保用 failed 状态更新组）。
+			m.refreshTaskGroup(task)
+		}
+	}()
 
 	// 竞态守卫：goroutine 启动前/排队期间任务可能已被取消（CancelTask 已置
 	// cancelled 并释放存储）。此时直接退出，不启动下载、不覆盖终态。
@@ -484,13 +491,17 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 
 		result, downloadErr = m.dl.Download(attemptCtx, task.URL, destPath, func(downloaded, total int64) {
 			m.mu.Lock()
-			defer m.mu.Unlock()
 			task.Downloaded = downloaded
 			if total > 0 {
 				task.TotalSize = total
 			}
-			// 标记为脏，由 flushLoop 每 30 秒批量持久化
-			m.markDirty(task.ID)
+			id := task.ID
+			m.mu.Unlock()
+			// 在 m.mu 外调用 markDirty，避免与 flushDirty 的 dirtyMu → m.mu 形成 ABBA 死锁。
+			// flushDirty 顺序：dirtyMu.Lock → saveTask(内部 m.mu.RLock)；
+			// progress 回调顺序：m.mu.Lock → markDirty(dirtyMu.Lock)。
+			// 将 markDirty 移出 m.mu 范围后锁序不再反转。
+			m.markDirty(id)
 		})
 
 		// 及时释放本次尝试的定时器，避免累积到函数退出
@@ -542,7 +553,6 @@ downloadDone:
 			m.running[task.ID] = true
 			handedOff = true
 			m.mu.Unlock()
-			// wg.Add(1) 在 go 之前确保不竞态
 			m.wg.Add(1)
 			go m.executeDownload(context.Background(), task) //nolint:gosec
 			return
@@ -1172,7 +1182,10 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 		cleaned++
 	}
 
-	// 清理引用已全部过期任务的空组（saveGroup 在锁外调用，避免 RLock 重入死锁）
+	// 清理引用已全部过期任务的空组（saveGroup 在锁外调用，避免 RLock 重入死锁）。
+	// 锁序说明：此处 m.groupMu 下调用 pruneGroupTaskIDs（内部取 m.mu.RLock），
+	// 嵌套顺序为 groupMu → mu；全代码库所有嵌套获取均遵循 groupMu → mu，
+	// 无反向路径（m.mu → groupMu），因此不存在 ABBA 死锁。
 	var toSave []*CloudTaskGroup
 	m.groupMu.Lock()
 	for gid, g := range m.groups {
@@ -1281,14 +1294,17 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 	rollback := func() {
 		// 先清除被吸收任务的组归属，避免悬挂引用到不存在的组
 		for _, id := range absorbedIDs {
+			var snap *CloudTask
 			m.mu.Lock()
 			t, ok := m.tasks[id]
 			if ok {
 				t.GroupID = ""
+				c := *t
+				snap = &c
 			}
 			m.mu.Unlock()
 			if ok {
-				_ = m.saveTask(t)
+				_ = m.saveTask(snap)
 			}
 		}
 		for i := len(newTaskIDs) - 1; i >= 0; i-- {
@@ -1750,6 +1766,7 @@ func (m *CloudDownloadManager) UpdateGroupStatus(groupID string) {
 
 // Close 停止所有后台 goroutine（flushLoop 和 cleanupExpired）并执行一次清理。
 // 在进程退出前应调用一次。多次调用安全。
+// 注意：wg.Wait 最多等待 30 秒，超时后返回（防止下载 goroutine 卡在 I/O 上永久阻塞）。
 func (m *CloudDownloadManager) Close() {
 	m.closeOnce.Do(func() {
 		m.mu.Lock()
@@ -1760,7 +1777,18 @@ func (m *CloudDownloadManager) Close() {
 		m.mu.Unlock()
 		close(m.stopFlush)
 		close(m.stopCleanup)
-		m.wg.Wait()
+
+		// 带超时的 Wait，防止下载 goroutine 卡在 I/O 上永久阻塞
+		done := make(chan struct{})
+		go func() {
+			m.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			m.logger.Warn("cloud download manager Close timed out waiting for goroutines")
+		}
 	})
 }
 
