@@ -33,8 +33,9 @@ func readEntriesFromFile(path string) ([]cloudfilename.Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
 	var entries []cloudfilename.Entry
-	for line := range strings.SplitSeq(string(data), "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -93,10 +94,6 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
-			archiveName, _ := cmd.Flags().GetString("archive-name")
-			if archiveName == "" {
-				archiveName = fmt.Sprintf("cloud-download-%d.tar.gz", time.Now().Unix())
-			}
 			outputDir, _ := cmd.Flags().GetString("output-dir")
 			keepFiles, _ := cmd.Flags().GetBool("keep-files")
 			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
@@ -107,6 +104,11 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 			entries, err := collectCloudEntries(args, urlFile)
 			if err != nil {
 				return err
+			}
+
+			archiveName, _ := cmd.Flags().GetString("archive-name")
+			if archiveName == "" {
+				archiveName = fmt.Sprintf("cloud-download-%d.tar.gz", time.Now().Unix())
 			}
 
 			ios.WriteOutLine("链式下载 %d 个 URL...", len(entries))
@@ -570,14 +572,14 @@ func extractTarGz(src, destDir string) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(targetPath, 0755); err != nil {
+			if err := os.MkdirAll(targetPath, os.FileMode(header.Mode)); err != nil {
 				return fmt.Errorf("创建目录失败: %w", err)
 			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 				return fmt.Errorf("创建目录失败: %w", err)
 			}
-			outFile, err := os.Create(targetPath)
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
 			if err != nil {
 				return fmt.Errorf("创建文件失败: %w", err)
 			}

@@ -51,6 +51,10 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 			urlFile, _ := cmd.Flags().GetString("url-file")
 
+			if len(args) < 2 && urlFile == "" {
+				return fmt.Errorf("请提供组名和至少一个 URL，或使用 --url-file 指定 URL 文件")
+			}
+
 			entries, collectErr := collectCloudEntries(args[1:], urlFile)
 			if collectErr != nil {
 				return collectErr
@@ -111,12 +115,11 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 	return cmd
 }
 
-// preflightGroupEntries 客户端预校验：组内保存文件名必须唯一（与服务端 CreateGroup 规则一致），
-// 且同一 URL 不允许出现两次。冲突在发送前拦截，同时展示每个 URL 的最终保存文件名。
+// preflightGroupEntries 客户端预校验：组内保存文件名必须唯一（与服务端 CreateGroup 规则一致）。
+// 冲突在发送前拦截，同时展示每个 URL 的最终保存文件名。
 func preflightGroupEntries(ios cli.IOStreams, name string, entries []cloudfilename.Entry) error {
 	ios.WriteOutLine("创建下载组 %q (%d 个条目):", name, len(entries))
 	filenameSeen := make(map[string]string, len(entries))
-	urlSeen := make(map[string]bool, len(entries))
 	var conflicts []string
 	for _, e := range entries {
 		fn, resolveErr := cloudfilename.ResolveFilename(e)
@@ -128,10 +131,6 @@ func preflightGroupEntries(ios cli.IOStreams, name string, entries []cloudfilena
 		} else {
 			filenameSeen[fn] = e.URL
 		}
-		if urlSeen[e.URL] {
-			conflicts = append(conflicts, fmt.Sprintf("重复 URL %s（可指定不同保存文件名也无法消除）", e.URL))
-		}
-		urlSeen[e.URL] = true
 		ios.WriteOutLine("  %s -> %s", e.URL, fn)
 	}
 	if len(conflicts) > 0 {

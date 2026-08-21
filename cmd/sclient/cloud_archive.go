@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// NewCmdCloudArchive 创建 cloud-archive 命令的工厂函数。
+// NewCmdCloudArchive 创建 cloud-download archive 子命令的工厂函数。
 func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "archive <task-id> [task-id...]",
