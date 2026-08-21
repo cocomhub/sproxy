@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // setupDownloadItemsTest 创建带上传/下载 mock 的服务端，并在其上预置两个文件。
@@ -23,11 +21,9 @@ func setupDownloadItemsTest(t *testing.T) *FileClient {
 	// 预置两个文件供下载
 	for _, name := range []string{"a.txt", "b.txt"} {
 		content := []byte("content-" + name)
-		sum := testutil.SHA256Hex(content)
 		if err := os.WriteFile(filepath.Join(dir, name), content, 0644); err != nil {
 			t.Fatal(err)
 		}
-		_ = sum
 	}
 	return c
 }
@@ -104,12 +100,8 @@ func TestDownloadItems_EmptyRemotePath(t *testing.T) {
 func TestDownloadItems_LocalPathDefaultsToBasename(t *testing.T) {
 	c := setupDownloadItemsTest(t)
 	outDir := t.TempDir()
-	// chdir 到 outDir 使 basename 落盘于当前目录
-	oldWd, _ := os.Getwd()
-	if err := os.Chdir(outDir); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(oldWd) //nolint:errcheck
+	// t.Chdir 自动恢复原工作目录（Go 1.24+），使 basename 落盘于 outDir
+	t.Chdir(outDir)
 
 	items := []DownloadItem{{RemotePath: "a.txt"}}
 	if err := c.DownloadItems(t.Context(), items); err != nil {
