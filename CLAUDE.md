@@ -291,7 +291,7 @@ type Conn interface {
 | `cloud_max_concurrent` | int | 3 | 云端下载并发数 |
 | `cloud_sync_threshold` | size | 20MiB | 同步阈值（handler 提交时大小未知恒异步，字段保留供未来按大小同步） |
 | `cloud_max_batch_urls` | int | 100 | 批量/组下载单次最大 URL 数；超过服务端返回 400 使创建失败 |
-| `cloud_download_timeout` / `.idle_timeout` | duration | 30m / 1m | 单次下载整体/空闲超时 |
+| `cloud_download_timeout` / `cloud_download_idle_timeout` | duration | 30m / 1m | 单次下载整体/空闲超时 |
 | `cloud_max_retries` / `cloud_retry_delay` | int / duration | 10 / 10s | 瞬时失败重试 |
 | `cloud_archive_max_bytes` | int64 | 0（不限） | 单次云归档原始文件大小总和上限；归档走 O_EXCL 防覆盖 + TryReserve 配额 |
 | `provider.default` | string | | 云端下载提供者 |

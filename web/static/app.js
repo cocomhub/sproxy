@@ -1415,23 +1415,20 @@ async function doChainDownloadCloud(lines, filenames) {
     if (!archiveResult.success) { showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error'); return; }
     showToast('下载归档并清理中...', 'info');
     const downloadName = archiveResult.file.split('/').pop();
-    // 先下载一次归档（I5：此前循环内重复下载 N 次同一归档），再逐个清理任务
-    let downloaded = false;
+    // 先下载一次归档（I5：此前循环内重复下载 N 次同一归档），再逐个清理任务。
+    // 两分支失败路径均 return，成功即已触发下载，无需额外标记。
     if (tunnelHexKey) {
       const streamResult = await tunnelDownloadStream(archiveResult.file);
-      if (streamResult && streamResult.body) {
-        triggerBrowserDownload(streamResult.body, downloadName);
-        downloaded = true;
-      } else {
+      if (!streamResult || !streamResult.body) {
         showToast('归档下载失败', 'error');
         return;
       }
+      triggerBrowserDownload(streamResult.body, downloadName);
     } else {
       const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: headers() });
       if (!dlResp.ok) { showToast('归档下载失败: HTTP ' + dlResp.status, 'error'); return; }
       const blob = await dlResp.blob();
       triggerBrowserDownload(blob, downloadName);
-      downloaded = true;
     }
     for (let i = 0; i < taskIds.length; i++) {
       if (tunnelHexKey) {
