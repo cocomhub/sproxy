@@ -19,6 +19,9 @@ import (
 // registerFrameTTL 是注册帧等待的超时时间。
 const registerFrameTTL = 10 * time.Second
 
+// maxRegisterFrameBytes 是注册帧的最大字节数（防恶意大帧耗尽内存）。
+const maxRegisterFrameBytes = 64 << 10 // 64 KiB
+
 // RegisterFrame 是节点连接后的注册帧（JSON）。
 // 向后兼容：若首个流上收到的是非 JSON 裸字符串（旧版仅发 nodeID），
 // 则等价于仅携带 NodeID 且无 token 的注册帧。
@@ -217,9 +220,12 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 		s.handleStream(m, stream)
 	}
 
-	s.rt.Remove(info.ID)
-	s.rt.ClearServices(info.ID)
-	s.logger.Info("中继节点已移除", "node", reg.NodeID)
+	// 仅移除属于本连接的节点（防 stale identity：同名节点若已被新连接
+	// 重新注册，不应被旧连接断开时误删）。
+	if s.rt.RemoveIfOwned(info.ID, m) {
+		s.rt.ClearServices(info.ID)
+		s.logger.Info("中继节点已移除", "node", reg.NodeID)
+	}
 	return nil
 }
 
@@ -232,12 +238,14 @@ func (s *HubServer) readRegisterFrame(ctx context.Context, conn xfer.Conn) (*Reg
 	regCtx, cancel := context.WithTimeout(ctx, registerFrameTTL)
 	defer cancel()
 
-	var raw = make([]byte, 0, 1<<10)
 	msg, err := conn.Receive(regCtx)
 	if err != nil {
 		return nil, err
 	}
-	raw = append(raw, msg...)
+	if len(msg) > maxRegisterFrameBytes {
+		return nil, fmt.Errorf("注册帧过大: %d bytes (max %d)", len(msg), maxRegisterFrameBytes)
+	}
+	raw := msg
 
 	reg := &RegisterFrame{}
 	if err := json.Unmarshal(raw, reg); err != nil || reg.NodeID == "" {

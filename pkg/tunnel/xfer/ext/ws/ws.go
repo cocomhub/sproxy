@@ -94,14 +94,20 @@ func (c *wsConn) Send(ctx context.Context, msg []byte) error {
 }
 
 // Receive 阻塞接收一条二进制消息。
+// 单条消息上限 maxMessageBytes，防恶意超大消息耗尽内存。
 func (c *wsConn) Receive(ctx context.Context) ([]byte, error) {
-	c.conn.SetReadLimit(-1)
+	c.conn.SetReadLimit(maxMessageBytes)
 	_, msg, err := c.conn.Read(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return msg, nil
 }
+
+// maxMessageBytes 是单条 WebSocket 消息的最大字节数（1 MiB）。
+// mux 帧（8B 头 + 最多 64 KiB 负载）在隧道/流中继下均小于此值；
+// 该上限仅用于防止恶意超大单帧耗尽内存。
+const maxMessageBytes = 1 << 20
 
 // Close 关闭 WebSocket 连接。
 // 先 close(closeCh) 广播关闭信号释放阻塞在 Send 上的 goroutine，

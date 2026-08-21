@@ -27,12 +27,25 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
 
+// ServeOptions 配置 Serve 的拨号策略。
+type ServeOptions struct {
+	// DialPolicy 出口模式下的目标地址校验策略。
+	// nil 时使用 DialAllowed（严格：仅允许公网目标）。
+	DialPolicy func(addr string) bool
+}
+
 // Serve 是叶子侧的流接收循环。
 // localAddr 是本地 HTTP 服务地址（HTTP 中继转发目标）；
 // dialAllow 为 true 时启用出口模式（收到 dial 帧可出站连接）。
-func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger) error {
+func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger, opts ...ServeOptions) error {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	dialPolicy := DialAllowed
+	for _, o := range opts {
+		if o.DialPolicy != nil {
+			dialPolicy = o.DialPolicy
+		}
 	}
 	for {
 		stream, err := m.Accept(ctx)
@@ -62,7 +75,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 					logger.Warn("收到 dial 帧但未开启 --dial-allow", "addr", d.Dial)
 					return
 				}
-				if !DialAllowed(d.Dial) {
+				if !dialPolicy(d.Dial) {
 					logger.Warn("出口模式收到非法 dial 地址", "addr", d.Dial)
 					return
 				}
@@ -143,15 +156,33 @@ func pump(s mux.Stream, remote net.Conn) {
 }
 
 // DialAllowed 限制出口模式可拨号的目标（最小授权）。
+// 仅允许公网目标：IP 必须是全局单播（排除回环/私有/链路本地/多播），
+// 主机名解析后同样按解析出的 IP 校验（防 DNS rebinding 指向内网）。
 func DialAllowed(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return false
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		// 主机名：允许（公网域名也放行，便于访问云服务器）
-		return true
+	if ip := net.ParseIP(host); ip != nil {
+		return ipAllowed(ip)
 	}
-	return ip.IsLoopback() || ip.IsPrivate()
+	// 主机名：解析后校验所有解析出的 IP，全部公网才放行
+	ips, err := net.LookupIP(host)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if !ipAllowed(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+func ipAllowed(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	return true
 }
