@@ -37,12 +37,21 @@
     // 无 scheme 但非空 Host）；其余（mailto:、data:、相对 URL、纯主机名）Host 均为空。
     let hostStart;
     const schemeEnd = rest.indexOf('://');
+    let schemePrefix = ''; // scheme 前原文（用于检测前导空白，对齐 Go url.Parse 报错）
     if (schemeEnd >= 0) {
       hostStart = schemeEnd + 3;
+      schemePrefix = rest.slice(0, schemeEnd);
     } else if (rest.startsWith('//')) {
       hostStart = 2;
     } else {
       return null; // 无 host → Go url.Parse 的 Host 为空
+    }
+    // 前导空白：Go url.Parse 会把整段前导空白解析进 Scheme（如 "  http"），
+    // 随后因 first path segment contains colon 报错 → 默认返回 download；
+    // JS 若忽略空白则会把空白留在 scheme prefix 之外正常解析出 'file'，两短分歧。
+    // 这里显式对齐：scheme 前出现任何空白 → 视为无 host（download）。
+    if (/^\s/.test(schemePrefix)) {
+      return null;
     }
     const afterScheme = rest.slice(hostStart);
     const slashIdx = afterScheme.indexOf('/');
@@ -55,6 +64,15 @@
       rawPath = afterScheme.slice(slashIdx);
     }
     if (!host) return null;
+    // 剥离 userinfo（Go url.Parse 的 Host 不含 user:pass@ 前缀；userinfo 只影响解析不参与 Path）
+    const atIdx = host.indexOf('@');
+    let hostForValidation = host;
+    if (atIdx >= 0) {
+      hostForValidation = host.slice(atIdx + 1);
+    }
+    // host 中出现任何百分号 → Go url.Parse 报 invalid URL escape（host 不允许未解码
+    // 转义），默认返回 download。注意 userinfo 部分（@ 前）允许百分号，不在此列。
+    if (/%/.test(hostForValidation)) return null;
     return { rawPath: rawPath, rawQuery: rawQuery, hash: hash };
   }
 
@@ -159,18 +177,42 @@
   }
 
   // safeDefaultFromURL = genDefaultFilename + filepathSafe 一步完成
+  // 注意：Go url.Parse 不做前导/尾随空白 trim —— 前导空白会让 host 解析失败
+  //       （返回 download），而尾随空白会被当作路径的一部分，Safe 时会去除。
+  //       因此这里不能全局 trim，避免破坏与 Go 的一致性；
+  //       前导空白已在 parseURL 中按 Go 语义处理（→ download）。
   function safeDefaultFromURL(rawUrl) {
     return filepathSafe(genDefaultFilename(rawUrl));
   }
 
-  // validateEntry 校验 URL 格式（对齐 Go cloudfilename.ValidateEntry）
+  // validateEntry 校验 URL 格式（对齐 Go cloudfilename.ValidateEntry）。
+  // 返回结构化结果: { valid, code, message }。
+  // 优先于 trim 前先判空（空串 → EMPTY_URL）；
+  // 注意：Go url.Parse 对前导空白（host 解析失败）与尾随空白（并入路径）
+  // 都各自有对应行为，这里不做 trim，保持与 Go 一致。
   function validateEntry(url) {
-    if (!url) return 'URL is empty';
+    if (!url) return { valid: false, code: 'EMPTY_URL', message: 'URL is empty' };
     const parsed = parseURL(url);
-    if (!parsed) return 'unsupported URL scheme or missing host';
-    if (!/^https?:\/\//i.test(url)) return 'unsupported URL scheme (only http/https)';
-    return null; // 无错误
+    if (!parsed) return { valid: false, code: 'BAD_SCHEME', message: 'unsupported URL scheme or missing host' };
+    if (!/^https?:\/\//i.test(url)) return { valid: false, code: 'BAD_SCHEME', message: 'unsupported URL scheme (only http/https)' };
+    return { valid: true, code: 'OK', message: '' };
   }
 
-  return { genDefaultFilename: genDefaultFilename, filepathSafe: filepathSafe, safeDefaultFromURL: safeDefaultFromURL, validateEntry: validateEntry };
+  // validateEntries 校验一组条目：全部通过 validateEntry，且同 URL 不允许出现
+  // 不同 Filename（对齐 Go cloudfilename.ValidateEntries，ErrEntryDupURL）。
+  // 返回首个错误结果: { valid, code, message }。
+  function validateEntries(entries) {
+    const urlFilenames = {};
+    for (const e of entries) {
+      const v = validateEntry(e.url);
+      if (!v.valid) return v;
+      if (urlFilenames[e.url] !== undefined && urlFilenames[e.url] !== e.filename) {
+        return { valid: false, code: 'DUP_URL', message: 'duplicate URL with different filename: ' + e.url };
+      }
+      urlFilenames[e.url] = e.filename;
+    }
+    return { valid: true, code: 'OK', message: '' };
+  }
+
+  return { genDefaultFilename: genDefaultFilename, filepathSafe: filepathSafe, safeDefaultFromURL: safeDefaultFromURL, validateEntry: validateEntry, validateEntries: validateEntries };
 });

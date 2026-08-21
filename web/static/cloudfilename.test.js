@@ -16,7 +16,7 @@ const assert = require('node:assert');
 const path = require('node:path');
 const fs = require('node:fs');
 
-const { genDefaultFilename, filepathSafe, safeDefaultFromURL, validateEntry } = require('./cloudfilename.js');
+const { genDefaultFilename, filepathSafe, safeDefaultFromURL, validateEntry, validateEntries } = require('./cloudfilename.js');
 
 const fixturePath = path.join(__dirname, '../../pkg/cloudfilename/testdata/cases.json');
 const cases = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
@@ -71,8 +71,32 @@ test('safeDefaultFromURL 安全语义（? 被替换为 _）', () => {
   assert.strictEqual(safeDefaultFromURL('https://example.com/file.txt?x=1'), 'file.txt_x=1');
 });
 
-test('validateEntry URL 格式校验', () => {
-  assert.strictEqual(validateEntry(''), 'URL is empty');
-  assert.strictEqual(validateEntry('ftp://e.com/a.zip'), 'unsupported URL scheme (only http/https)');
-  assert.strictEqual(validateEntry('https://e.com/a.zip'), null);
+test('validateEntry URL 格式校验（结构化结果）', () => {
+  assert.deepStrictEqual(validateEntry(''), { valid: false, code: 'EMPTY_URL', message: 'URL is empty' });
+  assert.deepStrictEqual(validateEntry('ftp://e.com/a.zip'), { valid: false, code: 'BAD_SCHEME', message: 'unsupported URL scheme (only http/https)' });
+  assert.deepStrictEqual(validateEntry('https://e.com/a.zip'), { valid: true, code: 'OK', message: '' });
+  // 尾随空白并入路径，不影响校验（Go url.Parse 同样把尾随空白当作路径 → 合法）。
+  assert.deepStrictEqual(validateEntry('https://e.com/a.zip '), { valid: true, code: 'OK', message: '' });
+  // 前导空白：JS 的正则要求 scheme 位于开头 → BAD_SCHEME；
+  // Go url.Parse 报错（first path segment…colon）→ 同样拒绝。两者 reject 语义一致。
+  assert.strictEqual(validateEntry(' http://e.com/a.zip').valid, false);
+});
+
+test('validateEntries 同 URL 不同 filename 去重', () => {
+  assert.strictEqual(validateEntries([{ url: 'https://e.com/a.zip' }]).valid, true);
+  assert.strictEqual(
+    validateEntries([
+      { url: 'https://e.com/a.zip', filename: 'a.zip' },
+      { url: 'https://e.com/a.zip', filename: 'a.zip' },
+    ]).valid, true);
+  const dup = validateEntries([
+    { url: 'https://e.com/a.zip', filename: 'a.zip' },
+    { url: 'https://e.com/a.zip', filename: 'b.zip' },
+  ]);
+  assert.strictEqual(dup.valid, false);
+  assert.strictEqual(dup.code, 'DUP_URL');
+  // 单条目 URL 非法时返回该条目的错误
+  const bad = validateEntries([{ url: '' }]);
+  assert.strictEqual(bad.valid, false);
+  assert.strictEqual(bad.code, 'EMPTY_URL');
 });

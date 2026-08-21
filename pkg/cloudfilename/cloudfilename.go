@@ -8,7 +8,6 @@ package cloudfilename
 
 import (
 	"net/url"
-	"path/filepath"
 	"strings"
 	"unicode/utf8"
 )
@@ -129,11 +128,17 @@ func reservedBase(name string) bool {
 
 // truncateName 将文件名按字节截断到 maxBytes 内，优先保留扩展名。
 // 扩展名本身超长（>= maxBytes）时放弃保留，直接整体截断。
+// 扩展名取最后一个 '.' 之后的部分（与 JS truncateName 的 lastIndexOf 一致，
+// 不使用 filepath.Ext：后者按平台分隔符处理，跨平台语义不一致）。
 func truncateName(name string, maxBytes int) string {
 	if len(name) <= maxBytes {
 		return name
 	}
-	if ext := filepath.Ext(name); ext != "" && len(ext) < maxBytes {
+	var ext string
+	if dotIdx := strings.LastIndex(name, "."); dotIdx >= 0 {
+		ext = name[dotIdx:]
+	}
+	if ext != "" && len(ext) < maxBytes {
 		base := strings.TrimSuffix(name, ext)
 		if base != "" {
 			return truncateBytes(base, maxBytes-len(ext)) + ext
