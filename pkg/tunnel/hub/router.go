@@ -5,10 +5,8 @@ package hub
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"strings"
 	"time"
@@ -247,20 +245,21 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 		return ackErr
 	}
 
-	// 持续 handle 新到达的流直到连接关闭：
-	// 1. 由旧版 relay 等调用方发起的隧道请求（HTTP 请求-响应交换）
-	// 2. 期1 新增的 TCP 流中继（首帧 DialRequest）——由 hub 转给出口叶子
+	// 阻塞直到连接断开：accept 循环让 mux 保持存活，并消费叶子可能
+	// 主动 open 的流（当前协议下叶子只 accept 不 open，正常不会到达）。
+	// 循环退出意味着连接断开，随后移除节点。
 	for {
 		stream, aerr := m.Accept(ctx)
 		if aerr != nil {
 			break
 		}
-		s.handleStream(m, stream)
+		// 叶子主动开流当前无协议场景，直接关闭（防流堆积在 acceptCh）。
+		_ = stream.Close()
 	}
 
 	// 仅移除属于本连接的节点（防 stale identity：同名节点若已被新连接
 	// 重新注册，不应被旧连接断开时误删）。RemoveIfOwned 内部已清除该节点的
-	// 服务宣告与 returnCh，无需额外 CleanServices。
+	// 服务宣告，无需额外 CleanServices。
 	if s.rt.RemoveIfOwned(info.ID, m) {
 		s.logger.Info("中继节点已移除", "node", reg.NodeID)
 	}
@@ -293,36 +292,4 @@ func (s *HubServer) readRegisterFrame(ctx context.Context, conn xfer.Conn) (*Reg
 		reg = &RegisterFrame{NodeID: strings.TrimSpace(string(raw))}
 	}
 	return reg, nil
-}
-
-// handleStream 处理单个到达流：按首帧类型分发。
-// 若首帧是 DialRequest（[4B len][{"dial":addr}]，与 relay_stream/p2p/leaf 一致），
-// 由叶子出口节点（relay.Serve）处理；否则视为隧道 HTTP 请求尾帧。
-//
-// 注意：当前叶子不会主动向 hub 开流（dial/隧道流都是 hub 主动 Open 向叶子），
-// 此路径仅在未来叶子→hub 主动开流时可达。帧格式与 relay_stream.go 保持一致，
-// 避免 M2 式的潜伏格式错位。
-func (s *HubServer) handleStream(m *mux.Mux, stream mux.Stream) {
-	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(stream, lenBuf); err != nil {
-		return
-	}
-	metaLen := binary.BigEndian.Uint32(lenBuf)
-	if metaLen == 0 || metaLen > 1<<20 {
-		s.rt.ReturnStream(m, stream)
-		return
-	}
-	meta := make([]byte, metaLen)
-	if _, err := io.ReadFull(stream, meta); err != nil {
-		return
-	}
-	var head DialRequest
-	if err := json.Unmarshal(meta, &head); err == nil && head.Dial != "" {
-		// Hub 自身不做出口（叶子/portal 承担），此处记录即可。
-		s.logger.Debug("收到非出口的 dial 帧", "addr", head.Dial)
-		stream.Close()
-		return
-	}
-	// 非 dial 帧（HTTP tunnel 请求尾帧）：回传 JitAccept 队列供 Tunnel.Serve 处理。
-	s.rt.ReturnStream(m, stream)
 }

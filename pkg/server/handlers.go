@@ -223,11 +223,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// Hub 管理 API（中继系统），需鉴权
 	if opts.RouteTable != nil {
-		relayHandler := NewRelayHandler(opts.RouteTable, log.With("component", "relay"))
-		srvMux.HandleFunc("POST /api/relay", h.authMiddleware(relayHandler.ServeHTTP))
-		localMux.HandleFunc("POST /api/relay", relayHandler.ServeHTTP)
-
-		// 任意 TCP 流中继（SSH/长连接）：升级为双向字节流
+		// 任意 TCP 流中继（SSH/长连接）：升级为双向字节流。
+		// 注：旧的 HTTP JSON 中继（POST /api/relay）已删除——被本流中继完全替代。
 		streamHandler := NewRelayStreamHandler(opts.RouteTable, log.With("component", "relay_stream"))
 		srvMux.HandleFunc("POST /api/relay/stream", h.authMiddleware(streamHandler.ServeHTTP))
 		localMux.HandleFunc("POST /api/relay/stream", streamHandler.ServeHTTP)

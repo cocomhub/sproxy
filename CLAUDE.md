@@ -321,13 +321,40 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 | `archive <name> <path>...` | 创建归档 |
 | `cloud-download <url>...` | 创建云端下载任务 |
 | `tunnel [flags] <url>` | 隧道请求 |
-| `relay [flags]` | 中继节点模式（连接 Hub） |
+| `relay start/status/...` | 中继节点（连接 Hub）：`relay start --hub wss://.../ws --token T --node-id N [--service name:addr] [--dial-allow] [--dial-allow-cidr CIDR]` |
+| `relay dial --node <id> --tcp <addr> [-l :port]` | 经 hub 中继拨号到目标节点出口（任意 TCP） |
+| `p2p connect --peer <id> --tcp <addr> [-l :port]` | WebRTC 打洞直连对端（数据面不经 hub） |
+| `p2p listen [--node-id N]` | 作为对端监听 WebRTC 直连（信令经 hub） |
+| `mesh connect <service> [-l :port]` | 连接 mesh 服务（webrtc 直连优先，hub 中继回落） |
+| `mesh status` | 列出 hub 上的 mesh 服务 |
 | `genkey` | 生成 64 hex 密钥 |
 | `config [show\|set <k> <v>]` | 配置管理 |
 | `diag` | 诊断连接问题 |
 | `version` | 版本 + 配置信息 |
 | `cd [path]` | 切换当前目录 |
 | `pwd` | 打印当前目录 |
+
+### mesh 内网穿透（双重 NAT 场景）
+
+任意节点经 hub 注册后可互相寻址；数据面优先 webrtc 打洞直连、失败回落 hub 中继。
+
+**服务宣告 + 访问**：
+```bash
+# 节点 A（被访问方）宣告本地服务，作为出口节点（--dial-allow 允许出站拨号）
+sclient relay start --hub wss://hub:18083/ws --token T --node-id nodeA \
+  --service ssh:127.0.0.1:22 --dial-allow
+
+# 节点 B（访问方）连接服务（webrtc 直连优先，失败回落中继）
+sclient mesh connect ssh -l :2222   # 然后 ssh -p 2222 user@127.0.0.1
+```
+
+**云端主动推数据到本地**（方向对称）：
+```bash
+# 在云端节点上执行，经 hub 中继到本地 Mac 的服务（Mac 需先 relay start 注册）
+sclient relay dial --node mac-mini --tcp 127.0.0.1:2090
+# 云端即可向该连接写入数据，数据经 hub 中继到达 Mac 本地服务
+```
+说明：`relay dial` 双向可用——任意节点可作 caller 拨向另一节点，实现云端→本地主动推送（无需 Mac 先发起）。
 
 ### sclient 当前目录（`cd`/`pwd`）
 
