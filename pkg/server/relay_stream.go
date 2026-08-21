@@ -125,8 +125,11 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		done <- struct{}{}
 	}()
 
-	// 等待一个方向完成；随后关闭另一方向（半关闭传播由叶子负责）
+	// 等待一个方向完成；随后关闭另一方向（半关闭传播由叶子负责）。
+	// 关键：同时 stream.Close() 解除 io.Copy(conn, stream) 对 stream 的阻塞，
+	// 否则远端 TCP 不随 EOF 关闭时第二半段永久阻塞（goroutine 泄漏）。
 	<-done
 	_ = conn.Close()
+	_ = stream.Close()
 	<-done
 }

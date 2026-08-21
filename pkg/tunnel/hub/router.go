@@ -5,6 +5,7 @@ package hub
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -156,6 +157,8 @@ func NewRegisterFrame(nodeID, token string, meta Meta) []byte {
 }
 
 // registerNode 将节点注册到路由表。
+// 注意：重连时先清空旧服务宣告再写入新宣告，避免同名节点重连
+// 且新注册不带服务时旧服务残留（M4）。
 func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) NodeInfo {
 	info := NodeInfo{
 		ID:        NodeID(reg.NodeID),
@@ -167,9 +170,7 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) NodeInfo {
 		info.Addr = reg.Meta.Addr
 	}
 	s.rt.AddWithInfo(info)
-	if len(reg.Meta.Services) > 0 {
-		s.rt.SetServices(info.ID, reg.Meta.Services)
-	}
+	s.rt.SetServices(info.ID, reg.Meta.Services) // 空 slice 也写入，等价清除旧宣告
 	return info
 }
 
@@ -201,6 +202,10 @@ func NewHubServer(rt *RouteTable, auth *Authenticator, logger *slog.Logger) *Hub
 // 不经过 mux 流），完成注册/鉴权后再创建 mux 走流协议。
 // 若先建 mux，其 readLoop 会与注册帧的 Receive 竞争同一连接。
 func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
+	// 确保所有退出路径都关闭连接（注册帧读取失败、鉴权失败等
+	// 在 mux 创建前 return，不 close 会导致 WS 连接泄漏）。
+	defer conn.Close()
+
 	reg, err := s.readRegisterFrame(ctx, conn)
 	if err != nil {
 		s.logger.Warn("读取注册帧失败", "error", err)
@@ -234,9 +239,9 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 	}
 
 	// 仅移除属于本连接的节点（防 stale identity：同名节点若已被新连接
-	// 重新注册，不应被旧连接断开时误删）。
+	// 重新注册，不应被旧连接断开时误删）。RemoveIfOwned 内部已清除该节点的
+	// 服务宣告与 returnCh，无需额外 CleanServices。
 	if s.rt.RemoveIfOwned(info.ID, m) {
-		s.rt.ClearServices(info.ID)
 		s.logger.Info("中继节点已移除", "node", reg.NodeID)
 	}
 	return nil
@@ -269,11 +274,28 @@ func (s *HubServer) readRegisterFrame(ctx context.Context, conn xfer.Conn) (*Reg
 }
 
 // handleStream 处理单个到达流：按首帧类型分发。
-// 若首帧是 DialRequest（JSON），由调用方建立的出口（叶子/portal）自行处理；
-// 否则视为尾帧（HTTP 请求），交由既有隧道复层（Tunnel.Serve）处理。
+// 若首帧是 DialRequest（[4B len][{"dial":addr}]，与 relay_stream/p2p/leaf 一致），
+// 由叶子出口节点（relay.Serve）处理；否则视为隧道 HTTP 请求尾帧。
+//
+// 注意：当前叶子不会主动向 hub 开流（dial/隧道流都是 hub 主动 Open 向叶子），
+// 此路径仅在未来叶子→hub 主动开流时可达。帧格式与 relay_stream.go 保持一致，
+// 避免 M2 式的潜伏格式错位。
 func (s *HubServer) handleStream(m *mux.Mux, stream mux.Stream) {
+	lenBuf := make([]byte, 4)
+	if _, err := io.ReadFull(stream, lenBuf); err != nil {
+		return
+	}
+	metaLen := binary.BigEndian.Uint32(lenBuf)
+	if metaLen == 0 || metaLen > 1<<20 {
+		s.rt.ReturnStream(m, stream)
+		return
+	}
+	meta := make([]byte, metaLen)
+	if _, err := io.ReadFull(stream, meta); err != nil {
+		return
+	}
 	var head DialRequest
-	if err := json.NewDecoder(io.LimitReader(stream, 1<<20)).Decode(&head); err == nil && head.Dial != "" {
+	if err := json.Unmarshal(meta, &head); err == nil && head.Dial != "" {
 		// Hub 自身不做出口（叶子/portal 承担），此处记录即可。
 		s.logger.Debug("收到非出口的 dial 帧", "addr", head.Dial)
 		stream.Close()

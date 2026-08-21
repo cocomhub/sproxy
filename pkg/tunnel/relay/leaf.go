@@ -151,7 +151,9 @@ func pump(s mux.Stream, remote net.Conn) {
 		_ = s.CloseWrite()
 		done <- struct{}{}
 	}()
+	// 一个方向完成即解除另一方向阻塞，防非合作 TCP 永久挂起
 	<-done
+	_ = s.Close()
 	<-done
 }
 
@@ -177,6 +179,41 @@ func DialAllowed(addr string) bool {
 		}
 	}
 	return true
+}
+
+// NewDialPolicy 构造出口拨号策略：默认按 DialAllowed（仅公网），
+// 额外放行调用方显式指定的 CIDR 网段（如 192.168.0.0/16 允许内网服务）。
+// 主机名目标解析后按解析出的 IP 判定是否命中白名单。
+func NewDialPolicy(allowCIDRs []string) func(string) bool {
+	nets := make([]*net.IPNet, 0, len(allowCIDRs))
+	for _, c := range allowCIDRs {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return func(addr string) bool {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return false
+		}
+		ips := []net.IP{}
+		if ip := net.ParseIP(host); ip != nil {
+			ips = append(ips, ip)
+		} else if resolved, rerr := net.LookupIP(host); rerr == nil {
+			ips = append(ips, resolved...)
+		}
+		for _, ip := range ips {
+			if ipAllowed(ip) {
+				return true // 公网目标放行
+			}
+			for _, n := range nets {
+				if n.Contains(ip) {
+					return true // 命中显式白名单网段
+				}
+			}
+		}
+		return false
+	}
 }
 
 func ipAllowed(ip net.IP) bool {

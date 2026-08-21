@@ -39,3 +39,35 @@ func TestDialAllowed(t *testing.T) {
 		})
 	}
 }
+
+func TestNewDialPolicy(t *testing.T) {
+	// 默认（无白名单）等价 DialAllowed：私网拒绝
+	def := NewDialPolicy(nil)
+	if def("192.168.1.10:22") {
+		t.Fatal("default policy should reject private")
+	}
+	if !def("8.8.8.8:53") {
+		t.Fatal("default policy should allow public")
+	}
+
+	// 显式白名单：放行内网网段
+	withCidr := NewDialPolicy([]string{"192.168.0.0/16", "10.0.0.0/8"})
+	if !withCidr("192.168.1.10:22") {
+		t.Fatal("policy with cidr should allow 192.168.1.10")
+	}
+	if !withCidr("10.1.2.3:8080") {
+		t.Fatal("policy with cidr should allow 10.x")
+	}
+	// 白名单之外的内网仍拒绝
+	if withCidr("172.16.0.5:80") {
+		t.Fatal("policy with cidr should reject non-whitelisted private 172.x")
+	}
+	// 公网仍放行
+	if !withCidr("8.8.8.8:53") {
+		t.Fatal("policy with cidr should still allow public")
+	}
+	// 非法输入拒绝
+	if withCidr("no-port") {
+		t.Fatal("invalid addr should be rejected")
+	}
+}

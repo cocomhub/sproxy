@@ -22,6 +22,7 @@ package webrtc
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,6 +47,10 @@ const defaultICETimeout = 30 * time.Second
 
 var useHostOnly bool
 
+// SetHostOnly 控制是否使用仅本机 host 候选（不加 STUN）。
+// 主要用于测试与无 STUN 可达性的内网场景；生产跨公网打洞请保持默认（含 STUN）。
+func SetHostOnly(hostOnly bool) { useHostOnly = hostOnly }
+
 // Signal provides in-memory channels for SDP Offer/Answer exchange.
 type Signal struct {
 	Offer  chan string
@@ -60,20 +65,25 @@ func NewSignal() *Signal {
 }
 
 // Signaler 抽象 SDP Offer/Answer（以及可选 ICE candidate）的交换通道。
+//
+// 方向语义（重要）：
+//   - SendOffer/SendAnswer 的 to 是目标对端节点 ID；
+//   - WaitOffer/WaitAnswer 等待「发给本节点」的消息，返回 from（发送方节点 ID）。
+//
 // 进程内实现用 Signal channel；跨机器实现可走 hub 的 HTTP 存转信令桥。
 type Signaler interface {
-	// SendOffer 发送 Offer SDP 给对端 peer。
-	SendOffer(peer string, sdp string) error
-	// WaitOffer 阻塞等待对端 peer 发来的 Offer SDP。
-	WaitOffer(ctx context.Context, peer string) (string, error)
-	// SendAnswer 发送 Answer SDP 给对端 peer。
-	SendAnswer(peer string, sdp string) error
-	// WaitAnswer 阻塞等待对端 peer 发来的 Answer SDP。
-	WaitAnswer(ctx context.Context, peer string) (string, error)
+	// SendOffer 向对端 to 发送 Offer SDP。
+	SendOffer(to string, sdp string) error
+	// WaitOffer 阻塞等待对端发来的 Offer SDP，返回发送方节点 ID。
+	WaitOffer(ctx context.Context) (from, sdp string, err error)
+	// SendAnswer 向对端 to 发送 Answer SDP。
+	SendAnswer(to string, sdp string) error
+	// WaitAnswer 阻塞等待对端发来的 Answer SDP，返回发送方节点 ID。
+	WaitAnswer(ctx context.Context) (from, sdp string, err error)
 }
 
 // signalerAdapter 把内存 Signal channel 包装成 Signaler，
-// 使既有 Dial/Listen 兼容新接口（peer 参数忽略，单进程共享）。
+// 使既有 Dial/Listen 兼容新接口（单进程共享，from 无意义）。
 type signalerAdapter struct {
 	signal *Signal
 }
@@ -82,15 +92,15 @@ func (a signalerAdapter) SendOffer(_ string, sdp string) error {
 	a.signal.Offer <- sdp
 	return nil
 }
-func (a signalerAdapter) WaitOffer(_ context.Context, _ string) (string, error) {
-	return <-a.signal.Offer, nil
+func (a signalerAdapter) WaitOffer(_ context.Context) (string, string, error) {
+	return "", <-a.signal.Offer, nil
 }
 func (a signalerAdapter) SendAnswer(_ string, sdp string) error {
 	a.signal.Answer <- sdp
 	return nil
 }
-func (a signalerAdapter) WaitAnswer(_ context.Context, _ string) (string, error) {
-	return <-a.signal.Answer, nil
+func (a signalerAdapter) WaitAnswer(_ context.Context) (string, string, error) {
+	return "", <-a.signal.Answer, nil
 }
 
 type webrtcAddr struct{}
@@ -154,7 +164,8 @@ func Listen(signal *Signal) (*Conn, error) {
 }
 
 // DialWithSignaler 通过指定的 Signaler 建立连接（跨机器可用）。
-// peer 是远端节点标识，Signaler 负责 Offer/Answer 的传输。
+// peer 是远端节点标识：Offer 发给 peer，Answer 等待来自 peer。
+// 整体等待受 defaultICETimeout 约束，避免对端离线时永久挂起。
 func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	pc, err := newPC()
 	if err != nil {
@@ -190,10 +201,17 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		return nil, fmt.Errorf("dial: send offer: %w", err)
 	}
 
-	aJSON, err := sig.WaitAnswer(context.Background(), peer)
+	// 等待对端 Answer（带整体超时，防挂起）
+	waitCtx, cancel := context.WithTimeout(context.Background(), defaultICETimeout)
+	defer cancel()
+	from, aJSON, err := sig.WaitAnswer(waitCtx)
 	if err != nil {
 		pc.Close()
 		return nil, fmt.Errorf("dial: wait answer: %w", err)
+	}
+	if from != "" && from != peer {
+		pc.Close()
+		return nil, fmt.Errorf("dial: answer 来自非预期节点 %q（期望 %q）", from, peer)
 	}
 	var answer webrtc.SessionDescription
 	if err := json.Unmarshal([]byte(aJSON), &answer); err != nil {
@@ -221,7 +239,8 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 }
 
 // ListenWithSignaler 通过指定的 Signaler 等待连接（跨机器可用）。
-// peer 是本地节点标识，Signaler 负责 Offer/Answer 的传输。
+// 等待发给本节点的 Offer，Answer 回给 offer 的发送方。
+// 整体等待受 defaultICETimeout 约束，避免无拨号方时永久挂起。
 func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	pc, err := newPC()
 	if err != nil {
@@ -237,7 +256,9 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		}
 	})
 
-	oJSON, err := sig.WaitOffer(context.Background(), peer)
+	waitCtx, cancel := context.WithTimeout(context.Background(), defaultICETimeout)
+	defer cancel()
+	offerFrom, oJSON, err := sig.WaitOffer(waitCtx)
 	if err != nil {
 		pc.Close()
 		return nil, fmt.Errorf("listen: wait offer: %w", err)
@@ -267,7 +288,12 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		pc.Close()
 		return nil, fmt.Errorf("listen: %w", err)
 	}
-	if err := sig.SendAnswer(peer, aJSON); err != nil {
+	// Answer 回给 offer 的发送方（offerFrom）；未知则回给 peer（本地 listen 通常即对方）。
+	answerTo := offerFrom
+	if answerTo == "" {
+		answerTo = peer
+	}
+	if err := sig.SendAnswer(answerTo, aJSON); err != nil {
 		pc.Close()
 		return nil, fmt.Errorf("listen: send answer: %w", err)
 	}
@@ -304,27 +330,52 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 // ---------------------------------------------------------------------------
 
 // webrtcXferConn wraps *Conn to implement xfer.Conn.
+//
+// 消息分帧：DataChannel 是字节流（无消息边界），xfer.Conn 要求消息保序成块。
+// 这里仿照 tcp 传输，用 [4B big-endian length][payload] 帧界定消息，
+// 使 mux 的最大帧（8B 头 + 65535 负载）能完整传输，不被 Read 截断。
 type webrtcXferConn struct {
 	raw *Conn
+	mu  sync.Mutex // 串行化 Send（保护 raw.Write 不被并发交错）
 }
 
 func (c *webrtcXferConn) Send(_ context.Context, msg []byte) error {
-	_, err := c.raw.Write(msg)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	frame := make([]byte, 4+len(msg))
+	binary.BigEndian.PutUint32(frame[:4], uint32(len(msg)))
+	copy(frame[4:], msg)
+	_, err := c.raw.Write(frame)
 	return err
 }
 
 func (c *webrtcXferConn) Receive(_ context.Context) ([]byte, error) {
-	buf := make([]byte, 65536)
+	// pion DetachDataChannel 的 Read 是「消息级」：一次返回一整条应用消息，
+	// 若 p 小于消息则返回 io.ErrShortBuffer。因此必须先读整帧到足够大的缓冲，
+	// 再解析前 4 字节长度（不能先读 4B 再读体——那会把整个帧当一条消息）。
+	buf := make([]byte, maxFrameBytes)
 	n, err := c.raw.Read(buf)
 	if err != nil {
 		return nil, err
 	}
-	return buf[:n], nil
+	if n < 4 {
+		return nil, fmt.Errorf("webrtc: frame too short: %d bytes", n)
+	}
+	msgLen := binary.BigEndian.Uint32(buf[:4])
+	if int(msgLen) != n-4 {
+		return nil, fmt.Errorf("webrtc: frame length mismatch: header=%d got=%d", msgLen, n-4)
+	}
+	msg := make([]byte, msgLen)
+	copy(msg, buf[4:n])
+	return msg, nil
 }
 
 func (c *webrtcXferConn) Close() error {
 	return c.raw.Close()
 }
+
+// maxFrameBytes 是单条消息上限：mux 帧 65543 + 隧道元数据余量，取 1 MiB。
+const maxFrameBytes = 1 << 20
 
 // ConnAsXfer 把一个已建立的 WebRTC *Conn 包装成 xfer.Conn，
 // 供上层 mux 复用（网络信令建立后，把 DataChannel 当作 xfer 消息通道）。

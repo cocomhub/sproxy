@@ -55,6 +55,7 @@ func (s *HubSignaler) post(ctx context.Context, kind SignalKind, to, sdp, cand s
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Node-ID", s.nodeID)
 	if s.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+s.authToken)
 	}
@@ -77,6 +78,7 @@ func (s *HubSignaler) poll(ctx context.Context, peer string) ([]SignalMsg, error
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("X-Node-ID", s.nodeID)
 	if s.authToken != "" {
 		req.Header.Set("Authorization", "Bearer "+s.authToken)
 	}
@@ -85,6 +87,10 @@ func (s *HubSignaler) poll(ctx context.Context, peer string) ([]SignalMsg, error
 		return nil, fmt.Errorf("信令 poll 失败: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("信令 poll: HTTP %d: %s", resp.StatusCode, b)
+	}
 	var msgs []SignalMsg
 	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
 		return nil, fmt.Errorf("信令 poll 解析失败: %w", err)
@@ -92,54 +98,54 @@ func (s *HubSignaler) poll(ctx context.Context, peer string) ([]SignalMsg, error
 	return msgs, nil
 }
 
-// SendOffer 发送 Offer SDP。
-func (s *HubSignaler) SendOffer(peer string, sdp string) error {
-	return s.post(context.Background(), SignalOffer, peer, sdp, "")
+// SendOffer 向对端 to 发送 Offer SDP。
+func (s *HubSignaler) SendOffer(to string, sdp string) error {
+	return s.post(context.Background(), SignalOffer, to, sdp, "")
 }
 
-// WaitOffer 阻塞等待 Offer SDP。
-// 仅接受来自指定 peer（From == peer）的消息，拒绝伪装来源的信令，
-// 防止攻击者冒充对端注入伪造的 Offer。
-func (s *HubSignaler) WaitOffer(ctx context.Context, peer string) (string, error) {
+// WaitOffer 阻塞等待发给本节点（s.nodeID）的 Offer SDP。
+// 返回发送方节点 ID 与 SDP。任何已注册节点发来的 offer 都接受
+// （listener 无法预知拨号方，身份由服务端已校验 From 为注册节点）。
+func (s *HubSignaler) WaitOffer(ctx context.Context) (string, string, error) {
 	for {
-		msgs, err := s.poll(ctx, peer)
+		msgs, err := s.poll(ctx, s.nodeID)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		for _, m := range msgs {
-			if m.From == peer && m.Kind == SignalOffer && m.SDP != "" {
-				return m.SDP, nil
+			if m.To == s.nodeID && m.Kind == SignalOffer && m.SDP != "" {
+				return m.From, m.SDP, nil
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", "", ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
 }
 
-// SendAnswer 发送 Answer SDP。
-func (s *HubSignaler) SendAnswer(peer string, sdp string) error {
-	return s.post(context.Background(), SignalAnswer, peer, sdp, "")
+// SendAnswer 向对端 to 发送 Answer SDP。
+func (s *HubSignaler) SendAnswer(to string, sdp string) error {
+	return s.post(context.Background(), SignalAnswer, to, sdp, "")
 }
 
-// WaitAnswer 阻塞等待 Answer SDP。
-// 仅接受来自指定 peer（From == peer）的消息，拒绝伪装来源的信令。
-func (s *HubSignaler) WaitAnswer(ctx context.Context, peer string) (string, error) {
+// WaitAnswer 阻塞等待发给本节点（s.nodeID）的 Answer SDP。
+// 返回发送方节点 ID 与 SDP；调用方可校验 from 是否为目标对端。
+func (s *HubSignaler) WaitAnswer(ctx context.Context) (string, string, error) {
 	for {
-		msgs, err := s.poll(ctx, peer)
+		msgs, err := s.poll(ctx, s.nodeID)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		for _, m := range msgs {
-			if m.From == peer && m.Kind == SignalAnswer && m.SDP != "" {
-				return m.SDP, nil
+			if m.To == s.nodeID && m.Kind == SignalAnswer && m.SDP != "" {
+				return m.From, m.SDP, nil
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return "", "", ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
