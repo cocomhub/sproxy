@@ -1168,6 +1168,20 @@ async function showCloudDownloadPreview(action) {
 
     // 执行对应操作
     var act = window._cloudPreviewAction;
+    // 提交前做 URL 格式预校验（对齐 Go cloudfilename.ValidateEntry，提供"服务端别拒绝"的体验）：
+    // 无效 URL 立即提示，避免发送后拿到 400/409 往返。组内重复 URL 由下方文件名冲突检测
+    // 与服务端 409 兜底（validateEntries 的去重判断与文件名冲突检测冗余，此处不重复调用）。
+    var invalidURLs = [];
+    for (var u = 0; u < urls.length; u++) {
+      if (!cloudfilename.validateEntry(urls[u]).valid) {
+        invalidURLs.push(urls[u]);
+      }
+    }
+    if (invalidURLs.length > 0) {
+      showToast('以下链接无效（需以 http/https 开头且含主机名）: '
+        + invalidURLs.slice(0, 3).join(', ') + (invalidURLs.length > 3 ? ' 等 ' + invalidURLs.length + ' 个' : ''), 'warning');
+      return;
+    }
     if (act === 'group' || act === 'chain_group') {
       // 客户端预校验：组内保存文件名必须唯一（服务端 CreateGroup 也会校验并返回 409），
       // 这里在发送前拦截，避免 409 往返，直接提示用户修改冲突条目。
