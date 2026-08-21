@@ -453,10 +453,10 @@ func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Chdir(origWd) }()
-	if err := os.Chdir(outDir); err != nil {
+	if err = os.Chdir(outDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmd.Execute(); err != nil {
+	if err = cmd.Execute(); err != nil {
 		t.Fatalf("download-archive subcommand failed: %v", err)
 	}
 	if !calledDownload {
