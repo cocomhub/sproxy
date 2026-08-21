@@ -69,7 +69,9 @@ type TransportConfigs struct {
 	WS WSTransportConfig `yaml:"ws"` // 预留：WebSocket 传输监听配置
 }
 
-// WSTransportConfig 配置 WebSocket 传输监听，当前为预留扩展，暂无产品代码消费。
+// WSTransportConfig 配置 WebSocket 传输监听。
+// 当前 WS 升级端点挂载到主 HTTP server（与文件服务同端口，路径由 Path 指定），
+// 因此 Listen 字段仅作预留（独立端口模式未来扩展），实际监听端口由 addr 决定。
 type WSTransportConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Listen  string `yaml:"listen"`

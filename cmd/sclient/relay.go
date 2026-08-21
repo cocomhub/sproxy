@@ -27,6 +27,8 @@ import (
 const (
 	reconnectBaseDelay = 1 * time.Second
 	reconnectMaxDelay  = 30 * time.Second
+	// registerAckTimeout 是等待 hub 注册 ACK 的超时。
+	registerAckTimeout = 10 * time.Second
 )
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
@@ -93,6 +95,20 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 	}
 	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta)); err != nil {
 		return fmt.Errorf("发送注册帧失败: %w", err)
+	}
+
+	// 等待 hub 注册 ACK（token 错误/格式错误尽早报错，而非等建流失败才发现）
+	ackCtx, ackCancel := context.WithTimeout(ctx, registerAckTimeout)
+	ack, ackErr := conn.Receive(ackCtx)
+	ackCancel()
+	if ackErr != nil {
+		return fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
+	}
+	if strings.HasPrefix(string(ack), hub.RegisterAckErr) {
+		return fmt.Errorf("注册被拒绝: %s", strings.TrimPrefix(string(ack), hub.RegisterAckErr))
+	}
+	if string(ack) != hub.RegisterAckOK {
+		logger.Warn("收到未知注册响应", "ack", string(ack))
 	}
 	logger.Info("已注册到 Hub")
 

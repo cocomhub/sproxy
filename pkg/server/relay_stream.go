@@ -114,9 +114,12 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 双向泵送：浏览器/SSH 端 <-> mux 流 <-> 叶子出站 TCP
+	// 读侧必须用 rw.Reader（包含 conn + 已缓冲字节），否则 Hijack 时
+	// 客户端在请求体后追加的数据若已被 bufio 预读，从 conn 直接读会跳过
+	// 缓冲字节导致流错位（I4'）。写侧用 conn（rw.Writer 内部就是 conn）。
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(stream, conn)
+		_, _ = io.Copy(stream, rw)
 		_ = stream.CloseWrite()
 		done <- struct{}{}
 	}()

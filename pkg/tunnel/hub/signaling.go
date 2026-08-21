@@ -139,5 +139,3 @@ func (q *SignalQueue) Wait(ctx context.Context, target string) error {
 
 // PollTimeout 是 poll 长轮询的单次最长等待。
 const PollTimeout = 25 * time.Second
-
-var _ = time.Second

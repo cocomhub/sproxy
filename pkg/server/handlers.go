@@ -280,8 +280,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		}))
 	}
 
-	// GET / -> /ui/ 重定向
-	srvMux.HandleFunc("GET /", h.webRedirect)
+	// GET / -> /ui/ 重定向。
+	// 用 "{$}" 只精确匹配根路径：Go 1.22+ ServeMux 中 "GET /" 会匹配所有子路径，
+	// 与 /ws、/upload 等具体路由冲突导致 panic。{$} 仅命中根。
+	srvMux.HandleFunc("GET /{$}", h.webRedirect)
 
 	h.handler = h.metricsMiddleware(srvMux)
 

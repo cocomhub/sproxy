@@ -54,7 +54,9 @@ func (c *FileClient) RelayStream(ctx context.Context, target, addr string) (net.
 	var raw net.Conn
 	switch scheme {
 	case "https", "wss":
-		raw, err = tls.DialWithDialer(dialer, "tcp", host, c.relayTLSConfig())
+		// 用 tls.Dialer.DialContext（支持 ctx 取消，Ctrl+C 可中断 TLS 拨号）
+		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: c.relayTLSConfig()}
+		raw, err = tlsDialer.DialContext(ctx, "tcp", host)
 	case "http", "ws":
 		raw, err = dialer.DialContext(ctx, "tcp", host)
 	default:
@@ -160,19 +162,26 @@ func (c *FileClient) MeshServices(ctx context.Context) ([]MeshService, error) {
 // MeshConnect 查找托管指定服务的节点并建立经 hub 的流中继连接。
 // 返回的 net.Conn 代表「本地 ⇄ hub ⇄ 托管节点（出口或本地服务）」。
 // 目标节点必须已宣告该服务（relay start/portal 通过 Meta.Services 宣告）。
+// 若多个节点宣告同名服务，依次尝试直到某个建立成功（首个离线不影响其余）。
 func (c *FileClient) MeshConnect(ctx context.Context, service string) (net.Conn, string, error) {
 	svcs, err := c.MeshServices(ctx)
 	if err != nil {
 		return nil, "", err
 	}
+	var lastErr error
 	for _, s := range svcs {
-		if s.Name == service {
-			conn, err := c.RelayStream(ctx, s.Node, s.Addr)
-			if err != nil {
-				return nil, "", fmt.Errorf("建立到服务 %q（节点 %s）的流中继失败: %w", service, s.Node, err)
-			}
-			return conn, s.Node, nil
+		if s.Name != service {
+			continue
 		}
+		conn, cerr := c.RelayStream(ctx, s.Node, s.Addr)
+		if cerr != nil {
+			lastErr = cerr
+			continue // 该节点不可达，尝试下一个候选
+		}
+		return conn, s.Node, nil
+	}
+	if lastErr != nil {
+		return nil, "", fmt.Errorf("mesh 服务 %q 的所有候选节点均连接失败: %w", service, lastErr)
 	}
 	return nil, "", fmt.Errorf("mesh 服务 %q 未找到（请确认目标节点已宣告该服务）", service)
 }

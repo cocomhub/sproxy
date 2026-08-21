@@ -4,11 +4,14 @@
 package main
 
 import (
+	"io"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/cli"
 )
 
 func TestNewCmdP2P_Subcommands(t *testing.T) {
-	cmd := NewCmdP2P()
+	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	if cmd.Use != "p2p" {
 		t.Fatalf("expected Use 'p2p', got %q", cmd.Use)
 	}
@@ -26,7 +29,7 @@ func TestNewCmdP2P_Subcommands(t *testing.T) {
 }
 
 func TestNewCmdP2PConnect_Flags(t *testing.T) {
-	cmd := NewCmdP2P()
+	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	connect := cmd.Commands()[0]
 	for _, name := range []string{"peer", "tcp", "listen", "hub", "token", "node-id"} {
 		if f := connect.Flags().Lookup(name); f == nil {

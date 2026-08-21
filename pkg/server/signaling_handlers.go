@@ -60,7 +60,6 @@ var (
 	errSignalHubDisabled       = &signalError{msg: "hub 未启用", code: http.StatusNotFound}
 	errSignalMissingNode       = &signalError{msg: "缺少 " + signalNodeHeader + " 请求头", code: http.StatusBadRequest}
 	errSignalNodeNotRegistered = &signalError{msg: "节点未注册", code: http.StatusBadRequest}
-	errSignalFromMismatch      = &signalError{msg: "from 与调用方节点身份不一致", code: http.StatusForbidden}
 	errSignalPeerMismatch      = &signalError{msg: "poll peer 与调用方节点身份不一致", code: http.StatusForbidden}
 )
 
@@ -86,14 +85,17 @@ func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "解析信令消息失败", http.StatusBadRequest)
 		return
 	}
+	// 身份绑定：From 完全由服务端从 X-Node-ID 派生，忽略 body 里的 From。
+	// 防止攻击者在请求体里伪造他人身份（body 注入面）。
+	msg.From = string(from)
 	msg.Kind = kind
 	msg.At = time.Now().UnixMilli()
 	if msg.To == "" {
 		http.Error(w, "缺少 to", http.StatusBadRequest)
 		return
 	}
-	if msg.From != string(from) {
-		http.Error(w, errSignalFromMismatch.msg, errSignalFromMismatch.code)
+	if msg.To == msg.From {
+		http.Error(w, "不能给自己发信令", http.StatusBadRequest)
 		return
 	}
 	if !b.rt.Has(hub.NodeID(msg.To)) {

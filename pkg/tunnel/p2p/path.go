@@ -37,11 +37,12 @@ const (
 // PlanFromService 根据 hub 服务注册表为调用方生成到目标服务的路径方案。
 //
 // 调用方视角的路径选择：
-//   - 若目标节点宣告了公开可达地址（Meta.Addr 非空且非回环/私有）→ 尝试 direct；
-//   - 否则优先 webrtc 打洞（数据面直连，不经过 hub）；
-//   - 打洞失败回落 hub 中继（relay stream，TCP 级）；
-//   - exit：目标服务由出口节点托管（公司电脑 --dial-allow），
-//     经 hub 中继到出口，由出口代拨目标地址。
+//   - 若服务声明了地址（Addr 非空）→ 首选 webrtc 打洞（数据面直连），
+//     失败回落 hub 中继（relay stream）或经出口节点代拨；
+//   - 否则（本地服务，无显式地址）→ 经 hub 中继（最通用、兜底）。
+//
+// 注意：direct（直连）路径不在此处自动选择——调用方需确认目标地址对自身
+// 可达（如公网 IP）时，用 PlanForDirect 显式构造。
 func PlanFromService(svc hub.Service, host hub.NodeID) Plan {
 	p := Plan{
 		Service:   svc.Name,
@@ -51,7 +52,7 @@ func PlanFromService(svc hub.Service, host hub.NodeID) Plan {
 		Fallbacks: []string{KindRelay},
 	}
 	if svc.Addr != "" {
-		// 目标是公网/主机名：出口节点可代拨（exit），webrtc 直连亦可
+		// 服务声明了目标地址：webrtc 直连优先，fallback 中继/出口
 		p.Kind = KindWebRTC
 		p.Fallbacks = []string{KindWebRTC, KindRelay, KindExit}
 	}

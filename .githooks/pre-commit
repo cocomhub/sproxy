@@ -31,14 +31,28 @@ if [ -n "$unformatted" ]; then
   exit 1
 fi
 
-# 3. 检查测试监听地址
+# 3. 检查测试监听地址（Windows 防火墙合规：必须绑定 127.0.0.1）
 echo "[3/4] check-loopback..."
-found=$(grep -rn --include='*_test.go' 'Listen.*0\.0\.0\.0\|Listen.*localhost\|httptest.*0\.0\.0\.0\|\"localhost\"' . 2>/dev/null || true)
+# 捕获测试文件中显式绑定非 127.0.0.1 的监听模式：
+#   - net.Listen("tcp", "<host>:port") 且 host 不是 127.0.0.1（含空 host 绑所有接口）
+#   - ListenAndServe() / ListenAndServeTLS()（无地址 → 默认绑所有接口）
+# 排除 httptest.NewServer（默认绑定 127.0.0.1）与纯 Dial（非监听）。
+found=$(grep -rn --include='*_test.go' \
+  -e 'net\.Listen("tcp", *"[^1][^"]*"' \
+  -e 'net\.Listen("tcp", *":"' \
+  -e 'Listen.*0\.0\.0\.0' \
+  -e 'Listen.*localhost' \
+  -e 'httptest.*0\.0\.0\.0' \
+  -e 'ListenAndServe()' \
+  -e 'ListenAndServeTLS()' \
+  . 2>/dev/null | grep -v '/.claude/' || true)
 if [ -n "$found" ]; then
-  echo "警告: 测试文件中发现 localhost/0.0.0.0 监听地址（应使用 127.0.0.1）:"
+  echo "FAIL: 测试文件中发现非 127.0.0.1 监听地址（会触发 Windows 防火墙授权弹窗）:"
   echo "$found"
+  echo "所有测试监听必须使用 127.0.0.1:0（httptest.NewServer 默认即回环）。"
   exit 1
 fi
+echo "loopback 检查通过"
 
 # 4. golangci-lint（快速检查）
 echo "[4/4] lint..."

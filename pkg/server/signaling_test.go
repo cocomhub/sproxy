@@ -98,13 +98,25 @@ func TestSignalBroker_IdentityBinding(t *testing.T) {
 		t.Fatalf("expected 400 for missing X-Node-ID, got %d", w.Code)
 	}
 
-	// 2. X-Node-ID 与 from 不一致 → 403（冒充被拒）
-	req2 := httptest.NewRequest(http.MethodPost, "/api/signal/offer", strings.NewReader(`{"from":"peer-a","to":"peer-b","sdp":"x"}`))
-	req2.Header.Set(signalNodeHeader, "peer-b") // 声称自己是 peer-b 却以 peer-a 发
+	// 2. body 里伪造 From 无效：服务端从 X-Node-ID 派生 From（body 注入面被消除）。
+	//    header=peer-b（声称自己是 peer-b），body 写 from=peer-a、to=peer-a
+	//    → From 被覆盖为 peer-b（忽略 body 的 from=peer-a），投递到 peer-a 成功。
+	req2 := httptest.NewRequest(http.MethodPost, "/api/signal/offer", strings.NewReader(`{"from":"peer-a","to":"peer-a","sdp":"x"}`))
+	req2.Header.Set(signalNodeHeader, "peer-b")
 	w2 := httptest.NewRecorder()
 	mux.ServeHTTP(w2, req2)
-	if w2.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for from mismatch, got %d", w2.Code)
+	if w2.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (From derived from header, body ignored), got %d", w2.Code)
+	}
+	// 验证 poll peer-a 收到 From==peer-b（而非 body 里的 peer-a）
+	pollVerify := httptest.NewRequest(http.MethodGet, "/api/signal/poll/peer-a", nil)
+	pollVerify.Header.Set(signalNodeHeader, "peer-a")
+	pwv := httptest.NewRecorder()
+	mux.ServeHTTP(pwv, pollVerify)
+	var vmsgs []hub.SignalMsg
+	_ = json.NewDecoder(pwv.Body).Decode(&vmsgs)
+	if len(vmsgs) != 1 || vmsgs[0].From != "peer-b" {
+		t.Fatalf("expected From derived as peer-b, got %+v", vmsgs)
 	}
 
 	// 3. poll 非自己收件箱 → 403（窃听被拒）
@@ -144,6 +156,33 @@ func TestSignalBroker_BadInput(t *testing.T) {
 	mux.ServeHTTP(w2, req2)
 	if w2.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w2.Code)
+	}
+}
+
+func TestSignalBroker_BodyTooLarge(t *testing.T) {
+	b := newSignalTestBroker(t)
+	mux := signalTestMux(b)
+	// 超大 body（超过 maxSignalBodyBytes 8KB）→ 400
+	big := `{"from":"peer-a","to":"peer-b","sdp":"` + strings.Repeat("x", maxSignalBodyBytes+1) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/signal/offer", strings.NewReader(big))
+	req.Header.Set(signalNodeHeader, "peer-a")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for oversized body, got %d", w.Code)
+	}
+}
+
+func TestSignalBroker_SelfSendRejected(t *testing.T) {
+	b := newSignalTestBroker(t)
+	mux := signalTestMux(b)
+	// 给自己发信令（from == to）→ 400
+	req := httptest.NewRequest(http.MethodPost, "/api/signal/offer", strings.NewReader(`{"to":"peer-a","sdp":"x"}`))
+	req.Header.Set(signalNodeHeader, "peer-a")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for self-send, got %d", w.Code)
 	}
 }
 

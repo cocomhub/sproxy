@@ -6,6 +6,7 @@ package client
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -136,6 +137,133 @@ func TestMeshConnect_Echo(t *testing.T) {
 	}
 
 	payload := []byte("mesh-echo-test")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo mismatch: got %q want %q", got, payload)
+	}
+}
+
+// TestMeshConnect_MultiCandidateFallback 验证 MeshConnect 遍历同名服务候选：
+// 首个节点地址不可达时尝试下一个，直到成功。
+func TestMeshConnect_MultiCandidateFallback(t *testing.T) {
+	// 只服务 /api/hub/services：返回两个候选，node-A 用不可达地址，node-B 可达
+	svcLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svcLn.Close()
+
+	// 可达的 echo 后端（纯数据 echo，不做协议解析——hub 已处理 CONNECT）
+	reachable, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reachable.Close()
+	go func() {
+		for {
+			conn, aerr := reachable.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c) // 纯 echo
+			}(conn)
+		}
+	}()
+
+	// hub 服务器：services 返回两个候选，relay/stream 走 reachable
+	hubLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hubLn.Close()
+	reachableAddr := reachable.Addr().String()
+	go func() {
+		for {
+			conn, aerr := hubLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				statusLine, lerr := br.ReadString('\n')
+				if lerr != nil {
+					return
+				}
+				contentLength := int64(0)
+				for {
+					line, rerr := br.ReadString('\n')
+					if rerr != nil {
+						return
+					}
+					if line == "\r\n" || line == "\n" {
+						break
+					}
+					k, v, ok := strings.Cut(line, ":")
+					if ok && strings.ToLower(strings.TrimSpace(k)) == "content-length" {
+						contentLength, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+					}
+				}
+				switch {
+				case strings.Contains(statusLine, "GET /api/hub/services "):
+					body := fmt.Sprintf(`[{"name":"svc","node":"node-A","addr":"127.0.0.1:1"},{"name":"svc","node":"node-B","addr":"%s"}]`, reachableAddr)
+					fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+					return
+				case strings.Contains(statusLine, "POST /api/relay/stream "):
+					body := make([]byte, contentLength)
+					_, _ = io.ReadFull(br, body)
+					var req struct {
+						Addr string `json:"addr"`
+					}
+					_ = json.Unmarshal(body, &req)
+					// 按请求体里的 addr 决定是否可达：127.0.0.1:1（node-A）不可达 → 返回不发 200
+					if req.Addr == "127.0.0.1:1" {
+						_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
+						return
+					}
+					// 转发到 reachable（模拟 hub 代理）
+					up, uerr := net.Dial("tcp", reachableAddr)
+					if uerr != nil {
+						return
+					}
+					defer up.Close()
+					_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
+					done := make(chan struct{}, 2)
+					go func() { _, _ = io.Copy(up, br); done <- struct{}{} }()
+					go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
+					<-done
+					return
+				default:
+					_, _ = io.WriteString(c, "HTTP/1.1 404 Not Found\r\n\r\n")
+					return
+				}
+			}(conn)
+		}
+	}()
+
+	c := NewFileClient("http://" + hubLn.Addr().String())
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	// node-A 地址 127.0.0.1:1 不可达，MeshConnect 应回退到 node-B
+	conn, node, err := c.MeshConnect(ctx, "svc")
+	if err != nil {
+		t.Fatalf("MeshConnect should fallback to reachable candidate: %v", err)
+	}
+	defer conn.Close()
+	if node != "node-B" {
+		t.Fatalf("expected fallback to node-B, got %q", node)
+	}
+	// 验证数据面通
+	payload := []byte("multi-candidate")
 	if _, err := conn.Write(payload); err != nil {
 		t.Fatal(err)
 	}
