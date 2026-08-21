@@ -61,6 +61,10 @@ type CloudDownloadChain struct {
 	archiveServerPath string        `json:"-"` // 服务端返回的归档文件路径
 	client            *FileClient   `json:"-"`
 	chainMgr          *ChainManager `json:"-"` // 链式操作管理器，用于阶段间持久化状态
+
+	// backoffFn 存储超限重试的退避间隔（attempt 从 0 起）。nil 时用默认 10s*(1<<attempt)。
+	// 测试注入小退避避免慢 CI（如 10ms）。
+	backoffFn func(attempt int) time.Duration
 }
 
 // NewCloudDownloadChain 创建云端下载链式操作。
@@ -388,9 +392,11 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			}
 			c.TaskIDs = remaining
 
-			// 指数退避等待：10s, 20s, 40s
-			baseDelay := 10 * time.Second
-			delay := baseDelay * (1 << attempt)
+			// 指数退避等待：默认 10s, 20s, 40s；测试可注入 backoffFn 缩短
+			delay := 10 * time.Second * (1 << attempt)
+			if c.backoffFn != nil {
+				delay = c.backoffFn(attempt)
+			}
 			// 检查上下文剩余时间，避免超时
 			if deadline, ok := ctx.Deadline(); ok {
 				remaining := time.Until(deadline)

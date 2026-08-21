@@ -467,16 +467,10 @@ func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 	cmd.SetArgs([]string{"download-archive", "archive.tar.gz"})
 	// 切到临时目录为工作目录：下载命令默认输出到当前目录，避免落到真实工作目录。
 	// 必须在 Execute 之前切换（Execute 内部的 DownloadItems 默认写到 cwd）。
+	// t.Chdir 自动恢复原工作目录（Go 1.24+）。
 	outDir := t.TempDir()
-	origWd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chdir(origWd) }()
-	if err = os.Chdir(outDir); err != nil {
-		t.Fatal(err)
-	}
-	if err = cmd.Execute(); err != nil {
+	t.Chdir(outDir)
+	if err := cmd.Execute(); err != nil {
 		t.Fatalf("download-archive subcommand failed: %v", err)
 	}
 	if !calledDownload {

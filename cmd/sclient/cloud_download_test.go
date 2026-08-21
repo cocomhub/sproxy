@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
@@ -49,7 +50,9 @@ func TestCloudDownloadCmd_UseAndArgs(t *testing.T) {
 func newChainMockServer(t *testing.T, tasks []map[string]any, archiveFile []byte) *httptest.Server {
 	t.Helper()
 	// 按任务 ID 独立计数轮询次数（避免多任务并发轮询时共享单个计数器导致
-	// 某个任务的早期轮询提前把所有任务置为 completed）
+	// 某个任务的早期轮询提前把所有任务置为 completed）。用 mutex 保护：
+	// pollAllTasks 对多个任务并发 GET，直接 map 读写是数据竞争。
+	var pollMu sync.Mutex
 	pollCounts := make(map[string]int)
 
 	// 计算归档文件的真实 SHA-256 校验和
@@ -68,22 +71,23 @@ func newChainMockServer(t *testing.T, tasks []map[string]any, archiveFile []byte
 			// 找到对应的任务
 			for _, t := range tasks {
 				if t["id"] == taskID {
-					pollCounts[taskID]++
+					// 从原始 map 读字段（只读，不修改 tasks——并发 GET 下写会 data race）
 					status := t["status"].(string)
 					totalSize := int64(100)
 					if s, ok := t["total_size"].(int64); ok {
 						totalSize = s
 					}
-					if status == "pending" || status == "downloading" {
-						if pollCounts[taskID] >= 2 {
-							t["status"] = "completed"
-						}
+					pollMu.Lock()
+					pollCounts[taskID]++
+					if (status == "pending" || status == "downloading") && pollCounts[taskID] >= 2 {
+						status = "completed"
 					}
+					pollMu.Unlock()
 					resp := map[string]any{
 						"id":         taskID,
 						"url":        t["url"],
 						"filename":   t["filename"],
-						"status":     t["status"],
+						"status":     status,
 						"total_size": totalSize,
 					}
 					w.Header().Set("Content-Type", "application/json")
@@ -629,11 +633,8 @@ func TestCloudDownloadCmd_DownloadSubcommand(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	outDir := t.TempDir()
-	origWd, _ := os.Getwd()
-	defer func() { _ = os.Chdir(origWd) }()
-	if err := os.Chdir(outDir); err != nil {
-		t.Fatal(err)
-	}
+	// t.Chdir 自动恢复原工作目录（Go 1.24+）
+	t.Chdir(outDir)
 
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
@@ -704,11 +705,8 @@ func TestCloudDownloadCmd_DownloadArchiveSubcommand(t *testing.T) {
 	svc := client.NewFileClient(mock.URL)
 	factory := clientfactory.NewMock(svc, nil)
 	outDir := t.TempDir()
-	origWd, _ := os.Getwd()
-	defer func() { _ = os.Chdir(origWd) }()
-	if err := os.Chdir(outDir); err != nil {
-		t.Fatal(err)
-	}
+	// t.Chdir 自动恢复原工作目录（Go 1.24+）
+	t.Chdir(outDir)
 
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)

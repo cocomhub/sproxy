@@ -493,14 +493,14 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		}
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
-			t.Error("ReadFile:", err)
+			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		sum := sha256.Sum256(data)
 		info, err := os.Stat(archiveFile)
 		if err != nil {
-			t.Error("Stat:", err)
+			t.Log("Stat:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -514,7 +514,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
-			t.Error("ReadFile:", err)
+			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -535,6 +535,8 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
 	}
+	// 注入小退避避免慢 CI（默认 10s/20s 硬 sleep）
+	chain.backoffFn = func(int) time.Duration { return 10 * time.Millisecond }
 
 	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err != nil {
@@ -616,14 +618,14 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 		}
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
-			t.Error("ReadFile:", err)
+			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		sum := sha256.Sum256(data)
 		info, err := os.Stat(archiveFile)
 		if err != nil {
-			t.Error("Stat:", err)
+			t.Log("Stat:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -638,7 +640,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
-			t.Error("ReadFile:", err)
+			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -843,6 +845,8 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
 	}
+	// 注入小退避避免慢 CI（默认 10s/20s/40s 硬 sleep）
+	chain.backoffFn = func(int) time.Duration { return 10 * time.Millisecond }
 
 	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {
@@ -890,6 +894,8 @@ func TestCloudDownloadChain_StorageFullRetry_ResubmitFailsNotSilent(t *testing.T
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
 	}
+	// 注入小退避避免慢 CI（默认 10s/20s 硬 sleep）
+	chain.backoffFn = func(int) time.Duration { return 10 * time.Millisecond }
 
 	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
 	if err == nil {

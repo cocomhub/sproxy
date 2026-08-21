@@ -102,7 +102,7 @@ func cloudTestServer(t *testing.T) (*httptest.Server, string) {
 	mux.HandleFunc("GET /api/cloud/tasks", func(w http.ResponseWriter, r *http.Request) {
 		status := r.URL.Query().Get("status")
 		all := []CloudTask{
-			{ID: "task-1", URL: "https://example.com/a.zip", Filename: "a.zip", Status: "completed"},
+			{ID: "task-1", URL: "https://example.com/a.zip", Filename: "a.zip", Status: "completed", ETag: `"abc123"`, GroupID: "group-9", FileMTime: 1700000000000000000},
 			{ID: "task-2", URL: "https://example.com/b.zip", Filename: "b.zip", Status: "downloading"},
 			{ID: "task-3", URL: "https://example.com/c.zip", Filename: "c.zip", Status: "completed"},
 		}
@@ -670,5 +670,36 @@ func TestCloudDownload_ListTasksLimitOnly(t *testing.T) {
 	}
 	if strings.Contains(gotQuery, "offset=") {
 		t.Fatalf("expected no offset param when offset=-1, got %q", gotQuery)
+	}
+}
+
+// TestCloudDownload_ListTasksFullFields 验证 ETag/GroupID/FileMTime 通过 JSON 往返完整保留
+// （服务端返回完整字段，client 必须反序列化到 CloudTask，CLI list 展示依赖此契约）。
+func TestCloudDownload_ListTasksFullFields(t *testing.T) {
+	t.Parallel()
+	ts, _ := cloudTestServer(t)
+	c := NewFileClient(ts.URL)
+
+	tasks, _, err := c.ListCloudTasksWithTotal(t.Context(), "", -1, 0)
+	if err != nil {
+		t.Fatalf("ListCloudTasksWithTotal: %v", err)
+	}
+	var found bool
+	for _, task := range tasks {
+		if task.ID == "task-1" {
+			found = true
+			if task.ETag != `"abc123"` {
+				t.Errorf("expected ETag preserved, got %q", task.ETag)
+			}
+			if task.GroupID != "group-9" {
+				t.Errorf("expected GroupID preserved, got %q", task.GroupID)
+			}
+			if task.FileMTime != 1700000000000000000 {
+				t.Errorf("expected FileMTime preserved, got %d", task.FileMTime)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected task-1 in full list")
 	}
 }
