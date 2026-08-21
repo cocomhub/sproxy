@@ -24,6 +24,7 @@ type CloudTask struct {
 	TotalSize  int64     `json:"total_size"`
 	Downloaded int64     `json:"downloaded"`
 	Checksum   string    `json:"checksum"`
+	ETag       string    `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
 	Error      string    `json:"error"`
 	GroupID    string    `json:"group_id,omitempty"` // 所属下载组 ID（可选）
 	FileMTime  int64     `json:"file_mtime,omitempty"`
@@ -247,6 +248,7 @@ type CloudGroup struct {
 	TotalTasks  int       `json:"total_tasks"`
 	Completed   int       `json:"completed"`
 	Failed      int       `json:"failed"`
+	Cancelled   int       `json:"cancelled"`
 	Error       string    `json:"error,omitempty"`
 	ArchiveFile string    `json:"archive_file,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`

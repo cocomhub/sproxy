@@ -29,6 +29,7 @@ func TestCloudTask_JSONRoundTrip(t *testing.T) {
 		TotalSize:  1024,
 		Downloaded: 0,
 		Checksum:   "abc123",
+		ETag:       `"686897696a7c876b7e"`,
 		Error:      "",
 		CreatedAt:  time.Now().Truncate(time.Second),
 		UpdatedAt:  time.Now().Truncate(time.Second),
@@ -68,6 +69,9 @@ func TestCloudTask_JSONRoundTrip(t *testing.T) {
 	}
 	if restored.Checksum != task.Checksum {
 		t.Fatalf("expected Checksum %q, got %q", task.Checksum, restored.Checksum)
+	}
+	if restored.ETag != task.ETag {
+		t.Fatalf("expected ETag %q, got %q", task.ETag, restored.ETag)
 	}
 	if restored.Error != task.Error {
 		t.Fatalf("expected Error %q, got %q", task.Error, restored.Error)
@@ -535,11 +539,6 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		<-blockCh // 阻塞直到测试结束
 	}))
-	t.Cleanup(func() {
-		close(blockCh)
-		srv.Close()
-	})
-
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger()) // 1 GiB 上限
 	cfg := &CloudDownloadConfig{
@@ -550,7 +549,10 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	// 优雅关闭：先释放阻塞的 handler（close(blockCh)），再等待 goroutine 退出（mgr.Close()）。
+	// Cleanup 按 LIFO 执行，后注册的 close(blockCh) 先于 mgr.Close() 执行。
 	t.Cleanup(mgr.Close)
+	t.Cleanup(func() { close(blockCh); srv.Close() })
 
 	// 第一次提交（异步，让任务停留在 downloading 状态）
 	task1, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil)
@@ -1081,7 +1083,6 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		<-blockCh
 	}))
-	defer srv.Close()
 
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
@@ -1093,17 +1094,21 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 		AllowPrivate:  true,
 	}
 	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() {
-		mgr.Close()
-		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
-		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
-	})
+	t.Cleanup(mgr.Close)
 
 	task1, _ := mgr.SubmitAndStart("url", srv.URL+"?1", "block1.bin", 104857600, nil)
 	task2, _ := mgr.SubmitAndStart("url", srv.URL+"?2", "block2.bin", 104857600, nil)
 	task3, _ := mgr.SubmitAndStart("url", srv.URL+"?3", "block3.bin", 104857600, nil)
 
 	allTasks := []*CloudTask{task1, task2, task3}
+	// defer 先于 t.Cleanup 执行：先取消阻塞任务再释放 blockCh，使 goroutine 自然退出
+	defer func() {
+		for _, t := range allTasks {
+			mgr.CancelTask(t.ID)
+		}
+		close(blockCh)
+		srv.Close()
+	}()
 
 	// 等待任意 2 个任务进入 downloading 状态
 	deadline := time.After(5 * time.Second)
@@ -1145,7 +1150,6 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 				if stable {
 					t.Logf("并发限制正常: 始终不超过 2 个 downloading")
 				}
-				close(blockCh)
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
@@ -1324,7 +1328,6 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 		<-blockCh // 阻塞第一个任务，占满唯一并发槽
 	}))
 	t.Cleanup(func() {
-		close(blockCh)
 		srv.Close()
 	})
 
@@ -1366,7 +1369,9 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 		t.Fatalf("expected queued task to be cancelled, got %q", cur.Status)
 	}
 
-	// Close 应能及时返回（排队任务已注册 cancelFuncs）
+	// Close 应能及时返回（优雅关闭不取消任务，需先释放阻塞 goroutine）
+	close(blockCh) // 释放阻塞的下载 handler，使下载 goroutine 自然退出
+	waitTaskDone(t, mgr, task1.ID)
 	done := make(chan struct{})
 	go func() {
 		mgr.Close()
@@ -1375,7 +1380,7 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Close() hung: queued task not cancellable")
+		t.Fatal("Close() hung: download goroutine leaked")
 	}
 }
 
@@ -1791,18 +1796,19 @@ func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {
 	}
 	mgr.UpdateGroupStatus(group.ID)
 	g, _ := mgr.GetGroup(group.ID)
-	if g.Status != "partial" || g.Completed != 1 || g.Failed != 1 {
-		t.Fatalf("expected partial(1 completed, 1 failed), got %s (%d/%d)", g.Status, g.Completed, g.Failed)
+	// 新逻辑：全部终止后，存在 failed → "failed"
+	if g.Status != "failed" || g.Completed != 1 || g.Failed != 1 || g.Cancelled != 0 {
+		t.Fatalf("expected failed(1 completed, 1 failed), got %s (completed=%d, failed=%d, cancelled=%d)", g.Status, g.Completed, g.Failed, g.Cancelled)
 	}
 
-	// 取消已完成/已失败任务：组状态不应被强制改为 cancelled
+	// 取消已完成/已失败任务：组状态不应被强制改为 cancelled（任务已终止，取消无效）
 	if err := mgr.CancelGroup(group.ID); err != nil {
 		t.Fatal(err)
 	}
 	mgr.UpdateGroupStatus(group.ID)
 	g, _ = mgr.GetGroup(group.ID)
-	if g.Status != "partial" {
-		t.Fatalf("expected partial after cancelling terminal tasks, got %q", g.Status)
+	if g.Status != "failed" {
+		t.Fatalf("expected failed after cancelling terminal tasks, got %q", g.Status)
 	}
 }
 

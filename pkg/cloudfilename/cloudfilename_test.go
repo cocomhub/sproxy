@@ -159,6 +159,7 @@ func TestSafe(t *testing.T) {
 		{name: "竖线替换", in: "a|b", want: "a_b"},
 		{name: "双引号替换", in: `a"b`, want: "a_b"},
 		{name: "星号替换", in: "a*b", want: "a_b"},
+		{name: "Tab替换", in: "a	b", want: "a_b"},
 		{name: "NUL移除", in: "a\x00b", want: "ab"},
 		{name: "组合替换", in: `a/b?c:d"e*f|g<h>i`, want: "a_b_c_d_e_f_g_h_i"},
 		{name: "等号与与号保留", in: "file.txt?a=b&c=d", want: "file.txt_a=b&c=d"},

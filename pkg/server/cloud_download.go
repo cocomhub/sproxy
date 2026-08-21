@@ -35,6 +35,7 @@ type CloudTask struct {
 	TotalSize    int64     `json:"total_size"` // -1 表示未知
 	Downloaded   int64     `json:"downloaded"`
 	Checksum     string    `json:"checksum"`
+	ETag         string    `json:"etag,omitempty"`       // 服务端 ETag，用于版本标识与二次校验（可能为空）
 	FileMTime    int64     `json:"file_mtime,omitempty"` // 原始文件修改时间（UnixNano），从 URL 的 Last-Modified 提取
 	Error        string    `json:"error"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -50,11 +51,12 @@ type CloudTask struct {
 type CloudTaskGroup struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
-	Status      string    `json:"status"` // pending | downloading | completed | partial | failed | cancelled
+	Status      string    `json:"status"` // downloading | completed | failed | cancelled
 	TaskIDs     []string  `json:"task_ids"`
 	TotalTasks  int       `json:"total_tasks"`
 	Completed   int       `json:"completed"`
 	Failed      int       `json:"failed"`
+	Cancelled   int       `json:"cancelled"`
 	Error       string    `json:"error,omitempty"`
 	ArchiveFile string    `json:"archive_file,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -440,6 +442,18 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	defer m.metrics.ActiveDownloads.Add(-1)
 
 	m.mu.Lock()
+	// 复查任务状态与存在性：CancelTask/DeleteTask 可能在信号量获取与此处之间
+	// 执行，若状态已非 pending 或任务已从 map 中删除，则放弃下载。
+	if stored, ok := m.tasks[task.ID]; !ok || (stored.Status != "pending" && stored.Status != "downloading") {
+		m.mu.Unlock()
+		if ok {
+			m.logger.Info("download skipped, task status changed while acquiring slot",
+				"task_id", task.ID, "status", stored.Status)
+		} else {
+			m.logger.Info("download skipped, task deleted while acquiring slot", "task_id", task.ID)
+		}
+		return
+	}
 	task.Status = "downloading"
 	task.UpdatedAt = time.Now()
 	m.mu.Unlock()
@@ -510,6 +524,13 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		}
 
 		if downloadErr == nil {
+			// 立即记录 ETag 到 task：续传重试时可通过 task.ETag 做二次校验，
+			// 完成后客户端也可通过 API 读取 ETag 确认版本。
+			if result.ETag != "" {
+				m.mu.Lock()
+				task.ETag = result.ETag
+				m.mu.Unlock()
+			}
 			break
 		}
 
@@ -640,6 +661,7 @@ downloadDone:
 	stored.TotalSize = result.Size
 	stored.Downloaded = result.Size
 	stored.Checksum = result.Checksum
+	stored.ETag = result.ETag
 	stored.UpdatedAt = time.Now()
 	stored.ExpiresAt = time.Now().Add(m.config.TaskTTL)
 	m.mu.Unlock()
@@ -869,7 +891,20 @@ func (m *CloudDownloadManager) DeleteTask(id string) error {
 	}
 
 	delete(m.tasks, id)
+
+	// 释放实际预留的存储空间（ReservedSize 为准，释放后归零防二次释放）。
+	// 必须在锁内释放：failTask 在持有 m.mu 期间读取 ReservedSize 并执行 I/O，
+	// 若 DeleteTask 在锁外释放，failTask 可能读到已释放的旧值并再次释放（double release）。
+	reserved := t.ReservedSize
+	if reserved > 0 {
+		t.ReservedSize = 0
+	}
 	m.mu.Unlock()
+
+	if reserved > 0 {
+		m.storage.Release(reserved, CategoryCloud)
+		m.logger.Debug("storage released", "task_id", id, "size", reserved)
+	}
 
 	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", t.Status)
 
@@ -890,13 +925,6 @@ func (m *CloudDownloadManager) DeleteTask(id string) error {
 	persistFile := filepath.Join(m.persistDir, t.ID+".json")
 	if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
 		m.logger.Warn("failed to remove persist file", "task_id", id, "error", err)
-	}
-
-	// 释放实际预留的存储空间（ReservedSize 为准，释放后归零防二次释放）
-	if t.ReservedSize > 0 {
-		m.storage.Release(t.ReservedSize, CategoryCloud)
-		m.logger.Debug("storage released", "task_id", id, "size", t.ReservedSize)
-		t.ReservedSize = 0
 	}
 
 	// 清理 checksum
@@ -940,7 +968,8 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 }
 
 // recoverTasks 从磁盘恢复所有任务。
-// downloading 与 pending 状态的任务自动重启下载（pending 可能因崩溃停在排队阶段）。
+// 仅重启 downloading 状态的任务（崩溃前正在下载中）。
+// pending 任务不自动启动——避免 CreateTask 创建但未 SubmitAndStart 的任务在崩溃后意外启动。
 func (m *CloudDownloadManager) recoverTasks() {
 	entries, err := os.ReadDir(m.persistDir)
 	if err != nil {
@@ -968,10 +997,11 @@ func (m *CloudDownloadManager) recoverTasks() {
 		m.tasks[task.ID] = &task
 		recovered++
 
-		// 重启中断/排队的下载：在 go 之前同步置位 running（与 SubmitAndStart 等
-		// 启动路径一致，闭合"检查→启动"竞态窗口），wg.Add(1) 在 go 之前确保不竞态
-		if task.Status == "downloading" || task.Status == "pending" {
-			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL, "status", task.Status)
+		// 仅重启 downloading 状态的任务（崩溃前正在下载）。
+		// pending 任务不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
+		// 就崩溃导致意外启动的边界情况。
+		if task.Status == "downloading" {
+			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
 			m.mu.Lock()
 			m.running[task.ID] = true
 			m.mu.Unlock()
@@ -1722,26 +1752,24 @@ func (m *CloudDownloadManager) UpdateGroupStatus(groupID string) {
 
 	m.groupMu.Lock()
 	changed := group.Completed != completed ||
-		group.Failed != failed+cancelled ||
+		group.Failed != failed ||
+		group.Cancelled != cancelled ||
 		group.TotalTasks != total
-	newStatus := group.Status
+	var newStatus string
+	// 只要还有未终止的任务（downloading 或 pending），组状态为 downloading。
+	// 一旦所有子任务进入终态，按 failed/cancelled/completed 优先级判定。
 	switch {
 	case total == 0:
-		// 所有子任务均不存在（已删除），保留原状态
-	case completed == total:
+		// 所有子任务已删除，组已完成其生命周期
 		newStatus = "completed"
-	case failed+cancelled == total && cancelled == total:
-		newStatus = "cancelled"
-	case failed+cancelled == total:
+	case active > 0 || pending > 0:
+		newStatus = "downloading"
+	case failed > 0:
 		newStatus = "failed"
-	case completed > 0 && failed+cancelled > 0:
-		newStatus = "partial"
-	case active > 0:
-		newStatus = "downloading"
-	case pending == total:
-		newStatus = "pending"
+	case cancelled > 0:
+		newStatus = "cancelled"
 	default:
-		newStatus = "downloading"
+		newStatus = "completed"
 	}
 	if newStatus != group.Status {
 		group.Status = newStatus
@@ -1753,7 +1781,8 @@ func (m *CloudDownloadManager) UpdateGroupStatus(groupID string) {
 		return
 	}
 	group.Completed = completed
-	group.Failed = failed + cancelled
+	group.Failed = failed
+	group.Cancelled = cancelled
 	group.TotalTasks = total
 	group.UpdatedAt = time.Now()
 	m.groupMu.Unlock()
@@ -1764,17 +1793,13 @@ func (m *CloudDownloadManager) UpdateGroupStatus(groupID string) {
 	}
 }
 
-// Close 停止所有后台 goroutine（flushLoop 和 cleanupExpired）并执行一次清理。
+// Close 停止所有后台 goroutine（flushLoop 和 cleanupExpired）并等待下载完成。
 // 在进程退出前应调用一次。多次调用安全。
-// 注意：wg.Wait 最多等待 30 秒，超时后返回（防止下载 goroutine 卡在 I/O 上永久阻塞）。
+// 注意：优雅关闭不取消进行中的下载任务——下载 goroutine 在进程退出时自然终止，
+// .partial 文件保留，重启后通过 recoverTasks 恢复并通过 Range 续传继续。
+// wg.Wait 最多等待 30 秒，超时后返回（防止下载 goroutine 卡在 I/O 上永久阻塞）。
 func (m *CloudDownloadManager) Close() {
 	m.closeOnce.Do(func() {
-		m.mu.Lock()
-		for id, cancel := range m.cancelFuncs {
-			cancel()
-			delete(m.cancelFuncs, id)
-		}
-		m.mu.Unlock()
 		close(m.stopFlush)
 		close(m.stopCleanup)
 

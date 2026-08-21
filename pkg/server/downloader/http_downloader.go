@@ -283,7 +283,16 @@ func (d *HTTPDownloader) doGet(ctx context.Context, source string, existingSize 
 	}
 	resp, err := d.getClient().Do(req)
 	if err != nil {
-		return nil, retryablef("http get: %w", err)
+		// 区分永久性错误（DNS NXDOMAIN、TLS 握手失败等）与可重试错误（超时、连接拒绝等）。
+		// 永久性错误重试永远不会成功，避免空耗 maxRetries 次重试。
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil, retryablef("http get: %w", err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, retryablef("http get: %w", err)
+		}
+		return nil, fmt.Errorf("http get: %w", err)
 	}
 	return resp, nil
 }
@@ -375,6 +384,16 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 
 	checksum := hex.EncodeToString(h.Sum(nil))
 	etag := extractETag(resp)
+	// 立即持久化 ETag 伴侣文件：使正常中断→续传流程中 loadETag 能读到非空 ETag，
+	// 从而发送 If-Range 头校验远程内容一致性，避免盲追加导致混合文件。
+	// 仅 Warn 失败（finalizeDownload 中还有一次兜底写入，此处持久化失败不影响
+	// 当前下载完成，仅影响"续传时 If-Range 校验"的可用性）。
+	if etag != "" {
+		if err := saveETag(etagPath(partialPath), etag); err != nil {
+			d.getLogger().Warn("保存 ETag 伴侣失败，续传将无 If-Range 一致性校验",
+				"path", etagPath(partialPath), "error", err)
+		}
+	}
 	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
 		return nil, err
 	}
@@ -470,6 +489,13 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 
 	fullChecksum := hex.EncodeToString(h.Sum(nil))
 	etag := extractETag(resp)
+	// 立即持久化 ETag 伴侣文件（与 writeFullBody 一致）
+	if etag != "" {
+		if err := saveETag(etagPath(partialPath), etag); err != nil {
+			d.getLogger().Warn("保存 ETag 伴侣失败，续传将无 If-Range 一致性校验",
+				"path", etagPath(partialPath), "error", err)
+		}
+	}
 	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
 		return nil, err
 	}

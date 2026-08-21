@@ -381,15 +381,10 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确定归档文件名。groupID 本身带 "group-" 前缀，需剥离避免生成
-	// "group-group-xxx" 的冗余命名。
+	// 确定归档文件名。默认使用 groupID 保证唯一性。
 	archiveName := req.ArchiveName
 	if archiveName == "" {
-		base := strings.TrimPrefix(groupID, "group-")
-		if base == "" {
-			base = groupID // 防御性兜底（正常 newGroupID 恒带前缀）
-		}
-		archiveName = fmt.Sprintf("group-%s-%d.tar.gz", base, time.Now().Unix())
+		archiveName = fmt.Sprintf("%s-%d.tar.gz", groupID, time.Now().Unix())
 	}
 	archiveName = filepath.Base(archiveName)
 	if archiveName == "" || archiveName == "." || archiveName == ".." {
@@ -402,6 +397,14 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	if len(archiveName) > 255 {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive name too long"}, http.StatusBadRequest)
 		return
+	}
+
+	// 用户指定归档名时，校验同名文件是否已存在，存在则拒绝
+	if req.ArchiveName != "" {
+		if _, err := os.Stat(filepath.Join(h.cloudMgr.uploadsDir, archiveName)); err == nil {
+			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists: " + archiveName}, http.StatusConflict)
+			return
+		}
 	}
 
 	// 按子任务目录收集已完成文件（子任务文件实际保存在 .__cloud__/<taskID>/ 下）

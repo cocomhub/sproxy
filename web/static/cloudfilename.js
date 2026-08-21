@@ -162,11 +162,11 @@
   }
 
   // filepathSafe 清理文件名中的路径分隔符，防止路径穿越。
-  // 与 Go pkg/cloudfilename.Safe 一致：替换 \ / ? : < > | " * 与 NUL，
+  // 与 Go pkg/cloudfilename.Safe 一致：替换 \ / ? : < > | " * \t 与 NUL，
   // 去除首尾空白与点，抵御 Windows 保留设备名，并按字节截断。
   function filepathSafe(name) {
     name = name.replace(/\x00/g, '');
-    name = name.replace(/[\\/:<>|"*?]/g, '_');
+    name = name.replace(/[\\/:<>|"*?\t]/g, '_');
     name = name.replace(/^[ .]+|[ .]+$/g, '');
     if (!name) return 'download';
     const base = name.toUpperCase().split('.')[0];

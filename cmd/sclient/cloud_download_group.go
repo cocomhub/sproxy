@@ -239,8 +239,8 @@ func NewCmdCloudGroupWait(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 					ios.WriteOutLine("  %s: %s (%d/%d 完成, %d 失败, %d 取消, %d 进行中)",
 						groupID, detail.Group.Status, completed, detail.Group.TotalTasks, failed, cancelled, active)
 
-					if failed+cancelled > 0 {
-						return fmt.Errorf("下载组 %s 有 %d 个任务失败/取消，无法完成", groupID, failed+cancelled)
+					if failed > 0 || cancelled > 0 {
+						return fmt.Errorf("下载组 %s 有 %d 个失败, %d 个取消，无法完成", groupID, failed, cancelled)
 					}
 					if active == 0 {
 						// 防御：服务端在极早期可能返回空 tasks，但组状态尚未到 completed。
@@ -281,12 +281,12 @@ func NewCmdCloudGroupList(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 				return nil
 			}
 			for _, g := range groups {
-				ios.WriteOutLine("  %s: %s (%s) %d/%d 完成", g.ID, g.Name, g.Status, g.Completed, g.TotalTasks)
+				ios.WriteOutLine("  %s: %s (%s) %d/%d 完成, %d 失败, %d 取消", g.ID, g.Name, g.Status, g.Completed, g.TotalTasks, g.Failed, g.Cancelled)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().String("status", "", "按状态过滤 (pending|downloading|completed|partial|failed|cancelled)")
+	cmd.Flags().String("status", "", "按状态过滤 (pending|downloading|completed|failed|cancelled)")
 	return cmd
 }
 

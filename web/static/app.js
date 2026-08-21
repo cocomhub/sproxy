@@ -1768,7 +1768,6 @@ function statusText(status) {
     case 'completed': return '✅ 已完成';
     case 'failed': return '❌ 失败';
     case 'cancelled': return '🚫 已取消';
-    case 'partial': return '🟡 部分完成';
     default: return status;
   }
 }
@@ -1873,10 +1872,10 @@ function buildCloudGroupTableHtml(groups) {
 
 function cloudGroupActions(id, status) {
   let actions = '';
-  if (status === 'completed' || status === 'partial') {
+  if (status === 'completed') {
     actions += '<button class="btn btn-primary btn-sm group-archive-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">打包</button>';
   }
-  if (status === 'failed' || status === 'partial') {
+  if (status === 'failed' || status === 'cancelled') {
     actions += '<button class="btn btn-sm btn-secondary group-resume-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">恢复</button>';
   }
   if (status === 'pending' || status === 'downloading') {
@@ -1912,7 +1911,7 @@ async function toggleGroupTasks(groupId, btn) {
       container.innerHTML = '<span style="color:var(--text-muted);">暂无子任务数据</span>';
       return;
     }
-    var html = '<table class="file-table" style="width:100%;"><thead><tr><th style="text-align:left;padding:4px 8px;">ID</th><th style="text-align:left;padding:4px 8px;">URL</th><th style="text-align:left;padding:4px 8px;">状态</th><th style="text-align:left;padding:4px 8px;">进度</th></tr></thead><tbody>';
+    var html = '<table class="file-table" style="width:100%;"><thead><tr><th style="text-align:left;padding:4px 8px;">ID</th><th style="text-align:left;padding:4px 8px;">URL</th><th style="text-align:left;padding:4px 8px;">状态</th><th style="text-align:left;padding:4px 8px;">进度</th><th style="text-align:left;padding:4px 8px;">ETag</th></tr></thead><tbody>';
     for (var i = 0; i < tasks.length; i++) {
       var t = tasks[i];
       html += '<tr>' +
@@ -1920,6 +1919,7 @@ async function toggleGroupTasks(groupId, btn) {
         '<td style="padding:4px 8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + escHtml(t.url || '') + '">' + escHtml(t.url || '') + '</td>' +
         '<td style="padding:4px 8px;">' + statusText(t.status) + '</td>' +
         '<td style="padding:4px 8px;">' + (t.total_size > 0 ? buildProgressBar(t.downloaded, t.total_size) : '-') + '</td>' +
+        '<td style="padding:4px 8px;max-width:180px;overflow:hidden;text-overflow:ellipsis;font-family:monospace;font-size:11px;" title="' + escHtml(t.etag || '') + '">' + escHtml(t.etag || '-') + '</td>' +
         '</tr>';
     }
     html += '</tbody></table>';

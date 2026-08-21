@@ -83,8 +83,8 @@ var winReservedBase = map[string]struct{}{
 	"LPT6": {}, "LPT7": {}, "LPT8": {}, "LPT9": {},
 }
 
-// Safe 清理文件名中的路径分隔符，防止路径穿越。
-//   - 替换 \ / ? : < > | " * 与 NUL 为下划线，去除首尾空白与点
+// Safe 清理文件名中的路径分隔符与非法字符，防止路径穿越。
+//   - 替换 \ / ? : < > | " * \t 与 NUL 为下划线，去除首尾空白与点
 //   - 抵御 Windows 保留设备名（基名匹配时加 "_" 前缀）
 //   - 按 maxNameBytes 字节截断（优先保留扩展名，不劈开 UTF-8 字符）
 //
@@ -101,6 +101,7 @@ func Safe(name string) string {
 		"|", "_",
 		"\"", "_",
 		"*", "_",
+		"\t", "_",
 	).Replace(name)
 	name = strings.Trim(name, " .")
 	if name == "" {
