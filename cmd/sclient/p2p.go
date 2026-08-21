@@ -55,7 +55,7 @@ func (f *p2pFlags) add(cmd *cobra.Command) {
 }
 
 func (f *p2pFlags) signaler() *hub.HubSignaler {
-	return hub.NewHubSignaler(f.hub, f.tok)
+	return hub.NewHubSignaler(f.hub, f.tok, f.localNode())
 }
 
 func (f *p2pFlags) localNode() string {

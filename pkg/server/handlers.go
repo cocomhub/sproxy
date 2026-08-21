@@ -83,7 +83,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		metrics:       NewMetrics(),
 		shareStore:    NewShareStore(log.With("component", "share")),
 		routeTable:    opts.RouteTable,
-		signalBroker:  NewSignalBroker(),
+		signalBroker:  NewSignalBroker(opts.RouteTable),
 		uploadingStop: make(chan struct{}),
 	}
 
@@ -258,6 +258,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		srvMux.HandleFunc("GET /api/hub/nodes", h.authMiddleware(h.hubNodesHandler))
 		srvMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
 		srvMux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))
+		srvMux.HandleFunc("GET /api/hub/services", h.authMiddleware(h.hubServicesHandler))
+		localMux.HandleFunc("GET /api/hub/services", h.hubServicesHandler)
 	}
 
 	srvMux.HandleFunc("GET /healthz", h.healthz)

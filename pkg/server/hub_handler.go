@@ -75,3 +75,26 @@ func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("JSON encode error", "handler", "hubStatsHandler", "error", err)
 	}
 }
+
+// hubServicesHandler 返回所有节点宣告的服务（mesh 选路用）。
+func (h *Handlers) hubServicesHandler(w http.ResponseWriter, r *http.Request) {
+	if h.routeTable == nil {
+		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
+		return
+	}
+	type svcResp struct {
+		Name string `json:"name"`
+		Node string `json:"node"`
+		Addr string `json:"addr,omitempty"`
+	}
+	var resp []svcResp
+	for _, n := range h.routeTable.List() {
+		for _, s := range h.routeTable.ServicesOf(n.ID) {
+			resp = append(resp, svcResp{Name: s.Name, Node: string(n.ID), Addr: s.Addr})
+		}
+	}
+	w.Header().Set(headerContentType, contentTypeJSON)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		h.logger.Warn("JSON encode error", "handler", "hubServicesHandler", "error", err)
+	}
+}

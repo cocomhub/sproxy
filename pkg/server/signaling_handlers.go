@@ -13,18 +13,26 @@ import (
 )
 
 // SignalBroker 封装 hub 端的信令队列，挂在 Handlers 上。
+// rt 用于校验信令消息的 from/to 必须是已注册节点（共享 relay_token
+// 信任域内的身份绑定：阻止向不存在/未注册节点投递或轮询）。
 type SignalBroker struct {
 	queue *hub.SignalQueue
+	rt    *hub.RouteTable
 }
 
 // NewSignalBroker 创建信令 broker（信令队列）。
-func NewSignalBroker() *SignalBroker {
-	return &SignalBroker{queue: hub.NewSignalQueue()}
+func NewSignalBroker(rt *hub.RouteTable) *SignalBroker {
+	return &SignalBroker{queue: hub.NewSignalQueue(), rt: rt}
 }
+
+// maxSignalBodyBytes 是单条信令消息体的最大字节数（SDP 通常 < 8 KiB）。
+const maxSignalBodyBytes = 8 << 10
 
 // handleSignalPost 处理 POST /api/signal/{kind}：把一条信令消息投递到目标 peer 收件箱。
 // kind ∈ offer|answer|candidate。
+// 校验：from/to 均为当前已注册节点（防向幽灵节点投递）。
 func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, kind hub.SignalKind) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSignalBodyBytes)
 	var msg hub.SignalMsg
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
 		http.Error(w, "解析信令消息失败", http.StatusBadRequest)
@@ -36,16 +44,33 @@ func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "缺少 to/from", http.StatusBadRequest)
 		return
 	}
+	if b.rt == nil {
+		http.Error(w, "hub 未启用", http.StatusNotFound)
+		return
+	}
+	if !b.rt.Has(hub.NodeID(msg.From)) {
+		http.Error(w, "from 节点未注册", http.StatusBadRequest)
+		return
+	}
+	if !b.rt.Has(hub.NodeID(msg.To)) {
+		http.Error(w, "to 节点未注册", http.StatusBadRequest)
+		return
+	}
 	b.queue.Push(msg)
 	w.WriteHeader(http.StatusAccepted)
 }
 
 // handleSignalPoll 处理 GET /api/signal/poll/{peer}：长轮询目标 peer 的收件箱。
 // 返回 [{...}] 数组（可能为空）。每条消息被取走即从队列删除。
+// 校验：peer 必须是已注册节点（防向幽灵节点无意义地长轮询占用连接）。
 func (b *SignalBroker) handleSignalPoll(w http.ResponseWriter, r *http.Request) {
 	peer := r.PathValue("peer")
 	if peer == "" {
 		http.Error(w, "缺少 peer", http.StatusBadRequest)
+		return
+	}
+	if b.rt == nil || !b.rt.Has(hub.NodeID(peer)) {
+		http.Error(w, "peer 节点未注册", http.StatusNotFound)
 		return
 	}
 

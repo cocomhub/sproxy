@@ -140,3 +140,39 @@ type bufferedNetConn struct {
 func (b *bufferedNetConn) Read(p []byte) (int, error) {
 	return b.reader.Read(p)
 }
+
+// MeshService 是 hub 返回的一条 mesh 服务宣告。
+type MeshService struct {
+	Name string `json:"name"`
+	Node string `json:"node"`
+	Addr string `json:"addr,omitempty"`
+}
+
+// MeshServices 查询 hub 上所有节点宣告的 mesh 服务（供选路发现）。
+func (c *FileClient) MeshServices(ctx context.Context) ([]MeshService, error) {
+	var svcs []MeshService
+	if err := c.doJSON(ctx, http.MethodGet, "/api/hub/services", nil, &svcs); err != nil {
+		return nil, fmt.Errorf("查询 mesh 服务失败: %w", err)
+	}
+	return svcs, nil
+}
+
+// MeshConnect 查找托管指定服务的节点并建立经 hub 的流中继连接。
+// 返回的 net.Conn 代表「本地 ⇄ hub ⇄ 托管节点（出口或本地服务）」。
+// 目标节点必须已宣告该服务（relay start/portal 通过 Meta.Services 宣告）。
+func (c *FileClient) MeshConnect(ctx context.Context, service string) (net.Conn, string, error) {
+	svcs, err := c.MeshServices(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, s := range svcs {
+		if s.Name == service {
+			conn, err := c.RelayStream(ctx, s.Node, s.Addr)
+			if err != nil {
+				return nil, "", fmt.Errorf("建立到服务 %q（节点 %s）的流中继失败: %w", service, s.Node, err)
+			}
+			return conn, s.Node, nil
+		}
+	}
+	return nil, "", fmt.Errorf("mesh 服务 %q 未找到（请确认目标节点已宣告该服务）", service)
+}

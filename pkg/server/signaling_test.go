@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
 func signalTestMux(b *SignalBroker) *http.ServeMux {
@@ -28,8 +30,21 @@ func signalTestMux(b *SignalBroker) *http.ServeMux {
 	return m
 }
 
+// newSignalTestBroker 构造带已注册节点的 SignalBroker（from/to 校验需要）。
+func newSignalTestBroker(t *testing.T) *SignalBroker {
+	t.Helper()
+	rt := hub.NewRouteTable()
+	for _, id := range []string{"peer-a", "peer-b"} {
+		a, _ := xfertest.Pipe()
+		m := mux.New(a, mux.RoleDialer)
+		t.Cleanup(func() { _ = m.Close() })
+		rt.Add(hub.NodeID(id), m)
+	}
+	return NewSignalBroker(rt)
+}
+
 func TestSignalBroker_PostAndPoll(t *testing.T) {
-	b := NewSignalBroker()
+	b := newSignalTestBroker(t)
 	mux := signalTestMux(b)
 
 	// POST offer 给 peer-b
@@ -68,7 +83,7 @@ func TestSignalBroker_PostAndPoll(t *testing.T) {
 }
 
 func TestSignalBroker_BadInput(t *testing.T) {
-	b := NewSignalBroker()
+	b := NewSignalBroker(hub.NewRouteTable()) // 空路由表
 	mux := signalTestMux(b)
 	// 缺 to/from
 	req := httptest.NewRequest(http.MethodPost, "/api/signal/offer", strings.NewReader(`{"sdp":"x"}`))
@@ -83,5 +98,24 @@ func TestSignalBroker_BadInput(t *testing.T) {
 	mux.ServeHTTP(w2, req2)
 	if w2.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w2.Code)
+	}
+	// from 未注册：拒绝
+	req3 := httptest.NewRequest(http.MethodPost, "/api/signal/offer", strings.NewReader(`{"from":"ghost","to":"peer-b","sdp":"x"}`))
+	w3 := httptest.NewRecorder()
+	mux.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unregistered from, got %d", w3.Code)
+	}
+}
+
+func TestSignalBroker_UnregisteredPeer(t *testing.T) {
+	b := newSignalTestBroker(t) // 只有 peer-a / peer-b 注册
+	mux := signalTestMux(b)
+	// poll 未注册 peer → 404
+	req := httptest.NewRequest(http.MethodGet, "/api/signal/poll/ghost", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unregistered peer, got %d", w.Code)
 	}
 }
