@@ -674,12 +674,14 @@ func TestE2E_CloudDownloadChain(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	// cloudListTasks 返回 JSON 数组，不是 {"tasks": [...]}
-	var tasks []any
-	if err := json.Unmarshal(body, &tasks); err != nil {
-		t.Logf("unmarshal tasks failed (may be empty already): %v", err)
-	} else if len(tasks) > 0 {
-		t.Errorf("expected no cloud tasks after cleanup, got %d", len(tasks))
+	// cloudListTasks 返回 {tasks: [...], total: N} 容器
+	var list struct {
+		Tasks []any `json:"tasks"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Errorf("unmarshal cloud tasks list failed: %v", err)
+	} else if len(list.Tasks) > 0 {
+		t.Errorf("expected no cloud tasks after cleanup, got %d", len(list.Tasks))
 	}
 }
 

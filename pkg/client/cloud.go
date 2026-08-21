@@ -176,8 +176,12 @@ func (c *FileClient) ListCloudTasksWithTotal(ctx context.Context, status string,
 	if status != "" {
 		params.Set("status", status)
 	}
-	if offset >= 0 && limit > 0 {
+	// offset/limit 各自独立生效：只传 limit（offset 保持 -1）时也要发送 limit，
+	// 否则 CLI 默认 offset=-1 会让 --limit 静默失效返回全量。
+	if offset >= 0 {
 		params.Set("offset", strconv.Itoa(offset))
+	}
+	if limit > 0 {
 		params.Set("limit", strconv.Itoa(limit))
 	}
 	if len(params) > 0 {
@@ -349,8 +353,11 @@ func (c *FileClient) CloudListGroupsWithTotal(ctx context.Context, status string
 	if status != "" {
 		params.Set("status", status)
 	}
-	if offset >= 0 && limit > 0 {
+	// offset/limit 各自独立生效（同 ListCloudTasksWithTotal）：只传 limit 也要发送。
+	if offset >= 0 {
 		params.Set("offset", strconv.Itoa(offset))
+	}
+	if limit > 0 {
 		params.Set("limit", strconv.Itoa(limit))
 	}
 	if len(params) > 0 {

@@ -1876,3 +1876,76 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 		t.Fatalf("DeleteGroup %s: %v", g2.ID, err)
 	}
 }
+
+// TestCloudDownloadManager_ListTasksPagination 验证 offset/limit 分页、排序与 total 统计。
+func TestCloudDownloadManager_ListTasksPagination(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
+
+	// 创建 5 个任务（URL 去重避免自动合并）
+	for i := range 5 {
+		if _, err := mgr.CreateTask("url", fmt.Sprintf("https://example.com/f%d.zip", i), fmt.Sprintf("f%d.zip", i), int64(i+1)*100); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 全量
+	all, total := mgr.ListTasks("", -1, 0)
+	if total != 5 || len(all) != 5 {
+		t.Fatalf("expected 5 tasks total=%d len=%d", total, len(all))
+	}
+
+	// limit=2：只取前 2 条，total 仍为 5
+	page1, total := mgr.ListTasks("", 0, 2)
+	if len(page1) != 2 || total != 5 {
+		t.Fatalf("expected page1 len=2 total=5, got len=%d total=%d", len(page1), total)
+	}
+	if page1[0].ID == page1[1].ID {
+		t.Fatal("expected distinct IDs on page")
+	}
+
+	// offset=2 limit=2：第二页
+	page2, _ := mgr.ListTasks("", 2, 2)
+	if len(page2) != 2 {
+		t.Fatalf("expected page2 len=2, got %d", len(page2))
+	}
+	if page1[1].ID == page2[0].ID {
+		t.Fatal("expected no overlap between pages")
+	}
+
+	// offset 超界 → 空 + total 不变
+	empty, total := mgr.ListTasks("", 99, 10)
+	if len(empty) != 0 || total != 5 {
+		t.Fatalf("expected empty offset=99 total=5, got len=%d total=%d", len(empty), total)
+	}
+}
+
+// TestCloudDownloadManager_ListGroupsPagination 验证组列表分页与 total。
+func TestCloudDownloadManager_ListGroupsPagination(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	t.Cleanup(mgr.Close)
+
+	for i := range 4 {
+		group := &CloudTaskGroup{
+			ID:         fmt.Sprintf("g%d", i),
+			Name:       fmt.Sprintf("group%d", i),
+			Status:     "completed",
+			CreatedAt:  time.Now().Add(time.Duration(i) * time.Second),
+			UpdatedAt:  time.Now(),
+			ExpiresAt:  time.Now().Add(time.Hour),
+			TotalTasks: 1,
+		}
+		mgr.groupMu.Lock()
+		mgr.groups[group.ID] = group
+		mgr.groupMu.Unlock()
+	}
+
+	page, total := mgr.ListGroups("", 0, 2)
+	if len(page) != 2 || total != 4 {
+		t.Fatalf("expected page len=2 total=4, got len=%d total=%d", len(page), total)
+	}
+}

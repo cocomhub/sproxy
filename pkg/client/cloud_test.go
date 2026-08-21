@@ -646,3 +646,29 @@ func TestCloudDownload_Batch_UnderCustomLimit(t *testing.T) {
 		t.Fatalf("expected 3 tasks, got %d", len(tasks))
 	}
 }
+
+// TestCloudDownload_ListTasksLimitOnly 回归：只传 limit（offset 保持 -1）时也必须发送 limit 参数，
+// 否则 CLI 默认 offset=-1 会让 --limit 静默失效返回全量。
+func TestCloudDownload_ListTasksLimitOnly(t *testing.T) {
+	t.Parallel()
+	var gotQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/cloud/tasks", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{}, "total": 0})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL)
+	if _, _, err := c.ListCloudTasksWithTotal(t.Context(), "", -1, 5); err != nil {
+		t.Fatalf("ListCloudTasksWithTotal limit-only: %v", err)
+	}
+	if !strings.Contains(gotQuery, "limit=5") {
+		t.Fatalf("expected limit=5 in query, got %q", gotQuery)
+	}
+	if strings.Contains(gotQuery, "offset=") {
+		t.Fatalf("expected no offset param when offset=-1, got %q", gotQuery)
+	}
+}

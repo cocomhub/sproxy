@@ -816,7 +816,9 @@ func (m *CloudDownloadManager) SnapshotTask(id string) (*CloudTask, bool) {
 
 // ListTasks 列出任务，支持按 status 过滤与 offset/limit 分页。
 // offset<0 时不偏移；limit<=0 时返回全部（兼容现有语义）。
-// 排序：CreatedAt 降序 + ID 降序 tie-break（newIDWithPrefix 单调序号保证稳定）。
+// 排序：CreatedAt 降序 + ID 降序 tie-break。ID 含随机 4 字节 hex，CreatedAt 相等时按
+// 随机值排序，但排序本身确定（同输入同输出），分页跨页仍稳定——仅同纳秒创建的任务
+// 顺序不代表创建序，属可接受（创建时间戳通常唯一）。
 // total 为按 status 过滤后的任务总数（不受分页影响）。
 func (m *CloudDownloadManager) ListTasks(status string, offset, limit int) ([]*CloudTask, int) {
 	m.mu.RLock()
@@ -1474,7 +1476,7 @@ func (m *CloudDownloadManager) GetGroup(id string) (*CloudTaskGroup, bool) {
 
 // ListGroups 列出组，支持按 status 过滤与 offset/limit 分页。
 // offset<0 时不偏移；limit<=0 时返回全部（兼容现有语义）。
-// 排序：CreatedAt 降序 + ID 降序 tie-break（保持稳定排序）。
+// 排序：CreatedAt 降序 + ID 降序 tie-break（同 ListTasks 注释，确定性排序）。
 // total 为按 status 过滤后的组总数（不受分页影响）。
 func (m *CloudDownloadManager) ListGroups(status string, offset, limit int) ([]*CloudTaskGroup, int) {
 	m.groupMu.RLock()
