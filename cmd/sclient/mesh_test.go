@@ -75,3 +75,24 @@ func TestDefaultMeshDial_FallsBackToRelay(t *testing.T) {
 		t.Fatalf("expected relay fallback error, got: %v", err)
 	}
 }
+
+// TestMeshRelayPath_NoDialFrame 回归测试：relay 中继路径不得写 dial 帧。
+// 实测发现的 bug：mesh connect 曾对 RelayStream 返回的流额外写 [4B len][{"dial":...}]
+// 帧，导致数据流被污染（echo 返回帧头而非业务数据）。
+// 修复后通过 meshDialFrameNeeded 精准判定：仅 webrtc 写帧，relay 不写。
+func TestMeshDialFrameNeeded(t *testing.T) {
+	tests := []struct {
+		kind string
+		want bool
+	}{
+		{"webrtc", true}, // 打洞直连对端，需写帧告知出口拨目标
+		{"relay", false}, // hub 的 RelayStreamHandler 已写帧，客户端不得再写（实测 bug）
+		{"", false},
+		{"unknown", false},
+	}
+	for _, tc := range tests {
+		if got := meshDialFrameNeeded(tc.kind); got != tc.want {
+			t.Fatalf("meshDialFrameNeeded(%q) = %v, want %v", tc.kind, got, tc.want)
+		}
+	}
+}
