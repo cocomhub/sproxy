@@ -315,7 +315,14 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 
 			ios.WriteOutLine("等待 %d 个任务完成...", len(pending))
 
-			pollCtx, cancel := context.WithTimeout(cmd.Context(), timeout)
+			// timeout>0 才设超时；timeout=0 表示不限时（与链式入口一致）
+			pollCtx := cmd.Context()
+			var cancel context.CancelFunc
+			if timeout > 0 {
+				pollCtx, cancel = context.WithTimeout(cmd.Context(), timeout)
+			} else {
+				pollCtx, cancel = context.WithCancel(cmd.Context())
+			}
 			defer cancel()
 
 			ticker := time.NewTicker(pollInterval)
@@ -354,9 +361,10 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 							ios.WriteOutLine("  ✗ %s: 失败 - %s", id, task.Error)
 							failedIDs = append(failedIDs, id)
 						case "cancelled":
-							// cancelled 属用户主动取消，不算失败（与链式 waitForTasks 语义一致）
+							// cancelled 计入失败（用户确认 cancelled=失败，与链式 waitForTasks 一致）
 							delete(pending, id)
 							ios.WriteOutLine("  ✗ %s: 已取消", id)
+							failedIDs = append(failedIDs, id)
 						default:
 							pct := int64(0)
 							if task.TotalSize > 0 {
@@ -429,6 +437,7 @@ func NewCmdCloudDownloadFile(factory clientfactory.Factory, ios cli.IOStreams, c
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			concurrency, _ := cmd.Flags().GetInt("concurrency")
+			outputDir, _ := cmd.Flags().GetString("output-dir")
 
 			// 先获取所有任务信息，构造下载条目（需要 Filename 拼远端路径）
 			items := make([]client.DownloadItem, 0, len(args))
@@ -441,7 +450,8 @@ func NewCmdCloudDownloadFile(factory clientfactory.Factory, ios cli.IOStreams, c
 					return fmt.Errorf("任务 %s 未完成（当前 %s），无法下载原始文件", taskID, task.Status)
 				}
 				cloudPath := ".__cloud__/" + taskID + "/" + task.Filename
-				items = append(items, client.DownloadItem{RemotePath: cloudPath, LocalPath: task.Filename})
+				local := filepath.Join(outputDir, task.Filename)
+				items = append(items, client.DownloadItem{RemotePath: cloudPath, LocalPath: local})
 			}
 
 			ios.WriteOutLine("下载 %d 个任务的原始文件...", len(items))
@@ -454,6 +464,7 @@ func NewCmdCloudDownloadFile(factory clientfactory.Factory, ios cli.IOStreams, c
 		},
 	}
 	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
+	cmd.Flags().String("output-dir", ".", "本地输出目录（默认当前目录）")
 	return cmd
 }
 
@@ -470,10 +481,12 @@ func NewCmdCloudDownloadArchive(factory clientfactory.Factory, ios cli.IOStreams
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			concurrency, _ := cmd.Flags().GetInt("concurrency")
+			outputDir, _ := cmd.Flags().GetString("output-dir")
 
 			items := make([]client.DownloadItem, 0, len(args))
 			for _, archiveFile := range args {
-				items = append(items, client.DownloadItem{RemotePath: archiveFile})
+				local := filepath.Join(outputDir, filepath.Base(archiveFile))
+				items = append(items, client.DownloadItem{RemotePath: archiveFile, LocalPath: local})
 			}
 
 			ios.WriteOutLine("下载 %d 个归档文件...", len(items))
@@ -486,6 +499,7 @@ func NewCmdCloudDownloadArchive(factory clientfactory.Factory, ios cli.IOStreams
 		},
 	}
 	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
+	cmd.Flags().String("output-dir", ".", "本地输出目录（默认当前目录）")
 	return cmd
 }
 
@@ -501,6 +515,11 @@ func NewCmdCloudDeleteTask(factory clientfactory.Factory, ios cli.IOStreams, cfg
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
+			yes, _ := cmd.Flags().GetBool("yes")
+			if !yes {
+				ios.WriteErrLine("将永久删除任务 %s 及关联云端文件，请使用 --yes 确认", args[0])
+				return fmt.Errorf("delete 需要 --yes 确认")
+			}
 			if err := svc.DeleteCloudTask(cmd.Context(), args[0]); err != nil {
 				return fmt.Errorf("删除任务失败: %w", err)
 			}
@@ -508,6 +527,7 @@ func NewCmdCloudDeleteTask(factory clientfactory.Factory, ios cli.IOStreams, cfg
 			return nil
 		},
 	}
+	cmd.Flags().Bool("yes", false, "确认永久删除（任务与云端文件）")
 	return cmd
 }
 

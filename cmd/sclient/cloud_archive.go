@@ -37,17 +37,21 @@ func NewCmdCloudArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc
 			if len(args) == 1 {
 				result, err := svc.ArchiveCloudTask(cmd.Context(), args[0], archiveName)
 				if err != nil {
-					ios.WriteErrLine("归档失败: %v", err)
 					return fmt.Errorf("归档失败: %w", err)
 				}
 				ios.WriteOutLine("归档完成: %s (%d bytes)", result.File, result.Size)
 			} else {
 				result, err := svc.ArchiveCloudTasks(cmd.Context(), args, archiveName)
 				if err != nil {
-					ios.WriteErrLine("归档失败: %v", err)
 					return fmt.Errorf("归档失败: %w", err)
 				}
-				ios.WriteOutLine("归档完成: %s (%d bytes, %d files)", result.File, result.Size, result.TaskCount)
+				// SkippedCount>0 时提示部分跳过（服务端批量归档会跳过无效/未完成任务）
+				if result.SkippedCount > 0 {
+					ios.WriteOutLine("归档完成: %s (%d bytes, %d files, 跳过 %d 个任务)",
+						result.File, result.Size, result.TaskCount, result.SkippedCount)
+				} else {
+					ios.WriteOutLine("归档完成: %s (%d bytes, %d files)", result.File, result.Size, result.TaskCount)
+				}
 			}
 			return nil
 		},

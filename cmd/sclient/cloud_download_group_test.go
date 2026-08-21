@@ -253,12 +253,32 @@ func TestCloudDownloadGroupCmd_Delete(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
-	cmd.SetArgs([]string{"delete", "group-1"})
+	cmd.SetArgs([]string{"delete", "group-1", "--yes"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("delete subcommand failed: %v", err)
 	}
 	if !strings.Contains(buf.String(), "已删除") {
 		t.Fatalf("expected deleted message, got: %s", buf.String())
+	}
+}
+
+// TestCloudDownloadGroupCmd_DeleteRequiresYes 验证未传 --yes 时组 delete 拒绝执行。
+func TestCloudDownloadGroupCmd_DeleteRequiresYes(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var out, errBuf strings.Builder
+	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: &out, ErrOut: &errBuf}, nil)
+	cmd.SetArgs([]string{"delete", "group-1"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error when --yes not provided")
+	}
+	if !strings.Contains(errBuf.String(), "--yes") {
+		t.Fatalf("expected stderr to mention --yes, got: %s", errBuf.String())
 	}
 }
 

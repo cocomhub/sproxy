@@ -5,7 +5,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -206,7 +208,14 @@ func NewCmdCloudGroupWait(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 
 			ios.WriteOutLine("等待下载组 %s (%q) 完成...", groupID, detail.Group.Name)
 
-			pollCtx, cancel := context.WithTimeout(cmd.Context(), timeout)
+			// timeout>0 才设超时；timeout=0 表示不限时（与链式入口一致）
+			pollCtx := cmd.Context()
+			var cancel context.CancelFunc
+			if timeout > 0 {
+				pollCtx, cancel = context.WithTimeout(cmd.Context(), timeout)
+			} else {
+				pollCtx, cancel = context.WithCancel(cmd.Context())
+			}
 			defer cancel()
 			ticker := time.NewTicker(pollInterval)
 			defer ticker.Stop()
@@ -243,6 +252,11 @@ func NewCmdCloudGroupWait(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 						return fmt.Errorf("下载组 %s 有 %d 个失败, %d 个取消，无法完成", groupID, failed, cancelled)
 					}
 					if active == 0 {
+						// 组状态为 failed/cancelled 且无活跃任务（空列表边界）→ 终态，视为异常报错，
+						// 避免转圈到超时（C7）。
+						if detail.Group.Status == "failed" || detail.Group.Status == "cancelled" {
+							return fmt.Errorf("下载组 %s 已终止（状态 %s），无法完成", groupID, detail.Group.Status)
+						}
 						// 防御：服务端在极早期可能返回空 tasks，但组状态尚未到 completed。
 						// 只有组状态为 completed（或 tasks 非空且无活跃）才视为完成。
 						if detail.Group.Status == "completed" || len(detail.Tasks) > 0 {
@@ -320,7 +334,12 @@ func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, c
 			if err != nil {
 				return fmt.Errorf("打包下载组失败: %w", err)
 			}
-			ios.WriteOutLine("打包完成: %s (%d bytes)", result.File, result.Size)
+			if result.SkippedCount > 0 {
+				ios.WriteOutLine("打包完成: %s (%d bytes, %d 个文件, 跳过 %d 个未完成任务)",
+					result.File, result.Size, result.TaskCount, result.SkippedCount)
+			} else {
+				ios.WriteOutLine("打包完成: %s (%d bytes)", result.File, result.Size)
+			}
 			return nil
 		},
 	}
@@ -340,6 +359,11 @@ func NewCmdCloudGroupCancel(factory clientfactory.Factory, ios cli.IOStreams, cf
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if err := svc.CloudCancelGroup(cmd.Context(), args[0]); err != nil {
+				// 与任务 cancel 一致：组不存在（404）视为已取消，幂等返回
+				if errors.Is(err, client.ErrNotFound) {
+					ios.WriteOutLine("下载组 %s 不存在（视为已取消）", args[0])
+					return nil
+				}
 				return fmt.Errorf("取消下载组失败: %w", err)
 			}
 			ios.WriteOutLine("下载组已取消")
@@ -387,6 +411,7 @@ func NewCmdCloudGroupDownload(factory clientfactory.Factory, ios cli.IOStreams, 
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			concurrency, _ := cmd.Flags().GetInt("concurrency")
+			outputDir, _ := cmd.Flags().GetString("output-dir")
 
 			groupID := args[0]
 			detail, err := svc.CloudGetGroup(cmd.Context(), groupID)
@@ -408,7 +433,7 @@ func NewCmdCloudGroupDownload(factory clientfactory.Factory, ios cli.IOStreams, 
 					return fmt.Errorf("子任务 %s 未完成（当前 %s），无法下载原始文件", subID, task.Status)
 				}
 				cloudPath := ".__cloud__/" + subID + "/" + task.Filename
-				items = append(items, client.DownloadItem{RemotePath: cloudPath, LocalPath: task.Filename})
+				items = append(items, client.DownloadItem{RemotePath: cloudPath, LocalPath: filepath.Join(outputDir, task.Filename)})
 			}
 
 			ios.WriteOutLine("下载组 %s 中 %d 个子任务原始文件...", groupID, len(items))
@@ -421,6 +446,7 @@ func NewCmdCloudGroupDownload(factory clientfactory.Factory, ios cli.IOStreams, 
 		},
 	}
 	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
+	cmd.Flags().String("output-dir", ".", "本地输出目录（默认当前目录）")
 	return cmd
 }
 
@@ -437,10 +463,12 @@ func NewCmdCloudGroupDownloadArchive(factory clientfactory.Factory, ios cli.IOSt
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			concurrency, _ := cmd.Flags().GetInt("concurrency")
+			outputDir, _ := cmd.Flags().GetString("output-dir")
 
 			items := make([]client.DownloadItem, 0, len(args))
 			for _, archiveFile := range args {
-				items = append(items, client.DownloadItem{RemotePath: archiveFile})
+				local := filepath.Join(outputDir, filepath.Base(archiveFile))
+				items = append(items, client.DownloadItem{RemotePath: archiveFile, LocalPath: local})
 			}
 
 			ios.WriteOutLine("下载 %d 个归档文件...", len(items))
@@ -453,6 +481,7 @@ func NewCmdCloudGroupDownloadArchive(factory clientfactory.Factory, ios cli.IOSt
 		},
 	}
 	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
+	cmd.Flags().String("output-dir", ".", "本地输出目录（默认当前目录）")
 	return cmd
 }
 
@@ -503,6 +532,11 @@ func NewCmdCloudGroupDelete(factory clientfactory.Factory, ios cli.IOStreams, cf
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
+			yes, _ := cmd.Flags().GetBool("yes")
+			if !yes {
+				ios.WriteErrLine("将永久删除下载组 %s 及所有关联文件，请使用 --yes 确认", args[0])
+				return fmt.Errorf("delete 需要 --yes 确认")
+			}
 			if err := svc.CloudDeleteGroup(cmd.Context(), args[0]); err != nil {
 				return fmt.Errorf("删除下载组失败: %w", err)
 			}
@@ -510,5 +544,6 @@ func NewCmdCloudGroupDelete(factory clientfactory.Factory, ios cli.IOStreams, cf
 			return nil
 		},
 	}
+	cmd.Flags().Bool("yes", false, "确认永久删除（组与所有关联文件）")
 	return cmd
 }

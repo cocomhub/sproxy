@@ -238,6 +238,11 @@ func (c *CloudDownloadGroupChain) Run(ctx context.Context, reportFn ProgressFunc
 // submitGroup 创建云端下载任务组并记录组 ID。
 // 组内去重可能吸收既有任务，TotalTasks 以服务端返回为准。
 func (c *CloudDownloadGroupChain) submitGroup(ctx context.Context) error {
+	// 幂等守卫：恢复时若 GroupID 已非空（submit 阶段完成、phase 尚未写入 waiting 前崩溃），
+	// 跳过重复创建，避免同一组被再次创建导致双倍任务（C5）。
+	if c.GroupID != "" {
+		return nil
+	}
 	group, err := c.client.CloudCreateGroupEntries(ctx, c.GroupName, c.Entries)
 	if err != nil {
 		return fmt.Errorf("创建下载组失败: %w", err)
@@ -261,7 +266,14 @@ func (c *CloudDownloadGroupChain) waitForGroup(ctx context.Context) error {
 		return fmt.Errorf("组 ID 为空，请先创建组")
 	}
 
-	timeoutCtx, cancel := context.WithTimeout(ctx, c.Timeout)
+	// c.Timeout>0 才设超时；0 表示不限时（与 batch 链 pollAllTasks 一致）
+	timeoutCtx := ctx
+	var cancel context.CancelFunc
+	if c.Timeout > 0 {
+		timeoutCtx, cancel = context.WithTimeout(ctx, c.Timeout)
+	} else {
+		timeoutCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	ticker := time.NewTicker(c.PollInterval)
@@ -312,6 +324,10 @@ func (c *CloudDownloadGroupChain) waitForGroup(ctx context.Context) error {
 			if active == 0 {
 				if detail.Group.Status == "completed" {
 					return nil
+				}
+				// 组状态为 failed/cancelled 且无活跃任务 → 终态，视为异常报错，避免转圈到超时（C7）。
+				if detail.Group.Status == "failed" || detail.Group.Status == "cancelled" {
+					return fmt.Errorf("下载组 %s 已终止（状态 %s），无法完成链式下载", c.GroupID, detail.Group.Status)
 				}
 				// 空 tasks + 非 completed 组状态：继续轮询（避免误判完成）
 				if len(detail.Tasks) == 0 {

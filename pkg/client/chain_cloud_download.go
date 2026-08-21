@@ -275,6 +275,11 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 // 任何条目提交失败（返回空 ID + error）都立即报错，不静默丢弃后继续——否则链式
 // 下载会"完成"但缺少这些文件，用户毫不知情（禁止静默失败）。
 func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
+	// 幂等守卫：恢复时若 TaskIDs 已非空（submit 阶段完成、phase 尚未写入 waiting 前崩溃），
+	// 跳过重复提交，避免同一批 URL 被再次提交导致双倍任务/轮询（C5）。
+	if len(c.TaskIDs) > 0 {
+		return nil
+	}
 	// 统一走带保存文件名的 Entries；为防御直接构造/旧持久化状态（Entries 为空），
 	// 回退为从 URLs 生成条目（filename 为空，服务端自动生成）。
 	entries := c.Entries
@@ -341,10 +346,13 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 		}
 		var storageFullURLs []string
 		var storageFullIDs []string
+		cancelled := 0
 		for _, r := range results {
 			switch r.Status {
 			case TaskStatusCompleted:
 				c.Completed++
+			case TaskStatusCancelled:
+				cancelled++
 			case TaskStatusFailed:
 				if isStorageFullError(r.Error) {
 					storageFullURLs = append(storageFullURLs, r.URL)
@@ -355,9 +363,13 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 			}
 		}
 		if len(storageFullURLs) == 0 {
-			// 无存储超限重试：若仍有失败任务（含重试提交失败的 URL），链式操作不得
-			// 声称成功（禁止静默失败）
-			if c.Failed+submitFailedCount > 0 {
+			// 无存储超限重试：若仍有失败/取消任务（含重试提交失败的 URL），链式操作不得
+			// 声称成功（禁止静默失败）。cancelled 计入失败（用户确认 cancelled=失败）。
+			if c.Failed+cancelled+submitFailedCount > 0 {
+				if cancelled > 0 {
+					return fmt.Errorf("%d 个云端下载任务失败（其中 %d 个被取消，共 %d 个）",
+						c.Failed+cancelled+submitFailedCount, cancelled, c.Total+submitFailedCount)
+				}
 				return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed+submitFailedCount, c.Total+submitFailedCount)
 			}
 			return nil
@@ -441,7 +453,14 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 	if len(c.TaskIDs) == 0 {
 		return nil, fmt.Errorf("没有可轮询的任务")
 	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, c.Timeout)
+	// c.Timeout>0 才设超时；0 表示不限时（与 waitForTasks 的 ctx 约束保持一致）
+	timeoutCtx := ctx
+	var cancel context.CancelFunc
+	if c.Timeout > 0 {
+		timeoutCtx, cancel = context.WithTimeout(ctx, c.Timeout)
+	} else {
+		timeoutCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	ticker := time.NewTicker(c.PollInterval)
@@ -494,10 +513,10 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 				}
 				results[r.index] = r.task
 				switch r.task.Status {
-				case TaskStatusCancelled:
-					return nil, fmt.Errorf("cloud download task %s was cancelled", r.task.ID)
-				case TaskStatusCompleted, TaskStatusFailed:
-					// 已完成或失败，继续等待其他任务
+				case TaskStatusCompleted, TaskStatusFailed, TaskStatusCancelled:
+					// 已完成/失败/取消均为终态：继续等待其他任务，不立即中止。
+					// 取消不再立即失败整链——与组链 waitForGroup 的"等所有任务终态后
+					// 整体报错"语义对齐（用户确认 cancelled=失败，但失败时机延后到终态收敛）。
 				default:
 					allDone = false
 				}

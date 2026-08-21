@@ -899,3 +899,39 @@ func TestCloudDownloadChain_StorageFullRetry_ResubmitFailsNotSilent(t *testing.T
 		t.Errorf("expected error mentioning resubmit failure, got: %v", err)
 	}
 }
+
+// TestCloudDownloadChain_WaitCancelled 验证批量链中任务被取消时整链失败（cancelled=失败，
+// 与组链语义一致；pollAllTasks 不再立即失败，等所有任务终态后报错）。
+func TestCloudDownloadChain_WaitCancelled(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"tasks": []CloudTask{{ID: "ct-1", Status: "pending"}},
+		})
+	})
+	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(CloudTask{ID: "ct-1", Status: TaskStatusCancelled})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := defaultChainOptions()
+	opts.pollInterval = 50 * time.Millisecond
+	opts.timeout = 5 * time.Second
+
+	chain, err := NewCloudDownloadChain(client, []string{"https://example.com/file1"}, "archive", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
+
+	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	if err == nil {
+		t.Fatal("expected error when task is cancelled")
+	}
+	if !strings.Contains(err.Error(), "取消") {
+		t.Errorf("expected error mentioning cancel, got: %v", err)
+	}
+}

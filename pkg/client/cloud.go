@@ -70,12 +70,14 @@ func WithCloudDownloadMaxBatchURLs(n int) CloudDownloadOption {
 
 // CloudArchiveResult 表示云端归档操作的结果。
 type CloudArchiveResult struct {
-	Success   bool   `json:"success"`
-	Message   string `json:"message,omitempty"`
-	File      string `json:"file,omitempty"`
-	Size      int64  `json:"size,omitempty"`
-	Checksum  string `json:"checksum,omitempty"`
-	TaskCount int    `json:"task_count,omitempty"`
+	Success      bool     `json:"success"`
+	Message      string   `json:"message,omitempty"`
+	File         string   `json:"file,omitempty"`
+	Size         int64    `json:"size,omitempty"`
+	Checksum     string   `json:"checksum,omitempty"`
+	TaskCount    int      `json:"task_count,omitempty"`
+	SkippedCount int      `json:"skipped_count,omitempty"`
+	SkippedTasks []string `json:"skipped_tasks,omitempty"`
 }
 
 // CloudArchiveResult 实现 successChecker 接口，支持 doJSON 自动检查。

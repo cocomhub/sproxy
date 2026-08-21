@@ -12,8 +12,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// cloudTaskInfo 表示一个云端下载任务的信息（与 cloud_types.go 中的 cloudTaskResponse 结构一致）。
-type cloudTaskInfo = cloudTaskResponse
+// cloudTaskInfo 直接复用 client.CloudTask（服务端返回的完整字段，含 ETag/GroupID/FileMTime/时间戳）。
+type cloudTaskInfo = client.CloudTask
 
 // getCloudServerURL 从 flag 和配置中获取 server URL 和 auth token。
 // 被 cloud_cancel.go 和 preview.go 共享使用。
@@ -62,12 +62,8 @@ func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 				return nil
 			}
 
-			// 转换为 cloudTaskInfo 用于格式化输出
-			infos := make([]cloudTaskInfo, len(tasks))
-			for i, t := range tasks {
-				infos[i] = cloudTaskToInfo(t)
-			}
-			fm.PrintCloudTaskList(infos)
+			// client.CloudTask 即 cloudTaskInfo（类型别名），直接透传完整字段
+			fm.PrintCloudTaskList(tasks)
 			return nil
 		},
 	}
@@ -78,20 +74,3 @@ func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 
 	return cmd
 }
-
-// cloudTaskToInfo 将 client.CloudTask 转换为 cloudTaskInfo。
-func cloudTaskToInfo(t client.CloudTask) cloudTaskInfo {
-	return cloudTaskInfo{
-		ID:         t.ID,
-		URL:        t.URL,
-		Filename:   t.Filename,
-		Status:     t.Status,
-		TotalSize:  t.TotalSize,
-		Downloaded: t.Downloaded,
-		Checksum:   t.Checksum,
-		Error:      t.Error,
-	}
-}
-
-// 确保 cloudTaskResponse 的字段与 client.CloudTask 兼容
-var _ = cloudTaskToInfo // 使用引用避免未使用错误

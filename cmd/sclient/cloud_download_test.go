@@ -744,7 +744,7 @@ func TestCloudDownloadCmd_DeleteSubcommand(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"delete", "task-del-1"})
+	cmd.SetArgs([]string{"delete", "task-del-1", "--yes"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("delete subcommand failed: %v", err)
 	}
@@ -753,6 +753,26 @@ func TestCloudDownloadCmd_DeleteSubcommand(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "task-del-1") {
 		t.Fatalf("expected output to contain task ID, got: %s", buf.String())
+	}
+}
+
+// TestCloudDownloadCmd_DeleteRequiresYes 验证未传 --yes 时 delete 拒绝执行且返回非零。
+func TestCloudDownloadCmd_DeleteRequiresYes(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	svc := client.NewFileClient(mock.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	var out, errBuf strings.Builder
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &out, ErrOut: &errBuf}, &state.State{}, nil)
+	cmd.SetArgs([]string{"delete", "task-del-1"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error when --yes not provided")
+	}
+	if !strings.Contains(errBuf.String(), "--yes") {
+		t.Fatalf("expected stderr to mention --yes, got: %s", errBuf.String())
 	}
 }
 
@@ -1161,8 +1181,13 @@ func TestCloudDownloadCmd_WaitTaskCancelled(t *testing.T) {
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
 	cmd.SetArgs([]string{"wait", "--poll-interval", "100ms", "--timeout", "30s", "cancel-1"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("wait subcommand should not fail on cancelled task: %v", err)
+	// cancelled 计入失败（用户确认 cancelled=失败），wait 必须返回非零
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("wait subcommand should fail on cancelled task")
+	}
+	if !strings.Contains(err.Error(), "cancel-1") {
+		t.Fatalf("expected error to mention task ID, got: %v", err)
 	}
 	if !strings.Contains(buf.String(), "已取消") {
 		t.Fatalf("expected cancelled message in output, got: %s", buf.String())
