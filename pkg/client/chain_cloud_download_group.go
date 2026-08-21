@@ -257,10 +257,9 @@ func (c *CloudDownloadGroupChain) submitGroup(ctx context.Context) error {
 // waitForGroup 轮询组详情（含子任务列表）直到全部完成或有任务失败。
 // 语义与 batch 链一致：任一子任务 failed/cancelled → 整体失败。
 //
-// 时序差异说明（与 batch 链 pollAllTasks 的区别）：batch 链在发现 cancelled 任务时
-// 立即返回错误并停止轮询；group 链这里继续轮询等待所有活跃任务进入终态后才整体失败。
-// 这是有意的"组完整性"语义——组内仍有任务在下载时，不提前中断（中断也无法阻止
-// 服务端已启动的下载）。两边的结果都是整体失败，仅失败时机不同。
+// 时序说明：batch 链与 group 链在 edef904 后语义统一——都不在发现 cancelled 时立即
+// 失败，而是等所有活跃任务进入终态后整体报错（cancelled 计入失败，用户确认 cancelled=失败）。
+// 组内仍有任务在下载时不提前中断（中断也无法阻止服务端已启动的下载）。
 func (c *CloudDownloadGroupChain) waitForGroup(ctx context.Context) error {
 	if c.GroupID == "" {
 		return fmt.Errorf("组 ID 为空，请先创建组")

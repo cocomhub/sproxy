@@ -301,14 +301,14 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 				var failedIDs []string
 				for _, t := range tasks {
 					ios.WriteOutLine("  %s: %s", t.ID, t.Status)
-					if t.Status == "failed" {
+					if t.Status == "failed" || t.Status == "cancelled" {
 						failedIDs = append(failedIDs, t.ID)
 					}
 				}
-				// 初始状态即含失败任务时返回非零（与链式 waitForTasks 语义一致：
-				// 仅 failed 视为失败，cancelled 属用户主动取消，不算失败）
+				// 初始状态即含失败/取消任务时返回非零（与链式 waitForTasks 语义一致：
+				// cancelled 计入失败——用户确认 cancelled=失败）
 				if len(failedIDs) > 0 {
-					return fmt.Errorf("%d 个任务失败: %s", len(failedIDs), strings.Join(failedIDs, ", "))
+					return fmt.Errorf("%d 个任务失败/取消: %s", len(failedIDs), strings.Join(failedIDs, ", "))
 				}
 				return nil
 			}
@@ -341,7 +341,7 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 						return pollCtx.Err()
 					}
 					if len(failedIDs) > 0 {
-						return fmt.Errorf("%d 个任务失败: %s", len(failedIDs), strings.Join(failedIDs, ", "))
+						return fmt.Errorf("%d 个任务失败/取消: %s", len(failedIDs), strings.Join(failedIDs, ", "))
 					}
 					return nil
 				case <-ticker.C:
@@ -375,10 +375,10 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 					}
 				}
 			}
-			// 任一任务失败即返回非零（与链式 waitForTasks 语义一致），
+			// 任一任务失败/取消即返回非零（与链式 waitForTasks 语义一致），
 			// 避免脚本把部分失败误判为全部成功
 			if len(failedIDs) > 0 {
-				return fmt.Errorf("%d 个任务失败: %s", len(failedIDs), strings.Join(failedIDs, ", "))
+				return fmt.Errorf("%d 个任务失败/取消: %s", len(failedIDs), strings.Join(failedIDs, ", "))
 			}
 			return nil
 		},
