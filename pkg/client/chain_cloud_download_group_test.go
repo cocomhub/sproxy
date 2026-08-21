@@ -47,6 +47,8 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 			Name:       req.Name,
 			Status:     "pending",
 			TotalTasks: len(req.URLs),
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
 		}
 		for i := range req.URLs {
 			group.TaskIDs = append(group.TaskIDs, fmt.Sprintf("gt-%d", i+1))
@@ -70,6 +72,8 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 			TotalTasks: 2,
 			Completed:  0,
 			Failed:     0,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
 		}
 		for _, t := range tasks {
 			if t.Status == TaskStatusCompleted {
