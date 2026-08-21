@@ -88,8 +88,8 @@ func cloudTestServer(t *testing.T) (*httptest.Server, string) {
 			Name:       req.Name,
 			Status:     "pending",
 			TotalTasks: len(req.URLs),
-			CreatedAt:  time.Now().Format(time.RFC3339),
-			UpdatedAt:  time.Now().Format(time.RFC3339),
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
 		}
 		for i := range req.URLs {
 			group.TaskIDs = append(group.TaskIDs, fmt.Sprintf("task-%d", i+1))

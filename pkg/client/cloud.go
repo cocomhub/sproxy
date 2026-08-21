@@ -238,18 +238,19 @@ func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, ar
 }
 
 // CloudGroup 表示云端下载任务组。
+// 时间戳与服务端 CloudTaskGroup 一致使用 time.Time（RFC3339 序列化）。
 type CloudGroup struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Status      string   `json:"status"`
-	TaskIDs     []string `json:"task_ids"`
-	TotalTasks  int      `json:"total_tasks"`
-	Completed   int      `json:"completed"`
-	Failed      int      `json:"failed"`
-	Error       string   `json:"error,omitempty"`
-	ArchiveFile string   `json:"archive_file,omitempty"`
-	CreatedAt   string   `json:"created_at"`
-	UpdatedAt   string   `json:"updated_at"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Status      string    `json:"status"`
+	TaskIDs     []string  `json:"task_ids"`
+	TotalTasks  int       `json:"total_tasks"`
+	Completed   int       `json:"completed"`
+	Failed      int       `json:"failed"`
+	Error       string    `json:"error,omitempty"`
+	ArchiveFile string    `json:"archive_file,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // CloudGroupDetail 包含组详情和子任务列表。
