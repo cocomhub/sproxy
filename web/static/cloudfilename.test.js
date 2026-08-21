@@ -80,6 +80,8 @@ test('validateEntry URL 格式校验（结构化结果）', () => {
   // 前导空白：JS 的正则要求 scheme 位于开头 → BAD_SCHEME；
   // Go url.Parse 报错（first path segment…colon）→ 同样拒绝。两者 reject 语义一致。
   assert.strictEqual(validateEntry(' http://e.com/a.zip').valid, false);
+  // host 含空格：Go url.Parse 报 invalid character，JS parseURL 拒绝（C3 修复）。
+  assert.strictEqual(validateEntry('http://exa mple.com/file').valid, false);
 });
 
 test('validateEntries 同 URL 不同 filename 去重', () => {

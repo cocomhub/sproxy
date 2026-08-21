@@ -38,6 +38,7 @@
   "http://example.com:8080/file": "file",
   "http://example.com/file ": "file",
   "http://exa%20mple.com/file": "download",
+  "http://exa mple.com/file": "download",
   "http://user@example.com/file": "file",
   "http://user:pass@example.com/file": "file",
   "mailto:foo@example.com": "download",

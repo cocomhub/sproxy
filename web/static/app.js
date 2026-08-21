@@ -47,10 +47,6 @@ function escHtml(s) {
   return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 }
 
-function escJsStr(s) {
-  return String(s).replaceAll('\\', '\\\\').replaceAll("'", "\\'").replaceAll('"', '\\"');
-}
-
 function headers(extra) {
   const h = extra || {};
   if (token && !tunnelHexKey) h['Authorization'] = 'Bearer ' + token;
@@ -1353,8 +1349,11 @@ async function chainDownloadCloud() {
 }
 
 async function doChainDownloadCloud(lines, filenames) {
-  const text = lines.join('\n');
+  // 防重入：链式等待期间不允许再次启动（模态关闭后后台继续跑，重复点击会并发两轮）
+  if (window._busyChain) { showToast('已有链式下载在进行中', 'error'); return; }
+  window._busyChain = true;
   try {
+    const text = lines.join('\n');
     const hdrs = headers({ 'Content-Type': 'application/json' });
     showToast('提交任务中...', 'info');
     const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
@@ -1427,12 +1426,17 @@ async function doChainDownloadCloud(lines, filenames) {
         if (!dlResp.ok) { showToast('归档下载失败: HTTP ' + dlResp.status, 'error'); return; }
         const blob = await dlResp.blob();
         triggerBrowserDownload(blob, downloadName);
-        await fetch(BASE + '/api/cloud/tasks/' + taskIds[i], { method: 'DELETE', headers: headers() });
+        const cleanResp = await fetch(BASE + '/api/cloud/tasks/' + taskIds[i], { method: 'DELETE', headers: headers() });
+        if (!cleanResp.ok) showToast('清理任务 ' + taskIds[i] + ' 失败: HTTP ' + cleanResp.status, 'error');
       }
     }
     refreshCloudTasks();
     showToast('链式下载完成!', 'success');
-  } catch (e) { showToast('链式下载失败: ' + e.message, 'error'); }
+  } catch (e) {
+    showToast('链式下载失败: ' + e.message, 'error');
+  } finally {
+    window._busyChain = false;
+  }
 }
 
 // 组链式下载入口：复用预览界面，action 为 'chain_group'
@@ -1443,9 +1447,12 @@ async function chainDownloadCloudGroup() {
 // doChainDownloadCloudGroup 执行组链式下载完整流程：创建组→等待→组级打包→下载→删除组。
 // 与 batch chain 的语义一致：任一子任务 failed/cancelled → 整体失败。
 async function doChainDownloadCloudGroup(urls, filenames) {
+  // 防重入：链式等待期间不允许再次启动
+  if (window._busyChain) { showToast('已有链式下载在进行中', 'error'); return; }
+  window._busyChain = true;
   // 先 prompt 组名（与现有"创建组"行为一致）
   const name = prompt('组名称（可选）:', 'group-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
-  if (name === null) return;
+  if (name === null) { window._busyChain = false; return; }
 
   try {
     const hdrs = headers({ 'Content-Type': 'application/json' });
@@ -1506,6 +1513,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
         }
         if (failed + cancelled > 0) {
           showToast('组内 ' + (failed + cancelled) + ' 个任务失败/取消，无法完成链式下载', 'error');
+          await deleteCloudGroupForCleanup(groupId);
           return;
         }
         if (group.status === 'completed' || (active === 0 && completed > 0)) {
@@ -1516,7 +1524,11 @@ async function doChainDownloadCloudGroup(urls, filenames) {
         // 轮询失败继续尝试
       }
     }
-    if (!allDone) { showToast('等待超时', 'error'); return; }
+    if (!allDone) {
+      showToast('等待超时', 'error');
+      await deleteCloudGroupForCleanup(groupId);
+      return;
+    }
     showToast('所有任务已完成', 'success');
 
     // 阶段 3: 组级打包
@@ -1534,6 +1546,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
     }
     if (!archiveResult.success) {
       showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error');
+      await deleteCloudGroupForCleanup(groupId);
       return;
     }
     showToast('下载归档并清理中...', 'info');
@@ -1545,24 +1558,51 @@ async function doChainDownloadCloudGroup(urls, filenames) {
         triggerBrowserDownload(streamResult.body, archiveName);
       } else {
         showToast('归档下载失败', 'error');
+        await deleteCloudGroupForCleanup(groupId);
         return;
       }
     } else {
       const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: headers() });
-      if (!dlResp.ok) { showToast('归档下载失败: HTTP ' + dlResp.status, 'error'); return; }
+      if (!dlResp.ok) {
+        showToast('归档下载失败: HTTP ' + dlResp.status, 'error');
+        await deleteCloudGroupForCleanup(groupId);
+        return;
+      }
       const blob = await dlResp.blob();
       triggerBrowserDownload(blob, archiveName);
     }
 
     // 阶段 5: 删除组（清理远端文件）
+    await deleteCloudGroupForCleanup(groupId);
+    refreshCloudGroups();
+    showToast('组链式下载完成!', 'success');
+  } catch (e) {
+    showToast('组链式下载失败: ' + e.message, 'error');
+    // 失败时尝试清理已创建的组，避免孤儿组+云端文件残留（CLI 链 PhaseCleaning 语义对齐）
+    if (typeof groupId !== 'undefined') {
+      await deleteCloudGroupForCleanup(groupId);
+    }
+  } finally {
+    window._busyChain = false;
+  }
+}
+
+// deleteCloudGroupForCleanup 删除已创建的组（链式失败/超时/完成后的清理）。
+// 组可能尚未创建（groupId 未定义）或已删除（幂等容忍 404）。
+async function deleteCloudGroupForCleanup(groupId) {
+  if (!groupId) return;
+  try {
     if (tunnelHexKey) {
       await tunnelRequest('DELETE', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
     } else {
-      await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { method: 'DELETE', headers: headers() });
+      const resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { method: 'DELETE', headers: headers() });
+      if (!resp.ok && resp.status !== 404) {
+        showToast('清理下载组 ' + groupId + ' 失败: HTTP ' + resp.status, 'error');
+      }
     }
-    refreshCloudGroups();
-    showToast('组链式下载完成!', 'success');
-  } catch (e) { showToast('组链式下载失败: ' + e.message, 'error'); }
+  } catch (e) {
+    showToast('清理下载组 ' + groupId + ' 失败: ' + e.message, 'error');
+  }
 }
 async function createCloudTask() {
   showCloudDownloadPreview('submit');
@@ -1703,11 +1743,19 @@ async function deleteCloudTask(taskId, filename, checksum) {
       await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskId, {}, null);
     } else {
       const hdrs = headers({ 'X-File-Checksum': checksum });
-      await fetch(BASE + '/delete?filename=' + encodeURIComponent(cloudPath), { method: 'POST', headers: hdrs });
-      await fetch(BASE + '/api/cloud/tasks/' + taskId, { method: 'DELETE', headers: headers() });
+      const delResp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(cloudPath), { method: 'POST', headers: hdrs });
+      if (!delResp.ok) throw new Error('删除云端文件失败 (HTTP ' + delResp.status + ')');
+      const taskResp = await fetch(BASE + '/api/cloud/tasks/' + taskId, { method: 'DELETE', headers: headers() });
+      if (!taskResp.ok) throw new Error('删除任务失败 (HTTP ' + taskResp.status + ')');
     }
     refreshCloudTasks();
-  } catch (e) { /* 静默处理 */ }
+    return true;
+  } catch (e) {
+    // 不再静默吞错：清理失败提示用户（禁止静默失败），返回 false 供调用方决定
+    showToast('清理云端副本失败: ' + e.message, 'error');
+    refreshCloudTasks();
+    return false;
+  }
 }
 
 async function cancelCloudTask(taskId) {

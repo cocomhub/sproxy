@@ -73,6 +73,18 @@
     // host 中出现任何百分号 → Go url.Parse 报 invalid URL escape（host 不允许未解码
     // 转义），默认返回 download。注意 userinfo 部分（@ 前）允许百分号，不在此列。
     if (/%/.test(hostForValidation)) return null;
+    // host 中 Go url.Parse 会报错的字符（实测）：空白/控制字符、|、反引号、非法端口。
+    // 这些输入 Go 侧返回 download，JS 也必须拒绝，避免双端分歧。
+    // 注意：< > ' & ( ) $ ~ + _ ] ! * 等 Go 合法，不得拒绝；[ 单独报错但边界复杂，暂不处理。
+    if (/[\s|`]/.test(hostForValidation)) return null;
+    // 非法端口（: 后非纯数字）→ Go url.Parse 报 invalid port。合法端口（如 :8080）保留。
+    // 仅检查 [ 之后的冒号（IPv6 字面量 [::1] 内的冒号属于地址，不算端口）。
+    const closeBracketIdx = hostForValidation.lastIndexOf(']');
+    const colonIdx = hostForValidation.lastIndexOf(':');
+    if (colonIdx > closeBracketIdx) {
+      const port = hostForValidation.slice(colonIdx + 1);
+      if (!/^\d*$/.test(port)) return null;
+    }
     return { rawPath: rawPath, rawQuery: rawQuery, hash: hash };
   }
 
@@ -202,14 +214,15 @@
   // 不同 Filename（对齐 Go cloudfilename.ValidateEntries，ErrEntryDupURL）。
   // 返回首个错误结果: { valid, code, message }。
   function validateEntries(entries) {
-    const urlFilenames = {};
+    // 用 Map 而非普通对象做去重表：避免 URL 恰好是 constructor/__proto__ 等原型键时误判 DUP_URL。
+    const urlFilenames = new Map();
     for (const e of entries) {
       const v = validateEntry(e.url);
       if (!v.valid) return v;
-      if (urlFilenames[e.url] !== undefined && urlFilenames[e.url] !== e.filename) {
+      if (urlFilenames.has(e.url) && urlFilenames.get(e.url) !== e.filename) {
         return { valid: false, code: 'DUP_URL', message: 'duplicate URL with different filename: ' + e.url };
       }
-      urlFilenames[e.url] = e.filename;
+      urlFilenames.set(e.url, e.filename);
     }
     return { valid: true, code: 'OK', message: '' };
   }
