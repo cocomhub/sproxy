@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787324629498,
+  "lastUpdate": 1787325435073,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -300800,6 +300800,720 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1272458 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "399ff896ec8bba7f27de4aa01a706bbdffe4238d",
+          "message": "feat(cloud): 云端下载增强——任务组/Range续传/双端文件名规则/CLI与Web UI重构 (#106)\n\n* feat: HTTPDownloader Range resume and timeout support\n\n* feat: server-side download timeout, retry, and task group/resume support\n\n* feat: task group API endpoints and resume handlers\n\n* feat: client SDK for task group and resume APIs\n\n* feat: CLI group subcommands for task group management\n\n* feat: Web UI task group tab, progress bar, and resume buttons\n\n* fix(downloader): 空闲超时/可重试错误/续传重构\n\n- HTTPDownloader 新增 IdleTimeout：响应体读取超过空闲时长无数据即中断，避免下载永久挂起\n- 新增 RetryableError：网络中断/超时/5xx 标记可重试，4xx/SSRF 保持确定性失败\n- 全量下载改为写入 .partial（失败保留、成功 rename），中断后可 Range 续传\n- 续传流式计算 SHA-256（不再 os.ReadFile 整体读入内存）；Content-Range 失配/416 自动回退全量或收尾\n\n* fix(cloud): 排队可取消/超时重试/存储账本/续传保留/任务组持久化\n\n- executeDownload 在等信号量前注册 cancelFuncs：排队任务可取消，Close 不再卡死\n- 每次尝试独立超时：超时/网络/5xx 自动重试（.partial 续传），用户取消不重试\n- 存储账本以 ReservedSize 为唯一权威：完成补偿对齐实际大小，取消/删除/清理释放并归零，消除 1 GiB 占位泄漏；重启后按磁盘扫描重算\n- failTask 保留 .partial 供续传；ResumeTask 支持 cancelled，force=false 不再改名 partial 而走 Range\n- recoverTasks 恢复 pending+downloading；任务组持久化到 .__downloads__/groups/，重启自动恢复\n- CreateGroup 设置 task.GroupID、拒绝组内重复 URL；UpdateGroupStatus 状态机修正；CancelGroup 不再强制 cancelled\n- 组归档按子任务目录收集已完成文件并落库 archive_file；config 接线新超时/重试配置键\n\n* feat(cloud): CLI archive 默认名/客户端 GroupID/Web UI 创建组/文档\n\n- sclient cloud archive 未指定 --name 时自动生成归档名（客户端要求非空）\n- client.CloudTask 增加 group_id 字段（向后兼容）\n- Web UI 云端下载新增创建组按钮（多行 URL 提交到 /api/cloud/groups），任务/组列表统一轮询\n- config.example.yaml 增加云端下载配置段；README 增加云端离线下载章节；CHANGELOG 记录 Unreleased\n\n* feat(cloud): 双端文件名规则共享 + 组创建防冲突 + If-Range 校验 + 暗色对比度 + 审查修复\n\n- pkg/cloudfilename 共享包（Go）+ web/static/cloudfilename.js（JS），双端规则一致由共享语料 cases.json 约束（Go 测试与 make web-test 同断言）\n- 组下载：CreateGroup 创建前保证文件名唯一并回滚；SDK/CLI/Web 每 URL 可指定保存文件名，CLI/Web 发送前本地预校验冲突\n- 下载器：If-Range/ETag 交叉校验 + 416 收尾要求 ETag 匹配，防\"同尺寸内容已变\"静默错文件；补齐 ETag 落盘等测试缺口\n- Web UI 暗色模式 WCAG AA：按钮/提示 token 白字 ≥4.5:1，内联硬编码亮色改 CSS 变量，Lighthouse color-contrast PASS（a11y 86→91）\n- 审查修复（Critical/Important）：去重副本重复下载、完成路径覆盖取消、取消/启动竞态、组回滚误删既有任务、失败任务账本欠计、CLI wait 与链式下载静默失败\n- saveTask/saveGroup 返回 error，终态持久化失败显式 Error 日志；CLAUDE.md 记录全部经验与陷阱\n\n* feat(cloud): 批量/组下载上限改为服务端配置 cloud_max_batch_urls\n\n- 服务端：CloudDownloadConfig.MaxBatchURLs（默认 100）由 config.yaml cloud_max_batch_urls 配置，批量/组 handler 超限返回 400（\"maximum N URLs per batch/group\"），创建失败\n- 客户端 SDK：移除硬编码 100 钳制，默认不预检数量，发送超过服务端上限时收到 400 报错使创建失败；WithCloudDownloadMaxBatchURLs 保留为可选客户端护栏\n- 测试：客户端「服务端超限→400→创建失败」、服务端可配置上限（batch/group 3>2 拒绝、2 通过）、config 默认值断言；端到端验证 cloud_max_batch_urls=2 生效\n\n* fix(cloud): 修复并发竞态/取消残留/静默失败等审查问题\n\n- SubmitAndStart 去重命中改用真实对象启动 goroutine，避免副本下载致任务卡 pending；SubmitAndStartGroup/ResumeTask/recoverTasks 在 go 前同步置 running，闭合检查→启动竞态窗口\n- 取消任务清理任务目录（含 .partial），存储账本与磁盘一致，避免突破 max_storage_bytes 配额\n- 链式下载存储超限重试时，重试提交再次失败的 URL 计入失败不再静默丢弃\n- cloudCreateGroup 校验后传入规范化 URL/Filename，与单条/批量路径去重一致\n- 三条下载完成路径 rename 前保存 ETag 伴侣、rename 后清理，消除 .partial.etag 残留\n- extractTarGz 路径穿越防护改用 filepath.Rel 校验\n- Web UI 云端下载弹窗预览后重开时恢复输入行，修复 TypeError\n- 补充对应回归测试\n\n* test(sclient): batch-rename 测试 mock 匹配 results 响应协议\n\nmock 返回 {\"success\":true} 与客户端解析的 {\"results\":[...]} 协议不符，导致所有操作显示\"服务端未返回结果\"。改为按请求 operations 数量返回对应结果。\n\n* fix(cloud): 完成审查修复（3个必须修复+18项建议修复+7项文档/记忆同步）\n\n修复项按批次归纳：\n\n批次1（双端文件名规则）：\n- query 非 ASCII 分歧修复：JS parseURL 用 raw query 与 Go 对齐，?x=中文 等入语料\n- Safe 增加 254 字节截断 + Windows 保留设备名防护\n- 删除 cmd/sclient/cloud_types.go 第三份 filepathSafe\n- 修复 cloudfilename.test.js 字面 NUL 字节（git 二进制）\n\n批次2（cloud_download.go 可靠性）：\n- 完成路径 TOCTOU 修复：锁内原子终态提交，消除取消/删除覆盖与 nil 解引用\n- handoff 误删 cancelFunc 修复：handedOff 同时保护 cancelFuncs\n- failTask 存储满分支先 Release(oldReserved) 防账本泄漏\n\n批次3（downloader）：\n- idle 定时器改为首次 Read 启动（续传哈希期间不计时，防活锁）\n- finalizePartial 本地 I/O 改非 retryable（与 handleRangeResume 一致）\n- saveETag 返回 error 并记 Warn\n- 抽取 finalizeDownload 公共函数（三条完成路径统一收尾）\n- doGet 确定性建请求错误不再标记可重试\n\n批次4（handler/config）：\n- 组创建返回 GetGroup 快照（防共享指针 data race）\n- ResumeGroup 跳过 task not found（不再误报 404）\n- 组列表先刷新全部组再按 status 过滤\n- 存储不足统一 507（errors.Is(ErrStorageFull)）\n- cloud_downloader 配置接线生效、MaxBatchURLs SetDefaults 补全\n- 批量响应 URL 规范化、同步路径注释修正\n\n批次5（Web UI）：\n- 隧道模式 assertTunnelOk 检查内层 status（消除\"静默成功 toast\"）\n- 预览确认后立即恢复输入行（防重复提交）\n- Enter 快捷键并入 bindCloudUrlRowEvents（重建后保留）\n- partial 中文标签、轮询防重入、cancelled 恢复入口\n- confirm 文案修复、死代码/未用变量清理\n\n批次6（SDK/CLI）：\n- submit/wait 部分失败返回非零（与 chain 语义一致，cancelled 不算失败）\n- --timeout 约束整个链式操作（含退避 sleep）\n- chain 提交失败时 cleanupRemote 防孤儿任务\n- CloudDownload 补 host 校验、WithCloudDownloadMaxBatchURLs(0) 可复位\n- readEntriesFromFile 忽略多余 Tab（文案与行为一致）\n- 链式命令支持 --url-file（WithChainEntries，含持久化/恢复/重试透传）\n\n批次7（存储/归档/文档）：\n- cloudArchiveDirName 纳入 ScanAndRecalculate 配额扫描\n- 组归档默认名去 group-group- 冗余、路径校验对齐任务子目录\n- README/config.example.yaml 配置键补齐与描述修正\n- CLAUDE.md 双端规则记录更新（已修复分歧、Safe 新规则）\n\n批次8（全量验证）：\n- go test -race 全包通过（19 包 + cmd/sproxy + cmd/sclient）\n- node --test cloudfilename.test.js 3/3（共享语料）\n- golangci-lint clean、gofmt clean、go vet clean\n- 新增 memory：Write JSON 转义含控制字节的陷阱记录\n\n* fix(cloud): 修复代码审查后续发现的 7 项问题\n\n- RecoverTasks 测试 mgr1 未 Close（加 mgr1.Close 关后台 goroutine）\n- ResumeTaskForceTrueFullRedownload 绕过账本（改走 failTask 释放路径）\n- DeleteTaskCleansAndReleases 直接插任务（补 TryReserve 使账本一致）\n- GetTask/SnapshotTask 重复（GetTask 委托给 SnapshotTask）\n- newTaskID/newGroupID 结构重复（合并为 newIDWithPrefix 共享计数器）\n- genDefaultFilename 死包装（删除，extractFilename 直接调 cloudfilename）\n- 链式下载重复 URL 致 TaskIDs 膨胀（submitTasks 对 TaskIDs 去重）\n\n* docs: add cloudfilename entry consolidation design spec\n\n* docs: add cloudfilename entry consolidation implementation plan\n\n* feat(cloudfilename): DefaultFromURL safe semantics, Entry type, ValidateEntry/ValidateEntries\n\n* feat(web): safeDefaultFromURL + validateEntry, app.js simplified\n\n* refactor(server): replace CloudBatchURL with cloudfilename.Entry, remove thin wrappers\n\n* refactor(client): replace CloudDownloadEntry with cloudfilename.Entry, use ValidateEntries\n\n* fix: remove resolvedFilename dead code, fix err shadow and comment formatting\n\n* docs: update cloudfilename rules in CLAUDE.md\n\n* fix: cloud_download_test.go comment + CloudDownload unified ValidateEntry\n\n* fix(batch_rename): 消除 gocritic ifElseChain 警告，提取 renameFailureMsg 辅助函数\n\n将三处重复的 stat 失败/checksum 为空判断逻辑提取为 renameFailureMsg 函数，\n消除 gocritic ifElseChain 告警。\n\nfeat: 新增 cloud-download-group 顶层命令，支持组级链式下载\n\n- 新增 CloudDownloadGroupChain runner (chain_cloud_download_group.go)\n- 新增 cloud-download-group 命令及 submit/wait/list/archive/cancel/resume/delete 子命令\n- 从 cloud-download 迁移 group 相关子命令，保留兼容性 stub\n- 新增 3 个测试用例覆盖超时、取消、nil group 边界\n- 调整 waitForGroup 空 tasks 防御逻辑\n- 全量测试通过，lint 0 issues\n\n* feat(cloud-download): Web UI 组链式下载 + ResumeChain 兼容修复\n\n- Web UI 新增\"组链式下载\"按钮：创建组→等待→组级打包→下载→删除组，\n  组名交互与\"创建组\"一致（prompt），与 batch 链式下载语义一致\n  （任一子任务失败/取消 → 整体失败）\n- 预览界面支持 URL<TAB>FILENAME 输入（与 CLI --url-file 格式对齐），\n  FILENAME 预填入编辑框；确认时对所有 filename 走 filepathSafe 保证名称可靠\n- 修复批量链式下载隧道模式下归档文件未触发浏览器保存的缺陷\n  （tunnelDownloadStream 返回值未使用导致数据丢失），抽取 triggerBrowserDownload\n- ResumeChain 增加 CloudDownloadGroupChain 分支，正确恢复 PollInterval/Timeout/\n  KeepFiles 并返回 group_id，组链式中断后 resume 不再退回默认值\n- 新增回归测试 TestCloudDownloadGroupChain_ResumeRestoresOptions\n\n* feat(sclient): align cloud-download subcommands with group (download/delete/resume-chain/resume-download)\n\n* feat(sclient): align cloud-download-group subcommands (download/download-archive/resume-chain/resume-download)\n\n* fix(sclient): update group-resume migration stub target and add not-completed download test\n\n* feat(web): add group sub-task detail expand/collapse in cloud download group list\n\n* fix(web): escape group id in toggle button, rollback button state on error\n\n* refactor(client): extract DownloadItems for batch download with concurrency control\n\n- Add pkg/client/download_items.go with DownloadItems/DownloadItemsSequential\n- Support configurable concurrency (default 2, 0=unlimited, 1=sequential)\n- Single-failure non-blocking, merged error reporting\n- Unify all download/download-archive subcommands in batch & group to\n  use DownloadItems with --concurrency flag\n- Rename file from batch_download.go to match API naming (DownloadItems)\n- Replace duplicate sha256Hex with testutil.SHA256Hex in chain test\n- Add X-File-Checksum header to group download-archive test mock\n- Add resume --chain-id migration stub in batch cloud-download\n- Fix(web): escape group id in toggle button, rollback state on error\n\n* fix(server): resolve 6 concurrency safety issues in CloudDownloadManager\n\n1. C3: progress callback lock order inversion (m.mu -> dirtyMu vs dirtyMu -> m.mu)\n   - Move markDirty outside m.mu to avoid ABBA deadlock with flushDirty\n2. C4: unify lock order (groupMu -> mu) across all paths, eliminate ABBA risk\n3. C1: rollback absorbedIDs saveTask data race - use snapshot copy before lock-free persist\n4. S-I04: reorder executeDownload defers (panic recovery as outermost LIFO),\n   extract cleanupRunning as named function so failTask runs before running flag cleared\n5. S-I10: add 30s timeout to Close().wg.Wait() to prevent permanent blocking\n6. Minor: remove redundant gosec/nolint comments, clarify lock ordering documentation\n\n* fix(cli,client): arg validation, URL dedup alignment, tar extract perms, CRLF preprocess, submitFailedCount reset\n\n* fix(cloudfilename): parseURL userinfo/leading-space alignment, truncateName OS-independence, structured validateEntry, corpus expansion\n\n* fix(client): aggregate all errors in DownloadItems to match doc promise\n\nThe documented contract '单文件失败不影响其余文件，失败信息合并后一并返回' was not met: errgroup.Wait() only returns the first error. Collect all failures via a mutex-guarded slice and return errors.Join result.\n\n* fix(client): HTTP 507 storage-full sentinel, timer drain, pagination params\n\n* feat(client): CloudCreateGroupEntries supports CloudDownloadOption maxBatchURLs precheck\n\n* fix(client): CloudGroup timestamps to time.Time, align with server type\n\n* fix(web): multipart encoding, scheme case-sensitivity, dark-mode toast contrast, modal overlay\n\n* test(server,client): register mgr.Close cleanup to stop goroutine leaks, per-task pollCount, temp-dir download\n\n* test(client): add timestamps to group mock responses for CloudGroup time.Time alignment\n\n* fix(sclient): fix govet shadow warning in download-archive test\n\n* feat(web): validate URLs via cloudfilename.validateEntry before cloud submit, making validateEntry a used API\n\n* fix(cloud): 7项正确性修复 + ETag 记录到任务\n\n已确认修复（用户指定）：\n1. Group 独立记录 cancelled 数量 — CloudTaskGroup 新增 Cancelled 字段，\n   group.Failed 只记录真正失败数，CLI/Web UI 同步更新\n2. 优雅关闭不取消任务 — Close() 不再遍历 cancelFuncs，仅关闭后台通道\n   并等待 goroutine 自然退出\n3. 组状态判定逻辑修正 — 有活跃→downloading，全部终止按\n   failed/cancelled/completed 优先级判定，移除 partial 状态\n4. 恢复时不自动启动 pending 任务 — recoverTasks 仅重启 downloading\n   状态任务，避免 CreateTask 未 SubmitAndStart 就崩溃的边界情况\n5. 组名仅为元数据，归档名使用 group-id — 默认归档名直接使用 groupID，\n   用户指定名时校验已存在则返回 409\n6. Filename 不允许包含 Tab 字符 — cloudfilename.Safe 新增 \\t 替换，\n   Go/JS 双端一致\n\n审查发现修复（Important）：\n7. executeDownload 状态翻转非原子 → 锁内复查任务存在性+状态后再翻转\n8. DeleteTask 锁外 Release storage → 移到锁内与 map-delete 原子化\n9. doGet 永久性错误误标可重试 → 区分 Timeout/DeadlineExceeded 才重试\n10. recoverTasks 重启的 downloading 任务被状态检查拒绝 → 允许 pending\n   和 downloading 两种状态通过\n11. ETag 伴侣文件在续传路径中从不生效 → writeFullBody/handleRangeResume\n   中收到 ETag 时立即持久化到伴侣文件\n\n新功能：\n12. ETag 记录到 CloudTask — 首次获取成功时立即写入 task.ETag，\n   完成时持久化，客户端/Web UI 展示，用于版本标识与二次校验\n\n* fix(cloud): 列表/组列表分页 + 归档加固（O_EXCL/总量/配额）\n\n分页（C2，用户确认直接改 {tasks,total}）：\n- ListTasks/ListGroups 增加 offset/limit 参数，CreatedAt 降序 + ID tie-break 稳定排序\n- /api/cloud/tasks 与 /api/cloud/groups 返回 {tasks|groups, total} 容器\n- SDK 新增 ListCloudTasksWithTotal/CloudListGroupsWithTotal，旧方法委托并保持返回全量\n- CLI list 增加 --offset/--limit；Web UI 兼容容器与裸数组两种响应\n\n归档加固（C10，用户确认方案 1a）：\n- 三处归档（单任务/批量/组）改 O_EXCL 创建，同名已存在 → 409\n- 新增 cloud_archive_max_bytes 配置，限制单次归档原始文件大小总和\n- 打包前 TryReserve(原始大小总和 + 100MB 占位)，失败 → 507\n- 打包后按磁盘实际 size 对账（Release 预占 + TryReserve 实际），账本收敛到 actual；\n  409/失败分支均释放预占，避免配额泄漏\n\n* fix(cloud): 分页参数独立生效 + e2e 容器解码 + 归档/分页回归测试\n\nH4 复检修复：\n- F2：ListCloudTasksWithTotal/CloudListGroupsWithTotal 的 offset/limit 独立判断——\n  只传 limit（offset 保持 -1）时也发送 limit，CLI --limit 不再静默失效\n- F1：test/e2e_test.go 云任务列表解码改 {tasks,total} 容器，恢复清理断言（原为死断言）\n- F3：新增归档加固回归测试（同名 409/总量 400/配额 507 不泄漏/组列表分页）+\n  分页切片/排序/total 测试 + 客户端 limit-only 测试\n- F4：ListTasks/ListGroups tie-break 注释修正（ID 含随机 hex，排序确定性但同纳秒非创建序）\n\n* fix(cloud): cancelled=失败统一 + 提交幂等 + CLI 易用性（list 字段/--output-dir/delete --yes/timeout guard）\n\nC1 cancelled 语义统一为失败（用户确认）：\n- batch 链 pollAllTasks 遇 cancelled 不再立即失败，等所有任务终态后整体报错（与组链一致）\n- CLI wait 把 cancelled 计入失败列表返回非零；消息含取消计数\n- 新增 batch 链 WaitCancelled 回归测试\n\nC5 提交幂等：submitTasks（TaskIDs 非空跳过）/ submitGroup（GroupID 非空跳过），\n  消除 phase=submitting 崩溃恢复重复提交\n\nC6 list 字段：cloudTaskInfo 直接复用 client.CloudTask（删 cloudTaskToInfo/cloudTaskResponse），\n  TextFormatter 增加 ETag/GroupID 列；JSON 全字段输出\n\nC7 组 wait 终态：status=failed/cancelled 且空任务列表 → 报错，避免转圈到超时（CLI+chain 双修）\n\nC8 --output-dir：download/download-archive/组 download/组 download-archive 增加输出目录 flag\n\nC9 delete --yes：delete/delete-group 未确认时拒绝执行并提示；task/group cancel 404 幂等统一\n\nC17 归档 SkippedCount 回显（批量/组）；CloudArchiveResult 补 SkippedCount/SkippedTasks 字段；\n  cloud_archive 去掉双报错\n\nS7 timeout=0 guard：CLI wait/组 wait/chain pollAllTasks/waitForGroup 均 if timeout>0 才 WithTimeout\n\n* fix(cloud): wait 初始即终态计入 cancelled + 过时注释更新\n\nH4 复检修复（Batch C）：\n- CLI wait 初始即终态路径：cancelled 计入失败返回非零（此前只计 failed，与 C1 矛盾）\n- CLI wait 失败消息统一为『N 个任务失败/取消』（三处：初始/轮询超时/正常结束）\n- chain_cloud_download_group.go 注释更新：batch/group 链 cancelled 语义已统一为等终态后报错\n\n* fix(cloud): Web UI/JS 加固——host 空格拒绝、deleteCloudTask 不静默、链式防重入+组失败清理、validateEntries Map\n\nC3 JS host 空格/非法端口拒绝（双端一致）：\n- parseURL 对 host 空白/控制符/|/反引号/非法端口 → null（Go url.Parse 同报错）\n- 保留 IPv6 字面量 [::1]（冒号在 ] 内不算端口）\n- cases.json 补 'http://exa mple.com/file'→download（Go/JS 双端语料自动断言）\n- cloudfilename.test.js 补 validateEntry host 空格断言\n\nC11 deleteCloudTask 不再静默吞错：检查 fetch resp.ok + 失败 showToast + 返回 boolean\n\nC12 链式轮询防重入 + 组失败清理：\n- doChainDownloadCloud/doChainDownloadCloudGroup 加 window._busyChain 防重入（finally 复位）\n- 组链失败/超时/归档失败/下载失败路径统一 deleteCloudGroupForCleanup（不残留孤儿组）\n- 清理 DELETE 检查 resp.ok\n\nS8：validateEntries 普通对象 → Map（防 constructor 原型键误判）；escJsStr 死代码删除\n\n* fix(cloud): 组链 catch 清理死代码修复 + host 拒绝改 ASCII 空白集\n\nH4 复检修复（Batch D）：\n- doChainDownloadCloudGroup 的 groupId 提升到函数作用域，catch 块组清理生效\n  （此前声明在 try 块内，catch 访问不到，异常路径不清理孤儿组）\n- parseURL host 拒绝正则改为显式 ASCII 空白集合，避免过度匹配\n  Unicode 空白（U+00A0/U+3000，Go url.Parse 接受，防止双端新分歧）\n\n* test(cloud): 测试加固——退避注入/竞态幂等/DownloadItems 直测/字段序列化/t.Chdir\n\nC14 慢测试修复：\n- CloudDownloadChain 新增 backoffFn 注入点（nil 时默认 10s*(1<<attempt)），\n  三个 StorageFull 重试测试注入 10ms 退避——从 10s/30s 降至 <0.2s\n- newChainMockServer 停止写共享 tasks map，改从 mutex 保护的 pollCounts 推导\n  completed 状态，消除并发 GET 的数据竞争\n\nC15 测试覆盖补齐：\n- 新增 pkg/client/download_items_test.go：顺序/错误聚合/空 RemotePath/basename 默认/并发\n- cloud_test.go 列表 mock 补 ETag/GroupID/FileMTime，新增 FullFields 序列化往返断言\n- sclient 测试 os.Chdir/Getwd → t.Chdir（Go 1.24+ 自动恢复）\n- mock handler 内 t.Error → t.Log（子 goroutine 调 t.Error 属未定义行为）\n\n* test(cloud): 清理 DownloadItems 测试死代码 + t.Chdir 统一\n\nH4 复检次要项：移除 setupDownloadItemsTest 中未用的 sum 计算；\nTestDownloadItems_LocalPathDefaultsToBasename 改 t.Chdir（与其他测试统一）\n\n* fix(cloud): Phase5 审查修复——分页溢出/隧道清理/组链终态/Web 部分失败与重复下载/文档\n\nPhase 5 最终审查修复（6 Important + 2 lint）：\n- I1 分页 limit 溢出远程 panic：offset+limit 溢出回绕 → 先钳制 limit 到剩余条数\n  （ListTasks/ListGroups），新增 MaxInt64 回归测试\n- I2 deleteCloudTask 隧道分支静默失败：补 assertTunnelOk 检查内层状态码\n- I3 组链 waitForGroup 提前中断：等所有活跃任务终态后整体判定（与 batch 链一致）\n- I4 Web batch 链部分失败静默成功：失败任务提示，完成消息含成功/失败计数\n- I5 Web batch 链归档重复下载 N 次：先下载一次再逐个清理\n- I6 Web group 链瞬态失败即删整组：保留组供 resume（与 CLI 链语义一致）\n- cmd/sclient SA4006：pollCtx 初值未用改 var 声明\n- 文档：CLAUDE.md 配置表修正（扁平键 + cloud_archive_max_bytes）、CHANGELOG 补记\n\n* fix(cloud): 清理 Phase5 复检 Minor 项——dead 变量与文档键名\n\n- app.js：移除 downloaded 死变量（失败路径均 return，成功即已触发下载）\n- CLAUDE.md：cloud_download_timeout / cloud_download_idle_timeout 键名修正",
+          "timestamp": "2026-08-21T23:05:21+08:00",
+          "tree_id": "a4d169fa65fa910e1c219c1bed94b4595dd843da",
+          "url": "https://github.com/cocomhub/sproxy/commit/399ff896ec8bba7f27de4aa01a706bbdffe4238d"
+        },
+        "date": 1787325429998,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4706033,
+            "unit": "ns/op\t 222.82 MB/s\t 4320478 B/op\t     296 allocs/op",
+            "extra": "308 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4706033,
+            "unit": "ns/op",
+            "extra": "308 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 222.82,
+            "unit": "MB/s",
+            "extra": "308 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4320478,
+            "unit": "B/op",
+            "extra": "308 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 296,
+            "unit": "allocs/op",
+            "extra": "308 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4673031,
+            "unit": "ns/op\t 224.39 MB/s\t 4323857 B/op\t     295 allocs/op",
+            "extra": "296 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4673031,
+            "unit": "ns/op",
+            "extra": "296 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 224.39,
+            "unit": "MB/s",
+            "extra": "296 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4323857,
+            "unit": "B/op",
+            "extra": "296 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 295,
+            "unit": "allocs/op",
+            "extra": "296 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4663278,
+            "unit": "ns/op\t 224.86 MB/s\t 4323459 B/op\t     296 allocs/op",
+            "extra": "307 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4663278,
+            "unit": "ns/op",
+            "extra": "307 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 224.86,
+            "unit": "MB/s",
+            "extra": "307 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4323459,
+            "unit": "B/op",
+            "extra": "307 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 296,
+            "unit": "allocs/op",
+            "extra": "307 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 5360618,
+            "unit": "ns/op\t 195.61 MB/s\t 4322551 B/op\t     295 allocs/op",
+            "extra": "298 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 5360618,
+            "unit": "ns/op",
+            "extra": "298 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 195.61,
+            "unit": "MB/s",
+            "extra": "298 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4322551,
+            "unit": "B/op",
+            "extra": "298 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 295,
+            "unit": "allocs/op",
+            "extra": "298 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4700578,
+            "unit": "ns/op\t 223.07 MB/s\t 4321970 B/op\t     296 allocs/op",
+            "extra": "289 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4700578,
+            "unit": "ns/op",
+            "extra": "289 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 223.07,
+            "unit": "MB/s",
+            "extra": "289 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4321970,
+            "unit": "B/op",
+            "extra": "289 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 296,
+            "unit": "allocs/op",
+            "extra": "289 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 3460683,
+            "unit": "ns/op\t 303.00 MB/s\t 2193014 B/op\t     141 allocs/op",
+            "extra": "339 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 3460683,
+            "unit": "ns/op",
+            "extra": "339 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 303,
+            "unit": "MB/s",
+            "extra": "339 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2193014,
+            "unit": "B/op",
+            "extra": "339 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 141,
+            "unit": "allocs/op",
+            "extra": "339 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 3577010,
+            "unit": "ns/op\t 293.14 MB/s\t 2193126 B/op\t     140 allocs/op",
+            "extra": "339 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 3577010,
+            "unit": "ns/op",
+            "extra": "339 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 293.14,
+            "unit": "MB/s",
+            "extra": "339 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2193126,
+            "unit": "B/op",
+            "extra": "339 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 140,
+            "unit": "allocs/op",
+            "extra": "339 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 3415604,
+            "unit": "ns/op\t 307.00 MB/s\t 2193149 B/op\t     141 allocs/op",
+            "extra": "348 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 3415604,
+            "unit": "ns/op",
+            "extra": "348 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 307,
+            "unit": "MB/s",
+            "extra": "348 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2193149,
+            "unit": "B/op",
+            "extra": "348 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 141,
+            "unit": "allocs/op",
+            "extra": "348 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 3411808,
+            "unit": "ns/op\t 307.34 MB/s\t 2192945 B/op\t     140 allocs/op",
+            "extra": "349 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 3411808,
+            "unit": "ns/op",
+            "extra": "349 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 307.34,
+            "unit": "MB/s",
+            "extra": "349 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2192945,
+            "unit": "B/op",
+            "extra": "349 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 140,
+            "unit": "allocs/op",
+            "extra": "349 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 3402738,
+            "unit": "ns/op\t 308.16 MB/s\t 2193090 B/op\t     141 allocs/op",
+            "extra": "349 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 3402738,
+            "unit": "ns/op",
+            "extra": "349 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 308.16,
+            "unit": "MB/s",
+            "extra": "349 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2193090,
+            "unit": "B/op",
+            "extra": "349 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 141,
+            "unit": "allocs/op",
+            "extra": "349 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 17924390,
+            "unit": "ns/op\t 234.00 MB/s\t16909440 B/op\t     394 allocs/op",
+            "extra": "66 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 17924390,
+            "unit": "ns/op",
+            "extra": "66 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 234,
+            "unit": "MB/s",
+            "extra": "66 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16909440,
+            "unit": "B/op",
+            "extra": "66 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 394,
+            "unit": "allocs/op",
+            "extra": "66 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 14624382,
+            "unit": "ns/op\t 286.80 MB/s\t16908450 B/op\t     394 allocs/op",
+            "extra": "70 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 14624382,
+            "unit": "ns/op",
+            "extra": "70 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 286.8,
+            "unit": "MB/s",
+            "extra": "70 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16908450,
+            "unit": "B/op",
+            "extra": "70 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 394,
+            "unit": "allocs/op",
+            "extra": "70 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 14774051,
+            "unit": "ns/op\t 283.90 MB/s\t16909093 B/op\t     393 allocs/op",
+            "extra": "73 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 14774051,
+            "unit": "ns/op",
+            "extra": "73 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 283.9,
+            "unit": "MB/s",
+            "extra": "73 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16909093,
+            "unit": "B/op",
+            "extra": "73 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 393,
+            "unit": "allocs/op",
+            "extra": "73 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 6152761785,
+            "unit": "ns/op\t   0.68 MB/s\t16909342 B/op\t     393 allocs/op",
+            "extra": "72 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 6152761785,
+            "unit": "ns/op",
+            "extra": "72 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 0.68,
+            "unit": "MB/s",
+            "extra": "72 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16909342,
+            "unit": "B/op",
+            "extra": "72 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 393,
+            "unit": "allocs/op",
+            "extra": "72 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 17800016,
+            "unit": "ns/op\t 235.63 MB/s\t16907129 B/op\t     394 allocs/op",
+            "extra": "75 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 17800016,
+            "unit": "ns/op",
+            "extra": "75 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 235.63,
+            "unit": "MB/s",
+            "extra": "75 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16907129,
+            "unit": "B/op",
+            "extra": "75 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 394,
+            "unit": "allocs/op",
+            "extra": "75 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 426902,
+            "unit": "ns/op\t  103108 B/op\t     729 allocs/op",
+            "extra": "2682 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 426902,
+            "unit": "ns/op",
+            "extra": "2682 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 103108,
+            "unit": "B/op",
+            "extra": "2682 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 729,
+            "unit": "allocs/op",
+            "extra": "2682 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 428720,
+            "unit": "ns/op\t  103095 B/op\t     729 allocs/op",
+            "extra": "2766 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 428720,
+            "unit": "ns/op",
+            "extra": "2766 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 103095,
+            "unit": "B/op",
+            "extra": "2766 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 729,
+            "unit": "allocs/op",
+            "extra": "2766 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 423141,
+            "unit": "ns/op\t  103195 B/op\t     729 allocs/op",
+            "extra": "2754 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 423141,
+            "unit": "ns/op",
+            "extra": "2754 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 103195,
+            "unit": "B/op",
+            "extra": "2754 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 729,
+            "unit": "allocs/op",
+            "extra": "2754 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 423799,
+            "unit": "ns/op\t  103070 B/op\t     729 allocs/op",
+            "extra": "2751 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 423799,
+            "unit": "ns/op",
+            "extra": "2751 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 103070,
+            "unit": "B/op",
+            "extra": "2751 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 729,
+            "unit": "allocs/op",
+            "extra": "2751 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 426847,
+            "unit": "ns/op\t  103066 B/op\t     729 allocs/op",
+            "extra": "2760 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 426847,
+            "unit": "ns/op",
+            "extra": "2760 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 103066,
+            "unit": "B/op",
+            "extra": "2760 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 729,
+            "unit": "allocs/op",
+            "extra": "2760 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 875.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1332508 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 875.4,
+            "unit": "ns/op",
+            "extra": "1332508 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1332508 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1332508 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 878.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1380466 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 878.1,
+            "unit": "ns/op",
+            "extra": "1380466 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1380466 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1380466 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 879.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1380817 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 879.9,
+            "unit": "ns/op",
+            "extra": "1380817 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1380817 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1380817 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 872.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1359169 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 872.5,
+            "unit": "ns/op",
+            "extra": "1359169 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1359169 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1359169 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 899.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1341462 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 899.5,
+            "unit": "ns/op",
+            "extra": "1341462 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1341462 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1341462 times\n4 procs"
           }
         ]
       }
