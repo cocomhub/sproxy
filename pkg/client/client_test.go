@@ -299,6 +299,19 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 	return ts, dir
 }
 
+func TestFileClientAuthToken(t *testing.T) {
+	// 配置了 auth token → AuthToken() 返回该值
+	c := NewFileClient("http://example.invalid", WithAuthToken("secret-token"))
+	if got := c.AuthToken(); got != "secret-token" {
+		t.Fatalf("AuthToken() = %q, want %q", got, "secret-token")
+	}
+	// 未配置 → 空串
+	plain := NewFileClient("http://example.invalid")
+	if got := plain.AuthToken(); got != "" {
+		t.Fatalf("AuthToken() = %q, want empty", got)
+	}
+}
+
 func TestFileClient_Upload_HappyPath(t *testing.T) {
 	t.Parallel()
 	ts, _ := newMockServer(t)

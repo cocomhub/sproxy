@@ -1019,6 +1019,13 @@ func (c *FileClient) ServerURL() string {
 	return c.serverURL
 }
 
+// AuthToken 返回客户端配置的 Bearer token（--auth-token / 配置 auth_token）。
+// mesh 信令在未显式指定 --token 时复用该值，保证 /api/signal/* 与
+// /api/hub/services、/api/relay/stream 使用同一认证凭据。
+func (c *FileClient) AuthToken() string {
+	return c.authToken
+}
+
 // doRequest 统一发送 HTTP 请求：当配置了隧道客户端时走加密隧道，否则直连。
 //
 // urlPath 是相对路径，如 "/upload" 或 "/download?filename=test.txt"。

@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -51,6 +52,117 @@ func defaultMeshDial(ctx context.Context, svc *client.FileClient, signaler *hub.
 	return &meshDialResult{conn: conn, kind: "relay"}, nil
 }
 
+const (
+	// meshTargetTTL 是 mesh 服务解析缓存的新鲜窗口。过期后下一次 resolve 触发
+	// 重新拉取 /api/hub/services，使 relay 节点下线/重上线的变化被 mesh 感知。
+	meshTargetTTL = 3 * time.Second
+	// meshResolveTimeout 是单次服务解析的网络超时，防止 hub 无响应拖住连接建立。
+	meshResolveTimeout = 5 * time.Second
+)
+
+// errMeshServiceUnavailable 报告服务当前不可用（节点离线或未宣告）。
+func errMeshServiceUnavailable(service string) error {
+	return fmt.Errorf("mesh 服务 %q 当前不可用（节点离线或未宣告）", service)
+}
+
+// meshTargetRefresher 按需解析 mesh 目标，带 TTL 缓存与单飞（single-flight）刷新。
+//
+// 并发安全设计：
+//   - 所有缓存字段由 mu 保护；
+//   - 刷新期间**不持有 mu 做网络调用**——承担刷新的 goroutine 置位后解锁再请求，
+//     等待者在 done 通道上等待，完成后重新抢锁读取最终状态。
+//
+// 这样 TTL 内并发调用只打一次 hub（单飞），且不引入「锁内做 I/O」死锁风险。
+type meshTargetRefresher struct {
+	svc     *client.FileClient
+	service string
+	ttl     time.Duration
+	now     func() time.Time // 可注入时钟（测试用）
+
+	mu          sync.Mutex
+	target      *client.MeshService
+	lastRefresh time.Time
+	refreshing  bool          // 一次只允许一个 goroutine 刷新
+	done        chan struct{} // 本次刷新完成时 close
+	refreshErr  error         // 最近一次刷新的错误（供等待者复用）
+}
+
+// newMeshTargetRefresher 创建 refresher。
+func newMeshTargetRefresher(svc *client.FileClient, service string) *meshTargetRefresher {
+	return &meshTargetRefresher{svc: svc, service: service, ttl: meshTargetTTL, now: time.Now}
+}
+
+// resolve 返回服务当前目标。缓存新鲜（<TTL）直接返回副本；否则触发一次刷新，
+// 并发调用共享同一刷新（单飞）。服务不在列表返回 errMeshServiceUnavailable。
+func (r *meshTargetRefresher) resolve(ctx context.Context) (*client.MeshService, error) {
+	r.mu.Lock()
+	if r.target != nil && r.now().Sub(r.lastRefresh) < r.ttl {
+		t := *r.target
+		r.mu.Unlock()
+		return &t, nil
+	}
+	if r.refreshing {
+		done := r.done
+		r.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.refreshErr != nil {
+			return nil, r.refreshErr
+		}
+		if r.target != nil {
+			t := *r.target
+			return &t, nil
+		}
+		return nil, errMeshServiceUnavailable(r.service)
+	}
+	// 本 goroutine 承担刷新：置位后立即解锁，绝不在锁内做网络调用。
+	r.refreshing = true
+	r.refreshErr = nil
+	r.done = make(chan struct{})
+	r.mu.Unlock()
+
+	fetchCtx, cancel := context.WithTimeout(ctx, meshResolveTimeout)
+	svcs, err := r.svc.MeshServices(fetchCtx)
+	cancel()
+
+	r.mu.Lock()
+	r.refreshing = false
+	close(r.done) // 等待者唤醒后先抢锁再读最终状态，无竞态
+	if err != nil {
+		r.refreshErr = fmt.Errorf("查询 mesh 服务失败: %w", err)
+		r.mu.Unlock()
+		return nil, r.refreshErr
+	}
+	for i := range svcs {
+		if svcs[i].Name == r.service {
+			t := svcs[i]
+			r.target = &t
+			r.lastRefresh = r.now()
+			r.mu.Unlock()
+			return &t, nil
+		}
+	}
+	r.target = nil
+	r.lastRefresh = time.Time{}
+	r.mu.Unlock()
+	return nil, errMeshServiceUnavailable(r.service)
+}
+
+// invalidate 使缓存过期：dial 失败（relay 404 / webrtc 失败）后调用，
+// 下一个连接立即重新解析而非等待 TTL。
+func (r *meshTargetRefresher) invalidate() {
+	r.mu.Lock()
+	r.target = nil
+	r.lastRefresh = time.Time{}
+	r.refreshErr = nil
+	r.mu.Unlock()
+}
+
 // NewCmdMesh 创建 mesh 父命令：基于 hub 服务注册表的服务发现与连接。
 func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
@@ -88,20 +200,11 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 				return err
 			}
 
-			// 解析服务 → 目标节点 + 地址
-			svcs, err := svc.MeshServices(cmd.Context())
+			// 按需解析服务 → 目标节点 + 地址（带 TTL 缓存与单飞刷新，感知节点上下线）
+			refresher := newMeshTargetRefresher(svc, service)
+			target, err := refresher.resolve(cmd.Context())
 			if err != nil {
 				return err
-			}
-			var target *client.MeshService
-			for i := range svcs {
-				if svcs[i].Name == service {
-					target = &svcs[i]
-					break
-				}
-			}
-			if target == nil {
-				return fmt.Errorf("mesh 服务 %q 未找到（请确认目标节点已宣告该服务）", service)
 			}
 			ios.WriteOutLine("目标服务: %s（节点 %s, addr %s）", service, target.Node, target.Addr)
 
@@ -114,7 +217,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 				if nodeID == "" {
 					nodeID = defaultLocalNodeID()
 				}
-				signaler = hub.NewHubSignaler(hubURL, token, nodeID)
+				signaler = hub.NewHubSignaler(hubURL, meshSignalToken(token, svc), nodeID)
 			}
 			dial := defaultMeshDial
 			localNode := nodeID
@@ -123,15 +226,15 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			}
 
 			if listenAddr != "" {
-				return meshForwardListen(cmd, svc, signaler, dial, target, localNode, listenAddr, ios)
+				return meshForwardListen(cmd, svc, signaler, dial, refresher, target, localNode, listenAddr, ios)
 			}
-			return meshStdioOnce(cmd, svc, signaler, dial, target, localNode, ios)
+			return meshStdioOnce(cmd, svc, signaler, dial, refresher, localNode, ios)
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 :2222）；留空为单次 stdin/stdout 模式")
 	cmd.Flags().Bool("webrtc", true, "优先 webrtc 打洞直连，失败回落 hub 中继")
 	cmd.Flags().String("hub", "", "hub 地址（webrtc 打洞信令用；默认取 server_url）")
-	cmd.Flags().String("token", "", "信令 token")
+	cmd.Flags().String("token", "", "信令 Bearer token（默认复用 --auth-token / 配置 auth_token）")
 	cmd.Flags().String("node-id", "", "本节点 ID（信令来源；默认主机名）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
@@ -170,13 +273,14 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 }
 
 // meshForwardListen 监听本地端口，每个入站连接独立建立一条 mesh 连接（选路 dial）。
-func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub.HubSignaler, dial meshDialFunc, target *client.MeshService, localNode, listenAddr string, ios cli.IOStreams) error {
+// ref 负责按需解析最新 target（带 TTL 缓存，感知节点上下线）；initial 仅用于启动横幅。
+func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub.HubSignaler, dial meshDialFunc, ref *meshTargetRefresher, initial *client.MeshService, localNode, listenAddr string, ios cli.IOStreams) error {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听本地端口失败: %w", err)
 	}
 	defer ln.Close()
-	ios.WriteOutLine("端口转发: %s ⇄ mesh(%s) ⇄ %s", listenAddr, target.Node, target.Addr)
+	ios.WriteOutLine("端口转发: %s ⇄ mesh(%s) ⇄ %s", listenAddr, initial.Node, initial.Addr)
 
 	ctx := cmd.Context()
 	// ctx 取消时关闭 listener，使 Accept 立即返回（优雅停止端口转发）。
@@ -194,8 +298,17 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub
 		}
 		go func(c net.Conn) {
 			defer c.Close()
+			// 每个连接用最新 target：服务已下线（不在列表）→ 立即清晰报错并关闭，
+			// 不再等 webrtc 30s ICE 超时（静默卡死）。
+			target, rerr := ref.resolve(ctx)
+			if rerr != nil {
+				ios.WriteErrLine("建立 mesh 流失败: %v", rerr)
+				return
+			}
 			res, cerr := dial(ctx, svc, signaler, target, localNode)
 			if cerr != nil {
+				// dial 失败（relay 404 / webrtc 失败）→ 强制缓存过期，下个连接立即重取。
+				ref.invalidate()
 				ios.WriteErrLine("建立 mesh 流失败: %v（目标 node=%s addr=%s 不可达或离线）", cerr, target.Node, target.Addr)
 				return
 			}
@@ -227,7 +340,12 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub
 }
 
 // meshStdioOnce 单次模式：stdin/stdout 与一条 mesh 连接直通（选路 dial）。
-func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler *hub.HubSignaler, dial meshDialFunc, target *client.MeshService, localNode string, ios cli.IOStreams) error {
+// ref 负责解析最新 target（单次拨号使用当前缓存；失败返回错误可由调用方重试）。
+func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler *hub.HubSignaler, dial meshDialFunc, ref *meshTargetRefresher, localNode string, ios cli.IOStreams) error {
+	target, err := ref.resolve(cmd.Context())
+	if err != nil {
+		return err
+	}
 	res, err := dial(cmd.Context(), svc, signaler, target, localNode)
 	if err != nil {
 		return err
@@ -273,6 +391,17 @@ func meshRelayDial(conn net.Conn, addr string) error {
 		return werr
 	}
 	return nil
+}
+
+// meshSignalToken 返回信令 Bearer token：显式 --token 优先，否则复用
+// FileClient 的 auth token（--auth-token / 配置 auth_token）。
+// hub 的 /api/signal/* 走 authMiddleware（校验 auth_token），与 MeshServices /
+// RelayStream 的认证一致；relay start --token 是另一套 relay 注册 token，不混用。
+func meshSignalToken(flagToken string, svc *client.FileClient) string {
+	if flagToken != "" {
+		return flagToken
+	}
+	return svc.AuthToken()
 }
 
 // defaultLocalNodeID 返回本机节点 ID（mesh webrtc 信令来源）。

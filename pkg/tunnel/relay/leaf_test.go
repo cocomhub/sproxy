@@ -101,6 +101,78 @@ func TestNewDialPolicy(t *testing.T) {
 	}
 }
 
+// TestNewServiceDialPolicy 验证出口拨号策略对节点自身宣告的服务地址做精确放行，
+// 其余回落既有 NewDialPolicy 逻辑（公网 + 白名单 CIDR）。
+func TestNewServiceDialPolicy(t *testing.T) {
+	svcAddrs := []string{"127.0.0.1:10022", "localhost:10022", "10.0.0.5:22"}
+	policy := NewServiceDialPolicy(nil, svcAddrs)
+
+	tests := []struct {
+		name string
+		addr string
+		want bool
+	}{
+		// 精确命中宣告地址（IP / 主机名 / 私网 IP）→ 放行，返回原地址
+		{"announced-loopback", "127.0.0.1:10022", true},
+		{"announced-hostname", "localhost:10022", true},
+		{"announced-private", "10.0.0.5:22", true},
+		// 未宣告的 loopback（同 IP 不同端口）→ 回落 base 拒绝
+		{"loopback-other-port", "127.0.0.1:10023", false},
+		{"loopback-not-announced", "127.0.0.1:22", false},
+		// 未宣告的私有地址 → 拒绝
+		{"private-not-announced", "10.0.0.6:22", false},
+		{"private-other", "192.168.1.10:22", false},
+		// 公网地址 → 回落 base 放行
+		{"public", "8.8.8.8:53", true},
+		// 畸形地址（无端口）→ 拒绝，即使字符串在宣告列表里
+		{"announced-no-port", "127.0.0.1", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := policy(tc.addr)
+			if ok != tc.want {
+				t.Fatalf("policy(%q) ok = %v, want %v", tc.addr, ok, tc.want)
+			}
+			if tc.want && got != tc.addr {
+				t.Fatalf("policy(%q) resolved = %q, want passthrough %q", tc.addr, got, tc.addr)
+			}
+		})
+	}
+}
+
+// TestNewServiceDialPolicy_WithCIDR 验证服务地址白名单与 CIDR 白名单叠加：
+// 宣告地址、CIDR 内地址放行；CIDR 外私有地址拒绝。
+func TestNewServiceDialPolicy_WithCIDR(t *testing.T) {
+	policy := NewServiceDialPolicy([]string{"192.168.0.0/16"}, []string{"127.0.0.1:10022"})
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:10022", true},  // 宣告地址
+		{"192.168.5.100:22", true}, // CIDR 白名单
+		{"8.8.8.8:53", true},       // 公网
+		{"10.0.0.5:22", false},     // CIDR 外的私有
+		{"127.0.0.1:9999", false},  // 未宣告的 loopback
+	}
+	for _, tc := range cases {
+		if _, ok := policy(tc.addr); ok != tc.want {
+			t.Fatalf("policy(%q) ok = %v, want %v", tc.addr, ok, tc.want)
+		}
+	}
+}
+
+// TestNewServiceDialPolicy_NoServiceAddrs 验证 serviceAddrs 为空时等价默认策略：
+// 私网拒绝、公网放行。
+func TestNewServiceDialPolicy_NoServiceAddrs(t *testing.T) {
+	policy := NewServiceDialPolicy(nil, nil)
+	if _, ok := policy("192.168.1.10:22"); ok {
+		t.Fatal("empty serviceAddrs policy should reject private")
+	}
+	if _, ok := policy("8.8.8.8:53"); !ok {
+		t.Fatal("empty serviceAddrs policy should allow public")
+	}
+}
+
 // TestNewDialPolicy_ResolvedCIDR 验证白名单命中时返回解析后的 IP:port。
 func TestNewDialPolicy_ResolvedCIDR(t *testing.T) {
 	withCidr := NewDialPolicy([]string{"192.168.0.0/16"})

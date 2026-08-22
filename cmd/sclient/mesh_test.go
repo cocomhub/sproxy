@@ -4,17 +4,24 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/spf13/cobra"
 )
 
 func TestNewCmdMesh_Subcommands(t *testing.T) {
@@ -45,6 +52,26 @@ func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 		if f := connect.Flags().Lookup(name); f == nil {
 			t.Errorf("connect 缺少 flag: %s", name)
 		}
+	}
+}
+
+// TestMeshSignalToken 验证信令 token 选择：显式 --token 优先，否则复用 FileClient 的
+// auth token（--auth-token / 配置 auth_token）。
+func TestMeshSignalToken(t *testing.T) {
+	svc := client.NewFileClient("http://127.0.0.1:1", client.WithAuthToken("cfg-token"))
+
+	// 显式 --token 优先
+	if got := meshSignalToken("flag-token", svc); got != "flag-token" {
+		t.Fatalf("meshSignalToken(flag) = %q, want flag-token", got)
+	}
+	// 空 flag → 回落 FileClient auth token
+	if got := meshSignalToken("", svc); got != "cfg-token" {
+		t.Fatalf("meshSignalToken(empty) = %q, want cfg-token", got)
+	}
+	// 两者皆空 → 空串
+	plain := client.NewFileClient("http://127.0.0.1:1")
+	if got := meshSignalToken("", plain); got != "" {
+		t.Fatalf("meshSignalToken(both empty) = %q, want empty", got)
 	}
 }
 
@@ -94,5 +121,342 @@ func TestMeshDialFrameNeeded(t *testing.T) {
 		if got := meshDialFrameNeeded(tc.kind); got != tc.want {
 			t.Fatalf("meshDialFrameNeeded(%q) = %v, want %v", tc.kind, got, tc.want)
 		}
+	}
+}
+
+// ---- meshTargetRefresher 单元测试 ----
+
+// servicesHandler 构造一个可切换响应的 /api/hub/services mock。
+func servicesHandler(hits *atomic.Int32, get func() string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(get()))
+	}
+}
+
+func fixedClock() (time.Time, func() time.Time) {
+	t := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	return t, func() time.Time { return t }
+}
+
+// TestMeshTargetRefresher_FreshHitAndConcurrentCache 验证：首次 resolve 打一次 HTTP；
+// TTL 内并发 resolve 全部走缓存（单飞 + 缓存命中），不再打 HTTP（-race 验证并发安全）。
+func TestMeshTargetRefresher_FreshHitAndConcurrentCache(t *testing.T) {
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string {
+		return `[{"name":"svc","node":"node-a","addr":"127.0.0.1:10022"}]`
+	}))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	r := newMeshTargetRefresher(svc, "svc")
+	r.ttl = time.Hour
+	_, r.now = fixedClock()
+
+	target, err := r.resolve(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Node != "node-a" || target.Addr != "127.0.0.1:10022" {
+		t.Fatalf("unexpected target: %+v", target)
+	}
+
+	const n = 10
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = r.resolve(context.Background())
+		}(i)
+	}
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("resolve[%d] error: %v", i, e)
+		}
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits = %d, want 1 (cache hit after first resolve)", got)
+	}
+}
+
+// TestMeshTargetRefresher_SingleFlightDuringRefresh 验证单飞：刷新在途时，
+// 并发 resolve 共享同一次刷新（不再打 HTTP），全部拿到结果。
+func TestMeshTargetRefresher_SingleFlightDuringRefresh(t *testing.T) {
+	var hits atomic.Int32
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		select {
+		case <-release:
+		case <-time.After(10 * time.Second):
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"name":"svc","node":"node-a","addr":"127.0.0.1:10022"}]`))
+	}))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	r := newMeshTargetRefresher(svc, "svc")
+	r.ttl = time.Hour
+	_, r.now = fixedClock()
+
+	// 第一个 resolve 承担刷新（阻塞在 handler）
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := r.resolve(context.Background())
+		firstDone <- err
+	}()
+
+	// 等 handler 被命中（刷新已在途）
+	deadline := time.Now().Add(3 * time.Second)
+	for hits.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if hits.Load() == 0 {
+		t.Fatal("refresh did not reach handler")
+	}
+
+	// 刷新在途时并发等待者：应等待同一刷新，不再打 HTTP
+	const n = 5
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = r.resolve(context.Background())
+		}(i)
+	}
+	// 给等待者一点时间进入 resolve（命中与否均不影响断言，仅提高单飞分支覆盖）
+	time.Sleep(50 * time.Millisecond)
+
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("waiter[%d] error: %v", i, e)
+		}
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("hits = %d, want 1 (single-flight)", got)
+	}
+}
+
+// TestMeshTargetRefresher_TTLExpiry 验证：TTL 过期后重新拉取，服务消失时报「不可用」。
+func TestMeshTargetRefresher_TTLExpiry(t *testing.T) {
+	var mu sync.Mutex
+	svcList := `[{"name":"svc","node":"node-a","addr":"127.0.0.1:10022"}]`
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return svcList
+	}))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	r := newMeshTargetRefresher(svc, "svc")
+	r.ttl = 3 * time.Second
+	cur := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	r.now = func() time.Time { return cur }
+
+	if _, err := r.resolve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// 推进时钟超过 TTL，且服务列表改为空 → resolve 重新拉取并报不可用
+	cur = cur.Add(4 * time.Second)
+	mu.Lock()
+	svcList = `[]`
+	mu.Unlock()
+	if _, err := r.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "不可用") {
+		t.Fatalf("expected unavailable after TTL expiry, got: %v", err)
+	}
+}
+
+// TestMeshTargetRefresher_ServiceAbsent 验证服务不在列表时报「不可用」。
+func TestMeshTargetRefresher_ServiceAbsent(t *testing.T) {
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string { return `[]` }))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	r := newMeshTargetRefresher(svc, "missing")
+	if _, err := r.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "不可用") {
+		t.Fatalf("expected unavailable, got: %v", err)
+	}
+}
+
+// TestMeshTargetRefresher_FetchError 验证 hub 查询失败时返回明确错误。
+func TestMeshTargetRefresher_FetchError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	r := newMeshTargetRefresher(svc, "svc")
+	if _, err := r.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "查询 mesh 服务失败") {
+		t.Fatalf("expected fetch error, got: %v", err)
+	}
+}
+
+// TestMeshTargetRefresher_InvalidateRefetch 验证 invalidate 后立即重取，TTL 内命中缓存。
+func TestMeshTargetRefresher_InvalidateRefetch(t *testing.T) {
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string {
+		return `[{"name":"svc","node":"node-a","addr":"127.0.0.1:10022"}]`
+	}))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	r := newMeshTargetRefresher(svc, "svc")
+	r.ttl = time.Hour
+	_, r.now = fixedClock()
+
+	if _, err := r.resolve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r.invalidate()
+	if _, err := r.resolve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.resolve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("hits = %d, want 2 (invalidate forces refetch, then cache hit)", got)
+	}
+}
+
+// lockedBuffer 是并发安全的字节缓冲，供测试观察异步 ErrOut 输出。
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// TestMeshForwardListen_RefreshesTarget 集成验证 meshForwardListen 每连接用最新 target：
+//
+//	场景 1：服务在列表 → dial 收到正确 target；
+//	场景 2：服务下线 + invalidate → 连接快速失败，ErrOut 报「不可用」，不再卡死。
+func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
+	var mu sync.Mutex
+	svcList := `[{"name":"svc","node":"node-a","addr":"127.0.0.1:10022"}]`
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return svcList
+	}))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	r := newMeshTargetRefresher(svc, "svc")
+	r.ttl = time.Hour
+	_, r.now = fixedClock()
+
+	// 注入 dial：记录收到的 target，返回错误触发 invalidate 路径（避免 pump 阻塞）
+	targets := make(chan *client.MeshService, 4)
+	dial := func(_ context.Context, _ *client.FileClient, _ *hub.HubSignaler, target *client.MeshService, _ string) (*meshDialResult, error) {
+		targets <- target
+		return nil, fmt.Errorf("injected dial error")
+	}
+
+	errBuf := &lockedBuffer{}
+	ios := cli.IOStreams{Out: io.Discard, ErrOut: errBuf}
+
+	initial, err := r.resolve(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 预留一个空闲端口（meshForwardListen 内部会再次绑定同一地址）
+	reserve, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenAddr := reserve.Addr().String()
+	_ = reserve.Close()
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background()) // 未执行 Execute 的裸命令 Context() 为 nil，需显式设置
+	go func() {
+		// meshForwardListen 阻塞在 Accept，直到测试结束端口关闭
+		_ = meshForwardListen(cmd, svc, nil, dial, r, initial, "local-node", listenAddr, ios)
+	}()
+
+	// 轮询拨号直到 meshForwardListen 的 listener 就绪（goroutine 启动有延迟）
+	dialForward := func() (net.Conn, error) {
+		var c net.Conn
+		var derr error
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			c, derr = net.Dial("tcp", listenAddr)
+			if derr == nil {
+				return c, nil
+			}
+			if time.Now().After(deadline) {
+				return nil, derr
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// 场景 1：服务在列表 → dial 收到 node-a
+	c1, err := dialForward()
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case target := <-targets:
+		if target.Node != "node-a" || target.Addr != "127.0.0.1:10022" {
+			t.Fatalf("dial target = %+v, want node-a/127.0.0.1:10022", target)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("dial not called for scenario 1")
+	}
+	_ = c1.Close()
+
+	// 场景 2：服务下线 + invalidate → 连接被服务端快速关闭，ErrOut 报「不可用」
+	mu.Lock()
+	svcList = `[]`
+	mu.Unlock()
+	r.invalidate()
+
+	c2, err := dialForward()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	if err := c2.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, rerr := c2.Read(make([]byte, 1)); rerr == nil {
+		t.Fatal("expected connection closed by server (service offline)")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(errBuf.String(), "不可用") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(errBuf.String(), "不可用") {
+		t.Fatalf("expected '不可用' error output, got: %q", errBuf.String())
 	}
 }

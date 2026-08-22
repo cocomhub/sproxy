@@ -270,6 +270,32 @@ func NewDialPolicy(allowCIDRs []string) func(string) (string, bool) {
 	}
 }
 
+// NewServiceDialPolicy 构造出口拨号策略：先对节点自身宣告的服务地址做
+// 精确字符串匹配放行（返回原地址），否则回落 NewDialPolicy(allowCIDRs)
+// 的既有逻辑（公网 + 白名单 CIDR）。
+//
+// 最小授权：仅精确放行操作者显式宣告的 host:port 对；未宣告的 loopback/
+// 私有地址仍被拒绝。dial 帧地址与宣告地址完全一致时（mesh connect 用
+// MeshServices 返回的 addr 原样拨号）命中；其他拼写（如 localhost vs
+// 127.0.0.1）不会命中，避免绕过白名单。
+func NewServiceDialPolicy(allowCIDRs, serviceAddrs []string) func(string) (string, bool) {
+	base := NewDialPolicy(allowCIDRs)
+	exact := make(map[string]struct{}, len(serviceAddrs))
+	for _, a := range serviceAddrs {
+		exact[a] = struct{}{}
+	}
+	return func(addr string) (string, bool) {
+		if _, ok := exact[addr]; ok {
+			// 命中宣告地址：仍需 host:port 合法，避免拨号畸形地址。
+			if _, _, err := net.SplitHostPort(addr); err == nil {
+				return addr, true
+			}
+			return "", false
+		}
+		return base(addr)
+	}
+}
+
 func ipAllowed(ip net.IP) bool {
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
