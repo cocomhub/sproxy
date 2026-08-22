@@ -96,6 +96,7 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 	// 与 HubServer.readRegisterFrame 对齐：hub 在创建 mux 前通过 conn.Receive 读取，
 	// 因此这里也必须用 conn.Send，而非 mux 控制流。
 	meta := hub.Meta{}
+	var serviceAddrs []string
 	if dialAllow {
 		meta.Tags = append(meta.Tags, "exit")
 	}
@@ -106,6 +107,9 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 			continue
 		}
 		meta.Services = append(meta.Services, hub.Service{Name: name, Addr: addr})
+		// 收集宣告的服务地址：出口拨号时精确放行这些地址（含 loopback/私网），
+		// 否则 mesh connect 回落中继路径拨 127.0.0.1:xxx 会被默认策略拒绝。
+		serviceAddrs = append(serviceAddrs, addr)
 	}
 	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta)); serr != nil {
 		return fmt.Errorf("发送注册帧失败: %w", serr)
@@ -141,9 +145,11 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 
 	logger.Info("等待中继请求...")
-	var opts []relay.ServeOptions
-	if len(dialAllowCIDRs) > 0 {
-		opts = append(opts, relay.ServeOptions{DialPolicy: relay.NewDialPolicy(dialAllowCIDRs)})
+	// 始终传入包含宣告服务地址的拨号策略（--dial-allow=false 时 Serve 在咨询
+	// 策略前就拒绝 dial 帧，策略不生效）。无服务宣告且无 CIDR 时等价默认
+	// DialAllowed（仅公网）。
+	opts := []relay.ServeOptions{
+		{DialPolicy: relay.NewServiceDialPolicy(dialAllowCIDRs, serviceAddrs)},
 	}
 	err = relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
 	if err != nil {
