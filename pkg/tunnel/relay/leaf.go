@@ -60,14 +60,17 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 
 			lenBuf := make([]byte, 4)
 			if _, rerr := io.ReadFull(s, lenBuf); rerr != nil {
+				logger.Warn("中继流: 读首帧长度失败", "error", rerr)
 				return
 			}
 			metaLen := binary.BigEndian.Uint32(lenBuf)
 			if metaLen == 0 || metaLen > tunnel.MaxMetadataBytes {
+				logger.Warn("中继流: 非法帧长度", "len", metaLen)
 				return
 			}
 			meta := make([]byte, metaLen)
 			if _, rerr := io.ReadFull(s, meta); rerr != nil {
+				logger.Warn("中继流: 读首帧内容失败", "error", rerr)
 				return
 			}
 
@@ -95,14 +98,17 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 					return
 				}
 				defer remote.Close()
+				// 记录拨号成功：让对端（mesh connect）与运维可确认出口数据通路就绪。
+				logger.Info("出口拨号成功，开始泵送", "addr", d.Dial, "remote", remote.RemoteAddr().String())
 				pump(s, remote)
+				logger.Info("出口泵送结束", "addr", d.Dial)
 				return
 			}
 
 			// 否则按隧道 HTTP 中继处理
 			var req tunnel.Request
 			if err := json.Unmarshal(meta, &req); err != nil || req.Method == "" {
-				logger.Warn("无法解析的中继帧")
+				logger.Warn("无法解析的中继帧", "meta", string(meta))
 				return
 			}
 			serveHTTP(ctx, s, localAddr, req, httpClient, logger)

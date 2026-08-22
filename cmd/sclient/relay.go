@@ -53,6 +53,9 @@ func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string,
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
+		if isTerminalRelayError(err) {
+			return err
+		}
 		logger.Warn("中继断开，即将重连", "delay", delay, "error", err)
 		select {
 		case <-time.After(delay):
@@ -64,6 +67,17 @@ func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string,
 			return ctx.Err()
 		}
 	}
+}
+
+// isTerminalRelayError 判断是否应因配置/权限错误终止而非重试。
+// 仅当 hub 通过注册 ACK **明确拒绝** 注册时才终止；其余（连接断开、超时、EOF、
+// ACK 未到达）均视为可重连的网络问题。EOF 不代表鉴权失败——真实鉴权失败时
+// hub 必然已回发 RegisterAckErr 帧，runRelayOnce 会走“注册失败”分支先于 EOF。
+func isTerminalRelayError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.HasPrefix(err.Error(), "注册失败")
 }
 
 func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
@@ -104,13 +118,17 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 	if ackErr != nil {
 		return fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
 	}
-	if strings.HasPrefix(string(ack), hub.RegisterAckErr) {
-		return fmt.Errorf("注册被拒绝: %s", strings.TrimPrefix(string(ack), hub.RegisterAckErr))
+	ackStr := string(ack)
+	switch {
+	case ackStr == hub.RegisterAckOK:
+		logger.Info("已注册到 Hub")
+	case strings.HasPrefix(ackStr, hub.RegisterAckErr):
+		// 仅当 hub 显式回发 REG_ERR 帧才算“注册失败”（鉴权错误）——
+		// 这是 isTerminalRelayError 唯一采信的依据。
+		return fmt.Errorf("注册失败: %s", strings.TrimPrefix(ackStr, hub.RegisterAckErr))
+	default:
+		return fmt.Errorf("注册失败: 收到未知注册响应 %q", ackStr)
 	}
-	if string(ack) != hub.RegisterAckOK {
-		logger.Warn("收到未知注册响应", "ack", string(ack))
-	}
-	logger.Info("已注册到 Hub")
 
 	m := mux.New(conn, mux.RoleListener)
 	defer m.Close()
