@@ -252,6 +252,11 @@ func (c *Config) Validate() error {
 	if c.Hub.Enabled && c.Hub.RelayToken == "" {
 		return fmt.Errorf("hub.enabled=true 但 relay_token 为空，中继节点注册将无任何鉴权，请配置 relay_token")
 	}
+	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled {
+		// S42：WS 是当前唯一可用的节点接入传输；hub 启用而无 transport 时
+		// 节点无法注册，属配置脚枪，fail-fast 启动失败。
+		return fmt.Errorf("hub.enabled=true 但 transports.ws.enabled=false，中继节点无法连接，请启用 WebSocket 传输")
+	}
 	return nil
 }
 
