@@ -102,7 +102,9 @@ func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "to 节点未注册", http.StatusBadRequest)
 		return
 	}
-	b.queue.Push(msg)
+	// B2 桥接：Push 现返回 error（全局满/per-sender cap），暂按旧语义静默忽略
+	// （保持 202）；B3 将在此感知错误并回 429（I9）。
+	_ = b.queue.Push(msg)
 	w.WriteHeader(http.StatusAccepted)
 }
 
