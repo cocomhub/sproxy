@@ -19,7 +19,8 @@ import (
 //   - listen 侧：WaitOffer 阻塞读 offer 文件 → SendAnswer 写 answer 文件
 //
 // 用户把 offer 文件从 dial 侧拷到 listen 侧、answer 反向拷回，即可完成信令。
-// 适用于「无 hub 可达」场景（如 Mac 无法访问新加坡 hub，但能与公司电脑打洞直连）。
+// 适用于「无 hub 可达」场景（如本地端无法访问公网服务器上的 hub，
+// 但能与中继端打洞直连，再由中继端作出口）。
 type manualSignaler struct {
 	offerFile  string
 	answerFile string
@@ -49,9 +50,27 @@ func waitFile(ctx context.Context, path string) error {
 	}
 }
 
+// writeSDPFile 以安全方式写入 SDP 文件：
+//   - 0600 私有权限（防其他用户读取 ICE 凭据）
+//   - O_EXCL 不覆盖已存在文件（防竞态/误覆盖）
+//   - Unix 上额外 O_NOFOLLOW 拒绝符号链接（见 sdpWriteFlags 平台实现）
+func writeSDPFile(path, data string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|sdpWriteFlags(), 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.WriteString(data)
+	cerr := f.Close()
+	if werr != nil {
+		_ = os.Remove(path)
+		return werr
+	}
+	return cerr
+}
+
 // SendOffer 把 offer SDP 写入 offer 文件并提示用户传给对端。
 func (m *manualSignaler) SendOffer(_ string, sdp string) error {
-	if err := os.WriteFile(m.offerFile, []byte(sdp), 0o600); err != nil {
+	if err := writeSDPFile(m.offerFile, sdp); err != nil {
 		return fmt.Errorf("写 offer 文件失败: %w", err)
 	}
 	m.ios.WriteOutLine("已生成 offer SDP: %s", m.offerFile)

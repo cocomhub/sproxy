@@ -18,7 +18,7 @@ import (
 type RelayStreamRequest struct {
 	Target string `json:"target"`
 	Type   string `json:"type"` // 固定 "tcp"
-	Addr   string `json:"addr"` // 目标叶子要出站连接的 TCP 地址（如 sg-vps-2:22）
+	Addr   string `json:"addr"` // 目标叶子要出站连接的 TCP 地址（如 target-host:22）
 }
 
 // RelayStreamHandler 通过 hub 路由表把一条 HTTP 请求升级为到目标叶子的双向字节流，

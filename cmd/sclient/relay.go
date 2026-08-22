@@ -213,7 +213,7 @@ func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
 	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
 	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
 	cmd.Flags().String("token", "", "中继注册 token（与 hub.relay_token 一致；未配置 hub token 时可不填）")
-	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供公司电脑充当出口网关）")
+	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供中继端充当出口网关）")
 	cmd.Flags().StringArray("service", nil, "宣告一个 mesh 服务（格式 name:addr，可重复；供 sclient mesh connect 发现）")
 	cmd.Flags().StringArray("dial-allow-cidr", nil, "出口拨号白名单网段（如 192.168.0.0/16；配合 --dial-allow 放行内网服务，默认仅公网）")
 	return cmd

@@ -173,19 +173,19 @@ hub:
 
 **节点注册 + 访问**：
 ```bash
-# 被访问方（如公司电脑）：注册 + 宣告本地服务 + 允许出口拨号
-sclient relay start --hub wss://hub:18083/ws --token T --node-id nodeA \
+# 中继端（出口节点）：注册 + 宣告本地服务 + 允许出口拨号
+sclient relay start --hub wss://hub:18083/ws --token T --node-id relay \
   --service ssh:127.0.0.1:22 --dial-allow
 
-# 访问方（如家庭 Mac）：webrtc 直连优先，失败回落中继
+# 本地端（访问方）：webrtc 直连优先，失败回落中继
 sclient mesh connect ssh -l :2222      # 然后 ssh -p 2222 user@127.0.0.1
 # 或直接经 hub 中继到目标节点出口
-sclient relay dial --node nodeA --tcp 127.0.0.1:22 -l :2222
+sclient relay dial --node relay --tcp 127.0.0.1:22 -l :2222
 ```
 
 **云端主动推数据到本地**：`relay dial` 双向可用——在云端节点执行
-`sclient relay dial --node mac-mini --tcp 127.0.0.1:2090` 即可经 hub 中继写入 Mac 本地服务，
-无需 Mac 先发起。
+`sclient relay dial --node local --tcp 127.0.0.1:2090` 即可经 hub 中继写入本地端服务，
+无需本地端先发起。
 
 ## 注意
 

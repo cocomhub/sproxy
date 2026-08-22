@@ -17,7 +17,7 @@ type Plan struct {
 	Host hub.NodeID
 	// Addr 目标数据面地址：
 	//   - relay/webrtc 直连场景 = 服务在 Host 上的地址（127.0.0.1:22）
-	//   - exit 场景 = Host 出口可达的外部地址（如 sg-vps-2:22）
+	//   - exit 场景 = Host 出口可达的外部地址（如 target-host:22）
 	Addr string
 	// Kind 首选路径类型：direct | webrtc | relay | exit | none。
 	Kind string

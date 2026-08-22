@@ -350,11 +350,11 @@ sclient mesh connect ssh -l :2222   # 然后 ssh -p 2222 user@127.0.0.1
 
 **云端主动推数据到本地**（方向对称）：
 ```bash
-# 在云端节点上执行，经 hub 中继到本地 Mac 的服务（Mac 需先 relay start 注册）
-sclient relay dial --node mac-mini --tcp 127.0.0.1:2090
-# 云端即可向该连接写入数据，数据经 hub 中继到达 Mac 本地服务
+# 在云端节点上执行，经 hub 中继到本地端的服务（本地端需先 relay start 注册）
+sclient relay dial --node local --tcp 127.0.0.1:2090
+# 云端即可向该连接写入数据，数据经 hub 中继到达本地端服务
 ```
-说明：`relay dial` 双向可用——任意节点可作 caller 拨向另一节点，实现云端→本地主动推送（无需 Mac 先发起）。
+说明：`relay dial` 双向可用——任意节点可作 caller 拨向另一节点，实现云端→本地主动推送（无需本地端先发起）。
 
 ### sclient 当前目录（`cd`/`pwd`）
 
