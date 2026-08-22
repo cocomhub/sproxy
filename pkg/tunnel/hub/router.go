@@ -162,6 +162,22 @@ type DialRequest struct {
 	Dial string `json:"dial,omitempty"` // 目标叶子出站连接的 TCP 地址
 }
 
+// DialResultFrame 是叶子出口拨号结果回帧（I27）。
+// hub 的 /api/relay/stream 在写 200 前读取 [4B len][DialResultFrame JSON]，
+// 据此决定返回 200（ok）或 502/504（error/超时）。
+// 仅当叶子以 ServeOptions.DialResultFrames 模式（relay start 经 hub 中继）运行时
+// 回写；webrtc 直连（p2p listen）不回写，避免结果帧污染数据流。
+type DialResultFrame struct {
+	DialResult string `json:"dial_result"`
+	Message    string `json:"message,omitempty"`
+}
+
+// DialResultFrame 取值。
+const (
+	DialResultOK    = "ok"
+	DialResultError = "error"
+)
+
 // NewRegisterFrame 构建注册帧。当无 meta/token 时退化为裸 nodeID，
 // 保证与旧版 hub（仅接收裸 nodeID）兼容。
 func NewRegisterFrame(nodeID, token string, meta Meta) []byte {

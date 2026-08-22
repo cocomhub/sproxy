@@ -56,6 +56,10 @@ type Stream interface {
 	io.ReadWriteCloser
 	ID() StreamID
 	CloseWrite() error
+	// Abort 立即放弃该流（非阻塞、幂等），不经 writeCh 向对端发送关闭帧。
+	// 与 Close 的区别见 stream.Abort 文档。收尾/超时强制释放场景应优先 Abort，
+	// 避免 writeCh 打满时 Close 永久阻塞。
+	Abort() error
 }
 
 // StreamMetrics 收集流的统计信息。

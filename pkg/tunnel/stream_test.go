@@ -165,6 +165,7 @@ type mockStream struct {
 func (m *mockStream) Write(p []byte) (int, error) { return len(p), nil }
 func (m *mockStream) Close() error                { return nil }
 func (m *mockStream) CloseWrite() error           { return nil }
+func (m *mockStream) Abort() error                { return nil }
 func (m *mockStream) ID() mux.StreamID            { return 0 }
 
 // TestStreamBodyEncryptedReadBuffer 验证加密模式下 streamBody 的预读缓冲读取正确性。

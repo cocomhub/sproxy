@@ -6,6 +6,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -91,8 +92,9 @@ func TestRelayStream_EndToEnd_Echo(t *testing.T) {
 	defer cancel()
 	leafErr := make(chan error, 1)
 	go func() {
+		// DialResultFrames=true：hub 写 200 前需读到 ok 结果帧（I27）。
 		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
-			relay.ServeOptions{DialPolicy: func(addr string) (string, bool) { return addr, true }})
+			relay.ServeOptions{DialPolicy: func(addr string) (string, bool) { return addr, true }, DialResultFrames: true})
 	}()
 
 	// caller 侧：注册到 RouteTable 并用 RelayStreamHandler 服务
@@ -177,4 +179,149 @@ func TestRelayStreamDialRequest_Framing(t *testing.T) {
 	if parsed.Dial != "127.0.0.1:22" {
 		t.Fatalf("unexpected dial: %q", parsed.Dial)
 	}
+}
+
+// TestRelayStreamHandler_UnknownTarget 验证未知目标节点返回 404（I65）。
+func TestRelayStreamHandler_UnknownTarget(t *testing.T) {
+	rt := hub.NewRouteTable()
+	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
+	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
+		strings.NewReader(`{"target":"missing","type":"tcp","addr":"1.2.3.4:80"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "missing") {
+		t.Fatalf("响应体应包含节点 ID，got %q", w.Body.String())
+	}
+}
+
+// TestRelayStreamHandler_NilLogger 验证构造器 logger==nil 兜底为 slog.Default（I65）。
+func TestRelayStreamHandler_NilLogger(t *testing.T) {
+	rt := hub.NewRouteTable()
+	h := NewRelayStreamHandler(rt, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
+		strings.NewReader(`{"target":"missing","type":"tcp","addr":"1.2.3.4:80"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+// TestRelayStreamHandler_NilRouteTable 验证 routeTable nil 守卫返回 404 而非 panic（I65/S34）。
+func TestRelayStreamHandler_NilRouteTable(t *testing.T) {
+	h := NewRelayStreamHandler(nil, testutil.DiscardLogger())
+	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
+		strings.NewReader(`{"target":"n","type":"tcp","addr":"1.2.3.4:80"}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+// TestRelayStreamHandler_BadAddr 验证 addr 语法校验 fail-fast 返回 400（I26/I65）。
+func TestRelayStreamHandler_BadAddr(t *testing.T) {
+	rt := hub.NewRouteTable()
+	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
+	for _, body := range []string{
+		`{"target":"n","type":"tcp","addr":"garbage"}`,       // 无端口
+		`{"target":"n","type":"tcp","addr":"127.0.0.1"}`,     // 无端口
+		`{"target":"n","type":"tcp","addr":"http://x"}`,      // 协议分隔符
+		`{"target":"n","type":"tcp","addr":"a@b:80"}`,        // @
+		`{"target":"n","type":"tcp","addr":"1.2.3.4:0"}`,     // 端口 0
+		`{"target":"n","type":"tcp","addr":"1.2.3.4:99999"}`, // 端口越界
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/relay/stream", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("body=%s expected 400, got %d", body, w.Code)
+		}
+	}
+}
+
+// TestRelayStreamHandler_NoHijacker 验证 ResponseWriter 无 http.Hijacker 时返回 500（I65）。
+// 需要叶子先回 ok 结果帧（I27：hub 写 200/升级前先读结果帧），再走到 hijack 步骤。
+func TestRelayStreamHandler_NoHijacker(t *testing.T) {
+	pipeA, pipeB := xfertest.Pipe()
+	callerMux := mux.New(pipeA, mux.RoleDialer)
+	defer callerMux.Close()
+	leafMux := mux.New(pipeB, mux.RoleListener)
+	defer leafMux.Close()
+
+	// 叶子 accept 流，读 dial 帧后回写 ok 结果帧，使 hub 通过结果帧检查进入 hijack。
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	go func() {
+		s, aerr := leafMux.Accept(ctx)
+		if aerr != nil {
+			return
+		}
+		defer s.Close()
+		lenBuf := make([]byte, 4)
+		if _, rerr := io.ReadFull(s, lenBuf); rerr != nil {
+			return
+		}
+		metaLen := binary.BigEndian.Uint32(lenBuf)
+		meta := make([]byte, metaLen)
+		if _, rerr := io.ReadFull(s, meta); rerr != nil {
+			return
+		}
+		ok, _ := json.Marshal(hub.DialResultFrame{DialResult: hub.DialResultOK})
+		ob := make([]byte, 4)
+		binary.BigEndian.PutUint32(ob, uint32(len(ok)))
+		_, _ = s.Write(ob)
+		_, _ = s.Write(ok)
+	}()
+
+	rt := hub.NewRouteTable()
+	rt.Add("node-a", callerMux)
+	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
+		strings.NewReader(`{"target":"node-a","type":"tcp","addr":"1.2.3.4:80"}`))
+	w := httptest.NewRecorder() // 无 Hijacker
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d (body=%q)", w.Code, w.Body.String())
+	}
+}
+
+// TestRelayStream_DialFailure_Returns502 验证叶子拨号失败（DialPolicy 拒绝）时
+// hub 读到 error 结果帧返回 502（I27 错误路径端到端）。
+func TestRelayStream_DialFailure_Returns502(t *testing.T) {
+	pipeA, pipeB := xfertest.Pipe()
+	callerMux := mux.New(pipeA, mux.RoleDialer)
+	defer callerMux.Close()
+	leafMux := mux.New(pipeB, mux.RoleListener)
+	defer leafMux.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	leafErr := make(chan error, 1)
+	go func() {
+		// DialPolicy 拒绝一切 → 叶子回 error 结果帧。
+		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
+			relay.ServeOptions{
+				DialPolicy:       func(addr string) (string, bool) { return "", false },
+				DialResultFrames: true,
+			})
+	}()
+
+	rt := hub.NewRouteTable()
+	rt.Add("leaf-node", callerMux)
+	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
+
+	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: "1.2.3.4:80"})
+	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream", strings.NewReader(string(body)))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", w.Code)
+	}
+	cancel()
+	_ = leafErr
 }

@@ -225,9 +225,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	if opts.RouteTable != nil {
 		// 任意 TCP 流中继（SSH/长连接）：升级为双向字节流。
 		// 注：旧的 HTTP JSON 中继（POST /api/relay）已删除——被本流中继完全替代。
+		// 仅支持直连（srvMux + Bearer）：handler 依赖 http.Hijacker 升级为原始 TCP，
+		// 而隧道的 ResponseWriter 包装链（streamRecorder/gzipResponseWriter）不实现
+		// Hijacker——经隧道访问必 500（旧版误注册到 localMux 的死路由，已删除）。
 		streamHandler := NewRelayStreamHandler(opts.RouteTable, log.With("component", "relay_stream"))
 		srvMux.HandleFunc("POST /api/relay/stream", h.authMiddleware(streamHandler.ServeHTTP))
-		localMux.HandleFunc("POST /api/relay/stream", streamHandler.ServeHTTP)
+		// TODO(I29)：若未来需要「经隧道做原始 TCP 中继」（链式中继/多跳），正确定位是
+		// mux 层 raw-stream（复用 hub relay 模式），而非 http.Hijacker。见
+		// .superpowers/sdd/i29-tunnel-hijack-value.md。
 
 		// WebRTC 信令桥：SDP Offer/Answer/Candidate 存转 + 长轮询
 		broker := h.signalBroker
@@ -256,6 +261,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		srvMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
 		srvMux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))
 		srvMux.HandleFunc("GET /api/hub/services", h.authMiddleware(h.hubServicesHandler))
+		// mesh 服务列表暴露 localMux 是有意的：FileClient.MeshServices（client.go）
+		// 配置了 tunnelClient 时经 /tunnel 访问 localMux 做 mesh 选路；
+		// nodes/stats/remove 为运维管理面，仅 srvMux+Bearer，不暴露隧道。
 		localMux.HandleFunc("GET /api/hub/services", h.hubServicesHandler)
 	}
 

@@ -41,6 +41,14 @@ type ServeOptions struct {
 	// （主机名会解析为具体 IP，防 DNS rebinding TOCTOU）。
 	// nil 时使用 DialAllowed（严格：仅允许公网目标）。
 	DialPolicy func(addr string) (resolvedAddr string, ok bool)
+
+	// DialResultFrames 控制叶子在出口拨号后是否向对端回写拨号结果帧
+	// [4B len][{"dial_result":"ok"}] / [{"dial_result":"error","message":...}]（I27）。
+	// hub 的 /api/relay/stream 在写 200 前读取该帧，据此返回 200/502/504，
+	// 使 200 语义变为「数据面就绪」而非「已受理」。
+	// 仅经 hub 中继的 relay start 需开启；webrtc 直连（p2p listen）必须保持
+	// false——否则结果帧会被对端当远程数据透传，污染数据流。
+	DialResultFrames bool
 }
 
 // Serve 是叶子侧的流接收循环。
@@ -50,11 +58,18 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 	if logger == nil {
 		logger = slog.Default()
 	}
-	dialPolicy := DialAllowed
+	sOpts := ServeOptions{}
 	for _, o := range opts {
 		if o.DialPolicy != nil {
-			dialPolicy = o.DialPolicy
+			sOpts.DialPolicy = o.DialPolicy
 		}
+		if o.DialResultFrames {
+			sOpts.DialResultFrames = true
+		}
+	}
+	dialPolicy := DialAllowed
+	if sOpts.DialPolicy != nil {
+		dialPolicy = sOpts.DialPolicy
 	}
 	for {
 		stream, err := m.Accept(ctx)
@@ -92,12 +107,18 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 			if err := json.Unmarshal(meta, &d); err == nil && d.Dial != "" {
 				if !dialAllow {
 					logger.Warn("收到 dial 帧但未开启 --dial-allow", "addr", d.Dial)
+					if sOpts.DialResultFrames {
+						_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: "未开启 --dial-allow"})
+					}
 					return
 				}
 				// 策略返回实际应拨的地址（已解析 IP，防 DNS rebinding TOCTOU）
 				resolved, ok := dialPolicy(d.Dial)
 				if !ok {
 					logger.Warn("出口模式收到非法 dial 地址", "addr", d.Dial)
+					if sOpts.DialResultFrames {
+						_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: "地址未通过拨号策略"})
+					}
 					return
 				}
 				dialAddr := resolved
@@ -108,10 +129,19 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				remote, derr := net.DialTimeout("tcp", dialAddr, 10*time.Second)
 				if derr != nil {
 					logger.Warn("出口拨号失败", "addr", d.Dial, "error", derr)
+					if sOpts.DialResultFrames {
+						_ = writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultError, Message: derr.Error()})
+					}
 					return
 				}
 				defer remote.Close()
 				// 记录拨号成功：让对端（mesh connect）与运维可确认出口数据通路就绪。
+				if sOpts.DialResultFrames {
+					// 先回写 ok 结果帧，hub 读到后才返回 200；随后进入 pump，数据面就绪。
+					if werr := writeDialResultFrame(s, &hub.DialResultFrame{DialResult: hub.DialResultOK}); werr != nil {
+						logger.Warn("写拨号结果帧失败", "addr", d.Dial, "error", werr)
+					}
+				}
 				logger.Info("出口拨号成功，开始泵送", "addr", d.Dial, "remote", remote.RemoteAddr().String())
 				pump(s, remote, pumpGracePeriod)
 				logger.Info("出口泵送结束", "addr", d.Dial)
@@ -209,6 +239,38 @@ func writeErrorResponse(s mux.Stream, status int) {
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(respMetaJSON)))
 	_, _ = s.Write(lenBuf)
 	_, _ = s.Write(respMetaJSON)
+}
+
+// writeDialResultFrame 向流回写拨号结果帧 [4B len][{"dial_result":...}]（I27）。
+// 协议与 dial 帧一致：[4B big-endian length][JSON]。仅当 ServeOptions.DialResultFrames
+// 为 true 时调用；webrtc 直连（p2p listen）不写结果帧，避免污染数据流。
+func writeDialResultFrame(s mux.Stream, result *hub.DialResultFrame) error {
+	b, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(b)))
+	if err := writeFull(s, lenBuf); err != nil {
+		return err
+	}
+	return writeFull(s, b)
+}
+
+// writeFull 循环写满整个 buf，处理流的部分写（mux 流在发送窗口小于 buf 长度时
+// 返回 n<len 的短写）。仅用于小帧（长度前缀 + 元数据）；数据面泵送用 io.Copy。
+func writeFull(w io.Writer, buf []byte) error {
+	for len(buf) > 0 {
+		n, err := w.Write(buf)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		buf = buf[n:]
+	}
+	return nil
 }
 
 // methodAllowsBody 报告 HTTP 方法是否允许携带请求体。
