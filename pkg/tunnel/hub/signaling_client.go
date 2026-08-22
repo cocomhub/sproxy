@@ -22,7 +22,7 @@ import (
 // 跨机器场景：两端的 SDP 都经 hub 队列存转；即使 Mac→hub 链路抖动，
 // 信令体量 K 级、可重试，也能最终完成。
 type HubSignaler struct {
-	// baseURL 是 hub 的地址，如 https://sg-vps-1:18083。
+	// baseURL 是 hub 的地址，如 https://hub.example.com:18083。
 	baseURL string
 	// authToken 是可选的 Bearer token。
 	authToken string

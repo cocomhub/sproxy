@@ -51,7 +51,7 @@ type p2pFlags struct {
 }
 
 func (f *p2pFlags) add(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&f.hub, "hub", "", "hub 地址（如 https://sg-vps-1:18083）")
+	cmd.Flags().StringVar(&f.hub, "hub", "", "hub 地址（如 https://hub.example.com:18083）")
 	cmd.Flags().StringVar(&f.tok, "token", "", "信令/中继 token")
 	cmd.Flags().StringVar(&f.node, "node-id", "", "本节点 ID（信令 from；默认主机名）")
 }
@@ -117,7 +117,7 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 		},
 	}
 	cmd.Flags().String("peer", "", "对端节点 ID")
-	cmd.Flags().String("tcp", "", "对端要出站连接的 TCP 地址（如 sg-vps-2:22）")
+	cmd.Flags().String("tcp", "", "对端要出站连接的 TCP 地址（如 target-host:22）")
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 :2222）；留空为单次 stdin/stdout 模式")
 	cmd.Flags().Bool("manual", false, "手工 SDP 信令（不依赖 hub，经 --offer/--answer 文件交换）")
 	cmd.Flags().String("offer", "", "--manual 模式的 offer SDP 文件路径")

@@ -26,7 +26,7 @@ func TestHubServicesHandler(t *testing.T) {
 	defer m.Close()
 	rt.AddWithInfo(hub.NodeInfo{ID: "node-a", Mux: m, Connected: time.Now()})
 	rt.SetServices("node-a", []hub.Service{
-		{Name: "sg-ssh", Addr: "sg-vps-2.example.com:22"},
+		{Name: "sg-ssh", Addr: "target.example.com:22"},
 		{Name: "local-web", Addr: "127.0.0.1:8080"},
 	})
 

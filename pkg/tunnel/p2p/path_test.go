@@ -10,7 +10,7 @@ import (
 )
 
 func TestPlanFromService_WithAddr(t *testing.T) {
-	svc := hub.Service{Name: "sg-vps-2:22", Addr: "sg-vps-2.example.com:22"}
+	svc := hub.Service{Name: "target-host:22", Addr: "target.example.com:22"}
 	host := hub.NodeID("exit-node")
 	p := PlanFromService(svc, host)
 	if p.Kind != KindWebRTC {
@@ -54,7 +54,7 @@ func TestPlanForDirect(t *testing.T) {
 }
 
 func TestPlanForExit(t *testing.T) {
-	svc := hub.Service{Name: "sg-ssh", Addr: "sg-vps-2.example.com:22"}
+	svc := hub.Service{Name: "sg-ssh", Addr: "target.example.com:22"}
 	p := PlanForExit(svc, hub.NodeID("company-exit"))
 	if p.Kind != KindExit {
 		t.Fatalf("expected Kind exit, got %q", p.Kind)

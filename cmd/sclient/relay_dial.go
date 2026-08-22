@@ -20,7 +20,7 @@ import (
 //
 // 用法：
 //
-//	sclient relay dial --node company --tcp sg-vps-2:22 [-l :2222]
+//	sclient relay dial --node company --tcp target-host:22 [-l :2222]
 //
 // 默认单次模式：连接建立后把 stdin/stdout 与远端双向泵送（适合脚本/SSH -J 风格）。
 // 指定 -l :port 时改为本地端口转发：监听本地端口，每个连接都经 hub 中继到目标。
@@ -34,10 +34,10 @@ func NewCmdRelayDial(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
   本地端口 ⇄ hub(/api/relay/stream) ⇄ 目标叶子出站 net.Dial ⇄ 目标服务
 
 示例:
-  sclient relay dial --node company --tcp sg-vps-2:22 -l :2222
+  sclient relay dial --node company --tcp target-host:22 -l :2222
   # 然后: ssh -p 2222 user@127.0.0.1
 
-  sclient relay dial --node company --tcp sg-vps-2:80
+  sclient relay dial --node company --tcp target-host:80
   # 单次模式: 标准输入/输出直接接远端`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			node, _ := cmd.Flags().GetString("node")
@@ -59,7 +59,7 @@ func NewCmdRelayDial(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
 		},
 	}
 	cmd.Flags().String("node", "", "目标叶子节点 ID（需以 --dial-allow 运行）")
-	cmd.Flags().String("tcp", "", "目标叶子出站连接的 TCP 地址，如 sg-vps-2:22")
+	cmd.Flags().String("tcp", "", "目标叶子出站连接的 TCP 地址，如 target-host:22")
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 :2222）；留空为单次 stdin/stdout 模式")
 	_ = cmd.MarkFlagRequired("node")
 	_ = cmd.MarkFlagRequired("tcp")
