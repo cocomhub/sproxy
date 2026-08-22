@@ -48,11 +48,11 @@ func TestManualSignaler_FileExchange(t *testing.T) {
 	_ = from
 
 	// listen 侧：SendAnswer 写 answer
-	if err := listenSig.SendAnswer("mac", `{"type":"answer","sdp":"v=0\r\n...answer..."}`); err != nil {
-		t.Fatal(err)
+	if serr := listenSig.SendAnswer("mac", `{"type":"answer","sdp":"v=0\r\n...answer..."}`); serr != nil {
+		t.Fatal(serr)
 	}
-	if _, err := os.Stat(answerFile); err != nil {
-		t.Fatalf("answer 文件未生成: %v", err)
+	if _, serr := os.Stat(answerFile); serr != nil {
+		t.Fatalf("answer 文件未生成: %v", serr)
 	}
 
 	// dial 侧：WaitAnswer 读 answer

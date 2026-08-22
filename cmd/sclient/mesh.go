@@ -255,11 +255,13 @@ func meshRelayDial(conn net.Conn, addr string) error {
 	}
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
-	if _, err := conn.Write(lenBuf); err != nil {
-		return err
+	if _, werr := conn.Write(lenBuf); werr != nil {
+		return werr
 	}
-	_, err = conn.Write(head)
-	return err
+	if _, werr := conn.Write(head); werr != nil {
+		return werr
+	}
+	return nil
 }
 
 // defaultLocalNodeID 返回本机节点 ID（mesh webrtc 信令来源）。
