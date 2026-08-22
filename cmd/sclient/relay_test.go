@@ -38,7 +38,7 @@ func TestRelayCmd_HasSubcommands(t *testing.T) {
 	for _, c := range cmds {
 		names[c.Name()] = true
 	}
-	for _, name := range []string{"start", "status", "stop", "remove-node", "stats"} {
+	for _, name := range []string{"start", "status", "stop", "remove-node", "stats", "dial"} {
 		if !names[name] {
 			t.Errorf("expected subcommand %s, not found", name)
 		}
@@ -147,60 +147,6 @@ func TestRelayStatusCmd_Empty(t *testing.T) {
 	}
 }
 
-func TestBuildRelayHandler_HappyPath(t *testing.T) {
-	t.Parallel()
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("backend response"))
-	}))
-	defer backend.Close()
-
-	handler := buildRelayHandler(context.Background(), backend.URL, http.DefaultClient, testutil.DiscardLogger())
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/test", nil)
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "backend response") {
-		t.Errorf("expected body 'backend response', got %s", rec.Body.String())
-	}
-}
-
-func TestBuildRelayHandler_BackendUnreachable(t *testing.T) {
-	t.Parallel()
-	handler := buildRelayHandler(context.Background(), "http://127.0.0.1:1", http.DefaultClient, testutil.DiscardLogger())
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/test", nil)
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusBadGateway {
-		t.Errorf("expected 502, got %d", rec.Code)
-	}
-}
-
-func TestBuildRelayHandler_QueryParams(t *testing.T) {
-	t.Parallel()
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.RawQuery != "key=val" {
-			t.Errorf("expected query 'key=val', got %q", r.URL.RawQuery)
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-	}))
-	defer backend.Close()
-
-	handler := buildRelayHandler(context.Background(), backend.URL, http.DefaultClient, testutil.DiscardLogger())
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/test?key=val", nil)
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", rec.Code)
-	}
-}
-
 func TestRunRelayWithRetry_CtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -221,9 +167,12 @@ func TestIsTerminalRelayError(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"hub 明确拒绝 invalid token（REG_ERR 帧）", fmt.Errorf("注册失败: invalid token"), true},
-		{"hub 明确拒绝 bad register frame", fmt.Errorf("注册失败: bad register frame"), true},
-		{"未知注册响应", fmt.Errorf("注册失败: 收到未知注册响应 %q", "???"), true},
+		{"hub 明确拒绝 invalid token（REG_ERR 帧）", fmt.Errorf("%w: invalid token", errRelayRegistrationRejected), true},
+		{"hub 明确拒绝 bad register frame", fmt.Errorf("%w: bad register frame", errRelayRegistrationRejected), true},
+		{"未知注册响应", fmt.Errorf("%w: 收到未知注册响应 %q", errRelayRegistrationRejected, "???"), true},
+		// I43 契约回归锁：外层 %w 包装后 errors.Is 仍必须命中终态判定，
+		// 防止未来文案改写/包装导致无效 token 退化为无限重连。
+		{"多层 %w 包装后 errors.Is 仍命中", fmt.Errorf("relay: %w", fmt.Errorf("%w: invalid token", errRelayRegistrationRejected)), true},
 		// 网络波动：不得判为终态
 		{"等待 ACK 超时（EOF）", fmt.Errorf("等待注册 ACK 失败: %w", io.EOF), false},
 		{"连接断开 EOF", io.EOF, false},

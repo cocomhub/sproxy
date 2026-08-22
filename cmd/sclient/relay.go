@@ -6,9 +6,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -39,6 +41,14 @@ func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, dial
 
 	logger := slog.With("node", nodeID, "hub", hubURL, "local", local, "dial_allow", dialAllow)
 	logger.Info("中继节点启动")
+	// S61：明文 ws:// + 携带注册 token 是真实风险组合（token 在公网明文飞行），
+	// 告警提示生产环境用 wss://。不改默认值——本地回环自签 hub 场景（ws xfer
+	// Dial 未支持自签 TLS）仍需可用。
+	if token != "" {
+		if u, perr := url.Parse(hubURL); perr == nil && u.Scheme == "ws" {
+			logger.Warn("hub 使用明文 ws:// 且携带注册 token，token 将明文传输；生产环境请使用 wss://", "hub", hubURL)
+		}
+	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
@@ -69,15 +79,17 @@ func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string,
 	}
 }
 
+// errRelayRegistrationRejected 表示 hub 通过注册 ACK 明确拒绝本次注册（鉴权/格式错误）。
+// 作为哨兵错误被 parseRegisterAck 的三种"注册失败"分支以 %w 包装；isTerminalRelayError
+// 用 errors.Is 判定，可穿透任意层包装，避免文案改写或 %w 包装后终态判定静默失效（I43）。
+var errRelayRegistrationRejected = errors.New("注册失败")
+
 // isTerminalRelayError 判断是否应因配置/权限错误终止而非重试。
 // 仅当 hub 通过注册 ACK **明确拒绝** 注册时才终止；其余（连接断开、超时、EOF、
 // ACK 未到达）均视为可重连的网络问题。EOF 不代表鉴权失败——真实鉴权失败时
 // hub 必然已回发 RegisterAckErr 帧，runRelayOnce 会走"注册失败"分支先于 EOF。
 func isTerminalRelayError(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.HasPrefix(err.Error(), "注册失败")
+	return errors.Is(err, errRelayRegistrationRejected)
 }
 
 // parseRegisterAck 解析 hub 注册 ACK 帧。返回节点 per-node secret：
@@ -94,15 +106,15 @@ func parseRegisterAck(ackStr string) (secret string, err error) {
 	case strings.HasPrefix(ackStr, hub.RegisterAckOK+":"):
 		secret = strings.TrimPrefix(ackStr, hub.RegisterAckOK+":")
 		if secret == "" {
-			return "", fmt.Errorf("注册失败: 收到异常的 REG_OK（secret 为空）")
+			return "", fmt.Errorf("%w: 收到异常的 REG_OK（secret 为空）", errRelayRegistrationRejected)
 		}
 		return secret, nil
 	case strings.HasPrefix(ackStr, hub.RegisterAckErr):
 		// 仅当 hub 显式回发 REG_ERR 帧才算"注册失败"（鉴权错误）——
 		// 这是 isTerminalRelayError 唯一采信的依据。
-		return "", fmt.Errorf("注册失败: %s", strings.TrimPrefix(ackStr, hub.RegisterAckErr))
+		return "", fmt.Errorf("%w: %s", errRelayRegistrationRejected, strings.TrimPrefix(ackStr, hub.RegisterAckErr))
 	default:
-		return "", fmt.Errorf("注册失败: 收到未知注册响应 %q", ackStr)
+		return "", fmt.Errorf("%w: 收到未知注册响应 %q", errRelayRegistrationRejected, ackStr)
 	}
 }
 
@@ -130,6 +142,14 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 		name, addr, ok := strings.Cut(svc, ":")
 		if !ok || name == "" || addr == "" {
 			logger.Warn("忽略无效服务宣告（应为 name:addr）", "raw", svc)
+			continue
+		}
+		// S60：addr 必须是合法 host:port（net.SplitHostPort），且 host 非空
+		//（拒绝 "x::22" 这类空 host）。否则注册了"可见不可连"的服务，
+		// mesh connect 命中后必然拨号失败。服务端 hub/router validateServices
+		// 应同步补 host:port 校验（B1 防御纵深，本批仅客户端）。
+		if host, _, err := net.SplitHostPort(addr); err != nil || host == "" {
+			logger.Warn("忽略无效服务宣告（addr 应为 host:port）", "raw", svc, "addr", addr, "error", err)
 			continue
 		}
 		meta.Services = append(meta.Services, hub.Service{Name: name, Addr: addr})
@@ -187,41 +207,6 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 		logger.Warn("中继服务停止", "error", err)
 	}
 	return err
-}
-
-// buildRelayHandler 创建用于转发中继请求的 HTTP handler。
-// 将远程隧道请求转发到本地 HTTP 服务并返回响应。
-func buildRelayHandler(ctx context.Context, localAddr string, httpClient *http.Client, logger *slog.Logger) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		forwardURL := localAddr + r.URL.Path
-		if r.URL.RawQuery != "" {
-			forwardURL += "?" + r.URL.RawQuery
-		}
-
-		forwardReq, err := http.NewRequestWithContext(ctx, r.Method, forwardURL, r.Body) //nolint:gosec // G704: SSRF is intentional (relay proxy)
-		if err != nil {
-			logger.Warn("构建转发请求失败", "error", err)
-			http.Error(w, "bad gateway", http.StatusBadGateway)
-			return
-		}
-		forwardReq.Header = r.Header.Clone()
-
-		resp, err := httpClient.Do(forwardReq) //nolint:gosec // G704: SSRF is intentional (relay proxy)
-		if err != nil {
-			logger.Warn("转发到本地失败", "path", r.URL.Path, "error", err)
-			http.Error(w, "bad gateway", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		for k, vs := range resp.Header {
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-	})
 }
 
 // ---- 工厂函数 ----
