@@ -22,7 +22,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
-	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层（自动注册拨号用）
 	"github.com/spf13/cobra"
@@ -206,6 +205,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			token, _ := cmd.Flags().GetString("token")
 			relayToken, _ := cmd.Flags().GetString("relay-token")
 			nodeID, _ := cmd.Flags().GetString("node-id")
+			insecure, _ := cmd.Flags().GetBool("insecure")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			if stunServers != nil {
 				webrtc.SetSTUNServers(stunServers)
@@ -231,8 +231,16 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 				if nodeID == "" {
 					nodeID = defaultLocalNodeID()
 				}
-				r, regErr := meshAutoRegister(cmd.Context(), svc, hubURL,
-					meshRelayToken(relayToken, token, svc), meshSignalToken(token, svc), nodeID)
+				r, regErr := autoRegister(cmd.Context(), autoRegisterParams{
+					hubURL:      hubURL,
+					serverURL:   svc.ServerURL(),
+					relayToken:  meshRelayToken(relayToken, token, svc),
+					signalToken: meshSignalToken(token, svc),
+					nodeID:      nodeID,
+					prefix:      "mesh",
+					exactNode:   false,
+					insecure:    insecure,
+				})
 				if regErr != nil {
 					// 注册失败不静默：warn + 回落中继（relay 路径只认 auth_token，
 					// 与本机临时注册无关，独立可用）。
@@ -545,35 +553,55 @@ type meshTempRegistration struct {
 	tempNode string           // 临时节点 ID（调试/日志用）
 }
 
-// meshAutoRegister 连接前自动注册：声明 per-node-secret 能力，从 REG_OK:<secret>
-// 解析出 per-node secret，构建携带 secret 的 HubSignaler，供 webrtc 信令身份校验
-// （B3 服务端对未声明/不匹配 secret 的信令 fail-closed 返回 403）。
+// autoRegisterParams 是一次自动注册（mesh/p2p 信令前置）的参数。
+// 与 meshAutoRegister 的区别：支持 temp/exact 两种 node 生成模式与 insecure TLS，
+// 供 mesh connect（temp）、p2p connect（temp）、p2p listen（exact）三处复用（B17）。
+type autoRegisterParams struct {
+	hubURL      string // hub 地址（空时回落 serverURL）
+	serverURL   string // hubURL 为空的回退基址（mesh 用 svc.ServerURL()；p2p 传 ""）
+	relayToken  string // 注册用（hub relay_token）
+	signalToken string // 信令 Bearer（hub auth_token）
+	nodeID      string // 节点 ID 基础
+	prefix      string // 临时 node 前缀："mesh" | "p2p"
+	exactNode   bool   // true=注册成 nodeID 原样（p2p listen 需稳定 ID 供 --peer 寻址）；false=临时 nodeID
+	insecure    bool   // 缺口 2：注册 WS 拨号 + HubSignaler HTTP 跳过证书校验（自签 wss hub）
+}
+
+// autoRegister 是 mesh/p2p 共用的信令自动注册实现：声明 per-node-secret 能力，
+// 从 REG_OK:<secret> 解析出 per-node secret，构建携带 secret 的 HubSignaler，
+// 供 webrtc 信令身份校验（B3 服务端对未声明/不匹配 secret 的信令 fail-closed 返回 403）。
 //
 // 注册连接用 mux.New 保活（自动跑 readLoop/pingLoop 处理心跳，镜像 runRelayOnce）；
-// closer 关闭 mux → 底层 WS → hub RemoveIfOwned 移除临时节点。临时 node_id 用
-// mesh-<base>-<unixnano> 保证唯一，严禁直接用用户 node_id（route_table 同名注册
-// 会踢掉长驻 relay 注册）。
-func meshAutoRegister(ctx context.Context, svc *client.FileClient, hubURL, relayToken, signalToken, nodeID string) (*meshTempRegistration, error) {
-	httpBase, wsURL, err := normalizeHubEndpoints(hubURL, svc.ServerURL())
+// closer 关闭 mux → 底层 WS → hub RemoveIfOwned 移除节点。
+//
+// node 生成规则：
+//   - exactNode=false：临时 node_id = <prefix>-<base>-<unixnano>（唯一，防踢长驻
+//     relay 注册，对齐 mesh 语义）；base 取 nodeID，为空回落 defaultLocalNodeID()。
+//   - exactNode=true：直接注册成 nodeID 原样（p2p listen 的被寻址方需稳定 ID，
+//     否则 p2p connect --peer <id> 无法寻址）。
+//
+// insecure=true 时：注册 WS 用 hubWSDial 注入跳过证书校验的 HTTPClient，且
+// HubSignaler 注入 insecureHTTPClient()（自签 wss hub 场景）。
+func autoRegister(ctx context.Context, p autoRegisterParams) (*meshTempRegistration, error) {
+	httpBase, wsURL, err := normalizeHubEndpoints(p.hubURL, p.serverURL)
 	if err != nil {
 		return nil, err
 	}
-	tp := xfer.Get("ws")
-	if tp == nil {
-		return nil, fmt.Errorf("ws 传输层未注册")
-	}
-	base := nodeID
+	base := p.nodeID
 	if base == "" {
 		base = defaultLocalNodeID()
 	}
-	tempNode := fmt.Sprintf("mesh-%s-%d", base, time.Now().UnixNano())
+	nodeID := base
+	if !p.exactNode {
+		nodeID = fmt.Sprintf("%s-%s-%d", p.prefix, base, time.Now().UnixNano())
+	}
 
-	conn, err := tp.Dial(ctx, wsURL)
+	conn, err := hubWSDial(ctx, wsURL, p.insecure)
 	if err != nil {
 		return nil, fmt.Errorf("连接 Hub 注册端点失败: %w", err)
 	}
 	// 注册帧：声明 per-node-secret 能力，hub 回 REG_OK:<secret>（B1）。
-	if err := conn.Send(ctx, hub.NewRegisterFrame(tempNode, relayToken, hub.Meta{}, hub.CapabilityPerNodeSecret)); err != nil {
+	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.relayToken, hub.Meta{}, hub.CapabilityPerNodeSecret)); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("发送注册帧失败: %w", err)
 	}
@@ -595,11 +623,30 @@ func meshAutoRegister(ctx context.Context, svc *client.FileClient, hubURL, relay
 	}
 	// mux 保活：自动跑 readLoop/writeLoop/pingLoop 处理心跳，注册连接存活到命令退出。
 	m := mux.New(conn, mux.RoleListener)
-	signaler := hub.NewHubSignaler(httpBase, signalToken, tempNode, secret)
+	signaler := hub.NewHubSignaler(httpBase, p.signalToken, nodeID, secret)
 	signaler.SetContext(ctx)
+	if p.insecure {
+		signaler.SetHTTPClient(insecureHTTPClient())
+	}
 	return &meshTempRegistration{
 		signaler: signaler,
 		closer:   func() error { return m.Close() },
-		tempNode: tempNode,
+		tempNode: nodeID,
 	}, nil
+}
+
+// meshAutoRegister 连接前自动注册（B12 语义不变）：mesh connect 的薄包装，
+// 固定 prefix="mesh"、temp node 模式、insecure=false。insecure 场景由 mesh connect
+// 直接调 autoRegister 注入。签名保持不变，mesh_test 的既有用例零破坏。
+func meshAutoRegister(ctx context.Context, svc *client.FileClient, hubURL, relayToken, signalToken, nodeID string) (*meshTempRegistration, error) {
+	return autoRegister(ctx, autoRegisterParams{
+		hubURL:      hubURL,
+		serverURL:   svc.ServerURL(),
+		relayToken:  relayToken,
+		signalToken: signalToken,
+		nodeID:      nodeID,
+		prefix:      "mesh",
+		exactNode:   false,
+		insecure:    false,
+	})
 }

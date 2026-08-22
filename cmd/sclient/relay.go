@@ -21,7 +21,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
-	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层
 	"github.com/spf13/cobra"
 )
@@ -34,7 +33,7 @@ const (
 )
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, dialAllow bool, services, dialAllowCIDRs []string) error {
+func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string) error {
 	if nodeID == "" {
 		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
@@ -49,17 +48,20 @@ func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, dial
 			logger.Warn("hub 使用明文 ws:// 且携带注册 token，token 将明文传输；生产环境请使用 wss://", "hub", hubURL)
 		}
 	}
+	if insecure {
+		logger.Warn("--insecure 已启用，跳过 TLS 证书验证；仅限开发/测试", "hub", hubURL)
+	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
-	return runRelayWithRetry(ctx, nodeID, hubURL, local, token, dialAllow, services, dialAllowCIDRs, logger)
+	return runRelayWithRetry(ctx, nodeID, hubURL, local, token, insecure, dialAllow, services, dialAllowCIDRs, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, nodeID, hubURL, local, token, dialAllow, services, dialAllowCIDRs, logger)
+		err := runRelayOnce(ctx, nodeID, hubURL, local, token, insecure, dialAllow, services, dialAllowCIDRs, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -118,13 +120,10 @@ func parseRegisterAck(ackStr string) (secret string, err error) {
 	}
 }
 
-func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
-	tp := xfer.Get("ws")
-	if tp == nil {
-		return fmt.Errorf("ws 传输层未注册")
-	}
-
-	conn, err := tp.Dial(ctx, hubURL)
+func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
+	// B17：insecure 时经 hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；
+	// 非 insecure 路径保持 xfer.Get("ws").Dial 原样（零行为变化）。
+	conn, err := hubWSDial(ctx, hubURL, insecure)
 	if err != nil {
 		return fmt.Errorf("连接到 Hub 失败: %w", err)
 	}
@@ -243,10 +242,11 @@ func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
 			local, _ := cmd.Flags().GetString("local")
 			nodeID, _ := cmd.Flags().GetString("node-id")
 			token, _ := cmd.Flags().GetString("token")
+			insecure, _ := cmd.Flags().GetBool("insecure")
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
-			return runRelayStart(cmd, hubURL, local, nodeID, token, dialAllow, services, dialAllowCIDRs)
+			return runRelayStart(cmd, hubURL, local, nodeID, token, insecure, dialAllow, services, dialAllowCIDRs)
 		},
 	}
 	cmd.Flags().String("hub", "ws://127.0.0.1:18084/ws", "Hub 的 WebSocket 地址")
@@ -302,7 +302,11 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 			if authToken != "" {
 				req.Header.Set("Authorization", "Bearer "+authToken)
 			}
+			// B17：--insecure 时复用 insecureHTTPClient（跳过证书校验，自签 https hub 场景）。
 			httpClient := &http.Client{Timeout: 10 * time.Second}
+			if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {
+				httpClient = insecureHTTPClient()
+			}
 			resp, err := httpClient.Do(req)
 			if err != nil {
 				return fmt.Errorf("查询 Hub 状态失败: %w", err)

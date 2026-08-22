@@ -6,9 +6,11 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -147,6 +149,47 @@ func TestHubSignaler_PollRejectsUnregistered(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "400") {
 		t.Fatalf("expected 400 in error, got: %v", err)
+	}
+}
+
+// recordingRoundTrip 是记录调用次数的 RoundTripper（验证 SetHTTPClient 注入生效）。
+type recordingRoundTrip struct {
+	calls atomic.Int32
+}
+
+func (r *recordingRoundTrip) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.calls.Add(1)
+	return &http.Response{
+		StatusCode: http.StatusAccepted,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader("")),
+	}, nil
+}
+
+// TestHubSignaler_SetHTTPClient 验证 SetHTTPClient 注入自定义 http.Client（B17）：
+//   - post/poll 经注入的 client 发送（自签 wss hub 场景注入跳过证书校验的 client，
+//     供 sclient --insecure 使用）；
+//   - nil 忽略，保留默认 client（向后兼容，I7 SetContext 同款模式）。
+func TestHubSignaler_SetHTTPClient(t *testing.T) {
+	rt := &recordingRoundTrip{}
+	sig := NewHubSignaler("http://127.0.0.1:1", "", "node-A")
+	sig.SetHTTPClient(&http.Client{Transport: rt})
+	if err := sig.SendOffer("node-B", "sdp"); err != nil {
+		t.Fatalf("SendOffer with custom client: %v", err)
+	}
+	if got := rt.calls.Load(); got != 1 {
+		t.Fatalf("custom client calls = %d, want 1", got)
+	}
+
+	// nil 忽略：不应 panic，且默认 client 仍可用（对 httptest 200 hub 发 post 成功）。
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer ts.Close()
+	sigNil := NewHubSignaler(ts.URL, "", "node-A")
+	sigNil.SetHTTPClient(nil) // 应被忽略，保持默认 client
+	if err := sigNil.SendOffer("node-B", "sdp"); err != nil {
+		t.Fatalf("SendOffer after nil SetHTTPClient: %v", err)
 	}
 }
 

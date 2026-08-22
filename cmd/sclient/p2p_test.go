@@ -32,7 +32,7 @@ func TestNewCmdP2P_Subcommands(t *testing.T) {
 func TestNewCmdP2PConnect_Flags(t *testing.T) {
 	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	connect := cmd.Commands()[0]
-	for _, name := range []string{"peer", "tcp", "listen", "hub", "token", "node-id"} {
+	for _, name := range []string{"peer", "tcp", "listen", "hub", "token", "relay-token", "node-id"} {
 		if f := connect.Flags().Lookup(name); f == nil {
 			t.Errorf("p2p connect 缺少 flag: %s", name)
 		}
@@ -42,10 +42,32 @@ func TestNewCmdP2PConnect_Flags(t *testing.T) {
 func TestNewCmdP2PListen_Flags(t *testing.T) {
 	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	listen := cmd.Commands()[1]
-	for _, name := range []string{"service", "dial-allow-cidr", "hub", "token", "node-id"} {
+	for _, name := range []string{"service", "dial-allow-cidr", "hub", "token", "relay-token", "node-id"} {
 		if f := listen.Flags().Lookup(name); f == nil {
 			t.Errorf("p2p listen 缺少 flag: %s", name)
 		}
+	}
+}
+
+// TestP2PFlagsRelayToken 验证 p2p 自动注册 relay_token 选择（B17）：
+// --relay-token 优先，否则回落 --token（对齐 mesh 的 meshRelayToken fallback 链）。
+func TestP2PFlagsRelayToken(t *testing.T) {
+	f := &p2pFlags{}
+	// 显式 --relay-token 优先
+	f.relayTok = "relay-token"
+	f.tok = "signal-token"
+	if got := f.relayToken(); got != "relay-token" {
+		t.Fatalf("relayToken() with relay-token set = %q, want relay-token", got)
+	}
+	// 空 relay → 回落 --token
+	f.relayTok = ""
+	if got := f.relayToken(); got != "signal-token" {
+		t.Fatalf("relayToken() fallback = %q, want signal-token", got)
+	}
+	// 两者皆空 → 空串
+	f.tok = ""
+	if got := f.relayToken(); got != "" {
+		t.Fatalf("relayToken() both empty = %q, want empty", got)
 	}
 }
 

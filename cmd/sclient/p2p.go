@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
-	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
@@ -58,15 +57,17 @@ func NewCmdP2P(ios cli.IOStreams) *cobra.Command {
 
 // p2pFlags 是 p2p 相关命令的公共 flag。
 type p2pFlags struct {
-	hub  string
-	tok  string
-	node string
-	stun []string
+	hub      string
+	tok      string
+	relayTok string
+	node     string
+	stun     []string
 }
 
 func (f *p2pFlags) add(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.hub, "hub", "", "hub 地址（http(s) 或 ws(s) 均可，如 https://hub.example.com:18083）")
-	cmd.Flags().StringVar(&f.tok, "token", "", "信令/中继 token")
+	cmd.Flags().StringVar(&f.tok, "token", "", "信令 token（hub auth_token；未传 --relay-token 时兼作注册 relay_token）")
+	cmd.Flags().StringVar(&f.relayTok, "relay-token", "", "hub 的 relay_token（自动注册用；与 relay start --token 一致；默认复用 --token）")
 	cmd.Flags().StringVar(&f.node, "node-id", "", "本节点 ID（信令 from；默认主机名）")
 	cmd.Flags().StringSliceVar(&f.stun, "stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
@@ -79,21 +80,40 @@ func (f *p2pFlags) applyConfig() {
 	}
 }
 
-// signaler 构造 hub 信令器。
-// S64：空 hub 显式报错（原来直接 NewHubSignaler("")，post/poll 时才报
-// unsupported protocol scheme 等晦涩错误）；normalize 失败（畸形 URL/未知
-// scheme）透出，不再被 if ...; err == nil 静默吞掉。
-func (f *p2pFlags) signaler() (*hub.HubSignaler, error) {
+// relayToken 返回自动注册用的 relay_token：--relay-token 优先，否则回落 --token
+// （对齐 mesh 的 meshRelayToken fallback 链；hub 设不同 relay_token/auth_token 时
+// 需显式传 --relay-token 才能完成注册，I37 子决策 A 同源）。
+func (f *p2pFlags) relayToken() string {
+	if f.relayTok != "" {
+		return f.relayTok
+	}
+	return f.tok
+}
+
+// requireHub 前置校验 --hub 非空（S64 语义保留）：非 manual 模式信令依赖 hub，
+// 空 hub 直接报错，不再把晦涩的 unsupported protocol scheme 留到注册/信令阶段。
+func (f *p2pFlags) requireHub() error {
 	if f.hub == "" {
-		return nil, fmt.Errorf("--hub 不能为空（p2p 信令依赖 hub；无 hub 场景请用 --manual）")
+		return fmt.Errorf("--hub 不能为空（p2p 信令依赖 hub；无 hub 场景请用 --manual）")
 	}
-	// I40：--hub 传 ws(s):// 时归一到 http(s)://（HubSignaler post/poll 用 http.Client，
-	// 对 ws:// 直接报 unsupported protocol scheme）。
-	httpBase, _, err := normalizeHubEndpoints(f.hub, "")
-	if err != nil {
-		return nil, fmt.Errorf("解析 hub 地址失败: %w", err)
-	}
-	return hub.NewHubSignaler(httpBase, f.tok, f.localNode()), nil
+	return nil
+}
+
+// registerSignaler 经 hub 自动注册并返回携带 per-node secret 的信令器（B17）。
+// 调用方须先 requireHub() 校验 hub 非空。exactNode=true 时注册成 f.localNode()
+// 原样（p2p listen 的被寻址方需稳定 ID 供 --peer 寻址）；false 用临时 node_id
+// （p2p connect 的 Answer 回给 offerFrom，对端无需预知本端 ID）。
+func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, exactNode bool) (*meshTempRegistration, error) {
+	insecure, _ := cmd.Flags().GetBool("insecure")
+	return autoRegister(ctx, autoRegisterParams{
+		hubURL:      f.hub,
+		relayToken:  f.relayToken(),
+		signalToken: f.tok,
+		nodeID:      f.localNode(),
+		prefix:      "p2p",
+		exactNode:   exactNode,
+		insecure:    insecure,
+	})
 }
 
 func (f *p2pFlags) localNode() string {
@@ -144,11 +164,18 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 					sig = newManualStdioSignaler(ios)
 				}
 			} else {
-				s, serr := f.signaler()
-				if serr != nil {
-					return serr
+				// B17：经 hub 信令前自动注册自身（声明 per-node-secret 能力），从
+				// REG_OK:<secret> 拿 per-node secret 供 B3 服务端信令身份校验。
+				// 用临时 node_id（p2p-<base>-<nano>），对端无需预知本端 ID。
+				if err := f.requireHub(); err != nil {
+					return err
 				}
-				sig = s
+				reg, rerr := f.registerSignaler(ctx, cmd, false)
+				if rerr != nil {
+					return fmt.Errorf("webrtc 信令注册失败: %w", rerr)
+				}
+				defer func() { _ = reg.closer() }()
+				sig = reg.signaler
 			}
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
 			if manual {
@@ -216,6 +243,7 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；否则经 hub 信令桥
 			var sig webrtc.Signaler
+			var reg *meshTempRegistration // 自动注册（exact node），accept 循环内重注册时替换
 			if manual {
 				needFile := offerFile != "" || answerFile != ""
 				if needFile && (offerFile == "" || answerFile == "") {
@@ -232,11 +260,21 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 					sig = newManualStdioSignaler(ios)
 				}
 			} else {
-				s, serr := f.signaler()
-				if serr != nil {
-					return serr
+				// B17：经 hub 信令前自动注册自身（声明 per-node-secret 能力）。p2p listen
+				// 是被寻址方，必须用精确 node_id（f.localNode()）注册，否则 connect 的
+				// --peer <id> 无法寻址。注册连接保活整个 accept 循环，closer 在命令退出时
+				// 关闭；信令 400/403（节点被 hub 移除，secret 已轮换）时在重连退避循环内
+				// 重注册自愈。
+				if err := f.requireHub(); err != nil {
+					return err
 				}
-				sig = s
+				var rerr error
+				reg, rerr = f.registerSignaler(ctx, cmd, true)
+				if rerr != nil {
+					return rerr
+				}
+				defer func() { _ = reg.closer() }()
+				sig = reg.signaler
 			}
 
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
@@ -265,6 +303,15 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 						return fmt.Errorf("p2p 打洞失败: %w", err)
 					}
 					ios.WriteErrLine("p2p 监听失败，%v 后重试: %v", delay, err)
+					// B17：节点可能已被 hub 移除（注册 WS 断 / 心跳超时），per-node secret 已
+					// 轮换——信令 400/403 时在重连退避循环内重注册自愈；重注册失败不阻断
+					// 退避（保持既有网络抖动重试行为），下一轮循环继续尝试。
+					if reg2, rerr2 := f.registerSignaler(ctx, cmd, true); rerr2 == nil {
+						_ = reg.closer()
+						reg, sig = reg2, reg2.signaler
+					} else {
+						ios.WriteErrLine("p2p 重注册失败: %v", rerr2)
+					}
 					select {
 					case <-time.After(delay):
 						delay *= 2
