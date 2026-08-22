@@ -169,12 +169,14 @@ build/bin/sclient p2p connect \
 
 **p2p vs mesh 分工**：
 - `mesh connect`：需 hub（服务发现 + 自动选路），日常使用
-- `p2p connect --manual`：无需 hub（手工 SDP），hub 不可达时的兜底
+- `p2p connect --manual`：无需 hub（手工 SDP），hub 不可达时的兜底；
+  支持两种交换方式：**文件**（`--offer`/`--answer`）或 **stdin/stdout（默认）**。
+  后者把 SDP JSON 输出到 stdout、从 stdin 读一行，直接复制粘贴即可，不留文件。
 
-**流程**（两台机器，同机验证时用不同文件路径）：
+**文件交换流程**（两台机器，同机验证时用不同文件路径）：
 
 ```bash
-# 1. 本地端（dial 侧）：生成 offer，阻塞等待 answer
+# 1. 本地端（dial 侧）：生成 offer，阻塞等待 answer（信令等待默认 10 分钟）
 build/bin/sclient p2p connect --peer relay --tcp 127.0.0.1:22 -l :2222 \
   --manual --offer /tmp/o.sdp --answer /tmp/a.sdp --node-id local
 
@@ -186,9 +188,28 @@ build/bin/sclient p2p listen --manual \
 
 # 4. 把 /tmp/a.sdp 拷回本地端，本地端的 connect 自动读到并完成打洞
 # 打洞成功后本地端 -l :2222 即连到中继端出口的 127.0.0.1:22
+# 注：读到的 offer/answer 文件会被自动删除，不留垃圾。
 ```
 
-> 打洞失败会报错（p2p 纯打洞不自动回落）；需要中继时用 `mesh connect` 或 `relay dial`。
+**stdin/stdout 交互流程**（不带 `--offer`/`--answer`，直接把 JSON 复制粘贴）：
+
+```bash
+# 1. 本地端（dial 侧）：stdout 输出一行 offer，阻塞读 stdin 等 answer
+build/bin/sclient p2p connect --peer relay --tcp 127.0.0.1:22 -l :2222 \
+  --manual --node-id local
+
+# 2. 把 stdout 那行 offer 复制 → 粘贴到中继端 listen 的 stdin 并回车
+
+# 3. 中继端（listen 侧）：从 stdin 读 offer，stdout 输出一行 answer
+build/bin/sclient p2p listen --manual --node-id relay
+
+# 4. 把 stdout 那行 answer 复制 → 粘贴回本地端 listen 的 stdin 并回车即完成打洞
+```
+
+> **时间窗口**：信令等待（offer ↔ answer 交换）放宽到 **10 分钟**，
+> 足够人工拷文件/粘贴；但 **ICE 打洞**本身仍受 30s 窗口约束，
+> offer/answer 就位后需尽快完成复制以免打洞阶段超时。
+> 注意 `--manual` 的 listen 侧单次连接后即退出，不再等待后续拨号。
 
 ---
 

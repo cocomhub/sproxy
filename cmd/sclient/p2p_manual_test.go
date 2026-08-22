@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -29,7 +30,7 @@ func TestManualSignaler_FileExchange(t *testing.T) {
 	defer cancel()
 
 	// dial 侧：SendOffer 写 offer
-	if err := dialSig.SendOffer("company", "offer-sdp-data"); err != nil {
+	if err := dialSig.SendOffer("company", `{"type":"offer","sdp":"v=0\r\n...offer..."}`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(offerFile); err != nil {
@@ -41,13 +42,13 @@ func TestManualSignaler_FileExchange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if offer != "offer-sdp-data" {
+	if offer != `{"type":"offer","sdp":"v=0\r\n...offer..."}` {
 		t.Fatalf("offer 内容不匹配: %q", offer)
 	}
 	_ = from
 
 	// listen 侧：SendAnswer 写 answer
-	if err := listenSig.SendAnswer("mac", "answer-sdp-data"); err != nil {
+	if err := listenSig.SendAnswer("mac", `{"type":"answer","sdp":"v=0\r\n...answer..."}`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(answerFile); err != nil {
@@ -59,7 +60,7 @@ func TestManualSignaler_FileExchange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if answer != "answer-sdp-data" {
+	if answer != `{"type":"answer","sdp":"v=0\r\n...answer..."}` {
 		t.Fatalf("answer 内容不匹配: %q", answer)
 	}
 }
@@ -74,5 +75,82 @@ func TestManualSignaler_WaitOfferTimeout(t *testing.T) {
 	defer cancel()
 	if _, _, err := sig.WaitOffer(ctx); err == nil {
 		t.Fatal("expected timeout error when offer file never appears")
+	}
+}
+
+// TestManualSignaler_StdioExchange 验证 manualStdioSignaler 的 stdin/stdout 交换。
+// io.Pipe 写端在未读时阻塞，因此用 goroutine 交错四个方向，避免死锁。
+func TestManualSignaler_StdioExchange(t *testing.T) {
+	dialOutR, dialOutW := io.Pipe()     // dial stdout -> listen stdin
+	listenOutR, listenOutW := io.Pipe() // listen stdout -> dial stdin
+
+	dialIOS := cli.IOStreams{In: listenOutR, Out: dialOutW, ErrOut: io.Discard}
+	listenIOS := cli.IOStreams{In: dialOutR, Out: listenOutW, ErrOut: io.Discard}
+	dialSig := newManualStdioSignaler(dialIOS)
+	listenSig := newManualStdioSignaler(listenIOS)
+
+	offer := `{"type":"offer","sdp":"v=0\r\no=- ..."}`
+	answer := `{"type":"answer","sdp":"v=0\r\no=- ..."}`
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := dialSig.SendOffer("", offer); err != nil {
+			errCh <- fmt.Errorf("send offer: %w", err)
+			return
+		}
+		_, gotAnswer, err := dialSig.WaitAnswer(ctx)
+		if err != nil {
+			errCh <- fmt.Errorf("wait answer: %w", err)
+			return
+		}
+		if gotAnswer != answer {
+			errCh <- fmt.Errorf("answer mismatch: %q", gotAnswer)
+			return
+		}
+		errCh <- nil
+	}()
+
+	_, gotOffer, err := listenSig.WaitOffer(ctx)
+	if err != nil {
+		t.Fatalf("listen read offer: %v", err)
+	}
+	if gotOffer != offer {
+		t.Fatalf("offer mismatch: %q", gotOffer)
+	}
+	if err := listenSig.SendAnswer("", answer); err != nil {
+		t.Fatalf("listen write answer: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("dial side: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("timeout: %v", ctx.Err())
+	}
+}
+
+// TestManualSignaler_StdioWaitTimeout 验证 stdio 侧读不到合法 SDP 时阻塞到超时。
+func TestManualSignaler_StdioWaitTimeout(t *testing.T) {
+	r, w := io.Pipe()
+	defer r.Close()
+	defer w.Close()
+	ios := cli.IOStreams{In: r, Out: io.Discard, ErrOut: io.Discard}
+	sig := newManualStdioSignaler(ios)
+
+	// 先写一行非法 SDP，应被跳过并继续等待（不会误以为合法而返回）。
+	go func() {
+		_, _ = w.Write([]byte("not-json\n"))
+		time.Sleep(150 * time.Millisecond)
+	}()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if _, _, err := sig.WaitAnswer(ctx); err == nil {
+		t.Fatal("expected timeout error when no valid answer arrives")
 	}
 }

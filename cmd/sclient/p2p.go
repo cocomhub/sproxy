@@ -23,6 +23,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	// manualSignalingTimeout 是 --manual 场景（文件或 stdin/stdout 交换）信令等待的整体超时。
+	// 默认 10 分钟：人工拷文件/复制粘贴 JSON 需要较长窗口。
+	manualSignalingTimeout = 10 * time.Minute
+)
+
 // discardLogger 返回输出到 io.Discard 的 logger（p2p listen 后台会话用）。
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -89,15 +95,24 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 			}
 			ctx := cmd.Context()
 
-			// 选信令器：--manual 用文件交换（不依赖 hub）；否则经 hub 信令桥
+			// 选信令器：--manual 用文件或 stdin/stdout 交换（不依赖 hub）；否则经 hub 信令桥
 			var sig webrtc.Signaler
 			if manual {
-				if offerFile == "" || answerFile == "" {
-					return fmt.Errorf("--manual 模式需要 --offer 与 --answer 文件路径")
+				needFile := offerFile != "" || answerFile != ""
+				if needFile && (offerFile == "" || answerFile == "") {
+					return fmt.Errorf("--manual 文件模式需要同时提供 --offer 与 --answer")
 				}
-				sig = newManualSignaler(offerFile, answerFile, ios)
+				if needFile {
+					sig = newManualSignaler(offerFile, answerFile, ios)
+				} else {
+					sig = newManualStdioSignaler(ios)
+				}
 			} else {
 				sig = f.signaler()
+			}
+			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
+			if manual {
+				webrtc.SetSignalingTimeout(manualSignalingTimeout)
 			}
 			conn, err := webrtc.DialWithSignaler(peer, sig)
 			if err != nil {
@@ -119,9 +134,9 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 	cmd.Flags().String("peer", "", "对端节点 ID")
 	cmd.Flags().String("tcp", "", "对端要出站连接的 TCP 地址（如 target-host:22）")
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 :2222）；留空为单次 stdin/stdout 模式")
-	cmd.Flags().Bool("manual", false, "手工 SDP 信令（不依赖 hub，经 --offer/--answer 文件交换）")
-	cmd.Flags().String("offer", "", "--manual 模式的 offer SDP 文件路径")
-	cmd.Flags().String("answer", "", "--manual 模式的 answer SDP 文件路径")
+	cmd.Flags().Bool("manual", false, "手工 SDP 信令（不依赖 hub）：提供 --offer/--answer 走文件交换，否则走 stdin/stdout 粘贴 JSON")
+	cmd.Flags().String("offer", "", "--manual 文件模式的 offer SDP 文件路径（需同时给 --answer）")
+	cmd.Flags().String("answer", "", "--manual 文件模式的 answer SDP 文件路径（需同时给 --offer）")
 	_ = cmd.MarkFlagRequired("peer")
 	_ = cmd.MarkFlagRequired("tcp")
 	f.add(cmd)
@@ -142,15 +157,25 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 			offerFile, _ := cmd.Flags().GetString("offer")
 			answerFile, _ := cmd.Flags().GetString("answer")
 
-			// 选信令器：--manual 用文件交换（单次连接，不循环）；否则经 hub 信令桥
+			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；否则经 hub 信令桥
 			var sig webrtc.Signaler
 			if manual {
-				if offerFile == "" || answerFile == "" {
-					return fmt.Errorf("--manual 模式需要 --offer 与 --answer 文件路径")
+				needFile := offerFile != "" || answerFile != ""
+				if needFile && (offerFile == "" || answerFile == "") {
+					return fmt.Errorf("--manual 文件模式需要同时提供 --offer 与 --answer")
 				}
-				sig = newManualSignaler(offerFile, answerFile, ios)
+				if needFile {
+					sig = newManualSignaler(offerFile, answerFile, ios)
+				} else {
+					sig = newManualStdioSignaler(ios)
+				}
 			} else {
 				sig = f.signaler()
+			}
+
+			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
+			if manual {
+				webrtc.SetSignalingTimeout(manualSignalingTimeout)
 			}
 
 			// 循环 accept：每条 p2p 连接交给 relay.Serve 分发（dial 帧 / HTTP 中继）。
@@ -193,9 +218,9 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 			}
 		},
 	}
-	cmd.Flags().Bool("manual", false, "手工 SDP 信令（不依赖 hub，经 --offer/--answer 文件交换）")
-	cmd.Flags().String("offer", "", "--manual 模式的 offer SDP 文件路径")
-	cmd.Flags().String("answer", "", "--manual 模式的 answer SDP 文件路径")
+	cmd.Flags().Bool("manual", false, "手工 SDP 信令（不依赖 hub）：提供 --offer/--answer 走文件交换，否则走 stdin/stdout 粘贴 JSON")
+	cmd.Flags().String("offer", "", "--manual 文件模式的 offer SDP 文件路径（需同时给 --answer）")
+	cmd.Flags().String("answer", "", "--manual 文件模式的 answer SDP 文件路径（需同时给 --offer）")
 	f.add(cmd)
 	return cmd
 }
