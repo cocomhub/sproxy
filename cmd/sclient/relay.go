@@ -93,8 +93,8 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 		}
 		meta.Services = append(meta.Services, hub.Service{Name: name, Addr: addr})
 	}
-	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta)); err != nil {
-		return fmt.Errorf("发送注册帧失败: %w", err)
+	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta)); serr != nil {
+		return fmt.Errorf("发送注册帧失败: %w", serr)
 	}
 
 	// 等待 hub 注册 ACK（token 错误/格式错误尽早报错，而非等建流失败才发现）

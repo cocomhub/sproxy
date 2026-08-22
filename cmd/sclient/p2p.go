@@ -292,17 +292,19 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 
 // writeDialFrame 在 mux 流上写入 [4B len][{"dial":addr}] 帧（与 relay 协议一致）。
 func writeDialFrame(s mux.Stream, addr string) error {
-	head, err := json.Marshal(hub.DialRequest{Dial: addr})
+	header, err := json.Marshal(hub.DialRequest{Dial: addr})
 	if err != nil {
 		return err
 	}
 	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
-	if _, err := s.Write(lenBuf); err != nil {
-		return err
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(header)))
+	if _, werr := s.Write(lenBuf); werr != nil {
+		return werr
 	}
-	_, err = s.Write(head)
-	return err
+	if _, werr := s.Write(header); werr != nil {
+		return werr
+	}
+	return nil
 }
 
 // pump 双向泵送：本地 socket <-> mux 流。
