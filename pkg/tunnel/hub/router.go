@@ -210,9 +210,21 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 	// 在 mux 创建前 return，不 close 会导致 WS 连接泄漏）。
 	defer conn.Close()
 
+	// flushCtx 供 sendRegErr flush 使用（写失败/对端离线时快速放弃，不拖慢连接关闭）。
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer flushCancel()
+
 	// sendRegErr 回发错误 ACK（尽力而为，客户端据此判断注册失败）
 	sendRegErr := func(reason string) error {
-		_ = conn.Send(ctx, []byte(RegisterAckErr+reason))
+		// 关键帧必须经 flush 确保真正写出再关闭，否则 defer conn.Close() 的
+		// CloseNow() 会掐掉排队中的 REG_ERR，对端只收到 EOF 而误判网络波动重连。
+		if serr := conn.Send(ctx, []byte(RegisterAckErr+reason)); serr == nil {
+			if fl, ok := conn.(xfer.Flusher); ok {
+				if ferr := fl.Flush(flushCtx); ferr != nil {
+					s.logger.Debug("flush REG_ERR 失败", "error", ferr)
+				}
+			}
+		}
 		return fmt.Errorf("注册失败: %s", reason)
 	}
 
@@ -227,8 +239,8 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 	if s.auth != nil {
 		if err := s.auth.Authenticate(reg.Token); err != nil {
 			s.logger.Warn("中继节点鉴权失败", "node", reg.NodeID)
-			_ = conn.Send(ctx, []byte(RegisterAckErr+"invalid token"))
-			return err // 保留原始错误（ErrInvalidToken）供调用方/测试识别
+			_ = sendRegErr("invalid token") // 回发 REG_ERR 供客户端终止重连（忽略错误，保留原始鉴权错误）
+			return err                      // 保留原始错误（ErrInvalidToken）供调用方/测试识别
 		}
 	}
 

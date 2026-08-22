@@ -34,6 +34,7 @@ func init() {
 type wsConn struct {
 	conn    *websocket.Conn
 	sendCh  chan []byte
+	flushCh chan chan error
 	closeCh chan struct{}
 	wg      sync.WaitGroup
 	mu      sync.Mutex
@@ -44,6 +45,7 @@ func newWSConn(conn *websocket.Conn) *wsConn {
 	c := &wsConn{
 		conn:    conn,
 		sendCh:  make(chan []byte, 256),
+		flushCh: make(chan chan error, 8),
 		closeCh: make(chan struct{}),
 	}
 	c.wg.Add(1)
@@ -57,6 +59,29 @@ func (c *wsConn) sendLoop() {
 		select {
 		case msg := <-c.sendCh:
 			if err := c.conn.Write(context.Background(), websocket.MessageBinary, msg); err != nil {
+				// 写失败：把错误回给所有等待中的 flush，然后退出。
+				c.failPendingFlushes(err)
+				return
+			}
+		case fl := <-c.flushCh:
+			// Flush 请求：先清空已排队的消息再应答（通道 FIFO 保证先于 Flush
+			// 调用的 Send 都已入 sendCh），保证对端确实已收到这些帧。
+			drainAndAck := func() bool {
+				for {
+					select {
+					case msg := <-c.sendCh:
+						if err := c.conn.Write(context.Background(), websocket.MessageBinary, msg); err != nil {
+							fl <- err
+							c.failPendingFlushes(err)
+							return false
+						}
+					default:
+						fl <- nil
+						return true
+					}
+				}
+			}
+			if !drainAndAck() {
 				return
 			}
 		case <-c.closeCh:
@@ -65,9 +90,23 @@ func (c *wsConn) sendLoop() {
 	}
 }
 
+// failPendingFlushes 把错误回给所有排队中的 Flush 调用并退出 sendLoop。
+func (c *wsConn) failPendingFlushes(err error) {
+	for {
+		select {
+		case fl := <-c.flushCh:
+			fl <- err
+		default:
+			return
+		}
+	}
+}
+
 // Send 发送一条二进制消息。关闭后返回 ErrConnClosed。
 // 两级检查：第一步非阻塞检查 closeCh/ctx.Done() 过滤已关闭/已取消场景；
 // 第二步阻塞 select 仅在 sendCh 满时等待 closeCh 或 ctx.Done()。
+// 注意：Send 只保证入队，不保证已写出到 socket。需要确保对端收到后再继续
+// （或关闭）的关键帧（如注册 REG_ERR），必须随后调用 Flush。
 func (c *wsConn) Send(ctx context.Context, msg []byte) error {
 	// 第一步：非阻塞前置检查——如果已关闭或 context 已取消，立即返回。
 	// 此步骤消除 select 非确定性：ctx 已取消时一定返回错误而非入 channel。
@@ -86,6 +125,28 @@ func (c *wsConn) Send(ctx context.Context, msg []byte) error {
 	select {
 	case c.sendCh <- cp:
 		return nil
+	case <-c.closeCh:
+		return xfer.ErrConnClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Flush 等待 sendLoop 把队列中所有已 Send 的消息真正写出到 WebSocket，
+// 并返回写结果。用于确保对端收到后再继续（或关闭）的关键帧。
+// 若底层写失败，返回该错误；连接已关闭或 ctx 取消则返回对应错误。
+func (c *wsConn) Flush(ctx context.Context) error {
+	fl := make(chan error, 1)
+	select {
+	case c.flushCh <- fl:
+	case <-c.closeCh:
+		return xfer.ErrConnClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-fl:
+		return err
 	case <-c.closeCh:
 		return xfer.ErrConnClosed
 	case <-ctx.Done():
@@ -222,7 +283,7 @@ func (n *HandlerNode) AddToMux(mux *http.ServeMux, path string) {
 		select {
 		case n.connCh <- newWSConn(conn):
 		case <-n.closeCh:
-			conn.CloseNow()
+			_ = conn.CloseNow()
 		}
 	})
 }
@@ -270,7 +331,7 @@ func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
 		select {
 		case l.connCh <- newWSConn(conn):
 		case <-l.closeCh:
-			conn.CloseNow()
+			_ = conn.CloseNow()
 		}
 	})
 	l.srv = &http.Server{
@@ -279,7 +340,7 @@ func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	go func() {
-		l.srv.Serve(netLn)
+		_ = l.srv.Serve(netLn)
 	}()
 	return l, nil
 }

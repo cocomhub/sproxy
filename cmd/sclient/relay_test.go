@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -207,6 +208,32 @@ func TestRunRelayWithRetry_CtxCancel(t *testing.T) {
 	// then runRelayWithRetry returns the error (ctx.Err() != nil)
 	if err == nil {
 		t.Fatal("expected error after context cancellation")
+	}
+}
+
+// TestIsTerminalRelayError 验证鉴权错误识别只采信 hub 显式 REG_ERR 帧（"注册失败"）。
+// EOF / 连接断开 / 超时等网络波动不得被当作配置/鉴权错误——它们应继续重连。
+func TestIsTerminalRelayError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"hub 明确拒绝 invalid token（REG_ERR 帧）", fmt.Errorf("注册失败: invalid token"), true},
+		{"hub 明确拒绝 bad register frame", fmt.Errorf("注册失败: bad register frame"), true},
+		{"未知注册响应", fmt.Errorf("注册失败: 收到未知注册响应 %q", "???"), true},
+		// 网络波动：不得判为终态
+		{"等待 ACK 超时（EOF）", fmt.Errorf("等待注册 ACK 失败: %w", io.EOF), false},
+		{"连接断开 EOF", io.EOF, false},
+		{"连接到 Hub 失败", fmt.Errorf("连接到 Hub 失败: %w", io.ErrClosedPipe), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTerminalRelayError(tc.err); got != tc.want {
+				t.Fatalf("isTerminalRelayError() = %v, want %v (err=%v)", got, tc.want, tc.err)
+			}
+		})
 	}
 }
 

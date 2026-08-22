@@ -33,6 +33,15 @@ type Conn interface {
 	io.Closer
 }
 
+// Flusher 是可选接口：实现该接口的连接可确保之前 Send 的消息已真正写出。
+// 某些传输（如 WebSocket 的异步发送通道）在 Close 前若不 Flush，排队中的
+// 关键帧会被 Close 掐掉，导致对端只收到 EOF。发送方需要在关闭前保证对端
+// 收到某条消息时，可断言 conn.(xfer.Flusher) 后调用。
+type Flusher interface {
+	// Flush 等待队列中所有已 Send 的消息真正写出，并返回写结果。
+	Flush(ctx context.Context) error
+}
+
 // Listener 接受来自远端的连接（Hub/Server 端使用）。
 type Listener interface {
 	// Accept 阻塞等待一个新的 Conn 连接。

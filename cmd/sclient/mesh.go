@@ -196,7 +196,7 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub
 			defer c.Close()
 			res, cerr := dial(ctx, svc, signaler, target, localNode)
 			if cerr != nil {
-				ios.WriteErrLine("建立 mesh 流失败: %v", cerr)
+				ios.WriteErrLine("建立 mesh 流失败: %v（目标 node=%s addr=%s 不可达或离线）", cerr, target.Node, target.Addr)
 				return
 			}
 			conn := res.conn
@@ -212,11 +212,16 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub
 				}
 			}
 			ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.kind, target.Node, target.Addr)
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() { defer wg.Done(); _, _ = io.Copy(conn, c) }()
-			go func() { defer wg.Done(); _, _ = io.Copy(c, conn) }()
-			wg.Wait()
+			// 双向泵送。关键：任一方向完成（如 relay 端拒绝拨号后关流 → conn EOF）
+			// 即关闭另一方向，让对端（如 curl）立刻得到 EOF/复位，而非永久挂起。
+			// 否则上游 EOF 后 io.Copy(conn, c) 会因 curl 还开着而无限阻塞（实测卡死）。
+			done := make(chan struct{}, 2)
+			go func() { defer func() { done <- struct{}{} }(); _, _ = io.Copy(conn, c) }()
+			go func() { defer func() { done <- struct{}{} }(); _, _ = io.Copy(c, conn) }()
+			<-done
+			_ = c.Close()
+			_ = conn.Close()
+			<-done
 		}(local)
 	}
 }
