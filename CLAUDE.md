@@ -286,7 +286,7 @@ type Conn interface {
 | `upload_session_ttl` | duration | 24h | 未完成上传会话过期时间 |
 | `versioning.enabled` / `.max_versions` | | 关闭 | 文件版本管理 |
 | `hub.enabled` / `.node_id` / `.relay_token` | | 关闭 | 中继 Hub 配置 |
-| `hub.transports.ws.enabled` / `.listen` | | 关闭 | WebSocket 传输 |
+| `hub.transports.ws.enabled` / `.listen`（预留，未消费）/ `.path`（已废弃，固定 `/ws`，非默认值仅告警忽略） | | 关闭 | WebSocket 传输 |
 | `cors.allowed_origins` | []string | | CORS 配置 |
 | `cloud_max_concurrent` | int | 3 | 云端下载并发数 |
 | `cloud_sync_threshold` | size | 20MiB | 同步阈值（handler 提交时大小未知恒异步，字段保留供未来按大小同步） |
@@ -344,17 +344,30 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 sclient relay start --hub wss://hub:18083/ws --token T --node-id nodeA \
   --service ssh:127.0.0.1:22 --dial-allow
 
-# 节点 B（访问方）连接服务（webrtc 直连优先，失败回落中继）
+# 节点 B（访问方）连接服务：连接前自动注册自身（webrtc 信令用）；
+# webrtc 直连优先，但需对端同时运行 p2p listen 且信令通过校验，否则默认回落 hub 中继
 sclient mesh connect ssh -l :2222   # 然后 ssh -p 2222 user@127.0.0.1
 ```
 
 **云端主动推数据到本地**（方向对称）：
 ```bash
-# 在云端节点上执行，经 hub 中继到本地端的服务（本地端需先 relay start 注册）
-sclient relay dial --node local --tcp 127.0.0.1:2090
+# 本地端（被访问方）先跑：注册 + 宣告本地 2090 服务 + 允许出站拨号（B9 精确放行宣告地址）
+sclient relay start --hub wss://hub:18083/ws --node-id local \
+  --token T --insecure --dial-allow --service app:127.0.0.1:2090
+
+# 云端节点：经 hub 中继拨本地端 2090 服务（自签 TLS hub 需 --insecure）
+sclient relay dial --node local --tcp 127.0.0.1:2090 \
+  -s https://hub:18083 --auth-token T --insecure
 # 云端即可向该连接写入数据，数据经 hub 中继到达本地端服务
 ```
-说明：`relay dial` 双向可用——任意节点可作 caller 拨向另一节点，实现云端→本地主动推送（无需本地端先发起）。
+说明：`relay dial` 双向可用——任意节点可作 caller 拨向另一节点，实现云端→本地主动推送
+（无需本地端先发起数据流）。本地端 `--service app:127.0.0.1:2090` 兼作 mesh 服务宣告与
+出口拨号精确放行（`NewServiceDialPolicy`）；`--insecure` 仅用于自签证书开发/测试，生产用真实证书。
+
+> 注意：`relay start --hub` 默认指向 `ws://127.0.0.1:18084/ws`，与 sproxy 默认监听端口
+> `:18083` **不同**；请始终显式 `--hub` 指定实际 hub 地址（`ws://host:port/ws`）。
+> 另：`relay start --hub` 传 WS 端点（`ws(s)://host/ws`）；`p2p` / `mesh connect --hub`
+> 传 HTTP 基址（`http(s)://host`）即可，也接受 `ws(s)` 自动归一（S123）。
 
 ### sclient 当前目录（`cd`/`pwd`）
 
