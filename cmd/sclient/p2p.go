@@ -81,12 +81,25 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 			peer, _ := cmd.Flags().GetString("peer")
 			tcpAddr, _ := cmd.Flags().GetString("tcp")
 			listenAddr, _ := cmd.Flags().GetString("listen")
+			manual, _ := cmd.Flags().GetBool("manual")
+			offerFile, _ := cmd.Flags().GetString("offer")
+			answerFile, _ := cmd.Flags().GetString("answer")
 			if peer == "" || tcpAddr == "" {
 				return fmt.Errorf("--peer 与 --tcp 均不能为空")
 			}
 			ctx := cmd.Context()
 
-			conn, err := webrtc.DialWithSignaler(peer, f.signaler())
+			// 选信令器：--manual 用文件交换（不依赖 hub）；否则经 hub 信令桥
+			var sig webrtc.Signaler
+			if manual {
+				if offerFile == "" || answerFile == "" {
+					return fmt.Errorf("--manual 模式需要 --offer 与 --answer 文件路径")
+				}
+				sig = newManualSignaler(offerFile, answerFile, ios)
+			} else {
+				sig = f.signaler()
+			}
+			conn, err := webrtc.DialWithSignaler(peer, sig)
 			if err != nil {
 				return fmt.Errorf("p2p 打洞失败: %w", err)
 			}
@@ -106,6 +119,9 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 	cmd.Flags().String("peer", "", "对端节点 ID")
 	cmd.Flags().String("tcp", "", "对端要出站连接的 TCP 地址（如 sg-vps-2:22）")
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 :2222）；留空为单次 stdin/stdout 模式")
+	cmd.Flags().Bool("manual", false, "手工 SDP 信令（不依赖 hub，经 --offer/--answer 文件交换）")
+	cmd.Flags().String("offer", "", "--manual 模式的 offer SDP 文件路径")
+	cmd.Flags().String("answer", "", "--manual 模式的 answer SDP 文件路径")
 	_ = cmd.MarkFlagRequired("peer")
 	_ = cmd.MarkFlagRequired("tcp")
 	f.add(cmd)
@@ -117,20 +133,38 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 	var f p2pFlags
 	cmd := &cobra.Command{
 		Use:   "listen",
-		Short: "作为对端监听 WebRTC 直连（信令经 hub，出口模式）",
+		Short: "作为对端监听 WebRTC 直连（信令经 hub 或手工 SDP）",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 			httpClient := &http.Client{Timeout: 30 * time.Second}
+			manual, _ := cmd.Flags().GetBool("manual")
+			offerFile, _ := cmd.Flags().GetString("offer")
+			answerFile, _ := cmd.Flags().GetString("answer")
+
+			// 选信令器：--manual 用文件交换（单次连接，不循环）；否则经 hub 信令桥
+			var sig webrtc.Signaler
+			if manual {
+				if offerFile == "" || answerFile == "" {
+					return fmt.Errorf("--manual 模式需要 --offer 与 --answer 文件路径")
+				}
+				sig = newManualSignaler(offerFile, answerFile, ios)
+			} else {
+				sig = f.signaler()
+			}
 
 			// 循环 accept：每条 p2p 连接交给 relay.Serve 分发（dial 帧 / HTTP 中继）。
 			// 信令失败（如临时网络抖动）时带退避重试，作为常驻服务不应轻易退出。
 			delay := reconnectBaseDelay
 			for {
-				conn, err := webrtc.ListenWithSignaler(f.localNode(), f.signaler())
+				conn, err := webrtc.ListenWithSignaler(f.localNode(), sig)
 				if err != nil {
 					if ctx.Err() != nil {
 						return nil
+					}
+					// manual 模式单次连接，失败直接返回（文件已消费，重试无意义）
+					if manual {
+						return fmt.Errorf("p2p 打洞失败: %w", err)
 					}
 					ios.WriteErrLine("p2p 监听失败，%v 后重试: %v", delay, err)
 					select {
@@ -152,9 +186,16 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 						ios.WriteErrLine("p2p 会话结束: %v", err)
 					}
 				}()
+				// manual 模式单次连接，建立后退出（不再等待更多）
+				if manual {
+					return nil
+				}
 			}
 		},
 	}
+	cmd.Flags().Bool("manual", false, "手工 SDP 信令（不依赖 hub，经 --offer/--answer 文件交换）")
+	cmd.Flags().String("offer", "", "--manual 模式的 offer SDP 文件路径")
+	cmd.Flags().String("answer", "", "--manual 模式的 answer SDP 文件路径")
 	f.add(cmd)
 	return cmd
 }
