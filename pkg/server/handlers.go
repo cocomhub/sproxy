@@ -236,15 +236,25 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 		// WebRTC 信令桥：SDP Offer/Answer/Candidate 存转 + 长轮询
 		broker := h.signalBroker
-		srvMux.HandleFunc("POST /api/signal/offer", h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			broker.handleSignalPost(w, r, hub.SignalOffer)
-		}))
-		srvMux.HandleFunc("POST /api/signal/answer", h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			broker.handleSignalPost(w, r, hub.SignalAnswer)
-		}))
-		srvMux.HandleFunc("POST /api/signal/candidate", h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
-			broker.handleSignalPost(w, r, hub.SignalCandidate)
-		}))
+		// S44：信令 POST 单独挂限流（独立实例，与文件传输隔离配额），防共享
+		// relay_token 下被攻破节点洪泛注入信令；GET poll 长轮询不挂（客户端
+		// 高频轮询会误触发限流）。
+		var signalPostRL *RateLimiter
+		if cfg.RateLimit.Enabled {
+			signalPostRL = NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "signal_rate_limiter"))
+		}
+		signalPost := func(kind hub.SignalKind) http.HandlerFunc {
+			hf := func(w http.ResponseWriter, r *http.Request) {
+				broker.handleSignalPost(w, r, kind)
+			}
+			if signalPostRL == nil {
+				return hf
+			}
+			return signalPostRL.Middleware(http.HandlerFunc(hf)).ServeHTTP
+		}
+		srvMux.HandleFunc("POST /api/signal/offer", h.authMiddleware(signalPost(hub.SignalOffer)))
+		srvMux.HandleFunc("POST /api/signal/answer", h.authMiddleware(signalPost(hub.SignalAnswer)))
+		srvMux.HandleFunc("POST /api/signal/candidate", h.authMiddleware(signalPost(hub.SignalCandidate)))
 		srvMux.HandleFunc("GET /api/signal/poll/{peer}", h.authMiddleware(broker.handleSignalPoll))
 		localMux.HandleFunc("POST /api/signal/offer", func(w http.ResponseWriter, r *http.Request) {
 			broker.handleSignalPost(w, r, hub.SignalOffer)
@@ -286,8 +296,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	}
 
 	// GET / -> /ui/ 重定向。
-	// 用 "{$}" 只精确匹配根路径：Go 1.22+ ServeMux 中 "GET /" 会匹配所有子路径，
-	// 与 /ws、/upload 等具体路由冲突导致 panic。{$} 仅命中根。
+	// 用 "{$}" 只精确匹配根路径：Go 1.22+ ServeMux 中 "GET /" 是 catch-all，
+	// 会把任意未匹配路径（如 /foobar）也 301 到 /ui/；{$} 使未知路径返回 404。
+	// （实测 /ui 无尾斜杠在 {$} 下返回 307 到 /ui/，浏览器自动跟随。）
 	srvMux.HandleFunc("GET /{$}", h.webRedirect)
 
 	h.handler = h.metricsMiddleware(srvMux)

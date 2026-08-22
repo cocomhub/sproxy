@@ -5,7 +5,10 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -16,13 +19,22 @@ import (
 // rt 用于校验信令消息的 from/to 必须是已注册节点（共享 relay_token
 // 信任域内的身份绑定：阻止向不存在/未注册节点投递或轮询）。
 type SignalBroker struct {
-	queue *hub.SignalQueue
-	rt    *hub.RouteTable
+	queue  *hub.SignalQueue
+	rt     *hub.RouteTable
+	logger *slog.Logger
+	// pollTimeout 是 poll 长轮询的单次最长等待（I32）。
+	// 默认 hub.PollTimeout；测试可注入更小值避免空 poll 阻塞拖慢用例（I63）。
+	pollTimeout time.Duration
 }
 
 // NewSignalBroker 创建信令 broker（信令队列）。
 func NewSignalBroker(rt *hub.RouteTable) *SignalBroker {
-	return &SignalBroker{queue: hub.NewSignalQueue(), rt: rt}
+	return &SignalBroker{
+		queue:       hub.NewSignalQueue(),
+		rt:          rt,
+		logger:      slog.Default(),
+		pollTimeout: hub.PollTimeout,
+	}
 }
 
 // maxSignalBodyBytes 是单条信令消息体的最大字节数（SDP 通常 < 8 KiB）。
@@ -33,7 +45,19 @@ const maxSignalBodyBytes = 8 << 10
 // 防止共享 relay_token 下节点互相冒充/窃听对方收件箱。
 const signalNodeHeader = "X-Node-ID"
 
+// signalNodeSecretHeader 是客户端声明自身 per-node secret 的请求头（I1）。
+// 服务端用 B1 下发的 NodeInfo.Secret 恒定时间比对，防止共享 relay_token 下
+// 节点以他人 node-id 窃听收件箱 / 投毒 SDP（零成本静默冒充被关闭）。
+const signalNodeSecretHeader = "X-Node-Secret"
+
+// signalPollBackoff 是 kind 过滤下队列积压其他 kind 消息时的轮询退避，
+// 避免 Wait 立即返回（有积压即唤醒）导致的空转忙等（I5/I9）。
+const signalPollBackoff = 100 * time.Millisecond
+
 // callerNode 读取并校验调用方声明的节点身份。
+// I1：除「已注册」外，还要求 X-Node-Secret 与 B1 下发的 per-node secret
+// 恒定时间匹配；节点未声明 secret（Secret==""）显式短路 403（fail-closed），
+// 防止空 header 对空 secret 通过比对。
 func (b *SignalBroker) callerNode(r *http.Request) (hub.NodeID, error) {
 	if b.rt == nil {
 		return "", errSignalHubDisabled
@@ -42,8 +66,18 @@ func (b *SignalBroker) callerNode(r *http.Request) (hub.NodeID, error) {
 	if node == "" {
 		return "", errSignalMissingNode
 	}
-	if !b.rt.Has(hub.NodeID(node)) {
+	info, ok := b.rt.LookupInfo(hub.NodeID(node))
+	if !ok {
 		return "", errSignalNodeNotRegistered
+	}
+	if info.Secret == "" {
+		// 节点未声明 per-node-secret 能力：无 secret 可校验，fail-closed 拒绝。
+		// 必须显式短路，否则空 header 对空 secret 会通过恒定时间比对。
+		return "", errSignalSecretMismatch
+	}
+	secret := r.Header.Get(signalNodeSecretHeader)
+	if subtle.ConstantTimeCompare([]byte(secret), []byte(info.Secret)) != 1 {
+		return "", errSignalSecretMismatch
 	}
 	return hub.NodeID(node), nil
 }
@@ -57,10 +91,11 @@ func signalErrorCode(err error) int {
 }
 
 var (
-	errSignalHubDisabled       = &signalError{msg: "hub 未启用", code: http.StatusNotFound}
+	errSignalHubDisabled       = &signalError{msg: errMsgHubNotEnabled, code: http.StatusNotFound}
 	errSignalMissingNode       = &signalError{msg: "缺少 " + signalNodeHeader + " 请求头", code: http.StatusBadRequest}
 	errSignalNodeNotRegistered = &signalError{msg: "节点未注册", code: http.StatusBadRequest}
 	errSignalPeerMismatch      = &signalError{msg: "poll peer 与调用方节点身份不一致", code: http.StatusForbidden}
+	errSignalSecretMismatch    = &signalError{msg: "节点信令 secret 不匹配", code: http.StatusForbidden}
 )
 
 type signalError struct {
@@ -82,6 +117,12 @@ func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, 
 	}
 	var msg hub.SignalMsg
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			// S41：body 超过 maxSignalBodyBytes → 413（与普通解析错误区分）
+			http.Error(w, "信令消息体过大", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "解析信令消息失败", http.StatusBadRequest)
 		return
 	}
@@ -102,9 +143,14 @@ func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "to 节点未注册", http.StatusBadRequest)
 		return
 	}
-	// B2 桥接：Push 现返回 error（全局满/per-sender cap），暂按旧语义静默忽略
-	// （保持 202）；B3 将在此感知错误并回 429（I9）。
-	_ = b.queue.Push(msg)
+	// I12：Push 返回 error（全局满 ErrSignalQueueFull / per-sender 配额
+	// ErrSignalPerSenderCap），本次 POST 的消息被拒绝 → 429，供发送方感知并
+	// 回落（客户端 post 非 2xx 即报错）。收件箱驱逐旧消息仍返回 nil（策略）。
+	if err := b.queue.Push(msg); err != nil {
+		b.logger.Warn("信令队列拒绝投递", "from", msg.From, "to", msg.To, "kind", msg.Kind, "error", err)
+		http.Error(w, "信令队列已满，稍后重试", http.StatusTooManyRequests)
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -127,41 +173,65 @@ func (b *SignalBroker) handleSignalPoll(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 长轮询：最多等 pollTimeout，期间一旦有新消息立即返回
+	// I9/I5：kind 过滤（?kind=offer|answer|candidate）。非空时只取该 kind 的消息，
+	// 其余 kind 的消息保留在队列，交给对应 kind 的消费者（破坏性消费不再吞掉
+	// 其他 kind 的信令）。空串匹配任意 kind。
+	kind := hub.SignalKind(r.URL.Query().Get("kind"))
+
+	// I32：覆盖写 deadline 为 pollTimeout + 2s 余量，解耦 server_timeouts.write
+	// 对长轮询的掐断（per-handler 覆盖已实测有效，不依赖全局 WriteTimeout）。
+	// httptest.ResponseRecorder 不支持 SetWriteDeadline → ErrNotSupported，忽略。
+	if rc := http.NewResponseController(w); rc != nil {
+		_ = rc.SetWriteDeadline(time.Now().Add(b.pollTimeout + 2*time.Second))
+	}
+
+	// 长轮询：最多等 b.pollTimeout，期间一旦有新消息立即返回。
+	// 单条返回为长轮询快响应设计：客户端 Wait* 以 500ms 周期重 poll，最终收敛。
 	ctx := r.Context()
-	deadline := time.Now().Add(hub.PollTimeout)
+	deadline := time.Now().Add(b.pollTimeout)
 	for {
-		if m := b.queue.Pop(peer); m != nil {
-			writeSignalMessages(w, []hub.SignalMsg{*m})
+		// I5：先 Peek（非破坏），Encode 成功后才 Confirm 消费，避免 Encode 失败丢消息。
+		if m := b.queue.Peek(peer, kind); m != nil {
+			if !b.writeSignalMessages(w, []hub.SignalMsg{*m}) {
+				return
+			}
+			b.queue.Confirm(peer, m.ID)
 			return
 		}
 		if time.Now().After(deadline) {
-			writeSignalMessages(w, []hub.SignalMsg{})
+			b.writeSignalMessages(w, []hub.SignalMsg{})
 			return
 		}
 		// 等待新消息信号，带上剩余时间
 		remaining := time.Until(deadline)
-		waitCtx, cancel := contextWithTimeout(ctx, remaining)
+		waitCtx, cancel := context.WithTimeout(ctx, remaining)
 		err := b.queue.Wait(waitCtx, peer)
 		cancel()
 		if err != nil {
 			// ctx 取消（客户端断开）或超时：返回空数组
-			writeSignalMessages(w, []hub.SignalMsg{})
+			b.writeSignalMessages(w, []hub.SignalMsg{})
 			return
 		}
-		// Wait 返回后循环 Pop
+		// kind 过滤下 Wait 可能因队列积压其他 kind 的消息立即返回（有积压即唤醒），
+		// Peek 目标 kind 仍无匹配：短促退避后再试，避免空转忙等。
+		if b.queue.Peek(peer, kind) == nil && b.queue.Peek(peer, "") != nil {
+			select {
+			case <-ctx.Done():
+				b.writeSignalMessages(w, []hub.SignalMsg{})
+				return
+			case <-time.After(signalPollBackoff):
+			}
+		}
 	}
-}
-
-// contextWithTimeout 为长轮询 wait 构造带超时的 context。
-func contextWithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, d)
 }
 
 // writeSignalMessages 以 JSON 数组写回信令消息。
-func writeSignalMessages(w http.ResponseWriter, msgs []hub.SignalMsg) {
+// 返回是否写入成功（false = 客户端断开/写失败，调用方不应消费该消息，I5）。
+func (b *SignalBroker) writeSignalMessages(w http.ResponseWriter, msgs []hub.SignalMsg) bool {
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(msgs); err != nil {
-		return
+		b.logger.Warn("写回信令消息失败", "count", len(msgs), "error", err)
+		return false
 	}
+	return true
 }

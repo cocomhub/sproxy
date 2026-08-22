@@ -139,8 +139,9 @@ func TestConfig_Validate_HubEnabledRequiresRelayToken(t *testing.T) {
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error when hub.enabled=true but relay_token empty")
 	}
-	// 配了 token 后应通过
+	// 配了 token 后应通过（需同时启用 ws transport，S42）
 	cfg.Hub.RelayToken = "secret"
+	cfg.Hub.Transports.WS.Enabled = true
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("unexpected error with relay_token set: %v", err)
 	}
@@ -150,6 +151,29 @@ func TestConfig_Validate_HubEnabledRequiresRelayToken(t *testing.T) {
 	cfg2.Hub.RelayToken = ""
 	if err := cfg2.Validate(); err != nil {
 		t.Fatalf("hub disabled should not require relay_token: %v", err)
+	}
+}
+
+func TestConfig_Validate_HubEnabledRequiresTransport(t *testing.T) {
+	t.Parallel()
+	// hub.enabled=true 但 transports.ws.enabled=false → 校验失败（S42，
+	// WS 是当前唯一节点接入传输，hub 启用而无 transport 时节点无法连接）。
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.RelayToken = "secret"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when hub.enabled=true but transports.ws.enabled=false")
+	}
+	// 启用 ws 后应通过
+	cfg.Hub.Transports.WS.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error with ws enabled: %v", err)
+	}
+	// hub 未启用时不受 ws 开关影响
+	cfg2 := Default()
+	cfg2.Hub.Transports.WS.Enabled = false
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("hub disabled should not require ws transport: %v", err)
 	}
 }
 
