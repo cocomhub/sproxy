@@ -33,19 +33,23 @@ fi
 
 # 3. 检查测试监听地址（Windows 防火墙合规：必须绑定 127.0.0.1）
 echo "[3/4] check-loopback..."
-# 捕获测试文件中显式绑定非 127.0.0.1 的监听模式：
-#   - net.Listen("tcp", "<host>:port") 且 host 不是 127.0.0.1（含空 host 绑所有接口）
+# 捕获测试文件中显式绑定非 127.0.0.1 / [::1] 回环的监听模式：
+#   - net.Listen("tcp[0-9]*", "<host>:port") 且 host 非 127.0.0.1 / [::1]
+#     （覆盖 tcp/tcp4/tcp6 变体、空 host 绑所有接口、私网任意首字符）
 #   - ListenAndServe() / ListenAndServeTLS()（无地址 → 默认绑所有接口）
-# 排除 httptest.NewServer（默认绑定 127.0.0.1）与纯 Dial（非监听）。
+# 排除 httptest.NewServer（默认绑定 127.0.0.1）与纯 Dial（非监听）；
+# 回环 host（127.0.0.1 / [::1]）显式放行，不触发防火墙弹窗。
 found=$(grep -rn --include='*_test.go' \
-  -e 'net\.Listen("tcp", *"[^1][^"]*"' \
-  -e 'net\.Listen("tcp", *":"' \
+  -e 'net\.Listen("tcp[0-9]*", *"[^"]*"' \
   -e 'Listen.*0\.0\.0\.0' \
   -e 'Listen.*localhost' \
   -e 'httptest.*0\.0\.0\.0' \
   -e 'ListenAndServe()' \
   -e 'ListenAndServeTLS()' \
-  . 2>/dev/null | grep -v '/.claude/' || true)
+  . 2>/dev/null | grep -v '/.claude/' \
+  | grep -vE 'net\.Listen\("tcp[0-9]*", *"127\.0\.0\.1' \
+  | grep -vE 'net\.Listen\("tcp[0-9]*", *"\[::1\]' \
+  || true)
 if [ -n "$found" ]; then
   echo "FAIL: 测试文件中发现非 127.0.0.1 监听地址（会触发 Windows 防火墙授权弹窗）:"
   echo "$found"
