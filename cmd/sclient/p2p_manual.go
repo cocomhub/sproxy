@@ -116,19 +116,44 @@ func waitFile(ctx context.Context, path string, hint func(d time.Duration)) (tim
 	}
 }
 
-// validateSDPFile 校验 SDP 数据含指定 type（offer/answer）。
-// 返回 (解析出的 type, err)；非法时给明确错误，避免静默透传坏数据。
-func validateSDPFile(data []byte, wantType string) (string, error) {
+// parseSDPType 解析 SDP JSON 的 type 字段（不做内容完整性校验）。
+// 用于 writeSDPFile 判断存量文件是否为"陈旧 SDP 残留"（可覆盖）——
+// 与 validateSDPFile 共用，避免"仅解析 type"的逻辑重复（I47）。
+func parseSDPType(data []byte) (string, error) {
 	var sdp struct {
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(data, &sdp); err != nil {
 		return "", fmt.Errorf("SDP 数据不是合法 JSON（可能是复制不完整/截断）: %v", err)
 	}
-	if sdp.Type != wantType {
-		return sdp.Type, fmt.Errorf("SDP 类型是 %q，期望 %q（可能拷错了内容）", sdp.Type, wantType)
-	}
 	return sdp.Type, nil
+}
+
+// validateSDPFile 校验 SDP 数据含指定 type（offer/answer），且 SDP 载荷
+// 非空、以 "v=" 版本行开头（RFC 4566）。返回 (解析出的 type, err)；
+// 非法时给明确错误，避免静默透传坏数据。
+func validateSDPFile(data []byte, wantType string) (string, error) {
+	typ, err := parseSDPType(data)
+	if err != nil {
+		return "", err
+	}
+	if typ != wantType {
+		return typ, fmt.Errorf("SDP 类型是 %q，期望 %q（可能拷错了内容）", typ, wantType)
+	}
+	// S66：校验 SDP 载荷完整性——捕获复制不完整/字段缺失等常见错误。
+	var full struct {
+		SDP string `json:"sdp"`
+	}
+	if err := json.Unmarshal(data, &full); err != nil {
+		return typ, fmt.Errorf("SDP 载荷解析失败: %v", err)
+	}
+	if full.SDP == "" {
+		return typ, fmt.Errorf("SDP 载荷为空（缺少 sdp 字段，可能复制不完整）")
+	}
+	if !strings.HasPrefix(full.SDP, "v=") {
+		return typ, fmt.Errorf("SDP 载荷非法（应以 v= 版本行开头，可能复制不完整）")
+	}
+	return typ, nil
 }
 
 // readSDP 读取 SDP 文件并校验内容类型（校验通过后删除，避免遗留垃圾文件）。
@@ -151,15 +176,37 @@ func readSDP(path, wantType string, ios cli.IOStreams) (string, error) {
 //   - O_EXCL 不覆盖已存在文件（防竞态/误覆盖）
 //   - Unix 上额外 O_NOFOLLOW 拒绝符号链接（见 sdpWriteFlags 平台实现）
 //
-// 若目标已存在（上次运行残留的答案/应答），先删除再写：
-// --manual 是人工交互流程，重试时旧文件会阻塞新写入，必须清掉。
+// I47：目标已存在时**不无条件删除**——仅当是"陈旧 SDP 残留"（合法 SDP JSON，
+// 含 type 字段）才清除重写（人工重试场景需要）；否则拒绝覆盖，防用户路径拼错
+// 覆盖存量重要文件（数据丢失脚枪）。
 func writeSDPFile(path, data string) error {
-	// 先清掉陈旧残留：O_EXCL 下文件存在会导致写入失败，人工重试场景最常遇到。
-	_ = os.Remove(path)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|sdpWriteFlags(), 0o600)
+	if err == nil {
+		return writeSDPFileAndClose(f, path, data)
+	}
+	if !os.IsExist(err) {
+		return err
+	}
+	// 文件已存在：读内容判断是否为陈旧 SDP（可覆盖），否则拒绝。
+	existing, rerr := os.ReadFile(path)
+	if rerr != nil {
+		return fmt.Errorf("目标文件 %s 已存在且无法读取: %w", path, rerr)
+	}
+	if _, perr := parseSDPType(existing); perr != nil {
+		return fmt.Errorf("目标文件 %s 已存在且不是 SDP 文件，拒绝覆盖（如需覆盖请先手动删除）: %w", path, perr)
+	}
+	if rerr := os.Remove(path); rerr != nil {
+		return fmt.Errorf("清除陈旧 SDP 文件失败: %w", rerr)
+	}
+	f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|sdpWriteFlags(), 0o600)
 	if err != nil {
 		return err
 	}
+	return writeSDPFileAndClose(f, path, data)
+}
+
+// writeSDPFileAndClose 写入并关闭；写失败时删除残留半截文件。
+func writeSDPFileAndClose(f *os.File, path, data string) error {
 	_, werr := f.WriteString(data)
 	cerr := f.Close()
 	if werr != nil {
@@ -236,13 +283,19 @@ func (m *manualSignaler) WaitAnswer(ctx context.Context) (string, string, error)
 
 // --- 标准输入输出信令器 ------------------------------------------------------
 
+// stdinLineResult 是 readJSONFromStdin 的读取结果：合法 SDP 行 / EOF 标志 / 读取错误。
+type stdinLineResult struct {
+	line string
+	err  error
+}
+
 // readJSONFromStdin 从 stdin 逐行读取，直到一行是合法 SDP JSON（或 ctx 取消/超时）。
 // 空行、非 JSON、类型不符的行跳过并提示，避免一次手滑输入整段粘错就崩。
 func (m *manualStdioSignaler) readJSONFromStdin(ctx context.Context, wantType, side string) (string, error) {
 	m.ios.WriteErrLine("请把对端 stdout 输出的 %s SDP JSON 粘贴到本进程 stdin（%s 侧；默认 %s 窗口）：", wantType, side, manualSignalingTimeout)
 	scanner := bufio.NewScanner(m.ios.In)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	lineCh := make(chan string, 1)
+	resultCh := make(chan stdinLineResult, 1)
 	go func() {
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
@@ -253,18 +306,27 @@ func (m *manualStdioSignaler) readJSONFromStdin(ctx context.Context, wantType, s
 				m.ios.WriteErrLine("  ✗ 忽略非法 %s 行: %v", wantType, verr)
 				continue
 			}
-			lineCh <- line
+			resultCh <- stdinLineResult{line: line}
 			return
 		}
-		lineCh <- "" // EOF 标志
+		// S65：scanner.Err() 非 nil 表示读取错误（如单行超长 >4MiB），不是 EOF——
+		// 显式报错，避免误报"stdin 已 EOF"。正常 EOF 才发空行标志。
+		if serr := scanner.Err(); serr != nil {
+			resultCh <- stdinLineResult{err: fmt.Errorf("stdin 读取失败: %w", serr)}
+			return
+		}
+		resultCh <- stdinLineResult{} // EOF 标志（line=""）
 	}()
 	select {
-	case line := <-lineCh:
-		if line == "" {
+	case res := <-resultCh:
+		if res.err != nil {
+			return "", res.err
+		}
+		if res.line == "" {
 			return "", fmt.Errorf("stdin 已 EOF，未收到有效的 %s SDP", wantType)
 		}
 		m.ios.WriteErrLine("  ✓ 收到合法 %s SDP，解析完成", wantType)
-		return line, nil
+		return res.line, nil
 	case <-ctx.Done():
 		return "", fmt.Errorf("%s 侧等待 %s SDP 超时/取消（%s）: %w", side, wantType, manualSignalingTimeout, ctx.Err())
 	}

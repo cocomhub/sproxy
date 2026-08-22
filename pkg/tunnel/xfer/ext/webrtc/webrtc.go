@@ -118,6 +118,11 @@ var signalingTimeout = defaultICETimeout
 // SetSignalingTimeout 覆盖信令等待整体超时（--manual 人工拷文件可调大）。
 func SetSignalingTimeout(d time.Duration) { signalingTimeout = d }
 
+// ResetSignalingTimeout 恢复信令等待整体超时为默认值（30s）。
+// --manual 场景 SetSignalingTimeout 调大后，命令/测试结束应恢复默认，
+// 避免全局泄漏污染库内嵌场景与后续测试（S69）。
+func ResetSignalingTimeout() { signalingTimeout = defaultICETimeout }
+
 var useHostOnly bool
 
 // SetHostOnly 控制是否使用仅本机 host 候选（不加 STUN）。

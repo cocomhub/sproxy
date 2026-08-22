@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pion/webrtc/v4"
 )
@@ -21,6 +22,21 @@ func TestSetSTUNServers_NilRestoresDefault(t *testing.T) {
 	SetSTUNServers(nil)
 	if len(stunServers) != len(defaultSTUNServers) || stunServers[0] != defaultSTUNServers[0] {
 		t.Fatalf("nil 应恢复默认: got %v, want %v", stunServers, defaultSTUNServers)
+	}
+}
+
+// TestResetSignalingTimeout 验证 ResetSignalingTimeout 恢复默认信令超时（S69），
+// --manual 场景调大后命令/测试结束必须复位，防全局泄漏污染库内嵌与后续测试。
+func TestResetSignalingTimeout(t *testing.T) {
+	ResetSignalingTimeout()
+	defer ResetSignalingTimeout()
+	SetSignalingTimeout(10 * time.Minute)
+	if signalingTimeout != 10*time.Minute {
+		t.Fatalf("SetSignalingTimeout 未生效: %v", signalingTimeout)
+	}
+	ResetSignalingTimeout()
+	if signalingTimeout != defaultICETimeout {
+		t.Fatalf("ResetSignalingTimeout 应恢复默认 %v, got %v", defaultICETimeout, signalingTimeout)
 	}
 }
 

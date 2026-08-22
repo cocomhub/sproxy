@@ -27,12 +27,18 @@ func TestManualSignaler_Cleanup_DeletesOwnFile(t *testing.T) {
 		t.Fatalf("offer 文件应存在: %v", err)
 	}
 
-	// 场景 A：对端已消费（文件被读删）→ Cleanup 无副作用
+	// 场景 A：对端已消费（readSDP 读删）→ Cleanup 无副作用（不重新创建文件）。
+	// 真实模拟"对端已读走 offer 文件"，而非直接 Cleanup（原测试注释与行为不符，
+	// 断言也是空转）。I68：强断言——Cleanup 后文件必须仍不存在。
+	if _, err := readSDP(offerFile, "offer", ios); err != nil {
+		t.Fatalf("模拟对端读删 offer 失败: %v", err)
+	}
+	if _, err := os.Stat(offerFile); !os.IsNotExist(err) {
+		t.Fatalf("对端读删后 offer 文件应不存在: %v", err)
+	}
 	sig.Cleanup()
-	if _, err := os.Stat(offerFile); err != nil {
-		if !os.IsNotExist(err) {
-			t.Fatalf("统计文件失败: %v", err)
-		}
+	if _, err := os.Stat(offerFile); !os.IsNotExist(err) {
+		t.Fatalf("Cleanup 对已消费文件不应有副作用（不得重新创建）: %v", err)
 	}
 
 	// 场景 B：文件仍在（对端未消费/打洞中途退出）→ Cleanup 删除

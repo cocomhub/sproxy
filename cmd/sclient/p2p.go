@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -25,9 +26,17 @@ const (
 	// manualSignalingTimeout 是 --manual 场景（文件或 stdin/stdout 交换）信令等待的整体超时。
 	// 默认 10 分钟：人工拷文件/复制粘贴 JSON 需要较长窗口。
 	manualSignalingTimeout = 10 * time.Minute
+
+	// p2pPumpGracePeriod 是 pump 第二方向完成收尾的宽限期（对齐 leaf.go pump 的
+	// C1 修复）：首方向完成（已传播半关闭）后，第二方向需在此时间内完成；超时
+	// 视为对端非合作，强制关闭两端防 goroutine / FD 泄漏。长连接（双向持续
+	// 活跃）不触发宽限期——计时器只在某方向完成且另一方向仍空闲时启动。
+	p2pPumpGracePeriod = 60 * time.Second
 )
 
-// discardLogger 返回输出到 io.Discard 的 logger（p2p listen 后台会话用）。
+// discardLogger 返回输出到 io.Discard 的 logger（供测试桩使用，如 mesh_test 的
+// hub 测试服务器）。p2p listen 的 relay 会话日志已改用经 ios.ErrOut 输出的
+// serveLogger（I46），不再吞诊断。
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -70,15 +79,21 @@ func (f *p2pFlags) applyConfig() {
 	}
 }
 
-func (f *p2pFlags) signaler() *hub.HubSignaler {
+// signaler 构造 hub 信令器。
+// S64：空 hub 显式报错（原来直接 NewHubSignaler("")，post/poll 时才报
+// unsupported protocol scheme 等晦涩错误）；normalize 失败（畸形 URL/未知
+// scheme）透出，不再被 if ...; err == nil 静默吞掉。
+func (f *p2pFlags) signaler() (*hub.HubSignaler, error) {
+	if f.hub == "" {
+		return nil, fmt.Errorf("--hub 不能为空（p2p 信令依赖 hub；无 hub 场景请用 --manual）")
+	}
 	// I40：--hub 传 ws(s):// 时归一到 http(s)://（HubSignaler post/poll 用 http.Client，
 	// 对 ws:// 直接报 unsupported protocol scheme）。
-	if f.hub != "" {
-		if httpBase, _, err := normalizeHubEndpoints(f.hub, ""); err == nil {
-			return hub.NewHubSignaler(httpBase, f.tok, f.localNode())
-		}
+	httpBase, _, err := normalizeHubEndpoints(f.hub, "")
+	if err != nil {
+		return nil, fmt.Errorf("解析 hub 地址失败: %w", err)
 	}
-	return hub.NewHubSignaler(f.hub, f.tok, f.localNode())
+	return hub.NewHubSignaler(httpBase, f.tok, f.localNode()), nil
 }
 
 func (f *p2pFlags) localNode() string {
@@ -119,16 +134,27 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 					return fmt.Errorf("--manual 文件模式需要同时提供 --offer 与 --answer")
 				}
 				if needFile {
+					if offerFile == answerFile {
+						// S67：--offer 与 --answer 同路径会在 SendOffer 后 WaitAnswer 读到
+						// 同一文件（type 不匹配），或对端重写导致误读——前置拒绝。
+						return fmt.Errorf("--offer 与 --answer 不能指向同一路径（文件交换需两个独立文件）")
+					}
 					sig = newManualSignaler(offerFile, answerFile, ios)
 				} else {
 					sig = newManualStdioSignaler(ios)
 				}
 			} else {
-				sig = f.signaler()
+				s, serr := f.signaler()
+				if serr != nil {
+					return serr
+				}
+				sig = s
 			}
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
 			if manual {
 				webrtc.SetSignalingTimeout(manualSignalingTimeout)
+				// S69：命令结束恢复默认超时，防全局泄漏污染库内嵌场景与后续测试。
+				defer webrtc.ResetSignalingTimeout()
 			}
 			// 手动模式单次连接：无论打洞成功/失败/panic，退出前都兜底清理本侧写出的 SDP 文件
 			if ms, ok := sig.(*manualSignaler); ok {
@@ -176,7 +202,17 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 			manual, _ := cmd.Flags().GetBool("manual")
 			offerFile, _ := cmd.Flags().GetString("offer")
 			answerFile, _ := cmd.Flags().GetString("answer")
+			services, _ := cmd.Flags().GetStringArray("service")
+			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
 			f.applyConfig()
+
+			// I46：relay 会话诊断日志经 ios.ErrOut 输出（用户可见 + 可测试），带 node
+			// 上下文便于多会话区分；丢弃日志会让出口拨号拒绝/失败原因完全不可见。
+			serveLogger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("node", f.localNode())
+			// I45：出口拨号策略——--service 宣告地址精确放行 + --dial-allow-cidr 网段放行；
+			// 无任何配置时 opts 为空 → Serve 回落默认 DialAllowed（仅公网），向后兼容。
+			// DialResultFrames 保持 false（webrtc 直连数据流约束，见 relay/leaf.go 注释）。
+			serveOpts := buildP2PServeOpts(services, dialAllowCIDRs, ios)
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；否则经 hub 信令桥
 			var sig webrtc.Signaler
@@ -186,17 +222,28 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 					return fmt.Errorf("--manual 文件模式需要同时提供 --offer 与 --answer")
 				}
 				if needFile {
+					if offerFile == answerFile {
+						// S67：--offer 与 --answer 同路径会在 SendAnswer 后 WaitOffer 读到
+						// 同一文件（type 不匹配），或对端重写导致误读——前置拒绝。
+						return fmt.Errorf("--offer 与 --answer 不能指向同一路径（文件交换需两个独立文件）")
+					}
 					sig = newManualSignaler(offerFile, answerFile, ios)
 				} else {
 					sig = newManualStdioSignaler(ios)
 				}
 			} else {
-				sig = f.signaler()
+				s, serr := f.signaler()
+				if serr != nil {
+					return serr
+				}
+				sig = s
 			}
 
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
 			if manual {
 				webrtc.SetSignalingTimeout(manualSignalingTimeout)
+				// S69：命令结束恢复默认超时，防全局泄漏污染库内嵌场景与后续测试。
+				defer webrtc.ResetSignalingTimeout()
 			}
 
 			// 手动模式单次连接：无论打洞成功/失败/panic，退出前都兜底清理本侧写出的 SDP 文件
@@ -233,7 +280,7 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 				m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleListener)
 				go func() {
 					defer m.Close()
-					if err := relay.Serve(ctx, m, "http://127.0.0.1:8080", true, httpClient, discardLogger()); err != nil {
+					if err := relay.Serve(ctx, m, "http://127.0.0.1:8080", true, httpClient, serveLogger, serveOpts...); err != nil {
 						ios.WriteErrLine("p2p 会话结束: %v", err)
 					}
 				}()
@@ -253,8 +300,40 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 	cmd.Flags().Bool("manual", false, "手工 SDP 信令（不依赖 hub）：提供 --offer/--answer 走文件交换，否则走 stdin/stdout 粘贴 JSON")
 	cmd.Flags().String("offer", "", "--manual 文件模式的 offer SDP 文件路径（需同时给 --answer）")
 	cmd.Flags().String("answer", "", "--manual 文件模式的 answer SDP 文件路径（需同时给 --offer）")
+	cmd.Flags().StringArray("service", nil,
+		"出口拨号白名单：宣告的服务地址（格式 name:addr，可重复；仅取 addr 精确放行，不注册到 hub）")
+	cmd.Flags().StringArray("dial-allow-cidr", nil,
+		"出口拨号白名单网段（如 192.168.0.0/16；配合放行内网服务，默认仅公网）")
 	f.add(cmd)
 	return cmd
+}
+
+// buildP2PServeOpts 构造 p2p listen 的 relay.ServeOptions：--service 宣告地址
+// 精确放行 + --dial-allow-cidr 网段放行（复用 relay.NewServiceDialPolicy）。
+// 无任何放行配置（或全部无效）时返回 nil → Serve 回落默认 DialAllowed（仅公网）。
+//
+// 注意：--service 仅作拨号白名单，不宣告到 hub（p2p listen 不注册节点），
+// 语义与 relay start 的注册宣告解耦（I45 子决策）。
+func buildP2PServeOpts(services, dialAllowCIDRs []string, ios cli.IOStreams) []relay.ServeOptions {
+	var serviceAddrs []string
+	for _, svc := range services {
+		_, addr, ok := strings.Cut(svc, ":")
+		if !ok || addr == "" {
+			ios.WriteErrLine("忽略无效服务（应为 name:addr）: %s", svc)
+			continue
+		}
+		if host, _, err := net.SplitHostPort(addr); err != nil || host == "" {
+			ios.WriteErrLine("忽略无效服务 addr（应为 host:port）: %s", svc)
+			continue
+		}
+		serviceAddrs = append(serviceAddrs, addr)
+	}
+	if len(serviceAddrs) == 0 && len(dialAllowCIDRs) == 0 {
+		return nil
+	}
+	return []relay.ServeOptions{
+		{DialPolicy: relay.NewServiceDialPolicy(dialAllowCIDRs, serviceAddrs)},
+	}
 }
 
 // p2pForward 在已建立的 p2p mux 上做本地端口转发。
@@ -265,13 +344,35 @@ func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr strin
 	}
 	defer ln.Close()
 	ios.WriteOutLine("端口转发: %s ⇄ p2p(%s) ⇄ %s", listenAddr, peer, tcpAddr)
+
+	// I44：会话死亡（m.Done()）或 ctx 取消时关闭 listener，解除 ln.Accept() 永久
+	// 阻塞。cobra ctx 默认是 context.Background()（进程内永不取消），因此必须监听
+	// m.Done() 才能感知 p2p 会话死亡（对端断开/心跳超时/WebRTC 连接关闭）——
+	// 否则命令僵尸常驻、defer ln.Close() 不执行。stopAccept 保证函数提前返回
+	// （监听错误）时 goroutine 也退出，不留活体。
+	stopAccept := make(chan struct{})
+	defer close(stopAccept)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-m.Done():
+		case <-stopAccept:
+		}
+		_ = ln.Close()
+	}()
+
 	for {
 		c, aerr := ln.Accept()
 		if aerr != nil {
-			if ctx.Err() != nil {
+			// 三态区分：主动关闭（ctx 取消 / 会话死亡）返回 nil，外部监听错误透出。
+			select {
+			case <-ctx.Done():
 				return nil // 优雅取消
+			case <-m.Done():
+				return nil // 会话已死亡
+			default:
+				return aerr
 			}
-			return aerr
 		}
 		go func(local net.Conn) {
 			defer local.Close()
@@ -299,11 +400,19 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 		return err
 	}
 	ios.WriteOutLine("已连接: stdin/stdout ⇄ p2p ⇄ %s (Ctrl+D / EOF 断开)", tcpAddr)
-	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(stream, ios.In); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(ios.Out, stream); done <- struct{}{} }()
-	<-done
-	<-done
+	// H1-C2：方向区分通道——对端断开（outDone）→ 会话结束立即返回，不再挂起；
+	// 本地 stdin 读完（inDone，如 EOF/管道结束）→ 等待对端把剩余响应写完
+	// （保留 `echo x | p2p connect` 的响应语义）。原 `<-done; <-done` 在对端断开
+	// 但 stdin 未 EOF 时永久挂起（对齐 meshStdioOnce 的 I38 修复范本）。
+	inDone := make(chan struct{})
+	outDone := make(chan struct{})
+	go func() { defer close(inDone); _, _ = io.Copy(stream, ios.In) }()
+	go func() { defer close(outDone); _, _ = io.Copy(ios.Out, stream) }()
+	select {
+	case <-outDone: // 对端断开：会话结束
+	case <-inDone: // 本地 stdin 读完：等对端把剩余数据写完
+		<-outDone
+	}
 	return nil
 }
 
@@ -313,6 +422,14 @@ func writeDialFrame(s mux.Stream, addr string) error {
 }
 
 // pump 双向泵送：本地 socket <-> mux 流。
+//
+// 关闭语义（S63，对齐 leaf.go pump 的 C1 修复）：
+//   - 每个方向 io.Copy 完成后向对端 CloseWrite 传播半关闭（TCP FIN / 流 EOF），
+//     而不是立即全关——让在途的响应仍可被另一方向读回（不截断）。
+//   - 首方向完成后武装 grace 宽限期计时器：宽限期内另一方向完成则正常收尾；
+//     超时视为对端非合作（对 FIN 不回应），强制关闭两端解除 Read 阻塞，
+//     防 goroutine / FD 泄漏。长连接（双向持续活跃）不触发计时器，不误断。
+//   - 正常路径不在此显式全关两端，由调用方 defer local.Close() / stream.Close() 收尾。
 func pump(local net.Conn, s mux.Stream) {
 	done := make(chan struct{}, 2)
 	go func() {
@@ -322,10 +439,40 @@ func pump(local net.Conn, s mux.Stream) {
 	}()
 	go func() {
 		_, _ = io.Copy(local, s)
+		if tc, ok := local.(*net.TCPConn); ok {
+			_ = tc.CloseWrite()
+		} else {
+			_ = local.Close()
+		}
 		done <- struct{}{}
 	}()
-	// 一个方向完成即解除另一方向阻塞，防非合作对端永久挂起
-	<-done
-	_ = local.Close()
-	<-done
+
+	remaining := 2
+	var timeoutCh <-chan time.Time
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for remaining > 0 {
+		select {
+		case <-done:
+			remaining--
+			if remaining == 1 {
+				// 一个方向完成：启动宽限期等待另一半完成半关闭收尾。
+				timer = time.NewTimer(p2pPumpGracePeriod)
+				timeoutCh = timer.C
+			}
+		case <-timeoutCh:
+			// 非合作对端：强制关闭两端，解除 local.Read / s.Read 阻塞。
+			_ = local.Close()
+			_ = s.Close()
+			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
+				<-done
+				remaining--
+			}
+			return
+		}
+	}
 }
