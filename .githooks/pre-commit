@@ -47,8 +47,8 @@ found=$(grep -rn --include='*_test.go' \
   -e 'ListenAndServe()' \
   -e 'ListenAndServeTLS()' \
   . 2>/dev/null | grep -v '/.claude/' \
-  | grep -vE 'net\.Listen\("tcp[0-9]*", *"127\.0\.0\.1' \
-  | grep -vE 'net\.Listen\("tcp[0-9]*", *"\[::1\]' \
+  | grep -vE 'net\.Listen\("tcp[0-9]*", *"127\.0\.0\.1(:[0-9]*)?"' \
+  | grep -vE 'net\.Listen\("tcp[0-9]*", *"\[::1\](:[0-9]*)?"' \
   || true)
 if [ -n "$found" ]; then
   echo "FAIL: 测试文件中发现非 127.0.0.1 监听地址（会触发 Windows 防火墙授权弹窗）:"
