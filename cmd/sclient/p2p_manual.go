@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -29,11 +30,46 @@ type manualSignaler struct {
 	offerFile  string
 	answerFile string
 	ios        cli.IOStreams
+
+	// writtenFile/writtenContent 记录本侧写出（Send*）的 SDP 文件路径与内容。
+	// Cleanup 只删除「内容仍是我们自己写的那份」的文件，防止误删对端后续重写的
+	// 同名文件（重试时对端可能把新 offer 写回同一路径）。
+	mu             sync.Mutex
+	writtenFile    string
+	writtenContent string
 }
 
 // newManualSignaler 创建手工 SDP 信令器（基于文件交换）。
 func newManualSignaler(offerFile, answerFile string, ios cli.IOStreams) *manualSignaler {
 	return &manualSignaler{offerFile: offerFile, answerFile: answerFile, ios: ios}
+}
+
+// Cleanup 兜底清理本侧写出的 SDP 文件。
+//
+// 正常路径中 Wait* 侧会在读取后立刻删除（readSDP）；此处仅兜底清理
+// 「本侧发送方写出的文件」——打洞失败、进程异常退出前的 defer、对端永不
+// 消费等场景下不残留垃圾。删除前校验内容仍是自己写的那份，已删/被改写均跳过。
+func (m *manualSignaler) Cleanup() {
+	m.mu.Lock()
+	path, content := m.writtenFile, m.writtenContent
+	m.mu.Unlock()
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			m.ios.WriteErrLine("清理 SDP 文件失败: %v", err)
+		}
+		return // 文件已不存在：要么已被读删，要么从未写出，无需再动
+	}
+	if string(data) != content {
+		m.ios.WriteErrLine("SDP 文件 %s 内容已被改写，跳过清理（可能对端已重写）", path)
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		m.ios.WriteErrLine("清理 SDP 文件失败: %v", err)
+	}
 }
 
 // manualStdioSignaler 实现 webrtc.Signaler 接口，SDP 经标准输入输出交换（不落文件）。
@@ -138,6 +174,9 @@ func (m *manualSignaler) SendOffer(_ string, sdp string) error {
 	if err := writeSDPFile(m.offerFile, sdp); err != nil {
 		return fmt.Errorf("写 offer 文件失败: %w", err)
 	}
+	m.mu.Lock()
+	m.writtenFile, m.writtenContent = m.offerFile, sdp
+	m.mu.Unlock()
 	m.ios.WriteOutLine("已生成 offer SDP: %s", m.offerFile)
 	m.ios.WriteOutLine("请把该文件传给对端（listen 侧），对端会回一个 answer 文件。")
 	return nil
