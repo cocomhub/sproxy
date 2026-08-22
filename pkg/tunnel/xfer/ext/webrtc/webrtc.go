@@ -28,6 +28,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,8 +45,38 @@ func init() {
 	})
 }
 
-const stunServer = "stun:stun.l.google.com:19302"
 const defaultICETimeout = 30 * time.Second
+
+// defaultSTUNServers 是默认 STUN 服务器列表（混合大陆/海外可达性）。
+// 单一 Google STUN 在大陆网络常被 UDP 屏蔽/超时，取不到 srflx 候选导致跨 NAT
+// 打洞必失败；这里保留 Google（海外最稳）并补上腾讯/小米（大陆通常可达）。
+// pion 并发查询全部，任一成功即拿到 srflx；全不通时用 --stun 手工指定。
+var defaultSTUNServers = []string{
+	"stun:stun.l.google.com:19302",
+	"stun:stun.qq.com:3478",
+	"stun:stun.miwifi.com:3478",
+}
+
+// stunServers 是当前生效的 STUN 服务器列表（pion 并发查询全部，任一成功即可）。
+var stunServers = defaultSTUNServers
+
+// SetSTUNServers 覆盖 STUN 服务器列表（调用方传入 --stun 的多个值）。
+// 空列表 = 不添加任何 STUN（等价 host-only 候选收集）；传 nil 恢复默认。
+// 在创建任何连接前调用（命令入口处）。
+func SetSTUNServers(servers []string) {
+	if servers == nil {
+		stunServers = defaultSTUNServers
+		return
+	}
+	// 过滤空串，避免空白 flag 值产生无效 ICE server
+	filtered := servers[:0]
+	for _, s := range servers {
+		if strings.TrimSpace(s) != "" {
+			filtered = append(filtered, s)
+		}
+	}
+	stunServers = filtered
+}
 
 // signalingTimeout 是 DialWithSignaler/ListenWithSignaler 内 Wait* 的整体超时。
 // 默认 30s：hub 信令（mesh/p2p）下对端离线或不对时快速失败回落中继；
@@ -141,6 +172,42 @@ func logPCStateEvent(pc *webrtc.PeerConnection, prev *webrtc.PeerConnectionState
 	})
 }
 
+// srflxDiag 跟踪最近一次连接的候选收集情况，用于打洞失败时的诊断提示。
+type srflxDiag struct {
+	mu       sync.Mutex
+	gotSrflx bool
+	total    int
+}
+
+var lastCandidateDiag srflxDiag
+
+// recordCandidate 记录候选类型（host/srflx/relay），供诊断查询。
+func (d *srflxDiag) record(c *webrtc.ICECandidate) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.total++
+	switch c.Typ {
+	case webrtc.ICECandidateTypeSrflx, webrtc.ICECandidateTypeRelay:
+		d.gotSrflx = true
+	}
+}
+
+// diagnose 返回打洞失败时的候选诊断信息（是否取到公网候选）。
+func (d *srflxDiag) diagnose(stunEnabled bool) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	switch {
+	case !stunEnabled:
+		return "（未配置 STUN，仅 host 候选；跨 NAT 打洞需要 srflx，请用 --stun 指定可达的 STUN 服务器）"
+	case d.total == 0:
+		return "（未收集到任何 ICE 候选）"
+	case !d.gotSrflx:
+		return "（仅 host 候选，未获取到公网 srflx：请检查 STUN 服务器可达性，或用 --stun 指定本地可达的服务器）"
+	default:
+		return "（已获取公网候选，失败更可能是对端不可达或防火墙/对称 NAT）"
+	}
+}
+
 // logCandidateEvents 常驻记录候选收集（Debug 级；帮判断 host/srflx 是否齐全）。
 func logCandidateEvents(pc *webrtc.PeerConnection, counter *int) {
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -149,6 +216,7 @@ func logCandidateEvents(pc *webrtc.PeerConnection, counter *int) {
 			return
 		}
 		*counter++
+		lastCandidateDiag.record(c)
 		slog.Debug("webrtc: 收集到 ICE 候选", "index", *counter,
 			"type", c.Typ.String(), "addr", c.Address, "port", c.Port)
 	})
@@ -232,11 +300,11 @@ func (c *Conn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *Conn) SetWriteDeadline(_ time.Time) error { return nil }
 
 func defaultConfig() webrtc.Configuration {
-	if useHostOnly {
+	if useHostOnly || len(stunServers) == 0 {
 		return webrtc.Configuration{}
 	}
 	return webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{{URLs: []string{stunServer}}},
+		ICEServers: []webrtc.ICEServer{{URLs: stunServers}},
 	}
 }
 
@@ -343,7 +411,7 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	case <-openCh:
 	case <-time.After(defaultICETimeout):
 		pc.Close()
-		return nil, fmt.Errorf("dial: dc open timed out")
+		return nil, fmt.Errorf("dial: dc open timed out %s", lastCandidateDiag.diagnose(!useHostOnly && len(stunServers) > 0))
 	}
 
 	raw, err := dc.Detach()
@@ -420,7 +488,7 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	case dc = <-dcCh:
 	case <-time.After(defaultICETimeout):
 		pc.Close()
-		return nil, fmt.Errorf("listen: dc not received within %v", defaultICETimeout)
+		return nil, fmt.Errorf("listen: dc not received within %v %s", defaultICETimeout, lastCandidateDiag.diagnose(!useHostOnly && len(stunServers) > 0))
 	}
 
 	// Wait for the DataChannel to open and then detach it.
@@ -430,7 +498,7 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	case <-openCh:
 	case <-time.After(defaultICETimeout):
 		pc.Close()
-		return nil, fmt.Errorf("listen: dc open timed out")
+		return nil, fmt.Errorf("listen: dc open timed out %s", lastCandidateDiag.diagnose(!useHostOnly && len(stunServers) > 0))
 	}
 
 	raw, err := dc.Detach()

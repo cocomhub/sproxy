@@ -78,6 +78,10 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			hubURL, _ := cmd.Flags().GetString("hub")
 			token, _ := cmd.Flags().GetString("token")
 			nodeID, _ := cmd.Flags().GetString("node-id")
+			stunServers, _ := cmd.Flags().GetStringSlice("stun")
+			if stunServers != nil {
+				webrtc.SetSTUNServers(stunServers)
+			}
 
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
@@ -129,6 +133,8 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 	cmd.Flags().String("hub", "", "hub 地址（webrtc 打洞信令用；默认取 server_url）")
 	cmd.Flags().String("token", "", "信令 token")
 	cmd.Flags().String("node-id", "", "本节点 ID（信令来源；默认主机名）")
+	cmd.Flags().StringSlice("stun", nil,
+		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
 	return cmd
 }
 

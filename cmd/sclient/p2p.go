@@ -54,12 +54,22 @@ type p2pFlags struct {
 	hub  string
 	tok  string
 	node string
+	stun []string
 }
 
 func (f *p2pFlags) add(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.hub, "hub", "", "hub 地址（如 https://hub.example.com:18083）")
 	cmd.Flags().StringVar(&f.tok, "token", "", "信令/中继 token")
 	cmd.Flags().StringVar(&f.node, "node-id", "", "本节点 ID（信令 from；默认主机名）")
+	cmd.Flags().StringSliceVar(&f.stun, "stun", nil,
+		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
+}
+
+// applyConfig 应用运行时全局配置（STUN 列表）。在连接创建前调用。
+func (f *p2pFlags) applyConfig() {
+	if f.stun != nil {
+		webrtc.SetSTUNServers(f.stun)
+	}
 }
 
 func (f *p2pFlags) signaler() *hub.HubSignaler {
@@ -94,6 +104,7 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 				return fmt.Errorf("--peer 与 --tcp 均不能为空")
 			}
 			ctx := cmd.Context()
+			f.applyConfig()
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（不依赖 hub）；否则经 hub 信令桥
 			var sig webrtc.Signaler
@@ -160,6 +171,7 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 			manual, _ := cmd.Flags().GetBool("manual")
 			offerFile, _ := cmd.Flags().GetString("offer")
 			answerFile, _ := cmd.Flags().GetString("answer")
+			f.applyConfig()
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；否则经 hub 信令桥
 			var sig webrtc.Signaler
