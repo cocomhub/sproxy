@@ -48,6 +48,8 @@ func newWSConn(conn *websocket.Conn) *wsConn {
 		flushCh: make(chan chan error, 8),
 		closeCh: make(chan struct{}),
 	}
+	// 单条消息上限只在构造时设置一次（coder 内部对上限 +1，见 maxMessageBytes 注释）。
+	c.conn.SetReadLimit(maxMessageBytes)
 	c.wg.Add(1)
 	go c.sendLoop()
 	return c
@@ -55,12 +57,19 @@ func newWSConn(conn *websocket.Conn) *wsConn {
 
 func (c *wsConn) sendLoop() {
 	defer c.wg.Done()
+	// writeMsg 用带超时的 ctx 写出消息：对端停读时 TCP 写缓冲满，coder/websocket
+	// 会在超时后关闭整条连接，避免 Write 永久阻塞（见 writeTimeout 注释）。
+	writeMsg := func(msg []byte) error {
+		wctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+		defer cancel()
+		return c.conn.Write(wctx, websocket.MessageBinary, msg)
+	}
 	for {
 		select {
 		case msg := <-c.sendCh:
-			if err := c.conn.Write(context.Background(), websocket.MessageBinary, msg); err != nil {
-				// 写失败：把错误回给所有等待中的 flush，然后退出。
-				c.failPendingFlushes(err)
+			if err := writeMsg(msg); err != nil {
+				// 写失败：回给所有等待中的 flush，广播关闭态，然后退出。
+				c.failLoop(err)
 				return
 			}
 		case fl := <-c.flushCh:
@@ -70,9 +79,9 @@ func (c *wsConn) sendLoop() {
 				for {
 					select {
 					case msg := <-c.sendCh:
-						if err := c.conn.Write(context.Background(), websocket.MessageBinary, msg); err != nil {
+						if err := writeMsg(msg); err != nil {
 							fl <- err
-							c.failPendingFlushes(err)
+							c.failLoop(err)
 							return false
 						}
 					default:
@@ -90,7 +99,18 @@ func (c *wsConn) sendLoop() {
 	}
 }
 
-// failPendingFlushes 把错误回给所有排队中的 Flush 调用并退出 sendLoop。
+// failLoop 是 sendLoop 写失败后的统一退出路径：把错误回给所有排队中的 Flush，
+// 然后原子标记连接已关闭并广播 closeCh（仅首个完成者 close，幂等）。
+// 这样后续 Send/Flush 立即返回 ErrConnClosed，不再假成功或悬挂。
+func (c *wsConn) failLoop(err error) {
+	c.failPendingFlushes(err)
+	if c.markClosed() {
+		close(c.closeCh)
+	}
+}
+
+// failPendingFlushes 把错误回给所有排队中的 Flush 调用。
+// 退出 sendLoop 的动作由调用方 failLoop 完成。
 func (c *wsConn) failPendingFlushes(err error) {
 	for {
 		select {
@@ -100,6 +120,18 @@ func (c *wsConn) failPendingFlushes(err error) {
 			return
 		}
 	}
+}
+
+// markClosed 原子地标记连接已关闭。返回 true 表示本次调用是首个完成关闭动作的
+// （调用方应 close(c.closeCh)）；返回 false 表示已被其他路径关闭，不应重复 close。
+func (c *wsConn) markClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return false
+	}
+	c.closed = true
+	return true
 }
 
 // Send 发送一条二进制消息。关闭后返回 ErrConnClosed。
@@ -135,6 +167,10 @@ func (c *wsConn) Send(ctx context.Context, msg []byte) error {
 // Flush 等待 sendLoop 把队列中所有已 Send 的消息真正写出到 WebSocket，
 // 并返回写结果。用于确保对端收到后再继续（或关闭）的关键帧。
 // 若底层写失败，返回该错误；连接已关闭或 ctx 取消则返回对应错误。
+//
+// 注意："已全部写出"的保证仅适用于单发送者（Flush 前无其他并发 Send）。
+// 并发发送下，Flush 判定队列空与另一 goroutine 入队之间存在窗口，返回时
+// 该消息可能尚未写出——并发发送者需自行同步，Flush 不提供跨发送者保证。
 func (c *wsConn) Flush(ctx context.Context) error {
 	fl := make(chan error, 1)
 	select {
@@ -157,7 +193,6 @@ func (c *wsConn) Flush(ctx context.Context) error {
 // Receive 阻塞接收一条二进制消息。
 // 单条消息上限 maxMessageBytes，防恶意超大消息耗尽内存。
 func (c *wsConn) Receive(ctx context.Context) ([]byte, error) {
-	c.conn.SetReadLimit(maxMessageBytes)
 	_, msg, err := c.conn.Read(ctx)
 	if err != nil {
 		return nil, err
@@ -165,28 +200,29 @@ func (c *wsConn) Receive(ctx context.Context) ([]byte, error) {
 	return msg, nil
 }
 
-// maxMessageBytes 是单条 WebSocket 消息的最大字节数（1 MiB）。
+// maxMessageBytes 是单条 WebSocket 消息的最大字节数（1 MiB），作为本传输的
+// 单条消息上限契约：恰好等于上限的消息可正常接收（coder/websocket 的
+// SetReadLimit 内部对上限 +1，用于容纳 fin 帧），超过上限对端返回
+// ErrMessageTooBig 并关闭连接。调用方发送前应确保单条消息不超过此值。
 // mux 帧（8B 头 + 最多 64 KiB 负载）在隧道/流中继下均小于此值；
 // 该上限仅用于防止恶意超大单帧耗尽内存。
 const maxMessageBytes = 1 << 20
+
+// writeTimeout 是 sendLoop 单次写出的超时。对端停止读取时 TCP 写缓冲满，
+// 若不加超时，Write 会永久阻塞导致整条连接假死（心跳帧也无法写出）。
+// 60s 远大于 mux 心跳周期（30s ping / 90s 超时），且覆盖 1MiB 单条消息在
+// 慢链路（如移动网络）上的传输时间，不会误伤正常长连接。
+const writeTimeout = 60 * time.Second
 
 // Close 关闭 WebSocket 连接。
 // 先 close(closeCh) 广播关闭信号释放阻塞在 Send 上的 goroutine，
 // 再 CloseNow() 关闭底层 socket 中断 sendLoop 中阻塞的 Write，
 // 最后等待 sendLoop 退出。
 func (c *wsConn) Close() error {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil
-	}
-	c.closed = true
-	c.mu.Unlock()
-
-	// 关闭 closeCh 释放阻塞在 Send 上的 goroutine。
-	select {
-	case <-c.closeCh:
-	default:
+	// markClosed 原子标记关闭；仅首个完成者 close(closeCh)，避免与 sendLoop
+	// 写失败路径（failLoop）并发 close 导致 panic。CloseNow 幂等（coder 内部
+	// casClosing），重复调用安全。
+	if c.markClosed() {
 		close(c.closeCh)
 	}
 
@@ -199,15 +235,33 @@ func (c *wsConn) Close() error {
 	return err
 }
 
+// DialOptions 是 DialWithOptions 的连接选项。
+type DialOptions struct {
+	// HTTPClient 用于建立连接。nil 时使用 http.DefaultClient。
+	// 需要跳过证书校验（如连接 auto-TLS 自签名 Hub）时，传入配置了
+	// TLSClientConfig{InsecureSkipVerify: true} 的自定义 http.Client。
+	HTTPClient *http.Client
+}
+
 // Dial 创建一个到 WebSocket 服务器的新连接。
 // addr 可以是完整的 ws:// 或 wss:// URL，也可以是 host:port 格式。
 // host:port 格式会转换为 ws://host:port/ws。
 func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
+	return DialWithOptions(ctx, addr, DialOptions{})
+}
+
+// DialWithOptions 与 Dial 相同，但允许注入 HTTPClient 等连接选项
+// （如自定义 TLS 配置，供 sclient --insecure 等场景使用）。
+func DialWithOptions(ctx context.Context, addr string, opts DialOptions) (xfer.Conn, error) {
 	url := addr
 	if !strings.HasPrefix(url, "ws://") && !strings.HasPrefix(url, "wss://") {
 		url = "ws://" + addr + "/ws"
 	}
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	var do *websocket.DialOptions
+	if opts.HTTPClient != nil {
+		do = &websocket.DialOptions{HTTPClient: opts.HTTPClient}
+	}
+	conn, _, err := websocket.Dial(ctx, url, do)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +313,7 @@ func (l *wsListener) Addr() net.Addr {
 type HandlerNode struct {
 	connCh  chan xfer.Conn
 	closeCh chan struct{}
+	closeMu sync.Once
 }
 
 // NewHandlerNode 创建一个可挂载的 WebSocket 传输节点。
@@ -275,15 +330,23 @@ func (n *HandlerNode) AddToMux(mux *http.ServeMux, path string) {
 	if path == "" {
 		path = "/ws"
 	}
+	// 防御性校验：ServeMux 的 pattern 必须以 / 开头（否则会被当作 host pattern
+	// 或直接 panic）。非 / 开头自动补全，与 path=="" 默认 /ws 的容错风格一致。
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
 	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			return
 		}
+		// 先构造 wsConn（会启动 sendLoop goroutine）；若节点已关闭而走 closeCh
+		// 分支，必须调用 wc.Close() 关闭内部 closeCh 释放 sendLoop，避免泄漏。
+		wc := newWSConn(conn)
 		select {
-		case n.connCh <- newWSConn(conn):
+		case n.connCh <- wc:
 		case <-n.closeCh:
-			_ = conn.CloseNow()
+			_ = wc.Close()
 		}
 	})
 }
@@ -301,12 +364,9 @@ func (n *HandlerNode) Accept(ctx context.Context) (xfer.Conn, error) {
 }
 
 // Close 关闭节点，不再接受新连接。
+// 使用 sync.Once 保证并发 Close 只 close(closeCh) 一次，与 wsListener.Close 对齐。
 func (n *HandlerNode) Close() error {
-	select {
-	case <-n.closeCh:
-	default:
-		close(n.closeCh)
-	}
+	n.closeMu.Do(func() { close(n.closeCh) })
 	return nil
 }
 
@@ -328,10 +388,13 @@ func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
 		if err != nil {
 			return
 		}
+		// 先构造 wsConn（会启动 sendLoop goroutine）；若监听器已关闭而走 closeCh
+		// 分支，必须调用 wc.Close() 关闭内部 closeCh 释放 sendLoop，避免泄漏。
+		wc := newWSConn(conn)
 		select {
-		case l.connCh <- newWSConn(conn):
+		case l.connCh <- wc:
 		case <-l.closeCh:
-			_ = conn.CloseNow()
+			_ = wc.Close()
 		}
 	})
 	l.srv = &http.Server{

@@ -16,6 +16,8 @@ import (
 //   - 每条消息是独立的 []byte，消息边界由实现保证，上层无需定界
 //   - 未使用 net.Conn 是因为它面向字节流而非消息，
 //     且缺少 context.Context 支持（取消/超时需要额外包装）
+//   - 单条消息大小上限由实现定义（如 WebSocket 为 1 MiB）：超出上限时
+//     对端返回错误并可能断开连接，上层应避免发送超限消息
 //
 // 典型实现：
 //   - WebSocket：原生消息协议，直接映射
@@ -24,6 +26,11 @@ import (
 //   - TCP：需要额外帧定界包装
 type Conn interface {
 	// Send 发送一条消息。ctx 用于超时和取消。
+	//
+	// 注意：返回 nil 仅表示消息已被连接接受（入队/写出由实现决定）。部分传输
+	// （如 WebSocket）异步缓冲，Send 返回后消息可能尚未写出到对端；需要确认
+	// 对端已收到的关键帧应断言 xfer.Flusher 并调用 Flush。具体是否缓冲由各
+	// 实现的文档说明。
 	Send(ctx context.Context, msg []byte) error
 
 	// Receive 阻塞接收一条消息。ctx 用于超时和取消。
@@ -39,6 +46,10 @@ type Conn interface {
 // 收到某条消息时，可断言 conn.(xfer.Flusher) 后调用。
 type Flusher interface {
 	// Flush 等待队列中所有已 Send 的消息真正写出，并返回写结果。
+	//
+	// 注意："已全部写出"的保证仅适用于单发送者（Flush 前无并发 Send）。
+	// 并发发送下存在 ack 窗口：Flush 判定队列空与另一 goroutine 入队之间，
+	// 返回时该消息可能尚未写出。并发发送者需自行同步。
 	Flush(ctx context.Context) error
 }
 
