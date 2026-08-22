@@ -134,18 +134,22 @@ sclient                    sproxy (Hub)                   Node B
   ├──── Register{ID:"node-a"}→│                            │
   │                           │ 注册到 RouteTable           │
   │                           │                            │
-  │ POST /api/relay            │                            │
+  │ POST /api/relay/stream     │                            │
   │ {target:"node-b",          │                            │
-  │  method:"GET",             │                            │
-  │  path:"/api/files"}        │                            │
+  │  addr:"127.0.0.1:22"}      │                            │
   ├───────────────────────────→│                            │
   │                           │ RouteTable.Lookup("node-b") │
   │                           │ targetMux.Open() → stream   │
-  │                           ├───── HTTP GET /api/files ──→│
-  │                           │                            │ 本地 HTTP 处理
-  │                           │←──── HTTP 200 + body ──────┤
-  │←──────── JSON 200 ────────┤                            │
+  │                           ├───── 拨号帧(addr) ─────────→│
+  │                           │                            │ 叶子 DialAllowed 校验后拨号
+  │                           │←── DialResultFrames ok ─────┤
+  │←──────── HTTP 200 ────────┤                            │
+  │  (此后为双向字节流)          │  ←───── TCP 数据 ────────── │
 ```
+
+> 说明：`POST /api/relay/stream`（RelayStreamHandler）升级为到目标叶子的双向字节流。
+> 拨号结果由叶子经 `DialResultFrames` 门控回报，hub 写 200 前先读结果帧（ok→200 /
+> 拨号失败→502 / 超时→504），客户端据此可感知拨号失败并回退候选。
 
 ## 相关包路径
 
