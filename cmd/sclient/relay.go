@@ -72,12 +72,38 @@ func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string,
 // isTerminalRelayError 判断是否应因配置/权限错误终止而非重试。
 // 仅当 hub 通过注册 ACK **明确拒绝** 注册时才终止；其余（连接断开、超时、EOF、
 // ACK 未到达）均视为可重连的网络问题。EOF 不代表鉴权失败——真实鉴权失败时
-// hub 必然已回发 RegisterAckErr 帧，runRelayOnce 会走“注册失败”分支先于 EOF。
+// hub 必然已回发 RegisterAckErr 帧，runRelayOnce 会走"注册失败"分支先于 EOF。
 func isTerminalRelayError(err error) bool {
 	if err == nil {
 		return false
 	}
 	return strings.HasPrefix(err.Error(), "注册失败")
+}
+
+// parseRegisterAck 解析 hub 注册 ACK 帧。返回节点 per-node secret：
+// - 纯 "REG_OK"（未声明能力或 secret 生成失败）→ 返回空串；
+// - "REG_OK:<base64url secret>"（声明 per-node-secret 能力）→ 返回 secret；
+// - "REG_ERR:<reason>"（hub 明确拒绝）→ 返回注册失败错误（终态）；
+// - 未知响应 → 返回注册失败错误（终态）。
+// 用前缀匹配而非精确比较，避免声明能力后收 "REG_OK:<secret>" 被误判为未知响应
+// 导致 relay start 终止（B1 复检 bug 回归锁）。
+func parseRegisterAck(ackStr string) (secret string, err error) {
+	switch {
+	case ackStr == hub.RegisterAckOK:
+		return "", nil
+	case strings.HasPrefix(ackStr, hub.RegisterAckOK+":"):
+		secret = strings.TrimPrefix(ackStr, hub.RegisterAckOK+":")
+		if secret == "" {
+			return "", fmt.Errorf("注册失败: 收到异常的 REG_OK（secret 为空）")
+		}
+		return secret, nil
+	case strings.HasPrefix(ackStr, hub.RegisterAckErr):
+		// 仅当 hub 显式回发 REG_ERR 帧才算"注册失败"（鉴权错误）——
+		// 这是 isTerminalRelayError 唯一采信的依据。
+		return "", fmt.Errorf("注册失败: %s", strings.TrimPrefix(ackStr, hub.RegisterAckErr))
+	default:
+		return "", fmt.Errorf("注册失败: 收到未知注册响应 %q", ackStr)
+	}
 }
 
 func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
@@ -111,7 +137,9 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 		// 否则 mesh connect 回落中继路径拨 127.0.0.1:xxx 会被默认策略拒绝。
 		serviceAddrs = append(serviceAddrs, addr)
 	}
-	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta)); serr != nil {
+	// 声明 per-node-secret 能力：hub 回 REG_OK:<base64url secret>（B1 已支持，
+	// B3 服务端将据此校验信令身份）。现有调用不传 caps 时行为不变。
+	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta, hub.CapabilityPerNodeSecret)); serr != nil {
 		return fmt.Errorf("发送注册帧失败: %w", serr)
 	}
 
@@ -122,16 +150,16 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 	if ackErr != nil {
 		return fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
 	}
-	ackStr := string(ack)
-	switch {
-	case ackStr == hub.RegisterAckOK:
+	nodeSecret, ackErr := parseRegisterAck(string(ack))
+	if ackErr != nil {
+		return ackErr
+	}
+	if nodeSecret != "" {
+		// per-node secret 与本次注册连接生命周期绑定（重连即轮换），
+		// 只在注册流程内使用，不落盘、不打印值（I1，方案 B）。
+		logger.Info("已注册到 Hub（per-node secret 已获取）")
+	} else {
 		logger.Info("已注册到 Hub")
-	case strings.HasPrefix(ackStr, hub.RegisterAckErr):
-		// 仅当 hub 显式回发 REG_ERR 帧才算“注册失败”（鉴权错误）——
-		// 这是 isTerminalRelayError 唯一采信的依据。
-		return fmt.Errorf("注册失败: %s", strings.TrimPrefix(ackStr, hub.RegisterAckErr))
-	default:
-		return fmt.Errorf("注册失败: 收到未知注册响应 %q", ackStr)
 	}
 
 	m := mux.New(conn, mux.RoleListener)

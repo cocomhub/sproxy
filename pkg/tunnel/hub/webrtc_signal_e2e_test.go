@@ -21,6 +21,10 @@ func TestWebrtcDialListen_WithHubSignaler(t *testing.T) {
 	// 备份并还原全局 hostOnly 状态
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
+	// I11/S12：信令整体预算 60s > 单 poll 25s，消除末段错过。
+	// SetSignalingTimeout 是包级全局变量，需 t.Cleanup 恢复默认（S69）。
+	webrtc.SetSignalingTimeout(60 * time.Second)
+	t.Cleanup(func() { webrtc.SetSignalingTimeout(30 * time.Second) })
 
 	hub := fakeSignalHub(t)
 	defer hub.Close()
@@ -114,6 +118,9 @@ func TestWebrtcDialListen_WithHubSignaler(t *testing.T) {
 func TestWebrtcXferConn_FramingLargeMessage(t *testing.T) {
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
+	// I11/S12：与主 e2e 测试一致的信令预算（全局变量需 t.Cleanup 恢复）。
+	webrtc.SetSignalingTimeout(60 * time.Second)
+	t.Cleanup(func() { webrtc.SetSignalingTimeout(30 * time.Second) })
 
 	hub := fakeSignalHub(t)
 	defer hub.Close()

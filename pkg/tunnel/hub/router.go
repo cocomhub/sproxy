@@ -178,13 +178,15 @@ const (
 	DialResultError = "error"
 )
 
-// NewRegisterFrame 构建注册帧。当无 meta/token 时退化为裸 nodeID，
+// NewRegisterFrame 构建注册帧。当无 meta/token/caps 时退化为裸 nodeID，
 // 保证与旧版 hub（仅接收裸 nodeID）兼容。
-func NewRegisterFrame(nodeID, token string, meta Meta) []byte {
-	if meta.Addr == "" && len(meta.Services) == 0 && len(meta.Tags) == 0 && token == "" {
+// caps 为可选变参：声明能力（如 CapabilityPerNodeSecret）后 hub 回 REG_OK 携带
+// per-node secret（I1）；现有调用不传 caps 时行为不变。
+func NewRegisterFrame(nodeID, token string, meta Meta, caps ...string) []byte {
+	if meta.Addr == "" && len(meta.Services) == 0 && len(meta.Tags) == 0 && token == "" && len(caps) == 0 {
 		return []byte(nodeID)
 	}
-	frame := RegisterFrame{NodeID: nodeID, Token: token, Meta: meta}
+	frame := RegisterFrame{NodeID: nodeID, Token: token, Meta: meta, Capabilities: caps}
 	b, _ := json.Marshal(frame)
 	return b
 }
