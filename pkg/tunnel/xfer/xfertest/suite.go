@@ -86,7 +86,10 @@ func testLargePayload(t *testing.T, factory ConnFactory) {
 	client, server, cleanup := factory(t)
 	defer cleanup()
 
-	payload := make([]byte, 1<<20) // 1 MiB
+	// 1 MiB - 1：WebSocket 传输的 maxMessageBytes 为 1 MiB（coder/websocket 的
+	// SetReadLimit 内部 +1 余量，恰好等于上限会压线通过）。用 1 MiB - 1 留出
+	// 安全余量，避免恰好压线导致测试脆弱（I19）。
+	payload := make([]byte, 1<<20-1)
 	rand.New(rand.NewSource(42)).Read(payload)
 
 	if err := client.Send(context.Background(), payload); err != nil {
