@@ -364,16 +364,11 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub
 				}
 			}
 			ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.kind, target.Node, target.Addr)
-			// 双向泵送。关键：任一方向完成（如 relay 端拒绝拨号后关流 → conn EOF）
-			// 即关闭另一方向，让对端（如 curl）立刻得到 EOF/复位，而非永久挂起。
-			// 否则上游 EOF 后 io.Copy(conn, c) 会因 curl 还开着而无限阻塞（实测卡死）。
-			done := make(chan struct{}, 2)
-			go func() { defer func() { done <- struct{}{} }(); _, _ = io.Copy(conn, c) }()
-			go func() { defer func() { done <- struct{}{} }(); _, _ = io.Copy(c, conn) }()
-			<-done
-			_ = c.Close()
-			_ = conn.Close()
-			<-done
+			// 双向泵送（CloseWrite 半关闭 + grace 宽限期，C1 范本）：任一方向完成
+			//（如 relay 端拒绝拨号后关流 → conn EOF）即向对端传播半关闭（TCP FIN /
+			// 流 EOF），让在途响应仍可被读回（不截断）；对端不回应 FIN 时 grace 超时
+			// 强制双侧关闭解除阻塞。返回后由外层 defer c.Close()/conn.Close() 收尾。
+			pumpConns(c, conn, pumpGracePeriod)
 		}(local)
 	}
 }

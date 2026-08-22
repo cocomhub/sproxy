@@ -133,17 +133,11 @@ func relayDialListenOn(ctx context.Context, svc relayDialClient, node, tcpAddr s
 				return
 			}
 			defer remote.Close()
-			// 双向泵送。任一方向完成（如中继端断开 → remote EOF）即关闭另一方向，
-			// 让对端（如 ssh）立刻得到 EOF/复位，而非永久挂起（I41，meshForwardListen
-			// 同款）。否则上游 EOF 后 io.Copy(remote, c) 会因本地连接还开着而无限阻塞
-			//（连接 goroutine + FD 泄漏）。
-			done := make(chan struct{}, 2)
-			go func() { defer func() { done <- struct{}{} }(); _, _ = io.Copy(remote, c) }()
-			go func() { defer func() { done <- struct{}{} }(); _, _ = io.Copy(c, remote) }()
-			<-done
-			_ = c.Close()
-			_ = remote.Close()
-			<-done
+			// 双向泵送（CloseWrite 半关闭 + grace 宽限期，C1 范本）：任一方向完成
+			//（如中继端断开 → remote EOF）即向对端传播半关闭（TCP FIN / 流 EOF），
+			// 让在途响应仍可被读回（不截断）；对端不回应 FIN 时 grace 超时强制双侧
+			// 关闭解除阻塞。返回后由外层 defer c.Close()/remote.Close() 收尾。
+			pumpConns(c, remote, pumpGracePeriod)
 		}(clientConn)
 	}
 }

@@ -17,7 +17,7 @@ sproxy v2 引入了全新的分层传输架构，在原有的文件服务与加�
 │  FileClient Go SDK                        │
 ├──────────────────────────────────────────┤
 │  hub 层 — 节点注册 / 路由表 / 中继转发      │
-│  RouteTable / RelayHandler                │
+│  RouteTable / RelayStreamHandler         │
 ├──────────────────────────────────────────┤
 │  tunnel 层 — HTTP 请求-响应交换             │
 │  Tunnel.Do(req) → *http.Response           │
@@ -123,7 +123,7 @@ func init() {
 
 - **RouteTable：** 线程安全的节点路由表（`NodeID → *mux.Mux`）
 - **节点注册：** 节点通过控制流发送 `Register` 帧向 Hub 注册
-- **中继转发：** `POST /api/relay` 接收 JSON，查找目标节点，通过其 mux 转发
+- **流中继转发：** `POST /api/relay/stream` 升级为到目标叶子的双向字节流（RelayStreamHandler）
 
 ## 数据流示例：中继请求
 

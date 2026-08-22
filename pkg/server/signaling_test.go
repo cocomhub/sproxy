@@ -278,3 +278,38 @@ func TestSignalBroker_QueueFull(t *testing.T) {
 		t.Fatalf("expected 429 for overflow, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// TestSignalBroker_PurgeOnNodeRemove 验证 I6 联动：节点从 RouteTable 真正移除时
+// （连接断开 RemoveIfOwned / 手动踢除 Remove），SignalBroker 收到下线回调并清空
+// 其信令收件箱——离线 peer 的消息不再常驻内存占用 maxSignalTotal 全局配额
+// （否则反复上下线的短命节点会耗尽配额 → 新信令 429）。
+func TestSignalBroker_PurgeOnNodeRemove(t *testing.T) {
+	b := newSignalTestBroker(t)
+	mux := signalTestMux(b)
+
+	// peer-a 发 offer 给 peer-b（入队）
+	req := signalReq(http.MethodPost, "/api/signal/offer", "peer-a", `{"to":"peer-b","sdp":"purge-me"}`)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", w.Code)
+	}
+	if m := b.queue.Peek("peer-b", ""); m == nil {
+		t.Fatal("expected message in peer-b inbox before removal")
+	}
+
+	// 节点下线（Remove 触发 RemoveHook → PurgeNode → queue.Purge）
+	if !b.rt.Remove("peer-b") {
+		t.Fatal("peer-b should be removed")
+	}
+
+	// 收件箱应已被清空（消息不再残留占配额）
+	if m := b.queue.Peek("peer-b", ""); m != nil {
+		t.Fatalf("expected empty inbox after node removal, got %+v", m)
+	}
+
+	// 全局积压计数应归零
+	if b.queue.Total() != 0 {
+		t.Fatalf("expected total backlog 0 after purge, got %d", b.queue.Total())
+	}
+}
