@@ -5,8 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -58,7 +56,7 @@ type p2pFlags struct {
 }
 
 func (f *p2pFlags) add(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&f.hub, "hub", "", "hub 地址（如 https://hub.example.com:18083）")
+	cmd.Flags().StringVar(&f.hub, "hub", "", "hub 地址（http(s) 或 ws(s) 均可，如 https://hub.example.com:18083）")
 	cmd.Flags().StringVar(&f.tok, "token", "", "信令/中继 token")
 	cmd.Flags().StringVar(&f.node, "node-id", "", "本节点 ID（信令 from；默认主机名）")
 	cmd.Flags().StringSliceVar(&f.stun, "stun", nil,
@@ -73,6 +71,13 @@ func (f *p2pFlags) applyConfig() {
 }
 
 func (f *p2pFlags) signaler() *hub.HubSignaler {
+	// I40：--hub 传 ws(s):// 时归一到 http(s)://（HubSignaler post/poll 用 http.Client，
+	// 对 ws:// 直接报 unsupported protocol scheme）。
+	if f.hub != "" {
+		if httpBase, _, err := normalizeHubEndpoints(f.hub, ""); err == nil {
+			return hub.NewHubSignaler(httpBase, f.tok, f.localNode())
+		}
+	}
 	return hub.NewHubSignaler(f.hub, f.tok, f.localNode())
 }
 
@@ -304,19 +309,7 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 
 // writeDialFrame 在 mux 流上写入 [4B len][{"dial":addr}] 帧（与 relay 协议一致）。
 func writeDialFrame(s mux.Stream, addr string) error {
-	header, err := json.Marshal(hub.DialRequest{Dial: addr})
-	if err != nil {
-		return err
-	}
-	lenBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBuf, uint32(len(header)))
-	if _, werr := s.Write(lenBuf); werr != nil {
-		return werr
-	}
-	if _, werr := s.Write(header); werr != nil {
-		return werr
-	}
-	return nil
+	return writeDialFrameTo(s, addr)
 }
 
 // pump 双向泵送：本地 socket <-> mux 流。

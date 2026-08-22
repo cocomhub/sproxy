@@ -21,6 +21,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	"github.com/spf13/cobra"
 )
 
@@ -48,7 +51,7 @@ func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 	if connect.Use != "connect <service> [-l :port]" {
 		t.Fatalf("unexpected connect Use: %q", connect.Use)
 	}
-	for _, name := range []string{"listen", "webrtc", "hub", "token", "node-id"} {
+	for _, name := range []string{"listen", "webrtc", "hub", "token", "relay-token", "node-id"} {
 		if f := connect.Flags().Lookup(name); f == nil {
 			t.Errorf("connect 缺少 flag: %s", name)
 		}
@@ -75,9 +78,78 @@ func TestMeshSignalToken(t *testing.T) {
 	}
 }
 
+// TestMeshRelayToken 验证自动注册 token 选择（I37 子决策 A fallback 链）：
+// --relay-token → --token → auth_token。
+func TestMeshRelayToken(t *testing.T) {
+	svc := client.NewFileClient("http://127.0.0.1:1", client.WithAuthToken("cfg-token"))
+
+	// 显式 --relay-token 优先
+	if got := meshRelayToken("relay-token", "flag-token", svc); got != "relay-token" {
+		t.Fatalf("meshRelayToken(relay) = %q, want relay-token", got)
+	}
+	// 空 relay → 回落信令 token（--token）
+	if got := meshRelayToken("", "flag-token", svc); got != "flag-token" {
+		t.Fatalf("meshRelayToken(empty relay) = %q, want flag-token", got)
+	}
+	// 空 relay + 空 token → 回落 auth_token
+	if got := meshRelayToken("", "", svc); got != "cfg-token" {
+		t.Fatalf("meshRelayToken(both empty) = %q, want cfg-token", got)
+	}
+	// 全空 → 空串
+	plain := client.NewFileClient("http://127.0.0.1:1")
+	if got := meshRelayToken("", "", plain); got != "" {
+		t.Fatalf("meshRelayToken(all empty) = %q, want empty", got)
+	}
+}
+
+// TestNormalizeHubEndpoints 验证 hub scheme 归一（I40）：
+// ws(s):// → http(s):// 信令基址 + ws(s)://host/ws 注册端点。
+func TestNormalizeHubEndpoints(t *testing.T) {
+	tests := []struct {
+		name         string
+		hubURL       string
+		serverURL    string
+		wantHTTPBase string
+		wantWSURL    string
+		wantErr      bool
+	}{
+		{"http", "http://hub:18083", "", "http://hub:18083", "ws://hub:18083/ws", false},
+		{"https", "https://hub:18083", "", "https://hub:18083", "wss://hub:18083/ws", false},
+		{"ws", "ws://hub:18084/ws", "", "http://hub:18084", "ws://hub:18084/ws", false},
+		{"wss", "wss://hub:18084/ws", "", "https://hub:18084", "wss://hub:18084/ws", false},
+		{"http with path", "http://hub:18083/ws", "", "http://hub:18083", "ws://hub:18083/ws", false},
+		{"empty fallback", "", "http://fallback:18083", "http://fallback:18083", "ws://fallback:18083/ws", false},
+		{"both empty", "", "", "", "", true},
+		{"bad scheme", "ftp://hub", "", "", "", true},
+		{"malformed url", "://bad", "", "", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			httpBase, wsURL, err := normalizeHubEndpoints(tc.hubURL, tc.serverURL)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got httpBase=%q wsURL=%q", httpBase, wsURL)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if httpBase != tc.wantHTTPBase || wsURL != tc.wantWSURL {
+				t.Fatalf("normalizeHubEndpoints(%q, %q) = (%q, %q), want (%q, %q)",
+					tc.hubURL, tc.serverURL, httpBase, wsURL, tc.wantHTTPBase, tc.wantWSURL)
+			}
+		})
+	}
+}
+
 // TestDefaultMeshDial_FallsBackToRelay 验证选路：webrtc 打洞失败（目标无 p2p listen
 // 或不可达）时回落 hub 中继。
 func TestDefaultMeshDial_FallsBackToRelay(t *testing.T) {
+	// I69：host-only 候选（零 STUN 依赖），gathering 秒级完成，CI 沙箱稳定。
+	webrtc.SetHostOnly(true)
+	t.Cleanup(func() { webrtc.SetHostOnly(false) })
+
 	// 模拟 hub：/api/relay/stream 返回 502（中继也失败）→ 最终返回错误
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/relay/stream" {
@@ -396,8 +468,12 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 	listenAddr := reserve.Addr().String()
 	_ = reserve.Close()
 
+	// I67：可取消 ctx + t.Cleanup(cancel)，测试结束触发 meshForwardListen 的
+	// ctx 优雅停止（Accept 返回、listener 关闭、goroutine 退出），修 listener 泄漏。
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background()) // 未执行 Execute 的裸命令 Context() 为 nil，需显式设置
+	cmd.SetContext(ctx) // 未执行 Execute 的裸命令 Context() 为 nil，需显式设置
 	go func() {
 		// meshForwardListen 阻塞在 Accept，直到测试结束端口关闭
 		_ = meshForwardListen(cmd, svc, nil, dial, r, initial, "local-node", listenAddr, ios)
@@ -458,5 +534,91 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "不可用") {
 		t.Fatalf("expected '不可用' error output, got: %q", errBuf.String())
+	}
+}
+
+// TestMeshAutoRegister_GetsSecretAndCleanup 验证自动注册（I37）：
+//   - mesh connect 连接前自持临时注册连接，从 hub 拿到 per-node secret；
+//   - HubSignaler 信令请求携带 X-Node-Secret / X-Node-ID（B2/B3 身份校验前置）；
+//   - closer 确定性关闭注册连接，hub 移除临时节点（防 WS 泄漏）。
+func TestMeshAutoRegister_GetsSecretAndCleanup(t *testing.T) {
+	rt := hub.NewRouteTable()
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator("relay-token"), discardLogger())
+
+	muxHTTP := http.NewServeMux()
+	wsNode := ws.NewHandlerNode()
+	wsNode.AddToMux(muxHTTP, "/ws")
+	// 信令端点：记录 X-Node-Secret 头（验证 B2 携带 secret）。
+	var mu sync.Mutex
+	var gotSecret, gotNodeID string
+	muxHTTP.HandleFunc("/api/signal/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotSecret = r.Header.Get("X-Node-Secret")
+		gotNodeID = r.Header.Get("X-Node-ID")
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	})
+	ts := httptest.NewServer(muxHTTP)
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// hub 侧：接受 ws 连接并交给 HandleConn 注册。
+	go func() {
+		for {
+			c, aerr := wsNode.Accept(ctx)
+			if aerr != nil {
+				return
+			}
+			go func(cc xfer.Conn) {
+				_ = srv.HandleConn(ctx, cc)
+			}(c)
+		}
+	}()
+
+	svc := client.NewFileClient(ts.URL)
+	reg, err := meshAutoRegister(ctx, svc, ts.URL, "relay-token", "signal-token", "node-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 显式断言 closer 后节点移除；中途失败用 Cleanup 兜底（mux.Close 幂等）。
+	t.Cleanup(func() { _ = reg.closer() })
+
+	// 断言：临时 node_id 唯一前缀 + 节点已注册且拿到非空 secret。
+	if !strings.HasPrefix(reg.tempNode, "mesh-node-a-") {
+		t.Fatalf("temp node %q should start with mesh-node-a-", reg.tempNode)
+	}
+	info, ok := rt.LookupInfo(hub.NodeID(reg.tempNode))
+	if !ok {
+		t.Fatalf("temp node %q not registered", reg.tempNode)
+	}
+	if info.Secret == "" {
+		t.Fatal("per-node secret should not be empty")
+	}
+
+	// 断言信令请求携带 X-Node-Secret（B2）+ X-Node-ID（I37 核心：不再 403 秒败）。
+	if err := reg.signaler.SendOffer("peer-node", "sdp"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	secret, nodeID := gotSecret, gotNodeID
+	mu.Unlock()
+	if secret != info.Secret {
+		t.Fatalf("X-Node-Secret = %q, want %q", secret, info.Secret)
+	}
+	if nodeID != reg.tempNode {
+		t.Fatalf("X-Node-ID = %q, want %q", nodeID, reg.tempNode)
+	}
+
+	// 断言 closer 后 hub 移除临时节点（确定性关闭防 WS 泄漏）。
+	if err := reg.closer(); err != nil {
+		t.Fatal(err)
+	}
+	removeDeadline := time.Now().Add(3 * time.Second)
+	for rt.Has(hub.NodeID(reg.tempNode)) && time.Now().Before(removeDeadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rt.Has(hub.NodeID(reg.tempNode)) {
+		t.Fatal("temp node should be removed after closer")
 	}
 }
