@@ -33,8 +33,8 @@ type ACMEConfig struct {
 	Domains    []string `yaml:"domains" mapstructure:"domains"`
 	Email      string   `yaml:"email" mapstructure:"email"`
 	CacheDir   string   `yaml:"cache_dir" mapstructure:"cache_dir"`
-	HTTP01     bool     `yaml:"http01" mapstructure:"http_01"`
-	HTTP01Port string   `yaml:"http01_port" mapstructure:"http_01_port"`
+	HTTP01     bool     `yaml:"http01" mapstructure:"http01"`
+	HTTP01Port string   `yaml:"http01_port" mapstructure:"http01_port"`
 }
 
 type RateLimitConfig struct {

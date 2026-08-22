@@ -5,6 +5,7 @@ package server
 
 import (
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -281,4 +282,53 @@ func TestLoadConfig_FileNotFound(t *testing.T) {
 	if cfg == nil {
 		t.Log("LoadConfig returned nil config (acceptable)")
 	}
+}
+
+// TestConfig_YAMLTagsMatchMapstructure 验证配置树中所有字段的 yaml 与 mapstructure 标签一致。
+//
+// 回归防护（I31）：viper 通过 mapstructure 标签解码，yaml.Unmarshal 通过 yaml 标签解码。
+// 两者键名不一致时（如 ACME 字段曾写 mapstructure:"http_01" 而 yaml 键为 http01），
+// viper 路径静默丢失配置值恒为默认值，而基于 yaml 的测试路径不受影响。
+// 该测试直接断言两条解码路径的键名一致，任何字段再出现标签漂移都会立即失败。
+func TestConfig_YAMLTagsMatchMapstructure(t *testing.T) {
+	t.Parallel()
+
+	seen := map[reflect.Type]bool{}
+	var check func(typ reflect.Type)
+	check = func(typ reflect.Type) {
+		switch typ.Kind() {
+		case reflect.Pointer:
+			check(typ.Elem())
+			return
+		case reflect.Slice, reflect.Array:
+			check(typ.Elem())
+			return
+		case reflect.Struct:
+			// 继续检查字段
+		default:
+			return
+		}
+		if seen[typ] {
+			return
+		}
+		seen[typ] = true
+		for f := range typ.Fields() {
+			f := f
+			if !f.IsExported() {
+				continue
+			}
+			yamlTag := f.Tag.Get("yaml")
+			mapTag := f.Tag.Get("mapstructure")
+			if yamlTag == "" || yamlTag == "-" || mapTag == "" || mapTag == "-" {
+				continue
+			}
+			yKey := strings.Split(yamlTag, ",")[0]
+			mKey := strings.Split(mapTag, ",")[0]
+			if yKey != mKey {
+				t.Errorf("%s.%s: yaml 标签 %q 与 mapstructure 标签 %q 不一致", typ.Name(), f.Name, yKey, mKey)
+			}
+			check(f.Type)
+		}
+	}
+	check(reflect.TypeFor[Config]())
 }
