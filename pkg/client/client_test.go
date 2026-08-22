@@ -1712,3 +1712,60 @@ func TestWithClientCert_ReverseOrder(t *testing.T) {
 		t.Errorf("expected 1 certificate preserved after WithInsecureTLS, got %d", len(transport.TLSClientConfig.Certificates))
 	}
 }
+
+// TestRelayTLSConfig_InheritsRootCAs 验证 relayTLSConfig 继承 Transport 的
+// RootCAs / InsecureSkipVerify / Certificates（I34），私有 CA 场景中继拨号可用。
+func TestRelayTLSConfig_InheritsRootCAs(t *testing.T) {
+	t.Parallel()
+	certFile, keyFile := generateTestCert(t)
+
+	c := NewFileClient("https://hub.example.com:18083", WithClientCert(certFile, keyFile, true))
+	tr, ok := c.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("expected *http.Transport")
+	}
+	// 手动注入私有 CA 信任根与自签容忍，模拟私有 CA 部署
+	certPEMBytes, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(certPEMBytes)
+	if block == nil {
+		t.Fatal("failed to decode cert PEM")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(leaf)
+	tr.TLSClientConfig.RootCAs = pool
+	tr.TLSClientConfig.InsecureSkipVerify = true
+
+	cfg := c.relayTLSConfig()
+	if cfg.RootCAs == nil {
+		t.Fatal("expected RootCAs to be inherited from Transport")
+	}
+	if !cfg.InsecureSkipVerify {
+		t.Error("expected InsecureSkipVerify to be inherited")
+	}
+	if len(cfg.Certificates) != 1 {
+		t.Errorf("expected 1 client certificate, got %d", len(cfg.Certificates))
+	}
+	if cfg.ServerName != "hub.example.com" {
+		t.Errorf("expected ServerName hub.example.com, got %q", cfg.ServerName)
+	}
+}
+
+// TestRelayTLSConfig_NoRootCAs 验证未配置 RootCAs 时保持 nil（走系统根，行为不变）。
+func TestRelayTLSConfig_NoRootCAs(t *testing.T) {
+	t.Parallel()
+	c := NewFileClient("https://hub.example.com")
+	cfg := c.relayTLSConfig()
+	if cfg.RootCAs != nil {
+		t.Errorf("expected nil RootCAs by default, got %v", cfg.RootCAs)
+	}
+	if cfg.ServerName != "hub.example.com" {
+		t.Errorf("expected ServerName hub.example.com, got %q", cfg.ServerName)
+	}
+}

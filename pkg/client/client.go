@@ -1022,6 +1022,9 @@ func (c *FileClient) ServerURL() string {
 // AuthToken 返回客户端配置的 Bearer token（--auth-token / 配置 auth_token）。
 // mesh 信令在未显式指定 --token 时复用该值，保证 /api/signal/* 与
 // /api/hub/services、/api/relay/stream 使用同一认证凭据。
+//
+// 安全警示（S49）：返回值是认证凭据，严禁写入日志、错误输出或用于展示；
+// 需要展示时使用配置层的掩码形式（如 config.go 中的 maskedToken）。
 func (c *FileClient) AuthToken() string {
 	return c.authToken
 }
