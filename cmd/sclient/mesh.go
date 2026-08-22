@@ -9,8 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,7 +21,10 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层（自动注册拨号用）
 	"github.com/spf13/cobra"
 )
 
@@ -36,14 +42,23 @@ type meshDialFunc func(ctx context.Context, svc *client.FileClient, signaler *hu
 // defaultMeshDial 是默认选路：webrtc 打洞优先，失败回落 hub 中继。
 func defaultMeshDial(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, _ string) (*meshDialResult, error) {
 	// webrtc 打洞优先（数据面直连，不经过 hub）。
-	// DialWithSignaler 内部用 defaultICETimeout（30s）作为信令等待上限，
+	// DialWithSignalerCtx 内部用 defaultICETimeout（30s）作为信令等待上限，
 	// 失败（对端无 p2p listen / 打洞不成功）后回落 hub 中继。
 	if signaler != nil && target.Node != "" {
-		conn, err := webrtc.DialWithSignaler(target.Node, signaler)
+		// ctx 预检：已取消则不触发 webrtc（避免无谓地启动 PeerConnection / STUN gathering）。
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		conn, err := webrtc.DialWithSignalerCtx(ctx, target.Node, signaler)
 		if err == nil {
 			return &meshDialResult{conn: conn, kind: "webrtc"}, nil
 		}
-		// 打洞失败回落中继
+		if ctx.Err() != nil {
+			// ctx 取消（用户中断/命令超时）：不再尝试中继，直接返回。
+			return nil, ctx.Err()
+		}
+		// 打洞失败回落中继（S57：不静默吞掉诊断，--verbose 下可见）。
+		slog.Debug("webrtc 打洞失败，回落 hub 中继", "error", err, "target_node", target.Node)
 	}
 	conn, err := svc.RelayStream(ctx, target.Node, target.Addr)
 	if err != nil {
@@ -189,6 +204,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			useWebRTC, _ := cmd.Flags().GetBool("webrtc")
 			hubURL, _ := cmd.Flags().GetString("hub")
 			token, _ := cmd.Flags().GetString("token")
+			relayToken, _ := cmd.Flags().GetString("relay-token")
 			nodeID, _ := cmd.Flags().GetString("node-id")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			if stunServers != nil {
@@ -208,16 +224,25 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			}
 			ios.WriteOutLine("目标服务: %s（节点 %s, addr %s）", service, target.Node, target.Addr)
 
-			// 构建信令器（webrtc 打洞用）。--hub 未指定时回退 serverURL。
+			// 构建信令器（webrtc 打洞用）。连接前自动注册自身（声明 per-node-secret
+			// 能力），从 REG_OK:<secret> 拿 per-node secret 供 B3 服务端信令身份校验。
 			var signaler *hub.HubSignaler
 			if useWebRTC {
-				if hubURL == "" {
-					hubURL = svc.ServerURL()
-				}
 				if nodeID == "" {
 					nodeID = defaultLocalNodeID()
 				}
-				signaler = hub.NewHubSignaler(hubURL, meshSignalToken(token, svc), nodeID)
+				r, regErr := meshAutoRegister(cmd.Context(), svc, hubURL,
+					meshRelayToken(relayToken, token, svc), meshSignalToken(token, svc), nodeID)
+				if regErr != nil {
+					// 注册失败不静默：warn + 回落中继（relay 路径只认 auth_token，
+					// 与本机临时注册无关，独立可用）。
+					ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
+				} else {
+					signaler = r.signaler
+					// 信令结束/命令退出确定性关闭注册连接，防 WS 泄漏
+					// （hub 侧断开即 RemoveIfOwned 移除临时节点）。
+					defer func() { _ = r.closer() }()
+				}
 			}
 			dial := defaultMeshDial
 			localNode := nodeID
@@ -231,10 +256,11 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			return meshStdioOnce(cmd, svc, signaler, dial, refresher, localNode, ios)
 		},
 	}
-	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 :2222）；留空为单次 stdin/stdout 模式")
+	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 127.0.0.1:2222；裸 :2222 归一为 127.0.0.1:2222）；留空为单次 stdin/stdout 模式")
 	cmd.Flags().Bool("webrtc", true, "优先 webrtc 打洞直连，失败回落 hub 中继")
-	cmd.Flags().String("hub", "", "hub 地址（webrtc 打洞信令用；默认取 server_url）")
+	cmd.Flags().String("hub", "", "hub 地址（http(s) 或 ws(s) 均可；默认取 server_url）")
 	cmd.Flags().String("token", "", "信令 Bearer token（默认复用 --auth-token / 配置 auth_token）")
+	cmd.Flags().String("relay-token", "", "hub 的 relay_token（自动注册用；与 relay start --token 一致；默认复用 --token / auth_token）")
 	cmd.Flags().String("node-id", "", "本节点 ID（信令来源；默认主机名）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
@@ -275,12 +301,17 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 // meshForwardListen 监听本地端口，每个入站连接独立建立一条 mesh 连接（选路 dial）。
 // ref 负责按需解析最新 target（带 TTL 缓存，感知节点上下线）；initial 仅用于启动横幅。
 func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub.HubSignaler, dial meshDialFunc, ref *meshTargetRefresher, initial *client.MeshService, localNode, listenAddr string, ios cli.IOStreams) error {
+	// S56：裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 +
+	// Windows 防火墙弹窗）；需 LAN 访问时显式 0.0.0.0:port / 具体 IP。
+	listenAddr = normalizeListenAddr(listenAddr)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听本地端口失败: %w", err)
 	}
 	defer ln.Close()
-	ios.WriteOutLine("端口转发: %s ⇄ mesh(%s) ⇄ %s", listenAddr, initial.Node, initial.Addr)
+	if initial != nil {
+		ios.WriteOutLine("端口转发: %s ⇄ mesh(%s) ⇄ %s", listenAddr, initial.Node, initial.Addr)
+	}
 
 	ctx := cmd.Context()
 	// ctx 取消时关闭 listener，使 Accept 立即返回（优雅停止端口转发）。
@@ -359,11 +390,19 @@ func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler *hub.Hub
 		}
 	}
 	ios.WriteOutLine("已连接（%s）: stdin/stdout ⇄ %s (Ctrl+D / EOF 断开)", res.kind, target.Name)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(conn, ios.In) }()
-	go func() { defer wg.Done(); _, _ = io.Copy(ios.Out, conn) }()
-	wg.Wait()
+	// 方向区分通道（I38）：对端断开（outDone）→ 会话结束立即返回，不再挂起；
+	// 本地 stdin 读完（inDone，如 EOF/管道结束）→ 等待对端把剩余响应写完
+	// （保留 `echo x | mesh connect` 的响应语义）。原 wg.Wait() 在对端断开但
+	// stdin 未 EOF 时永久挂起。
+	inDone := make(chan struct{})
+	outDone := make(chan struct{})
+	go func() { defer close(inDone); _, _ = io.Copy(conn, ios.In) }()
+	go func() { defer close(outDone); _, _ = io.Copy(ios.Out, conn) }()
+	select {
+	case <-outDone: // 对端断开：会话结束
+	case <-inDone: // 本地 stdin 读完：等对端把剩余数据写完
+		<-outDone
+	}
 	return nil
 }
 
@@ -378,16 +417,23 @@ func meshDialFrameNeeded(kind string) bool {
 // meshRelayDial 在连接上写 [4B len][{"dial":addr}] 帧，指示出口节点拨目标。
 // 与 relay_stream.go / relay.leaf.go / p2p.writeDialFrame 的帧格式一致。
 func meshRelayDial(conn net.Conn, addr string) error {
+	return writeDialFrameTo(conn, addr)
+}
+
+// writeDialFrameTo 在任意 io.Writer 上写 [4B len][{"dial":addr}] 帧（与 relay 协议一致）。
+// 供 meshRelayDial（net.Conn）与 p2p.writeDialFrame（mux.Stream）共用（S51），
+// 一处修复两处生效；net.Conn.Write / mux.Stream.Write 均满足 io.Writer。
+func writeDialFrameTo(w io.Writer, addr string) error {
 	head, err := json.Marshal(hub.DialRequest{Dial: addr})
 	if err != nil {
 		return err
 	}
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
-	if _, werr := conn.Write(lenBuf); werr != nil {
+	if _, werr := w.Write(lenBuf); werr != nil {
 		return werr
 	}
-	if _, werr := conn.Write(head); werr != nil {
+	if _, werr := w.Write(head); werr != nil {
 		return werr
 	}
 	return nil
@@ -404,7 +450,19 @@ func meshSignalToken(flagToken string, svc *client.FileClient) string {
 	return svc.AuthToken()
 }
 
+// meshRelayToken 返回自动注册用的 relay_token：显式 --relay-token 优先，否则
+// 回落 meshSignalToken（--token → auth_token）。与 relay start --token 语义对齐，
+// 使 hub 设不同 relay_token/auth_token 时 mesh connect 也能正确完成注册（I37 子决策 A）。
+func meshRelayToken(flagRelayToken, flagToken string, svc *client.FileClient) string {
+	if flagRelayToken != "" {
+		return flagRelayToken
+	}
+	return meshSignalToken(flagToken, svc)
+}
+
 // defaultLocalNodeID 返回本机节点 ID（mesh webrtc 信令来源）。
+// 注：与 p2pFlags.localNode() 功能重复（S53），但 fallback 名有意不同
+// （mesh-node vs p2p-node）保持命令语义隔离，故不合并。
 func defaultLocalNodeID() string {
 	return localHostname()
 }
@@ -416,4 +474,116 @@ func localHostname() string {
 		return "mesh-node"
 	}
 	return host
+}
+
+// normalizeHubEndpoints 将 hub 地址归一为信令 HTTP 基址与注册 WS 端点：
+//   - httpBase（信令 post/poll 用，http(s)://host[:port]，剥 path）；
+//   - wsURL（自动注册用，ws(s)://host[:port]/ws）。
+//
+// hubURL 接受 http(s):// 或 ws(s)://（含 /ws 等 path）；空串回退 serverURL。
+// 这样 --hub 传 relay start 的 ws://.../ws 形式也能正确推导信令基址（I40），
+// 并产出自动注册所需的 WS 端点（I37）。畸形 URL / 未知 scheme 显式报错。
+func normalizeHubEndpoints(hubURL, serverURL string) (httpBase, wsURL string, err error) {
+	if hubURL == "" {
+		hubURL = serverURL
+	}
+	if hubURL == "" {
+		return "", "", fmt.Errorf("hub 地址为空（--hub 未指定且 server_url 为空）")
+	}
+	u, perr := url.Parse(hubURL)
+	if perr != nil {
+		return "", "", fmt.Errorf("解析 hub 地址失败: %w", perr)
+	}
+	switch u.Scheme {
+	case "http", "https", "ws", "wss":
+	default:
+		return "", "", fmt.Errorf("不支持的 hub scheme %q（支持 http/https/ws/wss）", u.Scheme)
+	}
+	httpScheme, wsScheme := u.Scheme, u.Scheme
+	switch u.Scheme {
+	case "ws":
+		httpScheme = "http"
+	case "wss":
+		httpScheme = "https"
+	case "http":
+		wsScheme = "ws"
+	case "https":
+		wsScheme = "wss"
+	}
+	return httpScheme + "://" + u.Host, wsScheme + "://" + u.Host + "/ws", nil
+}
+
+// normalizeListenAddr 将裸 :port 归一为 127.0.0.1:port（loopback 安全默认，
+// 防 LAN 暴露 + Windows 防火墙弹窗）；显式 IP/主机名/0.0.0.0 保持原样（S56）。
+func normalizeListenAddr(addr string) string {
+	if strings.HasPrefix(addr, ":") {
+		return "127.0.0.1" + addr
+	}
+	return addr
+}
+
+// meshTempRegistration 是一次 mesh connect 的临时注册（生命周期与本次命令绑定）。
+type meshTempRegistration struct {
+	signaler *hub.HubSignaler // 携带临时 node_id + per-node secret
+	closer   func() error     // 关闭注册连接 → hub 移除临时节点
+	tempNode string           // 临时节点 ID（调试/日志用）
+}
+
+// meshAutoRegister 连接前自动注册：声明 per-node-secret 能力，从 REG_OK:<secret>
+// 解析出 per-node secret，构建携带 secret 的 HubSignaler，供 webrtc 信令身份校验
+// （B3 服务端对未声明/不匹配 secret 的信令 fail-closed 返回 403）。
+//
+// 注册连接用 mux.New 保活（自动跑 readLoop/pingLoop 处理心跳，镜像 runRelayOnce）；
+// closer 关闭 mux → 底层 WS → hub RemoveIfOwned 移除临时节点。临时 node_id 用
+// mesh-<base>-<unixnano> 保证唯一，严禁直接用用户 node_id（route_table 同名注册
+// 会踢掉长驻 relay 注册）。
+func meshAutoRegister(ctx context.Context, svc *client.FileClient, hubURL, relayToken, signalToken, nodeID string) (*meshTempRegistration, error) {
+	httpBase, wsURL, err := normalizeHubEndpoints(hubURL, svc.ServerURL())
+	if err != nil {
+		return nil, err
+	}
+	tp := xfer.Get("ws")
+	if tp == nil {
+		return nil, fmt.Errorf("ws 传输层未注册")
+	}
+	base := nodeID
+	if base == "" {
+		base = defaultLocalNodeID()
+	}
+	tempNode := fmt.Sprintf("mesh-%s-%d", base, time.Now().UnixNano())
+
+	conn, err := tp.Dial(ctx, wsURL)
+	if err != nil {
+		return nil, fmt.Errorf("连接 Hub 注册端点失败: %w", err)
+	}
+	// 注册帧：声明 per-node-secret 能力，hub 回 REG_OK:<secret>（B1）。
+	if err := conn.Send(ctx, hub.NewRegisterFrame(tempNode, relayToken, hub.Meta{}, hub.CapabilityPerNodeSecret)); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("发送注册帧失败: %w", err)
+	}
+	ackCtx, ackCancel := context.WithTimeout(ctx, registerAckTimeout)
+	ack, ackErr := conn.Receive(ackCtx)
+	ackCancel()
+	if ackErr != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
+	}
+	secret, ackErr := parseRegisterAck(string(ack))
+	if ackErr != nil {
+		_ = conn.Close()
+		return nil, ackErr
+	}
+	if secret == "" {
+		_ = conn.Close()
+		return nil, fmt.Errorf("hub 未下发 per-node secret（未声明能力或能力不被支持）")
+	}
+	// mux 保活：自动跑 readLoop/writeLoop/pingLoop 处理心跳，注册连接存活到命令退出。
+	m := mux.New(conn, mux.RoleListener)
+	signaler := hub.NewHubSignaler(httpBase, signalToken, tempNode, secret)
+	signaler.SetContext(ctx)
+	return &meshTempRegistration{
+		signaler: signaler,
+		closer:   func() error { return m.Close() },
+		tempNode: tempNode,
+	}, nil
 }

@@ -84,6 +84,13 @@ func TestManualSignaler_Cleanup_NoSideEffects_NeverSent(t *testing.T) {
 
 	// 未调用任何 Send* → writtenFile 为空 → Cleanup 不动任何文件
 	sig.Cleanup()
+	// I70：断言无副作用 = offer/answer 文件均未创建（死测试转有效断言）。
+	if _, err := os.Stat(filepath.Join(dir, "offer.sdp")); !os.IsNotExist(err) {
+		t.Fatalf("从未发送时 Cleanup 不应创建 offer 文件: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "answer.sdp")); !os.IsNotExist(err) {
+		t.Fatalf("从未发送时 Cleanup 不应创建 answer 文件: %v", err)
+	}
 }
 
 // TestManualSignaler_Cleanup_FileOverwritten 验证对端已重新写入同名文件时
