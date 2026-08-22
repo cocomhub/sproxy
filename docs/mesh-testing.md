@@ -162,6 +162,36 @@ build/bin/sclient p2p connect \
 
 ---
 
+## 7b. p2p 手工 SDP 打洞（--manual，无 hub 兜底）
+
+**适用场景**：Mac 完全无法访问新加坡 hub 时，仍能与公司电脑打洞直连
+（WebRTC 打洞本身用 Google STUN，只需手工交换 SDP，不依赖 hub）。
+
+**p2p vs mesh 分工**：
+- `mesh connect`：需 hub（服务发现 + 自动选路），日常使用
+- `p2p connect --manual`：无需 hub（手工 SDP），hub 不可达时的兜底
+
+**流程**（两台机器，同机验证时用不同文件路径）：
+
+```bash
+# 1. Mac（dial 侧）：生成 offer，阻塞等待 answer
+build/bin/sclient p2p connect --peer company --tcp 127.0.0.1:22 -l :2222 \
+  --manual --offer /tmp/o.sdp --answer /tmp/a.sdp --node-id mac
+
+# 2. 把 /tmp/o.sdp 拷到公司电脑
+
+# 3. 公司电脑（listen 侧）：读 offer，生成 answer
+build/bin/sclient p2p listen --manual \
+  --offer /tmp/o.sdp --answer /tmp/a.sdp --node-id company
+
+# 4. 把 /tmp/a.sdp 拷回 Mac，Mac 的 connect 自动读到并完成打洞
+# 打洞成功后 Mac 侧 -l :2222 即连到公司电脑出口的 127.0.0.1:22
+```
+
+> 打洞失败会报错（p2p 纯打洞不自动回落）；需要中继时用 `mesh connect` 或 `relay dial`。
+
+---
+
 ## 8. 断网测试（验证核心诉求）
 
 1. 保持 5b 的 SSH 会话
