@@ -5,6 +5,7 @@ package mux_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -139,6 +140,80 @@ func TestWithAcceptChSize(t *testing.T) {
 
 	for _, s := range streams {
 		s.Close()
+	}
+}
+
+// TestStream_Abort_ImmediateAndIdempotent 验证 Abort 立即返回且幂等（I28）。
+func TestStream_Abort_ImmediateAndIdempotent(t *testing.T) {
+	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
+	defer accepted.Close()
+
+	done := make(chan struct{})
+	go func() {
+		if err := stream.Abort(); err != nil {
+			t.Errorf("Abort #1 failed: %v", err)
+		}
+		if err := stream.Abort(); err != nil {
+			t.Errorf("Abort #2 not idempotent: %v", err)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Abort 未立即返回（非阻塞失败）")
+	}
+}
+
+// TestStream_Abort_ReadWriteReturnErrClosed 验证 Abort 后 Read/Write 立即返回
+// ErrConnClosed（I28）。
+func TestStream_Abort_ReadWriteReturnErrClosed(t *testing.T) {
+	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
+	defer accepted.Close()
+
+	if err := stream.Abort(); err != nil {
+		t.Fatalf("Abort failed: %v", err)
+	}
+
+	// Abort 后 Read/Write 不再阻塞，返回包装 ErrConnClosed 的错误。
+	buf := make([]byte, 8)
+	if _, err := stream.Read(buf); !errors.Is(err, xfer.ErrConnClosed) {
+		t.Fatalf("Read after Abort = %v, want xfer.ErrConnClosed", err)
+	}
+	if _, err := stream.Write([]byte("x")); !errors.Is(err, xfer.ErrConnClosed) {
+		t.Fatalf("Write after Abort = %v, want xfer.ErrConnClosed", err)
+	}
+}
+
+// TestStream_Abort_ConcurrentWithPushData 验证 Abort 与 pushData/pushEOF 并发时
+// 无 panic、无数据竞争（closeMu 保护；-race 下运行验证）。
+func TestStream_Abort_ConcurrentWithPushData(t *testing.T) {
+	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
+	defer accepted.Close()
+
+	// 对端写一小批数据，本侧在写入过程中 Abort：数据量远小于发送窗口，不会因
+	// 流控挂起；Abort 后 pushData 经 done 分支丢弃负载，写 goroutine 正常收尾。
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 100 {
+			if _, err := accepted.Write([]byte("payload")); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(10 * time.Millisecond) // 给写 goroutine 启动时间，制造并发窗口
+	if err := stream.Abort(); err != nil {
+		t.Fatalf("Abort failed: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("写 goroutine 未在 Abort 后正常退出")
 	}
 }
 

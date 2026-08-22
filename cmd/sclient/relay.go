@@ -148,8 +148,11 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, dial
 	// 始终传入包含宣告服务地址的拨号策略（--dial-allow=false 时 Serve 在咨询
 	// 策略前就拒绝 dial 帧，策略不生效）。无服务宣告且无 CIDR 时等价默认
 	// DialAllowed（仅公网）。
+	// DialResultFrames=true：经 hub 中继时向 hub 回写拨号结果帧，使 hub 在写 200
+	// 前能确认数据面就绪（I27）。注意 p2p listen（webrtc 直连）必须保持 false，
+	// 否则结果帧会污染数据流。
 	opts := []relay.ServeOptions{
-		{DialPolicy: relay.NewServiceDialPolicy(dialAllowCIDRs, serviceAddrs)},
+		{DialPolicy: relay.NewServiceDialPolicy(dialAllowCIDRs, serviceAddrs), DialResultFrames: true},
 	}
 	err = relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
 	if err != nil {
