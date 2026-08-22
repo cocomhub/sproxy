@@ -114,6 +114,10 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 			if manual {
 				webrtc.SetSignalingTimeout(manualSignalingTimeout)
 			}
+			// 手动模式单次连接：无论打洞成功/失败/panic，退出前都兜底清理本侧写出的 SDP 文件
+			if ms, ok := sig.(*manualSignaler); ok {
+				defer ms.Cleanup()
+			}
 			conn, err := webrtc.DialWithSignaler(peer, sig)
 			if err != nil {
 				return fmt.Errorf("p2p 打洞失败: %w", err)
@@ -178,6 +182,11 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 				webrtc.SetSignalingTimeout(manualSignalingTimeout)
 			}
 
+			// 手动模式单次连接：无论打洞成功/失败/panic，退出前都兜底清理本侧写出的 SDP 文件
+			if ms, ok := sig.(*manualSignaler); ok {
+				defer ms.Cleanup()
+			}
+
 			// 循环 accept：每条 p2p 连接交给 relay.Serve 分发（dial 帧 / HTTP 中继）。
 			// 信令失败（如临时网络抖动）时带退避重试，作为常驻服务不应轻易退出。
 			delay := reconnectBaseDelay
@@ -211,8 +220,14 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 						ios.WriteErrLine("p2p 会话结束: %v", err)
 					}
 				}()
-				// manual 模式单次连接，建立后退出（不再等待更多）
+				// manual 模式单次连接：不再进入 accept 循环，但必须阻塞等待连接结束
+				// （返回会让 main 退出，直接杀掉 relay.Serve/心跳 goroutine 与 WebRTC 连接）。
+				// 阻塞到 mux 关闭（任一侧断开/心跳超时）或 ctx 取消为止，无额外超时。
 				if manual {
+					select {
+					case <-m.Done():
+					case <-ctx.Done():
+					}
 					return nil
 				}
 			}
