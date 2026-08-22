@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -126,13 +125,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 		logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
 
 		if cfg.Hub.Transports.WS.Enabled {
-			hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(cfg.Hub.RelayToken), logger.With("component", "hub"))
-			wsPath := cfg.Hub.Transports.WS.Path
-			if wsPath == "" {
-				wsPath = "/ws"
-			}
-			if strings.HasPrefix(wsPath, "/") == false {
-				wsPath = "/" + wsPath
+			hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(cfg.Hub.RelayToken), logger.With("component", "hub"), cfg.Hub.MaxConnections)
+			// S36：WS 升级路径固定为 /ws。hub.transports.ws.path 已废弃，
+			// 非默认值时仅记录警告并忽略，避免可配置 path 与既有业务路由语义重叠。
+			wsPath := "/ws"
+			if configured := cfg.Hub.Transports.WS.Path; configured != "" && configured != wsPath {
+				logger.Warn("hub.transports.ws.path 已废弃，WS 升级路径固定为 /ws，忽略配置值", "configured", configured)
 			}
 			// 挂载 WebSocket 升级端点到主 mux；连接后由 HubServer 处理注册与转发。
 			hubNode := wsxfer.NewHandlerNode()
@@ -143,7 +141,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 					if aerr != nil {
 						return
 					}
-					go hubSrv.HandleConn(ctx, conn)
+					// I30：连接并发上限由 HubServer 信号量控制；超限立即关闭新连接。
+					if !hubSrv.TryHandleConn(ctx, conn) {
+						logger.Warn("Hub 连接数达到上限，拒绝新连接", "max", cfg.Hub.MaxConnections)
+						_ = conn.Close()
+						continue
+					}
 				}
 			}()
 		}

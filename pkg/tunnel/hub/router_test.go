@@ -138,4 +138,59 @@ func TestHubServerBadToken(t *testing.T) {
 	}
 }
 
+func TestHubServer_TryHandleConn_MaxConns(t *testing.T) {
+	log := testutil.DiscardLogger()
+	rt := NewRouteTable()
+	srv := NewHubServer(rt, NewAuthenticator("secret"), log, 1)
+
+	ctx := t.Context()
+
+	// 第一个连接：信号量空，应被接受
+	client1, server1 := xfertest.Pipe()
+	if !srv.TryHandleConn(ctx, server1) {
+		t.Fatal("expected first connection to be accepted")
+	}
+
+	// 第二个连接：信号量已满，应被拒绝（TryHandleConn 返回 false，调用方负责 Close）
+	client2, server2 := xfertest.Pipe()
+	if srv.TryHandleConn(ctx, server2) {
+		t.Fatal("expected second connection to be rejected when maxConns=1")
+	}
+	_ = client2.Close()
+	_ = server2.Close()
+
+	// 关闭第一个连接，处理 goroutine 结束后应释放名额
+	_ = client1.Close()
+	_ = server1.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		client3, server3 := xfertest.Pipe()
+		if srv.TryHandleConn(ctx, server3) {
+			_ = client3.Close()
+			_ = server3.Close()
+			return
+		}
+		_ = client3.Close()
+		_ = server3.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("semaphore not released after conn close")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestHubServer_TryHandleConn_NoLimit(t *testing.T) {
+	log := testutil.DiscardLogger()
+	rt := NewRouteTable()
+	srv := NewHubServer(rt, NewAuthenticator("secret"), log) // 不传上限 = 无上限
+	ctx := t.Context()
+
+	client, server := xfertest.Pipe()
+	if !srv.TryHandleConn(ctx, server) {
+		t.Fatal("expected connection accepted when maxConns unset")
+	}
+	_ = client.Close()
+	_ = server.Close()
+}
+
 var _ = mux.RoleDialer

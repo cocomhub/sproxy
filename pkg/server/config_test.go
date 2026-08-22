@@ -114,6 +114,45 @@ func TestConfig_Validate_EmptyTunnelKeyNoTLS(t *testing.T) {
 	}
 }
 
+func TestConfig_Defaults_HubMaxConnections(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.SetDefaults()
+	if cfg.Hub.MaxConnections != 256 {
+		t.Fatalf("Hub.MaxConnections default want 256, got %d", cfg.Hub.MaxConnections)
+	}
+	// 显式配置非零值应保留
+	cfg2 := Default()
+	cfg2.Hub.MaxConnections = 64
+	cfg2.SetDefaults()
+	if cfg2.Hub.MaxConnections != 64 {
+		t.Fatalf("Hub.MaxConnections want preserved 64, got %d", cfg2.Hub.MaxConnections)
+	}
+}
+
+func TestConfig_Validate_HubEnabledRequiresRelayToken(t *testing.T) {
+	t.Parallel()
+	// hub.enabled=true 且 relay_token 为空 → 校验失败（C2 主修复）
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.RelayToken = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when hub.enabled=true but relay_token empty")
+	}
+	// 配了 token 后应通过
+	cfg.Hub.RelayToken = "secret"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error with relay_token set: %v", err)
+	}
+	// hub 未启用（默认）时不受影响
+	cfg2 := Default()
+	cfg2.Hub.Enabled = false
+	cfg2.Hub.RelayToken = ""
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("hub disabled should not require relay_token: %v", err)
+	}
+}
+
 // mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。
 type mapProvider struct {
 	m map[string]any
