@@ -10,6 +10,7 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/server"
 )
 
 func TestNew_NoConfigFile(t *testing.T) {
@@ -125,4 +126,37 @@ func TestInterfaceCheck(t *testing.T) {
 	var _ provider.Provider = vp
 	var _ provider.Refresher = vp
 	// 如果能编译到这里，说明接口满足
+}
+
+// TestViperUnmarshal_ACMEMapstructure 验证 viper 路径下 ACME 配置的 mapstructure 标签
+// 与 yaml 键名一致（I31 回归）。此前 ACMEConfig.HTTP01/HTTP01Port 的 mapstructure 标签
+// 写成 http_01/http_01_port，与 yaml 键 http01/http01_port 不一致，导致 viper 解码
+// 恒为默认值（HTTP01 恒 false、HTTP01Port 恒空串）。
+//
+// 必须使用真实 viper（本包）而非 yaml.Unmarshal：pkg/server 的 yaml 路径不受标签漂移影响，
+// 只有 viper 的 mapstructure 路径会静默丢值。
+func TestViperUnmarshal_ACMEMapstructure(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	yamlContent := `
+tls:
+  acme:
+    http01: true
+    http01_port: 80
+`
+	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vp := sproxycfg.New(cfgPath)
+	cfg, err := server.LoadFromProvider(vp)
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if !cfg.TLS.ACME.HTTP01 {
+		t.Error("ACME.HTTP01 viper 解码失败：http01: true 未被还原")
+	}
+	if cfg.TLS.ACME.HTTP01Port != "80" {
+		t.Errorf("ACME.HTTP01Port viper 解码失败：want %q, got %q", "80", cfg.TLS.ACME.HTTP01Port)
+	}
 }
