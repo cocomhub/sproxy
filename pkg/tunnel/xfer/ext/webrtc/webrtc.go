@@ -28,6 +28,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,20 +63,51 @@ var stunServers = defaultSTUNServers
 
 // SetSTUNServers 覆盖 STUN 服务器列表（调用方传入 --stun 的多个值）。
 // 空列表 = 不添加任何 STUN（等价 host-only 候选收集）；传 nil 恢复默认。
-// 在创建任何连接前调用（命令入口处）。
+// 在创建任何连接前调用（命令入口处）。非法 URL（scheme/host:port 不合法）打 Warn 并跳过。
 func SetSTUNServers(servers []string) {
 	if servers == nil {
 		stunServers = defaultSTUNServers
 		return
 	}
-	// 过滤空串，避免空白 flag 值产生无效 ICE server
-	filtered := servers[:0]
+	// 过滤空串与非法 URL，避免空白/无效 flag 值产生无效 ICE server。
+	// 使用独立切片，避免与调用方 slice 共享底层数组（防后续修改污染 stunServers）。
+	filtered := make([]string, 0, len(servers))
 	for _, s := range servers {
-		if strings.TrimSpace(s) != "" {
-			filtered = append(filtered, s)
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
 		}
+		if !validSTUNURL(s) {
+			slog.Warn("webrtc: 忽略非法的 STUN/TURN URL", "url", s)
+			continue
+		}
+		filtered = append(filtered, s)
 	}
 	stunServers = filtered
+}
+
+// validSTUNURL 校验 STUN/TURN URL 的 scheme 与 host:port 基本格式。
+// 支持 stun:/stuns:/turn:/turns: 四种 scheme；TURN URL 可带 ?transport=udp 查询参数。
+// 端口要求为数字（STUN/TURN 均用数字端口；服务名端口不属于合法 ICE server URL）。
+func validSTUNURL(s string) bool {
+	for _, prefix := range []string{"stun:", "stuns:", "turn:", "turns:"} {
+		if !strings.HasPrefix(s, prefix) {
+			continue
+		}
+		rest := s[len(prefix):]
+		if i := strings.IndexByte(rest, '?'); i >= 0 {
+			rest = rest[:i]
+		}
+		host, port, err := net.SplitHostPort(rest)
+		if err != nil || host == "" || port == "" {
+			return false
+		}
+		if _, err := strconv.Atoi(port); err != nil {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // signalingTimeout 是 DialWithSignaler/ListenWithSignaler 内 Wait* 的整体超时。
@@ -90,7 +122,19 @@ var useHostOnly bool
 
 // SetHostOnly 控制是否使用仅本机 host 候选（不加 STUN）。
 // 主要用于测试与无 STUN 可达性的内网场景；生产跨公网打洞请保持默认（含 STUN）。
+// 注意：host-only 模式下远程 ICE 候选过滤全部放行（本机 loopback 候选合法），
+// 该开关同时作为安全过滤（SetRemoteIPFilter）的测试专用旁路。
 func SetHostOnly(hostOnly bool) { useHostOnly = hostOnly }
+
+// rejectPrivateRemoteCandidates 控制是否拒绝私有网段（RFC1918 + ULA）的远程 ICE 候选。
+// 默认 false：LAN mesh 需要放行私网候选做同网段直连；
+// 安全敏感部署（公网节点）可开启收紧，避免对端注入内网地址引发 UDP 探测。
+var rejectPrivateRemoteCandidates bool
+
+// SetRejectPrivateRemoteCandidates 收紧/放开私网远程候选过滤。
+// 默认保持私网放行以支持 LAN mesh；安全敏感部署可显式开启。
+// 在创建任何连接前调用（命令入口处）。
+func SetRejectPrivateRemoteCandidates(reject bool) { rejectPrivateRemoteCandidates = reject }
 
 // verbose 控制 pion 底层（ice/dtls/sctp/webrtc 等 scope）的日志级别。
 // 打洞失败需要排障时开启：会输出 candidate 收发、STUN binding、DTLS 握手等明细。
@@ -126,49 +170,67 @@ func pcStateLevel(s webrtc.PeerConnectionState) slog.Level {
 	}
 }
 
-// pionLoggerFactory 是传给 pion 各传输模块的 logger factory。
-// verbose 开启时把关键 scope 提到 Trace，否则保持默认 Error（无噪音）。
-var pionLoggerFactory = func() logging.LoggerFactory {
-	f := logging.NewDefaultLoggerFactory()
-	return f
-}()
-
-// setupVerboseLogging 在 verbose 开启时提升 pion 底层 scope 的日志级别。
+// configureLoggerFactory 构造 pion 底层日志 factory。
 // pion 没有全局 SetLogLevel：级别通过 SettingEngine.LoggerFactory 按 scope 注入，
-// 因此这里先构造好 factory，newPC 时通过 s.LoggerFactory 传入。
+// 因此这里构造好 factory，newPC 时通过 s.LoggerFactory 传入。
+// verbose 开启时把 ice/dtls/sctp/webrtc 四个关键 scope 提到 Trace（打洞排障明细），
+// 否则显式设为 Error（无噪音）。
+// 每次构造独立 factory 并显式覆盖 4 个 scope 的级别，不依赖 PION_LOG_* 环境变量的
+// 单例，避免外部 env 影响行为（也修复了日志级别被环境变量意外抬高的问题）。
 func configureLoggerFactory(verboseOn bool) logging.LoggerFactory {
+	f := logging.NewDefaultLoggerFactory()
+	level := logging.LogLevelError
 	if verboseOn {
-		f := logging.NewDefaultLoggerFactory()
 		// TRACE 级覆盖打洞排障关键链路：ICE 候选/连通性 + DTLS 握手 + SCTP 连接
-		for _, scope := range []string{"ice", "dtls", "sctp", "webrtc"} {
-			f.ScopeLevels[scope] = logging.LogLevelTrace
-		}
-		return f
+		level = logging.LogLevelTrace
 	}
-	return pionLoggerFactory
+	for _, scope := range []string{"ice", "dtls", "sctp", "webrtc"} {
+		f.ScopeLevels[scope] = level
+	}
+	return f
 }
 
 // logICEEvent 常驻记录 ICE 连接状态变化（打洞失败时的诊断主线）。
-func logICEEvent(pc *webrtc.PeerConnection, prev *webrtc.ICEConnectionState) {
+// 初始状态在闭包内捕获，去重状态由闭包持有，无需外部 *prev 指针。
+// 注意：pion 可能在连接快速关闭时并发触发多次状态回调，去重变量必须加锁保护。
+func logICEEvent(pc *webrtc.PeerConnection) {
+	prev := pc.ICEConnectionState()
+	var mu sync.Mutex
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
-		if *prev != s {
-			*prev = s
-			level := iceStateLevel(s)
-			slog.Log(context.Background(), level,
-				"webrtc: ICE 状态变化", "state", s.String())
+		mu.Lock()
+		unchanged := prev == s
+		if !unchanged {
+			prev = s
 		}
+		mu.Unlock()
+		if unchanged {
+			return
+		}
+		level := iceStateLevel(s)
+		slog.Log(context.Background(), level,
+			"webrtc: ICE 状态变化", "state", s.String())
 	})
 }
 
 // logPCStateEvent 常驻记录聚合连接状态（ICE+DTLS+SCTP 的最终结果）。
-func logPCStateEvent(pc *webrtc.PeerConnection, prev *webrtc.PeerConnectionState) {
+// 初始状态在闭包内捕获，去重状态由闭包持有，无需外部 *prev 指针。
+// 注意：pion 可能在连接快速关闭时并发触发多次状态回调，去重变量必须加锁保护。
+func logPCStateEvent(pc *webrtc.PeerConnection) {
+	prev := pc.ConnectionState()
+	var mu sync.Mutex
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
-		if *prev != s {
-			*prev = s
-			level := pcStateLevel(s)
-			slog.Log(context.Background(), level,
-				"webrtc: 连接状态变化", "state", s.String())
+		mu.Lock()
+		unchanged := prev == s
+		if !unchanged {
+			prev = s
 		}
+		mu.Unlock()
+		if unchanged {
+			return
+		}
+		level := pcStateLevel(s)
+		slog.Log(context.Background(), level,
+			"webrtc: 连接状态变化", "state", s.String())
 	})
 }
 
@@ -178,8 +240,6 @@ type srflxDiag struct {
 	gotSrflx bool
 	total    int
 }
-
-var lastCandidateDiag srflxDiag
 
 // recordCandidate 记录候选类型（host/srflx/relay），供诊断查询。
 func (d *srflxDiag) record(c *webrtc.ICECandidate) {
@@ -209,20 +269,23 @@ func (d *srflxDiag) diagnose(stunEnabled bool) string {
 }
 
 // logCandidateEvents 常驻记录候选收集（Debug 级；帮判断 host/srflx 是否齐全）。
-func logCandidateEvents(pc *webrtc.PeerConnection, counter *int) {
+// diag 是本次连接的候选诊断实例（每次 newPC 新建，杜绝跨连接累积污染）。
+func logCandidateEvents(pc *webrtc.PeerConnection, counter *int, diag *srflxDiag) {
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
 			slog.Debug("webrtc: ICE 候选收集完成", "candidates", *counter)
 			return
 		}
 		*counter++
-		lastCandidateDiag.record(c)
+		diag.record(c)
 		slog.Debug("webrtc: 收集到 ICE 候选", "index", *counter,
 			"type", c.Typ.String(), "addr", c.Address, "port", c.Port)
 	})
 }
 
 // Signal provides in-memory channels for SDP Offer/Answer exchange.
+// 注意：chan buffer 为 1，仅支持单连接 rendezvous（单拨号-单监听）；
+// 生产 mesh/p2p 请使用 hub.HubSignaler 或 manualSignaler（不经本类型）。
 type Signal struct {
 	Offer  chan string
 	Answer chan string
@@ -263,15 +326,25 @@ func (a signalerAdapter) SendOffer(_ string, sdp string) error {
 	a.signal.Offer <- sdp
 	return nil
 }
-func (a signalerAdapter) WaitOffer(_ context.Context) (string, string, error) {
-	return "", <-a.signal.Offer, nil
+func (a signalerAdapter) WaitOffer(ctx context.Context) (string, string, error) {
+	select {
+	case sdp := <-a.signal.Offer:
+		return "", sdp, nil
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
 }
 func (a signalerAdapter) SendAnswer(_ string, sdp string) error {
 	a.signal.Answer <- sdp
 	return nil
 }
-func (a signalerAdapter) WaitAnswer(_ context.Context) (string, string, error) {
-	return "", <-a.signal.Answer, nil
+func (a signalerAdapter) WaitAnswer(ctx context.Context) (string, string, error) {
+	select {
+	case sdp := <-a.signal.Answer:
+		return "", sdp, nil
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
 }
 
 type webrtcAddr struct{}
@@ -283,14 +356,67 @@ func (webrtcAddr) String() string  { return "webrtc" }
 type Conn struct {
 	raw       io.ReadWriteCloser
 	pc        *webrtc.PeerConnection
+	closeCh   chan struct{}
 	closeOnce sync.Once
+	readMu    sync.Mutex // 串行化 Read（pion detached DataChannel 不支持并发 Read）
 }
 
-func (c *Conn) Read(b []byte) (int, error)  { return c.raw.Read(b) }
-func (c *Conn) Write(b []byte) (int, error) { return c.raw.Write(b) }
+// Read 读取一条消息。与底层读并行监听 closeCh：Close 后 Read 可被确定性唤醒并
+// 立即返回错误（pion detached DataChannel 在 pc.Close 后不保证唤醒读循环，
+// 实测可能阻塞数秒甚至更久）。Read-after-Close 返回 xfer.ErrConnClosed。
+func (c *Conn) Read(b []byte) (int, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+
+	select {
+	case <-c.closeCh:
+		return 0, xfer.ErrConnClosed
+	default:
+	}
+
+	type readResult struct {
+		n   int
+		err error
+		buf []byte
+	}
+	// 在独立 goroutine 中读入临时缓冲，避免 closeCh 命中时 caller 复用 b 与
+	// 在途 raw.Read 继续写入 b 产生数据竞争。
+	resCh := make(chan readResult, 1)
+	go func() {
+		tmp := make([]byte, len(b))
+		n, err := c.raw.Read(tmp)
+		resCh <- readResult{n: n, err: err, buf: tmp}
+	}()
+	select {
+	case r := <-resCh:
+		copy(b, r.buf[:r.n])
+		return r.n, r.err
+	case <-c.closeCh:
+		// 有在途数据时 Close 优先：数据丢弃，返回关闭语义错误
+		return 0, io.ErrClosedPipe
+	}
+}
+
+func (c *Conn) Write(b []byte) (int, error) {
+	select {
+	case <-c.closeCh:
+		return 0, io.ErrClosedPipe
+	default:
+	}
+	return c.raw.Write(b)
+}
+
 func (c *Conn) Close() error {
 	var err error
-	c.closeOnce.Do(func() { err = c.pc.Close() })
+	c.closeOnce.Do(func() {
+		close(c.closeCh)
+		if c.raw != nil {
+			err = c.raw.Close()
+		}
+		if cerr := c.pc.Close(); err == nil {
+			err = cerr
+		}
+	})
 	return err
 }
 func (c *Conn) LocalAddr() net.Addr                { return webrtcAddr{} }
@@ -308,24 +434,57 @@ func defaultConfig() webrtc.Configuration {
 	}
 }
 
-func newPC() (*webrtc.PeerConnection, error) {
+func newPC() (*webrtc.PeerConnection, *srflxDiag, error) {
 	s := webrtc.SettingEngine{}
 	s.DetachDataChannels()
 	// verbose 时提升 pion 底层 scope（ice/dtls/sctp/webrtc）到 TRACE，便于打洞排障
 	s.LoggerFactory = configureLoggerFactory(verbose)
+	// 安全过滤远程 ICE 候选：默认拒 loopback/link-local/multicast/unspecified/broadcast，
+	// 私网（RFC1918+ULA）默认放行（保 LAN mesh）；useHostOnly 时全放行（本机 loopback 合法）。
+	if !useHostOnly {
+		s.SetRemoteIPFilter(remoteCandidateFilter(rejectPrivateRemoteCandidates))
+	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(s))
 	pc, err := api.NewPeerConnection(defaultConfig())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	// 常驻打洞流程日志：状态流转（Info）+ 失败（Warn）+ 候选收集（Debug）
-	iceState := pc.ICEConnectionState()
-	logICEEvent(pc, &iceState)
-	pcState := pc.ConnectionState()
-	logPCStateEvent(pc, &pcState)
+	// 常驻打洞流程日志：状态流转（Info）+ 失败（Warn）+ 候选收集（Debug）。
+	// diag 按连接实例创建，候选收集从零开始，杜绝跨连接累积污染诊断。
+	diag := &srflxDiag{}
+	logICEEvent(pc)
+	logPCStateEvent(pc)
 	var candidateCount int
-	logCandidateEvents(pc, &candidateCount)
-	return pc, nil
+	logCandidateEvents(pc, &candidateCount, diag)
+	return pc, diag, nil
+}
+
+// remoteCandidateFilter 构造传给 pion SettingEngine.SetRemoteIPFilter 的过滤函数。
+// 默认拒：loopback / link-local（unicast+multicast）/ multicast / unspecified / broadcast；
+// 私网（RFC1918 + ULA）默认放行（保 LAN mesh），rejectPrivate 为 true 时一并拒绝。
+// 过滤发生在 ICE agent addRemoteCandidate（内联候选与 trickle 候选的唯一入口），
+// 在任何 connectivity check 发起之前，是零依赖、覆盖内联 + trickle 的安全边界。
+func remoteCandidateFilter(rejectPrivate bool) func(net.IP) bool {
+	return func(ip net.IP) bool {
+		if ip == nil {
+			return false
+		}
+		switch {
+		case ip.IsLoopback():
+			return false
+		case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast():
+			return false
+		case ip.IsMulticast():
+			return false
+		case ip.IsUnspecified():
+			return false
+		case ip.Equal(net.IPv4bcast): // 255.255.255.255
+			return false
+		case rejectPrivate && ip.IsPrivate():
+			return false
+		}
+		return true
+	}
 }
 
 func marshalLD(pc *webrtc.PeerConnection) (string, error) {
@@ -349,9 +508,18 @@ func Listen(signal *Signal) (*Conn, error) {
 
 // DialWithSignaler 通过指定的 Signaler 建立连接（跨机器可用）。
 // peer 是远端节点标识：Offer 发给 peer，Answer 等待来自 peer。
-// 整体等待受 defaultICETimeout 约束，避免对端离线时永久挂起。
+// 整体等待受 signalingTimeout 约束，避免对端离线时永久挂起。
+// 该便捷包装使用 context.Background()；需要外部 ctx 取消请用 DialWithSignalerCtx。
 func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
-	pc, err := newPC()
+	return DialWithSignalerCtx(context.Background(), peer, sig)
+}
+
+// DialWithSignalerCtx 通过指定的 Signaler 建立连接（跨机器可用）。
+// peer 是远端节点标识：Offer 发给 peer，Answer 等待来自 peer。
+// 整体等待受 ctx 与 signalingTimeout 共同约束：ctx 取消立即返回 ctx.Err()，
+// 对端离线超时返回带候选诊断的错误。
+func DialWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Conn, error) {
+	pc, diag, err := newPC()
 	if err != nil {
 		return nil, fmt.Errorf("dial: new pc: %w", err)
 	}
@@ -386,7 +554,7 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	}
 
 	// 等待对端 Answer（整体超时：默认 30s，--manual 场景可 SetSignalingTimeout 调大）
-	waitCtx, cancel := context.WithTimeout(context.Background(), signalingTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, signalingTimeout)
 	defer cancel()
 	from, aJSON, err := sig.WaitAnswer(waitCtx)
 	if err != nil {
@@ -409,9 +577,12 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 
 	select {
 	case <-openCh:
+	case <-ctx.Done():
+		pc.Close()
+		return nil, ctx.Err()
 	case <-time.After(defaultICETimeout):
 		pc.Close()
-		return nil, fmt.Errorf("dial: dc open timed out %s", lastCandidateDiag.diagnose(!useHostOnly && len(stunServers) > 0))
+		return nil, fmt.Errorf("dial: dc open timed out %s", diag.diagnose(!useHostOnly && len(stunServers) > 0))
 	}
 
 	raw, err := dc.Detach()
@@ -419,14 +590,22 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		pc.Close()
 		return nil, fmt.Errorf("dial: detach: %w", err)
 	}
-	return &Conn{raw: raw, pc: pc}, nil
+	return &Conn{raw: raw, pc: pc, closeCh: make(chan struct{})}, nil
 }
 
 // ListenWithSignaler 通过指定的 Signaler 等待连接（跨机器可用）。
 // 等待发给本节点的 Offer，Answer 回给 offer 的发送方。
-// 整体等待受 defaultICETimeout 约束，避免无拨号方时永久挂起。
+// 整体等待受 signalingTimeout 约束，避免无拨号方时永久挂起。
+// 该便捷包装使用 context.Background()；需要外部 ctx 取消请用 ListenWithSignalerCtx。
 func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
-	pc, err := newPC()
+	return ListenWithSignalerCtx(context.Background(), peer, sig)
+}
+
+// ListenWithSignalerCtx 通过指定的 Signaler 等待连接（跨机器可用）。
+// 等待发给本节点的 Offer，Answer 回给 offer 的发送方。
+// 整体等待受 ctx 与 signalingTimeout 共同约束：ctx 取消立即返回 ctx.Err()。
+func ListenWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Conn, error) {
+	pc, diag, err := newPC()
 	if err != nil {
 		return nil, fmt.Errorf("listen: new pc: %w", err)
 	}
@@ -440,7 +619,7 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		}
 	})
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), signalingTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, signalingTimeout)
 	defer cancel()
 	offerFrom, oJSON, err := sig.WaitOffer(waitCtx)
 	if err != nil {
@@ -486,9 +665,12 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	var dc *webrtc.DataChannel
 	select {
 	case dc = <-dcCh:
+	case <-ctx.Done():
+		pc.Close()
+		return nil, ctx.Err()
 	case <-time.After(defaultICETimeout):
 		pc.Close()
-		return nil, fmt.Errorf("listen: dc not received within %v %s", defaultICETimeout, lastCandidateDiag.diagnose(!useHostOnly && len(stunServers) > 0))
+		return nil, fmt.Errorf("listen: dc not received within %v %s", defaultICETimeout, diag.diagnose(!useHostOnly && len(stunServers) > 0))
 	}
 
 	// Wait for the DataChannel to open and then detach it.
@@ -496,9 +678,12 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	dc.OnOpen(func() { close(openCh) })
 	select {
 	case <-openCh:
+	case <-ctx.Done():
+		pc.Close()
+		return nil, ctx.Err()
 	case <-time.After(defaultICETimeout):
 		pc.Close()
-		return nil, fmt.Errorf("listen: dc open timed out %s", lastCandidateDiag.diagnose(!useHostOnly && len(stunServers) > 0))
+		return nil, fmt.Errorf("listen: dc open timed out %s", diag.diagnose(!useHostOnly && len(stunServers) > 0))
 	}
 
 	raw, err := dc.Detach()
@@ -506,7 +691,7 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		pc.Close()
 		return nil, fmt.Errorf("listen: detach: %w", err)
 	}
-	return &Conn{raw: raw, pc: pc}, nil
+	return &Conn{raw: raw, pc: pc, closeCh: make(chan struct{})}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -519,13 +704,28 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 // 这里仿照 tcp 传输，用 [4B big-endian length][payload] 帧界定消息，
 // 使 mux 的最大帧（8B 头 + 65535 负载）能完整传输，不被 Read 截断。
 type webrtcXferConn struct {
-	raw *Conn
-	mu  sync.Mutex // 串行化 Send（保护 raw.Write 不被并发交错）
+	raw    *Conn
+	mu     sync.Mutex // 串行化 Send（保护 raw.Write 不被并发交错）
+	closed bool
 }
 
-func (c *webrtcXferConn) Send(_ context.Context, msg []byte) error {
+func (c *webrtcXferConn) Send(ctx context.Context, msg []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if c.closed {
+		return xfer.ErrConnClosed
+	}
+	// 单条消息上限防御：uint32(len(msg)) 在 len(msg) 超 4GiB 时溢出，且对端
+	// maxFrameBytes 缓冲放不下。mux 帧本身封顶 64KiB，此处为传输层防御缺口补漏。
+	if len(msg) > maxFrameBytes {
+		return fmt.Errorf("webrtc: message too large: %d > %d bytes", len(msg), maxFrameBytes)
+	}
 	frame := make([]byte, 4+len(msg))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(msg)))
 	copy(frame[4:], msg)
@@ -533,7 +733,12 @@ func (c *webrtcXferConn) Send(_ context.Context, msg []byte) error {
 	return err
 }
 
-func (c *webrtcXferConn) Receive(_ context.Context) ([]byte, error) {
+func (c *webrtcXferConn) Receive(ctx context.Context) ([]byte, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 	// pion DetachDataChannel 的 Read 是「消息级」：一次返回一整条应用消息，
 	// 若 p 小于消息则返回 io.ErrShortBuffer。因此必须先读整帧到足够大的缓冲，
 	// 再解析前 4 字节长度（不能先读 4B 再读体——那会把整个帧当一条消息）。
@@ -555,6 +760,12 @@ func (c *webrtcXferConn) Receive(_ context.Context) ([]byte, error) {
 }
 
 func (c *webrtcXferConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
 	return c.raw.Close()
 }
 
@@ -596,10 +807,11 @@ func xferDial(ctx context.Context, addr string) (xfer.Conn, error) {
 
 // webrtcListener implements xfer.Listener.
 type webrtcListener struct {
-	signal   *Signal
-	addr     string
-	acceptCh chan *webrtcXferConn
-	done     chan struct{}
+	signal    *Signal
+	addr      string
+	acceptCh  chan *webrtcXferConn
+	done      chan struct{}
+	closeOnce sync.Once // Close 幂等（对齐 tcp.TcpListener）
 }
 
 func (l *webrtcListener) Accept(ctx context.Context) (xfer.Conn, error) {
@@ -614,7 +826,7 @@ func (l *webrtcListener) Accept(ctx context.Context) (xfer.Conn, error) {
 }
 
 func (l *webrtcListener) Close() error {
-	close(l.done)
+	l.closeOnce.Do(func() { close(l.done) })
 	return nil
 }
 
@@ -634,13 +846,28 @@ func xferListen(ctx context.Context, addr string) (xfer.Listener, error) {
 }
 
 func (l *webrtcListener) acceptLoop(ctx context.Context) {
+	loopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// l.done 关闭时取消 loopCtx，使阻塞中的 ListenWithSignalerCtx 立即返回（无泄漏）。
+	go func() {
+		select {
+		case <-l.done:
+			cancel()
+		case <-loopCtx.Done():
+		}
+	}()
+
 	for {
-		conn, err := Listen(l.signal)
+		conn, err := ListenWithSignalerCtx(loopCtx, "", signalerAdapter{signal: l.signal})
 		if err != nil {
 			select {
 			case <-l.done:
 				return
+			case <-loopCtx.Done():
+				return
 			default:
+				// 瞬时失败继续监听
 				continue
 			}
 		}
