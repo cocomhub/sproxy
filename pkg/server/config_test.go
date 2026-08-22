@@ -313,7 +313,6 @@ func TestConfig_YAMLTagsMatchMapstructure(t *testing.T) {
 		}
 		seen[typ] = true
 		for f := range typ.Fields() {
-			f := f
 			if !f.IsExported() {
 				continue
 			}
