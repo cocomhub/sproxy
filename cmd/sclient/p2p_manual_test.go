@@ -154,3 +154,69 @@ func TestManualSignaler_StdioWaitTimeout(t *testing.T) {
 		t.Fatal("expected timeout error when no valid answer arrives")
 	}
 }
+
+// TestWriteSDPFile_RefusesNonSDPOverwrite 验证 writeSDPFile 拒绝覆盖非 SDP 存量文件
+// （I47 数据丢失防护：路径拼错指向重要文件时不得静默删除）。
+func TestWriteSDPFile_RefusesNonSDPOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "important.txt")
+	if err := os.WriteFile(path, []byte("important data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := writeSDPFile(path, `{"type":"offer","sdp":"v=0\r\n..."}`)
+	if err == nil {
+		t.Fatal("应拒绝覆盖非 SDP 存量文件")
+	}
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("拒绝后原文件应保留: %v", rerr)
+	}
+	if string(data) != "important data" {
+		t.Fatalf("原文件内容应未被改写: %q", string(data))
+	}
+}
+
+// TestWriteSDPFile_OverwritesStaleSDP 验证 writeSDPFile 覆盖陈旧 SDP 残留
+// （人工重试场景最常遇到，必须可覆盖）。
+func TestWriteSDPFile_OverwritesStaleSDP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "offer.sdp")
+	if err := os.WriteFile(path, []byte(`{"type":"offer","sdp":"v=0\r\n...old"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newSDP := `{"type":"offer","sdp":"v=0\r\n...new"}`
+	if err := writeSDPFile(path, newSDP); err != nil {
+		t.Fatalf("陈旧 SDP 应可覆盖: %v", err)
+	}
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		t.Fatalf("读回失败: %v", rerr)
+	}
+	if string(data) != newSDP {
+		t.Fatalf("应写入新内容: %q", string(data))
+	}
+}
+
+// TestValidateSDPFile_SDPPayloadChecks 验证 S66 的 SDP 载荷完整性校验。
+func TestValidateSDPFile_SDPPayloadChecks(t *testing.T) {
+	cases := []struct {
+		name    string
+		data    string
+		wantErr bool
+	}{
+		{"合法", `{"type":"offer","sdp":"v=0\r\n..."}`, false},
+		{"sdp 为空", `{"type":"offer","sdp":""}`, true},
+		{"缺 sdp 字段", `{"type":"offer"}`, true},
+		{"sdp 不以 v= 开头", `{"type":"offer","sdp":"o=- 1 2 IN IP4 127.0.0.1"}`, true},
+		{"type 不匹配", `{"type":"answer","sdp":"v=0\r\n..."}`, true},
+		{"非 JSON", `not-json`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := validateSDPFile([]byte(tc.data), "offer")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateSDPFile(%q) err=%v, wantErr=%v", tc.data, err, tc.wantErr)
+			}
+		})
+	}
+}

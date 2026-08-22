@@ -430,11 +430,27 @@ func writeDialFrameTo(w io.Writer, addr string) error {
 	}
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
-	if _, werr := w.Write(lenBuf); werr != nil {
-		return werr
+	// S68：io.Writer 契约允许部分写（mux 流在发送窗口小于 buf 时返回短写），
+	// 逐段写入不检查会致帧损坏——用 writeFull 循环写满。
+	if err := writeFull(w, lenBuf); err != nil {
+		return err
 	}
-	if _, werr := w.Write(head); werr != nil {
-		return werr
+	return writeFull(w, head)
+}
+
+// writeFull 循环写满整个 buf，处理 io.Writer 的部分写（mux 流在发送窗口小于
+// buf 长度时返回 n<len 的短写）。仅用于小帧（长度前缀 + 元数据）；数据面泵送
+// 用 io.Copy。与 relay 包 leaf.go 的 writeFull 同款（S68）。
+func writeFull(w io.Writer, buf []byte) error {
+	for len(buf) > 0 {
+		n, err := w.Write(buf)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		buf = buf[n:]
 	}
 	return nil
 }
