@@ -28,13 +28,27 @@ type SignalBroker struct {
 }
 
 // NewSignalBroker 创建信令 broker（信令队列）。
+// rt 非 nil 时注册节点下线回调：节点从路由表真正移除（连接断开 RemoveIfOwned /
+// 手动踢除 Remove）即清空其信令收件箱（I6）。仅当节点被真正移除（而非同名节点
+// 重连替换）时触发——重连时 RemoveIfOwned 所有权不匹配返回 false，不误删在线
+// 节点收件箱。
 func NewSignalBroker(rt *hub.RouteTable) *SignalBroker {
-	return &SignalBroker{
+	b := &SignalBroker{
 		queue:       hub.NewSignalQueue(),
 		rt:          rt,
 		logger:      slog.Default(),
 		pollTimeout: hub.PollTimeout,
 	}
+	if rt != nil {
+		rt.SetRemoveHook(b.PurgeNode)
+	}
+	return b
+}
+
+// PurgeNode 清空指定节点（下线）的信令收件箱与 waiter，释放 maxSignalTotal
+// 全局配额（I6）。幂等：节点从未有消息时是 no-op。
+func (b *SignalBroker) PurgeNode(id hub.NodeID) {
+	b.queue.Purge(string(id))
 }
 
 // maxSignalBodyBytes 是单条信令消息体的最大字节数（SDP 通常 < 8 KiB）。

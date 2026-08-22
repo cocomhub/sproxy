@@ -26,11 +26,11 @@ const (
 	// 默认 10 分钟：人工拷文件/复制粘贴 JSON 需要较长窗口。
 	manualSignalingTimeout = 10 * time.Minute
 
-	// p2pPumpGracePeriod 是 pump 第二方向完成收尾的宽限期（对齐 leaf.go pump 的
-	// C1 修复）：首方向完成（已传播半关闭）后，第二方向需在此时间内完成；超时
-	// 视为对端非合作，强制关闭两端防 goroutine / FD 泄漏。长连接（双向持续
+	// pumpGracePeriod 是 pump / pumpConns 第二方向完成收尾的宽限期（对齐 leaf.go
+	// pump 的 C1 修复）：首方向完成（已传播半关闭）后，第二方向需在此时间内完成；
+	// 超时视为对端非合作，强制关闭两端防 goroutine / FD 泄漏。长连接（双向持续
 	// 活跃）不触发宽限期——计时器只在某方向完成且另一方向仍空闲时启动。
-	p2pPumpGracePeriod = 60 * time.Second
+	pumpGracePeriod = 60 * time.Second
 )
 
 // discardLogger 返回输出到 io.Discard 的 logger（供测试桩使用，如 mesh_test 的
@@ -206,7 +206,7 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 	}
 	cmd.Flags().String("peer", "", "对端节点 ID")
 	cmd.Flags().String("tcp", "", "对端要出站连接的 TCP 地址（如 target-host:22）")
-	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 :2222）；留空为单次 stdin/stdout 模式")
+	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 127.0.0.1:2222；裸 :2222 归一为 127.0.0.1:2222）；留空为单次 stdin/stdout 模式")
 	cmd.Flags().Bool("manual", false, "手工 SDP 信令（不依赖 hub）：提供 --offer/--answer 走文件交换，否则走 stdin/stdout 粘贴 JSON")
 	cmd.Flags().String("offer", "", "--manual 文件模式的 offer SDP 文件路径（需同时给 --answer）")
 	cmd.Flags().String("answer", "", "--manual 文件模式的 answer SDP 文件路径（需同时给 --offer）")
@@ -385,6 +385,10 @@ func buildP2PServeOpts(services, dialAllowCIDRs []string, ios cli.IOStreams) []r
 
 // p2pForward 在已建立的 p2p mux 上做本地端口转发。
 func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr string, ios cli.IOStreams) error {
+	// 裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 + Windows
+	// 防火墙弹窗），与 mesh connect / relay dial 对齐（S56）；显式 0.0.0.0:port /
+	// 具体 IP 保持原样。
+	listenAddr = normalizeListenAddr(listenAddr)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听本地端口失败: %w", err)
@@ -508,7 +512,7 @@ func pump(local net.Conn, s mux.Stream) {
 			remaining--
 			if remaining == 1 {
 				// 一个方向完成：启动宽限期等待另一半完成半关闭收尾。
-				timer = time.NewTimer(p2pPumpGracePeriod)
+				timer = time.NewTimer(pumpGracePeriod)
 				timeoutCh = timer.C
 			}
 		case <-timeoutCh:
@@ -522,4 +526,66 @@ func pump(local net.Conn, s mux.Stream) {
 			return
 		}
 	}
+}
+
+// pumpConns 双向泵送两个 net.Conn（本地 socket <-> 隧道远端连接）。
+// 关闭语义与 leaf.go pump 的 C1 修复一致（S63 范本）：
+//   - 每个方向 io.Copy 完成后向对端 CloseWrite 传播半关闭（TCP FIN / 流 EOF），
+//     而不是立即全关——让对端在途响应仍可被读回（不截断）。
+//   - 首方向完成后武装 grace 宽限期计时器：宽限期内另一方向完成则正常收尾；
+//     超时视为对端非合作（对 FIN 不回应），强制关闭两端解除 Read 阻塞，
+//     防 goroutine / FD 泄漏。长连接（双向持续活跃）不触发计时器，不误断。
+//   - 返回后由调用方以 defer 关闭两端收尾（本函数不主动全关正常路径）。
+func pumpConns(a, b net.Conn, grace time.Duration) {
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(b, a)
+		closeWriteConn(b)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(a, b)
+		closeWriteConn(a)
+		done <- struct{}{}
+	}()
+
+	remaining := 2
+	var timeoutCh <-chan time.Time
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for remaining > 0 {
+		select {
+		case <-done:
+			remaining--
+			if remaining == 1 {
+				timer = time.NewTimer(grace)
+				timeoutCh = timer.C
+			}
+		case <-timeoutCh:
+			// 非合作对端：强制关闭两端，解除 a.Read / b.Read 阻塞。
+			_ = a.Close()
+			_ = b.Close()
+			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
+				<-done
+				remaining--
+			}
+			return
+		}
+	}
+}
+
+// closeWriteConn 向 conn 传播写半关闭（TCP FIN / 流 EOF），尽力而为：
+// 实现了 CloseWrite() 的连接（*net.TCPConn、client.bufferedNetConn 等）用
+// CloseWrite；其余（如 WebRTC 包装 conn）不支持半关闭则用 Close 退化，仍能
+// 解除对端 Read 阻塞。
+func closeWriteConn(conn net.Conn) {
+	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+		return
+	}
+	_ = conn.Close()
 }

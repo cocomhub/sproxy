@@ -509,6 +509,7 @@ func TestMeshConnect_504Fallback(t *testing.T) {
 					return
 				}
 				contentLength := int64(0)
+				headers := map[string]string{}
 				for {
 					line, rerr := br.ReadString('\n')
 					if rerr != nil {
@@ -518,9 +519,15 @@ func TestMeshConnect_504Fallback(t *testing.T) {
 						break
 					}
 					k, v, ok := strings.Cut(line, ":")
-					if ok && strings.ToLower(strings.TrimSpace(k)) == "content-length" {
-						contentLength, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+					if ok {
+						headers[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
 					}
+				}
+				contentLength, _ = strconv.ParseInt(headers["content-length"], 10, 64)
+				// I66：信令/中继请求必须携带复用后的 auth_token Bearer
+				if headers["authorization"] != "Bearer test-token" {
+					_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\x0d\x0a\x0d\x0a")
+					return
 				}
 				switch {
 				case strings.Contains(statusLine, "GET /api/hub/services "):
@@ -605,6 +612,7 @@ func TestMeshConnect_AllCandidatesFail(t *testing.T) {
 					return
 				}
 				contentLength := int64(0)
+				headers := map[string]string{}
 				for {
 					line, rerr := br.ReadString('\n')
 					if rerr != nil {
@@ -614,9 +622,15 @@ func TestMeshConnect_AllCandidatesFail(t *testing.T) {
 						break
 					}
 					k, v, ok := strings.Cut(line, ":")
-					if ok && strings.ToLower(strings.TrimSpace(k)) == "content-length" {
-						contentLength, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+					if ok {
+						headers[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
 					}
+				}
+				contentLength, _ = strconv.ParseInt(headers["content-length"], 10, 64)
+				// I66：信令/中继请求必须携带复用后的 auth_token Bearer
+				if headers["authorization"] != "Bearer test-token" {
+					_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\x0d\x0a\x0d\x0a")
+					return
 				}
 				switch {
 				case strings.Contains(statusLine, "GET /api/hub/services "):

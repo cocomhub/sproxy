@@ -152,7 +152,7 @@ sproxy v2 引入了可插拔传输层抽象，从下到上共 4 层（详见 `do
 
 ```
 应用层: HTTP 路由 + sclient CLI + FileClient Go SDK
-  ↑  hub 层: 节点注册 / 路由表 / 中继转发 (RouteTable / RelayHandler)
+  ↑  hub 层: 节点注册 / 路由表 / 流中继 (RouteTable / RelayStreamHandler)
   ↑  tunnel 层: HTTP 请求-响应交换 (Tunnel.Do/Serve, AES-256-GCM)
   ↑  mux 层: 虚拟流多路复用 (Stream RWC + 心跳 30s/90s)
   ↑  xfer 层: 传输层抽象 (Conn{ Send/Receive/Close })

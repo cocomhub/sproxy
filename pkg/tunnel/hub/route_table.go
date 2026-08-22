@@ -33,6 +33,19 @@ type RouteTable struct {
 	nodes    map[NodeID]*mux.Mux
 	info     map[NodeID]NodeInfo  // 扩展信息
 	services map[NodeID][]Service // 节点宣告的服务（mesh 选路）
+	// onRemove 是节点真正从路由表移除时的回调（Remove / RemoveIfOwned 成功路径）。
+	// 供上层（如 server 的 SignalBroker）在节点下线时清理 per-node 状态（I6 收件箱）。
+	// 在锁外同步调用，必须快速返回；nil 表示未注册。
+	onRemove func(NodeID)
+}
+
+// SetRemoveHook 注册节点移除回调：节点真正从路由表移除（Remove / RemoveIfOwned
+// 成功）后、在锁外调用一次 fn(id)。传 nil 清除回调。回调应快速返回（不做阻塞
+// I/O），需异步自行 go。
+func (rt *RouteTable) SetRemoveHook(fn func(NodeID)) {
+	rt.mu.Lock()
+	rt.onRemove = fn
+	rt.mu.Unlock()
 }
 
 // NewRouteTable 创建路由表。
@@ -87,35 +100,46 @@ func (rt *RouteTable) AddWithInfoAndServices(info NodeInfo, svcs []Service) {
 }
 
 // Remove 移除一个节点。返回是否真正移除（节点存在）。
+// 移除成功后在锁外触发 onRemove 回调（若注册）。
 func (rt *RouteTable) Remove(id NodeID) bool {
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
 	m, ok := rt.nodes[id]
 	if !ok {
+		rt.mu.Unlock()
 		return false
 	}
 	delete(rt.nodes, id)
 	delete(rt.info, id)
 	delete(rt.services, id)
+	fn := rt.onRemove
+	rt.mu.Unlock()
 	if m != nil {
 		go func() { _ = m.Close() }()
+	}
+	if fn != nil {
+		fn(id)
 	}
 	return true
 }
 
 // RemoveIfOwned 仅当该节点 ID 当前绑定到给定 mux（即本连接）时才移除。
 // 防止旧连接断开时误删新注册的同名节点（stale identity 防护）。
-// 返回是否真正移除。
+// 返回是否真正移除。移除成功后在锁外触发 onRemove 回调（若注册）。
 func (rt *RouteTable) RemoveIfOwned(id NodeID, m *mux.Mux) bool {
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
 	cur, ok := rt.nodes[id]
 	if !ok || cur != m {
+		rt.mu.Unlock()
 		return false
 	}
 	delete(rt.nodes, id)
 	delete(rt.info, id)
 	delete(rt.services, id)
+	fn := rt.onRemove
+	rt.mu.Unlock()
+	if fn != nil {
+		fn(id)
+	}
 	return true
 }
 

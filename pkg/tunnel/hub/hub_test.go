@@ -4,6 +4,7 @@
 package hub_test
 
 import (
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -68,6 +69,74 @@ func TestRouteTableRemoveIfOwned(t *testing.T) {
 	// 再次移除（已不存在）：返回 false
 	if rt.RemoveIfOwned("node-1", m1) {
 		t.Fatal("RemoveIfOwned of absent node should return false")
+	}
+}
+
+// TestRouteTable_RemoveHook 验证节点移除回调（I6 收件箱清理钩子）：
+// Remove / RemoveIfOwned 真正移除节点时触发；失败路径（节点不存在 / 所有权
+// 不匹配的 stale identity）不触发；SetRemoveHook(nil) 清除后不再触发。
+func TestRouteTable_RemoveHook(t *testing.T) {
+	rt := hub.NewRouteTable()
+	newTestMux := func() *mux.Mux {
+		a, _ := xfertest.Pipe()
+		m := mux.New(a, mux.RoleDialer)
+		t.Cleanup(func() { _ = m.Close() })
+		return m
+	}
+
+	var mu sync.Mutex
+	var removed []hub.NodeID
+	rt.SetRemoveHook(func(id hub.NodeID) {
+		mu.Lock()
+		removed = append(removed, id)
+		mu.Unlock()
+	})
+	hasRemoved := func(id string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Contains(removed, hub.NodeID(id))
+	}
+
+	// Remove 成功路径触发
+	rt.Add("node-a", newTestMux())
+	if !rt.Remove("node-a") {
+		t.Fatal("Remove should succeed")
+	}
+	if !hasRemoved("node-a") {
+		t.Fatalf("Remove hook should fire for node-a, got %v", removed)
+	}
+
+	// Remove 不存在的节点不触发
+	_ = rt.Remove("ghost")
+	if len(removed) != 1 {
+		t.Fatalf("removing absent node should not fire hook, got %v", removed)
+	}
+
+	// RemoveIfOwned 所有权匹配触发
+	m := newTestMux()
+	rt.AddWithInfoAndServices(hub.NodeInfo{ID: "node-b", Mux: m}, nil)
+	if !rt.RemoveIfOwned("node-b", m) {
+		t.Fatal("RemoveIfOwned should succeed")
+	}
+	if !hasRemoved("node-b") {
+		t.Fatalf("RemoveIfOwned hook should fire for node-b, got %v", removed)
+	}
+
+	// RemoveIfOwned 所有权不匹配不触发（stale identity 防护：同名节点被新连接
+	// 重新注册后，旧连接断开不得触发清理——在线节点收件箱保留）
+	rt.Add("node-c", newTestMux())
+	if rt.RemoveIfOwned("node-c", newTestMux()) {
+		t.Fatal("RemoveIfOwned with wrong mux should return false")
+	}
+	if len(removed) != 2 {
+		t.Fatalf("RemoveIfOwned mismatch should not fire hook, got %v", removed)
+	}
+
+	// SetRemoveHook(nil) 清除后不再触发
+	rt.SetRemoveHook(nil)
+	_ = rt.Remove("node-c")
+	if len(removed) != 2 {
+		t.Fatalf("cleared hook should not fire, got %v", removed)
 	}
 }
 

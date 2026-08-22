@@ -250,6 +250,14 @@ func (q *SignalQueue) Purge(peerID string) {
 	delete(q.waiters, peerID)
 }
 
+// Total 返回当前全局积压消息总数（含所有收件箱）。
+// 供上层（server 联动测试 / 运维观察）确认节点下线 Purge 后配额已释放。
+func (q *SignalQueue) Total() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.total
+}
+
 // Wait 阻塞等待 target 收件箱出现新消息（长轮询语义）。
 // 返回后调用方应再 Pop 一次；有超时保护。
 // 成功唤醒与 ctx 取消两条路径都会清理该 target 的 waiter，防止 waiters 表

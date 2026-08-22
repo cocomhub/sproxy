@@ -312,3 +312,81 @@ func TestRelayDialListen_NormalizesBarePortToLoopback(t *testing.T) {
 		t.Fatal("relayDialListen 未在 ctx 取消后返回")
 	}
 }
+
+// TestPumpConns_HalfCloseKeepsInFlightResponse 验证 pumpConns 的半关闭语义：
+// 本地写完并 CloseWrite（半关闭）后，远端在途响应仍可被读回，不截断
+// （对齐 leaf.go pump 的 C1 修复；meshForwardListen / relayDialListenOn 共用）。
+// 旧实现「首方向完成即双侧 Close」会在此场景截断远端响应。
+func TestPumpConns_HalfCloseKeepsInFlightResponse(t *testing.T) {
+	// 两对 TCP：pair1 的测试端 aPeer 控制 pumpConns 的 a，pair2 的 mock 远端
+	// bPeer 控制 pumpConns 的 b。
+	mkPair := func() (peer, srv *net.TCPConn) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		acceptCh := make(chan *net.TCPConn, 1)
+		go func() {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			acceptCh <- c.(*net.TCPConn)
+		}()
+		dc, derr := net.Dial("tcp", ln.Addr().String())
+		if derr != nil {
+			t.Fatal(derr)
+		}
+		peer = dc.(*net.TCPConn)
+		return peer, <-acceptCh
+	}
+
+	aPeer, a := mkPair()
+	bPeer, b := mkPair()
+	defer aPeer.Close()
+	defer a.Close()
+	defer bPeer.Close()
+	defer b.Close()
+
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		pumpConns(a, b, pumpGracePeriod)
+	}()
+
+	// mock 远端：读到 "ping" 后回 "pong" 并半关闭（保留读方向，bPeer 仍可写）。
+	remoteDone := make(chan struct{})
+	go func() {
+		defer close(remoteDone)
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(bPeer, buf); err != nil {
+			return
+		}
+		_, _ = bPeer.Write([]byte("pong"))
+		_ = bPeer.CloseWrite()
+	}()
+
+	// 测试端：写 "ping" 并半关闭，随后必须能读回 "pong"（在途响应不截断）。
+	if _, err := aPeer.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	if err := aPeer.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	_ = aPeer.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got := make([]byte, 4)
+	if _, err := io.ReadFull(aPeer, got); err != nil {
+		t.Fatalf("半关闭后应读到远端在途响应 pong，实际 %v", err)
+	}
+	if string(got) != "pong" {
+		t.Fatalf("got %q, want %q", got, "pong")
+	}
+
+	<-remoteDone
+	select {
+	case <-pumpDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pumpConns 未在双方向完成后返回")
+	}
+}
