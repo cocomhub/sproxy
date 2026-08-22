@@ -58,10 +58,12 @@ type VersionConfig struct {
 
 // HubConfig 配置 Hub 中继系统。
 type HubConfig struct {
-	Enabled    bool             `yaml:"enabled" mapstructure:"enabled"`
-	NodeID     string           `yaml:"node_id" mapstructure:"node_id"`
-	RelayToken string           `yaml:"relay_token" mapstructure:"relay_token"`
-	Transports TransportConfigs `yaml:"transports" mapstructure:"transports"`
+	Enabled    bool   `yaml:"enabled" mapstructure:"enabled"`
+	NodeID     string `yaml:"node_id" mapstructure:"node_id"`
+	RelayToken string `yaml:"relay_token" mapstructure:"relay_token"`
+	// MaxConnections 是 Hub 同时处理的中继节点连接数上限（I30），0 或不填使用默认 256。
+	MaxConnections int              `yaml:"max_connections" mapstructure:"max_connections"`
+	Transports     TransportConfigs `yaml:"transports" mapstructure:"transports"`
 }
 
 // TransportConfigs 聚合所有可用的传输层配置，当前为预留扩展，暂无产品代码消费。
@@ -75,7 +77,8 @@ type TransportConfigs struct {
 type WSTransportConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
 	Listen  string `yaml:"listen" mapstructure:"listen"`
-	Path    string `yaml:"path" mapstructure:"path"`
+	// Path 已废弃（S36）：WS 升级路径固定为 /ws，配置非默认值不生效（启动时记录警告并忽略）。
+	Path string `yaml:"path" mapstructure:"path"`
 }
 
 type Config struct {
@@ -206,6 +209,9 @@ func (c *Config) SetDefaults() {
 	if c.CloudFailedTaskTTL <= 0 {
 		c.CloudFailedTaskTTL = 1 * time.Hour
 	}
+	if c.Hub.MaxConnections <= 0 {
+		c.Hub.MaxConnections = 256
+	}
 }
 
 // Validate 校验配置合理性。
@@ -242,6 +248,9 @@ func (c *Config) Validate() error {
 	}
 	if c.RateLimit.Enabled && c.RateLimit.Window <= 0 {
 		return fmt.Errorf("rate_limit.enabled=true 但 window=%s 无效，请设置大于 0 的 duration", c.RateLimit.Window)
+	}
+	if c.Hub.Enabled && c.Hub.RelayToken == "" {
+		return fmt.Errorf("hub.enabled=true 但 relay_token 为空，中继节点注册将无任何鉴权，请配置 relay_token")
 	}
 	return nil
 }

@@ -189,14 +189,42 @@ type HubServer struct {
 	rt     *RouteTable
 	auth   *Authenticator
 	logger *slog.Logger
+	// maxConns 是并发连接上限信号量；nil 表示无上限（兼容现有测试构造与极端场景）。
+	maxConns chan struct{}
 }
 
 // NewHubServer 创建节点收口服务。auth 为 nil 时不鉴权。
-func NewHubServer(rt *RouteTable, auth *Authenticator, logger *slog.Logger) *HubServer {
+// maxConns 为可选变参：传 >0 的值表示 Hub 同时处理的连接数上限（I30），
+// 不传或 <=0 表示无上限。
+func NewHubServer(rt *RouteTable, auth *Authenticator, logger *slog.Logger, maxConns ...int) *HubServer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &HubServer{rt: rt, auth: auth, logger: logger}
+	s := &HubServer{rt: rt, auth: auth, logger: logger}
+	if len(maxConns) > 0 && maxConns[0] > 0 {
+		s.maxConns = make(chan struct{}, maxConns[0])
+	}
+	return s
+}
+
+// TryHandleConn 非阻塞获取一个连接名额；成功时启动 goroutine 调用 HandleConn 处理连接，
+// 并在处理结束后释放名额。信号量已满时返回 false，由调用方负责关闭 conn。
+// maxConns 未配置（nil）时始终接受，退化为无条件并发处理。
+func (s *HubServer) TryHandleConn(ctx context.Context, conn xfer.Conn) bool {
+	if s.maxConns != nil {
+		select {
+		case s.maxConns <- struct{}{}:
+		default:
+			return false
+		}
+	}
+	go func() {
+		if s.maxConns != nil {
+			defer func() { <-s.maxConns }()
+		}
+		_ = s.HandleConn(ctx, conn)
+	}()
+	return true
 }
 
 // HandleConn 接收一个已建立的节点连接，注册并维护其生命周期。
