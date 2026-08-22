@@ -5,9 +5,12 @@ package hub
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,21 +22,38 @@ import (
 const registerFrameTTL = 10 * time.Second
 
 // maxRegisterFrameBytes 是注册帧的最大字节数（防恶意大帧耗尽内存）。
+// 注意：conn.Receive 已完整缓冲整条消息后才做此处检查，真实内存上界由传输层
+// maxMessageBytes 决定（如 WS 为 1MiB，见 ext/ws/ws.go）；此常量是注册帧专项的
+// 收紧阈值（纵深防御），并非内存上界本身（S3）。
 const maxRegisterFrameBytes = 64 << 10 // 64 KiB
 
 // 注册 ACK 帧常量（xfer 层一条消息）。导出供 sclient 注册后等待。
+// 节点声明 per-node-secret 能力（见 CapabilityPerNodeSecret）时，REG_OK 携带
+// 独立 secret，线上格式为 "REG_OK:<base64url secret>"；未声明时为纯 "REG_OK"。
 const (
 	RegisterAckOK  = "REG_OK"
 	RegisterAckErr = "REG_ERR:"
 )
 
+// registerAckSecretSep 是 REG_OK 中 secret 字段的分隔符。
+const registerAckSecretSep = ":"
+
+// CapabilityPerNodeSecret 是节点声明"希望获得 per-node 独立 secret"的能力标志。
+// hub 注册成功后生成 32B 随机 secret 存入 NodeInfo.Secret 并随 REG_OK 下发，
+// 供后续批次（B3 服务端校验 / B2 客户端携带）的信令身份校验使用（I1）。
+const CapabilityPerNodeSecret = "per-node-secret"
+
 // RegisterFrame 是节点连接后的注册帧（JSON）。
 // 向后兼容：若首个流上收到的是非 JSON 裸字符串（旧版仅发 nodeID），
 // 则等价于仅携带 NodeID 且无 token 的注册帧。
+//
+// Capabilities 是节点声明的能力标志列表（可扩展：未来新增能力直接追加
+// 字符串常量，hub 端用 hasCapability 判断，旧 hub/旧客户端忽略未知项）。
 type RegisterFrame struct {
-	NodeID string `json:"node_id"`
-	Token  string `json:"token,omitempty"`
-	Meta   Meta   `json:"meta"`
+	NodeID       string   `json:"node_id"`
+	Token        string   `json:"token,omitempty"`
+	Meta         Meta     `json:"meta"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // Meta 是节点注册时宣告的附加信息，供 mesh 选路使用。
@@ -142,39 +162,105 @@ type DialRequest struct {
 	Dial string `json:"dial,omitempty"` // 目标叶子出站连接的 TCP 地址
 }
 
-// RegisterRequest 是节点发起注册的导出请求结构，供 sclient 复用。
-type RegisterRequest struct {
-	NodeID string `json:"node_id"`
-	Token  string `json:"token,omitempty"`
-	Meta   Meta   `json:"meta"`
-}
-
 // NewRegisterFrame 构建注册帧。当无 meta/token 时退化为裸 nodeID，
 // 保证与旧版 hub（仅接收裸 nodeID）兼容。
 func NewRegisterFrame(nodeID, token string, meta Meta) []byte {
 	if meta.Addr == "" && len(meta.Services) == 0 && len(meta.Tags) == 0 && token == "" {
 		return []byte(nodeID)
 	}
-	req := RegisterRequest{NodeID: nodeID, Token: token, Meta: meta}
-	b, _ := json.Marshal(req)
+	frame := RegisterFrame{NodeID: nodeID, Token: token, Meta: meta}
+	b, _ := json.Marshal(frame)
 	return b
 }
 
+// hasCapability 判断能力列表中是否包含指定能力。
+func hasCapability(caps []string, want string) bool {
+	return slices.Contains(caps, want)
+}
+
+// generateNodeSecret 用 crypto/rand 生成 32 字节随机数并 base64url 编码。
+// 该 secret 仅下发到持有该 node_id 注册连接的节点，不落日志。
+func generateNodeSecret() (string, error) {
+	var b [32]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("生成 per-node secret 失败: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
+}
+
+// buildRegisterAck 构造注册成功 ACK 帧。secret 为空（节点未声明 per-node-secret
+// 能力或生成失败）时返回纯 "REG_OK"，与不感知能力标志的旧客户端兼容。
+func buildRegisterAck(secret string) []byte {
+	if secret == "" {
+		return []byte(RegisterAckOK)
+	}
+	return []byte(RegisterAckOK + registerAckSecretSep + secret)
+}
+
+// maxServiceNameLen / maxServiceAddrLen 是服务宣告字段的长度上限（I3）。
+const (
+	maxServiceNameLen = 64
+	maxServiceAddrLen = 255
+)
+
+// containsControlChar 判断字符串是否含控制字符（0x00-0x1F 或 0x7F）。
+func containsControlChar(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// validateServices 校验服务宣告：过滤掉非法条目（空 name/addr、含控制字符、
+// 超长），并去除同节点内重复的 name（保留首个）。
+// 多节点同名服务保持多候选（不在此做全局去重，不破坏 failover）。
+func validateServices(svcs []Service) []Service {
+	seen := make(map[string]struct{}, len(svcs))
+	out := make([]Service, 0, len(svcs))
+	for _, s := range svcs {
+		if s.Name == "" || s.Addr == "" {
+			continue
+		}
+		if len(s.Name) > maxServiceNameLen || len(s.Addr) > maxServiceAddrLen {
+			continue
+		}
+		if containsControlChar(s.Name) || containsControlChar(s.Addr) {
+			continue
+		}
+		if _, dup := seen[s.Name]; dup {
+			continue
+		}
+		seen[s.Name] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
 // registerNode 将节点注册到路由表。
-// 注意：重连时先清空旧服务宣告再写入新宣告，避免同名节点重连
-// 且新注册不带服务时旧服务残留（M4）。
+// 注意：AddWithInfoAndServices 原子写入节点与服务宣告（重连时清空旧宣告，
+// 避免同名节点重连且新注册不带服务时旧服务残留，M4/S4）。
+// 节点声明 per-node-secret 能力时生成独立 secret 存入 NodeInfo.Secret（I1/S1）。
 func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) NodeInfo {
 	info := NodeInfo{
 		ID:        NodeID(reg.NodeID),
 		Mux:       m,
 		Connected: time.Now(),
-		Token:     reg.Token,
 	}
 	if reg.Meta.Addr != "" {
 		info.Addr = reg.Meta.Addr
 	}
-	s.rt.AddWithInfo(info)
-	s.rt.SetServices(info.ID, reg.Meta.Services) // 空 slice 也写入，等价清除旧宣告
+	if hasCapability(reg.Capabilities, CapabilityPerNodeSecret) {
+		if secret, err := generateNodeSecret(); err == nil {
+			info.Secret = secret
+		} else {
+			// 生成失败（crypto/rand 极端异常）按未声明能力处理，节点仍可注册。
+			s.logger.Warn("生成 per-node secret 失败，节点按未声明能力处理", "node", reg.NodeID, "error", err)
+		}
+	}
+	s.rt.AddWithInfoAndServices(info, validateServices(reg.Meta.Services))
 	return info
 }
 
@@ -278,16 +364,35 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 	info := s.registerNode(reg, m)
 	s.logger.Info("中继节点已注册", "node", reg.NodeID, "addr", info.Addr)
 
+	// 注册成功后立即注册清理 defer（RemoveIfOwned 幂等，重复调用返回 false）。
+	// 结构性覆盖所有 return 路径（I4）：ACK 发送失败提前 return 时也不会残留
+	// "已注册但 mux 已关"的幽灵节点。仅移除属于本连接的节点（防 stale identity：
+	// 同名节点若已被新连接重新注册，所有权不匹配不误删）。RemoveIfOwned 内部
+	// 已清除该节点的服务宣告，无需额外 CleanServices。
+	defer func() {
+		if s.rt.RemoveIfOwned(info.ID, m) {
+			s.logger.Info("中继节点已移除", "node", reg.NodeID)
+		}
+	}()
+
 	// 回发注册 ACK：让客户端尽早感知注册成功（而非等到建流失败才发现）。
 	// 鉴权失败路径在 mux 创建前 return，不经过这里。
-	if ackErr := conn.Send(ctx, []byte(RegisterAckOK)); ackErr != nil {
+	ack := buildRegisterAck(info.Secret)
+	if ackErr := conn.Send(ctx, ack); ackErr != nil {
 		s.logger.Warn("回发注册 ACK 失败", "node", reg.NodeID, "error", ackErr)
 		return ackErr
+	}
+	// 与 REG_ERR 对称：关键帧 flush 后再进入 accept 循环，避免 WS 传输下
+	// sendLoop 异步写出时连接关闭掐掉排队中的 REG_OK（S24）。
+	if fl, ok := conn.(xfer.Flusher); ok {
+		if ferr := fl.Flush(flushCtx); ferr != nil {
+			s.logger.Debug("flush REG_OK 失败", "node", reg.NodeID, "error", ferr)
+		}
 	}
 
 	// 阻塞直到连接断开：accept 循环让 mux 保持存活，并消费叶子可能
 	// 主动 open 的流（当前协议下叶子只 accept 不 open，正常不会到达）。
-	// 循环退出意味着连接断开，随后移除节点。
+	// 循环退出意味着连接断开，随后的 defer 移除节点。
 	for {
 		stream, aerr := m.Accept(ctx)
 		if aerr != nil {
@@ -297,12 +402,6 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 		_ = stream.Close()
 	}
 
-	// 仅移除属于本连接的节点（防 stale identity：同名节点若已被新连接
-	// 重新注册，不应被旧连接断开时误删）。RemoveIfOwned 内部已清除该节点的
-	// 服务宣告，无需额外 CleanServices。
-	if s.rt.RemoveIfOwned(info.ID, m) {
-		s.logger.Info("中继节点已移除", "node", reg.NodeID)
-	}
 	return nil
 }
 
@@ -327,9 +426,12 @@ func (s *HubServer) readRegisterFrame(ctx context.Context, conn xfer.Conn) (*Reg
 	raw := msg
 
 	reg := &RegisterFrame{}
-	if err := json.Unmarshal(raw, reg); err != nil || reg.NodeID == "" {
-		// 裸字符串容错
+	if err := json.Unmarshal(raw, reg); err != nil {
+		// 非 JSON → 裸字符串容错（旧版仅发 nodeID）
 		reg = &RegisterFrame{NodeID: strings.TrimSpace(string(raw))}
+	} else if reg.NodeID == "" {
+		// 合法 JSON 但缺 node_id：拒绝，不把 JSON 垃圾整串当裸串回退（S2）
+		return nil, fmt.Errorf("注册帧缺少 node_id")
 	}
 	return reg, nil
 }

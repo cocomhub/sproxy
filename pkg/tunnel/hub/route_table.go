@@ -8,6 +8,7 @@
 package hub
 
 import (
+	"sort"
 	"sync"
 	"time"
 
@@ -23,7 +24,7 @@ type NodeInfo struct {
 	Mux       *mux.Mux
 	Connected time.Time // 连接时间
 	Addr      string    // 远端地址
-	Token     string    // 使用的 token（脱敏）
+	Secret    string    // per-node 独立 secret（仅节点声明 per-node-secret 能力时下发；不落日志）
 }
 
 // RouteTable 是线程安全的节点路由表。
@@ -64,18 +65,42 @@ func (rt *RouteTable) AddWithInfo(info NodeInfo) {
 	rt.info[info.ID] = info
 }
 
-// Remove 移除一个节点。
-func (rt *RouteTable) Remove(id NodeID) {
+// AddWithInfoAndServices 原子地注册节点并写入服务宣告。
+// 与分两次调用 AddWithInfo + SetServices 相比，消除了重连时短暂残留
+// 旧服务宣告的非原子窗口（S4）。空/ nil svcs 等价于清除该节点的旧宣告。
+func (rt *RouteTable) AddWithInfoAndServices(info NodeInfo, svcs []Service) {
 	rt.mu.Lock()
-	if m, ok := rt.nodes[id]; ok {
-		delete(rt.nodes, id)
-		delete(rt.info, id)
-		delete(rt.services, id)
-		if m != nil {
-			go func() { _ = m.Close() }()
-		}
+	defer rt.mu.Unlock()
+	if old, ok := rt.nodes[info.ID]; ok {
+		go old.Close()
 	}
-	rt.mu.Unlock()
+	rt.nodes[info.ID] = info.Mux
+	rt.info[info.ID] = info
+	if rt.services == nil {
+		rt.services = make(map[NodeID][]Service)
+	}
+	if len(svcs) == 0 {
+		delete(rt.services, info.ID)
+		return
+	}
+	rt.services[info.ID] = svcs
+}
+
+// Remove 移除一个节点。返回是否真正移除（节点存在）。
+func (rt *RouteTable) Remove(id NodeID) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	m, ok := rt.nodes[id]
+	if !ok {
+		return false
+	}
+	delete(rt.nodes, id)
+	delete(rt.info, id)
+	delete(rt.services, id)
+	if m != nil {
+		go func() { _ = m.Close() }()
+	}
+	return true
 }
 
 // RemoveIfOwned 仅当该节点 ID 当前绑定到给定 mux（即本连接）时才移除。
@@ -110,6 +135,21 @@ func (rt *RouteTable) Lookup(id NodeID) *mux.Mux {
 	return rt.nodes[id]
 }
 
+// LookupInfo 按 ID 查找节点的扩展信息。
+// 同时确认 nodes 与 info 两表均存在该节点；节点不存在时返回 false。
+func (rt *RouteTable) LookupInfo(id NodeID) (NodeInfo, bool) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	nfo, ok := rt.info[id]
+	if !ok {
+		return NodeInfo{}, false
+	}
+	if _, ok := rt.nodes[id]; !ok {
+		return NodeInfo{}, false
+	}
+	return nfo, true
+}
+
 // List 返回所有已注册节点的列表。
 func (rt *RouteTable) List() []NodeInfo {
 	rt.mu.RLock()
@@ -122,6 +162,32 @@ func (rt *RouteTable) List() []NodeInfo {
 		result = append(result, nfo)
 	}
 	return result
+}
+
+// NodeService 是 ListServices 返回的一个服务条目（节点 + 服务）。
+type NodeService struct {
+	Node    NodeID
+	Service Service
+}
+
+// ListServices 返回所有节点宣告的服务，按 (node, name) 稳定排序（I3）。
+// 客户端据此确定性选路；多节点同名服务保持多候选（failover 语义不破坏）。
+func (rt *RouteTable) ListServices() []NodeService {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	var out []NodeService
+	for id, svcs := range rt.services {
+		for _, s := range svcs {
+			out = append(out, NodeService{Node: id, Service: s})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Node != out[j].Node {
+			return out[i].Node < out[j].Node
+		}
+		return out[i].Service.Name < out[j].Service.Name
+	})
+	return out
 }
 
 // NodeCount 返回当前注册的节点数量。

@@ -77,6 +77,7 @@ func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // hubServicesHandler 返回所有节点宣告的服务（mesh 选路用）。
+// 使用 RouteTable.ListServices 按 (node, name) 稳定排序，客户端可确定性选路（I3）。
 func (h *Handlers) hubServicesHandler(w http.ResponseWriter, r *http.Request) {
 	if h.routeTable == nil {
 		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
@@ -88,10 +89,8 @@ func (h *Handlers) hubServicesHandler(w http.ResponseWriter, r *http.Request) {
 		Addr string `json:"addr,omitempty"`
 	}
 	var resp []svcResp
-	for _, n := range h.routeTable.List() {
-		for _, s := range h.routeTable.ServicesOf(n.ID) {
-			resp = append(resp, svcResp{Name: s.Name, Node: string(n.ID), Addr: s.Addr})
-		}
+	for _, ns := range h.routeTable.ListServices() {
+		resp = append(resp, svcResp{Name: ns.Service.Name, Node: string(ns.Node), Addr: ns.Service.Addr})
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {

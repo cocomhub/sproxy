@@ -47,8 +47,15 @@ func TestHubServicesHandler(t *testing.T) {
 	if len(svcs) != 2 {
 		t.Fatalf("expected 2 services, got %d: %+v", len(svcs), svcs)
 	}
-	if svcs[0].Node != "node-a" || svcs[0].Name != "sg-ssh" {
-		t.Fatalf("unexpected first service: %+v", svcs[0])
+	// ListServices 按 (node, name) 稳定排序：local-web < sg-ssh
+	want := []struct{ node, name, addr string }{
+		{node: "node-a", name: "local-web", addr: "127.0.0.1:8080"},
+		{node: "node-a", name: "sg-ssh", addr: "target.example.com:22"},
+	}
+	for i, w := range want {
+		if svcs[i].Node != w.node || svcs[i].Name != w.name || svcs[i].Addr != w.addr {
+			t.Fatalf("entry %d mismatch: got %+v, want %+v", i, svcs[i], w)
+		}
 	}
 }
 
