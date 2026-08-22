@@ -45,6 +45,14 @@ func init() {
 const stunServer = "stun:stun.l.google.com:19302"
 const defaultICETimeout = 30 * time.Second
 
+// signalingTimeout 是 DialWithSignaler/ListenWithSignaler 内 Wait* 的整体超时。
+// 默认 30s：hub 信令（mesh/p2p）下对端离线或不对时快速失败回落中继；
+// 手工 SDP（--manual）调用方用 SetSignalingTimeout 调大到 10min（人工拷文件）。
+var signalingTimeout = defaultICETimeout
+
+// SetSignalingTimeout 覆盖信令等待整体超时（--manual 人工拷文件可调大）。
+func SetSignalingTimeout(d time.Duration) { signalingTimeout = d }
+
 var useHostOnly bool
 
 // SetHostOnly 控制是否使用仅本机 host 候选（不加 STUN）。
@@ -201,8 +209,8 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		return nil, fmt.Errorf("dial: send offer: %w", err)
 	}
 
-	// 等待对端 Answer（带整体超时，防挂起）
-	waitCtx, cancel := context.WithTimeout(context.Background(), defaultICETimeout)
+	// 等待对端 Answer（整体超时：默认 30s，--manual 场景可 SetSignalingTimeout 调大）
+	waitCtx, cancel := context.WithTimeout(context.Background(), signalingTimeout)
 	defer cancel()
 	from, aJSON, err := sig.WaitAnswer(waitCtx)
 	if err != nil {
@@ -256,7 +264,7 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		}
 	})
 
-	waitCtx, cancel := context.WithTimeout(context.Background(), defaultICETimeout)
+	waitCtx, cancel := context.WithTimeout(context.Background(), signalingTimeout)
 	defer cancel()
 	offerFrom, oJSON, err := sig.WaitOffer(waitCtx)
 	if err != nil {
