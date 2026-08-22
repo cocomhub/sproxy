@@ -15,6 +15,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/spf13/cobra"
 )
 
@@ -139,10 +140,13 @@ func Execute() error {
 }
 
 // initLogger 初始化 sclient 的控制台日志。
+// verbose 时同时把 pion 底层打洞日志（candidate/STUN/DTLS 明细）调到 TRACE，
+// 供打洞失败排障使用；默认保持 Error，常驻无噪音。
 func initLogger(verbose bool) *slog.Logger {
 	level := slog.LevelInfo
 	if verbose {
 		level = slog.LevelDebug
+		webrtc.SetVerbose(true)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)

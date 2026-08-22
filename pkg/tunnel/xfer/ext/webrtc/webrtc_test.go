@@ -62,8 +62,8 @@ func TestWebrtcRoundTrip(t *testing.T) {
 		}
 		defer conn.Close()
 
-		if _, err := conn.Write(payload); err != nil {
-			dialRes <- result{err: err}
+		if _, werr := conn.Write(payload); werr != nil {
+			dialRes <- result{err: werr}
 			return
 		}
 
