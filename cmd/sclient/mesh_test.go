@@ -622,3 +622,126 @@ func TestMeshAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 		t.Fatal("temp node should be removed after closer")
 	}
 }
+
+// waitNodeRemoved 轮询等待节点被 hub 移除（closer 后 RemoveIfOwned 异步生效）。
+func waitNodeRemoved(rt *hub.RouteTable, node string) error {
+	deadline := time.Now().Add(3 * time.Second)
+	for rt.Has(hub.NodeID(node)) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rt.Has(hub.NodeID(node)) {
+		return fmt.Errorf("node %q should be removed after closer", node)
+	}
+	return nil
+}
+
+// TestAutoRegister_TempAndExact 验证 autoRegister（B17）的两种 node 生成模式：
+//   - temp（exactNode=false，p2p connect / mesh connect）：临时 node_id = <prefix>-<base>-<nano>，
+//     唯一且防踢长驻 relay 注册；对端无需预知本端 ID（Answer 回给 offerFrom）。
+//   - exact（exactNode=true，p2p listen）：注册成 nodeID 原样，供 p2p connect --peer <id> 寻址。
+//
+// 两种模式都声明 per-node-secret 能力、拿到 secret，signaler 信令携带
+// X-Node-Secret / X-Node-ID（B3 服务端身份校验前置）。
+func TestAutoRegister_TempAndExact(t *testing.T) {
+	rt := hub.NewRouteTable()
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator("relay-token"), discardLogger())
+
+	muxHTTP := http.NewServeMux()
+	wsNode := ws.NewHandlerNode()
+	wsNode.AddToMux(muxHTTP, "/ws")
+	// 信令端点：记录 X-Node-Secret 头（验证携带 secret）。
+	var mu sync.Mutex
+	var gotSecret, gotNodeID string
+	muxHTTP.HandleFunc("/api/signal/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotSecret = r.Header.Get("X-Node-Secret")
+		gotNodeID = r.Header.Get("X-Node-ID")
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	})
+	ts := httptest.NewServer(muxHTTP)
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// hub 侧：接受 ws 连接并交给 HandleConn 注册。
+	go func() {
+		for {
+			c, aerr := wsNode.Accept(ctx)
+			if aerr != nil {
+				return
+			}
+			go func(cc xfer.Conn) {
+				_ = srv.HandleConn(ctx, cc)
+			}(c)
+		}
+	}()
+
+	// temp 模式：prefix=p2p，exactNode=false → 临时 node_id（唯一前缀 + 非原始 ID）。
+	regTemp, err := autoRegister(ctx, autoRegisterParams{
+		hubURL: ts.URL, relayToken: "relay-token", signalToken: "signal-token",
+		nodeID: "node-a", prefix: "p2p", exactNode: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = regTemp.closer() })
+	if !strings.HasPrefix(regTemp.tempNode, "p2p-node-a-") {
+		t.Fatalf("temp node %q should start with p2p-node-a-", regTemp.tempNode)
+	}
+	if regTemp.tempNode == "node-a" {
+		t.Fatal("temp 模式不应注册成原始 node_id")
+	}
+	infoTemp, ok := rt.LookupInfo(hub.NodeID(regTemp.tempNode))
+	if !ok {
+		t.Fatalf("temp node %q not registered", regTemp.tempNode)
+	}
+	if infoTemp.Secret == "" {
+		t.Fatal("temp 模式 per-node secret should not be empty")
+	}
+	// 信令携带 X-Node-Secret / X-Node-ID（I37 核心：不再 403 秒败）。
+	if err := regTemp.signaler.SendOffer("peer-node", "sdp"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	secret, nodeID := gotSecret, gotNodeID
+	mu.Unlock()
+	if secret != infoTemp.Secret {
+		t.Fatalf("X-Node-Secret = %q, want %q", secret, infoTemp.Secret)
+	}
+	if nodeID != regTemp.tempNode {
+		t.Fatalf("X-Node-ID = %q, want %q", nodeID, regTemp.tempNode)
+	}
+	if err := regTemp.closer(); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitNodeRemoved(rt, regTemp.tempNode); err != nil {
+		t.Fatal(err)
+	}
+
+	// exact 模式：nodeID 原样注册（p2p listen 被寻址方）。
+	regExact, err := autoRegister(ctx, autoRegisterParams{
+		hubURL: ts.URL, relayToken: "relay-token", signalToken: "signal-token",
+		nodeID: "node-b", prefix: "p2p", exactNode: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = regExact.closer() })
+	if regExact.tempNode != "node-b" {
+		t.Fatalf("exact node %q should be registered as-is, got %q", "node-b", regExact.tempNode)
+	}
+	infoExact, ok := rt.LookupInfo(hub.NodeID("node-b"))
+	if !ok {
+		t.Fatal("exact node-b not registered")
+	}
+	if infoExact.Secret == "" {
+		t.Fatal("exact 模式 per-node secret should not be empty")
+	}
+	if err := regExact.closer(); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitNodeRemoved(rt, "node-b"); err != nil {
+		t.Fatal(err)
+	}
+}
