@@ -50,6 +50,32 @@ func TestManualSignaler_Cleanup_DeletesOwnFile(t *testing.T) {
 	}
 }
 
+// TestManualSignaler_Cleanup_DeletesAnswerFile 验证 listen 侧（只写 answer、不读 offer 之外的文件）
+// 打洞失败/退出时 Cleanup 删除残留 answer 文件——回归 SendAnswer 未记录 writtenFile 的 bug
+// （原实现只记 offer，导致 listen 侧 a.sdp 打洞失败后遗留）。
+func TestManualSignaler_Cleanup_DeletesAnswerFile(t *testing.T) {
+	dir := t.TempDir()
+	answerFile := filepath.Join(dir, "answer.sdp")
+	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
+	// listen 侧：offer 由对端拷来已读删，本侧只 SendAnswer 写 answer
+	sig := newManualSignaler(filepath.Join(dir, "offer.sdp"), answerFile, ios)
+
+	if err := sig.SendAnswer("peer", `{"type":"answer","sdp":"v=0\r\n..."}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(answerFile); err != nil {
+		t.Fatalf("answer 文件应存在: %v", err)
+	}
+
+	// 打洞失败/连接退出 → Cleanup 应删除本侧写出的 answer 文件
+	sig.Cleanup()
+	if _, err := os.Stat(answerFile); err == nil {
+		t.Fatalf("Cleanup 应删除残留的 answer 文件")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("统计文件失败: %v", err)
+	}
+}
+
 // TestManualSignaler_Cleanup_NoSideEffects_NeverSent 验证从未写出任何 SDP 时 Cleanup 是无副作用 no-op。
 func TestManualSignaler_Cleanup_NoSideEffects_NeverSent(t *testing.T) {
 	dir := t.TempDir()

@@ -205,6 +205,9 @@ func (m *manualSignaler) SendAnswer(_ string, sdp string) error {
 	if err := writeSDPFile(m.answerFile, sdp); err != nil {
 		return fmt.Errorf("写 answer 文件失败: %w", err)
 	}
+	m.mu.Lock()
+	m.writtenFile, m.writtenContent = m.answerFile, sdp
+	m.mu.Unlock()
 	m.ios.WriteOutLine("已生成 answer SDP: %s", m.answerFile)
 	m.ios.WriteOutLine("请把该文件传给对端（dial 侧），对端读到后完成打洞。")
 	return nil
