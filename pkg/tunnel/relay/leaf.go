@@ -20,12 +20,19 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
+
+// pumpGracePeriod 是 pump 第二方向完成收尾的宽限期：第一方向完成（已传播
+// 半关闭）后，第二方向需在此时间内完成；超时视为对端非合作，强制关闭两端
+// 防 goroutine / FD 泄漏。长连接（双向持续活跃）不触发宽限期——计时器只在
+// 某方向完成且另一方向仍空闲时启动。
+const pumpGracePeriod = 60 * time.Second
 
 // ServeOptions 配置 Serve 的拨号策略。
 type ServeOptions struct {
@@ -49,13 +56,19 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 			dialPolicy = o.DialPolicy
 		}
 	}
-	_ = dialPolicy
 	for {
 		stream, err := m.Accept(ctx)
 		if err != nil {
 			return err
 		}
 		go func(s mux.Stream) {
+			// 每流 goroutine 处理不可信输入，panic 会击穿到整个进程（叶子被
+			// 恶意对端 DoS 的路径）——兜底 recover 防止进程崩溃。
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("中继流处理 panic", "panic", r)
+				}
+			}()
 			defer s.Close()
 
 			lenBuf := make([]byte, 4)
@@ -100,7 +113,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				defer remote.Close()
 				// 记录拨号成功：让对端（mesh connect）与运维可确认出口数据通路就绪。
 				logger.Info("出口拨号成功，开始泵送", "addr", d.Dial, "remote", remote.RemoteAddr().String())
-				pump(s, remote)
+				pump(s, remote, pumpGracePeriod)
 				logger.Info("出口泵送结束", "addr", d.Dial)
 				return
 			}
@@ -117,11 +130,38 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 }
 
 // serveHTTP 处理隧道 HTTP 中继流（metadata 已解析）。
+//
+// 安全边界（I20）：req.URL 是不可信输入，绝不能与 localAddr 直接拼接——否则
+// 攻击者可注入 `@evil.com:443/x` 劫持 URL 的 Host/Userinfo，把叶子变成不受限
+// HTTP 代理（SSRF）。这里固定用 url.Parse(localAddr) 得到 base，只把请求的相对
+// 路径 / query 覆盖到 base 的字段上，从不拼接原始字符串；绝对 URL、带 host、
+// 带 userinfo、带 opaque 的请求一律拒绝（返回 400）。
 func serveHTTP(ctx context.Context, s mux.Stream, localAddr string, req tunnel.Request, httpClient *http.Client, logger *slog.Logger) {
-	forwardURL := localAddr + req.URL
+	if httpClient == nil {
+		httpClient = http.DefaultClient // S29：防御性兜底
+	}
+	base, err := url.Parse(localAddr)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		logger.Warn("本地服务地址无效", "localAddr", localAddr)
+		writeErrorResponse(s, http.StatusInternalServerError)
+		return
+	}
+	rel, err := url.Parse(req.URL)
+	if err != nil || rel.IsAbs() || rel.Host != "" || rel.User != nil || rel.Opaque != "" {
+		// 仅允许相对路径；绝对 URL / host / userinfo / opaque 一律拒绝（防 SSRF host 劫持）。
+		logger.Warn("拒绝非法中继 URL（仅允许相对路径）", "url", req.URL)
+		writeErrorResponse(s, http.StatusBadRequest)
+		return
+	}
+	base.Path = rel.Path
+	base.RawPath = rel.RawPath // 保留原始转义（如 %2F 与 Path 语义一致）
+	base.RawQuery = rel.RawQuery
+	base.Fragment = "" // Fragment 不随请求发送
+	forwardURL := base.String()
+
 	// body 处理：仅对允许带 body 的方法把流 s 作为请求体（NopCloser 避免
-	// http.Client 读完 body 后 Close(s) 关掉整条 mux 流）。GET/HEAD/DELETE 等
-	// 无 body 方法不设 body，否则 http.Client 会尝试读 s 到 EOF 干扰协议。
+	// http.Client 读完 body 后 Close(s) 关掉整条 mux 流）。GET/HEAD 等无 body
+	// 方法不设 body，否则 http.Client 会尝试读 s 到 EOF 干扰协议。
 	var bodyReader io.Reader
 	if methodAllowsBody(req.Method) {
 		bodyReader = io.NopCloser(s)
@@ -156,12 +196,29 @@ func serveHTTP(ctx context.Context, s mux.Stream, localAddr string, req tunnel.R
 	_, _ = io.Copy(s, resp.Body)
 }
 
+// writeErrorResponse 向流回写一个错误 HTTP 响应 metadata（无 body，ContentLength=0）。
+// 协议与 serveHTTP 成功路径一致：[4B BE len][tunnel.Response JSON]。
+func writeErrorResponse(s mux.Stream, status int) {
+	respMeta := tunnel.Response{
+		Proto:   "HTTP/1.1",
+		Status:  status,
+		Headers: http.Header{},
+	}
+	respMetaJSON, _ := json.Marshal(respMeta)
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(respMetaJSON)))
+	_, _ = s.Write(lenBuf)
+	_, _ = s.Write(respMetaJSON)
+}
+
 // methodAllowsBody 报告 HTTP 方法是否允许携带请求体。
 // 仅对允许 body 的方法把隧道流作为请求体；GET/HEAD 等无 body 方法不设 body，
 // 否则 http.Client 会尝试读流到 EOF，干扰后续响应写入。
+// 注意：DELETE/OPTIONS 语义上可携带 body（RFC 7231），一并纳入，否则 body 字节
+// 会残留在流上被静默丢弃；不加入 GET/HEAD 以防御"客户端不 CloseWrite"的非一致场景。
 func methodAllowsBody(method string) bool {
 	switch method {
-	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions:
 		return true
 	default:
 		return false
@@ -169,7 +226,17 @@ func methodAllowsBody(method string) bool {
 }
 
 // pump 双向泵送：mux 流 <-> TCP socket。
-func pump(s mux.Stream, remote net.Conn) {
+//
+// 关闭语义（C1）：
+//   - 每个方向 io.Copy 完成后向对端 CloseWrite 传播半关闭（TCP FIN / 流 EOF），
+//     而不是立即全关流——让在途的响应仍可被另一方向读回（不截断）。
+//   - 首个方向完成后武装 grace 宽限期计时器：宽限期内另一方向完成则正常收尾；
+//     超时视为对端非合作（对 FIN 不回应、不关闭），强制关闭两端解除 remote.Read
+//     / s.Read 阻塞，防 goroutine 与 FD 泄漏（对叶子反复拨号半开服务即 DoS）。
+//   - 长连接（如 SSH 双向持续活跃）期间两方向都未完成，计时器不会启动，不误断。
+//   - 正常路径不在此显式关闭两端，由调用方（Serve 的 defer s.Close() /
+//     defer remote.Close()）收尾。
+func pump(s mux.Stream, remote net.Conn, grace time.Duration) {
 	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(remote, s)
@@ -185,10 +252,35 @@ func pump(s mux.Stream, remote net.Conn) {
 		_ = s.CloseWrite()
 		done <- struct{}{}
 	}()
-	// 一个方向完成即解除另一方向阻塞，防非合作 TCP 永久挂起
-	<-done
-	_ = s.Close()
-	<-done
+
+	remaining := 2
+	var timeoutCh <-chan time.Time
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for remaining > 0 {
+		select {
+		case <-done:
+			remaining--
+			if remaining == 1 {
+				// 一个方向完成：启动宽限期等待另一半完成半关闭收尾。
+				timer = time.NewTimer(grace)
+				timeoutCh = timer.C
+			}
+		case <-timeoutCh:
+			// 非合作对端：强制关闭两端，解除 remote.Read / s.Read 阻塞。
+			_ = remote.Close()
+			_ = s.Close()
+			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
+				<-done
+				remaining--
+			}
+			return
+		}
+	}
 }
 
 // DialAllowed 限制出口模式可拨号的目标（最小授权）。
@@ -204,7 +296,8 @@ func DialAllowed(addr string) (string, bool) {
 		if !ipAllowed(ip) {
 			return "", false
 		}
-		return ip.String() + ":" + port, true
+		// IPv6 必须加方括号，否则 "2606::1:443" 无法被 SplitHostPort / DialTimeout 解析。
+		return net.JoinHostPort(ip.String(), port), true
 	}
 	// 主机名：所有解析出的 IP 都必须公网才放行；返回第一个解析 IP 供拨号
 	ips, err := net.LookupIP(host)
@@ -232,6 +325,9 @@ func NewDialPolicy(allowCIDRs []string) func(string) (string, bool) {
 	for _, c := range allowCIDRs {
 		if _, n, err := net.ParseCIDR(c); err == nil {
 			nets = append(nets, n)
+		} else {
+			// 非法 CIDR 静默丢弃会导致对应网段被拒，排障困难——显式告警。
+			slog.Warn("忽略非法 CIDR", "cidr", c, "error", err)
 		}
 	}
 	return func(addr string) (string, bool) {
@@ -271,8 +367,13 @@ func NewDialPolicy(allowCIDRs []string) func(string) (string, bool) {
 }
 
 // NewServiceDialPolicy 构造出口拨号策略：先对节点自身宣告的服务地址做
-// 精确字符串匹配放行（返回原地址），否则回落 NewDialPolicy(allowCIDRs)
-// 的既有逻辑（公网 + 白名单 CIDR）。
+// 精确字符串匹配放行，否则回落 NewDialPolicy(allowCIDRs) 的既有逻辑
+// （公网 + 白名单 CIDR）。
+//
+// 命中宣告地址时：
+//   - 纯 IP 宣告 → 返回同一 IP:port（IPv6 自动补方括号）；
+//   - 主机名宣告 → 解析一次并返回解析后的 IP:port（消除拨号时二次解析的
+//     DNS rebinding TOCTOU）。
 //
 // 最小授权：仅精确放行操作者显式宣告的 host:port 对；未宣告的 loopback/
 // 私有地址仍被拒绝。dial 帧地址与宣告地址完全一致时（mesh connect 用
@@ -287,10 +388,22 @@ func NewServiceDialPolicy(allowCIDRs, serviceAddrs []string) func(string) (strin
 	return func(addr string) (string, bool) {
 		if _, ok := exact[addr]; ok {
 			// 命中宣告地址：仍需 host:port 合法，避免拨号畸形地址。
-			if _, _, err := net.SplitHostPort(addr); err == nil {
-				return addr, true
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil || port == "" {
+				return "", false
 			}
-			return "", false
+			if ip := net.ParseIP(host); ip != nil {
+				// 纯 IP 宣告：原样放行（JoinHostPort 对 IPv6 补方括号）。
+				return net.JoinHostPort(ip.String(), port), true
+			}
+			// 主机名宣告：此处解析一次并返回解析后的 IP:port（消除 Serve 在
+			// 拨号时二次解析的 DNS rebinding TOCTOU）。注意：返回串不再等于
+			// 原宣告地址，调用方按返回串拨号。
+			ips, lerr := net.LookupIP(host)
+			if lerr != nil || len(ips) == 0 {
+				return "", false
+			}
+			return net.JoinHostPort(ips[0].String(), port), true
 		}
 		return base(addr)
 	}
