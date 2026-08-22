@@ -4,12 +4,37 @@
 package webrtc
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/pion/logging"
 )
+
+// lockedBuffer 是并发安全的写入缓冲，用于测试捕获 slog 输出。
+// slog handler 可能被 pion 后台 goroutine（如异步连接状态变化）并发写入，
+// 直接读普通 bytes.Buffer 会产生数据竞争。
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // TestConfigureLoggerFactory_Verbose 验证 verbose 时 ice/dtls/sctp/webrtc scope 提升到 TRACE。
 func TestConfigureLoggerFactory_Verbose(t *testing.T) {
@@ -25,7 +50,8 @@ func TestConfigureLoggerFactory_Verbose(t *testing.T) {
 	}
 }
 
-// TestConfigureLoggerFactory_Default 验证默认（非 verbose）时保持 Error（无噪音）。
+// TestConfigureLoggerFactory_Default 验证默认（非 verbose）时 4 个关键 scope 显式设为 Error。
+// 不再依赖 PION_LOG_* 环境变量的单例：无论 env 如何，默认始终无噪音。
 func TestConfigureLoggerFactory_Default(t *testing.T) {
 	f := configureLoggerFactory(false)
 	dlf, ok := f.(*logging.DefaultLoggerFactory)
@@ -33,14 +59,15 @@ func TestConfigureLoggerFactory_Default(t *testing.T) {
 		t.Fatalf("期望 DefaultLoggerFactory, got %T", f)
 	}
 	for _, scope := range []string{"ice", "dtls", "sctp", "webrtc"} {
-		if lv, found := dlf.ScopeLevels[scope]; found {
-			t.Fatalf("scope %s: 默认不应被覆盖, level=%v", scope, lv)
+		if lv, found := dlf.ScopeLevels[scope]; !found || lv != logging.LogLevelError {
+			t.Fatalf("scope %s: 默认时应为 Error(level=%v, found=%v)", scope, lv, found)
 		}
 	}
 }
 
 // TestSetVerbose_GloballyEnabled 验证 SetVerbose 开关写入全局变量（供 newPC 使用）。
 func TestSetVerbose_GloballyEnabled(t *testing.T) {
+	t.Cleanup(func() { SetVerbose(false) })
 	SetVerbose(true)
 	if !verbose {
 		t.Fatal("SetVerbose(true) 后 verbose 应为 true")
@@ -51,11 +78,18 @@ func TestSetVerbose_GloballyEnabled(t *testing.T) {
 	}
 }
 
-// TestRoundTrip_WithStateCallbacks 验证接入状态回调后真实打洞往返仍正常
-// （host-only 内网模式，不依赖外部 STUN），防止回调注册破坏既有连接流程。
-func TestRoundTrip_WithStateCallbacks(t *testing.T) {
+// TestRoundTrip_HostOnly_StateCallbacksRegistered 验证 host-only 内网模式下往返正常，
+// 并断言打洞诊断回调（logICEEvent/logPCStateEvent/logCandidateEvents）确实被触发。
+func TestRoundTrip_HostOnly_StateCallbacksRegistered(t *testing.T) {
 	SetHostOnly(true)
-	defer SetHostOnly(false)
+	t.Cleanup(func() { SetHostOnly(false) })
+
+	// 捕获 slog 输出，验证状态回调被触发（Debug 级起全捕获）。
+	// 用互斥保护的缓冲：pion 内部 goroutine 可能异步写日志（如 state=closed）。
+	logBuf := &lockedBuffer{}
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
 
 	signal := NewSignal()
 	payload := []byte("hello webrtc diagnostics")
@@ -68,8 +102,14 @@ func TestRoundTrip_WithStateCallbacks(t *testing.T) {
 	listenRes := make(chan result, 1)
 	dialDone := make(chan struct{})
 
+	// 等待两个 goroutine 完全结束（含 conn.Close 触发的 state=closed 日志写入），
+	// 避免读 logBuf 时后台连接 goroutine 仍在写造成数据竞争。
+	var wg sync.WaitGroup
+	wg.Add(2)
+
 	// Listen goroutine：读到后写回，等 dial 完成再关闭（避免提前 Close 打断 SCTP）。
 	go func() {
+		defer wg.Done()
 		conn, err := Listen(signal)
 		if err != nil {
 			listenRes <- result{err: err}
@@ -92,6 +132,7 @@ func TestRoundTrip_WithStateCallbacks(t *testing.T) {
 
 	// Dial goroutine。
 	go func() {
+		defer wg.Done()
 		conn, err := Dial(signal)
 		if err != nil {
 			dialRes <- result{err: err}
@@ -115,28 +156,51 @@ func TestRoundTrip_WithStateCallbacks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// 两个 goroutine 都成功且数据一致才算过。
+	// 两个 goroutine 都成功且数据一致才算过。收集错误而不是直接 t.Fatalf，
+	// 确保 wg.Wait() 让两个 goroutine 完全退出后再读 logBuf / 结束测试。
 	okDial, okListen := false, false
+	var roundtripErr error
 	for !okDial || !okListen {
 		select {
 		case r := <-dialRes:
-			if r.err != nil {
-				t.Fatalf("dial side: %v", r.err)
+			switch {
+			case r.err != nil:
+				roundtripErr = fmt.Errorf("dial side: %w", r.err)
+			case string(r.data) != string(payload):
+				roundtripErr = fmt.Errorf("dial 收到数据不匹配: %q", string(r.data))
+			default:
+				okDial = true
 			}
-			if string(r.data) != string(payload) {
-				t.Fatalf("dial 收到数据不匹配: %q", string(r.data))
-			}
-			okDial = true
 		case r := <-listenRes:
-			if r.err != nil {
-				t.Fatalf("listen side: %v", r.err)
+			switch {
+			case r.err != nil:
+				roundtripErr = fmt.Errorf("listen side: %w", r.err)
+			case string(r.data) != string(payload):
+				roundtripErr = fmt.Errorf("listen 收到数据不匹配: %q", string(r.data))
+			default:
+				okListen = true
 			}
-			if string(r.data) != string(payload) {
-				t.Fatalf("listen 收到数据不匹配: %q", string(r.data))
-			}
-			okListen = true
 		case <-ctx.Done():
-			t.Fatalf("roundtrip 超时: %v", ctx.Err())
+			roundtripErr = ctx.Err()
+		}
+		if roundtripErr != nil {
+			break
+		}
+	}
+	wg.Wait()
+	if roundtripErr != nil {
+		t.Fatalf("roundtrip 失败: %v", roundtripErr)
+	}
+
+	// 断言诊断日志确实被触发（host-only 下 ICE 状态流转 + 候选收集必然发生）。
+	logs := logBuf.String()
+	for _, want := range []string{
+		"webrtc: ICE 状态变化",
+		"webrtc: 连接状态变化",
+		"webrtc: 收集到 ICE 候选",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("诊断日志缺失 %q；捕获输出:\n%s", want, logs)
 		}
 	}
 }
