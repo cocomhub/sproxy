@@ -183,13 +183,15 @@ per-node-secret 能力）。`--token` 是信令 Bearer（hub 的 `auth_token`）
 `--relay-token` 是自动注册用的 relay_token（与 `relay start --token` 一致；
 两者相同时可省略 `--relay-token`）。
 
-**中继端侧**（`p2p listen` 以精确 node-id 注册，供对端 `--peer` 寻址）：
+**中继端侧**（`p2p listen` 以精确 node-id 注册，供对端 `--peer` 寻址；
+`--service ssh:192.168.1.50:22` 精确放行对端拨号目标——B14 后默认仅公网，私网目标必须放行）：
 ```bash
 build/bin/sclient p2p listen \
   --hub https://hub.example.com:18083 \
   --node-id relay \
   --token CHANGE_ME_AUTH_TOKEN \
   --relay-token CHANGE_ME_RELAY_TOKEN \
+  --service ssh:192.168.1.50:22 \
   --insecure
 ```
 
@@ -207,7 +209,8 @@ build/bin/sclient p2p connect \
 ```
 
 > 注意：`p2p connect` 要求对端正在 `p2p listen`（WebRTC 信令经 hub 完成），
-> 且对端需 `--dial-allow` 才能出站拨号。打洞成功则数据面直连，不经 hub。
+> 且对端需 `--service <目标>` 或 `--dial-allow-cidr` 才能出站拨号到私网/回环目标。
+> 打洞成功则数据面直连，不经 hub。
 > `--hub` 传 HTTP 基址即可（`http(s)://host:port`；relay start 需传 WS 端点，见 §3）。
 
 ---
