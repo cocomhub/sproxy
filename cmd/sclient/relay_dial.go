@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"sync"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -60,7 +59,7 @@ func NewCmdRelayDial(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
 	}
 	cmd.Flags().String("node", "", "目标叶子节点 ID（需以 --dial-allow 运行）")
 	cmd.Flags().String("tcp", "", "目标叶子出站连接的 TCP 地址，如 target-host:22")
-	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 :2222）；留空为单次 stdin/stdout 模式")
+	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 127.0.0.1:2222；裸 :2222 归一为 127.0.0.1:2222）；留空为单次 stdin/stdout 模式")
 	_ = cmd.MarkFlagRequired("node")
 	_ = cmd.MarkFlagRequired("tcp")
 	return cmd
@@ -76,16 +75,28 @@ func relayDialOnce(cmd *cobra.Command, svc relayDialClient, node, tcpAddr string
 	defer conn.Close()
 	ios.WriteOutLine("已连接: %s ⇄ %s (Ctrl+D / EOF 断开)", node, tcpAddr)
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(conn, ios.In) }()
-	go func() { defer wg.Done(); _, _ = io.Copy(ios.Out, conn) }()
-	wg.Wait()
+	// 方向区分通道（I41，meshStdioOnce 同款）：对端断开（outDone）→ 会话结束立即
+	// 返回；本地 stdin 读完（inDone，如 EOF/管道结束）→ 等待对端把剩余响应写完
+	// （保留 `echo x | relay dial` 的响应语义）。原 wg.Wait() 在对端断开但 stdin
+	// 未 EOF 时永久挂起（CLI 假死）。
+	inDone := make(chan struct{})
+	outDone := make(chan struct{})
+	go func() { defer close(inDone); _, _ = io.Copy(conn, ios.In) }()
+	go func() { defer close(outDone); _, _ = io.Copy(ios.Out, conn) }()
+	select {
+	case <-outDone: // 对端断开：会话结束
+	case <-inDone: // 本地 stdin 读完：等对端把剩余数据写完
+		<-outDone
+	}
 	return nil
 }
 
 // relayDialListen 本地端口转发模式。
 func relayDialListen(cmd *cobra.Command, svc relayDialClient, node, tcpAddr, listenAddr string, ios cli.IOStreams) error {
+	// 裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 +
+	// Windows Defender 防火墙弹窗）；需 LAN 访问时显式 0.0.0.0:port / 具体 IP
+	// （S56 同款 normalizeListenAddr）。
+	listenAddr = normalizeListenAddr(listenAddr)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听本地端口失败: %w", err)
@@ -94,7 +105,18 @@ func relayDialListen(cmd *cobra.Command, svc relayDialClient, node, tcpAddr, lis
 	ios.WriteOutLine("端口转发已启动: %s ⇄ %s (经 hub 中继到 %s)", listenAddr, node, tcpAddr)
 	ios.WriteOutLine("按 Ctrl+C 停止。")
 
-	ctx := cmd.Context()
+	return relayDialListenOn(cmd.Context(), svc, node, tcpAddr, ln, ios)
+}
+
+// relayDialListenOn 在已注入的 listener 上运行端口转发，每连接建立一条中继流。
+// 拆出独立函数以便测试注入 127.0.0.1:0 动态端口 listener（S59）。
+func relayDialListenOn(ctx context.Context, svc relayDialClient, node, tcpAddr string, ln net.Listener, ios cli.IOStreams) error {
+	// ctx 取消时关闭 listener，使 Accept 立即返回（优雅停止端口转发，S58）。
+	// 若无此行，Accept 在 ln 关闭前永不返回，accept 循环里 ctx.Err() 分支是死代码。
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
 	for {
 		clientConn, aerr := ln.Accept()
 		if aerr != nil {
@@ -111,11 +133,17 @@ func relayDialListen(cmd *cobra.Command, svc relayDialClient, node, tcpAddr, lis
 				return
 			}
 			defer remote.Close()
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() { defer wg.Done(); _, _ = io.Copy(remote, c) }()
-			go func() { defer wg.Done(); _, _ = io.Copy(c, remote) }()
-			wg.Wait()
+			// 双向泵送。任一方向完成（如中继端断开 → remote EOF）即关闭另一方向，
+			// 让对端（如 ssh）立刻得到 EOF/复位，而非永久挂起（I41，meshForwardListen
+			// 同款）。否则上游 EOF 后 io.Copy(remote, c) 会因本地连接还开着而无限阻塞
+			//（连接 goroutine + FD 泄漏）。
+			done := make(chan struct{}, 2)
+			go func() { defer func() { done <- struct{}{} }(); _, _ = io.Copy(remote, c) }()
+			go func() { defer func() { done <- struct{}{} }(); _, _ = io.Copy(c, remote) }()
+			<-done
+			_ = c.Close()
+			_ = remote.Close()
+			<-done
 		}(clientConn)
 	}
 }
