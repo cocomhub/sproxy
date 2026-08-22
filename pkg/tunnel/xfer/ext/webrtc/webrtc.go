@@ -26,11 +26,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	"github.com/pion/logging"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -58,6 +60,99 @@ var useHostOnly bool
 // SetHostOnly 控制是否使用仅本机 host 候选（不加 STUN）。
 // 主要用于测试与无 STUN 可达性的内网场景；生产跨公网打洞请保持默认（含 STUN）。
 func SetHostOnly(hostOnly bool) { useHostOnly = hostOnly }
+
+// verbose 控制 pion 底层（ice/dtls/sctp/webrtc 等 scope）的日志级别。
+// 打洞失败需要排障时开启：会输出 candidate 收发、STUN binding、DTLS 握手等明细。
+// 默认 false：pion 日志级别 Error，仅错误才输出，常驻无噪音。
+var verbose bool
+
+// SetVerbose 开启 pion 底层打洞日志（candidate/STUN/DTLS 明细），供 --verbose 排障使用。
+// 在创建任何连接前调用（命令入口处）；生效于后续创建的 PeerConnection。
+func SetVerbose(v bool) { verbose = v }
+
+// logLevel 是 ICE 状态常量 → slog 级别的映射辅助。
+// 正常状态流转打 Info，异常（failed/disconnected）打 Warn。
+func iceStateLevel(s webrtc.ICEConnectionState) slog.Level {
+	switch s {
+	case webrtc.ICEConnectionStateFailed,
+		webrtc.ICEConnectionStateDisconnected,
+		webrtc.ICEConnectionStateClosed:
+		return slog.LevelWarn
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// pcStateLevel 是聚合连接状态（含 DTLS/SCTP）→ slog 级别的映射。
+func pcStateLevel(s webrtc.PeerConnectionState) slog.Level {
+	switch s {
+	case webrtc.PeerConnectionStateFailed,
+		webrtc.PeerConnectionStateDisconnected,
+		webrtc.PeerConnectionStateClosed:
+		return slog.LevelWarn
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// pionLoggerFactory 是传给 pion 各传输模块的 logger factory。
+// verbose 开启时把关键 scope 提到 Trace，否则保持默认 Error（无噪音）。
+var pionLoggerFactory = func() logging.LoggerFactory {
+	f := logging.NewDefaultLoggerFactory()
+	return f
+}()
+
+// setupVerboseLogging 在 verbose 开启时提升 pion 底层 scope 的日志级别。
+// pion 没有全局 SetLogLevel：级别通过 SettingEngine.LoggerFactory 按 scope 注入，
+// 因此这里先构造好 factory，newPC 时通过 s.LoggerFactory 传入。
+func configureLoggerFactory(verboseOn bool) logging.LoggerFactory {
+	if verboseOn {
+		f := logging.NewDefaultLoggerFactory()
+		// TRACE 级覆盖打洞排障关键链路：ICE 候选/连通性 + DTLS 握手 + SCTP 连接
+		for _, scope := range []string{"ice", "dtls", "sctp", "webrtc"} {
+			f.ScopeLevels[scope] = logging.LogLevelTrace
+		}
+		return f
+	}
+	return pionLoggerFactory
+}
+
+// logICEEvent 常驻记录 ICE 连接状态变化（打洞失败时的诊断主线）。
+func logICEEvent(pc *webrtc.PeerConnection, prev *webrtc.ICEConnectionState) {
+	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
+		if *prev != s {
+			*prev = s
+			level := iceStateLevel(s)
+			slog.Log(context.Background(), level,
+				"webrtc: ICE 状态变化", "state", s.String())
+		}
+	})
+}
+
+// logPCStateEvent 常驻记录聚合连接状态（ICE+DTLS+SCTP 的最终结果）。
+func logPCStateEvent(pc *webrtc.PeerConnection, prev *webrtc.PeerConnectionState) {
+	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		if *prev != s {
+			*prev = s
+			level := pcStateLevel(s)
+			slog.Log(context.Background(), level,
+				"webrtc: 连接状态变化", "state", s.String())
+		}
+	})
+}
+
+// logCandidateEvents 常驻记录候选收集（Debug 级；帮判断 host/srflx 是否齐全）。
+func logCandidateEvents(pc *webrtc.PeerConnection, counter *int) {
+	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil {
+			slog.Debug("webrtc: ICE 候选收集完成", "candidates", *counter)
+			return
+		}
+		*counter++
+		slog.Debug("webrtc: 收集到 ICE 候选", "index", *counter,
+			"type", c.Typ.String(), "addr", c.Address, "port", c.Port)
+	})
+}
 
 // Signal provides in-memory channels for SDP Offer/Answer exchange.
 type Signal struct {
@@ -148,8 +243,21 @@ func defaultConfig() webrtc.Configuration {
 func newPC() (*webrtc.PeerConnection, error) {
 	s := webrtc.SettingEngine{}
 	s.DetachDataChannels()
+	// verbose 时提升 pion 底层 scope（ice/dtls/sctp/webrtc）到 TRACE，便于打洞排障
+	s.LoggerFactory = configureLoggerFactory(verbose)
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(s))
-	return api.NewPeerConnection(defaultConfig())
+	pc, err := api.NewPeerConnection(defaultConfig())
+	if err != nil {
+		return nil, err
+	}
+	// 常驻打洞流程日志：状态流转（Info）+ 失败（Warn）+ 候选收集（Debug）
+	iceState := pc.ICEConnectionState()
+	logICEEvent(pc, &iceState)
+	pcState := pc.ConnectionState()
+	logPCStateEvent(pc, &pcState)
+	var candidateCount int
+	logCandidateEvents(pc, &candidateCount)
+	return pc, nil
 }
 
 func marshalLD(pc *webrtc.PeerConnection) (string, error) {
@@ -194,9 +302,9 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		pc.Close()
 		return nil, fmt.Errorf("dial: create offer: %w", err)
 	}
-	if err := pc.SetLocalDescription(offer); err != nil {
+	if serr := pc.SetLocalDescription(offer); serr != nil {
 		pc.Close()
-		return nil, fmt.Errorf("dial: set local desc: %w", err)
+		return nil, fmt.Errorf("dial: set local desc: %w", serr)
 	}
 
 	oJSON, err := marshalLD(pc)
@@ -204,9 +312,9 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		pc.Close()
 		return nil, fmt.Errorf("dial: %w", err)
 	}
-	if err := sig.SendOffer(peer, oJSON); err != nil {
+	if serr := sig.SendOffer(peer, oJSON); serr != nil {
 		pc.Close()
-		return nil, fmt.Errorf("dial: send offer: %w", err)
+		return nil, fmt.Errorf("dial: send offer: %w", serr)
 	}
 
 	// 等待对端 Answer（整体超时：默认 30s，--manual 场景可 SetSignalingTimeout 调大）
@@ -222,13 +330,13 @@ func DialWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		return nil, fmt.Errorf("dial: answer 来自非预期节点 %q（期望 %q）", from, peer)
 	}
 	var answer webrtc.SessionDescription
-	if err := json.Unmarshal([]byte(aJSON), &answer); err != nil {
+	if serr := json.Unmarshal([]byte(aJSON), &answer); serr != nil {
 		pc.Close()
-		return nil, fmt.Errorf("dial: unmarshal answer: %w", err)
+		return nil, fmt.Errorf("dial: unmarshal answer: %w", serr)
 	}
-	if err := pc.SetRemoteDescription(answer); err != nil {
+	if serr := pc.SetRemoteDescription(answer); serr != nil {
 		pc.Close()
-		return nil, fmt.Errorf("dial: set remote desc: %w", err)
+		return nil, fmt.Errorf("dial: set remote desc: %w", serr)
 	}
 
 	select {
@@ -272,13 +380,13 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		return nil, fmt.Errorf("listen: wait offer: %w", err)
 	}
 	var offer webrtc.SessionDescription
-	if err := json.Unmarshal([]byte(oJSON), &offer); err != nil {
+	if serr := json.Unmarshal([]byte(oJSON), &offer); serr != nil {
 		pc.Close()
-		return nil, fmt.Errorf("listen: unmarshal offer: %w", err)
+		return nil, fmt.Errorf("listen: unmarshal offer: %w", serr)
 	}
-	if err := pc.SetRemoteDescription(offer); err != nil {
+	if serr := pc.SetRemoteDescription(offer); serr != nil {
 		pc.Close()
-		return nil, fmt.Errorf("listen: set remote desc: %w", err)
+		return nil, fmt.Errorf("listen: set remote desc: %w", serr)
 	}
 
 	answer, err := pc.CreateAnswer(nil)
@@ -286,9 +394,9 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 		pc.Close()
 		return nil, fmt.Errorf("listen: create answer: %w", err)
 	}
-	if err := pc.SetLocalDescription(answer); err != nil {
+	if serr := pc.SetLocalDescription(answer); serr != nil {
 		pc.Close()
-		return nil, fmt.Errorf("listen: set local desc: %w", err)
+		return nil, fmt.Errorf("listen: set local desc: %w", serr)
 	}
 
 	aJSON, err := marshalLD(pc)
@@ -301,9 +409,9 @@ func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	if answerTo == "" {
 		answerTo = peer
 	}
-	if err := sig.SendAnswer(answerTo, aJSON); err != nil {
+	if serr := sig.SendAnswer(answerTo, aJSON); serr != nil {
 		pc.Close()
-		return nil, fmt.Errorf("listen: send answer: %w", err)
+		return nil, fmt.Errorf("listen: send answer: %w", serr)
 	}
 
 	// Wait for the DataChannel to arrive.
