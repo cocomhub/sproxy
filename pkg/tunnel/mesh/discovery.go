@@ -147,7 +147,7 @@ func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeI
 			continue
 		}
 		if p < nodeID {
-			continue // 半拨号去重：只高 ID 拨低 ID
+			continue // 半拨号去重：只低 ID 拨高 ID，每对恰好一条链接
 		}
 		dl.mu.Lock()
 		t, failed := dl.lastFail[p]

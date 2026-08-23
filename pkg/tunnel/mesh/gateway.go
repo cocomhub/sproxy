@@ -26,6 +26,10 @@ const GatewayDefaultAddr = "127.0.0.1:18085"
 // gatewayMaxRequestBytes 是网关请求/应答帧的长度上限。
 const gatewayMaxRequestBytes = 4096
 
+// gatewayMaxResponseBytes 是网关状态应答帧的长度上限（full-mesh 拓扑随节点数增长：
+// node_id + services + peers 在几十节点规模即可超 4KB，故应答与请求分开设限）。
+const gatewayMaxResponseBytes = 64 << 10
+
 // gatewayRequestTimeout 是网关读取客户端请求帧的超时（连接/泵送阶段不设 deadline）。
 const gatewayRequestTimeout = 15 * time.Second
 
@@ -167,7 +171,7 @@ func (g *Gateway) handleConn(ctx context.Context, c net.Conn) {
 		return
 	}
 	var req gatewayRequest
-	if err := readGatewayFrame(c, &req); err != nil {
+	if err := readGatewayFrame(c, &req, gatewayMaxRequestBytes); err != nil {
 		g.logger.Warn("mesh 本地网关读取请求失败", "error", err)
 		return
 	}
@@ -251,10 +255,16 @@ func GatewayConnect(ctx context.Context, addr, peer, targetAddr, token string) (
 	if err := writeGatewayFrame(conn, gatewayRequest{Token: token, Peer: peer, Addr: targetAddr}); err != nil {
 		return nil, fmt.Errorf("mesh 网关写入请求失败: %w", err)
 	}
+	// ack 读取设 deadline（对齐服务端 gatewayRequestTimeout）：网关卡在 m.Open/链路
+	// 背压时客户端不被无限阻塞；读完立即清除，返回的连接进入数据面泵送（不受影响）。
+	if err := conn.SetReadDeadline(time.Now().Add(gatewayRequestTimeout)); err != nil {
+		return nil, fmt.Errorf("mesh 网关设置应答超时失败: %w", err)
+	}
 	var ack gatewayAck
-	if err := readGatewayFrame(conn, &ack); err != nil {
+	if err := readGatewayFrame(conn, &ack, gatewayMaxRequestBytes); err != nil {
 		return nil, fmt.Errorf("mesh 网关读取应答失败: %w", err)
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	if !ack.OK {
 		if ack.Error == gatewayErrNoPeerLink {
 			return nil, ErrNoPeerLink
@@ -280,10 +290,15 @@ func QueryGatewayStatus(ctx context.Context, addr, token string) (*GatewayStatus
 	if err := writeGatewayFrame(conn, gatewayRequest{Token: token, Status: true}); err != nil {
 		return nil, fmt.Errorf("mesh 网关写入状态请求失败: %w", err)
 	}
+	// 状态读取设 deadline（对齐服务端 gatewayRequestTimeout）：网关无响应时不无限阻塞。
+	if err := conn.SetReadDeadline(time.Now().Add(gatewayRequestTimeout)); err != nil {
+		return nil, fmt.Errorf("mesh 网关设置状态超时失败: %w", err)
+	}
 	var st GatewayStatus
-	if err := readGatewayFrame(conn, &st); err != nil {
+	if err := readGatewayFrame(conn, &st, gatewayMaxResponseBytes); err != nil {
 		return nil, fmt.Errorf("mesh 网关读取状态失败: %w", err)
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	return &st, nil
 }
 
@@ -297,14 +312,15 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// readGatewayFrame 读取一帧 [4B BE len][JSON]（长度有界，防止超大帧占用内存）。
-func readGatewayFrame(r io.Reader, v any) error {
+// readGatewayFrame 读取一帧 [4B BE len][JSON]（maxBytes 长度有界，防超大帧占用内存；
+// 调用方按请求/应答分别传 gatewayMaxRequestBytes / gatewayMaxResponseBytes）。
+func readGatewayFrame(r io.Reader, v any, maxBytes uint32) error {
 	lenBuf := make([]byte, 4)
 	if _, err := io.ReadFull(r, lenBuf); err != nil {
 		return err
 	}
 	n := binary.BigEndian.Uint32(lenBuf)
-	if n == 0 || n > gatewayMaxRequestBytes {
+	if n == 0 || n > maxBytes {
 		return fmt.Errorf("网关帧长度非法: %d", n)
 	}
 	buf := make([]byte, n)

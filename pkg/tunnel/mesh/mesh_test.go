@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -904,5 +905,117 @@ func TestGateway_RejectsNonLoopback(t *testing.T) {
 	_, err = gw.Serve(ctx, "192.168.1.5:0")
 	if err == nil || !strings.Contains(err.Error(), "loopback") {
 		t.Fatalf("期望拒绝私网监听地址, got %v", err)
+	}
+}
+
+// TestGateway_BindFailureFallsBackToRandomPort：网关默认端口被占时回落 127.0.0.1:0
+// 随机端口（不终止 mesh node），回落后的网关可用。
+func TestGateway_BindFailureFallsBackToRandomPort(t *testing.T) {
+	// 占用一个 loopback 端口（模拟默认端口已被同机其他进程/节点占用）。
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	occupiedAddr := occupied.Addr().String()
+
+	links := newLinkPool()
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	actual, err := gw.Serve(ctx, occupiedAddr)
+	if err != nil {
+		t.Fatalf("网关应在默认端口被占时回落随机端口, got %v", err)
+	}
+	if actual == occupiedAddr {
+		t.Fatalf("回落端口不应等于被占端口 %s", occupiedAddr)
+	}
+	// 回落后的网关可用：状态查询成功。
+	if _, err := QueryGatewayStatus(ctx, actual, ""); err != nil {
+		t.Fatalf("回落网关不可用: %v", err)
+	}
+}
+
+// TestGateway_ConcurrentConnectionsOnSameLink：多个连接并发经同一网关复用同一条
+// 已建链路（mux 多路复用），各自 echo 端到端成功。
+func TestGateway_ConcurrentConnectionsOnSameLink(t *testing.T) {
+	// echo 后端。
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(cn, cn)
+			}(c)
+		}
+	}()
+	echoAddr := echoLn.Addr().String()
+
+	a, b := xfertest.Pipe()
+	defer a.Close()
+	defer b.Close()
+	serveMux := mux.New(a, mux.RoleListener)
+	defer serveMux.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = relay.Serve(ctx, serveMux, "http://127.0.0.1:1", true, nil, nil,
+			relay.ServeOptions{DialPolicy: relay.NewServiceDialPolicy(nil, []string{echoAddr})})
+	}()
+
+	links := newLinkPool()
+	dMux := mux.New(b, mux.RoleDialer)
+	defer dMux.Close()
+	links.set("peer", dMux)
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil)
+	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("gateway serve: %v", err)
+	}
+
+	const n = 8
+	var wg sync.WaitGroup
+	errCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, gerr := GatewayConnect(ctx, gatewayAddr, "peer", echoAddr, "")
+			if gerr != nil {
+				errCh <- gerr
+				return
+			}
+			defer conn.Close()
+			payload := []byte("ping")
+			if _, werr := conn.Write(payload); werr != nil {
+				errCh <- werr
+				return
+			}
+			got := make([]byte, len(payload))
+			if rerr := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); rerr != nil {
+				errCh <- rerr
+				return
+			}
+			if _, rerr := io.ReadFull(conn, got); rerr != nil {
+				errCh <- rerr
+				return
+			}
+			if string(got) != string(payload) {
+				errCh <- fmt.Errorf("echo mismatch: got %q want %q", got, payload)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for gerr := range errCh {
+		t.Errorf("并发复用已建链路失败: %v", gerr)
 	}
 }
