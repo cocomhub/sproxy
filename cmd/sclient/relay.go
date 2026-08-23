@@ -159,6 +159,7 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, inse
 	// 声明 per-node-secret 能力：hub 回 REG_OK:<base64url secret>（B1 已支持，
 	// B3 服务端将据此校验信令身份）。现有调用不传 caps 时行为不变。
 	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta, hub.CapabilityPerNodeSecret)); serr != nil {
+		_ = conn.Close() // P1-15：mux 创建前失败必须关闭 WS，否则重连循环泄漏连接+sendLoop goroutine
 		return fmt.Errorf("发送注册帧失败: %w", serr)
 	}
 
@@ -167,10 +168,12 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, inse
 	ack, ackErr := conn.Receive(ackCtx)
 	ackCancel()
 	if ackErr != nil {
+		_ = conn.Close() // P1-15：同守卫
 		return fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
 	}
 	nodeSecret, ackErr := parseRegisterAck(string(ack))
 	if ackErr != nil {
+		_ = conn.Close() // P1-15：同守卫
 		return ackErr
 	}
 	if nodeSecret != "" {

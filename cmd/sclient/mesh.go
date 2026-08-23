@@ -48,7 +48,13 @@ func defaultMeshDial(ctx context.Context, svc *client.FileClient, signaler *hub.
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		conn, err := webrtc.DialWithSignalerCtx(ctx, target.Node, signaler)
+		// P1-12：探测受 meshWebRTCProbeTimeout（10s）约束——目标仅跑 relay start 时
+		// 不再白等 30s 信令超时才回落中继；10s 覆盖 LAN/常见 NAT 打洞，更慢的直连
+		// 回落 hub 中继（仍可用）。直连建立后用完整 ctx 开 mux 流（探测超时只约束
+		// 拨号阶段，不约束已建立连接的数据面初始化）。
+		probeCtx, probeCancel := context.WithTimeout(ctx, meshWebRTCProbeTimeout)
+		conn, err := webrtc.DialWithSignalerCtx(probeCtx, target.Node, signaler)
+		probeCancel()
 		if err == nil {
 			res, serr := meshWebRTCStream(ctx, conn, target.Addr)
 			if serr != nil {
@@ -125,6 +131,12 @@ const (
 	meshTargetTTL = 3 * time.Second
 	// meshResolveTimeout 是单次服务解析的网络超时，防止 hub 无响应拖住连接建立。
 	meshResolveTimeout = 5 * time.Second
+	// meshWebRTCProbeTimeout 是 webrtc 直连探测的超时上限（P1-12）。
+	// DialWithSignalerCtx 内部信令等待默认 30s；目标仅跑 relay start（不消费信令
+	// 收件箱）时每条连接都白等满 30s 才回落中继（端口转发模式每入站连接一次）。
+	// 10s 覆盖 LAN/常见 NAT 打洞，更慢的直连回落 hub 中继（仍可用）；彻底跳过
+	// 探测用 --webrtc=false。
+	meshWebRTCProbeTimeout = 10 * time.Second
 )
 
 // errMeshServiceUnavailable 报告服务当前不可用（节点离线或未宣告）。
@@ -152,6 +164,9 @@ type meshTargetRefresher struct {
 	refreshing  bool          // 一次只允许一个 goroutine 刷新
 	done        chan struct{} // 本次刷新完成时 close
 	refreshErr  error         // 最近一次刷新的错误（供等待者复用）
+	// lastFailedNode 是最近一次拨号失败的节点（P1-13）：resolve 优先跳过它选择
+	// 其他健康候选，防止死节点永久遮蔽健康副本。
+	lastFailedNode string
 }
 
 // newMeshTargetRefresher 创建 refresher。
@@ -205,14 +220,30 @@ func (r *meshTargetRefresher) resolve(ctx context.Context) (*client.MeshService,
 		r.mu.Unlock()
 		return nil, r.refreshErr
 	}
+	// P1-13：收集该服务的全部候选；优先选择最近未失败的节点，避免死节点
+	// 永久遮蔽健康副本（旧实现恒取 node-ID 字典序首个）。
+	var first, candidate *client.MeshService
 	for i := range svcs {
-		if svcs[i].Name == r.service {
-			t := svcs[i]
-			r.target = &t
-			r.lastRefresh = r.now()
-			r.mu.Unlock()
-			return &t, nil
+		if svcs[i].Name != r.service {
+			continue
 		}
+		t := svcs[i]
+		if first == nil {
+			first = &t
+		}
+		if candidate == nil && t.Node != r.lastFailedNode {
+			candidate = &t
+		}
+	}
+	if candidate == nil {
+		candidate = first // 全部候选都是最近失败节点：回退到首个（失败信息仍真实）
+	}
+	if candidate != nil {
+		t := *candidate
+		r.target = &t
+		r.lastRefresh = r.now()
+		r.mu.Unlock()
+		return &t, nil
 	}
 	r.target = nil
 	r.lastRefresh = time.Time{}
@@ -222,11 +253,14 @@ func (r *meshTargetRefresher) resolve(ctx context.Context) (*client.MeshService,
 
 // invalidate 使缓存过期：dial 失败（relay 404 / webrtc 失败）后调用，
 // 下一个连接立即重新解析而非等待 TTL。
-func (r *meshTargetRefresher) invalidate() {
+// failedNode 记录最近拨号失败的节点，resolve 会跳过它优先尝试其他健康候选
+// （P1-13：防止死节点永久遮蔽健康副本）。
+func (r *meshTargetRefresher) invalidate(failedNode string) {
 	r.mu.Lock()
 	r.target = nil
 	r.lastRefresh = time.Time{}
 	r.refreshErr = nil
+	r.lastFailedNode = failedNode
 	r.mu.Unlock()
 }
 
@@ -399,8 +433,9 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub
 			}
 			res, cerr := dial(ctx, svc, signaler, target, localNode)
 			if cerr != nil {
-				// dial 失败（relay 404 / webrtc 失败）→ 强制缓存过期，下个连接立即重取。
-				ref.invalidate()
+				// dial 失败（relay 404 / webrtc 失败）→ 强制缓存过期 + 记录失败节点，
+				// 下个连接立即重取并优先跳过该节点（P1-13 候选 failover）。
+				ref.invalidate(target.Node)
 				ios.WriteErrLine("建立 mesh 流失败: %v（目标 node=%s addr=%s 不可达或离线）", cerr, target.Node, target.Addr)
 				return
 			}

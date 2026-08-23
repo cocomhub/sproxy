@@ -360,9 +360,17 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 		return fmt.Errorf("注册失败: %s", reason)
 	}
 
-	reg, err := s.readRegisterFrame(ctx, conn)
+	reg, received, err := s.readRegisterFrame(ctx, conn)
 	if err != nil {
-		s.logger.Warn("读取注册帧失败", "error", err)
+		if !received {
+			// P1-7：注册帧未读到（超时/网络错误）→ 不回 REG_ERR，静默断开让客户端按
+			// 网络问题重连。回 REG_ERR 会让客户端 isTerminalRelayError 判终态永久
+			// 退出——纯网络抖动即可杀死 relay 守护进程（违反 relay.go 自述契约）。
+			s.logger.Warn("读取注册帧失败（网络/超时），静默断开", "error", err)
+			return err
+		}
+		// 已读到帧但非法：回 REG_ERR（客户端据此终止或重试）。
+		s.logger.Warn("注册帧非法", "error", err)
 		return sendRegErr("bad register frame")
 	}
 	if reg.NodeID == "" {
@@ -427,19 +435,24 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 // 协议：连接建立后，节点在 xfer 层发送一条 JSON 注册帧 {node_id, token, meta}
 // （由 hub.NewRegisterFrame 构建；为容错，裸字符串 nodeID 也接受）。
 //
+// 返回 (reg, received, err)：
+//   - received=false：注册帧未读到（超时/网络错误）——调用方不应回发 REG_ERR，
+//     静默断开即可（P1-7：瞬时失败回 REG_ERR 会让客户端误判终态永久退出）；
+//   - received=true 且 err != nil：已读到帧但非法（过大/缺 node_id）——调用方回 REG_ERR。
+//
 // 注意：在 xfer 层（conn.Receive）读取，不占用 mux 流的创建。
 // 与旧版（base 399ff89）的「mux 控制流发 nodeID」协议不兼容——分支未发布，
 // 属协议升级而非破坏。
-func (s *HubServer) readRegisterFrame(ctx context.Context, conn xfer.Conn) (*RegisterFrame, error) {
+func (s *HubServer) readRegisterFrame(ctx context.Context, conn xfer.Conn) (*RegisterFrame, bool, error) {
 	regCtx, cancel := context.WithTimeout(ctx, registerFrameTTL)
 	defer cancel()
 
 	msg, err := conn.Receive(regCtx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if len(msg) > maxRegisterFrameBytes {
-		return nil, fmt.Errorf("注册帧过大: %d bytes (max %d)", len(msg), maxRegisterFrameBytes)
+		return nil, true, fmt.Errorf("注册帧过大: %d bytes (max %d)", len(msg), maxRegisterFrameBytes)
 	}
 	raw := msg
 
@@ -449,7 +462,7 @@ func (s *HubServer) readRegisterFrame(ctx context.Context, conn xfer.Conn) (*Reg
 		reg = &RegisterFrame{NodeID: strings.TrimSpace(string(raw))}
 	} else if reg.NodeID == "" {
 		// 合法 JSON 但缺 node_id：拒绝，不把 JSON 垃圾整串当裸串回退（S2）
-		return nil, fmt.Errorf("注册帧缺少 node_id")
+		return nil, true, fmt.Errorf("注册帧缺少 node_id")
 	}
-	return reg, nil
+	return reg, true, nil
 }

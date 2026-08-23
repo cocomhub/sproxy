@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -31,6 +32,11 @@ const relayStreamDialResultTimeout = 12 * time.Second
 // goroutine/FD 泄漏。
 const relayStreamGrace = 60 * time.Second
 
+// relayStreamIdleTimeout 是中继流 200 后无任何数据流量的空闲超时（P1-9）。
+// 取 15 分钟：远大于正常交互/SSH keepalive 间隔，同时防止"拿到 200 后不发"的
+// 客户端无限期占用叶子出站 FD 与 mux 流。
+const relayStreamIdleTimeout = 15 * time.Minute
+
 // maxDialResultFrameBytes 是拨号结果帧（[4B len][JSON]）的 JSON 部分长度上限。
 const maxDialResultFrameBytes = 4096
 
@@ -46,6 +52,9 @@ type RelayStreamRequest struct {
 type RelayStreamHandler struct {
 	routeTable *hub.RouteTable
 	logger     *slog.Logger
+	// idleTimeout 是中继流 200 后无任何数据流量的空闲超时（P1-9）；0 表示不启用。
+	// 防"拿到 200 后不发"的客户端无限期占用叶子出站 FD 与 mux 流。
+	idleTimeout time.Duration
 }
 
 // NewRelayStreamHandler 创建流中继处理器。
@@ -53,7 +62,7 @@ func NewRelayStreamHandler(rt *hub.RouteTable, logger *slog.Logger) *RelayStream
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &RelayStreamHandler{routeTable: rt, logger: logger}
+	return &RelayStreamHandler{routeTable: rt, logger: logger, idleTimeout: relayStreamIdleTimeout}
 }
 
 // validateRelayAddr 对中继目标地址做语法级校验（I26）：必须是 host:port 格式，
@@ -134,8 +143,18 @@ func readDialResultFrame(stream mux.Stream, result *hub.DialResultFrame) error {
 // webrtc 直连（p2p listen）不回帧，因此经 webrtc 直连的 hub 读帧会超时 504——
 // 该路径本就不经本 handler（mesh webrtc 直连由客户端直接写 dial 帧）。
 func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// P1-10：用 MaxBytesReader 而非 io.LimitReader——后者把超大请求体静默截断，
+	// 前 1MiB 内合法 JSON 照样 200 且开始真实拨号（调用方依赖 400/413 拒绝会失察）。
+	// MaxBytesReader 超限时 json.Decode 报 *http.MaxBytesError → 413（对齐
+	// signaling_handlers.go 的 S41 语义）。
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req RelayStreamRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			http.Error(w, "中继请求体过大", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, fmt.Sprintf("解析请求失败: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -250,14 +269,19 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 读侧必须用 rw.Reader（包含 conn + 已缓冲字节），否则 Hijack 时
 	// 客户端在请求体后追加的数据若已被 bufio 预读，从 conn 直接读会跳过
 	// 缓冲字节导致流错位（I4'）。写侧用 conn（rw.Writer 内部就是 conn）。
+	//
+	// P1-9 空闲超时：任一方向有字节流动即刷新 lastActive；watchdog 在 idleTimeout
+	// 内无任何数据则强制关闭两端，防"拿到 200 后不发"的客户端无限期占用叶子 FD。
+	var lastActive atomic.Int64
+	lastActive.Store(time.Now().UnixNano())
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(stream, rw)
+		_, _ = io.Copy(stream, &activityReader{r: rw, lastActive: &lastActive})
 		_ = stream.CloseWrite()
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(conn, stream)
+		_, _ = io.Copy(conn, &activityReader{r: stream, lastActive: &lastActive})
 		// 半关闭客户端写侧（TCP FIN），使客户端感知远端 EOF。conn 为 Hijack 后的
 		// 原始连接（*net.TCPConn），支持 CloseWrite；其他类型退化 Close。
 		if cw, ok := conn.(interface{ CloseWrite() error }); ok {
@@ -267,6 +291,29 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		done <- struct{}{}
 	}()
+
+	// P1-9 watchdog：空闲超时强制关闭（Abort 非阻塞，解除两个 io.Copy 的阻塞，
+	// 随后的 done 收尾让泵送函数正常返回）。idleTimeout<=0 时不启用。
+	if h.idleTimeout > 0 {
+		watchdogDone := make(chan struct{})
+		defer close(watchdogDone)
+		go func() {
+			ticker := time.NewTicker(h.idleTimeout / 2)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-watchdogDone:
+					return
+				case now := <-ticker.C:
+					if now.Sub(time.Unix(0, lastActive.Load())) > h.idleTimeout {
+						_ = conn.Close()
+						_ = stream.Abort()
+						return
+					}
+				}
+			}
+		}()
+	}
 
 	// 半关闭宽限期（P0-4，对齐 leaf.go pump 的 C1 范本）：任一方向完成后，
 	// 给另一方向 relayStreamGrace 时间完成半关闭收尾——让在途响应仍可被读回
@@ -301,4 +348,20 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// activityReader 包装 io.Reader，Read 读到数据时刷新 lastActive（P1-9 空闲超时判定）。
+// 中继泵送两个方向的读源（客户端 rw 与叶子 stream）都经此包装，任一方向有字节
+// 流动即视为连接活跃。
+type activityReader struct {
+	r          io.Reader
+	lastActive *atomic.Int64
+}
+
+func (a *activityReader) Read(p []byte) (int, error) {
+	n, err := a.r.Read(p)
+	if n > 0 {
+		a.lastActive.Store(time.Now().UnixNano())
+	}
+	return n, err
 }

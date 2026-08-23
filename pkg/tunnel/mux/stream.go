@@ -105,7 +105,16 @@ func (s *stream) Read(p []byte) (n int, err error) {
 			select {
 			case data, ok = <-s.dataCh:
 			case <-s.done:
-				return 0, s.rejectedOrClosedErr()
+				// P1-6：done 就绪但 dataCh 可能同时有数据（readLoop 先 pushData 再
+				// closeChannels，窗口内两分支同时就绪，Go select 随机选取）。必须
+				// 优先非阻塞清空 dataCh，仅当确无数据才报关闭——否则已投递的数据帧
+				// 有 ~50% 概率被丢弃（I27 拨号结果帧读取在叶子"接受后立即关"场景的
+				// 可靠性依赖此行为）。
+				select {
+				case data, ok = <-s.dataCh:
+				default:
+					return 0, s.rejectedOrClosedErr()
+				}
 			}
 		}
 		if !ok {

@@ -83,6 +83,36 @@ func (r *blockingRaw) Close() error {
 	return nil
 }
 
+// idleSignaler 是等待即阻塞的 Signaler 桩：Wait* 阻塞到 ctx 取消。
+type idleSignaler struct{}
+
+func (idleSignaler) SendOffer(string, string) error  { return nil }
+func (idleSignaler) SendAnswer(string, string) error { return nil }
+func (idleSignaler) WaitOffer(ctx context.Context) (string, string, error) {
+	<-ctx.Done()
+	return "", "", ctx.Err()
+}
+func (idleSignaler) WaitAnswer(ctx context.Context) (string, string, error) {
+	<-ctx.Done()
+	return "", "", ctx.Err()
+}
+
+// TestListenWithSignaler_IdleTimeout_ReturnsSentinel（P1-11 回归）：
+// 无对端在 signalingTimeout 内发起连接时，ListenWithSignalerCtx 必须返回
+// ErrNoIncomingConnection 哨兵（供 p2p listen 区分"空闲"与"失败"，避免空闲时
+// 无条件重注册 + per-node secret 轮换的注册抖动）。
+func TestListenWithSignaler_IdleTimeout_ReturnsSentinel(t *testing.T) {
+	SetHostOnly(true)
+	t.Cleanup(func() { SetHostOnly(false) })
+	SetSignalingTimeout(200 * time.Millisecond)
+	t.Cleanup(ResetSignalingTimeout)
+
+	_, err := ListenWithSignalerCtx(context.Background(), "peer", idleSignaler{})
+	if !errors.Is(err, ErrNoIncomingConnection) {
+		t.Fatalf("空闲超时应返回 ErrNoIncomingConnection，got: %v", err)
+	}
+}
+
 // TestWebrtcRoundTrip verifies bidirectional message exchange.
 func TestWebrtcRoundTrip(t *testing.T) {
 	SetHostOnly(true)

@@ -37,6 +37,23 @@ func TestRelayStreamHandler_BadJSON(t *testing.T) {
 }
 
 // TestRelayStreamHandler_MissingFields 验证缺 target/addr 被拒绝。
+// TestRelayStreamHandler_OversizedBody_413（P1-10 回归）：
+// 请求体超过上限必须 413 拒绝（MaxBytesReader + *http.MaxBytesError），
+// 而非 io.LimitReader 把 JSON 值截断成不完整的 400/静默截断。
+func TestRelayStreamHandler_OversizedBody_413(t *testing.T) {
+	rt := hub.NewRouteTable()
+	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
+
+	// JSON 值本身超过 1MiB（大 pad 字段），json.Decoder 解析时必读穿上限。
+	body := `{"target":"leaf","type":"tcp","addr":"127.0.0.1:22","pad":"` + strings.Repeat("x", 1<<20) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超大请求体应返回 413，got %d", w.Code)
+	}
+}
+
 func TestRelayStreamHandler_MissingFields(t *testing.T) {
 	rt := hub.NewRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
@@ -264,6 +281,93 @@ func TestRelayStream_ClientHalfClose_KeepsInFlightResponse(t *testing.T) {
 	}
 	cancel()
 	_ = leafErr
+}
+
+// TestRelayStream_IdleTimeout_ClosesIdleConnection（P1-9 回归）：
+// 中继流 200 后无任何数据流量超过 idleTimeout 即被强制关闭——旧实现无空闲上限，
+// "拿到 200 后不发"的客户端可无限期占用叶子出站 FD 与 mux 流。
+func TestRelayStream_IdleTimeout_ClosesIdleConnection(t *testing.T) {
+	// 静默目标：接受连接但保持沉默（双向空闲）。
+	backLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backLn.Close()
+	go func() {
+		for {
+			c, aerr := backLn.Accept()
+			if aerr != nil {
+				return
+			}
+			// 保持打开但沉默（不读不写），使中继流双向空闲；测试进程结束随进程清理。
+			_ = c
+		}
+	}()
+	backAddr := backLn.Addr().String()
+
+	pipeA, pipeB := xfertest.Pipe()
+	callerMux := mux.New(pipeA, mux.RoleDialer)
+	leafMux := mux.New(pipeB, mux.RoleListener)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	go func() {
+		_ = relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
+			relay.ServeOptions{DialPolicy: func(addr string) (string, bool) { return addr, true }, DialResultFrames: true})
+	}()
+
+	rt := hub.NewRouteTable()
+	rt.Add("leaf-node", callerMux)
+	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
+	h.idleTimeout = 300 * time.Millisecond // 短超时供测试
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: backAddr})
+	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", addr, len(body))
+	if _, werr := io.WriteString(conn, reqLine); werr != nil {
+		t.Fatal(werr)
+	}
+	if _, werr := conn.Write(body); werr != nil {
+		t.Fatal(werr)
+	}
+
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(statusLine, " 200 ") {
+		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
+		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
+	}
+	for {
+		line, rerr := br.ReadString('\n')
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	// 200 后不做任何事：等待空闲超时强制关闭。
+	// 区分"被 watchdog 关闭"（EOF/连接重置 → PASS）与"仍存活"（读超时 → FAIL）。
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, rerr := conn.Read(make([]byte, 1)); rerr == nil {
+		t.Fatal("空闲超时后应被强制关闭，但读到了数据")
+	} else if ne, ok := rerr.(net.Error); ok && ne.Timeout() {
+		t.Fatal("空闲超时后连接应被关闭，但读取超时（watchdog 未生效）")
+	}
 }
 
 // TestRelayStreamDialRequest_Framing 验证 dial 帧格式与 hub.DialRequest 一致。

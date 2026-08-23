@@ -42,9 +42,13 @@ type SignalMsg struct {
 // 防止大量空转 peer 的收件箱无界累积内存、以及单 sender 灌流逐出目标消息（I9）。
 type SignalQueue struct {
 	mu      sync.Mutex
-	inboxes map[string][]SignalMsg   // peer -> 待消费消息
-	waiters map[string]chan struct{} // peer -> 有新消息的信号
-	total   int                      // 当前积压消息总数
+	inboxes map[string][]SignalMsg // peer -> 待消费消息
+	// waiters 是 peer -> 广播唤醒通道：每个 peer 最多一个「开放」通道，
+	// Push/Purge 用 close 唤醒**所有**阻塞在该通道上的 Wait（close-broadcast，
+	// P1-8），随后删除 map 条目，下次 Wait 新建通道。相比旧的"单 waiter 通道 +
+	// 唤醒即删"，并发 Wait 不再有第二个被搁浅到 ctx 截止（最长 25s）。
+	waiters map[string]chan struct{}
+	total   int // 当前积压消息总数
 }
 
 // NewSignalQueue 创建信令队列。
@@ -157,11 +161,12 @@ func (q *SignalQueue) Push(m SignalMsg) error {
 	}
 	q.inboxes[m.To] = append(inbox, m)
 	q.total++
+	// P1-8：close-broadcast 唤醒该 target 全部等待者（并发 poll 不再只有一个 waiter
+	// 被唤醒、其余搁浅）。每通道只 close 一次：此处 close 后立即 delete，Wait 只在
+	// map 无条目时新建——两次 Push 之间无 Wait 时不重复 close。
 	if w := q.waiters[m.To]; w != nil {
-		select {
-		case w <- struct{}{}:
-		default:
-		}
+		close(w)
+		delete(q.waiters, m.To)
 	}
 	return nil
 }
@@ -238,8 +243,9 @@ func (q *SignalQueue) Confirm(target, id string) bool {
 }
 
 // Purge 清空 peer 的收件箱与 waiter（节点下线时调用，I6）。
-// 幂等：peer 不存在时是 no-op。在 Wait 中阻塞的 goroutine 不会被主动唤醒，
-// 但 waiter 表条目被删除，后续 Wait 会新建 waiter（不 panic）。
+// 幂等：peer 不存在时是 no-op。close-broadcast 唤醒阻塞中的 Wait（P1-8），
+// 使其不再搁浅至 ctx 截止（最长 25s）；唤醒后 Pop 为空，调用方自行收尾。
+// 每通道只 close 一次：此处 close 后立即 delete，后续 Wait 新建通道。
 func (q *SignalQueue) Purge(peerID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -247,7 +253,10 @@ func (q *SignalQueue) Purge(peerID string) {
 		q.total -= len(inbox)
 		delete(q.inboxes, peerID)
 	}
-	delete(q.waiters, peerID)
+	if w := q.waiters[peerID]; w != nil {
+		close(w)
+		delete(q.waiters, peerID)
+	}
 }
 
 // Total 返回当前全局积压消息总数（含所有收件箱）。
@@ -260,7 +269,8 @@ func (q *SignalQueue) Total() int {
 
 // Wait 阻塞等待 target 收件箱出现新消息（长轮询语义）。
 // 返回后调用方应再 Pop 一次；有超时保护。
-// 成功唤醒与 ctx 取消两条路径都会清理该 target 的 waiter，防止 waiters 表
+// 同一 target 的并发 Wait 共享同一个开放通道，Push/Purge close 后**全部**被唤醒
+// （P1-8）；成功唤醒与 ctx 取消两条路径都会清理 waiter 条目，防止 waiters 表
 // 无界增长（I6/S10）。
 func (q *SignalQueue) Wait(ctx context.Context, target string) error {
 	q.mu.Lock()
@@ -277,14 +287,15 @@ func (q *SignalQueue) Wait(ctx context.Context, target string) error {
 			<-ctx.Done()
 			return ctx.Err()
 		}
-		w = make(chan struct{}, 1)
+		w = make(chan struct{})
 		q.waiters[target] = w
 	}
 	q.mu.Unlock()
 
 	select {
 	case <-w:
-		// 成功唤醒：清理该 target 的 waiter（若无新 waiter 覆盖）
+		// 成功唤醒（channel 已被 Push/Purge close）：清理该 target 的 waiter 条目。
+		// 若已有新 waiter 覆盖（q.waiters[target] != w），不误删。
 		q.mu.Lock()
 		if q.waiters[target] == w {
 			delete(q.waiters, target)
@@ -292,7 +303,7 @@ func (q *SignalQueue) Wait(ctx context.Context, target string) error {
 		q.mu.Unlock()
 		return nil
 	case <-ctx.Done():
-		// 清理该 target 的 waiter（若无新 waiter 覆盖）
+		// 清理该 target 的 waiter 条目（若无新 waiter 覆盖）。
 		q.mu.Lock()
 		if q.waiters[target] == w {
 			delete(q.waiters, target)
