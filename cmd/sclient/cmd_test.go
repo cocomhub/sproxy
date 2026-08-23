@@ -52,7 +52,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 		{"batch-delete", NewCmdBatchDelete(factory, ios, st)},
 		{"batch-rename", NewCmdBatchRename(factory, ios)},
 		{"mv", NewCmdMv(factory, ios, st)},
-		{"stat", NewCmdStat(ios, &testConfigProvider{cfg: client.DefaultConfig()})},
+		{"stat", NewCmdStat(factory, ios, &testConfigProvider{cfg: client.DefaultConfig()})},
 		{"genkey", NewCmdGenkey(ios)},
 		{"tunnel", NewCmdTunnel(factory, ios)},
 		{"cd", NewCmdCd(st, ios)},
@@ -260,7 +260,8 @@ func TestMvCmd(t *testing.T) {
 // ---- stat command ----
 
 func TestStatCmd(t *testing.T) {
-	cmd := NewCmdStat(cli.IOStreams{Out: io.Discard}, &testConfigProvider{cfg: client.DefaultConfig()})
+	factory := clientfactory.NewMock(nil, nil)
+	cmd := NewCmdStat(factory, cli.IOStreams{Out: io.Discard}, &testConfigProvider{cfg: client.DefaultConfig()})
 
 	if cmd.Use != "stat [server]" {
 		t.Errorf("statCmd.Use = %q", cmd.Use)
