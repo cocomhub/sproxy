@@ -83,3 +83,32 @@ func TestRequestLog_InheritTraceID(t *testing.T) {
 		t.Fatalf("SpanContext = %+v, want inherited trace + new span", seen)
 	}
 }
+
+// TestRequestLog_NoDuplicateTraceAttrs 验证"收到请求/请求完成"日志经 WithContextHandler
+// 自动注入 trace_id/span_id 时不会重复（生产 logger 已用 WithContextHandler 包装，
+// 中间件 ctx 又带 SpanContext，显式传参会导致每行出现两对 trace_id/span_id）。
+func TestRequestLog_NoDuplicateTraceAttrs(t *testing.T) {
+	var buf bytes.Buffer
+	h := &Handlers{}
+	h.logger = slog.New(tracing.WithContextHandler(
+		slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	wrapped := h.requestLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest("GET", "/api/files", nil)
+	rr := httptest.NewRecorder()
+	wrapped.ServeHTTP(rr, req)
+
+	out := strings.TrimSpace(buf.String())
+	if out == "" {
+		t.Fatal("expected request log output")
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		if n := strings.Count(line, "trace_id="); n > 1 {
+			t.Fatalf("duplicate trace_id (%d) in line: %s", n, line)
+		}
+		if n := strings.Count(line, "span_id="); n > 1 {
+			t.Fatalf("duplicate span_id (%d) in line: %s", n, line)
+		}
+	}
+}

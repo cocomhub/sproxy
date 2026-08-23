@@ -21,6 +21,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 )
 
 // newTestServer 启动一个临时的 httptest.Server，绑定到独立的 uploads 目录。
@@ -1539,6 +1543,50 @@ func TestUpload_ExistingFileChecksumMismatch(t *testing.T) {
 	})
 	if status != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", status, respBody)
+	}
+}
+
+// TestTunnelInnerRequest_InheritsClientTraceID 验证隧道内层请求挂 requestLogMiddleware：
+// 客户端注入的 traceparent 经隧道到达内层后，内层生成子 span 并回显 Traceparent，
+// 其 trace_id 与客户端一致（span_id 为新生成），实现隧道内层全链路追踪。
+func TestTunnelInnerRequest_InheritsClientTraceID(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	// 服务端 TunnelKey 是 32 个零字节，对应 64 个 hex '0'。
+	hexKey := strings.Repeat("00", 32)
+	tc, err := tunnel.NewClient(hexKey, url+"/tunnel", 5*time.Second, nil)
+	if err != nil {
+		t.Fatalf("tunnel.NewClient: %v", err)
+	}
+
+	const wantTraceID = "0123456789abcdef0123456789abcdef"
+	const wantSpanID = "abcd1234abcd1234"
+	req, _ := http.NewRequest("GET", "/api/files", nil)
+	req.Header.Set("Traceparent", "00-"+wantTraceID+"-"+wantSpanID+"-01")
+
+	resp, err := tc.Do(req)
+	if err != nil {
+		t.Fatalf("tunnel Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("tunnel response status = %d, want 200", resp.StatusCode)
+	}
+
+	echoed := resp.Header.Get("Traceparent")
+	tid, sid, ok := tracing.ParseTraceparent(echoed)
+	if !ok {
+		t.Fatalf("inner response Traceparent = %q, invalid", echoed)
+	}
+	if tid != wantTraceID {
+		t.Fatalf("inner trace_id = %q, want %q", tid, wantTraceID)
+	}
+	if sid == wantSpanID {
+		t.Fatalf("inner span_id should differ from client's, got %q", sid)
+	}
+	if len(sid) != 16 {
+		t.Fatalf("inner span_id length = %d, want 16", len(sid))
 	}
 }
 
