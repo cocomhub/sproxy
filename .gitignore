@@ -6,6 +6,7 @@ logs
 *.gz
 *.zip
 build
+internal/build/
 local
 *.local
 certs
