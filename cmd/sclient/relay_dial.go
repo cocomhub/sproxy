@@ -12,6 +12,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/spf13/cobra"
 )
 
@@ -139,11 +140,10 @@ func relayDialListenOn(ctx context.Context, svc relayDialClient, node, tcpAddr s
 				return
 			}
 			defer remote.Close()
-			// 双向泵送（CloseWrite 半关闭 + grace 宽限期，C1 范本）：任一方向完成
-			//（如中继端断开 → remote EOF）即向对端传播半关闭（TCP FIN / 流 EOF），
-			// 让在途响应仍可被读回（不截断）；对端不回应 FIN 时 grace 超时强制双侧
-			// 关闭解除阻塞。返回后由外层 defer c.Close()/remote.Close() 收尾。
-			pumpConns(c, remote, pumpGracePeriod)
+			// 双向泵送（CloseWrite 半关闭 + grace 宽限期，C1 范本，见 iostream.Pump）：
+			// 任一方向完成即向对端传播半关闭，让在途响应仍可被读回；对端不回应 FIN
+			// 时 grace 超时强制双侧关闭解除阻塞。返回后由外层 defer 收尾。
+			iostream.Pump(c, remote, iostream.PumpGrace)
 		}(clientConn)
 	}
 }

@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
@@ -26,12 +28,6 @@ const (
 	// manualSignalingTimeout 是 --manual 场景（文件或 stdin/stdout 交换）信令等待的整体超时。
 	// 默认 10 分钟：人工拷文件/复制粘贴 JSON 需要较长窗口。
 	manualSignalingTimeout = 10 * time.Minute
-
-	// pumpGracePeriod 是 pump / pumpConns 第二方向完成收尾的宽限期（对齐 leaf.go
-	// pump 的 C1 修复）：首方向完成（已传播半关闭）后，第二方向需在此时间内完成；
-	// 超时视为对端非合作，强制关闭两端防 goroutine / FD 泄漏。长连接（双向持续
-	// 活跃）不触发宽限期——计时器只在某方向完成且另一方向仍空闲时启动。
-	pumpGracePeriod = 60 * time.Second
 )
 
 // discardLogger 返回输出到 io.Discard 的 logger（供测试桩使用，如 mesh_test 的
@@ -477,7 +473,7 @@ func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr strin
 			if werr := writeDialFrame(stream, tcpAddr); werr != nil {
 				return
 			}
-			pump(local, stream)
+			iostream.Pump(local, stream, iostream.PumpGrace)
 		}(c)
 	}
 }
@@ -516,128 +512,14 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 }
 
 // writeDialFrame 在 mux 流上写入 [4B len][{"dial":addr}] 帧（与 relay 协议一致）。
+// 委托 pkg/tunnel/mesh.WriteDialFrame。
 func writeDialFrame(s mux.Stream, addr string) error {
-	return writeDialFrameTo(s, addr)
+	return mesh.WriteDialFrame(s, addr)
 }
 
-// pump 双向泵送：本地 socket <-> mux 流。
-//
-// 关闭语义（S63，对齐 leaf.go pump 的 C1 修复）：
-//   - 每个方向 io.Copy 完成后向对端 CloseWrite 传播半关闭（TCP FIN / 流 EOF），
-//     而不是立即全关——让在途的响应仍可被另一方向读回（不截断）。
-//   - 首方向完成后武装 grace 宽限期计时器：宽限期内另一方向完成则正常收尾；
-//     超时视为对端非合作（对 FIN 不回应），强制关闭两端解除 Read 阻塞，
-//     防 goroutine / FD 泄漏。长连接（双向持续活跃）不触发计时器，不误断。
-//   - 正常路径不在此显式全关两端，由调用方 defer local.Close() / stream.Close() 收尾。
-func pump(local net.Conn, s mux.Stream) {
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(s, local)
-		_ = s.CloseWrite()
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(local, s)
-		if tc, ok := local.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		} else {
-			_ = local.Close()
-		}
-		done <- struct{}{}
-	}()
-
-	remaining := 2
-	var timeoutCh <-chan time.Time
-	var timer *time.Timer
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-	for remaining > 0 {
-		select {
-		case <-done:
-			remaining--
-			if remaining == 1 {
-				// 一个方向完成：启动宽限期等待另一半完成半关闭收尾。
-				timer = time.NewTimer(pumpGracePeriod)
-				timeoutCh = timer.C
-			}
-		case <-timeoutCh:
-			// 非合作对端：强制关闭两端，解除 local.Read / s.Read 阻塞。
-			_ = local.Close()
-			// P0-3：必须用 Abort() 而非 Close()——Close 经 writeCh 发 FrameClose，
-			// writeCh 打满时永久阻塞，本宽限期收尾路径直接挂死并泄漏 goroutine/stream/FD。
-			_ = s.Abort()
-			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
-				<-done
-				remaining--
-			}
-			return
-		}
-	}
-}
-
-// pumpConns 双向泵送两个 net.Conn（本地 socket <-> 隧道远端连接）。
-// 关闭语义与 leaf.go pump 的 C1 修复一致（S63 范本）：
-//   - 每个方向 io.Copy 完成后向对端 CloseWrite 传播半关闭（TCP FIN / 流 EOF），
-//     而不是立即全关——让对端在途响应仍可被读回（不截断）。
-//   - 首方向完成后武装 grace 宽限期计时器：宽限期内另一方向完成则正常收尾；
-//     超时视为对端非合作（对 FIN 不回应），强制关闭两端解除 Read 阻塞，
-//     防 goroutine / FD 泄漏。长连接（双向持续活跃）不触发计时器，不误断。
-//   - 返回后由调用方以 defer 关闭两端收尾（本函数不主动全关正常路径）。
-func pumpConns(a, b net.Conn, grace time.Duration) {
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(b, a)
-		closeWriteConn(b)
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(a, b)
-		closeWriteConn(a)
-		done <- struct{}{}
-	}()
-
-	remaining := 2
-	var timeoutCh <-chan time.Time
-	var timer *time.Timer
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-	for remaining > 0 {
-		select {
-		case <-done:
-			remaining--
-			if remaining == 1 {
-				timer = time.NewTimer(grace)
-				timeoutCh = timer.C
-			}
-		case <-timeoutCh:
-			// 非合作对端：强制关闭两端，解除 a.Read / b.Read 阻塞。
-			_ = a.Close()
-			_ = b.Close()
-			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
-				<-done
-				remaining--
-			}
-			return
-		}
-	}
-}
-
-// closeWriteConn 向目标传播写半关闭（TCP FIN / 流 EOF），尽力而为：
-// 实现了 CloseWrite() 的类型（*net.TCPConn、client.bufferedNetConn、mux.Stream 等）
-// 用 CloseWrite；其余（如 WebRTC 包装 conn）不支持半关闭则用 Close 退化，仍能
-// 解除对端 Read 阻塞。
-// 参数用 io.Closer 而非 net.Conn：mesh/relay dial 传 net.Conn，p2p stdio 传
-// mux.Stream（两者都实现 io.Closer）。
+// closeWriteConn 向目标传播写半关闭（TCP FIN / 流 EOF）。
+// 委托 pkg/iostream.CloseWrite（多态：mux.Stream/bufferedNetConn 用 CloseWrite，
+// 其余 Close 退化）。
 func closeWriteConn(conn io.Closer) {
-	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-		_ = cw.CloseWrite()
-		return
-	}
-	_ = conn.Close()
+	iostream.CloseWrite(conn)
 }
