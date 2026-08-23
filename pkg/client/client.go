@@ -140,8 +140,13 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 }
 
 // WithTracer 设置自定义 Tracer（可传 OpenTelemetry 适配，或测试用的 mock）。
+// 传入 nil 时保持默认实现（tracing.New()），避免 doRequest 中 nil 解引用。
 func WithTracer(t tracing.Tracer) Option {
-	return func(c *FileClient) { c.tracer = t }
+	return func(c *FileClient) {
+		if t != nil {
+			c.tracer = t
+		}
+	}
 }
 
 // tracingLogger 返回一个用 WithContextHandler 包装的 logger，使
@@ -421,7 +426,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 		return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
 	}
 	fileChecksum = hex.EncodeToString(h.Sum(nil))
-	c.logger.Debug("文件 SHA-256", "file_path", localPath, "remote_path", remotePath, "checksum", shortid.ShortHash(fileChecksum))
+	c.logger.DebugContext(ctx, "文件 SHA-256", "file_path", localPath, "remote_path", remotePath, "checksum", shortid.ShortHash(fileChecksum))
 	if _, err = file.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("重置文件指针失败: %w", err)
 	}
@@ -1060,9 +1065,16 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	}
 
 	// 追踪：为本次请求建立 span，并把 traceparent 头注入到请求头中。
-	ctx2, end := c.tracer.StartSpan(ctx, method+" "+urlPath)
+	// tracer 为 nil 时（如 WithTracer(nil)）回退到默认 slog 实现，避免 nil 解引用。
+	tracer := c.tracer
+	if tracer == nil {
+		tracer = tracing.New()
+	}
+	ctx2, end := tracer.StartSpan(ctx, method+" "+urlPath)
 	defer end()
-	c.tracer.Inject(ctx2, httpHeaderCarrier{req.Header})
+	tracer.Inject(ctx2, httpHeaderCarrier{req.Header})
+	// 请求上下文改用 ctx2：span 生命周期覆盖实际传输，且后续 Context 版日志自动带 trace_id/span_id。
+	req = req.WithContext(ctx2)
 
 	var resp *http.Response
 	if c.tunnelClient != nil {
@@ -1078,7 +1090,7 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		if !c.allowTransportFallback {
 			return nil, fmt.Errorf("transport initialization failed: %w", c.initError)
 		}
-		c.logger.Warn("transport unavailable, falling back to direct mode", "init_error", c.initError)
+		c.logger.WarnContext(ctx2, "transport unavailable, falling back to direct mode", "init_error", c.initError)
 	}
 
 	if c.xferName != "" {

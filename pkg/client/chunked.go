@@ -242,7 +242,7 @@ func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*Chunked
 		return nil, fmt.Errorf("文件合并失败: %s", completeResult.Message)
 	}
 
-	u.client.logger.Info("分块上传完成", "file_name", u.filename, "checksum", shortid.ShortHash(u.checksum))
+	u.client.logger.InfoContext(ctx, "分块上传完成", "file_name", u.filename, "checksum", shortid.ShortHash(u.checksum))
 	return &completeResult, nil
 }
 
@@ -261,7 +261,7 @@ func (u *ChunkedUploader) uploadChunkWithRetry(ctx context.Context, chunkIdx int
 			return
 		}
 	}
-	u.client.logger.Warn("chunk 重试耗尽", "chunk_index", chunkIdx,
+	u.client.logger.WarnContext(ctx, "chunk 重试耗尽", "chunk_index", chunkIdx,
 		"upload_id", shortid.ShortHash(u.uploadID))
 	u.failed.Store(true)
 }
@@ -271,7 +271,7 @@ func (u *ChunkedUploader) uploadChunkWithRetry(ctx context.Context, chunkIdx int
 func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
 	f, err := u.openAndSeekChunk(chunkIdx)
 	if err != nil {
-		u.client.logger.Warn("chunk 打开文件失败", "chunk_index", chunkIdx,
+		u.client.logger.WarnContext(ctx, "chunk 打开文件失败", "chunk_index", chunkIdx,
 			"upload_id", shortid.ShortHash(u.uploadID), "file", u.filePath, "error", err)
 		return false
 	}
@@ -281,7 +281,7 @@ func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
 	n, readErr := io.ReadFull(f, chunkData)
 	f.Close()
 	if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
-		u.client.logger.Warn("chunk 读取失败", "chunk_index", chunkIdx,
+		u.client.logger.WarnContext(ctx, "chunk 读取失败", "chunk_index", chunkIdx,
 			"upload_id", shortid.ShortHash(u.uploadID), "offset", offset, "error", readErr)
 		return false
 	}
@@ -294,7 +294,7 @@ func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
 	// 构造 multipart 请求
 	body, ct, err := u.buildChunkRequest(ctx, chunkIdx, chunkData, chunkChecksum)
 	if err != nil {
-		u.client.logger.Warn("chunk 构建请求失败", "chunk_index", chunkIdx,
+		u.client.logger.WarnContext(ctx, "chunk 构建请求失败", "chunk_index", chunkIdx,
 			"upload_id", shortid.ShortHash(u.uploadID), "error", err)
 		return false
 	}
@@ -309,13 +309,13 @@ func (u *ChunkedUploader) uploadChunk(ctx context.Context, chunkIdx int) bool {
 		if u.client.progressFn != nil {
 			u.client.progressFn("上传", progress, u.fileSize)
 		}
-		u.client.logger.Debug("chunk 上传成功", "chunk_index", chunkIdx, "checksum", shortid.ShortHash(chunkChecksum))
+		u.client.logger.DebugContext(ctx, "chunk 上传成功", "chunk_index", chunkIdx, "checksum", shortid.ShortHash(chunkChecksum))
 		return true
 	}
 
 	if !shouldRetry {
 		// 非重试错误（如 upload_id 过期），标记失败
-		u.client.logger.Warn("chunk 非重试错误", "chunk_index", chunkIdx,
+		u.client.logger.WarnContext(ctx, "chunk 非重试错误", "chunk_index", chunkIdx,
 			"upload_id", shortid.ShortHash(u.uploadID), "status", statusCode,
 			"message", message)
 		u.failed.Store(true)
@@ -420,7 +420,7 @@ func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, bo
 
 	chunkResp, err := u.client.doRequest(ctx, "POST", "/upload/chunk", body, headers)
 	if err != nil {
-		u.client.logger.Warn("chunk 上传请求失败", "chunk_index", chunkIdx,
+		u.client.logger.WarnContext(ctx, "chunk 上传请求失败", "chunk_index", chunkIdx,
 			"upload_id", shortid.ShortHash(u.uploadID), "error", err)
 		// doRequest 失败时关闭 body reader（io.Pipe），避免 buildChunkRequest 的
 		// goroutine 在 pipe 写入时阻塞泄漏
@@ -437,7 +437,7 @@ func (u *ChunkedUploader) sendChunkRequest(ctx context.Context, chunkIdx int, bo
 		Message     string `json:"message"`
 	}
 	if decodeErr := json.NewDecoder(io.LimitReader(chunkResp.Body, 1<<20)).Decode(&chunkResult); decodeErr != nil {
-		u.client.logger.Warn("chunk 响应解析失败", "chunk_index", chunkIdx,
+		u.client.logger.WarnContext(ctx, "chunk 响应解析失败", "chunk_index", chunkIdx,
 			"upload_id", shortid.ShortHash(u.uploadID), "status", chunkResp.StatusCode,
 			"error", decodeErr)
 		return false, true, chunkResp.StatusCode, ""
@@ -549,7 +549,7 @@ func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams
 	statusResp.Body.Close()
 
 	if statusData.Finished || statusData.Completed {
-		c.logger.Info("文件已存在，直接返回成功", "file_name", p.Filename, "checksum", shortid.ShortHash(p.FileChecksum))
+		c.logger.InfoContext(ctx, "文件已存在，直接返回成功", "file_name", p.Filename, "checksum", shortid.ShortHash(p.FileChecksum))
 		return tryResumeResult{result: &ChunkedUploadResult{
 			Success:      true,
 			UploadID:     p.UploadID,
@@ -560,7 +560,7 @@ func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams
 	}
 
 	if statusData.UploadID != "" {
-		c.logger.Info("续传会话已恢复", "upload_id", shortid.ShortHash(p.UploadID),
+		c.logger.InfoContext(ctx, "续传会话已恢复", "upload_id", shortid.ShortHash(p.UploadID),
 			"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
 		result, err := c.uploadChunks(ctx, statusData.MissingChunks, chunkUploadOpts{
 			filePath:     p.LocalPath,
@@ -686,7 +686,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	filename := filepath.ToSlash(filepath.Clean(remotePath))
 	uploadID := generateUploadID(filename, fileSize, modTime, fileChecksum)
 
-	c.logger.Info("分块上传开始", "file_name", filename, "file_size", fileSize,
+	c.logger.InfoContext(ctx, "分块上传开始", "file_name", filename, "file_size", fileSize,
 		"chunk_size", chunkSize, "total_chunks", totalChunks, "upload_id", shortid.ShortHash(uploadID))
 
 	// 尝试续传
@@ -707,7 +707,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	}
 
 	// 新文件 / 不在上传中，创建新 session
-	c.logger.Info("新上传", "file_name", filename, "upload_id", shortid.ShortHash(uploadID))
+	c.logger.InfoContext(ctx, "新上传", "file_name", filename, "upload_id", shortid.ShortHash(uploadID))
 
 	newChunkSize, newTotalChunks, err := c.initNewUploadSession(ctx, resumeSessionParams{
 		UploadID:     uploadID,
@@ -722,7 +722,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 		return nil, err
 	}
 	if newTotalChunks == -1 {
-		c.logger.Info("文件已存在，直接返回成功", "file_name", filename)
+		c.logger.InfoContext(ctx, "文件已存在，直接返回成功", "file_name", filename)
 		return &ChunkedUploadResult{
 			Success:      true,
 			UploadID:     UploadIDAlreadyExists,
@@ -733,7 +733,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	if newChunkSize != chunkSize {
 		chunkSize = newChunkSize
 		totalChunks = newTotalChunks
-		c.logger.Info("服务端返回的 chunk_size", "chunk_size", chunkSize, "total_chunks", totalChunks)
+		c.logger.InfoContext(ctx, "服务端返回的 chunk_size", "chunk_size", chunkSize, "total_chunks", totalChunks)
 	}
 
 	// 上传全部分块
