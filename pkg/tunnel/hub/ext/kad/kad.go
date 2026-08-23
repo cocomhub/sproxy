@@ -174,11 +174,12 @@ func (b *Bucket) moveToFront(i int) {
 }
 
 // Kademlia implements the Kademlia DHT routing table.
+// 注意：当前实现不持有自身锁（Bucket 内部各自加锁）；若未来需要跨 bucket 原子
+// 操作（如并发安全的重合/拆分），需补回 Kademlia 级锁。
 type Kademlia struct {
 	id      NodeID
 	buckets [keyBits]*Bucket
 	logger  *slog.Logger
-	mu      sync.RWMutex
 }
 
 // NewKademlia creates a new Kademlia instance with the given node ID.

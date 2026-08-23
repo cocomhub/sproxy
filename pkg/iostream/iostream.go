@@ -33,6 +33,19 @@ func CloseWrite(conn io.Closer) {
 	_ = conn.Close()
 }
 
+// ForceClose 强制关闭一端，解除阻塞中的 Read/Write，尽力而为且非阻塞：
+//   - 实现了 Abort() 的类型（如 mux.Stream）用 Abort——它直接关本地 done 通道，
+//     不经 writeCh；Close 在 writeCh 打满（对端停读导致流控窗口耗尽）时会永久
+//     阻塞（P0-3），收尾/超时路径必须用 Abort；
+//   - 其余（net.Conn 等）用 Close。
+func ForceClose(end io.ReadWriteCloser) {
+	if a, ok := end.(interface{ Abort() error }); ok {
+		_ = a.Abort()
+		return
+	}
+	_ = end.Close()
+}
+
 // WriteFull 循环写满整个 buf，处理 io.Writer 的部分写（mux 流在发送窗口小于
 // buf 长度时返回 n<len 的短写）。仅用于小帧（长度前缀 + 元数据）；数据面泵送
 // 用 io.Copy。
@@ -90,8 +103,20 @@ func Pump(a io.ReadWriteCloser, b io.ReadWriteCloser, grace time.Duration) {
 			}
 		case <-timeoutCh:
 			// 非合作对端：强制关闭两端，解除阻塞中的 Read/Write。
-			_ = a.Close()
-			_ = b.Close()
+			// 顺序关键（P0-3 + 半关闭传播）：先 Close 非 Abort 端（net.Conn 等），让其
+			// 在途 io.Copy 完成并传播 CloseWrite 到对端；再 Abort Abort 端（mux.Stream）。
+			// 若先 Abort mux.Stream，其 done 已关闭，对端 io.Copy 收尾时的 s.CloseWrite()
+			// 发送失败，半关闭传播丢失（leaf 原实现即 remote.Close 先、s.Abort 后）。
+			for _, end := range []io.ReadWriteCloser{a, b} {
+				if _, isAbortable := end.(interface{ Abort() error }); !isAbortable {
+					_ = end.Close()
+				}
+			}
+			for _, end := range []io.ReadWriteCloser{a, b} {
+				if ab, isAbortable := end.(interface{ Abort() error }); isAbortable {
+					_ = ab.Abort()
+				}
+			}
 			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
 				<-done
 				remaining--

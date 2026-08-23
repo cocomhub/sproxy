@@ -30,13 +30,6 @@ const (
 	manualSignalingTimeout = 10 * time.Minute
 )
 
-// discardLogger 返回输出到 io.Discard 的 logger（供测试桩使用，如 mesh_test 的
-// hub 测试服务器）。p2p listen 的 relay 会话日志已改用经 ios.ErrOut 输出的
-// serveLogger（I46），不再吞诊断。
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
 // NewCmdP2P 创建 p2p 父命令：基于 WebRTC 打洞的点对点连接。
 // 信令经 hub 的 /api/signal/* 桥，数据面打洞成功后直连（不经过 hub）。
 // cfgSvc 为可选配置提供者（P2-配置3）：--hub/--token/--relay-token/--node-id 未
@@ -130,16 +123,16 @@ func (f *p2pFlags) requireHub() error {
 // 调用方须先 requireHub() 校验 hub 非空。exactNode=true 时注册成 f.localNode()
 // 原样（p2p listen 的被寻址方需稳定 ID 供 --peer 寻址）；false 用临时 node_id
 // （p2p connect 的 Answer 回给 offerFrom，对端无需预知本端 ID）。
-func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, exactNode bool) (*meshTempRegistration, error) {
+func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, exactNode bool) (*mesh.TempRegistration, error) {
 	insecure, _ := cmd.Flags().GetBool("insecure")
-	return autoRegister(ctx, autoRegisterParams{
-		hubURL:      f.hub,
-		relayToken:  f.relayToken(),
-		signalToken: f.tok,
-		nodeID:      f.localNode(),
-		prefix:      "p2p",
-		exactNode:   exactNode,
-		insecure:    insecure,
+	return mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
+		HubURL:      f.hub,
+		RelayToken:  f.relayToken(),
+		SignalToken: f.tok,
+		NodeID:      f.localNode(),
+		Prefix:      "p2p",
+		ExactNode:   exactNode,
+		Insecure:    insecure,
 	})
 }
 
@@ -202,8 +195,8 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				if rerr != nil {
 					return fmt.Errorf("webrtc 信令注册失败: %w", rerr)
 				}
-				defer func() { _ = reg.closer() }()
-				sig = reg.signaler
+				defer func() { _ = reg.Closer() }()
+				sig = reg.Signaler
 			}
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
 			if manual {
@@ -272,7 +265,7 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；否则经 hub 信令桥
 			var sig webrtc.Signaler
-			var reg *meshTempRegistration // 自动注册（exact node），accept 循环内重注册时替换
+			var reg *mesh.TempRegistration // 自动注册（exact node），accept 循环内重注册时替换
 			if manual {
 				needFile := offerFile != "" || answerFile != ""
 				if needFile && (offerFile == "" || answerFile == "") {
@@ -302,8 +295,8 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				if rerr != nil {
 					return rerr
 				}
-				defer func() { _ = reg.closer() }()
-				sig = reg.signaler
+				defer func() { _ = reg.Closer() }()
+				sig = reg.Signaler
 			}
 
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
@@ -345,8 +338,8 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 					// 轮换——信令 400/403 时在重连退避循环内重注册自愈；重注册失败不阻断
 					// 退避（保持既有网络抖动重试行为），下一轮循环继续尝试。
 					if reg2, rerr2 := f.registerSignaler(ctx, cmd, true); rerr2 == nil {
-						_ = reg.closer()
-						reg, sig = reg2, reg2.signaler
+						_ = reg.Closer()
+						reg, sig = reg2, reg2.Signaler
 					} else {
 						ios.WriteErrLine("p2p 重注册失败: %v", rerr2)
 					}
@@ -426,7 +419,7 @@ func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr strin
 	// 裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 + Windows
 	// 防火墙弹窗），与 mesh connect / relay dial 对齐（S56）；显式 0.0.0.0:port /
 	// 具体 IP 保持原样。
-	listenAddr = normalizeListenAddr(listenAddr)
+	listenAddr = iostream.NormalizeListenAddr(listenAddr)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听本地端口失败: %w", err)
@@ -470,7 +463,7 @@ func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr strin
 				return
 			}
 			defer stream.Close()
-			if werr := writeDialFrame(stream, tcpAddr); werr != nil {
+			if werr := mesh.WriteDialFrame(stream, tcpAddr); werr != nil {
 				return
 			}
 			iostream.Pump(local, stream, iostream.PumpGrace)
@@ -485,7 +478,7 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 		return err
 	}
 	defer stream.Close()
-	if err := writeDialFrame(stream, tcpAddr); err != nil {
+	if err := mesh.WriteDialFrame(stream, tcpAddr); err != nil {
 		return err
 	}
 	ios.WriteOutLine("已连接: stdin/stdout ⇄ p2p ⇄ %s (Ctrl+D / EOF 断开)", tcpAddr)
@@ -500,7 +493,7 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 		_, _ = io.Copy(stream, ios.In)
 		// P0-5：stdin EOF 后传播半关闭（流 EOF），否则对端永远等不到"输入写完"，
 		// <outDone 永久挂起（与 meshStdioOnce / relayDialOnce 同款修复）。
-		closeWriteConn(stream)
+		iostream.CloseWrite(stream)
 	}()
 	go func() { defer close(outDone); _, _ = io.Copy(ios.Out, stream) }()
 	select {
@@ -509,17 +502,4 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 		<-outDone
 	}
 	return nil
-}
-
-// writeDialFrame 在 mux 流上写入 [4B len][{"dial":addr}] 帧（与 relay 协议一致）。
-// 委托 pkg/tunnel/mesh.WriteDialFrame。
-func writeDialFrame(s mux.Stream, addr string) error {
-	return mesh.WriteDialFrame(s, addr)
-}
-
-// closeWriteConn 向目标传播写半关闭（TCP FIN / 流 EOF）。
-// 委托 pkg/iostream.CloseWrite（多态：mux.Stream/bufferedNetConn 用 CloseWrite，
-// 其余 Close 退化）。
-func closeWriteConn(conn io.Closer) {
-	iostream.CloseWrite(conn)
 }

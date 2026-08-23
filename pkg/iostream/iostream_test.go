@@ -128,6 +128,36 @@ func TestPumpNonCooperativeForceClose(t *testing.T) {
 	}
 }
 
+// abortableEnd 实现 ReadWriteCloser + Abort（模拟 mux.Stream 的强制关闭路径）。
+type abortableEnd struct {
+	closed  bool
+	aborted bool
+}
+
+func (e *abortableEnd) Read([]byte) (int, error)    { return 0, io.EOF }
+func (e *abortableEnd) Write(p []byte) (int, error) { return len(p), nil }
+func (e *abortableEnd) Close() error                { e.closed = true; return nil }
+func (e *abortableEnd) Abort() error                { e.aborted = true; return nil }
+
+// TestForceClose_UsesAbortPreferentially（P0-3 回归）：
+// 强制关闭优先用 Abort()（mux.Stream 在 writeCh 打满时 Close 会永久阻塞），
+// 无 Abort 的类型退化为 Close。
+func TestForceClose_UsesAbortPreferentially(t *testing.T) {
+	end := &abortableEnd{}
+	ForceClose(end)
+	if !end.aborted || end.closed {
+		t.Fatalf("ForceClose 应优先 Abort, aborted=%v closed=%v", end.aborted, end.closed)
+	}
+	// 无 Abort 的类型退化为 Close。
+	plain := &blockingEnd{closed: make(chan struct{})}
+	ForceClose(plain)
+	select {
+	case <-plain.closed:
+	default:
+		t.Fatal("无 Abort 的 ForceClose 应调用 Close")
+	}
+}
+
 // blockingEnd 是阻塞读、可写、CloseWrite no-op 的流端（构造非合作对端）。
 type blockingEnd struct {
 	mu      sync.Mutex

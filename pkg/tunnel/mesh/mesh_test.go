@@ -11,13 +11,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 )
 
 // TestWebRTCStream_WritesDialFrameOnMuxStream（P0-1 回归）：
@@ -113,5 +116,73 @@ func TestDial_FallsBackToRelay(t *testing.T) {
 	// （svc.RelayStream 的错误均以该前缀包装），覆盖 502/连接重置/超时等 relay 错误。
 	if !strings.Contains(err.Error(), "RelayStream") {
 		t.Fatalf("expected relay fallback error, got: %v", err)
+	}
+}
+
+// TestAutoRegister_GetsSecretAndCleanup：经 mock hub 自动注册拿到 per-node secret，
+// 信令请求携带 X-Node-Secret / X-Node-ID（B2/B3），closer 移除临时节点。
+func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
+	rt := hub.NewRouteTable()
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator("relay-token"), nil)
+
+	muxHTTP := http.NewServeMux()
+	wsNode := ws.NewHandlerNode()
+	wsNode.AddToMux(muxHTTP, "/ws")
+	var mu sync.Mutex
+	var gotSecret, gotNodeID string
+	muxHTTP.HandleFunc("/api/signal/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotSecret = r.Header.Get("X-Node-Secret")
+		gotNodeID = r.Header.Get("X-Node-ID")
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	})
+	ts := httptest.NewServer(muxHTTP)
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// hub 侧：接受 ws 连接并交给 HandleConn 注册。
+	go func() {
+		for {
+			c, aerr := wsNode.Accept(ctx)
+			if aerr != nil {
+				return
+			}
+			go func(cc xfer.Conn) { _ = srv.HandleConn(ctx, cc) }(c)
+		}
+	}()
+
+	reg, err := AutoRegister(ctx, AutoRegisterParams{
+		HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+		NodeID: "node-a", Prefix: "p2p", ExactNode: false, Insecure: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reg.Closer() })
+	if !strings.HasPrefix(reg.TempNode, "p2p-node-a-") {
+		t.Fatalf("temp node %q should start with p2p-node-a-", reg.TempNode)
+	}
+	info, ok := rt.LookupInfo(hub.NodeID(reg.TempNode))
+	if !ok {
+		t.Fatalf("temp node %q not registered", reg.TempNode)
+	}
+	if info.Secret == "" {
+		t.Fatal("per-node secret should not be empty")
+	}
+	// 信令携带 X-Node-Secret / X-Node-ID（B2/B3 身份校验前置）。
+	if sperr := reg.Signaler.SendOffer("peer-node", "sdp"); sperr != nil {
+		t.Fatal(sperr)
+	}
+	mu.Lock()
+	secret, nodeID := gotSecret, gotNodeID
+	mu.Unlock()
+	if secret != info.Secret || nodeID != reg.TempNode {
+		t.Fatalf("signaling headers mismatch: secret=%q node=%q (want %q/%q)", secret, nodeID, info.Secret, reg.TempNode)
+	}
+	// closer 关闭注册连接 → hub 移除临时节点。
+	if cerr := reg.Closer(); cerr != nil {
+		t.Fatal(cerr)
 	}
 }

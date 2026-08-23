@@ -18,7 +18,9 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层
@@ -95,17 +97,10 @@ func isTerminalRelayError(err error) bool {
 	return errors.Is(err, hub.ErrRegisterRejected)
 }
 
-// parseRegisterAck 解析 hub 注册 ACK 帧，返回节点 per-node secret。
-// 委托 pkg/tunnel/hub.ParseRegisterAck（哨兵 hub.ErrRegisterRejected）：
-// "REG_ERR" / 未知响应 / 空 secret → 终态错误；"REG_OK[:secret]" → secret。
-func parseRegisterAck(ackStr string) (secret string, err error) {
-	return hub.ParseRegisterAck(ackStr)
-}
-
 func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
 	// B17：insecure 时经 hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；
 	// 非 insecure 路径保持 xfer.Get("ws").Dial 原样（零行为变化）。
-	conn, err := hubWSDial(ctx, hubURL, insecure)
+	conn, err := mesh.HubWSDial(ctx, hubURL, insecure)
 	if err != nil {
 		return fmt.Errorf("连接到 Hub 失败: %w", err)
 	}
@@ -126,11 +121,11 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, inse
 			continue
 		}
 		// S60：addr 必须是合法 host:port（net.SplitHostPort），且 host 非空
-		//（拒绝 "x::22" 这类空 host）。否则注册了"可见不可连"的服务，
+		// （拒绝 "x::22" 这类空 host）。否则注册了"可见不可连"的服务，
 		// mesh connect 命中后必然拨号失败。服务端 hub/router validateServices
 		// 应同步补 host:port 校验（B1 防御纵深，本批仅客户端）。
-		if host, _, err := net.SplitHostPort(addr); err != nil || host == "" {
-			logger.Warn("忽略无效服务宣告（addr 应为 host:port）", "raw", svc, "addr", addr, "error", err)
+		if host, _, sperr := net.SplitHostPort(addr); sperr != nil || host == "" {
+			logger.Warn("忽略无效服务宣告（addr 应为 host:port）", "raw", svc, "addr", addr, "error", sperr)
 			continue
 		}
 		meta.Services = append(meta.Services, hub.Service{Name: name, Addr: addr})
@@ -153,7 +148,7 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, inse
 		_ = conn.Close() // P1-15：同守卫
 		return fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
 	}
-	nodeSecret, ackErr := parseRegisterAck(string(ack))
+	nodeSecret, ackErr := hub.ParseRegisterAck(string(ack))
 	if ackErr != nil {
 		_ = conn.Close() // P1-15：同守卫
 		return ackErr
@@ -305,7 +300,7 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 			// B17：--insecure 时复用 insecureHTTPClient（跳过证书校验，自签 https hub 场景）。
 			httpClient := &http.Client{Timeout: 10 * time.Second}
 			if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {
-				httpClient = insecureHTTPClient()
+				httpClient = client.InsecureHTTPClient()
 			}
 			resp, err := httpClient.Do(req)
 			if err != nil {
