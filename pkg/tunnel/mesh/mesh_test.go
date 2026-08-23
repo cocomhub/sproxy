@@ -1064,6 +1064,9 @@ func TestParseDiscoveryPeerID(t *testing.T) {
 		{"disc-node-a-1787500000000000000", "node-a", true},
 		{"disc-my-node-with-dashes-1787500000000000000", "my-node-with-dashes", true}, // base 含 '-'
 		{"disc-node-123-1787500000000000000", "node-123", true},                       // base 以数字结尾
+		{"disc-123-1787500000000000000", "123", true},                                 // base 全数字
+		{"disc-disc-a-1787500000000000000", "disc-a", true},                           // base 以 disc- 开头
+		{"disc-123-456", "123", true},                                                 // disc-<digits>-<digits>
 		{"mesh-node-a-1787500000000000000", "", false},                                // 非 disc 前缀
 		{"p2p-node-a-1787500000000000000", "", false},                                 // p2p 拨号（临时，非 discovery）
 		{"disc-node-a-abc", "", false},                                                // 尾段非纯数字
@@ -1075,5 +1078,28 @@ func TestParseDiscoveryPeerID(t *testing.T) {
 		if ok != c.ok || got != c.want {
 			t.Errorf("parseDiscoveryPeerID(%q) = (%q,%v), want (%q,%v)", c.in, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// TestLinkPool_RemoveIf：仅当链路池中该 peer 仍指向给定 mux 才移除（防重连竞态
+// 误删新链路——旧链路 serve 返回时若新链路已 set 不误删）。
+func TestLinkPool_RemoveIf(t *testing.T) {
+	links := newLinkPool()
+	a, b := xfertest.Pipe()
+	m1 := mux.New(a, mux.RoleDialer)
+	defer m1.Close()
+	m2 := mux.New(b, mux.RoleListener)
+	defer m2.Close()
+	links.set("peer", m1)
+
+	// 旧 mux（m2）移除：池中仍指向 m1 → 不删除。
+	links.removeIf("peer", m2)
+	if _, ok := links.get("peer"); !ok {
+		t.Fatal("removeIf 旧 mux 不应删除当前链路")
+	}
+	// 当前 mux（m1）移除：删除。
+	links.removeIf("peer", m1)
+	if _, ok := links.get("peer"); ok {
+		t.Fatal("removeIf 当前 mux 应删除链路")
 	}
 }

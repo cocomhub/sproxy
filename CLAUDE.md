@@ -412,6 +412,12 @@ sclient mesh status --gateway 127.0.0.1:18085   # 直连拓扑 / 链路类型
 > 链路对端的服务（完全服务互访，半拨号去重仍保持每对一条链接）。拨号侧链路上同时跑
 > `relay.Serve`（接受对端网关回拨）。
 >
+> **disc- 身份防冒充**：discovery 临时注册（`disc-<base>-<unixnano>`）由 hub 注册时强制
+> 校验——base 必须等于 `real_node_id` 且持有该真实节点 per-node secret 的 HMAC 证明
+> （fail-closed 拒绝，`hub.ParseDiscNodeID` 单一实现供注册校验与 accept 侧解析共用），
+> 故 accept 侧解析的 base 即 hub 已验证、不可伪造；accept 侧另有半拨号序校验
+> （`peerID<nodeID`）作纵深，根除冒充他人污染链路池的投毒/MITM。
+>
 > **网关安全边界**：网关仅监听 loopback（`--gateway-addr` 传非 loopback 地址会被
 > fail-closed 拒绝——远程访问应经 mesh 本身而非网关，防被用作开放 mesh 中继）；mesh
 > node 配置了 `auth_token` 时，网关对 connect/status 请求校验相同 token（mesh connect/

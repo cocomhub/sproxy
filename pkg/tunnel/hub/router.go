@@ -5,8 +5,12 @@ package hub
 
 import (
 	"context"
+	"crypto/hmac"
 	cryptorand "crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -61,6 +65,13 @@ type Meta struct {
 	Addr     string    `json:"addr,omitempty"`     // 节点自身可达地址（直连地址，可为空）
 	Services []Service `json:"services,omitempty"` // 本地服务宣告（本地监听或出口可达目标）
 	Tags     []string  `json:"tags,omitempty"`     // 可选标签（如 "exit"、"trusted"）
+	// RealNodeID 是 mesh 自动对等发现临时注册（disc-<base>-<nano>）代表的本节点真实
+	// node-id。hub 强制校验（见 registerNode）：base 必须等于 RealNodeID 且持有该真实
+	// 节点 per-node secret 的 HMAC 证明（防冒充他人污染链路池）。
+	RealNodeID string `json:"real_node_id,omitempty"`
+	// RealNodeProof 是 HMAC-SHA256(真实节点 per-node secret, RealNodeID) 的 hex。
+	// 仅 mesh node 的 discovery 临时注册携带；hub 端用存储的真实节点 secret 复核。
+	RealNodeProof string `json:"real_node_proof,omitempty"`
 }
 
 // Service 描述一个可被 mesh 寻址的服务。
@@ -261,7 +272,12 @@ func validateServices(svcs []Service) []Service {
 // 注意：AddWithInfoAndServices 原子写入节点与服务宣告（重连时清空旧宣告，
 // 避免同名节点重连且新注册不带服务时旧服务残留，M4/S4）。
 // 节点声明 per-node-secret 能力时生成独立 secret 存入 NodeInfo.Secret（I1/S1）。
-func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) NodeInfo {
+//
+// mesh 自动对等发现临时身份（disc-<base>-<unixnano>）做防冒充校验（S-fix）：
+// base 必须等于 Meta.RealNodeID 且持有该真实节点 per-node secret 的 HMAC 证明，
+// 否则拒绝注册（fail-closed）。否则任何持有 relay_token 的节点可注册
+// disc-<victim>-<nano> 冒充 victim，污染对端 accept 侧链路池实现 MITM。
+func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, error) {
 	info := NodeInfo{
 		ID:        NodeID(reg.NodeID),
 		Mux:       m,
@@ -269,6 +285,23 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) NodeInfo {
 	}
 	if reg.Meta.Addr != "" {
 		info.Addr = reg.Meta.Addr
+	}
+	if strings.HasPrefix(reg.NodeID, discPrefix) {
+		base, ok := ParseDiscNodeID(reg.NodeID)
+		if !ok || base == "" {
+			return NodeInfo{}, fmt.Errorf("disc 临时节点 ID 非法: %q", reg.NodeID)
+		}
+		if reg.Meta.RealNodeID != base {
+			return NodeInfo{}, fmt.Errorf("disc 临时节点 real_node_id 不匹配（疑似冒充 %q）", base)
+		}
+		realInfo, ok := s.rt.LookupInfo(NodeID(base))
+		if !ok || realInfo.Secret == "" {
+			return NodeInfo{}, fmt.Errorf("disc 临时节点目标 %q 未注册或未声明 per-node secret", base)
+		}
+		if !validRealNodeProof(realInfo.Secret, base, reg.Meta.RealNodeProof) {
+			return NodeInfo{}, fmt.Errorf("disc 临时节点 real_node_id 证明失败（疑似冒充 %q）", base)
+		}
+		info.RealNodeID = base
 	}
 	if hasCapability(reg.Capabilities, CapabilityPerNodeSecret) {
 		if secret, err := generateNodeSecret(); err == nil {
@@ -279,7 +312,56 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) NodeInfo {
 		}
 	}
 	s.rt.AddWithInfoAndServices(info, validateServices(reg.Meta.Services))
-	return info
+	return info, nil
+}
+
+// DiscPrefix 是 mesh 自动对等发现临时节点 ID 的基前缀（不含 '-'，AutoRegister 的
+// Prefix 参数用）。完整节点 ID 形如 disc-<base>-<unixnano>，单一来源避免各处硬编码
+// 失配（hub 注册校验与 mesh 拨号共用）。
+const DiscPrefix = "disc"
+
+// discPrefix 是 mesh discovery 临时节点 ID 的完整前缀（含 '-'）。
+const discPrefix = DiscPrefix + "-"
+
+// ParseDiscNodeID 从 mesh discovery 临时节点 ID（disc-<base>-<unixnano>）解析真实
+// node-id base（base 可含 '-'，unixnano 为纯数字尾段）。hub 注册校验与 mesh accept
+// 侧解析共用同一实现，保证"hub 已验证的 base"与"accept 侧使用的 base"一致。
+func ParseDiscNodeID(nodeID string) (string, bool) {
+	if !strings.HasPrefix(nodeID, discPrefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(nodeID, discPrefix)
+	idx := strings.LastIndex(rest, "-")
+	if idx <= 0 {
+		return "", false
+	}
+	tail := rest[idx+1:]
+	if tail == "" {
+		return "", false
+	}
+	for _, r := range tail {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	base := rest[:idx]
+	if base == "" {
+		return "", false
+	}
+	return base, true
+}
+
+// validRealNodeProof 校验 mesh discovery 临时注册的 real_node_id 证明：
+// HMAC-SHA256(secret, realNodeID) 的 hex 与 proof 恒时比较。真实节点的 per-node
+// secret 只下发给出该节点（hub 注册时生成、仅 REG_OK 携带），冒充者无法计算证明。
+func validRealNodeProof(secret, realNodeID, proof string) bool {
+	if secret == "" || proof == "" {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(realNodeID))
+	got := hex.EncodeToString(mac.Sum(nil))
+	return subtle.ConstantTimeCompare([]byte(got), []byte(proof)) == 1
 }
 
 // HubServer 是 Hub 端的节点收口服务：接收 xfer.Conn 连接，
@@ -377,17 +459,23 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 		return sendRegErr("missing node_id")
 	}
 	if s.auth != nil {
-		if err := s.auth.Authenticate(reg.Token); err != nil {
+		if authErr := s.auth.Authenticate(reg.Token); authErr != nil {
 			s.logger.Warn("中继节点鉴权失败", "node", reg.NodeID)
 			_ = sendRegErr("invalid token") // 回发 REG_ERR 供客户端终止重连（忽略错误，保留原始鉴权错误）
-			return err                      // 保留原始错误（ErrInvalidToken）供调用方/测试识别
+			return authErr                  // 保留原始错误（ErrInvalidToken）供调用方/测试识别
 		}
 	}
 
 	m := mux.New(conn, mux.RoleListener)
 	defer m.Close()
 
-	info := s.registerNode(reg, m)
+	info, err := s.registerNode(reg, m)
+	if err != nil {
+		// fail-closed：disc 临时身份防冒充校验失败（或注册表异常）→ REG_ERR 拒绝，
+		// 不注册节点。客户端按 REG_ERR 判终态/重试。
+		s.logger.Warn("节点注册被拒绝", "node", reg.NodeID, "error", err)
+		return sendRegErr(err.Error())
+	}
 	s.logger.Info("中继节点已注册", "node", reg.NodeID, "addr", info.Addr)
 
 	// 注册成功后立即注册清理 defer（RemoveIfOwned 幂等，重复调用返回 false）。

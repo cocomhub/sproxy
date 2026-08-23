@@ -5,6 +5,9 @@ package mesh
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,42 +15,30 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
 
 // parseDiscoveryPeerID 从 discovery 拨号的临时信令身份（disc-<base>-<unixnano>）
-// 恢复真实 node ID：剥掉 "disc-" 前缀与末尾纯数字时间戳段（base 可含 '-'）。
-// accept 侧据此把接受的链路注册进共享 linkPool（网关双向全覆盖的前提）。
+// 恢复真实 node ID：委托 hub.ParseDiscNodeID（单一实现，hub 注册校验与 accept 侧
+// 解析共用——保证"hub 已验证的 base"与"accept 侧使用的 base"一致，不可伪造）。
 func parseDiscoveryPeerID(temp string) (string, bool) {
-	if !strings.HasPrefix(temp, "disc-") {
-		return "", false
-	}
-	rest := strings.TrimPrefix(temp, "disc-")
-	idx := strings.LastIndex(rest, "-")
-	if idx <= 0 {
-		return "", false
-	}
-	tail := rest[idx+1:]
-	if tail == "" {
-		return "", false
-	}
-	for _, r := range tail {
-		if r < '0' || r > '9' {
-			return "", false
-		}
-	}
-	base := rest[:idx]
-	if base == "" {
-		return "", false
-	}
-	return base, true
+	return hub.ParseDiscNodeID(temp)
+}
+
+// realNodeProof 计算 mesh discovery 临时注册的 real_node_id 证明：
+// HMAC-SHA256(perNodeSecret, realNodeID) 的 hex。perNodeSecret 是本节点常驻注册的
+// per-node secret（只下发给出该节点），冒充者无法计算，hub 端据此 fail-closed 拒绝。
+func realNodeProof(perNodeSecret, realNodeID string) string {
+	mac := hmac.New(sha256.New, []byte(perNodeSecret))
+	mac.Write([]byte(realNodeID))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // hubAPIError 是 hub HTTP API 错误（携带状态码供分类：4xx 致命 / 5xx 瞬时）。
@@ -117,10 +108,12 @@ type discoveryLoop struct {
 
 // runDiscoveryLoop 周期经 hub 节点列表发现其他 mesh node，并行 webrtc 自动直连并
 // 保持（full-mesh 拓扑）。links 是共享链路池（mesh node 本地网关据此复用已建链路）。
+// nodeID 是本节点真实 node-id（reg.TempNode）；mainSecret 是本节点 per-node secret
+// （派生 discovery 临时注册的 real_node_proof，hub 强制校验防冒充）。
 // localAddr/httpClient/serveOpts 供拨号侧对等链路上跑 relay.Serve（接受对端网关回拨，
 // 双向服务互访）。返回错误仅当 /api/hub/nodes 4xx（auth/配置级致命，触发整 cycle
 // 重连）；拨号失败 / 瞬时列表失败只冷却重试，不返回（避免重连风暴）。
-func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, links *linkPool, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) error {
+func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, links *linkPool, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) error {
 	interval := cfg.DiscoveryInterval
 	if interval <= 0 {
 		interval = defaultDiscoveryInterval
@@ -140,7 +133,7 @@ func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase stri
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		if err := dl.discoverOnce(ctx, cfg, nodeID, httpBase, probe, maxParallel, localAddr, httpClient, serveOpts, logger); err != nil {
+		if err := dl.discoverOnce(ctx, cfg, nodeID, httpBase, probe, maxParallel, mainSecret, localAddr, httpClient, serveOpts, logger); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -154,7 +147,7 @@ func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase stri
 	}
 }
 
-func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, probe time.Duration, maxParallel int, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) error {
+func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, probe time.Duration, maxParallel int, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) error {
 	peers, err := ListHubNodes(ctx, httpBase, cfg.SignalToken, cfg.Insecure)
 	if err != nil {
 		var herr *hubAPIError
@@ -203,7 +196,7 @@ func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeI
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			dl.dialPeer(ctx, cfg, p, probe, localAddr, httpClient, serveOpts, logger)
+			dl.dialPeer(ctx, cfg, nodeID, mainSecret, p, probe, localAddr, httpClient, serveOpts, logger)
 		}(peer)
 	}
 	wg.Wait()
@@ -214,17 +207,20 @@ func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeI
 // relay.Serve（接受对端网关回拨，双向服务互访）。
 // per-dial 临时信令身份：AutoRegister 临时 node-id + secret，独立收件箱，避免多个
 // 并发拨号共享 signaler 时 WaitAnswer 互相抢 answer。临时身份用 Prefix:"disc" +
-// 真实 NodeID 作 base（disc-<base>-<unixnano>），供对端 accept 侧 parseDiscoveryPeerID
-// 恢复本节点真实 ID 并注册链路。拨号后注销临时身份（连接已建立，数据面独立）。
-func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, peer string, probe time.Duration, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) {
+// 真实 node-id 作 base（disc-<base>-<unixnano>），并携带 real_node_id + real_node_proof
+// （HMAC-SHA256(本节点 per-node secret, nodeID)）：hub 注册时强制校验 base==real_node_id
+// 且证明有效（防冒充他人污染对端链路池），accept 侧 parseDiscoveryPeerID 恢复的 base
+// 即 hub 已验证、不可伪造。拨号后注销临时身份（连接已建立，数据面独立）。
+func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, nodeID, mainSecret, peer string, probe time.Duration, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
 	temp, err := AutoRegister(ctx, AutoRegisterParams{
 		HubURL: cfg.HubURL, ServerURL: cfg.ServerURL,
 		RelayToken: cfg.RelayToken, SignalToken: cfg.SignalToken,
-		NodeID: cfg.NodeID, Prefix: "disc", ExactNode: false,
-		Insecure: cfg.Insecure,
+		NodeID: nodeID, Prefix: hub.DiscPrefix, ExactNode: false,
+		Insecure:   cfg.Insecure,
+		RealNodeID: nodeID, RealNodeProof: realNodeProof(mainSecret, nodeID),
 	})
 	if err != nil {
 		logger.Debug("mesh 自动对等拨号身份注册失败", "peer", peer, "error", err)
