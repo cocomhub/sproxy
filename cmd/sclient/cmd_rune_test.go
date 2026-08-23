@@ -656,7 +656,7 @@ func TestListCommand_ServerError(t *testing.T) {
 // ---- Config command error paths ----
 
 func TestConfigCommand_UnknownSubcommand(t *testing.T) {
-	cfgSvc := &cliConfigProvider{provider: sclientcfg.New("")}
+	cfgSvc := &cliConfigProvider{getProvider: func() *sclientcfg.ViperProvider { return sclientcfg.New("") }}
 
 	var buf strings.Builder
 	cmd := NewCmdConfig(nil, cli.IOStreams{ErrOut: &buf}, new(string), cfgSvc)
@@ -668,7 +668,7 @@ func TestConfigCommand_UnknownSubcommand(t *testing.T) {
 }
 
 func TestConfigCommand_SetMissingValue(t *testing.T) {
-	cfgSvc := &cliConfigProvider{provider: sclientcfg.New("")}
+	cfgSvc := &cliConfigProvider{getProvider: func() *sclientcfg.ViperProvider { return sclientcfg.New("") }}
 
 	var buf strings.Builder
 	cmd := NewCmdConfig(nil, cli.IOStreams{ErrOut: &buf}, new(string), cfgSvc)

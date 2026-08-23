@@ -28,15 +28,22 @@ type ConfigProvider interface {
 }
 
 // cliConfigProvider 是生产实现的 ConfigProvider，基于 sclientcfg.ViperProvider。
+// 用 getProvider 闭包延迟解析 provider：PersistentPreRunE 才初始化 cfgProvider，
+// 若像 factory 一样直接捕获指针值，构造时会拿到 nil（config show/set 一直报
+// "配置未初始化"的既有 bug）。
 type cliConfigProvider struct {
-	provider *sclientcfg.ViperProvider
+	getProvider func() *sclientcfg.ViperProvider
 }
 
 func (c *cliConfigProvider) LoadConfig() (*client.Config, error) {
-	if c.provider == nil {
+	if c.getProvider == nil {
 		return nil, fmt.Errorf("配置未初始化")
 	}
-	return client.LoadFromProvider(c.provider)
+	p := c.getProvider()
+	if p == nil {
+		return nil, fmt.Errorf("配置未初始化")
+	}
+	return client.LoadFromProvider(p)
 }
 
 // NewRootCmd 创建完整的 sclient 根命令，包含所有 flags 和子命令。
@@ -113,7 +120,7 @@ func NewRootCmd() *cobra.Command {
 	// 注册子命令
 	ios := cli.SystemIOStreams()
 	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return cfgProvider })
-	cfgSvc := &cliConfigProvider{provider: cfgProvider}
+	cfgSvc := &cliConfigProvider{getProvider: func() *sclientcfg.ViperProvider { return cfgProvider }}
 	root.AddCommand(NewCmdCd(cliState, ios))
 	root.AddCommand(NewCmdPwd(cliState, ios))
 	root.AddCommand(NewCmdMkdir(factory, ios, cliState))
