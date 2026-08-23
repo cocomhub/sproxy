@@ -71,6 +71,13 @@ type NodeConfig struct {
 	DiscoveryMaxParallel int
 	// DiscoveryPeers 是可选的观测通道：每次建立新的对等直连时非阻塞发送 peer nodeID。
 	DiscoveryPeers chan<- string
+	// GatewayAddr 是本地网关监听地址（mesh connect --gateway 复用已建直连链路的
+	// 入口；空回落 GatewayDefaultAddr；同机多 mesh node 时用 127.0.0.1:0 随机端口）。
+	// 仅监听 loopback，安全默认。
+	GatewayAddr string
+	// GatewayNotify 是可选的观测通道：网关实际监听地址（含回落随机端口）就绪时
+	// 非阻塞发送（供测试/上层启动流程感知）。
+	GatewayNotify chan<- string
 	// Logger 是会话日志（nil 用 slog.Default()）。
 	Logger *slog.Logger
 }
@@ -153,6 +160,9 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	// 自动对等发现隐含需接受回拨（Discover=true 时即使 EnableWebRTC=false 也跑直连环）。
 	enableAccept := cfg.EnableWebRTC || cfg.Discover
 	errCh := make(chan error, 3)
+	// 共享链路池：自动对等发现写入，本地网关复用（mesh connect --gateway 路由）。
+	links := newLinkPool()
+	gw := newGateway(links, cfg, logger)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -175,6 +185,26 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 			<-cycleCtx.Done()
 		}()
 	}
+	// 本地网关（恒启用，loopback）：mesh connect --gateway 复用已建链路的入口。
+	// 绑定失败（默认端口被占 + 随机端口也失败）不致命——节点仍经 hub 中继/webrtc 直连
+	// 服务，只是复用已建链路的快捷路径不可用。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		actual, gerr := gw.Serve(cycleCtx, cfg.GatewayAddr)
+		if gerr != nil {
+			logger.Warn("mesh 本地网关不可用（mesh connect --gateway 将回落常规拨号）", "error", gerr)
+		} else {
+			logger.Info("mesh 本地网关就绪（mesh connect --gateway 复用已建直连链路）", "addr", actual)
+			if cfg.GatewayNotify != nil {
+				select {
+				case cfg.GatewayNotify <- actual:
+				default:
+				}
+			}
+		}
+		<-cycleCtx.Done()
+	}()
 	if cfg.Discover {
 		httpBase, _, herr := hub.NormalizeEndpoints(cfg.HubURL, cfg.ServerURL)
 		if herr != nil {
@@ -183,7 +213,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, logger); err != nil {
+			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, logger); err != nil {
 				// 非阻塞写：只有 /api/hub/nodes 4xx（auth/配置级）才致命触发整 cycle
 				// 重连；拨号/瞬时失败在 runDiscoveryLoop 内部冷却处理，不写 errCh。
 				select {

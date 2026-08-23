@@ -440,7 +440,8 @@ func startSClientRelayService(t *testing.T, hubURL, nodeID, serviceSpec string) 
 
 // startSClientMeshConnect 启动 sclient mesh connect 端口转发，返回转发监听地址与 cleanup。
 // --webrtc=false 跳过信令，直测中继回落路径（出口叶子必须能拨自己宣告的服务地址）。
-func startSClientMeshConnect(t *testing.T, hubURL, service string) (string, func()) {
+// extraArgs 追加到命令行（如 --gateway 127.0.0.1:18085 测复用已建链路）。
+func startSClientMeshConnect(t *testing.T, hubURL, service string, extraArgs ...string) (string, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
@@ -465,6 +466,7 @@ func startSClientMeshConnect(t *testing.T, hubURL, service string) (string, func
 		"--listen", listenAddr,
 		"--webrtc=false",
 	}
+	args = append(args, extraArgs...)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = e2eModuleRoot()
 	var stderrBuf bytes.Buffer

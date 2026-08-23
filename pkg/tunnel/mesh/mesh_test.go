@@ -21,9 +21,11 @@ import (
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
 // TestWebRTCStream_WritesDialFrameOnMuxStream（P0-1 回归）：
@@ -143,8 +145,7 @@ func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 	ts := httptest.NewServer(muxHTTP)
 	defer ts.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	// hub 侧：接受 ws 连接并交给 HandleConn 注册。
 	go func() {
 		for {
@@ -207,8 +208,7 @@ func TestAutoRegister_ExactNode(t *testing.T) {
 	wsNode.AddToMux(muxHTTP, "/ws")
 	ts := httptest.NewServer(muxHTTP)
 	defer ts.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() {
 		for {
 			c, aerr := wsNode.Accept(ctx)
@@ -486,8 +486,7 @@ func TestRunNode_WebRTCDirect(t *testing.T) {
 
 	rt, ts, _ := runNodeTestHub(t, true)
 	nodeID := "mesh-node-direct"
-	nodeCtx, nodeCancel := context.WithCancel(context.Background())
-	defer nodeCancel()
+	nodeCtx := t.Context()
 	runErr := make(chan error, 1)
 	go func() {
 		runErr <- RunNode(nodeCtx, NodeConfig{
@@ -617,8 +616,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 	rt, ts, _ := runNodeTestHub(t, true)
 
 	peersA := make(chan string, 4)
-	ctxA, cancelA := context.WithCancel(context.Background())
-	defer cancelA()
+	ctxA := t.Context()
 	go func() {
 		_ = RunNode(ctxA, NodeConfig{
 			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
@@ -627,8 +625,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 			DiscoveryPeers: peersA, DialAllow: true,
 		})
 	}()
-	ctxB, cancelB := context.WithCancel(context.Background())
-	defer cancelB()
+	ctxB := t.Context()
 	go func() {
 		_ = RunNode(ctxB, NodeConfig{
 			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
@@ -650,5 +647,220 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 	// node-b 仍在路由表（未因拨号/重连被误伤）。
 	if rt.Lookup(hub.NodeID("node-b")) == nil {
 		t.Fatal("node-b 不应从路由表消失")
+	}
+}
+
+// TestGateway_RoutesEstablishedLink：本地网关复用已建直连链路路由到目标服务。
+// 链路 = 内存 pipe 上的 mux 对（serve 侧跑 relay.Serve 出口拨 echo，链路池侧由网关
+// 持有）；GatewayConnect 后数据面端到端 echo 回显（拨号帧 → relay.Serve → 出口拨号）。
+func TestGateway_RoutesEstablishedLink(t *testing.T) {
+	// echo 后端（127.0.0.1 回环）。
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(cn, cn)
+			}(c)
+		}
+	}()
+	echoAddr := echoLn.Addr().String()
+
+	// 内存 pipe 上的 mux 对：serve 侧（relay.Serve 出口拨号）+ 链路池侧（网关持有）。
+	a, b := xfertest.Pipe()
+	defer a.Close()
+	defer b.Close()
+	serveMux := mux.New(a, mux.RoleListener)
+	defer serveMux.Close()
+	ctx := t.Context()
+	go func() {
+		// dialAllow=true + 精确放行宣告地址（echoAddr 是 loopback，DialAllowed 默认拒绝）。
+		_ = relay.Serve(ctx, serveMux, "http://127.0.0.1:1", true, nil, nil,
+			relay.ServeOptions{DialPolicy: relay.NewServiceDialPolicy(nil, []string{echoAddr})})
+	}()
+
+	links := newLinkPool()
+	dMux := mux.New(b, mux.RoleDialer)
+	defer dMux.Close()
+	links.set("peer", dMux)
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil)
+	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("gateway serve: %v", err)
+	}
+
+	conn, err := GatewayConnect(ctx, gatewayAddr, "peer", echoAddr)
+	if err != nil {
+		t.Fatalf("GatewayConnect: %v", err)
+	}
+	defer conn.Close()
+
+	payload := []byte("ping")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("echo 未回显: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo 内容不匹配: got %q want %q", got, payload)
+	}
+}
+
+// TestGateway_NoPeerLink：请求一个链路池中没有的 peer → ErrNoPeerLink（调用方回落
+// 常规拨号）。同时覆盖网关对缺参请求（peer/addr 为空）的 bad_request 应答。
+func TestGateway_NoPeerLink(t *testing.T) {
+	links := newLinkPool()
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil)
+	ctx := t.Context()
+	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("gateway serve: %v", err)
+	}
+
+	_, err = GatewayConnect(ctx, gatewayAddr, "missing-peer", "127.0.0.1:1")
+	if !errors.Is(err, ErrNoPeerLink) {
+		t.Fatalf("期望 ErrNoPeerLink, got %v", err)
+	}
+}
+
+// TestGateway_Status：网关拓扑查询返回 node-id + 服务宣告 + 已建直连链路（链路类型）。
+func TestGateway_Status(t *testing.T) {
+	a, b := xfertest.Pipe()
+	defer a.Close()
+	defer b.Close()
+	links := newLinkPool()
+	dMux := mux.New(b, mux.RoleDialer)
+	defer dMux.Close()
+	links.set("node-b", dMux)
+	gw := newGateway(links, NodeConfig{
+		NodeID:   "node-a",
+		Services: []hub.Service{{Name: "echo", Addr: "127.0.0.1:22"}},
+	}, nil)
+	ctx := t.Context()
+	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("gateway serve: %v", err)
+	}
+
+	st, err := QueryGatewayStatus(ctx, gatewayAddr)
+	if err != nil {
+		t.Fatalf("QueryGatewayStatus: %v", err)
+	}
+	if st.NodeID != "node-a" {
+		t.Fatalf("node_id = %q, want node-a", st.NodeID)
+	}
+	if len(st.Services) != 1 || st.Services[0].Name != "echo" || st.Services[0].Addr != "127.0.0.1:22" {
+		t.Fatalf("services = %+v, want [{echo 127.0.0.1:22}]", st.Services)
+	}
+	if len(st.Peers) != 1 || st.Peers[0].Peer != "node-b" || st.Peers[0].Link != "webrtc-direct" {
+		t.Fatalf("peers = %+v, want [node-b webrtc-direct]", st.Peers)
+	}
+}
+
+// TestRunNode_ServiceAccessViaGateway：两个 mesh node（node-ap 自动拨号 node-svc，
+// 后者宣告 echo 服务）——node-ap 本地网关复用已建直连链路路由到 node-svc 的 echo，
+// 数据面端到端就绪（mesh connect --gateway 的核心场景）。
+func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
+	webrtc.SetHostOnly(true)
+	t.Cleanup(func() { webrtc.SetHostOnly(false) })
+	webrtc.SetSignalingTimeout(60 * time.Second)
+	t.Cleanup(webrtc.ResetSignalingTimeout)
+
+	// echo 后端。
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(cn, cn)
+			}(c)
+		}
+	}()
+	echoAddr := echoLn.Addr().String()
+
+	_, ts, _ := runNodeTestHub(t, true)
+
+	// node-svc：宣告 echo 服务 + 精确放行地址（服务宿主，被 node-ap 自动拨号）。
+	ctxSvc := t.Context()
+	go func() {
+		_ = RunNode(ctxSvc, NodeConfig{
+			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			NodeID: "node-svc", EnableWebRTC: true, Discover: true,
+			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
+			Services:     []hub.Service{{Name: "echo", Addr: echoAddr}},
+			ServiceAddrs: []string{echoAddr}, DialAllow: true,
+		})
+	}()
+
+	// node-ap：访问方 mesh node（低 ID 自动拨 node-svc），本地网关复用已建链路。
+	peersA := make(chan string, 4)
+	gatewayNotifyA := make(chan string, 1)
+	ctxA := t.Context()
+	go func() {
+		_ = RunNode(ctxA, NodeConfig{
+			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			NodeID: "node-ap", EnableWebRTC: true, Discover: true,
+			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
+			DiscoveryPeers: peersA,
+			GatewayAddr:    "127.0.0.1:0", GatewayNotify: gatewayNotifyA,
+		})
+	}()
+
+	// 等网关就绪 + 自动直连建立（node-ap 拨 node-svc）。
+	var gatewayAddr string
+	select {
+	case gatewayAddr = <-gatewayNotifyA:
+	case <-time.After(10 * time.Second):
+		t.Fatal("node-ap 网关未就绪")
+	}
+	select {
+	case got := <-peersA:
+		if got != "node-svc" {
+			t.Fatalf("discovery peer = %q, want node-svc", got)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("node-ap 未自动直连 node-svc")
+	}
+
+	// 复用已建链路：node-ap 网关路由到 node-svc 的 echo。
+	conn, err := GatewayConnect(context.Background(), gatewayAddr, "node-svc", echoAddr)
+	if err != nil {
+		t.Fatalf("GatewayConnect 复用已建链路失败: %v", err)
+	}
+	defer conn.Close()
+	payload := []byte("ping")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("echo 未回显: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo 内容不匹配: got %q want %q", got, payload)
 	}
 }

@@ -332,8 +332,9 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 | `relay dial --node <id> --tcp <addr> [-l :port]` | 经 hub 中继拨号到目标节点出口（任意 TCP） |
 | `p2p connect --peer <id> --tcp <addr> [-l :port]` | WebRTC 打洞直连对端（数据面不经 hub） |
 | `p2p listen [--node-id N]` | 作为对端监听 WebRTC 直连（信令经 hub） |
-| `mesh connect <service> [-l :port]` | 连接 mesh 服务（webrtc 直连优先，hub 中继回落） |
-| `mesh status` | 列出 hub 上的 mesh 服务 |
+| `mesh connect <service> [-l :port]` | 连接 mesh 服务（webrtc 直连优先，hub 中继回落；`--gateway <addr>` 经本地 mesh node 网关复用已建直连链路） |
+| `mesh status` | 列出 hub 上的 mesh 服务（`--gateway <addr>` 改查本地 mesh node 直连拓扑/链路类型） |
+| `mesh node [flags]` | 单进程常驻 mesh 节点（注册+中继+webrtc 直连+自动对等发现+本地网关）：`--hub` `--node-id` `--token` `--service` `--dial-allow` `--discover` `--discover-interval` `--gateway-addr` |
 | `genkey` | 生成 64 hex 密钥 |
 | `config [show\|set <k> <v>]` | 配置管理 |
 | `diag` | 诊断连接问题 |
@@ -375,6 +376,39 @@ sclient relay dial --node local --tcp 127.0.0.1:2090 \
 > `:18083` **不同**；请始终显式 `--hub` 指定实际 hub 地址（`ws://host:port/ws`）。
 > 另：`relay start --hub` 传 WS 端点（`ws(s)://host/ws`）；`p2p` / `mesh connect --hub`
 > 传 HTTP 基址（`http(s)://host`）即可，也接受 `ws(s)` 自动归一（S123）。
+
+### mesh node 常驻 + 自动对等发现 + 完全服务互访
+
+`mesh node` 取代 `relay start` 作为常驻出口节点（单进程单注册，稳定 node-id + 服务宣告 +
+per-node secret + 断线指数退避重连），并叠加两层能力：
+
+**自动对等发现（全节点互联）**：`--discover`（默认开）周期经 hub 节点列表发现其他 mesh
+node，并行 webrtc 自动直连并保持（半拨号去重：低 ID 拨高 ID，每对一条链接），形成
+full-mesh 拓扑。`--discover-interval` 控制发现周期（默认 10s）。
+
+**本地网关 + 完全服务互访**：mesh node 恒监听 loopback 网关（`--gateway-addr`，默认
+`127.0.0.1:18085`）。`mesh connect --gateway <addr>` 先经本地 mesh node 网关**复用已建立
+的直连链路**路由到目标服务（零重新打洞），本地节点无到目标的已建链路时回落常规拨号
+（webrtc 打洞 / hub 中继，不回归既有路径）。`mesh status --gateway <addr>` 查询本地节点
+直连拓扑（node-id + 服务宣告 + 已建链路及链路类型 `webrtc-direct`）。
+
+```bash
+# 节点 node-svc（服务宿主）：宣告 echo 服务，自动对等发现开
+sclient mesh node --hub ws://hub:18083/ws --token T --node-id node-svc \
+  --service echo:127.0.0.1:2222 --dial-allow
+
+# 节点 node-ap（访问方，低 ID）：自动拨号 node-svc，本地网关 127.0.0.1:18085
+sclient mesh node --hub ws://hub:18083/ws --token T --node-id node-ap \
+  --discover --discover-interval 10s --gateway-addr 127.0.0.1:18085
+
+# 任一机器上：经 node-ap 网关复用已建直连链路访问 node-svc 的 echo
+sclient mesh connect echo -l :2222 --gateway 127.0.0.1:18085
+sclient mesh status --gateway 127.0.0.1:18085   # 直连拓扑 / 链路类型
+```
+
+> 说明：网关只复用**本地节点自己拨号建立的**链路（半拨号去重的拨号侧）。生产部署建议
+> 把访问点节点命名为全网最小 ID（低 ID 节点拨号所有远端服务节点），使访问点的网关持有
+> 到所有服务节点的已建链路；反向访问走常规拨号回落（不回归）。
 
 ### sclient 当前目录（`cd`/`pwd`）
 
