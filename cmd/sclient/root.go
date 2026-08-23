@@ -15,6 +15,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/spf13/cobra"
 )
@@ -148,7 +149,7 @@ func initLogger(verbose bool) *slog.Logger {
 		level = slog.LevelDebug
 		webrtc.SetVerbose(true)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	logger := slog.New(tracing.WithContextHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	slog.SetDefault(logger)
 	return logger
 }
