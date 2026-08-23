@@ -29,7 +29,7 @@ func TestConcurrentFileOperations(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			cfgSvc := &testConfigProvider{cfg: client.DefaultConfig()}
-			cmd := NewCmdStat(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, cfgSvc)
+			cmd := NewCmdStat(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, cfgSvc)
 			cmd.SetArgs(nil)
 			if err := cmd.Execute(); err != nil {
 				errCh <- err
