@@ -5,9 +5,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -21,8 +24,27 @@ import (
 )
 
 // meshDialFunc 建立一条到目标服务的连接（选路逻辑）。
-// 默认用 pkg/tunnel/mesh.Dial（webrtc 打洞优先，失败回落 hub 中继）；可注入测试桩。
+// 默认用 pkg/tunnel/mesh.Dial（webrtc 打洞优先，失败回落 hub 中继）；
+// 指定 --gateway 时先经本地 mesh node 网关复用已建直连链路，无已建链路回落常规拨号。
+// 可注入测试桩。
 type meshDialFunc func(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*mesh.Result, error)
+
+// meshGatewayDial 构造带本地网关优先的选路 dial：先经本地 mesh node 网关复用已建
+// 直连链路（零重新打洞），本地节点无到目标的已建链路（ErrNoPeerLink）时回落常规
+// 拨号 mesh.Dial；其他网关错误（连接失败/协议错误）也回落并提示（不回归既有路径）。
+func meshGatewayDial(gatewayAddr string, ios cli.IOStreams) meshDialFunc {
+	return func(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
+		if conn, gerr := mesh.GatewayConnect(ctx, gatewayAddr, target.Node, target.Addr); gerr == nil {
+			// 复用已建立直连链路：网关在已建链路上写拨号帧，对端 relay.Serve 出口拨号。
+			return &mesh.Result{Conn: conn, Kind: mesh.KindPeerLink}, nil
+		} else if errors.Is(gerr, mesh.ErrNoPeerLink) {
+			slog.Debug("本地网关无到目标节点的已建链路，回落常规拨号", "peer", target.Node, "addr", target.Addr)
+		} else {
+			ios.WriteErrLine("本地网关路由失败: %v（回落常规拨号）", gerr)
+		}
+		return mesh.Dial(ctx, svc, signaler, target, localNode)
+	}
+}
 
 // NewCmdMesh 创建 mesh 父命令：基于 hub 服务注册表的服务发现与连接。
 // cfgSvc 为可选配置提供者（mesh node 常驻节点用；hub/token/node-id 配置回落）。
@@ -54,6 +76,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			token, _ := cmd.Flags().GetString("token")
 			relayToken, _ := cmd.Flags().GetString("relay-token")
 			nodeID, _ := cmd.Flags().GetString("node-id")
+			gatewayAddr, _ := cmd.Flags().GetString("gateway")
 			insecure, _ := cmd.Flags().GetBool("insecure")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			if stunServers != nil {
@@ -117,10 +140,17 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 				localNode = iostream.LocalHostname("mesh-node")
 			}
 
-			if listenAddr != "" {
-				return meshForwardListen(cmd, svc, signaler, mesh.Dial, refresher, target, localNode, listenAddr, ios)
+			// --gateway：先经本地 mesh node 网关复用已建直连链路（零重新打洞），
+			// 本地节点无到目标的已建链路时回落常规拨号（不回归既有路径）。
+			dial := meshDialFunc(mesh.Dial)
+			if gatewayAddr != "" {
+				dial = meshGatewayDial(gatewayAddr, ios)
 			}
-			return meshStdioOnce(cmd, svc, signaler, mesh.Dial, refresher, localNode, ios)
+
+			if listenAddr != "" {
+				return meshForwardListen(cmd, svc, signaler, dial, refresher, target, localNode, listenAddr, ios)
+			}
+			return meshStdioOnce(cmd, svc, signaler, dial, refresher, localNode, ios)
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 127.0.0.1:2222；裸 :2222 归一为 127.0.0.1:2222）；留空为单次 stdin/stdout 模式")
@@ -129,17 +159,44 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 	cmd.Flags().String("token", "", "信令 Bearer token（默认复用 --auth-token / 配置 auth_token）")
 	cmd.Flags().String("relay-token", "", "hub 的 relay_token（自动注册用；与 relay start --token 一致；默认复用 --token / auth_token）")
 	cmd.Flags().String("node-id", "", "本节点 ID（信令来源；默认主机名）")
+	cmd.Flags().String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port；本地节点无到目标的已建链路时回落常规拨号）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
 	return cmd
 }
 
-// newCmdMeshStatus 创建 mesh status：列出 hub 上所有 mesh 服务。
+// newCmdMeshStatus 创建 mesh status：列出 hub 上的 mesh 服务；
+// 指定 --gateway 时改查本地 mesh node 网关拓扑（node-id + 服务宣告 + 已建直连链路）。
 func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "列出 hub 上的 mesh 服务",
+		Short: "列出 hub 上的 mesh 服务（或 --gateway 查本地节点直连拓扑）",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			gatewayAddr, _ := cmd.Flags().GetString("gateway")
+			if gatewayAddr != "" {
+				st, err := mesh.QueryGatewayStatus(cmd.Context(), gatewayAddr)
+				if err != nil {
+					return err
+				}
+				ios.WriteOutLine("mesh 节点: %s", st.NodeID)
+				if len(st.Services) == 0 {
+					ios.WriteOutLine("服务宣告: 无")
+				} else {
+					ios.WriteOutLine("服务宣告 (%d):", len(st.Services))
+					for _, s := range st.Services {
+						ios.WriteOutLine("  %-24s addr=%s", s.Name, s.Addr)
+					}
+				}
+				if len(st.Peers) == 0 {
+					ios.WriteOutLine("已建直连链路: 无")
+				} else {
+					ios.WriteOutLine("已建直连链路 (%d):", len(st.Peers))
+					for _, p := range st.Peers {
+						ios.WriteOutLine("  %-24s link=%s  since=%s", p.Peer, p.Link, p.Since.Format(time.RFC3339))
+					}
+				}
+				return nil
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				return err
@@ -163,6 +220,8 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 			return nil
 		},
 	}
+	cmd.Flags().String("gateway", "", "查询本地 mesh node 网关拓扑（127.0.0.1:port；node-id + 服务宣告 + 已建直连链路/链路类型）")
+	return cmd
 }
 
 // meshForwardListen 监听本地端口，每个入站连接独立建立一条 mesh 连接（选路 dial）。

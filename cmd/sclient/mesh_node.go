@@ -45,6 +45,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			enableWebRTC, _ := cmd.Flags().GetBool("webrtc")
 			discover, _ := cmd.Flags().GetBool("discover")
 			discoverInterval, _ := cmd.Flags().GetDuration("discover-interval")
+			gatewayAddr, _ := cmd.Flags().GetString("gateway-addr")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			insecure, _ := cmd.Flags().GetBool("insecure")
 			if stunServers != nil {
@@ -105,6 +106,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				EnableWebRTC:      enableWebRTC,
 				Discover:          discover,
 				DiscoveryInterval: discoverInterval,
+				GatewayAddr:       gatewayAddr,
 				Logger:            logger,
 			})
 		},
@@ -120,6 +122,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 	cmd.Flags().Bool("webrtc", true, "接受 WebRTC 直连（信令 poll + listen）；关闭则仅经 hub 中继可达")
 	cmd.Flags().Bool("discover", true, "启用自动对等发现（经 hub 节点列表发现其他 mesh node，并行 webrtc 自动直连并保持，形成 full-mesh 拓扑）")
 	cmd.Flags().Duration("discover-interval", 10*time.Second, "对等发现周期（如 1s 测试 / 30s 生产）")
+	cmd.Flags().String("gateway-addr", mesh.GatewayDefaultAddr, "本地网关监听地址（mesh connect --gateway 复用已建直连链路的入口；仅 loopback，安全默认；同机多节点用 127.0.0.1:0 随机端口）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
 	return cmd

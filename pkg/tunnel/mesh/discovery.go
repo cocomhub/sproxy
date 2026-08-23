@@ -78,17 +78,18 @@ func ListHubNodes(ctx context.Context, baseURL, signalToken string, insecure boo
 	return ids, nil
 }
 
-// discoveryLoop 维护对等直连集合（peer -> 拨号侧 mux）与失败冷却。
+// discoveryLoop 维护对等直连集合（共享 linkPool，供本地网关复用）与失败冷却。
 type discoveryLoop struct {
+	links    *linkPool // peer nodeID -> 拨号侧 mux（mux 心跳保活）
 	mu       sync.Mutex
-	peerMux  map[string]*mux.Mux  // peer nodeID -> 拨号侧 mux（mux 心跳保活）
 	lastFail map[string]time.Time // peer -> 上次拨号失败时间（冷却）
 }
 
 // runDiscoveryLoop 周期经 hub 节点列表发现其他 mesh node，并行 webrtc 自动直连并
-// 保持（full-mesh 拓扑）。返回错误仅当 /api/hub/nodes 4xx（auth/配置级致命，触发
-// 整 cycle 重连）；拨号失败 / 瞬时列表失败只冷却重试，不返回（避免重连风暴）。
-func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, logger *slog.Logger) error {
+// 保持（full-mesh 拓扑）。links 是共享链路池（mesh node 本地网关据此复用已建链路）。
+// 返回错误仅当 /api/hub/nodes 4xx（auth/配置级致命，触发整 cycle 重连）；拨号失败 /
+// 瞬时列表失败只冷却重试，不返回（避免重连风暴）。
+func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, links *linkPool, logger *slog.Logger) error {
 	interval := cfg.DiscoveryInterval
 	if interval <= 0 {
 		interval = defaultDiscoveryInterval
@@ -102,15 +103,8 @@ func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase stri
 		maxParallel = defaultDiscoveryMaxParallel
 	}
 
-	dl := &discoveryLoop{peerMux: map[string]*mux.Mux{}, lastFail: map[string]time.Time{}}
-	defer func() {
-		dl.mu.Lock()
-		defer dl.mu.Unlock()
-		for _, m := range dl.peerMux {
-			_ = m.Close()
-		}
-		dl.peerMux = map[string]*mux.Mux{}
-	}()
+	dl := &discoveryLoop{links: links, lastFail: map[string]time.Time{}}
+	defer dl.links.closeAll()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -141,14 +135,7 @@ func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeI
 	}
 
 	// sweep 已断开连接（peer 离线自动重拨）。
-	dl.mu.Lock()
-	for p, m := range dl.peerMux {
-		select {
-		case <-m.Done():
-			delete(dl.peerMux, p)
-		default:
-		}
-	}
+	_ = dl.links.sweep()
 	// 计算 targets：非自身、未连、半拨号去重（peer > nodeID，每对恰好一条链接）、
 	// 冷却内跳过。
 	var targets []string
@@ -156,18 +143,20 @@ func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeI
 		if p == "" || p == nodeID {
 			continue
 		}
-		if _, ok := dl.peerMux[p]; ok {
+		if _, ok := dl.links.get(p); ok {
 			continue
 		}
 		if p < nodeID {
 			continue // 半拨号去重：只高 ID 拨低 ID
 		}
-		if t, ok := dl.lastFail[p]; ok && time.Since(t) < discoveryFailedPeerCooldown {
+		dl.mu.Lock()
+		t, failed := dl.lastFail[p]
+		dl.mu.Unlock()
+		if failed && time.Since(t) < discoveryFailedPeerCooldown {
 			continue
 		}
 		targets = append(targets, p)
 	}
-	dl.mu.Unlock()
 	sort.Strings(targets)
 	if len(targets) == 0 {
 		return nil
@@ -220,9 +209,7 @@ func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, peer stri
 		return
 	}
 	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
-	dl.mu.Lock()
-	dl.peerMux[peer] = m
-	dl.mu.Unlock()
+	dl.links.set(peer, m)
 	logger.Info("mesh 自动对等直连建立", "peer", peer)
 	if cfg.DiscoveryPeers != nil {
 		select {

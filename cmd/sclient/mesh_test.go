@@ -6,6 +6,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -58,7 +59,7 @@ func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
 	if node.Use != "node" {
 		t.Fatalf("unexpected node Use: %q", node.Use)
 	}
-	for _, name := range []string{"hub", "node-id", "token", "relay-token", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "stun"} {
+	for _, name := range []string{"hub", "node-id", "token", "relay-token", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "stun"} {
 		if f := node.Flags().Lookup(name); f == nil {
 			t.Errorf("node 缺少 flag: %s", name)
 		}
@@ -71,7 +72,7 @@ func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 	if connect.Use != "connect <service> [-l :port]" {
 		t.Fatalf("unexpected connect Use: %q", connect.Use)
 	}
-	for _, name := range []string{"listen", "webrtc", "hub", "token", "relay-token", "node-id"} {
+	for _, name := range []string{"listen", "webrtc", "hub", "token", "relay-token", "node-id", "gateway"} {
 		if f := connect.Flags().Lookup(name); f == nil {
 			t.Errorf("connect 缺少 flag: %s", name)
 		}
@@ -219,5 +220,114 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "不可用") {
 		t.Fatalf("expected '不可用' error output, got: %q", errBuf.String())
+	}
+}
+
+// mockGateway 构造一个按固定应答 JSON 回应的 mock 网关（测试 meshGatewayDial 选路）。
+// resp 是应答帧 JSON 体（如 {"ok":true} 或 {"ok":false,"error":"no_peer_link"}）。
+func mockGateway(t *testing.T, resp string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				lenBuf := make([]byte, 4)
+				if _, rerr := io.ReadFull(cn, lenBuf); rerr != nil {
+					return
+				}
+				payload := make([]byte, binary.BigEndian.Uint32(lenBuf))
+				if _, rerr := io.ReadFull(cn, payload); rerr != nil {
+					return
+				}
+				respLen := make([]byte, 4)
+				binary.BigEndian.PutUint32(respLen, uint32(len(resp)))
+				_, _ = cn.Write(respLen)
+				_, _ = cn.Write([]byte(resp))
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// TestMeshGatewayDial_UsesGatewayWhenOk：--gateway 且网关返回 ok → 复用已建链路
+// （Kind=peer-link），不经常规拨号。
+func TestMeshGatewayDial_UsesGatewayWhenOk(t *testing.T) {
+	gatewayAddr := mockGateway(t, `{"ok":true}`)
+	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
+	dial := meshGatewayDial(gatewayAddr, ios)
+	target := &client.MeshService{Name: "svc", Node: "node-b", Addr: "127.0.0.1:22"}
+	res, err := dial(context.Background(), nil, nil, target, "local-node")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if res.Kind != mesh.KindPeerLink {
+		t.Fatalf("kind = %q, want %q", res.Kind, mesh.KindPeerLink)
+	}
+	if res.Conn == nil {
+		t.Fatal("conn 不应为 nil")
+	}
+	_ = res.Conn.Close()
+}
+
+// TestMeshGatewayDial_FallsBackWhenNoPeerLink：--gateway 但本地节点无已建链路
+// （网关回 no_peer_link）→ 回落常规拨号（webrtc 跳过 → 中继失败报 RelayStream），
+// 且 no_peer_link 属预期回落不写 ErrOut。
+func TestMeshGatewayDial_FallsBackWhenNoPeerLink(t *testing.T) {
+	gatewayAddr := mockGateway(t, `{"ok":false,"error":"no_peer_link","message":"mesh: no link"}`)
+	errBuf := &lockedBuffer{}
+	ios := cli.IOStreams{Out: io.Discard, ErrOut: errBuf}
+	dial := meshGatewayDial(gatewayAddr, ios)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer ts.Close()
+	svc := client.NewFileClient(ts.URL)
+	target := &client.MeshService{Name: "svc", Node: "node-b", Addr: "127.0.0.1:22"}
+	_, err := dial(context.Background(), svc, nil, target, "local-node")
+	if err == nil || !strings.Contains(err.Error(), "RelayStream") {
+		t.Fatalf("期望回落中继失败（RelayStream 错误）, got %v", err)
+	}
+	if strings.Contains(errBuf.String(), "本地网关路由失败") {
+		t.Fatalf("no_peer_link 不应写 ErrOut, got %q", errBuf.String())
+	}
+}
+
+// TestMeshStatus_GatewayTopology：mesh status --gateway 查询本地 mesh node 网关
+// 拓扑（node-id + 服务宣告 + 已建直连链路/链路类型）。
+func TestMeshStatus_GatewayTopology(t *testing.T) {
+	resp := `{"node_id":"node-ap","services":[{"name":"echo","addr":"127.0.0.1:22"}],"peers":[{"peer":"node-svc","link":"webrtc-direct","since":"2026-08-24T00:00:00Z"}]}`
+	gatewayAddr := mockGateway(t, resp)
+	var out bytes.Buffer
+	cmd := newCmdMeshStatus(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	cmd.SetContext(context.Background()) // 未 Execute 的裸命令 Context() 为 nil
+	if err := cmd.Flags().Set("gateway", gatewayAddr); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.RunE(cmd, []string{}); err != nil {
+		t.Fatalf("mesh status: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"mesh 节点: node-ap",
+		"服务宣告 (1):",
+		"echo",
+		"127.0.0.1:22",
+		"已建直连链路 (1):",
+		"node-svc",
+		"webrtc-direct",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("mesh status 输出缺少 %q: %s", want, got)
+		}
 	}
 }
