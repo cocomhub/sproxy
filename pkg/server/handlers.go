@@ -153,7 +153,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	}
 	apiHandler = CORSMiddleware(cfg.CORS, log.With("component", "cors"))(apiHandler)
 
-	h.tunnelHandler = tunnel.NewLocalHandler(opts.TunnelKey, apiHandler, log.With("component", "tunnel"))
+	// 隧道内层请求同样挂 requestLogMiddleware：解析客户端注入的 traceparent，
+	// 生成子 span 并把 SpanContext 写入 ctx，使内层 handler 的 InfoContext/DebugContext
+	// 日志带 trace_id/span_id，恢复隧道内层 per-request「收到/完成」日志。
+	// 注意：这是 requestLogMiddleware 的第二个独立实例（主 mux 外层已用一次），
+	// 对隧道路径独立生效，正确。
+	h.tunnelHandler = tunnel.NewLocalHandler(opts.TunnelKey, h.requestLogMiddleware(apiHandler), log.With("component", "tunnel"))
 
 	srvMux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
 	srvMux.HandleFunc("GET /download", h.authMiddleware(h.download))

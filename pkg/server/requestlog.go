@@ -31,14 +31,15 @@ func (h *Handlers) requestLogMiddleware(next http.Handler) http.Handler {
 		r = r.WithContext(ctx)
 		w.Header().Set("Traceparent", tracing.NewTraceparent(traceID, spanID))
 
+		// 不显式传 trace_id/span_id：ctx 已带 SpanContext，日志经 WithContextHandler
+		// 自动注入，避免同一行出现两对 trace_id/span_id 破坏日志解析。
 		h.logger.DebugContext(ctx, "收到请求", "method", r.Method, "path", r.URL.Path,
-			"remote_addr", r.RemoteAddr, "trace_id", traceID, "span_id", spanID)
+			"remote_addr", r.RemoteAddr)
 
 		mw := newMetricsResponseWriter(w)
 		next.ServeHTTP(mw, r)
 
 		h.logger.InfoContext(ctx, "请求完成", "method", r.Method, "path", r.URL.Path,
-			"status", mw.statusCode, "duration", time.Since(start).String(),
-			"trace_id", traceID, "span_id", spanID)
+			"status", mw.statusCode, "duration", time.Since(start).String())
 	})
 }

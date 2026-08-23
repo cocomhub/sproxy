@@ -388,6 +388,11 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("create tunnel request: %w", err)
 	}
 	tunnelReq.Header.Set(headerContentType, frameContentType)
+	// 全链路追踪：把内层请求的 traceparent 复制到外层 /tunnel 请求，
+	// 使服务端外层 requestLogMiddleware 记录的外层请求 trace_id 与客户端 trace 关联。
+	if tp := req.Header.Get("Traceparent"); tp != "" {
+		tunnelReq.Header.Set("Traceparent", tp)
+	}
 	httpResp, err := c.HTTPClient.Do(tunnelReq)
 	if err != nil {
 		return nil, fmt.Errorf("post request: %w", err)
