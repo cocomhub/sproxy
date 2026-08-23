@@ -36,7 +36,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hubURL, _ := cmd.Flags().GetString("hub")
 			nodeID, _ := cmd.Flags().GetString("node-id")
-			token, _ := cmd.Flags().GetString("token")
+			_, _ = cmd.Flags().GetString("token") // --token 保留（relay_token 回落）
 			relayToken, _ := cmd.Flags().GetString("relay-token")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
@@ -67,12 +67,14 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			if hubURL == "" {
 				hubURL = cfg.ServerURL
 			}
-			// 语义对齐 relay start：--token 是 relay_token（hub 注册）；信令 Bearer 单独
-			// 从根 --auth-token 或配置 auth_token 派生（否则 --token 会把 relay_token 误当
-			// auth_token 发到 /api/signal/*，hub 未配 auth_token 时 401 → 整节点重连）。
-			authTokenFlag, _ := cmd.Flags().GetString("auth-token")
-			signalToken := client.MeshSignalToken(authTokenFlag, cfg.AuthToken)
-			relayTok := client.MeshRelayToken(relayToken, cfg.RelayToken, token, cfg.AuthToken)
+			// 语义对齐 relay start：--token 是 relay_token（hub 注册）；SproxySig 认证
+			// AccessKey/SK 从根 --access-key/--access-key-secret 或配置派生（信令/节点
+			// 列表/网关均走签名，token 不上线）。
+			accessKeyFlag, _ := cmd.Flags().GetString("access-key")
+			accessKeySecretFlag, _ := cmd.Flags().GetString("access-key-secret")
+			accessKey := client.MeshAccessKey(accessKeyFlag, cfg.AccessKey)
+			accessKeySecret := client.MeshAccessKeySecret(accessKeySecretFlag, cfg.AccessKeySecret)
+			relayTok := client.MeshRelayToken(relayToken, cfg.RelayToken, "", "")
 			if nodeID == "" {
 				nodeID = cfg.NodeID
 			}
@@ -95,7 +97,8 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				HubURL:            hubURL,
 				NodeID:            nodeID,
 				RelayToken:        relayTok,
-				SignalToken:       signalToken,
+				AccessKey:         accessKey,
+				AccessKeySecret:   accessKeySecret,
 				Services:          svcs,
 				ServiceAddrs:      addrs,
 				Tags:              tags,

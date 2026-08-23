@@ -85,22 +85,22 @@ func TestConfigValidate(t *testing.T) {
 	}
 
 	// auth_token 任意字符串都合法
-	cfg7 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AuthToken: "my-token"}
+	cfg7 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AccessKey: "ak", AccessKeySecret: "my-token"}
 	if err := cfg7.Validate(); err != nil {
-		t.Fatalf("Validate() on config with AuthToken: %v", err)
+		t.Fatalf("Validate() on config with AccessKeySecret: %v", err)
 	}
 
 	// auth_token 空字符串也合法
-	cfg8 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AuthToken: ""}
+	cfg8 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AccessKeySecret: ""}
 	if err := cfg8.Validate(); err != nil {
-		t.Fatalf("Validate() on config with empty AuthToken: %v", err)
+		t.Fatalf("Validate() on config with empty AccessKeySecret: %v", err)
 	}
 }
 
 func TestLoadFromProvider(t *testing.T) {
 	t.Parallel()
 
-	p := mapProvider{m: map[string]any{"server_url": "http://test:8080", "timeout": 60, "auth_token": "secret"}}
+	p := mapProvider{m: map[string]any{"server_url": "http://test:8080", "timeout": 60, "access_key": "ak", "access_key_secret": "secret"}}
 
 	cfg, err := LoadFromProvider(p)
 	if err != nil {
@@ -115,8 +115,8 @@ func TestLoadFromProvider(t *testing.T) {
 	if cfg.ChunkSize != size.DefaultChunkSize {
 		t.Errorf("ChunkSize = %d, want %d", cfg.ChunkSize, size.DefaultChunkSize)
 	}
-	if cfg.AuthToken != "secret" {
-		t.Errorf("AuthToken = %q, want %q", cfg.AuthToken, "secret")
+	if cfg.AccessKeySecret != "secret" {
+		t.Errorf("AccessKeySecret = %q, want %q", cfg.AccessKeySecret, "secret")
 	}
 }
 
@@ -186,7 +186,8 @@ func TestHandleConfigShow(t *testing.T) {
 	cfg.ServerURL = "https://example.com"
 	cfg.Timeout = 120
 	cfg.TunnelKey = strings.Repeat("d", 64)
-	cfg.AuthToken = "my-secret-token"
+	cfg.AccessKey = "ak"
+	cfg.AccessKeySecret = "my-secret-token"
 	cfg.ChunkSize = 8 << 20
 	cfg.MaxChunkSize = 32 << 20
 	cfg.AllowTransportFallback = true

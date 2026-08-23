@@ -74,7 +74,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			listenAddr, _ := cmd.Flags().GetString("listen")
 			useWebRTC, _ := cmd.Flags().GetBool("webrtc")
 			hubURL, _ := cmd.Flags().GetString("hub")
-			token, _ := cmd.Flags().GetString("token")
+			_, _ = cmd.Flags().GetString("token") // --token 保留（relay_token 回落）
 			relayToken, _ := cmd.Flags().GetString("relay-token")
 			nodeID, _ := cmd.Flags().GetString("node-id")
 			gatewayAddr, _ := cmd.Flags().GetString("gateway")
@@ -116,14 +116,15 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 					nodeID = iostream.LocalHostname("mesh-node")
 				}
 				r, regErr := mesh.AutoRegister(cmd.Context(), mesh.AutoRegisterParams{
-					HubURL:      hubURL,
-					ServerURL:   svc.ServerURL(),
-					RelayToken:  client.MeshRelayToken(relayToken, svc.RelayToken(), token, svc.AuthToken()),
-					SignalToken: client.MeshSignalToken(token, svc.AuthToken()),
-					NodeID:      nodeID,
-					Prefix:      "mesh",
-					ExactNode:   false,
-					Insecure:    insecure,
+					HubURL:          hubURL,
+					ServerURL:       svc.ServerURL(),
+					RelayToken:      client.MeshRelayToken(relayToken, svc.RelayToken(), "", ""),
+					AccessKey:       svc.AccessKey(),
+					AccessKeySecret: svc.AccessKeySecret(),
+					NodeID:          nodeID,
+					Prefix:          "mesh",
+					ExactNode:       false,
+					Insecure:        insecure,
 				})
 				if regErr != nil {
 					// 注册失败不静默：warn + 回落中继（relay 路径只认 auth_token，
@@ -146,7 +147,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			// 网关认证 token 复用信令 token（auth_token），与 mesh node 网关一致。
 			dial := meshDialFunc(mesh.Dial)
 			if gatewayAddr != "" {
-				dial = meshGatewayDial(gatewayAddr, client.MeshSignalToken(token, svc.AuthToken()), ios)
+				dial = meshGatewayDial(gatewayAddr, svc.AccessKeySecret(), ios)
 			}
 
 			if listenAddr != "" {
@@ -181,7 +182,7 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 				if err != nil {
 					return err
 				}
-				st, err := mesh.QueryGatewayStatus(cmd.Context(), gatewayAddr, client.MeshSignalToken("", svc.AuthToken()))
+				st, err := mesh.QueryGatewayStatus(cmd.Context(), gatewayAddr, svc.AccessKeySecret())
 				if err != nil {
 					return err
 				}

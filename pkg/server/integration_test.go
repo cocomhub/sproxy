@@ -788,7 +788,7 @@ func TestRedirectRoot(t *testing.T) {
 
 func TestAuthMiddleware(t *testing.T) {
 	url, _, cleanup := newTestServer(t, func(c *Config) {
-		c.AuthToken = "secret-token"
+		c.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	})
 	defer cleanup()
 
@@ -798,18 +798,18 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 without token, got %d", resp.StatusCode)
+		t.Fatalf("expected 401 without SproxySig, got %d", resp.StatusCode)
 	}
 
 	req, _ := http.NewRequest("GET", url+"/api/files", nil)
-	req.Header.Set("Authorization", "Bearer secret-token")
+	signRequest(req, testAccessKey, testAccessSecret)
 	resp2, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("get with token: %v", err)
+		t.Fatalf("get with signature: %v", err)
 	}
 	resp2.Body.Close()
 	if resp2.StatusCode != 200 {
-		t.Fatalf("expected 200 with valid token, got %d", resp2.StatusCode)
+		t.Fatalf("expected 200 with valid SproxySig, got %d", resp2.StatusCode)
 	}
 }
 
@@ -887,7 +887,6 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	cfg.UploadsDir = tmpDir
 	cfg.ChunkSize = 4 << 10 // 4 KiB for testing
 	cfg.LogLevel = "error"
-	cfg.AuthToken = ""
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}

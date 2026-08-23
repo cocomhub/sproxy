@@ -26,12 +26,13 @@ func (m *mockCfgProvider) LoadConfig() (*client.Config, error) {
 // 未显式指定的 hub/token/relay-token/node-id 从配置回落；显式指定的不被覆盖。
 func TestP2PFlags_ApplyConfigFallback(t *testing.T) {
 	provider := &mockCfgProvider{cfg: &client.Config{
-		HubURL: "wss://hub.example.com/ws", AuthToken: "at", RelayToken: "rt", NodeID: "node-x",
+		HubURL: "wss://hub.example.com/ws", AccessKey: "ak", AccessKeySecret: "at", RelayToken: "rt", NodeID: "node-x",
 	}}
 
 	var f p2pFlags
 	f.applyConfigFallback(provider)
-	if f.hub != "wss://hub.example.com/ws" || f.tok != "at" || f.relayTok != "rt" || f.node != "node-x" {
+	// tok 仅作 --token（relay 回落），不再从配置 AuthToken 派生；relay-token/node-id 回落。
+	if f.hub != "wss://hub.example.com/ws" || f.relayTok != "rt" || f.node != "node-x" {
 		t.Fatalf("配置回落未生效: %+v", f)
 	}
 

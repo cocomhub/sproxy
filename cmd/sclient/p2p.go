@@ -54,7 +54,7 @@ func NewCmdP2P(ios cli.IOStreams, cfgSvc ...ConfigProvider) *cobra.Command {
 // p2pFlags 是 p2p 相关命令的公共 flag。
 type p2pFlags struct {
 	hub      string
-	tok      string
+	tok      string // --token：未传 --relay-token 时兼作注册 relay_token
 	relayTok string
 	node     string
 	stun     []string
@@ -62,7 +62,7 @@ type p2pFlags struct {
 
 func (f *p2pFlags) add(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.hub, "hub", "", "hub 地址（http(s) 或 ws(s) 均可，如 https://hub.example.com:18083）")
-	cmd.Flags().StringVar(&f.tok, "token", "", "信令 token（hub auth_token；未传 --relay-token 时兼作注册 relay_token）")
+	cmd.Flags().StringVar(&f.tok, "token", "", "中继注册 token（未传 --relay-token 时兼作；SproxySig 认证用 --access-key/--access-key-secret）")
 	cmd.Flags().StringVar(&f.relayTok, "relay-token", "", "hub 的 relay_token（自动注册用；与 relay start --token 一致；默认复用 --token）")
 	cmd.Flags().StringVar(&f.node, "node-id", "", "本节点 ID（信令 from；默认主机名）")
 	cmd.Flags().StringSliceVar(&f.stun, "stun", nil,
@@ -88,9 +88,6 @@ func (f *p2pFlags) applyConfigFallback(cfgSvc ConfigProvider) {
 	}
 	if f.hub == "" {
 		f.hub = cfg.HubURL
-	}
-	if f.tok == "" {
-		f.tok = cfg.AuthToken
 	}
 	if f.relayTok == "" {
 		f.relayTok = cfg.RelayToken
@@ -123,16 +120,29 @@ func (f *p2pFlags) requireHub() error {
 // 调用方须先 requireHub() 校验 hub 非空。exactNode=true 时注册成 f.localNode()
 // 原样（p2p listen 的被寻址方需稳定 ID 供 --peer 寻址）；false 用临时 node_id
 // （p2p connect 的 Answer 回给 offerFrom，对端无需预知本端 ID）。
-func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, exactNode bool) (*mesh.TempRegistration, error) {
+func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, cfgSvc ConfigProvider, exactNode bool) (*mesh.TempRegistration, error) {
 	insecure, _ := cmd.Flags().GetBool("insecure")
+	ak, _ := cmd.Root().PersistentFlags().GetString("access-key")
+	sk, _ := cmd.Root().PersistentFlags().GetString("access-key-secret")
+	if cfgSvc != nil {
+		if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+			if ak == "" {
+				ak = cfg.AccessKey
+			}
+			if sk == "" {
+				sk = cfg.AccessKeySecret
+			}
+		}
+	}
 	return mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
-		HubURL:      f.hub,
-		RelayToken:  f.relayToken(),
-		SignalToken: f.tok,
-		NodeID:      f.localNode(),
-		Prefix:      "p2p",
-		ExactNode:   exactNode,
-		Insecure:    insecure,
+		HubURL:          f.hub,
+		RelayToken:      f.relayToken(),
+		AccessKey:       ak,
+		AccessKeySecret: sk,
+		NodeID:          f.localNode(),
+		Prefix:          "p2p",
+		ExactNode:       exactNode,
+		Insecure:        insecure,
 	})
 }
 
@@ -191,7 +201,7 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				if err := f.requireHub(); err != nil {
 					return err
 				}
-				reg, rerr := f.registerSignaler(ctx, cmd, false)
+				reg, rerr := f.registerSignaler(ctx, cmd, cfgSvc, false)
 				if rerr != nil {
 					return fmt.Errorf("webrtc 信令注册失败: %w", rerr)
 				}
@@ -291,7 +301,7 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 					return err
 				}
 				var rerr error
-				reg, rerr = f.registerSignaler(ctx, cmd, true)
+				reg, rerr = f.registerSignaler(ctx, cmd, cfgSvc, true)
 				if rerr != nil {
 					return rerr
 				}
@@ -337,7 +347,7 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 					// B17：节点可能已被 hub 移除（注册 WS 断 / 心跳超时），per-node secret 已
 					// 轮换——信令 400/403 时在重连退避循环内重注册自愈；重注册失败不阻断
 					// 退避（保持既有网络抖动重试行为），下一轮循环继续尝试。
-					if reg2, rerr2 := f.registerSignaler(ctx, cmd, true); rerr2 == nil {
+					if reg2, rerr2 := f.registerSignaler(ctx, cmd, cfgSvc, true); rerr2 == nil {
 						_ = reg.Closer()
 						reg, sig = reg2, reg2.Signaler
 					} else {

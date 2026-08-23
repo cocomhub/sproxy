@@ -219,7 +219,7 @@ func (f *TextFormatter) PrintConfig(cfg *client.ConfigResponse) {
 	fmt.Fprintf(f.w, "远程服务器配置:\n")
 	fmt.Fprintf(f.w, "  log_level:              %s\n", cfg.LogLevel)
 	fmt.Fprintf(f.w, "  log_format:             %s\n", cfg.LogFormat)
-	fmt.Fprintf(f.w, "  auth_token:             %s\n", boolStr(cfg.AuthTokenSet))
+	fmt.Fprintf(f.w, "  access_keys:            %s\n", boolStr(cfg.AccessKeysSet))
 	fmt.Fprintf(f.w, "  tunnel_key:             %s\n", boolStr(cfg.TunnelKeySet))
 	fmt.Fprintf(f.w, "  rate_limit_requests:    %d\n", cfg.RateLimitRequests)
 	fmt.Fprintf(f.w, "  rate_limit_window:      %s\n", cfg.RateLimitWindow)

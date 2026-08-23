@@ -44,6 +44,22 @@ func MeshSignalToken(flagToken, svcAuthToken string) string {
 	return svcAuthToken
 }
 
+// MeshAccessKey 返回 SproxySig 认证 AccessKey：显式 flag 优先，否则配置值。
+func MeshAccessKey(flagKey, cfgKey string) string {
+	if flagKey != "" {
+		return flagKey
+	}
+	return cfgKey
+}
+
+// MeshAccessKeySecret 返回 SproxySig 认证 AccessKeySecret：显式 flag 优先，否则配置值。
+func MeshAccessKeySecret(flagKey, cfgKey string) string {
+	if flagKey != "" {
+		return flagKey
+	}
+	return cfgKey
+}
+
 // MeshRelayToken 返回自动注册用的 relay_token：显式 relayToken > 配置 relayToken
 // （svcRelayToken）> 回落 MeshSignalToken（--token → auth_token）。
 func MeshRelayToken(flagRelayToken, svcRelayToken, flagToken, svcAuthToken string) string {

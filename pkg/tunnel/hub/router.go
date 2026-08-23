@@ -323,9 +323,11 @@ const DiscPrefix = "disc"
 // discPrefix 是 mesh discovery 临时节点 ID 的完整前缀（含 '-'）。
 const discPrefix = DiscPrefix + "-"
 
-// ParseDiscNodeID 从 mesh discovery 临时节点 ID（disc-<base>-<unixnano>）解析真实
-// node-id base（base 可含 '-'，unixnano 为纯数字尾段）。hub 注册校验与 mesh accept
-// 侧解析共用同一实现，保证"hub 已验证的 base"与"accept 侧使用的 base"一致。
+// ParseDiscNodeID 从 mesh discovery 临时节点 ID（disc-<base>-<suffix>）解析真实
+// node-id base（base 可含 '-'；suffix 为 16 位随机 hex 尾段，保证并发拨号不碰撞）。
+// hub 注册校验与 mesh accept 侧解析共用同一实现，保证"hub 已验证的 base"与
+// "accept 侧使用的 base"一致。取最后一个 '-' 之前的全部为 base（base 可含 '-'）；
+// 尾段须为合法 hex（对齐 newTempSuffix 格式），避免歧义。
 func ParseDiscNodeID(nodeID string) (string, bool) {
 	if !strings.HasPrefix(nodeID, discPrefix) {
 		return "", false
@@ -336,19 +338,27 @@ func ParseDiscNodeID(nodeID string) (string, bool) {
 		return "", false
 	}
 	tail := rest[idx+1:]
-	if tail == "" {
+	if !isHexSuffix(tail) {
 		return "", false
-	}
-	for _, r := range tail {
-		if r < '0' || r > '9' {
-			return "", false
-		}
 	}
 	base := rest[:idx]
 	if base == "" {
 		return "", false
 	}
 	return base, true
+}
+
+// isHexSuffix 报告 tail 是否为随机 hex 后缀（newTempSuffix 生成 16 位 hex）。
+func isHexSuffix(tail string) bool {
+	if len(tail) < 8 || len(tail) > 64 {
+		return false
+	}
+	for _, r := range tail {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // validRealNodeProof 校验 mesh discovery 临时注册的 real_node_id 证明：

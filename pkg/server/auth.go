@@ -5,9 +5,13 @@ package server
 
 import (
 	"crypto/subtle"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
 // APIKey 表示一个 API 密钥及其权限。
@@ -28,6 +32,15 @@ const (
 type APIKeyConfig struct {
 	Enabled bool     `yaml:"enabled" mapstructure:"enabled"`
 	Keys    []APIKey `yaml:"keys" mapstructure:"keys"`
+}
+
+// AccessKeyConfig 是 SproxySig 请求签名认证的一对 AccessKey/AccessKeySecret
+// （替代旧 auth_token 明文 Bearer）。每 mesh 一对；Secret 只存本端用于验签，
+// 线上请求只携带 Key + HMAC 签名。
+type AccessKeyConfig struct {
+	Key    string `yaml:"key" mapstructure:"key"`         // AccessKey（公开标识）
+	Secret string `yaml:"secret" mapstructure:"secret"`   // AccessKeySecret（本地密钥）
+	MeshID string `yaml:"mesh_id" mapstructure:"mesh_id"` // 所属 mesh（多 mesh 隔离，可选）
 }
 
 // authResult 表示 API key 匹配结果。
@@ -75,13 +88,9 @@ func matchAPIKey(token, method string, keys []APIKey) authResult {
 	return authResultDenied
 }
 
-// handleNoBearerToken 处理缺少 Bearer Authorization 头的情况。
-// 如果任一认证配置启用则拒绝，否则放行。
-// 注意：仅检查 cfg.APIKeys.Enabled，不关心 Keys 是否为空：
-//   - Validate 层已禁止 Enabled=true + Keys=[] 的配置
-//   - 即使绕过 Validate，空 Keys 也会在 authenticateRequest 中 fallthrough 到 401
+// handleNoBearerToken 处理缺少 Bearer Authorization 头的情况（仅多用户 APIKeys 场景）。
 func handleNoBearerToken(w http.ResponseWriter, r *http.Request, cfg *Config, next http.HandlerFunc) {
-	if cfg.AuthToken != "" || cfg.APIKeys.Enabled {
+	if cfg.APIKeys.Enabled {
 		slog.Warn("auth: missing bearer token",
 			"remote", r.RemoteAddr,
 			"method", r.Method,
@@ -93,62 +102,69 @@ func handleNoBearerToken(w http.ResponseWriter, r *http.Request, cfg *Config, ne
 	next(w, r)
 }
 
-// authenticateRequest 执行请求认证，返回 true 表示已处理（放行或拒绝），false 表示需要继续（仅用于 APIKeys 没有匹配时的 fallthrough）。
-func (h *Handlers) authenticateRequest(w http.ResponseWriter, r *http.Request, cfg *Config, token string, next http.HandlerFunc) bool {
-	// 优先匹配多用户 API 密钥
-	if cfg.APIKeys.Enabled {
-		switch matchAPIKey(token, r.Method, cfg.APIKeys.Keys) {
-		case authResultOK:
-			next(w, r)
-			return true
-		case authResultForbidden:
-			slog.Warn("auth: permission denied",
-				"remote", r.RemoteAddr,
-				"method", r.Method,
-				"path", r.URL.Path,
-			)
-			http.Error(w, "permission denied", http.StatusForbidden)
-			return true
-		}
+// authenticateAPIKey 校验多用户 API 密钥（Bearer，独立特性）。
+func (h *Handlers) authenticateAPIKey(w http.ResponseWriter, r *http.Request, cfg *Config, token string, next http.HandlerFunc) {
+	switch matchAPIKey(token, r.Method, cfg.APIKeys.Keys) {
+	case authResultOK:
+		next(w, r)
+	case authResultForbidden:
+		slog.Warn("auth: permission denied",
+			"remote", r.RemoteAddr,
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+		http.Error(w, "permission denied", http.StatusForbidden)
+	default:
 		// authResultDenied: APIKeys 已启用但 token 不匹配任何 key，直接拒绝
-		// 不回退到 auth_token，避免多用户场景下弱密钥绕过
 		slog.Warn("auth: no matching api key",
 			"remote", r.RemoteAddr,
 			"method", r.Method,
 			"path", r.URL.Path,
 		)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "unauthorized"}, http.StatusUnauthorized)
-		return true
 	}
+}
 
-	// 回退到单用户 auth_token
-	if cfg.AuthToken != "" {
-		if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.AuthToken)) == 1 {
-			next(w, r)
-			return true
-		}
-		slog.Warn("auth: invalid auth_token",
-			"remote", r.RemoteAddr,
-			"method", r.Method,
-			"path", r.URL.Path,
-		)
+// verifySproxySig 校验 SproxySig 请求签名（AccessKey/AccessKeySecret + HMAC-SHA256）。
+// 成功时用 body 哈希校验 reader 包装 r.Body：流式接收、EOF 与声明比对（防 body 篡改；
+// 验签已在 body 接收前用声明哈希完成，失败即 401 无回滚）。
+func (h *Handlers) verifySproxySig(w http.ResponseWriter, r *http.Request, cfg *Config) bool {
+	hdr, err := sproxysig.ParseHeader(r.Header.Get("Authorization"))
+	if err != nil {
+		slog.Warn("auth: 非法 SproxySig 头",
+			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "error", err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return true
+		return false
 	}
-
-	// 无认证配置
-	slog.Warn("auth: no matching api key",
-		"remote", r.RemoteAddr,
-		"method", r.Method,
-		"path", r.URL.Path,
-	)
-	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	var sk string
+	for _, ak := range cfg.AccessKeys {
+		if subtle.ConstantTimeCompare([]byte(ak.Key), []byte(hdr.AK)) == 1 {
+			sk = ak.Secret
+			break
+		}
+	}
+	if sk == "" {
+		slog.Warn("auth: 未知 AccessKey", "ak", hdr.AK, "remote", r.RemoteAddr)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	var nonceSeen func(ak, nonce string, expMs int64) bool
+	if h.noncePool != nil {
+		nonceSeen = h.noncePool.Seen
+	}
+	if verr := sproxysig.Verify(sk, hdr, r.Method, r.URL.EscapedPath(), r.URL.RawQuery, time.Now(), 0, 0, nonceSeen); verr != nil {
+		slog.Warn("auth: SproxySig 校验失败", "ak", hdr.AK, "error", verr)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	r.Body = io.NopCloser(sproxysig.NewBodyValidator(r.Body, hdr.BodySHA256))
 	return true
 }
 
-// authMiddleware 验证请求认证和权限。
-// 优先匹配多用户 API 密钥（api_keys.enabled=true），
-// 其次回退到单用户 auth_token。
+// authMiddleware 验证请求认证：
+//   - api_keys.enabled → 多用户 API 密钥（Bearer，独立特性）；
+//   - access_keys 已配置 → SproxySig 请求签名（AK/SK，替代旧 auth_token 明文 Bearer）；
+//   - 均未配置 → 放行（启动日志负责无认证告警）。
 func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cfg := h.cfgPtr.Load()
@@ -158,22 +174,33 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			handleNoBearerToken(w, r, cfg, next)
-			return
-		}
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if token == "" {
-			slog.Warn("auth: empty bearer token",
-				"remote", r.RemoteAddr,
-				"method", r.Method,
-				"path", r.URL.Path,
-			)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if cfg.APIKeys.Enabled {
+			auth := r.Header.Get("Authorization")
+			if !strings.HasPrefix(auth, "Bearer ") {
+				handleNoBearerToken(w, r, cfg, next)
+				return
+			}
+			token := strings.TrimPrefix(auth, "Bearer ")
+			if token == "" {
+				slog.Warn("auth: empty bearer token",
+					"remote", r.RemoteAddr,
+					"method", r.Method,
+					"path", r.URL.Path,
+				)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			h.authenticateAPIKey(w, r, cfg, token, next)
 			return
 		}
 
-		h.authenticateRequest(w, r, cfg, token, next)
+		if len(cfg.AccessKeys) > 0 {
+			if h.verifySproxySig(w, r, cfg) {
+				next(w, r)
+			}
+			return
+		}
+
+		next(w, r) // 无认证配置 → 放行
 	}
 }

@@ -11,7 +11,9 @@ package mesh
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -170,8 +172,10 @@ type AutoRegisterParams struct {
 	ServerURL string
 	// RelayToken 是注册用 token（hub relay_token）。
 	RelayToken string
-	// SignalToken 是信令 Bearer（hub auth_token）。
-	SignalToken string
+	// AccessKey 是 SproxySig 请求签名认证的 AccessKey（信令/节点列表）。
+	AccessKey string
+	// AccessKeySecret 是 SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）。
+	AccessKeySecret string
 	// NodeID 是节点 ID 基础（为空回落主机名）。
 	NodeID string
 	// Prefix 是临时 node 前缀："mesh" | "p2p"。
@@ -225,7 +229,10 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	}
 	nodeID := base
 	if !p.ExactNode {
-		nodeID = fmt.Sprintf("%s-%s-%d", p.Prefix, base, time.Now().UnixNano())
+		// 临时 node-id：<prefix>-<base>-<随机 hex>。用随机后缀而非仅 unixnano——
+		// 并发拨号（discovery 并行）下 UnixNano 可能碰撞，导致对端 Answer 交叉路由
+		// （node-a 拨 b/c 的临时身份若相同，b/c 的 Answer 会互相串到对方 inbox）。
+		nodeID = fmt.Sprintf("%s-%s-%s", p.Prefix, base, newTempSuffix())
 	}
 
 	conn, err := HubWSDial(ctx, wsURL, p.Insecure)
@@ -258,7 +265,8 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	}
 	// mux 保活：自动跑 readLoop/writeLoop/pingLoop 处理心跳，注册连接存活到命令退出。
 	m := mux.New(conn, mux.RoleListener)
-	signaler := hub.NewHubSignaler(httpBase, p.SignalToken, nodeID, secret)
+	signaler := hub.NewHubSignaler(httpBase, p.AccessKey, nodeID, secret)
+	signaler.SetAccessKeySecret(p.AccessKeySecret)
 	signaler.SetContext(ctx)
 	if p.Insecure {
 		signaler.SetHTTPClient(client.InsecureHTTPClient())
@@ -270,4 +278,12 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 		Secret:   secret,
 		Mux:      m,
 	}, nil
+}
+
+// newTempSuffix 生成临时 node-id 的随机后缀（8B hex）。随机而非仅时间戳——
+// 并发拨号下 UnixNano 可能碰撞，导致对端 Answer 交叉路由。
+func newTempSuffix() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

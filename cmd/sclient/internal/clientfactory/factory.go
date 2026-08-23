@@ -73,11 +73,12 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	if cfg.MaxChunkSize > 0 {
 		opts = append(opts, client.WithMaxChunkSize(cfg.MaxChunkSize))
 	}
-	if cfg.AuthToken != "" {
-		opts = append(opts, client.WithAuthToken(cfg.AuthToken))
+	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" {
+		opts = append(opts, client.WithAccessKey(cfg.AccessKey, cfg.AccessKeySecret))
 	}
-	if t, _ := cmd.Flags().GetString("auth-token"); t != "" {
-		opts = append(opts, client.WithAuthToken(t))
+	if ak, _ := cmd.Flags().GetString("access-key"); ak != "" {
+		sk, _ := cmd.Flags().GetString("access-key-secret")
+		opts = append(opts, client.WithAccessKey(ak, sk))
 	}
 	// 通用 mesh 参数（hub_url/relay_token/node_id）：供 mesh connect / relay start /
 	// p2p 等命令在各自 --hub/--token/--node-id 未显式指定时作为配置回落（P2-配置）。

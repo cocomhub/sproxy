@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
@@ -159,7 +160,7 @@ func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 	}()
 
 	reg, err := AutoRegister(ctx, AutoRegisterParams{
-		HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+		HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
 		NodeID: "node-a", Prefix: "p2p", ExactNode: false, Insecure: false,
 	})
 	if err != nil {
@@ -221,7 +222,7 @@ func TestAutoRegister_ExactNode(t *testing.T) {
 	}()
 
 	reg, err := AutoRegister(ctx, AutoRegisterParams{
-		HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+		HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
 		NodeID: "node-b", Prefix: "p2p", ExactNode: true, Insecure: false,
 	})
 	if err != nil {
@@ -302,7 +303,10 @@ func (h *miniSignalHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.inbox == nil {
 			h.inbox = map[string][]map[string]any{}
 		}
-		// 按 ?kind= 过滤（对齐真实 hub I9），只消费匹配 kind 的消息，其余保留。
+		// 按 ?kind= 过滤（对齐真实 hub I9）。每次 poll 只消费**一条**匹配消息，
+		// 其余保留给下次 poll——否则同一 peer 的多个并发 offer（full-mesh 下 node-a
+		// 与 node-b 同时拨 node-c）会在一次 poll 中一起返回、客户端只取一条，其余
+		// 丢失导致对端 WaitAnswer 超时。
 		inbox := h.inbox[peer]
 		var msgs, kept []map[string]any
 		for _, m := range inbox {
@@ -312,6 +316,10 @@ func (h *miniSignalHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else {
 				kept = append(kept, m)
 			}
+		}
+		if len(msgs) > 1 {
+			kept = append(kept, msgs[1:]...)
+			msgs = msgs[:1]
 		}
 		if msgs == nil {
 			msgs = []map[string]any{}
@@ -369,7 +377,7 @@ func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() {
 		runErr <- RunNode(nodeCtx, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
 			NodeID: nodeID, Services: []hub.Service{{Name: "echo", Addr: echoAddr}},
 			ServiceAddrs: []string{echoAddr}, DialAllow: true, LocalAddr: "http://127.0.0.1:1",
 			EnableWebRTC: false,
@@ -491,7 +499,7 @@ func TestRunNode_WebRTCDirect(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() {
 		runErr <- RunNode(nodeCtx, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
 			NodeID: nodeID, Services: []hub.Service{{Name: "echo", Addr: echoAddr}},
 			ServiceAddrs: []string{echoAddr}, DialAllow: true, LocalAddr: "http://127.0.0.1:1",
 			EnableWebRTC: true,
@@ -509,7 +517,7 @@ func TestRunNode_WebRTCDirect(t *testing.T) {
 
 	// 拨号方：临时节点注册拿 signaler → webrtc 直连 nodeID → mux 流写 dial 帧 → echo。
 	dialer, err := AutoRegister(context.Background(), AutoRegisterParams{
-		HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+		HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
 		NodeID: "dialer", Prefix: "p2p", ExactNode: false,
 	})
 	if err != nil {
@@ -583,12 +591,12 @@ func TestListHubNodes(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	ids, err := ListHubNodes(context.Background(), ts.URL, "tok", false)
+	ids, err := ListHubNodes(context.Background(), ts.URL, "test-ak", "test-sk", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotAuth != "Bearer tok" {
-		t.Fatalf("Authorization = %q, want Bearer tok", gotAuth)
+	if !strings.HasPrefix(gotAuth, sproxysig.Scheme+" ") {
+		t.Fatalf("Authorization = %q, want SproxySig 签名", gotAuth)
 	}
 	if len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
 		t.Fatalf("ids = %v, want [a b]（空 id 过滤）", ids)
@@ -599,7 +607,7 @@ func TestListHubNodes(t *testing.T) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}))
 	defer ts401.Close()
-	_, err = ListHubNodes(context.Background(), ts401.URL, "tok", false)
+	_, err = ListHubNodes(context.Background(), ts401.URL, "test-ak", "test-sk", false)
 	var herr *hubAPIError
 	if !errors.As(err, &herr) || herr.code != http.StatusUnauthorized {
 		t.Fatalf("期望 hubAPIError 401, got %v", err)
@@ -620,7 +628,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 	ctxA := t.Context()
 	go func() {
 		_ = RunNode(ctxA, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
 			NodeID: "node-a", EnableWebRTC: true, Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DiscoveryPeers: peersA, DialAllow: true,
@@ -629,7 +637,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 	ctxB := t.Context()
 	go func() {
 		_ = RunNode(ctxB, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
 			NodeID: "node-b", EnableWebRTC: true, Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DialAllow: true,
@@ -813,7 +821,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	ctxSvc := t.Context()
 	go func() {
 		_ = RunNode(ctxSvc, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
 			NodeID: "node-svc", EnableWebRTC: true, Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			Services:     []hub.Service{{Name: "echo-svc", Addr: echoSvcAddr}},
@@ -828,7 +836,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	ctxA := t.Context()
 	go func() {
 		_ = RunNode(ctxA, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
 			NodeID: "node-ap", EnableWebRTC: true, Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DiscoveryPeers: peersA,
@@ -865,7 +873,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			conn, err := GatewayConnect(context.Background(), gatewayAddr, peer, addr, "signal-token")
+			conn, err := GatewayConnect(context.Background(), gatewayAddr, peer, addr, "test-sk")
 			if err == nil {
 				defer conn.Close()
 				payload := []byte("ping")
@@ -903,7 +911,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 // 正确 token 的请求（未授权进程无法复用网关路由）。
 func TestGateway_RejectsWrongToken(t *testing.T) {
 	links := newLinkPool()
-	gw := newGateway(links, NodeConfig{NodeID: "local-node", SignalToken: "secret-token"}, nil)
+	gw := newGateway(links, NodeConfig{NodeID: "local-node", AccessKeySecret: "secret-token"}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
@@ -1066,11 +1074,12 @@ func TestParseDiscoveryPeerID(t *testing.T) {
 		{"disc-node-123-1787500000000000000", "node-123", true},                       // base 以数字结尾
 		{"disc-123-1787500000000000000", "123", true},                                 // base 全数字
 		{"disc-disc-a-1787500000000000000", "disc-a", true},                           // base 以 disc- 开头
-		{"disc-123-456", "123", true},                                                 // disc-<digits>-<digits>
+		{"disc-123-456", "", false},                                                   // 尾段过短（非 8+ 位 hex 后缀）
 		{"mesh-node-a-1787500000000000000", "", false},                                // 非 disc 前缀
 		{"p2p-node-a-1787500000000000000", "", false},                                 // p2p 拨号（临时，非 discovery）
-		{"disc-node-a-abc", "", false},                                                // 尾段非纯数字
-		{"disc-node-a", "", false},                                                    // 无时间戳段
+		{"disc-node-a-abc12345", "node-a", true},                                      // 随机 hex 后缀（>=8 位）合法
+		{"disc-node-a-abc", "", false},                                                // 尾段非合法长度 hex
+		{"disc-node-a", "", false},                                                    // 无后缀段
 		{"disc--1787500000000000000", "", false},                                      // base 为空
 	}
 	for _, c := range cases {
@@ -1118,7 +1127,7 @@ func TestRunNode_FullMeshThreeNodes(t *testing.T) {
 	runNode := func(nodeID string, notify chan<- string) {
 		go func() {
 			_ = RunNode(t.Context(), NodeConfig{
-				HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+				HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
 				NodeID: nodeID, EnableWebRTC: true, Discover: true,
 				DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 				GatewayAddr: "127.0.0.1:0", GatewayNotify: notify,
@@ -1140,7 +1149,7 @@ func TestRunNode_FullMeshThreeNodes(t *testing.T) {
 	// 等 node-b 链路池同时含 node-a（accept 侧）与 node-c（拨号侧）。
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		st, err := QueryGatewayStatus(t.Context(), gatewayAddr, "signal-token")
+		st, err := QueryGatewayStatus(t.Context(), gatewayAddr, "test-sk")
 		if err == nil && len(st.Peers) == 2 {
 			peers := map[string]bool{}
 			for _, p := range st.Peers {
