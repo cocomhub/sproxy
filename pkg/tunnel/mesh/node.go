@@ -22,6 +22,12 @@ const (
 	nodeReconnectBaseDelay = 1 * time.Second
 	// nodeReconnectMaxDelay 是重连退避上限。
 	nodeReconnectMaxDelay = 30 * time.Second
+	// defaultDiscoveryInterval 是自动对等发现的默认周期。
+	defaultDiscoveryInterval = 10 * time.Second
+	// discoveryFailedPeerCooldown 是对等拨号失败后的冷却时长（避免每周期重复探测）。
+	discoveryFailedPeerCooldown = 60 * time.Second
+	// defaultDiscoveryMaxParallel 是并行拨号的默认并发数。
+	defaultDiscoveryMaxParallel = 3
 )
 
 // NodeConfig 是 mesh node 常驻节点的配置。
@@ -52,6 +58,19 @@ type NodeConfig struct {
 	Insecure bool
 	// EnableWebRTC 是否接受 WebRTC 直连（信令 poll + listen）。
 	EnableWebRTC bool
+	// Discover 启用自动对等发现：周期经 hub 节点列表发现其他 mesh node，
+	// 并行 webrtc 自动直连并保持，形成 full-mesh 拓扑（只验证可达 + 拓扑，不承载业务）。
+	Discover bool
+	// DiscoveryInterval 是发现周期（0 回落 defaultDiscoveryInterval）。
+	DiscoveryInterval time.Duration
+	// DiscoveryProbeTimeout 是单次对等拨号探测超时（0 回落 WebRTCProbeTimeout）。
+	DiscoveryProbeTimeout time.Duration
+	// DiscoveryMaxParallel 是并行拨号并发数（0 回落 defaultDiscoveryMaxParallel）。
+	// 每个拨号用独立临时信令身份（per-dial AutoRegister），规避共享 signaler 的
+	// WaitAnswer 竞态；限并发控制瞬时注册开销与对端 accept 环卡窗叠加。
+	DiscoveryMaxParallel int
+	// DiscoveryPeers 是可选的观测通道：每次建立新的对等直连时非阻塞发送 peer nodeID。
+	DiscoveryPeers chan<- string
 	// Logger 是会话日志（nil 用 slog.Default()）。
 	Logger *slog.Logger
 }
@@ -131,16 +150,19 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 		{DialPolicy: relay.NewServiceDialPolicy(cfg.DialAllowCIDRs, cfg.ServiceAddrs)},
 	}
 
-	errCh := make(chan error, 2)
+	// 自动对等发现隐含需接受回拨（Discover=true 时即使 EnableWebRTC=false 也跑直连环）。
+	enableAccept := cfg.EnableWebRTC || cfg.Discover
+	errCh := make(chan error, 3)
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		if err := relay.Serve(cycleCtx, reg.Mux, localAddr, cfg.DialAllow, httpClient, logger, relayOpts...); err != nil {
 			errCh <- err
 		}
 	}()
-	if cfg.EnableWebRTC {
+	wg.Add(1)
+	if enableAccept {
 		go func() {
 			defer wg.Done()
 			if err := runWebRTCAcceptLoop(cycleCtx, reg.Signaler, reg.TempNode, localAddr, cfg.DialAllow, httpClient, logger, directOpts); err != nil {
@@ -151,6 +173,24 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 		go func() {
 			defer wg.Done()
 			<-cycleCtx.Done()
+		}()
+	}
+	if cfg.Discover {
+		httpBase, _, herr := hub.NormalizeEndpoints(cfg.HubURL, cfg.ServerURL)
+		if herr != nil {
+			return herr
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, logger); err != nil {
+				// 非阻塞写：只有 /api/hub/nodes 4xx（auth/配置级）才致命触发整 cycle
+				// 重连；拨号/瞬时失败在 runDiscoveryLoop 内部冷却处理，不写 errCh。
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
 		}()
 	}
 

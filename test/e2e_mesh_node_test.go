@@ -17,9 +17,10 @@ import (
 )
 
 // startSClientMeshNode 启动一个 sclient mesh node 常驻节点（出口模式，--dial-allow，
-// 宣告 serviceSpec）。返回 cleanup（Kill+Wait，sync.Once 保护）。
-// 本测试只走 dial 帧分支（/api/relay/stream），不触发 HTTP 中继，故 --local 指向不存在的服务。
-func startSClientMeshNode(t *testing.T, hubURL, nodeID, serviceSpec string) func() {
+// 宣告 serviceSpec）。extraArgs 追加到命令行（如 --discover=false、--discover-interval 1s）。
+// 返回 cleanup（Kill+Wait，sync.Once 保护）。本测试只走 dial 帧分支（/api/relay/stream），
+// 不触发 HTTP 中继，故 --local 指向不存在的服务。
+func startSClientMeshNode(t *testing.T, hubURL, nodeID, serviceSpec string, extraArgs ...string) func() {
 	t.Helper()
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
@@ -41,6 +42,7 @@ func startSClientMeshNode(t *testing.T, hubURL, nodeID, serviceSpec string) func
 		"--dial-allow",
 		"--local", "http://127.0.0.1:1",
 	}
+	args = append(args, extraArgs...)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = e2eModuleRoot()
 	var stderrBuf bytes.Buffer
@@ -53,6 +55,39 @@ func startSClientMeshNode(t *testing.T, hubURL, nodeID, serviceSpec string) func
 
 	// 等 mesh node 注册到 hub（waitNodeRegistered 轮询 /api/hub/nodes）。
 	waitNodeRegistered(t, hubURL, nodeID, &stderrBuf, newKillWaitCleanup(cmd))
+	return newKillWaitCleanup(cmd)
+}
+
+// startSClientMeshNodeObservable 同 startSClientMeshNode，但把 stderr 写入外部 buffer
+// （供自动对等发现的可观测性断言：轮询 stderr 出现 "mesh 自动对等直连建立"）。
+func startSClientMeshNodeObservable(t *testing.T, hubURL, nodeID, serviceSpec string, out *bytes.Buffer, extraArgs ...string) func() {
+	t.Helper()
+	tmpDir := t.TempDir()
+	binPath := e2eBinPath(t, "cmd/sclient")
+
+	configPath := filepath.Join(tmpDir, "sclient.yaml")
+	if err := os.WriteFile(configPath, []byte("server_url: "+hubURL+"\n"), 0644); err != nil {
+		t.Fatalf("write sclient config: %v", err)
+	}
+	wsURL := strings.Replace(hubURL, "http://", "ws://", 1) + "/ws"
+	args := []string{
+		"mesh", "node",
+		"--config", configPath,
+		"--hub", wsURL,
+		"--node-id", nodeID,
+		"--token", "e2e-relay-token",
+		"--service", serviceSpec,
+		"--dial-allow",
+		"--local", "http://127.0.0.1:1",
+	}
+	args = append(args, extraArgs...)
+	cmd := exec.Command(binPath, args...)
+	cmd.Dir = e2eModuleRoot()
+	cmd.Stderr = out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sclient mesh node (obs): %v", err)
+	}
+	waitNodeRegistered(t, hubURL, nodeID, out, newKillWaitCleanup(cmd))
 	return newKillWaitCleanup(cmd)
 }
 
@@ -85,7 +120,8 @@ func TestE2E_MeshNode_RelayReachable(t *testing.T) {
 	echoAddr := echoLn.Addr().String()
 
 	// mesh node：单进程常驻，宣告 echo 服务 + 出口拨号放行。
-	leafCleanup := startSClientMeshNode(t, hubURL, "e2e-mesh-node", "echo:"+echoAddr)
+	// --discover=false：本测试只验证中继可达路径，隔离对 mesh connect 临时节点的空探测。
+	leafCleanup := startSClientMeshNode(t, hubURL, "e2e-mesh-node", "echo:"+echoAddr, "--discover=false")
 	defer leafCleanup()
 
 	// mesh connect 端口转发（--webrtc=false 走中继回落，确定性验证 mesh node 中继路径）。
@@ -124,5 +160,29 @@ func TestE2E_MeshNode_RelayReachable(t *testing.T) {
 			t.Fatalf("mesh node 中继数据面未在 15s 内就绪（最后错误: %v）", lastErr)
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestE2E_MeshNode_Discovery 验证 mesh node 自动对等发现：两个 mesh node 启动后，
+// node-a 自动发现 node-b（经 hub 节点列表）并 webrtc 直连保持（进程级观测 stderr 日志）。
+func TestE2E_MeshNode_Discovery(t *testing.T) {
+	hubURL, hubCleanup := startHubSPROXY(t)
+	defer hubCleanup()
+
+	// node-a 的 stderr 可观测（出现 "mesh 自动对等直连建立" + peer=node-b）。
+	var stderrA bytes.Buffer
+	cleanupA := startSClientMeshNodeObservable(t, hubURL, "e2e-disc-a", "", &stderrA, "--discover-interval", "1s")
+	defer cleanupA()
+	cleanupB := startSClientMeshNode(t, hubURL, "e2e-disc-b", "", "--discover-interval", "1s")
+	defer cleanupB()
+
+	// node-a < node-b 半拨号去重 → A 拨 B。轮询 stderr 出现自动直连建立（≤20s）。
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) &&
+		(!strings.Contains(stderrA.String(), "mesh 自动对等直连建立") || !strings.Contains(stderrA.String(), "peer=e2e-disc-b")) {
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !strings.Contains(stderrA.String(), "mesh 自动对等直连建立") || !strings.Contains(stderrA.String(), "peer=e2e-disc-b") {
+		t.Fatalf("node-a 未自动直连 node-b; stderr:\n%s", stderrA.String())
 	}
 }
