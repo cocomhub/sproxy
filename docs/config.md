@@ -94,19 +94,25 @@ sclient 的配置默认路径基于 XDG：
 
 环境变量前缀 `SCLIENT_`（例如 `SCLIENT_SERVER_URL=http://proxy:18083`）。
 
+**多环境**：`SCLIENT_ENV` 环境变量选择 env 后缀配置文件（如 `SCLIENT_ENV=prod` →
+`~/.config/sproxy/sclient.prod.yaml`）。为空用默认 `sclient.yaml`，便于同一台机器维护
+prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI flag > 环境变量 >
+配置文件 > 默认值**。
+
 完整字段：
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `server_url` | string | `https://127.0.0.1:18083` | sproxy 服务端地址 |
-| `check_checksum` | bool | `true` | 上传/下载启用 SHA-256 校验 |
 | `timeout` | int | `300` | HTTP 客户端超时（秒） |
 | `tunnel_key` | string | (空) | 64 位 hex；非空时通过 `POST /tunnel` 加密信道访问 |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 默认分块大小 |
 | `max_chunk_size` | int64 | `0` | 自适应分块上限；0 = fallback 到 64 MiB |
 | `auth_token` | string | (空) | Bearer 认证 token（如果服务端启用） |
-| `xfer_name` | string | (空) | 传输层名称（如 `"ws"`），空串 = 使用传统 HTTP POST |
-| `hub_url` | string | (空) | Hub 中继地址（启用 xfer 时必需），如 `ws://hub.example.com/ws` |
+| `allow_transport_fallback` | bool | `false` | 允许隧道/xfer 初始化失败时回退直连 |
+| `hub_url` | string | (空) | mesh/relay/p2p 共用的 hub 地址（http(s) 或 ws(s)，可带 /ws 路径）。为空时各命令按自身语义回落（mesh→server_url，p2p→报错，relay→本地默认） |
+| `relay_token` | string | (空) | hub 中继注册 token（与 relay start --token / hub.relay_token 一致） |
+| `node_id` | string | (空) | 本节点默认 ID（mesh/p2p/relay 信令来源与寻址目标；为空回落主机名） |
 
 ### Hub 中继配置（服务端）
 
