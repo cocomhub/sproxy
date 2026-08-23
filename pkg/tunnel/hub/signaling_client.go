@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
 // HubSignaler 是通过 hub 的 /api/signal/* 桥实现 SDP 交换的网络信令器。
@@ -26,8 +28,11 @@ import (
 type HubSignaler struct {
 	// baseURL 是 hub 的地址，如 https://hub.example.com:18083。
 	baseURL string
-	// authToken 是可选的 Bearer token。
-	authToken string
+	// accessKey 是 SproxySig 签名认证的 AccessKey（公开标识）。
+	accessKey string
+	// accessKeySecret 是 SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）。
+	// 空则不签名（无认证开发环境）。
+	accessKeySecret string
 	// nodeID 是本节点已注册的节点 ID（信令 from；服务端校验其已注册）。
 	nodeID string
 	// secret 是本节点的 per-node secret（I1）：非空时 post/poll 携带
@@ -50,12 +55,13 @@ type HubSignaler struct {
 const maxSeenSignalIDs = 1024
 
 // NewHubSignaler 创建经 hub 信令桥的 Signaler。
+// accessKey 是本 mesh 的 SproxySig AccessKey（公开标识；配合 SetAccessKeySecret 签名）。
 // nodeID 是本节点在 hub 上注册的节点 ID（信令来源，服务端校验已注册）。
 // secret 为可选变参：传入 per-node secret 后 post/poll 携带 X-Node-Secret 头。
-func NewHubSignaler(baseURL, authToken, nodeID string, secret ...string) *HubSignaler {
+func NewHubSignaler(baseURL, accessKey, nodeID string, secret ...string) *HubSignaler {
 	s := &HubSignaler{
 		baseURL:    strings.TrimRight(baseURL, "/"),
-		authToken:  authToken,
+		accessKey:  accessKey,
 		nodeID:     nodeID,
 		httpClient: &http.Client{Timeout: 60 * time.Second},
 	}
@@ -63,6 +69,29 @@ func NewHubSignaler(baseURL, authToken, nodeID string, secret ...string) *HubSig
 		s.secret = secret[0]
 	}
 	return s
+}
+
+// SetAccessKeySecret 设置 SproxySig AccessKeySecret（本地密钥，仅计算签名）。
+// 空则信令请求不签名（无认证开发环境）。
+func (s *HubSignaler) SetAccessKeySecret(sk string) {
+	s.accessKeySecret = sk
+}
+
+// sign 为信令请求打上 SproxySig 签名头（bodyHash 由调用方预计算）。
+func (s *HubSignaler) sign(req *http.Request, bodyHash string) {
+	if s.accessKeySecret == "" {
+		return
+	}
+	now := time.Now()
+	h := sproxysig.Header{
+		Version:    sproxysig.Version,
+		AK:         s.accessKey,
+		TS:         now.UnixMilli(),
+		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      sproxysig.NewNonce(),
+		BodySHA256: bodyHash,
+	}
+	req.Header.Set("Authorization", sproxysig.SignAndFormat(s.accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
 }
 
 // SetContext 注入 base context（I7）。SendOffer/SendAnswer/post 在注入后
@@ -134,9 +163,7 @@ func (s *HubSignaler) post(ctx context.Context, kind SignalKind, to, sdp, cand s
 	if s.secret != "" {
 		req.Header.Set("X-Node-Secret", s.secret)
 	}
-	if s.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.authToken)
-	}
+	s.sign(req, sproxysig.BodyHash(body))
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("信令 post %s 失败: %w", kind, err)
@@ -164,9 +191,7 @@ func (s *HubSignaler) poll(ctx context.Context, peer string, kind SignalKind) ([
 	if s.secret != "" {
 		req.Header.Set("X-Node-Secret", s.secret)
 	}
-	if s.authToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.authToken)
-	}
+	s.sign(req, sproxysig.EmptyBodyHash())
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("信令 poll 失败: %w", err)

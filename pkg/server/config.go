@@ -92,9 +92,13 @@ type Config struct {
 	MaxHeaderBytes int             `yaml:"max_header_bytes" mapstructure:"max_header_bytes"`
 	TunnelKey      string          `yaml:"tunnel_key" mapstructure:"tunnel_key"`
 	TLS            TLSConfig       `yaml:"tls" mapstructure:"tls"`
-	AuthToken      string          `yaml:"auth_token" mapstructure:"auth_token"`
 	RateLimit      RateLimitConfig `yaml:"rate_limit" mapstructure:"rate_limit"`
 	CORS           CORSConfig      `yaml:"cors" mapstructure:"cors"`
+
+	// AccessKeys 是 SproxySig 请求签名认证的 AccessKey 配置（每 mesh 一对；
+	// 替代旧 auth_token 明文 Bearer）。任一已配置即所有 HTTP 面（文件/信令/
+	// 节点列表/服务发现）要求 SproxySig 签名。hub 侧为多 mesh 时配置多对。
+	AccessKeys []AccessKeyConfig `yaml:"access_keys" mapstructure:"access_keys"`
 
 	// 分块上传配置
 	ChunkSize        int64         `yaml:"chunk_size" mapstructure:"chunk_size"`

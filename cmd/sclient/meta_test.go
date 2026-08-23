@@ -23,7 +23,8 @@ import (
 func newMetaTestRoot(svc *client.FileClient, ios cli.IOStreams) *cobra.Command {
 	root := &cobra.Command{Use: "sclient"}
 	root.PersistentFlags().String("server", "", "")
-	root.PersistentFlags().String("auth-token", "", "")
+	root.PersistentFlags().String("access-key", "", "")
+	root.PersistentFlags().String("access-key-secret", "", "")
 	// 注册其余 factory 依赖的 persistent flags（NewClient 会读取 json/insecure 等）
 	root.PersistentFlags().String("chunk-size", "", "")
 	root.PersistentFlags().Bool("json", false, "")

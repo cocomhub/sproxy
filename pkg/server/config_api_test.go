@@ -89,30 +89,6 @@ func TestConfig_UpdateLogFormat(t *testing.T) {
 	}
 }
 
-func TestConfig_UpdateAuthToken(t *testing.T) {
-	t.Parallel()
-	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
-
-	req, err := http.NewRequest("PUT", url+"/api/config", strings.NewReader(`{"auth_token":"new-token-123"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-
-	cfg := cfgPtr.Load()
-	if cfg.AuthToken != "new-token-123" {
-		t.Errorf("expected auth_token=new-token-123, got %s", cfg.AuthToken)
-	}
-}
-
 func TestConfig_UpdateMaxStorageBytes(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)

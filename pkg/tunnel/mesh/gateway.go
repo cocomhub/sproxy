@@ -111,12 +111,13 @@ type Gateway struct {
 }
 
 // newGateway 构造网关。cfg 提供 node-id 与服务宣告（状态查询）与认证 token
-// （cfg.SignalToken，空则不认证）；links 是已建链路池。
+// （cfg.AccessKeySecret，空则不认证——网关仅 loopback，Secret 只本地比较）；
+// links 是已建链路池。
 func newGateway(links *linkPool, cfg NodeConfig, logger *slog.Logger) *Gateway {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Gateway{links: links, nodeID: cfg.NodeID, services: cfg.Services, token: cfg.SignalToken, logger: logger}
+	return &Gateway{links: links, nodeID: cfg.NodeID, services: cfg.Services, token: cfg.AccessKeySecret, logger: logger}
 }
 
 // Serve 启动网关 accept 循环（独立 goroutine，ctx 取消关闭 listener）。返回实际监听

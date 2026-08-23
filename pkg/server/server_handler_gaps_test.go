@@ -147,7 +147,7 @@ func TestHandler_UploadRouteRequiresAuth(t *testing.T) {
 	t.Parallel()
 
 	cfg := Default()
-	cfg.AuthToken = "secret"
+	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()

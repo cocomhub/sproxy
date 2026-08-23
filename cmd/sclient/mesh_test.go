@@ -308,7 +308,7 @@ func TestMeshStatus_GatewayTopology(t *testing.T) {
 	resp := `{"node_id":"node-ap","services":[{"name":"echo","addr":"127.0.0.1:22"}],"peers":[{"peer":"node-svc","link":"webrtc-direct","since":"2026-08-24T00:00:00Z"}]}`
 	gatewayAddr := mockGateway(t, resp)
 	var out bytes.Buffer
-	// 真实 FileClient（mock 工厂传 nil client 会让 svc.AuthToken() nil 指针崩溃）。
+	// 真实 FileClient（mock 工厂传 nil client 会让 svc.AccessKeySecret() nil 指针崩溃）。
 	cmd := newCmdMeshStatus(clientfactory.NewMock(client.NewFileClient("http://127.0.0.1:1"), nil), cli.IOStreams{Out: &out, ErrOut: io.Discard})
 	cmd.SetContext(context.Background()) // 未 Execute 的裸命令 Context() 为 nil
 	if err := cmd.Flags().Set("gateway", gatewayAddr); err != nil {

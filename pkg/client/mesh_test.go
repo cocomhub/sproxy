@@ -22,7 +22,7 @@ func TestMeshServices(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/services" && r.Method == http.MethodGet {
 			// I66：断言 token 复用注入链路——mesh 信令复用 auth_token 携带 Bearer
-			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "SproxySig ") {
 				http.Error(w, fmt.Sprintf("missing/mismatched Authorization: %q", got), http.StatusUnauthorized)
 				return
 			}
@@ -34,7 +34,7 @@ func TestMeshServices(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewFileClient(ts.URL, WithAuthToken("test-token"))
+	c := NewFileClient(ts.URL, WithAccessKey("test-ak", "test-sk"))
 	svcs, err := c.MeshServices(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestMeshConnect_NotFound(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/hub/services" {
 			// I66：服务发现同样复用 auth_token
-			if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "SproxySig ") {
 				http.Error(w, fmt.Sprintf("missing/mismatched Authorization: %q", got), http.StatusUnauthorized)
 				return
 			}
@@ -60,7 +60,7 @@ func TestMeshConnect_NotFound(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewFileClient(ts.URL, WithAuthToken("test-token"))
+	c := NewFileClient(ts.URL, WithAccessKey("test-ak", "test-sk"))
 	_, _, err := c.MeshConnect(context.Background(), "missing-svc")
 	if err == nil {
 		t.Fatal("expected error for missing service")
@@ -111,7 +111,7 @@ func TestMeshConnect_Echo(t *testing.T) {
 				}
 				contentLength, _ = strconv.ParseInt(headers["content-length"], 10, 64)
 				// I66：所有 mesh 信令请求都必须携带复用后的 auth_token Bearer
-				if headers["authorization"] != "Bearer test-token" {
+				if !strings.HasPrefix(headers["authorization"], "SproxySig ") {
 					_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\r\n\r\n")
 					return
 				}
@@ -138,7 +138,7 @@ func TestMeshConnect_Echo(t *testing.T) {
 		}
 	}()
 
-	c := NewFileClient("http://"+ln.Addr().String(), WithAuthToken("test-token"))
+	c := NewFileClient("http://"+ln.Addr().String(), WithAccessKey("test-ak", "test-sk"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -224,7 +224,7 @@ func TestMeshConnect_MultiCandidateFallback(t *testing.T) {
 				}
 				contentLength, _ = strconv.ParseInt(headers["content-length"], 10, 64)
 				// I66：mesh 信令请求必须携带复用后的 auth_token Bearer
-				if headers["authorization"] != "Bearer test-token" {
+				if !strings.HasPrefix(headers["authorization"], "SproxySig ") {
 					_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\r\n\r\n")
 					return
 				}
@@ -272,7 +272,7 @@ func TestMeshConnect_MultiCandidateFallback(t *testing.T) {
 		}
 	}()
 
-	c := NewFileClient("http://"+hubLn.Addr().String(), WithAuthToken("test-token"))
+	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -525,7 +525,7 @@ func TestMeshConnect_504Fallback(t *testing.T) {
 				}
 				contentLength, _ = strconv.ParseInt(headers["content-length"], 10, 64)
 				// I66：信令/中继请求必须携带复用后的 auth_token Bearer
-				if headers["authorization"] != "Bearer test-token" {
+				if !strings.HasPrefix(headers["authorization"], "SproxySig ") {
 					_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\x0d\x0a\x0d\x0a")
 					return
 				}
@@ -565,7 +565,7 @@ func TestMeshConnect_504Fallback(t *testing.T) {
 		}
 	}()
 
-	c := NewFileClient("http://"+hubLn.Addr().String(), WithAuthToken("test-token"))
+	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -628,7 +628,7 @@ func TestMeshConnect_AllCandidatesFail(t *testing.T) {
 				}
 				contentLength, _ = strconv.ParseInt(headers["content-length"], 10, 64)
 				// I66：信令/中继请求必须携带复用后的 auth_token Bearer
-				if headers["authorization"] != "Bearer test-token" {
+				if !strings.HasPrefix(headers["authorization"], "SproxySig ") {
 					_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\x0d\x0a\x0d\x0a")
 					return
 				}
@@ -655,7 +655,7 @@ func TestMeshConnect_AllCandidatesFail(t *testing.T) {
 		}
 	}()
 
-	c := NewFileClient("http://"+hubLn.Addr().String(), WithAuthToken("test-token"))
+	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 

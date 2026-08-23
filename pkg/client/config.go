@@ -19,12 +19,15 @@ import (
 
 // Config 是 sclient 的配置文件结构。
 type Config struct {
-	ServerURL              string `yaml:"server_url" mapstructure:"server_url"`
-	Timeout                int    `yaml:"timeout" mapstructure:"timeout"`
-	TunnelKey              string `yaml:"tunnel_key" mapstructure:"tunnel_key"`
-	ChunkSize              int64  `yaml:"chunk_size" mapstructure:"chunk_size"`
-	MaxChunkSize           int64  `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
-	AuthToken              string `yaml:"auth_token" mapstructure:"auth_token"`
+	ServerURL    string `yaml:"server_url" mapstructure:"server_url"`
+	Timeout      int    `yaml:"timeout" mapstructure:"timeout"`
+	TunnelKey    string `yaml:"tunnel_key" mapstructure:"tunnel_key"`
+	ChunkSize    int64  `yaml:"chunk_size" mapstructure:"chunk_size"`
+	MaxChunkSize int64  `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
+	// AccessKey / AccessKeySecret 是 SproxySig 请求签名认证（替代旧 auth_token）。
+	// Secret 只存本端计算签名，永不上线；服务端配置 access_keys 时必填。
+	AccessKey              string `yaml:"access_key" mapstructure:"access_key"`
+	AccessKeySecret        string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
 	AllowTransportFallback bool   `yaml:"allow_transport_fallback" mapstructure:"allow_transport_fallback"`
 	// HubURL 是 mesh/relay/p2p 共用的 hub 地址（http(s):// 或 ws(s)://，接受带 /ws 路径）。
 	// 为空时各命令按自身语义回落（mesh connect → server_url，p2p → 报错，relay start → 本地默认）。
@@ -155,13 +158,14 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 		maskedKey = "****"
 	}
 	fmt.Fprintf(w, "TunnelKey:     %s\n", maskedKey)
-	maskedToken := cfg.AuthToken
-	if len(maskedToken) > 4 {
-		maskedToken = maskedToken[:4] + "****"
-	} else if len(maskedToken) > 0 {
-		maskedToken = "****"
+	maskedSecret := cfg.AccessKeySecret
+	if len(maskedSecret) > 4 {
+		maskedSecret = maskedSecret[:4] + "****"
+	} else if len(maskedSecret) > 0 {
+		maskedSecret = "****"
 	}
-	fmt.Fprintf(w, "AuthToken:     %s\n", maskedToken)
+	fmt.Fprintf(w, "AccessKey:     %s\n", cfg.AccessKey)
+	fmt.Fprintf(w, "AccessKeySecret: %s\n", maskedSecret)
 	fmt.Fprintf(w, "ChunkSize:     %d\n", cfg.ChunkSize)
 	fmt.Fprintf(w, "MaxChunkSize:  %d\n", cfg.MaxChunkSize)
 	fmt.Fprintf(w, "AllowTransportFallback: %v\n", cfg.AllowTransportFallback)
@@ -190,8 +194,10 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			return fmt.Errorf("无效的服务器地址: %s", value)
 		}
 		cfg.ServerURL = value
-	case "auth_token":
-		cfg.AuthToken = value
+	case "access_key":
+		cfg.AccessKey = value
+	case "access_key_secret":
+		cfg.AccessKeySecret = value
 	case "timeout":
 		if timeout, err := strconv.Atoi(value); err != nil {
 			return fmt.Errorf("无效的超时值: %w", err)
@@ -245,7 +251,7 @@ func HandleConfigSet(cfg *Config, configPath, key, value string) error {
 type ConfigResponse struct {
 	LogLevel           string `json:"log_level"`
 	LogFormat          string `json:"log_format"`
-	AuthTokenSet       bool   `json:"auth_token_set"`
+	AccessKeysSet      bool   `json:"access_keys_set"`
 	TunnelKeySet       bool   `json:"tunnel_key_set"`
 	RateLimitRequests  int    `json:"rate_limit_requests"`
 	RateLimitWindow    string `json:"rate_limit_window"`

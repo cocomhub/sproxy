@@ -569,12 +569,12 @@ func TestHubServer_DiscIdentity_ValidProof(t *testing.T) {
 	}
 	proof := discProof(secret, "victim-a")
 	ack, closeDisc := registerRawFrame(t, srv, fmt.Sprintf(
-		`{"node_id":"disc-victim-a-12345","token":"relay-token","meta":{"real_node_id":"victim-a","real_node_proof":%q},"capabilities":["per-node-secret"]}`, proof))
+		`{"node_id":"disc-victim-a-12345678ab","token":"relay-token","meta":{"real_node_id":"victim-a","real_node_proof":%q},"capabilities":["per-node-secret"]}`, proof))
 	defer closeDisc()
 	if !strings.HasPrefix(ack, RegisterAckOK) {
 		t.Fatalf("期望 REG_OK, got %q", ack)
 	}
-	info, ok := rt.LookupInfo("disc-victim-a-12345")
+	info, ok := rt.LookupInfo("disc-victim-a-12345678ab")
 	if !ok {
 		t.Fatal("disc 临时节点未注册")
 	}
@@ -593,22 +593,22 @@ func TestHubServer_DiscIdentity_ForgedRejected(t *testing.T) {
 	defer closeReal()
 
 	// 伪造证明（冒充 victim-a，但无其 per-node secret）。
-	ack, closeDisc := registerRawFrame(t, srv, `{"node_id":"disc-victim-a-99999","token":"relay-token","meta":{"real_node_id":"victim-a","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`)
+	ack, closeDisc := registerRawFrame(t, srv, `{"node_id":"disc-victim-a-99999999aa","token":"relay-token","meta":{"real_node_id":"victim-a","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`)
 	defer closeDisc()
 	if !strings.HasPrefix(ack, RegisterAckErr) {
 		t.Fatalf("期望 REG_ERR（伪造证明被拒）, got %q", ack)
 	}
-	if rt.Has("disc-victim-a-99999") {
+	if rt.Has("disc-victim-a-99999999aa") {
 		t.Fatal("伪造证明的 disc 节点不应注册")
 	}
 
 	// real_node_id 与 disc base 不匹配（base=victim-a 但声称 other-node）。
-	ack2, closeDisc2 := registerRawFrame(t, srv, `{"node_id":"disc-victim-a-99998","token":"relay-token","meta":{"real_node_id":"other-node","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`)
+	ack2, closeDisc2 := registerRawFrame(t, srv, `{"node_id":"disc-victim-a-99999999bb","token":"relay-token","meta":{"real_node_id":"other-node","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`)
 	defer closeDisc2()
 	if !strings.HasPrefix(ack2, RegisterAckErr) {
 		t.Fatalf("期望 REG_ERR（real_node_id 不匹配）, got %q", ack2)
 	}
-	if rt.Has("disc-victim-a-99998") {
+	if rt.Has("disc-victim-a-99999999bb") {
 		t.Fatal("real_node_id 不匹配的 disc 节点不应注册")
 	}
 }

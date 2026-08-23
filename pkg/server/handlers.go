@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
@@ -35,10 +36,11 @@ type Handlers struct {
 	handler        http.Handler
 	cloudMgr       *CloudDownloadManager
 	storageMgr     *StorageManager
-	uploadingFiles sync.Map       // map[string]string — filename → uploadID，追踪正在上传的文件名
-	uploadingStop  chan struct{}  // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
-	uploadingWg    sync.WaitGroup // 等待 cleanupUploadingFilesLoop 退出
-	closeOnce      sync.Once      // 防止 Close() 重复关闭 channel
+	uploadingFiles sync.Map             // map[string]string — filename → uploadID，追踪正在上传的文件名
+	uploadingStop  chan struct{}        // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
+	uploadingWg    sync.WaitGroup       // 等待 cleanupUploadingFilesLoop 退出
+	closeOnce      sync.Once            // 防止 Close() 重复关闭 channel
+	noncePool      *sproxysig.NoncePool // SproxySig nonce 防重放池
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -89,6 +91,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		routeTable:    opts.RouteTable,
 		signalBroker:  NewSignalBroker(opts.RouteTable),
 		uploadingStop: make(chan struct{}),
+		noncePool:     sproxysig.NewNoncePool(),
 	}
 
 	// 启动 uploadingFiles 定期清理 goroutine（OOM 防范）

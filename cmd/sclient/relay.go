@@ -19,6 +19,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -280,11 +281,13 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或 --hub 或配置 server_url")
 			}
 
-			// 获取 auth token
-			authToken, _ := cmd.Flags().GetString("auth-token")
-			if authToken == "" && cfgSvc != nil {
+			// 获取 SproxySig 认证密钥
+			accessKey, _ := cmd.Flags().GetString("access-key")
+			accessKeySecret, _ := cmd.Flags().GetString("access-key-secret")
+			if accessKeySecret == "" && cfgSvc != nil {
 				if cfg, err := cfgSvc.LoadConfig(); err == nil {
-					authToken = cfg.AuthToken
+					accessKey = cfg.AccessKey
+					accessKeySecret = cfg.AccessKeySecret
 				}
 			}
 
@@ -294,9 +297,7 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 			if err != nil {
 				return fmt.Errorf("创建请求失败: %w", err)
 			}
-			if authToken != "" {
-				req.Header.Set("Authorization", "Bearer "+authToken)
-			}
+			sproxysig.SignRequest(req, accessKey, accessKeySecret)
 			// B17：--insecure 时复用 insecureHTTPClient（跳过证书校验，自签 https hub 场景）。
 			httpClient := &http.Client{Timeout: 10 * time.Second}
 			if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {

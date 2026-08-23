@@ -102,11 +102,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 	logger := initLogger(cfg)
 	slog.Info("config loaded", "path", cfgFile, "log_level", levelString(cfg.LogLevel), "log_format", formatString(cfg.LogFormat))
 
-	// 无认证警告：auth_token 为空且 api_keys 未启用时，所有 HTTP API 端点无保护
-	if cfg.AuthToken == "" && !cfg.APIKeys.Enabled {
-		slog.Warn("未配置认证 (auth_token 为空, api_keys 未启用) — 所有 HTTP API 端点无访问保护，建议设置 auth_token 或启用 api_keys")
-		fmt.Fprintf(os.Stderr, "\n*** WARNING: No authentication configured (auth_token empty, api_keys disabled) ***\n")
-		fmt.Fprintf(os.Stderr, "*** All HTTP API endpoints are unprotected. Set auth_token or enable api_keys. ***\n\n")
+	// 无认证警告：access_keys 为空且 api_keys 未启用时，所有 HTTP API 端点无保护
+	if len(cfg.AccessKeys) == 0 && !cfg.APIKeys.Enabled {
+		slog.Warn("未配置认证 (access_keys 为空, api_keys 未启用) — 所有 HTTP API 端点无访问保护，建议配置 access_keys 或启用 api_keys")
+		fmt.Fprintf(os.Stderr, "\n*** WARNING: No authentication configured (access_keys empty, api_keys disabled) ***\n")
+		fmt.Fprintf(os.Stderr, "*** All HTTP API endpoints are unprotected. Configure access_keys or enable api_keys. ***\n\n")
 	}
 
 	tunnelKey, err := resolveTunnelKey(cfg)
