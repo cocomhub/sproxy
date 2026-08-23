@@ -53,6 +53,17 @@ func (p *linkPool) get(peer string) (*mux.Mux, bool) {
 	return m, ok
 }
 
+// removeIf 仅当链路池中该 peer 仍指向 m 时才移除（accept 侧 serve 结束后调用：
+// 若期间对端已重连、链路池已 set 新 mux，则不误删新链路）。
+func (p *linkPool) removeIf(peer string, m *mux.Mux) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cur, ok := p.peerMux[peer]; ok && cur == m {
+		delete(p.peerMux, peer)
+		delete(p.peerSince, peer)
+	}
+}
+
 // sweep 清理已断开（m.Done 已关闭）的链路，返回被移除的 peer 列表。
 // 每周期开头调用：对端离线/链路中断后自动移除，下一轮发现周期重新拨号。
 func (p *linkPool) sweep() []string {

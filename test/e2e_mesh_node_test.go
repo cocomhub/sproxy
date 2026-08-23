@@ -187,43 +187,48 @@ func TestE2E_MeshNode_Discovery(t *testing.T) {
 	}
 }
 
-// TestE2E_MeshNode_ServiceAccess 验证 mesh 完全服务互访的核心路径：
-// hub + node-svc（宣告 echo + 出口拨号精确放行）+ node-ap（自动直连 node-svc，
-// 本地网关 18085）+ mesh connect --gateway → 经已建直连链路路由到 node-svc 的 echo，
-// 数据面端到端就绪（复用已建链路，零重新打洞）。
+// TestE2E_MeshNode_ServiceAccess 验证 mesh 完全服务互访（双向全覆盖）：
+// hub + node-svc（宣告 echo）+ node-ap（宣告 echo-ap，自动直连 node-svc，网关 18085）
+// + mesh connect --gateway → 同一条已建直连链路**双向**路由（A→B 经 node-ap 网关、
+// B→A 经 node-svc 网关 accept 侧注册链路回拨），数据面端到端就绪（复用已建链路，
+// 零重新打洞）。
 func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 	hubURL, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
-	// 本地 echo 服务（node-svc 出口拨号的目标）。
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cn net.Conn) {
-				defer cn.Close()
-				_, _ = io.Copy(cn, cn) // echo
-			}(c)
+	// 两个本地 echo 服务（node-svc 与 node-ap 各一个，出口拨号目标）。
+	startEcho := func() string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
 		}
-	}()
-	echoAddr := echoLn.Addr().String()
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				c, aerr := ln.Accept()
+				if aerr != nil {
+					return
+				}
+				go func(cn net.Conn) {
+					defer cn.Close()
+					_, _ = io.Copy(cn, cn) // echo
+				}(c)
+			}
+		}()
+		return ln.Addr().String()
+	}
+	echoSvcAddr := startEcho()
+	echoApAddr := startEcho()
 
-	// node-ap（低 ID "e2e-ap"，访问方）：自动拨号 node-svc；网关 18085（默认）。
-	// 可观测 stderr 等待自动直连建立。
+	// node-ap（低 ID "e2e-ap"，访问方 + 服务宿主 echo-ap）：自动拨号 node-svc；
+	// 网关 18085（默认）。可观测 stderr 等待自动直连建立。
 	var stderrAP bytes.Buffer
-	cleanupAP := startSClientMeshNodeObservable(t, hubURL, "e2e-ap", "", &stderrAP,
+	cleanupAP := startSClientMeshNodeObservable(t, hubURL, "e2e-ap", "echo-ap:"+echoApAddr, &stderrAP,
 		"--discover-interval", "1s", "--gateway-addr", "127.0.0.1:18085")
 	defer cleanupAP()
 
-	// node-svc（服务宿主）：宣告 echo + --dial-allow；网关换端口避免同机冲突。
-	cleanupSvc := startSClientMeshNode(t, hubURL, "e2e-svc", "echo:"+echoAddr,
+	// node-svc（服务宿主 echo）：网关换端口避免同机冲突。
+	cleanupSvc := startSClientMeshNode(t, hubURL, "e2e-svc", "echo:"+echoSvcAddr,
 		"--discover-interval", "1s", "--gateway-addr", "127.0.0.1:18086")
 	defer cleanupSvc()
 
@@ -237,42 +242,47 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 		t.Fatalf("node-ap 未自动直连 node-svc; stderr:\n%s", stderrAP.String())
 	}
 
-	// mesh connect 经 node-ap 本地网关复用已建链路路由到 node-svc 的 echo。
-	listenAddr, meshCleanup := startSClientMeshConnect(t, hubURL, "echo",
-		"--gateway", "127.0.0.1:18085")
-	defer meshCleanup()
-
-	// 就绪判定：全 echo 往返（I73）。全局 15s 上限。
-	payload := []byte("e2e-mesh-node-service-access")
-	deadline = time.Now().Add(15 * time.Second)
-	var lastErr error
-	for {
-		conn, derr := net.Dial("tcp", listenAddr)
-		if derr != nil {
-			lastErr = derr
-		} else {
-			_, werr := conn.Write(payload)
-			if werr != nil {
-				lastErr = werr
-				conn.Close()
+	// echoRoundTrip 启动 mesh connect --gateway 端口转发并轮询全 echo 往返（I73）。
+	echoRoundTrip := func(service, gatewayAddr string) {
+		listenAddr, meshCleanup := startSClientMeshConnect(t, hubURL, service,
+			"--gateway", gatewayAddr)
+		defer meshCleanup()
+		payload := []byte("e2e-mesh-node-" + service)
+		deadline := time.Now().Add(15 * time.Second)
+		var lastErr error
+		for {
+			conn, derr := net.Dial("tcp", listenAddr)
+			if derr != nil {
+				lastErr = derr
 			} else {
-				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-				got := make([]byte, len(payload))
-				_, rerr := io.ReadFull(conn, got)
-				conn.Close()
-				switch {
-				case rerr != nil:
-					lastErr = rerr
-				case string(got) != string(payload):
-					lastErr = fmt.Errorf("echo mismatch: got %q want %q", got, payload)
-				default:
-					return // 数据面端到端就绪（复用已建链路路径）
+				_, werr := conn.Write(payload)
+				if werr != nil {
+					lastErr = werr
+					conn.Close()
+				} else {
+					_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+					got := make([]byte, len(payload))
+					_, rerr := io.ReadFull(conn, got)
+					conn.Close()
+					switch {
+					case rerr != nil:
+						lastErr = rerr
+					case string(got) != string(payload):
+						lastErr = fmt.Errorf("echo mismatch: got %q want %q", got, payload)
+					default:
+						return // 数据面端到端就绪（复用已建链路路径）
+					}
 				}
 			}
+			if time.Now().After(deadline) {
+				t.Fatalf("mesh connect %s --gateway %s 数据面未在 15s 内就绪（最后错误: %v）", service, gatewayAddr, lastErr)
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("mesh connect --gateway 数据面未在 15s 内就绪（最后错误: %v）", lastErr)
-		}
-		time.Sleep(200 * time.Millisecond)
 	}
+
+	// 方向 1（A→B）：node-ap 网关（18085）经已建链路路由到 node-svc 的 echo。
+	echoRoundTrip("echo", "127.0.0.1:18085")
+	// 方向 2（B→A）：node-svc 网关（18086，accept 侧注册链路）回拨 node-ap 的 echo-ap。
+	echoRoundTrip("echo-ap", "127.0.0.1:18086")
 }

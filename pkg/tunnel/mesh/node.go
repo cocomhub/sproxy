@@ -175,7 +175,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	if enableAccept {
 		go func() {
 			defer wg.Done()
-			if err := runWebRTCAcceptLoop(cycleCtx, reg.Signaler, reg.TempNode, localAddr, cfg.DialAllow, httpClient, logger, directOpts); err != nil {
+			if err := runWebRTCAcceptLoop(cycleCtx, reg.Signaler, reg.TempNode, localAddr, cfg.DialAllow, httpClient, logger, links, directOpts); err != nil {
 				errCh <- err
 			}
 		}()
@@ -213,7 +213,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, logger); err != nil {
+			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, localAddr, httpClient, directOpts, logger); err != nil {
 				// 非阻塞写：只有 /api/hub/nodes 4xx（auth/配置级）才致命触发整 cycle
 				// 重连；拨号/瞬时失败在 runDiscoveryLoop 内部冷却处理，不写 errCh。
 				select {
@@ -243,10 +243,15 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 // runWebRTCAcceptLoop 循环接受 webrtc 直连：每条直连用 relay.Serve 分发
 // （dial 帧→出口拨号 / HTTP 中继到 localAddr）。
 //
+// 自动对等发现的拨号（临时身份 disc-<base>-<unixnano>）接受后，把该链路注册进共享
+// linkPool（键=拨号者真实 node ID），使本节点网关也能回拨对端（同一条已建链路双向
+// 服务互访）；serve 结束（链路断开）removeIf 摘除（重连竞态安全）。mesh connect /
+// p2p 的临时拨号（mesh-/p2p- 前缀）不注册。
+//
 // 空闲（ErrNoIncomingConnection，signalingTimeout 内无对端发起连接）不是失败，
 // 不重注册继续监听（P1-11）；ctx 取消返回 nil；真实信令失败返回错误触发整 cycle
 // 重连（节点被 hub 移除时 secret 已轮换，重连即拿新 secret 自愈）。
-func runWebRTCAcceptLoop(ctx context.Context, signaler *hub.HubSignaler, nodeID, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger, opts []relay.ServeOptions) error {
+func runWebRTCAcceptLoop(ctx context.Context, signaler *hub.HubSignaler, nodeID, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger, links *linkPool, opts []relay.ServeOptions) error {
 	for {
 		conn, err := webrtc.ListenWithSignalerCtx(ctx, nodeID, signaler)
 		if err != nil {
@@ -259,11 +264,20 @@ func runWebRTCAcceptLoop(ctx context.Context, signaler *hub.HubSignaler, nodeID,
 			return err
 		}
 		m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleListener)
-		go func() {
+		// discovery 拨号（disc- 前缀）→ 恢复真实 node ID 并注册链路（网关双向复用）。
+		peerID, isDiscovery := parseDiscoveryPeerID(conn.RemotePeerID())
+		if isDiscovery {
+			links.set(peerID, m)
+		}
+		go func(m *mux.Mux, peerID string, registered bool) {
 			defer m.Close() // serve 结束即关 mux → 关底层 webrtc conn → 解除 pump
 			if err := relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...); err != nil {
 				logger.Debug("mesh node 直连会话结束", "error", err)
 			}
-		}()
+			if registered {
+				// 仅当链路池中仍指向本条 mux 才移除（防重连竞态：新链路已 set 时不误删）。
+				links.removeIf(peerID, m)
+			}
+		}(m, peerID, isDiscovery)
 	}
 }

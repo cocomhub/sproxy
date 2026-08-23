@@ -365,7 +365,15 @@ type Conn struct {
 	closeCh   chan struct{}
 	closeOnce sync.Once
 	readMu    sync.Mutex // 串行化 Read（pion detached DataChannel 不支持并发 Read）
+
+	// remotePeerID 是对端信令身份：拨号方为 Dial 的目标 peer；监听方为 offer 的
+	// 发送方（offerFrom）。用于 mesh 自动对等发现的 accept 侧恢复拨号者真实 node-id。
+	remotePeerID string
 }
+
+// RemotePeerID 返回对端信令身份（拨号方=目标 peer；监听方=offer 发送方）。
+// 供 mesh accept 侧判断拨号者是否 discovery peer（disc- 前缀）并注册链路。
+func (c *Conn) RemotePeerID() string { return c.remotePeerID }
 
 // Read 读取一条消息。与底层读并行监听 closeCh：Close 后 Read 可被确定性唤醒并
 // 立即返回错误（pion detached DataChannel 在 pc.Close 后不保证唤醒读循环，
@@ -596,7 +604,7 @@ func DialWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Conn,
 		pc.Close()
 		return nil, fmt.Errorf("dial: detach: %w", err)
 	}
-	return &Conn{raw: raw, pc: pc, closeCh: make(chan struct{})}, nil
+	return &Conn{raw: raw, pc: pc, closeCh: make(chan struct{}), remotePeerID: peer}, nil
 }
 
 // ListenWithSignaler 通过指定的 Signaler 等待连接（跨机器可用）。
@@ -708,7 +716,7 @@ func ListenWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Con
 		pc.Close()
 		return nil, fmt.Errorf("listen: detach: %w", err)
 	}
-	return &Conn{raw: raw, pc: pc, closeCh: make(chan struct{})}, nil
+	return &Conn{raw: raw, pc: pc, closeCh: make(chan struct{}), remotePeerID: offerFrom}, nil
 }
 
 // ---------------------------------------------------------------------------
