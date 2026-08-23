@@ -46,10 +46,20 @@ func NewRootCmd() *cobra.Command {
 		cfgProvider *sclientcfg.ViperProvider
 		cliState    = &state.State{}
 	)
-	defaultCfgPath, err := xdg.ConfigFile(filepath.Join("sproxy", "sclient.yaml"))
+	// P2-配置2：多环境支持——SCLIENT_ENV 环境变量选择 env 后缀配置文件
+	// （如 SCLIENT_ENV=prod → sclient.prod.yaml）。为空用默认 sclient.yaml。
+	// 便于同一台机器维护 prod/staging/dev 多套 hub/server/token 配置。
+	cfgBase := "sclient.yaml"
+	if envName := os.Getenv("SCLIENT_ENV"); envName != "" {
+		cfgBase = "sclient." + envName + ".yaml"
+	}
+	defaultCfgPath, err := xdg.ConfigFile(filepath.Join("sproxy", cfgBase))
 	if err != nil {
 		home, _ := os.UserHomeDir()
-		defaultCfgPath = filepath.Join(home, ".sclient.yaml")
+		defaultCfgPath = filepath.Join(home, "."+cfgBase)
+	}
+	if envName := os.Getenv("SCLIENT_ENV"); envName != "" {
+		fmt.Fprintf(os.Stderr, "使用环境配置: %s（SCLIENT_ENV=%s）\n", defaultCfgPath, envName)
 	}
 
 	// 检查旧路径 ~/.sclient.yaml
@@ -128,7 +138,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdTunnel(factory, ios))
 	root.AddCommand(NewCmdShare(factory, ios))
 	root.AddCommand(NewCmdRelay(factory, ios, cfgSvc))
-	root.AddCommand(NewCmdP2P(ios))
+	root.AddCommand(NewCmdP2P(ios, cfgSvc))
 	root.AddCommand(NewCmdMesh(factory, ios))
 	root.AddCommand(NewCmdCloudDownload(factory, ios, cliState, cfgSvc))
 	root.AddCommand(NewCmdCloudDownloadGroup(factory, ios, cfgSvc))

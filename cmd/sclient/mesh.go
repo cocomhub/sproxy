@@ -302,6 +302,17 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			if err != nil {
 				return err
 			}
+			// P2-配置3：通用 mesh 参数配置回落——--hub/--relay-token/--node-id 未显式
+			// 指定时取配置 hub_url/relay_token/node_id（优先级：CLI > 配置文件 > 默认）。
+			if hubURL == "" {
+				hubURL = svc.MeshHubURL()
+			}
+			if relayToken == "" {
+				relayToken = svc.RelayToken()
+			}
+			if nodeID == "" {
+				nodeID = svc.NodeID()
+			}
 
 			// 按需解析服务 → 目标节点 + 地址（带 TTL 缓存与单飞刷新，感知节点上下线）
 			refresher := newMeshTargetRefresher(svc, service)
@@ -542,11 +553,15 @@ func meshSignalToken(flagToken string, svc *client.FileClient) string {
 }
 
 // meshRelayToken 返回自动注册用的 relay_token：显式 --relay-token 优先，否则
-// 回落 meshSignalToken（--token → auth_token）。与 relay start --token 语义对齐，
-// 使 hub 设不同 relay_token/auth_token 时 mesh connect 也能正确完成注册（I37 子决策 A）。
+// 回落配置 relay_token（P2-配置3），再回落 meshSignalToken（--token → auth_token）。
+// 与 relay start --token 语义对齐，使 hub 设不同 relay_token/auth_token 时 mesh
+// connect 也能正确完成注册（I37 子决策 A）。
 func meshRelayToken(flagRelayToken, flagToken string, svc *client.FileClient) string {
 	if flagRelayToken != "" {
 		return flagRelayToken
+	}
+	if relay := svc.RelayToken(); relay != "" {
+		return relay
 	}
 	return meshSignalToken(flagToken, svc)
 }

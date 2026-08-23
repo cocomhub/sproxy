@@ -37,6 +37,11 @@ func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, inse
 	if nodeID == "" {
 		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
+	// 本地默认 hub（--hub 与配置 hub_url 均未提供时）。注意与 sproxy 默认监听端口
+	// :18083 不同——请按实际 hub 地址显式 --hub 或配置 hub_url。
+	if hubURL == "" {
+		hubURL = "ws://127.0.0.1:18084/ws"
+	}
 
 	logger := slog.With("node", nodeID, "hub", hubURL, "local", local, "dial_allow", dialAllow)
 	logger.Info("中继节点启动")
@@ -222,7 +227,7 @@ func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 			_ = cmd.Help()
 		},
 	}
-	cmd.AddCommand(NewCmdRelayStart(ios))
+	cmd.AddCommand(NewCmdRelayStart(ios, cfgSvc))
 	cmd.AddCommand(NewCmdRelayStatus(ios, cfgSvc))
 	cmd.AddCommand(NewCmdRelayStop(ios))
 	cmd.AddCommand(NewCmdRelayRemoveNode(ios, cfgSvc))
@@ -232,7 +237,7 @@ func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 }
 
 // NewCmdRelayStart 创建 relay start 命令的工厂函数。
-func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
+func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "启动中继节点，连接到 Hub",
@@ -249,10 +254,25 @@ func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
+			// P2-配置3：通用参数配置回落——--hub/--token/--node-id 未显式指定时
+			// 取配置 hub_url/relay_token/node_id（CLI > 配置文件 > 默认）。
+			if cfgSvc != nil {
+				if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
+					if hubURL == "" {
+						hubURL = cfg.HubURL
+					}
+					if token == "" {
+						token = cfg.RelayToken
+					}
+					if nodeID == "" {
+						nodeID = cfg.NodeID
+					}
+				}
+			}
 			return runRelayStart(cmd, hubURL, local, nodeID, token, insecure, dialAllow, services, dialAllowCIDRs)
 		},
 	}
-	cmd.Flags().String("hub", "ws://127.0.0.1:18084/ws", "Hub 的 WebSocket 地址")
+	cmd.Flags().String("hub", "", "Hub 的 WebSocket 地址（默认取配置 hub_url；均未配置用 ws://127.0.0.1:18084/ws）")
 	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
 	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
 	cmd.Flags().String("token", "", "中继注册 token（与 hub.relay_token 一致；未配置 hub token 时可不填）")

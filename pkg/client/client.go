@@ -101,6 +101,9 @@ type FileClient struct {
 	chunkSize              int64
 	maxChunkSize           int64
 	authToken              string
+	meshHubURL             string // 配置 hub_url（mesh/relay/p2p 信令/中继 hub，区别于 xfer 的 hubURL）
+	relayToken             string // 配置 relay_token（hub 中继注册）
+	nodeID                 string // 配置 node_id（本节点默认 ID）
 	logger                 *slog.Logger
 	uploadCache            sync.Map       // key = absFilePath, value = *uploadCacheEntry
 	cacheCleanCounter      atomic.Int64   // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
@@ -318,6 +321,29 @@ func WithChunkSize(n int64) Option {
 func WithAuthToken(token string) Option {
 	return func(c *FileClient) {
 		c.authToken = token
+	}
+}
+
+// WithMeshHubURL 设置 mesh/relay/p2p 共用的 hub 地址（配置文件 hub_url）。
+// 与 WithXfer 的 hubURL（xfer 传输地址）语义不同：这是信令/中继 hub，供 mesh
+// connect / relay start / p2p 等命令在 --hub 未显式指定时作为配置回落。
+func WithMeshHubURL(v string) Option {
+	return func(c *FileClient) {
+		c.meshHubURL = v
+	}
+}
+
+// WithRelayToken 设置 hub 中继注册 token（配置文件 relay_token）。
+func WithRelayToken(v string) Option {
+	return func(c *FileClient) {
+		c.relayToken = v
+	}
+}
+
+// WithNodeID 设置本节点默认 ID（配置文件 node_id）。
+func WithNodeID(v string) Option {
+	return func(c *FileClient) {
+		c.nodeID = v
 	}
 }
 
@@ -1046,6 +1072,21 @@ func (c *FileClient) ServerURL() string {
 // 需要展示时使用配置层的掩码形式（如 config.go 中的 maskedToken）。
 func (c *FileClient) AuthToken() string {
 	return c.authToken
+}
+
+// MeshHubURL 返回配置的 mesh/relay/p2p hub 地址（可为空，调用方按命令语义回落）。
+func (c *FileClient) MeshHubURL() string {
+	return c.meshHubURL
+}
+
+// RelayToken 返回配置的 hub 中继注册 token（可为空）。
+func (c *FileClient) RelayToken() string {
+	return c.relayToken
+}
+
+// NodeID 返回配置的本节点默认 ID（可为空，回落主机名）。
+func (c *FileClient) NodeID() string {
+	return c.nodeID
 }
 
 // doRequest 统一发送 HTTP 请求：当配置了隧道客户端时走加密隧道，否则直连。
