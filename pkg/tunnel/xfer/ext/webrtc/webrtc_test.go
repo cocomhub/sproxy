@@ -585,3 +585,75 @@ func TestWebrtcListener_Close(t *testing.T) {
 	// 幂等：重复 Close 不 panic
 	ln.Close()
 }
+
+// remotePeerSignaler 是一个保留 From 身份的内存信号器（测 Conn.RemotePeerID）：
+// 拨号方视角 answerFrom 须等于 Dial 的 peer（Dial 内部校验 from==peer），
+// 监听方视角 offerFrom 是拨号方临时身份（如 "disc-node-a-123"）。
+type remotePeerSignaler struct {
+	offerFrom  string
+	answerFrom string
+	offer      chan string
+	answer     chan string
+}
+
+func (s *remotePeerSignaler) SendOffer(_ string, sdp string) error { s.offer <- sdp; return nil }
+func (s *remotePeerSignaler) WaitOffer(ctx context.Context) (string, string, error) {
+	select {
+	case sdp := <-s.offer:
+		return s.offerFrom, sdp, nil
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
+}
+func (s *remotePeerSignaler) SendAnswer(_ string, sdp string) error { s.answer <- sdp; return nil }
+func (s *remotePeerSignaler) WaitAnswer(ctx context.Context) (string, string, error) {
+	select {
+	case sdp := <-s.answer:
+		return s.answerFrom, sdp, nil
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
+}
+
+// TestConn_RemotePeerID：Dial 侧 RemotePeerID 为目标 peer；Listen 侧为 offer 发送方
+// （offerFrom，供 mesh accept 侧恢复 discovery 拨号者真实 node-id）。
+func TestConn_RemotePeerID(t *testing.T) {
+	SetHostOnly(true)
+	t.Cleanup(func() { SetHostOnly(false) })
+	sig := &remotePeerSignaler{
+		offerFrom:  "disc-node-a-123", // 模拟拨号方临时身份（含真实 base "node-a"）
+		answerFrom: "node-b",          // 模拟监听方真实 ID（= 拨号方 peer）
+		offer:      make(chan string, 1),
+		answer:     make(chan string, 1),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	listenID := make(chan string, 1)
+	go func() {
+		conn, err := ListenWithSignalerCtx(ctx, "node-b", sig)
+		if err != nil {
+			listenID <- "<err>"
+			return
+		}
+		defer conn.Close()
+		listenID <- conn.RemotePeerID()
+	}()
+
+	conn, err := DialWithSignalerCtx(ctx, "node-b", sig)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if conn.RemotePeerID() != "node-b" {
+		t.Fatalf("dial RemotePeerID = %q, want node-b", conn.RemotePeerID())
+	}
+	select {
+	case id := <-listenID:
+		if id != "disc-node-a-123" {
+			t.Fatalf("listen RemotePeerID = %q, want disc-node-a-123", id)
+		}
+	case <-ctx.Done():
+		t.Fatal("等待 listen RemotePeerID 超时")
+	}
+}

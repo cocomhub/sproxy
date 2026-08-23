@@ -772,51 +772,59 @@ func TestGateway_Status(t *testing.T) {
 }
 
 // TestRunNode_ServiceAccessViaGateway：两个 mesh node（node-ap 自动拨号 node-svc，
-// 后者宣告 echo 服务）——node-ap 本地网关复用已建直连链路路由到 node-svc 的 echo，
-// 数据面端到端就绪（mesh connect --gateway 的核心场景）。
+// 各自宣告 echo 服务）——本地网关复用**同一条已建直连链路**双向路由（A→B 经 A 的
+// 网关、B→A 经 B 的网关 accept 侧注册链路回拨），数据面端到端就绪（mesh connect
+// --gateway 双向全覆盖）。
 func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
 	webrtc.SetSignalingTimeout(60 * time.Second)
 	t.Cleanup(webrtc.ResetSignalingTimeout)
 
-	// echo 后端。
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cn net.Conn) {
-				defer cn.Close()
-				_, _ = io.Copy(cn, cn)
-			}(c)
+	// 两个 echo 后端（node-svc 与 node-ap 各一个）。
+	startEcho := func(t *testing.T) string {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
 		}
-	}()
-	echoAddr := echoLn.Addr().String()
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				c, aerr := ln.Accept()
+				if aerr != nil {
+					return
+				}
+				go func(cn net.Conn) {
+					defer cn.Close()
+					_, _ = io.Copy(cn, cn)
+				}(c)
+			}
+		}()
+		return ln.Addr().String()
+	}
+	echoSvcAddr := startEcho(t)
+	echoApAddr := startEcho(t)
 
 	_, ts, _ := runNodeTestHub(t, true)
 
-	// node-svc：宣告 echo 服务 + 精确放行地址（服务宿主，被 node-ap 自动拨号）。
+	// node-svc：宣告 echo-svc（服务宿主，被 node-ap 自动拨号），本地网关。
+	gatewaySvc := make(chan string, 1)
 	ctxSvc := t.Context()
 	go func() {
 		_ = RunNode(ctxSvc, NodeConfig{
 			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
 			NodeID: "node-svc", EnableWebRTC: true, Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
-			Services:     []hub.Service{{Name: "echo", Addr: echoAddr}},
-			ServiceAddrs: []string{echoAddr}, DialAllow: true,
+			Services:     []hub.Service{{Name: "echo-svc", Addr: echoSvcAddr}},
+			ServiceAddrs: []string{echoSvcAddr}, DialAllow: true,
+			GatewayAddr: "127.0.0.1:0", GatewayNotify: gatewaySvc,
 		})
 	}()
 
-	// node-ap：访问方 mesh node（低 ID 自动拨 node-svc），本地网关复用已建链路。
+	// node-ap：低 ID 自动拨 node-svc，宣告 echo-ap，本地网关。
 	peersA := make(chan string, 4)
-	gatewayNotifyA := make(chan string, 1)
+	gatewayA := make(chan string, 1)
 	ctxA := t.Context()
 	go func() {
 		_ = RunNode(ctxA, NodeConfig{
@@ -824,16 +832,23 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 			NodeID: "node-ap", EnableWebRTC: true, Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DiscoveryPeers: peersA,
-			GatewayAddr:    "127.0.0.1:0", GatewayNotify: gatewayNotifyA,
+			Services:       []hub.Service{{Name: "echo-ap", Addr: echoApAddr}},
+			ServiceAddrs:   []string{echoApAddr}, DialAllow: true,
+			GatewayAddr: "127.0.0.1:0", GatewayNotify: gatewayA,
 		})
 	}()
 
-	// 等网关就绪 + 自动直连建立（node-ap 拨 node-svc）。
-	var gatewayAddr string
+	// 等两节点网关就绪 + node-ap 自动直连 node-svc。
+	var addrA, addrSvc string
 	select {
-	case gatewayAddr = <-gatewayNotifyA:
+	case addrA = <-gatewayA:
 	case <-time.After(10 * time.Second):
 		t.Fatal("node-ap 网关未就绪")
+	}
+	select {
+	case addrSvc = <-gatewaySvc:
+	case <-time.After(10 * time.Second):
+		t.Fatal("node-svc 网关未就绪")
 	}
 	select {
 	case got := <-peersA:
@@ -844,26 +859,44 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 		t.Fatal("node-ap 未自动直连 node-svc")
 	}
 
-	// 复用已建链路：node-ap 网关路由到 node-svc 的 echo。
-	conn, err := GatewayConnect(context.Background(), gatewayAddr, "node-svc", echoAddr, "signal-token")
-	if err != nil {
-		t.Fatalf("GatewayConnect 复用已建链路失败: %v", err)
+	// 双向 echo 往返（经各自本地网关复用同一条已建链路）。B→A 方向依赖 accept 侧
+	// 链路注册，注册在拨号建立后同步完成；对 ErrNoPeerLink 短重试容忍注册时序。
+	echoRoundTrip := func(t *testing.T, gatewayAddr, peer, addr string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			conn, err := GatewayConnect(context.Background(), gatewayAddr, peer, addr, "signal-token")
+			if err == nil {
+				defer conn.Close()
+				payload := []byte("ping")
+				if _, werr := conn.Write(payload); werr != nil {
+					t.Fatalf("写 echo（%s→%s）失败: %v", peer, addr, werr)
+				}
+				got := make([]byte, len(payload))
+				if rerr := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); rerr != nil {
+					t.Fatal(rerr)
+				}
+				if _, rerr := io.ReadFull(conn, got); rerr != nil {
+					t.Fatalf("echo 未回显（%s→%s）: %v", peer, addr, rerr)
+				}
+				if string(got) != string(payload) {
+					t.Fatalf("echo 内容不匹配: got %q want %q", got, payload)
+				}
+				return
+			}
+			if !errors.Is(err, ErrNoPeerLink) {
+				t.Fatalf("GatewayConnect(%s→%s) 失败: %v", peer, addr, err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("GatewayConnect(%s→%s) 无已建链路超时: %v", peer, addr, err)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
-	defer conn.Close()
-	payload := []byte("ping")
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, len(payload))
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("echo 未回显: %v", err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo 内容不匹配: got %q want %q", got, payload)
-	}
+	// 方向 1（A→B）：node-ap 网关复用已建链路路由到 node-svc 的 echo-svc。
+	echoRoundTrip(t, addrA, "node-svc", echoSvcAddr)
+	// 方向 2（B→A）：node-svc 网关（accept 侧注册链路）回拨 node-ap 的 echo-ap。
+	echoRoundTrip(t, addrSvc, "node-ap", echoApAddr)
 }
 
 // TestGateway_RejectsWrongToken：mesh node 配置了信令 token 时，网关拒绝未携带
@@ -1017,5 +1050,30 @@ func TestGateway_ConcurrentConnectionsOnSameLink(t *testing.T) {
 	close(errCh)
 	for gerr := range errCh {
 		t.Errorf("并发复用已建链路失败: %v", gerr)
+	}
+}
+
+// TestParseDiscoveryPeerID：discovery 拨号临时身份（disc-<base>-<unixnano>）恢复真实
+// node ID；非 disc 前缀 / 无数字尾段 / 空 base 均判非法。
+func TestParseDiscoveryPeerID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"disc-node-a-1787500000000000000", "node-a", true},
+		{"disc-my-node-with-dashes-1787500000000000000", "my-node-with-dashes", true}, // base 含 '-'
+		{"disc-node-123-1787500000000000000", "node-123", true},                       // base 以数字结尾
+		{"mesh-node-a-1787500000000000000", "", false},                                // 非 disc 前缀
+		{"p2p-node-a-1787500000000000000", "", false},                                 // p2p 拨号（临时，非 discovery）
+		{"disc-node-a-abc", "", false},                                                // 尾段非纯数字
+		{"disc-node-a", "", false},                                                    // 无时间戳段
+		{"disc--1787500000000000000", "", false},                                      // base 为空
+	}
+	for _, c := range cases {
+		got, ok := parseDiscoveryPeerID(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("parseDiscoveryPeerID(%q) = (%q,%v), want (%q,%v)", c.in, got, ok, c.want, c.ok)
+		}
 	}
 }
