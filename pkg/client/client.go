@@ -30,6 +30,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
@@ -101,13 +102,14 @@ type FileClient struct {
 	maxChunkSize           int64
 	authToken              string
 	logger                 *slog.Logger
-	uploadCache            sync.Map      // key = absFilePath, value = *uploadCacheEntry
-	cacheCleanCounter      atomic.Int64  // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
-	maxCacheEntries        int           // checksum 缓存最大条目数，在 calcFileChecksum 的 Range 清理时统计并淘汰
-	cacheTTL               time.Duration // checksum 缓存 TTL，0=使用默认值 10m
-	chainManager           *ChainManager // 链式操作管理器，nil=不启用
-	initError              error         // WithTunnel/WithXfer 初始化错误
-	allowTransportFallback bool          // WithTransportFallback 设置后允许回退到直连模式
+	uploadCache            sync.Map       // key = absFilePath, value = *uploadCacheEntry
+	cacheCleanCounter      atomic.Int64   // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
+	maxCacheEntries        int            // checksum 缓存最大条目数，在 calcFileChecksum 的 Range 清理时统计并淘汰
+	cacheTTL               time.Duration  // checksum 缓存 TTL，0=使用默认值 10m
+	chainManager           *ChainManager  // 链式操作管理器，nil=不启用
+	initError              error          // WithTunnel/WithXfer 初始化错误
+	allowTransportFallback bool           // WithTransportFallback 设置后允许回退到直连模式
+	tracer                 tracing.Tracer // 追踪器，默认 tracing.New()（slog 实现）
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
@@ -126,7 +128,8 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 		serverURL:       strings.TrimRight(serverURL, "/"),
 		httpClient:      &http.Client{Timeout: 300 * time.Second},
 		chunkSize:       size.DefaultChunkSize, // 4 MiB
-		logger:          slog.Default(),
+		logger:          tracingLogger(),
+		tracer:          tracing.New(),
 		maxCacheEntries: defaultMaxCacheEntries,
 		cacheTTL:        defaultCacheTTL,
 	}
@@ -134,6 +137,17 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 		opt(c)
 	}
 	return c
+}
+
+// WithTracer 设置自定义 Tracer（可传 OpenTelemetry 适配，或测试用的 mock）。
+func WithTracer(t tracing.Tracer) Option {
+	return func(c *FileClient) { c.tracer = t }
+}
+
+// tracingLogger 返回一个用 WithContextHandler 包装的 logger，使
+// InfoContext/DebugContext(ctx, ...) 日志自动携带 ctx 中的 trace_id/span_id。
+func tracingLogger() *slog.Logger {
+	return slog.New(tracing.WithContextHandler(slog.Default().Handler()))
 }
 
 // WithHTTPClient 设置自定义 HTTP 客户端。
@@ -1045,6 +1059,11 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		}
 	}
 
+	// 追踪：为本次请求建立 span，并把 traceparent 头注入到请求头中。
+	ctx2, end := c.tracer.StartSpan(ctx, method+" "+urlPath)
+	defer end()
+	c.tracer.Inject(ctx2, httpHeaderCarrier{req.Header})
+
 	var resp *http.Response
 	if c.tunnelClient != nil {
 		if c.initError != nil {
@@ -1084,6 +1103,13 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	resp, err = hc.Do(req)
 	return closeBodyIfErr(resp, err)
 }
+
+// httpHeaderCarrier 适配 http.Header 为 tracing.Carrier（http.Header 本身
+// 不实现 Carrier 接口所需的 Get/Set 签名）。
+type httpHeaderCarrier struct{ h http.Header }
+
+func (c httpHeaderCarrier) Get(k string) string { return c.h.Get(k) }
+func (c httpHeaderCarrier) Set(k, v string)     { c.h.Set(k, v) }
 
 // closeBodyIfErr 在 (resp, err) 同时非 nil 的情况下关闭 resp.Body，避免连接 / 句柄泄漏。
 // 这是 http.Client.Do 在某些错误（例如 redirect 策略错误）下会返回的非典型形态：返回了响应但同时报错。
