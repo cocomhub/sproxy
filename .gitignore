@@ -30,7 +30,6 @@ ms-playwright/
 
 # superpowers review artifacts (generated, not committed)
 .superpowers/
-superpowers/
 learnings/
 
 # remember 插件会话记录（含本地脱敏上下文，不入库）
