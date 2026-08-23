@@ -263,7 +263,7 @@ func mockGateway(t *testing.T, resp string) string {
 func TestMeshGatewayDial_UsesGatewayWhenOk(t *testing.T) {
 	gatewayAddr := mockGateway(t, `{"ok":true}`)
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	dial := meshGatewayDial(gatewayAddr, ios)
+	dial := meshGatewayDial(gatewayAddr, "", ios)
 	target := &client.MeshService{Name: "svc", Node: "node-b", Addr: "127.0.0.1:22"}
 	res, err := dial(context.Background(), nil, nil, target, "local-node")
 	if err != nil {
@@ -285,7 +285,7 @@ func TestMeshGatewayDial_FallsBackWhenNoPeerLink(t *testing.T) {
 	gatewayAddr := mockGateway(t, `{"ok":false,"error":"no_peer_link","message":"mesh: no link"}`)
 	errBuf := &lockedBuffer{}
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: errBuf}
-	dial := meshGatewayDial(gatewayAddr, ios)
+	dial := meshGatewayDial(gatewayAddr, "", ios)
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -308,7 +308,8 @@ func TestMeshStatus_GatewayTopology(t *testing.T) {
 	resp := `{"node_id":"node-ap","services":[{"name":"echo","addr":"127.0.0.1:22"}],"peers":[{"peer":"node-svc","link":"webrtc-direct","since":"2026-08-24T00:00:00Z"}]}`
 	gatewayAddr := mockGateway(t, resp)
 	var out bytes.Buffer
-	cmd := newCmdMeshStatus(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	// 真实 FileClient（mock 工厂传 nil client 会让 svc.AuthToken() nil 指针崩溃）。
+	cmd := newCmdMeshStatus(clientfactory.NewMock(client.NewFileClient("http://127.0.0.1:1"), nil), cli.IOStreams{Out: &out, ErrOut: io.Discard})
 	cmd.SetContext(context.Background()) // 未 Execute 的裸命令 Context() 为 nil
 	if err := cmd.Flags().Set("gateway", gatewayAddr); err != nil {
 		t.Fatal(err)
