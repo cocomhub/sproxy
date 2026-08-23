@@ -26,7 +26,7 @@ import (
 )
 
 func TestNewCmdMesh_Subcommands(t *testing.T) {
-	cmd := NewCmdMesh(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard})
+	cmd := NewCmdMesh(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, nil)
 	if cmd.Use != "mesh" {
 		t.Fatalf("expected Use 'mesh', got %q", cmd.Use)
 	}
@@ -43,8 +43,30 @@ func TestNewCmdMesh_Subcommands(t *testing.T) {
 	}
 }
 
+func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
+	cmd := NewCmdMesh(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, nil)
+	var node *cobra.Command
+	for _, c := range cmd.Commands() {
+		if c.Name() == "node" {
+			node = c
+			break
+		}
+	}
+	if node == nil {
+		t.Fatal("mesh 缺少 node 子命令")
+	}
+	if node.Use != "node" {
+		t.Fatalf("unexpected node Use: %q", node.Use)
+	}
+	for _, name := range []string{"hub", "node-id", "token", "relay-token", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "stun"} {
+		if f := node.Flags().Lookup(name); f == nil {
+			t.Errorf("node 缺少 flag: %s", name)
+		}
+	}
+}
+
 func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
-	cmd := NewCmdMesh(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard})
+	cmd := NewCmdMesh(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard}, nil)
 	connect := cmd.Commands()[0]
 	if connect.Use != "connect <service> [-l :port]" {
 		t.Fatalf("unexpected connect Use: %q", connect.Use)
