@@ -21,7 +21,6 @@ type legacyContextKey struct{}
 // slogTracer implements Tracer with log/slog output.
 type slogTracer struct {
 	mu    sync.Mutex
-	spans []*Span
 	depth int
 }
 
@@ -55,7 +54,6 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 	newCtx := context.WithValue(ctx, SpanContextKey{}, SpanContext{TraceID: traceID, SpanID: span.SpanID})
 	newCtx = context.WithValue(newCtx, legacyContextKey{}, span)
 
-	t.spans = append(t.spans, span)
 	t.depth++
 
 	depth := t.depth
