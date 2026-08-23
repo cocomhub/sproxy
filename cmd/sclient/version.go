@@ -15,12 +15,12 @@ import (
 // NewCmdVersion 创建 version 命令，显示程序二进制版本。
 // 移除文件版本管理（迁移至 meta version list|restore|delete）。
 func NewCmdVersion(ios cli.IOStreams) *cobra.Command {
-	info := buildinfo.New()
+	info := buildinfo.Default()
+	// Version/BuiltAt 走 main 变量（Makefile -X main.Version/main.BuildAt 注入）；
+	// Branch/CommitID/ReleaseURL 走 buildinfo 包级变量（-X buildinfo.* 注入）。
 	info.Version = Version
 	info.BuiltAt = BuildAt
 	info.DirtyInfo = buildmeta.DirtyInfo()
-	info.CommitID = "unknown"
-	info.Branch = "unknown"
 	cmd := buildinfo.NewVersionCmd(info)
 
 	// dirty-info 子命令：输出内嵌 diff（对应 cocom version dirty-info）。

@@ -13,12 +13,12 @@ import (
 
 // NewVersionSubcommand 创建 version 子命令，输出程序二进制版本与构建元信息。
 func NewVersionSubcommand() *cobra.Command {
-	info := buildinfo.New()
+	info := buildinfo.Default()
+	// Version/BuiltAt 走 main 变量（Makefile -X main.Version/main.BuildAt 注入）；
+	// Branch/CommitID/ReleaseURL 走 buildinfo 包级变量（-X buildinfo.* 注入）。
 	info.Version = Version
 	info.BuiltAt = BuildAt
 	info.DirtyInfo = buildmeta.DirtyInfo()
-	info.CommitID = "unknown"
-	info.Branch = "unknown"
 	cmd := buildinfo.NewVersionCmd(info)
 	dirty := &cobra.Command{
 		Use:   "dirty-info",
