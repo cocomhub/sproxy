@@ -36,8 +36,11 @@ VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || e
 BUILD_AT        ?= $(shell date +"%Y-%m-%dT%H:%M:%SZ")
 COVER_THRESHOLD ?= 70
 SONAR_PROJECT_KEY ?= cocomhub_sproxy
-SKIP_VERSION    ?= true
-VERSION_DIR     ?= internal/version/build
+SKIP_VERSION    ?= false
+VERSION_DIR     ?= internal/build
+# buildmeta 包编译时 embed 其包内 build/dirty_info.txt，路径为
+# internal/buildmeta/build/。prepare 在 $(VERSION_DIR) 生成后拷到 $(EMBED_BASE)/build/。
+EMBED_BASE     ?= internal/buildmeta
 GOTAGS          ?=
 GOBUILD_EXTRA   ?= -v
 GO_LDFLAGS      := 
@@ -69,15 +72,16 @@ TOOLS := \
 
 .PHONY: prepare
 prepare:
-	@mkdir -p $(BUILD_DIR) $(BIN_DIR)
+	@mkdir -p $(BUILD_DIR) $(BIN_DIR) $(VERSION_DIR) $(EMBED_BASE)/build
 ifneq ($(SKIP_VERSION), true)
-	@mkdir -p $(VERSION_DIR)
 	@if ! git diff --quiet HEAD 2>/dev/null; then \
 		git diff HEAD > $(VERSION_DIR)/dirty_info.txt 2>/dev/null; \
 		echo "[prepare] dirty_info.txt updated ($(VERSION_DIR)/dirty_info.txt)"; \
 	else \
 		rm -f $(VERSION_DIR)/dirty_info.txt; \
 	fi
+	@# embed 副本始终存在：无 diff 时置空文件（等同 clean），保证 buildmeta 包可编译
+	@cp -f $(VERSION_DIR)/dirty_info.txt $(EMBED_BASE)/build/dirty_info.txt 2>/dev/null || : > $(EMBED_BASE)/build/dirty_info.txt
 endif
 
 .PHONY: build
