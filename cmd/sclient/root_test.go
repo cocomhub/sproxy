@@ -41,7 +41,7 @@ func TestNewRootCmd_NoSCLIENT_ENV_DefaultConfig(t *testing.T) {
 }
 
 func TestLoadConfig_NilProvider(t *testing.T) {
-	svc := &cliConfigProvider{provider: nil}
+	svc := &cliConfigProvider{getProvider: func() *sclientcfg.ViperProvider { return nil }}
 	_, err := svc.LoadConfig()
 	if err == nil {
 		t.Fatal("expected error for nil provider")
@@ -51,7 +51,7 @@ func TestLoadConfig_NilProvider(t *testing.T) {
 func TestLoadConfig_WithProvider(t *testing.T) {
 	vp := sclientcfg.New(filepath.Join(t.TempDir(), "nonexistent.yaml"))
 	vp.Set("server_url", "http://test:18083")
-	svc := &cliConfigProvider{provider: vp}
+	svc := &cliConfigProvider{getProvider: func() *sclientcfg.ViperProvider { return vp }}
 	cfg, err := svc.LoadConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -63,7 +63,7 @@ func TestLoadConfig_WithProvider(t *testing.T) {
 
 func TestLoadConfig_WithProviderDefaults(t *testing.T) {
 	vp := sclientcfg.New(filepath.Join(t.TempDir(), "nonexistent.yaml"))
-	svc := &cliConfigProvider{provider: vp}
+	svc := &cliConfigProvider{getProvider: func() *sclientcfg.ViperProvider { return vp }}
 	cfg, err := svc.LoadConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
