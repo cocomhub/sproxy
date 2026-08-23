@@ -167,7 +167,7 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 // ref 负责按需解析最新 target（带 TTL 缓存，感知节点上下线）；initial 仅用于启动横幅。
 func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub.HubSignaler, dial meshDialFunc, ref *client.MeshTargetRefresher, initial *client.MeshService, localNode, listenAddr string, ios cli.IOStreams) error {
 	// S56：裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 +
-	// Windows 防火墙弹窗）；需 LAN 访问时显式 0.0.0.0:port / 具体 IP。
+	// Windows 防火墙弹窗）；需 LAN 访问时显式通配地址:port 或具体 IP。
 	listenAddr = iostream.NormalizeListenAddr(listenAddr)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {

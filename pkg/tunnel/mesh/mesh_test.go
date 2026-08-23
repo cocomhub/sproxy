@@ -181,8 +181,65 @@ func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 	if secret != info.Secret || nodeID != reg.TempNode {
 		t.Fatalf("signaling headers mismatch: secret=%q node=%q (want %q/%q)", secret, nodeID, info.Secret, reg.TempNode)
 	}
-	// closer 关闭注册连接 → hub 移除临时节点。
+	// closer 关闭注册连接 → hub 移除临时节点（防 WS 泄漏核心保证，D4）。
 	if cerr := reg.Closer(); cerr != nil {
 		t.Fatal(cerr)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for rt.Has(hub.NodeID(reg.TempNode)) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rt.Has(hub.NodeID(reg.TempNode)) {
+		t.Fatalf("closer 后节点 %q 应被 hub 移除", reg.TempNode)
+	}
+}
+
+// TestAutoRegister_ExactNode（D1 回归）：exact 模式注册成 nodeID 原样（p2p listen
+// 的被寻址方需稳定 ID 供 --peer 寻址），closer 移除节点。
+func TestAutoRegister_ExactNode(t *testing.T) {
+	rt := hub.NewRouteTable()
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator("relay-token"), nil)
+	muxHTTP := http.NewServeMux()
+	wsNode := ws.NewHandlerNode()
+	wsNode.AddToMux(muxHTTP, "/ws")
+	ts := httptest.NewServer(muxHTTP)
+	defer ts.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for {
+			c, aerr := wsNode.Accept(ctx)
+			if aerr != nil {
+				return
+			}
+			go func(cc xfer.Conn) { _ = srv.HandleConn(ctx, cc) }(c)
+		}
+	}()
+
+	reg, err := AutoRegister(ctx, AutoRegisterParams{
+		HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+		NodeID: "node-b", Prefix: "p2p", ExactNode: true, Insecure: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reg.Closer() })
+	// exact 模式：注册成 nodeID 原样（不加临时前缀）。
+	if reg.TempNode != "node-b" {
+		t.Fatalf("exact 模式应注册成 node-b 原样, got %q", reg.TempNode)
+	}
+	if _, ok := rt.LookupInfo(hub.NodeID("node-b")); !ok {
+		t.Fatal("exact node-b 未注册（p2p listen 无法被 --peer 寻址）")
+	}
+	// closer 移除节点。
+	if cerr := reg.Closer(); cerr != nil {
+		t.Fatal(cerr)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for rt.Has(hub.NodeID("node-b")) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rt.Has(hub.NodeID("node-b")) {
+		t.Fatal("closer 后 exact node-b 应被移除")
 	}
 }

@@ -127,7 +127,7 @@ func Pump(a io.ReadWriteCloser, b io.ReadWriteCloser, grace time.Duration) {
 }
 
 // NormalizeListenAddr 将裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防
-// LAN 暴露 + Windows 防火墙弹窗）；显式 IP/主机名/0.0.0.0 保持原样。
+// LAN 暴露 + Windows 防火墙弹窗）；显式 IP/主机名/通配地址 保持原样。
 func NormalizeListenAddr(addr string) string {
 	if strings.HasPrefix(addr, ":") {
 		return "127.0.0.1" + addr
