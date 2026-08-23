@@ -58,7 +58,7 @@ func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
 	if node.Use != "node" {
 		t.Fatalf("unexpected node Use: %q", node.Use)
 	}
-	for _, name := range []string{"hub", "node-id", "token", "relay-token", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "stun"} {
+	for _, name := range []string{"hub", "node-id", "token", "relay-token", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "stun"} {
 		if f := node.Flags().Lookup(name); f == nil {
 			t.Errorf("node 缺少 flag: %s", name)
 		}

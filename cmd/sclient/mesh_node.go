@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -42,6 +43,8 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
 			localAddr, _ := cmd.Flags().GetString("local")
 			enableWebRTC, _ := cmd.Flags().GetBool("webrtc")
+			discover, _ := cmd.Flags().GetBool("discover")
+			discoverInterval, _ := cmd.Flags().GetDuration("discover-interval")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			insecure, _ := cmd.Flags().GetBool("insecure")
 			if stunServers != nil {
@@ -88,19 +91,21 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			defer stop()
 
 			return mesh.RunNode(ctx, mesh.NodeConfig{
-				HubURL:         hubURL,
-				NodeID:         nodeID,
-				RelayToken:     relayTok,
-				SignalToken:    signalToken,
-				Services:       svcs,
-				ServiceAddrs:   addrs,
-				Tags:           tags,
-				DialAllow:      dialAllow,
-				DialAllowCIDRs: dialAllowCIDRs,
-				LocalAddr:      localAddr,
-				Insecure:       insecure,
-				EnableWebRTC:   enableWebRTC,
-				Logger:         logger,
+				HubURL:            hubURL,
+				NodeID:            nodeID,
+				RelayToken:        relayTok,
+				SignalToken:       signalToken,
+				Services:          svcs,
+				ServiceAddrs:      addrs,
+				Tags:              tags,
+				DialAllow:         dialAllow,
+				DialAllowCIDRs:    dialAllowCIDRs,
+				LocalAddr:         localAddr,
+				Insecure:          insecure,
+				EnableWebRTC:      enableWebRTC,
+				Discover:          discover,
+				DiscoveryInterval: discoverInterval,
+				Logger:            logger,
 			})
 		},
 	}
@@ -113,6 +118,8 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 	cmd.Flags().StringArray("dial-allow-cidr", nil, "出口拨号白名单网段（如 192.168.0.0/16；配合 --dial-allow 放行内网，默认仅公网+宣告地址）")
 	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址（HTTP 中继转发目标）")
 	cmd.Flags().Bool("webrtc", true, "接受 WebRTC 直连（信令 poll + listen）；关闭则仅经 hub 中继可达")
+	cmd.Flags().Bool("discover", true, "启用自动对等发现（经 hub 节点列表发现其他 mesh node，并行 webrtc 自动直连并保持，形成 full-mesh 拓扑）")
+	cmd.Flags().Duration("discover-interval", 10*time.Second, "对等发现周期（如 1s 测试 / 30s 生产）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
 	return cmd

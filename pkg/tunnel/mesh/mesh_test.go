@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -257,6 +258,18 @@ func runNodeTestHub(t *testing.T, withSignaling bool) (*hub.RouteTable, *httptes
 	if withSignaling {
 		muxHTTP.Handle("/api/signal/", &miniSignalHub{})
 	}
+	// 节点发现：GET /api/hub/nodes 返回当前路由表全部在线节点（含临时节点）。
+	muxHTTP.HandleFunc("/api/hub/nodes", func(w http.ResponseWriter, r *http.Request) {
+		type nodeResp struct {
+			ID string `json:"id"`
+		}
+		var nodes []nodeResp
+		for _, n := range rt.List() {
+			nodes = append(nodes, nodeResp{ID: string(n.ID)})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(nodes)
+	})
 	ts := httptest.NewServer(muxHTTP)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -283,15 +296,26 @@ func (h *miniSignalHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasPrefix(r.URL.Path, "/api/signal/poll/"):
 		peer := strings.TrimPrefix(r.URL.Path, "/api/signal/poll/")
+		kind := r.URL.Query().Get("kind")
 		h.mu.Lock()
 		if h.inbox == nil {
 			h.inbox = map[string][]map[string]any{}
 		}
-		msgs := h.inbox[peer]
+		// 按 ?kind= 过滤（对齐真实 hub I9），只消费匹配 kind 的消息，其余保留。
+		inbox := h.inbox[peer]
+		var msgs, kept []map[string]any
+		for _, m := range inbox {
+			mkind, _ := m["kind"].(string)
+			if kind == "" || mkind == kind {
+				msgs = append(msgs, m)
+			} else {
+				kept = append(kept, m)
+			}
+		}
 		if msgs == nil {
 			msgs = []map[string]any{}
 		}
-		h.inbox[peer] = nil
+		h.inbox[peer] = kept
 		h.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(msgs)
@@ -543,4 +567,88 @@ func TestRunNode_WebRTCDirect(t *testing.T) {
 	}
 
 	_ = runErr
+}
+
+// TestListHubNodes：解析 /api/hub/nodes 返回的节点列表 + Bearer 头 + 401 分支。
+func TestListHubNodes(t *testing.T) {
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/hub/nodes" {
+			http.NotFound(w, r)
+			return
+		}
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"a"},{"id":"b"},{"id":""}]`))
+	}))
+	defer ts.Close()
+
+	ids, err := ListHubNodes(context.Background(), ts.URL, "tok", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Fatalf("Authorization = %q, want Bearer tok", gotAuth)
+	}
+	if len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
+		t.Fatalf("ids = %v, want [a b]（空 id 过滤）", ids)
+	}
+
+	// 401 分支：hubAPIError code=401。
+	ts401 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer ts401.Close()
+	_, err = ListHubNodes(context.Background(), ts401.URL, "tok", false)
+	var herr *hubAPIError
+	if !errors.As(err, &herr) || herr.code != http.StatusUnauthorized {
+		t.Fatalf("期望 hubAPIError 401, got %v", err)
+	}
+}
+
+// TestRunNode_DiscoveryConnects：两个 mesh node（node-a/node-b）自动对等发现，
+// node-a（A<B 半拨号）自动 webrtc 直连 node-b 并保持。
+func TestRunNode_DiscoveryConnects(t *testing.T) {
+	webrtc.SetHostOnly(true)
+	t.Cleanup(func() { webrtc.SetHostOnly(false) })
+	webrtc.SetSignalingTimeout(60 * time.Second)
+	t.Cleanup(webrtc.ResetSignalingTimeout)
+
+	rt, ts, _ := runNodeTestHub(t, true)
+
+	peersA := make(chan string, 4)
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	go func() {
+		_ = RunNode(ctxA, NodeConfig{
+			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			NodeID: "node-a", EnableWebRTC: true, Discover: true,
+			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
+			DiscoveryPeers: peersA, DialAllow: true,
+		})
+	}()
+	ctxB, cancelB := context.WithCancel(context.Background())
+	defer cancelB()
+	go func() {
+		_ = RunNode(ctxB, NodeConfig{
+			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			NodeID: "node-b", EnableWebRTC: true, Discover: true,
+			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
+			DialAllow: true,
+		})
+	}()
+
+	// 等 node-a 自动发现并直连 node-b（node-a < node-b → A 拨 B）。
+	select {
+	case got := <-peersA:
+		if got != "node-b" {
+			t.Fatalf("discovery peer = %q, want node-b", got)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("node-a 未在 15s 内自动直连 node-b")
+	}
+	// node-b 仍在路由表（未因拨号/重连被误伤）。
+	if rt.Lookup(hub.NodeID("node-b")) == nil {
+		t.Fatal("node-b 不应从路由表消失")
+	}
 }
