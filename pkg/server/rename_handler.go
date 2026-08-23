@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 // parseRenameParams 从请求中提取重命名参数：from、to 和 X-File-Checksum。
@@ -172,11 +171,7 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 // 与 delete 对称，要求 X-File-Checksum 头校验源文件，避免误覆盖。
 // 目标路径已存在时返回 409；服务端会自动 mkdir -p 中间目录。
 func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
-	reqID := r.Header.Get(headerRequestID)
-	if reqID == "" {
-		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	logger := h.logger.With("req_id", reqID)
+	logger := h.logger
 
 	from, to, expectedChecksum, err := parseRenameParams(r)
 	if err != nil {
