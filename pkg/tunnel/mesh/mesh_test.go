@@ -1103,3 +1103,54 @@ func TestLinkPool_RemoveIf(t *testing.T) {
 		t.Fatal("removeIf 当前 mux 应删除链路")
 	}
 }
+
+// TestRunNode_FullMeshThreeNodes：3 节点 full-mesh，中间节点 node-b 的链路池同时含
+// accept 侧（node-a，a<b 拨入注册）与拨号侧（node-c，b<c 拨出注册）条目——验证
+// 双向链路注册在真实 full-mesh 中的混合。
+func TestRunNode_FullMeshThreeNodes(t *testing.T) {
+	webrtc.SetHostOnly(true)
+	t.Cleanup(func() { webrtc.SetHostOnly(false) })
+	webrtc.SetSignalingTimeout(60 * time.Second)
+	t.Cleanup(webrtc.ResetSignalingTimeout)
+
+	_, ts, _ := runNodeTestHub(t, true)
+
+	runNode := func(nodeID string, notify chan<- string) {
+		go func() {
+			_ = RunNode(t.Context(), NodeConfig{
+				HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+				NodeID: nodeID, EnableWebRTC: true, Discover: true,
+				DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
+				GatewayAddr: "127.0.0.1:0", GatewayNotify: notify,
+			})
+		}()
+	}
+	gatewayB := make(chan string, 1)
+	runNode("node-a", make(chan string, 1))
+	runNode("node-b", gatewayB)
+	runNode("node-c", make(chan string, 1))
+
+	var gatewayAddr string
+	select {
+	case gatewayAddr = <-gatewayB:
+	case <-time.After(10 * time.Second):
+		t.Fatal("node-b 网关未就绪")
+	}
+
+	// 等 node-b 链路池同时含 node-a（accept 侧）与 node-c（拨号侧）。
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		st, err := QueryGatewayStatus(t.Context(), gatewayAddr, "signal-token")
+		if err == nil && len(st.Peers) == 2 {
+			peers := map[string]bool{}
+			for _, p := range st.Peers {
+				peers[p.Peer] = true
+			}
+			if peers["node-a"] && peers["node-c"] {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("node-b 链路池未同时包含 node-a（accept 侧）与 node-c（拨号侧）")
+}
