@@ -11,7 +11,6 @@ import (
 	"hash"
 	"io"
 	"log/slog"
-	"math/rand/v2"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -72,11 +71,7 @@ func (h *Handlers) setUploadResponseHeaders(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
-	reqID := r.Header.Get(headerRequestID)
-	if reqID == "" {
-		reqID = fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Int64())
-	}
-	logger := h.logger.With("req_id", reqID)
+	logger := h.logger
 
 	file, handler, expectedChecksum, ok := h.parseUploadMultipart(w, r, logger)
 	if !ok {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 	"github.com/cocomhub/sproxy/web"
 )
 
@@ -69,6 +70,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux := opts.Mux
 	cfg := opts.CfgPtr.Load()
 	log := defaultLogger(opts.Logger)
+	// 用 WithContextHandler 包装：所有 InfoContext/DebugContext(ctx, ...) 日志
+	// 自动读取 ctx 中的 SpanContext，带上 trace_id/span_id 实现全链路追踪。
+	log = slog.New(tracing.WithContextHandler(log.Handler()))
 
 	// 初始化 ChecksumStore
 	cs := NewChecksumStore(cfg.UploadsDir, log.With("component", "checksum_store"))
@@ -149,7 +153,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	}
 	apiHandler = CORSMiddleware(cfg.CORS, log.With("component", "cors"))(apiHandler)
 
-	h.tunnelHandler = tunnel.NewLocalHandler(opts.TunnelKey, requestLogMiddleware(log.With("component", "request"), apiHandler), log.With("component", "tunnel"))
+	h.tunnelHandler = tunnel.NewLocalHandler(opts.TunnelKey, apiHandler, log.With("component", "tunnel"))
 
 	srvMux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
 	srvMux.HandleFunc("GET /download", h.authMiddleware(h.download))
@@ -301,7 +305,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// （实测 /ui 无尾斜杠在 {$} 下返回 307 到 /ui/，浏览器自动跟随。）
 	srvMux.HandleFunc("GET /{$}", h.webRedirect)
 
-	h.handler = h.metricsMiddleware(srvMux)
+	h.handler = h.metricsMiddleware(h.requestLogMiddleware(srvMux))
 
 	return h
 }
@@ -370,17 +374,6 @@ func (h *Handlers) versionHandler(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) webRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/ui/", http.StatusMovedPermanently)
-}
-
-// requestLogMiddleware 记录 HTTP 请求的基本信息，包括状态码。
-func requestLogMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		mw := newMetricsResponseWriter(w)
-		next.ServeHTTP(mw, r)
-		logger.Info("请求", "method", r.Method, "path", r.URL.Path,
-			"status", mw.statusCode, "remote_addr", r.RemoteAddr, "user_agent", r.UserAgent(), "duration", time.Since(start))
-	})
 }
 
 // cleanupUploadingFilesLoop 定期清理 uploadingFiles 中已过期（不存在对应 session）的条目。

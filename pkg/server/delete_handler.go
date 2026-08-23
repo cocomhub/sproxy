@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"time"
 )
 
 // resolveAndValidateFile 校验文件名并返回安全的远程路径和完整路径。
@@ -28,11 +27,7 @@ func (h *Handlers) resolveAndValidateFile(filename string) (remotePath, fullPath
 }
 
 func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
-	reqID := r.Header.Get(headerRequestID)
-	if reqID == "" {
-		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	logger := h.logger.With("req_id", reqID)
+	logger := h.logger
 
 	filename := r.URL.Query().Get("filename")
 	if filename == "" {
@@ -100,7 +95,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	if h.metrics != nil {
 		h.metrics.RecordDelete()
 	}
-	logger.Info("文件已删除", "file_name", remotePath, "request_id", reqID)
+	logger.Info("文件已删除", "file_name", remotePath)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, http.StatusOK)
 }
 
