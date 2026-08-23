@@ -44,7 +44,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 		{"delete", NewCmdDelete(factory, ios, st)},
 		{"list", NewCmdList(factory, ios, st)},
 		{"search", NewCmdSearch(factory, ios)},
-		{"version", NewCmdVersion(factory, ios, nil)},
+		{"version", NewCmdVersion(ios)},
 		{"stats", NewCmdStats(factory, ios)},
 		{"diag", NewCmdDiag(ios)},
 		{"relay", NewCmdRelay(factory, ios, nil)},
@@ -295,8 +295,7 @@ func TestSearchCmd(t *testing.T) {
 // ---- version command ----
 
 func TestVersionCmd(t *testing.T) {
-	factory := clientfactory.NewMock(nil, nil)
-	cmd := NewCmdVersion(factory, cli.IOStreams{Out: io.Discard}, nil)
+	cmd := NewCmdVersion(cli.IOStreams{Out: io.Discard})
 	if !strings.HasPrefix(cmd.Use, "version") {
 		t.Errorf("versionCmd.Use = %q, want prefix 'version'", cmd.Use)
 	}
