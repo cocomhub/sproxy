@@ -213,7 +213,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, localAddr, httpClient, directOpts, logger); err != nil {
+			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, reg.Secret, localAddr, httpClient, directOpts, logger); err != nil {
 				// 非阻塞写：只有 /api/hub/nodes 4xx（auth/配置级）才致命触发整 cycle
 				// 重连；拨号/瞬时失败在 runDiscoveryLoop 内部冷却处理，不写 errCh。
 				select {
@@ -265,9 +265,14 @@ func runWebRTCAcceptLoop(ctx context.Context, signaler *hub.HubSignaler, nodeID,
 		}
 		m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleListener)
 		// discovery 拨号（disc- 前缀）→ 恢复真实 node ID 并注册链路（网关双向复用）。
+		// base 已由 hub 注册时强制校验（base==real_node_id + HMAC 证明），不可伪造；
+		// 再加半拨号序校验 peerID<nodeID 作纵深（真实 discovery 恒低 ID 拨高 ID，
+		// 绝不误伤正常注册），根除"冒充高 ID"类投毒与 discovery 侧 set 竞态。
 		peerID, isDiscovery := parseDiscoveryPeerID(conn.RemotePeerID())
-		if isDiscovery {
+		registered := isDiscovery && peerID < nodeID
+		if registered {
 			links.set(peerID, m)
+			logger.Info("mesh 自动对等链路 accept 注册", "peer", peerID)
 		}
 		go func(m *mux.Mux, peerID string, registered bool) {
 			defer m.Close() // serve 结束即关 mux → 关底层 webrtc conn → 解除 pump
@@ -278,6 +283,6 @@ func runWebRTCAcceptLoop(ctx context.Context, signaler *hub.HubSignaler, nodeID,
 				// 仅当链路池中仍指向本条 mux 才移除（防重连竞态：新链路已 set 时不误删）。
 				links.removeIf(peerID, m)
 			}
-		}(m, peerID, isDiscovery)
+		}(m, peerID, registered)
 	}
 }

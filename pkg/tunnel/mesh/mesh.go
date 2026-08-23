@@ -186,6 +186,13 @@ type AutoRegisterParams struct {
 	Services []hub.Service
 	// Tags 是节点标签（如 ["exit"] 表示出口节点；mesh node --dial-allow 时打）。
 	Tags []string
+	// RealNodeID 是 mesh discovery 临时注册（Prefix:"disc"）代表的本节点真实 node-id。
+	// hub 注册时强制校验（base==RealNodeID 且 RealNodeProof 有效），防冒充他人污染
+	// 对端链路池。mesh connect/p2p 拨号方不传。
+	RealNodeID string
+	// RealNodeProof 是 HMAC-SHA256(本节点 per-node secret, RealNodeID) 的 hex。
+	// 本节点 per-node secret 来自自身常驻注册（runNodeOnce 的 reg.Secret）。
+	RealNodeProof string
 }
 
 // TempRegistration 是一次信令前置的临时注册（生命周期与本次命令绑定）。
@@ -193,6 +200,9 @@ type TempRegistration struct {
 	Signaler *hub.HubSignaler // 携带临时 node_id + per-node secret
 	Closer   func() error     // 关闭注册连接 → hub 移除临时节点
 	TempNode string           // 临时节点 ID（调试/日志用）
+	// Secret 是本临时节点的 per-node secret（mesh node 常驻注册用它派生 discovery
+	// 拨号的 real_node_proof；供同一进程内派生 HMAC 证明）。
+	Secret string
 	// Mux 是注册连接上的 mux（RoleListener）：mesh node 在其上 relay.Serve 接受
 	// 经 hub 的中继流；p2p/mesh connect 拨号方不消费。
 	Mux *mux.Mux
@@ -223,8 +233,10 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 		return nil, fmt.Errorf("连接 Hub 注册端点失败: %w", err)
 	}
 	// 注册帧：声明 per-node-secret 能力（hub 回 REG_OK:<secret>，B1），并携带
-	// 服务宣告（mesh node 常驻）与标签（如 exit）。mesh/p2p 拨号方不传则 Meta{}。
-	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.RelayToken, hub.Meta{Services: p.Services, Tags: p.Tags}, hub.CapabilityPerNodeSecret)); err != nil {
+	// 服务宣告（mesh node 常驻）与标签（如 exit）。mesh discovery 临时注册（disc-）
+	// 另带 real_node_id + real_node_proof（hub 强制校验防冒充）。mesh/p2p 拨号方
+	// 不传则 Meta{}。
+	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.RelayToken, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret)); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("发送注册帧失败: %w", err)
 	}
@@ -255,6 +267,7 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 		Signaler: signaler,
 		Closer:   func() error { return m.Close() },
 		TempNode: nodeID,
+		Secret:   secret,
 		Mux:      m,
 	}, nil
 }
