@@ -20,42 +20,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// meshDialResult 是一次 mesh 连接的结果（薄包装 mesh.Result，保持测试签名稳定）。
-type meshDialResult struct {
-	conn net.Conn
-	// kind 是实际使用的路径：webrtc | relay。
-	kind string
-}
-
 // meshDialFunc 建立一条到目标服务的连接（选路逻辑）。
-// 默认实现：webrtc 打洞优先，失败回落 hub 中继。可注入测试桩。
-type meshDialFunc func(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*meshDialResult, error)
-
-// defaultMeshDial 是默认选路：webrtc 打洞优先，失败回落 hub 中继。
-// 委托 pkg/tunnel/mesh.Dial（选路逻辑已下沉，含 P1-12 探测超时约束）。
-func defaultMeshDial(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, _ string) (*meshDialResult, error) {
-	res, err := mesh.Dial(ctx, svc, signaler, target, "")
-	if err != nil {
-		return nil, err
-	}
-	return &meshDialResult{conn: res.Conn, kind: res.Kind}, nil
-}
-
-// meshWebRTCStream 在已建立的 WebRTC 直连上打开 mux 流并写好拨号帧。
-// 委托 pkg/tunnel/mesh.WebRTCStream（含 P0-1 mux 分帧修复）。
-func meshWebRTCStream(ctx context.Context, conn *webrtc.Conn, addr string) (*meshDialResult, error) {
-	res, err := mesh.WebRTCStream(ctx, conn, addr)
-	if err != nil {
-		return nil, err
-	}
-	return &meshDialResult{conn: res.Conn, kind: res.Kind}, nil
-}
-
-// newMeshTargetRefresher 创建 refresher（TTL 单飞缓存 + 失败节点 failover）。
-// 委托 pkg/client.MeshTargetRefresher。
-func newMeshTargetRefresher(svc *client.FileClient, service string) *client.MeshTargetRefresher {
-	return client.NewMeshTargetRefresher(svc, service)
-}
+// 默认用 pkg/tunnel/mesh.Dial（webrtc 打洞优先，失败回落 hub 中继）；可注入测试桩。
+type meshDialFunc func(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*mesh.Result, error)
 
 // NewCmdMesh 创建 mesh 父命令：基于 hub 服务注册表的服务发现与连接。
 func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
@@ -107,8 +74,8 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 				nodeID = svc.NodeID()
 			}
 
-			// 按需解析服务 → 目标节点 + 地址（带 TTL 缓存与单飞刷新，感知节点上下线）
-			refresher := newMeshTargetRefresher(svc, service)
+			// 按需解析服务 → 目标节点 + 地址（带 TTL 缓存与单飞刷新，感知节点上下线）。
+			refresher := client.NewMeshTargetRefresher(svc, service)
 			target, err := refresher.Resolve(cmd.Context())
 			if err != nil {
 				return err
@@ -120,39 +87,38 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			var signaler *hub.HubSignaler
 			if useWebRTC {
 				if nodeID == "" {
-					nodeID = defaultLocalNodeID()
+					nodeID = iostream.LocalHostname("mesh-node")
 				}
-				r, regErr := autoRegister(cmd.Context(), autoRegisterParams{
-					hubURL:      hubURL,
-					serverURL:   svc.ServerURL(),
-					relayToken:  meshRelayToken(relayToken, token, svc),
-					signalToken: meshSignalToken(token, svc),
-					nodeID:      nodeID,
-					prefix:      "mesh",
-					exactNode:   false,
-					insecure:    insecure,
+				r, regErr := mesh.AutoRegister(cmd.Context(), mesh.AutoRegisterParams{
+					HubURL:      hubURL,
+					ServerURL:   svc.ServerURL(),
+					RelayToken:  client.MeshRelayToken(relayToken, svc.RelayToken(), token, svc.AuthToken()),
+					SignalToken: client.MeshSignalToken(token, svc.AuthToken()),
+					NodeID:      nodeID,
+					Prefix:      "mesh",
+					ExactNode:   false,
+					Insecure:    insecure,
 				})
 				if regErr != nil {
 					// 注册失败不静默：warn + 回落中继（relay 路径只认 auth_token，
 					// 与本机临时注册无关，独立可用）。
 					ios.WriteErrLine("webrtc 信令注册失败: %v（回落 hub 中继）", regErr)
 				} else {
-					signaler = r.signaler
+					signaler = r.Signaler
 					// 信令结束/命令退出确定性关闭注册连接，防 WS 泄漏
 					// （hub 侧断开即 RemoveIfOwned 移除临时节点）。
-					defer func() { _ = r.closer() }()
+					defer func() { _ = r.Closer() }()
 				}
 			}
-			dial := defaultMeshDial
 			localNode := nodeID
 			if localNode == "" {
-				localNode = defaultLocalNodeID()
+				localNode = iostream.LocalHostname("mesh-node")
 			}
 
 			if listenAddr != "" {
-				return meshForwardListen(cmd, svc, signaler, dial, refresher, target, localNode, listenAddr, ios)
+				return meshForwardListen(cmd, svc, signaler, mesh.Dial, refresher, target, localNode, listenAddr, ios)
 			}
-			return meshStdioOnce(cmd, svc, signaler, dial, refresher, localNode, ios)
+			return meshStdioOnce(cmd, svc, signaler, mesh.Dial, refresher, localNode, ios)
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 127.0.0.1:2222；裸 :2222 归一为 127.0.0.1:2222）；留空为单次 stdin/stdout 模式")
@@ -202,7 +168,7 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub.HubSignaler, dial meshDialFunc, ref *client.MeshTargetRefresher, initial *client.MeshService, localNode, listenAddr string, ios cli.IOStreams) error {
 	// S56：裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 +
 	// Windows 防火墙弹窗）；需 LAN 访问时显式 0.0.0.0:port / 具体 IP。
-	listenAddr = normalizeListenAddr(listenAddr)
+	listenAddr = iostream.NormalizeListenAddr(listenAddr)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听本地端口失败: %w", err)
@@ -243,14 +209,11 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub
 				ios.WriteErrLine("建立 mesh 流失败: %v（目标 node=%s addr=%s 不可达或离线）", cerr, target.Node, target.Addr)
 				return
 			}
-			conn := res.conn
+			conn := res.Conn
 			defer conn.Close()
-			// 拨号帧已由 dial 内部写好（P0-1）：
-			//   - relay：hub 的 RelayStreamHandler 已写好 dial 帧（叶子拨目标），
-			//     客户端直接透传字节，不得再写帧；
-			//   - webrtc：meshWebRTCStream 已在 mux 流上写好 dial 帧，此处同样透传。
-			// 客户端不再按路径手动写帧——曾把帧以裸字节写 DataChannel 导致直连 100% 失败。
-			ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.kind, target.Node, target.Addr)
+			// 拨号帧已由 dial 内部写好（P0-1）：relay 由 hub 写，webrtc 由
+			// mesh.WebRTCStream 在 mux 流上写，客户端均直接透传。
+			ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.Kind, target.Node, target.Addr)
 			// 双向泵送（CloseWrite 半关闭 + grace 宽限期，C1 范本，见 iostream.Pump）：
 			// 任一方向完成即向对端传播半关闭，让在途响应仍可被读回；对端不回应 FIN
 			// 时 grace 超时强制双侧关闭解除阻塞。返回后由外层 defer 收尾。
@@ -270,11 +233,11 @@ func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler *hub.Hub
 	if err != nil {
 		return err
 	}
-	conn := res.conn
+	conn := res.Conn
 	defer conn.Close()
 	// 拨号帧已由 dial 内部写好（P0-1，同 meshForwardListen）：relay 由 hub 写，
-	// webrtc 由 meshWebRTCStream 在 mux 流上写，客户端均直接透传。
-	ios.WriteOutLine("已连接（%s）: stdin/stdout ⇄ %s (Ctrl+D / EOF 断开)", res.kind, target.Name)
+	// webrtc 由 mesh.WebRTCStream 在 mux 流上写，客户端均直接透传。
+	ios.WriteOutLine("已连接（%s）: stdin/stdout ⇄ %s (Ctrl+D / EOF 断开)", res.Kind, target.Name)
 	// 方向区分通道（I38）：对端断开（outDone）→ 会话结束立即返回，不再挂起；
 	// 本地 stdin 读完（inDone，如 EOF/管道结束）→ 等待对端把剩余响应写完
 	// （保留 `echo x | mesh connect` 的响应语义）。原 wg.Wait() 在对端断开但
@@ -296,91 +259,4 @@ func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler *hub.Hub
 		<-outDone
 	}
 	return nil
-}
-
-// meshSignalToken 返回信令 Bearer token：显式 --token 优先，否则复用 auth_token。
-// 委托 pkg/client.MeshSignalToken。
-func meshSignalToken(flagToken string, svc *client.FileClient) string {
-	return client.MeshSignalToken(flagToken, svc.AuthToken())
-}
-
-// meshRelayToken 返回自动注册用的 relay_token：显式 --relay-token > 配置 relay_token
-// > --token > auth_token。委托 pkg/client.MeshRelayToken（含 P2-配置3 回落链）。
-func meshRelayToken(flagRelayToken, flagToken string, svc *client.FileClient) string {
-	return client.MeshRelayToken(flagRelayToken, svc.RelayToken(), flagToken, svc.AuthToken())
-}
-
-// defaultLocalNodeID 返回本机节点 ID（mesh webrtc 信令来源）。
-// 委托 pkg/iostream.LocalHostname（fallback "mesh-node"）。
-func defaultLocalNodeID() string {
-	return iostream.LocalHostname("mesh-node")
-}
-
-// normalizeHubEndpoints 将 hub 地址归一为信令 HTTP 基址与注册 WS 端点。
-// 委托 pkg/tunnel/hub.NormalizeEndpoints。
-func normalizeHubEndpoints(hubURL, serverURL string) (httpBase, wsURL string, err error) {
-	return hub.NormalizeEndpoints(hubURL, serverURL)
-}
-
-// normalizeListenAddr 将裸 :port 归一为 127.0.0.1:port（loopback 安全默认）。
-// 委托 pkg/iostream.NormalizeListenAddr。
-func normalizeListenAddr(addr string) string {
-	return iostream.NormalizeListenAddr(addr)
-}
-
-// meshTempRegistration 是一次 mesh connect 的临时注册（生命周期与本次命令绑定）。
-// 薄包装 pkg/tunnel/mesh.TempRegistration，保持测试签名稳定。
-type meshTempRegistration struct {
-	signaler *hub.HubSignaler // 携带临时 node_id + per-node secret
-	closer   func() error     // 关闭注册连接 → hub 移除临时节点
-	tempNode string           // 临时节点 ID（调试/日志用）
-}
-
-// autoRegisterParams 是一次自动注册（mesh/p2p 信令前置）的参数。
-// 与 meshAutoRegister 的区别：支持 temp/exact 两种 node 生成模式与 insecure TLS，
-// 供 mesh connect（temp）、p2p connect（temp）、p2p listen（exact）三处复用（B17）。
-type autoRegisterParams struct {
-	hubURL      string // hub 地址（空时回落 serverURL）
-	serverURL   string // hubURL 为空的回退基址（mesh 用 svc.ServerURL()；p2p 传 ""）
-	relayToken  string // 注册用（hub relay_token）
-	signalToken string // 信令 Bearer（hub auth_token）
-	nodeID      string // 节点 ID 基础
-	prefix      string // 临时 node 前缀："mesh" | "p2p"
-	exactNode   bool   // true=注册成 nodeID 原样（p2p listen 需稳定 ID 供 --peer 寻址）；false=临时 nodeID
-	insecure    bool   // 缺口 2：注册 WS 拨号 + HubSignaler HTTP 跳过证书校验（自签 wss hub）
-}
-
-// autoRegister 是 mesh/p2p 共用的信令自动注册实现。委托 pkg/tunnel/mesh.AutoRegister
-// （声明 per-node-secret 能力、解析 REG_OK:<secret>、mux 保活、per-node secret 校验），
-// 本层仅做参数适配与结果转换。insecure 语义由 mesh.AutoRegister 内部处理。
-func autoRegister(ctx context.Context, p autoRegisterParams) (*meshTempRegistration, error) {
-	reg, err := mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
-		HubURL:      p.hubURL,
-		ServerURL:   p.serverURL,
-		RelayToken:  p.relayToken,
-		SignalToken: p.signalToken,
-		NodeID:      p.nodeID,
-		Prefix:      p.prefix,
-		ExactNode:   p.exactNode,
-		Insecure:    p.insecure,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &meshTempRegistration{signaler: reg.Signaler, closer: reg.Closer, tempNode: reg.TempNode}, nil
-}
-
-// meshAutoRegister 连接前自动注册（B12 语义不变）：mesh connect 的薄包装，
-// 固定 prefix="mesh"、temp node 模式、insecure=false。
-func meshAutoRegister(ctx context.Context, svc *client.FileClient, hubURL, relayToken, signalToken, nodeID string) (*meshTempRegistration, error) {
-	return autoRegister(ctx, autoRegisterParams{
-		hubURL:      hubURL,
-		serverURL:   svc.ServerURL(),
-		relayToken:  relayToken,
-		signalToken: signalToken,
-		nodeID:      nodeID,
-		prefix:      "mesh",
-		exactNode:   false,
-		insecure:    false,
-	})
 }

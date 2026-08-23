@@ -87,7 +87,7 @@ func relayDialOnce(cmd *cobra.Command, svc relayDialClient, node, tcpAddr string
 		_, _ = io.Copy(conn, ios.In)
 		// P0-5：stdin EOF 后传播半关闭，否则对端永远等不到"输入写完"，
 		// <outDone 永久挂起（与 meshStdioOnce / p2pStdio 同款修复）。
-		closeWriteConn(conn)
+		iostream.CloseWrite(conn)
 	}()
 	go func() { defer close(outDone); _, _ = io.Copy(ios.Out, conn) }()
 	select {
@@ -103,7 +103,7 @@ func relayDialListen(cmd *cobra.Command, svc relayDialClient, node, tcpAddr, lis
 	// 裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 +
 	// Windows Defender 防火墙弹窗）；需 LAN 访问时显式 0.0.0.0:port / 具体 IP
 	// （S56 同款 normalizeListenAddr）。
-	listenAddr = normalizeListenAddr(listenAddr)
+	listenAddr = iostream.NormalizeListenAddr(listenAddr)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听本地端口失败: %w", err)

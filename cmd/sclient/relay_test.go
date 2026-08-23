@@ -192,13 +192,13 @@ func TestIsTerminalRelayError(t *testing.T) {
 // 回归锁：声明 per-node-secret 能力后 hub 回 "REG_OK:<base64url secret>"，
 // 若用精确比较会误判为未知响应导致 relay start 终止（B1 复检 bug）。
 func TestParseRegisterAck(t *testing.T) {
-	secret, err := parseRegisterAck(hub.RegisterAckOK)
+	secret, err := hub.ParseRegisterAck(hub.RegisterAckOK)
 	if err != nil || secret != "" {
 		t.Fatalf("expected REG_OK to no secret, got secret=%q err=%v", secret, err)
 	}
 
 	const wantSecret = "abc123"
-	secret, err = parseRegisterAck(hub.RegisterAckOK + ":" + wantSecret)
+	secret, err = hub.ParseRegisterAck(hub.RegisterAckOK + ":" + wantSecret)
 	if err != nil {
 		t.Fatalf("expected REG_OK:secret parse success, got %v", err)
 	}
@@ -210,7 +210,7 @@ func TestParseRegisterAck(t *testing.T) {
 		t.Fatal("REG_OK:secret 不应被 isTerminalRelayError 判为终态")
 	}
 
-	_, err = parseRegisterAck(hub.RegisterAckErr + "invalid token")
+	_, err = hub.ParseRegisterAck(hub.RegisterAckErr + "invalid token")
 	if err == nil || !strings.Contains(err.Error(), "invalid token") {
 		t.Fatalf("expected REG_ERR error containing reason, got %v", err)
 	}
@@ -218,7 +218,7 @@ func TestParseRegisterAck(t *testing.T) {
 		t.Fatal("REG_ERR 应被 isTerminalRelayError 判为终态")
 	}
 
-	_, err = parseRegisterAck(hub.RegisterAckOK + ":")
+	_, err = hub.ParseRegisterAck(hub.RegisterAckOK + ":")
 	if err == nil {
 		t.Fatal("expected error for empty secret after REG_OK:")
 	}
@@ -226,7 +226,7 @@ func TestParseRegisterAck(t *testing.T) {
 		t.Fatal("异常 REG_OK（secret 为空）应判为终态")
 	}
 
-	_, err = parseRegisterAck("???")
+	_, err = hub.ParseRegisterAck("???")
 	if err == nil || !strings.Contains(err.Error(), "未知注册响应") {
 		t.Fatalf("expected unknown-response error, got %v", err)
 	}

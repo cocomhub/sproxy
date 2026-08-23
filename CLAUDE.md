@@ -19,6 +19,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
 - **worktree**：除非用户明确要求，不使用 git worktree。
 
+## 工程原则（必须遵守）
+
+1. **永不允许 lint 错误**：只要发现 lint 问题（任何模块，含改动前已存在的历史遗留），就必须修复，不得以"改动前就有"为由跳过。提交前全模块 lint（主 go.mod + 每个子 go.mod）必须 0 issues。
+2. **cmd 避免复杂逻辑**：cobra 命令处理保持薄（flag 解析 + 调用 + IO 展示）。非命令行纯逻辑，若值得复用→抽独立 pkg；若不值得抽 pkg→放 cmd 内的 `internal/` 内部包，不留在 `package main`。
+3. **抽象先薄包装委托保障一致**：逻辑下沉 pkg 时，先让 cmd 用**薄包装委托**新抽象并通过全量测试验证功能一致性/可靠性；随后**最终直接用新抽象，不保留薄包装委托**（薄包装是过渡，不是最终形态）。
+4. **有价值测试场景在抽象中仍覆盖**：抽象后，原 cmd 测试中有价值的场景必须在抽象包里有等价测试（不能因"逻辑搬走了"而丢失覆盖）；抽象包测试是功能一致性的最终保障。
+
 ## 常用命令
 
 ```bash

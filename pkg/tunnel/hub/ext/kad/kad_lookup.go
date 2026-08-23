@@ -12,12 +12,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
 
-// lookupResult is the result of a single FindNode query.
-type lookupResult struct {
-	closest []hub.PeerInfo
-	err     error
-}
-
 // findNodeFunc is a function that queries a remote node for nodes closest to a target.
 type findNodeFunc func(ctx context.Context, target NodeID, remote hub.PeerInfo) ([]hub.PeerInfo, error)
 
