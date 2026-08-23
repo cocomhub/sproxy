@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,7 +44,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	expectedChecksum := r.Header.Get(headerFileChecksum)
 	if expectedChecksum == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgMissingChecksum}, http.StatusBadRequest)
-		logger.Warn("X-File-Checksum 为空", "file_name", remotePath)
+		logger.WarnContext(r.Context(), "X-File-Checksum 为空", "file_name", remotePath)
 		return
 	}
 
@@ -54,7 +55,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 			return
 		}
-		h.logger.Error("打开文件失败", "file_name", remotePath, "error", err.Error())
+		h.logger.ErrorContext(r.Context(), "打开文件失败", "file_name", remotePath, "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "打开文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -63,7 +64,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	info, err := file.Stat()
 	if err != nil {
 		file.Close()
-		h.logger.Error("stat 文件失败", "file_name", remotePath, "error", err.Error())
+		h.logger.ErrorContext(r.Context(), "stat 文件失败", "file_name", remotePath, "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "stat 失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -74,14 +75,14 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	_, _ = file.Seek(0, io.SeekStart)
 	if err != nil {
 		file.Close()
-		h.logger.Error("计算文件 checksum 失败", "file_name", remotePath, "error", err.Error())
+		h.logger.ErrorContext(r.Context(), "计算文件 checksum 失败", "file_name", remotePath, "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件校验失败"}, http.StatusInternalServerError)
 		return
 	}
 	if cs != expectedChecksum {
 		file.Close()
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件校验失败"}, http.StatusBadRequest)
-		logger.Warn("文件校验失败", "file_name", remotePath)
+		logger.WarnContext(r.Context(), "文件校验失败", "file_name", remotePath)
 		return
 	}
 
@@ -95,12 +96,12 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	if h.metrics != nil {
 		h.metrics.RecordDelete()
 	}
-	logger.Info("文件已删除", "file_name", remotePath)
+	logger.InfoContext(r.Context(), "文件已删除", "file_name", remotePath)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, http.StatusOK)
 }
 
 // processBatchDeleteItem 处理单条文件删除操作。
-func (h *Handlers) processBatchDeleteItem(f BatchDeleteFile, logger *slog.Logger) BatchOperationResult {
+func (h *Handlers) processBatchDeleteItem(ctx context.Context, f BatchDeleteFile, logger *slog.Logger) BatchOperationResult {
 	result := BatchOperationResult{Filename: f.Filename}
 	remotePath, filePath, ok := h.resolveAndValidateFile(f.Filename)
 	if !ok {
@@ -110,7 +111,7 @@ func (h *Handlers) processBatchDeleteItem(f BatchDeleteFile, logger *slog.Logger
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		result.Success = true
 		result.Message = "文件不存在（幂等删除）"
-		logger.Warn("批量删除：文件不存在（幂等删除）", "file_name", remotePath)
+		logger.WarnContext(ctx, "批量删除：文件不存在（幂等删除）", "file_name", remotePath)
 		return result
 	}
 	if f.Checksum == "" {
@@ -120,7 +121,7 @@ func (h *Handlers) processBatchDeleteItem(f BatchDeleteFile, logger *slog.Logger
 	// 校验 checksum，不匹配时拒绝删除
 	if !verifyFileWithChecksum(filePath, f.Checksum) {
 		result.Message = "文件校验失败"
-		logger.Warn("批量删除时 checksum 不匹配", "file_name", remotePath)
+		logger.WarnContext(ctx, "批量删除时 checksum 不匹配", "file_name", remotePath)
 		return result
 	}
 	if err := os.Remove(filePath); err != nil {
@@ -150,7 +151,7 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger.With("batch", "delete")
 	results := make([]BatchOperationResult, 0, len(req.Files))
 	for _, f := range req.Files {
-		results = append(results, h.processBatchDeleteItem(f, logger))
+		results = append(results, h.processBatchDeleteItem(r.Context(), f, logger))
 	}
 	sendJSONResponse(w, BatchResponse{Results: results}, http.StatusOK)
 }
