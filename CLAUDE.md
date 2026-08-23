@@ -409,6 +409,11 @@ sclient mesh status --gateway 127.0.0.1:18085   # 直连拓扑 / 链路类型
 > 说明：网关只复用**本地节点自己拨号建立的**链路（半拨号去重的拨号侧）。生产部署建议
 > 把访问点节点命名为全网最小 ID（低 ID 节点拨号所有远端服务节点），使访问点的网关持有
 > 到所有服务节点的已建链路；反向访问走常规拨号回落（不回归）。
+>
+> **网关安全边界**：网关仅监听 loopback（`--gateway-addr` 传非 loopback 地址会被
+> fail-closed 拒绝——远程访问应经 mesh 本身而非网关，防被用作开放 mesh 中继）；mesh
+> node 配置了 `auth_token` 时，网关对 connect/status 请求校验相同 token（mesh connect/
+> status 自动发送），未授权本地进程无法复用网关路由。
 
 ### sclient 当前目录（`cd`/`pwd`）
 

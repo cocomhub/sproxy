@@ -5,6 +5,7 @@ package mesh
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -38,6 +39,7 @@ const KindPeerLink = "peer-link"
 // 网关应答错误码（服务端与客户端共享，客户端据此区分 ErrNoPeerLink 与其他失败）。
 const (
 	gatewayErrBadRequest = "bad_request"
+	gatewayErrBadToken   = "bad_token"
 	gatewayErrNoPeerLink = "no_peer_link"
 	gatewayErrOpenStream = "open_stream"
 	gatewayErrDialFrame  = "dial_frame"
@@ -45,6 +47,10 @@ const (
 
 // gatewayRequest 是本地网关路由请求（[4B BE len][JSON] 帧，与拨号帧同款长度前缀）。
 type gatewayRequest struct {
+	// Token 是网关认证 token（mesh node 配置了信令 token 时必填，恒时比较；
+	// 未配置则不认证——仅 loopback 安全边界兜底）。mesh connect/status 发送与
+	// mesh node 相同的 auth_token（即信号 token），避免未授权进程滥用网关路由。
+	Token string `json:"token"`
 	// Peer 是目标 mesh node 的稳定 node-id（connect）。
 	Peer string `json:"peer"`
 	// Addr 是目标服务地址（connect；须等于对端宣告的服务地址，供出口拨号策略精确放行）。
@@ -84,31 +90,47 @@ type GatewayStatus struct {
 // Gateway 是 mesh node 本地网关：把对等直连链路（linkPool）暴露为 loopback 端口，
 // mesh connect --gateway 复用已建立链路路由到目标节点服务；同时提供拓扑状态查询。
 //
-// 安全边界：仅监听 loopback（NormalizeListenAddr 归一裸端口），数据面仍由对端
-// 出口拨号策略（NewServiceDialPolicy）把守——网关本身不做地址授权，只转发
-// 调用方请求的 (peer, addr) 到已建链路上的拨号帧。
+// 安全边界：
+//   - 仅监听 loopback（Serve 对非 loopback 地址 fail-closed 拒绝——远程访问应经 mesh
+//     本身而非网关，网关无 LAN 暴露的合法用例，防被用作开放 mesh 中继）。
+//   - 认证：mesh node 配置了信令 token（auth_token）时，网关对 connect/status 请求
+//     校验请求携带的 token（恒时比较）。mesh connect/status 发送与 mesh node 相同的
+//     auth_token，未授权进程无法复用网关路由。
+//   - 数据面仍由对端出口拨号策略（NewServiceDialPolicy）把守——网关本身不做地址
+//     授权，只转发调用方请求的 (peer, addr) 到已建链路上的拨号帧。
 type Gateway struct {
 	links    *linkPool
 	nodeID   string
 	services []hub.Service
+	token    string
 	logger   *slog.Logger
 }
 
-// newGateway 构造网关。cfg 提供 node-id 与服务宣告（状态查询）；links 是已建链路池。
+// newGateway 构造网关。cfg 提供 node-id 与服务宣告（状态查询）与认证 token
+// （cfg.SignalToken，空则不认证）；links 是已建链路池。
 func newGateway(links *linkPool, cfg NodeConfig, logger *slog.Logger) *Gateway {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Gateway{links: links, nodeID: cfg.NodeID, services: cfg.Services, logger: logger}
+	return &Gateway{links: links, nodeID: cfg.NodeID, services: cfg.Services, token: cfg.SignalToken, logger: logger}
 }
 
 // Serve 启动网关 accept 循环（独立 goroutine，ctx 取消关闭 listener）。返回实际监听
-// 地址（配置 addr 被占时回落 127.0.0.1:0 随机端口并 Warn，不终止 mesh node）。
+// 地址（默认端口被占时回落 127.0.0.1:0 随机端口并 Warn，不终止 mesh node）。
+// 非 loopback 监听地址 fail-closed 拒绝（安全边界，见 Gateway 文档）。
 func (g *Gateway) Serve(ctx context.Context, addr string) (string, error) {
 	if addr == "" {
 		addr = GatewayDefaultAddr
 	}
 	addr = iostream.NormalizeListenAddr(addr)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return "", fmt.Errorf("mesh 本地网关监听地址非法（应为 host:port）: %q", addr)
+	}
+	if !isLoopbackHost(host) {
+		// fail-closed：绝不在非 loopback 上开放未认证控制面（防被用作开放 mesh 中继）。
+		return "", fmt.Errorf("mesh 本地网关仅允许 loopback 监听（禁用非 loopback 地址 %q；远程访问请经 mesh 本身）", host)
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		g.logger.Warn("mesh 本地网关默认端口被占，回落随机端口", "addr", addr, "error", err)
@@ -151,6 +173,17 @@ func (g *Gateway) handleConn(ctx context.Context, c net.Conn) {
 	}
 	// 连接/泵送阶段取消 deadline（数据面由 Pump 的宽限期与底层链路生命周期约束）。
 	_ = c.SetDeadline(time.Time{})
+
+	// 认证（防御纵深）：mesh node 配置了信令 token 时，connect/status 请求必须携带
+	// 相同 token（恒时比较），未授权进程无法复用网关路由。token 为空则不认证（仅
+	// loopback 安全边界兜底，典型为未配置 auth_token 的开发环境）。
+	if g.token != "" {
+		if len(req.Token) != len(g.token) || subtle.ConstantTimeCompare([]byte(req.Token), []byte(g.token)) != 1 {
+			g.logger.Warn("mesh 本地网关拒绝未授权请求", "remote", c.RemoteAddr().String())
+			_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrBadToken, Message: "网关 token 校验失败（需与 mesh node 相同的 auth_token）"})
+			return
+		}
+	}
 
 	if req.Status {
 		g.writeStatus(c)
@@ -198,10 +231,12 @@ func (g *Gateway) toGatewayPeers(in []peerLinkInfo) []GatewayPeer {
 }
 
 // GatewayConnect 经本地 mesh node 网关复用已建立的直连链路路由到目标服务。
-// addr 是网关地址（127.0.0.1:port）；peer/targetAddr 是目标节点与宣告的服务地址。
+// addr 是网关地址（127.0.0.1:port）；peer/targetAddr 是目标节点与宣告的服务地址；
+// token 是网关认证 token（与 mesh node 相同的 auth_token；mesh node 未配置信令
+// token 时传空串）。
 // 返回的连接为原始数据流（网关已写拨号帧，对端 relay.Serve 已接上目标服务）。
 // 本地节点无到 peer 的已建链路时返回 ErrNoPeerLink（调用方回落常规拨号）。
-func GatewayConnect(ctx context.Context, addr, peer, targetAddr string) (net.Conn, error) {
+func GatewayConnect(ctx context.Context, addr, peer, targetAddr, token string) (net.Conn, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -213,7 +248,7 @@ func GatewayConnect(ctx context.Context, addr, peer, targetAddr string) (net.Con
 			_ = conn.Close()
 		}
 	}()
-	if err := writeGatewayFrame(conn, gatewayRequest{Peer: peer, Addr: targetAddr}); err != nil {
+	if err := writeGatewayFrame(conn, gatewayRequest{Token: token, Peer: peer, Addr: targetAddr}); err != nil {
 		return nil, fmt.Errorf("mesh 网关写入请求失败: %w", err)
 	}
 	var ack gatewayAck
@@ -235,14 +270,14 @@ func GatewayConnect(ctx context.Context, addr, peer, targetAddr string) (net.Con
 }
 
 // QueryGatewayStatus 查询本地 mesh node 网关的拓扑状态（node-id + 服务宣告 + 已建链路）。
-func QueryGatewayStatus(ctx context.Context, addr string) (*GatewayStatus, error) {
+func QueryGatewayStatus(ctx context.Context, addr, token string) (*GatewayStatus, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("mesh 网关连接失败: %w", err)
 	}
 	defer conn.Close()
-	if err := writeGatewayFrame(conn, gatewayRequest{Status: true}); err != nil {
+	if err := writeGatewayFrame(conn, gatewayRequest{Token: token, Status: true}); err != nil {
 		return nil, fmt.Errorf("mesh 网关写入状态请求失败: %w", err)
 	}
 	var st GatewayStatus
@@ -250,6 +285,16 @@ func QueryGatewayStatus(ctx context.Context, addr string) (*GatewayStatus, error
 		return nil, fmt.Errorf("mesh 网关读取状态失败: %w", err)
 	}
 	return &st, nil
+}
+
+// isLoopbackHost 报告 host 是否为回环地址（127.0.0.1 / ::1 / localhost）。
+// 网关 fail-closed 仅允许 loopback 监听，杜绝把未认证控制面暴露到 LAN/公网。
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // readGatewayFrame 读取一帧 [4B BE len][JSON]（长度有界，防止超大帧占用内存）。

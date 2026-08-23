@@ -31,10 +31,11 @@ type meshDialFunc func(ctx context.Context, svc *client.FileClient, signaler *hu
 
 // meshGatewayDial 构造带本地网关优先的选路 dial：先经本地 mesh node 网关复用已建
 // 直连链路（零重新打洞），本地节点无到目标的已建链路（ErrNoPeerLink）时回落常规
-// 拨号 mesh.Dial；其他网关错误（连接失败/协议错误）也回落并提示（不回归既有路径）。
-func meshGatewayDial(gatewayAddr string, ios cli.IOStreams) meshDialFunc {
+// 拨号 mesh.Dial；其他网关错误（连接失败/协议错误/token 校验失败）也回落并提示
+// （不回归既有路径）。gatewayToken 是网关认证 token（与 mesh node 相同的 auth_token）。
+func meshGatewayDial(gatewayAddr, gatewayToken string, ios cli.IOStreams) meshDialFunc {
 	return func(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*mesh.Result, error) {
-		if conn, gerr := mesh.GatewayConnect(ctx, gatewayAddr, target.Node, target.Addr); gerr == nil {
+		if conn, gerr := mesh.GatewayConnect(ctx, gatewayAddr, target.Node, target.Addr, gatewayToken); gerr == nil {
 			// 复用已建立直连链路：网关在已建链路上写拨号帧，对端 relay.Serve 出口拨号。
 			return &mesh.Result{Conn: conn, Kind: mesh.KindPeerLink}, nil
 		} else if errors.Is(gerr, mesh.ErrNoPeerLink) {
@@ -142,9 +143,10 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 
 			// --gateway：先经本地 mesh node 网关复用已建直连链路（零重新打洞），
 			// 本地节点无到目标的已建链路时回落常规拨号（不回归既有路径）。
+			// 网关认证 token 复用信令 token（auth_token），与 mesh node 网关一致。
 			dial := meshDialFunc(mesh.Dial)
 			if gatewayAddr != "" {
-				dial = meshGatewayDial(gatewayAddr, ios)
+				dial = meshGatewayDial(gatewayAddr, client.MeshSignalToken(token, svc.AuthToken()), ios)
 			}
 
 			if listenAddr != "" {
@@ -174,7 +176,12 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 		RunE: func(cmd *cobra.Command, args []string) error {
 			gatewayAddr, _ := cmd.Flags().GetString("gateway")
 			if gatewayAddr != "" {
-				st, err := mesh.QueryGatewayStatus(cmd.Context(), gatewayAddr)
+				// 网关认证：查询拓扑需与 mesh node 相同的 auth_token（经配置/--auth-token）。
+				svc, err := factory.NewClient(cmd)
+				if err != nil {
+					return err
+				}
+				st, err := mesh.QueryGatewayStatus(cmd.Context(), gatewayAddr, client.MeshSignalToken("", svc.AuthToken()))
 				if err != nil {
 					return err
 				}

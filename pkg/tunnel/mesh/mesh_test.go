@@ -697,7 +697,7 @@ func TestGateway_RoutesEstablishedLink(t *testing.T) {
 		t.Fatalf("gateway serve: %v", err)
 	}
 
-	conn, err := GatewayConnect(ctx, gatewayAddr, "peer", echoAddr)
+	conn, err := GatewayConnect(ctx, gatewayAddr, "peer", echoAddr, "")
 	if err != nil {
 		t.Fatalf("GatewayConnect: %v", err)
 	}
@@ -730,7 +730,7 @@ func TestGateway_NoPeerLink(t *testing.T) {
 		t.Fatalf("gateway serve: %v", err)
 	}
 
-	_, err = GatewayConnect(ctx, gatewayAddr, "missing-peer", "127.0.0.1:1")
+	_, err = GatewayConnect(ctx, gatewayAddr, "missing-peer", "127.0.0.1:1", "")
 	if !errors.Is(err, ErrNoPeerLink) {
 		t.Fatalf("期望 ErrNoPeerLink, got %v", err)
 	}
@@ -755,7 +755,7 @@ func TestGateway_Status(t *testing.T) {
 		t.Fatalf("gateway serve: %v", err)
 	}
 
-	st, err := QueryGatewayStatus(ctx, gatewayAddr)
+	st, err := QueryGatewayStatus(ctx, gatewayAddr, "")
 	if err != nil {
 		t.Fatalf("QueryGatewayStatus: %v", err)
 	}
@@ -844,7 +844,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	}
 
 	// 复用已建链路：node-ap 网关路由到 node-svc 的 echo。
-	conn, err := GatewayConnect(context.Background(), gatewayAddr, "node-svc", echoAddr)
+	conn, err := GatewayConnect(context.Background(), gatewayAddr, "node-svc", echoAddr, "signal-token")
 	if err != nil {
 		t.Fatalf("GatewayConnect 复用已建链路失败: %v", err)
 	}
@@ -862,5 +862,47 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	}
 	if string(got) != string(payload) {
 		t.Fatalf("echo 内容不匹配: got %q want %q", got, payload)
+	}
+}
+
+// TestGateway_RejectsWrongToken：mesh node 配置了信令 token 时，网关拒绝未携带
+// 正确 token 的请求（未授权进程无法复用网关路由）。
+func TestGateway_RejectsWrongToken(t *testing.T) {
+	links := newLinkPool()
+	gw := newGateway(links, NodeConfig{NodeID: "local-node", SignalToken: "secret-token"}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("gateway serve: %v", err)
+	}
+	// 错误 token → 拒绝。
+	_, err = GatewayConnect(ctx, gatewayAddr, "peer", "127.0.0.1:1", "wrong-token")
+	if err == nil || !strings.Contains(err.Error(), "token") {
+		t.Fatalf("期望网关拒绝错误 token, got %v", err)
+	}
+	// 空 token → 拒绝。
+	_, err = GatewayConnect(ctx, gatewayAddr, "peer", "127.0.0.1:1", "")
+	if err == nil {
+		t.Fatalf("期望网关拒绝空 token, got nil")
+	}
+}
+
+// TestGateway_RejectsNonLoopback：网关 fail-closed 拒绝非 loopback 监听地址
+// （杜绝把未认证控制面暴露到 LAN/公网，防被用作开放 mesh 中继）。
+func TestGateway_RejectsNonLoopback(t *testing.T) {
+	links := newLinkPool()
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// 通配地址（0.0.0.0）→ 拒绝。
+	_, err := gw.Serve(ctx, "0.0.0.0:0")
+	if err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("期望拒绝通配监听地址, got %v", err)
+	}
+	// 显式私网地址 → 拒绝。
+	_, err = gw.Serve(ctx, "192.168.1.5:0")
+	if err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("期望拒绝私网监听地址, got %v", err)
 	}
 }
