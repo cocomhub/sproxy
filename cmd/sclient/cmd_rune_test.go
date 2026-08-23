@@ -145,67 +145,7 @@ func TestMvCommand_ServerError(t *testing.T) {
 	_ = cmd.Execute()
 }
 
-// ---- Stat command RunE 测试 ----
-
-func TestStatCommand_HappyPath(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-File-Checksum", "abc123def456")
-		w.Header().Set("X-File-Size", "42")
-		w.Header().Set("X-File-IsDir", "false")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	var buf strings.Builder
-	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdStat(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, st)
-	cmd.SetArgs([]string{"test.txt"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("stat command failed: %v", err)
-	}
-	if !strings.Contains(buf.String(), "abc123def456") {
-		t.Errorf("expected checksum in output, got: %s", buf.String())
-	}
-}
-
-func TestStatCommand_NotFound(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdStat(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
-	cmd.SetArgs([]string{"test.txt"})
-	_ = cmd.Execute()
-}
-
-func TestStatCommand_Directory(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-File-Checksum", "")
-		w.Header().Set("X-File-Size", "0")
-		w.Header().Set("X-File-IsDir", "true")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	var buf strings.Builder
-	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdStat(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, st)
-	cmd.SetArgs([]string{"mydir"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("stat command failed: %v", err)
-	}
-	if !strings.Contains(buf.String(), "directory") {
-		t.Errorf("expected output to mention directory, got: %s", buf.String())
-	}
-}
+// ---- Stat command 文件元信息迁移至 meta（见 meta_test.go） ----
 
 // ---- Batch-delete command RunE 测试 ----
 

@@ -52,7 +52,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 		{"batch-delete", NewCmdBatchDelete(factory, ios, st)},
 		{"batch-rename", NewCmdBatchRename(factory, ios)},
 		{"mv", NewCmdMv(factory, ios, st)},
-		{"stat", NewCmdStat(factory, ios, st)},
+		{"stat", NewCmdStat(ios, &testConfigProvider{cfg: client.DefaultConfig()})},
 		{"genkey", NewCmdGenkey(ios)},
 		{"tunnel", NewCmdTunnel(factory, ios)},
 		{"cd", NewCmdCd(st, ios)},
@@ -260,18 +260,19 @@ func TestMvCmd(t *testing.T) {
 // ---- stat command ----
 
 func TestStatCmd(t *testing.T) {
-	factory := clientfactory.NewMock(nil, nil)
-	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdStat(factory, cli.IOStreams{Out: io.Discard}, st)
+	cmd := NewCmdStat(cli.IOStreams{Out: io.Discard}, &testConfigProvider{cfg: client.DefaultConfig()})
 
-	if cmd.Use != "stat <filename>" {
+	if cmd.Use != "stat [server]" {
 		t.Errorf("statCmd.Use = %q", cmd.Use)
 	}
-	if err := cmd.Args(cmd, []string{}); err == nil {
-		t.Error("stat should require exactly 1 arg")
+	if err := cmd.Args(cmd, []string{}); err != nil {
+		t.Errorf("stat with no args should be ok: %v", err)
 	}
-	if err := cmd.Args(cmd, []string{"f.txt"}); err != nil {
+	if err := cmd.Args(cmd, []string{"server"}); err != nil {
 		t.Errorf("stat with 1 arg should be ok: %v", err)
+	}
+	if err := cmd.Args(cmd, []string{"a", "b"}); err == nil {
+		t.Error("stat should reject 2 args")
 	}
 }
 

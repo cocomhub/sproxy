@@ -21,18 +21,6 @@ import (
 func TestConcurrentFileOperations(t *testing.T) {
 	t.Parallel()
 
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-File-Checksum", "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
-		w.Header().Set("X-File-Size", "42")
-		w.Header().Set("X-File-IsDir", "false")
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(mock.Close)
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	st := &state.State{CurrentDir: ""}
-
 	var wg sync.WaitGroup
 	// 使用 error 收集而非直接 t.Fatalf（goroutine 中 t.Fatal 不安全）
 	errCh := make(chan error, 10)
@@ -40,8 +28,9 @@ func TestConcurrentFileOperations(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			cmd := NewCmdStat(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
-			cmd.SetArgs([]string{"test.txt"})
+			cfgSvc := &testConfigProvider{cfg: client.DefaultConfig()}
+			cmd := NewCmdStat(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, cfgSvc)
+			cmd.SetArgs(nil)
 			if err := cmd.Execute(); err != nil {
 				errCh <- err
 			}
