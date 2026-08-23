@@ -4,10 +4,12 @@
 package mesh
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -242,4 +244,303 @@ func TestAutoRegister_ExactNode(t *testing.T) {
 	if rt.Has(hub.NodeID("node-b")) {
 		t.Fatal("closer 后 exact node-b 应被移除")
 	}
+}
+
+// runNodeTestHub 起 mock hub：/ws 注册 + HubServer + 可选信令桥，返回 server URL。
+func runNodeTestHub(t *testing.T, withSignaling bool) (*hub.RouteTable, *httptest.Server, context.CancelFunc) {
+	t.Helper()
+	rt := hub.NewRouteTable()
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator("relay-token"), nil)
+	muxHTTP := http.NewServeMux()
+	wsNode := ws.NewHandlerNode()
+	wsNode.AddToMux(muxHTTP, "/ws")
+	if withSignaling {
+		muxHTTP.Handle("/api/signal/", &miniSignalHub{})
+	}
+	ts := httptest.NewServer(muxHTTP)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			c, aerr := wsNode.Accept(ctx)
+			if aerr != nil {
+				return
+			}
+			go func(cc xfer.Conn) { _ = srv.HandleConn(ctx, cc) }(c)
+		}
+	}()
+	t.Cleanup(func() { cancel(); ts.Close() })
+	return rt, ts, cancel
+}
+
+// miniSignalHub 是最小信令桥：POST /api/signal/{kind} 存到收件箱，
+// GET /api/signal/poll/{peer} 返回该 peer 的消息并消费（非长轮询，客户端周期重 poll）。
+type miniSignalHub struct {
+	mu    sync.Mutex
+	inbox map[string][]map[string]any
+}
+
+func (h *miniSignalHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/api/signal/poll/"):
+		peer := strings.TrimPrefix(r.URL.Path, "/api/signal/poll/")
+		h.mu.Lock()
+		if h.inbox == nil {
+			h.inbox = map[string][]map[string]any{}
+		}
+		msgs := h.inbox[peer]
+		if msgs == nil {
+			msgs = []map[string]any{}
+		}
+		h.inbox[peer] = nil
+		h.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(msgs)
+	case strings.HasPrefix(r.URL.Path, "/api/signal/"):
+		var msg map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		to, _ := msg["to"].(string)
+		h.mu.Lock()
+		if h.inbox == nil {
+			h.inbox = map[string][]map[string]any{}
+		}
+		h.inbox[to] = append(h.inbox[to], msg)
+		h.mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// TestRunNode_RegistersServicesAndRelays：mesh node 单进程注册 + 服务宣告 +
+// 中继路径（hub 侧 mux Open 流写 dial 帧 → 出口拨号 echo）。EnableWebRTC=false。
+func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
+	// echo 后端（127.0.0.1 回环）。
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(cn, cn)
+			}(c)
+		}
+	}()
+	echoAddr := echoLn.Addr().String()
+
+	rt, ts, _ := runNodeTestHub(t, false)
+	nodeID := "mesh-node-relay"
+	nodeCtx, nodeCancel := context.WithCancel(context.Background())
+	defer nodeCancel()
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- RunNode(nodeCtx, NodeConfig{
+			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			NodeID: nodeID, Services: []hub.Service{{Name: "echo", Addr: echoAddr}},
+			ServiceAddrs: []string{echoAddr}, DialAllow: true, LocalAddr: "http://127.0.0.1:1",
+			EnableWebRTC: false,
+		})
+	}()
+
+	// 等注册 + 服务宣告。
+	deadline := time.Now().Add(5 * time.Second)
+	for rt.Lookup(hub.NodeID(nodeID)) == nil && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if rt.Lookup(hub.NodeID(nodeID)) == nil {
+		nodeCancel()
+		t.Fatal("mesh node 未注册")
+	}
+	svcs := rt.ServicesOf(hub.NodeID(nodeID))
+	if len(svcs) != 1 || svcs[0].Name != "echo" || svcs[0].Addr != echoAddr {
+		nodeCancel()
+		t.Fatalf("服务宣告不对: %+v", svcs)
+	}
+
+	// 中继路径：hub 侧 mux Open 流 + 写 dial 帧 → mesh node relay.Serve 出口拨 echo。
+	hubMux := rt.Lookup(hub.NodeID(nodeID))
+	stream, err := hubMux.Open(context.Background())
+	if err != nil {
+		nodeCancel()
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	head, _ := json.Marshal(hub.DialRequest{Dial: echoAddr})
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
+	if _, err := stream.Write(lenBuf); err != nil {
+		nodeCancel()
+		t.Fatal(err)
+	}
+	if _, err := stream.Write(head); err != nil {
+		nodeCancel()
+		t.Fatal(err)
+	}
+	if _, err := stream.Write([]byte("ping")); err != nil {
+		nodeCancel()
+		t.Fatal(err)
+	}
+
+	// 读回：先消费拨号结果帧，再读 echo 回显。
+	gotCh := make(chan string, 1)
+	go func() {
+		var all []byte
+		buf := make([]byte, 64)
+		for {
+			n, rerr := stream.Read(buf)
+			if n > 0 {
+				all = append(all, buf[:n]...)
+				if bytes.Contains(all, []byte("ping")) {
+					gotCh <- string(all)
+					return
+				}
+			}
+			if rerr != nil {
+				gotCh <- string(all)
+				return
+			}
+		}
+	}()
+	select {
+	case got := <-gotCh:
+		if !bytes.Contains([]byte(got), []byte("ping")) {
+			nodeCancel()
+			t.Fatalf("中继 echo 未回显: %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		nodeCancel()
+		t.Fatal("中继 echo 超时")
+	}
+
+	nodeCancel()
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("RunNode 应在 ctx 取消后返回 nil, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunNode 未在 ctx 取消后返回")
+	}
+}
+
+// TestRunNode_WebRTCDirect：mesh node webrtc 直连环接受拨号方打洞直连，
+// 直连数据面（dial 帧→出口拨号 echo）经 relay.Serve 分发。EnableWebRTC=true。
+func TestRunNode_WebRTCDirect(t *testing.T) {
+	webrtc.SetHostOnly(true)
+	t.Cleanup(func() { webrtc.SetHostOnly(false) })
+	webrtc.SetSignalingTimeout(60 * time.Second)
+	t.Cleanup(webrtc.ResetSignalingTimeout)
+
+	// echo 后端。
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(cn, cn)
+			}(c)
+		}
+	}()
+	echoAddr := echoLn.Addr().String()
+
+	rt, ts, _ := runNodeTestHub(t, true)
+	nodeID := "mesh-node-direct"
+	nodeCtx, nodeCancel := context.WithCancel(context.Background())
+	defer nodeCancel()
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- RunNode(nodeCtx, NodeConfig{
+			HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+			NodeID: nodeID, Services: []hub.Service{{Name: "echo", Addr: echoAddr}},
+			ServiceAddrs: []string{echoAddr}, DialAllow: true, LocalAddr: "http://127.0.0.1:1",
+			EnableWebRTC: true,
+		})
+	}()
+
+	// 等 mesh node 注册（webrtc 环依赖注册 + secret）。
+	deadline := time.Now().Add(5 * time.Second)
+	for rt.Lookup(hub.NodeID(nodeID)) == nil && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if rt.Lookup(hub.NodeID(nodeID)) == nil {
+		t.Fatal("mesh node 未注册")
+	}
+
+	// 拨号方：临时节点注册拿 signaler → webrtc 直连 nodeID → mux 流写 dial 帧 → echo。
+	dialer, err := AutoRegister(context.Background(), AutoRegisterParams{
+		HubURL: ts.URL, RelayToken: "relay-token", SignalToken: "signal-token",
+		NodeID: "dialer", Prefix: "p2p", ExactNode: false,
+	})
+	if err != nil {
+		t.Fatalf("拨号方注册失败: %v", err)
+	}
+	defer func() { _ = dialer.Closer() }()
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer dialCancel()
+	conn, err := webrtc.DialWithSignalerCtx(dialCtx, nodeID, dialer.Signaler)
+	if err != nil {
+		t.Fatalf("webrtc 直连失败: %v", err)
+	}
+	defer conn.Close()
+	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
+	defer m.Close()
+	stream, err := m.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if err := WriteDialFrame(stream, echoAddr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+
+	gotCh := make(chan string, 1)
+	go func() {
+		var all []byte
+		buf := make([]byte, 64)
+		for {
+			n, rerr := stream.Read(buf)
+			if n > 0 {
+				all = append(all, buf[:n]...)
+				if bytes.Contains(all, []byte("ping")) {
+					gotCh <- string(all)
+					return
+				}
+			}
+			if rerr != nil {
+				gotCh <- string(all)
+				return
+			}
+		}
+	}()
+	select {
+	case got := <-gotCh:
+		if !bytes.Contains([]byte(got), []byte("ping")) {
+			t.Fatalf("直连 echo 未回显: %q", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("直连 echo 超时")
+	}
+
+	_ = runErr
 }

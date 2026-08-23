@@ -25,7 +25,8 @@ import (
 type meshDialFunc func(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler, target *client.MeshService, localNode string) (*mesh.Result, error)
 
 // NewCmdMesh 创建 mesh 父命令：基于 hub 服务注册表的服务发现与连接。
-func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+// cfgSvc 为可选配置提供者（mesh node 常驻节点用；hub/token/node-id 配置回落）。
+func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mesh",
 		Short: "mesh 服务发现与连接（webrtc 直连优先，hub 中继回落）",
@@ -35,6 +36,7 @@ func NewCmdMesh(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command
 	}
 	cmd.AddCommand(newCmdMeshConnect(factory, ios))
 	cmd.AddCommand(newCmdMeshStatus(factory, ios))
+	cmd.AddCommand(newCmdMeshNode(ios, cfgSvc))
 	return cmd
 }
 
