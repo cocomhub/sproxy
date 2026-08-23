@@ -7,44 +7,51 @@ import (
 	"fmt"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
-	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/spf13/cobra"
 )
 
-// NewCmdStat 创建 stat 命令的工厂函数，使用 state.State 替代全局变量。
-func NewCmdStat(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
+// NewCmdStat 创建 stat 命令：无参显示本地 client 状态；server 显示远端服务状态。
+// 原 stat <file> 文件元信息功能迁移至 meta。
+func NewCmdStat(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "stat [server]",
+		Short: "显示本地 client 或远端服务状态",
+		Args:  cobra.MaximumNArgs(1),
+	}
+	cmd.AddCommand(NewCmdStatServer(nil, ios))
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		cfg, err := cfgSvc.LoadConfig()
+		if err != nil {
+			return err
+		}
+		ios.WriteOutLine("server_url: %s", cfg.ServerURL)
+		ios.WriteOutLine("version: %s (build: %s)", Version, BuildAt)
+		return nil
+	}
+	return cmd
+}
+
+// NewCmdStatServer 创建 stat server 命令：查询远端服务统计。
+func NewCmdStatServer(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	return &cobra.Command{
-		Use:   "stat <filename>",
-		Short: "查询远端文件元信息（不下载）",
-		Long: `通过 HEAD /api/files/stat 获取远端单个文件的元信息：
-		size、checksum、mod_time。不下载文件内容。
-
-		filename 受当前目录 (cd) 影响：相对路径自动拼接前缀，绝对路径 (/开头) 绕过。
-
-		示例:
-		  sclient stat README.md
-		  sclient stat sub/dir/file.txt`,
-		Args: cobra.ExactArgs(1),
+		Use:   "server",
+		Short: "显示远端服务状态",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
-			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
-				return fmt.Errorf(errFmtInitClient, err)
+			if factory == nil {
+				return fmt.Errorf("内部错误: factory 未初始化")
 			}
-
-			filename, err := st.ResolveRemotePathOrErr(args[0])
+			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				return err
 			}
-			info, err := svc.Stat(cmd.Context(), filename)
+			stats, err := svc.GetStats(cmd.Context())
 			if err != nil {
-				ios.WriteErrLine("获取文件信息失败: %v", err)
-				return fmt.Errorf("获取文件信息失败: %w", err)
+				return fmt.Errorf("获取服务器统计失败: %w", err)
 			}
-
 			fm := buildFormatterWithWriter(ios.Out, cmd)
-			fm.PrintStat(info, filename)
+			fm.PrintStats(stats)
 			return nil
 		},
 	}
