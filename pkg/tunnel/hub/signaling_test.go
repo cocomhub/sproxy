@@ -85,6 +85,42 @@ func TestSignalQueue_WaitSuccessCleansWaiter(t *testing.T) {
 	}
 }
 
+// TestSignalQueue_WaitTwoConcurrentWaiters_BothWake（P1-8 回归）：
+// 同一 peer 的两个并发 Wait 必须都被一次 Push 唤醒——旧实现用单 waiter 通道且
+// 唤醒即删 map 条目，第二个 waiter 被搁浅到 ctx 截止（最长 25s，可击穿 webrtc
+// 30s 信令预算导致拨号超时失败）。
+func TestSignalQueue_WaitTwoConcurrentWaiters_BothWake(t *testing.T) {
+	q := NewSignalQueue()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	wait1 := make(chan error, 1)
+	wait2 := make(chan error, 1)
+	go func() { wait1 <- q.Wait(ctx, "peer-a") }()
+	go func() { wait2 <- q.Wait(ctx, "peer-a") }()
+	time.Sleep(50 * time.Millisecond) // 两个 waiter 都注册
+
+	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "x", To: "peer-a", SDP: "s"})
+
+	// 两个 waiter 都必须被唤醒（旧实现第二个搁浅到 ctx 截止）。
+	select {
+	case err := <-wait1:
+		if err != nil {
+			t.Fatalf("wait1 error: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("wait1 未被唤醒")
+	}
+	select {
+	case err := <-wait2:
+		if err != nil {
+			t.Fatalf("wait2 error: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("wait2 未被唤醒（并发 waiter 搁浅 bug）")
+	}
+}
+
 func TestSignalQueue_WaitTimeout(t *testing.T) {
 	q := NewSignalQueue()
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)

@@ -99,12 +99,14 @@ func (c *wsConn) sendLoop() {
 	}
 }
 
-// failLoop 是 sendLoop 写失败后的统一退出路径：把错误回给所有排队中的 Flush，
-// 然后原子标记连接已关闭并广播 closeCh（仅首个完成者 close，幂等）。
-// 这样后续 Send/Flush 立即返回 ErrConnClosed，不再假成功或悬挂。
+// failLoop 是 sendLoop 写失败后的统一退出路径：先原子标记连接已关闭（P1-14：
+// 让 Send 入队后复检 closed 能立即拒绝新入队，不再有"failLoop 到 close(closeCh)
+// 之间假成功"的窗口），再把错误回给所有排队中的 Flush，最后广播 closeCh（仅
+// 首个完成者 close，幂等）。这样后续 Send/Flush 立即返回错误，不再假成功或悬挂。
 func (c *wsConn) failLoop(err error) {
+	first := c.markClosed()
 	c.failPendingFlushes(err)
-	if c.markClosed() {
+	if first {
 		close(c.closeCh)
 	}
 }
@@ -156,6 +158,17 @@ func (c *wsConn) Send(ctx context.Context, msg []byte) error {
 	// 第二步：阻塞发送到 channel，同时监听 closeCh 和 ctx.Done()。
 	select {
 	case c.sendCh <- cp:
+		// P1-14：入队后复检 closed——sendLoop 写失败后 failLoop 会先置 closed 再
+		// close(closeCh)，若入队与置位并发（前置 closeCh 检查尚未命中），消息将留在
+		// sendCh 永不写出。复检保证连接已失效时 Send 返回错误而非假成功（"Send 返回
+		// nil = 已接受"契约不被静默破坏）。注：入队后、写失败前就返回 nil 的消息属
+		// 在途丢失（连接失败固有语义），不在本复检范围内。
+		c.mu.Lock()
+		closed := c.closed
+		c.mu.Unlock()
+		if closed {
+			return xfer.ErrConnClosed
+		}
 		return nil
 	case <-c.closeCh:
 		return xfer.ErrConnClosed

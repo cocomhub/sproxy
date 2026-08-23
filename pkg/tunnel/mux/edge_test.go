@@ -217,6 +217,48 @@ func TestStream_Abort_ConcurrentWithPushData(t *testing.T) {
 	}
 }
 
+// TestStream_ReadDataBeforeImmediateClose（P1-6 回归）：
+// 对端写数据后立即关闭时，读取方必须拿到已投递的数据而非关闭错误——readLoop
+// 先 pushData 再 closeChannels，done 与 dataCh 同时就绪时 Go select 随机选取，
+// 无修复前 ~50% 概率丢弃数据帧（I27 拨号结果帧读取在叶子"接受后立即关"场景的
+// 可靠性）。循环多轮加大命中并发窗口的概率。
+func TestStream_ReadDataBeforeImmediateClose(t *testing.T) {
+	for i := range 20 {
+		dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+		stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
+		defer stream.Close()
+		defer accepted.Close()
+
+		// 先让读取方进入阻塞 Read（命中 inner select 的 done/dataCh 并发窗口）。
+		type readRes struct {
+			n   int
+			err error
+		}
+		readCh := make(chan readRes, 1)
+		go func() {
+			buf := make([]byte, 4)
+			n, err := stream.Read(buf)
+			readCh <- readRes{n, err}
+		}()
+		time.Sleep(5 * time.Millisecond) // 给 Read 启动时间（即使未及时启动，数据也不会丢失，仅少命中竞态）
+
+		// 对端写数据后立即关闭：数据帧与关闭帧几乎同时到达读取方。
+		if _, err := accepted.Write([]byte("data")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_ = accepted.Close()
+
+		select {
+		case r := <-readCh:
+			if r.err != nil || r.n != 4 {
+				t.Fatalf("iter %d: Read 应返回 4 字节数据，got n=%d err=%v", i, r.n, r.err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("iter %d: Read 未返回（挂起）", i)
+		}
+	}
+}
+
 // TestHandleFrame_CloseWriteUnknownStream 测试 handleFrame 中 FrameCloseWrite 对未知流的处理
 func TestHandleFrame_CloseWriteUnknownStream(t *testing.T) {
 	a, b := xfertest.Pipe()

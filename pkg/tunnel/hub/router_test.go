@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/pkg/testutil/mockxfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
@@ -35,6 +37,38 @@ func pipeXfer() (dial func(ctx context.Context) (xfer.Conn, error), serverConn f
 	}
 	cleanup = func() {}
 	return dial, serverConn, cleanup
+}
+
+// TestHubServer_RegisterReadFailure_SilentNoRegErr（P1-7 回归）：
+// 未读到注册帧（超时/WS 网络错误）时 hub 不得回发 REG_ERR——否则客户端
+// isTerminalRelayError 把纯网络抖动判为终态，relay 守护进程永久退出。
+func TestHubServer_RegisterReadFailure_SilentNoRegErr(t *testing.T) {
+	rt := NewRouteTable()
+	srv := NewHubServer(rt, NewAuthenticator("relay-token"), testutil.DiscardLogger())
+
+	conn := &mockxfer.MockConn{
+		ReceiveFn: func(context.Context) ([]byte, error) {
+			return nil, errors.New("ws read timeout")
+		},
+	}
+	var mu sync.Mutex
+	var sent []string
+	conn.SendFn = func(_ context.Context, msg []byte) error {
+		mu.Lock()
+		sent = append(sent, string(msg))
+		mu.Unlock()
+		return nil
+	}
+
+	_ = srv.HandleConn(context.Background(), conn)
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, m := range sent {
+		if strings.HasPrefix(m, RegisterAckErr) {
+			t.Fatalf("未读到注册帧不应回 REG_ERR（会被客户端误判终态），got %q", m)
+		}
+	}
 }
 
 func TestHubServerRegisterAndRemove(t *testing.T) {

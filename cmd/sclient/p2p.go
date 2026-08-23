@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -301,6 +302,15 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 					// manual 模式单次连接，失败直接返回（文件已消费，重试无意义）
 					if manual {
 						return fmt.Errorf("p2p 打洞失败: %w", err)
+					}
+					if errors.Is(err, webrtc.ErrNoIncomingConnection) {
+						// P1-11：空闲超时（signalingTimeout 内无对端发起连接）——不是失败。
+						// 旧实现把 30s 空闲当失败，无条件重注册 + per-node secret 轮换，
+						// hub 每次替换都关旧 WS，注册连接持续抖动。空闲时保持注册、重置
+						// 退避、继续监听；仅真实失败（如信令 400/403，节点被 hub 移除）才
+						// 走下方重注册自愈。
+						delay = reconnectBaseDelay
+						continue
 					}
 					ios.WriteErrLine("p2p 监听失败，%v 后重试: %v", delay, err)
 					// B17：节点可能已被 hub 移除（注册 WS 断 / 心跳超时），per-node secret 已

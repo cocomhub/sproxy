@@ -455,7 +455,7 @@ func TestMeshTargetRefresher_InvalidateRefetch(t *testing.T) {
 	if _, err := r.resolve(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	r.invalidate()
+	r.invalidate("node-a")
 	if _, err := r.resolve(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -464,6 +464,43 @@ func TestMeshTargetRefresher_InvalidateRefetch(t *testing.T) {
 	}
 	if got := hits.Load(); got != 2 {
 		t.Fatalf("hits = %d, want 2 (invalidate forces refetch, then cache hit)", got)
+	}
+}
+
+// TestMeshTargetRefresher_FailoverSkipsDeadNode（P1-13 回归）：
+// 同名服务多候选时，拨号失败节点被 invalidate 记录后，下一次 resolve 应优先选择
+// 其他健康候选——旧实现恒取 node-ID 字典序首个，死节点永久遮蔽健康副本。
+func TestMeshTargetRefresher_FailoverSkipsDeadNode(t *testing.T) {
+	// 多候选：node-a（字典序首，模拟死节点）与 node-b（健康）。
+	ts := httptest.NewServer(servicesHandler(&atomic.Int32{}, func() string {
+		return `[{"name":"svc","node":"node-a","addr":"10.0.0.1:22"},{"name":"svc","node":"node-b","addr":"10.0.0.2:22"}]`
+	}))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	r := newMeshTargetRefresher(svc, "svc")
+	r.ttl = time.Hour
+	_, r.now = fixedClock()
+
+	// 首次 resolve：node-a（字典序首）。
+	t1, err := r.resolve(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if t1.Node != "node-a" {
+		t.Fatalf("首次 resolve 应取 node-a，got %q", t1.Node)
+	}
+
+	// node-a 拨号失败 → invalidate(node-a)。
+	r.invalidate(t1.Node)
+
+	// 下一次 resolve 应跳过 node-a 选 node-b（P1-13 核心断言）。
+	t2, err := r.resolve(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if t2.Node != "node-b" {
+		t.Fatalf("invalidate(node-a) 后应跳过死节点选 node-b，got %q", t2.Node)
 	}
 }
 
@@ -575,7 +612,7 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 	mu.Lock()
 	svcList = `[]`
 	mu.Unlock()
-	r.invalidate()
+	r.invalidate("node-a")
 
 	c2, err := dialForward()
 	if err != nil {

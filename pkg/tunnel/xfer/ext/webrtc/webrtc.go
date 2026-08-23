@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -602,6 +603,11 @@ func DialWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Conn,
 // 等待发给本节点的 Offer，Answer 回给 offer 的发送方。
 // 整体等待受 signalingTimeout 约束，避免无拨号方时永久挂起。
 // 该便捷包装使用 context.Background()；需要外部 ctx 取消请用 ListenWithSignalerCtx。
+// ErrNoIncomingConnection 表示信令/数据通道等待超时（signalingTimeout 或
+// defaultICETimeout 内无对端发起连接）。
+// 监听方可将此视为"空闲"而非"失败：不应触发重注册/退避重连，只需继续监听（P1-11）。
+var ErrNoIncomingConnection = errors.New("webrtc: 无对端在超时窗口内发起连接")
+
 func ListenWithSignaler(peer string, sig Signaler) (*Conn, error) {
 	return ListenWithSignalerCtx(context.Background(), peer, sig)
 }
@@ -629,6 +635,11 @@ func ListenWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Con
 	offerFrom, oJSON, err := sig.WaitOffer(waitCtx)
 	if err != nil {
 		pc.Close()
+		if errors.Is(err, context.DeadlineExceeded) {
+			// P1-11：signalingTimeout 内无 offer → 空闲而非失败（哨兵供监听方区分，
+			// 不触发重注册/退避重连）。
+			return nil, fmt.Errorf("listen: wait offer: %w", ErrNoIncomingConnection)
+		}
 		return nil, fmt.Errorf("listen: wait offer: %w", err)
 	}
 	var offer webrtc.SessionDescription
@@ -675,7 +686,8 @@ func ListenWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Con
 		return nil, ctx.Err()
 	case <-time.After(defaultICETimeout):
 		pc.Close()
-		return nil, fmt.Errorf("listen: dc not received within %v %s", defaultICETimeout, diag.diagnose(!useHostOnly && len(stunServers) > 0))
+		// P1-11：与 wait offer 同语义——无对端连接属空闲而非失败（哨兵供监听方区分）。
+		return nil, fmt.Errorf("listen: dc not received within %v %s: %w", defaultICETimeout, diag.diagnose(!useHostOnly && len(stunServers) > 0), ErrNoIncomingConnection)
 	}
 
 	// Wait for the DataChannel to open and then detach it.
