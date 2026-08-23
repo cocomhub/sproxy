@@ -6,6 +6,7 @@ require (
 	github.com/adrg/xdg v0.5.3
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.0.0
+	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.0.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260728025421-d6b205ef75ab
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0-20260728025421-d6b205ef75ab
 	github.com/spf13/cobra v1.10.2
@@ -55,5 +56,7 @@ require (
 replace github.com/cocomhub/sproxy => ../../
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc => ../../pkg/tunnel/xfer/ext/webrtc
+
+replace github.com/cocomhub/sproxy/pkg/tunnel/mesh => ../../pkg/tunnel/mesh
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ../../pkg/tunnel/xfer/ext/ws

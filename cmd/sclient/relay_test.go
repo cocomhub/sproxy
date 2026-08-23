@@ -167,12 +167,12 @@ func TestIsTerminalRelayError(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"hub 明确拒绝 invalid token（REG_ERR 帧）", fmt.Errorf("%w: invalid token", errRelayRegistrationRejected), true},
-		{"hub 明确拒绝 bad register frame", fmt.Errorf("%w: bad register frame", errRelayRegistrationRejected), true},
-		{"未知注册响应", fmt.Errorf("%w: 收到未知注册响应 %q", errRelayRegistrationRejected, "???"), true},
+		{"hub 明确拒绝 invalid token（REG_ERR 帧）", fmt.Errorf("%w: invalid token", hub.ErrRegisterRejected), true},
+		{"hub 明确拒绝 bad register frame", fmt.Errorf("%w: bad register frame", hub.ErrRegisterRejected), true},
+		{"未知注册响应", fmt.Errorf("%w: 收到未知注册响应 %q", hub.ErrRegisterRejected, "???"), true},
 		// I43 契约回归锁：外层 %w 包装后 errors.Is 仍必须命中终态判定，
 		// 防止未来文案改写/包装导致无效 token 退化为无限重连。
-		{"多层 %w 包装后 errors.Is 仍命中", fmt.Errorf("relay: %w", fmt.Errorf("%w: invalid token", errRelayRegistrationRejected)), true},
+		{"多层 %w 包装后 errors.Is 仍命中", fmt.Errorf("relay: %w", fmt.Errorf("%w: invalid token", hub.ErrRegisterRejected)), true},
 		// 网络波动：不得判为终态
 		{"等待 ACK 超时（EOF）", fmt.Errorf("等待注册 ACK 失败: %w", io.EOF), false},
 		{"连接断开 EOF", io.EOF, false},

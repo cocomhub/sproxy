@@ -23,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
@@ -184,8 +185,10 @@ func TestDefaultMeshDial_FallsBackToRelay(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error: webrtc 打洞失败且中继失败应报错")
 	}
-	// 错误应来自中继（webrtc 已回落），而非 webrtc 本身
-	if !strings.Contains(err.Error(), "502") && !strings.Contains(err.Error(), "hub") {
+	// 错误应来自中继（webrtc 已回落），而非 webrtc 本身。用 "RelayStream" 前缀判定
+	// （svc.RelayStream 的错误均以该前缀包装）：502 / 连接重置 / 超时等任何 relay
+	// 错误都满足；仅当错误来自 webrtc（含 "webrtc"/"打洞"）时才不通过。
+	if !strings.Contains(err.Error(), "RelayStream") {
 		t.Fatalf("expected relay fallback error, got: %v", err)
 	}
 }
@@ -251,7 +254,7 @@ func TestMeshWebRTCStream_WritesDialFrameOnMuxStream(t *testing.T) {
 	if res.kind != "webrtc" {
 		t.Fatalf("kind = %q, want webrtc", res.kind)
 	}
-	if _, ok := res.conn.(*muxStreamConn); !ok {
+	if _, ok := res.conn.(*mesh.MuxStreamConn); !ok {
 		t.Fatalf("webrtc 路径应返回 muxStreamConn（net.Conn 适配），got %T", res.conn)
 	}
 
@@ -279,9 +282,9 @@ func servicesHandler(hits *atomic.Int32, get func() string) http.HandlerFunc {
 	}
 }
 
-func fixedClock() (time.Time, func() time.Time) {
+func fixedClock() func() time.Time {
 	t := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
-	return t, func() time.Time { return t }
+	return func() time.Time { return t }
 }
 
 // TestMeshTargetRefresher_FreshHitAndConcurrentCache 验证：首次 resolve 打一次 HTTP；
@@ -295,10 +298,10 @@ func TestMeshTargetRefresher_FreshHitAndConcurrentCache(t *testing.T) {
 
 	svc := client.NewFileClient(ts.URL)
 	r := newMeshTargetRefresher(svc, "svc")
-	r.ttl = time.Hour
-	_, r.now = fixedClock()
+	r.SetTTL(time.Hour)
+	r.SetClock(fixedClock())
 
-	target, err := r.resolve(context.Background())
+	target, err := r.Resolve(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +316,7 @@ func TestMeshTargetRefresher_FreshHitAndConcurrentCache(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = r.resolve(context.Background())
+			_, errs[i] = r.Resolve(context.Background())
 		}(i)
 	}
 	wg.Wait()
@@ -345,13 +348,13 @@ func TestMeshTargetRefresher_SingleFlightDuringRefresh(t *testing.T) {
 
 	svc := client.NewFileClient(ts.URL)
 	r := newMeshTargetRefresher(svc, "svc")
-	r.ttl = time.Hour
-	_, r.now = fixedClock()
+	r.SetTTL(time.Hour)
+	r.SetClock(fixedClock())
 
 	// 第一个 resolve 承担刷新（阻塞在 handler）
 	firstDone := make(chan error, 1)
 	go func() {
-		_, err := r.resolve(context.Background())
+		_, err := r.Resolve(context.Background())
 		firstDone <- err
 	}()
 
@@ -372,7 +375,7 @@ func TestMeshTargetRefresher_SingleFlightDuringRefresh(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = r.resolve(context.Background())
+			_, errs[i] = r.Resolve(context.Background())
 		}(i)
 	}
 	// 给等待者一点时间进入 resolve（命中与否均不影响断言，仅提高单飞分支覆盖）
@@ -407,11 +410,11 @@ func TestMeshTargetRefresher_TTLExpiry(t *testing.T) {
 
 	svc := client.NewFileClient(ts.URL)
 	r := newMeshTargetRefresher(svc, "svc")
-	r.ttl = 3 * time.Second
+	r.SetTTL(3 * time.Second)
 	cur := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
-	r.now = func() time.Time { return cur }
+	r.SetClock(func() time.Time { return cur })
 
-	if _, err := r.resolve(context.Background()); err != nil {
+	if _, err := r.Resolve(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	// 推进时钟超过 TTL，且服务列表改为空 → resolve 重新拉取并报不可用
@@ -419,7 +422,7 @@ func TestMeshTargetRefresher_TTLExpiry(t *testing.T) {
 	mu.Lock()
 	svcList = `[]`
 	mu.Unlock()
-	if _, err := r.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "不可用") {
+	if _, err := r.Resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "不可用") {
 		t.Fatalf("expected unavailable after TTL expiry, got: %v", err)
 	}
 }
@@ -432,7 +435,7 @@ func TestMeshTargetRefresher_ServiceAbsent(t *testing.T) {
 
 	svc := client.NewFileClient(ts.URL)
 	r := newMeshTargetRefresher(svc, "missing")
-	if _, err := r.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "不可用") {
+	if _, err := r.Resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "不可用") {
 		t.Fatalf("expected unavailable, got: %v", err)
 	}
 }
@@ -446,7 +449,7 @@ func TestMeshTargetRefresher_FetchError(t *testing.T) {
 
 	svc := client.NewFileClient(ts.URL)
 	r := newMeshTargetRefresher(svc, "svc")
-	if _, err := r.resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "查询 mesh 服务失败") {
+	if _, err := r.Resolve(context.Background()); err == nil || !strings.Contains(err.Error(), "查询 mesh 服务失败") {
 		t.Fatalf("expected fetch error, got: %v", err)
 	}
 }
@@ -461,17 +464,17 @@ func TestMeshTargetRefresher_InvalidateRefetch(t *testing.T) {
 
 	svc := client.NewFileClient(ts.URL)
 	r := newMeshTargetRefresher(svc, "svc")
-	r.ttl = time.Hour
-	_, r.now = fixedClock()
+	r.SetTTL(time.Hour)
+	r.SetClock(fixedClock())
 
-	if _, err := r.resolve(context.Background()); err != nil {
+	if _, err := r.Resolve(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	r.invalidate("node-a")
-	if _, err := r.resolve(context.Background()); err != nil {
+	r.Invalidate("node-a")
+	if _, err := r.Resolve(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.resolve(context.Background()); err != nil {
+	if _, err := r.Resolve(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := hits.Load(); got != 2 {
@@ -491,11 +494,11 @@ func TestMeshTargetRefresher_FailoverSkipsDeadNode(t *testing.T) {
 
 	svc := client.NewFileClient(ts.URL)
 	r := newMeshTargetRefresher(svc, "svc")
-	r.ttl = time.Hour
-	_, r.now = fixedClock()
+	r.SetTTL(time.Hour)
+	r.SetClock(fixedClock())
 
 	// 首次 resolve：node-a（字典序首）。
-	t1, err := r.resolve(context.Background())
+	t1, err := r.Resolve(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,10 +507,10 @@ func TestMeshTargetRefresher_FailoverSkipsDeadNode(t *testing.T) {
 	}
 
 	// node-a 拨号失败 → invalidate(node-a)。
-	r.invalidate(t1.Node)
+	r.Invalidate(t1.Node)
 
 	// 下一次 resolve 应跳过 node-a 选 node-b（P1-13 核心断言）。
-	t2, err := r.resolve(context.Background())
+	t2, err := r.Resolve(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,8 +554,8 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 
 	svc := client.NewFileClient(ts.URL)
 	r := newMeshTargetRefresher(svc, "svc")
-	r.ttl = time.Hour
-	_, r.now = fixedClock()
+	r.SetTTL(time.Hour)
+	r.SetClock(fixedClock())
 
 	// 注入 dial：记录收到的 target，返回错误触发 invalidate 路径（避免 pump 阻塞）
 	targets := make(chan *client.MeshService, 4)
@@ -564,7 +567,7 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 	errBuf := &lockedBuffer{}
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: errBuf}
 
-	initial, err := r.resolve(context.Background())
+	initial, err := r.Resolve(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,7 +627,7 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 	mu.Lock()
 	svcList = `[]`
 	mu.Unlock()
-	r.invalidate("node-a")
+	r.Invalidate("node-a")
 
 	c2, err := dialForward()
 	if err != nil {

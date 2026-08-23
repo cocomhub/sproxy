@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/spf13/cobra"
 )
 
@@ -376,7 +377,7 @@ func TestPumpConns_HalfCloseKeepsInFlightResponse(t *testing.T) {
 	pumpDone := make(chan struct{})
 	go func() {
 		defer close(pumpDone)
-		pumpConns(a, b, pumpGracePeriod)
+		iostream.Pump(a, b, iostream.PumpGrace)
 	}()
 
 	// mock 远端：读到 "ping" 后回 "pong" 并半关闭（保留读方向，bPeer 仍可写）。
