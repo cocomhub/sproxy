@@ -417,7 +417,7 @@ func buildP2PServeOpts(services, dialAllowCIDRs []string, ios cli.IOStreams) []r
 // p2pForward 在已建立的 p2p mux 上做本地端口转发。
 func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr string, ios cli.IOStreams) error {
 	// 裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 + Windows
-	// 防火墙弹窗），与 mesh connect / relay dial 对齐（S56）；显式 0.0.0.0:port /
+	// 防火墙弹窗），与 mesh connect / relay dial 对齐（S56）；显式通配地址:port /
 	// 具体 IP 保持原样。
 	listenAddr = iostream.NormalizeListenAddr(listenAddr)
 	ln, err := net.Listen("tcp", listenAddr)

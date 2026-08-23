@@ -101,7 +101,7 @@ func relayDialOnce(cmd *cobra.Command, svc relayDialClient, node, tcpAddr string
 // relayDialListen 本地端口转发模式。
 func relayDialListen(cmd *cobra.Command, svc relayDialClient, node, tcpAddr, listenAddr string, ios cli.IOStreams) error {
 	// 裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 +
-	// Windows Defender 防火墙弹窗）；需 LAN 访问时显式 0.0.0.0:port / 具体 IP
+	// Windows Defender 防火墙弹窗）；需 LAN 访问时显式通配地址:port 或具体 IP
 	// （S56 同款 normalizeListenAddr）。
 	listenAddr = iostream.NormalizeListenAddr(listenAddr)
 	ln, err := net.Listen("tcp", listenAddr)
