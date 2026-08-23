@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/adrg/xdg v0.5.3
-	github.com/cocomhub/buildinfo v0.0.0
+	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.0.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260728025421-d6b205ef75ab
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0-20260728025421-d6b205ef75ab
