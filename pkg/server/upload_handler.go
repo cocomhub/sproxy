@@ -31,14 +31,14 @@ var hashPool = sync.Pool{
 func (h *Handlers) parseUploadMultipart(w http.ResponseWriter, r *http.Request, logger *slog.Logger) (file multipart.File, handler *multipart.FileHeader, expectedChecksum string, ok bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, size.UploadBodyLimit)
 	if err := r.ParseMultipartForm(size.MultipartBufSize); err != nil {
-		logger.Warn("解析 multipart 失败", "error", err.Error())
+		logger.WarnContext(r.Context(), "解析 multipart 失败", "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体过大或解析失败"}, http.StatusRequestEntityTooLarge)
 		return nil, nil, "", false
 	}
 
 	file, handler, err := r.FormFile("file")
 	if err != nil {
-		logger.Error("读取文件失败", "error", err.Error())
+		logger.ErrorContext(r.Context(), "读取文件失败", "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "读取文件失败"}, http.StatusBadRequest)
 		return nil, nil, "", false
 	}
@@ -46,7 +46,7 @@ func (h *Handlers) parseUploadMultipart(w http.ResponseWriter, r *http.Request, 
 	expectedChecksum = r.Header.Get(headerFileChecksum)
 	if expectedChecksum == "" {
 		file.Close()
-		logger.Warn("缺少 X-File-Checksum 请求头")
+		logger.WarnContext(r.Context(), "缺少 X-File-Checksum 请求头")
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgMissingChecksum}, http.StatusBadRequest)
 		return nil, nil, "", false
 	}
@@ -64,7 +64,7 @@ func (h *Handlers) setUploadResponseHeaders(w http.ResponseWriter, r *http.Reque
 		if err == nil && mtimeInt > 0 {
 			modTime := time.Unix(0, mtimeInt)
 			if err := os.Chtimes(filePath, modTime, modTime); err != nil {
-				logger.Warn("设置文件时间戳失败", "file_name", remotePath, "error", err)
+				logger.WarnContext(r.Context(), "设置文件时间戳失败", "file_name", remotePath, "error", err)
 			}
 		}
 	}
@@ -88,31 +88,31 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	logger.Debug("上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
+	logger.DebugContext(r.Context(), "上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
 
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-		logger.Error("创建目录失败", "error", err.Error())
+		logger.ErrorContext(r.Context(), "创建目录失败", "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
 		return
 	}
 
 	// 并发上传防护：防止同一文件被多个上传请求同时写入导致 OOM
 	if _, loaded := h.uploadingFiles.LoadOrStore(remotePath, "upload"); loaded {
-		logger.Warn("文件正在上传中，拒绝并发上传", "file_name", remotePath)
+		logger.WarnContext(r.Context(), "文件正在上传中，拒绝并发上传", "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在上传中"}, http.StatusConflict)
 		return
 	}
 	defer h.uploadingFiles.Delete(remotePath)
 
 	// 重复检测与版本管理
-	if h.handleDuplicateFile(w, filePath, expectedChecksum, remotePath) {
+	if h.handleDuplicateFile(w, r.Context(), filePath, expectedChecksum, remotePath) {
 		return
 	}
 
 	// 原子写入 + 流式哈希
 	serverChecksum, _, err := writeFileAtomically(r.Context(), filePath, file)
 	if err != nil {
-		logger.Error("保存文件失败", "error", err.Error(), "file_name", remotePath)
+		logger.ErrorContext(r.Context(), "保存文件失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
 		return
 	}
@@ -120,7 +120,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	if serverChecksum != expectedChecksum {
 		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomically 清理）
 		_ = os.Remove(filePath)
-		logger.Warn("文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "file_name", remotePath)
+		logger.WarnContext(r.Context(), "文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件 SHA-256 校验失败"}, http.StatusBadRequest)
 		return
 	}
@@ -203,7 +203,7 @@ func (h *Handlers) resolveFilePathHTTP(w http.ResponseWriter, filename string) (
 
 // handleDuplicateFile 检查文件是否存在，处理重复上传和版本管理逻辑。
 // 返回 true 表示已处理（调用方应 return）。
-func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, filePath, expectedChecksum, remotePath string) bool {
+func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, ctx context.Context, filePath, expectedChecksum, remotePath string) bool {
 	stat, statErr := os.Stat(filePath)
 	if statErr != nil {
 		return false // 文件不存在，继续正常上传
@@ -221,7 +221,7 @@ func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, filePath, expected
 		return false // 继续执行写入流程，用新内容覆盖现有文件
 	}
 	// checksum 不匹配：冲突，需保留现有文件
-	h.logger.Warn("文件已存在，但校验失败", "file_name", remotePath)
+	h.logger.WarnContext(ctx, "文件已存在，但校验失败", "file_name", remotePath)
 	// 附带服务端文件的实际 checksum，方便客户端决策
 	if serverCS, csErr := FileChecksum(filePath); csErr == nil {
 		sendJSONResponse(w, UploadResponse{
