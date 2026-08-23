@@ -389,6 +389,16 @@ sclient relay dial --node local --tcp 127.0.0.1:2090 \
 
 环境变量前缀 `SCLIENT_`（如 `SCLIENT_SERVER_URL`）。
 
+**多环境**：`SCLIENT_ENV=prod` 时默认加载 `sclient.prod.yaml`（同一目录下），便于维护
+prod/staging/dev 多套配置。**通用 mesh 配置键**（`sclient config set` 支持）：
+- `hub_url` — mesh/relay/p2p 共用 hub 地址（http(s)/ws(s)，可带 /ws 路径）
+- `relay_token` — hub 中继注册 token（与 relay start --token / hub.relay_token 一致）
+- `node_id` — 本节点默认 ID（为空回落主机名）
+
+mesh connect / relay start / p2p 的 `--hub`/`--token`/`--relay-token`/`--node-id` 未显式
+指定时按 `CLI flag > 配置文件 > 默认值` 回落（relay start 的 `--hub` 默认值已改为空，
+本地默认 `ws://127.0.0.1:18084/ws` 在 runRelayStart 内解析）。
+
 ## 多层级目录支持
 
 - 所有 handler 使用 `ValidateFilePath`（`pkg/server/validate.go`）校验用户路径
