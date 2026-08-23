@@ -335,7 +335,10 @@ func pump(s mux.Stream, remote net.Conn, grace time.Duration) {
 		case <-timeoutCh:
 			// 非合作对端：强制关闭两端，解除 remote.Read / s.Read 阻塞。
 			_ = remote.Close()
-			_ = s.Close()
+			// P0-3：必须用 Abort() 而非 Close()——Close 经 writeCh 发 FrameClose，
+			// writeCh 打满（对端停读导致流控窗口耗尽）时永久阻塞，本宽限期收尾路径
+			// 直接挂死并泄漏 goroutine/stream/FD（stream.go Abort 文档点名该场景）。
+			_ = s.Abort()
 			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
 				<-done
 				remaining--

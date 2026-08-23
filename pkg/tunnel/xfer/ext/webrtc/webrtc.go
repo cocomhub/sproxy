@@ -703,28 +703,43 @@ func ListenWithSignalerCtx(ctx context.Context, peer string, sig Signaler) (*Con
 // xfer.Conn / xfer.Transport adapter
 // ---------------------------------------------------------------------------
 
+// connReadWriter 抽象底层连接，便于注入测试桩（阻塞写等）。*Conn 满足该接口。
+type connReadWriter interface {
+	Read(p []byte) (int, error)
+	Write(p []byte) (int, error)
+	Close() error
+}
+
 // webrtcXferConn wraps *Conn to implement xfer.Conn.
 //
 // 消息分帧：DataChannel 是字节流（无消息边界），xfer.Conn 要求消息保序成块。
 // 这里仿照 tcp 传输，用 [4B big-endian length][payload] 帧界定消息，
 // 使 mux 的最大帧（8B 头 + 65535 负载）能完整传输，不被 Read 截断。
 type webrtcXferConn struct {
-	raw    *Conn
-	mu     sync.Mutex // 串行化 Send（保护 raw.Write 不被并发交错）
-	closed bool
+	raw connReadWriter
+	// mu 串行化 Send 的 raw.Write（DataChannel 写不保证并发安全）。
+	// 注意：对端存活但不消费时（SCTP 流控窗口归零）raw.Write 可能长时间阻塞，
+	// 因此 mu 不能被 Close 持有——否则 Close 等不到锁、raw.Close() 永不执行、
+	// 阻塞中的 Write 永不解除，Send 与 Close 互相等待构成永久死锁（P0-2）。
+	mu sync.Mutex
+	// closeMu 保护 closed 标志（与 mu 独立）：Close 只短暂抢 closeMu 置位 closed，
+	// 随后不经 mu 直接 raw.Close() 解除阻塞中的 Send。
+	closeMu sync.Mutex
+	closed  bool
 }
 
 func (c *webrtcXferConn) Send(ctx context.Context, msg []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.closeMu.Lock()
+	if c.closed {
+		c.closeMu.Unlock()
+		return xfer.ErrConnClosed
+	}
+	c.closeMu.Unlock()
 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
-	}
-	if c.closed {
-		return xfer.ErrConnClosed
 	}
 	// 单条消息上限防御：uint32(len(msg)) 在 len(msg) 超 4GiB 时溢出，且对端
 	// maxFrameBytes 缓冲放不下。mux 帧本身封顶 64KiB，此处为传输层防御缺口补漏。
@@ -734,7 +749,11 @@ func (c *webrtcXferConn) Send(ctx context.Context, msg []byte) error {
 	frame := make([]byte, 4+len(msg))
 	binary.BigEndian.PutUint32(frame[:4], uint32(len(msg)))
 	copy(frame[4:], msg)
+	c.mu.Lock()
+	// P0-2：此处 raw.Write 可能无限期阻塞（对端存活但不消费）；Close 不经 mu
+	// 直接 raw.Close() 解除阻塞，Write 返回错误后 Send 释放 mu 正常退出。
 	_, err := c.raw.Write(frame)
+	c.mu.Unlock()
 	return err
 }
 
@@ -765,12 +784,15 @@ func (c *webrtcXferConn) Receive(ctx context.Context) ([]byte, error) {
 }
 
 func (c *webrtcXferConn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.closeMu.Lock()
 	if c.closed {
+		c.closeMu.Unlock()
 		return nil
 	}
 	c.closed = true
+	c.closeMu.Unlock()
+	// 不经 c.mu（P0-2）：并发 Send 可能正阻塞在 raw.Write（对端不消费），
+	// 若等 c.mu 会死锁。raw.Close() 使阻塞中的 Write 立即返回错误。
 	return c.raw.Close()
 }
 

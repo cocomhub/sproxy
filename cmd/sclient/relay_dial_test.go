@@ -125,11 +125,34 @@ func TestRelayDialOnce_RemoteDisconnect_Returns(t *testing.T) {
 }
 
 // TestRelayDialOnce_EchoStdinEOF_WaitsForRemoteResponse 验证 `echo x | relay dial`
-// 语义：本地 stdin EOF 后必须等待远端把剩余响应写完再返回，不得截断在途数据。
+// 语义：本地 stdin EOF 后必须向对端传播半关闭（FIN）并等待远端把剩余响应写完
+// 再返回，不得截断在途数据。
+//
+// 用 TCP 回环对而非 net.Pipe：*net.PipeConn 无 CloseWrite，closeWriteConn 会退化
+// Close 整条连接，与远端写响应构成竞态（P0-5 修复后测试不确定）。TCPConn 支持
+// CloseWrite（半关闭），才能确定性地验证「stdin EOF → FIN → 远端感知写完 →
+// 响应写回不截断」的完整语义。
 func TestRelayDialOnce_EchoStdinEOF_WaitsForRemoteResponse(t *testing.T) {
-	server, client := net.Pipe()
-	defer server.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	serverCh := make(chan net.Conn, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		serverCh <- c
+	}()
+	client, derr := net.Dial("tcp", ln.Addr().String())
+	if derr != nil {
+		t.Fatal(derr)
+	}
 	defer client.Close()
+	server := <-serverCh
+	defer server.Close()
 
 	pr, pw := io.Pipe()
 	defer pw.Close()
@@ -146,22 +169,23 @@ func TestRelayDialOnce_EchoStdinEOF_WaitsForRemoteResponse(t *testing.T) {
 		done <- relayDialOnce(cmd, mock, "node", "127.0.0.1:22", ios)
 	}()
 
-	// 读走 client→server 方向写入的输入，使 io.Copy(conn, ios.In) 能完成写入
-	//（net.Pipe 同步写，无读者会阻塞）并在 stdin EOF 后关闭 inDone。
+	// 读走 client→server 方向的输入；随后再次读，等待 stdin EOF 传播的 FIN
+	//（半关闭后 server.Read 返回 io.EOF）——确认 P0-5 的 closeWriteConn 已生效。
 	serverRead := make(chan struct{})
 	go func() {
 		defer close(serverRead)
 		buf := make([]byte, 64)
-		_, _ = server.Read(buf)
+		_, _ = server.Read(buf) // "ping\n"
+		_, _ = server.Read(buf) // FIN → io.EOF
 	}()
 
 	// stdin EOF：写入一行输入后关闭读端。
 	_, _ = pw.Write([]byte("ping\n"))
 	_ = pw.Close()
-	<-serverRead // g1 已把输入写完，inDone 即将关闭
+	<-serverRead // 输入写完且 FIN 已传播（半关闭生效）
 
 	// 远端随后写响应再关闭：relayDialOnce 必须等响应写完才返回（echo 语义），
-	// 若在 stdin EOF 时立即关闭连接则会截断 "pong\n"。
+	// 若在 stdin EOF 时 Close 整条连接（而非 CloseWrite）则会截断 "pong\n"。
 	_ = server.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_, _ = server.Write([]byte("pong\n"))
 	_ = server.Close()

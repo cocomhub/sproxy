@@ -6,6 +6,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +23,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
@@ -175,24 +178,81 @@ func TestDefaultMeshDial_FallsBackToRelay(t *testing.T) {
 	}
 }
 
-// TestMeshRelayPath_NoDialFrame 回归测试：relay 中继路径不得写 dial 帧。
-// 实测发现的 bug：mesh connect 曾对 RelayStream 返回的流额外写 [4B len][{"dial":...}]
-// 帧，导致数据流被污染（echo 返回帧头而非业务数据）。
-// 修复后通过 meshDialFrameNeeded 精准判定：仅 webrtc 写帧，relay 不写。
-func TestMeshDialFrameNeeded(t *testing.T) {
-	tests := []struct {
-		kind string
-		want bool
-	}{
-		{"webrtc", true}, // 打洞直连对端，需写帧告知出口拨目标
-		{"relay", false}, // hub 的 RelayStreamHandler 已写帧，客户端不得再写（实测 bug）
-		{"", false},
-		{"unknown", false},
-	}
-	for _, tc := range tests {
-		if got := meshDialFrameNeeded(tc.kind); got != tc.want {
-			t.Fatalf("meshDialFrameNeeded(%q) = %v, want %v", tc.kind, got, tc.want)
+// TestMeshWebRTCStream_WritesDialFrameOnMuxStream 回归测试（P0-1）：
+// mesh webrtc 直连路径必须在 mux 流上写拨号帧，而不是把帧以裸字节写在
+// DataChannel 上。
+//
+// 曾实测发现的 bug：defaultMeshDial 返回裸 *webrtc.Conn，meshForwardListen 直接把
+// [4B len][{"dial":addr}] 以两次独立 Write（两条 SCTP 消息）写在 DataChannel 上；
+// 对端 p2p listen 用 mux.New(webrtc.ConnAsXfer) 按帧消费 → frame length mismatch →
+// 拆会话，直连数据面 100% 失败（且拨号"已成功"不回落中继，纯坏路径）。
+// 本测试用进程内 webrtc 对复现对端消费方式，断言 meshWebRTCStream 返回的流上
+// 对端能读到正确拨号帧。
+func TestMeshWebRTCStream_WritesDialFrameOnMuxStream(t *testing.T) {
+	webrtc.SetHostOnly(true)
+	t.Cleanup(func() { webrtc.SetHostOnly(false) })
+
+	signal := webrtc.NewSignal()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// 对端：p2p listen 等价物——mux RoleListener 消费帧，从流读拨号帧。
+	frameCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := webrtc.Listen(signal)
+		if err != nil {
+			errCh <- err
+			return
 		}
+		m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleListener)
+		defer m.Close()
+		stream, err := m.Accept(ctx)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer stream.Close()
+		lenBuf := make([]byte, 4)
+		if _, err := io.ReadFull(stream, lenBuf); err != nil {
+			errCh <- err
+			return
+		}
+		meta := make([]byte, binary.BigEndian.Uint32(lenBuf))
+		if _, err := io.ReadFull(stream, meta); err != nil {
+			errCh <- err
+			return
+		}
+		frameCh <- string(meta)
+	}()
+
+	// 本侧：mesh connect 等价物——meshWebRTCStream 开 mux 流并写拨号帧。
+	conn, err := webrtc.Dial(signal)
+	if err != nil {
+		t.Fatalf("dial webrtc: %v", err)
+	}
+	defer conn.Close()
+	res, err := meshWebRTCStream(ctx, conn, "127.0.0.1:22")
+	if err != nil {
+		t.Fatalf("meshWebRTCStream: %v", err)
+	}
+	if res.kind != "webrtc" {
+		t.Fatalf("kind = %q, want webrtc", res.kind)
+	}
+	if _, ok := res.conn.(*muxStreamConn); !ok {
+		t.Fatalf("webrtc 路径应返回 muxStreamConn（net.Conn 适配），got %T", res.conn)
+	}
+
+	select {
+	case f := <-frameCh:
+		var d hub.DialRequest
+		if err := json.Unmarshal([]byte(f), &d); err != nil || d.Dial != "127.0.0.1:22" {
+			t.Fatalf("对端收到的拨号帧 = %q, want {\"dial\":\"127.0.0.1:22\"}", f)
+		}
+	case err := <-errCh:
+		t.Fatalf("对端读取拨号帧失败: %v", err)
+	case <-ctx.Done():
+		t.Fatal("等待对端读取拨号帧超时")
 	}
 }
 
