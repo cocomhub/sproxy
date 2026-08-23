@@ -25,6 +25,12 @@ import (
 // 叶子崩溃/旧叶子不回帧时，超时后回 504。
 const relayStreamDialResultTimeout = 12 * time.Second
 
+// relayStreamGrace 是中继流泵送一方向完成后的半关闭宽限期（P0-4）。
+// 与叶子/客户端 pump 的 pumpGracePeriod（60s）对齐：宽限期内另一方向应完成
+// 半关闭收尾（在途响应读回）；超时视为对端非合作，强制关闭释放，防
+// goroutine/FD 泄漏。
+const relayStreamGrace = 60 * time.Second
+
 // maxDialResultFrameBytes 是拨号结果帧（[4B len][JSON]）的 JSON 部分长度上限。
 const maxDialResultFrameBytes = 4096
 
@@ -252,15 +258,47 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 	go func() {
 		_, _ = io.Copy(conn, stream)
+		// 半关闭客户端写侧（TCP FIN），使客户端感知远端 EOF。conn 为 Hijack 后的
+		// 原始连接（*net.TCPConn），支持 CloseWrite；其他类型退化 Close。
+		if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		} else {
+			_ = conn.Close()
+		}
 		done <- struct{}{}
 	}()
 
-	// 等待一个方向完成；随后关闭另一方向（半关闭传播由叶子负责）。
-	// 关键：同时用 Abort() 非阻塞关闭流，解除 io.Copy(conn, stream) 对 stream 的
-	// 阻塞——否则 writeCh 打满时 Close() 会永久阻塞、另一侧 io.Copy goroutine 泄漏
-	// （I28）。对齐 meshForwardListen「关闭两端皆非阻塞」范本。
-	<-done
-	_ = conn.Close()
-	_ = stream.Abort()
-	<-done
+	// 半关闭宽限期（P0-4，对齐 leaf.go pump 的 C1 范本）：任一方向完成后，
+	// 给另一方向 relayStreamGrace 时间完成半关闭收尾——让在途响应仍可被读回
+	// （write-then-read 流不截断）。超时视为对端非合作，强制关闭释放。
+	// 注意收尾路径统一用非阻塞 Abort()（writeCh 打满时阻塞版 Close 会永久挂起，
+	// I28），conn.Close() 亦非阻塞。
+	remaining := 2
+	var timeoutCh <-chan time.Time
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for remaining > 0 {
+		select {
+		case <-done:
+			remaining--
+			if remaining == 1 {
+				// 一个方向完成：武装宽限期等待另一半完成半关闭收尾。
+				timer = time.NewTimer(relayStreamGrace)
+				timeoutCh = timer.C
+			}
+		case <-timeoutCh:
+			// 非合作对端：强制关闭两端，解除 io.Copy 对 conn/stream 的阻塞。
+			_ = conn.Close()
+			_ = stream.Abort()
+			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
+				<-done
+				remaining--
+			}
+			return
+		}
+	}
 }

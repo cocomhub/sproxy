@@ -8,12 +8,80 @@ package webrtc
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
+
+// TestWebrtcXferConn_CloseUnblocksBlockedSend（P0-2 回归）：
+// Send 持 mu 阻塞在 raw.Write（对端存活但不消费，SCTP 流控窗口归零）时，
+// Close 必须不经 mu 直接 raw.Close() 解除阻塞——否则 Close 等不到 mu、
+// 阻塞中的 Write 永不解除，Send 与 Close 互相等待构成永久死锁。
+func TestWebrtcXferConn_CloseUnblocksBlockedSend(t *testing.T) {
+	raw := &blockingRaw{writeCh: make(chan struct{}), closeCh: make(chan struct{})}
+	c := &webrtcXferConn{raw: raw}
+
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- c.Send(context.Background(), []byte("hello"))
+	}()
+
+	// 等 Send 进入阻塞的 raw.Write（确定性时序：Close 必在 Write 阻塞后才开始）。
+	select {
+	case <-raw.writeCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Send 未进入 raw.Write")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- c.Close()
+	}()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close 死锁：无法解除阻塞中的 Send")
+	}
+
+	select {
+	case err := <-sendDone:
+		if err == nil {
+			t.Fatal("Send 应在 Close 后返回错误")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Send 未在 Close 后返回")
+	}
+
+	// 幂等：二次 Close 立即返回。
+	if err := c.Close(); err != nil {
+		t.Fatalf("二次 Close: %v", err)
+	}
+}
+
+// blockingRaw 是阻塞写的底层连接桩：Write 阻塞直到 Close 关闭 closeCh。
+type blockingRaw struct {
+	writeCh chan struct{} // Write 被调用时关闭（标记已进入阻塞）
+	closeCh chan struct{} // Close 时关闭，解除 Write
+	once    sync.Once
+}
+
+func (r *blockingRaw) Read(_ []byte) (int, error) { return 0, io.EOF }
+func (r *blockingRaw) Write(p []byte) (int, error) {
+	close(r.writeCh)
+	<-r.closeCh
+	return 0, io.ErrClosedPipe
+}
+func (r *blockingRaw) Close() error {
+	r.once.Do(func() { close(r.closeCh) })
+	return nil
+}
 
 // TestWebrtcRoundTrip verifies bidirectional message exchange.
 func TestWebrtcRoundTrip(t *testing.T) {

@@ -157,6 +157,115 @@ func TestRelayStream_EndToEnd_Echo(t *testing.T) {
 	_ = leafErr
 }
 
+// TestRelayStream_ClientHalfClose_KeepsInFlightResponse（P0-4 回归）：
+// 客户端发送请求后半关闭写侧（TCP FIN），叶子在收到完整输入后延迟返回响应——
+// hub 泵送必须传播半关闭并等待宽限期内的在途响应，而不是在任一方完成后立即
+// conn.Close()+stream.Abort()（旧实现确定性截断 write-then-read 流）。
+func TestRelayStream_ClientHalfClose_KeepsInFlightResponse(t *testing.T) {
+	// 延迟响应 server：读完整输入（含 EOF）后等 300ms 再回写响应（模拟慢后端；
+	// 若 hub 零宽限截断，客户端将读不到该响应）。
+	backLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backLn.Close()
+	go func() {
+		for {
+			c, aerr := backLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.ReadAll(cn) // 读请求直到 EOF（叶子半关闭传播）
+				time.Sleep(300 * time.Millisecond)
+				_, _ = cn.Write([]byte("delayed-response"))
+			}(c)
+		}
+	}()
+	backAddr := backLn.Addr().String()
+
+	// 建立 leaf mux（RoleListener）与 caller mux（RoleDialer）
+	pipeA, pipeB := xfertest.Pipe()
+	callerMux := mux.New(pipeA, mux.RoleDialer)
+	leafMux := mux.New(pipeB, mux.RoleListener)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	leafErr := make(chan error, 1)
+	go func() {
+		leafErr <- relay.Serve(ctx, leafMux, "http://127.0.0.1:1", true, &http.Client{Timeout: 5 * time.Second}, testutil.DiscardLogger(),
+			relay.ServeOptions{DialPolicy: func(addr string) (string, bool) { return addr, true }, DialResultFrames: true})
+	}()
+
+	rt := hub.NewRouteTable()
+	rt.Add("leaf-node", callerMux)
+	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: backAddr})
+	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", addr, len(body))
+	if _, werr := io.WriteString(conn, reqLine); werr != nil {
+		t.Fatal(werr)
+	}
+	if _, werr := conn.Write(body); werr != nil {
+		t.Fatal(werr)
+	}
+
+	br := bufio.NewReader(conn)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(statusLine, " 200 ") {
+		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
+		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
+	}
+	for {
+		line, rerr := br.ReadString('\n')
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	// 发送请求后立即半关闭写侧（模拟 stdin EOF → FIN）。
+	if _, err := conn.Write([]byte("request")); err != nil {
+		t.Fatalf("写请求失败: %v", err)
+	}
+	if tc, ok := conn.(*net.TCPConn); ok {
+		if err := tc.CloseWrite(); err != nil {
+			t.Fatalf("半关闭写侧失败: %v", err)
+		}
+	} else {
+		t.Fatalf("conn 类型 %T 不支持 CloseWrite", conn)
+	}
+
+	// 关键断言：在途响应必须被完整读回（旧实现会因 hub 立即 conn.Close()+Abort() 而截断）。
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len("delayed-response"))
+	if _, rerr := io.ReadFull(conn, got); rerr != nil {
+		t.Fatalf("读在途响应失败（可能被 hub 零宽限截断）: %v", rerr)
+	}
+	if string(got) != "delayed-response" {
+		t.Fatalf("响应不匹配: got %q want %q", got, "delayed-response")
+	}
+	cancel()
+	_ = leafErr
+}
+
 // TestRelayStreamDialRequest_Framing 验证 dial 帧格式与 hub.DialRequest 一致。
 func TestRelayStreamDialRequest_Framing(t *testing.T) {
 	d := hub.DialRequest{Dial: "127.0.0.1:22"}

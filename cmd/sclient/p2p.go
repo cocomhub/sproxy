@@ -457,11 +457,17 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 	// 但 stdin 未 EOF 时永久挂起（对齐 meshStdioOnce 的 I38 修复范本）。
 	inDone := make(chan struct{})
 	outDone := make(chan struct{})
-	go func() { defer close(inDone); _, _ = io.Copy(stream, ios.In) }()
+	go func() {
+		defer close(inDone)
+		_, _ = io.Copy(stream, ios.In)
+		// P0-5：stdin EOF 后传播半关闭（流 EOF），否则对端永远等不到"输入写完"，
+		// <outDone 永久挂起（与 meshStdioOnce / relayDialOnce 同款修复）。
+		closeWriteConn(stream)
+	}()
 	go func() { defer close(outDone); _, _ = io.Copy(ios.Out, stream) }()
 	select {
 	case <-outDone: // 对端断开：会话结束
-	case <-inDone: // 本地 stdin 读完：等对端把剩余数据写完
+	case <-inDone: // 本地 stdin 读完：半关闭已传播，等对端把剩余数据写完
 		<-outDone
 	}
 	return nil
@@ -518,7 +524,9 @@ func pump(local net.Conn, s mux.Stream) {
 		case <-timeoutCh:
 			// 非合作对端：强制关闭两端，解除 local.Read / s.Read 阻塞。
 			_ = local.Close()
-			_ = s.Close()
+			// P0-3：必须用 Abort() 而非 Close()——Close 经 writeCh 发 FrameClose，
+			// writeCh 打满时永久阻塞，本宽限期收尾路径直接挂死并泄漏 goroutine/stream/FD。
+			_ = s.Abort()
 			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
 				<-done
 				remaining--
@@ -578,11 +586,13 @@ func pumpConns(a, b net.Conn, grace time.Duration) {
 	}
 }
 
-// closeWriteConn 向 conn 传播写半关闭（TCP FIN / 流 EOF），尽力而为：
-// 实现了 CloseWrite() 的连接（*net.TCPConn、client.bufferedNetConn 等）用
-// CloseWrite；其余（如 WebRTC 包装 conn）不支持半关闭则用 Close 退化，仍能
+// closeWriteConn 向目标传播写半关闭（TCP FIN / 流 EOF），尽力而为：
+// 实现了 CloseWrite() 的类型（*net.TCPConn、client.bufferedNetConn、mux.Stream 等）
+// 用 CloseWrite；其余（如 WebRTC 包装 conn）不支持半关闭则用 Close 退化，仍能
 // 解除对端 Read 阻塞。
-func closeWriteConn(conn net.Conn) {
+// 参数用 io.Closer 而非 net.Conn：mesh/relay dial 传 net.Conn，p2p stdio 传
+// mux.Stream（两者都实现 io.Closer）。
+func closeWriteConn(conn io.Closer) {
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
 		return

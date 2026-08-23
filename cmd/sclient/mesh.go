@@ -50,7 +50,14 @@ func defaultMeshDial(ctx context.Context, svc *client.FileClient, signaler *hub.
 		}
 		conn, err := webrtc.DialWithSignalerCtx(ctx, target.Node, signaler)
 		if err == nil {
-			return &meshDialResult{conn: conn, kind: "webrtc"}, nil
+			res, serr := meshWebRTCStream(ctx, conn, target.Addr)
+			if serr != nil {
+				// 直连已建立但 mux 流打开/拨号帧写入失败：关闭直连，回落中继。
+				_ = conn.Close()
+				slog.Debug("webrtc 直连 mux 流建立失败，回落 hub 中继", "error", serr, "target_node", target.Node)
+			} else {
+				return res, nil
+			}
 		}
 		if ctx.Err() != nil {
 			// ctx 取消（用户中断/命令超时）：不再尝试中继，直接返回。
@@ -65,6 +72,52 @@ func defaultMeshDial(ctx context.Context, svc *client.FileClient, signaler *hub.
 	}
 	return &meshDialResult{conn: conn, kind: "relay"}, nil
 }
+
+// meshWebRTCStream 在已建立的 WebRTC 直连上打开 mux 流并写好拨号帧（P0-1 修复）。
+//
+// 协议对齐 p2p connect（p2p.go:197）：数据面必须经 mux 分帧。mesh connect 曾把
+// [4B len][{"dial":addr}] 拨号帧以裸字节写在 DataChannel 上，而对端 p2p listen
+// 用 mux.New(webrtc.ConnAsXfer) 按帧消费——帧协议载体错位，直连数据面 100% 失败
+// （对端 readLoop 报 frame length mismatch 后拆会话，且因拨号"已成功"不回落
+// 中继，纯坏路径）。这里与 p2p 一致：先 mux.New 包装，再在流上写拨号帧，
+// 对端 relay.Serve 经流读到后出站拨号。
+func meshWebRTCStream(ctx context.Context, conn *webrtc.Conn, addr string) (*meshDialResult, error) {
+	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
+	stream, err := m.Open(ctx)
+	if err != nil {
+		_ = m.Close()
+		return nil, fmt.Errorf("打开 webrtc mux 流失败: %w", err)
+	}
+	if err := writeDialFrame(stream, addr); err != nil {
+		_ = m.Close()
+		return nil, fmt.Errorf("写 webrtc 拨号帧失败: %w", err)
+	}
+	return &meshDialResult{conn: &muxStreamConn{stream: stream, mux: m}, kind: "webrtc"}, nil
+}
+
+// muxStreamConn 把 mux.Stream 适配为 net.Conn（mesh webrtc 直连数据面）。
+// Close 关闭整个 mux（连带关闭流与底层 WebRTC 连接）；CloseWrite 向对端传播
+// 半关闭（流 EOF），供 pump 的 C1 半关闭收尾路径使用。
+type muxStreamConn struct {
+	stream mux.Stream
+	mux    *mux.Mux
+}
+
+func (c *muxStreamConn) Read(p []byte) (int, error)  { return c.stream.Read(p) }
+func (c *muxStreamConn) Write(p []byte) (int, error) { return c.stream.Write(p) }
+func (c *muxStreamConn) Close() error                { return c.mux.Close() }
+func (c *muxStreamConn) CloseWrite() error           { return c.stream.CloseWrite() }
+
+type muxStreamAddr struct{}
+
+func (muxStreamAddr) Network() string { return "mux" }
+func (muxStreamAddr) String() string  { return "mux" }
+
+func (c *muxStreamConn) LocalAddr() net.Addr                { return muxStreamAddr{} }
+func (c *muxStreamConn) RemoteAddr() net.Addr               { return muxStreamAddr{} }
+func (c *muxStreamConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *muxStreamConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *muxStreamConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 const (
 	// meshTargetTTL 是 mesh 服务解析缓存的新鲜窗口。过期后下一次 resolve 触发
@@ -353,16 +406,11 @@ func meshForwardListen(cmd *cobra.Command, svc *client.FileClient, signaler *hub
 			}
 			conn := res.conn
 			defer conn.Close()
-			// 路径语义：
+			// 拨号帧已由 dial 内部写好（P0-1）：
 			//   - relay：hub 的 RelayStreamHandler 已写好 dial 帧（叶子拨目标），
 			//     客户端直接透传字节，不得再写帧；
-			//   - webrtc：打洞直连对端，需要手动写 dial 帧让对端出口拨目标。
-			if meshDialFrameNeeded(res.kind) {
-				if werr := meshRelayDial(conn, target.Addr); werr != nil {
-					ios.WriteErrLine("写 webrtc dial 帧失败: %v", werr)
-					return
-				}
-			}
+			//   - webrtc：meshWebRTCStream 已在 mux 流上写好 dial 帧，此处同样透传。
+			// 客户端不再按路径手动写帧——曾把帧以裸字节写 DataChannel 导致直连 100% 失败。
 			ios.WriteOutLine("连接已建立（%s）: %s ⇄ %s", res.kind, target.Node, target.Addr)
 			// 双向泵送（CloseWrite 半关闭 + grace 宽限期，C1 范本）：任一方向完成
 			//（如 relay 端拒绝拨号后关流 → conn EOF）即向对端传播半关闭（TCP FIN /
@@ -386,12 +434,8 @@ func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler *hub.Hub
 	}
 	conn := res.conn
 	defer conn.Close()
-	// 同 meshForwardListen：webrtc 直连需写 dial 帧；relay 中继 handler 已写。
-	if meshDialFrameNeeded(res.kind) {
-		if err := meshRelayDial(conn, target.Addr); err != nil {
-			return err
-		}
-	}
+	// 拨号帧已由 dial 内部写好（P0-1，同 meshForwardListen）：relay 由 hub 写，
+	// webrtc 由 meshWebRTCStream 在 mux 流上写，客户端均直接透传。
 	ios.WriteOutLine("已连接（%s）: stdin/stdout ⇄ %s (Ctrl+D / EOF 断开)", res.kind, target.Name)
 	// 方向区分通道（I38）：对端断开（outDone）→ 会话结束立即返回，不再挂起；
 	// 本地 stdin 读完（inDone，如 EOF/管道结束）→ 等待对端把剩余响应写完
@@ -399,33 +443,26 @@ func meshStdioOnce(cmd *cobra.Command, svc *client.FileClient, signaler *hub.Hub
 	// stdin 未 EOF 时永久挂起。
 	inDone := make(chan struct{})
 	outDone := make(chan struct{})
-	go func() { defer close(inDone); _, _ = io.Copy(conn, ios.In) }()
+	go func() {
+		defer close(inDone)
+		_, _ = io.Copy(conn, ios.In)
+		// P0-5：stdin EOF 后必须向对端传播半关闭（FIN / 流 EOF），否则对端
+		// 永远等不到"输入写完"，<outDone 永久挂起（I38/C2 声称修复的挂死，
+		// 在同一批代码的另一方向仍然存在——此处补上）。
+		closeWriteConn(conn)
+	}()
 	go func() { defer close(outDone); _, _ = io.Copy(ios.Out, conn) }()
 	select {
 	case <-outDone: // 对端断开：会话结束
-	case <-inDone: // 本地 stdin 读完：等对端把剩余数据写完
+	case <-inDone: // 本地 stdin 读完：半关闭已传播，等对端把剩余数据写完
 		<-outDone
 	}
 	return nil
 }
 
-// meshDialFrameNeeded 报告该路径是否需要在连接上额外写 dial 帧。
-//   - webrtc：打洞直连对端，对端出口需知道拨哪个目标 → 写帧；
-//   - relay：hub 的 RelayStreamHandler 已写好 dial 帧（叶子拨目标），客户端
-//     直接透传，不得再写（否则帧头污染数据流——实测发现的 bug）。
-func meshDialFrameNeeded(kind string) bool {
-	return kind == "webrtc"
-}
-
-// meshRelayDial 在连接上写 [4B len][{"dial":addr}] 帧，指示出口节点拨目标。
-// 与 relay_stream.go / relay.leaf.go / p2p.writeDialFrame 的帧格式一致。
-func meshRelayDial(conn net.Conn, addr string) error {
-	return writeDialFrameTo(conn, addr)
-}
-
 // writeDialFrameTo 在任意 io.Writer 上写 [4B len][{"dial":addr}] 帧（与 relay 协议一致）。
-// 供 meshRelayDial（net.Conn）与 p2p.writeDialFrame（mux.Stream）共用（S51），
-// 一处修复两处生效；net.Conn.Write / mux.Stream.Write 均满足 io.Writer。
+// 供 p2p.writeDialFrame（mux.Stream）与 meshWebRTCStream 共用（S51），一处修复
+// 多处生效；net.Conn.Write / mux.Stream.Write 均满足 io.Writer。
 func writeDialFrameTo(w io.Writer, addr string) error {
 	head, err := json.Marshal(hub.DialRequest{Dial: addr})
 	if err != nil {

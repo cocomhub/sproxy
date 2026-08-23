@@ -81,11 +81,17 @@ func relayDialOnce(cmd *cobra.Command, svc relayDialClient, node, tcpAddr string
 	// 未 EOF 时永久挂起（CLI 假死）。
 	inDone := make(chan struct{})
 	outDone := make(chan struct{})
-	go func() { defer close(inDone); _, _ = io.Copy(conn, ios.In) }()
+	go func() {
+		defer close(inDone)
+		_, _ = io.Copy(conn, ios.In)
+		// P0-5：stdin EOF 后传播半关闭，否则对端永远等不到"输入写完"，
+		// <outDone 永久挂起（与 meshStdioOnce / p2pStdio 同款修复）。
+		closeWriteConn(conn)
+	}()
 	go func() { defer close(outDone); _, _ = io.Copy(ios.Out, conn) }()
 	select {
 	case <-outDone: // 对端断开：会话结束
-	case <-inDone: // 本地 stdin 读完：等对端把剩余数据写完
+	case <-inDone: // 本地 stdin 读完：半关闭已传播，等对端把剩余数据写完
 		<-outDone
 	}
 	return nil
