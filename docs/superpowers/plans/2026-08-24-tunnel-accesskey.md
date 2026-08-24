@@ -210,13 +210,15 @@ go test -count=1 ./pkg/tunnel/... && git add pkg/tunnel/tunnel.go pkg/tunnel/tun
 ### 任务 7：`sclient` 侧 `WithTunnel(ak, sk)` + 删 tunnel_key 配置
 
 **文件：**
-- 修改：`pkg/client/client.go`（`WithTunnel(ak, sk)`；`doRequest` 对 `/tunnel` SproxySig=metadata 帧哈希）
+- 修改：`pkg/client/client.go`（`WithTunnel(ak, sk)`；`doRequest` 对 `/tunnel` SproxySig body_sha256=`UNSIGNED`，不签 metadata 帧哈希）
 - 修改：`pkg/client/config.go`（删 `TunnelKey`）
 - 修改：`cmd/sclient/internal/clientfactory/factory.go`（`WithTunnel` 从 access_key/secret 派生；删除 tunnel_key 读取）
 - 测试：`pkg/client/*_test.go`、`cmd/sclient/internal/clientfactory/factory_test.go`、`cmd/sclient/*_test.go`
 
+> **审查确认（2026-08-24）**：/tunnel 外层 body 采用 `body_sha256=UNSIGNED`（流式 body 无法整体哈希；scripts 已支持 `NewBodyValidator` 对 `UNSIGNED` 透传）。metadata 帧与正文完整性由隧道内 AES-GCM 保证。计划原稿「签 metadata 帧哈希」已否决。
+
 - [ ] **步骤 1：`WithTunnel(ak, sk)` 签名变更 + HKDF 派生**
-- [ ] **步骤 2：`WithXfer` 语义保持**
+- [ ] **步骤 2：`doRequest` 对 `/tunnel` 签名 body_sha256=`sproxysig.UnsignedBody`**
 - [ ] **步骤 3：全量更新调用点 + 测试 + lint + commit**
 
 ### 任务 8：hub 节点注册改 AK/HMAC 准入（废除 relay_token）
