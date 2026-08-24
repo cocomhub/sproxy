@@ -5,6 +5,7 @@ package server
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
 // APIKey 表示一个 API 密钥及其权限。
@@ -195,12 +197,40 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		if len(cfg.AccessKeys) > 0 {
-			if h.verifySproxySig(w, r, cfg) {
-				next(w, r)
+			if !h.verifySproxySig(w, r, cfg) {
+				return
 			}
+			// /tunnel：验签成功后按 AK 查 SK → HKDF 派生隧道密钥放入 ctx，
+			// 隧道 handler 用 ctx 密钥解密 metadata 与 body；普通 API 请求走下面分支。
+			if r.URL.Path == "/tunnel" {
+				sepKey, err := h.tunnelDerivedKey(r, cfg)
+				if err != nil {
+					slog.Warn("auth: 派生隧道密钥失败", "error", err)
+					http.Error(w, "隧道密钥派生失败", http.StatusInternalServerError)
+					return
+				}
+				next(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), sepKey)))
+				return
+			}
+			next(w, r)
 			return
 		}
 
 		next(w, r) // 无认证配置 → 放行
 	}
+}
+
+// tunnelDerivedKey 从当前请求的 AK 查 AccessKeys 配置，用其 SK HKDF 派生隧道密钥。
+// v1：AK/SK 对称，SK 即 AES 隧道密钥派生源（golang.org/x/crypto/hkdf）。
+func (h *Handlers) tunnelDerivedKey(r *http.Request, cfg *Config) ([]byte, error) {
+	hdr, err := sproxysig.ParseHeader(r.Header.Get("Authorization"))
+	if err != nil {
+		return nil, err
+	}
+	for _, ak := range cfg.AccessKeys {
+		if subtle.ConstantTimeCompare([]byte(ak.Key), []byte(hdr.AK)) == 1 {
+			return tunnel.DeriveTunnelKey(ak.Secret, ak.MeshID)
+		}
+	}
+	return nil, fmt.Errorf("unknown access key %q", hdr.AK)
 }
