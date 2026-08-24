@@ -18,7 +18,7 @@ func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *str
 	cmd := &cobra.Command{
 		Use:   "config [show|set <key> <value>|remote]",
 		Short: "配置管理",
-		Long:  "查看或修改 sclient 配置。\n\n可用配置项:\n  server_url      服务器地址 (如 https://127.0.0.1:18083)\n  auth_token      Bearer Token 认证令牌\n  timeout         HTTP 超时秒数\n  tunnel_key      隧道密钥 (64 位 hex)\n  chunk_size      分块上传/下载块大小 (字节)\n  max_chunk_size  最大分块大小 (字节)\n  hub_url         mesh/relay/p2p 共用的 hub 地址 (如 wss://hub.example.com/ws)\n  relay_token     hub 中继注册 token\n  node_id         本节点默认 ID (mesh/relay/p2p 信令来源；为空回落主机名)\n\n多环境：SCLIENT_ENV=prod 时默认加载 sclient.prod.yaml。",
+		Long:  "查看或修改 sclient 配置。\n\n可用配置项:\n  server_url      服务器地址 (如 https://127.0.0.1:18083)\n  access_key      SproxySig 认证 AccessKey（服务端配置了 access_keys 时需要）\n  access_key_secret  SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线）\n  timeout         HTTP 超时秒数\n  tunnel_key      隧道密钥 (64 位 hex)\n  chunk_size      分块上传/下载块大小 (字节)\n  max_chunk_size  最大分块大小 (字节)\n  hub_url         mesh/relay/p2p 共用的 hub 地址 (如 wss://hub.example.com/ws)\n  relay_token     hub 中继注册 token\n  node_id         本节点默认 ID (mesh/relay/p2p 信令来源；为空回落主机名)\n\n多环境：SCLIENT_ENV=prod 时默认加载 sclient.prod.yaml。",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := cfgSvc.LoadConfig()
 			if err != nil {

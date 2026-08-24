@@ -34,10 +34,13 @@ tls:
   # 要显式禁用自签证书生成，取消注释并设为 false：
   # auto_tls: false
 
-# Bearer Token 认证（默认关闭，生产环境必须设置）
+# SproxySig 请求签名认证（默认关闭，生产环境必须设置；每 mesh 一对 AK/SK）
 # 启用后，除 /healthz、/version、/ui/、POST /tunnel 之外所有路由都要求
-# Authorization: Bearer <token> 请求头。
-# auth_token: "your-secret-token"
+# Authorization: SproxySig v=1 ... 请求签名头。
+# 生成 AK/SK：sclient access-key create [--mesh <name>]
+# access_keys:
+#   - key: "sk-meshA-3f8a..."
+#     secret: "0123...（64 hex）"
 
 # 速率限制（默认关闭；enabled: true 时限制 tunnel handler）
 # rate_limit:

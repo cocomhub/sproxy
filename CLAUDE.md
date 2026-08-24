@@ -184,7 +184,7 @@ type Conn interface {
 
 ## 关键路由（`pkg/server/handlers.go`）
 
-`RegisterRoutes` 在 `cmd/sproxy/root.go` 中挂到 `http.NewServeMux`。支持两层认证：主 mux 走 Bearer auth（`authMiddleware`），`localMux` 走隧道密钥（`POST /tunnel` 内部路由时跳过 Bearer auth）。
+`RegisterRoutes` 在 `cmd/sproxy/root.go` 中挂到 `http.NewServeMux`。支持两层认证：主 mux 走 SproxySig 请求签名（`authMiddleware`，配置 `access_keys` 时启用；`api_keys` 仍走独立 Bearer 多用户模式），`localMux` 走隧道密钥（`POST /tunnel` 内部路由时跳过认证）。
 
 ### 基础
 - `GET /` — 301 重定向到 `/ui/`
@@ -285,7 +285,8 @@ type Conn interface {
 | `tls.cert_file` / `tls.key_file` | string | | |
 | `tls.auto_tls` | bool | true | 自动生成 ECDSA P-256 自签证书 |
 | `tls.client_ca` | string | | mTLS CA 证书路径 |
-| `auth_token` | string | 空 | Bearer token 认证 |
+| `access_keys` | []AccessKey | 空 | SproxySig 请求签名认证（每 mesh 一对 AK/SK：`{key, secret, mesh_id?}`；配置后除 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 外全 HTTP 面验签） |
+| `api_keys.enabled` / `.keys` | | 关闭 | 多用户 API 密钥（独立 Bearer 特性，与 access_keys 互斥，优先） |
 | `rate_limit.enabled` / `.requests` / `.window` | | 关闭 | tunnel handler 限流 |
 | `chunk_size` | int | 4 MB | 分块上传每块大小 |
 | `max_chunk_size` | int | 64 MB | 客户端最大分块大小 |
@@ -305,9 +306,24 @@ type Conn interface {
 | `provider.timeout` / `.retry` | | | 提供者超时/重试 |
 | `max_storage_bytes` | int64 | 0（不限） | 存储上限 |
 
-所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 必须是 64 个十六进制字符（32 字节 AES-256 密钥），否则启动失败。生成密钥：`sclient genkey`。
+所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 必须是 64 个十六进制字符（32 字节 AES-256 密钥），否则启动失败。生成密钥：`sclient genkey`；生成 SproxySig AccessKey/AccessKeySecret：`sclient access-key create [--mesh <name>]`（输出 AK/SK 供服务端 `access_keys` 配置与客户端 `access_key`/`access_key_secret` 使用）。
 
-SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配置"会生效；`addr`/`uploads_dir`/`tunnel_key`/`rate_limit`/`server_timeouts`/`max_header_bytes` 需要重启进程。
+SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`uploads_dir`/`tunnel_key`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`access_keys` 需要重启进程。
+
+## 认证：SproxySig 请求签名（`pkg/sproxysig`）
+
+服务端配置 `access_keys: [{key, secret, mesh_id?}]`（每 mesh 一对）后，除
+`/healthz`、`/version`、`/ui/`、`POST /tunnel` 外的全部 HTTP 面（文件/信令/节点列表/
+服务发现/网关/云端下载）走 **SproxySig v1 请求签名**，替代旧 `auth_token` 明文 Bearer。
+`api_keys`（多用户 Bearer）与 access_keys 互斥，api_keys 优先。
+
+- **协议头**：`Authorization: SproxySig v=1 ak=<AK> ts=<unix_ms> exp=<unix_ms> nonce=<16B hex> body_sha256=<hex|UNSIGNED> sig=<hex>`
+- **签名**：`sig = HMAC-SHA256(SK, "sproxy-sig/v1\n" + ak + "\n" + ts + "\n" + exp + "\n" + nonce + "\n" + method + "\n" + path + "\n" + query + "\n" + body_sha256)`（canonical 为换行拼接，path 用 `EscapedPath()`，query 用 `RawQuery`）
+- **服务端校验**：取 AK→SK、重算 sig 恒时比较、`now≤exp`、`exp−ts≤max_ttl(15min)`、nonce 防重放池；带 body 请求客户端**发送前预计算哈希**，服务端流式累加、EOF 比对（防篡改）
+- **无 body 请求** `body_sha256 = sha256("")`（`sproxysig.EmptyBodyHash()`）
+- 客户端（sclient/FileClient/mesh/relay/信令）统一 `--access-key`/`--access-key-secret`（或配置 `access_key`/`access_key_secret`），Secret 只存本端计算签名、永不上线
+- Web UI 用 **WebCrypto** 计算 HMAC（`crypto.subtle`），AK/SK 存 `sessionStorage`（关页即清）；未配置 AK/SK 时不发签名头（无认证兼容）
+- 生成 AK/SK：`sclient access-key create [--mesh <name>]`（AK=`sk[-<mesh>]-<16hex>`，SK=32B 随机 hex）
 
 ## sclient CLI（`cmd/sclient/`）
 
@@ -335,6 +351,7 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 | `mesh connect <service> [-l :port]` | 连接 mesh 服务（webrtc 直连优先，hub 中继回落；`--gateway <addr>` 经本地 mesh node 网关复用已建直连链路） |
 | `mesh status` | 列出 hub 上的 mesh 服务（`--gateway <addr>` 改查本地 mesh node 直连拓扑/链路类型） |
 | `mesh node [flags]` | 单进程常驻 mesh 节点（注册+中继+webrtc 直连+自动对等发现+本地网关）：`--hub` `--node-id` `--token` `--service` `--dial-allow` `--discover` `--discover-interval` `--gateway-addr` |
+| `access-key create [--mesh <name>]` | 生成一对 AccessKey/AccessKeySecret 打印（供服务端 `access_keys` 配置与客户端 `access_key`/`access_key_secret`） |
 | `genkey` | 生成 64 hex 密钥 |
 | `config [show\|set <k> <v>]` | 配置管理 |
 | `diag` | 诊断连接问题 |
@@ -363,9 +380,10 @@ sclient mesh connect ssh -l :2222   # 然后 ssh -p 2222 user@127.0.0.1
 sclient relay start --hub wss://hub:18083/ws --node-id local \
   --token T --insecure --dial-allow --service app:127.0.0.1:2090
 
-# 云端节点：经 hub 中继拨本地端 2090 服务（自签 TLS hub 需 --insecure）
+# 云端节点：经 hub 中继拨本地端 2090 服务（SproxySig 需 --access-key/--access-key-secret，
+# 与服务端 access_keys 一致；自签 TLS hub 需 --insecure）
 sclient relay dial --node local --tcp 127.0.0.1:2090 \
-  -s https://hub:18083 --auth-token T --insecure
+  -s https://hub:18083 --access-key <AK> --access-key-secret <SK> --insecure
 # 云端即可向该连接写入数据，数据经 hub 中继到达本地端服务
 ```
 说明：`relay dial` 双向可用——任意节点可作 caller 拨向另一节点，实现云端→本地主动推送
@@ -420,8 +438,8 @@ sclient mesh status --gateway 127.0.0.1:18085   # 直连拓扑 / 链路类型
 >
 > **网关安全边界**：网关仅监听 loopback（`--gateway-addr` 传非 loopback 地址会被
 > fail-closed 拒绝——远程访问应经 mesh 本身而非网关，防被用作开放 mesh 中继）；mesh
-> node 配置了 `auth_token` 时，网关对 connect/status 请求校验相同 token（mesh connect/
-> status 自动发送），未授权本地进程无法复用网关路由。
+> node 配置了 `access_key`/`access_key_secret`（SproxySig）时，网关对 connect/status
+> 请求校验相同凭据（mesh connect/status 自动签名），未授权本地进程无法复用网关路由。
 
 ### sclient 当前目录（`cd`/`pwd`）
 
@@ -445,13 +463,16 @@ sclient mesh status --gateway 127.0.0.1:18085   # 直连拓扑 / 链路类型
 
 **多环境**：`SCLIENT_ENV=prod` 时默认加载 `sclient.prod.yaml`（同一目录下），便于维护
 prod/staging/dev 多套配置。**通用 mesh 配置键**（`sclient config set` 支持）：
+- `server_url` — 服务器地址
+- `access_key` / `access_key_secret` — SproxySig 认证 AK/SK（服务端配置了 `access_keys` 时需要；Secret 只本端计算签名，永不上线）
 - `hub_url` — mesh/relay/p2p 共用 hub 地址（http(s)/ws(s)，可带 /ws 路径）
 - `relay_token` — hub 中继注册 token（与 relay start --token / hub.relay_token 一致）
 - `node_id` — 本节点默认 ID（为空回落主机名）
 
-mesh connect / relay start / p2p 的 `--hub`/`--token`/`--relay-token`/`--node-id` 未显式
-指定时按 `CLI flag > 配置文件 > 默认值` 回落（relay start 的 `--hub` 默认值已改为空，
-本地默认 `ws://127.0.0.1:18084/ws` 在 runRelayStart 内解析）。
+mesh connect / relay start / p2p / mesh node 的 `--hub`/`--token`/`--relay-token`/
+`--node-id`/`--access-key`/`--access-key-secret` 未显式指定时按 `CLI flag > 配置文件 >
+默认值` 回落（relay start 的 `--hub` 默认值已改为空，本地默认 `ws://127.0.0.1:18084/ws`
+在 runRelayStart 内解析）。
 
 ## 多层级目录支持
 

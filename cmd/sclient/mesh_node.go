@@ -36,7 +36,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hubURL, _ := cmd.Flags().GetString("hub")
 			nodeID, _ := cmd.Flags().GetString("node-id")
-			_, _ = cmd.Flags().GetString("token") // --token 保留（relay_token 回落）
+			token, _ := cmd.Flags().GetString("token") // --token 保留（relay_token 回落）
 			relayToken, _ := cmd.Flags().GetString("relay-token")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
@@ -74,7 +74,9 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			accessKeySecretFlag, _ := cmd.Flags().GetString("access-key-secret")
 			accessKey := client.MeshAccessKey(accessKeyFlag, cfg.AccessKey)
 			accessKeySecret := client.MeshAccessKeySecret(accessKeySecretFlag, cfg.AccessKeySecret)
-			relayTok := client.MeshRelayToken(relayToken, cfg.RelayToken, "", "")
+			// --token 仍是 relay_token（hub 注册）的回落源：显式 --relay-token > 配置
+			// relay_token > --token（auth_token 已移除，第 4 参传空）。
+			relayTok := client.MeshRelayToken(relayToken, cfg.RelayToken, token, "")
 			if nodeID == "" {
 				nodeID = cfg.NodeID
 			}
