@@ -1,3 +1,5 @@
+github.com/cocomhub/buildinfo v0.0.1 h1:WJfxtfhTBBXm1h/NKq2U652dEedukvOKR4XDbUvmBC0=
+github.com/cocomhub/buildinfo v0.0.1/go.mod h1:SVZ3qv5aEGELCz90dJOVro1CPk//yPjjfG/iMPqYVTw=
 github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260821150521-399ff896ec8b h1:EDf+T3sc2S4MXzYih+PXdonenMecH3RAcjlqrsvmXx8=
 github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260821150521-399ff896ec8b/go.mod h1:jmX8sMAlOwNcgIqsE3IrJy4V9hIglooKu6FvpJvr3Hw=
 github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0-20260821150521-399ff896ec8b h1:OQRpv0bC0USrsyf4a4ZFSFmxFebtHVEpA9LQBMNa7tg=
