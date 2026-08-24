@@ -82,13 +82,10 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		// AK/SK 供外层 SproxySig 签名，无需重复 WithAccessKey。
 		opts = append(opts, client.WithTunnel(ak, sk))
 	}
-	// 通用 mesh 参数（hub_url/relay_token/node_id）：供 mesh connect / relay start /
-	// p2p 等命令在各自 --hub/--token/--node-id 未显式指定时作为配置回落（P2-配置）。
+	// 通用 mesh 参数（hub_url/node_id）：供 mesh connect / relay start / p2p 等命令
+	// 在各自 --hub/--node-id 未显式指定时作为配置回落（P2-配置）。
 	if cfg.HubURL != "" {
 		opts = append(opts, client.WithMeshHubURL(cfg.HubURL))
-	}
-	if cfg.RelayToken != "" {
-		opts = append(opts, client.WithRelayToken(cfg.RelayToken))
 	}
 	if cfg.NodeID != "" {
 		opts = append(opts, client.WithNodeID(cfg.NodeID))

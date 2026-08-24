@@ -170,11 +170,9 @@ type AutoRegisterParams struct {
 	HubURL string
 	// ServerURL 是 HubURL 为空的回退基址（mesh 用 svc.ServerURL()；p2p 传 ""）。
 	ServerURL string
-	// RelayToken 是注册用 token（hub relay_token）。
-	RelayToken string
-	// AccessKey 是 SproxySig 请求签名认证的 AccessKey（信令/节点列表）。
+	// AccessKey 是 SproxySig 请求签名认证的 AccessKey（信令/节点列表/hub 注册准入）。
 	AccessKey string
-	// AccessKeySecret 是 SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）。
+	// AccessKeySecret 是 SproxySig AccessKeySecret（本地密钥，仅计算签名与注册证明，永不上线）。
 	AccessKeySecret string
 	// NodeID 是节点 ID 基础（为空回落主机名）。
 	NodeID string
@@ -235,6 +233,18 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 		nodeID = fmt.Sprintf("%s-%s-%s", p.Prefix, base, newTempSuffix())
 	}
 
+	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof
+	// （hub.ComputeRegisterProof 绑定 nodeID，防串用/重放）。
+	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
+	// 拒绝后客户端困惑——明明连上了却被拒）。
+	if p.AccessKeySecret == "" {
+		return nil, fmt.Errorf("register: access_key_secret 为空，无法计算注册 proof")
+	}
+	proof, err := hub.ComputeRegisterProof(p.AccessKeySecret, nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("register: 计算注册证明失败: %w", err)
+	}
+
 	conn, err := HubWSDial(ctx, wsURL, p.Insecure)
 	if err != nil {
 		return nil, fmt.Errorf("连接 Hub 注册端点失败: %w", err)
@@ -243,7 +253,7 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	// 服务宣告（mesh node 常驻）与标签（如 exit）。mesh discovery 临时注册（disc-）
 	// 另带 real_node_id + real_node_proof（hub 强制校验防冒充）。mesh/p2p 拨号方
 	// 不传则 Meta{}。
-	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.RelayToken, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret)); err != nil {
+	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.AccessKey, proof, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret)); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("发送注册帧失败: %w", err)
 	}

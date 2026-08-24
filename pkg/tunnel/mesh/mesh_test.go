@@ -30,6 +30,12 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
+// 测试用合法 AK/SK：SK 必须为 64 hex 字符（32 字节），ComputeRegisterProof 才可计算。
+const (
+	testAccessKey = "sk-test-access-key"
+	testSecret    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
+
 // TestWebRTCStream_WritesDialFrameOnMuxStream（P0-1 回归）：
 // 直连数据面必须在 mux 流上写拨号帧，而非裸字节写 DataChannel。对端 p2p listen
 // 用 mux 按帧消费，本测试复现对端消费方式断言读到正确拨号帧。
@@ -130,7 +136,7 @@ func TestDial_FallsBackToRelay(t *testing.T) {
 // 信令请求携带 X-Node-Secret / X-Node-ID（B2/B3），closer 移除临时节点。
 func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 	rt := hub.NewRouteTable()
-	srv := hub.NewHubServer(rt, hub.NewAuthenticator("relay-token"), nil)
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
 
 	muxHTTP := http.NewServeMux()
 	wsNode := ws.NewHandlerNode()
@@ -160,7 +166,7 @@ func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 	}()
 
 	reg, err := AutoRegister(ctx, AutoRegisterParams{
-		HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
+		HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 		NodeID: "node-a", Prefix: "p2p", ExactNode: false, Insecure: false,
 	})
 	if err != nil {
@@ -204,7 +210,7 @@ func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 // 的被寻址方需稳定 ID 供 --peer 寻址），closer 移除节点。
 func TestAutoRegister_ExactNode(t *testing.T) {
 	rt := hub.NewRouteTable()
-	srv := hub.NewHubServer(rt, hub.NewAuthenticator("relay-token"), nil)
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
 	muxHTTP := http.NewServeMux()
 	wsNode := ws.NewHandlerNode()
 	wsNode.AddToMux(muxHTTP, "/ws")
@@ -222,7 +228,7 @@ func TestAutoRegister_ExactNode(t *testing.T) {
 	}()
 
 	reg, err := AutoRegister(ctx, AutoRegisterParams{
-		HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
+		HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 		NodeID: "node-b", Prefix: "p2p", ExactNode: true, Insecure: false,
 	})
 	if err != nil {
@@ -249,11 +255,27 @@ func TestAutoRegister_ExactNode(t *testing.T) {
 	}
 }
 
+// TestAutoRegister_EmptySecretFailsClosed（任务8）：AccessKeySecret 为空时 AutoRegister
+// 直接报错（fail-closed，防止无凭据注册被 hub 静默拒绝后客户端困惑）。
+func TestAutoRegister_EmptySecretFailsClosed(t *testing.T) {
+	_, err := AutoRegister(t.Context(), AutoRegisterParams{
+		HubURL: "ws://127.0.0.1:1/ws",
+		NodeID: "node-a",
+		Prefix: "p2p",
+	})
+	if err == nil {
+		t.Fatal("expected error when access_key_secret is empty")
+	}
+	if !strings.Contains(err.Error(), "access_key_secret 为空") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // runNodeTestHub 起 mock hub：/ws 注册 + HubServer + 可选信令桥，返回 server URL。
 func runNodeTestHub(t *testing.T, withSignaling bool) (*hub.RouteTable, *httptest.Server, context.CancelFunc) {
 	t.Helper()
 	rt := hub.NewRouteTable()
-	srv := hub.NewHubServer(rt, hub.NewAuthenticator("relay-token"), nil)
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
 	muxHTTP := http.NewServeMux()
 	wsNode := ws.NewHandlerNode()
 	wsNode.AddToMux(muxHTTP, "/ws")
@@ -377,7 +399,7 @@ func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() {
 		runErr <- RunNode(nodeCtx, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
+			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 			NodeID: nodeID, Services: []hub.Service{{Name: "echo", Addr: echoAddr}},
 			ServiceAddrs: []string{echoAddr}, DialAllow: true, LocalAddr: "http://127.0.0.1:1",
 			EnableWebRTC: false,
@@ -499,7 +521,7 @@ func TestRunNode_WebRTCDirect(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() {
 		runErr <- RunNode(nodeCtx, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
+			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 			NodeID: nodeID, Services: []hub.Service{{Name: "echo", Addr: echoAddr}},
 			ServiceAddrs: []string{echoAddr}, DialAllow: true, LocalAddr: "http://127.0.0.1:1",
 			EnableWebRTC: true,
@@ -517,7 +539,7 @@ func TestRunNode_WebRTCDirect(t *testing.T) {
 
 	// 拨号方：临时节点注册拿 signaler → webrtc 直连 nodeID → mux 流写 dial 帧 → echo。
 	dialer, err := AutoRegister(context.Background(), AutoRegisterParams{
-		HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
+		HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 		NodeID: "dialer", Prefix: "p2p", ExactNode: false,
 	})
 	if err != nil {
@@ -628,7 +650,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 	ctxA := t.Context()
 	go func() {
 		_ = RunNode(ctxA, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
+			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 			NodeID: "node-a", EnableWebRTC: true, Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DiscoveryPeers: peersA, DialAllow: true,
@@ -637,7 +659,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 	ctxB := t.Context()
 	go func() {
 		_ = RunNode(ctxB, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
+			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 			NodeID: "node-b", EnableWebRTC: true, Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DialAllow: true,
@@ -821,7 +843,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	ctxSvc := t.Context()
 	go func() {
 		_ = RunNode(ctxSvc, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
+			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 			NodeID: "node-svc", EnableWebRTC: true, Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			Services:     []hub.Service{{Name: "echo-svc", Addr: echoSvcAddr}},
@@ -836,7 +858,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	ctxA := t.Context()
 	go func() {
 		_ = RunNode(ctxA, NodeConfig{
-			HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
+			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 			NodeID: "node-ap", EnableWebRTC: true, Discover: true,
 			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 			DiscoveryPeers: peersA,
@@ -873,7 +895,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)
 		for {
-			conn, err := GatewayConnect(context.Background(), gatewayAddr, peer, addr, "test-sk")
+			conn, err := GatewayConnect(context.Background(), gatewayAddr, peer, addr, testSecret)
 			if err == nil {
 				defer conn.Close()
 				payload := []byte("ping")
@@ -1127,7 +1149,7 @@ func TestRunNode_FullMeshThreeNodes(t *testing.T) {
 	runNode := func(nodeID string, notify chan<- string) {
 		go func() {
 			_ = RunNode(t.Context(), NodeConfig{
-				HubURL: ts.URL, RelayToken: "relay-token", AccessKey: "test-ak", AccessKeySecret: "test-sk",
+				HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 				NodeID: nodeID, EnableWebRTC: true, Discover: true,
 				DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
 				GatewayAddr: "127.0.0.1:0", GatewayNotify: notify,
@@ -1151,7 +1173,7 @@ func TestRunNode_FullMeshThreeNodes(t *testing.T) {
 	// CLAUDE.md "-race 下超时留 3 倍余量"。
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		st, err := QueryGatewayStatus(t.Context(), gatewayAddr, "test-sk")
+		st, err := QueryGatewayStatus(t.Context(), gatewayAddr, testSecret)
 		if err == nil && len(st.Peers) == 2 {
 			peers := map[string]bool{}
 			for _, p := range st.Peers {

@@ -23,30 +23,29 @@ func (m *mockCfgProvider) LoadConfig() (*client.Config, error) {
 }
 
 // TestP2PFlags_ApplyConfigFallback（P2-配置3）：
-// 未显式指定的 hub/token/relay-token/node-id 从配置回落；显式指定的不被覆盖。
+// 未显式指定的 hub/node-id 从配置回落；显式指定的不被覆盖。
 func TestP2PFlags_ApplyConfigFallback(t *testing.T) {
 	provider := &mockCfgProvider{cfg: &client.Config{
-		HubURL: "wss://hub.example.com/ws", AccessKey: "ak", AccessKeySecret: "at", RelayToken: "rt", NodeID: "node-x",
+		HubURL: "wss://hub.example.com/ws", AccessKey: "ak", AccessKeySecret: "at", NodeID: "node-x",
 	}}
 
 	var f p2pFlags
 	f.applyConfigFallback(provider)
-	// tok 仅作 --token（relay 回落），不再从配置 AuthToken 派生；relay-token/node-id 回落。
-	if f.hub != "wss://hub.example.com/ws" || f.relayTok != "rt" || f.node != "node-x" {
+	if f.hub != "wss://hub.example.com/ws" || f.node != "node-x" {
 		t.Fatalf("配置回落未生效: %+v", f)
 	}
 
 	// 显式指定的 flag 不被覆盖
-	explicit := p2pFlags{hub: "ws://explicit", tok: "explicit-tok"}
+	explicit := p2pFlags{hub: "ws://explicit"}
 	explicit.applyConfigFallback(provider)
-	if explicit.hub != "ws://explicit" || explicit.tok != "explicit-tok" || explicit.relayTok != "rt" || explicit.node != "node-x" {
+	if explicit.hub != "ws://explicit" || explicit.node != "node-x" {
 		t.Fatalf("显式 flag 被配置覆盖: %+v", explicit)
 	}
 
 	// nil provider 是 no-op
 	empty := p2pFlags{}
 	empty.applyConfigFallback(nil)
-	if empty.hub != "" || empty.tok != "" {
+	if empty.hub != "" {
 		t.Fatal("nil provider 不应填充")
 	}
 }
@@ -72,7 +71,7 @@ func TestNewCmdP2P_Subcommands(t *testing.T) {
 func TestNewCmdP2PConnect_Flags(t *testing.T) {
 	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	connect := cmd.Commands()[0]
-	for _, name := range []string{"peer", "tcp", "listen", "hub", "token", "relay-token", "node-id"} {
+	for _, name := range []string{"peer", "tcp", "listen", "hub", "node-id"} {
 		if f := connect.Flags().Lookup(name); f == nil {
 			t.Errorf("p2p connect 缺少 flag: %s", name)
 		}
@@ -82,32 +81,10 @@ func TestNewCmdP2PConnect_Flags(t *testing.T) {
 func TestNewCmdP2PListen_Flags(t *testing.T) {
 	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	listen := cmd.Commands()[1]
-	for _, name := range []string{"service", "dial-allow-cidr", "hub", "token", "relay-token", "node-id"} {
+	for _, name := range []string{"service", "dial-allow-cidr", "hub", "node-id"} {
 		if f := listen.Flags().Lookup(name); f == nil {
 			t.Errorf("p2p listen 缺少 flag: %s", name)
 		}
-	}
-}
-
-// TestP2PFlagsRelayToken 验证 p2p 自动注册 relay_token 选择（B17）：
-// --relay-token 优先，否则回落 --token（对齐 mesh 的 meshRelayToken fallback 链）。
-func TestP2PFlagsRelayToken(t *testing.T) {
-	f := &p2pFlags{}
-	// 显式 --relay-token 优先
-	f.relayTok = "relay-token"
-	f.tok = "signal-token"
-	if got := f.relayToken(); got != "relay-token" {
-		t.Fatalf("relayToken() with relay-token set = %q, want relay-token", got)
-	}
-	// 空 relay → 回落 --token
-	f.relayTok = ""
-	if got := f.relayToken(); got != "signal-token" {
-		t.Fatalf("relayToken() fallback = %q, want signal-token", got)
-	}
-	// 两者皆空 → 空串
-	f.tok = ""
-	if got := f.relayToken(); got != "" {
-		t.Fatalf("relayToken() both empty = %q, want empty", got)
 	}
 }
 

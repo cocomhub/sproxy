@@ -54,7 +54,7 @@ func TestRelayStartCmd_UseAndArgs(t *testing.T) {
 	if cmd.Short != "启动中继节点，连接到 Hub" {
 		t.Errorf("expected Short '启动中继节点，连接到 Hub', got %q", cmd.Short)
 	}
-	for _, name := range []string{"hub", "local", "node-id", "token", "dial-allow", "service", "dial-allow-cidr"} {
+	for _, name := range []string{"hub", "local", "node-id", "dial-allow", "service", "dial-allow-cidr"} {
 		if f := cmd.Flags().Lookup(name); f == nil {
 			t.Errorf("missing flag: %s", name)
 		}
@@ -150,7 +150,7 @@ func TestRelayStatusCmd_Empty(t *testing.T) {
 func TestRunRelayWithRetry_CtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := runRelayWithRetry(ctx, "test-node", "ws://hub", "http://local", "", false, false, nil, nil, testutil.DiscardLogger())
+	err := runRelayWithRetry(ctx, "test-node", "ws://hub", "http://local", "", "", false, false, nil, nil, testutil.DiscardLogger())
 	// With cancelled context, runRelayOnce will fail quickly (ws dial fails),
 	// then runRelayWithRetry returns the error (ctx.Err() != nil)
 	if err == nil {

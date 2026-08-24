@@ -91,27 +91,22 @@ func TestConfig_Defaults_HubMaxConnections(t *testing.T) {
 	}
 }
 
-func TestConfig_Validate_HubEnabledRequiresRelayToken(t *testing.T) {
+func TestConfig_Validate_HubEnabledNoTokenRequired(t *testing.T) {
 	t.Parallel()
-	// hub.enabled=true 且 relay_token 为空 → 校验失败（C2 主修复）
+	// hub.enabled=true 不再要求任何 hub 级 token（准入改由顶层 access_keys 提供，
+	// SproxySig AccessKey + HMAC proof）；仅需 ws transport 即可通过校验（S42）。
 	cfg := Default()
 	cfg.Hub.Enabled = true
-	cfg.Hub.RelayToken = ""
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when hub.enabled=true but relay_token empty")
-	}
-	// 配了 token 后应通过（需同时启用 ws transport，S42）
-	cfg.Hub.RelayToken = "secret"
 	cfg.Hub.Transports.WS.Enabled = true
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("unexpected error with relay_token set: %v", err)
+		t.Fatalf("hub.enabled=true 且 ws 传输开启应通过校验（无需 token）: %v", err)
 	}
-	// hub 未启用（默认）时不受影响
+	// hub 未启用时不受 ws 开关影响。
 	cfg2 := Default()
 	cfg2.Hub.Enabled = false
-	cfg2.Hub.RelayToken = ""
+	cfg2.Hub.Transports.WS.Enabled = false
 	if err := cfg2.Validate(); err != nil {
-		t.Fatalf("hub disabled should not require relay_token: %v", err)
+		t.Fatalf("hub disabled should not require ws transport: %v", err)
 	}
 }
 
@@ -121,7 +116,6 @@ func TestConfig_Validate_HubEnabledRequiresTransport(t *testing.T) {
 	// WS 是当前唯一节点接入传输，hub 启用而无 transport 时节点无法连接）。
 	cfg := Default()
 	cfg.Hub.Enabled = true
-	cfg.Hub.RelayToken = "secret"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error when hub.enabled=true but transports.ws.enabled=false")
 	}

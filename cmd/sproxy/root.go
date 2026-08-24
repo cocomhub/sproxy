@@ -111,7 +111,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
 
 		if cfg.Hub.Transports.WS.Enabled {
-			hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(cfg.Hub.RelayToken), logger.With("component", "hub"), cfg.Hub.MaxConnections)
+			// 节点注册准入：SproxySig AccessKey + HMAC proof（共享 token 已废除）。
+			// hub 准入凭据来自顶层 access_keys 配置，转换后交给 hub.Authenticator。
+			aks := make([]hub.AccessKey, 0, len(cfg.AccessKeys))
+			for _, k := range cfg.AccessKeys {
+				aks = append(aks, hub.AccessKey{Key: k.Key, Secret: k.Secret})
+			}
+			hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(aks), logger.With("component", "hub"), cfg.Hub.MaxConnections)
 			// S36：WS 升级路径固定为 /ws。hub.transports.ws.path 已废弃，
 			// 非默认值时仅记录警告并忽略，避免可配置 path 与既有业务路由语义重叠。
 			wsPath := "/ws"

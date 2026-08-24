@@ -247,9 +247,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 		// WebRTC 信令桥：SDP Offer/Answer/Candidate 存转 + 长轮询
 		broker := h.signalBroker
-		// S44：信令 POST 单独挂限流（独立实例，与文件传输隔离配额），防共享
-		// relay_token 下被攻破节点洪泛注入信令；GET poll 长轮询不挂（客户端
-		// 高频轮询会误触发限流）。
+		// S44：信令 POST 单独挂限流（独立实例，与文件传输隔离配额），防被攻破
+		// 的已准入节点洪泛注入信令；GET poll 长轮询不挂（客户端高频轮询会误触发限流）。
 		var signalPostRL *RateLimiter
 		if cfg.RateLimit.Enabled {
 			signalPostRL = NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "signal_rate_limiter"))

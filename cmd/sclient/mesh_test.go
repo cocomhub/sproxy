@@ -59,7 +59,7 @@ func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
 	if node.Use != "node" {
 		t.Fatalf("unexpected node Use: %q", node.Use)
 	}
-	for _, name := range []string{"hub", "node-id", "token", "relay-token", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "stun"} {
+	for _, name := range []string{"hub", "node-id", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "stun"} {
 		if f := node.Flags().Lookup(name); f == nil {
 			t.Errorf("node 缺少 flag: %s", name)
 		}
@@ -72,7 +72,7 @@ func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 	if connect.Use != "connect <service> [-l :port]" {
 		t.Fatalf("unexpected connect Use: %q", connect.Use)
 	}
-	for _, name := range []string{"listen", "webrtc", "hub", "token", "relay-token", "node-id", "gateway"} {
+	for _, name := range []string{"listen", "webrtc", "hub", "node-id", "gateway"} {
 		if f := connect.Flags().Lookup(name); f == nil {
 			t.Errorf("connect 缺少 flag: %s", name)
 		}

@@ -60,18 +60,6 @@ func MeshAccessKeySecret(flagKey, cfgKey string) string {
 	return cfgKey
 }
 
-// MeshRelayToken 返回自动注册用的 relay_token：显式 relayToken > 配置 relayToken
-// （svcRelayToken）> 回落 MeshSignalToken（--token → auth_token）。
-func MeshRelayToken(flagRelayToken, svcRelayToken, flagToken, svcAuthToken string) string {
-	if flagRelayToken != "" {
-		return flagRelayToken
-	}
-	if svcRelayToken != "" {
-		return svcRelayToken
-	}
-	return MeshSignalToken(flagToken, svcAuthToken)
-}
-
 // MeshTargetRefresher 按需解析 mesh 目标，带 TTL 缓存与单飞（single-flight）刷新。
 //
 // 并发安全设计：所有缓存字段由 mu 保护；刷新期间**不持有 mu 做网络调用**——

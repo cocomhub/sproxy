@@ -16,8 +16,8 @@ import (
 )
 
 // SignalBroker 封装 hub 端的信令队列，挂在 Handlers 上。
-// rt 用于校验信令消息的 from/to 必须是已注册节点（共享 relay_token
-// 信任域内的身份绑定：阻止向不存在/未注册节点投递或轮询）。
+// rt 用于校验信令消息的 from/to 必须是已注册节点（已准入节点信任域内的
+// 身份绑定：阻止向不存在/未注册节点投递或轮询）。
 type SignalBroker struct {
 	queue  *hub.SignalQueue
 	rt     *hub.RouteTable
@@ -56,12 +56,12 @@ const maxSignalBodyBytes = 8 << 10
 
 // signalNodeHeader 是客户端声明自身节点 ID 的请求头。
 // 身份绑定：post 的 From 与 poll 的 peer 必须等于调用方声明的 node-id，
-// 防止共享 relay_token 下节点互相冒充/窃听对方收件箱。
+// 防止已准入节点互相冒充/窃听对方收件箱。
 const signalNodeHeader = "X-Node-ID"
 
 // signalNodeSecretHeader 是客户端声明自身 per-node secret 的请求头（I1）。
-// 服务端用 B1 下发的 NodeInfo.Secret 恒定时间比对，防止共享 relay_token 下
-// 节点以他人 node-id 窃听收件箱 / 投毒 SDP（零成本静默冒充被关闭）。
+// 服务端用 B1 下发的 NodeInfo.Secret 恒定时间比对，防止已准入节点以他人
+// node-id 窃听收件箱 / 投毒 SDP（零成本静默冒充被关闭）。
 const signalNodeSecretHeader = "X-Node-Secret"
 
 // signalPollBackoff 是 kind 过滤下队列积压其他 kind 消息时的轮询退避，
