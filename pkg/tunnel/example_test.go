@@ -83,7 +83,11 @@ func ExampleNewHandler() {
 	defer targetServer.Close()
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key, nil))
+	// 认证驱动：key 由中间件放入 ctx（等价 authMiddleware 派生）
+	h := tunnel.NewHandler(nil, nil)
+	mux.Handle("POST /tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
+	}))
 	proxyServer := httptest.NewServer(mux)
 	defer proxyServer.Close()
 
@@ -107,6 +111,7 @@ func ExampleNewHandler() {
 
 func Example_newHandlerEmptyKey() {
 	mux := http.NewServeMux()
+	// 无密钥：Handler 直接 401/400（认证驱动下未派生的 key 被拒）
 	mux.Handle("POST /tunnel", tunnel.NewHandler(nil, nil))
 
 	server := httptest.NewServer(mux)
@@ -119,7 +124,7 @@ func Example_newHandlerEmptyKey() {
 	}
 	defer resp.Body.Close()
 	fmt.Println(resp.StatusCode)
-	// Output: 403
+	// Output: 401
 }
 
 func ExampleRequest() {
@@ -159,7 +164,11 @@ func Example_tamperDetection() {
 	key, _ := tunnel.ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key, nil))
+	// 认证驱动：key 由中间件放入 ctx（等价 authMiddleware 派生）
+	h := tunnel.NewHandler(nil, nil)
+	mux.Handle("POST /tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
+	}))
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -185,7 +194,11 @@ func ExampleClient_Do() {
 	defer targetServer.Close()
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key, nil))
+	// 认证驱动：key 由中间件放入 ctx（等价 authMiddleware 派生）
+	h := tunnel.NewHandler(nil, nil)
+	mux.Handle("POST /tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
+	}))
 	proxyServer := httptest.NewServer(mux)
 	defer proxyServer.Close()
 
@@ -227,7 +240,11 @@ func ExampleClient_Do_largeBody() {
 	defer targetServer.Close()
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key, nil))
+	// 认证驱动：key 由中间件放入 ctx（等价 authMiddleware 派生）
+	h := tunnel.NewHandler(nil, nil)
+	mux.Handle("POST /tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
+	}))
 	proxyServer := httptest.NewServer(mux)
 	defer proxyServer.Close()
 
@@ -279,7 +296,11 @@ func ExampleClient_Do_streamResponse() {
 	defer targetServer.Close()
 
 	mux := http.NewServeMux()
-	mux.Handle("POST /tunnel", tunnel.NewHandler(key, nil))
+	// 认证驱动：key 由中间件放入 ctx（等价 authMiddleware 派生）
+	h := tunnel.NewHandler(nil, nil)
+	mux.Handle("POST /tunnel", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), key)))
+	}))
 	proxyServer := httptest.NewServer(mux)
 	defer proxyServer.Close()
 
