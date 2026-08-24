@@ -29,12 +29,13 @@ const testHexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 var _ = GenerateKey
 
 func TestNewHandler_returnsForbiddenOnEmptyKey(t *testing.T) {
+	// 认证驱动：无 ctx 密钥 → 401
 	h := NewHandler(nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/tunnel", nil)
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 }
 
@@ -46,7 +47,7 @@ func TestNewHandlerForwardsAbsoluteURL(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	handler := NewHandler(testKey, nil)
+	handler := withTunnelKey(testKey, NewHandler(nil, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -81,7 +82,7 @@ func TestNewLocalHandler_dispatchesRelativeURL(t *testing.T) {
 		_, _ = w.Write([]byte(`{"files":[{"name":"test.txt","size":123}]}`))
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -124,7 +125,7 @@ func TestNewLocalHandler_dispatchesWithQueryAndHeaders(t *testing.T) {
 		_, _ = w.Write([]byte(`{"success":true}`))
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -156,7 +157,7 @@ func TestNewLocalHandler_dispatchesUploadBody(t *testing.T) {
 		_, _ = w.Write([]byte(`{"success":true,"file_checksum":"abc"}`))
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -194,7 +195,7 @@ func TestNewLocalHandler_forwardsAbsoluteURL(t *testing.T) {
 		_, _ = w.Write([]byte("should-not-reach"))
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -226,7 +227,7 @@ func TestNewLocalHandler_withNil_actsLikeNewHandler(t *testing.T) {
 	defer backend.Close()
 
 	// NewLocalHandler with nil localHandler
-	handler := NewLocalHandler(testKey, nil, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, nil, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -278,7 +279,7 @@ func TestNewLocalHandler_responseHeadersInMetadata(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"not found"}`))
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -498,7 +499,7 @@ func TestNewLocalHandler_preservesMethodAndURL(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -561,7 +562,7 @@ func TestNewLocalHandler_bodyMultiPartCompatible(t *testing.T) {
 		_, _ = w.Write([]byte(`{"success":true}`))
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -599,7 +600,7 @@ func TestNewLocalHandler_largeStreamingBody(t *testing.T) {
 		_, _ = w.Write(payload[:100]) // 小响应
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -633,7 +634,7 @@ func TestNewLocalHandler_multiValueResponseHeaders(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -672,7 +673,7 @@ func TestNewLocalHandler_metadataRoundtrip(t *testing.T) {
 		_, _ = w.Write([]byte("hello"))
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -715,7 +716,7 @@ func TestNewLocalHandler_emptyBody(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 
@@ -743,7 +744,7 @@ func TestNewLocalHandler_rejectsNonLeadingSlash(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := NewLocalHandler(testKey, local, nil)
+	handler := withTunnelKey(testKey, NewLocalHandler(nil, local, nil))
 	ts := httptest.NewServer(handler)
 	defer ts.Close()
 

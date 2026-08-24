@@ -83,6 +83,10 @@ const (
 // ErrMetadataTooLarge 表示 metadata 帧长度超过 MaxMetadataBytes。
 var ErrMetadataTooLarge = fmt.Errorf("metadata frame too large (> %d bytes)", MaxMetadataBytes)
 
+// ErrTunnelKeyMissing 表示请求 context 中未携带隧道密钥（authMiddleware 未派生或
+// 未对 /tunnel 验签）。认证驱动的隧道模式下这是拒绝请求的哨兵错误。
+var ErrTunnelKeyMissing = fmt.Errorf("tunnel key missing in request context")
+
 // Request 表示一个加密隧道请求，包含要转发到目标服务器的 HTTP 请求信息。
 type Request struct {
 	Method  string            `json:"method"`

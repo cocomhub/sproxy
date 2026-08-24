@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -22,13 +21,11 @@ import (
 //
 // 两种模式统一使用流式帧协议，响应体通过 Pipe 流式加密，不缓冲在内存中。
 //
-// 密钥轮换：通过 UpdateKey 可运行时热替换密钥，旧密钥保留短时窗口供存量连接完成。
-// 所有新加密使用新密钥；解密时先尝试新密钥，不匹配则尝试旧密钥。
+// 认证驱动：隧道编解码密钥不再由进程级静态 tunnel_key 提供，改由 authMiddleware
+// 验签后按 AK→SK 派生密钥（SetTunnelKey 放入请求 ctx），ServeHTTP 用 GetTunnelKey(ctx)
+// 解密 metadata 与 body、加密响应。未携带密钥的请求 401。
 // 重放保护：ServiceHTTP 中解析 metadata 后调用 replayProtector.Validate 检测重放攻击。
 type Handler struct {
-	keyMu           sync.RWMutex
-	primaryKey      []byte // 当前活跃密钥，用于加密和解密
-	oldKey          []byte // 前一个密钥，仅用于解密存量连接（短时窗口）
 	httpClient      *http.Client
 	localHandler    http.Handler
 	logger          *slog.Logger
@@ -37,16 +34,15 @@ type Handler struct {
 
 // NewHandler 创建一个仅支持外部转发的加密隧道处理器。
 //
-// 行为同旧版闭包实现。如果 key 为空，处理器直接返回 403 Forbidden。
+// 密钥不在此构造（由 authMiddleware 派生后放入请求 ctx），key 参数仅占位（旧签名兼容）。
 // logger 为 nil 时使用 slog.Default()。
-// 使用方式：mux.Handle("POST /tunnel", tunnel.NewHandler(key))
+// 使用方式：mux.Handle("POST /tunnel", tunnel.NewHandler(nil, logger))。
 func NewHandler(key []byte, logger *slog.Logger) http.Handler {
 	log := logger
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Handler{
-		primaryKey: key,
 		httpClient: &http.Client{
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
@@ -63,6 +59,7 @@ func NewHandler(key []byte, logger *slog.Logger) http.Handler {
 //
 // 当请求 URL 为绝对路径（如 /upload）且在 local 中注册时，直接在当前进程中转发到 local handler；
 // 当请求 URL 为绝对 URL（如 https://example.com/api）时，与原 NewHandler 行为一致。
+// 密钥由 authMiddleware 派生后放入请求 ctx，key 参数仅占位（旧签名兼容）。
 // logger 为 nil 时使用 slog.Default()。
 func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.Handler {
 	log := logger
@@ -70,7 +67,6 @@ func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.H
 		log = slog.Default()
 	}
 	return &Handler{
-		primaryKey: key,
 		httpClient: &http.Client{
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
@@ -84,66 +80,51 @@ func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.H
 	}
 }
 
-// UpdateKey 热替换隧道加密密钥。
-//
-// 调用后，新连接使用 newKey 加密；存量连接仍可用旧密钥解密（写入者已使用旧密钥加密的流）。
-// 多次调用只保留最近两代密钥（当前 + 前一代），更早的密钥不再接受。
-func (h *Handler) UpdateKey(newKey []byte) {
-	h.keyMu.Lock()
-	defer h.keyMu.Unlock()
-	h.oldKey = h.primaryKey
-	h.primaryKey = newKey
-}
+// UpdateKey 不再支持：隧道密钥由认证派生，无法热替换进程级密钥。
+// 保留 API 以兼容 SIGHUP 流程（调用成为 no-op）。
+func (h *Handler) UpdateKey(newKey []byte) {}
 
-// resolveKey 从请求体解析 metadata 帧并尝试所有可用密钥解密。
+// resolveKey 从请求体解析 metadata 帧并解密。
 //
+// 密钥从请求 context（GetTunnelKey）获取；未携带密钥返回 ErrTunnelKeyMissing。
 // 返回：解密后的 metadata JSON、匹配的密钥（用于后续 body 流解密）、错误。
-// 先尝试 primaryKey，失败后再尝试 oldKey。
-func (h *Handler) resolveKey(r io.Reader) ([]byte, []byte, error) {
+func (h *Handler) resolveKey(r io.Reader, key []byte) ([]byte, []byte, error) {
 	encMeta, err := readEncMeta(r)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	h.keyMu.RLock()
-	keys := make([][]byte, 0, 2)
-	keys = append(keys, h.primaryKey)
-	if len(h.oldKey) > 0 {
-		keys = append(keys, h.oldKey)
+	if len(key) == 0 {
+		return nil, nil, ErrTunnelKeyMissing
 	}
-	h.keyMu.RUnlock()
-
-	var lastErr error
-	for _, key := range keys {
-		data, err := Decrypt(key, encMeta, []byte(AADMeta))
-		if err == nil {
-			return data, key, nil
-		}
-		lastErr = err
+	data, err := Decrypt(key, encMeta, []byte(AADMeta))
+	if err != nil {
+		return nil, nil, fmt.Errorf("decrypt metadata: %w", err)
 	}
-	return nil, nil, fmt.Errorf("decrypt metadata with all keys: %w", lastErr)
+	return data, key, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if len(h.primaryKey) == 0 {
-		h.logger.Warn("隧道密钥为空，拒绝请求")
-		w.WriteHeader(http.StatusForbidden)
+	// 隧道密钥来自请求 context（authMiddleware 验签后派生）。
+	key := GetTunnelKey(r.Context())
+	if len(key) == 0 {
+		h.logger.Warn("隧道请求缺少派生密钥", "remote_addr", r.RemoteAddr)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	h.logger.Debug("隧道请求", "method", r.Method, "remote_addr", r.RemoteAddr)
 
-	// 1. 解析 metadata 帧，使用 resolveKey 尝试 primary + old 密钥
-	metaJSON, resolvedKey, err := h.resolveKey(r.Body)
+	// 1. 解析 metadata 帧，用 context 密钥解密
+	metaJSON, resolvedKey, err := h.resolveKey(r.Body, key)
 	if err != nil {
 		h.logger.Error("解析隧道 metadata 失败", "error", err)
-		w.WriteHeader(http.StatusBadRequest)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	var req Request
 	if err := json.Unmarshal(metaJSON, &req); err != nil {
 		h.logger.Error("反序列化隧道请求失败", "error", err)
-		w.WriteHeader(http.StatusBadRequest)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -155,13 +136,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.Copy(io.Discard, r.Body)
 			r.Body.Close()
 			h.logger.Warn("重放检测失败", "error", err, "jti", req.JTI)
-			w.WriteHeader(http.StatusTooEarly) // 425 Too Early
+			http.Error(w, "too early", http.StatusTooEarly) // 425
 			return
 		}
 	}
 
 	// 4. r.Body 剩余部分为流式加密 body，通过 Pipe + DecryptStream 流式解密
-	//    使用 resolveKey 匹配成功的 resolvedKey（兼容正在轮换中的旧密钥）
 	bodyPr, bodyPw := io.Pipe()
 	go func() {
 		_, decErr := DecryptStream(resolvedKey, r.Body, bodyPw, []byte(AADStream))
@@ -170,14 +150,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 分支：本地路由 vs 外部转发
 	if h.localHandler != nil && isRelativePath(req.URL) {
-		h.dispatchLocal(w, r, &req, bodyPr)
+		h.dispatchLocal(w, r, &req, bodyPr, resolvedKey)
 	} else {
-		h.forwardExternal(w, r, &req, bodyPr)
+		h.forwardExternal(w, r, &req, bodyPr, resolvedKey)
 	}
 }
 
 // dispatchLocal 将加密请求路由到本地 handler，响应体通过 Pipe 流式加密。
-func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader) {
+func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader, encKey []byte) {
 	localReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -214,10 +194,6 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 			Headers:       hdrs,
 			ContentLength: -1,
 		})
-		// 用 primaryKey 加密响应（始终使用最新密钥）
-		h.keyMu.RLock()
-		encKey := h.primaryKey
-		h.keyMu.RUnlock()
 		metaFrame, _ := encodeMetadataFrame(encKey, respMetaJSON)
 
 		w.Header().Set(headerContentType, frameContentType)
@@ -244,7 +220,7 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 }
 
 // forwardExternal 将加密请求转发到外部目标 URL，保持原 NewHandler 的完整行为。
-func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader) {
+func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *Request, body io.Reader, encKey []byte) {
 	proxyReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.URL, body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -257,9 +233,6 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 	resp, err := h.httpClient.Do(proxyReq)
 	if err != nil {
 		errMetaJSON, _ := json.Marshal(Response{Status: 502, Headers: make(http.Header)})
-		h.keyMu.RLock()
-		encKey := h.primaryKey
-		h.keyMu.RUnlock()
 		errMetaFrame, _ := encodeMetadataFrame(encKey, errMetaJSON)
 		w.Header().Set(headerContentType, frameContentType)
 		w.WriteHeader(http.StatusOK)
@@ -281,9 +254,6 @@ func (h *Handler) forwardExternal(w http.ResponseWriter, r *http.Request, req *R
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	h.keyMu.RLock()
-	encKey := h.primaryKey
-	h.keyMu.RUnlock()
 	metaFrame, err := encodeMetadataFrame(encKey, respMetaJSON)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)

@@ -59,8 +59,8 @@ func TestServeHTTP_RejectsOversizedMetadataFrame(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 }
 
@@ -77,7 +77,7 @@ func TestClient_ConcurrentRequests(t *testing.T) {
 		_, _ = w.Write([]byte("hello"))
 	})
 
-	ts := httptest.NewServer(NewLocalHandler(key, local, nil))
+	ts := httptest.NewServer(withTunnelKey(key, NewLocalHandler(nil, local, nil)))
 	defer ts.Close()
 
 	client, err := NewClient(strings.Repeat("c", 64), ts.URL, 10*time.Second, nil)
@@ -124,7 +124,7 @@ func TestDispatchLocal_HandlerPanicDoesNotHang(t *testing.T) {
 		panic("boom")
 	})
 
-	ts := httptest.NewServer(NewLocalHandler(key, local, nil))
+	ts := httptest.NewServer(withTunnelKey(key, NewLocalHandler(nil, local, nil)))
 	defer ts.Close()
 
 	client, err := NewClient(strings.Repeat("d", 64), ts.URL, 5*time.Second, nil)
