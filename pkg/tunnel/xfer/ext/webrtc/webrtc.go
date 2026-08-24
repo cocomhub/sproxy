@@ -466,6 +466,10 @@ func newPC() (*webrtc.PeerConnection, *srflxDiag, error) {
 	// ICE 无法区分包归属（ufrag 串扰），连通性检查必然失败。
 	loopbackOnly := icecfg.LoopbackOnly()
 	if loopbackOnly {
+		// pion 默认 MulticastDNSModeQueryOnly 会另建独立 UDP socket（监听组播），
+		// 不走 SetICEUDPMux，绑定非 loopback → 仍触发 Windows 防火墙弹窗。必须显式
+		// 禁用 mDNS（loopback 收敛仅本机互联，host 候选用 IP，mDNS 无意义）。
+		s.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 		if ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
 			// 创建失败回退默认（可能弹窗但不阻断连接）。
 			slog.Warn("webrtc: 创建 loopback UDP socket 失败，回退默认候选收集", "err", err)
