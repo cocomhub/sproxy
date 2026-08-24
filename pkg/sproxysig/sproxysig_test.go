@@ -181,3 +181,18 @@ func TestEmptyBodyHash(t *testing.T) {
 		t.Fatalf("EmptyBodyHash=%q 应等于 sha256(空)=%q", got, BodyHash(nil))
 	}
 }
+
+func TestBodyValidator_Unsigned(t *testing.T) {
+	r := NewBodyValidator(strings.NewReader("x"), UnsignedBody)
+	b, err := io.ReadAll(r)
+	if err != nil || string(b) != "x" {
+		t.Fatalf("UNSIGNED 应透传不校验: %v %q", err, b)
+	}
+}
+
+func TestBodyValidator_Mismatch(t *testing.T) {
+	r := NewBodyValidator(strings.NewReader("x"), BodyHash([]byte("y")))
+	if _, err := io.ReadAll(r); err == nil {
+		t.Fatal("哈希不匹配应收错")
+	}
+}
