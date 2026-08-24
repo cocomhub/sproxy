@@ -82,7 +82,7 @@ func TestChainManager_Run_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state, err := store.Load(ctx, "chain:test-run-1")
+	state, err := store.Load(ctx, "chain-test-run-1")
 	if err != nil {
 		t.Fatal("expected cache to be preserved after successful run")
 	}
@@ -112,7 +112,7 @@ func TestChainManager_Run_Failure(t *testing.T) {
 		t.Fatal("expected error")
 	}
 
-	state, err := store.Load(ctx, "chain:test-run-2")
+	state, err := store.Load(ctx, "chain-test-run-2")
 	if err != nil {
 		t.Fatal("expected cache to be preserved after failed run")
 	}
@@ -127,7 +127,7 @@ func TestChainManager_Resume(t *testing.T) {
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
-	store.Save(ctx, "chain:test-resume", map[string]any{
+	store.Save(ctx, "chain-test-resume", map[string]any{
 		"type": "test_chain", "id": "test-resume", "phase": "phase2", "status": StatusRunning,
 	})
 
@@ -146,13 +146,13 @@ func TestChainManager_List(t *testing.T) {
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
-	store.Save(ctx, "chain:active1", map[string]any{
+	store.Save(ctx, "chain-active1", map[string]any{
 		"type": "test_chain", "id": "active1", "phase": "phase1", "status": StatusRunning,
 	})
-	store.Save(ctx, "chain:active2", map[string]any{
+	store.Save(ctx, "chain-active2", map[string]any{
 		"type": "test_chain", "id": "active2", "phase": "phase2", "status": StatusRunning,
 	})
-	store.Save(ctx, "chain:done1", map[string]any{
+	store.Save(ctx, "chain-done1", map[string]any{
 		"type": "test_chain", "id": "done1", "phase": PhaseCompleted, "status": StatusCompleted,
 	})
 
@@ -171,7 +171,7 @@ func TestChainManager_Delete(t *testing.T) {
 	store := NewMemoryKVStore()
 	cm := NewChainManager(store)
 
-	store.Save(ctx, "chain:todelete", map[string]any{
+	store.Save(ctx, "chain-todelete", map[string]any{
 		"type": "test_chain", "id": "todelete",
 	})
 
@@ -179,7 +179,7 @@ func TestChainManager_Delete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := store.Load(ctx, "chain:todelete")
+	_, err := store.Load(ctx, "chain-todelete")
 	if err == nil {
 		t.Fatal("expected cache to be deleted")
 	}
@@ -392,10 +392,10 @@ func TestFileClient_ListChains_WithManager(t *testing.T) {
 	store := NewMemoryKVStore()
 	client := NewFileClient("http://127.0.0.1:9999", WithKVStore(store))
 	// 先保存两条活跃链
-	store.Save(t.Context(), "chain:active-1", map[string]any{
+	store.Save(t.Context(), "chain-active-1", map[string]any{
 		"type": "test_chain", "id": "active-1", "phase": "phase1", "status": StatusRunning,
 	})
-	store.Save(t.Context(), "chain:active-2", map[string]any{
+	store.Save(t.Context(), "chain-active-2", map[string]any{
 		"type": "test_chain", "id": "active-2", "phase": "phase2", "status": StatusRunning,
 	})
 	states, err := client.ListChains(t.Context())
@@ -411,13 +411,13 @@ func TestFileClient_DeleteChain_WithManager(t *testing.T) {
 	t.Parallel()
 	store := NewMemoryKVStore()
 	client := NewFileClient("http://127.0.0.1:9999", WithKVStore(store))
-	store.Save(t.Context(), "chain:to-delete", map[string]any{
+	store.Save(t.Context(), "chain-to-delete", map[string]any{
 		"type": "test_chain", "id": "to-delete",
 	})
 	if err := client.DeleteChain(t.Context(), "to-delete"); err != nil {
 		t.Fatalf("DeleteChain: %v", err)
 	}
-	_, err := store.Load(t.Context(), "chain:to-delete")
+	_, err := store.Load(t.Context(), "chain-to-delete")
 	if err == nil {
 		t.Fatal("expected chain to be deleted")
 	}

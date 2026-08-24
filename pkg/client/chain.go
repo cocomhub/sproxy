@@ -264,7 +264,7 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 	if err != nil {
 		state := runner.State()
 		state["status"] = StatusFailed
-		if saveErr := m.store.Save(context.WithoutCancel(ctx), "chain:"+runner.ID(), state); saveErr != nil {
+		if saveErr := m.store.Save(context.WithoutCancel(ctx), "chain-"+runner.ID(), state); saveErr != nil {
 			return fmt.Errorf("链操作失败: %w（保存状态也失败: %v）", err, saveErr)
 		}
 		return err
@@ -273,7 +273,7 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 	// 用户可通过 List/Resume 查看已完成操作的历史，而不会误报为 error。
 	state := runner.State()
 	state["status"] = StatusCompleted
-	if err := m.store.Save(context.WithoutCancel(ctx), "chain:"+runner.ID(), state); err != nil {
+	if err := m.store.Save(context.WithoutCancel(ctx), "chain-"+runner.ID(), state); err != nil {
 		// 保存完成状态失败只记录警告，不阻断成功返回
 		slog.Warn("链操作成功但保存完成状态失败", "chain_id", runner.ID(), "error", err)
 	}
@@ -281,7 +281,7 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 }
 
 func (m *ChainManager) Resume(ctx context.Context, chainID string) (ChainRunner, error) {
-	state, err := m.store.Load(ctx, "chain:"+chainID)
+	state, err := m.store.Load(ctx, "chain-"+chainID)
 	if err != nil {
 		return nil, fmt.Errorf("加载链状态失败: %w", err)
 	}
@@ -299,7 +299,7 @@ func (m *ChainManager) Resume(ctx context.Context, chainID string) (ChainRunner,
 // 注意：返回的 runner 仅用于查看状态（Phase, Status, State），
 // 不可直接用于执行 Run 方法——如需恢复执行请使用 Resume。
 func (m *ChainManager) List(ctx context.Context) ([]ChainRunner, error) {
-	keys, err := m.store.List(ctx, "chain:")
+	keys, err := m.store.List(ctx, "chain-")
 	if err != nil {
 		return nil, err
 	}
@@ -329,12 +329,12 @@ func (m *ChainManager) List(ctx context.Context) ([]ChainRunner, error) {
 }
 
 func (m *ChainManager) Delete(ctx context.Context, chainID string) error {
-	return m.store.Delete(ctx, "chain:"+chainID)
+	return m.store.Delete(ctx, "chain-"+chainID)
 }
 
 func (m *ChainManager) saveState(ctx context.Context, runner ChainRunner) {
 	state := runner.State()
-	if err := m.store.Save(ctx, "chain:"+runner.ID(), state); err != nil {
+	if err := m.store.Save(ctx, "chain-"+runner.ID(), state); err != nil {
 		m.logger.Warn("保存链状态失败", "chain_id", runner.ID(), "error", err)
 	}
 }
