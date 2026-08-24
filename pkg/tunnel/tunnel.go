@@ -54,6 +54,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -61,6 +62,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"golang.org/x/crypto/hkdf"
 )
 
 const (
@@ -121,6 +124,21 @@ func GenerateKey() (string, error) {
 		return "", fmt.Errorf("generate key: %w", err)
 	}
 	return hex.EncodeToString(key), nil
+}
+
+// DeriveTunnelKey 从 SproxySig AccessKeySecret（SK，64 hex）派生 32B AES-256 隧道密钥。
+// salt 固定字符串提供域分离；info=mesh_id（每 mesh 独立）。两端必须用相同参数。
+func DeriveTunnelKey(skHex, meshID string) ([]byte, error) {
+	secret, err := hex.DecodeString(skHex)
+	if err != nil {
+		return nil, fmt.Errorf("derive: invalid sk: %w", err)
+	}
+	r := hkdf.New(sha256.New, secret, []byte("sproxy-tunnel-key-v1"), []byte(meshID))
+	out := make([]byte, 32)
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil, fmt.Errorf("derive: %w", err)
+	}
+	return out, nil
 }
 
 // blockCache 缓存 AES cipher.Block 实例，避免同一密钥重复做密钥扩展。

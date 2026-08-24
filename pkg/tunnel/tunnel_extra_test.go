@@ -171,3 +171,19 @@ func TestResolveKey_BothFail(t *testing.T) {
 	}
 	t.Logf("got expected error: %v", err)
 }
+
+func TestDeriveTunnelKey(t *testing.T) {
+	sk := "2b40d5b60e6792134f07b44b46e2e19fb72f967136868015cb922d720c1aa6f5"
+	k1, _ := DeriveTunnelKey(sk, "meshA")
+	k2, _ := DeriveTunnelKey(sk, "meshB")
+	if len(k1) != 32 || bytes.Equal(k1, k2) {
+		t.Fatalf("derived key len=%d equal=%v", len(k1), bytes.Equal(k1, k2))
+	}
+	k1b, _ := DeriveTunnelKey(sk, "meshA")
+	if !bytes.Equal(k1, k1b) {
+		t.Fatal("派生必须确定")
+	}
+	if _, err := DeriveTunnelKey("zz", ""); err == nil {
+		t.Fatal("非法 hex 应报错")
+	}
+}
