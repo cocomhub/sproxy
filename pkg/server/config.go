@@ -10,7 +10,6 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
-	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"gopkg.in/yaml.v3"
 )
 
@@ -90,7 +89,6 @@ type Config struct {
 	LogLevel       string          `yaml:"log_level" mapstructure:"log_level"`
 	LogFormat      string          `yaml:"log_format" mapstructure:"log_format"`
 	MaxHeaderBytes int             `yaml:"max_header_bytes" mapstructure:"max_header_bytes"`
-	TunnelKey      string          `yaml:"tunnel_key" mapstructure:"tunnel_key"`
 	TLS            TLSConfig       `yaml:"tls" mapstructure:"tls"`
 	RateLimit      RateLimitConfig `yaml:"rate_limit" mapstructure:"rate_limit"`
 	CORS           CORSConfig      `yaml:"cors" mapstructure:"cors"`
@@ -226,14 +224,8 @@ func (c *Config) Validate() error {
 	if c.UploadsDir == "" {
 		return fmt.Errorf("uploads_dir 为空，请配置上传目录")
 	}
-	if c.TunnelKey == "" && !c.TLS.Enabled {
-		return fmt.Errorf("tunnel_key 为空且 TLS 未启用，传输将完全明文，请配置 tunnel_key 或启用 TLS")
-	}
-	if c.TunnelKey != "" {
-		if _, err := tunnel.ParseKey(c.TunnelKey); err != nil {
-			return fmt.Errorf("tunnel_key 校验失败（必须是 64 位十六进制字符 0-9a-fA-F）: %w", err)
-		}
-	}
+	// 无 auth 配置（access_keys/api_keys 均为空）在 Validate 层是合法的——
+	// fail-fast 拒绝启动在 cmd/sproxy 侧执行。
 	if c.APIKeys.Enabled && len(c.APIKeys.Keys) == 0 {
 		return fmt.Errorf("api_keys.enabled=true 但未配置任何密钥，认证将拒绝所有请求")
 	}
@@ -307,7 +299,7 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func SaveConfig(cfg *Config, path string) error {
-	// TODO: 后续优化敏感信息管理（TunnelKey/AuthToken 脱敏）
+	// TODO: 后续优化敏感信息管理（AuthToken 脱敏）
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)

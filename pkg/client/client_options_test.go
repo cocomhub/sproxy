@@ -95,7 +95,7 @@ func TestWithTunnel_ValidKey(t *testing.T) {
 	c := NewFileClient("http://127.0.0.1:18083")
 	// 64 hex chars = 32 bytes = valid AES-256 key
 	validKey := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	WithTunnel(validKey)(c)
+	WithTunnel(testTunnelAK, validKey)(c)
 	if c.tunnelClient == nil {
 		t.Fatal("tunnelClient should not be nil for valid key")
 	}
@@ -105,7 +105,7 @@ func TestWithTunnel_InvalidKey(t *testing.T) {
 	t.Parallel()
 
 	c := NewFileClient("http://127.0.0.1:18083")
-	WithTunnel(strings.Repeat("abcdef", 11))(c) // 66 chars → invalid, logged as warn
+	WithTunnel(testTunnelAK, strings.Repeat("abcdef", 11))(c) // 66 chars → invalid, logged as warn
 	if c.tunnelClient != nil {
 		t.Fatal("tunnelClient should be nil for invalid key")
 	}
@@ -458,7 +458,7 @@ func TestTunnelDo_WithXferNoTransport(t *testing.T) {
 }
 
 func TestTunnelDo_WithTunnel(t *testing.T) {
-	// WithTunnel 被 WithXfer 抢占 — 预期 xfer 错误（因 ws 未注册）
+	// WithTunnel 生成 tunnelClient，但此处 xferName 已设 —— 实际不冲突；此测试验证未注册 xfer → 报错。
 	c := &FileClient{
 		serverURL:  "http://127.0.0.1:18083",
 		httpClient: http.DefaultClient,

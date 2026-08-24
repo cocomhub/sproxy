@@ -21,7 +21,6 @@ import (
 type Config struct {
 	ServerURL    string `yaml:"server_url" mapstructure:"server_url"`
 	Timeout      int    `yaml:"timeout" mapstructure:"timeout"`
-	TunnelKey    string `yaml:"tunnel_key" mapstructure:"tunnel_key"`
 	ChunkSize    int64  `yaml:"chunk_size" mapstructure:"chunk_size"`
 	MaxChunkSize int64  `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
 	// AccessKey / AccessKeySecret 是 SproxySig 请求签名认证（替代旧 auth_token）。
@@ -80,9 +79,6 @@ func (c *Config) Validate() error {
 	}
 	if c.ChunkSize <= 0 {
 		return fmt.Errorf("chunk_size 必须大于 0")
-	}
-	if c.TunnelKey != "" && len(c.TunnelKey) != 64 {
-		return fmt.Errorf("tunnel_key 必须是 64 位 hex 字符")
 	}
 	return nil
 }
@@ -151,13 +147,6 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 	}
 	fmt.Fprintf(w, "ServerURL:     %s\n", cfg.ServerURL)
 	fmt.Fprintf(w, "Timeout:       %d\n", cfg.Timeout)
-	maskedKey := cfg.TunnelKey
-	if len(maskedKey) > 4 {
-		maskedKey = maskedKey[:4] + "****"
-	} else if len(maskedKey) > 0 {
-		maskedKey = "****"
-	}
-	fmt.Fprintf(w, "TunnelKey:     %s\n", maskedKey)
 	maskedSecret := cfg.AccessKeySecret
 	if len(maskedSecret) > 4 {
 		maskedSecret = maskedSecret[:4] + "****"
@@ -204,8 +193,6 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 		} else {
 			cfg.Timeout = timeout
 		}
-	case "tunnel_key":
-		cfg.TunnelKey = value
 	case "chunk_size":
 		chunkSize, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
@@ -252,7 +239,6 @@ type ConfigResponse struct {
 	LogLevel           string `json:"log_level"`
 	LogFormat          string `json:"log_format"`
 	AccessKeysSet      bool   `json:"access_keys_set"`
-	TunnelKeySet       bool   `json:"tunnel_key_set"`
 	RateLimitRequests  int    `json:"rate_limit_requests"`
 	RateLimitWindow    string `json:"rate_limit_window"`
 	MaxStorageBytes    int64  `json:"max_storage_bytes"`

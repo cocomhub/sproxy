@@ -106,11 +106,33 @@ func TestBuildTunnelRequest_WithBody(t *testing.T) {
 	}
 }
 
+// tunnelProxyHandler 构造一个认证驱动模式的隧道代理：把派生密钥放入 ctx 再交给 Handler。
+// 等价于服务端 authMiddleware 验签成功后 SetTunnelKey 再进入隧道 handler。
+// 派生规则与客户端 WithTunnel 一致：HKDF(SK, mesh)，mesh 从 AK 提取（sk[-<mesh>]-<hex>）。
+func tunnelProxyHandler(t *testing.T, ak, sk string) http.HandlerFunc {
+	t.Helper()
+	parts := strings.Split(ak, "-")
+	mesh := ""
+	if len(parts) == 3 && parts[0] == "sk" {
+		mesh = parts[1]
+	}
+	keyBytes, err := tunnel.DeriveTunnelKey(sk, mesh)
+	if err != nil {
+		t.Fatalf("derive tunnel key: %v", err)
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tunnel" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		tunnel.NewHandler(keyBytes, nil).ServeHTTP(w, r.WithContext(tunnel.SetTunnelKey(r.Context(), keyBytes)))
+	}
+}
+
 func TestTunnelCmd_MethodFlag(t *testing.T) {
 	t.Parallel()
 
 	key := testutil.TestKey()
-	keyBytes, _ := tunnel.ParseKey(key)
 	// 目标后端：验证 method 传递
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
@@ -121,17 +143,10 @@ func TestTunnelCmd_MethodFlag(t *testing.T) {
 	}))
 	defer target.Close()
 
-	// 隧道代理：将加密请求转发到目标后端
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/tunnel" {
-			tunnel.NewHandler(keyBytes, nil).ServeHTTP(w, r)
-			return
-		}
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
+	proxy := httptest.NewServer(tunnelProxyHandler(t, testutil.TestAccessKey(), key))
 	defer proxy.Close()
 
-	svc := client.NewFileClient(proxy.URL, client.WithTunnel(key))
+	svc := client.NewFileClient(proxy.URL, client.WithTunnel(testutil.TestAccessKey(), key))
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard, Out: io.Discard})
 	cmd.SetArgs([]string{"-X", "POST", target.URL + "/data"})
@@ -145,7 +160,6 @@ func TestTunnelCmd_HeaderFlag(t *testing.T) {
 	t.Parallel()
 
 	key := testutil.TestKey()
-	keyBytes, _ := tunnel.ParseKey(key)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Custom") != "value" {
 			t.Errorf("expected X-Custom: value, got %q", r.Header.Get("X-Custom"))
@@ -155,16 +169,10 @@ func TestTunnelCmd_HeaderFlag(t *testing.T) {
 	}))
 	defer target.Close()
 
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/tunnel" {
-			tunnel.NewHandler(keyBytes, nil).ServeHTTP(w, r)
-			return
-		}
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
+	proxy := httptest.NewServer(tunnelProxyHandler(t, testutil.TestAccessKey(), key))
 	defer proxy.Close()
 
-	svc := client.NewFileClient(proxy.URL, client.WithTunnel(key))
+	svc := client.NewFileClient(proxy.URL, client.WithTunnel(testutil.TestAccessKey(), key))
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard, Out: io.Discard})
 	cmd.SetArgs([]string{"-H", "X-Custom: value", target.URL + "/data"})
@@ -178,7 +186,6 @@ func TestTunnelCmd_DataFlag(t *testing.T) {
 	t.Parallel()
 
 	key := testutil.TestKey()
-	keyBytes, _ := tunnel.ParseKey(key)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if string(body) != `{"key":"val"}` {
@@ -189,16 +196,10 @@ func TestTunnelCmd_DataFlag(t *testing.T) {
 	}))
 	defer target.Close()
 
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/tunnel" {
-			tunnel.NewHandler(keyBytes, nil).ServeHTTP(w, r)
-			return
-		}
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
+	proxy := httptest.NewServer(tunnelProxyHandler(t, testutil.TestAccessKey(), key))
 	defer proxy.Close()
 
-	svc := client.NewFileClient(proxy.URL, client.WithTunnel(key))
+	svc := client.NewFileClient(proxy.URL, client.WithTunnel(testutil.TestAccessKey(), key))
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard, Out: io.Discard})
 	cmd.SetArgs([]string{"-d", `{"key":"val"}`, target.URL + "/data"})
@@ -212,23 +213,16 @@ func TestTunnelCmd_IncludeFlag(t *testing.T) {
 	t.Parallel()
 
 	key := testutil.TestKey()
-	keyBytes, _ := tunnel.ParseKey(key)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	}))
 	defer target.Close()
 
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/tunnel" {
-			tunnel.NewHandler(keyBytes, nil).ServeHTTP(w, r)
-			return
-		}
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
+	proxy := httptest.NewServer(tunnelProxyHandler(t, testutil.TestAccessKey(), key))
 	defer proxy.Close()
 
-	svc := client.NewFileClient(proxy.URL, client.WithTunnel(key))
+	svc := client.NewFileClient(proxy.URL, client.WithTunnel(testutil.TestAccessKey(), key))
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard, Out: io.Discard})
 	cmd.SetArgs([]string{"-i", target.URL + "/data"})
@@ -240,7 +234,7 @@ func TestTunnelCmd_IncludeFlag(t *testing.T) {
 
 func TestTunnelCmd_WithConfigKey(t *testing.T) {
 	t.Parallel()
-	svc := client.NewFileClient("http://127.0.0.1:1", client.WithTunnel(testutil.TestKey()))
+	svc := client.NewFileClient("http://127.0.0.1:1", client.WithTunnel(testutil.TestAccessKey(), testutil.TestKey()))
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard, Out: io.Discard})
 	cmd.SetArgs([]string{"http://any-host.local/data"})

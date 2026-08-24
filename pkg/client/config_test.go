@@ -15,6 +15,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// 测试共享常量：access-key 驱动的隧道密钥固定 AK/SK。
+const (
+	testTunnelAK = "sk-test-1234567890abcdef1234567890abcdef"
+	testTunnelSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+
 // mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。
 type mapProvider struct {
 	m map[string]any
@@ -72,18 +78,6 @@ func TestConfigValidate(t *testing.T) {
 		t.Errorf("expected ChunkSize to default to %d, got %d", size.DefaultChunkSize, cfg4.ChunkSize)
 	}
 
-	// invalid tunnel_key length → error
-	cfg5 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, TunnelKey: "too-short"}
-	if err := cfg5.Validate(); err == nil {
-		t.Fatal("expected error for invalid tunnel_key length, got nil")
-	}
-
-	// valid tunnel_key length → no error
-	cfg6 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, TunnelKey: strings.Repeat("a", 64)}
-	if err := cfg6.Validate(); err != nil {
-		t.Fatalf("Validate() on config with 64-char tunnel_key: %v", err)
-	}
-
 	// auth_token 任意字符串都合法
 	cfg7 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AccessKey: "ak", AccessKeySecret: "my-token"}
 	if err := cfg7.Validate(); err != nil {
@@ -117,17 +111,6 @@ func TestLoadFromProvider(t *testing.T) {
 	}
 	if cfg.AccessKeySecret != "secret" {
 		t.Errorf("AccessKeySecret = %q, want %q", cfg.AccessKeySecret, "secret")
-	}
-}
-
-func TestLoadFromProvider_InvalidTunnelKey(t *testing.T) {
-	t.Parallel()
-
-	p := mapProvider{m: map[string]any{"server_url": "http://test:8080", "tunnel_key": "bad-key"}}
-
-	_, err := LoadFromProvider(p)
-	if err == nil {
-		t.Fatal("expected error for invalid tunnel_key, got nil")
 	}
 }
 
@@ -185,7 +168,6 @@ func TestHandleConfigShow(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ServerURL = "https://example.com"
 	cfg.Timeout = 120
-	cfg.TunnelKey = strings.Repeat("d", 64)
 	cfg.AccessKey = "ak"
 	cfg.AccessKeySecret = "my-secret-token"
 	cfg.ChunkSize = 8 << 20
@@ -202,8 +184,8 @@ func TestHandleConfigShow(t *testing.T) {
 	if !strings.Contains(out, "Timeout:       120") {
 		t.Errorf("expected Timeout in output, got: %s", out)
 	}
-	if !strings.Contains(out, "dddd****") {
-		t.Errorf("expected masked TunnelKey in output, got: %s", out)
+	if !strings.Contains(out, "AccessKeySecret: my-s****") {
+		t.Errorf("expected masked AccessKeySecret in output, got: %s", out)
 	}
 	if !strings.Contains(out, "my-s****") {
 		t.Errorf("expected masked AuthToken in output, got: %s", out)
@@ -266,14 +248,14 @@ func TestLoadConfig_EmptyFile(t *testing.T) {
 
 func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.TunnelKey = "short"
+	cfg.AccessKeySecret = "short-sk"
 
 	var buf bytes.Buffer
 	HandleConfigShow(cfg, &buf)
 	out := buf.String()
 
-	if !strings.Contains(out, "shor****") {
-		t.Errorf("expected masked short key (shor****) in output, got: %s", out)
+	if !strings.Contains(out, "AccessKeySecret: shor****") {
+		t.Errorf("expected masked AccessKeySecret, got: %s", out)
 	}
 }
 

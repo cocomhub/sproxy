@@ -45,15 +45,13 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	key := make([]byte, 32) // 32 字节 tunnel key，测试用零值
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "test",
-		BuildAt:   "test",
-		TunnelKey: key,
-		Logger:    slog.Default(),
+		Mux:     mux,
+		CfgPtr:  &cfgPtr,
+		Version: "test",
+		BuildAt: "test",
+		Logger:  slog.Default(),
 	})
 
 	ts := httptest.NewServer(h.Handler())
@@ -899,14 +897,12 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
-	key := make([]byte, 32) // 32 字节 tunnel key，测试用零值
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "test-version",
-		BuildAt:   "test-buildat",
-		TunnelKey: key,
-		Logger:    testLogger(),
+		Mux:     mux,
+		CfgPtr:  &cfgPtr,
+		Version: "test-version",
+		BuildAt: "test-buildat",
+		Logger:  testLogger(),
 	})
 
 	ts := httptest.NewServer(h.Handler())
@@ -1550,14 +1546,22 @@ func TestUpload_ExistingFileChecksumMismatch(t *testing.T) {
 // 其 trace_id 与客户端一致（span_id 为新生成），实现隧道内层全链路追踪。
 func TestTunnelInnerRequest_InheritsClientTraceID(t *testing.T) {
 	t.Parallel()
-	url, _ := newTestServerWithAllRoutes(t, nil)
+	// 认证驱动隧道：配置 access_keys，隧道密钥由 AK/SK 派生。
+	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+	})
 
-	// 服务端 TunnelKey 是 32 个零字节，对应 64 个 hex '0'。
-	hexKey := strings.Repeat("00", 32)
-	tc, err := tunnel.NewClient(hexKey, url+"/tunnel", 5*time.Second, nil)
+	// 客户端密钥 = HKDF(testAccessSecret, meshID="")；/tunnel 外层请求需 UNSIGNED 签名。
+	key, err := tunnel.DeriveTunnelKey(testAccessSecret, "")
+	if err != nil {
+		t.Fatalf("DeriveTunnelKey: %v", err)
+	}
+	tc, err := tunnel.NewClient(hex.EncodeToString(key), url+"/tunnel", 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("tunnel.NewClient: %v", err)
 	}
+	base := tc.HTTPClient.Transport
+	tc.HTTPClient.Transport = &tunnelSignTransport{base: base, ak: testAccessKey, sk: testAccessSecret}
 
 	const wantTraceID = "0123456789abcdef0123456789abcdef"
 	const wantSpanID = "abcd1234abcd1234"

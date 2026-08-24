@@ -137,6 +137,9 @@ func DeriveTunnelKey(skHex, meshID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("derive: invalid sk: %w", err)
 	}
+	if len(secret) != 32 {
+		return nil, fmt.Errorf("derive: sk must be 32 bytes (64 hex chars), got %d", len(secret))
+	}
 	r := hkdf.New(sha256.New, secret, []byte("sproxy-tunnel-key-v1"), []byte(meshID))
 	out := make([]byte, 32)
 	if _, err := io.ReadFull(r, out); err != nil {

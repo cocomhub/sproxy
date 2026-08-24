@@ -52,7 +52,6 @@ type configResponse struct {
 	LogLevel           string `json:"log_level"`
 	LogFormat          string `json:"log_format"`
 	AccessKeysSet      bool   `json:"access_keys_set"` // 是否已配置 AccessKey（SproxySig 认证）
-	TunnelKeySet       bool   `json:"tunnel_key_set"`  // 是否已设置 tunnel key
 	RateLimitRequests  int    `json:"rate_limit_requests"`
 	RateLimitWindow    string `json:"rate_limit_window"` // Duration 字符串
 	MaxStorageBytes    int64  `json:"max_storage_bytes"`
@@ -76,7 +75,6 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 		LogLevel:           cfg.LogLevel,
 		LogFormat:          cfg.LogFormat,
 		AccessKeysSet:      len(cfg.AccessKeys) > 0,
-		TunnelKeySet:       cfg.TunnelKey != "",
 		RateLimitRequests:  cfg.RateLimit.Requests,
 		RateLimitWindow:    cfg.RateLimit.Window.String(),
 		MaxStorageBytes:    cfg.MaxStorageBytes,

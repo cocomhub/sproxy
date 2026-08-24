@@ -16,6 +16,12 @@ func TestKey() string {
 	return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 
+// TestAccessKey returns a deterministic AccessKey（sk-<no mesh>-<16B hex>）。
+// 服务端 access_keys 配置与客户端 WithTunnel(ak, sk) 共用此值，保证隧道密钥派生一致。
+func TestAccessKey() string {
+	return "sk-00000000000000000000000000000000"
+}
+
 // SHA256Hex computes the hex-encoded SHA-256 hash of data.
 func SHA256Hex(data []byte) string {
 	h := sha256.Sum256(data)
