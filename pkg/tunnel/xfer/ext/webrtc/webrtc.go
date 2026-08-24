@@ -35,6 +35,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/internal/icecfg"
+	"github.com/pion/ice/v4"
 	"github.com/pion/logging"
 	"github.com/pion/webrtc/v4"
 )
@@ -453,9 +455,30 @@ func newPC() (*webrtc.PeerConnection, *srflxDiag, error) {
 	s.DetachDataChannels()
 	// verbose 时提升 pion 底层 scope（ice/dtls/sctp/webrtc）到 TRACE，便于打洞排障
 	s.LoggerFactory = configureLoggerFactory(verbose)
+	// 测试专用 loopback 收敛：webrtctest.New(t) 开启后，把 UDP 候选收集收敛到
+	// loopback 接口（每个 PeerConnection 独立 socket），避免 Windows 反复弹防火墙
+	// 授权框；生产默认 false 不注入。需同时 SetIncludeLoopbackCandidate(true)：
+	// pion ICE agent 默认 includeLoopback=false，即使绑了 loopback 也会跳过该 host
+	// 候选，导致 ICE 连通性检查必然失败（gather.go 对 loopback 地址有显式过滤）。
+	//
+	// 注意：这里用「每 PC 独立 loopback socket」（ice.NewUDPMuxDefault + 127.0.0.1），
+	// 而非共享单 socket 复用——两个独立 PeerConnection 共享同一 UDP socket 时 pion 的
+	// ICE 无法区分包归属（ufrag 串扰），连通性检查必然失败。
+	loopbackOnly := icecfg.LoopbackOnly()
+	if loopbackOnly {
+		if ln, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}); err != nil {
+			// 创建失败回退默认（可能弹窗但不阻断连接）。
+			slog.Warn("webrtc: 创建 loopback UDP socket 失败，回退默认候选收集", "err", err)
+		} else {
+			s.SetICEUDPMux(ice.NewUDPMuxDefault(ice.UDPMuxParams{UDPConn: ln}))
+			s.SetIncludeLoopbackCandidate(true)
+		}
+	}
 	// 安全过滤远程 ICE 候选：默认拒 loopback/link-local/multicast/unspecified/broadcast，
-	// 私网（RFC1918+ULA）默认放行（保 LAN mesh）；useHostOnly 时全放行（本机 loopback 合法）。
-	if !useHostOnly {
+	// 私网（RFC1918+ULA）默认放行（保 LAN mesh）；useHostOnly 或 loopback 收敛开启时
+	// 全放行（本机 loopback 候选合法——loopback 收敛时远程候选即本机 loopback，若过滤
+	// 会被拒导致 ICE 连通性检查必然失败）。
+	if !useHostOnly && !loopbackOnly {
 		s.SetRemoteIPFilter(remoteCandidateFilter(rejectPrivateRemoteCandidates))
 	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(s))
