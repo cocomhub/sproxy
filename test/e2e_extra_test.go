@@ -45,7 +45,7 @@ func TestE2E_ChunkedUploadDownload(t *testing.T) {
 	}
 
 	// Stat to verify
-	statResp, err := http.Head(baseURL + "/api/files/stat?filename=" + filename)
+	statResp, err := authedHTTPClient.Head(baseURL + "/api/files/stat?filename=" + filename)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestE2E_ChunkedUploadDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Range", "bytes=100-199")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedHTTPClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestE2E_MkdirRmdir(t *testing.T) {
 	defer cleanup()
 
 	// Mkdir
-	resp, err := http.Post(baseURL+"/mkdir?dirname=e2e_testdir", "application/json", nil)
+	resp, err := authedHTTPClient.Post(baseURL+"/mkdir?dirname=e2e_testdir", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestE2E_MkdirRmdir(t *testing.T) {
 	}
 
 	// List subdir
-	resp, err = http.Get(baseURL + "/api/files?subdir=e2e_testdir")
+	resp, err = authedHTTPClient.Get(baseURL + "/api/files?subdir=e2e_testdir")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestE2E_MkdirRmdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err = http.DefaultClient.Do(req)
+	resp, err = authedHTTPClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestE2E_ArchiveDir(t *testing.T) {
 	defer cleanup()
 
 	// Create the directory first
-	mkResp, err := http.Post(baseURL+"/mkdir?dirname=archivedir", "application/json", nil)
+	mkResp, err := authedHTTPClient.Post(baseURL+"/mkdir?dirname=archivedir", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestE2E_ArchiveDir(t *testing.T) {
 	}
 
 	// Archive the directory
-	resp, err := http.Get(baseURL + "/api/archive-dir?dirname=archivedir")
+	resp, err := authedHTTPClient.Get(baseURL + "/api/archive-dir?dirname=archivedir")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestE2E_BatchDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedHTTPClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestE2E_SclientCLI(t *testing.T) {
 
 	// sclient list: use a temp config to avoid local tunnel interference
 	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
-	cfgContent := fmt.Sprintf("server_url: %s\n", baseURL)
+	cfgContent := fmt.Sprintf("server_url: %s\naccess_key: %s\naccess_key_secret: %s\n", baseURL, e2eTestAK, e2eTestSK)
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestE2E_WebUIAccessible(t *testing.T) {
 	baseURL, cleanup := startSPROXY(t)
 	defer cleanup()
 
-	resp, err := http.Get(baseURL + "/ui/")
+	resp, err := authedHTTPClient.Get(baseURL + "/ui/")
 	if err != nil {
 		t.Fatalf("GET /ui/ failed: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestE2E_HealthEndpoint(t *testing.T) {
 	baseURL, cleanup := startSPROXY(t)
 	defer cleanup()
 
-	resp, err := http.Get(baseURL + "/healthz")
+	resp, err := authedHTTPClient.Get(baseURL + "/healthz")
 	if err != nil {
 		t.Fatalf("GET /healthz failed: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestE2E_FileListAfterUpload(t *testing.T) {
 	}
 
 	// List files via /api/files to verify
-	resp, err := http.Get(baseURL + "/api/files")
+	resp, err := authedHTTPClient.Get(baseURL + "/api/files")
 	if err != nil {
 		t.Fatalf("GET /api/files failed: %v", err)
 	}
@@ -425,7 +425,7 @@ func startSPROXYWithAccessKeys(t *testing.T, accessKeysYAML string) (string, fun
 	ready := false
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(baseURL + "/healthz")
+		resp, err := authedHTTPClient.Get(baseURL + "/healthz")
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -454,7 +454,7 @@ func TestE2E_SproxySigAuth(t *testing.T) {
 	defer cleanup()
 
 	// 未签名 GET /api/files → 401（access_keys 强制验签）
-	resp, err := http.Get(baseURL + "/api/files")
+	resp, err := authedHTTPClient.Get(baseURL + "/api/files")
 	if err != nil {
 		t.Fatalf("unsigned GET /api/files: %v", err)
 	}

@@ -224,3 +224,19 @@ func TestBodyValidator_DataAndEOF(t *testing.T) {
 		t.Fatalf("ReadAll 内容 = %q, want %q（末尾 chunk 被丢弃）", got, payload)
 	}
 }
+
+// TestBodyValidator_DataAndEOF_Mismatch：最后一次 Read 同时返回数据与 EOF 且哈希不匹配时，
+// 必须立即报错（不得延迟到后续 Read，否则调用方读到 (n, nil) 后停止读取会绕过校验）。
+func TestBodyValidator_DataAndEOF_Mismatch(t *testing.T) {
+	// 声明哈希是 "world"，实际 body 是 "hello"——即使 (n>0, io.EOF) 也必须立即拒绝。
+	r := NewBodyValidator(&eofWithDataReader{data: []byte("hello")}, BodyHash([]byte("world")))
+	// 单次 Read：应返回数据 + 错误（或 0 + 错误），但绝不能 (n, nil)。
+	buf := make([]byte, 32)
+	n, err := r.Read(buf)
+	if err == nil {
+		t.Fatalf("哈希不匹配应返回错误，got (n=%d, err=nil)", n)
+	}
+	if !strings.Contains(err.Error(), "哈希不匹配") {
+		t.Fatalf("错误应包含'哈希不匹配', got %v", err)
+	}
+}
