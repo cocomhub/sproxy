@@ -22,6 +22,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
 // e2eModuleRoot 返回 sproxy module 根目录（本文件位于 test/，上级即 module 根）。
@@ -81,10 +83,31 @@ func newKillWaitCleanup(cmd *exec.Cmd) func() {
 // e2eHTTPClient 是 hub 探测用的短超时客户端，避免轮询被挂起请求卡死。
 var e2eHTTPClient = &http.Client{Timeout: 2 * time.Second}
 
+// signedHubGET 用 SproxySig 签名 GET 请求 hub API（access_keys 配置后全 HTTP 面验签）。
+func signedHubGET(baseURL, path, ak, sk string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	sproxysig.SignRequest(req, ak, sk)
+	return e2eHTTPClient.Do(req)
+}
+
+// sproxySigHeader 构造 SproxySig Authorization 头值（带 body 哈希；原始 socket 请求用）。
+func sproxySigHeader(ak, sk, method, path, query string, body []byte) string {
+	now := time.Now()
+	h := sproxysig.Header{
+		Version: sproxysig.Version, AK: ak,
+		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce: sproxysig.NewNonce(), BodySHA256: sproxysig.BodyHash(body),
+	}
+	return sproxysig.SignAndFormat(sk, h, method, path, query)
+}
+
 // hubNodesOK 报告 /api/hub/nodes 是否已装配并返回合法 JSON 数组
 // （hub 路由就绪，S116；routeTable nil 时该路由返回 404）。
-func hubNodesOK(baseURL string) bool {
-	resp, err := e2eHTTPClient.Get(baseURL + "/api/hub/nodes")
+func hubNodesOK(baseURL, ak, sk string) bool {
+	resp, err := signedHubGET(baseURL, "/api/hub/nodes", ak, sk)
 	if err != nil {
 		return false
 	}
@@ -100,8 +123,8 @@ func hubNodesOK(baseURL string) bool {
 }
 
 // hubNodeRegistered 查询 /api/hub/nodes 判断 nodeID 是否已在 hub 注册。
-func hubNodeRegistered(baseURL, nodeID string) bool {
-	resp, err := e2eHTTPClient.Get(baseURL + "/api/hub/nodes")
+func hubNodeRegistered(baseURL, nodeID, ak, sk string) bool {
+	resp, err := signedHubGET(baseURL, "/api/hub/nodes", ak, sk)
 	if err != nil {
 		return false
 	}
@@ -126,11 +149,11 @@ func hubNodeRegistered(baseURL, nodeID string) bool {
 // waitNodeRegistered 轮询 /api/hub/nodes 直到 nodeID 出现（I72，替代固定 sleep）。
 // 10s 对齐 registerAckTimeout；超时则 Kill+Wait 并打印 sclient stderr 后失败（S112）。
 // killWait 由调用方传入（sync.Once 保护），超时路径与 defer cleanup 共享同一 Wait。
-func waitNodeRegistered(t *testing.T, hubURL, nodeID string, stderrBuf *bytes.Buffer, killWait func()) {
+func waitNodeRegistered(t *testing.T, hubURL, nodeID, ak, sk string, stderrBuf *bytes.Buffer, killWait func()) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if hubNodeRegistered(hubURL, nodeID) {
+		if hubNodeRegistered(hubURL, nodeID, ak, sk) {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -149,8 +172,10 @@ func logStderrOnFailure(t *testing.T, label string, stderrBuf *bytes.Buffer) {
 	})
 }
 
-// startHubSPROXY 启动一个启用了 hub 中继的 sproxy，返回 baseURL 与 cleanup。
-func startHubSPROXY(t *testing.T) (string, func()) {
+// startHubSPROXY 启动一个启用了 hub 中继 + SproxySig access_keys 的 sproxy，
+// 返回 baseURL、生成的 AK/SK 与 cleanup。hub 注册准入由顶层 access_keys 提供
+// （SproxySig AccessKey + HMAC proof），relay_token 已废除。
+func startHubSPROXY(t *testing.T) (string, string, string, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sproxy")
@@ -165,22 +190,24 @@ func startHubSPROXY(t *testing.T) (string, func()) {
 	addr := l.Addr().String()
 	l.Close() //nolint:staticcheck
 
+	ak, sk := generateTestAccessKeyPair(t)
 	uploadsDir := filepath.Join(tmpDir, "uploads")
 	_ = os.MkdirAll(uploadsDir, 0755)
 
 	configPath := filepath.Join(tmpDir, "hub.yaml")
-	configContent := []byte(`tls:
+	configContent := fmt.Sprintf(`tls:
   enabled: false
-tunnel_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 hub:
   enabled: true
-  relay_token: "e2e-relay-token"
   transports:
     ws:
       enabled: true
       path: /ws
-`)
-	if err := os.WriteFile(configPath, configContent, 0644); err != nil {
+access_keys:
+  - key: %q
+    secret: %q
+`, ak, sk)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("write hub config: %v", err)
 	}
 	cmd := exec.Command(binPath, "--addr", addr, "--uploads-dir", uploadsDir, "--config", configPath)
@@ -203,7 +230,7 @@ hub:
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" && hubNodesOK(baseURL) {
+			if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" && hubNodesOK(baseURL, ak, sk) {
 				ready = true
 				break
 			}
@@ -215,13 +242,13 @@ hub:
 		t.Fatalf("hub sproxy not ready; stderr:\n%s", stderrBuf.String())
 	}
 
-	return baseURL, cleanup
+	return baseURL, ak, sk, cleanup
 }
 
 // startSClientRelay 启动一个 sclient relay start 叶子节点（出口模式，--dial-allow）。
 // 返回 cleanup（Kill+Wait，sync.Once 保护）。nodeID 是注册到 hub 的节点 ID。
 // 本测试只走 dial 帧分支（/api/relay/stream），不触发 HTTP 中继，故不传 --local（S113）。
-func startSClientRelay(t *testing.T, hubURL, nodeID string) func() {
+func startSClientRelay(t *testing.T, hubURL, nodeID, ak, sk string) func() {
 	t.Helper()
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
@@ -238,7 +265,8 @@ func startSClientRelay(t *testing.T, hubURL, nodeID string) func() {
 		"--config", configPath,
 		"--hub", wsURL,
 		"--node-id", nodeID,
-		"--token", "e2e-relay-token",
+		"--access-key", ak,
+		"--access-key-secret", sk,
 		"--dial-allow",                     // 允许叶子出站拨号（供 caller 经 /api/relay/stream 中继）
 		"--dial-allow-cidr", "127.0.0.0/8", // E2E 用回环 echo，放行回环网段
 	}
@@ -253,7 +281,7 @@ func startSClientRelay(t *testing.T, hubURL, nodeID string) func() {
 	logStderrOnFailure(t, "sclient relay "+nodeID, &stderrBuf)
 	killWait := newKillWaitCleanup(cmd)
 	// 等待注册完成（I72）：轮询 /api/hub/nodes，替代固定 sleep。
-	waitNodeRegistered(t, hubURL, nodeID, &stderrBuf, killWait)
+	waitNodeRegistered(t, hubURL, nodeID, ak, sk, &stderrBuf, killWait)
 	return killWait
 }
 
@@ -261,7 +289,7 @@ func startSClientRelay(t *testing.T, hubURL, nodeID string) func() {
 // hub(sproxy with hub.enabled) + leaf(sclient relay start 注册) + caller(原始 CONNECT 经 /api/relay/stream)
 // 叶子把中继请求转发到本地 echo 服务。
 func TestE2E_RelayStream(t *testing.T) {
-	hubURL, hubCleanup := startHubSPROXY(t)
+	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
 	// 本地 echo 服务（叶子转发的目标）
@@ -284,7 +312,7 @@ func TestE2E_RelayStream(t *testing.T) {
 	}()
 
 	// 启动 leaf 节点
-	leafCleanup := startSClientRelay(t, hubURL, "e2e-leaf")
+	leafCleanup := startSClientRelay(t, hubURL, "e2e-leaf", ak, sk)
 	defer leafCleanup()
 
 	// caller：原始 CONNECT 风格经 hub /api/relay/stream 中继到 leaf，
@@ -297,7 +325,9 @@ func TestE2E_RelayStream(t *testing.T) {
 	defer conn.Close()
 
 	reqBody := fmt.Sprintf(`{"target":"e2e-leaf","type":"tcp","addr":"%s"}`, echoLn.Addr().String())
-	fmt.Fprintf(conn, "POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", host, len(reqBody), reqBody)
+	// access_keys 配置后 /api/relay/stream 需 SproxySig 签名（带 body 哈希）。
+	auth := sproxySigHeader(ak, sk, "POST", "/api/relay/stream", "", []byte(reqBody))
+	fmt.Fprintf(conn, "POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nAuthorization: %s\r\nContent-Length: %d\r\n\r\n%s", host, auth, len(reqBody), reqBody)
 	br := bufio.NewReader(conn)
 	statusLine, rerr := br.ReadString('\n')
 	if rerr != nil {
@@ -336,7 +366,7 @@ func TestE2E_RelayStream(t *testing.T) {
 
 // TestE2E_RelayStream_UnknownTarget 验证中继到未知节点时 hub 返回 404（S114）。
 func TestE2E_RelayStream_UnknownTarget(t *testing.T) {
-	hubURL, hubCleanup := startHubSPROXY(t)
+	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
 	host := strings.TrimPrefix(hubURL, "http://")
@@ -347,7 +377,8 @@ func TestE2E_RelayStream_UnknownTarget(t *testing.T) {
 	defer conn.Close()
 
 	reqBody := `{"target":"no-such-node","type":"tcp","addr":"127.0.0.1:1"}`
-	fmt.Fprintf(conn, "POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", host, len(reqBody), reqBody)
+	auth := sproxySigHeader(ak, sk, "POST", "/api/relay/stream", "", []byte(reqBody))
+	fmt.Fprintf(conn, "POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nAuthorization: %s\r\nContent-Length: %d\r\n\r\n%s", host, auth, len(reqBody), reqBody)
 	br := bufio.NewReader(conn)
 	statusLine, rerr := br.ReadString('\n')
 	if rerr != nil {
@@ -362,11 +393,11 @@ func TestE2E_RelayStream_UnknownTarget(t *testing.T) {
 // TestE2E_RelayStream_DialRefused 验证叶子出口拨号失败（目标端口关闭）时 hub 返回
 // 502（S114；B4 DialResultFrames error 帧路径）。
 func TestE2E_RelayStream_DialRefused(t *testing.T) {
-	hubURL, hubCleanup := startHubSPROXY(t)
+	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
 	// 叶子节点（--dial-allow-cidr 放行回环；--dial-allow 触发 DialResultFrames 回帧）
-	leafCleanup := startSClientRelay(t, hubURL, "e2e-leaf-refused")
+	leafCleanup := startSClientRelay(t, hubURL, "e2e-leaf-refused", ak, sk)
 	defer leafCleanup()
 
 	// 取一个空闲端口后立即关闭，作为「已关闭端口」的拨号目标。
@@ -387,7 +418,8 @@ func TestE2E_RelayStream_DialRefused(t *testing.T) {
 	defer conn.Close()
 
 	reqBody := fmt.Sprintf(`{"target":"e2e-leaf-refused","type":"tcp","addr":"%s"}`, closedAddr)
-	fmt.Fprintf(conn, "POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", host, len(reqBody), reqBody)
+	auth := sproxySigHeader(ak, sk, "POST", "/api/relay/stream", "", []byte(reqBody))
+	fmt.Fprintf(conn, "POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nAuthorization: %s\r\nContent-Length: %d\r\n\r\n%s", host, auth, len(reqBody), reqBody)
 	br := bufio.NewReader(conn)
 	statusLine, rerr := br.ReadString('\n')
 	if rerr != nil {
@@ -402,7 +434,7 @@ func TestE2E_RelayStream_DialRefused(t *testing.T) {
 // startSClientRelayService 启动一个宣告 --service 的 relay start 出口叶子节点。
 // 与 startSClientRelay 不同：不传 --dial-allow-cidr，依赖 --service 宣告的地址
 // 被出口拨号策略精确放行（回归：loopback 服务无需额外 CIDR 白名单）。
-func startSClientRelayService(t *testing.T, hubURL, nodeID, serviceSpec string) func() {
+func startSClientRelayService(t *testing.T, hubURL, nodeID, serviceSpec, ak, sk string) func() {
 	t.Helper()
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
@@ -419,7 +451,8 @@ func startSClientRelayService(t *testing.T, hubURL, nodeID, serviceSpec string) 
 		"--config", configPath,
 		"--hub", wsURL,
 		"--node-id", nodeID,
-		"--token", "e2e-relay-token",
+		"--access-key", ak,
+		"--access-key-secret", sk,
 		"--service", serviceSpec,
 		"--dial-allow",
 	}
@@ -434,14 +467,14 @@ func startSClientRelayService(t *testing.T, hubURL, nodeID, serviceSpec string) 
 	logStderrOnFailure(t, "sclient relay service "+nodeID, &stderrBuf)
 	killWait := newKillWaitCleanup(cmd)
 	// 等待注册完成（I72）：轮询 /api/hub/nodes，替代固定 sleep。
-	waitNodeRegistered(t, hubURL, nodeID, &stderrBuf, killWait)
+	waitNodeRegistered(t, hubURL, nodeID, ak, sk, &stderrBuf, killWait)
 	return killWait
 }
 
 // startSClientMeshConnect 启动 sclient mesh connect 端口转发，返回转发监听地址与 cleanup。
 // --webrtc=false 跳过信令，直测中继回落路径（出口叶子必须能拨自己宣告的服务地址）。
 // extraArgs 追加到命令行（如 --gateway 127.0.0.1:18085 测复用已建链路）。
-func startSClientMeshConnect(t *testing.T, hubURL, service string, extraArgs ...string) (string, func()) {
+func startSClientMeshConnect(t *testing.T, hubURL, service, ak, sk string, extraArgs ...string) (string, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
@@ -464,6 +497,8 @@ func startSClientMeshConnect(t *testing.T, hubURL, service string, extraArgs ...
 		"mesh", "connect", service,
 		"--config", configPath,
 		"--listen", listenAddr,
+		"--access-key", ak,
+		"--access-key-secret", sk,
 		"--webrtc=false",
 	}
 	args = append(args, extraArgs...)
@@ -486,7 +521,7 @@ func startSClientMeshConnect(t *testing.T, hubURL, service string, extraArgs ...
 // --service ssh:127.0.0.1:10022 --dial-allow，mesh connect 回落中继时出口需拨
 // 127.0.0.1:10022）。
 func TestE2E_MeshConnect_AnnouncedService(t *testing.T) {
-	hubURL, hubCleanup := startHubSPROXY(t)
+	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
 
 	// 本地 echo 服务（出口叶子要出站拨号的目标）
@@ -510,11 +545,11 @@ func TestE2E_MeshConnect_AnnouncedService(t *testing.T) {
 	echoAddr := echoLn.Addr().String()
 
 	// 出口叶子：宣告 echo:127.0.0.1:PORT（loopback），无 --dial-allow-cidr
-	leafCleanup := startSClientRelayService(t, hubURL, "e2e-exit", "echo:"+echoAddr)
+	leafCleanup := startSClientRelayService(t, hubURL, "e2e-exit", "echo:"+echoAddr, ak, sk)
 	defer leafCleanup()
 
 	// mesh connect 端口转发
-	listenAddr, meshCleanup := startSClientMeshConnect(t, hubURL, "echo")
+	listenAddr, meshCleanup := startSClientMeshConnect(t, hubURL, "echo", ak, sk)
 	defer meshCleanup()
 
 	// I73：就绪判定升级为「全 echo 往返」。每个尝试建立一条新的 mesh 连接

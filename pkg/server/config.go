@@ -56,10 +56,11 @@ type VersionConfig struct {
 }
 
 // HubConfig 配置 Hub 中继系统。
+// 节点注册准入由顶层 access_keys 提供（SproxySig AccessKey + HMAC proof），
+// hub 级不再需要任何 token 配置。
 type HubConfig struct {
-	Enabled    bool   `yaml:"enabled" mapstructure:"enabled"`
-	NodeID     string `yaml:"node_id" mapstructure:"node_id"`
-	RelayToken string `yaml:"relay_token" mapstructure:"relay_token"`
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	NodeID  string `yaml:"node_id" mapstructure:"node_id"`
 	// MaxConnections 是 Hub 同时处理的中继节点连接数上限（I30），0 或不填使用默认 256。
 	MaxConnections int              `yaml:"max_connections" mapstructure:"max_connections"`
 	Transports     TransportConfigs `yaml:"transports" mapstructure:"transports"`
@@ -244,9 +245,6 @@ func (c *Config) Validate() error {
 	}
 	if c.RateLimit.Enabled && c.RateLimit.Window <= 0 {
 		return fmt.Errorf("rate_limit.enabled=true 但 window=%s 无效，请设置大于 0 的 duration", c.RateLimit.Window)
-	}
-	if c.Hub.Enabled && c.Hub.RelayToken == "" {
-		return fmt.Errorf("hub.enabled=true 但 relay_token 为空，中继节点注册将无任何鉴权，请配置 relay_token")
 	}
 	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled {
 		// S42：WS 是当前唯一可用的节点接入传输；hub 启用而无 transport 时

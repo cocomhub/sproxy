@@ -48,7 +48,7 @@ func pipeXfer() (dial func(ctx context.Context) (xfer.Conn, error), serverConn f
 // isTerminalRelayError 把纯网络抖动判为终态，relay 守护进程永久退出。
 func TestHubServer_RegisterReadFailure_SilentNoRegErr(t *testing.T) {
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator("relay-token"), testutil.DiscardLogger())
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
 
 	conn := &mockxfer.MockConn{
 		ReceiveFn: func(context.Context) ([]byte, error) {
@@ -78,7 +78,7 @@ func TestHubServer_RegisterReadFailure_SilentNoRegErr(t *testing.T) {
 func TestHubServerRegisterAndRemove(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator("secret"), log)
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -99,8 +99,8 @@ func TestHubServerRegisterAndRemove(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	// 节点侧：先发一条注册帧（token 非空 → JSON 帧；裸字节回退见 TestHubServerBareNodeID）
-	if err := clientConn.Send(ctx, NewRegisterFrame("node-a", "secret", Meta{})); err != nil {
+	// 节点侧：先发一条注册帧（带 AK/proof → JSON 帧；裸字节回退见 TestHubServerBareNodeID）
+	if err := clientConn.Send(ctx, NewRegisterFrame("node-a", testAK, testRegisterProof(t, "node-a"), Meta{})); err != nil {
 		t.Fatal(err)
 	}
 
@@ -136,7 +136,7 @@ func TestHubServerRegisterAndRemove(t *testing.T) {
 func TestHubServerBadToken(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator("secret"), log)
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -157,8 +157,8 @@ func TestHubServerBadToken(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	// 错误 token：HubServer 读注册帧后鉴权失败，应立即返回
-	if err := clientConn.Send(ctx, []byte(`{"node_id":"node-b","token":"wrong"}`)); err != nil {
+	// 错误 proof：HubServer 读注册帧后鉴权失败，应立即返回
+	if err := clientConn.Send(ctx, fmt.Appendf(nil, `{"node_id":"node-b","access_key":%q,"access_key_proof":"deadbeef"}`, testAK)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,8 +171,8 @@ func TestHubServerBadToken(t *testing.T) {
 	if !strings.HasPrefix(ackStr, RegisterAckErr) {
 		t.Fatalf("expected REG_ERR prefix, got %q", ackStr)
 	}
-	if !strings.Contains(ackStr, "invalid token") {
-		t.Fatalf("expected 'invalid token' in REG_ERR, got %q", ackStr)
+	if !strings.Contains(ackStr, "invalid access key") {
+		t.Fatalf("expected 'invalid access key' in REG_ERR, got %q", ackStr)
 	}
 
 	// 出错场景：HubServer 读完注册帧并鉴权失败，应尽快返回
@@ -181,14 +181,14 @@ func TestHubServerBadToken(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected authentication error")
 		}
-		if !errors.Is(err, ErrInvalidToken) {
-			t.Fatalf("expected ErrInvalidToken, got: %v", err)
+		if !errors.Is(err, ErrInvalidAccessKeyProof) {
+			t.Fatalf("expected ErrInvalidAccessKeyProof, got: %v", err)
 		}
 		if err := clientConn.Close(); err != nil {
 			t.Logf("close client: %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("HandleConn did not return on bad token")
+		t.Fatal("HandleConn did not return on bad proof")
 	}
 	if rt.Has("node-b") {
 		t.Fatal("node-b must not be registered")
@@ -198,7 +198,7 @@ func TestHubServerBadToken(t *testing.T) {
 func TestHubServer_TryHandleConn_MaxConns(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator("secret"), log, 1)
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log, 1)
 
 	ctx := t.Context()
 
@@ -239,7 +239,7 @@ func TestHubServer_TryHandleConn_MaxConns(t *testing.T) {
 func TestHubServer_TryHandleConn_NoLimit(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator("secret"), log) // 不传上限 = 无上限
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log) // 不传上限 = 无上限
 	ctx := t.Context()
 
 	client, server := xfertest.Pipe()
@@ -308,7 +308,7 @@ func TestHubServerBareNodeID(t *testing.T) {
 func TestHubServerRegisterSecretCapability(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator("secret"), log)
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -330,7 +330,7 @@ func TestHubServerRegisterSecretCapability(t *testing.T) {
 	defer clientConn.Close()
 
 	// 声明 per-node-secret 能力：REG_OK 应携带 "<base64url secret>"
-	frame := []byte(`{"node_id":"node-sec","token":"secret","capabilities":["per-node-secret"]}`)
+	frame := fmt.Appendf(nil, `{"node_id":"node-sec","access_key":%q,"access_key_proof":%q,"capabilities":["per-node-secret"]}`, testAK, testRegisterProof(t, "node-sec"))
 	if err := clientConn.Send(ctx, frame); err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestHubServerRegisterSecretCapability(t *testing.T) {
 func TestHubServerRegisterNoCapabilityPlainAck(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator("secret"), log)
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -399,7 +399,7 @@ func TestHubServerRegisterNoCapabilityPlainAck(t *testing.T) {
 	defer clientConn.Close()
 
 	// 未声明能力：REG_OK 为纯 "REG_OK"
-	frame := []byte(`{"node_id":"node-plain","token":"secret"}`)
+	frame := fmt.Appendf(nil, `{"node_id":"node-plain","access_key":%q,"access_key_proof":%q}`, testAK, testRegisterProof(t, "node-plain"))
 	if err := clientConn.Send(ctx, frame); err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +436,7 @@ func TestHubServerRegisterNoCapabilityPlainAck(t *testing.T) {
 func TestHubServerJSONMissingNodeID(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator("secret"), log)
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -499,7 +499,7 @@ func discProof(secret, nodeID string) string {
 // registerNodeAndGetSecret 注册一个声明 per-node-secret 能力的节点，返回下发 secret
 // 与 keepAlive（调用方在断言完成后调用以关闭连接）。连接保持打开期间节点在 hub
 // 路由表在线——否则 hub 在连接断开即 RemoveIfOwned 移除节点，后续 disc 注册找不到目标。
-func registerNodeAndGetSecret(t *testing.T, srv *HubServer, nodeID, token string) (string, func()) {
+func registerNodeAndGetSecret(t *testing.T, srv *HubServer, nodeID string) (string, func()) {
 	t.Helper()
 	dial, serverConn, _ := pipeXfer()
 	ctx := t.Context()
@@ -514,7 +514,7 @@ func registerNodeAndGetSecret(t *testing.T, srv *HubServer, nodeID, token string
 	if err != nil {
 		t.Fatal(err)
 	}
-	frame := fmt.Appendf(nil, `{"node_id":%q,"token":%q,"capabilities":["per-node-secret"]}`, nodeID, token)
+	frame := fmt.Appendf(nil, `{"node_id":%q,"access_key":%q,"access_key_proof":%q,"capabilities":["per-node-secret"]}`, nodeID, testAK, testRegisterProof(t, nodeID))
 	if err := clientConn.Send(ctx, frame); err != nil {
 		t.Fatal(err)
 	}
@@ -561,15 +561,17 @@ func registerRawFrame(t *testing.T, srv *HubServer, frame string) (string, func(
 // 派生的 HMAC 证明 → 注册成功且 RealNodeID 记录。
 func TestHubServer_DiscIdentity_ValidProof(t *testing.T) {
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator("relay-token"), testutil.DiscardLogger())
-	secret, closeReal := registerNodeAndGetSecret(t, srv, "victim-a", "relay-token")
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
+	secret, closeReal := registerNodeAndGetSecret(t, srv, "victim-a")
 	defer closeReal()
 	if secret == "" {
 		t.Fatal("victim-a per-node secret 为空")
 	}
 	proof := discProof(secret, "victim-a")
+	discNode := "disc-victim-a-12345678ab"
 	ack, closeDisc := registerRawFrame(t, srv, fmt.Sprintf(
-		`{"node_id":"disc-victim-a-12345678ab","token":"relay-token","meta":{"real_node_id":"victim-a","real_node_proof":%q},"capabilities":["per-node-secret"]}`, proof))
+		`{"node_id":%q,"access_key":%q,"access_key_proof":%q,"meta":{"real_node_id":"victim-a","real_node_proof":%q},"capabilities":["per-node-secret"]}`,
+		discNode, testAK, testRegisterProof(t, discNode), proof))
 	defer closeDisc()
 	if !strings.HasPrefix(ack, RegisterAckOK) {
 		t.Fatalf("期望 REG_OK, got %q", ack)
@@ -588,12 +590,15 @@ func TestHubServer_DiscIdentity_ValidProof(t *testing.T) {
 // （防冒充他人污染 accept 侧链路池）。
 func TestHubServer_DiscIdentity_ForgedRejected(t *testing.T) {
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator("relay-token"), testutil.DiscardLogger())
-	_, closeReal := registerNodeAndGetSecret(t, srv, "victim-a", "relay-token")
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
+	_, closeReal := registerNodeAndGetSecret(t, srv, "victim-a")
 	defer closeReal()
 
 	// 伪造证明（冒充 victim-a，但无其 per-node secret）。
-	ack, closeDisc := registerRawFrame(t, srv, `{"node_id":"disc-victim-a-99999999aa","token":"relay-token","meta":{"real_node_id":"victim-a","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`)
+	discNode1 := "disc-victim-a-99999999aa"
+	ack, closeDisc := registerRawFrame(t, srv, fmt.Sprintf(
+		`{"node_id":%q,"access_key":%q,"access_key_proof":%q,"meta":{"real_node_id":"victim-a","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`,
+		discNode1, testAK, testRegisterProof(t, discNode1)))
 	defer closeDisc()
 	if !strings.HasPrefix(ack, RegisterAckErr) {
 		t.Fatalf("期望 REG_ERR（伪造证明被拒）, got %q", ack)
@@ -603,7 +608,10 @@ func TestHubServer_DiscIdentity_ForgedRejected(t *testing.T) {
 	}
 
 	// real_node_id 与 disc base 不匹配（base=victim-a 但声称 other-node）。
-	ack2, closeDisc2 := registerRawFrame(t, srv, `{"node_id":"disc-victim-a-99999999bb","token":"relay-token","meta":{"real_node_id":"other-node","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`)
+	discNode2 := "disc-victim-a-99999999bb"
+	ack2, closeDisc2 := registerRawFrame(t, srv, fmt.Sprintf(
+		`{"node_id":%q,"access_key":%q,"access_key_proof":%q,"meta":{"real_node_id":"other-node","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`,
+		discNode2, testAK, testRegisterProof(t, discNode2)))
 	defer closeDisc2()
 	if !strings.HasPrefix(ack2, RegisterAckErr) {
 		t.Fatalf("期望 REG_ERR（real_node_id 不匹配）, got %q", ack2)

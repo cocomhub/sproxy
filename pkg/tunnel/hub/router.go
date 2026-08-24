@@ -54,10 +54,15 @@ const CapabilityPerNodeSecret = "per-node-secret"
 // Capabilities 是节点声明的能力标志列表（可扩展：未来新增能力直接追加
 // 字符串常量，hub 端用 hasCapability 判断，旧 hub/旧客户端忽略未知项）。
 type RegisterFrame struct {
-	NodeID       string   `json:"node_id"`
-	Token        string   `json:"token,omitempty"`
-	Meta         Meta     `json:"meta"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	NodeID string `json:"node_id"`
+	// Token 已废弃：不再用于准入（保留字段避免破坏旧客户端 JSON）。
+	Token string `json:"token,omitempty"`
+	// AccessKey 是 SproxySig 准入 AccessKey（与 access_keys 配置一致）。
+	AccessKey string `json:"access_key,omitempty"`
+	// AccessKeyProof 是 ComputeRegisterProof 输出（HMAC-SHA256 证明持有 SK）。
+	AccessKeyProof string   `json:"access_key_proof,omitempty"`
+	Meta           Meta     `json:"meta"`
+	Capabilities   []string `json:"capabilities,omitempty"`
 }
 
 // Meta 是节点注册时宣告的附加信息，供 mesh 选路使用。
@@ -189,15 +194,15 @@ const (
 	DialResultError = "error"
 )
 
-// NewRegisterFrame 构建注册帧。当无 meta/token/caps 时退化为裸 nodeID，
+// NewRegisterFrame 构建注册帧。当无 meta/ak/proof/caps 时退化为裸 nodeID，
 // 保证与旧版 hub（仅接收裸 nodeID）兼容。
 // caps 为可选变参：声明能力（如 CapabilityPerNodeSecret）后 hub 回 REG_OK 携带
 // per-node secret（I1）；现有调用不传 caps 时行为不变。
-func NewRegisterFrame(nodeID, token string, meta Meta, caps ...string) []byte {
-	if meta.Addr == "" && len(meta.Services) == 0 && len(meta.Tags) == 0 && token == "" && len(caps) == 0 {
+func NewRegisterFrame(nodeID, ak, proof string, meta Meta, caps ...string) []byte {
+	if meta.Addr == "" && len(meta.Services) == 0 && len(meta.Tags) == 0 && ak == "" && proof == "" && len(caps) == 0 {
 		return []byte(nodeID)
 	}
-	frame := RegisterFrame{NodeID: nodeID, Token: token, Meta: meta, Capabilities: caps}
+	frame := RegisterFrame{NodeID: nodeID, AccessKey: ak, AccessKeyProof: proof, Meta: meta, Capabilities: caps}
 	b, _ := json.Marshal(frame)
 	return b
 }
@@ -275,8 +280,8 @@ func validateServices(svcs []Service) []Service {
 //
 // mesh 自动对等发现临时身份（disc-<base>-<unixnano>）做防冒充校验（S-fix）：
 // base 必须等于 Meta.RealNodeID 且持有该真实节点 per-node secret 的 HMAC 证明，
-// 否则拒绝注册（fail-closed）。否则任何持有 relay_token 的节点可注册
-// disc-<victim>-<nano> 冒充 victim，污染对端 accept 侧链路池实现 MITM。
+// 否则拒绝注册（fail-closed）。否则任何已准入节点可注册 disc-<victim>-<nano>
+// 冒充 victim，污染对端 accept 侧链路池实现 MITM。
 func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, error) {
 	info := NodeInfo{
 		ID:        NodeID(reg.NodeID),
@@ -469,12 +474,14 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 		return sendRegErr("missing node_id")
 	}
 	if s.auth != nil {
-		if authErr := s.auth.Authenticate(reg.Token); authErr != nil {
-			s.logger.Warn("中继节点鉴权失败", "node", reg.NodeID)
-			_ = sendRegErr("invalid token") // 回发 REG_ERR 供客户端终止重连（忽略错误，保留原始鉴权错误）
-			return authErr                  // 保留原始错误（ErrInvalidToken）供调用方/测试识别
+		if authErr := s.auth.Authenticate(reg.AccessKey, reg.AccessKeyProof, reg.NodeID); authErr != nil {
+			s.logger.Warn("中继节点鉴权失败", "node", reg.NodeID, "error", authErr)
+			_ = sendRegErr("invalid access key") // 回发 REG_ERR 供客户端终止重连（忽略错误，保留原始鉴权错误）
+			return authErr                       // 保留原始错误（ErrInvalidAccessKey/Proof）供调用方/测试识别
 		}
 	}
+	// reg.AccessKey == "" 时 Authenticate 会因未命中 accessKeys 返回 ErrInvalidAccessKey（fail-closed），
+	// 无需额外判断。
 
 	m := mux.New(conn, mux.RoleListener)
 	defer m.Close()

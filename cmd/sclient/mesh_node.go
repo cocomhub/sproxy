@@ -20,8 +20,9 @@ import (
 // newCmdMeshNode 创建 mesh node：单进程常驻 mesh 节点（注册 + 服务宣告 + 中继 +
 // webrtc 直连 + 自动重连），mesh connect 可直连优先/中继回落到达它。
 //
-// 依赖：hub 已启用中继（hub.enabled=true + relay_token）。--dial-allow 必须开启
-// （mesh connect 恒发 dial 帧，出口拨号依赖它；关闭时只剩 HTTP 中继到 --local）。
+// 依赖：hub 已启用中继（hub.enabled=true + access_keys 配置，注册走 SproxySig
+// AccessKey + HMAC proof 准入）。--dial-allow 必须开启（mesh connect 恒发 dial 帧，
+// 出口拨号依赖它；关闭时只剩 HTTP 中继到 --local）。
 func newCmdMeshNode(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "node",
@@ -36,8 +37,6 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hubURL, _ := cmd.Flags().GetString("hub")
 			nodeID, _ := cmd.Flags().GetString("node-id")
-			token, _ := cmd.Flags().GetString("token") // --token 保留（relay_token 回落）
-			relayToken, _ := cmd.Flags().GetString("relay-token")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
@@ -67,16 +66,13 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			if hubURL == "" {
 				hubURL = cfg.ServerURL
 			}
-			// 语义对齐 relay start：--token 是 relay_token（hub 注册）；SproxySig 认证
-			// AccessKey/SK 从根 --access-key/--access-key-secret 或配置派生（信令/节点
-			// 列表/网关均走签名，token 不上线）。
+			// SproxySig 认证 AccessKey/SK 从根 --access-key/--access-key-secret 或配置派生
+			// （信令/节点列表/网关/hub 注册准入均走签名，Secret 永不上线）。hub 注册
+			// 准入由 AutoRegister 用 SK 计算 HMAC proof（绑定 nodeID），无需共享 token。
 			accessKeyFlag, _ := cmd.Flags().GetString("access-key")
 			accessKeySecretFlag, _ := cmd.Flags().GetString("access-key-secret")
 			accessKey := client.MeshAccessKey(accessKeyFlag, cfg.AccessKey)
 			accessKeySecret := client.MeshAccessKeySecret(accessKeySecretFlag, cfg.AccessKeySecret)
-			// --token 仍是 relay_token（hub 注册）的回落源：显式 --relay-token > 配置
-			// relay_token > --token（auth_token 已移除，第 4 参传空）。
-			relayTok := client.MeshRelayToken(relayToken, cfg.RelayToken, token, "")
 			if nodeID == "" {
 				nodeID = cfg.NodeID
 			}
@@ -98,7 +94,6 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			return mesh.RunNode(ctx, mesh.NodeConfig{
 				HubURL:            hubURL,
 				NodeID:            nodeID,
-				RelayToken:        relayTok,
 				AccessKey:         accessKey,
 				AccessKeySecret:   accessKeySecret,
 				Services:          svcs,
@@ -118,8 +113,6 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 	}
 	cmd.Flags().String("hub", "", "hub 地址（http(s)/ws(s)，可带 /ws；默认取配置 hub_url，再回落 server_url）")
 	cmd.Flags().String("node-id", "", "本节点稳定 ID（mesh connect 用它寻址；默认取配置 node_id，再回落主机名）")
-	cmd.Flags().String("token", "", "hub 中继注册 token（relay_token；与 relay start --token 一致；信令 Bearer 用根 --auth-token / 配置 auth_token）")
-	cmd.Flags().String("relay-token", "", "hub 中继注册 token（优先于 --token；默认复用 --token / 配置 relay_token）")
 	cmd.Flags().StringArray("service", nil, "宣告一个 mesh 服务（格式 name:addr，可重复；mesh connect 可发现）")
 	cmd.Flags().Bool("dial-allow", false, "允许出口拨号（mesh connect 恒发 dial 帧，依赖此开关；关闭时只剩 HTTP 中继到 --local）")
 	cmd.Flags().StringArray("dial-allow-cidr", nil, "出口拨号白名单网段（如 192.168.0.0/16；配合 --dial-allow 放行内网，默认仅公网+宣告地址）")

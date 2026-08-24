@@ -38,9 +38,7 @@ type NodeConfig struct {
 	ServerURL string
 	// NodeID 是本节点稳定 ID（为空回落主机名；mesh connect 用它寻址，需唯一）。
 	NodeID string
-	// RelayToken 是 hub 中继注册 token。
-	RelayToken string
-	// AccessKey 是 SproxySig 请求签名认证的 AccessKey（信令/节点列表/网关）。
+	// AccessKey 是 SproxySig 请求签名认证的 AccessKey（信令/节点列表/网关/hub 注册准入）。
 	AccessKey string
 	// AccessKeySecret 是 SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）。
 	AccessKeySecret string
@@ -129,7 +127,6 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	reg, err := AutoRegister(cycleCtx, AutoRegisterParams{
 		HubURL:          cfg.HubURL,
 		ServerURL:       cfg.ServerURL,
-		RelayToken:      cfg.RelayToken,
 		AccessKey:       cfg.AccessKey,
 		AccessKeySecret: cfg.AccessKeySecret,
 		NodeID:          cfg.NodeID,

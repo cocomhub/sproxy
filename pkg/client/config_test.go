@@ -268,8 +268,8 @@ func TestHandleConfigShow_NilReceiver(t *testing.T) {
 }
 
 // TestApplyConfigSet_MeshParams（P2-配置1）：
-// config set 支持 hub_url/relay_token/node_id 三个通用 mesh 参数；hub_url 校验
-// URL 格式，node_id 拒绝空白字符。
+// config set 支持 hub_url/node_id 两个通用 mesh 参数；hub_url 校验 URL 格式，
+// node_id 拒绝空白字符。已废除的旧配置键返回未知键错误（fail-closed）。
 func TestApplyConfigSet_MeshParams(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -283,12 +283,7 @@ func TestApplyConfigSet_MeshParams(t *testing.T) {
 	if err := ApplyConfigSet(cfg, "hub_url", "not a url"); err == nil {
 		t.Fatal("非法 hub_url 应报错")
 	}
-	if err := ApplyConfigSet(cfg, "relay_token", "tok"); err != nil {
-		t.Fatalf("relay_token set: %v", err)
-	}
-	if cfg.RelayToken != "tok" {
-		t.Fatalf("RelayToken = %q, want tok", cfg.RelayToken)
-	}
+	// 已废除的旧配置键应返回未知键错误（ApplyConfigSet 默认分支覆盖）。
 	if err := ApplyConfigSet(cfg, "node_id", "node-a"); err != nil {
 		t.Fatalf("node_id set: %v", err)
 	}
@@ -300,11 +295,12 @@ func TestApplyConfigSet_MeshParams(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_MeshParams（P2-配置1）：YAML 中 hub_url/relay_token/node_id 正确解码。
+// TestLoadConfig_MeshParams（P2-配置1）：YAML 中 hub_url/node_id 正确解码
+// （已废除的旧配置键不再识别）。
 func TestLoadConfig_MeshParams(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sclient.yaml")
-	content := "server_url: https://127.0.0.1:18083\nhub_url: wss://hub.example.com/ws\nrelay_token: rt\nnode_id: node-a\n"
+	content := "server_url: https://127.0.0.1:18083\nhub_url: wss://hub.example.com/ws\nnode_id: node-a\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -314,9 +310,6 @@ func TestLoadConfig_MeshParams(t *testing.T) {
 	}
 	if cfg.HubURL != "wss://hub.example.com/ws" {
 		t.Fatalf("HubURL = %q", cfg.HubURL)
-	}
-	if cfg.RelayToken != "rt" {
-		t.Fatalf("RelayToken = %q", cfg.RelayToken)
 	}
 	if cfg.NodeID != "node-a" {
 		t.Fatalf("NodeID = %q", cfg.NodeID)

@@ -222,7 +222,7 @@ func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, nodeID, m
 	}
 	temp, err := AutoRegister(ctx, AutoRegisterParams{
 		HubURL: cfg.HubURL, ServerURL: cfg.ServerURL,
-		RelayToken: cfg.RelayToken, AccessKey: cfg.AccessKey, AccessKeySecret: cfg.AccessKeySecret,
+		AccessKey: cfg.AccessKey, AccessKeySecret: cfg.AccessKeySecret,
 		NodeID: nodeID, Prefix: hub.DiscPrefix, ExactNode: false,
 		Insecure:   cfg.Insecure,
 		RealNodeID: nodeID, RealNodeProof: realNodeProof(mainSecret, nodeID),

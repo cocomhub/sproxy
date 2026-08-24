@@ -105,7 +105,6 @@ type FileClient struct {
 	accessKeySecret        string // SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）
 	authToken              string // 多用户 API 密钥 Bearer（api_keys.enabled 场景）
 	meshHubURL             string // 配置 hub_url（mesh/relay/p2p 信令/中继 hub，区别于 xfer 的 hubURL）
-	relayToken             string // 配置 relay_token（hub 中继注册）
 	nodeID                 string // 配置 node_id（本节点默认 ID）
 	logger                 *slog.Logger
 	uploadCache            sync.Map       // key = absFilePath, value = *uploadCacheEntry
@@ -366,13 +365,6 @@ func WithBearerToken(token string) Option {
 func WithMeshHubURL(v string) Option {
 	return func(c *FileClient) {
 		c.meshHubURL = v
-	}
-}
-
-// WithRelayToken 设置 hub 中继注册 token（配置文件 relay_token）。
-func WithRelayToken(v string) Option {
-	return func(c *FileClient) {
-		c.relayToken = v
 	}
 }
 
@@ -1123,11 +1115,6 @@ func (c *FileClient) AuthToken() string {
 // MeshHubURL 返回配置的 mesh/relay/p2p hub 地址（可为空，调用方按命令语义回落）。
 func (c *FileClient) MeshHubURL() string {
 	return c.meshHubURL
-}
-
-// RelayToken 返回配置的 hub 中继注册 token（可为空）。
-func (c *FileClient) RelayToken() string {
-	return c.relayToken
 }
 
 // NodeID 返回配置的本节点默认 ID（可为空，回落主机名）。

@@ -31,8 +31,6 @@ type Config struct {
 	// HubURL 是 mesh/relay/p2p 共用的 hub 地址（http(s):// 或 ws(s)://，接受带 /ws 路径）。
 	// 为空时各命令按自身语义回落（mesh connect → server_url，p2p → 报错，relay start → 本地默认）。
 	HubURL string `yaml:"hub_url" mapstructure:"hub_url"`
-	// RelayToken 是 hub 中继注册 token（与 relay start --token / hub.relay_token 一致）。
-	RelayToken string `yaml:"relay_token" mapstructure:"relay_token"`
 	// NodeID 是本节点默认 ID（mesh/p2p/relay 的信令来源与寻址目标；为空回落主机名）。
 	NodeID string `yaml:"node_id" mapstructure:"node_id"`
 }
@@ -161,15 +159,6 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 	if cfg.HubURL != "" {
 		fmt.Fprintf(w, "HubURL:        %s\n", cfg.HubURL)
 	}
-	if cfg.RelayToken != "" {
-		masked := cfg.RelayToken
-		if len(masked) > 4 {
-			masked = masked[:4] + "****"
-		} else if len(masked) > 0 {
-			masked = "****"
-		}
-		fmt.Fprintf(w, "RelayToken:    %s\n", masked)
-	}
 	if cfg.NodeID != "" {
 		fmt.Fprintf(w, "NodeID:        %s\n", cfg.NodeID)
 	}
@@ -213,8 +202,6 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			}
 		}
 		cfg.HubURL = value
-	case "relay_token":
-		cfg.RelayToken = value
 	case "node_id":
 		if strings.ContainsAny(value, " \t\r\n") {
 			return fmt.Errorf("node_id 不能包含空白字符: %s", value)
