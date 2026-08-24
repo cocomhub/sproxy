@@ -60,7 +60,6 @@ type RegisterRoutesOpts struct {
 	CfgPtr     *atomic.Pointer[Config]
 	Version    string
 	BuildAt    string
-	TunnelKey  []byte
 	Logger     *slog.Logger
 	RouteTable *hub.RouteTable
 }
@@ -161,7 +160,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 日志带 trace_id/span_id，恢复隧道内层 per-request「收到/完成」日志。
 	// 注意：这是 requestLogMiddleware 的第二个独立实例（主 mux 外层已用一次），
 	// 对隧道路径独立生效，正确。
-	h.tunnelHandler = tunnel.NewLocalHandler(opts.TunnelKey, h.requestLogMiddleware(apiHandler), log.With("component", "tunnel"))
+	h.tunnelHandler = tunnel.NewLocalHandler(nil, h.requestLogMiddleware(apiHandler), log.With("component", "tunnel"))
 
 	srvMux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
 	srvMux.HandleFunc("GET /download", h.authMiddleware(h.download))
@@ -292,7 +291,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /healthz", h.healthz)
 	srvMux.HandleFunc("GET /version", h.versionHandler)
 	srvMux.HandleFunc("GET /metrics", h.MetricsHandler)
-	srvMux.Handle("POST /tunnel", h.tunnelHandler)
+	// /tunnel 走 authMiddleware：SproxySig 验签成功后按 AK 查 SK 派生隧道密钥
+	// （SetTunnelKey 放入 ctx），隧道 handler 用 ctx 密钥解密 metadata/body、加密响应。
+	// 未验签的请求 401；隧道内层 localMux 请求（解密后转发）由隧道加密本身提供认证。
+	srvMux.Handle("POST /tunnel", h.authMiddleware(http.HandlerFunc(h.tunnelHandler.ServeHTTP)))
 
 	// Web UI
 	subFS, err := fs.Sub(web.StaticFS, "static")

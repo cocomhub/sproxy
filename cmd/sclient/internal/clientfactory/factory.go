@@ -60,10 +60,10 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	opts := []client.Option{
 		client.WithTimeout(time.Duration(cfg.Timeout) * time.Second),
 	}
-	if cfg.TunnelKey != "" {
-		if s, _ := cmd.Flags().GetString("server"); s == "" {
-			opts = append(opts, client.WithTunnel(cfg.TunnelKey))
-		}
+	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" && serverFlagNotSet(cmd) {
+		// 有 AK/SK 且未显式 --server：走 access-key 驱动的加密隧道（WithTunnel 内部
+		// 已存 AK/SK 供外层 SproxySig 签名，无需再 WithAccessKey）。
+		opts = append(opts, client.WithTunnel(cfg.AccessKey, cfg.AccessKeySecret))
 	}
 	if cs, _ := cmd.Flags().GetInt64("chunk-size"); cs > 0 {
 		opts = append(opts, client.WithChunkSize(cs))
@@ -78,7 +78,9 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	}
 	if ak, _ := cmd.Flags().GetString("access-key"); ak != "" {
 		sk, _ := cmd.Flags().GetString("access-key-secret")
-		opts = append(opts, client.WithAccessKey(ak, sk))
+		// 显式 AK/SK（flag 覆盖）同样开启 access-key 驱动隧道：WithTunnel 内部已存
+		// AK/SK 供外层 SproxySig 签名，无需重复 WithAccessKey。
+		opts = append(opts, client.WithTunnel(ak, sk))
 	}
 	// 通用 mesh 参数（hub_url/relay_token/node_id）：供 mesh connect / relay start /
 	// p2p 等命令在各自 --hub/--token/--node-id 未显式指定时作为配置回落（P2-配置）。
@@ -116,6 +118,12 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		return nil, fmt.Errorf("初始化客户端失败: %w", err)
 	}
 	return fc, nil
+}
+
+// serverFlagNotSet 报告 --server flag 是否未显式指定（隧道模式仅对默认服务器生效）。
+func serverFlagNotSet(cmd *cobra.Command) bool {
+	s, _ := cmd.Flags().GetString("server")
+	return s == ""
 }
 
 // mockFactory 是测试实现，直接返回预配置的 client。

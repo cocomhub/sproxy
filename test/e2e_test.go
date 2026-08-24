@@ -693,7 +693,7 @@ func TestE2E_TunnelEncryption(t *testing.T) {
 	key := testutil.TestKey()
 
 	fc := client.NewFileClient(baseURL,
-		client.WithTunnel(key),
+		client.WithTunnel("sk-e2e-00112233445566778899aabbccddeeff", key),
 	)
 
 	content := []byte("tunnel encrypted test content")

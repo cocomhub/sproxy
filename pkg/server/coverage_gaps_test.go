@@ -235,14 +235,12 @@ func TestHealthz_UploadStoreStopped(t *testing.T) {
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
-	key := make([]byte, 32)
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "test",
-		BuildAt:   "now",
-		TunnelKey: key,
-		Logger:    testLogger(),
+		Mux:     mux,
+		CfgPtr:  &cfgPtr,
+		Version: "test",
+		BuildAt: "now",
+		Logger:  testLogger(),
 	})
 
 	// 停止 uploadStore 使其 Health() 返回错误

@@ -75,46 +75,6 @@ func TestConfig_Validate_FillsZeroes(t *testing.T) {
 	}
 }
 
-func TestConfig_Validate_TunnelKey_HexCheck(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name    string
-		key     string
-		wantErr bool
-	}{
-		{"empty_ok_tls_enabled", "", false},
-		{"valid_64hex", strings.Repeat("a", 64), false},
-		{"too_short", strings.Repeat("a", 32), true},
-		{"too_long", strings.Repeat("a", 65), true},
-		{"non_hex", strings.Repeat("z", 64), true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := Default()
-			cfg.TunnelKey = c.key
-			err := cfg.Validate()
-			if c.wantErr && err == nil {
-				t.Fatalf("expected error for %q", c.key)
-			}
-			if !c.wantErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-		})
-	}
-}
-
-func TestConfig_Validate_EmptyTunnelKeyNoTLS(t *testing.T) {
-	t.Parallel()
-	cfg := Default()
-	cfg.TunnelKey = ""
-	cfg.TLS.Enabled = false
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error for empty tunnel_key with TLS disabled, got nil")
-	}
-}
-
 func TestConfig_Defaults_HubMaxConnections(t *testing.T) {
 	t.Parallel()
 	cfg := Default()

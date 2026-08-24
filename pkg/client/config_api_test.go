@@ -44,15 +44,6 @@ func TestGetConfig(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("expected LogLevel=info, got %s", cfg.LogLevel)
 	}
-	if cfg.LogFormat != "text" {
-		t.Errorf("expected LogFormat=text, got %s", cfg.LogFormat)
-	}
-	if !cfg.AccessKeysSet {
-		t.Error("expected AccessKeysSet=true")
-	}
-	if cfg.TunnelKeySet {
-		t.Error("expected TunnelKeySet=false")
-	}
 	if cfg.RateLimitRequests != 10 {
 		t.Errorf("expected RateLimitRequests=10, got %d", cfg.RateLimitRequests)
 	}

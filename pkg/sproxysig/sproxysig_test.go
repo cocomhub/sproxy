@@ -196,3 +196,31 @@ func TestBodyValidator_Mismatch(t *testing.T) {
 		t.Fatal("哈希不匹配应收错")
 	}
 }
+
+// eofWithDataReader 在第一次 Read 同时返回数据与 io.EOF——io.Reader 允许 (n>0, io.EOF)，
+// chunked 传输的底层 reader 常在最后一次 Read 这样返回。bodyValidator 不得丢弃这 n 字节。
+type eofWithDataReader struct {
+	data []byte
+	done bool
+}
+
+func (r *eofWithDataReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	n := copy(p, r.data)
+	return n, io.EOF
+}
+
+func TestBodyValidator_DataAndEOF(t *testing.T) {
+	payload := "hello"
+	r := NewBodyValidator(&eofWithDataReader{data: []byte(payload)}, BodyHash([]byte(payload)))
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("(n>0, io.EOF) 场景数据不得丢失: %v", err)
+	}
+	if string(got) != payload {
+		t.Fatalf("ReadAll 内容 = %q, want %q（末尾 chunk 被丢弃）", got, payload)
+	}
+}

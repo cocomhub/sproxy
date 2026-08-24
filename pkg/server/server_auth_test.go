@@ -42,6 +42,32 @@ func signRequest(r *http.Request, ak, sk string) {
 	r.Header.Set("Authorization", formatSigAuth(h))
 }
 
+// signTunnelRequest 给隧道外层请求打 UNSIGNED 签名头（流式加密 body 无法整体哈希，
+// 与 pkg/client.sigRoundTripper 一致）。服务端 authMiddleware 验签后派生隧道密钥。
+func signTunnelRequest(r *http.Request, ak, sk string) {
+	now := time.Now()
+	h := sproxysig.Header{
+		Version: sproxysig.Version, AK: ak,
+		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      fmt.Sprintf("test-nonce-%d", now.UnixNano()),
+		BodySHA256: sproxysig.UnsignedBody,
+	}
+	h.Sig = sproxysig.Sign(sk, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
+	r.Header.Set("Authorization", formatSigAuth(h))
+}
+
+// tunnelSignTransport 给每个 /tunnel 外层请求注入 UNSIGNED SproxySig 签名头，
+// 模拟 pkg/client.sigRoundTripper 的行为（本 SDK 无 http.RoundTripperFunc）。
+type tunnelSignTransport struct {
+	base   http.RoundTripper
+	ak, sk string
+}
+
+func (t *tunnelSignTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	signTunnelRequest(req, t.ak, t.sk)
+	return t.base.RoundTrip(req)
+}
+
 func TestPermissionAllowed(t *testing.T) {
 	t.Parallel()
 

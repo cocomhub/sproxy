@@ -317,7 +317,7 @@ func TestTunnelCommand_WithConfigKey(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	svc := client.NewFileClient(mock.URL, client.WithTunnel(testutil.TestKey()))
+	svc := client.NewFileClient(mock.URL, client.WithTunnel(testutil.TestAccessKey(), testutil.TestKey()))
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: &buf, Out: &buf})
@@ -334,7 +334,7 @@ func TestTunnelCommand_HeaderFlag(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	svc := client.NewFileClient(mock.URL, client.WithTunnel(testutil.TestKey()))
+	svc := client.NewFileClient(mock.URL, client.WithTunnel(testutil.TestAccessKey(), testutil.TestKey()))
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: &buf, Out: &buf})
@@ -351,7 +351,7 @@ func TestTunnelCommand_MethodFlag(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	svc := client.NewFileClient(mock.URL, client.WithTunnel(testutil.TestKey()))
+	svc := client.NewFileClient(mock.URL, client.WithTunnel(testutil.TestAccessKey(), testutil.TestKey()))
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: &buf, Out: &buf})
@@ -368,7 +368,7 @@ func TestTunnelCommand_DataFlag(t *testing.T) {
 	}))
 	defer mock.Close()
 
-	svc := client.NewFileClient(mock.URL, client.WithTunnel(testutil.TestKey()))
+	svc := client.NewFileClient(mock.URL, client.WithTunnel(testutil.TestAccessKey(), testutil.TestKey()))
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: &buf, Out: &buf})

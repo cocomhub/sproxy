@@ -246,6 +246,13 @@ func (b *bodyValidator) Read(p []byte) (int, error) {
 		_, _ = b.h.Write(p[:n])
 	}
 	if err == io.EOF {
+		if n > 0 {
+			// 合法的 (n>0, io.EOF)：先交付这 n 字节数据，哈希校验延迟到下一次 Read。
+			// 若不处理直接返回 (0, io.EOF)，会丢弃最后一次读到的数据
+			// （chunked body 常在最后一次 Read 同时返回数据与 EOF），
+			// 导致下游读到被截断的 body（如 multipart 缺 closing boundary）。
+			return n, nil
+		}
 		actual := hex.EncodeToString(b.h.Sum(nil))
 		if actual != b.declared {
 			return 0, fmt.Errorf("sproxy-sig: body 哈希不匹配（被篡改或损坏）: declared %s actual %s", b.declared, actual)

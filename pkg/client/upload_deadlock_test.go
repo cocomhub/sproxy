@@ -14,9 +14,6 @@ import (
 	"time"
 )
 
-// testUploadDeadlockHexKey 是合法的 64 hex AES-256 密钥（与 tunnel_test.go 的测试密钥一致）。
-const testUploadDeadlockHexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
 // TestUpload_Tunnel_ServerDoesNotReadBody_NoDeadlock 复现并守护：
 // 经过加密隧道上传时，若服务端在未消费完请求体的情况下提前返回（如 400），
 // Upload 必须返回，不能因请求体加密 goroutine 阻塞在 io.Pipe 上而永久挂起 uploadWg.Wait()。
@@ -35,7 +32,7 @@ func TestUpload_Tunnel_ServerDoesNotReadBody_NoDeadlock(t *testing.T) {
 	}
 
 	c := NewFileClient(ts.URL,
-		WithTunnel(testUploadDeadlockHexKey),
+		WithTunnel(testTunnelAK, testTunnelSK),
 		WithTimeout(2*time.Second),
 	)
 

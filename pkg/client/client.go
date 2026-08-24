@@ -172,17 +172,42 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
-// WithTunnel 启用加密隧道传输，hexKey 需与 sproxy 服务端的 tunnel_key 一致。
-func WithTunnel(hexKey string) Option {
+// WithTunnel 启用加密隧道传输（access-key 驱动）：
+// 隧道编解码密钥 = HKDF(SK, mesh) 派生；服务端同一算法（authMiddleware 验签后派生）。
+// ak 形如 sk[-<mesh>]-<16hex>，mesh 从 AK 提取（无 mesh 段则为空串）。
+func WithTunnel(ak, sk string) Option {
 	return func(c *FileClient) {
-		tc, err := tunnel.NewClient(hexKey, c.serverURL+"/tunnel", c.httpClient.Timeout, c.logger)
+		// 1) 把 accessKey/Secret 存进 client（doRequest 签名用）
+		c.accessKey = ak
+		c.accessKeySecret = sk
+		// 2) 派生隧道密钥
+		mesh := accessKeyMesh(ak)
+		key, err := tunnel.DeriveTunnelKey(sk, mesh)
 		if err != nil {
 			c.logger.Warn("创建隧道客户端失败", "error", err)
 			c.initError = fmt.Errorf("创建隧道客户端失败: %w", err)
 			return
 		}
+		// 3) 创建隧道 HTTP client，并给外层 /tunnel 请求注入 SproxySig(UNSIGNED)
+		tc, err := tunnel.NewClient(hex.EncodeToString(key), c.serverURL+"/tunnel", c.httpClient.Timeout, c.logger)
+		if err != nil {
+			c.logger.Warn("创建隧道客户端失败", "error", err)
+			c.initError = fmt.Errorf("创建隧道客户端失败: %w", err)
+			return
+		}
+		tc.HTTPClient.Transport = &sigRoundTripper{base: tc.HTTPClient.Transport, ak: ak, sk: sk}
 		c.tunnelClient = tc
 	}
+}
+
+// accessKeyMesh 从 AccessKey（sk[-<mesh>]-<16hex>）提取 mesh 段；无 mesh 段返回空串。
+// 与服务端 HKDF 的 info=mesh_id 对齐：sk-<mesh>-<hex> → mesh；sk-<hex> → ""。
+func accessKeyMesh(ak string) string {
+	parts := strings.Split(ak, "-")
+	if len(parts) == 3 && parts[0] == "sk" {
+		return parts[1]
+	}
+	return ""
 }
 
 // WithXfer 启用扩展传输层（xfer），支持 hub 中继、WebSocket 等传输方式。
@@ -1262,6 +1287,28 @@ type httpHeaderCarrier struct{ h http.Header }
 
 func (c httpHeaderCarrier) Get(k string) string { return c.h.Get(k) }
 func (c httpHeaderCarrier) Set(k, v string)     { c.h.Set(k, v) }
+
+// sigRoundTripper 是隧道外层客户端的 RoundTripper：给每个 /tunnel 请求
+// 注入 SproxySig 签名（body_sha256=UNSIGNED，流式 body 无法整体哈希）。
+// 服务端 authMiddleware 验签后派生隧道密钥解密；无签名则 401。
+type sigRoundTripper struct {
+	base   http.RoundTripper
+	ak, sk string
+}
+
+func (rt *sigRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	now := time.Now()
+	h := sproxysig.Header{
+		Version:    sproxysig.Version,
+		AK:         rt.ak,
+		TS:         now.UnixMilli(),
+		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      sproxysig.NewNonce(),
+		BodySHA256: sproxysig.UnsignedBody,
+	}
+	req.Header.Set("Authorization", sproxysig.SignAndFormat(rt.sk, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
+	return rt.base.RoundTrip(req)
+}
 
 // closeBodyIfErr 在 (resp, err) 同时非 nil 的情况下关闭 resp.Body，避免连接 / 句柄泄漏。
 // 这是 http.Client.Do 在某些错误（例如 redirect 策略错误）下会返回的非典型形态：返回了响应但同时报错。
