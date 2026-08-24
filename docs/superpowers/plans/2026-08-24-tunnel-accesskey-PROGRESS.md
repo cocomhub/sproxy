@@ -35,17 +35,28 @@
   - `pkg/client/config.go`：删 TunnelKey 字段/配置键；`config_extra_test.go` 删 set_tunnel_key 用例。
   - `cmd/sclient/internal/clientfactory/factory.go`：`WithTunnel(cfg.AccessKey, cfg.AccessKeySecret)`。
 
-## 进行中
+## 已完成
 
 ### 任务 8：hub 节点注册改 AK/HMAC 准入（废除 relay_token）
-- 见 `2026-08-24-tunnel-accesskey-task8-brief.md`（子代理简报）。
-- 关键决策：注册帧 `RegisterFrame` 加 `AccessKey`/`AccessKeyProof`；`AccessKeyProof = hex(HMAC-SHA256(SK, "sproxy-hub-register/v1\n"+nodeID))`；`NewAuthenticator([]hub.AccessKey)`；per-node secret 信令保留。
+- commit `36b757c`：`ComputeRegisterProof = HMAC-SHA256(SK, "sproxy-hub-register/v1\n"+nodeID)`；
+  `NewAuthenticator([]hub.AccessKey)`；relay_token 在 pkg/cmd 全废除，per-node secret 信令保留。
+- 子代理实现（简报 `2026-08-24-tunnel-accesskey-task8-brief.md`，报告 `...-task8-report.md`）。
 
-## 待办
+### 任务 9：E2E 验证 + 最终审查
+- commit `047834d`：17 个基础 E2E 迁移 access_keys（startSPROXY 配 access_keys + signingTransport
+  自动签名）；新增 `test/e2e_tunnel_accesskey_test.go` 纯隧道 upload/list E2E（无 tunnel_key）；
+  bodyValidator `(n>0, io.EOF)` 哈希即时校验（采纳安全审查）。
+- commit `7411311`（最终审查修复 I-1..I-4, M-5/M-7）：`tunnel.AccessKeyMesh` 单一 mesh 解析
+  （支持连字符）、`Config.Validate` 校验 access_keys、authMiddleware drain body 触发 EOF 校验、
+  config.example.yaml 更新、NewHubServer(nil) fail-closed。
+- 最终审查：`2026-08-24-tunnel-accesskey-finalreview.md`——0 Critical，修复 4 Important + 2 Minor。
 
-### 任务 9：E2E 验证
-- `test/e2e_tunnel_accesskey_test.go`：真实二进制 + access_keys + 纯隧道 list/upload。
-- `make test-all && make lint` 全绿。
+## 已知权衡（审查搁置，非缺陷）
+- M-6 hub 注册 proof 静态（无 ts/nonce）：捕获需 wss/TLS 被攻破，绑定 nodeID 已排除串用。
+- M-8 api_keys-only 启动时 hub//tunnel 不可用（功能死角，非安全洞）。
+- M-9 共享 hub 下跨 mesh 元数据可见（mesh 隔离仅在数据面密钥层）。
+- M-10 verifySproxySig/tunnelDerivedKey 二次解析头与遍历（理论 TOCTOU，概率极低）。
+- I-3 深层修复：JSON/multipart 端点在响应前拒绝篡改 body 需 handler 内校验（当前为响应后检测 + Warn 留痕）。
 
 ---
 
