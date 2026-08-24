@@ -177,7 +177,7 @@ type Conn interface {
 
 ## 关键路由（`pkg/server/handlers.go`）
 
-`RegisterRoutes` 在 `cmd/sproxy/root.go` 中挂到 `http.NewServeMux`。支持两层认证：主 mux 走 Bearer auth（`authMiddleware`），`localMux` 走隧道密钥（`POST /tunnel` 内部路由时跳过 Bearer auth）。
+`RegisterRoutes` 在 `cmd/sproxy/root.go` 中挂到 `http.NewServeMux`。支持两层认证：主 mux 走 SproxySig 请求签名（`authMiddleware`，配置 `access_keys` 时启用；`api_keys` 仍走独立 Bearer 多用户模式），`localMux` 走隧道密钥（`POST /tunnel` 内部路由时跳过认证）。
 
 ### 基础
 - `GET /` — 301 重定向到 `/ui/`
@@ -278,7 +278,8 @@ type Conn interface {
 | `tls.cert_file` / `tls.key_file` | string | | |
 | `tls.auto_tls` | bool | true | 自动生成 ECDSA P-256 自签证书 |
 | `tls.client_ca` | string | | mTLS CA 证书路径 |
-| `auth_token` | string | 空 | Bearer token 认证 |
+| `access_keys` | []AccessKey | 空 | SproxySig 请求签名认证（每 mesh 一对 AK/SK：`{key, secret, mesh_id?}`；配置后除 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 外全 HTTP 面验签） |
+| `api_keys.enabled` / `.keys` | | 关闭 | 多用户 API 密钥（独立 Bearer 特性，与 access_keys 互斥，优先） |
 | `rate_limit.enabled` / `.requests` / `.window` | | 关闭 | tunnel handler 限流 |
 | `chunk_size` | int | 4 MB | 分块上传每块大小 |
 | `max_chunk_size` | int | 64 MB | 客户端最大分块大小 |
@@ -296,7 +297,7 @@ type Conn interface {
 
 所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 必须是 64 个十六进制字符（32 字节 AES-256 密钥），否则启动失败。生成密钥：`sclient genkey`。
 
-SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配置"会生效；`addr`/`uploads_dir`/`tunnel_key`/`rate_limit`/`server_timeouts`/`max_header_bytes` 需要重启进程。
+SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`uploads_dir`/`tunnel_key`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`access_keys` 需要重启进程。
 
 ## sclient CLI（`cmd/sclient/`）
 

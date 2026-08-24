@@ -233,6 +233,6 @@ sclient batch-rename <from1> <to1> [from2 to2...]
 | `路径包含父级引用 '..'` | 客户端预拦截了不安全路径，去掉 `..` 或用绝对路径 |
 | `tunnel error (HTTP 403)` | 服务端 `tunnel_key` 为空 / 启动失败，检查 sproxy 日志 |
 | `tunnel error (HTTP 400)` | 隧道密钥与服务端不一致，或网络中间层破坏了请求体 |
-| `unauthorized` (401) | `auth_token` 不匹配，检查 `~/.config/sproxy/sclient.yaml` |
+| `unauthorized` (401) | SproxySig 签名缺失/非法/过期（服务端配置了 `access_keys` 时），检查 `~/.config/sproxy/sclient.yaml` 的 `access_key`/`access_key_secret` 是否与服务端一致 |
 | `源文件 SHA-256 校验失败` | mv 期间本地文件已变，刷新本地 checksum 后重试 |
 | `文件已存在但 checksum 不匹配` (409) | 服务端已有同名文件且内容不同，先 mv 或 delete |

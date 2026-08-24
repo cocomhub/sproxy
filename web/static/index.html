@@ -14,9 +14,11 @@
 <div class="container" id="app">
   <h1>sproxy 文件管理</h1>
   <div class="auth-bar">
-    <label for="token">Token:</label>
-    <input type="password" id="token" placeholder="可选，输入 Bearer Token">
-    <button type="button" id="save-token-btn">保存</button>
+    <label for="accessKey">AccessKey:</label>
+    <input type="text" id="accessKey" placeholder="可选，输入 AccessKey">
+    <label for="token">Secret:</label>
+    <input type="password" id="token" placeholder="可选，输入 AccessKeySecret">
+    <button type="button" id="save-access-btn">保存</button>
     <label for="tunnel-key" style="margin-left:16px;">Tunnel Key:</label>
     <input type="password" id="tunnel-key" placeholder="64位 hex 密钥，可选" style="flex:1.5;">
     <button type="button" id="save-tunnel-key-btn">保存</button>
