@@ -4,12 +4,14 @@
 package server
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"gopkg.in/yaml.v3"
 )
 
@@ -238,6 +240,29 @@ func (c *Config) Validate() error {
 		case PermissionRead, PermissionWrite, "":
 		default:
 			return fmt.Errorf("api_keys[%d].permission=%q 无效，仅允许 %q 或 %q", i, k.Permission, PermissionRead, PermissionWrite)
+		}
+	}
+	// access_keys 校验（I-1/I-2）：Key 非空、Key 唯一、Secret 为 64 hex（32B）、
+	// mesh_id 与 AK 内嵌 mesh 一致（防配置漂移导致两端隧道派生密钥不匹配）。
+	seenAccessKeys := make(map[string]struct{}, len(c.AccessKeys))
+	for i, k := range c.AccessKeys {
+		if k.Key == "" {
+			return fmt.Errorf("access_keys[%d].key 为空，密钥不能为空字符串", i)
+		}
+		if _, dup := seenAccessKeys[k.Key]; dup {
+			return fmt.Errorf("access_keys[%d].key %q 重复", i, k.Key)
+		}
+		seenAccessKeys[k.Key] = struct{}{}
+		if len(k.Secret) != 64 {
+			return fmt.Errorf("access_keys[%d].secret 必须为 64 个十六进制字符（32 字节 AES 密钥源），got %d 字符", i, len(k.Secret))
+		}
+		if _, err := hex.DecodeString(k.Secret); err != nil {
+			return fmt.Errorf("access_keys[%d].secret 不是合法十六进制: %v", i, err)
+		}
+		if k.MeshID != "" {
+			if mesh := tunnel.AccessKeyMesh(k.Key); mesh != "" && mesh != k.MeshID {
+				return fmt.Errorf("access_keys[%d].mesh_id %q 与 AK 内嵌 mesh %q 不一致（sclient 按 AK 解析 mesh 派生隧道密钥）", i, k.MeshID, mesh)
+			}
 		}
 	}
 	if c.RateLimit.Enabled && c.RateLimit.Requests <= 0 {

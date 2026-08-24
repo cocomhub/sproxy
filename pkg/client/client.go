@@ -179,8 +179,8 @@ func WithTunnel(ak, sk string) Option {
 		// 1) 把 accessKey/Secret 存进 client（doRequest 签名用）
 		c.accessKey = ak
 		c.accessKeySecret = sk
-		// 2) 派生隧道密钥
-		mesh := accessKeyMesh(ak)
+		// 2) 派生隧道密钥（mesh 由共享 tunnel.AccessKeyMesh 解析，与服务端一致）
+		mesh := tunnel.AccessKeyMesh(ak)
 		key, err := tunnel.DeriveTunnelKey(sk, mesh)
 		if err != nil {
 			c.logger.Warn("创建隧道客户端失败", "error", err)
@@ -197,16 +197,6 @@ func WithTunnel(ak, sk string) Option {
 		tc.HTTPClient.Transport = &sigRoundTripper{base: tc.HTTPClient.Transport, ak: ak, sk: sk}
 		c.tunnelClient = tc
 	}
-}
-
-// accessKeyMesh 从 AccessKey（sk[-<mesh>]-<16hex>）提取 mesh 段；无 mesh 段返回空串。
-// 与服务端 HKDF 的 info=mesh_id 对齐：sk-<mesh>-<hex> → mesh；sk-<hex> → ""。
-func accessKeyMesh(ak string) string {
-	parts := strings.Split(ak, "-")
-	if len(parts) == 3 && parts[0] == "sk" {
-		return parts[1]
-	}
-	return ""
 }
 
 // WithXfer 启用扩展传输层（xfer），支持 hub 中继、WebSocket 等传输方式。
