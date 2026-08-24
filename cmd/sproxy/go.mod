@@ -32,5 +32,3 @@ require (
 )
 
 replace github.com/cocomhub/sproxy => ../../
-
-replace github.com/cocomhub/buildinfo => ../../../buildinfo

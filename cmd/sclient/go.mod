@@ -52,8 +52,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/cocomhub/buildinfo => ../../../buildinfo
-
 replace github.com/cocomhub/sproxy => ../../
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc => ../../pkg/tunnel/xfer/ext/webrtc
