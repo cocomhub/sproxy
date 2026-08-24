@@ -394,12 +394,16 @@ type HubServer struct {
 	maxConns chan struct{}
 }
 
-// NewHubServer 创建节点收口服务。auth 为 nil 时不鉴权。
+// NewHubServer 创建节点收口服务。auth 为 nil 时视为 fail-closed（拒绝所有注册），
+// 防止调用方"遗漏传 auth"走向开放注册（M-7）。
 // maxConns 为可选变参：传 >0 的值表示 Hub 同时处理的连接数上限（I30），
 // 不传或 <=0 表示无上限。
 func NewHubServer(rt *RouteTable, auth *Authenticator, logger *slog.Logger, maxConns ...int) *HubServer {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if auth == nil {
+		auth = NewAuthenticator(nil)
 	}
 	s := &HubServer{rt: rt, auth: auth, logger: logger}
 	if len(maxConns) > 0 && maxConns[0] > 0 {

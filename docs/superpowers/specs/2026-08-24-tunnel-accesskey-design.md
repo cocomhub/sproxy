@@ -138,4 +138,10 @@ func DeriveTunnelKey(sk, mesh string) ([]byte, error) {
 ## 6. 已完成/待办
 
 - [x] 用户确认整体设计（2026-08-24）
-- [ ] 写实现计划（writing-plans）
+- [x] 写实现计划（writing-plans，`2026-08-24-tunnel-accesskey.md`）
+- [x] 任务 1–9 全部实现（commit `eb9efdd..047834d`，分支 `feature/mesh-tunnel`）
+  - 任务 1–5：sproxysig 双签 / ctx 密钥 / DeriveTunnelKey / authMiddleware / handler ctx
+  - 任务 6–7：废除 tunnel_key + fail-fast / sclient WithTunnel 派生（`269b669`）
+  - 任务 8：hub 节点注册 AK/HMAC 准入（`36b757c`）
+  - 任务 9：E2E 迁移 access_keys + 纯隧道 E2E + bodyValidator 哈希即时校验（`047834d`）
+- [x] 全量验证：`make test-all` 所有子 module 通过；`make lint` 0 issues；E2E 全绿

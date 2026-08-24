@@ -250,12 +250,13 @@ func TestHubServer_TryHandleConn_NoLimit(t *testing.T) {
 	_ = server.Close()
 }
 
-// TestHubServerBareNodeID 覆盖 readRegisterFrame 的裸字节回退分支（I48）：
-// 非 JSON 裸字符串被当作 nodeID；nil auth（测试专用）下注册应成功并回发 REG_OK。
+// TestHubServerBareNodeID 覆盖 readRegisterFrame 的裸字节回退分支（I48）+ 认证驱动 fail-closed：
+// 非 JSON 裸字符串被当作 nodeID，但裸帧无 AK/proof 凭据 → 注册被拒绝（REG_ERR），节点不注册。
+// （nil auth 现视为 fail-closed，见 NewHubServer；本测试用合法 accessKeys 验证拒绝路径。）
 func TestHubServerBareNodeID(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewRouteTable()
-	srv := NewHubServer(rt, nil, log) // nil auth：测试专用，跳过鉴权
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -276,20 +277,20 @@ func TestHubServerBareNodeID(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	// 裸字节注册帧：非 JSON，readRegisterFrame 走裸字符串容错分支
+	// 裸字节注册帧：非 JSON，readRegisterFrame 走裸字符串容错分支；但无 AK/proof 凭据 → 拒绝。
 	if err := clientConn.Send(ctx, []byte("node-bare")); err != nil {
 		t.Fatal(err)
 	}
 
 	ack, ackErr := clientConn.Receive(ctx)
 	if ackErr != nil {
-		t.Fatalf("expected REG_OK frame, got error: %v", ackErr)
+		t.Fatalf("expected REG_ERR frame, got error: %v", ackErr)
 	}
-	if string(ack) != RegisterAckOK {
-		t.Fatalf("expected %q, got %q", RegisterAckOK, string(ack))
+	if !strings.HasPrefix(string(ack), RegisterAckErr) {
+		t.Fatalf("expected REG_ERR, got %q", string(ack))
 	}
-	if !rt.Has("node-bare") {
-		t.Fatal("node-bare not registered")
+	if rt.Has("node-bare") {
+		t.Fatal("node-bare should NOT be registered without access key proof")
 	}
 
 	_ = clientConn.Close()

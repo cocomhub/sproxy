@@ -933,3 +933,26 @@ func TestResponseJSON(t *testing.T) {
 		t.Fatalf("roundtrip mismatch: %+v vs %+v", resp, decoded)
 	}
 }
+
+// TestAccessKeyMesh 覆盖 AccessKey 的 mesh 段解析：支持连字符 mesh、无 mesh 段、
+// 非 sk- 前缀等（I-1：客户端派生与服务端 HKDF info 共用的单一解析实现）。
+func TestAccessKeyMesh(t *testing.T) {
+	tests := []struct {
+		ak   string
+		want string
+	}{
+		{"sk-prod-1234567890abcdef", "prod"},
+		{"sk-prod-eu-1234567890abcdef", "prod-eu"}, // mesh 含连字符
+		{"sk-meshA-3f8a1234abcd5678", "meshA"},
+		{"sk-1234567890abcdef", ""},     // 无 mesh 段
+		{"other", ""},                   // 非 sk- 前缀
+		{"sk-", ""},                     // 只有前缀
+		{"sk-prod-1234567890abcde", ""}, // hex 段不足 16 位
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := AccessKeyMesh(tt.ak); got != tt.want {
+			t.Errorf("AccessKeyMesh(%q) = %q, want %q", tt.ak, got, tt.want)
+		}
+	}
+}

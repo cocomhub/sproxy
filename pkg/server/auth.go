@@ -200,6 +200,15 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			if !h.verifySproxySig(w, r, cfg) {
 				return
 			}
+			// I-3：bodyValidator 只在读到 io.EOF 时比对哈希，而 JSON 端点用
+			// json.Decoder、上传用 ParseMultipartForm 都不读到 EOF，哈希比对永不触发。
+			// handler 完成后强制消费剩余 body 触发 EOF 校验；不匹配记 Warn（响应已发，
+			// 无法改状态码，但防篡改意图得以执行并留痕）。
+			defer func() {
+				if _, derr := io.Copy(io.Discard, r.Body); derr != nil {
+					slog.Warn("auth: body 哈希校验失败", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "error", derr)
+				}
+			}()
 			// /tunnel：验签成功后按 AK 查 SK → HKDF 派生隧道密钥放入 ctx，
 			// 隧道 handler 用 ctx 密钥解密 metadata 与 body；普通 API 请求走下面分支。
 			if r.URL.Path == "/tunnel" {
@@ -222,6 +231,8 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 // tunnelDerivedKey 从当前请求的 AK 查 AccessKeys 配置，用其 SK HKDF 派生隧道密钥。
 // v1：AK/SK 对称，SK 即 AES 隧道密钥派生源（golang.org/x/crypto/hkdf）。
+// mesh 用共享 tunnel.AccessKeyMesh(ak.Key) 解析（与 sclient 一致，消除配置漂移 I-1）；
+// 显式配置的 mesh_id 由 Config.Validate 校验必须与 AK 内嵌 mesh 一致。
 func (h *Handlers) tunnelDerivedKey(r *http.Request, cfg *Config) ([]byte, error) {
 	hdr, err := sproxysig.ParseHeader(r.Header.Get("Authorization"))
 	if err != nil {
@@ -229,7 +240,7 @@ func (h *Handlers) tunnelDerivedKey(r *http.Request, cfg *Config) ([]byte, error
 	}
 	for _, ak := range cfg.AccessKeys {
 		if subtle.ConstantTimeCompare([]byte(ak.Key), []byte(hdr.AK)) == 1 {
-			return tunnel.DeriveTunnelKey(ak.Secret, ak.MeshID)
+			return tunnel.DeriveTunnelKey(ak.Secret, tunnel.AccessKeyMesh(ak.Key))
 		}
 	}
 	return nil, fmt.Errorf("unknown access key %q", hdr.AK)

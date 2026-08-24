@@ -130,6 +130,46 @@ func GenerateKey() (string, error) {
 	return hex.EncodeToString(key), nil
 }
 
+// AccessKeyMesh 从 SproxySig AccessKey 提取 mesh 段（AK 形如 sk[-<mesh>]-<16hex>）：
+//   - sk-<mesh>-<hex>（mesh 可含连字符）→ mesh
+//   - sk-<hex>（无 mesh 段）→ ""
+//   - 其他格式 → ""
+//
+// 这是两端（sclient 派生 / 服务端 HKDF info）唯一的 mesh 解析实现，保证派生参数一致
+// （I-1：禁止客户端字符串解析与服务端配置 mesh_id 各写一套导致密钥不匹配）。
+func AccessKeyMesh(ak string) string {
+	if !strings.HasPrefix(ak, "sk-") {
+		return ""
+	}
+	rest := strings.TrimPrefix(ak, "sk-")
+	// 末尾必须为 -<16 hex>（mesh 段可含连字符，故取最后一个 '-'）。
+	idx := strings.LastIndex(rest, "-")
+	if idx <= 0 || idx+17 != len(rest) {
+		return ""
+	}
+	hexPart := rest[idx+1:]
+	if !isHexString(hexPart) {
+		return ""
+	}
+	return rest[:idx]
+}
+
+// hexChars 是 16 个十六进制字符集（isHexString 用）。
+const hexChars = "0123456789abcdefABCDEF"
+
+// isHexString 判断 s 是否为 16 个十六进制字符。
+func isHexString(s string) bool {
+	if len(s) != 16 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !strings.ContainsRune(hexChars, rune(s[i])) {
+			return false
+		}
+	}
+	return true
+}
+
 // DeriveTunnelKey 从 SproxySig AccessKeySecret（SK，64 hex）派生 32B AES-256 隧道密钥。
 // salt 固定字符串提供域分离；info=mesh_id（每 mesh 独立）。两端必须用相同参数。
 func DeriveTunnelKey(skHex, meshID string) ([]byte, error) {
