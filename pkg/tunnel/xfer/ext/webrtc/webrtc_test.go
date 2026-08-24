@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
 )
 
 // TestWebrtcXferConn_CloseUnblocksBlockedSend（P0-2 回归）：
@@ -102,6 +103,9 @@ func (idleSignaler) WaitAnswer(ctx context.Context) (string, string, error) {
 // ErrNoIncomingConnection 哨兵（供 p2p listen 区分"空闲"与"失败"，避免空闲时
 // 无条件重注册 + per-node secret 轮换的注册抖动）。
 func TestListenWithSignaler_IdleTimeout_ReturnsSentinel(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	SetHostOnly(true)
 	t.Cleanup(func() { SetHostOnly(false) })
 	SetSignalingTimeout(200 * time.Millisecond)
@@ -115,6 +119,9 @@ func TestListenWithSignaler_IdleTimeout_ReturnsSentinel(t *testing.T) {
 
 // TestWebrtcRoundTrip verifies bidirectional message exchange.
 func TestWebrtcRoundTrip(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	SetHostOnly(true)
 	t.Cleanup(func() { SetHostOnly(false) })
 	signal := NewSignal()
@@ -211,6 +218,9 @@ func TestWebrtcRoundTrip(t *testing.T) {
 
 // TestWebrtcBasicConnect verifies one-way message delivery.
 func TestWebrtcBasicConnect(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	SetHostOnly(true)
 	t.Cleanup(func() { SetHostOnly(false) })
 	signal := NewSignal()
@@ -265,6 +275,9 @@ func TestWebrtcBasicConnect(t *testing.T) {
 // TestWebrtcConcurrentSends verifies concurrent writes from dialer to listener
 // with content-set assertion（并发写顺序不保证，但内容必须完整一致）。
 func TestWebrtcConcurrentSends(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	SetHostOnly(true)
 	t.Cleanup(func() { SetHostOnly(false) })
 	signal := NewSignal()
@@ -346,6 +359,9 @@ func TestWebrtcConcurrentSends(t *testing.T) {
 // 修复前 pion detached DataChannel 在 pc.Close 后 Read 可能阻塞数秒甚至更久，
 // 原测试"data or error both acceptable"实为死测试。
 func TestWebrtcCloseBeforeRead(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	SetHostOnly(true)
 	t.Cleanup(func() { SetHostOnly(false) })
 	signal := NewSignal()
@@ -392,6 +408,9 @@ func TestWebrtcCloseBeforeRead(t *testing.T) {
 
 // TestWebrtcLargeMessage verifies 64 KiB message transfer.
 func TestWebrtcLargeMessage(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	SetHostOnly(true)
 	t.Cleanup(func() { SetHostOnly(false) })
 	signal := NewSignal()
@@ -466,6 +485,9 @@ func TestWebrtcAddr(t *testing.T) {
 
 // TestWebrtcConnDeadlines verifies deadline methods are no-ops.
 func TestWebrtcConnDeadlines(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	SetHostOnly(true)
 	t.Cleanup(func() { SetHostOnly(false) })
 	signal := NewSignal()
@@ -506,6 +528,9 @@ func TestWebrtcConnDeadlines(t *testing.T) {
 //   - Send 超 maxFrameBytes 返回错误（大小上限防御）
 //   - Close 后 Send/Receive 返回 xfer.ErrConnClosed（与 tcp 传输对齐）
 func TestWebrtcXferConn_ClosedSemantics(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	SetHostOnly(true)
 	t.Cleanup(func() { SetHostOnly(false) })
 	signal := NewSignal()
@@ -618,6 +643,9 @@ func (s *remotePeerSignaler) WaitAnswer(ctx context.Context) (string, string, er
 // TestConn_RemotePeerID：Dial 侧 RemotePeerID 为目标 peer；Listen 侧为 offer 发送方
 // （offerFrom，供 mesh accept 侧恢复 discovery 拨号者真实 node-id）。
 func TestConn_RemotePeerID(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	SetHostOnly(true)
 	t.Cleanup(func() { SetHostOnly(false) })
 	sig := &remotePeerSignaler{

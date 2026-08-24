@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
 	"github.com/pion/logging"
 )
 
@@ -81,6 +82,9 @@ func TestSetVerbose_GloballyEnabled(t *testing.T) {
 // TestRoundTrip_HostOnly_StateCallbacksRegistered 验证 host-only 内网模式下往返正常，
 // 并断言打洞诊断回调（logICEEvent/logPCStateEvent/logCandidateEvents）确实被触发。
 func TestRoundTrip_HostOnly_StateCallbacksRegistered(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	SetHostOnly(true)
 	t.Cleanup(func() { SetHostOnly(false) })
 
