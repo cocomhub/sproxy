@@ -196,7 +196,13 @@ var blockCache sync.Map
 func getCipherBlock(key []byte) (cipher.Block, error) {
 	k := string(key)
 	if v, ok := blockCache.Load(k); ok {
-		return v.(cipher.Block), nil //nolint:errcheck
+		// 显式两值断言：errcheck(check-type-assertions) 要求检查类型断言结果，
+		// 同时避免缓存类型异常时 panic。缓存内恒为 cipher.Block，此处仅防御。
+		block, ok := v.(cipher.Block)
+		if !ok {
+			return nil, fmt.Errorf("tunnel: cipher block cache 类型异常: %T", v)
+		}
+		return block, nil
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
