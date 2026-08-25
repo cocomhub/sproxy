@@ -56,40 +56,13 @@ document.addEventListener('DOMContentLoaded', function() {
   cb.addEventListener('change', function() { toggleTransport(cb); });
 });
 
-// 还原网络传输层：检测 override，返回当前 scope 的传输配置分量。
-function applyTransportOverride() {
-  const override = sclientConfig.readLocalOverride();
-  const ov = override && override.transport;
-  const mode = (ov === 'tunnel' || ov === 'direct') ? ov : overrideTransportFallback();
-  sclientTransport.configure({
-    accessKey: accessKey,
-    accessKeySecret: accessKeySecret,
-    mode: mode,
-    tunnelDefault: undefined,
-  });
-  return mode;
-}
-
-// overrideTransportFallback 回退读取 transport 的有效模式（override 为空时按服务端开关）。
-function overrideTransportFallback() {
-  return (sclientTransport.effectiveMode && sclientTransport.effectiveMode() === 'tunnel') ? 'tunnel' : 'direct';
-}
-
-// refreshTransport 复算传输配置（切换 override / 保存 AK/SK / 服务端开关后调用）。
-function refreshTransport() {
-  try {
-    applyTransportOverride();
-  } catch (e) { /* ignore */ }
-}
-
 // toggleTransport 读写「走隧道（调试）」checkbox，并落地 override + 强制 mode 即时生效。
+// override 必须写成 JSON 对象字符串（align config.readLocalOverride 的 JSON.parse），
+// 裸字符串 'tunnel'/'direct' 无法被 readLocalOverride 解析，刷新后不回读。
 function toggleTransport(cb) {
   const on = !!cb.checked;
-  // 写到 localStorage override（transport.readLocalOverride/effectiveMode 读取，
-  // auto 时有效）。显式 'tunnel'/'direct' 同时强制 transport.mode 即时生效。
   try {
-    if (on) localStorage.setItem('sproxy_web_transport_override', 'tunnel');
-    else localStorage.setItem('sproxy_web_transport_override', 'direct');
+    localStorage.setItem('sproxy_web_transport_override', JSON.stringify({ transport: on ? 'tunnel' : 'direct' }));
     sclientTransport.configure({
       accessKey: accessKey,
       accessKeySecret: accessKeySecret,
@@ -453,7 +426,10 @@ async function showStats() {
   switchStatsTab('stats');
   document.getElementById('stats-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
-    const data = await sc.statsGet();
+    // /api/stats 无对应领域方法（api/index 只有 files/cloud/share/config/hub 命名空间），
+    // 直接走传输层 coreRequest 取 JSON（隧道/直连自动协商 + SproxySig）。
+    const res = await sclientTransport.coreRequest('GET', '/api/stats', {});
+    const data = sclientUtil.decodeJSON(res.body);
     var du = data.disk_usage || {};
     var rc = data.request_counts || {};
     document.getElementById('stats-panel').innerHTML = statsTableHtml(du, rc, data);
