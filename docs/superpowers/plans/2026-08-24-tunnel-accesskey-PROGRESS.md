@@ -51,12 +51,23 @@
   config.example.yaml 更新、NewHubServer(nil) fail-closed。
 - 最终审查：`2026-08-24-tunnel-accesskey-finalreview.md`——0 Critical，修复 4 Important + 2 Minor。
 
-## 已知权衡（审查搁置，非缺陷）
-- M-6 hub 注册 proof 静态（无 ts/nonce）：捕获需 wss/TLS 被攻破，绑定 nodeID 已排除串用。
-- M-8 api_keys-only 启动时 hub//tunnel 不可用（功能死角，非安全洞）。
-- M-9 共享 hub 下跨 mesh 元数据可见（mesh 隔离仅在数据面密钥层）。
-- M-10 verifySproxySig/tunnelDerivedKey 二次解析头与遍历（理论 TOCTOU，概率极低）。
-- I-3 深层修复：JSON/multipart 端点在响应前拒绝篡改 body 需 handler 内校验（当前为响应后检测 + Warn 留痕）。
+## 审查修复（全部完成）
+
+### commit be14e98 — M-6/M-8/M-10 + I-3
+- M-6 hub 注册 proof 加 ts+nonce（v2 协议防重放）：proof = HMAC(SK, "sproxy-hub-register/v2\n"+nodeID+"\n"+ts+"\n"+nonce)；ts 新鲜度 + nonce 池（复用 sproxysig.NoncePool）。
+- M-8 api_keys 保留 + 边界：hub.enabled 时强制 access_keys（条件 fail-fast）。
+- M-10 verifySproxySig 返回命中 AK（消除二次遍历/TOCTOU）。
+- I-3 body 防篡改响应前拒绝：drainAndVerifyBody + 15 个 JSON 端点 + 2 个 multipart 端点补 EOF 校验；回归测试 TestSproxySig_BodyTamperRejected。
+
+### commit 03d7ba5 — M-9 mesh 独立分表
+- 新增 MeshRouteTable 聚合层（每 mesh 独立 RouteTable + nodeMesh 映射）；NodeInfo.Mesh；
+  registerNode 按 AK 解析 mesh 分表注册；/api/hub/nodes、stats、services 按请求 AK mesh 过滤；
+  relay_stream 跨 mesh 转发 404；信令跨 mesh 403；metrics 按 ctx mesh。
+- 跨 mesh 隔离测试全套通过（列表/转发/服务发现/信令）。
+
+## 已知权衡（审查后仍搁置，均非缺陷）
+- ~~M-6/M-8/M-9/M-10/I-3 均已修复~~（原搁置项全部落实）。
+- 剩余：hub proof 重放需 wss/TLS 被攻破（M-6 已加 ts/nonce 防重放）；api_keys-only 文件面保留（不走隧道/hub，已文档化）。
 
 ---
 
