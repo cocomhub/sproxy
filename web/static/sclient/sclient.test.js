@@ -19,6 +19,7 @@ const assert = require('node:assert/strict');
 const cryptoLib = require('./crypto.js');
 const { defaultConfig, applyOverride, readLocalOverride } = require('./config.js');
 const log = require('./log.js');
+const sig = require('./sig.js');
 
 // ---- 已知向量（来自 Go 实测，任务 2 注入值，必须逐字使用） ----
 const BASE_SK = '2b40d5b60e6792134f07b44b46e2e19fb72f967136868015cb922d720c1aa6f5';
@@ -171,4 +172,66 @@ test('log.js 级别过滤', () => {
     log.setLevel(oldLevel);
     log.setConsole(oldConsole);
   }
+});
+
+// ==================== sig.js 追加用例（任务 3） ====================
+
+test('sig.signHeader unsigned canonical 对齐 Go sproxysig 已知向量', async () => {
+  // 注入值逐字使用（见 hmacCanonicalInput 顶部向量）：SK=BASE_SK，AK/ts/exp/nonce
+  // 固定，body_sha256='UNSIGNED'。signHeader 内部用 hmacSHA256Hex（baseSK 编码为
+  // UTF-8）计算 canonical 的 HMAC——与 Go hmac.New(sha256.New, []byte(sk)) 同一字节。
+  const header = await sig.signHeader('POST', '/tunnel', null, {
+    ak: HMAC_FIXTURE.ak,
+    ts: HMAC_FIXTURE.ts,
+    exp: HMAC_FIXTURE.exp,
+    nonce: HMAC_FIXTURE.nonce,
+    secret: BASE_SK,
+    unsigned: true,
+  });
+  assert.strictEqual(header, 'SproxySig v=1 ak=' + HMAC_FIXTURE.ak + ' ts=' + HMAC_FIXTURE.ts + ' exp=' + HMAC_FIXTURE.exp + ' nonce=' + HMAC_FIXTURE.nonce + ' body_sha256=UNSIGNED sig=' + HMAC_FIXTURE.sigHex);
+});
+
+test('sig.buildCanonical 分段拼接与 Go Header.Canonical 一致', () => {
+  const c = sig.buildCanonical('POST', '/tunnel', {
+    ak: HMAC_FIXTURE.ak,
+    ts: HMAC_FIXTURE.ts,
+    exp: HMAC_FIXTURE.exp,
+    nonce: HMAC_FIXTURE.nonce,
+    bodySha256: 'UNSIGNED',
+  });
+  // 9 段（sproxy-sig/v1、ak、ts、exp、nonce、method、path、query、body_sha256）
+  const seg = c.split('\n');
+  assert.strictEqual(seg.length, 9);
+  assert.strictEqual(c, hmacCanonicalInput(HMAC_FIXTURE));
+});
+
+test('sig.signHeader 常规 body：sha256 hashing 正确 + 完整头部', async () => {
+  const bodyStr = 'hello sproxy sig body';
+  const body = new TextEncoder().encode(bodyStr);
+  // 短 body 的 SHA-256 hex（等价于 Go BodyHash(body)）。
+  const bodyHashHex = await cryptoLib.sha256Hex(body);
+  // 独立构造 canonical（与 signHeader 内部同一拼接；signHeader 会把
+  // '/upload?q=1' 拆成 path='/upload' 与 query='q=1'——对齐 Go
+  // EscapedPath/RawQuery 语义）。
+  const expectedCanonical =
+    'sproxy-sig/v1\n' + HMAC_FIXTURE.ak + '\n' + HMAC_FIXTURE.ts + '\n' + HMAC_FIXTURE.exp + '\n' +
+    HMAC_FIXTURE.nonce + '\nPOST\n/upload\nq=1\n' + bodyHashHex;
+  const header = await sig.signHeader('POST', '/upload?q=1', body, {
+    ak: HMAC_FIXTURE.ak,
+    ts: HMAC_FIXTURE.ts,
+    exp: HMAC_FIXTURE.exp,
+    nonce: HMAC_FIXTURE.nonce,
+    secret: BASE_SK,
+  });
+  // 完整头部格式 + body 哈希字段
+  assert.ok(header.startsWith('SproxySig v=1 ak=' + HMAC_FIXTURE.ak), header);
+  assert.ok(header.indexOf('body_sha256=' + bodyHashHex) >= 0, '头部必须携带 body 的 sha256 hex');
+  // 提取 sig 并与独立复算的 canonical HMAC 一致（验证 canonical 分段/哈希拼接）
+  const bodySig = header.split(' sig=')[1];
+  assert.strictEqual(bodySig, await cryptoLib.hmacSHA256Hex(BASE_SK, expectedCanonical));
+  // 非 unsigned → body_sha256 不是 UNSIGNED
+  assert.ok(header.indexOf('body_sha256=UNSIGNED') < 0);
+  // body_sha256 分段占 canonical 的第 9 段（校验用 buildCanonical 复算）
+  const seg = sig.buildCanonical('POST', '/upload?q=1', { ak: HMAC_FIXTURE.ak, ts: HMAC_FIXTURE.ts, exp: HMAC_FIXTURE.exp, nonce: HMAC_FIXTURE.nonce, bodySha256: bodyHashHex });
+  assert.strictEqual(seg, expectedCanonical);
 });
