@@ -311,16 +311,8 @@
   }
 
   // ---- 流式响应解码（ReadableStream.getReader 逐帧） ----
-  function makeByteSource(reader) {
-    return {
-      async pull(controller) {
-        const { done, value } = await reader.read();
-        if (done) { controller.close(); return; }
-        controller.enqueue(new Uint8Array(value));
-      },
-      cancel() { return reader.cancel(); },
-    };
-  }
+  // 下载分支（opts.download）直接消费 resp.body.getReader()（见 readNBytes/fillBuffer
+  // 与下方 streamDecode），不在此包装 makeByteSource。
 
   // 从 ReadableStream 读满 n 字节；不足/提前 EOF 抛 E_DECRYPT。
   async function readNBytes(reader, n) {
