@@ -538,3 +538,363 @@ const fakeTunnelBytes = (async () => {
   const bodyFrame = await encryptFrameAAD(derivedKeyHex, 'HTTP body payload from tunnel', AAD_STREAM);
   return concatBytes(metaFrame, bodyFrame);
 })();
+
+// ==================== 领域 API（任务 5：files/cloud/share/config/hub） ====================
+// 用注入 ctx 的 createApi 测试：mock coreRequest 捕获 (method, path, opts)，
+// 断言各领域方法的 (method, path) 映射与 JSON/multipart 编解码正确。
+
+const apiIndex = require('./api/index.js');
+const apiUtil = require('./util.js');
+
+function makeMockCore(results) {
+  const calls = [];
+  const fn = async (method, path, opts) => {
+    calls.push({ method, path, opts: opts || {} });
+    const r = results && results.length ? results.shift() : { status: 200, headers: {}, body: new Uint8Array(0) };
+    if (r && r._throw) throw (r.err instanceof Error ? r.err : new Error(String(r.err)));
+    return r;
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+function jsonBody(body) {
+  return body == null ? {} : JSON.parse(new TextDecoder().decode(body));
+}
+
+function mockCtx(core, overrides) {
+  return Object.assign({
+    coreRequest: core,
+    config: { chunkThreshold: 8 * 1024 * 1024 },
+    log: undefined,
+    crypto: cryptoLib,
+    util: apiUtil,
+  }, overrides || {});
+}
+
+function makeApi(core, overrides) {
+  return apiIndex.createApi(mockCtx(core, overrides));
+}
+
+function okResp(obj) {
+  return { status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify(obj)) };
+}
+
+// ---- files：列表/搜索/stat/download/delete/rename/mkdir/rmdir 映射 ----
+test('files.list 映射 GET /api/files（subdir/offset/limit 参数）', async () => {
+  const core = makeMockCore([okResp({ files: [{ name: 'a.txt', size: 3, checksum: 'c' }], total: 1 })]);
+  const api = makeApi(core);
+  const d = await api.files.list('dir/sub', { offset: 0, limit: 500 });
+  assert.strictEqual(core.calls[0].method, 'GET');
+  assert.strictEqual(core.calls[0].path, '/api/files?subdir=dir%2Fsub&offset=0&limit=500');
+  assert.strictEqual(d.files.length, 1);
+  assert.strictEqual(d.total, 1);
+});
+
+test('files.search / stat / download 映射', async () => {
+  const core = makeMockCore([
+    okResp({ files: [], total: 0 }),
+    { status: 200, headers: { 'X-File-Size': '3' }, body: new Uint8Array(0) },
+    { status: 200, headers: { 'content-type': 'application/octet-stream' }, body: new TextEncoder().encode('abc') },
+  ]);
+  const api = makeApi(core);
+  await api.files.search('q1');
+  assert.strictEqual(core.calls[0].path, '/api/files/search?q=q1');
+  assert.strictEqual(core.calls[0].method, 'GET');
+  await api.files.stat('x/y.txt');
+  assert.strictEqual(core.calls[1].method, 'HEAD');
+  assert.strictEqual(core.calls[1].path, '/api/files/stat?filename=x%2Fy.txt');
+  const blob = await api.files.download('x/y.txt');
+  assert.strictEqual(core.calls[2].method, 'GET');
+  assert.strictEqual(core.calls[2].path, '/download?filename=x%2Fy.txt');
+  assert.strictEqual(core.calls[2].opts.download, true);
+  assert.ok(blob instanceof Blob);
+  assert.strictEqual(new TextDecoder().decode(await blob.arrayBuffer()), 'abc');
+});
+
+test('files deleteFile/rename 带 X-File-Checksum 头映射', async () => {
+  const core = makeMockCore([okResp({ success: true }), okResp({ success: true })]);
+  const api = makeApi(core);
+  await api.files.deleteFile('a.txt', 'abc123');
+  assert.strictEqual(core.calls[0].method, 'POST');
+  assert.strictEqual(core.calls[0].path, '/delete?filename=a.txt');
+  assert.strictEqual(core.calls[0].opts.headers['X-File-Checksum'], 'abc123');
+  await api.files.rename('old.txt', 'new.txt', 'cafebeef');
+  assert.strictEqual(core.calls[1].method, 'POST');
+  assert.strictEqual(core.calls[1].path, '/rename?from=old.txt&to=new.txt');
+  assert.strictEqual(core.calls[1].opts.headers['X-File-Checksum'], 'cafebeef');
+});
+
+test('files mkdir/rmdir 映射', async () => {
+  const core = makeMockCore([okResp({ success: true }), okResp({ success: true })]);
+  const api = makeApi(core);
+  await api.files.mkdir('a b');
+  assert.strictEqual(core.calls[0].method, 'POST');
+  assert.strictEqual(core.calls[0].path, '/mkdir?dirname=a%20b');
+  await api.files.rmdir('d');
+  assert.strictEqual(core.calls[1].path, '/rmdir?dirname=d');
+});
+
+test('files batchDelete/batchRename JSON body 编解码', async () => {
+  const core = makeMockCore([okResp({ results: [{ filename: 'a', success: true }] }), okResp({ results: [] })]);
+  const api = makeApi(core);
+  await api.files.batchDelete([{ filename: 'a.txt', checksum: 'cc' }]);
+  assert.strictEqual(core.calls[0].path, '/api/batch/delete');
+  assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes), { files: [{ filename: 'a.txt', checksum: 'cc' }] });
+  assert.strictEqual(core.calls[0].opts.headers['Content-Type'], 'application/json');
+  await api.files.batchRename([{ from: 'a', to: 'b', checksum: 'c' }]);
+  assert.strictEqual(core.calls[1].path, '/api/batch/rename');
+  assert.deepStrictEqual(jsonBody(core.calls[1].opts.bodyBytes), { operations: [{ from: 'a', to: 'b', checksum: 'c' }] });
+});
+
+test('files archive/archiveDir 返回 blob + Content-Disposition 文件名', async () => {
+  const core = makeMockCore([
+    { status: 200, headers: { 'Content-Disposition': 'attachment; filename="pkg.tar.gz"' }, body: new TextEncoder().encode('gzipbytes') },
+    { status: 200, headers: {}, body: new TextEncoder().encode('more') },
+  ]);
+  const api = makeApi(core);
+  const a1 = await api.files.archive(['f1']);
+  assert.strictEqual(core.calls[0].method, 'POST');
+  assert.strictEqual(core.calls[0].path, '/api/archive');
+  assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes), { files: ['f1'] });
+  assert.strictEqual(core.calls[0].opts.download, true);
+  assert.strictEqual(a1.filename, 'pkg.tar.gz');
+  assert.ok(a1.blob instanceof Blob);
+  const a2 = await api.files.archiveDir('d');
+  assert.strictEqual(core.calls[1].path, '/api/archive-dir?dirname=d');
+  assert.strictEqual(core.calls[1].opts.download, true);
+  assert.strictEqual(a2.filename, 'archive.tar.gz');
+});
+
+test('files versions.list/restore/delete 映射', async () => {
+  const core = makeMockCore([
+    okResp({ versions: [{ version_id: 1, size: 2 }] }),
+    okResp({ success: true }),
+    okResp({ success: true }),
+  ]);
+  const api = makeApi(core);
+  const v = await api.files.versions.list('f.txt');
+  assert.strictEqual(core.calls[0].path, '/api/versions?filename=f.txt');
+  assert.strictEqual(core.calls[0].method, 'GET');
+  assert.strictEqual(v.versions.length, 1);
+  await api.files.versions.restore('f.txt', '7');
+  assert.strictEqual(core.calls[1].path, '/api/versions/restore?filename=f.txt&version_id=7');
+  assert.strictEqual(core.calls[1].method, 'POST');
+  await api.files.versions.delete('f.txt', '7');
+  assert.strictEqual(core.calls[2].path, '/api/versions?filename=f.txt&version_id=7');
+  assert.strictEqual(core.calls[2].method, 'DELETE');
+});
+
+// ---- files.upload：小文件简单上传（multipart + 头）与分块上传（init/chunk/complete）----
+
+test('files.upload 小文件走简单 POST /upload（multipart + X-File-Checksum/Path/MTime）', async () => {
+  const core = makeMockCore([okResp({ success: true, file_checksum: 'abc' })]);
+  const api = makeApi(core, { config: { chunkThreshold: 1 << 20 } });
+  const smallTxt = new TextEncoder().encode('abcd');
+  const file = {
+    name: 'small.txt',
+    size: 4,
+    lastModified: 1700000000000,
+    slice: (s, e) => { const b = smallTxt.slice(s, e); return { arrayBuffer: async () => b.slice().buffer }; },
+    arrayBuffer: async () => smallTxt.slice().buffer,
+  };
+  const res = await api.files.upload(file, { subdir: '', onProgress: undefined });
+  assert.strictEqual(core.calls.length, 1);
+  assert.strictEqual(core.calls[0].method, 'POST');
+  assert.strictEqual(core.calls[0].path, '/upload');
+  assert.strictEqual(core.calls[0].opts.headers['X-File-Path'], 'small.txt');
+  assert.strictEqual(core.calls[0].opts.headers['X-File-MTime'], String(1700000000000 * 1e6));
+  const chk = core.calls[0].opts.headers['X-File-Checksum'];
+  assert.ok(/^[0-9a-f]{64}$/.test(chk), 'checksum 应为 64 hex: ' + chk);
+  assert.strictEqual(chk, await cryptoLib.sha256Hex('abcd'));
+  assert.ok(core.calls[0].opts.headers['Content-Type'].indexOf('multipart/form-data; boundary=') === 0);
+  assert.ok(core.calls[0].opts.bodyBytes instanceof Uint8Array);
+  assert.ok(core.calls[0].opts.bodyBytes.length > 0);
+  assert.ok(res.success);
+});
+
+test('files.upload 分块流程 init→status→chunk→complete（forceChunked 强制）', async () => {
+  const core = makeMockCore([
+    okResp({ success: true, upload_id: 'u123', chunk_size: 4, message: 'ok' }),
+    okResp({ success: true, missing_chunks: [0], upload_id: 'u123' }),
+    okResp({ success: true, message: 'ok' }),
+    okResp({ success: true, filename: 'big.bin', file_checksum: 'ff' }),
+  ]);
+  const api = makeApi(core);
+  const content = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) content[i] = i;
+  const overall = content.slice();
+  const file = {
+    name: 'big.bin',
+    size: 16,
+    lastModified: 1700000000000,
+    slice: (s, e) => { const b = overall.slice(s, e); return { arrayBuffer: async () => b.slice().buffer }; },
+    arrayBuffer: async () => overall.slice().buffer,
+  };
+  const res = await api.files.upload(file, { subdir: 's', forceChunked: true });
+  assert.strictEqual(core.calls.length, 4);
+  assert.strictEqual(core.calls[0].path, '/upload/init');
+  assert.strictEqual(core.calls[1].path, '/upload/status?upload_id=u123');
+  assert.strictEqual(core.calls[2].path, '/upload/chunk');
+  assert.strictEqual(core.calls[2].opts.headers['Content-Type'].indexOf('multipart/form-data; boundary=') === 0, true);
+  assert.strictEqual(core.calls[3].path, '/upload/complete');
+  assert.strictEqual(res.success, true);
+});
+
+// ---- cloud：任务/组 ----
+test('cloud 任务映射（create/batch/list/get/cancel/delete/resume/archive）', async () => {
+  const core = makeMockCore([
+    okResp({ id: 't1', status: 'pending' }),
+    okResp({ tasks: [{ id: 't2', status: 'completed' }] }),
+    okResp({ tasks: [], total: 0 }),
+    okResp({ id: 't3', status: 'downloading' }),
+    okResp({ status: 'cancelled' }),
+    okResp({ status: 'deleted' }),
+    okResp({ status: 'resumed' }),
+    okResp({ success: true, file: '.__cloud_archives__/x.tar.gz' }),
+    okResp({ success: true, file: 'b.tar.gz' }),
+  ]);
+  const api = makeApi(core);
+  await api.cloud.createDownload('http://x/a', 'a.jpg');
+  assert.strictEqual(core.calls[0].path, '/api/cloud/download');
+  assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes), { url: 'http://x/a', filename: 'a.jpg' });
+  await api.cloud.createBatch([{ url: 'http://x/b', filename: 'b.jpg' }]);
+  assert.strictEqual(core.calls[1].path, '/api/cloud/download/batch');
+  assert.deepStrictEqual(jsonBody(core.calls[1].opts.bodyBytes), { urls: [{ url: 'http://x/b', filename: 'b.jpg' }] });
+  await api.cloud.listTasks({ status: 'downloading' });
+  assert.strictEqual(core.calls[2].path, '/api/cloud/tasks?status=downloading');
+  assert.strictEqual(core.calls[2].method, 'GET');
+  await api.cloud.getTask('t3');
+  assert.strictEqual(core.calls[3].path, '/api/cloud/tasks/t3');
+  await api.cloud.cancelTask('t4');
+  assert.strictEqual(core.calls[4].path, '/api/cloud/tasks/t4/cancel');
+  assert.strictEqual(core.calls[4].method, 'POST');
+  await api.cloud.deleteTask('t5');
+  assert.strictEqual(core.calls[5].path, '/api/cloud/tasks/t5');
+  assert.strictEqual(core.calls[5].method, 'DELETE');
+  await api.cloud.resumeTask('t6', true);
+  assert.strictEqual(core.calls[6].path, '/api/cloud/tasks/t6/resume');
+  assert.deepStrictEqual(jsonBody(core.calls[6].opts.bodyBytes), { force: true });
+  await api.cloud.archiveTask('t7', 'x.tar.gz');
+  assert.strictEqual(core.calls[7].path, '/api/cloud/tasks/t7/archive');
+  assert.deepStrictEqual(jsonBody(core.calls[7].opts.bodyBytes), { archive_name: 'x.tar.gz' });
+  await api.cloud.archiveBatch(['a', 'b']);
+  assert.strictEqual(core.calls[8].path, '/api/cloud/archive');
+  assert.deepStrictEqual(jsonBody(core.calls[8].opts.bodyBytes), { task_ids: ['a', 'b'] });
+});
+
+test('cloud 组映射（create/list/get/cancel/delete/resume/archive）', async () => {
+  const core = makeMockCore([
+    okResp({ id: 'g1', total_tasks: 1 }),
+    okResp({ groups: [], total: 0 }),
+    okResp({ group: { id: 'g1' }, tasks: [] }),
+    okResp({ status: 'cancelled' }),
+    okResp({ status: 'deleted' }),
+    okResp({ status: 'resumed' }),
+    okResp({ success: true, file: 'g.tar.gz' }),
+  ]);
+  const api = makeApi(core);
+  await api.cloud.createGroup('grp', [{ url: 'http://x/a', filename: 'a.jpg' }]);
+  assert.strictEqual(core.calls[0].path, '/api/cloud/groups');
+  assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes), { name: 'grp', urls: [{ url: 'http://x/a', filename: 'a.jpg' }] });
+  await api.cloud.listGroups({});
+  assert.strictEqual(core.calls[1].path, '/api/cloud/groups');
+  await api.cloud.getGroup('g1');
+  assert.strictEqual(core.calls[2].path, '/api/cloud/groups/g1');
+  await api.cloud.cancelGroup('g1');
+  assert.strictEqual(core.calls[3].path, '/api/cloud/groups/g1/cancel');
+  await api.cloud.deleteGroup('g1');
+  assert.strictEqual(core.calls[4].path, '/api/cloud/groups/g1');
+  assert.strictEqual(core.calls[4].method, 'DELETE');
+  await api.cloud.resumeGroup('g1', false);
+  assert.strictEqual(core.calls[5].path, '/api/cloud/groups/g1/resume');
+  assert.deepStrictEqual(jsonBody(core.calls[5].opts.bodyBytes), { force: false });
+  await api.cloud.archiveGroup('g1', 'g.tar.gz');
+  assert.strictEqual(core.calls[6].path, '/api/cloud/groups/g1/archive');
+  assert.deepStrictEqual(jsonBody(core.calls[6].opts.bodyBytes), { archive_name: 'g.tar.gz' });
+});
+
+// ---- share ----
+test('share create/list/revoke 映射', async () => {
+  const core = makeMockCore([
+    okResp({ success: true, token: 'T' }),
+    okResp({ success: true, token: 'T' }),
+    okResp({ shares: [{ token: 'T', filename: 'a.txt' }] }),
+    okResp({ success: true }),
+  ]);
+  const api = makeApi(core);
+  await api.share.create({ filename: 'a.txt', ttl: '24h', max_downloads: 3, one_time: false });
+  assert.strictEqual(core.calls[0].path, '/api/share');
+  assert.strictEqual(core.calls[0].method, 'POST');
+  assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes), { filename: 'a.txt', ttl: '24h', max_downloads: 3, one_time: false });
+  const noBody = await api.share.create({ filename: 'a.txt' });
+  assert.strictEqual(noBody.token, 'T');
+  assert.deepStrictEqual(jsonBody(core.calls[1].opts.bodyBytes), { filename: 'a.txt', ttl: '24h', max_downloads: 0, one_time: false });
+  const list = await api.share.list();
+  assert.strictEqual(core.calls[2].path, '/api/shares');
+  assert.strictEqual(list.shares.length, 1);
+  await api.share.revoke('T');
+  assert.strictEqual(core.calls[3].path, '/api/shares/T');
+  assert.strictEqual(core.calls[3].method, 'DELETE');
+});
+
+// ---- config ----
+test('config.get / update / updateStorage 映射', async () => {
+  const core = makeMockCore([
+    okResp({ log_level: 'info', web_tunnel: true }),
+    okResp({ success: true, changed: true }),
+    okResp({ success: true, max_storage_bytes: 1024 }),
+  ]);
+  const api = makeApi(core);
+  const g = await api.config.get();
+  assert.strictEqual(core.calls[0].path, '/api/config');
+  assert.strictEqual(core.calls[0].method, 'GET');
+  assert.strictEqual(g.web_tunnel, true);
+  await api.config.update({ log_level: 'debug', web_tunnel: false });
+  assert.strictEqual(core.calls[1].path, '/api/config');
+  assert.strictEqual(core.calls[1].method, 'PUT');
+  assert.deepStrictEqual(jsonBody(core.calls[1].opts.bodyBytes), { log_level: 'debug', web_tunnel: false });
+  await api.config.updateStorage(2048);
+
+  assert.strictEqual(core.calls[2].path, '/api/storage/config');
+  assert.strictEqual(core.calls[2].method, 'PUT');
+  assert.deepStrictEqual(jsonBody(core.calls[2].opts.bodyBytes), { max_storage_bytes: 2048 });
+});
+
+// ---- hub ----
+test('hub nodes/stats/remove 映射（nodes 包装为 {nodes:[...]}）', async () => {
+  const core = makeMockCore([
+    // nodes 返回裸数组（服务端 json array）；领域把它统一为 {nodes, ...}
+    { status: 200, headers: {}, body: new TextEncoder().encode(JSON.stringify([{ id: 'n1', addr: '127.0.0.1:1', connected: '2026-01-01T00:00:00Z' }])) },
+    okResp({ nodes_connected: 3 }),
+    okResp({ status: 'removed', node: 'n1' }),
+  ]);
+  const api = makeApi(core);
+  const n = await api.hub.nodes();
+  assert.strictEqual(core.calls[0].path, '/api/hub/nodes');
+  assert.strictEqual(core.calls[0].method, 'GET');
+  assert.ok(Array.isArray(n.nodes), 'nodes 应被包装为数组');
+  assert.strictEqual(n.nodes[0].id, 'n1');
+  const s = await api.hub.stats();
+  assert.strictEqual(core.calls[1].path, '/api/hub/stats');
+  assert.strictEqual(core.calls[1].method, 'GET');
+  assert.strictEqual(s.nodes_connected, 3);
+  await api.hub.remove('n1');
+  assert.strictEqual(core.calls[2].path, '/api/hub/nodes/n1');
+  assert.strictEqual(core.calls[2].method, 'DELETE');
+});
+
+test('util.buildMultipart 片段断言（boundary/字段/文件存在性）', () => {
+  const mp = apiUtil.buildMultipart(
+    { a: '1', upload_id: 'u', chunk_checksum: 'f'.repeat(64) },
+    { name: 'file', filename: 'name.txt', contentType: 'text/plain', bytes: new TextEncoder().encode('hello') }
+  );
+  const text = new TextDecoder().decode(mp.body);
+  const b = mp.contentType.split('boundary=')[1];
+  assert.ok(b, 'contentType 应含 boundary');
+  assert.ok(mp.body instanceof Uint8Array);
+  assert.ok(text.indexOf('name="a"') >= 0, '普通字段存在');
+  assert.ok(text.indexOf('name="file"; filename="name.txt"') >= 0, '文件字段存在');
+  assert.ok(text.indexOf('[object Uint8Array]') < 0, '文件内容应为原始字节非字符串化');
+  assert.ok(text.indexOf('hello' + String.fromCharCode(13) + String.fromCharCode(10)) >= 0, '文件字节与 CRLF 相邻');
+});
