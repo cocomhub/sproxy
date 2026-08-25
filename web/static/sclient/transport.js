@@ -317,7 +317,6 @@
 
     // 下载特例：外层流式读取 + 逐帧解密（不整体缓冲）。否则 arrayBuffer 后统一解密。
     if (opts && opts.download) {
-      if (!resp.body) throw SclientError('E_DECRYPT', '响应无流');
       return await streamDecode(keyHex, resp);
     }
 
@@ -328,6 +327,8 @@
   // ---- 流式响应解码（ReadableStream.getReader 逐帧） ----
   // 下载分支（opts.download）直接消费 resp.body.getReader()（见 readNBytes/fillBuffer
   // 与下方 streamDecode），不在此包装 makeByteSource。
+  // 导出为 fromStream（测试注入）：接受 { body: ReadableStream }；浏览器路径 resp.body
+  // 即流。统一在进入时断言 body 存在，缺失以 E_DECRYPT 拒绝，避免 undefined 解引用。
 
   // 从 ReadableStream 读满 n 字节；不足/提前 EOF 抛 E_DECRYPT。
   async function readNBytes(reader, n) {
@@ -340,16 +341,27 @@
     return buf;
   }
 
-  // 逐帧解码（与 tunnel.js tunnelDownloadStream 相同策略，密钥来自派生）。
+  // 逐帧解码（与 decodeResponseFrames 同一语义，但消费 ReadableStream）。
+  // 全程用 fillBuffer 累积 remainder，防止底层层块比帧大时丢字节——readNBytes 会把
+  // 超过 n 的多余读取字节丢弃，导致「meta 整帧 + 后续 chunk」落在同一 read chunk 时
+  // 后续字节丢失（表现为 '响应流提前结束'）。
   async function streamDecode(keyHex, resp) {
+    if (!resp || !resp.body || typeof resp.body.getReader !== 'function') {
+      throw SclientError('E_DECRYPT', '响应无流');
+    }
     const reader = resp.body.getReader();
-    let metaLenBytes;
-    try {
-      metaLenBytes = await readNBytes(reader, 4);
-    } catch (e) { throw e; } // E_DECRYPT 透传
-    const metaLen = new DataView(metaLenBytes.buffer).getUint32(0, false);
+    let remainder = new Uint8Array(0);
+
+    // metadata 帧：[4B BE len + enc]，fillBuffer 累积读取（防止跨 chunk 截断）。
+    remainder = await fillBuffer(reader, remainder, 4);
+    if (remainder.length < 4) throw SclientError('E_DECRYPT', '响应数据不足（缺 4B meta 长度）');
+    const metaLen = new DataView(remainder.buffer, remainder.byteOffset, 4).getUint32(0, false);
     if (metaLen > MAX_META) throw SclientError('E_DECRYPT', 'metadata 帧过长');
-    const metaEnc = await readNBytes(reader, metaLen);
+    remainder = remainder.subarray(4);
+    remainder = await fillBuffer(reader, remainder, metaLen);
+    if (remainder.length < metaLen) throw SclientError('E_DECRYPT', '响应 metadata 数据不足');
+    const metaEnc = remainder.subarray(0, metaLen);
+    remainder = remainder.subarray(metaLen);
     let metaPlain;
     try {
       metaPlain = await decryptBlockAAD(keyHex, metaEnc, AAD_META_BYTES);
@@ -364,12 +376,12 @@
       throw SclientError('E_DECRYPT', '响应 metadata JSON 解析失败');
     }
 
+    // body 帧循环（与缓冲式 decodeResponseFrames 同一语义）。
     const chunks = [];
-    let remainder = new Uint8Array(0);
     for (;;) {
       remainder = await fillBuffer(reader, remainder, 4);
       if (remainder.length < 4) break;
-      const chunkLen = new DataView(remainder.buffer, remainder.byteOffset).getUint32(0, false);
+      const chunkLen = new DataView(remainder.buffer, remainder.byteOffset, 4).getUint32(0, false);
       if (chunkLen === 0) { remainder = remainder.subarray(4); continue; }
       if (chunkLen > 1 << 20) throw SclientError('E_DECRYPT', 'stream chunk 过长');
       remainder = await fillBuffer(reader, remainder, 4 + chunkLen);
@@ -440,7 +452,7 @@
 
     const bodyArr = new Uint8Array(await resp.arrayBuffer());
     const outHeaders = {};
-    resp.headers && resp.headers.forEach ? resp.headers.forEach((v, k) => { outHeaders[k] = v; }) : (outHeaders['content-type'] = resp.headers.get('content-type'));
+    resp.headers && resp.headers.forEach ? resp.headers.forEach((v, k) => { outHeaders[k] = v; outHeaders[k.toLowerCase()] = v; }) : (outHeaders['content-type'] = resp.headers.get('content-type'));
     return { status: resp.status, headers: outHeaders, body: bodyArr };
   }
 
@@ -463,6 +475,9 @@
     fullURL,
     TUNNEL_PATH,
     decodeResponseFrames,
+    // streamDecode 的薄导出（测试用；非公共 API，领域层勿依赖）——streamDecode 本身
+    // 是下载分支的唯一实现，导出避免在测试里重复它（跨帧边界/分段流语义由单测覆盖）。
+    fromStream: streamDecode,
     // 内部原语（单测跨端闭环用；非公共 API，勿在领域层依赖）。
     _internals: {
       getTunnelKeyHex,

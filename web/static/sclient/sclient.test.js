@@ -535,9 +535,76 @@ const fakeTunnelBytes = (async () => {
   );
   const metaJSON = JSON.stringify({ proto: 'HTTP/1.1', status: 200, headers: { 'content-type': 'application/json' }, content_length: -1 });
   const metaFrame = await encryptFrameAAD(derivedKeyHex, metaJSON, AAD_META);
-  const bodyFrame = await encryptFrameAAD(derivedKeyHex, 'HTTP body payload from tunnel', AAD_STREAM);
+  const bodyFrame = await makeBodyFrame(derivedKeyHex, 'HTTP body payload from tunnel');
   return concatBytes(metaFrame, bodyFrame);
 })();
+
+// 构造一个帧的 body 段（[4B len + enc]，不含 meta）——供 streamDecode 测试预生成。
+async function makeBodyFrame(derivedKeyHex, plainText) {
+  const key = await cryptoLib.importAesGcmKey(derivedKeyHex);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: dec(AAD_STREAM) }, key, dec(plainText));
+  return concatBytes(u32be(12 + ct.byteLength), iv, new Uint8Array(ct));
+}
+
+test('streamDecode 流式分支：分段 ReadableStream 构造 + 跨帧边界解密与 buffered 一致（I5）', () => {
+  return cryptoLib.deriveTunnelKey(SK, transport.accessKeyMesh(AK)).then(function (tunKey) {
+    const derivedKeyHex = cryptoLib.bytesToHex(tunKey);
+    const metaJSON = JSON.stringify({ proto: 'HTTP/1.1', status: 200, headers: { 'content-type': 'application/json', 'x-file-checksum': 'aa'.repeat(32) }, content_length: -1 });
+    return Promise.all([
+      encryptFrameAAD(derivedKeyHex, metaJSON, AAD_META),
+      makeBodyFrame(derivedKeyHex, 'first chunk payload '),
+      makeBodyFrame(derivedKeyHex, 'second chunk payload'),
+    ]).then(function (frames) {
+      const metaFrame = frames[0], f1 = frames[1], f2 = frames[2];
+      const whole = concatBytes(metaFrame, f1, f2);
+
+      // 分段构造 ReadableStream：metaEnc 劈开 + 第一帧劈开 + 第二帧紧凑（帧边界不落在段边界）。
+      const metaLen = new DataView(whole.buffer, whole.byteOffset, 4).getUint32(0, false);
+      const metaEnd = 4 + metaLen;
+      const seg1 = whole.subarray(0, 4 + 2);
+      const f1Len = new DataView(whole.buffer, whole.byteOffset + metaEnd, 4).getUint32(0, false);
+      const f1Half = 4 + Math.floor(f1Len / 2);
+      const seg2 = whole.subarray(4 + 2, metaEnd + f1Half);
+      const seg3 = whole.subarray(metaEnd + f1Half);
+
+      const parts = [seg1, seg2, seg3];
+      let pi = 0;
+      const stream = new ReadableStream({
+        start(c) { c.enqueue(parts[0]); },
+        pull(c) {
+          pi++;
+          if (pi < parts.length) c.enqueue(parts[pi]);
+          else c.close();
+        },
+        cancel() {},
+      });
+      const resp = new Response(stream, { status: 200 });
+
+      // 流式解密 + buffered 对照
+      assert.strictEqual(typeof ReadableStream, 'function', 'Node ≥18 自带 ReadableStream，无需 stub');
+      return transport.fromStream(derivedKeyHex, resp).then(function (outStream) {
+        return transport.decodeResponseFrames(derivedKeyHex, whole).then(function (outBuffered) {
+          assert.strictEqual(outStream.status, 200);
+          assert.strictEqual(outBuffered.status, 200);
+          assert.strictEqual(outStream.headers['x-file-checksum'], 'aa'.repeat(32), 'headers 从 meta 透出');
+          const sBody = new TextDecoder().decode(outStream.body);
+          const bBody = new TextDecoder().decode(outBuffered.body);
+          assert.strictEqual(sBody, bBody, '流式解密与 buffered 解密一致');
+          assert.strictEqual(sBody, 'first chunk payload ' + 'second chunk payload');
+        });
+      });
+    });
+  });
+});
+
+// 构造一个帧的 body 段（[4B len + enc]，不含 meta）——供 streamDecode/相关测试复用。
+async function makeBodyFrame(derivedKeyHex, plainText) {
+  const key = await cryptoLib.importAesGcmKey(derivedKeyHex);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: dec(AAD_STREAM) }, key, dec(plainText));
+  return concatBytes(u32be(12 + ct.byteLength), iv, new Uint8Array(ct));
+}
 
 // ==================== 领域 API（任务 5：files/cloud/share/config/hub） ====================
 // 用注入 ctx 的 createApi 测试：mock coreRequest 捕获 (method, path, opts)，
@@ -604,12 +671,46 @@ test('files.search / stat / download 映射', async () => {
   await api.files.stat('x/y.txt');
   assert.strictEqual(core.calls[1].method, 'HEAD');
   assert.strictEqual(core.calls[1].path, '/api/files/stat?filename=x%2Fy.txt');
-  const blob = await api.files.download('x/y.txt');
+  const dl = await api.files.download('x/y.txt');
   assert.strictEqual(core.calls[2].method, 'GET');
   assert.strictEqual(core.calls[2].path, '/download?filename=x%2Fy.txt');
   assert.strictEqual(core.calls[2].opts.download, true);
-  assert.ok(blob instanceof Blob);
+  const blob = dl.blob;
+  assert.ok(blob instanceof Blob, 'download 返回结构应含 blob');
   assert.strictEqual(new TextDecoder().decode(await blob.arrayBuffer()), 'abc');
+  // C2: download 暴露响应头（含 X-File-Checksum）。mock core 响应头仅含 content-type，
+  // 未注入 downloadHeaders 时 headers 应为空对象；显式注入则取对应响应头。
+  assert.deepStrictEqual(dl.headers, {});
+});
+
+// C2 适配测试：download 返回 {blob, headers} 且 headers 携带 X-File-Checksum
+//（app.js downloadFile 用它做本地 SHA-256 往返校验；direct 模式 fetch 头大小写问题
+// 由 transport.directRun 统一小写化，此处验证注入的 downloadHeaders 被透传并在结果中
+// 以响应头为准返回）。
+test('files.downloadHeaders 适配（C2）: {blob, headers} + X-File-Checksum 透传', async () => {
+  // 注入 downloadHeaders → 请求 opts.collectHeaders 携带目标 key；响应含该头时
+  // out.headers 以响应头值为准（小写命中也提取）。
+  const core = makeMockCore([
+    { status: 200, headers: { 'X-File-Checksum': 'aa'.repeat(32), 'Content-Type': 'application/octet-stream' }, body: new TextEncoder().encode('content') },
+  ]);
+  const api = makeApi(core);
+  const out = await api.files.download('x.bin', { downloadHeaders: { 'X-File-Checksum': '' } });
+  assert.strictEqual(core.calls[0].opts.collectHeaders['X-File-Checksum'], '', '请求 opts 携带目标下载响应头 key');
+  assert.ok(out.blob instanceof Blob);
+  assert.strictEqual(out.headers['X-File-Checksum'], 'aa'.repeat(32), '响应含该头时以响应头值为准');
+
+  // 响应头 key 大小写差异：flat map 场景（transport 已统一小写化）
+  const core3 = makeMockCore([{ status: 200, headers: { 'x-file-checksum': 'bb'.repeat(32), 'content-type': 'application/octet-stream' }, body: new Uint8Array([3]) }]);
+  const api3 = makeApi(core3);
+  const out3 = await api3.files.download('z.bin', { downloadHeaders: { 'X-File-Checksum': '' } });
+  assert.strictEqual(out3.headers['X-File-Checksum'], 'bb'.repeat(32), '小写响应头也能被提取');
+
+  // 未注入任何下载响应头 → headers 恒为空对象（不影响 blob）
+  const core4 = makeMockCore([{ status: 200, headers: { 'X-Other': '1' }, body: new Uint8Array([7]) }]);
+  const api4 = makeApi(core4);
+  const out4 = await api4.files.download('n.bin', {});
+  assert.deepStrictEqual(out4.headers, {});
+  assert.ok(out4.blob instanceof Blob);
 });
 
 test('files deleteFile/rename 带 X-File-Checksum 头映射', async () => {
