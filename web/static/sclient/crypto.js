@@ -111,7 +111,14 @@
     return new Uint8Array(plain);
   }
 
-  // Node 下探活 WebCrypto（v24 全局可用；显式检查避免环境差异）。
+  // Node 下探活 WebCrypto（v24 已全局可用；显式检查避免环境差异）。
+  // 浏览器（Chromium/Firefox/Safari 现代版本）与 Node 18+ 均内置 WebCrypto，
+  // 此分支基本是不可达的防御性检查：只有老到不支持 crypto.subtle 的
+  //（预 2017）浏览器或极老 Node 才会触发。加载期抛错是刻意为之——该库
+  // 理论上无法在无 WebCrypto 环境下工作，尽早显式失败可避免后续每个调用
+  // 都抛晦涩的 OperationError，这是无害的（不会加载失败导致页面白屏以外
+  // 的副作用；页面由 index.html 静态加载各脚本，脚本加载失败浏览器会直接
+  // 跳过并继续执行后续资源）。
   const cryptoObj = globalThis.crypto;
   if (!cryptoObj || !cryptoObj.subtle) {
     throw new Error('WebCrypto (crypto.subtle) 不可用——sclient 前端库要求现代浏览器或 Node 18+');
