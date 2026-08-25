@@ -11,7 +11,7 @@
  *   - update(patch)    PUT  /api/config（可改 log_level / log_format /
  *     rate_limit_requests / rate_limit_window / max_storage_bytes / web_tunnel）
  *
- * get() 返回 {log_level, log_format, access_keys_set, tunnel_key_set, ...web_tunnel}。
+ * get() 返回 {log_level, log_format, access_keys_set, ...web_tunnel}。
  * 注：历史上曾封装 updateStorage（PUT /api/storage/config），但服务端场景无此路由
  *（pkg/client/hub.go 自身的 UpdateStorageConfig 也无调用方），存储上限统一走
  * update({max_storage_bytes})。

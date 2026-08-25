@@ -587,7 +587,6 @@ function configTableHtml(cfg) {
   html += row('日志级别', cfg.log_level);
   html += row('日志格式', cfg.log_format);
   html += row('AccessKey 认证', cfg.access_keys_set ? '✅ 已设置' : '❌ 未设置');
-  html += row('隧道密钥', cfg.tunnel_key_set ? '✅ 已设置' : '❌ 未设置');
   html += row('速率限制', cfg.rate_limit_requests + ' req / ' + (cfg.rate_limit_window || '-'));
   html += row('存储上限', cfg.max_storage_bytes > 0 ? formatBytes(cfg.max_storage_bytes) : '不限');
   html += row('分块大小', formatBytes(cfg.chunk_size));

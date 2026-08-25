@@ -433,7 +433,7 @@ test('隧道响应帧解密失败 → E_DECRYPT', async () => {
   }
 });
 
-test('隧道外层签名路径与请求 URL 一致（锁定 /tunnel + 路径守卫，C1）', async () => {
+test('隧道外层签名路径与请求 URL 一致（锁定 /tunnel）+ 业务路径可走隧道，C1', async () => {
   const origFetch = globalThis.fetch;
   try {
     transport.configure({ mode: 'tunnel', accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
@@ -442,11 +442,9 @@ test('隧道外层签名路径与请求 URL 一致（锁定 /tunnel + 路径守�
       requests.push({ url, init });
       return new Response(await fakeTunnelBytes, { status: 200, headers: { 'Content-Type': 'application/x-tunnel-frame' } });
     };
-    // 有效入口（pathWithQuery 带 query——C1 正是此场景：签名路径与 fetch URL 分岔则
-    // 服务端按 r.URL.Path=/tunnel 验签必 401）：签名头 canonical 必须由 TUNNEL_PATH
-    // /tunnel 驱动。注意：the guard 拦截使本调用不合法——但 C1 要点是确认签名头路径段
-    // 与请求 URL 一致；此处用 `transport.TUNNEL_PATH` + sig.buildCanonical 复算证明。
-    await transport.coreRequest('GET', transport.TUNNEL_PATH, {});
+    // 业务路径带 query（/api/files?x=1 与 /download?filename= 同形态）——不再被守卫拦截，
+    // 外层仍锁 /tunnel：签名头 canonical 第 7 段必须 /tunnel、fetch URL 必须 /tunnel。
+    await transport.coreRequest('GET', '/api/files?x=1', {});
     assert.strictEqual(requests.length, 1);
     assert.strictEqual(requests[0].url, '/tunnel', 'fetch URL 必须是 /tunnel');
     const auth = requests[0].init.headers['Authorization'] || requests[0].init.headers['authorization'];
@@ -464,21 +462,44 @@ test('隧道外层签名路径与请求 URL 一致（锁定 /tunnel + 路径守�
   }
 });
 
-test('隧道模式路径守卫：非 /tunnel 的 pathWithQuery 抛 E_INTERNAL（C1）', async () => {
+test('隧道模式业务路径（非 /tunnel）正常走隧道：外层锁 /tunnel、metadata.url 保留真实路径', async () => {
   const origFetch = globalThis.fetch;
-  let fetched = false;
   try {
-    transport.configure({ mode: 'tunnel', accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
-    globalThis.fetch = async () => { fetched = true; throw new Error('不应发出请求'); };
-    for (const bad of ['/api/files?q=1', '/tunnel?x=1', '/other']) {
-      let caught = null;
-      try {
-        await transport.coreRequest('GET', bad, {});
-      } catch (e) { caught = e; }
-      assert.ok(caught && caught.code === 'E_INTERNAL', 'pathWithQuery=' + bad + ' 应抛 E_INTERNAL: ' + JSON.stringify(caught));
-    }
-    assert.strictEqual(fetched, false, '守卫应在发起 fetch 前拦截');
+    // 默认隧道（tunnelDefault=true 且无 override、无 mode 强制）——eg 真实页面后台调用。
+    transport.configure({ accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
+    assert.strictEqual(transport.effectiveMode(), 'tunnel');
+    const requests = [];
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url, init });
+      return new Response(await fakeTunnelBytes, { status: 200, headers: { 'Content-Type': 'application/x-tunnel-frame' } });
+    };
+    // GET /api/files 业务路径：不再抛 E_INTERNAL，正常发起隧道请求。
+    const out = await transport.coreRequest('GET', '/api/files', {});
+    assert.strictEqual(out.status, 200, '业务路径响应解密成功');
+    assert.strictEqual(requests.length, 1);
+    assert.strictEqual(requests[0].url, '/tunnel', '外层 fetch URL 仍锁 /tunnel');
+    assert.strictEqual(requests[0].init.method, 'POST');
+    const auth = requests[0].init.headers['Authorization'] || requests[0].init.headers['authorization'];
+    const ak = auth.split(' ak=')[1].split(' ')[0];
+    const ts = auth.split(' ts=')[1].split(' exp=')[0];
+    const exp = auth.split(' exp=')[1].split(' nonce=')[0];
+    const nonce = auth.split(' nonce=')[1].split(' body_sha256=')[0];
+    const canonical = sig.buildCanonical('POST', transport.TUNNEL_PATH, { ak, ts, exp, nonce, bodySha256: 'UNSIGNED' });
+    assert.strictEqual(canonical.split('\n')[6] + '/' + canonical.split('\n')[8], '/tunnel/UNSIGNED', 'canonical path 段（第 7 段）锁 /tunnel、body_sha256 段 UNSIGNED');
+    // metadata 解密后 url 保留调用方传入的真实业务路径：
+    const keyHex = await cryptoLib.bytesToHex(await cryptoLib.deriveTunnelKey(SK, transport.accessKeyMesh(AK)));
+    const data = requests[0].init.body;
+    const metaLen = new DataView(data.buffer, data.byteOffset, 4).getUint32(0, false);
+    const metaEnc = data.subarray(4, 4 + metaLen);
+    const metaPlain = await transport._internals.decryptBlockAAD(keyHex, metaEnc, new TextEncoder().encode('tunnel:meta:v1'));
+    const meta = JSON.parse(new TextDecoder().decode(metaPlain));
+    assert.deepStrictEqual(
+      { method: meta.method, url: meta.url },
+      { method: 'GET', url: '/api/files' },
+      'metadata.method/url 应保留调用方真实 method 与业务路径'
+    );
   } finally {
+    transport.configure({ mode: '', accessKey: '', accessKeySecret: '' });
     globalThis.fetch = origFetch;
   }
 });
