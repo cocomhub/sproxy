@@ -108,6 +108,30 @@ test('config 默认值 + applyOverride/readLocalOverride', () => {
   assert.strictEqual(o1.transport, 'auto');
 });
 
+test('readLocalOverride 成功路径（localStorage 已注入值）', () => {
+  // 探测并保存原有 localStorage 描述符（Node 默认无），在 finally 恢复
+  const desc = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const backup = desc ? desc : { value: undefined, configurable: true, writable: true };
+  try {
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (k) => (k === 'sproxy_web_transport_override' ? JSON.stringify({ transport: 'direct' }) : null),
+      },
+    });
+    const o = readLocalOverride();
+    assert.strictEqual(o.transport, 'direct');
+    assert.strictEqual(o.overrideKey, 'sproxy_web_transport_override');
+    // 既有字段正确合并：其余选项保持默认值
+    assert.strictEqual(o.applied.baseUrl, '');
+    assert.strictEqual(o.applied.accessKey, '');
+    assert.strictEqual(o.applied.tunnelDefault, true);
+    assert.strictEqual(o.applied.chunkThreshold, 8 * 1024 * 1024);
+  } finally {
+    Object.defineProperty(globalThis, 'localStorage', backup);
+  }
+});
+
 test('log.js 基本功能', () => {
   const levels = ['debug', 'info', 'warn', 'error'];
   const messages = [];
