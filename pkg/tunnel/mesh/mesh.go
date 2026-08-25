@@ -234,13 +234,15 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	}
 
 	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof
-	// （hub.ComputeRegisterProof 绑定 nodeID，防串用/重放）。
+	// （hub.ComputeRegisterProof 绑定 nodeID + ts/nonce，防串用/重放）。
 	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
 	// 拒绝后客户端困惑——明明连上了却被拒）。
 	if p.AccessKeySecret == "" {
 		return nil, fmt.Errorf("register: access_key_secret 为空，无法计算注册 proof")
 	}
-	proof, err := hub.ComputeRegisterProof(p.AccessKeySecret, nodeID)
+	ts := time.Now().UnixMilli()
+	nonce := hub.NewRegisterNonce()
+	proof, err := hub.ComputeRegisterProof(p.AccessKeySecret, nodeID, ts, nonce)
 	if err != nil {
 		return nil, fmt.Errorf("register: 计算注册证明失败: %w", err)
 	}
@@ -253,7 +255,7 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	// 服务宣告（mesh node 常驻）与标签（如 exit）。mesh discovery 临时注册（disc-）
 	// 另带 real_node_id + real_node_proof（hub 强制校验防冒充）。mesh/p2p 拨号方
 	// 不传则 Meta{}。
-	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.AccessKey, proof, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret)); err != nil {
+	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.AccessKey, proof, ts, nonce, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret)); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("发送注册帧失败: %w", err)
 	}

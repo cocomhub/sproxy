@@ -31,6 +31,11 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
 		return
 	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return
+	}
 
 	cleanedURL, cleanedFilename, err := validateCloudDownloadURL(req.URL, req.Filename, h.cloudMgr.config.AllowPrivate)
 	if err != nil {
@@ -93,6 +98,11 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		return
+	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
 		return
 	}
 	if len(req.URLs) == 0 {
@@ -222,6 +232,10 @@ func (h *Handlers) cloudResumeTask(w http.ResponseWriter, r *http.Request) {
 		Force bool `json:"force"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req) // 解析失败使用默认 false
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return
+	}
 
 	if err := h.cloudMgr.ResumeTask(id, req.Force); err != nil {
 		status := http.StatusBadRequest
@@ -244,6 +258,11 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		return
+	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
 		return
 	}
 	if len(req.URLs) == 0 {
@@ -377,6 +396,10 @@ func (h *Handlers) cloudResumeGroup(w http.ResponseWriter, r *http.Request) {
 		Force bool `json:"force"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return
+	}
 
 	if err := h.cloudMgr.ResumeGroup(id, req.Force); err != nil {
 		status := http.StatusBadRequest
@@ -403,6 +426,11 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	var req CloudArchiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid request body"}, http.StatusBadRequest)
+		return
+	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
 		return
 	}
 

@@ -158,6 +158,11 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("解析请求失败: %v", err), http.StatusBadRequest)
 		return
 	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return
+	}
 	if req.Target == "" || req.Addr == "" {
 		http.Error(w, "缺少 target 或 addr", http.StatusBadRequest)
 		return

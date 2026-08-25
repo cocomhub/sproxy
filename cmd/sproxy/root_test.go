@@ -277,6 +277,39 @@ func TestRunServer_RejectsStartupWithoutAuth(t *testing.T) {
 	}
 }
 
+// TestRunServer_HubEnabledRequiresAccessKeys 验证 M-8：api_keys-only（多用户 Bearer）
+// 下 hub 注册不可用——启用 hub 时强制要求 access_keys 非空（隧道密钥与 hub 准入都来自 access_keys）。
+func TestRunServer_HubEnabledRequiresAccessKeys(t *testing.T) {
+	cfgPtr.Store(nil)
+	cfgProvider = nil
+
+	oldCfgFile := cfgFile
+	cfgFile = filepath.Join(t.TempDir(), "sproxy.yaml")
+	t.Cleanup(func() { cfgFile = oldCfgFile })
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("addr", "127.0.0.1:0", "")
+	cmd.Flags().Bool("version", false, "")
+	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cmd.Flags().Bool("no-tls", false, "")
+	_ = cmd.Flags().Set("no-tls", "true")
+
+	cfgProvider = sproxycfg.New(cfgFile)
+	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.Set("api_keys", map[string]any{"enabled": true, "keys": []map[string]any{{"key": "t1", "permission": "write"}}})
+	cfgProvider.Set("hub", map[string]any{"enabled": true})
+	t.Cleanup(func() { cfgProvider = nil })
+
+	err := runServer(cmd, nil)
+	if err == nil {
+		t.Fatal("hub.enabled without access_keys should fail fast")
+	}
+	if !strings.Contains(err.Error(), "hub.enabled=true") {
+		t.Errorf("expected hub access_keys error, got: %v", err)
+	}
+}
+
 // setupRunServerAuthConfig 为 runServer 测试配置 access_keys（认证驱动启动必需）
 // 与 uploads_dir，使服务器能通过 fail-fast 检查正常启动。
 func setupRunServerAuthConfig(t *testing.T, cmd *cobra.Command) {

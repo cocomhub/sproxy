@@ -60,9 +60,13 @@ type RegisterFrame struct {
 	// AccessKey 是 SproxySig 准入 AccessKey（与 access_keys 配置一致）。
 	AccessKey string `json:"access_key,omitempty"`
 	// AccessKeyProof 是 ComputeRegisterProof 输出（HMAC-SHA256 证明持有 SK）。
-	AccessKeyProof string   `json:"access_key_proof,omitempty"`
-	Meta           Meta     `json:"meta"`
-	Capabilities   []string `json:"capabilities,omitempty"`
+	AccessKeyProof string `json:"access_key_proof,omitempty"`
+	// TS / Nonce 是注册证明的防重放字段（M-6）：TS 为 unix 毫秒、Nonce 为一次性随机串，
+	// 均参与 ComputeRegisterProof 签名；hub 校验 TS 新鲜度 + nonce 去重。
+	TS           int64    `json:"ts,omitempty"`
+	Nonce        string   `json:"nonce,omitempty"`
+	Meta         Meta     `json:"meta"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // Meta 是节点注册时宣告的附加信息，供 mesh 选路使用。
@@ -194,15 +198,16 @@ const (
 	DialResultError = "error"
 )
 
-// NewRegisterFrame 构建注册帧。当无 meta/ak/proof/caps 时退化为裸 nodeID，
+// NewRegisterFrame 构建注册帧。当无 meta/ak/proof/ts/nonce/caps 时退化为裸 nodeID，
 // 保证与旧版 hub（仅接收裸 nodeID）兼容。
+// ts/nonce 为注册证明的防重放字段（M-6，与 ComputeRegisterProof 参数一致）。
 // caps 为可选变参：声明能力（如 CapabilityPerNodeSecret）后 hub 回 REG_OK 携带
 // per-node secret（I1）；现有调用不传 caps 时行为不变。
-func NewRegisterFrame(nodeID, ak, proof string, meta Meta, caps ...string) []byte {
-	if meta.Addr == "" && len(meta.Services) == 0 && len(meta.Tags) == 0 && ak == "" && proof == "" && len(caps) == 0 {
+func NewRegisterFrame(nodeID, ak, proof string, ts int64, nonce string, meta Meta, caps ...string) []byte {
+	if meta.Addr == "" && len(meta.Services) == 0 && len(meta.Tags) == 0 && ak == "" && proof == "" && ts == 0 && nonce == "" && len(caps) == 0 {
 		return []byte(nodeID)
 	}
-	frame := RegisterFrame{NodeID: nodeID, AccessKey: ak, AccessKeyProof: proof, Meta: meta, Capabilities: caps}
+	frame := RegisterFrame{NodeID: nodeID, AccessKey: ak, AccessKeyProof: proof, TS: ts, Nonce: nonce, Meta: meta, Capabilities: caps}
 	b, _ := json.Marshal(frame)
 	return b
 }
@@ -478,7 +483,7 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 		return sendRegErr("missing node_id")
 	}
 	if s.auth != nil {
-		if authErr := s.auth.Authenticate(reg.AccessKey, reg.AccessKeyProof, reg.NodeID); authErr != nil {
+		if authErr := s.auth.Authenticate(reg.AccessKey, reg.AccessKeyProof, reg.NodeID, reg.TS, reg.Nonce); authErr != nil {
 			s.logger.Warn("中继节点鉴权失败", "node", reg.NodeID, "error", authErr)
 			_ = sendRegErr("invalid access key") // 回发 REG_ERR 供客户端终止重连（忽略错误，保留原始鉴权错误）
 			return authErr                       // 保留原始错误（ErrInvalidAccessKey/Proof）供调用方/测试识别

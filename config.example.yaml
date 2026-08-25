@@ -40,6 +40,17 @@ access_keys:
   - key: "sk-00000000000000000000000000000000"
     secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+# 多用户 API 密钥（Bearer，与 access_keys 互斥且优先；可选）。
+# 提供 read/write 权限分级，适合多用户 HTTP 文件访问；但不支持隧道/hub——
+# 隧道密钥与 hub 注册准入均来自 access_keys（hub.enabled 时强制要求 access_keys）。
+# api_keys:
+#   enabled: true
+#   keys:
+#     - key: "user-token-1"
+#       permission: "read"    # read=只读 GET/HEAD；write=读写（默认）
+#     - key: "user-token-2"
+#       permission: "write"
+
 # 速率限制（默认关闭；enabled: true 时限制 tunnel handler）
 # rate_limit:
 #   enabled: false

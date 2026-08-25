@@ -112,6 +112,11 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
 		return
 	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return
+	}
 
 	h.logger.Debug("uploadInit 请求", "file_name", req.Filename, "total_size", req.TotalSize,
 		"chunk_size", req.ChunkSize, "total_chunks", req.TotalChunks,
@@ -230,6 +235,11 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil {
 		h.logger.Warn("uploadChunk parse multipart 失败", "error", err.Error(), "content_type", r.Header.Get("Content-Type"), "content_length", r.ContentLength)
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败"}, http.StatusRequestEntityTooLarge)
+		return
+	}
+	// I-3：multipart 解析不读到 EOF，读完全部 body 触发 bodyValidator 哈希校验。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
 		return
 	}
 	h.logger.Debug("uploadChunk multipart 解析完成", "content_type", r.Header.Get("Content-Type"))
@@ -584,6 +594,11 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
+		return
+	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
 		return
 	}
 

@@ -259,6 +259,11 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
 		return
 	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return
+	}
 	if req.Filename == "" {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "filename 不能为空"}, http.StatusBadRequest)
 		return

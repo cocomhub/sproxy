@@ -99,7 +99,9 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, accessKey, accessK
 	if accessKeySecret == "" {
 		return fmt.Errorf("注册失败: access_key_secret 为空，无法计算注册 proof")
 	}
-	proof, err := hub.ComputeRegisterProof(accessKeySecret, nodeID)
+	ts := time.Now().UnixMilli()
+	nonce := hub.NewRegisterNonce()
+	proof, err := hub.ComputeRegisterProof(accessKeySecret, nodeID, ts, nonce)
 	if err != nil {
 		return fmt.Errorf("注册失败: 计算注册证明失败: %w", err)
 	}
@@ -140,7 +142,7 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, accessKey, accessK
 	}
 	// 声明 per-node-secret 能力：hub 回 REG_OK:<base64url secret>（B1 已支持，
 	// B3 服务端将据此校验信令身份）。现有调用不传 caps 时行为不变。
-	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, accessKey, proof, meta, hub.CapabilityPerNodeSecret)); serr != nil {
+	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, accessKey, proof, ts, nonce, meta, hub.CapabilityPerNodeSecret)); serr != nil {
 		_ = conn.Close() // P1-15：mux 创建前失败必须关闭 WS，否则重连循环泄漏连接+sendLoop goroutine
 		return fmt.Errorf("发送注册帧失败: %w", serr)
 	}
