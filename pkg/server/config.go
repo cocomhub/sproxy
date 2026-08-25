@@ -83,6 +83,13 @@ type WSTransportConfig struct {
 	Path string `yaml:"path" mapstructure:"path"`
 }
 
+// WebConfig 控制 Web UI 的传输行为。
+// Tunnel=true 时 Web 领域方法默认走加密隧道（由 SK 派生密钥）；false 走直连 SproxySig。
+// 页面另有 localStorage 调试开关，可临时覆盖（仅调试用，非敏感开关可持久化）。
+type WebConfig struct {
+	Tunnel bool `yaml:"tunnel" mapstructure:"tunnel"`
+}
+
 type Config struct {
 	Addr       string `yaml:"addr" mapstructure:"addr"`
 	UploadsDir string `yaml:"uploads_dir" mapstructure:"uploads_dir"`
@@ -113,6 +120,9 @@ type Config struct {
 
 	// Hub 中继系统（默认关闭）
 	Hub HubConfig `yaml:"hub" mapstructure:"hub"`
+
+	// Web UI 行为配置
+	Web WebConfig `yaml:"web" mapstructure:"web"`
 
 	// 存储空间控制
 	MaxStorageBytes int64 `yaml:"max_storage_bytes" mapstructure:"max_storage_bytes"` // 存储上限（字节），0 = 不限制
@@ -150,6 +160,9 @@ func Default() *Config {
 		},
 		CORS: CORSConfig{
 			MaxAge: defaultMaxAge,
+		},
+		Web: WebConfig{
+			Tunnel: true,
 		},
 		ChunkSize:                 size.DefaultChunkSize,
 		UploadSessionTTL:          24 * time.Hour,

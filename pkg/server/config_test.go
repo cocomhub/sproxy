@@ -18,6 +18,14 @@ import (
 // compile-time interface check
 var _ provider.Provider = mapProvider{}
 
+func TestConfig_WebTunnelDefault(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	if !c.Web.Tunnel {
+		t.Fatal("web.tunnel 默认应为 true")
+	}
+}
+
 func TestConfig_DefaultsFilled(t *testing.T) {
 	t.Parallel()
 	cfg := Default()

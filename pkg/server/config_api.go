@@ -65,6 +65,7 @@ type configResponse struct {
 	TLSEnabled         bool   `json:"tls_enabled"`
 	Addr               string `json:"addr"`
 	UploadsDir         string `json:"uploads_dir"` // 相对路径；若配置为绝对路径则返回原值
+	WebTunnel          bool   `json:"web_tunnel"`  // web.tunnel：Web UI 领域方法是否默认走加密隧道
 }
 
 // configHandler 处理 GET /api/config，返回当前运行时配置（脱敏）。
@@ -88,6 +89,7 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 		TLSEnabled:         cfg.TLS.Enabled,
 		Addr:               cfg.Addr,
 		UploadsDir:         cfg.UploadsDir,
+		WebTunnel:          cfg.Web.Tunnel,
 	}
 
 	sendJSONResponse(w, resp, http.StatusOK)
@@ -100,6 +102,7 @@ type updateConfigRequest struct {
 	RateLimitReq    *int    `json:"rate_limit_requests,omitempty"`
 	RateLimitWin    *string `json:"rate_limit_window,omitempty"`
 	MaxStorageBytes *int64  `json:"max_storage_bytes,omitempty"`
+	WebTunnel       *bool   `json:"web_tunnel,omitempty"`
 }
 
 // updateConfigHandler 处理 PUT /api/config，更新运行时配置项。
@@ -123,7 +126,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 检查是否所有字段均为 nil，拒绝空请求体（{}）
 	if req.LogLevel == nil && req.LogFormat == nil &&
-		req.RateLimitReq == nil && req.RateLimitWin == nil && req.MaxStorageBytes == nil {
+		req.RateLimitReq == nil && req.RateLimitWin == nil && req.MaxStorageBytes == nil && req.WebTunnel == nil {
 		sendJSONResponse(w, map[string]any{"success": false, "message": "empty request body: no fields to update"}, http.StatusBadRequest)
 		return
 	}
@@ -180,6 +183,11 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 		if h.storageMgr != nil {
 			h.storageMgr.SetMaxBytes(*req.MaxStorageBytes)
 		}
+		changed = true
+	}
+
+	if req.WebTunnel != nil {
+		cfg.Web.Tunnel = *req.WebTunnel
 		changed = true
 	}
 

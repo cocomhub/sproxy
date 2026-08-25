@@ -20,6 +20,11 @@ log_level: "info"
 log_format: "text"
 max_header_bytes: 1048576
 
+# Web 领域方法传输行为（默认隧道）。
+# web:
+#   tunnel: true   # true=Web 领域方法默认走加密隧道（由 SK 派生密钥）；false=走直连 SproxySig
+#                  # 页面另有 localStorage 调试开关可临时覆盖（仅调试用）。
+
 # TLS 配置（默认启用）
 tls:
   enabled: true
