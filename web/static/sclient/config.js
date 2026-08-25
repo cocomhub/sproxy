@@ -15,9 +15,9 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  // transport 合法取值：auto | direct
-  const TRANSPORT_VALUES = ['auto', 'direct'];
-
+  // transport 合法取值：auto | direct | tunnel（tunnel 为调试 override 合法值，
+  // 允许用户在遇到隧道问题时强制切直连 / 隧道之外的显式隧道）。
+  const TRANSPORT_VALUES = ['auto', 'direct', 'tunnel'];
   // 返回一份默认配置对象（每次调用独立拷贝，避免调用方修改共享单例）。
   function defaultConfig() {
     return {

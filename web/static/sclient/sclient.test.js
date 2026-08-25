@@ -129,6 +129,7 @@ test('readLocalOverride 成功路径（localStorage 已注入值）', () => {
     assert.strictEqual(o.applied.tunnelDefault, true);
     assert.strictEqual(o.applied.chunkThreshold, 8 * 1024 * 1024);
   } finally {
+    // 恢复原描述符（保持「readLocalOverride 成功路径」后续用例互不污染）。
     Object.defineProperty(globalThis, 'localStorage', backup);
   }
 });
@@ -235,3 +236,255 @@ test('sig.signHeader 常规 body：sha256 hashing 正确 + 完整头部', async 
   const seg = sig.buildCanonical('POST', '/upload?q=1', { ak: HMAC_FIXTURE.ak, ts: HMAC_FIXTURE.ts, exp: HMAC_FIXTURE.exp, nonce: HMAC_FIXTURE.nonce, bodySha256: bodyHashHex });
   assert.strictEqual(seg, expectedCanonical);
 });
+
+// ==================== transport.js 追加用例（任务 4） ====================
+// 隧道模式：类服务端响应帧由测试借助 transport.js 内部导出的帧编码原语
+// + WebCrypto 精确构造（含 AAD 上下文、4B 大端长度前缀），与 Go handler
+// 的 Encrypt* 帧字节完全同构——请求/响应两向都在同一帧协议上闭环。
+
+const transport = require('./transport.js');
+const sclientConfig = require('./config.js');
+
+function dec(s) {
+  return new TextEncoder().encode(s);
+}
+
+function concatBytes() {
+  let total = 0;
+  for (const a of arguments) total += (a && a.length) || 0;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arguments) {
+    if (a && a.length) { out.set(a, off); off += a.length; }
+  }
+  return out;
+}
+
+function u32be(n) {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n, false);
+  return b;
+}
+
+async function encryptFrameAAD(secretHex, plainUtf8, aad) {
+  const key = await cryptoLib.importAesGcmKey(secretHex);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: dec(aad) }, key, dec(plainUtf8));
+  return concatBytes(u32be(12 + ct.byteLength), iv, new Uint8Array(ct));
+}
+
+test('accessKeyMesh 与 Go AccessKeyMesh 语义一致（隧道密钥派生 mesh 段）', () => {
+  const { accessKeyMesh } = transport;
+  assert.strictEqual(accessKeyMesh('sk-prod-1234567890abcdef'), 'prod');
+  assert.strictEqual(accessKeyMesh('sk-prod-eu-1234567890abcdef'), 'prod-eu');
+  assert.strictEqual(accessKeyMesh('sk-meshA-3f8a1234abcd5678'), 'meshA');
+  assert.strictEqual(accessKeyMesh('sk-1234567890abcdef'), '');
+  assert.strictEqual(accessKeyMesh('other'), '');
+  assert.strictEqual(accessKeyMesh('sk-'), '');
+  assert.strictEqual(accessKeyMesh('sk-prod-1234567890abcde'), '');
+  assert.strictEqual(accessKeyMesh(''), '');
+});
+
+test('effectiveMode 服务端开关 × local override 全三态', () => {
+  // 服务端开：默认隧道；本地 override 为显式值时直接覆盖
+  transport.configure({ accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
+  setLocalStorageValue(null);
+  assert.strictEqual(transport.effectiveMode(), 'tunnel');
+
+  transport.configure({ accessKey: AK, accessKeySecret: SK, tunnelDefault: false });
+  assert.strictEqual(transport.effectiveMode(), 'direct');
+
+  // override 覆盖服务端状态（双显式分支）
+  setLocalStorageValue({ transport: 'direct' });
+  transport.configure({ accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
+  assert.strictEqual(transport.effectiveMode(), 'direct');
+  transport.configure({ accessKey: AK, accessKeySecret: SK, tunnelDefault: false });
+  assert.strictEqual(transport.effectiveMode(), 'direct');
+
+  // override 'tunnel' 同样生效
+  setLocalStorageValue({ transport: 'tunnel' });
+  transport.configure({ accessKey: AK, accessKeySecret: SK, tunnelDefault: false });
+  assert.strictEqual(transport.effectiveMode(), 'tunnel');
+
+  setLocalStorageValue(null);
+  transport.configure({ accessKey: '', accessKeySecret: '' });
+  // 恢复基态
+  transport.configure({ tunnelDefault: true });
+});
+
+test('隧道模式 coreRequest：帧发送 + SproxySig(UNSIGNED) 外层 + 响应解密', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'tunnel', accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
+
+    const requests = [];
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url, init });
+      return new Response(await fakeTunnelBytes, {
+        status: 200,
+        headers: { 'Content-Type': 'application/x-tunnel-frame' },
+      });
+    };
+
+    const out = await transport.coreRequest('GET', '/api/files?subdir=/', { headers: { 'X-Test': '1' }, bodyBytes: null });
+    // GET 无 body：请求帧 = metadata 帧 + 零 body 帧。走 /tunnel 且带 Content-Type。
+    assert.ok(requests[0].init.body instanceof Uint8Array, '隧道请求体应为 Uint8Array');
+
+    assert.strictEqual(requests.length, 1);
+    assert.strictEqual(requests[0].url, '/tunnel');
+    assert.strictEqual(requests[0].init.method, 'POST');
+    assert.strictEqual(requests[0].init.headers['Content-Type'], 'application/x-tunnel-frame');
+    const auth = requests[0].init.headers['Authorization'] || requests[0].init.headers['authorization'];
+    assert.ok(auth, '隧道请求必须携带 SproxySig 头');
+    assert.ok(auth.indexOf('body_sha256=UNSIGNED') >= 0, '隧道外层 body_sha256=UNSIGNED；实际: ' + auth);
+    // 响应帧才是携带实际负载的载体：
+    assert.strictEqual(out.status, 200);
+    assert.strictEqual(out.headers['content-type'], 'application/json');
+    assert.strictEqual(decodeText(out.body), 'HTTP body payload from tunnel');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('直连模式 coreRequest：GET 携带 SproxySig(sha256)', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK });
+    const requests = [];
+    globalThis.fetch = async (_url, init) => { requests.push(init); return new Response('direct body', { status: 201 }); };
+
+    const out = await transport.coreRequest('GET', '/api/files?subdir=foo', { bodyBytes: null });
+
+    assert.strictEqual(requests.length, 1);
+    assert.strictEqual(requests[0].method, 'GET');
+    const auth = requests[0].headers['Authorization'];
+    assert.ok(auth, '直连请求必须携带 SproxySig 头');
+    assert.ok(auth.startsWith('SproxySig v=1 ak=' + AK));
+    assert.ok(auth.indexOf('body_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') >= 0, '直连无 body 签空串 sha256: ' + auth);
+    assert.ok(auth.indexOf('body_sha256=UNSIGNED') < 0);
+    assert.strictEqual(out.status, 201);
+    assert.strictEqual(decodeText(out.body), 'direct body');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('direct coreRequest 有 body 时签名其 SHA-256 且带 body（canonical 复核）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK });
+    const body = dec('direct-request-payload');
+    const requests = [];
+    globalThis.fetch = async (_url, init) => { requests.push(init); return new Response('ok', { status: 200 }); };
+
+    await transport.coreRequest('POST', '/api/batch/rename', { bodyBytes: body });
+
+    const auth = requests[0].headers['Authorization'];
+    const bodySha = auth.split(' body_sha256=')[1].split(' sig=')[0];
+    assert.strictEqual(bodySha, await cryptoLib.sha256Hex(body), 'body_sha256 应为 body 的 SHA-256');
+    const ts = auth.split(' ts=')[1].split(' exp=')[0];
+    const exp = auth.split(' exp=')[1].split(' nonce=')[0];
+    const nonce = auth.split(' nonce=')[1].split(' body_sha256=')[0];
+    const canonical = 'sproxy-sig/v1\n' + AK + '\n' + ts + '\n' + exp + '\n' + nonce + '\nPOST\n/api/batch/rename\n\n' + bodySha;
+    const expectSig = await cryptoLib.hmacSHA256Hex(SK, canonical);
+    assert.strictEqual(auth.split(' sig=')[1], expectSig);
+    assert.deepStrictEqual(new Uint8Array(requests[0].body), body);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('错误路径：401 → E_AUTH 且保留 status；网络错误 → E_NETWORK', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK });
+    globalThis.fetch = async () => new Response('nope', { status: 401 });
+    let caught = null;
+    try {
+      await transport.coreRequest('GET', '/api/files', {});
+    } catch (e) { caught = e; }
+    assert.ok(caught && caught.code === 'E_AUTH' && caught.status === 401, JSON.stringify(caught));
+    assert.ok(caught instanceof Error && caught.name === 'SclientError', 'SclientError 应继承 Error');
+
+    globalThis.fetch = async () => { throw new TypeError('fetch failed'); };
+    try {
+      await transport.coreRequest('GET', '/api/files', {});
+    } catch (e2) { caught = e2; }
+    assert.ok(caught && caught.code === 'E_NETWORK', JSON.stringify(caught));
+    assert.ok(caught && caught.cause, '网络错误保留原始 cause');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('隧道响应帧解密失败 → E_DECRYPT', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'tunnel', accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
+    // 返回帧（meta 长度 0 → 解析失败）
+    globalThis.fetch = async () => new Response(new Uint8Array([0, 0, 0, 0]), { status: 200 });
+    let caught = null;
+    try {
+      await transport.coreRequest('GET', '/x', {});
+    } catch (e) { caught = e; }
+    assert.ok(caught && caught.code === 'E_DECRYPT', JSON.stringify(caught));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+// ---- setup helpers（供上方用例使用） ----
+// localStorage override 状态：模块内单一可注入的「当前 override 值」，供
+// readLocalOverride 读取；空串/未设置 = 无覆盖（试用真实现，避免在 test runner
+// 并发环境反复 defineProperty 全局对象互相踩踏）。
+let __overrideValue = null;
+function setLocalStorageValue(val) {
+  __overrideValue = val === null ? null : val;
+}
+
+function __overrideGetItem(k) {
+  if (k === transport.overrideKey() && __overrideValue) return JSON.stringify(__overrideValue);
+  return null;
+}
+
+// 注入最小 localStorage 探针（Node 默认无此全局；config.readLocalOverride 在
+// globalThis.localStorage 存在时调用其 getItem）。
+// 注意：describe 级（文件级）已注入一次；此处重复注入会覆盖 readLocalOverride
+// 成功路径测试的 restore-underlay？不会——本声明只在执行到该行时执行一次，
+// 把 localStorage 设为 __overrideGetItem。
+(function ensureTestLocalStorage() {
+  const desc = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    writable: true,
+    value: { getItem: __overrideGetItem },
+  });
+})();
+const PREV_LOCALSTORAGE_GET_ITEM = null;
+
+function decodeText(u8) {
+  if (u8 == null) return null;
+  if (typeof u8 === 'string') return u8;
+  if (u8 instanceof ArrayBuffer) u8 = new Uint8Array(u8);
+  if (u8.byteLength !== undefined) return new TextDecoder().decode(u8);
+  return String(u8);
+}
+
+const AK = 'sk-meshA-1234567890abcdef';
+const SK = '2b40d5b60e6792134f07b44b46e2e19fb72f967136868015cb922d720c1aa6f5';
+// 与 transport.js 内部 AAD 常量相同的上下文标签（Go AADMeta/AADStream）。
+const AAD_META = 'tunnel:meta:v1';
+const AAD_STREAM = 'tunnel:stream:v1';
+
+// 预生成隧道响应帧（用 deriveTunnelKey 派生密钥加密 meta+body，模拟服务端/网关）。
+// 注意：Promise 求值时 transport.accessKeyMesh / cryptoLib.deriveTunnelKey 均为纯函数，
+// 与下方状态的 configure 无关。
+const fakeTunnelBytes = (async () => {
+  const derivedKeyHex = cryptoLib.bytesToHex(
+    await cryptoLib.deriveTunnelKey(SK, transport.accessKeyMesh(AK))
+  );
+  const metaJSON = JSON.stringify({ proto: 'HTTP/1.1', status: 200, headers: { 'content-type': 'application/json' }, content_length: -1 });
+  const metaFrame = await encryptFrameAAD(derivedKeyHex, metaJSON, AAD_META);
+  const bodyFrame = await encryptFrameAAD(derivedKeyHex, 'HTTP body payload from tunnel', AAD_STREAM);
+  return concatBytes(metaFrame, bodyFrame);
+})();
