@@ -12,13 +12,13 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
 
-// hubNodesHandler 返回在线节点列表。
+// hubNodesHandler 返回在线节点列表（按调用方 mesh 过滤，M-9）。
 func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	if h.routeTable == nil {
 		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
 		return
 	}
-	nodes := h.routeTable.List()
+	nodes := h.routeTable.List(meshFromRequest(r))
 	type nodeResp struct {
 		ID        string    `json:"id"`
 		Addr      string    `json:"addr,omitempty"`
@@ -61,13 +61,13 @@ func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// hubStatsHandler 返回中继统计。
+// hubStatsHandler 返回中继统计（按调用方 mesh 统计节点数，M-9）。
 func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 	if h.routeTable == nil {
 		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
 		return
 	}
-	count := h.routeTable.NodeCount()
+	count := h.routeTable.NodeCount(meshFromRequest(r))
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(map[string]any{
 		"nodes_connected": count,
@@ -76,7 +76,7 @@ func (h *Handlers) hubStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// hubServicesHandler 返回所有节点宣告的服务（mesh 选路用）。
+// hubServicesHandler 返回调用方 mesh 内节点宣告的服务（mesh 选路用）。
 // 使用 RouteTable.ListServices 按 (node, name) 稳定排序，客户端可确定性选路（I3）。
 func (h *Handlers) hubServicesHandler(w http.ResponseWriter, r *http.Request) {
 	if h.routeTable == nil {
@@ -89,7 +89,7 @@ func (h *Handlers) hubServicesHandler(w http.ResponseWriter, r *http.Request) {
 		Addr string `json:"addr,omitempty"`
 	}
 	var resp []svcResp
-	for _, ns := range h.routeTable.ListServices() {
+	for _, ns := range h.routeTable.ListServices(meshFromRequest(r)) {
 		resp = append(resp, svcResp{Name: ns.Service.Name, Node: string(ns.Node), Addr: ns.Service.Addr})
 	}
 	w.Header().Set(headerContentType, contentTypeJSON)

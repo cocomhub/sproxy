@@ -20,7 +20,7 @@ import (
 // 身份绑定：阻止向不存在/未注册节点投递或轮询）。
 type SignalBroker struct {
 	queue  *hub.SignalQueue
-	rt     *hub.RouteTable
+	rt     *hub.MeshRouteTable
 	logger *slog.Logger
 	// pollTimeout 是 poll 长轮询的单次最长等待（I32）。
 	// 默认 hub.PollTimeout；测试可注入更小值避免空 poll 阻塞拖慢用例（I63）。
@@ -32,7 +32,7 @@ type SignalBroker struct {
 // 手动踢除 Remove）即清空其信令收件箱（I6）。仅当节点被真正移除（而非同名节点
 // 重连替换）时触发——重连时 RemoveIfOwned 所有权不匹配返回 false，不误删在线
 // 节点收件箱。
-func NewSignalBroker(rt *hub.RouteTable) *SignalBroker {
+func NewSignalBroker(rt *hub.MeshRouteTable) *SignalBroker {
 	b := &SignalBroker{
 		queue:       hub.NewSignalQueue(),
 		rt:          rt,
@@ -72,6 +72,7 @@ const signalPollBackoff = 100 * time.Millisecond
 // I1：除「已注册」外，还要求 X-Node-Secret 与 B1 下发的 per-node secret
 // 恒定时间匹配；节点未声明 secret（Secret==""）显式短路 403（fail-closed），
 // 防止空 header 对空 secret 通过比对。
+// M-9：节点必须与请求 ctx 的 mesh 一致（防跨 mesh 信令身份冒用）。
 func (b *SignalBroker) callerNode(r *http.Request) (hub.NodeID, error) {
 	if b.rt == nil {
 		return "", errSignalHubDisabled
@@ -83,6 +84,9 @@ func (b *SignalBroker) callerNode(r *http.Request) (hub.NodeID, error) {
 	info, ok := b.rt.LookupInfo(hub.NodeID(node))
 	if !ok {
 		return "", errSignalNodeNotRegistered
+	}
+	if info.Mesh != meshFromRequest(r) {
+		return "", errSignalMeshMismatch
 	}
 	if info.Secret == "" {
 		// 节点未声明 per-node-secret 能力：无 secret 可校验，fail-closed 拒绝。
@@ -110,6 +114,7 @@ var (
 	errSignalNodeNotRegistered = &signalError{msg: "节点未注册", code: http.StatusBadRequest}
 	errSignalPeerMismatch      = &signalError{msg: "poll peer 与调用方节点身份不一致", code: http.StatusForbidden}
 	errSignalSecretMismatch    = &signalError{msg: "节点信令 secret 不匹配", code: http.StatusForbidden}
+	errSignalMeshMismatch      = &signalError{msg: "信令跨 mesh 拒绝", code: http.StatusForbidden}
 )
 
 type signalError struct {
@@ -160,6 +165,14 @@ func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, 
 	}
 	if !b.rt.Has(hub.NodeID(msg.To)) {
 		http.Error(w, "to 节点未注册", http.StatusBadRequest)
+		return
+	}
+	// M-9 信令跨 mesh 校验（纵深）：from 与 to 必须同 mesh。callerNode 已保证 from
+	// 与请求 ctx mesh 一致，此处再确认 to 也在同一 mesh（防信息面交叉投递）。
+	fromInfo, _ := b.rt.LookupInfo(from)
+	toInfo, _ := b.rt.LookupInfo(hub.NodeID(msg.To))
+	if fromInfo.Mesh != toInfo.Mesh {
+		http.Error(w, errSignalMeshMismatch.msg, errSignalMeshMismatch.code)
 		return
 	}
 	// I12：Push 返回 error（全局满 ErrSignalQueueFull / per-sender 配额

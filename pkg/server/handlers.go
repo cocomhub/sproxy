@@ -31,7 +31,7 @@ type Handlers struct {
 	logger         *slog.Logger
 	metrics        *Metrics
 	shareStore     *ShareStore
-	routeTable     *hub.RouteTable
+	routeTable     *hub.MeshRouteTable
 	signalBroker   *SignalBroker
 	handler        http.Handler
 	cloudMgr       *CloudDownloadManager
@@ -61,7 +61,7 @@ type RegisterRoutesOpts struct {
 	Version    string
 	BuildAt    string
 	Logger     *slog.Logger
-	RouteTable *hub.RouteTable
+	RouteTable *hub.MeshRouteTable // 每 mesh 独立路由表的聚合（M-9）
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。

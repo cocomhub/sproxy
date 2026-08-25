@@ -59,7 +59,7 @@ func testRegFrameJSON(t *testing.T, nodeID, extra string) string {
 }
 
 func TestHubServer_RegisterReadFailure_SilentNoRegErr(t *testing.T) {
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
 
 	conn := &mockxfer.MockConn{
@@ -89,7 +89,7 @@ func TestHubServer_RegisterReadFailure_SilentNoRegErr(t *testing.T) {
 
 func TestHubServerRegisterAndRemove(t *testing.T) {
 	log := testutil.DiscardLogger()
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
@@ -148,7 +148,7 @@ func TestHubServerRegisterAndRemove(t *testing.T) {
 
 func TestHubServerBadToken(t *testing.T) {
 	log := testutil.DiscardLogger()
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
@@ -211,7 +211,7 @@ func TestHubServerBadToken(t *testing.T) {
 
 func TestHubServer_TryHandleConn_MaxConns(t *testing.T) {
 	log := testutil.DiscardLogger()
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log, 1)
 
 	ctx := t.Context()
@@ -252,7 +252,7 @@ func TestHubServer_TryHandleConn_MaxConns(t *testing.T) {
 
 func TestHubServer_TryHandleConn_NoLimit(t *testing.T) {
 	log := testutil.DiscardLogger()
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log) // 不传上限 = 无上限
 	ctx := t.Context()
 
@@ -269,7 +269,7 @@ func TestHubServer_TryHandleConn_NoLimit(t *testing.T) {
 // （nil auth 现视为 fail-closed，见 NewHubServer；本测试用合法 accessKeys 验证拒绝路径。）
 func TestHubServerBareNodeID(t *testing.T) {
 	log := testutil.DiscardLogger()
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
@@ -322,7 +322,7 @@ func TestHubServerBareNodeID(t *testing.T) {
 // 声明 per-node-secret 能力的节点，REG_OK 携带 secret，且 LookupInfo 返回一致。
 func TestHubServerRegisterSecretCapability(t *testing.T) {
 	log := testutil.DiscardLogger()
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
@@ -391,7 +391,7 @@ func TestHubServerRegisterSecretCapability(t *testing.T) {
 // REG_OK 为纯 "REG_OK"，NodeInfo.Secret 为空（行为不变）。
 func TestHubServerRegisterNoCapabilityPlainAck(t *testing.T) {
 	log := testutil.DiscardLogger()
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
@@ -450,7 +450,7 @@ func TestHubServerRegisterNoCapabilityPlainAck(t *testing.T) {
 // REG_ERR（而非把 JSON 垃圾整串当裸串回退）。
 func TestHubServerJSONMissingNodeID(t *testing.T) {
 	log := testutil.DiscardLogger()
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
 	dial, serverConn, _ := pipeXfer()
 
@@ -497,8 +497,8 @@ func TestHubServerJSONMissingNodeID(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("HandleConn did not return")
 	}
-	if rt.NodeCount() != 0 {
-		t.Fatalf("invalid frame must not register a node, count=%d", rt.NodeCount())
+	if rt.NodeCount("") != 0 {
+		t.Fatalf("invalid frame must not register a node, count=%d", rt.NodeCount(""))
 	}
 }
 
@@ -575,7 +575,7 @@ func registerRawFrame(t *testing.T, srv *HubServer, frame string) (string, func(
 // TestHubServer_DiscIdentity_ValidProof：disc 临时注册携带真实节点 per-node secret
 // 派生的 HMAC 证明 → 注册成功且 RealNodeID 记录。
 func TestHubServer_DiscIdentity_ValidProof(t *testing.T) {
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
 	secret, closeReal := registerNodeAndGetSecret(t, srv, "victim-a")
 	defer closeReal()
@@ -599,11 +599,65 @@ func TestHubServer_DiscIdentity_ValidProof(t *testing.T) {
 	}
 }
 
+// meshRegFrameJSON 构造带指定 AK 的注册帧 JSON（与 testRegFrameJSON 同构，
+// 但 AK 可指定为带 mesh 的 access key，供 mesh 分表断言使用）。
+func meshRegFrameJSON(t *testing.T, nodeID, ak string) string {
+	t.Helper()
+	proof, ts, nonce := testRegCred(t, nodeID)
+	return fmt.Sprintf(`{"node_id":%q,"access_key":%q,"access_key_proof":%q,"ts":%d,"nonce":%q}`, nodeID, ak, proof, ts, nonce)
+}
+
+// TestHubServer_RegisterMeshFromAK（M-9）：注册 AK 解析出 mesh 并写入 NodeInfo.Mesh，
+// 节点落入对应 mesh 的独立 RouteTable（跨 mesh 不可见）。
+func TestHubServer_RegisterMeshFromAK(t *testing.T) {
+	const (
+		akA = "sk-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
+		akB = "sk-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
+	)
+	log := testutil.DiscardLogger()
+	rt := NewMeshRouteTable()
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: akA, Secret: testSK}, {Key: akB, Secret: testSK}}), log)
+
+	ackA, closeA := registerRawFrame(t, srv, meshRegFrameJSON(t, "node-a", akA))
+	defer closeA()
+	if !strings.HasPrefix(ackA, RegisterAckOK) {
+		t.Fatalf("node-a 注册失败: %q", ackA)
+	}
+	ackB, closeB := registerRawFrame(t, srv, meshRegFrameJSON(t, "node-b", akB))
+	defer closeB()
+	if !strings.HasPrefix(ackB, RegisterAckOK) {
+		t.Fatalf("node-b 注册失败: %q", ackB)
+	}
+
+	infoA, ok := rt.LookupInfo("node-a")
+	if !ok {
+		t.Fatal("node-a 未注册")
+	}
+	if infoA.Mesh != "mesh-a" {
+		t.Fatalf("node-a.Mesh = %q, want mesh-a（注册 AK 应解析出 mesh）", infoA.Mesh)
+	}
+	if infoB, ok := rt.LookupInfo("node-b"); !ok || infoB.Mesh != "mesh-b" {
+		t.Fatalf("node-b.Mesh = %q, want mesh-b", infoB.Mesh)
+	}
+	// 各自 List(mesh) 只见本 mesh。
+	meshAList := rt.List("mesh-a")
+	if len(meshAList) != 1 || meshAList[0].ID != "node-a" {
+		t.Fatalf("List(mesh-a) = %+v, want 仅 node-a", meshAList)
+	}
+	if got := rt.List("mesh-b"); len(got) != 1 || got[0].ID != "node-b" {
+		t.Fatalf("List(mesh-b) = %+v, want 仅 node-b", got)
+	}
+	// 节点计数按 mesh 隔离。
+	if rt.NodeCount("mesh-a") != 1 || rt.NodeCount("mesh-b") != 1 {
+		t.Fatalf("NodeCount(mesh-a)=%d NodeCount(mesh-b)=%d, want 1/1", rt.NodeCount("mesh-a"), rt.NodeCount("mesh-b"))
+	}
+}
+
 // TestHubServer_DiscIdentity_ForgedRejected：伪造 real_node_id 证明（无真实节点
 // per-node secret）或 real_node_id 与 disc base 不匹配 → hub fail-closed 拒绝注册
 // （防冒充他人污染 accept 侧链路池）。
 func TestHubServer_DiscIdentity_ForgedRejected(t *testing.T) {
-	rt := NewRouteTable()
+	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
 	_, closeReal := registerNodeAndGetSecret(t, srv, "victim-a")
 	defer closeReal()

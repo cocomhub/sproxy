@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
@@ -283,6 +284,9 @@ func validateServices(svcs []Service) []Service {
 // 避免同名节点重连且新注册不带服务时旧服务残留，M4/S4）。
 // 节点声明 per-node-secret 能力时生成独立 secret 存入 NodeInfo.Secret（I1/S1）。
 //
+// mesh 隔离（M-9）：mesh 由注册 AK 解析（tunnel.AccessKeyMesh），写入 NodeInfo.Mesh 并
+// 注册到该 mesh 的独立 RouteTable（默认 mesh "" 等价单 mesh 行为）。
+//
 // mesh 自动对等发现临时身份（disc-<base>-<unixnano>）做防冒充校验（S-fix）：
 // base 必须等于 Meta.RealNodeID 且持有该真实节点 per-node secret 的 HMAC 证明，
 // 否则拒绝注册（fail-closed）。否则任何已准入节点可注册 disc-<victim>-<nano>
@@ -321,7 +325,8 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, erro
 			s.logger.Warn("生成 per-node secret 失败，节点按未声明能力处理", "node", reg.NodeID, "error", err)
 		}
 	}
-	s.rt.AddWithInfoAndServices(info, validateServices(reg.Meta.Services))
+	mesh := tunnel.AccessKeyMesh(reg.AccessKey)
+	s.rt.Add(mesh, info, validateServices(reg.Meta.Services))
 	return info, nil
 }
 
@@ -392,7 +397,7 @@ func validRealNodeProof(secret, realNodeID, proof string) bool {
 // mux 的流创建——这样后续 Tunnel.Serve 的 Open/Accept 与 TCP 流中继
 // 可复用同一条 mux 而互不抢 acceptCh。
 type HubServer struct {
-	rt     *RouteTable
+	rt     *MeshRouteTable
 	auth   *Authenticator
 	logger *slog.Logger
 	// maxConns 是并发连接上限信号量；nil 表示无上限（兼容现有测试构造与极端场景）。
@@ -401,9 +406,10 @@ type HubServer struct {
 
 // NewHubServer 创建节点收口服务。auth 为 nil 时视为 fail-closed（拒绝所有注册），
 // 防止调用方"遗漏传 auth"走向开放注册（M-7）。
+// rt 为每 mesh 独立路由表的聚合（M-9），按注册 AK 解析的 mesh 分表隔离。
 // maxConns 为可选变参：传 >0 的值表示 Hub 同时处理的连接数上限（I30），
 // 不传或 <=0 表示无上限。
-func NewHubServer(rt *RouteTable, auth *Authenticator, logger *slog.Logger, maxConns ...int) *HubServer {
+func NewHubServer(rt *MeshRouteTable, auth *Authenticator, logger *slog.Logger, maxConns ...int) *HubServer {
 	if logger == nil {
 		logger = slog.Default()
 	}

@@ -26,7 +26,7 @@ import (
 
 // TestRelayStreamHandler_BadJSON 验证非法请求体被拒绝。
 func TestRelayStreamHandler_BadJSON(t *testing.T) {
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream", strings.NewReader("{bad json"))
 	w := httptest.NewRecorder()
@@ -41,7 +41,7 @@ func TestRelayStreamHandler_BadJSON(t *testing.T) {
 // 请求体超过上限必须 413 拒绝（MaxBytesReader + *http.MaxBytesError），
 // 而非 io.LimitReader 把 JSON 值截断成不完整的 400/静默截断。
 func TestRelayStreamHandler_OversizedBody_413(t *testing.T) {
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 
 	// JSON 值本身超过 1MiB（大 pad 字段），json.Decoder 解析时必读穿上限。
@@ -55,7 +55,7 @@ func TestRelayStreamHandler_OversizedBody_413(t *testing.T) {
 }
 
 func TestRelayStreamHandler_MissingFields(t *testing.T) {
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	for _, body := range []string{
 		`{"target":"n","type":"tcp","addr":""}`,
@@ -115,8 +115,8 @@ func TestRelayStream_EndToEnd_Echo(t *testing.T) {
 	}()
 
 	// caller 侧：注册到 RouteTable 并用 RelayStreamHandler 服务
-	rt := hub.NewRouteTable()
-	rt.Add("leaf-node", callerMux)
+	rt := hub.NewMeshRouteTable()
+	rt.AddNode("", "leaf-node", callerMux)
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	ts := httptest.NewServer(h)
 	defer ts.Close()
@@ -215,8 +215,8 @@ func TestRelayStream_ClientHalfClose_KeepsInFlightResponse(t *testing.T) {
 			relay.ServeOptions{DialPolicy: func(addr string) (string, bool) { return addr, true }, DialResultFrames: true})
 	}()
 
-	rt := hub.NewRouteTable()
-	rt.Add("leaf-node", callerMux)
+	rt := hub.NewMeshRouteTable()
+	rt.AddNode("", "leaf-node", callerMux)
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	ts := httptest.NewServer(h)
 	defer ts.Close()
@@ -316,8 +316,8 @@ func TestRelayStream_IdleTimeout_ClosesIdleConnection(t *testing.T) {
 			relay.ServeOptions{DialPolicy: func(addr string) (string, bool) { return addr, true }, DialResultFrames: true})
 	}()
 
-	rt := hub.NewRouteTable()
-	rt.Add("leaf-node", callerMux)
+	rt := hub.NewMeshRouteTable()
+	rt.AddNode("", "leaf-node", callerMux)
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	h.idleTimeout = 300 * time.Millisecond // 短超时供测试
 	ts := httptest.NewServer(h)
@@ -396,7 +396,7 @@ func TestRelayStreamDialRequest_Framing(t *testing.T) {
 
 // TestRelayStreamHandler_UnknownTarget 验证未知目标节点返回 404（I65）。
 func TestRelayStreamHandler_UnknownTarget(t *testing.T) {
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
 		strings.NewReader(`{"target":"missing","type":"tcp","addr":"1.2.3.4:80"}`))
@@ -410,9 +410,68 @@ func TestRelayStreamHandler_UnknownTarget(t *testing.T) {
 	}
 }
 
+// TestRelayStreamHandler_CrossMeshTargetNotFound（M-9 路由面隔离）：调用方（mesh-a）
+// 请求中继到 mesh-b 的节点 → 404（跨 mesh 目标对外不可见）。
+// 同 mesh 对照：mesh 校验通过并进入转发（叶子回拨号失败 → 502，而非 404）。
+func TestRelayStreamHandler_CrossMeshTargetNotFound(t *testing.T) {
+	// 叶子 accept 循环：读 dial 帧后回 error 结果帧（让同 mesh 对照快速返回 502，
+	// 避免 12s 结果帧超时拖慢测试；跨 mesh 请求在 Open 前即被 404 拦截，不占流）。
+	pipeA, pipeB := xfertest.Pipe()
+	leafMux := mux.New(pipeB, mux.RoleListener)
+	defer leafMux.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	go func() {
+		s, aerr := leafMux.Accept(ctx)
+		if aerr != nil {
+			return
+		}
+		defer s.Close()
+		lenBuf := make([]byte, 4)
+		if _, rerr := io.ReadFull(s, lenBuf); rerr != nil {
+			return
+		}
+		meta := make([]byte, binary.BigEndian.Uint32(lenBuf))
+		if _, rerr := io.ReadFull(s, meta); rerr != nil {
+			return
+		}
+		frame, _ := json.Marshal(hub.DialResultFrame{DialResult: hub.DialResultError, Message: "deny"})
+		ob := make([]byte, 4)
+		binary.BigEndian.PutUint32(ob, uint32(len(frame)))
+		_, _ = s.Write(ob)
+		_, _ = s.Write(frame)
+	}()
+
+	rt := hub.NewMeshRouteTable()
+	callerMux := mux.New(pipeA, mux.RoleDialer)
+	defer callerMux.Close()
+	rt.AddNode("mesh-b", "node-b", callerMux)
+	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
+
+	// 跨 mesh：mesh-a 调用方 → mesh-b 节点 → 404（不可见）。
+	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
+		strings.NewReader(`{"target":"node-b","type":"tcp","addr":"1.2.3.4:80"}`))
+	req = req.WithContext(withMesh(req.Context(), "mesh-a"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("跨 mesh 中继目标应 404, got %d", w.Code)
+	}
+
+	// 对照：同 mesh（mesh-b）→ 通过 mesh 校验并进入转发（叶子回拨号失败 → 502）。
+	req2 := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
+		strings.NewReader(`{"target":"node-b","type":"tcp","addr":"1.2.3.4:80"}`))
+	req2 = req2.WithContext(withMesh(req2.Context(), "mesh-b"))
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusBadGateway {
+		t.Fatalf("同 mesh 目标应进入转发（502 拨号失败）, got %d", w2.Code)
+	}
+}
+
 // TestRelayStreamHandler_NilLogger 验证构造器 logger==nil 兜底为 slog.Default（I65）。
 func TestRelayStreamHandler_NilLogger(t *testing.T) {
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
 		strings.NewReader(`{"target":"missing","type":"tcp","addr":"1.2.3.4:80"}`))
@@ -437,7 +496,7 @@ func TestRelayStreamHandler_NilRouteTable(t *testing.T) {
 
 // TestRelayStreamHandler_BadAddr 验证 addr 语法校验 fail-fast 返回 400（I26/I65）。
 func TestRelayStreamHandler_BadAddr(t *testing.T) {
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	for _, body := range []string{
 		`{"target":"n","type":"tcp","addr":"garbage"}`,       // 无端口
@@ -490,8 +549,8 @@ func TestRelayStreamHandler_NoHijacker(t *testing.T) {
 		_, _ = s.Write(ok)
 	}()
 
-	rt := hub.NewRouteTable()
-	rt.Add("node-a", callerMux)
+	rt := hub.NewMeshRouteTable()
+	rt.AddNode("", "node-a", callerMux)
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 
 	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
@@ -524,8 +583,8 @@ func TestRelayStream_DialFailure_Returns502(t *testing.T) {
 			})
 	}()
 
-	rt := hub.NewRouteTable()
-	rt.Add("leaf-node", callerMux)
+	rt := hub.NewMeshRouteTable()
+	rt.AddNode("", "leaf-node", callerMux)
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 
 	body, _ := json.Marshal(RelayStreamRequest{Target: "leaf-node", Type: "tcp", Addr: "1.2.3.4:80"})

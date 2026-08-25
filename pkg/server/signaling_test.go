@@ -49,12 +49,12 @@ func signalTestMux(b *SignalBroker) *http.ServeMux {
 // LookupInfo 会判定节点未注册。
 func newSignalTestBroker(t *testing.T) *SignalBroker {
 	t.Helper()
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	for _, id := range []string{"peer-a", "peer-b"} {
 		a, _ := xfertest.Pipe()
 		m := mux.New(a, mux.RoleDialer)
 		t.Cleanup(func() { _ = m.Close() })
-		rt.AddWithInfoAndServices(hub.NodeInfo{ID: hub.NodeID(id), Mux: m, Secret: testSignalSecret(id)}, nil)
+		rt.Add("", hub.NodeInfo{ID: hub.NodeID(id), Mux: m, Secret: testSignalSecret(id)}, nil)
 	}
 	return NewSignalBroker(rt)
 }
@@ -181,11 +181,11 @@ func TestSignalBroker_NodeSecret(t *testing.T) {
 	}
 
 	// 4. 已注册但 Secret==""（未声明 per-node-secret 能力）→ 403 fail-closed
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	a, _ := xfertest.Pipe()
 	m := mux.New(a, mux.RoleDialer)
 	t.Cleanup(func() { _ = m.Close() })
-	rt.AddWithInfoAndServices(hub.NodeInfo{ID: "nonsecret", Mux: m}, nil) // 不设 Secret
+	rt.Add("", hub.NodeInfo{ID: "nonsecret", Mux: m}, nil) // 不设 Secret
 	b2 := NewSignalBroker(rt)
 	mux2 := signalTestMux(b2)
 	reqEmpty := httptest.NewRequest(http.MethodPost, "/api/signal/offer", strings.NewReader(`{"to":"peer-b","sdp":"x"}`))
@@ -276,6 +276,57 @@ func TestSignalBroker_QueueFull(t *testing.T) {
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429 for overflow, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestSignalBroker_CrossMeshSignalingRejected（M-9 集成验收）：跨 mesh 信令拒绝。
+// 场景 1：mesh-a 节点发信令给 mesh-b 节点 → 403（from/to 不同 mesh）。
+// 场景 2：mesh-a 调用方用 mesh-b 节点的 X-Node-ID 声称自己 → 403（callerNode mesh 不一致）。
+func TestSignalBroker_CrossMeshSignalingRejected(t *testing.T) {
+	const (
+		meshA = "mesh-a"
+		meshB = "mesh-b"
+	)
+	rt := hub.NewMeshRouteTable()
+	reg := func(t *testing.T, mesh, id string) {
+		t.Helper()
+		a, _ := xfertest.Pipe()
+		m := mux.New(a, mux.RoleDialer)
+		t.Cleanup(func() { _ = m.Close() })
+		rt.Add(mesh, hub.NodeInfo{ID: hub.NodeID(id), Mux: m, Secret: testSignalSecret(id)}, nil)
+	}
+	reg(t, meshA, "peer-a")
+	reg(t, meshB, "peer-b")
+	b := NewSignalBroker(rt)
+	m := signalTestMux(b)
+
+	// 场景 1：from=peer-a（mesh-a）→ to=peer-b（mesh-b）→ 403。
+	req1 := signalReq(http.MethodPost, "/api/signal/offer", "peer-a", `{"to":"peer-b","sdp":"x"}`)
+	req1 = req1.WithContext(withMesh(req1.Context(), meshA))
+	w1 := httptest.NewRecorder()
+	m.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusForbidden {
+		t.Fatalf("跨 mesh 信令（mesh-a → mesh-b）应 403, got %d: %s", w1.Code, w1.Body.String())
+	}
+
+	// 场景 2：mesh-a 调用方冒用 mesh-b 的 peer-b 身份 → 403（callerNode mesh 不一致）。
+	req2 := signalReq(http.MethodPost, "/api/signal/offer", "peer-b", `{"to":"peer-a","sdp":"x"}`)
+	req2 = req2.WithContext(withMesh(req2.Context(), meshA))
+	w2 := httptest.NewRecorder()
+	m.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusForbidden {
+		t.Fatalf("mesh 不一致的 callerNode 应 403, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	// 对照：同 mesh 信令（peer-a → peer-a 不行，需 peer-a→同 mesh 另一节点）。
+	// 注册一个 mesh-a 的第二节点，验证同 mesh 投递仍 202。
+	reg(t, meshA, "peer-a2")
+	req3 := signalReq(http.MethodPost, "/api/signal/offer", "peer-a", `{"to":"peer-a2","sdp":"x"}`)
+	req3 = req3.WithContext(withMesh(req3.Context(), meshA))
+	w3 := httptest.NewRecorder()
+	m.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusAccepted {
+		t.Fatalf("同 mesh 信令应 202, got %d: %s", w3.Code, w3.Body.String())
 	}
 }
 

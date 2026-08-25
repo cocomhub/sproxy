@@ -83,31 +83,35 @@ func (m *Metrics) Snapshot() map[string]int64 {
 	}
 }
 
-// aggregateMuxMetrics 从 RouteTable 中所有已注册 mux 实例聚合 mux 级指标。
+// aggregateMuxMetrics 从 MeshRouteTable 中所有已注册 mux 实例聚合 mux 级指标
+// （跨全部 mesh 汇总，/metrics 为运维面，不区分调用方 mesh）。
 // 返回 nil 表示没有可用的 mux 实例。
 func (h *Handlers) aggregateMuxMetrics() *mux.Metrics {
 	if h.routeTable == nil {
 		return nil
 	}
-	nodes := h.routeTable.List()
-	if len(nodes) == 0 {
-		return nil
-	}
 	var total mux.Metrics
-	for _, n := range nodes {
-		if n.Mux == nil {
-			continue
+	found := false
+	for _, mesh := range h.routeTable.AllMeshes() {
+		for _, n := range h.routeTable.List(mesh) {
+			if n.Mux == nil {
+				continue
+			}
+			found = true
+			mm := n.Mux.Metrics()
+			total.Streams.Opened.Add(mm.Streams.Opened.Load())
+			total.Streams.BytesRead.Add(mm.Streams.BytesRead.Load())
+			total.Streams.BytesWritten.Add(mm.Streams.BytesWritten.Load())
+			total.FramesSent.Add(mm.FramesSent.Load())
+			total.FramesReceived.Add(mm.FramesReceived.Load())
+			total.PingsSent.Add(mm.PingsSent.Load())
+			total.PongsReceived.Add(mm.PongsReceived.Load())
+			total.Errors.Add(mm.Errors.Load())
+			total.Streams.Errors.Add(mm.Streams.Errors.Load())
 		}
-		mm := n.Mux.Metrics()
-		total.Streams.Opened.Add(mm.Streams.Opened.Load())
-		total.Streams.BytesRead.Add(mm.Streams.BytesRead.Load())
-		total.Streams.BytesWritten.Add(mm.Streams.BytesWritten.Load())
-		total.FramesSent.Add(mm.FramesSent.Load())
-		total.FramesReceived.Add(mm.FramesReceived.Load())
-		total.PingsSent.Add(mm.PingsSent.Load())
-		total.PongsReceived.Add(mm.PongsReceived.Load())
-		total.Errors.Add(mm.Errors.Load())
-		total.Streams.Errors.Add(mm.Streams.Errors.Load())
+	}
+	if !found {
+		return nil
 	}
 	return &total
 }
@@ -149,9 +153,17 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeMetric(&b, "sproxy_mux_errors", "counter", "Mux errors", mm.Errors.Load())
 		writeMetric(&b, "sproxy_mux_stream_errors", "counter", "Mux stream errors", mm.Streams.Errors.Load())
 	}
-	// Hub 级指标
+	// Hub 级指标：按调用方 mesh 统计（无 mesh 请求时汇总所有 mesh）。
 	if rt := h.routeTable; rt != nil {
-		writeMetric(&b, "sproxy_hub_nodes_connected", "gauge", "Current number of connected relay nodes", int64(rt.NodeCount()))
+		count := 0
+		if mesh := meshFromRequest(r); mesh != "" {
+			count = rt.NodeCount(mesh)
+		} else {
+			for _, m := range rt.AllMeshes() {
+				count += rt.NodeCount(m)
+			}
+		}
+		writeMetric(&b, "sproxy_hub_nodes_connected", "gauge", "Current number of connected relay nodes", int64(count))
 	}
 	// 云端下载指标
 	if cm := h.cloudMgr; cm != nil && cm.metrics != nil {
