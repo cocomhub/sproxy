@@ -123,6 +123,7 @@ web-test:
 	@node --check web/static/app.js
 	@node --check web/static/cloudfilename.js
 	node --test web/static/cloudfilename.test.js
+	node --test web/static/sclient/sclient.test.js
 
 .PHONY: cover-check
 cover-check: test-cover
