@@ -326,7 +326,7 @@ test('隧道模式 coreRequest：帧发送 + SproxySig(UNSIGNED) 外层 + 响应
       });
     };
 
-    const out = await transport.coreRequest('GET', '/api/files?subdir=/', { headers: { 'X-Test': '1' }, bodyBytes: null });
+    const out = await transport.coreRequest('GET', '/tunnel', { headers: { 'X-Test': '1' }, bodyBytes: null });
     // GET 无 body：请求帧 = metadata 帧 + 零 body 帧。走 /tunnel 且带 Content-Type。
     assert.ok(requests[0].init.body instanceof Uint8Array, '隧道请求体应为 Uint8Array');
 
@@ -425,9 +425,59 @@ test('隧道响应帧解密失败 → E_DECRYPT', async () => {
     globalThis.fetch = async () => new Response(new Uint8Array([0, 0, 0, 0]), { status: 200 });
     let caught = null;
     try {
-      await transport.coreRequest('GET', '/x', {});
+      await transport.coreRequest('GET', '/tunnel', {});
     } catch (e) { caught = e; }
     assert.ok(caught && caught.code === 'E_DECRYPT', JSON.stringify(caught));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('隧道外层签名路径与请求 URL 一致（锁定 /tunnel + 路径守卫，C1）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'tunnel', accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
+    const requests = [];
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url, init });
+      return new Response(await fakeTunnelBytes, { status: 200, headers: { 'Content-Type': 'application/x-tunnel-frame' } });
+    };
+    // 有效入口（pathWithQuery 带 query——C1 正是此场景：签名路径与 fetch URL 分岔则
+    // 服务端按 r.URL.Path=/tunnel 验签必 401）：签名头 canonical 必须由 TUNNEL_PATH
+    // /tunnel 驱动。注意：the guard 拦截使本调用不合法——但 C1 要点是确认签名头路径段
+    // 与请求 URL 一致；此处用 `transport.TUNNEL_PATH` + sig.buildCanonical 复算证明。
+    await transport.coreRequest('GET', transport.TUNNEL_PATH, {});
+    assert.strictEqual(requests.length, 1);
+    assert.strictEqual(requests[0].url, '/tunnel', 'fetch URL 必须是 /tunnel');
+    const auth = requests[0].init.headers['Authorization'] || requests[0].init.headers['authorization'];
+    // 从头中抽取字段，复算 canonical，断言其 path 段（第 7 段）为 /tunnel。
+    const ak = auth.split(' ak=')[1].split(' ')[0];
+    const ts = auth.split(' ts=')[1].split(' exp=')[0];
+    const exp = auth.split(' exp=')[1].split(' nonce=')[0];
+    const nonce = auth.split(' nonce=')[1].split(' body_sha256=')[0];
+    const canonical = sig.buildCanonical('POST', transport.TUNNEL_PATH, { ak, ts, exp, nonce, bodySha256: 'UNSIGNED' });
+    assert.strictEqual(canonical.split('\n')[6], '/tunnel', 'canonical 第 7 段（signHeader path）必须为 /tunnel');
+    // 且该 canonical 正是头部 sig 的输入（证明 transport 用 /tunnel 而不是 pathWithQuery 签名）。
+    assert.strictEqual(auth.split(' sig=')[1], await cryptoLib.hmacSHA256Hex(SK, canonical), '签名输入 canonical 的 path 段 = /tunnel');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('隧道模式路径守卫：非 /tunnel 的 pathWithQuery 抛 E_INTERNAL（C1）', async () => {
+  const origFetch = globalThis.fetch;
+  let fetched = false;
+  try {
+    transport.configure({ mode: 'tunnel', accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
+    globalThis.fetch = async () => { fetched = true; throw new Error('不应发出请求'); };
+    for (const bad of ['/api/files?q=1', '/tunnel?x=1', '/other']) {
+      let caught = null;
+      try {
+        await transport.coreRequest('GET', bad, {});
+      } catch (e) { caught = e; }
+      assert.ok(caught && caught.code === 'E_INTERNAL', 'pathWithQuery=' + bad + ' 应抛 E_INTERNAL: ' + JSON.stringify(caught));
+    }
+    assert.strictEqual(fetched, false, '守卫应在发起 fetch 前拦截');
   } finally {
     globalThis.fetch = origFetch;
   }

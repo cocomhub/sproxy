@@ -16,8 +16,12 @@
  *     metadata 帧 AADMeta "tunnel:meta:v1"，body 帧 AADStream "tunnel:stream:v1"，
  *     crypto.js 的 aesGcm* 不传 AAD；本模块用 WebCrypto 显式传 additionalData，
  *     与服务端 gcm.Seal(nonce, plaintext, aad) 同一字节语义。
- *   - 外层 /tunnel 签名用 sig.signHeader("POST", "/tunnel", 帧bytes, {unsigned:true})
- *     ——body_sha256=UNSIGNED（帧密文长度未知无法整体预哈希，与 Go sigRoundTripper 一致）。
+ *   - 外层 /tunnel 签名用 sig.signHeader("POST", TUNNEL_PATH, 帧bytes, {unsigned:true})
+ *     ——TUNNEL_PATH('/tunnel') 常量同时驱动签名与 fetch URL，保证 canonical 第 7 段
+ *     （path）与 Go authMiddleware 按 r.URL.Path 的验签比对一致；body_sha256=UNSIGNED
+ *     （帧密文长度未知无法整体预哈希，与 Go sigRoundTripper 一致）。
+ *   - 路径守卫：tunnelRun 只接受 pathWithQuery === '/tunnel'（Web 隧道入口），其它路径
+ *     提前抛 E_INTERNAL，防止签名路径与请求 URL 分岔导致服务端验签恒 401。
  *
  * 依赖（浏览器按序挂全局 / Node require）：crypto.js→sclientCrypto、sig.js→sclientSig、
  * config.js→sclientConfig、log.js→sclientLog。
@@ -34,6 +38,8 @@
   'use strict';
 
   // ---- 常量（对齐 Go tunnel const）----
+  // 隧道入口路径：外层签名与 fetch 固定一致（Go authMiddleware 按 r.URL.Path 验签）。
+  const TUNNEL_PATH = '/tunnel';
   const frameContentType = 'application/x-tunnel-frame';
   const AAD_META = 'tunnel:meta:v1';
   const AAD_STREAM = 'tunnel:stream:v1';
@@ -265,8 +271,16 @@
       throw SclientError('E_AUTH', '隧道密钥派生失败');
     }
 
-    // metadata：method/url 相对路径/headers（去掉 Authorization——外层有独立签名）
+    // metadata：method/url 相对路径/headers（去掉 Authorization——外层有独立签名）。
+    // 内层 url 保留调用方原始 pathWithQuery（原样透传，请求分发语义），外层签名/fetch
+    // 固定用 TUNNEL_PATH /tunnel——Go 侧 metadata 里 URL 已忽略、以请求行 Path 为准。
     const meta = { method: method, url: pathWithQuery, headers: {} };
+    // ---- 隧道入口路径守卫：Web 隧道只接受 /tunnel。外层 SproxySig canonical 第 7 段
+    // 用 Go authMiddleware 的 r.URL.Path（隧道入口）比对，若与 fetch URL 分岔（带 query
+    // 或其它路径）则验签恒 401；此处提前抛错，把签名路径与请求路径锁定为同一常量。
+    if (pathWithQuery !== TUNNEL_PATH) {
+      throw SclientError('E_INTERNAL', '隧道模式仅支持入口路径 /tunnel，收到: ' + pathWithQuery);
+    }
     if (headers) {
       for (const [k, v] of Object.entries(headers)) {
         if (k.toLowerCase() !== 'authorization' && typeof v === 'string') meta.headers[k] = v;
@@ -276,8 +290,9 @@
     const bodyFrames = await encodeBodyFrames(keyHex, bodyBytes);
     const fullBody = concatU8(metaFrame, bodyFrames.length ? concatU8.apply(null, bodyFrames) : new Uint8Array(0));
 
-    // 外层签名：body_sha256=UNSIGNED（帧密文无法整体预哈希），与 Go sigRoundTripper 一致。
-    const auth = await sigLib.signHeader('POST', '/tunnel', fullBody, {
+    // 外层签名：body_sha256=UNSIGNED（帧密文无法整体预哈希），与 Go sigRoundTripper 一致；
+    // 路径固定 TUNNEL_PATH——与下方 fetch URL 严格同源（Go 按 r.URL.Path 验签）。
+    const auth = await sigLib.signHeader('POST', TUNNEL_PATH, fullBody, {
       ak: cfg.accessKey,
       secret: cfg.accessKeySecret,
       unsigned: true,
@@ -285,7 +300,7 @@
 
     let resp;
     try {
-      resp = await globalThis.fetch(fullURL('/tunnel'), {
+      resp = await globalThis.fetch(fullURL(TUNNEL_PATH), {
         method: 'POST',
         headers: { 'Content-Type': frameContentType, 'Authorization': auth },
         body: fullBody,
@@ -446,6 +461,7 @@
     overrideKey,
     SclientError,
     fullURL,
+    TUNNEL_PATH,
     decodeResponseFrames,
     // 内部原语（单测跨端闭环用；非公共 API，勿在领域层依赖）。
     _internals: {
