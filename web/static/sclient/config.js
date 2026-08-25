@@ -64,9 +64,10 @@
     const overrideKey = cfg.overrideKey;
     let value = null;
     try {
-      value = localStorage.getItem(overrideKey);
+      // 运行时再解析 localStorage（含 node 单测环境）——避免加载期直接引用未定义全局报错
+      value = globalThis.localStorage && globalThis.localStorage.getItem(overrideKey);
     } catch (e) {
-      value = null; // localStorage 不可用（隐私模式/禁用）→ 回退默认
+      value = null; // localStorage 不可用（隐私模式/禁用/无全局）→ 回退默认
     }
     if (value) {
       try {
