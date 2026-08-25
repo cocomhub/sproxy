@@ -839,11 +839,10 @@ test('share create/list/revoke 映射', async () => {
 });
 
 // ---- config ----
-test('config.get / update / updateStorage 映射', async () => {
+test('config.get / update 映射', async () => {
   const core = makeMockCore([
     okResp({ log_level: 'info', web_tunnel: true }),
     okResp({ success: true, changed: true }),
-    okResp({ success: true, max_storage_bytes: 1024 }),
   ]);
   const api = makeApi(core);
   const g = await api.config.get();
@@ -854,11 +853,6 @@ test('config.get / update / updateStorage 映射', async () => {
   assert.strictEqual(core.calls[1].path, '/api/config');
   assert.strictEqual(core.calls[1].method, 'PUT');
   assert.deepStrictEqual(jsonBody(core.calls[1].opts.bodyBytes), { log_level: 'debug', web_tunnel: false });
-  await api.config.updateStorage(2048);
-
-  assert.strictEqual(core.calls[2].path, '/api/storage/config');
-  assert.strictEqual(core.calls[2].method, 'PUT');
-  assert.deepStrictEqual(jsonBody(core.calls[2].opts.bodyBytes), { max_storage_bytes: 2048 });
 });
 
 // ---- hub ----

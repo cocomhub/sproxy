@@ -6,15 +6,15 @@
  * 闭包式工厂：api/config.js(ctx) → { ...方法 }，ctx = { coreRequest, config, log,
  * crypto, util }（由 api/index.js 组装传入）。领域方法一律 promise。
  *
- * 端点语义对齐 server config_api.go / client hub.go：
+ * 端点语义对齐 server config_api.go：
  *   - get()            GET  /api/config（脱敏运行时配置，含 web_tunnel）
  *   - update(patch)    PUT  /api/config（可改 log_level / log_format /
  *     rate_limit_requests / rate_limit_window / max_storage_bytes / web_tunnel）
- *   - updateStorage(maxStorageBytes)  PUT  /api/storage/config {max_storage_bytes}
- *     注：服务端主 mux 另有 PUT /api/config 的 max_storage_bytes 支持；
- *     /api/storage/config 为 client SDK 既有路由（本领域一并封装）。
  *
  * get() 返回 {log_level, log_format, access_keys_set, tunnel_key_set, ...web_tunnel}。
+ * 注：历史上曾封装 updateStorage（PUT /api/storage/config），但服务端场景无此路由
+ *（pkg/client/hub.go 自身的 UpdateStorageConfig 也无调用方），存储上限统一走
+ * update({max_storage_bytes})。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -67,11 +67,11 @@
       return jsonRequest('PUT', '/api/config', body);
     }
 
-    // PUT /api/storage/config：更新存储上限（客户端 SDK 既有路由）。
-    function updateStorage(maxStorageBytes) {
-      return jsonRequest('PUT', '/api/storage/config', { max_storage_bytes: maxStorageBytes });
-    }
+    // 注：历史上曾有 updateStorage（PUT /api/storage/config）——服务端 handlers.go
+    // 并无此路由（pkg/client/hub.go 的 UpdateStorageConfig 自身也无调用方），会 404。
+    // 存储上限统一走 update({max_storage_bytes})（PUT /api/config 实装）。
+    // 若服务端未来补 /api/storage/config 路由，随 pkg/client 一起加回。
 
-    return { get, update, updateStorage };
+    return { get, update };
   };
 });
