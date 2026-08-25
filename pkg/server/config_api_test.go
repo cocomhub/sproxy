@@ -10,6 +10,29 @@ import (
 	"testing"
 )
 
+func TestConfigAPI_WebTunnelField(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	resp, err := http.Get(url + "/api/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var cfg configResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.WebTunnel {
+		t.Fatal("web_tunnel 默认应为 true")
+	}
+}
+
 func TestConfig_GetConfig(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
