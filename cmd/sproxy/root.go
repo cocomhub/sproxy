@@ -108,11 +108,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	mux := http.NewServeMux()
-	var routeTable *hub.RouteTable
+	var routeTable *hub.MeshRouteTable
 	// Hub 中继：先注册 xfer/ws 传输（开启 transports.ws 时），
-	// 创建 RouteTable + HubServer 收口，再注册 HTTP 路由。
+	// 创建 MeshRouteTable + HubServer 收口，再注册 HTTP 路由。
 	if cfg.Hub.Enabled {
-		routeTable = hub.NewRouteTable()
+		routeTable = hub.NewMeshRouteTable()
 		logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
 
 		if cfg.Hub.Transports.WS.Enabled {

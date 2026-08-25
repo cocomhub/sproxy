@@ -26,6 +26,7 @@ type NodeInfo struct {
 	Addr       string    // 远端地址
 	Secret     string    // per-node 独立 secret（仅节点声明 per-node-secret 能力时下发；不落日志）
 	RealNodeID string    // mesh discovery 临时注册（disc-）代表的本节点真实 node-id（hub 校验后记录）
+	Mesh       string    // 节点所属 mesh（由注册 AK 解析；"" 为默认 mesh）
 }
 
 // RouteTable 是线程安全的节点路由表。

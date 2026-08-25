@@ -135,7 +135,7 @@ func TestDial_FallsBackToRelay(t *testing.T) {
 // TestAutoRegister_GetsSecretAndCleanup：经 mock hub 自动注册拿到 per-node secret，
 // 信令请求携带 X-Node-Secret / X-Node-ID（B2/B3），closer 移除临时节点。
 func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
 
 	muxHTTP := http.NewServeMux()
@@ -209,7 +209,7 @@ func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 // TestAutoRegister_ExactNode（D1 回归）：exact 模式注册成 nodeID 原样（p2p listen
 // 的被寻址方需稳定 ID 供 --peer 寻址），closer 移除节点。
 func TestAutoRegister_ExactNode(t *testing.T) {
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
 	muxHTTP := http.NewServeMux()
 	wsNode := ws.NewHandlerNode()
@@ -272,9 +272,9 @@ func TestAutoRegister_EmptySecretFailsClosed(t *testing.T) {
 }
 
 // runNodeTestHub 起 mock hub：/ws 注册 + HubServer + 可选信令桥，返回 server URL。
-func runNodeTestHub(t *testing.T, withSignaling bool) (*hub.RouteTable, *httptest.Server, context.CancelFunc) {
+func runNodeTestHub(t *testing.T, withSignaling bool) (*hub.MeshRouteTable, *httptest.Server, context.CancelFunc) {
 	t.Helper()
-	rt := hub.NewRouteTable()
+	rt := hub.NewMeshRouteTable()
 	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
 	muxHTTP := http.NewServeMux()
 	wsNode := ws.NewHandlerNode()
@@ -288,7 +288,7 @@ func runNodeTestHub(t *testing.T, withSignaling bool) (*hub.RouteTable, *httptes
 			ID string `json:"id"`
 		}
 		var nodes []nodeResp
-		for _, n := range rt.List() {
+		for _, n := range rt.List("") {
 			nodes = append(nodes, nodeResp{ID: string(n.ID)})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -415,7 +415,7 @@ func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
 		nodeCancel()
 		t.Fatal("mesh node 未注册")
 	}
-	svcs := rt.ServicesOf(hub.NodeID(nodeID))
+	svcs := rt.Table("").ServicesOf(hub.NodeID(nodeID))
 	if len(svcs) != 1 || svcs[0].Name != "echo" || svcs[0].Addr != echoAddr {
 		nodeCancel()
 		t.Fatalf("服务宣告不对: %+v", svcs)

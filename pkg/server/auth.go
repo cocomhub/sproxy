@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"io"
 	"log/slog"
@@ -14,6 +15,27 @@ import (
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
+
+// meshCtxKey 是请求 ctx 中 mesh 的私有 key 类型（避免与其他包/库的 string key 碰撞）。
+type meshCtxKey struct{}
+
+// withMesh 把 mesh 写入请求 ctx。
+func withMesh(ctx context.Context, mesh string) context.Context {
+	return context.WithValue(ctx, meshCtxKey{}, mesh)
+}
+
+// MeshFrom 返回请求 ctx 中的 mesh（未设置时返回 ""）。
+// authMiddleware 在 SproxySig 验签成功后按命中 AK 派生 mesh 写入 ctx；
+// 供 /api/hub/nodes、信令、metrics 按 mesh 过滤。
+func MeshFrom(ctx context.Context) string {
+	mesh, _ := ctx.Value(meshCtxKey{}).(string)
+	return mesh
+}
+
+// meshFromRequest 从请求 ctx 读取调用方所属 mesh（无则返回 ""）。
+func meshFromRequest(r *http.Request) string {
+	return MeshFrom(r.Context())
+}
 
 // APIKey 表示一个 API 密钥及其权限。
 type APIKey struct {
@@ -210,6 +232,8 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			if !ok {
 				return
 			}
+			// M-9：验签成功后按命中 AK 派生 mesh 写入 ctx，供列表/信令/指标按 mesh 过滤。
+			r = r.WithContext(withMesh(r.Context(), tunnel.AccessKeyMesh(matched.Key)))
 			// I-3：bodyValidator 只在读到 io.EOF 时比对哈希，而 JSON 端点用
 			// json.Decoder、上传用 ParseMultipartForm 都不读到 EOF，哈希比对永不触发。
 			// handler 完成后强制消费剩余 body 触发 EOF 校验；不匹配记 Warn（响应已发，
