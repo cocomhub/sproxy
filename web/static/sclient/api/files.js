@@ -7,7 +7,8 @@
  * crypto, util }（由 api/index.js 组装传入）。领域方法一律 promise。
  *
  * 归一：列表类返回 JSON 对象（coreRequest 的 body 经 util.decodeJSON 解析）；
- * 操作类返回 {success, message, ...}；download/archive 返回 Blob。
+ * 操作类返回 {success, message, ...}；download/archive 返回 {blob, headers}（headers
+ * 保留 X-File-Checksum 等响应头供 UI 完整性校验；archive 额外给 {filename, ...}）。
  *
  * 端点语义对齐 server handlers（handlers.go / list_handler.go / chunked_upload.go）：
  *   - list(subdir, opts)        GET  /api/files?subdir=&offset=&limit=&sort=&order=
@@ -116,6 +117,20 @@
     return '';
   }
 
+  // 从响应 headers 中提取指定 key 的字符串映射（未注入任何 key 时返回 {}）。
+  // 兼容两种形态：flat（隧道 metadata headers 已由 transport 展开为 {name:value}）
+  // 与 Headers 对象（直连 fetch）。下载返回结构中的 headers 由此构造。
+  function extractHeaderMap(headers, wanted) {
+    const keys = wanted && Object.keys(wanted);
+    if (!keys || keys.length === 0) return {};
+    const out = {};
+    for (const k of keys) {
+      const v = firstStringHeader(headers, k);
+      if (v) out[k] = v;
+    }
+    return out;
+  }
+
   // ---- 领域方法工厂 ----
   return function createFilesApi(ctx) {
     if (!ctx || typeof ctx.coreRequest !== 'function') throw new Error('api/files: ctx 需提供 coreRequest 函数');
@@ -175,15 +190,20 @@
       return coreRequest('HEAD', '/api/files/stat?filename=' + encodeURIComponent(filename), {});
     }
 
-    // ---- 下载：返回 Blob（隧道 mode 流式、direct arrayBuffer→Blob）----
+    // ---- 下载：返回 { blob, headers }（隧道 mode 流式、direct arrayBuffer→Blob）。
+    // headers 保留 X-File-Checksum 以便 UI 做本地 SHA-256 往返校验（C-1 遗留：旧版
+    // 只回 Blob 不回响应头，导致直连模式 UI 无法校验）。assert: blob 字节与 header
+    // 一致性由调用方（app.js downloadFile）负责——此处只透传。
     function download(filename, opts) {
       const p = opts || {};
       const headers = Object.assign({}, p.headers || {});
+      const dlHeaders = Object.assign({}, p.downloadHeaders || {});
       return coreRequest('GET', '/download?filename=' + encodeURIComponent(filename), {
         headers: headers,
         download: true,
+        collectHeaders: dlHeaders,
       }).then(function (res) {
-        return blobFromBytes(res.body, p.type || 'application/octet-stream');
+        return { blob: blobFromBytes(res.body, p.type || 'application/octet-stream'), headers: extractHeaderMap(res.headers, dlHeaders) };
       });
     }
 

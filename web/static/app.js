@@ -287,13 +287,67 @@ async function rmdirDir(dirPath) {
 }
 
 // --- 下载 ---
-// downloadFile 走 sc.files.download(name) → Blob（传输层自动协商隧道/直连）。
+// downloadFile 走 sc.files.download(name) → { blob, headers }（传输层自动协商隧道/直连）；
+// headers 携带 X-File-Checksum（if any）——与下载字节做本地 SHA-256 比对（旧行为，C-1），
+// 不一致则报错不触发下载，防服务器返回内容与账本不符。
 async function downloadFile(name, expectedChecksum) {
   try {
-    const blob = await sc.files.download(name);
+    const { blob, headers } = await sc.files.download(name, { downloadHeaders: { 'X-File-Checksum': '' } });
+    const serverCS = (headers && headers['X-File-Checksum']) || '';
+    if (serverCS) {
+      const localCS = await computeFileSHA256(blob);
+      if (localCS !== serverCS) {
+        showToast('校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
+        return;
+      }
+      triggerDownload(name, blob);
+      showToast(name + ' 下载完成' + '，校验通过', 'success');
+      return;
+    }
     triggerDownload(name, blob);
     showToast(name + ' 下载完成', 'success');
   } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
+}
+
+// 计算 Blob 的 SHA-256 hex（小文件一次 arrayBuffer；大文件分片增量——浏览器有
+// 同源 sha256.js 全局 Sha256；Node 侧测试环境用 crypto.subtle 单次，结果一致）。
+function computeFileSHA256(blob) {
+  const total = blob.size || 0;
+  const readWhole = total <= 8 * 1024 * 1024;
+  if (readWhole) return blob.arrayBuffer().then(function(buf) { return sha256Bytes(new Uint8Array(buf)); });
+  const cs = Math.min(64 * 1024 * 1024, total);
+  const n = Math.ceil(total / cs);
+  const sh = (typeof globalThis.Sha256 === 'function') ? new globalThis.Sha256() : null;
+  const pending = [];
+  for (let i = 0; i < n; i++) {
+    const s = i * cs, e = Math.min(s + cs, total);
+    pending.push(blob.slice(s, e).arrayBuffer());
+  }
+  return Promise.all(pending).then(function(buffers) {
+    let acc = [];
+    for (const b of buffers) acc.push(new Uint8Array(b));
+    if (sh) { for (const b of acc) sh.update(b); return sh.digest(); }
+    return sha256Bytes(concatBytes(acc));
+  });
+}
+
+function sha256Bytes(bytes) {
+  return crypto.subtle.digest('SHA-256', bytes).then(function(d) { return bytesToHex(new Uint8Array(d)); });
+}
+
+function bytesToHex(bytes) {
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0');
+  return out;
+}
+
+function concatBytes() {
+  let total = 0;
+  for (const a of arguments) total += (a && a.byteLength) || (a && a.length) || 0;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arguments) { if (a) { out.set(a, off); off += a.byteLength || a.length; } }
+  return out;
 }
 
 function triggerDownload(fileName, data) {
@@ -1170,7 +1224,7 @@ async function doChainDownloadCloud(lines, filenames) {
     showToast('下载归档并清理中...', 'info');
     const downloadName = (archiveResult.file || '').split('/').pop();
     // 先下载一次归档（I5），再逐个清理任务。
-    const dlBlob = await sc.files.download(archiveResult.file);
+    const dlBlob = (await sc.files.download(archiveResult.file)).blob;
     triggerBrowserDownload(dlBlob, downloadName);
     for (let i = 0; i < taskIds.length; i++) {
       try {
@@ -1272,7 +1326,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
     showToast('下载归档并清理中...', 'info');
 
     // 阶段 4: 下载归档文件（先下载再删除组）
-    const dlBlob = await sc.files.download(archiveResult.file);
+    const dlBlob = (await sc.files.download(archiveResult.file)).blob;
     triggerBrowserDownload(dlBlob, archiveName);
     // 阶段 5: 删除组（清理远端文件）
     await deleteCloudGroupForCleanup(groupId);
@@ -1343,9 +1397,9 @@ async function doCreateCloudGroup(lines, filenames) {
 
 async function downloadCloudFile(taskId, filename, checksum) {
   try {
-    // 先下载云端文件（sc.files.download 返回 Blob，传输层自动协商）
+    // 先下载云端文件（sc.files.download 返回 {blob, headers}，传输层自动协商）
     const cloudPath = '.__cloud__/' + taskId + '/' + filename;
-    const blob = await sc.files.download(cloudPath);
+    const blob = (await sc.files.download(cloudPath)).blob;
 
     // 触发浏览器下载
     const a = document.createElement('a');
@@ -2051,7 +2105,7 @@ function previewImage(filename) {
 
 async function previewText(filename) {
   try {
-    const blob = await sc.files.download(filename);
+    const { blob } = await sc.files.download(filename);
     let text = await blob.text();
     var lines = text.split('\n');
     if (lines.length > 100) {
