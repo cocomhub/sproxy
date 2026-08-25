@@ -94,6 +94,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if len(cfg.AccessKeys) == 0 && !cfg.APIKeys.Enabled {
 		return fmt.Errorf("拒绝启动：未配置 access_keys（且 api_keys 未启用），无法提供认证")
 	}
+	// M-8：api_keys-only（多用户 Bearer）下隧道/hub 不可用——隧道密钥由 access_keys 派生、
+	// hub 注册由 access_keys 准入。启用 hub 时强制 access_keys 非空，消除功能死角。
+	if cfg.Hub.Enabled && len(cfg.AccessKeys) == 0 {
+		return fmt.Errorf("拒绝启动：hub.enabled=true 但未配置 access_keys，中继节点注册需要 SproxySig 准入")
+	}
 	cfgPtr.Store(cfg)
 
 	logger := initLogger(cfg)

@@ -46,6 +46,18 @@ func pipeXfer() (dial func(ctx context.Context) (xfer.Conn, error), serverConn f
 // TestHubServer_RegisterReadFailure_SilentNoRegErr（P1-7 回归）：
 // 未读到注册帧（超时/WS 网络错误）时 hub 不得回发 REG_ERR——否则客户端
 // isTerminalRelayError 把纯网络抖动判为终态，relay 守护进程永久退出。
+// testRegFrameJSON 构造带 AK/proof/ts/nonce 的注册帧 JSON（extra 为可选额外字段 JSON 片段，
+// 如 capabilities/meta）。每次调用生成唯一 nonce，满足 Authenticator 的 nonce 去重。
+func testRegFrameJSON(t *testing.T, nodeID, extra string) string {
+	t.Helper()
+	proof, ts, nonce := testRegCred(t, nodeID)
+	extraField := ""
+	if extra != "" {
+		extraField = "," + extra
+	}
+	return fmt.Sprintf(`{"node_id":%q,"access_key":%q,"access_key_proof":%q,"ts":%d,"nonce":%q%s}`, nodeID, testAK, proof, ts, nonce, extraField)
+}
+
 func TestHubServer_RegisterReadFailure_SilentNoRegErr(t *testing.T) {
 	rt := NewRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
@@ -99,8 +111,9 @@ func TestHubServerRegisterAndRemove(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	// 节点侧：先发一条注册帧（带 AK/proof → JSON 帧；裸字节回退见 TestHubServerBareNodeID）
-	if err := clientConn.Send(ctx, NewRegisterFrame("node-a", testAK, testRegisterProof(t, "node-a"), Meta{})); err != nil {
+	// 节点侧：先发一条注册帧（带 AK/proof+ts/nonce → JSON 帧；裸字节回退见 TestHubServerBareNodeID）
+	proof, ts, nonce := testRegCred(t, "node-a")
+	if err := clientConn.Send(ctx, NewRegisterFrame("node-a", testAK, proof, ts, nonce, Meta{})); err != nil {
 		t.Fatal(err)
 	}
 
@@ -157,8 +170,9 @@ func TestHubServerBadToken(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	// 错误 proof：HubServer 读注册帧后鉴权失败，应立即返回
-	if err := clientConn.Send(ctx, fmt.Appendf(nil, `{"node_id":"node-b","access_key":%q,"access_key_proof":"deadbeef"}`, testAK)); err != nil {
+	// 错误 proof：带有效 ts/nonce（通过新鲜度+去重），proof 故意错误 → ErrInvalidAccessKeyProof
+	_, badTS, badNonce := testRegCred(t, "node-b")
+	if err := clientConn.Send(ctx, fmt.Appendf(nil, `{"node_id":"node-b","access_key":%q,"access_key_proof":"deadbeef","ts":%d,"nonce":%q}`, testAK, badTS, badNonce)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -331,8 +345,8 @@ func TestHubServerRegisterSecretCapability(t *testing.T) {
 	defer clientConn.Close()
 
 	// 声明 per-node-secret 能力：REG_OK 应携带 "<base64url secret>"
-	frame := fmt.Appendf(nil, `{"node_id":"node-sec","access_key":%q,"access_key_proof":%q,"capabilities":["per-node-secret"]}`, testAK, testRegisterProof(t, "node-sec"))
-	if err := clientConn.Send(ctx, frame); err != nil {
+	frame := testRegFrameJSON(t, "node-sec", `"capabilities":["per-node-secret"]`)
+	if err := clientConn.Send(ctx, []byte(frame)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -400,8 +414,8 @@ func TestHubServerRegisterNoCapabilityPlainAck(t *testing.T) {
 	defer clientConn.Close()
 
 	// 未声明能力：REG_OK 为纯 "REG_OK"
-	frame := fmt.Appendf(nil, `{"node_id":"node-plain","access_key":%q,"access_key_proof":%q}`, testAK, testRegisterProof(t, "node-plain"))
-	if err := clientConn.Send(ctx, frame); err != nil {
+	frame := testRegFrameJSON(t, "node-plain", "")
+	if err := clientConn.Send(ctx, []byte(frame)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -515,8 +529,8 @@ func registerNodeAndGetSecret(t *testing.T, srv *HubServer, nodeID string) (stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	frame := fmt.Appendf(nil, `{"node_id":%q,"access_key":%q,"access_key_proof":%q,"capabilities":["per-node-secret"]}`, nodeID, testAK, testRegisterProof(t, nodeID))
-	if err := clientConn.Send(ctx, frame); err != nil {
+	frame := testRegFrameJSON(t, nodeID, `"capabilities":["per-node-secret"]`)
+	if err := clientConn.Send(ctx, []byte(frame)); err != nil {
 		t.Fatal(err)
 	}
 	ack, ackErr := clientConn.Receive(ctx)
@@ -570,9 +584,8 @@ func TestHubServer_DiscIdentity_ValidProof(t *testing.T) {
 	}
 	proof := discProof(secret, "victim-a")
 	discNode := "disc-victim-a-12345678ab"
-	ack, closeDisc := registerRawFrame(t, srv, fmt.Sprintf(
-		`{"node_id":%q,"access_key":%q,"access_key_proof":%q,"meta":{"real_node_id":"victim-a","real_node_proof":%q},"capabilities":["per-node-secret"]}`,
-		discNode, testAK, testRegisterProof(t, discNode), proof))
+	ack, closeDisc := registerRawFrame(t, srv, testRegFrameJSON(t, discNode,
+		fmt.Sprintf(`"meta":{"real_node_id":"victim-a","real_node_proof":%q},"capabilities":["per-node-secret"]`, proof)))
 	defer closeDisc()
 	if !strings.HasPrefix(ack, RegisterAckOK) {
 		t.Fatalf("期望 REG_OK, got %q", ack)
@@ -597,9 +610,8 @@ func TestHubServer_DiscIdentity_ForgedRejected(t *testing.T) {
 
 	// 伪造证明（冒充 victim-a，但无其 per-node secret）。
 	discNode1 := "disc-victim-a-99999999aa"
-	ack, closeDisc := registerRawFrame(t, srv, fmt.Sprintf(
-		`{"node_id":%q,"access_key":%q,"access_key_proof":%q,"meta":{"real_node_id":"victim-a","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`,
-		discNode1, testAK, testRegisterProof(t, discNode1)))
+	ack, closeDisc := registerRawFrame(t, srv, testRegFrameJSON(t, discNode1,
+		`"meta":{"real_node_id":"victim-a","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]`))
 	defer closeDisc()
 	if !strings.HasPrefix(ack, RegisterAckErr) {
 		t.Fatalf("期望 REG_ERR（伪造证明被拒）, got %q", ack)
@@ -610,9 +622,8 @@ func TestHubServer_DiscIdentity_ForgedRejected(t *testing.T) {
 
 	// real_node_id 与 disc base 不匹配（base=victim-a 但声称 other-node）。
 	discNode2 := "disc-victim-a-99999999bb"
-	ack2, closeDisc2 := registerRawFrame(t, srv, fmt.Sprintf(
-		`{"node_id":%q,"access_key":%q,"access_key_proof":%q,"meta":{"real_node_id":"other-node","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`,
-		discNode2, testAK, testRegisterProof(t, discNode2)))
+	ack2, closeDisc2 := registerRawFrame(t, srv, testRegFrameJSON(t, discNode2,
+		`"meta":{"real_node_id":"other-node","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]`))
 	defer closeDisc2()
 	if !strings.HasPrefix(ack2, RegisterAckErr) {
 		t.Fatalf("期望 REG_ERR（real_node_id 不匹配）, got %q", ack2)

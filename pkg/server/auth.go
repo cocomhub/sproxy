@@ -5,7 +5,6 @@ package server
 
 import (
 	"crypto/subtle"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -127,40 +126,50 @@ func (h *Handlers) authenticateAPIKey(w http.ResponseWriter, r *http.Request, cf
 	}
 }
 
+// drainAndVerifyBody 强制消费请求体剩余部分，触发 SproxySig bodyValidator 的 EOF 哈希比对（I-3）。
+// json.Decoder / ParseMultipartForm 读到自身需要的数据后即返回、不读到 EOF，导致 bodyValidator
+// 的哈希比对永不触发；此处兜底读完整个 body——body 被篡改（哈希不匹配）时返回错误，
+// 调用方应在响应前拒绝（400）。合法 body 读到 EOF 校验通过，无副作用。
+func drainAndVerifyBody(r *http.Request) error {
+	_, err := io.Copy(io.Discard, r.Body)
+	return err
+}
+
 // verifySproxySig 校验 SproxySig 请求签名（AccessKey/AccessKeySecret + HMAC-SHA256）。
-// 成功时用 body 哈希校验 reader 包装 r.Body：流式接收、EOF 与声明比对（防 body 篡改；
+// 成功时返回命中的 *AccessKeyConfig（供隧道密钥派生复用，消除二次遍历/TOCTOU，M-10），
+// 并用 body 哈希校验 reader 包装 r.Body：流式接收、EOF 与声明比对（防 body 篡改；
 // 验签已在 body 接收前用声明哈希完成，失败即 401 无回滚）。
-func (h *Handlers) verifySproxySig(w http.ResponseWriter, r *http.Request, cfg *Config) bool {
+func (h *Handlers) verifySproxySig(w http.ResponseWriter, r *http.Request, cfg *Config) (*AccessKeyConfig, bool) {
 	hdr, err := sproxysig.ParseHeader(r.Header.Get("Authorization"))
 	if err != nil {
 		slog.Warn("auth: 非法 SproxySig 头",
 			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "error", err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
+		return nil, false
 	}
-	var sk string
-	for _, ak := range cfg.AccessKeys {
-		if subtle.ConstantTimeCompare([]byte(ak.Key), []byte(hdr.AK)) == 1 {
-			sk = ak.Secret
+	var matched *AccessKeyConfig
+	for i := range cfg.AccessKeys {
+		if subtle.ConstantTimeCompare([]byte(cfg.AccessKeys[i].Key), []byte(hdr.AK)) == 1 {
+			matched = &cfg.AccessKeys[i]
 			break
 		}
 	}
-	if sk == "" {
+	if matched == nil {
 		slog.Warn("auth: 未知 AccessKey", "ak", hdr.AK, "remote", r.RemoteAddr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
+		return nil, false
 	}
 	var nonceSeen func(ak, nonce string, expMs int64) bool
 	if h.noncePool != nil {
 		nonceSeen = h.noncePool.Seen
 	}
-	if verr := sproxysig.Verify(sk, hdr, r.Method, r.URL.EscapedPath(), r.URL.RawQuery, time.Now(), 0, 0, nonceSeen); verr != nil {
+	if verr := sproxysig.Verify(matched.Secret, hdr, r.Method, r.URL.EscapedPath(), r.URL.RawQuery, time.Now(), 0, 0, nonceSeen); verr != nil {
 		slog.Warn("auth: SproxySig 校验失败", "ak", hdr.AK, "error", verr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
+		return nil, false
 	}
 	r.Body = io.NopCloser(sproxysig.NewBodyValidator(r.Body, hdr.BodySHA256))
-	return true
+	return matched, true
 }
 
 // authMiddleware 验证请求认证：
@@ -197,7 +206,8 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		if len(cfg.AccessKeys) > 0 {
-			if !h.verifySproxySig(w, r, cfg) {
+			matched, ok := h.verifySproxySig(w, r, cfg)
+			if !ok {
 				return
 			}
 			// I-3：bodyValidator 只在读到 io.EOF 时比对哈希，而 JSON 端点用
@@ -209,10 +219,10 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 					slog.Warn("auth: body 哈希校验失败", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "error", derr)
 				}
 			}()
-			// /tunnel：验签成功后按 AK 查 SK → HKDF 派生隧道密钥放入 ctx，
+			// /tunnel：验签成功后按命中 AK → HKDF 派生隧道密钥放入 ctx，
 			// 隧道 handler 用 ctx 密钥解密 metadata 与 body；普通 API 请求走下面分支。
 			if r.URL.Path == "/tunnel" {
-				sepKey, err := h.tunnelDerivedKey(r, cfg)
+				sepKey, err := h.tunnelDerivedKey(r, matched)
 				if err != nil {
 					slog.Warn("auth: 派生隧道密钥失败", "error", err)
 					http.Error(w, "隧道密钥派生失败", http.StatusInternalServerError)
@@ -229,19 +239,10 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// tunnelDerivedKey 从当前请求的 AK 查 AccessKeys 配置，用其 SK HKDF 派生隧道密钥。
+// tunnelDerivedKey 用 verifySproxySig 已命中的 AccessKeyConfig 的 SK HKDF 派生隧道密钥。
 // v1：AK/SK 对称，SK 即 AES 隧道密钥派生源（golang.org/x/crypto/hkdf）。
 // mesh 用共享 tunnel.AccessKeyMesh(ak.Key) 解析（与 sclient 一致，消除配置漂移 I-1）；
 // 显式配置的 mesh_id 由 Config.Validate 校验必须与 AK 内嵌 mesh 一致。
-func (h *Handlers) tunnelDerivedKey(r *http.Request, cfg *Config) ([]byte, error) {
-	hdr, err := sproxysig.ParseHeader(r.Header.Get("Authorization"))
-	if err != nil {
-		return nil, err
-	}
-	for _, ak := range cfg.AccessKeys {
-		if subtle.ConstantTimeCompare([]byte(ak.Key), []byte(hdr.AK)) == 1 {
-			return tunnel.DeriveTunnelKey(ak.Secret, tunnel.AccessKeyMesh(ak.Key))
-		}
-	}
-	return nil, fmt.Errorf("unknown access key %q", hdr.AK)
+func (h *Handlers) tunnelDerivedKey(r *http.Request, ak *AccessKeyConfig) ([]byte, error) {
+	return tunnel.DeriveTunnelKey(ak.Secret, tunnel.AccessKeyMesh(ak.Key))
 }

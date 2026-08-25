@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 )
@@ -1594,3 +1595,41 @@ func TestTunnelInnerRequest_InheritsClientTraceID(t *testing.T) {
 }
 
 // ---- GzipMiddleware ----
+
+// TestSproxySig_BodyTamperRejected 验证 I-3：篡改 JSON body 但保留原始签名头 →
+// handler 读完全部 body 触发 bodyValidator 的 EOF 哈希校验 → 400（响应前拒绝，
+// 而非响应后留痕）。签名用原始 body 哈希声明，实际发送篡改 body，哈希比对不匹配。
+func TestSproxySig_BodyTamperRejected(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+	})
+
+	// 原始 body 与哈希（签名声明用它）。
+	orig := []byte(`{"filename":"real.txt"}`)
+	sum := sha256.Sum256(orig)
+
+	// 手动构造签名：声明原始 body 哈希，但实际发送篡改后的 body（结构合法）。
+	now := time.Now()
+	h := sproxysig.Header{
+		Version: sproxysig.Version, AK: testAccessKey,
+		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      sproxysig.NewNonce(),
+		BodySHA256: hex.EncodeToString(sum[:]),
+	}
+	auth := sproxysig.SignAndFormat(testAccessSecret, h, "POST", "/api/batch/delete", "")
+
+	req, err := http.NewRequest("POST", url+"/api/batch/delete", strings.NewReader(`{"files":["evil.txt"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", auth)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for tampered body, got %d", resp.StatusCode)
+	}
+}

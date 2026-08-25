@@ -35,6 +35,11 @@ func (h *Handlers) parseUploadMultipart(w http.ResponseWriter, r *http.Request, 
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体过大或解析失败"}, http.StatusRequestEntityTooLarge)
 		return nil, nil, "", false
 	}
+	// I-3：multipart 解析不读到 EOF，读完全部 body 触发 bodyValidator 哈希校验。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return nil, nil, "", false
+	}
 
 	file, handler, err := r.FormFile("file")
 	if err != nil {

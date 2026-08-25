@@ -115,6 +115,11 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]any{"success": false, "message": "invalid request body"}, http.StatusBadRequest)
 		return
 	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return
+	}
 
 	// 检查是否所有字段均为 nil，拒绝空请求体（{}）
 	if req.LogLevel == nil && req.LogFormat == nil &&
