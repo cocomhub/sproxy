@@ -19,9 +19,7 @@
     <label for="token">Secret:</label>
     <input type="password" id="token" placeholder="可选，输入 AccessKeySecret">
     <button type="button" id="save-access-btn">保存</button>
-    <label for="tunnel-key" style="margin-left:16px;">Tunnel Key:</label>
-    <input type="password" id="tunnel-key" placeholder="64位 hex 密钥，可选" style="flex:1.5;">
-    <button type="button" id="save-tunnel-key-btn">保存</button>
+    <label style="margin-left:16px;"><input type="checkbox" id="use-tunnel-checkbox"> 走隧道（调试）</label>
   </div>
   <div class="toolbar">
     <label class="btn btn-primary" for="file-input" id="upload-btn-label">上传文件</label>
@@ -170,7 +168,18 @@
 </div>
 
 <script src="sha256.js"></script>
-<script src="tunnel.js"></script>
+<script src="sclient/crypto.js"></script>
+<script src="sclient/sig.js"></script>
+<script src="sclient/config.js"></script>
+<script src="sclient/log.js"></script>
+<script src="sclient/transport.js"></script>
+<script src="sclient/util.js"></script>
+<script src="sclient/api/files.js"></script>
+<script src="sclient/api/cloud.js"></script>
+<script src="sclient/api/share.js"></script>
+<script src="sclient/api/config.js"></script>
+<script src="sclient/api/hub.js"></script>
+<script src="sclient/api/index.js"></script>
 <script src="cloudfilename.js"></script>
 <script src="upload.js"></script>
 <script src="app.js"></script>
