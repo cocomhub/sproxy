@@ -12,7 +12,7 @@
  *
  * 端点语义对齐 server handlers（handlers.go / list_handler.go / chunked_upload.go）：
  *   - list(subdir, opts)        GET  /api/files?subdir=&offset=&limit=&sort=&order=
- *   - search(q)                 GET  /api/files/search?q=（历史 UI 不传 subdir）
+ *   - search(q)                 GET  /api/files/search?q=（服务端只消费 q；subdir/offset/limit 不消费）
  *   - stat(filename)           HEAD /api/files/stat?filename=（返回{status,headers,body}）
  *   - download(filename, opts)  GET  /download?filename=（opts.headers 透传含 Range）
  *   - deleteFile(name, chk)    POST /delete?filename=（X-File-Checksum 头）
@@ -27,7 +27,9 @@
  *
  * upload：小文件（≤cfg.chunkThreshold，默认 8 MiB）走简单 POST /upload（先算
  * SHA-256，buildMultipart 字节由 coreRequest 自动签名）；大文件/mesh 走分块
- * init→chunk（每块独立签名）→complete。onProgress(loaded,total) 回调由 UI 传。
+ * init→chunk（每块独立签名）→complete。onProgress 回调由 UI 传：简单上传传字节
+ * (loaded,total)；分块上传段传对象 {loaded, total, chunkIndex, totalChunks} 供 UI 渲染
+ * 「done/total 分块」进度文案。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -177,13 +179,10 @@
       return jsonRequest('GET', path).then(function (d) { return d; });
     }
 
-    function search(q, opts) {
-      const p = opts || {};
-      const params = { q: q };
-      if (p.subdir) params.subdir = p.subdir;
-      if (p.offset !== undefined) params.offset = String(p.offset);
-      if (p.limit !== undefined) params.limit = String(p.limit);
-      return jsonRequest('GET', urlWithParams('/api/files/search', params));
+    // search 仅消费 q：服务端 searchFiles 只读 URL 的 q 参数（subdir/offset/limit 均无
+    // 语义）。保持 search(q) 单参签名，杜绝死透传（历史曾把 subdir 透传给服务端，不消费）。
+    function search(q) {
+      return jsonRequest('GET', urlWithParams('/api/files/search', { q: q }));
     }
 
     function stat(filename) {
@@ -201,7 +200,8 @@
       return coreRequest('GET', '/download?filename=' + encodeURIComponent(filename), {
         headers: headers,
         download: true,
-        collectHeaders: dlHeaders,
+        // 注：collectHeaders 不透传给 transport（transport 不消费该字段）——
+        // 响应头过滤只走下方 extractHeaderMap(res.headers, dlHeaders)，勿再传 collectHeaders。
       }).then(function (res) {
         return { blob: blobFromBytes(res.body, p.type || 'application/octet-stream'), headers: extractHeaderMap(res.headers, dlHeaders) };
       });
@@ -347,7 +347,7 @@
         });
         if (chunkRes.success) {
           loaded += (end - start);
-          if (p.onProgress) p.onProgress(loaded, totalSize);
+          if (p.onProgress) p.onProgress({ loaded: loaded, total: totalSize, chunkIndex: idx, totalChunks: totalChunksAdj });
         } else if (!chunkRes.should_retry) {
           return { success: false, message: chunkRes.message || ('分块 ' + idx + ' 上传失败'), upload_id: sessionId, filename: fileName };
         }

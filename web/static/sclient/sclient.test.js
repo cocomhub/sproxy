@@ -560,7 +560,7 @@ const fakeTunnelBytes = (async () => {
   return concatBytes(metaFrame, bodyFrame);
 })();
 
-// 构造一个帧的 body 段（[4B len + enc]，不含 meta）——供 streamDecode 测试预生成。
+// 构造一个帧的 body 段（[4B len + enc]，不含 meta）——供 streamDecode/相关测试复用。
 async function makeBodyFrame(derivedKeyHex, plainText) {
   const key = await cryptoLib.importAesGcmKey(derivedKeyHex);
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -619,14 +619,6 @@ test('streamDecode 流式分支：分段 ReadableStream 构造 + 跨帧边界解
   });
 });
 
-// 构造一个帧的 body 段（[4B len + enc]，不含 meta）——供 streamDecode/相关测试复用。
-async function makeBodyFrame(derivedKeyHex, plainText) {
-  const key = await cryptoLib.importAesGcmKey(derivedKeyHex);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: dec(AAD_STREAM) }, key, dec(plainText));
-  return concatBytes(u32be(12 + ct.byteLength), iv, new Uint8Array(ct));
-}
-
 // ==================== 领域 API（任务 5：files/cloud/share/config/hub） ====================
 // 用注入 ctx 的 createApi 测试：mock coreRequest 捕获 (method, path, opts)，
 // 断言各领域方法的 (method, path) 映射与 JSON/multipart 编解码正确。
@@ -682,6 +674,7 @@ test('files.list 映射 GET /api/files（subdir/offset/limit 参数）', async (
 test('files.search / stat / download 映射', async () => {
   const core = makeMockCore([
     okResp({ files: [], total: 0 }),
+    okResp({ files: [], total: 0 }),
     { status: 200, headers: { 'X-File-Size': '3' }, body: new Uint8Array(0) },
     { status: 200, headers: { 'content-type': 'application/octet-stream' }, body: new TextEncoder().encode('abc') },
   ]);
@@ -689,13 +682,16 @@ test('files.search / stat / download 映射', async () => {
   await api.files.search('q1');
   assert.strictEqual(core.calls[0].path, '/api/files/search?q=q1');
   assert.strictEqual(core.calls[0].method, 'GET');
+  // M5: search 不再透传 subdir/offset/limit（服务端只消费 q）；即使传 opts 也只拼 q。
+  await api.files.search('q2', { subdir: 'd', offset: 1, limit: 50 });
+  assert.strictEqual(core.calls[1].path, '/api/files/search?q=q2');
   await api.files.stat('x/y.txt');
-  assert.strictEqual(core.calls[1].method, 'HEAD');
-  assert.strictEqual(core.calls[1].path, '/api/files/stat?filename=x%2Fy.txt');
+  assert.strictEqual(core.calls[2].method, 'HEAD');
+  assert.strictEqual(core.calls[2].path, '/api/files/stat?filename=x%2Fy.txt');
   const dl = await api.files.download('x/y.txt');
-  assert.strictEqual(core.calls[2].method, 'GET');
-  assert.strictEqual(core.calls[2].path, '/download?filename=x%2Fy.txt');
-  assert.strictEqual(core.calls[2].opts.download, true);
+  assert.strictEqual(core.calls[3].method, 'GET');
+  assert.strictEqual(core.calls[3].path, '/download?filename=x%2Fy.txt');
+  assert.strictEqual(core.calls[3].opts.download, true);
   const blob = dl.blob;
   assert.ok(blob instanceof Blob, 'download 返回结构应含 blob');
   assert.strictEqual(new TextDecoder().decode(await blob.arrayBuffer()), 'abc');
@@ -709,14 +705,14 @@ test('files.search / stat / download 映射', async () => {
 // 由 transport.directRun 统一小写化，此处验证注入的 downloadHeaders 被透传并在结果中
 // 以响应头为准返回）。
 test('files.downloadHeaders 适配（C2）: {blob, headers} + X-File-Checksum 透传', async () => {
-  // 注入 downloadHeaders → 请求 opts.collectHeaders 携带目标 key；响应含该头时
+  // 注入 downloadHeaders → opts 不再携带 collectHeaders（M1：transport 不消费），
   // out.headers 以响应头值为准（小写命中也提取）。
   const core = makeMockCore([
     { status: 200, headers: { 'X-File-Checksum': 'aa'.repeat(32), 'Content-Type': 'application/octet-stream' }, body: new TextEncoder().encode('content') },
   ]);
   const api = makeApi(core);
   const out = await api.files.download('x.bin', { downloadHeaders: { 'X-File-Checksum': '' } });
-  assert.strictEqual(core.calls[0].opts.collectHeaders['X-File-Checksum'], '', '请求 opts 携带目标下载响应头 key');
+  assert.strictEqual(core.calls[0].opts.collectHeaders, undefined, 'download opts 不再携带 collectHeaders（transport 不消费）');
   assert.ok(out.blob instanceof Blob);
   assert.strictEqual(out.headers['X-File-Checksum'], 'aa'.repeat(32), '响应含该头时以响应头值为准');
 
