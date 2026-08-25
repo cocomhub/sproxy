@@ -48,22 +48,41 @@ function createProgressBar(fileName, totalSize, totalChunks) {
 
 // 分块上传主入口：委托 sc.files.upload（进度条经 onProgress 回调接入）。
 // resumeSession 为已持久化的续传会话（含 uploadId/fileChecksum）。
+// sc.files.upload 的分块 onProgress 回调携 {loaded, total, chunkIndex, totalChunks}，
+// 此处用实时 chunkIndex/totalChunks 渲染「done/N 分块」文案（替换历史固定 1 的展示）。
 async function chunkedUpload(file, resumeSession) {
   const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
   const totalSize = file.size;
+  // 分块数先在 init 后经 onProgress 得知；此处占位 1，收到首个回调时用真实值刷新标题。
   const progId = createProgressBar(fileName, totalSize, 1);
-  const updateProg = function(loaded, total) {
+  const updateProg = function(loaded, total, doneChunks, totalChunks) {
     const pct = total > 0 ? (loaded / total * 100) : 0;
-    document.getElementById(progId).style.width = pct + '%';
-    document.getElementById(progId + '-text').textContent =
-      Math.round(pct) + '%（' + formatSize(loaded) + '/' + formatSize(total) + '）';
+    const el = document.getElementById(progId);
+    if (el) el.style.width = pct + '%';
+    const elText = document.getElementById(progId + '-text');
+    if (elText) {
+      elText.textContent = totalChunks > 0
+        ? Math.round(pct) + '%（' + formatSize(loaded) + '/' + formatSize(total) + '，分块 ' + doneChunks + '/' + totalChunks + '）'
+        : Math.round(pct) + '%（' + formatSize(loaded) + '/' + formatSize(total) + '）';
+    }
+    // 刷新标题中的分块数（createProgressBar 参数是估计值；以 onProgress 实物为准）。
+    if (totalChunks > 0) {
+      const small = document.querySelector('#' + progId + '-wrap small');
+      if (small) small.textContent = fileName + ' (' + formatSize(totalSize) + ', ' + totalChunks + ' 分块)';
+    }
   };
 
   try {
     const result = await sc.files.upload(file, {
       subdir: currentSubdir ? currentSubdir : undefined,
       forceChunked: true,
-      onProgress: function(loaded, total) { updateProg(loaded, total); },
+      onProgress: function(pr) {
+        if (pr && typeof pr === 'object' && typeof pr.totalChunks === 'number') {
+          updateProg(pr.loaded, pr.total, Math.min(pr.totalChunks, pr.chunkIndex + 1), pr.totalChunks);
+        } else {
+          updateProg(pr || 0, totalSize, 0, 0);
+        }
+      },
     });
     if (result && result.success) {
       if (!resumeSession && result.upload_id) removeUploadSession(result.upload_id);

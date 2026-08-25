@@ -120,6 +120,8 @@ UI → 领域方法 → `coreRequest`：
 | `E_AUTH` | 401/403、AK/SK 无效、派生失败 | 重新保存凭据 |
 | `E_DECRYPT` | 响应解密失败 | 隧道响应解密失败 |
 | `E_NETWORK` | 网络错误 | 网络错误 |
+| `E_SERVER`（已实现） | 5xx：隧道/直连请求响应 !ok（transport.js：tunnelRun/directRun）| 服务器错误（HTTP status） |
+| `E_INTERNAL`（已实现） | 内部守卫 / 参数错误（如 coreRequest 非法参数守卫、领域层参数校验） | 客户端内部错误 |
 | 业务 4xx | `{success:false, message}` 不 throw | 服务器返回 message |
 | 5xx | throw `{code:'E_SERVER', status}` | 服务器错误 |
 

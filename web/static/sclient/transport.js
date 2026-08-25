@@ -321,24 +321,13 @@
   }
 
   // ---- 流式响应解码（ReadableStream.getReader 逐帧） ----
-  // 下载分支（opts.download）直接消费 resp.body.getReader()（见 readNBytes/fillBuffer
+  // 下载分支（opts.download）直接消费 resp.body.getReader()（见 fillBuffer
   // 与下方 streamDecode），不在此包装 makeByteSource。
   // 导出为 fromStream（测试注入）：接受 { body: ReadableStream }；浏览器路径 resp.body
   // 即流。统一在进入时断言 body 存在，缺失以 E_DECRYPT 拒绝，避免 undefined 解引用。
 
-  // 从 ReadableStream 读满 n 字节；不足/提前 EOF 抛 E_DECRYPT。
-  async function readNBytes(reader, n) {
-    let buf = new Uint8Array(0);
-    while (buf.length < n) {
-      const { done, value } = await reader.read();
-      if (done) throw SclientError('E_DECRYPT', '响应流提前结束');
-      buf = concatU8(buf, value instanceof Uint8Array ? value : new Uint8Array(await value.arrayBuffer()));
-    }
-    return buf;
-  }
-
   // 逐帧解码（与 decodeResponseFrames 同一语义，但消费 ReadableStream）。
-  // 全程用 fillBuffer 累积 remainder，防止底层层块比帧大时丢字节——readNBytes 会把
+  // 全程用 fillBuffer 累积 remainder，防止底层层块比帧大时丢字节——读满 n 的逻辑会把
   // 超过 n 的多余读取字节丢弃，导致「meta 整帧 + 后续 chunk」落在同一 read chunk 时
   // 后续字节丢失（表现为 '响应流提前结束'）。
   async function streamDecode(keyHex, resp) {
