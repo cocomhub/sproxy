@@ -665,6 +665,7 @@ test('streamDecode 流式分支：分段 ReadableStream 构造 + 跨帧边界解
 
 const apiIndex = require('./api/index.js');
 const apiUtil = require('./util.js');
+const sha256js = require('../sha256.js');
 
 function makeMockCore(results) {
   const calls = [];
@@ -898,6 +899,71 @@ test('files.upload 分块流程 init→status→chunk→complete（forceChunked 
   assert.strictEqual(core.calls[3].path, '/upload/complete');
   assert.strictEqual(res.success, true);
 });
+
+// ---- computeSHA256 流式哈希（大文件修复核心）----
+// 历史缺陷：>8MiB 分片路径把所有分片 arrayBuffer() push 进 pending 数组再
+// concatBytes 一次性复制进巨大 new Uint8Array(total)——1GiB 文件在浏览器触发
+// RangeError: Array buffer allocation failed（concatBytes util.js:57 / computeSHA256
+// files.js:103）。修复后逐片（≤64MiB）喂 Sha256.update 增量摘要，内存受控。
+// 附：顶层 const Sha256 不会成为 globalThis 属性，故本测试直接 require，并单测确认
+// UMD 暴露（files.js 依赖浏览器端 self.Sha256；浏览器加载 sha256.js 后 self.Sha256
+// 存在，此处 Node require 路径即等价）。
+
+test('sha256.js 增量实现（require 引入，RFC 向量）', () => {
+  const s = new sha256js();
+  s.update(new Uint8Array([0x61, 0x62, 0x63]));
+  assert.strictEqual(s.digest(), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  // 长输入（≥2 个 64 字节块）跨 _transform 边界：分段 update 结果应与 WebCrypto 单次一致
+  const s2 = new sha256js();
+  const data = new Uint8Array(200); for (let i = 0; i < data.length; i++) data[i] = i;
+  s2.update(data.subarray(0, 100)); s2.update(data.subarray(100));
+  assert.strictEqual(s2.digest(), '1901da1c9f699b48f6b2636e65cbf73abf99d0441ef67f5c540a42f7051dec6f');
+});
+
+test('computeSHA256 大文件（>8MiB）流式分片，不调用 concatBytes 且结果与 WebCrypto 一致', async () => {
+  const cs = 64 * 1024 * 1024;
+  const total = cs + 12345; // 恰好两个分片，第二片为余量
+  const pattern = new Uint8Array(cs);
+  for (let i = 0; i < pattern.length; i++) pattern[i] = (i * 31 + 7) & 0xff;
+  const tail = new Uint8Array(total - cs);
+  for (let i = 0; i < tail.length; i++) tail[i] = (i * 13 + 3) & 0xff;
+  const bigBlob = new Blob([pattern, tail]);
+  assert.strictEqual(bigBlob.size, total, '前置条件：Blob 规模 >8MiB');
+
+  // 分片逐片物化（受控）：slice().arrayBuffer() 只产生 ≤64MiB 的独立 buffer，
+  // 绝不整文件 new ArrayBuffer(total)。用 slice-size 断言分片边界（避免 arrayBuffer 一次性）。
+  let maxSlice = 0;
+  const realSlice = Blob.prototype.slice;
+  let concatCalls = 0;
+  const realConcat = apiUtil.concatBytes;
+  try {
+    // 注入浏览器等价全局（files.js 大文件路径 new globalThis.Sha256()）。
+    const prev = globalThis.Sha256;
+    globalThis.Sha256 = sha256js;
+    // 断言 concatBytes 永不被调用（回归守卫：一旦改回拼接整文件立即失败）。
+    apiUtil.concatBytes = function() { concatCalls++; throw new Error('computeSHA256 流式路径不得调用 concatBytes'); };
+    // 断言单片物化 ≤64MiB：包裹 Blob.prototype.slice 统计最大切段。
+    Blob.prototype.slice = function(s, e) { if (e !== undefined) maxSlice = Math.max(maxSlice, e - s); return realSlice.call(this, s, e); };
+    const got = await apiIndex.createApi(mockCtx(makeMockCore())).files._internals.computeSHA256(bigBlob);
+    // 参考哈希：WebCrypto 单次对全量字节（pattern+tail 直接拼接）
+    const ref = await cryptoLib.sha256Hex(concatU8([pattern, tail]));
+    assert.strictEqual(got, ref, '流式分片结果应与 WebCrypto 单次一致');
+    assert.strictEqual(concatCalls, 0, '流式路径不得调用 concatBytes');
+    assert.ok(maxSlice <= cs, '单片物化不得超过 64MiB（实际最大片: ' + maxSlice + '）');
+    assert.strictEqual(maxSlice, cs, '第一片应恰好为满块 64MiB');
+  } finally {
+    delete globalThis.Sha256;
+    Blob.prototype.slice = realSlice;
+    apiUtil.concatBytes = realConcat;
+  }
+});
+
+function concatU8(arr) {
+  let total = 0; for (const a of arr) total += a.byteLength;
+  const out = new Uint8Array(total); let off = 0;
+  for (const a of arr) { out.set(a, off); off += a.byteLength; }
+  return out;
+}
 
 // ---- cloud：任务/组 ----
 test('cloud 任务映射（create/batch/list/get/cancel/delete/resume/archive）', async () => {

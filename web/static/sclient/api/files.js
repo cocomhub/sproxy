@@ -76,8 +76,10 @@
   }
 
   // 文件/Blob → SHA-256 hex。小文件（≤8 MiB）单次 arrayBuffer；大文件分片增量
-  //（浏览器有 sha256.js 全局 Sha256；Node 无则拼接后单次摘要——结果一致）。
-  // onChunk(accumulated, total) 每读一块回调（可选，用于进度）。
+  //（sha256.js 的 Sha256.update 接受 Uint8Array，digest() 返回 hex）——每片最大
+  // 64MiB、随读随弃，绝不整文件物化（历史曾所有分片拼接成单个巨型 ArrayBuffer，
+  // 大文件触发 Array buffer allocation failed：RangeError）。onChunk(accumulated,total)
+  // 每读一块回调（可选，用于进度）。
   async function computeSHA256(blob, onChunk) {
     const total = blob.size || 0;
     const readWhole = total <= 8 * 1024 * 1024;
@@ -86,21 +88,19 @@
       if (onChunk) onChunk(total, total);
       return await sha256Bytes(bytes);
     }
-    const chunks = [];
     const cs = Math.min(64 * 1024 * 1024, total);
     const n = Math.ceil(total / cs);
-    const sha = typeof globalThis.Sha256 === 'function' ? new globalThis.Sha256() : null;
+    const sha = new globalThis.Sha256();
     let acc = 0;
     for (let i = 0; i < n; i++) {
       const s = i * cs;
       const e = Math.min(s + cs, total);
       const buf = new Uint8Array(await blob.slice(s, e).arrayBuffer());
-      if (sha) { sha.update(buf); } else { chunks.push(buf); }
+      sha.update(buf);
       acc += buf.byteLength;
       if (onChunk) onChunk(acc, total);
     }
-    if (sha) return sha.digest();
-    return await sha256Bytes(utilLib.concatBytes.apply(null, chunks));
+    return sha.digest();
   }
 
   function encodeJSON(obj) { return TE.encode(JSON.stringify(obj)); }

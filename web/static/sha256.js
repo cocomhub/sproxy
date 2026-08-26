@@ -4,10 +4,21 @@
 // Pure JS incremental SHA-256 implementation.
 // Supports update(Uint8Array) / digest() pattern.
 // All intermediate results use >>> 0 to ensure unsigned 32-bit integer operations.
+//
+// 历史：`const Sha256 = (function(){...})()` 顶层 const 不会成为 globalThis 的属性，
+// files.js 的 `typeof globalThis.Sha256 === 'function'` 判存在永远为假 → 大文件哈希
+// 走了 concatBytes 拼接整文件的路径 → `new ArrayBuffer(total)` RangeError
+// (Array buffer allocation failed)。此处改为 UMD：浏览器挂 self.Sha256，Node 走
+// require 导出，测试可直接引入。算法本体逐字节不变。
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) {
+    module.exports = factory();
+  } else {
+    root.Sha256 = factory();
+  }
+})(typeof self !== 'undefined' ? self : this, function () {
+  function rot(x, n) { return ((x >>> n) | (x << (32 - n))) >>> 0; }
 
-function rot(x, n) { return ((x >>> n) | (x << (32 - n))) >>> 0; }
-
-const Sha256 = (function() {
   const K = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
     0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -113,4 +124,4 @@ const Sha256 = (function() {
   };
 
   return Sha256;
-})();
+});
