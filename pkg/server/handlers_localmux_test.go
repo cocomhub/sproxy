@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
 
 // localMuxPatterns 记录隧道内层 localMux 上必须可达的全部路由（method + pattern）。
@@ -63,24 +66,34 @@ var localMuxPatterns = []struct{ method, pattern string }{
 	{"DELETE", "/api/cloud/groups/{id}"},
 	{"POST", "/api/cloud/groups/{id}/resume"},
 	{"POST", "/api/cloud/groups/{id}/archive"},
+	// Hub 用户面查询（仅 hub.enabled / opts.RouteTable != nil 时注册）
+	{"GET", "/api/hub/nodes"},
+	{"GET", "/api/hub/stats"},
 }
 
 // newTestMux 返回接入 RegisterRoutes 的 mux（含 access_keys，隧道可用）。
-func newTestMux(t *testing.T) http.Handler {
+// withHub 为 true 时注入 RouteTable（hub.enabled 语义；hub 用户面路由只在
+// opts.RouteTable != nil 时注册）。
+func newTestMux(t *testing.T, withHub bool) http.Handler {
 	t.Helper()
 	cfg := Default()
 	cfg.UploadsDir = t.TempDir()
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+	cfg.Hub.Enabled = withHub
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:     mux,
 		CfgPtr:  &cfgPtr,
 		Version: "v",
 		BuildAt: "b",
 		Logger:  testLogger(),
-	})
+	}
+	if withHub {
+		opts.RouteTable = hub.NewMeshRouteTable()
+	}
+	h := RegisterRoutes(t.Context(), opts)
 	t.Cleanup(func() { _ = h.Close() })
 	return mux
 }
@@ -112,11 +125,14 @@ func TestLocalMuxCoversAllTunnelRoutes(t *testing.T) {
 	t.Parallel()
 	probeMethods := []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch, http.MethodOptions}
 	for _, tc := range localMuxPatterns {
+		tp := tc
 		t.Run(fmt.Sprintf("%s %s", tc.method, tc.pattern), func(t *testing.T) {
 			t.Parallel()
-			handler := newTestMux(t)
-			if !hasRoute(t, handler, probeMethods, tc.pattern) {
-				t.Fatalf("路由 %s %s 未注册（隧道内层与直连面都不可达）", tc.method, tc.pattern)
+			// hub 用户面仅在 RouteTable != nil（hub.enabled）时注册——非 hub 用
+			// 默认 mux；hub 路由用带 RouteTable 的 mux 断言存在性。
+			handler := newTestMux(t, strings.HasPrefix(tp.pattern, "/api/hub/"))
+			if !hasRoute(t, handler, probeMethods, tp.pattern) {
+				t.Fatalf("路由 %s %s 未注册（隧道内层与直连面都不可达）", tp.method, tp.pattern)
 			}
 		})
 	}
