@@ -83,6 +83,12 @@ async function chunkedUpload(file, resumeSession) {
           updateProg(pr || 0, totalSize, 0, 0);
         }
       },
+      // 断点续传：把分块会话持久化到 localStorage（files.js 每块成功/完成时回调）。
+      // 第二个参数 true = remove（合并成功或『已存在』后清理）。
+      onSession: function(sess, remove) {
+        if (remove || sess.upload_id === 'already_exists') { removeUploadSession(sess.upload_id); return; }
+        saveUploadSession(sess.upload_id, sess);
+      },
     });
     if (result && result.success) {
       if (!resumeSession && result.upload_id) removeUploadSession(result.upload_id);
