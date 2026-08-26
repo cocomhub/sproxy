@@ -607,8 +607,17 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	finalChecksum, ok := h.mergeAndRenameFile(r.Context(), w, req.UploadID, session)
+	// 合并不随客户端断开而取消：Using WithoutCancel 派生独立 context，使
+	// sclient CLI 上传大文件后断开连接/超时不影响已在进行的合并；
+	// 即使响应已写出，合并也能完成（下次 init/status/complete 幂等发现已上传）。
+	// （mergeChunksWithHash 内部仍保守检查 ctx.Done：本 context 永不 cancel，
+	// recovery 兜底走进程级；未来如需可打断用独立 goroutine + 状态表。）
+	mergeCtx := context.WithoutCancel(r.Context())
+
+	finalChecksum, ok := h.mergeAndRenameFile(mergeCtx, w, req.UploadID, session)
 	if !ok {
+		// mergeAndRenameFile 已发送错误响应；分块与会话保留，客户端可重试 init/complete。
+		h.logger.Warn("合并失败但分块保留，客户端可重试", "upload_id", req.UploadID, "file_name", session.Filename)
 		return
 	}
 
