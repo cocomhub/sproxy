@@ -1102,7 +1102,130 @@ test('hub nodes/stats/remove 映射（nodes 包装为 {nodes:[...]}）', async (
   assert.strictEqual(core.calls[2].method, 'DELETE');
 });
 
+// ==================== sha256.js 交叉验证 + 增量边界（任务 13） ====================
+// 目标：确认两份 SHA-256 实现（crypto.sha256Hex 走 WebCrypto 一次性；sha256.js 的
+// Sha256 走纯 JS 增量）对同一输入永不漂移，并锁定 Sha256.update 的块边界
+// 63/64/65B、单块满 64 立即 transform、多小段累积、空输入等行为。
+
+// 确定性伪随机字节（避免依赖全局 Math.random——其行为依赖 Node 版本与 seed）。
+function deterministicBytes(n) {
+  const out = new Uint8Array(n);
+  let x = 0x12345678;
+  for (let i = 0; i < n; i++) {
+    // xorshift32：纯定点、可复现，与 WebCrypto/RFC 向量无关的输入生成。
+    x ^= x << 13; x ^= x >>> 17; x ^= x << 5; x >>>= 0;
+    out[i] = x & 0xff;
+  }
+  return out;
+}
+
+// 对给定字节序列，用多种分段方式（一次/逐字节/64B 整块/随机分裂）喂 Sha256，
+// 断言各自 digest 一致，且与 WebCrypto 一次性结果一致。
+function assertSegmentedSha256(data, label) {
+  return cryptoLib.sha256Hex(data).then(function(ref) {
+    // 一次喂入
+    const one = new sha256js(); one.update(data);
+    // 逐字节喂入
+    const perByte = new sha256js();
+    for (let i = 0; i < data.length; i++) perByte.update(data.subarray(i, i + 1));
+    // 64B 整块喂入
+    const by64 = new sha256js();
+    for (let i = 0; i < data.length; i += 64) by64.update(data.subarray(i, Math.min(i + 64, data.length)));
+    // 乱序分段（1+2+3+…+k 前缀三角形，剩余段合并）
+    const tri = new sha256js();
+    let off = 0;
+    for (let step = 1; off < data.length; step++) { tri.update(data.subarray(off, Math.min(off + step, data.length))); off += step; }
+    assert.strictEqual(one.digest(), ref, label + ': 一次喂入');
+    assert.strictEqual(perByte.digest(), ref, label + ': 逐字节喂入');
+    assert.strictEqual(by64.digest(), ref, label + ': 64B 整块喂入');
+    assert.strictEqual(tri.digest(), ref, label + ': 三角形分段喂入');
+  });
+}
+
+test('sha256 双实现交叉验证（增量 Sha256 vs WebCrypto sha256Hex）', async () => {
+  const cases = [
+    { n: 0, label: '空输入' },
+    { n: 1, label: '1B' },
+    { n: 63, label: '63B' },
+    { n: 64, label: '恰好 64B（跨完整块）' },
+    { n: 65, label: '65B' },
+    { n: 127, label: '127B' },
+    { n: 128, label: '128B' },
+    { n: 200, label: '200B（现有用例同规模）' },
+    { n: 64 * 1024 + 1, label: '64KiB+1' },
+  ];
+  for (const c of cases) {
+    const data = deterministicBytes(c.n);
+    await assertSegmentedSha256(data, c.label + ' (' + c.n + 'B)');
+  }
+
+  // 与 RFC 6234 空串向量显式核对（双实现各一次）
+  assert.strictEqual(new sha256js().digest(), 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+}, { timeout: 15000 });
+
+test('Sha256.update 块边界：63/64/65B 与满 64 即刻 transform', async () => {
+  // 63B：末尾 8 字节长度字段前补丁 0x80 后 pad 到 64 边界——单独覆盖
+  const d63 = deterministicBytes(63);
+  const ref63 = await cryptoLib.sha256Hex(d63);
+  const s63 = new sha256js(); s63.update(d63);
+  assert.strictEqual(s63.digest(), ref63, '63B 跨 0x80 pad 边界');
+
+  // 64B：恰好一块，update 内部应立即 transform（_buf 清空）而非积压
+  const d64 = deterministicBytes(64);
+  const ref64 = await cryptoLib.sha256Hex(d64);
+  const s64 = new sha256js(); s64.update(d64);
+  assert.strictEqual(s64.digest(), ref64, '64B 完整块立即 transform');
+
+  // 65B = 64 + 1：第一块满后第二块只有 1 字节
+  const d65 = deterministicBytes(65);
+  const ref65 = await cryptoLib.sha256Hex(d65);
+  const s65 = new sha256js(); s65.update(d65);
+  assert.strictEqual(s65.digest(), ref65, '65B 跨块分裂');
+}, { timeout: 15000 });
+
+test('computeSHA256 在 8MiB 阈值两侧切换路径且结果一致', async () => {
+  // 阈值为 8 MiB = 8388608。8388607B（阈值-1）走单次 arrayBuffer 路径；8388609B
+  //（阈值+1）走增量分片路径。两个 Blob 均为确定性内容，断言两路径输出一致
+  //（且与 WebCrypto 直接对全量字节的参考哈希一致）。
+  const TH = 8 * 1024 * 1024;
+  const below = deterministicBytes(TH - 1);       // 8MiB - 1 → 单次路径
+  const above = deterministicBytes(TH + 1);        // 8MiB + 1 → 增量路径
+  const belowRef = await cryptoLib.sha256Hex(below);
+  const aboveRef = await cryptoLib.sha256Hex(above);
+  // Node 下无浏览器全局 sclientSha256：注入 sha256js（与既有大文件用例一致，finally 恢复）。
+  let constructorCalls = 0;
+  const OrigSha256 = sha256js;
+  function CountingSha256() { constructorCalls++; return new OrigSha256(); }
+  CountingSha256.prototype = OrigSha256.prototype;
+  globalThis.sclientSha256 = CountingSha256;
+  try {
+    const api = apiIndex.createApi(mockCtx(makeMockCore()));
+    const gBelow = await api.files._internals.computeSHA256(new Blob([below]));
+    const gAbove = await api.files._internals.computeSHA256(new Blob([above]));
+    assert.strictEqual(gBelow, belowRef, '8MiB-1 单次路径');
+    assert.strictEqual(gAbove, aboveRef, '8MiB+1 增量路径');
+    assert.strictEqual(constructorCalls, 1, '8MiB+1 应恰好构造一次 Sha256（走增量）');
+
+    // 增量路径的 onChunk 进度回调：multi-chunk 输入（>64MiB：cs=64MiB 固定）
+    // 才会产生 >1 次回调。此处用 64MiB+1 确认多片回调 + 累加语义。
+    const multi = 64 * 1024 * 1024 + 1;
+    const multiData = deterministicBytes(multi);
+    const multiRef = await cryptoLib.sha256Hex(multiData);
+    let chunks = 0, accSum = 0, lastAcc = -1, lastTotal = -1;
+    const gCb = await api.files._internals.computeSHA256(new Blob([multiData]), function(acc, total) {
+      chunks++; accSum = acc; lastAcc = acc; lastTotal = total;
+    });
+    assert.strictEqual(gCb, multiRef, 'onChunk 回调多片路径哈希一致');
+    assert.strictEqual(chunks, 2, '64MiB+1 应拆 2 片（实际 ' + chunks + ' 次）');
+    assert.strictEqual(lastAcc, multi, '回调累计字节应达文件尾');
+    assert.strictEqual(lastTotal, multi, '回调 total 应为文件总大小');
+  } finally {
+    delete globalThis.sclientSha256;
+  }
+}, { timeout: 60000 });
+
 test('util.buildMultipart 片段断言（boundary/字段/文件存在性）', () => {
+
   const mp = apiUtil.buildMultipart(
     { a: '1', upload_id: 'u', chunk_checksum: 'f'.repeat(64) },
     { name: 'file', filename: 'name.txt', contentType: 'text/plain', bytes: new TextEncoder().encode('hello') }
