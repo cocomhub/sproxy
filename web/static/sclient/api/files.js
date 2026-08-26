@@ -76,7 +76,7 @@
   }
 
   // 文件/Blob → SHA-256 hex。小文件（≤8 MiB）单次 arrayBuffer；大文件分片增量
-  //（sha256.js 的 Sha256.update 接受 Uint8Array，digest() 返回 hex）——每片最大
+  //（sclient/sha256.js 的 Sha256.update 接受 Uint8Array，digest() 返回 hex）——每片最大
   // 64MiB、随读随弃，绝不整文件物化（历史曾所有分片拼接成单个巨型 ArrayBuffer，
   // 大文件触发 Array buffer allocation failed：RangeError）。onChunk(accumulated,total)
   // 每读一块回调（可选，用于进度）。
@@ -90,7 +90,7 @@
     }
     const cs = Math.min(64 * 1024 * 1024, total);
     const n = Math.ceil(total / cs);
-    const sha = new globalThis.Sha256();
+    const sha = new sclientSha256();
     let acc = 0;
     for (let i = 0; i < n; i++) {
       const s = i * cs;
