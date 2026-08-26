@@ -285,7 +285,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		// hub 用户面查询统一暴露 localMux：节点列表/统计/服务发现/移除在隧道内部
 		// 均可调用（handler 按 routeTable==nil 返回 404 语义不变），保证浏览器隧道
 		// 模式下 sclient.hub.* 全部可达；nodes/stats/remove 在 srvMux 侧仍是
-		// authMiddleware 保护（直连面无降权）。
+		// authMiddleware 保护（直连面无降权）。本组在 opts.RouteTable != nil 内注册
+		// （注册依赖 handler.signalBroker/routeTable 就位）。
 		localMux.HandleFunc("GET /api/hub/nodes", h.hubNodesHandler)
 		localMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.hubRemoveNodeHandler)
 		localMux.HandleFunc("GET /api/hub/stats", h.hubStatsHandler)
