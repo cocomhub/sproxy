@@ -136,6 +136,7 @@ web-test:
 	@node --check web/static/sclient/api/hub.js
 	@node --check web/static/sclient/api/index.js
 	node --test web/static/cloudfilename.test.js
+	node --test web/static/upload.test.js
 	node --test web/static/sclient/sclient.test.js
 
 .PHONY: cover-check
