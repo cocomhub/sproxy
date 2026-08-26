@@ -123,6 +123,7 @@ web-test:
 	@node --check web/static/app.js
 	@node --check web/static/cloudfilename.js
 	@node --check web/static/sclient/crypto.js
+	@node --check web/static/sclient/sha256.js
 	@node --check web/static/sclient/sig.js
 	@node --check web/static/sclient/config.js
 	@node --check web/static/sclient/log.js
