@@ -315,26 +315,23 @@ async function downloadFile(name, expectedChecksum) {
   } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
 }
 
-// 计算 Blob 的 SHA-256 hex（小文件一次 arrayBuffer；大文件分片增量——浏览器有
-// 同源 sha256.js 全局 Sha256；Node 侧测试环境用 crypto.subtle 单次，结果一致）。
+// 计算 Blob 的 SHA-256 hex（小文件一次 arrayBuffer；大文件分片增量喂 sha256.js 的
+// Sha256（同源全局；digest() 返回 hex）——每片最大 64MiB、随读随弃，绝不整文件
+// 物化（历史曾 Promise.all 攒全部分片后一次性 new ArrayBuffer(total)，大文件触发
+// RangeError: Array buffer allocation failed）。
 function computeFileSHA256(blob) {
   const total = blob.size || 0;
   const readWhole = total <= 8 * 1024 * 1024;
   if (readWhole) return blob.arrayBuffer().then(function(buf) { return sha256Bytes(new Uint8Array(buf)); });
   const cs = Math.min(64 * 1024 * 1024, total);
   const n = Math.ceil(total / cs);
-  const sh = (typeof globalThis.Sha256 === 'function') ? new globalThis.Sha256() : null;
-  const pending = [];
-  for (let i = 0; i < n; i++) {
+  const sh = new globalThis.Sha256();
+  function process(i) {
+    if (i >= n) return Promise.resolve();
     const s = i * cs, e = Math.min(s + cs, total);
-    pending.push(blob.slice(s, e).arrayBuffer());
+    return blob.slice(s, e).arrayBuffer().then(function(b) { sh.update(new Uint8Array(b)); return process(i + 1); });
   }
-  return Promise.all(pending).then(function(buffers) {
-    let acc = [];
-    for (const b of buffers) acc.push(new Uint8Array(b));
-    if (sh) { for (const b of acc) sh.update(b); return sh.digest(); }
-    return sha256Bytes(concatBytes(acc));
-  });
+  return process(0).then(function() { return sh.digest(); });
 }
 
 function sha256Bytes(bytes) {
