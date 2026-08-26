@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // 主逻辑：文件列表、CRUD、批量操作、导航、UI 工具。
-// 依赖 sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
+// 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
 
 const BASE = '';
 // SproxySig 请求签名认证（AccessKey/AccessKeySecret）。Secret 只存本端计算签名，
@@ -315,8 +315,8 @@ async function downloadFile(name, expectedChecksum) {
   } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
 }
 
-// 计算 Blob 的 SHA-256 hex（小文件一次 arrayBuffer；大文件分片增量喂 sha256.js 的
-// Sha256（同源全局；digest() 返回 hex）——每片最大 64MiB、随读随弃，绝不整文件
+// 计算 Blob 的 SHA-256 hex（小文件一次 arrayBuffer；大文件分片增量喂 sclient/sha256.js 的
+// Sha256（sclientSha256 全局；digest() 返回 hex）——每片最大 64MiB、随读随弃，绝不整文件
 // 物化（历史曾 Promise.all 攒全部分片后一次性 new ArrayBuffer(total)，大文件触发
 // RangeError: Array buffer allocation failed）。
 function computeFileSHA256(blob) {
@@ -325,7 +325,7 @@ function computeFileSHA256(blob) {
   if (readWhole) return blob.arrayBuffer().then(function(buf) { return sha256Bytes(new Uint8Array(buf)); });
   const cs = Math.min(64 * 1024 * 1024, total);
   const n = Math.ceil(total / cs);
-  const sh = new globalThis.Sha256();
+  const sh = new sclientSha256();
   function process(i) {
     if (i >= n) return Promise.resolve();
     const s = i * cs, e = Math.min(s + cs, total);

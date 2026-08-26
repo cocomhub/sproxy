@@ -8,13 +8,13 @@
 // 历史：`const Sha256 = (function(){...})()` 顶层 const 不会成为 globalThis 的属性，
 // files.js 的 `typeof globalThis.Sha256 === 'function'` 判存在永远为假 → 大文件哈希
 // 走了 concatBytes 拼接整文件的路径 → `new ArrayBuffer(total)` RangeError
-// (Array buffer allocation failed)。此处改为 UMD：浏览器挂 self.Sha256，Node 走
+// (Array buffer allocation failed)。此处改为 UMD：浏览器挂 sclientSha256（符合 sclient 命名空间），Node 走
 // require 导出，测试可直接引入。算法本体逐字节不变。
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
     module.exports = factory();
   } else {
-    root.Sha256 = factory();
+    root.sclientSha256 = factory();
   }
 })(typeof self !== 'undefined' ? self : this, function () {
   function rot(x, n) { return ((x >>> n) | (x << (32 - n))) >>> 0; }

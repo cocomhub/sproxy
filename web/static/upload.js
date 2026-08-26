@@ -3,7 +3,7 @@
 
 // 上传 UI 模块：进度条 / 会话 / 断点续传 DOM，上传纯逻辑委托给 sclient/api/files.js
 // 的 sc.files.upload（内部自己看 transport 隧道/直连与分块决策）。
-// 依赖 sha256.js, sclient/*, app.js 全局辅助。
+// 依赖 sclient/sha256.js, sclient/*, app.js 全局辅助。
 
 const SESSIONS_KEY = 'sproxy_upload_sessions';
 

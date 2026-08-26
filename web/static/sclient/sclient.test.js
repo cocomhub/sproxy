@@ -665,7 +665,7 @@ test('streamDecode 流式分支：分段 ReadableStream 构造 + 跨帧边界解
 
 const apiIndex = require('./api/index.js');
 const apiUtil = require('./util.js');
-const sha256js = require('../sha256.js');
+const sha256js = require('./sha256.js');
 
 function makeMockCore(results) {
   const calls = [];
@@ -906,8 +906,8 @@ test('files.upload 分块流程 init→status→chunk→complete（forceChunked 
 // RangeError: Array buffer allocation failed（concatBytes util.js:57 / computeSHA256
 // files.js:103）。修复后逐片（≤64MiB）喂 Sha256.update 增量摘要，内存受控。
 // 附：顶层 const Sha256 不会成为 globalThis 属性，故本测试直接 require，并单测确认
-// UMD 暴露（files.js 依赖浏览器端 self.Sha256；浏览器加载 sha256.js 后 self.Sha256
-// 存在，此处 Node require 路径即等价）。
+// UMD 暴露（files.js 依赖浏览器端 sclientSha256；浏览器加载 sclient/sha256.js 后
+// sclientSha256 存在，此处 Node require 路径即等价）。
 
 test('sha256.js 增量实现（require 引入，RFC 向量）', () => {
   const s = new sha256js();
@@ -937,9 +937,9 @@ test('computeSHA256 大文件（>8MiB）流式分片，不调用 concatBytes 且
   let concatCalls = 0;
   const realConcat = apiUtil.concatBytes;
   try {
-    // 注入浏览器等价全局（files.js 大文件路径 new globalThis.Sha256()）。
-    const prev = globalThis.Sha256;
-    globalThis.Sha256 = sha256js;
+    // 注入浏览器等价全局（files.js 大文件路径 new sclientSha256()）。
+    const prev = globalThis.sclientSha256;
+    globalThis.sclientSha256 = sha256js;
     // 断言 concatBytes 永不被调用（回归守卫：一旦改回拼接整文件立即失败）。
     apiUtil.concatBytes = function() { concatCalls++; throw new Error('computeSHA256 流式路径不得调用 concatBytes'); };
     // 断言单片物化 ≤64MiB：包裹 Blob.prototype.slice 统计最大切段。
@@ -952,7 +952,7 @@ test('computeSHA256 大文件（>8MiB）流式分片，不调用 concatBytes 且
     assert.ok(maxSlice <= cs, '单片物化不得超过 64MiB（实际最大片: ' + maxSlice + '）');
     assert.strictEqual(maxSlice, cs, '第一片应恰好为满块 64MiB');
   } finally {
-    delete globalThis.Sha256;
+    delete globalThis.sclientSha256;
     Blob.prototype.slice = realSlice;
     apiUtil.concatBytes = realConcat;
   }
