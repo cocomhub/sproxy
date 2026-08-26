@@ -305,6 +305,7 @@
       const checksum = await computeSHA256(file, p.onProgress);
       const mtimeNano = ((file.lastModified) || Date.now()) * 1000000;
       const uploadId = await generateUploadId(fileName, totalSize, mtimeNano, checksum);
+      const persist = typeof p.onSession === 'function' ? p.onSession : null; // 会话持久化钩子（UI 断点续传）
 
       const initRes = await jsonRequest('POST', '/upload/init', {
         upload_id: uploadId, filename: fileName, total_size: totalSize,
@@ -315,9 +316,16 @@
         return { success: false, message: initRes.message || '初始化失败', filename: fileName };
       }
       if (initRes.upload_id === 'already_exists') {
+        if (persist) persist({ upload_id: 'already_exists', filename: fileName }, true);
         return { success: true, message: '文件已存在，跳过', upload_id: 'already_exists', filename: fileName };
       }
       const sessionId = initRes.upload_id;
+      // 首个会话就位后立即持久化（页面刷新后 checkResumableUploads 能读到 uploading）。
+      // totalChunks 以 init 返回的 chunk_size 校准。
+      if (persist) {
+        const serverChunkSize = initRes.chunk_size || chunkSize;
+        persist({ upload_id: sessionId, filename: fileName, totalSize: totalSize, totalChunks: Math.ceil(totalSize / serverChunkSize), fileChecksum: checksum, status: 'uploading' });
+      }
 
       // 查询缺失分块（服务端权威列表；失败回退全量上传）。
       let missing = null;
@@ -348,6 +356,8 @@
         if (chunkRes.success) {
           loaded += (end - start);
           if (p.onProgress) p.onProgress({ loaded: loaded, total: totalSize, chunkIndex: idx, totalChunks: totalChunksAdj });
+          // 每个分块成功即更新持久化会话（进度字段，供续传 UI 展示）。
+          if (persist) persist({ upload_id: sessionId, filename: fileName, totalSize: totalSize, totalChunks: totalChunksAdj, fileChecksum: checksum, status: 'uploading', completedChunks: indices.slice(0, i + 1), loaded: loaded });
         } else if (!chunkRes.should_retry) {
           return { success: false, message: chunkRes.message || ('分块 ' + idx + ' 上传失败'), upload_id: sessionId, filename: fileName };
         }
@@ -358,6 +368,8 @@
       if (!completeRes.success) {
         return { success: false, message: completeRes.message || '合并失败', upload_id: sessionId, filename: fileName };
       }
+      // 合并成功/『已存在』后移除持久化会话。
+      if (persist) persist({ upload_id: sessionId, filename: fileName }, true);
       return {
         success: true, filename: completeRes.filename || fileName,
         checksum: completeRes.file_checksum || checksum, upload_id: sessionId,
