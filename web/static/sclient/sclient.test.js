@@ -369,6 +369,46 @@ test('直连模式 coreRequest：GET 携带 SproxySig(sha256)', async () => {
   }
 });
 
+test('effectiveMode 无凭据强制 direct（无密钥无法隧道且 config.get 不可签名）', () => {
+  setLocalStorageValue(null);
+  // 无凭据 + tunnelDefault=true：即使服务端想开隧道，也必须回落 direct（不能桶装造
+  // 「隧道模式需要 accessKeySecret」——无凭据浏览器应以直连无签名方式工作）。
+  transport.configure({ accessKey: '', accessKeySecret: '', tunnelDefault: true, mode: undefined });
+  assert.strictEqual(transport.effectiveMode(), 'direct', '无凭据应强制 direct');
+
+  // 有凭据则保持服务端开关
+  transport.configure({ accessKey: AK, accessKeySecret: SK, tunnelDefault: true, mode: undefined });
+  assert.strictEqual(transport.effectiveMode(), 'tunnel');
+  transport.configure({ tunnelDefault: false, mode: undefined });
+  assert.strictEqual(transport.effectiveMode(), 'direct');
+
+  // override 仍优先于无凭据规则（用户显式想要隧道调试时允许，会得到 E_AUTH 提示）
+  setLocalStorageValue({ transport: 'tunnel' });
+  transport.configure({ accessKey: '', accessKeySecret: '', tunnelDefault: true, mode: undefined });
+  assert.strictEqual(transport.effectiveMode(), 'tunnel');
+
+  setLocalStorageValue(null);
+  transport.configure({ accessKey: '', accessKeySecret: '', tunnelDefault: true });
+});
+
+test('direct 无凭据请求不带 SproxySig 头（兼容服务端未配 access_keys）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ accessKey: '', accessKeySecret: '', mode: 'direct' });
+    const requests = [];
+    globalThis.fetch = async (_url, init) => { requests.push(init); return new Response('ok', { status: 200 }); };
+
+    await transport.coreRequest('GET', '/api/files', { bodyBytes: null });
+
+    assert.strictEqual(requests.length, 1);
+    const auth = requests[0].headers['Authorization'];
+    assert.strictEqual(auth, undefined, '无凭据直连不应带 Authorization 头');
+  } finally {
+    globalThis.fetch = origFetch;
+    transport.configure({ accessKey: AK, accessKeySecret: SK, mode: undefined });
+  }
+});
+
 test('direct coreRequest 有 body 时签名其 SHA-256 且带 body（canonical 复核）', async () => {
   const origFetch = globalThis.fetch;
   try {

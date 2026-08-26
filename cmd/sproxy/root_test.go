@@ -277,6 +277,50 @@ func TestRunServer_RejectsStartupWithoutAuth(t *testing.T) {
 	}
 }
 
+// TestRunServer_AllowNoAuthFlag 验证 --allow-no-auth 显式跳过 fail-fast：无
+// access_keys/api_keys 时仍可启动（仅限本地无认证调试，Web UI 无凭据直连需要）。
+func TestRunServer_AllowNoAuthFlag(t *testing.T) {
+	cfgPtr.Store(nil)
+	cfgProvider = nil
+
+	oldCfgFile := cfgFile
+	cfgFile = filepath.Join(t.TempDir(), "sproxy.yaml")
+	t.Cleanup(func() { cfgFile = oldCfgFile })
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("addr", "127.0.0.1:0", "")
+	cmd.Flags().Bool("version", false, "")
+	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cmd.Flags().Bool("no-tls", false, "")
+	cmd.Flags().Bool("allow-no-auth", false, "")
+	_ = cmd.Flags().Set("no-tls", "true")
+	_ = cmd.Flags().Set("allow-no-auth", "true")
+
+	cfgProvider = sproxycfg.New(cfgFile)
+	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	t.Cleanup(func() { cfgProvider = nil })
+
+	// runServer 会启动监听并阻塞于 shutdown——注入关闭信号使其快速返回，
+	// 验证不因 fail-fast 而拒绝（主要断言：未走到 fail-fast 错误路径）。
+	done := make(chan struct{}, 1)
+	oldSignal := testSignalCh
+	testSignalCh = make(chan os.Signal, 1)
+	testSignalCh <- syscall.SIGTERM
+	t.Cleanup(func() { testSignalCh = oldSignal })
+
+	go func() {
+		_ = runServer(cmd, nil)
+		done <- struct{}{}
+	}()
+	select {
+	case <-done:
+		// 收到 SIGTERM 后正常退出（未 fail-fast）
+	case <-time.After(10 * time.Second):
+		t.Fatal("runServer with --allow-no-auth should not block forever / fail fast")
+	}
+}
+
 // TestRunServer_HubEnabledRequiresAccessKeys 验证 M-8：api_keys-only（多用户 Bearer）
 // 下 hub 注册不可用——启用 hub 时强制要求 access_keys 非空（隧道密钥与 hub 准入都来自 access_keys）。
 func TestRunServer_HubEnabledRequiresAccessKeys(t *testing.T) {
