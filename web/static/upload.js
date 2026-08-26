@@ -142,7 +142,6 @@ async function uploadFiles(files) {
   if (!files || files.length === 0) return;
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    // 差异化文案：大文件标分块数（与旧 chunkedUpload 的进度条风格一致），小文件不标。
     const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
     const size = file.size;
     const progId = createProgressBar(fileName, size, 1);
@@ -151,10 +150,11 @@ async function uploadFiles(files) {
         subdir: currentSubdir ? currentSubdir : undefined,
         onProgress: function(pr) {
           // 分块上传回调是对象（{loaded,total,chunkIndex,totalChunks}）；简单上传
-          // 回调是 (loaded,total)。统一渲染：计算阶段显示「计算 SHA-256…」，上传
-          // 数据阶段显示「上传中… N%」+ 分块进度。
+          // 回调是 (loaded,total)。无 total 时以文件 size 兜底（修复历史 totalSize
+          // 未定义：本作用域只有 size）。
           if (pr && typeof pr === 'object' && typeof pr.loaded === 'number') {
-            const pct = pr.total ? Math.round(pr.loaded / pr.total * 100) : 0;
+            const total = (typeof pr.total === 'number' && pr.total > 0) ? pr.total : size;
+            const pct = total > 0 ? Math.round(pr.loaded / total * 100) : 0;
             const el = document.getElementById(progId);
             if (el) el.style.width = pct + '%';
             const elText = document.getElementById(progId + '-text');
@@ -162,11 +162,12 @@ async function uploadFiles(files) {
               const chunkTxt = (pr.totalChunks && pr.totalChunks > 1)
                 ? '（' + Math.min(pr.totalChunks, pr.chunkIndex + 1) + '/' + pr.totalChunks + ' 分块）'
                 : '';
-              elText.textContent = '上传中… ' + pct + '%（' + formatSize(pr.loaded) + '/' + formatSize(pr.total) + '）' + chunkTxt;
+              elText.textContent = '上传中… ' + pct + '%（' + formatSize(pr.loaded) + '/' + formatSize(total) + '）' + chunkTxt;
             }
             return;
           }
-          updateSimpleProgress(progId, '上传中…', pr || 0, totalSize);
+          // 数值回调阶段（简单上传 / 计算期）
+          updateSimpleProgress(progId, '上传中…', pr || 0, size);
         },
       });
       if (result && result.success) {
