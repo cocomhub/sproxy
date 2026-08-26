@@ -113,12 +113,10 @@ async function simpleUpload(file) {
     const result = await sc.files.upload(file, {
       subdir: currentSubdir ? currentSubdir : undefined,
       onProgress: function(loaded, total) {
-        const pct = total > 0 ? Math.round(loaded / total * 100) : 0;
-        const el = document.getElementById(progId);
-        if (el) el.style.width = pct + '%';
-        const elText = document.getElementById(progId + '-text');
-        if (elText) elText.textContent = '计算 SHA-256… ' + pct + '%';
+        updateSimpleProgress(progId, '计算 SHA-256…', loaded, total);
       },
+      // 分块上传的 onProgress 携带 {loaded, total, chunkIndex, totalChunks}；
+      // this分支只用于小文件（forceChunked 由 uploadFiles 决定，此处不传）。
     });
     if (result && result.success) {
       if (result.upload_id) removeUploadSession(result.upload_id);
@@ -145,12 +143,24 @@ async function uploadFiles(files) {
     try {
       const result = await sc.files.upload(file, {
         subdir: currentSubdir ? currentSubdir : undefined,
-        onProgress: function(loaded, total) {
-          const pct = total > 0 ? Math.round(loaded / total * 100) : 0;
-          const el = document.getElementById(progId);
-          if (el) el.style.width = pct + '%';
-          const elText = document.getElementById(progId + '-text');
-          if (elText) elText.textContent = '上传中… ' + pct + '%（' + formatSize(loaded) + '/' + formatSize(total) + '）';
+        onProgress: function(pr) {
+          // 分块上传回调是对象（{loaded,total,chunkIndex,totalChunks}）；简单上传
+          // 回调是 (loaded,total)。统一渲染：计算阶段显示「计算 SHA-256…」，上传
+          // 数据阶段显示「上传中… N%」+ 分块进度。
+          if (pr && typeof pr === 'object' && typeof pr.loaded === 'number') {
+            const pct = pr.total ? Math.round(pr.loaded / pr.total * 100) : 0;
+            const el = document.getElementById(progId);
+            if (el) el.style.width = pct + '%';
+            const elText = document.getElementById(progId + '-text');
+            if (elText) {
+              const chunkTxt = (pr.totalChunks && pr.totalChunks > 1)
+                ? '（' + Math.min(pr.totalChunks, pr.chunkIndex + 1) + '/' + pr.totalChunks + ' 分块）'
+                : '';
+              elText.textContent = '上传中… ' + pct + '%（' + formatSize(pr.loaded) + '/' + formatSize(pr.total) + '）' + chunkTxt;
+            }
+            return;
+          }
+          updateSimpleProgress(progId, '上传中…', pr || 0, totalSize);
         },
       });
       if (result && result.success) {
@@ -168,6 +178,15 @@ async function uploadFiles(files) {
     removeProgressBar(progId);
   }
   refreshList();
+}
+
+// updateSimpleProgress 渲染「计算 SHA-256… / 上传中… N%（loaded/total）」型进度条。
+function updateSimpleProgress(progId, label, loaded, total) {
+  const pct = total > 0 ? Math.round(loaded / total * 100) : 0;
+  const el = document.getElementById(progId);
+  if (el) el.style.width = pct + '%';
+  const elText = document.getElementById(progId + '-text');
+  if (elText) elText.textContent = label + ' ' + pct + '%（' + formatSize(loaded) + '/' + formatSize(total) + '）';
 }
 
 // --- 续传检测 ---

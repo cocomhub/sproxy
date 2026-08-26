@@ -55,6 +55,9 @@ function sclientInit() {
 
 // checkboxInit 初始化「走隧道（调试）」开关：初值从 localStorage 读取。
 // 保存按钮仍写 sessionStorage（AK/SK）。保存后同步到 transport（VP-1：sc 用当前 AK/SK）。
+// 注意：「走隧道」只表示 localStorage override 显式存在。纯服务端 web.tunnel=true
+//（未设置 override）时页面已在走隧道，但 checkbox 不该勾选（它是「强制/调试覆盖」
+// 的指示器，不是当前 effectiveMode 的指示器）——勾选态与有效模式解耦可避免误导。
 document.addEventListener('DOMContentLoaded', function() {
   const cb = document.getElementById('use-tunnel-checkbox');
   if (!cb) return;
