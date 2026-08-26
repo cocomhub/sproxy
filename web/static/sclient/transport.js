@@ -67,8 +67,9 @@
     for (const key of allowed) {
       const val = patch[key];
       if (val === undefined || val === null) continue;
+      // accessKey/accessKeySecret 空串也允许写入（凭证可被清空）；此处沿用
+      // config.applyOverride 的白名单语义，但空串不是「未给」——仅跳过 overrideKey。
       if (key === 'overrideKey' && (typeof val !== 'string' || val === '')) continue;
-      if (key === 'accessKeySecret' && (typeof val !== 'string' || val === '')) continue;
       cfg[key] = val;
     }
     // mode 是 configure 特有的运行时强制项，不与 config.defaultConfig 的 transport 混淆。
@@ -118,14 +119,20 @@
   }
 
   // ---- 有效模式 ----
-  // 优先级：localStorage override（transport 显式值）> 服务端 web.tunnel。
-  // mode 字段（configure 注入）只在非空值（tunnel/direct）时参与——供测试/页面强制。
+  // 优先级：localStorage override（transport 显式值）> mode（configure 注入）>
+  // 无凭据强制 direct > 服务端 web.tunnel。
+  // 无凭据（未配置 accessKey/accessKeySecret）：无法派生隧道密钥，也无法安全读取
+  // 服务端 web.tunnel 开关——强制直连；direct 无凭据时也不带签名头（服务端未配
+  // access_keys 时无认证放行；配了则由服务端 401 提示需登录，避免「隧道模式需要
+  // accessKeySecret」这类低信息报错）。
   function effectiveMode() {
     const o = configLib.readLocalOverride();
     const overrideTransport = o.transport;
     if (overrideTransport === 'tunnel' || overrideTransport === 'direct') return overrideTransport;
-    // 无 override：跟随服务端开关
+    // mode 字段（configure 注入）只在非空值（tunnel/direct）时参与——供测试/页面强制。
     if (cfg.mode === 'tunnel' || cfg.mode === 'direct') return cfg.mode;
+    if (!cfg.accessKey || !cfg.accessKeySecret) return 'direct';
+    // 无 override：跟随服务端开关
     return cfg.tunnelDefault ? 'tunnel' : 'direct';
   }
 
@@ -403,11 +410,17 @@
     const ak = cfg.accessKey;
     const sk = cfg.accessKeySecret;
     // SproxySig（有 body 用其 SHA-256；无 body 签空串）——对齐 Go signRequest。
-    let auth;
-    try {
-      auth = await sigLib.signHeader(method, pathWithQuery, bodyBytes || null, { ak, secret: sk });
-    } catch (e) {
-      throw SclientError('E_AUTH', '签名失败：' + (e && e.message), undefined);
+    // 无凭据（ak/sk 均缺）：不加处理就不是签名头，交由服务端决定（未配 access_keys
+    // 时放行；配了则 401，URL 上仍可取 /healthz //version /ui/ 查阅——不同于抛错）。
+    // 一个可缺一个完整时仍按协议要求完整签名头（若服务端配了单侧可能 401）。
+    let auth = '';
+    if (ak || sk) {
+      if (!ak || !sk) throw SclientError('E_AUTH', '直连模式需要 ak 与 secret 都配置）', undefined);
+      try {
+        auth = await sigLib.signHeader(method, pathWithQuery, bodyBytes || null, { ak, secret: sk });
+      } catch (e) {
+        throw SclientError('E_AUTH', '签名失败：' + (e && e.message), undefined);
+      }
     }
     const mergedHeaders = {};
     if (headers) {
@@ -415,7 +428,7 @@
         if (typeof v === 'string') mergedHeaders[k] = v;
       }
     }
-    mergedHeaders.Authorization = auth;
+    if (auth) mergedHeaders.Authorization = auth;
     if (bodyBytes && bodyBytes.length > 0) mergedHeaders['Content-Type'] = mergedHeaders['Content-Type'] || 'application/octet-stream';
 
     let resp;

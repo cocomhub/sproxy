@@ -26,25 +26,31 @@
       require('./hub.js')
     );
   } else {
-    root.sclientApi = factory(
+    var fn = factory(
       root.sclientApiFiles,
       root.sclientApiCloud,
       root.sclientApiShare,
       root.sclientApiConfig,
       root.sclientApiHub
     );
+    root.sclientApi = fn;
+    if (typeof fn._bindBrowser === 'function') fn._bindBrowser();
   }
 })(typeof self !== 'undefined' ? self : this, function (createFilesApi, createCloudApi, createShareApi, createConfigApi, createHubApi) {
   'use strict';
 
   // 组装 ctx 的默认实现（浏览器路径）：从各全局取传输核心 + 配置 + 日志。
   // 阶段方缺（缺哪个）时对应命名空间创建失败并抛错——由入口 catch 并提示。
+  // 注意：IIFE 的第一个参数 root（浏览器全局）不是本工厂函数的参数——直接引用 root
+  // 会 Uncaught ReferenceError；需新建局部 g 指向浏览器全局对象（Node 侧走
+  // module.exports 分支，不经过这里，故 globalThis 回退只是防御）。
+  const g = (typeof self !== 'undefined' ? self : globalThis);
   function apiFromGlobals() {
-    const transport = root.sclientTransport;
-    const config = root.sclientConfig;
-    const log = root.sclientLog;
-    const crypto = root.sclientCrypto;
-    const util = root.sclientUtil;
+    const transport = g.sclientTransport;
+    const config = g.sclientConfig;
+    const log = g.sclientLog;
+    const crypto = g.sclientCrypto;
+    const util = g.sclientUtil;
     if (!transport) throw new Error('sclient: 缺少 transport 全局（sclientTransport）');
     if (!util) throw new Error('sclient: 缺少 util 全局（sclientUtil）');
     // config 默认：readLocalOverride().applied（含 override 合并）；
@@ -75,5 +81,12 @@
   return {
     createApi,
     apiFromGlobals,
+    // UMD 浏览器分支绑定 host：浏览器加载时把 createApi/apiFromGlobals 暴露为
+    // self.sclientApi，使 app.js 的 sclientApi.apiFromGlobals() 可用（Node 走上面
+    // module.exports 分支，不受影响）。
+    _bindBrowser: function () {
+      const h = typeof self !== 'undefined' ? self : globalThis;
+      h.sclientApi = { createApi, apiFromGlobals };
+    },
   };
 });
