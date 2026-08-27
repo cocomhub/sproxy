@@ -3,7 +3,7 @@
 
 // 上传 UI 模块（app 层）：进度条 / 会话 / 断点续传 DOM。上传纯逻辑委托给
 // sclient/api/files.js 的 sc.files.upload（内部自己看 transport 隧道/直连与分块决策）。
-// 依赖 sclient/sha256.js, sclient/*, app.js 全局辅助（formatSize/escHtml/showToast）。
+// 依赖 sclient/sha256.js, sclient/*, app-render.js（appRender：formatSize/escHtml）、app.js（showToast）。
 //
 // 渲染隔离原则（全部 app 层共同遵守）：
 //   1. 纯计算函数（progressText 等）不碰 DOM、单测可直测；
@@ -28,7 +28,7 @@ function progressText(input) {
   const loaded = (typeof i.loaded === 'number' && i.loaded >= 0) ? i.loaded : 0;
   const total = (typeof i.total === 'number' && i.total > 0) ? i.total : 0;
   const pct = total > 0 ? Math.round(loaded / total * 100) : 0;
-  const sizeTxt = formatSize(loaded) + '/' + formatSize(total);
+  const sizeTxt = appRender.formatSize(loaded) + '/' + appRender.formatSize(total);
   const label = (typeof i.label === 'string' && i.label) ? i.label : '上传中…';
   const tc = i.totalChunks;
   let text;
@@ -82,7 +82,7 @@ function createProgressBar(fileName, totalSize, totalChunks) {
   const progId = 'prog-' + Date.now() + '-' + (++_progCounter);
   const container = document.getElementById('upload-progress-container');
   container.insertAdjacentHTML('beforeend',
-    '<div id="' + progId + '-wrap"><small>' + escHtml(fileName) + ' (' + formatSize(totalSize) + ', ' + totalChunks + ' 分块)</small>' +
+    '<div id="' + progId + '-wrap"><small>' + appRender.escHtml(fileName) + ' (' + appRender.formatSize(totalSize) + ', ' + totalChunks + ' 分块)</small>' +
     '<div class="upload-progress"><div class="upload-progress-bar" id="' + progId + '"></div></div>' +
     '<div class="chunk-progress-text" id="' + progId + '-text">等待中…</div></div>');
   return progId;
@@ -117,7 +117,7 @@ async function chunkedUpload(file, resumeSession) {
         // 分块回调对对象（{loaded,total,chunkIndex,totalChunks}）；计算期数值。
         // 统一经 progressText 计算 + renderProgress 渲染（两段隔离）。
         const render = (pr && typeof pr === 'object')
-          ? progressText({ label: '上传中…', loaded: pr.loaded, total: pr.total, totalChunks: pr.totalChunks, chunkIndex: pr.chunkIndex, titleText: fileName + ' (' + formatSize(totalSize) + ', ' + pr.totalChunks + ' 分块)' })
+          ? progressText({ label: '上传中…', loaded: pr.loaded, total: pr.total, totalChunks: pr.totalChunks, chunkIndex: pr.chunkIndex, titleText: fileName + ' (' + appRender.formatSize(totalSize) + ', ' + pr.totalChunks + ' 分块)' })
           : progressText({ label: '计算 SHA-256…', loaded: pr || 0, total: totalSize });
         renderProgress(progId, render);
       },
@@ -188,7 +188,7 @@ async function uploadFiles(files) {
           // 分块回调对象 {loaded,total,chunkIndex,totalChunks}；简单回调数值。
           // 统一：total 缺省/0 以 size 兜底（修复历史 totalSize 未定义）。两段隔离。
           const render = (pr && typeof pr === 'object' && typeof pr.loaded === 'number')
-            ? progressText({ label: '上传中…', loaded: pr.loaded, total: pr.total, totalChunks: pr.totalChunks, chunkIndex: pr.chunkIndex, titleText: fileName + ' (' + formatSize(size) + ', ' + pr.totalChunks + ' 分块)' })
+            ? progressText({ label: '上传中…', loaded: pr.loaded, total: pr.total, totalChunks: pr.totalChunks, chunkIndex: pr.chunkIndex, titleText: fileName + ' (' + appRender.formatSize(size) + ', ' + pr.totalChunks + ' 分块)' })
             : progressText({ label: '计算 SHA-256…', loaded: pr || 0, total: size });
           renderProgress(progId, render);
         },
@@ -250,7 +250,7 @@ function showResumePrompt(data, uploadId) {
   const done = resumedChunkCount(data);
   const totalChunks = (data && data.totalChunks) || 0;
   div.style.cssText = 'padding:8px 12px;background:var(--bg-batch);border-radius:4px;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-  div.innerHTML = '<span style="flex:1;">📦 未完成的上传: <strong>' + escHtml((data && data.filename) || '') + '</strong> (' + done + '/' + totalChunks + ' 分块)</span>' +
+  div.innerHTML = '<span style="flex:1;">📦 未完成的上传: <strong>' + appRender.escHtml((data && data.filename) || '') + '</strong> (' + done + '/' + totalChunks + ' 分块)</span>' +
     '<input type="file" id="resume-file-' + uploadId + '" style="display:none" data-upload-id="' + uploadId + '">' +
     '<button class="resume-btn" data-upload-id="' + uploadId + '">选择文件续传</button>' +
     '<button class="btn btn-sm btn-secondary dismiss-btn" data-upload-id="' + uploadId + '">忽略</button>';
