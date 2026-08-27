@@ -372,6 +372,171 @@
     return { pct: pct, text: text };
   }
 
+  // ---- 传输渲染（纯函数，只读 TransferItem 数组 → HTML 字符串） ----
+
+  // 频道条定义（spec 字面值，顺序不可打乱）。id 全小写下划线；label 为 UI 标签。
+  const TRANSFER_CHANNELS = [
+    { id: 'all', label: '全部' },
+    { id: 'uploading', label: '上传中' },
+    { id: 'downloading', label: '下载中' },
+    { id: 'cloud_tasks', label: '云任务' },
+    { id: 'cloud_groups', label: '云组' },
+    { id: 'completed', label: '已完成' },
+  ];
+
+  // 频道谓词：predicate(item) → boolean（供 filterTransferItems 分发）。
+  // 语义与 spec 分节 1 一致：uploading 仅 upload 类（hashing/uploading/paused/failed/cancelled）；
+  // downloading 仅 download 类（含 archive）；cloud_tasks/cloud_groups 按 kind 全量透传；
+  // completed 按 status==='completed' 全 kind 命中。
+  const _channelPredicates = {
+    all: function () { return true; },
+    uploading: function (it) { return it.kind === 'upload' && ['hashing', 'uploading', 'paused', 'failed', 'cancelled'].indexOf(it.status) >= 0; },
+    downloading: function (it) { return it.kind === 'download' && ['downloading', 'paused', 'failed', 'cancelled'].indexOf(it.status) >= 0; },
+    cloud_tasks: function (it) { return it.kind === 'cloud_task'; },
+    cloud_groups: function (it) { return it.kind === 'cloud_group'; },
+    completed: function (it) { return it.status === 'completed'; },
+  };
+
+  // filterTransferItems(items, channel)：按频道筛选，顺序保留；
+  // channel 缺省（null/undefined）→ all；未知/空字符串频道 fail-closed 返回 []。
+  function filterTransferItems(items, channel) {
+    const list = Array.isArray(items) ? items : [];
+    if (channel == null) channel = 'all';
+    const pred = _channelPredicates[channel];
+    if (!pred) return [];
+    return list.filter(pred);
+  }
+
+  const KIND_LABEL = { upload: '上传', download: '下载', cloud_task: '云任务', cloud_group: '云组' };
+  const KIND_ICON = { upload: '⬆', download: '⬇', cloud_task: '☁', cloud_group: '🗂' };
+  function _kindIcon(kind) { return KIND_ICON[kind] || '📄'; }
+  function _kindLabel(kind) { return KIND_LABEL[kind] || kind || '项'; }
+
+  // 主标题回退：filename || name || id || '-'（云组类用 name）。
+  function _rowTitle(it) { return it.filename || it.name || it.id || '-'; }
+
+  // 已缓存块计数（meta.chunksBitmap 置位合计）。无 bitmap → 0。
+  function _cachedChunksOf(meta) {
+    const b = meta && meta.chunksBitmap;
+    if (!Array.isArray(b)) return 0;
+    let n = 0;
+    for (let i = 0; i < b.length; i++) if (b[i]) n++;
+    return n;
+  }
+
+  // 操作按钮组（data-* 携带：item-id + 状态，按钮类名沿用 .btn/.btn-sm + transfer-* 语义类）。
+  // 状态机：
+  //   hashing/uploading/downloading/pending → 暂停 + 取消
+  //   paused → 恢复 + 取消（upload/download 类恢复，云行暂停仅取消）
+  //   failed/cancelled（upload/download 类）→ 恢复 + 删除记录
+  //   completed → 完成专属（打开目录/重新下载）+ 删除记录
+  //   cloud_* 非终态 → 追加删除
+  function _rowActions(it) {
+    const idHtml = ' data-item-id="' + escHtml(it.id) + '"';
+    const st = it.status;
+    const kind = it.kind;
+    let a = '';
+    if (st === 'completed') {
+      if (kind === 'upload') {
+        a += '<button class="btn btn-sm btn-primary transfer-open-dir-btn" data-item-id="' + escHtml(it.id) + '">打开存储目录</button>';
+      } else if (kind === 'download') {
+        a += '<button class="btn btn-sm btn-primary transfer-redownload-btn" data-item-id="' + escHtml(it.id) + '">重新下载</button>';
+      }
+      a += '<button class="btn btn-danger btn-sm transfer-delete-btn" data-item-id="' + escHtml(it.id) + '">删除记录</button>';
+    } else if (st === 'paused') {
+      // 暂停（可恢复）：恢复 + 取消。
+      if (kind === 'upload' || kind === 'download') {
+        a += '<button class="btn btn-sm btn-secondary transfer-resume-btn" data-item-id="' + escHtml(it.id) + '">恢复</button>';
+      }
+      a += '<button class="btn btn-warning btn-sm transfer-cancel-btn" data-item-id="' + escHtml(it.id) + '">取消</button>';
+    } else if (st === 'failed' || st === 'cancelled') {
+      // 终态失败/取消：upload/download 可恢复；一律可删记录（failed 仍给取消已无意义——删除记录）
+      if ((st === 'failed' || st === 'cancelled') && (kind === 'upload' || kind === 'download')) {
+        a += '<button class="btn btn-sm btn-secondary transfer-resume-btn" data-item-id="' + escHtml(it.id) + '">恢复</button>';
+      }
+      a += '<button class="btn btn-danger btn-sm transfer-delete-btn" data-item-id="' + escHtml(it.id) + '">删除记录</button>';
+    } else if (kind === 'cloud_task' || kind === 'cloud_group') {
+      // 云类非终态：取消（终态 completed/failed/cancelled 已在上两支覆盖）
+      a += '<button class="btn btn-warning btn-sm transfer-cancel-btn" data-item-id="' + escHtml(it.id) + '">取消</button>';
+      a += '<button class="btn btn-danger btn-sm transfer-delete-btn" data-item-id="' + escHtml(it.id) + '">删除</button>';
+    } else {
+      // 进行中（upload/download）：暂停 + 取消。
+      a += '<button class="btn btn-sm btn-secondary transfer-pause-btn" data-item-id="' + escHtml(it.id) + '">暂停</button>';
+      a += '<button class="btn btn-warning btn-sm transfer-cancel-btn" data-item-id="' + escHtml(it.id) + '">取消</button>';
+    }
+    return a.length ? a : idHtml; // 未知状态兜底至少可寻址
+  }
+
+  // 进度条/百分比（复用 buildProgressBar 当 total>0 与进行中状态；否则 ''）。
+  function _progressHtml(it) {
+    const st = it.status;
+    const total = it.total > 0 ? it.total : 0;
+    if (total <= 0) return '';
+    if (st === 'uploading' || st === 'downloading' || st === 'pending' || st === 'hashing') {
+      return buildProgressBar(it.loaded, total);
+    }
+    return '';
+  }
+
+  // 统一行：kind 图标 + filename + 状态徽章(statusText) + 进度条/百分比 + 操作按钮组。
+  // 上传含「已缓存 X/Y 块」；下载含「重新下载」（completed）；completed 折叠由 list 处理。
+  function buildTransferRowHtml(item) {
+    item = item || {};
+    const kind = item.kind || '';
+    const title = _rowTitle(item);
+    const titleHtml = kind === 'cloud_group' ? (item.name || item.id || '-') : title;
+    const badge = '<span style="font-size:12px;font-weight:600;margin-left:8px;padding:1px 8px;border-radius:10px;background:var(--bg-hover);color:var(--text-secondary);white-space:nowrap;">' + statusText(item.status) + '</span>';
+    const cached = _cachedChunksOf(item.meta);
+    const totalChunks = item.meta && item.meta.totalChunks ? item.meta.totalChunks : 0;
+    const cachedHtml = cached > 0 ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">已缓存 ' + cached + '/' + totalChunks + ' 块</span>' : '';
+    const actions = _rowActions(item);
+    return '<div class="transfer-row" data-item-id="' + escHtml(item.id) + '" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border-color);background:var(--bg-container);">' +
+      '<span style="font-size:16px;">' + _kindIcon(kind) + '</span>' +
+      '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(title) + '">' + escHtml(titleHtml) + badge + cachedHtml + '</span>' +
+      '<span style="white-space:nowrap;">' + _progressHtml(item) + '</span>' +
+      '<span class="transfer-actions" style="white-space:nowrap;">' + actions + '</span>' +
+      '</div>';
+  }
+
+  // 已完成折叠分组行（summary）：组标签 + 计数；detail id 为 group-detail-<kind>。
+  function _groupSummaryHtml(kind, count, detailId) {
+    return '<details style="border-bottom:1px solid var(--border-color);"><summary style="cursor:pointer;padding:10px 12px;background:var(--bg-container);color:var(--text-secondary);font-size:13px;">' +
+      '✅ 已完成' + _kindLabel(kind) + ' (' + count + ')' +
+      '<span style="float:right;font-size:11px;">点击展开</span></summary>' +
+      '<div class="group-detail" id="' + detailId + '" style="background:var(--bg-page);">';
+  }
+
+  function _completedGroupsHtml(completedItems) {
+    const orderedKinds = ['upload', 'download', 'cloud_task', 'cloud_group'];
+    const grouped = {};
+    for (const it of completedItems || []) {
+      const k = it.kind || 'other';
+      (grouped[k] = grouped[k] || []).push(it);
+    }
+    let html = '';
+    for (const k of orderedKinds) {
+      const group = grouped[k] || [];
+      if (group.length === 0) continue;
+      html += _groupSummaryHtml(k, group.length, 'group-detail-' + k);
+      html += group.map(buildTransferRowHtml).join('');
+      html += '</div></details>';
+    }
+    return html;
+  }
+
+  // buildTransferListHtml(items, channel)：过滤 + 已完成按 kind 分组折叠 + 空文案。
+  // 无完成项时整个列表平铺（避免空 details 占行）；有完成项时完成后置并折叠。
+  function buildTransferListHtml(items, channel) {
+    const filtered = filterTransferItems(items, channel);
+    if (filtered.length === 0) return '<div class="empty-msg">暂无传输记录</div>';
+    const completed = filtered.filter(function (it) { return it.status === 'completed'; });
+    if (completed.length === 0) {
+      return filtered.map(buildTransferRowHtml).join('');
+    }
+    const running = filtered.filter(function (it) { return it.status !== 'completed'; });
+    return running.map(buildTransferRowHtml).join('') + _completedGroupsHtml(completed);
+  }
+
   return {
     escHtml, formatSize, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
     uploadProgressText,
@@ -379,5 +544,6 @@
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
     statusText, buildProgressBar, cloudTaskActions, buildCloudTaskTableHtml,
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
+    TRANSFER_CHANNELS, filterTransferItems, buildTransferRowHtml, buildTransferListHtml,
   };
 });
