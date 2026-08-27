@@ -8,13 +8,11 @@
 // UMD：浏览器挂 window.transferStore；Node 下 module.exports（顶部无 DOM/window/网络副作用，
 // 可被 Node require 做单测——DOM/IDB/localStorage 仅函数运行期访问）。
 //
-// 存储约定（与 spec 一致，读 docs/superpowers/specs/2026-08-27-transfer-manager-design.md，
-// 库结构实现见下方 getOpenDB 说明）：
+// 存储约定（与 spec 一致，读 docs/superpowers/specs/2026-08-27-transfer-manager-design.md）：
 //   - localStorage key `sproxy_transfer_items`：TransferItem 数组 JSON。
-//   - IndexedDB 库 `sproxy-dl-cache` / 仓库 `chunks`，复合主键 [itemId, chunkIndex]，
-//     值 {itemId, chunkIndex, data:ArrayBuffer, size}。
-//   - 同一库 `sproxy-dl-cache` 下仓库 `fileHandles`，主键 uploadId，值 {uploadId, fileHandle}。
-//   - 旧键 `sproxy_upload_sessions` / 旧库 `sproxy-up-dev` 不读、不迁移（无过渡期）。
+//   - IndexedDB 库 `sproxy-dl-cache` / 仓库 `chunks`，复合主键 [itemId, chunkIndex]，值 {itemId, chunkIndex, data:ArrayBuffer, size}。
+//   - IndexedDB 库 `sproxy-up-dev` / 仓库 `fileHandles`，主键 uploadId，值 {uploadId, fileHandle}。
+//   - 旧键 `sproxy_upload_sessions` 不读、不迁移（无过渡期）。
 //
 // 注入式：createTransferStore({ls, idb, idbKeyRange})——测试传内存 fake；浏览器默认
 // window.localStorage / window.indexedDB / window.IDBKeyRange。所有 IDB 请求经
@@ -139,29 +137,41 @@
     function upsert(item) { return upsertItem(ls, item); }
     function remove(id) { return removeItem(ls, id); }
 
-    // getOpenDB 打开主库（sproxy-dl-cache），在 upgrade 阶段建两个仓库：
-    // chunks（复合主键 [itemId, chunkIndex]）+ fileHandles（主键 uploadId）。
-    // lazily opens，每次调用返回同一 Promise。
-    // 顺序约定：saveChunk→chunks 仓库，saveFileHandle→fileHandles 仓库，
-    // 两仓库承载于同一库中（spec 双库命名 sproxy-dl-cache / sproxy-up-dev 演进为双仓库）；
-    // 因 transfer-store 是本任务端到端的唯一存储契约消费方（后置任务 download.js/upload.js
-    // 改写都只面 createTransferStore 返回值），保持单库双仓（版本 1 稳定）。
-    let openPromise = null;
+    // 双库分别打开（spec 字面值）：sproxy-dl-cache（块缓存）与 sproxy-up-dev（上传文件句柄）。
+    // 各自独立 lazily open 并缓存 Promise；upgrade 事件只建本库所属仓库。
+    let dlPromise = null;
     function getOpenDB() {
       if (idb == null) return Promise.reject(new Error('IndexedDB unavailable in this environment'));
-      if (!openPromise) {
-        openPromise = openDB(idb, DL_DB, 1, function (db) {
+      if (!dlPromise) {
+        dlPromise = openDB(idb, DL_DB, 1, function (db) {
           if (!db.objectStoreNames.contains(CHUNKS_STORE)) {
             db.createObjectStore(CHUNKS_STORE, { keyPath: ['itemId', 'chunkIndex'] });
           }
+        });
+      }
+      return dlPromise;
+    }
+    let upPromise = null;
+    function getUpDB() {
+      if (idb == null) return Promise.reject(new Error('IndexedDB unavailable in this environment'));
+      if (!upPromise) {
+        upPromise = openDB(idb, UP_DB, 1, function (db) {
           if (!db.objectStoreNames.contains(HANDLES_STORE)) {
             db.createObjectStore(HANDLES_STORE, { keyPath: 'uploadId' });
           }
         });
       }
-      return openPromise;
+      return upPromise;
     }
 
+    // 写确认策略（Important 审查项）——本实现采用 b) 请求成功即确认 + 注释权衡：
+    // 写请求（put/delete）的 success 在真实浏览器中仅当该请求成功且已（或即将）提交
+    // 到本次事务时才触发；随后浏览器自动提交事务，unload 或忽略的窗口极短。数据层只
+    // 负责把写请求排入事务；若要求『落盘后才让上层继续』的严格持久性保证，需双事件
+    // 等待（tx.oncomplete + 请求失败恰好抛错），但本库写请求成功即返回的宽容语义与
+    // 断点续传的『尽力而为落盘 + 重启后按服务端会话对账』模型一致（重启恢复以服务端
+    // 会话为权威，本地块缓存只是加速缓冲，丢失可重写）。unload 时机可接受（极小
+    // 窗口 + 可恢复），故不走 a)。
     // saveChunk(itemId, chunkIndex, data:ArrayBuffer, size) — 复合主键 upsert。
     function saveChunk(itemId, chunkIndex, data, size) {
       return getOpenDB().then(function (db) {
@@ -206,17 +216,18 @@
     }
 
     // saveFileHandle(uploadId, fileHandle) / getFileHandle(uploadId) — 上传续传用。
+    // 操作独立库 sproxy-up-dev / fileHandles（主键 uploadId）。
     // 仅 Chromium-class 浏览器的 File System Access API 可用时才有实际句柄；
     // 句柄不可得 → 回落『重选文件』路径（调用应用层处理）。
     function saveFileHandle(uploadId, fileHandle) {
-      return getOpenDB().then(function (db) {
+      return getUpDB().then(function (db) {
         return _idbRequest(db.transaction(HANDLES_STORE, 'readwrite').objectStore(HANDLES_STORE)
           .put({ uploadId: uploadId, fileHandle: fileHandle }));
       });
     }
 
     function getFileHandle(uploadId) {
-      return getOpenDB().then(function (db) {
+      return getUpDB().then(function (db) {
         return _idbRequest(db.transaction(HANDLES_STORE, 'readonly').objectStore(HANDLES_STORE).get(uploadId));
       }).then(function (rec) { return (rec && rec.fileHandle) || null; });
     }
@@ -245,8 +256,8 @@
       upsertItem: upsert,
       removeItem: remove,
       // IDB 封装
-      openDB: getOpenDB,
       getOpenDB: getOpenDB,
+      getUpDB: getUpDB,
       saveChunk: saveChunk,
       listChunkCount: listChunkCount,
       loadChunk: loadChunk,

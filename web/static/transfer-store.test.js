@@ -138,7 +138,9 @@ function createFakeIDB() {
     };
   }
   const idb = {
+    names: [],
     open(name) {
+      this.names.push(name);
       const req = {};
       setTimeout(() => {
         let db = dbs.get(name);
@@ -266,7 +268,8 @@ test('localStorage 操作带容错：ls 抛错时 loadItems 返回 []，saveItem
 // ---- IndexedDB 块缓存 ----
 
 test('saveChunk/listChunkCount/loadChunk：roundtrip + 跨 itemId 隔离', async () => {
-  const store = ts.createTransferStore({ ls: createFakeLS(), idb: createFakeIDB(), idbKeyRange: createFakeRange() });
+  const idb = createFakeIDB();
+  const store = ts.createTransferStore({ ls: createFakeLS(), idb: idb, idbKeyRange: createFakeRange() });
   const data0 = new Uint8Array([1, 2, 3]).buffer;
   const data1 = new Uint8Array([4, 5]).buffer;
   await store.saveChunk('item1', 0, data0, 3);
@@ -283,7 +286,8 @@ test('saveChunk/listChunkCount/loadChunk：roundtrip + 跨 itemId 隔离', async
 });
 
 test('deleteChunkRange：只清指定 item 的块', async () => {
-  const store = ts.createTransferStore({ ls: createFakeLS(), idb: createFakeIDB(), idbKeyRange: createFakeRange() });
+  const idb = createFakeIDB();
+  const store = ts.createTransferStore({ ls: createFakeLS(), idb: idb, idbKeyRange: createFakeRange() });
   const d = new Uint8Array([9]).buffer;
   await store.saveChunk('x', 0, d, 1);
   await store.saveChunk('x', 1, d, 1);
@@ -296,14 +300,27 @@ test('deleteChunkRange：只清指定 item 的块', async () => {
 
 // ---- 文件句柄（上传续传） ----
 
-test('saveFileHandle/getFileHandle：roundtrip + 缺省 null', async () => {
-  const store = ts.createTransferStore({ ls: createFakeLS(), idb: createFakeIDB(), idbKeyRange: createFakeRange() });
+test('saveFileHandle/getFileHandle：roundtrip + 缺省 null，双库打开验证（独立 sproxy-up-dev 库）', async () => {
+  const idb = createFakeIDB();
+  const store = ts.createTransferStore({ ls: createFakeLS(), idb: idb, idbKeyRange: createFakeRange() });
   const fakeHandle = { kind: 'file', name: 'a.bin' };
   await store.saveFileHandle('upload1', fakeHandle);
   const got = await store.getFileHandle('upload1');
   assert.strictEqual(got.kind, 'file');
   assert.strictEqual(got.name, 'a.bin');
   assert.strictEqual(await store.getFileHandle('missing'), null);
+  // sproxy-up-dev 必须以独立库打开（勿与 sproxy-dl-cache 同库双仓库）——本测试只碰句柄库
+  assert.deepStrictEqual(idb.names, ['sproxy-up-dev']);
+});
+
+test('open 库隔离：块缓存写不涉 sproxy-up-dev；文件句柄写也不涉 sproxy-dl-cache 之外', async () => {
+  const idb = createFakeIDB();
+  const store = ts.createTransferStore({ ls: createFakeLS(), idb: idb, idbKeyRange: createFakeRange() });
+  await store.saveChunk('i', 0, new Uint8Array([1]).buffer, 1);
+  // 打开过的库名只能是 sproxy-dl-cache（首个残余 open 也可能出现 sproxy-dl-cache 被复用）
+  assert.deepStrictEqual(idb.names, ['sproxy-dl-cache']);
+  await store.saveFileHandle('u', null);
+  assert.deepStrictEqual(idb.names, ['sproxy-dl-cache', 'sproxy-up-dev']);
 });
 
 test('queryFileHandlePermission：返回查询状态，不可用返回 null', async () => {
