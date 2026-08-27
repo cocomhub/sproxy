@@ -31,6 +31,16 @@ test('escHtml 转义', () => {
   assert.strictEqual(r.escHtml(undefined), '');
 });
 
+test('uploadProgressText 可测入口：进度文案与 upload.js progressText 语义一致', () => {
+  // 分块阶段（totalChunks>1 且带 chunkIndex → 分块 i/N）
+  assert.deepStrictEqual(r.uploadProgressText('上传中…', 12, 100, 4, 1), { pct: 12, text: '上传中… 12%（12 B/100 B，分块 2/4）' });
+  // 计算阶段（无分块）
+  assert.deepStrictEqual(r.uploadProgressText('计算 SHA-256…', 5, 10), { pct: 50, text: '计算 SHA-256… 50%（5 B/10 B）' });
+  // 边界：total=0 → pct 0；chunkIndex 缺省 → 分块 1/N
+  assert.deepStrictEqual(r.uploadProgressText('上传中…', 0, 0, 3), { pct: 0, text: '上传中… 0%（0 B/0 B，分块 1/3）' });
+  assert.deepStrictEqual(r.uploadProgressText('下载中…', 7, 8, 2, 0), { pct: 88, text: '下载中… 88%（7 B/8 B，分块 1/2）' });
+});
+
 test('getChecksumPrefix + bytesToHex', () => {
   assert.strictEqual(r.getChecksumPrefix(''), '-');
   assert.strictEqual(r.getChecksumPrefix('abc'), 'abc…');

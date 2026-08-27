@@ -606,6 +606,18 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 
 ## 记录
 
+### 跨文件隐式全局陷阱（formatSize/escHtml 转发删除事故）
+- **教训**：`app.js` 曾定义 `formatSize`/`escHtml` 等转发函数（委托 `appRender`），为去重整体删除后，**页面其他文件（upload.js）仍有裸调用** → 运行期 `ReferenceError: escHtml is not defined`（上传时才触发）。
+- **根因**：`node --check` 只做语法解析、**不做跨文件符号解析**；`make web-test` 只测 app.js 相关，`upload.js` 的调用点从未被单测覆盖；浏览器只测列表加载、没触发上传操作 → 错误路径完全未被触及。
+- **规则（避免重演）**：
+  1. **渲染工具一律走 `appRender.xxx` 命名空间**（`formatSize`/`escHtml`/`getChecksumPrefix`/`bytesToHex`），**禁止在 app.js/upload.js 内再定义同名函数**；
+  2. 签名/SHA-256 一律走 `sclientCrypto`/`sclientSig`，同理禁止页面层重复定义；
+  3. **所有引用跨文件隐式全局的文件**（upload.js 引用 `currentSubdir`/`showToast`）须在文件顶部 `// global：<名>（<提供文件>）` 注释显式声明调用方，加载序安全靠 index.html script 顺序（调用点运行期解引用）；
+  4. **补 `node --check` 覆盖每个非 cli 的静态 JS**（Makefile web-test 已把 upload.js 纳入）；
+  5. **可测入口**：进度文案纯函数双入口（`app-render.uploadProgressText`），避免埋 DOM 依赖；其余纯函数一律放 app-render 并在 app-render.test.js + upload.test.js 覆盖。
+  6. **回归验证必须触发用户报错路径**：列表加载 ≠ 上传；至少实测一次真实上传 + 断点续传 + 列表刷新 + 分享/版本弹窗，并确认 console 无 error。
+- 已固化：`Makefile` 加 `node --check web/static/upload.js`；`upload.js` 顶部显式 `// global` 声明；`appRender.uploadProgressText` 可测入口。
+
 ### 云端下载文件名生成规则（双端共享）
 - 规则唯一实现：Go `pkg/cloudfilename`（`DefaultFromURL` / `Safe` / `ResolveFilename` / `ValidateEntries`）+ JS `web/static/cloudfilename.js`（UMD，浏览器全局 `cloudfilename` 与 Node 导出双用）。
 - **一致性靠共享语料保证**：`pkg/cloudfilename/testdata/cases.json` 是权威语料，Go 测试 `TestDefaultFromURL_FromFixture` 与 JS 测试 `web/static/cloudfilename.test.js`（`make web-test`）都断言它 → 双端任一改规则导致不一致，测试立即失败。
