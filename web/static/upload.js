@@ -222,11 +222,18 @@ function checkResumableUploads() {
   let hasResumable = false;
   for (const uploadId in sessions) {
     const data = sessions[uploadId];
-    if (data.status !== 'uploading') continue;
+    if (data.status !== 'uploading' && data.status !== 'hashing') continue;
     hasResumable = true;
     (function(sessionData, sessUploadId) {
       const statusUrl = '/upload/status?upload_id=' + sessUploadId + '&filename=' + encodeURIComponent(sessionData.filename);
       function handleStatusResponse(status) {
+        if (sessionData.status === 'hashing') {
+          // 计算 SHA-256 阶段刷新：服务端还没有 init 会话，/upload/status 只能 status.success=false
+          // 或 missing_chunks 空 → 落到 else 分支被 removeUploadSession 清掉了。此时应保留会话并
+          // 显示「待续传」提示；用户重选同文件续传时会以 status='hashing' 走全量重传分块。
+          showResumePrompt(sessionData, sessUploadId);
+          return;
+        }
         if (status.success && status.finished) {
           removeUploadSession(sessUploadId);
         } else if (status.success && status.missing_chunks && status.missing_chunks.length > 0) {
@@ -277,6 +284,14 @@ async function resumeUpload(uploadId, file) {
   if (!data) { showToast('续传数据已丢失', 'error'); return; }
   if (file.size !== data.totalSize) { showToast('文件大小不匹配，无法续传', 'error'); return; }
 
+  const resumeData = Object.assign({}, data);
+  // hashing：服务端尚无会话（计算阶段刷新），重算后 sessionId===uploadId（filename/size/mtime/checksum
+  // 未变），会以新 session 完成全量分块；移除旧的 hashing 会话避免 complete 后残留。
+  // uploading：服务端有会话，续传只补缺失块。
+  if (resumeData.status === 'hashing') {
+    removeUploadSession(uploadId);
+  }
+
   const resumeContainer = document.getElementById('resume-container');
   if (resumeContainer) {
     const promptDiv = resumeContainer.querySelector('[data-upload-id="' + uploadId + '"]')?.closest('div');
@@ -296,7 +311,6 @@ async function resumeUpload(uploadId, file) {
   checkResumableUploads();
   refreshList();
 }
-
 // --- 续传容器事件委托（Node require 时无 document，跳过绑定） ---
 if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', function() {
