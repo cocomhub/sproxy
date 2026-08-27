@@ -106,19 +106,13 @@ function showToast(msg, type) {
   el._timer = setTimeout(function() { el.classList.remove('show'); }, 3000);
 }
 
-// 统一大小/转义等纯渲染工具：委托 app-render.js（appRender 全局），单一实现、可单测。
-function formatSize(n) { return appRender.formatSize(n); }
-function escHtml(s) { return appRender.escHtml(s); }
-function getChecksumPrefix(cs) { return appRender.getChecksumPrefix(cs); }
-function bytesToHex(bytes) { return appRender.bytesToHex(bytes); }
+// 纯渲染工具统一来自 app-render.js（全局 appRender）。app.js 不再保留同名转发；
+// 内联 HTML 片段一律直接 appRender.escHtml/bytesToHex/...（见各调用处）。
 
 // --- SproxySig 请求签名（WebCrypto，与 Go pkg/sproxysig 对齐） ---
 
 // 本地自定义 SHA-256/HMAC 辅助已迁移到 sclient/crypto.js（sclientCrypto）；
 // SproxySig 签名由 sclient/sig.js 统一负责，此处不再重复实现。
-
-function getChecksumPrefix(cs) { return appRender.getChecksumPrefix(cs); }
-function bytesToHex(bytes) { return appRender.bytesToHex(bytes); }
 
 function copyChecksum(cs) {
   navigator.clipboard.writeText(cs).then(function() {
@@ -225,7 +219,7 @@ function updateBreadcrumb() {
   let accumulated = '';
   for (const p of parts) {
     accumulated = accumulated ? accumulated + '/' + p : p;
-    html += ' <span style="color:var(--text-muted)">›</span> <a href="#" data-subdir="' + escHtml(accumulated) + '">' + escHtml(p) + '</a>';
+    html += ' <span style="color:var(--text-muted)">›</span> <a href="#" data-subdir="' + appRender.escHtml(accumulated) + '">' + appRender.escHtml(p) + '</a>';
   }
   el.innerHTML = html;
 }
@@ -298,7 +292,8 @@ function computeFileSHA256(blob) {
 }
 
 function sha256Bytes(bytes) {
-  return crypto.subtle.digest('SHA-256', bytes).then(function(d) { return bytesToHex(new Uint8Array(d)); });
+  // 已删除 app.js 同名转发函数后改成委托 sclientCrypto.bytesToHex。
+  return crypto.subtle.digest('SHA-256', bytes).then(function(d) { return sclientCrypto.bytesToHex(new Uint8Array(d)); });
 }
 
 function triggerDownload(fileName, data) {
@@ -687,15 +682,15 @@ async function refreshShareList() {
       var downloads = s.max_downloads > 0 ? s.downloads + '/' + s.max_downloads : s.downloads + '/∞';
       var expiresLabel = s.expired ? '-' : (s.expires_at ? new Date(s.expires_at).toLocaleString() : '-');
 
-      html += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + escHtml(s.filename) + '">' + escHtml(s.filename) + '</td>';
+      html += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + appRender.escHtml(s.filename) + '">' + appRender.escHtml(s.filename) + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);color:' + statusColor + ';">' + statusText + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + downloads + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;">' + expiresLabel + '</td>';
       html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">';
       if (!s.expired) {
-        html += '<button class="btn btn-danger btn-sm share-revoke-btn" data-token="' + escHtml(s.token) + '">撤销</button>';
+        html += '<button class="btn btn-danger btn-sm share-revoke-btn" data-token="' + appRender.escHtml(s.token) + '">撤销</button>';
       }
-      html += '<button class="btn btn-sm btn-secondary share-copy-btn" data-token="' + escHtml(s.token) + '" style="margin-left:4px;">复制</button>';
+      html += '<button class="btn btn-sm btn-secondary share-copy-btn" data-token="' + appRender.escHtml(s.token) + '" style="margin-left:4px;">复制</button>';
       html += '</td></tr>';
     }
     html += '</tbody></table>';
@@ -780,8 +775,8 @@ async function showCloudDownloadPreview(action) {
       : cloudfilename.safeDefaultFromURL(parsedLines[i].url);
     previewHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:4px 0;border-bottom:1px solid var(--border-color);">';
     previewHtml += '<span style="flex-shrink:0;font-size:12px;color:var(--text-muted);min-width:28px;">' + (i + 1) + '.</span>';
-    previewHtml += '<input type="text" class="cloud-preview-filename" data-index="' + i + '" value="' + escHtml(defaultName) + '" style="flex:1;padding:4px 6px;border:1px solid var(--border-input);border-radius:3px;font-size:13px;font-family:monospace;">';
-    previewHtml += '<span style="font-size:11px;color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(parsedLines[i].url) + '">' + escHtml(parsedLines[i].url) + '</span>';
+    previewHtml += '<input type="text" class="cloud-preview-filename" data-index="' + i + '" value="' + appRender.escHtml(defaultName) + '" style="flex:1;padding:4px 6px;border:1px solid var(--border-input);border-radius:3px;font-size:13px;font-family:monospace;">';
+    previewHtml += '<span style="font-size:11px;color:var(--text-muted);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + appRender.escHtml(parsedLines[i].url) + '">' + appRender.escHtml(parsedLines[i].url) + '</span>';
     previewHtml += '</div>';
   }
   previewHtml += '</div>';
@@ -1322,11 +1317,11 @@ async function toggleGroupTasks(groupId, btn) {
     for (var i = 0; i < tasks.length; i++) {
       var t = tasks[i];
       html += '<tr>' +
-        '<td style="padding:4px 8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;">' + escHtml(t.id || '') + '</td>' +
-        '<td style="padding:4px 8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + escHtml(t.url || '') + '">' + escHtml(t.url || '') + '</td>' +
+        '<td style="padding:4px 8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;">' + appRender.escHtml(t.id || '') + '</td>' +
+        '<td style="padding:4px 8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + appRender.escHtml(t.url || '') + '">' + appRender.escHtml(t.url || '') + '</td>' +
         '<td style="padding:4px 8px;">' + statusText(t.status) + '</td>' +
         '<td style="padding:4px 8px;">' + (t.total_size > 0 ? buildProgressBar(t.downloaded, t.total_size) : '-') + '</td>' +
-        '<td style="padding:4px 8px;max-width:180px;overflow:hidden;text-overflow:ellipsis;font-family:monospace;font-size:11px;" title="' + escHtml(t.etag || '') + '">' + escHtml(t.etag || '-') + '</td>' +
+        '<td style="padding:4px 8px;max-width:180px;overflow:hidden;text-overflow:ellipsis;font-family:monospace;font-size:11px;" title="' + appRender.escHtml(t.etag || '') + '">' + appRender.escHtml(t.etag || '-') + '</td>' +
         '</tr>';
     }
     html += '</tbody></table>';
@@ -1832,7 +1827,7 @@ function showTextPreview(filename, text) {
 
   var header = document.createElement('div');
   header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;';
-  header.innerHTML = '<span style="font-size:14px;font-weight:600;color:var(--text-primary,#333);">' + escHtml(filename) + '</span>' +
+  header.innerHTML = '<span style="font-size:14px;font-weight:600;color:var(--text-primary,#333);">' + appRender.escHtml(filename) + '</span>' +
     '<button style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-secondary,#888);line-height:1;">&times;</button>';
   header.querySelector('button').addEventListener('click', function() { if (document.body.contains(modal)) document.body.removeChild(modal); });
 
