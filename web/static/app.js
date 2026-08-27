@@ -513,7 +513,7 @@ async function updateConfigField(key, value) {
 // async function updateStorageConfig 已废弃：存储上限统一走配置面板 cfg-update-storage
 //（updateConfigField('max_storage_bytes', ...) → PUT /api/config）。旧 PUT /api/storage/config
 // 无服务端路由，已由任务 5 裁定删除（config.updateStorage 移除）。本函数移除。
-function formatBytes(n) { return appRender.formatSize(n); }
+// 统一大小格式化委托 appRender.formatSize（等价旧 formatBytes，见 app-render.js）。
 function statsTableHtml(du, rc, s) { return appRender.statsTableHtml(du, rc, s); }
 
 // --- 暗色模式 ---
@@ -607,30 +607,6 @@ sclientInit();
 initTheme();
 refreshList();
 checkResumableUploads();
-
-// --- 文件分享（旧版，改用弹窗） ---
-function shareFile(name) {
-  var ttl = prompt('分享有效期（例如 1h, 24h, 7d，留空=24h）:', '24h');
-  if (ttl === null) return;
-  ttl = ttl.trim() || '24h';
-  var maxDownloads = prompt('最大下载次数（0=不限）:', '0');
-  if (maxDownloads === null) return;
-  maxDownloads = Number.parseInt(maxDownloads) || 0;
-  var oneTime = confirm('一次性分享（下载一次后自动失效）？\n确定=是，取消=否');
-  (async function() {
-    try {
-      const data = await sc.share.create({ filename: name, ttl: ttl, max_downloads: maxDownloads, one_time: oneTime });
-      if (!data.token) { showToast('创建分享失败: ' + ((data && data.message) || 'unknown'), 'error'); return; }
-      var shareUrl = location.origin + '/s/' + data.token;
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(shareUrl);
-        showToast('分享链接已复制到剪贴板: ' + shareUrl, 'success');
-      } else {
-        showToast('分享链接: ' + shareUrl, 'success');
-      }
-    } catch (e) { showToast('创建分享失败: ' + e.message, 'error'); }
-  })();
-}
 
 // --- 分享管理 ---
 var _shareModalVisible = false;

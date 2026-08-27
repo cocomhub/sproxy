@@ -17,7 +17,7 @@
  *   - download(filename, opts)  GET  /download?filename=（opts.headers 透传含 Range）
  *   - deleteFile(name, chk)    POST /delete?filename=（X-File-Checksum 头）
  *   - rename(from,to,chk)      POST /rename?from=&to=（X-File-Checksum 头）
- *   - mkdir/rmdir(dir)         POST /mkdir?dirname= / POST /rmdir?dirname=
+ *   - mkdir/rmdir(dir)         POST /mkdir?dirname= / POST /rmdir?dirname=&force=true
  *   - batchDelete(files)        POST /api/batch/delete  files=[{filename,checksum}]
  *   - batchRename(ops)         POST /api/batch/rename   ops=[{from,to,checksum}]
  *   - archive(files)           POST /api/archive（下载归档 → {success,blob,filename}）
@@ -212,7 +212,9 @@
       return jsonRequest('POST', '/mkdir?dirname=' + encodeURIComponent(dirname), undefined);
     }
     function rmdir(dirname) {
-      return jsonRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirname), undefined);
+      // 服务端对非空目录要求 ?force=true（防误删）；Web 删除目录前已 confirm，
+      // 故此处永远带 force=true（手动删目录同样过 confirm）。
+      return jsonRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirname) + '&force=true', undefined);
     }
 
     // ---- 删除 / 重命名（需要 X-File-Checksum 头）----
