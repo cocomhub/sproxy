@@ -791,7 +791,7 @@ test('files mkdir/rmdir 映射', async () => {
   assert.strictEqual(core.calls[0].method, 'POST');
   assert.strictEqual(core.calls[0].path, '/mkdir?dirname=a%20b');
   await api.files.rmdir('d');
-  assert.strictEqual(core.calls[1].path, '/rmdir?dirname=d');
+  assert.strictEqual(core.calls[1].path, '/rmdir?dirname=d&force=true');
 });
 
 test('files batchDelete/batchRename JSON body 编解码', async () => {
