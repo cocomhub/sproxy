@@ -135,7 +135,9 @@ web-test:
 	@node --check web/static/sclient/api/config.js
 	@node --check web/static/sclient/api/hub.js
 	@node --check web/static/sclient/api/index.js
+	@node --check web/static/app-render.js
 	node --test web/static/cloudfilename.test.js
+	node --test web/static/app-render.test.js
 	node --test web/static/upload.test.js
 	node --test web/static/sclient/sclient.test.js
 
