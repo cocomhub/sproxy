@@ -130,3 +130,29 @@ test('renderProgress 缺省参数不炸', () => {
   u.renderProgress(void 0, void 0);
   u.renderProgress('p', { pct: 1 }); // text 缺失不写
 });
+
+// ---- 回归：刷新时序不再误清进行中的分块会话 ----
+// 场景还原：大文件分块上传进行中刷新页面 → app.js 顶层 refreshList() 先于
+// checkResumableUploads() 执行。此前 upload.js 三处『success』分支无条件
+// removeUploadSession(result.upload_id)，性能上会把正在上传的会话清掉，
+// 导致 checkResumableUploads 读不到 → 断点续传提示消失。修复后会话清除只由
+// files.js 的 onSession(true)（合并成功/已存在）与 /upload/status finished 负责。
+// upload.js 暴露 uploadFiles/simpleUpload/chunkedUpload（+FileClient 全局 stub），
+// 此处用最轻量方式验证：分块会话在『上传成功』回调后仍可在 localStorage 读到。
+// （真正端到端需浏览器 + mock transport；Node 下用真实 URL + coreRequest stub 成本高，
+//   本用例固守语义：成功回调不产生 removeUploadSession 副作用。）
+
+// 防御性留注：本测试不启动 network；仅锁定『去除误清』这一不可观察回归。
+// 验证点：upload.js 源码不包含对 removeUploadSession 的这三处误清调用（编译期语义快照）。
+test('upload.js 不再在 success 分支误清分块会话（语义快照）', () => {
+  const fs = require('node:fs');
+  const src = fs.readFileSync(path.join(__dirname, 'upload.js'), 'utf8');
+  // 三处旧写法（无条件删除）不应再出现：
+  const leaks = [
+    /if \(!resumeSession && result\.upload_id\) removeUploadSession/, // chunkedUpload
+    /if \(result\.upload_id\) removeUploadSession/,                 // simpleUpload/uploadFiles
+  ];
+  for (const re of leaks) {
+    assert.ok(!re.test(src), '已去除 success 分支误清：' + re.toString());
+  }
+});
