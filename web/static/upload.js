@@ -133,7 +133,8 @@ async function chunkedUpload(file, resumeSession) {
       },
     });
     if (result && result.success) {
-      if (!resumeSession && result.upload_id) removeUploadSession(result.upload_id);
+      // 分块会话的清除由 files.js 上传完成回调 onSession(true) 负责，此处不清——
+      // 否则刷新后的 refreshList 会把进行中的大文件分块会话误清，导致断点续传提示消失。
       showToast(fileName + ' 上传成功' + (result.message && result.message !== 'ok' ? '：' + result.message : ''), 'success');
       removeProgressBar(progId);
       return;
@@ -165,7 +166,8 @@ async function simpleUpload(file) {
       },
     });
     if (result && result.success) {
-      if (result.upload_id) removeUploadSession(result.upload_id);
+      // 简单上传走 POST /upload 单请求：无分块会话（只有分块路径才产生 upload_id 会话），
+      // 无需 removeUploadSession。
       showToast(fileName + ' 上传成功', 'success');
     } else {
       showToast(fileName + ' 上传失败: ' + ((result && result.message) || 'unknown'), 'error');
@@ -198,7 +200,7 @@ async function uploadFiles(files) {
         },
       });
       if (result && result.success) {
-        if (result.upload_id) removeUploadSession(result.upload_id);
+        // 分块会话清理由 files.js onSession(true) 负责，此处不误清（见 chunkedUpload 注释）。
         showToast(fileName + ' 上传成功', 'success');
       } else if (result && result.upload_id === 'already_exists') {
         showToast(fileName + ' 已存在，跳过', 'success');
