@@ -304,10 +304,19 @@
     async function chunkedUpload(file, fileName, p) {
       const totalSize = file.size;
       const chunkSize = calcChunkSize(totalSize);
+      const persist = typeof p.onSession === 'function' ? p.onSession : null; // 会话持久化钩子（UI 断点续传）
+      const startMtimeNano = ((file.lastModified) || Date.now()) * 1000000;
+
+      // 计算 SHA-256 之前就先落一个基础会话（status='hashing'）——否则计算阶段（大文件
+      // 耗时可达数秒~数十秒）刷新页面，localStorage 里还没有任何会话，checkResumableUploads
+      // 无从发现，且此时服务端也还没有 init 会话（无法续传）。刷新后重选文件重算 checksum，
+      // upload_id（seed=filename|size|mtime|checksum）不变即可续传。
+      const preUploadId = await generateUploadId(fileName, totalSize, startMtimeNano, '');
+      if (persist) persist({ upload_id: preUploadId, filename: fileName, totalSize: totalSize, totalChunks: Math.ceil(totalSize / chunkSize), status: 'hashing', mtimeNano: startMtimeNano });
+
       const checksum = await computeSHA256(file, p.onProgress);
       const mtimeNano = ((file.lastModified) || Date.now()) * 1000000;
       const uploadId = await generateUploadId(fileName, totalSize, mtimeNano, checksum);
-      const persist = typeof p.onSession === 'function' ? p.onSession : null; // 会话持久化钩子（UI 断点续传）
 
       const initRes = await jsonRequest('POST', '/upload/init', {
         upload_id: uploadId, filename: fileName, total_size: totalSize,
@@ -324,8 +333,11 @@
       const sessionId = initRes.upload_id;
       // 首个会话就位后立即持久化（页面刷新后 checkResumableUploads 能读到 uploading）。
       // totalChunks 以 init 返回的 chunk_size 校准。
+      // 若 sessionId === preUploadId（filename/size/mtime 同源）：先移除 hashing 占位再落
+      // uploading——避免同 key 残留 hashing 幽灵会话（complete 只能按 sessionId 清）。
       if (persist) {
         const serverChunkSize = initRes.chunk_size || chunkSize;
+        if (sessionId === preUploadId) persist({ upload_id: preUploadId, filename: fileName }, true); // 清 hashing 占位（remove 语义）
         persist({ upload_id: sessionId, filename: fileName, totalSize: totalSize, totalChunks: Math.ceil(totalSize / serverChunkSize), fileChecksum: checksum, status: 'uploading' });
       }
 
