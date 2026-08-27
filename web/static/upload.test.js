@@ -19,14 +19,13 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 // 注入最小全局（upload.js require 时顶部不触碰 DOM，仅函数运行期访问）。
-// progressText 只依赖 formatSize（不在此列表）；会话依赖 localStorage；渲染依赖 document。
+// progressText 只依赖 appRender.formatSize（不在此列表）；会话依赖 localStorage；渲染依赖 document。
 globalThis.localStorage = (() => { const m = new Map(); return {
   getItem: (k) => (m.has(k) ? m.get(k) : null),
   setItem: (k, v) => m.set(k, String(v)),
   removeItem: (k) => m.delete(k),
 }; })();
-globalThis.formatSize = (n) => String(n) + 'B';
-globalThis.escHtml = (s) => String(s);
+globalThis.appRender = { formatSize: (n) => String(n) + 'B', escHtml: (s) => String(s) };
 globalThis.document = {
   getElementById() { return null; },
   querySelector() { return null; },
