@@ -724,6 +724,9 @@ function copyShareLink(token) {
 // --- 云端下载 ---
 let _cloudTasks = [];
 
+// 传输页状态：当前激活频道（缺省 all）。频道条与列表渲染入口（任务 4）。
+let _transferChannel = 'all';
+
 // genDefaultFilename 从 URL 推断默认文件名，委托给共享模块 cloudfilename.js。
 // 与 Go 端 pkg/cloudfilename 使用同一套规则（wget 行为），由共享语料测试保证双端一致。
 function genDefaultFilename(rawUrl) {
@@ -887,10 +890,12 @@ function bindCloudUrlRowEvents() {
 // #cloud-url 所在行的 innerHTML 替换为预览列表；若用户不点预览的"取消"而直接关闭
 // 弹窗，输入行不会自动恢复。再次打开弹窗时 showCloudDownload 依赖 #cloud-url 存在，
 // 缺失会导致 .value 抛 TypeError、弹窗空白。这里重建输入行并重新绑定按钮事件。
+// 选择器改为 .cloud-url-row（不再依赖 #cloud-modal 祖先，URL 区已迁入 #transfer-page）。
 function restoreCloudUrlRow() {
-  var urlRow = document.querySelector('#cloud-modal .cloud-url-row');
+  var urlRow = document.querySelector('.cloud-url-row');
   if (!urlRow || document.getElementById('cloud-url')) return;
-  // 静态可信模板，无用户输入拼接；用户内容通过 .value 赋值，不进入 innerHTML
+  // 静态可信模板，无用户输入拼接；用户内容通过 .value 赋值。
+  // 对端 row 可能位于 transfer-page（本任务迁入）——重建后沿用原容器即可。
   urlRow.innerHTML = '<textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>' +
     '<button type="button" id="cloud-chain-btn" class="btn btn-primary" style="white-space:nowrap;">链式下载</button>' +
     '<button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>' +
@@ -899,21 +904,18 @@ function restoreCloudUrlRow() {
   bindCloudUrlRowEvents();
 }
 
+// showCloudDownload（最小适配，键入裁定：云逻辑完整重组在任务 5）——由弹窗打开改为
+// 切转到传输页主 tab + 云任务频道。传输页轮询由 showTransferPage/hideTransferPage 门控
+//（进入传输页即启动、切离即停止）——这里不再自启轮询。
 function showCloudDownload() {
-  document.getElementById('cloud-modal').style.display = 'flex';
-  // 先恢复可能的预览残留，确保 #cloud-url 存在（否则 .value 抛 TypeError）
-  restoreCloudUrlRow();
-  document.getElementById('cloud-url').value = '';
-  refreshCloudTasks();
-  refreshCloudGroups();
-  startCloudPolling();
-  switchCloudTab('tasks');
+  switchMainTab('transfer');
+  switchTransferChannel('cloud_tasks');
 }
 
-function hideCloudDownload() {
-  document.getElementById('cloud-modal').style.display = 'none';
-  stopCloudPolling();
-}
+// hideCloudDownload 由频道切换与主 tab 门控接管：不再存在独立的"关闭云弹窗"行为。
+// 保留函数名（既有关闭/键盘 Esc 调用点），其职责已由 hideTransferPage（切离主 tab
+// 停止轮询）+ switchTransferChannel（切走云频道即隐藏云列表体）覆盖。
+function hideCloudDownload() { /* no-op：切离由主 tab / 频道切换接管（任务 5 重组） */ }
 
 let _cloudActiveTab = 'tasks';
 
@@ -946,6 +948,113 @@ function startCloudPolling() {
 
 function stopCloudPolling() {
   if (_cloudPollTimer) { clearInterval(_cloudPollTimer); _cloudPollTimer = null; }
+}
+
+// ---- 传输页：主 tab 切换 + 频道渲染（任务 4 骨架；云逻辑完整重组在任务 5）----
+
+// switchMainTab('files'|'transfer')：页面级主 tab。切换时改激活样式与显隐；
+// 进入 transfer 时由 showTransferPage 触发首次渲染 + 轮询，切离时由 hideTransferPage 停轮询。
+// 幂等：重复进入不重启渲染/轮询（切换守卫 mainTab !== tab 短路）。
+// 注意事项：云频道（cloud_tasks/cloud_groups）路由到旧云列表体（/cloud-groups-body），
+// 显隐交给 switchCloudTab（保留既有流程，任务 5 重组为统一渲染管线）；因此从云频道切离
+// 时不重置频道，返回仍留在云频道。
+function switchMainTab(tab) {
+  if (tab !== 'files' && tab !== 'transfer') return;
+  const cur = document.querySelector('.main-tab.active');
+  if (cur && cur.id === 'main-tab-' + tab) return; // 已在目标 tab，幂等返回
+  const oldTab = cur ? cur.id.replace('main-tab-', '') : 'files';
+  if (oldTab === 'transfer') hideTransferPage();
+  const filesPage = document.getElementById('files-page');
+  const transferPage = document.getElementById('transfer-page');
+  if (!filesPage || !transferPage) return;
+  const filesBtn = document.getElementById('main-tab-files');
+  const transferBtn = document.getElementById('main-tab-transfer');
+  if (filesBtn) filesBtn.classList.toggle('active', tab === 'files');
+  if (transferBtn) transferBtn.classList.toggle('active', tab === 'transfer');
+  filesPage.style.display = tab === 'files' ? '' : 'none';
+  transferPage.style.display = tab === 'transfer' ? '' : 'none';
+  if (tab === 'transfer') showTransferPage();
+}
+
+// showTransferPage：进入传输页（含初始化）——频道条渲染只需一次（DOMContentLoaded 后
+// transfer-page 已存在）；每次进入重渲染当前频道列表并启动轮询（幂等防重）。
+// initTransferPage 于 DOMContentLoaded 内调用一次完成频道条静态渲染与频道点击委托。
+function showTransferPage() {
+  renderTransferChannel();
+  startCloudPolling();
+}
+
+function hideTransferPage() {
+  stopCloudPolling();
+}
+
+// renderTransferChannel：按当前 _transferChannel 重渲染 #transfer-body 传输列表。
+// 数据源 transferStore.loadItems()（任务 4 占位；云任务/组归一进统一列表由任务 5 迁入）。
+function renderTransferChannel() {
+  const ch = _transferChannel;
+  if (ch === 'cloud_tasks') { switchCloudTab('tasks'); return; }
+  if (ch === 'cloud_groups') { switchCloudTab('groups'); return; }
+  // 非云频道（all/uploading/downloading/completed）走传输统一渲染管线。
+  const items = (typeof transferStore !== 'undefined' && transferStore.loadItems)
+    ? transferStore.loadItems()
+    : [];
+  const body = document.getElementById('transfer-body');
+  if (!body) return;
+  const html = appRender.buildTransferListHtml(items, ch);
+  body.innerHTML = html;
+  syncChannelBarActive();
+}
+
+// syncChannelBarActive：把当前频道的按钮打上 active 高亮（幂等，无则补；其它清显）。
+// 动画语义：仅同步 active 类，不做 innerHTML 重建（频道条激活样式随频道切换更新，
+// 数据仍复用，符合 spec 分节 1——频道切换只重渲染不重新拉取）。
+function syncChannelBarActive() {
+  const bar = document.getElementById('transfer-channel-bar');
+  if (!bar) return;
+  const btns = bar.querySelectorAll('[data-channel]');
+  for (const b of btns) {
+    const on = b.dataset.channel === _transferChannel;
+    b.classList.toggle('active', on);
+  }
+}
+
+// switchTransferChannel：频道切换（转移高亮）。云频道留在旧云列表体（cloud-tasks-body /
+// cloud-groups-body 的显隐由 switchCloudTab 管理）；其余频道写入 #transfer-body。
+// 频道切换只重渲染、不重新拉取（传输页核心交互，spec 分节 1）。
+function switchTransferChannel(ch) {
+  _transferChannel = ch;
+  renderTransferChannelBar(); // 重设频道条激活样式（channel-bar innerHTML 全量重建，委托在容器上不受影响）
+  renderTransferChannel();
+}
+
+// initTransferPage：静态元素一次性绑定——频道条渲染 + 频道条点击委托。
+// 云 URL 行绑定由 DOMContentLoaded 既有 bindCloudUrlRowEvents 负责（预览后 restoreCloudUrlRow
+// 会重新绑定），此处不再重复绑定避免重复处理器。预渲染 / guard 均幂等。
+function initTransferPage() {
+  renderTransferChannelBar();
+  const bar = document.getElementById('transfer-channel-bar');
+  if (bar) {
+    bar.addEventListener('click', function(e) {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const ch = btn.dataset && btn.dataset.channel;
+      if (!ch) return;
+      switchTransferChannel(ch);
+    });
+  }
+}
+
+// renderTransferChannelBar：由 TRANSFER_CHANNELS 精确取值生成频道条（顺序/spec 字面值）。
+// 每个频道按钮 id 按 TRANSFER_CHANNELS 的 id 命名 #transfer-channel-<id>；激活频道加 active。
+function renderTransferChannelBar() {
+  const bar = document.getElementById('transfer-channel-bar');
+  if (!bar) return;
+  let html = '';
+  for (const c of appRender.TRANSFER_CHANNELS) {
+    const active = c.id === _transferChannel ? ' active' : '';
+    html += '<button type="button" id="transfer-channel-' + c.id + '" class="channel-btn' + active + '" data-channel="' + c.id + '">' + c.label + '</button>';
+  }
+  bar.innerHTML = html;
 }
 
 let _cloudTasksInFlight = false;
@@ -1427,6 +1536,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // 认证栏
   document.getElementById('save-access-btn').addEventListener('click', saveAccessKeys);
+  // 主 tab 导航（文件/传输）
+  var tabFiles = document.getElementById('main-tab-files');
+  if (tabFiles) tabFiles.addEventListener('click', function() { switchMainTab('files'); });
+  var tabTransfer = document.getElementById('main-tab-transfer');
+  if (tabTransfer) tabTransfer.addEventListener('click', function() { switchMainTab('transfer'); });
+  // 传输页静态初始化（频道条渲染 + 点击委托），幂等
+  initTransferPage();
   // 「走隧道（调试）」checkbox：初值取自 localStorage，change 即时生效（无需保存）
   var transportCb = document.getElementById('use-tunnel-checkbox');
   if (transportCb) {
@@ -1469,11 +1585,13 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
 
-  // 云端下载弹窗（按钮 + Enter 快捷键统一走 bindCloudUrlRowEvents，避免重复绑定）
-  document.getElementById('cloud-close-btn').addEventListener('click', hideCloudDownload);
+  // 云端下载（云 URL 行按钮 + Enter 快捷键统一走 bindCloudUrlRowEvents；
+  // cloud-modal 已移除——URL 区迁入 #transfer-page，仍由同一函数绑定保持既有流程）
   bindCloudUrlRowEvents();
-  document.getElementById('cloud-refresh-btn').addEventListener('click', refreshCloudCurrentTab);
-  document.getElementById('cloud-close-modal-btn').addEventListener('click', hideCloudDownload);
+  // cloud-refresh-btn / cloud-close-modal-btn 不再存在（cloud-modal 移除，任务 4 裁定
+  // 物理删除 DOM）：刷新由传输页轮询门控接管，关闭由主 tab 门控接管。
+  // 云 tasks/groups tab 仍保留——频道点击委托在 #transfer-channel-bar（initTransferPage），
+  // 显隐由 switchCloudTab 管理（云任务/云组落频道条交互）。
   document.getElementById('cloud-tasks-tab').addEventListener('click', function() { switchCloudTab('tasks'); });
   document.getElementById('cloud-groups-tab').addEventListener('click', function() { switchCloudTab('groups'); });
 
