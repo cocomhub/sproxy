@@ -143,6 +143,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
 	localMux.HandleFunc("POST /upload/chunk", h.uploadChunk)
 	localMux.HandleFunc("GET /upload/status", h.uploadStatus)
+	localMux.HandleFunc("GET /upload/sessions", h.uploadSessions)
 	localMux.HandleFunc("POST /upload/complete", h.uploadComplete)
 	localMux.HandleFunc("GET /download/chunk", h.downloadChunk)
 
@@ -171,6 +172,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("POST /upload/init", h.authMiddleware(h.uploadInit))
 	srvMux.HandleFunc("POST /upload/chunk", h.authMiddleware(h.uploadChunk))
 	srvMux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
+	srvMux.HandleFunc("GET /upload/sessions", h.authMiddleware(h.uploadSessions))
 	srvMux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
 	srvMux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
 	srvMux.HandleFunc("POST /mkdir", h.authMiddleware(h.mkdir))

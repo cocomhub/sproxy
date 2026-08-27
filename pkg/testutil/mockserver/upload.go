@@ -193,6 +193,40 @@ func (m *MockUploadStore) CleanupSessionAfter(uploadID string, delay time.Durati
 	})
 }
 
+// ListSessions 返回全部会话的元信息快照（与真实 UploadStore 对齐，含已完成）。
+func (m *MockUploadStore) ListSessions() []server.ChunkedUploadSessionMeta {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]server.ChunkedUploadSessionMeta, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		result = append(result, server.ChunkedUploadSessionMeta{
+			UploadID:      s.UploadID,
+			Filename:      s.Filename,
+			TotalSize:     s.TotalSize,
+			ChunkSize:     s.ChunkSize,
+			TotalChunks:   s.TotalChunks,
+			ReceivedCount: countReceived(s.ReceivedChunks),
+			MissingCount:  s.TotalChunks - countReceived(s.ReceivedChunks),
+			FileChecksum:  s.FileChecksum,
+			FileModTime:   s.FileModTime,
+			ExpiresAt:     s.ExpiresAt.UnixNano(),
+			Completed:     s.Completed,
+		})
+	}
+	return result
+}
+
+// countReceived 统计 bitmap 中已接收的分块数。
+func countReceived(bitmap []bool) int {
+	count := 0
+	for _, b := range bitmap {
+		if b {
+			count++
+		}
+	}
+	return count
+}
+
 // Stop 停止后台任务（mock 空实现，无后台 goroutine 需要停止）。
 func (m *MockUploadStore) Stop() {
 	/* No-op: mock has no background goroutines or resources to release. */
