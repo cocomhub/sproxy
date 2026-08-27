@@ -62,7 +62,7 @@ type UploadSessionInfo struct {
 	TotalChunks   int    `json:"total_chunks"`
 	FileChecksum  string `json:"file_checksum"`
 	FileModTime   int64  `json:"file_mod_time"` // UnixNano, 0 = unknown
-	Status        string `json:"status"`        // uploading | stuck（总块数 > 已收块数才能 restart）
+	Status        string `json:"status"`        // uploading（Completed 会话被 handler 过滤，永不返回）
 }
 
 // ChunkSessionsResponse 是 GET /upload/sessions 的响应结构。
