@@ -4,6 +4,9 @@
 // 上传 UI 模块（app 层）：进度条 / 会话 / 断点续传 DOM。上传纯逻辑委托给
 // sclient/api/files.js 的 sc.files.upload（内部自己看 transport 隧道/直连与分块决策）。
 // 依赖 sclient/sha256.js, sclient/*, app-render.js（appRender：formatSize/escHtml）、app.js（showToast）。
+// 加载顺序（index.html）：upload.js 在 app-render.js 之前——函数体执行时 appRender 已可用；
+// 严禁在此文件内新开 formatSize/escHtml 等函数（与 app-render 重复，已因转发删除踩过坑）。
+// global：currentSubdir（app.js），showToast（app.js）——调用点运行期才解引用，加载序安全。
 //
 // 渲染隔离原则（全部 app 层共同遵守）：
 //   1. 纯计算函数（progressText 等）不碰 DOM、单测可直测；
@@ -23,6 +26,7 @@ const SESSIONS_KEY = 'sproxy_upload_sessions';
 //   - totalChunks>1 → 附加「分块 i/N」（chunkIndex 缺省从 1 计，i 封顶 N）；
 //   - 否则仅「N%（loaded/total）」。
 // 所有数值经 Math.round；不抛错（undefined → 0 文案）。
+// （纯函数可测入口与语义亦在 appRender.uploadProgressText；本处为 DOM 无关的本地实现。）
 function progressText(input) {
   const i = (input && typeof input === 'object') ? input : {};
   const loaded = (typeof i.loaded === 'number' && i.loaded >= 0) ? i.loaded : 0;

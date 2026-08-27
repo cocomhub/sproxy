@@ -355,8 +355,26 @@
     return html;
   }
 
+  // 上传进度文案（与 upload.js progressText 同语义——upload.js 已在本文件之下本地实现，
+  // 重复不是缺陷。唯一依赖 formatSize 的跨文件调用点：upload.js 顶部进度回调）。
+  // 本函数仅供单元测试（可测入口）与 upload 逻辑复用，避免直接调用依赖 DOM 的整体模块。
+  function uploadProgressText(label, loaded, total, totalChunks, chunkIndex) {
+    const sized = label || '上传中…';
+    const pct = total > 0 ? Math.round(loaded / total * 100) : 0;
+    const sizeTxt = formatSize(loaded) + '/' + formatSize(total);
+    let text;
+    if (totalChunks && totalChunks > 1) {
+      const idx = (chunkIndex || chunkIndex === 0 ? chunkIndex : 0) + 1;
+      text = sized + ' ' + pct + '%（' + sizeTxt + '，分块 ' + Math.min(totalChunks, idx) + '/' + totalChunks + '）';
+    } else {
+      text = sized + ' ' + pct + '%（' + sizeTxt + '）';
+    }
+    return { pct: pct, text: text };
+  }
+
   return {
     escHtml, formatSize, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
+    uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
     statusText, buildProgressBar, cloudTaskActions, buildCloudTaskTableHtml,

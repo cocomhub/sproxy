@@ -121,6 +121,7 @@ notest:
 .PHONY: web-test
 web-test:
 	@node --check web/static/app.js
+	@node --check web/static/upload.js
 	@node --check web/static/cloudfilename.js
 	@node --check web/static/sclient/crypto.js
 	@node --check web/static/sclient/sha256.js
