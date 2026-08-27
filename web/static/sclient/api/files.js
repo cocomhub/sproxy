@@ -333,11 +333,12 @@
       const sessionId = initRes.upload_id;
       // 首个会话就位后立即持久化（页面刷新后 checkResumableUploads 能读到 uploading）。
       // totalChunks 以 init 返回的 chunk_size 校准。
-      // 若 sessionId === preUploadId（filename/size/mtime 同源）：先移除 hashing 占位再落
-      // uploading——避免同 key 残留 hashing 幽灵会话（complete 只能按 sessionId 清）。
+      // hashing 占位（empty-checksum 的 preUploadId）与真实 session（real-checksum）恒不同 key，
+      // 但续传进 init 后 hashing 占位已无意义：统一移除再落 uploading——否则 complete 只清
+      // 真实 sessionId，hashing 残留成幽灵（E2E 已证实，E2E 里续传后残留 3ed8a4…）。
       if (persist) {
         const serverChunkSize = initRes.chunk_size || chunkSize;
-        if (sessionId === preUploadId) persist({ upload_id: preUploadId, filename: fileName }, true); // 清 hashing 占位（remove 语义）
+        persist({ upload_id: preUploadId, filename: fileName }, true); // 清 hashing 占位（对无占位的全新上传是无害 no-op）
         persist({ upload_id: sessionId, filename: fileName, totalSize: totalSize, totalChunks: Math.ceil(totalSize / serverChunkSize), fileChecksum: checksum, status: 'uploading' });
       }
 
