@@ -601,7 +601,6 @@ document.addEventListener('keydown', function(e) {
 sclientInit();
 initTheme();
 refreshList();
-checkResumableUploads();
 
 // --- 分享管理 ---
 var _shareModalVisible = false;
@@ -1421,6 +1420,11 @@ async function deleteVersion(filename, versionId) {
 
 // --- DOMContentLoaded 初始化：用 addEventListener 绑定所有静态 HTML 元素 ---
 document.addEventListener('DOMContentLoaded', function() {
+  // 断点续传检测在 DOMContentLoaded 后执行——此时 resume-container 已存在且页面交互就绪；
+  // 放在顶层 refreshList 之后会导致其成功分支之前误清进行中分块会话的历史隐患（已由
+  // chunkedUpload/uploadFiles success 分支去 removeUploadSession 修复），挪到此统一时序。
+  checkResumableUploads();
+
   // 认证栏
   document.getElementById('save-access-btn').addEventListener('click', saveAccessKeys);
   // 「走隧道（调试）」checkbox：初值取自 localStorage，change 即时生效（无需保存）
