@@ -21,7 +21,10 @@ const path = require('node:path');
 const dl = require(path.join(__dirname, 'download.js'));
 
 // ---- 内存 store mock（对齐 transfer-store 接口契约）----
-function createMockStore() {
+// opts.deleteGate：可选 {wait: Promise, did: fn}——deleteChunkRange 先等 wait 再清块。
+// 用于精确制造「assembleAndSave 已进入、deleteChunkRange 完成前」的 cancel 写回窗口。
+function createMockStore(opts) {
+  const o = opts || {};
   let items = [];
   const blocks = new Map(); // `${id}:${idx}` -> {data,size,...}
   return {
@@ -42,8 +45,13 @@ function createMockStore() {
       return n;
     },
     async deleteChunkRange(itemId) {
+      const g = o && o.deleteGate;
+      if (g && g.wait) await g.wait; // 门控：等待测试放行（模拟 IDB 异步删除耗时）
       for (const k of Array.from(blocks.keys())) if (k.startsWith(itemId + ':')) blocks.delete(k);
+      if (g && g.did) g.did();
     },
+    _blocks() { return blocks; },
+    _items() { return items; },
   };
 }
 
@@ -144,7 +152,7 @@ function patternBytes(size) {
 
 function makeManager(fileBytes, opts) {
   const o = opts || {};
-  const store = createMockStore();
+  const store = createMockStore(o); // 透传 opts（deleteGate 等）
   const files = {};
   files[o.filename || 'a.bin'] = fileBytes;
   const transport = createMockTransport(Object.assign({ dataByFile: files }, o));
@@ -317,6 +325,36 @@ test('R1：cancel 后完成写回被抑制（onComplete 不触发、item 不残�
   assert.strictEqual(onCompleteCalled.length, 0, '取消后 onComplete 不得触发');
   assert.strictEqual(await x.store.listChunkCount(itemId), 0, '取消后块缓存已清');
   assert.strictEqual(x.mgr.isRunning(itemId), false, '_running 会话也不得残留');
+});
+
+// ---- R2：cancel 落在 assembleAndSave「已进入、deleteChunkRange 未完成」写回窗口 ----
+
+test('R2：deleteChunkRange 挂起时 cancel → restart 复查生效：completed 未写回、onComplete 未触发、item 不残留', async () => {
+  const chunkSize = dl.calcChunkSize(0);
+  const size = 2 * chunkSize;
+  const bytes = patternBytes(size);
+  const x = makeManager(bytes, { blockAfter: { 'a.bin': 0 }, downloadDelay: 0 });
+  // 用 .deleteChunkRange 包一个「等待放行」的门——精确命中写回窗口（assemble 已进入、
+  // delete 尚未完成、cancel 穿插）。
+  const store0 = x.store;
+  const origDelete = store0.deleteChunkRange;
+  let releaseDelete;
+  const entered = new Promise((r) => { releaseDelete = r; });
+  let deleteStarted = false;
+  store0.deleteChunkRange = function (id) { deleteStarted = true; return entered.then(function () { return origDelete(id); }); };
+  const onCompleteCalled = [];
+  x.mgr.startDownload('a.bin', { size: size, mtime: '5', checksum: 'c' }, {
+    onComplete: (blob, filename) => { onCompleteCalled.push(filename); },
+  });
+  await waitUntil(() => deleteStarted, 3000); // deleteChunkRange 已被进入——assemble 在写回窗口挂起
+  const itemId = x.store.loadItems()[0].id;
+  await x.mgr.cancelDownload(itemId);                 // cancel 落在 delete 进行中
+  releaseDelete();                                    // 放行 delete——其 .then 内二次复查应中止写回
+  await new Promise((r) => setTimeout(r, 120));
+  assert.deepStrictEqual(x.store.loadItems().map((i) => i.id), [], '写回窗口 cancel：completed 未写回（item 未复活）');
+  assert.strictEqual(onCompleteCalled.length, 0, '写回窗口 cancel：onComplete 未触发');
+  assert.strictEqual(await x.store.listChunkCount(itemId), 0, '取消后块缓存已清');
+  assert.strictEqual(x.mgr.isRunning(itemId), false, '_running 会话不残留');
 });
 
 test('分块下载失败置 failed 且写回 lastError（缺块不组装不完成）', async () => {
