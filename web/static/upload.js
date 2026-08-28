@@ -118,6 +118,7 @@ function sessionToTransferItem(sess) {
     meta: {
       uploadId: uploadId,
       fileChecksum: (typeof sess.fileChecksum === 'string') ? sess.fileChecksum : '',
+      mtimeNano: (typeof sess.mtimeNano === 'number' && isFinite(sess.mtimeNano)) ? sess.mtimeNano : '',
       totalChunks: (typeof sess.totalChunks === 'number' && sess.totalChunks > 0) ? sess.totalChunks : 0,
       chunkSize: (typeof sess.chunkSize === 'number' && sess.chunkSize > 0) ? sess.chunkSize : (typeof sess.meta_serverChunkSize === 'number' && sess.meta_serverChunkSize > 0 ? sess.meta_serverChunkSize : 0),
       serverChunkSize: (typeof sess.serverChunkSize === 'number' && sess.serverChunkSize > 0) ? sess.serverChunkSize : (typeof sess.chunkSize === 'number' && sess.chunkSize > 0 ? sess.chunkSize : 0),
@@ -399,15 +400,22 @@ function dismissResume(uploadId) {
 async function resumeUpload(uploadId, file) {
   const item = itemForUploadId(uploadId);
   if (!item) { showToast('续传数据已丢失', 'error'); return; }
+  const savedMtimeNano = (item.meta && isFinite(Number(item.meta.mtimeNano)) && Number(item.meta.mtimeNano) > 0) ? Number(item.meta.mtimeNano) : '';
+  // 续传校验：size 必须匹配；mtimeNano 双方可得时也必须匹配（防内容异动续出新旧混合文件）。
+  function mtimeMismatch(candidateMtimeNano) {
+    return savedMtimeNano !== '' && Number(candidateMtimeNano) !== savedMtimeNano;
+  }
   if (file) {
     if (item.totalSize && file.size !== item.totalSize) { showToast('文件大小不匹配，无法续传', 'error'); return; }
+    const fileMtimeNano = ((file.lastModified) || Date.now()) * 1000000;
+    if (mtimeMismatch(fileMtimeNano)) { showToast('文件已变更，无法续传', 'error'); return; }
     hideResumePrompt(uploadId);
     await chunkedUpload(file, item);
     checkResumableUploads();
     safeRefreshList();
     return;
   }
-  // 免重选：FS 句柄 → read 授权 → getFile → size 校验 → 补缺失块。
+  // 免重选：FS 句柄 → read 授权 → getFile → size/mtime 校验 → 补缺失块。
   let handle = null;
   try {
     const store = currentStore();
@@ -422,6 +430,8 @@ async function resumeUpload(uploadId, file) {
   try { picked = await handle.getFile(); } catch (e) { picked = null; }
   if (!picked) { hideResumePrompt(uploadId); showToast('句柄失效，请选择文件续传', 'info'); return; }
   if (item.totalSize && picked.size !== item.totalSize) { hideResumePrompt(uploadId); showToast('文件已变更，请选择文件续传', 'info'); return; }
+  const pickedMtimeNano = ((picked.lastModified) || Date.now()) * 1000000;
+  if (mtimeMismatch(pickedMtimeNano)) { hideResumePrompt(uploadId); showToast('文件已变更，请选择文件续传', 'info'); return; }
   hideResumePrompt(uploadId);
   await chunkedUpload(picked, item);
   checkResumableUploads();
@@ -431,24 +441,19 @@ async function resumeUpload(uploadId, file) {
 // --- 上传入口 ---
 async function uploadFiles(files) {
   if (!files || files.length === 0) return;
-  const singleFile = files && files.length === 1;
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
     const size = file.size;
     const progId = createProgressBar(fileName, size, 1);
-    // 单文件且 FS Access 可用：本实现不额外弹 picker（见 takeFileHandle）——句柄免重选
-    // 由 resumeUpload(uploadId) 句柄路径承担。此处保留 pendingHandle 加载语义以备未来主动
-    // picker 拿句柄；当前恒 null（上传照常，刷新后走「选择文件续传」）。
-    const pendingHandle = null;
+    // FS Access 免重选：句柄由 resumeUpload(uploadId) 句柄路径承担（无需此处采集）；
+    // 不留采集钩子——input change 后无法自动弹 picker 且会破坏『选中即上传』体验。
     try {
       const result = await sc.files.upload(file, {
         subdir: currentSubdir ? currentSubdir : undefined,
         onSession: function(sess, remove) {
           if (remove || sess.upload_id === 'already_exists') { removeUploadSession(sess.upload_id); return; }
           saveUploadSession(sess.upload_id, sess);
-          // 首次 persist（hashing 占位真正拿到 upload_id）且句柄已捕获 → 落库 sproxy-up-dev。
-          if (pendingHandle && sess.upload_id) { saveFileHandleForSession(sess.upload_id, pendingHandle); pendingHandle = null; }
         },
         onProgress: function(pr) {
           // 分块回调对对象 {loaded,total,chunkIndex,totalChunks}；计算期数值。

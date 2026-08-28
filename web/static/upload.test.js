@@ -30,6 +30,13 @@ globalThis.document = {
   addEventListener() {},
 };
 globalThis.sclientTransport = { coreRequest: () => Promise.reject(new Error('transport 未注入')) };
+// 续传校验与上传内饰引用 sc.files（upload.js 上层入口，resume 直接调 chunkedUpload）。
+// 默认拒绝式 mock；用例内按需替换为计数 mock。
+globalThis.sc = { files: { upload: () => Promise.reject(new Error('files.upload 未注入')) } };
+// resume 尾部安全调用
+let _rLastToast = null;
+globalThis.showToast = (msg, kind) => { _rLastToast = { msg: String(msg), kind: kind || '' }; };
+globalThis.currentSubdir = ''; // chunkedUpload/uploadFiles 读取
 
 const u = require(path.join(__dirname, 'upload.js'));
 
@@ -46,7 +53,10 @@ function createMockStore(seedItems) {
     },
     removeItem(id) { items = items.filter((it) => it.id !== id); },
     saveFileHandle(uploadId, fileHandle) { handles.set(uploadId, fileHandle); return Promise.resolve(); },
+    getFileHandle(uploadId) { return handles.get(uploadId) || null; },
+    saveFileHandle(uploadId, fileHandle) { handles.set(uploadId, fileHandle); return Promise.resolve(fileHandle); },
     getFileHandle(uploadId) { return Promise.resolve(handles.get(uploadId) || null); },
+    setHandle(uploadId, fileHandle) { handles.set(uploadId, fileHandle); },
     queryFileHandlePermission(fileHandle, mode) {
       if (!fileHandle || typeof fileHandle.queryPermission !== 'function') {
         return Promise.resolve(null);
@@ -57,6 +67,11 @@ function createMockStore(seedItems) {
     _handles() { return handles; },
   };
 }
+
+// fake File 对象（upload.js 读取 lastModified/size/name）；resume 的 refreshList 用真实
+// window.refreshList —— takeFileHandle 已简化，resume/file 路不触碰 upload 的 takeFileHandle。
+globalThis.window = { showOpenFilePicker: undefined };
+globalThis.refreshList = () => {}; // resumeUpload 尾部 safeRefreshList 防抛
 
 // ---- 会话层（任务 7：TransferItem kind:'upload' 语义） ----
 const uploadItem = (over) => Object.assign({
@@ -207,6 +222,93 @@ test('checkResumableUploads：completed 删除 / missing>0 提示续传 / 其它
   } finally {
     globalThis.sclientTransport = { coreRequest: () => Promise.reject(new Error('transport 未注入')) };
     cap.restore();
+    u.setTransferStore(null);
+  }
+});
+
+// ---- resumeUpload：file 路 size 不匹配 → 提示且不发起上传；句柄路 granted+size 匹配补块 ----
+// 用假 file/clone（lastModified/size/name）与计数 mock files.upload；item 带 meta.mtimeNano。
+const baseMtimeMs = 1700000000000;
+function fakeFile(name, size, lastMs) {
+  return { name: name, size: size, lastModified: lastMs === undefined ? baseMtimeMs : lastMs, arrayBuffer: () => Promise.resolve(new ArrayBuffer(size)) };
+}
+function countingUpload() {
+  let calls = 0;
+  const filesUpload = function () { calls++; return Promise.resolve({ success: true, upload_id: 'cid', message: '合并成功' }); };
+  return { get() { return calls; }, filesUpload, install() { globalThis.sc = { files: { upload: filesUpload } }; } };
+}
+
+// 替换 document stub 以让 hideResumePrompt 不再操作 querySelector；并隔离 toast 记录。
+test('resumeUpload file 路：size 不匹配 → toast 提示、不发起上传（files.upload 计数 0）', async () => {
+  const store = createMockStore([{
+    id: 'rid1', kind: 'upload', filename: 'r.bin', status: 'uploading', totalSize: 100, total: 100,
+    meta: { uploadId: 'rid1', mtimeNano: baseMtimeMs * 1000000, chunksBitmap: [1, 0], totalChunks: 2 },
+  }]);
+  u.setTransferStore(store);
+  const cnt = countingUpload();
+  cnt.install();
+  try {
+    await u.resumeUpload('rid1', fakeFile('r.bin', 99, baseMtimeMs));
+    assert.strictEqual(cnt.get(), 0, 'size 不匹配不得发起上传');
+    assert.ok(_rLastToast && _rLastToast.msg.includes('不匹配'), 'toast=' + (_rLastToast && _rLastToast.msg));
+  } finally {
+    globalThis.sc = { files: { upload: () => Promise.reject(new Error('files.upload 未注入')) } };
+    u.setTransferStore(null);
+  }
+});
+
+// 句柄路：mock store 返回 fake handle；queryPermission granted + picked.size==totalSize +
+// mtime 匹配 → 经 getFile 拿 picked 走 chunkedUpload（mock files.upload 计数 1）。
+test('resumeUpload 句柄免重选路：granted + size/mtime 匹配 → files.upload 调用一次（补缺失块）', async () => {
+  const store = createMockStore([{
+    id: 'rid2', kind: 'upload', filename: 'dir/h.bin', status: 'uploading', totalSize: 100, total: 100,
+    meta: { uploadId: 'rid2', mtimeNano: baseMtimeMs * 1000000, chunksBitmap: [1, 0], totalChunks: 2 },
+  }]);
+  // fake handle：queryPermission('read') → granted；getFile() → 匹配的 picked 文件。
+  const handle = {
+    queryPermission: () => Promise.resolve('granted'),
+    getFile: () => Promise.resolve(fakeFile('h.bin', 100, baseMtimeMs)),
+  };
+  store.setHandle('rid2', handle);
+  u.setTransferStore(store);
+  const cnt = countingUpload();
+  cnt.install();
+  // chunkedUpload 会 createProgressBar（读 #upload-progress-container）——注入容器 stub。
+  const progContainer = { insertAdjacentHTML() {} };
+  const origGet = globalThis.document.getElementById;
+  const origQ = globalThis.document.querySelector;
+  globalThis.document.getElementById = (id) => (id === 'upload-progress-container' ? progContainer : origGet(id));
+  globalThis.document.querySelector = () => null;
+  try {
+    await u.resumeUpload('rid2'); // file 缺省 → 句柄路径
+    assert.strictEqual(cnt.get(), 1, 'granted+匹配 → 发起续传（只补缺失块由 files.js 内核 missing_chunks 决定）');
+  } finally {
+    globalThis.document.getElementById = origGet;
+    globalThis.document.querySelector = origQ;
+    globalThis.sc = { files: { upload: () => Promise.reject(new Error('files.upload 未注入')) } };
+    u.setTransferStore(null);
+  }
+});
+
+test('resumeUpload 句柄免重选路：mtime 不匹配 → toast 提示、不发上传', async () => {
+  const store = createMockStore([{
+    id: 'rid3', kind: 'upload', filename: 'h.bin', status: 'uploading', totalSize: 100, total: 100,
+    meta: { uploadId: 'rid3', mtimeNano: (baseMtimeMs + 5) * 1000000, chunksBitmap: [1, 0], totalChunks: 2 },
+  }]);
+  const handle = {
+    queryPermission: () => Promise.resolve('granted'),
+    getFile: () => Promise.resolve(fakeFile('h.bin', 100, baseMtimeMs)),
+  };
+  store.setHandle('rid3', handle);
+  u.setTransferStore(store);
+  const cnt = countingUpload();
+  cnt.install();
+  try {
+    await u.resumeUpload('rid3');
+    assert.strictEqual(cnt.get(), 0, 'mtime 不匹配不发上传');
+    assert.ok(_rLastToast && _rLastToast.msg.includes('已变更'), 'toast=' + (_rLastToast && _rLastToast.msg));
+  } finally {
+    globalThis.sc = { files: { upload: () => Promise.reject(new Error('files.upload 未注入')) } };
     u.setTransferStore(null);
   }
 });
