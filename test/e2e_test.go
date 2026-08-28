@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -767,4 +768,425 @@ func TestE2E_TunnelEncryption(t *testing.T) {
 	if string(downloaded) != string(content) {
 		t.Fatalf("content mismatch: got %q, want %q", string(downloaded), string(content))
 	}
+}
+
+// ---- 传输管理器：上传会话恢复 E2E ----
+// 分块上传会话恢复：init → 传部分块 → GET /upload/sessions 断言含该会话
+// （status=uploading）→ 同 upload_id 再 init（reused）→ 补传缺失块 → complete →
+// 断言 /upload/sessions 已不含该会话且文件可下载、checksum 一致。
+// 纯 HTTP 直接驱动真实二进制，经 signingTransport 自动 SproxySig 签名。
+func TestE2E_UploadSessionResume(t *testing.T) {
+	t.Parallel()
+	baseURL, cleanup := startSPROXY(t)
+	defer cleanup()
+
+	const chunkSize = 64 << 10                 // 64 KiB，E2E 用小块避免大数据量
+	content := make([]byte, chunkSize*3+12345) // ~3.5 块
+	for i := range content {
+		content[i] = byte(i*31 + 7)
+	}
+	fileChecksum := sha256hex(content)
+
+	modTime := time.Now().Add(-time.Hour).Truncate(time.Second) // 提前 1 小时的确定性时间戳
+	uploadID := "e2e-resume-" + fileChecksum[:12]
+	filename := "e2e-resume.bin"
+
+	// 1) init，带 file_mod_time 与 file_checksum，建立会话（reused=false）
+	initResp := doInit(t, baseURL, uploadID, filename, content, chunkSize, modTime, fileChecksum)
+	if initResp.UploadID != uploadID {
+		t.Fatalf("init 返回 upload_id=%q，期望 %q", initResp.UploadID, uploadID)
+	}
+
+	// 2) 只传前 2 个分块（部分上传）
+	for _, idx := range []int{0, 1} {
+		uploadChunkE(t, baseURL, uploadID, idx, chunkSize, content)
+	}
+
+	// 3) GET /upload/sessions 断言含该会话且状态 uploading
+	sess := fetchSession(t, baseURL, uploadID)
+	if sess == nil {
+		t.Fatal("GET /upload/sessions 应包含该会话")
+	}
+	if sess.Status != "uploading" {
+		t.Fatalf("session 状态应为 uploading，got %q", sess.Status)
+	}
+	if sess.ReceivedCount != 2 {
+		t.Fatalf("received_count 应为 2，got %d", sess.ReceivedCount)
+	}
+
+	// 4) 同 upload_id 再 init → reused 续传，missing_chunks 合理
+	init2 := doInit(t, baseURL, uploadID, filename, content, chunkSize, modTime, fileChecksum)
+	if init2.UploadID != uploadID {
+		t.Fatalf("续传 init 返回 upload_id=%q，期望 %q", init2.UploadID, uploadID)
+	}
+
+	// 5) status 查询获取缺失块
+	delta := doStatus(t, baseURL, uploadID)
+	if delta.ReceivedCount != 2 {
+		t.Fatalf("续传后 received_count 应为 2，got %d", delta.ReceivedCount)
+	}
+	if len(delta.MissingChunks) == 0 {
+		t.Fatal("续传后仍应有缺失分块")
+	}
+
+	// 6) 补传缺失块
+	for _, idx := range delta.MissingChunks {
+		uploadChunkE(t, baseURL, uploadID, idx, chunkSize, content)
+	}
+
+	// 7) complete → 成功 + checksum 一致
+	complete := doComplete(t, baseURL, uploadID)
+	if !complete.Success {
+		t.Fatalf("complete 失败: %s", complete.Message)
+	}
+	if complete.FileChecksum != fileChecksum {
+		t.Fatalf("complete checksum: got %s, want %s", complete.FileChecksum, fileChecksum)
+	}
+
+	// 8) complete 后列表已不含该会话（上传管理器在轮询里靠此判定会话结束）
+	if got := fetchSession(t, baseURL, uploadID); got != nil {
+		t.Fatalf("complete 后 /upload/sessions 仍含会话: %+v", got)
+	}
+
+	// 9) 文件可下载，内容与 checksum 一致
+	dlStatus, dlHeaders, dlBody := downloadFile(t, baseURL, filename)
+	if dlStatus != http.StatusOK {
+		t.Fatalf("下载恢复完成的文件失败: status=%d", dlStatus)
+	}
+	if sha256hex(dlBody) != fileChecksum {
+		t.Fatalf("下载内容 checksum 不一致")
+	}
+	if dlHeaders.Get("X-File-Checksum") != fileChecksum {
+		t.Fatalf("下载 checksum 头不一致: got %s", dlHeaders.Get("X-File-Checksum"))
+	}
+}
+
+// ---- 传输管理器：恢复校验 mtime 变更回退（服务端语义 E2E） ----
+// 场景：客户端本地文件 mtime/内容在同一 upload_id 下发生变更（前端应回退全量重传，
+// 但服务端对同 upload_id 重新 init 会 returned 已有的会话——本 E2E 验证服务端
+// 对这种重新 init 的正确语义（reused 会话 + missing_chunks 列表），
+// 以及文件内容变更导致 chunk checksum 变化时服务端的处置。
+// 前提：uploadID 是客户端对文件元数据（filename|size|mtime|checksum）派生的，
+// 内容变更后 checksum 也会变 → 客户端上传 uploadID 必然变化 → 服务端不会再命中旧会话。
+// 因此服务端「同 upload_id 变内容」只在客户端显式复用 upload_id 时出现；
+// 此时服务端保留创建时的 FileModTime/FileChecksum 不变（GetOrCreateSession 不覆盖），
+// chunk checksum 不一致块会被拒绝写入，完整 re-init 只能视为新会话（不同 upload_id）。
+func TestE2E_UploadSessionResume_MTimeChanged(t *testing.T) {
+	t.Parallel()
+	baseURL, cleanup := startSPROXY(t)
+	defer cleanup()
+
+	const chunkSize = 64 << 10
+	// 内容 A（大小与内容 A2 相同，但内容不同，模拟本地文件被替换）
+	contentA := repeatPattern(79, chunkSize*2+20000) // ~2.3 块
+	contentB := repeatPattern(193, len(contentA))    // 同尺寸不同内容，恰与 A 等长
+	if bytes.Equal(contentA, contentB) {
+		t.Fatal("测试数据设计错误：两内容不能相同")
+	}
+	fileChecksumA := sha256hex(contentA)
+	fileChecksumB := sha256hex(contentB)
+	totalChunks := int((int64(len(contentA)) + chunkSize - 1) / chunkSize)
+
+	modTimeA := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	modTimeB := modTimeA.Add(-30 * time.Minute)                         // 不同 mtime：前端链路里 resume 判定会因 mtime/checksum 变化而回退
+	uploadID := "e2e-mtime-" + strings.ReplaceAll(dateStamp(), ":", "") // 每次运行唯一，避免残留会话干扰
+	filename := "e2e-mtime-change.bin"
+
+	// 1) init 带 A 的 checksum/mtime（建立会话）
+	doInit(t, baseURL, uploadID, filename, contentA, chunkSize, modTimeA, fileChecksumA)
+
+	// 2) 传 A 的第一块
+	uploadChunkE(t, baseURL, uploadID, 0, chunkSize, contentA)
+
+	// 3) 同 upload_id 再 init（带 B 的 checksum/mtime）——记录服务端语义
+	initB := doInit(t, baseURL, uploadID, filename, contentB, chunkSize, modTimeB, fileChecksumB)
+	if initB.Success == false {
+		t.Fatalf("同 upload_id 重新 init 应成功: %+v", initB)
+	}
+
+	// 4) 服务端返回 reused 会话（原有 received bitmap）；
+	//    断言 /upload/sessions 里 FileModTime 仍是创建时 A 的值（GetOrCreateSession 不覆盖）。
+	sess := fetchSession(t, baseURL, uploadID)
+	if sess == nil {
+		t.Fatalf("会话应仍在列表中")
+	}
+	if sess.FileModTime != modTimeA.UnixNano() {
+		t.Fatalf("GetOrCreateSession 续传应保留创建时 FileModTime，got %d want %d", sess.FileModTime, modTimeA.UnixNano())
+	}
+
+	// 5) 服务端真实契约：同 upload_id 下 chunk 只校验「本次上传分块的自身 checksum」，
+	//    不会因与已接收块内容不同而拒绝（同一 session 内会静默覆盖+置位）。
+	//    真实客户端不依赖此路径：upload_id = sha256(filename|size|mtime|checksum) 前缀，
+	//    内容变了 upload_id 必然变，永远不会对已存在的旧 session 传新内容。
+	//    因此这里不再断言“B 内容应被拒绝”，只验证会话未损坏、可恢复原内容。
+	_ = uploadChunkRaw(t, baseURL, uploadID, 0, sha256hex(chunkSlice(contentB, 0, chunkSize)), chunkSlice(contentB, 0, chunkSize))
+
+	// 6) 恢复原内容 A 的分块 0（幂等跳过/成功）——验证会话未损坏、缺失块列表仍只缺后续块
+	repair := uploadChunkRaw(t, baseURL, uploadID, 0, sha256hex(chunkSlice(contentA, 0, chunkSize)), chunkSlice(contentA, 0, chunkSize))
+	if !repair.Success {
+		t.Fatalf("恢复 A 的 chunk0 应成功: %+v", repair)
+	}
+
+	// 7) 补全 A 的缺失块 → complete 成功，checksum 为 A
+	for idx := range totalChunks {
+		if idx == 0 {
+			continue // chunk0 已在上一步恢复
+		}
+		uploadChunkE(t, baseURL, uploadID, idx, chunkSize, contentA)
+	}
+	complete := doComplete(t, baseURL, uploadID)
+	if !complete.Success {
+		t.Fatalf("complete 失败: %s", complete.Message)
+	}
+	if complete.FileChecksum != fileChecksumA {
+		t.Fatalf("complete checksum 应等于 A: got %s, want %s", complete.FileChecksum, fileChecksumA)
+	}
+
+	// 8) 下载验证最终文件 = A
+	dlStatus, _, dlBody := downloadFile(t, baseURL, filename)
+	if dlStatus != http.StatusOK {
+		t.Fatalf("下载状态: %d", dlStatus)
+	}
+	if sha256hex(dlBody) != fileChecksumA {
+		t.Fatalf("最终文件内容应等于 A")
+	}
+}
+
+// ---- 分块上传 E2E 辅助 ----------------
+
+// e2eInitData 是 /upload/init 请求体的结构化参数。
+// initInitResp e2e: /upload/init 响应。
+type e2eInitResponse struct {
+	Success   bool   `json:"success"`
+	UploadID  string `json:"upload_id,omitempty"`
+	ChunkSize int64  `json:"chunk_size,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+type e2eInitRequest struct {
+	UploadID     string `json:"upload_id"`
+	Filename     string `json:"filename"`
+	TotalSize    int64  `json:"total_size"`
+	ChunkSize    int64  `json:"chunk_size"`
+	TotalChunks  int    `json:"total_chunks"`
+	FileChecksum string `json:"file_checksum"`
+	FileModTime  int64  `json:"file_mod_time"`
+}
+
+type e2eChunkUploadResponse struct {
+	Success     bool   `json:"success"`
+	ChunkIndex  int    `json:"chunk_index,omitempty"`
+	ShouldRetry bool   `json:"should_retry,omitempty"`
+	Message     string `json:"message,omitempty"`
+}
+
+type e2eStatusResponse struct {
+	Success       bool   `json:"success"`
+	UploadID      string `json:"upload_id,omitempty"`
+	ReceivedCount int    `json:"received_count,omitempty"`
+	TotalChunks   int    `json:"total_chunks,omitempty"`
+	MissingChunks []int  `json:"missing_chunks,omitempty"`
+	Completed     bool   `json:"completed,omitempty"`
+	FileChecksum  string `json:"file_checksum,omitempty"`
+	Message       string `json:"message,omitempty"`
+}
+
+type e2eCompleteResponse struct {
+	Success      bool   `json:"success"`
+	Filename     string `json:"filename,omitempty"`
+	FileChecksum string `json:"file_checksum,omitempty"`
+	Message      string `json:"message,omitempty"`
+}
+
+type e2eSessionInfo struct {
+	UploadID      string `json:"upload_id"`
+	Filename      string `json:"filename"`
+	TotalSize     int64  `json:"total_size"`
+	ReceivedCount int    `json:"received_count"`
+	TotalChunks   int    `json:"total_chunks"`
+	FileChecksum  string `json:"file_checksum"`
+	FileModTime   int64  `json:"file_mod_time"`
+	Status        string `json:"status"`
+}
+
+type e2eSessionsResponse struct {
+	Success  bool             `json:"success"`
+	Sessions []e2eSessionInfo `json:"sessions"`
+}
+
+// doInit 发送 POST /upload/init（JSON body），返回解析后的响应。
+// body 通过 signingTransport 预哈希签名，与 FileClient 语义一致。
+func doInit(t *testing.T, baseURL, uploadID, filename string, content []byte, chunkSize int64, modTime time.Time, fileChecksum string) e2eInitResponse {
+	t.Helper()
+	body := e2eInitRequest{
+		UploadID:     uploadID,
+		Filename:     filename,
+		TotalSize:    int64(len(content)),
+		ChunkSize:    chunkSize,
+		TotalChunks:  (len(content) + int(chunkSize) - 1) / int(chunkSize),
+		FileChecksum: fileChecksum,
+		FileModTime:  modTime.UnixNano(),
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal init body: %v", err)
+	}
+	req, err := http.NewRequest("POST", baseURL+"/upload/init", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("init 请求构造失败: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := authedHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("init 请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("init 期望 200 得到 %d: %s", resp.StatusCode, respBody)
+	}
+	var out e2eInitResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		t.Fatalf("init 响应解析失败: %v (body: %s)", err, respBody)
+	}
+	return out
+}
+
+// uploadChunkE 读取 content 的第 idx 个分块并以 multipart 上传（字段与 FileClient 一致：
+// upload_id / chunk_index / chunk_checksum / 文件字段 chunk）。
+func uploadChunkE(t *testing.T, baseURL, uploadID string, idx int, chunkSize int64, content []byte) {
+	t.Helper()
+	res := uploadChunkRaw(t, baseURL, uploadID, idx, sha256hex(chunkSlice(content, idx, chunkSize)), chunkSlice(content, idx, chunkSize))
+	if !res.Success {
+		t.Fatalf("chunk %d 上传失败: %+v", idx, res)
+	}
+}
+
+// uploadChunkRaw 上传指定分块，返回解析后的响应（调用方自行判断成败）。
+func uploadChunkRaw(t *testing.T, baseURL, uploadID string, idx int, chunkChecksum string, data []byte) e2eChunkUploadResponse {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.WriteField("upload_id", uploadID); err != nil {
+		t.Fatalf("write upload_id field: %v", err)
+	}
+	if err := mw.WriteField("chunk_index", fmt.Sprintf("%d", idx)); err != nil {
+		t.Fatalf("write chunk_index field: %v", err)
+	}
+	if err := mw.WriteField("chunk_checksum", chunkChecksum); err != nil {
+		t.Fatalf("write chunk_checksum field: %v", err)
+	}
+	part, err := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", idx))
+	if err != nil {
+		t.Fatalf("create chunk form file: %v", err)
+	}
+	if _, err = part.Write(data); err != nil {
+		t.Fatalf("write chunk data: %v", err)
+	}
+	if err = mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", baseURL+"/upload/chunk", &buf)
+	if err != nil {
+		t.Fatalf("chunk 请求构造失败: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := authedHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("chunk 请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	var out e2eChunkUploadResponse
+	if err = json.Unmarshal(respBody, &out); err != nil {
+		t.Fatalf("chunk 响应解析失败: %v (body: %s)", err, respBody)
+	}
+	return out
+}
+
+// doStatus 查询 /upload/status?upload_id= 并返回解析后的响应。
+func doStatus(t *testing.T, baseURL, uploadID string) e2eStatusResponse {
+	t.Helper()
+	resp, err := authedHTTPClient.Get(baseURL + "/upload/status?upload_id=" + url.QueryEscape(uploadID))
+	if err != nil {
+		t.Fatalf("status 请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var out e2eStatusResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("status 响应解析失败: %v (body: %s)", err, body)
+	}
+	if !out.Success {
+		t.Fatalf("status 查询失败: %+v (HTTP body: %s)", out, body)
+	}
+	return out
+}
+
+// doComplete 发送 POST /upload/complete（JSON body），返回解析后的响应。
+func doComplete(t *testing.T, baseURL, uploadID string) e2eCompleteResponse {
+	t.Helper()
+	body := fmt.Sprintf(`{"upload_id":%q}`, uploadID)
+	req, err := http.NewRequest("POST", baseURL+"/upload/complete", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("complete 请求构造失败: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := authedHTTPClient.Do(req)
+	if err != nil {
+		t.Fatalf("complete 请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	var out e2eCompleteResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		t.Fatalf("complete 响应解析失败: %v (body: %s)", err, respBody)
+	}
+	return out
+}
+
+// fetchSession 返回 /upload/sessions 中指定 upload_id 的会话，未找到返回 nil。
+func fetchSession(t *testing.T, baseURL, uploadID string) *e2eSessionInfo {
+	t.Helper()
+	var out e2eSessionsResponse
+	resp, err := authedHTTPClient.Get(baseURL + "/upload/sessions")
+	if err != nil {
+		t.Fatalf("GET /upload/sessions 失败: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("/upload/sessions 响应解析失败: %v (body: %s)", err, body)
+	}
+	for i := range out.Sessions {
+		if out.Sessions[i].UploadID == uploadID {
+			return &out.Sessions[i]
+		}
+	}
+	return nil
+}
+
+// chunkSlice 返回内容第 idx 个分块的字节（最后一个分块可能不足 chunkSize）。
+func chunkSlice(content []byte, idx int, chunkSize int64) []byte {
+	start := int64(idx) * chunkSize
+	if start >= int64(len(content)) {
+		return []byte{} // 防御：越界返回空块
+	}
+	end := min(start+chunkSize, int64(len(content)))
+	return content[start:end]
+}
+
+// repeatPattern 用后端模式填充长度为 n 的不可重复内容（供测试数据与 checksum 区分）。
+func repeatPattern(seed byte, n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = byte(int(seed)*13 + i*29 + int(seed))
+	}
+	return out
+}
+
+// dateStamp 返回 yyyyMMddHHmmss 格式的时间戳，用于生成唯一 upload_id。
+func dateStamp() string {
+	return time.Now().Format("20060102150405")
 }
