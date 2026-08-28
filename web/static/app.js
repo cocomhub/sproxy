@@ -727,6 +727,19 @@ let _cloudTasks = [];
 // 传输页状态：当前激活频道（缺省 all）。频道条与列表渲染入口（任务 4）。
 let _transferChannel = 'all';
 
+// 传输数据层实例（惰性、单例）：transfer-store.js 的 UMD 顶层导出是
+// {createTransferStore, normalizeItems, computeChunkIndex, chunkCountOf}，loadItems 是
+// createTransferStore() 返回实例的方法（全仓唯一调用 createTransferStore 的地方）。
+// createTransferStore({}) 使用浏览器默认 localStorage/indexedDB；loadItems 只读主列表，
+// upsertItem/removeItem 供后续任务（6/7）写入用。
+let _transferStore = null;
+function getTransferStore() {
+  if (!_transferStore && typeof transferStore !== 'undefined' && transferStore.createTransferStore) {
+    _transferStore = transferStore.createTransferStore({});
+  }
+  return _transferStore;
+}
+
 // genDefaultFilename 从 URL 推断默认文件名，委托给共享模块 cloudfilename.js。
 // 与 Go 端 pkg/cloudfilename 使用同一套规则（wget 行为），由共享语料测试保证双端一致。
 function genDefaultFilename(rawUrl) {
@@ -905,10 +918,13 @@ function restoreCloudUrlRow() {
 }
 
 // showCloudDownload（最小适配，键入裁定：云逻辑完整重组在任务 5）——由弹窗打开改为
-// 切转到传输页主 tab + 云任务频道。传输页轮询由 showTransferPage/hideTransferPage 门控
-//（进入传输页即启动、切离即停止）——这里不再自启轮询。
+// 切转到传输页主 tab + 云任务频道；进入前先恢复并清空 URL 输入行（沿用旧弹窗打开行为）。
+// 传输页轮询由 showTransferPage/hideTransferPage 门控——这里不再自启轮询。
 function showCloudDownload() {
   switchMainTab('transfer');
+  restoreCloudUrlRow();
+  const urlInput = document.getElementById('cloud-url');
+  if (urlInput) urlInput.value = '';
   switchTransferChannel('cloud_tasks');
 }
 
@@ -989,15 +1005,15 @@ function hideTransferPage() {
 }
 
 // renderTransferChannel：按当前 _transferChannel 重渲染 #transfer-body 传输列表。
-// 数据源 transferStore.loadItems()（任务 4 占位；云任务/组归一进统一列表由任务 5 迁入）。
+// 数据源经 getTransferStore().loadItems()（惰性创建 createTransferStore 实例；
+// 云任务/组归一进统一列表由任务 5 迁入）。
 function renderTransferChannel() {
   const ch = _transferChannel;
   if (ch === 'cloud_tasks') { switchCloudTab('tasks'); return; }
   if (ch === 'cloud_groups') { switchCloudTab('groups'); return; }
   // 非云频道（all/uploading/downloading/completed）走传输统一渲染管线。
-  const items = (typeof transferStore !== 'undefined' && transferStore.loadItems)
-    ? transferStore.loadItems()
-    : [];
+  const store = getTransferStore();
+  const items = store ? store.loadItems() : [];
   const body = document.getElementById('transfer-body');
   if (!body) return;
   const html = appRender.buildTransferListHtml(items, ch);
