@@ -227,34 +227,34 @@
       function recordChunk(idx, data, recSize) {
         bitmap[idx] = 1;
         loaded += recSize;
-        const next = persistItem(item, {
+        persistItem(item, {
           loaded: loaded,
           status: 'downloading',
           meta: Object.assign(copyMeta(currentItem(item)), {
             chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize: chunkSize, chunkIndex: idx,
           }),
         });
-        void next;
         if (typeof store.saveChunk === 'function') {
           store.saveChunk(item.id, idx, data, recSize).catch(function () { /* 尽力而为（块缓存可重写） */ });
         }
       }
 
+      function stopped() { return session.state === 'paused' || session.state === 'cancelled'; }
+
       function fetchOne(idx) {
         const start = idx * chunkSize;
         const len = Math.min(chunkSize, total - start);
-        if (len <= 0) return Promise.resolve();
+        if (len <= 0 || stopped()) return Promise.resolve();
         const controller = new AbortController();
         const onAbort = function () { controller.abort(); };
         const sig = session.aborter.signal;
         sig.addEventListener('abort', onAbort, { once: true });
         const cleanup = function () { sig.removeEventListener('abort', onAbort); };
+        // 暂停/取消：把 abort（或未发出的请求）转化为已决值，让 pump 的 Promise.all 等齐。
         const proceed = function (err) {
-          if (session.state === 'paused' || session.state === 'cancelled') {
-            // 暂停/取消：把 abort 转化为已决的 Promise 值，让 pump 的 Promise.all 等齐
-            return Promise.resolve();
-          }
+          if (stopped()) return Promise.resolve();
           if (err) return Promise.reject(err);
+          return undefined;
         };
         return Promise.resolve()
           .then(function () {
@@ -262,6 +262,7 @@
             return transport.coreRequest('GET', chunkUrlFor(filename, start, len), { headers: {}, signal: controller.signal });
           })
           .then(function (res) {
+            if (stopped()) return; // abort/竞态后仍到达 → 不落块
             if (!res || res.status !== 200) throw new Error('分块下载失败: HTTP ' + ((res && res.status) || '?'));
             lastChunkHeaders = (res && res.headers) || null;
             const raw = res.body;
@@ -270,18 +271,15 @@
             const block = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
             recordChunk(idx, block, bytes.byteLength);
           }, function (err) { return proceed(err); })
-          .then(function () { return proceed(); }).finally(function () {
-            cleanup();
-          });
+          .then(function () { return proceed(); }).finally(function () { cleanup(); });
       }
 
+      // pump：并发拉取。停止（pause/cancel）后不再调度新块；在途块由 fetchOne 的
+      // abort→proceed 短路收尾（Promise.all 等齐即退）。
       function pump() {
-        if (session.state !== 'running' || pending.length === 0) { /* 无剩余块或已停 */
-          return Promise.resolve();
-        }
+        if (stopped() || pending.length === 0) return Promise.resolve();
         const active = [];
         while (pending.length && active.length < PARALLEL) active.push(fetchOne(pending.shift()));
-        if (active.length === 0) return Promise.resolve();
         return Promise.all(active).then(pump);
       }
 
@@ -298,6 +296,12 @@
       }
 
       function isAbort(err) { return !!(err && (err.code === 'E_ABORT' || err.name === 'AbortError')); }
+
+      // 完成/失败/中断统一收尾：清 _running 会话（pause/cancel 已删时幂等）。
+      function finish() {
+        if (session.state !== 'paused' && session.state !== 'cancelled') session.state = 'finished';
+        if (self._running[item.id] === session) delete self._running[item.id];
+      }
 
       function assembleAndSave() {
         return readAllChunks().then(function (chunks) {
@@ -318,39 +322,46 @@
           }
           return blob;
         }).then(function (blob) {
+          // 取消竞态复查：cancel 发生在 assemble 期间（此阶段不响应 abort）时中止——
+          // 不写回 completed、不触发 onComplete，块缓存已被 cancel 清理。
+          if (stopped()) return;
           return Promise.resolve(store.deleteChunkRange(item.id)).catch(function () { /* 清缓存失败不阻断 */ }).then(function () {
-            const finalItem = persistItem(item, {
+            persistItem(item, {
               status: 'completed',
               loaded: total,
               totalSize: total,
               total: total,
               meta: { chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize },
             });
-            void finalItem;
             if (hooks.onComplete) hooks.onComplete(blob, item.filename || filename);
           });
         }).catch(function (err) {
           // 完成前失败（含 onVerify false / 缺块）：置 failed 写回错误原因，保留缓存供恢复。
-          if (isAbort(err)) return; // 暂停/取消已由 pause/cancel 写状态
+          if (isAbort(err) || stopped()) return; // 暂停/取消已由 pause/cancel 写状态；跳过终态写回
           persistItem(item, { status: 'failed', failedAt: Date.now(), lastError: (err && err.message) ? err.message : String(err) });
           if (hooks.onError && !err.skipComplete) hooks.onError(err);
         });
       }
 
       return pump().then(function () {
-        if (session.state !== 'running') return; // 已被暂停/取消，跳过终态判定
+        if (stopped()) return;
         if (bitmapReady(bitmap, totalChunks) && loaded >= total) return assembleAndSave();
-        // 无异常但块不齐（中途静默失败）→ 置 failed
         persistItem(item, { status: 'failed', failedAt: Date.now(), lastError: '下载未完成（部分块缺失）' });
         return undefined;
       }).catch(function (err) {
-        if (isAbort(err)) return; // 暂停/取消除外——状态已由 pause/cancel 双写
+        if (isAbort(err) || stopped()) return; // 暂停/取消已由 pause/cancel 写状态
         const it = currentItem(item);
         if (it && !(err && err.skipComplete)) {
           persistItem(it, { status: 'failed', failedAt: Date.now(), lastError: (err && err.message) ? err.message : String(err) });
         }
         if (hooks.onError && !(err && err.skipComplete)) hooks.onError(err);
         return undefined;
+      }).then(function (r) {
+        finish();
+        return r;
+      }, function (e) {
+        finish();
+        throw e;
       });
     }
 
@@ -364,7 +375,6 @@
       if (Array.isArray(arr)) for (let i = 0; i < Math.min(arr.length, n); i++) out[i] = arr[i] ? 1 : 0;
       return out;
     }
-    function bmOf(item) { return (item && item.meta && item.meta.chunksBitmap) || []; }
 
     // ---- 公开 API ----
 
@@ -407,8 +417,8 @@
       function continueResume(serverMeta) {
         // 更新存档 meta 为最新 stat（恢复后以最新 mtime/checksum 为准，供后续恢复比对）。
         const meta = Object.assign(copyMeta(item), {
-          mtimeNano: serverMeta.mtime || '',
-          checksum: serverMeta.checksum || '',
+          mtimeNano: serverMeta.mtime ? String(serverMeta.mtime) : '',
+          checksum: serverMeta.checksum ? String(serverMeta.checksum) : '',
           chunkSize: chunkSize,
           totalChunks: totalChunks,
         });
@@ -455,7 +465,7 @@
     }
 
     // pauseDownload(id)：中断在途 + 写回 paused（保留缓存块供恢复）。同步写 paused 后
-    // abort，让在途请求尽快中断（pump 的各 fetcher 遇 abort 转为已决值不再入队新块）。
+    // abort，让在途请求尽快中断（pump 的各 fetcher 遇 abort/stopped 转为已决值不再入队新块）。
     self.pauseDownload = function (id) {
       return new Promise(function (resolve) {
         const item = self.findItem(id);
