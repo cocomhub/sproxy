@@ -54,11 +54,11 @@ function progressText(input) {
 // 无过渡期：直接使用 sproxy_transfer_items（transfer-store 内管理）；旧键
 // sproxy_upload_sessions 不读、不迁移（spec 分节 2）。
 
-// defaultTransferStore 惰性单例：浏览器 transferStore.createTransferStore({})（与 app.js
-// getTransferStore 同一 UMD 顶层导出）。Node require 且未注入时返回 null——会话函数
-// 经 currentStore() 兜底 noopStore（load/Save 幂等，不触碰 localStorage）。
-let _transferStore = null;
-let _fallbackStore = null;
+// _injectedStore：由 app.js 在页面初始化时调用 upload.setStore(getTransferStore()) 注入
+// （index.html 顺序：upload.js 在 app.js 之前，故不能引用 app.js 的 getTransferStore——
+// 通过显式 set 注入避免跨文件隐式全局与顶层 let 重名冲突历史（见 app.js/upload.js
+// `_transferStore` 声明冲突修复）。Node 测试沿用 setTransferStore 注入内存 mock。
+let _injectedStore = null;
 
 function noopStore() {
   const items = [];
@@ -71,20 +71,18 @@ function noopStore() {
     queryFileHandlePermission: function () { return Promise.resolve(null); },
   };
 }
-
-function transferStoreSingleton() {
-  if (_transferStore) return _transferStore;
-  if (typeof transferStore !== 'undefined' && transferStore.createTransferStore) {
-    _transferStore = transferStore.createTransferStore({});
-    if (_transferStore) return _transferStore;
-  }
-  if (!_fallbackStore) _fallbackStore = noopStore();
-  return _fallbackStore;
+function _fallbackStore() {
+  return noopStore();
 }
-function resetTransferStoreCache() { _transferStore = null; _fallbackStore = null; }
-function getTransferStore() { return transferStoreSingleton(); }
-function currentStore() { return transferStoreSingleton(); }
-function setTransferStore(store) { _transferStore = store; }
+// setTransferStore 注入，currentStore() 返回注入 store；无注入 → noopStore（测试/无浏览器环境）。
+function setTransferStore(store) { _injectedStore = store || null; }
+function currentStore() { return _injectedStore || noopStore(); }
+function transferStoreSingleton() { return currentStore(); }
+function resetTransferStoreCache() { _injectedStore = null; }
+
+// legacyUploadModuleName：历史地址导出名 upload 恒指向本模块（页内函数声明），
+// app.js 经 `setTransferStore(getTransferStore())` 注入——见 app.js 注释。
+// 注意：本文件**不得**再声明 getTransferStore（app.js 已声明），否则同页顶层重名。
 
 // completedBitmap(totalChunks)：全 0 块位图（data 为 0/1 数组）。completedChunks
 // 数组位扩容（越界/非法索引忽略）。缺 total 或 非数组 → 全 0。

@@ -1615,6 +1615,11 @@ document.addEventListener('DOMContentLoaded', function() {
   // 断点续传检测在 DOMContentLoaded 后执行——此时 resume-container 已存在且页面交互就绪；
   // 放在顶层 refreshList 之后会导致其成功分支之前误清进行中分块会话的历史隐患（已由
   // chunkedUpload/uploadFiles success 分支去 removeUploadSession 修复），挪到此统一时序。
+  // 上传模块经显式注入获取与 app 一致的 transfer store（upload.js 自身不声明同名字段，
+  // 避免顶层 let 重名——历史 `_transferStore` 冲突修复）。
+  if (typeof setTransferStore === 'function') {
+    setTransferStore(getTransferStore());
+  }
   checkResumableUploads();
 
   // 认证栏
