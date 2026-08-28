@@ -306,8 +306,7 @@ function getDownloadManager() {
 }
 
 // legacyDownloadFile：旧全量 GET /download（保底回落）——保留但不再默认走。
-async function legacyDownloadFile(name, expectedChecksum) {
-  try {
+async function legacyDownloadFile(name, expectedChecksum) {  try {
     const { blob, headers } = await sc.files.download(name, { downloadHeaders: { 'X-File-Checksum': '' } });
     const serverCS = (headers && headers['X-File-Checksum']) || '';
     if (serverCS) {
@@ -359,6 +358,22 @@ function triggerDownload(fileName, data) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+// downloadCompleteHandler：下载管线 onComplete 桩——保存 Blob + toast（与 downloadFile 一致）。
+// used by transfer 行「恢复下载」回调。
+function downloadCompleteHandler(blob, filename) {
+  if (!blob || !filename) return;
+  triggerDownload(filename, blob);
+  showToast(filename + ' 下载完成' + (filename.indexOf('校验通过') >= 0 ? '' : ''), 'success');
+  renderTransferChannel();
+}
+
+// itemParentDir：从 item filename（可能带相对目录）取父目录段（'a/b/c.txt' → 'a/b'）。
+function itemParentDir(filename) {
+  const s = String(filename || '');
+  const i = s.lastIndexOf('/');
+  return i >= 0 ? s.slice(0, i) : '';
 }
 
 // --- 删除 ---
@@ -1828,6 +1843,47 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('group-toggle-btn')) {
         toggleGroupTasks(btn.dataset.id, btn);
+        return;
+      }
+      // ---- 通用 TransferItem 行操作（upload/download 类，非云）----
+      // 按钮类名 transfer-pause/resume/cancel/delete/redownload/open-dir（app-render 生成）。
+      // id = item.id（upload 即 upload_id；download 为文件名哈希）。
+      const tId = btn.dataset.itemId;
+      if (tId === undefined || tId === '') return;
+      const store = getTransferStore();
+      const mgr = getDownloadManager();
+      const tItem = (store && typeof store.loadItems === 'function')
+        ? store.loadItems().filter(function (it) { return it.id === tId && (it.kind === 'upload' || it.kind === 'download'); })[0]
+        : null;
+      if (btn.classList.contains('transfer-pause-btn')) {
+        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.pauseDownload === 'function') { mgr.pauseDownload(tId); renderTransferChannel(); return; }
+        showToast('上传不支持暂停，可取消后重选续传', 'info');
+        return;
+      }
+      if (btn.classList.contains('transfer-resume-btn')) {
+        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.resumeDownload === 'function') { mgr.resumeDownload(tId, { onComplete: downloadCompleteHandler, onError: function (err) { showToast('恢复下载失败: ' + err.message, 'error'); } }); return; }
+        if (tItem && tItem.kind === 'upload' && typeof resumeUpload === 'function') { resumeUpload(tId); return; }
+        showToast('恢复失败：传输项不存在', 'error');
+        return;
+      }
+      if (btn.classList.contains('transfer-cancel-btn')) {
+        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.cancelDownload === 'function') { mgr.cancelDownload(tId); renderTransferChannel(); return; }
+        if (tItem && tItem.kind === 'upload') { removeUploadSession(tId); renderTransferChannel(); return; }
+        showToast('取消失败：传输项不存在', 'error');
+        return;
+      }
+      if (btn.classList.contains('transfer-delete-btn')) {
+        if (tItem && store && typeof store.removeItem === 'function') { store.removeItem(tId); renderTransferChannel(); return; }
+        showToast('删除失败：传输项不存在', 'error');
+        return;
+      }
+      if (btn.classList.contains('transfer-redownload-btn') && tItem) { downloadFile(tItem.filename, tItem.meta && tItem.meta.checksum); return; }
+      if (btn.classList.contains('transfer-open-dir-btn') && tItem) {
+        // 打开本地存储目录：跳转文件 tab 并导航到上传文件所在目录 + toast 绝对路径。
+        switchMainTab('files');
+        const parent = itemParentDir(tItem.filename);
+        navigateDir(parent);
+        showToast('存储目录：上传根目录/' + (parent || ''), 'info');
         return;
       }
     });
