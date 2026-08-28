@@ -1861,7 +1861,7 @@ function initDynamicEventDelegation() {
         return;
       }
       if (btn.classList.contains('transfer-resume-btn')) {
-        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.resumeDownload === 'function') { mgr.resumeDownload(tId, { onComplete: downloadCompleteHandler, onError: function (err) { showToast('恢复下载失败: ' + err.message, 'error'); } }); return; }
+        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.resumeDownload === 'function') { mgr.resumeDownload(tId, { onComplete: downloadCompleteHandler, onError: function (err) { showToast('恢复下载失败: ' + err.message, 'error'); }, onMismatch: function () { showToast('存储文件已变更，无法续传——可先重新下载', 'warning'); } }); return; }
         if (tItem && tItem.kind === 'upload' && typeof resumeUpload === 'function') { resumeUpload(tId); return; }
         showToast('恢复失败：传输项不存在', 'error');
         return;
