@@ -322,10 +322,16 @@
           }
           return blob;
         }).then(function (blob) {
-          // 取消竞态复查：cancel 发生在 assemble 期间（此阶段不响应 abort）时中止——
-          // 不写回 completed、不触发 onComplete，块缓存已被 cancel 清理。
+          // 取消竞态复查必须覆盖写回全链：deleteChunkRange（异步 IDB）完成后到
+          // persistItem/onComplete 之间仍有被 cancel（removeItem）穿插的窗口——若只复查
+          // 一次于开头（pump 后），cancel 落在该窗口会把已删 item 复活为 completed 并触发
+          // onComplete（R2）。故此处两层复查：deleteChunkRange 前复查一次 + 完成后、
+          // persistItem 前再复查一次，且 onComplete 发射前亦兜底复查。任一停下即静默中止。
           if (stopped()) return;
           return Promise.resolve(store.deleteChunkRange(item.id)).catch(function () { /* 清缓存失败不阻断 */ }).then(function () {
+            // deleteChunkRange 完成（IDB 异步落定）后、写回前二次复查——覆盖 cancel 落在
+            // delete 进行中的窗口：此时 item 已被 removeItem，恢复写 completed 属复活。
+            if (stopped()) return;
             persistItem(item, {
               status: 'completed',
               loaded: total,
@@ -333,6 +339,7 @@
               total: total,
               meta: { chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize },
             });
+            if (stopped()) return;
             if (hooks.onComplete) hooks.onComplete(blob, item.filename || filename);
           });
         }).catch(function (err) {
