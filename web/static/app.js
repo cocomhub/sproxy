@@ -765,19 +765,6 @@ function normalizeCloudTaskItem(t) {
     id: 'cloud-task-' + t.id,
     kind: 'cloud_task',
     filename: filename,
-    totalSize: t && typeof t.total_size === 'number' ? t.total_size : 0,
-    loaded: t && typeof t.downloaded === 'number' && t.downloaded > 0 ? t.downloaded : 0,
-    status: (t && t.status) || 'pending',
-    meta: { raw: t || {} },
-  };
-}
-
-function normalizeCloudTaskItem(t) {
-  const filename = (t && t.filename) || (t && t.url) || '任务-' + (t && t.id ? t.id : '?');
-  return {
-    id: 'cloud-task-' + t.id,
-    kind: 'cloud_task',
-    filename: filename,
     // total_size<=0 归一为 0（避免负数/缺省值污染渲染）
     totalSize: (t && typeof t.total_size === 'number' && t.total_size > 0) ? t.total_size : 0,
     loaded: t && typeof t.downloaded === 'number' && t.downloaded > 0 ? t.downloaded : 0,
