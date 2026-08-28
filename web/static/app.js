@@ -250,10 +250,63 @@ async function rmdirDir(dirPath) {
 }
 
 // --- 下载 ---
-// downloadFile 走 sc.files.download(name) → { blob, headers }（传输层自动协商隧道/直连）；
-// headers 携带 X-File-Checksum（if any）——与下载字节做本地 SHA-256 比对（旧行为，C-1），
-// 不一致则报错不触发下载，防服务器返回内容与账本不符。
+// downloadFile 入口改组：先 stat 取 size/mtime/checksum，再委派 download.js 的分块管线
+//（并发 3 拉取 → IndexedDB 缓存 → 完成后合并 Blob → 本文件 triggerDownload 保存 + toast）。
+// 旧的全量 GET /download（sc.files.download）作为无 download.js 时的保底回落（保留）。
 async function downloadFile(name, expectedChecksum) {
+  if (typeof downloadMgr !== 'undefined' && downloadMgr && downloadMgr.createDownloadManager) {
+    const mgr = getDownloadManager();
+    try {
+      const statRes = await sc.files.stat(name);
+      const meta = httpFileMeta(statRes);
+      const result = await mgr.startDownload(name, meta, {
+        // 完成回调由本文件提供：triggerDownload 保存 + toast（管线自身不含 DOM）。
+        onComplete: function (blob, filename) {
+          triggerDownload(filename, blob);
+          const shouldVerify = !!(meta && meta.checksum);
+          showToast(filename + ' 下载完成' + (shouldVerify ? '，校验通过' : ''), 'success');
+        },
+        onError: function (err) { showToast('下载失败: ' + err.message, 'error'); },
+      });
+      return result;
+    } catch (e) {
+      // 传输/建项失败 → 回落旧全量下载（保证下载入口可用），并提示已回退。
+      showToast(name + ' 分块下载启动失败，回落全量下载: ' + e.message, 'warning');
+      return legacyDownloadFile(name, expectedChecksum);
+    }
+  }
+  return legacyDownloadFile(name, expectedChecksum);
+}
+
+// httpFileMeta 从 stat 响应 {headers} 提取下载管线 stat 参数 {size, mtime, checksum}
+//（X-File-Size / X-File-MTime / X-File-Checksum；兼容小写与大写键）。
+function httpFileMeta(statRes) {
+  const headers = (statRes && statRes.headers) ? statRes.headers : {};
+  function hv(key) {
+    const direct = headers[key] || headers[key.toLowerCase()] || headers[key.toUpperCase()];
+    if (Array.isArray(direct)) return direct[0] || '';
+    return (direct === undefined || direct === null) ? '' : String(direct);
+  }
+  const sizeN = Number(hv('X-File-Size'));
+  return {
+    size: isFinite(sizeN) && sizeN > 0 ? sizeN : ((statRes && statRes.size) || 0),
+    mtime: hv('X-File-MTime'),
+    checksum: hv('X-File-Checksum'),
+  };
+}
+
+// getDownloadManager：惰性创建下载管线实例（全仓唯一 createDownloadManager 调用点；
+// 缺省 store=transferStore.createTransferStore({})，transport=sclientTransport）。
+let _downloadManager = null;
+function getDownloadManager() {
+  if (!_downloadManager && typeof downloadMgr !== 'undefined' && downloadMgr.createDownloadManager) {
+    _downloadManager = downloadMgr.createDownloadManager({});
+  }
+  return _downloadManager;
+}
+
+// legacyDownloadFile：旧全量 GET /download（保底回落）——保留但不再默认走。
+async function legacyDownloadFile(name, expectedChecksum) {
   try {
     const { blob, headers } = await sc.files.download(name, { downloadHeaders: { 'X-File-Checksum': '' } });
     const serverCS = (headers && headers['X-File-Checksum']) || '';
@@ -264,7 +317,7 @@ async function downloadFile(name, expectedChecksum) {
         return;
       }
       triggerDownload(name, blob);
-      showToast(name + ' 下载完成' + '，校验通过', 'success');
+      showToast(name + ' 下载完成，校验通过', 'success');
       return;
     }
     triggerDownload(name, blob);
