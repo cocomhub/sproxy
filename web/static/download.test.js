@@ -272,6 +272,53 @@ test('完成：全块合并 → Blob → 校验（header checksum 对比）→ o
   assert.strictEqual(it.status, 'completed');
 });
 
+// ---- R1：_running 会话回收 + cancel 竞态抑制 ----
+
+test('R1：完成后 _running 会话被清（isRunning=false，二次 startDownload 可发起新下载）', async () => {
+  const chunkSize = dl.calcChunkSize(0);
+  const size = 2 * chunkSize;
+  const bytes = patternBytes(size);
+  const x = makeManager(bytes, { downloadDelay: 0 });
+  const done = [];
+  await x.mgr.startDownload('a.bin', { size: size, mtime: '5', checksum: 'c' }, {
+    onComplete: (blob, filename) => { done.push({ blob, filename }); },
+  });
+  const id = x.store.loadItems()[0].id;
+  assert.strictEqual(x.mgr.isRunning(id), false, '完成后 _running 会话必须清（isRunning false）');
+  // 同名文件再次下载：run 不应被「已在处理中」拒绝
+  const second = await x.mgr.startDownload('a.bin', { size: size, mtime: '5', checksum: 'c' }, {
+    onComplete: (blob, filename) => { done.push({ blob, filename }); },
+  });
+  assert.strictEqual(second, undefined, '二次 startDownload 正常返回（不再 reject 已在处理中）');
+  await waitUntil(() => x.store.getItem(id) && x.store.getItem(id).status === 'completed');
+  assert.ok(done.length >= 2, '两次下载的 onComplete 均触发');
+  assert.strictEqual(x.mgr.isRunning(id), false, '二次完成后 _running 亦清');
+});
+
+test('R1：cancel 后完成写回被抑制（onComplete 不触发、item 不残留 completed）', async () => {
+  const chunkSize = dl.calcChunkSize(0);
+  const size = 2 * chunkSize;
+  const bytes = patternBytes(size);
+  const x = makeManager(bytes, { blockAfter: { 'a.bin': 1 }, downloadDelay: 0 });
+  const onCompleteCalled = [];
+  // 挂起所有分块——暂停瞬间即取消（assemble 前竞态），覆盖「取消恰在完成写回前」场景。
+  x.mgr.startDownload('a.bin', { size: size, mtime: '5', checksum: 'c' }, {
+    onComplete: (blob, filename) => { onCompleteCalled.push(filename); },
+  });
+  await waitUntil(async () => { const id = x.store.loadItems()[0] && x.store.loadItems()[0].id; return id && (await x.store.listChunkCount(id)) >= 1; });
+  const itemId = x.store.loadItems()[0].id;
+  assert.strictEqual(x.mgr.isRunning(itemId), true, '下载进行中');
+  await x.mgr.cancelDownload(itemId);
+  // 放行全部挂起块——若 assembleAndSave 复查失效则会把 cancelled item 写回 completed
+  x.transport.release();
+  x.transport.ungate();
+  await new Promise((r) => setTimeout(r, 120));
+  assert.deepStrictEqual(x.store.loadItems().map((i) => i.id), [], '取消后无残留 item（尤其无 completed 复活）');
+  assert.strictEqual(onCompleteCalled.length, 0, '取消后 onComplete 不得触发');
+  assert.strictEqual(await x.store.listChunkCount(itemId), 0, '取消后块缓存已清');
+  assert.strictEqual(x.mgr.isRunning(itemId), false, '_running 会话也不得残留');
+});
+
 test('分块下载失败置 failed 且写回 lastError（缺块不组装不完成）', async () => {
   const size = 2 * dl.calcChunkSize(0);
   const bytes = patternBytes(size);
