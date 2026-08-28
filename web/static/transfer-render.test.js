@@ -137,6 +137,54 @@ test('buildTransferRowHtml failed/ paused 项：恢复/取消按钮', () => {
   assert.ok(paused.includes('恢复') && paused.includes('取消'));
 });
 
+// ---- 云行按钮组（任务 5：kind 感知 _rowActions 分派 _cloudTaskActions / _cloudGroupActions） ----
+
+test('buildTransferRowHtml 云任务行按 status 渲染云按钮（completed 下载到本地 + 删除）', () => {
+  const html = r.buildTransferRowHtml({
+    id: 'cloud-task-T1', kind: 'cloud_task', filename: 'a.bin', status: 'completed',
+    totalSize: 100, loaded: 100, meta: { raw: { checksum: 'c1' } },
+  });
+  // 云按钮复用既有事件委托类名 + data-* 属性齐全（裁定 4/5）
+  assert.ok(html.includes('class="btn btn-primary btn-sm cloud-download-btn"'), '下载到本地按钮');
+  assert.ok(html.includes('data-id="cloud-task-T1"') && html.includes('data-filename="a.bin"') && html.includes('data-checksum="c1"'), 'data-* 齐全');
+  assert.ok(!html.includes('transfer-resume-btn') && !html.includes('transfer-delete-btn'), '不用通用 transfer-* 按钮');
+  assert.ok(html.includes('✅ 已完成'), '状态徽章走 statusText');
+  assert.ok(!html.includes('<script'), '无 XSS');
+});
+
+test('buildTransferRowHtml 云任务 failed/cancelled → 恢复 + 删除；pending/downloading → 取消', () => {
+  const failedHtml = r.buildTransferRowHtml({ id: 'cloud-task-F', kind: 'cloud_task', filename: 'f.bin', status: 'failed', meta: { raw: {} } });
+  assert.ok(failedHtml.includes('cloud-resume-btn') && failedHtml.includes('cloud-remove-btn'));
+  assert.ok(!failedHtml.includes('cloud-cancel-btn'));
+  const dlHtml = r.buildTransferRowHtml({ id: 'cloud-task-D', kind: 'cloud_task', filename: 'd.bin', status: 'downloading', meta: { raw: {} } });
+  assert.ok(dlHtml.includes('cloud-cancel-btn'));
+  assert.ok(!dlHtml.includes('cloud-resume-btn'));
+  const pendHtml = r.buildTransferRowHtml({ id: 'cloud-task-P', kind: 'cloud_task', filename: 'p.bin', status: 'pending', meta: { raw: {} } });
+  assert.ok(pendHtml.includes('cloud-cancel-btn'));
+});
+
+test('buildTransferRowHtml 云组行按钮按 status 渲染（打包/恢复/取消/删除/展开 + 详情行）', () => {
+  const done = r.buildTransferRowHtml({ id: 'cloud-group-G1', kind: 'cloud_group', name: 'grp', status: 'completed', meta: { raw: { id: 'G1' } } });
+  assert.ok(done.includes('group-archive-btn') && done.includes('data-id="cloud-group-G1"'), '打包按钮');
+  assert.ok(done.includes('group-delete-btn') && done.includes('group-toggle-btn'), '删除 + 展开/收起');
+  assert.ok(done.includes('id="group-detail-cloud-group-G1"'), '组详情行 id 与 data-id 对齐');
+  assert.ok(done.includes('🗂') && done.includes('grp'), '组图标 + name 主标题');
+  assert.ok(done.includes('✅ 已完成'));
+  const running = r.buildTransferRowHtml({ id: 'cloud-group-G2', kind: 'cloud_group', name: 'g2', status: 'downloading', meta: { raw: { id: 'G2' } } });
+  assert.ok(running.includes('group-cancel-btn'), '进行中可取消');
+  assert.ok(!running.includes('group-archive-btn'), '非 completed 无打包');
+  const failed = r.buildTransferRowHtml({ id: 'cloud-group-G3', kind: 'cloud_group', name: 'g3', status: 'failed', meta: { raw: { id: 'G3' } } });
+  assert.ok(failed.includes('group-resume-btn') && failed.includes('group-delete-btn'), '失败可恢复 + 删除');
+  assert.ok(!failed.includes('group-cancel-btn'));
+  assert.ok(!done.includes('<script'), '无 XSS');
+});
+
+test('buildTransferRowHtml 云行 status 缺省不发通用 transfer-* 按钮、不 panic', () => {
+  const html = r.buildTransferRowHtml({ id: 'cloud-task-X', kind: 'cloud_task', filename: 'x.bin', meta: { raw: {} } });
+  assert.ok(!html.includes('transfer-delete-btn') && !html.includes('transfer-resume-btn') && !html.includes('transfer-cancel-btn') && !html.includes('transfer-pause-btn') && !html.includes('transfer-redownload-btn') && !html.includes('transfer-open-dir-btn'), '云行不用通用 transfer-* 动作按钮');
+  assert.ok(html.includes('data-item-id="cloud-task-X"'), '仍可寻址');
+});
+
 // ---- buildTransferListHtml ----
 
 test('buildTransferListHtml 空列表或频道无匹配 → 暂无传输记录', () => {

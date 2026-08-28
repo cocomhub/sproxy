@@ -138,6 +138,7 @@ web-test:
 	@node --check web/static/sclient/api/index.js
 	@node --check web/static/app-render.js
 	@node --check web/static/transfer-store.js
+	@node --check web/static/transfer-render.test.js
 	node --test web/static/cloudfilename.test.js
 	node --test web/static/transfer-store.test.js
 	node --test web/static/transfer-render.test.js
