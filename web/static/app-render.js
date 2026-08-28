@@ -35,6 +35,15 @@
     return (n / 1073741824).toFixed(2) + ' GB';
   }
 
+  // stripCloudId：把云项展示 id（'cloud-task-<id>' / 'cloud-group-<id>'）还原为服务端真实 id。
+  // 云行按钮 data-id 携带展示 id（含前缀）；凡要调 sc.cloud.* API 或拼 '.__cloud__/<id>/' 路径，
+  // 必须先剥前缀，否则后端 404/组 not found。非云 id 原样返回。双实现同源同行为：
+  // app.js（浏览器全局，脚本顺序在其后加载并定义覆盖本镜像）用于浏览器运行时；
+  // 本镜像服务 node 测试环境（无 app.js），测试直接验证本体。
+  function stripCloudId(id) {
+    return String(id).replace(/^cloud-(task|group)-/, '');
+  }
+
   function getChecksumPrefix(cs) {
     if (!cs) return '-';
     return cs.substring(0, 16) + '…';
@@ -262,57 +271,33 @@
       '</div><div style="font-size:11px;color:var(--text-secondary);margin-top:1px;">' + formatSize(downloaded) + ' / ' + formatSize(total) + ' (' + pct + '%)</div>';
   }
 
-  function cloudTaskActions(id, filename, status, checksum) {
-    let actions = '';
-    if (status === 'completed') {
-      actions += '<button class="btn btn-primary btn-sm cloud-download-btn" data-id="' + escHtml(id) + '" data-filename="' + escHtml(filename) + '" data-checksum="' + escHtml(checksum || '') + '" style="margin-right:4px;">下载到本地</button>';
-      actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
-    } else if (status === 'failed' || status === 'cancelled') {
-      actions += '<button class="btn btn-sm btn-secondary cloud-resume-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">恢复</button>';
-      actions += '<button class="btn btn-danger btn-sm cloud-remove-btn" data-id="' + escHtml(id) + '">删除</button>';
-    } else {
-      actions += '<button class="btn btn-warning btn-sm cloud-cancel-btn" data-id="' + escHtml(id) + '">取消</button>';
-    }
-    return actions;
-  }
+  // 诊断云行可见性（R1 起不直接调用：云行统一走 _rowActions kind 分派 → _cloudTaskActions/
+  // _cloudGroupActions，data-id 携带展示 id）。保留导出避免破坏既有调用方与测试引用。
+  function cloudTaskActions(id, filename, status, checksum) { return _cloudTaskActions({ id: id, filename: filename, status: status, checksum: checksum || '', meta: { raw: {} } }); }
 
   function buildCloudTaskTableHtml(tasks) {
-    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
+    let html = '<div style="font-size:13px;color:var(--text-warning);margin-bottom:6px;">(legacy 表格视图，已由传输页统一渲染管取代)</div><table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
       '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">文件名</th>' +
       '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">状态</th>' +
       '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">大小</th>' +
       '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">操作</th></tr></thead><tbody>';
     for (const t of tasks || []) {
       const statusLabel = statusText(t.status);
-      const rowClass = t.status === 'downloading' ? ' style="background:var(--bg-auth);"' : '';
       const progressHtml = t.status === 'downloading' && t.total_size > 0 ? buildProgressBar(t.downloaded, t.total_size) : '';
-      html += '<tr' + rowClass + '><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(t.filename || '') + '">' + escHtml(t.filename || '-') + '</td>' +
+      html += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(t.filename || '') + '">' + escHtml(t.filename || '-') + '</td>' +
         '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + statusLabel + progressHtml + '</td>' +
         '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' + (t.total_size > 0 ? formatSize(t.total_size) : '-') + '</td>' +
         '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' +
-        cloudTaskActions(t.id, t.filename, t.status, t.checksum) + '</td></tr>';
+        _cloudTaskActions({ id: t.id, kind: 'cloud_task', filename: t.filename, status: t.status, checksum: t.checksum, meta: { raw: { checksum: t.checksum } } }) + '</td></tr>';
     }
     html += '</tbody></table>';
     return html;
   }
 
-  function cloudGroupActions(id, status) {
-    let actions = '';
-    if (status === 'completed') {
-      actions += '<button class="btn btn-primary btn-sm group-archive-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">打包</button>';
-    }
-    if (status === 'failed' || status === 'cancelled') {
-      actions += '<button class="btn btn-sm btn-secondary group-resume-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">恢复</button>';
-    }
-    if (status === 'pending' || status === 'downloading') {
-      actions += '<button class="btn btn-warning btn-sm group-cancel-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">取消</button>';
-    }
-    actions += '<button class="btn btn-danger btn-sm group-delete-btn" data-id="' + escHtml(id) + '">删除</button>';
-    return actions;
-  }
+  function cloudGroupActions(id, status) { return _cloudGroupActions({ id: id, kind: 'cloud_group', status: status }); }
 
   function buildCloudGroupTableHtml(groups) {
-    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
+    let html = '<div style="font-size:13px;color:var(--text-warning);margin-bottom:6px;">(legacy 表格视图，已由传输页统一渲染管取代)</div><table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr>' +
       '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">名称</th>' +
       '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">状态</th>' +
       '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);">进度</th>' +
@@ -320,14 +305,13 @@
       '<th style="text-align:left;padding:4px 8px;border-bottom:1px solid var(--border-color);"></th></tr></thead><tbody>';
     for (const g of groups || []) {
       const statusLabel = statusText(g.status);
-      const progressText = g.completed + '/' + g.total_tasks;
+      const progressText = (g.completed || 0) + '/' + (g.total_tasks || 0);
       html += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(g.name || g.id) + '">' + escHtml(g.name || g.id) + '</td>' +
         '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + statusLabel + '</td>' +
         '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + progressText + '</td>' +
         '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap;">' +
-        cloudGroupActions(g.id, g.status) + '</td>' +
-        '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);"><button class="btn btn-small group-toggle-btn" data-id="' + escHtml(g.id) + '">展开</button></td></tr>' +
-        '<tr id="group-detail-' + escHtml(g.id) + '" style="display:none;"><td colspan="5"><div class="group-task-list" style="padding:8px;font-size:13px;">加载中...</div></td></tr>';
+        _cloudGroupActions({ id: g.id, kind: 'cloud_group', status: g.status }) + '</td>' +
+        '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);"></td></tr>';
     }
     html += '</tbody></table>';
     return html;
@@ -424,10 +408,10 @@
     return n;
   }
 
-  // 云任务操作按钮组（复用既有事件委托类名，data-* 携带：data-id/data-filename/data-checksum）。
-  // 状态机：completed → 下载到本地(data-id/data-filename/data-checksum) + 删除；
-  //   failed/cancelled → 恢复 + 删除；pending/downloading → 取消（废弃直连 switchCloudTab 后
-  //   云行统一经此渲染，类名保持与 initDynamicEventDelegation 在 #transfer-body 上的委托一致）。
+  // 云任务操作按钮组（复用既有事件委托类名，data-* 携带展示 id/data-filename/data-checksum）。
+  // 状态机：completed → 下载到本地 + 删除；failed/cancelled → 恢复 + 删除；pending/downloading
+  // → 取消。展示 id = 'cloud-task-' + 服务端真实 id；委托侧经 app.js stripCloudId 剥前缀后
+  // 调 sc.cloud.*（真实 id 形如 cloud-<8hex>-<seq>）。
   function _cloudTaskActions(it) {
     const st = it.status;
     const raw = (it.meta && it.meta.raw) || {};
@@ -449,7 +433,8 @@
   }
 
   // 云组操作按钮组：completed → 打包；failed/cancelled → 恢复；pending/downloading → 取消；
-  // 任意状态都提供删除 + 展开/收起。展开行 id 为 group-detail-<gid>（由 buildTransferRowHtml 输出）。
+  // 任意状态都提供删除 + 展开/收起。展开行 id 为 group-detail-<displayID>（由 buildTransferRowHtml
+  // 输出），API 调用侧剥 'cloud-group-' 前缀；展示 id 保留前缀以避撞 localStorage 项 id。
   function _cloudGroupActions(it) {
     const st = it.status;
     const id = it.id;
@@ -526,8 +511,8 @@
 
   // 统一行：kind 图标 + filename + 状态徽章(statusText) + 进度条/百分比 + 操作按钮组。
   // 上传含「已缓存 X/Y 块」；下载含「重新下载」（completed）；completed 折叠由 list 处理。
-  // 云组：主标题用 name；追加可展开/收起的子任务详情行（group-detail-<gid>，经 _cloudGroupActions
-  // 的「展开」按钮触发 toggleGroupTasks，与既有实现一致）。云任务/云组都走统一行渲染（裁定 2/4）。
+  // 云组：主标题用 name；追加可展开/收起的子任务详情行（id 为 group-detail-<displayID>，由
+  // _cloudGroupActions 的「展开」按钮触发 toggleGroupTasks）。展示 id 保留前缀，API 侧剥前缀。
   function buildTransferRowHtml(item) {
     item = item || {};
     const kind = item.kind || '';
@@ -590,6 +575,7 @@
 
   return {
     escHtml, formatSize, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
+    stripCloudId,
     uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,

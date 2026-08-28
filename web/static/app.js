@@ -772,8 +772,23 @@ function normalizeCloudTaskItem(t) {
   };
 }
 
+function normalizeCloudTaskItem(t) {
+  const filename = (t && t.filename) || (t && t.url) || '任务-' + (t && t.id ? t.id : '?');
+  return {
+    id: 'cloud-task-' + t.id,
+    kind: 'cloud_task',
+    filename: filename,
+    // total_size<=0 归一为 0（避免负数/缺省值污染渲染）
+    totalSize: (t && typeof t.total_size === 'number' && t.total_size > 0) ? t.total_size : 0,
+    loaded: t && typeof t.downloaded === 'number' && t.downloaded > 0 ? t.downloaded : 0,
+    status: (t && t.status) || 'pending',
+    meta: { raw: t || {} },
+  };
+}
+
 // 云组归一：filename 以组名兜底（主标题走 name）；totalSize 缺省 0（组无明确总字节，
-// 显示面积由 completed/total_tasks 进度串决定）；loaded = completed 字节或 0。
+// 显示面积由 completed/total_tasks 进度串决定）；loaded 置 0——该字段语义是字节数，
+// 组 API 的 completed 是子任务个数，装入 loaded 会造成"已加载字节"误读，故不装。
 function normalizeCloudGroupItem(g) {
   const name = (g && g.name) || ('group-' + (g && g.id ? g.id : '?'));
   return {
@@ -782,10 +797,19 @@ function normalizeCloudGroupItem(g) {
     filename: name,
     name: name,
     totalSize: 0,
-    loaded: (g && typeof g.completed === 'number' && g.completed > 0) ? g.completed : 0,
+    loaded: 0, // 非字节：组无单文件字节进度，避免混淆
     status: (g && g.status) || 'pending',
     meta: { raw: g || {} },
   };
+}
+
+// stripCloudId：把云项展示 id（'cloud-task-<id>' / 'cloud-group-<id>'）还原为服务端
+// 真实 id。按钮 data-id 一律携带展示 id（含前缀，防与 localStorage 项 id 冲突、详情行
+// 寻址一致）；凡要传给 sc.cloud.* API 或拼 '.__cloud__/<id>/' 路径，必须先剥前缀，
+// 否则后端 404/组 not found。非云 id（未命中前缀）原样返回。浏览器顶层全局，
+// app-render.js 保持同名镜像用于 node 测试环境（此处非 UMD，脚本顺序保证其先定义）。
+function stripCloudId(id) {
+  return String(id).replace(/^cloud-(task|group)-/, '');
 }
 
 // 传输合并数组（裁定 2）：localStorage 项 + 云任务 + 云组。
@@ -871,6 +895,10 @@ function switchMainTab(tab) {
 // transfer-page 已存在）；每次进入重渲染当前频道列表并启动轮询（幂等防重）。
 // initTransferPage 于 DOMContentLoaded 内调用一次完成频道条静态渲染与频道点击委托。
 function showTransferPage() {
+  // 先首拉避免首屏空列表 3s（Important：首进先 refresh，轮询只做增量）。
+  // 幂等：重复进入（已在 transfer tab）被 switchMainTab 短路，不会走到这里。
+  refreshCloudTasks();
+  refreshCloudGroups();
   renderTransferChannel();
   startCloudPolling();
 }
@@ -1154,7 +1182,7 @@ async function doChainDownloadCloud(lines, filenames) {
       let allDone = true;
       for (let j = 0; j < taskList.length; j++) {
         try {
-          const t = await sc.cloud.getTask(taskList[j].id);
+          const t = await sc.cloud.getTask(stripCloudId(taskList[j].id));
           taskList[j] = t;
           if (t.status === 'pending' || t.status === 'downloading') { allDone = false; }
         } catch(e) {
@@ -1171,7 +1199,7 @@ async function doChainDownloadCloud(lines, filenames) {
       showToast(failedCount + ' 个任务失败/取消，仅打包 ' + succeeded.length + ' 个已完成', 'warning');
     }
     showToast('打包归档中...', 'info');
-    const taskIds = succeeded.map(function(t) { return t.id; });
+    const taskIds = succeeded.map(function(t) { return stripCloudId(t.id); });
     const archiveResult = await sc.cloud.archiveBatch(taskIds);
     if (!archiveResult.success) { showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error'); return; }
     showToast('下载归档并清理中...', 'info');
@@ -1234,6 +1262,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
       await new Promise(function(r) { setTimeout(r, 2000); });
       refreshCloudGroups().catch(function() { /* 轮询失败忽略，主轮询继续 */ });
       try {
+        // groupId 为 createGroup 返回的原始 id（无前缀），直接使用真实 id
         const detail = await sc.cloud.getGroup(groupId);
         const group = detail.group || detail;
         // 检查是否有失败/取消的子任务
@@ -1350,8 +1379,10 @@ async function doCreateCloudGroup(lines, filenames) {
 
 async function downloadCloudFile(taskId, filename, checksum) {
   try {
+    const rawTaskId = stripCloudId(taskId);
     // 先下载云端文件（sc.files.download 返回 {blob, headers}，传输层自动协商）
-    const cloudPath = '.__cloud__/' + taskId + '/' + filename;
+    // 云端目录名是服务端真实 id（无前缀），路径用剥前缀 id（否则 404）
+    const cloudPath = '.__cloud__/' + rawTaskId + '/' + filename;
     const blob = (await sc.files.download(cloudPath)).blob;
 
     // 触发浏览器下载
@@ -1363,16 +1394,17 @@ async function downloadCloudFile(taskId, filename, checksum) {
     showToast('下载完成: ' + filename, 'success');
 
     // 清理云端副本
-    await deleteCloudTask(taskId, filename, checksum);
+    await deleteCloudTask(rawTaskId, filename, checksum);
   } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
 }
 
 async function deleteCloudTask(taskId, filename, checksum) {
   try {
-    // 删除云端文件（sc.files.deleteFile 走 checksum 校验）+ 删除任务
-    const cloudPath = '.__cloud__/' + taskId + '/' + filename;
+    const rawTaskId = stripCloudId(taskId);
+    // 删除云端文件（sc.files.deleteFile 走 checksum 校验）+ 删除任务；路径同样用剥前缀 id
+    const cloudPath = '.__cloud__/' + rawTaskId + '/' + filename;
     await sc.files.deleteFile(cloudPath, checksum);
-    await sc.cloud.deleteTask(taskId);
+    await sc.cloud.deleteTask(rawTaskId);
     refreshCloudTasks();
     return true;
   } catch (e) {
@@ -1385,7 +1417,7 @@ async function deleteCloudTask(taskId, filename, checksum) {
 
 async function cancelCloudTask(taskId) {
   try {
-    await sc.cloud.cancelTask(taskId);
+    await sc.cloud.cancelTask(stripCloudId(taskId));
     showToast('任务已取消', 'success');
     refreshCloudTasks();
   } catch (e) { showToast('取消失败: ' + e.message, 'error'); }
@@ -1393,7 +1425,7 @@ async function cancelCloudTask(taskId) {
 
 async function removeCloudTask(taskId) {
   try {
-    await sc.cloud.deleteTask(taskId);
+    await sc.cloud.deleteTask(stripCloudId(taskId));
     showToast('任务已删除', 'success');
     refreshCloudTasks();
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
@@ -1411,7 +1443,8 @@ function hideVersioning() {
 }
 
 // --- 云端下载组管理 ---
-// toggleGroupTasks 展开/收起组内子任务详情（组详情行由 buildTransferRowHtml 输出）。
+// toggleGroupTasks 展开/收起组内子任务详情（组详情行 id = 'group-detail-' + 展示 id，
+// 展示 id 保留前缀）；getGroup 等 API 必须用剥前缀后的真实 id。
 async function toggleGroupTasks(groupId, btn) {
   var detailRow = document.getElementById('group-detail-' + groupId);
   if (!detailRow) return;
@@ -1424,7 +1457,7 @@ async function toggleGroupTasks(groupId, btn) {
   btn.textContent = '收起';
   var container = detailRow.querySelector('.group-task-list');
   try {
-    const detail = await sc.cloud.getGroup(groupId);
+    const detail = await sc.cloud.getGroup(stripCloudId(groupId));
     var tasks = detail.tasks || [];
     if (tasks.length === 0) {
       container.innerHTML = '<span style="color:var(--text-muted);">暂无子任务数据</span>';
@@ -1452,10 +1485,11 @@ async function toggleGroupTasks(groupId, btn) {
 }
 
 async function archiveCloudGroup(groupId) {
-  const archiveName = prompt('归档文件名:', 'group-' + groupId + '.tar.gz');
+  const rawGroupId = stripCloudId(groupId);
+  const archiveName = prompt('归档文件名:', 'group-' + rawGroupId + '.tar.gz');
   if (!archiveName) return;
   try {
-    await sc.cloud.archiveGroup(groupId, archiveName);
+    await sc.cloud.archiveGroup(rawGroupId, archiveName);
     showToast('打包成功', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('打包失败: ' + e.message, 'error'); }
@@ -1467,7 +1501,7 @@ async function resumeCloudGroup(groupId) {
   // 第二个确认框仅决定是否"强制重下"：确定=强制，取消=续传恢复（仍会执行恢复）。
   const force = confirm('是否强制重新下载（不使用续传）？\n点「确定」= 强制重新下载\n点「取消」= 使用续传恢复');
   try {
-    await sc.cloud.resumeGroup(groupId, force);
+    await sc.cloud.resumeGroup(stripCloudId(groupId), force);
     showToast('恢复成功', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
@@ -1476,7 +1510,7 @@ async function resumeCloudGroup(groupId) {
 async function cancelCloudGroup(groupId) {
   if (!confirm('确认取消该组内所有任务？')) return;
   try {
-    await sc.cloud.cancelGroup(groupId);
+    await sc.cloud.cancelGroup(stripCloudId(groupId));
     showToast('已取消', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('取消失败: ' + e.message, 'error'); }
@@ -1485,7 +1519,7 @@ async function cancelCloudGroup(groupId) {
 async function deleteCloudGroup(groupId) {
   if (!confirm('确认删除该组及所有关联文件？')) return;
   try {
-    await sc.cloud.deleteGroup(groupId);
+    await sc.cloud.deleteGroup(stripCloudId(groupId));
     showToast('已删除', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
@@ -1497,7 +1531,7 @@ async function resumeCloudTask(taskId) {
   if (!confirm('确认恢复该任务？\n（默认使用断点续传，已下载的部分不重复下载）')) return;
   const force = confirm('是否强制重新下载（不使用续传）？\n点「确定」= 强制重新下载\n点「取消」= 使用续传恢复');
   try {
-    await sc.cloud.resumeTask(taskId, force);
+    await sc.cloud.resumeTask(stripCloudId(taskId), force);
     showToast('任务已恢复', 'success');
     refreshCloudTasks();
   } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
