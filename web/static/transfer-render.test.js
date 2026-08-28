@@ -185,6 +185,34 @@ test('buildTransferRowHtml 云行 status 缺省不发通用 transfer-* 按钮、
   assert.ok(html.includes('data-item-id="cloud-task-X"'), '仍可寻址');
 });
 
+// ---- 服务端真实 id 前缀剥离（R1：Critical 修复；app.js 事件委托侧剥前缀后调 sc.cloud.*） ----
+test('stripCloudId 剥 cloud-task-/cloud-group- 前缀，非云 id 原样', () => {
+  assert.equal(r.stripCloudId('cloud-task-abc123'), 'abc123');
+  assert.equal(r.stripCloudId('cloud-group-def456'), 'def456');
+  assert.equal(r.stripCloudId('cloud-xxx-yy'), 'cloud-xxx-yy'); // 服务端真实 id 也可能含 cloud- 前缀
+  assert.equal(r.stripCloudId('plain-id'), 'plain-id');
+  assert.equal(r.stripCloudId(''), '');
+});
+
+test('云展示 id 与 meta.raw.id 的可剥前缀关系（不直接用 display id 调 API）', () => {
+  const t = r.buildTransferRowHtml({
+    id: 'cloud-task-abc123', kind: 'cloud_task', filename: 'a.bin', status: 'completed',
+    meta: { raw: { id: 'abc123' } },
+  });
+  // 按钮 data-id 是展示 id（含前缀），供事件委托取到后经 app.js stripCloudId 还原
+  assert.ok(t.includes('data-id="cloud-task-abc123"'));
+  assert.ok(t.includes('data-filename="a.bin"'));
+  // 剥前缀后即服务端真实 id
+  assert.equal(r.stripCloudId('cloud-task-abc123'), 'abc123');
+  const g = r.buildTransferRowHtml({
+    id: 'cloud-group-def456', kind: 'cloud_group', name: 'grp', status: 'completed',
+    meta: { raw: { id: 'def456' } },
+  });
+  assert.ok(g.includes('data-id="cloud-group-def456"'));
+  assert.ok(g.includes('id="group-detail-cloud-group-def456"'), '详情行用展示 id');
+  assert.equal(r.stripCloudId('cloud-group-def456'), 'def456');
+});
+
 // ---- buildTransferListHtml ----
 
 test('buildTransferListHtml 空列表或频道无匹配 → 暂无传输记录', () => {
