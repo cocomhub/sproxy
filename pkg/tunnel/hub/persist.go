@@ -103,6 +103,7 @@ func (p *Persister) Load() (*Snapshot, error) {
 		return nil, err
 	}
 	if fi.Size() > maxSnapshotBytes {
+		// 快速路径：stat 已知超出上限，不读入内存（防启动 OOM）。
 		p.logger().Warn("hub 持久化文件超出大小上限，忽略并启动为空状态", "path", p.path, "size", fi.Size(), "max", maxSnapshotBytes)
 		return &Snapshot{}, nil
 	}
@@ -112,6 +113,12 @@ func (p *Persister) Load() (*Snapshot, error) {
 			return &Snapshot{}, nil
 		}
 		return nil, err
+	}
+	// 权威上限校验（M6/TOCTOU）：stat 之后文件可能被替换/膨胀，
+	// 以实际读入长度为准——读入超过上限视为损坏，拒绝解码防 OOM。
+	if len(raw) > maxSnapshotBytes {
+		p.logger().Warn("hub 持久化文件实际大小超出上限，忽略并启动为空状态", "path", p.path, "size", len(raw), "max", maxSnapshotBytes)
+		return &Snapshot{}, nil
 	}
 	snap := &Snapshot{}
 	if err := json.Unmarshal(raw, snap); err != nil {

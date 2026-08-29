@@ -577,3 +577,127 @@ func TestPersister_SaveSets0600(t *testing.T) {
 		t.Fatalf("快照文件权限 = %o, want 600（secret 不应被同机其他用户读取，M7）", got)
 	}
 }
+
+// TestPersister_ScheduleDebounceRealTimer：用真实去抖计时器（短 debounce）验证
+// time.AfterFunc + Reset 的相互配合——多次 Schedule 落在同一去抖窗口内时，只有
+// **最后一次**排队的闭包在窗口到期后落盘（中间状态被合并/覆盖），磁盘上最终是
+// 最新状态。与 TestPersister_ScheduleCoalesces（用 time.Hour 关停异步 timer，
+// 全同步路径断言合并）互补：本测试走真实 timer 路径。
+func TestPersister_ScheduleDebounceRealTimer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.json")
+	p := NewPersister(path)
+	p.debounce = 50 * time.Millisecond
+
+	// 三次 Schedule，间距短于 debounce：窗口内密集变更应合并为最后一次落盘。
+	p.Schedule(func() *Snapshot { return &Snapshot{Nodes: []NodeSnap{{ID: "v1"}}} })
+	time.Sleep(10 * time.Millisecond)
+	p.Schedule(func() *Snapshot { return &Snapshot{Nodes: []NodeSnap{{ID: "v2"}}} })
+	time.Sleep(10 * time.Millisecond)
+	p.Schedule(func() *Snapshot { return &Snapshot{Nodes: []NodeSnap{{ID: "v3"}}} })
+
+	// 等待去抖窗口过去（timer 触发并异步落盘）。轮询直到 v3 出现在磁盘上，
+	// 避免固定 sleep 在慢机器/CI 上 flake。
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		snap, err := p.Load()
+		if err == nil && snap != nil && len(snap.Nodes) == 1 && snap.Nodes[0].ID == "v3" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("去抖 timer 未把 latest 快照落盘: snap=%+v err=%v", snap, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 最终磁盘内容就是 latest（v3），且不应残留中间状态节点。
+	snap, err := p.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(snap.Nodes) != 1 || snap.Nodes[0].ID != "v3" {
+		t.Fatalf("落盘快照 = %+v, want 仅 v3（latest 覆盖，去抖合并）", snap.Nodes)
+	}
+}
+
+// TestRestoreSignalQueue_FiltersExpired（M3 恢复路径）：恢复含过期消息的收件箱时，
+// 过期消息被丢弃（不重投递），且不计入 q.total——否则重启后 q.total 高估、占用
+// 全局配额直到下次惰性清理。
+func TestRestoreSignalQueue_FiltersExpired(t *testing.T) {
+	q := NewSignalQueue()
+	now := time.Now()
+	msgs := []MessageSnap{
+		{
+			Peer: "node-a",
+			Msgs: []SignalMsg{
+				{ID: "expired", Kind: SignalOffer, From: "node-b", To: "node-a", SDP: "stale", At: now.Add(-2 * signalMsgTTL).UnixMilli()},
+				{ID: "fresh", Kind: SignalAnswer, From: "node-b", To: "node-a", SDP: "live", At: now.UnixMilli()},
+			},
+		},
+	}
+	RestoreSignalQueue(q, msgs)
+
+	if got := q.Total(); got != 1 {
+		t.Fatalf("RestoreSignalQueue 后 total = %d, want 1（过期消息不计入）", got)
+	}
+	// Pop 只取回未过期消息；过期死信不重投递。
+	m := q.Pop("node-a")
+	if m == nil || m.ID != "fresh" || m.SDP != "live" {
+		t.Fatalf("Pop 应返回 fresh 消息，got %+v", m)
+	}
+	if m := q.Pop("node-a"); m != nil {
+		t.Fatalf("Pop 应返回 nil（只剩过期消息被丢弃），got %+v", m)
+	}
+	if got := q.Total(); got != 0 {
+		t.Fatalf("消费后 total = %d, want 0", got)
+	}
+}
+
+// TestRestoreSignalQueue_OverCapGraceful：恢复超过单 peer 上限（maxSignalInbox）
+// 的收件箱——RestoreSignalQueue 恢复路径有意不强制收紧 cap（避免启动时丢消息），
+// 断言：不 panic、收件箱可用（可 Pop）、过期条目被丢弃、total 不被膨胀（只计
+// 未过期消息，验证 Minor #3 修复）。
+func TestRestoreSignalQueue_OverCapGraceful(t *testing.T) {
+	q := NewSignalQueue()
+	now := time.Now()
+
+	// 超过 maxSignalInbox 的未过期消息 + 混入一条过期消息。
+	fresh := make([]SignalMsg, 0, maxSignalInbox+16)
+	for i := range maxSignalInbox + 16 {
+		fresh = append(fresh, SignalMsg{
+			ID:   fmt.Sprintf("f%d", i),
+			Kind: SignalOffer,
+			From: "node-b",
+			To:   "node-a",
+			SDP:  "sdp",
+			At:   now.UnixMilli(),
+		})
+	}
+	msgs := []MessageSnap{
+		{
+			Peer: "node-a",
+			Msgs: append(fresh,
+				SignalMsg{ID: "expired", Kind: SignalAnswer, From: "node-b", To: "node-a", SDP: "stale", At: now.Add(-2 * signalMsgTTL).UnixMilli()},
+			),
+		},
+	}
+
+	// 不应 panic。
+	RestoreSignalQueue(q, msgs)
+
+	// 过期条目被丢弃、total 只计未过期消息（不被膨胀）。
+	if got := q.Total(); got != len(fresh) {
+		t.Fatalf("RestoreSignalQueue 后 total = %d, want %d（过期不计入）", got, len(fresh))
+	}
+	// 恢复的收件箱可用：能取回第一条未过期消息；全量取完应为空。
+	for i := 0; i < len(fresh); i++ {
+		if m := q.Pop("node-a"); m == nil {
+			t.Fatalf("Pop 第 %d 次应取回消息", i)
+		}
+	}
+	if m := q.Pop("node-a"); m != nil {
+		t.Fatalf("收件箱应已取空，多出 %+v", m)
+	}
+	if got := q.Total(); got != 0 {
+		t.Fatalf("全部消费后 total = %d, want 0", got)
+	}
+}

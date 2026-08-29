@@ -90,6 +90,8 @@ func (b *SignalBroker) FlushSignal(persist *hub.Persister) error {
 // signalSnapshots 生成信令收件箱快照，过滤掉收件箱归属节点已不在路由表的
 // 孤儿 peer（M4）——避免把死信写入持久化文件（重启后这些消息既无人投递
 // 也无人消费，只会白白占配额）。路由表为 nil（hub 未启用）时返回 nil。
+// 三条持久化路径共用：FlushSignal（信令入队/消费后）、onChange（节点注册/
+// 移除后）与停服 Flush（snapshotCurrent）——保证任何镜像都不含孤儿死信。
 func (b *SignalBroker) signalSnapshots() []hub.MessageSnap {
 	if b.rt == nil {
 		return nil

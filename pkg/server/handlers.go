@@ -116,7 +116,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 			}
 			opts.HubPersist.Schedule(func() *hub.Snapshot {
 				snap := hub.SnapshotRouteTable(h.routeTable)
-				snap.Messages = hub.SnapshotSignalQueue(h.signalBroker.queue)
+				// M4：与 FlushSignal 一致，用 signalSnapshots 过滤孤儿收件箱
+				// （节点已不在路由表），避免 onChange 路径把死信写入持久化文件。
+				snap.Messages = h.signalBroker.signalSnapshots()
 				return snap
 			})
 		})
@@ -380,8 +382,10 @@ func (h *Handlers) Close() error {
 		h.shareStore.Stop()
 	}
 	// hub 状态持久化器最终 flush：优雅停服前把最后一次注册/信令变更落盘。
+	// 快照生成在 Persister 锁内执行（FlushFn 持有 p.mu 再调 snapshotCurrent），
+	// 避免停服时节点下线与快照生成之间的竞态导致旧快照覆盖新状态（I1）。
 	if h.hubPersist != nil {
-		if err := h.hubPersist.Flush(h.snapshotCurrent()); err != nil {
+		if err := h.hubPersist.FlushFn(func() *hub.Snapshot { return h.snapshotCurrent() }); err != nil {
 			h.logger.Error("shutdown: hub 状态最终落盘失败", "err", err)
 		}
 	}
@@ -396,7 +400,8 @@ func (h *Handlers) snapshotCurrent() *hub.Snapshot {
 		return &hub.Snapshot{}
 	}
 	snap := hub.SnapshotRouteTable(h.routeTable)
-	snap.Messages = hub.SnapshotSignalQueue(h.signalBroker.queue)
+	// M4：与 FlushSignal / onChange 一致，过滤孤儿收件箱，避免停服快照写入死信。
+	snap.Messages = h.signalBroker.signalSnapshots()
 	return snap
 }
 

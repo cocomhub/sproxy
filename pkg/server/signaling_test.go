@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -445,6 +446,67 @@ func TestSignalBroker_FlushSignalFiltersOrphanInbox(t *testing.T) {
 	for _, ms := range snap.Messages {
 		if ms.Peer == "peer-b" {
 			t.Fatalf("快照含孤儿收件箱 peer-b，M4 应过滤（节点已移除）: %+v", ms)
+		}
+	}
+}
+
+// TestHubPersist_OnChangeFiltersOrphanInbox（M4 onChange 路径）：节点注册/移除触发
+// 的 onChange 持久化回调必须与 FlushSignal 一致，过滤「收件箱归属节点已不在路由表」
+// 的孤儿 peer——否则节点下线（PurgeNode 清空收件箱）与下一次 onChange 快照之间
+// 推入的孤儿消息会被持久化为死信。本测试直接构造 RegisterRoutes 全链路，验证
+// onChange 落盘镜像不含孤儿收件箱（修复前 onChange 用原始 SnapshotSignalQueue，
+// 孤儿消息会漏进文件）。
+func TestHubPersist_OnChangeFiltersOrphanInbox(t *testing.T) {
+	cfgPtr := &atomic.Pointer[Config]{}
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.UploadsDir = filepath.Join(t.TempDir(), "uploads")
+	cfgPtr.Store(cfg)
+
+	rt := hub.NewMeshRouteTable()
+	a, _ := xfertest.Pipe()
+	m := mux.New(a, mux.RoleDialer)
+	t.Cleanup(func() { _ = m.Close() })
+	rt.Add("", hub.NodeInfo{ID: "peer-a", Mux: m, Secret: "sec-a"}, nil)
+
+	path := filepath.Join(t.TempDir(), "hub.json")
+	p := hub.NewPersister(path)
+
+	srvMux := http.NewServeMux()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:        srvMux,
+		CfgPtr:     cfgPtr,
+		Version:    "test",
+		BuildAt:    "now",
+		Logger:     testLogger(),
+		RouteTable: rt,
+		HubPersist: p,
+	})
+	defer h.Close()
+
+	// 直接向 peer-b 收件箱投递一条消息，但 peer-b 从未注册 → 孤儿收件箱。
+	// （绕过 handleSignalPost 的 to 节点校验，模拟"节点已下线但消息残留"竞态。）
+	if err := h.signalBroker.queue.Push(hub.SignalMsg{Kind: hub.SignalOffer, From: "peer-a", To: "peer-b", SDP: "v=0"}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if got := h.signalBroker.queue.Total(); got != 1 {
+		t.Fatalf("push 后 total = %d, want 1", got)
+	}
+
+	// 触发 onChange（节点注册成功路径）：再注册一个节点，持久化回调排队。
+	rt.Add("", hub.NodeInfo{ID: "peer-c", Secret: "sec-c"}, nil)
+	// onChange 是异步去抖 Schedule——同步 Flush 执行 pending 闭包（M4 过滤后落盘）。
+	if err := p.Flush(nil); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	snap, err := p.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for _, ms := range snap.Messages {
+		if ms.Peer == "peer-b" {
+			t.Fatalf("onChange 快照含孤儿收件箱 peer-b，M4 应过滤: %+v", ms)
 		}
 	}
 }

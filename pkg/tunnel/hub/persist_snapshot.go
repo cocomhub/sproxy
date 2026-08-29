@@ -116,16 +116,28 @@ func SnapshotSignalQueue(q *SignalQueue) []MessageSnap {
 }
 
 // RestoreSignalQueue 将快照的信令收件箱恢复到队列。
+// 恢复时即过滤已过期消息（M3）：过期死信不重投递（与惰性过期语义一致，重启后
+// 不再投递已过期的消息），且不把过期消息计入 q.total——否则 q.total 在下次
+// 惰性清理前被高估，白白占用全局配额。
 func RestoreSignalQueue(q *SignalQueue, msgs []MessageSnap) {
 	if q == nil {
 		return
 	}
+	now := time.Now()
 	for _, ms := range msgs {
 		if ms.Peer == "" {
 			continue
 		}
 		inbox := make([]SignalMsg, 0, len(ms.Msgs))
-		inbox = append(inbox, ms.Msgs...)
+		for _, m := range ms.Msgs {
+			if signalMsgExpired(m, now) {
+				continue
+			}
+			inbox = append(inbox, m)
+		}
+		if len(inbox) == 0 {
+			continue
+		}
 		q.mu.Lock()
 		q.inboxes[ms.Peer] = inbox
 		q.total += len(inbox)
