@@ -33,6 +33,9 @@ func testSnap() *Snapshot {
 }
 
 // TestPersister_SaveLoadRoundTrip：Save→Load 往返恢复节点+服务+secret 与消息。
+// 注意：比较**数据值**而非内部表示——time.Time 经 JSON round-trip 后 loc（*Location）
+// 指针可能不同（CI UTC 环境 time.Unix 的 Local vs 解析的 UTC），reflect.DeepEqual 对
+// 含 unexported loc 字段的 time.Time 会误报不等。故节点逐字段比较、时间用 Equal()。
 func TestPersister_SaveLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.json")
 	p := NewPersister(path)
@@ -48,11 +51,43 @@ func TestPersister_SaveLoadRoundTrip(t *testing.T) {
 	if got == nil {
 		t.Fatal("Load 返回 nil，期望读到快照")
 	}
-	if !reflect.DeepEqual(got.Nodes, want.Nodes) {
-		t.Fatalf("节点快照不一致:\n got=%+v\nwant=%+v", got.Nodes, want.Nodes)
+	if len(got.Nodes) != len(want.Nodes) {
+		t.Fatalf("节点数不一致: got=%d want=%d", len(got.Nodes), len(want.Nodes))
 	}
-	if !reflect.DeepEqual(got.Messages, want.Messages) {
-		t.Fatalf("消息快照不一致:\n got=%+v\nwant=%+v", got.Messages, want.Messages)
+	for i := range want.Nodes {
+		w, g := want.Nodes[i], got.Nodes[i]
+		if w.ID != g.ID || w.Mesh != g.Mesh || w.Addr != g.Addr ||
+			w.Secret != g.Secret || w.RealNodeID != g.RealNodeID {
+			t.Fatalf("节点[%d] 元信息不一致:\n got=%+v\nwant=%+v", i, g, w)
+		}
+		if !w.Connected.Equal(g.Connected) {
+			t.Fatalf("节点[%d] Connected 不一致: got=%v want=%v", i, g.Connected, w.Connected)
+		}
+		if !reflect.DeepEqual(g.Services, w.Services) {
+			t.Fatalf("节点[%d] 服务不一致:\n got=%+v\nwant=%+v", i, g.Services, w.Services)
+		}
+	}
+	if len(got.Messages) != len(want.Messages) {
+		t.Fatalf("消息数不一致: got=%d want=%d", len(got.Messages), len(want.Messages))
+	}
+	for i := range want.Messages {
+		w, g := want.Messages[i], got.Messages[i]
+		if w.Peer != g.Peer {
+			t.Fatalf("消息[%d] peer 不一致: got=%q want=%q", i, g.Peer, w.Peer)
+		}
+		if len(g.Msgs) != len(w.Msgs) {
+			t.Fatalf("消息[%d] 条数不一致: got=%d want=%d", i, len(g.Msgs), len(w.Msgs))
+		}
+		for j := range w.Msgs {
+			wm, gm := w.Msgs[j], g.Msgs[j]
+			if wm.ID != gm.ID || wm.Kind != gm.Kind || wm.From != gm.From ||
+				wm.To != gm.To || wm.SDP != gm.SDP || wm.Cand != gm.Cand {
+				t.Fatalf("消息[%d][%d] 内容不一致:\n got=%+v\nwant=%+v", i, j, gm, wm)
+			}
+			if wm.At != gm.At {
+				t.Fatalf("消息[%d][%d] At 不一致: got=%d want=%d", i, j, gm.At, wm.At)
+			}
+		}
 	}
 }
 
