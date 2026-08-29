@@ -10,6 +10,8 @@
  *   - HKDF 派生隧道密钥与 Go tunnel.DeriveTunnelKey 已知向量完全一致
  *   - SHA-256 / HMAC-SHA256 canonical 签名与 Go sproxysig 已知向量一致
  *   - AES-GCM 加解密往返 + 默认配置 / localStorage override 读写
+ *   - 分块上传真暂停（#17）：isUploadCancelled 检查点在第 N 块抛 E_CANCELLED、
+ *     后续块/complete 不执行（mock transport 第 N 块触发 cancel）
  */
 'use strict';
 
@@ -964,6 +966,36 @@ function concatU8(arr) {
   for (const a of arr) { out.set(a, off); off += a.byteLength; }
   return out;
 }
+
+test('files.upload 分块：第 1 块后触发真暂停 → 不再发后续块 + 抛 E_CANCELLED', async () => {
+  // 服务器权威 missing=[0,1]：两块都要传。探针在第 1 块（i=1）循环开头（已发第 0 块）
+  // 返回 true → 抛 E_CANCELLED，第 1 块不发、complete 不执行。
+  const core = makeMockCore([
+    okResp({ success: true, upload_id: 'c123', chunk_size: 4, message: 'ok' }),   // init
+    okResp({ success: true, missing_chunks: [0, 1], upload_id: 'c123' }),          // status
+    okResp({ success: true, message: 'ok' }),                                         // chunk 0（第 1 次）
+  ]);
+  const api = makeApi(core);
+  const content = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) content[i] = i * 3 + 1;
+  const overall = content.slice();
+  const file = {
+    name: 'pause.bin', size: 8, lastModified: 1700000000000,
+    slice: (s, e) => { const b = overall.slice(s, e); return { arrayBuffer: async () => b.slice().buffer }; },
+    arrayBuffer: async () => overall.slice().buffer,
+  };
+  // 探针：已发出任一 /upload/chunk 请求即判定暂停（迭代 0 开头无 → 发第 0 块；
+  // 迭代 1 开头有 → 停）。
+  const probe = () => core.calls.some((c) => c.path === '/upload/chunk');
+  let err = null;
+  try {
+    await api.files.upload(file, { subdir: '', forceChunked: true, isUploadCancelled: probe });
+  } catch (e) { err = e; }
+  const chunkPosts = core.calls.filter((c) => c.path === '/upload/chunk').length;
+  assert.strictEqual(chunkPosts, 1, '只应发第 0 块；第 1 块开头探针为真 → 不发');
+  assert.ok(err && err.code === 'E_CANCELLED' && err.name === 'SclientError', '应抛可识别的 E_CANCELLED 错误: ' + JSON.stringify(err));
+  assert.strictEqual(core.calls.filter((c) => c.path === '/upload/complete').length, 0, '暂停后不得执行 complete');
+});
 
 // ---- cloud：任务/组 ----
 test('cloud 任务映射（create/batch/list/get/cancel/delete/resume/archive）', async () => {

@@ -13,6 +13,8 @@
  *   - FS Access 文件句柄：句柄缺失/无 FS API 时回落『选择文件续传』input（返回 false）
  *   - resumedChunkCount 改读 meta.chunksBitmap
  *   - 纯函数 sessionToTransferItem / completedBitmap
+ *   - 上传真暂停（#17）：pauseUploadSession 置取消标志 + 写回 paused；
+ *     setCancelledUpload 记 per-upload 标志；E_CANCELLED 恢复注册表
  */
 'use strict';
 
@@ -378,4 +380,64 @@ test('upload.js 不在 success 分支误清分块会话（语义快照）', () =
   for (const re of leaks) {
     assert.ok(!re.test(src), '已去除 success 分支误清：' + re.toString());
   }
+});
+
+// ---- 上传真暂停（#17）：pauseUploadSession 置取消标志 + 写回 paused ----
+
+test('pauseUploadSession 写回 paused：持久化 item（status:paused + 最近进度 + fileChecksum/mtimeNano）', () => {
+  const store = createMockStore([uploadItem({
+    id: 'paused-id', meta: { uploadId: 'paused-id', fileChecksum: 'ff', mtimeNano: 1700000000000000000, totalChunks: 4, chunkSize: 25, serverChunkSize: 25, chunksBitmap: [1, 1, 0, 0] },
+  })]);
+  u.setTransferStore(store);
+  try {
+    // 传入的『在途』item 与 seed 同一会话（meta.uploadId 相同）——live item 是 store 该项的镜像，
+    // pauseUploadSession 据此定位会话 id 并 upsert 写回（不新增条）。
+    u.pauseUploadSession({ id: 'paused-id', kind: 'upload', filename: 'dir/a.bin', loaded: 50, totalSize: 100, status: 'uploading', meta: { uploadId: 'paused-id', fileChecksum: 'ff', mtimeNano: 1700000000000000000, totalChunks: 4, chunkSize: 25, serverChunkSize: 25, chunksBitmap: [1, 1, 0, 0] } });
+    const items = store.loadItems();
+    assert.strictEqual(items.length, 1, '暂停不删会话——保供恢复');
+    assert.strictEqual(items[0].status, 'paused');
+    assert.strictEqual(items[0].loaded, 50, '最近进度写回');
+    assert.strictEqual(items[0].meta.fileChecksum, 'ff', 'fileChecksum 保留供续传校验');
+    assert.strictEqual(items[0].meta.mtimeNano, 1700000000000000000, 'mtimeNano 保留供续传校验');
+    // 代码审查回归（#17-2）：暂停必须写回 paused——再次调用必幂等
+    u.pauseUploadSession({ id: 'paused-id', kind: 'upload', filename: 'dir/a.bin', loaded: 60, totalSize: 100, status: 'uploading', meta: { uploadId: 'paused-id', fileChecksum: 'ff', mtimeNano: 1700000000000000000, totalChunks: 4, chunkSize: 25, serverChunkSize: 25, chunksBitmap: [1, 1, 1, 0] } });
+    const after = store.loadItems();
+    assert.strictEqual(after.length, 1, '重复暂停不追加');
+    assert.strictEqual(after[0].status, 'paused');
+    assert.strictEqual(after[0].loaded, 60);
+  } finally {
+    u.clearCancelledUpload('paused-id');
+    u.setTransferStore(null);
+  }
+});
+
+test('setCancelledUpload/isCancelledFor：per-upload 暂停标志（真值化 + 清除）', () => {
+  try {
+    u.setCancelledUpload('x1', true);
+    assert.strictEqual(u.isCancelledFor('x1'), true);
+    assert.strictEqual(u.isCancelledFor('x2'), false, '其它 id 不受影响');
+    u.setCancelledUpload('x1', false);
+    assert.strictEqual(u.isCancelledFor('x1'), false, '清除后为假');
+    u.setCancelledUpload('x1', true);
+    u.setCancelledUpload('x1', false);
+    assert.strictEqual(u.isCancelledFor('x1'), false);
+    u.setCancelledUpload('x1', true);
+    u.clearCancelledUpload('x1');
+    assert.strictEqual(u.isCancelledFor('x1'), false, 'clear 清除');
+    u.setCancelledUpload(undefined, true);
+    assert.strictEqual(u.isCancelledFor(undefined), false, '非法 id 不记录');
+  } finally {
+    u.clearCancelledUpload('x1');
+  }
+});
+
+// 语义快照：uploadFiles 必须传 isCancelled 检查点（真暂停前端接线）——且探针按会话 id 寻址
+//（缺失则永远 false，不允许误停独立上传）。
+test('uploadFiles 传 isCancelled：暂停检查点已接线（语义快照）', () => {
+  const fs = require('node:fs');
+  const src = fs.readFileSync(path.join(__dirname, 'upload.js'), 'utf8');
+  assert.ok(src.includes('isCancelled: cancelProbe'), 'uploadFiles 必须传 isCancelled 检查点');
+  assert.ok(src.includes('cancelProbe'), '探针注册');
+  assert.ok(src.includes('!!sessUploadId'), '探针按会话 id 寻址');
+  assert.ok(src.includes("e.code === 'E_CANCELLED'"), 'catch 识别取消');
 });

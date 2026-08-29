@@ -1857,6 +1857,10 @@ function initDynamicEventDelegation() {
         : null;
       if (btn.classList.contains('transfer-pause-btn')) {
         if (tItem && tItem.kind === 'download' && mgr && typeof mgr.pauseDownload === 'function') { mgr.pauseDownload(tId); renderTransferChannel(); return; }
+        // 上传真暂停：置 per-upload 取消标志 + 把本地会话写回 paused（保会话供续传）——
+        // 在途 for 检查点抛 E_CANCELLED，uploadFiles catch 归一「已暂停」；checkResumableUploads
+        // 探 /upload/status readiness 后走既存 resume 续传（选择文件/补缺失块）。
+        if (tItem && tItem.kind === 'upload') { pauseUploadSession(tItem); renderTransferChannel(); return; }
         showToast('上传不支持暂停，可取消后重选续传', 'info');
         return;
       }
@@ -1868,7 +1872,7 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('transfer-cancel-btn')) {
         if (tItem && tItem.kind === 'download' && mgr && typeof mgr.cancelDownload === 'function') { mgr.cancelDownload(tId); renderTransferChannel(); return; }
-        if (tItem && tItem.kind === 'upload') { removeUploadSession(tId); renderTransferChannel(); return; }
+        if (tItem && tItem.kind === 'upload') { clearCancelledUpload(tId); removeUploadSession(tId); renderTransferChannel(); return; }
         showToast('取消失败：传输项不存在', 'error');
         return;
       }
