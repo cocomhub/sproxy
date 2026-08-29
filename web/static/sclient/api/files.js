@@ -353,8 +353,23 @@
       const totalChunksAdj = Math.ceil(totalSize / serverChunkSize);
       const indices = buildChunkIndices(totalChunksAdj, missing);
 
+      // 真暂停检查点（可选）：回调返回 true → 抛 E_CANCELLED 的 SclientError，本块及后续块
+      // 不再发送、complete 不执行。upload.js 暂停按钮置 per-upload 标志即驱动此回调。
+      // 命名 p.isUploadCancelled 与其它 p.* 字段一致；兼容早期 spec 的 p.isCancelled 别名。
+      const cancelProbe = (typeof p.isUploadCancelled === 'function') ? p.isUploadCancelled
+        : ((typeof p.isCancelled === 'function') ? p.isCancelled : null);
+      function throwIfCancelled() {
+        if (cancelProbe && cancelProbe()) {
+          const err = new Error('上传已暂停');
+          err.name = 'SclientError';
+          err.code = 'E_CANCELLED';
+          throw err;
+        }
+      }
+
       let loaded = 0;
       for (let i = 0; i < indices.length; i++) {
+        throwIfCancelled();
         const idx = indices[i];
         const start = idx * serverChunkSize;
         const end = Math.min(start + serverChunkSize, totalSize);

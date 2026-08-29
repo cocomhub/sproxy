@@ -53,6 +53,26 @@ type ChunkStatusResponse struct {
 	Message       string `json:"message,omitempty"`
 }
 
+// UploadSessionInfo 是 GET /upload/sessions 列表中单个会话的信息条目。
+type UploadSessionInfo struct {
+	UploadID      string `json:"upload_id"`
+	Filename      string `json:"filename"`
+	TotalSize     int64  `json:"total_size"`
+	ReceivedCount int    `json:"received_count"`
+	TotalChunks   int    `json:"total_chunks"`
+	FileChecksum  string `json:"file_checksum"`
+	FileModTime   int64  `json:"file_mod_time"` // UnixNano, 0 = unknown
+	Status        string `json:"status"`        // uploading（Completed 会话被 handler 过滤，永不返回）
+}
+
+// ChunkSessionsResponse 是 GET /upload/sessions 的响应结构。
+// Sessions 永远序列化为数组（不省略为 null），便于前端遍历。
+type ChunkSessionsResponse struct {
+	Success  bool                `json:"success"`
+	Message  string              `json:"message,omitempty"`
+	Sessions []UploadSessionInfo `json:"sessions"`
+}
+
 // ChunkUploadResponse 单块上传响应。
 type ChunkUploadResponse struct {
 	Success     bool   `json:"success"`

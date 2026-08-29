@@ -250,11 +250,63 @@ async function rmdirDir(dirPath) {
 }
 
 // --- 下载 ---
-// downloadFile 走 sc.files.download(name) → { blob, headers }（传输层自动协商隧道/直连）；
-// headers 携带 X-File-Checksum（if any）——与下载字节做本地 SHA-256 比对（旧行为，C-1），
-// 不一致则报错不触发下载，防服务器返回内容与账本不符。
+// downloadFile 入口改组：先 stat 取 size/mtime/checksum，再委派 download.js 的分块管线
+//（并发 3 拉取 → IndexedDB 缓存 → 完成后合并 Blob → 本文件 triggerDownload 保存 + toast）。
+// 旧的全量 GET /download（sc.files.download）作为无 download.js 时的保底回落（保留）。
 async function downloadFile(name, expectedChecksum) {
-  try {
+  if (typeof downloadMgr !== 'undefined' && downloadMgr && downloadMgr.createDownloadManager) {
+    const mgr = getDownloadManager();
+    try {
+      const statRes = await sc.files.stat(name);
+      const meta = httpFileMeta(statRes);
+      const result = await mgr.startDownload(name, meta, {
+        // 完成回调由本文件提供：triggerDownload 保存 + toast（管线自身不含 DOM）。
+        onComplete: function (blob, filename) {
+          triggerDownload(filename, blob);
+          const shouldVerify = !!(meta && meta.checksum);
+          showToast(filename + ' 下载完成' + (shouldVerify ? '，校验通过' : ''), 'success');
+        },
+        onError: function (err) { showToast('下载失败: ' + err.message, 'error'); },
+      });
+      return result;
+    } catch (e) {
+      // 传输/建项失败 → 回落旧全量下载（保证下载入口可用），并提示已回退。
+      showToast(name + ' 分块下载启动失败，回落全量下载: ' + e.message, 'warning');
+      return legacyDownloadFile(name, expectedChecksum);
+    }
+  }
+  return legacyDownloadFile(name, expectedChecksum);
+}
+
+// httpFileMeta 从 stat 响应 {headers} 提取下载管线 stat 参数 {size, mtime, checksum}
+//（X-File-Size / X-File-MTime / X-File-Checksum；兼容小写与大写键）。
+function httpFileMeta(statRes) {
+  const headers = (statRes && statRes.headers) ? statRes.headers : {};
+  function hv(key) {
+    const direct = headers[key] || headers[key.toLowerCase()] || headers[key.toUpperCase()];
+    if (Array.isArray(direct)) return direct[0] || '';
+    return (direct === undefined || direct === null) ? '' : String(direct);
+  }
+  const sizeN = Number(hv('X-File-Size'));
+  return {
+    size: isFinite(sizeN) && sizeN > 0 ? sizeN : ((statRes && statRes.size) || 0),
+    mtime: hv('X-File-MTime'),
+    checksum: hv('X-File-Checksum'),
+  };
+}
+
+// getDownloadManager：惰性创建下载管线实例（全仓唯一 createDownloadManager 调用点；
+// 缺省 store=transferStore.createTransferStore({})，transport=sclientTransport）。
+let _downloadManager = null;
+function getDownloadManager() {
+  if (!_downloadManager && typeof downloadMgr !== 'undefined' && downloadMgr.createDownloadManager) {
+    _downloadManager = downloadMgr.createDownloadManager({});
+  }
+  return _downloadManager;
+}
+
+// legacyDownloadFile：旧全量 GET /download（保底回落）——保留但不再默认走。
+async function legacyDownloadFile(name, expectedChecksum) {  try {
     const { blob, headers } = await sc.files.download(name, { downloadHeaders: { 'X-File-Checksum': '' } });
     const serverCS = (headers && headers['X-File-Checksum']) || '';
     if (serverCS) {
@@ -264,7 +316,7 @@ async function downloadFile(name, expectedChecksum) {
         return;
       }
       triggerDownload(name, blob);
-      showToast(name + ' 下载完成' + '，校验通过', 'success');
+      showToast(name + ' 下载完成，校验通过', 'success');
       return;
     }
     triggerDownload(name, blob);
@@ -306,6 +358,22 @@ function triggerDownload(fileName, data) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+// downloadCompleteHandler：下载管线 onComplete 桩——保存 Blob + toast（与 downloadFile 一致）。
+// used by transfer 行「恢复下载」回调。
+function downloadCompleteHandler(blob, filename) {
+  if (!blob || !filename) return;
+  triggerDownload(filename, blob);
+  showToast(filename + ' 下载完成' + (filename.indexOf('校验通过') >= 0 ? '' : ''), 'success');
+  renderTransferChannel();
+}
+
+// itemParentDir：从 item filename（可能带相对目录）取父目录段（'a/b/c.txt' → 'a/b'）。
+function itemParentDir(filename) {
+  const s = String(filename || '');
+  const i = s.lastIndexOf('/');
+  return i >= 0 ? s.slice(0, i) : '';
 }
 
 // --- 删除 ---
@@ -567,7 +635,6 @@ document.addEventListener('keydown', function(e) {
     case 'Escape':
       // Esc: 关闭所有弹窗
       hideStats();
-      hideCloudDownload();
       hideVersioning();
       hideShareModal();
       break;
@@ -721,8 +788,30 @@ function copyShareLink(token) {
   }
 }
 
-// --- 云端下载 ---
+// --- 云端下载（任务 5：云任务/云组归一为 TransferItem，统一走传输页渲染管） ---
 let _cloudTasks = [];
+let _cloudGroups = [];
+let _cloudPollTimer = null;
+let _cloudTasksInFlight = false;
+let _cloudGroupsInFlight = false;
+
+// 传输页状态：当前激活频道（缺省 all）。频道条与列表渲染入口（任务 4）。
+let _transferChannel = 'all';
+
+// 传输数据层实例（惰性、单例）：transfer-store.js 的 UMD 顶层导出是
+// {createTransferStore, normalizeItems, computeChunkIndex, chunkCountOf}，loadItems 是
+// createTransferStore() 返回实例的方法（全仓唯一调用 createTransferStore 的地方）。
+// createTransferStore({}) 使用浏览器默认 localStorage/indexedDB；loadItems 只读主列表，
+// upsertItem/removeItem 供后续任务（6/7）写入用。
+// 裁定 1：云任务/组不入 localStorage（server 是唯一权威，内存数组即最新）——
+// 本页合并渲染时 loadItems() + _cloudTasks/_cloudGroups 归一（见 getAllTransferItems）。
+let _transferStore = null;
+function getTransferStore() {
+  if (!_transferStore && typeof transferStore !== 'undefined' && transferStore.createTransferStore) {
+    _transferStore = transferStore.createTransferStore({});
+  }
+  return _transferStore;
+}
 
 // genDefaultFilename 从 URL 推断默认文件名，委托给共享模块 cloudfilename.js。
 // 与 Go 端 pkg/cloudfilename 使用同一套规则（wget 行为），由共享语料测试保证双端一致。
@@ -733,6 +822,257 @@ function genDefaultFilename(rawUrl) {
 // filepathSafe 清理文件名中的路径分隔符，委托给共享模块，与 Go 端 pkg/cloudfilename.Safe 一致。
 function filepathSafe(name) {
   return cloudfilename.filepathSafe(name);
+}
+
+// ---- 云项归一（裁定 3）----
+// 服务器云任务/组对象 → TransferItem 形态。status 透传并须落入 statusText 映射
+// （pending/downloading/completed/failed/cancelled）。meta.raw 保留原始对象供操作读取。
+function normalizeCloudTaskItem(t) {
+  const filename = (t && t.filename) || (t && t.url) || '任务-' + (t && t.id ? t.id : '?');
+  return {
+    id: 'cloud-task-' + t.id,
+    kind: 'cloud_task',
+    filename: filename,
+    // total_size<=0 归一为 0（避免负数/缺省值污染渲染）
+    totalSize: (t && typeof t.total_size === 'number' && t.total_size > 0) ? t.total_size : 0,
+    loaded: t && typeof t.downloaded === 'number' && t.downloaded > 0 ? t.downloaded : 0,
+    status: (t && t.status) || 'pending',
+    meta: { raw: t || {} },
+  };
+}
+
+// 云组归一：filename 以组名兜底（主标题走 name）；totalSize 缺省 0（组无明确总字节，
+// 显示面积由 completed/total_tasks 进度串决定）；loaded 置 0——该字段语义是字节数，
+// 组 API 的 completed 是子任务个数，装入 loaded 会造成"已加载字节"误读，故不装。
+function normalizeCloudGroupItem(g) {
+  const name = (g && g.name) || ('group-' + (g && g.id ? g.id : '?'));
+  return {
+    id: 'cloud-group-' + g.id,
+    kind: 'cloud_group',
+    filename: name,
+    name: name,
+    totalSize: 0,
+    loaded: 0, // 非字节：组无单文件字节进度，避免混淆
+    status: (g && g.status) || 'pending',
+    meta: { raw: g || {} },
+  };
+}
+
+// stripCloudId：把云项展示 id（'cloud-task-<id>' / 'cloud-group-<id>'）还原为服务端
+// 真实 id。按钮 data-id 一律携带展示 id（含前缀，防与 localStorage 项 id 冲突、详情行
+// 寻址一致）；凡要传给 sc.cloud.* API 或拼 '.__cloud__/<id>/' 路径，必须先剥前缀，
+// 否则后端 404/组 not found。非云 id（未命中前缀）原样返回。浏览器顶层全局，
+// app-render.js 保持同名镜像用于 node 测试环境（此处非 UMD，脚本顺序保证其先定义）。
+function stripCloudId(id) {
+  return String(id).replace(/^cloud-(task|group)-/, '');
+}
+
+// 传输合并数组（裁定 2）：localStorage 项 + 云任务 + 云组。
+function getAllTransferItems() {
+  const store = getTransferStore();
+  const local = store ? store.loadItems() : [];
+  const tasks = (_cloudTasks || []).map(normalizeCloudTaskItem);
+  const groups = (_cloudGroups || []).map(normalizeCloudGroupItem);
+  return local.concat(tasks, groups);
+}
+
+// refresh 云任务/组的顶部 URL 预填由 showCloudDownload 的 restoreCloudUrlRow + 清空负责，
+// 这里不重复。刷新只回写内存数组并让 renderTransferChannel 重渲染（裁定 1）。
+function refreshCloudTasks() {
+  if (_cloudTasksInFlight) return;
+  _cloudTasksInFlight = true;
+  return sc.cloud.listTasks({}).then(function (data) {
+    const tasks = Array.isArray(data) ? data : (data && data.tasks) || [];
+    _cloudTasks = tasks || [];
+    renderTransferChannel(); // 云任务名称/进度进统一传输页渲染管
+  }).catch(function (e) {
+    showToast('云端任务刷新失败: ' + e.message, 'error');
+  }).finally(function () {
+    _cloudTasksInFlight = false;
+  });
+}
+
+// refreshCloudGroups：组列表转 TransferItem 统一渲染后，组操作已由 #transfer-body 事件委托
+// 处理，此处仅回写内存数组（裁定 1）。
+function refreshCloudGroups() {
+  if (_cloudGroupsInFlight) return;
+  _cloudGroupsInFlight = true;
+  return sc.cloud.listGroups({}).then(function (data) {
+    const groups = Array.isArray(data) ? data : (data && data.groups) || [];
+    _cloudGroups = groups || [];
+    renderTransferChannel(); // 云组进统一传输页渲染管
+  }).catch(function (e) {
+    showToast('云端组刷新失败: ' + e.message, 'error');
+  }).finally(function () {
+    _cloudGroupsInFlight = false;
+  });
+}
+
+function startCloudPolling() {
+  stopCloudPolling();
+  // 任务与组列表一起轮询，保证组进度同步刷新；只回写云项（裁定 1：不 upsert 到
+  // sproxy_transfer_items——server 是云任务唯一权威，localStorage 只存本机上传/下载）。
+  _cloudPollTimer = setInterval(function () {
+    refreshCloudTasks();
+    refreshCloudGroups();
+  }, 3000);
+}
+
+function stopCloudPolling() {
+  if (_cloudPollTimer) { clearInterval(_cloudPollTimer); _cloudPollTimer = null; }
+}
+
+// ---- 传输页：主 tab 切换 + 频道渲染（任务 4 骨架；任务 5 云逻辑并入统一管）----
+
+// switchMainTab('files'|'transfer')：页面级主 tab。切换时改激活样式与显隐；
+// 进入 transfer 时由 showTransferPage 触发首次渲染 + 轮询，切离时由 hideTransferPage 停轮询。
+// 幂等：重复进入不重启渲染/轮询（切换守卫 mainTab !== tab 短路）。
+// 云频道（cloud_tasks/cloud_groups）与其它频道一致走 transfer-body 统一渲染管（裁定 2）。
+function switchMainTab(tab) {
+  if (tab !== 'files' && tab !== 'transfer') return;
+  const cur = document.querySelector('.main-tab.active');
+  if (cur && cur.id === 'main-tab-' + tab) return; // 已在目标 tab，幂等返回
+  const oldTab = cur ? cur.id.replace('main-tab-', '') : 'files';
+  if (oldTab === 'transfer') hideTransferPage();
+  const filesPage = document.getElementById('files-page');
+  const transferPage = document.getElementById('transfer-page');
+  if (!filesPage || !transferPage) return;
+  const filesBtn = document.getElementById('main-tab-files');
+  const transferBtn = document.getElementById('main-tab-transfer');
+  if (filesBtn) filesBtn.classList.toggle('active', tab === 'files');
+  if (transferBtn) transferBtn.classList.toggle('active', tab === 'transfer');
+  filesPage.style.display = tab === 'files' ? '' : 'none';
+  transferPage.style.display = tab === 'transfer' ? '' : 'none';
+  if (tab === 'transfer') showTransferPage();
+}
+
+// showTransferPage：进入传输页（含初始化）——频道条渲染只需一次（DOMContentLoaded 后
+// transfer-page 已存在）；每次进入重渲染当前频道列表并启动轮询（幂等防重）。
+// initTransferPage 于 DOMContentLoaded 内调用一次完成频道条静态渲染与频道点击委托。
+function showTransferPage() {
+  // 先首拉避免首屏空列表 3s（Important：首进先 refresh，轮询只做增量）。
+  // 幂等：重复进入（已在 transfer tab）被 switchMainTab 短路，不会走到这里。
+  refreshCloudTasks();
+  refreshCloudGroups();
+  renderTransferChannel();
+  startCloudPolling();
+}
+
+function hideTransferPage() {
+  stopCloudPolling();
+}
+
+// renderTransferChannel：按当前 _transferChannel 重渲染 #transfer-body 传输列表。
+// 数据源 = 合并数组（localStorage 项 + _cloudTasks/_cloudGroups 归一），
+// filterTransferItems → buildTransferListHtml → body.innerHTML（所有频道同一渲染管，裁定 2）。
+function renderTransferChannel() {
+  const ch = _transferChannel;
+  const body = document.getElementById('transfer-body');
+  if (!body) return;
+  const items = getAllTransferItems();
+  const html = appRender.buildTransferListHtml(items, ch);
+  body.innerHTML = html;
+  syncChannelBarActive();
+}
+
+// syncChannelBarActive：把当前频道的按钮打上 active 高亮（幂等，无则补；其它清显）。
+// 动画语义：仅同步 active 类，不做 innerHTML 重建（频道条激活样式随频道切换更新，
+// 数据仍复用，符合 spec 分节 1——频道切换只重渲染不重新拉取）。
+function syncChannelBarActive() {
+  const bar = document.getElementById('transfer-channel-bar');
+  if (!bar) return;
+  const btns = bar.querySelectorAll('[data-channel]');
+  for (const b of btns) {
+    const on = b.dataset.channel === _transferChannel;
+    b.classList.toggle('active', on);
+  }
+}
+
+// switchTransferChannel：频道切换（转移高亮）。所有频道写入 #transfer-body 统一渲染管
+// （cloud_tasks/cloud_groups 按 kind 过滤，裁定 2）。频道切换只重渲染、不重新拉取
+// （传输页核心交互，spec 分节 1）。
+function switchTransferChannel(ch) {
+  _transferChannel = ch;
+  renderTransferChannelBar(); // 重设频道条激活样式（channel-bar innerHTML 全量重建，委托在容器上不受影响）
+  renderTransferChannel();
+}
+
+// initTransferPage：静态元素一次性绑定——频道条渲染 + 频道条点击委托。
+// 云 URL 行绑定由 DOMContentLoaded 既有 bindCloudUrlRowEvents 负责（预览后 restoreCloudUrlRow
+// 会重新绑定），此处不再重复绑定避免重复处理器。预渲染 / guard 均幂等。
+// 云行操作按钮沿用 cloud-*/group-* 事件委托类名（见 initDynamicEventDelegation，挂 #transfer-body）。
+function initTransferPage() {
+  renderTransferChannelBar();
+  const bar = document.getElementById('transfer-channel-bar');
+  if (bar) {
+    bar.addEventListener('click', function(e) {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const ch = btn.dataset && btn.dataset.channel;
+      if (!ch) return;
+      switchTransferChannel(ch);
+    });
+  }
+}
+
+// renderTransferChannelBar：由 TRANSFER_CHANNELS 精确取值生成频道条（顺序/spec 字面值）。
+// 每个频道按钮 id 按 TRANSFER_CHANNELS 的 id 命名 #transfer-channel-<id>；激活频道加 active。
+function renderTransferChannelBar() {
+  const bar = document.getElementById('transfer-channel-bar');
+  if (!bar) return;
+  let html = '';
+  for (const c of appRender.TRANSFER_CHANNELS) {
+    const active = c.id === _transferChannel ? ' active' : '';
+    html += '<button type="button" id="transfer-channel-' + c.id + '" class="channel-btn' + active + '" data-channel="' + c.id + '">' + c.label + '</button>';
+  }
+  bar.innerHTML = html;
+}
+
+// 云端下载入口（云按钮）：URL 输入行静态存在于 #transfer-page；点击切到传输页 + 云任务频道。
+// 传输页轮询由 showTransferPage/hideTransferPage 门控（进入自动轮询、切离停止）——不再自启。
+function showCloudDownload() {
+  switchMainTab('transfer');
+  restoreCloudUrlRow();
+  const urlInput = document.getElementById('cloud-url');
+  if (urlInput) urlInput.value = '';
+  switchTransferChannel('cloud_tasks');
+}
+
+// bindCloudUrlRowEvents 为云端下载输入行的按钮与 Enter 快捷键绑定事件。
+// 必须在 restoreCloudUrlRow 重建输入行后也调用：重建的 textarea 是全新元素，
+// 若不在此处补绑 keydown，Enter 只插入换行而不提交，与首次打开行为不一致。
+function bindCloudUrlRowEvents() {
+  const cb = document.getElementById('cloud-chain-btn');
+  if (cb) cb.addEventListener('click', chainDownloadCloud);
+  const sb = document.getElementById('cloud-submit-btn');
+  if (sb) sb.addEventListener('click', createCloudTask);
+  const cgb = document.getElementById('cloud-create-group-btn');
+  if (cgb) cgb.addEventListener('click', createCloudGroup);
+  const cg = document.getElementById('cloud-chain-group-btn');
+  if (cg) cg.addEventListener('click', chainDownloadCloudGroup);
+  const urlInput = document.getElementById('cloud-url');
+  if (urlInput) {
+    urlInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createCloudTask(); }
+    });
+  }
+}
+
+// restoreCloudUrlRow 恢复云端下载输入行。预览界面（showCloudDownloadPreview）把
+// #cloud-url 所在行的 innerHTML 替换为预览列表；若用户不点预览的"取消"而直接关闭弹窗，
+// 输入行不会自动恢复。再次打开云频道时依赖 #cloud-url 存在，缺失会导致 .value 抛
+// TypeError、传输页云任务频道空白。这里重建输入行并重新绑定按钮事件。
+// 选择器 .cloud-url-row（URL 区在 #transfer-page 内，不依赖 #cloud-modal 祖先）。
+function restoreCloudUrlRow() {
+  var urlRow = document.querySelector('.cloud-url-row');
+  if (!urlRow || document.getElementById('cloud-url')) return;
+  // 静态可信模板，无用户输入拼接；用户内容通过 .value 赋值。
+  urlRow.innerHTML = '<textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>' +
+    '<button type="button" id="cloud-chain-btn" class="btn btn-primary" style="white-space:nowrap;">链式下载</button>' +
+    '<button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>' +
+    '<button type="button" id="cloud-create-group-btn" class="btn btn-secondary" style="white-space:nowrap;">创建组</button>' +
+    '<button type="button" id="cloud-chain-group-btn" class="btn btn-primary" style="white-space:nowrap;">组链式下载</button>';
+  bindCloudUrlRowEvents();
 }
 
 // showCloudDownloadPreview 在提交前展示每个 URL 的默认文件名，供用户确认或修改。
@@ -863,113 +1203,6 @@ async function showCloudDownloadPreview(action) {
     }
   });
 }
-let _cloudGroups = [];
-let _cloudPollTimer = null;
-
-// bindCloudUrlRowEvents 为云端下载输入行的按钮与 Enter 快捷键绑定事件。
-// 必须在 restoreCloudUrlRow 重建输入行后也调用：重建的 textarea 是全新元素，
-// 若不在此处补绑 keydown，Enter 只插入换行而不提交，与首次打开行为不一致。
-function bindCloudUrlRowEvents() {
-  document.getElementById('cloud-chain-btn').addEventListener('click', chainDownloadCloud);
-  document.getElementById('cloud-submit-btn').addEventListener('click', createCloudTask);
-  document.getElementById('cloud-create-group-btn').addEventListener('click', createCloudGroup);
-  var chainGroupBtn = document.getElementById('cloud-chain-group-btn');
-  if (chainGroupBtn) chainGroupBtn.addEventListener('click', chainDownloadCloudGroup);
-  var urlInput = document.getElementById('cloud-url');
-  if (urlInput) {
-    urlInput.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createCloudTask(); }
-    });
-  }
-}
-
-// restoreCloudUrlRow 恢复云端下载输入行。预览界面（showCloudDownloadPreview）把
-// #cloud-url 所在行的 innerHTML 替换为预览列表；若用户不点预览的"取消"而直接关闭
-// 弹窗，输入行不会自动恢复。再次打开弹窗时 showCloudDownload 依赖 #cloud-url 存在，
-// 缺失会导致 .value 抛 TypeError、弹窗空白。这里重建输入行并重新绑定按钮事件。
-function restoreCloudUrlRow() {
-  var urlRow = document.querySelector('#cloud-modal .cloud-url-row');
-  if (!urlRow || document.getElementById('cloud-url')) return;
-  // 静态可信模板，无用户输入拼接；用户内容通过 .value 赋值，不进入 innerHTML
-  urlRow.innerHTML = '<textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>' +
-    '<button type="button" id="cloud-chain-btn" class="btn btn-primary" style="white-space:nowrap;">链式下载</button>' +
-    '<button type="button" id="cloud-submit-btn" class="btn btn-secondary" style="white-space:nowrap;">仅提交</button>' +
-    '<button type="button" id="cloud-create-group-btn" class="btn btn-secondary" style="white-space:nowrap;">创建组</button>' +
-    '<button type="button" id="cloud-chain-group-btn" class="btn btn-primary" style="white-space:nowrap;">组链式下载</button>';
-  bindCloudUrlRowEvents();
-}
-
-function showCloudDownload() {
-  document.getElementById('cloud-modal').style.display = 'flex';
-  // 先恢复可能的预览残留，确保 #cloud-url 存在（否则 .value 抛 TypeError）
-  restoreCloudUrlRow();
-  document.getElementById('cloud-url').value = '';
-  refreshCloudTasks();
-  refreshCloudGroups();
-  startCloudPolling();
-  switchCloudTab('tasks');
-}
-
-function hideCloudDownload() {
-  document.getElementById('cloud-modal').style.display = 'none';
-  stopCloudPolling();
-}
-
-let _cloudActiveTab = 'tasks';
-
-function switchCloudTab(tab) {
-  _cloudActiveTab = tab;
-  document.getElementById('cloud-tasks-body').style.display = tab === 'tasks' ? 'block' : 'none';
-  document.getElementById('cloud-groups-body').style.display = tab === 'groups' ? 'block' : 'none';
-  document.querySelectorAll('.cloud-tab').forEach(function(el) {
-    el.style.borderBottomColor = el.id === 'cloud-' + tab + '-tab' ? 'var(--tab-active)' : 'transparent';
-    el.style.color = el.id === 'cloud-' + tab + '-tab' ? 'var(--text-primary)' : 'var(--text-secondary)';
-  });
-  if (tab === 'groups') refreshCloudGroups();
-  if (tab === 'tasks') refreshCloudTasks();
-}
-
-// 刷新当前激活 Tab 的内容（刷新按钮按激活 Tab 分发）
-function refreshCloudCurrentTab() {
-  if (_cloudActiveTab === 'groups') refreshCloudGroups();
-  else refreshCloudTasks();
-}
-
-function startCloudPolling() {
-  stopCloudPolling();
-  // 任务与组列表一起轮询，保证组进度同步刷新
-  _cloudPollTimer = setInterval(function() {
-    refreshCloudTasks();
-    refreshCloudGroups();
-  }, 3000);
-}
-
-function stopCloudPolling() {
-  if (_cloudPollTimer) { clearInterval(_cloudPollTimer); _cloudPollTimer = null; }
-}
-
-let _cloudTasksInFlight = false;
-
-async function refreshCloudTasks() {
-  // 防重入：3s 轮询与手动刷新可能重叠，慢网络下后到的旧响应会覆盖新数据
-  if (_cloudTasksInFlight) return;
-  _cloudTasksInFlight = true;
-  const body = document.getElementById('cloud-tasks-body');
-  try {
-    const data = await sc.cloud.listTasks({});
-    const tasks = Array.isArray(data) ? data : (data && data.tasks) || [];
-    _cloudTasks = tasks || [];
-    if (_cloudTasks.length === 0) {
-      body.innerHTML = '<div class="empty-msg">暂无下载任务</div>';
-      return;
-    }
-    body.innerHTML = buildCloudTaskTableHtml(_cloudTasks);
-  } catch (e) {
-    body.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
-  } finally {
-    _cloudTasksInFlight = false;
-  }
-}
 
 // triggerBrowserDownload 触发浏览器保存（下载型归档等）。
 function triggerBrowserDownload(data, filename) {
@@ -1004,7 +1237,7 @@ async function doChainDownloadCloud(lines, filenames) {
       let allDone = true;
       for (let j = 0; j < taskList.length; j++) {
         try {
-          const t = await sc.cloud.getTask(taskList[j].id);
+          const t = await sc.cloud.getTask(stripCloudId(taskList[j].id));
           taskList[j] = t;
           if (t.status === 'pending' || t.status === 'downloading') { allDone = false; }
         } catch(e) {
@@ -1021,7 +1254,7 @@ async function doChainDownloadCloud(lines, filenames) {
       showToast(failedCount + ' 个任务失败/取消，仅打包 ' + succeeded.length + ' 个已完成', 'warning');
     }
     showToast('打包归档中...', 'info');
-    const taskIds = succeeded.map(function(t) { return t.id; });
+    const taskIds = succeeded.map(function(t) { return stripCloudId(t.id); });
     const archiveResult = await sc.cloud.archiveBatch(taskIds);
     if (!archiveResult.success) { showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error'); return; }
     showToast('下载归档并清理中...', 'info');
@@ -1084,6 +1317,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
       await new Promise(function(r) { setTimeout(r, 2000); });
       refreshCloudGroups().catch(function() { /* 轮询失败忽略，主轮询继续 */ });
       try {
+        // groupId 为 createGroup 返回的原始 id（无前缀），直接使用真实 id
         const detail = await sc.cloud.getGroup(groupId);
         const group = detail.group || detail;
         // 检查是否有失败/取消的子任务
@@ -1193,15 +1427,17 @@ async function doCreateCloudGroup(lines, filenames) {
     const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
     await sc.cloud.createGroup(name, urls);
     showToast('下载组已创建', 'success');
-    switchCloudTab('groups');
+    switchTransferChannel('cloud_groups');
     refreshCloudGroups();
   } catch (e) { showToast('创建组失败: ' + e.message, 'error'); }
 }
 
 async function downloadCloudFile(taskId, filename, checksum) {
   try {
+    const rawTaskId = stripCloudId(taskId);
     // 先下载云端文件（sc.files.download 返回 {blob, headers}，传输层自动协商）
-    const cloudPath = '.__cloud__/' + taskId + '/' + filename;
+    // 云端目录名是服务端真实 id（无前缀），路径用剥前缀 id（否则 404）
+    const cloudPath = '.__cloud__/' + rawTaskId + '/' + filename;
     const blob = (await sc.files.download(cloudPath)).blob;
 
     // 触发浏览器下载
@@ -1213,16 +1449,17 @@ async function downloadCloudFile(taskId, filename, checksum) {
     showToast('下载完成: ' + filename, 'success');
 
     // 清理云端副本
-    await deleteCloudTask(taskId, filename, checksum);
+    await deleteCloudTask(rawTaskId, filename, checksum);
   } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
 }
 
 async function deleteCloudTask(taskId, filename, checksum) {
   try {
-    // 删除云端文件（sc.files.deleteFile 走 checksum 校验）+ 删除任务
-    const cloudPath = '.__cloud__/' + taskId + '/' + filename;
+    const rawTaskId = stripCloudId(taskId);
+    // 删除云端文件（sc.files.deleteFile 走 checksum 校验）+ 删除任务；路径同样用剥前缀 id
+    const cloudPath = '.__cloud__/' + rawTaskId + '/' + filename;
     await sc.files.deleteFile(cloudPath, checksum);
-    await sc.cloud.deleteTask(taskId);
+    await sc.cloud.deleteTask(rawTaskId);
     refreshCloudTasks();
     return true;
   } catch (e) {
@@ -1235,7 +1472,7 @@ async function deleteCloudTask(taskId, filename, checksum) {
 
 async function cancelCloudTask(taskId) {
   try {
-    await sc.cloud.cancelTask(taskId);
+    await sc.cloud.cancelTask(stripCloudId(taskId));
     showToast('任务已取消', 'success');
     refreshCloudTasks();
   } catch (e) { showToast('取消失败: ' + e.message, 'error'); }
@@ -1243,16 +1480,11 @@ async function cancelCloudTask(taskId) {
 
 async function removeCloudTask(taskId) {
   try {
-    await sc.cloud.deleteTask(taskId);
+    await sc.cloud.deleteTask(stripCloudId(taskId));
     showToast('任务已删除', 'success');
     refreshCloudTasks();
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
-
-function buildCloudTaskTableHtml(tasks) { return appRender.buildCloudTaskTableHtml(tasks); }
-function buildProgressBar(downloaded, total) { return appRender.buildProgressBar(downloaded, total); }
-function statusText(status) { return appRender.statusText(status); }
-function cloudTaskActions(id, filename, status, checksum) { return appRender.cloudTaskActions(id, filename, status, checksum); }
 
 // --- 文件版本管理 ---
 function showVersioning() {
@@ -1266,34 +1498,8 @@ function hideVersioning() {
 }
 
 // --- 云端下载组管理 ---
-let _cloudGroupsInFlight = false;
-
-async function refreshCloudGroups() {
-  const body = document.getElementById('cloud-groups-body');
-  if (body.style.display === 'none') return;
-  // 防重入：与任务刷新同一策略，跳过重叠请求避免旧响应覆盖新数据
-  if (_cloudGroupsInFlight) return;
-  _cloudGroupsInFlight = true;
-  try {
-    const data = await sc.cloud.listGroups({});
-    const groups = Array.isArray(data) ? data : (data && data.groups) || [];
-    _cloudGroups = groups || [];
-    if (_cloudGroups.length === 0) {
-      body.innerHTML = '<div class="empty-msg">暂无下载组</div>';
-      return;
-    }
-    body.innerHTML = buildCloudGroupTableHtml(_cloudGroups);
-  } catch (e) {
-    body.innerHTML = '<div class="empty-msg">请求失败: ' + e.message + '</div>';
-  } finally {
-    _cloudGroupsInFlight = false;
-  }
-}
-
-function buildCloudGroupTableHtml(groups) { return appRender.buildCloudGroupTableHtml(groups); }
-function cloudGroupActions(id, status) { return appRender.cloudGroupActions(id, status); }
-
-// toggleGroupTasks 展开/收起组内子任务详情。
+// toggleGroupTasks 展开/收起组内子任务详情（组详情行 id = 'group-detail-' + 展示 id，
+// 展示 id 保留前缀）；getGroup 等 API 必须用剥前缀后的真实 id。
 async function toggleGroupTasks(groupId, btn) {
   var detailRow = document.getElementById('group-detail-' + groupId);
   if (!detailRow) return;
@@ -1306,7 +1512,7 @@ async function toggleGroupTasks(groupId, btn) {
   btn.textContent = '收起';
   var container = detailRow.querySelector('.group-task-list');
   try {
-    const detail = await sc.cloud.getGroup(groupId);
+    const detail = await sc.cloud.getGroup(stripCloudId(groupId));
     var tasks = detail.tasks || [];
     if (tasks.length === 0) {
       container.innerHTML = '<span style="color:var(--text-muted);">暂无子任务数据</span>';
@@ -1318,8 +1524,8 @@ async function toggleGroupTasks(groupId, btn) {
       html += '<tr>' +
         '<td style="padding:4px 8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;">' + appRender.escHtml(t.id || '') + '</td>' +
         '<td style="padding:4px 8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + appRender.escHtml(t.url || '') + '">' + appRender.escHtml(t.url || '') + '</td>' +
-        '<td style="padding:4px 8px;">' + statusText(t.status) + '</td>' +
-        '<td style="padding:4px 8px;">' + (t.total_size > 0 ? buildProgressBar(t.downloaded, t.total_size) : '-') + '</td>' +
+        '<td style="padding:4px 8px;">' + appRender.statusText(t.status) + '</td>' +
+        '<td style="padding:4px 8px;">' + (t.total_size > 0 ? appRender.buildProgressBar(t.downloaded, t.total_size) : '-') + '</td>' +
         '<td style="padding:4px 8px;max-width:180px;overflow:hidden;text-overflow:ellipsis;font-family:monospace;font-size:11px;" title="' + appRender.escHtml(t.etag || '') + '">' + appRender.escHtml(t.etag || '-') + '</td>' +
         '</tr>';
     }
@@ -1334,10 +1540,11 @@ async function toggleGroupTasks(groupId, btn) {
 }
 
 async function archiveCloudGroup(groupId) {
-  const archiveName = prompt('归档文件名:', 'group-' + groupId + '.tar.gz');
+  const rawGroupId = stripCloudId(groupId);
+  const archiveName = prompt('归档文件名:', 'group-' + rawGroupId + '.tar.gz');
   if (!archiveName) return;
   try {
-    await sc.cloud.archiveGroup(groupId, archiveName);
+    await sc.cloud.archiveGroup(rawGroupId, archiveName);
     showToast('打包成功', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('打包失败: ' + e.message, 'error'); }
@@ -1349,7 +1556,7 @@ async function resumeCloudGroup(groupId) {
   // 第二个确认框仅决定是否"强制重下"：确定=强制，取消=续传恢复（仍会执行恢复）。
   const force = confirm('是否强制重新下载（不使用续传）？\n点「确定」= 强制重新下载\n点「取消」= 使用续传恢复');
   try {
-    await sc.cloud.resumeGroup(groupId, force);
+    await sc.cloud.resumeGroup(stripCloudId(groupId), force);
     showToast('恢复成功', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
@@ -1358,7 +1565,7 @@ async function resumeCloudGroup(groupId) {
 async function cancelCloudGroup(groupId) {
   if (!confirm('确认取消该组内所有任务？')) return;
   try {
-    await sc.cloud.cancelGroup(groupId);
+    await sc.cloud.cancelGroup(stripCloudId(groupId));
     showToast('已取消', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('取消失败: ' + e.message, 'error'); }
@@ -1367,7 +1574,7 @@ async function cancelCloudGroup(groupId) {
 async function deleteCloudGroup(groupId) {
   if (!confirm('确认删除该组及所有关联文件？')) return;
   try {
-    await sc.cloud.deleteGroup(groupId);
+    await sc.cloud.deleteGroup(stripCloudId(groupId));
     showToast('已删除', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
@@ -1379,7 +1586,7 @@ async function resumeCloudTask(taskId) {
   if (!confirm('确认恢复该任务？\n（默认使用断点续传，已下载的部分不重复下载）')) return;
   const force = confirm('是否强制重新下载（不使用续传）？\n点「确定」= 强制重新下载\n点「取消」= 使用续传恢复');
   try {
-    await sc.cloud.resumeTask(taskId, force);
+    await sc.cloud.resumeTask(stripCloudId(taskId), force);
     showToast('任务已恢复', 'success');
     refreshCloudTasks();
   } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
@@ -1423,10 +1630,22 @@ document.addEventListener('DOMContentLoaded', function() {
   // 断点续传检测在 DOMContentLoaded 后执行——此时 resume-container 已存在且页面交互就绪；
   // 放在顶层 refreshList 之后会导致其成功分支之前误清进行中分块会话的历史隐患（已由
   // chunkedUpload/uploadFiles success 分支去 removeUploadSession 修复），挪到此统一时序。
+  // 上传模块经显式注入获取与 app 一致的 transfer store（upload.js 自身不声明同名字段，
+  // 避免顶层 let 重名——历史 `_transferStore` 冲突修复）。
+  if (typeof setTransferStore === 'function') {
+    setTransferStore(getTransferStore());
+  }
   checkResumableUploads();
 
   // 认证栏
   document.getElementById('save-access-btn').addEventListener('click', saveAccessKeys);
+  // 主 tab 导航（文件/传输）
+  var tabFiles = document.getElementById('main-tab-files');
+  if (tabFiles) tabFiles.addEventListener('click', function() { switchMainTab('files'); });
+  var tabTransfer = document.getElementById('main-tab-transfer');
+  if (tabTransfer) tabTransfer.addEventListener('click', function() { switchMainTab('transfer'); });
+  // 传输页静态初始化（频道条渲染 + 点击委托），幂等
+  initTransferPage();
   // 「走隧道（调试）」checkbox：初值取自 localStorage，change 即时生效（无需保存）
   var transportCb = document.getElementById('use-tunnel-checkbox');
   if (transportCb) {
@@ -1469,13 +1688,11 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
 
-  // 云端下载弹窗（按钮 + Enter 快捷键统一走 bindCloudUrlRowEvents，避免重复绑定）
-  document.getElementById('cloud-close-btn').addEventListener('click', hideCloudDownload);
+  // 云端下载（云 URL 行按钮 + Enter 快捷键统一走 bindCloudUrlRowEvents；
+  // cloud-modal 已移除——URL 区已迁入 #transfer-page，频道条点击委托在 initTransferPage）。
+  // 已删除的 stale 绑定：cloud-close-btn / cloud-refresh-btn / cloud-close-modal-btn /
+  // cloud-tasks-tab / cloud-groups-tab（旧 cloud-modal DOM 与 switchCloudTab 一并移除）。
   bindCloudUrlRowEvents();
-  document.getElementById('cloud-refresh-btn').addEventListener('click', refreshCloudCurrentTab);
-  document.getElementById('cloud-close-modal-btn').addEventListener('click', hideCloudDownload);
-  document.getElementById('cloud-tasks-tab').addEventListener('click', function() { switchCloudTab('tasks'); });
-  document.getElementById('cloud-groups-tab').addEventListener('click', function() { switchCloudTab('groups'); });
 
   // 版本管理弹窗
   document.getElementById('version-close-btn').addEventListener('click', hideVersioning);
@@ -1586,10 +1803,10 @@ function initDynamicEventDelegation() {
     }
   });
 
-  // 云端下载任务操作
-  const cloudBody = document.getElementById('cloud-tasks-body');
-  if (cloudBody) {
-    cloudBody.addEventListener('click', function(e) {
+  // 云任务操作（事件委托挂 #transfer-body，云行由 buildTransferRowHtml 输出，类名复用既有）
+  const transferBody = document.getElementById('transfer-body');
+  if (transferBody) {
+    transferBody.addEventListener('click', function (e) {
       const btn = e.target.closest('button');
       if (!btn) return;
       if (btn.classList.contains('cloud-download-btn')) {
@@ -1608,15 +1825,6 @@ function initDynamicEventDelegation() {
         resumeCloudTask(btn.dataset.id);
         return;
       }
-    });
-  }
-
-  // 云端下载组操作
-  const cloudGroupsBody = document.getElementById('cloud-groups-body');
-  if (cloudGroupsBody) {
-    cloudGroupsBody.addEventListener('click', function(e) {
-      const btn = e.target.closest('button');
-      if (!btn) return;
       if (btn.classList.contains('group-archive-btn')) {
         archiveCloudGroup(btn.dataset.id);
         return;
@@ -1635,6 +1843,51 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('group-toggle-btn')) {
         toggleGroupTasks(btn.dataset.id, btn);
+        return;
+      }
+      // ---- 通用 TransferItem 行操作（upload/download 类，非云）----
+      // 按钮类名 transfer-pause/resume/cancel/delete/redownload/open-dir（app-render 生成）。
+      // id = item.id（upload 即 upload_id；download 为文件名哈希）。
+      const tId = btn.dataset.itemId;
+      if (tId === undefined || tId === '') return;
+      const store = getTransferStore();
+      const mgr = getDownloadManager();
+      const tItem = (store && typeof store.loadItems === 'function')
+        ? store.loadItems().filter(function (it) { return it.id === tId && (it.kind === 'upload' || it.kind === 'download'); })[0]
+        : null;
+      if (btn.classList.contains('transfer-pause-btn')) {
+        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.pauseDownload === 'function') { mgr.pauseDownload(tId); renderTransferChannel(); return; }
+        // 上传真暂停：置 per-upload 取消标志 + 把本地会话写回 paused（保会话供续传）——
+        // 在途 for 检查点抛 E_CANCELLED，uploadFiles catch 归一「已暂停」；checkResumableUploads
+        // 探 /upload/status readiness 后走既存 resume 续传（选择文件/补缺失块）。
+        if (tItem && tItem.kind === 'upload') { pauseUploadSession(tItem); renderTransferChannel(); return; }
+        showToast('上传不支持暂停，可取消后重选续传', 'info');
+        return;
+      }
+      if (btn.classList.contains('transfer-resume-btn')) {
+        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.resumeDownload === 'function') { mgr.resumeDownload(tId, { onComplete: downloadCompleteHandler, onError: function (err) { showToast('恢复下载失败: ' + err.message, 'error'); }, onMismatch: function () { showToast('存储文件已变更，无法续传——可先重新下载', 'warning'); } }); return; }
+        if (tItem && tItem.kind === 'upload' && typeof resumeUpload === 'function') { resumeUpload(tId); return; }
+        showToast('恢复失败：传输项不存在', 'error');
+        return;
+      }
+      if (btn.classList.contains('transfer-cancel-btn')) {
+        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.cancelDownload === 'function') { mgr.cancelDownload(tId); renderTransferChannel(); return; }
+        if (tItem && tItem.kind === 'upload') { clearCancelledUpload(tId); removeUploadSession(tId); renderTransferChannel(); return; }
+        showToast('取消失败：传输项不存在', 'error');
+        return;
+      }
+      if (btn.classList.contains('transfer-delete-btn')) {
+        if (tItem && store && typeof store.removeItem === 'function') { store.removeItem(tId); renderTransferChannel(); return; }
+        showToast('删除失败：传输项不存在', 'error');
+        return;
+      }
+      if (btn.classList.contains('transfer-redownload-btn') && tItem) { downloadFile(tItem.filename, tItem.meta && tItem.meta.checksum); return; }
+      if (btn.classList.contains('transfer-open-dir-btn') && tItem) {
+        // 打开本地存储目录：跳转文件 tab 并导航到上传文件所在目录 + toast 绝对路径。
+        switchMainTab('files');
+        const parent = itemParentDir(tItem.filename);
+        navigateDir(parent);
+        showToast('存储目录：上传根目录/' + (parent || ''), 'info');
         return;
       }
     });

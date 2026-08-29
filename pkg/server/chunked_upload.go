@@ -354,6 +354,32 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
+// uploadSessions 列出所有未完成上传会话的元信息。
+// 归一为 {success:true, sessions:[{upload_id,filename,total_size,received_count,total_chunks,file_checksum,file_mod_time,status}]}。
+// 已完成会话（Completed=true，complete 后 CleanupSessionAfter 延迟清理前的窗口）不列出，
+// 故 status 恒为 "uploading"（取值域 uploading|completed，completed 在此被 handler 过滤）。
+func (h *Handlers) uploadSessions(w http.ResponseWriter, r *http.Request) {
+	meta := h.uploadStore.ListSessions()
+	sessions := make([]UploadSessionInfo, 0, len(meta))
+	for _, m := range meta {
+		if m.Completed {
+			continue
+		}
+		info := UploadSessionInfo{
+			UploadID:      m.UploadID,
+			Filename:      m.Filename,
+			TotalSize:     m.TotalSize,
+			ReceivedCount: m.ReceivedCount,
+			TotalChunks:   m.TotalChunks,
+			FileChecksum:  m.FileChecksum,
+			FileModTime:   m.FileModTime,
+			Status:        "uploading",
+		}
+		sessions = append(sessions, info)
+	}
+	sendJSONResponse(w, ChunkSessionsResponse{Success: true, Sessions: sessions}, http.StatusOK)
+}
+
 // uploadStatus 查询上传会话状态。
 func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 	params := r.URL.Query()

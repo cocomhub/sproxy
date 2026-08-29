@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,7 @@ type UploadStoreIface interface {
 	DeleteSession(uploadID string)
 	CleanupSessionAfter(uploadID string, delay time.Duration)
 	GetOrCreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, bool, error)
+	ListSessions() []ChunkedUploadSessionMeta
 	LockChunkIO(uploadID string) func()
 	LockChunkMerge(uploadID string) func()
 	// TODO: 考虑添加 SyncPersistSession/RollbackChunkReceived 方法支持幂等会话持久化
@@ -273,6 +275,49 @@ func (us *UploadStore) GetSession(uploadID string) *ChunkedUploadSession {
 		return nil
 	}
 	return copySession(s)
+}
+
+// ChunkedUploadSessionMeta 是分块上传会话的紧凑元信息（不含 bitmap），用于列表展示。
+type ChunkedUploadSessionMeta struct {
+	UploadID      string `json:"upload_id"`
+	Filename      string `json:"filename"`
+	TotalSize     int64  `json:"total_size"`
+	ChunkSize     int64  `json:"chunk_size"`
+	TotalChunks   int    `json:"total_chunks"`
+	ReceivedCount int    `json:"received_count"`
+	MissingCount  int    `json:"missing_count"`
+	FileChecksum  string `json:"file_checksum"`
+	FileModTime   int64  `json:"file_mod_time"` // UnixNano, 0 = unknown
+	ExpiresAt     int64  `json:"expires_at"`
+	Completed     bool   `json:"completed"`
+}
+
+// ListSessions 返回所有（含已完成）会话的元信息快照，并按上传 ID 升序排列（输出确定）。
+// 持锁期间从 sessions map 拷贝元信息（不含 bitmap），并在锁内完成计数，
+// 避免读取时被 MarkChunkReceived 改写造成数据竞争。
+// 注：已完成会话在 complete 后 CleanupSessionAfter 删除前仍在 sessions map 中，列表交由调用方过滤。
+func (us *UploadStore) ListSessions() []ChunkedUploadSessionMeta {
+	us.mu.RLock()
+	meta := make([]ChunkedUploadSessionMeta, 0, len(us.sessions))
+	for _, s := range us.sessions {
+		m := ChunkedUploadSessionMeta{
+			UploadID:      s.UploadID,
+			Filename:      s.Filename,
+			TotalSize:     s.TotalSize,
+			ChunkSize:     s.ChunkSize,
+			TotalChunks:   s.TotalChunks,
+			ReceivedCount: countReceived(s.ReceivedChunks),
+			MissingCount:  s.TotalChunks - countReceived(s.ReceivedChunks),
+			FileChecksum:  s.FileChecksum,
+			FileModTime:   s.FileModTime,
+			ExpiresAt:     s.ExpiresAt.UnixNano(),
+			Completed:     s.Completed,
+		}
+		meta = append(meta, m)
+	}
+	us.mu.RUnlock()
+	slices.SortFunc(meta, func(a, b ChunkedUploadSessionMeta) int { return strings.Compare(a.UploadID, b.UploadID) })
+	return meta
 }
 
 // GetSessionByFilename 按文件名查找未完成的 session。
