@@ -152,7 +152,7 @@ sproxy v2 引入了可插拔传输层抽象，从下到上共 4 层（详见 `do
 
 ```
 应用层: HTTP 路由 + sclient CLI + FileClient Go SDK
-  ↑  hub 层: 节点注册 / 路由表 / 中继转发 (RouteTable / RelayHandler)
+  ↑  hub 层: 节点注册 / 路由表 / 流中继 (RouteTable / RelayStreamHandler)
   ↑  tunnel 层: HTTP 请求-响应交换 (Tunnel.Do/Serve, AES-256-GCM)
   ↑  mux 层: 虚拟流多路复用 (Stream RWC + 心跳 30s/90s)
   ↑  xfer 层: 传输层抽象 (Conn{ Send/Receive/Close })
@@ -286,7 +286,7 @@ type Conn interface {
 | `upload_session_ttl` | duration | 24h | 未完成上传会话过期时间 |
 | `versioning.enabled` / `.max_versions` | | 关闭 | 文件版本管理 |
 | `hub.enabled` / `.node_id` / `.relay_token` | | 关闭 | 中继 Hub 配置 |
-| `hub.transports.ws.enabled` / `.listen` | | 关闭 | WebSocket 传输 |
+| `hub.transports.ws.enabled` / `.listen`（预留，未消费）/ `.path`（已废弃，固定 `/ws`，非默认值仅告警忽略） | | 关闭 | WebSocket 传输 |
 | `cors.allowed_origins` | []string | | CORS 配置 |
 | `cloud_max_concurrent` | int | 3 | 云端下载并发数 |
 | `cloud_sync_threshold` | size | 20MiB | 同步阈值（handler 提交时大小未知恒异步，字段保留供未来按大小同步） |
@@ -321,13 +321,53 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 | `archive <name> <path>...` | 创建归档 |
 | `cloud-download <url>...` | 创建云端下载任务 |
 | `tunnel [flags] <url>` | 隧道请求 |
-| `relay [flags]` | 中继节点模式（连接 Hub） |
+| `relay start/status/...` | 中继节点（连接 Hub）：`relay start --hub wss://.../ws --token T --node-id N [--service name:addr] [--dial-allow] [--dial-allow-cidr CIDR]` |
+| `relay dial --node <id> --tcp <addr> [-l :port]` | 经 hub 中继拨号到目标节点出口（任意 TCP） |
+| `p2p connect --peer <id> --tcp <addr> [-l :port]` | WebRTC 打洞直连对端（数据面不经 hub） |
+| `p2p listen [--node-id N]` | 作为对端监听 WebRTC 直连（信令经 hub） |
+| `mesh connect <service> [-l :port]` | 连接 mesh 服务（webrtc 直连优先，hub 中继回落） |
+| `mesh status` | 列出 hub 上的 mesh 服务 |
 | `genkey` | 生成 64 hex 密钥 |
 | `config [show\|set <k> <v>]` | 配置管理 |
 | `diag` | 诊断连接问题 |
 | `version` | 版本 + 配置信息 |
 | `cd [path]` | 切换当前目录 |
 | `pwd` | 打印当前目录 |
+
+### mesh 内网穿透（双重 NAT 场景）
+
+任意节点经 hub 注册后可互相寻址；数据面优先 webrtc 打洞直连、失败回落 hub 中继。
+
+**服务宣告 + 访问**：
+```bash
+# 节点 A（被访问方）宣告本地服务，作为出口节点（--dial-allow 允许出站拨号）
+sclient relay start --hub wss://hub:18083/ws --token T --node-id nodeA \
+  --service ssh:127.0.0.1:22 --dial-allow
+
+# 节点 B（访问方）连接服务：连接前自动注册自身（webrtc 信令用）；
+# webrtc 直连优先，但需对端同时运行 p2p listen 且信令通过校验，否则默认回落 hub 中继
+sclient mesh connect ssh -l :2222   # 然后 ssh -p 2222 user@127.0.0.1
+```
+
+**云端主动推数据到本地**（方向对称）：
+```bash
+# 本地端（被访问方）先跑：注册 + 宣告本地 2090 服务 + 允许出站拨号（B9 精确放行宣告地址）
+sclient relay start --hub wss://hub:18083/ws --node-id local \
+  --token T --insecure --dial-allow --service app:127.0.0.1:2090
+
+# 云端节点：经 hub 中继拨本地端 2090 服务（自签 TLS hub 需 --insecure）
+sclient relay dial --node local --tcp 127.0.0.1:2090 \
+  -s https://hub:18083 --auth-token T --insecure
+# 云端即可向该连接写入数据，数据经 hub 中继到达本地端服务
+```
+说明：`relay dial` 双向可用——任意节点可作 caller 拨向另一节点，实现云端→本地主动推送
+（无需本地端先发起数据流）。本地端 `--service app:127.0.0.1:2090` 兼作 mesh 服务宣告与
+出口拨号精确放行（`NewServiceDialPolicy`）；`--insecure` 仅用于自签证书开发/测试，生产用真实证书。
+
+> 注意：`relay start --hub` 默认指向 `ws://127.0.0.1:18084/ws`，与 sproxy 默认监听端口
+> `:18083` **不同**；请始终显式 `--hub` 指定实际 hub 地址（`ws://host:port/ws`）。
+> 另：`relay start --hub` 传 WS 端点（`ws(s)://host/ws`）；`p2p` / `mesh connect --hub`
+> 传 HTTP 基址（`http(s)://host`）即可，也接受 `ws(s)` 自动归一（S123）。
 
 ### sclient 当前目录（`cd`/`pwd`）
 

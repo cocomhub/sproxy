@@ -49,28 +49,27 @@ func (s *stream) closeChannels() {
 	select {
 	case <-s.done:
 	default:
-		close(s.dataCh)
+		// 只关 done 不关 dataCh。Read 通过 done 分支返回关闭错误，而
+		// pushData/pushEOF 的 select（dataCh send vs done）在 done 关闭后
+		// 可选中 done 分支丢弃负载；若同时关闭 dataCh，select 可能选中对
+		// 已关闭 dataCh 的 send 操作而 panic（Abort 本地关流后对端仍可能发数据）。
 		close(s.done)
 	}
 	s.closeMu.Unlock()
 }
 
 func (s *stream) pushData(payload []byte) {
-	s.closeMu.Lock()
 	select {
 	case s.dataCh <- payload:
 	case <-s.done:
 	}
-	s.closeMu.Unlock()
 }
 
 func (s *stream) pushEOF() {
-	s.closeMu.Lock()
 	select {
 	case s.dataCh <- nil:
 	case <-s.done:
 	}
-	s.closeMu.Unlock()
 }
 
 func (s *stream) reject() {
@@ -94,20 +93,39 @@ func (s *stream) Read(p []byte) (n int, err error) {
 	defer s.rMu.Unlock()
 
 	for s.rOff >= len(s.rBuf) {
+		// 优先消费已缓冲的数据：对端可能已发送数据后立即关闭（FrameClose），
+		// 若 select 随机选中 done 分支，已缓冲数据会被跳过误报关闭——I27 拨号
+		// 结果帧读取在叶子「接受后立即关」场景的可靠性依赖此行为。仅当无缓冲
+		// 数据时才等待新数据或关闭信号。
+		var data []byte
+		var ok bool
 		select {
-		case data, ok := <-s.dataCh:
-			if !ok {
-				return 0, s.rejectedOrClosedErr()
+		case data, ok = <-s.dataCh:
+		default:
+			select {
+			case data, ok = <-s.dataCh:
+			case <-s.done:
+				// P1-6：done 就绪但 dataCh 可能同时有数据（readLoop 先 pushData 再
+				// closeChannels，窗口内两分支同时就绪，Go select 随机选取）。必须
+				// 优先非阻塞清空 dataCh，仅当确无数据才报关闭——否则已投递的数据帧
+				// 有 ~50% 概率被丢弃（I27 拨号结果帧读取在叶子"接受后立即关"场景的
+				// 可靠性依赖此行为）。
+				select {
+				case data, ok = <-s.dataCh:
+				default:
+					return 0, s.rejectedOrClosedErr()
+				}
 			}
-			if data == nil {
-				return 0, io.EOF
-			}
-			s.rBuf = data
-			s.rOff = 0
-			s.mux.sendWindowUpdateUnsafe(s.id, int32(len(data)))
-		case <-s.done:
+		}
+		if !ok {
 			return 0, s.rejectedOrClosedErr()
 		}
+		if data == nil {
+			return 0, io.EOF
+		}
+		s.rBuf = data
+		s.rOff = 0
+		s.mux.sendWindowUpdateUnsafe(s.id, int32(len(data)))
 	}
 
 	n = copy(p, s.rBuf[s.rOff:])
@@ -173,6 +191,24 @@ func (s *stream) Close() error {
 	case <-s.done:
 		return fmt.Errorf(errFmtMuxStreamErr, s.id, xfer.ErrConnClosed)
 	}
+}
+
+// Abort 立即放弃该流，不经 writeCh（非阻塞）。
+//
+// 与 Close 的区别：
+//   - Close 经 writeCh 向对端发送 FrameClose 优雅关闭；writeCh 打满且 done 未关闭时
+//     会永久阻塞（对端停读导致流控窗口耗尽、重传积压的收尾路径）。
+//   - Abort 直接关闭本地 done 通道（closeChannels，不经 writeCh），立即解除
+//     Read/Write 阻塞，用于收尾/超时强制释放（对齐 meshForwardListen 的非阻塞关闭范本）。
+//
+// 语义注意：Abort 不向对端发送关闭帧——对端感知本侧已放弃流依赖其自身的
+// 半关闭传播或超时机制。Abort 是幂等的（closeChannels 内部有 closeMu + select
+// 防重入），重复调用、与 pushData/pushEOF/reject 并发调用均安全。与 retransmitLoop
+// 的交互：流被 Abort 后若其数据帧仍在重传队列，对端收到未知流的数据帧会直接丢弃，
+// 无副作用。
+func (s *stream) Abort() error {
+	s.closeChannels()
+	return nil
 }
 
 var closeMarker = make([]byte, 0)

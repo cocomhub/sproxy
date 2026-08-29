@@ -17,7 +17,7 @@ sproxy v2 引入了全新的分层传输架构，在原有的文件服务与加�
 │  FileClient Go SDK                        │
 ├──────────────────────────────────────────┤
 │  hub 层 — 节点注册 / 路由表 / 中继转发      │
-│  RouteTable / RelayHandler                │
+│  RouteTable / RelayStreamHandler         │
 ├──────────────────────────────────────────┤
 │  tunnel 层 — HTTP 请求-响应交换             │
 │  Tunnel.Do(req) → *http.Response           │
@@ -123,7 +123,7 @@ func init() {
 
 - **RouteTable：** 线程安全的节点路由表（`NodeID → *mux.Mux`）
 - **节点注册：** 节点通过控制流发送 `Register` 帧向 Hub 注册
-- **中继转发：** `POST /api/relay` 接收 JSON，查找目标节点，通过其 mux 转发
+- **流中继转发：** `POST /api/relay/stream` 升级为到目标叶子的双向字节流（RelayStreamHandler）
 
 ## 数据流示例：中继请求
 
@@ -134,18 +134,22 @@ sclient                    sproxy (Hub)                   Node B
   ├──── Register{ID:"node-a"}→│                            │
   │                           │ 注册到 RouteTable           │
   │                           │                            │
-  │ POST /api/relay            │                            │
+  │ POST /api/relay/stream     │                            │
   │ {target:"node-b",          │                            │
-  │  method:"GET",             │                            │
-  │  path:"/api/files"}        │                            │
+  │  addr:"127.0.0.1:22"}      │                            │
   ├───────────────────────────→│                            │
   │                           │ RouteTable.Lookup("node-b") │
   │                           │ targetMux.Open() → stream   │
-  │                           ├───── HTTP GET /api/files ──→│
-  │                           │                            │ 本地 HTTP 处理
-  │                           │←──── HTTP 200 + body ──────┤
-  │←──────── JSON 200 ────────┤                            │
+  │                           ├───── 拨号帧(addr) ─────────→│
+  │                           │                            │ 叶子 DialAllowed 校验后拨号
+  │                           │←── DialResultFrames ok ─────┤
+  │←──────── HTTP 200 ────────┤                            │
+  │  (此后为双向字节流)          │  ←───── TCP 数据 ────────── │
 ```
+
+> 说明：`POST /api/relay/stream`（RelayStreamHandler）升级为到目标叶子的双向字节流。
+> 拨号结果由叶子经 `DialResultFrames` 门控回报，hub 写 200 前先读结果帧（ok→200 /
+> 拨号失败→502 / 超时→504），客户端据此可感知拨号失败并回退候选。
 
 ## 相关包路径
 

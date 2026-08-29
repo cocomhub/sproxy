@@ -74,3 +74,16 @@ tls:
 # 无论是否设置，都受 max_storage_bytes（TryReserve）兜底；归档文件计入 __cloud_archives__/ 目录空间。
 # 同名归档文件已存在时返回 409（O_EXCL 防覆盖）；打包完成后按磁盘实际大小对账预留配额。
 # cloud_archive_max_bytes: 10737418240   # 10 GiB 示例
+
+# Hub 中继（mesh 内网穿透，默认关闭）。
+# 启用后必须配置 relay_token，否则启动校验失败（C2：防未鉴权注册）。
+# hub:
+#   enabled: true
+#   node_id: "node-a"               # 本节点 ID（mesh connect / relay dial 的目标）
+#   relay_token: "your-relay-token"  # 中继节点注册共享密钥，hub.enabled=true 时必填
+#   max_connections: 256             # 同时处理的中继连接数上限（0/缺省默认 256；I30 防连接洪泛）
+#   transports:
+#     ws:
+#       enabled: true
+#       # path 已废弃（S36）：WS 升级路径固定为 /ws，配置非默认值不生效（启动时记录警告并忽略）
+#       # path: /ws

@@ -5,6 +5,7 @@ package server
 
 import (
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -114,6 +115,69 @@ func TestConfig_Validate_EmptyTunnelKeyNoTLS(t *testing.T) {
 	}
 }
 
+func TestConfig_Defaults_HubMaxConnections(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.SetDefaults()
+	if cfg.Hub.MaxConnections != 256 {
+		t.Fatalf("Hub.MaxConnections default want 256, got %d", cfg.Hub.MaxConnections)
+	}
+	// 显式配置非零值应保留
+	cfg2 := Default()
+	cfg2.Hub.MaxConnections = 64
+	cfg2.SetDefaults()
+	if cfg2.Hub.MaxConnections != 64 {
+		t.Fatalf("Hub.MaxConnections want preserved 64, got %d", cfg2.Hub.MaxConnections)
+	}
+}
+
+func TestConfig_Validate_HubEnabledRequiresRelayToken(t *testing.T) {
+	t.Parallel()
+	// hub.enabled=true 且 relay_token 为空 → 校验失败（C2 主修复）
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.RelayToken = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when hub.enabled=true but relay_token empty")
+	}
+	// 配了 token 后应通过（需同时启用 ws transport，S42）
+	cfg.Hub.RelayToken = "secret"
+	cfg.Hub.Transports.WS.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error with relay_token set: %v", err)
+	}
+	// hub 未启用（默认）时不受影响
+	cfg2 := Default()
+	cfg2.Hub.Enabled = false
+	cfg2.Hub.RelayToken = ""
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("hub disabled should not require relay_token: %v", err)
+	}
+}
+
+func TestConfig_Validate_HubEnabledRequiresTransport(t *testing.T) {
+	t.Parallel()
+	// hub.enabled=true 但 transports.ws.enabled=false → 校验失败（S42，
+	// WS 是当前唯一节点接入传输，hub 启用而无 transport 时节点无法连接）。
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.RelayToken = "secret"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when hub.enabled=true but transports.ws.enabled=false")
+	}
+	// 启用 ws 后应通过
+	cfg.Hub.Transports.WS.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error with ws enabled: %v", err)
+	}
+	// hub 未启用时不受 ws 开关影响
+	cfg2 := Default()
+	cfg2.Hub.Transports.WS.Enabled = false
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("hub disabled should not require ws transport: %v", err)
+	}
+}
+
 // mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。
 type mapProvider struct {
 	m map[string]any
@@ -218,4 +282,52 @@ func TestLoadConfig_FileNotFound(t *testing.T) {
 	if cfg == nil {
 		t.Log("LoadConfig returned nil config (acceptable)")
 	}
+}
+
+// TestConfig_YAMLTagsMatchMapstructure 验证配置树中所有字段的 yaml 与 mapstructure 标签一致。
+//
+// 回归防护（I31）：viper 通过 mapstructure 标签解码，yaml.Unmarshal 通过 yaml 标签解码。
+// 两者键名不一致时（如 ACME 字段曾写 mapstructure:"http_01" 而 yaml 键为 http01），
+// viper 路径静默丢失配置值恒为默认值，而基于 yaml 的测试路径不受影响。
+// 该测试直接断言两条解码路径的键名一致，任何字段再出现标签漂移都会立即失败。
+func TestConfig_YAMLTagsMatchMapstructure(t *testing.T) {
+	t.Parallel()
+
+	seen := map[reflect.Type]bool{}
+	var check func(typ reflect.Type)
+	check = func(typ reflect.Type) {
+		switch typ.Kind() {
+		case reflect.Pointer:
+			check(typ.Elem())
+			return
+		case reflect.Slice, reflect.Array:
+			check(typ.Elem())
+			return
+		case reflect.Struct:
+			// 继续检查字段
+		default:
+			return
+		}
+		if seen[typ] {
+			return
+		}
+		seen[typ] = true
+		for f := range typ.Fields() {
+			if !f.IsExported() {
+				continue
+			}
+			yamlTag := f.Tag.Get("yaml")
+			mapTag := f.Tag.Get("mapstructure")
+			if yamlTag == "" || yamlTag == "-" || mapTag == "" || mapTag == "-" {
+				continue
+			}
+			yKey := strings.Split(yamlTag, ",")[0]
+			mKey := strings.Split(mapTag, ",")[0]
+			if yKey != mKey {
+				t.Errorf("%s.%s: yaml 标签 %q 与 mapstructure 标签 %q 不一致", typ.Name(), f.Name, yKey, mKey)
+			}
+			check(f.Type)
+		}
+	}
+	check(reflect.TypeFor[Config]())
 }

@@ -17,13 +17,13 @@ func TestAuthenticator(t *testing.T) {
 		t.Fatal("expected error for wrong token")
 	}
 
-	// 空 token = 不鉴权
+	// 空 token = fail-closed：拒绝所有 token（C2 纵深加固）
 	a2 := NewAuthenticator("")
-	if err := a2.Authenticate("anything"); err != nil {
-		t.Fatal("expected success when relay token is empty")
+	if err := a2.Authenticate("anything"); err == nil {
+		t.Fatal("expected error when relay token is empty (fail-closed)")
 	}
-	if err := a2.Authenticate(""); err != nil {
-		t.Fatal("expected success for empty token when relay token is empty")
+	if err := a2.Authenticate(""); err == nil {
+		t.Fatal("expected error for empty token when relay token is empty (fail-closed)")
 	}
 
 	// 非空 token，节点发送空 token 应拒绝

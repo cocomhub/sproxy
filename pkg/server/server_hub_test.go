@@ -41,16 +41,16 @@ func TestHubNodesHandler_Disabled(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	// Hub 未启用时 /api/hub/nodes 路由未注册，catch-all GET / 返回 301 重定向
+	// Hub 未启用时 /api/hub/nodes 路由未注册，返回 404。
+	// （GET /{$} 精确匹配根路径，不再 catch-all 拦截未知路径，避免与 /ws 等冲突）
 	client := noRedirectClient()
 	resp, err := client.Get(srv.URL + "/api/hub/nodes")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	// catch-all GET / 返回 301 MovedPermanently → /ui/，而不是 hub handler 的 200
-	if resp.StatusCode != http.StatusMovedPermanently {
-		t.Errorf("expected 301 redirect when hub disabled, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 when hub disabled, got %d", resp.StatusCode)
 	}
 }
 
@@ -78,8 +78,8 @@ func TestHubStatsHandler_Disabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusMovedPermanently {
-		t.Errorf("expected 301 redirect when hub disabled, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 when hub disabled, got %d", resp.StatusCode)
 	}
 }
 

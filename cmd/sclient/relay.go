@@ -6,9 +6,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,9 +18,9 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
-	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
-	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层
 	"github.com/spf13/cobra"
 )
@@ -26,28 +28,44 @@ import (
 const (
 	reconnectBaseDelay = 1 * time.Second
 	reconnectMaxDelay  = 30 * time.Second
+	// registerAckTimeout 是等待 hub 注册 ACK 的超时。
+	registerAckTimeout = 10 * time.Second
 )
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID string) error {
+func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string) error {
 	if nodeID == "" {
 		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
 
-	logger := slog.With("node", nodeID, "hub", hubURL, "local", local)
+	logger := slog.With("node", nodeID, "hub", hubURL, "local", local, "dial_allow", dialAllow)
 	logger.Info("中继节点启动")
+	// S61：明文 ws:// + 携带注册 token 是真实风险组合（token 在公网明文飞行），
+	// 告警提示生产环境用 wss://。不改默认值——本地回环自签 hub 场景（ws xfer
+	// Dial 未支持自签 TLS）仍需可用。
+	if token != "" {
+		if u, perr := url.Parse(hubURL); perr == nil && u.Scheme == "ws" {
+			logger.Warn("hub 使用明文 ws:// 且携带注册 token，token 将明文传输；生产环境请使用 wss://", "hub", hubURL)
+		}
+	}
+	if insecure {
+		logger.Warn("--insecure 已启用，跳过 TLS 证书验证；仅限开发/测试", "hub", hubURL)
+	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
-	return runRelayWithRetry(ctx, nodeID, hubURL, local, logger)
+	return runRelayWithRetry(ctx, nodeID, hubURL, local, token, insecure, dialAllow, services, dialAllowCIDRs, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, nodeID, hubURL, local, logger)
+		err := runRelayOnce(ctx, nodeID, hubURL, local, token, insecure, dialAllow, services, dialAllowCIDRs, logger)
 		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		if isTerminalRelayError(err) {
 			return err
 		}
 		logger.Warn("中继断开，即将重连", "delay", delay, "error", err)
@@ -63,82 +81,134 @@ func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local string, logger
 	}
 }
 
-func runRelayOnce(ctx context.Context, nodeID, hubURL, local string, logger *slog.Logger) error {
-	tp := xfer.Get("ws")
-	if tp == nil {
-		return fmt.Errorf("ws 传输层未注册")
-	}
+// errRelayRegistrationRejected 表示 hub 通过注册 ACK 明确拒绝本次注册（鉴权/格式错误）。
+// 作为哨兵错误被 parseRegisterAck 的三种"注册失败"分支以 %w 包装；isTerminalRelayError
+// 用 errors.Is 判定，可穿透任意层包装，避免文案改写或 %w 包装后终态判定静默失效（I43）。
+var errRelayRegistrationRejected = errors.New("注册失败")
 
-	conn, err := tp.Dial(ctx, hubURL)
+// isTerminalRelayError 判断是否应因配置/权限错误终止而非重试。
+// 仅当 hub 通过注册 ACK **明确拒绝** 注册时才终止；其余（连接断开、超时、EOF、
+// ACK 未到达）均视为可重连的网络问题。EOF 不代表鉴权失败——真实鉴权失败时
+// hub 必然已回发 RegisterAckErr 帧，runRelayOnce 会走"注册失败"分支先于 EOF。
+func isTerminalRelayError(err error) bool {
+	return errors.Is(err, errRelayRegistrationRejected)
+}
+
+// parseRegisterAck 解析 hub 注册 ACK 帧。返回节点 per-node secret：
+// - 纯 "REG_OK"（未声明能力或 secret 生成失败）→ 返回空串；
+// - "REG_OK:<base64url secret>"（声明 per-node-secret 能力）→ 返回 secret；
+// - "REG_ERR:<reason>"（hub 明确拒绝）→ 返回注册失败错误（终态）；
+// - 未知响应 → 返回注册失败错误（终态）。
+// 用前缀匹配而非精确比较，避免声明能力后收 "REG_OK:<secret>" 被误判为未知响应
+// 导致 relay start 终止（B1 复检 bug 回归锁）。
+func parseRegisterAck(ackStr string) (secret string, err error) {
+	switch {
+	case ackStr == hub.RegisterAckOK:
+		return "", nil
+	case strings.HasPrefix(ackStr, hub.RegisterAckOK+":"):
+		secret = strings.TrimPrefix(ackStr, hub.RegisterAckOK+":")
+		if secret == "" {
+			return "", fmt.Errorf("%w: 收到异常的 REG_OK（secret 为空）", errRelayRegistrationRejected)
+		}
+		return secret, nil
+	case strings.HasPrefix(ackStr, hub.RegisterAckErr):
+		// 仅当 hub 显式回发 REG_ERR 帧才算"注册失败"（鉴权错误）——
+		// 这是 isTerminalRelayError 唯一采信的依据。
+		return "", fmt.Errorf("%w: %s", errRelayRegistrationRejected, strings.TrimPrefix(ackStr, hub.RegisterAckErr))
+	default:
+		return "", fmt.Errorf("%w: 收到未知注册响应 %q", errRelayRegistrationRejected, ackStr)
+	}
+}
+
+func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
+	// B17：insecure 时经 hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；
+	// 非 insecure 路径保持 xfer.Get("ws").Dial 原样（零行为变化）。
+	conn, err := hubWSDial(ctx, hubURL, insecure)
 	if err != nil {
 		return fmt.Errorf("连接到 Hub 失败: %w", err)
 	}
 	logger.Info("已连接到 Hub")
 
+	// 注册协议：连接建立后，在 xfer 层直接发送一条注册帧（JSON 或裸 nodeID）。
+	// 与 HubServer.readRegisterFrame 对齐：hub 在创建 mux 前通过 conn.Receive 读取，
+	// 因此这里也必须用 conn.Send，而非 mux 控制流。
+	meta := hub.Meta{}
+	var serviceAddrs []string
+	if dialAllow {
+		meta.Tags = append(meta.Tags, "exit")
+	}
+	for _, svc := range services {
+		name, addr, ok := strings.Cut(svc, ":")
+		if !ok || name == "" || addr == "" {
+			logger.Warn("忽略无效服务宣告（应为 name:addr）", "raw", svc)
+			continue
+		}
+		// S60：addr 必须是合法 host:port（net.SplitHostPort），且 host 非空
+		//（拒绝 "x::22" 这类空 host）。否则注册了"可见不可连"的服务，
+		// mesh connect 命中后必然拨号失败。服务端 hub/router validateServices
+		// 应同步补 host:port 校验（B1 防御纵深，本批仅客户端）。
+		if host, _, err := net.SplitHostPort(addr); err != nil || host == "" {
+			logger.Warn("忽略无效服务宣告（addr 应为 host:port）", "raw", svc, "addr", addr, "error", err)
+			continue
+		}
+		meta.Services = append(meta.Services, hub.Service{Name: name, Addr: addr})
+		// 收集宣告的服务地址：出口拨号时精确放行这些地址（含 loopback/私网），
+		// 否则 mesh connect 回落中继路径拨 127.0.0.1:xxx 会被默认策略拒绝。
+		serviceAddrs = append(serviceAddrs, addr)
+	}
+	// 声明 per-node-secret 能力：hub 回 REG_OK:<base64url secret>（B1 已支持，
+	// B3 服务端将据此校验信令身份）。现有调用不传 caps 时行为不变。
+	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta, hub.CapabilityPerNodeSecret)); serr != nil {
+		_ = conn.Close() // P1-15：mux 创建前失败必须关闭 WS，否则重连循环泄漏连接+sendLoop goroutine
+		return fmt.Errorf("发送注册帧失败: %w", serr)
+	}
+
+	// 等待 hub 注册 ACK（token 错误/格式错误尽早报错，而非等建流失败才发现）
+	ackCtx, ackCancel := context.WithTimeout(ctx, registerAckTimeout)
+	ack, ackErr := conn.Receive(ackCtx)
+	ackCancel()
+	if ackErr != nil {
+		_ = conn.Close() // P1-15：同守卫
+		return fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
+	}
+	nodeSecret, ackErr := parseRegisterAck(string(ack))
+	if ackErr != nil {
+		_ = conn.Close() // P1-15：同守卫
+		return ackErr
+	}
+	if nodeSecret != "" {
+		// per-node secret 与本次注册连接生命周期绑定（重连即轮换），
+		// 只在注册流程内使用，不落盘、不打印值（I1，方案 B）。
+		logger.Info("已注册到 Hub（per-node secret 已获取）")
+	} else {
+		logger.Info("已注册到 Hub")
+	}
+
 	m := mux.New(conn, mux.RoleListener)
 	defer m.Close()
 
-	// 注册节点：在控制流上发送 NodeID
-	ctrl, err := m.Open(ctx)
-	if err != nil {
-		return fmt.Errorf("创建控制流失败: %w", err)
-	}
-	if _, writeErr := ctrl.Write([]byte(nodeID)); writeErr != nil {
-		return fmt.Errorf("发送注册帧失败: %w", writeErr)
-	}
-	ctrl.Close()
-	logger.Info("已注册到 Hub")
-
-	// 使用 Tunnel.Serve 接受中继请求，转发到本地 HTTP 服务
+	// 本地 HTTP 服务地址（HTTP 中继转发目标）
 	localAddr := local
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 
-	tun := tunnel.NewTunnel(m, nil)
 	logger.Info("等待中继请求...")
-
-	err = tun.Serve(ctx, buildRelayHandler(ctx, localAddr, httpClient, logger))
+	// 始终传入包含宣告服务地址的拨号策略（--dial-allow=false 时 Serve 在咨询
+	// 策略前就拒绝 dial 帧，策略不生效）。无服务宣告且无 CIDR 时等价默认
+	// DialAllowed（仅公网）。
+	// DialResultFrames=true：经 hub 中继时向 hub 回写拨号结果帧，使 hub 在写 200
+	// 前能确认数据面就绪（I27）。注意 p2p listen（webrtc 直连）必须保持 false，
+	// 否则结果帧会污染数据流。
+	opts := []relay.ServeOptions{
+		{DialPolicy: relay.NewServiceDialPolicy(dialAllowCIDRs, serviceAddrs), DialResultFrames: true},
+	}
+	err = relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
 	if err != nil {
 		logger.Warn("中继服务停止", "error", err)
 	}
 	return err
-}
-
-// buildRelayHandler 创建用于转发中继请求的 HTTP handler。
-// 将远程隧道请求转发到本地 HTTP 服务并返回响应。
-func buildRelayHandler(ctx context.Context, localAddr string, httpClient *http.Client, logger *slog.Logger) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		forwardURL := localAddr + r.URL.Path
-		if r.URL.RawQuery != "" {
-			forwardURL += "?" + r.URL.RawQuery
-		}
-
-		forwardReq, err := http.NewRequestWithContext(ctx, r.Method, forwardURL, r.Body) //nolint:gosec // G704: SSRF is intentional (relay proxy)
-		if err != nil {
-			logger.Warn("构建转发请求失败", "error", err)
-			http.Error(w, "bad gateway", http.StatusBadGateway)
-			return
-		}
-		forwardReq.Header = r.Header.Clone()
-
-		resp, err := httpClient.Do(forwardReq) //nolint:gosec // G704: SSRF is intentional (relay proxy)
-		if err != nil {
-			logger.Warn("转发到本地失败", "path", r.URL.Path, "error", err)
-			http.Error(w, "bad gateway", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		for k, vs := range resp.Header {
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
-	})
 }
 
 // ---- 工厂函数 ----
@@ -157,6 +227,7 @@ func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 	cmd.AddCommand(NewCmdRelayStop(ios))
 	cmd.AddCommand(NewCmdRelayRemoveNode(ios, cfgSvc))
 	cmd.AddCommand(NewCmdRelayStats(ios, cfgSvc))
+	cmd.AddCommand(NewCmdRelayDial(factory, ios))
 	return cmd
 }
 
@@ -173,12 +244,21 @@ func NewCmdRelayStart(ios cli.IOStreams) *cobra.Command {
 			hubURL, _ := cmd.Flags().GetString("hub")
 			local, _ := cmd.Flags().GetString("local")
 			nodeID, _ := cmd.Flags().GetString("node-id")
-			return runRelayStart(cmd, hubURL, local, nodeID)
+			token, _ := cmd.Flags().GetString("token")
+			insecure, _ := cmd.Flags().GetBool("insecure")
+			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
+			services, _ := cmd.Flags().GetStringArray("service")
+			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
+			return runRelayStart(cmd, hubURL, local, nodeID, token, insecure, dialAllow, services, dialAllowCIDRs)
 		},
 	}
 	cmd.Flags().String("hub", "ws://127.0.0.1:18084/ws", "Hub 的 WebSocket 地址")
 	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
 	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
+	cmd.Flags().String("token", "", "中继注册 token（与 hub.relay_token 一致；未配置 hub token 时可不填）")
+	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供中继端充当出口网关）")
+	cmd.Flags().StringArray("service", nil, "宣告一个 mesh 服务（格式 name:addr，可重复；供 sclient mesh connect 发现）")
+	cmd.Flags().StringArray("dial-allow-cidr", nil, "出口拨号白名单网段（如 192.168.0.0/16；配合 --dial-allow 放行内网服务，默认仅公网）")
 	return cmd
 }
 
@@ -225,7 +305,11 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 			if authToken != "" {
 				req.Header.Set("Authorization", "Bearer "+authToken)
 			}
+			// B17：--insecure 时复用 insecureHTTPClient（跳过证书校验，自签 https hub 场景）。
 			httpClient := &http.Client{Timeout: 10 * time.Second}
+			if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {
+				httpClient = insecureHTTPClient()
+			}
 			resp, err := httpClient.Do(req)
 			if err != nil {
 				return fmt.Errorf("查询 Hub 状态失败: %w", err)

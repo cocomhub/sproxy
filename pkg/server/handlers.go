@@ -30,6 +30,7 @@ type Handlers struct {
 	metrics        *Metrics
 	shareStore     *ShareStore
 	routeTable     *hub.RouteTable
+	signalBroker   *SignalBroker
 	handler        http.Handler
 	cloudMgr       *CloudDownloadManager
 	storageMgr     *StorageManager
@@ -82,6 +83,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		metrics:       NewMetrics(),
 		shareStore:    NewShareStore(log.With("component", "share")),
 		routeTable:    opts.RouteTable,
+		signalBroker:  NewSignalBroker(opts.RouteTable),
 		uploadingStop: make(chan struct{}),
 	}
 
@@ -221,13 +223,58 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 	// Hub 管理 API（中继系统），需鉴权
 	if opts.RouteTable != nil {
-		relayHandler := NewRelayHandler(opts.RouteTable, log.With("component", "relay"))
-		srvMux.HandleFunc("POST /api/relay", h.authMiddleware(relayHandler.ServeHTTP))
-		localMux.HandleFunc("POST /api/relay", relayHandler.ServeHTTP)
+		// 任意 TCP 流中继（SSH/长连接）：升级为双向字节流。
+		// 注：旧的 HTTP JSON 中继（POST /api/relay）已删除——被本流中继完全替代。
+		// 仅支持直连（srvMux + Bearer）：handler 依赖 http.Hijacker 升级为原始 TCP，
+		// 而隧道的 ResponseWriter 包装链（streamRecorder/gzipResponseWriter）不实现
+		// Hijacker——经隧道访问必 500（旧版误注册到 localMux 的死路由，已删除）。
+		streamHandler := NewRelayStreamHandler(opts.RouteTable, log.With("component", "relay_stream"))
+		srvMux.HandleFunc("POST /api/relay/stream", h.authMiddleware(streamHandler.ServeHTTP))
+		// TODO(I29)：若未来需要「经隧道做原始 TCP 中继」（链式中继/多跳），正确定位是
+		// mux 层 raw-stream（复用 hub relay 模式），而非 http.Hijacker。见
+		// .superpowers/sdd/i29-tunnel-hijack-value.md。
+
+		// WebRTC 信令桥：SDP Offer/Answer/Candidate 存转 + 长轮询
+		broker := h.signalBroker
+		// S44：信令 POST 单独挂限流（独立实例，与文件传输隔离配额），防共享
+		// relay_token 下被攻破节点洪泛注入信令；GET poll 长轮询不挂（客户端
+		// 高频轮询会误触发限流）。
+		var signalPostRL *RateLimiter
+		if cfg.RateLimit.Enabled {
+			signalPostRL = NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "signal_rate_limiter"))
+		}
+		signalPost := func(kind hub.SignalKind) http.HandlerFunc {
+			hf := func(w http.ResponseWriter, r *http.Request) {
+				broker.handleSignalPost(w, r, kind)
+			}
+			if signalPostRL == nil {
+				return hf
+			}
+			return signalPostRL.Middleware(http.HandlerFunc(hf)).ServeHTTP
+		}
+		srvMux.HandleFunc("POST /api/signal/offer", h.authMiddleware(signalPost(hub.SignalOffer)))
+		srvMux.HandleFunc("POST /api/signal/answer", h.authMiddleware(signalPost(hub.SignalAnswer)))
+		srvMux.HandleFunc("POST /api/signal/candidate", h.authMiddleware(signalPost(hub.SignalCandidate)))
+		srvMux.HandleFunc("GET /api/signal/poll/{peer}", h.authMiddleware(broker.handleSignalPoll))
+		localMux.HandleFunc("POST /api/signal/offer", func(w http.ResponseWriter, r *http.Request) {
+			broker.handleSignalPost(w, r, hub.SignalOffer)
+		})
+		localMux.HandleFunc("POST /api/signal/answer", func(w http.ResponseWriter, r *http.Request) {
+			broker.handleSignalPost(w, r, hub.SignalAnswer)
+		})
+		localMux.HandleFunc("POST /api/signal/candidate", func(w http.ResponseWriter, r *http.Request) {
+			broker.handleSignalPost(w, r, hub.SignalCandidate)
+		})
+		localMux.HandleFunc("GET /api/signal/poll/{peer}", broker.handleSignalPoll)
 
 		srvMux.HandleFunc("GET /api/hub/nodes", h.authMiddleware(h.hubNodesHandler))
 		srvMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
 		srvMux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))
+		srvMux.HandleFunc("GET /api/hub/services", h.authMiddleware(h.hubServicesHandler))
+		// mesh 服务列表暴露 localMux 是有意的：FileClient.MeshServices（client.go）
+		// 配置了 tunnelClient 时经 /tunnel 访问 localMux 做 mesh 选路；
+		// nodes/stats/remove 为运维管理面，仅 srvMux+Bearer，不暴露隧道。
+		localMux.HandleFunc("GET /api/hub/services", h.hubServicesHandler)
 	}
 
 	srvMux.HandleFunc("GET /healthz", h.healthz)
@@ -248,8 +295,11 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		}))
 	}
 
-	// GET / -> /ui/ 重定向
-	srvMux.HandleFunc("GET /", h.webRedirect)
+	// GET / -> /ui/ 重定向。
+	// 用 "{$}" 只精确匹配根路径：Go 1.22+ ServeMux 中 "GET /" 是 catch-all，
+	// 会把任意未匹配路径（如 /foobar）也 301 到 /ui/；{$} 使未知路径返回 404。
+	// （实测 /ui 无尾斜杠在 {$} 下返回 307 到 /ui/，浏览器自动跟随。）
+	srvMux.HandleFunc("GET /{$}", h.webRedirect)
 
 	h.handler = h.metricsMiddleware(srvMux)
 

@@ -156,6 +156,51 @@ sproxy 服务端可代替客户端从外部 URL 下载文件（云端离线下�
   ./build/bin/sproxy --tunnel-key "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
   ```
 
+## Mesh 内网穿透（双重 NAT）
+
+启用 hub 中继后，任意节点可注册并互相寻址；数据面优先 WebRTC 打洞直连、失败回落 hub 中继。
+
+**服务端启用 hub**（`sproxy.yaml`）：
+```yaml
+hub:
+  enabled: true
+  relay_token: "<共享密钥>"
+  transports:
+    ws:
+      enabled: true
+      path: /ws
+```
+
+**节点注册 + 访问**：
+```bash
+# 中继端（出口节点）：注册 + 宣告本地服务 + 允许出口拨号
+sclient relay start --hub wss://hub:18083/ws --token T --node-id relay \
+  --service ssh:127.0.0.1:22 --dial-allow
+
+# 本地端（访问方）：连接前自动注册；webrtc 直连优先（需对端同时跑 p2p listen），失败回落中继
+sclient mesh connect ssh -l :2222      # 然后 ssh -p 2222 user@127.0.0.1
+# 或直接经 hub 中继到目标节点出口
+sclient relay dial --node relay --tcp 127.0.0.1:22 -l :2222
+```
+
+**云端主动推数据到本地**：`relay dial` 双向可用——本地端先 `relay start` 注册并宣告服务：
+
+```bash
+# 本地端（被访问方）：注册 + 宣告 2090 服务 + 允许出站拨号（精确放行宣告地址）
+sclient relay start --hub wss://hub:18083/ws --node-id local \
+  --token T --insecure --dial-allow --service app:127.0.0.1:2090
+```
+
+随后在云端节点执行：
+
+```bash
+sclient relay dial --node local --tcp 127.0.0.1:2090 \
+  -s https://hub:18083 --auth-token T --insecure
+```
+
+即可经 hub 中继写入本地端服务，数据推送由云端发起（无需本地端先发起数据流）。
+`--insecure` 仅用于自签证书开发/测试环境，生产应使用真实证书。
+
 ## 注意
 
 - 所有超时字段使用 Go 的持续时间语法（例如 `"30s"`、`"5m"`）。

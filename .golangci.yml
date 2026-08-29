@@ -70,9 +70,6 @@ linters:
         path: pkg/server/config\.go
       - linters:
           - revive
-        path: pkg/tunnel/p2p/p2p\.go
-      - linters:
-          - revive
         path: pkg/tunnel/xfer/internal/tcp/tcp\.go
       - linters:
           - revive

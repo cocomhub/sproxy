@@ -5,6 +5,7 @@ package mux_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -139,6 +140,122 @@ func TestWithAcceptChSize(t *testing.T) {
 
 	for _, s := range streams {
 		s.Close()
+	}
+}
+
+// TestStream_Abort_ImmediateAndIdempotent 验证 Abort 立即返回且幂等（I28）。
+func TestStream_Abort_ImmediateAndIdempotent(t *testing.T) {
+	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
+	defer accepted.Close()
+
+	done := make(chan struct{})
+	go func() {
+		if err := stream.Abort(); err != nil {
+			t.Errorf("Abort #1 failed: %v", err)
+		}
+		if err := stream.Abort(); err != nil {
+			t.Errorf("Abort #2 not idempotent: %v", err)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Abort 未立即返回（非阻塞失败）")
+	}
+}
+
+// TestStream_Abort_ReadWriteReturnErrClosed 验证 Abort 后 Read/Write 立即返回
+// ErrConnClosed（I28）。
+func TestStream_Abort_ReadWriteReturnErrClosed(t *testing.T) {
+	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
+	defer accepted.Close()
+
+	if err := stream.Abort(); err != nil {
+		t.Fatalf("Abort failed: %v", err)
+	}
+
+	// Abort 后 Read/Write 不再阻塞，返回包装 ErrConnClosed 的错误。
+	buf := make([]byte, 8)
+	if _, err := stream.Read(buf); !errors.Is(err, xfer.ErrConnClosed) {
+		t.Fatalf("Read after Abort = %v, want xfer.ErrConnClosed", err)
+	}
+	if _, err := stream.Write([]byte("x")); !errors.Is(err, xfer.ErrConnClosed) {
+		t.Fatalf("Write after Abort = %v, want xfer.ErrConnClosed", err)
+	}
+}
+
+// TestStream_Abort_ConcurrentWithPushData 验证 Abort 与 pushData/pushEOF 并发时
+// 无 panic、无数据竞争（closeMu 保护；-race 下运行验证）。
+func TestStream_Abort_ConcurrentWithPushData(t *testing.T) {
+	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
+	defer accepted.Close()
+
+	// 对端写一小批数据，本侧在写入过程中 Abort：数据量远小于发送窗口，不会因
+	// 流控挂起；Abort 后 pushData 经 done 分支丢弃负载，写 goroutine 正常收尾。
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 100 {
+			if _, err := accepted.Write([]byte("payload")); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(10 * time.Millisecond) // 给写 goroutine 启动时间，制造并发窗口
+	if err := stream.Abort(); err != nil {
+		t.Fatalf("Abort failed: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("写 goroutine 未在 Abort 后正常退出")
+	}
+}
+
+// TestStream_ReadDataBeforeImmediateClose（P1-6 回归）：
+// 对端写数据后立即关闭时，读取方必须拿到已投递的数据而非关闭错误——readLoop
+// 先 pushData 再 closeChannels，done 与 dataCh 同时就绪时 Go select 随机选取，
+// 无修复前 ~50% 概率丢弃数据帧（I27 拨号结果帧读取在叶子"接受后立即关"场景的
+// 可靠性）。循环多轮加大命中并发窗口的概率。
+func TestStream_ReadDataBeforeImmediateClose(t *testing.T) {
+	for i := range 20 {
+		dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
+		stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
+		defer stream.Close()
+		defer accepted.Close()
+
+		// 先让读取方进入阻塞 Read（命中 inner select 的 done/dataCh 并发窗口）。
+		type readRes struct {
+			n   int
+			err error
+		}
+		readCh := make(chan readRes, 1)
+		go func() {
+			buf := make([]byte, 4)
+			n, err := stream.Read(buf)
+			readCh <- readRes{n, err}
+		}()
+		time.Sleep(5 * time.Millisecond) // 给 Read 启动时间（即使未及时启动，数据也不会丢失，仅少命中竞态）
+
+		// 对端写数据后立即关闭：数据帧与关闭帧几乎同时到达读取方。
+		if _, err := accepted.Write([]byte("data")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		_ = accepted.Close()
+
+		select {
+		case r := <-readCh:
+			if r.err != nil || r.n != 4 {
+				t.Fatalf("iter %d: Read 应返回 4 字节数据，got n=%d err=%v", i, r.n, r.err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("iter %d: Read 未返回（挂起）", i)
+		}
 	}
 }
 

@@ -19,36 +19,36 @@ import (
 //   - ACME.Enabled：ACME 自动证书
 //   - AutoTLS：自签证书（默认 fallback）
 type TLSConfig struct {
-	Enabled  bool       `yaml:"enabled"`
-	CertFile string     `yaml:"cert_file"`
-	KeyFile  string     `yaml:"key_file"`
-	AutoTLS  bool       `yaml:"auto_tls"`
-	ClientCA string     `yaml:"client_ca"` // mTLS: CA 证书路径，非空时启用客户端证书验证
-	ACME     ACMEConfig `yaml:"acme"`      // ACME 自动证书配置（可选）
+	Enabled  bool       `yaml:"enabled" mapstructure:"enabled"`
+	CertFile string     `yaml:"cert_file" mapstructure:"cert_file"`
+	KeyFile  string     `yaml:"key_file" mapstructure:"key_file"`
+	AutoTLS  bool       `yaml:"auto_tls" mapstructure:"auto_tls"`
+	ClientCA string     `yaml:"client_ca" mapstructure:"client_ca"` // mTLS: CA 证书路径，非空时启用客户端证书验证
+	ACME     ACMEConfig `yaml:"acme" mapstructure:"acme"`           // ACME 自动证书配置（可选）
 }
 
 // ACMEConfig 是 ACME 自动证书的配置。
 type ACMEConfig struct {
-	Enabled    bool     `yaml:"enabled"`
-	Domains    []string `yaml:"domains"`
-	Email      string   `yaml:"email"`
-	CacheDir   string   `yaml:"cache_dir"`
-	HTTP01     bool     `yaml:"http01"`
-	HTTP01Port string   `yaml:"http01_port"`
+	Enabled    bool     `yaml:"enabled" mapstructure:"enabled"`
+	Domains    []string `yaml:"domains" mapstructure:"domains"`
+	Email      string   `yaml:"email" mapstructure:"email"`
+	CacheDir   string   `yaml:"cache_dir" mapstructure:"cache_dir"`
+	HTTP01     bool     `yaml:"http01" mapstructure:"http01"`
+	HTTP01Port string   `yaml:"http01_port" mapstructure:"http01_port"`
 }
 
 type RateLimitConfig struct {
-	Enabled  bool          `yaml:"enabled"`
-	Requests int           `yaml:"requests"`
-	Window   time.Duration `yaml:"window"`
+	Enabled  bool          `yaml:"enabled" mapstructure:"enabled"`
+	Requests int           `yaml:"requests" mapstructure:"requests"`
+	Window   time.Duration `yaml:"window" mapstructure:"window"`
 }
 
 type ServerTimeouts struct {
-	ReadHeader time.Duration `yaml:"read_header"`
-	Read       time.Duration `yaml:"read"`
-	Write      time.Duration `yaml:"write"`
-	Idle       time.Duration `yaml:"idle"`
-	Shutdown   time.Duration `yaml:"shutdown"`
+	ReadHeader time.Duration `yaml:"read_header" mapstructure:"read_header"`
+	Read       time.Duration `yaml:"read" mapstructure:"read"`
+	Write      time.Duration `yaml:"write" mapstructure:"write"`
+	Idle       time.Duration `yaml:"idle" mapstructure:"idle"`
+	Shutdown   time.Duration `yaml:"shutdown" mapstructure:"shutdown"`
 }
 
 type VersionConfig struct {
@@ -58,22 +58,27 @@ type VersionConfig struct {
 
 // HubConfig 配置 Hub 中继系统。
 type HubConfig struct {
-	Enabled    bool             `yaml:"enabled"`
-	NodeID     string           `yaml:"node_id"`
-	RelayToken string           `yaml:"relay_token"`
-	Transports TransportConfigs `yaml:"transports"`
+	Enabled    bool   `yaml:"enabled" mapstructure:"enabled"`
+	NodeID     string `yaml:"node_id" mapstructure:"node_id"`
+	RelayToken string `yaml:"relay_token" mapstructure:"relay_token"`
+	// MaxConnections 是 Hub 同时处理的中继节点连接数上限（I30），0 或不填使用默认 256。
+	MaxConnections int              `yaml:"max_connections" mapstructure:"max_connections"`
+	Transports     TransportConfigs `yaml:"transports" mapstructure:"transports"`
 }
 
 // TransportConfigs 聚合所有可用的传输层配置，当前为预留扩展，暂无产品代码消费。
 type TransportConfigs struct {
-	WS WSTransportConfig `yaml:"ws"` // 预留：WebSocket 传输监听配置
+	WS WSTransportConfig `yaml:"ws" mapstructure:"ws"` // 预留：WebSocket 传输监听配置
 }
 
-// WSTransportConfig 配置 WebSocket 传输监听，当前为预留扩展，暂无产品代码消费。
+// WSTransportConfig 配置 WebSocket 传输监听。
+// 当前 WS 升级端点挂载到主 HTTP server（与文件服务同端口，路径由 Path 指定），
+// 因此 Listen 字段仅作预留（独立端口模式未来扩展），实际监听端口由 addr 决定。
 type WSTransportConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Listen  string `yaml:"listen"`
-	Path    string `yaml:"path"`
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	Listen  string `yaml:"listen" mapstructure:"listen"`
+	// Path 已废弃（S36）：WS 升级路径固定为 /ws，配置非默认值不生效（启动时记录警告并忽略）。
+	Path string `yaml:"path" mapstructure:"path"`
 }
 
 type Config struct {
@@ -204,6 +209,9 @@ func (c *Config) SetDefaults() {
 	if c.CloudFailedTaskTTL <= 0 {
 		c.CloudFailedTaskTTL = 1 * time.Hour
 	}
+	if c.Hub.MaxConnections <= 0 {
+		c.Hub.MaxConnections = 256
+	}
 }
 
 // Validate 校验配置合理性。
@@ -240,6 +248,14 @@ func (c *Config) Validate() error {
 	}
 	if c.RateLimit.Enabled && c.RateLimit.Window <= 0 {
 		return fmt.Errorf("rate_limit.enabled=true 但 window=%s 无效，请设置大于 0 的 duration", c.RateLimit.Window)
+	}
+	if c.Hub.Enabled && c.Hub.RelayToken == "" {
+		return fmt.Errorf("hub.enabled=true 但 relay_token 为空，中继节点注册将无任何鉴权，请配置 relay_token")
+	}
+	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled {
+		// S42：WS 是当前唯一可用的节点接入传输；hub 启用而无 transport 时
+		// 节点无法注册，属配置脚枪，fail-fast 启动失败。
+		return fmt.Errorf("hub.enabled=true 但 transports.ws.enabled=false，中继节点无法连接，请启用 WebSocket 传输")
 	}
 	return nil
 }

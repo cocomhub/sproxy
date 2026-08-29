@@ -21,6 +21,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	"github.com/spf13/cobra"
 )
 
@@ -117,9 +118,38 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	mux := http.NewServeMux()
 	var routeTable *hub.RouteTable
+	// Hub 中继：先注册 xfer/ws 传输（开启 transports.ws 时），
+	// 创建 RouteTable + HubServer 收口，再注册 HTTP 路由。
 	if cfg.Hub.Enabled {
 		routeTable = hub.NewRouteTable()
 		logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
+
+		if cfg.Hub.Transports.WS.Enabled {
+			hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(cfg.Hub.RelayToken), logger.With("component", "hub"), cfg.Hub.MaxConnections)
+			// S36：WS 升级路径固定为 /ws。hub.transports.ws.path 已废弃，
+			// 非默认值时仅记录警告并忽略，避免可配置 path 与既有业务路由语义重叠。
+			wsPath := "/ws"
+			if configured := cfg.Hub.Transports.WS.Path; configured != "" && configured != wsPath {
+				logger.Warn("hub.transports.ws.path 已废弃，WS 升级路径固定为 /ws，忽略配置值", "configured", configured)
+			}
+			// 挂载 WebSocket 升级端点到主 mux；连接后由 HubServer 处理注册与转发。
+			hubNode := wsxfer.NewHandlerNode()
+			hubNode.AddToMux(mux, wsPath)
+			go func() {
+				for {
+					conn, aerr := hubNode.Accept(ctx)
+					if aerr != nil {
+						return
+					}
+					// I30：连接并发上限由 HubServer 信号量控制；超限立即关闭新连接。
+					if !hubSrv.TryHandleConn(ctx, conn) {
+						logger.Warn("Hub 连接数达到上限，拒绝新连接", "max", cfg.Hub.MaxConnections)
+						_ = conn.Close()
+						continue
+					}
+				}
+			}()
+		}
 	}
 	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
 		Mux:        mux,
