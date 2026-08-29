@@ -26,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
@@ -40,6 +41,9 @@ const (
 // 直连数据面必须在 mux 流上写拨号帧，而非裸字节写 DataChannel。对端 p2p listen
 // 用 mux 按帧消费，本测试复现对端消费方式断言读到正确拨号帧。
 func TestWebRTCStream_WritesDialFrameOnMuxStream(t *testing.T) {
+	// Windows 下收敛 UDP 候选收集到 loopback 单端口，避免测试反复弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
 
@@ -104,6 +108,9 @@ func TestWebRTCStream_WritesDialFrameOnMuxStream(t *testing.T) {
 
 // TestDial_FallsBackToRelay：webrtc 打洞失败（不可达信令）时回落 hub 中继。
 func TestDial_FallsBackToRelay(t *testing.T) {
+	// Windows 下收敛 UDP 候选收集到 loopback 单端口，避免测试反复弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
 
@@ -490,6 +497,9 @@ func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
 // TestRunNode_WebRTCDirect：mesh node webrtc 直连环接受拨号方打洞直连，
 // 直连数据面（dial 帧→出口拨号 echo）经 relay.Serve 分发。EnableWebRTC=true。
 func TestRunNode_WebRTCDirect(t *testing.T) {
+	// Windows 下收敛 UDP 候选收集到 loopback 单端口，避免测试反复弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
 	webrtc.SetSignalingTimeout(60 * time.Second)
@@ -639,6 +649,9 @@ func TestListHubNodes(t *testing.T) {
 // TestRunNode_DiscoveryConnects：两个 mesh node（node-a/node-b）自动对等发现，
 // node-a（A<B 半拨号）自动 webrtc 直连 node-b 并保持。
 func TestRunNode_DiscoveryConnects(t *testing.T) {
+	// Windows 下收敛 UDP 候选收集到 loopback 单端口，避免测试反复弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
 	webrtc.SetSignalingTimeout(60 * time.Second)
@@ -806,6 +819,9 @@ func TestGateway_Status(t *testing.T) {
 // 网关、B→A 经 B 的网关 accept 侧注册链路回拨），数据面端到端就绪（mesh connect
 // --gateway 双向全覆盖）。
 func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
+	// Windows 下收敛 UDP 候选收集到 loopback 单端口，避免测试反复弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
 	webrtc.SetSignalingTimeout(60 * time.Second)
@@ -1139,6 +1155,9 @@ func TestLinkPool_RemoveIf(t *testing.T) {
 // accept 侧（node-a，a<b 拨入注册）与拨号侧（node-c，b<c 拨出注册）条目——验证
 // 双向链路注册在真实 full-mesh 中的混合。
 func TestRunNode_FullMeshThreeNodes(t *testing.T) {
+	// Windows 下收敛 UDP 候选收集到 loopback 单端口，避免测试反复弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
 	webrtc.SetSignalingTimeout(60 * time.Second)

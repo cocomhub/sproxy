@@ -10,6 +10,7 @@ import (
 	"time"
 
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
 )
 
 // TestWebrtcDialListen_WithHubSignaler 端到端验证 C1 修复：
@@ -18,6 +19,10 @@ import (
 //
 // 使用 SetHostOnly(true) 使 ICE 仅用本机 host 候选（无 STUN 依赖，CI 可跑）。
 func TestWebrtcDialListen_WithHubSignaler(t *testing.T) {
+	// Windows 下收敛 UDP 候选收集到 loopback 单端口，避免测试反复弹防火墙授权框
+	// （webrtctest.New 注册 t.Cleanup 自动恢复；与 SetHostOnly 正交）。
+	env := webrtctest.New(t)
+	defer env.Close()
 	// 备份并还原全局 hostOnly 状态
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
@@ -116,6 +121,9 @@ func TestWebrtcDialListen_WithHubSignaler(t *testing.T) {
 // 分帧能完整传输超过单次 Read 缓冲（65536）的大消息——I6 回归测试。
 // 直接对同一 peer 的两端做 xfer.Send/Receive，不经过 mux。
 func TestWebrtcXferConn_FramingLargeMessage(t *testing.T) {
+	// 同主 e2e 测试：loopback 候选收敛防 Windows 防火墙弹窗。
+	env := webrtctest.New(t)
+	defer env.Close()
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
 	// I11/S12：与主 e2e 测试一致的信令预算（全局变量需 t.Cleanup 恢复）。
