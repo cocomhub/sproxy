@@ -437,8 +437,42 @@ async function resumeUpload(uploadId, file) {
 }
 
 // --- 上传入口 ---
+// cancelledUploads：按 upload_id 记 per-upload 真暂停标志（暂停按钮置 true）。
+// 每批上传开始时统一清空：与新的会话（可能同 upload_id）解耦，避免上次暂停标志
+// 泄漏到下一批同 id 上传（无意义残留会误停——上传本来就在跑）。
+// 事件委托（app.js）经标记函数操作它，仅在本文件内实现，避免重复实现回归（E-C-1）。
+let cancelledUploads = {};
+function isCancelledFor(uploadId) { return !!(cancelledUploads[uploadId] || 0); }
+function setCancelledUpload(uploadId, flag) {
+  if (uploadId === undefined || uploadId === null) return;
+  if (flag) cancelledUploads[uploadId] = (cancelledUploads[uploadId] || 0) + 1;
+  else delete cancelledUploads[uploadId];
+}
+// pauseUploadSession：真暂停当前上传——置 per-upload 取消标志（让分块 for 检查点中断）
+// + 把本地持久化会话写回 status:'paused'——checkResumableUploads 探 readiness 后正常
+// 显示续传提示（探出 missing→提示走既有 resume 路径补缺失块）。不发网络请求；
+// statusProbe 对 paused 按普通状态分流（与 uploading 一致，见 statusProbe 注释）。
+function pauseUploadSession(item) {
+  const uploadId = (item && item.meta && item.meta.uploadId) ? item.meta.uploadId : (item && item.id) || '';
+  if (!uploadId) return;
+  setCancelledUpload(uploadId, true);
+  // 写回 paused（基于最近持久化 data 重建——saveUploadSession 的 upsert 语义自动覆盖旧项）。
+  saveUploadSession(uploadId, Object.assign({}, item.meta || {}, {
+    filename: item.filename, totalSize: item.totalSize, chunksBitmap: (item.meta && item.meta.chunksBitmap) || [],
+    status: 'paused', loaded: item.loaded,
+  }));
+}
+
+// clearCancelledUpload：取消按钮一键清理（真删会话 + 清 cancel 标志），供事件委托调用。
+// 注意：暂停与取消分离——取消保留 removeUploadSession(id)（本函数只是它的便捷增强）。
+function clearCancelledUpload(uploadId) {
+  setCancelledUpload(uploadId, false);
+}
+
 async function uploadFiles(files) {
   if (!files || files.length === 0) return;
+  // 每批上传开始清空 per-upload 暂停标志：与上一批的会话解耦（见 cancelledUploads 注释）。
+  cancelledUploads = {};
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
@@ -446,10 +480,19 @@ async function uploadFiles(files) {
     const progId = createProgressBar(fileName, size, 1);
     // FS Access 免重选：句柄由 resumeUpload(uploadId) 句柄路径承担（无需此处采集）；
     // 不留采集钩子——input change 后无法自动弹 picker 且会破坏『选中即上传』体验。
+    // 当前 upload 的会话 id（onSession 首次持久化时捕获）：暂停检查点按它找取消标志。
+    let sessUploadId = null;
+    const cancelProbe = function () { return !!sessUploadId && isCancelledFor(sessUploadId); };
     try {
       const result = await sc.files.upload(file, {
         subdir: currentSubdir ? currentSubdir : undefined,
+        // 真暂停检查点：分块 for 循环每块开头查询本 upload_id 的暂停标志。
+        // 暂停按钮（app.js 委托）置标志 → isCancelled 为真 → 抛 E_CANCELLED → 下面的
+        // catch 归一为「已暂停」toast；取消按钮则直接 removeUploadSession（走失败路径不重试）。
+        isCancelled: cancelProbe,
         onSession: function(sess, remove) {
+          // 记录会话 id 供暂停检查点寻址；同一会话持续 persist（含 status/paused 写回）始终覆写。
+          if (sess && sess.upload_id) sessUploadId = sess.upload_id;
           if (remove || sess.upload_id === 'already_exists') { removeUploadSession(sess.upload_id); return; }
           saveUploadSession(sess.upload_id, sess);
         },
@@ -471,6 +514,13 @@ async function uploadFiles(files) {
         showToast(fileName + ' 上传失败: ' + ((result && result.message) || 'unknown'), 'error');
       }
     } catch (e) {
+      if (e && e.code === 'E_CANCELLED') {
+        // 真暂停：session 已在上方 pauseUploadSession 写回 paused；此处只提示 + 探续传。
+        showToast(fileName + ' 已暂停', 'info');
+        checkResumableUploads();
+        removeProgressBar(progId);
+        continue;
+      }
       console.error('[upload] 上传异常', e);
       showToast(fileName + ' 上传失败: ' + e.message, 'error');
     }
@@ -522,5 +572,6 @@ if (typeof module === 'object' && module.exports) {
     chunkedUpload, simpleUpload, uploadFiles,
     checkResumableUploads, statusProbe, showResumePrompt, hideResumePrompt, dismissResume, resumeUpload,
     takeFileHandle, itemForUploadId,
+    isCancelledFor, setCancelledUpload, pauseUploadSession, clearCancelledUpload,
   };
 }
