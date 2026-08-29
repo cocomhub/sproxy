@@ -17,7 +17,7 @@
  *   - download(filename, opts)  GET  /download?filename=（opts.headers 透传含 Range）
  *   - deleteFile(name, chk)    POST /delete?filename=（X-File-Checksum 头）
  *   - rename(from,to,chk)      POST /rename?from=&to=（X-File-Checksum 头）
- *   - mkdir/rmdir(dir)         POST /mkdir?dirname= / POST /rmdir?dirname=
+ *   - mkdir/rmdir(dir)         POST /mkdir?dirname= / POST /rmdir?dirname=&force=true
  *   - batchDelete(files)        POST /api/batch/delete  files=[{filename,checksum}]
  *   - batchRename(ops)         POST /api/batch/rename   ops=[{from,to,checksum}]
  *   - archive(files)           POST /api/archive（下载归档 → {success,blob,filename}）
@@ -212,7 +212,9 @@
       return jsonRequest('POST', '/mkdir?dirname=' + encodeURIComponent(dirname), undefined);
     }
     function rmdir(dirname) {
-      return jsonRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirname), undefined);
+      // 服务端对非空目录要求 ?force=true（防误删）；Web 删除目录前已 confirm，
+      // 故此处永远带 force=true（手动删目录同样过 confirm）。
+      return jsonRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirname) + '&force=true', undefined);
     }
 
     // ---- 删除 / 重命名（需要 X-File-Checksum 头）----
@@ -302,6 +304,16 @@
     async function chunkedUpload(file, fileName, p) {
       const totalSize = file.size;
       const chunkSize = calcChunkSize(totalSize);
+      const persist = typeof p.onSession === 'function' ? p.onSession : null; // 会话持久化钩子（UI 断点续传）
+      const startMtimeNano = ((file.lastModified) || Date.now()) * 1000000;
+
+      // 计算 SHA-256 之前就先落一个基础会话（status='hashing'）——否则计算阶段（大文件
+      // 耗时可达数秒~数十秒）刷新页面，localStorage 里还没有任何会话，checkResumableUploads
+      // 无从发现，且此时服务端也还没有 init 会话（无法续传）。刷新后重选文件重算 checksum，
+      // upload_id（seed=filename|size|mtime|checksum）不变即可续传。
+      const preUploadId = await generateUploadId(fileName, totalSize, startMtimeNano, '');
+      if (persist) persist({ upload_id: preUploadId, filename: fileName, totalSize: totalSize, totalChunks: Math.ceil(totalSize / chunkSize), status: 'hashing', mtimeNano: startMtimeNano });
+
       const checksum = await computeSHA256(file, p.onProgress);
       const mtimeNano = ((file.lastModified) || Date.now()) * 1000000;
       const uploadId = await generateUploadId(fileName, totalSize, mtimeNano, checksum);
@@ -315,9 +327,20 @@
         return { success: false, message: initRes.message || '初始化失败', filename: fileName };
       }
       if (initRes.upload_id === 'already_exists') {
+        if (persist) persist({ upload_id: 'already_exists', filename: fileName }, true);
         return { success: true, message: '文件已存在，跳过', upload_id: 'already_exists', filename: fileName };
       }
       const sessionId = initRes.upload_id;
+      // 首个会话就位后立即持久化（页面刷新后 checkResumableUploads 能读到 uploading）。
+      // totalChunks 以 init 返回的 chunk_size 校准。
+      // hashing 占位（empty-checksum 的 preUploadId）与真实 session（real-checksum）恒不同 key，
+      // 但续传进 init 后 hashing 占位已无意义：统一移除再落 uploading——否则 complete 只清
+      // 真实 sessionId，hashing 残留成幽灵（E2E 已证实，E2E 里续传后残留 3ed8a4…）。
+      if (persist) {
+        const serverChunkSize = initRes.chunk_size || chunkSize;
+        persist({ upload_id: preUploadId, filename: fileName }, true); // 清 hashing 占位（对无占位的全新上传是无害 no-op）
+        persist({ upload_id: sessionId, filename: fileName, totalSize: totalSize, totalChunks: Math.ceil(totalSize / serverChunkSize), fileChecksum: checksum, status: 'uploading' });
+      }
 
       // 查询缺失分块（服务端权威列表；失败回退全量上传）。
       let missing = null;
@@ -348,6 +371,8 @@
         if (chunkRes.success) {
           loaded += (end - start);
           if (p.onProgress) p.onProgress({ loaded: loaded, total: totalSize, chunkIndex: idx, totalChunks: totalChunksAdj });
+          // 每个分块成功即更新持久化会话（进度字段，供续传 UI 展示）。
+          if (persist) persist({ upload_id: sessionId, filename: fileName, totalSize: totalSize, totalChunks: totalChunksAdj, fileChecksum: checksum, status: 'uploading', completedChunks: indices.slice(0, i + 1), loaded: loaded });
         } else if (!chunkRes.should_retry) {
           return { success: false, message: chunkRes.message || ('分块 ' + idx + ' 上传失败'), upload_id: sessionId, filename: fileName };
         }
@@ -358,6 +383,8 @@
       if (!completeRes.success) {
         return { success: false, message: completeRes.message || '合并失败', upload_id: sessionId, filename: fileName };
       }
+      // 合并成功/『已存在』后移除持久化会话。
+      if (persist) persist({ upload_id: sessionId, filename: fileName }, true);
       return {
         success: true, filename: completeRes.filename || fileName,
         checksum: completeRes.file_checksum || checksum, upload_id: sessionId,

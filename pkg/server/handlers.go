@@ -190,6 +190,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 
 	// 分享管理 API（localMux：隧道内部使用）
+	localMux.HandleFunc("POST /api/share", h.createShareHandler)
 	localMux.HandleFunc("GET /api/shares", h.listSharesHandler)
 	localMux.HandleFunc("DELETE /api/shares/{token}", h.revokeShareHandler)
 
@@ -281,9 +282,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		srvMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
 		srvMux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))
 		srvMux.HandleFunc("GET /api/hub/services", h.authMiddleware(h.hubServicesHandler))
-		// mesh 服务列表暴露 localMux 是有意的：FileClient.MeshServices（client.go）
-		// 配置了 tunnelClient 时经 /tunnel 访问 localMux 做 mesh 选路；
-		// nodes/stats/remove 为运维管理面，仅 srvMux+Bearer，不暴露隧道。
+		// hub 用户面查询统一暴露 localMux：节点列表/统计/服务发现/移除在隧道内部
+		// 均可调用（handler 按 routeTable==nil 返回 404 语义不变），保证浏览器隧道
+		// 模式下 sclient.hub.* 全部可达；nodes/stats/remove 在 srvMux 侧仍是
+		// authMiddleware 保护（直连面无降权）。本组在 opts.RouteTable != nil 内注册
+		// （注册依赖 handler.signalBroker/routeTable 就位）。
+		localMux.HandleFunc("GET /api/hub/nodes", h.hubNodesHandler)
+		localMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.hubRemoveNodeHandler)
+		localMux.HandleFunc("GET /api/hub/stats", h.hubStatsHandler)
 		localMux.HandleFunc("GET /api/hub/services", h.hubServicesHandler)
 	}
 

@@ -1,11 +1,53 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// 上传 UI 模块：进度条 / 会话 / 断点续传 DOM，上传纯逻辑委托给 sclient/api/files.js
-// 的 sc.files.upload（内部自己看 transport 隧道/直连与分块决策）。
-// 依赖 sclient/sha256.js, sclient/*, app.js 全局辅助。
+// 上传 UI 模块（app 层）：进度条 / 会话 / 断点续传 DOM。上传纯逻辑委托给
+// sclient/api/files.js 的 sc.files.upload（内部自己看 transport 隧道/直连与分块决策）。
+// 依赖 sclient/sha256.js, sclient/*, app-render.js（appRender：formatSize/escHtml）、app.js（showToast）。
+// 加载顺序（index.html）：upload.js 在 app-render.js 之前——函数体执行时 appRender 已可用；
+// 严禁在此文件内新开 formatSize/escHtml 等函数（与 app-render 重复，已因转发删除踩过坑）。
+// global：currentSubdir（app.js），showToast（app.js）——调用点运行期才解引用，加载序安全。
+//
+// 渲染隔离原则（全部 app 层共同遵守）：
+//   1. 纯计算函数（progressText 等）不碰 DOM、单测可直测；
+//   2. DOM 写入唯一入口 renderProgress / createProgressBar / showResumePrompt，
+//      其它函数不得直接 getElementById 改进度；
+//   3. 逻辑（进度回调数据判断）与渲染（progressText→renderProgress）分离。
+//   4. Node 单测可 require 本文件（module.exports；DOM/localStorage 仅在运行时访问，
+//      顶部不引用 document，事件绑定用 typeof document 守卫）。
 
 const SESSIONS_KEY = 'sproxy_upload_sessions';
+
+// ---- 纯计算：进度文案（不碰 DOM，全部边界单测覆盖） ----
+
+// progressText 把进度回调统一成 {pct, text, titleText(可选)}。
+// input:{label, loaded, total, totalChunks(可选), chunkIndex(可选), titleText(可选)}
+//   - total 缺省/为 0 → pct=0（不 NaN）；loaded 非 number → 0；
+//   - totalChunks>1 → 附加「分块 i/N」（chunkIndex 缺省从 1 计，i 封顶 N）；
+//   - 否则仅「N%（loaded/total）」。
+// 所有数值经 Math.round；不抛错（undefined → 0 文案）。
+// （纯函数可测入口与语义亦在 appRender.uploadProgressText；本处为 DOM 无关的本地实现。）
+function progressText(input) {
+  const i = (input && typeof input === 'object') ? input : {};
+  const loaded = (typeof i.loaded === 'number' && i.loaded >= 0) ? i.loaded : 0;
+  const total = (typeof i.total === 'number' && i.total > 0) ? i.total : 0;
+  const pct = total > 0 ? Math.round(loaded / total * 100) : 0;
+  const sizeTxt = appRender.formatSize(loaded) + '/' + appRender.formatSize(total);
+  const label = (typeof i.label === 'string' && i.label) ? i.label : '上传中…';
+  const tc = i.totalChunks;
+  let text;
+  if (tc && tc > 1) {
+    const idx = (typeof i.chunkIndex === 'number') ? i.chunkIndex + 1 : 1;
+    text = label + ' ' + pct + '%（' + sizeTxt + '，分块 ' + Math.min(tc, idx) + '/' + tc + '）';
+  } else {
+    text = label + ' ' + pct + '%（' + sizeTxt + '）';
+  }
+  const out = { pct: pct, text: text };
+  if (typeof i.titleText === 'string') out.titleText = i.titleText;
+  return out;
+}
+
+// ---- 会话持久化（逻辑部分不碰 DOM） ----
 
 function loadSessions() {
   try {
@@ -19,7 +61,7 @@ function saveSessions(sessions) {
 
 function saveUploadSession(uploadId, data) {
   const sessions = loadSessions();
-  sessions[uploadId] = data;
+  sessions[uploadId] = data || {};
   saveSessions(sessions);
 }
 
@@ -29,6 +71,10 @@ function removeUploadSession(uploadId) {
   saveSessions(sessions);
 }
 
+// resumedChunkCount 供续传提示展示：completedChunks 数组长度，缺省回退 0。
+function resumedChunkCount(data) { return (data && Array.isArray(data.completedChunks)) ? data.completedChunks.length : 0; }
+
+// ---- DOM 渲染入口（纯写入，不做计算） ----
 // 移除当前文件的进度条
 function removeProgressBar(progId) {
   const wrap = document.getElementById(progId + '-wrap');
@@ -40,52 +86,55 @@ function createProgressBar(fileName, totalSize, totalChunks) {
   const progId = 'prog-' + Date.now() + '-' + (++_progCounter);
   const container = document.getElementById('upload-progress-container');
   container.insertAdjacentHTML('beforeend',
-    '<div id="' + progId + '-wrap"><small>' + escHtml(fileName) + ' (' + formatSize(totalSize) + ', ' + totalChunks + ' 分块)</small>' +
+    '<div id="' + progId + '-wrap"><small>' + appRender.escHtml(fileName) + ' (' + appRender.formatSize(totalSize) + ', ' + totalChunks + ' 分块)</small>' +
     '<div class="upload-progress"><div class="upload-progress-bar" id="' + progId + '"></div></div>' +
     '<div class="chunk-progress-text" id="' + progId + '-text">等待中…</div></div>');
   return progId;
 }
 
+// renderProgress 统一渲染：render(pct,text,titleText?) → 进度条宽度 + 文案 + 标题。
+// 是 app 层唯一「进度 → DOM」入口；计算一律走 progressText。
+function renderProgress(progId, render) {
+  if (!progId) return;
+  const r = render || {};
+  const el = document.getElementById(progId);
+  if (el && typeof r.pct === 'number') el.style.width = r.pct + '%';
+  const elText = document.getElementById(progId + '-text');
+  if (elText && typeof r.text === 'string') elText.textContent = r.text;
+  if (r.titleText) {
+    const small = document.querySelector('#' + progId + '-wrap small');
+    if (small && typeof r.titleText === 'string') small.textContent = r.titleText;
+  }
+}
+
 // 分块上传主入口：委托 sc.files.upload（进度条经 onProgress 回调接入）。
 // resumeSession 为已持久化的续传会话（含 uploadId/fileChecksum）。
-// sc.files.upload 的分块 onProgress 回调携 {loaded, total, chunkIndex, totalChunks}，
-// 此处用实时 chunkIndex/totalChunks 渲染「done/N 分块」文案（替换历史固定 1 的展示）。
 async function chunkedUpload(file, resumeSession) {
   const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
   const totalSize = file.size;
-  // 分块数先在 init 后经 onProgress 得知；此处占位 1，收到首个回调时用真实值刷新标题。
   const progId = createProgressBar(fileName, totalSize, 1);
-  const updateProg = function(loaded, total, doneChunks, totalChunks) {
-    const pct = total > 0 ? (loaded / total * 100) : 0;
-    const el = document.getElementById(progId);
-    if (el) el.style.width = pct + '%';
-    const elText = document.getElementById(progId + '-text');
-    if (elText) {
-      elText.textContent = totalChunks > 0
-        ? Math.round(pct) + '%（' + formatSize(loaded) + '/' + formatSize(total) + '，分块 ' + doneChunks + '/' + totalChunks + '）'
-        : Math.round(pct) + '%（' + formatSize(loaded) + '/' + formatSize(total) + '）';
-    }
-    // 刷新标题中的分块数（createProgressBar 参数是估计值；以 onProgress 实物为准）。
-    if (totalChunks > 0) {
-      const small = document.querySelector('#' + progId + '-wrap small');
-      if (small) small.textContent = fileName + ' (' + formatSize(totalSize) + ', ' + totalChunks + ' 分块)';
-    }
-  };
-
   try {
     const result = await sc.files.upload(file, {
       subdir: currentSubdir ? currentSubdir : undefined,
       forceChunked: true,
       onProgress: function(pr) {
-        if (pr && typeof pr === 'object' && typeof pr.totalChunks === 'number') {
-          updateProg(pr.loaded, pr.total, Math.min(pr.totalChunks, pr.chunkIndex + 1), pr.totalChunks);
-        } else {
-          updateProg(pr || 0, totalSize, 0, 0);
-        }
+        // 分块回调对对象（{loaded,total,chunkIndex,totalChunks}）；计算期数值。
+        // 统一经 progressText 计算 + renderProgress 渲染（两段隔离）。
+        const render = (pr && typeof pr === 'object')
+          ? progressText({ label: '上传中…', loaded: pr.loaded, total: pr.total, totalChunks: pr.totalChunks, chunkIndex: pr.chunkIndex, titleText: fileName + ' (' + appRender.formatSize(totalSize) + ', ' + pr.totalChunks + ' 分块)' })
+          : progressText({ label: '计算 SHA-256…', loaded: pr || 0, total: totalSize });
+        renderProgress(progId, render);
+      },
+      // 断点续传：把分块会话持久化到 localStorage（files.js 每块成功/完成时回调）。
+      // 第二个参数 true = remove（合并成功或『已存在』后清理）。
+      onSession: function(sess, remove) {
+        if (remove || sess.upload_id === 'already_exists') { removeUploadSession(sess.upload_id); return; }
+        saveUploadSession(sess.upload_id, sess);
       },
     });
     if (result && result.success) {
-      if (!resumeSession && result.upload_id) removeUploadSession(result.upload_id);
+      // 分块会话的清除由 files.js 上传完成回调 onSession(true) 负责，此处不清——
+      // 否则刷新后的 refreshList 会把进行中的大文件分块会话误清，导致断点续传提示消失。
       showToast(fileName + ' 上传成功' + (result.message && result.message !== 'ok' ? '：' + result.message : ''), 'success');
       removeProgressBar(progId);
       return;
@@ -112,16 +161,13 @@ async function simpleUpload(file) {
   try {
     const result = await sc.files.upload(file, {
       subdir: currentSubdir ? currentSubdir : undefined,
-      onProgress: function(loaded, total) {
-        const pct = total > 0 ? Math.round(loaded / total * 100) : 0;
-        const el = document.getElementById(progId);
-        if (el) el.style.width = pct + '%';
-        const elText = document.getElementById(progId + '-text');
-        if (elText) elText.textContent = '计算 SHA-256… ' + pct + '%';
+      onProgress: function(pr) {
+        renderProgress(progId, progressText({ label: '计算 SHA-256…', loaded: pr, total: totalSize }));
       },
     });
     if (result && result.success) {
-      if (result.upload_id) removeUploadSession(result.upload_id);
+      // 简单上传走 POST /upload 单请求：无分块会话（只有分块路径才产生 upload_id 会话），
+      // 无需 removeUploadSession。
       showToast(fileName + ' 上传成功', 'success');
     } else {
       showToast(fileName + ' 上传失败: ' + ((result && result.message) || 'unknown'), 'error');
@@ -138,23 +184,23 @@ async function uploadFiles(files) {
   if (!files || files.length === 0) return;
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    // 差异化文案：大文件标分块数（与旧 chunkedUpload 的进度条风格一致），小文件不标。
     const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
     const size = file.size;
     const progId = createProgressBar(fileName, size, 1);
     try {
       const result = await sc.files.upload(file, {
         subdir: currentSubdir ? currentSubdir : undefined,
-        onProgress: function(loaded, total) {
-          const pct = total > 0 ? Math.round(loaded / total * 100) : 0;
-          const el = document.getElementById(progId);
-          if (el) el.style.width = pct + '%';
-          const elText = document.getElementById(progId + '-text');
-          if (elText) elText.textContent = '上传中… ' + pct + '%（' + formatSize(loaded) + '/' + formatSize(total) + '）';
+        onProgress: function(pr) {
+          // 分块回调对象 {loaded,total,chunkIndex,totalChunks}；简单回调数值。
+          // 统一：total 缺省/0 以 size 兜底（修复历史 totalSize 未定义）。两段隔离。
+          const render = (pr && typeof pr === 'object' && typeof pr.loaded === 'number')
+            ? progressText({ label: '上传中…', loaded: pr.loaded, total: pr.total, totalChunks: pr.totalChunks, chunkIndex: pr.chunkIndex, titleText: fileName + ' (' + appRender.formatSize(size) + ', ' + pr.totalChunks + ' 分块)' })
+            : progressText({ label: '计算 SHA-256…', loaded: pr || 0, total: size });
+          renderProgress(progId, render);
         },
       });
       if (result && result.success) {
-        if (result.upload_id) removeUploadSession(result.upload_id);
+        // 分块会话清理由 files.js onSession(true) 负责，此处不误清（见 chunkedUpload 注释）。
         showToast(fileName + ' 上传成功', 'success');
       } else if (result && result.upload_id === 'already_exists') {
         showToast(fileName + ' 已存在，跳过', 'success');
@@ -176,21 +222,27 @@ function checkResumableUploads() {
   let hasResumable = false;
   for (const uploadId in sessions) {
     const data = sessions[uploadId];
-    if (data.status !== 'uploading') continue;
+    if (data.status !== 'uploading' && data.status !== 'hashing') continue;
     hasResumable = true;
     (function(sessionData, sessUploadId) {
       const statusUrl = '/upload/status?upload_id=' + sessUploadId + '&filename=' + encodeURIComponent(sessionData.filename);
       function handleStatusResponse(status) {
-        if (status.success && !status.finished && status.missing_chunks && status.missing_chunks.length > 0) {
+        if (sessionData.status === 'hashing') {
+          // 计算 SHA-256 阶段刷新：服务端还没有 init 会话，/upload/status 只能 status.success=false
+          // 或 missing_chunks 空 → 落到 else 分支被 removeUploadSession 清掉了。此时应保留会话并
+          // 显示「待续传」提示；用户重选同文件续传时会以 status='hashing' 走全量重传分块。
           showResumePrompt(sessionData, sessUploadId);
-        } else if (status.success && status.finished) {
+          return;
+        }
+        if (status.success && status.finished) {
           removeUploadSession(sessUploadId);
+        } else if (status.success && status.missing_chunks && status.missing_chunks.length > 0) {
+          showResumePrompt(sessionData, sessUploadId);
         } else {
           removeUploadSession(sessUploadId);
         }
       }
-      // 查询分块上传状态走传输层（coreRequest GET /upload/status）——续传查询统一走传输层，
-      // 与简单/分块上传的 sc.files.upload 走同一 coreRequest。
+      // 查询分块上传状态走传输层（coreRequest GET /upload/status）——续传查询统一走传输层。
       sclientTransport.coreRequest('GET', statusUrl, {}).then(function(result) {
         const data = JSON.parse(new TextDecoder().decode(result.body));
         handleStatusResponse(data);
@@ -208,8 +260,10 @@ function showResumePrompt(data, uploadId) {
   if (!el) return;
   el.style.display = 'block';
   const div = document.createElement('div');
+  const done = resumedChunkCount(data);
+  const totalChunks = (data && data.totalChunks) || 0;
   div.style.cssText = 'padding:8px 12px;background:var(--bg-batch);border-radius:4px;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-  div.innerHTML = '<span style="flex:1;">📦 未完成的上传: <strong>' + escHtml(data.filename) + '</strong> (' + (data.completedChunks ? data.completedChunks.length : 0) + '/' + data.totalChunks + ' 分块)</span>' +
+  div.innerHTML = '<span style="flex:1;">📦 未完成的上传: <strong>' + appRender.escHtml((data && data.filename) || '') + '</strong> (' + done + '/' + totalChunks + ' 分块)</span>' +
     '<input type="file" id="resume-file-' + uploadId + '" style="display:none" data-upload-id="' + uploadId + '">' +
     '<button class="resume-btn" data-upload-id="' + uploadId + '">选择文件续传</button>' +
     '<button class="btn btn-sm btn-secondary dismiss-btn" data-upload-id="' + uploadId + '">忽略</button>';
@@ -230,12 +284,18 @@ async function resumeUpload(uploadId, file) {
   if (!data) { showToast('续传数据已丢失', 'error'); return; }
   if (file.size !== data.totalSize) { showToast('文件大小不匹配，无法续传', 'error'); return; }
 
-  // 隐藏当前续传提示，表示已开始处理
+  const resumeData = Object.assign({}, data);
+  // hashing：服务端尚无会话（计算阶段刷新），重算后 sessionId===uploadId（filename/size/mtime/checksum
+  // 未变），会以新 session 完成全量分块；移除旧的 hashing 会话避免 complete 后残留。
+  // uploading：服务端有会话，续传只补缺失块。
+  if (resumeData.status === 'hashing') {
+    removeUploadSession(uploadId);
+  }
+
   const resumeContainer = document.getElementById('resume-container');
   if (resumeContainer) {
     const promptDiv = resumeContainer.querySelector('[data-upload-id="' + uploadId + '"]')?.closest('div');
     if (promptDiv) promptDiv.remove();
-    // 没有更多续传提示时隐藏容器
     if (!resumeContainer.querySelector('.resume-btn')) {
       resumeContainer.style.display = 'none';
     }
@@ -251,40 +311,48 @@ async function resumeUpload(uploadId, file) {
   checkResumableUploads();
   refreshList();
 }
+// --- 续传容器事件委托（Node require 时无 document，跳过绑定） ---
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', function() {
+    const resumeContainer = document.getElementById('resume-container');
+    if (!resumeContainer) return;
 
-// --- 续传容器事件委托 ---
-document.addEventListener('DOMContentLoaded', function() {
-  const resumeContainer = document.getElementById('resume-container');
-  if (!resumeContainer) return;
-
-  // 点击"选择文件续传"按钮 → 触发隐藏的 file input
-  resumeContainer.addEventListener('click', function(e) {
-    const btn = e.target.closest('.resume-btn');
-    if (btn) {
-      const uploadId = btn.dataset.uploadId;
-      const fileInput = document.getElementById('resume-file-' + uploadId);
-      if (fileInput) fileInput.click();
-      return;
-    }
-  });
-
-  // 点击"忽略"按钮
-  resumeContainer.addEventListener('click', function(e) {
-    const btn = e.target.closest('.dismiss-btn');
-    if (btn) {
-      dismissResume(btn.dataset.uploadId);
-      return;
-    }
-  });
-
-  // 文件选择变化 → 触发续传
-  resumeContainer.addEventListener('change', function(e) {
-    const fileInput = e.target.closest('input[type="file"]');
-    if (fileInput && fileInput.id && fileInput.id.startsWith('resume-file-')) {
-      const uploadId = fileInput.dataset.uploadId;
-      if (uploadId && fileInput.files && fileInput.files[0]) {
-        resumeUpload(uploadId, fileInput.files[0]);
+    resumeContainer.addEventListener('click', function(e) {
+      const btn = e.target.closest('.resume-btn');
+      if (btn) {
+        const uploadId = btn.dataset.uploadId;
+        const fileInput = document.getElementById('resume-file-' + uploadId);
+        if (fileInput) fileInput.click();
+        return;
       }
-    }
+    });
+
+    resumeContainer.addEventListener('click', function(e) {
+      const btn = e.target.closest('.dismiss-btn');
+      if (btn) {
+        dismissResume(btn.dataset.uploadId);
+        return;
+      }
+    });
+
+    resumeContainer.addEventListener('change', function(e) {
+      const fileInput = e.target.closest('input[type="file"]');
+      if (fileInput && fileInput.id && fileInput.id.startsWith('resume-file-')) {
+        const uploadId = fileInput.dataset.uploadId;
+        if (uploadId && fileInput.files && fileInput.files[0]) {
+          resumeUpload(uploadId, fileInput.files[0]);
+        }
+      }
+    });
   });
-});
+}
+
+// ---- Node 单测导出（浏览器全局由函数声明提供，不需该分支） ----
+if (typeof module === 'object' && module.exports) {
+  module.exports = {
+    loadSessions, saveSessions, saveUploadSession, removeUploadSession,
+    progressText, renderProgress, createProgressBar, removeProgressBar,
+    chunkedUpload, simpleUpload, uploadFiles,
+    checkResumableUploads, showResumePrompt, dismissResume, resumeUpload, resumedChunkCount,
+  };
+}
