@@ -50,13 +50,14 @@ type snapshotFn func() *Snapshot
 // （多个连接同时注册）由 200ms 窗口自然合并。
 type Persister struct {
 	path string
-	// mu 保护文件写侧并发（Save 唯一入口）与 pending/timer 状态。
+	// mu 保护文件写侧并发（Save / saveSnapshotLocked 共用 writeFile 落盘）与
+	// pending/timer 状态。快照生成 + 落盘在临界区内原子完成（I1）。
 	mu sync.Mutex
 
 	// debounce 是去抖窗口：变更密集时合并落盘。0 表示立即。
 	debounce time.Duration
 
-	// logger 用于记录损坏文件等非致命告警；nil 时回退 slog.Default()。
+	// logger 用于记录损坏文件等非致命告警与落盘失败日志；nil 时回退 slog.Default()。
 	logger *slog.Logger
 
 	pending *snapshotFn // 当前排队待落盘的最新闭包；nil 表示无变更（受 mu 保护）
@@ -94,11 +95,20 @@ func (p *Persister) Load() (*Snapshot, error) {
 }
 
 // Save 原子写快照到 p.path：先写同目录临时文件再 rename（不出现半写文件）。
-// 父目录不存在时返回 error。
+// 父目录不存在时返回 error。写失败记录 error 日志（不静默吞掉，I2）。
 func (p *Persister) Save(snap *Snapshot) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.writeFile(snap); err != nil {
+		p.logError("persist: save failed", err)
+		return err
+	}
+	return nil
+}
 
+// writeFile 假设调用方已持有 p.mu（Save / saveSnapshotLocked 均保证），执行原子写：
+// 同目录临时文件 + fsync + rename。返回底层 I/O 错误，由调用方决定记录/上抛。
+func (p *Persister) writeFile(snap *Snapshot) error {
 	dir := filepath.Dir(p.path)
 	tmp, err := os.CreateTemp(dir, filepath.Base(p.path)+".tmp-*.json")
 	if err != nil {
@@ -121,6 +131,31 @@ func (p *Persister) Save(snap *Snapshot) error {
 	return os.Rename(tmpName, p.path)
 }
 
+// saveSnapshotLocked 在调用方已持有 p.mu 的前提下，先执行 fn() 生成快照再原子落盘。
+// 快照生成与文件写入处于同一临界区，避免"旧快照覆盖新快照"的 lost-update 竞态
+// （I1）：并发写者不可能在另一个写者的"读快照→写盘"之间穿插写入更新后再被旧快照
+// 覆盖——每次落盘内容都反映获取 p.mu 时刻的最新状态。返回是否实际落盘；写失败记录
+// error 日志（I2）。
+func (p *Persister) saveSnapshotLocked(fn snapshotFn) bool {
+	snap := fn()
+	if snap == nil {
+		return false
+	}
+	if err := p.writeFile(snap); err != nil {
+		p.logError("persist: save failed", err)
+	}
+	return true
+}
+
+// logError 记录持久化失败日志；logger 为 nil 时回落 slog.Default()。
+func (p *Persister) logError(msg string, err error) {
+	logger := p.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Error(msg, "path", p.path, "err", err)
+}
+
 // Schedule 排队一次快照并在去抖窗口后异步落盘。fn 返回 nil 表示无可持久化变化。
 // 多次调用只会让**最后一次**的 fn 在窗口到期后执行（合并），避免注册/信令风暴
 // 反复落盘。线程安全。
@@ -131,17 +166,15 @@ func (p *Persister) Schedule(fn snapshotFn) {
 	if p.timer == nil {
 		delay := p.debounce
 		t := time.AfterFunc(delay, func() {
+			// 快照生成与落盘都持有 p.mu（saveSnapshotLocked），保证与其它写者串行、
+			// 不产生旧快照覆盖新快照的 lost-update（I1）。
 			p.mu.Lock()
+			defer p.mu.Unlock()
 			fnPtr := p.pending
 			p.pending = nil
 			p.timer = nil
-			p.mu.Unlock()
-			if fnPtr == nil {
-				return
-			}
-			fn := *fnPtr
-			if snap := fn(); snap != nil {
-				_ = p.Save(snap)
+			if fnPtr != nil {
+				p.saveSnapshotLocked(*fnPtr)
 			}
 		})
 		p.timer = t
@@ -152,46 +185,39 @@ func (p *Persister) Schedule(fn snapshotFn) {
 }
 
 // Flush 同步执行当前排队的快照（若存在）。用于进程优雅停服前确保状态不丢失；
-// 无 pending 时是 no-op。返回是否实际落盘。
+// 无 pending 时是 no-op。返回是否实际落盘。快照生成与落盘在同一临界区（I1）。
 func (p *Persister) Flush(curr *Snapshot) bool {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	fnPtr := p.pending
 	p.pending = nil
 	t := p.timer
 	p.timer = nil
-	p.mu.Unlock()
 	if t != nil {
 		t.Stop()
 	}
-	if curr == nil && fnPtr == nil {
-		return false
-	}
 	if curr != nil {
-		_ = p.Save(curr)
+		if err := p.writeFile(curr); err != nil {
+			p.logError("persist: save failed", err)
+		}
 		return true
 	}
-	fn := *fnPtr
-	if snap := fn(); snap != nil {
-		_ = p.Save(snap)
-		return true
+	if fnPtr != nil {
+		return p.saveSnapshotLocked(*fnPtr)
 	}
 	return false
 }
 
 // FlushFn 同步执行给定 snapshotFn 并落盘（curr nil 语义）。用于服务端在信令
-// 变更后立即持久化当前收件箱状态。返回是否落盘。
+// 变更后立即持久化当前收件箱状态。返回是否落盘。快照生成与落盘在同一临界区（I1）。
 func (p *Persister) FlushFn(fn snapshotFn) bool {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.pending = nil
 	t := p.timer
 	p.timer = nil
-	p.mu.Unlock()
 	if t != nil {
 		t.Stop()
 	}
-	if snap := fn(); snap != nil {
-		_ = p.Save(snap)
-		return true
-	}
-	return false
+	return p.saveSnapshotLocked(fn)
 }

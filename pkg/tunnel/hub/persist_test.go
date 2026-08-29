@@ -5,9 +5,11 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -367,6 +369,122 @@ func TestPersist_RestartSimulation(t *testing.T) {
 	}
 	if svcs := mrt2.ListServices("mesh-a"); len(svcs) != 1 || svcs[0].Service.Name != "svc-a" {
 		t.Fatalf("重启恢复后服务宣告 = %+v, want svc-a", svcs)
+	}
+}
+
+// TestReconnectAfterRestore_NoPanic：重启恢复（Mux==nil 的离线节点）后，同名节点
+// 重连触发注册，修复前 `go old.Close()` 对 nil Mux 解引用在独立 goroutine 中 panic、
+// 直接崩溃进程（C1）。修复后应无 panic 且新 Mux 生效。
+func TestReconnectAfterRestore_NoPanic(t *testing.T) {
+	// 完整链路：注册 → 快照 → 恢复（离线）→ 重连（MeshRouteTable.Add → AddWithInfoAndServices）。
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("重连注册 panic: %v", r)
+			}
+		}()
+		src := NewMeshRouteTable()
+		src.Add("mesh-a", NodeInfo{ID: "node-a", Mux: newTestMux(t), Connected: time.Now(), Secret: "sec-a"}, []Service{{Name: "svc-a", Addr: "a:22"}})
+		snap := SnapshotRouteTable(src)
+
+		dst := NewMeshRouteTable()
+		RestoreFromSnapshot(dst, snap)
+		if m := dst.Lookup("node-a"); m != nil {
+			t.Fatal("恢复后 node-a 的 Mux 应为 nil（离线待重连）")
+		}
+		// 重连：非 nil mux 覆盖离线占位（nil）。修复前此处 go nil.Close() panic。
+		dst.Add("mesh-a", NodeInfo{ID: "node-a", Mux: newTestMux(t), Connected: time.Now(), Secret: "sec-a2"}, []Service{{Name: "svc-a", Addr: "a:22"}})
+		if m := dst.Lookup("node-a"); m == nil {
+			t.Fatal("重连后 node-a 应有非 nil Mux")
+		}
+	}()
+
+	// 底层 RouteTable 三个注册方法逐一验证：nodes[id] 为 nil（离线占位）时用非 nil
+	// mux 重注册不得 panic。
+	rt := NewRouteTable()
+	rt.info["node-x"] = NodeInfo{ID: "node-x", Secret: "sec-x"}
+	for _, tc := range []struct {
+		name string
+		fn   func(m *mux.Mux)
+	}{
+		{"Add", func(m *mux.Mux) { rt.Add("node-x", m) }},
+		{"AddWithInfo", func(m *mux.Mux) { rt.AddWithInfo(NodeInfo{ID: "node-x", Mux: m}) }},
+		{"AddWithInfoAndServices", func(m *mux.Mux) { rt.AddWithInfoAndServices(NodeInfo{ID: "node-x", Mux: m}, nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("%s 重注册 panic: %v", tc.name, r)
+				}
+			}()
+			rt.nodes["node-x"] = nil // 重置为离线占位（模拟快照恢复的 nil Mux）
+			tc.fn(newTestMux(t))
+			if rt.nodes["node-x"] == nil {
+				t.Fatalf("%s 后 node-x 应有非 nil Mux", tc.name)
+			}
+		})
+	}
+}
+
+// TestPersister_ConcurrentSaveFlushSerializes：并发 Save/FlushFn/Flush/Load 共享
+// 同一 Persister 时序列化，不 panic、无数据竞争（-race 通过）；最终文件必为某次
+// 完整快照（原子写保证），不会因并发写者交错产生半写或整体丢失。I1 修复方向是
+// 让快照生成 + 落盘处于同一临界区，本测试验证序列化与原子写不变量。
+func TestPersister_ConcurrentSaveFlushSerializes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.json")
+	p := NewPersister(path)
+	p.debounce = time.Hour // 关闭异步 timer，全部走同步路径
+
+	const workers = 8
+	const iters = 30
+
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := range iters {
+				id := fmt.Sprintf("w%d-%d", n, j)
+				snap := &Snapshot{
+					Nodes:    []NodeSnap{{ID: NodeID(id), Mesh: "m"}},
+					Messages: []MessageSnap{{Peer: "p", Msgs: []SignalMsg{{ID: id}}}},
+				}
+				switch j % 3 {
+				case 0:
+					if err := p.Save(snap); err != nil {
+						t.Errorf("Save: %v", err)
+						return
+					}
+				case 1:
+					if !p.FlushFn(func() *Snapshot { return snap }) {
+						t.Errorf("FlushFn 应落盘")
+						return
+					}
+				default:
+					p.Flush(snap)
+				}
+			}
+		}(i)
+	}
+	// 并发的 Load 读者（Load 不持 p.mu，与写者共享文件，验证原子 rename 下不读到半写）。
+	wg.Go(func() {
+		for range iters {
+			if _, err := p.Load(); err != nil {
+				t.Errorf("Load: %v", err)
+				return
+			}
+		}
+	})
+	wg.Wait()
+
+	// 最终文件必须完整可解码（原子写 + 序列化保证不产生半写文件）。
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var decoded Snapshot
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("最终文件非法 JSON: %v", err)
 	}
 }
 
