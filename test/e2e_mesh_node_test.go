@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -45,22 +46,48 @@ func startSClientMeshNode(t *testing.T, hubURL, nodeID, serviceSpec string, extr
 	args = append(args, extraArgs...)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = e2eModuleRoot()
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	// stderr 缓冲带锁（同 observable 变体）：os/exec 后台 goroutine 写入，
+	// logStderrOnFailure 在 cleanup 里读取，无锁并发访问会被 -race 标记竞争。
+	stderrBuf := newLockedBuffer()
+	cmd.Stderr = stderrBuf
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sclient mesh node: %v", err)
 	}
 
-	logStderrOnFailure(t, "sclient mesh node "+nodeID, &stderrBuf)
+	logStderrOnFailure(t, "sclient mesh node "+nodeID, stderrBuf)
 
 	// 等 mesh node 注册到 hub（waitNodeRegistered 轮询 /api/hub/nodes）。
-	waitNodeRegistered(t, hubURL, nodeID, &stderrBuf, newKillWaitCleanup(cmd))
+	waitNodeRegistered(t, hubURL, nodeID, stderrBuf, newKillWaitCleanup(cmd))
 	return newKillWaitCleanup(cmd)
+}
+
+// lockedBuffer 是带锁的 bytes.Buffer：子进程 stderr 由 os/exec 后台 goroutine
+// 写入、测试主 goroutine 轮询读取（String），无锁并发访问会被 -race 标记为
+// 数据竞争。实现 io.Writer（exec 需要）——与 *bytes.Buffer 的 Write/String 语义一致。
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func newLockedBuffer() *lockedBuffer { return &lockedBuffer{} }
+
+func (lb *lockedBuffer) Write(p []byte) (int, error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.b.Write(p)
+}
+
+func (lb *lockedBuffer) String() string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.b.String()
 }
 
 // startSClientMeshNodeObservable 同 startSClientMeshNode，但把 stderr 写入外部 buffer
 // （供自动对等发现的可观测性断言：轮询 stderr 出现 "mesh 自动对等直连建立"）。
-func startSClientMeshNodeObservable(t *testing.T, hubURL, nodeID, serviceSpec string, out *bytes.Buffer, extraArgs ...string) func() {
+// 返回一个带锁读取缓冲的句柄：子进程 stderr 由 os/exec 后台 goroutine 持续写入，
+// 测试主 goroutine 轮询读取，无锁并发读写 bytes.Buffer 会被 -race 标记为数据竞争。
+func startSClientMeshNodeObservable(t *testing.T, hubURL, nodeID, serviceSpec string, out *lockedBuffer, extraArgs ...string) func() {
 	t.Helper()
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
@@ -170,7 +197,7 @@ func TestE2E_MeshNode_Discovery(t *testing.T) {
 	defer hubCleanup()
 
 	// node-a 的 stderr 可观测（出现 "mesh 自动对等直连建立" + peer=node-b）。
-	var stderrA bytes.Buffer
+	var stderrA lockedBuffer
 	cleanupA := startSClientMeshNodeObservable(t, hubURL, "e2e-disc-a", "", &stderrA, "--discover-interval", "1s")
 	defer cleanupA()
 	cleanupB := startSClientMeshNode(t, hubURL, "e2e-disc-b", "", "--discover-interval", "1s")
@@ -222,7 +249,7 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 
 	// node-ap（低 ID "e2e-ap"，访问方 + 服务宿主 echo-ap）：自动拨号 node-svc；
 	// 网关 18085（默认）。可观测 stderr 等待自动直连建立。
-	var stderrAP bytes.Buffer
+	var stderrAP lockedBuffer
 	cleanupAP := startSClientMeshNodeObservable(t, hubURL, "e2e-ap", "echo-ap:"+echoApAddr, &stderrAP,
 		"--discover-interval", "1s", "--gateway-addr", "127.0.0.1:18085")
 	defer cleanupAP()
@@ -248,7 +275,9 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 			"--gateway", gatewayAddr)
 		defer meshCleanup()
 		payload := []byte("e2e-mesh-node-" + service)
-		deadline := time.Now().Add(15 * time.Second)
+		// 镜像链路（复用已建直连 + 出口拨号）通常 <3s，但 -race + 首次 webrtc 打洞
+		// 建立可能高达数十秒；30s 宽窗口与 CLAUDE.md "-race 下超时留 3 倍余量" 一致。
+		deadline := time.Now().Add(30 * time.Second)
 		var lastErr error
 		for {
 			conn, derr := net.Dial("tcp", listenAddr)
@@ -275,7 +304,7 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 				}
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("mesh connect %s --gateway %s 数据面未在 15s 内就绪（最后错误: %v）", service, gatewayAddr, lastErr)
+				t.Fatalf("mesh connect %s --gateway %s 数据面未在 30s 内就绪（最后错误: %v）", service, gatewayAddr, lastErr)
 			}
 			time.Sleep(200 * time.Millisecond)
 		}

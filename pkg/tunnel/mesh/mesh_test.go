@@ -1138,7 +1138,9 @@ func TestRunNode_FullMeshThreeNodes(t *testing.T) {
 	}
 
 	// 等 node-b 链路池同时含 node-a（accept 侧）与 node-c（拨号侧）。
-	deadline := time.Now().Add(20 * time.Second)
+	// -race + 3 节点真实 webrtc 打洞可能显著慢于常规；60s 宽窗口对齐
+	// CLAUDE.md "-race 下超时留 3 倍余量"。
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		st, err := QueryGatewayStatus(t.Context(), gatewayAddr, "signal-token")
 		if err == nil && len(st.Peers) == 2 {
