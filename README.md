@@ -76,6 +76,8 @@
 - `GET /api/files`：列出已上传文件，返回 `{files: [{name, size, checksum, mod_time, is_dir}, ...]}`
 - `POST /tunnel`：AES-256-GCM 加密的 HTTP 请求转发（需配置 `tunnel_key`）
 
+- **Web UI 隧道**：`web/static/sclient/` 领域库驱动页面，其经端口 `POST /tunnel`（外层 SproxySig、内层 AES-256-GCM）或直连（按配置）访问文件 API；`web.tunnel` 服务端开关（`/api/config` 下发 `web_tunnel`，默认 `true`）控制默认模式，页面「走隧道（调试）」checkbox 可即时切换并持久化（localStorage）。未配置 `access_keys` 回落直连。
+
 
 ## 详细文档
 

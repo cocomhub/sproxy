@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // 主逻辑：文件列表、CRUD、批量操作、导航、UI 工具。
-// 依赖 sha256.js, tunnel.js, upload.js（先加载）。
+// 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
 
 const BASE = '';
 // SproxySig 请求签名认证（AccessKey/AccessKeySecret）。Secret 只存本端计算签名，
@@ -15,23 +15,83 @@ let _currentOffset = 0;
 let _hasMore = false;
 const PAGE_LIMIT = 500;
 
+// 传输层由 sclient 领域库统一（隧道/直连协商 + SproxySig 签名），页面级
+// sc 常量在底部 sclientInit 中按 cuTunnelOverride 注入后创建。
+let sc = null;
+
+// cuTunnelOverride 读取「走隧道（调试）」checkbox 的持久化值。
+// 读写 localStorage 键 sproxy_web_transport_override（与 sclient config.js 的
+// overrideKey 同键）——transport.readLocalOverride/effectiveMode 实时读它。
+const CUTUNNEL_OVERRIDE_KEY = 'sproxy_web_transport_override';
+function cuTunnelOverride() {
+  try {
+    const v = localStorage.getItem(CUTUNNEL_OVERRIDE_KEY);
+    return v === 'tunnel';
+  } catch { return false; }
+}
+
+// sclientInit 创建领域 API 并落地服务端 web.tunnel 开关。
+// 在 DOMContentLoaded 之前执行（脚本按顺序加载，此时 DOM 元素尚未就绪——
+// checkbox 仅由 DOMContentLoaded 中的 checkboxInit 读取，本处不触碰 DOM）。
+function sclientInit() {
+  // 先把页面/localStorage 的传输 override 注入 transport，再创建领域 API。
+  sclientTransport.configure({
+    accessKey: accessKey,
+    accessKeySecret: accessKeySecret,
+  });
+  sc = sclientApi.apiFromGlobals();
+
+  // 落地服务端 web.tunnel 默认值（GET /api/config 下发），失败静默（直接模式仍可用）。
+  // 关键：/api/config 在 authMiddleware 保护内，请求必须带 SproxySig 签名
+  //（有 access_keys 时）或服务端未配 access_keys（此时 config.get 无签名可成功）。
+  // 无凭据（未输 AK/SK）时签名无从产生，既拿不到 web.tunnel 又不能安全请求——
+  // 直接保持 transport 默认（direct 由 transport 无凭据规则保证），跳过 config.get。
+  // 有凭据时正常 config.get（direct 带签名 200 / 隧道 401 时 catch 保持默认）。
+  if (!accessKeySecret) return;
+  sc.config.get().then(function(data) {
+    sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, tunnelDefault: !!data.web_tunnel });
+  }).catch(function() { /* 忽略——无 web.tunnel 存取时保持默认 */ });
+}
+
+// checkboxInit 初始化「走隧道（调试）」开关：初值从 localStorage 读取。
+// 保存按钮仍写 sessionStorage（AK/SK）。保存后同步到 transport（VP-1：sc 用当前 AK/SK）。
+document.addEventListener('DOMContentLoaded', function() {
+  const cb = document.getElementById('use-tunnel-checkbox');
+  if (!cb) return;
+  cb.checked = cuTunnelOverride();
+  cb.addEventListener('change', function() { toggleTransport(cb); });
+});
+
+// toggleTransport 读写「走隧道（调试）」checkbox，并落地 override + 强制 mode 即时生效。
+// override 必须写成 JSON 对象字符串（align config.readLocalOverride 的 JSON.parse），
+// 裸字符串 'tunnel'/'direct' 无法被 readLocalOverride 解析，刷新后不回读。
+function toggleTransport(cb) {
+  const on = !!cb.checked;
+  try {
+    localStorage.setItem('sproxy_web_transport_override', JSON.stringify({ transport: on ? 'tunnel' : 'direct' }));
+    sclientTransport.configure({
+      accessKey: accessKey,
+      accessKeySecret: accessKeySecret,
+      mode: on ? 'tunnel' : 'direct',
+      tunnelDefault: undefined,
+    });
+  } catch (e) { /* ignore */ }
+  return on;
+}
+
 document.getElementById('accessKey').value = accessKey;
 document.getElementById('token').value = accessKeySecret;
-document.getElementById('tunnel-key').value = tunnelHexKey || '';
 
 function saveAccessKeys() {
   accessKey = document.getElementById('accessKey').value.trim();
   accessKeySecret = document.getElementById('token').value.trim();
   sessionStorage.setItem('sproxy_access_key', accessKey);
   sessionStorage.setItem('sproxy_access_key_secret', accessKeySecret);
+  // 同步到 transport（sc 已创建时；含 override/默认沿用）
+  try {
+    sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, mode: undefined, tunnelDefault: undefined });
+  } catch (e) { /* ignore */ }
   showToast('AccessKey 已保存', 'success');
-}
-
-function saveTunnelKey() {
-  tunnelHexKey = document.getElementById('tunnel-key').value;
-  localStorage.setItem('sproxy_tunnel_key', tunnelHexKey);
-  _tunnelCryptoKey = null;
-  showToast('Tunnel Key 已保存', 'success');
 }
 
 // --- UI 工具 ---
@@ -55,60 +115,8 @@ function escHtml(s) {
 
 // --- SproxySig 请求签名（WebCrypto，与 Go pkg/sproxysig 对齐） ---
 
-// sha256HexBytes 计算字节数组的 SHA-256（hex）。
-async function sha256HexBytes(bytes) {
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return bytesToHex(new Uint8Array(digest));
-}
-
-// hmacSHA256Hex 用 secret 计算 data 的 HMAC-SHA256（hex）。
-async function hmacSHA256Hex(secret, dataBytes) {
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const sig = await crypto.subtle.sign('HMAC', key, dataBytes);
-  return bytesToHex(new Uint8Array(sig));
-}
-
-// sproxysigAuthHeader 构造 SproxySig Authorization 头值（协议头与 Go 一致）：
-//   SproxySig v=1 ak=<AK> ts=<unix_ms> exp=<unix_ms> nonce=<16B hex> body_sha256=<hex> sig=<hex>
-// canonical = "sproxy-sig/v1\n" + ak + "\n" + ts + "\n" + exp + "\n" + nonce + "\n"
-//           + method + "\n" + path + "\n" + query + "\n" + body_sha256
-// bodyBytes 为发送的实际 body 字节；无 body 时传 null（body_sha256 = sha256("")）。
-// 未配置 AK/SK 时返回 null（服务端未配置 access_keys 时无认证兼容）。
-async function sproxysigAuthHeader(method, url, bodyBytes) {
-  if (!accessKey || !accessKeySecret) return null;
-  const qIdx = url.indexOf('?');
-  const pathPart = qIdx >= 0 ? url.substring(0, qIdx) : url;
-  const queryPart = qIdx >= 0 ? url.substring(qIdx + 1) : '';
-  const encoder = new TextEncoder();
-  const empty = encoder.encode('');
-  const bodyHash = bodyBytes && bodyBytes.byteLength > 0
-    ? await sha256HexBytes(bodyBytes)
-    : await sha256HexBytes(empty);
-  const nowMs = Date.now();
-  const expMs = nowMs + 5 * 60 * 1000; // 客户端自决过期（5min，服务端上限 15min）
-  const nonce = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
-  const canonical = 'sproxy-sig/v1\n' + accessKey + '\n' + nowMs + '\n' + expMs + '\n' + nonce + '\n' +
-    method + '\n' + pathPart + '\n' + queryPart + '\n' + bodyHash;
-  const sig = await hmacSHA256Hex(accessKeySecret, encoder.encode(canonical));
-  return 'SproxySig v=1 ak=' + accessKey + ' ts=' + nowMs + ' exp=' + expMs +
-    ' nonce=' + nonce + ' body_sha256=' + bodyHash + ' sig=' + sig;
-}
-
-// headers 构造请求头（SproxySig + 附加头）。method/url 必传（url 含 query）；
-// bodyBytes 为发送的实际 body 字节（无 body 传 null）；extra 为附加头。
-// 隧道模式返回 extra（隧道密钥已认证，POST /tunnel 不经 authMiddleware）。
-async function headers(method, url, extra, bodyBytes) {
-  const h = extra || {};
-  if (tunnelHexKey) return h;
-  const auth = await sproxysigAuthHeader(method, url, bodyBytes);
-  if (auth) h['Authorization'] = auth;
-  return h;
-}
-
-// encodeBody 把字符串编码为 UTF-8 字节（用于 body 签名与发送）。
-function encodeBody(s) {
-  return new TextEncoder().encode(s);
-}
+// 本地自定义 SHA-256/HMAC 辅助已迁移到 sclient/crypto.js（sclientCrypto）；
+// SproxySig 签名由 sclient/sig.js 统一负责，此处不再重复实现。
 
 function getChecksumPrefix(cs) {
   if (!cs) return '-';
@@ -131,20 +139,8 @@ async function refreshList() {
   _currentOffset = 0;
   _hasMore = false;
   try {
-    let files;
-    let data;
-    const qs = (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) + '&' : '?') + 'offset=0&limit=' + PAGE_LIMIT;
-    const listUrl = '/api/files' + qs;
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('GET', listUrl, {}, null);
-      data = JSON.parse(new TextDecoder().decode(result.body));
-      files = data.files || [];
-    } else {
-      const resp = await fetch(BASE + listUrl, { headers: await headers('GET', listUrl) });
-      data = await resp.json();
-      if (!resp.ok) { el.innerHTML = '<div class="empty-msg">加载失败: ' + escHtml(data.message || String(resp.status)) + '</div>'; return; }
-      files = data.files || [];
-    }
+    let data = await sc.files.list(currentSubdir, { offset: 0, limit: PAGE_LIMIT });
+    let files = Array.isArray(data) ? data : (data && data.files) || [];
     _currentOffset = files.length;
     _hasMore = (data.total || 0) > _currentOffset;
     if (files.length === 0) { el.innerHTML = '<div class="empty-msg">暂无文件</div>'; return; }
@@ -160,18 +156,8 @@ async function loadMore() {
   const qs = (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) + '&' : '?') + 'offset=' + _currentOffset + '&limit=' + PAGE_LIMIT;
   const listUrl = '/api/files' + qs;
   try {
-    let files;
-    let data;
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('GET', listUrl, {}, null);
-      data = JSON.parse(new TextDecoder().decode(result.body));
-      files = data.files || [];
-    } else {
-      const resp = await fetch(BASE + listUrl, { headers: await headers('GET', listUrl) });
-      data = await resp.json();
-      if (!resp.ok) return;
-      files = data.files || [];
-    }
+    let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT });
+    let files = Array.isArray(data) ? data : (data && data.files) || [];
     _currentOffset += files.length;
     _hasMore = (data.total || 0) > _currentOffset;
 
@@ -239,22 +225,8 @@ async function searchFiles() {
   const el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">搜索中...</div>';
   try {
-    let files;
-    const searchUrl = '/api/files/search?q=' + encodeURIComponent(q);
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('GET', searchUrl, {}, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
-      files = data.files || [];
-    } else {
-      const resp = await fetch(BASE + searchUrl, { headers: await headers('GET', searchUrl) });
-      if (!resp.ok) {
-        const errData = await resp.json().catch(function() { return {}; });
-        el.innerHTML = '<div class="empty-msg">搜索失败: ' + (errData.message || resp.status) + '</div>';
-        return;
-      }
-      const data = await resp.json();
-      files = data.files || [];
-    }
+    let data = await sc.files.search(q);
+    let files = Array.isArray(data) ? data : (data && data.files) || [];
     _searchActive = true;
     document.getElementById('clear-search-btn').style.display = '';
     if (files.length === 0) { el.innerHTML = '<div class="empty-msg">未找到匹配文件</div>'; return; }
@@ -302,109 +274,83 @@ async function mkdirDir() {
   if (!name) { showToast('请输入目录名', 'warning'); return; }
   const dirPath = currentSubdir ? currentSubdir + '/' + name : name;
   try {
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/mkdir?dirname=' + encodeURIComponent(dirPath), {}, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
-      if (result.status >= 200 && result.status < 300 && data.success) {
-        showToast('目录已创建: ' + dirPath, 'success');
-        input.value = '';
-        refreshList();
-      } else { showToast('创建目录失败: ' + (data.message || result.status), 'error'); }
-    } else {
-      const resp = await fetch(BASE + '/mkdir?dirname=' + encodeURIComponent(dirPath), { method: 'POST', headers: await headers('POST', '/mkdir?dirname=' + encodeURIComponent(dirPath)) });
-      const data = await resp.json();
-      if (resp.ok && data.success) {
-        showToast('目录已创建: ' + dirPath, 'success');
-        input.value = '';
-        refreshList();
-      } else { showToast('创建目录失败: ' + (data.message || resp.status), 'error'); }
-    }
+    const data = await sc.files.mkdir(dirPath);
+    if (data && data.success) {
+      showToast('目录已创建: ' + dirPath, 'success');
+      input.value = '';
+      refreshList();
+    } else { showToast('创建目录失败: ' + ((data && data.message) || ''), 'error'); }
   } catch (e) { showToast('创建目录失败: ' + e.message, 'error'); }
 }
 
 async function rmdirDir(dirPath) {
   if (!confirm('确认删除目录 "' + dirPath + '" 及其所有内容?')) return;
   try {
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/rmdir?dirname=' + encodeURIComponent(dirPath), {}, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
-      if (result.status >= 200 && result.status < 300 && data.success) { showToast('目录已删除: ' + dirPath, 'success'); refreshList(); }
-      else { showToast('删除目录失败: ' + (data.message || result.status), 'error'); }
-    } else {
-      const resp = await fetch(BASE + '/rmdir?dirname=' + encodeURIComponent(dirPath), { method: 'POST', headers: await headers('POST', '/rmdir?dirname=' + encodeURIComponent(dirPath)) });
-      const data = await resp.json();
-      if (resp.ok && data.success) { showToast('目录已删除: ' + dirPath, 'success'); refreshList(); }
-      else { showToast('删除目录失败: ' + (data.message || resp.status), 'error'); }
-    }
+    const data = await sc.files.rmdir(dirPath);
+    if (data && data.success) { showToast('目录已删除: ' + dirPath, 'success'); refreshList(); }
+    else { showToast('删除目录失败: ' + ((data && data.message) || ''), 'error'); }
   } catch (e) { showToast('删除目录失败: ' + e.message, 'error'); }
 }
 
 // --- 下载 ---
+// downloadFile 走 sc.files.download(name) → { blob, headers }（传输层自动协商隧道/直连）；
+// headers 携带 X-File-Checksum（if any）——与下载字节做本地 SHA-256 比对（旧行为，C-1），
+// 不一致则报错不触发下载，防服务器返回内容与账本不符。
 async function downloadFile(name, expectedChecksum) {
   try {
-    if (tunnelHexKey) {
-      let result = await tunnelDownloadStream(name);
-      if (!result) result = await tunnelRequest('GET', '/download?filename=' + encodeURIComponent(name), {}, null);
-      const serverCS = (result.headers['X-File-Checksum'] || [''])[0];
-      if (serverCS) {
-        const sha256 = new Sha256();
-        sha256.update(new Uint8Array(result.body));
-        const localCS = sha256.digest();
-        if (localCS !== serverCS) {
-          showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
-          return;
-        }
+    const { blob, headers } = await sc.files.download(name, { downloadHeaders: { 'X-File-Checksum': '' } });
+    const serverCS = (headers && headers['X-File-Checksum']) || '';
+    if (serverCS) {
+      const localCS = await computeFileSHA256(blob);
+      if (localCS !== serverCS) {
+        showToast('校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
+        return;
       }
-      triggerDownload(name, result.body);
-      showToast(name + ' 下载完成' + (serverCS ? '，校验通过' : ''), 'success');
-    } else {
-      await directDownload(name);
+      triggerDownload(name, blob);
+      showToast(name + ' 下载完成' + '，校验通过', 'success');
+      return;
     }
+    triggerDownload(name, blob);
+    showToast(name + ' 下载完成', 'success');
   } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
 }
 
-async function directDownload(name) {
-  const resp = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: await headers('GET', '/download?filename=' + encodeURIComponent(name)) });
-  if (!resp.ok) {
-    const data = await resp.json().catch(function() { return {}; });
-    showToast('下载失败: ' + (data.message || resp.status), 'error');
-    return;
+// 计算 Blob 的 SHA-256 hex（小文件一次 arrayBuffer；大文件分片增量喂 sclient/sha256.js 的
+// Sha256（sclientSha256 全局；digest() 返回 hex）——每片最大 64MiB、随读随弃，绝不整文件
+// 物化（历史曾 Promise.all 攒全部分片后一次性 new ArrayBuffer(total)，大文件触发
+// RangeError: Array buffer allocation failed）。
+function computeFileSHA256(blob) {
+  const total = blob.size || 0;
+  const readWhole = total <= 8 * 1024 * 1024;
+  if (readWhole) return blob.arrayBuffer().then(function(buf) { return sha256Bytes(new Uint8Array(buf)); });
+  const cs = Math.min(64 * 1024 * 1024, total);
+  const n = Math.ceil(total / cs);
+  const sh = new sclientSha256();
+  function process(i) {
+    if (i >= n) return Promise.resolve();
+    const s = i * cs, e = Math.min(s + cs, total);
+    return blob.slice(s, e).arrayBuffer().then(function(b) { sh.update(new Uint8Array(b)); return process(i + 1); });
   }
-  const serverCS = resp.headers.get('X-File-Checksum') || '';
-  const contentLength = Number.parseInt(resp.headers.get('Content-Length') || '0');
+  return process(0).then(function() { return sh.digest(); });
+}
 
-  if (serverCS) {
-    const sha256 = new Sha256();
-    if (contentLength > 100 * 1024 * 1024) {
-      const reader = resp.body.getReader();
-      let readResult = await reader.read();
-      while (!readResult.done) {
-        sha256.update(new Uint8Array(readResult.value));
-        readResult = await reader.read();
-      }
-      const localCS = sha256.digest();
-      if (localCS !== serverCS) {
-        showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
-        return;
-      }
-      const resp2 = await fetch(BASE + '/download?filename=' + encodeURIComponent(name), { headers: await headers('GET', '/download?filename=' + encodeURIComponent(name)) });
-      triggerDownload(name, await resp2.blob());
-      showToast(name + ' 下载完成，校验通过', 'success');
-      return;
-    }
-    const buffer = await resp.arrayBuffer();
-    sha256.update(new Uint8Array(buffer));
-    const localCS = sha256.digest();
-    if (localCS !== serverCS) {
-      showToast(name + ' 校验失败: 服务端 ' + serverCS.substring(0, 16) + '…, 本地 ' + localCS.substring(0, 16) + '…', 'error');
-      return;
-    }
-    triggerDownload(name, buffer);
-    showToast(name + ' 下载完成，校验通过', 'success');
-    return;
-  }
-  triggerDownload(name, await resp.blob());
-  showToast(name + ' 下载完成', 'success');
+function sha256Bytes(bytes) {
+  return crypto.subtle.digest('SHA-256', bytes).then(function(d) { return bytesToHex(new Uint8Array(d)); });
+}
+
+function bytesToHex(bytes) {
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0');
+  return out;
+}
+
+function concatBytes() {
+  let total = 0;
+  for (const a of arguments) total += (a && a.byteLength) || (a && a.length) || 0;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arguments) { if (a) { out.set(a, off); off += a.byteLength || a.length; } }
+  return out;
 }
 
 function triggerDownload(fileName, data) {
@@ -424,19 +370,9 @@ async function deleteFile(name, checksum) {
   if (!confirm('确认删除 "' + name + '"?')) return;
   if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
   try {
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(name), { 'X-File-Checksum': checksum }, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
-      if (result.status >= 200 && result.status < 300 && data.success) { showToast('删除成功: ' + name, 'success'); refreshList(); }
-      else { showToast('删除失败: ' + (data.message || result.status), 'error'); }
-    } else {
-      const resp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(name), {
-        method: 'POST', headers: await headers('POST', '/delete?filename=' + encodeURIComponent(name), { 'X-File-Checksum': checksum })
-      });
-      const data = await resp.json();
-      if (resp.ok && data.success) { showToast('删除成功: ' + name, 'success'); refreshList(); }
-      else { showToast('删除失败: ' + (data.message || resp.status), 'error'); }
-    }
+    const data = await sc.files.deleteFile(name, checksum);
+    if (data && data.success) { showToast('删除成功: ' + name, 'success'); refreshList(); }
+    else { showToast('删除失败: ' + ((data && data.message) || ''), 'error'); }
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
 
@@ -446,19 +382,9 @@ async function renameFile(name, checksum) {
   const newName = prompt('新的文件名（路径）:', name);
   if (!newName || newName === name) return;
   try {
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), { 'X-File-Checksum': checksum }, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
-      if (result.status >= 200 && result.status < 300 && data.success) { showToast('重命名成功: ' + newName, 'success'); refreshList(); }
-      else { showToast('重命名失败: ' + (data.message || result.status), 'error'); }
-    } else {
-      const resp = await fetch(BASE + '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), {
-        method: 'POST', headers: await headers('POST', '/rename?from=' + encodeURIComponent(name) + '&to=' + encodeURIComponent(newName), { 'X-File-Checksum': checksum })
-      });
-      const data = await resp.json();
-      if (resp.ok && data.success) { showToast('重命名成功: ' + newName, 'success'); refreshList(); }
-      else { showToast('重命名失败: ' + (data.message || resp.status), 'error'); }
-    }
+    const data = await sc.files.rename(name, newName, checksum);
+    if (data && data.success) { showToast('重命名成功: ' + newName, 'success'); refreshList(); }
+    else { showToast('重命名失败: ' + ((data && data.message) || ''), 'error'); }
   } catch (e) { showToast('重命名失败: ' + e.message, 'error'); }
 }
 
@@ -497,9 +423,8 @@ async function batchDelete() {
   const files = getSelectedFiles();
   if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
   if (!confirm('确定要删除选中的 ' + files.length + ' 个文件吗？')) return;
-  const body = JSON.stringify({ files: files });
   try {
-    const data = await sendBatchRequest('/api/batch/delete', body);
+    const data = await sc.files.batchDelete(files);
     if (data.success) { showToast(data.message || '删除完成', 'success'); refreshList(); }
     else { showToast(data.message || '批量删除失败', 'error'); }
   } catch (e) { showToast('批量删除失败: ' + e.message, 'error'); }
@@ -518,61 +443,36 @@ async function batchRename() {
   }
   if (operations.length === 0) { showToast('没有需要重命名的文件', 'info'); return; }
   try {
-    const data = await sendBatchRequest('/api/batch/rename', JSON.stringify({ operations: operations }));
+    const data = await sc.files.batchRename(operations);
     if (data.success) { showToast(data.message || '重命名完成', 'success'); clearSelection(); refreshList(); }
     else { showToast(data.message || '批量重命名失败', 'error'); }
   } catch (e) { showToast('批量重命名失败: ' + e.message, 'error'); }
-}
-
-async function sendBatchRequest(url, body) {
-  if (tunnelHexKey) {
-    const result = await tunnelRequest('POST', url, { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
-    return JSON.parse(new TextDecoder().decode(result.body));
-  }
-  const resp = await fetch(BASE + url, { method: 'POST', headers: await headers('POST', url, { 'Content-Type': 'application/json' }, encodeBody(body)), body: body });
-  return resp.json();
 }
 
 async function batchDownloadArchive() {
   const selected = getSelectedFiles();
   if (selected.length === 0) { showToast('请选择文件', 'warning'); return; }
   const files = selected.map(function(f) { return f.filename; });
-  const body = JSON.stringify({ files: files });
   try {
-    const resp = await fetch(BASE + '/api/archive', {
-      method: 'POST', headers: await headers('POST', '/api/archive', { 'Content-Type': 'application/json' }, encodeBody(body)), body: body
-    });
-    if (!resp.ok) { const t = await resp.text(); throw new Error(t); }
-    const disposition = resp.headers.get('Content-Disposition') || '';
-    const match = disposition.match(/filename="?(.+?)"?$/);
-    const filename = match ? match[1] : 'archive.tar.gz';
-    const blob = await resp.blob();
-    triggerDownload(filename, blob);
-    showToast('归档下载完成: ' + filename, 'success');
+    const ar = await sc.files.archive(files);
+    if (ar && ar.success && ar.blob) {
+      triggerDownload(ar.filename || 'archive.tar.gz', ar.blob);
+      showToast('归档下载完成: ' + (ar.filename || 'archive.tar.gz'), 'success');
+    } else {
+      showToast('归档失败: ' + ((ar && ar.message) || '未知错误'), 'error');
+    }
   } catch (err) { showToast('归档失败: ' + err.message, 'error'); }
 }
 
 // 目录打包下载（GET /api/archive-dir）
 async function downloadDirArchive(dirPath) {
   try {
-    var url = '/api/archive-dir?dirname=' + encodeURIComponent(dirPath);
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('GET', url, {}, null);
-      triggerDownload(dirPath.replace('/', '_') + '.tar.gz', result.body);
+    const ar = await sc.files.archiveDir(dirPath);
+    if (ar && ar.success && ar.blob) {
+      triggerDownload(ar.filename || (dirPath.replace('/', '_') + '.tar.gz'), ar.blob);
       showToast('目录打包下载完成', 'success');
     } else {
-      var resp = await fetch(BASE + url, { headers: await headers('GET', url) });
-      if (!resp.ok) {
-        var errData = await resp.json().catch(function() { return {}; });
-        showToast('打包下载失败: ' + (errData.message || resp.status), 'error');
-        return;
-      }
-      var disposition = resp.headers.get('Content-Disposition') || '';
-      var match = disposition.match(/filename="?(.+?)"?$/);
-      var filename = match ? match[1] : dirPath.replace('/', '_') + '.tar.gz';
-      var blob = await resp.blob();
-      triggerDownload(filename, blob);
-      showToast('目录打包下载完成: ' + filename, 'success');
+      showToast('打包下载失败: ' + ((ar && ar.message) || '未知错误'), 'error');
     }
   } catch (e) { showToast('打包下载失败: ' + e.message, 'error'); }
 }
@@ -583,15 +483,10 @@ async function showStats() {
   switchStatsTab('stats');
   document.getElementById('stats-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
-    var data;
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('GET', '/api/stats', {}, null);
-      data = JSON.parse(new TextDecoder().decode(result.body));
-    } else {
-      var resp = await fetch(BASE + '/api/stats', { headers: await headers('GET', '/api/stats') });
-      if (!resp.ok) { document.getElementById('stats-panel').innerHTML = '<div style="color:red">请求失败: ' + resp.status + '</div>'; return; }
-      data = await resp.json();
-    }
+    // /api/stats 无对应领域方法（api/index 只有 files/cloud/share/config/hub 命名空间），
+    // 直接走传输层 coreRequest 取 JSON（隧道/直连自动协商 + SproxySig）。
+    const res = await sclientTransport.coreRequest('GET', '/api/stats', {});
+    const data = sclientUtil.decodeJSON(res.body);
     var du = data.disk_usage || {};
     var rc = data.request_counts || {};
     document.getElementById('stats-panel').innerHTML = statsTableHtml(du, rc, data);
@@ -618,15 +513,7 @@ function switchStatsTab(tab) {
 async function showConfig() {
   document.getElementById('config-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
-    var data;
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('GET', '/api/config', {}, null);
-      data = JSON.parse(new TextDecoder().decode(result.body));
-    } else {
-      var resp = await fetch(BASE + '/api/config', { headers: await headers('GET', '/api/config') });
-      if (!resp.ok) { document.getElementById('config-panel').innerHTML = '<div style="color:red">请求失败: ' + resp.status + '</div>'; return; }
-      data = await resp.json();
-    }
+    const data = await sc.config.get();
     document.getElementById('config-panel').innerHTML = configTableHtml(data);
   } catch (e) { document.getElementById('config-panel').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
 }
@@ -635,26 +522,12 @@ async function showConfig() {
 async function showHub() {
   document.getElementById('hub-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
-    var nodes, stats;
-    if (tunnelHexKey) {
-      var [nResult, sResult] = await Promise.all([
-        tunnelRequest('GET', '/api/hub/nodes', {}, null),
-        tunnelRequest('GET', '/api/hub/stats', {}, null)
-      ]);
-      nodes = JSON.parse(new TextDecoder().decode(nResult.body)) || [];
-      stats = JSON.parse(new TextDecoder().decode(sResult.body));
-    } else {
-      var [nResp, sResp] = await Promise.all([
-        fetch(BASE + '/api/hub/nodes', { headers: await headers('GET', '/api/hub/nodes') }),
-        fetch(BASE + '/api/hub/stats', { headers: await headers('GET', '/api/hub/stats') })
-      ]);
-      if (!nResp.ok) {
-        document.getElementById('hub-panel').innerHTML = '<div class="empty-msg">Hub 未启用或请求失败</div>';
-        return;
-      }
-      nodes = await nResp.json();
-      stats = await sResp.json();
-    }
+    const [nData, sData] = await Promise.all([
+      sc.hub.nodes(),
+      sc.hub.stats(),
+    ]);
+    const nodes = Array.isArray(nData) ? nData : ((nData && nData.nodes) || []);
+    const stats = sData;
     document.getElementById('hub-panel').innerHTML = hubTableHtml(nodes, stats);
   } catch (e) {
     document.getElementById('hub-panel').innerHTML = '<div class="empty-msg">Hub 未启用或请求失败: ' + e.message + '</div>';
@@ -700,16 +573,7 @@ function hubTableHtml(nodes, stats) {
 async function removeHubNode(nodeId) {
   if (!confirm('确定移除节点 ' + nodeId + '？')) return;
   try {
-    if (tunnelHexKey) {
-      await tunnelRequest('DELETE', '/api/hub/nodes/' + encodeURIComponent(nodeId), {}, null);
-    } else {
-      var resp = await fetch(BASE + '/api/hub/nodes/' + encodeURIComponent(nodeId), { method: 'DELETE', headers: await headers('DELETE', '/api/hub/nodes/' + encodeURIComponent(nodeId)) });
-      if (!resp.ok) {
-        var data = await resp.json().catch(function() { return {}; });
-        showToast('移除失败: ' + (data.error || resp.status), 'error');
-        return;
-      }
-    }
+    await sc.hub.remove(nodeId);
     showToast('节点 ' + nodeId + ' 已移除', 'success');
     showHub();
   } catch (e) { showToast('移除失败: ' + e.message, 'error'); }
@@ -726,7 +590,6 @@ function configTableHtml(cfg) {
   html += row('日志级别', cfg.log_level);
   html += row('日志格式', cfg.log_format);
   html += row('AccessKey 认证', cfg.access_keys_set ? '✅ 已设置' : '❌ 未设置');
-  html += row('隧道密钥', cfg.tunnel_key_set ? '✅ 已设置' : '❌ 未设置');
   html += row('速率限制', cfg.rate_limit_requests + ' req / ' + (cfg.rate_limit_window || '-'));
   html += row('存储上限', cfg.max_storage_bytes > 0 ? formatBytes(cfg.max_storage_bytes) : '不限');
   html += row('分块大小', formatBytes(cfg.chunk_size));
@@ -783,47 +646,17 @@ function configTableHtml(cfg) {
 }
 
 async function updateConfigField(key, value) {
-  var body = JSON.stringify((function() { var o = {}; o[key] = value; return o; })());
+  var patch = (function() { var o = {}; o[key] = value; return o; })();
   try {
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('PUT', '/api/config', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
-      var data = JSON.parse(new TextDecoder().decode(result.body));
-      if (data.success) { showToast('配置已更新', 'success'); showConfig(); }
-      else { showToast('更新失败', 'error'); }
-    } else {
-      var resp = await fetch(BASE + '/api/config', {
-        method: 'PUT', headers: await headers('PUT', '/api/config', { 'Content-Type': 'application/json' }, encodeBody(body)), body: body
-      });
-      var data = await resp.json();
-      if (resp.ok && data.success) { showToast('配置已更新', 'success'); showConfig(); }
-      else { showToast('更新失败: ' + (data.error || resp.status), 'error'); }
-    }
+    const data = await sc.config.update(patch);
+    if (data && data.success) { showToast('配置已更新', 'success'); showConfig(); }
+    else { showToast('更新失败', 'error'); }
   } catch (e) { showToast('更新失败: ' + e.message, 'error'); }
 }
 
-// 旧版 updateStorageConfig，改用配置面板中的 cfg-update-storage 代替
-async function updateStorageConfig() {
-  var input = document.getElementById('max-storage-input');
-  var maxBytes = Number.parseInt(input.value) || 0;
-  if (maxBytes < 0) { showToast('存储限制不能为负数', 'error'); return; }
-  try {
-    var body = JSON.stringify({ max_storage_bytes: maxBytes });
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('PUT', '/api/storage/config', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
-      var data = JSON.parse(new TextDecoder().decode(result.body));
-      if (data.success) { showToast('存储限制已更新: ' + formatBytes(data.max_storage_bytes || 0), 'success'); }
-      else { showToast('更新失败', 'error'); }
-    } else {
-      var resp = await fetch(BASE + '/api/storage/config', {
-        method: 'PUT', headers: await headers('PUT', '/api/storage/config', { 'Content-Type': 'application/json' }, encodeBody(body)), body: body
-      });
-      var data = await resp.json();
-      if (resp.ok && data.success) { showToast('存储限制已更新: ' + formatBytes(data.max_storage_bytes || 0), 'success'); }
-      else { showToast('更新失败: ' + (data.error || resp.status), 'error'); }
-    }
-  } catch (e) { showToast('更新失败: ' + e.message, 'error'); }
-}
-
+// async function updateStorageConfig 已废弃：存储上限统一走配置面板 cfg-update-storage
+//（updateConfigField('max_storage_bytes', ...) → PUT /api/config）。旧 PUT /api/storage/config
+// 无服务端路由，已由任务 5 裁定删除（config.updateStorage 移除）。本函数移除。
 function formatBytes(n) {
   if (n == null) return '-';
   if (n < 1024) return n + ' B';
@@ -939,6 +772,7 @@ document.addEventListener('keydown', function(e) {
 });
 
 // --- 初始化 ---
+sclientInit();
 initTheme();
 refreshList();
 checkResumableUploads();
@@ -952,25 +786,10 @@ function shareFile(name) {
   if (maxDownloads === null) return;
   maxDownloads = Number.parseInt(maxDownloads) || 0;
   var oneTime = confirm('一次性分享（下载一次后自动失效）？\n确定=是，取消=否');
-  var body = JSON.stringify({
-    filename: name,
-    ttl: ttl,
-    max_downloads: maxDownloads,
-    one_time: oneTime
-  });
   (async function() {
     try {
-      var data;
-      if (tunnelHexKey) {
-        var result = await tunnelRequest('POST', '/api/share', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
-        data = JSON.parse(new TextDecoder().decode(result.body));
-      } else {
-        var resp = await fetch(BASE + '/api/share', {
-          method: 'POST', headers: await headers('POST', '/api/share', { 'Content-Type': 'application/json' }, encodeBody(body)), body: body
-        });
-        data = await resp.json();
-        if (!resp.ok) { showToast('创建分享失败: ' + (data.message || resp.status), 'error'); return; }
-      }
+      const data = await sc.share.create({ filename: name, ttl: ttl, max_downloads: maxDownloads, one_time: oneTime });
+      if (!data.token) { showToast('创建分享失败: ' + ((data && data.message) || 'unknown'), 'error'); return; }
       var shareUrl = location.origin + '/s/' + data.token;
       if (navigator.clipboard) {
         await navigator.clipboard.writeText(shareUrl);
@@ -1017,21 +836,9 @@ async function createShare() {
   var maxDownloads = Number.parseInt(document.getElementById('share-max-downloads').value) || 0;
   var oneTime = document.getElementById('share-one-time').checked;
 
-  var body = JSON.stringify({ filename: filename, ttl: ttl, max_downloads: maxDownloads, one_time: oneTime });
-
   try {
-    var data;
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('POST', '/api/share', { 'Content-Type': 'application/json' }, new TextEncoder().encode(body));
-      data = JSON.parse(new TextDecoder().decode(result.body));
-      if (data.message && data.message !== 'ok') { showToast('创建分享失败: ' + data.message, 'error'); return; }
-    } else {
-      var resp = await fetch(BASE + '/api/share', {
-        method: 'POST', headers: await headers('POST', '/api/share', { 'Content-Type': 'application/json' }, encodeBody(body)), body: body
-      });
-      data = await resp.json();
-      if (!resp.ok) { showToast('创建分享失败: ' + (data.message || resp.status), 'error'); return; }
-    }
+    const data = await sc.share.create({ filename: filename, ttl: ttl, max_downloads: maxDownloads, one_time: oneTime });
+    if (!data.token) { showToast('创建分享失败: ' + ((data && data.message) || 'unknown'), 'error'); return; }
     var shareUrl = location.origin + '/s/' + data.token;
     if (navigator.clipboard) {
       try {
@@ -1051,15 +858,8 @@ async function refreshShareList() {
   if (!_shareModalVisible) return;
   var body = document.getElementById('share-list-body');
   try {
-    var shares;
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('GET', '/api/shares', {}, null);
-      shares = (JSON.parse(new TextDecoder().decode(result.body))).shares || [];
-    } else {
-      var resp = await fetch(BASE + '/api/shares', { headers: await headers('GET', '/api/shares') });
-      if (!resp.ok) { body.innerHTML = '<div class="empty-msg">请求失败: ' + resp.status + '</div>'; return; }
-      shares = (await resp.json()).shares || [];
-    }
+    const listData = await sc.share.list();
+    var shares = (listData && listData.shares) || [];
 
     if (shares.length === 0) {
       body.innerHTML = '<div class="empty-msg">暂无分享链接</div>';
@@ -1101,16 +901,7 @@ async function refreshShareList() {
 async function revokeShare(token) {
   if (!confirm('确定撤销此分享链接？撤销后链接将立即失效。')) return;
   try {
-    if (tunnelHexKey) {
-      await tunnelRequest('DELETE', '/api/shares/' + token, {}, null);
-    } else {
-      var resp = await fetch(BASE + '/api/shares/' + token, { method: 'DELETE', headers: await headers('DELETE', '/api/shares/' + token) });
-      if (!resp.ok) {
-        var data = await resp.json().catch(function() { return {}; });
-        showToast('撤销失败: ' + (data.message || resp.status), 'error');
-        return;
-      }
-    }
+    await sc.share.revoke(token);
     showToast('分享链接已撤销', 'success');
     refreshShareList();
   } catch (e) { showToast('撤销失败: ' + e.message, 'error'); }
@@ -1364,19 +1155,8 @@ async function refreshCloudTasks() {
   _cloudTasksInFlight = true;
   const body = document.getElementById('cloud-tasks-body');
   try {
-    let tasks;
-    const url = '/api/cloud/tasks';
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('GET', url, {}, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
-      // 服务端返回 {tasks, total} 容器（保持对旧裸数组的兼容）
-      tasks = Array.isArray(data) ? data : (data && data.tasks) || [];
-    } else {
-      const resp = await fetch(BASE + url, { headers: await headers('GET', url) });
-      if (!resp.ok) { body.innerHTML = '<div class="empty-msg">请求失败: ' + resp.status + '</div>'; return; }
-      const data = await resp.json();
-      tasks = Array.isArray(data) ? data : (data && data.tasks) || [];
-    }
+    const data = await sc.cloud.listTasks({});
+    const tasks = Array.isArray(data) ? data : (data && data.tasks) || [];
     _cloudTasks = tasks || [];
     if (_cloudTasks.length === 0) {
       body.innerHTML = '<div class="empty-msg">暂无下载任务</div>';
@@ -1390,9 +1170,7 @@ async function refreshCloudTasks() {
   }
 }
 
-// triggerBrowserDownload 把已下载的数据触发浏览器保存。
-// 隧道模式的 tunnelDownloadStream 返回 Uint8Array，需手动构造 Blob 触发下载；
-// 非隧道模式的 fetch blob 路径也复用它，消除两处链式下载中的重复模板。
+// triggerBrowserDownload 触发浏览器保存（下载型归档等）。
 function triggerBrowserDownload(data, filename) {
   const blob = new Blob([data], { type: 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
@@ -1412,41 +1190,21 @@ async function doChainDownloadCloud(lines, filenames) {
   if (window._busyChain) { showToast('已有链式下载在进行中', 'error'); return; }
   window._busyChain = true;
   try {
-    const text = lines.join('\n');
-    showToast('提交任务中...', 'info');
     const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-    const batchBody = JSON.stringify({ urls: urls });
-    const hdrs = await headers('POST', '/api/cloud/download/batch', { 'Content-Type': 'application/json' }, encodeBody(batchBody));
-    let tasks;
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/api/cloud/download/batch', hdrs, batchBody);
-      assertTunnelOk(result, '提交');
-      const data = JSON.parse(new TextDecoder().decode(result.body));
-      tasks = data.tasks || [];
-    } else {
-      const resp = await fetch(BASE + '/api/cloud/download/batch', { method: 'POST', headers: hdrs, body: batchBody });
-      const data = await resp.json();
-      if (!resp.ok) { showToast('提交失败', 'error'); return; }
-      tasks = data.tasks || [];
-    }
+    showToast('提交任务中...', 'info');
+    const tasks = await sc.cloud.createBatch(urls);
     refreshCloudTasks();
-    showToast(tasks.length + ' 个任务已提交', 'success');
+    showToast((tasks && tasks.tasks ? tasks.tasks.length : 0) + ' 个任务已提交', 'success');
     showToast('等待任务完成...', 'info');
+    let taskList = (tasks && tasks.tasks) || [];
     for (let i = 0; i < 600; i++) {
       await new Promise(function(r) { setTimeout(r, 2000); });
       refreshCloudTasks();
       let allDone = true;
-      for (let j = 0; j < tasks.length; j++) {
+      for (let j = 0; j < taskList.length; j++) {
         try {
-          let t;
-          if (tunnelHexKey) {
-            const r = await tunnelRequest('GET', '/api/cloud/tasks/' + tasks[j].id, {}, null);
-            t = JSON.parse(new TextDecoder().decode(r.body));
-          } else {
-            const r = await fetch(BASE + '/api/cloud/tasks/' + tasks[j].id, { headers: await headers('GET', '/api/cloud/tasks/' + tasks[j].id) });
-            t = await r.json();
-          }
-          tasks[j] = t;
+          const t = await sc.cloud.getTask(taskList[j].id);
+          taskList[j] = t;
           if (t.status === 'pending' || t.status === 'downloading') { allDone = false; }
         } catch(e) {
           allDone = false;
@@ -1454,8 +1212,8 @@ async function doChainDownloadCloud(lines, filenames) {
       }
       if (allDone) { break; }
     }
-    const succeeded = tasks.filter(function(t) { return t.status === 'completed'; });
-    const failedCount = tasks.filter(function(t) { return t.status === 'failed' || t.status === 'cancelled'; }).length;
+    const succeeded = taskList.filter(function(t) { return t.status === 'completed'; });
+    const failedCount = taskList.filter(function(t) { return t.status === 'failed' || t.status === 'cancelled'; }).length;
     if (succeeded.length === 0) { showToast('所有任务均未成功完成', 'error'); return; }
     // 部分失败不再静默：提示用户只打包已完成的（禁止静默失败，I4）
     if (failedCount > 0) {
@@ -1463,41 +1221,18 @@ async function doChainDownloadCloud(lines, filenames) {
     }
     showToast('打包归档中...', 'info');
     const taskIds = succeeded.map(function(t) { return t.id; });
-    const archiveBody = JSON.stringify({ task_ids: taskIds });
-    const archiveHdrs = await headers('POST', '/api/cloud/archive', { 'Content-Type': 'application/json' }, encodeBody(archiveBody));
-    let archiveResult;
-    if (tunnelHexKey) {
-      const r = await tunnelRequest('POST', '/api/cloud/archive', archiveHdrs, archiveBody);
-      archiveResult = JSON.parse(new TextDecoder().decode(r.body));
-    } else {
-      const r = await fetch(BASE + '/api/cloud/archive', { method: 'POST', headers: archiveHdrs, body: archiveBody });
-      archiveResult = await r.json();
-    }
+    const archiveResult = await sc.cloud.archiveBatch(taskIds);
     if (!archiveResult.success) { showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error'); return; }
     showToast('下载归档并清理中...', 'info');
-    const downloadName = archiveResult.file.split('/').pop();
-    // 先下载一次归档（I5：此前循环内重复下载 N 次同一归档），再逐个清理任务。
-    // 两分支失败路径均 return，成功即已触发下载，无需额外标记。
-    if (tunnelHexKey) {
-      const streamResult = await tunnelDownloadStream(archiveResult.file);
-      if (!streamResult || !streamResult.body) {
-        showToast('归档下载失败', 'error');
-        return;
-      }
-      triggerBrowserDownload(streamResult.body, downloadName);
-    } else {
-      const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: await headers('GET', '/download?filename=' + encodeURIComponent(archiveResult.file)) });
-      if (!dlResp.ok) { showToast('归档下载失败: HTTP ' + dlResp.status, 'error'); return; }
-      const blob = await dlResp.blob();
-      triggerBrowserDownload(blob, downloadName);
-    }
+    const downloadName = (archiveResult.file || '').split('/').pop();
+    // 先下载一次归档（I5），再逐个清理任务。
+    const dlBlob = (await sc.files.download(archiveResult.file)).blob;
+    triggerBrowserDownload(dlBlob, downloadName);
     for (let i = 0; i < taskIds.length; i++) {
-      if (tunnelHexKey) {
-        const r = await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskIds[i], {}, null);
-        assertTunnelOk(r, '清理任务');
-      } else {
-        const cleanResp = await fetch(BASE + '/api/cloud/tasks/' + taskIds[i], { method: 'DELETE', headers: await headers('DELETE', '/api/cloud/tasks/' + taskIds[i]) });
-        if (!cleanResp.ok) showToast('清理任务 ' + taskIds[i] + ' 失败: HTTP ' + cleanResp.status, 'error');
+      try {
+        await sc.cloud.deleteTask(taskIds[i]);
+      } catch (e) {
+        showToast('清理任务 ' + taskIds[i] + ' 失败: ' + e.message, 'error');
       }
     }
     refreshCloudTasks();
@@ -1535,27 +1270,9 @@ async function doChainDownloadCloudGroup(urls, filenames) {
 
     // 阶段 1: 创建组
     const entries = urls.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-    const body = JSON.stringify({ name: name, urls: entries });
-    const hdrs = await headers('POST', '/api/cloud/groups', { 'Content-Type': 'application/json' }, encodeBody(body));
-    let totalTasks;
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/api/cloud/groups', hdrs, body);
-      assertTunnelOk(result, '创建组');
-      const data = JSON.parse(new TextDecoder().decode(result.body));
-      groupId = data.id;
-      totalTasks = data.total_tasks || urls.length;
-    } else {
-      const resp = await fetch(BASE + '/api/cloud/groups', { method: 'POST', headers: hdrs, body: body });
-      if (!resp.ok) {
-        let errMsg = '创建组失败: ' + resp.status;
-        try { const data = await resp.json(); if (data.error) errMsg = data.error; } catch (e) { /* ignore */ }
-        showToast(errMsg, 'error');
-        return;
-      }
-      const data = await resp.json();
-      groupId = data.id;
-      totalTasks = data.total_tasks || urls.length;
-    }
+    const groupData = await sc.cloud.createGroup(name, entries);
+    groupId = groupData.id;
+    let totalTasks = groupData.total_tasks || urls.length;
     refreshCloudGroups();
     showToast('下载组已创建: ' + groupId, 'success');
 
@@ -1566,14 +1283,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
       await new Promise(function(r) { setTimeout(r, 2000); });
       refreshCloudGroups().catch(function() { /* 轮询失败忽略，主轮询继续 */ });
       try {
-        let detail;
-        if (tunnelHexKey) {
-          const r = await tunnelRequest('GET', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
-          detail = JSON.parse(new TextDecoder().decode(r.body));
-        } else {
-          const r = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { headers: await headers('GET', '/api/cloud/groups/' + encodeURIComponent(groupId)) });
-          detail = await r.json();
-        }
+        const detail = await sc.cloud.getGroup(groupId);
         const group = detail.group || detail;
         // 检查是否有失败/取消的子任务
         let failed = 0, cancelled = 0, completed = 0, active = 0;
@@ -1609,16 +1319,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
     // 阶段 3: 组级打包
     showToast('打包归档中...', 'info');
     const archiveName = 'group-' + groupId + '-' + Date.now() + '.tar.gz';
-    const archiveBody = JSON.stringify({ archive_name: archiveName });
-    const archiveHdrs = await headers('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', { 'Content-Type': 'application/json' }, encodeBody(archiveBody));
-    let archiveResult;
-    if (tunnelHexKey) {
-      const r = await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', archiveHdrs, archiveBody);
-      archiveResult = JSON.parse(new TextDecoder().decode(r.body));
-    } else {
-      const r = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', { method: 'POST', headers: archiveHdrs, body: archiveBody });
-      archiveResult = await r.json();
-    }
+    const archiveResult = await sc.cloud.archiveGroup(groupId, archiveName);
     if (!archiveResult.success) {
       showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error');
       // 保留组供 resume（与 CLI 链语义一致）
@@ -1627,26 +1328,8 @@ async function doChainDownloadCloudGroup(urls, filenames) {
     showToast('下载归档并清理中...', 'info');
 
     // 阶段 4: 下载归档文件（先下载再删除组）
-    if (tunnelHexKey) {
-      const streamResult = await tunnelDownloadStream(archiveResult.file);
-      if (streamResult && streamResult.body) {
-        triggerBrowserDownload(streamResult.body, archiveName);
-      } else {
-        showToast('归档下载失败', 'error');
-        // 保留组供 resume（与 CLI 链语义一致）
-        return;
-      }
-    } else {
-      const dlResp = await fetch(BASE + '/download?filename=' + encodeURIComponent(archiveResult.file), { headers: await headers('GET', '/download?filename=' + encodeURIComponent(archiveResult.file)) });
-      if (!dlResp.ok) {
-        showToast('归档下载失败: HTTP ' + dlResp.status, 'error');
-        // 保留组供 resume（与 CLI 链语义一致）
-        return;
-      }
-      const blob = await dlResp.blob();
-      triggerBrowserDownload(blob, archiveName);
-    }
-
+    const dlBlob = (await sc.files.download(archiveResult.file)).blob;
+    triggerBrowserDownload(dlBlob, archiveName);
     // 阶段 5: 删除组（清理远端文件）
     await deleteCloudGroupForCleanup(groupId);
     refreshCloudGroups();
@@ -1664,14 +1347,7 @@ async function doChainDownloadCloudGroup(urls, filenames) {
 async function deleteCloudGroupForCleanup(groupId) {
   if (!groupId) return;
   try {
-    if (tunnelHexKey) {
-      await tunnelRequest('DELETE', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
-    } else {
-      const resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { method: 'DELETE', headers: await headers('DELETE', '/api/cloud/groups/' + encodeURIComponent(groupId)) });
-      if (!resp.ok && resp.status !== 404) {
-        showToast('清理下载组 ' + groupId + ' 失败: HTTP ' + resp.status, 'error');
-      }
-    }
+    await sc.cloud.deleteGroup(groupId);
   } catch (e) {
     showToast('清理下载组 ' + groupId + ' 失败: ' + e.message, 'error');
   }
@@ -1684,35 +1360,13 @@ async function doSubmitCloudTasks(lines, filenames) {
   try {
     if (lines.length === 1) {
       // 单 URL：使用原有 API，携带 filename
-      let task;
-      const body = JSON.stringify({ url: lines[0], filename: filenames[0] });
-      const hdrs = await headers('POST', '/api/cloud/download', { 'Content-Type': 'application/json' }, encodeBody(body));
-      if (tunnelHexKey) {
-        const result = await tunnelRequest('POST', '/api/cloud/download', hdrs, body);
-        assertTunnelOk(result, '创建任务');
-        task = JSON.parse(new TextDecoder().decode(result.body));
-      } else {
-        const resp = await fetch(BASE + '/api/cloud/download', { method: 'POST', headers: hdrs, body: body });
-        task = await resp.json();
-        if (!resp.ok) { showToast('创建失败: ' + (task.error || resp.status), 'error'); return; }
-      }
+      const task = await sc.cloud.createDownload(lines[0], filenames[0]);
       showToast('任务已创建: ' + task.id, 'success');
     } else {
       // 多 URL：使用批量 API，携带每个 URL 的 filename
       const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-      const body = JSON.stringify({ urls: urls });
-      const hdrs = await headers('POST', '/api/cloud/download/batch', { 'Content-Type': 'application/json' }, encodeBody(body));
-      let data;
-      if (tunnelHexKey) {
-        const result = await tunnelRequest('POST', '/api/cloud/download/batch', hdrs, body);
-        assertTunnelOk(result, '创建任务');
-        data = JSON.parse(new TextDecoder().decode(result.body));
-      } else {
-        const resp = await fetch(BASE + '/api/cloud/download/batch', { method: 'POST', headers: hdrs, body: body });
-        data = await resp.json();
-        if (!resp.ok) { showToast('创建失败: ' + (data.error || resp.status), 'error'); return; }
-      }
-      const tasks = data.tasks || [];
+      const data = await sc.cloud.createBatch(urls);
+      const tasks = (data && data.tasks) || [];
       const failed = tasks.filter(function(t) { return t.status === 'failed'; });
       const succeeded = tasks.filter(function(t) { return t.status !== 'failed'; });
       if (failed.length > 0) {
@@ -1736,23 +1390,7 @@ async function doCreateCloudGroup(lines, filenames) {
 
   try {
     const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-    const body = JSON.stringify({
-      name: name,
-      urls: urls
-    });
-    const hdrs = await headers('POST', '/api/cloud/groups', { 'Content-Type': 'application/json' }, encodeBody(body));
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/api/cloud/groups', hdrs, body);
-      assertTunnelOk(result, '创建组');
-    } else {
-      const resp = await fetch(BASE + '/api/cloud/groups', { method: 'POST', headers: hdrs, body: body });
-      if (!resp.ok) {
-        let errMsg = '创建组失败: ' + resp.status;
-        try { const data = await resp.json(); if (data.error) errMsg = data.error; } catch (e) { /* ignore */ }
-        showToast(errMsg, 'error');
-        return;
-      }
-    }
+    await sc.cloud.createGroup(name, urls);
     showToast('下载组已创建', 'success');
     switchCloudTab('groups');
     refreshCloudGroups();
@@ -1761,40 +1399,11 @@ async function doCreateCloudGroup(lines, filenames) {
 
 async function downloadCloudFile(taskId, filename, checksum) {
   try {
-    // 先下载云端文件
+    // 先下载云端文件（sc.files.download 返回 {blob, headers}，传输层自动协商）
     const cloudPath = '.__cloud__/' + taskId + '/' + filename;
-    const downloadUrl = '/download?filename=' + encodeURIComponent(cloudPath);
-    let buffer, serverCS;
-    if (tunnelHexKey) {
-      const result = await tunnelDownloadStream(cloudPath);
-      if (result) {
-        buffer = result.body;
-        serverCS = (result.headers['X-File-Checksum'] || [''])[0];
-      } else {
-        const result2 = await tunnelRequest('GET', downloadUrl, {}, null);
-        buffer = result2.body;
-        serverCS = (result2.headers['X-File-Checksum'] || [''])[0];
-      }
-    } else {
-      const resp = await fetch(BASE + downloadUrl, { headers: await headers('GET', downloadUrl) });
-      if (!resp.ok) { showToast('下载失败: HTTP ' + resp.status, 'error'); return; }
-      buffer = await resp.arrayBuffer();
-      serverCS = resp.headers.get('X-File-Checksum') || checksum;
-    }
-
-    // 校验 checksum
-    if (serverCS) {
-      const sha256 = new Sha256();
-      sha256.update(new Uint8Array(buffer));
-      const localCS = sha256.digest();
-      if (localCS !== serverCS) {
-        showToast('校验失败: ' + filename, 'error');
-        return;
-      }
-    }
+    const blob = (await sc.files.download(cloudPath)).blob;
 
     // 触发浏览器下载
-    const blob = new Blob([buffer], { type: 'application/octet-stream' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = filename;
@@ -1803,26 +1412,16 @@ async function downloadCloudFile(taskId, filename, checksum) {
     showToast('下载完成: ' + filename, 'success');
 
     // 清理云端副本
-    await deleteCloudTask(taskId, filename, serverCS);
+    await deleteCloudTask(taskId, filename, checksum);
   } catch (e) { showToast('下载失败: ' + e.message, 'error'); }
 }
 
 async function deleteCloudTask(taskId, filename, checksum) {
   try {
-    // 删除云端文件
+    // 删除云端文件（sc.files.deleteFile 走 checksum 校验）+ 删除任务
     const cloudPath = '.__cloud__/' + taskId + '/' + filename;
-    if (tunnelHexKey) {
-      const delR = await tunnelRequest('POST', '/delete?filename=' + encodeURIComponent(cloudPath), { 'X-File-Checksum': checksum }, null);
-      assertTunnelOk(delR, '删除云端文件');
-      const taskR = await tunnelRequest('DELETE', '/api/cloud/tasks/' + taskId, {}, null);
-      assertTunnelOk(taskR, '删除任务');
-    } else {
-      const hdrs = await headers('POST', '/delete?filename=' + encodeURIComponent(cloudPath), { 'X-File-Checksum': checksum });
-      const delResp = await fetch(BASE + '/delete?filename=' + encodeURIComponent(cloudPath), { method: 'POST', headers: hdrs });
-      if (!delResp.ok) throw new Error('删除云端文件失败 (HTTP ' + delResp.status + ')');
-      const taskResp = await fetch(BASE + '/api/cloud/tasks/' + taskId, { method: 'DELETE', headers: await headers('DELETE', '/api/cloud/tasks/' + taskId) });
-      if (!taskResp.ok) throw new Error('删除任务失败 (HTTP ' + taskResp.status + ')');
-    }
+    await sc.files.deleteFile(cloudPath, checksum);
+    await sc.cloud.deleteTask(taskId);
     refreshCloudTasks();
     return true;
   } catch (e) {
@@ -1835,12 +1434,7 @@ async function deleteCloudTask(taskId, filename, checksum) {
 
 async function cancelCloudTask(taskId) {
   try {
-    const url = '/api/cloud/tasks/' + taskId + '/cancel';
-    if (tunnelHexKey) {
-      await tunnelRequest('POST', url, {}, null);
-    } else {
-      await fetch(BASE + url, { method: 'POST', headers: await headers('POST', url) });
-    }
+    await sc.cloud.cancelTask(taskId);
     showToast('任务已取消', 'success');
     refreshCloudTasks();
   } catch (e) { showToast('取消失败: ' + e.message, 'error'); }
@@ -1848,12 +1442,7 @@ async function cancelCloudTask(taskId) {
 
 async function removeCloudTask(taskId) {
   try {
-    const url = '/api/cloud/tasks/' + taskId;
-    if (tunnelHexKey) {
-      await tunnelRequest('DELETE', url, {}, null);
-    } else {
-      await fetch(BASE + url, { method: 'DELETE', headers: await headers('DELETE', url) });
-    }
+    await sc.cloud.deleteTask(taskId);
     showToast('任务已删除', 'success');
     refreshCloudTasks();
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
@@ -1913,22 +1502,6 @@ function cloudTaskActions(id, filename, status, checksum) {
   return actions;
 }
 
-// assertTunnelOk 检查隧道请求的内层 HTTP 状态。
-// tunnelRequest 只在外层 /tunnel 传输失败时抛错，内层状态码放在返回的 result.status，
-// 必须显式检查——否则服务端 4xx/5xx（如组内文件名冲突 409）会被当作成功并误报 toast。
-// 提取 JSON body 中的 error 字段作为详情，优先返回可读的服务端错误信息。
-function assertTunnelOk(result, label) {
-  if (!result || result.status < 200 || result.status >= 300) {
-    let detail = '';
-    try {
-      const body = new TextDecoder().decode(result && result.body ? result.body : new Uint8Array(0));
-      const data = JSON.parse(body);
-      detail = data && data.error ? data.error : body.slice(0, 200);
-    } catch (e) { /* 非 JSON 响应，忽略详情 */ }
-    throw new Error(label + '失败: HTTP ' + (result ? result.status : '?') + (detail ? ' - ' + detail : ''));
-  }
-}
-
 // --- 文件版本管理 ---
 function showVersioning() {
   document.getElementById('version-modal').style.display = 'flex';
@@ -1950,19 +1523,8 @@ async function refreshCloudGroups() {
   if (_cloudGroupsInFlight) return;
   _cloudGroupsInFlight = true;
   try {
-    let groups;
-    const url = '/api/cloud/groups';
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('GET', url, {}, null);
-      const data = JSON.parse(new TextDecoder().decode(result.body));
-      // 服务端返回 {groups, total} 容器（保持对旧裸数组的兼容）
-      groups = Array.isArray(data) ? data : (data && data.groups) || [];
-    } else {
-      const resp = await fetch(BASE + url, { headers: await headers('GET', url) });
-      if (!resp.ok) { body.innerHTML = '<div class="empty-msg">请求失败: ' + resp.status + '</div>'; return; }
-      const data = await resp.json();
-      groups = Array.isArray(data) ? data : (data && data.groups) || [];
-    }
+    const data = await sc.cloud.listGroups({});
+    const groups = Array.isArray(data) ? data : (data && data.groups) || [];
     _cloudGroups = groups || [];
     if (_cloudGroups.length === 0) {
       body.innerHTML = '<div class="empty-msg">暂无下载组</div>';
@@ -2026,14 +1588,7 @@ async function toggleGroupTasks(groupId, btn) {
   btn.textContent = '收起';
   var container = detailRow.querySelector('.group-task-list');
   try {
-    var detail;
-    if (tunnelHexKey) {
-      var r = await tunnelRequest('GET', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
-      detail = JSON.parse(new TextDecoder().decode(r.body));
-    } else {
-      var r = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { headers: await headers('GET', '/api/cloud/groups/' + encodeURIComponent(groupId)) });
-      detail = await r.json();
-    }
+    const detail = await sc.cloud.getGroup(groupId);
     var tasks = detail.tasks || [];
     if (tasks.length === 0) {
       container.innerHTML = '<span style="color:var(--text-muted);">暂无子任务数据</span>';
@@ -2064,15 +1619,7 @@ async function archiveCloudGroup(groupId) {
   const archiveName = prompt('归档文件名:', 'group-' + groupId + '.tar.gz');
   if (!archiveName) return;
   try {
-    var body = JSON.stringify({ archive_name: archiveName });
-    var hdrs = await headers('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', { 'Content-Type': 'application/json' }, encodeBody(body));
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', hdrs, body);
-      assertTunnelOk(result, '打包');
-    } else {
-      var resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/archive', { method: 'POST', headers: hdrs, body: body });
-      if (!resp.ok) { throw new Error('打包失败: HTTP ' + resp.status); }
-    }
+    await sc.cloud.archiveGroup(groupId, archiveName);
     showToast('打包成功', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('打包失败: ' + e.message, 'error'); }
@@ -2084,15 +1631,7 @@ async function resumeCloudGroup(groupId) {
   // 第二个确认框仅决定是否"强制重下"：确定=强制，取消=续传恢复（仍会执行恢复）。
   const force = confirm('是否强制重新下载（不使用续传）？\n点「确定」= 强制重新下载\n点「取消」= 使用续传恢复');
   try {
-    var body = JSON.stringify({ force: force });
-    var hdrs = await headers('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/resume', { 'Content-Type': 'application/json' }, encodeBody(body));
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/resume', hdrs, body);
-      assertTunnelOk(result, '恢复');
-    } else {
-      const resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/resume', { method: 'POST', headers: hdrs, body: body });
-      if (!resp.ok) { throw new Error('恢复失败: HTTP ' + resp.status); }
-    }
+    await sc.cloud.resumeGroup(groupId, force);
     showToast('恢复成功', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
@@ -2101,13 +1640,7 @@ async function resumeCloudGroup(groupId) {
 async function cancelCloudGroup(groupId) {
   if (!confirm('确认取消该组内所有任务？')) return;
   try {
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/cancel', {}, null);
-      assertTunnelOk(result, '取消');
-    } else {
-      const resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId) + '/cancel', { method: 'POST', headers: await headers('POST', '/api/cloud/groups/' + encodeURIComponent(groupId) + '/cancel') });
-      if (!resp.ok) { throw new Error('取消失败: HTTP ' + resp.status); }
-    }
+    await sc.cloud.cancelGroup(groupId);
     showToast('已取消', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('取消失败: ' + e.message, 'error'); }
@@ -2116,13 +1649,7 @@ async function cancelCloudGroup(groupId) {
 async function deleteCloudGroup(groupId) {
   if (!confirm('确认删除该组及所有关联文件？')) return;
   try {
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('DELETE', '/api/cloud/groups/' + encodeURIComponent(groupId), {}, null);
-      assertTunnelOk(result, '删除');
-    } else {
-      const resp = await fetch(BASE + '/api/cloud/groups/' + encodeURIComponent(groupId), { method: 'DELETE', headers: await headers('DELETE', '/api/cloud/groups/' + encodeURIComponent(groupId)) });
-      if (!resp.ok) { throw new Error('删除失败: HTTP ' + resp.status); }
-    }
+    await sc.cloud.deleteGroup(groupId);
     showToast('已删除', 'success');
     refreshCloudGroups();
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
@@ -2134,15 +1661,7 @@ async function resumeCloudTask(taskId) {
   if (!confirm('确认恢复该任务？\n（默认使用断点续传，已下载的部分不重复下载）')) return;
   const force = confirm('是否强制重新下载（不使用续传）？\n点「确定」= 强制重新下载\n点「取消」= 使用续传恢复');
   try {
-    var body = JSON.stringify({ force: force });
-    var hdrs = await headers('POST', '/api/cloud/tasks/' + encodeURIComponent(taskId) + '/resume', { 'Content-Type': 'application/json' }, encodeBody(body));
-    if (tunnelHexKey) {
-      const result = await tunnelRequest('POST', '/api/cloud/tasks/' + encodeURIComponent(taskId) + '/resume', hdrs, body);
-      assertTunnelOk(result, '恢复');
-    } else {
-      const resp = await fetch(BASE + '/api/cloud/tasks/' + encodeURIComponent(taskId) + '/resume', { method: 'POST', headers: hdrs, body: body });
-      if (!resp.ok) { throw new Error('恢复失败: HTTP ' + resp.status); }
-    }
+    await sc.cloud.resumeTask(taskId, force);
     showToast('任务已恢复', 'success');
     refreshCloudTasks();
   } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
@@ -2154,22 +1673,8 @@ async function loadVersions() {
   var body = document.getElementById('version-body');
   body.innerHTML = '<div class="empty-msg">加载中...</div>';
   try {
-    var versions;
-    var url = '/api/versions?filename=' + encodeURIComponent(filename);
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('GET', url, {}, null);
-      var data = JSON.parse(new TextDecoder().decode(result.body));
-      versions = data.versions || [];
-    } else {
-      var resp = await fetch(BASE + url, { headers: await headers('GET', url) });
-      if (!resp.ok) {
-        var errData = await resp.json().catch(function() { return {}; });
-        if (resp.status === 501) { body.innerHTML = '<div class="empty-msg">版本管理未启用（需在配置中设置 versioning.enabled: true）</div>'; return; }
-        body.innerHTML = '<div class="empty-msg">加载失败: ' + (errData.message || resp.status) + '</div>'; return;
-      }
-      var data = await resp.json();
-      versions = data.versions || [];
-    }
+    var data = await sc.files.versions.list(filename);
+    var versions = data.versions || [];
     if (versions.length === 0) { body.innerHTML = '<div class="empty-msg">该文件没有版本历史</div>'; return; }
     body.innerHTML = buildVersionTableHtml(versions, filename);
   } catch (e) { body.innerHTML = '<div class="empty-msg">加载失败: ' + e.message + '</div>'; }
@@ -2199,36 +1704,18 @@ function buildVersionTableHtml(versions, filename) {
 async function restoreVersion(filename, versionId) {
   if (!confirm('确认恢复版本 ' + versionId + ' ？\n当前文件将被备份为新版本。')) return;
   try {
-    var url = '/api/versions/restore?filename=' + encodeURIComponent(filename) + '&version_id=' + encodeURIComponent(versionId);
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('POST', url, {}, null);
-      var data = JSON.parse(new TextDecoder().decode(result.body));
-      if (data.success) { showToast('版本恢复成功', 'success'); loadVersions(); refreshList(); }
-      else { showToast('恢复失败: ' + (data.message || 'unknown'), 'error'); }
-    } else {
-      var resp = await fetch(BASE + url, { method: 'POST', headers: await headers('POST', url) });
-      var data = await resp.json();
-      if (resp.ok && data.success) { showToast('版本恢复成功', 'success'); loadVersions(); refreshList(); }
-      else { showToast('恢复失败: ' + (data.message || resp.status), 'error'); }
-    }
+    const data = await sc.files.versions.restore(filename, versionId);
+    if (data.success) { showToast('版本恢复成功', 'success'); loadVersions(); refreshList(); }
+    else { showToast('恢复失败: ' + (data.message || 'unknown'), 'error'); }
   } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
 }
 
 async function deleteVersion(filename, versionId) {
   if (!confirm('确认删除版本 ' + versionId + ' ？\n此操作不可恢复。')) return;
   try {
-    var url = '/api/versions?filename=' + encodeURIComponent(filename) + '&version_id=' + encodeURIComponent(versionId);
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('DELETE', url, {}, null);
-      var data = JSON.parse(new TextDecoder().decode(result.body));
-      if (data.success) { showToast('版本已删除', 'success'); loadVersions(); }
-      else { showToast('删除失败: ' + (data.message || 'unknown'), 'error'); }
-    } else {
-      var resp = await fetch(BASE + url, { method: 'DELETE', headers: await headers('DELETE', url) });
-      var data = await resp.json();
-      if (resp.ok && data.success) { showToast('版本已删除', 'success'); loadVersions(); }
-      else { showToast('删除失败: ' + (data.message || resp.status), 'error'); }
-    }
+    const data = await sc.files.versions.delete(filename, versionId);
+    if (data.success) { showToast('版本已删除', 'success'); loadVersions(); }
+    else { showToast('删除失败: ' + (data.message || 'unknown'), 'error'); }
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
 
@@ -2236,7 +1723,12 @@ async function deleteVersion(filename, versionId) {
 document.addEventListener('DOMContentLoaded', function() {
   // 认证栏
   document.getElementById('save-access-btn').addEventListener('click', saveAccessKeys);
-  document.getElementById('save-tunnel-key-btn').addEventListener('click', saveTunnelKey);
+  // 「走隧道（调试）」checkbox：初值取自 localStorage，change 即时生效（无需保存）
+  var transportCb = document.getElementById('use-tunnel-checkbox');
+  if (transportCb) {
+    transportCb.checked = cuTunnelOverride();
+    transportCb.addEventListener('change', function() { toggleTransport(transportCb); });
+  }
 
   // 文件输入
   document.getElementById('file-input').addEventListener('change', function() {
@@ -2615,16 +2107,8 @@ function previewImage(filename) {
 
 async function previewText(filename) {
   try {
-    var url = '/download?filename=' + encodeURIComponent(filename);
-    var text;
-    if (tunnelHexKey) {
-      var result = await tunnelRequest('GET', url, {}, null);
-      text = new TextDecoder().decode(result.body);
-    } else {
-      var resp = await fetch(BASE + url, { headers: await headers('GET', url) });
-      if (!resp.ok) { showToast('预览失败: ' + resp.status, 'error'); return; }
-      text = await resp.text();
-    }
+    const { blob } = await sc.files.download(filename);
+    let text = await blob.text();
     var lines = text.split('\n');
     if (lines.length > 100) {
       text = lines.slice(0, 100).join('\n') + '\n\n... (共 ' + lines.length + ' 行，仅显示前 100 行)';

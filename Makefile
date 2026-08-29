@@ -122,7 +122,21 @@ notest:
 web-test:
 	@node --check web/static/app.js
 	@node --check web/static/cloudfilename.js
+	@node --check web/static/sclient/crypto.js
+	@node --check web/static/sclient/sha256.js
+	@node --check web/static/sclient/sig.js
+	@node --check web/static/sclient/config.js
+	@node --check web/static/sclient/log.js
+	@node --check web/static/sclient/transport.js
+	@node --check web/static/sclient/util.js
+	@node --check web/static/sclient/api/files.js
+	@node --check web/static/sclient/api/cloud.js
+	@node --check web/static/sclient/api/share.js
+	@node --check web/static/sclient/api/config.js
+	@node --check web/static/sclient/api/hub.js
+	@node --check web/static/sclient/api/index.js
 	node --test web/static/cloudfilename.test.js
+	node --test web/static/sclient/sclient.test.js
 
 .PHONY: cover-check
 cover-check: test-cover

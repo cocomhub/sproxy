@@ -29,6 +29,7 @@ const (
 	flagUploadsDir      = "uploads-dir"
 	flagVersion         = "version"
 	flagNoTLS           = "no-tls"
+	flagAllowNoAuth     = "allow-no-auth"
 	defaultConfig       = "sproxy.yaml"
 	cfgAddr             = "addr"
 	cfgUploadsDir       = "uploads_dir"
@@ -74,6 +75,7 @@ func init() {
 	rootCmd.Flags().String(flagUploadsDir, "./uploads", "上传目录")
 	rootCmd.Flags().Bool(flagVersion, false, "打印版本与构建信息后退出")
 	rootCmd.Flags().Bool(flagNoTLS, false, "禁用 TLS（覆盖 tls.enabled 配置）")
+	rootCmd.Flags().Bool(flagAllowNoAuth, false, "允许无认证启动（无 access_keys/api_keys；仅限本地调试，生产勿用））")
 
 	rootCmd.AddCommand(NewVersionSubcommand())
 }
@@ -91,8 +93,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	// fail-fast：无 access_keys 且 api_keys 未启用时拒绝启动（无法提供认证）。
+	// --allow-no-auth 显式跳过（本地无认证调试/开发，Web UI 无凭据直连仍需可用）。
 	if len(cfg.AccessKeys) == 0 && !cfg.APIKeys.Enabled {
-		return fmt.Errorf("拒绝启动：未配置 access_keys（且 api_keys 未启用），无法提供认证")
+		allow, _ := cmd.Flags().GetBool(flagAllowNoAuth)
+		if !allow {
+			return fmt.Errorf("拒绝启动：未配置 access_keys（且 api_keys 未启用），无法提供认证")
+		}
+		slog.Warn("无 access_keys/api_keys——以允许无认证模式启动（请仅用于本地调试，勿在生产开放）")
 	}
 	// M-8：api_keys-only（多用户 Bearer）下隧道/hub 不可用——隧道密钥由 access_keys 派生、
 	// hub 注册由 access_keys 准入。启用 hub 时强制 access_keys 非空，消除功能死角。
