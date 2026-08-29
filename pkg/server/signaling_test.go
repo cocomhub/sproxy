@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,48 @@ func newSignalTestBroker(t *testing.T) *SignalBroker {
 		rt.Add("", hub.NodeInfo{ID: hub.NodeID(id), Mux: m, Secret: testSignalSecret(id)}, nil)
 	}
 	return NewSignalBroker(rt)
+}
+
+// TestSignalBroker_FlushSignalPreservesNodes：信令持久化必须同时保留节点注册与
+// 收件箱——FlushSignal 不能只写 messages 而丢 nodes（否则任何一次信令往来都会
+// 让已持久化的节点注册从文件里消失，重启后节点全丢）。
+func TestSignalBroker_FlushSignalPreservesNodes(t *testing.T) {
+	rt := hub.NewMeshRouteTable()
+	a, _ := xfertest.Pipe()
+	m := mux.New(a, mux.RoleDialer)
+	t.Cleanup(func() { _ = m.Close() })
+	rt.Add("", hub.NodeInfo{ID: "peer-a", Mux: m, Secret: "sec-a"}, nil)
+	rt.Add("", hub.NodeInfo{ID: "peer-b", Secret: "sec-b"}, nil) // 离线节点（Mux nil）
+
+	b := NewSignalBroker(rt)
+	path := filepath.Join(t.TempDir(), "hub.json")
+	p := hub.NewPersister(path)
+	b.SetPersister(p)
+
+	// 先落盘节点注册（模拟节点注册触发的持久化）。
+	if !p.FlushFn(func() *hub.Snapshot { return hub.SnapshotRouteTable(rt) }) {
+		t.Fatal("FlushFn 应落盘")
+	}
+
+	// 投递一条信令并 FlushSignal（模拟 handleSignalPost 的持久化路径）。
+	if err := b.queue.Push(hub.SignalMsg{Kind: hub.SignalOffer, From: "peer-a", To: "peer-b", SDP: "v=0"}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if !b.FlushSignal(p) {
+		t.Fatal("FlushSignal 应落盘")
+	}
+
+	// 重新加载：节点注册与信令收件箱必须都保留。
+	snap, err := p.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(snap.Nodes) != 2 {
+		t.Fatalf("FlushSignal 后快照节点 = %d, want 2（信令持久化不能丢节点注册）", len(snap.Nodes))
+	}
+	if len(snap.Messages) != 1 || len(snap.Messages[0].Msgs) != 1 || snap.Messages[0].Msgs[0].To != "peer-b" {
+		t.Fatalf("FlushSignal 后快照消息 = %+v, want 1 条 to peer-b", snap.Messages)
+	}
 }
 
 func TestSignalBroker_PostAndPoll(t *testing.T) {

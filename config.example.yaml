@@ -98,6 +98,7 @@ access_keys:
 #   enabled: true
 #   node_id: "node-a"               # 本节点 ID（mesh connect / relay dial 的目标）
 #   max_connections: 256             # 同时处理的中继连接数上限（0/缺省默认 256；I30 防连接洪泛）
+#   persist_file: ""                # hub 状态持久化文件路径（节点注册/信令收件箱重启间保留）；空=关闭（默认）
 #   transports:
 #     ws:
 #       enabled: true
