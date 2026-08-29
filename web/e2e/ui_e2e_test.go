@@ -313,7 +313,7 @@ func TestCloudDownloadButtonExists(t *testing.T) {
 	}
 }
 
-// TestCloudDownloadModalOpens 验证点击按钮打开云端下载弹窗。
+// TestCloudDownloadModalOpens 验证点击云端下载按钮进入传输页并显示云任务区。
 func TestCloudDownloadModalOpens(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
@@ -323,29 +323,29 @@ func TestCloudDownloadModalOpens(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	// 通过 evaluate 直接调用 JS 函数（避免 CSP 阻止 inline onclick）
-	if _, err := page.Evaluate("showCloudDownload()"); err != nil {
-		t.Fatalf("showCloudDownload: %v", err)
+	// 真实点击云按钮（cloud-modal 已移除，showCloudDownload 仅是切换到传输页的入口）
+	if err := page.Locator("#cloud-btn").Click(); err != nil {
+		t.Fatalf("click cloud-btn: %v", err)
 	}
 
-	// 等待弹窗可见
-	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+	// 等待传输页可见
+	_, err := page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
 		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
-		t.Fatalf("cloud-modal not visible: %v", err)
+		t.Fatalf("transfer-page not visible: %v", err)
 	}
 
-	// 验证关键元素存在
-	for _, sel := range []string{"#cloud-url", "#cloud-chain-btn", "#cloud-submit-btn", "#cloud-tasks-body", "#cloud-refresh-btn", "#cloud-close-modal-btn"} {
+	// 验证云 URL 输入行与按钮存在于传输页内
+	for _, sel := range []string{"#cloud-url", "#cloud-chain-btn", "#cloud-submit-btn"} {
 		if cnt, _ := page.Locator(sel).Count(); cnt == 0 {
-			t.Errorf("element %s not found in cloud modal", sel)
+			t.Errorf("element %s not found in transfer page", sel)
 		}
 	}
 }
 
-// TestCloudDownloadModalCloses 验证关闭云端下载弹窗。
+// TestCloudDownloadModalCloses 验证传输页显示/隐藏（切换到传输主 tab 再切回文件主 tab）。
 func TestCloudDownloadModalCloses(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
@@ -355,44 +355,46 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	// 打开弹窗
-	page.Evaluate("showCloudDownload()")
-	page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+	// 进入传输页
+	if err := page.Locator("#main-tab-transfer").Click(); err != nil {
+		t.Fatalf("click main-tab-transfer: %v", err)
+	}
+	page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
 		Timeout: playwright.Float(8000),
 	})
 
-	// 关闭弹窗
-	if _, err := page.Evaluate("hideCloudDownload()"); err != nil {
-		t.Fatalf("hideCloudDownload: %v", err)
+	// 关闭传输页（切回文件主 tab）
+	if err := page.Locator("#main-tab-files").Click(); err != nil {
+		t.Fatalf("click main-tab-files: %v", err)
 	}
 
-	// 验证弹窗隐藏
-	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+	// 验证传输页隐藏
+	_, err := page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateHidden,
 		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
-		t.Fatalf("cloud-modal should be hidden: %v", err)
+		t.Fatalf("transfer-page should be hidden: %v", err)
 	}
 
-	// 重新打开再关闭（验证幂等性）
-	page.Evaluate("showCloudDownload()")
-	page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+	// 重新进入再切离（验证幂等性）
+	page.Locator("#main-tab-transfer").Click()
+	page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
 		Timeout: playwright.Float(8000),
 	})
-	page.Evaluate("hideCloudDownload()")
-	_, err = page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+	page.Locator("#main-tab-files").Click()
+	_, err = page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateHidden,
 		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
-		t.Fatalf("cloud-modal should be hidden after second close: %v", err)
+		t.Fatalf("transfer-page should be hidden after second close: %v", err)
 	}
 }
 
-// TestCloudDownloadCreateTask 验证创建云端下载任务。
+// TestCloudDownloadCreateTask 验证创建云端下载任务（输入 URL 点击仅提交）。
 func TestCloudDownloadCreateTask(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
@@ -402,14 +404,16 @@ func TestCloudDownloadCreateTask(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	// 打开弹窗
-	page.Evaluate("showCloudDownload()")
-	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+	// 点击云按钮进入传输页（URL 行静态存在于 #transfer-page 内）
+	if err := page.Locator("#cloud-btn").Click(); err != nil {
+		t.Fatalf("click cloud-btn: %v", err)
+	}
+	_, err := page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
 		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
-		t.Fatalf("cloud-modal not visible: %v", err)
+		t.Fatalf("transfer-page not visible: %v", err)
 	}
 
 	// 输入 URL
@@ -422,13 +426,21 @@ func TestCloudDownloadCreateTask(t *testing.T) {
 		t.Fatalf("click submit btn: %v", err)
 	}
 
-	// 等待响应（URL 不可达，但至少验证没有 crash）
-	page.WaitForSelector("#cloud-tasks-body", playwright.PageWaitForSelectorOptions{
-		Timeout: playwright.Float(8000),
+	// 等待传输列表渲染（URL 不可达，但至少验证没有 crash）
+	_, err = page.WaitForSelector("#transfer-body", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(10000),
 	})
+	if err != nil {
+		t.Fatalf("transfer-body not visible: %v", err)
+	}
+	// 云任务频道已激活（提交后在云任务频道视图）
+	if cnt, _ := page.Locator("#transfer-channel-cloud_tasks.active").Count(); cnt == 0 {
+		t.Error("cloud_tasks channel not active after submit")
+	}
 }
 
-// TestCloudDownloadTaskList 验证任务列表渲染。
+// TestCloudDownloadTaskList 验证云任务列表渲染（进入传输页云任务频道）。
 func TestCloudDownloadTaskList(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
@@ -438,31 +450,35 @@ func TestCloudDownloadTaskList(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	// 打开弹窗
-	page.Evaluate("showCloudDownload()")
-	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+	// 点击云按钮进入传输页并切到云任务频道
+	if err := page.Locator("#cloud-btn").Click(); err != nil {
+		t.Fatalf("click cloud-btn: %v", err)
+	}
+
+	// 云任务频道按钮存在且被激活
+	if cnt, _ := page.Locator("#transfer-channel-cloud_tasks").Count(); cnt == 0 {
+		t.Fatal("cloud_tasks channel button not found")
+	}
+
+	// 等待传输列表渲染
+	_, err := page.WaitForSelector("#transfer-body", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
 		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
-		t.Fatalf("cloud-modal not visible: %v", err)
+		t.Fatalf("transfer-body not visible: %v", err)
 	}
 
-	// 等待任务列表加载
-	_, err = page.WaitForSelector("#cloud-tasks-body", playwright.PageWaitForSelectorOptions{
+	// 验证任务列表区可用（任务列表/空态由统一渲染管输出）
+	_, err = page.WaitForSelector("#transfer-channel-cloud_tasks.active", playwright.PageWaitForSelectorOptions{
 		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
-		t.Fatalf("cloud-tasks-body not found: %v", err)
-	}
-
-	// 验证刷新按钮可用
-	if err := page.Locator("#cloud-refresh-btn").Click(); err != nil {
-		t.Fatalf("click refresh btn: %v", err)
+		t.Fatalf("cloud_tasks channel not active: %v", err)
 	}
 }
 
-// TestCloudDownloadURLInput 验证云端下载弹窗中的 textarea 输入框存在且可用。
+// TestCloudDownloadURLInput 验证传输页中的 URL textarea 输入框存在且可用。
 func TestCloudDownloadURLInput(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
@@ -472,14 +488,16 @@ func TestCloudDownloadURLInput(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	// 打开弹窗
-	page.Evaluate("showCloudDownload()")
-	_, err := page.WaitForSelector("#cloud-modal", playwright.PageWaitForSelectorOptions{
+	// 点击云按钮进入传输页
+	if err := page.Locator("#cloud-btn").Click(); err != nil {
+		t.Fatalf("click cloud-btn: %v", err)
+	}
+	_, err := page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
 		Timeout: playwright.Float(8000),
 	})
 	if err != nil {
-		t.Fatalf("cloud-modal not visible: %v", err)
+		t.Fatalf("transfer-page not visible: %v", err)
 	}
 
 	// 验证 textarea 存在（已从 input 改为 textarea 支持多行）
