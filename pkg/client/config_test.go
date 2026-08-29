@@ -283,3 +283,59 @@ func TestHandleConfigShow_NilReceiver(t *testing.T) {
 		t.Errorf("expected no output for nil config, got: %s", buf.String())
 	}
 }
+
+// TestApplyConfigSet_MeshParams（P2-配置1）：
+// config set 支持 hub_url/relay_token/node_id 三个通用 mesh 参数；hub_url 校验
+// URL 格式，node_id 拒绝空白字符。
+func TestApplyConfigSet_MeshParams(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if err := ApplyConfigSet(cfg, "hub_url", "wss://hub.example.com/ws"); err != nil {
+		t.Fatalf("hub_url set: %v", err)
+	}
+	if cfg.HubURL != "wss://hub.example.com/ws" {
+		t.Fatalf("HubURL = %q, want wss://hub.example.com/ws", cfg.HubURL)
+	}
+	// 非法 hub_url 拒绝
+	if err := ApplyConfigSet(cfg, "hub_url", "not a url"); err == nil {
+		t.Fatal("非法 hub_url 应报错")
+	}
+	if err := ApplyConfigSet(cfg, "relay_token", "tok"); err != nil {
+		t.Fatalf("relay_token set: %v", err)
+	}
+	if cfg.RelayToken != "tok" {
+		t.Fatalf("RelayToken = %q, want tok", cfg.RelayToken)
+	}
+	if err := ApplyConfigSet(cfg, "node_id", "node-a"); err != nil {
+		t.Fatalf("node_id set: %v", err)
+	}
+	if cfg.NodeID != "node-a" {
+		t.Fatalf("NodeID = %q, want node-a", cfg.NodeID)
+	}
+	if err := ApplyConfigSet(cfg, "node_id", "bad node"); err == nil {
+		t.Fatal("含空白的 node_id 应报错")
+	}
+}
+
+// TestLoadConfig_MeshParams（P2-配置1）：YAML 中 hub_url/relay_token/node_id 正确解码。
+func TestLoadConfig_MeshParams(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sclient.yaml")
+	content := "server_url: https://127.0.0.1:18083\nhub_url: wss://hub.example.com/ws\nrelay_token: rt\nnode_id: node-a\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HubURL != "wss://hub.example.com/ws" {
+		t.Fatalf("HubURL = %q", cfg.HubURL)
+	}
+	if cfg.RelayToken != "rt" {
+		t.Fatalf("RelayToken = %q", cfg.RelayToken)
+	}
+	if cfg.NodeID != "node-a" {
+		t.Fatalf("NodeID = %q", cfg.NodeID)
+	}
+}

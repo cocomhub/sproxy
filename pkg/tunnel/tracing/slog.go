@@ -5,7 +5,6 @@ package tracing
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -14,13 +13,14 @@ import (
 	"time"
 )
 
-// contextKey is used to store the current span in a context.Context.
-type contextKey struct{}
+// legacyContextKey is used to store the legacy *Span in a context.Context.
+// It is kept private: newer code accesses the span via SpanContext (SpanContextKey)
+// while WithTag/spanFromContext still rely on the full Span.
+type legacyContextKey struct{}
 
 // slogTracer implements Tracer with log/slog output.
 type slogTracer struct {
 	mu    sync.Mutex
-	spans []*Span
 	depth int
 }
 
@@ -32,7 +32,7 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	traceID := hexID()
+	traceID := TraceID()
 	parentID := ""
 	tags := make(map[string]string)
 
@@ -44,16 +44,16 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 
 	span := &Span{
 		TraceID:   traceID,
-		SpanID:    hexID(),
+		SpanID:    SpanID(),
 		ParentID:  parentID,
 		Name:      name,
 		StartTime: time.Now(),
 		Tags:      tags,
 	}
 
-	newCtx := context.WithValue(ctx, contextKey{}, span)
+	newCtx := context.WithValue(ctx, SpanContextKey{}, SpanContext{TraceID: traceID, SpanID: span.SpanID})
+	newCtx = context.WithValue(newCtx, legacyContextKey{}, span)
 
-	t.spans = append(t.spans, span)
 	t.depth++
 
 	depth := t.depth
@@ -82,6 +82,14 @@ func (t *slogTracer) StartSpan(ctx context.Context, name string) (context.Contex
 	}
 }
 
+// Inject writes the current span's W3C traceparent header into the carrier
+// if the context carries a valid SpanContext.
+func (t *slogTracer) Inject(ctx context.Context, carrier Carrier) {
+	if sc, ok := ctx.Value(SpanContextKey{}).(SpanContext); ok && sc.TraceID != "" && sc.SpanID != "" {
+		carrier.Set("traceparent", NewTraceparent(sc.TraceID, sc.SpanID))
+	}
+}
+
 // WithTag attaches a key-value tag to the span stored in the context.
 // If no span is found, the tag is silently dropped.
 func WithTag(ctx context.Context, key, value string) context.Context {
@@ -93,14 +101,8 @@ func WithTag(ctx context.Context, key, value string) context.Context {
 	return ctx
 }
 
-func hexID() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%016x", b)
-}
-
 func spanFromContext(ctx context.Context) *Span {
-	s, _ := ctx.Value(contextKey{}).(*Span)
+	s, _ := ctx.Value(legacyContextKey{}).(*Span)
 	return s
 }
 

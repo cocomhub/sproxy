@@ -4,13 +4,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 // parseRenameParams 从请求中提取重命名参数：from、to 和 X-File-Checksum。
@@ -46,6 +46,7 @@ func resolveRenamePaths(h *Handlers, from, to string) (fromPath, toPath string, 
 type renameOpCtx struct {
 	h                *Handlers
 	w                http.ResponseWriter
+	ctx              context.Context
 	fromPath         string
 	toPath           string
 	from             string
@@ -57,7 +58,7 @@ type renameOpCtx struct {
 // executeRename 校验 checksum、执行 Rename、更新 checksumStore。
 // 返回 nil 表示成功；返回 error 表示失败（已在内部发送响应）。
 func executeRename(ctx renameOpCtx) error {
-	ctx.logger.Info("开始重命名", "from", ctx.fromPath, "to", ctx.toPath)
+	ctx.logger.InfoContext(ctx.ctx, "开始重命名", "from", ctx.fromPath, "to", ctx.toPath)
 	if _, err := os.Stat(ctx.fromPath); os.IsNotExist(err) {
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
 		return err
@@ -68,17 +69,17 @@ func executeRename(ctx renameOpCtx) error {
 		return err
 	}
 	if !verifyFileWithChecksum(ctx.fromPath, ctx.expectedChecksum) {
-		ctx.logger.Warn("rename checksum 校验失败", "from", ctx.from)
+		ctx.logger.WarnContext(ctx.ctx, "rename checksum 校验失败", "from", ctx.from)
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: errMsgSrcChecksumFailed}, http.StatusBadRequest)
 		return fmt.Errorf("checksum mismatch")
 	}
 	if err := os.MkdirAll(filepath.Dir(ctx.toPath), 0755); err != nil {
-		ctx.logger.Error(errMsgCreateParentDirFailed, "to", ctx.to, "error", err.Error())
+		ctx.logger.ErrorContext(ctx.ctx, errMsgCreateParentDirFailed, "to", ctx.to, "error", err.Error())
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: errMsgCreateParentDirFailed}, http.StatusInternalServerError)
 		return err
 	}
 	if err := atomicRename(ctx.fromPath, ctx.toPath); err != nil {
-		ctx.logger.Error("重命名失败", "from", ctx.from, "to", ctx.to, "error", err.Error())
+		ctx.logger.ErrorContext(ctx.ctx, "重命名失败", "from", ctx.from, "to", ctx.to, "error", err.Error())
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
 		return err
 	}
@@ -87,7 +88,7 @@ func executeRename(ctx renameOpCtx) error {
 }
 
 // processBatchRenameItem 处理单条批量重命名操作。
-func (h *Handlers) processBatchRenameItem(op BatchRenameOp, logger *slog.Logger) BatchOperationResult {
+func (h *Handlers) processBatchRenameItem(ctx context.Context, op BatchRenameOp, logger *slog.Logger) BatchOperationResult {
 	result := BatchOperationResult{Filename: op.From + " -> " + op.To}
 	from, err := ValidateFilePath(op.From)
 	if err != nil {
@@ -122,22 +123,22 @@ func (h *Handlers) processBatchRenameItem(op BatchRenameOp, logger *slog.Logger)
 		return result
 	}
 	if !verifyFileWithChecksum(fromPath, op.Checksum) {
-		logger.Warn("batch rename checksum 不匹配", "from", op.From)
+		logger.WarnContext(ctx, "batch rename checksum 不匹配", "from", op.From)
 		result.Message = errMsgSrcChecksumFailed
 		return result
 	}
 	if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
-		logger.Error(errMsgCreateParentDirFailed, "to", to, "error", err.Error())
+		logger.ErrorContext(ctx, errMsgCreateParentDirFailed, "to", to, "error", err.Error())
 		result.Message = "创建父目录失败"
 		return result
 	}
 	if err := atomicRename(fromPath, toPath); err != nil {
-		logger.Error("batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
+		logger.ErrorContext(ctx, "batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
 		result.Message = "重命名失败"
 		return result
 	}
 	h.checksumStore.Rename(from, to)
-	logger.Info("文件已重命名", "from", op.From, "to", op.To)
+	logger.InfoContext(ctx, "文件已重命名", "from", op.From, "to", op.To)
 	return BatchOperationResult{
 		Filename: op.From + " -> " + op.To,
 		Success:  true,
@@ -162,7 +163,7 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger.With("batch", "rename")
 	results := make([]BatchOperationResult, 0, len(req.Operations))
 	for _, op := range req.Operations {
-		result := h.processBatchRenameItem(op, logger)
+		result := h.processBatchRenameItem(r.Context(), op, logger)
 		results = append(results, result)
 	}
 	sendJSONResponse(w, BatchResponse{Results: results}, http.StatusOK)
@@ -172,11 +173,7 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 // 与 delete 对称，要求 X-File-Checksum 头校验源文件，避免误覆盖。
 // 目标路径已存在时返回 409；服务端会自动 mkdir -p 中间目录。
 func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
-	reqID := r.Header.Get(headerRequestID)
-	if reqID == "" {
-		reqID = fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	logger := h.logger.With("req_id", reqID)
+	logger := h.logger
 
 	from, to, expectedChecksum, err := parseRenameParams(r)
 	if err != nil {
@@ -203,6 +200,7 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 	if err := executeRename(renameOpCtx{
 		h:                h,
 		w:                w,
+		ctx:              r.Context(),
 		fromPath:         fromPath,
 		toPath:           toPath,
 		from:             from,
@@ -213,7 +211,7 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Info("文件已重命名", "from", from, "to", to, "checksum", expectedChecksum)
+	logger.InfoContext(r.Context(), "文件已重命名", "from", from, "to", to, "checksum", expectedChecksum)
 	sendJSONResponse(w, UploadResponse{
 		Success:  true,
 		Message:  fmt.Sprintf("文件已重命名: %s -> %s", from, to),

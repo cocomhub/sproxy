@@ -98,6 +98,18 @@ func TestMeshRelayToken(t *testing.T) {
 	if got := meshRelayToken("", "", svc); got != "cfg-token" {
 		t.Fatalf("meshRelayToken(both empty) = %q, want cfg-token", got)
 	}
+	// P2-配置3：配置 relay_token 优先于 --token/auth_token
+	cfgSvc := client.NewFileClient("http://127.0.0.1:1", client.WithRelayToken("cfg-relay"), client.WithAuthToken("cfg-token"))
+	if got := meshRelayToken("", "flag-token", cfgSvc); got != "cfg-relay" {
+		t.Fatalf("meshRelayToken(config relay) = %q, want cfg-relay", got)
+	}
+	if got := meshRelayToken("", "", cfgSvc); got != "cfg-relay" {
+		t.Fatalf("meshRelayToken(config relay, no flag) = %q, want cfg-relay", got)
+	}
+	// 显式 --relay-token 仍优先于配置
+	if got := meshRelayToken("explicit", "", cfgSvc); got != "explicit" {
+		t.Fatalf("meshRelayToken(explicit) = %q, want explicit", got)
+	}
 	// 全空 → 空串
 	plain := client.NewFileClient("http://127.0.0.1:1")
 	if got := meshRelayToken("", "", plain); got != "" {

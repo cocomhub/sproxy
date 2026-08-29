@@ -17,6 +17,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
@@ -1767,5 +1769,58 @@ func TestRelayTLSConfig_NoRootCAs(t *testing.T) {
 	}
 	if cfg.ServerName != "hub.example.com" {
 		t.Errorf("expected ServerName hub.example.com, got %q", cfg.ServerName)
+	}
+}
+
+func TestDoRequest_InjectTraceparent(t *testing.T) {
+	received := make(chan string, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Get("Traceparent")
+		w.Write([]byte("ok"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewFileClient(srv.URL)
+	c.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	resp, err := c.doRequest(context.Background(), "GET", "/echo", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	tp := <-received
+	traceID, spanID, ok := tracing.ParseTraceparent(tp)
+	if !ok || len(traceID) != 32 || len(spanID) != 16 {
+		t.Fatalf("Traceparent = %q, invalid", tp)
+	}
+}
+
+func TestWithTracer_CustomTracer(t *testing.T) {
+	var injected []string
+	mock := &mockTracer{injectFn: func(ctx context.Context, c tracing.Carrier) { injected = append(injected, c.Get("traceparent")) }}
+	c := NewFileClient("http://127.0.0.1:1", WithTracer(mock))
+	_ = c
+	if len(injected) != 0 {
+		t.Fatalf("should not inject before request")
+	}
+}
+
+// mockTracer 用于验证 WithTracer Option 的组织与注入时机。
+type mockTracer struct {
+	startFn  func(context.Context, string) (context.Context, func())
+	injectFn func(context.Context, tracing.Carrier)
+}
+
+func (m *mockTracer) StartSpan(ctx context.Context, name string) (context.Context, func()) {
+	if m.startFn != nil {
+		return m.startFn(ctx, name)
+	}
+	return ctx, func() {}
+}
+
+func (m *mockTracer) Inject(ctx context.Context, c tracing.Carrier) {
+	if m.injectFn != nil {
+		m.injectFn(ctx, c)
 	}
 }

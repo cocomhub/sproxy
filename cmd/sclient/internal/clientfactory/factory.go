@@ -79,6 +79,17 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	if t, _ := cmd.Flags().GetString("auth-token"); t != "" {
 		opts = append(opts, client.WithAuthToken(t))
 	}
+	// 通用 mesh 参数（hub_url/relay_token/node_id）：供 mesh connect / relay start /
+	// p2p 等命令在各自 --hub/--token/--node-id 未显式指定时作为配置回落（P2-配置）。
+	if cfg.HubURL != "" {
+		opts = append(opts, client.WithMeshHubURL(cfg.HubURL))
+	}
+	if cfg.RelayToken != "" {
+		opts = append(opts, client.WithRelayToken(cfg.RelayToken))
+	}
+	if cfg.NodeID != "" {
+		opts = append(opts, client.WithNodeID(cfg.NodeID))
+	}
 	if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {
 		opts = append(opts, client.WithInsecureTLS())
 	}

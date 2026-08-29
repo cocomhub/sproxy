@@ -15,6 +15,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/spf13/cobra"
 )
@@ -27,15 +28,22 @@ type ConfigProvider interface {
 }
 
 // cliConfigProvider 是生产实现的 ConfigProvider，基于 sclientcfg.ViperProvider。
+// 用 getProvider 闭包延迟解析 provider：PersistentPreRunE 才初始化 cfgProvider，
+// 若像 factory 一样直接捕获指针值，构造时会拿到 nil（config show/set 一直报
+// "配置未初始化"的既有 bug）。
 type cliConfigProvider struct {
-	provider *sclientcfg.ViperProvider
+	getProvider func() *sclientcfg.ViperProvider
 }
 
 func (c *cliConfigProvider) LoadConfig() (*client.Config, error) {
-	if c.provider == nil {
+	if c.getProvider == nil {
 		return nil, fmt.Errorf("配置未初始化")
 	}
-	return client.LoadFromProvider(c.provider)
+	p := c.getProvider()
+	if p == nil {
+		return nil, fmt.Errorf("配置未初始化")
+	}
+	return client.LoadFromProvider(p)
 }
 
 // NewRootCmd 创建完整的 sclient 根命令，包含所有 flags 和子命令。
@@ -45,10 +53,20 @@ func NewRootCmd() *cobra.Command {
 		cfgProvider *sclientcfg.ViperProvider
 		cliState    = &state.State{}
 	)
-	defaultCfgPath, err := xdg.ConfigFile(filepath.Join("sproxy", "sclient.yaml"))
+	// P2-配置2：多环境支持——SCLIENT_ENV 环境变量选择 env 后缀配置文件
+	// （如 SCLIENT_ENV=prod → sclient.prod.yaml）。为空用默认 sclient.yaml。
+	// 便于同一台机器维护 prod/staging/dev 多套 hub/server/token 配置。
+	cfgBase := "sclient.yaml"
+	if envName := os.Getenv("SCLIENT_ENV"); envName != "" {
+		cfgBase = "sclient." + envName + ".yaml"
+	}
+	defaultCfgPath, err := xdg.ConfigFile(filepath.Join("sproxy", cfgBase))
 	if err != nil {
 		home, _ := os.UserHomeDir()
-		defaultCfgPath = filepath.Join(home, ".sclient.yaml")
+		defaultCfgPath = filepath.Join(home, "."+cfgBase)
+	}
+	if envName := os.Getenv("SCLIENT_ENV"); envName != "" {
+		fmt.Fprintf(os.Stderr, "使用环境配置: %s（SCLIENT_ENV=%s）\n", defaultCfgPath, envName)
 	}
 
 	// 检查旧路径 ~/.sclient.yaml
@@ -102,7 +120,7 @@ func NewRootCmd() *cobra.Command {
 	// 注册子命令
 	ios := cli.SystemIOStreams()
 	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return cfgProvider })
-	cfgSvc := &cliConfigProvider{provider: cfgProvider}
+	cfgSvc := &cliConfigProvider{getProvider: func() *sclientcfg.ViperProvider { return cfgProvider }}
 	root.AddCommand(NewCmdCd(cliState, ios))
 	root.AddCommand(NewCmdPwd(cliState, ios))
 	root.AddCommand(NewCmdMkdir(factory, ios, cliState))
@@ -127,7 +145,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdTunnel(factory, ios))
 	root.AddCommand(NewCmdShare(factory, ios))
 	root.AddCommand(NewCmdRelay(factory, ios, cfgSvc))
-	root.AddCommand(NewCmdP2P(ios))
+	root.AddCommand(NewCmdP2P(ios, cfgSvc))
 	root.AddCommand(NewCmdMesh(factory, ios))
 	root.AddCommand(NewCmdCloudDownload(factory, ios, cliState, cfgSvc))
 	root.AddCommand(NewCmdCloudDownloadGroup(factory, ios, cfgSvc))
@@ -148,7 +166,7 @@ func initLogger(verbose bool) *slog.Logger {
 		level = slog.LevelDebug
 		webrtc.SetVerbose(true)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	logger := slog.New(tracing.WithContextHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	slog.SetDefault(logger)
 	return logger
 }

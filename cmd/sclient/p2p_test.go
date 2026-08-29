@@ -9,7 +9,46 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 )
+
+// mockCfgProvider 是 ConfigProvider 测试桩。
+type mockCfgProvider struct {
+	cfg *client.Config
+	err error
+}
+
+func (m *mockCfgProvider) LoadConfig() (*client.Config, error) {
+	return m.cfg, m.err
+}
+
+// TestP2PFlags_ApplyConfigFallback（P2-配置3）：
+// 未显式指定的 hub/token/relay-token/node-id 从配置回落；显式指定的不被覆盖。
+func TestP2PFlags_ApplyConfigFallback(t *testing.T) {
+	provider := &mockCfgProvider{cfg: &client.Config{
+		HubURL: "wss://hub.example.com/ws", AuthToken: "at", RelayToken: "rt", NodeID: "node-x",
+	}}
+
+	var f p2pFlags
+	f.applyConfigFallback(provider)
+	if f.hub != "wss://hub.example.com/ws" || f.tok != "at" || f.relayTok != "rt" || f.node != "node-x" {
+		t.Fatalf("配置回落未生效: %+v", f)
+	}
+
+	// 显式指定的 flag 不被覆盖
+	explicit := p2pFlags{hub: "ws://explicit", tok: "explicit-tok"}
+	explicit.applyConfigFallback(provider)
+	if explicit.hub != "ws://explicit" || explicit.tok != "explicit-tok" || explicit.relayTok != "rt" || explicit.node != "node-x" {
+		t.Fatalf("显式 flag 被配置覆盖: %+v", explicit)
+	}
+
+	// nil provider 是 no-op
+	empty := p2pFlags{}
+	empty.applyConfigFallback(nil)
+	if empty.hub != "" || empty.tok != "" {
+		t.Fatal("nil provider 不应填充")
+	}
+}
 
 func TestNewCmdP2P_Subcommands(t *testing.T) {
 	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})

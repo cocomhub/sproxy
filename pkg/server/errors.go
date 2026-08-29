@@ -24,7 +24,6 @@ const (
 	headerContentType  = "Content-Type"
 	headerFileChecksum = "X-File-Checksum"
 	headerFileMTime    = "X-File-MTime"
-	headerRequestID    = "X-Request-ID"
 
 	// Content-Type 值常量
 	contentTypeJSON        = "application/json"

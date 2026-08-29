@@ -766,6 +766,34 @@ func TestNewLocalHandler_rejectsNonLeadingSlash(t *testing.T) {
 	}
 }
 
+// TestClientDo_PropagatesTraceparentToOuterRequest 验证 Client.Do 会把内层请求的
+// traceparent 头复制到外层 /tunnel 请求，使服务端外层 requestLogMiddleware 记录的
+// 外层请求 trace_id 与客户端 trace 关联（全链路追踪在隧道模式下不断链）。
+func TestClientDo_PropagatesTraceparentToOuterRequest(t *testing.T) {
+	var gotTraceparent string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTraceparent = r.Header.Get("Traceparent")
+		// 直接返回 500 让 client.Do 快速失败；测试只关心外层请求头是否携带 traceparent。
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	client, err := NewClient(testHexKey, ts.URL, time.Second, nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	const want = "00-0123456789abcdef0123456789abcdef-abcd1234abcd1234-01"
+	req, _ := http.NewRequest("GET", "/api/files", nil)
+	req.Header.Set("Traceparent", want)
+	if _, err = client.Do(req); err == nil {
+		t.Fatal("expected error from 500 tunnel response")
+	}
+	if gotTraceparent != want {
+		t.Fatalf("outer tunnel request Traceparent = %q, want %q", gotTraceparent, want)
+	}
+}
+
 // TestReplayProtector_Validate 测试重放保护器的验证逻辑。
 func TestReplayProtector_Validate(t *testing.T) {
 	rp := NewReplayProtector()

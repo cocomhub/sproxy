@@ -30,6 +30,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
@@ -100,14 +101,18 @@ type FileClient struct {
 	chunkSize              int64
 	maxChunkSize           int64
 	authToken              string
+	meshHubURL             string // 配置 hub_url（mesh/relay/p2p 信令/中继 hub，区别于 xfer 的 hubURL）
+	relayToken             string // 配置 relay_token（hub 中继注册）
+	nodeID                 string // 配置 node_id（本节点默认 ID）
 	logger                 *slog.Logger
-	uploadCache            sync.Map      // key = absFilePath, value = *uploadCacheEntry
-	cacheCleanCounter      atomic.Int64  // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
-	maxCacheEntries        int           // checksum 缓存最大条目数，在 calcFileChecksum 的 Range 清理时统计并淘汰
-	cacheTTL               time.Duration // checksum 缓存 TTL，0=使用默认值 10m
-	chainManager           *ChainManager // 链式操作管理器，nil=不启用
-	initError              error         // WithTunnel/WithXfer 初始化错误
-	allowTransportFallback bool          // WithTransportFallback 设置后允许回退到直连模式
+	uploadCache            sync.Map       // key = absFilePath, value = *uploadCacheEntry
+	cacheCleanCounter      atomic.Int64   // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
+	maxCacheEntries        int            // checksum 缓存最大条目数，在 calcFileChecksum 的 Range 清理时统计并淘汰
+	cacheTTL               time.Duration  // checksum 缓存 TTL，0=使用默认值 10m
+	chainManager           *ChainManager  // 链式操作管理器，nil=不启用
+	initError              error          // WithTunnel/WithXfer 初始化错误
+	allowTransportFallback bool           // WithTransportFallback 设置后允许回退到直连模式
+	tracer                 tracing.Tracer // 追踪器，默认 tracing.New()（slog 实现）
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
@@ -126,7 +131,8 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 		serverURL:       strings.TrimRight(serverURL, "/"),
 		httpClient:      &http.Client{Timeout: 300 * time.Second},
 		chunkSize:       size.DefaultChunkSize, // 4 MiB
-		logger:          slog.Default(),
+		logger:          tracingLogger(),
+		tracer:          tracing.New(),
 		maxCacheEntries: defaultMaxCacheEntries,
 		cacheTTL:        defaultCacheTTL,
 	}
@@ -134,6 +140,22 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 		opt(c)
 	}
 	return c
+}
+
+// WithTracer 设置自定义 Tracer（可传 OpenTelemetry 适配，或测试用的 mock）。
+// 传入 nil 时保持默认实现（tracing.New()），避免 doRequest 中 nil 解引用。
+func WithTracer(t tracing.Tracer) Option {
+	return func(c *FileClient) {
+		if t != nil {
+			c.tracer = t
+		}
+	}
+}
+
+// tracingLogger 返回一个用 WithContextHandler 包装的 logger，使
+// InfoContext/DebugContext(ctx, ...) 日志自动携带 ctx 中的 trace_id/span_id。
+func tracingLogger() *slog.Logger {
+	return slog.New(tracing.WithContextHandler(slog.Default().Handler()))
 }
 
 // WithHTTPClient 设置自定义 HTTP 客户端。
@@ -302,6 +324,29 @@ func WithAuthToken(token string) Option {
 	}
 }
 
+// WithMeshHubURL 设置 mesh/relay/p2p 共用的 hub 地址（配置文件 hub_url）。
+// 与 WithXfer 的 hubURL（xfer 传输地址）语义不同：这是信令/中继 hub，供 mesh
+// connect / relay start / p2p 等命令在 --hub 未显式指定时作为配置回落。
+func WithMeshHubURL(v string) Option {
+	return func(c *FileClient) {
+		c.meshHubURL = v
+	}
+}
+
+// WithRelayToken 设置 hub 中继注册 token（配置文件 relay_token）。
+func WithRelayToken(v string) Option {
+	return func(c *FileClient) {
+		c.relayToken = v
+	}
+}
+
+// WithNodeID 设置本节点默认 ID（配置文件 node_id）。
+func WithNodeID(v string) Option {
+	return func(c *FileClient) {
+		c.nodeID = v
+	}
+}
+
 // WithLogger 设置 FileClient 内部使用的日志记录器。
 // 当 logger 为 nil 时使用 slog.Default()。
 func WithLogger(logger *slog.Logger) Option {
@@ -407,7 +452,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 		return nil, fmt.Errorf("计算 SHA-256 失败: %w", err)
 	}
 	fileChecksum = hex.EncodeToString(h.Sum(nil))
-	c.logger.Debug("文件 SHA-256", "file_path", localPath, "remote_path", remotePath, "checksum", shortid.ShortHash(fileChecksum))
+	c.logger.DebugContext(ctx, "文件 SHA-256", "file_path", localPath, "remote_path", remotePath, "checksum", shortid.ShortHash(fileChecksum))
 	if _, err = file.Seek(0, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("重置文件指针失败: %w", err)
 	}
@@ -1029,6 +1074,21 @@ func (c *FileClient) AuthToken() string {
 	return c.authToken
 }
 
+// MeshHubURL 返回配置的 mesh/relay/p2p hub 地址（可为空，调用方按命令语义回落）。
+func (c *FileClient) MeshHubURL() string {
+	return c.meshHubURL
+}
+
+// RelayToken 返回配置的 hub 中继注册 token（可为空）。
+func (c *FileClient) RelayToken() string {
+	return c.relayToken
+}
+
+// NodeID 返回配置的本节点默认 ID（可为空，回落主机名）。
+func (c *FileClient) NodeID() string {
+	return c.nodeID
+}
+
 // doRequest 统一发送 HTTP 请求：当配置了隧道客户端时走加密隧道，否则直连。
 //
 // urlPath 是相对路径，如 "/upload" 或 "/download?filename=test.txt"。
@@ -1045,6 +1105,18 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		}
 	}
 
+	// 追踪：为本次请求建立 span，并把 traceparent 头注入到请求头中。
+	// tracer 为 nil 时（如 WithTracer(nil)）回退到默认 slog 实现，避免 nil 解引用。
+	tracer := c.tracer
+	if tracer == nil {
+		tracer = tracing.New()
+	}
+	ctx2, end := tracer.StartSpan(ctx, method+" "+urlPath)
+	defer end()
+	tracer.Inject(ctx2, httpHeaderCarrier{req.Header})
+	// 请求上下文改用 ctx2：span 生命周期覆盖实际传输，且后续 Context 版日志自动带 trace_id/span_id。
+	req = req.WithContext(ctx2)
+
 	var resp *http.Response
 	if c.tunnelClient != nil {
 		if c.initError != nil {
@@ -1059,7 +1131,7 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		if !c.allowTransportFallback {
 			return nil, fmt.Errorf("transport initialization failed: %w", c.initError)
 		}
-		c.logger.Warn("transport unavailable, falling back to direct mode", "init_error", c.initError)
+		c.logger.WarnContext(ctx2, "transport unavailable, falling back to direct mode", "init_error", c.initError)
 	}
 
 	if c.xferName != "" {
@@ -1084,6 +1156,13 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	resp, err = hc.Do(req)
 	return closeBodyIfErr(resp, err)
 }
+
+// httpHeaderCarrier 适配 http.Header 为 tracing.Carrier（http.Header 本身
+// 不实现 Carrier 接口所需的 Get/Set 签名）。
+type httpHeaderCarrier struct{ h http.Header }
+
+func (c httpHeaderCarrier) Get(k string) string { return c.h.Get(k) }
+func (c httpHeaderCarrier) Set(k, v string)     { c.h.Set(k, v) }
 
 // closeBodyIfErr 在 (resp, err) 同时非 nil 的情况下关闭 resp.Body，避免连接 / 句柄泄漏。
 // 这是 http.Client.Do 在某些错误（例如 redirect 策略错误）下会返回的非典型形态：返回了响应但同时报错。

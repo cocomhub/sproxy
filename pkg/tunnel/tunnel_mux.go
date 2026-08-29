@@ -165,6 +165,9 @@ func (t *Tunnel) sendRequestBody(stream mux.Stream, req *http.Request) error {
 	if req.Body == nil {
 		return nil
 	}
+	// 兜底：请求体写完后即使出错也必须让对端感知写入已结束,
+	// 否则对端在 handleStream 停读后, 这里可能永久阻塞（断流死锁）。
+	defer stream.CloseWrite()
 	encKey := t.encryptionKey()
 	if encKey != nil {
 		if _, err := EncryptStream(encKey, req.Body, stream, []byte(AADStream)); err != nil {

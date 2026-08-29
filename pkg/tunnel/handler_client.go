@@ -388,20 +388,34 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("create tunnel request: %w", err)
 	}
 	tunnelReq.Header.Set(headerContentType, frameContentType)
+	// 全链路追踪：把内层请求的 traceparent 复制到外层 /tunnel 请求，
+	// 使服务端外层 requestLogMiddleware 记录的外层请求 trace_id 与客户端 trace 关联。
+	if tp := req.Header.Get("Traceparent"); tp != "" {
+		tunnelReq.Header.Set("Traceparent", tp)
+	}
 	httpResp, err := c.HTTPClient.Do(tunnelReq)
 	if err != nil {
+		// 兜底关闭上行 pipe：请求体加密 goroutine 仍在阻塞写 pw（io.Copy 下游断流时
+		// 永不返回），必须 Close 使 EncryptStream 的写立即失败, 否则 uploadWg.Wait() 死锁。
+		pr.Close()
 		return nil, fmt.Errorf("post request: %w", err)
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(httpResp.Body)
 		httpResp.Body.Close()
+		// 非 200（如 400/425）：服务端可能未消费完请求体，同样兜底关闭上行 pipe,
+		// 解除请求体加密 goroutine 的阻塞。
+		pr.Close()
 		return nil, fmt.Errorf("tunnel error (HTTP %d): %s", httpResp.StatusCode, string(errBody))
 	}
 
 	respMetaJSON, err := decodeMetadataFrame(httpResp.Body, c.Key)
 	if err != nil {
 		httpResp.Body.Close()
+		// 解码响应 metadata 失败同样意味着响应已结束, 上行 pipe 不再被消费,
+		// 关闭避免请求体加密 goroutine 永久阻塞。
+		pr.Close()
 		return nil, fmt.Errorf("decode response metadata: %w", err)
 	}
 	var tunnelResp Response

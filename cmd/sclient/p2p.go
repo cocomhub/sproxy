@@ -43,7 +43,13 @@ func discardLogger() *slog.Logger {
 
 // NewCmdP2P 创建 p2p 父命令：基于 WebRTC 打洞的点对点连接。
 // 信令经 hub 的 /api/signal/* 桥，数据面打洞成功后直连（不经过 hub）。
-func NewCmdP2P(ios cli.IOStreams) *cobra.Command {
+// cfgSvc 为可选配置提供者（P2-配置3）：--hub/--token/--relay-token/--node-id 未
+// 显式指定时从配置 hub_url/auth_token/relay_token/node_id 回落。
+func NewCmdP2P(ios cli.IOStreams, cfgSvc ...ConfigProvider) *cobra.Command {
+	var provider ConfigProvider
+	if len(cfgSvc) > 0 {
+		provider = cfgSvc[0]
+	}
 	cmd := &cobra.Command{
 		Use:   "p2p",
 		Short: "WebRTC 点对点直连（经 hub 信令桥打洞）",
@@ -51,8 +57,8 @@ func NewCmdP2P(ios cli.IOStreams) *cobra.Command {
 			_ = cmd.Help()
 		},
 	}
-	cmd.AddCommand(newCmdP2PConnect(ios))
-	cmd.AddCommand(newCmdP2PListen(ios))
+	cmd.AddCommand(newCmdP2PConnect(ios, provider))
+	cmd.AddCommand(newCmdP2PListen(ios, provider))
 	return cmd
 }
 
@@ -78,6 +84,30 @@ func (f *p2pFlags) add(cmd *cobra.Command) {
 func (f *p2pFlags) applyConfig() {
 	if f.stun != nil {
 		webrtc.SetSTUNServers(f.stun)
+	}
+}
+
+// applyConfigFallback 用配置文件补齐未显式指定的 hub/token/relay-token/node-id
+// （优先级：CLI flag > 配置文件；P2-配置3）。cfgSvc 为 nil 时是 no-op。
+func (f *p2pFlags) applyConfigFallback(cfgSvc ConfigProvider) {
+	if cfgSvc == nil {
+		return
+	}
+	cfg, err := cfgSvc.LoadConfig()
+	if err != nil {
+		return
+	}
+	if f.hub == "" {
+		f.hub = cfg.HubURL
+	}
+	if f.tok == "" {
+		f.tok = cfg.AuthToken
+	}
+	if f.relayTok == "" {
+		f.relayTok = cfg.RelayToken
+	}
+	if f.node == "" {
+		f.node = cfg.NodeID
 	}
 }
 
@@ -129,7 +159,7 @@ func (f *p2pFlags) localNode() string {
 }
 
 // newCmdP2PConnect 创建 p2p connect：拨号到对端建立 WebRTC 直连。
-func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
+func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var f p2pFlags
 	cmd := &cobra.Command{
 		Use:   "connect --peer <id> --tcp <addr> [-l :port]",
@@ -145,6 +175,7 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 				return fmt.Errorf("--peer 与 --tcp 均不能为空")
 			}
 			ctx := cmd.Context()
+			f.applyConfigFallback(cfgSvc) // P2-配置3：未显式指定的 hub/token/node-id 取配置文件
 			f.applyConfig()
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（不依赖 hub）；否则经 hub 信令桥
@@ -218,7 +249,7 @@ func newCmdP2PConnect(ios cli.IOStreams) *cobra.Command {
 }
 
 // newCmdP2PListen 创建 p2p listen：作为对端等待入站 WebRTC 直连。
-func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
+func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var f p2pFlags
 	cmd := &cobra.Command{
 		Use:   "listen",
@@ -232,6 +263,7 @@ func newCmdP2PListen(ios cli.IOStreams) *cobra.Command {
 			answerFile, _ := cmd.Flags().GetString("answer")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
+			f.applyConfigFallback(cfgSvc) // P2-配置3：未显式指定的 hub/token/node-id 取配置文件
 			f.applyConfig()
 
 			// I46：relay 会话诊断日志经 ios.ErrOut 输出（用户可见 + 可测试），带 node
