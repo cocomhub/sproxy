@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788009653573,
+  "lastUpdate": 1788009882924,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -305622,6 +305622,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1203955 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "da3257a6e8ed0cc634552fb529b4eea71a09165c",
+          "message": "fix: 上传断点续传可靠性 + Web UI 渲染重构 (#114)\n\n* fix(server): POST /api/share 与 hub 查询路由补进 localMux——修复隧道模式下 sclient.share.create 404\n\n浏览器回归发现：createShareHandler 此前只挂 srvMux（主面），localMux（隧道内层\n转发目标）缺注册 GET/POST /api/share，导致 Web UI 分享在隧道模式下 100% 404。\nGo 1.22 ServeMux：'/tunnel' 内层转发到 localMux，缺路由即 404 page not found。\n同步把 hub nodes/stats/remove/services 也暴露 localMux（隧道内全用户面可达，\nhandler 各自按 routeTable==nil 返回 404 语义不变；直连面仍 authMiddleware）。\n新增 handlers_localmux_test.go：账本式测试声明 44 条路由在接入层 mux 均存在\n（405 判据，6 个 probe method 黑盒探测），未来任何 srvMux 用户面路由未同步\n localMux 都会在此失败。\n\n(cherry picked from commit 9c3f7c150f6007f44dc87508668e2b7915ff13eb)\n\n* fix(server): hub 用户面路由补进 localMux（隧道内可用）+ localMux 账本测试支持 hub.enabled\n\n浏览器回归：hub.nodes()/hub.stats() 在隧道模式（web.tunnel:true）下 404。根因：\nhub 用户面路由（GET /api/hub/nodes、/stats、/services、DELETE /api/hub/nodes/{id}）\n此前只在 opts.RouteTable != nil 分支里注册到一个 localMux（漏 + 语句），且\nhandlers_localmux_test 的账本未覆盖 /api/hub/*，把「本地有 hub 配置」的路由\n该在的知识与测试脱节。修复 handlers.go：把四个 hub 查询路由从 srvMux-only\n统一暴露 localMux（隧道内全用户面可达；handler 按 routeTable==nil 返回 404\n语义不变，直连面仍 authMiddleware）。\n\n测试：newTestMux(withHub) 注入 RouteTable 模拟 hub.enabled；localMuxPatterns 增\n/api/hub/nodes 与 /api/hub/stats 两项；每次请求都新建独立 mux 避免并行路由冲突。\n\n浏览器实际验证：hub.enabled:true 配置下经隧道 hub.nodes()==200 {nodes:[]}、\nhub.stats()==200 {nodes_connected:0}。\n\n(cherry picked from commit 1e4e81b943e9d0912312c9fb4633ea8252255690)\n\n* fix(web): 上传进度标错与续传/隧道checkbox一致性\n\n1. 大文件上传进度：分块上传的 onProgress 回调是 {loaded,total,chunkIndex,totalChunks}\n   对象，uploadFiles 误按 (loaded,total) 数值渲染 - Object] B/undefined B。现在统一判\n   断对象/数值两种形态：计算阶段显示「计算 SHA-256… N%」，数据阶段「上传中… N%（\n   done/total 分块）」。简单上传沿用同一 updateSimpleProgress 辅助。\n2. 续传会话保存丢失：sc.files.upload 内部 model 分块上传在 files.js chunkedUpload，\n   upload.js 的 saveUploadSession 仅在旧 upload.js 分块上传路径调用，而新一已全委托\n   sc.files.upload（内部不再持久化会话）→ 刷新页面后 checkResumableUploads 读不到\n   uploading 会话。恢复：在 sc.files.upload 分块路径每次 chunk 成功后本地持久化会话\n   （filename/totalSize/totalChunks），失败保留，merge complete/already_exists 时移除。\n   为免 over-engineering，改在 files.js 内可注入会话钩子（onSession 回调），upload.js\n   传 saveUploadSession/removeUploadSession 接入；实现最小、由 UI 决定持久化。\n4. use-tunnel-checkbox 勾选态与 effectiveMode 解耦：checkbox 指示「存在 localStorage\n   override」，不再等于「当前真实走隧道」（后者受服务端 web.tunnel 默认影响）。刷新后\n   勾选仍跟随 override 值（本次修复只补注释；实际初值读取本已正确，勾选为 false 但\n   实际走隧道是设计而非残留——凸显误导所以补注释明确）。\n   ——注：本 commit 主要修 1、2；4 为注释澄清。\n\n(cherry picked from commit efd6c79fa25f5c9c6baf0c37e7d7eb85c581d4e9)\n\n* fix(web): 恢复分块上传会话持久化（files.js onSession 钩子 + upload.js 接入）\n\n问题2：新 UI 全部委托 sc.files.upload（files.js chunkedUpload），其内部不再持久化\n上传会话 → 刷新页面后 checkResumableUploads 读 localStorage 无 uploading 会话，\n续传提示丢失。修复：files.js 分块路径新增 onSession 钩子（每 block 成功更新\n{upload_id,filename,totalSize,totalChunks,fileChecksum,status:uploading,\ncompletedChunks,loaded}；init 后立即首持久化；already_exists/合并成功→remove）；\nupload.js chunkedUpload 接入 saveUploadSession/removeUploadSession。\n\n验证：node --check + sclient.test.js 45 pass + make build-sproxy（web 内嵌）\n\n(cherry picked from commit f6f79192c4fb995757a34058a68050ba0ece5bb7)\n\n* fix(server): uploadComplete 合并改 WithoutCancel context——客户端断开不影响合并\n\n问题5：sclient CLI 上传大文件时，分块全部成功但合并最终失败。根因：原\nuploadComplete 把 r.Context()（客户端请求连接 context）透传给 mergeChunksWithHash，\nmergeChunksWithHash 循环内 select ctx.Done() 取消——客户端断开/超时 → 合并中断。\n修复：合并改用 context.WithoutCancel(r.Context())，合并不随客户端连接结束而取消；\n即使响应已写出，合并仍可完成，客户端下次 init/status/complete 幂等发现已上传。\n失败时仍保留分块与会话（未 CompleteSession/清理），客户端可重试。\n\n验证：go test ./pkg/server/... + golangci-lint 0 issues + make build\n\n(cherry picked from commit 36814c15f44894043dbf05e613f4e3568f4f8542)\n\n* fix(web): uploadFiles 修复引用未定义 totalSize（改用 size）——大文件经上传入口报 ReferenceError\n\n上传入口 uploadFiles 的分块回调拿对象 {loaded,total,...} 时原本引用 totalSize，\n但该作用域只有 size（totalSize 定义在 chunkedUpload/simpleUpload）。total 缺失/为 0\n时以 file.size 兜底。修复后大文件走 uploadFiles 不再 ReferenceError。\n\n真实浏览器验证：10MiB 分块经 uploadFiles 上传成功合并校验通过；服务端返回的\nupload.js 含修复（grep pr || 0, size 命中）；web-test 45 pass。\n\n(cherry picked from commit b95130cb0155a474389e93b3ca3ac19b91c1f09a)\n\n* refactor(web): upload.js 渲染/逻辑隔离（progressText 纯函数 + renderProgress 唯一 DOM 入口 + module.exports）+ upload.test.js 全场景\n\n原则（全部 app 层共同遵守）：\n  1) 纯计算（progressText）不碰 DOM、单测直测；2) DOM 写入唯一入口 renderProgress/\\ncreateProgressBar/showResumePrompt，其它函数不得直接改进度；3) 事件绑定用 typeof \\ndocument 守卫，Node 单测可 require；4) module.exports 导出供 Node 测试。\n\nprogressText 覆盖边界：total=0/undefined→pct=0 不 NaN、loaded 负→0、chunkIndex 缺省\\n分块从 1 计并封顶 N、titleText 条件透传。test 断言 progressText 不触发 DOM（隔离）。\\nrenderProgress 在 stub document 下只写 render 结果。会话 save/load/remove + 坏 JSON\\n回退 + resumedChunkCount 兜底。web-test 现已并入 upload.test（11 用例），总 45+11+6 pass。\\n\\n此前已修 totalSize 未定义（b95130c）。\n\n(cherry picked from commit 14d657d35b4ba599b53a1365835603a29fe76e41)\n\n* refactor(web): 抽出 app-render.js 纯渲染模块——app 层全部渲染函数与 DOM/逻辑隔离\n\napp.js 重构（按隔离原则）：\n- 纯函数（formatSize/escHtml/getChecksumPrefix/bytesToHex/normalizeList/zipNames/\n  parseCloudLines/previewKind + buildFile*Html/buildLoadMore*（参数化）/hubTableHtml/\n  configTableHtml/statsTableHtml/statusText/buildProgressBar/cloudTaskActions/\n  buildCloudTaskTableHtml/cloudGroupActions/buildCloudGroupTableHtml/\n  buildVersionTableHtml）全部迁入 web/static/app-render.js（UMD：浏览器 appRender，\n  Node module.exports）；app.js 只保留薄转发，删除内联重复实现。\n- 删除死代码 concatBytes；合并 formatBytes→formatSize（清重复口径）。\n- 修复 cloudGroupActions/buildCloudGroupTableHtml 中 id/name 未过 escHtml 的轻微 XSS 面。\n- index.html 在 app.js 前加载 app-render.js + Makefile web-test 并入 app-render.test.js。\n\n测试：app-render.test.js 全场景 19 用例覆盖基础工具/列表/hub/config/stats/云端/版本\n含 XSS 断言与边界；web-test 现 6+19+11+45=81 pass；浏览器回归（凭据→列表→上传→\n下载 checksum→删除）全绿、console 无 error。\n\n(cherry picked from commit c4b8dda6863c638db08a5484ad2064d2b6054a48)\n\n* fix(web): rmdir 补 force=true 修复删除非空目录 400 + 删除 shareFile legacy 薄转发\n\n复审回归发现：sdk/files.js.rmdir 只发 /rmdir?dirname=，服务端对非空目录要求\n?force=true（防误删）→ Web 删除目录按钮永远 400「请使用 ?force=true 确认删除」。\nWeb 删除目录前已 confirm，故 SDK 统一带 force=true。单测断言 path=\n/rmdir?dirname=d&force=true。同时删除 app.js 中 shareFile legacy 薄转发\n（实际事件委托已直接用 showShareModal，不留 legacy）与 formatBytes 残留转发。\n\n浏览器回归：mkdir→rmdir(force) 通过非空目录删除、小/大文件上传下载校验删除、\n分享、config 全绿、console 0 error。\n\n(cherry picked from commit 7891be6365d2afb2cfeb07139fe627d0bff3daa3)\n\n* fix(web): app.js 内联渲染工具改用 appRender 委托 + sha256Bytes 改用 sclientCrypto.bytesToHex（删除残留转发函数防 ReferenceError）\n\n(cherry picked from commit 2073aa8a944e146f2ffb9524303414860ec0c4bf)\n\n* fix(web): upload.js 进度条/render 改 appRender 委托——修复上传时 escHtml is not defined（app.js 转发函数已删除）\n\n(cherry picked from commit 3bfda50b1236e8dd9b236485c7d73c84ee893ca2)\n\n* chore(web): 固化跨文件隐式全局防护——Makefile 补 upload.js check + appRender.uploadProgressText 可测入口 + CLAUDE.md 记录\ntest 覆盖：app-render.test.js uploadProgressText 全边界、web-test 维持全绿\n\n(cherry picked from commit 68b86bec3d53014cf63d64777554d9ba3dca0bd5)\n\n* fix(web): 刷新不再误清进行中分块会话——success 分支去掉 removeUploadSession，会话清除只由 onSession(true)/upload-status 负责\n\n场景：大文件分块上传中刷新页面 → 顶层 refreshList 先执行，旧逻辑 success 分支无条件\nremoveUploadSession 把进行中会话清掉 → checkResumableUploads 读空 → 断点续传提示消失。\n回归测试锁定三处旧写法不再出现。\n\n(cherry picked from commit f75d12be3f4c20a8b39a449fa78bd09228c0ecbf)\n\n* fix(web): 断点续传检测移到 DOMContentLoaded 内——刷新时序更稳定（此前顶层 refreshList+checkResumableUploads 同步链路与 async list 竞态）\n\n(cherry picked from commit 7899e7b438fb49845479a8f0ba6ec36f3ccb55e8)\n\n* fix(web): 计算 SHA-256 阶段刷新可恢复——分块上传先落 hashing 会话（preUploadId）再算哈希，检查/续传/清理全链路支持\n\n计算大文件 SHA-256 期间刷新：此前 localStorage 尚无会话 → 提示缺失。现在 init 前\n先以 preUploadId（filename|size|mtime|''）落 hashing 会话，checkResumableUploads\n对 hashing 保留并显示待续传；init 成功后若 sessionId===preUploadId 清占位再落 uploading；\nresumeUpload 对 hashing 移除旧会话走全量重传。\n\n(cherry picked from commit ca3c246f6beab57737f03d03f6282e3c3ad9f69c)\n\n* fix(web): hashing 占位在续传进入分块后统一清除——修复幽灵会话残留(E2E 证实)\n\n(cherry picked from commit 39899c1430db031b02e1ba2bb8ffdee66cdc30fe)",
+          "timestamp": "2026-08-29T21:20:40+08:00",
+          "tree_id": "45771e855fc67806c548ab318f710e98a4ae9179",
+          "url": "https://github.com/cocomhub/sproxy/commit/da3257a6e8ed0cc634552fb529b4eea71a09165c"
+        },
+        "date": 1788009878590,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 728.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1656124 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 728.2,
+            "unit": "ns/op",
+            "extra": "1656124 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1656124 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1656124 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 730.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1633611 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 730.1,
+            "unit": "ns/op",
+            "extra": "1633611 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1633611 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1633611 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 736.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1623176 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 736.1,
+            "unit": "ns/op",
+            "extra": "1623176 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1623176 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1623176 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 742.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1521973 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 742.9,
+            "unit": "ns/op",
+            "extra": "1521973 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1521973 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1521973 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 730.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1644751 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 730.8,
+            "unit": "ns/op",
+            "extra": "1644751 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1644751 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1644751 times\n4 procs"
           }
         ]
       }
