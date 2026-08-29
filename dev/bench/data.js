@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788010279976,
+  "lastUpdate": 1788012032854,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -305906,6 +305906,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1281369 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "20f7362d48a69f5708eed0f864a2db764d38fdc0",
+          "message": "feat: 传输管理器（数据层/下载管线/上传真实暂停）+ SDD 设计文档 (#115)\n\n* feat(server): GET /upload/sessions 列出未完成上传会话\n\n(cherry picked from commit db65e5a99b9f56ae2fb8953a6265a0abbb551cf8)\n\n* refactor(server): /upload/sessions status 收敛为 uploading，删除 stuck 分支\n\n(cherry picked from commit 2deef292fa826162b7f0654cb8278c41d1ea36cc)\n\n* feat(web): 传输数据层 transfer-store（TransferItem/IndexedDB 块缓存/文件句柄）\n\n(cherry picked from commit 67b7cf5a9a662a1eba7664cd839d7107ddc49d9b)\n\n* fix(web): transfer-store 拆出 sproxy-up-dev 库 + 写确认策略注释权衡（R1）\n\n(cherry picked from commit c78fc360c51fa650e586f4d5e299e792d969d0e9)\n\n* feat(web): 传输渲染与按状态筛选纯函数（app-render）\n\n(cherry picked from commit 06e6a2f705c95eb4ff46298d8ab27dee4b7c6548)\n\n* feat(web): 传输页导航骨架（文件/传输主 tab）\n\n(cherry picked from commit 549e4c4ae55d2a31a0264f7ff2ecce05063cfe1a)\n\n* fix(web): transferStore 实例化接线——非云频道列表数据源收敛（R1）\n\n(cherry picked from commit f575cb7517ff4a8610049332289c739e97b2422f)\n\n* refactor(web): 云任务/云组迁入传输页统一渲染管，移除 cloud-modal 残留（R1）\n\n(cherry picked from commit 34af07ca3b46d4ff011080d3d17fa49eb334ee8b)\n\n* fix(web): 云行前缀 id 剥除 + 首屏首拉（R2）\n\n(cherry picked from commit b2f258526b46c935dfd6e9fc60a31d7cb97583aa)\n\n* chore(web): 删除 normalizeCloudTaskItem 重复定义（R2 复审 Minor 消重）\n\n(cherry picked from commit b31ac5aaa62548ce88c86f76743ba8aee1ea1c4f)\n\n* feat(web): 下载管理管线（分块缓存+恢复校验）\n\n(cherry picked from commit 3897e343fc8aa490e1946f994fb27cf3ffa5b90e)\n\n* fix(web): 下载管线 R1 审查修复（_running 回收 + cancel/assemble 竞态抑制）\n\n(cherry picked from commit 919aab3a7649e4d4d1bdaf97ff9462886cf73ad8)\n\n* fix(web): 下载管线 R2 cancel/assemble 写回窗口复查内移（persistItem 前二次复查）\n\n(cherry picked from commit 5af094fabcde23a9c666953dbb68fc5623e59a19)\n\n* feat(web): 上传会话层改 TransferItem + 文件句柄（任务 7）\n\n会话持久化从 localStorage 键值改 transfer-store/sproxy_transfer_items 的 TransferItem（kind:upload，meta 存 uploadId/fileChecksum/totalChunks/chunkSize/serverChunkSize/chunksBitmap），completedChunks→bitmap 计数续传；checkResumableUploads 读全部 upload 类 item 并发 /upload/status 探测（hashing 保留待续传 / finished 删 / missing>0 提示 / 失联删）；resumeUpload 优先 getFileHandle→queryPermission(read)→getFile→size 校验→只补缺失块（files.js 内核 missing_chunks 权威），句柄缺失/拒绝/无 FS API 回落选择文件续传 input；删除 SESSIONS_KEY/loadSessions/saveSessions；upload.test.js 注入 mock transfer-store + 探测 transport 覆盖新会话层与纯函数；Makefile web-test 已含 upload.js check 无需改。\n\n(cherry picked from commit 65a8f2b3179534f4c3285e08182d52729a7eb419)\n\n* fix(web): 任务7 R1 mtime 续传校验 + 死代码清理 + 句柄/回落测试\n\nresumeUpload 两路补 mtime 校验：sessionToTransferItem 落 meta.mtimeNano（files.js hashing 占位 data 已带 mtimeNano）；file 路用 file.lastModified*1000000、句柄免重选路用 picked.lastModified*1000000，存档有 mtime 且不一致时提示「文件已变更」并不再续传（防内容异动续出新旧混合文件）。删除未使用死代码 const singleFile/pendingHandle 采集钩子（FS 免重选由 resumeUpload 句柄路径承担）。upload.test.js 增至 16 用例：resumeUpload file 路 size 不匹配 → toast+files.upload 计数 0；句柄路 granted+size/mtime 匹配 → files.upload 计数 1（补缺失块由 files.js 内核 missing_chunks 决定）；句柄路 mtime 不匹配 → toast 不发上传。make web-test 全绿（7 文件 7 fail 0）。\n\n(cherry picked from commit 7d3f98c018df8d19e435305800ed14c3b9ff8603)\n\n* test(e2e): 传输管理器会话恢复覆盖\n\n(cherry picked from commit 3920d93515fcb2d37b0c3b9f09650b9322c951ae)\n\n* fix(web): 修复 upload.js/app.js 顶层 _transferStore 重名 SyntaxError，改 setTransferStore 注入\n\n(cherry picked from commit e29c1d35476e1d26418440ed03667e86a04e8f38)\n\n* fix(web): 传输页行操作按钮事件委托接线（暂停/恢复/取消/删记录/重下/打开目录）\n\n(cherry picked from commit c8e7503f70a34f798d9a10a1e633e8aa2a7bb173)\n\n* test(web): 传输页行操作事件委托回归测试（防按钮失效重演）\n\n(cherry picked from commit 6246aefed7726ad6a51f70285658f08525918504)\n\n* fix(web): 恢复下载不匹配 onMismatch 提示（防静默失败）\n\n(cherry picked from commit 687d796a7b5ec2a0d7d7af287de7b1d868f51422)\n\n* feat(web): 上传行真实暂停（取消检查点+E_CANCELLED+paused 写回）+ 回归测试\n\n(cherry picked from commit bff0f9eb18b30125a7b319ba23a7b85642b383f3)\n\n* docs: 传输管理器设计规格与实现计划（SDD 全套文档入库）\n\n(cherry picked from commit bd7973a12aa36cefc1c2bf4e0f42f985d6df5c2d)\n\n* fix(web): UI E2E 云下载测试对齐新版传输页（cloud-modal 已移除）",
+          "timestamp": "2026-08-29T21:56:02+08:00",
+          "tree_id": "fdce8b7dc11488330741eae1f10f91ceea785a11",
+          "url": "https://github.com/cocomhub/sproxy/commit/20f7362d48a69f5708eed0f864a2db764d38fdc0"
+        },
+        "date": 1788012026216,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 923,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1307274 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 923,
+            "unit": "ns/op",
+            "extra": "1307274 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1307274 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1307274 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 964.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1305904 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 964.7,
+            "unit": "ns/op",
+            "extra": "1305904 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1305904 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1305904 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 923.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1304430 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 923.1,
+            "unit": "ns/op",
+            "extra": "1304430 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1304430 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1304430 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1303959 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921.4,
+            "unit": "ns/op",
+            "extra": "1303959 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1303959 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1303959 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 923.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1308967 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 923.7,
+            "unit": "ns/op",
+            "extra": "1308967 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1308967 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1308967 times\n4 procs"
           }
         ]
       }
