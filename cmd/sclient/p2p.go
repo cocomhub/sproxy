@@ -53,9 +53,12 @@ func NewCmdP2P(ios cli.IOStreams, cfgSvc ...ConfigProvider) *cobra.Command {
 
 // p2pFlags 是 p2p 相关命令的公共 flag。
 type p2pFlags struct {
-	hub  string
-	node string
-	stun []string
+	hub      string
+	node     string
+	stun     []string
+	turn     []string
+	turnUser string
+	turnPass string
 }
 
 func (f *p2pFlags) add(cmd *cobra.Command) {
@@ -63,12 +66,24 @@ func (f *p2pFlags) add(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.node, "node-id", "", "本节点 ID（信令 from；默认主机名）")
 	cmd.Flags().StringSliceVar(&f.stun, "stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
+	cmd.Flags().StringSliceVar(&f.turn, "turn", nil,
+		"TURN 中继服务器地址（可重复/逗号分隔，如 turn:relay.example.com:3478）；需配合 --turn-user/--turn-pass，提升对称 NAT 下打洞成功率")
+	cmd.Flags().StringVar(&f.turnUser, "turn-user", "", "TURN 用户名（静态密码模式，配 --turn/--turn-pass 使用）")
+	cmd.Flags().StringVar(&f.turnPass, "turn-pass", "", "TURN 密码（静态密码模式，配 --turn/--turn-user 使用）")
 }
 
-// applyConfig 应用运行时全局配置（STUN 列表）。在连接创建前调用。
+// applyConfig 应用运行时全局配置（STUN/TURN）。在连接创建前调用。
+// TURN 相关仅对显式提供的 flag 生效：--turn 非空才调 SetTURNServers，
+// --turn-user/--turn-pass 非空才调 SetTURNCredential（缺 flag = 保持现状）。
 func (f *p2pFlags) applyConfig() {
 	if f.stun != nil {
 		webrtc.SetSTUNServers(f.stun)
+	}
+	if f.turn != nil {
+		webrtc.SetTURNServers(f.turn)
+	}
+	if f.turnUser != "" || f.turnPass != "" {
+		webrtc.SetTURNCredential(f.turnUser, f.turnPass)
 	}
 }
 

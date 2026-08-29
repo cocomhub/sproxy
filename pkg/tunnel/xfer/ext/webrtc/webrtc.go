@@ -89,6 +89,44 @@ func SetSTUNServers(servers []string) {
 	stunServers = filtered
 }
 
+// turnServers 是当前生效的 TURN 服务器列表（与 stunServers 独立）。
+// 空切片 = 不使用 TURN（默认）；SetTURNServers(nil) 清空。
+var turnServers []string
+
+// turnUsername / turnPassword 是 TURN 服务器的长期凭据（静态密码模式）。
+var turnUsername, turnPassword string
+
+// SetTURNServers 覆盖 TURN 服务器列表（调用方传入 --turn 的多个值）。
+// nil = 清空（不使用 TURN）；否则过滤掉空串与非法 URL（打 Warn 并跳过），
+// 存储时用独立切片，避免与调用方 slice 共享底层数组（防后续修改污染）。
+// 注：只设服务器不设凭据时 defaultConfig 不下发 TURN 条目（pion 需要
+// Username/Credential，否则 newPC 校验失败）。
+func SetTURNServers(urls []string) {
+	if urls == nil {
+		turnServers = nil
+		return
+	}
+	filtered := make([]string, 0, len(urls))
+	for _, u := range urls {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		if !validSTUNURL(u) {
+			slog.Warn("webrtc: 忽略非法的 TURN URL", "url", u)
+			continue
+		}
+		filtered = append(filtered, u)
+	}
+	turnServers = filtered
+}
+
+// SetTURNCredential 设置 TURN 服务器凭据（静态用户名/密码，pion password 模式）。
+func SetTURNCredential(username, password string) {
+	turnUsername = username
+	turnPassword = password
+}
+
 // validSTUNURL 校验 STUN/TURN URL 的 scheme 与 host:port 基本格式。
 // 支持 stun:/stuns:/turn:/turns: 四种 scheme；TURN URL 可带 ?transport=udp 查询参数。
 // 端口要求为数字（STUN/TURN 均用数字端口；服务名端口不属于合法 ICE server URL）。
@@ -442,12 +480,26 @@ func (c *Conn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *Conn) SetWriteDeadline(_ time.Time) error { return nil }
 
 func defaultConfig() webrtc.Configuration {
-	if useHostOnly || len(stunServers) == 0 {
+	// host-only 是测试专用逃生舱（仅本机候选），此时仍返回空配置（既有行为与测试）。
+	// 其余情况：stunServers 与 turnServers 都为空时才返回空配置，否则逐项构建。
+	if useHostOnly || (len(stunServers) == 0 && len(turnServers) == 0) {
 		return webrtc.Configuration{}
 	}
-	return webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{{URLs: stunServers}},
+	var servers []webrtc.ICEServer
+	if len(stunServers) > 0 {
+		servers = append(servers, webrtc.ICEServer{URLs: stunServers})
 	}
+	// TURN 条目仅在服务器与凭据三者齐备时下发（pion 4.2.18 对无凭据 turn URL
+	// 报 ErrNoTurnCredentials，缺凭据时下发会导致 newPC 失败——因此静默不追加）。
+	if len(turnServers) > 0 && turnUsername != "" && turnPassword != "" {
+		servers = append(servers, webrtc.ICEServer{
+			URLs:           turnServers,
+			Username:       turnUsername,
+			Credential:     turnPassword,
+			CredentialType: webrtc.ICECredentialTypePassword,
+		})
+	}
+	return webrtc.Configuration{ICEServers: servers}
 }
 
 func newPC() (*webrtc.PeerConnection, *srflxDiag, error) {

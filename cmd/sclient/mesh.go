@@ -81,6 +81,15 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			if stunServers != nil {
 				webrtc.SetSTUNServers(stunServers)
 			}
+			turnServers, _ := cmd.Flags().GetStringSlice("turn")
+			turnUser, _ := cmd.Flags().GetString("turn-user")
+			turnPass, _ := cmd.Flags().GetString("turn-pass")
+			if turnServers != nil {
+				webrtc.SetTURNServers(turnServers)
+			}
+			if turnUser != "" || turnPass != "" {
+				webrtc.SetTURNCredential(turnUser, turnPass)
+			}
 
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
@@ -158,6 +167,10 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 	cmd.Flags().String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port；本地节点无到目标的已建链路时回落常规拨号）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
+	cmd.Flags().StringSlice("turn", nil,
+		"TURN 中继服务器地址（可重复/逗号分隔，如 turn:relay.example.com:3478）；需配合 --turn-user/--turn-pass，提升对称 NAT 下打洞成功率")
+	cmd.Flags().String("turn-user", "", "TURN 用户名（静态密码模式，配 --turn/--turn-pass 使用）")
+	cmd.Flags().String("turn-pass", "", "TURN 密码（静态密码模式，配 --turn/--turn-user 使用）")
 	return cmd
 }
 

@@ -50,6 +50,15 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			if stunServers != nil {
 				webrtc.SetSTUNServers(stunServers)
 			}
+			turnServers, _ := cmd.Flags().GetStringSlice("turn")
+			turnUser, _ := cmd.Flags().GetString("turn-user")
+			turnPass, _ := cmd.Flags().GetString("turn-pass")
+			if turnServers != nil {
+				webrtc.SetTURNServers(turnServers)
+			}
+			if turnUser != "" || turnPass != "" {
+				webrtc.SetTURNCredential(turnUser, turnPass)
+			}
 
 			// P2-配置3：通用参数配置回落（CLI > 配置文件 > 默认）。常驻节点不需要
 			// FileClient（避免 tunnel_key/InitError 拖垮），直接经 cfgSvc 回落。
@@ -123,5 +132,9 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 	cmd.Flags().String("gateway-addr", mesh.GatewayDefaultAddr, "本地网关监听地址（mesh connect --gateway 复用已建直连链路的入口；仅 loopback，安全默认；同机多节点用 127.0.0.1:0 随机端口）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
+	cmd.Flags().StringSlice("turn", nil,
+		"TURN 中继服务器地址（可重复/逗号分隔，如 turn:relay.example.com:3478）；需配合 --turn-user/--turn-pass，提升对称 NAT 下打洞成功率")
+	cmd.Flags().String("turn-user", "", "TURN 用户名（静态密码模式，配 --turn/--turn-pass 使用）")
+	cmd.Flags().String("turn-pass", "", "TURN 密码（静态密码模式，配 --turn/--turn-user 使用）")
 	return cmd
 }
