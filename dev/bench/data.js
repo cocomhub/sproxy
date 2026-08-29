@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787982667241,
+  "lastUpdate": 1787983720761,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -302938,6 +302938,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1296543 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5116bab511f10ec8f7ac2e01a813a2535117f491",
+          "message": "feat: tracing W3C traceparent 可观测性 + 配置多环境 + 隧道断流修复 (#108)\n\n* feat(tracing): W3C traceparent 支持（SpanContext/Inject/WithContextHandler）\n\n(cherry picked from commit 56b9f77af896c18c795bbdcf8e1005bef71774ca)\n\n* feat(server): traceparent 请求日志中间件，全请求覆盖收到/结束 + ctx 链路日志\n\n(cherry picked from commit 99163bffd441a85b2567af086f6f6ce160452606)\n\n* fix(server): upload/delete/rename 内部日志改用 Context 版，自动携带 trace_id/span_id\n\n(cherry picked from commit 42610e56b58ed60e5b8e396265a3db06c23fa191)\n\n* feat(client): doRequest 注入 traceparent + verbose 打印 trace_id/span_id\n\n(cherry picked from commit 400849fd0019e6c6a66ced82bd60d43effd8be37)\n\n* feat(tracing): OpenTelemetry 可插拔适配子模块\n\n(cherry picked from commit 0d07db1be4f51a0f571cc9470889517b1a044556)\n\n* fix(workspace): go.work 收录 tracing/ext/otel 子模块（对齐其他 ext 约定）\n\n(cherry picked from commit fa3cad7767dfbdbbeecf73ddd0147fbc0b1010ee)\n\n* chore(deps): go.work 收录 otel 子模块后的 MVS 依赖对账\n\n(cherry picked from commit d516586f0b70f14e977e21d39415d55eb4f4283a)\n\n* fix(tracing): 隧道全链路追踪接线——外层 /tunnel 复制 traceparent + 内层挂 requestLogMiddleware + 日志去重\n\n问题 1（Important）：隧道模式下全链路追踪断裂\n- handler_client.Client.Do 构造外层 POST /tunnel 请求时复制内层 req.Header 的\n  traceparent，使服务端外层 requestLogMiddleware 记录的外层请求 trace_id 与\n  客户端 trace 关联（此前外层日志用随机新 trace_id）。\n- handlers.go 把隧道 local handler 从直接挂 apiHandler 改为挂\n  requestLogMiddleware(apiHandler)：内层请求 ctx 带上 SpanContext，恢复\n  隧道内层 per-request「收到/完成」日志，内层 handler 的 InfoContext 日志\n  自动带 trace_id/span_id。\n\n问题 3（破坏性 Minor）：中间件日志属性重复\n- requestlog.go「收到请求/请求完成」不再显式传 trace_id/span_id，改由\n  WithContextHandler 从 ctx 自动注入，避免每行两对 trace_id/span_id。\n\n测试：\n- TestClientDo_PropagatesTraceparentToOuterRequest：外层请求携带 traceparent。\n- TestTunnelInnerRequest_InheritsClientTraceID：内层 trace_id 继承客户端。\n- TestRequestLog_NoDuplicateTraceAttrs：日志行无重复 trace_id/span_id。\n\n(cherry picked from commit 35aa7544976311a65d7ff7b87866199f657025b0)\n\n* fix(client): 客户端 Context 日志携带 trace_id/span_id + tracer nil 防护 + 移除 slogTracer 泄漏\n\n问题 2（Important）：客户端日志未带 trace_id/span_id\n- doRequest 请求上下文改用 span 的 ctx2（req.WithContext(ctx2)）：span 生命周期\n  覆盖实际传输，后续 Context 版日志自动带 trace_id/span_id。\n- 关键日志改用 Context 版：doRequest 内部 fallback 警告用 WarnContext(ctx2)；\n  Upload 的「文件 SHA-256」用 DebugContext(ctx)；ChunkedUpload 的「分块上传开始/\n  新上传/chunk 上传成功/失败/重试耗尽/响应解析失败」等全部改用 *Context 版，\n  使调用方传入带 SpanContext 的 ctx 时日志自动携带 trace_id/span_id。\n\n顺手修：\n- WithTracer(nil) 不再覆盖默认 tracer（doRequest 另加 nil 回退到 tracing.New()），\n  避免 nil 解引用 panic。\n- tracing/slog.go 移除只 append 从未读取的 slogTracer.spans 字段，消除长驻/\n  大批量请求下的内存泄漏。\n\n(cherry picked from commit 98b59d9561cd503510fc3770a19621163f0a0eb8)\n\n* feat(client): 配置系统多环境化——通用 mesh 参数入配置 + SCLIENT_ENV + 子命令回落\n\n- client.Config 增补 hub_url/relay_token/node_id；FileClient 增 MeshHubURL/RelayToken/\n  NodeID 访问器 + With 选项；factory 从配置注入。\n- config set/show 支持新键（hub_url 校验 URL 格式、node_id 拒绝空白字符）。\n- SCLIENT_ENV 环境变量选择 env 后缀配置文件（如 SCLIENT_ENV=prod → sclient.prod.yaml），\n  实现客户端多环境（prod/staging/dev 各配一套 hub/server/token）。\n- mesh connect / relay start / p2p 命令：--hub/--token/--relay-token/--node-id 未显式\n  指定时回落配置（优先级：CLI flag > 配置文件 > 默认）。relay start --hub 默认改为空\n  （不再硬编码误导性 ws://127.0.0.1:18084/ws），由 runRelayStart 在「flag → 配置\n  hub_url → 本地默认」链中解析。\n- p2p 命令注入 ConfigProvider（变参，兼容既有 6 处测试调用）。\n\n回归测试：ApplyConfigSet 新键（含非法值拒绝）、YAML 解码 mesh 参数、SCLIENT_ENV 选择\nenv 配置文件、meshRelayToken 配置回落链（配置 relay_token 优先于 auth_token）、\np2pFlags 配置回落（显式 flag 不被覆盖）。\n\n(cherry picked from commit 5f87621e6b8a4142f4cf6821f6635131e194a8f7)\n\n* fix(sclient): cliConfigProvider 改闭包延迟解析 provider——config show/set 不再报配置未初始化\n\n既有 bug：NewRootCmd 内 cfgSvc := &cliConfigProvider{provider: cfgProvider} 在\nPersistentPreRunE 初始化 provider 之前就捕获了 nil 指针值（factory 用闭包延迟解析\n所以正常），导致 config show/set/remote/version/preview 一直报配置未初始化。\n改 getProvider 闭包对齐 factory 模式。冒烟验证：config show 正常显示 hub_url/\nrelay_token/node_id，SCLIENT_ENV=prod 正确加载 sclient.prod.yaml。\n\n(cherry picked from commit ae3c235404561754df5ae6af2845eaf9256dea84)\n\n* docs(client): 配置系统多环境化文档——SCLIENT_ENV 选择 env 配置文件 + hub_url/relay_token/node_id 通用键\n\n(cherry picked from commit 25378cdd3746368aa448c5dc409de98de830231b)\n\n* fix(tunnel): 修复上传经隧道断流时请求体 write 永久阻塞死锁——Client.Do 三条失败路径兜底关闭上行 pipe + sendRequestBody defer CloseWrite，新增断流/长连接守护测试\n\n(cherry picked from commit d969843ccdf0b6a14ca9bbac7833e3dacced8d66)",
+          "timestamp": "2026-08-29T14:03:45+08:00",
+          "tree_id": "6d59eb6ed0e1a5fa8deefbb8c1467ce262611eff",
+          "url": "https://github.com/cocomhub/sproxy/commit/5116bab511f10ec8f7ac2e01a813a2535117f491"
+        },
+        "date": 1787983716197,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 938.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1306970 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 938.1,
+            "unit": "ns/op",
+            "extra": "1306970 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1306970 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1306970 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1299585 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921.5,
+            "unit": "ns/op",
+            "extra": "1299585 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1299585 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1299585 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 929.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1295312 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 929.7,
+            "unit": "ns/op",
+            "extra": "1295312 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1295312 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1295312 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 923.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1284974 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 923.4,
+            "unit": "ns/op",
+            "extra": "1284974 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1284974 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1284974 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 958.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1304530 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 958.1,
+            "unit": "ns/op",
+            "extra": "1304530 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1304530 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1304530 times\n4 procs"
           }
         ]
       }
