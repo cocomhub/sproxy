@@ -37,15 +37,13 @@ func testServer(t *testing.T, opts ...bool) (string, *server.Config, func()) {
 	var cfgPtr atomic.Pointer[server.Config]
 	cfgPtr.Store(cfg)
 
-	key := make([]byte, 32)
 	mux := http.NewServeMux()
 	h := server.RegisterRoutes(t.Context(), server.RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "e2e-test",
-		BuildAt:   "e2e-test",
-		TunnelKey: key,
-		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Mux:     mux,
+		CfgPtr:  &cfgPtr,
+		Version: "e2e-test",
+		BuildAt: "e2e-test",
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 
 	ts := httptest.NewServer(h.Handler())
