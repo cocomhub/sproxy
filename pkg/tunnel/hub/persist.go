@@ -57,8 +57,9 @@ type Persister struct {
 	// debounce 是去抖窗口：变更密集时合并落盘。0 表示立即。
 	debounce time.Duration
 
-	// logger 用于记录损坏文件等非致命告警与落盘失败日志；nil 时回退 slog.Default()。
-	logger *slog.Logger
+	// lg 用于记录损坏文件等非致命告警与落盘失败日志；nil 时回退 slog.Default()
+	// （经 logger() 访问，日志行号指向真实调用点，不做方法封装转发）。
+	lg *slog.Logger
 
 	pending *snapshotFn // 当前排队待落盘的最新闭包；nil 表示无变更（受 mu 保护）
 	timer   *time.Timer // 激活中的去抖计时器；非 nil 表示已调度（受 mu 保护）
@@ -66,15 +67,45 @@ type Persister struct {
 
 // NewPersister 创建指向 path 的持久化器。
 func NewPersister(path string) *Persister {
-	return &Persister{path: path, debounce: 200 * time.Millisecond, logger: slog.Default()}
+	return &Persister{path: path, debounce: 200 * time.Millisecond, lg: slog.Default()}
 }
+
+// Path 返回持久化文件路径（供服务层日志/诊断展示）。
+func (p *Persister) Path() string { return p.path }
+
+// logger 返回生效的 slog.Logger；lg 字段为 nil 时回落 slog.Default()。
+// 所有日志调用点经此访问，保证日志不会因字段未初始化而 panic。
+// 注意：不做「记录错误再转发」的封装——每个调用点直接用返回的 logger 打日志，
+// 使 slog 的 source 行号指向真实错误发生处（而非本 helper），便于排障定位。
+func (p *Persister) logger() *slog.Logger {
+	if p.lg != nil {
+		return p.lg
+	}
+	return slog.Default()
+}
+
+// maxSnapshotBytes 是持久化快照文件允许的最大字节数（M6）。
+// 超出视为文件损坏（拒绝整体读入内存），避免攻击者/事故写入超大文件
+// 导致启动时 OOM。
+const maxSnapshotBytes = 64 << 20 // 64 MiB
 
 // Load 读取快照文件并解码。
 //   - 文件不存在（未持久化过）→ 返回空快照、无错误；
-//   - 文件存在但损坏/非法 JSON → 记录 warn、返回空快照、无错误（hub 启动
-//     不因持久化文件损坏而失败，也不 panic）；
+//   - 文件存在但损坏/非法 JSON，或超出 maxSnapshotBytes → 记录 warn、返回空快照、
+//     无错误（hub 启动不因持久化文件损坏而失败，也不 panic）；
 //   - 其余 I/O 错误（如权限不足）→ 返回 error，由调用方决定是否中止。
 func (p *Persister) Load() (*Snapshot, error) {
+	fi, err := os.Stat(p.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &Snapshot{}, nil
+		}
+		return nil, err
+	}
+	if fi.Size() > maxSnapshotBytes {
+		p.logger().Warn("hub 持久化文件超出大小上限，忽略并启动为空状态", "path", p.path, "size", fi.Size(), "max", maxSnapshotBytes)
+		return &Snapshot{}, nil
+	}
 	raw, err := os.ReadFile(p.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -84,11 +115,7 @@ func (p *Persister) Load() (*Snapshot, error) {
 	}
 	snap := &Snapshot{}
 	if err := json.Unmarshal(raw, snap); err != nil {
-		logger := p.logger
-		if logger == nil {
-			logger = slog.Default()
-		}
-		logger.Warn("hub 持久化文件损坏，忽略并启动为空状态", "path", p.path, "error", err)
+		p.logger().Warn("hub 持久化文件损坏，忽略并启动为空状态", "path", p.path, "error", err)
 		return &Snapshot{}, nil
 	}
 	return snap, nil
@@ -100,7 +127,7 @@ func (p *Persister) Save(snap *Snapshot) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := p.writeFile(snap); err != nil {
-		p.logError("persist: save failed", err)
+		p.logger().Error("persist: save failed", "path", p.path, "err", err)
 		return err
 	}
 	return nil
@@ -128,32 +155,30 @@ func (p *Persister) writeFile(snap *Snapshot) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, p.path)
+	if err := os.Rename(tmpName, p.path); err != nil {
+		return err
+	}
+	// M7：显式收紧为 0600——per-node secret 等敏感信息落盘不应被同机其他用户读取。
+	// CreateTemp 在 Unix 已建 0600 文件，rename 保留权限；这里再显式 Chmod 一次以
+	// 防御依赖 CreateTemp 具体实现（Windows 上 Chmod 只影响只读位，ACL 由系统继承，
+	// 属于平台固有限制，文档注明）。
+	if err := os.Chmod(p.path, 0o600); err != nil {
+		// chmod 失败不视为持久化失败（文件已写入）；记录 warn 供排查权限问题。
+		p.logger().Warn("persist: 设置快照文件权限 0600 失败", "path", p.path, "err", err)
+	}
+	return nil
 }
 
 // saveSnapshotLocked 在调用方已持有 p.mu 的前提下，先执行 fn() 生成快照再原子落盘。
 // 快照生成与文件写入处于同一临界区，避免"旧快照覆盖新快照"的 lost-update 竞态
 // （I1）：并发写者不可能在另一个写者的"读快照→写盘"之间穿插写入更新后再被旧快照
-// 覆盖——每次落盘内容都反映获取 p.mu 时刻的最新状态。返回是否实际落盘；写失败记录
-// error 日志（I2）。
-func (p *Persister) saveSnapshotLocked(fn snapshotFn) bool {
+// 覆盖——每次落盘内容都反映获取 p.mu 时刻的最新状态。返回是否实际落盘。
+func (p *Persister) saveSnapshotLocked(fn snapshotFn) error {
 	snap := fn()
 	if snap == nil {
-		return false
+		return nil
 	}
-	if err := p.writeFile(snap); err != nil {
-		p.logError("persist: save failed", err)
-	}
-	return true
-}
-
-// logError 记录持久化失败日志；logger 为 nil 时回落 slog.Default()。
-func (p *Persister) logError(msg string, err error) {
-	logger := p.logger
-	if logger == nil {
-		logger = slog.Default()
-	}
-	logger.Error(msg, "path", p.path, "err", err)
+	return p.writeFile(snap)
 }
 
 // Schedule 排队一次快照并在去抖窗口后异步落盘。fn 返回 nil 表示无可持久化变化。
@@ -174,7 +199,9 @@ func (p *Persister) Schedule(fn snapshotFn) {
 			p.pending = nil
 			p.timer = nil
 			if fnPtr != nil {
-				p.saveSnapshotLocked(*fnPtr)
+				if err := p.saveSnapshotLocked(*fnPtr); err != nil {
+					p.logger().Error("persist: save failed", "path", p.path, "err", err)
+				}
 			}
 		})
 		p.timer = t
@@ -185,8 +212,9 @@ func (p *Persister) Schedule(fn snapshotFn) {
 }
 
 // Flush 同步执行当前排队的快照（若存在）。用于进程优雅停服前确保状态不丢失；
-// 无 pending 时是 no-op。返回是否实际落盘。快照生成与落盘在同一临界区（I1）。
-func (p *Persister) Flush(curr *Snapshot) bool {
+// 无 pending 且 curr 为 nil 时是 no-op（返回 nil）。返回落盘错误（I2/M8：不静默吞）。
+// 快照生成与落盘在同一临界区（I1）。
+func (p *Persister) Flush(curr *Snapshot) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	fnPtr := p.pending
@@ -197,20 +225,18 @@ func (p *Persister) Flush(curr *Snapshot) bool {
 		t.Stop()
 	}
 	if curr != nil {
-		if err := p.writeFile(curr); err != nil {
-			p.logError("persist: save failed", err)
-		}
-		return true
+		return p.writeFile(curr)
 	}
 	if fnPtr != nil {
 		return p.saveSnapshotLocked(*fnPtr)
 	}
-	return false
+	return nil
 }
 
 // FlushFn 同步执行给定 snapshotFn 并落盘（curr nil 语义）。用于服务端在信令
-// 变更后立即持久化当前收件箱状态。返回是否落盘。快照生成与落盘在同一临界区（I1）。
-func (p *Persister) FlushFn(fn snapshotFn) bool {
+// 变更后立即持久化当前收件箱状态。返回落盘错误（M8：不再以 bool 掩盖失败）。
+// 快照生成与落盘在同一临界区（I1）。
+func (p *Persister) FlushFn(fn snapshotFn) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.pending = nil

@@ -381,13 +381,17 @@ func (h *Handlers) Close() error {
 	}
 	// hub 状态持久化器最终 flush：优雅停服前把最后一次注册/信令变更落盘。
 	if h.hubPersist != nil {
-		h.hubPersist.Flush(h.snapshotLocked())
+		if err := h.hubPersist.Flush(h.snapshotCurrent()); err != nil {
+			h.logger.Error("shutdown: hub 状态最终落盘失败", "err", err)
+		}
 	}
 	return nil
 }
 
-// snapshotLocked 为 Handlers 构建当前完整 hub 快照（节点 + 信令收件箱）。
-func (h *Handlers) snapshotLocked() *hub.Snapshot {
+// snapshotCurrent 构建当前完整 hub 快照（节点 + 信令收件箱）。
+// 命名不用 snapshotLocked：本函数自身不持任何锁（节点/队列锁在各 Snapshot 函数内
+// 短临界区自行加解锁），避免误导调用方以为入参需预先持锁。
+func (h *Handlers) snapshotCurrent() *hub.Snapshot {
 	if h.routeTable == nil {
 		return &hub.Snapshot{}
 	}

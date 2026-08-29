@@ -9,12 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
-	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
 // testSnap 构建一个覆盖两个 mesh、三个节点（含服务与 secret）的 Snapshot。
@@ -58,6 +58,8 @@ func TestPersister_SaveLoadRoundTrip(t *testing.T) {
 
 // TestSnapshotRestore_MultiMesh：快照含两个 mesh 的节点，恢复进空表后
 // Has/LookupInfo/MeshOf/服务宣告均在；Lookup（在线连接）为 nil（重启后等待重连）。
+// M2：disc-* mesh 自动对等发现的临时节点**不持久化**（重启后不会重连、无人在用，
+// 持久化只会留下永久 nil-Mux 幽灵条目），故快照只含 node-a/node-b 两个真实节点。
 func TestSnapshotRestore_MultiMesh(t *testing.T) {
 	src := NewMeshRouteTable()
 	muxA := newTestMux(t)
@@ -65,19 +67,20 @@ func TestSnapshotRestore_MultiMesh(t *testing.T) {
 	muxC := newTestMux(t)
 	src.Add("mesh-a", NodeInfo{ID: "node-a", Mux: muxA, Connected: time.Unix(1700000000, 0), Secret: "sec-a"}, []Service{{Name: "svc-a", Addr: "a:22"}})
 	src.Add("mesh-b", NodeInfo{ID: "node-b", Mux: muxB, Connected: time.Unix(1700000100, 0), Secret: "sec-b"}, []Service{{Name: "svc-b1", Addr: "b1:22"}, {Name: "svc-b2", Addr: "b2:80"}})
+	// M2：disc- 临时发现节点（在线时真实 Mux，但属于临时身份）——应被快照过滤。
 	src.Add("mesh-a", NodeInfo{ID: "disc-node-c-abcdef", Mux: muxC, Connected: time.Unix(1700000200, 0), Secret: "sec-c", RealNodeID: "node-c"}, nil)
 	// 不注册 remove hook，避免 Purge 干扰。
 
 	snap := SnapshotRouteTable(src)
-	if len(snap.Nodes) != 3 {
-		t.Fatalf("SnapshotRouteTable nodes = %d, want 3", len(snap.Nodes))
+	if len(snap.Nodes) != 2 {
+		t.Fatalf("SnapshotRouteTable nodes = %d, want 2（disc- 临时节点应被过滤，M2）", len(snap.Nodes))
 	}
 
 	dst := NewMeshRouteTable()
 	RestoreFromSnapshot(dst, snap)
 
-	// 注册身份保留（离线恢复，无 mux）
-	for _, id := range []NodeID{"node-a", "node-b", "disc-node-c-abcdef"} {
+	// 注册身份保留（离线恢复，无 mux）——仅真实节点。
+	for _, id := range []NodeID{"node-a", "node-b"} {
 		if !dst.Has(id) {
 			t.Fatalf("恢复后 %q 应 Has == true", id)
 		}
@@ -88,6 +91,10 @@ func TestSnapshotRestore_MultiMesh(t *testing.T) {
 		if info.Mux != nil {
 			t.Fatalf("恢复后 %q 的 Mux 应为 nil（离线待重连）", id)
 		}
+	}
+	// M2：disc- 临时节点不应进入恢复后的路由表。
+	if dst.Has("disc-node-c-abcdef") {
+		t.Fatal("恢复后 disc- 临时节点不应存在（M2）")
 	}
 	if got := dst.MeshOf("node-a"); got != "mesh-a" {
 		t.Fatalf("MeshOf(node-a) = %q, want mesh-a", got)
@@ -107,8 +114,9 @@ func TestSnapshotRestore_MultiMesh(t *testing.T) {
 	if nfoB, _ := dst.LookupInfo("node-b"); nfoB.Mesh != "mesh-b" {
 		t.Fatalf("node-b Mesh = %q, want mesh-b", nfoB.Mesh)
 	}
-	if nfoC, _ := dst.LookupInfo("disc-node-c-abcdef"); nfoC.RealNodeID != "node-c" {
-		t.Fatalf("disc 节点恢复后 RealNodeID = %q, want node-c", nfoC.RealNodeID)
+	// M2：disc- 临时节点已被快照过滤，恢复表中不存在 → 无 RealNodeID 可查。
+	if _, ok := dst.LookupInfo("disc-node-c-abcdef"); ok {
+		t.Fatal("恢复后 disc- 临时节点不应存在（M2 过滤）")
 	}
 }
 
@@ -253,17 +261,18 @@ func TestPersister_ScheduleCoalesces(t *testing.T) {
 		return s
 	})
 	p.Schedule(func() *Snapshot { return nil })
-	// Flush(nil)：pending 的闭包（第二次，返回 nil）被执行，无落盘 → false。
-	// 第一次的闭包（自增 writes）在同一窗口内被覆盖、从未执行 → writes == 0，验证合并。
-	if p.Flush(nil) {
-		t.Fatal("Flush(nil) 应返回 false（最后一次排队的快照返回 nil）")
+	// Flush(nil)：pending 的闭包（第二次，返回 nil）被执行，无落盘 → nil（无错误，
+	// 也无需落盘）。第一次的闭包（自增 writes）在同一窗口内被覆盖、从未执行 →
+	// writes == 0，验证合并。
+	if err := p.Flush(nil); err != nil {
+		t.Fatalf("Flush(nil) 应返回 nil（无 pending 可落盘），got %v", err)
 	}
 	if writes != 0 {
 		t.Fatalf("快照生成函数执行次数 = %d, want 0（第一次被覆盖，未执行）", writes)
 	}
 	// FlushFn 显式快照生成器：立即同步执行。
-	if !p.FlushFn(testSnap) {
-		t.Fatal("FlushFn(非 nil) 应返回 true")
+	if err := p.FlushFn(testSnap); err != nil {
+		t.Fatalf("FlushFn(非 nil) 应落盘无错，got %v", err)
 	}
 	snap, err := p.Load()
 	if err != nil {
@@ -305,8 +314,8 @@ func TestMeshRouteTable_PersistOnAddAndRemove(t *testing.T) {
 
 	// Add → 落盘
 	mrt.Add("mesh-a", NodeInfo{ID: "node-a", Secret: "sec-a", Addr: "1.2.3.4:22"}, []Service{{Name: "svc-a", Addr: "a:22"}})
-	if !p.Flush(nil) {
-		t.Fatal("Add 后 Flush 应落盘")
+	if err := p.Flush(nil); err != nil {
+		t.Fatalf("Add 后 Flush 应落盘无错，got %v", err)
 	}
 	p2 := NewPersister(path)
 	snap, err := p2.Load()
@@ -321,8 +330,8 @@ func TestMeshRouteTable_PersistOnAddAndRemove(t *testing.T) {
 	if !mrt.Remove("node-a") {
 		t.Fatal("Remove 应成功")
 	}
-	if !p.Flush(nil) {
-		t.Fatal("Remove 后 Flush 应落盘")
+	if err = p.Flush(nil); err != nil {
+		t.Fatalf("Remove 后 Flush 应落盘无错，got %v", err)
 	}
 	snap2, err := p2.Load()
 	if err != nil {
@@ -346,8 +355,8 @@ func TestPersist_RestartSimulation(t *testing.T) {
 		p1.Schedule(func() *Snapshot { return SnapshotRouteTable(mrt1) })
 	})
 	mrt1.Add("mesh-a", NodeInfo{ID: "node-a", Secret: "sec-a", Addr: "1.2.3.4:22"}, []Service{{Name: "svc-a", Addr: "a:22"}})
-	if !p1.Flush(nil) {
-		t.Fatal("Flush 应落盘")
+	if err := p1.Flush(nil); err != nil {
+		t.Fatalf("Flush 应落盘无错，got %v", err)
 	}
 
 	// 模拟重启：全新路由表 + 全新 Persister，从文件加载恢复
@@ -456,12 +465,12 @@ func TestPersister_ConcurrentSaveFlushSerializes(t *testing.T) {
 						return
 					}
 				case 1:
-					if !p.FlushFn(func() *Snapshot { return snap }) {
-						t.Errorf("FlushFn 应落盘")
+					if err := p.FlushFn(func() *Snapshot { return snap }); err != nil {
+						t.Errorf("FlushFn 应落盘无错: %v", err)
 						return
 					}
 				default:
-					p.Flush(snap)
+					_ = p.Flush(snap)
 				}
 			}
 		}(i)
@@ -488,8 +497,83 @@ func TestPersister_ConcurrentSaveFlushSerializes(t *testing.T) {
 	}
 }
 
-// compile-time guards：确认 mux/xfertest 引用不因重构丢失。
-var (
-	_ = mux.RoleDialer
-	_ = xfertest.Pipe
-)
+// TestSnapshotSignalQueue_FiltersExpired（M3）：快照只保留未过期消息——
+// 队列的惰性过期只在 Push/Peek/Pop 时发生，空 poll 不触发；若镜像复制会把
+// 已过期消息残留在持久化文件里直到下次写盘。这里验证 SnapshotSignalQueue
+// 直接按 TTL 过滤，任何持久化镜像都不含过期死信。
+func TestSnapshotSignalQueue_FiltersExpired(t *testing.T) {
+	q := NewSignalQueue()
+	now := time.Now()
+	if err := q.Push(SignalMsg{Kind: SignalOffer, From: "a", To: "b", SDP: "fresh", At: now.UnixMilli()}); err != nil {
+		t.Fatalf("Push fresh: %v", err)
+	}
+	// 人为制造一条已过期消息（At 远早于 TTL）——直接写 inbox，绕过 Push 的
+	// compactExpiredLocked（Push 会当场清理过期，无法放入过期消息）。
+	stale := SignalMsg{Kind: SignalAnswer, From: "a", To: "b", SDP: "stale", At: now.Add(-2 * signalMsgTTL).UnixMilli()}
+	q.mu.Lock()
+	q.inboxes["b"] = append(q.inboxes["b"], stale)
+	q.total++
+	q.mu.Unlock()
+
+	snaps := SnapshotSignalQueue(q)
+	if len(snaps) != 1 || len(snaps[0].Msgs) != 1 {
+		t.Fatalf("SnapshotSignalQueue = %+v, want 仅 1 条未过期消息（M3 过滤过期）", snaps)
+	}
+	if got := snaps[0].Msgs[0].SDP; got != "fresh" {
+		t.Fatalf("快照消息 = %q, want fresh（过期消息应被过滤）", got)
+	}
+}
+
+// TestPersister_LoadOversizedFile（M6）：快照文件超出 maxSnapshotBytes 时
+// Load 视为损坏，返回空快照且不 panic（拒绝整体读入内存，防启动 OOM）。
+func TestPersister_LoadOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hub.json")
+	// 构造超过上限的文件：不实际写 maxSnapshotBytes+1 字节（磁盘/内存开销），
+	// 用一个略大于上限的稀疏文件即可——Size() 判定只看 stat。
+	if err := os.WriteFile(path, []byte("{\"nodes\":["), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// 用 Truncate 制造稀疏大文件，避免真实写巨量数据。
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if err = f.Truncate(maxSnapshotBytes + 1); err != nil {
+		_ = f.Close()
+		t.Fatalf("Truncate: %v", err)
+	}
+	_ = f.Close()
+
+	p := NewPersister(path)
+	snap, err := p.Load()
+	if err != nil {
+		t.Fatalf("Load(超大文件) err = %v, want nil（记 warn + 空快照）", err)
+	}
+	if snap == nil || len(snap.Nodes) != 0 {
+		t.Fatalf("Load(超大文件) = %+v, want 空快照", snap)
+	}
+}
+
+// TestPersister_SaveSets0600（M7）：落盘后文件权限应为 0600——
+// per-node secret 等敏感信息不应被同机其他用户读取。
+// Unix 上 CreateTemp 已建 0600，显式 Chmod 二次确认；Windows 上 Chmod
+// 只影响只读位（平台固有），本测试仅校验 Unix 语义（跳过 Windows）。
+func TestPersister_SaveSets0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 上 Chmod 不反映 Unix 权限语义，ACL 由系统继承")
+	}
+	path := filepath.Join(t.TempDir(), "hub.json")
+	p := NewPersister(path)
+	snap := &Snapshot{Nodes: []NodeSnap{{ID: "node-a", Secret: "sec-a"}}}
+	if err := p.FlushFn(func() *Snapshot { return snap }); err != nil {
+		t.Fatalf("FlushFn: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Fatalf("快照文件权限 = %o, want 600（secret 不应被同机其他用户读取，M7）", got)
+	}
+}
