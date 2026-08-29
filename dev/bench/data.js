@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787982538255,
+  "lastUpdate": 1787982667241,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -302224,6 +302224,720 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1275369 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "36f11ca04b6a44d857d62e262754dadaf086cf73",
+          "message": "feat: mesh 传输网络——hub/p2p/relay 数据面加固 (#107)\n\n* feat(hub): Hub 节点收口 + 任意 TCP 流中继\n\n补全 sproxy hub 中继断链，使双重 NAT 设备能经 hub 出站注册并被寻址：\n\n- HubServer 收口（pkg/tunnel/hub/router.go）：连接后首消息即注册帧\n  （xfer 层，JSON/裸 nodeID 兼容），Authenticator 鉴权接线，断开自动移除。\n- sproxy 消费 hub.transports.ws（cmd/sproxy/root.go）：WS 升级端点挂主 mux，\n  ws 传输新增可挂载 HandlerNode。\n- 任意 TCP 流中继：POST /api/relay/stream（CONNECT 风格 + http.Hijacker\n  双向字节泵），SSH/长连接可用；共享 pkg/tunnel/relay 叶子分发逻辑\n  （[4B len][json] 帧，{\"dial\":addr}→出站 TCP，否则隧道 HTTP 中继）。\n- 调用方 CLI：sclient relay dial --node --tcp [-l :port]；叶子新增\n  --token / --dial-allow（出口模式）；RouteTable 增服务宣告（mesh 选路）。\n- SDK：FileClient.RelayStream。\n\n测试：pkg/tunnel/hub、pkg/tunnel/relay、pkg/server（含流中继端到端）、\npkg/client、cmd/sclient、cmd/sproxy 全绿（-race）。\n\n(cherry picked from commit 059f2ceb6f01c669468749663f22498bc9215065)\n\n* feat(p2p): WebRTC 网络信令桥 + p2p 直连 CLI + 中继安全加固\n\n根治双重 NAT 下\"Mac→新加坡烂链路\"：打洞成功后数据面 Mac↔对端\n直连，不再经过 hub。\n\n- webrtc 传输信令化：新增 Signaler 接口 + DialWithSignaler/\n  ListenWithSignaler（保留内存 Signal/Dial/Listen 兼容），\n  ConnAsXfer 包装 DataChannel 为 xfer.Conn。\n- hub 信令桥（pkg/tunnel/hub/signaling.go）：per-peer 有界队列，\n  POST /api/signal/offer|answer|candidate + GET /api/signal/poll/{peer}\n  长轮询；HubSignaler 客户端（signaling_client.go）无需 import webrtc。\n- 服务端路由（pkg/server/signaling_handlers.go）：走既有 authMiddleware\n  与 localMux，SDP K 级可重试，烂链路上也能最终建立会话。\n- CLI：sclient p2p connect（--peer/--tcp/-l）与 p2p listen（出口模式），\n  数据面复用 relay 帧协议；cmd/sclient 增 webrtc module 依赖。\n\n安全加固（commit 审查修复）：\n- relay.DialAllowed：仅允许公网目标，主机名解析后按 IP 校验\n  （防 SSRF / DNS rebinding 指向内网）；Serve 支持可配置 DialPolicy。\n- hub.RouteTable.RemoveIfOwned：仅本连接移除，防 stale identity 误删\n  同名新注册。\n- 注册帧大小上限 64 KiB；ws 传输 SetReadLimit 从 -1 改 1 MiB。\n\n测试：hub 信令队列 + RemoveIfOwned、server 信令 HTTP 往返、p2p 命令\n注册、relay.DialAllowed 策略；相关包 -race 全绿。\n\n(cherry picked from commit 4eee498bcb3f7ca4a664871b5411a6e310193dd5)\n\n* feat(mesh): mesh 服务发现与选路 + 信令安全加固\n\n全互通 mesh：任意节点按服务名经 hub 发现并连接，双向主动。\n\n- 服务发现：GET /api/hub/services（RouteTable.ServicesOf + hubServicesHandler）\n  + FileClient.MeshServices/MeshConnect SDK。\n- 选路：pkg/tunnel/p2p/path.go——Plan 生成器（direct/webrtc/relay/exit），\n  按服务地址形态选择优先路径，fallback 链兜底。\n- CLI：sclient mesh connect <service> [-l :port]（stdin/stdout 或端口转发）、\n  mesh status（列出 hub 服务）。\n\n信令安全加固（commit 审查修复）：\n- SignalBroker 校验 from/to 均为已注册节点（防幽灵节点投递/轮询），\n  请求体 8 KiB 上限；HubSignaler 携带本节点 nodeID 作信令来源。\n- SignalQueue 全局消息总量上限 1024、waiters 上限 256、空队列即删 map 项、\n  Wait ctx 取消时清理 waiter（防无界内存）。\n- HubSignaler.WaitOffer/WaitAnswer 仅接受 From==peer 的消息（防伪造来源）。\n\n测试：path 选路、hub services handler、SDK mesh 发现+echo、mesh CLI、\n信令身份校验；相关包 -race 全绿。\n\n(cherry picked from commit 1437b1213ed0a1f261e25cf9347b569ad7930108)\n\n* fix(review): 代码审查修复（C1 死锁 + 关键 I 组 + Minor）\n\n针对 3 代理交叉审查的发现（含 commit 安全审查），修复后全量 -race 通过。\n\nCritical:\n- C1 WebRTC 信令死锁：Signaler 接口方向语义重构——Wait*/Wait* 轮询本节点\n  收件箱、返回 (from, sdp)；Send* 收明确 to；Listen 侧从 offer 得知对端回\n  answer。补 HubSignaler 往返 + 真实 pion 双端端到端测试（此前零覆盖）。\n\nImportant:\n- I1 信令身份绑定：post 的 From / poll 的 peer 必须等于 X-Node-ID 头声明的\n  已注册节点（防共享 token 下冒充/窃听收件箱）。\n- I3 HandleConn 注册/鉴权失败路径不再泄漏连接（defer conn.Close 前置）。\n- I4 mesh 服务宣告：relay start 新增 --service name:addr（可重复），mesh\n  connect 有数据源。\n- I5 私有网段不可达：relay start 新增 --dial-allow-cidr；NewDialPolicy 支持\n  白名单放行内网。\n- I6 webrtcXferConn 缓冲截断：改为 [4B len][payload] 消息分帧（对齐 tcp），\n  Receive 读整帧再解析，支持 >64KB 大消息（补 70KB 回归测试）。\n- I7 relay_stream/leaf/p2p 泵送第二半段永久阻塞：第一半完成即 Close 另一侧。\n- M2 handleStream 帧格式对齐 [4B len][json]。\n- M3 冗余 ClearServices、M4 重连服务残留（registerNode 重置宣告）。\n\n测试：hub 信令往返/身份绑定/webrtc 端到端、relay DialPolicy、sclient\nservice/cidr flag；受影响包 -race 全绿。\n\n(cherry picked from commit 8f2b949f06ae2dd320043d347a9f272c56ad6002)\n\n* fix(review): 全量修复遗留项 + E2E 补强 + pre-commit 加固\n\n按用户要求修复所有审查问题（含 Minor/遗留项），并通过项目完整门禁\n（make check-ci：vet/lint 0 issues/loopback/notest/全量 test/cover/test-all/build-all）。\n\n安全修复（第 3 轮审查）：\n- 信令身份：From 由服务端从 X-Node-ID 派生，消除 body 注入面；拒绝自发送。\n- DialAllowed/NewDialPolicy 改返回解析后 IP:port（防 DNS rebinding TOCTOU），\n  主机名需全部解析 IP 合法。\n\n遗留 Important：\n- Hijack 泵送读侧改用 rw（防丢缓冲字节，I4 变体）。\n- MeshConnect 遍历全部候选节点（首个离线不影响其余）。\n- p2p 改用 cli.IOStreams（可测性）；p2p listen 信令失败带退避重试。\n- 注册 ACK 协议：hub 回 REG_OK/REG_ERR，客户端 token 错误早报错。\n- serveHTTP 修真实 bug：GET 不设 body（避免 http.Client 干扰协议），\n  NopCloser 防流被关；methodAllowsBody 辅助。\n- TLS 拨号改 tls.Dialer.DialContext（支持 ctx 取消）。\n\nMinor：\n- 移除 signaling.go 死代码、path.go 注释失实、mesh Forward 优雅取消、\n  WSTransportConfig 注释、readRegisterFrame 注释澄清协议升级。\n- 边界：注册帧 64KB/信令体 8KB/ws 1MB/信令队列上限，测试覆盖。\n\nE2E 补强（捕获 2 个真实 bug）：\n- 新增 TestE2E_RelayStream 三端二进制闭环（hub+leaf+caller 真实进程），\n  暴露并修复：GET / 与 /ws 路由冲突（改 GET /{$}）、DialAllowed 回环拦截。\n- 新增 serveHTTP HTTP 中继测试、信令 8KB/自发送边界、MeshConnect 多候选回退。\n\npre-commit 强化：loopback 检测改精确正则（捕获 net.Listen 空 host 等），\n避免误报字符串字面量。\n\n测试：make check-ci 全绿（含全量 -race、E2E、子模块）。\n\n(cherry picked from commit e0de5a7fd50709642a2044c1cad93ebd739668a4)\n\n* feat(mesh): 接线 mesh 选路 + 清理被替代的死代码 + 云端推送文档\n\n按用户决策：\n1. 分析确认反向流/HTTP JSON 中继是「被 CONNECT 方案完全替代」而非漏用\n   （relay dial 双向可用，云端推送无需反向流；handleStream 只 log 不转发，\n   无法作为 CONNECT 降级）。\n2. 接线 mesh 选路（期3 核心但此前从未真正接线）：\n   - mesh connect 默认 webrtc 打洞优先，失败回落 hub 中继（defaultMeshDial）\n   - 新增 --webrtc/--hub/--token/--node-id flags；FileClient.ServerURL() 访问器\n   - 补回落测试：webrtc 打洞失败 → 中继\n3. 删除被完全替代的死代码：\n   - 反向流整套（handleStream 非 dial 分支 / ReturnStream / AcceptStream / returnCh）\n   - /api/relay HTTP JSON 中继（relay.go + relay_test.go，被 /api/relay/stream 取代）\n4. 云端推送文档：CLAUDE.md + README 补充 mesh 用法与「relay dial 双向推数据」\n\n验证：make check-ci 全绿（vet/lint 0 issues/loopback/notest/全量 test/cover/test-all/build-all + E2E）。\n\n(cherry picked from commit f56baed1c279821edcbc63ea38a20dd649331a4f)\n\n* fix(mesh): mesh connect 重复写帧 bug + 实测测试指南\n\n在实测测试指南时发现并修复真实 bug：\n- mesh connect 对 RelayStream 返回的流额外写 [4B len][{\"dial\":...}] 帧，\n  导致数据流被帧头污染（echo 返回帧头而非业务数据）。\n  根因：RelayStreamHandler 已在 hub 侧写好 dial 帧（叶子拨目标），\n  客户端应直接透传字节。\n- 修复：新增 meshDialFrameNeeded(kind) 精准判定——仅 webrtc 路径写帧\n  （打洞直连对端需告知出口拨目标），relay 路径不写。\n  补 meshDialFrameNeeded 回归测试。\n\n新增 docs/mesh-testing.md：完整测试指南（hub.yaml 配置 + 各端命令 +\n断网测试 + 常见问题），对应真实拓扑（云服务器 hub + 两台 NAT 电脑）。\n\n本地实测验证：hub + 叶子 + mesh connect/relay dial 端到端 echo 通。\nmake check-ci 全绿。\n\n(cherry picked from commit 6eba4b7bf9c3c0a5f31bbcdc2feae3c9af3dd291)\n\n* feat(p2p): 手工 SDP 信令（--manual，无 hub 打洞兜底）\n\n解决「所有节点 无法同时访问 hub 时也能打洞」的核心诉求：\n- p2p connect/listen 新增 --manual 模式：SDP offer/answer 经文件交换，\n  不依赖 hub（WebRTC 打洞本身用 Google STUN）。\n- 复用 webrtc.Signaler 接口，manualSignaler 实现文件读写 + 轮询等待 +\n  提示引导；Dial/ListenWithSignaler 半握手流程天然驱动。\n- 打洞失败返回错误（p2p 纯打洞，需中继用 mesh connect/relay dial）。\n- 明确 p2p/mesh 分工：mesh=需hub服务导向；p2p=无需hub节点导向。\n- docs/mesh-testing.md 补充 7b 手工打洞流程。\n\n本地实测验证：dial 写 offer → listen 读 offer 写 answer → dial 读 answer\n打洞建立（真实 pion 直连，无 hub）。补 manualSignaler 单元测试。\nmake check-ci 全绿。\n\n(cherry picked from commit bc880c534553a93a2a504463285f40d4ce0a291d)\n\n* chore(sanitize): 脱敏 WIP（rebase 前临时提交）\n\n(cherry picked from commit a299bba3dbe05c04717eee909b98c61dff2c10e5)\n\n* fix(p2p): 手动 SDP 信令增强（10min 超时 + 文件清理 + stdin/stdout 粘贴）\n\n- --manual 信令等待默认放宽到 10 分钟：人工拷文件/粘贴 JSON 足够；\n  默认仍 30s 保 mesh 快速回落，仅 --manual 用 SetSignalingTimeout 调大\n- 文件交换：读到 offer/answer 校验通过后自动删除，不留垃圾；\n  WaitAnswer 成功顺带清理本侧 offer 残留；writeSDPFile 先清陈旧残留\n- 新增 stdin/stdout 交换（不落文件）：SDP 行走 stdout，提示走 stderr；\n  跳过空行/非法 JSON/类型不符行，直到一行合法 SDP 或超时/EOF\n- 等待期间每 15s 提示仍在等待；检测到文件/解析完成/开始打洞均有进度日志\n- 单元测试：FileExchange(JSON 化) + WaitOfferTimeout +\n  StdioExchange + StdioWaitTimeout 全通过；gofmt/vet/race 绿\n\n(cherry picked from commit 51235c589ed1c6d583be554d72299f8bc2a06b37)\n\n* fix(p2p): --manual 打洞成功后监听端退出 + SDP 文件残留清理\n\n- p2p.go: manual listen 打洞成功后原 return nil 直接退进程，强杀\n  relay.Serve/心跳 goroutine 与 WebRTC 连接，对端 90s 心跳超时。\n  改为 select 阻塞等待 mux 关闭或 ctx 取消，无额外超时（ctx 仅\n  Ctrl+C 取消时触发，data 面生命周期不受信令 10min 窗口约束）。\n- p2p_manual.go: manualSignaler 增加 Cleanup() 兜底删除本侧写出的\n  SDP 文件；按内容校验，仅删仍是自己那份，防对端重写误删。\n  readSDP 侧本就读取后立刻删除，两文件删除时机对齐。\n- p2p_manual_cleanup_test.go: 新增 3 个测试覆盖已删/未删/被改写。\n\n(cherry picked from commit d542487c43ab84d5748477eef9762d4ce005af36)\n\n* style(lint): 修复 5 处 govet err shadow 告警\n\n- mesh.go meshRelayDial / p2p.go writeDialFrame：拆分 Write 的 err 复用为 werr,\n  消除对函数外层 err 的遮蔽（逻辑不变）\n- relay.go runRelayOnce：注册帧 Send 错误改 serr 命名，避免遮蔽 conn 建立的 err\n- p2p_manual_test.go FileExchange：SendAnswer/Stat 错误改 serr, 不遮蔽 WaitOffer err\n- golangci-lint run ./... 0 issues\n\n(cherry picked from commit 60d396d4c2cc27340c2f2444d67265757cf3d55a)\n\n* feat(p2p): 打洞流程日志（常驻 ICE 状态 + --verbose 底层明细）\n\n打洞失败时此前只有笼统 \"dc open timed out\"，无法定位是候选不全、\nSTUN 不可达还是 DTLS 失败。pion/webrtc 原生具备状态回调与模块日志，\n但本项目未接线（logging 未 import，无任何状态回调）。\n\n- webrtc.go newPC: 常驻注册 OnICEConnectionStateChange /\n  OnConnectionStateChange / OnICECandidate 三个回调，slog 记录状态流转\n  （Info）+ 失败（Warn）+ 候选收集（Debug）。连接每次都会输出\n  checking→connected/failed 主链路，失败时能一眼看到停在哪个状态。\n- webrtc.go SetVerbose: --verbose 时把 pion ice/dtls/sctp/webrtc scope\n  提到 TRACE（candidate/STUN/DTLS 明细），通过 SettingEngine.LoggerFactory\n  注入；默认保持 Error 无噪音。pion 无全局 SetLogLevel，须按 scope 配置。\n- root.go initLogger: verbose 时调 webrtc.SetVerbose(true)。\n- diag_log_test.go: 新增 4 测试（factory 级别/默认级别/全局开关/回调下\n  roundtrip 仍正常）。webrtc_test.go 顺手修 1 处 err shadow。\n- 顺带清理 webrtc.go 既有 6 处 govet err shadow（DialWithSignaler/\n  ListenWithSignaler 嵌套 err），lint 全绿。\n\n(cherry picked from commit 3ed9e83a2b68cc2d6d6e996e9dbb528f45043106)\n\n* fix(p2p): manual listen 打洞失败后遗留 answer 文件（SendAnswer 未记录 writtenFile）\n\n根因：Cleanup 只清理 SendOffer 记录的 offer 文件；SendAnswer 写 answer\n后没记录 writtenFile，listen 侧 Cleanup() 看到空路径直接返回，a.sdp\n残留。补上 SendAnswer 的记录，与 SendOffer 对称，确保 listen 侧退出\n（打洞失败/成功/panic）都兜底删除本侧写出的 answer 文件。\n回归测试：TestManualSignaler_Cleanup_DeletesAnswerFile。\n\n(cherry picked from commit 262a62370fe83f13050a89ad44a684b761f49483)\n\n* feat(p2p): STUN 服务器可配置 + 打洞失败候选诊断\n\n大陆网络 stun.l.google.com UDP 常超时，取不到 srflx 候选导致跨 NAT\n打洞必失败（connect 仅 host 候选，与 listen srflx 无法配对）。\n日志此前只有笼统 dc open timed out，无法定位。\n\n- webrtc.go: stunServer 常量 → stunServers 列表 + SetSTUNServers()\n  （pion 并发查询全部，任一成功即可）。默认改为 Google+腾讯+小米\n  混合：保留 Google 覆盖海外、腾讯/小米覆盖大陆（单一 Google 大陆\n  必不通），全不通时用 --stun 手工指定。空列表=不配 STUN。\n- webrtc.go: srflxDiag 跟踪候选类型，Dial/Listen dc 超时失败时附带诊断\n  （未配 STUN / 无候选 / 仅 host 无公网 srflx / 已取到公网候选）。\n- p2p connect/listen + mesh connect 新增 --stun flag（可重复/逗号分隔）。\n- diag_stun_test.go: SetSTUNServers 默认/过滤 + diagnose 全分支。\n\n(cherry picked from commit 7e39731267e0d82fd48177c79e9b5db58d7f2dea)\n\n* feat(relay): 注册失败显式终止重连 + mesh 链路可观测性优化\n\n- relay start: 仅当 hub 回发 REG_ERR 帧（注册失败）才终止重连，\n  避免鉴权失败（token 错误）无限重连刷屏；EOF/超时仍按网络波动重连\n- relay start: 未知注册响应也从静默改为显式报错退出\n- mesh connect: 端口转发泵送改为半关闭语义，一处 EOF 即关闭另一侧，\n  避免 curl 请求永久卡死；失败日志补充目标 node/addr\n- relay leaf: 中继流处理各失败分支补日志（读帧失败/非法帧长/拨号成功/泵送结束），\n  让 relay 重启后 mesh 端可观测链路状态\n- server config: 各配置结构体补充 mapstructure tag（与 viper 解码对齐）\n\n(cherry picked from commit ae9f10edc85698a040afa7c103a04068ef8fd723)\n\n* fix(mesh): 出口拨号放行宣告的服务地址 + 信令 token 复用 + 节点上下线感知\n\n- 出口拨号策略 NewServiceDialPolicy 精确放行 --service 宣告的地址（含\n  loopback），修复 mesh connect 回落中继时出口拨 127.0.0.1:xxx 被默认\n  DialAllowed 拒绝（SSH 经 mesh 连不通的根因）\n- mesh connect 信令 token 默认复用 --auth-token/配置 auth_token，消除\n  hub 配 auth_token 时 /api/signal/* 的 401 噪声\n- mesh connect 新增 meshTargetRefresher（TTL 3s 缓存 + 单飞刷新 + dial\n  失败 invalidate 强制重取），每连接用最新 target：服务离线立即清晰报错\n  不静默卡死，relay 重新上线后约 3s 内感知\n- 新增 E2E TestE2E_MeshConnect_AnnouncedService：hub + 出口叶子 --service\n  宣告 loopback echo（无 --dial-allow-cidr）+ mesh connect 转发回显\n\n(cherry picked from commit 8a0e1eb6a03b41273ce5458b13d1c6762324fb44)\n\n* refactor(mesh): 删除选路抽象死代码（p2p.Plan + hub.Path + P2PNode）\n\n两套选路抽象（pkg/tunnel/p2p/path.go 的 Plan、hub/service_registry.go 的\nPath/BetterPath）均为生产死代码：无执行器、无引用点，真实选路在\ncmd/sclient/mesh.go 的 defaultMeshDial 内联实现（f56baed 接线时的遗漏清理）。\npkg/tunnel/p2p 的 P2PNode 同为死代码（生产直接使用 webrtc.DialWithSignaler\n+ mux.New + relay.Serve，从不实例化）。依赖方向否决复用：p2p import hub，\nhub 无法 import p2p。git 历史保留设计意图（1437b12）。\n\n- 删除 pkg/tunnel/p2p/（p2p.go/p2p_test.go/path.go/path_test.go）\n- 删除 pkg/tunnel/hub/service_registry.go（出生即期3 占位，从未被消费）\n- 清理 .golangci.yml 对 pkg/tunnel/p2p 的 revive 豁免\n\n(cherry picked from commit 5222081bb532525776394a14d610236db61ebf4f)\n\n* fix(mesh): hub 安全加固——relay_token 强制 + WS 连接上限 + 固定 /ws\n\nC2(critical): hub.enabled=true 时强制 relay_token 非空，Validate 拒绝空 token 启动；\n  Authenticator 改 fail-closed——NewAuthenticator(\"\") 拒绝所有 token，纵深防未鉴权注册。\nI30(important): HubServer 新增 maxConns 信号量 + TryHandleConn 非阻塞接收；\n  新增 hub.max_connections 配置（默认 256），accept 循环超限立即关闭新连接。\nS36(suggestion): WS 升级路径固定为 /ws，hub.transports.ws.path 废弃（非默认值记警告并忽略）。\n\n测试：config_test 新增 MaxConnections 默认值与 relay_token 校验用例；\n  auth_test 更新 fail-closed 语义；router_test 新增 TryHandleConn 信号量/无上限用例。\n\n(cherry picked from commit 74b49162f92764b493116d42c0ca70f367043f6e)\n\n* fix(relay): B9 批次修复 pump 泄漏/截断、HTTP 中继 SSRF、IPv6 拨号及测试覆盖\n\nC1 (critical): pump 改为 done-channel + CloseWrite 半关闭 + 宽限期 deadline\n- 首方向完成后对远端 CloseWrite 传播半关闭（TCP FIN / 流 EOF），在途响应可回读\n- 首方向完成后武装宽限期 timer（pumpGracePeriod=60s），宽限期内另一方向完成则\n  正常收尾；超时视为非合作远端，强制关闭两端防 goroutine/FD 泄漏（DoS 兜底）\n- 长连接（SSH 双向活跃）期间两方向都未完成，timer 不启动，不误断\n- pump 签名加 grace 参数；Serve 调用处传 pumpGracePeriod\n\nI20 (critical SSRF): serveHTTP 不再 localAddr+req.URL 字符串拼接\n- url.Parse(localAddr) 固定 base，只把请求相对 Path/RawQuery/RawPath 覆盖到 base\n- 拒绝 IsAbs/Host/User/Opaque 的 URL（返回 400），含 @ 注入与 //host 注入\n- query 内 @ 正常保留；Fragment 不随请求发送；新增 writeErrorResponse 辅助\n- httpClient nil 时兜底 http.DefaultClient（S29）\n\nI21: DialAllowed 直写 IP 分支改用 net.JoinHostPort（IPv6 补方括号），IPv4 行为不变\n\nH1-S2/S27: NewServiceDialPolicy 精确命中主机名宣告时解析一次返回 IP:port\n- 消除 Serve 拨号时二次解析的 DNS rebinding TOCTOU；纯 IP 宣告原样放行\n\nS25-S29:\n- S25: NewDialPolicy 非法 CIDR 不再静默丢弃，记 slog.Warn\n- S26: 删除 Serve 中 _ = dialPolicy 死语句\n- S28: methodAllowsBody 纳入 DELETE/OPTIONS（RFC 7231 可带 body）\n- S29: Serve 每流 goroutine 加 recover 兜底 panic（防恶意对端击穿进程）\n\n测试修复:\n- I59: TestNewServiceDialPolicy svcAddrs 加入 \"127.0.0.1\"，命中精确匹配后\n  SplitHostPort 拒绝分支；announced-hostname 断言改为\"IP:port 且端口正确\"\n- I60+H1-T1: TestServeHTTP_BadMeta 改名为 BackendUnreachable_NoPanic；新增\n  TestServe_BadMeta_ClosesStream 驱动 Serve 真测坏 metadata 帧拒绝 + 流关闭断言\n- I61: TestServeHTTP_RelaysToLocal 读侧用 goroutine+select ctx.Done 包裹\n- I62: 新增 dial 帧分发/回显、dialAllow 门控零 accept、策略拒绝零 accept、\n  pump 双向回读、body 方法（POST/PUT/DELETE/OPTIONS）测试\n- I20: TestServeHTTP_URLValidation 覆盖相对/绝对/@ 注入/query 含 @/非法编码 6 用例\n- 新增 TestPump_NonCooperativeRemote_ForceClose、TestNewDialPolicy_InvalidCIDR_Warns\n\n测试规避 mux 关闭竞态（预先存在 bug：stream.Read 在 dataCh 有缓冲但 done 已关时\n随机丢数据）：读响应类测试不在客户端读完前关闭服务端流，另行跟踪修复。\n\n(cherry picked from commit 3de56c9f14eb66697188b238a2ed413b0b089fdd)\n\n* fix(webrtc): Close 可唤醒 Read + 远程候选过滤 + 诊断/测试加固\n\nB8 批次（pkg/tunnel/xfer/ext/webrtc）：\n\n- C3/S15: Conn.Read 并行 select 底层读与 closeCh，Close 后 Read 确定性返回错误\n  （xfer.ErrConnClosed，与 tcp 传输对齐）；webrtcXferConn Send/Receive 补关闭语义\n  与 maxFrameBytes 大小上限防御\n- I13: signalerAdapter WaitOffer/WaitAnswer 尊重 ctx；新增 DialWithSignalerCtx/\n  ListenWithSignalerCtx（旧签名保留为兼容包装）；acceptLoop 用 loopCtx，Close 后\n  立即退出（无泄漏）；webrtcListener.Close 幂等（closeOnce，对齐 tcp）\n- I14: 候选诊断改 per-connection 实例，移除全局 lastCandidateDiag 累积污染\n- H1-S1: newPC 加 pion SetRemoteIPFilter，拒 loopback/link-local/multicast/\n  unspecified/broadcast 远程候选，私网默认放行（保 LAN mesh），\n  SetRejectPrivateRemoteCandidates 可收紧\n- I53: 8 个网络测试统一 SetHostOnly + t.Cleanup，套件从 ~124s 降至 <4s\n- I54/I55/I56/I57/I58: 并发发送内容断言、回调日志断言（lockedBuffer 防竞争）、\n  logger factory 确定性（不依赖 PION_LOG_* 单例）、t.Cleanup 恢复全局\n- S13/S14/S17/S18/S19: STUN 切片去别名 + URL 预校验、logICEEvent/logPCStateEvent\n  去重状态加锁（修并发回调竞争）、*prev 简化\n\n(cherry picked from commit c5c4dec2492ee801e906c8756a60970f11372aaa)\n\n* fix(hub): per-node secret 下发 + 恒定时间比较 + 服务宣告校验与确定性排序\n\nB1 批次 hub 路由核心修复（I1 hub 端 / I2 / I3 / I4 / I48 / I49 + S1-S7/S24）：\n\n- I1 hub 端：RegisterFrame 增可扩展 Capabilities 字段（slice 而非 bool），\n  节点声明 per-node-secret 能力时用 crypto/rand 生成 32B secret 存\n  NodeInfo.Secret，REG_OK 携带 \"<base64url secret>\"；未声明能力保持纯\n  \"REG_OK\"，向后兼容（sclient 精确比较不受影响）\n- I2/S7：Authenticator 改用 subtle.ConstantTimeCompare（对齐 server/auth.go）；\n  ErrInvalidToken 改用 errors.New 哨兵\n- I3：registerNode 校验服务宣告（非空/无控制字符/长度上限/节点内去重）；\n  RouteTable 新增 ListServices 按 (node, name) 稳定排序，hubServicesHandler\n  改用（不破坏多节点同名 failover）\n- I4：注册成功后 defer RemoveIfOwned（幂等），覆盖 ACK 失败 return 路径，\n  消除幽灵节点\n- S1：NodeInfo.Token 移除，改存 per-node Secret（裸 relay_token 不再驻留内存）\n- S2：readRegisterFrame 区分\"合法 JSON 缺 node_id 报错\"与\"非 JSON 裸串回退\"\n- S3/S4/S5/S6：maxRegisterFrameBytes 注释修正、AddWithInfoAndServices 单锁\n  原子写入、删除重复的 RegisterRequest、Remove 返回 bool\n- S24：REG_OK 补 Flush，与 REG_ERR 对称\n- I48/I49：裸字节注册帧用例（nil-auth）+ REG_OK/REG_ERR 客户端侧断言 +\n  secret 下发/未下发用例 + S2 缺 node_id 用例\n\n(cherry picked from commit a0b3a3b4f8f34ea54f964db34aa3511f363c6682)\n\n* fix(ws): B7 批次修复并发关闭/写超时/goroutine 泄漏 + 传输边界加固\n\n- I15 HandlerNode.Close 用 sync.Once 防并发 close panic（对齐 wsListener）\n- I16 AddToMux/Listen 关闭分支调 wc.Close() 释放 sendLoop，消除 goroutine 泄漏\n- I17 sendLoop 写加 60s deadline，写失败 markClosed 广播关闭态，Send/Flush 不再假成功/悬挂\n- I18 Flush 注释声明单发送者约束（并发 ack 窗口文档化，不改热路径）\n- I19 共享 testLargePayload 改 1MiB-1 + maxMessageBytes 契约注释（消除 1 字节压线脆弱）\n- S20 core.go Conn.Send 注释补异步缓冲语义与 Flush 指引\n- S21 新增 DialWithOptions（HTTPClient/TLS 注入，sclient --insecure 接线留后续批次）\n- S22 AddToMux 非 / 开头 path 自动补前缀（防 ServeMux host pattern/panic）\n- S23 SetReadLimit 移入 newWSConn（去掉 Receive 每帧重复原子写）\n\n新增 ws 专属测试：并发 HandlerNode.Close、Flush 关闭后不悬挂、超 1MiB 消息 Receive 报错。\n\n(cherry picked from commit ffda35f814010ecb84b73e7bbb2fa187e3637ee6)\n\n* fix(mesh): 中继流拨号结果帧门控 + mux Abort 非阻塞关闭 + addr 校验\n\nI26（important）hub 侧 addr 语法校验：\n- relay_stream.go 新增 validateRelayAddr：SplitHostPort + 端口 1-65535 数值 + 拒绝\n  @/:///控制字符，开流前 fail-fast 回 400；不限制回环/私网（叶子 DialPolicy 是最终边界）。\n\nI27（important，跨 B9/B11/B15）DialResultFrames 拨号结果帧：\n- hub.DialResultFrame 新增到 pkg/tunnel/hub（dial_result ok/error + message）。\n- leaf.go ServeOptions 新增 DialResultFrames；dial 成功回 [4B len][{\"dial_result\":\"ok\"}]，\n  失败（policy 拒绝/未开 --dial-allow/net.DialTimeout 失败）回 error 帧再关流。\n- relay_stream.go 写 200 前带 12s 超时读结果帧：ok→200，error/EOF→502，超时→504，\n  取消→直接返回；读帧 goroutine 经 stream.Abort() 回收。\n- cmd/sclient/relay.go relay start 置 DialResultFrames=true；p2p listen 保持 false\n  （默认零值）避免结果帧污染 webrtc 数据流。\n\nI28（important）mux.Stream 非阻塞 Abort：\n- stream.go 新增 Abort()：不经 writeCh 直接关 done（幂等、非阻塞），与 Close（发\n  FrameClose）区分。\n- closeChannels 改为只关 done 不关 dataCh：避免 Abort 本地关流后对端 pushData/\n  pushEOF 对已关闭 dataCh send 的 panic。\n- pushData/pushEOF 去掉 closeMu（dataCh 永不关闭，无需保护）：消除 dataCh 满时\n  pushData 持 closeMu 阻塞、Abort 等 closeMu 的死锁。\n- Read 优先消费已缓冲数据（dataCh 有数据且 done 已关时不再随机跳过）：保证叶子\n  「接受后立即关」时 hub 仍能读到 ok 结果帧。\n- relay_stream.go 泵送收尾 stream.Close() 改 stream.Abort()；leaf.go 收尾逻辑不变\n  （保留 s.Close() 发 FrameClose 通知对端，见 TestPump_NonCooperativeRemote_ForceClose）。\n\nI29（suggestion，用户确认）删除 localMux 死路由：\n- handlers.go 删除 localMux 的 POST /api/relay/stream 注册（经隧道必 500），保留\n  srvMux 直连注册并注释「仅支持直连」；删除处留 TODO 指向 mux raw-stream 方案。\n\nI65（important）补测试 + S34/S35/S37/S40：\n- relay_stream_test.go 补 UnknownTarget/NilLogger/NilRouteTable/BadAddr/NoHijacker\n  5 个测试 + DialFailure_Returns502 端到端；e2e 叶子置 DialResultFrames=true。\n- S34 routeTable nil 守卫（404）；S35 git rm relay_full.txt；S37 dial 帧短写防护；\n  S40 hubServices localMux 暴露注释。\n- mux/edge_test.go 补 Abort 立即返回/幂等/Read-Write 返 ErrConnClosed/并发无 panic 测试。\n- mockStream 补 Abort 满足接口。\n\n(cherry picked from commit 4f14135f6326fe56585b1d3a24c182c0cc0f32d8)\n\n* fix(hub): B2 批次修复信令可靠性 + per-node secret 客户端携带\n\nI1: relay 注册声明 per-node-secret 能力 + ackStr 三段解析（修复声明能力后\n    REG_OK:<secret> 被精确比较误判终态导致 relay start 终止的 B1 复检 bug）；\n    HubSignaler 变参 secret，post/poll 携带 X-Node-Secret 头（B3 服务端校验用）\nI5: SignalQueue 新增 Peek/Confirm 原语（供 B3 poll 端 Encode 成功后才消费）\nI6: SignalQueue.Purge(peerID) + Wait 成功路径清理 waiter（防 waiters 表泄漏）\nI7: HubSignaler.SetContext 注入 base context，Send* 弃用 context.Background()\nI8: poll 瞬时错误（5xx/网络）退避重试最多 3 次；HTTP 4xx 直接返回\nI9: PopKind 按 kind 消费（不匹配保留队列）+ 消息 TTL 2min + per-sender cap 32\n    + Push 返回 error（供 B3 回 429）\nI10: Push 为消息赋去重 ID + 客户端有界 seen-set 去重\nI11: 客户端单次 poll HTTP 超时 30s→60s；e2e 测试 SetSignalingTimeout(60s) 且\n    t.Cleanup 恢复全局（S69）\nI50/I51/I52: goroutine 内 t.Errorf 改 channel 回传断言；mock 404→400 对齐真实；\n    补 maxSignalTotal / maxSignalWaiters 资源边界测试\nS11: 客户端 post 不再设 At（服务端统一设，S11）\n\n跨文件说明：\n- router.go：NewRegisterFrame 改变参 caps（I1 能力声明必需，分析 §14 列为 B2 文件）\n- signaling_handlers.go：Push 返回 error 后加 _= 桥接（保持旧静默语义，B3 将改回 429）\n\n(cherry picked from commit 94a5453154a429197d8420dc7ea9158997b8f0c4)\n\n* fix(signal): 信令身份校验 X-Node-Secret + 队列溢出 429 + poll Peek/Confirm 接线\n\nB3 批次服务端信令修复（I1/I5/I12/I32/I63/I64 + S41-S44）：\n- I1: callerNode 改 LookupInfo 取 per-node Secret，X-Node-Secret 恒定时间比对；\n  Secret==\"\" 显式短路 403（fail-closed），关闭共享 relay_token 下零成本静默冒充\n- I12: Push 返回 error（全局满/per-sender cap）→ 429 + Warn 日志，替代 B2 的 _= 桥接\n- I5: poll 用 Peek/Confirm 原语，Encode 成功才 Confirm 消费；配合 ?kind= 过滤\n  （其余 kind 保留队列）；队列积压其他 kind 时 100ms 退避防空转忙等\n- I32: SignalBroker 增 pollTimeout 字段，poll 入口 SetWriteDeadline(pollTimeout+2s)\n  解耦 server_timeouts.write 对长轮询的掐断；I63 测试注入 100ms 免空 poll 阻塞\n- S41: encode 错误用 logger 记录；删 contextWithTimeout 包装；errMsgHubDisabled\n  复用 errMsgHubNotEnabled；body 超限 MaxBytesError → 413\n- S42: Validate 增 hub.enabled 需 transports.ws.enabled 一致性校验\n- S43: 修正 GET /{$} 注释（catch-all 表述，非 panic 冲突）\n- S44: 信令 POST 挂独立限流（与文件传输隔离配额），GET poll 不挂\n\n测试：newSignalTestBroker 改用 AddWithInfoAndServices 预置 Secret；全部用例补\nsecret 头；新增 NodeSecret（错/缺/空 secret 403）/QueueFull（429）用例；\nBadInput 重构真正命中缺 to/坏 JSON 分支；BodyTooLarge 断言改 413。\n\n(cherry picked from commit 0270bcfce63fad421315ce04bbe217c541f74f79)\n\n* fix(config): ACME mapstructure 标签与 yaml 键对齐（http01/http01_port）\n\nACMEConfig.HTTP01/HTTP01Port 的 mapstructure 标签写成 http_01/http_01_port，\n与 yaml 键 http01/http01_port 不一致，导致 viper 路径解码恒为默认值\n（HTTP01 恒 false、HTTP01Port 恒空串），属本分支引入的回归。\n\n- pkg/server/config.go: 修正两个 mapstructure 标签，与 yaml 键对齐\n- pkg/server/config_test.go: 新增反射一致性测试，断言配置树所有字段 yaml 与\n  mapstructure 标签一致，防同类标签漂移回归\n- cmd/sproxy/internal/sproxycfg/provider_test.go: 新增真实 viper 解码测试\n  （http01: true + http01_port: 80 → HTTP01/HTTP01Port），证明\n  yaml→viper→mapstructure 全链路解码正确（viper 仅存在于 cmd/sproxy 模块）\n\n(cherry picked from commit b8f74d5cfcb4b677f9bce64405dd23d6af154a6f)\n\n* fix(client): B11 批次 mesh/relay 客户端健壮性修复\n\nI33: RelayStream 握手阶段有界——deadline 取 min(ctx, 30s)（> 服务端 12s 决策\n     超时）+ ctx-watchdog 防 hub 半开无限阻塞，读完头清除 deadline\nI34: relayTLSConfig 继承 Transport.RootCAs，私有 CA 场景中继拨号可用\nI35: 补 504 回退测试 + 全候选失败回归测试，MeshConnect 文档化 200+EOF 固有限制\nI36: 隧道/xfer 模式 RelayStream 直拨 srvMux 鉴权差异文档化 + 401 诊断错误\nI66: mesh_test 各 mock 加 WithAuthToken 并断言 Authorization 头（token 复用链路）\nS45: 状态行成功判定改 SplitN 取状态码（不可用 http.ReadResponse——CONNECT 200\n     后紧跟数据面字节）\nS46: bufferedNetConn 补 CloseWrite 透传 + 文档化并发读约束\nS49: AuthToken() getter 加凭据风险警示注释\nS50: 补 RelayStream 成功/错误状态/挂起回退 + relayTLSConfig 继承 + CloseWrite 单测\nS95: 删除 TestMeshConnect_MultiCandidateFallback 中 svcLn 死代码\nS97: relay mock 断言请求体 target/type 字段\n(cherry picked from commit 4e854fb87ab7afc9f8c3d7a5736d215cb8d2c8a4)\n\n* style(config): 移除 Go 1.22+ 不再需要的 loopvar 复制（go fix）\n\n(cherry picked from commit ad747bb602a3f9a91d24048f681ff1c88530ea42)\n\n* fix(mesh): mesh connect 自动注册 + stdio 泵送挂起修复 + hub scheme 归一\n\nI37（webrtc 直连不可达）：mesh connect 连接前自持临时注册连接\n（mesh-<base>-<unixnano>，mux 保活，defer closer 确定性关闭），\n从 REG_OK:<secret> 拿 per-node secret 构建 HubSignaler，信令带\nX-Node-Secret；新增 --relay-token（fallback --token→auth_token）；\n注册失败 warn+回落中继（不静默）。\n\nI38：meshStdioOnce 改方向区分通道（outDone/inDone），对端断开\n立即返回不再挂起，且保留 echo x | mesh connect 等响应语义。\n\nI39：defaultMeshDial 改 DialWithSignalerCtx + ctx 预检，取消可立即\n打断 webrtc 拨号。\n\nI40：新增 normalizeHubEndpoints（ws(s):// → http(s):// 信令基址 +\nws(s)://host/ws 注册端点），mesh connect 与 p2p 的 --hub 共用。\n\n测试：I67 可取消 ctx + t.Cleanup 修 listener 泄漏；I69 SetHostOnly\n秒级 CI 稳定；I70 断言 offer/answer 文件均未创建；新增\nTestMeshAutoRegister_GetsSecretAndCleanup / TestNormalizeHubEndpoints /\nTestMeshRelayToken。\n\nS51 writeDialFrameTo 合并 mesh/p2p 帧写入；S55 initial nil 检查；\nS56 裸 :port 归一 127.0.0.1；S57 webrtc 失败回落前 slog.Debug 诊断。\n\n(cherry picked from commit 61e5a68880dbd82006032d8635a4629550190629)\n\n* fix(relay): 拨号泵送挂起修复 + 终态判定哨兵化 + 死代码清理\n\n- relayDialOnce 方向区分通道（meshStdioOnce 同款）：远端断开立即返回、\n  stdin EOF 等对端写完（保留 `echo x | relay dial` 语义，I41）\n- relayDialListenOn per-conn done + 双侧 Close（meshForwardListen 同款），\n  每连接 goroutine 正确收尾；ctx 取消时关闭 listener（S58）\n- -l 裸 :port 归一为 127.0.0.1:port（Windows 防火墙兼容，S56 同款）\n- 删除 buildRelayHandler 生产死代码（含 localAddr+URL.Path SSRF 隐患）\n  与 3 个测它的假覆盖测试（I42）\n- isTerminalRelayError 改用哨兵 errRelayRegistrationRejected + errors.Is，\n  穿透任意层 %w 包装（I43）\n- --service addr 用 net.SplitHostPort 校验（含 host==\"\" 拒绝），非法\n  warn+skip（S60）\n- hub 明文 ws:// 且携带 token 时 warn 提示生产用 wss（S61）\n- 新增 relay_dial_test.go：I41 两条路径 + echo 语义 + S58 + 端口归一；\n  TestRelayCmd_HasSubcommands 补 \"dial\"（S59/S62）\n\n(cherry picked from commit 204f6f282f6823272e0d8ff550803ebc68122a73)\n\n* fix(p2p): B14 批次 p2p CLI 修复——会话死亡/挂死/拨号策略/SDP 文件安全\n\n- I44: p2pForward 监听 m.Done()+ctx.Done() 关 listener 解 Accept 永久阻塞\n- H1-C2: p2pStdio 方向区分通道（对端断开立即返回，stdin EOF 等对端写完）\n- I45: p2p listen 加 --service/--dial-allow-cidr，复用 NewServiceDialPolicy\n- I46: p2p listen relay 日志改经 ios.ErrOut（discardLogger 保留给测试桩）\n- I47: writeSDPFile O_EXCL + 陈旧 SDP 判断，拒绝覆盖非 SDP 存量文件\n- S63: pump 对齐 leaf.go 半关闭 + grace 兜底，防在途数据截断\n- S64: signaler() 返回 error，--hub 空/畸形 URL 前置报错\n- S65: readJSONFromStdin 检查 scanner.Err()，读取错误不再误报 EOF\n- S66: validateSDPFile 校验 sdp 非空 + v= 前缀\n- S67: --offer 与 --answer 同路径前置拒绝\n- S68: writeDialFrameTo 用 writeFull 循环写满（mesh/p2p 双受益）\n- S69: webrtc 加 ResetSignalingTimeout，manual 分支 defer 复位\n- I68: Cleanup 测试场景 A 真实模拟对端消费 + 强断言\n\n(cherry picked from commit 5f6bd08e7f656fd9f559a2a1ae09c57d551721bb)\n\n* fix(test): e2e 中继/mesh 测试可靠性加固（B15 批次）\n\n- I71: TestE2E_RelayStream echo 读加 5s deadline，防叶子 pump 卡死挂满 10 分钟\n- I72: 两个 relay helper 以 waitNodeRegistered 轮询 /api/hub/nodes 替代固定 sleep，\n  超时打印 sclient stderr 后 Kill 失败（对齐 registerAckTimeout 10s）\n- I73: mesh connect 就绪判定升级为全 echo 往返轮询（全局 15s，单次 2s deadline），\n  覆盖「慢注册」与「首连成功但数据面未就绪」两类 flaky\n- I74: relay helper 写临时 sclient.yaml 并传 --config（配置隔离）\n- S110: 包级 sync.Once + os.Stat 共享 sproxy/sclient 二进制，消除重复 go build\n- S111: 修正文件头 caller 描述与 startSClientRelay 注释失真\n- S112: 三个 sclient helper 注册 t.Cleanup，测试失败时打印子进程 stderr\n- S113: 移除 --local 与 localAddr 参数（dial 帧分支不触发 HTTP 中继，死配置）\n- S114: 新增 UnknownTarget→404、DialRefused→502 两个失败场景 E2E\n- S115: 端口 TOCTOU 保持现状 + 注释说明（由 I73 echo 轮询与 healthz 兜底）\n- S116: hub 就绪门追加 /api/hub/nodes 200 + 合法 JSON 数组校验\n\n(cherry picked from commit 3d6cab192d12ac6284d31f4c9851fb0048690a6a)\n\n* fix(sclient): p2p 自动注册 + --insecure 接线 TLS 拨号（B17 批次）\n\np2p 经 hub 信令此前必 400/403：信令器不自动注册节点、不携带 per-node\nsecret，而服务端已 fail-closed（B3/I1）。本批抽参数化 autoRegister\n（temp/exact node + prefix + insecure），meshAutoRegister 变薄包装。\n\n- mesh/p2p 共用 autoRegister：mesh connect（temp）、p2p connect（temp）、\n  p2p listen（exact 稳定 node_id 供 --peer 寻址）三处接入，信令携带 secret\n- p2p listen 信令 400/403（节点被 hub 移除）时在重连退避循环内重注册自愈\n- p2pFlags 增 --relay-token（fallback --relay-token → --token）\n- 新增 cmd/sclient/tlsutil.go：insecureHTTPClient + hubWSDial；HubSignaler\n  增 SetHTTPClient（对齐 SetContext，向后兼容）\n- 四处接线 --insecure：relay start ws 拨号、mesh/p2p 自动注册 ws + 信令\n  HTTP、relay status HTTP（自签 wss hub 场景；不新增关闭 TLS 校验路径）\n\n(cherry picked from commit b958c151b98b0da4deac50082dac554f8f46e682)\n\n* docs(mesh): B16 批次文档修复——C4 云端推送命令可复现 + pre-commit 正则补漏 + 对齐 B12/B14/B17\n\n- C4(critical): 三处文档本地端 relay start 补 --dial-allow --service app:127.0.0.1:2090\n  （B9 NewServiceDialPolicy 精确放行宣告地址），云端 relay dial 补 --insecure（B17 已接线），\n  并补充 --insecure 安全提示（仅开发/测试自签，生产用真实证书）\n- I77: mesh-testing.md 7b stdin/stdout 第 4 步 listen → connect（本地端是 dial 侧）\n- I78: pre-commit check-loopback 正则补漏（tcp4/空 host/私网首字符 1）修误报（[::1] IPv6 回环），\n  grep -vE 显式排除 127.0.0.1 / [::1]\n- S117: mesh connect/p2p 文档说明连接前自动注册（B17）、webrtc 直连前提（对端需同时跑 p2p listen）\n- S118: glossary 加\"同一节点可同时担任多角色\"约定\n- S119: CLAUDE.md 配置表补 hub.transports.ws.path（已废弃，固定 /ws）\n- S120: 注明 relay start --hub 默认 127.0.0.1:18084 ≠ sproxy 默认 :18083\n- S121: FAQ 报错文案改\"注册失败: invalid token\"（对齐 parseRegisterAck 哨兵）；mesh connect 卡住文案改不可用场景\n- S122: mesh-testing.md 补完整 hub.yaml 结构（参照 config.example.yaml）\n- S123: 说明 --hub 地址形式差异（relay start 传 WS 端点，p2p/mesh 传 HTTP 基址）\n\n(cherry picked from commit a2f5326607ce1d96e9a5e2d3433d774abe273fa1)\n\n* docs(mesh-testing): §7 p2p listen 补 --service 放行私网目标（B14 后默认仅公网）\n\n(cherry picked from commit a6ea479f53cfcabe028125bf86ba4f57b12e4666)\n\n* fix(mesh): 下线触发信令收件箱清理 + 端口转发半关闭升级 + p2p -l 归一 + 文档残留修正\n\n- I6 收件箱清理接线：RouteTable 新增 SetRemoveHook 下线回调（Remove/RemoveIfOwned\n  成功路径、锁外调用），SignalBroker 构造时注册 PurgeNode，节点下线即清空其信令\n  收件箱释放 maxSignalTotal 配额（防反复上下线耗尽配额 → 新信令 429）；重连替换\n  不误删在线节点收件箱\n- 端口转发 CloseWrite 半关闭升级：meshForwardListen / relayDialListenOn 改用\n  pumpConns（对齐 leaf.go pump 的 C1 修复），首方向完成即传播半关闭，在途响应\n  不再被双侧 Close 截断；grace 宽限期兜底非合作对端\n- p2pForward -l 裸 :port 归一 127.0.0.1（与 mesh/relay_dial 对齐，防 Windows\n  防火墙弹窗 + LAN 暴露）；显式 0.0.0.0 保持\n- I66：TestMeshConnect_504Fallback / AllCandidatesFail 补 Authorization Bearer 断言\n- S39：CLAUDE.md / AGENTS.md / docs/architecture.md 修正 RelayHandler →\n  RelayStreamHandler、POST /api/relay → /api/relay/stream 残留\n\n(cherry picked from commit 8dc4e78fb6133b30e7d33b920ff40b873f3bda90)\n\n* chore(pre-commit): 排除正则锚定端口，精确匹配回环地址参数\n\n(cherry picked from commit 0c8e4e042bae97ff99518341f2216dac274818bf)\n\n* docs(architecture): 数据流图修正为 RelayStreamHandler 流中继模式（旧 /api/relay JSON 中继已删除）\n\n(cherry picked from commit 4af8aaa259fe95913ad4fa04644f46c2b37c643c)\n\n* fix(mesh): P0 数据面修复——webrtc 直连 mux 分帧 + Send/Close 死锁 + pump Abort + hub 半关闭宽限 + stdio CloseWrite\n\n- P0-1: mesh 直连数据面协议错位。defaultMeshDial 曾把 [4B len][{\"dial\":addr}] 拨号帧\n  以裸字节写 DataChannel，对端 mux 帧协议无法解析（100% 失败）。新增 meshWebRTCStream：\n  mux.New(webrtc.ConnAsXfer(conn)) + 流上写拨号帧，对齐 p2p connect；新增 muxStreamConn\n  (mux.Stream→net.Conn 适配)；删除 meshDialFrameNeeded/meshRelayDial。\n- P0-2: webrtcXferConn Send/Close 死锁。Send 持 mu 跨无界 raw.Write，Close 等 mu 永不\n  解除 → 新增 closeMu 独立保护 closed，Close 不经写串行化 mu 直接 raw.Close() 解阻塞。\n- P0-3: pump 宽限期收尾 Close→Abort（leaf.go/p2p.go），writeCh 打满时 Close 永久阻塞。\n- P0-4: hub 中继泵送半关闭宽限期（relay_stream.go），方向完成传播 CloseWrite/CloseWriteConn，\n  在途响应不截断，超时 Abort 强关。\n- P0-5: stdio 单次模式 stdin EOF 后 closeWriteConn 传播半关闭（mesh/relay_dial/p2p），\n  helper 参数 net.Conn→io.Closer 兼容 mux.Stream。\n\n回归测试：TestMeshWebRTCStream_WritesDialFrameOnMuxStream（直连帧经 mux 协议送达）、\nTestWebrtcXferConn_CloseUnblocksBlockedSend（阻塞写桩解死锁）、\nTestRelayStream_ClientHalfClose_KeepsInFlightResponse（已验证旧代码 FAIL/新代码 PASS）、\necho 测试改用 TCP 回环对（net.PipeConn 无 CloseWrite 致竞态）。\n\n(cherry picked from commit 98b8882b907c9c73da946c08c96a902e909088fc)\n\n* fix(mesh): P1 批次可靠性修复——注册/信令/传输层 10 项\n\n- P1-7: hub 未读到注册帧（超时/网络）不再回 REG_ERR，静默断开让客户端按网络\n  问题重连——否则纯网络抖动即可让 relay 守护进程永久退出（router.go received 标志）。\n- P1-8: SignalQueue.Wait 改 close-broadcast，同一 peer 并发 poll 不再只有一个 waiter\n  被唤醒、其余搁浅至 ctx 截止 25s（击穿 webrtc 30s 信令预算）。\n- P1-9: 中继流 200 后加空闲超时（默认 15min，RelayStreamHandler.idleTimeout），\n  防\"拿到 200 后不发\"的客户端无限期占用叶子出站 FD 与 mux 流。\n- P1-10: 中继请求体 io.LimitReader 改 http.MaxBytesReader + 413（对齐信令 S41），\n  超大请求体不再静默截断后 200。\n- P1-11: webrtc 新增 ErrNoIncomingConnection 哨兵，p2p listen 空闲超时（30s 无\n  对端发起连接）不再误判失败、无条件重注册 + secret 轮换抖动。\n- P1-12: mesh connect webrtc 探测受 meshWebRTCProbeTimeout（10s）约束，relay-only\n  目标不再每条连接白等 30s 信令超时才回落中继。\n- P1-13: meshTargetRefresher 候选 failover——invalidate 记录失败节点，resolve 跳过\n  它选健康候选，死节点不再永久遮蔽副本。\n- P1-14: ws failLoop 先置 closed + Send 入队后复检 closed，消除 failLoop 到\n  close(closeCh) 之间假成功入队、消息永不写出的静默丢帧窗口。\n- P1-15: runRelayOnce mux 创建前三个注册错误路径关闭 WS 连接（对齐 mesh 守卫），\n  消除重连循环的连接 + sendLoop goroutine 泄漏。\n- P1-6: mux stream.Read 内层 select 的 done 分支先非阻塞清空 dataCh——对端发数据\n  后立即关闭时不再约 50% 概率丢弃已投递数据帧（I27 拨号结果帧可靠性）。\n\n回归测试：注册读取失败不回 REG_ERR、并发 waiter 双唤醒、中继空闲超时关闭、\n413 拒绝超大请求体、webrtc 空闲哨兵、mesh 候选 failover、ws markClosed 中间态\nSend 报错（已验证旧代码 FAIL/新代码 PASS）、mux 数据先于关闭不丢失。\n\n(cherry picked from commit 974e3c6ef1cb224bf847bb09cf9113de8cca7490)",
+          "timestamp": "2026-08-29T13:46:41+08:00",
+          "tree_id": "ee949da565a6c894b2624cc3909b2eab591aef61",
+          "url": "https://github.com/cocomhub/sproxy/commit/36f11ca04b6a44d857d62e262754dadaf086cf73"
+        },
+        "date": 1787982662470,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 5055018,
+            "unit": "ns/op\t 207.43 MB/s\t 4322414 B/op\t     296 allocs/op",
+            "extra": "237 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 5055018,
+            "unit": "ns/op",
+            "extra": "237 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 207.43,
+            "unit": "MB/s",
+            "extra": "237 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4322414,
+            "unit": "B/op",
+            "extra": "237 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 296,
+            "unit": "allocs/op",
+            "extra": "237 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 5835757,
+            "unit": "ns/op\t 179.68 MB/s\t 4323625 B/op\t     296 allocs/op",
+            "extra": "249 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 5835757,
+            "unit": "ns/op",
+            "extra": "249 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 179.68,
+            "unit": "MB/s",
+            "extra": "249 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4323625,
+            "unit": "B/op",
+            "extra": "249 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 296,
+            "unit": "allocs/op",
+            "extra": "249 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 4904878,
+            "unit": "ns/op\t 213.78 MB/s\t 4322940 B/op\t     296 allocs/op",
+            "extra": "232 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 4904878,
+            "unit": "ns/op",
+            "extra": "232 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 213.78,
+            "unit": "MB/s",
+            "extra": "232 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4322940,
+            "unit": "B/op",
+            "extra": "232 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 296,
+            "unit": "allocs/op",
+            "extra": "232 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 5035862,
+            "unit": "ns/op\t 208.22 MB/s\t 4321962 B/op\t     297 allocs/op",
+            "extra": "222 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 5035862,
+            "unit": "ns/op",
+            "extra": "222 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 208.22,
+            "unit": "MB/s",
+            "extra": "222 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4321962,
+            "unit": "B/op",
+            "extra": "222 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 297,
+            "unit": "allocs/op",
+            "extra": "222 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 6162526,
+            "unit": "ns/op\t 170.15 MB/s\t 4323595 B/op\t     296 allocs/op",
+            "extra": "222 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 6162526,
+            "unit": "ns/op",
+            "extra": "222 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 170.15,
+            "unit": "MB/s",
+            "extra": "222 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 4323595,
+            "unit": "B/op",
+            "extra": "222 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 296,
+            "unit": "allocs/op",
+            "extra": "222 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 3555543,
+            "unit": "ns/op\t 294.91 MB/s\t 2192942 B/op\t     140 allocs/op",
+            "extra": "321 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 3555543,
+            "unit": "ns/op",
+            "extra": "321 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 294.91,
+            "unit": "MB/s",
+            "extra": "321 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2192942,
+            "unit": "B/op",
+            "extra": "321 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 140,
+            "unit": "allocs/op",
+            "extra": "321 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 3537758,
+            "unit": "ns/op\t 296.40 MB/s\t 2192994 B/op\t     141 allocs/op",
+            "extra": "328 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 3537758,
+            "unit": "ns/op",
+            "extra": "328 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 296.4,
+            "unit": "MB/s",
+            "extra": "328 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2192994,
+            "unit": "B/op",
+            "extra": "328 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 141,
+            "unit": "allocs/op",
+            "extra": "328 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 3534323,
+            "unit": "ns/op\t 296.68 MB/s\t 2192902 B/op\t     140 allocs/op",
+            "extra": "338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 3534323,
+            "unit": "ns/op",
+            "extra": "338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 296.68,
+            "unit": "MB/s",
+            "extra": "338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2192902,
+            "unit": "B/op",
+            "extra": "338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 140,
+            "unit": "allocs/op",
+            "extra": "338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 3632488,
+            "unit": "ns/op\t 288.67 MB/s\t 2192623 B/op\t     140 allocs/op",
+            "extra": "337 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 3632488,
+            "unit": "ns/op",
+            "extra": "337 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 288.67,
+            "unit": "MB/s",
+            "extra": "337 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2192623,
+            "unit": "B/op",
+            "extra": "337 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 140,
+            "unit": "allocs/op",
+            "extra": "337 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 3500264,
+            "unit": "ns/op\t 299.57 MB/s\t 2192954 B/op\t     141 allocs/op",
+            "extra": "334 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 3500264,
+            "unit": "ns/op",
+            "extra": "334 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 299.57,
+            "unit": "MB/s",
+            "extra": "334 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 2192954,
+            "unit": "B/op",
+            "extra": "334 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDownload (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 141,
+            "unit": "allocs/op",
+            "extra": "334 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 28569097,
+            "unit": "ns/op\t 146.81 MB/s\t16909208 B/op\t     393 allocs/op",
+            "extra": "61 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 28569097,
+            "unit": "ns/op",
+            "extra": "61 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 146.81,
+            "unit": "MB/s",
+            "extra": "61 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16909208,
+            "unit": "B/op",
+            "extra": "61 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 393,
+            "unit": "allocs/op",
+            "extra": "61 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 17318080,
+            "unit": "ns/op\t 242.19 MB/s\t16908856 B/op\t     393 allocs/op",
+            "extra": "60 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 17318080,
+            "unit": "ns/op",
+            "extra": "60 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 242.19,
+            "unit": "MB/s",
+            "extra": "60 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16908856,
+            "unit": "B/op",
+            "extra": "60 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 393,
+            "unit": "allocs/op",
+            "extra": "60 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 24438652,
+            "unit": "ns/op\t 171.63 MB/s\t16907792 B/op\t     394 allocs/op",
+            "extra": "58 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 24438652,
+            "unit": "ns/op",
+            "extra": "58 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 171.63,
+            "unit": "MB/s",
+            "extra": "58 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16907792,
+            "unit": "B/op",
+            "extra": "58 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 394,
+            "unit": "allocs/op",
+            "extra": "58 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 21209193,
+            "unit": "ns/op\t 197.76 MB/s\t16908166 B/op\t     394 allocs/op",
+            "extra": "68 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 21209193,
+            "unit": "ns/op",
+            "extra": "68 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 197.76,
+            "unit": "MB/s",
+            "extra": "68 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16908166,
+            "unit": "B/op",
+            "extra": "68 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 394,
+            "unit": "allocs/op",
+            "extra": "68 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 33165890,
+            "unit": "ns/op\t 126.46 MB/s\t16908339 B/op\t     393 allocs/op",
+            "extra": "55 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 33165890,
+            "unit": "ns/op",
+            "extra": "55 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - MB/s",
+            "value": 126.46,
+            "unit": "MB/s",
+            "extra": "55 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 16908339,
+            "unit": "B/op",
+            "extra": "55 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkUpload_4MB_Regular (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 393,
+            "unit": "allocs/op",
+            "extra": "55 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 627020,
+            "unit": "ns/op\t  103108 B/op\t     729 allocs/op",
+            "extra": "1840 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 627020,
+            "unit": "ns/op",
+            "extra": "1840 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 103108,
+            "unit": "B/op",
+            "extra": "1840 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 729,
+            "unit": "allocs/op",
+            "extra": "1840 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 637141,
+            "unit": "ns/op\t  103255 B/op\t     729 allocs/op",
+            "extra": "1854 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 637141,
+            "unit": "ns/op",
+            "extra": "1854 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 103255,
+            "unit": "B/op",
+            "extra": "1854 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 729,
+            "unit": "allocs/op",
+            "extra": "1854 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 626009,
+            "unit": "ns/op\t  103209 B/op\t     729 allocs/op",
+            "extra": "1867 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 626009,
+            "unit": "ns/op",
+            "extra": "1867 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 103209,
+            "unit": "B/op",
+            "extra": "1867 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 729,
+            "unit": "allocs/op",
+            "extra": "1867 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 635494,
+            "unit": "ns/op\t  103246 B/op\t     729 allocs/op",
+            "extra": "1886 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 635494,
+            "unit": "ns/op",
+            "extra": "1886 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 103246,
+            "unit": "B/op",
+            "extra": "1886 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 729,
+            "unit": "allocs/op",
+            "extra": "1886 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client)",
+            "value": 624668,
+            "unit": "ns/op\t  103086 B/op\t     729 allocs/op",
+            "extra": "1876 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - ns/op",
+            "value": 624668,
+            "unit": "ns/op",
+            "extra": "1876 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - B/op",
+            "value": 103086,
+            "unit": "B/op",
+            "extra": "1876 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkListFiles (github.com/cocomhub/sproxy/pkg/client) - allocs/op",
+            "value": 729,
+            "unit": "allocs/op",
+            "extra": "1876 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 964.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1303750 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 964.5,
+            "unit": "ns/op",
+            "extra": "1303750 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1303750 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1303750 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 923.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1288922 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 923.2,
+            "unit": "ns/op",
+            "extra": "1288922 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1288922 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1288922 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 929.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1289025 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 929.2,
+            "unit": "ns/op",
+            "extra": "1289025 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1289025 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1289025 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 926.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1295340 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 926.3,
+            "unit": "ns/op",
+            "extra": "1295340 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1295340 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1295340 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 936.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1296543 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 936.9,
+            "unit": "ns/op",
+            "extra": "1296543 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1296543 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1296543 times\n4 procs"
           }
         ]
       }
