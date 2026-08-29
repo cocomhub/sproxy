@@ -91,6 +91,13 @@ type NodeConfig struct {
 	// 测试可指定 "127.0.0.1:0" 收敛到 loopback（避免防火墙弹窗）。实际广播的
 	// saddr 按监听 host 派生：通配 host 用主局域网 IP，显式 host 原样保留。
 	SignalAddr string
+	// MDNSPeerSecret 是 mDNS 模式的共享密钥（--mdns-secret）。非空时：
+	//   - 直连信令 offer 携带 HMAC 签名，listener 校验（防未授权 peer 借本节点作
+	//     中继/出口）；
+	//   - mDNS TXT 宣告携带 HMAC 签名，浏览方校验（防伪造/MITM）。
+	// 同 mesh 所有节点须配置相同密钥；空 = 无认证（LAN 信任模型，出口由
+	// dial-allow 策略约束）。
+	MDNSPeerSecret string
 	// Logger 是会话日志（nil 用 slog.Default()）。
 	Logger *slog.Logger
 }

@@ -5,6 +5,9 @@ package mesh
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -57,6 +60,40 @@ const (
 // ErrMDNSServiceNotFound 表示在超时窗口内未通过 mDNS 发现指定服务。
 var ErrMDNSServiceNotFound = errors.New("mdns: 局域网内未发现该 mesh 服务")
 
+var (
+	mdnsLoopbackMu   sync.Mutex
+	mdnsLoopbackOnly bool
+)
+
+// SetMDNSLoopbackOnly 控制 mDNS 组播是否只加入 loopback 接口（测试专用，避免
+// Windows 防火墙弹窗）。对齐 icecfg.LoopbackOnly 模式：默认关闭，生产路径不调用；
+// 测试经 t.Cleanup 恢复。开启后组播仅在本机 loopback 上收发，跨机器 mDNS 失效。
+func SetMDNSLoopbackOnly(v bool) {
+	mdnsLoopbackMu.Lock()
+	mdnsLoopbackOnly = v
+	mdnsLoopbackMu.Unlock()
+}
+
+func isMDNSLoopbackOnly() bool {
+	mdnsLoopbackMu.Lock()
+	defer mdnsLoopbackMu.Unlock()
+	return mdnsLoopbackOnly
+}
+
+// loopbackInterface 返回本机 loopback 接口（测试组播收敛用；找不到返回 nil）。
+func loopbackInterface() *net.Interface {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	for i := range ifaces {
+		if ifaces[i].Flags&net.FlagLoopback != 0 {
+			return &ifaces[i]
+		}
+	}
+	return nil
+}
+
 // MDNSConfig 是 mDNS 服务器配置。
 type MDNSConfig struct {
 	// NodeID 是本节点 node-id（必填；广播与自去重键）。
@@ -71,6 +108,11 @@ type MDNSConfig struct {
 	BrowseOnly bool
 	// Port 是组播端口（0 回落 mDNSPort；测试可覆盖避免占用标准 5353）。
 	Port int
+	// Secret 是共享密钥（--mdns-secret）：非空时宣告的 TXT 记录携带 HMAC 签名，
+	// 浏览方校验签名后才信任对端（防伪造/MITM）。空 = 无认证（LAN 信任模型）。
+	// 注意：Secret 非空时，同 mesh 所有节点须配置相同密钥，否则未配置方无法发现
+	// 已配置方（其 TXT 无有效签名被拒绝）。
+	Secret string
 	// Logger 是会话日志（nil 用 slog.Default()）。
 	Logger *slog.Logger
 }
@@ -141,7 +183,13 @@ func (s *MDNSServer) Start(ctx context.Context) error {
 		port = mDNSPort
 	}
 	group := &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port}
-	conn, err := net.ListenMulticastUDP("udp4", nil, group)
+	// 测试 loopback 收敛：加入 loopback 接口（SetMDNSLoopbackOnly），避免 Windows
+	// 防火墙对非本机接口组播绑定弹窗。生产（nil）加入系统默认组播接口。
+	var ifi *net.Interface
+	if isMDNSLoopbackOnly() {
+		ifi = loopbackInterface()
+	}
+	conn, err := net.ListenMulticastUDP("udp4", ifi, group)
 	if err != nil {
 		return fmt.Errorf("mdns: 加入组播 %s 失败: %w", group, err)
 	}
@@ -384,8 +432,10 @@ func (s *MDNSServer) applyAnswer(res dnsmessage.Resource) {
 }
 
 // applyTXT 解析一条实例的 TXT 记录，填充 node-id / 信令端点 / 服务列表。
+// 配置了共享密钥（Secret）时，对端 TXT 必须携带匹配的 HMAC 签名才被信任
+// （防伪造/MITM，安全审查 D）；签名不匹配/缺失则忽略该对端。
 func (s *MDNSServer) applyTXT(inst string, txt []string, ttl uint32) {
-	var nodeID, signalAddr string
+	var nodeID, signalAddr, sig string
 	var services []hub.Service
 	for _, str := range txt {
 		k, v, ok := strings.Cut(str, "=")
@@ -397,6 +447,8 @@ func (s *MDNSServer) applyTXT(inst string, txt []string, ttl uint32) {
 			nodeID = unescapeMDNS(v)
 		case "saddr":
 			signalAddr = unescapeMDNS(v)
+		case "sig":
+			sig = v // hex，无特殊字符，不转义
 		default:
 			if rest, ok2 := strings.CutPrefix(k, "svc."); ok2 {
 				svcName := unescapeMDNS(rest)
@@ -409,6 +461,12 @@ func (s *MDNSServer) applyTXT(inst string, txt []string, ttl uint32) {
 	}
 	if nodeID == "" {
 		return // 非本 mesh 的 TXT（缺 node 标识），忽略
+	}
+	if s.conf.Secret != "" {
+		expected := mdnsTXTSig(s.conf.Secret, mdnsTXTContent(nodeID, signalAddr, services))
+		if sig == "" || !hmac.Equal([]byte(sig), []byte(expected)) {
+			return // 签名缺失/不匹配：未认证对端，忽略（防伪造）
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -559,7 +617,35 @@ func (s *MDNSServer) txtPairs() []string {
 	for _, svc := range s.conf.Services {
 		pairs = append(pairs, "svc."+escapeMDNS(svc.Name)+"="+escapeMDNS(svc.Addr))
 	}
+	if s.conf.Secret != "" {
+		// 共享密钥签名：覆盖 node-id + saddr + 服务集，浏览方据此校验防伪造。
+		pairs = append(pairs, "sig="+mdnsTXTSig(s.conf.Secret, mdnsTXTContent(s.conf.NodeID, s.conf.SignalAddr, s.conf.Services)))
+	}
 	return pairs
+}
+
+// mdnsTXTContent 计算 mDNS TXT 签名的规范化内容（服务按 name 排序保证确定性）。
+func mdnsTXTContent(nodeID, signalAddr string, services []hub.Service) string {
+	svcs := append([]hub.Service(nil), services...)
+	sort.Slice(svcs, func(i, j int) bool { return svcs[i].Name < svcs[j].Name })
+	var b strings.Builder
+	b.WriteString(nodeID)
+	b.WriteByte('|')
+	b.WriteString(signalAddr)
+	for _, svc := range svcs {
+		b.WriteByte('|')
+		b.WriteString(svc.Name)
+		b.WriteByte('=')
+		b.WriteString(svc.Addr)
+	}
+	return b.String()
+}
+
+// mdnsTXTSig 计算 mDNS TXT 内容的 HMAC-SHA256 签名（hex）。
+func mdnsTXTSig(secret, content string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(content))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // escapeMDNS / unescapeMDNS 用 URL 编码保证 node-id/服务名/地址中任意字节

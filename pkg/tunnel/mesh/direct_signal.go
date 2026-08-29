@@ -5,7 +5,10 @@ package mesh
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +48,19 @@ type directSignalMsg struct {
 	Node string `json:"node,omitempty"`
 	// SDP 是 offer/answer 的 SDP JSON。
 	SDP string `json:"sdp"`
+	// Sig 是共享密钥对 offer 的 HMAC-SHA256(secret, node+"\n"+sdp) hex。
+	// 仅当两端配置了 --mdns-secret 时必填；服务端校验，防未授权连接利用本节点
+	// 作中继/出口（安全审查 Issue 1）。
+	Sig string `json:"sig,omitempty"`
+}
+
+// computeSignalSig 计算直连信令 offer 的共享密钥签名（HMAC-SHA256）。
+func computeSignalSig(secret, node, sdp string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(node))
+	mac.Write([]byte("\n"))
+	mac.Write([]byte(sdp))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // errDirectSignalConn 表示一条对端信令连接异常（提前关闭/畸形长度前缀/非法 JSON/
@@ -62,6 +78,23 @@ type DirectSignalServer struct {
 
 	closed    chan struct{}
 	closeOnce sync.Once
+
+	mu     sync.RWMutex
+	secret string // --mdns-secret 共享密钥；空 = 无认证（LAN 信任）
+}
+
+// SetSecret 设置直连信令共享密钥（--mdns-secret）。须在 Serve 启动前调用；
+// 设置后仅接受携带有效 HMAC 签名的 offer（防未授权连接利用本节点作中继/出口）。
+func (s *DirectSignalServer) SetSecret(secret string) {
+	s.mu.Lock()
+	s.secret = secret
+	s.mu.Unlock()
+}
+
+func (s *DirectSignalServer) getSecret() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.secret
 }
 
 // NewDirectSignalServer 监听 addr（空回落 ":0" 全接口随机端口），返回服务器。
@@ -199,6 +232,15 @@ func (s *directSignalerServer) WaitOffer(ctx context.Context) (string, string, e
 		_ = c.Close()
 		return "", "", errDirectSignalConn
 	}
+	// 共享密钥认证（--mdns-secret）：配置了密钥时，offer 必须携带有效 HMAC 签名，
+	// 否则拒绝（防未授权 peer 借本节点作中继/出口，安全审查 A/C）。
+	if secret := s.srv.getSecret(); secret != "" {
+		expected := computeSignalSig(secret, rr.msg.Node, rr.msg.SDP)
+		if rr.msg.Sig == "" || !hmac.Equal([]byte(rr.msg.Sig), []byte(expected)) {
+			_ = c.Close()
+			return "", "", errDirectSignalConn
+		}
+	}
 	s.mu.Lock()
 	s.conn = c
 	s.mu.Unlock()
@@ -225,6 +267,9 @@ func (s *directSignalerServer) WaitAnswer(_ context.Context) (string, string, er
 // 关闭底层 TCP 连接（信令握手完成后调用方负责释放）。
 type DirectSignaler interface {
 	webrtc.Signaler
+	// SetSecret 设置共享密钥（--mdns-secret）；须在 SendOffer 前调用。
+	// 设置后 offer 携带 HMAC 签名，供服务端认证。
+	SetSecret(secret string)
 	Close() error
 }
 
@@ -243,6 +288,21 @@ func DialDirectSignaler(ctx context.Context, addr, nodeID string) (DirectSignale
 type directSignalerClient struct {
 	conn   net.Conn
 	nodeID string
+
+	mu     sync.RWMutex
+	secret string
+}
+
+func (c *directSignalerClient) SetSecret(secret string) {
+	c.mu.Lock()
+	c.secret = secret
+	c.mu.Unlock()
+}
+
+func (c *directSignalerClient) getSecret() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.secret
 }
 
 func (c *directSignalerClient) SendOffer(_ string, sdp string) error {
@@ -250,7 +310,11 @@ func (c *directSignalerClient) SendOffer(_ string, sdp string) error {
 		return err
 	}
 	defer func() { _ = c.conn.SetWriteDeadline(time.Time{}) }()
-	return writeDirectSignalFrame(c.conn, directSignalMsg{Node: c.nodeID, SDP: sdp})
+	msg := directSignalMsg{Node: c.nodeID, SDP: sdp}
+	if secret := c.getSecret(); secret != "" {
+		msg.Sig = computeSignalSig(secret, c.nodeID, sdp)
+	}
+	return writeDirectSignalFrame(c.conn, msg)
 }
 
 func (c *directSignalerClient) WaitAnswer(ctx context.Context) (string, string, error) {

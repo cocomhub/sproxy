@@ -16,6 +16,42 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
 )
 
+// TestValidateSignalAddr（安全审查 B 回归）：mDNS 发现的信令端点须拒绝
+// loopback/link-local（含云 metadata 169.254.169.254）/multicast/unspecified/
+// 非法端口，防恶意广播诱导拨号（SSRF）。测试 loopback 收敛模式放行 loopback。
+func TestValidateSignalAddr(t *testing.T) {
+	SetMDNSLoopbackOnly(false)
+	t.Cleanup(func() { SetMDNSLoopbackOnly(false) })
+	bad := []string{
+		"127.0.0.1:40001",    // loopback
+		"[::1]:40001",        // IPv6 loopback
+		"169.254.169.254:80", // 云 metadata（link-local）
+		"169.254.0.1:40001",  // link-local
+		"fe80::1:40001",      // IPv6 link-local
+		"224.0.0.251:5353",   // multicast
+		"0.0.0.0:40001",      // unspecified
+		"10.0.0.5",           // 缺端口
+		"10.0.0.5:abc",       // 非数字端口
+		":40001",             // 缺 host
+	}
+	for _, addr := range bad {
+		if err := ValidateSignalAddr(addr); err == nil {
+			t.Errorf("ValidateSignalAddr(%q) 应拒绝", addr)
+		}
+	}
+	for _, addr := range []string{"192.168.1.10:40001", "10.0.0.5:40001"} {
+		if err := ValidateSignalAddr(addr); err != nil {
+			t.Errorf("ValidateSignalAddr(%q) 应通过: %v", addr, err)
+		}
+	}
+	// 测试 loopback 收敛模式放行 loopback（两节点同机测试）。
+	SetMDNSLoopbackOnly(true)
+	t.Cleanup(func() { SetMDNSLoopbackOnly(false) })
+	if err := ValidateSignalAddr("127.0.0.1:40001"); err != nil {
+		t.Errorf("loopback 收敛模式应放行 loopback: %v", err)
+	}
+}
+
 func TestResolveSignalListenAddr(t *testing.T) {
 	// 通配 host → 收敛到主局域网 IPv4 + 端口 "0"（不校验具体 IP，仅校验格式与端口）。
 	host, port, err := resolveSignalListenAddr("")
@@ -50,7 +86,8 @@ func TestResolveSignalListenAddr(t *testing.T) {
 // mesh 节点（宣告 echo 服务 + 直连信令端点），客户端经 mDNS 发现该服务，用直连信令
 // 建立 webrtc 数据面并走对端出口拨号，验证 echo 数据双向通过。
 func TestMeshNodeMDNS_Connect(t *testing.T) {
-	// Windows 下收敛 UDP 候选收集到 loopback，避免防火墙弹窗。
+	// Windows 下收敛 UDP 候选收集到 loopback + mDNS 组播 loopback，避免防火墙弹窗。
+	testMDNSLoopback(t)
 	env := webrtctest.New(t)
 	defer env.Close()
 	webrtc.SetHostOnly(true)
@@ -211,7 +248,8 @@ func TestMeshNodeMDNS_Connect(t *testing.T) {
 // webrtc 直连（低 ID 拨高 ID，半拨号去重）。通过 DiscoveryPeers 观测通道断言拨号侧
 // 建立了到对端的直连链路。
 func TestMeshNodeMDNS_MutualDiscovery(t *testing.T) {
-	// Windows 下收敛 UDP 候选收集到 loopback，避免防火墙弹窗。
+	// Windows 下收敛 UDP 候选收集到 loopback + mDNS 组播 loopback，避免防火墙弹窗。
+	testMDNSLoopback(t)
 	env := webrtctest.New(t)
 	defer env.Close()
 	webrtc.SetHostOnly(true)

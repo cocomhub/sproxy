@@ -23,12 +23,12 @@ var mdnsLookupTimeout = 5 * time.Second
 // runMDNSConnect 纯 mDNS 直连（mesh connect --mdns，不经 hub）：
 // 经 mDNS 发现局域网内宣告 service 的 mesh node（mesh node --mdns 运行），用直连
 // 信令建立 webrtc 数据面，走对端出口拨号。listenAddr 非空时为端口转发模式，否则
-// 单次 stdin/stdout 模式。
-func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID string, ios cli.IOStreams) error {
+// 单次 stdin/stdout 模式。secret 是共享密钥（--mdns-secret，可为空 = 无认证）。
+func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret string, ios cli.IOStreams) error {
 	if nodeID == "" {
 		nodeID = iostream.LocalHostname("mesh-node")
 	}
-	mdns, err := mesh.NewMDNS(mesh.MDNSConfig{NodeID: nodeID, BrowseOnly: true})
+	mdns, err := mesh.NewMDNS(mesh.MDNSConfig{NodeID: nodeID, BrowseOnly: true, Secret: secret})
 	if err != nil {
 		return fmt.Errorf("mDNS 初始化失败: %w", err)
 	}
@@ -63,11 +63,18 @@ func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID string, ios 
 				lastErr = fmt.Errorf("节点 %s 未广播信令端点或服务地址", peer.NodeID)
 				continue
 			}
+			// 校验 mDNS 发现的信令端点（防 SSRF：拒绝 loopback/link-local 等，
+			// 安全审查 B/D）。
+			if verr := mesh.ValidateSignalAddr(peer.SignalAddr); verr != nil {
+				lastErr = fmt.Errorf("节点 %s 信令端点非法（%s）: %v", peer.NodeID, peer.SignalAddr, verr)
+				continue
+			}
 			sig, serr := mesh.DialDirectSignaler(dctx, peer.SignalAddr, nodeID)
 			if serr != nil {
 				lastErr = fmt.Errorf("直连信令失败（%s）: %w", peer.SignalAddr, serr)
 				continue
 			}
+			sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
 			target := &client.MeshService{Name: service, Node: peer.NodeID, Addr: svcAddr}
 			res, derr := mesh.DialDirect(dctx, sig, target)
 			// 信令握手已完成、数据面独立；无论成败都释放信令连接（成功后仅剩数据通道）。

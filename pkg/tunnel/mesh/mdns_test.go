@@ -20,6 +20,14 @@ func testMDNSLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// testMDNSLoopback 开启 mDNS 组播 loopback 收敛（避免 Windows 防火墙弹窗），
+// 测试结束自动恢复。含组播的测试开头调用。
+func testMDNSLoopback(t *testing.T) {
+	t.Helper()
+	SetMDNSLoopbackOnly(true)
+	t.Cleanup(func() { SetMDNSLoopbackOnly(false) })
+}
+
 func TestMDNSInstanceLabel(t *testing.T) {
 	tests := []struct {
 		in   string
@@ -144,6 +152,67 @@ func TestMDNSAnnouncementRoundtrip(t *testing.T) {
 	}
 }
 
+// TestMDNSSecretAuth（安全审查 D 回归）：配置共享密钥后，mDNS TXT 携带 HMAC 签名；
+// 浏览方用正确密钥发现对端，错误密钥忽略（防广告伪造/MITM），无密钥 = LAN 信任放行。
+// 用确定性 roundtrip（构造宣告 → 解析 → 应用到各密钥浏览方），不依赖组播。
+func TestMDNSSecretAuth(t *testing.T) {
+	svc := []hub.Service{{Name: "echo", Addr: "192.168.1.10:2222"}}
+	srvA, err := NewMDNS(MDNSConfig{
+		NodeID: "node-a", SignalAddr: "192.168.1.10:40001",
+		Services: svc, Secret: "S",
+	})
+	if err != nil {
+		t.Fatalf("NewMDNS(A): %v", err)
+	}
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true})
+	if serr := b.StartAnswers(); serr != nil {
+		t.Fatalf("StartAnswers: %v", serr)
+	}
+	srvA.appendRecords(&b)
+	msg, err := b.Finish()
+	if err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	var p dnsmessage.Parser
+	if _, serr := p.Start(msg); serr != nil {
+		t.Fatalf("解析: %v", serr)
+	}
+	for {
+		if _, qerr := p.Question(); qerr != nil {
+			if qerr == dnsmessage.ErrSectionDone {
+				break
+			}
+			t.Fatalf("Question: %v", qerr)
+		}
+	}
+	answers, err := p.AllAnswers()
+	if err != nil {
+		t.Fatalf("AllAnswers: %v", err)
+	}
+	applyTo := func(secret string) []MDNSPeer {
+		recv, rerr := NewMDNS(MDNSConfig{NodeID: "node-x", BrowseOnly: true, Secret: secret})
+		if rerr != nil {
+			t.Fatalf("NewMDNS(recv): %v", rerr)
+		}
+		for _, a := range answers {
+			recv.applyAnswer(a)
+		}
+		return recv.Peers()
+	}
+	// 正确密钥 → 发现 A。
+	if peers := applyTo("S"); len(peers) != 1 || peers[0].NodeID != "node-a" {
+		t.Fatalf("正确密钥应发现 node-a, got %+v", peers)
+	}
+	// 错误密钥 → 忽略（签名不匹配）。
+	if peers := applyTo("T"); len(peers) != 0 {
+		t.Fatalf("错误密钥不应发现 node-a, got %+v", peers)
+	}
+	// 无密钥（LAN 信任）→ 放行。
+	if peers := applyTo(""); len(peers) != 1 {
+		t.Fatalf("无密钥 LAN 信任应发现 node-a, got %+v", peers)
+	}
+}
+
 // TestMDNSIgnoreOwnAnnouncement：节点不应把自身的宣告计入对端列表。
 func TestMDNSIgnoreOwnAnnouncement(t *testing.T) {
 	srv, err := NewMDNS(MDNSConfig{NodeID: "node-a", SignalAddr: "192.168.1.10:40001"})
@@ -200,6 +269,7 @@ func waitMDNSPeer(s *MDNSServer, nodeID string, timeout time.Duration) (MDNSPeer
 // TestMDNSDiscovery_TwoNodes 是 mDNS 局域网互发现的集成测试：同机两个实例加入同一
 // 组播组，互相发现对方（node-id + 服务 + 信令端点）。组播在部分 CI/容器不可用时跳过。
 func TestMDNSDiscovery_TwoNodes(t *testing.T) {
+	testMDNSLoopback(t)
 	port := 15353 // 测试专用端口，避免占用标准 5353
 	// 探测组播可用性：先试绑定，失败则跳过（CI 容器常无组播路由）。
 	probe, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
@@ -261,6 +331,7 @@ func TestMDNSDiscovery_TwoNodes(t *testing.T) {
 
 // TestMDNSLookupService：LookupService 返回宣告指定服务的对端。
 func TestMDNSLookupService(t *testing.T) {
+	testMDNSLoopback(t)
 	port := 15354
 	probe, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{IP: net.ParseIP(mDNSIPv4), Port: port})
 	if err != nil {

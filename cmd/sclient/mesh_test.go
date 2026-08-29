@@ -85,6 +85,9 @@ func TestMeshConnect_MDNSDispatch(t *testing.T) {
 	oldTimeout := mdnsLookupTimeout
 	mdnsLookupTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { mdnsLookupTimeout = oldTimeout })
+	// mDNS 组播收敛 loopback，避免 Windows 防火墙弹窗。
+	mesh.SetMDNSLoopbackOnly(true)
+	t.Cleanup(func() { mesh.SetMDNSLoopbackOnly(false) })
 
 	var out bytes.Buffer
 	cmd := newCmdMeshConnect(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &out, ErrOut: io.Discard})

@@ -148,6 +148,85 @@ func TestDirectSignaler_MalformedConnNonFatal(t *testing.T) {
 	}
 }
 
+// TestDirectSignaler_SecretAuth（安全审查 A/C 回归）：配置共享密钥后，无签名/错误签名
+// 的 offer 被拒（非致命，监听器存活），正确签名被接受——防未授权 peer 借本节点作
+// 中继/出口。
+func TestDirectSignaler_SecretAuth(t *testing.T) {
+	srv, err := NewDirectSignalServer("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewDirectSignalServer: %v", err)
+	}
+	srv.SetSecret("mesh-secret")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	go srv.Serve(ctx)
+	defer srv.Close()
+
+	sig := srv.NewSignaler()
+	// 场景 1：无签名 offer → 拒。
+	conn, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if werr := writeDirectSignalFrame(conn, directSignalMsg{Node: "evil", SDP: "offer-sdp"}); werr != nil {
+		t.Fatalf("write: %v", werr)
+	}
+	_ = conn.Close()
+	if _, _, werr := sig.WaitOffer(ctx); !errors.Is(werr, errDirectSignalConn) {
+		t.Fatalf("无签名 offer 应被拒, got %v", werr)
+	}
+	// 场景 2：错误签名 offer → 拒。
+	conn2, err := net.Dial("tcp", srv.Addr().String())
+	if err != nil {
+		t.Fatalf("dial2: %v", err)
+	}
+	if werr := writeDirectSignalFrame(conn2, directSignalMsg{Node: "evil", SDP: "offer-sdp", Sig: "wrong-sig"}); werr != nil {
+		t.Fatalf("write2: %v", werr)
+	}
+	_ = conn2.Close()
+	if _, _, werr := sig.WaitOffer(ctx); !errors.Is(werr, errDirectSignalConn) {
+		t.Fatalf("错误签名 offer 应被拒, got %v", werr)
+	}
+	// 场景 3：正确签名 → 接受，answer 成功。
+	client, err := DialDirectSignaler(ctx, srv.Addr().String(), "node-dialer")
+	if err != nil {
+		t.Fatalf("DialDirectSignaler: %v", err)
+	}
+	defer client.Close()
+	client.SetSecret("mesh-secret")
+	listenerErr := make(chan error, 1)
+	go func() {
+		from, offer, werr := sig.WaitOffer(ctx)
+		if werr != nil {
+			listenerErr <- werr
+			return
+		}
+		if from != "node-dialer" || offer != "offer-sdp" {
+			listenerErr <- fmt.Errorf("from=%q offer=%q", from, offer)
+			return
+		}
+		listenerErr <- sig.SendAnswer("node-dialer", "answer-sdp")
+	}()
+	if serr := client.SendOffer("node-listener", "offer-sdp"); serr != nil {
+		t.Fatalf("SendOffer: %v", serr)
+	}
+	_, answer, aerr := client.WaitAnswer(ctx)
+	if aerr != nil {
+		t.Fatalf("WaitAnswer: %v", aerr)
+	}
+	if answer != "answer-sdp" {
+		t.Errorf("answer = %q, want answer-sdp", answer)
+	}
+	select {
+	case err := <-listenerErr:
+		if err != nil {
+			t.Fatalf("监听侧失败: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("等待监听侧完成超时")
+	}
+}
+
 // TestDirectSignaler_WaitAnswerCtxAware（N1 回归）：对端信令端点可达但不回 answer 时，
 // WaitAnswer 应在 ctx 到期时及时返回 ctx.Err()（而非卡满 directSignalTimeout 30s），
 // 保证 WebRTCProbeTimeout(10s) 与用户中断/节点关停的 ctx 语义真实生效。

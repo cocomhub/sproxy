@@ -49,6 +49,8 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	if err != nil {
 		return fmt.Errorf("mesh mDNS: 直连信令监听失败: %w", err)
 	}
+	// 共享密钥（--mdns-secret）：非空时仅接受携带有效 HMAC 签名的 offer。
+	signalSrv.SetSecret(cfg.MDNSPeerSecret)
 	defer signalSrv.Close()
 
 	signalTCP, ok := signalSrv.Addr().(*net.TCPAddr)
@@ -69,6 +71,7 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 		Services:   cfg.Services,
 		IPs:        lanIPs,
 		Port:       cfg.MDNSPort,
+		Secret:     cfg.MDNSPeerSecret, // --mdns-secret：TXT 签名 + 浏览校验
 		Logger:     logger,
 	})
 	if err != nil {
@@ -239,6 +242,13 @@ func (dl *mdnsDiscoveryLoop) dialPeerDirect(ctx context.Context, cfg NodeConfig,
 	if err := ctx.Err(); err != nil {
 		return
 	}
+	// 校验 mDNS 发现的信令端点（防 SSRF：拒绝 loopback/link-local/multicast/
+	// unspecified，防恶意广播诱导拨号到内网/元数据服务，安全审查 B）。
+	if verr := ValidateSignalAddr(p.SignalAddr); verr != nil {
+		logger.Debug("mesh mDNS 对等信令端点非法，跳过", "peer", p.NodeID, "saddr", p.SignalAddr, "error", verr)
+		dl.markFail(p.NodeID)
+		return
+	}
 	tempID := fmt.Sprintf("%s-%s-%s", hub.DiscPrefix, nodeID, newTempSuffix())
 	sig, err := DialDirectSignaler(ctx, p.SignalAddr, tempID)
 	if err != nil {
@@ -246,6 +256,7 @@ func (dl *mdnsDiscoveryLoop) dialPeerDirect(ctx context.Context, cfg NodeConfig,
 		dl.markFail(p.NodeID)
 		return
 	}
+	sig.SetSecret(cfg.MDNSPeerSecret) // --mdns-secret：offer 携带 HMAC 签名
 	defer func() { _ = sig.Close() }()
 	probeCtx, cancel := context.WithTimeout(ctx, probe)
 	conn, derr := webrtc.DialWithSignalerCtx(probeCtx, p.NodeID, sig)
@@ -330,6 +341,59 @@ func primaryLANIPv4() net.IP {
 	ips := lanIPv4Addrs()
 	if len(ips) > 0 {
 		return ips[0]
+	}
+	return nil
+}
+
+// ValidateSignalAddr 校验 mDNS 发现的直连信令端点（防 SSRF/伪造 peer，安全审查 B）：
+//   - host:port 可解析、端口为数字；
+//   - 拒绝 unspecified / multicast / broadcast / link-local（169.254.0.0/16 含云
+//     metadata、fe80::/10）；loopback 在测试 loopback 收敛模式（mdnsLoopbackOnly）下
+//     放行（两节点同机测试），生产拒绝；
+//   - hostname 解析并校验全部结果 IP。
+//
+// 在 auto-dial（dialPeerDirect）与 mesh connect --mdns（runMDNSConnect）共用。
+func ValidateSignalAddr(addr string) error {
+	host, port, serr := net.SplitHostPort(addr)
+	if serr != nil {
+		return fmt.Errorf("mesh mDNS: 直连信令端点非法（应为 host:port）: %w", serr)
+	}
+	if host == "" || port == "" {
+		return fmt.Errorf("mesh mDNS: 直连信令端点 host/port 为空: %q", addr)
+	}
+	if _, aerr := strconv.Atoi(port); aerr != nil {
+		return fmt.Errorf("mesh mDNS: 直连信令端点端口非法: %q", port)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return validateSignalIP(ip)
+	}
+	ips, lerr := net.LookupIP(host)
+	if lerr != nil || len(ips) == 0 {
+		return fmt.Errorf("mesh mDNS: 直连信令端点主机名解析失败: %q", host)
+	}
+	for _, ip := range ips {
+		if verr := validateSignalIP(ip); verr != nil {
+			return verr
+		}
+	}
+	return nil
+}
+
+func validateSignalIP(ip net.IP) error {
+	if ip == nil {
+		return errors.New("mesh mDNS: 直连信令端点 IP 为空")
+	}
+	if ip.IsUnspecified() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) {
+		return fmt.Errorf("mesh mDNS: 拒绝不安全信令端点 %s", ip)
+	}
+	if isMDNSLoopbackOnly() {
+		return nil // 测试 loopback 收敛：允许 loopback/link-local（两节点同机）
+	}
+	if ip.IsLoopback() {
+		return fmt.Errorf("mesh mDNS: 拒绝 loopback 信令端点 %s", ip)
+	}
+	if ip.IsLinkLocalUnicast() {
+		return fmt.Errorf("mesh mDNS: 拒绝 link-local 信令端点 %s", ip)
 	}
 	return nil
 }
