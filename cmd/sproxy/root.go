@@ -116,12 +116,29 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	mux := http.NewServeMux()
 	var routeTable *hub.MeshRouteTable
+	var persist *hub.Persister         // hub 状态持久化器（仅 hub.enabled 且 persist_file 非空时创建）
+	var restoredMsgs []hub.MessageSnap // 启动时从持久化恢复的信令收件箱（灌入 SignalBroker）
 	// Hub 中继：先注册 xfer/ws 传输（开启 transports.ws 时），
 	// 创建 MeshRouteTable + HubServer 收口，再注册 HTTP 路由。
 	if cfg.Hub.Enabled {
 		routeTable = hub.NewMeshRouteTable()
 		logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
 
+		// hub 状态持久化：配置了 persist_file 时加载历史快照恢复节点注册，
+		// 并让后续注册/移除变更异步落盘（sproxy 启动后经 handlers 的 SetOnChange 触发）。
+		// 文件缺失或损坏均按空状态启动（不因损坏文件拒绝启动，见 Persister.Load）。
+		if cfg.Hub.PersistFile != "" {
+			persist = hub.NewPersister(cfg.Hub.PersistFile)
+			if snap, err := persist.Load(); err != nil {
+				return fmt.Errorf("读取 hub 持久化文件失败: %w", err)
+			} else if snap != nil {
+				hub.RestoreFromSnapshot(routeTable, snap)
+				restoredMsgs = snap.Messages
+				if len(snap.Nodes) > 0 || len(snap.Messages) > 0 {
+					logger.Info("hub 状态已从持久化恢复", "file", cfg.Hub.PersistFile, "nodes", len(snap.Nodes), "messages", len(snap.Messages))
+				}
+			}
+		}
 		if cfg.Hub.Transports.WS.Enabled {
 			// 节点注册准入：SproxySig AccessKey + HMAC proof（共享 token 已废除）。
 			// hub 准入凭据来自顶层 access_keys 配置，转换后交给 hub.Authenticator。
@@ -156,12 +173,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 	}
 	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
-		Mux:        mux,
-		CfgPtr:     &cfgPtr,
-		Version:    Version,
-		BuildAt:    BuildAt,
-		Logger:     logger,
-		RouteTable: routeTable,
+		Mux:                 mux,
+		CfgPtr:              &cfgPtr,
+		Version:             Version,
+		BuildAt:             BuildAt,
+		Logger:              logger,
+		RouteTable:          routeTable,
+		HubPersist:          persist,
+		HubRestoredMessages: restoredMsgs,
 	})
 	defer func() {
 		if err := h.Close(); err != nil {

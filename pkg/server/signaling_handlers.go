@@ -22,6 +22,11 @@ type SignalBroker struct {
 	queue  *hub.SignalQueue
 	rt     *hub.MeshRouteTable
 	logger *slog.Logger
+	// persist 是 hub 状态持久化器（nil 表示未启用持久化）。提供 setter 注入
+	// （启动时配置了 hub.persist_file 才设置），写入当前收件箱快照。
+	// 仅用于触发信令变更持久化，不持有生命周期（进程退出前的最终 flush 由
+	// cmd 层在 handlers.Close 前调用）。
+	persist *hub.Persister
 	// pollTimeout 是 poll 长轮询的单次最长等待（I32）。
 	// 默认 hub.PollTimeout；测试可注入更小值避免空 poll 阻塞拖慢用例（I63）。
 	pollTimeout time.Duration
@@ -49,6 +54,59 @@ func NewSignalBroker(rt *hub.MeshRouteTable) *SignalBroker {
 // 全局配额（I6）。幂等：节点从未有消息时是 no-op。
 func (b *SignalBroker) PurgeNode(id hub.NodeID) {
 	b.queue.Purge(string(id))
+}
+
+// SetPersister 设置 hub 状态持久化器（配置了 hub.persist_file 时由 cmd 层注入）。
+// 传 nil 清除（关闭持久化）。
+func (b *SignalBroker) SetPersister(p *hub.Persister) {
+	b.persist = p
+}
+
+// FlushSignal 持久化完整 hub 快照（节点注册 + 信令收件箱）。由 handleSignalPost/
+// handleSignalPoll 在信令入队/消费后调用（服务端事件驱动，把最新收件箱同步写入文件）。
+// 必须与节点持久化共用同一 Snapshot 结构——只写 messages 会把已落盘的节点注册
+// 从文件里抹掉（重启后节点全丢），故这里合并路由表快照一起写。
+// 无持久化配置（persist == nil）时是 no-op，返回 nil。
+// M4：快照生成时过滤「引用已不在路由表」的孤儿收件箱，避免持久化死信。
+func (b *SignalBroker) FlushSignal(persist *hub.Persister) error {
+	if persist == nil {
+		persist = b.persist
+	}
+	if persist == nil {
+		return nil
+	}
+	return persist.FlushFn(func() *hub.Snapshot {
+		snap := &hub.Snapshot{
+			Nodes:    hub.SnapshotRouteTable(b.rt).Nodes,
+			Messages: b.signalSnapshots(),
+		}
+		if len(snap.Nodes) == 0 && len(snap.Messages) == 0 {
+			return nil
+		}
+		return snap
+	})
+}
+
+// signalSnapshots 生成信令收件箱快照，过滤掉收件箱归属节点已不在路由表的
+// 孤儿 peer（M4）——避免把死信写入持久化文件（重启后这些消息既无人投递
+// 也无人消费，只会白白占配额）。路由表为 nil（hub 未启用）时返回 nil。
+// 三条持久化路径共用：FlushSignal（信令入队/消费后）、onChange（节点注册/
+// 移除后）与停服 Flush（snapshotCurrent）——保证任何镜像都不含孤儿死信。
+func (b *SignalBroker) signalSnapshots() []hub.MessageSnap {
+	if b.rt == nil {
+		return nil
+	}
+	all := hub.SnapshotSignalQueue(b.queue)
+	out := all[:0]
+	for _, ms := range all {
+		if _, ok := b.rt.LookupInfo(hub.NodeID(ms.Peer)); ok {
+			out = append(out, ms)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // maxSignalBodyBytes 是单条信令消息体的最大字节数（SDP 通常 < 8 KiB）。
@@ -183,6 +241,15 @@ func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "信令队列已满，稍后重试", http.StatusTooManyRequests)
 		return
 	}
+	// 持久化：同步写入当前收件箱（持久化启用时）。与节点注册/移除的 onChange
+	// 回调共享同一 Persister——序列化在同一 mutex 下，不会互相覆盖。
+	// 落盘失败记录 error 日志但不拒绝本次 POST：信令投递不依赖持久化成功，
+	// 仅影响「重启后是否还记得这封信」——让发送方感知持久化异常比丢 5xx 更重要。
+	if p := b.persist; p != nil {
+		if err := b.FlushSignal(p); err != nil {
+			b.logger.Error("signal: 持久化收件箱失败", "path", p.Path(), "err", err)
+		}
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -228,6 +295,13 @@ func (b *SignalBroker) handleSignalPoll(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 			b.queue.Confirm(peer, m.ID)
+			// 信令被取走即从持久化镜像中消失：同步刷新快照，避免重启后
+			// 重新投递已被消费的旧消息（收件箱快照与实际队列保持一致）。
+			if p := b.persist; p != nil {
+				if err := b.FlushSignal(p); err != nil {
+					b.logger.Error("signal: 持久化收件箱失败", "path", p.Path(), "err", err)
+				}
+			}
 			return
 		}
 		if time.Now().After(deadline) {

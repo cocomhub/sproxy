@@ -63,8 +63,8 @@ func NewRouteTable() *RouteTable {
 func (rt *RouteTable) Add(id NodeID, m *mux.Mux) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if old, ok := rt.nodes[id]; ok {
-		go old.Close() // 异步关闭旧连接
+	if old, ok := rt.nodes[id]; ok && old != nil {
+		go old.Close() // 异步关闭旧连接；nil 占位（快照恢复的离线节点）无可关闭，跳过
 	}
 	rt.nodes[id] = m
 }
@@ -73,8 +73,8 @@ func (rt *RouteTable) Add(id NodeID, m *mux.Mux) {
 func (rt *RouteTable) AddWithInfo(info NodeInfo) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if old, ok := rt.nodes[info.ID]; ok {
-		go old.Close()
+	if old, ok := rt.nodes[info.ID]; ok && old != nil {
+		go old.Close() // 异步关闭旧连接；nil 占位（快照恢复的离线节点）无可关闭，跳过
 	}
 	rt.nodes[info.ID] = info.Mux
 	rt.info[info.ID] = info
@@ -86,8 +86,8 @@ func (rt *RouteTable) AddWithInfo(info NodeInfo) {
 func (rt *RouteTable) AddWithInfoAndServices(info NodeInfo, svcs []Service) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if old, ok := rt.nodes[info.ID]; ok {
-		go old.Close()
+	if old, ok := rt.nodes[info.ID]; ok && old != nil {
+		go old.Close() // 异步关闭旧连接；nil 占位（快照恢复的离线节点）无可关闭，跳过
 	}
 	rt.nodes[info.ID] = info.Mux
 	rt.info[info.ID] = info

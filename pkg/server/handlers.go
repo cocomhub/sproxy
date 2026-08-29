@@ -33,6 +33,7 @@ type Handlers struct {
 	shareStore     *ShareStore
 	routeTable     *hub.MeshRouteTable
 	signalBroker   *SignalBroker
+	hubPersist     *hub.Persister // hub 状态持久化器（配置 hub.persist_file 时注入；nil = 不持久化）
 	handler        http.Handler
 	cloudMgr       *CloudDownloadManager
 	storageMgr     *StorageManager
@@ -62,6 +63,11 @@ type RegisterRoutesOpts struct {
 	BuildAt    string
 	Logger     *slog.Logger
 	RouteTable *hub.MeshRouteTable // 每 mesh 独立路由表的聚合（M-9）
+	// HubPersist 是 hub 状态持久化器（配置 hub.persist_file 时由 flag 层注入）。
+	HubPersist *hub.Persister
+	// HubRestoredMessages 是启动时从持久化文件恢复的信令收件箱快照
+	// （nodes 已在 routeTable 恢复；messages 需在 SignalBroker 创建后灌入队列）。
+	HubRestoredMessages []hub.MessageSnap
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -89,8 +95,33 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		shareStore:    NewShareStore(log.With("component", "share")),
 		routeTable:    opts.RouteTable,
 		signalBroker:  NewSignalBroker(opts.RouteTable),
+		hubPersist:    opts.HubPersist,
 		uploadingStop: make(chan struct{}),
 		noncePool:     sproxysig.NewNoncePool(),
+	}
+	h.signalBroker.SetPersister(opts.HubPersist)
+
+	// 启动时恢复持久化的信令收件箱（节点注册已在 cmd 层通过 RestoreFromSnapshot
+	// 灌入 routeTable；此处把 messages 灌入 SignalBroker 队列，重启不丢待投递信令）。
+	if len(opts.HubRestoredMessages) > 0 {
+		hub.RestoreSignalQueue(h.signalBroker.queue, opts.HubRestoredMessages)
+	}
+
+	if h.routeTable != nil {
+		// 节点注册/移除（Add/Remove/RemoveIfOwned）→ 持久化快照。onChange 回调要求
+		// 快速返回（不做阻塞 I/O），故只排队（异步去抖落盘），真正写盘在 Persister 内部。
+		h.routeTable.SetOnChange(func() {
+			if opts.HubPersist == nil {
+				return
+			}
+			opts.HubPersist.Schedule(func() *hub.Snapshot {
+				snap := hub.SnapshotRouteTable(h.routeTable)
+				// M4：与 FlushSignal 一致，用 signalSnapshots 过滤孤儿收件箱
+				// （节点已不在路由表），避免 onChange 路径把死信写入持久化文件。
+				snap.Messages = h.signalBroker.signalSnapshots()
+				return snap
+			})
+		})
 	}
 
 	// 启动 uploadingFiles 定期清理 goroutine（OOM 防范）
@@ -350,7 +381,28 @@ func (h *Handlers) Close() error {
 	if h.shareStore != nil {
 		h.shareStore.Stop()
 	}
+	// hub 状态持久化器最终 flush：优雅停服前把最后一次注册/信令变更落盘。
+	// 快照生成在 Persister 锁内执行（FlushFn 持有 p.mu 再调 snapshotCurrent），
+	// 避免停服时节点下线与快照生成之间的竞态导致旧快照覆盖新状态（I1）。
+	if h.hubPersist != nil {
+		if err := h.hubPersist.FlushFn(func() *hub.Snapshot { return h.snapshotCurrent() }); err != nil {
+			h.logger.Error("shutdown: hub 状态最终落盘失败", "err", err)
+		}
+	}
 	return nil
+}
+
+// snapshotCurrent 构建当前完整 hub 快照（节点 + 信令收件箱）。
+// 命名不用 snapshotLocked：本函数自身不持任何锁（节点/队列锁在各 Snapshot 函数内
+// 短临界区自行加解锁），避免误导调用方以为入参需预先持锁。
+func (h *Handlers) snapshotCurrent() *hub.Snapshot {
+	if h.routeTable == nil {
+		return &hub.Snapshot{}
+	}
+	snap := hub.SnapshotRouteTable(h.routeTable)
+	// M4：与 FlushSignal / onChange 一致，过滤孤儿收件箱，避免停服快照写入死信。
+	snap.Messages = h.signalBroker.signalSnapshots()
+	return snap
 }
 
 // Handler 返回包装了 metricsMiddleware 的 HTTP handler，用于 http.Server.Handler。

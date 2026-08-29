@@ -63,6 +63,9 @@ type VersionConfig struct {
 type HubConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
 	NodeID  string `yaml:"node_id" mapstructure:"node_id"`
+	// PersistFile 是 hub 状态持久化文件路径。非空时启用状态持久化
+	// （节点注册/信令收件箱在重启间保留）；为空则持久化关闭（现有行为）。
+	PersistFile string `yaml:"persist_file" mapstructure:"persist_file"`
 	// MaxConnections 是 Hub 同时处理的中继节点连接数上限（I30），0 或不填使用默认 256。
 	MaxConnections int              `yaml:"max_connections" mapstructure:"max_connections"`
 	Transports     TransportConfigs `yaml:"transports" mapstructure:"transports"`

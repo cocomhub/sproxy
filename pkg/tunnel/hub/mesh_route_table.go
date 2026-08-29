@@ -18,6 +18,10 @@ type MeshRouteTable struct {
 	// onRemove 是为每个内部 RouteTable 注册的节点移除回调（SetRemoveHook 设置）。
 	// 惰性新建的表（Table）会同步挂上该回调，保证 SignalBroker 收件箱清理全覆盖。
 	onRemove func(NodeID)
+	// onChange 是任意节点注册/移除后的回调（Add / Remove / RemoveIfOwned 成功路径）。
+	// 供 hub 状态持久化在节点集合变更后落盘。在锁外同步调用，必须快速返回；
+	// nil 表示未注册。
+	onChange func()
 }
 
 // NewMeshRouteTable 创建每 mesh 独立路由表的聚合。
@@ -63,6 +67,7 @@ func (mrt *MeshRouteTable) lookupMesh(id NodeID) (string, bool) {
 // Add 写入对应表（info.Mesh = mesh）。
 // 若同一节点 ID 此前属于另一 mesh（跨 mesh 同名重注册），先从旧 mesh 表移除，
 // 维持 nodeMesh 单一归属的隔离不变量（节点名不跨 mesh 共享）。
+// 节点集合变更后在锁外触发 onChange 回调（持久化）。
 func (mrt *MeshRouteTable) Add(mesh string, info NodeInfo, svcs []Service) {
 	info.Mesh = mesh
 	t := mrt.Table(mesh)
@@ -75,6 +80,7 @@ func (mrt *MeshRouteTable) Add(mesh string, info NodeInfo, svcs []Service) {
 	}
 	mrt.nodeMesh[info.ID] = mesh
 	mrt.mu.Unlock()
+	mrt.fireChange()
 }
 
 // AddNode 低层节点注册（Add 的变体，不携带服务宣告）。
@@ -142,6 +148,7 @@ func (mrt *MeshRouteTable) cleanupNodeMesh(id NodeID, mesh string, t *RouteTable
 
 // Remove 按 ID 移除节点（自动按 nodeMesh 定位所属 mesh）。
 // 移除成功后删除 nodeMesh 映射并清空该 mesh 的空表。
+// 节点集合变更后在锁外触发 onChange 回调（持久化）。
 func (mrt *MeshRouteTable) Remove(id NodeID) bool {
 	mesh, ok := mrt.lookupMesh(id)
 	if !ok {
@@ -157,11 +164,13 @@ func (mrt *MeshRouteTable) Remove(id NodeID) bool {
 	mrt.mu.Lock()
 	mrt.cleanupNodeMesh(id, mesh, t)
 	mrt.mu.Unlock()
+	mrt.fireChange()
 	return true
 }
 
 // RemoveIfOwned 仅当节点 ID 当前绑定到给定 mux（即本连接）时才从对应 mesh 移除。
 // 防止旧连接断开时误删新注册的同名节点（stale identity 防护）。
+// 节点集合变更后在锁外触发 onChange 回调（持久化）。
 func (mrt *MeshRouteTable) RemoveIfOwned(id NodeID, m *mux.Mux) bool {
 	mesh, ok := mrt.lookupMesh(id)
 	if !ok {
@@ -177,6 +186,7 @@ func (mrt *MeshRouteTable) RemoveIfOwned(id NodeID, m *mux.Mux) bool {
 	mrt.mu.Lock()
 	mrt.cleanupNodeMesh(id, mesh, t)
 	mrt.mu.Unlock()
+	mrt.fireChange()
 	return true
 }
 
@@ -225,6 +235,25 @@ func (mrt *MeshRouteTable) SetRemoveHook(fn func(NodeID)) {
 	mrt.mu.Unlock()
 	for _, t := range tables {
 		t.SetRemoveHook(fn)
+	}
+}
+
+// SetOnChange 注册任意节点注册/移除后的回调（Add / Remove / RemoveIfOwned 成功路径）。
+// 供 hub 状态持久化在节点集合变更后落盘。传 nil 清除回调。
+// 回调在锁外同步调用，必须快速返回（不做阻塞 I/O），如需阻塞请自行 go。
+func (mrt *MeshRouteTable) SetOnChange(fn func()) {
+	mrt.mu.Lock()
+	mrt.onChange = fn
+	mrt.mu.Unlock()
+}
+
+// fireChange 在锁外调用 onChange 回调（若注册）。
+func (mrt *MeshRouteTable) fireChange() {
+	mrt.mu.RLock()
+	fn := mrt.onChange
+	mrt.mu.RUnlock()
+	if fn != nil {
+		fn()
 	}
 }
 
