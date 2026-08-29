@@ -145,67 +145,7 @@ func TestMvCommand_ServerError(t *testing.T) {
 	_ = cmd.Execute()
 }
 
-// ---- Stat command RunE 测试 ----
-
-func TestStatCommand_HappyPath(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-File-Checksum", "abc123def456")
-		w.Header().Set("X-File-Size", "42")
-		w.Header().Set("X-File-IsDir", "false")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	var buf strings.Builder
-	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdStat(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, st)
-	cmd.SetArgs([]string{"test.txt"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("stat command failed: %v", err)
-	}
-	if !strings.Contains(buf.String(), "abc123def456") {
-		t.Errorf("expected checksum in output, got: %s", buf.String())
-	}
-}
-
-func TestStatCommand_NotFound(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdStat(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)
-	cmd.SetArgs([]string{"test.txt"})
-	_ = cmd.Execute()
-}
-
-func TestStatCommand_Directory(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-File-Checksum", "")
-		w.Header().Set("X-File-Size", "0")
-		w.Header().Set("X-File-IsDir", "true")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	var buf strings.Builder
-	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdStat(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, st)
-	cmd.SetArgs([]string{"mydir"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("stat command failed: %v", err)
-	}
-	if !strings.Contains(buf.String(), "directory") {
-		t.Errorf("expected output to mention directory, got: %s", buf.String())
-	}
-}
+// ---- Stat command 文件元信息迁移至 meta（见 meta_test.go） ----
 
 // ---- Batch-delete command RunE 测试 ----
 
@@ -354,61 +294,6 @@ func TestArchiveDirCommand_ServerError(t *testing.T) {
 
 // ---- Version 测试已迁移到新工厂函数 ----
 // TestVersionCommand_Run 已移除，版本命令不再通过 rootCmd 注册
-
-// ---- Version 子命令 error 测试（已迁移）----
-
-func TestNewCmdVersionList_ServerError(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdVersionList(factory, cli.IOStreams{ErrOut: io.Discard})
-
-	cmd.SetArgs([]string{"test.txt"})
-	err := cmd.Execute()
-	if err == nil {
-		t.Error("expected error when server returns 404")
-	}
-}
-
-func TestNewCmdVersionRestore_ServerError(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdVersionRestore(factory, cli.IOStreams{ErrOut: io.Discard})
-
-	cmd.SetArgs([]string{"test.txt", "1"})
-	err := cmd.Execute()
-	if err == nil {
-		t.Error("expected error when server returns 404")
-	}
-}
-
-func TestNewCmdVersionDelete_ServerError(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	cmd := NewCmdVersionDelete(factory, cli.IOStreams{ErrOut: io.Discard})
-
-	cmd.SetArgs([]string{"test.txt", "1"})
-	err := cmd.Execute()
-	if err == nil {
-		t.Error("expected error when server returns 404")
-	}
-}
-
-// ---- Tunnel command RunE 测试 ----
 
 func TestTunnelCommand_MissingKey(t *testing.T) {
 	svc := client.NewFileClient("http://127.0.0.1:18083")
@@ -954,52 +839,6 @@ func TestResolveOutputPath_ConflictAppendsSuffix(t *testing.T) {
 	expected := filepath.Join(baseDir, "data.txt.1")
 	if got != expected {
 		t.Errorf("expected %s, got %s", expected, got)
-	}
-}
-
-// ---- Version command RunE 测试 ----
-
-func TestVersionCommand_ListVersions(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"versions": []client.VersionInfo{
-				{VersionID: 1, Size: 100, CreatedAt: "2026-01-01T00:00:00Z", Checksum: "abc123"},
-			},
-		})
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	var buf strings.Builder
-	cmd := NewCmdVersionList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
-	cmd.SetArgs([]string{"test.txt"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("version list command failed: %v", err)
-	}
-	if !strings.Contains(buf.String(), "abc123") {
-		t.Errorf("expected output to contain checksum, got: %s", buf.String())
-	}
-}
-
-func TestVersionCommand_ListEmpty(t *testing.T) {
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"versions": []client.VersionInfo{},
-		})
-	}))
-	defer mock.Close()
-
-	svc := client.NewFileClient(mock.URL)
-	factory := clientfactory.NewMock(svc, nil)
-	var buf strings.Builder
-	cmd := NewCmdVersionList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
-	cmd.SetArgs([]string{"test.txt"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("version list command failed: %v", err)
-	}
-	if !strings.Contains(buf.String(), "没有历史版本") {
-		t.Errorf("expected '没有历史版本', got: %s", buf.String())
 	}
 }
 

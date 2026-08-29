@@ -81,6 +81,8 @@ func init() {
 	rootCmd.Flags().String(flagTunnelKey, "", "隧道密钥 (64 hex chars)")
 	rootCmd.Flags().Bool(flagVersion, false, "打印版本与构建信息后退出")
 	rootCmd.Flags().Bool(flagNoTLS, false, "禁用 TLS（覆盖 tls.enabled 配置）")
+
+	rootCmd.AddCommand(NewVersionSubcommand())
 }
 
 func runServer(cmd *cobra.Command, args []string) error {

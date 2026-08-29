@@ -36,11 +36,26 @@ VERSION         ?= $(shell git describe --tags --always --dirty 2>/dev/null || e
 BUILD_AT        ?= $(shell date +"%Y-%m-%dT%H:%M:%SZ")
 COVER_THRESHOLD ?= 70
 SONAR_PROJECT_KEY ?= cocomhub_sproxy
-SKIP_VERSION    ?= true
-VERSION_DIR     ?= internal/version/build
+SKIP_VERSION    ?= false
+VERSION_DIR     ?= internal/build
+# buildmeta 包编译时 embed 其包内 build/dirty_info.txt，路径为
+# internal/buildmeta/build/。prepare 在 $(VERSION_DIR) 生成后拷到 $(EMBED_BASE)/build/。
+EMBED_BASE     ?= internal/buildmeta
 GOTAGS          ?=
 GOBUILD_EXTRA   ?= -v
-GO_LDFLAGS      := 
+# 构建信息 -X 注入。注意：VERSION/BUILD_AT 须在 GO_LDFLAGS 之前定义（:= 立即求值）。
+# 符号路径使用相对导入路径（link 的 -X 接受 main.V / 包内局部导入别名）：
+#   main.Version/main.BuildAt       → cmd/sproxy、cmd/sclient 的包级变量（version 子命令 + --version 共用）
+#   github.com/cocomhub/buildinfo.* → buildinfo 包级变量（Branch/CommitID/ReleaseURL）
+COMMIT_ID      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BRANCH         ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+RELEASE_URL    ?= https://github.com/cocomhub/sproxy/releases
+GO_LDFLAGS     := -ldflags "\
+  -X main.Version=$(VERSION) \
+  -X main.BuildAt=$(BUILD_AT) \
+  -X github.com/cocomhub/buildinfo.CommitID=$(COMMIT_ID) \
+  -X github.com/cocomhub/buildinfo.Branch=$(BRANCH) \
+  -X github.com/cocomhub/buildinfo.ReleaseURL=$(RELEASE_URL)" -trimpath
 CONFIG_FILE     ?= $(BUILD_DIR)/config.yaml
 CMD_NAMES       := sproxy sclient
 BIN_NAME        := $(BIN_DIR)/$(PROJECT_NAME)-$(GOOS)-$(GOARCH)$(EXE)
@@ -69,19 +84,20 @@ TOOLS := \
 
 .PHONY: prepare
 prepare:
-	@mkdir -p $(BUILD_DIR) $(BIN_DIR)
+	@mkdir -p $(BUILD_DIR) $(BIN_DIR) $(VERSION_DIR) $(EMBED_BASE)/build
 ifneq ($(SKIP_VERSION), true)
-	@mkdir -p $(VERSION_DIR)
 	@if ! git diff --quiet HEAD 2>/dev/null; then \
 		git diff HEAD > $(VERSION_DIR)/dirty_info.txt 2>/dev/null; \
 		echo "[prepare] dirty_info.txt updated ($(VERSION_DIR)/dirty_info.txt)"; \
 	else \
 		rm -f $(VERSION_DIR)/dirty_info.txt; \
 	fi
+	@# embed 副本始终存在：无 diff 时置空文件（等同 clean），保证 buildmeta 包可编译
+	@cp -f $(VERSION_DIR)/dirty_info.txt $(EMBED_BASE)/build/dirty_info.txt 2>/dev/null || : > $(EMBED_BASE)/build/dirty_info.txt
 endif
 
 .PHONY: build
-build: fmt
+build: fmt prepare
 	@mkdir -p $(BIN_DIR)
 	@$(foreach name,$(CMD_NAMES),echo "Building $(name)"; $(GO) build $(GOBUILD_EXTRA) $(GO_LDFLAGS) -o $(BIN_DIR)/$(name)$(EXE) ./cmd/$(name);)
 

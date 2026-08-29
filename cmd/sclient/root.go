@@ -127,7 +127,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdRmdir(factory, ios, cliState))
 	root.AddCommand(NewCmdGenkey(ios))
 	root.AddCommand(NewCmdConfig(factory, ios, &cfgFile, cfgSvc))
-	root.AddCommand(NewCmdVersion(factory, ios, cfgSvc))
+	root.AddCommand(NewCmdVersion(ios))
 	root.AddCommand(NewCmdStats(factory, ios))
 	root.AddCommand(NewCmdDiag(ios))
 	root.AddCommand(NewCmdUpload(factory, ios, cliState))
@@ -135,7 +135,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdDelete(factory, ios, cliState))
 	root.AddCommand(NewCmdList(factory, ios, cliState))
 	root.AddCommand(NewCmdSearch(factory, ios))
-	root.AddCommand(NewCmdStat(factory, ios, cliState))
+	root.AddCommand(NewCmdStat(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdMv(factory, ios, cliState))
 	root.AddCommand(NewCmdArchive(factory, ios))
 	root.AddCommand(NewCmdArchiveDir(factory, ios))
@@ -149,6 +149,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdMesh(factory, ios))
 	root.AddCommand(NewCmdCloudDownload(factory, ios, cliState, cfgSvc))
 	root.AddCommand(NewCmdCloudDownloadGroup(factory, ios, cfgSvc))
+	root.AddCommand(NewCmdMeta(factory, ios, cliState))
 
 	return root
 }

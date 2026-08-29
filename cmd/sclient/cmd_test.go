@@ -44,7 +44,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 		{"delete", NewCmdDelete(factory, ios, st)},
 		{"list", NewCmdList(factory, ios, st)},
 		{"search", NewCmdSearch(factory, ios)},
-		{"version", NewCmdVersion(factory, ios, nil)},
+		{"version", NewCmdVersion(ios)},
 		{"stats", NewCmdStats(factory, ios)},
 		{"diag", NewCmdDiag(ios)},
 		{"relay", NewCmdRelay(factory, ios, nil)},
@@ -52,7 +52,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 		{"batch-delete", NewCmdBatchDelete(factory, ios, st)},
 		{"batch-rename", NewCmdBatchRename(factory, ios)},
 		{"mv", NewCmdMv(factory, ios, st)},
-		{"stat", NewCmdStat(factory, ios, st)},
+		{"stat", NewCmdStat(factory, ios, &testConfigProvider{cfg: client.DefaultConfig()})},
 		{"genkey", NewCmdGenkey(ios)},
 		{"tunnel", NewCmdTunnel(factory, ios)},
 		{"cd", NewCmdCd(st, ios)},
@@ -261,17 +261,19 @@ func TestMvCmd(t *testing.T) {
 
 func TestStatCmd(t *testing.T) {
 	factory := clientfactory.NewMock(nil, nil)
-	st := &state.State{CurrentDir: ""}
-	cmd := NewCmdStat(factory, cli.IOStreams{Out: io.Discard}, st)
+	cmd := NewCmdStat(factory, cli.IOStreams{Out: io.Discard}, &testConfigProvider{cfg: client.DefaultConfig()})
 
-	if cmd.Use != "stat <filename>" {
+	if cmd.Use != "stat [server]" {
 		t.Errorf("statCmd.Use = %q", cmd.Use)
 	}
-	if err := cmd.Args(cmd, []string{}); err == nil {
-		t.Error("stat should require exactly 1 arg")
+	if err := cmd.Args(cmd, []string{}); err != nil {
+		t.Errorf("stat with no args should be ok: %v", err)
 	}
-	if err := cmd.Args(cmd, []string{"f.txt"}); err != nil {
+	if err := cmd.Args(cmd, []string{"server"}); err != nil {
 		t.Errorf("stat with 1 arg should be ok: %v", err)
+	}
+	if err := cmd.Args(cmd, []string{"a", "b"}); err == nil {
+		t.Error("stat should reject 2 args")
 	}
 }
 
@@ -295,8 +297,7 @@ func TestSearchCmd(t *testing.T) {
 // ---- version command ----
 
 func TestVersionCmd(t *testing.T) {
-	factory := clientfactory.NewMock(nil, nil)
-	cmd := NewCmdVersion(factory, cli.IOStreams{Out: io.Discard}, nil)
+	cmd := NewCmdVersion(cli.IOStreams{Out: io.Discard})
 	if !strings.HasPrefix(cmd.Use, "version") {
 		t.Errorf("versionCmd.Use = %q, want prefix 'version'", cmd.Use)
 	}
