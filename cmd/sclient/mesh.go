@@ -76,6 +76,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			hubURL, _ := cmd.Flags().GetString("hub")
 			nodeID, _ := cmd.Flags().GetString("node-id")
 			gatewayAddr, _ := cmd.Flags().GetString("gateway")
+			mdns, _ := cmd.Flags().GetBool("mdns")
 			insecure, _ := cmd.Flags().GetBool("insecure")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			if stunServers != nil {
@@ -89,6 +90,10 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			}
 			if turnUser != "" || turnPass != "" {
 				webrtc.SetTURNCredential(turnUser, turnPass)
+			}
+			if mdns {
+				// 纯 mDNS 直连（不经 hub）：服务端需 `mesh node --mdns` 宣告该服务。
+				return runMDNSConnect(cmd, service, listenAddr, nodeID, ios)
 			}
 
 			svc, err := factory.NewClient(cmd)
@@ -165,6 +170,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 	cmd.Flags().String("hub", "", "hub 地址（http(s) 或 ws(s) 均可；默认取 server_url）")
 	cmd.Flags().String("node-id", "", "本节点 ID（信令来源；默认主机名）")
 	cmd.Flags().String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port；本地节点无到目标的已建链路时回落常规拨号）")
+	cmd.Flags().Bool("mdns", false, "纯 mDNS 局域网直连（不经 hub）：经 mDNS 发现局域网内宣告该服务的 mesh node（`mesh node --mdns` 运行），直连信令建立 webrtc 数据面")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
 	cmd.Flags().StringSlice("turn", nil,
