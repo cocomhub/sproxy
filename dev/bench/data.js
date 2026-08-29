@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788007759978,
+  "lastUpdate": 1788008060308,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -304770,6 +304770,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1265282 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7d747a69188655a2a6985c3dc35c7c597ef232b0",
+          "message": "feat: access-key 驱动认证重构——SproxySig + 隧道 AK/HMAC + hub 准入（破坏性） (#111)\n\n* feat(auth): AccessKey/AccessKeySecret + SproxySig 请求签名重构——替代 auth_token 明文 Bearer\n\n认证重构（阶段 0a/0b/1/2，Go 侧）：\n- pkg/sproxysig：SproxySig v1 协议（Header 解析、canonical、HMAC sign/verify、\n  客户端自决 exp 过期、nonce 防重放池、body 流式哈希校验、SignRequest/SignAndFormat）\n- 服务端：Config.AuthToken → AccessKeys（每 mesh 一对 AK/SK）；authMiddleware 改\n  SproxySig 验签（覆盖文件/信令/节点列表/服务发现全部 HTTP 面）；移除 Bearer auth_token\n- 客户端：FileClient accessKey/accessKeySecret + doRequest 签名（body 发送前预哈希、\n  一次性流缓存临时文件）；RelayStream 签名；配置 access_key/access_key_secret\n- 信令：HubSignaler accessKey/SK 签名（替代 Bearer）\n- mesh：NodeConfig/AutoRegister/discovery/网关全切 AccessKey/SK 签名；\n  临时 node-id 改随机 hex 后缀（修 UnixNano 并发碰撞导致对端 Answer 交叉路由）\n- cmd：--access-key/--access-key-secret 替代 --auth-token；preview/relay/relay_mgmt/p2p 签名\n- 测试：sproxysig 单测 + 服务端/客户端/信令/mesh 全量迁移；hub/sclient/mesh/webrtc 全绿\n- 保留：relay_token（连接级注册）、per-node secret（信令动态防伪）、APIKeys（多用户，独立）\n\n(cherry picked from commit 478399deb0dfe67caf9618a42481e1cdf078c930)\n\n* feat(auth): 认证重构收尾——web SproxySig 签名 + access-key CLI + E2E 迁移 + 文档\n\n认证重构（阶段 0b 剩余 / 3 / 4 / 5，web+CLI+E2E+docs）：\n- access-key CLI：新增 `sclient access-key create [--mesh <name>]` 生成 AK/SK 打印\n  （AK=sk[-<mesh>]-<16hex>，SK=32B 随机 hex），供服务端 access_keys 配置与客户端使用；\n  注册到 root + 单测（命令存在/输出两行/mesh 前缀/随机性）\n- web：app.js 改用 WebCrypto 计算 SproxySig（crypto.subtle HMAC-SHA256），AK/SK 存\n  sessionStorage（关页即清，sproxy_tunnel_key 保持 localStorage）；index.html 增加\n  AccessKey 输入（token 语义改为 AccessKeySecret）；全部 fetch 调用点异步签名，\n  body 请求发送前预计算 SHA-256（上传构建 multipart 字节供哈希）；config 面板\n  auth_token_set → access_keys_set\n- E2E：修复 mesh node `--token` 未作为 relay_token 回落的回归（MeshRelayToken 第 3 参\n  误传空串导致 hub \"invalid token\" 拒绝注册）；新增 TestE2E_SproxySigAuth（配置\n  access_keys 的服务端拒绝未签名请求 401、sclient 签名请求成功）\n- 文档：CLAUDE.md/AGENTS.md 认证段落更新（access_keys 替代 auth_token、SproxySig 协议\n  说明、access-key CLI、web sessionStorage）；docs/config.md、docs/api.md、docs/cli.md、\n  config.example.yaml 同步去除 auth_token 残留\n\n验证：根+sclient+sproxy+mesh 子 module lint 0 issues；pkg/internal/mesh(-race)/\nhub/webrtc/sclient/sproxy 全部测试通过；go vet/gofmt 干净；web-test 通过；\n完整 E2E（含 mesh node/relay/签名认证）ok\n\n(cherry picked from commit 551b2eeb2617f7d77a07916aa29319ad2871d33a)\n\n* fix(client): chain 持久化 key 前缀 chain: → chain-（Windows 文件名兼容）\n\npkg/client/chain.go 用 \"chain:\"+ID 作 JSONKVStore key（即文件名），Windows 下\n冒号是非法文件名字符，os.Rename 报 \"The parameter is incorrect\" 导致链式下载\n状态持久化失败（TestE2E_CloudDownloadChain 偶发）。改前缀为 \"chain-\"（与\nstore_json.go 的 validateKey 语义一致），同步更新相关测试的 mock key。\n\n独立子 agent 完成认证重构收尾（551b2ee）时发现并建议，本提交落实。\n\n(cherry picked from commit f4b328e6e9a6d392018319d383407f306ab0c694)\n\n* docs(design): access-key 驱动的 /tunnel 认证与编解码设计（废除 tunnel_key/relay_token）\n\n(cherry picked from commit eb9efdd8b47fd60cff8728552d58340aac8ffbe8)\n\n* docs(plans): access-key 驱动 /tunnel 认证重构实现计划\n\n(cherry picked from commit 7d222a08ee3146fabbba62b2abe8256e4e01e586)\n\n* test(sproxysig): UNSIGNED body 透传与哈希不匹配断言\n\n(cherry picked from commit ac2337f6d33e9471f33bb4528c29493aa43c86b2)\n\n* feat(tunnel): SetTunnelKey/GetTunnelKey context 传递隧道密钥\n\n(cherry picked from commit e0533fea3783a1714d9d3dc151ee3f20eacfa8a3)\n\n* feat(tunnel): HKDF 派生隧道密钥 DeriveTunnelKey\n\n(cherry picked from commit 4f716c03e7d267618cbad223eba33161b5229105)\n\n* docs(plans): /tunnel 外层改用 UNSIGNED（流式 body 无法签 metadata 帧哈希）\n\n(cherry picked from commit 03620a24884adc45123e3b96ef44cc0ef3e05b76)\n\n* feat(auth): /tunnel 验签 + HKDF 派生隧道密钥进 ctx（tunnelDerivedKey）\n\n(cherry picked from commit abb4107876dc75b69a99a0291f12d2087d784ba9)\n\n* refactor(tunnel): Handler 改为从 request ctx 取派生密钥（废除进程级 primaryKey/oldKey）\n\n(cherry picked from commit dfe40cd6c88f2862ff3f793bdcc82ff04df401b9)\n\n* feat(tunnel): access-key 认证驱动隧道收尾（任务 6/7）——废除 tunnel_key + sclient 派生 + 修复 bodyValidator\n\n任务 6（废除 tunnel_key fail-fast）：\n- cmd/sproxy: 无 access_keys（且 api_keys 未启用）启动即拒绝，不再有无认证告警模式\n- pkg/server/config.go: Validate 允许无 auth（fail-fast 在 cmd 侧），移除空分支\n- cmd/sproxy/root_test.go: AuthWarning 改 TestRunServer_RejectsStartupWithoutAuth；Signal 测试补 access_keys\n- 删除 resolveTunnelKey / SIGHUP UpdateKey 相关测试与代码路径\n\n任务 7（sclient WithTunnel 派生）：\n- pkg/client.WithTunnel(ak, sk): HKDF(SK, mesh) 派生隧道密钥 + sigRoundTripper 注入 UNSIGNED 签名\n- pkg/client/config.go: 移除 TunnelKey 字段与 tunnel_key 配置键\n- cmd/sclient: factory WithTunnel(cfg.AccessKey, cfg.AccessKeySecret)\n- pkg/tunnel/tunnel.go: DeriveTunnelKey 增加 32 字节 SK 长度校验\n\n配套修复：\n- pkg/sproxysig/bodyValidator: 修复 (n>0, io.EOF) 时丢弃末次数据的 io.Reader 约定违反——\n  chunked multipart 上传并发下偶发 413（服务端读到缺 closing boundary 的截断 body）\n- pkg/server/handlers.go: POST /tunnel 挂 authMiddleware（验签后 SetTunnelKey 派生密钥进 ctx）\n- cmd/sproxy: 监听后写回实际地址到 cfgPtr（:0 端口测试友好），监听失败错误保持 errFmtListenServe 文案\n- 测试迁移：tunnel handler 测试注入 ctx 密钥；e2e/并发/直连测试补 SproxySig 签名\n\n验证：pkg/internal/cmd + ext 子 module 全部测试通过，golangci-lint 主仓 0 issues\n\n* feat(hub): 节点注册改 AK/HMAC 准入（废除 relay_token）——任务 8\n\nhub 中继节点注册准入从 relay_token 明文对比改为 SproxySig AccessKey + HMAC proof：\nComputeRegisterProof = HMAC-SHA256(SK, \"sproxy-hub-register/v1\\n\"+nodeID)，\nproof 绑定 node_id 防串用/重放；per-node secret 信令认证（X-Node-Secret）完全保留。\n\n- pkg/tunnel/hub/auth.go：重写为 AccessKey 列表 + Authenticate(ak, proof, nodeID)\n  fail-closed 准入（空 accessKeys 拒绝所有注册）；RegisterProofV1Context 常量\n- pkg/tunnel/hub/router.go：RegisterFrame 新增 access_key/access_key_proof；\n  NewRegisterFrame(nodeID, ak, proof, meta, caps...)；RegisterConn 改调新准入\n- pkg/tunnel/mesh/mesh.go：AutoRegisterParams 删 RelayToken；AutoRegister 用\n  ComputeRegisterProof 派生 proof（SK 为空 fail-closed 报错）\n- pkg/tunnel/mesh/node.go / discovery.go：删 RelayToken\n- cmd/sclient：relay.go / mesh.go / mesh_node.go / p2p.go 移除 --token/--relay-token\n  flag，改 --access-key/--access-key-secret；config.go 帮助文案\n- cmd/sproxy/root.go：hub.NewAuthenticator 改用顶层 cfg.AccessKeys 转换\n- pkg/server/config.go：HubConfig.RelayToken 删除 + 校验移除\n- pkg/client：Config.RelayToken / WithRelayToken / RelayToken() / MeshRelayToken 删除\n- 测试：hub/mesh/sclient/client/server + relay/mesh-node E2E 迁移到 AK/proof 认证\n\ngrep relay_token/RelayToken 在 pkg/ cmd/ 0 残留。\n\n* fix(sproxysig): bodyValidator 立即校验哈希 + E2E 迁移 access_keys（任务 9）\n\n- pkg/sproxysig/bodyValidator.Read：err==io.EOF 时立即校验哈希——\n  匹配返回 (n, io.EOF)（合法 io.Reader 约定，不丢末次数据）；不匹配返回 (0, error)\n  立即拒绝。此前延迟到下次 Read 存在校验绕过（调用方读到 (n,nil) 后停止读取\n  则篡改 body 永不校验）。补回归测试 TestBodyValidator_DataAndEOF_Mismatch。\n\n- test/e2e_test.go：startSPROXY 配置 access_keys（删除 tunnel_key），新增\n  signingTransport 自动加 SproxySig 签名（body 预哈希重放），authedHTTPClient\n  替代 http.DefaultClient；TestE2E_TunnelEncryption 改用统一测试凭据\n  （mesh 为空，两端 HKDF 派生一致）。\n- test/e2e_extra_test.go：裸请求统一走 authedHTTPClient（含 http.Head）。\n- test/e2e_tunnel_accesskey_test.go（新）：纯隧道 upload/list E2E——\n  真实 sproxy 二进制 + access_keys + sclient access_key/access_key_secret\n  派生隧道密钥走通（无 tunnel_key）。\n- 文档：PROGRESS 账本、任务 8 简报/报告归档。\n\n验证：17 个基础 E2E + 纯隧道 E2E 全过；主仓 + ext 子 module 全绿；lint 0 issues。\n\n* fix(auth): 落实最终代码审查——配置校验 + mesh 一致性 + body 校验兜底 + 示例配置（I-1..I-4, M-5/M-7）\n\n最终审查（docs/superpowers/plans/2026-08-24-tunnel-accesskey-finalreview.md）\n无 Critical；修复 4 项 Important + 2 项低成本 Minor：\n\nI-1 mesh 派生单一事实来源：新增 pkg/tunnel.AccessKeyMesh（支持连字符 mesh，\nsk-<mesh>-<hex> → mesh / sk-<hex> → \"\"），client 派生与服务端 HKDF info 统一用它，\n消除客户端字符串解析与服务端配置 mesh_id 双实现漂移。\nI-2 Config.Validate 校验 access_keys：Key 非空、Key 唯一、Secret 64 hex、\nmesh_id 与 AK 内嵌 mesh 一致（防坏配置启动后 /tunnel 才 500）。\nI-3 body 哈希校验兜底：authMiddleware 验签成功后 defer io.Copy(io.Discard, r.Body)\n强制消费剩余 body 触发 bodyValidator 的 EOF 比对——JSON/multipart handler 不读到\nEOF 导致校验永不触发的漏洞关闭（篡改 body 记 Warn 留痕）。\nI-4 config.example.yaml 更新：删除已移除的 tunnel_key/relay_token，提供可启动的\naccess_keys 示例 + fail-fast 说明。\nM-5 sclient config 帮助文案移除 tunnel_key。\nM-7 NewHubServer(nil) 视为 fail-closed（空 accessKeys 拒绝所有注册），杜绝\n\"遗漏传 auth\"走向开放注册；TestHubServerBareNodeID 改验证裸注册拒绝路径。\n\n测试：新增 AccessKeyMesh 单测、Validate access_keys 表驱动测试；\n全量 make lint 0 issues、主仓+cmd+test 全绿。\n\n* fix(auth): 审查修复 M-6/M-8/M-10 + I-3 body 防篡改（handler 读 EOF 触发校验）\n\nM-6 hub 注册 proof 加 ts+nonce 防重放（v2 协议，未上线无需兼容）：\n- proof = HMAC(SK, \"sproxy-hub-register/v2\\n\"+nodeID+\"\\n\"+ts+\"\\n\"+nonce)\n- Authenticate 校验 ts 新鲜度（5min 窗口，ErrStaleRegisterProof）+ nonce 去重\n  （复用 sproxysig.NoncePool，ErrReplayRegisterNonce）+ proof constant-time 比对\n- RegisterFrame 加 ts/nonce 字段；hub.NewRegisterNonce 生成一次性 nonce\n- 客户端 AutoRegister/runRelayOnce 生成 ts/nonce\n\nM-8 api_keys 保留 + 边界处理：hub.enabled=true 时强制 access_keys 非空\n（条件 fail-fast，消除 api_keys-only 下 hub//tunnel 死角）；config.example.yaml\n标注 api_keys 边界（不走隧道/hub）。\n\nM-10 verifySproxySig 返回命中 *AccessKeyConfig：tunnelDerivedKey 复用，\n消除二次 ParseHeader/遍历/理论 TOCTOU。\n\nI-3 body 防篡改响应前拒绝：新增 drainAndVerifyBody 辅助（io.Copy(Discard) 触发\nbodyValidator EOF 哈希比对），15 个 JSON 端点 Decode 后 + upload/chunked\nParseMultipartForm 后 + 2 个忽略错误的 Decode 后统一补校验；篡改 body 返回 400。\n补回归测试 TestSproxySig_BodyTamperRejected（篡改 JSON body 保留签名头 → 400）。\n\n验证：主仓+cmd+test 全绿，lint 0 issues。\n\n(cherry picked from commit bab2c0190ea7c02e27aab8cad05de9f1a967d415)\n\n* feat(hub): mesh 独立分表——每 mesh 独立 RouteTable（M-9）\n\nmesh 节点/服务/路由表完全隔离（连节点名都不共享），消除跨 mesh 元数据可见\n（M-9）。数据面加密已按 mesh 隔离（HKDF(SK, mesh)），本改动补元数据面 + 路由面隔离。\n\n- 新增 MeshRouteTable 聚合层（pkg/tunnel/hub/mesh_route_table.go）：map[mesh]*RouteTable\n  + nodeID→mesh 映射；Add（跨 mesh 同名重注册迁移）、Lookup/LookupInfo/Has/Remove 按\n  nodeMesh 自动定位、List/ListServices/NodeCount 按 mesh 过滤、SetRemoveHook 覆盖全表。\n- NodeInfo 加 Mesh 字段；registerNode 用 tunnel.AccessKeyMesh(reg.AccessKey) 解析 mesh\n  分表注册（无 mesh 归默认 \"\" 表，等价单 mesh）。\n- server 层：authMiddleware 验签后把 mesh 写入 ctx（MeshFrom 读取）；/api/hub/nodes、\n  stats、services 按请求 AK 的 mesh 过滤；relay_stream 转发校验目标与调用方同 mesh\n  （跨 mesh 404）；信令 callerNode 与 from/to 同 mesh 校验（跨 mesh 403）；metrics\n  节点数按 ctx mesh。\n- cmd/sproxy：NewMeshRouteTable。\n\n新增跨 mesh 隔离测试（验收核心）：MeshRouteTable 跨 mesh 表隔离（Lookup/Has/List/\nListServices/NodeCount）、TestHubServer_RegisterMeshFromAK、TestHubNodesHandler_MeshIsolation\n（mesh-a AK 只见 mesh-a）、TestSignalBroker_CrossMeshSignalingRejected（跨 mesh 信令 403）、\nTestRelayStreamHandler_CrossMeshTargetNotFound（跨 mesh 中继 404）。\n\n验证：主仓+cmd+test 全绿；-race（hub/server）无竞态；lint 0 issues。\n\n(cherry picked from commit 35f105ad926bbebcf05a5a5dbe4ca42c5c7902b8)\n\n* fix(ui-e2e): 适配 access-key 认证的隧道 API + 补 go.sum 依赖条目",
+          "timestamp": "2026-08-29T20:50:11+08:00",
+          "tree_id": "7001305b931e7501ea1c8226f49dd7e6aa9d3793",
+          "url": "https://github.com/cocomhub/sproxy/commit/7d747a69188655a2a6985c3dc35c7c597ef232b0"
+        },
+        "date": 1788008055045,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 916.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1314744 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 916.8,
+            "unit": "ns/op",
+            "extra": "1314744 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1314744 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1314744 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 984.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1299800 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 984.1,
+            "unit": "ns/op",
+            "extra": "1299800 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1299800 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1299800 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 917.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1303089 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 917.6,
+            "unit": "ns/op",
+            "extra": "1303089 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1303089 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1303089 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 919.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1306700 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 919.3,
+            "unit": "ns/op",
+            "extra": "1306700 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1306700 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1306700 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 922.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1308140 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 922.7,
+            "unit": "ns/op",
+            "extra": "1308140 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1308140 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1308140 times\n4 procs"
           }
         ]
       }
