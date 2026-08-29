@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -288,64 +289,10 @@ func methodAllowsBody(method string) bool {
 }
 
 // pump 双向泵送：mux 流 <-> TCP socket。
-//
-// 关闭语义（C1）：
-//   - 每个方向 io.Copy 完成后向对端 CloseWrite 传播半关闭（TCP FIN / 流 EOF），
-//     而不是立即全关流——让在途的响应仍可被另一方向读回（不截断）。
-//   - 首个方向完成后武装 grace 宽限期计时器：宽限期内另一方向完成则正常收尾；
-//     超时视为对端非合作（对 FIN 不回应、不关闭），强制关闭两端解除 remote.Read
-//     / s.Read 阻塞，防 goroutine 与 FD 泄漏（对叶子反复拨号半开服务即 DoS）。
-//   - 长连接（如 SSH 双向持续活跃）期间两方向都未完成，计时器不会启动，不误断。
-//   - 正常路径不在此显式关闭两端，由调用方（Serve 的 defer s.Close() /
-//     defer remote.Close()）收尾。
+// 委托 pkg/iostream.Pump（C1 范本：CloseWrite 半关闭传播 + 宽限期 + 超时强制关闭；
+// ForceClose 对 mux.Stream 优先 Abort，保留 P0-3 修复）。
 func pump(s mux.Stream, remote net.Conn, grace time.Duration) {
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(remote, s)
-		if tc, ok := remote.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		} else {
-			_ = remote.Close()
-		}
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(s, remote)
-		_ = s.CloseWrite()
-		done <- struct{}{}
-	}()
-
-	remaining := 2
-	var timeoutCh <-chan time.Time
-	var timer *time.Timer
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-	for remaining > 0 {
-		select {
-		case <-done:
-			remaining--
-			if remaining == 1 {
-				// 一个方向完成：启动宽限期等待另一半完成半关闭收尾。
-				timer = time.NewTimer(grace)
-				timeoutCh = timer.C
-			}
-		case <-timeoutCh:
-			// 非合作对端：强制关闭两端，解除 remote.Read / s.Read 阻塞。
-			_ = remote.Close()
-			// P0-3：必须用 Abort() 而非 Close()——Close 经 writeCh 发 FrameClose，
-			// writeCh 打满（对端停读导致流控窗口耗尽）时永久阻塞，本宽限期收尾路径
-			// 直接挂死并泄漏 goroutine/stream/FD（stream.go Abort 文档点名该场景）。
-			_ = s.Abort()
-			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
-				<-done
-				remaining--
-			}
-			return
-		}
-	}
+	iostream.Pump(s, remote, grace)
 }
 
 // DialAllowed 限制出口模式可拨号的目标（最小授权）。

@@ -28,7 +28,7 @@ func NewCmdVersion(ios cli.IOStreams) *cobra.Command {
 		Use:   "dirty-info",
 		Short: "显示自上次提交以来的未提交变更",
 		Run: func(c *cobra.Command, args []string) {
-			io.WriteString(ios.Out, buildmeta.DirtyInfo())
+			_, _ = io.WriteString(ios.Out, buildmeta.DirtyInfo())
 		},
 	}
 	cmd.AddCommand(dirty)

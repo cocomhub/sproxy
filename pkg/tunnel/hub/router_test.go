@@ -5,7 +5,11 @@ package hub
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -484,3 +488,127 @@ func TestHubServerJSONMissingNodeID(t *testing.T) {
 }
 
 var _ = mux.RoleDialer
+
+// discProof 计算 mesh discovery 临时注册的 real_node_id 证明（与 hub 端校验同式）。
+func discProof(secret, nodeID string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(nodeID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// registerNodeAndGetSecret 注册一个声明 per-node-secret 能力的节点，返回下发 secret
+// 与 keepAlive（调用方在断言完成后调用以关闭连接）。连接保持打开期间节点在 hub
+// 路由表在线——否则 hub 在连接断开即 RemoveIfOwned 移除节点，后续 disc 注册找不到目标。
+func registerNodeAndGetSecret(t *testing.T, srv *HubServer, nodeID, token string) (string, func()) {
+	t.Helper()
+	dial, serverConn, _ := pipeXfer()
+	ctx := t.Context()
+	go func() {
+		c := serverConn()
+		if c == nil {
+			return
+		}
+		_ = srv.HandleConn(ctx, c)
+	}()
+	clientConn, err := dial(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := fmt.Appendf(nil, `{"node_id":%q,"token":%q,"capabilities":["per-node-secret"]}`, nodeID, token)
+	if err := clientConn.Send(ctx, frame); err != nil {
+		t.Fatal(err)
+	}
+	ack, ackErr := clientConn.Receive(ctx)
+	if ackErr != nil {
+		t.Fatalf("register %s: %v", nodeID, ackErr)
+	}
+	ackStr := string(ack)
+	prefix := RegisterAckOK + registerAckSecretSep
+	if !strings.HasPrefix(ackStr, prefix) {
+		t.Fatalf("register %s: 期望 REG_OK, got %q", nodeID, ackStr)
+	}
+	return strings.TrimPrefix(ackStr, prefix), func() { _ = clientConn.Close() }
+}
+
+// registerRawFrame 发送原始注册帧并返回 ACK 串（REG_OK:... / REG_ERR:...）与
+// keepAlive（注册成功且需断言节点在线时，调用方在断言完成后调用关闭连接）。
+func registerRawFrame(t *testing.T, srv *HubServer, frame string) (string, func()) {
+	t.Helper()
+	dial, serverConn, _ := pipeXfer()
+	ctx := t.Context()
+	go func() {
+		c := serverConn()
+		if c == nil {
+			return
+		}
+		_ = srv.HandleConn(ctx, c)
+	}()
+	clientConn, err := dial(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clientConn.Send(ctx, []byte(frame)); err != nil {
+		t.Fatal(err)
+	}
+	ack, ackErr := clientConn.Receive(ctx)
+	if ackErr != nil {
+		t.Fatalf("receive ack: %v", ackErr)
+	}
+	return string(ack), func() { _ = clientConn.Close() }
+}
+
+// TestHubServer_DiscIdentity_ValidProof：disc 临时注册携带真实节点 per-node secret
+// 派生的 HMAC 证明 → 注册成功且 RealNodeID 记录。
+func TestHubServer_DiscIdentity_ValidProof(t *testing.T) {
+	rt := NewRouteTable()
+	srv := NewHubServer(rt, NewAuthenticator("relay-token"), testutil.DiscardLogger())
+	secret, closeReal := registerNodeAndGetSecret(t, srv, "victim-a", "relay-token")
+	defer closeReal()
+	if secret == "" {
+		t.Fatal("victim-a per-node secret 为空")
+	}
+	proof := discProof(secret, "victim-a")
+	ack, closeDisc := registerRawFrame(t, srv, fmt.Sprintf(
+		`{"node_id":"disc-victim-a-12345","token":"relay-token","meta":{"real_node_id":"victim-a","real_node_proof":%q},"capabilities":["per-node-secret"]}`, proof))
+	defer closeDisc()
+	if !strings.HasPrefix(ack, RegisterAckOK) {
+		t.Fatalf("期望 REG_OK, got %q", ack)
+	}
+	info, ok := rt.LookupInfo("disc-victim-a-12345")
+	if !ok {
+		t.Fatal("disc 临时节点未注册")
+	}
+	if info.RealNodeID != "victim-a" {
+		t.Fatalf("RealNodeID = %q, want victim-a", info.RealNodeID)
+	}
+}
+
+// TestHubServer_DiscIdentity_ForgedRejected：伪造 real_node_id 证明（无真实节点
+// per-node secret）或 real_node_id 与 disc base 不匹配 → hub fail-closed 拒绝注册
+// （防冒充他人污染 accept 侧链路池）。
+func TestHubServer_DiscIdentity_ForgedRejected(t *testing.T) {
+	rt := NewRouteTable()
+	srv := NewHubServer(rt, NewAuthenticator("relay-token"), testutil.DiscardLogger())
+	_, closeReal := registerNodeAndGetSecret(t, srv, "victim-a", "relay-token")
+	defer closeReal()
+
+	// 伪造证明（冒充 victim-a，但无其 per-node secret）。
+	ack, closeDisc := registerRawFrame(t, srv, `{"node_id":"disc-victim-a-99999","token":"relay-token","meta":{"real_node_id":"victim-a","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`)
+	defer closeDisc()
+	if !strings.HasPrefix(ack, RegisterAckErr) {
+		t.Fatalf("期望 REG_ERR（伪造证明被拒）, got %q", ack)
+	}
+	if rt.Has("disc-victim-a-99999") {
+		t.Fatal("伪造证明的 disc 节点不应注册")
+	}
+
+	// real_node_id 与 disc base 不匹配（base=victim-a 但声称 other-node）。
+	ack2, closeDisc2 := registerRawFrame(t, srv, `{"node_id":"disc-victim-a-99998","token":"relay-token","meta":{"real_node_id":"other-node","real_node_proof":"deadbeef"},"capabilities":["per-node-secret"]}`)
+	defer closeDisc2()
+	if !strings.HasPrefix(ack2, RegisterAckErr) {
+		t.Fatalf("期望 REG_ERR（real_node_id 不匹配）, got %q", ack2)
+	}
+	if rt.Has("disc-victim-a-99998") {
+		t.Fatal("real_node_id 不匹配的 disc 节点不应注册")
+	}
+}

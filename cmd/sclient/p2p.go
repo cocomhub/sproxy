@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
@@ -26,20 +28,7 @@ const (
 	// manualSignalingTimeout 是 --manual 场景（文件或 stdin/stdout 交换）信令等待的整体超时。
 	// 默认 10 分钟：人工拷文件/复制粘贴 JSON 需要较长窗口。
 	manualSignalingTimeout = 10 * time.Minute
-
-	// pumpGracePeriod 是 pump / pumpConns 第二方向完成收尾的宽限期（对齐 leaf.go
-	// pump 的 C1 修复）：首方向完成（已传播半关闭）后，第二方向需在此时间内完成；
-	// 超时视为对端非合作，强制关闭两端防 goroutine / FD 泄漏。长连接（双向持续
-	// 活跃）不触发宽限期——计时器只在某方向完成且另一方向仍空闲时启动。
-	pumpGracePeriod = 60 * time.Second
 )
-
-// discardLogger 返回输出到 io.Discard 的 logger（供测试桩使用，如 mesh_test 的
-// hub 测试服务器）。p2p listen 的 relay 会话日志已改用经 ios.ErrOut 输出的
-// serveLogger（I46），不再吞诊断。
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 // NewCmdP2P 创建 p2p 父命令：基于 WebRTC 打洞的点对点连接。
 // 信令经 hub 的 /api/signal/* 桥，数据面打洞成功后直连（不经过 hub）。
@@ -134,16 +123,16 @@ func (f *p2pFlags) requireHub() error {
 // 调用方须先 requireHub() 校验 hub 非空。exactNode=true 时注册成 f.localNode()
 // 原样（p2p listen 的被寻址方需稳定 ID 供 --peer 寻址）；false 用临时 node_id
 // （p2p connect 的 Answer 回给 offerFrom，对端无需预知本端 ID）。
-func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, exactNode bool) (*meshTempRegistration, error) {
+func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, exactNode bool) (*mesh.TempRegistration, error) {
 	insecure, _ := cmd.Flags().GetBool("insecure")
-	return autoRegister(ctx, autoRegisterParams{
-		hubURL:      f.hub,
-		relayToken:  f.relayToken(),
-		signalToken: f.tok,
-		nodeID:      f.localNode(),
-		prefix:      "p2p",
-		exactNode:   exactNode,
-		insecure:    insecure,
+	return mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
+		HubURL:      f.hub,
+		RelayToken:  f.relayToken(),
+		SignalToken: f.tok,
+		NodeID:      f.localNode(),
+		Prefix:      "p2p",
+		ExactNode:   exactNode,
+		Insecure:    insecure,
 	})
 }
 
@@ -206,8 +195,8 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				if rerr != nil {
 					return fmt.Errorf("webrtc 信令注册失败: %w", rerr)
 				}
-				defer func() { _ = reg.closer() }()
-				sig = reg.signaler
+				defer func() { _ = reg.Closer() }()
+				sig = reg.Signaler
 			}
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
 			if manual {
@@ -276,7 +265,7 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；否则经 hub 信令桥
 			var sig webrtc.Signaler
-			var reg *meshTempRegistration // 自动注册（exact node），accept 循环内重注册时替换
+			var reg *mesh.TempRegistration // 自动注册（exact node），accept 循环内重注册时替换
 			if manual {
 				needFile := offerFile != "" || answerFile != ""
 				if needFile && (offerFile == "" || answerFile == "") {
@@ -306,8 +295,8 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				if rerr != nil {
 					return rerr
 				}
-				defer func() { _ = reg.closer() }()
-				sig = reg.signaler
+				defer func() { _ = reg.Closer() }()
+				sig = reg.Signaler
 			}
 
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
@@ -349,8 +338,8 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 					// 轮换——信令 400/403 时在重连退避循环内重注册自愈；重注册失败不阻断
 					// 退避（保持既有网络抖动重试行为），下一轮循环继续尝试。
 					if reg2, rerr2 := f.registerSignaler(ctx, cmd, true); rerr2 == nil {
-						_ = reg.closer()
-						reg, sig = reg2, reg2.signaler
+						_ = reg.Closer()
+						reg, sig = reg2, reg2.Signaler
 					} else {
 						ios.WriteErrLine("p2p 重注册失败: %v", rerr2)
 					}
@@ -428,9 +417,9 @@ func buildP2PServeOpts(services, dialAllowCIDRs []string, ios cli.IOStreams) []r
 // p2pForward 在已建立的 p2p mux 上做本地端口转发。
 func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr string, ios cli.IOStreams) error {
 	// 裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 + Windows
-	// 防火墙弹窗），与 mesh connect / relay dial 对齐（S56）；显式 0.0.0.0:port /
+	// 防火墙弹窗），与 mesh connect / relay dial 对齐（S56）；显式通配地址:port /
 	// 具体 IP 保持原样。
-	listenAddr = normalizeListenAddr(listenAddr)
+	listenAddr = iostream.NormalizeListenAddr(listenAddr)
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听本地端口失败: %w", err)
@@ -474,10 +463,10 @@ func p2pForward(ctx context.Context, m *mux.Mux, peer, tcpAddr, listenAddr strin
 				return
 			}
 			defer stream.Close()
-			if werr := writeDialFrame(stream, tcpAddr); werr != nil {
+			if werr := mesh.WriteDialFrame(stream, tcpAddr); werr != nil {
 				return
 			}
-			pump(local, stream)
+			iostream.Pump(local, stream, iostream.PumpGrace)
 		}(c)
 	}
 }
@@ -489,7 +478,7 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 		return err
 	}
 	defer stream.Close()
-	if err := writeDialFrame(stream, tcpAddr); err != nil {
+	if err := mesh.WriteDialFrame(stream, tcpAddr); err != nil {
 		return err
 	}
 	ios.WriteOutLine("已连接: stdin/stdout ⇄ p2p ⇄ %s (Ctrl+D / EOF 断开)", tcpAddr)
@@ -504,7 +493,7 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 		_, _ = io.Copy(stream, ios.In)
 		// P0-5：stdin EOF 后传播半关闭（流 EOF），否则对端永远等不到"输入写完"，
 		// <outDone 永久挂起（与 meshStdioOnce / relayDialOnce 同款修复）。
-		closeWriteConn(stream)
+		iostream.CloseWrite(stream)
 	}()
 	go func() { defer close(outDone); _, _ = io.Copy(ios.Out, stream) }()
 	select {
@@ -513,131 +502,4 @@ func p2pStdio(ctx context.Context, m *mux.Mux, tcpAddr string, ios cli.IOStreams
 		<-outDone
 	}
 	return nil
-}
-
-// writeDialFrame 在 mux 流上写入 [4B len][{"dial":addr}] 帧（与 relay 协议一致）。
-func writeDialFrame(s mux.Stream, addr string) error {
-	return writeDialFrameTo(s, addr)
-}
-
-// pump 双向泵送：本地 socket <-> mux 流。
-//
-// 关闭语义（S63，对齐 leaf.go pump 的 C1 修复）：
-//   - 每个方向 io.Copy 完成后向对端 CloseWrite 传播半关闭（TCP FIN / 流 EOF），
-//     而不是立即全关——让在途的响应仍可被另一方向读回（不截断）。
-//   - 首方向完成后武装 grace 宽限期计时器：宽限期内另一方向完成则正常收尾；
-//     超时视为对端非合作（对 FIN 不回应），强制关闭两端解除 Read 阻塞，
-//     防 goroutine / FD 泄漏。长连接（双向持续活跃）不触发计时器，不误断。
-//   - 正常路径不在此显式全关两端，由调用方 defer local.Close() / stream.Close() 收尾。
-func pump(local net.Conn, s mux.Stream) {
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(s, local)
-		_ = s.CloseWrite()
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(local, s)
-		if tc, ok := local.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		} else {
-			_ = local.Close()
-		}
-		done <- struct{}{}
-	}()
-
-	remaining := 2
-	var timeoutCh <-chan time.Time
-	var timer *time.Timer
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-	for remaining > 0 {
-		select {
-		case <-done:
-			remaining--
-			if remaining == 1 {
-				// 一个方向完成：启动宽限期等待另一半完成半关闭收尾。
-				timer = time.NewTimer(pumpGracePeriod)
-				timeoutCh = timer.C
-			}
-		case <-timeoutCh:
-			// 非合作对端：强制关闭两端，解除 local.Read / s.Read 阻塞。
-			_ = local.Close()
-			// P0-3：必须用 Abort() 而非 Close()——Close 经 writeCh 发 FrameClose，
-			// writeCh 打满时永久阻塞，本宽限期收尾路径直接挂死并泄漏 goroutine/stream/FD。
-			_ = s.Abort()
-			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
-				<-done
-				remaining--
-			}
-			return
-		}
-	}
-}
-
-// pumpConns 双向泵送两个 net.Conn（本地 socket <-> 隧道远端连接）。
-// 关闭语义与 leaf.go pump 的 C1 修复一致（S63 范本）：
-//   - 每个方向 io.Copy 完成后向对端 CloseWrite 传播半关闭（TCP FIN / 流 EOF），
-//     而不是立即全关——让对端在途响应仍可被读回（不截断）。
-//   - 首方向完成后武装 grace 宽限期计时器：宽限期内另一方向完成则正常收尾；
-//     超时视为对端非合作（对 FIN 不回应），强制关闭两端解除 Read 阻塞，
-//     防 goroutine / FD 泄漏。长连接（双向持续活跃）不触发计时器，不误断。
-//   - 返回后由调用方以 defer 关闭两端收尾（本函数不主动全关正常路径）。
-func pumpConns(a, b net.Conn, grace time.Duration) {
-	done := make(chan struct{}, 2)
-	go func() {
-		_, _ = io.Copy(b, a)
-		closeWriteConn(b)
-		done <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(a, b)
-		closeWriteConn(a)
-		done <- struct{}{}
-	}()
-
-	remaining := 2
-	var timeoutCh <-chan time.Time
-	var timer *time.Timer
-	defer func() {
-		if timer != nil {
-			timer.Stop()
-		}
-	}()
-	for remaining > 0 {
-		select {
-		case <-done:
-			remaining--
-			if remaining == 1 {
-				timer = time.NewTimer(grace)
-				timeoutCh = timer.C
-			}
-		case <-timeoutCh:
-			// 非合作对端：强制关闭两端，解除 a.Read / b.Read 阻塞。
-			_ = a.Close()
-			_ = b.Close()
-			for remaining > 0 { // 关闭后 Read/Write 立即返回，等待 goroutine 退出
-				<-done
-				remaining--
-			}
-			return
-		}
-	}
-}
-
-// closeWriteConn 向目标传播写半关闭（TCP FIN / 流 EOF），尽力而为：
-// 实现了 CloseWrite() 的类型（*net.TCPConn、client.bufferedNetConn、mux.Stream 等）
-// 用 CloseWrite；其余（如 WebRTC 包装 conn）不支持半关闭则用 Close 退化，仍能
-// 解除对端 Read 阻塞。
-// 参数用 io.Closer 而非 net.Conn：mesh/relay dial 传 net.Conn，p2p stdio 传
-// mux.Stream（两者都实现 io.Closer）。
-func closeWriteConn(conn io.Closer) {
-	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
-		_ = cw.CloseWrite()
-		return
-	}
-	_ = conn.Close()
 }

@@ -20,11 +20,12 @@ type NodeID string
 
 // NodeInfo 包含已注册节点的信息。
 type NodeInfo struct {
-	ID        NodeID
-	Mux       *mux.Mux
-	Connected time.Time // 连接时间
-	Addr      string    // 远端地址
-	Secret    string    // per-node 独立 secret（仅节点声明 per-node-secret 能力时下发；不落日志）
+	ID         NodeID
+	Mux        *mux.Mux
+	Connected  time.Time // 连接时间
+	Addr       string    // 远端地址
+	Secret     string    // per-node 独立 secret（仅节点声明 per-node-secret 能力时下发；不落日志）
+	RealNodeID string    // mesh discovery 临时注册（disc-）代表的本节点真实 node-id（hub 校验后记录）
 }
 
 // RouteTable 是线程安全的节点路由表。

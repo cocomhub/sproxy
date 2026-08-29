@@ -628,10 +628,12 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 
 	// 等待真实对象离开 pending（旧 bug：真实对象永远停在 pending）。
 	// 用 SnapshotTask 取快照副本读取，避免锁外读共享对象与 executeDownload 写状态竞争。
+	// 注意：不把 downloading 当作失败——executeDownload 可能因 goroutine 调度/Race 延迟
+	// 恰好停在中间态；只以 reached completed 为成功，failed/cancelled/超时 5s 为失败。
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		real, ok := mgr.SnapshotTask(taskID)
-		if ok && real.Status != "pending" {
+		if ok && real.Status != "pending" && real.Status != "downloading" {
 			if real.Status == "completed" {
 				return
 			}
@@ -639,7 +641,7 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("real task %s never left pending (dedup goroutine ran on a snapshot copy)", taskID)
+	t.Fatalf("real task %s never reached completed (dedup goroutine ran on a snapshot copy)", taskID)
 }
 
 func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {

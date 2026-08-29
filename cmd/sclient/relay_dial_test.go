@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/spf13/cobra"
 )
 
@@ -170,7 +171,7 @@ func TestRelayDialOnce_EchoStdinEOF_WaitsForRemoteResponse(t *testing.T) {
 	}()
 
 	// 读走 client→server 方向的输入；随后再次读，等待 stdin EOF 传播的 FIN
-	//（半关闭后 server.Read 返回 io.EOF）——确认 P0-5 的 closeWriteConn 已生效。
+	// （半关闭后 server.Read 返回 io.EOF）——确认 P0-5 的 closeWriteConn 已生效。
 	serverRead := make(chan struct{})
 	go func() {
 		defer close(serverRead)
@@ -253,8 +254,8 @@ func TestRelayDialListenOn_RemoteDisconnect_ClosesConnAndKeepsListening(t *testi
 
 	// relayDialListenOn 仍应存活（accept 循环继续）。
 	select {
-	case err := <-done:
-		t.Fatalf("relayDialListenOn 不应退出，got: %v", err)
+	case derr := <-done:
+		t.Fatalf("relayDialListenOn 不应退出，got: %v", derr)
 	default:
 	}
 
@@ -376,7 +377,7 @@ func TestPumpConns_HalfCloseKeepsInFlightResponse(t *testing.T) {
 	pumpDone := make(chan struct{})
 	go func() {
 		defer close(pumpDone)
-		pumpConns(a, b, pumpGracePeriod)
+		iostream.Pump(a, b, iostream.PumpGrace)
 	}()
 
 	// mock 远端：读到 "ping" 后回 "pong" 并半关闭（保留读方向，bPeer 仍可写）。

@@ -18,7 +18,9 @@ import (
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层
@@ -87,48 +89,18 @@ func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string,
 }
 
 // errRelayRegistrationRejected 表示 hub 通过注册 ACK 明确拒绝本次注册（鉴权/格式错误）。
-// 作为哨兵错误被 parseRegisterAck 的三种"注册失败"分支以 %w 包装；isTerminalRelayError
-// 用 errors.Is 判定，可穿透任意层包装，避免文案改写或 %w 包装后终态判定静默失效（I43）。
-var errRelayRegistrationRejected = errors.New("注册失败")
-
 // isTerminalRelayError 判断是否应因配置/权限错误终止而非重试。
 // 仅当 hub 通过注册 ACK **明确拒绝** 注册时才终止；其余（连接断开、超时、EOF、
-// ACK 未到达）均视为可重连的网络问题。EOF 不代表鉴权失败——真实鉴权失败时
-// hub 必然已回发 RegisterAckErr 帧，runRelayOnce 会走"注册失败"分支先于 EOF。
+// ACK 未到达）均视为可重连的网络问题。哨兵错误定义在 pkg/tunnel/hub
+// （hub.ErrRegisterRejected），errors.Is 可穿透任意 %w 包装。
 func isTerminalRelayError(err error) bool {
-	return errors.Is(err, errRelayRegistrationRejected)
-}
-
-// parseRegisterAck 解析 hub 注册 ACK 帧。返回节点 per-node secret：
-// - 纯 "REG_OK"（未声明能力或 secret 生成失败）→ 返回空串；
-// - "REG_OK:<base64url secret>"（声明 per-node-secret 能力）→ 返回 secret；
-// - "REG_ERR:<reason>"（hub 明确拒绝）→ 返回注册失败错误（终态）；
-// - 未知响应 → 返回注册失败错误（终态）。
-// 用前缀匹配而非精确比较，避免声明能力后收 "REG_OK:<secret>" 被误判为未知响应
-// 导致 relay start 终止（B1 复检 bug 回归锁）。
-func parseRegisterAck(ackStr string) (secret string, err error) {
-	switch {
-	case ackStr == hub.RegisterAckOK:
-		return "", nil
-	case strings.HasPrefix(ackStr, hub.RegisterAckOK+":"):
-		secret = strings.TrimPrefix(ackStr, hub.RegisterAckOK+":")
-		if secret == "" {
-			return "", fmt.Errorf("%w: 收到异常的 REG_OK（secret 为空）", errRelayRegistrationRejected)
-		}
-		return secret, nil
-	case strings.HasPrefix(ackStr, hub.RegisterAckErr):
-		// 仅当 hub 显式回发 REG_ERR 帧才算"注册失败"（鉴权错误）——
-		// 这是 isTerminalRelayError 唯一采信的依据。
-		return "", fmt.Errorf("%w: %s", errRelayRegistrationRejected, strings.TrimPrefix(ackStr, hub.RegisterAckErr))
-	default:
-		return "", fmt.Errorf("%w: 收到未知注册响应 %q", errRelayRegistrationRejected, ackStr)
-	}
+	return errors.Is(err, hub.ErrRegisterRejected)
 }
 
 func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
 	// B17：insecure 时经 hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；
 	// 非 insecure 路径保持 xfer.Get("ws").Dial 原样（零行为变化）。
-	conn, err := hubWSDial(ctx, hubURL, insecure)
+	conn, err := mesh.HubWSDial(ctx, hubURL, insecure)
 	if err != nil {
 		return fmt.Errorf("连接到 Hub 失败: %w", err)
 	}
@@ -149,11 +121,11 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, inse
 			continue
 		}
 		// S60：addr 必须是合法 host:port（net.SplitHostPort），且 host 非空
-		//（拒绝 "x::22" 这类空 host）。否则注册了"可见不可连"的服务，
+		// （拒绝 "x::22" 这类空 host）。否则注册了"可见不可连"的服务，
 		// mesh connect 命中后必然拨号失败。服务端 hub/router validateServices
 		// 应同步补 host:port 校验（B1 防御纵深，本批仅客户端）。
-		if host, _, err := net.SplitHostPort(addr); err != nil || host == "" {
-			logger.Warn("忽略无效服务宣告（addr 应为 host:port）", "raw", svc, "addr", addr, "error", err)
+		if host, _, sperr := net.SplitHostPort(addr); sperr != nil || host == "" {
+			logger.Warn("忽略无效服务宣告（addr 应为 host:port）", "raw", svc, "addr", addr, "error", sperr)
 			continue
 		}
 		meta.Services = append(meta.Services, hub.Service{Name: name, Addr: addr})
@@ -176,7 +148,7 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, inse
 		_ = conn.Close() // P1-15：同守卫
 		return fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
 	}
-	nodeSecret, ackErr := parseRegisterAck(string(ack))
+	nodeSecret, ackErr := hub.ParseRegisterAck(string(ack))
 	if ackErr != nil {
 		_ = conn.Close() // P1-15：同守卫
 		return ackErr
@@ -328,7 +300,7 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 			// B17：--insecure 时复用 insecureHTTPClient（跳过证书校验，自签 https hub 场景）。
 			httpClient := &http.Client{Timeout: 10 * time.Second}
 			if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {
-				httpClient = insecureHTTPClient()
+				httpClient = client.InsecureHTTPClient()
 			}
 			resp, err := httpClient.Do(req)
 			if err != nil {

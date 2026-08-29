@@ -167,12 +167,12 @@ func TestIsTerminalRelayError(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"hub 明确拒绝 invalid token（REG_ERR 帧）", fmt.Errorf("%w: invalid token", errRelayRegistrationRejected), true},
-		{"hub 明确拒绝 bad register frame", fmt.Errorf("%w: bad register frame", errRelayRegistrationRejected), true},
-		{"未知注册响应", fmt.Errorf("%w: 收到未知注册响应 %q", errRelayRegistrationRejected, "???"), true},
+		{"hub 明确拒绝 invalid token（REG_ERR 帧）", fmt.Errorf("%w: invalid token", hub.ErrRegisterRejected), true},
+		{"hub 明确拒绝 bad register frame", fmt.Errorf("%w: bad register frame", hub.ErrRegisterRejected), true},
+		{"未知注册响应", fmt.Errorf("%w: 收到未知注册响应 %q", hub.ErrRegisterRejected, "???"), true},
 		// I43 契约回归锁：外层 %w 包装后 errors.Is 仍必须命中终态判定，
 		// 防止未来文案改写/包装导致无效 token 退化为无限重连。
-		{"多层 %w 包装后 errors.Is 仍命中", fmt.Errorf("relay: %w", fmt.Errorf("%w: invalid token", errRelayRegistrationRejected)), true},
+		{"多层 %w 包装后 errors.Is 仍命中", fmt.Errorf("relay: %w", fmt.Errorf("%w: invalid token", hub.ErrRegisterRejected)), true},
 		// 网络波动：不得判为终态
 		{"等待 ACK 超时（EOF）", fmt.Errorf("等待注册 ACK 失败: %w", io.EOF), false},
 		{"连接断开 EOF", io.EOF, false},
@@ -192,13 +192,13 @@ func TestIsTerminalRelayError(t *testing.T) {
 // 回归锁：声明 per-node-secret 能力后 hub 回 "REG_OK:<base64url secret>"，
 // 若用精确比较会误判为未知响应导致 relay start 终止（B1 复检 bug）。
 func TestParseRegisterAck(t *testing.T) {
-	secret, err := parseRegisterAck(hub.RegisterAckOK)
+	secret, err := hub.ParseRegisterAck(hub.RegisterAckOK)
 	if err != nil || secret != "" {
 		t.Fatalf("expected REG_OK to no secret, got secret=%q err=%v", secret, err)
 	}
 
 	const wantSecret = "abc123"
-	secret, err = parseRegisterAck(hub.RegisterAckOK + ":" + wantSecret)
+	secret, err = hub.ParseRegisterAck(hub.RegisterAckOK + ":" + wantSecret)
 	if err != nil {
 		t.Fatalf("expected REG_OK:secret parse success, got %v", err)
 	}
@@ -210,7 +210,7 @@ func TestParseRegisterAck(t *testing.T) {
 		t.Fatal("REG_OK:secret 不应被 isTerminalRelayError 判为终态")
 	}
 
-	_, err = parseRegisterAck(hub.RegisterAckErr + "invalid token")
+	_, err = hub.ParseRegisterAck(hub.RegisterAckErr + "invalid token")
 	if err == nil || !strings.Contains(err.Error(), "invalid token") {
 		t.Fatalf("expected REG_ERR error containing reason, got %v", err)
 	}
@@ -218,7 +218,7 @@ func TestParseRegisterAck(t *testing.T) {
 		t.Fatal("REG_ERR 应被 isTerminalRelayError 判为终态")
 	}
 
-	_, err = parseRegisterAck(hub.RegisterAckOK + ":")
+	_, err = hub.ParseRegisterAck(hub.RegisterAckOK + ":")
 	if err == nil {
 		t.Fatal("expected error for empty secret after REG_OK:")
 	}
@@ -226,7 +226,7 @@ func TestParseRegisterAck(t *testing.T) {
 		t.Fatal("异常 REG_OK（secret 为空）应判为终态")
 	}
 
-	_, err = parseRegisterAck("???")
+	_, err = hub.ParseRegisterAck("???")
 	if err == nil || !strings.Contains(err.Error(), "未知注册响应") {
 		t.Fatalf("expected unknown-response error, got %v", err)
 	}

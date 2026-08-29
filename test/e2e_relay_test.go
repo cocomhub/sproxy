@@ -126,7 +126,14 @@ func hubNodeRegistered(baseURL, nodeID string) bool {
 // waitNodeRegistered 轮询 /api/hub/nodes 直到 nodeID 出现（I72，替代固定 sleep）。
 // 10s 对齐 registerAckTimeout；超时则 Kill+Wait 并打印 sclient stderr 后失败（S112）。
 // killWait 由调用方传入（sync.Once 保护），超时路径与 defer cleanup 共享同一 Wait。
-func waitNodeRegistered(t *testing.T, hubURL, nodeID string, stderrBuf *bytes.Buffer, killWait func()) {
+// stderrSink 是子进程 stderr 的读接口：*bytes.Buffer 与 lockedBuffer 均可传入
+// （mesh node 测试用带锁缓冲防止 -race 竞争标记）。
+type stderrSink interface {
+	io.Writer
+	String() string
+}
+
+func waitNodeRegistered(t *testing.T, hubURL, nodeID string, stderrBuf stderrSink, killWait func()) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -140,7 +147,7 @@ func waitNodeRegistered(t *testing.T, hubURL, nodeID string, stderrBuf *bytes.Bu
 }
 
 // logStderrOnFailure 注册 cleanup：测试失败时打印子进程 stderr（S112）。
-func logStderrOnFailure(t *testing.T, label string, stderrBuf *bytes.Buffer) {
+func logStderrOnFailure(t *testing.T, label string, stderrBuf stderrSink) {
 	t.Helper()
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -440,7 +447,8 @@ func startSClientRelayService(t *testing.T, hubURL, nodeID, serviceSpec string) 
 
 // startSClientMeshConnect 启动 sclient mesh connect 端口转发，返回转发监听地址与 cleanup。
 // --webrtc=false 跳过信令，直测中继回落路径（出口叶子必须能拨自己宣告的服务地址）。
-func startSClientMeshConnect(t *testing.T, hubURL, service string) (string, func()) {
+// extraArgs 追加到命令行（如 --gateway 127.0.0.1:18085 测复用已建链路）。
+func startSClientMeshConnect(t *testing.T, hubURL, service string, extraArgs ...string) (string, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
@@ -465,6 +473,7 @@ func startSClientMeshConnect(t *testing.T, hubURL, service string) (string, func
 		"--listen", listenAddr,
 		"--webrtc=false",
 	}
+	args = append(args, extraArgs...)
 	cmd := exec.Command(binPath, args...)
 	cmd.Dir = e2eModuleRoot()
 	var stderrBuf bytes.Buffer

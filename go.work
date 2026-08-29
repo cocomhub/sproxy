@@ -6,6 +6,7 @@ use (
 	./cmd/sproxy
 	./pkg/certmgr/ext/dnspod
 	./pkg/tunnel/hub/ext/kad
+	./pkg/tunnel/mesh
 	./pkg/tunnel/tracing/ext/otel
 	./pkg/tunnel/xfer/ext/grpc
 	./pkg/tunnel/xfer/ext/quic

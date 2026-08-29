@@ -19,6 +19,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
 - **worktree**：除非用户明确要求，不使用 git worktree。
 
+## 工程原则（必须遵守）
+
+1. **永不允许 lint 错误**：只要发现 lint 问题（任何模块，含改动前已存在的历史遗留），就必须修复，不得以"改动前就有"为由跳过。提交前全模块 lint（主 go.mod + 每个子 go.mod）必须 0 issues。
+2. **cmd 避免复杂逻辑**：cobra 命令处理保持薄（flag 解析 + 调用 + IO 展示）。非命令行纯逻辑，若值得复用→抽独立 pkg；若不值得抽 pkg→放 cmd 内的 `internal/` 内部包，不留在 `package main`。
+3. **抽象先薄包装委托保障一致**：逻辑下沉 pkg 时，先让 cmd 用**薄包装委托**新抽象并通过全量测试验证功能一致性/可靠性；随后**最终直接用新抽象，不保留薄包装委托**（薄包装是过渡，不是最终形态）。
+4. **有价值测试场景在抽象中仍覆盖**：抽象后，原 cmd 测试中有价值的场景必须在抽象包里有等价测试（不能因"逻辑搬走了"而丢失覆盖）；抽象包测试是功能一致性的最终保障。
+
 ## 常用命令
 
 ```bash
@@ -325,8 +332,9 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format`/`auth_token` 等"软配
 | `relay dial --node <id> --tcp <addr> [-l :port]` | 经 hub 中继拨号到目标节点出口（任意 TCP） |
 | `p2p connect --peer <id> --tcp <addr> [-l :port]` | WebRTC 打洞直连对端（数据面不经 hub） |
 | `p2p listen [--node-id N]` | 作为对端监听 WebRTC 直连（信令经 hub） |
-| `mesh connect <service> [-l :port]` | 连接 mesh 服务（webrtc 直连优先，hub 中继回落） |
-| `mesh status` | 列出 hub 上的 mesh 服务 |
+| `mesh connect <service> [-l :port]` | 连接 mesh 服务（webrtc 直连优先，hub 中继回落；`--gateway <addr>` 经本地 mesh node 网关复用已建直连链路） |
+| `mesh status` | 列出 hub 上的 mesh 服务（`--gateway <addr>` 改查本地 mesh node 直连拓扑/链路类型） |
+| `mesh node [flags]` | 单进程常驻 mesh 节点（注册+中继+webrtc 直连+自动对等发现+本地网关）：`--hub` `--node-id` `--token` `--service` `--dial-allow` `--discover` `--discover-interval` `--gateway-addr` |
 | `genkey` | 生成 64 hex 密钥 |
 | `config [show\|set <k> <v>]` | 配置管理 |
 | `diag` | 诊断连接问题 |
@@ -368,6 +376,52 @@ sclient relay dial --node local --tcp 127.0.0.1:2090 \
 > `:18083` **不同**；请始终显式 `--hub` 指定实际 hub 地址（`ws://host:port/ws`）。
 > 另：`relay start --hub` 传 WS 端点（`ws(s)://host/ws`）；`p2p` / `mesh connect --hub`
 > 传 HTTP 基址（`http(s)://host`）即可，也接受 `ws(s)` 自动归一（S123）。
+
+### mesh node 常驻 + 自动对等发现 + 完全服务互访
+
+`mesh node` 取代 `relay start` 作为常驻出口节点（单进程单注册，稳定 node-id + 服务宣告 +
+per-node secret + 断线指数退避重连），并叠加两层能力：
+
+**自动对等发现（全节点互联）**：`--discover`（默认开）周期经 hub 节点列表发现其他 mesh
+node，并行 webrtc 自动直连并保持（半拨号去重：低 ID 拨高 ID，每对一条链接），形成
+full-mesh 拓扑。`--discover-interval` 控制发现周期（默认 10s）。
+
+**本地网关 + 完全服务互访**：mesh node 恒监听 loopback 网关（`--gateway-addr`，默认
+`127.0.0.1:18085`）。`mesh connect --gateway <addr>` 先经本地 mesh node 网关**复用已建立
+的直连链路**路由到目标服务（零重新打洞），本地节点无到目标的已建链路时回落常规拨号
+（webrtc 打洞 / hub 中继，不回归既有路径）。`mesh status --gateway <addr>` 查询本地节点
+直连拓扑（node-id + 服务宣告 + 已建链路及链路类型 `webrtc-direct`）。
+
+```bash
+# 节点 node-svc（服务宿主）：宣告 echo 服务，自动对等发现开
+sclient mesh node --hub ws://hub:18083/ws --token T --node-id node-svc \
+  --service echo:127.0.0.1:2222 --dial-allow
+
+# 节点 node-ap（访问方，低 ID）：自动拨号 node-svc，本地网关 127.0.0.1:18085
+sclient mesh node --hub ws://hub:18083/ws --token T --node-id node-ap \
+  --discover --discover-interval 10s --gateway-addr 127.0.0.1:18085
+
+# 任一机器上：经 node-ap 网关复用已建直连链路访问 node-svc 的 echo
+sclient mesh connect echo -l :2222 --gateway 127.0.0.1:18085
+sclient mesh status --gateway 127.0.0.1:18085   # 直连拓扑 / 链路类型
+```
+
+> 说明：每条已建直连链路**两侧都注册进各自链路池**——拨号侧 `dialPeer` set + accept 侧
+> （discovery 拨号临时身份 `disc-<base>-<unixnano>` 经 `parseDiscoveryPeerID` 恢复真实
+> node ID 后注册，`removeIf` 防重连竞态），故**任意节点的网关都能双向路由**到任意已建
+> 链路对端的服务（完全服务互访，半拨号去重仍保持每对一条链接）。拨号侧链路上同时跑
+> `relay.Serve`（接受对端网关回拨）。
+>
+> **disc- 身份防冒充**：discovery 临时注册（`disc-<base>-<unixnano>`）由 hub 注册时强制
+> 校验——base 必须等于 `real_node_id` 且持有该真实节点 per-node secret 的 HMAC 证明
+> （fail-closed 拒绝，`hub.ParseDiscNodeID` 单一实现供注册校验与 accept 侧解析共用），
+> 故 accept 侧解析的 base 即 hub 已验证、不可伪造；accept 侧另有半拨号序校验
+> （`peerID<nodeID`）作纵深，根除冒充他人污染链路池的投毒/MITM。
+>
+> **网关安全边界**：网关仅监听 loopback（`--gateway-addr` 传非 loopback 地址会被
+> fail-closed 拒绝——远程访问应经 mesh 本身而非网关，防被用作开放 mesh 中继）；mesh
+> node 配置了 `auth_token` 时，网关对 connect/status 请求校验相同 token（mesh connect/
+> status 自动发送），未授权本地进程无法复用网关路由。
 
 ### sclient 当前目录（`cd`/`pwd`）
 
