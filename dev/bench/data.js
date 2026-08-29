@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787990678416,
+  "lastUpdate": 1787991436934,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -304206,6 +304206,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1620027 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2d5e55a51fff84d03c1e757dc75de5d9684dd700",
+          "message": "feat: sclient mesh node 常驻组网 + cmd→pkg 抽象（11 commits） (#110)\n\n* refactor(mesh): P2 cmd→pkg 抽象——按领域归位 + 独立 mesh 模块 + cmd 接线\n\n将 cmd/sclient 中与传输无关的纯逻辑按领域归位到主 go.mod 的领域包，webrtc 相关\n选路/注册下沉为独立 go.mod 模块；cmd 改为薄 cobra 装配，删除重复实现。\n\n主 go.mod（零外部传输依赖，保持 go.mod 最小）：\n- pkg/iostream（新）：Pump（半关闭+60s 宽限期 C1 范本）、CloseWrite、WriteFull、\n  NormalizeListenAddr、LocalHostname、PumpGrace——leaf/relay_stream 亦可复用。\n- pkg/client：MeshTargetRefresher（TTL 单飞缓存 + 失败节点 failover）、\n  MeshSignalToken/MeshRelayToken 配置回落链、InsecureHTTPClient、mesh 常量。\n- pkg/tunnel/hub：ParseRegisterAck（哨兵 hub.ErrRegisterRejected，终态判定）、\n  NormalizeEndpoints（hub 地址归一）。\n\n独立 go.mod（依赖 webrtc/ws ext）：pkg/tunnel/mesh\n- Dial（webrtc 打洞优先→中继回落，含 P1-12 探测超时）、WebRTCStream（mux 分帧 +\n  拨号帧，P0-1 修复）、MuxStreamConn（mux.Stream→net.Conn）、AutoRegister（hub WS\n  注册 + per-node secret）、HubWSDial、WriteDialFrame。\n- 未来 mesh node 常驻模式直接复用本包；cmd 仅是 CLI 前端。\n\ncmd/sclient：删除与上述包重复的实现（refresher/pump/pumpConns/closeWriteConn/\nwriteFull/writeDialFrameTo/normalize*/meshSignalToken/meshRelayToken/parseRegisterAck/\ninsecureHTTPClient/hubWSDial），改为薄包装委托；meshForwardListen/meshStdioOnce 用\niostream.Pump。relay 终态判定改 errors.Is(hub.ErrRegisterRejected)。\n\n功能一致性：全模块测试通过（含 mesh/p2p/relay/relay_dial 既有用例直接验证委托后\n行为一致）；修复 TestDefaultMeshDial_FallsBackToRelay 脆弱的 \"502\" 断言为\n\"RelayStream\" 前缀判定（Windows TCP 全量负载下瞬时连接重置不再误报）。\n\n(cherry picked from commit c4e85f072685bfcc8eb8879dd10775c0e89c3730)\n\n* refactor(mesh): R3-R5——lint 0 容忍 + leaf 泵送归位 + cmd 直接使用抽象（删薄包装）\n\nR3：修复全部 lint 错误（0 容忍原则落地，含改动前既有遗留）：\n- sclient：version.go errcheck、relay.go commentFormatting+shadow、relay_dial_test\n  commentFormatting+shadow、mesh_test shadow ×3\n- kad 模块：Kademlia.mu 死字段、lookupResult 死类型\n- 全模块（主 go.mod + 10 个子 go.mod）lint 0 issues\n\nR4：leaf.go pump 委托 iostream.Pump（消除第三处 pump 重复）。为此 iostream.Pump 超时\n路径改为\"先 Close 非 Abort 端（传播 CloseWrite）→ 再 Abort Abort 端（mux.Stream）\"，\n保留 P0-3 修复且修复重构引入的回归（先 Abort 会丢失半关闭传播，被\nTestPump_NonCooperativeRemote_ForceClose 捕获）。\n\nR5：cmd 直接用新抽象，删除薄包装委托：\n- 删除 defaultMeshDial/meshWebRTCStream/newMeshTargetRefresher/meshSignalToken/\n  meshRelayToken/normalizeHubEndpoints/normalizeListenAddr/defaultLocalNodeID/\n  writeDialFrame/closeWriteConn/parseRegisterAck/insecureHTTPClient/hubWSDial/\n  autoRegister/meshAutoRegister 及 meshDialResult/autoRegisterParams/meshTempRegistration\n- 命令/会话函数直接调 mesh.Dial/mesh.AutoRegister/client.*/hub.ParseRegisterAck/\n  iostream.*（meshDialFunc 保留为注入用函数类型，返回 *mesh.Result）\n- 删除 tlsutil.go（薄包装）；tlsutil_test 改直测 mesh.HubWSDial/client.InsecureHTTPClient\n- cmd mesh_test 删除已迁移逻辑的测试（抽象包有等价覆盖：client refresher 单飞/failover、\n  hub NormalizeEndpoints/ParseRegisterAck、mesh Dial 回落/WebRTCStream 拨号帧/AutoRegister\n  secret+cleanup）；保留会话测试 TestMeshForwardListen_RefreshesTarget\n- 新增 mesh 模块 TestAutoRegister_GetsSecretAndCleanup（等价覆盖原 cmd 场景）\n\n工程原则已记入 CLAUDE.md 与持久 memory：lint 0 容忍 / cmd 薄逻辑 / 抽象薄包装过渡 /\n有价值测试场景在抽象中覆盖。\n\n功能一致性：全模块测试通过（leaf 非合作回归由既有测试捕获并修复）。\n\n(cherry picked from commit 9d5c17a29b18e2852b20c058ff4179caf0eb086a)\n\n* test(mesh): 补齐独立审核发现 7 项——测试场景零遗漏 + check-loopback 绿\n\n独立子代理对 c4e85f0+9d5c17a 审核后，功能等价性良好，但发现被删测试场景在\n抽象包无等价覆盖（D1-D4）与部分覆盖（D5-D6）及 check-loopback 红门禁（D7），\n全部修复：\n\nD1: pkg/tunnel/mesh TestAutoRegister_ExactNode——exact 模式注册成 nodeID 原样\n  （p2p listen 被寻址方依赖），closer 移除节点（回归：误加前缀将导致无法寻址）。\nD2: pkg/client TestMeshTargetRefresher_TTLExpiry——时钟推进超 TTL 后重新拉取，\n  缓存命中测试掩盖的\"永不过期\"回归。\nD3: pkg/client TestMeshTargetRefresher_FetchError——hub 500 应返回查询失败错误，\n  而非误报\"服务不可用\"。\nD4: mesh TestAutoRegister 增强 closer 后轮询节点被 hub 移除（防 WS 泄漏核心保证）。\nD5: client TestMeshSignalAndRelayToken 补齐回落链边界（显式 relay 优先、auth 兜底、\n  全空→空串）。\nD6: client TestMeshTargetRefresher_ConcurrentCacheHit——TTL 内 10 并发全命中缓存\n  （1 次 HTTP）。\nD7: 改写 4 处注释规避 \"0.0.0.0\" 字面量（check-loopback 门禁变绿，含 iostream 文档）。\n\n验证：根/sclient/mesh 全量测试 + E2E 通过，根/sclient/mesh lint 0，make check-loopback OK。\n\n(cherry picked from commit 5d26b736a3ce5648b71dc38e8140d0c5a7226813)\n\n* feat(mesh): 新增 sclient mesh node 单进程常驻节点——mesh 自动组网第一步\n\nmesh node = relay start 超集：单进程单注册（稳定 node-id + 服务宣告 + per-node\nsecret），并行提供经 hub 的中继服务 + WebRTC 直连 + 自动重连。mesh connect 可\n直连优先/中继回落到达它。解决 §3.2 的 relay start + p2p listen 双进程同名节点\n互踢缺陷（单注册承载中继与信令身份）。\n\npkg/tunnel/mesh：\n- AutoRegisterParams 加 Services/Tags（服务宣告进 Meta）；TempRegistration 暴露\n  Mux（供中继 relay.Serve）。\n- 新增 ParseServiceDecls（--service name:addr 解析 → 宣告服务 + 出口精确放行，\n  relay start 可复用）。\n- 新增 RunNode(ctx, NodeConfig)：指数退避重连；runNodeOnce 在 cycleCtx 内并行\n  中继 relay.Serve（DialResultFrames=true）+ webrtc 直连环（DialResultFrames=false，\n  空闲 ErrNoIncomingConnection 不重注册）；首个真实失败 → cycleCancel + 幂等\n  closeReg → wg.Wait 有界回收；hub.ErrRegisterRejected 终态退出。\n\ncmd/sclient：\n- 新增 mesh node 命令（--hub/--node-id/--token/--relay-token/--service/--dial-allow/\n  --dial-allow-cidr/--local/--stun/--webrtc），配置回落，SIGINT 优雅摘除节点。\n  语义对齐 relay start：--token 是 relay_token；信令 Bearer 单独从根 --auth-token\n  派生（否则把 relay_token 误当 auth_token 发 /api/signal/* 在 hub 未配 auth_token\n  时 401 → 整节点重连，E2E 捕获）。\n- NewCmdMesh 加 cfgSvc 参数（mesh node 常驻节点配置回落，不依赖 FileClient）。\n\n测试：\n- mesh 包 TestRunNode_RegistersServicesAndRelays（注册+服务宣告+中继出口拨号 echo）、\n  TestRunNode_WebRTCDirect（信令桥 + host-only 直连拨号 echo）、AutoRegister Mux 断言。\n- cmd TestNewCmdMesh_NodeSubcommand。\n- E2E TestE2E_MeshNode_RelayReachable（hub + mesh node + mesh connect 中继可达，\n  echo 数据面端到端）。\n\n验证：根/sclient/mesh 全量测试 + E2E + -race 通过，全模块 lint 0，check-loopback OK。\n\n(cherry picked from commit c3447b561a6191c34449c64bb0b4509299dc5f80)\n\n* feat(mesh): mesh node 自动对等发现——hub 节点列表发现 + 并行 webrtc 自动直连（全节点互联）\n\nmesh node 启动后自动发现其他 mesh node（经 hub 节点列表）并 webrtc 自动直连保持，\n形成 overlay full-mesh 拓扑。kad 留远期（不成熟，需自建 DHT 网络层且无法去掉 hub\n信令/中继依赖）；完全服务互访留下一步（业务访问仍由 mesh connect 按需拨号）。\n\npkg/tunnel/mesh：\n- discovery.go（新增）：ListHubNodes（轻量 HTTP GET /api/hub/nodes，带 Bearer，\n  不构造 FileClient）+ hubAPIError（4xx 致命判定）+ runDiscoveryLoop（周期发现 +\n  半拨号去重（peer>nodeID 每对一条链接）+ 失败 60s 冷却 + sweep 离线 peer）。\n- 并行拨号（per-dial 临时信令身份 + 信号量限并发默认 3）：每个拨号 AutoRegister\n  独立临时 HubSignaler，规避共享 signaler 的 WaitAnswer 竞态（answer 无法按 From\n  路由）；拨号后注销临时身份（连接独立于信令身份）。成功 → mux 心跳保活 + Info\n  日志 + DiscoveryPeers 观测。\n- node.go：NodeConfig 加 Discover/DiscoveryInterval/DiscoveryProbeTimeout/\n  DiscoveryMaxParallel/DiscoveryPeers；runNodeOnce errCh→3（防第 3 goroutine 死锁）\n  + enableAccept（Discover 隐含接受回拨）+ 第 3 goroutine runDiscoveryLoop\n  （只 4xx 列表错误致命写 errCh，避免重连风暴）。\n\ncmd/sclient mesh node：--discover（默认 true）+ --discover-interval（默认 10s）。\n\n测试：\n- mesh 包 TestRunNode_DiscoveryConnects（node-a 自动直连 node-b，0.5s）、\n  TestListHubNodes（Bearer + 401）；runNodeTestHub 补 /api/hub/nodes，miniSignalHub\n  按 ?kind= 过滤（对齐真实 hub I9）。\n- cmd TestNewCmdMesh_NodeSubcommand 加 discover flags。\n- E2E TestE2E_MeshNode_Discovery（两个 mesh node 自动互联，stderr 观测直连日志）；\n  TestE2E_MeshNode_RelayReachable 显式 --discover=false 隔离。\n\n验证：根/sclient/mesh 全量 + -race + E2E 通过，全模块 lint 0，check-loopback OK。\n\n(cherry picked from commit 795d19af1b729edb6d106eda5994cabe2fe81498)\n\n* feat(mesh): 完全服务互访——本地网关复用已建直连链路 + 服务路由层 + 拓扑可观测\n\nmesh connect --gateway 复用已建立的自动直连链路（零重新打洞），失败回落常规拨号；\nmesh status --gateway 查询本地节点直连拓扑/链路类型。\n\n- pkg/tunnel/mesh/links.go（新）：共享链路池（linkPool）——发现环写入，网关复用\n- pkg/tunnel/mesh/gateway.go（新）：本地网关——connect 路由（[4B len][JSON] 帧，\n  linkPool 找已建链路 + mux 流写拨号帧 + C1 泵送）+ status 拓扑查询；ErrNoPeerLink\n  哨兵（无已建链路时 mesh connect 回落）；GatewayConnect/QueryGatewayStatus\n- discovery.go：discoveryLoop 改用共享 linkPool（sweep/closeAll 收敛到池）\n- node.go：NodeConfig 加 GatewayAddr/GatewayNotify；runNodeOnce 启动网关 goroutine\n- cmd：mesh node --gateway-addr（默认 127.0.0.1:18085，loopback 安全默认）；\n  mesh connect --gateway（meshGatewayDial 先网关后回落）；mesh status --gateway（拓扑）\n- 测试：mesh 包 4 项（路由/无链路/状态/RunNode 集成）+ cmd 4 项（flags + dial 选路 +\n  status 输出）+ E2E TestE2E_MeshNode_ServiceAccess（已建链路端到端 echo 复用）\n- docs：CLAUDE.md 补 mesh node 自动对等发现 + 完全服务互访/网关说明\n\n说明：网关只复用本地节点自己拨号建立的链路（半拨号去重拨号侧）；访问点节点命名为\n全网最小 ID 即可让网关持有到全部服务节点的已建链路，反向访问走常规拨号回落。\n\n(cherry picked from commit 93cda2858b7d65b054a615125d6f062a2b23cc93)\n\n* fix(mesh): 网关安全加固——loopback-only fail-closed + auth_token 认证（回应安全审核 2 项 MEDIUM）\n\n- gateway.Serve：非 loopback 监听地址 fail-closed 拒绝（0.0.0.0/私网/公网）；\n  网关无 LAN 暴露的合法用例，杜绝被用作开放 mesh 中继（原 --gateway-addr 可绑任意地址）\n- 网关认证：mesh node 配置信令 token（auth_token）时，connect/status 请求须携带相同\n  token（恒时比较 subtle.ConstantTimeCompare），未授权本地进程无法复用网关路由；\n  未配置则不认证（loopback 兜底，典型开发环境）\n- gatewayRequest 增 Token 字段；GatewayConnect/QueryGatewayStatus 增 token 参数；\n  mesh connect/status 自动发送 auth_token（MeshSignalToken，与 mesh node 一致）\n- 测试：TestGateway_RejectsWrongToken（错/空 token 拒绝）、TestGateway_RejectsNonLoopback\n  （通配/私网地址拒绝）；既有 gateway 测试补 token 参数\n- docs：CLAUDE.md 网关安全边界说明\n\n(cherry picked from commit ec68ffe9773eee9aa93729f62e55e93bf8a2f314)\n\n* fix(mesh): 回应独立审核——应答帧上限分离 + ack 读取 deadline + 半拨号注释纠偏\n\n独立审核 93cda28 发现项（安全项已在 ec68ffe 处理）：\n- 状态应答帧上限 4096 对 full-mesh（>~45 节点）过小：readGatewayFrame 改为按\n  请求/应答传参（请求 4KB / 应答 64KB），mesh status --gateway 大拓扑不再失败\n- GatewayConnect/QueryGatewayStatus 读 ack/status 无 deadline：设 15s 读超时\n  （对齐服务端 gatewayRequestTimeout），读完清除（数据面泵送不受影响）——网关卡\n  在 m.Open/链路背压时客户端不被无限阻塞\n- discovery.go 半拨号去重注释方向写反（只低 ID 拨高 ID），修正防误导\n- 补测试：网关默认端口被占回落随机端口可用；并发多连接复用同一条已建链路（mux\n  多路复用）各自 echo 端到端成功\n\n(cherry picked from commit 76ca3312832020f2ef4d7dd8a3eab8b94b8cce10)\n\n* feat(mesh): 网关双向全覆盖——accept 侧链路池注册（同一条已建链路两侧均可网关路由）\n\n消除半拨号去重的拨号侧局限：此前网关只复用本地节点自己拨号建立的链路（低 ID 拨高\nID，高 ID 节点网关无低 ID 对端链路）。现同一条已建链路两侧都注册进各自链路池。\n\n- webrtc：Conn 暴露 RemotePeerID()（Dial=目标 peer；Listen=offerFrom），accept 侧\n  据此恢复 discovery 拨号者的真实 node-id\n- discovery：拨号临时身份改 Prefix:disc + 真实 NodeID 作 base（disc-<base>-<unixnano>，\n  parseDiscoveryPeerID 恢复）；拨号侧 peerMux 同时跑 relay.Serve（接受对端网关回拨）\n- node.go：runWebRTCAcceptLoop 对 disc- 拨号者注册 accept mux 进共享 linkPool\n  （removeIf 防重连竞态误删新链路）；runDiscoveryLoop 传 localAddr/httpClient/直接 serve 参数\n- links.go：新增 removeIf（仅当池中仍指向本 mux 才移除）\n- 测试：TestRunNode_ServiceAccessViaGateway 双向（A→B + B→A 同链路）+ TestParseDiscoveryPeerID\n  + webrtc TestConn_RemotePeerID + E2E TestE2E_MeshNode_ServiceAccess 双向\n- docs：CLAUDE.md 更新（双向全覆盖 + disc- 身份约定）\n- 半拨号去重保持（每对一条链接）；mesh connect/p2p 临时拨号（mesh-/p2p- 前缀）不注册\n\n(cherry picked from commit 5256d4da848281f35f82ce68c790e045a1d661fa)\n\n* fix(mesh): disc- 临时身份防冒充——hub 强制校验 real_node_id 绑定 + HMAC 证明\n\n安全审核 MEDIUM（plugin + 独立审核 S1 双重确认）：parseDiscoveryPeerID 从拨号者\n自述的信令身份（disc-<base>-<nano>）恢复 base 并注册链路，持有 relay_token 的恶意\n节点可注册 disc-<victim>-<nano> 冒充他人，污染 accept 侧链路池实现 MITM / 链路抑制。\n\n修复（hub 为身份权威）：\n- hub/registerNode：disc- 前缀临时注册强制校验——base 必须等于 Meta.RealNodeID 且\n  持有该真实节点 per-node secret 的 HMAC-SHA256 证明（fail-closed REG_ERR 拒绝）；\n  冒充者无真实节点 secret 无法计算证明。NodeInfo 记录 RealNodeID\n- hub.ParseDiscNodeID：disc-<base>-<unixnano> 单一解析实现（hub 注册校验 + mesh\n  accept 侧解析共用，保证已验证 base 与使用 base 一致）；DiscPrefix 单一来源\n- mesh/dialPeer：discovery 临时注册携带 real_node_id + real_node_proof（HMAC 派生自\n  本节点 per-node secret，来自常驻注册 reg.Secret）\n- mesh/runWebRTCAcceptLoop：解析的 base 即 hub 已验证；另加半拨号序校验 peerID<nodeID\n  作纵深（真实 discovery 恒低 ID 拨高 ID，绝不误伤）+ accept 注册日志\n- TempRegistration.Secret 暴露；AutoRegister 注册帧带 Meta.RealNodeID/RealNodeProof\n- 测试：hub TestHubServer_DiscIdentity_ValidProof/ForgedRejected（伪造证明/不匹配拒绝）\n  + mesh TestLinkPool_RemoveIf + TestParseDiscoveryPeerID 边界；既有全量回归绿\n- docs：CLAUDE.md disc- 身份防冒充说明\n\n(cherry picked from commit f1b9ebd83b8fd7ed11ec06f13d4a9c0efc957649)\n\n* test(mesh): 补 3 节点 full-mesh 混合注册断言（独立审核 S4）\n\nnode-b（中间节点）链路池同时含 accept 侧（node-a，a<b 拨入）与拨号侧（node-c，\nb<c 拨出）条目——验证双向链路注册在真实 full-mesh 中的混合，防单测只覆盖单侧方向。\n\n(cherry picked from commit 162e87a0d86f46013fe4087fad243c70753a15ae)\n\n* test: mesh node E2E race 修复——lockedBuffer 带锁 stderr 读缓冲 + 超时 3 倍余量\n\n* test: DedupPendingUsesRealObject 等待 completed 终态（downloading 是合法中间态，防 race 偶发误报）",
+          "timestamp": "2026-08-29T16:13:01+08:00",
+          "tree_id": "7fefe65ffed92d7a10683b33086921ee96f2252b",
+          "url": "https://github.com/cocomhub/sproxy/commit/2d5e55a51fff84d03c1e757dc75de5d9684dd700"
+        },
+        "date": 1787991431997,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 726.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1639884 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 726.6,
+            "unit": "ns/op",
+            "extra": "1639884 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1639884 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1639884 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 727.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1638352 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 727.1,
+            "unit": "ns/op",
+            "extra": "1638352 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1638352 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1638352 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 727.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1651729 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 727.5,
+            "unit": "ns/op",
+            "extra": "1651729 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1651729 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1651729 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 731.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1639398 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 731.9,
+            "unit": "ns/op",
+            "extra": "1639398 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1639398 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1639398 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 770.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1649683 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 770.8,
+            "unit": "ns/op",
+            "extra": "1649683 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1649683 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1649683 times\n4 procs"
           }
         ]
       }
