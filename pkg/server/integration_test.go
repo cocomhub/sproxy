@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 )
@@ -45,15 +46,13 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	key := make([]byte, 32) // 32 字节 tunnel key，测试用零值
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "test",
-		BuildAt:   "test",
-		TunnelKey: key,
-		Logger:    slog.Default(),
+		Mux:     mux,
+		CfgPtr:  &cfgPtr,
+		Version: "test",
+		BuildAt: "test",
+		Logger:  slog.Default(),
 	})
 
 	ts := httptest.NewServer(h.Handler())
@@ -788,7 +787,7 @@ func TestRedirectRoot(t *testing.T) {
 
 func TestAuthMiddleware(t *testing.T) {
 	url, _, cleanup := newTestServer(t, func(c *Config) {
-		c.AuthToken = "secret-token"
+		c.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	})
 	defer cleanup()
 
@@ -798,18 +797,18 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 without token, got %d", resp.StatusCode)
+		t.Fatalf("expected 401 without SproxySig, got %d", resp.StatusCode)
 	}
 
 	req, _ := http.NewRequest("GET", url+"/api/files", nil)
-	req.Header.Set("Authorization", "Bearer secret-token")
+	signRequest(req, testAccessKey, testAccessSecret)
 	resp2, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("get with token: %v", err)
+		t.Fatalf("get with signature: %v", err)
 	}
 	resp2.Body.Close()
 	if resp2.StatusCode != 200 {
-		t.Fatalf("expected 200 with valid token, got %d", resp2.StatusCode)
+		t.Fatalf("expected 200 with valid SproxySig, got %d", resp2.StatusCode)
 	}
 }
 
@@ -887,7 +886,6 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	cfg.UploadsDir = tmpDir
 	cfg.ChunkSize = 4 << 10 // 4 KiB for testing
 	cfg.LogLevel = "error"
-	cfg.AuthToken = ""
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}
@@ -900,14 +898,12 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
-	key := make([]byte, 32) // 32 字节 tunnel key，测试用零值
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "test-version",
-		BuildAt:   "test-buildat",
-		TunnelKey: key,
-		Logger:    testLogger(),
+		Mux:     mux,
+		CfgPtr:  &cfgPtr,
+		Version: "test-version",
+		BuildAt: "test-buildat",
+		Logger:  testLogger(),
 	})
 
 	ts := httptest.NewServer(h.Handler())
@@ -1551,14 +1547,22 @@ func TestUpload_ExistingFileChecksumMismatch(t *testing.T) {
 // 其 trace_id 与客户端一致（span_id 为新生成），实现隧道内层全链路追踪。
 func TestTunnelInnerRequest_InheritsClientTraceID(t *testing.T) {
 	t.Parallel()
-	url, _ := newTestServerWithAllRoutes(t, nil)
+	// 认证驱动隧道：配置 access_keys，隧道密钥由 AK/SK 派生。
+	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+	})
 
-	// 服务端 TunnelKey 是 32 个零字节，对应 64 个 hex '0'。
-	hexKey := strings.Repeat("00", 32)
-	tc, err := tunnel.NewClient(hexKey, url+"/tunnel", 5*time.Second, nil)
+	// 客户端密钥 = HKDF(testAccessSecret, meshID="")；/tunnel 外层请求需 UNSIGNED 签名。
+	key, err := tunnel.DeriveTunnelKey(testAccessSecret, "")
+	if err != nil {
+		t.Fatalf("DeriveTunnelKey: %v", err)
+	}
+	tc, err := tunnel.NewClient(hex.EncodeToString(key), url+"/tunnel", 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("tunnel.NewClient: %v", err)
 	}
+	base := tc.HTTPClient.Transport
+	tc.HTTPClient.Transport = &tunnelSignTransport{base: base, ak: testAccessKey, sk: testAccessSecret}
 
 	const wantTraceID = "0123456789abcdef0123456789abcdef"
 	const wantSpanID = "abcd1234abcd1234"
@@ -1591,3 +1595,41 @@ func TestTunnelInnerRequest_InheritsClientTraceID(t *testing.T) {
 }
 
 // ---- GzipMiddleware ----
+
+// TestSproxySig_BodyTamperRejected 验证 I-3：篡改 JSON body 但保留原始签名头 →
+// handler 读完全部 body 触发 bodyValidator 的 EOF 哈希校验 → 400（响应前拒绝，
+// 而非响应后留痕）。签名用原始 body 哈希声明，实际发送篡改 body，哈希比对不匹配。
+func TestSproxySig_BodyTamperRejected(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+	})
+
+	// 原始 body 与哈希（签名声明用它）。
+	orig := []byte(`{"filename":"real.txt"}`)
+	sum := sha256.Sum256(orig)
+
+	// 手动构造签名：声明原始 body 哈希，但实际发送篡改后的 body（结构合法）。
+	now := time.Now()
+	h := sproxysig.Header{
+		Version: sproxysig.Version, AK: testAccessKey,
+		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      sproxysig.NewNonce(),
+		BodySHA256: hex.EncodeToString(sum[:]),
+	}
+	auth := sproxysig.SignAndFormat(testAccessSecret, h, "POST", "/api/batch/delete", "")
+
+	req, err := http.NewRequest("POST", url+"/api/batch/delete", strings.NewReader(`{"files":["evil.txt"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", auth)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for tampered body, got %d", resp.StatusCode)
+	}
+}

@@ -13,7 +13,6 @@ import (
 )
 
 func TestHandler_UpdateKey_OldKeyStillWorks(t *testing.T) {
-	key1 := testKey
 	key2 := make([]byte, 32)
 	for i := range key2 {
 		key2[i] = byte(i)
@@ -24,15 +23,10 @@ func TestHandler_UpdateKey_OldKeyStillWorks(t *testing.T) {
 		_, _ = w.Write([]byte("old-key-accepted"))
 	})
 
-	// Create local handler with key1, then update to key2
-	h := NewLocalHandler(key1, local, nil)
-	ts := httptest.NewServer(h)
+	// 认证驱动：key 由 withTunnelKey 中间件注入 request ctx，handler 不再持有进程级密钥。
+	ts := httptest.NewServer(withTunnelKey(key2, NewLocalHandler(nil, local, nil)))
 	defer ts.Close()
 
-	hImpl := h.(*Handler)
-	hImpl.UpdateKey(key2)
-
-	// Client uses the new key (key2) to ensure response decryption works
 	clientKey2Hex := hex.EncodeToString(key2)
 	client, err := NewClient(clientKey2Hex, ts.URL, 0, nil)
 	if err != nil {
@@ -56,8 +50,8 @@ func TestHandler_ServeHTTP_EmptyKey(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/tunnel", nil)
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for empty key, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for no ctx key (missing auth), got %d", rec.Code)
 	}
 }
 
@@ -66,8 +60,7 @@ func TestDispatchLocal_PanicRecovery(t *testing.T) {
 		panic("test panic in local handler")
 	})
 
-	h := NewLocalHandler(testKey, panicHandler, nil)
-	ts := httptest.NewServer(h)
+	ts := httptest.NewServer(withTunnelKey(testKey, NewLocalHandler(nil, panicHandler, nil)))
 	defer ts.Close()
 
 	client, err := NewClient(testHexKey, ts.URL, 0, nil)
@@ -96,8 +89,7 @@ func TestForwardExternal_HTTPClientError(t *testing.T) {
 
 	absURL := closedSrv.URL + "/api/test"
 
-	h := NewHandler(testKey, nil)
-	ts := httptest.NewServer(h)
+	ts := httptest.NewServer(withTunnelKey(testKey, NewHandler(nil, nil)))
 	defer ts.Close()
 
 	client, err := NewClient(testHexKey, ts.URL, 0, nil)
@@ -120,11 +112,10 @@ func TestForwardExternal_HTTPClientError(t *testing.T) {
 
 // ---- resolveKey tests ----
 
-func TestResolveKey_PrimaryKeyEmpty(t *testing.T) {
-	// Create handler with empty primaryKey and non-nil oldKey
+func TestResolveKey_UsesPassedKey(t *testing.T) {
+	// 认证驱动：resolveKey 从调用方传入的 key（来自 ctx）解密，不再有进程级 primaryKey/oldKey。
 	metaContent := []byte(`{"method":"GET","url":"/api/test","headers":{}}`)
 
-	// Encrypt metadata with oldKey (testKey)
 	encMeta, err := Encrypt(testKey, metaContent, []byte(AADMeta))
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
@@ -135,39 +126,44 @@ func TestResolveKey_PrimaryKeyEmpty(t *testing.T) {
 	binary.BigEndian.PutUint32(frame[0:4], uint32(len(encMeta)))
 	copy(frame[4:], encMeta)
 
-	handler := &Handler{
-		primaryKey: nil,
-		oldKey:     testKey,
-	}
-
-	decodedMeta, matchedKey, err := handler.resolveKey(bytes.NewReader(frame))
+	handler := &Handler{}
+	decodedMeta, matchedKey, err := handler.resolveKey(bytes.NewReader(frame), testKey)
 	if err != nil {
-		t.Fatalf("resolveKey with oldKey should succeed: %v", err)
+		t.Fatalf("resolveKey with passed key should succeed: %v", err)
 	}
-
 	if !bytes.Equal(matchedKey, testKey) {
-		t.Fatal("resolveKey should return oldKey as the matched key")
+		t.Fatal("resolveKey should return the passed key as matched key")
 	}
-
 	if !bytes.Equal(decodedMeta, metaContent) {
 		t.Fatalf("decoded metadata mismatch: got %q, want %q", decodedMeta, metaContent)
 	}
 }
 
-func TestResolveKey_BothFail(t *testing.T) {
-	handler := &Handler{
-		primaryKey: nil,
-		oldKey:     nil,
-	}
-
+func TestResolveKey_EmptyKey(t *testing.T) {
+	handler := &Handler{}
 	// Send a frame with random bytes (invalid encrypted data)
 	frame := make([]byte, 8)
 	binary.BigEndian.PutUint32(frame[0:4], 4)
 	copy(frame[4:], []byte{0x01, 0x02, 0x03, 0x04})
 
-	_, _, err := handler.resolveKey(bytes.NewReader(frame))
+	_, _, err := handler.resolveKey(bytes.NewReader(frame), nil)
 	if err == nil {
-		t.Fatal("resolveKey should return error when both keys are nil")
+		t.Fatal("resolveKey should error when key is nil")
 	}
-	t.Logf("got expected error: %v", err)
+}
+
+func TestDeriveTunnelKey(t *testing.T) {
+	sk := "2b40d5b60e6792134f07b44b46e2e19fb72f967136868015cb922d720c1aa6f5"
+	k1, _ := DeriveTunnelKey(sk, "meshA")
+	k2, _ := DeriveTunnelKey(sk, "meshB")
+	if len(k1) != 32 || bytes.Equal(k1, k2) {
+		t.Fatalf("derived key len=%d equal=%v", len(k1), bytes.Equal(k1, k2))
+	}
+	k1b, _ := DeriveTunnelKey(sk, "meshA")
+	if !bytes.Equal(k1, k1b) {
+		t.Fatal("派生必须确定")
+	}
+	if _, err := DeriveTunnelKey("zz", ""); err == nil {
+		t.Fatal("非法 hex 应报错")
+	}
 }

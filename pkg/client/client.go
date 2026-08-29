@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
@@ -100,9 +101,10 @@ type FileClient struct {
 	progressFn             func(label string, read, total int64)
 	chunkSize              int64
 	maxChunkSize           int64
-	authToken              string
+	accessKey              string // SproxySig 签名认证 AccessKey（公开标识）
+	accessKeySecret        string // SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）
+	authToken              string // 多用户 API 密钥 Bearer（api_keys.enabled 场景）
 	meshHubURL             string // 配置 hub_url（mesh/relay/p2p 信令/中继 hub，区别于 xfer 的 hubURL）
-	relayToken             string // 配置 relay_token（hub 中继注册）
 	nodeID                 string // 配置 node_id（本节点默认 ID）
 	logger                 *slog.Logger
 	uploadCache            sync.Map       // key = absFilePath, value = *uploadCacheEntry
@@ -169,15 +171,30 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
-// WithTunnel 启用加密隧道传输，hexKey 需与 sproxy 服务端的 tunnel_key 一致。
-func WithTunnel(hexKey string) Option {
+// WithTunnel 启用加密隧道传输（access-key 驱动）：
+// 隧道编解码密钥 = HKDF(SK, mesh) 派生；服务端同一算法（authMiddleware 验签后派生）。
+// ak 形如 sk[-<mesh>]-<16hex>，mesh 从 AK 提取（无 mesh 段则为空串）。
+func WithTunnel(ak, sk string) Option {
 	return func(c *FileClient) {
-		tc, err := tunnel.NewClient(hexKey, c.serverURL+"/tunnel", c.httpClient.Timeout, c.logger)
+		// 1) 把 accessKey/Secret 存进 client（doRequest 签名用）
+		c.accessKey = ak
+		c.accessKeySecret = sk
+		// 2) 派生隧道密钥（mesh 由共享 tunnel.AccessKeyMesh 解析，与服务端一致）
+		mesh := tunnel.AccessKeyMesh(ak)
+		key, err := tunnel.DeriveTunnelKey(sk, mesh)
 		if err != nil {
 			c.logger.Warn("创建隧道客户端失败", "error", err)
 			c.initError = fmt.Errorf("创建隧道客户端失败: %w", err)
 			return
 		}
+		// 3) 创建隧道 HTTP client，并给外层 /tunnel 请求注入 SproxySig(UNSIGNED)
+		tc, err := tunnel.NewClient(hex.EncodeToString(key), c.serverURL+"/tunnel", c.httpClient.Timeout, c.logger)
+		if err != nil {
+			c.logger.Warn("创建隧道客户端失败", "error", err)
+			c.initError = fmt.Errorf("创建隧道客户端失败: %w", err)
+			return
+		}
+		tc.HTTPClient.Transport = &sigRoundTripper{base: tc.HTTPClient.Transport, ak: ak, sk: sk}
 		c.tunnelClient = tc
 	}
 }
@@ -315,10 +332,18 @@ func WithChunkSize(n int64) Option {
 	}
 }
 
-// WithAuthToken 设置 Bearer Token 认证。
-// 当服务端配置了 auth_token 或 api_keys 时，需要此 token 通过认证。
-// 隧道模式下不需要（隧道密钥已提供认证），但直连模式必须。
-func WithAuthToken(token string) Option {
+// WithAccessKey 设置 SproxySig 请求签名认证（AccessKey/AccessKeySecret）。
+// 服务端配置了 access_keys 时，所有 HTTP 请求（直连/信令/relay）须携带 AK 标识 +
+// HMAC 签名；Secret 只存本端计算签名，永不上线。api_keys 场景请用 WithBearerToken。
+func WithAccessKey(ak, sk string) Option {
+	return func(c *FileClient) {
+		c.accessKey = ak
+		c.accessKeySecret = sk
+	}
+}
+
+// WithBearerToken 设置多用户 API 密钥（api_keys.enabled）的 Bearer token 认证。
+func WithBearerToken(token string) Option {
 	return func(c *FileClient) {
 		c.authToken = token
 	}
@@ -330,13 +355,6 @@ func WithAuthToken(token string) Option {
 func WithMeshHubURL(v string) Option {
 	return func(c *FileClient) {
 		c.meshHubURL = v
-	}
-}
-
-// WithRelayToken 设置 hub 中继注册 token（配置文件 relay_token）。
-func WithRelayToken(v string) Option {
-	return func(c *FileClient) {
-		c.relayToken = v
 	}
 }
 
@@ -1064,12 +1082,22 @@ func (c *FileClient) ServerURL() string {
 	return c.serverURL
 }
 
-// AuthToken 返回客户端配置的 Bearer token（--auth-token / 配置 auth_token）。
-// mesh 信令在未显式指定 --token 时复用该值，保证 /api/signal/* 与
-// /api/hub/services、/api/relay/stream 使用同一认证凭据。
+// AccessKey 返回 SproxySig 认证的 AccessKey（公开标识）。
+func (c *FileClient) AccessKey() string {
+	return c.accessKey
+}
+
+// AccessKeySecret 返回 SproxySig 认证的 AccessKeySecret（本地密钥，仅计算签名）。
 //
 // 安全警示（S49）：返回值是认证凭据，严禁写入日志、错误输出或用于展示；
 // 需要展示时使用配置层的掩码形式（如 config.go 中的 maskedToken）。
+func (c *FileClient) AccessKeySecret() string {
+	return c.accessKeySecret
+}
+
+// AuthToken 返回多用户 API 密钥 Bearer（api_keys 场景）。
+//
+// 安全警示（S49）：返回值是认证凭据，严禁写入日志、错误输出或用于展示。
 func (c *FileClient) AuthToken() string {
 	return c.authToken
 }
@@ -1077,11 +1105,6 @@ func (c *FileClient) AuthToken() string {
 // MeshHubURL 返回配置的 mesh/relay/p2p hub 地址（可为空，调用方按命令语义回落）。
 func (c *FileClient) MeshHubURL() string {
 	return c.meshHubURL
-}
-
-// RelayToken 返回配置的 hub 中继注册 token（可为空）。
-func (c *FileClient) RelayToken() string {
-	return c.relayToken
 }
 
 // NodeID 返回配置的本节点默认 ID（可为空，回落主机名）。
@@ -1095,6 +1118,23 @@ func (c *FileClient) NodeID() string {
 // 隧道模式下 URL 保持相对路径，由服务端隧道 handler 本地路由；
 // 直连模式下拼接 serverURL + urlPath 构造完整 URL。
 func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header) (*http.Response, error) {
+	// SproxySig 请求签名认证（AccessKey/AccessKeySecret）：发送前预计算 body 哈希，
+	// 构造 Authorization 头；Secret 只本端计算签名，永不上线。api_keys 场景用 Bearer。
+	if c.accessKeySecret != "" {
+		sigAuth, signedBody, cleanup, serr := c.signRequest(method, urlPath, body)
+		if serr != nil {
+			return nil, fmt.Errorf("SproxySig 签名失败: %w", serr)
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		body = signedBody
+		if headers == nil {
+			headers = make(http.Header)
+		}
+		headers.Set("Authorization", sigAuth)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
@@ -1145,8 +1185,8 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	if err != nil {
 		return nil, fmt.Errorf("解析 URL 失败: %w", err)
 	}
-	// 直连模式且配置了 auth token 时注入 Authorization 头
-	if c.authToken != "" {
+	// 直连模式且配置了多用户 API 密钥（api_keys，非 SproxySig）时注入 Bearer 头
+	if c.authToken != "" && c.accessKeySecret == "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
 	hc := c.httpClient
@@ -1157,12 +1197,95 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	return closeBodyIfErr(resp, err)
 }
 
+// signRequest 为请求构造 SproxySig 签名头，并返回可重放（已预计算哈希）的 body。
+// 返回的 cleanup 非 nil 时需在请求完成后调用（临时文件缓存路径）。
+func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string, io.Reader, func(), error) {
+	pathPart, queryPart, _ := strings.Cut(urlPath, "?")
+	signedBody, bodyHash, cleanup, err := prehashBody(body)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	now := time.Now()
+	h := sproxysig.Header{
+		Version:    sproxysig.Version,
+		AK:         c.accessKey,
+		TS:         now.UnixMilli(),
+		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      sproxysig.NewNonce(),
+		BodySHA256: bodyHash,
+	}
+	return sproxysig.SignAndFormat(c.accessKeySecret, h, method, pathPart, queryPart), signedBody, cleanup, nil
+}
+
+// prehashBody 计算 body 的 SHA-256（发送前预计算，供签名）。
+//   - nil body → EmptyBodyHash，原样返回；
+//   - 可回绕 reader（bytes.Reader / *os.File 等）→ 哈希后回绕，返回原 reader；
+//   - 一次性流（io.Pipe / multipart）→ 缓存到临时文件并流式哈希（有界内存），
+//     返回临时文件 reader + cleanup（请求完成后删除）。
+func prehashBody(body io.Reader) (io.Reader, string, func(), error) {
+	if body == nil {
+		return nil, sproxysig.EmptyBodyHash(), nil, nil
+	}
+	if s, ok := body.(io.Seeker); ok {
+		h := sha256.New()
+		if _, err := io.Copy(h, body); err != nil {
+			return nil, "", nil, err
+		}
+		if _, err := s.Seek(0, io.SeekStart); err != nil {
+			return nil, "", nil, err
+		}
+		return body, hex.EncodeToString(h.Sum(nil)), nil, nil
+	}
+	f, err := os.CreateTemp("", "sproxy-sig-body-*")
+	if err != nil {
+		return nil, "", nil, err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(f, h), body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, "", nil, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return nil, "", nil, err
+	}
+	cleanup := func() {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+	}
+	return f, hex.EncodeToString(h.Sum(nil)), cleanup, nil
+}
+
 // httpHeaderCarrier 适配 http.Header 为 tracing.Carrier（http.Header 本身
 // 不实现 Carrier 接口所需的 Get/Set 签名）。
 type httpHeaderCarrier struct{ h http.Header }
 
 func (c httpHeaderCarrier) Get(k string) string { return c.h.Get(k) }
 func (c httpHeaderCarrier) Set(k, v string)     { c.h.Set(k, v) }
+
+// sigRoundTripper 是隧道外层客户端的 RoundTripper：给每个 /tunnel 请求
+// 注入 SproxySig 签名（body_sha256=UNSIGNED，流式 body 无法整体哈希）。
+// 服务端 authMiddleware 验签后派生隧道密钥解密；无签名则 401。
+type sigRoundTripper struct {
+	base   http.RoundTripper
+	ak, sk string
+}
+
+func (rt *sigRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	now := time.Now()
+	h := sproxysig.Header{
+		Version:    sproxysig.Version,
+		AK:         rt.ak,
+		TS:         now.UnixMilli(),
+		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      sproxysig.NewNonce(),
+		BodySHA256: sproxysig.UnsignedBody,
+	}
+	req.Header.Set("Authorization", sproxysig.SignAndFormat(rt.sk, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
+	return rt.base.RoundTrip(req)
+}
 
 // closeBodyIfErr 在 (resp, err) 同时非 nil 的情况下关闭 resp.Body，避免连接 / 句柄泄漏。
 // 这是 http.Client.Do 在某些错误（例如 redirect 策略错误）下会返回的非典型形态：返回了响应但同时报错。

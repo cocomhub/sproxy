@@ -301,16 +301,19 @@ func newMockServer(t *testing.T) (*httptest.Server, string) {
 	return ts, dir
 }
 
-func TestFileClientAuthToken(t *testing.T) {
-	// 配置了 auth token → AuthToken() 返回该值
-	c := NewFileClient("http://example.invalid", WithAuthToken("secret-token"))
-	if got := c.AuthToken(); got != "secret-token" {
-		t.Fatalf("AuthToken() = %q, want %q", got, "secret-token")
+func TestFileClientAccessKey(t *testing.T) {
+	// 配置了 AccessKey/SK → 对应访问器返回该值
+	c := NewFileClient("http://example.invalid", WithAccessKey("test-ak", "test-sk"))
+	if got := c.AccessKey(); got != "test-ak" {
+		t.Fatalf("AccessKey() = %q, want test-ak", got)
+	}
+	if got := c.AccessKeySecret(); got != "test-sk" {
+		t.Fatalf("AccessKeySecret() = %q, want test-sk", got)
 	}
 	// 未配置 → 空串
 	plain := NewFileClient("http://example.invalid")
-	if got := plain.AuthToken(); got != "" {
-		t.Fatalf("AuthToken() = %q, want empty", got)
+	if got := plain.AccessKeySecret(); got != "" {
+		t.Fatalf("AccessKeySecret() = %q, want empty", got)
 	}
 }
 
@@ -1423,12 +1426,12 @@ func TestClientBatchDelete_NilFiles(t *testing.T) {
 	}
 }
 
-// TestLoadFromViper_ValidTunnelKey 验证 LoadFromViper 正确处理有效的 tunnel key。
-func TestLoadFromProvider_ValidTunnelKey(t *testing.T) {
+// TestLoadFromProvider_IgnoresLegacyTunnelKey 验证 LoadFromProvider 忽略已废除的 tunnel_key。
+func TestLoadFromProvider_IgnoresLegacyTunnelKey(t *testing.T) {
 	t.Parallel()
 	p := mapProvider{m: map[string]any{
 		"server_url": "http://test:8080",
-		"tunnel_key": strings.Repeat("a", 64),
+		"tunnel_key": strings.Repeat("a", 64), // 废字段，应被忽略
 		"timeout":    60,
 		"chunk_size": 4194304,
 	}}
@@ -1437,8 +1440,11 @@ func TestLoadFromProvider_ValidTunnelKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFromProvider failed: %v", err)
 	}
-	if cfg.TunnelKey != strings.Repeat("a", 64) {
-		t.Errorf("expected tunnel key to be preserved, got %q", cfg.TunnelKey)
+	if cfg.ServerURL != "http://test:8080" {
+		t.Errorf("expected ServerURL preserved, got %q", cfg.ServerURL)
+	}
+	if cfg.Timeout != 60 {
+		t.Errorf("expected Timeout=60, got %d", cfg.Timeout)
 	}
 }
 

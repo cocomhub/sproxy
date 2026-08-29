@@ -101,7 +101,8 @@ func TestCloudListCmd_JSONOutput(t *testing.T) {
 	root := &cobra.Command{}
 	root.PersistentFlags().Bool("json", false, "")
 	root.PersistentFlags().String("server", "", "")
-	root.PersistentFlags().String("auth-token", "", "")
+	root.PersistentFlags().String("access-key", "", "")
+	root.PersistentFlags().String("access-key-secret", "", "")
 	cmd := NewCmdCloudList(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, nil)
 	root.AddCommand(cmd)
 	root.SetArgs([]string{"list", "--json"})
@@ -164,19 +165,21 @@ func TestGetCloudServerURL_FromFlag(t *testing.T) {
 	t.Parallel()
 	root := &cobra.Command{}
 	root.PersistentFlags().String("server", "", "")
-	root.PersistentFlags().String("auth-token", "", "")
+	root.PersistentFlags().String("access-key", "", "")
+	root.PersistentFlags().String("access-key-secret", "", "")
 	root.PersistentFlags().Set("server", "http://test-server:18083")
-	root.PersistentFlags().Set("auth-token", "test-token")
+	root.PersistentFlags().Set("access-key", "test-ak")
+	root.PersistentFlags().Set("access-key-secret", "test-sk")
 
 	cmd := &cobra.Command{Use: "test"}
 	root.AddCommand(cmd)
 
-	serverURL, authToken := getCloudServerURL(cmd, nil)
+	serverURL, ak, sk := getCloudServerURL(cmd, nil)
 	if serverURL != "http://test-server:18083" {
 		t.Errorf("expected server URL from flag, got %q", serverURL)
 	}
-	if authToken != "test-token" {
-		t.Errorf("expected auth token from flag, got %q", authToken)
+	if ak != "test-ak" || sk != "test-sk" {
+		t.Errorf("expected access key from flag, got %q/%q", ak, sk)
 	}
 }
 
@@ -184,18 +187,19 @@ func TestGetCloudServerURL_FromConfig(t *testing.T) {
 	t.Parallel()
 	root := &cobra.Command{}
 	root.PersistentFlags().String("server", "", "")
-	root.PersistentFlags().String("auth-token", "", "")
+	root.PersistentFlags().String("access-key", "", "")
+	root.PersistentFlags().String("access-key-secret", "", "")
 
 	cmd := &cobra.Command{Use: "test"}
 	root.AddCommand(cmd)
 
-	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://cfg-server:18083", AuthToken: "cfg-token"}}
-	serverURL, authToken := getCloudServerURL(cmd, cfgSvc)
+	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://cfg-server:18083", AccessKey: "cfg-ak", AccessKeySecret: "cfg-sk"}}
+	serverURL, ak, sk := getCloudServerURL(cmd, cfgSvc)
 	if serverURL != "http://cfg-server:18083" {
 		t.Errorf("expected server URL from config, got %q", serverURL)
 	}
-	if authToken != "cfg-token" {
-		t.Errorf("expected auth token from config, got %q", authToken)
+	if ak != "cfg-ak" || sk != "cfg-sk" {
+		t.Errorf("expected access key from config, got %q/%q", ak, sk)
 	}
 }
 
@@ -203,19 +207,21 @@ func TestGetCloudServerURL_FlagOverridesConfig(t *testing.T) {
 	t.Parallel()
 	root := &cobra.Command{}
 	root.PersistentFlags().String("server", "", "")
-	root.PersistentFlags().String("auth-token", "", "")
+	root.PersistentFlags().String("access-key", "", "")
+	root.PersistentFlags().String("access-key-secret", "", "")
 	root.PersistentFlags().Set("server", "http://flag-server:18083")
-	root.PersistentFlags().Set("auth-token", "flag-token")
+	root.PersistentFlags().Set("access-key", "flag-ak")
+	root.PersistentFlags().Set("access-key-secret", "flag-sk")
 
 	cmd := &cobra.Command{Use: "test"}
 	root.AddCommand(cmd)
 
-	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://cfg-server:18083", AuthToken: "cfg-token"}}
-	serverURL, authToken := getCloudServerURL(cmd, cfgSvc)
+	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://cfg-server:18083", AccessKey: "cfg-ak", AccessKeySecret: "cfg-sk"}}
+	serverURL, ak, sk := getCloudServerURL(cmd, cfgSvc)
 	if serverURL != "http://flag-server:18083" {
 		t.Errorf("expected flag to override config, got %q", serverURL)
 	}
-	if authToken != "flag-token" {
-		t.Errorf("expected flag to override config token, got %q", authToken)
+	if ak != "flag-ak" || sk != "flag-sk" {
+		t.Errorf("expected flag to override config access key, got %q/%q", ak, sk)
 	}
 }

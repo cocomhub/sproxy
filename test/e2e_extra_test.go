@@ -4,8 +4,12 @@
 package sproxy_test
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -13,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---- E2E: Chunked upload and download ----
@@ -40,7 +45,7 @@ func TestE2E_ChunkedUploadDownload(t *testing.T) {
 	}
 
 	// Stat to verify
-	statResp, err := http.Head(baseURL + "/api/files/stat?filename=" + filename)
+	statResp, err := authedHTTPClient.Head(baseURL + "/api/files/stat?filename=" + filename)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +75,7 @@ func TestE2E_ChunkedUploadDownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Range", "bytes=100-199")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedHTTPClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +105,7 @@ func TestE2E_MkdirRmdir(t *testing.T) {
 	defer cleanup()
 
 	// Mkdir
-	resp, err := http.Post(baseURL+"/mkdir?dirname=e2e_testdir", "application/json", nil)
+	resp, err := authedHTTPClient.Post(baseURL+"/mkdir?dirname=e2e_testdir", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +125,7 @@ func TestE2E_MkdirRmdir(t *testing.T) {
 	}
 
 	// List subdir
-	resp, err = http.Get(baseURL + "/api/files?subdir=e2e_testdir")
+	resp, err = authedHTTPClient.Get(baseURL + "/api/files?subdir=e2e_testdir")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +139,7 @@ func TestE2E_MkdirRmdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err = http.DefaultClient.Do(req)
+	resp, err = authedHTTPClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +157,7 @@ func TestE2E_ArchiveDir(t *testing.T) {
 	defer cleanup()
 
 	// Create the directory first
-	mkResp, err := http.Post(baseURL+"/mkdir?dirname=archivedir", "application/json", nil)
+	mkResp, err := authedHTTPClient.Post(baseURL+"/mkdir?dirname=archivedir", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +186,7 @@ func TestE2E_ArchiveDir(t *testing.T) {
 	}
 
 	// Archive the directory
-	resp, err := http.Get(baseURL + "/api/archive-dir?dirname=archivedir")
+	resp, err := authedHTTPClient.Get(baseURL + "/api/archive-dir?dirname=archivedir")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +231,7 @@ func TestE2E_BatchDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedHTTPClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +275,7 @@ func TestE2E_SclientCLI(t *testing.T) {
 
 	// sclient list: use a temp config to avoid local tunnel interference
 	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
-	cfgContent := fmt.Sprintf("server_url: %s\n", baseURL)
+	cfgContent := fmt.Sprintf("server_url: %s\naccess_key: %s\naccess_key_secret: %s\n", baseURL, e2eTestAK, e2eTestSK)
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +297,7 @@ func TestE2E_WebUIAccessible(t *testing.T) {
 	baseURL, cleanup := startSPROXY(t)
 	defer cleanup()
 
-	resp, err := http.Get(baseURL + "/ui/")
+	resp, err := authedHTTPClient.Get(baseURL + "/ui/")
 	if err != nil {
 		t.Fatalf("GET /ui/ failed: %v", err)
 	}
@@ -310,7 +315,7 @@ func TestE2E_HealthEndpoint(t *testing.T) {
 	baseURL, cleanup := startSPROXY(t)
 	defer cleanup()
 
-	resp, err := http.Get(baseURL + "/healthz")
+	resp, err := authedHTTPClient.Get(baseURL + "/healthz")
 	if err != nil {
 		t.Fatalf("GET /healthz failed: %v", err)
 	}
@@ -344,7 +349,7 @@ func TestE2E_FileListAfterUpload(t *testing.T) {
 	}
 
 	// List files via /api/files to verify
-	resp, err := http.Get(baseURL + "/api/files")
+	resp, err := authedHTTPClient.Get(baseURL + "/api/files")
 	if err != nil {
 		t.Fatalf("GET /api/files failed: %v", err)
 	}
@@ -355,5 +360,119 @@ func TestE2E_FileListAfterUpload(t *testing.T) {
 	listBody, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(listBody), "list_test.txt") {
 		t.Errorf("expected list_test.txt in file list, got: %s", listBody)
+	}
+}
+
+// ---- E2E: SproxySig 请求签名认证 ----
+
+// generateTestAccessKeyPair 生成一对 SproxySig AK/SK（AccessKey=sk-<16hex>，Secret=32B hex）。
+func generateTestAccessKeyPair(t *testing.T) (string, string) {
+	t.Helper()
+	akBytes := make([]byte, 16)
+	skBytes := make([]byte, 32)
+	if _, err := rand.Read(akBytes); err != nil {
+		t.Fatalf("generate AK: %v", err)
+	}
+	if _, err := rand.Read(skBytes); err != nil {
+		t.Fatalf("generate SK: %v", err)
+	}
+	return "sk-" + hex.EncodeToString(akBytes), hex.EncodeToString(skBytes)
+}
+
+// startSPROXYWithAccessKeys 启动一个配置了 SproxySig access_keys 的 sproxy（TLS 关闭），
+// 返回 baseURL 与 cleanup。accessKeysYAML 形如 "  - key: ...\n    secret: ...\n"。
+func startSPROXYWithAccessKeys(t *testing.T, accessKeysYAML string) (string, func()) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	binName := "sproxy"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	binPath := filepath.Join(tmpDir, binName)
+	moduleRoot := e2eModuleRoot()
+	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sproxy")
+	buildCmd.Dir = moduleRoot
+	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("build sproxy: %v\n%s", err, buildOut)
+	}
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find free port: %v", err)
+	}
+	addr := l.Addr().String()
+	l.Close() //nolint:staticcheck
+
+	uploadsDir := filepath.Join(tmpDir, "uploads")
+	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
+		t.Fatalf("create uploads dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "sproxy.yaml")
+	configContent := "tls:\n  enabled: false\ntunnel_key: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\naccess_keys:\n" + accessKeysYAML
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	cmd := exec.Command(binPath, "--addr", addr, "--uploads-dir", uploadsDir, "--config", configPath)
+	cmd.Dir = moduleRoot
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sproxy: %v", err)
+	}
+
+	baseURL := fmt.Sprintf("http://%s", addr)
+	ready := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := authedHTTPClient.Get(baseURL + "/healthz")
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK" {
+				ready = true
+				break
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if !ready {
+		cmd.Process.Kill()
+		cmd.Wait()
+		t.Fatalf("sproxy did not become ready; stderr:\n%s", stderrBuf.String())
+	}
+	return baseURL, newKillWaitCleanup(cmd)
+}
+
+// TestE2E_SproxySigAuth 验证 SproxySig 请求签名认证端到端：
+//   - 配置 access_keys 的服务端拒绝未签名请求（401）；
+//   - sclient 用 --access-key/--access-key-secret 签名后请求成功（list --json 退出 0）。
+func TestE2E_SproxySigAuth(t *testing.T) {
+	t.Parallel()
+	ak, sk := generateTestAccessKeyPair(t)
+	baseURL, cleanup := startSPROXYWithAccessKeys(t, "  - key: \""+ak+"\"\n    secret: \""+sk+"\"\n")
+	defer cleanup()
+
+	// 未签名 GET /api/files → 401（access_keys 强制验签）
+	resp, err := authedHTTPClient.Get(baseURL + "/api/files")
+	if err != nil {
+		t.Fatalf("unsigned GET /api/files: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unsigned /api/files expected 401, got %d", resp.StatusCode)
+	}
+
+	// sclient list（SproxySig 签名）→ 退出码 0（未签名会 401 → 非零退出）。
+	// 服务端日志可确认 GET /api/files 被签名请求命中并返回 200。
+	bin := e2eBinPath(t, "cmd/sclient")
+	args := []string{"list", "--server", baseURL, "--access-key", ak, "--access-key-secret", sk}
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = e2eModuleRoot()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("sclient list (signed) failed: %v\nstderr: %s\nstdout: %s", err, stderr.String(), stdout.String())
 	}
 }

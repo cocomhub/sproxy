@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
@@ -30,15 +31,16 @@ type Handlers struct {
 	logger         *slog.Logger
 	metrics        *Metrics
 	shareStore     *ShareStore
-	routeTable     *hub.RouteTable
+	routeTable     *hub.MeshRouteTable
 	signalBroker   *SignalBroker
 	handler        http.Handler
 	cloudMgr       *CloudDownloadManager
 	storageMgr     *StorageManager
-	uploadingFiles sync.Map       // map[string]string — filename → uploadID，追踪正在上传的文件名
-	uploadingStop  chan struct{}  // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
-	uploadingWg    sync.WaitGroup // 等待 cleanupUploadingFilesLoop 退出
-	closeOnce      sync.Once      // 防止 Close() 重复关闭 channel
+	uploadingFiles sync.Map             // map[string]string — filename → uploadID，追踪正在上传的文件名
+	uploadingStop  chan struct{}        // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
+	uploadingWg    sync.WaitGroup       // 等待 cleanupUploadingFilesLoop 退出
+	closeOnce      sync.Once            // 防止 Close() 重复关闭 channel
+	noncePool      *sproxysig.NoncePool // SproxySig nonce 防重放池
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -58,9 +60,8 @@ type RegisterRoutesOpts struct {
 	CfgPtr     *atomic.Pointer[Config]
 	Version    string
 	BuildAt    string
-	TunnelKey  []byte
 	Logger     *slog.Logger
-	RouteTable *hub.RouteTable
+	RouteTable *hub.MeshRouteTable // 每 mesh 独立路由表的聚合（M-9）
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -89,6 +90,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		routeTable:    opts.RouteTable,
 		signalBroker:  NewSignalBroker(opts.RouteTable),
 		uploadingStop: make(chan struct{}),
+		noncePool:     sproxysig.NewNoncePool(),
 	}
 
 	// 启动 uploadingFiles 定期清理 goroutine（OOM 防范）
@@ -158,7 +160,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 日志带 trace_id/span_id，恢复隧道内层 per-request「收到/完成」日志。
 	// 注意：这是 requestLogMiddleware 的第二个独立实例（主 mux 外层已用一次），
 	// 对隧道路径独立生效，正确。
-	h.tunnelHandler = tunnel.NewLocalHandler(opts.TunnelKey, h.requestLogMiddleware(apiHandler), log.With("component", "tunnel"))
+	h.tunnelHandler = tunnel.NewLocalHandler(nil, h.requestLogMiddleware(apiHandler), log.With("component", "tunnel"))
 
 	srvMux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
 	srvMux.HandleFunc("GET /download", h.authMiddleware(h.download))
@@ -245,9 +247,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 
 		// WebRTC 信令桥：SDP Offer/Answer/Candidate 存转 + 长轮询
 		broker := h.signalBroker
-		// S44：信令 POST 单独挂限流（独立实例，与文件传输隔离配额），防共享
-		// relay_token 下被攻破节点洪泛注入信令；GET poll 长轮询不挂（客户端
-		// 高频轮询会误触发限流）。
+		// S44：信令 POST 单独挂限流（独立实例，与文件传输隔离配额），防被攻破
+		// 的已准入节点洪泛注入信令；GET poll 长轮询不挂（客户端高频轮询会误触发限流）。
 		var signalPostRL *RateLimiter
 		if cfg.RateLimit.Enabled {
 			signalPostRL = NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "signal_rate_limiter"))
@@ -289,7 +290,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /healthz", h.healthz)
 	srvMux.HandleFunc("GET /version", h.versionHandler)
 	srvMux.HandleFunc("GET /metrics", h.MetricsHandler)
-	srvMux.Handle("POST /tunnel", h.tunnelHandler)
+	// /tunnel 走 authMiddleware：SproxySig 验签成功后按 AK 查 SK 派生隧道密钥
+	// （SetTunnelKey 放入 ctx），隧道 handler 用 ctx 密钥解密 metadata/body、加密响应。
+	// 未验签的请求 401；隧道内层 localMux 请求（解密后转发）由隧道加密本身提供认证。
+	srvMux.Handle("POST /tunnel", h.authMiddleware(http.HandlerFunc(h.tunnelHandler.ServeHTTP)))
 
 	// Web UI
 	subFS, err := fs.Sub(web.StaticFS, "static")

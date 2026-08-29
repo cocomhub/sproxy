@@ -29,8 +29,53 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
+
+// e2eTestAK / e2eTestSK 是 startSPROXY 配置的 SproxySig 测试凭据。
+// 认证驱动模式下全部 HTTP 面（除 healthz/version/ui//tunnel）必须验签；
+// 与 testutil.TestAccessKey/TestKey 一致，保证 sclient/FileClient 派生隧道密钥一致。
+const (
+	e2eTestAK = "sk-00000000000000000000000000000000"
+	e2eTestSK = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
+
+// signingTransport 自动给每个请求加 SproxySig 签名头（body 预哈希后重放）。
+// access_keys 配置后直连 HTTP 面必须验签；此 transport 使 E2E 测试能复用
+// http.DefaultClient 风格的裸请求，无需逐请求手动签名。
+type signingTransport struct {
+	base http.RoundTripper
+}
+
+func (t *signingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var bodyHash string
+	if req.Body != nil && req.Body != http.NoBody {
+		data, rerr := io.ReadAll(req.Body)
+		if rerr != nil {
+			return nil, rerr
+		}
+		_ = req.Body.Close()
+		sum := sha256.Sum256(data)
+		bodyHash = hex.EncodeToString(sum[:])
+		req.ContentLength = int64(len(data))
+		req.Body = io.NopCloser(bytes.NewReader(data))
+	} else {
+		bodyHash = sproxysig.EmptyBodyHash()
+	}
+	now := time.Now()
+	h := sproxysig.Header{
+		Version: sproxysig.Version, AK: e2eTestAK,
+		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      sproxysig.NewNonce(),
+		BodySHA256: bodyHash,
+	}
+	req.Header.Set("Authorization", sproxysig.SignAndFormat(e2eTestSK, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
+	return t.base.RoundTrip(req)
+}
+
+// authedHTTPClient 是带 SproxySig 签名的 HTTP client（替代 http.DefaultClient）。
+var authedHTTPClient = &http.Client{Transport: &signingTransport{base: http.DefaultTransport}}
 
 // ---- helpers ----
 
@@ -61,7 +106,7 @@ func uploadFile(t *testing.T, baseURL, filename string, body []byte, headers map
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedHTTPClient.Do(req)
 	if err != nil {
 		t.Fatalf("upload request: %v", err)
 	}
@@ -73,7 +118,7 @@ func uploadFile(t *testing.T, baseURL, filename string, body []byte, headers map
 // downloadFile performs GET /download and returns status code, headers, and body.
 func downloadFile(t *testing.T, baseURL, filename string) (int, http.Header, []byte) {
 	t.Helper()
-	resp, err := http.Get(baseURL + "/download?filename=" + filename)
+	resp, err := authedHTTPClient.Get(baseURL + "/download?filename=" + filename)
 	if err != nil {
 		t.Fatalf("download request: %v", err)
 	}
@@ -92,7 +137,7 @@ func deleteFile(t *testing.T, baseURL, filename, checksum string) (int, []byte) 
 	if checksum != "" {
 		req.Header.Set("X-File-Checksum", checksum)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedHTTPClient.Do(req)
 	if err != nil {
 		t.Fatalf("delete request: %v", err)
 	}
@@ -105,7 +150,7 @@ func deleteFile(t *testing.T, baseURL, filename, checksum string) (int, []byte) 
 func searchFiles(t *testing.T, baseURL, query string) (int, map[string]any) {
 	t.Helper()
 	q := query
-	resp, err := http.Get(baseURL + "/api/files/search?q=" + q)
+	resp, err := authedHTTPClient.Get(baseURL + "/api/files/search?q=" + q)
 	if err != nil {
 		t.Fatalf("search request: %v", err)
 	}
@@ -125,7 +170,7 @@ func statFile(t *testing.T, baseURL, filename string) (int, http.Header) {
 	if err != nil {
 		t.Fatalf("stat request: %v", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedHTTPClient.Do(req)
 	if err != nil {
 		t.Fatalf("stat request: %v", err)
 	}
@@ -143,7 +188,7 @@ func renameFile(t *testing.T, baseURL, from, to, checksum string) (int, []byte) 
 	if checksum != "" {
 		req.Header.Set("X-File-Checksum", checksum)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := authedHTTPClient.Do(req)
 	if err != nil {
 		t.Fatalf("rename request: %v", err)
 	}
@@ -189,10 +234,13 @@ func startSPROXY(t *testing.T) (string, func()) {
 	}
 
 	// Start server
-	// 写入临时配置文件，禁用 TLS（E2E 测试使用纯 HTTP 连接）
+	// 写入临时配置文件，禁用 TLS（E2E 测试使用纯 HTTP 连接）。
+	// 认证驱动：配置 access_keys（fail-fast 要求），客户端统一用 e2eTestAK/e2eTestSK 签名。
 	configPath := filepath.Join(tmpDir, "sproxy.yaml")
-	configContent := []byte("tls:\n  enabled: false\ntunnel_key: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\ncloud_download_allow_private: true\n")
-	if err := os.WriteFile(configPath, configContent, 0644); err != nil {
+	// e2eTestAK 为 sk-<hex>（2 段），accessKeyMesh 解析 mesh_id 为空字符串；
+	// 服务端 access_keys 不配 mesh_id（默认空）→ 两端 HKDF 派生参数一致。
+	configContent := fmt.Sprintf("tls:\n  enabled: false\ncloud_download_allow_private: true\naccess_keys:\n  - key: %q\n    secret: %q\n", e2eTestAK, e2eTestSK)
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("write temp config: %v", err)
 	}
 	args := []string{
@@ -598,7 +646,9 @@ func TestE2E_CloudDownloadChain(t *testing.T) {
 	baseURL, cleanup := startSPROXY(t)
 	defer cleanup()
 
-	fc := client.NewFileClient(baseURL, client.WithCacheDir(t.TempDir()))
+	fc := client.NewFileClient(baseURL,
+		client.WithCacheDir(t.TempDir()),
+		client.WithAccessKey(e2eTestAK, e2eTestSK))
 
 	// 创建一个测试 HTTP 服务器提供下载文件，并返回 Last-Modified 头
 	fileContent := []byte("test file content for cloud download chain e2e")
@@ -668,7 +718,7 @@ func TestE2E_CloudDownloadChain(t *testing.T) {
 
 	// 验证远端文件已被清理（默认 keepFiles=false）
 	// 通过尝试访问云任务列表验证
-	resp, err := http.Get(baseURL + "/api/cloud/tasks")
+	resp, err := authedHTTPClient.Get(baseURL + "/api/cloud/tasks")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -693,7 +743,7 @@ func TestE2E_TunnelEncryption(t *testing.T) {
 	key := testutil.TestKey()
 
 	fc := client.NewFileClient(baseURL,
-		client.WithTunnel(key),
+		client.WithTunnel(e2eTestAK, key),
 	)
 
 	content := []byte("tunnel encrypted test content")

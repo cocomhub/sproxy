@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
@@ -19,7 +18,6 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/server"
-	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	"github.com/spf13/cobra"
@@ -29,23 +27,20 @@ const (
 	flagConfig          = "config"
 	flagAddr            = "addr"
 	flagUploadsDir      = "uploads-dir"
-	flagTunnelKey       = "tunnel-key"
 	flagVersion         = "version"
 	flagNoTLS           = "no-tls"
 	defaultConfig       = "sproxy.yaml"
 	cfgAddr             = "addr"
 	cfgUploadsDir       = "uploads_dir"
-	cfgTunnelKey        = "tunnel_key"
 	logListenClosed     = "listen and serve closed"
 	logHandlersCloseErr = "handlers close error"
 	errFmtListenServe   = "listen and serve error: %w"
 )
 
 var (
-	cfgFile             string
-	cfgPtr              atomic.Pointer[server.Config]
-	currentTunnelKeyHex string // 记录当前生效的 tunnel_key hex，用于 SIGHUP 轮换检测
-	cfgProvider         *sproxycfg.ViperProvider
+	cfgFile     string
+	cfgPtr      atomic.Pointer[server.Config]
+	cfgProvider *sproxycfg.ViperProvider
 
 	// testSignalCh 用于测试注入 signal channel；为 nil 时 runServer 创建自己的 channel。
 	testSignalCh chan os.Signal
@@ -58,7 +53,6 @@ var rootCmd = &cobra.Command{
 		cfgProvider = sproxycfg.New(cfgFile)
 		cfgProvider.BindPFlag(cfgAddr, cmd.Flags().Lookup(flagAddr))
 		cfgProvider.BindPFlag(cfgUploadsDir, cmd.Flags().Lookup(flagUploadsDir))
-		cfgProvider.BindPFlag(cfgTunnelKey, cmd.Flags().Lookup(flagTunnelKey))
 		// --no-tls 不绑定到 viper，在 buildServerConfig 中直接处理
 		return nil
 	},
@@ -78,7 +72,6 @@ func init() {
 
 	rootCmd.Flags().String(flagAddr, ":18083", "监听地址")
 	rootCmd.Flags().String(flagUploadsDir, "./uploads", "上传目录")
-	rootCmd.Flags().String(flagTunnelKey, "", "隧道密钥 (64 hex chars)")
 	rootCmd.Flags().Bool(flagVersion, false, "打印版本与构建信息后退出")
 	rootCmd.Flags().Bool(flagNoTLS, false, "禁用 TLS（覆盖 tls.enabled 配置）")
 
@@ -97,37 +90,39 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// fail-fast：无 access_keys 且 api_keys 未启用时拒绝启动（无法提供认证）。
+	if len(cfg.AccessKeys) == 0 && !cfg.APIKeys.Enabled {
+		return fmt.Errorf("拒绝启动：未配置 access_keys（且 api_keys 未启用），无法提供认证")
+	}
+	// M-8：api_keys-only（多用户 Bearer）下隧道/hub 不可用——隧道密钥由 access_keys 派生、
+	// hub 注册由 access_keys 准入。启用 hub 时强制 access_keys 非空，消除功能死角。
+	if cfg.Hub.Enabled && len(cfg.AccessKeys) == 0 {
+		return fmt.Errorf("拒绝启动：hub.enabled=true 但未配置 access_keys，中继节点注册需要 SproxySig 准入")
+	}
 	cfgPtr.Store(cfg)
 
 	logger := initLogger(cfg)
 	slog.Info("config loaded", "path", cfgFile, "log_level", levelString(cfg.LogLevel), "log_format", formatString(cfg.LogFormat))
 
-	// 无认证警告：auth_token 为空且 api_keys 未启用时，所有 HTTP API 端点无保护
-	if cfg.AuthToken == "" && !cfg.APIKeys.Enabled {
-		slog.Warn("未配置认证 (auth_token 为空, api_keys 未启用) — 所有 HTTP API 端点无访问保护，建议设置 auth_token 或启用 api_keys")
-		fmt.Fprintf(os.Stderr, "\n*** WARNING: No authentication configured (auth_token empty, api_keys disabled) ***\n")
-		fmt.Fprintf(os.Stderr, "*** All HTTP API endpoints are unprotected. Set auth_token or enable api_keys. ***\n\n")
-	}
-
-	tunnelKey, err := resolveTunnelKey(cfg)
-	if err != nil {
-		return fmt.Errorf("隧道密钥处理失败: %w", err)
-	}
-	currentTunnelKeyHex = cfg.TunnelKey
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	mux := http.NewServeMux()
-	var routeTable *hub.RouteTable
+	var routeTable *hub.MeshRouteTable
 	// Hub 中继：先注册 xfer/ws 传输（开启 transports.ws 时），
-	// 创建 RouteTable + HubServer 收口，再注册 HTTP 路由。
+	// 创建 MeshRouteTable + HubServer 收口，再注册 HTTP 路由。
 	if cfg.Hub.Enabled {
-		routeTable = hub.NewRouteTable()
+		routeTable = hub.NewMeshRouteTable()
 		logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
 
 		if cfg.Hub.Transports.WS.Enabled {
-			hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(cfg.Hub.RelayToken), logger.With("component", "hub"), cfg.Hub.MaxConnections)
+			// 节点注册准入：SproxySig AccessKey + HMAC proof（共享 token 已废除）。
+			// hub 准入凭据来自顶层 access_keys 配置，转换后交给 hub.Authenticator。
+			aks := make([]hub.AccessKey, 0, len(cfg.AccessKeys))
+			for _, k := range cfg.AccessKeys {
+				aks = append(aks, hub.AccessKey{Key: k.Key, Secret: k.Secret})
+			}
+			hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(aks), logger.With("component", "hub"), cfg.Hub.MaxConnections)
 			// S36：WS 升级路径固定为 /ws。hub.transports.ws.path 已废弃，
 			// 非默认值时仅记录警告并忽略，避免可配置 path 与既有业务路由语义重叠。
 			wsPath := "/ws"
@@ -158,7 +153,6 @@ func runServer(cmd *cobra.Command, args []string) error {
 		CfgPtr:     &cfgPtr,
 		Version:    Version,
 		BuildAt:    BuildAt,
-		TunnelKey:  tunnelKey,
 		Logger:     logger,
 		RouteTable: routeTable,
 	})
@@ -208,7 +202,6 @@ func buildServerConfig(cmd *cobra.Command) (*server.Config, error) {
 		cfgProvider = sproxycfg.New(configPath)
 		cfgProvider.BindPFlag(cfgAddr, cmd.Flags().Lookup(flagAddr))
 		cfgProvider.BindPFlag(cfgUploadsDir, cmd.Flags().Lookup(flagUploadsDir))
-		cfgProvider.BindPFlag(cfgTunnelKey, cmd.Flags().Lookup(flagTunnelKey))
 		if cfgFile == "" {
 			cfgFile = configPath
 		}
@@ -276,7 +269,12 @@ func startTLSListener(cfg *server.Config, s *http.Server) error {
 	s.TLSConfig = tlsCfg
 	slog.Info("TLS enabled", "cert_file", cfg.TLS.CertFile, "auto_tls", cfg.TLS.AutoTLS, "client_ca", cfg.TLS.ClientCA, "acme", cfg.TLS.ACME.Enabled)
 
-	if err := s.ListenAndServeTLS("", ""); err != nil {
+	ln, err := net.Listen("tcp", cfg.Addr)
+	if err != nil {
+		return fmt.Errorf(errFmtListenServe, err)
+	}
+	writeBackActualAddr(ln.Addr().String())
+	if err := s.ServeTLS(ln, "", ""); err != nil {
 		if err == http.ErrServerClosed {
 			slog.Info(logListenClosed, "error", err.Error())
 		} else {
@@ -288,7 +286,12 @@ func startTLSListener(cfg *server.Config, s *http.Server) error {
 
 // startPlainListener 启动非 TLS HTTP 监听。
 func startPlainListener(s *http.Server) error {
-	if err := s.ListenAndServe(); err != nil {
+	ln, err := net.Listen("tcp", s.Addr)
+	if err != nil {
+		return fmt.Errorf(errFmtListenServe, err)
+	}
+	writeBackActualAddr(ln.Addr().String())
+	if err := s.Serve(ln); err != nil {
 		if err == http.ErrServerClosed {
 			slog.Info(logListenClosed, "error", err.Error())
 		} else {
@@ -296,6 +299,16 @@ func startPlainListener(s *http.Server) error {
 		}
 	}
 	return nil
+}
+
+// writeBackActualAddr 把实际监听地址写回 cfgPtr（配置 :0 随机端口时反映真实端口，
+// 供测试与观测获取实际监听地址；固定端口时值不变）。
+func writeBackActualAddr(addr string) {
+	if old := cfgPtr.Load(); old != nil {
+		updated := *old
+		updated.Addr = addr
+		cfgPtr.Store(&updated)
+	}
 }
 
 // runSignalHandler 启动信号处理 goroutine，返回 stopSigCh（关闭后通知 goroutine 退出）和 shutdownDone（清理完成后关闭）。
@@ -320,7 +333,7 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 					return
 				}
 				if sig == syscall.SIGHUP {
-					handleSignalSighup(h, cfg)
+					handleSighup(cfg)
 					continue
 				}
 				handleSignalShutdown(cancel, s, h)
@@ -329,17 +342,6 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 		}
 	}()
 	return stopSigCh, shutdownDone
-}
-
-// handleSignalSighup 处理 SIGHUP 信号：重新加载配置并热替换可动态变更的字段。
-func handleSignalSighup(h *server.Handlers, cfg *server.Config) {
-	tunUpdater, ok := h.TunnelHandler().(server.TunnelUpdater)
-	if !ok {
-		slog.Warn("tunnel handler does not support UpdateKey")
-		handleSighup(cfg, nil)
-	} else {
-		handleSighup(cfg, tunUpdater)
-	}
 }
 
 // handleSignalShutdown 执行优雅关闭：取消 context、关闭 HTTP 服务器和 handlers。
@@ -360,36 +362,9 @@ func handleSignalShutdown(cancel context.CancelFunc, s *http.Server, h *server.H
 	}
 }
 
-// resolveTunnelKey 处理隧道密钥：已配置则校验，未配置则自动生成并回写配置文件。
-func resolveTunnelKey(cfg *server.Config) ([]byte, error) {
-	if cfg.TunnelKey != "" {
-		if len(cfg.TunnelKey) != 64 {
-			return nil, fmt.Errorf("invalid tunnel_key: must be 64 hex characters")
-		}
-		key, err := hex.DecodeString(cfg.TunnelKey)
-		if err != nil {
-			return nil, fmt.Errorf("invalid tunnel_key: %w", err)
-		}
-		return key, nil
-	}
-
-	// 自动生成
-	newKey, err := tunnel.GenerateKey()
-	if err != nil {
-		return nil, fmt.Errorf("generate tunnel key error: %w", err)
-	}
-	cfg.TunnelKey = newKey
-	fmt.Fprintf(os.Stderr, "Generated tunnel key: %s\n", cfg.TunnelKey)
-	if err := server.SaveConfig(cfg, cfgFile); err != nil {
-		return nil, fmt.Errorf("save config error: %w", err)
-	}
-	return hex.DecodeString(cfg.TunnelKey)
-}
-
 // handleSighup 处理 SIGHUP 信号：使用 Provider 重新读取配置文件，
-// 仅 log_level/log_format/auth_token/tunnel_key 等软配置生效。
-// tunUpdater 为隧道密钥热替换接口；为 nil 时不替换密钥。
-func handleSighup(oldCfg *server.Config, tunUpdater server.TunnelUpdater) {
+// 仅 log_level/log_format 等软配置生效（tunnel_key 已废除）。
+func handleSighup(oldCfg *server.Config) {
 	if err := cfgProvider.Refresh(); err != nil {
 		slog.Error("SIGHUP config reload failed", "error", err)
 		return
@@ -405,18 +380,6 @@ func handleSighup(oldCfg *server.Config, tunUpdater server.TunnelUpdater) {
 	}
 	if oldCfg.UploadsDir != newCfg.UploadsDir {
 		slog.Warn("uploads_dir 修改在 SIGHUP 后不会生效（ChecksumStore 不重建），需要重启进程", "old", oldCfg.UploadsDir, "new", newCfg.UploadsDir)
-	}
-	if currentTunnelKeyHex != newCfg.TunnelKey && newCfg.TunnelKey != "" && tunUpdater != nil {
-		slog.Info("tunnel_key 已变更，通过 UpdateKey 热替换",
-			"old_prefix", currentTunnelKeyHex[:8]+"...",
-			"new_prefix", newCfg.TunnelKey[:8]+"...")
-		tunnelKey, err := hex.DecodeString(newCfg.TunnelKey)
-		if err != nil {
-			slog.Error("新 tunnel_key hex 解析失败", "error", err)
-		} else {
-			tunUpdater.UpdateKey(tunnelKey)
-			currentTunnelKeyHex = newCfg.TunnelKey
-		}
 	}
 	if oldCfg.RateLimit != newCfg.RateLimit {
 		slog.Warn("rate_limit 修改在 SIGHUP 后不会生效，需要重启进程")

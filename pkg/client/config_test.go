@@ -15,6 +15,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// 测试共享常量：access-key 驱动的隧道密钥固定 AK/SK。
+const (
+	testTunnelAK = "sk-test-1234567890abcdef1234567890abcdef"
+	testTunnelSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+
 // mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。
 type mapProvider struct {
 	m map[string]any
@@ -72,35 +78,23 @@ func TestConfigValidate(t *testing.T) {
 		t.Errorf("expected ChunkSize to default to %d, got %d", size.DefaultChunkSize, cfg4.ChunkSize)
 	}
 
-	// invalid tunnel_key length → error
-	cfg5 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, TunnelKey: "too-short"}
-	if err := cfg5.Validate(); err == nil {
-		t.Fatal("expected error for invalid tunnel_key length, got nil")
-	}
-
-	// valid tunnel_key length → no error
-	cfg6 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, TunnelKey: strings.Repeat("a", 64)}
-	if err := cfg6.Validate(); err != nil {
-		t.Fatalf("Validate() on config with 64-char tunnel_key: %v", err)
-	}
-
 	// auth_token 任意字符串都合法
-	cfg7 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AuthToken: "my-token"}
+	cfg7 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AccessKey: "ak", AccessKeySecret: "my-token"}
 	if err := cfg7.Validate(); err != nil {
-		t.Fatalf("Validate() on config with AuthToken: %v", err)
+		t.Fatalf("Validate() on config with AccessKeySecret: %v", err)
 	}
 
 	// auth_token 空字符串也合法
-	cfg8 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AuthToken: ""}
+	cfg8 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AccessKeySecret: ""}
 	if err := cfg8.Validate(); err != nil {
-		t.Fatalf("Validate() on config with empty AuthToken: %v", err)
+		t.Fatalf("Validate() on config with empty AccessKeySecret: %v", err)
 	}
 }
 
 func TestLoadFromProvider(t *testing.T) {
 	t.Parallel()
 
-	p := mapProvider{m: map[string]any{"server_url": "http://test:8080", "timeout": 60, "auth_token": "secret"}}
+	p := mapProvider{m: map[string]any{"server_url": "http://test:8080", "timeout": 60, "access_key": "ak", "access_key_secret": "secret"}}
 
 	cfg, err := LoadFromProvider(p)
 	if err != nil {
@@ -115,19 +109,8 @@ func TestLoadFromProvider(t *testing.T) {
 	if cfg.ChunkSize != size.DefaultChunkSize {
 		t.Errorf("ChunkSize = %d, want %d", cfg.ChunkSize, size.DefaultChunkSize)
 	}
-	if cfg.AuthToken != "secret" {
-		t.Errorf("AuthToken = %q, want %q", cfg.AuthToken, "secret")
-	}
-}
-
-func TestLoadFromProvider_InvalidTunnelKey(t *testing.T) {
-	t.Parallel()
-
-	p := mapProvider{m: map[string]any{"server_url": "http://test:8080", "tunnel_key": "bad-key"}}
-
-	_, err := LoadFromProvider(p)
-	if err == nil {
-		t.Fatal("expected error for invalid tunnel_key, got nil")
+	if cfg.AccessKeySecret != "secret" {
+		t.Errorf("AccessKeySecret = %q, want %q", cfg.AccessKeySecret, "secret")
 	}
 }
 
@@ -185,8 +168,8 @@ func TestHandleConfigShow(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ServerURL = "https://example.com"
 	cfg.Timeout = 120
-	cfg.TunnelKey = strings.Repeat("d", 64)
-	cfg.AuthToken = "my-secret-token"
+	cfg.AccessKey = "ak"
+	cfg.AccessKeySecret = "my-secret-token"
 	cfg.ChunkSize = 8 << 20
 	cfg.MaxChunkSize = 32 << 20
 	cfg.AllowTransportFallback = true
@@ -201,8 +184,8 @@ func TestHandleConfigShow(t *testing.T) {
 	if !strings.Contains(out, "Timeout:       120") {
 		t.Errorf("expected Timeout in output, got: %s", out)
 	}
-	if !strings.Contains(out, "dddd****") {
-		t.Errorf("expected masked TunnelKey in output, got: %s", out)
+	if !strings.Contains(out, "AccessKeySecret: my-s****") {
+		t.Errorf("expected masked AccessKeySecret in output, got: %s", out)
 	}
 	if !strings.Contains(out, "my-s****") {
 		t.Errorf("expected masked AuthToken in output, got: %s", out)
@@ -265,14 +248,14 @@ func TestLoadConfig_EmptyFile(t *testing.T) {
 
 func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.TunnelKey = "short"
+	cfg.AccessKeySecret = "short-sk"
 
 	var buf bytes.Buffer
 	HandleConfigShow(cfg, &buf)
 	out := buf.String()
 
-	if !strings.Contains(out, "shor****") {
-		t.Errorf("expected masked short key (shor****) in output, got: %s", out)
+	if !strings.Contains(out, "AccessKeySecret: shor****") {
+		t.Errorf("expected masked AccessKeySecret, got: %s", out)
 	}
 }
 
@@ -285,8 +268,8 @@ func TestHandleConfigShow_NilReceiver(t *testing.T) {
 }
 
 // TestApplyConfigSet_MeshParams（P2-配置1）：
-// config set 支持 hub_url/relay_token/node_id 三个通用 mesh 参数；hub_url 校验
-// URL 格式，node_id 拒绝空白字符。
+// config set 支持 hub_url/node_id 两个通用 mesh 参数；hub_url 校验 URL 格式，
+// node_id 拒绝空白字符。已废除的旧配置键返回未知键错误（fail-closed）。
 func TestApplyConfigSet_MeshParams(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -300,12 +283,7 @@ func TestApplyConfigSet_MeshParams(t *testing.T) {
 	if err := ApplyConfigSet(cfg, "hub_url", "not a url"); err == nil {
 		t.Fatal("非法 hub_url 应报错")
 	}
-	if err := ApplyConfigSet(cfg, "relay_token", "tok"); err != nil {
-		t.Fatalf("relay_token set: %v", err)
-	}
-	if cfg.RelayToken != "tok" {
-		t.Fatalf("RelayToken = %q, want tok", cfg.RelayToken)
-	}
+	// 已废除的旧配置键应返回未知键错误（ApplyConfigSet 默认分支覆盖）。
 	if err := ApplyConfigSet(cfg, "node_id", "node-a"); err != nil {
 		t.Fatalf("node_id set: %v", err)
 	}
@@ -317,11 +295,12 @@ func TestApplyConfigSet_MeshParams(t *testing.T) {
 	}
 }
 
-// TestLoadConfig_MeshParams（P2-配置1）：YAML 中 hub_url/relay_token/node_id 正确解码。
+// TestLoadConfig_MeshParams（P2-配置1）：YAML 中 hub_url/node_id 正确解码
+// （已废除的旧配置键不再识别）。
 func TestLoadConfig_MeshParams(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sclient.yaml")
-	content := "server_url: https://127.0.0.1:18083\nhub_url: wss://hub.example.com/ws\nrelay_token: rt\nnode_id: node-a\n"
+	content := "server_url: https://127.0.0.1:18083\nhub_url: wss://hub.example.com/ws\nnode_id: node-a\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -331,9 +310,6 @@ func TestLoadConfig_MeshParams(t *testing.T) {
 	}
 	if cfg.HubURL != "wss://hub.example.com/ws" {
 		t.Fatalf("HubURL = %q", cfg.HubURL)
-	}
-	if cfg.RelayToken != "rt" {
-		t.Fatalf("RelayToken = %q", cfg.RelayToken)
 	}
 	if cfg.NodeID != "node-a" {
 		t.Fatalf("NodeID = %q", cfg.NodeID)

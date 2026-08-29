@@ -50,7 +50,7 @@ type RelayStreamRequest struct {
 // RelayStreamHandler 通过 hub 路由表把一条 HTTP 请求升级为到目标叶子的双向字节流，
 // 实现任意 TCP（SSH/长连接）中继。
 type RelayStreamHandler struct {
-	routeTable *hub.RouteTable
+	routeTable *hub.MeshRouteTable
 	logger     *slog.Logger
 	// idleTimeout 是中继流 200 后无任何数据流量的空闲超时（P1-9）；0 表示不启用。
 	// 防"拿到 200 后不发"的客户端无限期占用叶子出站 FD 与 mux 流。
@@ -58,7 +58,7 @@ type RelayStreamHandler struct {
 }
 
 // NewRelayStreamHandler 创建流中继处理器。
-func NewRelayStreamHandler(rt *hub.RouteTable, logger *slog.Logger) *RelayStreamHandler {
+func NewRelayStreamHandler(rt *hub.MeshRouteTable, logger *slog.Logger) *RelayStreamHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -158,6 +158,11 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("解析请求失败: %v", err), http.StatusBadRequest)
 		return
 	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return
+	}
 	if req.Target == "" || req.Addr == "" {
 		http.Error(w, "缺少 target 或 addr", http.StatusBadRequest)
 		return
@@ -180,6 +185,12 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	targetMux := h.routeTable.Lookup(hub.NodeID(req.Target))
 	if targetMux == nil {
 		h.logger.Warn("流中继目标节点未找到", "target", req.Target)
+		http.Error(w, fmt.Sprintf("目标节点 %s 未找到", req.Target), http.StatusNotFound)
+		return
+	}
+	// M-9 路由面隔离：目标节点必须与调用方同 mesh，跨 mesh 目标对外不可见（404 防节点存在性探测）。
+	if targetInfo, ok := h.routeTable.LookupInfo(hub.NodeID(req.Target)); ok && targetInfo.Mesh != meshFromRequest(r) {
+		h.logger.Warn("流中继目标节点跨 mesh，拒绝", "target", req.Target, "mesh", targetInfo.Mesh)
 		http.Error(w, fmt.Sprintf("目标节点 %s 未找到", req.Target), http.StatusNotFound)
 		return
 	}

@@ -23,8 +23,8 @@ func TestHandleConfigSet(t *testing.T) {
 		wantErr bool
 	}{
 		{"set server_url", "server_url", "http://test:8080", false},
-		{"set auth_token", "auth_token", "my-token", false},
-		{"set tunnel_key", "tunnel_key", "abcd1234", false},
+		{"set access_key", "access_key", "my-ak", false},
+		{"set access_key_secret", "access_key_secret", "my-sk", false},
 		{"set timeout", "timeout", "60", false},
 		{"set chunk_size", "chunk_size", "4194304", false},
 		{"set max_chunk_size", "max_chunk_size", "67108864", false},
@@ -54,8 +54,8 @@ func TestApplyConfigSet(t *testing.T) {
 		wantErr bool
 	}{
 		{"set server_url", "server_url", "http://test:8080", false},
-		{"set auth_token", "auth_token", "my-token", false},
-		{"set tunnel_key", "tunnel_key", "abcd1234", false},
+		{"set access_key", "access_key", "my-ak", false},
+		{"set access_key_secret", "access_key_secret", "my-sk", false},
 		{"set timeout", "timeout", "60", false},
 		{"set chunk_size", "chunk_size", "4194304", false},
 		{"set max_chunk_size", "max_chunk_size", "67108864", false},

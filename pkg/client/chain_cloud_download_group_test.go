@@ -670,7 +670,7 @@ func TestCloudDownloadGroupChain_ResumeRestoresOptions(t *testing.T) {
 		"poll_interval": int64(100 * time.Millisecond),
 		"timeout":       int64(10 * time.Second),
 	}
-	if err := store.Save(t.Context(), "chain:group-chain-resume-options", phaseState); err != nil {
+	if err := store.Save(t.Context(), "chain-group-chain-resume-options", phaseState); err != nil {
 		t.Fatal(err)
 	}
 

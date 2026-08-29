@@ -19,18 +19,18 @@ import (
 
 // Config 是 sclient 的配置文件结构。
 type Config struct {
-	ServerURL              string `yaml:"server_url" mapstructure:"server_url"`
-	Timeout                int    `yaml:"timeout" mapstructure:"timeout"`
-	TunnelKey              string `yaml:"tunnel_key" mapstructure:"tunnel_key"`
-	ChunkSize              int64  `yaml:"chunk_size" mapstructure:"chunk_size"`
-	MaxChunkSize           int64  `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
-	AuthToken              string `yaml:"auth_token" mapstructure:"auth_token"`
+	ServerURL    string `yaml:"server_url" mapstructure:"server_url"`
+	Timeout      int    `yaml:"timeout" mapstructure:"timeout"`
+	ChunkSize    int64  `yaml:"chunk_size" mapstructure:"chunk_size"`
+	MaxChunkSize int64  `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
+	// AccessKey / AccessKeySecret 是 SproxySig 请求签名认证（替代旧 auth_token）。
+	// Secret 只存本端计算签名，永不上线；服务端配置 access_keys 时必填。
+	AccessKey              string `yaml:"access_key" mapstructure:"access_key"`
+	AccessKeySecret        string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
 	AllowTransportFallback bool   `yaml:"allow_transport_fallback" mapstructure:"allow_transport_fallback"`
 	// HubURL 是 mesh/relay/p2p 共用的 hub 地址（http(s):// 或 ws(s)://，接受带 /ws 路径）。
 	// 为空时各命令按自身语义回落（mesh connect → server_url，p2p → 报错，relay start → 本地默认）。
 	HubURL string `yaml:"hub_url" mapstructure:"hub_url"`
-	// RelayToken 是 hub 中继注册 token（与 relay start --token / hub.relay_token 一致）。
-	RelayToken string `yaml:"relay_token" mapstructure:"relay_token"`
 	// NodeID 是本节点默认 ID（mesh/p2p/relay 的信令来源与寻址目标；为空回落主机名）。
 	NodeID string `yaml:"node_id" mapstructure:"node_id"`
 }
@@ -77,9 +77,6 @@ func (c *Config) Validate() error {
 	}
 	if c.ChunkSize <= 0 {
 		return fmt.Errorf("chunk_size 必须大于 0")
-	}
-	if c.TunnelKey != "" && len(c.TunnelKey) != 64 {
-		return fmt.Errorf("tunnel_key 必须是 64 位 hex 字符")
 	}
 	return nil
 }
@@ -148,34 +145,19 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 	}
 	fmt.Fprintf(w, "ServerURL:     %s\n", cfg.ServerURL)
 	fmt.Fprintf(w, "Timeout:       %d\n", cfg.Timeout)
-	maskedKey := cfg.TunnelKey
-	if len(maskedKey) > 4 {
-		maskedKey = maskedKey[:4] + "****"
-	} else if len(maskedKey) > 0 {
-		maskedKey = "****"
+	maskedSecret := cfg.AccessKeySecret
+	if len(maskedSecret) > 4 {
+		maskedSecret = maskedSecret[:4] + "****"
+	} else if len(maskedSecret) > 0 {
+		maskedSecret = "****"
 	}
-	fmt.Fprintf(w, "TunnelKey:     %s\n", maskedKey)
-	maskedToken := cfg.AuthToken
-	if len(maskedToken) > 4 {
-		maskedToken = maskedToken[:4] + "****"
-	} else if len(maskedToken) > 0 {
-		maskedToken = "****"
-	}
-	fmt.Fprintf(w, "AuthToken:     %s\n", maskedToken)
+	fmt.Fprintf(w, "AccessKey:     %s\n", cfg.AccessKey)
+	fmt.Fprintf(w, "AccessKeySecret: %s\n", maskedSecret)
 	fmt.Fprintf(w, "ChunkSize:     %d\n", cfg.ChunkSize)
 	fmt.Fprintf(w, "MaxChunkSize:  %d\n", cfg.MaxChunkSize)
 	fmt.Fprintf(w, "AllowTransportFallback: %v\n", cfg.AllowTransportFallback)
 	if cfg.HubURL != "" {
 		fmt.Fprintf(w, "HubURL:        %s\n", cfg.HubURL)
-	}
-	if cfg.RelayToken != "" {
-		masked := cfg.RelayToken
-		if len(masked) > 4 {
-			masked = masked[:4] + "****"
-		} else if len(masked) > 0 {
-			masked = "****"
-		}
-		fmt.Fprintf(w, "RelayToken:    %s\n", masked)
 	}
 	if cfg.NodeID != "" {
 		fmt.Fprintf(w, "NodeID:        %s\n", cfg.NodeID)
@@ -190,16 +172,16 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			return fmt.Errorf("无效的服务器地址: %s", value)
 		}
 		cfg.ServerURL = value
-	case "auth_token":
-		cfg.AuthToken = value
+	case "access_key":
+		cfg.AccessKey = value
+	case "access_key_secret":
+		cfg.AccessKeySecret = value
 	case "timeout":
 		if timeout, err := strconv.Atoi(value); err != nil {
 			return fmt.Errorf("无效的超时值: %w", err)
 		} else {
 			cfg.Timeout = timeout
 		}
-	case "tunnel_key":
-		cfg.TunnelKey = value
 	case "chunk_size":
 		chunkSize, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
@@ -220,8 +202,6 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			}
 		}
 		cfg.HubURL = value
-	case "relay_token":
-		cfg.RelayToken = value
 	case "node_id":
 		if strings.ContainsAny(value, " \t\r\n") {
 			return fmt.Errorf("node_id 不能包含空白字符: %s", value)
@@ -245,8 +225,7 @@ func HandleConfigSet(cfg *Config, configPath, key, value string) error {
 type ConfigResponse struct {
 	LogLevel           string `json:"log_level"`
 	LogFormat          string `json:"log_format"`
-	AuthTokenSet       bool   `json:"auth_token_set"`
-	TunnelKeySet       bool   `json:"tunnel_key_set"`
+	AccessKeysSet      bool   `json:"access_keys_set"`
 	RateLimitRequests  int    `json:"rate_limit_requests"`
 	RateLimitWindow    string `json:"rate_limit_window"`
 	MaxStorageBytes    int64  `json:"max_storage_bytes"`

@@ -51,8 +51,7 @@ func (h *Handlers) rebuildLogger(cfg *Config) {
 type configResponse struct {
 	LogLevel           string `json:"log_level"`
 	LogFormat          string `json:"log_format"`
-	AuthTokenSet       bool   `json:"auth_token_set"` // 是否已设置 token
-	TunnelKeySet       bool   `json:"tunnel_key_set"` // 是否已设置 tunnel key
+	AccessKeysSet      bool   `json:"access_keys_set"` // 是否已配置 AccessKey（SproxySig 认证）
 	RateLimitRequests  int    `json:"rate_limit_requests"`
 	RateLimitWindow    string `json:"rate_limit_window"` // Duration 字符串
 	MaxStorageBytes    int64  `json:"max_storage_bytes"`
@@ -75,8 +74,7 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 	resp := configResponse{
 		LogLevel:           cfg.LogLevel,
 		LogFormat:          cfg.LogFormat,
-		AuthTokenSet:       cfg.AuthToken != "",
-		TunnelKeySet:       cfg.TunnelKey != "",
+		AccessKeysSet:      len(cfg.AccessKeys) > 0,
 		RateLimitRequests:  cfg.RateLimit.Requests,
 		RateLimitWindow:    cfg.RateLimit.Window.String(),
 		MaxStorageBytes:    cfg.MaxStorageBytes,
@@ -99,7 +97,6 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 type updateConfigRequest struct {
 	LogLevel        *string `json:"log_level,omitempty"`
 	LogFormat       *string `json:"log_format,omitempty"`
-	AuthToken       *string `json:"auth_token,omitempty"`
 	RateLimitReq    *int    `json:"rate_limit_requests,omitempty"`
 	RateLimitWin    *string `json:"rate_limit_window,omitempty"`
 	MaxStorageBytes *int64  `json:"max_storage_bytes,omitempty"`
@@ -118,9 +115,14 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]any{"success": false, "message": "invalid request body"}, http.StatusBadRequest)
 		return
 	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return
+	}
 
 	// 检查是否所有字段均为 nil，拒绝空请求体（{}）
-	if req.LogLevel == nil && req.LogFormat == nil && req.AuthToken == nil &&
+	if req.LogLevel == nil && req.LogFormat == nil &&
 		req.RateLimitReq == nil && req.RateLimitWin == nil && req.MaxStorageBytes == nil {
 		sendJSONResponse(w, map[string]any{"success": false, "message": "empty request body: no fields to update"}, http.StatusBadRequest)
 		return
@@ -147,11 +149,6 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.LogFormat = *req.LogFormat
-		changed = true
-	}
-
-	if req.AuthToken != nil {
-		cfg.AuthToken = *req.AuthToken
 		changed = true
 	}
 

@@ -66,7 +66,8 @@ func TestStatCmd_Server(t *testing.T) {
 	cfgSvc := &testConfigProvider{cfg: client.DefaultConfig()}
 	root := &cobra.Command{Use: "sclient"}
 	root.PersistentFlags().String("server", "", "")
-	root.PersistentFlags().String("auth-token", "", "")
+	root.PersistentFlags().String("access-key", "", "")
+	root.PersistentFlags().String("access-key-secret", "", "")
 	root.PersistentFlags().Bool("json", false, "")
 	root.AddCommand(NewCmdStat(factory, ios, cfgSvc))
 	cmd, _, err := root.Find([]string{"stat", "server"}) // 先解析子命令再执行，确保走真实 dispatch

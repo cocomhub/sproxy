@@ -276,27 +276,51 @@ async function calcChunkSha256(chunkBytes) {
   return bytesToHex(new Uint8Array(hash));
 }
 
+// buildMultipartBody 构建 multipart/form-data 请求体字节（供 SproxySig body 预哈希与发送）。
+// fields 为普通字段 {name: value}；fileField 为文件字段 {name, filename, contentType, bytes}。
+// 返回 { body: Uint8Array, contentType: string }。与 Go 端 multipart 编码语义一致。
+function buildMultipartBody(fields, fileField) {
+  const boundary = '----WebKitFormBoundary' + crypto.getRandomValues(new Uint32Array(1))[0].toString(36);
+  const encoder = new TextEncoder();
+  const parts = [];
+  for (const key of Object.keys(fields)) {
+    parts.push(encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="' + key + '"\r\n\r\n' + fields[key] + '\r\n'));
+  }
+  if (fileField) {
+    parts.push(encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="' + fileField.name + '"; filename="' + String(fileField.filename).replace(/"/g, '') + '"\r\nContent-Type: ' + fileField.contentType + '\r\n\r\n'));
+    parts.push(fileField.bytes);
+    parts.push(encoder.encode('\r\n'));
+  }
+  parts.push(encoder.encode('--' + boundary + '--\r\n'));
+  const total = parts.reduce(function(s, p) { return s + p.byteLength; }, 0);
+  const body = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { body.set(p, off); off += p.byteLength; }
+  return { body: body, contentType: 'multipart/form-data; boundary=' + boundary };
+}
+
 async function initUpload(uploadId, fileName, totalSize, chunkSize, totalChunks, fileChecksum, tunnelMode) {
   const initBody = {
     upload_id: uploadId, filename: fileName, total_size: totalSize,
     chunk_size: chunkSize, total_chunks: totalChunks, file_checksum: fileChecksum
   };
+  const bodyStr = JSON.stringify(initBody);
+  const bodyBytes = new TextEncoder().encode(bodyStr);
   if (tunnelMode) {
     const initResp = await tunnelRequest('POST', '/upload/init',
-      { 'Content-Type': 'application/json' },
-      new TextEncoder().encode(JSON.stringify(initBody)));
+      { 'Content-Type': 'application/json' }, bodyBytes);
     return JSON.parse(new TextDecoder().decode(initResp.body));
   }
   const resp = await fetch(BASE + '/upload/init', {
     method: 'POST',
-    headers: headers({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify(initBody)
+    headers: await headers('POST', '/upload/init', { 'Content-Type': 'application/json' }, bodyBytes),
+    body: bodyStr
   });
   return resp.json();
 }
 
 async function queryMissingChunks(uploadID) {
-  const statusResp = await fetch(BASE + '/upload/status?upload_id=' + uploadID, { headers: headers() });
+  const statusResp = await fetch(BASE + '/upload/status?upload_id=' + uploadID, { headers: await headers('GET', '/upload/status?upload_id=' + uploadID) });
   if (statusResp.ok) {
     const statusData = await statusResp.json();
     if (statusData.success) {
@@ -344,50 +368,39 @@ async function uploadChunk(uploadID, idx, chunkBytes, chunkChecksum, tunnelMode)
   if (tunnelMode) {
     return uploadChunkViaTunnel(uploadID, idx, chunkBytes, chunkChecksum);
   }
-  const formData = new FormData();
-  formData.append('upload_id', uploadID);
-  formData.append('chunk_index', String(idx));
-  formData.append('chunk_checksum', chunkChecksum);
-  formData.append('chunk', new Blob([chunkBytes]), String(idx).padStart(5, '0') + '.chunk');
+  const mp = buildMultipartBody(
+    { upload_id: uploadID, chunk_index: String(idx), chunk_checksum: chunkChecksum },
+    { name: 'chunk', filename: String(idx).padStart(5, '0') + '.chunk', contentType: 'application/octet-stream', bytes: chunkBytes }
+  );
   const resp = await fetch(BASE + '/upload/chunk', {
     method: 'POST',
-    headers: headers({}),
-    body: formData
+    headers: await headers('POST', '/upload/chunk', { 'Content-Type': mp.contentType }, mp.body),
+    body: mp.body
   });
   return resp.json();
 }
 
 async function uploadChunkViaTunnel(uploadID, idx, chunkBytes, chunkChecksum) {
-  const boundary = '----WebKitFormBoundary' + crypto.getRandomValues(new Uint32Array(1))[0].toString(36);
-  const encoder = new TextEncoder();
-  const parts = [
-    encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="upload_id"\r\n\r\n' + uploadID + '\r\n'),
-    encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="chunk_index"\r\n\r\n' + idx + '\r\n'),
-    encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="chunk_checksum"\r\n\r\n' + chunkChecksum + '\r\n'),
-    encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="chunk"; filename="' + String(idx).padStart(5, '0') + '.chunk"\r\nContent-Type: application/octet-stream\r\n\r\n'),
-    chunkBytes,
-    encoder.encode('\r\n--' + boundary + '--\r\n')
-  ];
-  const tlen = parts.reduce(function(s, p) { return s + p.byteLength; }, 0);
-  const fullBody = new Uint8Array(tlen);
-  let off = 0;
-  for (let pi = 0; pi < parts.length; pi++) { fullBody.set(parts[pi], off); off += parts[pi].byteLength; }
-  const treq = await tunnelRequest('POST', '/upload/chunk',
-    { 'Content-Type': 'multipart/form-data; boundary=' + boundary }, fullBody);
+  const mp = buildMultipartBody(
+    { upload_id: uploadID, chunk_index: String(idx), chunk_checksum: chunkChecksum },
+    { name: 'chunk', filename: String(idx).padStart(5, '0') + '.chunk', contentType: 'application/octet-stream', bytes: chunkBytes }
+  );
+  const treq = await tunnelRequest('POST', '/upload/chunk', { 'Content-Type': mp.contentType }, mp.body);
   return JSON.parse(new TextDecoder().decode(treq.body));
 }
 
 async function completeUpload(uploadID, tunnelMode) {
+  const bodyStr = JSON.stringify({ upload_id: uploadID });
+  const bodyBytes = new TextEncoder().encode(bodyStr);
   if (tunnelMode) {
     const cresp = await tunnelRequest('POST', '/upload/complete',
-      { 'Content-Type': 'application/json' },
-      new TextEncoder().encode(JSON.stringify({ upload_id: uploadID })));
+      { 'Content-Type': 'application/json' }, bodyBytes);
     return JSON.parse(new TextDecoder().decode(cresp.body));
   }
   const resp = await fetch(BASE + '/upload/complete', {
     method: 'POST',
-    headers: headers({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ upload_id: uploadID })
+    headers: await headers('POST', '/upload/complete', { 'Content-Type': 'application/json' }, bodyBytes),
+    body: bodyStr
   });
   return resp.json();
 }
@@ -413,28 +426,18 @@ async function simpleUpload(file, tunnelMode) {
 
     document.getElementById(progId + '-text').textContent = '上传中…';
 
-    // 直接用 POST /upload 上传
-    const formData = new FormData();
-    formData.append('file', file, fileName);
+    // 直接用 POST /upload 上传（构建 multipart 字节：供 SproxySig body 预哈希与发送）
+    const mp = buildMultipartBody(
+      {},
+      { name: 'file', filename: fileName, contentType: 'application/octet-stream', bytes: new Uint8Array(await file.arrayBuffer()) }
+    );
 
     if (tunnelMode) {
-      // 隧道模式下构建 multipart 请求
-      const boundary = '----WebKitFormBoundary' + crypto.getRandomValues(new Uint32Array(1))[0].toString(36);
-      const encoder = new TextEncoder();
-      const parts = [];
-      const fileData = await file.arrayBuffer();
-      parts.push(encoder.encode('--' + boundary + '\r\nContent-Disposition: form-data; name="file"; filename="' + fileName.replace(/"/g, '') + '"\r\nContent-Type: application/octet-stream\r\n\r\n'));
-      parts.push(new Uint8Array(fileData));
-      parts.push(encoder.encode('\r\n--' + boundary + '--\r\n'));
-      const tlen = parts.reduce(function(s, p) { return s + p.byteLength; }, 0);
-      const fullBody = new Uint8Array(tlen);
-      let off = 0;
-      for (let pi = 0; pi < parts.length; pi++) { fullBody.set(parts[pi], off); off += parts[pi].byteLength; }
       const treq = await tunnelRequest('POST', '/upload',
-        { 'Content-Type': 'multipart/form-data; boundary=' + boundary,
+        { 'Content-Type': mp.contentType,
           'X-File-Checksum': fileChecksum,
           'X-File-Path': fileName,
-          'X-File-MTime': String((file.lastModified || Date.now()) * 1_000_000) }, fullBody);
+          'X-File-MTime': String((file.lastModified || Date.now()) * 1_000_000) }, mp.body);
       const result = JSON.parse(new TextDecoder().decode(treq.body));
       if (result.success) {
         showToast(fileName + ' 上传成功', 'success');
@@ -445,12 +448,13 @@ async function simpleUpload(file, tunnelMode) {
       // 直接 HTTP 上传
       const resp = await fetch(BASE + '/upload', {
         method: 'POST',
-        headers: headers({
+        headers: await headers('POST', '/upload', {
+          'Content-Type': mp.contentType,
           'X-File-Checksum': fileChecksum,
           'X-File-Path': fileName,
           'X-File-MTime': String((file.lastModified || Date.now()) * 1_000_000)
-        }),
-        body: formData
+        }, mp.body),
+        body: mp.body
       });
       const result = await resp.json();
       if (result.success) {
@@ -509,9 +513,13 @@ function checkResumableUploads() {
           })
           .catch(function() { removeUploadSession(sessUploadId); });
       } else {
-        fetch(BASE + statusUrl, { headers: headers() })
-          .then(function(r) { return r.json(); })
-          .then(handleStatusResponse)
+        headers('GET', statusUrl)
+          .then(function(hdrs) {
+            fetch(BASE + statusUrl, { headers: hdrs })
+              .then(function(r) { return r.json(); })
+              .then(handleStatusResponse)
+              .catch(function() { removeUploadSession(sessUploadId); });
+          })
           .catch(function() { removeUploadSession(sessUploadId); });
       }
     })(data, uploadId);

@@ -4,6 +4,7 @@
 package server
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"time"
@@ -57,10 +58,11 @@ type VersionConfig struct {
 }
 
 // HubConfig 配置 Hub 中继系统。
+// 节点注册准入由顶层 access_keys 提供（SproxySig AccessKey + HMAC proof），
+// hub 级不再需要任何 token 配置。
 type HubConfig struct {
-	Enabled    bool   `yaml:"enabled" mapstructure:"enabled"`
-	NodeID     string `yaml:"node_id" mapstructure:"node_id"`
-	RelayToken string `yaml:"relay_token" mapstructure:"relay_token"`
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	NodeID  string `yaml:"node_id" mapstructure:"node_id"`
 	// MaxConnections 是 Hub 同时处理的中继节点连接数上限（I30），0 或不填使用默认 256。
 	MaxConnections int              `yaml:"max_connections" mapstructure:"max_connections"`
 	Transports     TransportConfigs `yaml:"transports" mapstructure:"transports"`
@@ -90,11 +92,14 @@ type Config struct {
 	LogLevel       string          `yaml:"log_level" mapstructure:"log_level"`
 	LogFormat      string          `yaml:"log_format" mapstructure:"log_format"`
 	MaxHeaderBytes int             `yaml:"max_header_bytes" mapstructure:"max_header_bytes"`
-	TunnelKey      string          `yaml:"tunnel_key" mapstructure:"tunnel_key"`
 	TLS            TLSConfig       `yaml:"tls" mapstructure:"tls"`
-	AuthToken      string          `yaml:"auth_token" mapstructure:"auth_token"`
 	RateLimit      RateLimitConfig `yaml:"rate_limit" mapstructure:"rate_limit"`
 	CORS           CORSConfig      `yaml:"cors" mapstructure:"cors"`
+
+	// AccessKeys 是 SproxySig 请求签名认证的 AccessKey 配置（每 mesh 一对；
+	// 替代旧 auth_token 明文 Bearer）。任一已配置即所有 HTTP 面（文件/信令/
+	// 节点列表/服务发现）要求 SproxySig 签名。hub 侧为多 mesh 时配置多对。
+	AccessKeys []AccessKeyConfig `yaml:"access_keys" mapstructure:"access_keys"`
 
 	// 分块上传配置
 	ChunkSize        int64         `yaml:"chunk_size" mapstructure:"chunk_size"`
@@ -222,14 +227,8 @@ func (c *Config) Validate() error {
 	if c.UploadsDir == "" {
 		return fmt.Errorf("uploads_dir 为空，请配置上传目录")
 	}
-	if c.TunnelKey == "" && !c.TLS.Enabled {
-		return fmt.Errorf("tunnel_key 为空且 TLS 未启用，传输将完全明文，请配置 tunnel_key 或启用 TLS")
-	}
-	if c.TunnelKey != "" {
-		if _, err := tunnel.ParseKey(c.TunnelKey); err != nil {
-			return fmt.Errorf("tunnel_key 校验失败（必须是 64 位十六进制字符 0-9a-fA-F）: %w", err)
-		}
-	}
+	// 无 auth 配置（access_keys/api_keys 均为空）在 Validate 层是合法的——
+	// fail-fast 拒绝启动在 cmd/sproxy 侧执行。
 	if c.APIKeys.Enabled && len(c.APIKeys.Keys) == 0 {
 		return fmt.Errorf("api_keys.enabled=true 但未配置任何密钥，认证将拒绝所有请求")
 	}
@@ -243,14 +242,34 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("api_keys[%d].permission=%q 无效，仅允许 %q 或 %q", i, k.Permission, PermissionRead, PermissionWrite)
 		}
 	}
+	// access_keys 校验（I-1/I-2）：Key 非空、Key 唯一、Secret 为 64 hex（32B）、
+	// mesh_id 与 AK 内嵌 mesh 一致（防配置漂移导致两端隧道派生密钥不匹配）。
+	seenAccessKeys := make(map[string]struct{}, len(c.AccessKeys))
+	for i, k := range c.AccessKeys {
+		if k.Key == "" {
+			return fmt.Errorf("access_keys[%d].key 为空，密钥不能为空字符串", i)
+		}
+		if _, dup := seenAccessKeys[k.Key]; dup {
+			return fmt.Errorf("access_keys[%d].key %q 重复", i, k.Key)
+		}
+		seenAccessKeys[k.Key] = struct{}{}
+		if len(k.Secret) != 64 {
+			return fmt.Errorf("access_keys[%d].secret 必须为 64 个十六进制字符（32 字节 AES 密钥源），got %d 字符", i, len(k.Secret))
+		}
+		if _, err := hex.DecodeString(k.Secret); err != nil {
+			return fmt.Errorf("access_keys[%d].secret 不是合法十六进制: %v", i, err)
+		}
+		if k.MeshID != "" {
+			if mesh := tunnel.AccessKeyMesh(k.Key); mesh != "" && mesh != k.MeshID {
+				return fmt.Errorf("access_keys[%d].mesh_id %q 与 AK 内嵌 mesh %q 不一致（sclient 按 AK 解析 mesh 派生隧道密钥）", i, k.MeshID, mesh)
+			}
+		}
+	}
 	if c.RateLimit.Enabled && c.RateLimit.Requests <= 0 {
 		return fmt.Errorf("rate_limit.enabled=true 但 requests=%d 无效，请设置大于 0 的值", c.RateLimit.Requests)
 	}
 	if c.RateLimit.Enabled && c.RateLimit.Window <= 0 {
 		return fmt.Errorf("rate_limit.enabled=true 但 window=%s 无效，请设置大于 0 的 duration", c.RateLimit.Window)
-	}
-	if c.Hub.Enabled && c.Hub.RelayToken == "" {
-		return fmt.Errorf("hub.enabled=true 但 relay_token 为空，中继节点注册将无任何鉴权，请配置 relay_token")
 	}
 	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled {
 		// S42：WS 是当前唯一可用的节点接入传输；hub 启用而无 transport 时
@@ -303,7 +322,7 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func SaveConfig(cfg *Config, path string) error {
-	// TODO: 后续优化敏感信息管理（TunnelKey/AuthToken 脱敏）
+	// TODO: 后续优化敏感信息管理（AuthToken 脱敏）
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)

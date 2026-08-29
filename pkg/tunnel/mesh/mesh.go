@@ -11,7 +11,9 @@ package mesh
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,10 +170,10 @@ type AutoRegisterParams struct {
 	HubURL string
 	// ServerURL 是 HubURL 为空的回退基址（mesh 用 svc.ServerURL()；p2p 传 ""）。
 	ServerURL string
-	// RelayToken 是注册用 token（hub relay_token）。
-	RelayToken string
-	// SignalToken 是信令 Bearer（hub auth_token）。
-	SignalToken string
+	// AccessKey 是 SproxySig 请求签名认证的 AccessKey（信令/节点列表/hub 注册准入）。
+	AccessKey string
+	// AccessKeySecret 是 SproxySig AccessKeySecret（本地密钥，仅计算签名与注册证明，永不上线）。
+	AccessKeySecret string
 	// NodeID 是节点 ID 基础（为空回落主机名）。
 	NodeID string
 	// Prefix 是临时 node 前缀："mesh" | "p2p"。
@@ -225,7 +227,24 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	}
 	nodeID := base
 	if !p.ExactNode {
-		nodeID = fmt.Sprintf("%s-%s-%d", p.Prefix, base, time.Now().UnixNano())
+		// 临时 node-id：<prefix>-<base>-<随机 hex>。用随机后缀而非仅 unixnano——
+		// 并发拨号（discovery 并行）下 UnixNano 可能碰撞，导致对端 Answer 交叉路由
+		// （node-a 拨 b/c 的临时身份若相同，b/c 的 Answer 会互相串到对方 inbox）。
+		nodeID = fmt.Sprintf("%s-%s-%s", p.Prefix, base, newTempSuffix())
+	}
+
+	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof
+	// （hub.ComputeRegisterProof 绑定 nodeID + ts/nonce，防串用/重放）。
+	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
+	// 拒绝后客户端困惑——明明连上了却被拒）。
+	if p.AccessKeySecret == "" {
+		return nil, fmt.Errorf("register: access_key_secret 为空，无法计算注册 proof")
+	}
+	ts := time.Now().UnixMilli()
+	nonce := hub.NewRegisterNonce()
+	proof, err := hub.ComputeRegisterProof(p.AccessKeySecret, nodeID, ts, nonce)
+	if err != nil {
+		return nil, fmt.Errorf("register: 计算注册证明失败: %w", err)
 	}
 
 	conn, err := HubWSDial(ctx, wsURL, p.Insecure)
@@ -236,7 +255,7 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	// 服务宣告（mesh node 常驻）与标签（如 exit）。mesh discovery 临时注册（disc-）
 	// 另带 real_node_id + real_node_proof（hub 强制校验防冒充）。mesh/p2p 拨号方
 	// 不传则 Meta{}。
-	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.RelayToken, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret)); err != nil {
+	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.AccessKey, proof, ts, nonce, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret)); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("发送注册帧失败: %w", err)
 	}
@@ -258,7 +277,8 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	}
 	// mux 保活：自动跑 readLoop/writeLoop/pingLoop 处理心跳，注册连接存活到命令退出。
 	m := mux.New(conn, mux.RoleListener)
-	signaler := hub.NewHubSignaler(httpBase, p.SignalToken, nodeID, secret)
+	signaler := hub.NewHubSignaler(httpBase, p.AccessKey, nodeID, secret)
+	signaler.SetAccessKeySecret(p.AccessKeySecret)
 	signaler.SetContext(ctx)
 	if p.Insecure {
 		signaler.SetHTTPClient(client.InsecureHTTPClient())
@@ -270,4 +290,12 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 		Secret:   secret,
 		Mux:      m,
 	}, nil
+}
+
+// newTempSuffix 生成临时 node-id 的随机后缀（8B hex）。随机而非仅时间戳——
+// 并发拨号下 UnixNano 可能碰撞，导致对端 Answer 交叉路由。
+func newTempSuffix() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

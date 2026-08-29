@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
 // relayHandshakeTimeout 是 RelayStream 握手阶段（写请求 + 读状态行/响应头）的
@@ -123,7 +125,14 @@ func (c *FileClient) RelayStream(ctx context.Context, target, addr string) (net.
 	fmt.Fprintf(&b, "Host: %s\r\n", host)
 	b.WriteString("Content-Type: application/json\r\n")
 	fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
-	if c.authToken != "" {
+	if c.accessKeySecret != "" {
+		// SproxySig 请求签名认证（token 不上线）：method/path/body 哈希参与签名。
+		now := time.Now()
+		h := sproxysig.Header{Version: sproxysig.Version, AK: c.accessKey,
+			TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+			Nonce: sproxysig.NewNonce(), BodySHA256: sproxysig.BodyHash(body)}
+		fmt.Fprintf(&b, "Authorization: %s\r\n", sproxysig.SignAndFormat(c.accessKeySecret, h, http.MethodPost, path, ""))
+	} else if c.authToken != "" {
 		fmt.Fprintf(&b, "Authorization: Bearer %s\r\n", c.authToken)
 	}
 	b.WriteString("Connection: close\r\n\r\n")

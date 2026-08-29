@@ -356,7 +356,7 @@ func TestCloudDownloadChain_ResumeMidway(t *testing.T) {
 		"created_at":   time.Now(),
 		"updated_at":   time.Now(),
 	}
-	if err := store.Save(t.Context(), "chain:chain-resume", state); err != nil {
+	if err := store.Save(t.Context(), "chain-chain-resume", state); err != nil {
 		t.Fatal(err)
 	}
 
@@ -399,7 +399,7 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 		"created_at":   time.Now(),
 		"updated_at":   time.Now(),
 	}
-	if err := store.Save(t.Context(), "chain:chain-resume-run", state); err != nil {
+	if err := store.Save(t.Context(), "chain-chain-resume-run", state); err != nil {
 		t.Fatal(err)
 	}
 

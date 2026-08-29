@@ -19,6 +19,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -35,7 +36,7 @@ const (
 )
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string) error {
+func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string) error {
 	if nodeID == "" {
 		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
@@ -47,14 +48,8 @@ func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, inse
 
 	logger := slog.With("node", nodeID, "hub", hubURL, "local", local, "dial_allow", dialAllow)
 	logger.Info("中继节点启动")
-	// S61：明文 ws:// + 携带注册 token 是真实风险组合（token 在公网明文飞行），
-	// 告警提示生产环境用 wss://。不改默认值——本地回环自签 hub 场景（ws xfer
-	// Dial 未支持自签 TLS）仍需可用。
-	if token != "" {
-		if u, perr := url.Parse(hubURL); perr == nil && u.Scheme == "ws" {
-			logger.Warn("hub 使用明文 ws:// 且携带注册 token，token 将明文传输；生产环境请使用 wss://", "hub", hubURL)
-		}
-	}
+	// hub 注册准入已改 SproxySig AccessKey + HMAC proof：Secret 只本端计算签名/证明，
+	// 永不上线，故明文 ws:// 不再泄露凭据；仍提示自签证书场景用 wss://。
 	if insecure {
 		logger.Warn("--insecure 已启用，跳过 TLS 证书验证；仅限开发/测试", "hub", hubURL)
 	}
@@ -62,13 +57,13 @@ func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, token string, inse
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
-	return runRelayWithRetry(ctx, nodeID, hubURL, local, token, insecure, dialAllow, services, dialAllowCIDRs, logger)
+	return runRelayWithRetry(ctx, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, nodeID, hubURL, local, token, insecure, dialAllow, services, dialAllowCIDRs, logger)
+		err := runRelayOnce(ctx, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -97,7 +92,19 @@ func isTerminalRelayError(err error) bool {
 	return errors.Is(err, hub.ErrRegisterRejected)
 }
 
-func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
+	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof。
+	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
+	// 拒绝后客户端困惑——明明连上了却被拒）。
+	if accessKeySecret == "" {
+		return fmt.Errorf("注册失败: access_key_secret 为空，无法计算注册 proof")
+	}
+	ts := time.Now().UnixMilli()
+	nonce := hub.NewRegisterNonce()
+	proof, err := hub.ComputeRegisterProof(accessKeySecret, nodeID, ts, nonce)
+	if err != nil {
+		return fmt.Errorf("注册失败: 计算注册证明失败: %w", err)
+	}
 	// B17：insecure 时经 hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；
 	// 非 insecure 路径保持 xfer.Get("ws").Dial 原样（零行为变化）。
 	conn, err := mesh.HubWSDial(ctx, hubURL, insecure)
@@ -135,7 +142,7 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, token string, inse
 	}
 	// 声明 per-node-secret 能力：hub 回 REG_OK:<base64url secret>（B1 已支持，
 	// B3 服务端将据此校验信令身份）。现有调用不传 caps 时行为不变。
-	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, token, meta, hub.CapabilityPerNodeSecret)); serr != nil {
+	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, accessKey, proof, ts, nonce, meta, hub.CapabilityPerNodeSecret)); serr != nil {
 		_ = conn.Close() // P1-15：mux 创建前失败必须关闭 WS，否则重连循环泄漏连接+sendLoop goroutine
 		return fmt.Errorf("发送注册帧失败: %w", serr)
 	}
@@ -221,33 +228,36 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			hubURL, _ := cmd.Flags().GetString("hub")
 			local, _ := cmd.Flags().GetString("local")
 			nodeID, _ := cmd.Flags().GetString("node-id")
-			token, _ := cmd.Flags().GetString("token")
+			accessKey, _ := cmd.Flags().GetString("access-key")
+			accessKeySecret, _ := cmd.Flags().GetString("access-key-secret")
 			insecure, _ := cmd.Flags().GetBool("insecure")
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
-			// P2-配置3：通用参数配置回落——--hub/--token/--node-id 未显式指定时
-			// 取配置 hub_url/relay_token/node_id（CLI > 配置文件 > 默认）。
+			// P2-配置3：通用参数配置回落——--hub/--node-id/--access-key/--access-key-secret
+			// 未显式指定时取配置 hub_url/node_id/access_key/access_key_secret（CLI > 配置 > 默认）。
 			if cfgSvc != nil {
 				if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
 					if hubURL == "" {
 						hubURL = cfg.HubURL
 					}
-					if token == "" {
-						token = cfg.RelayToken
+					if accessKey == "" {
+						accessKey = cfg.AccessKey
+					}
+					if accessKeySecret == "" {
+						accessKeySecret = cfg.AccessKeySecret
 					}
 					if nodeID == "" {
 						nodeID = cfg.NodeID
 					}
 				}
 			}
-			return runRelayStart(cmd, hubURL, local, nodeID, token, insecure, dialAllow, services, dialAllowCIDRs)
+			return runRelayStart(cmd, hubURL, local, nodeID, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs)
 		},
 	}
 	cmd.Flags().String("hub", "", "Hub 的 WebSocket 地址（默认取配置 hub_url；均未配置用 ws://127.0.0.1:18084/ws）")
 	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
 	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
-	cmd.Flags().String("token", "", "中继注册 token（与 hub.relay_token 一致；未配置 hub token 时可不填）")
 	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供中继端充当出口网关）")
 	cmd.Flags().StringArray("service", nil, "宣告一个 mesh 服务（格式 name:addr，可重复；供 sclient mesh connect 发现）")
 	cmd.Flags().StringArray("dial-allow-cidr", nil, "出口拨号白名单网段（如 192.168.0.0/16；配合 --dial-allow 放行内网服务，默认仅公网）")
@@ -280,11 +290,13 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或 --hub 或配置 server_url")
 			}
 
-			// 获取 auth token
-			authToken, _ := cmd.Flags().GetString("auth-token")
-			if authToken == "" && cfgSvc != nil {
+			// 获取 SproxySig 认证密钥
+			accessKey, _ := cmd.Flags().GetString("access-key")
+			accessKeySecret, _ := cmd.Flags().GetString("access-key-secret")
+			if accessKeySecret == "" && cfgSvc != nil {
 				if cfg, err := cfgSvc.LoadConfig(); err == nil {
-					authToken = cfg.AuthToken
+					accessKey = cfg.AccessKey
+					accessKeySecret = cfg.AccessKeySecret
 				}
 			}
 
@@ -294,9 +306,7 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 			if err != nil {
 				return fmt.Errorf("创建请求失败: %w", err)
 			}
-			if authToken != "" {
-				req.Header.Set("Authorization", "Bearer "+authToken)
-			}
+			sproxysig.SignRequest(req, accessKey, accessKeySecret)
 			// B17：--insecure 时复用 insecureHTTPClient（跳过证书校验，自签 https hub 场景）。
 			httpClient := &http.Client{Timeout: 10 * time.Second}
 			if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {

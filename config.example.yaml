@@ -7,10 +7,6 @@ uploads_dir: "./uploads"
 # 单次普通上传（非分块）最大字节数，超过返回 413。0 或不填使用默认 1 GiB。
 # max_upload_bytes: 1073741824
 
-# tunnel_key 留空时 sproxy 自动生成 64 位 hex 密钥并回写到配置文件
-# 可通过 `sclient genkey` 手动生成
-# tunnel_key: ""
-
 server_timeouts:
   read_header: "5s"
   read: "30s"
@@ -34,10 +30,26 @@ tls:
   # 要显式禁用自签证书生成，取消注释并设为 false：
   # auto_tls: false
 
-# Bearer Token 认证（默认关闭，生产环境必须设置）
+# SproxySig 请求签名认证（每 mesh 一对 AK/SK；生产环境必须设置）。
 # 启用后，除 /healthz、/version、/ui/、POST /tunnel 之外所有路由都要求
-# Authorization: Bearer <token> 请求头。
-# auth_token: "your-secret-token"
+# Authorization: SproxySig v=1 ... 请求签名头。
+# 生成 AK/SK：sclient access-key create [--mesh <name>]
+# 注意：未配置 access_keys（且 api_keys 未启用）时 sproxy 拒绝启动（fail-fast）。
+# 下面为开发示例凭据，生产环境务必用 `sclient access-key create` 生成并更换。
+access_keys:
+  - key: "sk-00000000000000000000000000000000"
+    secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+# 多用户 API 密钥（Bearer，与 access_keys 互斥且优先；可选）。
+# 提供 read/write 权限分级，适合多用户 HTTP 文件访问；但不支持隧道/hub——
+# 隧道密钥与 hub 注册准入均来自 access_keys（hub.enabled 时强制要求 access_keys）。
+# api_keys:
+#   enabled: true
+#   keys:
+#     - key: "user-token-1"
+#       permission: "read"    # read=只读 GET/HEAD；write=读写（默认）
+#     - key: "user-token-2"
+#       permission: "write"
 
 # 速率限制（默认关闭；enabled: true 时限制 tunnel handler）
 # rate_limit:
@@ -76,11 +88,10 @@ tls:
 # cloud_archive_max_bytes: 10737418240   # 10 GiB 示例
 
 # Hub 中继（mesh 内网穿透，默认关闭）。
-# 启用后必须配置 relay_token，否则启动校验失败（C2：防未鉴权注册）。
+# 节点注册准入由顶层 access_keys 提供（AK/HMAC proof 证明持有 SK，无需独立 relay_token）。
 # hub:
 #   enabled: true
 #   node_id: "node-a"               # 本节点 ID（mesh connect / relay dial 的目标）
-#   relay_token: "your-relay-token"  # 中继节点注册共享密钥，hub.enabled=true 时必填
 #   max_connections: 256             # 同时处理的中继连接数上限（0/缺省默认 256；I30 防连接洪泛）
 #   transports:
 #     ws:

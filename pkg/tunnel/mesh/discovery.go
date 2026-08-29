@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
@@ -56,9 +57,9 @@ func (e *hubAPIError) Error() string {
 
 // ListHubNodes 返回 hub 上全部在线节点 ID（含自身与临时节点）。
 // 轻量直连 GET /api/hub/nodes：不构造 FileClient，避免 tunnel_key/InitError 拖垮
-// mesh node 常驻进程（与 relay status 的直连方式一致）。非空 signalToken 时带
-// Authorization: Bearer。4xx/5xx/网络错误统一返回 *hubAPIError 或包装错误。
-func ListHubNodes(ctx context.Context, baseURL, signalToken string, insecure bool) ([]string, error) {
+// mesh node 常驻进程（与 relay status 的直连方式一致）。配置了 AccessKeySecret 时
+// 用 SproxySig 签名认证（token 不上线）。4xx/5xx/网络错误统一返回 *hubAPIError。
+func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret string, insecure bool) ([]string, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("list hub nodes: hub 地址为空")
 	}
@@ -66,8 +67,12 @@ func ListHubNodes(ctx context.Context, baseURL, signalToken string, insecure boo
 	if err != nil {
 		return nil, fmt.Errorf("list hub nodes: 构造请求失败: %w", err)
 	}
-	if signalToken != "" {
-		req.Header.Set("Authorization", "Bearer "+signalToken)
+	if accessKeySecret != "" {
+		now := time.Now()
+		h := sproxysig.Header{Version: sproxysig.Version, AK: accessKey,
+			TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+			Nonce: sproxysig.NewNonce(), BodySHA256: sproxysig.EmptyBodyHash()}
+		req.Header.Set("Authorization", sproxysig.SignAndFormat(accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
 	}
 	var hc *http.Client
 	if insecure {
@@ -148,7 +153,7 @@ func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase stri
 }
 
 func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, probe time.Duration, maxParallel int, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) error {
-	peers, err := ListHubNodes(ctx, httpBase, cfg.SignalToken, cfg.Insecure)
+	peers, err := ListHubNodes(ctx, httpBase, cfg.AccessKey, cfg.AccessKeySecret, cfg.Insecure)
 	if err != nil {
 		var herr *hubAPIError
 		if errors.As(err, &herr) && herr.code >= 400 && herr.code < 500 {
@@ -217,7 +222,7 @@ func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, nodeID, m
 	}
 	temp, err := AutoRegister(ctx, AutoRegisterParams{
 		HubURL: cfg.HubURL, ServerURL: cfg.ServerURL,
-		RelayToken: cfg.RelayToken, SignalToken: cfg.SignalToken,
+		AccessKey: cfg.AccessKey, AccessKeySecret: cfg.AccessKeySecret,
 		NodeID: nodeID, Prefix: hub.DiscPrefix, ExactNode: false,
 		Insecure:   cfg.Insecure,
 		RealNodeID: nodeID, RealNodeProof: realNodeProof(mainSecret, nodeID),

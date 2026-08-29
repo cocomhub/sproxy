@@ -345,14 +345,12 @@ func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	key := make([]byte, 32)
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "test",
-		BuildAt:   "test",
-		TunnelKey: key,
-		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Mux:     mux,
+		CfgPtr:  &cfgPtr,
+		Version: "test",
+		BuildAt: "test",
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	t.Cleanup(func() { _ = h.Close() })
 
@@ -366,14 +364,12 @@ func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	key := make([]byte, 32)
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "test",
-		BuildAt:   "test",
-		TunnelKey: key,
-		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Mux:     mux,
+		CfgPtr:  &cfgPtr,
+		Version: "test",
+		BuildAt: "test",
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	t.Cleanup(func() { _ = h.Close() })
 

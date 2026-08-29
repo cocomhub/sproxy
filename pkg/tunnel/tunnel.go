@@ -54,6 +54,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -61,6 +62,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"golang.org/x/crypto/hkdf"
 )
 
 const (
@@ -79,6 +82,10 @@ const (
 
 // ErrMetadataTooLarge 表示 metadata 帧长度超过 MaxMetadataBytes。
 var ErrMetadataTooLarge = fmt.Errorf("metadata frame too large (> %d bytes)", MaxMetadataBytes)
+
+// ErrTunnelKeyMissing 表示请求 context 中未携带隧道密钥（authMiddleware 未派生或
+// 未对 /tunnel 验签）。认证驱动的隧道模式下这是拒绝请求的哨兵错误。
+var ErrTunnelKeyMissing = fmt.Errorf("tunnel key missing in request context")
 
 // Request 表示一个加密隧道请求，包含要转发到目标服务器的 HTTP 请求信息。
 type Request struct {
@@ -121,6 +128,64 @@ func GenerateKey() (string, error) {
 		return "", fmt.Errorf("generate key: %w", err)
 	}
 	return hex.EncodeToString(key), nil
+}
+
+// AccessKeyMesh 从 SproxySig AccessKey 提取 mesh 段（AK 形如 sk[-<mesh>]-<16hex>）：
+//   - sk-<mesh>-<hex>（mesh 可含连字符）→ mesh
+//   - sk-<hex>（无 mesh 段）→ ""
+//   - 其他格式 → ""
+//
+// 这是两端（sclient 派生 / 服务端 HKDF info）唯一的 mesh 解析实现，保证派生参数一致
+// （I-1：禁止客户端字符串解析与服务端配置 mesh_id 各写一套导致密钥不匹配）。
+func AccessKeyMesh(ak string) string {
+	if !strings.HasPrefix(ak, "sk-") {
+		return ""
+	}
+	rest := strings.TrimPrefix(ak, "sk-")
+	// 末尾必须为 -<16 hex>（mesh 段可含连字符，故取最后一个 '-'）。
+	idx := strings.LastIndex(rest, "-")
+	if idx <= 0 || idx+17 != len(rest) {
+		return ""
+	}
+	hexPart := rest[idx+1:]
+	if !isHexString(hexPart) {
+		return ""
+	}
+	return rest[:idx]
+}
+
+// hexChars 是 16 个十六进制字符集（isHexString 用）。
+const hexChars = "0123456789abcdefABCDEF"
+
+// isHexString 判断 s 是否为 16 个十六进制字符。
+func isHexString(s string) bool {
+	if len(s) != 16 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !strings.ContainsRune(hexChars, rune(s[i])) {
+			return false
+		}
+	}
+	return true
+}
+
+// DeriveTunnelKey 从 SproxySig AccessKeySecret（SK，64 hex）派生 32B AES-256 隧道密钥。
+// salt 固定字符串提供域分离；info=mesh_id（每 mesh 独立）。两端必须用相同参数。
+func DeriveTunnelKey(skHex, meshID string) ([]byte, error) {
+	secret, err := hex.DecodeString(skHex)
+	if err != nil {
+		return nil, fmt.Errorf("derive: invalid sk: %w", err)
+	}
+	if len(secret) != 32 {
+		return nil, fmt.Errorf("derive: sk must be 32 bytes (64 hex chars), got %d", len(secret))
+	}
+	r := hkdf.New(sha256.New, secret, []byte("sproxy-tunnel-key-v1"), []byte(meshID))
+	out := make([]byte, 32)
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil, fmt.Errorf("derive: %w", err)
+	}
+	return out, nil
 }
 
 // blockCache 缓存 AES cipher.Block 实例，避免同一密钥重复做密钥扩展。

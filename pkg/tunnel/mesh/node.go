@@ -38,10 +38,10 @@ type NodeConfig struct {
 	ServerURL string
 	// NodeID 是本节点稳定 ID（为空回落主机名；mesh connect 用它寻址，需唯一）。
 	NodeID string
-	// RelayToken 是 hub 中继注册 token。
-	RelayToken string
-	// SignalToken 是信令 Bearer（hub auth_token）。
-	SignalToken string
+	// AccessKey 是 SproxySig 请求签名认证的 AccessKey（信令/节点列表/网关/hub 注册准入）。
+	AccessKey string
+	// AccessKeySecret 是 SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）。
+	AccessKeySecret string
 	// Services 是宣告到 hub 的服务（mesh connect 服务发现）。
 	Services []hub.Service
 	// ServiceAddrs 是出口拨号精确放行地址（含 loopback/私网，供 NewServiceDialPolicy）。
@@ -125,16 +125,16 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	defer cycleCancel()
 
 	reg, err := AutoRegister(cycleCtx, AutoRegisterParams{
-		HubURL:      cfg.HubURL,
-		ServerURL:   cfg.ServerURL,
-		RelayToken:  cfg.RelayToken,
-		SignalToken: cfg.SignalToken,
-		NodeID:      cfg.NodeID,
-		Prefix:      "mesh",
-		ExactNode:   true, // mesh node 是稳定 node-id，供 mesh connect 寻址
-		Insecure:    cfg.Insecure,
-		Services:    cfg.Services,
-		Tags:        cfg.Tags,
+		HubURL:          cfg.HubURL,
+		ServerURL:       cfg.ServerURL,
+		AccessKey:       cfg.AccessKey,
+		AccessKeySecret: cfg.AccessKeySecret,
+		NodeID:          cfg.NodeID,
+		Prefix:          "mesh",
+		ExactNode:       true, // mesh node 是稳定 node-id，供 mesh connect 寻址
+		Insecure:        cfg.Insecure,
+		Services:        cfg.Services,
+		Tags:            cfg.Tags,
 	})
 	if err != nil {
 		return err

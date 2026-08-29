@@ -5,7 +5,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net"
@@ -32,86 +31,11 @@ func setupProviderForSighup(cfgPath string) *sproxycfg.ViperProvider {
 
 // ---- handleSighup tests ----
 
-func TestResolveTunnelKey_EmptyAutoGenerate(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfgFile = filepath.Join(tmpDir, "sproxy.yaml")
-	t.Cleanup(func() { cfgFile = "" })
-
-	cfg := &server.Config{TunnelKey: ""}
-	_, err := resolveTunnelKey(cfg)
-	if err != nil {
-		t.Fatalf("resolveTunnelKey with empty key should auto-generate: %v", err)
-	}
-	if cfg.TunnelKey == "" {
-		t.Fatal("resolveTunnelKey should set TunnelKey on empty")
-	}
-	if len(cfg.TunnelKey) != 64 {
-		t.Errorf("expected 64 hex chars, got %d: %q", len(cfg.TunnelKey), cfg.TunnelKey)
-	}
-	// Verify config file was written
-	if _, err := os.Stat(cfgFile); err != nil {
-		t.Errorf("expected config file to be written: %v", err)
-	}
-}
-
-func TestHandleSighup_KeyRotation(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "sproxy.yaml")
-
-	// Write initial config file
-	initialCfg := server.Default()
-	initialCfg.Addr = "127.0.0.1:0"
-	initialCfg.TunnelKey = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	if err := server.SaveConfig(initialCfg, cfgPath); err != nil {
-		t.Fatal(err)
-	}
-	cfgProvider = setupProviderForSighup(cfgPath)
-	t.Cleanup(func() { cfgProvider = nil })
-
-	// Set up the cfgFile global with save/restore
-	cfgFile = cfgPath
-	t.Cleanup(func() { cfgFile = "" })
-	var updated string
-	tunUpdater := &mockTunnelUpdater{updateFn: func(key []byte) {
-		updated = hex.EncodeToString(key)
-	}}
-
-	// Initial cfgPtr state
-	cfgPtr.Store(initialCfg)
-	currentTunnelKeyHex = initialCfg.TunnelKey
-	t.Cleanup(func() { currentTunnelKeyHex = "" })
-
-	// Modify config file with new key
-	newCfg := *initialCfg
-	newCfg.TunnelKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	if err := server.SaveConfig(&newCfg, cfgPath); err != nil {
-		t.Fatal(err)
-	}
-
-	oldCfg := cfgPtr.Load()
-	handleSighup(oldCfg, tunUpdater)
-
-	if updated == "" {
-		t.Fatal("UpdateKey was not called")
-	}
-}
-
-type mockTunnelUpdater struct {
-	updateFn func(key []byte)
-}
-
-func (m *mockTunnelUpdater) UpdateKey(key []byte) {
-	if m.updateFn != nil {
-		m.updateFn(key)
-	}
-}
-
 func TestHandleSighup_ConfigReload(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "sproxy.yaml")
 
 	initialCfg := server.Default()
-	initialCfg.TunnelKey = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	initialCfg.Addr = "127.0.0.1:0"
 	if err := server.SaveConfig(initialCfg, cfgPath); err != nil {
 		t.Fatal(err)
@@ -125,8 +49,6 @@ func TestHandleSighup_ConfigReload(t *testing.T) {
 	})
 
 	cfgPtr.Store(initialCfg)
-	currentTunnelKeyHex = initialCfg.TunnelKey
-	t.Cleanup(func() { currentTunnelKeyHex = "" })
 
 	// Change log level in config file
 	newCfg := *initialCfg
@@ -136,7 +58,7 @@ func TestHandleSighup_ConfigReload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handleSighup(initialCfg, nil)
+	handleSighup(initialCfg)
 
 	reloaded := cfgPtr.Load()
 	if reloaded.LogLevel != "debug" {
@@ -149,7 +71,6 @@ func TestHandleSighup_AddrChangeWarning(t *testing.T) {
 	cfgPath := filepath.Join(tmpDir, "sproxy.yaml")
 
 	initialCfg := server.Default()
-	initialCfg.TunnelKey = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	initialCfg.Addr = ":18083"
 	if err := server.SaveConfig(initialCfg, cfgPath); err != nil {
 		t.Fatal(err)
@@ -163,8 +84,6 @@ func TestHandleSighup_AddrChangeWarning(t *testing.T) {
 	})
 
 	cfgPtr.Store(initialCfg)
-	currentTunnelKeyHex = initialCfg.TunnelKey
-	t.Cleanup(func() { currentTunnelKeyHex = "" })
 
 	// Change addr (warn-only field)
 	newCfg := *initialCfg
@@ -175,7 +94,7 @@ func TestHandleSighup_AddrChangeWarning(t *testing.T) {
 	}
 
 	_ = testutil.CaptureStderr(func() {
-		handleSighup(initialCfg, nil)
+		handleSighup(initialCfg)
 	})
 }
 
@@ -199,7 +118,6 @@ func TestRunServer_ListenAndServeError(t *testing.T) {
 	cmd := &cobra.Command{Use: "sproxy"}
 	cmd.Flags().String("addr", occupiedAddr, "")
 	cmd.Flags().String("uploads-dir", tmpDir, "")
-	cmd.Flags().String("tunnel-key", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "")
 	cmd.Flags().Bool("version", false, "")
 
 	// 注入 signal channel 避免 goroutine 泄漏
@@ -212,10 +130,9 @@ func TestRunServer_ListenAndServeError(t *testing.T) {
 	t.Cleanup(func() { cfgProvider = nil })
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
 	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
-	cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
 	cfgProvider.Set("addr", occupiedAddr)
 	cfgProvider.Set("uploads_dir", tmpDir)
-	cfgProvider.Set("tunnel_key", "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
+	cfgProvider.Set("access_keys", []map[string]any{{"key": "sk-test-0000000000000000", "secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mesh_id": "test"}})
 	cfgProvider.Set("log_level", "error")
 
 	// 并发运行 server
@@ -309,21 +226,4 @@ func assertLogOutput(t *testing.T, output string, format string) {
 	}
 }
 
-// ---- resolveTunnelKey tests ----
-
-func TestResolveTunnelKey_SaveError(t *testing.T) {
-	// Save cfgFile so resolveTunnelKey can restore it later
-	t.Cleanup(func() { cfgFile = "" })
-
-	// Use a path where the parent directory does not exist.
-	// os.WriteFile will fail because the directory doesn't exist.
-	badDir := filepath.Join(t.TempDir(), "nonexistent")
-	cfgFile = filepath.Join(badDir, "sproxy.yaml")
-
-	cfg := &server.Config{TunnelKey: ""}
-	_, err := resolveTunnelKey(cfg)
-	if err == nil {
-		t.Fatal("expected error when SaveConfig fails due to non-writable path")
-	}
-	t.Logf("got expected error: %v", err)
-}
+// ---- initLogger tests ----

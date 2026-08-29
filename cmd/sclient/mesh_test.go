@@ -59,7 +59,7 @@ func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
 	if node.Use != "node" {
 		t.Fatalf("unexpected node Use: %q", node.Use)
 	}
-	for _, name := range []string{"hub", "node-id", "token", "relay-token", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "stun"} {
+	for _, name := range []string{"hub", "node-id", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "stun"} {
 		if f := node.Flags().Lookup(name); f == nil {
 			t.Errorf("node 缺少 flag: %s", name)
 		}
@@ -72,7 +72,7 @@ func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 	if connect.Use != "connect <service> [-l :port]" {
 		t.Fatalf("unexpected connect Use: %q", connect.Use)
 	}
-	for _, name := range []string{"listen", "webrtc", "hub", "token", "relay-token", "node-id", "gateway"} {
+	for _, name := range []string{"listen", "webrtc", "hub", "node-id", "gateway"} {
 		if f := connect.Flags().Lookup(name); f == nil {
 			t.Errorf("connect 缺少 flag: %s", name)
 		}
@@ -308,7 +308,7 @@ func TestMeshStatus_GatewayTopology(t *testing.T) {
 	resp := `{"node_id":"node-ap","services":[{"name":"echo","addr":"127.0.0.1:22"}],"peers":[{"peer":"node-svc","link":"webrtc-direct","since":"2026-08-24T00:00:00Z"}]}`
 	gatewayAddr := mockGateway(t, resp)
 	var out bytes.Buffer
-	// 真实 FileClient（mock 工厂传 nil client 会让 svc.AuthToken() nil 指针崩溃）。
+	// 真实 FileClient（mock 工厂传 nil client 会让 svc.AccessKeySecret() nil 指针崩溃）。
 	cmd := newCmdMeshStatus(clientfactory.NewMock(client.NewFileClient("http://127.0.0.1:1"), nil), cli.IOStreams{Out: &out, ErrOut: io.Discard})
 	cmd.SetContext(context.Background()) // 未 Execute 的裸命令 Context() 为 nil
 	if err := cmd.Flags().Set("gateway", gatewayAddr); err != nil {

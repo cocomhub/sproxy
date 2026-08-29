@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,10 +21,35 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
-// makeKey 生成一个合法的 64 位 hex AES-256 密钥（重复 'a'）。
-func makeKey() string { return strings.Repeat("a", 64) }
+// e2eAK / e2eSK 是 startTestServer 配置的 SproxySig 测试凭据（与 AccessKeyConfig 一致）。
+const (
+	e2eAK = "sk-e2e-0000000000000000"
+	e2eSK = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
+
+// newAuthedClient 返回带 SproxySig 凭据的直连 client（不走隧道）。
+// 服务端配置了 access_keys 时，直连 HTTP 面需验签。
+func newAuthedClient(url string) *client.FileClient {
+	return client.NewFileClient(url, client.WithAccessKey(e2eAK, e2eSK))
+}
+
+// signE2ERequest 给裸请求打上合法 SproxySig 头（空 body：body_sha256=sha256("")）。
+func signE2ERequest(r *http.Request) {
+	now := time.Now()
+	h := sproxysig.Header{
+		Version: sproxysig.Version, AK: e2eAK,
+		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      fmt.Sprintf("test-nonce-%d", now.UnixNano()),
+		BodySHA256: sproxysig.EmptyBodyHash(),
+	}
+	h.Sig = sproxysig.Sign(e2eSK, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
+	r.Header.Set("Authorization", sproxysig.Scheme+" v="+h.Version+" ak="+h.AK+
+		" ts="+strconv.FormatInt(h.TS, 10)+" exp="+strconv.FormatInt(h.Exp, 10)+
+		" nonce="+h.Nonce+" body_sha256="+h.BodySHA256+" sig="+h.Sig)
+}
 
 // startTestServer 启动一个完整 sproxy 测试服务（含 tunnel 路由），返回 URL 和清理函数。
 func startTestServer(t *testing.T) (string, string) {
@@ -32,7 +58,7 @@ func startTestServer(t *testing.T) (string, string) {
 
 	cfg := server.Default()
 	cfg.UploadsDir = tmpDir
-	cfg.TunnelKey = makeKey()
+	cfg.AccessKeys = []server.AccessKeyConfig{{Key: e2eAK, Secret: e2eSK, MeshID: "e2e"}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -40,14 +66,12 @@ func startTestServer(t *testing.T) (string, string) {
 	var cfgPtr atomic.Pointer[server.Config]
 	cfgPtr.Store(cfg)
 
-	key, _ := hex.DecodeString(cfg.TunnelKey)
 	mux := http.NewServeMux()
 	h := server.RegisterRoutes(t.Context(), server.RegisterRoutesOpts{
-		Mux:       mux,
-		CfgPtr:    &cfgPtr,
-		Version:   "v",
-		BuildAt:   "t",
-		TunnelKey: key,
+		Mux:     mux,
+		CfgPtr:  &cfgPtr,
+		Version: "v",
+		BuildAt: "t",
 	})
 	t.Cleanup(func() { _ = h.Close() })
 
@@ -72,7 +96,7 @@ func TestE2E_Direct_UploadStatRenameDownloadDelete(t *testing.T) {
 	sum := sha256.Sum256(payload)
 	wantCS := hex.EncodeToString(sum[:])
 
-	c := client.NewFileClient(url)
+	c := newAuthedClient(url)
 
 	// 1. upload
 	if _, err := c.Upload(t.Context(), srcPath, "data.bin"); err != nil {
@@ -128,7 +152,7 @@ func TestE2E_Tunnel_UploadDownload(t *testing.T) {
 	sum := sha256.Sum256(payload)
 	wantCS := hex.EncodeToString(sum[:])
 
-	c := client.NewFileClient(url, client.WithTunnel(makeKey()))
+	c := client.NewFileClient(url, client.WithTunnel("sk-e2e-0000000000000000", strings.Repeat("a", 64)))
 
 	if _, err := c.Upload(t.Context(), srcPath, "tunnel.txt"); err != nil {
 		t.Fatalf("Upload via tunnel: %v", err)
@@ -168,14 +192,15 @@ func TestE2E_RangeDownload(t *testing.T) {
 	if err := os.WriteFile(srcPath, payload, 0644); err != nil {
 		t.Fatal(err)
 	}
-	c := client.NewFileClient(url)
+	c := newAuthedClient(url)
 	if _, err := c.Upload(t.Context(), srcPath, "ranged.bin"); err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
 
-	// 自己发 Range 请求
+	// 自己发 Range 请求（服务端配置了 access_keys，需 SproxySig 签名）
 	req, _ := http.NewRequest("GET", url+"/download?filename=ranged.bin", nil)
 	req.Header.Set("Range", "bytes=10-19")
+	signE2ERequest(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Range request: %v", err)
@@ -220,7 +245,7 @@ func TestConcurrent_UploadDifferentFiles(t *testing.T) {
 				errCh <- err
 				return
 			}
-			c := client.NewFileClient(url)
+			c := newAuthedClient(url)
 			if _, err := c.Upload(t.Context(), srcPath, fmt.Sprintf("f%d.txt", n)); err != nil {
 				errCh <- err
 			}
@@ -251,7 +276,7 @@ func TestConcurrent_UploadSameFile(t *testing.T) {
 	successCount := int32(0)
 	for range 10 {
 		wg.Go(func() {
-			c := client.NewFileClient(url)
+			c := newAuthedClient(url)
 			if result, err := c.Upload(t.Context(), srcPath, "same.txt"); err == nil && result.Success {
 				atomic.AddInt32(&successCount, 1)
 			}
@@ -262,7 +287,7 @@ func TestConcurrent_UploadSameFile(t *testing.T) {
 	if successCount < 1 {
 		t.Fatal("at least one upload should succeed")
 	}
-	c := client.NewFileClient(url)
+	c := newAuthedClient(url)
 	outDir := t.TempDir()
 	outPath := filepath.Join(outDir, "same.txt")
 	if err := c.Download(t.Context(), "same.txt", outPath); err != nil {
@@ -285,7 +310,7 @@ func TestConcurrent_RenameAndDelete(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	c := client.NewFileClient(url)
+	c := newAuthedClient(url)
 	if _, err := c.Upload(t.Context(), srcPath, "target.txt"); err != nil {
 		t.Fatalf("upload: %v", err)
 	}

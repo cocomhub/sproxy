@@ -24,7 +24,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `uploads_dir` | string | `./uploads` | 文件存储根目录，自动创建 |
 | `max_upload_bytes` | int64 | `1073741824` (1 GiB) | 单次普通上传最大字节，超过 413。0 = 不限制 |
 | `tunnel_key` | string | (空) | 64 位 hex AES-256 密钥。留空时启动自动生成并回写到 YAML |
-| `auth_token` | string | (空) | Bearer 认证 token；留空 = 不认证。除 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 之外全路由生效 |
+| `access_keys` | []{key, secret, mesh_id?} | (空) | SproxySig 请求签名认证（每 mesh 一对 AK/SK）。配置后除 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 之外全路由验签；留空 = 不认证 |
 | `log_level` | string | `info` | `debug` / `info` / `warn` / `error` |
 | `log_format` | string | `text` | `text`（默认）或 `json` |
 | `max_header_bytes` | int | `1048576` (1 MiB) | HTTP 请求头大小上限 |
@@ -75,10 +75,9 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 
 - `log_level`
 - `log_format`
-- `auth_token`
 
 其他字段（`addr`、`uploads_dir`、`tunnel_key`、`rate_limit`、`server_timeouts`、
-`max_header_bytes`）需要**重启进程**。SIGHUP 时会打印警告说明哪些字段未生效。
+`max_header_bytes`、`access_keys`）需要**重启进程**。SIGHUP 时会打印警告说明哪些字段未生效。
 
 ## 客户端配置（sclient）
 
@@ -108,7 +107,8 @@ prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI 
 | `tunnel_key` | string | (空) | 64 位 hex；非空时通过 `POST /tunnel` 加密信道访问 |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 默认分块大小 |
 | `max_chunk_size` | int64 | `0` | 自适应分块上限；0 = fallback 到 64 MiB |
-| `auth_token` | string | (空) | Bearer 认证 token（如果服务端启用） |
+| `access_key` | string | (空) | SproxySig 认证 AccessKey（服务端配置了 `access_keys` 时需要） |
+| `access_key_secret` | string | (空) | SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线） |
 | `allow_transport_fallback` | bool | `false` | 允许隧道/xfer 初始化失败时回退直连 |
 | `hub_url` | string | (空) | mesh/relay/p2p 共用的 hub 地址（http(s) 或 ws(s)，可带 /ws 路径）。为空时各命令按自身语义回落（mesh→server_url，p2p→报错，relay→本地默认） |
 | `relay_token` | string | (空) | hub 中继注册 token（与 relay start --token / hub.relay_token 一致） |
@@ -144,7 +144,9 @@ addr: ":18083"
 uploads_dir: "/var/lib/sproxy/uploads"
 max_upload_bytes: 5368709120     # 5 GiB
 tunnel_key: "<64 位 hex>"
-auth_token: "your-secret-token"
+access_keys:
+  - key: "sk-meshA-3f8a..."
+    secret: "0123...（64 hex）"
 
 server_timeouts:
   read_header: "5s"
@@ -165,7 +167,8 @@ rate_limit:
 # ~/.config/sproxy/sclient.yaml
 server_url: "https://proxy.example.com"
 tunnel_key: "<与服务端相同的 64 位 hex>"
-auth_token: "your-secret-token"
+access_key: "sk-meshA-3f8a..."
+access_key_secret: "0123...（64 hex，与服务端 access_keys 中 secret 一致）"
 check_checksum: true
 chunk_size: 8388608    # 8 MiB
 ```

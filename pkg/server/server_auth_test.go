@@ -5,11 +5,68 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
+
+// testAccessKey / testAccessSecret 是 SproxySig 测试密钥对。
+const (
+	testAccessKey    = "sk-test-mesh-aabbcc"
+	testAccessSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
+
+// formatSigAuth 把 Header 序列化为 Authorization 头。
+func formatSigAuth(h sproxysig.Header) string {
+	return sproxysig.Scheme + " v=" + h.Version + " ak=" + h.AK +
+		" ts=" + strconv.FormatInt(h.TS, 10) + " exp=" + strconv.FormatInt(h.Exp, 10) +
+		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
+}
+
+// signRequest 用给定 AK/SK 给请求打上合法 SproxySig 头（无 body）。
+func signRequest(r *http.Request, ak, sk string) {
+	now := time.Now()
+	h := sproxysig.Header{
+		Version: sproxysig.Version, AK: ak,
+		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      fmt.Sprintf("test-nonce-%d", now.UnixNano()),
+		BodySHA256: sproxysig.EmptyBodyHash(),
+	}
+	h.Sig = sproxysig.Sign(sk, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
+	r.Header.Set("Authorization", formatSigAuth(h))
+}
+
+// signTunnelRequest 给隧道外层请求打 UNSIGNED 签名头（流式加密 body 无法整体哈希，
+// 与 pkg/client.sigRoundTripper 一致）。服务端 authMiddleware 验签后派生隧道密钥。
+func signTunnelRequest(r *http.Request, ak, sk string) {
+	now := time.Now()
+	h := sproxysig.Header{
+		Version: sproxysig.Version, AK: ak,
+		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      fmt.Sprintf("test-nonce-%d", now.UnixNano()),
+		BodySHA256: sproxysig.UnsignedBody,
+	}
+	h.Sig = sproxysig.Sign(sk, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
+	r.Header.Set("Authorization", formatSigAuth(h))
+}
+
+// tunnelSignTransport 给每个 /tunnel 外层请求注入 UNSIGNED SproxySig 签名头，
+// 模拟 pkg/client.sigRoundTripper 的行为（本 SDK 无 http.RoundTripperFunc）。
+type tunnelSignTransport struct {
+	base   http.RoundTripper
+	ak, sk string
+}
+
+func (t *tunnelSignTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	signTunnelRequest(req, t.ak, t.sk)
+	return t.base.RoundTrip(req)
+}
 
 func TestPermissionAllowed(t *testing.T) {
 	t.Parallel()
@@ -67,12 +124,12 @@ func TestAuthMiddleware_NoAuthConfigured(t *testing.T) {
 	}
 }
 
-func TestAuthMiddleware_AuthTokenMissing(t *testing.T) {
+func TestAuthMiddleware_SproxySigMissing(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AuthToken: "secret"})
-	h := &Handlers{cfgPtr: cfgPtr}
+	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
 	called := false
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
@@ -87,16 +144,16 @@ func TestAuthMiddleware_AuthTokenMissing(t *testing.T) {
 		t.Errorf("expected 401, got %d", w.Code)
 	}
 	if called {
-		t.Error("authMiddleware should block request when no token provided")
+		t.Error("authMiddleware should block request when no SproxySig provided")
 	}
 }
 
-func TestAuthMiddleware_AuthTokenValid(t *testing.T) {
+func TestAuthMiddleware_SproxySigValid(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AuthToken: "valid"})
-	h := &Handlers{cfgPtr: cfgPtr}
+	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
 	called := false
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -105,7 +162,7 @@ func TestAuthMiddleware_AuthTokenValid(t *testing.T) {
 	handler := h.authMiddleware(inner)
 
 	r := httptest.NewRequest("GET", "/upload", nil)
-	r.Header.Set("Authorization", "Bearer valid")
+	signRequest(r, testAccessKey, testAccessSecret)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -113,24 +170,25 @@ func TestAuthMiddleware_AuthTokenValid(t *testing.T) {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
 	if !called {
-		t.Error("authMiddleware blocked request with valid token")
+		t.Error("authMiddleware blocked request with valid SproxySig")
 	}
 }
 
-func TestAuthMiddleware_AuthTokenMismatch(t *testing.T) {
+func TestAuthMiddleware_SproxySigBadSignature(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AuthToken: "secret"})
-	h := &Handlers{cfgPtr: cfgPtr}
+	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
 	called := false
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
 	})
 	handler := h.authMiddleware(inner)
 
+	// 用错误的 SK 签名 → 401。
 	r := httptest.NewRequest("GET", "/upload", nil)
-	r.Header.Set("Authorization", "Bearer wrong")
+	signRequest(r, testAccessKey, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -138,7 +196,33 @@ func TestAuthMiddleware_AuthTokenMismatch(t *testing.T) {
 		t.Errorf("expected 401, got %d", w.Code)
 	}
 	if called {
-		t.Error("authMiddleware should block request with wrong token")
+		t.Error("authMiddleware should block request with bad signature")
+	}
+}
+
+func TestAuthMiddleware_SproxySigUnknownKey(t *testing.T) {
+	t.Parallel()
+
+	cfgPtr := &atomic.Pointer[Config]{}
+	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	called := false
+	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+	handler := h.authMiddleware(inner)
+
+	// 未配置的 AK → 401。
+	r := httptest.NewRequest("GET", "/upload", nil)
+	signRequest(r, "sk-unknown", testAccessSecret)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", w.Code)
+	}
+	if called {
+		t.Error("authMiddleware should block request with unknown AccessKey")
 	}
 }
 

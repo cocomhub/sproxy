@@ -4,9 +4,7 @@
 package main
 
 import (
-	"bytes"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -82,55 +80,7 @@ func TestInitLogger_Boundaries(t *testing.T) {
 	}
 }
 
-// ---- resolveTunnelKey 边界测试 ----
-
-func TestResolveTunnelKey_Valid(t *testing.T) {
-	validKey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	cfg := &server.Config{TunnelKey: validKey}
-	key, err := resolveTunnelKey(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(key) != 32 {
-		t.Errorf("expected 32 bytes, got %d", len(key))
-	}
-}
-
-func TestResolveTunnelKey_InvalidLength(t *testing.T) {
-	cfg := &server.Config{TunnelKey: "short"}
-	_, err := resolveTunnelKey(cfg)
-	if err == nil {
-		t.Error("expected error for short tunnel key")
-	}
-}
-
-func TestResolveTunnelKey_NonHex(t *testing.T) {
-	cfg := &server.Config{TunnelKey: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}
-	_, err := resolveTunnelKey(cfg)
-	if err == nil {
-		t.Error("expected error for non-hex tunnel key")
-	}
-}
-
-// TestResolveTunnelKey_EmptyAutoGenFail 测试空密钥 + cfgFile 不可写时的错误路径
-// 与 root_extra_test.go 中 TestResolveTunnelKey_SaveError 类似但使用空路径场景
-func TestResolveTunnelKey_EmptyAutoGenFail(t *testing.T) {
-	// 保存并恢复全局 cfgFile
-	oldCfgFile := cfgFile
-	t.Cleanup(func() { cfgFile = oldCfgFile })
-
-	cfgFile = filepath.Join(t.TempDir(), "nonexistent", "sproxy.yaml")
-	cfg := &server.Config{TunnelKey: ""}
-	_, err := resolveTunnelKey(cfg)
-	if err == nil {
-		t.Fatal("expected error when auto-generate fails due to non-writable path")
-	}
-	t.Logf("got expected error: %v", err)
-}
-
-// ---- runServer 边界测试 ----
-// TestRunServer_VersionFlag 确保 --version 正确输出
-
+// ---- resolveTunnelKey 边界测试（已废除）----
 func TestRunServer_VersionFlag(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("version", false, "")
@@ -164,6 +114,7 @@ func TestRunServer_SignalShutdown(t *testing.T) {
 	cmd.Flags().Bool("version", false, "")
 	cmd.Flags().Bool("no-tls", false, "")
 	_ = cmd.Flags().Set("no-tls", "true")
+	setupRunServerAuthConfig(t, cmd)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -211,6 +162,7 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
 	cmd.Flags().Bool("no-tls", false, "")
 	_ = cmd.Flags().Set("no-tls", "true")
+	setupRunServerAuthConfig(t, cmd)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -238,7 +190,7 @@ func TestRunServer_SignalGoroutineLeak(t *testing.T) {
 	}
 }
 
-// ---- buildServerConfig 测试 ----
+// ---- 构建配置（无 tunnel_key 引用）测试 ----
 
 func TestBuildServerConfig_NoTLSFlag(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -250,13 +202,11 @@ func TestBuildServerConfig_NoTLSFlag(t *testing.T) {
 	cmd.Flags().Bool("no-tls", false, "")
 	cmd.Flags().String("addr", ":18083", "")
 	cmd.Flags().String("uploads-dir", tmpDir, "")
-	cmd.Flags().String("tunnel-key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "")
 	_ = cmd.Flags().Set("no-tls", "true")
 
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
 	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
-	cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
 	t.Cleanup(func() { cfgProvider = nil })
 
 	cfg, err := buildServerConfig(cmd)
@@ -278,13 +228,11 @@ func TestBuildServerConfig_NoTLSFlagDefaults(t *testing.T) {
 	cmd.Flags().Bool("no-tls", false, "")
 	cmd.Flags().String("addr", ":18083", "")
 	cmd.Flags().String("uploads-dir", tmpDir, "")
-	cmd.Flags().String("tunnel-key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "")
 	// 不设置 --no-tls，验证 TLS 默认启用
 
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
 	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
-	cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
 	t.Cleanup(func() { cfgProvider = nil })
 
 	cfg, err := buildServerConfig(cmd)
@@ -296,66 +244,86 @@ func TestBuildServerConfig_NoTLSFlagDefaults(t *testing.T) {
 	}
 }
 
-// ---- 无认证警告测试 ----
+// ---- 认证 fail-fast 测试 ----
 
-func TestRunServer_AuthWarning(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping auth warning test in short mode")
-	}
+// TestRunServer_RejectsStartupWithoutAuth 验证 fail-fast：无 access_keys 且 api_keys
+// 未启用时，runServer 直接返回错误拒绝启动（认证驱动隧道要求）。
+func TestRunServer_RejectsStartupWithoutAuth(t *testing.T) {
+	cfgPtr.Store(nil)
+	cfgProvider = nil
 
-	sigCh := make(chan os.Signal, 1)
-	testSignalCh = sigCh
-	t.Cleanup(func() { testSignalCh = nil })
+	oldCfgFile := cfgFile
+	cfgFile = filepath.Join(t.TempDir(), "sproxy.yaml")
+	t.Cleanup(func() { cfgFile = oldCfgFile })
 
-	tmpDir := t.TempDir()
 	cmd := &cobra.Command{}
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
 	cmd.Flags().Bool("version", false, "")
-	cmd.Flags().String("uploads-dir", tmpDir, "")
-	cmd.Flags().String("tunnel-key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "")
-
-	oldCfgFile := cfgFile
-	cfgFile = filepath.Join(tmpDir, "sproxy.yaml")
-	t.Cleanup(func() { cfgFile = oldCfgFile })
+	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cmd.Flags().Bool("no-tls", false, "")
+	_ = cmd.Flags().Set("no-tls", "true")
 
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
 	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
-	cfgProvider.BindPFlag("tunnel_key", cmd.Flags().Lookup("tunnel-key"))
-	cfgProvider.Set("tls.enabled", false)
 	t.Cleanup(func() { cfgProvider = nil })
 
-	// 捕获 stderr
-	var stderrBuf bytes.Buffer
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-	t.Cleanup(func() { os.Stderr = oldStderr })
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- runServer(cmd, nil)
-	}()
-
-	waitForConfig(t, 5*time.Second)
-	sigCh <- syscall.SIGTERM
-
-	select {
-	case <-errCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("server did not shut down within 5s")
+	err := runServer(cmd, nil)
+	if err == nil {
+		t.Fatal("runServer without access_keys should fail fast")
 	}
-
-	w.Close()
-	stderrData, _ := io.ReadAll(r)
-	stderrBuf.Write(stderrData)
-
-	if !strings.Contains(stderrBuf.String(), "WARNING") {
-		t.Error("expected auth warning containing 'WARNING' on stderr when AuthToken empty and APIKeys disabled")
+	if !strings.Contains(err.Error(), "拒绝启动") {
+		t.Errorf("expected fail-fast error containing '拒绝启动', got: %v", err)
 	}
-	if !strings.Contains(stderrBuf.String(), "unprotected") {
-		t.Error("expected 'unprotected' in auth warning output")
+}
+
+// TestRunServer_HubEnabledRequiresAccessKeys 验证 M-8：api_keys-only（多用户 Bearer）
+// 下 hub 注册不可用——启用 hub 时强制要求 access_keys 非空（隧道密钥与 hub 准入都来自 access_keys）。
+func TestRunServer_HubEnabledRequiresAccessKeys(t *testing.T) {
+	cfgPtr.Store(nil)
+	cfgProvider = nil
+
+	oldCfgFile := cfgFile
+	cfgFile = filepath.Join(t.TempDir(), "sproxy.yaml")
+	t.Cleanup(func() { cfgFile = oldCfgFile })
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("addr", "127.0.0.1:0", "")
+	cmd.Flags().Bool("version", false, "")
+	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cmd.Flags().Bool("no-tls", false, "")
+	_ = cmd.Flags().Set("no-tls", "true")
+
+	cfgProvider = sproxycfg.New(cfgFile)
+	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.Set("api_keys", map[string]any{"enabled": true, "keys": []map[string]any{{"key": "t1", "permission": "write"}}})
+	cfgProvider.Set("hub", map[string]any{"enabled": true})
+	t.Cleanup(func() { cfgProvider = nil })
+
+	err := runServer(cmd, nil)
+	if err == nil {
+		t.Fatal("hub.enabled without access_keys should fail fast")
 	}
+	if !strings.Contains(err.Error(), "hub.enabled=true") {
+		t.Errorf("expected hub access_keys error, got: %v", err)
+	}
+}
+
+// setupRunServerAuthConfig 为 runServer 测试配置 access_keys（认证驱动启动必需）
+// 与 uploads_dir，使服务器能通过 fail-fast 检查正常启动。
+func setupRunServerAuthConfig(t *testing.T, cmd *cobra.Command) {
+	t.Helper()
+	oldCfgFile := cfgFile
+	cfgFile = filepath.Join(t.TempDir(), "sproxy.yaml")
+	t.Cleanup(func() { cfgFile = oldCfgFile })
+
+	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cfgProvider = sproxycfg.New(cfgFile)
+	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.Set("access_keys", []map[string]any{{"key": "sk-test-0000000000000000", "secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mesh_id": "test"}})
+	t.Cleanup(func() { cfgProvider = nil })
 }
 
 // ---- 测试辅助函数 ----

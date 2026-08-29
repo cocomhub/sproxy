@@ -124,7 +124,7 @@ func TestMeshTargetRefresher_SingleFlight(t *testing.T) {
 	}
 }
 
-func TestMeshSignalAndRelayToken(t *testing.T) {
+func TestMeshSignalToken(t *testing.T) {
 	if got := MeshSignalToken("flag", "cfg"); got != "flag" {
 		t.Fatalf("MeshSignalToken flag 优先, got %q", got)
 	}
@@ -133,22 +133,6 @@ func TestMeshSignalAndRelayToken(t *testing.T) {
 	}
 	if got := MeshSignalToken("", ""); got != "" {
 		t.Fatalf("MeshSignalToken 全空应空串, got %q", got)
-	}
-	if got := MeshRelayToken("", "", "t", "a"); got != "t" {
-		t.Fatalf("MeshRelayToken flag token 回落, got %q", got)
-	}
-	if got := MeshRelayToken("", "c", "t", "a"); got != "c" {
-		t.Fatalf("MeshRelayToken 配置 relay 优先, got %q", got)
-	}
-	// D5：回落链边界——显式 --relay-token 优先于配置；auth_token 兜底；全空→空串。
-	if got := MeshRelayToken("explicit", "cfg-relay", "flag-token", "auth"); got != "explicit" {
-		t.Fatalf("MeshRelayToken 显式 relay 优先, got %q", got)
-	}
-	if got := MeshRelayToken("", "", "", "auth"); got != "auth" {
-		t.Fatalf("MeshRelayToken auth 兜底, got %q", got)
-	}
-	if got := MeshRelayToken("", "", "", ""); got != "" {
-		t.Fatalf("MeshRelayToken 全空应空串, got %q", got)
 	}
 }
 

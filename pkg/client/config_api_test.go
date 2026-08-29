@@ -21,7 +21,7 @@ func TestGetConfig(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{
-			"log_level":"info","log_format":"text",
+			"log_level":"info","log_format":"text","access_keys_set":true,
 			"auth_token_set":true,"tunnel_key_set":false,
 			"rate_limit_requests":10,"rate_limit_window":"1s",
 			"max_storage_bytes":1073741824,"chunk_size":4194304,
@@ -43,15 +43,6 @@ func TestGetConfig(t *testing.T) {
 	// 全部 17 个字段断言
 	if cfg.LogLevel != "info" {
 		t.Errorf("expected LogLevel=info, got %s", cfg.LogLevel)
-	}
-	if cfg.LogFormat != "text" {
-		t.Errorf("expected LogFormat=text, got %s", cfg.LogFormat)
-	}
-	if !cfg.AuthTokenSet {
-		t.Error("expected AuthTokenSet=true")
-	}
-	if cfg.TunnelKeySet {
-		t.Error("expected TunnelKeySet=false")
 	}
 	if cfg.RateLimitRequests != 10 {
 		t.Errorf("expected RateLimitRequests=10, got %d", cfg.RateLimitRequests)

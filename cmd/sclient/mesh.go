@@ -74,8 +74,6 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			listenAddr, _ := cmd.Flags().GetString("listen")
 			useWebRTC, _ := cmd.Flags().GetBool("webrtc")
 			hubURL, _ := cmd.Flags().GetString("hub")
-			token, _ := cmd.Flags().GetString("token")
-			relayToken, _ := cmd.Flags().GetString("relay-token")
 			nodeID, _ := cmd.Flags().GetString("node-id")
 			gatewayAddr, _ := cmd.Flags().GetString("gateway")
 			insecure, _ := cmd.Flags().GetBool("insecure")
@@ -88,13 +86,11 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			if err != nil {
 				return err
 			}
-			// P2-配置3：通用 mesh 参数配置回落——--hub/--relay-token/--node-id 未显式
-			// 指定时取配置 hub_url/relay_token/node_id（优先级：CLI > 配置文件 > 默认）。
+			// P2-配置3：通用 mesh 参数配置回落——--hub/--node-id 未显式指定时取配置
+			// hub_url/node_id；hub 注册准入用 SproxySig AccessKey/SK（svc.AccessKey()
+			// /AccessKeySecret() 已含 config + flag 覆盖），不需要额外 relay token。
 			if hubURL == "" {
 				hubURL = svc.MeshHubURL()
-			}
-			if relayToken == "" {
-				relayToken = svc.RelayToken()
 			}
 			if nodeID == "" {
 				nodeID = svc.NodeID()
@@ -116,14 +112,14 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 					nodeID = iostream.LocalHostname("mesh-node")
 				}
 				r, regErr := mesh.AutoRegister(cmd.Context(), mesh.AutoRegisterParams{
-					HubURL:      hubURL,
-					ServerURL:   svc.ServerURL(),
-					RelayToken:  client.MeshRelayToken(relayToken, svc.RelayToken(), token, svc.AuthToken()),
-					SignalToken: client.MeshSignalToken(token, svc.AuthToken()),
-					NodeID:      nodeID,
-					Prefix:      "mesh",
-					ExactNode:   false,
-					Insecure:    insecure,
+					HubURL:          hubURL,
+					ServerURL:       svc.ServerURL(),
+					AccessKey:       svc.AccessKey(),
+					AccessKeySecret: svc.AccessKeySecret(),
+					NodeID:          nodeID,
+					Prefix:          "mesh",
+					ExactNode:       false,
+					Insecure:        insecure,
 				})
 				if regErr != nil {
 					// 注册失败不静默：warn + 回落中继（relay 路径只认 auth_token，
@@ -146,7 +142,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			// 网关认证 token 复用信令 token（auth_token），与 mesh node 网关一致。
 			dial := meshDialFunc(mesh.Dial)
 			if gatewayAddr != "" {
-				dial = meshGatewayDial(gatewayAddr, client.MeshSignalToken(token, svc.AuthToken()), ios)
+				dial = meshGatewayDial(gatewayAddr, svc.AccessKeySecret(), ios)
 			}
 
 			if listenAddr != "" {
@@ -158,8 +154,6 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 	cmd.Flags().StringP("listen", "l", "", "本地监听地址（如 127.0.0.1:2222；裸 :2222 归一为 127.0.0.1:2222）；留空为单次 stdin/stdout 模式")
 	cmd.Flags().Bool("webrtc", true, "优先 webrtc 打洞直连，失败回落 hub 中继")
 	cmd.Flags().String("hub", "", "hub 地址（http(s) 或 ws(s) 均可；默认取 server_url）")
-	cmd.Flags().String("token", "", "信令 Bearer token（默认复用 --auth-token / 配置 auth_token）")
-	cmd.Flags().String("relay-token", "", "hub 的 relay_token（自动注册用；与 relay start --token 一致；默认复用 --token / auth_token）")
 	cmd.Flags().String("node-id", "", "本节点 ID（信令来源；默认主机名）")
 	cmd.Flags().String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port；本地节点无到目标的已建链路时回落常规拨号）")
 	cmd.Flags().StringSlice("stun", nil,
@@ -181,7 +175,7 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 				if err != nil {
 					return err
 				}
-				st, err := mesh.QueryGatewayStatus(cmd.Context(), gatewayAddr, client.MeshSignalToken("", svc.AuthToken()))
+				st, err := mesh.QueryGatewayStatus(cmd.Context(), gatewayAddr, svc.AccessKeySecret())
 				if err != nil {
 					return err
 				}

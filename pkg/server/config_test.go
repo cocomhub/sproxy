@@ -75,46 +75,6 @@ func TestConfig_Validate_FillsZeroes(t *testing.T) {
 	}
 }
 
-func TestConfig_Validate_TunnelKey_HexCheck(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name    string
-		key     string
-		wantErr bool
-	}{
-		{"empty_ok_tls_enabled", "", false},
-		{"valid_64hex", strings.Repeat("a", 64), false},
-		{"too_short", strings.Repeat("a", 32), true},
-		{"too_long", strings.Repeat("a", 65), true},
-		{"non_hex", strings.Repeat("z", 64), true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := Default()
-			cfg.TunnelKey = c.key
-			err := cfg.Validate()
-			if c.wantErr && err == nil {
-				t.Fatalf("expected error for %q", c.key)
-			}
-			if !c.wantErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-		})
-	}
-}
-
-func TestConfig_Validate_EmptyTunnelKeyNoTLS(t *testing.T) {
-	t.Parallel()
-	cfg := Default()
-	cfg.TunnelKey = ""
-	cfg.TLS.Enabled = false
-	err := cfg.Validate()
-	if err == nil {
-		t.Fatal("expected error for empty tunnel_key with TLS disabled, got nil")
-	}
-}
-
 func TestConfig_Defaults_HubMaxConnections(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
@@ -131,27 +91,22 @@ func TestConfig_Defaults_HubMaxConnections(t *testing.T) {
 	}
 }
 
-func TestConfig_Validate_HubEnabledRequiresRelayToken(t *testing.T) {
+func TestConfig_Validate_HubEnabledNoTokenRequired(t *testing.T) {
 	t.Parallel()
-	// hub.enabled=true 且 relay_token 为空 → 校验失败（C2 主修复）
+	// hub.enabled=true 不再要求任何 hub 级 token（准入改由顶层 access_keys 提供，
+	// SproxySig AccessKey + HMAC proof）；仅需 ws transport 即可通过校验（S42）。
 	cfg := Default()
 	cfg.Hub.Enabled = true
-	cfg.Hub.RelayToken = ""
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when hub.enabled=true but relay_token empty")
-	}
-	// 配了 token 后应通过（需同时启用 ws transport，S42）
-	cfg.Hub.RelayToken = "secret"
 	cfg.Hub.Transports.WS.Enabled = true
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("unexpected error with relay_token set: %v", err)
+		t.Fatalf("hub.enabled=true 且 ws 传输开启应通过校验（无需 token）: %v", err)
 	}
-	// hub 未启用（默认）时不受影响
+	// hub 未启用时不受 ws 开关影响。
 	cfg2 := Default()
 	cfg2.Hub.Enabled = false
-	cfg2.Hub.RelayToken = ""
+	cfg2.Hub.Transports.WS.Enabled = false
 	if err := cfg2.Validate(); err != nil {
-		t.Fatalf("hub disabled should not require relay_token: %v", err)
+		t.Fatalf("hub disabled should not require ws transport: %v", err)
 	}
 }
 
@@ -161,7 +116,6 @@ func TestConfig_Validate_HubEnabledRequiresTransport(t *testing.T) {
 	// WS 是当前唯一节点接入传输，hub 启用而无 transport 时节点无法连接）。
 	cfg := Default()
 	cfg.Hub.Enabled = true
-	cfg.Hub.RelayToken = "secret"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error when hub.enabled=true but transports.ws.enabled=false")
 	}
@@ -330,4 +284,66 @@ func TestConfig_YAMLTagsMatchMapstructure(t *testing.T) {
 		}
 	}
 	check(reflect.TypeFor[Config]())
+}
+
+// TestConfig_Validate_AccessKeys 覆盖 access_keys 校验（I-1/I-2）：
+// Secret 长度/hex、Key 唯一、mesh_id 与 AK 内嵌 mesh 一致性。
+func TestConfig_Validate_AccessKeys(t *testing.T) {
+	validSecret := strings.Repeat("a", 64)
+
+	// 合法：单 AK，无 mesh_id（默认空），Secret 64 hex。
+	ok := Default()
+	ok.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: validSecret}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("合法 access_keys 应通过: %v", err)
+	}
+
+	// Secret 非 64 hex。
+	short := Default()
+	short.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: "short"}}
+	if err := short.Validate(); err == nil {
+		t.Fatal("Secret 非 64 hex 应报错")
+	}
+
+	// Secret 非 hex。
+	nonhex := Default()
+	nonhex.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: strings.Repeat("g", 64)}}
+	if err := nonhex.Validate(); err == nil {
+		t.Fatal("Secret 非 hex 应报错")
+	}
+
+	// Key 空。
+	emptyKey := Default()
+	emptyKey.AccessKeys = []AccessKeyConfig{{Key: "", Secret: validSecret}}
+	if err := emptyKey.Validate(); err == nil {
+		t.Fatal("空 Key 应报错")
+	}
+
+	// Key 重复。
+	dup := Default()
+	dup.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: validSecret}, {Key: "sk-prod-1234567890abcdef", Secret: strings.Repeat("b", 64)}}
+	if err := dup.Validate(); err == nil {
+		t.Fatal("重复 Key 应报错")
+	}
+
+	// mesh_id 与 AK 内嵌 mesh 不一致。
+	meshMismatch := Default()
+	meshMismatch.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: validSecret, MeshID: "other"}}
+	if err := meshMismatch.Validate(); err == nil {
+		t.Fatal("mesh_id 与 AK 内嵌 mesh 不一致应报错")
+	}
+
+	// mesh_id 与 AK 内嵌 mesh 一致。
+	meshOK := Default()
+	meshOK.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: validSecret, MeshID: "prod"}}
+	if err := meshOK.Validate(); err != nil {
+		t.Fatalf("mesh_id 一致应通过: %v", err)
+	}
+
+	// AK 非 sk- 格式时 mesh_id 显式提供不校验一致性。
+	nonSK := Default()
+	nonSK.AccessKeys = []AccessKeyConfig{{Key: "legacy-key", Secret: validSecret, MeshID: "custom"}}
+	if err := nonSK.Validate(); err != nil {
+		t.Fatalf("非 sk- AK + 显式 mesh_id 应通过: %v", err)
+	}
 }
