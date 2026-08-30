@@ -15,14 +15,22 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
 // LocalFS 基于 os 实现 FS（Windows 兼容）。
 // Root 为本地基准目录；所有 relPath 均为正斜杠相对路径。
+//
+// 安全边界（审查 MEDIUM：symlink 逃逸）：所有文件操作经 confine() 解析真实路径，
+// 要求解析结果（含中间父目录符号链接）仍落在 Root 的规范路径内，否则拒绝。
+// 文本 `..` 过滤只是第一道防线；符号链接逃逸由 EvalSymlinks + 前缀校验阻断。
 type LocalFS struct {
 	Root   string
 	Logger *slog.Logger
+
+	rootOnce sync.Once
+	rootReal string // Root 的规范路径（EvalSymlinks 解析，失败回落 Abs）
 }
 
 // NewLocalFS 创建 LocalFS。
@@ -30,9 +38,69 @@ func NewLocalFS(root string, logger *slog.Logger) *LocalFS {
 	return &LocalFS{Root: root, Logger: logger}
 }
 
-// abs 将安全清理后的相对路径映射为根目录下的绝对路径。
-func (l *LocalFS) abs(clean string) string {
-	return filepath.Join(l.Root, filepath.FromSlash(clean))
+// rootRealPath 返回 Root 的规范路径（解析符号链接），进程内缓存一次。
+// Root 不存在时回落 Abs(Root)（WriteFile/MakeDir 会先创建）；仍失败回退原值。
+func (l *LocalFS) rootRealPath() string {
+	l.rootOnce.Do(func() {
+		r, err := filepath.EvalSymlinks(l.Root)
+		if err != nil {
+			if a, aerr := filepath.Abs(l.Root); aerr == nil {
+				r = a
+			} else {
+				r = l.Root
+			}
+		}
+		l.rootReal = r
+	})
+	return l.rootReal
+}
+
+// within 报告 p 是否等于 root 或位于 root 目录内（前缀 + 分隔符，避免 /a/b 与 /a/bb 误判）。
+func within(root, p string) bool {
+	if p == root {
+		return true
+	}
+	return strings.HasPrefix(p, root+string(os.PathSeparator))
+}
+
+// confine 把已 sanitize 的相对路径（clean）映射为 Root 内安全绝对路径，拒绝符号链接逃逸。
+//
+// 防线（对齐 pkg/server.joinSafePath，审查 MEDIUM 闭环）：
+//  1. 拼接 Root 规范路径 + clean；
+//  2. EvalSymlinks 解析目标：目标存在（含中间父目录符号链接）且解析结果落在 Root 内
+//     → 返回解析后的真实路径；解析结果在 Root 外 → 拒绝；
+//  3. 目标不存在（如写入/重命名前）→ 逐级向上解析已存在父目录，任一级符号链接指向
+//     Root 外 → 拒绝；
+//  4. 文本 `..` 已由 sanitizeRelPath 拦截（纵深防御）。
+func (l *LocalFS) confine(clean string) (string, error) {
+	rootReal := l.rootRealPath()
+	full := filepath.Join(rootReal, filepath.FromSlash(clean))
+	if !within(rootReal, full) {
+		return "", fmt.Errorf("路径越界根目录: %s", clean)
+	}
+	resolved, err := filepath.EvalSymlinks(full)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		// 目标不存在：逐级向上解析已存在的父目录，校验符号链接不越界。
+		dir := full
+		for dir != rootReal && dir != filepath.Dir(dir) {
+			dir = filepath.Dir(dir)
+			if r, e := filepath.EvalSymlinks(dir); e == nil {
+				if !within(rootReal, r) {
+					return "", fmt.Errorf("父目录符号链接指向根目录外: %s", clean)
+				}
+				rel, _ := filepath.Rel(dir, full)
+				return filepath.Join(r, rel), nil
+			}
+		}
+		return full, nil
+	}
+	if !within(rootReal, resolved) {
+		return "", fmt.Errorf("路径符号链接指向根目录外: %s", clean)
+	}
+	return resolved, nil
 }
 
 // sanitizeRelPath 校验并规范化 relPath：
@@ -86,7 +154,10 @@ func (l *LocalFS) ListDir(ctx context.Context, relPath string) ([]Entry, error) 
 	if err != nil {
 		return nil, err
 	}
-	full := l.abs(clean)
+	full, cerr := l.confine(clean)
+	if cerr != nil {
+		return nil, cerr
+	}
 	dirEntries, err := os.ReadDir(full)
 	if err != nil {
 		return nil, err
@@ -129,7 +200,10 @@ func (l *LocalFS) Stat(ctx context.Context, relPath string) (*Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	full := l.abs(clean)
+	full, cerr := l.confine(clean)
+	if cerr != nil {
+		return nil, cerr
+	}
 	info, err := os.Stat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -188,7 +262,10 @@ func copyWithCtx(ctx context.Context, dst io.Writer, src io.Reader) (int64, erro
 
 // computeChecksum 流式计算文件 SHA-256（受 ctx 取消约束）。
 func (l *LocalFS) computeChecksum(ctx context.Context, rel string) (string, error) {
-	full := l.abs(rel)
+	full, err := l.confine(rel)
+	if err != nil {
+		return "", err
+	}
 	f, err := os.Open(full)
 	if err != nil {
 		return "", err
@@ -201,7 +278,7 @@ func (l *LocalFS) computeChecksum(ctx context.Context, rel string) (string, erro
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// OpenRead 打开文件读取流（跟随符号链接）。
+// OpenRead 打开文件读取流（跟随符号链接，但须落在 Root 内）。
 func (l *LocalFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -210,7 +287,11 @@ func (l *LocalFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, 
 	if err != nil {
 		return nil, err
 	}
-	return os.Open(l.abs(clean))
+	full, cerr := l.confine(clean)
+	if cerr != nil {
+		return nil, cerr
+	}
+	return os.Open(full)
 }
 
 // WriteFile 写入文件，自动创建父目录并保留 mtime。大文件拷贝受 ctx 取消约束
@@ -223,7 +304,10 @@ func (l *LocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, si
 	if err != nil {
 		return err
 	}
-	full := l.abs(clean)
+	full, cerr := l.confine(clean)
+	if cerr != nil {
+		return cerr
+	}
 	if dir := filepath.Dir(full); dir != "" {
 		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
 			return mkErr
@@ -249,7 +333,7 @@ func (l *LocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, si
 	return nil
 }
 
-// Rename 重命名/移动文件。
+// Rename 重命名/移动文件/目录（from/to 均须落在 Root 内，防符号链接逃逸）。
 func (l *LocalFS) Rename(ctx context.Context, from, to string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -262,10 +346,18 @@ func (l *LocalFS) Rename(ctx context.Context, from, to string) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(l.abs(fromClean), l.abs(toClean))
+	fromFull, ferr := l.confine(fromClean)
+	if ferr != nil {
+		return ferr
+	}
+	toFull, terr := l.confine(toClean)
+	if terr != nil {
+		return terr
+	}
+	return os.Rename(fromFull, toFull)
 }
 
-// Delete 删除文件。
+// Delete 删除文件（须落在 Root 内，防符号链接逃逸）。
 func (l *LocalFS) Delete(ctx context.Context, relPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -274,10 +366,14 @@ func (l *LocalFS) Delete(ctx context.Context, relPath string) error {
 	if err != nil {
 		return err
 	}
-	return os.Remove(l.abs(clean))
+	full, cerr := l.confine(clean)
+	if cerr != nil {
+		return cerr
+	}
+	return os.Remove(full)
 }
 
-// MakeDir 创建目录（含父目录）。
+// MakeDir 创建目录（含父目录；父目录链符号链接越界被 confine 拒绝）。
 func (l *LocalFS) MakeDir(ctx context.Context, relPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -286,5 +382,9 @@ func (l *LocalFS) MakeDir(ctx context.Context, relPath string) error {
 	if err != nil {
 		return err
 	}
-	return os.MkdirAll(l.abs(clean), 0o755)
+	full, cerr := l.confine(clean)
+	if cerr != nil {
+		return cerr
+	}
+	return os.MkdirAll(full, 0o755)
 }

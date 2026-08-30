@@ -367,3 +367,73 @@ func TestLocalFS_CtxCancelled(t *testing.T) {
 		}
 	}
 }
+
+// TestLocalFS_SymlinkEscape 验证 Root 内符号链接指向外部时文件操作被拒绝
+// （审查 MEDIUM：symlink 逃逸 / root confinement 闭环）。
+func TestLocalFS_SymlinkEscape(t *testing.T) {
+	outDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outDir, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Symlink(outDir, filepath.Join(root, "escape")); err != nil {
+		t.Skipf("当前环境无法创建符号链接: %v", err)
+	}
+	l := NewLocalFS(root, nil)
+	ctx := context.Background()
+
+	// 读逃逸
+	if _, err := l.Stat(ctx, "escape/secret.txt"); err == nil {
+		t.Fatalf("Stat 逃逸应被拒绝")
+	}
+	if _, err := l.OpenRead(ctx, "escape/secret.txt"); err == nil {
+		t.Fatalf("OpenRead 逃逸应被拒绝")
+	}
+	if _, err := l.ListDir(ctx, "escape"); err == nil {
+		t.Fatalf("ListDir 逃逸应被拒绝")
+	}
+	// 写逃逸
+	if err := l.WriteFile(ctx, "escape/evil.txt", strings.NewReader("x"), 1, 1); err == nil {
+		t.Fatalf("WriteFile 逃逸应被拒绝")
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "evil.txt")); err == nil {
+		t.Fatalf("逃逸写入了外部文件")
+	}
+	// rename / delete 逃逸
+	if err := l.Rename(ctx, "escape/secret.txt", "inside.txt"); err == nil {
+		t.Fatalf("Rename 逃逸应被拒绝")
+	}
+	if err := l.Delete(ctx, "escape/secret.txt"); err == nil {
+		t.Fatalf("Delete 逃逸应被拒绝")
+	}
+	// 外部文件不应被删除
+	if _, err := os.Stat(filepath.Join(outDir, "secret.txt")); err != nil {
+		t.Fatalf("外部 secret.txt 不应被删除: %v", err)
+	}
+}
+
+// TestLocalFS_SymlinkInsideRootOK 验证 Root 内符号链接指向 Root 内部时允许（合法）。
+func TestLocalFS_SymlinkInsideRootOK(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "real", "a.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "link")); err != nil {
+		t.Skipf("当前环境无法创建符号链接: %v", err)
+	}
+	l := NewLocalFS(root, nil)
+	e, err := l.Stat(context.Background(), "link/a.txt")
+	if err != nil || e == nil {
+		t.Fatalf("Root 内符号链接应允许，err=%v", err)
+	}
+	if e.Size != 5 {
+		t.Fatalf("大小不符: %d", e.Size)
+	}
+	// 写入 Root 内符号链接目标也允许
+	if err := l.WriteFile(context.Background(), "link/b.txt", strings.NewReader("x"), 1, 1); err != nil {
+		t.Fatalf("Root 内符号链接写入应允许: %v", err)
+	}
+}
