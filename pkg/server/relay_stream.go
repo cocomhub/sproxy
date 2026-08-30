@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -198,7 +199,12 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 在目标 mux 上打开一条流，写入「隧道元数据帧」格式的 dial 指令：
 	//   [4B big-endian length][JSON {"dial":"addr"}]
 	// 叶子侧（自定义 accept 循环）读到该帧后向 addr 发起出站 TCP。
-	stream, err := targetMux.Open(r.Context())
+	// Open 受 relayStreamDialResultTimeout 约束：目标叶子若「已注册但不读」其底层
+	// 传输写阻塞（TCP 传输 Send 同步写、持锁最长 60s），Open 也能在有限时间内失败
+	// 回 502，而非静默挂起（WS 的 Send 异步入队不受此影响，超时仅兜底）。
+	openCtx, openCancel := context.WithTimeout(r.Context(), relayStreamDialResultTimeout)
+	defer openCancel()
+	stream, err := targetMux.Open(openCtx)
 	if err != nil {
 		h.logger.Error("打开流中继流失败", "target", req.Target, "error", err)
 		http.Error(w, fmt.Sprintf("打开流失败: %v", err), http.StatusBadGateway)

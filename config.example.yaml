@@ -107,3 +107,8 @@ access_keys:
 #       enabled: true
 #       # path 已废弃（S36）：WS 升级路径固定为 /ws，配置非默认值不生效（启动时记录警告并忽略）
 #       # path: /ws
+#     tcp:
+#       enabled: false      # 裸 TCP 中继（独立 raw TCP listener，默认关闭；显式开启才生效）
+#       listen: "127.0.0.1:18084"  # TCP 监听地址（为空回落默认 127.0.0.1:18084，loopback；
+#                                  # 远程节点可达需显式配 ":18084" 或具体网卡 IP。注册准入由
+#                                  # access_keys 的 SproxySig 保证，未配置时拒绝所有注册）
