@@ -289,6 +289,47 @@ func TestParseFingerprint(t *testing.T) {
 	}
 }
 
+// TestParseFingerprint_CaseInsensitivePrefix 验证前缀 "sha256:" 大小写不敏感（m-3）：
+// "SHA256:" / "Sha256:" 等变体应被接受并归一化为小写前缀。
+func TestParseFingerprint_CaseInsensitivePrefix(t *testing.T) {
+	id, _ := GenerateIdentity()
+	fp := id.Fingerprint()
+	hexOnly := strings.TrimPrefix(fp, fingerprintPrefix)
+
+	for _, prefix := range []string{"sha256:", "SHA256:", "Sha256:", "SHa256:"} {
+		parsed, err := ParseFingerprint(prefix + hexOnly)
+		if err != nil {
+			t.Fatalf("ParseFingerprint(%q): %v", prefix+hexOnly, err)
+		}
+		if parsed != fp {
+			t.Fatalf("prefix %q: 期望 %q, 实际 %q", prefix, fp, parsed)
+		}
+	}
+}
+
+// TestIdentitySave_NoTempResidue 验证 SaveIdentity 使用唯一临时文件（m-5）：
+// 保存成功后目录中不应残留固定名或通配临时文件（崩溃残留路径.tmp 的场景已消除）。
+func TestIdentitySave_NoTempResidue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "identity.json")
+	id, _ := GenerateIdentity()
+	if err := SaveIdentity(id, path); err != nil {
+		t.Fatalf("SaveIdentity: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "identity.json.tmp") || e.Name() == "identity.json.tmp" {
+			t.Fatalf("残留临时文件: %s", e.Name())
+		}
+	}
+	if len(entries) != 1 || entries[0].Name() != "identity.json" {
+		t.Fatalf("目录应仅含 identity.json, 实际: %v", entries)
+	}
+}
+
 // TestFingerprintMatches 验证指纹恒时比较。
 func TestFingerprintMatches(t *testing.T) {
 	id, _ := GenerateIdentity()

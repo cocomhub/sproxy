@@ -23,6 +23,9 @@ const (
 	ecdhSalt         = "sproxy-ecdh-salt-v1"
 
 	// identityFlagPresent 表示握手身份扩展中"对端提供了身份公钥"。
+	// 身份扩展帧结构：[1B flag][Ed25519 pub 32B][Ed25519 sig 64B] 或 [1B flag=0x00]。
+	// 帧无独立版本字节；版本由签名域前缀 "sproxy-identity-v1"（identitySigDomain）隐含。
+	// 未来协议演进需新增帧格式时，应在此扩展一个版本字节并更新 identitySigDomain。
 	identityFlagPresent = 0x01
 	// identityFlagAbsent 表示握手身份扩展中"对端无身份密钥"。
 	identityFlagAbsent = 0x00
@@ -136,6 +139,13 @@ func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, 
 		listenerPub = publicKey.Bytes()
 	}
 	sigMsg := identitySigMessage(dialerPub, listenerPub)
+
+	// 身份阶段流读取不感知 ctx：恶意对端完成阶段 1 后可在身份阶段停滞，
+	// 无限占住 dialer 的 ensureHandshake / listener 的 Serve goroutine（资源耗尽 DoS）。
+	// 用 context.AfterFunc 在 ctx 超时/取消时 abort 握手流，使 io.ReadFull 立即返回，
+	// 使 handshakeTimeout 对身份阶段真正兜底。
+	stopAbort := context.AfterFunc(ctx, func() { _ = stream.Abort() })
+	defer stopAbort()
 
 	var peerFP string
 	var idErr error

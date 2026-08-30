@@ -52,11 +52,12 @@ func TestIdentityCommand_Generate_ExistsWithoutForce(t *testing.T) {
 
 	cmd := NewCmdIdentityGenerate(ios)
 	cmd.SetArgs([]string{"--file", file})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute: %v", err)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for existing identity without --force")
 	}
-	if !strings.Contains(errOut.String(), "已存在") {
-		t.Fatalf("expected exists error, got %q", errOut.String())
+	if !strings.Contains(err.Error(), "已存在") {
+		t.Fatalf("expected exists error, got %v", err)
 	}
 	loaded, _ := tunnel.LoadIdentity(file)
 	if loaded.Fingerprint() != id.Fingerprint() {
@@ -114,11 +115,12 @@ func TestIdentityCommand_Show_NotExist(t *testing.T) {
 
 	cmd := NewCmdIdentityShow(ios)
 	cmd.SetArgs([]string{"--file", file})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("Execute: %v", err)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for missing identity")
 	}
-	if !strings.Contains(errOut.String(), "身份文件不存在") {
-		t.Fatalf("expected not-exist error, got %q", errOut.String())
+	if !strings.Contains(err.Error(), "身份文件不存在") {
+		t.Fatalf("expected not-exist error, got %v", err)
 	}
 }
 

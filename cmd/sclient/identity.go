@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
 	"os"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
@@ -31,30 +32,29 @@ func NewCmdIdentityGenerate(ios cli.IOStreams) *cobra.Command {
 	var file string
 	var force bool
 	cmd := &cobra.Command{
-		Use:   "generate",
-		Short: "生成并持久化节点身份密钥（Ed25519）",
-		Run: func(cmd *cobra.Command, _ []string) {
-			path, err := resolveIdentityPath(ios, file)
+		Use:          "generate",
+		Short:        "生成并持久化节点身份密钥（Ed25519）",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			path, err := resolveIdentityPath(file)
 			if err != nil {
-				return
+				return err
 			}
 			if !force {
 				if _, statErr := os.Stat(path); statErr == nil {
-					ios.WriteErrLine("身份文件已存在: %s（使用 --force 覆盖）", path)
-					return
+					return fmt.Errorf("身份文件已存在: %s（使用 --force 覆盖）", path)
 				}
 			}
 			id, gErr := tunnel.GenerateIdentity()
 			if gErr != nil {
-				ios.WriteErrLine("生成身份失败: %v", gErr)
-				return
+				return fmt.Errorf("生成身份失败: %w", gErr)
 			}
 			if sErr := tunnel.SaveIdentity(id, path); sErr != nil {
-				ios.WriteErrLine("保存身份失败: %v", sErr)
-				return
+				return fmt.Errorf("保存身份失败: %w", sErr)
 			}
 			ios.WriteOutLine("身份已生成: %s", path)
 			ios.WriteOutLine("Fingerprint: %s", id.Fingerprint())
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "身份文件路径（默认 XDG 配置目录 sproxy/identity.json）")
@@ -66,15 +66,17 @@ func NewCmdIdentityGenerate(ios cli.IOStreams) *cobra.Command {
 func NewCmdIdentityShow(ios cli.IOStreams) *cobra.Command {
 	var file string
 	cmd := &cobra.Command{
-		Use:   "show",
-		Short: "展示本节点身份指纹与公钥",
-		Run: func(cmd *cobra.Command, _ []string) {
-			id, err := loadIdentityForCLI(ios, file)
+		Use:          "show",
+		Short:        "展示本节点身份指纹与公钥",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			id, err := loadIdentityForCLI(file)
 			if err != nil {
-				return
+				return err
 			}
 			ios.WriteOutLine("Fingerprint: %s", id.Fingerprint())
 			ios.WriteOutLine("PublicKey:   %s", hex.EncodeToString(id.PublicKey()))
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "身份文件路径（默认 XDG 配置目录 sproxy/identity.json）")
@@ -85,14 +87,16 @@ func NewCmdIdentityShow(ios cli.IOStreams) *cobra.Command {
 func NewCmdIdentityFingerprint(ios cli.IOStreams) *cobra.Command {
 	var file string
 	cmd := &cobra.Command{
-		Use:   "fingerprint",
-		Short: "仅打印本节点身份指纹（供脚本/复制）",
-		Run: func(cmd *cobra.Command, _ []string) {
-			id, err := loadIdentityForCLI(ios, file)
+		Use:          "fingerprint",
+		Short:        "仅打印本节点身份指纹（供脚本/复制）",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			id, err := loadIdentityForCLI(file)
 			if err != nil {
-				return
+				return err
 			}
 			ios.WriteOutLine("%s", id.Fingerprint())
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "身份文件路径（默认 XDG 配置目录 sproxy/identity.json）")
@@ -100,33 +104,26 @@ func NewCmdIdentityFingerprint(ios cli.IOStreams) *cobra.Command {
 }
 
 // resolveIdentityPath 解析身份文件路径：--file 覆盖时用显式路径，否则用默认 XDG 路径。
-func resolveIdentityPath(ios cli.IOStreams, file string) (string, error) {
+func resolveIdentityPath(file string) (string, error) {
 	if file != "" {
 		return file, nil
 	}
-	path, err := clientfactory.DefaultIdentityPath()
-	if err != nil {
-		ios.WriteErrLine("获取默认身份路径失败: %v", err)
-		return "", err
-	}
-	return path, nil
+	return clientfactory.DefaultIdentityPath()
 }
 
 // loadIdentityForCLI 加载本端身份供 show/fingerprint 展示。
-// 文件不存在或损坏时输出错误信息并返回 error。
-func loadIdentityForCLI(ios cli.IOStreams, file string) (*tunnel.Identity, error) {
-	path, err := resolveIdentityPath(ios, file)
+// 文件不存在或损坏时返回带恢复路径的 error（RunE 使退出码非 0）。
+func loadIdentityForCLI(file string) (*tunnel.Identity, error) {
+	path, err := resolveIdentityPath(file)
 	if err != nil {
 		return nil, err
 	}
 	id, lErr := tunnel.LoadIdentity(path)
 	if lErr != nil {
 		if os.IsNotExist(lErr) {
-			ios.WriteErrLine("身份文件不存在: %s（请先运行 sclient identity generate）", path)
-		} else {
-			ios.WriteErrLine("加载身份失败: %v", lErr)
+			return nil, fmt.Errorf("身份文件不存在: %s（请先运行 sclient identity generate）", path)
 		}
-		return nil, lErr
+		return nil, fmt.Errorf("加载身份失败: %w", lErr)
 	}
 	return id, nil
 }

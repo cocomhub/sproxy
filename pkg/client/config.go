@@ -83,6 +83,12 @@ func (c *Config) Validate() error {
 	if c.ChunkSize <= 0 {
 		return fmt.Errorf("chunk_size 必须大于 0")
 	}
+	// m-4：peer_fingerprints 配置在加载阶段响亮校验（而非握手时静默跳过非法指纹）。
+	for _, fp := range c.PeerFingerprints {
+		if _, err := tunnel.ParseFingerprint(fp); err != nil {
+			return fmt.Errorf("peer_fingerprints 含非法指纹 %q: %w", fp, err)
+		}
+	}
 	return nil
 }
 

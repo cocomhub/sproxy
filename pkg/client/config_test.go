@@ -12,6 +12,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,6 +89,34 @@ func TestConfigValidate(t *testing.T) {
 	cfg8 := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, AccessKeySecret: ""}
 	if err := cfg8.Validate(); err != nil {
 		t.Fatalf("Validate() on config with empty AccessKeySecret: %v", err)
+	}
+}
+
+// TestConfigValidate_PeerFingerprintsInvalid 验证 peer_fingerprints 在配置加载
+// Validate 阶段响亮报错（m-4）：手改 YAML 笔误不被静默跳过（否则握手时全部对端被拒且报错费解）。
+func TestConfigValidate_PeerFingerprintsInvalid(t *testing.T) {
+	t.Parallel()
+
+	id, err := tunnel.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validFP := id.Fingerprint()
+
+	// 合法指纹：无错误。
+	cfg := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, PeerFingerprints: []string{validFP}}
+	if err = cfg.Validate(); err != nil {
+		t.Fatalf("Validate() on valid fingerprint: %v", err)
+	}
+
+	// 非法指纹：须报错，并指出是 peer_fingerprints 配置问题。
+	bad := &Config{ServerURL: "http://x", Timeout: 30, ChunkSize: size.DefaultChunkSize, PeerFingerprints: []string{"not-a-fingerprint"}}
+	err = bad.Validate()
+	if err == nil {
+		t.Fatal("Validate() should reject invalid peer_fingerprints")
+	}
+	if !strings.Contains(err.Error(), "peer_fingerprints") {
+		t.Fatalf("错误应指明 peer_fingerprints 配置项, 实际: %v", err)
 	}
 }
 

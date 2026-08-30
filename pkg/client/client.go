@@ -1142,6 +1142,18 @@ func (c *FileClient) NodeID() string {
 	return c.nodeID
 }
 
+// Identity 返回本端长时身份（P1 身份 pinning，可为 nil——未配置身份）。
+// 仅诊断/测试用途；真实握手由 xfer 隧道在 TunnelDo 时消费。
+func (c *FileClient) Identity() *tunnel.Identity {
+	return c.identity
+}
+
+// PeerFingerprints 返回对端身份指纹 pinning 列表（可为空——未配置 pin）。
+// 仅诊断/测试用途；真实校验由 xfer 隧道握手时执行（fail-closed）。
+func (c *FileClient) PeerFingerprints() []string {
+	return append([]string(nil), c.peerFingerprints...)
+}
+
 // doRequest 统一发送 HTTP 请求：当配置了隧道客户端时走加密隧道，否则直连。
 //
 // urlPath 是相对路径，如 "/upload" 或 "/download?filename=test.txt"。

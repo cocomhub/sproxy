@@ -110,8 +110,10 @@ func (id *Identity) Verify(msg, sig []byte) bool {
 	return ed25519.Verify(id.publicKey, msg, sig)
 }
 
-// SaveIdentity 将身份原子持久化到 path（先写临时文件再 rename），权限 0600。
+// SaveIdentity 将身份原子持久化到 path（唯一临时文件 + rename），权限 0600。
 // 自动创建父目录（0700）。
+// 安全权衡：os.Chmod 在 Windows 上是 no-op，身份文件权限 0600 依赖 os.CreateTemp
+// 默认权限与路径隔离（XDG 用户配置目录），不把权限位当唯一安全边界（fail-closed 逻辑兜底）。
 func SaveIdentity(id *Identity, path string) error {
 	if id == nil || id.privateKey == nil || id.publicKey == nil {
 		return fmt.Errorf("identity: 空身份")
@@ -129,12 +131,25 @@ func SaveIdentity(id *Identity, path string) error {
 	if err != nil {
 		return fmt.Errorf("identity: 序列化: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, identityFilePerm); err != nil {
+	// 唯一临时文件名（非固定 .tmp），避免崩溃残留固定名文件。
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("identity: 创建临时文件: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // rename 成功后 Remove 为 no-op
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("identity: 写入临时文件: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := tmp.Chmod(identityFilePerm); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("identity: 设置临时文件权限: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("identity: 关闭临时文件: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("identity: 替换身份文件: %w", err)
 	}
 	return nil
@@ -174,6 +189,8 @@ func LoadIdentity(path string) (*Identity, error) {
 
 // LoadOrCreateIdentity 加载身份；文件不存在时生成并保存新身份。
 // 文件已存在但损坏时返回 ErrIdentityFileCorrupt（不覆盖）。
+// 注意：生产 CLI 路径未直接使用本函数（sclient identity generate 显式生成；
+// factory 懒加载用 LoadIdentityOptional），保留供库使用方需要"自动创建"语义时调用。
 func LoadOrCreateIdentity(path string) (*Identity, error) {
 	id, err := LoadIdentity(path)
 	if err == nil {
@@ -192,11 +209,14 @@ func LoadOrCreateIdentity(path string) (*Identity, error) {
 	return id, nil
 }
 
-// ParseFingerprint 归一化指纹输入：接受纯 64 hex、带 "sha256:" 前缀、大写 hex、首尾空白。
-// 返回规范化小写 "sha256:<64 hex>"。
+// ParseFingerprint 归一化指纹输入：接受纯 64 hex、带 "sha256:" 前缀（大小写不敏感）、
+// 大写 hex、首尾空白。返回规范化小写 "sha256:<64 hex>"。
 func ParseFingerprint(s string) (string, error) {
 	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, fingerprintPrefix)
+	// 大小写不敏感剥离前缀：接受 "sha256:" / "SHA256:" / "Sha256:"。
+	if len(s) >= len(fingerprintPrefix) && strings.EqualFold(s[:len(fingerprintPrefix)], fingerprintPrefix) {
+		s = s[len(fingerprintPrefix):]
+	}
 	if len(s) != sha256HexLen {
 		return "", fmt.Errorf("指纹长度非法: 期望 %d 个 hex 字符, 实际 %d", sha256HexLen, len(s))
 	}

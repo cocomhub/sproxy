@@ -56,6 +56,13 @@ access_keys:
 #     - key: "user-token-2"
 #       permission: "write"
 
+# ---- sclient 侧 P1 身份 pinning（客户端配置键，非服务端字段，见 sclient.yaml）----
+# sclient 配置 peer_fingerprints（对端身份指纹 pinning 列表）与本端身份
+# （sclient identity generate，XDG 目录 sproxy/identity.json）仅由 `sclient tunnel --xfer`
+# xfer/mux 隧道消费（ECDH 握手 + Ed25519 身份签名 proof of possession + 指纹 pin 校验，
+# fail-closed）。传统隧道/HTTP 直连命令不走 xfer 握手，配置 peer_fingerprints 会输出 Warn
+# 提示不生效。生成对端指纹：`sclient identity fingerprint`（带外固化）。
+
 # 速率限制（默认关闭；enabled: true 时限制 tunnel handler）
 # rate_limit:
 #   enabled: false
