@@ -18,7 +18,7 @@ import (
 func TestDeadlineConn_SetReadDeadline_ClosesOnExpiry(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
-	dc := wrapDeadline(clientSide)
+	dc := wrapDeadline(clientSide, 0, 0)
 	defer dc.Close()
 
 	errCh := make(chan error, 1)
@@ -49,7 +49,7 @@ func TestDeadlineConn_SetReadDeadline_ClosesOnExpiry(t *testing.T) {
 func TestDeadlineConn_ClearDeadline(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
-	dc := wrapDeadline(clientSide)
+	dc := wrapDeadline(clientSide, 0, 0)
 	defer dc.Close()
 
 	if err := dc.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
@@ -81,7 +81,7 @@ func TestDeadlineConn_ClearDeadline(t *testing.T) {
 func TestDeadlineConn_SetDeadline_BothDirections(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
-	dc := wrapDeadline(clientSide)
+	dc := wrapDeadline(clientSide, 0, 0)
 	defer dc.Close()
 
 	if err := dc.SetDeadline(time.Now().Add(60 * time.Millisecond)); err != nil {
@@ -108,7 +108,7 @@ func TestDeadlineConn_SetDeadline_BothDirections(t *testing.T) {
 func TestDeadlineConn_Passthrough_NoDeadline(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
-	dc := wrapDeadline(clientSide)
+	dc := wrapDeadline(clientSide, 0, 0)
 	defer dc.Close()
 
 	go func() {
@@ -130,7 +130,7 @@ func TestDeadlineConn_Passthrough_NoDeadline(t *testing.T) {
 func TestDeadlineConn_Close_StopsTimer(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer serverSide.Close()
-	dc := wrapDeadline(clientSide)
+	dc := wrapDeadline(clientSide, 0, 0)
 
 	if err := dc.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		t.Fatal(err)
@@ -145,5 +145,74 @@ func TestDeadlineConn_Close_StopsTimer(t *testing.T) {
 	// 空地址断言：确保 LocalAddr/RemoteAddr 透传不 panic（间接覆盖内嵌 net.Conn）
 	if serverSide.LocalAddr() == nil {
 		t.Fatalf("LocalAddr 不应为 nil")
+	}
+}
+
+// TestDeadlineConn_WriteTimeout_ClosesOnExpiry 验证活跃写超时：对端停读时 Write
+// 阻塞超过 writeTimeout 即强制关闭连接返回错误（审查 I-1/I-2：HTTP/1.1 不调
+// SetWriteDeadline，写路径需活跃超时兜底；DoD 8 对端停读）。
+func TestDeadlineConn_WriteTimeout_ClosesOnExpiry(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer serverSide.Close()
+	dc := wrapDeadline(clientSide, 0, 80*time.Millisecond)
+	defer dc.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1<<20) // 1MB，net.Pipe 同步阻塞，服务端不读则 Write 挂起
+		_, err := dc.Write(buf)
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatalf("写超时到点后 Write 应返回错误")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Write 未在超时后返回（无限挂起）")
+	}
+}
+
+// TestDeadlineConn_ReadTimeout_ClosesOnExpiry 验证活跃读超时：对端停发时 Read
+// 阻塞超过 readTimeout 即强制关闭连接返回错误。
+func TestDeadlineConn_ReadTimeout_ClosesOnExpiry(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer serverSide.Close()
+	dc := wrapDeadline(clientSide, 80*time.Millisecond, 0)
+	defer dc.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 16)
+		_, err := dc.Read(buf)
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatalf("读超时到点后 Read 应返回错误")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Read 未在超时后返回（无限挂起）")
+	}
+}
+
+// TestDeadlineConn_WriteTimeout_ShortWriteReturns 验证 Write 正常快速返回时不触发
+// 超时关闭（活跃超时只在阻塞时生效，不误杀正常读写）。
+func TestDeadlineConn_WriteTimeout_ShortWriteReturns(t *testing.T) {
+	clientSide, serverSide := net.Pipe()
+	defer serverSide.Close()
+	dc := wrapDeadline(clientSide, 0, 200*time.Millisecond)
+	defer dc.Close()
+
+	// 服务端先读，客户端写小块数据：写应快速成功，不触发超时。
+	go func() {
+		buf := make([]byte, 8)
+		_, _ = serverSide.Read(buf)
+	}()
+	if _, err := dc.Write([]byte("ping")); err != nil {
+		t.Fatalf("快速 Write 不应触发超时: %v", err)
 	}
 }

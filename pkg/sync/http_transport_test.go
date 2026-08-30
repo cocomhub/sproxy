@@ -49,6 +49,11 @@ type httpMockFS struct {
 	files    map[string]*mockFile // key = 正斜杠相对路径
 	dirs     map[string]bool      // key = 正斜杠相对路径
 	sessions map[string]*mockSession
+
+	// 失败注入（测试用）
+	failStat       bool // Stat 返回 500
+	failChunk      bool // 任一 chunk 返回 checksum mismatch
+	noStatChecksum bool // Stat 不返回 X-File-Checksum（Rename checksum 为空场景）
 }
 
 func newHTTPMockFS(t *testing.T) (*httptest.Server, *httpMockFS) {
@@ -109,6 +114,12 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func (m *httpMockFS) handleList(w http.ResponseWriter, r *http.Request) {
 	subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/")
+	// 分页（对齐真实服务端 /api/files：默认 limit=1000，按 name 排序）
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 1000
+	}
 	m.mu.Lock()
 	var files []map[string]any
 	for p, f := range m.files {
@@ -154,16 +165,28 @@ func (m *httpMockFS) handleList(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(files, func(i, j int) bool {
 		return files[i]["name"].(string) < files[j]["name"].(string)
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"files": files, "total": len(files)})
+	total := len(files)
+	if offset > total {
+		offset = total
+	}
+	end := min(offset+limit, total)
+	files = files[offset:end]
+	writeJSON(w, http.StatusOK, map[string]any{"files": files, "total": total})
 }
 
 func (m *httpMockFS) handleStat(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("filename")
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failStat {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "注入的 stat 失败"})
+		return
+	}
 	if f, ok := m.files[name]; ok {
 		w.Header().Set("X-File-Size", strconv.Itoa(len(f.data)))
-		w.Header().Set("X-File-Checksum", f.checksum)
+		if !m.noStatChecksum {
+			w.Header().Set("X-File-Checksum", f.checksum)
+		}
 		w.Header().Set("X-File-MTime", strconv.FormatInt(f.mtime, 10))
 		w.Header().Set("X-File-IsDir", "false")
 		w.WriteHeader(http.StatusOK)
@@ -285,6 +308,10 @@ func (m *httpMockFS) handleUploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failChunk {
+		writeJSON(w, http.StatusOK, map[string]any{"success": false, "should_retry": true, "message": "注入的 chunk 失败"})
+		return
+	}
 	sess, ok := m.sessions[uploadID]
 	if !ok {
 		http.Error(w, "no session", http.StatusNotFound)
@@ -686,5 +713,105 @@ func TestHTTPTransport_Deadline_ServerStopsReading(t *testing.T) {
 	}
 	if elapsed < 150*time.Millisecond {
 		t.Fatalf("请求过早失败（%v），可能是连接层错误而非 ResponseHeaderTimeout", elapsed)
+	}
+}
+
+// TestHTTPTransport_DialWrapsDeadline 验证 Dial 返回的连接被 deadlineConn 包装且
+// WriteTimeout 正确传递（审查 I-2：Go 1.26 http.Transport HTTP/1.1 不调用
+// SetReadDeadline/SetWriteDeadline，写路径对端停读靠 deadlineConn 活跃写超时兜底）。
+func TestHTTPTransport_DialWrapsDeadline(t *testing.T) {
+	clientSide, _ := net.Pipe()
+	tr, err := NewHTTPTransport(HTTPTransportConfig{
+		BaseURL:      "http://127.0.0.1:1",
+		Dial:         func(ctx context.Context) (net.Conn, error) { return &noDeadlineConn{Conn: clientSide}, nil },
+		WriteTimeout: 123 * time.Millisecond,
+		Logger:       discardLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPTransport error: %v", err)
+	}
+	defer func() { _ = tr.Close() }()
+
+	c, derr := tr.tr.DialContext(context.Background(), "tcp", "127.0.0.1:1")
+	if derr != nil {
+		t.Fatalf("DialContext error: %v", derr)
+	}
+	defer c.Close()
+	tc, ok := c.(*trackedConn)
+	if !ok {
+		t.Fatalf("Dial 返回连接应为 trackedConn，got %T", c)
+	}
+	dc, ok := tc.Conn.(*deadlineConn)
+	if !ok {
+		t.Fatalf("trackedConn 底层应为 deadlineConn，got %T", tc.Conn)
+	}
+	if dc.writeTimeout != 123*time.Millisecond {
+		t.Fatalf("writeTimeout 未传递: got %v, want 123ms", dc.writeTimeout)
+	}
+}
+
+// TestHTTPTransport_Stat_ServerError 验证远程 Stat 500 → 报错（R-2）。
+func TestHTTPTransport_Stat_ServerError(t *testing.T) {
+	srv, m := newHTTPMockFS(t)
+	m.failStat = true
+	tr := newHTTPTransport(t, srv)
+	if _, err := tr.Stat(context.Background(), "x.txt"); err == nil {
+		t.Fatalf("Stat 500 应返回 error")
+	}
+}
+
+// TestHTTPTransport_ListDir_Pagination 验证大目录分页拉全（审查 C-1 回归）。
+func TestHTTPTransport_ListDir_Pagination(t *testing.T) {
+	srv, m := newHTTPMockFS(t)
+	for i := range 1100 {
+		m.seedFile(t, fmt.Sprintf("f%04d.txt", i), "x")
+	}
+	tr := newHTTPTransport(t, srv)
+	entries, err := tr.ListDir(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListDir error: %v", err)
+	}
+	if len(entries) != 1100 {
+		t.Fatalf("分页应拉全 1100 个条目，got %d", len(entries))
+	}
+}
+
+// TestHTTPTransport_WriteFile_ChunkedFailure 验证 chunk 校验失败 → WriteFile 报错（R-2）。
+func TestHTTPTransport_WriteFile_ChunkedFailure(t *testing.T) {
+	srv, m := newHTTPMockFS(t)
+	m.failChunk = true
+	tr := newHTTPTransport(t, srv)
+	content := strings.Repeat("x", 5<<20) // 5MB → 多 chunk
+	if err := tr.WriteFile(context.Background(), "big.bin", strings.NewReader(content), int64(len(content)), 0); err == nil {
+		t.Fatalf("chunk 失败时 WriteFile 应返回 error")
+	}
+}
+
+// TestHTTPTransport_Rename_EmptyChecksum 验证源 checksum 为空 → Rename 报错（R-2）。
+func TestHTTPTransport_Rename_EmptyChecksum(t *testing.T) {
+	srv, m := newHTTPMockFS(t)
+	m.seedFile(t, "a.txt", "data")
+	m.noStatChecksum = true
+	tr := newHTTPTransport(t, srv)
+	if err := tr.Rename(context.Background(), "a.txt", "b.txt"); err == nil {
+		t.Fatalf("源 checksum 为空时 Rename 应报错")
+	}
+}
+
+// TestHTTPTransport_WriteFile_Empty_PreservesMTime 验证空文件走 Upload 且 mtime 保留（R-2）。
+func TestHTTPTransport_WriteFile_Empty_PreservesMTime(t *testing.T) {
+	srv, m := newHTTPMockFS(t)
+	tr := newHTTPTransport(t, srv)
+	const mtime = 1700000000123456700
+	if err := tr.WriteFile(context.Background(), "empty.txt", bytes.NewReader(nil), 0, mtime); err != nil {
+		t.Fatalf("WriteFile(empty+mtime) error: %v", err)
+	}
+	files := m.snapshotFiles()
+	f, ok := files["empty.txt"]
+	if !ok {
+		t.Fatalf("empty.txt 应已创建")
+	}
+	if f.mtime != mtime {
+		t.Fatalf("空文件 mtime 未保留: got %d, want %d", f.mtime, mtime)
 	}
 }
