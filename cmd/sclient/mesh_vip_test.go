@@ -73,3 +73,30 @@ func TestMeshVIPDial_NonVirtualAddrFallsBack(t *testing.T) {
 		t.Fatalf("非虚拟子网目标应原样回落 base, got %+v", gotTarget)
 	}
 }
+
+// TestMeshVIPDial_WrapsGatewayDial 校验 isVIP && --gateway 组合（mesh.go 装配顺序）：
+// meshVIPDial 为最外层，先解析虚拟 IP → node-id，再把解析后的 target 传给内层网关
+// 选路（meshGatewayDial 用 target.Node 走已建链路）。防止反序（gateway 包最外）导致
+// meshVIPDial 被覆盖、目标节点 VIP 变化时解析不到最新 node-id（R-5）。
+func TestMeshVIPDial_WrapsGatewayDial(t *testing.T) {
+	subnet := netip.MustParsePrefix("100.64.0.0/10")
+	vt := mesh.NewVipTable(subnet)
+	vt.Add(netip.MustParseAddr("100.64.0.5"), "node-b")
+
+	// 模拟 meshGatewayDial（内层选路）：记录收到的 target，返回 KindPeerLink。
+	var gotTarget *client.MeshService
+	gatewayBase := func(_ context.Context, _ *client.FileClient, _ *hub.HubSignaler, target *client.MeshService, _ string) (*mesh.Result, error) {
+		gotTarget = target
+		return &mesh.Result{Kind: mesh.KindPeerLink}, nil
+	}
+	// 最外层 = meshVIPDial 包装网关选路（与 mesh.go 装配顺序一致）。
+	dial := meshVIPDial(vt, subnet, gatewayBase, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+
+	_, err := dial(context.Background(), nil, nil, &client.MeshService{Addr: "100.64.0.5:22"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTarget == nil || gotTarget.Node != "node-b" || gotTarget.Addr != "100.64.0.5:22" {
+		t.Fatalf("网关 base 收到 target = %+v, want Node=node-b Addr=100.64.0.5:22", gotTarget)
+	}
+}

@@ -213,13 +213,17 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			// --gateway：先经本地 mesh node 网关复用已建直连链路（零重新打洞），
 			// 本地节点无到目标的已建链路时回落常规拨号（不回归既有路径）。
 			// 网关认证 token 复用信令 token（auth_token），与 mesh node 网关一致。
+			// 装配顺序（整体审核确认）：先装配网关选路（内层），再包虚拟 IP 解析
+			// （最外层）——保证 isVIP && --gateway 同时存在时，"vip → node-id 运行时
+			// 重新解析"仍先执行，随后回落网关复用已建链路（或 mesh.Dial）。若反序
+			// （gateway 包最外），meshGatewayDial 会覆盖 meshVIPDial，目标节点 VIP
+			// 变化（R-5）时解析不到最新 node-id。
 			dial := meshDialFunc(mesh.Dial)
-			if isVIP {
-				// 虚拟 IP 目标：经 vipTable 解析 node-id 后回落 mesh.Dial / 网关路由。
-				dial = meshVIPDial(vipTable, vipSubnet, dial, ios)
-			}
 			if gatewayAddr != "" {
 				dial = meshGatewayDial(gatewayAddr, svc.AccessKeySecret(), ios)
+			}
+			if isVIP {
+				dial = meshVIPDial(vipTable, vipSubnet, dial, ios)
 			}
 
 			if listenAddr != "" {
