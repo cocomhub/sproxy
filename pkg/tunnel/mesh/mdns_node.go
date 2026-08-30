@@ -49,8 +49,10 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	if err != nil {
 		return fmt.Errorf("mesh mDNS: 直连信令监听失败: %w", err)
 	}
-	// 共享密钥（--mdns-secret）：非空时仅接受携带有效 HMAC 签名的 offer。
-	signalSrv.SetSecret(cfg.MDNSPeerSecret)
+	// 共享密钥（--mdns-secret 优先，回落 access_key_secret 复用 AK/SK）：非空时
+	// 仅接受携带有效 HMAC 签名的 offer。
+	mdnsKey := resolveMDNSSecret(cfg.MDNSPeerSecret, cfg.AccessKeySecret)
+	signalSrv.SetSecret(mdnsKey)
 	defer signalSrv.Close()
 
 	signalTCP, ok := signalSrv.Addr().(*net.TCPAddr)
@@ -71,7 +73,7 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 		Services:   cfg.Services,
 		IPs:        lanIPs,
 		Port:       cfg.MDNSPort,
-		Secret:     cfg.MDNSPeerSecret, // --mdns-secret：TXT 签名 + 浏览校验
+		Secret:     mdnsKey, // --mdns-secret 或 access_key_secret 回落：TXT 签名 + 浏览校验
 		Logger:     logger,
 	})
 	if err != nil {
@@ -256,7 +258,8 @@ func (dl *mdnsDiscoveryLoop) dialPeerDirect(ctx context.Context, cfg NodeConfig,
 		dl.markFail(p.NodeID)
 		return
 	}
-	sig.SetSecret(cfg.MDNSPeerSecret) // --mdns-secret：offer 携带 HMAC 签名
+	// offer 携带 HMAC 签名（--mdns-secret 优先，回落 access_key_secret 复用 AK/SK）。
+	sig.SetSecret(resolveMDNSSecret(cfg.MDNSPeerSecret, cfg.AccessKeySecret))
 	defer func() { _ = sig.Close() }()
 	probeCtx, cancel := context.WithTimeout(ctx, probe)
 	conn, derr := webrtc.DialWithSignalerCtx(probeCtx, p.NodeID, sig)
@@ -343,6 +346,17 @@ func primaryLANIPv4() net.IP {
 		return ips[0]
 	}
 	return nil
+}
+
+// resolveMDNSSecret 解析 mDNS 认证密钥：显式 --mdns-secret 优先；为空时回落
+// access_key_secret（复用 mesh AK/SK 的 SK 作为 mDNS 共享密钥，避免双套凭据；
+// hub mesh 自动获得 mDNS 签名认证）；两者皆空 = 无认证（LAN 信任）。
+// 密钥经 HMAC 域分隔（sproxy-mdns-*/v1 前缀）与 SproxySig 请求签名隔离。
+func resolveMDNSSecret(mdnsSecret, accessKeySecret string) string {
+	if mdnsSecret != "" {
+		return mdnsSecret
+	}
+	return accessKeySecret
 }
 
 // ValidateSignalAddr 校验 mDNS 发现的直连信令端点（防 SSRF/伪造 peer，安全审查 B）：

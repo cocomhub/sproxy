@@ -94,7 +94,15 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			}
 			if mdns {
 				// 纯 mDNS 直连（不经 hub）：服务端需 `mesh node --mdns` 宣告该服务。
-				return runMDNSConnect(cmd, service, listenAddr, nodeID, mdnsSecret, ios)
+				// mDNS 认证密钥：--mdns-secret 优先；为空回落配置的 access_key_secret
+				// （复用 mesh AK/SK 的 SK，避免双套凭据）；两者皆空 = LAN 信任。
+				secret := mdnsSecret
+				if secret == "" {
+					if svc, cerr := factory.NewClient(cmd); cerr == nil && svc != nil {
+						secret = svc.AccessKeySecret()
+					}
+				}
+				return runMDNSConnect(cmd, service, listenAddr, nodeID, secret, ios)
 			}
 
 			svc, err := factory.NewClient(cmd)

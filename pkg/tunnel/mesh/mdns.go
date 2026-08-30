@@ -642,8 +642,11 @@ func mdnsTXTContent(nodeID, signalAddr string, services []hub.Service) string {
 }
 
 // mdnsTXTSig 计算 mDNS TXT 内容的 HMAC-SHA256 签名（hex）。
+// 消息带协议域前缀 "sproxy-mdns-txt/v1\n"：当密钥复用 AK/SK（SK）时，与 SproxySig
+// 请求签名等其他 HMAC 域隔离，防跨协议混淆。
 func mdnsTXTSig(secret, content string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte("sproxy-mdns-txt/v1\n"))
 	mac.Write([]byte(content))
 	return hex.EncodeToString(mac.Sum(nil))
 }

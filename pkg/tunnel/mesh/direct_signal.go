@@ -55,8 +55,11 @@ type directSignalMsg struct {
 }
 
 // computeSignalSig 计算直连信令 offer 的共享密钥签名（HMAC-SHA256）。
+// 消息带协议域前缀 "sproxy-mdns-signal/v1\n"：当密钥复用 AK/SK（SK）时，与
+// SproxySig 请求签名等其他 HMAC 域隔离，防跨协议混淆。
 func computeSignalSig(secret, node, sdp string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte("sproxy-mdns-signal/v1\n"))
 	mac.Write([]byte(node))
 	mac.Write([]byte("\n"))
 	mac.Write([]byte(sdp))

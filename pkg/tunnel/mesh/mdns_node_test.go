@@ -16,6 +16,20 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc/webrtctest"
 )
 
+// TestResolveMDNSSecret：mDNS 认证密钥解析——显式 --mdns-secret 优先，回落
+// access_key_secret（复用 AK/SK 的 SK），皆空 = LAN 信任。
+func TestResolveMDNSSecret(t *testing.T) {
+	if got := resolveMDNSSecret("explicit", "sk"); got != "explicit" {
+		t.Errorf("显式 --mdns-secret 应优先, got %q", got)
+	}
+	if got := resolveMDNSSecret("", "sk"); got != "sk" {
+		t.Errorf("回落 access_key_secret, got %q", got)
+	}
+	if got := resolveMDNSSecret("", ""); got != "" {
+		t.Errorf("皆空应 LAN 信任, got %q", got)
+	}
+}
+
 // TestValidateSignalAddr（安全审查 B 回归）：mDNS 发现的信令端点须拒绝
 // loopback/link-local（含云 metadata 169.254.169.254）/multicast/unspecified/
 // 非法端口，防恶意广播诱导拨号（SSRF）。测试 loopback 收敛模式放行 loopback。
