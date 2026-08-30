@@ -59,6 +59,11 @@ type mockExecutor struct {
 	blockCh  chan struct{} // 非 nil 时 Run 阻塞直到关闭或 ctx 取消
 	calls    int
 	lastTask *SyncTask
+	// started 是非阻塞执行器/阻塞执行器的「Run 被调用」一次性信号（close 一次）：
+	// 测试用确定性 channel 同步「任务已真正开始执行（已拿信号量）」，而非死等固定超时
+	// 轮询状态（对齐 flaky-network-test-pattern 教训，TestConcurrency_Semaphore）。
+	started   chan struct{}
+	startOnce sync.Once
 }
 
 // newMockExecutor 构造返回固定结果的 mock 执行器。
@@ -67,11 +72,12 @@ func newMockExecutor(result *RunResult) *mockExecutor {
 }
 
 // newBlockingMockExecutor 构造阻塞直到 ctx 取消或 release 的 mock 执行器；
-// 释放后返回一个"完成"结果（1 文件 5 字节）。
+// 释放后返回一个"完成"结果（1 文件 5 字节）。带 started 信号（Run 被调用时 close）。
 func newBlockingMockExecutor() *mockExecutor {
 	return &mockExecutor{
 		result:  &RunResult{Status: StatusCompleted, FilesTotal: 1, FilesDone: 1, BytesTotal: 5, BytesDone: 5},
 		blockCh: make(chan struct{}),
+		started: make(chan struct{}),
 	}
 }
 
@@ -83,6 +89,11 @@ func (m *mockExecutor) Run(ctx context.Context, task *SyncTask, _ RemoteConfig) 
 	err := m.err
 	block := m.blockCh
 	m.mu.Unlock()
+
+	// 确定性信号：Run 被调用 = 任务已拿到信号量、开始执行（close 一次）。
+	if m.started != nil {
+		m.startOnce.Do(func() { close(m.started) })
+	}
 
 	if block != nil {
 		select {

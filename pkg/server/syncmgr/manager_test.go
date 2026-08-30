@@ -433,13 +433,22 @@ func TestConcurrency_Semaphore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 超时给足余量（-race + cover 下 goroutine 调度/磁盘 I/O 显著变慢，CI 曾 35s 超时
-	// flake——对齐 flaky-network-test-pattern 教训，正常值 3 倍以上）。
-	waitForStatus(t, mgr, taskA.ID, "syncing", 15*time.Second)
+	// 确定性同步（对齐 flaky-network-test-pattern）：用 channel 信号等 taskA 的
+	// executor.Run 被调用（= 已拿到信号量、开始执行），而非死等固定超时轮询状态——
+	// CI Windows -race + cover 下 goroutine 启动/状态流转慢，死等超时必然 flake
+	// （5s→15s 仍破过）。started 信号由 mockExecutor.Run 首次调用时 close。
+	select {
+	case <-blocking.started:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("taskA 未在 30s 内开始执行（executor.Run 未被调用）")
+	}
+	// taskA 已持有信号量（MaxConcurrent=1），taskB 必 pending（确定性，无时序依赖）。
 	if b := mgr.Get(taskB.ID); b.Status != StatusPending {
 		t.Fatalf("MaxConcurrent=1 时第二个任务应排队 pending，got %q", b.Status)
 	}
 	blocking.release()
+	// release 后 taskA 的 Run 返回 → 回填完成 → 释放信号量 → taskB 执行并完成。
+	// completed 是「任务确定在跑」后的收尾状态，30s 宽限足够（本地 0.02s，CI 慢也秒级）。
 	waitForStatus(t, mgr, taskA.ID, "completed", 30*time.Second)
 	waitForStatus(t, mgr, taskB.ID, "completed", 30*time.Second)
 }
