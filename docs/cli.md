@@ -174,6 +174,10 @@ sclient identity fingerprint [--file <path>]          # 仅打印指纹（供脚
 `sproxy/identity.json`（`--file` 覆盖）。`generate` 已存在时报错（`--force` 覆盖）；
 `show`/`fingerprint` 在文件缺失/损坏时返回非 0 退出码并提示恢复路径。
 
+> 注意：`--file` 为独立管理用途——`tunnel --xfer` 的 pinning 恒从默认 XDG 路径
+> （`sproxy/identity.json`）加载本端身份，自定义路径生成的身份仅供展示/备份，
+> 不会参与 xfer 隧道的身份交换。如需自定义身份路径参与隧道，请改用默认路径。
+
 ### relay
 
 ```bash

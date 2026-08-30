@@ -144,6 +144,9 @@ func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, 
 	// 无限占住 dialer 的 ensureHandshake / listener 的 Serve goroutine（资源耗尽 DoS）。
 	// 用 context.AfterFunc 在 ctx 超时/取消时 abort 握手流，使 io.ReadFull 立即返回，
 	// 使 handshakeTimeout 对身份阶段真正兜底。
+	// 注：Abort 的流残留在 mux.streams 表直至 mux 关闭（Abort 不删表项、defer Close
+	// 因 done 已关不发关闭帧）——单条流表项、有界、非泄漏；dialer 侧握手失败后 mux
+	// 整体关闭会清理，listener 侧无 pin 时 Serve 继续运行但滞留量受并发握手数上限约束。
 	stopAbort := context.AfterFunc(ctx, func() { _ = stream.Abort() })
 	defer stopAbort()
 
@@ -208,6 +211,13 @@ func handshakeIdentityDialer(s mux.Stream, id *Identity, peerFingerprints []stri
 // 先写本端身份标志（旧对端可能读完 ECDH 即关闭，写多余字节安全），随后读 dialer 响应。
 func handshakeIdentityListener(s mux.Stream, id *Identity, peerFingerprints []string, sigMsg []byte) (string, error) {
 	if err := writeIdentityFlag(s, id, sigMsg); err != nil {
+		// 写身份扩展失败：对端可能在读完 ECDH 公钥后即关闭（旧实现无身份扩展），
+		// 与下方 EOF 分支语义一致——未配置 pin 时视为"对端未提供身份"（向后兼容：
+		// 避免新旧对端混用时监听侧握手失败回退静态密钥而对端用 ECDH 会话密钥，
+		// 导致两端密钥不一致）；配置 pin 时仍 fail-closed 拒绝。
+		if len(peerFingerprints) == 0 {
+			return "", nil
+		}
 		return "", err
 	}
 	var flag [1]byte

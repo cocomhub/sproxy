@@ -1099,6 +1099,9 @@ func (c *FileClient) getTunnelMux(ctx context.Context) (*tunnel.Tunnel, error) {
 			return c.tunnelInst, nil
 		}
 	}
+	// 注：握手持续失败（如配置了错误 pin）时，每次请求都会重建 mux（重新 Dial + 握手），
+	// 无退避/熔断。fail-closed 语义正确；CLI 单请求场景每次新建 FileClient，影响有限；
+	// 库调用方长循环持续请求时注意此行为（背压/退避留待未来）。
 
 	tp := xfer.Get(c.xferName)
 	if tp == nil {

@@ -457,3 +457,38 @@ func TestNewTunnel_PinMismatch_ListenerServeFails(t *testing.T) {
 	}
 	cancel()
 }
+
+// failWriteStream 实现 mux.Stream，Write 恒失败（模拟"对端为旧实现，读完 ECDH 后
+// 关闭流"导致本端写身份扩展失败）。
+type failWriteStream struct{}
+
+func (m *failWriteStream) Read(p []byte) (int, error) { return 0, io.EOF }
+func (m *failWriteStream) Write(p []byte) (int, error) {
+	return 0, errors.New("stream closed by peer")
+}
+func (m *failWriteStream) Close() error      { return nil }
+func (m *failWriteStream) CloseWrite() error { return nil }
+func (m *failWriteStream) Abort() error      { return nil }
+func (m *failWriteStream) ID() mux.StreamID  { return 0 }
+
+// TestHandshakeIdentityListener_WriteFail_TreatAsOldPeer 验证发现 1：
+// listener 写身份扩展失败（对端为旧实现读完 ECDH 即关闭）且未配置 pin 时，
+// 握手不应失败——视为"对端未提供身份"（向后兼容，避免与旧 dialer 的 ECDH 会话
+// 密钥不一致导致隧道静默错位）；配置 pin 时仍 fail-closed 拒绝。
+func TestHandshakeIdentityListener_WriteFail_TreatAsOldPeer(t *testing.T) {
+	sigMsg := identitySigMessage(make([]byte, ecdhPublicKeyLen), make([]byte, ecdhPublicKeyLen))
+
+	// 无 pin：写失败 → 视为旧对端（无身份扩展），不报错。
+	fp, err := handshakeIdentityListener(&failWriteStream{}, nil, nil, sigMsg)
+	if err != nil {
+		t.Fatalf("无 pin 时写失败应视为旧对端（不报错），实际 err=%v", err)
+	}
+	if fp != "" {
+		t.Fatalf("对端未提供身份，指纹应为空，实际 %q", fp)
+	}
+
+	// 配置 pin：写失败 → fail-closed 报错（无法校验对端身份）。
+	if _, err := handshakeIdentityListener(&failWriteStream{}, nil, []string{"sha256:0000"}, sigMsg); err == nil {
+		t.Fatal("配置 pin 时写身份扩展失败应 fail-closed 报错")
+	}
+}

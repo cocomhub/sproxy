@@ -204,7 +204,7 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	} else if len(cfg.PeerFingerprints) > 0 {
 		// fail-closed：非 xfer 命令配置了 peer_fingerprints 但当前命令不走 xfer 握手，
 		// pinning 无法生效；配置了 pin 却静默跳过 = fail-open，必须报错并给出恢复路径。
-		return nil, fmt.Errorf("已配置 peer_fingerprints 但当前命令不走 xfer 隧道（--xfer），身份指纹 pinning 无法生效；请使用 `sclient tunnel --xfer <name>`，或移除 peer_fingerprints 配置（fail-closed）")
+		return nil, fmt.Errorf("已配置 peer_fingerprints 但当前命令不走 xfer 隧道（--xfer），身份指纹 pinning 无法生效；请使用 `sclient tunnel --xfer <name>`，或运行 `sclient config set peer_fingerprints \"\"` 临时清除（fail-closed）")
 	}
 
 	fc := client.NewFileClient(serverURL, opts...)
