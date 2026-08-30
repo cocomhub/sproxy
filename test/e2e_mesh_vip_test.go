@@ -104,3 +104,71 @@ func TestE2E_MeshConnect_VirtualIP(t *testing.T) {
 	}
 	t.Fatal("mesh connect <vip>:<port> echo 往返超时（虚拟 IP 端到端链路未就绪）")
 }
+
+// TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected（C-1 安全红线 E2E）：
+// mesh connect <vip>:<未宣告端口> 必须被出口拒绝——node-svc 只宣告 echo 端口，
+// 9999 未开放 → 拨号失败/流关闭，无 echo 回显。防 mesh 触达未宣告的网关 18085/
+// SOCKS/agent socket 等 loopback 服务。
+func TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected(t *testing.T) {
+	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
+	defer hubCleanup()
+
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(cn, cn)
+			}(c)
+		}
+	}()
+	_, echoPort, _ := net.SplitHostPort(echoLn.Addr().String())
+
+	cleanupSvc := startSClientMeshNode(t, hubURL, "node-svc", "echo:127.0.0.1:"+echoPort, ak, sk)
+	defer cleanupSvc()
+
+	deadline := time.Now().Add(15 * time.Second)
+	var vip string
+	for time.Now().Before(deadline) {
+		if vip = hubNodeVirtualIP(t, hubURL, "node-svc", ak, sk); vip != "" {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if vip == "" {
+		t.Fatal("node-svc 未在 hub 获得虚拟 IP")
+	}
+
+	// mesh connect <vip>:9999（未宣告端口）→ 出口必须拒绝。
+	listenAddr, meshCleanup := startSClientMeshConnect(t, hubURL, vip+":9999", ak, sk)
+	defer meshCleanup()
+
+	payload := []byte("c1-reject")
+	deadline = time.Now().Add(25 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, derr := net.Dial("tcp", listenAddr)
+		if derr == nil {
+			_, _ = conn.Write(payload)
+			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			buf := make([]byte, 16)
+			_, rerr := conn.Read(buf)
+			_ = conn.Close()
+			if rerr != nil {
+				// 读失败（EOF/超时）= 出口拒绝（无 echo 回显）→ 安全红线通过。
+				t.Log("未宣告端口被出口拒绝（C-1 闭环）")
+				return
+			}
+			t.Fatal("未宣告端口 9999 不应可访问（C-1 安全红线：mesh 触达未开放端口）")
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("mesh connect <vip>:9999 未在窗口内被拒绝（C-1 安全红线未闭环）")
+}
