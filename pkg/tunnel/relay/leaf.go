@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"syscall"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/iostream"
@@ -232,9 +233,15 @@ func handleUDPMap(ctx context.Context, m *mux.Mux, control mux.Stream, udpAddr s
 			_ = conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
 			n, rerr := conn.Read(buf)
 			if rerr != nil {
+				// 瞬时错误（目标 ICMP 拒绝/重置、超长、超时）丢弃该数据报并继续——
+				// 与写路径对称，防恶意对端向已关闭目标端口发一个数据报即终止映射。
 				var ne *net.OpError
 				if errors.As(rerr, &ne) && ne.Timeout() {
-					continue // 无响应，回 select 检查待发/stop
+					continue
+				}
+				if errors.Is(rerr, syscall.ECONNREFUSED) || errors.Is(rerr, syscall.ECONNRESET) || errors.Is(rerr, syscall.EMSGSIZE) {
+					logger.Debug("UDP 读瞬时错误（丢弃）", "error", rerr)
+					continue
 				}
 				return
 			}

@@ -53,7 +53,9 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 地址。本地监听默认 loopback。
 
 使用示例:
-  sclient udp map -l :5300 --exit node-b --remote 127.0.0.1:53`,
+  sclient udp map -l :5300 --exit node-b --remote 8.8.8.8:53
+  # 转发到出口本机 loopback 目标时，需出口节点宣告该服务或放行网段：
+  #   mesh node ... --service dns:127.0.0.1:53  或  --dial-allow-cidr 127.0.0.1/32`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			listenAddr, _ := cmd.Flags().GetString("listen")
 			exit, _ := cmd.Flags().GetString("exit")
