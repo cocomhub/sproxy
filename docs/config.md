@@ -113,6 +113,7 @@ prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI 
 | `hub_url` | string | (空) | mesh/relay/p2p 共用的 hub 地址（http(s) 或 ws(s)，可带 /ws 路径）。为空时各命令按自身语义回落（mesh→server_url，p2p→报错，relay→本地默认） |
 | `relay_token` | string | (空) | hub 中继注册 token（与 relay start --token / hub.relay_token 一致） |
 | `node_id` | string | (空) | 本节点默认 ID（mesh/p2p/relay 信令来源与寻址目标；为空回落主机名） |
+| `peer_fingerprints` | []string | (空) | 对端身份指纹 pinning 列表（64 hex 或 `sha256:<64 hex>`，逗号分隔）。仅 `sclient tunnel --xfer <name>`（xfer/mux 隧道）消费：握手时 fail-closed 校验对端 Ed25519 身份指纹，防 MITM。对端指纹取 `sclient identity fingerprint` 带外固化；本端身份由 `sclient identity generate` 生成（XDG 目录 `sproxy/identity.json`）。需配置 `access_key`/`access_key_secret`（派生隧道密钥使握手执行）。传统隧道/文件直连命令不走 xfer 握手，配置此项输出 Warn 提示不生效 |
 
 ### Hub 中继配置（服务端）
 
