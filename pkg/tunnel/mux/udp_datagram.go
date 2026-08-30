@@ -24,6 +24,10 @@ const (
 // ErrDatagramTooLarge 是数据报超过 MaxDatagramPayload 时的错误。
 var ErrDatagramTooLarge = errors.New("mux: datagram too large")
 
+// ErrDatagramDrop 是发送缓冲（writeCh）满、数据报被丢弃时的错误（UDP 语义：
+// 背压自然丢包，调用方应 log+continue 而非终止）。
+var ErrDatagramDrop = errors.New("mux: datagram dropped")
+
 // DatagramHandler 处理收到的 UDP 数据报（flowID 标识会话，data 为完整数据报负载）。
 // 由 readLoop 单线程调用，handler 内不得阻塞（如需耗时操作自行 go）。
 type DatagramHandler func(flowID uint32, data []byte)
@@ -39,10 +43,14 @@ func (m *Mux) SendDatagram(flowID uint32, data []byte) error {
 	copy(payload[datagramFlowLen:], data)
 	frame := EncodeFrame(0, FrameDatagram, payload)
 	select {
-	case m.writeCh <- writeMsg{data: frame, isRaw: true}:
+	case m.writeCh <- writeMsg{data: frame, isRaw: true, datagram: true}:
 		return nil
 	case <-m.done:
 		return ErrMuxClosed
+	default:
+		// writeCh 满（拥塞/对端不消费）→ 丢弃该数据报（UDP 语义，背压自然丢包），
+		// 不让单条数据报阻塞整个映射（防双向头阻塞）。
+		return ErrDatagramDrop
 	}
 }
 

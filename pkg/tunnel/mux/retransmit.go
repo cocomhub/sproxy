@@ -39,6 +39,12 @@ func (m *Mux) sendFrame(msg writeMsg) {
 	if msg.isRaw {
 		if err := m.conn.Send(m.Context(), msg.data); err != nil {
 			m.metrics.Errors.Add(1)
+			if msg.datagram {
+				// UDP 数据报：发送瞬时失败只丢弃（尽力而为），不关闭 mux——
+				// 避免单条数据报失败连带杀掉同 mux 的 TCP 流/HTTP 中继。
+				m.logger.Debug("mux: datagram send dropped", "err", err)
+				return
+			}
 			m.logger.Error("mux: send error", "err", err)
 			m.Close()
 		}

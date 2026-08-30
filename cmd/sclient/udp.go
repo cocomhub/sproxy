@@ -89,6 +89,9 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "udp")
 			svc, svcErr := factory.NewClient(cmd)
 			if svcErr != nil {
+				// 不吞错误：配置加载失败会导致 hub 模式报"无可用 mesh 路由"（真实根因
+				// 被隐藏），此处打 Warn 供排查；--mdns 可无客户端，不影响。
+				logger.Warn("创建客户端失败（hub 模式将无可用 mesh 路由；--mdns 可忽略）", "error", svcErr)
 				svc = nil
 			}
 			if hubURL == "" && svc != nil {
@@ -162,8 +165,11 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			if oerr != nil {
 				return fmt.Errorf("建立 UDP 映射失败: %w", oerr)
 			}
+			// 收尾顺序（LIFO）：先 m.Close 关闭 mux（解除流/读阻塞），再用 control.Abort
+			// 非阻塞放弃控制流（绝不用 Close——writeCh 满时 Close 会永久阻塞，造成
+			// Ctrl+C 收尾死锁）。
+			defer func() { _ = control.Abort() }()
 			defer func() { _ = m.Close() }()
-			defer func() { _ = control.Close() }()
 
 			// 本地 UDP 监听。
 			listenAddr = iostream.NormalizeListenAddr(listenAddr)
@@ -222,9 +228,15 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			}()
 
 			ios.WriteOutLine("UDP 映射就绪: %s ⇄ mesh(%s) ⇄ %s（Ctrl+C 退出）", udpLn.LocalAddr().String(), exit, remote)
-			<-ctx.Done()
-			logger.Info("UDP 映射结束")
-			return nil
+			// 主循环：ctx 取消（Ctrl+C）优雅退出；mux 死亡（出口重启/网络断）报错退出，
+			// 不静默永久挂起（客户端"就绪"后零数据流应可感知）。
+			select {
+			case <-ctx.Done():
+				logger.Info("UDP 映射结束")
+				return nil
+			case <-m.Done():
+				return fmt.Errorf("mesh 连接已断开（UDP 映射终止，出口节点可能已重启/网络中断）")
+			}
 		},
 	}
 	cmd.Flags().StringP("listen", "l", "127.0.0.1:0", "本地 UDP 监听地址（裸 :port 归一 127.0.0.1:port；默认随机端口）")

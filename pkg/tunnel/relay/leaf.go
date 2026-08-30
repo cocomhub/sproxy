@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 	"syscall"
 	"time"
 
@@ -105,9 +106,21 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				return
 			}
 
-			// 先按 UDP 映射帧解析（首帧 {"udp": addr} → 该 mux 作为 UDP 数据报通道）。
+			// 首帧分派：UDP 映射 / TCP dial / HTTP 中继。三种帧类型字段互斥，但
+			// 恶意帧可同时携带 udp/method 等键——统一解析后按"仅命中一种"分派，
+			// 防带 method 的帧被 udp 键劫持。
 			var ur hub.UDPRequest
-			if err := json.Unmarshal(meta, &ur); err == nil && ur.UDP != "" {
+			var d hub.DialRequest
+			var req tunnel.Request
+			uErr := json.Unmarshal(meta, &ur)
+			dErr := json.Unmarshal(meta, &d)
+			rErr := json.Unmarshal(meta, &req)
+			uOK := uErr == nil && ur.UDP != ""
+			dOK := dErr == nil && d.Dial != ""
+			rOK := rErr == nil && req.Method != ""
+
+			// UDP 映射帧：仅当非 dial 非 HTTP 时才生效（该 mux 作为 UDP 数据报通道）。
+			if uOK && !dOK && !rOK {
 				if !dialAllow {
 					logger.Warn("收到 UDP 映射帧但未开启 --dial-allow", "addr", ur.UDP)
 					return
@@ -115,9 +128,8 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				handleUDPMap(ctx, m, s, ur.UDP, dialPolicy, logger)
 				return
 			}
-			// 再按 dial 帧解析
-			var d hub.DialRequest
-			if err := json.Unmarshal(meta, &d); err == nil && d.Dial != "" {
+			// TCP dial 帧
+			if dOK && !rOK {
 				if !dialAllow {
 					logger.Warn("收到 dial 帧但未开启 --dial-allow", "addr", d.Dial)
 					if sOpts.DialResultFrames {
@@ -161,9 +173,8 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				return
 			}
 
-			// 否则按隧道 HTTP 中继处理
-			var req tunnel.Request
-			if err := json.Unmarshal(meta, &req); err != nil || req.Method == "" {
+			// 否则按隧道 HTTP 中继处理（req 已在上方统一解析）。
+			if !rOK {
 				logger.Warn("无法解析的中继帧", "meta", string(meta))
 				return
 			}
@@ -198,63 +209,65 @@ func handleUDPMap(ctx context.Context, m *mux.Mux, control mux.Stream, udpAddr s
 		logger.Warn("UDP 映射目标地址非法", "addr", udpAddr, "error", err)
 		return
 	}
-	conn, err := net.DialUDP("udp", nil, raddr)
+	// 用 ListenUDP + WriteToUDP（非连接 socket）：目标从不同源端口/IP 回包的协议
+	// （TFTP/游戏协议/多 A 记录）也能收到响应；转发时显式写目标地址。
+	conn, err := net.ListenUDP("udp", nil)
 	if err != nil {
-		logger.Warn("UDP 映射连接失败", "addr", udpAddr, "error", err)
+		logger.Warn("UDP 映射监听失败", "error", err)
 		return
 	}
 	logger.Info("UDP 端口映射就绪", "target", udpAddr, "local", conn.LocalAddr().String())
 
-	// 单 UDP 协程串行处理转发与响应（避免 handler/读/关闭并发访问 conn 的竞态）：
-	// 读用短 deadline 周期性让出给待发数据（否则阻塞在 conn.Read 无法消费 sendCh）。
-	// 数据报经非阻塞通道投递，通道满则丢弃（UDP 语义，背压自然丢包）。
-	// stop 关闭（控制流 EOF/对端退出）→ 协程退出，防优雅关闭后 goroutine/FD 泄漏。
-	sendCh := make(chan []byte, 64)
+	// 并发读+写：读协程收目标响应 → SendDatagram 回传；数据报 handler 写目标。
+	// conn.Read 与 conn.WriteToUDP 并发安全（net.UDPConn）；Close 经 connMu 串行化
+	// （等待在途 Write 完成），消除关闭竞态。读用 1s deadline 周期性让出给 stop
+	// （无响应时也检查关停；无忙等）。
+	var connMu sync.Mutex
 	stop := make(chan struct{})
 	udpDone := make(chan struct{})
 	go func() {
 		defer close(udpDone)
-		defer func() { _ = conn.Close() }()
+		defer func() {
+			connMu.Lock()
+			_ = conn.Close()
+			connMu.Unlock()
+		}()
 		buf := make([]byte, mux.MaxDatagramPayload)
 		for {
-			select {
-			case <-stop:
-				return
-			case data := <-sendCh:
-				if _, werr := conn.Write(data); werr != nil {
-					// 超限/瞬时写失败：丢弃该数据报并继续（防恶意超长数据报终止映射；
-					// conn 真正关闭时读路径也会失败退出）。
-					logger.Debug("UDP 转发失败（丢弃该数据报）", "error", werr)
-				}
-				continue // 优先排空待发数据
-			default:
-			}
-			// 非阻塞读响应：50ms deadline 让出给 sendCh/stop（本地 UDP 转发延迟可忽略）。
-			_ = conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 			n, rerr := conn.Read(buf)
 			if rerr != nil {
-				// 瞬时错误（目标 ICMP 拒绝/重置、超长、超时）丢弃该数据报并继续——
-				// 与写路径对称，防恶意对端向已关闭目标端口发一个数据报即终止映射。
 				var ne *net.OpError
 				if errors.As(rerr, &ne) && ne.Timeout() {
-					continue
+					select {
+					case <-stop:
+						return
+					default:
+						continue
+					}
 				}
-				if errors.Is(rerr, syscall.ECONNREFUSED) || errors.Is(rerr, syscall.ECONNRESET) || errors.Is(rerr, syscall.EMSGSIZE) {
+				if isUDPMomentaryErr(rerr) {
 					logger.Debug("UDP 读瞬时错误（丢弃）", "error", rerr)
 					continue
 				}
 				return
 			}
 			if serr := m.SendDatagram(0, buf[:n]); serr != nil {
+				// 拥塞丢弃/超限（UDP 语义）→ 继续；mux 关闭 → 退出。
+				if errors.Is(serr, mux.ErrDatagramDrop) || errors.Is(serr, mux.ErrDatagramTooLarge) {
+					continue
+				}
 				return
 			}
 		}
 	}()
 
 	m.SetDatagramHandler(func(flowID uint32, data []byte) {
-		select {
-		case sendCh <- data:
-		default:
+		connMu.Lock()
+		defer connMu.Unlock()
+		if _, werr := conn.WriteToUDP(data, raddr); werr != nil {
+			// 超限/瞬时写失败：丢弃该数据报（防恶意超长数据报终止映射）。
+			logger.Debug("UDP 转发失败（丢弃该数据报）", "error", werr)
 		}
 	})
 	defer func() { m.SetDatagramHandler(nil) }()
@@ -263,11 +276,21 @@ func handleUDPMap(ctx context.Context, m *mux.Mux, control mux.Stream, udpAddr s
 	var one [1]byte
 	_, _ = control.Read(one[:])
 	_ = ctx
-	// 先清 handler（不再投递 sendCh）→ 通知 UDP 协程停止 → 有界回收（≤50ms read deadline）。
+	// 先清 handler（不再写 conn）→ 通知读协程停止 → conn 在其 defer 内经 connMu 关闭。
 	m.SetDatagramHandler(nil)
 	close(stop)
 	<-udpDone
 	_ = control.Close()
+}
+
+// isUDPMomentaryErr 判断 UDP 读错误是否为瞬时（目标 ICMP 拒绝/重置、超长、路由不可达）
+// ——此类错误应丢弃该数据报并继续，而非终止整个映射（防恶意对端一击击穿）。
+func isUDPMomentaryErr(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EMSGSIZE) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH)
 }
 
 // serveHTTP 处理隧道 HTTP 中继流（metadata 已解析）。
