@@ -146,6 +146,10 @@ type CloudDownloadManager struct {
 	// TaskGroup 支持
 	groups  map[string]*CloudTaskGroup
 	groupMu sync.RWMutex
+	// groupSaveMu 串行化组持久化：saveGroup 的 marshal 与 write 必须原子（相对彼此），
+	// 否则一个持有旧快照的保存可能在更新保存之后落盘，导致重启恢复出陈旧组状态
+	// （Completed/Status 回退，TestCloudDownloadManager_GroupLifecycleAndPersistence 偶发 flake）。
+	groupSaveMu sync.Mutex
 }
 
 // CloudMetrics 云端下载 Prometheus 指标。
@@ -1156,6 +1160,13 @@ func (m *CloudDownloadManager) groupsDirPath() string {
 // 组状态（completed/partial/archive_file 等）持久化失败意味着重启后组元数据丢失，
 // 调用方（组状态变更点）必须显式处理；清理类保存可忽略返回值。
 func (m *CloudDownloadManager) saveGroup(g *CloudTaskGroup) error {
+	// 串行化整个 marshal+write：并发调用 saveGroup 时，若某个持有旧快照的保存
+	// 在更新的保存之后落盘，重启会恢复出陈旧组状态（进度/状态回退）。持锁期间
+	// marshal 反映当时的在内存最新状态，写盘按获取锁的顺序落盘，最后写盘者必为
+	// 最新状态触发的保存（所有组状态变更路径都调用 saveGroup）。
+	m.groupSaveMu.Lock()
+	defer m.groupSaveMu.Unlock()
+
 	m.groupMu.RLock()
 	data, err := json.Marshal(g)
 	m.groupMu.RUnlock()
