@@ -47,14 +47,20 @@ type HTTPTransportConfig struct {
 // （审查 I-1/I-2 / DoD 8）。
 //
 // 并发模型（AD-6）：MaxConnsPerHost=1 单连接串行分块；Engine 在多文件间并发。
-// Close 经 conn tracker 关闭全部 in-flight 连接（审查 M-3）。
+// Close 经 conn tracker 关闭全部 in-flight 连接（审查 M-3）；Close 后新拨号连接被
+// trackConn 立即关闭（审查第二轮 Minor #4）。
+//
+// BaseURL 约定：mesh 场景 Dial 返回的已是加密隧道流，BaseURL 应使用
+// `http://host:port`（https 会在隧道流上再叠一层 TLS 握手，自签必失败且无注入点）；
+// https 仅适用于直连 TCP 且远端有合法证书的场景。
 type HTTPTransport struct {
 	client *client.FileClient
 	tr     *http.Transport
 	logger *slog.Logger
 
-	mu    sync.Mutex
-	conns map[net.Conn]struct{} // in-flight 连接（Close 时逐个关闭，审查 M-3）
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{} // in-flight 连接（Close 时逐个关闭，审查 M-3）
+	closed bool                  // Close 已调用（新拨号直接拒绝）
 }
 
 // NewHTTPTransport 构造 HTTPTransport。Dial 必须非空（远程访问必须经 mesh 链路）。
@@ -90,7 +96,11 @@ func NewHTTPTransport(cfg HTTPTransportConfig) (*HTTPTransport, error) {
 				return nil, derr
 			}
 			wc := wrapDeadline(c, cfg.ReadTimeout, writeTimeout)
-			return t.trackConn(wc), nil
+			tc, terr := t.trackConn(wc)
+			if terr != nil {
+				return nil, terr
+			}
+			return tc, nil
 		},
 		ResponseHeaderTimeout: responseHeaderTimeout,
 		IdleConnTimeout:       30 * time.Second,
@@ -107,11 +117,19 @@ func NewHTTPTransport(cfg HTTPTransportConfig) (*HTTPTransport, error) {
 }
 
 // trackConn 注册连接到 tracker（供 Close 关闭），返回包装连接（Close 时自动 untrack）。
-func (t *HTTPTransport) trackConn(c net.Conn) net.Conn {
+// 已 Close 后拒绝新连接（直接关闭并返回 net.ErrClosed，审查第二轮 Minor #4）。
+func (t *HTTPTransport) trackConn(c net.Conn) (net.Conn, error) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		_ = c.Close()
+		return nil, net.ErrClosed
+	}
+	if t.conns == nil {
+		t.conns = make(map[net.Conn]struct{})
+	}
 	t.conns[c] = struct{}{}
-	t.mu.Unlock()
-	return &trackedConn{Conn: c, t: t}
+	return &trackedConn{Conn: c, t: t}, nil
 }
 
 func (t *HTTPTransport) untrack(c net.Conn) {
@@ -310,7 +328,10 @@ func (t *HTTPTransport) Rename(ctx context.Context, from, to string) error {
 		return fmt.Errorf("重命名源不存在: %s", from)
 	}
 	if e.IsDir {
-		return fmt.Errorf("远程服务不支持目录重命名（/rename 需源文件 SHA-256 checksum）: %s", from)
+		// 审查第二轮 Minor #3：与 LocalFS.Rename（支持目录）不对称。引擎的
+		// conflict_rename 在「src 文件 vs dst 目录」类型冲突时会尝试改名远端目录，
+		// 此处明确报错（fail-safe 不丢数据），并提示这是策略/平台限制。
+		return fmt.Errorf("远程服务不支持目录重命名（conflict_rename/overwrite 遇目录类型冲突时该路径不可用；/rename 需源文件 SHA-256 checksum）: %s", from)
 	}
 	if e.Checksum == "" {
 		return fmt.Errorf("重命名源 checksum 为空，无法校验: %s", from)
@@ -352,9 +373,15 @@ func (t *HTTPTransport) MakeDir(ctx context.Context, relPath string) error {
 }
 
 // Close 关闭全部 in-flight 连接（含空闲），使挂起的请求能通过连接关闭快速失败
-// （审查 M-3：仅 CloseIdleConnections 无法中断 in-flight 请求）。
+// （审查 M-3：仅 CloseIdleConnections 无法中断 in-flight 请求）。幂等；Close 后新拨号
+// 连接被 trackConn 立即关闭（审查第二轮 Minor #4）。
 func (t *HTTPTransport) Close() error {
 	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil
+	}
+	t.closed = true
 	conns := make([]net.Conn, 0, len(t.conns))
 	for c := range t.conns {
 		conns = append(conns, c)

@@ -54,6 +54,7 @@ type httpMockFS struct {
 	failStat       bool // Stat 返回 500
 	failChunk      bool // 任一 chunk 返回 checksum mismatch
 	noStatChecksum bool // Stat 不返回 X-File-Checksum（Rename checksum 为空场景）
+	failList       bool // List 返回 500
 }
 
 func newHTTPMockFS(t *testing.T) (*httptest.Server, *httpMockFS) {
@@ -114,6 +115,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func (m *httpMockFS) handleList(w http.ResponseWriter, r *http.Request) {
 	subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/")
+	if m.failList {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "注入的 list 失败"})
+		return
+	}
 	// 分页（对齐真实服务端 /api/files：默认 limit=1000，按 name 排序）
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -647,7 +652,12 @@ func TestHTTPTransport_Close(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// deadline 兜底（DoD 8）：对端停读 → 请求超时失败，而非无限挂起。
+// deadline 兜底（DoD 8）：对端停读/停发 → 请求超时失败，而非无限挂起。
+// 说明（审查第二轮 Minor #2）：本测试用 GET（无 body），请求头极小不阻塞写，实际验证
+// 的是 http.Transport 的 ResponseHeaderTimeout（读路径，内部 timer + pc.close，不依赖
+// deadlineConn 包装）；活跃写超时（写路径对端停读）由 TestDeadlineConn_WriteTimeout_*
+// （net.Pipe 单测）与 TestHTTPTransport_DialWrapsDeadline（包装与 WriteTimeout 传递）
+// 覆盖。
 // ---------------------------------------------------------------------------
 
 // noDeadlineConn 模拟 mesh 流（MuxStreamConn）的 SetDeadline no-op 行为。
@@ -680,8 +690,9 @@ func TestHTTPTransport_Deadline_ServerStopsReading(t *testing.T) {
 	}()
 	defer close(stop)
 
-	// Dial 返回「deadline no-op 的 mesh 流」——必须由 HTTPTransport 的 deadline-aware
-	// 包装兜底，否则 http.Transport 的 ResponseHeaderTimeout 静默失效。
+	// Dial 返回「deadline no-op 的 mesh 流」。http.Transport 的 ResponseHeaderTimeout
+	// 用内部 timer + pc.close()（不依赖 conn.SetDeadline），故本测试在 mesh 流上验证
+	// 读路径超时端到端；活跃写超时由 deadlineConn 单测与 DialWrapsDeadline 覆盖。
 	dial := func(ctx context.Context) (net.Conn, error) {
 		var d net.Dialer
 		c, derr := d.DialContext(ctx, "tcp", ln.Addr().String())
@@ -813,5 +824,53 @@ func TestHTTPTransport_WriteFile_Empty_PreservesMTime(t *testing.T) {
 	}
 	if f.mtime != mtime {
 		t.Fatalf("空文件 mtime 未保留: got %d, want %d", f.mtime, mtime)
+	}
+}
+
+// TestHTTPTransport_ListDir_ServerError 验证远程 List 500 → 报错（审查第二轮 Minor #5）。
+func TestHTTPTransport_ListDir_ServerError(t *testing.T) {
+	srv, m := newHTTPMockFS(t)
+	m.failList = true
+	tr := newHTTPTransport(t, srv)
+	if _, err := tr.ListDir(context.Background(), ""); err == nil {
+		t.Fatalf("List 500 应返回 error")
+	}
+}
+
+// TestHTTPTransport_Close_InterruptsInflight 验证 Close 中断 in-flight 请求（审查
+// M-3 核心承诺：Close 不只是关空闲连接）。handler 等待 ctx 取消，Close 后请求快速失败。
+func TestHTTPTransport_Close_InterruptsInflight(t *testing.T) {
+	started := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-r.Context().Done() // 等待客户端关闭连接（Close 或请求超时）
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	tr := newHTTPTransport(t, srv)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr.ListDir(context.Background(), "")
+		done <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("请求未建立连接")
+	}
+	_ = tr.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("Close 后 in-flight 请求应失败")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Close 未中断 in-flight 请求")
 	}
 }
