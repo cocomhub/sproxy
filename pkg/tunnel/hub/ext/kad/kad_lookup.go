@@ -128,6 +128,12 @@ func (d *KademliaDHT) Register(_ context.Context, info hub.PeerInfo) error {
 	return nil
 }
 
+// Remove removes a node from the routing table (idempotent).
+func (d *KademliaDHT) Remove(_ context.Context, nodeID string) error {
+	d.kad.Remove(nodeID)
+	return nil
+}
+
 // Lookup finds a specific node by ID.
 func (d *KademliaDHT) Lookup(ctx context.Context, nodeID string) (hub.PeerInfo, error) {
 	target := NodeIDFromString(nodeID)

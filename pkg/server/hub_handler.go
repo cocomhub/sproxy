@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,17 +13,31 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
 
+// SetDHT 注入节点发现表（DHT）。nil 清除（恢复不合并 DHT 候选）。
+// 由 cmd/sproxy 装配 Kademlia 时调用（hub.dht: kad）。
+func (h *Handlers) SetDHT(dht hub.DHT) {
+	h.dht = dht
+}
+
 // hubNodesHandler 返回在线节点列表（按调用方 mesh 过滤，M-9）。
+// 发现源 = 路由表（hub 权威）+ DHT 候选节点（SetDHT 注入时合并，去重，路由表优先）。
+// 满足"路由表仍 hub 权威；DHT 只提供候选节点/发现，不改状态"。
 func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	if h.routeTable == nil {
 		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
 		return
 	}
-	nodes := h.routeTable.List(meshFromRequest(r))
+	mesh := meshFromRequest(r)
+	nodes := h.routeTable.List(mesh)
+	if h.dht != nil {
+		nodes = h.mergeDHTNodes(nodes, mesh)
+	}
 	type nodeResp struct {
-		ID        string    `json:"id"`
-		Addr      string    `json:"addr,omitempty"`
-		Connected time.Time `json:"connected"`
+		ID   string `json:"id"`
+		Addr string `json:"addr,omitempty"`
+		// omitzero（Go 1.24+）：time.Time 的零值经 omitempty 仍会序列化为
+		// "0001-01-01T00:00:00Z"，DHT 候选无连接时间需用 omitzero 才真正省略。
+		Connected time.Time `json:"connected,omitzero"`
 	}
 	resp := make([]nodeResp, 0, len(nodes))
 	for _, n := range nodes {
@@ -36,6 +51,39 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		h.logger.Warn("JSON encode error", "handler", "hubNodesHandler", "error", err)
 	}
+}
+
+// mergeDHTNodes 把 DHT 候选节点合并进发现列表：按调用方 mesh 过滤（PeerInfo.Meta
+// ["mesh"]），按 node-id 去重（路由表权威优先）。DHT 查询失败/为空时原样返回。
+// 对端候选节点的 Connected 时间未知，用零值（客户端仅按 id 寻址，不依赖时间）。
+func (h *Handlers) mergeDHTNodes(nodes []hub.NodeInfo, mesh string) []hub.NodeInfo {
+	candidates, err := h.dht.GetClosestNodes(context.Background(), "hub-discovery", 1000)
+	if err != nil {
+		return nodes
+	}
+	seen := make(map[hub.NodeID]bool, len(nodes))
+	for _, n := range nodes {
+		seen[n.ID] = true
+	}
+	for _, c := range candidates {
+		// DHT 候选按 mesh 严格隔离：cm=="" 即默认 mesh，只对默认 mesh 请求者放行。
+		// 不能用"cm=="" 放行所有"——否则默认 mesh 节点泄漏给命名 mesh 调用方
+		// （破坏 M-9 列表隔离，且信令按 node-id 存转可被利用跨 mesh 拨号）。
+		if cm := c.Meta["mesh"]; cm != mesh {
+			continue
+		}
+		id := hub.NodeID(c.ID)
+		if id == "" || seen[id] {
+			continue // 去重：路由表权威优先
+		}
+		seen[id] = true
+		addr := c.Meta["addr"]
+		if addr == "" && len(c.Addrs) > 0 {
+			addr = c.Addrs[0]
+		}
+		nodes = append(nodes, hub.NodeInfo{ID: id, Addr: addr})
+	}
+	return nodes
 }
 
 // hubRemoveNodeHandler 踢出指定节点。
@@ -55,6 +103,12 @@ func (h *Handlers) hubRemoveNodeHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	h.routeTable.Remove(id)
+	// 同步从发现表（DHT）移除，防管理端踢出后节点仍出现在 /api/hub/nodes。
+	if h.dht != nil {
+		if rerr := h.dht.Remove(context.Background(), string(id)); rerr != nil {
+			h.logger.Debug("DHT 节点移除失败（忽略）", "node", id, "error", rerr)
+		}
+	}
 	w.Header().Set(headerContentType, contentTypeJSON)
 	if err := json.NewEncoder(w).Encode(map[string]string{"status": "removed", "node": string(id)}); err != nil {
 		h.logger.Warn("JSON encode error", "handler", "hubRemoveNodeHandler", "error", err)

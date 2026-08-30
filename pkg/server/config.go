@@ -69,6 +69,13 @@ type HubConfig struct {
 	// MaxConnections 是 Hub 同时处理的中继节点连接数上限（I30），0 或不填使用默认 256。
 	MaxConnections int              `yaml:"max_connections" mapstructure:"max_connections"`
 	Transports     TransportConfigs `yaml:"transports" mapstructure:"transports"`
+	// DHT 是节点发现表实现选择：""（默认）= 内置内存 DHT（不合并候选）；
+	// "kad" = Kademlia（ext/kad，XOR 距离路由表）。启用 kad 后，注册节点喂入
+	// DHT，/api/hub/nodes 合并 DHT 候选（路由表仍权威，DHT 只提供候选/发现）。
+	DHT string `yaml:"dht" mapstructure:"dht"`
+	// DHTSeeds 是 DHT 引导种子节点地址（仅 DHT=kad 时消费；空 = 不引导）。
+	// 当前无 hub 联邦，种子用于未来多 hub DHT 组网；填入即调 Bootstrap 插入路由表。
+	DHTSeeds []string `yaml:"dht_seeds" mapstructure:"dht_seeds"`
 }
 
 // TransportConfigs 聚合所有可用的传输层配置，当前为预留扩展，暂无产品代码消费。
@@ -291,6 +298,11 @@ func (c *Config) Validate() error {
 		// S42：WS 是当前唯一可用的节点接入传输；hub 启用而无 transport 时
 		// 节点无法注册，属配置脚枪，fail-fast 启动失败。
 		return fmt.Errorf("hub.enabled=true 但 transports.ws.enabled=false，中继节点无法连接，请启用 WebSocket 传输")
+	}
+	if c.Hub.Enabled && c.Hub.DHT != "" && c.Hub.DHT != "kad" {
+		// 防配置打错字（"kademlia" 等）被静默忽略。门控在 hub.enabled：hub 未启用时
+		// dht 不被消费，历史/闲置配置遗留不阻断启动（与 ws transport 校验一致）。
+		return fmt.Errorf("hub.dht=%q 无效，仅支持 \"\"（内置内存 DHT）或 \"kad\"（Kademlia）", c.Hub.DHT)
 	}
 	return nil
 }

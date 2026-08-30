@@ -99,6 +99,9 @@ access_keys:
 #   node_id: "node-a"               # 本节点 ID（mesh connect / relay dial 的目标）
 #   max_connections: 256             # 同时处理的中继连接数上限（0/缺省默认 256；I30 防连接洪泛）
 #   persist_file: ""                # hub 状态持久化文件路径（节点注册/信令收件箱重启间保留）；空=关闭（默认）
+#   dht: ""                        # 节点发现表实现：""（默认）= 内置内存 DHT；"kad" = Kademlia（ext/kad，XOR 距离路由表）
+#                                   # 启用 kad 后注册节点喂入 DHT，/api/hub/nodes 合并 DHT 候选（路由表仍权威，DHT 只提供候选/发现）
+#   dht_seeds: []                  # DHT 引导种子节点地址（仅 dht: kad 时消费；空=不引导，预留多 hub 组网）
 #   transports:
 #     ws:
 #       enabled: true

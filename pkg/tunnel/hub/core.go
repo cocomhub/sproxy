@@ -26,6 +26,10 @@ type DHT interface {
 	// 距离算法由各实现定义（内置：词法排序；Kademlia：XOR 距离）。
 	GetClosestNodes(ctx context.Context, nodeID string, n int) ([]PeerInfo, error)
 
+	// Remove 从发现表中移除指定节点（节点断开/管理端踢出时调用，防幽灵节点残留）。
+	// 节点不存在时视为成功（幂等）。
+	Remove(ctx context.Context, nodeID string) error
+
 	// Bootstrap 连接到已知种子节点，加入 DHT 网络。
 	Bootstrap(ctx context.Context, seeds []string) error
 

@@ -54,6 +54,12 @@ func (m *MockDHT) GetClosestNodes(ctx context.Context, nodeID string, n int) ([]
 	return nil, nil
 }
 
+// Remove 实现 hub.DHT.Remove（幂等：不存在也返回 nil）。
+func (m *MockDHT) Remove(_ context.Context, nodeID string) error {
+	delete(m.peers, nodeID)
+	return nil
+}
+
 // Bootstrap 实现 hub.DHT.Bootstrap。
 func (m *MockDHT) Bootstrap(ctx context.Context, seeds []string) error {
 	return nil

@@ -22,16 +22,20 @@ import (
 
 // Handlers 持有所有 HTTP handler 的依赖。
 type Handlers struct {
-	cfgPtr         *atomic.Pointer[Config]
-	version        string
-	buildAt        string
-	checksumStore  ChecksumStoreIface
-	uploadStore    UploadStoreIface
-	tunnelHandler  http.Handler
-	logger         *slog.Logger
-	metrics        *Metrics
-	shareStore     *ShareStore
-	routeTable     *hub.MeshRouteTable
+	cfgPtr        *atomic.Pointer[Config]
+	version       string
+	buildAt       string
+	checksumStore ChecksumStoreIface
+	uploadStore   UploadStoreIface
+	tunnelHandler http.Handler
+	logger        *slog.Logger
+	metrics       *Metrics
+	shareStore    *ShareStore
+	routeTable    *hub.MeshRouteTable
+	// dht 是节点发现表（nil = 不启用 DHT 候选，既有行为）。/api/hub/nodes 把 DHT
+	// 候选节点合并进发现列表（路由表权威 + DHT 候选，去重）。由 cmd/sproxy 装配
+	// Kademlia 时经 SetDHT 注入（hub.dht: kad）。
+	dht            hub.DHT
 	signalBroker   *SignalBroker
 	hubPersist     *hub.Persister // hub 状态持久化器（配置 hub.persist_file 时注入；nil = 不持久化）
 	handler        http.Handler
