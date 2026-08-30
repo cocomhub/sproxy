@@ -49,7 +49,7 @@ func TestServe_UDPMapDialPolicyRejected(t *testing.T) {
 	_, _ = clientStream.Write(udpMeta)
 	_ = clientStream.CloseWrite()
 
-	expectStreamClosed(ctx, t, clientStream, "策略拒绝的 UDP 映射流")
+	expectStreamClosed(t, clientStream, "策略拒绝的 UDP 映射流", 5*time.Second)
 }
 
 // TestServe_UDPMapBidirectional（relay 级）：UDP 映射流经 relay 双向转发——数据报经
@@ -256,5 +256,5 @@ func TestServe_FrameDisambiguation(t *testing.T) {
 	_ = clientStream.CloseWrite()
 
 	// 流应按 HTTP 处理（localAddr 不可达 → 关闭），而非保持打开（UDP 映射）。
-	expectStreamClosed(ctx, t, clientStream, "双字段帧应按 HTTP 处理（流关闭）")
+	expectStreamClosed(t, clientStream, "双字段帧应按 HTTP 处理（流关闭）", 5*time.Second)
 }
