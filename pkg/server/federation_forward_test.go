@@ -319,27 +319,38 @@ func TestRelayStreamHandler_ForwardUpstream401_Maps502(t *testing.T) {
 }
 
 // TestFederationForwarder_Forward_LoopGuard：转发器防环单元测试——跳数超限与
-// 路径回源均返回 508（DoD 2），且不发起网络请求。
+// 路径回源均返回 508（DoD 2），且不发起网络请求。覆盖 hubID 配置与不配置两种
+// 情形（评审 #2：默认无 node_id 时防环也必须自洽生效）。
 func TestFederationForwarder_Forward_LoopGuard(t *testing.T) {
 	peer := hub.FederationPeer{ID: "hubB", URL: "http://127.0.0.1:1"} // 不会真正拨号
-	fwd := NewFederationForwarder(nil, "hubA", 2, testutil.DiscardLogger())
+	for _, tc := range []struct {
+		name  string
+		hubID string
+	}{
+		{name: "hubID配置", hubID: "hubA"},
+		{name: "hubID缺省", hubID: ""}, // 默认配置：防环依赖下一跳 peer.ID 追加，仍须生效
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fwd := NewFederationForwarder(nil, tc.hubID, 2, testutil.DiscardLogger())
 
-	// 跳数超限：incomingHop >= maxHops(2) → 508。
-	_, err := fwd.Forward(t.Context(), peer, "node-x", "1.2.3.4:80", 2, nil)
-	if !isForwardStatus(err, http.StatusLoopDetected) {
-		t.Fatalf("跳数超限应 508, got %v", err)
-	}
+			// 跳数超限：incomingHop >= maxHops(2) → 508。
+			_, err := fwd.Forward(t.Context(), peer, "node-x", "1.2.3.4:80", 2, nil)
+			if !isForwardStatus(err, http.StatusLoopDetected) {
+				t.Fatalf("跳数超限应 508, got %v", err)
+			}
 
-	// 路径回源：peer.ID("hubB") 已在路径 → 508。
-	_, err = fwd.Forward(t.Context(), peer, "node-x", "1.2.3.4:80", 0, []string{"hubA", "hubB"})
-	if !isForwardStatus(err, http.StatusLoopDetected) {
-		t.Fatalf("路径回源应 508, got %v", err)
-	}
+			// 路径回源：peer.ID("hubB") 已在路径 → 508。
+			_, err = fwd.Forward(t.Context(), peer, "node-x", "1.2.3.4:80", 0, []string{"hubA", "hubB"})
+			if !isForwardStatus(err, http.StatusLoopDetected) {
+				t.Fatalf("路径回源应 508, got %v", err)
+			}
 
-	// 跳数边界内、路径不含 peer → 不触发防环（会尝试拨号 127.0.0.1:1 → 网络错误 502）。
-	_, err = fwd.Forward(t.Context(), peer, "node-x", "1.2.3.4:80", 1, []string{"hubA"})
-	if err == nil || isForwardStatus(err, http.StatusLoopDetected) {
-		t.Fatalf("防环不应误伤合法转发, got %v", err)
+			// 跳数边界内、路径不含 peer → 不触发防环（会尝试拨号 127.0.0.1:1 → 网络错误 502）。
+			_, err = fwd.Forward(t.Context(), peer, "node-x", "1.2.3.4:80", 1, []string{"hubA"})
+			if err == nil || isForwardStatus(err, http.StatusLoopDetected) {
+				t.Fatalf("防环不应误伤合法转发, got %v", err)
+			}
+		})
 	}
 }
 
@@ -392,6 +403,39 @@ func TestRelayStreamHandler_ForwardPathLoop_Returns508(t *testing.T) {
 	}
 	if mock.relayHits.Load() != 0 {
 		t.Fatalf("路径回源不应向对端转发, relay hits = %d", mock.relayHits.Load())
+	}
+}
+
+// TestRelayStreamHandler_Forward_FailoverToSecondPeer：多对端上报同一节点时，首个
+// 对端失败（502）自动尝试第二个（成功）——故障转移（评审 #5，对齐 MeshConnect 多候选回退）。
+func TestRelayStreamHandler_Forward_FailoverToSecondPeer(t *testing.T) {
+	mockDown := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
+	mockDown.relayStatus = http.StatusBadGateway
+	mockUp := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
+
+	rtA := hub.NewMeshRouteTable()
+	hA, tsA := newRelayTestHub(t, rtA, nil)
+	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{
+		{ID: "hubDown", URL: mockDown.srv.URL},
+		{ID: "hubUp", URL: mockUp.srv.URL},
+	}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	t.Cleanup(fcA.Close)
+	if err := fcA.SyncAll(context.Background()); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	hA.SetFederationClient(fcA)
+
+	conn, err := relayConnectRaw(t, tsA.URL, "node-x", "1.2.3.4:80", nil)
+	if err != nil {
+		t.Fatalf("第二个对端应接管成功: %v", err)
+	}
+	defer conn.Close()
+	echoRoundTrip(t, conn, "failover-echo")
+	if mockDown.relayHits.Load() != 1 {
+		t.Errorf("宕机对端应被尝试一次, got %d", mockDown.relayHits.Load())
+	}
+	if mockUp.relayHits.Load() != 1 {
+		t.Errorf("健康对端应被尝试一次, got %d", mockUp.relayHits.Load())
 	}
 }
 
@@ -451,8 +495,76 @@ func TestRelayStreamHandler_Forward_HeadersSent(t *testing.T) {
 	if hdr["hop"] != "1" {
 		t.Errorf("转发请求 X-Relay-Hop 应为 1, got %q", hdr["hop"])
 	}
+	// 下一跳 peer.ID（hubB）必须追加进路径：即使 hubID 未配置（默认），防环路径
+	// 检查也自洽生效（评审 #2 修复：不再依赖 node_id 配置）。
+	if hdr["path"] != "hubB" {
+		t.Errorf("转发请求 X-Relay-Path 应为下一跳 peer ID hubB（hubID 未配置）, got %q", hdr["path"])
+	}
 	if !strings.HasPrefix(hdr["authorization"], "SproxySig ") {
 		t.Errorf("转发请求应带 SproxySig 认证头, got %q", hdr["authorization"])
+	}
+}
+
+// TestRelayStreamHandler_ForwardPath_Accumulation：中间 hub 转发时 hop/path 逐跳
+// 递增——客户端请求带 hop=2 / path=hubA,hubB（已途经两 hub），本 hub 转发到下一跳
+// 对端 hubC 时，hop 递增为 3、路径追加下一跳 peer.ID → hubA,hubB,hubC（评审 #3：
+// 多跳路径追加逻辑的服务器级覆盖）。
+func TestRelayStreamHandler_ForwardPath_Accumulation(t *testing.T) {
+	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
+	rtA := hub.NewMeshRouteTable()
+	hA, tsA := newRelayTestHub(t, rtA, nil)
+	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubC", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	t.Cleanup(fcA.Close)
+	if err := fcA.SyncAll(context.Background()); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	hA.SetFederationClient(fcA)
+
+	conn, err := relayConnectRaw(t, tsA.URL, "node-x", "1.2.3.4:80", map[string]string{
+		relayForwardHopHeader:  "2",
+		relayForwardPathHeader: "hubA,hubB",
+	})
+	if err != nil {
+		t.Fatalf("转发应成功: %v", err)
+	}
+	_ = conn.Close()
+
+	hdr := mock.lastHeaders()
+	if hdr == nil {
+		t.Fatalf("mock 未收到转发请求")
+	}
+	if hdr["hop"] != "3" {
+		t.Errorf("X-Relay-Hop 应递增为 3, got %q", hdr["hop"])
+	}
+	if hdr["path"] != "hubA,hubB,hubC" {
+		t.Errorf("X-Relay-Path 应追加下一跳 hubC → hubA,hubB,hubC, got %q", hdr["path"])
+	}
+}
+
+// TestRelayStreamHandler_ForwardOversizedPath_400：X-Relay-Path 超限 → 400 拒绝
+// （防头部放大，评审 #6）。
+func TestRelayStreamHandler_ForwardOversizedPath_400(t *testing.T) {
+	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
+	rtA := hub.NewMeshRouteTable()
+	hA, tsA := newRelayTestHub(t, rtA, nil)
+	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	t.Cleanup(fcA.Close)
+	if err := fcA.SyncAll(context.Background()); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	hA.SetFederationClient(fcA)
+
+	bigPath := strings.Repeat("a,", (maxRelayPathBytes+1024)/2) // 远超 64KiB
+	conn, err := relayConnectRaw(t, tsA.URL, "node-x", "1.2.3.4:80", map[string]string{relayForwardPathHeader: bigPath})
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("超限路径应被拒绝")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Fatalf("超限路径应 400, got: %v", err)
+	}
+	if mock.relayHits.Load() != 0 {
+		t.Fatalf("超限路径不应触发转发, hits = %d", mock.relayHits.Load())
 	}
 }
 
@@ -521,6 +633,42 @@ func TestRelayStreamHandler_ForwardMeshIsolation_404(t *testing.T) {
 	}
 	if mock.relayHits.Load() != 0 {
 		t.Fatalf("跨 mesh 不应触发转发, hits = %d", mock.relayHits.Load())
+	}
+}
+
+// TestRelayForwardDialer_TLSHandshakeBounded：对端 accept TCP 但永不回复 ServerHello
+// （TLS 黑洞）时，握手必须被 deadline/ctx 约束快速失败，而非无限阻塞（评审 #1）。
+func TestRelayForwardDialer_TLSHandshakeBounded(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(io.Discard, cn) // 读 ClientHello 但永不回 ServerHello
+			}(c)
+		}
+	}()
+
+	peer := hub.FederationPeer{ID: "hubTLS", URL: "https://" + ln.Addr().String()}
+	d := &relayForwardDialer{logger: testutil.DiscardLogger()}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err = d.Dial(ctx, peer, "node-x", "1.2.3.4:80", nil)
+	if err == nil {
+		t.Fatalf("TLS 黑洞应拨号失败")
+	}
+	// 2s ctx deadline + 握手 deadline（min(ctx,30s)）→ 应在 5s 内返回（-race 留余量）。
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("TLS 握手应被 deadline 约束，took %v", elapsed)
 	}
 }
 

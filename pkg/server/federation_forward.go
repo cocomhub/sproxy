@@ -92,12 +92,12 @@ func NewFederationForwarder(fc *hub.FederationClient, hubID string, maxHops int,
 	}
 }
 
-// PeerForNode 返回上报目标节点的联邦对端（mesh 严格匹配）。
-func (f *FederationForwarder) PeerForNode(id hub.NodeID, mesh string) (hub.FederationPeer, bool) {
+// PeersForNode 返回上报目标节点的全部联邦对端（mesh 严格匹配），供故障转移按序尝试。
+func (f *FederationForwarder) PeersForNode(id hub.NodeID, mesh string) []hub.FederationPeer {
 	if f == nil || f.fc == nil {
-		return hub.FederationPeer{}, false
+		return nil
 	}
-	return f.fc.PeerForNode(id, mesh)
+	return f.fc.PeersForNode(id, mesh)
 }
 
 // MaxHops 返回转发链最大跳数。
@@ -110,12 +110,17 @@ func (f *FederationForwarder) MaxHops() int {
 
 // Forward 把 relay 拨号请求转发到对端 hub，返回对端已升级的双向字节流。
 //
-// 防环（DoD 2）：
+// 防环（DoD 2，自洽不依赖对端配置）：
 //   - 跳数超限（incomingHop >= maxHops）→ *forwardStatusError{508}
 //   - 目标对端已在路径中（回源/环路）→ *forwardStatusError{508}
 //
-// 转发时附加 hop+1 / path+hubID 头，供下游 hub 做同样的防环检查。上游非 200
-// 状态映射为 *forwardStatusError{状态码}；网络/握手错误映射 502。
+// 路径（X-Relay-Path）追加两层标识，供下游 hub 做同样的防环检查：
+//   - **下一跳 peer.ID（总是追加）**：与对端解析目标时的 peer.ID 同一命名空间，
+//     环路检查自洽——无需各 hub 的 node_id 与 peer.id 跨命名空间一致即可生效；
+//   - **本 hub 身份 hubID（配置了 node_id 时追加）**：对端把「请求来自哪个 hub」
+//     与本端解析结果比对，配置一致时在回源前一跳即拒绝（更严格）。
+//
+// 上游非 200 状态映射为 *forwardStatusError{状态码}；网络/握手错误映射 502。
 func (f *FederationForwarder) Forward(ctx context.Context, peer hub.FederationPeer, target, addr string, incomingHop int, path []string) (net.Conn, error) {
 	if incomingHop >= f.maxHops {
 		return nil, &forwardStatusError{http.StatusLoopDetected, fmt.Sprintf("跨 hub 转发跳数超限（max=%d）", f.maxHops)}
@@ -124,10 +129,11 @@ func (f *FederationForwarder) Forward(ctx context.Context, peer hub.FederationPe
 		return nil, &forwardStatusError{http.StatusLoopDetected, "检测到转发环路：目标 hub 已在路径中，拒绝回源"}
 	}
 	nextHop := incomingHop + 1
-	nextPath := path
+	nextPath := append([]string{}, path...)
 	if f.hubID != "" {
-		nextPath = append(append([]string{}, path...), f.hubID)
+		nextPath = append(nextPath, f.hubID) // 本 hub 身份（配置 node_id 时追加）
 	}
+	nextPath = append(nextPath, peer.ID) // 下一跳 peer ID（自洽防环）
 	headers := map[string]string{
 		relayForwardHopHeader:  strconv.Itoa(nextHop),
 		relayForwardPathHeader: strings.Join(nextPath, ","),
@@ -168,7 +174,8 @@ func (f *FederationForwarder) mapUpstreamError(peer hub.FederationPeer, err erro
 	return &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("连接上游 hub %s 失败: %v", peer.ID, err)}
 }
 
-// Close 释放对端直连 dialer 引用。
+// Close 释放对端直连 dialer 引用。不中断在途转发——活跃转发连接由各自
+// serveForwarded 的 defer upstream.Close() 负责收尾。
 func (f *FederationForwarder) Close() {
 	if f == nil {
 		return
@@ -202,32 +209,51 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("对端 URL %q 无效", peer.URL)}
 	}
 
-	dialer := &net.Dialer{Timeout: 15 * time.Second}
-	var raw net.Conn
-	switch scheme {
-	case "https", "wss":
-		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: relayForwardTLSConfig(peer, host)}
-		raw, err = tlsDialer.DialContext(ctx, "tcp", host)
-	case "http", "ws":
-		raw, err = dialer.DialContext(ctx, "tcp", host)
-	default:
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("不支持的对端 URL scheme %q", scheme)}
-	}
-	if err != nil {
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("连接对端 %s 失败: %v", host, err)}
-	}
-
 	// 握手阶段有界（对齐 pkg/client I33）：deadline 取 min(ctx deadline, 30s)；
-	// ctx-watchdog 在 ctx 取消时立即关闭底层连接。握手完成后清除 deadline，
-	// 长连接数据面不受影响。
+	// **TCP 连接与 TLS 握手都在该预算内**（TLS 握手在设 socket deadline 之后执行，
+	// 不受无 deadline 的 ctx 影响，防对端 TLS 黑洞无限阻塞）。ctx-watchdog 在
+	// ctx 取消时立即关闭底层连接。握手完成后清除 deadline，长连接数据面不受影响。
 	handshakeDeadline := time.Now().Add(relayForwardHandshakeTimeout)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(handshakeDeadline) {
 		handshakeDeadline = dl
 	}
-	if err := raw.SetDeadline(handshakeDeadline); err != nil {
-		_ = raw.Close()
-		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", err)}
+
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	var raw net.Conn
+	switch scheme {
+	case "https", "wss":
+		raw, err = dialer.DialContext(ctx, "tcp", host) // TCP 连接（15s 内）
+		if err != nil {
+			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("连接对端 %s 失败: %v", host, err)}
+		}
+		if derr := raw.SetDeadline(handshakeDeadline); derr != nil {
+			_ = raw.Close()
+			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
+		}
+		tlsCfg, cerr := relayForwardTLSConfig(peer, host)
+		if cerr != nil {
+			_ = raw.Close()
+			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("构造对端 TLS 配置失败: %v", cerr)}
+		}
+		tlsConn := tls.Client(raw, tlsCfg)
+		if herr := tlsConn.HandshakeContext(ctx); herr != nil {
+			_ = raw.Close()
+			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("对端 %s TLS 握手失败: %v", host, herr)}
+		}
+		raw = tlsConn
+	case "http", "ws":
+		raw, err = dialer.DialContext(ctx, "tcp", host)
+		if err != nil {
+			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("连接对端 %s 失败: %v", host, err)}
+		}
+		if derr := raw.SetDeadline(handshakeDeadline); derr != nil {
+			_ = raw.Close()
+			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
+		}
+	default:
+		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("不支持的对端 URL scheme %q", scheme)}
 	}
+
 	stopWatchdog := make(chan struct{})
 	watchdogDone := make(chan struct{})
 	go func() {
@@ -263,10 +289,12 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 		fmt.Fprintf(&b, "Authorization: %s\r\n", sproxysig.SignAndFormat(peer.AccessKeySecret, h, http.MethodPost, path, ""))
 	}
 	for k, v := range headers {
-		// 防 CRLF 注入：拒绝含 \r\n 的头名/值（本端构造，防未来调用方传入脏值）。
-		if strings.ContainsAny(k, "\r\n") || strings.ContainsAny(v, "\r\n") {
+		// 头卫生（RFC 7230 字段值只允许 vchar + SP/HTAB）：拒绝 CR/LF（防注入）
+		// 与其它的 0x00-0x1F/0x7F 控制字符（防对端解析歧义）。本端构造，防未来
+		// 调用方传入脏值。
+		if !validHeaderField(k, v) {
 			_ = raw.Close()
-			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("非法转发头 %q（含 CR/LF）", k)}
+			return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("非法转发头 %q（含控制字符）", k)}
 		}
 		fmt.Fprintf(&b, "%s: %s\r\n", k, v)
 	}
@@ -293,12 +321,18 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 	if len(parts) >= 2 {
 		status, _ = strconv.Atoi(parts[1])
 	}
+	// 状态码无法解析（非法状态行）→ 归一为 502（Bad Gateway），避免 status=0
+	// 落入 http.Error(w, msg, 0) 产生畸形响应。
 	if status != http.StatusOK {
 		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
 		_ = raw.Close()
 		reason := strings.TrimSpace(string(rest))
 		if reason == "" && len(parts) >= 3 {
 			reason = strings.TrimSpace(parts[2])
+		}
+		if status < 100 || status > 999 {
+			status = http.StatusBadGateway
+			reason = fmt.Sprintf("对端返回非法状态行 %q", strings.TrimSpace(statusLine))
 		}
 		return nil, &forwardStatusError{status, reason}
 	}
@@ -345,23 +379,44 @@ func (c *relayForwardConn) CloseWrite() error {
 
 // relayForwardTLSConfig 构造到对端 hub 的 TLS 配置（fail-closed，与联邦拉取一致）：
 //   - CAFile 非空 → 用该 CA 构建专属证书池严格校验（ServerName 由 URL host 自动校验）；
+//     文件缺失/无有效 PEM 返回 error（fail-fast，与 FederationClient 构造期一致，
+//     不静默回落系统根——否则 peer 的 CA 在运行期被删除后转发会悄悄放宽校验）。
 //   - InsecureSkipVerify → 跳过校验（仅 loopback peer，Config.Validate 已强制）；
 //   - 默认 → 系统根证书池严格校验。
-//
-// CA 文件读取失败时不设置 RootCAs（走系统根）——联邦拉取构造期已校验过 CA
-// （fail-fast），此处仅兜底，TLS 握手失败会以明确错误传播。
-func relayForwardTLSConfig(peer hub.FederationPeer, serverName string) *tls.Config {
+func relayForwardTLSConfig(peer hub.FederationPeer, serverName string) (*tls.Config, error) {
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
 	switch {
 	case peer.CAFile != "":
-		if pem, err := os.ReadFile(peer.CAFile); err == nil {
-			if pool := x509.NewCertPool(); pool.AppendCertsFromPEM(pem) {
-				cfg.RootCAs = pool
-			}
+		pem, err := os.ReadFile(peer.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("读取 CA 文件 %s: %w", peer.CAFile, err)
 		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("CA 文件 %s 无有效 PEM 证书", peer.CAFile)
+		}
+		cfg.RootCAs = pool
 	case peer.InsecureSkipVerify:
 		// 仅 loopback peer（Config.Validate 已拒绝远程 + insecure）。
 		cfg.InsecureSkipVerify = true //nolint:gosec // 用户仅对本 loopback peer 显式配置跳过证书校验（本机自签开发/测试）
 	}
-	return cfg
+	return cfg, nil
+}
+
+// validHeaderField 校验 HTTP 头字段名/值是否合法（RFC 7230）：字段值只允许
+// visible chars、空格与水平制表符；拒绝 CR/LF（注入）及其它控制字符。
+func validHeaderField(k, v string) bool {
+	check := func(s string) bool {
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			if c == '\t' {
+				continue
+			}
+			if c < 0x20 || c == 0x7f {
+				return false
+			}
+		}
+		return true
+	}
+	return k != "" && check(k) && check(v)
 }

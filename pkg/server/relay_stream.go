@@ -42,6 +42,11 @@ const relayStreamIdleTimeout = 15 * time.Minute
 // maxDialResultFrameBytes 是拨号结果帧（[4B len][JSON]）的 JSON 部分长度上限。
 const maxDialResultFrameBytes = 4096
 
+// maxRelayPathBytes 是跨 hub 转发路径头 X-Relay-Path 的最大字节数。
+// 防头部放大：恶意客户端可发 MB 级路径头让本 hub 原样写回对端（对端仅靠
+// max_header_bytes 兜底）；超限直接拒绝（fail-closed，不截断静默放行）。
+const maxRelayPathBytes = 64 << 10 // 64 KiB
+
 // RelayStreamRequest 是任意 TCP 流中继请求（对应 hub.DialRequest）。
 type RelayStreamRequest struct {
 	Target string `json:"target"`
@@ -78,6 +83,9 @@ func NewRelayStreamHandler(rt *hub.MeshRouteTable, logger *slog.Logger) *RelaySt
 // hubID 是本 hub 身份（防环路径记录用，通常为 config hub.node_id；为空不追加路径条目）。
 // 由 Handlers.SetFederationClient 在注入联邦客户端时联动调用，保证跨 hub 转发
 // 与节点表联邦候选合并同步启用。
+//
+// 并发约束：仅启动期装配调用（root.go 装配后即固定）；运行期重载不支持，
+// h.forwarder 字段无锁（与 Handlers.fedClient/dht 同模式）。
 func (h *RelayStreamHandler) SetFederation(fc *hub.FederationClient, hubID string) {
 	if fc == nil {
 		h.forwarder = nil
@@ -320,23 +328,48 @@ func (h *RelayStreamHandler) serveForwarded(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	mesh := meshFromRequest(r)
-	peer, ok := h.forwarder.PeerForNode(hub.NodeID(req.Target), mesh)
-	if !ok {
+	peers := h.forwarder.PeersForNode(hub.NodeID(req.Target), mesh)
+	if len(peers) == 0 {
 		h.logger.Warn("流中继目标节点非本地且非联邦候选", "target", req.Target, "mesh", mesh)
 		http.Error(w, fmt.Sprintf("目标节点 %s 未找到", req.Target), http.StatusNotFound)
 		return
 	}
 	hop := relayHopFrom(r)
-	path := relayPathFrom(r)
-	upstream, ferr := h.forwarder.Forward(r.Context(), peer, req.Target, req.Addr, hop, path)
-	if ferr != nil {
-		var fse *forwardStatusError
-		if errors.As(ferr, &fse) {
-			h.logger.Warn("跨 hub 中继转发失败", "target", req.Target, "peer", peer.ID, "status", fse.status, "message", fse.message)
-			http.Error(w, fse.message, fse.status)
+	path, pathOK := relayPathFrom(r)
+	if !pathOK {
+		h.logger.Warn("流中继转发路径头超限，拒绝", "target", req.Target)
+		http.Error(w, "X-Relay-Path 头超限", http.StatusBadRequest)
+		return
+	}
+	// 故障转移：多对端上报同一节点时按序尝试（首个宕机尝试下一个）。
+	// 防环检查在每个对端上独立执行（Forward 内部对每个 peer 校验 hop/path）。
+	var lastFSE *forwardStatusError
+	var lastErr error
+	var upstream net.Conn
+	for _, peer := range peers {
+		conn, ferr := h.forwarder.Forward(r.Context(), peer, req.Target, req.Addr, hop, path)
+		if ferr == nil {
+			upstream = conn
+			break
+		}
+		lastErr = ferr
+		if fse, ok := ferr.(*forwardStatusError); ok {
+			lastFSE = fse
+			// 防环（508）无故障转移意义——目标对端已在路径中，尝试其它对端同样回源。
+			// 404（对端无此节点）也应继续尝试其它候选；502/504 网络性失败应转移。
+			if fse.status == http.StatusLoopDetected {
+				break
+			}
+		}
+		h.logger.Warn("跨 hub 中继转发候选失败，尝试下一对端", "target", req.Target, "peer", peer.ID, "error", ferr)
+	}
+	if upstream == nil {
+		if lastFSE != nil {
+			h.logger.Warn("跨 hub 中继转发失败", "target", req.Target, "peer", lastFSE.message, "status", lastFSE.status)
+			http.Error(w, lastFSE.message, lastFSE.status)
 			return
 		}
-		h.logger.Error("跨 hub 中继转发内部错误", "target", req.Target, "peer", peer.ID, "error", ferr)
+		h.logger.Error("跨 hub 中继转发内部错误", "target", req.Target, "error", lastErr)
 		http.Error(w, "跨 hub 中继转发失败", http.StatusBadGateway)
 		return
 	}
@@ -377,10 +410,15 @@ func relayHopFrom(r *http.Request) int {
 }
 
 // relayPathFrom 读取跨 hub 转发请求的路径头 X-Relay-Path（逗号分隔的已途经 hub ID）。
-func relayPathFrom(r *http.Request) []string {
+// 返回 (path, ok)：ok=false 表示路径头超限（拒绝，防头部放大——恶意客户端可发
+// MB 级路径头让本 hub 原样写回对端，触发对端 max_header_bytes 兜底）。
+func relayPathFrom(r *http.Request) ([]string, bool) {
 	v := strings.TrimSpace(r.Header.Get(relayForwardPathHeader))
 	if v == "" {
-		return nil
+		return nil, true
+	}
+	if len(v) > maxRelayPathBytes {
+		return nil, false
 	}
 	parts := strings.Split(v, ",")
 	out := make([]string, 0, len(parts))
@@ -389,7 +427,7 @@ func relayPathFrom(r *http.Request) []string {
 			out = append(out, p)
 		}
 	}
-	return out
+	return out, true
 }
 
 // relayStreamIface 抽象中继泵送所需的流操作（本地 mux.Stream 与跨 hub 上游
@@ -455,10 +493,16 @@ func (h *RelayStreamHandler) pumpRelayConn(rw *bufio.ReadWriter, conn net.Conn, 
 	// P1-9 watchdog：空闲超时强制关闭（Abort 非阻塞，解除两个 io.Copy 的阻塞，
 	// 随后的 done 收尾让泵送函数正常返回）。idleTimeout<=0 时不启用。
 	if idleTimeout > 0 {
+		// 防极小 idleTimeout 下 idleTimeout/2==0 使 time.NewTicker panic（当前
+		// 生产值恒为 15min，此处为防御性下限，不影响语义）。
+		pollInterval := idleTimeout / 2
+		if pollInterval <= 0 {
+			pollInterval = time.Millisecond
+		}
 		watchdogDone := make(chan struct{})
 		defer close(watchdogDone)
 		go func() {
-			ticker := time.NewTicker(idleTimeout / 2)
+			ticker := time.NewTicker(pollInterval)
 			defer ticker.Stop()
 			for {
 				select {

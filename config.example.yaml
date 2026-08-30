@@ -116,8 +116,11 @@ access_keys:
 #   # 联邦只提供发现/可达性，不改路由表状态；mesh 隔离不破坏（按拉取方 mesh 过滤）。
 #   # 跨 hub 转发（阶段3 B）：/api/relay/stream 目标节点在本 hub 路由表未命中但为联邦
 #   # 候选时，自动转发到上报该节点的对端 hub（A→hub1→hub2→B 链式中继），带防环
-#   # 保护（跳数上限 X-Relay-Hop + 路径回源拒绝 X-Relay-Path，环路返回 508）。
+#   # 保护（X-Relay-Hop 跳数上限 4 + X-Relay-Path 路径回源拒绝，环路返回 508）。
 #   # 转发复用对端 SproxySig 认证与 /api/relay/stream 协议，不跳过目标侧拨号策略。
+#   # 防环说明：路径恒追加「下一跳 peer.id」（自洽，无需配置即可生效）；配置了
+#   # hub.node_id 且 federation.peers[].id 等于对端 node_id 时，额外在回源前一跳
+#   # 即拒绝（更严格）。链式深度受跳数上限约束（每跳握手预算 30s，建议 2-3 跳）。
 #   # 注意：未配置 access_keys 时（仅本地调试），联邦端点与 /api/hub/nodes 一样
 #   # 对任意请求者开放——生产务必配置 access_keys 并让双方共享同一 mesh 的凭据，
 #   # 否则 peer 拉到的节点只对同名 mesh 请求者可见（fail-closed，但会看不到）。
@@ -126,11 +129,16 @@ access_keys:
 #   #   interval: "30s"             # 出站拉取周期（默认 30s）
 #   #   timeout: "10s"              # 单次拉取超时（默认 10s）
 #   #   peers:                      # 对端 hub 列表（空=本 hub 仅作为被 peer，不主动拉取）
-#   #     - id: "hub-b"             # 对端 hub 唯一标识（日志/去重；为空回落 URL）
-#   #       url: "http://127.0.0.1:18084"  # 对端节点表端点基址（为空回落默认
-#   #                                      # 127.0.0.1:18083 loopback；远程 peering 需显式配置
-#   #                                      # URL 与成对 access_key/access_key_secret）
-#   #       access_key: "sk-xxx"   # 对端 hub 认可的 SproxySig AccessKey（双方共享同一 mesh 的凭据）
+#   #     - id: "hub-b"             # 对端 hub 唯一标识（日志/去重；为空回落 URL）。
+#   #                               # 跨 hub 转发防环建议与对端 node_id 一致（见上文防环说明）
+#   #       url: "http://127.0.0.1:18084"  # 对端节点表端点基址（**必须是无路径的基址**，
+#   #                                      # 如 http://host:port，不带 /api/… 路径；为空回落
+#   #                                      # 默认 127.0.0.1:18083 loopback；远程 peering 需显式
+#   #                                      # 配置 URL 与成对 access_key/access_key_secret）
+#   #       access_key: "sk-xxx"   # 对端 hub 认可的 SproxySig AccessKey（双方共享同一 mesh 的
+#   #                               # 凭据；**多 mesh 部署需为每个 mesh 单独配一对 peer/AK**——
+#   #                               # 转发在目标 hub 以对端 AK 的 mesh 重新鉴权，客户端 mesh
+#   #                               # 必须与 peer AK mesh 及目标节点 mesh 三者一致才可达）
 #   #       access_key_secret: "..."  # 64 hex（只本端计算签名，永不上线）
 #   #       ca_file: "/path/to/hub-ca.pem"  # 对端 hub 的 TLS 受信 CA（PEM）。远程自签 hub
 #   #                                      # 应配置 ca_file（受信 CA 严格校验），而非跳过校验。
