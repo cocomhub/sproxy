@@ -155,6 +155,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newCmdUDP(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdCloudDownload(factory, ios, cliState, cfgSvc))
 	root.AddCommand(NewCmdCloudDownloadGroup(factory, ios, cfgSvc))
+	root.AddCommand(NewCmdSync(factory, ios, cliState, cfgSvc))
 	root.AddCommand(NewCmdMeta(factory, ios, cliState))
 
 	return root
