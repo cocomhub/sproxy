@@ -4,6 +4,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -41,6 +42,11 @@ const relayStreamIdleTimeout = 15 * time.Minute
 // maxDialResultFrameBytes 是拨号结果帧（[4B len][JSON]）的 JSON 部分长度上限。
 const maxDialResultFrameBytes = 4096
 
+// maxRelayPathBytes 是跨 hub 转发路径头 X-Relay-Path 的最大字节数。
+// 防头部放大：恶意客户端可发 MB 级路径头让本 hub 原样写回对端（对端仅靠
+// max_header_bytes 兜底）；超限直接拒绝（fail-closed，不截断静默放行）。
+const maxRelayPathBytes = 64 << 10 // 64 KiB
+
 // RelayStreamRequest 是任意 TCP 流中继请求（对应 hub.DialRequest）。
 type RelayStreamRequest struct {
 	Target string `json:"target"`
@@ -50,12 +56,19 @@ type RelayStreamRequest struct {
 
 // RelayStreamHandler 通过 hub 路由表把一条 HTTP 请求升级为到目标叶子的双向字节流，
 // 实现任意 TCP（SSH/长连接）中继。
+//
+// 跨 hub 联邦（B）：目标节点在本 hub 路由表未命中时，若配置了联邦转发器
+// （SetFederation），把请求转发到上报该节点的对端 hub（A→hub1→hub2→B 链式中继）。
+// 转发链有防环机制（跳数上限 + 路径回源拒绝，见 FederationForwarder.Forward）。
 type RelayStreamHandler struct {
 	routeTable *hub.MeshRouteTable
 	logger     *slog.Logger
 	// idleTimeout 是中继流 200 后无任何数据流量的空闲超时（P1-9）；0 表示不启用。
 	// 防"拿到 200 后不发"的客户端无限期占用叶子出站 FD 与 mux 流。
 	idleTimeout time.Duration
+	// forwarder 是跨 hub 中继转发器（nil = 不启用联邦转发，目标未本地命中即 404）。
+	// 由 SetFederation 装配（Handlers.SetFederationClient 注入联邦客户端时联动）。
+	forwarder *FederationForwarder
 }
 
 // NewRelayStreamHandler 创建流中继处理器。
@@ -64,6 +77,21 @@ func NewRelayStreamHandler(rt *hub.MeshRouteTable, logger *slog.Logger) *RelaySt
 		logger = slog.Default()
 	}
 	return &RelayStreamHandler{routeTable: rt, logger: logger, idleTimeout: relayStreamIdleTimeout}
+}
+
+// SetFederation 装配/清除跨 hub 联邦转发器。fc 为 nil 时清除（目标未本地命中即 404）。
+// hubID 是本 hub 身份（防环路径记录用，通常为 config hub.node_id；为空不追加路径条目）。
+// 由 Handlers.SetFederationClient 在注入联邦客户端时联动调用，保证跨 hub 转发
+// 与节点表联邦候选合并同步启用。
+//
+// 并发约束：仅启动期装配调用（root.go 装配后即固定）；运行期重载不支持，
+// h.forwarder 字段无锁（与 Handlers.fedClient/dht 同模式）。
+func (h *RelayStreamHandler) SetFederation(fc *hub.FederationClient, hubID string) {
+	if fc == nil {
+		h.forwarder = nil
+		return
+	}
+	h.forwarder = NewFederationForwarder(fc, hubID, defaultRelayMaxHops, h.logger)
 }
 
 // validateRelayAddr 对中继目标地址做语法级校验（I26）：必须是 host:port 格式，
@@ -185,8 +213,9 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	targetMux := h.routeTable.Lookup(hub.NodeID(req.Target))
 	if targetMux == nil {
-		h.logger.Warn("流中继目标节点未找到", "target", req.Target)
-		http.Error(w, fmt.Sprintf("目标节点 %s 未找到", req.Target), http.StatusNotFound)
+		// 本 hub 路由表未命中 → 尝试跨 hub 联邦转发（目标节点注册在远程 hub）。
+		// 未配置转发器时走 404（与旧行为一致）。
+		h.serveForwarded(w, r, req)
 		return
 	}
 	// M-9 路由面隔离：目标节点必须与调用方同 mesh，跨 mesh 目标对外不可见（404 防节点存在性探测）。
@@ -281,14 +310,176 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := rw.Flush(); err != nil {
 		return
 	}
+	// 双向泵送：客户端连接 <-> 中继流（本地 mux 流，或跨 hub 上游连接）
+	h.pumpRelayConn(rw, conn, stream, h.idleTimeout)
+}
 
-	// 双向泵送：浏览器/SSH 端 <-> mux 流 <-> 叶子出站 TCP
-	// 读侧必须用 rw.Reader（包含 conn + 已缓冲字节），否则 Hijack 时
-	// 客户端在请求体后追加的数据若已被 bufio 预读，从 conn 直接读会跳过
-	// 缓冲字节导致流错位（I4'）。写侧用 conn（rw.Writer 内部就是 conn）。
-	//
-	// P1-9 空闲超时：任一方向有字节流动即刷新 lastActive；watchdog 在 idleTimeout
-	// 内无任何数据则强制关闭两端，防"拿到 200 后不发"的客户端无限期占用叶子 FD。
+// serveForwarded 处理跨 hub 联邦转发：目标节点在本 hub 路由表未命中时，定位
+// 上报该节点的联邦对端并转发（A→hub1→hub2→B 链式中继）。未配置转发器 / 目标
+// 非联邦候选时返回 404（与旧行为一致）；防环命中返回 508；上游失败按状态映射。
+//
+// 安全边界：mesh 由调用方 AK 派生（meshFromRequest），PeerForNode 按 mesh 严格
+// 匹配——跨 hub 转发不绕过 mesh 隔离。转发请求由对端 hub 的 /api/relay/stream
+// 走 SproxySig 认证，目标节点仍须过目标侧拨号策略（SSRF 边界不因跨 hub 放宽）。
+func (h *RelayStreamHandler) serveForwarded(w http.ResponseWriter, r *http.Request, req RelayStreamRequest) {
+	if h.forwarder == nil {
+		h.logger.Warn("流中继目标节点未找到", "target", req.Target)
+		http.Error(w, fmt.Sprintf("目标节点 %s 未找到", req.Target), http.StatusNotFound)
+		return
+	}
+	mesh := meshFromRequest(r)
+	peers := h.forwarder.PeersForNode(hub.NodeID(req.Target), mesh)
+	if len(peers) == 0 {
+		h.logger.Warn("流中继目标节点非本地且非联邦候选", "target", req.Target, "mesh", mesh)
+		http.Error(w, fmt.Sprintf("目标节点 %s 未找到", req.Target), http.StatusNotFound)
+		return
+	}
+	hop := relayHopFrom(r)
+	path, pathOK := relayPathFrom(r)
+	if !pathOK {
+		h.logger.Warn("流中继转发路径头超限，拒绝", "target", req.Target)
+		http.Error(w, "X-Relay-Path 头超限", http.StatusBadRequest)
+		return
+	}
+	// 故障转移：多对端上报同一节点时按序尝试（首个宕机尝试下一个）。
+	// 防环检查在每个对端上独立执行（Forward 内部对每个 peer 校验 hop/path）——
+	// **508 也继续尝试剩余对端**：请求经对端 X 来（路径含 X），X 命中防环 508 不代表
+	// 其它上报同节点的对端 Y 也会回源；每个 Forward 独立防环、尝试次数 ≤ peer 数、
+	// 每次握手 30s 有界，不削弱防环。全部失败时优先回最先遇到的 508（防环语义最明确）。
+	var firstLoopFSE *forwardStatusError
+	var lastFSE *forwardStatusError
+	var lastErr error
+	var lastPeerID string
+	var upstream net.Conn
+	for _, peer := range peers {
+		conn, ferr := h.forwarder.Forward(r.Context(), peer, req.Target, req.Addr, hop, path)
+		if ferr == nil {
+			upstream = conn
+			break
+		}
+		lastErr = ferr
+		lastPeerID = peer.ID
+		var fse *forwardStatusError
+		if errors.As(ferr, &fse) {
+			lastFSE = fse
+			if fse.status == http.StatusLoopDetected && firstLoopFSE == nil {
+				firstLoopFSE = fse
+			}
+		}
+		h.logger.Warn("跨 hub 中继转发候选失败，尝试下一对端", "target", req.Target, "peer", peer.ID, "error", ferr)
+	}
+	if upstream == nil {
+		if lastFSE != nil {
+			h.logger.Warn("跨 hub 中继转发失败", "target", req.Target, "peer", lastPeerID, "status", lastFSE.status, "message", lastFSE.message)
+			http.Error(w, lastFSE.message, lastFSE.status)
+			return
+		}
+		if firstLoopFSE != nil {
+			h.logger.Warn("跨 hub 中继转发全部回源（防环）", "target", req.Target, "status", firstLoopFSE.status, "message", firstLoopFSE.message)
+			http.Error(w, firstLoopFSE.message, firstLoopFSE.status)
+			return
+		}
+		h.logger.Error("跨 hub 中继转发内部错误", "target", req.Target, "peer", lastPeerID, "error", lastErr)
+		http.Error(w, "跨 hub 中继转发失败", http.StatusBadGateway)
+		return
+	}
+	defer upstream.Close()
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "服务器不支持连接升级", http.StatusInternalServerError)
+		return
+	}
+	conn, rw, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("升级连接失败: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer conn.Close()
+	_, _ = fmt.Fprintf(rw, "HTTP/1.1 200 Connection Established\r\n\r\n")
+	if err := rw.Flush(); err != nil {
+		return
+	}
+	// 双向泵送：客户端连接 <-> 跨 hub 上游连接（对端 hub 的已升级流）
+	h.pumpRelayConn(rw, conn, netConnStream{Conn: upstream}, h.idleTimeout)
+}
+
+// relayHopFrom 读取跨 hub 转发请求的跳数头 X-Relay-Hop。
+// 缺省/非法值按 0 处理（fail-safe：非法值不会放大跳数——各 hub 基于收到的值
+// 递增并在转发前检查上限，链条长度仍受 maxHops 约束）。
+func relayHopFrom(r *http.Request) int {
+	v := strings.TrimSpace(r.Header.Get(relayForwardHopHeader))
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// relayPathFrom 读取跨 hub 转发请求的路径头 X-Relay-Path（逗号分隔的已途经 hub ID）。
+// 返回 (path, ok)：ok=false 表示路径头超限（拒绝，防头部放大——恶意客户端可发
+// MB 级路径头让本 hub 原样写回对端，触发对端 max_header_bytes 兜底）。
+func relayPathFrom(r *http.Request) ([]string, bool) {
+	v := strings.TrimSpace(r.Header.Get(relayForwardPathHeader))
+	if v == "" {
+		return nil, true
+	}
+	if len(v) > maxRelayPathBytes {
+		return nil, false
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out, true
+}
+
+// relayStreamIface 抽象中继泵送所需的流操作（本地 mux.Stream 与跨 hub 上游
+// net.Conn 均可满足），使 pumpRelayConn 对本地/跨 hub 两种中继路径复用同一套
+// 泵送/半关闭/空闲超时逻辑。
+type relayStreamIface interface {
+	io.ReadWriteCloser
+	CloseWrite() error
+	// Abort 立即放弃（非阻塞）。mux.Stream 为 Abort；net.Conn 退化 Close。
+	Abort() error
+}
+
+// netConnStream 把 net.Conn 适配为 relayStreamIface（跨 hub 上游连接用）。
+// CloseWrite 透传底层（TCPConn 等支持半关闭）；Abort 退化为 Close（非阻塞）。
+type netConnStream struct {
+	net.Conn
+}
+
+func (s netConnStream) CloseWrite() error {
+	if cw, ok := s.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return s.Close()
+}
+
+func (s netConnStream) Abort() error { return s.Close() }
+
+// pumpRelayConn 在已劫持的客户端连接与中继流（本地 mux 流 / 跨 hub 上游连接）
+// 之间双向泵送。
+//
+// 读侧必须用 rw.Reader（包含 conn + 已缓冲字节），否则 Hijack 时客户端在请求体后
+// 追加的数据若已被 bufio 预读，从 conn 直接读会跳过缓冲字节导致流错位（I4'）。
+// 写侧用 conn（rw.Writer 内部就是 conn）。
+//
+// P1-9 空闲超时：任一方向有字节流动即刷新 lastActive；watchdog 在 idleTimeout
+// 内无任何数据则强制关闭两端，防"拿到 200 后不发"的客户端无限期占用叶子 FD。
+//
+// 半关闭宽限期（P0-4，对齐 leaf.go pump 的 C1 范本）：任一方向完成后，给另一方向
+// relayStreamGrace 时间完成半关闭收尾——让在途响应仍可被读回（write-then-read
+// 流不截断）。超时视为对端非合作，强制关闭释放。收尾路径统一用非阻塞 Abort()
+// （writeCh 打满时阻塞版 Close 会永久挂起，I28），conn.Close() 亦非阻塞。
+func (h *RelayStreamHandler) pumpRelayConn(rw *bufio.ReadWriter, conn net.Conn, stream relayStreamIface, idleTimeout time.Duration) {
 	var lastActive atomic.Int64
 	lastActive.Store(time.Now().UnixNano())
 	done := make(chan struct{}, 2)
@@ -311,18 +502,24 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// P1-9 watchdog：空闲超时强制关闭（Abort 非阻塞，解除两个 io.Copy 的阻塞，
 	// 随后的 done 收尾让泵送函数正常返回）。idleTimeout<=0 时不启用。
-	if h.idleTimeout > 0 {
+	if idleTimeout > 0 {
+		// 防极小 idleTimeout 下 idleTimeout/2==0 使 time.NewTicker panic（当前
+		// 生产值恒为 15min，此处为防御性下限，不影响语义）。
+		pollInterval := idleTimeout / 2
+		if pollInterval <= 0 {
+			pollInterval = time.Millisecond
+		}
 		watchdogDone := make(chan struct{})
 		defer close(watchdogDone)
 		go func() {
-			ticker := time.NewTicker(h.idleTimeout / 2)
+			ticker := time.NewTicker(pollInterval)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-watchdogDone:
 					return
 				case now := <-ticker.C:
-					if now.Sub(time.Unix(0, lastActive.Load())) > h.idleTimeout {
+					if now.Sub(time.Unix(0, lastActive.Load())) > idleTimeout {
 						_ = conn.Close()
 						_ = stream.Abort()
 						return
@@ -332,11 +529,6 @@ func (h *RelayStreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	// 半关闭宽限期（P0-4，对齐 leaf.go pump 的 C1 范本）：任一方向完成后，
-	// 给另一方向 relayStreamGrace 时间完成半关闭收尾——让在途响应仍可被读回
-	// （write-then-read 流不截断）。超时视为对端非合作，强制关闭释放。
-	// 注意收尾路径统一用非阻塞 Abort()（writeCh 打满时阻塞版 Close 会永久挂起，
-	// I28），conn.Close() 亦非阻塞。
 	remaining := 2
 	var timeoutCh <-chan time.Time
 	var timer *time.Timer

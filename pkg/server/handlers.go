@@ -39,7 +39,12 @@ type Handlers struct {
 	// fedClient 是 hub 联邦节点表同步客户端（nil = 不启用联邦候选）。/api/hub/nodes
 	// 把联邦候选节点合并进发现列表（路由表权威 + DHT + 联邦候选，去重）。由
 	// cmd/sproxy 装配 hub.federation 时经 SetFederationClient 注入。
-	fedClient      *hub.FederationClient
+	fedClient *hub.FederationClient
+	// relayStream 是 /api/relay/stream 处理器（RegisterRoutes 创建）。SetFederationClient
+	// 注入联邦客户端时联动装配其跨 hub 转发器（路由表未命中 → 联邦转发）。
+	relayStream *RelayStreamHandler
+	// hubID 是本 hub 身份（config hub.node_id），跨 hub 转发防环路径记录用。
+	hubID          string
 	signalBroker   *SignalBroker
 	hubPersist     *hub.Persister // hub 状态持久化器（配置 hub.persist_file 时注入；nil = 不持久化）
 	handler        http.Handler
@@ -60,8 +65,13 @@ type TunnelUpdater interface {
 
 // SetFederationClient 注入 hub 联邦节点表同步客户端（nil 清除，恢复不合并联邦候选）。
 // 由 cmd/sproxy 装配 hub.federation 时调用。
+// 联动：同时装配 /api/relay/stream 的跨 hub 转发器（路由表未命中目标时，把 relay
+// 拨号转发到上报该节点的联邦对端 hub）——节点表联邦合并与数据面联邦转发同步启用。
 func (h *Handlers) SetFederationClient(fc *hub.FederationClient) {
 	h.fedClient = fc
+	if h.relayStream != nil {
+		h.relayStream.SetFederation(fc, h.hubID)
+	}
 }
 
 // TunnelHandler 返回隧道处理器，用于 SIGHUP 时热替换密钥。
@@ -110,6 +120,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		routeTable:    opts.RouteTable,
 		signalBroker:  NewSignalBroker(opts.RouteTable),
 		hubPersist:    opts.HubPersist,
+		hubID:         cfg.Hub.NodeID,
 		uploadingStop: make(chan struct{}),
 		noncePool:     sproxysig.NewNoncePool(),
 	}
@@ -288,6 +299,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		// 而隧道的 ResponseWriter 包装链（streamRecorder/gzipResponseWriter）不实现
 		// Hijacker——经隧道访问必 500（旧版误注册到 localMux 的死路由，已删除）。
 		streamHandler := NewRelayStreamHandler(opts.RouteTable, log.With("component", "relay_stream"))
+		// 联邦转发器由 SetFederationClient 装配（注入联邦客户端时联动）；在此之前
+		// 目标未本地命中即 404（与旧行为一致）。
+		h.relayStream = streamHandler
 		srvMux.HandleFunc("POST /api/relay/stream", h.authMiddleware(streamHandler.ServeHTTP))
 		// TODO(I29)：若未来需要「经隧道做原始 TCP 中继」（链式中继/多跳），正确定位是
 		// mux 层 raw-stream（复用 hub relay 模式），而非 http.Hijacker。见
@@ -401,6 +415,9 @@ func (h *Handlers) Close() error {
 	}
 	if h.shareStore != nil {
 		h.shareStore.Stop()
+	}
+	if h.relayStream != nil && h.relayStream.forwarder != nil {
+		h.relayStream.forwarder.Close()
 	}
 	// hub 状态持久化器最终 flush：优雅停服前把最后一次注册/信令变更落盘。
 	// 快照生成在 Persister 锁内执行（FlushFn 持有 p.mu 再调 snapshotCurrent），
