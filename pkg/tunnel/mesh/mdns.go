@@ -263,6 +263,30 @@ func (s *MDNSServer) LookupService(ctx context.Context, service string, timeout 
 	}
 }
 
+// LookupPeer 在 timeout 窗口内等待并返回指定 node-id 的对端（mDNS 无 hub 直连时按
+// 节点寻址，如 sclient socks --mdns --exit <node>）。未发现返回错误。
+func (s *MDNSServer) LookupPeer(ctx context.Context, nodeID string, timeout time.Duration) (MDNSPeer, error) {
+	if timeout <= 0 {
+		timeout = mdnsAnnounceInterval * 2
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, p := range s.Peers() {
+			if p.NodeID == nodeID {
+				return p, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return MDNSPeer{}, fmt.Errorf("mdns: 未发现节点 %s", nodeID)
+		}
+		select {
+		case <-ctx.Done():
+			return MDNSPeer{}, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
 func (s *MDNSServer) peersWithService(service string) []MDNSPeer {
 	var matches []MDNSPeer
 	for _, p := range s.Peers() {

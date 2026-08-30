@@ -150,6 +150,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdRelay(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdP2P(ios, cfgSvc))
 	root.AddCommand(NewCmdMesh(factory, ios, cfgSvc))
+	root.AddCommand(newCmdSocks(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdCloudDownload(factory, ios, cliState, cfgSvc))
 	root.AddCommand(NewCmdCloudDownloadGroup(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdMeta(factory, ios, cliState))

@@ -48,6 +48,9 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			mdns, _ := cmd.Flags().GetBool("mdns")
 			mdnsSecret, _ := cmd.Flags().GetString("mdns-secret")
 			signalAddr, _ := cmd.Flags().GetString("signal-addr")
+			socksAddr, _ := cmd.Flags().GetString("socks")
+			socksUser, _ := cmd.Flags().GetString("socks-user")
+			socksPass, _ := cmd.Flags().GetString("socks-pass")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			insecure, _ := cmd.Flags().GetBool("insecure")
 			if stunServers != nil {
@@ -125,6 +128,9 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				MDNSOnly:          mdns,
 				SignalAddr:        signalAddr,
 				MDNSPeerSecret:    mdnsSecret,
+				SocksAddr:         socksAddr,
+				SocksUser:         socksUser,
+				SocksPass:         socksPass,
 				Logger:            logger,
 			})
 		},
@@ -142,6 +148,9 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 	cmd.Flags().Bool("mdns", false, "纯 mDNS 局域网模式（不经 hub）：广播本节点（node-id + 服务 + 直连信令端点）并经 mDNS 发现同网段节点自动直连。两节点同网段运行 `mesh node --mdns` 即可互发现并 mesh connect 直连。注意：需监听局域网接口（直连信令 + mDNS 组播），Windows 首次运行会弹防火墙授权")
 	cmd.Flags().String("signal-addr", "", "直连 webrtc 信令监听地址（--mdns 用；空默认绑定主局域网 IP 的随机端口；可显式指定如 127.0.0.1:0 收敛 loopback 开发/测试避免防火墙弹窗，但仅本机可达）")
 	cmd.Flags().String("mdns-secret", "", "mDNS 模式共享密钥（直连信令 offer 与 mDNS TXT 均 HMAC 签名校验，防未授权 peer 借本节点作中继/出口、防广告伪造；同 mesh 所有节点须一致；为空 = 无认证 LAN 信任，出口由 dial-allow 策略约束）")
+	cmd.Flags().String("socks", "", "本地 SOCKS5 出口监听地址（本节点为出口，CONNECT 目标本机拨号；裸 :port 归一 127.0.0.1:port，loopback 安全默认；远程 peer 可 mesh connect socks -l :port 隧道到它。注意：不配 --socks-user/--socks-pass 时，对可触及者即开放本机内网出口，请显式开启认证或保持 loopback）")
+	cmd.Flags().String("socks-user", "", "SOCKS5 RFC 1929 认证用户名（配 --socks 使用；配置后要求认证，防未授权使用本节点作代理）")
+	cmd.Flags().String("socks-pass", "", "SOCKS5 RFC 1929 认证密码（配 --socks/--socks-user 使用）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
 	cmd.Flags().StringSlice("turn", nil,
