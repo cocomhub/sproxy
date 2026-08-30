@@ -20,8 +20,9 @@ func (h *Handlers) SetDHT(dht hub.DHT) {
 }
 
 // hubNodesHandler 返回在线节点列表（按调用方 mesh 过滤，M-9）。
-// 发现源 = 路由表（hub 权威）+ DHT 候选节点（SetDHT 注入时合并，去重，路由表优先）。
-// 满足"路由表仍 hub 权威；DHT 只提供候选节点/发现，不改状态"。
+// 发现源 = 路由表（hub 权威）+ DHT 候选节点（SetDHT 注入时合并）+ 联邦候选节点
+// （SetFederationClient 注入时合并），逐层去重（路由表优先），均只提供发现/可达性。
+// 满足"路由表仍 hub 权威；DHT/联邦只提供候选节点/发现，不改状态"。
 func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	if h.routeTable == nil {
 		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
@@ -31,6 +32,9 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	nodes := h.routeTable.List(mesh)
 	if h.dht != nil {
 		nodes = h.mergeDHTNodes(nodes, mesh)
+	}
+	if h.fedClient != nil {
+		nodes = h.mergeFederationNodes(nodes, mesh)
 	}
 	type nodeResp struct {
 		ID   string `json:"id"`
@@ -82,6 +86,71 @@ func (h *Handlers) mergeDHTNodes(nodes []hub.NodeInfo, mesh string) []hub.NodeIn
 			addr = c.Addrs[0]
 		}
 		nodes = append(nodes, hub.NodeInfo{ID: id, Addr: addr})
+	}
+	return nodes
+}
+
+// federationNodesHandler 返回本 hub 路由表节点（带 mesh），供联邦对端同步。
+// 按调用方 mesh 过滤（M-9）：拉取方用哪个 mesh 的凭据，只能拿到该 mesh 的节点，
+// 联邦同步不破坏 mesh 隔离。只返回路由表（不合并 DHT/联邦候选），防同步环路
+// （A 拉 B、B 又拉 A 造成无限回声）。路由表仍本 hub 权威，联邦只交换发现/可达性。
+func (h *Handlers) federationNodesHandler(w http.ResponseWriter, r *http.Request) {
+	if h.routeTable == nil {
+		http.Error(w, errMsgHubNotEnabled, http.StatusNotFound)
+		return
+	}
+	mesh := meshFromRequest(r)
+	type fedNodeResp struct {
+		ID        string    `json:"id"`
+		Addr      string    `json:"addr,omitempty"`
+		Mesh      string    `json:"mesh,omitempty"`
+		Connected time.Time `json:"connected,omitzero"`
+	}
+	nodes := h.routeTable.List(mesh)
+	resp := make([]fedNodeResp, 0, len(nodes))
+	for _, n := range nodes {
+		resp = append(resp, fedNodeResp{
+			ID:        string(n.ID),
+			Addr:      n.Addr,
+			Mesh:      n.Mesh,
+			Connected: n.Connected,
+		})
+	}
+	w.Header().Set(headerContentType, contentTypeJSON)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		h.logger.Warn("JSON encode error", "handler", "federationNodesHandler", "error", err)
+	}
+}
+
+// mergeFederationNodes 把联邦候选节点合并进发现列表：按调用方 mesh 严格过滤
+// （FederationNode.Mesh，空 mesh 只对默认 mesh 请求者放行），按 node-id 去重
+// （路由表/DHT 已占用优先，联邦候选后置）。联邦候选是远程 hub 的节点，不进入
+// 本 hub 路由表（本 hub 无法转发到远程节点），仅提供发现/可达性。
+// 注意：候选 Addr 来自对端上报（信息面，与 mergeDHTNodes 一致，客户端自行决定
+// 连接）；若未来联邦候选用于自动拨号，需在此处增加地址合法性校验。
+func (h *Handlers) mergeFederationNodes(nodes []hub.NodeInfo, mesh string) []hub.NodeInfo {
+	candidates := h.fedClient.Candidates()
+	if len(candidates) == 0 {
+		return nodes
+	}
+	seen := make(map[hub.NodeID]bool, len(nodes))
+	for _, n := range nodes {
+		seen[n.ID] = true
+	}
+	for _, c := range candidates {
+		// 联邦候选按 mesh 严格隔离：cm=="" 即默认 mesh，只对默认 mesh 请求者放行。
+		// 不能用"cm=="" 放行所有"——否则默认 mesh 节点泄漏给命名 mesh 调用方
+		// （破坏 M-9 列表隔离，且信令按 node-id 存转可被利用跨 mesh 拨号）。
+		// 与 mergeDHTNodes 的隔离语义严格一致（阶段 2 DHT 曾踩过默认 mesh 泄漏）。
+		if c.Mesh != mesh {
+			continue
+		}
+		id := c.ID
+		if id == "" || seen[id] {
+			continue // 去重：路由表/DHT 优先
+		}
+		seen[id] = true
+		nodes = append(nodes, hub.NodeInfo{ID: id, Addr: c.Addr})
 	}
 	return nodes
 }

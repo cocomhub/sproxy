@@ -110,6 +110,30 @@ access_keys:
 #   dht: ""                        # 节点发现表实现：""（默认）= 内置内存 DHT；"kad" = Kademlia（ext/kad，XOR 距离路由表）
 #                                   # 启用 kad 后注册节点喂入 DHT，/api/hub/nodes 合并 DHT 候选（路由表仍权威，DHT 只提供候选/发现）
 #   dht_seeds: []                  # DHT 引导种子节点地址（仅 dht: kad 时消费；空=不引导，预留多 hub 组网）
+#   # hub 联邦（hub-to-hub peering，P1）：启用后周期拉取对端 hub 节点表（联邦候选），
+#   # /api/hub/nodes 合并（路由表权威 + DHT + 联邦候选，去重）；入站端点
+#   # /api/hub/federation/nodes（受 SproxySig 认证保护，fail-closed）供对端拉取。
+#   # 联邦只提供发现/可达性，不改路由表状态；mesh 隔离不破坏（按拉取方 mesh 过滤）。
+#   # 注意：未配置 access_keys 时（仅本地调试），联邦端点与 /api/hub/nodes 一样
+#   # 对任意请求者开放——生产务必配置 access_keys 并让双方共享同一 mesh 的凭据，
+#   # 否则 peer 拉到的节点只对同名 mesh 请求者可见（fail-closed，但会看不到）。
+#   # federation:
+#   #   enabled: true
+#   #   interval: "30s"             # 出站拉取周期（默认 30s）
+#   #   timeout: "10s"              # 单次拉取超时（默认 10s）
+#   #   peers:                      # 对端 hub 列表（空=本 hub 仅作为被 peer，不主动拉取）
+#   #     - id: "hub-b"             # 对端 hub 唯一标识（日志/去重；为空回落 URL）
+#   #       url: "http://127.0.0.1:18084"  # 对端节点表端点基址（为空回落默认
+#   #                                      # 127.0.0.1:18083 loopback；远程 peering 需显式配置
+#   #                                      # URL 与成对 access_key/access_key_secret）
+#   #       access_key: "sk-xxx"   # 对端 hub 认可的 SproxySig AccessKey（双方共享同一 mesh 的凭据）
+#   #       access_key_secret: "..."  # 64 hex（只本端计算签名，永不上线）
+#   #       ca_file: "/path/to/hub-ca.pem"  # 对端 hub 的 TLS 受信 CA（PEM）。远程自签 hub
+#   #                                      # 应配置 ca_file（受信 CA 严格校验），而非跳过校验。
+#   #                                      # 为空时用系统根证书池（默认 fail-closed：证书非法即拒绝）。
+#   #       insecure_skip_verify: false  # 跳过 TLS 校验。**仅允许 loopback peer**（本机自签
+#   #                                    # 开发/测试）；远程 peer 配置该选项启动失败（MITM 风险）。
+#   #                                    # 与 ca_file 互斥。
 #   transports:
 #     ws:
 #       enabled: true

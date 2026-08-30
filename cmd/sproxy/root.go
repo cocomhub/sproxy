@@ -117,9 +117,10 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	mux := http.NewServeMux()
 	var routeTable *hub.MeshRouteTable
-	var persist *hub.Persister         // hub 状态持久化器（仅 hub.enabled 且 persist_file 非空时创建）
-	var restoredMsgs []hub.MessageSnap // 启动时从持久化恢复的信令收件箱（灌入 SignalBroker）
-	var hubDHT hub.DHT                 // hub 节点发现表（hub.dht: kad 时装配；注入 HubServer 与 Handlers）
+	var persist *hub.Persister          // hub 状态持久化器（仅 hub.enabled 且 persist_file 非空时创建）
+	var restoredMsgs []hub.MessageSnap  // 启动时从持久化恢复的信令收件箱（灌入 SignalBroker）
+	var hubDHT hub.DHT                  // hub 节点发现表（hub.dht: kad 时装配；注入 HubServer 与 Handlers）
+	var fedClient *hub.FederationClient // hub 联邦节点表同步客户端（hub.federation.enabled 时装配；注入 Handlers）
 	// Hub 中继：先创建 MeshRouteTable + HubServer 收口（ws/tcp 传输共用注册/中继逻辑），
 	// 再按传输配置挂载 WS 升级端点与裸 TCP listener，最后注册 HTTP 路由。
 	if cfg.Hub.Enabled {
@@ -170,6 +171,34 @@ func runServer(cmd *cobra.Command, args []string) error {
 			}
 			hubSrv.SetDHT(hubDHT)
 			logger.Info("Hub DHT 已启用", "impl", "kad", "node_id", dhtNodeID)
+		}
+		// hub 联邦（hub-to-hub peering）：配置 hub.federation.peers 时周期拉取
+		// 对端 hub 节点表（联邦候选），/api/hub/nodes 合并（路由表权威 +
+		// DHT + 联邦候选，去重）。入站端点 /api/hub/federation/nodes 由
+		// RegisterRoutes 在 hub.enabled 且 federation.enabled 时注册。
+		// 拉取认证复用 SproxySig AccessKey（对端 hub 配置的 access_keys）；
+		// peer URL 为空回落默认 loopback（远程 peering 需显式配置，见
+		// Config.Validate）。联邦只提供发现/可达性，不改路由表状态。
+		if cfg.Hub.Federation.Enabled {
+			peers := make([]hub.FederationPeer, 0, len(cfg.Hub.Federation.Peers))
+			for _, p := range cfg.Hub.Federation.Peers {
+				peers = append(peers, hub.FederationPeer{
+					ID:                 p.ID,
+					URL:                p.URL,
+					AccessKey:          p.AccessKey,
+					AccessKeySecret:    p.AccessKeySecret,
+					CAFile:             p.CAFile,
+					InsecureSkipVerify: p.InsecureSkipVerify,
+				})
+			}
+			var ferr error
+			fedClient, ferr = hub.NewFederationClient(peers, cfg.Hub.Federation.Interval, cfg.Hub.Federation.Timeout, logger.With("component", "hub_federation"))
+			if ferr != nil {
+				return fmt.Errorf("初始化 hub 联邦客户端: %w", ferr)
+			}
+			fedClient.Start(ctx)
+			defer fedClient.Close()
+			logger.Info("Hub 联邦已启用", "peers", len(cfg.Hub.Federation.Peers), "interval", cfg.Hub.Federation.Interval)
 		}
 		if cfg.Hub.Transports.WS.Enabled {
 			// S36：WS 升级路径固定为 /ws。hub.transports.ws.path 已废弃，
@@ -229,6 +258,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 	})
 	if hubDHT != nil {
 		h.SetDHT(hubDHT) // /api/hub/nodes 合并 DHT 候选节点（发现源：路由表权威 + DHT 候选）
+	}
+	if fedClient != nil {
+		h.SetFederationClient(fedClient) // /api/hub/nodes 合并联邦候选节点（发现源：+ 联邦候选）
 	}
 	defer func() {
 		if err := h.Close(); err != nil {

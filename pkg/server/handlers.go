@@ -35,7 +35,11 @@ type Handlers struct {
 	// dht 是节点发现表（nil = 不启用 DHT 候选，既有行为）。/api/hub/nodes 把 DHT
 	// 候选节点合并进发现列表（路由表权威 + DHT 候选，去重）。由 cmd/sproxy 装配
 	// Kademlia 时经 SetDHT 注入（hub.dht: kad）。
-	dht            hub.DHT
+	dht hub.DHT
+	// fedClient 是 hub 联邦节点表同步客户端（nil = 不启用联邦候选）。/api/hub/nodes
+	// 把联邦候选节点合并进发现列表（路由表权威 + DHT + 联邦候选，去重）。由
+	// cmd/sproxy 装配 hub.federation 时经 SetFederationClient 注入。
+	fedClient      *hub.FederationClient
 	signalBroker   *SignalBroker
 	hubPersist     *hub.Persister // hub 状态持久化器（配置 hub.persist_file 时注入；nil = 不持久化）
 	handler        http.Handler
@@ -52,6 +56,12 @@ type Handlers struct {
 // cmd/sproxy 的 SIGHUP 处理流程通过此接口在运行时替换隧道密钥。
 type TunnelUpdater interface {
 	UpdateKey(key []byte)
+}
+
+// SetFederationClient 注入 hub 联邦节点表同步客户端（nil 清除，恢复不合并联邦候选）。
+// 由 cmd/sproxy 装配 hub.federation 时调用。
+func (h *Handlers) SetFederationClient(fc *hub.FederationClient) {
+	h.fedClient = fc
 }
 
 // TunnelHandler 返回隧道处理器，用于 SIGHUP 时热替换密钥。
@@ -319,6 +329,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		srvMux.HandleFunc("DELETE /api/hub/nodes/{id}", h.authMiddleware(h.hubRemoveNodeHandler))
 		srvMux.HandleFunc("GET /api/hub/stats", h.authMiddleware(h.hubStatsHandler))
 		srvMux.HandleFunc("GET /api/hub/services", h.authMiddleware(h.hubServicesHandler))
+		if cfg.Hub.Federation.Enabled {
+			// 联邦节点表端点（hub-to-hub peering 入站面）：返回本 hub 路由表节点
+			// （带 mesh），供对端 hub 周期拉取同步。走 authMiddleware（SproxySig
+			// fail-closed：hub 配置 access_keys 后无凭据请求 401），不注册 localMux
+			// （联邦是 hub 间直连 HTTP 同步，不经隧道）。
+			srvMux.HandleFunc("GET /api/hub/federation/nodes", h.authMiddleware(h.federationNodesHandler))
+		}
 		// hub 用户面查询统一暴露 localMux：节点列表/统计/服务发现/移除在隧道内部
 		// 均可调用（handler 按 routeTable==nil 返回 404 语义不变），保证浏览器隧道
 		// 模式下 sclient.hub.* 全部可达；nodes/stats/remove 在 srvMux 侧仍是
