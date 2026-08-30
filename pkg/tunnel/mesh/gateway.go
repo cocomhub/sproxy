@@ -108,16 +108,20 @@ type Gateway struct {
 	services []hub.Service
 	token    string
 	logger   *slog.Logger
+	// vipTable 是虚拟 IP → 节点映射（由 hub 节点列表 / mDNS 签名 TXT 填充，认证数据源）。
+	// mesh connect <vip>:<port> 经网关路由时，req.Peer 为空且 Addr host ∈ 虚拟子网
+	// → 查表定位目标节点复用已建链路。nil 时不启用虚拟 IP 路由（既有行为）。
+	vipTable *VipTable
 }
 
 // newGateway 构造网关。cfg 提供 node-id 与服务宣告（状态查询）与认证 token
 // （cfg.AccessKeySecret，空则不认证——网关仅 loopback，Secret 只本地比较）；
-// links 是已建链路池。
-func newGateway(links *linkPool, cfg NodeConfig, logger *slog.Logger) *Gateway {
+// links 是已建链路池；vipTable 为可选的虚拟 IP → 节点映射（nil 不启用虚拟 IP 路由）。
+func newGateway(links *linkPool, cfg NodeConfig, logger *slog.Logger, vipTable *VipTable) *Gateway {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Gateway{links: links, nodeID: cfg.NodeID, services: cfg.Services, token: cfg.AccessKeySecret, logger: logger}
+	return &Gateway{links: links, nodeID: cfg.NodeID, services: cfg.Services, token: cfg.AccessKeySecret, logger: logger, vipTable: vipTable}
 }
 
 // Serve 启动网关 accept 循环（独立 goroutine，ctx 取消关闭 listener）。返回实际监听
@@ -194,11 +198,27 @@ func (g *Gateway) handleConn(ctx context.Context, c net.Conn) {
 		g.writeStatus(c)
 		return
 	}
-	if req.Peer == "" || req.Addr == "" {
+	// 虚拟 IP 路由分支：req.Peer 为空且 Addr host ∈ 虚拟子网 → 查 vipTable 定位节点
+	// （mesh connect <vip>:<port> 经网关复用已建链路）。表内无该 VIP → 拒绝（防未知
+	// 地址注入）；Addr 非虚拟子网 → 回落既有逻辑（req.Peer 必须非空）。
+	peer := req.Peer
+	if peer == "" && g.vipTable != nil {
+		if host, _, herr := net.SplitHostPort(req.Addr); herr == nil {
+			if vip, ok := ParseVirtualAddr(host); ok && IsVirtualAddr(vip, g.vipTable.Subnet()) {
+				if p, ok2 := g.vipTable.NodeByAddr(vip); ok2 {
+					peer = p
+				} else {
+					_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrBadRequest, Message: "虚拟 IP 未在 mesh 节点列表中找到对应节点"})
+					return
+				}
+			}
+		}
+	}
+	if peer == "" || req.Addr == "" {
 		_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrBadRequest, Message: "peer 与 addr 必填"})
 		return
 	}
-	m, ok := g.links.get(req.Peer)
+	m, ok := g.links.get(peer)
 	if !ok {
 		_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrNoPeerLink, Message: ErrNoPeerLink.Error()})
 		return

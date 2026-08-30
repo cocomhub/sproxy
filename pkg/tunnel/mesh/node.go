@@ -220,7 +220,10 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	errCh := make(chan error, 3)
 	// 共享链路池：自动对等发现写入，本地网关复用（mesh connect --gateway 路由）。
 	links := newLinkPool()
-	gw := newGateway(links, cfg, logger)
+	// 虚拟 IP 表：由 hub 节点列表填充（认证数据源），供网关虚拟 IP 路由与本地拓扑。
+	// subnet 与出口拨号策略一致（默认 CGNAT，可 --virtual-subnet 覆盖）。
+	vipTable := NewVipTable(parseVirtualSubnet(cfg.VirtualSubnet))
+	gw := newGateway(links, cfg, logger, vipTable)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -281,7 +284,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, reg.Secret, localAddr, httpClient, directOpts, logger); err != nil {
+			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, reg.Secret, localAddr, httpClient, directOpts, vipTable, logger); err != nil {
 				// 非阻塞写：只有 /api/hub/nodes 4xx（auth/配置级）才致命触发整 cycle
 				// 重连；拨号/瞬时失败在 runDiscoveryLoop 内部冷却处理，不写 errCh。
 				select {

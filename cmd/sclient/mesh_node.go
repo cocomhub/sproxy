@@ -12,6 +12,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 	"github.com/spf13/cobra"
@@ -53,6 +54,8 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			socksPass, _ := cmd.Flags().GetString("socks-pass")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			insecure, _ := cmd.Flags().GetBool("insecure")
+			virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
+			vipAllowPorts, _ := cmd.Flags().GetIntSlice("vip-allow-port")
 			if stunServers != nil {
 				webrtc.SetSTUNServers(stunServers)
 			}
@@ -131,6 +134,8 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				SocksAddr:         socksAddr,
 				SocksUser:         socksUser,
 				SocksPass:         socksPass,
+				VirtualSubnet:     virtualSubnet,
+				VIPAllowPorts:     vipAllowPorts,
 				Logger:            logger,
 			})
 		},
@@ -149,6 +154,8 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 	cmd.Flags().String("signal-addr", "", "直连 webrtc 信令监听地址（--mdns 用；空默认绑定主局域网 IP 的随机端口；可显式指定如 127.0.0.1:0 收敛 loopback 开发/测试避免防火墙弹窗，但仅本机可达）")
 	cmd.Flags().String("mdns-secret", "", "mDNS 模式共享密钥（直连信令 offer 与 mDNS TXT 均 HMAC 签名校验，防未授权 peer 借本节点作中继/出口、防广告伪造；同 mesh 所有节点须一致；为空 = 无认证 LAN 信任，出口由 dial-allow 策略约束）")
 	cmd.Flags().String("socks", "", "本地 SOCKS5 出口监听地址（本节点为出口，CONNECT 目标本机拨号；裸 :port 归一 127.0.0.1:port，loopback 安全默认；远程 peer 可 mesh connect socks -l :port 隧道到它。注意：不配 --socks-user/--socks-pass 时，对可触及者即开放本机内网出口，请显式开启认证或保持 loopback）")
+	cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；默认 CGNAT 100.64.0.0/10；mDNS 无 hub 模式本地确定性分配用，有 hub 时以 hub 分配为准）")
+	cmd.Flags().IntSlice("vip-allow-port", nil, "虚拟 IP 开放的额外端口白名单（可重复；缺省 = --service 宣告端口自动开放，此处额外开放未宣告的本机端口）")
 	cmd.Flags().String("socks-user", "", "SOCKS5 RFC 1929 认证用户名（配 --socks 使用；配置后要求认证，防未授权使用本节点作代理）")
 	cmd.Flags().String("socks-pass", "", "SOCKS5 RFC 1929 认证密码（配 --socks/--socks-user 使用）")
 	cmd.Flags().StringSlice("stun", nil,

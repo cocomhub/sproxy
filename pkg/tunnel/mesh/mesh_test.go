@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -623,15 +624,19 @@ func TestListHubNodes(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	ids, err := ListHubNodes(context.Background(), ts.URL, "test-ak", "test-sk", false)
+	nodes, err := ListHubNodes(context.Background(), ts.URL, "test-ak", "test-sk", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(gotAuth, sproxysig.Scheme+" ") {
 		t.Fatalf("Authorization = %q, want SproxySig 签名", gotAuth)
 	}
-	if len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
-		t.Fatalf("ids = %v, want [a b]（空 id 过滤）", ids)
+	if len(nodes) != 2 || nodes[0].ID != "a" || nodes[1].ID != "b" {
+		t.Fatalf("nodes = %v, want [a b]（空 id 过滤）", nodes)
+	}
+	// virtual_ip 解析：mock 响应无 vip 字段 → 无效 Addr。
+	if nodes[0].VIP.IsValid() {
+		t.Fatalf("无 virtual_ip 字段的节点 VIP 应为无效 Addr, got %v", nodes[0].VIP)
 	}
 
 	// 401 分支：hubAPIError code=401。
@@ -643,6 +648,32 @@ func TestListHubNodes(t *testing.T) {
 	var herr *hubAPIError
 	if !errors.As(err, &herr) || herr.code != http.StatusUnauthorized {
 		t.Fatalf("期望 hubAPIError 401, got %v", err)
+	}
+}
+
+// TestListHubNodes_VirtualIP 校验 /api/hub/nodes 的 virtual_ip 字段被解析为 HubNodeInfo.VIP。
+func TestListHubNodes_VirtualIP(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"node-a","virtual_ip":"100.64.0.2"},{"id":"node-b","virtual_ip":"bad-ip"},{"id":"node-c"}]`))
+	}))
+	defer ts.Close()
+
+	nodes, err := ListHubNodes(context.Background(), ts.URL, "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 3 {
+		t.Fatalf("nodes = %d, want 3", len(nodes))
+	}
+	if nodes[0].VIP != netip.MustParseAddr("100.64.0.2") {
+		t.Fatalf("node-a VIP = %v, want 100.64.0.2", nodes[0].VIP)
+	}
+	if nodes[1].VIP.IsValid() {
+		t.Fatalf("非法 virtual_ip 应解析为无效 Addr, got %v", nodes[1].VIP)
+	}
+	if nodes[2].VIP.IsValid() {
+		t.Fatalf("缺 virtual_ip 应为无效 Addr, got %v", nodes[2].VIP)
 	}
 }
 
@@ -735,7 +766,7 @@ func TestGateway_RoutesEstablishedLink(t *testing.T) {
 	dMux := mux.New(b, mux.RoleDialer)
 	defer dMux.Close()
 	links.set("peer", dMux)
-	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil)
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
 	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("gateway serve: %v", err)
@@ -767,7 +798,7 @@ func TestGateway_RoutesEstablishedLink(t *testing.T) {
 // 常规拨号）。同时覆盖网关对缺参请求（peer/addr 为空）的 bad_request 应答。
 func TestGateway_NoPeerLink(t *testing.T) {
 	links := newLinkPool()
-	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil)
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
 	ctx := t.Context()
 	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
 	if err != nil {
@@ -792,7 +823,7 @@ func TestGateway_Status(t *testing.T) {
 	gw := newGateway(links, NodeConfig{
 		NodeID:   "node-a",
 		Services: []hub.Service{{Name: "echo", Addr: "127.0.0.1:22"}},
-	}, nil)
+	}, nil, nil)
 	ctx := t.Context()
 	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
 	if err != nil {
@@ -949,7 +980,7 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 // 正确 token 的请求（未授权进程无法复用网关路由）。
 func TestGateway_RejectsWrongToken(t *testing.T) {
 	links := newLinkPool()
-	gw := newGateway(links, NodeConfig{NodeID: "local-node", AccessKeySecret: "secret-token"}, nil)
+	gw := newGateway(links, NodeConfig{NodeID: "local-node", AccessKeySecret: "secret-token"}, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
@@ -972,7 +1003,7 @@ func TestGateway_RejectsWrongToken(t *testing.T) {
 // （杜绝把未认证控制面暴露到 LAN/公网，防被用作开放 mesh 中继）。
 func TestGateway_RejectsNonLoopback(t *testing.T) {
 	links := newLinkPool()
-	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil)
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// 通配地址（0.0.0.0）→ 拒绝。
@@ -999,7 +1030,7 @@ func TestGateway_BindFailureFallsBackToRandomPort(t *testing.T) {
 	occupiedAddr := occupied.Addr().String()
 
 	links := newLinkPool()
-	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil)
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	actual, err := gw.Serve(ctx, occupiedAddr)
@@ -1054,7 +1085,7 @@ func TestGateway_ConcurrentConnectionsOnSameLink(t *testing.T) {
 	dMux := mux.New(b, mux.RoleDialer)
 	defer dMux.Close()
 	links.set("peer", dMux)
-	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil)
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
 	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("gateway serve: %v", err)
@@ -1237,7 +1268,6 @@ func TestAutoRegister_GetsVirtualIP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = reg.Closer() })
 	if !reg.VirtualIP.IsValid() {
 		t.Fatal("常驻注册应获得 hub 分配的虚拟 IP（REG_OK 下发）")
 	}
@@ -1248,7 +1278,10 @@ func TestAutoRegister_GetsVirtualIP(t *testing.T) {
 	if info.VirtualIP != reg.VirtualIP {
 		t.Fatalf("reg.VirtualIP=%v 与路由表 %v 不一致", reg.VirtualIP, info.VirtualIP)
 	}
-	_ = reg.Closer()
+	// 关闭注册连接（hub RemoveIfOwned 移除节点），随后同 nodeID 临时注册不受干扰。
+	if cerr := reg.Closer(); cerr != nil {
+		t.Fatal(cerr)
+	}
 
 	// 临时拨号身份（ExactNode=false）：瞬态 → hub 不分配虚拟 IP → reg.VirtualIP 无效。
 	reg2, err := AutoRegister(ctx, AutoRegisterParams{
@@ -1258,9 +1291,10 @@ func TestAutoRegister_GetsVirtualIP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = reg2.Closer() })
 	if reg2.VirtualIP.IsValid() {
 		t.Fatalf("瞬态拨号身份不应获得虚拟 IP, got %v", reg2.VirtualIP)
 	}
-	_ = reg2.Closer()
+	if cerr := reg2.Closer(); cerr != nil {
+		t.Fatal(cerr)
+	}
 }

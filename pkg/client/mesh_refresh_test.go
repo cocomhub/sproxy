@@ -226,3 +226,27 @@ func TestMeshTargetRefresher_ConcurrentCacheHit(t *testing.T) {
 		t.Fatalf("TTL 内并发应全部命中缓存（1 次 HTTP）, got %d", hits.Load())
 	}
 }
+
+// TestMeshTargetRefresher_Static 校验固定目标 refresher（虚拟 IP 寻址）：
+// Resolve 始终返回预设 target（不查 hub），Invalidate no-op。
+func TestMeshTargetRefresher_Static(t *testing.T) {
+	target := &MeshService{Node: "node-b", Addr: "100.64.0.5:22"}
+	r := NewStaticMeshTargetRefresher(target)
+
+	got, err := r.Resolve(t.Context())
+	if err != nil {
+		t.Fatalf("static Resolve: %v", err)
+	}
+	if got.Node != "node-b" || got.Addr != "100.64.0.5:22" {
+		t.Fatalf("static Resolve = %+v, want Node=node-b Addr=100.64.0.5:22", got)
+	}
+	// Invalidate no-op：再次 Resolve 仍返回固定 target。
+	r.Invalidate("node-b")
+	got2, err := r.Resolve(t.Context())
+	if err != nil {
+		t.Fatalf("static Resolve after Invalidate: %v", err)
+	}
+	if got2.Node != "node-b" {
+		t.Fatalf("Invalidate 后 static Resolve 仍应返回固定 target, got %+v", got2)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -113,6 +114,9 @@ type MDNSConfig struct {
 	// 注意：Secret 非空时，同 mesh 所有节点须配置相同密钥，否则未配置方无法发现
 	// 已配置方（其 TXT 无有效签名被拒绝）。
 	Secret string
+	// VirtualIP 是本节点虚拟 IP（mDNS 无 hub 模式本地确定性分配；广播进 TXT `vip=`，
+	// 对端据此构建 vipTable）。无效 Addr 不广播。
+	VirtualIP netip.Addr
 	// Logger 是会话日志（nil 用 slog.Default()）。
 	Logger *slog.Logger
 }
@@ -127,6 +131,8 @@ type MDNSPeer struct {
 	Services []hub.Service
 	// IPs 是对端广告的 LAN IPv4 地址。
 	IPs []net.IP
+	// VirtualIP 是对端虚拟 IP（mDNS TXT `vip=`；无签名/未宣告为无效 Addr）。
+	VirtualIP netip.Addr
 }
 
 // mdnsPeerCache 是一条已发现对端的缓存条目。
@@ -460,6 +466,7 @@ func (s *MDNSServer) applyAnswer(res dnsmessage.Resource) {
 // （防伪造/MITM，安全审查 D）；签名不匹配/缺失则忽略该对端。
 func (s *MDNSServer) applyTXT(inst string, txt []string, ttl uint32) {
 	var nodeID, signalAddr, sig string
+	var vip netip.Addr
 	var services []hub.Service
 	for _, str := range txt {
 		k, v, ok := strings.Cut(str, "=")
@@ -471,6 +478,10 @@ func (s *MDNSServer) applyTXT(inst string, txt []string, ttl uint32) {
 			nodeID = unescapeMDNS(v)
 		case "saddr":
 			signalAddr = unescapeMDNS(v)
+		case "vip":
+			if a, perr := netip.ParseAddr(v); perr == nil {
+				vip = a
+			}
 		case "sig":
 			sig = v // hex，无特殊字符，不转义
 		default:
@@ -487,7 +498,7 @@ func (s *MDNSServer) applyTXT(inst string, txt []string, ttl uint32) {
 		return // 非本 mesh 的 TXT（缺 node 标识），忽略
 	}
 	if s.conf.Secret != "" {
-		expected := mdnsTXTSig(s.conf.Secret, mdnsTXTContent(nodeID, signalAddr, services))
+		expected := mdnsTXTSig(s.conf.Secret, mdnsTXTContent(nodeID, signalAddr, vip, services))
 		if sig == "" || !hmac.Equal([]byte(sig), []byte(expected)) {
 			return // 签名缺失/不匹配：未认证对端，忽略（防伪造）
 		}
@@ -498,6 +509,9 @@ func (s *MDNSServer) applyTXT(inst string, txt []string, ttl uint32) {
 	cp.peer.NodeID = nodeID
 	if signalAddr != "" {
 		cp.peer.SignalAddr = signalAddr
+	}
+	if vip.IsValid() {
+		cp.peer.VirtualIP = vip
 	}
 	// 无条件替换服务列表：本实例的 TXT 记录在单条宣告中总是完整集合，替换保证
 	// 节点删服务/换服务后对端缓存立即反映（否则陈旧服务残留到 TTL 过期）。
@@ -638,24 +652,31 @@ func (s *MDNSServer) txtPairs() []string {
 	if s.conf.SignalAddr != "" {
 		pairs = append(pairs, "saddr="+escapeMDNS(s.conf.SignalAddr))
 	}
+	if s.conf.VirtualIP.IsValid() {
+		pairs = append(pairs, "vip="+s.conf.VirtualIP.String())
+	}
 	for _, svc := range s.conf.Services {
 		pairs = append(pairs, "svc."+escapeMDNS(svc.Name)+"="+escapeMDNS(svc.Addr))
 	}
 	if s.conf.Secret != "" {
-		// 共享密钥签名：覆盖 node-id + saddr + 服务集，浏览方据此校验防伪造。
-		pairs = append(pairs, "sig="+mdnsTXTSig(s.conf.Secret, mdnsTXTContent(s.conf.NodeID, s.conf.SignalAddr, s.conf.Services)))
+		// 共享密钥签名：覆盖 node-id + saddr + vip + 服务集，浏览方据此校验防伪造。
+		pairs = append(pairs, "sig="+mdnsTXTSig(s.conf.Secret, mdnsTXTContent(s.conf.NodeID, s.conf.SignalAddr, s.conf.VirtualIP, s.conf.Services)))
 	}
 	return pairs
 }
 
 // mdnsTXTContent 计算 mDNS TXT 签名的规范化内容（服务按 name 排序保证确定性）。
-func mdnsTXTContent(nodeID, signalAddr string, services []hub.Service) string {
+func mdnsTXTContent(nodeID, signalAddr string, vip netip.Addr, services []hub.Service) string {
 	svcs := append([]hub.Service(nil), services...)
 	sort.Slice(svcs, func(i, j int) bool { return svcs[i].Name < svcs[j].Name })
 	var b strings.Builder
 	b.WriteString(nodeID)
 	b.WriteByte('|')
 	b.WriteString(signalAddr)
+	if vip.IsValid() {
+		b.WriteByte('|')
+		b.WriteString(vip.String())
+	}
 	for _, svc := range svcs {
 		b.WriteByte('|')
 		b.WriteString(svc.Name)

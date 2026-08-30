@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
@@ -119,11 +120,46 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 				nodeID = svc.NodeID()
 			}
 
-			// 按需解析服务 → 目标节点 + 地址（带 TTL 缓存与单飞刷新，感知节点上下线）。
-			refresher := client.NewMeshTargetRefresher(svc, service)
-			target, err := refresher.Resolve(cmd.Context())
-			if err != nil {
-				return err
+			// 虚拟 IP 寻址（<vip>:<port>）：目标地址 host ∈ 虚拟子网 → 拉 hub 节点列表
+			// 构建 vipTable 解析 node-id（设计 AD-3/AD-6）。vipTable 只接受认证数据源
+			// （hub 节点列表，SproxySig 签名）。未知虚拟 IP 报错，不猜测 node-id。
+			// 非虚拟子网目标回落服务名解析（既有路径）。
+			vipSubnet := netip.MustParsePrefix(hub.DefaultVirtualSubnet)
+			var vipTable *mesh.VipTable
+			var target *client.MeshService
+			var refresher *client.MeshTargetRefresher
+			isVIP := false
+			if host, _, hErr := net.SplitHostPort(service); hErr == nil {
+				if vip, ok := mesh.ParseVirtualAddr(host); ok && mesh.IsVirtualAddr(vip, vipSubnet) {
+					isVIP = true
+					nodes, lErr := svc.ListHubNodes(cmd.Context())
+					if lErr != nil {
+						return fmt.Errorf("拉取 hub 节点列表解析虚拟 IP 失败: %w", lErr)
+					}
+					vipTable = mesh.NewVipTable(vipSubnet)
+					for _, n := range nodes {
+						if n.VirtualIP != "" {
+							if a, pErr := netip.ParseAddr(n.VirtualIP); pErr == nil {
+								vipTable.Add(a, n.ID)
+							}
+						}
+					}
+					targetNode, ok := vipTable.NodeByAddr(vip)
+					if !ok {
+						return fmt.Errorf("虚拟 IP %s 未在 mesh 节点列表中找到对应节点（请确认目标节点已在线且 hub 已分配虚拟 IP）", vip)
+					}
+					target = &client.MeshService{Node: targetNode, Addr: service}
+					// 固定目标 refresher：vip → node 映射已由 vipTable 解析，无需服务名刷新。
+					refresher = client.NewStaticMeshTargetRefresher(target)
+				}
+			}
+			if !isVIP {
+				// 按需解析服务 → 目标节点 + 地址（带 TTL 缓存与单飞刷新，感知节点上下线）。
+				refresher = client.NewMeshTargetRefresher(svc, service)
+				target, err = refresher.Resolve(cmd.Context())
+				if err != nil {
+					return err
+				}
 			}
 			ios.WriteOutLine("目标服务: %s（节点 %s, addr %s）", service, target.Node, target.Addr)
 
@@ -164,6 +200,10 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			// 本地节点无到目标的已建链路时回落常规拨号（不回归既有路径）。
 			// 网关认证 token 复用信令 token（auth_token），与 mesh node 网关一致。
 			dial := meshDialFunc(mesh.Dial)
+			if isVIP {
+				// 虚拟 IP 目标：经 vipTable 解析 node-id 后回落 mesh.Dial / 网关路由。
+				dial = meshVIPDial(vipTable, vipSubnet, dial, ios)
+			}
 			if gatewayAddr != "" {
 				dial = meshGatewayDial(gatewayAddr, svc.AccessKeySecret(), ios)
 			}
@@ -239,13 +279,26 @@ func newCmdMeshStatus(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 				ios.WriteOutLine("暂无 mesh 服务")
 				return nil
 			}
+			// 拉节点列表构建 node → 虚拟 IP 映射（mesh status 显示 virtual_ip，设计 AD-5）。
+			nodeVIP := map[string]string{}
+			if nodes, nerr := svc.ListHubNodes(cmd.Context()); nerr == nil {
+				for _, n := range nodes {
+					if n.VirtualIP != "" {
+						nodeVIP[n.ID] = n.VirtualIP
+					}
+				}
+			}
 			ios.WriteOutLine("mesh 服务 (%d):", len(svcs))
 			for _, s := range svcs {
 				addr := s.Addr
 				if addr == "" {
 					addr = "-"
 				}
-				ios.WriteOutLine("  %-24s node=%s  addr=%s", s.Name, s.Node, addr)
+				vip := nodeVIP[s.Node]
+				if vip == "" {
+					vip = "-"
+				}
+				ios.WriteOutLine("  %-24s node=%s  vip=%s  addr=%s", s.Name, s.Node, vip, addr)
 			}
 			return nil
 		},
