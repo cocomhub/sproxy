@@ -97,15 +97,18 @@ type FileClient struct {
 	hubURL                 string
 	tunnelKey              []byte
 	tunnelMux              *mux.Mux
+	tunnelInst             *tunnel.Tunnel // 缓存的 xfer 隧道实例（复用同一 mux，避免二次握手）
 	tunnelMuxMu            sync.Mutex
 	progressFn             func(label string, read, total int64)
 	chunkSize              int64
 	maxChunkSize           int64
-	accessKey              string // SproxySig 签名认证 AccessKey（公开标识）
-	accessKeySecret        string // SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）
-	authToken              string // 多用户 API 密钥 Bearer（api_keys.enabled 场景）
-	meshHubURL             string // 配置 hub_url（mesh/relay/p2p 信令/中继 hub，区别于 xfer 的 hubURL）
-	nodeID                 string // 配置 node_id（本节点默认 ID）
+	accessKey              string           // SproxySig 签名认证 AccessKey（公开标识）
+	accessKeySecret        string           // SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）
+	authToken              string           // 多用户 API 密钥 Bearer（api_keys.enabled 场景）
+	meshHubURL             string           // 配置 hub_url（mesh/relay/p2p 信令/中继 hub，区别于 xfer 的 hubURL）
+	nodeID                 string           // 配置 node_id（本节点默认 ID）
+	identity               *tunnel.Identity // 本端长时身份（P1 身份 pinning，可选）
+	peerFingerprints       []string         // 对端身份指纹 pinning 列表（可选，非空时握手 fail-closed 校验）
 	logger                 *slog.Logger
 	uploadCache            sync.Map       // key = absFilePath, value = *uploadCacheEntry
 	cacheCleanCounter      atomic.Int64   // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
@@ -219,6 +222,22 @@ func WithXfer(name, hubURL, hexKey string) Option {
 			}
 			c.tunnelKey = key
 		}
+	}
+}
+
+// WithIdentity 设置本端长时身份密钥对（P1 身份 pinning）。
+// 配置后 xfer 隧道握手时向对端出示身份公钥，供对端对本端做指纹 pinning。
+func WithIdentity(id *tunnel.Identity) Option {
+	return func(c *FileClient) {
+		c.identity = id
+	}
+}
+
+// WithPeerFingerprints 设置对端身份指纹 pinning 列表（P1 身份 pinning）。
+// 配置后 xfer 隧道握手时校验对端身份指纹，不匹配或对端未提供身份时 fail-closed 拒绝。
+func WithPeerFingerprints(fps []string) Option {
+	return func(c *FileClient) {
+		c.peerFingerprints = append([]string(nil), fps...)
 	}
 }
 
@@ -1040,23 +1059,49 @@ func (c *FileClient) doRequestViaXfer(req *http.Request) (*http.Response, error)
 	if err != nil {
 		return nil, fmt.Errorf("获取隧道 mux 失败: %w", err)
 	}
-	return tun.Do(req)
+	resp, err := tun.Do(req)
+	if err != nil {
+		// N-1：握手失败（fail-closed，配置 pin 时）后 mux 已处于协议错位状态——
+		// 残留的 mux 不能再复用。清除缓存，使下一次调用重新建立连接。
+		if tun.HandshakeErr() != nil {
+			c.tunnelMuxMu.Lock()
+			if c.tunnelInst == tun {
+				c.closeTunnelMuxLocked()
+			}
+			c.tunnelMuxMu.Unlock()
+		}
+	}
+	return resp, err
 }
 
 func (c *FileClient) getTunnelMux(ctx context.Context) (*tunnel.Tunnel, error) {
 	c.tunnelMuxMu.Lock()
 	defer c.tunnelMuxMu.Unlock()
 
-	// 检查已有连接是否存活
+	// 复用缓存：mux 已关闭（连接断开）→ 清理重建。
 	if c.tunnelMux != nil {
 		select {
 		case <-c.tunnelMux.Context().Done():
-			// mux 已关闭，清理并重建
-			c.tunnelMux = nil
+			c.closeTunnelMuxLocked()
 		default:
-			return tunnel.NewTunnel(c.tunnelMux, c.tunnelKey), nil
 		}
 	}
+
+	// 缓存隧道可用（握手成功 / 未配置密钥不握手）→ 复用同一 Tunnel 实例。
+	// 注意：不能为每个请求新建 Tunnel 包装同一 mux——Tunnel 的 ECDH 握手是
+	// 每实例 sync.Once，新建实例会对已完成一次握手的连接发起第二次握手，
+	// 造成协议混淆（N-1）。
+	if c.tunnelInst != nil {
+		if err := c.tunnelInst.HandshakeErr(); err != nil {
+			// 握手失败残留：协议错位，必须重建连接。
+			c.closeTunnelMuxLocked()
+		} else {
+			return c.tunnelInst, nil
+		}
+	}
+	// 注：握手持续失败（如配置了错误 pin）时，每次请求都会重建 mux（重新 Dial + 握手），
+	// 无退避/熔断。fail-closed 语义正确；CLI 单请求场景每次新建 FileClient，影响有限；
+	// 库调用方长循环持续请求时注意此行为（背压/退避留待未来）。
 
 	tp := xfer.Get(c.xferName)
 	if tp == nil {
@@ -1067,8 +1112,33 @@ func (c *FileClient) getTunnelMux(ctx context.Context) (*tunnel.Tunnel, error) {
 		return nil, fmt.Errorf("xfer 拨号失败: %w", err)
 	}
 	m := mux.New(conn, mux.RoleDialer)
+	tun := tunnel.NewTunnel(m, c.tunnelKey, c.tunnelOpts()...)
 	c.tunnelMux = m
-	return tunnel.NewTunnel(m, c.tunnelKey), nil
+	c.tunnelInst = tun
+	return tun, nil
+}
+
+// closeTunnelMuxLocked 关闭并清空缓存的 xfer mux / Tunnel（调用方须持有 tunnelMuxMu）。
+func (c *FileClient) closeTunnelMuxLocked() {
+	if c.tunnelInst != nil {
+		c.tunnelInst = nil
+	}
+	if c.tunnelMux != nil {
+		_ = c.tunnelMux.Close()
+		c.tunnelMux = nil
+	}
+}
+
+// tunnelOpts 返回 xfer 隧道创建用的身份 pinning 选项（identity / peer_fingerprints）。
+func (c *FileClient) tunnelOpts() []tunnel.TunnelOption {
+	var opts []tunnel.TunnelOption
+	if c.identity != nil {
+		opts = append(opts, tunnel.WithIdentity(c.identity))
+	}
+	if len(c.peerFingerprints) > 0 {
+		opts = append(opts, tunnel.WithPeerFingerprints(c.peerFingerprints))
+	}
+	return opts
 }
 
 // InitError 返回初始化过程中的错误，如 WithTunnel/WithXfer 初始化失败。
@@ -1110,6 +1180,18 @@ func (c *FileClient) MeshHubURL() string {
 // NodeID 返回配置的本节点默认 ID（可为空，回落主机名）。
 func (c *FileClient) NodeID() string {
 	return c.nodeID
+}
+
+// Identity 返回本端长时身份（P1 身份 pinning，可为 nil——未配置身份）。
+// 仅诊断/测试用途；真实握手由 xfer 隧道在 TunnelDo 时消费。
+func (c *FileClient) Identity() *tunnel.Identity {
+	return c.identity
+}
+
+// PeerFingerprints 返回对端身份指纹 pinning 列表（可为空——未配置 pin）。
+// 仅诊断/测试用途；真实校验由 xfer 隧道握手时执行（fail-closed）。
+func (c *FileClient) PeerFingerprints() []string {
+	return append([]string(nil), c.peerFingerprints...)
 }
 
 // doRequest 统一发送 HTTP 请求：当配置了隧道客户端时走加密隧道，否则直连。

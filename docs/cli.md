@@ -34,7 +34,8 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`batch-rename`](#batch-rename) | 批量重命名文件 |
 | [`cd`](#cd) | 切换当前目录 |
 | [`pwd`](#pwd) | 打印当前目录 |
-| [`tunnel`](#tunnel) | 通过隧道发送任意 HTTP 请求 |
+| [`tunnel`](#tunnel) | 通过隧道发送任意 HTTP 请求（`--xfer <name> --hub <addr>` 走 xfer/mux 隧道，启用身份指纹 pinning） |
+| [`identity`](#identity) | 节点长时身份密钥管理（Ed25519，供对端指纹 pinning） |
 | [`relay`](#relay) | 中继节点：连接到 Hub，转发请求到本地 HTTP 服务 |
 | [`genkey`](#genkey) | 生成 tunnel_key |
 | [`config`](#config) | 配置管理 |
@@ -137,9 +138,45 @@ sclient rmdir --force <dirname>
 ```bash
 sclient tunnel <url>
 sclient tunnel -X POST -H "Content-Type: application/json" -d '{"k":"v"}' <url>
+# xfer/mux 隧道模式（启用身份指纹 pinning，见下）
+sclient tunnel --xfer tcp --hub 127.0.0.1:18090 <url>
 ```
 
 通过加密隧道发送任意 HTTP 请求。可用于调试或转发到其他服务。
+
+**xfer/mux 隧道模式（P1 身份 pinning）**：加 `--xfer <name> --hub <addr>` 走
+xfer/mux 隧道（如 `tcp`、`ws`）。该模式在 ECDH 握手时交换 Ed25519 长时身份并做
+对端指纹 pin 校验：
+
+- 本端身份：`sclient identity generate` 生成（XDG 目录 `sproxy/identity.json`）；
+- 对端 pin：配置 `peer_fingerprints`（`sclient config set peer_fingerprints <fp>`，
+  多个逗号分隔；对端指纹取 `sclient identity fingerprint` 带外固化）；
+- 需配置 `access_key`/`access_key_secret`（派生隧道密钥使握手执行；缺 key 但配置了
+  身份/指纹时 fail-closed 报错，不静默降级）；
+- fail-closed：pin 不匹配或对端无身份即拒绝；传统隧道（未加 `--xfer`）与文件直连
+  命令不做身份交换，配置 `peer_fingerprints` 会 fail-closed 报错并指引使用 `--xfer`。
+
+> **接线现状（N-3）**：`--xfer` 当前对接的是 **xfer/mux listener**（测试或自定义
+> 服务端，如 `sclient relay`/`mesh node` 建立的自定义隧道对端）；**真实 sproxy
+> hub/relay/mesh 节点的数据面协议尚不兼容**——服务端 xfer tunnel listener 待后续
+> 接线，生产环境请勿把 `--xfer` 指向尚未提供该协议的地址（示例中的
+> `127.0.0.1:18090` 仅为示意）。
+
+### identity
+
+```bash
+sclient identity generate [--file <path>] [--force]   # 生成并持久化节点身份密钥，打印指纹
+sclient identity show [--file <path>]                 # 展示本节点身份指纹与公钥
+sclient identity fingerprint [--file <path>]          # 仅打印指纹（供脚本/复制）
+```
+
+管理节点长时身份（Ed25519，P1 身份 pinning）。身份文件默认存 XDG 配置目录
+`sproxy/identity.json`（`--file` 覆盖）。`generate` 已存在时报错（`--force` 覆盖）；
+`show`/`fingerprint` 在文件缺失/损坏时返回非 0 退出码并提示恢复路径。
+
+> 注意：`--file` 为独立管理用途——`tunnel --xfer` 的 pinning 恒从默认 XDG 路径
+> （`sproxy/identity.json`）加载本端身份，自定义路径生成的身份仅供展示/备份，
+> 不会参与 xfer 隧道的身份交换。如需自定义身份路径参与隧道，请改用默认路径。
 
 ### relay
 

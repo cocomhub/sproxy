@@ -6,13 +6,54 @@
 package clientfactory
 
 import (
+	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
+
+// IdentityFileName 是身份文件默认文件名。
+const IdentityFileName = "identity.json"
+
+// DefaultIdentityPath 返回默认身份文件路径（XDG 配置目录 sproxy/identity.json）。
+// 只计算路径，不创建目录/文件（加载场景无副作用）。
+// xdg.ConfigHome 为空时回落 os.UserConfigDir()（OS 标准配置目录），避免相对路径落盘。
+func DefaultIdentityPath() (string, error) {
+	configHome := xdg.ConfigHome
+	if configHome == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("无法确定配置目录: %w", err)
+		}
+		configHome = dir
+	}
+	return filepath.Join(configHome, "sproxy", IdentityFileName), nil
+}
+
+// LoadIdentityOptional 加载本端长时身份（P1 身份 pinning）。
+// 身份文件不存在时返回 (nil, nil)——不自动生成，未配置身份时行为与现状完全一致。
+// 身份文件存在但损坏时返回错误（fail-closed，不静默覆盖用户文件）。
+func LoadIdentityOptional() (*tunnel.Identity, error) {
+	path, err := DefaultIdentityPath()
+	if err != nil {
+		return nil, err
+	}
+	id, err := tunnel.LoadIdentity(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return id, nil
+}
 
 // Factory 抽象客户端创建，生产/测试可替换。
 type Factory interface {
@@ -57,10 +98,16 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		serverURL = s
 	}
 
+	// xfer 隧道模式（--xfer <name>）：P1 身份 pinning 的真实传输路径。
+	// xfer 隧道走 mux 握手（performHandshake），身份签名 + 指纹 pin 在此校验。
+	// 该模式下 TunnelDo 优先走 xfer（跳过 WithTunnel 传统隧道，避免 tunnelClient 短路）。
+	xferName, xferFlagErr := cmd.Flags().GetString("xfer")
+	xferEnabled := xferFlagErr == nil && xferName != ""
+
 	opts := []client.Option{
 		client.WithTimeout(time.Duration(cfg.Timeout) * time.Second),
 	}
-	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" && serverFlagNotSet(cmd) {
+	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" && serverFlagNotSet(cmd) && !xferEnabled {
 		// 有 AK/SK 且未显式 --server：走 access-key 驱动的加密隧道（WithTunnel 内部
 		// 已存 AK/SK 供外层 SproxySig 签名，无需再 WithAccessKey）。
 		opts = append(opts, client.WithTunnel(cfg.AccessKey, cfg.AccessKeySecret))
@@ -76,7 +123,7 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" {
 		opts = append(opts, client.WithAccessKey(cfg.AccessKey, cfg.AccessKeySecret))
 	}
-	if ak, _ := cmd.Flags().GetString("access-key"); ak != "" {
+	if ak, _ := cmd.Flags().GetString("access-key"); ak != "" && !xferEnabled {
 		sk, _ := cmd.Flags().GetString("access-key-secret")
 		// 显式 AK/SK（flag 覆盖）同样开启 access-key 驱动隧道：WithTunnel 内部已存
 		// AK/SK 供外层 SproxySig 签名，无需重复 WithAccessKey。
@@ -108,6 +155,56 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		opts = append(opts, client.WithTransportFallback())
 	} else if cfg.AllowTransportFallback {
 		opts = append(opts, client.WithTransportFallback())
+	}
+
+	if xferEnabled {
+		hub := ""
+		if h, err := cmd.Flags().GetString("hub"); err == nil {
+			hub = h
+		}
+		if hub == "" {
+			hub = cfg.HubURL
+		}
+		if hub == "" {
+			return nil, fmt.Errorf("xfer 隧道模式需要 --hub 或配置 hub_url")
+		}
+		// P1 身份 pinning：仅 xfer 隧道模式消费本端身份与对端指纹（懒加载——非隧道命令
+		// 不加载身份，身份文件损坏不导致 upload/download 等命令全部不可用）。
+		// 错误信息给出恢复路径。
+		var id *tunnel.Identity
+		if loadedID, lErr := LoadIdentityOptional(); lErr != nil {
+			return nil, fmt.Errorf("加载本端身份失败（可用 sclient identity generate --force 重新生成，或删除身份文件）: %w", lErr)
+		} else {
+			id = loadedID
+		}
+		if id != nil {
+			opts = append(opts, client.WithIdentity(id))
+		}
+		if len(cfg.PeerFingerprints) > 0 {
+			opts = append(opts, client.WithPeerFingerprints(cfg.PeerFingerprints))
+		}
+
+		// 隧道加密密钥：access-key 驱动（SK 派生），使 mux 握手执行（key 为 nil 时不握手，
+		// pinning 不生效）。
+		// fail-closed：配置了身份/peer_fingerprints 但缺 access_key_secret 时，握手不执行、
+		// pinning 静默不生效 = 安全机制被无声绕过，必须报错而非仅 Warn。
+		if cfg.AccessKeySecret == "" && (id != nil || len(cfg.PeerFingerprints) > 0) {
+			return nil, fmt.Errorf("xfer 隧道配置了身份或 peer_fingerprints 时必须配置 access_key_secret（ECDH 握手与身份 pinning 依赖隧道密钥；fail-closed）")
+		}
+		xferKey := ""
+		if cfg.AccessKeySecret != "" {
+			mesh := tunnel.AccessKeyMesh(cfg.AccessKey)
+			k, kErr := tunnel.DeriveTunnelKey(cfg.AccessKeySecret, mesh)
+			if kErr != nil {
+				return nil, fmt.Errorf("派生 xfer 隧道密钥失败: %w", kErr)
+			}
+			xferKey = hex.EncodeToString(k)
+		}
+		opts = append(opts, client.WithXfer(xferName, hub, xferKey))
+	} else if len(cfg.PeerFingerprints) > 0 {
+		// fail-closed：非 xfer 命令配置了 peer_fingerprints 但当前命令不走 xfer 握手，
+		// pinning 无法生效；配置了 pin 却静默跳过 = fail-open，必须报错并给出恢复路径。
+		return nil, fmt.Errorf("已配置 peer_fingerprints 但当前命令不走 xfer 隧道（--xfer），身份指纹 pinning 无法生效；请使用 `sclient tunnel --xfer <name>`，或运行 `sclient config set peer_fingerprints \"\"` 临时清除（fail-closed）")
 	}
 
 	fc := client.NewFileClient(serverURL, opts...)

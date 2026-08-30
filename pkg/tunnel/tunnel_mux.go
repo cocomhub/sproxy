@@ -28,14 +28,63 @@ type Tunnel struct {
 	sessionKey      []byte
 	skMu            sync.Mutex
 	replayProtector *ReplayProtector
+
+	// identity 是本端长时身份（可选，P1 身份 pinning）。
+	identity *Identity
+	// peerFingerprints 是对端身份指纹 pinning 列表（非空时握手 fail-closed 校验）。
+	peerFingerprints []string
+	// handshakeErr 记录 dialer 侧握手失败（仅配置 pin 时置位，fail-closed）。
+	handshakeErr error
+	// peerFP 记录握手时获得的对端身份指纹（展示/诊断用）。
+	peerFP string
 }
 
-func NewTunnel(m *mux.Mux, key []byte) *Tunnel {
-	return &Tunnel{
+// TunnelOption 配置 Tunnel 的可选参数。
+type TunnelOption func(*Tunnel)
+
+// WithIdentity 设置本端长时身份密钥对（用于在对端 pin 本端时提供公钥）。
+func WithIdentity(id *Identity) TunnelOption {
+	return func(t *Tunnel) {
+		t.identity = id
+	}
+}
+
+// WithPeerFingerprints 设置对端身份指纹 pinning 列表。
+// 配置后握手时校验对端身份指纹，不匹配或对端未提供身份时拒绝（fail-closed）。
+func WithPeerFingerprints(fps []string) TunnelOption {
+	return func(t *Tunnel) {
+		t.peerFingerprints = append([]string(nil), fps...)
+	}
+}
+
+func NewTunnel(m *mux.Mux, key []byte, opts ...TunnelOption) *Tunnel {
+	t := &Tunnel{
 		mux:             m,
 		key:             key,
 		replayProtector: NewReplayProtector(),
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
+}
+
+// PeerFingerprint 返回握手时获得的对端身份指纹（未握手或无身份时为空字符串）。
+// 仅供日志/诊断展示。
+func (t *Tunnel) PeerFingerprint() string {
+	t.skMu.Lock()
+	defer t.skMu.Unlock()
+	return t.peerFP
+}
+
+// HandshakeErr 返回握手失败的错误（fail-closed pinning 路径）。
+// 未配置 pin、握手成功或未握手时返回 nil。供调用方在 Do 失败后判断握手是否
+// 失败，从而决定是否需要关闭并重建 mux（避免复用残留 mux 发起第二次握手，
+// 见 pkg/client.getTunnelMux）。
+func (t *Tunnel) HandshakeErr() error {
+	t.skMu.Lock()
+	defer t.skMu.Unlock()
+	return t.handshakeErr
 }
 
 // ensureHandshake 确保 ECDH 握手已完成。
@@ -54,12 +103,21 @@ func (t *Tunnel) ensureHandshake() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
 		defer cancel()
-		sk, err := performHandshake(ctx, t.mux, true)
-		if err == nil {
+		sk, peerFP, err := performHandshakeWithIdentity(ctx, t.mux, true, t.identity, t.peerFingerprints)
+		switch {
+		case err == nil:
 			t.skMu.Lock()
 			t.sessionKey = sk
+			t.peerFP = peerFP
 			t.skMu.Unlock()
-		} else {
+		case len(t.peerFingerprints) > 0:
+			// fail-closed：配置了 pin 但握手失败，隧道操作必须拒绝，不回退静态密钥。
+			// handshakeErr 在 skMu 下写入，供 HandshakeErr() 并发安全读取。
+			t.skMu.Lock()
+			t.handshakeErr = fmt.Errorf("tunnel: 对端指纹校验失败: %w", err)
+			t.skMu.Unlock()
+			slog.Error("隧道握手失败（dialer，已配置对端指纹 pinning）", "error", err)
+		default:
 			slog.Warn("ECDH 握手失败（dialer），回退到静态密钥", "error", err)
 		}
 	})
@@ -84,6 +142,10 @@ func (t *Tunnel) encryptionKey() []byte {
 func (t *Tunnel) Do(req *http.Request) (*http.Response, error) {
 	// 在打开请求流之前确保握手已完成
 	t.ensureHandshake()
+	// fail-closed：配置了对端指纹 pinning 且握手校验失败时，拒绝所有隧道操作。
+	if err := t.HandshakeErr(); err != nil {
+		return nil, err
+	}
 
 	ctx := req.Context()
 	stream, err := t.mux.Open(ctx)
@@ -213,19 +275,25 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 
 // Serve 在隧道上提供 HTTP 服务。
 // 在进入 accept 循环前，同步执行 ECDH 握手（listener 侧），超时后回退到静态密钥。
+// 若配置了对端指纹 pinning 且握手校验失败，Serve 返回错误终止（fail-closed）。
 func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	if t.key != nil && t.mux.Role() == mux.RoleListener {
 		hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
-		sk, err := performHandshake(hctx, t.mux, false)
+		sk, peerFP, err := performHandshakeWithIdentity(hctx, t.mux, false, t.identity, t.peerFingerprints)
 		cancel()
-		if err == nil {
+		switch {
+		case err == nil:
 			t.skMu.Lock()
 			t.sessionKey = sk
+			t.peerFP = peerFP
 			t.skMu.Unlock()
-		} else {
+		case len(t.peerFingerprints) > 0:
+			// fail-closed：配置了 pin 但握手失败，拒绝整个隧道，不进入 accept 循环。
+			return fmt.Errorf("tunnel: 对端指纹校验失败: %w", err)
+		default:
 			slog.Warn("ECDH 握手失败（listener），回退到静态密钥", "error", err)
 		}
-		// 即使握手失败，Serve 也继续运行（向后兼容）
+		// 未配置 pin 时即使握手失败，Serve 也继续运行（向后兼容）
 	}
 
 	for {

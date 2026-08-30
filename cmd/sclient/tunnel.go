@@ -189,6 +189,8 @@ func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 	cmd.Flags().StringArrayP("header", "H", nil, "自定义请求头 (可重复)")
 	cmd.Flags().StringP("data", "d", "", "请求体 (@file 从文件读取)")
 	cmd.Flags().BoolP("include", "i", false, "显示响应头")
+	cmd.Flags().String("xfer", "", "使用 xfer/mux 隧道传输（如 ws/tcp），启用身份指纹 pinning（需 --hub 或配置 hub_url）")
+	cmd.Flags().String("hub", "", "xfer 隧道 hub 地址（ws://host/ws 或 host:port，默认用配置 hub_url）")
 	return cmd
 }
 
