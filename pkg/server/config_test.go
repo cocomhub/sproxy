@@ -153,15 +153,16 @@ func TestConfig_Default_TCPTransportDisabled(t *testing.T) {
 	}
 }
 
-// TestConfig_SetDefaults_TCPListen 验证 tcp 传输启用且 listen 为空时回落默认 :18084
-// （与 sclient relay --transport tcp 无 --hub 的默认回落一致）。
+// TestConfig_SetDefaults_TCPListen 验证 tcp 传输启用且 listen 为空时回落默认
+// 127.0.0.1:18084（loopback，与 sclient relay --transport tcp 无 --hub 的默认回落一致）。
+// 安全边界：默认绑定 loopback，远程可达需显式配置 listen。
 func TestConfig_SetDefaults_TCPListen(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
 	cfg.Hub.Transports.TCP.Enabled = true
 	cfg.SetDefaults()
-	if cfg.Hub.Transports.TCP.Listen != ":18084" {
-		t.Fatalf("tcp listen 默认应为 :18084，got %q", cfg.Hub.Transports.TCP.Listen)
+	if cfg.Hub.Transports.TCP.Listen != "127.0.0.1:18084" {
+		t.Fatalf("tcp listen 默认应为 127.0.0.1:18084，got %q", cfg.Hub.Transports.TCP.Listen)
 	}
 	// 显式配置的 listen 应保留
 	cfg2 := Default()
@@ -170,6 +171,29 @@ func TestConfig_SetDefaults_TCPListen(t *testing.T) {
 	cfg2.SetDefaults()
 	if cfg2.Hub.Transports.TCP.Listen != "127.0.0.1:19000" {
 		t.Fatalf("显式 tcp listen 应保留，got %q", cfg2.Hub.Transports.TCP.Listen)
+	}
+}
+
+// TestConfig_Validate_TCPPortConflict 验证 hub TCP 中继与主 HTTP server 同端口时
+// 校验失败（提前给清晰错误，而非 OS 绑定失败）。
+func TestConfig_Validate_TCPPortConflict(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.Transports.TCP.Enabled = true
+	cfg.Hub.Transports.TCP.Listen = ":18083" // 与默认 addr :18083 同端口
+	cfg.SetDefaults()
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when TCP relay port conflicts with HTTP addr")
+	}
+	// 不同端口应通过
+	cfg2 := Default()
+	cfg2.Hub.Enabled = true
+	cfg2.Hub.Transports.TCP.Enabled = true
+	cfg2.Hub.Transports.TCP.Listen = "127.0.0.1:18084"
+	cfg2.SetDefaults()
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("different port should pass: %v", err)
 	}
 }
 

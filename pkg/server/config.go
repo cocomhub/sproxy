@@ -6,6 +6,7 @@ package server
 import (
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -58,8 +59,13 @@ type VersionConfig struct {
 }
 
 // DefaultHubTCPListen 是 hub 裸 TCP 中继的默认监听地址（transports.tcp.listen 为空时）。
-// 与 sclient relay --transport tcp 无 --hub 的默认回落（127.0.0.1:18084）同端口对齐。
-const DefaultHubTCPListen = ":18084"
+// 与 sclient relay --transport tcp 无 --hub 的默认回落（127.0.0.1:18084）对齐。
+//
+// 安全边界：默认绑定 **loopback**（127.0.0.1）——裸 TCP 中继是网络面服务，全接口
+// 绑定意味着任意网卡可达（属 SSRF/暴露面攻击目标）；远程节点可达需显式配置
+// `listen: ":18084"` 或具体网卡 IP。注册准入由 SproxySig AccessKey + HMAC proof
+// 保证（fail-closed：未配置 access_keys 时 hub 拒绝所有注册）。
+const DefaultHubTCPListen = "127.0.0.1:18084"
 
 // HubConfig 配置 Hub 中继系统。
 // 节点注册准入由顶层 access_keys 提供（SproxySig AccessKey + HMAC proof），
@@ -100,8 +106,10 @@ type WSTransportConfig struct {
 
 // TCPTransportConfig 配置裸 TCP 中继传输监听。
 // 与 WS 不同，TCP 是独立 raw TCP listener（不走 HTTP server），端口由 Listen 指定。
-// 默认关闭（Enabled=false），显式开启才生效。Listen 为空时回落默认 :18084
-// （与 sclient relay --transport tcp 无 --hub 的默认回落一致）。
+// 默认关闭（Enabled=false），显式开启才生效。Listen 为空时回落默认
+// 127.0.0.1:18084（loopback，与 sclient relay --transport tcp 无 --hub 的默认回落
+// 一致）。远程节点可达需显式配置 `listen: ":18084"` 或具体网卡 IP（安全边界：默认
+// 不绑定全部接口，见 DefaultHubTCPListen 注释）。
 type TCPTransportConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
 	Listen  string `yaml:"listen" mapstructure:"listen"`
@@ -315,6 +323,16 @@ func (c *Config) Validate() error {
 		// S42 演进：节点接入传输 = ws（挂载主 HTTP server）或 tcp（独立 raw TCP
 		// listener）。hub 启用而两者皆关时节点无法注册，属配置脚枪，fail-fast 启动失败。
 		return fmt.Errorf("hub.enabled=true 但 transports.ws.enabled 与 transports.tcp.enabled 均为 false，中继节点无法连接，请至少启用一种传输")
+	}
+	if c.Hub.Enabled && c.Hub.Transports.TCP.Enabled && c.Hub.Transports.TCP.Listen != "" {
+		// 端口冲突校验：TCP 中继是独立 raw TCP listener，不能与主 HTTP server（addr）
+		// 同端口（同端口绑定会在启动时失败，这里提前给清晰错误）。比较 host:port 的
+		// port 段；非 host:port 或 :0（随机端口）跳过（由 OS 绑定兜底）。
+		if _, tcpPort, tcpErr := net.SplitHostPort(c.Hub.Transports.TCP.Listen); tcpErr == nil && tcpPort != "0" {
+			if _, httpPort, httpErr := net.SplitHostPort(c.Addr); httpErr == nil && httpPort != "0" && tcpPort == httpPort {
+				return fmt.Errorf("hub.transports.tcp.listen 端口 %s 与主 HTTP 监听 addr 端口 %s 冲突（TCP 中继与 HTTP server 不能同端口），请改配 transports.tcp.listen", tcpPort, httpPort)
+			}
+		}
 	}
 	if c.Hub.Enabled && c.Hub.DHT != "" && c.Hub.DHT != "kad" {
 		// 防配置打错字（"kademlia" 等）被静默忽略。门控在 hub.enabled：hub 未启用时
