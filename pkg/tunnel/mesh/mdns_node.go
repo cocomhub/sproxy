@@ -140,6 +140,16 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 			}
 		}()
 	}
+	if cfg.SocksAddr != "" { // 本地 SOCKS5 出口（本节点为出口，CONNECT 目标本机拨号）
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// 绑定失败不致命：Warn 后节点仍正常运行（对齐网关降级）。
+			if err := serveLocalSocks(nodeCtx, cfg.SocksAddr, cfg.SocksUser, cfg.SocksPass, logger); err != nil {
+				logger.Warn("mesh SOCKS5 出口不可用（节点仍正常运行）", "error", err)
+			}
+		}()
+	}
 
 	select {
 	case err := <-errCh:

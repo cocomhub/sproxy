@@ -91,6 +91,15 @@ type NodeConfig struct {
 	// 测试可指定 "127.0.0.1:0" 收敛到 loopback（避免防火墙弹窗）。实际广播的
 	// saddr 按监听 host 派生：通配 host 用主局域网 IP，显式 host 原样保留。
 	SignalAddr string
+	// SocksAddr 是本地 SOCKS5 出口监听地址（mesh node --socks；空 = 不启用）。
+	// 本节点作为出口：CONNECT 目标由节点本机拨号（本地网络出口）。远程 peer 可
+	// `mesh connect socks -l :port` 隧道到它使用。监听默认 loopback 安全；
+	// 可配 --socks-user/--socks-pass 要求 RFC 1929 认证。
+	SocksAddr string
+	// SocksUser / SocksPass 是 SOCKS5 RFC 1929 认证凭据（仅 SocksAddr 非空时生效；
+	// 配置了才要求认证，防未授权使用本节点作代理）。
+	SocksUser string
+	SocksPass string
 	// MDNSPeerSecret 是 mDNS 模式的共享密钥（--mdns-secret）。非空时：
 	//   - 直连信令 offer 携带 HMAC 签名，listener 校验（防未授权 peer 借本节点作
 	//     中继/出口）；
@@ -231,6 +240,16 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 		}
 		<-cycleCtx.Done()
 	}()
+	if cfg.SocksAddr != "" { // 本地 SOCKS5 出口（本节点为出口，CONNECT 目标本机拨号）
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// 绑定失败不致命：Warn 后节点仍正常运行（对齐网关降级）。
+			if err := serveLocalSocks(cycleCtx, cfg.SocksAddr, cfg.SocksUser, cfg.SocksPass, logger); err != nil {
+				logger.Warn("mesh SOCKS5 出口不可用（节点仍正常运行）", "error", err)
+			}
+		}()
+	}
 	if cfg.Discover {
 		httpBase, _, herr := hub.NormalizeEndpoints(cfg.HubURL, cfg.ServerURL)
 		if herr != nil {
