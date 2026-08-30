@@ -152,6 +152,11 @@ func (a *hubAllocator) reserveLocked(mesh, nodeID string, vip netip.Addr) error 
 	if !vip.IsValid() || !vip.Is4() || !a.subnet.Contains(vip) {
 		return fmt.Errorf("虚拟 IP %s 不在子网 %s 内", vip, a.subnet)
 	}
+	if off := a.ipv4Offset(vip); off < 2 {
+		// S-1：网络地址（偏移 0）与网关（偏移 1）不可被节点保留——hub 分配从不
+		// 产出这些地址，快照重建入口 fail-closed，防损坏/伪造持久化文件破坏不变量。
+		return fmt.Errorf("虚拟 IP %s 是保留地址（偏移 %d < 2），不可分配给节点", vip, off)
+	}
 	key := allocKey(mesh, nodeID)
 	if old, ok := a.assigned[key]; ok && old != vip {
 		return fmt.Errorf("虚拟 IP 冲突：%s 已分配 %s，尝试保留 %s", key, old, vip)

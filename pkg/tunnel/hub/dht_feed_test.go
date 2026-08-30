@@ -112,8 +112,8 @@ func TestHubServer_SetDHT_SkipsTransientNodes(t *testing.T) {
 	defer clientConn.Close()
 
 	// 注册一个 mesh- 临时身份（ExactNode=false 的拨号方临时 node-id）。
-	proof, ts, nonce := testRegCred(t, "mesh-tmp-123")
-	if err := clientConn.Send(ctx, NewRegisterFrame("mesh-tmp-123", testAK, proof, ts, nonce, Meta{})); err != nil {
+	proof, ts, nonce := testRegCred(t, "mesh-tmp-1234abcd5678ef90")
+	if err := clientConn.Send(ctx, NewRegisterFrame("mesh-tmp-1234abcd5678ef90", testAK, proof, ts, nonce, Meta{})); err != nil {
 		t.Fatal(err)
 	}
 	ack, ackErr := clientConn.Receive(ctx)
@@ -125,11 +125,11 @@ func TestHubServer_SetDHT_SkipsTransientNodes(t *testing.T) {
 	}
 
 	// 路由表应包含（临时节点也注册，转发寻址用）。
-	if !rt.Has("mesh-tmp-123") {
+	if !rt.Has("mesh-tmp-1234abcd5678ef90") {
 		t.Fatal("mesh-tmp-123 应注册到路由表")
 	}
 	// DHT 不应包含（跳过瞬态临时身份）。
-	if _, lerr := dht.Lookup(ctx, "mesh-tmp-123"); lerr == nil {
+	if _, lerr := dht.Lookup(ctx, "mesh-tmp-1234abcd5678ef90"); lerr == nil {
 		t.Fatal("瞬态临时节点不应喂入 DHT")
 	}
 
@@ -141,21 +141,31 @@ func TestHubServer_SetDHT_SkipsTransientNodes(t *testing.T) {
 	}
 }
 
-// TestIsTransientNodeID：瞬态临时身份识别。
+// TestIsTransientNodeID：瞬态临时身份识别（S-4 收紧为完整形态 <prefix>-<base>-<16hex>，
+// 避免误伤以 mesh-/p2p- 开头的合法稳定节点名如回落字面量 "mesh-node"）。
 func TestIsTransientNodeID(t *testing.T) {
-	for _, id := range []string{"disc-node-a-abc", "mesh-host-xyz", "p2p-node-123", "mesh-tmp-123"} {
+	// 完整形态临时身份 → true。
+	for _, id := range []string{
+		"disc-node-a-abc",                      // disc 前缀专用（注册时 ParseDiscNodeID 严格校验）
+		"mesh-host-xyz-1234abcd5678ef90",       // mesh 拨号临时身份
+		"p2p-node-123-1234abcd5678ef90",        // p2p 拨号临时身份
+		"mesh-base-with-dash-1234abcd5678ef90", // base 可含 '-'，尾段 16 hex
+	} {
 		if !isTransientNodeID(id) {
 			t.Errorf("isTransientNodeID(%q) 应为 true", id)
 		}
 	}
-	for _, id := range []string{"node-a", "mesh", "stable-node"} {
+	// 非瞬态：稳定节点 / 尾段非 16 hex 的 mesh-/p2p- 前缀名（如回落字面量 "mesh-node"）。
+	for _, id := range []string{
+		"node-a", "mesh", "stable-node",
+		"mesh-host-xyz", // 尾段非 16 hex → 稳定节点
+		"p2p-node-123",  // 尾段非 16 hex → 稳定节点
+		"mesh-node",     // 主机名不可解析的 mesh node 回落字面量
+		"mesh-",         // 裸前缀不再判瞬态（完整形态才判）
+	} {
 		if isTransientNodeID(id) {
 			t.Errorf("isTransientNodeID(%q) 应为 false", id)
 		}
-	}
-	// "mesh-" 裸前缀也判瞬态（保守：真实临时 ID 为 mesh-<base>-<hex>）。
-	if !isTransientNodeID("mesh-") {
-		t.Error("isTransientNodeID(\"mesh-\") 应为 true（裸前缀保守判瞬态）")
 	}
 }
 

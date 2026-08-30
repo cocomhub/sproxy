@@ -733,7 +733,7 @@ func TestHubServer_RegisterTransientNoVIP(t *testing.T) {
 	}
 	_ = baseM.Close()
 
-	for _, id := range []string{"mesh-tmp-abc123", "p2p-tmp-abc123", "disc-real-node-1234abcd"} {
+	for _, id := range []string{"mesh-tmp-1234abcd5678ef90", "p2p-tmp-1234abcd5678ef90", "disc-real-node-1234abcd"} {
 		m := newTestMux(t)
 		frame := &RegisterFrame{NodeID: id, AccessKey: testAK}
 		if strings.HasPrefix(id, "disc-") {
@@ -886,5 +886,152 @@ func TestMeshRouteTable_VirtualIPLookup(t *testing.T) {
 	// 无效地址反查失败。
 	if _, ok := rt.NodeByVirtualIP("mesh-a", netip.Addr{}); ok {
 		t.Fatal("无效地址不应可反查")
+	}
+}
+
+// TestHubServer_CrossMeshReRegisterReleasesOldVIP（S-2）校验节点从 mesh-a 换注册到
+// mesh-b 时，旧 mesh 的虚拟 IP 被释放（不再占旧 mesh 的地址空间）。
+func TestHubServer_CrossMeshReRegisterReleasesOldVIP(t *testing.T) {
+	rt := NewMeshRouteTable()
+	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
+	alloc := srv.Allocator().(*hubAllocator)
+
+	const akMeshA = "sk-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
+	const akMeshB = "sk-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
+
+	mA := newTestMux(t)
+	infoA, err := srv.registerNode(&RegisterFrame{NodeID: "node-x", AccessKey: akMeshA}, mA)
+	if err != nil {
+		t.Fatalf("注册到 mesh-a: %v", err)
+	}
+	if !infoA.VirtualIP.IsValid() {
+		t.Fatal("mesh-a 注册应获得虚拟 IP")
+	}
+	if rt.MeshOf("node-x") != "mesh-a" {
+		t.Fatalf("MeshOf = %q, want mesh-a", rt.MeshOf("node-x"))
+	}
+	_ = mA.Close()
+
+	// 换 mesh-b 注册同一 node-id（Add 触发跨 mesh 移动：移除旧表 + 释放旧 VIP）。
+	mB := newTestMux(t)
+	infoB, err := srv.registerNode(&RegisterFrame{NodeID: "node-x", AccessKey: akMeshB}, mB)
+	if err != nil {
+		t.Fatalf("注册到 mesh-b: %v", err)
+	}
+	if !infoB.VirtualIP.IsValid() {
+		t.Fatal("mesh-b 注册应获得虚拟 IP")
+	}
+	if rt.MeshOf("node-x") != "mesh-b" {
+		t.Fatalf("MeshOf = %q, want mesh-b", rt.MeshOf("node-x"))
+	}
+	// 旧 mesh-a 的 VIP 应已释放（assigned[mesh-a\0node-x] 不存在）。
+	alloc.mu.Lock()
+	_, stillHeld := alloc.assigned[allocKey("mesh-a", "node-x")]
+	alloc.mu.Unlock()
+	if stillHeld {
+		t.Fatal("跨 mesh 重注册后旧 mesh-a 的虚拟 IP 应已释放")
+	}
+	_ = mB.Close()
+}
+
+// TestHubServer_RemoveReRegister_NoDupVIP（I-1 回归）并发执行 Remove（管理端踢出）
+// 与 registerNode（重注册），最终分配器的 assigned 表不得出现两个 key 共享同一 VIP。
+func TestHubServer_RemoveReRegister_NoDupVIP(t *testing.T) {
+	rt := NewMeshRouteTable()
+	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
+	alloc := srv.Allocator().(*hubAllocator)
+
+	var wg sync.WaitGroup
+	for range 60 {
+		wg.Go(func() {
+			m := newTestMux(t)
+			defer m.Close()
+			_, _ = srv.registerNode(&RegisterFrame{NodeID: "node-x", AccessKey: testAK}, m)
+			_ = rt.Remove("node-x")
+		})
+	}
+	wg.Wait()
+
+	// 最终分配表不变量：同一 VIP 不得被两个不同 key 共享。
+	alloc.mu.Lock()
+	defer alloc.mu.Unlock()
+	owner := make(map[netip.Addr]string, len(alloc.assigned))
+	for k, vip := range alloc.assigned {
+		if prev, dup := owner[vip]; dup && prev != k {
+			t.Fatalf("虚拟 IP %v 被 %s 与 %s 共享（重复分配竞态）", vip, prev, k)
+		}
+		owner[vip] = k
+	}
+}
+
+// TestHubServer_RegisterStableMeshPrefixedNodeGetsVIP（S-4 回归）校验以 mesh- 开头的
+// 稳定节点名（如主机名不可解析时 mesh node 回落字面量 "mesh-node"）仍能获得虚拟 IP，
+// 不被瞬态前缀过滤误伤（静默失效）。
+func TestHubServer_RegisterStableMeshPrefixedNodeGetsVIP(t *testing.T) {
+	rt := NewMeshRouteTable()
+	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
+	m := newTestMux(t)
+	defer m.Close()
+
+	info, err := srv.registerNode(&RegisterFrame{NodeID: "mesh-node", AccessKey: testAK}, m)
+	if err != nil {
+		t.Fatalf("registerNode: %v", err)
+	}
+	if !info.VirtualIP.IsValid() {
+		t.Fatal("稳定节点名 mesh-node 应获得虚拟 IP（非瞬态身份）")
+	}
+}
+
+// TestHubServer_RegisterVIPInAck_NoSecret 校验仅声明 virtual-ip 能力（不声明
+// per-node-secret）的节点，REG_OK 携带虚拟 IP 且格式为 "REG_OK::<vip>"（secret 空
+// 占位），向后兼容解析正确。
+func TestHubServer_RegisterVIPInAck_NoSecret(t *testing.T) {
+	rt := NewMeshRouteTable()
+	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
+	dial, serverConn, _ := pipeXfer()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	srvDone := make(chan error, 1)
+	go func() {
+		c := serverConn()
+		if c == nil {
+			srvDone <- context.DeadlineExceeded
+			return
+		}
+		srvDone <- srv.HandleConn(ctx, c)
+	}()
+
+	clientConn, err := dial(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := testRegFrameJSON(t, "node-vip-nosec", `"capabilities":["virtual-ip"]`)
+	if err := clientConn.Send(ctx, []byte(frame)); err != nil {
+		t.Fatal(err)
+	}
+	ack, ackErr := clientConn.Receive(ctx)
+	if ackErr != nil {
+		t.Fatalf("Receive REG_OK: %v", ackErr)
+	}
+	if !strings.HasPrefix(string(ack), RegisterAckOK+"::") {
+		t.Fatalf("仅声明 virtual-ip 的节点应收到 REG_OK::<vip> 格式, got %q", string(ack))
+	}
+	ackFull, perr := ParseRegisterAckFull(string(ack))
+	if perr != nil {
+		t.Fatalf("解析 REG_OK: %v", perr)
+	}
+	if ackFull.Secret != "" {
+		t.Fatalf("未声明 per-node-secret 不应有 secret, got %q", ackFull.Secret)
+	}
+	if !ackFull.VirtualIP.IsValid() || !testVIPSubnet.Contains(ackFull.VirtualIP) {
+		t.Fatalf("REG_OK 应携带有效虚拟 IP, got %+v", ackFull)
+	}
+
+	_ = clientConn.Close()
+	select {
+	case <-srvDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("HandleConn did not return")
 	}
 }

@@ -171,6 +171,34 @@ func TestHubAllocator_ReserveFromSnapshot(t *testing.T) {
 	}
 }
 
+// TestHubAllocator_ReserveRejectsReservedOffsets（S-1）校验快照重建不能把网络地址
+// （偏移 0）或网关（偏移 1）保留给节点——hub 分配从不产出这些地址，防损坏/伪造
+// 持久化文件破坏"首地址保留网关、从 .2 起分配"的不变量。
+func TestHubAllocator_ReserveRejectsReservedOffsets(t *testing.T) {
+	a := NewHubAllocator(testVIPSubnet)
+	if err := a.Reserve("m", "a", netip.MustParseAddr("100.64.0.0")); err == nil {
+		t.Fatal("网络地址（偏移 0）不应可保留")
+	}
+	if err := a.Reserve("m", "a", netip.MustParseAddr("100.64.0.1")); err == nil {
+		t.Fatal("网关地址（偏移 1）不应可保留")
+	}
+	// 正常地址（偏移 ≥2）仍可保留。
+	if err := a.Reserve("m", "a", netip.MustParseAddr("100.64.0.2")); err != nil {
+		t.Fatalf("正常地址应可保留: %v", err)
+	}
+}
+
+// TestHubAllocator_TinySubnetExhaust 校验 /31、/32 极小子网无可分配地址（偏移 ≥2
+// 且 < maxHost 的范围内无主机）。
+func TestHubAllocator_TinySubnetExhaust(t *testing.T) {
+	for _, cidr := range []string{"100.64.0.0/31", "100.64.0.0/32"} {
+		a := NewHubAllocator(netip.MustParsePrefix(cidr))
+		if _, err := a.Alloc("m", "a"); err == nil {
+			t.Fatalf("%s 应地址耗尽（无可分配主机）", cidr)
+		}
+	}
+}
+
 // TestHubAllocator_ReserveConflict 校验快照重建时的地址冲突处理：
 // 同一 VIP 被两个不同 key 保留 → 第二个报错。
 func TestHubAllocator_ReserveConflict(t *testing.T) {

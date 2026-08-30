@@ -372,12 +372,37 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, erro
 }
 
 // isTransientNodeID 判断 node-id 是否为瞬态临时身份（mesh 自动对等拨号 disc-、
-// mesh connect mesh-、p2p p2p- 前缀的 <prefix>-<base>-<随机hex>）。这些身份拨号完成
-// 后即注销，不应喂入 DHT（发现表只保留稳定真实节点）。
+// mesh connect mesh-、p2p p2p- 的 <prefix>-<base>-<16hex> 完整形态）。这些身份拨号
+// 完成后即注销，不应喂入 DHT（发现表只保留稳定真实节点）、不应分配虚拟 IP。
+//
+// S-4：mesh-/p2p- 判断收紧为完整形态（isTransientDialID），避免把以 mesh-/p2p- 开头
+// 的合法稳定节点名（如主机名不可解析时 mesh node 回落字面量 "mesh-node"）误判为
+// 瞬态身份而不分配虚拟 IP（静默失效）。disc- 保留前缀判断（disc 前缀专用，注册时
+// 有 ParseDiscNodeID 严格校验，无稳定节点会用它）。
 func isTransientNodeID(nodeID string) bool {
-	return strings.HasPrefix(nodeID, discPrefix) ||
-		strings.HasPrefix(nodeID, "mesh-") ||
-		strings.HasPrefix(nodeID, "p2p-")
+	return strings.HasPrefix(nodeID, discPrefix) || isTransientDialID(nodeID)
+}
+
+// isTransientDialID 判断 mesh-/p2p- 拨号临时身份（<prefix>-<base>-<hex 尾段>）。
+// 与 AutoRegister 的临时 node-id 格式对齐（fmt.Sprintf("%s-%s-%s", prefix, base,
+// newTempSuffix())，newTempSuffix 为 16 位 hex）。尾段须为 hex 且长度符合
+// newTempSuffix（8-64 位 hex），base 可含 '-'。
+func isTransientDialID(nodeID string) bool {
+	for _, prefix := range []string{"mesh-", "p2p-"} {
+		if !strings.HasPrefix(nodeID, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(nodeID, prefix)
+		idx := strings.LastIndex(rest, "-")
+		if idx <= 0 {
+			return false
+		}
+		if !isHexSuffix(rest[idx+1:]) {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // DiscPrefix 是 mesh 自动对等发现临时节点 ID 的基前缀（不含 '-'，AutoRegister 的
@@ -488,9 +513,18 @@ func NewHubServer(rt *MeshRouteTable, auth *Authenticator, logger *slog.Logger, 
 	}
 	s := &HubServer{rt: rt, auth: auth, logger: logger, allocator: NewHubAllocator(DefaultHubAllocatorSubnet())}
 	s.rt.SetVIPRelease(func(mesh string, id NodeID) {
-		if s.allocator != nil {
-			s.allocator.Release(mesh, string(id))
+		// I-1 竞态守卫：Remove 先删节点再触发本回调。若同一 node-id 已被并发重注册
+		// 到**同一 mesh**（Add 覆盖旧连接后该 mesh 表内仍有节点），**不释放**——新注册
+		// 已复用旧 VIP（assigned 命中），释放会破坏虚拟 IP 唯一性（两个存活节点共享
+		// 地址）。用 HasInMesh（而非全局 Has）判断：跨 mesh 移动时旧 mesh 表已移除
+		// 节点，HasInMesh 为 false，正确释放旧归属（S-2）。
+		// 残余 TOCTOU 窗口（本检查与 Release 之间的重注册）极小且不引入安全面，
+		// 已由分配器 used 反向映射的归属校验兜底；并发交错由
+		// TestHubServer_RemoveReRegister_NoDupVIP 锁定。
+		if s.allocator == nil || s.rt.HasInMesh(mesh, id) {
+			return
 		}
+		s.allocator.Release(mesh, string(id))
 	})
 	if len(maxConns) > 0 && maxConns[0] > 0 {
 		s.maxConns = make(chan struct{}, maxConns[0])

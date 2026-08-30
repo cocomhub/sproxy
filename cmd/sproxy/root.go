@@ -157,10 +157,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 		hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(aks), logger.With("component", "hub"), cfg.Hub.MaxConnections)
 		// 虚拟 IP 分配：按 hub.virtual_subnet 配置的子网构建分配器（默认 CGNAT
 		// 100.64.0.0/10，config.Validate 已保证 IPv4）。分配权在 hub，节点不可自选。
+		// S-5：防御兜底同时覆盖非法 CIDR 与 IPv6（NewHubAllocator 对非 IPv4 panic，
+		// 此处避免把 IPv6 前缀传给它）。默认分配器已在 NewHubServer 建立。
 		if prefix, perr := netip.ParsePrefix(cfg.Hub.VirtualSubnet); perr == nil {
-			hubSrv.SetAllocator(hub.NewHubAllocator(prefix))
+			if prefix.Addr().Is4() {
+				hubSrv.SetAllocator(hub.NewHubAllocator(prefix))
+			} else {
+				logger.Warn("hub.virtual_subnet 非 IPv4，使用默认子网", "virtual_subnet", cfg.Hub.VirtualSubnet)
+			}
 		} else {
-			// Validate 已保证合法，此处仅防御性兜底（默认分配器已在 NewHubServer 建立）。
 			logger.Warn("hub.virtual_subnet 非法，使用默认子网", "virtual_subnet", cfg.Hub.VirtualSubnet, "error", perr)
 		}
 		// 重启快照重建分配表：把已持久化的 (mesh,nodeID)→VIP 灌回分配器，
