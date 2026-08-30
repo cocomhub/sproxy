@@ -100,6 +100,20 @@ access_keys:
 # 同名归档文件已存在时返回 409（O_EXCL 防覆盖）；打包完成后按磁盘实际大小对账预留配额。
 # cloud_archive_max_bytes: 10737418240   # 10 GiB 示例
 
+# 文件同步任务（SyncManager）——服务端托管节点间 push/pull 同步任务（v1）。
+# SyncManager 默认装配（/api/sync/tasks 等路由始终可用）；sync_remotes 为空时创建远程任务
+# 会 fail-closed 拒绝（remote 未配置）。
+# sync:
+#   max_concurrent: 3                # 最大并发同步任务数（默认 3）
+#   task_ttl: "24h"                  # 完成任务保留时间，过期自动清理
+# 远程节点（sync_remotes）：第一版用 HTTP 直连远程 sproxy 文件 API（SproxySig 认证）。
+# mesh 通道为后续增强。未配置 access_key/access_key_secret 的 remote 创建任务时 fail-closed 拒绝。
+# sync_remotes:
+#   - name: "node-a"                 # 配置名（创建任务时 remote 字段引用）
+#     url: "http://192.168.1.10:18083"
+#     access_key: ""                 # 远程 sproxy 认可的 SproxySig AK/SK（sclient access-key create 生成）
+#     access_key_secret: ""
+
 # Hub 中继（mesh 内网穿透，默认关闭）。
 # 节点注册准入由顶层 access_keys 提供（AK/HMAC proof 证明持有 SK，无需独立 relay_token）。
 # hub:

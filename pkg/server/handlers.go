@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -49,6 +50,7 @@ type Handlers struct {
 	hubPersist     *hub.Persister // hub 状态持久化器（配置 hub.persist_file 时注入；nil = 不持久化）
 	handler        http.Handler
 	cloudMgr       *CloudDownloadManager
+	syncMgr        *syncmgr.Manager // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	storageMgr     *StorageManager
 	uploadingFiles sync.Map             // map[string]string — filename → uploadID，追踪正在上传的文件名
 	uploadingStop  chan struct{}        // 关闭后通知 uploadingFiles 定期清理 goroutine 退出
@@ -72,6 +74,12 @@ func (h *Handlers) SetFederationClient(fc *hub.FederationClient) {
 	if h.relayStream != nil {
 		h.relayStream.SetFederation(fc, h.hubID)
 	}
+}
+
+// SetSyncMgr 注入文件同步任务管理器（nil 清除，相关 /api/sync/* 路由返回 400）。
+// 由 cmd/sproxy 在配置了 sync（sync.max_concurrent 或 sync_remotes）时调用。
+func (h *Handlers) SetSyncMgr(mgr *syncmgr.Manager) {
+	h.syncMgr = mgr
 }
 
 // TunnelHandler 返回隧道处理器，用于 SIGHUP 时热替换密钥。
@@ -290,6 +298,19 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("DELETE /api/cloud/groups/{id}", h.authMiddleware(h.cloudDeleteGroup))
 	srvMux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.authMiddleware(h.cloudResumeGroup))
 	srvMux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.authMiddleware(h.cloudArchiveGroup))
+
+	// 文件同步 API（localMux：隧道认证；handler 在 syncMgr 未装配时返回 400）
+	localMux.HandleFunc("POST /api/sync/tasks", h.syncCreateTask)
+	localMux.HandleFunc("GET /api/sync/tasks", h.syncListTasks)
+	localMux.HandleFunc("GET /api/sync/tasks/{id}", h.syncGetTask)
+	localMux.HandleFunc("POST /api/sync/tasks/{id}/cancel", h.syncCancelTask)
+	localMux.HandleFunc("DELETE /api/sync/tasks/{id}", h.syncDeleteTask)
+	// 文件同步 API（主 mux：SproxySig auth）
+	srvMux.HandleFunc("POST /api/sync/tasks", h.authMiddleware(h.syncCreateTask))
+	srvMux.HandleFunc("GET /api/sync/tasks", h.authMiddleware(h.syncListTasks))
+	srvMux.HandleFunc("GET /api/sync/tasks/{id}", h.authMiddleware(h.syncGetTask))
+	srvMux.HandleFunc("POST /api/sync/tasks/{id}/cancel", h.authMiddleware(h.syncCancelTask))
+	srvMux.HandleFunc("DELETE /api/sync/tasks/{id}", h.authMiddleware(h.syncDeleteTask))
 
 	// Hub 管理 API（中继系统），需鉴权
 	if opts.RouteTable != nil {
