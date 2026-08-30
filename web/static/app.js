@@ -795,6 +795,10 @@ let _cloudPollTimer = null;
 let _cloudTasksInFlight = false;
 let _cloudGroupsInFlight = false;
 
+// --- 文件同步任务（sync_task 频道；server 是唯一权威，内存数组即最新，不入 localStorage） ---
+let _syncTasks = [];
+let _syncTasksInFlight = false;
+
 // 传输页状态：当前激活频道（缺省 all）。频道条与列表渲染入口（任务 4）。
 let _transferChannel = 'all';
 
@@ -858,6 +862,28 @@ function normalizeCloudGroupItem(g) {
   };
 }
 
+// 同步任务归一：SyncTask JSON → TransferItem（kind:'sync_task'）。
+// id 直接用服务端 id（sync 任务不入 localStorage，无 cloud-task- 前缀冲突）。
+// meta.sync 保留服务端完整快照（供 buildSyncRowMeta / 操作读取 files_done 等）。
+function normalizeSyncTaskItem(t) {
+  const src = (t && t.src) || '';
+  const total = (t && typeof t.bytes_total === 'number' && t.bytes_total > 0) ? t.bytes_total : 0;
+  const loaded = (t && typeof t.bytes_done === 'number' && t.bytes_done > 0) ? t.bytes_done : 0;
+  return {
+    id: t && t.id,
+    kind: 'sync_task',
+    filename: src || 'sync',
+    src: src,
+    dst: (t && t.dst) || '',
+    direction: (t && t.direction) || '',
+    totalSize: total,
+    total: total,
+    loaded: loaded,
+    status: (t && t.status) || 'pending',
+    meta: { sync: t || {} },
+  };
+}
+
 // stripCloudId：把云项展示 id（'cloud-task-<id>' / 'cloud-group-<id>'）还原为服务端
 // 真实 id。按钮 data-id 一律携带展示 id（含前缀，防与 localStorage 项 id 冲突、详情行
 // 寻址一致）；凡要传给 sc.cloud.* API 或拼 '.__cloud__/<id>/' 路径，必须先剥前缀，
@@ -867,13 +893,14 @@ function stripCloudId(id) {
   return String(id).replace(/^cloud-(task|group)-/, '');
 }
 
-// 传输合并数组（裁定 2）：localStorage 项 + 云任务 + 云组。
+// 传输合并数组（裁定 2）：localStorage 项 + 云任务 + 云组 + 同步任务。
 function getAllTransferItems() {
   const store = getTransferStore();
   const local = store ? store.loadItems() : [];
   const tasks = (_cloudTasks || []).map(normalizeCloudTaskItem);
   const groups = (_cloudGroups || []).map(normalizeCloudGroupItem);
-  return local.concat(tasks, groups);
+  const syncs = (_syncTasks || []).map(normalizeSyncTaskItem);
+  return local.concat(tasks, groups, syncs);
 }
 
 // refresh 云任务/组的顶部 URL 预填由 showCloudDownload 的 restoreCloudUrlRow + 清空负责，
@@ -908,13 +935,40 @@ function refreshCloudGroups() {
   });
 }
 
+// refreshSyncTasks：拉取 /api/sync/tasks 转 TransferItem 并重渲染当前频道。
+// 与云任务同裁定：sync 任务 server 唯一权威，只回写内存数组，不入 localStorage。
+// 审查 I-1/R-1/R-4：区分「sync 未配置」与真错误——服务端 syncMgr==nil 时
+// GET /api/sync/tasks 恒 400 {error:'sync not configured'}，此情形静默清空列表不 toast
+// （否则合法禁用配置下每 3s 轮询刷错误 toast）；真网络/认证/5xx 错误保留 stale 列表
+// 可见 + toast（对齐 refreshCloudTasks 的 catch 只 toast 不清空）。
+function refreshSyncTasks() {
+  if (_syncTasksInFlight) return;
+  _syncTasksInFlight = true;
+  return sc.sync.listTasks().then(function (data) {
+    const tasks = Array.isArray(data) ? data : (data && data.tasks) || [];
+    _syncTasks = tasks || [];
+    renderTransferChannel();
+  }).catch(function (e) {
+    if (e && e.status === 400) {
+      _syncTasks = [];
+      renderTransferChannel();
+      return;
+    }
+    showToast('同步任务刷新失败: ' + (e && e.message ? e.message : String(e)), 'error');
+  }).finally(function () {
+    _syncTasksInFlight = false;
+  });
+}
+
 function startCloudPolling() {
   stopCloudPolling();
-  // 任务与组列表一起轮询，保证组进度同步刷新；只回写云项（裁定 1：不 upsert 到
-  // sproxy_transfer_items——server 是云任务唯一权威，localStorage 只存本机上传/下载）。
+  // 云任务/云组/同步任务列表一起轮询，保证进度同步刷新；只回写内存数组（裁定 1：
+  // 不 upsert 到 sproxy_transfer_items——server 是云任务与同步任务的唯一权威，
+  // localStorage 只存本机上传/下载）。
   _cloudPollTimer = setInterval(function () {
     refreshCloudTasks();
     refreshCloudGroups();
+    refreshSyncTasks();
   }, 3000);
 }
 
@@ -954,6 +1008,7 @@ function showTransferPage() {
   // 幂等：重复进入（已在 transfer tab）被 switchMainTab 短路，不会走到这里。
   refreshCloudTasks();
   refreshCloudGroups();
+  refreshSyncTasks();
   renderTransferChannel();
   startCloudPolling();
 }
@@ -973,6 +1028,14 @@ function renderTransferChannel() {
   const html = appRender.buildTransferListHtml(items, ch);
   body.innerHTML = html;
   syncChannelBarActive();
+  syncCreateRowVisibility();
+}
+
+// syncCreateRowVisibility：仅 sync 频道显示「新建同步」表单，其它频道隐藏。
+function syncCreateRowVisibility() {
+  const el = document.getElementById('sync-create-row');
+  if (!el) return;
+  el.style.display = _transferChannel === 'sync' ? 'flex' : 'none';
 }
 
 // syncChannelBarActive：把当前频道的按钮打上 active 高亮（幂等，无则补；其它清显）。
@@ -1073,6 +1136,100 @@ function restoreCloudUrlRow() {
     '<button type="button" id="cloud-create-group-btn" class="btn btn-secondary" style="white-space:nowrap;">创建组</button>' +
     '<button type="button" id="cloud-chain-group-btn" class="btn btn-primary" style="white-space:nowrap;">组链式下载</button>';
   bindCloudUrlRowEvents();
+}
+
+// --- 文件同步（sync 频道：新建表单 + 行操作） ---
+
+// bindSyncCreateEvents：绑定「新建同步」表单按钮（静态 DOM，DOMContentLoaded 时调用一次）。
+function bindSyncCreateEvents() {
+  const btn = document.getElementById('sync-create-btn');
+  if (btn) btn.addEventListener('click', createSyncTask);
+  // 审查 R-2：文本输入框 Enter 提交（对齐云 URL 行）；select 不绑（Enter 语义不同）。
+  ['sync-remote', 'sync-src', 'sync-dst'].forEach(function (id) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); createSyncTask(); }
+    });
+  });
+}
+
+// createSyncTask：读取 sync 频道表单 → POST /api/sync/tasks → 刷新列表。
+// 第一版表单从简：direction/remote/src/dst + recursive 复选框 + conflict_policy 下拉。
+async function createSyncTask() {
+  const direction = document.getElementById('sync-direction').value;
+  const remote = document.getElementById('sync-remote').value.trim();
+  const src = document.getElementById('sync-src').value.trim();
+  const dst = document.getElementById('sync-dst').value.trim();
+  const recursive = document.getElementById('sync-recursive').checked;
+  const conflictPolicy = document.getElementById('sync-conflict').value;
+  if (!remote) { showToast('请输入 remote 节点名', 'warning'); return; }
+  if (!src) { showToast('请输入 src 路径', 'warning'); return; }
+  try {
+    const data = await sc.sync.createTask({
+      direction: direction,
+      remote: remote,
+      src: src,
+      dst: dst,
+      recursive: recursive,
+      conflict_policy: conflictPolicy,
+    });
+    showToast('同步任务已创建: ' + (data.id || ''), 'success');
+    document.getElementById('sync-remote').value = '';
+    document.getElementById('sync-src').value = '';
+    document.getElementById('sync-dst').value = '';
+    // 审查 M-4：先本地即时更新（新任务立即可见），再触发刷新——若恰逢轮询在途被
+    // in-flight 守卫 no-op，本地已显示，下一轮轮询补齐。
+    if (data && data.id) {
+      (_syncTasks = _syncTasks || []).push(normalizeSyncTaskItem(data));
+      renderTransferChannel();
+    }
+    switchTransferChannel('sync');
+    refreshSyncTasks();
+  } catch (e) {
+    // 审查 M-3：按 status 映射友好提示（SclientError 不带响应体 error，仅 HTTP 状态）。
+    let msg = e && e.message ? e.message : String(e);
+    if (e && e.status === 400) msg = '参数有误（请检查 remote 是否存在、src/dst/conflict 等）';
+    else if (e && e.status === 507) msg = '目标存储空间不足';
+    showToast('创建同步失败: ' + msg, 'error');
+  }
+}
+
+// cancelSyncTask：取消进行中的同步任务（data-id = 服务端任务 id，无前缀）。
+async function cancelSyncTask(id) {
+  if (!confirm('确认取消同步任务 ' + id + '？')) return;
+  try {
+    await sc.sync.cancelTask(id);
+    showToast('同步任务已取消', 'success');
+    // 审查 M-4：先本地即时移除，再刷新（防 in-flight 守卫吞掉更新）。
+    _syncTasks = (_syncTasks || []).filter(function (x) { return x.id !== id; });
+    renderTransferChannel();
+    refreshSyncTasks();
+  } catch (e) { showToast('取消失败: ' + (e && e.message ? e.message : e), 'error'); }
+}
+
+// deleteSyncTask：删除同步任务（终态清理）。
+async function deleteSyncTask(id) {
+  if (!confirm('确认删除同步任务 ' + id + '？')) return;
+  try {
+    await sc.sync.deleteTask(id);
+    showToast('同步任务已删除', 'success');
+    // 审查 M-4：先本地即时移除，再刷新。
+    _syncTasks = (_syncTasks || []).filter(function (x) { return x.id !== id; });
+    renderTransferChannel();
+    refreshSyncTasks();
+  } catch (e) { showToast('删除失败: ' + (e && e.message ? e.message : e), 'error'); }
+}
+
+// refreshSyncTaskStatus：单任务刷新（GET /api/sync/tasks/{id}）。
+// 审查 M-5：成功后走全量 refreshSyncTasks 重拉——直接写 _syncTasks[idx] 会被随后完成的
+// 轮询整表覆盖（旧快照回写），全量重拉避免竞态。
+async function refreshSyncTaskStatus(id) {
+  try {
+    const t = await sc.sync.getTask(id);
+    if (!t || !t.id) throw new Error('任务不存在');
+    showToast('已刷新', 'success');
+    refreshSyncTasks();
+  } catch (e) { showToast('刷新失败: ' + (e && e.message ? e.message : e), 'error'); }
 }
 
 // showCloudDownloadPreview 在提交前展示每个 URL 的默认文件名，供用户确认或修改。
@@ -1693,6 +1850,8 @@ document.addEventListener('DOMContentLoaded', function() {
   // 已删除的 stale 绑定：cloud-close-btn / cloud-refresh-btn / cloud-close-modal-btn /
   // cloud-tasks-tab / cloud-groups-tab（旧 cloud-modal DOM 与 switchCloudTab 一并移除）。
   bindCloudUrlRowEvents();
+  // 文件同步（sync 频道「新建同步」表单按钮；静态 DOM 一次绑定）
+  bindSyncCreateEvents();
 
   // 版本管理弹窗
   document.getElementById('version-close-btn').addEventListener('click', hideVersioning);
@@ -1843,6 +2002,19 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('group-toggle-btn')) {
         toggleGroupTasks(btn.dataset.id, btn);
+        return;
+      }
+      // sync 任务操作（data-id = 服务端任务 id，无展示前缀）
+      if (btn.classList.contains('sync-cancel-btn')) {
+        cancelSyncTask(btn.dataset.id);
+        return;
+      }
+      if (btn.classList.contains('sync-delete-btn')) {
+        deleteSyncTask(btn.dataset.id);
+        return;
+      }
+      if (btn.classList.contains('sync-refresh-btn')) {
+        refreshSyncTaskStatus(btn.dataset.id);
         return;
       }
       // ---- 通用 TransferItem 行操作（upload/download 类，非云）----

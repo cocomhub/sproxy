@@ -36,6 +36,8 @@ function sampleItems() {
     { id: 'cg-running', kind: 'cloud_group', name: 'p', status: 'downloading' },
     { id: 'cg-failed', kind: 'cloud_group', name: 'q', status: 'failed' },
     { id: 'cg-completed', kind: 'cloud_group', name: 'r', status: 'completed' },
+    { id: 's-syncing', kind: 'sync_task', filename: 'dir/src1', src: 'dir/src1', dst: 'dst1', status: 'syncing', loaded: 10, total: 100, meta: { sync: { direction: 'push', files_done: 1, files_total: 3 } } },
+    { id: 's-completed', kind: 'sync_task', filename: 'dir/src2', src: 'dir/src2', dst: 'dst2', status: 'completed', meta: { sync: {} } },
   ];
 }
 
@@ -43,12 +45,12 @@ function sampleItems() {
 
 test('TRANSFER_CHANNELS 频道顺序与 label 精确取值', () => {
   assert.deepStrictEqual(r.TRANSFER_CHANNELS.map((c) => c.id),
-    ['all', 'uploading', 'downloading', 'cloud_tasks', 'cloud_groups', 'completed']);
+    ['all', 'uploading', 'downloading', 'cloud_tasks', 'cloud_groups', 'sync', 'completed']);
   const labels = {};
   for (const c of r.TRANSFER_CHANNELS) labels[c.id] = c.label;
   assert.deepStrictEqual(labels, {
     all: '全部', uploading: '上传中', downloading: '下载中',
-    cloud_tasks: '云任务', cloud_groups: '云组', completed: '已完成',
+    cloud_tasks: '云任务', cloud_groups: '云组', sync: '同步', completed: '已完成',
   });
 });
 
@@ -82,9 +84,25 @@ test('filterTransferItems: cloud_tasks / cloud_groups 按 kind 全量透传（�
     ['cg-running', 'cg-failed', 'cg-completed']);
 });
 
-test('filterTransferItems: completed 含各 kind 的 completed（upload/download/cloud_task/cloud_group）', () => {
+test('filterTransferItems: completed 含各 kind 的 completed（upload/download/cloud_task/cloud_group/sync_task）', () => {
   const out = r.filterTransferItems(sampleItems(), 'completed');
-  assert.deepStrictEqual(out.map((i) => i.id), ['u-completed', 'd-completed', 'ct-completed', 'cg-completed']);
+  assert.deepStrictEqual(out.map((i) => i.id), ['u-completed', 'd-completed', 'ct-completed', 'cg-completed', 's-completed']);
+});
+
+test('filterTransferItems: sync 频道按 kind===\'sync_task\' 全量透传（pending/syncing/completed/failed/cancelled）', () => {
+  const syncItems = [
+    { id: 'sp', kind: 'sync_task', status: 'pending' },
+    { id: 'ss', kind: 'sync_task', status: 'syncing' },
+    { id: 'sc', kind: 'sync_task', status: 'completed' },
+    { id: 'sf', kind: 'sync_task', status: 'failed' },
+    { id: 'sx', kind: 'sync_task', status: 'cancelled' },
+  ];
+  const out = r.filterTransferItems(syncItems, 'sync');
+  assert.deepStrictEqual(out.map((i) => i.id), ['sp', 'ss', 'sc', 'sf', 'sx']);
+  assert.ok(out.every((i) => i.kind === 'sync_task'));
+  // 其它 kind（upload/download/cloud_*）不进 sync 频道
+  const mixed = r.filterTransferItems(sampleItems(), 'sync');
+  assert.deepStrictEqual(mixed.map((i) => i.id), ['s-syncing', 's-completed']);
 });
 
 test('filterTransferItems: 未知频道 fail-closed 返回 []', () => {
@@ -185,6 +203,47 @@ test('buildTransferRowHtml 云行 status 缺省不发通用 transfer-* 按钮、
   assert.ok(html.includes('data-item-id="cloud-task-X"'), '仍可寻址');
 });
 
+// ---- 同步任务行（sync_task 频道） ----
+
+test('buildTransferRowHtml sync_task 行：同步中徽章 + 字节进度条 + 取消/刷新（data-id 即服务端 id）', () => {
+  const html = r.buildTransferRowHtml({
+    id: 'sync-T1', kind: 'sync_task', filename: 'a.txt', src: 'a.txt', dst: 'b.txt',
+    status: 'syncing', loaded: 10, total: 100, meta: { sync: { direction: 'push', files_done: 1, files_total: 3 } },
+  });
+  assert.ok(html.includes('🔄 同步中'), '状态徽章走 syncStatusText');
+  assert.ok(html.includes('sync-cancel-btn') && html.includes('data-id="sync-T1"'), '取消按钮 + data-id');
+  assert.ok(html.includes('sync-refresh-btn'), '刷新状态按钮');
+  assert.ok(html.includes('10%'), '字节进度条百分比');
+  assert.ok(!html.includes('sync-delete-btn'), '进行中无删除按钮');
+  assert.ok(!html.includes('<script'), '无 XSS');
+});
+
+test('buildTransferRowHtml sync_task 终态行：completed/failed/cancelled 删除 + 刷新，无取消', () => {
+  const done = r.buildTransferRowHtml({ id: 'sync-T2', kind: 'sync_task', filename: 'c', src: 'c', status: 'completed', meta: { sync: {} } });
+  assert.ok(done.includes('✅ 已完成'));
+  assert.ok(done.includes('sync-delete-btn') && done.includes('sync-refresh-btn'), 'completed 删除+刷新');
+  assert.ok(!done.includes('sync-cancel-btn'), 'completed 无取消');
+  const failed = r.buildTransferRowHtml({ id: 'sync-T3', kind: 'sync_task', filename: 'd', src: 'd', status: 'failed', meta: { sync: {} } });
+  assert.ok(failed.includes('❌ 失败') && failed.includes('sync-delete-btn'));
+  const cancelled = r.buildTransferRowHtml({ id: 'sync-T4', kind: 'sync_task', filename: 'e', src: 'e', status: 'cancelled', meta: { sync: {} } });
+  assert.ok(cancelled.includes('🚫 已取消') && cancelled.includes('sync-delete-btn'));
+  assert.ok(!done.includes('<script'), '无 XSS');
+});
+
+test('buildTransferRowHtml sync_task 仅文件进度（无字节）时显示文件计数进度', () => {
+  const html = r.buildTransferRowHtml({
+    id: 'sync-T5', kind: 'sync_task', filename: 'd', src: 'd', status: 'syncing',
+    meta: { sync: { files_done: 2, files_total: 5 } },
+  });
+  assert.ok(html.includes('2/5'), '文件进度串（files_done/files_total）');
+});
+
+test('buildTransferRowHtml sync_task status 缺省：仍可寻址且不发通用 transfer-* 按钮', () => {
+  const html = r.buildTransferRowHtml({ id: 'sync-X', kind: 'sync_task', filename: 'x', meta: { sync: {} } });
+  assert.ok(html.includes('data-item-id="sync-X"'), '仍可寻址');
+  assert.ok(!html.includes('transfer-pause-btn') && !html.includes('transfer-resume-btn'), '不用通用 transfer-* 动作按钮');
+});
+
 // ---- 服务端真实 id 前缀剥离（R1：Critical 修复；app.js 事件委托侧剥前缀后调 sc.cloud.*） ----
 test('stripCloudId 剥 cloud-task-/cloud-group- 前缀，非云 id 原样', () => {
   assert.equal(r.stripCloudId('cloud-task-abc123'), 'abc123');
@@ -230,9 +289,11 @@ test('buildTransferListHtml all：进行中行 + 已完成按 kind 折叠分组�
   assert.ok(html.includes('id="group-detail-download"'));
   assert.ok(html.includes('id="group-detail-cloud_task"'));
   assert.ok(html.includes('id="group-detail-cloud_group"'));
+  assert.ok(html.includes('id="group-detail-sync_task"'), 'sync_task 已完成也应分组折叠');
   // 折叠分组行 summary 显示分组计数与 kind 标签
   assert.ok(html.includes('已完成上传 (1)'));
   assert.ok(html.includes('已完成下载 (1)'));
+  assert.ok(html.includes('已完成同步 (1)'));
   // 展开机制：details 未带 open → 默认折叠；含可点击 summary 元素
   assert.ok(!/<details[^>]*open/.test(html));
   assert.ok(html.includes('<summary'));
