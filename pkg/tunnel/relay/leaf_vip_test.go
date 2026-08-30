@@ -102,3 +102,47 @@ func TestNewVirtualIPDialPolicy_RejectsIPv6Subnet(t *testing.T) {
 	}()
 	NewVirtualIPDialPolicy(netip.MustParsePrefix("fd00::/8"), netip.Addr{}, nil, nil, nil)
 }
+
+// TestNewVirtualIPDialPolicy_InvalidAllowPorts 校验显式 allowPorts 中的非法端口
+// （0/65536/负数）被跳过，不进入白名单。
+func TestNewVirtualIPDialPolicy_InvalidAllowPorts(t *testing.T) {
+	subnet := netip.MustParsePrefix("100.64.0.0/10")
+	selfVIP := netip.MustParseAddr("100.64.0.5")
+	policy := NewVirtualIPDialPolicy(subnet, selfVIP, []int{0, 65536, -1, 22}, nil, nil)
+
+	if _, ok := policy("100.64.0.5:22"); !ok {
+		t.Fatal("合法端口 22 应放行")
+	}
+	if _, ok := policy("100.64.0.5:0"); ok {
+		t.Fatal("端口 0 不应放行（非法端口被跳过）")
+	}
+	if _, ok := policy("100.64.0.5:65536"); ok {
+		t.Fatal("端口 65536 不应放行（越界被跳过）")
+	}
+}
+
+// TestNewVirtualIPDialPolicy_InvalidServiceAddrPort 校验 serviceAddrs 端口提取失败
+// （无端口 / 非数字端口）的条目不进入端口白名单。
+func TestNewVirtualIPDialPolicy_InvalidServiceAddrPort(t *testing.T) {
+	subnet := netip.MustParsePrefix("100.64.0.0/10")
+	selfVIP := netip.MustParseAddr("100.64.0.5")
+	policy := NewVirtualIPDialPolicy(subnet, selfVIP, nil, nil, []string{"127.0.0.1", "host:notaport"})
+
+	if _, ok := policy("100.64.0.5:22"); ok {
+		t.Fatal("无效宣告条目的端口不应进入白名单（无端口/非数字被跳过）")
+	}
+}
+
+// TestNewVirtualIPDialPolicy_HostnameNotRewritten 校验主机名目标不进入虚拟子网分支
+// （host 不是 IP），回落 base——主机名不能因 selfVIP 端口白名单被改写绕过（防 DNS
+// 解析到 loopback/私网后意外放行）。
+func TestNewVirtualIPDialPolicy_HostnameNotRewritten(t *testing.T) {
+	subnet := netip.MustParsePrefix("100.64.0.0/10")
+	selfVIP := netip.MustParseAddr("100.64.0.5")
+	policy := NewVirtualIPDialPolicy(subnet, selfVIP, []int{22}, nil, nil)
+
+	// localhost:22 解析为 loopback → base 拒绝（不因 selfVIP:22 白名单被改写放行）。
+	if got, ok := policy("localhost:22"); ok {
+		t.Fatalf("主机名目标不应因 selfVIP 白名单被改写, got %q", got)
+	}
+}

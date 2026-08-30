@@ -371,9 +371,13 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				}
 				delay = reconnectBaseDelay
 				m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleListener)
+				// B-审查竞态：serveOpts 可能在重注册分支被主循环重写（selfVIP 轮换），
+				// 而已接受连接的 serve goroutine 经闭包并发读它——spawn 前快照，
+				// 每条连接固定使用其建立时刻的策略。
+				opts := serveOpts
 				go func() {
 					defer m.Close()
-					if err := relay.Serve(ctx, m, "http://127.0.0.1:8080", true, httpClient, serveLogger, serveOpts...); err != nil {
+					if err := relay.Serve(ctx, m, "http://127.0.0.1:8080", true, httpClient, serveLogger, opts...); err != nil {
 						ios.WriteErrLine("p2p 会话结束: %v", err)
 					}
 				}()
