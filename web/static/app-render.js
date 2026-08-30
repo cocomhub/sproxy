@@ -271,6 +271,59 @@
       '</div><div style="font-size:11px;color:var(--text-secondary);margin-top:1px;">' + formatSize(downloaded) + ' / ' + formatSize(total) + ' (' + pct + '%)</div>';
   }
 
+  // 同步任务状态徽章文案（sync_task 频道专用）：复用 statusText 的 pending/completed/failed/
+  // cancelled 语义，新增 syncing→🔄 同步中。未知/空回落原值。
+  function syncStatusText(status) {
+    switch (status) {
+      case 'pending': return '⏳ 等待中';
+      case 'syncing': return '🔄 同步中';
+      case 'completed': return '✅ 已完成';
+      case 'failed': return '❌ 失败';
+      case 'cancelled': return '🚫 已取消';
+      default: return status;
+    }
+  }
+
+  // buildSyncRowMeta：从 sync_task TransferItem 提取展示元信息（纯函数，供单测与渲染）。
+  // 字段来源：item 顶层（filename/src/dst/direction/loaded/total）优先，meta.sync 快照兜底。
+  // 进度优先级：字节进度（bytes_done/bytes_total → item.loaded/total）> 文件进度（files_done/files_total）。
+  function buildSyncRowMeta(item) {
+    const meta = (item && item.meta && item.meta.sync) || {};
+    const src = (item && item.src) || meta.src || '';
+    const dst = (item && item.dst) || meta.dst || '';
+    const direction = (item && item.direction) || meta.direction || '';
+    const loaded = Number(item && item.loaded) > 0 ? Number(item && item.loaded) : 0;
+    const total = Number(item && item.total) > 0 ? Number(item && item.total) : 0;
+    const filesDone = Number(meta.files_done) > 0 ? Number(meta.files_done) : 0;
+    const filesTotal = Number(meta.files_total) > 0 ? Number(meta.files_total) : 0;
+    const bytesPct = total > 0 ? Math.min(100, Math.round(loaded * 100 / total)) : 0;
+    const filesPct = filesTotal > 0 ? Math.min(100, Math.round(filesDone * 100 / filesTotal)) : 0;
+    const hasBytes = total > 0;
+    const hasFiles = filesTotal > 0;
+    let progressText = '';
+    if (hasBytes) {
+      progressText = formatSize(loaded) + ' / ' + formatSize(total) + ' (' + bytesPct + '%)';
+    } else if (hasFiles) {
+      // 文件进度格式对齐云组 completed/total（无空格斜杠）。
+      progressText = filesDone + '/' + filesTotal + ' 个文件 (' + filesPct + '%)';
+    }
+    return {
+      title: (item && item.filename) || src || '同步任务',
+      direction: direction,
+      src: src,
+      dst: dst,
+      loaded: loaded,
+      total: total,
+      filesDone: filesDone,
+      filesTotal: filesTotal,
+      bytesPct: bytesPct,
+      filesPct: filesPct,
+      hasBytes: hasBytes,
+      hasFiles: hasFiles,
+      progressText: progressText,
+    };
+  }
+
   // 诊断云行可见性（R1 起不直接调用：云行统一走 _rowActions kind 分派 → _cloudTaskActions/
   // _cloudGroupActions，data-id 携带展示 id）。保留导出避免破坏既有调用方与测试引用。
   function cloudTaskActions(id, filename, status, checksum) { return _cloudTaskActions({ id: id, filename: filename, status: status, checksum: checksum || '', meta: { raw: {} } }); }
@@ -365,6 +418,7 @@
     { id: 'downloading', label: '下载中' },
     { id: 'cloud_tasks', label: '云任务' },
     { id: 'cloud_groups', label: '云组' },
+    { id: 'sync', label: '同步' },
     { id: 'completed', label: '已完成' },
   ];
 
@@ -378,6 +432,7 @@
     downloading: function (it) { return it.kind === 'download' && ['downloading', 'paused', 'failed', 'cancelled'].indexOf(it.status) >= 0; },
     cloud_tasks: function (it) { return it.kind === 'cloud_task'; },
     cloud_groups: function (it) { return it.kind === 'cloud_group'; },
+    sync: function (it) { return it.kind === 'sync_task' && ['pending', 'syncing', 'completed', 'failed', 'cancelled'].indexOf(it.status) >= 0; },
     completed: function (it) { return it.status === 'completed'; },
   };
 
@@ -391,8 +446,8 @@
     return list.filter(pred);
   }
 
-  const KIND_LABEL = { upload: '上传', download: '下载', cloud_task: '云任务', cloud_group: '云组' };
-  const KIND_ICON = { upload: '⬆', download: '⬇', cloud_task: '☁', cloud_group: '🗂' };
+  const KIND_LABEL = { upload: '上传', download: '下载', cloud_task: '云任务', cloud_group: '云组', sync_task: '同步' };
+  const KIND_ICON = { upload: '⬆', download: '⬇', cloud_task: '☁', cloud_group: '🗂', sync_task: '🔄' };
   function _kindIcon(kind) { return KIND_ICON[kind] || '📄'; }
   function _kindLabel(kind) { return KIND_LABEL[kind] || kind || '项'; }
 
@@ -453,6 +508,22 @@
     return a;
   }
 
+  // 同步任务操作按钮组：进行中（pending/syncing）取消 + 刷新；终态（completed/failed/cancelled）
+  // 删除 + 刷新。data-id 即服务端任务 id（sync 任务不入 localStorage，无展示前缀——与
+  // cloud-task-/cloud-group- 不同，事件委托侧无需剥前缀）。
+  function _syncTaskActions(it) {
+    const st = it.status;
+    const id = it.id;
+    let a = '';
+    if (st === 'pending' || st === 'syncing') {
+      a += '<button class="btn btn-warning btn-sm sync-cancel-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">取消</button>';
+    } else if (st === 'completed' || st === 'failed' || st === 'cancelled') {
+      a += '<button class="btn btn-danger btn-sm sync-delete-btn" data-id="' + escHtml(id) + '" style="margin-right:4px;">删除</button>';
+    }
+    a += '<button class="btn btn-sm btn-secondary sync-refresh-btn" data-id="' + escHtml(id) + '">刷新</button>';
+    return a;
+  }
+
   // 操作按钮组（data-* 携带：item-id + 状态，按钮类名沿用 .btn/.btn-sm + transfer-* 语义类）。
   // 状态机：
   //   hashing/uploading/downloading/pending → 暂停 + 取消
@@ -467,6 +538,7 @@
     let a = '';
     if (kind === 'cloud_task') { a = _cloudTaskActions(it); return a.length ? a : idHtml; }
     if (kind === 'cloud_group') { a = _cloudGroupActions(it); return a.length ? a : idHtml; }
+    if (kind === 'sync_task') { a = _syncTaskActions(it); return a.length ? a : idHtml; }
     if (st === 'completed') {
       if (kind === 'upload') {
         a += '<button class="btn btn-sm btn-primary transfer-open-dir-btn" data-item-id="' + escHtml(it.id) + '">打开存储目录</button>';
@@ -498,9 +570,20 @@
     return a.length ? a : idHtml; // 未知状态兜底至少可寻址
   }
 
+  // sync 进度：进行中（pending/syncing）显示字节进度条（bytes_total>0）或文件计数进度串。
+  function _syncProgressHtml(it) {
+    const st = it.status;
+    if (st !== 'syncing' && st !== 'pending') return '';
+    const meta = buildSyncRowMeta(it);
+    if (meta.hasBytes) return buildProgressBar(meta.loaded, meta.total);
+    if (meta.hasFiles) return '<span style="font-size:12px;color:var(--text-secondary);white-space:nowrap;">' + meta.progressText + '</span>';
+    return '';
+  }
+
   // 进度条/百分比（复用 buildProgressBar 当 total>0 与进行中状态；否则 ''）。
   function _progressHtml(it) {
     const st = it.status;
+    if (it.kind === 'sync_task') return _syncProgressHtml(it);
     const total = it.total > 0 ? it.total : 0;
     if (total <= 0) return '';
     if (st === 'uploading' || st === 'downloading' || st === 'pending' || st === 'hashing') {
@@ -518,7 +601,9 @@
     const kind = item.kind || '';
     const title = _rowTitle(item);
     const titleHtml = kind === 'cloud_group' ? (item.name || item.id || '-') : title;
-    const badge = '<span style="font-size:12px;font-weight:600;margin-left:8px;padding:1px 8px;border-radius:10px;background:var(--bg-hover);color:var(--text-secondary);white-space:nowrap;">' + statusText(item.status) + '</span>';
+    const badgeText = kind === 'sync_task' ? syncStatusText(item.status) : statusText(item.status);
+    // 审查 M-1：状态文本来自服务端，转义防注入（纵深防御；sync 行至少转义）。
+    const badge = '<span style="font-size:12px;font-weight:600;margin-left:8px;padding:1px 8px;border-radius:10px;background:var(--bg-hover);color:var(--text-secondary);white-space:nowrap;">' + escHtml(badgeText) + '</span>';
     const cached = _cachedChunksOf(item.meta);
     const totalChunks = item.meta && item.meta.totalChunks ? item.meta.totalChunks : 0;
     const cachedHtml = cached > 0 ? '<span style="font-size:11px;color:var(--text-muted);margin-left:8px;">已缓存 ' + cached + '/' + totalChunks + ' 块</span>' : '';
@@ -543,7 +628,7 @@
   }
 
   function _completedGroupsHtml(completedItems) {
-    const orderedKinds = ['upload', 'download', 'cloud_task', 'cloud_group'];
+    const orderedKinds = ['upload', 'download', 'cloud_task', 'cloud_group', 'sync_task'];
     const grouped = {};
     for (const it of completedItems || []) {
       const k = it.kind || 'other';
@@ -581,6 +666,7 @@
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
     statusText, buildProgressBar, cloudTaskActions, buildCloudTaskTableHtml,
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
+    syncStatusText, buildSyncRowMeta,
     TRANSFER_CHANNELS, filterTransferItems, buildTransferRowHtml, buildTransferListHtml,
   };
 });

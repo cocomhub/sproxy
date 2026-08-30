@@ -135,15 +135,18 @@ web-test:
 	@node --check web/static/sclient/api/share.js
 	@node --check web/static/sclient/api/config.js
 	@node --check web/static/sclient/api/hub.js
+	@node --check web/static/sclient/api/sync.js
 	@node --check web/static/sclient/api/index.js
 	@node --check web/static/app-render.js
 	@node --check web/static/transfer-store.js
 	@node --check web/static/download.js
 	@node --check web/static/download.test.js
 	@node --check web/static/transfer-render.test.js
+	@node --check web/static/sync.test.js
 	node --test web/static/cloudfilename.test.js
 	node --test web/static/transfer-store.test.js
 	node --test web/static/transfer-render.test.js
+	node --test web/static/sync.test.js
 	node --test web/static/app-render.test.js
 	node --test web/static/app-transfer-actions.test.js
 	node --test web/static/upload.test.js

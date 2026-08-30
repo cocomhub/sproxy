@@ -3,7 +3,7 @@
 /*
  * index.js —— sclient 领域 API 命名空间组装。
  *
- * createApi(ctx) → { files, cloud, share, config, hub }。
+ * createApi(ctx) → { files, cloud, share, config, hub, sync }。
  *
  * ctx 由库入口注入（浏览器经全局 sclientTransport/sclientConfig/sclientLog/
  * sclientCrypto/sclientUtil 组装后逐命名空间分发）：
@@ -23,7 +23,8 @@
       require('./cloud.js'),
       require('./share.js'),
       require('./config.js'),
-      require('./hub.js')
+      require('./hub.js'),
+      require('./sync.js')
     );
   } else {
     var fn = factory(
@@ -31,12 +32,13 @@
       root.sclientApiCloud,
       root.sclientApiShare,
       root.sclientApiConfig,
-      root.sclientApiHub
+      root.sclientApiHub,
+      root.sclientApiSync
     );
     root.sclientApi = fn;
     if (typeof fn._bindBrowser === 'function') fn._bindBrowser();
   }
-})(typeof self !== 'undefined' ? self : this, function (createFilesApi, createCloudApi, createShareApi, createConfigApi, createHubApi) {
+})(typeof self !== 'undefined' ? self : this, function (createFilesApi, createCloudApi, createShareApi, createConfigApi, createHubApi, createSyncApi) {
   'use strict';
 
   // 组装 ctx 的默认实现（浏览器路径）：从各全局取传输核心 + 配置 + 日志。
@@ -75,6 +77,7 @@
       share: createShareApi(ctx),
       config: createConfigApi(ctx),
       hub: createHubApi(ctx),
+      sync: createSyncApi(ctx),
     };
   }
 
