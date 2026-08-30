@@ -352,6 +352,7 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 | `mesh status` | 列出 hub 上的 mesh 服务（`--gateway <addr>` 改查本地 mesh node 直连拓扑/链路类型） |
 | `mesh node [flags]` | 单进程常驻 mesh 节点（注册+中继+webrtc 直连+自动对等发现+本地网关）：`--hub` `--node-id` `--token` `--service` `--dial-allow` `--discover` `--discover-interval` `--gateway-addr` |
 | `access-key create [--mesh <name>]` | 生成一对 AccessKey/AccessKeySecret 打印（供服务端 `access_keys` 配置与客户端 `access_key`/`access_key_secret`） |
+| `identity generate [--force]` / `identity show` / `identity fingerprint` | 节点长时身份密钥（Ed25519，XDG 目录 `sproxy/identity.json`）生成/展示/仅打印指纹（P1 身份 pinning） |
 | `genkey` | 生成 64 hex 密钥 |
 | `config [show\|set <k> <v>]` | 配置管理 |
 | `diag` | 诊断连接问题 |
@@ -468,6 +469,7 @@ prod/staging/dev 多套配置。**通用 mesh 配置键**（`sclient config set`
 - `hub_url` — mesh/relay/p2p 共用 hub 地址（http(s)/ws(s)，可带 /ws 路径）
 - `relay_token` — hub 中继注册 token（与 relay start --token / hub.relay_token 一致）
 - `node_id` — 本节点默认 ID（为空回落主机名）
+- `peer_fingerprints` — 对端身份指纹 pinning 列表（逗号分隔，64 hex 或 `sha256:<64 hex>`；配置后 xfer 隧道握手 fail-closed 校验对端身份，防 MITM。对端指纹取 `sclient identity fingerprint` 带外固化）
 
 mesh connect / relay start / p2p / mesh node 的 `--hub`/`--token`/`--relay-token`/
 `--node-id`/`--access-key`/`--access-key-secret` 未显式指定时按 `CLI flag > 配置文件 >
