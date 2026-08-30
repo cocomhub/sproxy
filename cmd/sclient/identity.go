@@ -17,7 +17,7 @@ import (
 func NewCmdIdentity(ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "identity",
-		Short: "节点身份密钥与指纹管理（X25519 长时身份，供对端指纹 pinning）",
+		Short: "节点身份密钥与指纹管理（Ed25519 长时身份，供对端指纹 pinning）",
 	}
 	cmd.AddCommand(NewCmdIdentityGenerate(ios))
 	cmd.AddCommand(NewCmdIdentityShow(ios))
@@ -26,13 +26,13 @@ func NewCmdIdentity(ios cli.IOStreams) *cobra.Command {
 }
 
 // NewCmdIdentityGenerate 创建 identity generate 命令：
-// 生成并持久化 X25519 身份密钥对，打印指纹。默认存 XDG 配置目录 sproxy/identity.json。
+// 生成并持久化 Ed25519 身份密钥对，打印指纹。默认存 XDG 配置目录 sproxy/identity.json。
 func NewCmdIdentityGenerate(ios cli.IOStreams) *cobra.Command {
 	var file string
 	var force bool
 	cmd := &cobra.Command{
 		Use:   "generate",
-		Short: "生成并持久化节点身份密钥（X25519）",
+		Short: "生成并持久化节点身份密钥（Ed25519）",
 		Run: func(cmd *cobra.Command, _ []string) {
 			path, err := resolveIdentityPath(ios, file)
 			if err != nil {
