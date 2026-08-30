@@ -38,6 +38,20 @@ var frameHandlers = map[FrameType]frameHandler{
 	FramePing:         handlePingFrame,
 	FramePong:         handlePongFrame,
 	FrameWindowUpdate: handleWindowUpdateFrame,
+	FrameDatagram:     handleDatagramFrame,
+}
+
+// handleDatagramFrame 处理 UDP 数据报帧：解析 flowID + 数据报，交给注册的 handler。
+func handleDatagramFrame(m *Mux, sid StreamID, payload []byte) {
+	if len(payload) < datagramFlowLen {
+		m.metrics.Errors.Add(1)
+		return
+	}
+	flowID := binary.BigEndian.Uint32(payload[:datagramFlowLen])
+	data := payload[datagramFlowLen:]
+	if h := m.getDatagramHandler(); h != nil {
+		h(flowID, data)
+	}
 }
 
 // handleDataFrame 处理 Data 帧：将负载推送到对应流。

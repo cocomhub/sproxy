@@ -183,6 +183,12 @@ type DialRequest struct {
 	Dial string `json:"dial,omitempty"` // 目标叶子出站连接的 TCP 地址
 }
 
+// UDPRequest 是 UDP 端口映射控制帧（sclient udp map 首帧）：目标叶子的 UDP 目标
+// 地址（host:port）。收到后叶子把该流的 mux 作为 UDP 数据报通道（FrameDatagram）。
+type UDPRequest struct {
+	UDP string `json:"udp,omitempty"` // 目标叶子出站 UDP 地址
+}
+
 // DialResultFrame 是叶子出口拨号结果回帧（I27）。
 // hub 的 /api/relay/stream 在写 200 前读取 [4B len][DialResultFrame JSON]，
 // 据此决定返回 200（ok）或 502/504（error/超时）。

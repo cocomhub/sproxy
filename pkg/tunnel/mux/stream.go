@@ -217,4 +217,8 @@ type writeMsg struct {
 	streamID StreamID
 	data     []byte // nil=CloseWrite, empty([]byte{})=Close
 	isRaw    bool
+	// datagram true 表示 isRaw 帧是 UDP 数据报（FrameDatagram）：发送失败只丢弃
+	// 该数据报（UDP 语义），不关闭整个 mux（流数据帧有重传保护，可关；数据报高频
+	// 瞬时失败不应连带杀掉同 mux 的 TCP 流）。
+	datagram bool
 }
