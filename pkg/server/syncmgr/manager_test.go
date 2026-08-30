@@ -433,13 +433,15 @@ func TestConcurrency_Semaphore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	waitForStatus(t, mgr, taskA.ID, "syncing", 5*time.Second)
+	// 超时给足余量（-race + cover 下 goroutine 调度/磁盘 I/O 显著变慢，CI 曾 35s 超时
+	// flake——对齐 flaky-network-test-pattern 教训，正常值 3 倍以上）。
+	waitForStatus(t, mgr, taskA.ID, "syncing", 15*time.Second)
 	if b := mgr.Get(taskB.ID); b.Status != StatusPending {
 		t.Fatalf("MaxConcurrent=1 时第二个任务应排队 pending，got %q", b.Status)
 	}
 	blocking.release()
-	waitForStatus(t, mgr, taskA.ID, "completed", 10*time.Second)
-	waitForStatus(t, mgr, taskB.ID, "completed", 10*time.Second)
+	waitForStatus(t, mgr, taskA.ID, "completed", 30*time.Second)
+	waitForStatus(t, mgr, taskB.ID, "completed", 30*time.Second)
 }
 
 // ---------------------------------------------------------------------------

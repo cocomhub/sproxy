@@ -504,6 +504,11 @@ func (c *Config) Validate() error {
 		if u.Host == "" {
 			return fmt.Errorf("sync_remotes[%d].url 缺少 host: %q", i, r.URL)
 		}
+		// 明文 http 仅限 loopback（本机调试）：远程 remote 用 http 会把 SproxySig
+		// AK/SK 明文上线，对齐联邦 peering 的 TLS 安全边界（安全审查 MEDIUM）。
+		if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+			return fmt.Errorf("sync_remotes[%d].url 使用明文 http 且非 loopback（AK/SK 将明文上线；远程 remote 请用 https，本机调试可用 http://127.0.0.1）: %q", i, r.URL)
+		}
 	}
 	return nil
 }

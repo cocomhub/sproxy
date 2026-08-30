@@ -46,6 +46,12 @@ type SyncFileResult struct {
 
 // SyncTask 表示一个服务端同步任务。
 // ReservedSize 不持久化（重启后由 StorageManager 磁盘扫描校准，任务不再持有预留）。
+//
+// 访问边界（安全审查 MEDIUM，书面确认）：同步任务是 **server-global** 状态，与
+// CloudTask（云下载任务）一致——所有经认证的操作者（access_keys 持有者互信，或
+// api_keys 多用户 Bearer）视为受信任管理员，可列出/操作全部任务。第一版**不区分
+// 创建者 owner**（对齐 CloudTask 无 owner）；若未来启用多租户隔离，需加 owner 字段
+// （由请求 AK 派生）并按 owner 过滤列表/详情/取消/删除。
 type SyncTask struct {
 	ID             string           `json:"id"`
 	Direction      string           `json:"direction"`

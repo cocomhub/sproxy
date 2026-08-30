@@ -86,3 +86,31 @@ func TestSyncConfig_Validate_RemoteErrorContainsName(t *testing.T) {
 		t.Fatalf("错误应包含 sync_remotes 字段上下文: %v", err)
 	}
 }
+
+// TestSyncConfig_Validate_PlainHTTPRemoteRejected 验证 sync_remotes 明文 http 仅限
+// loopback（本机调试）；远程 http（SproxySig AK/SK 明文上线）被 Validate 拒绝
+// （安全审查 MEDIUM：对齐联邦 peering 的 TLS 安全边界）。
+func TestSyncConfig_Validate_PlainHTTPRemoteRejected(t *testing.T) {
+	base := Default()
+
+	// loopback http → 允许（本机调试）
+	cfg := *base
+	cfg.SyncRemotes = []SyncRemoteConfig{{Name: "r", URL: "http://127.0.0.1:18083"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("loopback http 应允许: %v", err)
+	}
+
+	// 远程 http（非 loopback）→ 拒绝（AK/SK 明文上线）
+	cfg = *base
+	cfg.SyncRemotes = []SyncRemoteConfig{{Name: "r", URL: "http://example.com:18083"}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("远程 http 明文应拒绝（AK/SK 明文上线）")
+	}
+
+	// https 远程 → 允许（TLS 加密）
+	cfg = *base
+	cfg.SyncRemotes = []SyncRemoteConfig{{Name: "r", URL: "https://example.com:18083"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("https 远程应允许: %v", err)
+	}
+}
