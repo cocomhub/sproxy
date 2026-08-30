@@ -11,6 +11,7 @@ status: planning
 > 前置：阶段 1–3 已合入（master `7048018`）；#115「传输管理器」（前端 Web transfer mgr + 服务端分块管线）已合入
 > 修订：2026-08-30 v2——设计审查（C-2 空文件、I-4 deadline、I-5 Rename、I-6 模块边界、I-7 空目录/符号链接、I-9 并发模型、M-5/M-6/M-7）已融入
 > 修订：2026-08-30 v3——用户决策：**v1 就要服务端任务**（SyncManager + 服务端 API + 前端 sync_task 频道），不再推迟到 v2；§1 范围/§AD-5/§4.4/§8 已更新
+> 修订：2026-08-31 v4——实现后修订（子任务 A/B/C 合入 master）：远程访问改 **HTTP 直连第一版**（mesh 后续）、模块边界落定为 `syncmgr.Executor` 接口 + `pkg/syncexec`、配额/去重/内部目录安全细节落定；§AD-1/AD-5/§4.2/§4.4 已更新
 
 ## 1. 目标
 
@@ -55,14 +56,14 @@ status: planning
 
 ## 3. 架构决策
 
-### AD-1：传输通道 = 经 mesh 链路调远程节点文件 API（最大复用，最少新协议）
+### AD-1：传输通道 = 调远程节点文件 API（v4：HTTP 直连第一版；mesh 为后续增强）
 
-同步引擎通过 mesh 链路建立到**远程节点 sproxy HTTP 文件服务**的连接，然后在上面跑既有文件 API（`/api/files`、`/upload/init|chunk|complete`、`/download/chunk`）。**不发明同步专用帧协议**。
+同步引擎建立到**远程节点 sproxy HTTP 文件服务**的连接，然后在上面跑既有文件 API（`/api/files`、`/upload/init|chunk|complete`、`/download/chunk`）。**不发明同步专用帧协议**。
 
-- 通道获取：`sclient`（mesh 客户端）用 `mesh.Dial`/`GatewayConnect`/中继拨到远程节点，目标 = 远程节点 sproxy HTTP 端口（`--service sproxy:127.0.0.1:<port>` 宣告，或虚拟 IP——阶段 4 工作项 1 的产物；两者选其一可用即可）。
-- 认证（v2，审查 M-6 修正）：mesh 流是**直连远程 sproxy 的 HTTP 端口**（普通 HTTP 请求，走 `srvMux` + `authMiddleware`），配置了 `access_keys` 时必须 SproxySig（`--access-key/--access-key-secret`）；**不适用 localMux 免签面**（localMux 是隧道内层，本设计不经本机 sproxy 隧道）。
-- **数据面加密**：经 mesh 链路（隧道 AES-GCM）或直连 TLS，天然加密。
-- **模块边界（v2，审查 I-6）**：`pkg/tunnel/mesh` 是独立 go.mod，主 go.mod 无 replace；`pkg/sync` **不得 import `pkg/tunnel/mesh`**。`pkg/sync` 只定义 `Dial func(ctx) (net.Conn, error)` 函数类型，mesh 拨号器由 `cmd/sclient` 组装注入（`pkg/sync` 保持仅依赖核心 go.mod）。
+- **通道获取（v4，实现修订）**：第一版用 **HTTP 直连远程 sproxy**——`pkg/syncexec` 的执行器构造 `pkg/sync.HTTPTransport`，其 `Dial = net.Dial(remote.URL 的 host:port)`（`sync_remotes` 配置的 URL）。mesh 通道为后续增强：`HTTPTransportConfig.Dial` 已是注入点，未来可注入 mesh 拨号器（服务端/CLI 装配 mesh 能力后），接口不变。
+- **认证（v2，审查 M-6 修正）**：远程文件 API 走 `srvMux` + `authMiddleware`，配置了 `access_keys` 时必须 SproxySig（`sync_remotes` 的 `access_key/access_key_secret`）；**不适用 localMux 免签面**（localMux 是隧道内层，本设计不经本机 sproxy 隧道）。fail-closed：remote 未配置凭据时拒绝创建远程任务。
+- **数据面加密**：HTTP 直连时经 TLS（https URL）或运维网络隔离；mesh 后续（隧道 AES-GCM）。
+- **模块边界（v2，审查 I-6）**：`pkg/tunnel/mesh` 是独立 go.mod，主 go.mod 无 replace；`pkg/sync` **不得 import `pkg/tunnel/mesh`**。`pkg/sync` 只定义 `Dial func(ctx) (net.Conn, error)` 函数类型，拨号器由装配方注入。**服务端侧模块边界（v4）**：`pkg/server` 经 `syncmgr` **不依赖 `pkg/sync`**（其 HTTPTransport import `pkg/client`，与 `pkg/client` 的 e2e_test 构成测试环）——`syncmgr` 定义 `Executor` 接口，真实实现在独立包 `pkg/syncexec`，由 `cmd/sproxy` 装配注入。
 
 ### AD-2：同步引擎独立包 `pkg/sync`（仅依赖核心 go.mod）
 
@@ -128,17 +129,19 @@ type Transport interface {
 - 策略在 job 上配置；`lww`/`conflict-rename` 需两端 mtime 可靠（服务端 `recordCompleteMetadata` 已 `os.Chtimes` 保留 mtime；**Windows mtime 精度/时区行为在测试中确认**，v2 审查 M-7；mtime 相同回落 checksum 的分支必测）。
 - 冲突时**不静默破坏目标**：`skip`/`conflict-rename` 保证目标文件不被无声覆盖；`overwrite`/`lww` 为显式选择，且非原子窗口文档化。
 
-### AD-5：任务状态与持久化 = 服务端 SyncManager（v3，用户决策：服务端任务进 v1）
+### AD-5：任务状态与持久化 = 服务端 SyncManager（v3 用户决策 + v4 实现落定）
 
-**v1 即服务端托管**：`sclient sync push/pull` 在本地 sproxy 创建同步任务（`POST /api/sync/tasks`），服务端 `SyncManager`（`pkg/server/sync/`）负责执行、持久化与前端可见。
+**v1 即服务端托管**：`sclient sync push/pull` 在本地 sproxy 创建同步任务（`POST /api/sync/tasks`），服务端 `SyncManager`（`pkg/server/syncmgr`）负责执行、持久化与前端可见。
 
-- **服务端前置**：执行远程同步需要服务端有 mesh 通道（sproxy 配置/运行了 mesh 能力，经网关 `GatewayConnect` 或 `mesh.Dial` 到远程节点 sproxy 文件服务）。服务端未配置 mesh 通道时，创建**远程**同步任务 fail-closed 拒绝（报「服务端未配置 mesh 通道」）；纯本地路径（若未来有）不受影响。
-- **任务模型**（照搬 CloudTask 生命周期）：`SyncTask{ID, Direction, Remote, Src, Dst, Recursive, Filters, ConflictPolicy, Status(pending/syncing/completed/failed/cancelled), Stats(Progress), Results[]FileResult, CreatedAt/UpdatedAt/ExpiresAt, ReservedSize}`。
-- **持久化**：`uploadsDir/.__sync__/<id>.json`（对齐 cloud `.__downloads__` 模式）；终态/进度按 CloudTask 的 dirty-flush 模式；重启恢复只重启 `syncing` 状态。
-- **并发与配额**：`semaphore` 信号量限制并发同步任务；配额由分块管线服务端侧 `TryReserve(CategoryChunked)` 承担（同步客户端不自留）。
-- **API**：`POST /api/sync/tasks`（创建）、`GET /api/sync/tasks`（列表）、`GET /api/sync/tasks/{id}`（查询）、`POST /api/sync/tasks/{id}/cancel`（取消）、`DELETE /api/sync/tasks/{id}`（删除）。localMux + srvMux authMiddleware 双注册，对齐 `handlers.go:228-233` 分块路由模式。
-- **前端**：`transfer-store.js` 增加 `kind:'sync_task'`；`app-render.js` 增加 `sync_task` 频道渲染（复用 `filterTransferItems` 频道谓词 + 统一行组件）；传输页频道条新增 `sync`。
-- **CLI**：`sclient sync` 仍负责：参数解析 → `POST /api/sync/tasks` 创建 → 轮询 `GET /api/sync/tasks/{id}` 展示进度/结果；`--json` 输出便于脚本。
+- **服务端前置（v4，实现修订）**：执行远程同步需要服务端配置远程节点（`sync_remotes` 的 URL + SproxySig 凭据），经 HTTP 直连远程 sproxy 文件服务。未配置 `sync_remotes` 或该 remote 未配置凭据时，创建远程任务 fail-closed 拒绝（`ErrStorageFull`→507、其余校验失败→400）。mesh 通道为后续（`sync_remotes` 不变，执行器 Dial 可换 mesh 拨号器）。
+- **任务模型**（照搬 CloudTask 生命周期，v4 加 `Restored`）：`SyncTask{ID, Direction, Remote, Src, Dst, Recursive, Include/Exclude, ConflictPolicy, SyncEmptyDirs, FollowSymlinks, Status(pending/syncing/completed/failed/cancelled), FilesTotal/FilesDone/BytesTotal/BytesDone, Results[]SyncFileResult, Error, CreatedAt/UpdatedAt/ExpiresAt, ReservedSize, Restored}`。
+- **持久化**：`uploadsDir/.__sync__/<id>.json`（对齐 cloud `.__downloads__` 模式）；终态持久化失败记 Error（禁止静默失败）；重启恢复只重启 `syncing` 状态，且恢复任务 `ReservedSize=0 + Restored=true`（启动扫描已记账，完成对账不重新 TryReserve，防配额虚高/瞬时 507，审查 I-2）。
+- **去重（v4，审查 I-1）**：`CreateTask` 的「同 direction+remote+src+dst 活跃任务去重 + pull 占位预留 + 插入」整体在**写锁内**完成，闭合 TOCTOU——并发同 key 请求只创建一个任务（否则双任务并发写同一 dst 路径/远程 session 踩踏）。
+- **并发与配额（v4）**：`semaphore` 信号量限制并发同步任务；排队/执行中可取消（cancelFuncs）。配额：**pull 本地落盘按 1GiB 占位 `TryReserve(CategoryUserFiles)`，完成按 `BytesDone` 对账收敛（实际>占位补预留、实际<占位释放、不足则释放占位+failed）；push 远程自行预留，本地不预留**。取消/删除释放占位；pull 已落盘文件不清理（散落 uploadsDir 无法安全区分），残留字节在周期扫描前瞬时欠计（已注释说明）。
+- **路径安全（v4，审查 I-3）**：`validateSyncPath` 拒绝绝对路径/穿越/**任一 `.__` 前缀段**（防 push 把 `.__cloud__` 等内部数据外发远程、pull 覆盖 `.__sync__` 持久化状态）。
+- **API**：`POST /api/sync/tasks`（创建 201 / 去重复用 200）、`GET /api/sync/tasks`（列表）、`GET /api/sync/tasks/{id}`（查询）、`POST /api/sync/tasks/{id}/cancel`（取消）、`DELETE /api/sync/tasks/{id}`（删除）。localMux + srvMux authMiddleware 双注册。
+- **前端（E，第二版内）**：`transfer-store.js` 增加 `kind:'sync_task'`；`app-render.js` 增加 `sync_task` 频道渲染（复用 `filterTransferItems` 频道谓词 + 统一行组件）；传输页频道条新增 `sync`。
+- **CLI（D）**：`sclient sync push/pull`：参数解析 → `POST /api/sync/tasks` 创建 → 轮询 `GET /api/sync/tasks/{id}` 展示进度/结果；`--json` 输出便于脚本。
 
 ### AD-6：HTTPTransport 并发模型（v2，审查 I-9）
 
@@ -159,21 +162,22 @@ type Transport interface {
 - `Diff(ctx, srcListFn, dstStatFn) []DiffEntry`：差异计算纯函数（可测：给 mock 列表/stat）。
 - `entry.go`：`Entry{Name, Size, MTime, Checksum, IsDir}`；目录枚举含空目录/符号链接判定。
 
-### 4.2 `cmd/sclient/sync.go`（新命令）
+### 4.2 `cmd/sclient/sync.go`（新命令，子任务 D）
 
-- `newCmdSync`：子命令 `push` / `pull`；flags `--remote`（节点）/ `--dst` / `--src` / `--recursive` / `--include` / `--exclude` / `--conflict`（skip|overwrite|lww|conflict-rename）/ `--follow-symlinks` / `--sync-empty-dirs` / `--concurrency` / `--json` / `--access-key` / `--access-key-secret` / `--hub` / `--gateway`（复用 mesh 寻址）。
-- cmd 保持薄：flag 解析 → 组装 `sync.Job` + 建 `HTTPTransport`（注入 mesh `Dial`）→ 调 `sync.Sync` → IO 展示。
+- `newCmdSync`：子命令 `push` / `pull`；flags `--remote`（**服务端 `sync_remotes` 配置名**，非 mesh node）/ `--src` / `--dst` / `--recursive` / `--include` / `--exclude` / `--conflict`（skip|overwrite|lww|conflict-rename）/ `--follow-symlinks` / `--sync-empty-dirs` / `--wait`（等待完成）/ `--timeout` / `--json`。
+- cmd 保持薄：flag 解析 → 调 `pkg/client.FileClient` 的 Sync API（`CreateSyncTask`/`GetSyncTask`/`ListSyncTasks`/`CancelSyncTask`/`DeleteSyncTask`，打 `/api/sync/tasks`）→ 轮询展示进度/结果 → IO 展示。
 
 ### 4.3 `pkg/client`（复用）
 
 - `FileClient` 现有 `ChunkedUpload`/`ChunkedDownload`/`Stat`/`ListWithPagination`/`Rename`/`Upload` 已满足；`HTTPTransport` 内部调用。**`Rename` 已存在（client.go:792）**，供 conflict-rename 与 overwrite rename 交换。
 
-### 4.4 服务端 SyncManager + API + 前端（v3，v1 实现）
+### 4.4 服务端 SyncManager + API + 前端（v4 实现落定）
 
-- `pkg/server/sync/` `SyncManager`：任务生命周期（照搬 `cloud_download.go` 模式）+ `.__sync__/` 持久化 + 并发信号量 + 配额对账 + 重启恢复。执行器复用 `pkg/sync.Engine`（`Transport` 的 mesh `Dial` 由服务端 mesh 网关能力组装注入）。
-- `pkg/server/sync_handler.go`：`/api/sync/tasks` 等端点（localMux + srvMux 双注册，`handlers.go RegisterRoutes`）。
-- 服务端 mesh 通道：spoxy 服务端若运行 `mesh node`（或配置了可用的 mesh 网关），`SyncManager` 经网关 `GatewayConnect`/`mesh.Dial` 建立到远程节点 sproxy 文件服务的连接；否则创建远程任务 fail-closed 拒绝。
-- `web/static/transfer-store.js` / `app-render.js`：`sync_task` kind + 频道渲染；传输页频道条新增 `sync`。
+- `pkg/server/syncmgr/` `SyncManager`（v4，实际包名 syncmgr 避免与 stdlib sync 冲突）：任务生命周期（照搬 `cloud_download.go` 模式）+ `.__sync__/` 持久化 + 并发信号量 + 配额对账 + 重启恢复（Restored 不双预留）+ panic recovery。**执行由注入的 `Executor` 接口完成**（模块边界：`pkg/server` 经 syncmgr 不依赖 `pkg/sync`/`pkg/client`，避免 pkg/client e2e_test 测试环）。
+- `pkg/syncexec/executor.go`（v4）：`syncmgr.Executor` 的真实实现——`pkg/sync.Engine.Sync(ctx, srcFS, dstFS, job)`，push 侧 `src=LocalFS(uploadsDir)`/`dst=HTTPTransport(remote)`，pull 反向；HTTP 直连远程（`Dial = net.Dial(remote.URL host)` + SproxySig）。
+- `pkg/server/sync_handler.go`：`/api/sync/tasks` 等端点（localMux + srvMux 双注册）+ `syncQuotaAdapter`（StorageManager→syncmgr.QuotaStore）。
+- 配置：`sync_remotes [{name, url, access_key, access_key_secret}]` + `sync.max_concurrent/task_ttl` 三段式；`cmd/sproxy/root.go` 装配（defer 先 drain sync 再关 Handlers）。
+- `web/static/transfer-store.js` / `app-render.js`（子任务 E）：`sync_task` kind + 频道渲染；传输页频道条新增 `sync`。
 - `Makefile`：`web-test` 加入新 JS 的 `node --check` 与测试（若前端变更）。
 
 ## 5. 边界与安全面（汇总）
