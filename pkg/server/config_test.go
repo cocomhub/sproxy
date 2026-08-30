@@ -141,7 +141,7 @@ func TestConfig_Validate_HubEnabledRequiresTransport(t *testing.T) {
 }
 
 // TestConfig_Default_TCPTransportDisabled 验证 hub.transports.tcp 默认关闭
-// （显式开启才生效），且默认监听地址为空（由装配点回落 :18084）。
+// （显式开启才生效），且默认监听地址为空（由装配点回落 127.0.0.1:18084）。
 func TestConfig_Default_TCPTransportDisabled(t *testing.T) {
 	t.Parallel()
 	cfg := Default()

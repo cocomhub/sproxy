@@ -123,6 +123,11 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	var conn xfer.Conn
 	switch transport {
 	case "tcp":
+		// 用户沿用 WS 习惯传 ws:// URL 时给清晰错误（tcp.Dial 会把 "ws://..." 当
+		// host 解析，报 "missing port" 之类难懂的错）。
+		if strings.HasPrefix(hubURL, "ws://") || strings.HasPrefix(hubURL, "wss://") {
+			return fmt.Errorf("--transport tcp 的 --hub 应为 host:port（如 127.0.0.1:18084），不能是 ws:// 地址，got %q", hubURL)
+		}
 		tp := xfer.Get("tcp")
 		if tp == nil {
 			return fmt.Errorf("tcp 传输层未注册")

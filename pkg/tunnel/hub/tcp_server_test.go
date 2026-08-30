@@ -202,6 +202,8 @@ func TestHubTCP_ConcurrentRegistrations(t *testing.T) {
 
 	const n = 8
 	var wg sync.WaitGroup
+	var connsMu sync.Mutex
+	conns := make([]xfer.Conn, 0, n)
 	errCh := make(chan error, n)
 	for i := range n {
 		wg.Add(1)
@@ -215,7 +217,13 @@ func TestHubTCP_ConcurrentRegistrations(t *testing.T) {
 				errCh <- err
 				return
 			}
-			defer conn.Close()
+			// 注册后保持连接存活（直到断言完成后再关闭）：hub 在连接断开后**异步**
+			// 移除节点（mux readLoop 对 EOF 退避重试后 m.Close），若 goroutine 立即
+			// defer conn.Close()，断言 rt.Has 会与移除流程竞争（依赖"EOF 重试很慢"
+			// 的实现细节，一旦优化即 flaky）。
+			connsMu.Lock()
+			conns = append(conns, conn)
+			connsMu.Unlock()
 			ts := time.Now().UnixMilli()
 			nonce := hub.NewRegisterNonce()
 			proof, perr := hub.ComputeRegisterProof(testAccessKeySecret, id, ts, nonce)
@@ -244,12 +252,33 @@ func TestHubTCP_ConcurrentRegistrations(t *testing.T) {
 	for err := range errCh {
 		t.Fatalf("concurrent registration failed: %v", err)
 	}
+	// 连接仍存活，节点应保持注册（轮询等待全部进入路由表）
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		all := true
+		for i := range n {
+			if !rt.Has(hub.NodeID(string(rune('n' + i)))) {
+				all = false
+				break
+			}
+		}
+		if all {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	for i := range n {
 		id := string(rune('n' + i))
 		if !rt.Has(hub.NodeID(id)) {
 			t.Fatalf("expected node %q registered", id)
 		}
 	}
+	// 断言完成后关闭全部连接（t.Cleanup 兜底）
+	connsMu.Lock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+	connsMu.Unlock()
 }
 
 // TestHubTCP_AcceptCtxCancel 验证 ctx 取消后 AcceptTCP 正常返回（不泄漏 goroutine）。

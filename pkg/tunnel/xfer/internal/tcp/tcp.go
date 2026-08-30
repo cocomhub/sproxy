@@ -111,14 +111,22 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("tcp recv set deadline: %w", err)
 	}
 	lenBuf := make([]byte, 4)
-	if _, err := io.ReadFull(c.conn, lenBuf); err != nil {
+	n, err := io.ReadFull(c.conn, lenBuf)
+	if err != nil {
+		if n > 0 {
+			// 部分读取长度前缀：流已错位（残余字节会被后续帧解析误读），必须关闭连接。
+			c.failConn()
+		}
+		_ = c.conn.SetReadDeadline(time.Time{})
 		return nil, fmt.Errorf("tcp recv length: %w", err)
 	}
 	msgLen := binary.BigEndian.Uint32(lenBuf)
 	if msgLen > maxMessageBytes {
-		// 已读到非法长度前缀：清除 deadline 后返回，连接随后由调用方关闭。
-		_ = c.conn.SetReadDeadline(time.Time{})
-		return nil, fmt.Errorf("tcp recv: message too large: %d bytes (max %d)", msgLen, maxMessageBytes)
+		// 超大长度前缀：帧协议破坏，必须关闭连接（否则未读的 body 字节会破坏后续帧
+		// 对齐，mux readLoop 会把它当瞬时错误重试，读入垃圾帧）。返回 ErrConnClosed
+		// 包装错误，让 mux readLoop 经 errors.Is 判终态干净退出。
+		c.failConn()
+		return nil, fmt.Errorf("tcp recv: message too large: %d bytes (max %d): %w", msgLen, maxMessageBytes, xfer.ErrConnClosed)
 	}
 	// 读消息体：前缀可能跨 ctx deadline 边界，重新应用 deadline
 	if err := c.conn.SetReadDeadline(readDeadlineFrom(ctx)); err != nil {
@@ -126,11 +134,24 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 	}
 	msg := make([]byte, msgLen)
 	if _, err := io.ReadFull(c.conn, msg); err != nil {
+		// body 读取失败（长度前缀已消费）：流错位，必须关闭连接。
+		c.failConn()
+		_ = c.conn.SetReadDeadline(time.Time{})
 		return nil, fmt.Errorf("tcp recv body: %w", err)
 	}
 	// 清除读 deadline：长连接数据面（mux 心跳/中继泵送）不受残留 deadline 影响。
 	_ = c.conn.SetReadDeadline(time.Time{})
 	return msg, nil
+}
+
+// failConn 原子标记连接已关闭并关闭底层 socket（幂等）。
+// 帧协议破坏（超长/错位读）时调用，确保后续 Send/Receive 立即返回 ErrConnClosed，
+// 且阻塞中的读/写被解除。
+func (c *tcpConn) failConn() {
+	if c.closed.Swap(true) {
+		return
+	}
+	_ = c.conn.Close()
 }
 
 // readDeadlineFrom 返回 ctx deadline 对应的读截止时间；无 deadline 时返回零值
@@ -173,7 +194,13 @@ func (l *TcpListener) Accept(ctx context.Context) (xfer.Conn, error) {
 			errCh <- err
 			return
 		}
-		connCh <- c
+		// 与 WS HandlerNode.AddToMux 的收尾对齐：监听器已关闭（ctx 取消后的窗口）时
+		// 丢弃该连接，防「accept goroutine 送出的 conn 无人读取、永不关闭」的 FD 泄漏。
+		select {
+		case connCh <- c:
+		case <-l.closeCh:
+			_ = c.Close()
+		}
 	}()
 
 	select {

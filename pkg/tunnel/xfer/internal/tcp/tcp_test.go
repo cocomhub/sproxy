@@ -281,16 +281,20 @@ func TestTcpReceive_RespectsCtxTimeout(t *testing.T) {
 }
 
 // TestTcpReceive_CloseUnblocksBlockedReceive 验证阻塞中的 Receive 在连接关闭后
-// 及时返回（mux readLoop 用 cancel-only ctx + conn.Close 解除阻塞的收尾路径）。
+// 及时返回（mux readLoop 用 cancel-only ctx（无 deadline）+ conn.Close 解除阻塞的
+// 收尾路径）。用 cancel-only ctx 传入，确保走「无 deadline → 阻塞读 → conn.Close
+// 解除」的真实 mux 路径（而非 ctx deadline 分支）。
 func TestTcpReceive_CloseUnblocksBlockedReceive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
 	_, serverConn, _ := newTCPPair(t, ctx)
+	recvCtx, recvCancel := context.WithCancel(ctx) // cancel-only：无 deadline
+	defer recvCancel()
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := serverConn.Receive(ctx)
+		_, err := serverConn.Receive(recvCtx)
 		done <- err
 	}()
 	time.Sleep(100 * time.Millisecond)
@@ -354,6 +358,11 @@ func TestTcpReceive_RejectsOversizedMessage(t *testing.T) {
 
 	if _, rerr := serverConn.Receive(ctx); rerr == nil {
 		t.Fatal("expected error for oversized length prefix")
+	}
+	// 帧协议破坏后连接必须关闭：后续 Receive 立即返回 ErrConnClosed（而非把残余
+	// body 字节当新帧解析）。这是 mux readLoop 干净退出（而非悬挂 90s 等心跳）的关键。
+	if _, rerr := serverConn.Receive(ctx); !errors.Is(rerr, xfer.ErrConnClosed) {
+		t.Fatalf("expected ErrConnClosed after oversized frame, got %v", rerr)
 	}
 }
 
