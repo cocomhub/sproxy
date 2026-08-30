@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788088945097,
+  "lastUpdate": 1788090919949,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -310418,6 +310418,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1260842 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f7a9dc6444d539c18f77fd19af1c88ea6a6272fd",
+          "message": "feat: P1 证书身份 + 指纹 pinning——长时身份密钥 + 对端公钥指纹校验（防 MITM） (#125)\n\n* feat: P1 证书身份 + 指纹 pinning——长时身份密钥 + 对端公钥指纹校验（防 MITM）\n\n* docs: CLAUDE.md 补充 sclient identity 命令与 peer_fingerprints 配置\n\n* fix: identity 命令文案 X25519 → Ed25519（与实现一致）\n\n* fix: 独立审查修复——H-1 真实接线 pinning + M-1/M-2/M-3 + m-1..m-9\n\n- H-1: sclient tunnel 增加 --xfer/--hub xfer/mux 隧道模式，pinning 在生产 CLI 路径端到端生效（含 CLI 级测试证明 pin 匹配通/不匹配拒）\n- M-1: 身份懒加载仅 xfer 模式消费，损坏时错误含恢复路径\n- M-2: 身份阶段流读取受 ctx 约束（context.AfterFunc + stream.Abort），防停滞 DoS\n- M-3: peer_fingerprints 配置但非 xfer 路径时显式 Warn\n- m-1..m-9: 帧版本注释、DefaultIdentityPath 死代码、指纹前缀 EqualFold、Validate 校验指纹、唯一临时文件、RunE、LoadOrCreate 注释、权限权衡注释、文档同步\n\n* docs: peer_fingerprints 配置说明落 docs/config.md，剥离 CLAUDE.md 范围外改动\n\n- docs/config.md 补充 sclient 客户端配置键 peer_fingerprints（含与 identity 命令、\n  xfer 隧道模式的关系），与 docs/cli.md、config.example.yaml 形成完整命令/配置文档。\n- 还原 CLAUDE.md 至 origin/master（此前 b5a84d8 注入的 identity 命令与 peer_fingerprints\n  两行属功能子任务范围外的指令文件改动；命令/配置文档统一落在 docs/*.md 与 config.example.yaml）。\n\n* fix: peer_fingerprints 缺 access_key_secret / 非 xfer 命令 fail-closed 拒绝（防 pinning 静默失效）\n\nsecurity-guidance MEDIUM 修复：用户显式配置身份/peer_fingerprints 但传输路径无法提供\nECDH 握手 + 指纹 pin 时，不得仅 Warn 后继续（fail-open，安全机制被无声绕过）：\n\n- --xfer 隧道模式：配置了身份或 peer_fingerprints 但缺 access_key_secret（隧道 key 为\n  nil → 握手不执行 → pinning 静默不生效）→ 返回错误，指引补齐 access_key_secret。\n- 非 xfer 命令（upload/download/list 等）：配置了 peer_fingerprints 但命令不走 xfer 握手\n  → 返回错误，指引使用 `sclient tunnel --xfer <name>` 或移除配置。\n- 无身份/无 pin 的 xfer 模式仍正常创建客户端（无 pinning 预期，向后兼容）。\n- 回归测试：缺 key+有身份 → 报错；缺 key+无身份/无 pin → 正常；非 xfer+peer_fingerprints\n  → 报错。\n- 文档同步：docs/cli.md、docs/config.md、config.example.yaml 由 Warn 改为 fail-closed 报错说明。\n\n* fix: xfer 隧道握手失败后重建 mux + 复用隧道避免二次握手（N-1）+ 文档接线现状标注（N-3）\n\nN-1（真实小缺陷）：\n- 根因：getTunnelMux 每次返回新建 Tunnel 包装同一 mux，Tunnel 的 ECDH 握手是\n  每实例 sync.Once → 复用 mux 时会对已完成一次握手的服务端发起第二次握手，\n  造成协议混淆；握手失败（fail-closed pin 校验）后残留 mux 仍被缓存。\n- 修复：缓存 Tunnel 实例（tunnelInst），复用同一实例避免二次握手；握手失败后\n  closeTunnelMuxLocked 关闭并清空 mux，下次调用重新建立连接。\n- tunnel.Tunnel 新增 HandshakeErr()（skMu 并发安全读），ensureHandshake 写\n  handshakeErr 移入 skMu；Do 改用 HandshakeErr()。\n- 测试：握手失败后重试 Dial=2（新建 mux，不复用残留）；握手成功后 3 次请求\n  Dial=1（复用同一 mux，不二次握手）。\n\nN-3（文档）：docs/cli.md tunnel --xfer 段落标注接线现状——当前对接 xfer/mux\nlistener（测试/自定义服务端），真实 sproxy hub/relay/mesh 数据面协议尚不兼容，\n服务端 xfer tunnel listener 待后续接线。（N-2 已在 docs/config.md 覆盖，无改动）\n\n* test: relay pump 测试去 flake——expectStreamClosed 独立超时 + 非合作远端断言确定性化\n\n既有 relay 包时序脆弱 flake（非 pinning 回归，PR #125 diff 未触及 relay/）：\n- expectStreamClosed 原复用调用方 ctx（可能被前置 pump 消耗大部分预算）→ 改为独立内部超时。\n- TestPump_NonCooperativeRemote_ForceClose 的客户端流关闭断言依赖 pump force-close 的\n  半关闭传播，存在已知 Abort 竞态（iostream.Pump 注释），对端流有时不被关闭 →\n  改为 pumpDone 验证核心语义（非合作远端被强制关闭）+ 关闭 clientMux 后确定性验证流关闭。\n\n* fix: 全面审核 5 项建议级发现——listener 写身份扩展失败按旧对端处理 + 错误提示/文档/注释完善\n\n- 发现1（正确性）：新 listener + 旧 dialer 无 pin 混用时，listener 写身份扩展失败\n  若返回错误会导致握手失败回退静态密钥、而对端用 ECDH 会话密钥，两端密钥不一致\n  → 未配置 pin 时写失败视为'对端未提供身份'（与 EOF 分支语义一致）；配置 pin 仍\n  fail-closed。补回归测试 TestHandshakeIdentityListener_WriteFail_TreatAsOldPeer。\n- 发现2（可用性）：docs/cli.md 注明 identity --file 为独立管理用途，tunnel --xfer\n  恒从默认 XDG 路径加载本端身份。\n- 发现3（可用性）：factory.go 非 xfer + peer_fingerprints 报错补充具体清除命令\n  （sclient config set peer_fingerprints \"\"）。\n- 发现4（参考）：ecdh.go 注释说明 ctx 超时 Abort 流残留在 mux.streams 表为有界非泄漏。\n- 发现5（参考）：client.go 注释说明握手持续失败无退避（CLI 单请求场景影响有限）。\n\n* fix: 云下载组持久化竞态——串行化 saveGroup（marshal+write 原子）防陈旧快照覆盖\n\nCI ubuntu 偶发 TestCloudDownloadManager_GroupLifecycleAndPersistence 失败：\n重启恢复出陈旧组状态（Status=downloading / Completed=1，应为 completed/2）。\n根因：saveGroup 在 groupMu 下 marshal、锁外 write，存在调度间隙——一个持有旧\n快照（downloading/1）的保存可能在最新保存（completed/2）之后才落盘，覆盖成陈旧\n状态。该测试为既有 flake（PR #125 未触及 pkg/server，本修复为合并门槛清理）。\n\n修复：新增 groupSaveMu 串行化整个 marshal+write——持锁期间 marshal 反映当时最新\n在内存状态，写盘按取锁顺序落盘，最后写盘者必为最新状态触发的保存（所有组状态\n变更路径都调用 saveGroup）。本地 -race count=20 稳定 + 全包 -race 通过。",
+          "timestamp": "2026-08-30T19:23:24+08:00",
+          "tree_id": "3599d190b57ad42d389d6194163db4829cbd10bf",
+          "url": "https://github.com/cocomhub/sproxy/commit/f7a9dc6444d539c18f77fd19af1c88ea6a6272fd"
+        },
+        "date": 1788090912804,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 981.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1282892 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 981.1,
+            "unit": "ns/op",
+            "extra": "1282892 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1282892 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1282892 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 927.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1283509 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 927.9,
+            "unit": "ns/op",
+            "extra": "1283509 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1283509 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1283509 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 927.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1297663 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 927.6,
+            "unit": "ns/op",
+            "extra": "1297663 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1297663 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1297663 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 931.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1286118 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 931.7,
+            "unit": "ns/op",
+            "extra": "1286118 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1286118 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1286118 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 925.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1295539 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 925.2,
+            "unit": "ns/op",
+            "extra": "1295539 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1295539 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1295539 times\n4 procs"
           }
         ]
       }
