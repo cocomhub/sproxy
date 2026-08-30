@@ -140,6 +140,108 @@ func TestConfig_Validate_HubEnabledRequiresTransport(t *testing.T) {
 	}
 }
 
+// TestConfig_Default_TCPTransportDisabled 验证 hub.transports.tcp 默认关闭
+// （显式开启才生效），且默认监听地址为空（由装配点回落 :18084）。
+func TestConfig_Default_TCPTransportDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if cfg.Hub.Transports.TCP.Enabled {
+		t.Fatal("hub.transports.tcp.enabled 默认应为 false")
+	}
+	if cfg.Hub.Transports.TCP.Listen != "" {
+		t.Fatalf("hub.transports.tcp.listen 默认应为空，got %q", cfg.Hub.Transports.TCP.Listen)
+	}
+}
+
+// TestConfig_SetDefaults_TCPListen 验证 tcp 传输启用且 listen 为空时回落默认 :18084
+// （与 sclient relay --transport tcp 无 --hub 的默认回落一致）。
+func TestConfig_SetDefaults_TCPListen(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Transports.TCP.Enabled = true
+	cfg.SetDefaults()
+	if cfg.Hub.Transports.TCP.Listen != ":18084" {
+		t.Fatalf("tcp listen 默认应为 :18084，got %q", cfg.Hub.Transports.TCP.Listen)
+	}
+	// 显式配置的 listen 应保留
+	cfg2 := Default()
+	cfg2.Hub.Transports.TCP.Enabled = true
+	cfg2.Hub.Transports.TCP.Listen = "127.0.0.1:19000"
+	cfg2.SetDefaults()
+	if cfg2.Hub.Transports.TCP.Listen != "127.0.0.1:19000" {
+		t.Fatalf("显式 tcp listen 应保留，got %q", cfg2.Hub.Transports.TCP.Listen)
+	}
+}
+
+// TestConfig_Validate_HubEnabledRequiresAtLeastOneTransport 验证 hub 启用时
+// ws/tcp 至少启用一种；两者皆关校验失败（旧规则只认 ws，P1 TCP 中继后放宽）。
+func TestConfig_Validate_HubEnabledRequiresAtLeastOneTransport(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when hub enabled but no transport enabled")
+	}
+	// 仅 tcp 启用应通过（无 WS 场景）
+	cfgOnlyTCP := Default()
+	cfgOnlyTCP.Hub.Enabled = true
+	cfgOnlyTCP.Hub.Transports.TCP.Enabled = true
+	if err := cfgOnlyTCP.Validate(); err != nil {
+		t.Fatalf("hub enabled with only tcp transport should pass: %v", err)
+	}
+	// 仅 ws 启用应通过（向后兼容）
+	cfgOnlyWS := Default()
+	cfgOnlyWS.Hub.Enabled = true
+	cfgOnlyWS.Hub.Transports.WS.Enabled = true
+	if err := cfgOnlyWS.Validate(); err != nil {
+		t.Fatalf("hub enabled with only ws transport should pass: %v", err)
+	}
+	// 两者都启用应通过
+	cfgBoth := Default()
+	cfgBoth.Hub.Enabled = true
+	cfgBoth.Hub.Transports.WS.Enabled = true
+	cfgBoth.Hub.Transports.TCP.Enabled = true
+	if err := cfgBoth.Validate(); err != nil {
+		t.Fatalf("hub enabled with ws+tcp transports should pass: %v", err)
+	}
+	// hub 未启用时不受影响
+	cfgDisabled := Default()
+	cfgDisabled.Hub.Enabled = false
+	if err := cfgDisabled.Validate(); err != nil {
+		t.Fatalf("hub disabled should pass regardless of transports: %v", err)
+	}
+}
+
+// TestLoadFromProvider_TCPTransport 验证 YAML 解析 hub.transports.tcp 配置。
+func TestLoadFromProvider_TCPTransport(t *testing.T) {
+	t.Parallel()
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr": ":18083",
+		"hub": map[string]any{
+			"enabled": true,
+			"transports": map[string]any{
+				"ws": map[string]any{"enabled": false},
+				"tcp": map[string]any{
+					"enabled": true,
+					"listen":  "127.0.0.1:19000",
+				},
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider failed: %v", err)
+	}
+	if !cfg.Hub.Transports.TCP.Enabled {
+		t.Fatal("expected hub.transports.tcp.enabled=true")
+	}
+	if cfg.Hub.Transports.TCP.Listen != "127.0.0.1:19000" {
+		t.Fatalf("expected tcp listen 127.0.0.1:19000, got %q", cfg.Hub.Transports.TCP.Listen)
+	}
+	if cfg.Hub.Transports.WS.Enabled {
+		t.Fatal("expected ws transport disabled")
+	}
+}
+
 // mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。
 type mapProvider struct {
 	m map[string]any

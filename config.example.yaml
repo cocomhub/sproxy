@@ -107,3 +107,6 @@ access_keys:
 #       enabled: true
 #       # path 已废弃（S36）：WS 升级路径固定为 /ws，配置非默认值不生效（启动时记录警告并忽略）
 #       # path: /ws
+#     tcp:
+#       enabled: false      # 裸 TCP 中继（独立 raw TCP listener，默认关闭；显式开启才生效）
+#       listen: ":18084"    # TCP 监听地址（为空回落默认 :18084；与 sclient relay --transport tcp 默认回落一致）

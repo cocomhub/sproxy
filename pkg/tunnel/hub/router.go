@@ -21,6 +21,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin" // 注册内置 TCP 传输层（裸 TCP 中继）
 )
 
 // registerFrameTTL 是注册帧等待的超时时间。
@@ -479,6 +480,42 @@ func (s *HubServer) TryHandleConn(ctx context.Context, conn xfer.Conn) bool {
 		_ = s.HandleConn(ctx, conn)
 	}()
 	return true
+}
+
+// ListenTCP 绑定裸 TCP 中继监听地址（同步，绑定错误立即返回，便于装配点 fail-fast）。
+// 复用内置 xfer/tcp 传输（长度前缀分帧），连接接入后走与 WS 完全相同的
+// HandleConn 注册/鉴权/中继路径——传输层从 ws 扩到 tcp，协议零改动。
+func (s *HubServer) ListenTCP(ctx context.Context, addr string) (xfer.Listener, error) {
+	tp := xfer.Get("tcp")
+	if tp == nil {
+		return nil, fmt.Errorf("tcp 传输层未注册")
+	}
+	ln, err := tp.Listen(ctx, addr)
+	if err != nil {
+		return nil, fmt.Errorf("hub tcp listen %s: %w", addr, err)
+	}
+	return ln, nil
+}
+
+// AcceptTCP 在已绑定的裸 TCP listener 上接受节点连接，复用 HandleConn 的
+// 注册/鉴权/中继（与 WS accept 循环等价，仅传输层不同）。
+// 阻塞直到 ctx 取消或 listener 关闭；ctx 取消时返回 nil。
+// 连接数上限由 HubServer 信号量（maxConns）控制，超限立即关闭新连接。
+func (s *HubServer) AcceptTCP(ctx context.Context, ln xfer.Listener) error {
+	for {
+		conn, aerr := ln.Accept(ctx)
+		if aerr != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return aerr
+		}
+		if !s.TryHandleConn(ctx, conn) {
+			s.logger.Warn("Hub TCP 连接数达到上限，拒绝新连接")
+			_ = conn.Close()
+			continue
+		}
+	}
 }
 
 // HandleConn 接收一个已建立的节点连接，注册并维护其生命周期。

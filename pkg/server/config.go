@@ -57,6 +57,10 @@ type VersionConfig struct {
 	MaxVersions int  `yaml:"max_versions" mapstructure:"max_versions"`
 }
 
+// DefaultHubTCPListen 是 hub 裸 TCP 中继的默认监听地址（transports.tcp.listen 为空时）。
+// 与 sclient relay --transport tcp 无 --hub 的默认回落（127.0.0.1:18084）同端口对齐。
+const DefaultHubTCPListen = ":18084"
+
 // HubConfig 配置 Hub 中继系统。
 // 节点注册准入由顶层 access_keys 提供（SproxySig AccessKey + HMAC proof），
 // hub 级不再需要任何 token 配置。
@@ -78,9 +82,10 @@ type HubConfig struct {
 	DHTSeeds []string `yaml:"dht_seeds" mapstructure:"dht_seeds"`
 }
 
-// TransportConfigs 聚合所有可用的传输层配置，当前为预留扩展，暂无产品代码消费。
+// TransportConfigs 聚合所有可用的传输层配置。
 type TransportConfigs struct {
-	WS WSTransportConfig `yaml:"ws" mapstructure:"ws"` // 预留：WebSocket 传输监听配置
+	WS  WSTransportConfig  `yaml:"ws" mapstructure:"ws"`   // WebSocket 传输（挂载到主 HTTP server，固定 /ws）
+	TCP TCPTransportConfig `yaml:"tcp" mapstructure:"tcp"` // 裸 TCP 中继传输（独立端口监听，默认关闭）
 }
 
 // WSTransportConfig 配置 WebSocket 传输监听。
@@ -91,6 +96,15 @@ type WSTransportConfig struct {
 	Listen  string `yaml:"listen" mapstructure:"listen"`
 	// Path 已废弃（S36）：WS 升级路径固定为 /ws，配置非默认值不生效（启动时记录警告并忽略）。
 	Path string `yaml:"path" mapstructure:"path"`
+}
+
+// TCPTransportConfig 配置裸 TCP 中继传输监听。
+// 与 WS 不同，TCP 是独立 raw TCP listener（不走 HTTP server），端口由 Listen 指定。
+// 默认关闭（Enabled=false），显式开启才生效。Listen 为空时回落默认 :18084
+// （与 sclient relay --transport tcp 无 --hub 的默认回落一致）。
+type TCPTransportConfig struct {
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	Listen  string `yaml:"listen" mapstructure:"listen"`
 }
 
 // WebConfig 控制 Web UI 的传输行为。
@@ -240,6 +254,9 @@ func (c *Config) SetDefaults() {
 	if c.Hub.MaxConnections <= 0 {
 		c.Hub.MaxConnections = 256
 	}
+	if c.Hub.Transports.TCP.Enabled && c.Hub.Transports.TCP.Listen == "" {
+		c.Hub.Transports.TCP.Listen = DefaultHubTCPListen
+	}
 }
 
 // Validate 校验配置合理性。
@@ -294,10 +311,10 @@ func (c *Config) Validate() error {
 	if c.RateLimit.Enabled && c.RateLimit.Window <= 0 {
 		return fmt.Errorf("rate_limit.enabled=true 但 window=%s 无效，请设置大于 0 的 duration", c.RateLimit.Window)
 	}
-	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled {
-		// S42：WS 是当前唯一可用的节点接入传输；hub 启用而无 transport 时
-		// 节点无法注册，属配置脚枪，fail-fast 启动失败。
-		return fmt.Errorf("hub.enabled=true 但 transports.ws.enabled=false，中继节点无法连接，请启用 WebSocket 传输")
+	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled && !c.Hub.Transports.TCP.Enabled {
+		// S42 演进：节点接入传输 = ws（挂载主 HTTP server）或 tcp（独立 raw TCP
+		// listener）。hub 启用而两者皆关时节点无法注册，属配置脚枪，fail-fast 启动失败。
+		return fmt.Errorf("hub.enabled=true 但 transports.ws.enabled 与 transports.tcp.enabled 均为 false，中继节点无法连接，请至少启用一种传输")
 	}
 	if c.Hub.Enabled && c.Hub.DHT != "" && c.Hub.DHT != "kad" {
 		// 防配置打错字（"kademlia" 等）被静默忽略。门控在 hub.enabled：hub 未启用时

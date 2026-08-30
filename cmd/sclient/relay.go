@@ -24,7 +24,9 @@ import (
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
-	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin" // 注册内置 TCP 传输层（--transport tcp）
+	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"  // 注册 WebSocket 传输层（--transport ws）
 	"github.com/spf13/cobra"
 )
 
@@ -36,34 +38,44 @@ const (
 )
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func runRelayStart(cmd *cobra.Command, hubURL, local, nodeID, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string) error {
+func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string) error {
+	switch transport {
+	case "ws", "tcp":
+	default:
+		return fmt.Errorf("未知传输层 %q（仅支持 ws/tcp）", transport)
+	}
 	if nodeID == "" {
 		nodeID = fmt.Sprintf("relay-%d", time.Now().UnixMilli())
 	}
 	// 本地默认 hub（--hub 与配置 hub_url 均未提供时）。注意与 sproxy 默认监听端口
 	// :18083 不同——请按实际 hub 地址显式 --hub 或配置 hub_url。
+	// ws 传输用 ws(s):// URL；tcp 传输用裸 host:port（hub.transports.tcp.listen）。
 	if hubURL == "" {
-		hubURL = "ws://127.0.0.1:18084/ws"
+		if transport == "tcp" {
+			hubURL = "127.0.0.1:18084"
+		} else {
+			hubURL = "ws://127.0.0.1:18084/ws"
+		}
 	}
 
-	logger := slog.With("node", nodeID, "hub", hubURL, "local", local, "dial_allow", dialAllow)
+	logger := slog.With("node", nodeID, "hub", hubURL, "local", local, "dial_allow", dialAllow, "transport", transport)
 	logger.Info("中继节点启动")
 	// hub 注册准入已改 SproxySig AccessKey + HMAC proof：Secret 只本端计算签名/证明，
 	// 永不上线，故明文 ws:// 不再泄露凭据；仍提示自签证书场景用 wss://。
-	if insecure {
+	if insecure && transport != "tcp" {
 		logger.Warn("--insecure 已启用，跳过 TLS 证书验证；仅限开发/测试", "hub", hubURL)
 	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
-	return runRelayWithRetry(ctx, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, logger)
+	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, logger)
+		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -92,7 +104,7 @@ func isTerminalRelayError(err error) bool {
 	return errors.Is(err, hub.ErrRegisterRejected)
 }
 
-func runRelayOnce(ctx context.Context, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
 	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof。
 	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
 	// 拒绝后客户端困惑——明明连上了却被拒）。
@@ -105,9 +117,24 @@ func runRelayOnce(ctx context.Context, nodeID, hubURL, local, accessKey, accessK
 	if err != nil {
 		return fmt.Errorf("注册失败: 计算注册证明失败: %w", err)
 	}
-	// B17：insecure 时经 hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；
-	// 非 insecure 路径保持 xfer.Get("ws").Dial 原样（零行为变化）。
-	conn, err := mesh.HubWSDial(ctx, hubURL, insecure)
+	// 传输层选择：--transport tcp 走裸 TCP（hub.transports.tcp.listen，hubURL 为
+	// host:port）；默认 ws 走 WebSocket（hubURL 为 ws(s):// 或 host:port）。
+	// 两者注册/信令/数据面协议完全一致，仅 xfer.Conn 载体不同。
+	var conn xfer.Conn
+	switch transport {
+	case "tcp":
+		tp := xfer.Get("tcp")
+		if tp == nil {
+			return fmt.Errorf("tcp 传输层未注册")
+		}
+		conn, err = tp.Dial(ctx, hubURL)
+	case "ws", "":
+		// B17：insecure 时经 hubWSDial 注入跳过证书校验的 HTTPClient（自签 wss hub）；
+		// 非 insecure 路径保持 xfer.Get("ws").Dial 原样（零行为变化）。
+		conn, err = mesh.HubWSDial(ctx, hubURL, insecure)
+	default:
+		return fmt.Errorf("未知传输层 %q（仅支持 ws/tcp）", transport)
+	}
 	if err != nil {
 		return fmt.Errorf("连接到 Hub 失败: %w", err)
 	}
@@ -223,8 +250,10 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 		Long: `作为中继节点连接到 Hub，注册自身，然后等待远程请求并通过隧道转发到本地 HTTP 服务。
 
 使用示例:
-  sclient relay start --hub ws://hub.example.com/ws --local http://127.0.0.1:8080 --node-id my-node`,
+  sclient relay start --hub ws://hub.example.com/ws --local http://127.0.0.1:8080 --node-id my-node
+  sclient relay start --transport tcp --hub 127.0.0.1:18084 --node-id my-node --dial-allow`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			transport, _ := cmd.Flags().GetString("transport")
 			hubURL, _ := cmd.Flags().GetString("hub")
 			local, _ := cmd.Flags().GetString("local")
 			nodeID, _ := cmd.Flags().GetString("node-id")
@@ -252,10 +281,11 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 					}
 				}
 			}
-			return runRelayStart(cmd, hubURL, local, nodeID, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs)
+			return runRelayStart(cmd, transport, hubURL, local, nodeID, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs)
 		},
 	}
-	cmd.Flags().String("hub", "", "Hub 的 WebSocket 地址（默认取配置 hub_url；均未配置用 ws://127.0.0.1:18084/ws）")
+	cmd.Flags().String("transport", "ws", "连接到 Hub 的传输层: ws（默认，WebSocket）/ tcp（裸 TCP，hub.transports.tcp.listen）")
+	cmd.Flags().String("hub", "", "Hub 地址（默认取配置 hub_url；均未配置时 ws 用 ws://127.0.0.1:18084/ws、tcp 用 127.0.0.1:18084）")
 	cmd.Flags().String("local", "http://127.0.0.1:8080", "本地 HTTP 服务地址")
 	cmd.Flags().String("node-id", "", "节点唯一标识 (默认使用时间戳)")
 	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供中继端充当出口网关）")
