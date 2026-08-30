@@ -80,6 +80,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			mdns, _ := cmd.Flags().GetBool("mdns")
 			mdnsSecret, _ := cmd.Flags().GetString("mdns-secret")
 			insecure, _ := cmd.Flags().GetBool("insecure")
+			virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			if stunServers != nil {
 				webrtc.SetSTUNServers(stunServers)
@@ -103,7 +104,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 						secret = svc.AccessKeySecret()
 					}
 				}
-				return runMDNSConnect(cmd, service, listenAddr, nodeID, secret, ios)
+				return runMDNSConnect(cmd, service, listenAddr, nodeID, secret, virtualSubnet, ios)
 			}
 
 			svc, err := factory.NewClient(cmd)
@@ -124,7 +125,13 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			// 构建 vipTable 解析 node-id（设计 AD-3/AD-6）。vipTable 只接受认证数据源
 			// （hub 节点列表，SproxySig 签名）。未知虚拟 IP 报错，不猜测 node-id。
 			// 非虚拟子网目标回落服务名解析（既有路径）。
-			vipSubnet := netip.MustParsePrefix(hub.DefaultVirtualSubnet)
+			// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（自定义 hub.virtual_subnet
+			// 时须与本 hub 配置一致，否则 VIP 寻址 fail-closed 拒绝，C 审查 Important）。
+			vipSubnet, perr := netip.ParsePrefix(virtualSubnet)
+			if perr != nil || !vipSubnet.Addr().Is4() {
+				return fmt.Errorf("--virtual-subnet %q 非法（应为 IPv4 CIDR）", virtualSubnet)
+			}
+			vipSubnet = vipSubnet.Masked()
 			var vipTable *mesh.VipTable
 			var target *client.MeshService
 			var refresher *client.MeshTargetRefresher
@@ -139,8 +146,14 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 					vipTable = mesh.NewVipTable(vipSubnet)
 					for _, n := range nodes {
 						if n.VirtualIP != "" {
-							if a, pErr := netip.ParseAddr(n.VirtualIP); pErr == nil {
-								vipTable.Add(a, n.ID)
+							a, pErr := netip.ParseAddr(n.VirtualIP)
+							if pErr != nil {
+								continue
+							}
+							if !vipTable.Add(a, n.ID) {
+								// R-2：hub 权威列表内同一 VIP 被多个节点声明（异常），
+								// 不静默丢弃——fail-closed 报错避免误导。
+								return fmt.Errorf("hub 节点列表虚拟 IP %s 冲突（多个节点声明），无法解析虚拟 IP 目标", a)
 							}
 						}
 					}
@@ -218,6 +231,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 	cmd.Flags().Bool("webrtc", true, "优先 webrtc 打洞直连，失败回落 hub 中继")
 	cmd.Flags().String("hub", "", "hub 地址（http(s) 或 ws(s) 均可；默认取 server_url）")
 	cmd.Flags().String("node-id", "", "本节点 ID（信令来源；默认主机名）")
+	cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
 	cmd.Flags().String("gateway", "", "经本地 mesh node 网关复用已建立直连链路路由（127.0.0.1:port；本地节点无到目标的已建链路时回落常规拨号）")
 	cmd.Flags().Bool("mdns", false, "纯 mDNS 局域网直连（不经 hub）：经 mDNS 发现局域网内宣告该服务的 mesh node（`mesh node --mdns` 运行），直连信令建立 webrtc 数据面")
 	cmd.Flags().String("mdns-secret", "", "mDNS 模式共享密钥（与 mesh node --mdns-secret 一致；为空 = 无认证 LAN 信任，同 mesh 配置密钥则须一致，TXT 与信令均签名校验）")

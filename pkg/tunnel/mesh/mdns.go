@@ -28,8 +28,13 @@ import (
 // 每个 mesh node 在 `_sproxy-mesh._tcp.local.` 服务类型下广播自身：
 //   - PTR：`_sproxy-mesh._tcp.local.` → `<instance>._sproxy-mesh._tcp.local.`
 //   - TXT：`<instance>...` → `node=<node-id>`、`saddr=<ip:port>`（直连 webrtc 信令端点）、
+//     `vip=<虚拟 IP>`（mDNS 无 hub 模式确定性分配，供对端构建 vipTable）、
 //     `svc.<name>=<addr>`（每服务一条）
 //   - A：`<instance>...` → 本节点 LAN IPv4（供对端获取源地址）
+//
+// 注意（R-5）：`vip=` 加入 TXT 与签名内容后，配置共享密钥（Secret）的混合版本 LAN 中，
+// 旧版本节点（广播/校验不感知 vip）无法与新版本节点互发现（签名内容不匹配）。本特性
+// 首发无历史部署版本，风险低；若未来有混合版本升级，需同批升级全部节点。
 //
 // 节点周期发送 unsolicited 宣告（无需先收到查询即可被发现，天然满足"同网段互发现"），
 // 同时监听组播：接收其他节点的宣告/查询应答更新本地缓存（TTL 过期剔除），并对

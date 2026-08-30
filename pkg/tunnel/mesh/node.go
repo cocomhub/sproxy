@@ -205,6 +205,12 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	// --virtual-subnet 覆盖）优先，内部已含宣告地址精确匹配（逃生口）与公网/CIDR
 	// 回落。selfVIP 无效（临时身份/旧 hub）时虚拟子网内 fail-closed 拒绝，其余不变。
 	subnet := parseVirtualSubnet(cfg.VirtualSubnet)
+	// S-4：自定义 hub.virtual_subnet 时，本节点 selfVIP（REG_OK 下发）若不在配置的
+	// 虚拟子网内，虚拟 IP 拨号将 fail-closed 拒绝——此处显式告警（而非仅出口策略
+	// Warn）引导核对 hub.virtual_subnet 与 --virtual-subnet 一致性。
+	if reg.VirtualIP.IsValid() && !subnet.Contains(reg.VirtualIP) {
+		logger.Warn("本节点虚拟 IP 不在配置的虚拟子网内（请检查 hub.virtual_subnet 与 --virtual-subnet 是否一致；不一致时虚拟 IP 拨号 fail-closed 拒绝）", "self_vip", reg.VirtualIP, "subnet", subnet)
+	}
 	vipPolicy := relay.NewVirtualIPDialPolicy(subnet, reg.VirtualIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs)
 	// 中继路径 DialResultFrames=true：hub 写 200 前读拨号结果帧确认数据面就绪（I27）。
 	relayOpts := []relay.ServeOptions{

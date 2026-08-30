@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1296,5 +1297,96 @@ func TestAutoRegister_GetsVirtualIP(t *testing.T) {
 	}
 	if cerr := reg2.Closer(); cerr != nil {
 		t.Fatal(cerr)
+	}
+}
+
+// TestGateway_VirtualIPRoute（S-3 回归）校验本地网关的虚拟 IP 路由分支：
+// req.Peer 为空且 Addr host ∈ 虚拟子网 → 查 vipTable 定位节点 → 复用已建链路写拨号帧
+// → 对端出口 NewVirtualIPDialPolicy 识别 ==selfVIP 且端口 ∈ 白名单 → 改写本机 echo。
+func TestGateway_VirtualIPRoute(t *testing.T) {
+	// echo 后端（127.0.0.1 回环）。
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echoLn.Close()
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(cn, cn)
+			}(c)
+		}
+	}()
+	_, echoPortStr, _ := net.SplitHostPort(echoLn.Addr().String())
+	echoPort, _ := strconv.Atoi(echoPortStr)
+
+	// 内存 pipe 上的 mux 对：serve 侧用虚拟 IP 拨号策略（selfVIP=100.64.0.5，白名单 echo 端口）。
+	a, b := xfertest.Pipe()
+	defer a.Close()
+	defer b.Close()
+	serveMux := mux.New(a, mux.RoleListener)
+	defer serveMux.Close()
+	ctx := t.Context()
+	go func() {
+		selfVIP := netip.MustParseAddr("100.64.0.5")
+		_ = relay.Serve(ctx, serveMux, "http://127.0.0.1:1", true, nil, nil,
+			relay.ServeOptions{DialPolicy: relay.NewVirtualIPDialPolicy(testVIPSubnet, selfVIP, []int{echoPort}, nil, nil)})
+	}()
+
+	links := newLinkPool()
+	dMux := mux.New(b, mux.RoleDialer)
+	defer dMux.Close()
+	links.set("node-b", dMux)
+	vipTable := NewVipTable(testVIPSubnet)
+	vipTable.Add(netip.MustParseAddr("100.64.0.5"), "node-b")
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, vipTable)
+	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("gateway serve: %v", err)
+	}
+
+	// GatewayConnect 虚拟 IP：peer 空 + addr 为虚拟子网内地址 → 网关查表定位 node-b。
+	conn, err := GatewayConnect(ctx, gatewayAddr, "", "100.64.0.5:"+strconv.Itoa(echoPort), "")
+	if err != nil {
+		t.Fatalf("GatewayConnect 虚拟 IP: %v", err)
+	}
+	defer conn.Close()
+
+	payload := []byte("vip-gateway")
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("读 echo: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo 回显 = %q, want %q", got, payload)
+	}
+}
+
+// TestGateway_VirtualIPUnknownRejected（S-3 回归）校验网关对 vipTable 中不存在的
+// 虚拟 IP 请求拒绝（不猜测 node-id，防地址注入）。
+func TestGateway_VirtualIPUnknownRejected(t *testing.T) {
+	links := newLinkPool()
+	vipTable := NewVipTable(testVIPSubnet)
+	vipTable.Add(netip.MustParseAddr("100.64.0.5"), "node-b")
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, vipTable)
+	ctx := t.Context()
+	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("gateway serve: %v", err)
+	}
+	_, err = GatewayConnect(ctx, gatewayAddr, "", "100.64.0.99:22", "")
+	if err == nil {
+		t.Fatal("未知虚拟 IP 应被网关拒绝")
 	}
 }

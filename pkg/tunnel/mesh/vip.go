@@ -149,6 +149,32 @@ func (t *VipTable) Len() int {
 	return len(t.byAddr)
 }
 
+// Nodes 返回表内全部 nodeID（去重；供 mDNS 离场清理遍历）。
+func (t *VipTable) Nodes() []string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	seen := make(map[string]bool, len(t.byAddr))
+	out := make([]string, 0, len(t.byAddr))
+	for _, e := range t.byAddr {
+		if !seen[e.NodeID] {
+			seen[e.NodeID] = true
+			out = append(out, e.NodeID)
+		}
+	}
+	return out
+}
+
+// RemoveByNode 移除指定 nodeID 的全部虚拟 IP 映射（对端离场清理）。
+func (t *VipTable) RemoveByNode(nodeID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for addr, e := range t.byAddr {
+		if e.NodeID == nodeID {
+			delete(t.byAddr, addr)
+		}
+	}
+}
+
 // deterministicAllocator 是 mDNS 无 hub 模式的本地确定性虚拟 IP 分配器
 // （实现 hub.Allocator）。vip = 子网基址 + hash(mesh, nodeID) % (宿主-3) + 2，
 // 无状态、无 hub 可用。仅 IPv4（虚拟 IP 分配做 IPv4 算术）。
@@ -167,6 +193,13 @@ func (t *VipTable) Len() int {
 //     服务寻址（服务名/--node 拨号路径独立可用）。
 type deterministicAllocator struct {
 	subnet netip.Prefix
+}
+
+// NewDeterministicAllocator 创建确定性虚拟 IP 分配器（mDNS 无 hub 模式回落；供
+// cmd/sclient 等外部包构造，用于 vipTable.AddVerified 校验对端声明 VIP 与确定性
+// 公式一致）。
+func NewDeterministicAllocator(subnet netip.Prefix) hub.Allocator {
+	return newDeterministicAllocator(subnet)
 }
 
 // newDeterministicAllocator 创建确定性分配器（锁定子网，仅 IPv4）。

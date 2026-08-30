@@ -218,6 +218,19 @@ func runMDNSDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID string, md
 
 func (dl *mdnsDiscoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID string, mdns *MDNSServer, probe time.Duration, maxParallel int, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, vipTable *VipTable, alloc hub.Allocator, logger *slog.Logger) {
 	_ = dl.links.sweep()
+	// S-2：对端离场清理——mDNS AddVerified 只增不删，离场/过期对端的 VIP 映射会残留；
+	// 当前 peers 不存在的 nodeID 移除其映射（自身 nodeID 保留，避免误删自身 VIP）。
+	if vipTable != nil {
+		current := map[string]bool{nodeID: true}
+		for _, p := range mdns.Peers() {
+			current[p.NodeID] = true
+		}
+		for _, node := range vipTable.Nodes() {
+			if !current[node] {
+				vipTable.RemoveByNode(node)
+			}
+		}
+	}
 	var targets []MDNSPeer
 	for _, p := range mdns.Peers() {
 		if p.NodeID == "" || p.NodeID == nodeID || p.SignalAddr == "" {

@@ -6,6 +6,7 @@ package mesh
 import (
 	"fmt"
 	"net/netip"
+	"sync"
 	"testing"
 )
 
@@ -245,5 +246,52 @@ func TestVipTable_AddVerified(t *testing.T) {
 	_ = vt.AddVerified(expectedB, "node-b", "", alloc)
 	if vt.AddVerified(expectedB, "node-c", "", alloc) {
 		t.Fatal("同 addr 不同 nodeID 应拒绝")
+	}
+}
+
+// TestVipTable_ReconcileConcurrent（S-3 回归）校验并发 Reconcile 重建 + 读表在
+// -race 下稳定（原子换表，读侧不半读）。
+func TestVipTable_ReconcileConcurrent(t *testing.T) {
+	vt := NewVipTable(testVIPSubnet)
+	vt.Add(netip.MustParseAddr("100.64.0.2"), "node-a")
+
+	var wg sync.WaitGroup
+	// 并发重建（交替不同条目集）。
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			entries := []VipEntry{
+				{Addr: netip.MustParseAddr("100.64.0.2"), NodeID: "node-a"},
+				{Addr: netip.MustParseAddr("100.64.0.3"), NodeID: fmt.Sprintf("node-%d", i)},
+			}
+			vt.Reconcile(entries)
+		}(i)
+		go func() {
+			defer wg.Done()
+			_, _ = vt.NodeByAddr(netip.MustParseAddr("100.64.0.2"))
+			_ = vt.Nodes()
+		}()
+	}
+	wg.Wait()
+}
+
+// TestDeterministicAllocator_TinySubnet（S-3 回归）校验 /31、/32 无可分配地址报错，
+// /30 单宿主（偏移 2）正确分配。
+func TestDeterministicAllocator_TinySubnet(t *testing.T) {
+	for _, cidr := range []string{"100.64.0.0/31", "100.64.0.0/32"} {
+		a := newDeterministicAllocator(netip.MustParsePrefix(cidr))
+		if _, err := a.Alloc("m", "node-a"); err == nil {
+			t.Fatalf("%s 应地址耗尽（无可分配主机）", cidr)
+		}
+	}
+	// /30：size=4，可分配偏移 [2,2]（.2 唯一宿主；.1 网关、.3 广播保留）。
+	a := newDeterministicAllocator(netip.MustParsePrefix("100.64.0.0/30"))
+	vip, err := a.Alloc("m", "node-a")
+	if err != nil {
+		t.Fatalf("/30 Alloc: %v", err)
+	}
+	if vip != netip.MustParseAddr("100.64.0.2") {
+		t.Fatalf("/30 Alloc = %v, want 100.64.0.2", vip)
 	}
 }
