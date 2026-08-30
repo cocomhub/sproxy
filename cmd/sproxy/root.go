@@ -19,6 +19,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	kad "github.com/cocomhub/sproxy/pkg/tunnel/hub/ext/kad"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	"github.com/spf13/cobra"
 )
@@ -118,6 +119,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	var routeTable *hub.MeshRouteTable
 	var persist *hub.Persister         // hub 状态持久化器（仅 hub.enabled 且 persist_file 非空时创建）
 	var restoredMsgs []hub.MessageSnap // 启动时从持久化恢复的信令收件箱（灌入 SignalBroker）
+	var hubDHT hub.DHT                 // hub 节点发现表（hub.dht: kad 时装配；注入 HubServer 与 Handlers）
 	// Hub 中继：先注册 xfer/ws 传输（开启 transports.ws 时），
 	// 创建 MeshRouteTable + HubServer 收口，再注册 HTTP 路由。
 	if cfg.Hub.Enabled {
@@ -147,6 +149,28 @@ func runServer(cmd *cobra.Command, args []string) error {
 				aks = append(aks, hub.AccessKey{Key: k.Key, Secret: k.Secret})
 			}
 			hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(aks), logger.With("component", "hub"), cfg.Hub.MaxConnections)
+			// DHT 节点发现表（hub.dht: kad）：装配 Kademlia，注册进 DHTRegistry，
+			// 注入 HubServer（注册时喂入 DHT）与 Handlers（/api/hub/nodes 合并候选）。
+			// 路由表仍 hub 权威；DHT 只提供候选节点/发现，不改路由表状态。
+			if cfg.Hub.DHT == "kad" {
+				dhtNodeID := cfg.Hub.NodeID
+				if dhtNodeID == "" {
+					dhtNodeID = "hub-dht"
+				}
+				// 装配 Kademlia 进 DHTRegistry（Active 返回最高优先级实现 = kad），
+				// 随后经 DHTRegistry.Active() 注入 HubServer/Handlers——registry 是
+				// 实际选择机制（非装饰性副作用）。
+				hub.RegisterDHT("kad", kad.NewDHTNode(dhtNodeID, nil, logger.With("component", "dht")), 10)
+				hubDHT = hub.DHTRegistry.Active()
+				if len(cfg.Hub.DHTSeeds) > 0 {
+					// 多 hub DHT 组网未实现，种子暂不引导（kad.Bootstrap 现会把种子
+					// 当假 ID 节点插入路由表，污染发现列表）；预留配置，未来实现
+					// 真实 bootstrap 时再消费。
+					logger.Warn("hub.dht_seeds 预留（多 hub DHT 组网未实现），暂不引导", "seeds", cfg.Hub.DHTSeeds)
+				}
+				hubSrv.SetDHT(hubDHT)
+				logger.Info("Hub DHT 已启用", "impl", "kad", "node_id", dhtNodeID)
+			}
 			// S36：WS 升级路径固定为 /ws。hub.transports.ws.path 已废弃，
 			// 非默认值时仅记录警告并忽略，避免可配置 path 与既有业务路由语义重叠。
 			wsPath := "/ws"
@@ -182,6 +206,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		HubPersist:          persist,
 		HubRestoredMessages: restoredMsgs,
 	})
+	if hubDHT != nil {
+		h.SetDHT(hubDHT) // /api/hub/nodes 合并 DHT 候选节点（发现源：路由表权威 + DHT 候选）
+	}
 	defer func() {
 		if err := h.Close(); err != nil {
 			slog.Warn(logHandlersCloseErr, "error", err.Error())

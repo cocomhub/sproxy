@@ -47,6 +47,13 @@ func (d *memoryDHT) Lookup(_ context.Context, nodeID string) (PeerInfo, error) {
 	return node, nil
 }
 
+func (d *memoryDHT) Remove(_ context.Context, nodeID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.nodes, nodeID)
+	return nil
+}
+
 func (d *memoryDHT) GetClosestNodes(_ context.Context, targetID string, n int) ([]PeerInfo, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()

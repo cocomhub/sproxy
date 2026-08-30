@@ -327,7 +327,29 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, erro
 	}
 	mesh := tunnel.AccessKeyMesh(reg.AccessKey)
 	s.rt.Add(mesh, info, validateServices(reg.Meta.Services))
+	// 节点发现表（DHT）喂入：路由表仍权威，DHT 仅作候选节点来源（供 /api/hub/nodes
+	// 合并发现）。注册失败不阻断连接（DHT 是辅助发现，不承载转发）。
+	// 只喂**稳定真实节点**：跳过瞬态临时身份（disc-/mesh-/p2p- 拨号临时 ID，拨号后
+	// 即注销、DHT 无移除路径），否则幽灵节点永久污染发现列表并挤占 k-bucket。
+	if s.dht != nil && !isTransientNodeID(reg.NodeID) {
+		if perr := s.dht.Register(context.Background(), PeerInfo{
+			ID:    string(info.ID),
+			Addrs: []string{info.Addr},
+			Meta:  map[string]string{"mesh": mesh, "addr": info.Addr},
+		}); perr != nil {
+			s.logger.Debug("DHT 节点注册失败（忽略）", "node", info.ID, "error", perr)
+		}
+	}
 	return info, nil
+}
+
+// isTransientNodeID 判断 node-id 是否为瞬态临时身份（mesh 自动对等拨号 disc-、
+// mesh connect mesh-、p2p p2p- 前缀的 <prefix>-<base>-<随机hex>）。这些身份拨号完成
+// 后即注销，不应喂入 DHT（发现表只保留稳定真实节点）。
+func isTransientNodeID(nodeID string) bool {
+	return strings.HasPrefix(nodeID, discPrefix) ||
+		strings.HasPrefix(nodeID, "mesh-") ||
+		strings.HasPrefix(nodeID, "p2p-")
 }
 
 // DiscPrefix 是 mesh 自动对等发现临时节点 ID 的基前缀（不含 '-'，AutoRegister 的
@@ -402,6 +424,16 @@ type HubServer struct {
 	logger *slog.Logger
 	// maxConns 是并发连接上限信号量；nil 表示无上限（兼容现有测试构造与极端场景）。
 	maxConns chan struct{}
+	// dht 是节点发现表（nil = 不启用 DHT 候选，既有行为）。路由表仍 hub 权威；
+	// DHT 只作为候选节点来源（注册时喂入，发现时供 /api/hub/nodes 合并）。
+	// 由 cmd/sproxy 装配 Kademlia 时经 SetDHT 注入（hub.dht: kad）。
+	dht DHT
+}
+
+// SetDHT 注入节点发现表（DHT）。nil 清除（恢复不启用 DHT 候选）。
+// 须在服务器开始处理连接前调用。
+func (s *HubServer) SetDHT(dht DHT) {
+	s.dht = dht
 }
 
 // NewHubServer 创建节点收口服务。auth 为 nil 时视为 fail-closed（拒绝所有注册），
@@ -518,6 +550,13 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 	defer func() {
 		if s.rt.RemoveIfOwned(info.ID, m) {
 			s.logger.Info("中继节点已移除", "node", reg.NodeID)
+			// 同步从发现表（DHT）移除，防幽灵节点残留（稳定节点断开后不应再出现在
+			// /api/hub/nodes 发现列表）。DHT 移除失败不影响连接清理。
+			if s.dht != nil && !isTransientNodeID(reg.NodeID) {
+				if rerr := s.dht.Remove(context.Background(), string(info.ID)); rerr != nil {
+					s.logger.Debug("DHT 节点移除失败（忽略）", "node", info.ID, "error", rerr)
+				}
+			}
 		}
 	}()
 
