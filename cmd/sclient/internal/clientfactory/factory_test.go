@@ -4,11 +4,9 @@
 package clientfactory_test
 
 import (
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/adrg/xdg"
@@ -259,27 +257,10 @@ func TestFactory_NewClient_Xfer_IdentityAndPinWired(t *testing.T) {
 	}
 }
 
-// syncBuffer 是 goroutine-safe 的 slog 捕获 writer。
-type syncBuffer struct {
-	mu sync.Mutex
-	b  strings.Builder
-}
-
-func (s *syncBuffer) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.Write(p)
-}
-
-func (s *syncBuffer) String() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.b.String()
-}
-
-// TestFactory_NewClient_Xfer_NoKey_Warns 验证：xfer 隧道模式配置了身份/pin 但
-// 未配置 access_key_secret（隧道 key 为 nil → 握手不执行）时输出显式 Warn（pinning 不生效）。
-func TestFactory_NewClient_Xfer_NoKey_Warns(t *testing.T) {
+// TestFactory_NewClient_Xfer_NoKey_FailsClosed 验证：xfer 隧道模式配置了身份/peer_fingerprints
+// 但未配置 access_key_secret（隧道 key 为 nil → 握手不执行 → pinning 静默不生效）时
+// fail-closed 报错（而非仅 Warn），避免安全机制被无声绕过。
+func TestFactory_NewClient_Xfer_NoKey_FailsClosed(t *testing.T) {
 	id, err := tunnel.GenerateIdentity()
 	if err != nil {
 		t.Fatal(err)
@@ -288,11 +269,6 @@ func TestFactory_NewClient_Xfer_NoKey_Warns(t *testing.T) {
 	if err = tunnel.SaveIdentity(id, filepath.Join(dir, "sproxy", "identity.json")); err != nil {
 		t.Fatal(err)
 	}
-
-	old := slog.Default()
-	buf := &syncBuffer{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(old) })
 
 	binder := &mockCfgBinder{
 		data: map[string]any{
@@ -308,26 +284,46 @@ func TestFactory_NewClient_Xfer_NoKey_Warns(t *testing.T) {
 	if err = cmd.Flags().Set("xfer", "tcp"); err != nil {
 		t.Fatal(err)
 	}
+	_, err = f.NewClient(cmd)
+	if err == nil {
+		t.Fatal("xfer 配置身份但缺 access_key_secret 应 fail-closed 报错")
+	}
+	if !strings.Contains(err.Error(), "access_key_secret") {
+		t.Fatalf("错误应指明需配置 access_key_secret, 实际: %v", err)
+	}
+}
+
+// TestFactory_NewClient_Xfer_NoKeyNoPin_Succeeds 验证：xfer 模式无身份、无 peer_fingerprints、
+// 无 access_key_secret 时仍正常创建客户端（无 pinning 预期，向后兼容）。
+func TestFactory_NewClient_Xfer_NoKeyNoPin_Succeeds(t *testing.T) {
+	setXDGConfigHome(t) // 空 XDG：无身份文件
+
+	binder := &mockCfgBinder{
+		data: map[string]any{
+			"server_url": "http://127.0.0.1:18083",
+			"hub_url":    "127.0.0.1:9999",
+		},
+	}
+	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	cmd := &cobra.Command{}
+	cmd.Flags().String("server", "", "")
+	cmd.Flags().String("xfer", "", "")
+	cmd.Flags().String("hub", "", "")
+	if err := cmd.Flags().Set("xfer", "tcp"); err != nil {
+		t.Fatal(err)
+	}
 	svc, err := f.NewClient(cmd)
 	if err != nil {
-		t.Fatalf("xfer 无 key 时应成功创建客户端: %v", err)
+		t.Fatalf("xfer 无身份/无 pin/无 key 应正常创建客户端: %v", err)
 	}
 	if svc == nil {
 		t.Fatal("expected non-nil service")
 	}
-	if !strings.Contains(buf.String(), "握手不会执行") {
-		t.Fatalf("应输出握手不执行告警, 实际日志: %q", buf.String())
-	}
 }
 
-// TestFactory_NewClient_PeerFingerprintsNonXfer_Warns 验证 M-3：
-// 配置了 peer_fingerprints 但命令不走 xfer 隧道时输出显式 Warn（pinning 未生效）。
-func TestFactory_NewClient_PeerFingerprintsNonXfer_Warns(t *testing.T) {
-	old := slog.Default()
-	buf := &syncBuffer{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(old) })
-
+// TestFactory_NewClient_PeerFingerprintsNonXfer_FailsClosed 验证：配置了 peer_fingerprints
+// 但命令不走 xfer 隧道时 fail-closed 报错（而非仅 Warn），防止用户误以为受 pinning 保护。
+func TestFactory_NewClient_PeerFingerprintsNonXfer_FailsClosed(t *testing.T) {
 	binder := &mockCfgBinder{
 		data: map[string]any{
 			"server_url": "http://127.0.0.1:18083",
@@ -339,14 +335,11 @@ func TestFactory_NewClient_PeerFingerprintsNonXfer_Warns(t *testing.T) {
 	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
-	svc, err := f.NewClient(cmd)
-	if err != nil {
-		t.Fatalf("非 xfer + peer_fingerprints 不应失败: %v", err)
+	_, err := f.NewClient(cmd)
+	if err == nil {
+		t.Fatal("非 xfer + peer_fingerprints 应 fail-closed 报错")
 	}
-	if svc == nil {
-		t.Fatal("expected non-nil service")
-	}
-	if !strings.Contains(buf.String(), "pinning 不会生效") {
-		t.Fatalf("应输出 pinning 未生效告警, 实际日志: %q", buf.String())
+	if !strings.Contains(err.Error(), "xfer") {
+		t.Fatalf("错误应指引使用 xfer 隧道, 实际: %v", err)
 	}
 }

@@ -151,9 +151,10 @@ xfer/mux 隧道（如 `tcp`、`ws`）。该模式在 ECDH 握手时交换 Ed2551
 - 本端身份：`sclient identity generate` 生成（XDG 目录 `sproxy/identity.json`）；
 - 对端 pin：配置 `peer_fingerprints`（`sclient config set peer_fingerprints <fp>`，
   多个逗号分隔；对端指纹取 `sclient identity fingerprint` 带外固化）；
-- 需配置 `access_key`/`access_key_secret`（派生隧道密钥使握手执行；无密钥不握手）；
+- 需配置 `access_key`/`access_key_secret`（派生隧道密钥使握手执行；缺 key 但配置了
+  身份/指纹时 fail-closed 报错，不静默降级）；
 - fail-closed：pin 不匹配或对端无身份即拒绝；传统隧道（未加 `--xfer`）与文件直连
-  命令不做身份交换，配置 `peer_fingerprints` 会输出 Warn 提示不生效。
+  命令不做身份交换，配置 `peer_fingerprints` 会 fail-closed 报错并指引使用 `--xfer`。
 
 ### identity
 

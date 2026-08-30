@@ -8,7 +8,6 @@ package clientfactory
 import (
 	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -186,7 +185,12 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		}
 
 		// 隧道加密密钥：access-key 驱动（SK 派生），使 mux 握手执行（key 为 nil 时不握手，
-		// pinning 不生效）；无 AK/SK 时不加密。
+		// pinning 不生效）。
+		// fail-closed：配置了身份/peer_fingerprints 但缺 access_key_secret 时，握手不执行、
+		// pinning 静默不生效 = 安全机制被无声绕过，必须报错而非仅 Warn。
+		if cfg.AccessKeySecret == "" && (id != nil || len(cfg.PeerFingerprints) > 0) {
+			return nil, fmt.Errorf("xfer 隧道配置了身份或 peer_fingerprints 时必须配置 access_key_secret（ECDH 握手与身份 pinning 依赖隧道密钥；fail-closed）")
+		}
 		xferKey := ""
 		if cfg.AccessKeySecret != "" {
 			mesh := tunnel.AccessKeyMesh(cfg.AccessKey)
@@ -195,18 +199,12 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 				return nil, fmt.Errorf("派生 xfer 隧道密钥失败: %w", kErr)
 			}
 			xferKey = hex.EncodeToString(k)
-		} else if id != nil || len(cfg.PeerFingerprints) > 0 {
-			// 无 AK/SK → 隧道 key 为 nil → mux 握手不执行 → 身份/pin 校验静默不生效。
-			// 显式告警，避免用户配置了身份/pin 却误以为受保护（与 M-3 同源的 fail-open 防护）。
-			slog.Warn("xfer 隧道未配置 access_key_secret，ECDH 握手不会执行，身份/对端指纹 pinning 不生效",
-				"xfer", xferName, "has_identity", id != nil, "peer_fingerprints", len(cfg.PeerFingerprints))
 		}
 		opts = append(opts, client.WithXfer(xferName, hub, xferKey))
 	} else if len(cfg.PeerFingerprints) > 0 {
-		// M-3：配置了对端指纹 pinning 但当前命令不走 xfer 隧道（--xfer），pinning 不生效，
-		// 显式告警，避免用户误以为受保护。
-		slog.Warn("已配置 peer_fingerprints 但当前命令不走 xfer 隧道（--xfer），身份指纹 pinning 不会生效",
-			"peer_fingerprints", len(cfg.PeerFingerprints))
+		// fail-closed：非 xfer 命令配置了 peer_fingerprints 但当前命令不走 xfer 握手，
+		// pinning 无法生效；配置了 pin 却静默跳过 = fail-open，必须报错并给出恢复路径。
+		return nil, fmt.Errorf("已配置 peer_fingerprints 但当前命令不走 xfer 隧道（--xfer），身份指纹 pinning 无法生效；请使用 `sclient tunnel --xfer <name>`，或移除 peer_fingerprints 配置（fail-closed）")
 	}
 
 	fc := client.NewFileClient(serverURL, opts...)
