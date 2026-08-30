@@ -8,6 +8,7 @@
 package hub
 
 import (
+	"net/netip"
 	"sort"
 	"sync"
 	"time"
@@ -27,6 +28,9 @@ type NodeInfo struct {
 	Secret     string    // per-node 独立 secret（仅节点声明 per-node-secret 能力时下发；不落日志）
 	RealNodeID string    // mesh discovery 临时注册（disc-）代表的本节点真实 node-id（hub 校验后记录）
 	Mesh       string    // 节点所属 mesh（由注册 AK 解析；"" 为默认 mesh）
+	// VirtualIP 是本节点在所属 mesh 内的虚拟 IP（hub 权威分配；瞬态节点不分配）。
+	// 随持久化快照落盘，重启由分配器重建，保证稳定。
+	VirtualIP netip.Addr
 }
 
 // RouteTable 是线程安全的节点路由表。

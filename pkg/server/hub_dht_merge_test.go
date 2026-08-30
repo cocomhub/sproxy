@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -122,5 +123,37 @@ func TestHubNodesHandler_NoDHT_Unchanged(t *testing.T) {
 	}
 	if len(resp) != 1 || resp[0].ID != "node-a" {
 		t.Fatalf("未注入 DHT 应只返回路由表节点, got %+v", resp)
+	}
+}
+
+// TestHubNodesHandler_VirtualIP 校验 /api/hub/nodes 响应携带 virtual_ip 字段
+// （供 mesh node / 一次性 CLI 构建 vipTable）。
+func TestHubNodesHandler_VirtualIP(t *testing.T) {
+	rt := hub.NewMeshRouteTable()
+	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-a"), Addr: "192.168.1.1:9000", VirtualIP: netip.MustParseAddr("100.64.0.2")}, nil)
+	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-b"), Addr: "192.168.1.2:9000"}, nil)
+
+	h := &Handlers{routeTable: rt, logger: testutil.DiscardLogger()}
+	w := httptest.NewRecorder()
+	h.hubNodesHandler(w, httptest.NewRequest(http.MethodGet, "/api/hub/nodes", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp []struct {
+		ID        string `json:"id"`
+		VirtualIP string `json:"virtual_ip"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := make(map[string]string, len(resp))
+	for _, n := range resp {
+		got[n.ID] = n.VirtualIP
+	}
+	if got["node-a"] != "100.64.0.2" {
+		t.Fatalf("node-a virtual_ip = %q, want 100.64.0.2", got["node-a"])
+	}
+	if got["node-b"] != "" {
+		t.Fatalf("node-b 无虚拟 IP 应省略, got %q", got["node-b"])
 	}
 }

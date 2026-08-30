@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -82,6 +83,10 @@ type HubConfig struct {
 	// MaxConnections 是 Hub 同时处理的中继节点连接数上限（I30），0 或不填使用默认 256。
 	MaxConnections int              `yaml:"max_connections" mapstructure:"max_connections"`
 	Transports     TransportConfigs `yaml:"transports" mapstructure:"transports"`
+	// VirtualSubnet 是虚拟 IP 分配的 IPv4 子网（CIDR）。默认 CGNAT 100.64.0.0/10
+	// （RFC 6598，Tailscale 同款）；空值由 SetDefaults 填默认。Validate 限定 IPv4。
+	// 子网首地址（.1）保留为网关/默认，实际分配从 .2 起。
+	VirtualSubnet string `yaml:"virtual_subnet" mapstructure:"virtual_subnet"`
 	// DHT 是节点发现表实现选择：""（默认）= 内置内存 DHT（不合并候选）；
 	// "kad" = Kademlia（ext/kad，XOR 距离路由表）。启用 kad 后，注册节点喂入
 	// DHT，/api/hub/nodes 合并 DHT 候选（路由表仍权威，DHT 只提供候选/发现）。
@@ -268,6 +273,9 @@ func Default() *Config {
 			MaxConcurrent: 3,
 			TaskTTL:       24 * time.Hour,
 		},
+		Hub: HubConfig{
+			VirtualSubnet: hub.DefaultVirtualSubnet,
+		},
 		ChunkSize:                 size.DefaultChunkSize,
 		UploadSessionTTL:          24 * time.Hour,
 		CloudSyncThreshold:        20 * 1024 * 1024, // 20 MiB
@@ -339,6 +347,9 @@ func (c *Config) SetDefaults() {
 	}
 	if c.Hub.MaxConnections <= 0 {
 		c.Hub.MaxConnections = 256
+	}
+	if c.Hub.VirtualSubnet == "" {
+		c.Hub.VirtualSubnet = hub.DefaultVirtualSubnet
 	}
 	if c.Hub.Transports.TCP.Enabled && c.Hub.Transports.TCP.Listen == "" {
 		c.Hub.Transports.TCP.Listen = DefaultHubTCPListen
@@ -422,6 +433,17 @@ func (c *Config) Validate() error {
 		// 防配置打错字（"kademlia" 等）被静默忽略。门控在 hub.enabled：hub 未启用时
 		// dht 不被消费，历史/闲置配置遗留不阻断启动（与 ws transport 校验一致）。
 		return fmt.Errorf("hub.dht=%q 无效，仅支持 \"\"（内置内存 DHT）或 \"kad\"（Kademlia）", c.Hub.DHT)
+	}
+	if c.Hub.VirtualSubnet != "" {
+		// 虚拟 IP 分配仅支持 IPv4（确定性分配与递增分配均做 IPv4 算术）。非法/非 IPv4
+		// CIDR 在启动时拒绝，防止分配器构造时 panic 或产生不可路由地址（M-3）。
+		prefix, perr := netip.ParsePrefix(c.Hub.VirtualSubnet)
+		if perr != nil {
+			return fmt.Errorf("hub.virtual_subnet=%q 非法: %v", c.Hub.VirtualSubnet, perr)
+		}
+		if !prefix.Addr().Is4() {
+			return fmt.Errorf("hub.virtual_subnet=%q 必须是 IPv4 CIDR（虚拟 IP 分配仅支持 IPv4）", c.Hub.VirtualSubnet)
+		}
 	}
 	// hub 联邦配置校验（S4F）：URL 合法性 + 远程 peering 凭据强制（fail-closed）。
 	// 门控在 hub.federation.enabled：hub 未启用或联邦关闭时 peers 不被消费，

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -235,9 +236,17 @@ func generateNodeSecret() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
-// buildRegisterAck 构造注册成功 ACK 帧。secret 为空（节点未声明 per-node-secret
-// 能力或生成失败）时返回纯 "REG_OK"，与不感知能力标志的旧客户端兼容。
-func buildRegisterAck(secret string) []byte {
+// buildRegisterAck 构造注册成功 ACK 帧：
+//   - secret 为空且不携带 vip → 纯 "REG_OK"（与不感知能力标志的旧客户端兼容）；
+//   - includeVIP 且 vip 有效 → "REG_OK:<secret>:<vip>"（secret 空时 "REG_OK::<vip>"）；
+//   - 否则 → "REG_OK:<secret>"。
+//
+// includeVIP 由节点是否声明 CapabilityVirtualIP 门控——旧客户端不声明该能力时
+// 收到旧格式，完全向后兼容。
+func buildRegisterAck(secret string, vip netip.Addr, includeVIP bool) []byte {
+	if includeVIP && vip.IsValid() {
+		return []byte(RegisterAckOK + registerAckSecretSep + secret + registerAckSecretSep + vip.String())
+	}
 	if secret == "" {
 		return []byte(RegisterAckOK)
 	}
@@ -333,6 +342,18 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, erro
 		}
 	}
 	mesh := tunnel.AccessKeyMesh(reg.AccessKey)
+	// 虚拟 IP 分配（瞬态节点过滤，I-2）：disc-*/mesh-*/p2p-* 临时身份拨号后即注销，
+	// 分配 VIP 只会制造濒死条目（vipTable 出现幽灵映射），故跳过。分配失败不阻断
+	// 注册（虚拟 IP 是增强寻址能力，非注册前提），仅告警——子网耗尽等极端场景
+	// 下节点仍可经服务名/--node 寻址。
+	if !isTransientNodeID(reg.NodeID) && s.allocator != nil {
+		if vip, aerr := s.allocator.Alloc(mesh, reg.NodeID); aerr == nil {
+			info.VirtualIP = vip
+		} else {
+			s.logger.Warn("虚拟 IP 分配失败", "node", reg.NodeID, "error", aerr)
+		}
+	}
+	info.Mesh = mesh
 	s.rt.Add(mesh, info, validateServices(reg.Meta.Services))
 	// 节点发现表（DHT）喂入：路由表仍权威，DHT 仅作候选节点来源（供 /api/hub/nodes
 	// 合并发现）。注册失败不阻断连接（DHT 是辅助发现，不承载转发）。
@@ -435,6 +456,10 @@ type HubServer struct {
 	// DHT 只作为候选节点来源（注册时喂入，发现时供 /api/hub/nodes 合并）。
 	// 由 cmd/sproxy 装配 Kademlia 时经 SetDHT 注入（hub.dht: kad）。
 	dht DHT
+	// allocator 是虚拟 IP 分配器（默认 NewHubAllocator(DefaultVirtualSubnet)）。
+	// 由 cmd/sproxy 装配时经 SetAllocator 注入配置子网对应的分配器（hub.virtual_subnet）。
+	// 分配权在 hub：节点不可自选虚拟 IP。
+	allocator Allocator
 }
 
 // SetDHT 注入节点发现表（DHT）。nil 清除（恢复不启用 DHT 候选）。
@@ -448,6 +473,12 @@ func (s *HubServer) SetDHT(dht DHT) {
 // rt 为每 mesh 独立路由表的聚合（M-9），按注册 AK 解析的 mesh 分表隔离。
 // maxConns 为可选变参：传 >0 的值表示 Hub 同时处理的连接数上限（I30），
 // 不传或 <=0 表示无上限。
+//
+// 虚拟 IP：默认创建 hubAllocator（CGNAT 默认子网），registerNode 为稳定节点分配
+// 虚拟 IP；显式移除节点（MeshRouteTable.Remove，管理端踢出）时经 SetVIPRelease
+// 回调回收。连接断开（RemoveIfOwned）不回收——虚拟 IP 与 node-id 在进程生命周期
+// 内稳定绑定，重连复用，彻底消除"断开释放/并发重注册"的重复分配竞态；重启后
+// 由快照重建（ReserveSnapshot）只恢复仍持久化的节点，离线节点的地址自然回收。
 func NewHubServer(rt *MeshRouteTable, auth *Authenticator, logger *slog.Logger, maxConns ...int) *HubServer {
 	if logger == nil {
 		logger = slog.Default()
@@ -455,11 +486,32 @@ func NewHubServer(rt *MeshRouteTable, auth *Authenticator, logger *slog.Logger, 
 	if auth == nil {
 		auth = NewAuthenticator(nil)
 	}
-	s := &HubServer{rt: rt, auth: auth, logger: logger}
+	s := &HubServer{rt: rt, auth: auth, logger: logger, allocator: NewHubAllocator(DefaultHubAllocatorSubnet())}
+	s.rt.SetVIPRelease(func(mesh string, id NodeID) {
+		if s.allocator != nil {
+			s.allocator.Release(mesh, string(id))
+		}
+	})
 	if len(maxConns) > 0 && maxConns[0] > 0 {
 		s.maxConns = make(chan struct{}, maxConns[0])
 	}
 	return s
+}
+
+// DefaultHubAllocatorSubnet 返回默认虚拟子网前缀（DefaultVirtualSubnet 的解析结果）。
+func DefaultHubAllocatorSubnet() netip.Prefix {
+	return netip.MustParsePrefix(DefaultVirtualSubnet)
+}
+
+// SetAllocator 替换虚拟 IP 分配器（装配期调用，用配置的 hub.virtual_subnet 构建）。
+// nil 清除（恢复不分配虚拟 IP）。与 SetDHT 一致，须在服务器开始处理连接前调用。
+func (s *HubServer) SetAllocator(a Allocator) {
+	s.allocator = a
+}
+
+// Allocator 返回当前虚拟 IP 分配器（供装配期灌回快照重建分配表；nil 表示未启用）。
+func (s *HubServer) Allocator() Allocator {
+	return s.allocator
 }
 
 // TryHandleConn 非阻塞获取一个连接名额；成功时启动 goroutine 调用 HandleConn 处理连接，
@@ -605,7 +657,9 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 
 	// 回发注册 ACK：让客户端尽早感知注册成功（而非等到建流失败才发现）。
 	// 鉴权失败路径在 mux 创建前 return，不经过这里。
-	ack := buildRegisterAck(info.Secret)
+	// 节点声明 virtual-ip 能力时 REG_OK 携带本节点虚拟 IP（防 Discover=false 的
+	// relay 出口节点 / mesh node 静默失效，无需依赖 discovery 环拉 /api/hub/nodes）。
+	ack := buildRegisterAck(info.Secret, info.VirtualIP, hasCapability(reg.Capabilities, CapabilityVirtualIP))
 	if ackErr := conn.Send(ctx, ack); ackErr != nil {
 		s.logger.Warn("回发注册 ACK 失败", "node", reg.NodeID, "error", ackErr)
 		return ackErr
