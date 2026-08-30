@@ -164,6 +164,58 @@ func Dial(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler
 	return &Result{Conn: conn, Kind: KindRelay}, nil
 }
 
+// OpenUDPMux 经 mesh 到出口节点建立 UDP 端口映射（sclient udp map）：建立 webrtc
+// mux 连接，开一条控制流写 [4B len][{"udp": remote}] 帧（出口 relay 据此把该 mux
+// 作为 UDP 数据报通道），返回 mux + 控制流（供 SendDatagram / SetDatagramHandler）。
+//
+// 仅支持 webrtc 直连（hub 信令 / mDNS 直连信令）；hub 中继回落暂不支持 UDP。
+// signaler 由调用方建立（AutoRegister 的 HubSignaler 或 DialDirectSignaler）。
+func OpenUDPMux(ctx context.Context, signaler webrtc.Signaler, targetNode, udpAddr string) (*mux.Mux, mux.Stream, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	probeCtx, probeCancel := context.WithTimeout(ctx, WebRTCProbeTimeout)
+	conn, err := webrtc.DialWithSignalerCtx(probeCtx, targetNode, signaler)
+	probeCancel()
+	if err != nil {
+		return nil, nil, err
+	}
+	m := mux.New(webrtc.ConnAsXfer(conn), mux.RoleDialer)
+	stream, err := m.Open(ctx)
+	if err != nil {
+		_ = m.Close()
+		return nil, nil, fmt.Errorf("打开 UDP 控制流失败: %w", err)
+	}
+	// 控制帧写入受 ctx 约束（对端停读时 stream.Write 可能阻塞，Ctrl+C 需能打断）。
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- WriteUDPControl(stream, udpAddr) }()
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			_ = m.Close()
+			return nil, nil, fmt.Errorf("写 UDP 映射帧失败: %w", err)
+		}
+	case <-ctx.Done():
+		_ = m.Close()
+		return nil, nil, ctx.Err()
+	}
+	return m, stream, nil
+}
+
+// WriteUDPControl 写 [4B len][{"udp": addr}] 控制帧（指示出口把该 mux 作为 UDP 通道）。
+func WriteUDPControl(w io.Writer, udpAddr string) error {
+	head, err := json.Marshal(hub.UDPRequest{UDP: udpAddr})
+	if err != nil {
+		return err
+	}
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(head)))
+	if err := iostream.WriteFull(w, lenBuf); err != nil {
+		return err
+	}
+	return iostream.WriteFull(w, head)
+}
+
 // DialDirect 经给定信令器直连目标（mDNS 无 hub 场景）：无 hub 中继回落，仅走
 // webrtc 打洞直连。signaler 为直连信令器（DialDirectSignaler 的返回，已连到对端
 // 广播的信令端点）或任何实现 webrtc.Signaler 的通道；target 由 mDNS 服务解析获得。

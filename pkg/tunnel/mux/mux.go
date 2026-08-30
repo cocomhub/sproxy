@@ -41,6 +41,7 @@ const errFmtMuxClosed = "mux: %w"
 var (
 	ErrStreamRejected = errors.New("mux: stream rejected")
 	ErrMaxStreams     = errors.New("mux: max streams reached")
+	ErrMuxClosed      = errors.New("mux: closed")
 )
 
 // Role 标识 Mux 的角色。
@@ -116,6 +117,11 @@ type Mux struct {
 	acceptCh chan Stream
 	writeCh  chan writeMsg
 	done     chan struct{}
+
+	// datagramHandler 处理 UDP 数据报帧（FrameDatagram）。readLoop 读、relay
+	// SetDatagramHandler 写（运行期异步设置），用 RWMutex 保护（勿在热路径持有写锁）。
+	datagramMu      sync.RWMutex
+	datagramHandler DatagramHandler
 
 	activeStreams atomic.Int32
 	maxStreams    int32

@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -77,7 +78,7 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 		if err != nil {
 			return err
 		}
-		go func(s mux.Stream) {
+		go func(s mux.Stream, m *mux.Mux) {
 			// 每流 goroutine 处理不可信输入，panic 会击穿到整个进程（叶子被
 			// 恶意对端 DoS 的路径）——兜底 recover 防止进程崩溃。
 			defer func() {
@@ -103,7 +104,17 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				return
 			}
 
-			// 先按 dial 帧解析
+			// 先按 UDP 映射帧解析（首帧 {"udp": addr} → 该 mux 作为 UDP 数据报通道）。
+			var ur hub.UDPRequest
+			if err := json.Unmarshal(meta, &ur); err == nil && ur.UDP != "" {
+				if !dialAllow {
+					logger.Warn("收到 UDP 映射帧但未开启 --dial-allow", "addr", ur.UDP)
+					return
+				}
+				handleUDPMap(ctx, m, s, ur.UDP, dialPolicy, logger)
+				return
+			}
+			// 再按 dial 帧解析
 			var d hub.DialRequest
 			if err := json.Unmarshal(meta, &d); err == nil && d.Dial != "" {
 				if !dialAllow {
@@ -156,8 +167,100 @@ func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, ht
 				return
 			}
 			serveHTTP(ctx, s, localAddr, req, httpClient, logger)
-		}(stream)
+		}(stream, m)
 	}
+}
+
+// handleUDPMap 处理 UDP 端口映射流（首帧 {"udp": addr}）：把该 mux 作为 UDP 数据报
+// 通道（FrameDatagram）。收到数据报 → 转发到目标 UDP 地址（net.DialUDP 连接 socket）；
+// 目标 UDP 响应 → SendDatagram 回传（flowID 0，单端口映射）。控制流关闭/mux 关闭时
+// 停止（对端 sclient udp map 退出）。
+//
+// 安全边界：目标地址由对端指定（sclient udp map --remote），叶子作为 UDP 出口——
+// 与 TCP dial 帧同属"出口模式"，由 mesh node 的 --dial-allow 语义约束；udp map 目标
+// 地址应经调用方校验（sclient udp map 本地侧默认仅允许 --remote 指定地址）。
+func handleUDPMap(ctx context.Context, m *mux.Mux, control mux.Stream, udpAddr string, dialPolicy func(string) (string, bool), logger *slog.Logger) {
+	// 与 TCP dial 帧一致：目标须通过拨号策略（DialAllowed/NewServiceDialPolicy），
+	// 防 --dial-allow 节点被任意 mesh 对端当任意内网 UDP 转发代理（SSRF）。
+	// 策略返回实际应拨地址（主机名解析为 IP，防 DNS rebinding TOCTOU）。
+	resolved, ok := dialPolicy(udpAddr)
+	if !ok {
+		logger.Warn("UDP 映射地址未通过拨号策略", "addr", udpAddr)
+		return
+	}
+	dialAddr := resolved
+	if dialAddr == "" {
+		dialAddr = udpAddr
+	}
+	raddr, err := net.ResolveUDPAddr("udp", dialAddr)
+	if err != nil {
+		logger.Warn("UDP 映射目标地址非法", "addr", udpAddr, "error", err)
+		return
+	}
+	conn, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		logger.Warn("UDP 映射连接失败", "addr", udpAddr, "error", err)
+		return
+	}
+	logger.Info("UDP 端口映射就绪", "target", udpAddr, "local", conn.LocalAddr().String())
+
+	// 单 UDP 协程串行处理转发与响应（避免 handler/读/关闭并发访问 conn 的竞态）：
+	// 读用短 deadline 周期性让出给待发数据（否则阻塞在 conn.Read 无法消费 sendCh）。
+	// 数据报经非阻塞通道投递，通道满则丢弃（UDP 语义，背压自然丢包）。
+	// stop 关闭（控制流 EOF/对端退出）→ 协程退出，防优雅关闭后 goroutine/FD 泄漏。
+	sendCh := make(chan []byte, 64)
+	stop := make(chan struct{})
+	udpDone := make(chan struct{})
+	go func() {
+		defer close(udpDone)
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, mux.MaxDatagramPayload)
+		for {
+			select {
+			case <-stop:
+				return
+			case data := <-sendCh:
+				if _, werr := conn.Write(data); werr != nil {
+					// 超限/瞬时写失败：丢弃该数据报并继续（防恶意超长数据报终止映射；
+					// conn 真正关闭时读路径也会失败退出）。
+					logger.Debug("UDP 转发失败（丢弃该数据报）", "error", werr)
+				}
+				continue // 优先排空待发数据
+			default:
+			}
+			// 非阻塞读响应：50ms deadline 让出给 sendCh/stop（本地 UDP 转发延迟可忽略）。
+			_ = conn.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			n, rerr := conn.Read(buf)
+			if rerr != nil {
+				var ne *net.OpError
+				if errors.As(rerr, &ne) && ne.Timeout() {
+					continue // 无响应，回 select 检查待发/stop
+				}
+				return
+			}
+			if serr := m.SendDatagram(0, buf[:n]); serr != nil {
+				return
+			}
+		}
+	}()
+
+	m.SetDatagramHandler(func(flowID uint32, data []byte) {
+		select {
+		case sendCh <- data:
+		default:
+		}
+	})
+	defer func() { m.SetDatagramHandler(nil) }()
+
+	// 控制流读到 EOF（对端 sclient udp map 退出）→ 停止转发。
+	var one [1]byte
+	_, _ = control.Read(one[:])
+	_ = ctx
+	// 先清 handler（不再投递 sendCh）→ 通知 UDP 协程停止 → 有界回收（≤50ms read deadline）。
+	m.SetDatagramHandler(nil)
+	close(stop)
+	<-udpDone
+	_ = control.Close()
 }
 
 // serveHTTP 处理隧道 HTTP 中继流（metadata 已解析）。

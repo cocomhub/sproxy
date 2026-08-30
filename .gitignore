@@ -20,7 +20,7 @@ cover
 .trae/
 *.out.txt
 coverage.tmp
-data*
+data/
 cov2.html
 coverage.html
 sproxy.yaml
