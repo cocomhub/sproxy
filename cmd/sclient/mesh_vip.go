@@ -44,7 +44,9 @@ func meshVIPDial(vipTable *mesh.VipTable, subnet netip.Prefix, base meshDialFunc
 		}
 		nodeID, ok := vipTable.NodeByAddr(vip)
 		if !ok {
-			return nil, fmt.Errorf("虚拟 IP %s 未在 mesh 节点列表中找到对应节点（请确认目标节点已在线且 hub 已分配虚拟 IP）", vip)
+			// R-5：目标节点重连/hub 重启后虚拟 IP 可能变化，静态 target 会持续解析失败；
+			// 明确提示重试（重启 mesh connect 重新拉取节点列表）。
+			return nil, fmt.Errorf("虚拟 IP %s 未在 mesh 节点列表中找到对应节点（请确认目标节点已在线且 hub 已分配虚拟 IP；若目标节点刚重连导致虚拟 IP 变化，请重试本命令）", vip)
 		}
 		t2 := *target
 		t2.Node = nodeID

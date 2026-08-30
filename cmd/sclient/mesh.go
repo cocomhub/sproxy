@@ -127,18 +127,18 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			// 非虚拟子网目标回落服务名解析（既有路径）。
 			// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（自定义 hub.virtual_subnet
 			// 时须与本 hub 配置一致，否则 VIP 寻址 fail-closed 拒绝，C 审查 Important）。
-			vipSubnet, perr := netip.ParsePrefix(virtualSubnet)
-			if perr != nil || !vipSubnet.Addr().Is4() {
-				return fmt.Errorf("--virtual-subnet %q 非法（应为 IPv4 CIDR）", virtualSubnet)
-			}
-			vipSubnet = vipSubnet.Masked()
+			// R-2：仅在虚拟 IP 寻址路径校验合法性——服务名寻址不因误传非法
+			// --virtual-subnet 被拦。
+			vipSubnet, vipPerr := netip.ParsePrefix(virtualSubnet)
+			vipValid := vipPerr == nil && vipSubnet.Addr().Is4()
 			var vipTable *mesh.VipTable
 			var target *client.MeshService
 			var refresher *client.MeshTargetRefresher
 			isVIP := false
 			if host, _, hErr := net.SplitHostPort(service); hErr == nil {
-				if vip, ok := mesh.ParseVirtualAddr(host); ok && mesh.IsVirtualAddr(vip, vipSubnet) {
+				if vip, ok := mesh.ParseVirtualAddr(host); ok && vipValid && mesh.IsVirtualAddr(vip, vipSubnet) {
 					isVIP = true
+					vipSubnet = vipSubnet.Masked()
 					nodes, lErr := svc.ListHubNodes(cmd.Context())
 					if lErr != nil {
 						return fmt.Errorf("拉取 hub 节点列表解析虚拟 IP 失败: %w", lErr)
@@ -159,7 +159,8 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 					}
 					targetNode, ok := vipTable.NodeByAddr(vip)
 					if !ok {
-						return fmt.Errorf("虚拟 IP %s 未在 mesh 节点列表中找到对应节点（请确认目标节点已在线且 hub 已分配虚拟 IP）", vip)
+						// R-5：目标节点重连/hub 重启后虚拟 IP 可能变化，提示重试。
+						return fmt.Errorf("虚拟 IP %s 未在 mesh 节点列表中找到对应节点（请确认目标节点已在线且 hub 已分配虚拟 IP；若目标节点刚重连导致虚拟 IP 变化，请重试本命令）", vip)
 					}
 					target = &client.MeshService{Node: targetNode, Addr: service}
 					// 固定目标 refresher：vip → node 映射已由 vipTable 解析，无需服务名刷新。

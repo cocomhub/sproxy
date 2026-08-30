@@ -182,7 +182,11 @@ func TestHubAllocator_ReserveRejectsReservedOffsets(t *testing.T) {
 	if err := a.Reserve("m", "a", netip.MustParseAddr("100.64.0.1")); err == nil {
 		t.Fatal("网关地址（偏移 1）不应可保留")
 	}
-	// 正常地址（偏移 ≥2）仍可保留。
+	// R-1：广播地址（偏移 ≥ maxHost，/10 的 100.127.255.255）不应可保留。
+	if err := a.Reserve("m", "a", netip.MustParseAddr("100.127.255.255")); err == nil {
+		t.Fatal("广播地址（偏移 ≥ maxHost）不应可保留")
+	}
+	// 正常地址（偏移 ≥2 且 < maxHost）仍可保留。
 	if err := a.Reserve("m", "a", netip.MustParseAddr("100.64.0.2")); err != nil {
 		t.Fatalf("正常地址应可保留: %v", err)
 	}

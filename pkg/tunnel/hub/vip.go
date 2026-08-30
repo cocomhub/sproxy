@@ -130,6 +130,12 @@ func (a *hubAllocator) addrAt(i uint64) netip.Addr {
 
 // Release 释放 (mesh, nodeID) 的虚拟 IP，回收复用。next 游标不回退（避免地址抖动），
 // 释放的地址经 nextFreeLocked 回扫复用。
+//
+// 回收时机（R-3）：HubServer 仅在本节点**显式移除**（管理端踢出 MeshRouteTable.Remove）
+// 时调用 Release；连接断开（RemoveIfOwned）不释放——虚拟 IP 与 node-id 在进程生命
+// 周期内稳定绑定（重连复用，消除重复分配竞态）。地址随重启自然回收：快照重建只
+// 恢复仍持久化的节点（RestoreFromSnapshot），离线/踢出节点的地址被释放。默认 /10
+// 宿主量大不敏感；自定义小子网时注意离线节点地址在运行期暂不回收。
 func (a *hubAllocator) Release(mesh, nodeID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -152,10 +158,11 @@ func (a *hubAllocator) reserveLocked(mesh, nodeID string, vip netip.Addr) error 
 	if !vip.IsValid() || !vip.Is4() || !a.subnet.Contains(vip) {
 		return fmt.Errorf("虚拟 IP %s 不在子网 %s 内", vip, a.subnet)
 	}
-	if off := a.ipv4Offset(vip); off < 2 {
-		// S-1：网络地址（偏移 0）与网关（偏移 1）不可被节点保留——hub 分配从不
-		// 产出这些地址，快照重建入口 fail-closed，防损坏/伪造持久化文件破坏不变量。
-		return fmt.Errorf("虚拟 IP %s 是保留地址（偏移 %d < 2），不可分配给节点", vip, off)
+	if off := a.ipv4Offset(vip); off < 2 || off >= a.maxHost {
+		// 网络地址（偏移 0）、网关（偏移 1）与广播地址（偏移 ≥ maxHost）不可被节点
+		// 保留——hub 分配从不产出这些地址，快照重建入口 fail-closed，防损坏/伪造
+		// 持久化文件破坏不变量（R-1 对称补广播地址边界）。
+		return fmt.Errorf("虚拟 IP %s 是保留地址（偏移 %d 越界），不可分配给节点", vip, off)
 	}
 	key := allocKey(mesh, nodeID)
 	if old, ok := a.assigned[key]; ok && old != vip {

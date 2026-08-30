@@ -272,7 +272,9 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			// + 虚拟 IP NAT（selfVIP 初始无效；经 hub 信令注册后由 REG_OK 下发再更新）。
 			// 无任何配置时 opts 为空 → Serve 回落默认 DialAllowed（仅公网），向后兼容。
 			// DialResultFrames 保持 false（webrtc 直连数据流约束，见 relay/leaf.go 注释）。
-			serveOpts := buildP2PServeOpts(services, dialAllowCIDRs, netip.Addr{}, ios)
+			// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
+			vipSubnet := parseVIPSubnetFlag(cmd, ios)
+			serveOpts := buildP2PServeOpts(services, dialAllowCIDRs, netip.Addr{}, vipSubnet, ios)
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；否则经 hub 信令桥
 			var sig webrtc.Signaler
@@ -309,7 +311,7 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				defer func() { _ = reg.Closer() }()
 				sig = reg.Signaler
 				// 虚拟 IP NAT：selfVIP 由 REG_OK 下发（稳定常驻注册），更新出口拨号策略。
-				serveOpts = buildP2PServeOpts(services, dialAllowCIDRs, reg.VirtualIP, ios)
+				serveOpts = buildP2PServeOpts(services, dialAllowCIDRs, reg.VirtualIP, vipSubnet, ios)
 			}
 
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
@@ -354,7 +356,7 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 						_ = reg.Closer()
 						reg, sig = reg2, reg2.Signaler
 						// selfVIP 随重注册可能轮换，同步更新出口拨号策略。
-						serveOpts = buildP2PServeOpts(services, dialAllowCIDRs, reg.VirtualIP, ios)
+						serveOpts = buildP2PServeOpts(services, dialAllowCIDRs, reg.VirtualIP, vipSubnet, ios)
 					} else {
 						ios.WriteErrLine("p2p 重注册失败: %v", rerr2)
 					}
@@ -401,6 +403,7 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 		"出口拨号白名单：宣告的服务地址（格式 name:addr，可重复；仅取 addr 精确放行，不注册到 hub）")
 	cmd.Flags().StringArray("dial-allow-cidr", nil,
 		"出口拨号白名单网段（如 192.168.0.0/16；配合放行内网服务，默认仅公网）")
+	cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
 	f.add(cmd)
 	return cmd
 }
@@ -413,7 +416,7 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 //
 // 注意：--service 仅作拨号白名单，不宣告到 hub（p2p listen 不注册节点），
 // 语义与 relay start 的注册宣告解耦（I45 子决策）。
-func buildP2PServeOpts(services, dialAllowCIDRs []string, selfVIP netip.Addr, ios cli.IOStreams) []relay.ServeOptions {
+func buildP2PServeOpts(services, dialAllowCIDRs []string, selfVIP netip.Addr, vipSubnet netip.Prefix, ios cli.IOStreams) []relay.ServeOptions {
 	var serviceAddrs []string
 	for _, svc := range services {
 		_, addr, ok := strings.Cut(svc, ":")
@@ -430,10 +433,20 @@ func buildP2PServeOpts(services, dialAllowCIDRs []string, selfVIP netip.Addr, io
 	if len(serviceAddrs) == 0 && len(dialAllowCIDRs) == 0 && !selfVIP.IsValid() {
 		return nil
 	}
-	vipSubnet := netip.MustParsePrefix(hub.DefaultVirtualSubnet)
 	return []relay.ServeOptions{
-		{DialPolicy: relay.NewVirtualIPDialPolicy(vipSubnet, selfVIP, nil, dialAllowCIDRs, serviceAddrs)},
+		{DialPolicy: relay.NewVirtualIPDialPolicy(vipSubnet.Masked(), selfVIP, nil, dialAllowCIDRs, serviceAddrs)},
 	}
+}
+
+// parseVIPSubnetFlag 解析 --virtual-subnet（非法/非 IPv4 回落默认 CGNAT 并告警）。
+func parseVIPSubnetFlag(cmd *cobra.Command, ios cli.IOStreams) netip.Prefix {
+	s, _ := cmd.Flags().GetString("virtual-subnet")
+	p, err := netip.ParsePrefix(s)
+	if err != nil || !p.Addr().Is4() {
+		ios.WriteErrLine("--virtual-subnet %q 非法，使用默认子网 %s", s, hub.DefaultVirtualSubnet)
+		return netip.MustParsePrefix(hub.DefaultVirtualSubnet)
+	}
+	return p.Masked()
 }
 
 // p2pForward 在已建立的 p2p mux 上做本地端口转发。

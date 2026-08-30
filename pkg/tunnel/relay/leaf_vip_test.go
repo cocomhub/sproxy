@@ -146,3 +146,34 @@ func TestNewVirtualIPDialPolicy_HostnameNotRewritten(t *testing.T) {
 		t.Fatalf("主机名目标不应因 selfVIP 白名单被改写, got %q", got)
 	}
 }
+
+// TestNewVirtualIPDialPolicy_RemoteServicePortNotWhitelisted（S-2 安全闭环）校验
+// 远程 LAN 宣告（--service db:192.168.1.10:5432）的端口**不**进入虚拟 IP 白名单——
+// 否则 mesh connect <selfVIP>:5432 会改写拨到本机 127.0.0.1:5432 意外暴露本机同
+// 端口未宣告服务。需要开放时用显式 --vip-allow-port。
+func TestNewVirtualIPDialPolicy_RemoteServicePortNotWhitelisted(t *testing.T) {
+	subnet := netip.MustParsePrefix("100.64.0.0/10")
+	selfVIP := netip.MustParseAddr("100.64.0.5")
+	policy := NewVirtualIPDialPolicy(subnet, selfVIP, nil, nil, []string{"db:192.168.1.10:5432"})
+	if got, ok := policy("100.64.0.5:5432"); ok {
+		t.Fatalf("远程 LAN 宣告端口不应进入虚拟 IP 白名单, got %q", got)
+	}
+	// 显式 allowPorts 仍可开放（运维自主决定）。
+	policy2 := NewVirtualIPDialPolicy(subnet, selfVIP, []int{5432}, nil, []string{"db:192.168.1.10:5432"})
+	if _, ok := policy2("100.64.0.5:5432"); !ok {
+		t.Fatal("显式 --vip-allow-port 应开放端口（远程宣告场景运维显式授权）")
+	}
+}
+
+// TestNewVirtualIPDialPolicy_LocalhostServicePortWhitelisted 校验 loopback/localhost
+// 宣告的端口自动进入白名单（本机服务，S-2 例外保留）。
+func TestNewVirtualIPDialPolicy_LocalhostServicePortWhitelisted(t *testing.T) {
+	subnet := netip.MustParsePrefix("100.64.0.0/10")
+	selfVIP := netip.MustParseAddr("100.64.0.5")
+	for _, svc := range []string{"127.0.0.1:22", "localhost:22"} {
+		policy := NewVirtualIPDialPolicy(subnet, selfVIP, nil, nil, []string{svc})
+		if _, ok := policy("100.64.0.5:22"); !ok {
+			t.Fatalf("loopback/localhost 宣告 %q 的端口应进入白名单", svc)
+		}
+	}
+}

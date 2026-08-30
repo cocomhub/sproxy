@@ -22,11 +22,11 @@ import (
 //     !=selfVIP → 拒绝（虚拟 IP 属于其他节点，防 SSRF/地址劫持）；
 //  3. 虚拟子网外回落 NewDialPolicy(allowCIDRs) 的既有公网 + CIDR 白名单逻辑。
 //
-// 端口白名单 = 显式 allowPorts（--vip-allow-port）∪ serviceAddrs 各条目端口
-// （--service 宣告端口自动开放）。**语义：宣告端口即开放本机同端口**——若宣告的是
-// LAN 服务地址（192.168.x.y:8080），其端口 8080 仍进入白名单，对自身 VIP:8080 的
-// 拨号改写为 127.0.0.1:8080（本机同端口）。这是 handoff 文档确认的宽松语义，与
-// spec AD-3 的"仅 loopback 宣告"措辞有偏差，风险低（运维通常本机端口=宣告服务）。
+// 端口白名单 = 显式 allowPorts（--vip-allow-port）∪ serviceAddrs 中**本机/loopback
+// 宣告**条目的端口（S-2 收紧：--service 端口仅当 host 为 loopback/本机 IP 时才是
+// 本机开放端口）。远程 LAN 宣告（--service db:192.168.1.10:5432）的端口**不**自动
+// 进入白名单——避免 mesh connect <selfVIP>:5432 意外暴露本机同端口未宣告服务；
+// 需开放远程宣告端口时用 --vip-allow-port 显式加入。
 //
 // 注意：
 //   - 在**自身虚拟 IP 上**宣告服务（--service x:100.64.0.5:8080）会精确匹配优先
@@ -61,12 +61,21 @@ func NewVirtualIPDialPolicy(subnet netip.Prefix, selfVIP netip.Addr, allowPorts 
 			allowSet[p] = struct{}{}
 		}
 	}
-	// 宣告端口自动加入白名单（--service 端口即出口本机开放端口）。
+	// 宣告端口自动加入白名单（S-2 收紧：**仅当服务 host 为 loopback/本机 IP** 时，
+	// 其端口才是"本机开放端口"。远程 LAN 宣告（如 --service db:192.168.1.10:5432）
+	// 的端口**不**进入白名单——否则 mesh connect <selfVIP>:5432 会改写拨到本机
+	// 127.0.0.1:5432，意外暴露本机同端口未宣告服务。需要开放远程宣告端口时用
+	// --vip-allow-port 显式加入）。
 	for _, a := range serviceAddrs {
-		if _, port, err := net.SplitHostPort(a); err == nil {
-			if p, perr := strconv.Atoi(port); perr == nil && p > 0 && p <= 65535 {
-				allowSet[p] = struct{}{}
-			}
+		host, port, err := net.SplitHostPort(a)
+		if err != nil {
+			continue
+		}
+		if !isLocalHost(host) {
+			continue
+		}
+		if p, perr := strconv.Atoi(port); perr == nil && p > 0 && p <= 65535 {
+			allowSet[p] = struct{}{}
 		}
 	}
 	return func(addr string) (string, bool) {
@@ -107,4 +116,34 @@ func NewVirtualIPDialPolicy(subnet netip.Prefix, selfVIP netip.Addr, allowPorts 
 		// 3. 虚拟子网外回落既有公网 + CIDR 白名单逻辑。
 		return base(addr)
 	}
+}
+
+// isLocalHost 判断 host 是否为 loopback 或本机网卡 IP（S-2：仅本机服务的端口进入
+// 虚拟 IP 白名单）。主机名仅认 "localhost"（解析为本机 loopback）；其他主机名（含
+// 本机主机名、远程 host 名）保守判为远程（不自动开放端口，可 --vip-allow-port 显式
+// 加入）——避免依赖 DNS 解析导致误判。
+func isLocalHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }

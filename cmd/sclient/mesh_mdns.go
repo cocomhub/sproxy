@@ -118,15 +118,29 @@ func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret, vir
 // 虚拟 IP → node-id，建立直连信令拨号到对端（Addr 保持 <vip>:<port>，出口策略
 // 改写本机端口）。
 func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Addr, service string, subnet netip.Prefix, alloc hub.Allocator, nodeID, secret string) (net.Conn, error) {
-	vt := mesh.NewVipTable(subnet)
-	for _, p := range mdns.Peers() {
-		if p.VirtualIP.IsValid() && p.SignalAddr != "" {
-			vt.AddVerified(p.VirtualIP, p.NodeID, "", alloc)
+	// S-2：mDNS 组播宣告是周期性的，单次 connect 可能在对端首个含 vip= 的 TXT
+	// 到达前发起——有界等待 peers 表填充（复用服务名路径的 mdnsLookupTimeout），
+	// 超时才报错；否则单次 stdio 模式在对端刚启动时必然失败。
+	deadline := time.Now().Add(mdnsLookupTimeout)
+	var node string
+	for {
+		vt := mesh.NewVipTable(subnet)
+		for _, p := range mdns.Peers() {
+			if p.VirtualIP.IsValid() && p.SignalAddr != "" {
+				vt.AddVerified(p.VirtualIP, p.NodeID, "", alloc)
+			}
 		}
-	}
-	node, ok := vt.NodeByAddr(vip)
-	if !ok {
-		return nil, fmt.Errorf("虚拟 IP %s 未在 mDNS 节点列表中找到对应节点（请确认目标 mesh node --mdns 已运行且已广播虚拟 IP）", vip)
+		if n, ok := vt.NodeByAddr(vip); ok {
+			node = n
+			break
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("虚拟 IP %s 未在 mDNS 节点列表中找到（等待 %v 超时；请确认目标 mesh node --mdns 已运行并广播虚拟 IP）", vip, mdnsLookupTimeout)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 	// 找对端信令端点并校验（防 SSRF，同服务名分支）。
 	var peerSignal string

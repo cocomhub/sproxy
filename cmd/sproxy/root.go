@@ -170,9 +170,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 		// 重启快照重建分配表：把已持久化的 (mesh,nodeID)→VIP 灌回分配器，
 		// 避免把已持久化的 VIP 再分给新节点（DoD 1）。
+		// R-5：快照内虚拟 IP 冲突/越界（损坏或伪造持久化文件）时显式记录 Error——
+		// 被拒条目不保留，可能使已持久化节点重启后拿新 VIP；清晰告警供运维定位，
+		// 不再静默以空表启动掩盖问题。
 		if restoredSnap != nil {
 			if perr := hub.PreloadAllocator(hubSrv.Allocator(), restoredSnap); perr != nil {
-				logger.Warn("虚拟 IP 分配表快照重建冲突（忽略，继续以空分配表启动）", "error", perr)
+				logger.Error("虚拟 IP 分配表快照重建冲突（冲突条目不保留；对应节点重启后可能拿到新虚拟 IP）", "error", perr)
 			}
 		}
 		// DHT 节点发现表（hub.dht: kad）：装配 Kademlia，注册进 DHTRegistry，

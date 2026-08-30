@@ -155,7 +155,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 	cmd.Flags().String("mdns-secret", "", "mDNS 模式共享密钥（直连信令 offer 与 mDNS TXT 均 HMAC 签名校验，防未授权 peer 借本节点作中继/出口、防广告伪造；同 mesh 所有节点须一致；为空 = 无认证 LAN 信任，出口由 dial-allow 策略约束）")
 	cmd.Flags().String("socks", "", "本地 SOCKS5 出口监听地址（本节点为出口，CONNECT 目标本机拨号；裸 :port 归一 127.0.0.1:port，loopback 安全默认；远程 peer 可 mesh connect socks -l :port 隧道到它。注意：不配 --socks-user/--socks-pass 时，对可触及者即开放本机内网出口，请显式开启认证或保持 loopback）")
 	cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；默认 CGNAT 100.64.0.0/10；mDNS 无 hub 模式本地确定性分配用，有 hub 时以 hub 分配为准）")
-	cmd.Flags().IntSlice("vip-allow-port", nil, "虚拟 IP 开放的额外端口白名单（可重复；缺省 = --service 宣告端口自动开放，此处额外开放未宣告的本机端口）")
+	cmd.Flags().IntSlice("vip-allow-port", nil, "虚拟 IP 开放的额外端口白名单（可重复；缺省 = --service 宣告端口自动开放，此处额外开放未宣告的本机端口）。注意：宣告 LAN 地址服务（如 --service web:192.168.x.y:8080）时，其端口 8080 会进入白名单——若本机 loopback 同端口 8080 有未宣告服务，mesh connect <vip>:8080 会改写拨到本机 127.0.0.1:8080（S-3 宽松语义，风险低）")
 	cmd.Flags().String("socks-user", "", "SOCKS5 RFC 1929 认证用户名（配 --socks 使用；配置后要求认证，防未授权使用本节点作代理）")
 	cmd.Flags().String("socks-pass", "", "SOCKS5 RFC 1929 认证密码（配 --socks/--socks-user 使用）")
 	cmd.Flags().StringSlice("stun", nil,

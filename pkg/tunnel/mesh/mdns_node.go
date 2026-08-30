@@ -76,6 +76,14 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	}
 	vipTable := NewVipTable(subnet)
 	vipTable.Add(selfVIP, nodeID)
+	// R-1：确定性分配无全局唯一性保证（无 hub 冲突检测在本地表层面），启动显式
+	// 说明碰撞风险与排查路径，避免"对端 VIP 拨号被拒"时困惑。
+	logger.Info("mDNS 虚拟 IP 确定性分配（无 hub）：碰撞概率低（子网宿主量大）；若对端虚拟 IP 冲突被拒请核对 --virtual-subnet 一致性", "self_vip", selfVIP, "subnet", subnet)
+	// R-2：无密钥模式（LAN 信任模型）下攻击者可伪造广播/抢占确定性 VIP，启动打印
+	// 安全提示（与 mdns.go 安全边界文档一致）。
+	if mdnsKey == "" {
+		logger.Warn("mDNS 无共享密钥（LAN 信任模型）：同网段攻击者可伪造广播/抢占确定性虚拟 IP；生产建议配置 --mdns-secret 或 --access-key-secret")
+	}
 	lanIPs := lanIPv4Addrs()
 
 	mdns, err := NewMDNS(MDNSConfig{
