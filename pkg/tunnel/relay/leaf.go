@@ -280,7 +280,9 @@ func handleUDPMap(ctx context.Context, m *mux.Mux, control mux.Stream, udpAddr s
 	m.SetDatagramHandler(nil)
 	close(stop)
 	<-udpDone
-	_ = control.Close()
+	// 用 Abort（非阻塞）放弃控制流，与 H1 对称：Close 经 writeCh 发 FrameClose，极端
+	// 场景（writeCh 满且 s.done 未关）会永久阻塞该 Serve goroutine。
+	_ = control.Abort()
 }
 
 // isUDPMomentaryErr 判断 UDP 读错误是否为瞬时（目标 ICMP 拒绝/重置、超长、路由不可达）

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -219,8 +220,9 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 					clientAddr = addr
 					mu.Unlock()
 					if serr := m.SendDatagram(0, buf[:n]); serr != nil {
-						logger.Warn("UDP 发送经 mesh 失败", "error", serr)
-						if serr == mux.ErrMuxClosed {
+						// 拥塞丢弃（ErrDatagramDrop）属 UDP 语义，Debug 级避免刷屏。
+						logger.Debug("UDP 发送经 mesh 失败（丢弃）", "error", serr)
+						if errors.Is(serr, mux.ErrMuxClosed) {
 							return
 						}
 					}
