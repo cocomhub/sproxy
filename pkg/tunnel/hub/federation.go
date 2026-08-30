@@ -68,10 +68,13 @@ type federationNodeResp struct {
 // （stale-while-error），不静默清空发现列表。
 // 每个 peer 持有独立的 http.Client（TLS InsecureSkipVerify 按 peer 隔离，不全局扩散）。
 type FederationClient struct {
-	mu       sync.RWMutex
-	peers    []FederationPeer
-	cands    map[string][]FederationNode // peer.ID → 节点列表
-	clients  map[string]*http.Client     // peer.ID → 独立 http.Client
+	mu    sync.RWMutex
+	peers []FederationPeer
+	cands map[string][]FederationNode // peer.ID → 节点列表
+	// clients（peer.ID → 独立 http.Client）在 NewFederationClient 构造后**不可变**：
+	// syncPeer/Close/Start 均只读访问，无需持锁（加锁反而与 Peers()/Close() 的
+	// 读锁风格不一致）。新增写操作前必须加锁并同步更新注释，防竞态。
+	clients  map[string]*http.Client
 	interval time.Duration
 	logger   *slog.Logger
 }
