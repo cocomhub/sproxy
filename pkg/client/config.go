@@ -14,6 +14,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,6 +34,10 @@ type Config struct {
 	HubURL string `yaml:"hub_url" mapstructure:"hub_url"`
 	// NodeID 是本节点默认 ID（mesh/p2p/relay 的信令来源与寻址目标；为空回落主机名）。
 	NodeID string `yaml:"node_id" mapstructure:"node_id"`
+	// PeerFingerprints 是对端身份指纹 pinning 列表（P1 身份 pinning）。
+	// 配置后 xfer 隧道握手时校验对端身份指纹，不匹配或对端未提供身份时 fail-closed 拒绝。
+	// 指纹格式：64 hex 或 "sha256:<64 hex>"。本端身份由 `sclient identity generate` 生成。
+	PeerFingerprints []string `yaml:"peer_fingerprints" mapstructure:"peer_fingerprints"`
 }
 
 func DefaultConfig() *Config {
@@ -162,6 +167,9 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 	if cfg.NodeID != "" {
 		fmt.Fprintf(w, "NodeID:        %s\n", cfg.NodeID)
 	}
+	if len(cfg.PeerFingerprints) > 0 {
+		fmt.Fprintf(w, "PeerFingerprints: %s\n", strings.Join(cfg.PeerFingerprints, ","))
+	}
 }
 
 // ApplyConfigSet 在内存中更新配置，不写文件。返回更新后的配置和错误。
@@ -207,6 +215,19 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			return fmt.Errorf("node_id 不能包含空白字符: %s", value)
 		}
 		cfg.NodeID = value
+	case "peer_fingerprints":
+		fps := []string{}
+		for part := range strings.SplitSeq(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if _, err := tunnel.ParseFingerprint(part); err != nil {
+				return fmt.Errorf("无效的对端指纹: %s（应为 64 hex 或 sha256:<64 hex>）", part)
+			}
+			fps = append(fps, part)
+		}
+		cfg.PeerFingerprints = fps
 	default:
 		return fmt.Errorf("未知配置键: %s", key)
 	}

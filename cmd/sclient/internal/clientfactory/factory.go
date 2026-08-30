@@ -7,12 +7,51 @@ package clientfactory
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
+
+// IdentityFileName 是身份文件默认文件名。
+const IdentityFileName = "identity.json"
+
+// DefaultIdentityPath 返回默认身份文件路径（XDG 配置目录 sproxy/identity.json）。
+// 只计算路径，不创建目录/文件（加载场景无副作用）。
+func DefaultIdentityPath() (string, error) {
+	p := filepath.Join(xdg.ConfigHome, "sproxy", IdentityFileName)
+	if p == "" {
+		home, hErr := os.UserHomeDir()
+		if hErr != nil {
+			return "", fmt.Errorf("无法确定配置目录: %w", hErr)
+		}
+		return filepath.Join(home, "."+IdentityFileName), nil
+	}
+	return p, nil
+}
+
+// LoadIdentityOptional 加载本端长时身份（P1 身份 pinning）。
+// 身份文件不存在时返回 (nil, nil)——不自动生成，未配置身份时行为与现状完全一致。
+// 身份文件存在但损坏时返回错误（fail-closed，不静默覆盖用户文件）。
+func LoadIdentityOptional() (*tunnel.Identity, error) {
+	path, err := DefaultIdentityPath()
+	if err != nil {
+		return nil, err
+	}
+	id, err := tunnel.LoadIdentity(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return id, nil
+}
 
 // Factory 抽象客户端创建，生产/测试可替换。
 type Factory interface {
@@ -108,6 +147,17 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		opts = append(opts, client.WithTransportFallback())
 	} else if cfg.AllowTransportFallback {
 		opts = append(opts, client.WithTransportFallback())
+	}
+
+	// P1 身份 pinning：加载本端长时身份（若存在）+ 配置的对端指纹。
+	// 身份文件缺失时不自动生成（未配置身份时行为与现状一致）；损坏时 fail-closed。
+	if id, err := LoadIdentityOptional(); err != nil {
+		return nil, fmt.Errorf("加载本端身份失败: %w", err)
+	} else if id != nil {
+		opts = append(opts, client.WithIdentity(id))
+	}
+	if len(cfg.PeerFingerprints) > 0 {
+		opts = append(opts, client.WithPeerFingerprints(cfg.PeerFingerprints))
 	}
 
 	fc := client.NewFileClient(serverURL, opts...)
