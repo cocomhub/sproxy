@@ -439,6 +439,42 @@ func TestRelayStreamHandler_Forward_FailoverToSecondPeer(t *testing.T) {
 	}
 }
 
+// TestRelayStreamHandler_Forward_FailoverPastLoop（Minor-1 回归）：请求经对端 X 来
+// （路径含 X），X 命中防环 508——**508 不阻断故障转移**，继续尝试上报同节点的对端 Y
+// 并成功（每个 Forward 独立防环；旧实现 break 会跳过能真实服务的 Y）。
+func TestRelayStreamHandler_Forward_FailoverPastLoop(t *testing.T) {
+	mockX := newMockFedPeer(t, `[{"id":"node-z","addr":"10.0.0.9:9000","mesh":""}]`)
+	mockY := newMockFedPeer(t, `[{"id":"node-z","addr":"10.0.0.9:9000","mesh":""}]`)
+
+	rtA := hub.NewMeshRouteTable()
+	hA, tsA := newRelayTestHub(t, rtA, nil)
+	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{
+		{ID: "hubX", URL: mockX.srv.URL},
+		{ID: "hubY", URL: mockY.srv.URL},
+	}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	t.Cleanup(fcA.Close)
+	if err := fcA.SyncAll(context.Background()); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	hA.SetFederationClient(fcA)
+
+	// 请求带 X-Relay-Path: hubX（模拟经 hubX 转发而来）→ X 防环 508，Y 应接管。
+	conn, err := relayConnectRaw(t, tsA.URL, "node-z", "1.2.3.4:80", map[string]string{
+		relayForwardPathHeader: "hubX",
+	})
+	if err != nil {
+		t.Fatalf("508 后应故障转移到 Y 成功: %v", err)
+	}
+	defer conn.Close()
+	echoRoundTrip(t, conn, "past-loop-failover-echo")
+	if mockX.relayHits.Load() != 0 {
+		t.Errorf("X 在路径中应被防环拦截（不实际拨号）, hits = %d", mockX.relayHits.Load())
+	}
+	if mockY.relayHits.Load() != 1 {
+		t.Errorf("Y 应被实际拨号一次, got %d", mockY.relayHits.Load())
+	}
+}
+
 // TestRelayStreamHandler_ForwardErrorPropagation_502：上游对端返回 502 → 客户端
 // 收到 502（错误沿转发链传播，不静默挂起）。
 func TestRelayStreamHandler_ForwardErrorPropagation_502(t *testing.T) {

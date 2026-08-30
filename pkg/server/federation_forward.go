@@ -254,6 +254,18 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("不支持的对端 URL scheme %q", scheme)}
 	}
 
+	// 请求/响应阶段重新计时：TLS 握手可能已消耗部分预算，重置为 min(ctx, now+30s)——
+	// 防慢连接下对端合法叶子拨号（≤12s）被残量 deadline 误判 502（评审 Minor-5）。
+	// http 分支刚设过 deadline，重置仅微小延长，无副作用。
+	handshakeDeadline = time.Now().Add(relayForwardHandshakeTimeout)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(handshakeDeadline) {
+		handshakeDeadline = dl
+	}
+	if derr := raw.SetDeadline(handshakeDeadline); derr != nil {
+		_ = raw.Close()
+		return nil, &forwardStatusError{http.StatusBadGateway, fmt.Sprintf("设置握手 deadline 失败: %v", derr)}
+	}
+
 	stopWatchdog := make(chan struct{})
 	watchdogDone := make(chan struct{})
 	go func() {

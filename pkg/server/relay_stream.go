@@ -342,9 +342,14 @@ func (h *RelayStreamHandler) serveForwarded(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	// 故障转移：多对端上报同一节点时按序尝试（首个宕机尝试下一个）。
-	// 防环检查在每个对端上独立执行（Forward 内部对每个 peer 校验 hop/path）。
+	// 防环检查在每个对端上独立执行（Forward 内部对每个 peer 校验 hop/path）——
+	// **508 也继续尝试剩余对端**：请求经对端 X 来（路径含 X），X 命中防环 508 不代表
+	// 其它上报同节点的对端 Y 也会回源；每个 Forward 独立防环、尝试次数 ≤ peer 数、
+	// 每次握手 30s 有界，不削弱防环。全部失败时优先回最先遇到的 508（防环语义最明确）。
+	var firstLoopFSE *forwardStatusError
 	var lastFSE *forwardStatusError
 	var lastErr error
+	var lastPeerID string
 	var upstream net.Conn
 	for _, peer := range peers {
 		conn, ferr := h.forwarder.Forward(r.Context(), peer, req.Target, req.Addr, hop, path)
@@ -353,23 +358,28 @@ func (h *RelayStreamHandler) serveForwarded(w http.ResponseWriter, r *http.Reque
 			break
 		}
 		lastErr = ferr
-		if fse, ok := ferr.(*forwardStatusError); ok {
+		lastPeerID = peer.ID
+		var fse *forwardStatusError
+		if errors.As(ferr, &fse) {
 			lastFSE = fse
-			// 防环（508）无故障转移意义——目标对端已在路径中，尝试其它对端同样回源。
-			// 404（对端无此节点）也应继续尝试其它候选；502/504 网络性失败应转移。
-			if fse.status == http.StatusLoopDetected {
-				break
+			if fse.status == http.StatusLoopDetected && firstLoopFSE == nil {
+				firstLoopFSE = fse
 			}
 		}
 		h.logger.Warn("跨 hub 中继转发候选失败，尝试下一对端", "target", req.Target, "peer", peer.ID, "error", ferr)
 	}
 	if upstream == nil {
 		if lastFSE != nil {
-			h.logger.Warn("跨 hub 中继转发失败", "target", req.Target, "peer", lastFSE.message, "status", lastFSE.status)
+			h.logger.Warn("跨 hub 中继转发失败", "target", req.Target, "peer", lastPeerID, "status", lastFSE.status, "message", lastFSE.message)
 			http.Error(w, lastFSE.message, lastFSE.status)
 			return
 		}
-		h.logger.Error("跨 hub 中继转发内部错误", "target", req.Target, "error", lastErr)
+		if firstLoopFSE != nil {
+			h.logger.Warn("跨 hub 中继转发全部回源（防环）", "target", req.Target, "status", firstLoopFSE.status, "message", firstLoopFSE.message)
+			http.Error(w, firstLoopFSE.message, firstLoopFSE.status)
+			return
+		}
+		h.logger.Error("跨 hub 中继转发内部错误", "target", req.Target, "peer", lastPeerID, "error", lastErr)
 		http.Error(w, "跨 hub 中继转发失败", http.StatusBadGateway)
 		return
 	}
