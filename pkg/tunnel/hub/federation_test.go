@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -89,17 +88,28 @@ func TestFederationClient_StaleWhileError(t *testing.T) {
 	}
 }
 
-// TestFederationClient_DefaultLoopbackURL：peer.URL 为空时回落默认 loopback 地址。
+// TestFederationClient_DefaultLoopbackURL：peer.URL 为空时归一化回落默认 loopback
+// 地址（确定性断言，不发起网络请求——避免依赖本机 18083 端口是否有服务导致的 flaky）。
 func TestFederationClient_DefaultLoopbackURL(t *testing.T) {
 	fc := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB"}}, 30*time.Second, 5*time.Second, testFedLogger())
 	t.Cleanup(fc.Close)
-	// 空 URL 应回落默认 loopback：拉取会连 127.0.0.1:18083（无服务 → 网络错误而非 URL 非法）。
-	err := fc.SyncAll(context.Background())
-	if err == nil {
-		t.Fatalf("空 URL 回落默认 loopback 拉取应失败（无服务）")
+	peers := fc.Peers()
+	if len(peers) != 1 {
+		t.Fatalf("Peers 应含 1 个对端, got %d", len(peers))
 	}
-	if !strings.Contains(err.Error(), "127.0.0.1:18083") {
-		t.Fatalf("默认 URL 应指向 127.0.0.1:18083, got err: %v", err)
+	if peers[0].URL != hub.DefaultFederationPeerURL {
+		t.Fatalf("空 URL 应回落默认 loopback %q, got %q", hub.DefaultFederationPeerURL, peers[0].URL)
+	}
+	if peers[0].ID != "peerB" {
+		t.Fatalf("显式 ID 应保持, got %q", peers[0].ID)
+	}
+
+	// 空 ID + 空 URL：两者都归一为默认 URL（去重 key 冲突检测依据）。
+	fc2 := hub.NewFederationClient([]hub.FederationPeer{{}}, 30*time.Second, 5*time.Second, testFedLogger())
+	t.Cleanup(fc2.Close)
+	p2 := fc2.Peers()
+	if len(p2) != 1 || p2[0].ID != hub.DefaultFederationPeerURL || p2[0].URL != hub.DefaultFederationPeerURL {
+		t.Fatalf("空 ID/URL 应归一为默认 URL, got %+v", p2)
 	}
 }
 

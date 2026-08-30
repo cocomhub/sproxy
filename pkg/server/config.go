@@ -404,10 +404,19 @@ func (c *Config) Validate() error {
 			if u.Scheme != "http" && u.Scheme != "https" {
 				return fmt.Errorf("hub.federation.peers[%d].url scheme %q 无效，仅允许 http/https", i, u.Scheme)
 			}
-			if p.URL != "" && !isLoopbackHost(u.Hostname()) && p.AccessKeySecret == "" {
-				// 远程 peering 必须显式配置凭据（AccessKey/Secret 对）——
-				// 未配置时无认证直连远程 hub 属暴露面，fail-closed 拒绝。
-				return fmt.Errorf("hub.federation.peers[%d].url %q 为远程地址，远程 peering 必须配置 access_key/access_key_secret", i, p.URL)
+			if p.URL != "" && !isLoopbackHost(u.Hostname()) && (p.AccessKey == "" || p.AccessKeySecret == "") {
+				// 远程 peering 必须显式成对配置凭据（AccessKey + AccessKeySecret）——
+				// 缺失任一即无有效签名，未配置时无认证直连远程 hub 属暴露面，fail-closed 拒绝。
+				return fmt.Errorf("hub.federation.peers[%d].url %q 为远程地址，远程 peering 必须同时配置 access_key 与 access_key_secret", i, p.URL)
+			}
+			if p.AccessKeySecret != "" {
+				// 与顶层 access_keys 的校验一致：SK 必须为 64 hex（32 字节 HMAC 密钥源）。
+				if len(p.AccessKeySecret) != 64 {
+					return fmt.Errorf("hub.federation.peers[%d].access_key_secret 必须为 64 个十六进制字符（32 字节），got %d 字符", i, len(p.AccessKeySecret))
+				}
+				if _, derr := hex.DecodeString(p.AccessKeySecret); derr != nil {
+					return fmt.Errorf("hub.federation.peers[%d].access_key_secret 不是合法十六进制: %v", i, derr)
+				}
 			}
 			key := p.ID
 			if key == "" {

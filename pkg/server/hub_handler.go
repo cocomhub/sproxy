@@ -126,6 +126,8 @@ func (h *Handlers) federationNodesHandler(w http.ResponseWriter, r *http.Request
 // （FederationNode.Mesh，空 mesh 只对默认 mesh 请求者放行），按 node-id 去重
 // （路由表/DHT 已占用优先，联邦候选后置）。联邦候选是远程 hub 的节点，不进入
 // 本 hub 路由表（本 hub 无法转发到远程节点），仅提供发现/可达性。
+// 注意：候选 Addr 来自对端上报（信息面，与 mergeDHTNodes 一致，客户端自行决定
+// 连接）；若未来联邦候选用于自动拨号，需在此处增加地址合法性校验。
 func (h *Handlers) mergeFederationNodes(nodes []hub.NodeInfo, mesh string) []hub.NodeInfo {
 	candidates := h.fedClient.Candidates()
 	if len(candidates) == 0 {

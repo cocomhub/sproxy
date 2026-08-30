@@ -48,8 +48,47 @@ func TestFederationConfig_Validate_RemotePeerRequiresCreds(t *testing.T) {
 	if err == nil {
 		t.Fatalf("远程 peer 无凭据应拒绝")
 	}
-	if !strings.Contains(err.Error(), "远程 peering 必须配置 access_key/access_key_secret") {
-		t.Fatalf("错误信息应说明远程 peering 需凭据, got: %v", err)
+	if !strings.Contains(err.Error(), "远程 peering 必须同时配置 access_key 与 access_key_secret") {
+		t.Fatalf("错误信息应说明远程 peering 需成对凭据, got: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_RemotePeerMissingAK：远程 peer 只配 SK 缺 AK 应拒绝
+// （凭据必须成对，缺任一即无有效签名）。
+func TestFederationConfig_Validate_RemotePeerMissingAK(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{
+			ID:              "peer-remote",
+			URL:             "http://192.168.1.100:18083",
+			AccessKeySecret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "同时配置 access_key 与 access_key_secret") {
+		t.Fatalf("远程 peer 缺 AK 应拒绝, got: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_BadPeerSKHex：peer 配置的 access_key_secret 非 64 hex
+// 应拒绝（与顶层 access_keys 校验一致）。
+func TestFederationConfig_Validate_BadPeerSKHex(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{
+			ID:              "peer-local",
+			URL:             "http://127.0.0.1:18083",
+			AccessKey:       "sk-0123456789abcdef",
+			AccessKeySecret: "not-hex-not-64",
+		},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "64 个十六进制字符") {
+		t.Fatalf("peer SK 非 64 hex 应拒绝, got: %v", err)
 	}
 }
 

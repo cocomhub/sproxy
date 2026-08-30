@@ -114,6 +114,9 @@ access_keys:
 #   # /api/hub/nodes 合并（路由表权威 + DHT + 联邦候选，去重）；入站端点
 #   # /api/hub/federation/nodes（受 SproxySig 认证保护，fail-closed）供对端拉取。
 #   # 联邦只提供发现/可达性，不改路由表状态；mesh 隔离不破坏（按拉取方 mesh 过滤）。
+#   # 注意：未配置 access_keys 时（仅本地调试），联邦端点与 /api/hub/nodes 一样
+#   # 对任意请求者开放——生产务必配置 access_keys 并让双方共享同一 mesh 的凭据，
+#   # 否则 peer 拉到的节点只对同名 mesh 请求者可见（fail-closed，但会看不到）。
 #   # federation:
 #   #   enabled: true
 #   #   interval: "30s"             # 出站拉取周期（默认 30s）
@@ -122,10 +125,10 @@ access_keys:
 #   #     - id: "hub-b"             # 对端 hub 唯一标识（日志/去重；为空回落 URL）
 #   #       url: "http://127.0.0.1:18084"  # 对端节点表端点基址（为空回落默认
 #   #                                      # 127.0.0.1:18083 loopback；远程 peering 需显式配置
-#   #                                      # URL 与 access_key/access_key_secret）
+#   #                                      # URL 与成对 access_key/access_key_secret）
 #   #       access_key: "sk-xxx"   # 对端 hub 认可的 SproxySig AccessKey（双方共享同一 mesh 的凭据）
 #   #       access_key_secret: "..."  # 64 hex（只本端计算签名，永不上线）
-#   #       insecure_skip_verify: false  # 跳过 TLS 证书校验（仅自签证书开发/测试）
+#   #       insecure_skip_verify: false  # 仅对本 peer 跳过 TLS 证书校验（自签证书开发/测试）
 #   transports:
 #     ws:
 #       enabled: true

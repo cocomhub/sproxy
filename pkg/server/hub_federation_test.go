@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
@@ -176,6 +177,114 @@ func TestFederationEndpoint_AuthRequired(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("无凭据请求联邦端点应 401, got %d", resp.StatusCode)
+	}
+}
+
+// TestFederationSync_AuthSuccessAndFailure（DoD 2 认证两侧）：配置 access_keys 的
+// hub 联邦端点上，正确 AK/SK 拉取成功、错误 SK 拉取返回错误（401，fail-closed）。
+func TestFederationSync_AuthSuccessAndFailure(t *testing.T) {
+	rt := hub.NewMeshRouteTable()
+	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-b"), Addr: "192.168.1.2:9000"}, nil)
+	cfg := Default()
+	cfg.UploadsDir = t.TempDir()
+	cfg.LogLevel = "error"
+	cfg.Hub.Enabled = true
+	cfg.Hub.Federation.Enabled = true
+	const (
+		testAK = "sk-0123456789abcdef"
+		testSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	)
+	cfg.AccessKeys = []AccessKeyConfig{{Key: testAK, Secret: testSK}}
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	mux := http.NewServeMux()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:        mux,
+		CfgPtr:     &cfgPtr,
+		RouteTable: rt,
+		Logger:     testutil.DiscardLogger(),
+	})
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(func() { ts.Close(); _ = h.Close() })
+
+	// 正确凭据：拉取成功，候选含 node-b。
+	fcOK := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: ts.URL, AccessKey: testAK, AccessKeySecret: testSK}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	t.Cleanup(fcOK.Close)
+	if err := fcOK.SyncAll(context.Background()); err != nil {
+		t.Fatalf("正确凭据拉取应成功: %v", err)
+	}
+	cands := fcOK.Candidates()
+	found := false
+	for _, c := range cands {
+		if c.ID == "node-b" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("正确凭据拉取后候选应含 node-b, got %+v", cands)
+	}
+
+	// 错误 SK：拉取失败（401，fail-closed）。
+	fcBad := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: ts.URL, AccessKey: testAK, AccessKeySecret: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	t.Cleanup(fcBad.Close)
+	if err := fcBad.SyncAll(context.Background()); err == nil {
+		t.Fatalf("错误 SK 拉取应返回错误（fail-closed 401）")
+	}
+}
+
+// TestFederationNodesEndpoint_MeshFromAccessKey（DoD 2 mesh 派生链路）：入站联邦
+// 端点按拉取方 AK 的 mesh 过滤——用命名 mesh 的 AK 签名拉取，只返回该 mesh 节点，
+// 默认 mesh 节点不泄漏。
+func TestFederationNodesEndpoint_MeshFromAccessKey(t *testing.T) {
+	rt := hub.NewMeshRouteTable()
+	rt.Add("meshM", hub.NodeInfo{ID: hub.NodeID("node-m"), Addr: "192.168.1.2:9000"}, nil)
+	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-default"), Addr: "192.168.1.3:9000"}, nil)
+	cfg := Default()
+	cfg.UploadsDir = t.TempDir()
+	cfg.LogLevel = "error"
+	cfg.Hub.Enabled = true
+	cfg.Hub.Federation.Enabled = true
+	// meshM 的 AK（sk-meshM-<16hex>）：authMiddleware 验签后按 AccessKeyMesh 派生 mesh=meshM。
+	const (
+		meshMAK = "sk-meshM-0123456789abcdef"
+		meshMSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	)
+	cfg.AccessKeys = []AccessKeyConfig{{Key: meshMAK, Secret: meshMSK}}
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	mux := http.NewServeMux()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:        mux,
+		CfgPtr:     &cfgPtr,
+		RouteTable: rt,
+		Logger:     testutil.DiscardLogger(),
+	})
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(func() { ts.Close(); _ = h.Close() })
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/hub/federation/nodes", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	sproxysig.SignRequest(req, meshMAK, meshMSK)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var nodes []struct {
+		ID   string `json:"id"`
+		Mesh string `json:"mesh"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].ID != "node-m" || nodes[0].Mesh != "meshM" {
+		t.Fatalf("meshM 调用方应只看到 node-m(mesh=meshM), got %+v", nodes)
 	}
 }
 
