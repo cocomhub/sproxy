@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,6 +131,105 @@ func TestFileClient_XferTunnel_PinMatch(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "ping-pinning" {
 		t.Fatalf("body mismatch: %q", body)
+	}
+}
+
+// registerCountingPipeXfer 注册一个测试 xfer 传输，统计 Dial 次数（N-1 复用/重建判定用）。
+func registerCountingPipeXfer(t *testing.T, idServer *tunnel.Identity, hexKey string) (string, *atomic.Int32) {
+	t.Helper()
+	name := fmt.Sprintf("pipepin-count-%d", time.Now().UnixNano())
+	key, err := tunnel.ParseKey(hexKey)
+	if err != nil {
+		t.Fatalf("ParseKey: %v", err)
+	}
+	var dialCount atomic.Int32
+	xfer.Register(&xfer.Transport{
+		Name: name,
+		Dial: func(ctx context.Context, _ string) (xfer.Conn, error) {
+			dialCount.Add(1)
+			a, b := xfertest.Pipe()
+			go func() {
+				m := mux.New(b, mux.RoleListener)
+				defer m.Close()
+				tun := tunnel.NewTunnel(m, key, tunnel.WithIdentity(idServer))
+				_ = tun.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = io.Copy(w, r.Body)
+				}))
+			}()
+			return a, nil
+		},
+	})
+	return name, &dialCount
+}
+
+// TestFileClient_XferTunnel_HandshakeFailure_RetryRebuildsMux 验证 N-1：
+// 握手失败（fail-closed pin 校验）后，同一 FileClient 重试会重新建立 mux（再次 Dial），
+// 而非复用残留 mux——残留 mux 已处于协议错位状态，复用会对已完成握手的服务端
+// 发起第二次握手导致协议混淆。
+func TestFileClient_XferTunnel_HandshakeFailure_RetryRebuildsMux(t *testing.T) {
+	idServer, _ := tunnel.GenerateIdentity()
+	idClient, _ := tunnel.GenerateIdentity()
+	wrong, _ := tunnel.GenerateIdentity()
+	const hexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	name, dialCount := registerCountingPipeXfer(t, idServer, hexKey)
+	c := NewFileClient("https://127.0.0.1:18083",
+		WithXfer(name, "hub://test", hexKey),
+		WithIdentity(idClient),
+		WithPeerFingerprints([]string{wrong.Fingerprint()}))
+
+	// 第一次：pin 不匹配 → 握手失败，建立 mux（Dial=1）。
+	req1, _ := http.NewRequest("POST", "/echo", strings.NewReader("x"))
+	_, err1 := c.TunnelDo(req1)
+	if err1 == nil {
+		t.Fatal("第一次 TunnelDo 应因 pin 不匹配失败")
+	}
+	if dialCount.Load() != 1 {
+		t.Fatalf("第一次后 Dial 次数应为 1, 实际 %d", dialCount.Load())
+	}
+
+	// 第二次：必须重新建立 mux（Dial=2），而非复用残留 mux。
+	req2, _ := http.NewRequest("POST", "/echo", strings.NewReader("x"))
+	_, err2 := c.TunnelDo(req2)
+	if err2 == nil {
+		t.Fatal("第二次 TunnelDo 应因 pin 不匹配失败")
+	}
+	if dialCount.Load() != 2 {
+		t.Fatalf("握手失败重试应重新建立 mux（Dial=2）, 实际 %d", dialCount.Load())
+	}
+	if !errors.Is(err2, tunnel.ErrPeerFingerprintMismatch) {
+		t.Fatalf("第二次应仍为 pin 不匹配, 实际 %v", err2)
+	}
+}
+
+// TestFileClient_XferTunnel_Success_ReuseMux_NoRehandshake 验证 N-1 的另一半：
+// 握手成功后同一 FileClient 多次请求复用同一 mux（Dial 保持 1），不发起第二次握手。
+func TestFileClient_XferTunnel_Success_ReuseMux_NoRehandshake(t *testing.T) {
+	idServer, _ := tunnel.GenerateIdentity()
+	idClient, _ := tunnel.GenerateIdentity()
+	const hexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	name, dialCount := registerCountingPipeXfer(t, idServer, hexKey)
+	c := NewFileClient("https://127.0.0.1:18083",
+		WithXfer(name, "hub://test", hexKey),
+		WithIdentity(idClient),
+		WithPeerFingerprints([]string{idServer.Fingerprint()}))
+
+	for i := range 3 {
+		req, _ := http.NewRequest("POST", "/echo", strings.NewReader(fmt.Sprintf("req-%d", i)))
+		resp, err := c.TunnelDo(req)
+		if err != nil {
+			t.Fatalf("第 %d 次 TunnelDo: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		want := fmt.Sprintf("req-%d", i)
+		if string(body) != want {
+			t.Fatalf("第 %d 次 body mismatch: 期望 %q, 实际 %q", i, want, string(body))
+		}
+	}
+	if dialCount.Load() != 1 {
+		t.Fatalf("握手成功后应复用同一 mux（Dial=1）, 实际 %d", dialCount.Load())
 	}
 }
 

@@ -156,6 +156,12 @@ xfer/mux 隧道（如 `tcp`、`ws`）。该模式在 ECDH 握手时交换 Ed2551
 - fail-closed：pin 不匹配或对端无身份即拒绝；传统隧道（未加 `--xfer`）与文件直连
   命令不做身份交换，配置 `peer_fingerprints` 会 fail-closed 报错并指引使用 `--xfer`。
 
+> **接线现状（N-3）**：`--xfer` 当前对接的是 **xfer/mux listener**（测试或自定义
+> 服务端，如 `sclient relay`/`mesh node` 建立的自定义隧道对端）；**真实 sproxy
+> hub/relay/mesh 节点的数据面协议尚不兼容**——服务端 xfer tunnel listener 待后续
+> 接线，生产环境请勿把 `--xfer` 指向尚未提供该协议的地址（示例中的
+> `127.0.0.1:18090` 仅为示意）。
+
 ### identity
 
 ```bash

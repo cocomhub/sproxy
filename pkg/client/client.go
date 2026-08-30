@@ -97,6 +97,7 @@ type FileClient struct {
 	hubURL                 string
 	tunnelKey              []byte
 	tunnelMux              *mux.Mux
+	tunnelInst             *tunnel.Tunnel // 缓存的 xfer 隧道实例（复用同一 mux，避免二次握手）
 	tunnelMuxMu            sync.Mutex
 	progressFn             func(label string, read, total int64)
 	chunkSize              int64
@@ -1058,21 +1059,44 @@ func (c *FileClient) doRequestViaXfer(req *http.Request) (*http.Response, error)
 	if err != nil {
 		return nil, fmt.Errorf("获取隧道 mux 失败: %w", err)
 	}
-	return tun.Do(req)
+	resp, err := tun.Do(req)
+	if err != nil {
+		// N-1：握手失败（fail-closed，配置 pin 时）后 mux 已处于协议错位状态——
+		// 残留的 mux 不能再复用。清除缓存，使下一次调用重新建立连接。
+		if tun.HandshakeErr() != nil {
+			c.tunnelMuxMu.Lock()
+			if c.tunnelInst == tun {
+				c.closeTunnelMuxLocked()
+			}
+			c.tunnelMuxMu.Unlock()
+		}
+	}
+	return resp, err
 }
 
 func (c *FileClient) getTunnelMux(ctx context.Context) (*tunnel.Tunnel, error) {
 	c.tunnelMuxMu.Lock()
 	defer c.tunnelMuxMu.Unlock()
 
-	// 检查已有连接是否存活
+	// 复用缓存：mux 已关闭（连接断开）→ 清理重建。
 	if c.tunnelMux != nil {
 		select {
 		case <-c.tunnelMux.Context().Done():
-			// mux 已关闭，清理并重建
-			c.tunnelMux = nil
+			c.closeTunnelMuxLocked()
 		default:
-			return tunnel.NewTunnel(c.tunnelMux, c.tunnelKey, c.tunnelOpts()...), nil
+		}
+	}
+
+	// 缓存隧道可用（握手成功 / 未配置密钥不握手）→ 复用同一 Tunnel 实例。
+	// 注意：不能为每个请求新建 Tunnel 包装同一 mux——Tunnel 的 ECDH 握手是
+	// 每实例 sync.Once，新建实例会对已完成一次握手的连接发起第二次握手，
+	// 造成协议混淆（N-1）。
+	if c.tunnelInst != nil {
+		if err := c.tunnelInst.HandshakeErr(); err != nil {
+			// 握手失败残留：协议错位，必须重建连接。
+			c.closeTunnelMuxLocked()
+		} else {
+			return c.tunnelInst, nil
 		}
 	}
 
@@ -1085,8 +1109,21 @@ func (c *FileClient) getTunnelMux(ctx context.Context) (*tunnel.Tunnel, error) {
 		return nil, fmt.Errorf("xfer 拨号失败: %w", err)
 	}
 	m := mux.New(conn, mux.RoleDialer)
+	tun := tunnel.NewTunnel(m, c.tunnelKey, c.tunnelOpts()...)
 	c.tunnelMux = m
-	return tunnel.NewTunnel(m, c.tunnelKey, c.tunnelOpts()...), nil
+	c.tunnelInst = tun
+	return tun, nil
+}
+
+// closeTunnelMuxLocked 关闭并清空缓存的 xfer mux / Tunnel（调用方须持有 tunnelMuxMu）。
+func (c *FileClient) closeTunnelMuxLocked() {
+	if c.tunnelInst != nil {
+		c.tunnelInst = nil
+	}
+	if c.tunnelMux != nil {
+		_ = c.tunnelMux.Close()
+		c.tunnelMux = nil
+	}
 }
 
 // tunnelOpts 返回 xfer 隧道创建用的身份 pinning 选项（identity / peer_fingerprints）。
