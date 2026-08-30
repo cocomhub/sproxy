@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788097088409,
+  "lastUpdate": 1788098263413,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -311126,6 +311126,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1283938 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "176725eacb4ad7feda14c899c72bc0853bfe5161",
+          "message": "feat: P1 hub 联邦 B——跨 hub 转发路径（A→hub1→hub2→B 链式中继） (#127)\n\n* feat: P1 hub 联邦 B——跨 hub 转发路径（A→hub1→hub2→B 链式中继）\n\nhub 联邦节点表可见性（#126）基础上打通数据面：/api/relay/stream 目标节点\n在本 hub 路由表未命中但为联邦候选时，自动转发到上报该节点的对端 hub，\n复用对端 /api/relay/stream（SproxySig 认证 + CONNECT 风格 + mux 拨号帧），\n实现 A→hub1→hub2→B 链式中继，不发明新协议。\n\n- pkg/tunnel/hub/federation.go: FederationClient.PeerForNode 定位上报节点的\n  联邦对端（mesh 严格匹配，防跨 mesh 泄漏）\n- pkg/server/federation_forward.go（新增）: FederationForwarder 跨 hub 转发——\n  防环（X-Relay-Hop 跳数上限 4 + X-Relay-Path 路径回源拒绝，命中返回 508）、\n  独立 CONNECT dialer（TLS 策略与联邦拉取一致 fail-closed，401/403 映射 502）\n- pkg/server/relay_stream.go: RelayStreamHandler.SetFederation 装配转发器；\n  ServeHTTP 目标未命中 → serveForwarded；泵送逻辑抽为 pumpRelayConn 供\n  本地/跨 hub 两路径复用（netConnStream 适配上游连接）\n- pkg/server/handlers.go: SetFederationClient 联动装配转发器（节点表联邦合并\n  与数据面联邦转发同步启用），hubID 取 config hub.node_id\n- pkg/client/relay.go: RelayStreamWithHeaders（自定义防环头 + CRLF 注入防护）、\n  RelayStatusError（携带状态码，供跨 hub 错误映射）\n- 配置注释补充跨 hub 转发与防环说明\n\n测试（-race 连跑 3 次通过）：\n- in-process：双 hub 链式 echo 往返、并发拨号、带认证全链路、上游 401→502、\n  防环（跳数/路径 508）、上游 502 传播、未知目标 404、mesh 隔离 404、头透传\n- CLI 级：真实二进制双 hub（caller→hub-A→联邦→hub-B→node-b 叶子→echo）\n- PeerForNode 定位、RelayStreamWithHeaders 头透传/CRLF 拒绝/RelayStatusError\n\n验证：make lint 0 issues、make build-all、make test-all、make check-loopback 全绿。\n注：make test 的 TestE2E_MeshNode_ServiceAccess 在 origin/master 上同样失败\n（webrtc 网关数据面预存在问题，与本改动无关）。\n\n* fix: 对抗式审查修复——TLS 握手有界 + 防环自洽（不依赖 node_id 配置）+ 故障转移等\n\n按独立对抗式审查（c2407df）发现逐项修复：\n\n- Critical：relayForwardDialer.Dial 的 TLS 握手此前不受握手 deadline 约束（仅 TCP\n  受 net.Dialer 15s、TLS 受无 deadline 的 ctx）——对端 TLS 黑洞可无限阻塞。改为\n  在 TLS 握手前设 socket deadline（min(ctx, 30s)）+ tls.Client.HandshakeContext(ctx)，\n  握手阶段整体有界。\n- Important：路径防环此前仅靠 self hubID（cfg.Hub.NodeID 默认空 → 路径恒空，防环\n  退化为纯跳数）。改为**恒追加下一跳 peer.ID**（与对端解析目标时的 peer.ID 同一\n  命名空间，防环自洽、无需跨 hub 配置一致）；配置了 hub.node_id 时额外追加 self ID\n  （回源前一跳即拒绝，更严格）。config.example.yaml 补充防环说明。\n- Important：补多跳路径追加覆盖（TestRelayStreamHandler_ForwardPath_Accumulation）\n  与 hubID 缺省/配置两种防环测试；完整 3+ hub 真实链式受联邦设计限制（仅同步本地\n  表，多跳 deferred）已在文档说明。\n- Minor：上游状态行解析失败归一 502（防 status=0 落 http.Error）；多对端上报同一\n  节点故障转移（PeersForNode + 按序尝试 + TestRelayStreamHandler_Forward_Failover）；\n  X-Relay-Path 长度上限 64KiB（超限 400）；转发头按 RFC 7230 拒绝控制字符；\n  relayForwardTLSConfig CA 读取失败 fail-fast（不静默回落系统根）。\n- Reference：SetFederation 并发约束注释、Close 不中断在途转发注释、watchdog ticker\n  极小值防御。\n\n验证：受影响包 -race 全绿、make lint 0 issues、make test-all 通过、\nTestE2E_CrossHubRelay（CLI 级真实二进制）通过。预存在的\nTestE2E_MeshNode_ServiceAccess 在 origin/master 同样失败，与本改动无关。\n\n* fix: 复审 Minor 修复——508 不阻断故障转移 + TLS 后 deadline 重置 + 日志属性修正等\n\n- Minor-1：serveForwarded 对 508 不再 break——请求经对端 X 来（路径含 X）时 X 命中\n  防环 508 不代表其它上报同节点的对端 Y 也会回源；每个 Forward 独立防环、尝试次数\n  ≤ peer 数、各 30s 有界。全部失败时优先回最先遇到的 508。补回归测试\n  TestRelayStreamHandler_Forward_FailoverPastLoop（X 防环拦截后 Y 接管成功）。\n- Minor-2：日志属性修正——循环内记 lastPeerID，收尾日志用真 peer ID，\n  lastFSE.message 单独作 message 属性（不再误标为 peer）。\n- Minor-3：ferr.(*forwardStatusError) 改 errors.As（防未来包裹后静默退化 502）。\n- Minor-4：config.example.yaml 注明 peer.id 应在整个联邦内全局唯一。\n- Minor-5：TLS 握手成功后把握手 deadline 重置为 min(ctx, now+30s)——慢连接下 TLS\n  消耗预算后，对端合法叶子拨号（≤12s）不被残量 deadline 误判 502。\n\n验证：受影响包 -race 全绿、-race 3x 连跑通过、make lint 0 issues、\nmake check-loopback 通过。",
+          "timestamp": "2026-08-30T21:53:35+08:00",
+          "tree_id": "96d1dc483bc8fe966390ceead1ce2725817a5179",
+          "url": "https://github.com/cocomhub/sproxy/commit/176725eacb4ad7feda14c899c72bc0853bfe5161"
+        },
+        "date": 1788098256882,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 916.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1313743 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 916.2,
+            "unit": "ns/op",
+            "extra": "1313743 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1313743 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1313743 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 915,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1206918 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 915,
+            "unit": "ns/op",
+            "extra": "1206918 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1206918 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1206918 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 920.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1301623 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 920.6,
+            "unit": "ns/op",
+            "extra": "1301623 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1301623 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1301623 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 922.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1302409 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 922.5,
+            "unit": "ns/op",
+            "extra": "1302409 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1302409 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1302409 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 915.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1278182 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 915.5,
+            "unit": "ns/op",
+            "extra": "1278182 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1278182 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1278182 times\n4 procs"
           }
         ]
       }
