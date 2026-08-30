@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -274,6 +275,10 @@ type TempRegistration struct {
 	// Secret 是本临时节点的 per-node secret（mesh node 常驻注册用它派生 discovery
 	// 拨号的 real_node_proof；供同一进程内派生 HMAC 证明）。
 	Secret string
+	// VirtualIP 是本节点虚拟 IP（hub 权威分配；仅稳定常驻注册 ExactNode=true 时
+	// 由 REG_OK 下发，临时拨号身份/旧 hub 为无效 Addr）。mesh node 用它装配出口
+	// 虚拟 IP NAT 拨号策略（NewVirtualIPDialPolicy 的 selfVIP）。
+	VirtualIP netip.Addr
 	// Mux 是注册连接上的 mux（RoleListener）：mesh node 在其上 relay.Serve 接受
 	// 经 hub 的中继流；p2p/mesh connect 拨号方不消费。
 	Mux *mux.Mux
@@ -320,11 +325,12 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	if err != nil {
 		return nil, fmt.Errorf("连接 Hub 注册端点失败: %w", err)
 	}
-	// 注册帧：声明 per-node-secret 能力（hub 回 REG_OK:<secret>，B1），并携带
-	// 服务宣告（mesh node 常驻）与标签（如 exit）。mesh discovery 临时注册（disc-）
-	// 另带 real_node_id + real_node_proof（hub 强制校验防冒充）。mesh/p2p 拨号方
-	// 不传则 Meta{}。
-	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.AccessKey, proof, ts, nonce, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret)); err != nil {
+	// 注册帧：声明 per-node-secret 能力（hub 回 REG_OK:<secret>，B1）与 virtual-ip
+	// 能力（hub 回 REG_OK:<secret>:<vip>，本节点虚拟 IP；不感知该能力的旧 hub 忽略
+	// 未知能力位，回旧格式），并携带服务宣告（mesh node 常驻）与标签（如 exit）。
+	// mesh discovery 临时注册（disc-）另带 real_node_id + real_node_proof（hub 强制
+	// 校验防冒充）。mesh/p2p 拨号方不传则 Meta{}。
+	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.AccessKey, proof, ts, nonce, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret, hub.CapabilityVirtualIP)); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("发送注册帧失败: %w", err)
 	}
@@ -335,29 +341,30 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 		_ = conn.Close()
 		return nil, fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
 	}
-	secret, ackErr := hub.ParseRegisterAck(string(ack))
+	ackFull, ackErr := hub.ParseRegisterAckFull(string(ack))
 	if ackErr != nil {
 		_ = conn.Close()
 		return nil, ackErr
 	}
-	if secret == "" {
+	if ackFull.Secret == "" {
 		_ = conn.Close()
 		return nil, fmt.Errorf("hub 未下发 per-node secret（未声明能力或能力不被支持）")
 	}
 	// mux 保活：自动跑 readLoop/writeLoop/pingLoop 处理心跳，注册连接存活到命令退出。
 	m := mux.New(conn, mux.RoleListener)
-	signaler := hub.NewHubSignaler(httpBase, p.AccessKey, nodeID, secret)
+	signaler := hub.NewHubSignaler(httpBase, p.AccessKey, nodeID, ackFull.Secret)
 	signaler.SetAccessKeySecret(p.AccessKeySecret)
 	signaler.SetContext(ctx)
 	if p.Insecure {
 		signaler.SetHTTPClient(client.InsecureHTTPClient())
 	}
 	return &TempRegistration{
-		Signaler: signaler,
-		Closer:   func() error { return m.Close() },
-		TempNode: nodeID,
-		Secret:   secret,
-		Mux:      m,
+		Signaler:  signaler,
+		Closer:    func() error { return m.Close() },
+		TempNode:  nodeID,
+		Secret:    ackFull.Secret,
+		VirtualIP: ackFull.VirtualIP,
+		Mux:       m,
 	}, nil
 }
 

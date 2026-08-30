@@ -11,12 +11,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
@@ -266,10 +268,11 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			// I46：relay 会话诊断日志经 ios.ErrOut 输出（用户可见 + 可测试），带 node
 			// 上下文便于多会话区分；丢弃日志会让出口拨号拒绝/失败原因完全不可见。
 			serveLogger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("node", f.localNode())
-			// I45：出口拨号策略——--service 宣告地址精确放行 + --dial-allow-cidr 网段放行；
+			// I45：出口拨号策略——--service 宣告地址精确放行 + --dial-allow-cidr 网段放行
+			// + 虚拟 IP NAT（selfVIP 初始无效；经 hub 信令注册后由 REG_OK 下发再更新）。
 			// 无任何配置时 opts 为空 → Serve 回落默认 DialAllowed（仅公网），向后兼容。
 			// DialResultFrames 保持 false（webrtc 直连数据流约束，见 relay/leaf.go 注释）。
-			serveOpts := buildP2PServeOpts(services, dialAllowCIDRs, ios)
+			serveOpts := buildP2PServeOpts(services, dialAllowCIDRs, netip.Addr{}, ios)
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（单次连接，不循环）；否则经 hub 信令桥
 			var sig webrtc.Signaler
@@ -305,6 +308,8 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 				}
 				defer func() { _ = reg.Closer() }()
 				sig = reg.Signaler
+				// 虚拟 IP NAT：selfVIP 由 REG_OK 下发（稳定常驻注册），更新出口拨号策略。
+				serveOpts = buildP2PServeOpts(services, dialAllowCIDRs, reg.VirtualIP, ios)
 			}
 
 			// --manual 需人工拷文件/粘贴 JSON，信令等待放宽到 10 分钟（默认 30s 必然不够）
@@ -348,6 +353,8 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 					if reg2, rerr2 := f.registerSignaler(ctx, cmd, cfgSvc, true); rerr2 == nil {
 						_ = reg.Closer()
 						reg, sig = reg2, reg2.Signaler
+						// selfVIP 随重注册可能轮换，同步更新出口拨号策略。
+						serveOpts = buildP2PServeOpts(services, dialAllowCIDRs, reg.VirtualIP, ios)
 					} else {
 						ios.WriteErrLine("p2p 重注册失败: %v", rerr2)
 					}
@@ -395,12 +402,14 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 }
 
 // buildP2PServeOpts 构造 p2p listen 的 relay.ServeOptions：--service 宣告地址
-// 精确放行 + --dial-allow-cidr 网段放行（复用 relay.NewServiceDialPolicy）。
-// 无任何放行配置（或全部无效）时返回 nil → Serve 回落默认 DialAllowed（仅公网）。
+// 精确放行 + --dial-allow-cidr 网段放行 + 虚拟 IP NAT（selfVIP 由 AutoRegister 的
+// REG_OK 下发；默认 CGNAT 子网，宣告端口自动开放）。复用 relay.NewVirtualIPDialPolicy
+// （内部已含宣告地址精确匹配与公网/CIDR 回落）。
+// 无任何放行配置且 selfVIP 无效时返回 nil → Serve 回落默认 DialAllowed（仅公网）。
 //
 // 注意：--service 仅作拨号白名单，不宣告到 hub（p2p listen 不注册节点），
 // 语义与 relay start 的注册宣告解耦（I45 子决策）。
-func buildP2PServeOpts(services, dialAllowCIDRs []string, ios cli.IOStreams) []relay.ServeOptions {
+func buildP2PServeOpts(services, dialAllowCIDRs []string, selfVIP netip.Addr, ios cli.IOStreams) []relay.ServeOptions {
 	var serviceAddrs []string
 	for _, svc := range services {
 		_, addr, ok := strings.Cut(svc, ":")
@@ -414,11 +423,12 @@ func buildP2PServeOpts(services, dialAllowCIDRs []string, ios cli.IOStreams) []r
 		}
 		serviceAddrs = append(serviceAddrs, addr)
 	}
-	if len(serviceAddrs) == 0 && len(dialAllowCIDRs) == 0 {
+	if len(serviceAddrs) == 0 && len(dialAllowCIDRs) == 0 && !selfVIP.IsValid() {
 		return nil
 	}
+	vipSubnet := netip.MustParsePrefix(hub.DefaultVirtualSubnet)
 	return []relay.ServeOptions{
-		{DialPolicy: relay.NewServiceDialPolicy(dialAllowCIDRs, serviceAddrs)},
+		{DialPolicy: relay.NewVirtualIPDialPolicy(vipSubnet, selfVIP, nil, dialAllowCIDRs, serviceAddrs)},
 	}
 }
 

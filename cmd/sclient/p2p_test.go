@@ -5,6 +5,7 @@ package main
 
 import (
 	"io"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -134,10 +135,10 @@ func TestNewCmdP2PListen_ManualSameOfferAnswer(t *testing.T) {
 // Serve 回落默认 DialAllowed（仅公网）。
 func TestBuildP2PServeOpts_EmptyNil(t *testing.T) {
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	if opts := buildP2PServeOpts(nil, nil, ios); opts != nil {
+	if opts := buildP2PServeOpts(nil, nil, netip.Addr{}, ios); opts != nil {
 		t.Fatalf("无配置应返回 nil: %v", opts)
 	}
-	if opts := buildP2PServeOpts([]string{"invalid-no-colon"}, nil, ios); opts != nil {
+	if opts := buildP2PServeOpts([]string{"invalid-no-colon"}, nil, netip.Addr{}, ios); opts != nil {
 		t.Fatalf("全部无效服务应返回 nil: %v", opts)
 	}
 }
@@ -146,7 +147,7 @@ func TestBuildP2PServeOpts_EmptyNil(t *testing.T) {
 // 未宣告的 loopback 拒绝、公网目标回落放行（I45）。
 func TestBuildP2PServeOpts_ServiceAllowsExact(t *testing.T) {
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	opts := buildP2PServeOpts([]string{"ssh:127.0.0.1:22"}, nil, ios)
+	opts := buildP2PServeOpts([]string{"ssh:127.0.0.1:22"}, nil, netip.Addr{}, ios)
 	if len(opts) != 1 || opts[0].DialPolicy == nil {
 		t.Fatalf("应构造带 DialPolicy 的 ServeOptions: %v", opts)
 	}
@@ -166,7 +167,7 @@ func TestBuildP2PServeOpts_ServiceAllowsExact(t *testing.T) {
 // 私网地址、未命中网段仍拒绝（I45）。
 func TestBuildP2PServeOpts_CIDRAllowsPrivate(t *testing.T) {
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	opts := buildP2PServeOpts(nil, []string{"192.168.0.0/16"}, ios)
+	opts := buildP2PServeOpts(nil, []string{"192.168.0.0/16"}, netip.Addr{}, ios)
 	if len(opts) != 1 || opts[0].DialPolicy == nil {
 		t.Fatalf("CIDR 应构造 DialPolicy: %v", opts)
 	}

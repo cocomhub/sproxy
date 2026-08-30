@@ -1206,3 +1206,61 @@ func TestRunNode_FullMeshThreeNodes(t *testing.T) {
 	}
 	t.Fatal("node-b 链路池未同时包含 node-a（accept 侧）与 node-c（拨号侧）")
 }
+
+// TestAutoRegister_GetsVirtualIP 校验 mesh node 常驻注册（ExactNode=true）经 REG_OK
+// 拿到 hub 分配的虚拟 IP（供出口 NewVirtualIPDialPolicy 装配 selfVIP）；临时拨号
+// 身份（ExactNode=false）为瞬态，hub 不分配虚拟 IP，reg.VirtualIP 无效。
+func TestAutoRegister_GetsVirtualIP(t *testing.T) {
+	rt := hub.NewMeshRouteTable()
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
+	muxHTTP := http.NewServeMux()
+	wsNode := ws.NewHandlerNode()
+	wsNode.AddToMux(muxHTTP, "/ws")
+	ts := httptest.NewServer(muxHTTP)
+	defer ts.Close()
+	ctx := t.Context()
+	go func() {
+		for {
+			c, aerr := wsNode.Accept(ctx)
+			if aerr != nil {
+				return
+			}
+			go func(cc xfer.Conn) { _ = srv.HandleConn(ctx, cc) }(c)
+		}
+	}()
+
+	// 常驻注册（ExactNode=true）：hub 分配虚拟 IP → reg.VirtualIP 有效且与路由表一致。
+	reg, err := AutoRegister(ctx, AutoRegisterParams{
+		HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
+		NodeID: "svc-node", Prefix: "mesh", ExactNode: true, Insecure: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reg.Closer() })
+	if !reg.VirtualIP.IsValid() {
+		t.Fatal("常驻注册应获得 hub 分配的虚拟 IP（REG_OK 下发）")
+	}
+	info, ok := rt.LookupInfo(hub.NodeID("svc-node"))
+	if !ok {
+		t.Fatal("svc-node 未注册")
+	}
+	if info.VirtualIP != reg.VirtualIP {
+		t.Fatalf("reg.VirtualIP=%v 与路由表 %v 不一致", reg.VirtualIP, info.VirtualIP)
+	}
+	_ = reg.Closer()
+
+	// 临时拨号身份（ExactNode=false）：瞬态 → hub 不分配虚拟 IP → reg.VirtualIP 无效。
+	reg2, err := AutoRegister(ctx, AutoRegisterParams{
+		HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
+		NodeID: "svc-node", Prefix: "mesh", ExactNode: false, Insecure: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reg2.Closer() })
+	if reg2.VirtualIP.IsValid() {
+		t.Fatalf("瞬态拨号身份不应获得虚拟 IP, got %v", reg2.VirtualIP)
+	}
+	_ = reg2.Closer()
+}

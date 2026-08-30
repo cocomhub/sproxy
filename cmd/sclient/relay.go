@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -173,8 +174,10 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		serviceAddrs = append(serviceAddrs, addr)
 	}
 	// 声明 per-node-secret 能力：hub 回 REG_OK:<base64url secret>（B1 已支持，
-	// B3 服务端将据此校验信令身份）。现有调用不传 caps 时行为不变。
-	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, accessKey, proof, ts, nonce, meta, hub.CapabilityPerNodeSecret)); serr != nil {
+	// B3 服务端将据此校验信令身份）；声明 virtual-ip 能力：hub 在 REG_OK 携带本节点
+	// 虚拟 IP（Discover=false 的 relay 出口节点也能立即得知自身 VIP）。不感知能力的
+	// 旧 hub 忽略未知能力位，回旧格式。现有调用不传 caps 时行为不变。
+	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, accessKey, proof, ts, nonce, meta, hub.CapabilityPerNodeSecret, hub.CapabilityVirtualIP)); serr != nil {
 		_ = conn.Close() // P1-15：mux 创建前失败必须关闭 WS，否则重连循环泄漏连接+sendLoop goroutine
 		return fmt.Errorf("发送注册帧失败: %w", serr)
 	}
@@ -187,11 +190,12 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		_ = conn.Close() // P1-15：同守卫
 		return fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
 	}
-	nodeSecret, ackErr := hub.ParseRegisterAck(string(ack))
+	ackFull, ackErr := hub.ParseRegisterAckFull(string(ack))
 	if ackErr != nil {
 		_ = conn.Close() // P1-15：同守卫
 		return ackErr
 	}
+	nodeSecret := ackFull.Secret
 	if nodeSecret != "" {
 		// per-node secret 与本次注册连接生命周期绑定（重连即轮换），
 		// 只在注册流程内使用，不落盘、不打印值（I1，方案 B）。
@@ -199,6 +203,7 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	} else {
 		logger.Info("已注册到 Hub")
 	}
+	selfVIP := ackFull.VirtualIP
 
 	m := mux.New(conn, mux.RoleListener)
 	defer m.Close()
@@ -217,8 +222,11 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	// DialResultFrames=true：经 hub 中继时向 hub 回写拨号结果帧，使 hub 在写 200
 	// 前能确认数据面就绪（I27）。注意 p2p listen（webrtc 直连）必须保持 false，
 	// 否则结果帧会污染数据流。
+	// 出口拨号策略：虚拟 IP NAT（selfVIP 由 REG_OK 下发；默认 CGNAT 子网，服务宣告
+	// 端口自动开放）优先，内部已含宣告地址精确匹配（逃生口）与公网/CIDR 回落。
+	vipSubnet := netip.MustParsePrefix(hub.DefaultVirtualSubnet)
 	opts := []relay.ServeOptions{
-		{DialPolicy: relay.NewServiceDialPolicy(dialAllowCIDRs, serviceAddrs), DialResultFrames: true},
+		{DialPolicy: relay.NewVirtualIPDialPolicy(vipSubnet, selfVIP, nil, dialAllowCIDRs, serviceAddrs), DialResultFrames: true},
 	}
 	err = relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
 	if err != nil {
