@@ -187,10 +187,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 					URL:                p.URL,
 					AccessKey:          p.AccessKey,
 					AccessKeySecret:    p.AccessKeySecret,
+					CAFile:             p.CAFile,
 					InsecureSkipVerify: p.InsecureSkipVerify,
 				})
 			}
-			fedClient = hub.NewFederationClient(peers, cfg.Hub.Federation.Interval, cfg.Hub.Federation.Timeout, logger.With("component", "hub_federation"))
+			var ferr error
+			fedClient, ferr = hub.NewFederationClient(peers, cfg.Hub.Federation.Interval, cfg.Hub.Federation.Timeout, logger.With("component", "hub_federation"))
+			if ferr != nil {
+				return fmt.Errorf("初始化 hub 联邦客户端: %w", ferr)
+			}
 			fedClient.Start(ctx)
 			defer fedClient.Close()
 			logger.Info("Hub 联邦已启用", "peers", len(cfg.Hub.Federation.Peers), "interval", cfg.Hub.Federation.Interval)

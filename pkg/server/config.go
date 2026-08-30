@@ -122,8 +122,15 @@ type FederationPeerConfig struct {
 	// 由 Validate 强制要求（fail-closed）。
 	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
 	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
-	// InsecureSkipVerify 为 true 时跳过 TLS 证书校验（自签证书开发/测试用）。
-	// 默认 false（生产应使用受信任证书）。
+	// CAFile 是对端 hub 的 TLS 受信 CA 证书文件路径（PEM）。非空时用该 CA 构建
+	// 专属证书池严格校验对端证书（InsecureSkipVerify=false，ServerName 由 URL host
+	// 自动校验）——自签 hub 的远程 peering 应配置 ca_file（受信 CA）而非跳过校验。
+	// 为空时使用系统根证书池（默认，fail-closed：证书非法即拒绝）。与
+	// InsecureSkipVerify 互斥。
+	CAFile string `yaml:"ca_file" mapstructure:"ca_file"`
+	// InsecureSkipVerify 为 true 时跳过 TLS 证书校验。**仅允许 loopback peer**
+	// （本机自签开发/测试）；远程 peer 配置该选项由 Validate 拒绝（MITM 风险），
+	// 远程自签场景应改用 ca_file。默认 false。
 	InsecureSkipVerify bool `yaml:"insecure_skip_verify" mapstructure:"insecure_skip_verify"`
 }
 
@@ -416,6 +423,21 @@ func (c *Config) Validate() error {
 				}
 				if _, derr := hex.DecodeString(p.AccessKeySecret); derr != nil {
 					return fmt.Errorf("hub.federation.peers[%d].access_key_secret 不是合法十六进制: %v", i, derr)
+				}
+			}
+			// TLS 安全边界（S-Medium 闭环）：insecure_skip_verify 仅限 loopback peer
+			// （本机自签开发/测试）；远程 peer 必须严格校验 TLS（受信任证书或 ca_file），
+			// 跳过校验 = MITM 可窃听/篡改节点表，fail-closed 拒绝。
+			if p.InsecureSkipVerify && !isLoopbackHost(u.Hostname()) {
+				return fmt.Errorf("hub.federation.peers[%d].insecure_skip_verify 仅允许用于 loopback peer（本机自签开发）；远程 peering 应配置受信任证书或 ca_file（受信 CA）", i)
+			}
+			// ca_file 与 insecure_skip_verify 互斥（ca_file 是严格校验，跳过校验与其冲突）。
+			if p.CAFile != "" && p.InsecureSkipVerify {
+				return fmt.Errorf("hub.federation.peers[%d].ca_file 与 insecure_skip_verify 互斥，请二选一（ca_file 为受信 CA 严格校验）", i)
+			}
+			if p.CAFile != "" {
+				if _, serr := os.Stat(p.CAFile); serr != nil {
+					return fmt.Errorf("hub.federation.peers[%d].ca_file %q 不可读: %v", i, p.CAFile, serr)
 				}
 			}
 			key := p.ID

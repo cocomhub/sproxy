@@ -6,11 +6,13 @@ package hub
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -48,9 +50,14 @@ type FederationPeer struct {
 	// 目标 hub 配置了 access_keys 时必填；远程 peering 由 Config.Validate 强制成对校验。
 	AccessKey       string
 	AccessKeySecret string
-	// InsecureSkipVerify 为 true 时跳过该 peer 的 TLS 证书校验（自签证书测试/开发用）。
-	// 仅作用于本 peer（per-peer http.Client），不扩散到其他 peer；生产应使用受信任证书
-	// 并保持 false（默认）。
+	// CAFile 是对端 hub 的 TLS 受信 CA 证书文件路径（PEM）。非空时用该 CA 构建
+	// 专属证书池严格校验对端证书（ServerName 由 URL host 自动校验）——自签 hub
+	// 的远程 peering 应配置 ca_file 而非跳过校验。与 InsecureSkipVerify 互斥。
+	CAFile string
+	// InsecureSkipVerify 为 true 时跳过该 peer 的 TLS 证书校验。仅允许 loopback
+	// peer（本机自签开发/测试，Config.Validate 限制）；仅作用于本 peer
+	// （per-peer http.Client），不扩散到其他 peer。默认 false（严格校验 TLS，
+	// 证书非法即拒绝，fail-closed）。
 	InsecureSkipVerify bool
 }
 
@@ -81,9 +88,14 @@ type FederationClient struct {
 
 // NewFederationClient 创建联邦同步客户端。
 // interval<=0 回落默认 30s；timeout<=0 回落默认 10s；logger 为空回落 slog.Default。
-// 每个 peer 独立创建 http.Client：仅该 peer 配置 InsecureSkipVerify 时跳过其 TLS
-// 证书校验，不扩散到其他 peer（配置隔离）。
-func NewFederationClient(peers []FederationPeer, interval, timeout time.Duration, logger *slog.Logger) *FederationClient {
+// 每个 peer 独立创建 http.Client，TLS 策略（S-Medium 闭环）：
+//   - CAFile 非空 → 用该 CA 构建专属证书池**严格校验**（InsecureSkipVerify=false，
+//     ServerName 由 URL host 自动校验），供远程自签 hub 使用受信 CA；
+//   - InsecureSkipVerify → 跳过校验（**仅限 loopback peer**，Config.Validate 强制）；
+//   - 默认 → 系统根证书池严格校验（fail-closed：证书非法即拒绝，不静默降级）。
+//
+// CA 文件读取失败返回 error（fail-fast，不静默回退到不校验）。
+func NewFederationClient(peers []FederationPeer, interval, timeout time.Duration, logger *slog.Logger) (*FederationClient, error) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
@@ -104,10 +116,23 @@ func NewFederationClient(peers []FederationPeer, interval, timeout time.Duration
 			p.ID = p.URL
 		}
 		c := &http.Client{Timeout: timeout}
-		if p.InsecureSkipVerify {
-			c.Transport = &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // 用户仅对本 peer 显式配置跳过证书校验（自签证书开发/测试）
+		switch {
+		case p.CAFile != "":
+			pool, cerr := loadCertPool(p.CAFile)
+			if cerr != nil {
+				return nil, fmt.Errorf("peer %s: %w", p.ID, cerr)
 			}
+			c.Transport = &http.Transport{
+				TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+			}
+		case p.InsecureSkipVerify:
+			// 仅 loopback peer（Config.Validate 已拒绝远程 + insecure）。
+			c.Transport = &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // 用户仅对本 loopback peer 显式配置跳过证书校验（本机自签开发/测试）
+			}
+		default:
+			// 严格校验（系统根证书池），fail-closed。
+			c.Transport = &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
 		}
 		clients[p.ID] = c
 		normalized = append(normalized, p)
@@ -118,7 +143,20 @@ func NewFederationClient(peers []FederationPeer, interval, timeout time.Duration
 		clients:  clients,
 		interval: interval,
 		logger:   logger,
+	}, nil
+}
+
+// loadCertPool 读取 PEM CA 文件并构建 x509 证书池。文件不存在/无有效证书返回错误。
+func loadCertPool(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取 CA 文件 %s: %w", path, err)
 	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("CA 文件 %s 无有效 PEM 证书", path)
+	}
+	return pool, nil
 }
 
 // Peers 返回归一化后的对端配置副本（URL 已回落默认、ID 已归一），供测试与诊断。

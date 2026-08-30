@@ -4,6 +4,7 @@
 package server
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -92,18 +93,18 @@ func TestFederationConfig_Validate_BadPeerSKHex(t *testing.T) {
 	}
 }
 
-// TestFederationConfig_Validate_RemotePeerWithCreds：远程 peer 配置凭据后通过。
+// TestFederationConfig_Validate_RemotePeerWithCreds：远程 peer 配置凭据 + 受信任证书
+// （无 insecure，默认严格校验系统根池）通过。
 func TestFederationConfig_Validate_RemotePeerWithCreds(t *testing.T) {
 	cfg := Default()
 	cfg.Hub.Enabled = false
 	cfg.Hub.Federation.Enabled = true
 	cfg.Hub.Federation.Peers = []FederationPeerConfig{
 		{
-			ID:                 "peer-remote",
-			URL:                "https://hub.example.com:18083",
-			AccessKey:          "sk-0123456789abcdef",
-			AccessKeySecret:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-			InsecureSkipVerify: true,
+			ID:              "peer-remote",
+			URL:             "https://hub.example.com:18083",
+			AccessKey:       "sk-0123456789abcdef",
+			AccessKeySecret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -154,6 +155,85 @@ func TestFederationConfig_Validate_DupEmptyURLPeer(t *testing.T) {
 	err := cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "重复") {
 		t.Fatalf("两个空 URL 空 ID peer 应判重复拒绝, got: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_RemoteInsecureRejected：远程 peer 配置
+// insecure_skip_verify 应拒绝（跳过 TLS 校验 = MITM 风险，fail-closed）。
+func TestFederationConfig_Validate_RemoteInsecureRejected(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{
+			ID:                 "peer-remote",
+			URL:                "https://192.168.1.100:18083",
+			AccessKey:          "sk-0123456789abcdef",
+			AccessKeySecret:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			InsecureSkipVerify: true,
+		},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "insecure_skip_verify 仅允许用于 loopback peer") {
+		t.Fatalf("远程 peer + insecure_skip_verify 应拒绝, got: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_LoopbackInsecureAllowed：loopback peer 配置
+// insecure_skip_verify 允许（本机自签开发/测试）。
+func TestFederationConfig_Validate_LoopbackInsecureAllowed(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{
+			ID:                 "peer-local",
+			URL:                "https://127.0.0.1:18083",
+			InsecureSkipVerify: true,
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("loopback peer + insecure_skip_verify 应通过: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_CAFileAndInsecureMutuallyExclusive：ca_file 与
+// insecure_skip_verify 互斥（ca_file 是严格校验，跳过校验与其冲突）。
+func TestFederationConfig_Validate_CAFileAndInsecureMutuallyExclusive(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{
+			ID:                 "peer-local",
+			URL:                "https://127.0.0.1:18083",
+			CAFile:             filepath.Join(t.TempDir(), "ca.pem"),
+			InsecureSkipVerify: true,
+		},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "互斥") {
+		t.Fatalf("ca_file 与 insecure_skip_verify 应互斥拒绝, got: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_CAFileNotExist：ca_file 不存在应拒绝（fail-fast）。
+func TestFederationConfig_Validate_CAFileNotExist(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{
+			ID:              "peer-local",
+			URL:             "https://127.0.0.1:18083",
+			CAFile:          filepath.Join(t.TempDir(), "does-not-exist.pem"),
+			AccessKey:       "sk-0123456789abcdef",
+			AccessKeySecret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "不可读") {
+		t.Fatalf("ca_file 不存在应拒绝, got: %v", err)
 	}
 }
 

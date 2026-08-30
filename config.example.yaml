@@ -128,7 +128,12 @@ access_keys:
 #   #                                      # URL 与成对 access_key/access_key_secret）
 #   #       access_key: "sk-xxx"   # 对端 hub 认可的 SproxySig AccessKey（双方共享同一 mesh 的凭据）
 #   #       access_key_secret: "..."  # 64 hex（只本端计算签名，永不上线）
-#   #       insecure_skip_verify: false  # 仅对本 peer 跳过 TLS 证书校验（自签证书开发/测试）
+#   #       ca_file: "/path/to/hub-ca.pem"  # 对端 hub 的 TLS 受信 CA（PEM）。远程自签 hub
+#   #                                      # 应配置 ca_file（受信 CA 严格校验），而非跳过校验。
+#   #                                      # 为空时用系统根证书池（默认 fail-closed：证书非法即拒绝）。
+#   #       insecure_skip_verify: false  # 跳过 TLS 校验。**仅允许 loopback peer**（本机自签
+#   #                                    # 开发/测试）；远程 peer 配置该选项启动失败（MITM 风险）。
+#   #                                    # 与 ca_file 互斥。
 #   transports:
 #     ws:
 #       enabled: true

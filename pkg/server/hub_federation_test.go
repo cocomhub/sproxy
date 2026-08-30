@@ -33,7 +33,7 @@ func fedMockPeer(t *testing.T, body string) *httptest.Server {
 func newFedClient(t *testing.T, body string) *hub.FederationClient {
 	t.Helper()
 	srv := fedMockPeer(t, body)
-	fc := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	fc, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fc.Close)
 	if err := fc.SyncAll(context.Background()); err != nil {
 		t.Fatalf("SyncAll mock peer: %v", err)
@@ -208,7 +208,7 @@ func TestFederationSync_AuthSuccessAndFailure(t *testing.T) {
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
 
 	// 正确凭据：拉取成功，候选含 node-b。
-	fcOK := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: ts.URL, AccessKey: testAK, AccessKeySecret: testSK}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	fcOK, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: ts.URL, AccessKey: testAK, AccessKeySecret: testSK}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcOK.Close)
 	if err := fcOK.SyncAll(context.Background()); err != nil {
 		t.Fatalf("正确凭据拉取应成功: %v", err)
@@ -226,7 +226,7 @@ func TestFederationSync_AuthSuccessAndFailure(t *testing.T) {
 	}
 
 	// 错误 SK：拉取失败（401，fail-closed）。
-	fcBad := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: ts.URL, AccessKey: testAK, AccessKeySecret: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	fcBad, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: ts.URL, AccessKey: testAK, AccessKeySecret: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcBad.Close)
 	if err := fcBad.SyncAll(context.Background()); err == nil {
 		t.Fatalf("错误 SK 拉取应返回错误（fail-closed 401）")
@@ -333,7 +333,7 @@ func TestDualHubPeering_NodesVisible(t *testing.T) {
 	t.Cleanup(func() { tsA.Close(); _ = hA.Close() })
 
 	// A 的联邦客户端指向 B，同步一次。
-	fcA := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: tsB.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: tsB.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
 		t.Fatalf("hub-A 拉取 hub-B 节点表: %v", err)
@@ -413,7 +413,7 @@ func TestDualHubPeering_MeshNotLeaked(t *testing.T) {
 	tsA := httptest.NewServer(hA.Handler())
 	t.Cleanup(func() { tsA.Close(); _ = hA.Close() })
 
-	fcA := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: tsB.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: tsB.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
 		t.Fatalf("hub-A 拉取 hub-B 节点表: %v", err)

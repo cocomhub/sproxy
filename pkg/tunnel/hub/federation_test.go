@@ -5,11 +5,19 @@ package hub_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -44,7 +52,7 @@ func TestFederationClient_SyncFromPeer(t *testing.T) {
 		{"id": "node-b1", "addr": "192.168.1.2:9000", "mesh": "M"},
 		{"id": "node-b2", "addr": "192.168.1.3:9000", "mesh": ""},
 	}, nil)
-	fc := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: peer.URL}}, 30*time.Second, 5*time.Second, testFedLogger())
+	fc, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: peer.URL}}, 30*time.Second, 5*time.Second, testFedLogger())
 	t.Cleanup(fc.Close)
 
 	if err := fc.SyncAll(context.Background()); err != nil {
@@ -72,7 +80,7 @@ func TestFederationClient_StaleWhileError(t *testing.T) {
 	peer := testFedPeer(t, []map[string]string{
 		{"id": "node-b1", "addr": "192.168.1.2:9000", "mesh": ""},
 	}, &fail)
-	fc := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: peer.URL}}, 30*time.Second, 5*time.Second, testFedLogger())
+	fc, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: peer.URL}}, 30*time.Second, 5*time.Second, testFedLogger())
 	t.Cleanup(fc.Close)
 
 	if err := fc.SyncAll(context.Background()); err != nil {
@@ -91,7 +99,7 @@ func TestFederationClient_StaleWhileError(t *testing.T) {
 // TestFederationClient_DefaultLoopbackURL：peer.URL 为空时归一化回落默认 loopback
 // 地址（确定性断言，不发起网络请求——避免依赖本机 18083 端口是否有服务导致的 flaky）。
 func TestFederationClient_DefaultLoopbackURL(t *testing.T) {
-	fc := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB"}}, 30*time.Second, 5*time.Second, testFedLogger())
+	fc, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB"}}, 30*time.Second, 5*time.Second, testFedLogger())
 	t.Cleanup(fc.Close)
 	peers := fc.Peers()
 	if len(peers) != 1 {
@@ -105,7 +113,7 @@ func TestFederationClient_DefaultLoopbackURL(t *testing.T) {
 	}
 
 	// 空 ID + 空 URL：两者都归一为默认 URL（去重 key 冲突检测依据）。
-	fc2 := hub.NewFederationClient([]hub.FederationPeer{{}}, 30*time.Second, 5*time.Second, testFedLogger())
+	fc2, _ := hub.NewFederationClient([]hub.FederationPeer{{}}, 30*time.Second, 5*time.Second, testFedLogger())
 	t.Cleanup(fc2.Close)
 	p2 := fc2.Peers()
 	if len(p2) != 1 || p2[0].ID != hub.DefaultFederationPeerURL || p2[0].URL != hub.DefaultFederationPeerURL {
@@ -119,7 +127,7 @@ func TestFederationClient_MeshPreserved(t *testing.T) {
 		{"id": "node-m1", "addr": "10.0.0.1:9000", "mesh": "meshA"},
 		{"id": "node-m2", "addr": "10.0.0.2:9000", "mesh": "meshB"},
 	}, nil)
-	fc := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: peer.URL}}, 30*time.Second, 5*time.Second, testFedLogger())
+	fc, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: peer.URL}}, 30*time.Second, 5*time.Second, testFedLogger())
 	t.Cleanup(fc.Close)
 	if err := fc.SyncAll(context.Background()); err != nil {
 		t.Fatalf("SyncAll: %v", err)
@@ -138,7 +146,7 @@ func TestFederationClient_DedupAcrossPeers(t *testing.T) {
 	body := []map[string]string{{"id": "node-x", "addr": "10.0.0.1:9000", "mesh": "M"}}
 	peerA := testFedPeer(t, body, nil)
 	peerB := testFedPeer(t, body, nil)
-	fc := hub.NewFederationClient([]hub.FederationPeer{
+	fc, _ := hub.NewFederationClient([]hub.FederationPeer{
 		{ID: "peerA", URL: peerA.URL},
 		{ID: "peerB", URL: peerB.URL},
 	}, 30*time.Second, 5*time.Second, testFedLogger())
@@ -156,7 +164,7 @@ func TestFederationClient_DedupAcrossPeers(t *testing.T) {
 func TestFederationClient_ConcurrentSync(t *testing.T) {
 	peerA := testFedPeer(t, []map[string]string{{"id": "node-a", "addr": "10.0.0.1:9000", "mesh": ""}}, nil)
 	peerB := testFedPeer(t, []map[string]string{{"id": "node-b", "addr": "10.0.0.2:9000", "mesh": ""}}, nil)
-	fc := hub.NewFederationClient([]hub.FederationPeer{
+	fc, _ := hub.NewFederationClient([]hub.FederationPeer{
 		{ID: "peerA", URL: peerA.URL},
 		{ID: "peerB", URL: peerB.URL},
 	}, 30*time.Second, 5*time.Second, testFedLogger())
@@ -183,7 +191,7 @@ func TestFederationClient_ConcurrentSync(t *testing.T) {
 // TestFederationClient_StartContextCancel：Start 启动后台拉取，ctx 取消后 goroutine 退出。
 func TestFederationClient_StartContextCancel(t *testing.T) {
 	peer := testFedPeer(t, []map[string]string{{"id": "node-b1", "addr": "192.168.1.2:9000", "mesh": ""}}, nil)
-	fc := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: peer.URL}}, 10*time.Millisecond, 5*time.Second, testFedLogger())
+	fc, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: peer.URL}}, 10*time.Millisecond, 5*time.Second, testFedLogger())
 	t.Cleanup(fc.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -203,4 +211,134 @@ func TestFederationClient_StartContextCancel(t *testing.T) {
 	// ctx 取消后不 panic、Candidates 仍可读（goroutine 应退出）。
 	time.Sleep(50 * time.Millisecond)
 	_ = fc.Candidates()
+}
+
+// ---- TLS 安全面（S-Medium 闭环）测试 ----
+
+// writeCertPEM 把 x509 证书写为 PEM 文件，返回路径（作 ca_file）。
+func writeCertPEM(t *testing.T, cert *x509.Certificate) string {
+	t.Helper()
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(path, pemBytes, 0644); err != nil {
+		t.Fatalf("write ca.pem: %v", err)
+	}
+	return path
+}
+
+// newSelfSignedCert 生成一个新的自签证书（作错误的 CA / 不受信任的对端）。
+func newSelfSignedCert(t *testing.T) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "federation-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		IsCA:         true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+	return cert
+}
+
+// TestFederationClient_CAFileStrictVerify：ca_file 指向对端自签证书时**严格校验**
+// 成功（受信 CA 而非跳过校验）——远程自签 hub 的正确配置方式。
+func TestFederationClient_CAFileStrictVerify(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"node-tls","addr":"10.0.0.1:9000","mesh":""}]`))
+	}))
+	t.Cleanup(srv.Close)
+	caPath := writeCertPEM(t, srv.Certificate())
+	fc, err := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerTLS", URL: srv.URL, CAFile: caPath}}, 30*time.Second, 5*time.Second, testFedLogger())
+	if err != nil {
+		t.Fatalf("NewFederationClient: %v", err)
+	}
+	t.Cleanup(fc.Close)
+	if err := fc.SyncAll(context.Background()); err != nil {
+		t.Fatalf("ca_file 严格校验应成功: %v", err)
+	}
+	cands := fc.Candidates()
+	if len(cands) != 1 || cands[0].ID != "node-tls" {
+		t.Fatalf("候选应含 node-tls, got %+v", cands)
+	}
+}
+
+// TestFederationClient_CAFileWrongCA：ca_file 指向错误 CA 时校验失败（fail-closed，
+// 不因配置了 ca_file 而绕过校验）。
+func TestFederationClient_CAFileWrongCA(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(srv.Close)
+	wrongCA := writeCertPEM(t, newSelfSignedCert(t))
+	fc, err := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerTLS", URL: srv.URL, CAFile: wrongCA}}, 30*time.Second, 5*time.Second, testFedLogger())
+	if err != nil {
+		t.Fatalf("NewFederationClient: %v", err)
+	}
+	t.Cleanup(fc.Close)
+	if err := fc.SyncAll(context.Background()); err == nil {
+		t.Fatalf("错误 CA 应校验失败（证书不受信）")
+	}
+}
+
+// TestFederationClient_DefaultStrictVerify：默认（无 ca_file、无 insecure）严格校验
+// TLS——自签对端证书不被系统根池信任，拉取失败（fail-closed，不默认跳过）。
+func TestFederationClient_DefaultStrictVerify(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(srv.Close)
+	fc, err := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerTLS", URL: srv.URL}}, 30*time.Second, 5*time.Second, testFedLogger())
+	if err != nil {
+		t.Fatalf("NewFederationClient: %v", err)
+	}
+	t.Cleanup(fc.Close)
+	if err := fc.SyncAll(context.Background()); err == nil {
+		t.Fatalf("默认应严格校验 TLS，自签证书应拉取失败")
+	}
+}
+
+// TestFederationClient_CAFileInvalid：ca_file 文件无有效 PEM 证书时 NewFederationClient
+// 返回 error（fail-fast，不静默回退）。
+func TestFederationClient_CAFileInvalid(t *testing.T) {
+	badPath := filepath.Join(t.TempDir(), "bad.pem")
+	if err := os.WriteFile(badPath, []byte("not a certificate"), 0644); err != nil {
+		t.Fatalf("write bad.pem: %v", err)
+	}
+	_, err := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerTLS", URL: "https://127.0.0.1:18083", CAFile: badPath}}, 30*time.Second, 5*time.Second, testFedLogger())
+	if err == nil {
+		t.Fatalf("无效 CA 文件应返回 error")
+	}
+}
+
+// TestFederationClient_LoopbackInsecure：loopback peer + insecure_skip_verify 跳过
+// 校验成功（本机自签开发），远程不在此构造层限制（Config.Validate 已强制 loopback）。
+func TestFederationClient_LoopbackInsecure(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"node-loop","addr":"10.0.0.1:9000","mesh":""}]`))
+	}))
+	t.Cleanup(srv.Close)
+	fc, err := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerLocal", URL: srv.URL, InsecureSkipVerify: true}}, 30*time.Second, 5*time.Second, testFedLogger())
+	if err != nil {
+		t.Fatalf("NewFederationClient: %v", err)
+	}
+	t.Cleanup(fc.Close)
+	if err := fc.SyncAll(context.Background()); err != nil {
+		t.Fatalf("loopback insecure 应成功: %v", err)
+	}
 }
