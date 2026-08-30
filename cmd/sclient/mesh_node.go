@@ -45,6 +45,9 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			discover, _ := cmd.Flags().GetBool("discover")
 			discoverInterval, _ := cmd.Flags().GetDuration("discover-interval")
 			gatewayAddr, _ := cmd.Flags().GetString("gateway-addr")
+			mdns, _ := cmd.Flags().GetBool("mdns")
+			mdnsSecret, _ := cmd.Flags().GetString("mdns-secret")
+			signalAddr, _ := cmd.Flags().GetString("signal-addr")
 			stunServers, _ := cmd.Flags().GetStringSlice("stun")
 			insecure, _ := cmd.Flags().GetBool("insecure")
 			if stunServers != nil {
@@ -69,11 +72,13 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			if cfg == nil {
 				cfg = client.DefaultConfig()
 			}
-			if hubURL == "" {
-				hubURL = cfg.HubURL
-			}
-			if hubURL == "" {
-				hubURL = cfg.ServerURL
+			if !mdns { // 纯 mDNS 模式不解析 hub 配置（不经 hub）
+				if hubURL == "" {
+					hubURL = cfg.HubURL
+				}
+				if hubURL == "" {
+					hubURL = cfg.ServerURL
+				}
 			}
 			// SproxySig 认证 AccessKey/SK 从根 --access-key/--access-key-secret 或配置派生
 			// （信令/节点列表/网关/hub 注册准入均走签名，Secret 永不上线）。hub 注册
@@ -116,6 +121,10 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				Discover:          discover,
 				DiscoveryInterval: discoverInterval,
 				GatewayAddr:       gatewayAddr,
+				EnableMDNS:        mdns,
+				MDNSOnly:          mdns,
+				SignalAddr:        signalAddr,
+				MDNSPeerSecret:    mdnsSecret,
 				Logger:            logger,
 			})
 		},
@@ -130,6 +139,9 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 	cmd.Flags().Bool("discover", true, "启用自动对等发现（经 hub 节点列表发现其他 mesh node，并行 webrtc 自动直连并保持，形成 full-mesh 拓扑）")
 	cmd.Flags().Duration("discover-interval", 10*time.Second, "对等发现周期（如 1s 测试 / 30s 生产）")
 	cmd.Flags().String("gateway-addr", mesh.GatewayDefaultAddr, "本地网关监听地址（mesh connect --gateway 复用已建直连链路的入口；仅 loopback，安全默认；同机多节点用 127.0.0.1:0 随机端口）")
+	cmd.Flags().Bool("mdns", false, "纯 mDNS 局域网模式（不经 hub）：广播本节点（node-id + 服务 + 直连信令端点）并经 mDNS 发现同网段节点自动直连。两节点同网段运行 `mesh node --mdns` 即可互发现并 mesh connect 直连。注意：需监听局域网接口（直连信令 + mDNS 组播），Windows 首次运行会弹防火墙授权")
+	cmd.Flags().String("signal-addr", "", "直连 webrtc 信令监听地址（--mdns 用；空默认绑定主局域网 IP 的随机端口；可显式指定如 127.0.0.1:0 收敛 loopback 开发/测试避免防火墙弹窗，但仅本机可达）")
+	cmd.Flags().String("mdns-secret", "", "mDNS 模式共享密钥（直连信令 offer 与 mDNS TXT 均 HMAC 签名校验，防未授权 peer 借本节点作中继/出口、防广告伪造；同 mesh 所有节点须一致；为空 = 无认证 LAN 信任，出口由 dial-allow 策略约束）")
 	cmd.Flags().StringSlice("stun", nil,
 		"STUN 服务器地址（可重复/逗号分隔，如 stun:stun.qq.com:3478）；默认 Google+腾讯+小米混合，全不通时请指定本地可达服务器")
 	cmd.Flags().StringSlice("turn", nil,

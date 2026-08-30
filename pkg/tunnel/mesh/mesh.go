@@ -164,6 +164,23 @@ func Dial(ctx context.Context, svc *client.FileClient, signaler *hub.HubSignaler
 	return &Result{Conn: conn, Kind: KindRelay}, nil
 }
 
+// DialDirect 经给定信令器直连目标（mDNS 无 hub 场景）：无 hub 中继回落，仅走
+// webrtc 打洞直连。signaler 为直连信令器（DialDirectSignaler 的返回，已连到对端
+// 广播的信令端点）或任何实现 webrtc.Signaler 的通道；target 由 mDNS 服务解析获得。
+// 拨号成功后调用方负责 Close signaler（信令握手已结束，数据面独立）。
+func DialDirect(ctx context.Context, signaler webrtc.Signaler, target *client.MeshService) (*Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	probeCtx, probeCancel := context.WithTimeout(ctx, WebRTCProbeTimeout)
+	conn, err := webrtc.DialWithSignalerCtx(probeCtx, target.Node, signaler)
+	probeCancel()
+	if err != nil {
+		return nil, err
+	}
+	return WebRTCStream(ctx, conn, target.Addr)
+}
+
 // AutoRegisterParams 是一次自动注册（mesh/p2p 信令前置）的参数。
 type AutoRegisterParams struct {
 	// HubURL 是 hub 地址（空时回落 ServerURL）。

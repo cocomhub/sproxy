@@ -78,6 +78,26 @@ type NodeConfig struct {
 	// GatewayNotify 是可选的观测通道：网关实际监听地址（含回落随机端口）就绪时
 	// 非阻塞发送（供测试/上层启动流程感知）。
 	GatewayNotify chan<- string
+	// EnableMDNS 启用 mDNS 局域网发现：广播本节点（node-id + 服务 + 直连信令端点）、
+	// 浏览并自动直连同网段其他 mesh node。MDNSOnly=true 时进入纯 mDNS 无 hub 模式
+	// （本节点不注册 hub，直连信令替代 HubSignaler，供局域网内互发现与直连）。
+	EnableMDNS bool
+	// MDNSOnly 强制纯 mDNS 无 hub 模式（mesh node --mdns）：忽略 HubURL/ServerURL，
+	// 不注册 hub。与 EnableMDNS 一起由 CLI 设置。
+	MDNSOnly bool
+	// MDNSPort 是 mDNS 组播端口（0 回落 5353；测试可覆盖）。
+	MDNSPort int
+	// SignalAddr 是直连 webrtc 信令的监听地址（空回落 ":0" 全接口随机端口）。
+	// 测试可指定 "127.0.0.1:0" 收敛到 loopback（避免防火墙弹窗）。实际广播的
+	// saddr 按监听 host 派生：通配 host 用主局域网 IP，显式 host 原样保留。
+	SignalAddr string
+	// MDNSPeerSecret 是 mDNS 模式的共享密钥（--mdns-secret）。非空时：
+	//   - 直连信令 offer 携带 HMAC 签名，listener 校验（防未授权 peer 借本节点作
+	//     中继/出口）；
+	//   - mDNS TXT 宣告携带 HMAC 签名，浏览方校验（防伪造/MITM）。
+	// 同 mesh 所有节点须配置相同密钥；空 = 无认证（LAN 信任模型，出口由
+	// dial-allow 策略约束）。
+	MDNSPeerSecret string
 	// Logger 是会话日志（nil 用 slog.Default()）。
 	Logger *slog.Logger
 }
@@ -90,6 +110,12 @@ func RunNode(ctx context.Context, cfg NodeConfig) error {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	// 纯 mDNS 无 hub 模式：不注册 hub，直连信令 + mDNS 发现/广播。无重连语义
+	// （无 hub 会话可断）；ctx 取消即优雅退出。触发条件：显式 MDNSOnly（mesh node
+	// --mdns），或 EnableMDNS 且无 hub 可连（HubURL/ServerURL 均为空）。
+	if cfg.MDNSOnly || (cfg.EnableMDNS && cfg.HubURL == "" && cfg.ServerURL == "") {
+		return runNodeMDNSOnly(ctx, cfg, logger)
 	}
 	delay := nodeReconnectBaseDelay
 	for {
@@ -243,6 +269,9 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 // runWebRTCAcceptLoop 循环接受 webrtc 直连：每条直连用 relay.Serve 分发
 // （dial 帧→出口拨号 / HTTP 中继到 localAddr）。
 //
+// signaler 抽象信令通道：hub 模式传 *hub.HubSignaler（HTTP 存转桥），mDNS 无 hub
+// 模式传 directSignalerServer（TCP 直连信令）。两者均实现 webrtc.Signaler。
+//
 // 自动对等发现的拨号（临时身份 disc-<base>-<unixnano>）接受后，把该链路注册进共享
 // linkPool（键=拨号者真实 node ID），使本节点网关也能回拨对端（同一条已建链路双向
 // 服务互访）；serve 结束（链路断开）removeIf 摘除（重连竞态安全）。mesh connect /
@@ -251,14 +280,17 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 // 空闲（ErrNoIncomingConnection，signalingTimeout 内无对端发起连接）不是失败，
 // 不重注册继续监听（P1-11）；ctx 取消返回 nil；真实信令失败返回错误触发整 cycle
 // 重连（节点被 hub 移除时 secret 已轮换，重连即拿新 secret 自愈）。
-func runWebRTCAcceptLoop(ctx context.Context, signaler *hub.HubSignaler, nodeID, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger, links *linkPool, opts []relay.ServeOptions) error {
+func runWebRTCAcceptLoop(ctx context.Context, signaler webrtc.Signaler, nodeID, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger, links *linkPool, opts []relay.ServeOptions) error {
 	for {
 		conn, err := webrtc.ListenWithSignalerCtx(ctx, nodeID, signaler)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			if errors.Is(err, webrtc.ErrNoIncomingConnection) {
+			if errors.Is(err, webrtc.ErrNoIncomingConnection) || errors.Is(err, errDirectSignalConn) {
+				// ErrNoIncomingConnection：超时窗口内无 offer → 空闲，继续监听（P1-11）。
+				// errDirectSignalConn：直连信令一条连接异常（端口扫描/畸形帧）→ 已关闭该
+				// 连接，属 per-connection 瞬时失败，继续监听而非把整节点判死（F1）。
 				continue
 			}
 			return err

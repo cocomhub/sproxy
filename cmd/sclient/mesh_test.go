@@ -59,7 +59,7 @@ func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
 	if node.Use != "node" {
 		t.Fatalf("unexpected node Use: %q", node.Use)
 	}
-	for _, name := range []string{"hub", "node-id", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "stun"} {
+	for _, name := range []string{"hub", "node-id", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "mdns", "signal-addr", "stun"} {
 		if f := node.Flags().Lookup(name); f == nil {
 			t.Errorf("node 缺少 flag: %s", name)
 		}
@@ -72,10 +72,35 @@ func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 	if connect.Use != "connect <service> [-l :port]" {
 		t.Fatalf("unexpected connect Use: %q", connect.Use)
 	}
-	for _, name := range []string{"listen", "webrtc", "hub", "node-id", "gateway"} {
+	for _, name := range []string{"listen", "webrtc", "hub", "node-id", "gateway", "mdns"} {
 		if f := connect.Flags().Lookup(name); f == nil {
 			t.Errorf("connect 缺少 flag: %s", name)
 		}
+	}
+}
+
+// TestMeshConnect_MDNSDispatch：`mesh connect <svc> --mdns` 走纯 mDNS 路径
+// （不经 hub/svc），错误消息含 "mDNS" 证明路由正确。
+func TestMeshConnect_MDNSDispatch(t *testing.T) {
+	oldTimeout := mdnsLookupTimeout
+	mdnsLookupTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { mdnsLookupTimeout = oldTimeout })
+	// mDNS 组播收敛 loopback，避免 Windows 防火墙弹窗。
+	mesh.SetMDNSLoopbackOnly(true)
+	t.Cleanup(func() { mesh.SetMDNSLoopbackOnly(false) })
+
+	var out bytes.Buffer
+	cmd := newCmdMeshConnect(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	cmd.SetContext(context.Background())
+	if err := cmd.Flags().Set("mdns", "true"); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.RunE(cmd, []string{"nosuchsvc"})
+	if err == nil {
+		t.Fatal("期望 mDNS 路径报错（未发现服务或 mDNS 不可用）")
+	}
+	if !strings.Contains(err.Error(), "mDNS") {
+		t.Fatalf("期望错误含 mDNS, got: %v", err)
 	}
 }
 
