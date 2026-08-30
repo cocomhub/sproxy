@@ -18,6 +18,8 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	kad "github.com/cocomhub/sproxy/pkg/tunnel/hub/ext/kad"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
@@ -262,11 +264,29 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if fedClient != nil {
 		h.SetFederationClient(fedClient) // /api/hub/nodes 合并联邦候选节点（发现源：+ 联邦候选）
 	}
+	// 先停 SyncManager（drain 同步任务）再关 Handlers：defer LIFO，h.Close 先注册
+	// （后执行），syncMgr.Stop 后注册（先执行）——同步任务收尾完成后才关 Handlers（审查 M-1）。
 	defer func() {
 		if err := h.Close(); err != nil {
 			slog.Warn(logHandlersCloseErr, "error", err.Error())
 		}
 	}()
+	// 文件同步 SyncManager：配置了 sync（sync.max_concurrent 或 sync_remotes 非空）时装配。
+	// 远程访问用 HTTP 直连远程 sproxy（sync_remotes URL + SproxySig 凭据）；mesh 通道为后续增强。
+	if cfg.Sync.MaxConcurrent > 0 || len(cfg.SyncRemotes) > 0 {
+		remotes := make([]syncmgr.RemoteConfig, 0, len(cfg.SyncRemotes))
+		for _, r := range cfg.SyncRemotes {
+			remotes = append(remotes, syncmgr.RemoteConfig{
+				Name: r.Name, URL: r.URL, AccessKey: r.AccessKey, AccessKeySecret: r.AccessKeySecret,
+			})
+		}
+		syncMgr := syncmgr.NewManager(cfg.UploadsDir, h.SyncQuotaStore(), int(server.CategoryUserFiles),
+			remotes, syncexec.NewExecutor(cfg.UploadsDir, logger.With("component", "sync_exec")),
+			logger.With("component", "sync"),
+			&syncmgr.Config{MaxConcurrent: cfg.Sync.MaxConcurrent, TaskTTL: cfg.Sync.TaskTTL})
+		h.SetSyncMgr(syncMgr)
+		defer syncMgr.Stop()
+	}
 
 	protocol := "http"
 	if cfg.TLS.Enabled {

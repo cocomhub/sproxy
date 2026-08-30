@@ -168,6 +168,24 @@ type WebConfig struct {
 	Tunnel bool `yaml:"tunnel" mapstructure:"tunnel"`
 }
 
+// SyncConfig 是文件同步任务（SyncManager）配置。
+type SyncConfig struct {
+	// MaxConcurrent 最大并发同步任务数，默认 3。
+	MaxConcurrent int `yaml:"max_concurrent" mapstructure:"max_concurrent"`
+	// TaskTTL 完成任务保留时间，默认 24h。
+	TaskTTL time.Duration `yaml:"task_ttl" mapstructure:"task_ttl"`
+}
+
+// SyncRemoteConfig 是同步远程节点配置（sync_remotes 数组元素）。
+// URL 必须为 http(s)://host:port；AccessKey/AccessKeySecret 是远程 sproxy 认可的
+// SproxySig 凭据（未配置时创建远程任务在 SyncManager 层 fail-closed 拒绝，Validate 只校验 URL/name）。
+type SyncRemoteConfig struct {
+	Name            string `yaml:"name" mapstructure:"name"`
+	URL             string `yaml:"url" mapstructure:"url"`
+	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
+	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
+}
+
 type Config struct {
 	Addr       string `yaml:"addr" mapstructure:"addr"`
 	UploadsDir string `yaml:"uploads_dir" mapstructure:"uploads_dir"`
@@ -201,6 +219,10 @@ type Config struct {
 
 	// Web UI 行为配置
 	Web WebConfig `yaml:"web" mapstructure:"web"`
+
+	// 文件同步任务配置（SyncManager）
+	Sync        SyncConfig         `yaml:"sync" mapstructure:"sync"`
+	SyncRemotes []SyncRemoteConfig `yaml:"sync_remotes" mapstructure:"sync_remotes"`
 
 	// 存储空间控制
 	MaxStorageBytes int64 `yaml:"max_storage_bytes" mapstructure:"max_storage_bytes"` // 存储上限（字节），0 = 不限制
@@ -241,6 +263,10 @@ func Default() *Config {
 		},
 		Web: WebConfig{
 			Tunnel: true,
+		},
+		Sync: SyncConfig{
+			MaxConcurrent: 3,
+			TaskTTL:       24 * time.Hour,
 		},
 		ChunkSize:                 size.DefaultChunkSize,
 		UploadSessionTTL:          24 * time.Hour,
@@ -304,6 +330,12 @@ func (c *Config) SetDefaults() {
 	}
 	if c.CloudFailedTaskTTL <= 0 {
 		c.CloudFailedTaskTTL = 1 * time.Hour
+	}
+	if c.Sync.MaxConcurrent <= 0 {
+		c.Sync.MaxConcurrent = 3
+	}
+	if c.Sync.TaskTTL <= 0 {
+		c.Sync.TaskTTL = 24 * time.Hour
 	}
 	if c.Hub.MaxConnections <= 0 {
 		c.Hub.MaxConnections = 256
@@ -448,6 +480,34 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("hub.federation.peers[%d].id %q 重复", i, p.ID)
 			}
 			seenPeerIDs[key] = struct{}{}
+		}
+	}
+	// sync_remotes 校验：URL 合法（http/https + host）、name 唯一非空。
+	// 凭据 fail-closed 在 SyncManager.CreateTask 层执行（Validate 不要求凭据——
+	// 允许配置空凭据的 remote 供未启用 access_keys 的远程节点使用，创建任务时才拒绝）。
+	seenSyncRemoteNames := make(map[string]struct{}, len(c.SyncRemotes))
+	for i, r := range c.SyncRemotes {
+		if r.Name == "" {
+			return fmt.Errorf("sync_remotes[%d].name 为空，名称不能为空字符串", i)
+		}
+		if _, dup := seenSyncRemoteNames[r.Name]; dup {
+			return fmt.Errorf("sync_remotes[%d].name %q 重复", i, r.Name)
+		}
+		seenSyncRemoteNames[r.Name] = struct{}{}
+		u, perr := url.Parse(r.URL)
+		if perr != nil {
+			return fmt.Errorf("sync_remotes[%d].url 非法: %v", i, perr)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("sync_remotes[%d].url scheme %q 无效，仅允许 http/https", i, u.Scheme)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("sync_remotes[%d].url 缺少 host: %q", i, r.URL)
+		}
+		// 明文 http 仅限 loopback（本机调试）：远程 remote 用 http 会把 SproxySig
+		// AK/SK 明文上线，对齐联邦 peering 的 TLS 安全边界（安全审查 MEDIUM）。
+		if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+			return fmt.Errorf("sync_remotes[%d].url 使用明文 http 且非 loopback（AK/SK 将明文上线；远程 remote 请用 https，本机调试可用 http://127.0.0.1）: %q", i, r.URL)
 		}
 	}
 	return nil

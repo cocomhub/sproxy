@@ -720,3 +720,35 @@ func TestEngineSync_ContextCancel_SelectBranch(t *testing.T) {
 		t.Fatalf("ctx 取消应有 ActionError 结果（select ctx.Done 分支），got %+v", job.Results)
 	}
 }
+
+// TestEngineSync_FollowSymlinks_NoEscape 验证 follow_symlinks=true 时，LocalFS 的
+// confine（EvalSymlinks 逐级解析 + 前缀校验）仍封堵指向 root 外的符号链接逃逸——
+// 枚举层 Stat 对逃逸 symlink 返回 error → 保留为 symlink 条目 → 引擎跳过，
+// 外部内容绝不落盘（安全审查 MEDIUM）。
+func TestEngineSync_FollowSymlinks_NoEscape(t *testing.T) {
+	outDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outDir, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srcRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcRoot, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outDir, "secret.txt"), filepath.Join(srcRoot, "link")); err != nil {
+		t.Skipf("当前环境无法创建符号链接: %v", err)
+	}
+
+	dstRoot := t.TempDir()
+	job := &Job{Direction: DirectionPush, Src: "", Dst: "", Recursive: true, FollowSymlinks: true, ConflictPolicy: ConflictSkip}
+	if err := (&Engine{Concurrency: 1}).Sync(context.Background(), NewLocalFS(srcRoot, nil), NewLocalFS(dstRoot, nil), job); err != nil {
+		t.Fatalf("Sync error: %v", err)
+	}
+	// 外部 secret 内容不得落盘（link 不应被复制为含外部内容的目标）
+	if _, err := os.Stat(filepath.Join(dstRoot, "link")); err == nil {
+		t.Fatalf("逃逸符号链接不应落盘")
+	}
+	// a.txt 正常同步
+	if data, err := os.ReadFile(filepath.Join(dstRoot, "a.txt")); err != nil || string(data) != "a" {
+		t.Fatalf("a.txt 应正常同步，err=%v", err)
+	}
+}
