@@ -1035,3 +1035,36 @@ func TestHubServer_RegisterVIPInAck_NoSecret(t *testing.T) {
 		t.Fatal("HandleConn did not return")
 	}
 }
+
+// TestHubServer_RemoveReRegister_NoDupVIPInRouteTable（整体审查发现 2 回归）：
+// 并发 Remove + registerNode 后，**路由表内**不得出现两个节点共享同一虚拟 IP
+// （分配器侧由 TestHubServer_RemoveReRegister_NoDupVIP 锁定，本测试补路由表侧不变量）。
+func TestHubServer_RemoveReRegister_NoDupVIPInRouteTable(t *testing.T) {
+	rt := NewMeshRouteTable()
+	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
+
+	var wg sync.WaitGroup
+	for range 40 {
+		wg.Go(func() {
+			m := newTestMux(t)
+			defer m.Close()
+			_, _ = srv.registerNode(&RegisterFrame{NodeID: "node-x", AccessKey: testAK}, m)
+			_ = rt.Remove("node-x")
+		})
+	}
+	wg.Wait()
+
+	// 路由表侧唯一性不变量：同 mesh 内两节点不得共享同一 VIP。
+	seen := make(map[netip.Addr]string)
+	for _, mesh := range rt.AllMeshes() {
+		for _, n := range rt.List(mesh) {
+			if !n.VirtualIP.IsValid() {
+				continue
+			}
+			if prev, dup := seen[n.VirtualIP]; dup {
+				t.Fatalf("路由表两节点共享虚拟 IP %v: %s vs %s（重复分配竞态）", n.VirtualIP, prev, n.ID)
+			}
+			seen[n.VirtualIP] = string(n.ID)
+		}
+	}
+}

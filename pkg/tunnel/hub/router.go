@@ -516,12 +516,22 @@ func NewHubServer(rt *MeshRouteTable, auth *Authenticator, logger *slog.Logger, 
 		// I-1 竞态守卫：Remove 先删节点再触发本回调。若同一 node-id 已被并发重注册
 		// 到**同一 mesh**（Add 覆盖旧连接后该 mesh 表内仍有节点），**不释放**——新注册
 		// 已复用旧 VIP（assigned 命中），释放会破坏虚拟 IP 唯一性（两个存活节点共享
-		// 地址）。用 HasInMesh（而非全局 Has）判断：跨 mesh 移动时旧 mesh 表已移除
-		// 节点，HasInMesh 为 false，正确释放旧归属（S-2）。
-		// 残余 TOCTOU 窗口（本检查与 Release 之间的重注册）极小且不引入安全面，
-		// 已由分配器 used 反向映射的归属校验兜底；并发交错由
-		// TestHubServer_RemoveReRegister_NoDupVIP 锁定。
-		if s.allocator == nil || s.rt.HasInMesh(mesh, id) {
+		// 地址）。
+		// 双保险（整体审查发现 2 加固）：
+		//   1) LookupInfo 命中且同 mesh 且 VirtualIP 已写回路由表 → 重注册已接管，不释放；
+		//   2) HasInMesh（非全局 Has）判断：跨 mesh 移动时旧 mesh 表已移除节点，
+		//      HasInMesh 为 false，正确释放旧归属（S-2）。
+		// 残余 TOCTOU 窗口（本检查与 Release 之间的重注册，节点未 Add 前路由表查不到）
+		// 极小且不引入安全面，由分配器 used 反向映射归属校验兜底；并发交错由
+		// TestHubServer_RemoveReRegister_NoDupVIP（分配器侧）与
+		// TestHubServer_RemoveReRegister_NoDupVIPInRouteTable（路由表侧）锁定。
+		if s.allocator == nil {
+			return
+		}
+		if info, ok := s.rt.LookupInfo(id); ok && info.Mesh == mesh && info.VirtualIP.IsValid() {
+			return // 同 mesh 重注册已把 VirtualIP 写回路由表：不释放。
+		}
+		if s.rt.HasInMesh(mesh, id) {
 			return
 		}
 		s.allocator.Release(mesh, string(id))
