@@ -15,6 +15,7 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"gopkg.in/yaml.v3"
 )
 
@@ -389,26 +390,28 @@ func (c *Config) Validate() error {
 	if c.Hub.Federation.Enabled {
 		seenPeerIDs := make(map[string]struct{}, len(c.Hub.Federation.Peers))
 		for i, p := range c.Hub.Federation.Peers {
-			if p.URL == "" {
-				// 空 URL 回落默认 loopback（安全面：默认只与本机 hub peering），
-				// 无需校验，也不计入重复 ID 检测的 key 冲突（key 用默认 URL）。
-				continue
+			peerURL := p.URL
+			if peerURL == "" {
+				// 空 URL 回落默认 loopback（安全面：默认只与本机 hub peering）。
+				// 仍以默认 URL 参与重复检测——两个空 URL peer 都回落同一默认
+				// 地址属配置冲突（运行时后写覆盖），启动时拦截。
+				peerURL = hub.DefaultFederationPeerURL
 			}
-			u, perr := url.Parse(p.URL)
+			u, perr := url.Parse(peerURL)
 			if perr != nil {
 				return fmt.Errorf("hub.federation.peers[%d].url 非法: %v", i, perr)
 			}
 			if u.Scheme != "http" && u.Scheme != "https" {
 				return fmt.Errorf("hub.federation.peers[%d].url scheme %q 无效，仅允许 http/https", i, u.Scheme)
 			}
-			if !isLoopbackHost(u.Hostname()) && p.AccessKeySecret == "" {
+			if p.URL != "" && !isLoopbackHost(u.Hostname()) && p.AccessKeySecret == "" {
 				// 远程 peering 必须显式配置凭据（AccessKey/Secret 对）——
 				// 未配置时无认证直连远程 hub 属暴露面，fail-closed 拒绝。
 				return fmt.Errorf("hub.federation.peers[%d].url %q 为远程地址，远程 peering 必须配置 access_key/access_key_secret", i, p.URL)
 			}
 			key := p.ID
 			if key == "" {
-				key = p.URL
+				key = peerURL
 			}
 			if _, dup := seenPeerIDs[key]; dup {
 				return fmt.Errorf("hub.federation.peers[%d].id %q 重复", i, p.ID)

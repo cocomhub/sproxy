@@ -101,6 +101,23 @@ func TestFederationConfig_Validate_DupPeerID(t *testing.T) {
 	}
 }
 
+// TestFederationConfig_Validate_DupEmptyURLPeer：两个空 URL 空 ID 的 peer 都回落
+// 默认 loopback 且归一化后 ID 同为默认 URL（缓存 key 冲突，运行时后写覆盖），
+// 启动时拦截（fail-fast）。
+func TestFederationConfig_Validate_DupEmptyURLPeer(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{}, // 空 URL 空 ID → 回落默认 127.0.0.1:18083，ID 归一为默认 URL
+		{}, // 同上 → key 冲突
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "重复") {
+		t.Fatalf("两个空 URL 空 ID peer 应判重复拒绝, got: %v", err)
+	}
+}
+
 // TestFederationConfig_Validate_EnabledNoPeers：联邦启用但无 peers 合法
 // （本 hub 仅作为被 peer，不主动拉取）。
 func TestFederationConfig_Validate_EnabledNoPeers(t *testing.T) {
