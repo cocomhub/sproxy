@@ -114,6 +114,10 @@ access_keys:
 #   # /api/hub/nodes 合并（路由表权威 + DHT + 联邦候选，去重）；入站端点
 #   # /api/hub/federation/nodes（受 SproxySig 认证保护，fail-closed）供对端拉取。
 #   # 联邦只提供发现/可达性，不改路由表状态；mesh 隔离不破坏（按拉取方 mesh 过滤）。
+#   # 跨 hub 转发（阶段3 B）：/api/relay/stream 目标节点在本 hub 路由表未命中但为联邦
+#   # 候选时，自动转发到上报该节点的对端 hub（A→hub1→hub2→B 链式中继），带防环
+#   # 保护（跳数上限 X-Relay-Hop + 路径回源拒绝 X-Relay-Path，环路返回 508）。
+#   # 转发复用对端 SproxySig 认证与 /api/relay/stream 协议，不跳过目标侧拨号策略。
 #   # 注意：未配置 access_keys 时（仅本地调试），联邦端点与 /api/hub/nodes 一样
 #   # 对任意请求者开放——生产务必配置 access_keys 并让双方共享同一 mesh 的凭据，
 #   # 否则 peer 拉到的节点只对同名 mesh 请求者可见（fail-closed，但会看不到）。

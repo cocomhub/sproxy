@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,18 @@ type RelayStreamRequest struct {
 	Target string `json:"target"`
 	Type   string `json:"type"` // 固定 "tcp"
 	Addr   string `json:"addr"` // 目标叶子要出站连接的 TCP 地址
+}
+
+// RelayStatusError 是 RelayStream 上游 hub 返回非 200 状态时的错误，携带状态码。
+// 跨 hub 转发（hub 联邦）据此把上游错误映射到对客户端的响应状态（502/504/508 等）。
+// 与旧版字符串错误兼容：Error() 包含状态码数字（既有测试按子串断言）。
+type RelayStatusError struct {
+	Status  int
+	Message string
+}
+
+func (e *RelayStatusError) Error() string {
+	return fmt.Sprintf("RelayStream: hub 返回 %d %s", e.Status, e.Message)
 }
 
 // RelayStream 通过 hub 的 /api/relay/stream 建立一条到目标叶子出口节点的
@@ -51,6 +64,14 @@ type RelayStreamRequest struct {
 //     deadline 与 ctx 取消 watchdog 保护；握手完成后清除 deadline，长连接数据面
 //     不受影响。
 func (c *FileClient) RelayStream(ctx context.Context, target, addr string) (net.Conn, error) {
+	return c.RelayStreamWithHeaders(ctx, target, addr, nil)
+}
+
+// RelayStreamWithHeaders 是 RelayStream 的扩展：额外携带自定义 HTTP 头
+// （如跨 hub 转发的防环元数据 X-Relay-Hop / X-Relay-Path）。nil/空 map 行为
+// 与 RelayStream 完全一致。非 200 状态返回 *RelayStatusError（携带状态码，
+// 供调用方映射错误）。
+func (c *FileClient) RelayStreamWithHeaders(ctx context.Context, target, addr string, headers map[string]string) (net.Conn, error) {
 	if target == "" || addr == "" {
 		return nil, fmt.Errorf("RelayStream: target 与 addr 均不能为空")
 	}
@@ -135,6 +156,17 @@ func (c *FileClient) RelayStream(ctx context.Context, target, addr string) (net.
 	} else if c.authToken != "" {
 		fmt.Fprintf(&b, "Authorization: Bearer %s\r\n", c.authToken)
 	}
+	// 自定义头（跨 hub 转发防环元数据等）：SproxySig 只签名 method/path/query/body，
+	// 头不参与签名（hop-by-hop 语义），此处直接写入。
+	for k, v := range headers {
+		// 防 CRLF 注入：拒绝含 \r\n 的头名/值（对端 hub 解析 header 时不受影响，但
+		// 防转发链上中间环节把注入带到下一跳）。
+		if strings.ContainsAny(k, "\r\n") || strings.ContainsAny(v, "\r\n") {
+			raw.Close()
+			return nil, fmt.Errorf("RelayStream: 非法自定义头 %q（含 CR/LF）", k)
+		}
+		fmt.Fprintf(&b, "%s: %s\r\n", k, v)
+	}
 	b.WriteString("Connection: close\r\n\r\n")
 	if _, werr := io.WriteString(raw, b.String()); werr != nil {
 		raw.Close()
@@ -155,19 +187,23 @@ func (c *FileClient) RelayStream(ctx context.Context, target, addr string) (net.
 	// S45：解析状态码而非脆弱的 Contains(" 200 ")。不要用 http.ReadResponse——
 	// CONNECT 200 后紧跟数据面字节，ReadResponse 会把数据当 body 消费，破坏流。
 	parts := strings.SplitN(strings.TrimSpace(statusLine), " ", 3)
-	statusCode := ""
+	statusCode := 0
 	if len(parts) >= 2 {
-		statusCode = parts[1]
+		statusCode, _ = strconv.Atoi(parts[1])
 	}
-	if statusCode != "200" {
+	if statusCode != 200 {
 		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
 		raw.Close()
-		if statusCode == "401" {
+		reason := strings.TrimSpace(string(rest))
+		if reason == "" && len(parts) >= 3 {
+			reason = strings.TrimSpace(parts[2])
+		}
+		if statusCode == 401 {
 			// I36：401 诊断错误——隧道/xfer 模式经 localMux 访问 /api/hub/services
 			// 成功，但本方法直拨 /api/relay/stream 仅 srvMux + Bearer。
-			return nil, fmt.Errorf("RelayStream: hub 返回 401 未授权（可能原因：隧道/xfer 模式 + 服务端强制 Bearer + 客户端未配 auth_token，请用 WithAuthToken 配置与 auth_token 一致的凭据）")
+			reason = "未授权（可能原因：隧道/xfer 模式 + 服务端强制 Bearer + 客户端未配 auth_token，请用 WithAuthToken 配置与 auth_token 一致的凭据）"
 		}
-		return nil, fmt.Errorf("RelayStream: hub 返回 %s%s", strings.TrimSpace(statusLine), string(rest))
+		return nil, &RelayStatusError{Status: statusCode, Message: reason}
 	}
 	// 读取剩余响应头直到空行
 	for {

@@ -342,3 +342,40 @@ func TestFederationClient_LoopbackInsecure(t *testing.T) {
 		t.Fatalf("loopback insecure 应成功: %v", err)
 	}
 }
+
+// TestFederationClient_PeerForNode：跨 hub 转发定位——PeerForNode 返回上报目标节点
+// 的联邦对端（mesh 严格匹配），未知/跨 mesh 返回 false。
+func TestFederationClient_PeerForNode(t *testing.T) {
+	peerA := testFedPeer(t, []map[string]string{
+		{"id": "node-a1", "addr": "10.0.0.1:9000", "mesh": "M"},
+	}, nil)
+	peerB := testFedPeer(t, []map[string]string{
+		{"id": "node-b1", "addr": "10.0.0.2:9000", "mesh": "M"},
+		{"id": "node-b2", "addr": "10.0.0.3:9000", "mesh": "N"},
+	}, nil)
+	fc, _ := hub.NewFederationClient([]hub.FederationPeer{
+		{ID: "peerA", URL: peerA.URL},
+		{ID: "peerB", URL: peerB.URL},
+	}, 30*time.Second, 5*time.Second, testFedLogger())
+	t.Cleanup(fc.Close)
+	if err := fc.SyncAll(context.Background()); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+
+	// 命中：mesh M 的 node-b1 属于 peerB。
+	p, ok := fc.PeerForNode("node-b1", "M")
+	if !ok || p.ID != "peerB" {
+		t.Fatalf("PeerForNode(node-b1, M) = (%q, %v), want (peerB, true)", p.ID, ok)
+	}
+	// mesh 严格隔离：node-b2 是 mesh N，mesh M 查询不得命中。
+	if _, ok := fc.PeerForNode("node-b2", "M"); ok {
+		t.Fatalf("跨 mesh 查询不应命中 node-b2")
+	}
+	if p, ok := fc.PeerForNode("node-b2", "N"); !ok || p.ID != "peerB" {
+		t.Fatalf("PeerForNode(node-b2, N) = (%q, %v), want (peerB, true)", p.ID, ok)
+	}
+	// 未知节点返回 false。
+	if _, ok := fc.PeerForNode("node-unknown", "M"); ok {
+		t.Fatalf("未知节点不应命中")
+	}
+}

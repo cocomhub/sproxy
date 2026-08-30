@@ -4,6 +4,7 @@
 package sproxy_test
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -173,4 +175,103 @@ func TestE2E_DualHubFederation(t *testing.T) {
 	waitNodeVisible(t, hubB, "node-b", 10*time.Second)
 	// hub-A 经联邦拉取（1s 周期）看到 node-b。
 	waitNodeVisible(t, hubA, "node-b", 15*time.Second)
+}
+
+// TestE2E_CrossHubRelay（DoD 1 CLI 级）：真实二进制双 hub 链式中继——
+// caller → hub-A →（联邦转发）→ hub-B → node-b 叶子 → 本地 echo。
+// 验证「A→hub1→hub2→B 数据往返」在真实进程下成立。
+func TestE2E_CrossHubRelay(t *testing.T) {
+	binPath := buildSPROXYBin(t)
+
+	// 本地 echo 服务（node-b 叶子转发的目标）。
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = echoLn.Close() })
+	go func() {
+		for {
+			c, aerr := echoLn.Accept()
+			if aerr != nil {
+				return
+			}
+			go func(cn net.Conn) {
+				defer cn.Close()
+				_, _ = io.Copy(cn, cn) // echo
+			}(c)
+		}
+	}()
+
+	// hub-B：被拉取方（不主动拉取）。
+	hubB, cleanupB := startFederatedHub(t, binPath, "hubB", "")
+	t.Cleanup(cleanupB)
+	// hub-A：拉取方，peer 指向 hub-B（联邦同步 1s 周期）。
+	hubA, cleanupA := startFederatedHub(t, binPath, "hubA", hubB)
+	t.Cleanup(cleanupA)
+
+	// node-b 叶子：sclient relay start 注册到 hub-B（出口模式，放行回环）。
+	sclient := buildSClient(t)
+	relayCmd := exec.Command(sclient, "relay", "start",
+		"--hub", wsURL(hubB),
+		"--node-id", "node-b",
+		"--access-key", e2eTestAK,
+		"--access-key-secret", e2eTestSK,
+		"--dial-allow",
+		"--dial-allow-cidr", "127.0.0.0/8",
+	)
+	if startErr := relayCmd.Start(); startErr != nil {
+		t.Fatalf("start sclient relay: %v", startErr)
+	}
+	t.Cleanup(func() {
+		_ = relayCmd.Process.Kill()
+		_, _ = relayCmd.Process.Wait()
+	})
+
+	// hub-B 本地出现 node-b（注册成功），hub-A 经联邦（1s 周期）看到 node-b。
+	waitNodeVisible(t, hubB, "node-b", 10*time.Second)
+	waitNodeVisible(t, hubA, "node-b", 15*time.Second)
+
+	// caller：经 hub-A 中继到 node-b（hub-A 联邦转发 → hub-B → 叶子）。
+	host := strings.TrimPrefix(hubA, "http://")
+	conn, err := net.Dial("tcp", host)
+	if err != nil {
+		t.Fatalf("dial hub-A: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	reqBody := fmt.Sprintf(`{"target":"node-b","type":"tcp","addr":"%s"}`, echoLn.Addr().String())
+	auth := sproxySigHeader(e2eTestAK, e2eTestSK, "POST", "/api/relay/stream", "", []byte(reqBody))
+	fmt.Fprintf(conn, "POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nAuthorization: %s\r\nContent-Length: %d\r\n\r\n%s", host, auth, len(reqBody), reqBody)
+	br := bufio.NewReader(conn)
+	statusLine, rerr := br.ReadString('\n')
+	if rerr != nil {
+		t.Fatalf("read status: %v", rerr)
+	}
+	if !strings.Contains(statusLine, " 200 ") {
+		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
+		t.Fatalf("跨 hub 中继应 200，实际 %s%s", strings.TrimSpace(statusLine), rest)
+	}
+	for {
+		line, lerr := br.ReadString('\n')
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+	}
+
+	// 数据往返：写 payload 读回 echo（A→hub1→hub2→B 链路）。
+	payload := []byte("cross-hub-e2e-payload")
+	if _, werr := conn.Write(payload); werr != nil {
+		t.Fatalf("写 payload: %v", werr)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got := make([]byte, len(payload))
+	if _, rerr := io.ReadFull(conn, got); rerr != nil {
+		t.Fatalf("读 echo（跨 hub 链路）: %v", rerr)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
+	}
 }

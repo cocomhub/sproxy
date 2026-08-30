@@ -273,6 +273,24 @@ func (fc *FederationClient) Candidates() []FederationNode {
 	return out
 }
 
+// PeerForNode 返回上报了指定节点的联邦对端（在给定 mesh 下）。
+// 跨 hub 中继转发用它定位「目标节点注册在哪个对端 hub」——本 hub 路由表未命中时，
+// 把 relay 拨号请求转发到该对端的 /api/relay/stream。
+// mesh 严格匹配：节点必须是给定 mesh 的候选，防跨 mesh 泄漏（与 mergeFederationNodes
+// 的隔离语义一致）。多个对端上报同名同 mesh 节点时返回第一个（与 Candidates 去重顺序一致）。
+func (fc *FederationClient) PeerForNode(id NodeID, mesh string) (FederationPeer, bool) {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	for _, p := range fc.peers {
+		for _, n := range fc.cands[p.ID] {
+			if n.ID == id && n.Mesh == mesh {
+				return p, true
+			}
+		}
+	}
+	return FederationPeer{}, false
+}
+
 // Close 释放各 peer 客户端空闲连接（后台 goroutine 由 Start 的 ctx 取消控制退出）。
 func (fc *FederationClient) Close() {
 	fc.mu.RLock()
