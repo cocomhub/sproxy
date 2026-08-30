@@ -1,0 +1,127 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package server
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestFederationConfig_Defaults：联邦配置默认值（Interval 30s / Timeout 10s）。
+func TestFederationConfig_Defaults(t *testing.T) {
+	cfg := Default()
+	cfg.SetDefaults()
+	if cfg.Hub.Federation.Interval != 30*time.Second {
+		t.Errorf("federation.interval 默认应 30s, got %s", cfg.Hub.Federation.Interval)
+	}
+	if cfg.Hub.Federation.Timeout != 10*time.Second {
+		t.Errorf("federation.timeout 默认应 10s, got %s", cfg.Hub.Federation.Timeout)
+	}
+}
+
+// TestFederationConfig_Validate_LoopbackPeerNoCreds：loopback peer 无凭据合法
+// （默认 loopback 安全面——仅本地调试 peering 无需强制凭据）。
+func TestFederationConfig_Validate_LoopbackPeerNoCreds(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{ID: "peer-local", URL: "http://127.0.0.1:18083"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("loopback peer 无凭据应通过校验: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_RemotePeerRequiresCreds：远程 peer 必须显式配置
+// 凭据（fail-closed）——无凭据直连远程 hub 属暴露面，拒绝启动。
+func TestFederationConfig_Validate_RemotePeerRequiresCreds(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{ID: "peer-remote", URL: "http://192.168.1.100:18083"},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatalf("远程 peer 无凭据应拒绝")
+	}
+	if !strings.Contains(err.Error(), "远程 peering 必须配置 access_key/access_key_secret") {
+		t.Fatalf("错误信息应说明远程 peering 需凭据, got: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_RemotePeerWithCreds：远程 peer 配置凭据后通过。
+func TestFederationConfig_Validate_RemotePeerWithCreds(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{
+			ID:                 "peer-remote",
+			URL:                "https://hub.example.com:18083",
+			AccessKey:          "sk-0123456789abcdef",
+			AccessKeySecret:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			InsecureSkipVerify: true,
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("远程 peer 配置凭据应通过: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_BadScheme：非法 scheme 拒绝。
+func TestFederationConfig_Validate_BadScheme(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{ID: "peer-bad", URL: "ftp://127.0.0.1:18083", AccessKeySecret: "x"},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "scheme") {
+		t.Fatalf("非法 scheme 应拒绝, got: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_DupPeerID：重复 peer ID 拒绝。
+func TestFederationConfig_Validate_DupPeerID(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{ID: "peer-x", URL: "http://127.0.0.1:18083"},
+		{ID: "peer-x", URL: "http://127.0.0.1:19000"},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "重复") {
+		t.Fatalf("重复 peer ID 应拒绝, got: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_EnabledNoPeers：联邦启用但无 peers 合法
+// （本 hub 仅作为被 peer，不主动拉取）。
+func TestFederationConfig_Validate_EnabledNoPeers(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("联邦启用但无 peers 应通过: %v", err)
+	}
+}
+
+// TestFederationConfig_Validate_DisabledIgnoresPeers：联邦未启用时 peers 遗留配置
+// 不阻断启动（门控在 enabled，与 ws/dht 校验一致）。
+func TestFederationConfig_Validate_DisabledIgnoresPeers(t *testing.T) {
+	cfg := Default()
+	cfg.Hub.Enabled = false
+	cfg.Hub.Federation.Enabled = false
+	cfg.Hub.Federation.Peers = []FederationPeerConfig{
+		{ID: "peer-remote", URL: "http://192.168.1.100:18083"}, // 无凭据但联邦关闭
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("联邦关闭时 peers 遗留配置不应阻断: %v", err)
+	}
+}

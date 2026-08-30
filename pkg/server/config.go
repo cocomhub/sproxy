@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
@@ -86,6 +88,42 @@ type HubConfig struct {
 	// DHTSeeds 是 DHT 引导种子节点地址（仅 DHT=kad 时消费；空 = 不引导）。
 	// 当前无 hub 联邦，种子用于未来多 hub DHT 组网；填入即调 Bootstrap 插入路由表。
 	DHTSeeds []string `yaml:"dht_seeds" mapstructure:"dht_seeds"`
+	// Federation 是 hub 联邦（hub-to-hub peering）配置。启用后本 hub 向配置的
+	// 对端 hub 周期拉取节点表（联邦候选），并把本 hub 路由表节点表暴露给对端
+	// （入站端点 /api/hub/federation/nodes，受 SproxySig 认证保护）。
+	// 路由表仍本 hub 权威，联邦只提供发现/可达性，不改路由表状态。
+	Federation FederationConfig `yaml:"federation" mapstructure:"federation"`
+}
+
+// FederationConfig 是 hub 联邦节点表同步的配置。
+// Enabled 时注册入站联邦节点表端点（/api/hub/federation/nodes，按调用方 mesh
+// 过滤返回本 hub 路由表节点）；Peers 非空时启动出站周期拉取。
+type FederationConfig struct {
+	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
+	// Peers 是联邦对端 hub 列表（出站拉取）。空 = 本 hub 仅作为被 peer（不主动拉取）。
+	Peers []FederationPeerConfig `yaml:"peers" mapstructure:"peers"`
+	// Interval 是出站拉取周期，默认 30s。
+	Interval time.Duration `yaml:"interval" mapstructure:"interval"`
+	// Timeout 是单次拉取超时，默认 10s。
+	Timeout time.Duration `yaml:"timeout" mapstructure:"timeout"`
+}
+
+// FederationPeerConfig 是联邦对端 hub 的配置（出站拉取）。
+// 认证复用 SproxySig AccessKey/AccessKeySecret（与 hub 节点注册准入同一模式）。
+type FederationPeerConfig struct {
+	// ID 是对端 hub 唯一标识（日志/去重用；为空回落 URL）。
+	ID string `yaml:"id" mapstructure:"id"`
+	// URL 是对端节点表端点基址（如 http://127.0.0.1:18083）。为空回落默认
+	// loopback（http://127.0.0.1:18083）——远程 peering 必须显式配置 URL。
+	URL string `yaml:"url" mapstructure:"url"`
+	// AccessKey / AccessKeySecret 是对端 hub 认可的 SproxySig 凭据。
+	// 目标 hub 配置了 access_keys 时必填；远程 peering（URL host 非 loopback）
+	// 由 Validate 强制要求（fail-closed）。
+	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
+	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
+	// InsecureSkipVerify 为 true 时跳过 TLS 证书校验（自签证书开发/测试用）。
+	// 默认 false（生产应使用受信任证书）。
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify" mapstructure:"insecure_skip_verify"`
 }
 
 // TransportConfigs 聚合所有可用的传输层配置。
@@ -265,6 +303,12 @@ func (c *Config) SetDefaults() {
 	if c.Hub.Transports.TCP.Enabled && c.Hub.Transports.TCP.Listen == "" {
 		c.Hub.Transports.TCP.Listen = DefaultHubTCPListen
 	}
+	if c.Hub.Federation.Interval <= 0 {
+		c.Hub.Federation.Interval = 30 * time.Second
+	}
+	if c.Hub.Federation.Timeout <= 0 {
+		c.Hub.Federation.Timeout = 10 * time.Second
+	}
 }
 
 // Validate 校验配置合理性。
@@ -339,7 +383,55 @@ func (c *Config) Validate() error {
 		// dht 不被消费，历史/闲置配置遗留不阻断启动（与 ws transport 校验一致）。
 		return fmt.Errorf("hub.dht=%q 无效，仅支持 \"\"（内置内存 DHT）或 \"kad\"（Kademlia）", c.Hub.DHT)
 	}
+	// hub 联邦配置校验（S4F）：URL 合法性 + 远程 peering 凭据强制（fail-closed）。
+	// 门控在 hub.federation.enabled：hub 未启用或联邦关闭时 peers 不被消费，
+	// 历史/闲置配置遗留不阻断启动。
+	if c.Hub.Federation.Enabled {
+		seenPeerIDs := make(map[string]struct{}, len(c.Hub.Federation.Peers))
+		for i, p := range c.Hub.Federation.Peers {
+			if p.URL == "" {
+				// 空 URL 回落默认 loopback（安全面：默认只与本机 hub peering），
+				// 无需校验，也不计入重复 ID 检测的 key 冲突（key 用默认 URL）。
+				continue
+			}
+			u, perr := url.Parse(p.URL)
+			if perr != nil {
+				return fmt.Errorf("hub.federation.peers[%d].url 非法: %v", i, perr)
+			}
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return fmt.Errorf("hub.federation.peers[%d].url scheme %q 无效，仅允许 http/https", i, u.Scheme)
+			}
+			if !isLoopbackHost(u.Hostname()) && p.AccessKeySecret == "" {
+				// 远程 peering 必须显式配置凭据（AccessKey/Secret 对）——
+				// 未配置时无认证直连远程 hub 属暴露面，fail-closed 拒绝。
+				return fmt.Errorf("hub.federation.peers[%d].url %q 为远程地址，远程 peering 必须配置 access_key/access_key_secret", i, p.URL)
+			}
+			key := p.ID
+			if key == "" {
+				key = p.URL
+			}
+			if _, dup := seenPeerIDs[key]; dup {
+				return fmt.Errorf("hub.federation.peers[%d].id %q 重复", i, p.ID)
+			}
+			seenPeerIDs[key] = struct{}{}
+		}
+	}
 	return nil
+}
+
+// isLoopbackHost 判断主机名是否为 loopback（IPv4/IPv6 loopback 或 localhost）。
+// 用于联邦 peering 的安全边界：默认 loopback 安全面，远程 peering 需显式配置。
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	// net.SplitHostPort 对 IPv6 返回带方括号的 host（如 "[::1]"），strip 后判断。
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // LoadFromProvider 从 provider.Provider 解码配置，设置默认值并校验。
