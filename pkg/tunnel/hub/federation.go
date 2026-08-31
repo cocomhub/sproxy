@@ -443,6 +443,10 @@ func (fc *FederationClient) scheduleSave() {
 	}
 	fc.saveMu.Lock()
 	defer fc.saveMu.Unlock()
+	// 审查 Minor 1：不用 timer.Reset 延长去抖窗口——AfterFunc 已触发的 timer 上调用
+	// Reset 不安全（回调可能双触发/游离，flushSave 停不掉）。挂起中的回调执行
+	// SaveCandidates 时读的是调用时刻最新 cands（天然合并窗口内全部变更），去抖合并
+	// 语义已成立，Reset 唯一作用只是把写窗口再延 200ms，无价值且有害。
 	if fc.saveTimer == nil {
 		fc.saveTimer = time.AfterFunc(federationSaveDebounce, func() {
 			fc.saveMu.Lock()
@@ -452,8 +456,6 @@ func (fc *FederationClient) scheduleSave() {
 				fc.logger.Error("联邦候选持久化失败", "path", fc.persistFile, "err", err)
 			}
 		})
-	} else {
-		_ = fc.saveTimer.Reset(federationSaveDebounce)
 	}
 }
 
@@ -511,10 +513,20 @@ func (fc *FederationClient) restoreCandidates() error {
 		fc.logger.Warn("联邦候选持久化文件损坏，忽略并启动为空候选", "path", fc.persistFile, "error", err)
 		return nil
 	}
+	// 审查 Minor 2：只恢复仍存在于当前配置（fc.peers）中的对端候选——配置里删除的
+	// 联邦对端，其旧候选不应跨重启自我延续（否则 /api/hub/nodes 展示陈旧节点，且
+	// 每次落盘又写回文件，文件层面无法自愈）。
+	configuredPeers := make(map[string]struct{}, len(fc.peers))
+	for _, p := range fc.peers {
+		configuredPeers[p.ID] = struct{}{}
+	}
 	cands := make(map[string][]FederationNode, len(snap.Peers))
 	for _, ps := range snap.Peers {
 		if ps.Peer == "" {
 			continue // 空 peer ID 无归属，丢弃（fail-closed）
+		}
+		if _, ok := configuredPeers[ps.Peer]; !ok {
+			continue // 该对端已不在当前配置：丢弃（防陈旧候选自我延续）
 		}
 		nodes := make([]FederationNode, 0, len(ps.Nodes))
 		for _, n := range ps.Nodes {
