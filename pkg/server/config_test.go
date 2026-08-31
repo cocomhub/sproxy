@@ -503,6 +503,41 @@ func TestConfig_VirtualSubnet_Default(t *testing.T) {
 	}
 }
 
+// TestConfig_Defaults_HubDHTPersistFile 验证 hub.dht_persist_file 默认空
+// （持久化缺省关闭，零行为变更）。
+func TestConfig_Defaults_HubDHTPersistFile(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if cfg.Hub.DHTPersistFile != "" {
+		t.Fatalf("Hub.DHTPersistFile 默认应为空，got %q", cfg.Hub.DHTPersistFile)
+	}
+}
+
+// TestLoadFromProvider_HubDHTPersistFile 验证 YAML 解析 hub.dht_persist_file 配置。
+func TestLoadFromProvider_HubDHTPersistFile(t *testing.T) {
+	t.Parallel()
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr": ":18083",
+		"hub": map[string]any{
+			"enabled": true,
+			"transports": map[string]any{
+				"ws": map[string]any{"enabled": true},
+			},
+			"dht":              "kad",
+			"dht_persist_file": "/tmp/kad-dht.json",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider failed: %v", err)
+	}
+	if cfg.Hub.DHT != "kad" {
+		t.Fatalf("Hub.DHT want kad, got %q", cfg.Hub.DHT)
+	}
+	if cfg.Hub.DHTPersistFile != "/tmp/kad-dht.json" {
+		t.Fatalf("Hub.DHTPersistFile want /tmp/kad-dht.json, got %q", cfg.Hub.DHTPersistFile)
+	}
+}
+
 // TestConfig_VirtualSubnet_Validate 校验 hub.virtual_subnet 校验：非法 CIDR 拒绝、
 // IPv6 拒绝、合法 IPv4 通过。
 func TestConfig_VirtualSubnet_Validate(t *testing.T) {

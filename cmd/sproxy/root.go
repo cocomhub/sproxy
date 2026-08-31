@@ -193,8 +193,22 @@ func runServer(cmd *cobra.Command, args []string) error {
 			// 装配 Kademlia 进 DHTRegistry（Active 返回最高优先级实现 = kad），
 			// 随后经 DHTRegistry.Active() 注入 HubServer/Handlers——registry 是
 			// 实际选择机制（非装饰性副作用）。
-			hub.RegisterDHT("kad", kad.NewDHTNode(dhtNodeID, nil, logger.With("component", "dht")), 10)
+			kadDHT := kad.NewDHT(dhtNodeID, nil, logger.With("component", "dht"))
+			// k-bucket 持久化（缓存语义，路由表仍 hub 权威）：配置
+			// hub.dht_persist_file 时启动 Load 恢复上次发现缓存（不冷启动），
+			// 后续 Register/Remove 变更经去抖异步落盘。文件缺失/损坏/超限按
+			// 空桶启动（kad.Load 语义）；Load 的其余 I/O 错误 fail-fast。
+			if cfg.Hub.DHTPersistFile != "" {
+				if perr := kadDHT.EnablePersistence(cfg.Hub.DHTPersistFile); perr != nil {
+					return fmt.Errorf("初始化 kad DHT 持久化失败: %w", perr)
+				}
+				logger.Info("kad DHT k-bucket 持久化已启用", "file", cfg.Hub.DHTPersistFile)
+			}
+			hub.RegisterDHT("kad", kadDHT, 10)
 			hubDHT = hub.DHTRegistry.Active()
+			// 停服时 flush 去抖窗口内未落盘的 k-bucket 变更（hubDHT.Close 委托
+			// kad.FlushPersist；内存 DHT 的 Close 是 no-op）。
+			defer func() { _ = hubDHT.Close() }()
 			if len(cfg.Hub.DHTSeeds) > 0 {
 				// 多 hub DHT 组网未实现，种子暂不引导（kad.Bootstrap 现会把种子
 				// 当假 ID 节点插入路由表，污染发现列表）；预留配置，未来实现

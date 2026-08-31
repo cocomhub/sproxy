@@ -107,6 +107,12 @@ type HubConfig struct {
 	// DHTSeeds 是 DHT 引导种子节点地址（仅 DHT=kad 时消费；空 = 不引导）。
 	// 当前无 hub 联邦，种子用于未来多 hub DHT 组网；填入即调 Bootstrap 插入路由表。
 	DHTSeeds []string `yaml:"dht_seeds" mapstructure:"dht_seeds"`
+	// DHTPersistFile 是 kad DHT 路由表（k-bucket）持久化文件路径。非空且
+	// hub.dht=kad 时启用 k-bucket 落盘（重启后恢复上次发现缓存，不冷启动）；
+	// 为空则持久化关闭（现有行为）。快照只存 id/route_id/addr（发现缓存无
+	// secret），损坏/缺失/超限文件按空桶启动。路由表仍 hub 权威，DHT 持久化
+	// 是缓存语义。
+	DHTPersistFile string `yaml:"dht_persist_file" mapstructure:"dht_persist_file"`
 	// Federation 是 hub 联邦（hub-to-hub peering）配置。启用后本 hub 向配置的
 	// 对端 hub 周期拉取节点表（联邦候选），并把本 hub 路由表节点表暴露给对端
 	// （入站端点 /api/hub/federation/nodes，受 SproxySig 认证保护）。
