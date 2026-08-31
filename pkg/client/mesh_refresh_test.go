@@ -316,8 +316,9 @@ func TestMeshTargetRefresher_RoundRobin_TTLHit(t *testing.T) {
 	}
 }
 
-// TestMeshTargetRefresher_SkipFailedNode 验证 Invalidate(failedNode) 后 Resolve 持续跳过
-// 该节点（在其余候选中轮询），不再返回失败节点。
+// TestMeshTargetRefresher_SkipFailedNode 验证 Invalidate(failedNode) 后 Resolve 在
+// 冷却期内跳过该节点（在其余候选中轮询），冷却过后自动重新评估（恢复节点重新入池，
+// 审查 Important #1）。
 func TestMeshTargetRefresher_SkipFailedNode(t *testing.T) {
 	var hits atomic.Int32
 	ts := httptest.NewServer(servicesHandler(&hits, func() string {
@@ -325,20 +326,39 @@ func TestMeshTargetRefresher_SkipFailedNode(t *testing.T) {
 	}))
 	defer ts.Close()
 
+	// 注入可推进的假时钟：控制 TTL 过期与冷却窗口。
+	cur := time.Now()
 	svc := NewFileClient(ts.URL)
 	r := NewMeshTargetRefresher(svc, "svc")
-	r.SetTTL(time.Hour)
-	r.Invalidate("node-a") // 记录失败节点并强制下次刷新
+	r.SetClock(func() time.Time { return cur })
+	r.SetTTL(10 * time.Second)
 
-	const n = 9
+	// 阶段 1：冷却期内跳过失败节点（首次 Resolve 刷新，lastFailedAt=cur，冷却 9s 内）。
+	r.Invalidate("node-a")
+	const n = 6
 	for i := range n {
 		got, err := r.Resolve(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got.Node == "node-a" {
-			t.Fatalf("第 %d 次 Resolve 不应返回失败节点 node-a, got %q", i+1, got.Node)
+			t.Fatalf("第 %d 次 Resolve（冷却期）不应返回失败节点 node-a, got %q", i+1, got.Node)
 		}
+		// b/c 均应被选中（RR 在其余候选间轮询，非恒取同一节点）。
+		if got.Node != "node-b" && got.Node != "node-c" {
+			t.Fatalf("冷却期 Resolve 应返回 node-b 或 node-c, got %q", got.Node)
+		}
+	}
+
+	// 阶段 2：推进时钟越过冷却窗口（>9s），且 TTL（10s）未过 → Resolve 命中缓存池，
+	// 失败标记失效 → node-a 重新入池被选中。
+	cur = cur.Add(MeshFailCooldown + time.Second)
+	gotB, errB := r.Resolve(context.Background())
+	if errB != nil {
+		t.Fatal(errB)
+	}
+	if gotB.Node != "node-a" {
+		t.Fatalf("冷却期过后 node-a 应重新纳入 RR（审查 Important #1），got %q", gotB.Node)
 	}
 }
 

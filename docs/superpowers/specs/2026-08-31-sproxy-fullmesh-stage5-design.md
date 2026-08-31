@@ -138,7 +138,8 @@ status: active
 
 ### 4.3 关键架构决策
 - **调度加在 resolver 层而非 mesh.Dial**：resolver 是单点、dial 是热路径；`MeshGatewayDial`/`MeshVIPDial` 包装链不动。
-- `MeshTargetRefresher` 增 `atomic.Uint64` 轮询游标 + 排序候选池；`Invalidate` 现有失败跳过机制保留扩展为多失败候选跳过。
+- `MeshTargetRefresher` 增轮询游标（mu 保护普通 uint64，因候选池同受 mu 保护，与 atomic 等效）+ 按 NodeID 排序候选池；缓存「候选池+游标」而非单 target，**TTL 内也轮询**（RR 生效关键）。`Invalidate` 记录失败节点 + 失败时间戳。
+- **失败跳过 = 单槽 + 冷却自愈（审查 Important #1 修正原"扩展为多失败候选跳过"设计）**：单槽 `lastFailedNode` + `MeshFailCooldown`（3×TTL=9s）。冷却期内跳过该节点（避免每 TTL 重试打死节点）；冷却过后自动重新评估——服务恢复则重新纳入 RR，仍失败则 `Invalidate` 重置冷却。避免"单次瞬时失败永久排除节点致 RR 失衡"（原永久跳过盲点）。
 - 不引入最少连接/健康检测（成本高，需动 dial 层计数）；RR 均匀 + 失败跳过 + `MeshConnect` 现有逐候选重试兜底。
 
 ### 4.4 TDD 测试点
