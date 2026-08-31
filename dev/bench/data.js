@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788204544234,
+  "lastUpdate": 1788204799818,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -317754,6 +317754,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1393348 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d86f181f30fd6132f4544df3d4449a0271f02b5c",
+          "message": "feat(hub,kad): 联邦候选/kad DHT 持久化 + 文档收尾（阶段5 工作项3 PR-2~4） (#142)\n\n* feat(hub): 联邦候选节点表持久化——重启恢复发现缓存（阶段5 工作项3 PR-2）\n\nFederationClient 的 cands 纯内存，hub 重启后联邦候选清空需冷启动。新增可选\n持久化（发现缓存非权威），重启恢复上次同步的候选节点。\n\n- federation.go: FederationClient 加 persistFile/saveMu/saveTimer；\n  NewFederationClientWithPersist（保留原 NewFederationClient 委托兼容）；\n  SaveCandidates（原子写：同目录 temp + fsync + rename + 0600）/ scheduleSave\n  （200ms 去抖异步落盘，Reset 合并中间变更）/ flushSave（Close 前同步落盘）/\n  restoreCandidates（构造时恢复；缺失/损坏/超限 → warn + 空候选不 panic，其余\n  I/O 错误上抛）。syncPeer 成功更新后触发保存。\n- 快照格式 federationCandidatesSnap：只存 peer.ID → 候选节点 ID/addr/mesh\n  （FederationNode 本无 secret，天然满足\"per-node secret 不落盘\"）；空 ID/peer\n  丢弃（fail-closed）；大小上限 64MiB（stat 快检 + 实际读入权威校验防 OOM）。\n- config.go: FederationConfig 加 PersistFile（yaml persist_file，缺省空=关闭）。\n- root.go: 装配改 NewFederationClientWithPersist + 日志含 persist_file。\n- 测试：8 个（SaveRestore 往返 / CorruptFile / MissingFile / Disabled no-op /\n  AutoSaveOnSync 去抖落盘 / RestoreIOError / Config PersistFile / BuildServerConfig\n  装配链路）。TDD 红→绿（含 5 处 govet shadow 修复）。\n\n验证：go test -race ./pkg/tunnel/hub/... ./pkg/server/... ./cmd/sproxy/... 全绿；\nvet + golangci-lint 0 issues；gofmt 合规；主 build 通过。\n\n* fix(hub): 联邦持久化审查修复——去抖 timer 双触发移除 + 恢复对端配置剪枝（PR-2 复审）\n\nPR-2 对抗审查（无 Critical/Important）发现 1 真实缺陷（M1，已实测）+ 若干次要，全修：\n\n- M1（核心）scheduleSave 对已触发的 AfterFunc timer 调 Reset 不安全：回调被派发但\n  阻塞在 saveMu 时 Reset 会双触发（实测执行 2 次），产生游离 timer 且 flushSave 停\n  不掉，Close 后仍落盘。修：删除 Reset 分支——挂起中的回调执行 SaveCandidates 时\n  读调用时刻最新 cands（天然合并窗口内全部变更），去抖合并语义已成立，Reset 仅\n  延长写窗口无价值且有害。锁序无死锁、写盘在 saveMu 临界区内、原子 temp+rename\n  幂等（审查确认），故仅消除重复写。\n- M2（实质）恢复的对端不按当前配置剪枝：配置删除的联邦对端，其旧候选跨重启自我\n  延续（/api/hub/nodes 展示陈旧节点，落盘又写回文件无法自愈）。修：restoreCandidates\n  恢复时只保留仍存在于 fc.peers 的对端（configuredPeers 过滤）。\n- 回归测试：PersistConcurrentScheduleClose（8 并发 + Close 竞态无 panic + 文件最新）\n  / PersistRemovedPeerNotRestored（配置删对端 → 候选不恢复）。既有 SaveRestore/\n  AutoSaveOnSync 适配配置剪枝（恢复 client 带匹配 peers）。\n\n验证：go test -race ./pkg/tunnel/hub/... ./pkg/server/... ./cmd/sproxy/... 全绿；\nvet + golangci-lint 0 issues；gofmt 合规；主 build 通过。\n\n* feat(kad): Kademlia k-bucket 落盘——Save/Load + hub.dht_persist_file（阶段5 工作项3 PR-3）\n\nkad DHT 桶纯内存，hub 重启后 k-bucket 清空需冷启动。新增落盘（缓存语义，\n路由表仍 hub 权威），重启恢复上次发现缓存。\n\n- kad/kad.go: Save（原子写：temp+fsync+rename+0600）/ Load（缺失/损坏/超限按\n  空桶不 panic，其余 I/O 错误上抛）/ EnablePersistence（Load 恢复 + 变更去抖\n  异步落盘）/ FlushPersist（Close 收口）。快照存 id/route_id/addrs（route_id=\n  sha256(id) hex，Load 校验 NodeIDFromString(id)==route 丢弃损坏/伪造）；非法\n  条目丢弃、单 bucket 截断至 K=20、文件上限 64MiB（stat 快检 + 权威校验）。\n- kad/kad_lookup.go: KademliaDHT 委托 EnablePersistence/PersistFile；Close 改\n  flush 未落盘变更。\n- config.go: HubConfig 加 DHTPersistFile（yaml dht_persist_file，缺省空=关闭）。\n- root.go: hub.dht=kad 装配改用 kad.NewDHT 具体类型 + dht_persist_file 非空\n  EnablePersistence（I/O 错误 fail-fast）+ defer Close flush。\n- **顺带修复 2 个既有缺陷**：defaultLogger 用 nil writer 导致 Warn panic（改\n  io.Discard）；NodeIDFromHex 对 31 字节 hex 越界 panic（改要求恰好 64 hex）。\n- 测试：10 个（RoundTrip 往返 / MissingFile / CorruptFile / FileTooLarge /\n  InvalidEntriesDropped / BucketOverflowTruncated / EmptyPathNoop /\n  SavesOnChange / Config 默认空 / YAML 解析）。TDD 红→绿。\n\n验证：kad 子模块 + server + sproxy go test -race 全绿；vet + golangci-lint\n（主+kad）0 issues；gofmt 合规；主 build 通过。\n\n* fix(kad): k-bucket 落盘审查修复——buildSnap 数据竞争 + saveMu 串行 + 回归测试（PR-3 复审）\n\nPR-3 对抗审查（无 Critical）发现 2 Important（已 -race 实测复现）+ 若干 Minor，全修：\n\n- I-1（Important，-race 实测复现）buildSnap 数据竞争：getNodes 只复制指针切片，\n  返回后无锁读 n.info，与 addNode 原地更新同一 kadNode 的 info 竞争（撕裂读）。\n  修：新增 getNodesSnapshot 在 bucket 锁内复制 PeerInfo 本体（ID/Addrs 深拷贝），\n  buildSnap 用它替代裸指针遍历。\n- I-2（Important）FlushPersist/Close 陈旧覆盖窗口：kad 的 Save 无锁，回调与\n  FlushPersist 并发写盘可能让旧快照覆盖新变更。修：加 saveMu 贯穿 buildSnap+write\n  （Save 全程持锁，后获得锁者必然写更新快照；变更路径 Insert/Remove 不取此锁，\n  无锁序倒置）——与联邦 saveMu 模式对齐。\n- M-1 root.go 吞 Close flush 错误：defer 记录 Error（禁止静默失败）。\n- M-2 补异步去抖 timer 真实落盘测试（AsyncDebouncedSave）+ I-1/I-2 回归\n  （ConcurrentInsertBuildSnapRace 并发 -race / FlushWithConcurrentChange）。\n- M-3 NewDHTNode 死代码标注 Deprecated（保留兼容，新代码用 NewDHT）。\n- M-4 notifyChange 持久化关闭时锁外快速返回（免每次变更互斥锁往返）。\n- M-5 kadNodeSnap 注释说明 Meta 不持久化（重启后重新发现填充）。\n\n验证：kad 子模块 + server + sproxy go test -race 全绿（含 3 新回归测试）；\nvet + golangci-lint（主+kad）0 issues；gofmt 合规；主 build 通过。\n\n* docs: 阶段5 工作项3 文档收尾——TURN REST + 联邦/kad 持久化配置说明（PR-4）\n\n工作项 3 收尾：文档同步 + e2e 冒烟评估（纯文档，无代码变更）。\n\n- docs/cli.md: 新增「TURN 中继」段落——5 命令（mesh/p2p/socks/udp/mesh node）支持\n  --turn-rest 族动态短期凭证（coturn 标准）+ 静态 --turn 表；协议（惰性拉取 +\n  TTL 缓存续期 + 单飞）、安全边界（https 强推 / http 仅 loopback / ≤512 /\n  TTL:user 校验 fail-closed）、失败降级（沿用旧缓存或仅 STUN）。\n- config.example.yaml: 三处——sclient 侧 TURN REST 注释块（CLI flag 非服务端键）、\n  hub.dht_persist_file（仅 dht:kad 消费、空=关闭）、hub.federation.persist_file\n  （空=关闭，快照只存 id/addr/mesh，0600+原子写+去抖落盘）。\n- docs/config.md: TURN REST 说明 + hub 中继配置扩展（dht_persist_file/federation\n  persist_file，缓存语义缺省关闭）。\n- 设计文档 §5: 标注 ✅ PR-1~3 已实现（commit 引用 + 测试清单）、§5.3 实现落点修正\n  （TURN flag 挂 5 命令非 relay、REST 走 webrtc 全局配置未进 NodeConfig）、§5.5 e2e\n  冒烟跳过理由（TURN 需真实打洞链路成本高；持久化已被集成测试充分覆盖）。\n\n验证：go build ./... + go test -race ./pkg/server/... ./pkg/tunnel/hub/... 全绿；\nconfig.example.yaml safe_load 通过；UTF-8 无 BOM；一致性 grep 通过。\n\n* docs: TURN REST 文档审查修复——必填标注 + 静态回落 + 措辞修正（PR-4 复审）\n\nPR-4 对抗审查（无 Critical/Important，文档与实现基本完全一致）发现 2 Minor + 3\n参考级，修 4 项：\n\n- M1（Minor）--turn-rest-user 实际必填但文档标 [可选]：实现 SetTURNRESTURL 对空\n  username 返回错误使命令终止。三处文档（config.example.yaml/cli.md/config.md）改\n  必填标注（--turn-rest <url> --turn-rest-user <user> [--turn-rest-service <svc>]）。\n- M2（Minor）\"失败降级仅 STUN\"遗漏静态回落：实际 REST 失败且无有效缓存时先回落\n  静态 --turn-user/--turn-pass，两者皆无才仅 STUN。config.example.yaml/config.md/\n  设计文档统一为\"回落静态凭据（若有）/仅 STUN\"。\n- R1（参考）联邦 persist_file 注释补\"超限文件按空候选启动\"（与 kad 注释对称）。\n- R3（参考）设计文档\"TTL:user 格式（fail-closed，非法配置命令终止）\"括号歧义：\n  明确\"响应格式违规拒绝凭据并回落\"与\"非法 CLI 配置命令终止\"分离。\n\n验证：config.example.yaml safe_load 通过；UTF-8 无 BOM。",
+          "timestamp": "2026-09-01T03:28:39+08:00",
+          "tree_id": "b970711e6ac98a160c5d09bdfda3f5db411e67de",
+          "url": "https://github.com/cocomhub/sproxy/commit/d86f181f30fd6132f4544df3d4449a0271f02b5c"
+        },
+        "date": 1788204790765,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 923.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1274937 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 923.1,
+            "unit": "ns/op",
+            "extra": "1274937 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1274937 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1274937 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 925.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1222926 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 925.2,
+            "unit": "ns/op",
+            "extra": "1222926 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1222926 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1222926 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 928.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1313817 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 928.5,
+            "unit": "ns/op",
+            "extra": "1313817 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1313817 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1313817 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 923.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1289942 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 923.7,
+            "unit": "ns/op",
+            "extra": "1289942 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1289942 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1289942 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 924.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1313980 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 924.9,
+            "unit": "ns/op",
+            "extra": "1313980 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1313980 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1313980 times\n4 procs"
           }
         ]
       }
