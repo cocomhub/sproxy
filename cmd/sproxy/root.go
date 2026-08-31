@@ -21,8 +21,12 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	kad "github.com/cocomhub/sproxy/pkg/tunnel/hub/ext/kad"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
 	"github.com/spf13/cobra"
 )
@@ -297,6 +301,15 @@ func runServer(cmd *cobra.Command, args []string) error {
 			slog.Warn(logHandlersCloseErr, "error", err.Error())
 		}
 	}()
+	// xfer listener（阶段 5 工作项 1）：接收 `sclient tunnel --xfer tcp/tcp+tls --hub <addr>`
+	// 的会话，经 mux → tunnel 解密 → 路由到本地文件 API（h.LocalHandler() 的 localMux）。
+	// 必须在 RegisterRoutes 之后启动（handler 彼时才构造）。注意用 LocalHandler() 而非
+	// TunnelHandler()：xfer 隧道 handleStream 已解密请求体为明文，TunnelHandler() 是传统
+	// POST /tunnel 的外层帧解密器（期望 ctx 带派生密钥 + 帧 body），直接使用会 401。
+	// fail-closed：xfer 段启用但装配失败（无 access_keys / 无证书）→ 拒绝启动。
+	if _, err := startXferListener(ctx, cfg, h.LocalHandler(), logger); err != nil {
+		return err
+	}
 	// 文件同步 SyncManager：配置了 sync（sync.max_concurrent 或 sync_remotes 非空）时装配。
 	// 远程访问用 HTTP 直连远程 sproxy（sync_remotes URL + SproxySig 凭据）；mesh 通道为后续增强。
 	if cfg.Sync.MaxConcurrent > 0 || len(cfg.SyncRemotes) > 0 {
@@ -342,6 +355,167 @@ func runServer(cmd *cobra.Command, args []string) error {
 	<-shutdownDone
 	slog.Info("downserver exit")
 	return nil
+}
+
+// xferListenerInfo 记录已启动的 xfer listener 信息（供测试与观测）。
+type xferListenerInfo struct {
+	// Name 是配置段名（xfer_tcp / xfer_tls）。
+	Name string
+	// Addr 是实际监听地址（listen 配置 :0 随机端口时为真实端口）。
+	Addr string
+	// TLS 表示该 listener 是否承载 TLS（xfer_tls 恒 true；xfer_tcp + tls_enabled 也为 true）。
+	TLS bool
+	// Fingerprint 是服务端 Ed25519 身份指纹（供客户端 `sclient config set
+	// peer_fingerprints` 固化，AD-4）。
+	Fingerprint string
+}
+
+// startXferListener 装配服务端 xfer listener（阶段 5 工作项 1 PR-3）。
+//
+// 接收 `sclient tunnel --xfer tcp/tcp+tls --hub <addr>` 的会话：accept 循环 →
+// mux(RoleListener) → tunnel.NewTunnel(key, WithIdentity) → tun.Serve(ctx, tunnelHandler)。
+// tunnelHandler 是 server.RegisterRoutes 构造的 localApiHandler（本地文件 API）。
+//
+// 关键正确性点：
+//   - 握手密钥 = server.HubXferKey(cfg)（AD-3：access_keys 首对 SK + mesh 派生，与客户端一致）；
+//   - 服务端身份 = server.LoadXferIdentity(cfg)（AD-4：Ed25519，指纹供客户端 pin）；
+//   - fail-closed：xfer 段启用但无 access_keys / 无证书 → 返回 error（拒绝启动）；
+//   - 默认绑 loopback（127.0.0.1:<port>），远程可达须显式 listen；
+//   - 连接并入数量上限（cfg.Hub.MaxConnections 信号量）；**不注册路由表**（xfer 是
+//     文件 API 隧道面，非中继节点面，不参与节点注册/VIP/DHT——hub 的 TryHandleConn
+//     走注册帧语义，与 xfer 隧道帧不兼容，故独立信号量控制并发）。
+func startXferListener(ctx context.Context, cfg *server.Config, tunnelHandler http.Handler, logger *slog.Logger) ([]xferListenerInfo, error) {
+	var infos []xferListenerInfo
+	if cfg == nil {
+		return nil, fmt.Errorf("start xfer listener: 配置为 nil")
+	}
+	if tunnelHandler == nil {
+		return nil, fmt.Errorf("start xfer listener: 隧道 handler 为 nil（需在 RegisterRoutes 之后调用）")
+	}
+	xferTLS := cfg.Hub.Transports.XferTLS
+	xferTCP := cfg.Hub.Transports.XferTCP
+	if !xferTLS.Enabled && !xferTCP.Enabled {
+		return infos, nil // 未启用 xfer listener：无操作
+	}
+	// fail-closed：xfer listener 需要 access_keys 首对派生隧道密钥（AD-3）。
+	key, err := server.HubXferKey(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("start xfer listener: %w", err)
+	}
+	// 服务端 Ed25519 身份（AD-4），打印指纹供 `sclient config set peer_fingerprints` 固化。
+	identity, err := server.LoadXferIdentity(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("start xfer listener: 加载服务端身份失败: %w", err)
+	}
+	logger.Info("xfer 服务端身份已就绪", "fingerprint", identity.Fingerprint(), "file", server.XferIdentityPath(cfg))
+
+	// TLS 传输（xfer_tls 恒 TLS；xfer_tcp 段 tls_enabled=true 升级）需要默认 *tls.Config。
+	// 走 registry：builtin.SetDefaultTLSConfig 后经 xfer.Get("tcp+tls").Listen。
+	// defaultTLSConfig 是 internal/tcp 包级全局，服务端进程内证书单一（同一 cfg），
+	// 多段共享同一 TLS 配置无冲突。
+	if xferTLS.Enabled || xferTCP.TLSEnabled {
+		tlsCfg, tErr := server.BuildXferTLSConfig(cfg)
+		if tErr != nil {
+			return nil, fmt.Errorf("start xfer listener: %w", tErr)
+		}
+		builtin.SetDefaultTLSConfig(tlsCfg)
+	}
+
+	if xferTLS.Enabled {
+		// xfer_tls 段恒 TLS（段名即约定），不消费 TLSEnabled 字段。
+		info, sErr := startOneXferListener(ctx, cfg, "xfer_tls", xferTLS, true, key, identity, tunnelHandler, logger)
+		if sErr != nil {
+			return nil, sErr
+		}
+		infos = append(infos, info)
+	}
+	if xferTCP.Enabled {
+		// xfer_tcp 段默认明文（显式 option），tls_enabled=true 升级为 TLS。
+		info, sErr := startOneXferListener(ctx, cfg, "xfer_tcp", xferTCP, xferTCP.TLSEnabled, key, identity, tunnelHandler, logger)
+		if sErr != nil {
+			return nil, sErr
+		}
+		infos = append(infos, info)
+	}
+	return infos, nil
+}
+
+// startOneXferListener 启动单个 xfer accept 循环（同步绑定，绑定失败 fail-fast）。
+// tlsEnabled 显式指定传输方式：xfer_tls 段恒传 true；xfer_tcp 段传 tc.TLSEnabled。
+func startOneXferListener(ctx context.Context, cfg *server.Config, name string, tc server.XferTransportConfig, tlsEnabled bool, key []byte, identity *tunnel.Identity, tunnelHandler http.Handler, logger *slog.Logger) (xferListenerInfo, error) {
+	transportName := "tcp"
+	if tlsEnabled {
+		transportName = "tcp+tls"
+	}
+	listenAddr := tc.Listen
+	if listenAddr == "" {
+		if tlsEnabled {
+			listenAddr = server.DefaultXferTLSListen
+		} else {
+			listenAddr = server.DefaultXferTCPListen
+		}
+	}
+	tp := xfer.Get(transportName)
+	if tp == nil {
+		return xferListenerInfo{}, fmt.Errorf("start xfer listener %s: 传输层 %q 未注册", name, transportName)
+	}
+	ln, err := tp.Listen(ctx, listenAddr)
+	if err != nil {
+		return xferListenerInfo{}, fmt.Errorf("start xfer listener %s: 监听失败（%s %s）: %w", name, transportName, listenAddr, err)
+	}
+	addr := xferListenerAddr(ln)
+
+	// 连接数上限信号量（复用 hub.max_connections 语义）。xfer 是隧道帧，不走 hub
+	// 注册帧语义的 TryHandleConn（那会误读注册帧破坏隧道握手），故独立信号量控制
+	// 并发，超限立即关闭新连接（防未认证/慢连接拖垮进程，C-1 DoS 收敛）。
+	maxConns := cfg.Hub.MaxConnections
+	if maxConns <= 0 {
+		maxConns = 256
+	}
+	sem := make(chan struct{}, maxConns)
+
+	go func() {
+		defer func() { _ = ln.Close() }()
+		for {
+			conn, aErr := ln.Accept(ctx)
+			if aErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				logger.Error("xfer listener accept 退出", "name", name, "error", aErr)
+				return
+			}
+			select {
+			case sem <- struct{}{}:
+			default:
+				logger.Warn("xfer 连接数达到上限，拒绝新连接", "name", name, "max", maxConns)
+				_ = conn.Close()
+				continue
+			}
+			go func() {
+				defer func() { <-sem }()
+				m := mux.New(conn, mux.RoleListener)
+				tun := tunnel.NewTunnel(m, key, tunnel.WithIdentity(identity))
+				// Serve 同步执行 ECDH 握手（listener 侧）+ accept 循环；ctx 取消时返回。
+				if sErr := tun.Serve(ctx, tunnelHandler); sErr != nil && ctx.Err() == nil {
+					logger.Warn("xfer 隧道 Serve 退出", "name", name, "error", sErr)
+				}
+				_ = m.Close()
+			}()
+		}
+	}()
+
+	logger.Info("xfer listener 已启用", "name", name, "transport", transportName, "addr", addr)
+	return xferListenerInfo{Name: name, Addr: addr, TLS: tlsEnabled, Fingerprint: identity.Fingerprint()}, nil
+}
+
+// xferListenerAddr 从 xfer.Listener 提取实际监听地址（支持实现暴露 Addr() 的
+// listener，如内置 TcpListener/TlsListener）；否则返回空串。
+func xferListenerAddr(ln xfer.Listener) string {
+	if a, ok := ln.(interface{ Addr() net.Addr }); ok {
+		return a.Addr().String()
+	}
+	return ""
 }
 
 // buildServerConfig 从 CLI 标志和配置文件构建服务器配置。

@@ -29,10 +29,14 @@ type Handlers struct {
 	checksumStore ChecksumStoreIface
 	uploadStore   UploadStoreIface
 	tunnelHandler http.Handler
-	logger        *slog.Logger
-	metrics       *Metrics
-	shareStore    *ShareStore
-	routeTable    *hub.MeshRouteTable
+	// localHandler 是隧道内层本地文件 API handler（localMux + 中间件链，不含外层
+	// 帧解密/密钥检查）。供 xfer listener（阶段 5 工作项 1）直接路由解密后的隧道
+	// 请求；与 tunnelHandler（传统 POST /tunnel 外层帧解密器）互补。
+	localHandler http.Handler
+	logger       *slog.Logger
+	metrics      *Metrics
+	shareStore   *ShareStore
+	routeTable   *hub.MeshRouteTable
 	// dht 是节点发现表（nil = 不启用 DHT 候选，既有行为）。/api/hub/nodes 把 DHT
 	// 候选节点合并进发现列表（路由表权威 + DHT 候选，去重）。由 cmd/sproxy 装配
 	// Kademlia 时经 SetDHT 注入（hub.dht: kad）。
@@ -85,6 +89,18 @@ func (h *Handlers) SetSyncMgr(mgr *syncmgr.Manager) {
 // TunnelHandler 返回隧道处理器，用于 SIGHUP 时热替换密钥。
 func (h *Handlers) TunnelHandler() http.Handler {
 	return h.tunnelHandler
+}
+
+// LocalHandler 返回隧道内层本地文件 API handler（localMux + 中间件链，
+// 不含外层帧解密/密钥检查）。
+//
+// 供 xfer listener（阶段 5 工作项 1）直接路由解密后的隧道请求：xfer 隧道
+// handleStream 已把请求体解密为明文，无需再经 TunnelHandler() 的外层帧解密
+// （NewLocalHandler 期望请求 ctx 带派生密钥且 body 为帧协议——xfer 请求两者皆无，
+// 直接使用会 401 unauthorized）。与 TunnelHandler() 互补：前者给传统 POST /tunnel，
+// 后者给 xfer 隧道。
+func (h *Handlers) LocalHandler() http.Handler {
+	return h.localHandler
 }
 
 // RegisterRoutesOpts 是 RegisterRoutes 的选项参数结构体。
@@ -225,7 +241,11 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 日志带 trace_id/span_id，恢复隧道内层 per-request「收到/完成」日志。
 	// 注意：这是 requestLogMiddleware 的第二个独立实例（主 mux 外层已用一次），
 	// 对隧道路径独立生效，正确。
-	h.tunnelHandler = tunnel.NewLocalHandler(nil, h.requestLogMiddleware(apiHandler), log.With("component", "tunnel"))
+	// 隧道内层 handler：requestLogMiddleware（trace + 请求日志）包装 apiHandler。
+	// localHandler 供 xfer listener 直接使用（请求体已解密为明文）；tunnelHandler
+	// 是传统 POST /tunnel 的外层帧解密器（期望 ctx 带派生密钥 + body 为帧协议）。
+	h.localHandler = h.requestLogMiddleware(apiHandler)
+	h.tunnelHandler = tunnel.NewLocalHandler(nil, h.localHandler, log.With("component", "tunnel"))
 
 	srvMux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
 	srvMux.HandleFunc("GET /download", h.authMiddleware(h.download))

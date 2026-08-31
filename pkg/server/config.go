@@ -71,6 +71,19 @@ type VersionConfig struct {
 // 保证（fail-closed：未配置 access_keys 时 hub 拒绝所有注册）。
 const DefaultHubTCPListen = "127.0.0.1:18084"
 
+// DefaultXferTCPListen 是 xfer_tcp 明文 listener 的默认监听地址
+// （transports.xfer_tcp.listen 为空时）。
+//
+// 安全边界：默认绑定 **loopback**（127.0.0.1）——xfer listener 承载文件内容
+// （文件 API 隧道面），全接口绑定意味着任意网卡可达（数据泄露面）；远程节点可达需
+// 显式配置 `listen: ":<port>"`。明文 tcp 仅显式 option，TLS 机密性 + Ed25519 指纹
+// pinning 由 xfer_tls / tls_enabled 保证。
+const DefaultXferTCPListen = "127.0.0.1:18086"
+
+// DefaultXferTLSListen 是 xfer_tls listener 的默认监听地址
+// （transports.xfer_tls.listen 为空时）。同样默认绑 loopback。
+const DefaultXferTLSListen = "127.0.0.1:18087"
+
 // HubConfig 配置 Hub 中继系统。
 // 节点注册准入由顶层 access_keys 提供（SproxySig AccessKey + HMAC proof），
 // hub 级不再需要任何 token 配置。
@@ -148,6 +161,11 @@ type FederationPeerConfig struct {
 type TransportConfigs struct {
 	WS  WSTransportConfig  `yaml:"ws" mapstructure:"ws"`   // WebSocket 传输（挂载到主 HTTP server，固定 /ws）
 	TCP TCPTransportConfig `yaml:"tcp" mapstructure:"tcp"` // 裸 TCP 中继传输（独立端口监听，默认关闭）
+	// XferTCP/XferTLS 是服务端 xfer listener（阶段 5 工作项 1）：接收
+	// `sclient tunnel --xfer tcp/tcp+tls --hub <addr>` 的会话，经 mux → tunnel 解密 →
+	// 路由到本地文件 API。与 hub 中继不同，xfer listener 不参与节点注册/VIP/DHT。
+	XferTCP XferTransportConfig `yaml:"xfer_tcp" mapstructure:"xfer_tcp"` // 明文 xfer listener（显式 option；tls_enabled 可升级）
+	XferTLS XferTransportConfig `yaml:"xfer_tls" mapstructure:"xfer_tls"` // TLS xfer listener（默认，段名即约定恒 TLS）
 }
 
 // WSTransportConfig 配置 WebSocket 传输监听。
@@ -169,6 +187,22 @@ type WSTransportConfig struct {
 type TCPTransportConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
 	Listen  string `yaml:"listen" mapstructure:"listen"`
+}
+
+// XferTransportConfig 配置服务端 xfer listener（阶段 5 工作项 1）。
+//
+// 两段（xfer_tcp / xfer_tls）共用本结构：
+//   - xfer_tls 段恒为 TLS（段名即约定），TLSEnabled 不消费；
+//   - xfer_tcp 段默认为明文（裸 tcp，显式 option），TLSEnabled=true 时升级为 TLS
+//     （复用 tcp+tls 传输，与 xfer_tls 同一证书源 cfg.TLS.*）。
+//
+// Listen 为空时回落 loopback 默认地址（DefaultXferTCPListen / DefaultXferTLSListen）——
+// xfer listener 承载文件内容，默认不绑全部接口，远程可达须显式 listen。
+type XferTransportConfig struct {
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	Listen  string `yaml:"listen" mapstructure:"listen"`
+	// TLSEnabled 仅 xfer_tcp 段有意义：true 把明文 xfer listener 升级为 TLS。
+	TLSEnabled bool `yaml:"tls_enabled" mapstructure:"tls_enabled"`
 }
 
 // WebConfig 控制 Web UI 的传输行为。
@@ -358,6 +392,12 @@ func (c *Config) SetDefaults() {
 	}
 	if c.Hub.Transports.TCP.Enabled && c.Hub.Transports.TCP.Listen == "" {
 		c.Hub.Transports.TCP.Listen = DefaultHubTCPListen
+	}
+	if c.Hub.Transports.XferTLS.Enabled && c.Hub.Transports.XferTLS.Listen == "" {
+		c.Hub.Transports.XferTLS.Listen = DefaultXferTLSListen
+	}
+	if c.Hub.Transports.XferTCP.Enabled && c.Hub.Transports.XferTCP.Listen == "" {
+		c.Hub.Transports.XferTCP.Listen = DefaultXferTCPListen
 	}
 	if c.Hub.Federation.Interval <= 0 {
 		c.Hub.Federation.Interval = 30 * time.Second

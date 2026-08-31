@@ -115,6 +115,39 @@ func hasRoute(t *testing.T, mux http.Handler, probeMethods []string, path string
 	return false
 }
 
+// TestHandlers_LocalHandler 验证 LocalHandler() 返回隧道内层本地文件 API handler
+// （localMux + 中间件链），且可直接路由请求（不经 TunnelHandler() 的外层帧解密/
+// 密钥检查）——这是 xfer listener（阶段 5 工作项 1）的接线前提：请求体已由 xfer
+// 隧道解密为明文，直接 ServeHTTP 应命中路由返回 200，而非 401。
+func TestHandlers_LocalHandler(t *testing.T) {
+	cfg := Default()
+	cfg.UploadsDir = t.TempDir()
+	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	mux := http.NewServeMux()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:     mux,
+		CfgPtr:  &cfgPtr,
+		Version: "v",
+		BuildAt: "b",
+		Logger:  testLogger(),
+	})
+	t.Cleanup(func() { _ = h.Close() })
+
+	lh := h.LocalHandler()
+	if lh == nil {
+		t.Fatal("LocalHandler 返回 nil")
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/files", nil)
+	lh.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("LocalHandler 直连 GET /api/files 应为 200，实际 %d（body=%s）", w.Code, w.Body.String())
+	}
+}
+
 // TestLocalMuxCoversAllTunnelRoutes 断言账本每条路由在接入层 mux 上都已注册。
 // 由于 localMux 与 srvMux 共享同一批 handler 且 pattern 完全一致，两者任一缺失
 // （authMiddleware 版或裸版）都意味着一端业务不可达：srvMux 有而 localMux 缺 =
