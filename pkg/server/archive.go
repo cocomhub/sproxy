@@ -90,7 +90,7 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
-			fullPath := h.safePath(relPath)
+			fullPath := h.safePathFor(r, relPath)
 			if fullPath == "" {
 				logger.Error("归档添加文件失败：无效的文件路径", "path", relPath)
 				continue
@@ -258,7 +258,7 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath := h.safePath(relPath)
+	fullPath := h.safePathFor(r, relPath)
 	if fullPath == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return

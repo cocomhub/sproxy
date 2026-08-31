@@ -1416,8 +1416,9 @@ async function doChainDownloadCloud(lines, filenames) {
     if (!archiveResult.success) { showToast('归档失败: ' + (archiveResult.error || archiveResult.message || '未知错误'), 'error'); return; }
     showToast('下载归档并清理中...', 'info');
     const downloadName = (archiveResult.file || '').split('/').pop();
-    // 先下载一次归档（I5），再逐个清理任务。
-    const dlBlob = (await sc.files.download(archiveResult.file)).blob;
+    // 先下载一次归档（I5），再逐个清理任务。归档下载按用途传 kind=cloud_archive
+    // （服务端返回的 file 只含归档名，客户端不接触 .__ 内部路径）。
+    const dlBlob = (await sc.files.download(archiveResult.file, { kind: 'cloud_archive' })).blob;
     triggerBrowserDownload(dlBlob, downloadName);
     for (let i = 0; i < taskIds.length; i++) {
       try {
@@ -1519,8 +1520,8 @@ async function doChainDownloadCloudGroup(urls, filenames) {
     }
     showToast('下载归档并清理中...', 'info');
 
-    // 阶段 4: 下载归档文件（先下载再删除组）
-    const dlBlob = (await sc.files.download(archiveResult.file)).blob;
+    // 阶段 4: 下载归档文件（先下载再删除组）。归档下载按用途传 kind=cloud_archive。
+    const dlBlob = (await sc.files.download(archiveResult.file, { kind: 'cloud_archive' })).blob;
     triggerBrowserDownload(dlBlob, archiveName);
     // 阶段 5: 删除组（清理远端文件）
     await deleteCloudGroupForCleanup(groupId);
@@ -1592,10 +1593,10 @@ async function doCreateCloudGroup(lines, filenames) {
 async function downloadCloudFile(taskId, filename, checksum) {
   try {
     const rawTaskId = stripCloudId(taskId);
-    // 先下载云端文件（sc.files.download 返回 {blob, headers}，传输层自动协商）
-    // 云端目录名是服务端真实 id（无前缀），路径用剥前缀 id（否则 404）
-    const cloudPath = '.__cloud__/' + rawTaskId + '/' + filename;
-    const blob = (await sc.files.download(cloudPath)).blob;
+    // 先下载云端文件（sc.files.download 返回 {blob, headers}，传输层自动协商）。
+    // 云任务文件存服务端 .__cloud__/<taskID>/<file>（.__ 内部目录），按用途传
+    // kind=cloud_task + filename=<taskID>/<file>，服务端校验任务 owner 后拼接。
+    const blob = (await sc.files.download(rawTaskId + '/' + filename, { kind: 'cloud_task' })).blob;
 
     // 触发浏览器下载
     const a = document.createElement('a');

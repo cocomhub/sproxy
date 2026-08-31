@@ -52,9 +52,8 @@ type CloudDownloadGroupChain struct {
 	Timeout      time.Duration `json:"timeout"`
 
 	// 非持久化字段
-	archiveServerPath string        `json:"-"`
-	client            *FileClient   `json:"-"`
-	chainMgr          *ChainManager `json:"-"`
+	client   *FileClient   `json:"-"`
+	chainMgr *ChainManager `json:"-"`
 }
 
 // NewCloudDownloadGroupChain 创建云端组下载链式操作。
@@ -339,11 +338,10 @@ func (c *CloudDownloadGroupChain) waitForGroup(ctx context.Context) error {
 
 // archiveGroup 打包组内已完成文件。
 func (c *CloudDownloadGroupChain) archiveGroup(ctx context.Context) error {
-	result, err := c.client.CloudArchiveGroup(ctx, c.GroupID, c.ArchiveName)
+	_, err := c.client.CloudArchiveGroup(ctx, c.GroupID, c.ArchiveName)
 	if err != nil {
 		return fmt.Errorf("archive: %w: %v", ErrArchiveFailed, err)
 	}
-	c.archiveServerPath = result.File
 	return nil
 }
 
@@ -354,20 +352,11 @@ func (c *CloudDownloadGroupChain) downloadToLocal(ctx context.Context) error {
 		archiveName += ".tar.gz"
 	}
 
-	archivePath := c.archiveServerPath
-	if archivePath == "" {
-		archivePath = filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName))
-	}
-	// 提取归档名（filepath.Base 同时中和服务端路径中的路径穿越组件），
-	// 以 kind=cloud_archive 下载：.__ 内部目录被 ValidateFilePath 全拒，kind 由服务端拼接。
-	archiveFileName := filepath.Base(archivePath)
-	if archiveFileName == "" {
-		archiveFileName = archiveName
-	}
-
+	// 归档下载按用途传 kind=cloud_archive：服务端在 .__cloud_archives__/<owner>/ 下
+	// 按 owner 拼接，客户端不接触内部路径，filename 只传归档名。
 	localPath := filepath.Join(c.LocalDir, archiveName)
 	c.LocalPath = localPath
-	if err := c.client.ChunkedDownload(ctx, archiveFileName, localPath, WithChunkedKind(DownloadKindCloudArchive)); err != nil {
+	if err := c.client.ChunkedDownload(ctx, archiveName, localPath, WithChunkedKind(DownloadKindCloudArchive)); err != nil {
 		return fmt.Errorf("下载归档文件失败: %w", err)
 	}
 	return nil

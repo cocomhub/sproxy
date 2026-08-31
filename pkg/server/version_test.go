@@ -354,7 +354,8 @@ func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = h.Close() })
 
-	h.saveVersionBeforeOverwrite("")
+	req, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1/upload", nil)
+	h.saveVersionBeforeOverwrite(req, "")
 }
 
 func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {

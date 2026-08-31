@@ -33,10 +33,10 @@ func parseRenameParams(r *http.Request) (from, to, checksum string, err error) {
 	return from, to, checksum, nil
 }
 
-// resolveRenamePaths 计算 from 和 to 对应的安全绝对路径。
-func resolveRenamePaths(h *Handlers, from, to string) (fromPath, toPath string, ok bool) {
-	fromPath = h.safePath(from)
-	toPath = h.safePath(to)
+// resolveRenamePaths 计算 from 和 to 在指定 owner 存储根下的安全绝对路径。
+func resolveRenamePaths(h *Handlers, owner, from, to string) (fromPath, toPath string, ok bool) {
+	fromPath = h.safePathForOwner(owner, from)
+	toPath = h.safePathForOwner(owner, to)
 	if fromPath == "" || toPath == "" {
 		return "", "", false
 	}
@@ -48,6 +48,7 @@ type renameOpCtx struct {
 	h                *Handlers
 	w                http.ResponseWriter
 	ctx              context.Context
+	owner            string
 	fromPath         string
 	toPath           string
 	from             string
@@ -106,12 +107,12 @@ func executeRename(ctx renameOpCtx) error {
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
 		return err
 	}
-	ctx.h.checksumStore.Rename(ctx.from, ctx.to)
+	ctx.h.checksumStore.Rename(checksumStoreKey(ctx.owner, ctx.from), checksumStoreKey(ctx.owner, ctx.to))
 	return nil
 }
 
 // processBatchRenameItem 处理单条批量重命名操作。
-func (h *Handlers) processBatchRenameItem(ctx context.Context, op BatchRenameOp, logger *slog.Logger) BatchOperationResult {
+func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op BatchRenameOp, logger *slog.Logger) BatchOperationResult {
 	result := BatchOperationResult{Filename: op.From + " -> " + op.To}
 	from, err := ValidateFilePath(op.From)
 	if err != nil {
@@ -128,7 +129,7 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, op BatchRenameOp,
 		result.Message = "源与目标相同，无需移动"
 		return result
 	}
-	fromPath, toPath, ok := resolveRenamePaths(h, from, to)
+	fromPath, toPath, ok := resolveRenamePaths(h, owner, from, to)
 	if !ok {
 		result.Message = "无效的文件路径"
 		return result
@@ -173,7 +174,7 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, op BatchRenameOp,
 		result.Message = "重命名失败"
 		return result
 	}
-	h.checksumStore.Rename(from, to)
+	h.checksumStore.Rename(checksumStoreKey(owner, from), checksumStoreKey(owner, to))
 	h.RecordAudit(ctx, AuditEvent{
 		Action: "rename", ObjectType: "file", Object: from,
 		Result: AuditResultSuccess, Detail: "to=" + to,
@@ -206,9 +207,10 @@ func (h *Handlers) batchRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logger := h.logger.With("batch", "rename")
+	owner := ownerFromRequest(r)
 	results := make([]BatchOperationResult, 0, len(req.Operations))
 	for _, op := range req.Operations {
-		result := h.processBatchRenameItem(r.Context(), op, logger)
+		result := h.processBatchRenameItem(r.Context(), owner, op, logger)
 		results = append(results, result)
 	}
 	sendJSONResponse(w, BatchResponse{Results: results}, http.StatusOK)
@@ -236,7 +238,8 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromPath, toPath, ok := resolveRenamePaths(h, from, to)
+	owner := ownerFromRequest(r)
+	fromPath, toPath, ok := resolveRenamePaths(h, owner, from, to)
 	if !ok {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
@@ -246,6 +249,7 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		h:                h,
 		w:                w,
 		ctx:              r.Context(),
+		owner:            owner,
 		fromPath:         fromPath,
 		toPath:           toPath,
 		from:             from,

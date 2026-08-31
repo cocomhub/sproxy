@@ -5,6 +5,7 @@ package mockserver
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +67,22 @@ func (m *MockUploadStore) GetSessionByFilename(filename string) *server.ChunkedU
 	defer m.mu.RUnlock()
 	for _, s := range m.sessions {
 		if s.Filename == filename && !s.Completed {
+			return s
+		}
+	}
+	return nil
+}
+
+// GetSessionByFilenameOwner 按文件名与 owner 前缀查找未完成的会话。
+func (m *MockUploadStore) GetSessionByFilenameOwner(filename, owner string) *server.ChunkedUploadSession {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	prefix := ""
+	if owner != "" {
+		prefix = owner + "/"
+	}
+	for _, s := range m.sessions {
+		if s.Filename == filename && !s.Completed && strings.HasPrefix(s.UploadID, prefix) {
 			return s
 		}
 	}

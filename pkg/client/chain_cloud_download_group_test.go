@@ -97,7 +97,7 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 		json.NewEncoder(w).Encode(CloudArchiveResult{
 			Success: true,
 			Message: "ok",
-			File:    filepath.ToSlash(filepath.Join(".__cloud_archives__", "group-archive.tar.gz")),
+			File:    "group-archive.tar.gz",
 			Size:    int64(len("group-archive-content")),
 		})
 	})
@@ -491,7 +491,7 @@ func TestCloudDownloadGroupChain_CleanupRemoteError(t *testing.T) {
 		archivePath := filepath.Join(archiveDir, "cleanup-archive.tar.gz")
 		os.WriteFile(archivePath, []byte("cleanup"), 0644)
 		json.NewEncoder(w).Encode(CloudArchiveResult{
-			Success: true, File: filepath.ToSlash(filepath.Join(".__cloud_archives__", "cleanup-archive.tar.gz")), Size: 7,
+			Success: true, File: "cleanup-archive.tar.gz", Size: 7,
 		})
 	})
 	// 删除组失败：cleanupGroup 应容忍（Run 仍成功）

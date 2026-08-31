@@ -274,7 +274,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath := h.safePath(remotePath)
+	fullPath := h.safePathFor(r, remotePath)
 	if fullPath == "" {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return

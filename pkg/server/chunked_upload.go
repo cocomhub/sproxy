@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/shortid"
@@ -50,8 +51,8 @@ func negotiateChunkSize(clientChunkSize, cfgChunkSize int64) (chunkSize int64, a
 }
 
 // checkExistingFileForInit 检查目标文件是否已存在。返回 true 表示已处理（调用方应 return）。
-func (h *Handlers) checkExistingFileForInit(w http.ResponseWriter, filename, fileChecksum string) bool {
-	existingPath := h.safePath(filename)
+func (h *Handlers) checkExistingFileForInit(w http.ResponseWriter, r *http.Request, filename, fileChecksum string) bool {
+	existingPath := h.safePathFor(r, filename)
 	if existingPath == "" {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return true
@@ -152,21 +153,23 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确保上传目录存在
-	if err := os.MkdirAll(cfg.UploadsDir, 0755); err != nil {
+	// 确保 owner 存储根存在
+	if err := os.MkdirAll(h.ownerUploadsDir(r), 0755); err != nil {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "创建上传目录失败"}, http.StatusInternalServerError)
 		return
 	}
 
-	// 排他上传检查：同一文件名不能并发上传
-	if _, loaded := h.uploadingFiles.LoadOrStore(req.Filename, req.UploadID); loaded {
+	// 排他上传检查：同一文件名不能并发上传（key 按 owner 隔离）
+	owner := ownerFromRequest(r)
+	upKey := ownerScopedUploadKey(owner, req.Filename)
+	if _, loaded := h.uploadingFiles.LoadOrStore(upKey, req.UploadID); loaded {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "该文件正在上传中"}, http.StatusConflict)
 		return
 	}
-	defer h.uploadingFiles.Delete(req.Filename)
+	defer h.uploadingFiles.Delete(upKey)
 
 	// 已存在同名文件的检查
-	if h.checkExistingFileForInit(w, req.Filename, req.FileChecksum) {
+	if h.checkExistingFileForInit(w, r, req.Filename, req.FileChecksum) {
 		return
 	}
 
@@ -181,7 +184,8 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		req.TotalChunks = int((req.TotalSize + chunkSize - 1) / chunkSize)
 	}
 
-	session, reused, err := h.uploadStore.GetOrCreateSession(req.UploadID, req.Filename,
+	// 会话 key 按 owner 命名空间隔离（客户端 upload_id 由文件元数据确定性生成，跨租户会碰撞）
+	session, reused, err := h.uploadStore.GetOrCreateSession(ownerScopedSessionKey(owner, req.UploadID), req.Filename,
 		req.TotalSize, chunkSize, req.TotalChunks, req.FileChecksum, req.FileModTime)
 	if err != nil {
 		h.logger.Error("创建/续传上传会话失败", "upload_id", req.UploadID, "error", err)
@@ -251,6 +255,13 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Debug("uploadChunk 请求", "upload_id", uploadID, "chunk_index", chunkIndex, "content_type", r.Header.Get("Content-Type"))
+
+	// 校验 upload_id 属于当前 owner（会话 key 为 <owner>/<upload_id>）
+	owner := ownerFromRequest(r)
+	if _, ok := validateSessionOwner(owner, uploadID); !ok {
+		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
+		return
+	}
 
 	// 获取 session
 	session := h.uploadStore.GetSession(uploadID)
@@ -360,9 +371,14 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 // 故 status 恒为 "uploading"（取值域 uploading|completed，completed 在此被 handler 过滤）。
 func (h *Handlers) uploadSessions(w http.ResponseWriter, r *http.Request) {
 	meta := h.uploadStore.ListSessions()
+	owner := ownerFromRequest(r)
+	prefix := ""
+	if owner != "" {
+		prefix = owner + "/"
+	}
 	sessions := make([]UploadSessionInfo, 0, len(meta))
 	for _, m := range meta {
-		if m.Completed {
+		if m.Completed || (prefix != "" && !strings.HasPrefix(m.UploadID, prefix)) {
 			continue
 		}
 		info := UploadSessionInfo{
@@ -385,17 +401,18 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 	params := r.URL.Query()
 	uploadID := params.Get("upload_id")
 	filename := params.Get("filename")
+	owner := ownerFromRequest(r)
 
 	// 1. 按 upload_id 查 session
 	if uploadID != "" {
-		if h.lookupUploadIDStatus(w, uploadID, filename) {
+		if h.lookupUploadIDStatus(w, owner, uploadID, filename) {
 			return
 		}
 	}
 
-	// 2. 按 filename 查找未完成的 session
+	// 2. 按 filename 查找未完成的 session（owner 作用域）
 	if filename != "" {
-		if h.lookupFilenameStatus(w, filename) {
+		if h.lookupFilenameStatus(w, owner, filename) {
 			return
 		}
 	}
@@ -405,7 +422,15 @@ func (h *Handlers) uploadStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // lookupUploadIDStatus 按 upload_id 查询上传会话状态。返回 true 表示已处理请求。
-func (h *Handlers) lookupUploadIDStatus(w http.ResponseWriter, uploadID, filename string) bool {
+func (h *Handlers) lookupUploadIDStatus(w http.ResponseWriter, owner, uploadID, filename string) bool {
+	// 校验 upload_id 属于当前 owner（会话 key 为 <owner>/<upload_id>）
+	if _, ok := validateSessionOwner(owner, uploadID); !ok {
+		if filename == "" {
+			sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
+			return true
+		}
+		return false
+	}
 	session := h.uploadStore.GetSession(uploadID)
 	if session != nil {
 		missing := MissingChunks(session)
@@ -431,13 +456,13 @@ func (h *Handlers) lookupUploadIDStatus(w http.ResponseWriter, uploadID, filenam
 }
 
 // lookupFilenameStatus 按 filename 查找上传会话或检查文件是否已存在。返回 true 表示已处理请求。
-func (h *Handlers) lookupFilenameStatus(w http.ResponseWriter, filename string) bool {
+func (h *Handlers) lookupFilenameStatus(w http.ResponseWriter, owner, filename string) bool {
 	// 防御性校验：防止路径穿越
 	if _, err := ValidateFilePath(filename); err != nil {
 		sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return true
 	}
-	session := h.uploadStore.GetSessionByFilename(filename)
+	session := h.uploadStore.GetSessionByFilenameOwner(filename, owner)
 	if session != nil {
 		missing := MissingChunks(session)
 		sendJSONResponse(w, ChunkStatusResponse{
@@ -453,12 +478,12 @@ func (h *Handlers) lookupFilenameStatus(w http.ResponseWriter, filename string) 
 		return true
 	}
 
-	return h.checkFileExistsStatus(w, filename)
+	return h.checkFileExistsStatus(w, owner, filename)
 }
 
 // checkFileExistsStatus 检查磁盘上文件是否已存在且 checksum 匹配。返回 true 表示已处理请求。
-func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, filename string) bool {
-	filePath := h.safePath(filename)
+func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, owner, filename string) bool {
+	filePath := h.safePathForOwner(owner, filename)
 	if filePath == "" {
 		sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return true
@@ -467,7 +492,7 @@ func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, filename string)
 	if err != nil {
 		return false
 	}
-	if checksum, ok := h.checksumStore.Get(filename); ok {
+	if checksum, ok := h.checksumStore.Get(checksumStoreKey(owner, filename)); ok {
 		sendJSONResponse(w, ChunkStatusResponse{
 			Success:      true,
 			Completed:    true,
@@ -493,9 +518,14 @@ func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, filename string)
 
 // validateCompleteSession 校验 complete 请求的 session 是否有效。
 // 如果校验失败，已发送错误响应，返回 (nil, false)。
-func (h *Handlers) validateCompleteSession(w http.ResponseWriter, uploadID string) (*ChunkedUploadSession, bool) {
+func (h *Handlers) validateCompleteSession(w http.ResponseWriter, owner, uploadID string) (*ChunkedUploadSession, bool) {
 	if uploadID == "" {
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "缺少 upload_id"}, http.StatusBadRequest)
+		return nil, false
+	}
+	// 校验 upload_id 属于当前 owner（会话 key 为 <owner>/<upload_id>）
+	if _, ok := validateSessionOwner(owner, uploadID); !ok {
+		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
 		return nil, false
 	}
 
@@ -535,8 +565,8 @@ func (h *Handlers) validateCompleteSession(w http.ResponseWriter, uploadID strin
 
 // mergeAndRenameFile 合并分块到临时文件，校验 SHA-256，然后原子重命名。
 // 如果操作失败，已发送错误响应，返回 ("", false)。
-func (h *Handlers) mergeAndRenameFile(ctx context.Context, w http.ResponseWriter, uploadID string, session *ChunkedUploadSession) (string, bool) {
-	filePath := h.safePath(session.Filename)
+func (h *Handlers) mergeAndRenameFile(ctx context.Context, w http.ResponseWriter, owner, uploadID string, session *ChunkedUploadSession) (string, bool) {
+	filePath := h.safePathForOwner(owner, session.Filename)
 	if filePath == "" {
 		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return "", false
@@ -589,8 +619,8 @@ func (h *Handlers) mergeAndRenameFile(ctx context.Context, w http.ResponseWriter
 }
 
 // recordCompleteMetadata 记录文件 checksum、保留时间戳并清理上传 session。
-func (h *Handlers) recordCompleteMetadata(uploadID string, session *ChunkedUploadSession, finalChecksum string) {
-	filePath := h.safePath(session.Filename)
+func (h *Handlers) recordCompleteMetadata(owner, uploadID string, session *ChunkedUploadSession, finalChecksum string) {
+	filePath := h.safePathForOwner(owner, session.Filename)
 
 	// 保留文件原始修改时间
 	if session.FileModTime > 0 {
@@ -600,8 +630,8 @@ func (h *Handlers) recordCompleteMetadata(uploadID string, session *ChunkedUploa
 		}
 	}
 
-	// 记录 checksum
-	h.checksumStore.Set(session.Filename, finalChecksum)
+	// 记录 checksum（owner 作用域 key）
+	h.checksumStore.Set(checksumStoreKey(owner, session.Filename), finalChecksum)
 
 	// 标记完成（延迟清理 session 目录）
 	if err := h.uploadStore.CompleteSession(uploadID); err != nil {
@@ -628,7 +658,8 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, ok := h.validateCompleteSession(w, req.UploadID)
+	owner := ownerFromRequest(r)
+	session, ok := h.validateCompleteSession(w, owner, req.UploadID)
 	if !ok {
 		return
 	}
@@ -640,14 +671,14 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	// recovery 兜底走进程级；未来如需可打断用独立 goroutine + 状态表。）
 	mergeCtx := context.WithoutCancel(r.Context())
 
-	finalChecksum, ok := h.mergeAndRenameFile(mergeCtx, w, req.UploadID, session)
+	finalChecksum, ok := h.mergeAndRenameFile(mergeCtx, w, owner, req.UploadID, session)
 	if !ok {
 		// mergeAndRenameFile 已发送错误响应；分块与会话保留，客户端可重试 init/complete。
 		h.logger.Warn("合并失败但分块保留，客户端可重试", "upload_id", req.UploadID, "file_name", session.Filename)
 		return
 	}
 
-	h.recordCompleteMetadata(req.UploadID, session, finalChecksum)
+	h.recordCompleteMetadata(owner, req.UploadID, session, finalChecksum)
 
 	h.logger.Info("文件合并完成", "file_name", session.Filename, "checksum", shortid.ShortHash(finalChecksum), "size", session.TotalSize)
 	sendJSONResponse(w, ChunkCompleteResponse{

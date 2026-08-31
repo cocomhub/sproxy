@@ -17,8 +17,13 @@ import (
 
 // downloadKindCloudArchive 是云任务归档下载的 kind 值。
 // kind 白名单仅此一项——归档是用户主动打包的产出（归档名含随机难枚举），
-// 第一版对所有认证用户可下载，未来可按 owner 隔离。
+// 按 owner 隔离存储（.__cloud_archives__/<owner>/）。
 const downloadKindCloudArchive = "cloud_archive"
+
+// downloadKindCloudTask 是云任务文件下载的 kind 值。
+// 云任务文件存 uploadsDir/.__cloud__/<taskID>/<file>（.__ 内部目录），
+// filename 传 <taskID>/<file>，服务端校验任务属于当前 owner 后拼接内部目录。
+const downloadKindCloudTask = "cloud_task"
 
 // downloadPathError 携带 HTTP 状态码与消息，统一 /download 与 /download/chunk 的路径解析错误。
 type downloadPathError struct {
@@ -83,28 +88,13 @@ func validateCloudArchiveName(name string) *downloadPathError {
 	return nil
 }
 
-// cloudArchivePath 在 uploadsDir/.__cloud_archives__ 下安全拼接归档名。
-// 返回空字符串表示配置缺失或路径越界（防穿越纵深防御）。
-func (h *Handlers) cloudArchivePath(name string) string {
-	cfg := h.cfgPtr.Load()
-	if cfg == nil {
-		return ""
-	}
-	archiveDir := filepath.Join(cfg.UploadsDir, cloudArchiveDirName)
-	fullPath := filepath.Join(archiveDir, name)
-	if !IsPathWithin(fullPath, archiveDir) {
-		return ""
-	}
-	return fullPath
-}
-
 // resolveDownloadPath 解析 /download、/download/chunk 与 /api/files/stat 的文件路径。
 // 返回用于响应头（Content-Disposition / checksum key）的 filename 与磁盘路径 filePath。
 //
-// kind 为空 → 原逻辑：ValidateFilePath 校验 + UploadsDir 安全拼接（.__ 内部目录全拒）。
+// kind 为空 → 原逻辑：ValidateFilePath 校验 + owner 存储根安全拼接（.__ 内部目录全拒）。
 // kind=cloud_archive → filename 为归档名（单文件名），服务端拼接
 //
-//	uploadsDir/.__cloud_archives__/<name> 并确认在归档目录内（防穿越）。
+//	uploadsDir/.__cloud_archives__/<owner>/<name>（未认证无 owner 段）并确认在归档目录内。
 //
 // 其它 kind → 400（白名单，防任意内部目录访问）。
 func (h *Handlers) resolveDownloadPath(r *http.Request) (filename, filePath string, err error) {
@@ -120,7 +110,7 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (filename, filePath stri
 			}
 			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
 		}
-		fullPath := h.safePath(remotePath)
+		fullPath := h.safePathFor(r, remotePath)
 		if fullPath == "" {
 			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
 		}
@@ -129,11 +119,33 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (filename, filePath stri
 		if aErr := validateCloudArchiveName(name); aErr != nil {
 			return "", "", aErr
 		}
-		fullPath := h.cloudArchivePath(name)
+		fullPath := h.cloudArchivePathFor(r, name)
 		if fullPath == "" {
 			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
 		}
 		return name, fullPath, nil
+	case downloadKindCloudTask:
+		remotePath, vErr := ValidateFilePath(name)
+		if vErr != nil {
+			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
+		}
+		// 校验任务属于当前 owner（跨租户任务视为不存在，404 防枚举）
+		taskID := remotePath
+		if i := strings.IndexByte(remotePath, '/'); i > 0 {
+			taskID = remotePath[:i]
+		}
+		if h.cloudMgr == nil {
+			return "", "", &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+		}
+		if _, ok := h.cloudMgr.SnapshotTask(taskID, ownerFromRequest(r)); !ok {
+			return "", "", &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+		}
+		cfg := h.cfgPtr.Load()
+		fullPath := joinSafePath(filepath.Join(cfg.UploadsDir, cloudDirName), remotePath)
+		if fullPath == "" {
+			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
+		}
+		return remotePath, fullPath, nil
 	default:
 		return "", "", &downloadPathError{
 			status:  http.StatusBadRequest,
@@ -187,14 +199,16 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 
 	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算
 	// 回退路径优先复用已打开的文件句柄（零额外 I/O），仅当计算成功后才写入缓存。
-	if cs, ok := h.checksumStore.Get(filename); ok {
+	// checksum key 按 owner 作用域隔离，避免跨租户同路径冲突。
+	csKey := h.checksumKeyFor(r, filename)
+	if cs, ok := h.checksumStore.Get(csKey); ok {
 		w.Header().Set(headerFileChecksum, cs)
 	} else {
 		// 缓存未命中，从已打开文件句柄计算（复用 file，零额外 I/O）
 		_, _ = file.Seek(0, io.SeekStart)
 		if cs, err := Checksum(file); err == nil {
 			_, _ = file.Seek(0, io.SeekStart)
-			h.checksumStore.Set(filename, cs)
+			h.checksumStore.Set(csKey, cs)
 			w.Header().Set(headerFileChecksum, cs)
 		} else {
 			h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "file_name", filename)
@@ -238,7 +252,7 @@ func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
 	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", info.ModTime().UnixNano()))
-	if cs, ok := h.checksumStore.Get(filename); ok {
+	if cs, ok := h.checksumStore.Get(h.checksumKeyFor(r, filename)); ok {
 		w.Header().Set(headerFileChecksum, cs)
 	} else if !info.IsDir() {
 		if cs, err := FileChecksum(fullPath); err == nil {

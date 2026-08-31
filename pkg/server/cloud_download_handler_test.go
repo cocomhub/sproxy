@@ -688,7 +688,8 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 		t.Fatalf("unexpected archive result: %+v", arch)
 	}
 	// 归档文件真实存在
-	archivePath := filepath.Join(mgr.uploadsDir, filepath.FromSlash(arch.File))
+	// 归档响应 File 只含归档名；磁盘落在 uploadsDir/.__cloud_archives__/ 下（未认证 owner 空）。
+	archivePath := filepath.Join(mgr.uploadsDir, cloudArchiveDirName, filepath.FromSlash(arch.File))
 	if _, err2 := os.Stat(archivePath); err2 != nil {
 		t.Fatalf("expected archive file on disk: %v", err2)
 	}

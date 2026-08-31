@@ -13,14 +13,14 @@ import (
 	"os"
 )
 
-// resolveAndValidateFile 校验文件名并返回安全的远程路径和完整路径。
+// resolveAndValidateFile 校验文件名并返回请求者 owner 存储根下的安全路径。
 // 校验失败时返回 ("", "", false)。
-func (h *Handlers) resolveAndValidateFile(filename string) (remotePath, fullPath string, ok bool) {
+func (h *Handlers) resolveAndValidateFile(r *http.Request, filename string) (remotePath, fullPath string, ok bool) {
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
 		return "", "", false
 	}
-	fullPath = h.safePath(remotePath)
+	fullPath = h.safePathFor(r, remotePath)
 	if fullPath == "" {
 		return "", "", false
 	}
@@ -35,7 +35,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgEmptyFilename}, http.StatusBadRequest)
 		return
 	}
-	remotePath, filePath, ok := h.resolveAndValidateFile(filename)
+	remotePath, filePath, ok := h.resolveAndValidateFile(r, filename)
 	if !ok {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
@@ -119,7 +119,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除文件失败"}, http.StatusInternalServerError)
 		return
 	}
-	h.checksumStore.Delete(remotePath)
+	h.checksumStore.Delete(h.checksumKeyFor(r, remotePath))
 	if h.metrics != nil {
 		h.metrics.RecordDelete()
 	}
@@ -132,9 +132,9 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // processBatchDeleteItem 处理单条文件删除操作。
-func (h *Handlers) processBatchDeleteItem(ctx context.Context, f BatchDeleteFile, logger *slog.Logger) BatchOperationResult {
+func (h *Handlers) processBatchDeleteItem(ctx context.Context, owner string, f BatchDeleteFile, logger *slog.Logger) BatchOperationResult {
 	result := BatchOperationResult{Filename: f.Filename}
-	remotePath, filePath, ok := h.resolveAndValidateFile(f.Filename)
+	remotePath, filePath, ok := h.resolveAndValidateFileForOwner(owner, f.Filename)
 	if !ok {
 		result.Message = "无效的文件路径"
 		return result
@@ -168,7 +168,7 @@ func (h *Handlers) processBatchDeleteItem(ctx context.Context, f BatchDeleteFile
 		})
 		result.Message = "删除失败"
 	} else {
-		h.checksumStore.Delete(remotePath)
+		h.checksumStore.Delete(checksumStoreKey(owner, remotePath))
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "delete", ObjectType: "file", Object: remotePath,
 			Result: AuditResultSuccess,
@@ -199,9 +199,10 @@ func (h *Handlers) batchDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logger := h.logger.With("batch", "delete")
+	owner := ownerFromRequest(r)
 	results := make([]BatchOperationResult, 0, len(req.Files))
 	for _, f := range req.Files {
-		results = append(results, h.processBatchDeleteItem(r.Context(), f, logger))
+		results = append(results, h.processBatchDeleteItem(r.Context(), owner, f, logger))
 	}
 	sendJSONResponse(w, BatchResponse{Results: results}, http.StatusOK)
 }

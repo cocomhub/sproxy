@@ -194,19 +194,15 @@
     // 只回 Blob 不回响应头，导致直连模式 UI 无法校验）。assert: blob 字节与 header
     // 一致性由调用方（app.js downloadFile）负责——此处只透传。
     //
-    // kind 自适应：filename 以 .__cloud_archives__/ 开头（云任务归档 API 返回的 File 字段）
-    // → 拆出归档名并把 kind=cloud_archive 传给服务端，由服务端在归档目录内拼接。
-    // 归档存 uploadsDir/.__cloud_archives__/<name>（.__ 内部目录），普通下载不开放 .__
-    // 路径访问（服务端 ValidateFilePath 全拒），kind 方案把路径拼接收敛在服务端。
+    // kind 由调用方按用途显式传入（如 cloud_archive 下载云任务归档、cloud_task 下载
+    // 云任务文件）——客户端不接触 .__ 内部路径，filename 传相对路径/归档名，服务端
+    // 按 kind 在对应内部目录内拼接并校验 owner。
     function download(filename, opts) {
       const p = opts || {};
       const headers = Object.assign({}, p.headers || {});
       const dlHeaders = Object.assign({}, p.downloadHeaders || {});
       const params = { filename: filename };
-      if (typeof filename === 'string' && filename.indexOf('.__cloud_archives__/') === 0) {
-        params.filename = filename.slice('.__cloud_archives__/'.length);
-        params.kind = 'cloud_archive';
-      }
+      if (p.kind) params.kind = p.kind;
       return coreRequest('GET', urlWithParams('/download', params), {
         headers: headers,
         download: true,

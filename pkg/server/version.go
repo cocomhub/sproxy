@@ -30,7 +30,8 @@ type VersionInfo struct {
 
 // saveVersion 在上传覆盖前保存当前文件版本。
 // 返回保存的版本 ID（UnixNano），如果没有旧文件则返回 0。
-func (h *Handlers) saveVersion(remotePath, uploadsDir string) (int64, error) {
+// owner 用于 checksum key 作用域隔离（跨租户同名文件版本独立）。
+func (h *Handlers) saveVersion(remotePath, uploadsDir, owner string) (int64, error) {
 	fullPath := joinSafePath(uploadsDir, remotePath)
 	if fullPath == "" {
 		return 0, fmt.Errorf("保存版本: 无效的文件路径: %s", remotePath)
@@ -73,8 +74,8 @@ func (h *Handlers) saveVersion(remotePath, uploadsDir string) (int64, error) {
 	}
 	checksum := hex.EncodeToString(hasher.Sum(nil))
 
-	// 写入 checksumStore
-	csKey := fmt.Sprintf("__version__/%s/%d", remotePath, versionID)
+	// 写入 checksumStore（owner 作用域 key）
+	csKey := checksumStoreKey(owner, fmt.Sprintf("__version__/%s/%d", remotePath, versionID))
 	h.checksumStore.Set(csKey, checksum)
 
 	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
@@ -161,7 +162,7 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verDir := h.safePath(filepath.Join(versionsDirName, remotePath))
+	verDir := h.safePathFor(r, filepath.Join(versionsDirName, remotePath))
 	if verDir == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
@@ -193,8 +194,8 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 			Size:      info.Size(),
 			CreatedAt: time.Unix(0, versionID).Format(time.RFC3339),
 		}
-		// 尝试获取 checksum
-		csKey := fmt.Sprintf("__version__/%s/%d", remotePath, versionID)
+		// 尝试获取 checksum（owner 作用域 key）
+		csKey := h.checksumKeyFor(r, fmt.Sprintf("__version__/%s/%d", remotePath, versionID))
 		if cs, ok := h.checksumStore.Get(csKey); ok {
 			fi.Checksum = cs
 		}
@@ -225,7 +226,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	verFile := h.safePath(filepath.Join(versionsDirName, remotePath, versionIDStr))
+	verFile := h.safePathFor(r, filepath.Join(versionsDirName, remotePath, versionIDStr))
 	if verFile == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
@@ -239,14 +240,14 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	targetPath := h.safePath(remotePath)
+	targetPath := h.safePathFor(r, remotePath)
 	if targetPath == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 
 	// 先保存当前版本（回滚前备份），备份失败时返回 500 拒绝执行恢复
-	if _, err = h.saveVersion(remotePath, cfg.UploadsDir); err != nil {
+	if _, err = h.saveVersion(remotePath, h.ownerUploadsDir(r), ownerFromRequest(r)); err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "恢复前备份失败: " + versionIDStr,
@@ -306,7 +307,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "计算文件校验和失败"}, http.StatusInternalServerError)
 		return
 	}
-	h.checksumStore.Set(remotePath, checksum)
+	h.checksumStore.Set(h.checksumKeyFor(r, remotePath), checksum)
 
 	h.RecordAudit(r.Context(), AuditEvent{
 		Action: "version_restore", ObjectType: "file", Object: remotePath,
@@ -337,7 +338,7 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	verFile := h.safePath(filepath.Join(versionsDirName, remotePath, versionIDStr))
+	verFile := h.safePathFor(r, filepath.Join(versionsDirName, remotePath, versionIDStr))
 	if verFile == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
@@ -359,8 +360,8 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 清理 checksumStore 中对应的版本记录
-	verKey := fmt.Sprintf("__version__/%s/%s", remotePath, versionIDStr)
+	// 清理 checksumStore 中对应的版本记录（owner 作用域 key）
+	verKey := h.checksumKeyFor(r, fmt.Sprintf("__version__/%s/%s", remotePath, versionIDStr))
 	h.checksumStore.Delete(verKey)
 
 	h.RecordAudit(r.Context(), AuditEvent{
@@ -371,13 +372,13 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 // saveVersionBeforeOverwrite 在文件即将被覆盖前保存旧版本。
-// 在 upload handler 中调用，如果版本管理启用则保存当前版本。
-func (h *Handlers) saveVersionBeforeOverwrite(remotePath string) {
+// 在 upload handler 中调用，如果版本管理启用则保存当前版本（按 owner 存储根隔离）。
+func (h *Handlers) saveVersionBeforeOverwrite(r *http.Request, remotePath string) {
 	cfg := h.cfgPtr.Load()
 	if !cfg.Versioning.Enabled {
 		return
 	}
-	fullPath := h.safePath(remotePath)
+	fullPath := h.safePathFor(r, remotePath)
 	if fullPath == "" {
 		h.logger.Warn("saveVersionBeforeOverwrite: 无效路径", "remote_path", remotePath)
 		return
@@ -385,7 +386,7 @@ func (h *Handlers) saveVersionBeforeOverwrite(remotePath string) {
 	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 		return
 	}
-	if _, err := h.saveVersion(remotePath, cfg.UploadsDir); err != nil {
+	if _, err := h.saveVersion(remotePath, h.ownerUploadsDir(r), ownerFromRequest(r)); err != nil {
 		h.logger.Warn("保存文件版本失败", "file_name", remotePath, "error", err)
 	}
 }

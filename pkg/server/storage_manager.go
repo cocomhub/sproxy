@@ -202,9 +202,11 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		size := info.Size()
 
 		switch {
-		case strings.HasPrefix(rel, chunkedDirName+"/"):
+		// 多租户 owner 隔离后，版本目录等内部目录可能出现在 owner 子目录下
+		// （uploadsDir/<owner>/.__versions__/<path>），用任意层级识别分类。
+		case hasInternalDirAtAnyDepth(rel, chunkedDirName):
 			chunked += size
-		case strings.HasPrefix(rel, versionsDirName+"/"):
+		case hasInternalDirAtAnyDepth(rel, versionsDirName):
 			versions += size
 		case strings.HasPrefix(rel, cloudDirName+"/"):
 			cloud += size

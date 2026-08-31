@@ -146,8 +146,8 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	// 设置响应头
 	setChunkResponseHeaders(w, filename, offset, length, fileSize)
 
-	// 如果 ChecksumStore 有记录，返回完整文件 checksum
-	if cs, ok := h.checksumStore.Get(filename); ok {
+	// 如果 ChecksumStore 有记录，返回完整文件 checksum（owner 作用域 key）
+	if cs, ok := h.checksumStore.Get(h.checksumKeyFor(r, filename)); ok {
 		w.Header().Set(headerFileChecksum, cs)
 	}
 

@@ -546,8 +546,8 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确保输出目录存在
-	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName)
+	// 确保输出目录存在（按 owner 隔离：.__cloud_archives__/<owner>/）
+	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName, cloudArchiveOwnerDir(owner))
 	if mkErr := os.MkdirAll(archiveDir, 0755); mkErr != nil {
 		h.logger.Error("failed to create archive directory", "error", mkErr)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
@@ -615,8 +615,8 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		size = info.Size()
 	}
 
-	// 更新组归档路径（落库到真实组对象）
-	archiveFile := filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName))
+	// 更新组归档路径（落库到真实组对象；仅存归档名，客户端不接触 .__ 内部路径）
+	archiveFile := archiveName
 	h.cloudMgr.SetGroupArchiveFile(groupID, archiveFile)
 
 	sendJSONResponse(w, CloudArchiveResult{

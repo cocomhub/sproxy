@@ -52,17 +52,16 @@ func parsePagination(r *http.Request) (offset, limit int) {
 	return
 }
 
-// resolveListDir 处理 listFiles 的 subdir 参数，返回目标目录。
+// resolveListDir 处理 listFiles 的 subdir 参数，返回请求者 owner 存储根下的目标目录。
 func (h *Handlers) resolveListDir(w http.ResponseWriter, r *http.Request) (targetDir string, ok bool) {
-	cfg := h.cfgPtr.Load()
-	targetDir = cfg.UploadsDir
+	targetDir = h.ownerUploadsDir(r)
 	if subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/"); subdir != "" {
 		if _, err := ValidateFilePath(subdir); err != nil {
 			h.logger.Warn("无效的子目录", "subdir", subdir, "error", err.Error())
 			sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
 			return "", false
 		}
-		targetDir = h.safePath(subdir)
+		targetDir = h.safePathFor(r, subdir)
 		if targetDir == "" {
 			h.logger.Warn("无效的子目录路径", "subdir", subdir)
 			sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
@@ -122,7 +121,8 @@ func paginateEntries(entries []fileInfo, offset, limit int) []fileInfo {
 }
 
 // buildFileListEntries 从目录条目构建文件信息列表，排除内部目录并附加 checksum。
-func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]string, subdir string) []fileInfo {
+// owner 用于 checksum 作用域 key 查找（跨租户同路径独立）。
+func (h *Handlers) buildFileListEntries(owner string, entries []os.DirEntry, csMap map[string]string, subdir string) []fileInfo {
 	allFiles := make([]fileInfo, 0, len(entries))
 	for _, e := range entries {
 		if isInternalDir(e.Name()) {
@@ -149,7 +149,7 @@ func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]
 		if subdir != "" {
 			relName = filepath.ToSlash(filepath.Join(subdir, e.Name()))
 		}
-		if cs, ok := csMap[relName]; ok {
+		if cs, ok := csMap[checksumStoreKey(owner, relName)]; ok {
 			fi.Checksum = cs
 		}
 		allFiles = append(allFiles, fi)
@@ -190,7 +190,7 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 
 	// 收集所有条目（跳过内部目录）
 	subdir := r.URL.Query().Get("subdir")
-	allFiles := h.buildFileListEntries(entries, csMap, subdir)
+	allFiles := h.buildFileListEntries(ownerFromRequest(r), entries, csMap, subdir)
 
 	// 排序
 	sortFileEntries(allFiles, sortBy, sortOrder)
@@ -213,25 +213,25 @@ func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	qLower := strings.ToLower(q)
 
-	cfg := h.cfgPtr.Load()
+	owner := ownerFromRequest(r)
 	csMap := h.checksumStore.GetAll()
 
-	results := h.collectSearchResults(cfg.UploadsDir, qLower, csMap)
+	results := h.collectSearchResults(owner, h.ownerUploadsDir(r), qLower, csMap)
 	resp := listResponse{Files: results, Total: len(results), Offset: 0, Limit: len(results)}
 	sendJSONResponse(w, resp, http.StatusOK)
 }
 
-// collectSearchResults 递归搜索 uploads_dir 下文件名包含 queryLower 的文件。
-func (h *Handlers) collectSearchResults(rootsDir, queryLower string, csMap map[string]string) []fileInfo {
+// collectSearchResults 递归搜索请求者 owner 存储根下文件名包含 queryLower 的文件。
+func (h *Handlers) collectSearchResults(owner, rootsDir, queryLower string, csMap map[string]string) []fileInfo {
 	var results []fileInfo
 	_ = filepath.WalkDir(rootsDir, func(path string, d fs.DirEntry, err error) error {
-		return h.searchWalkDirCallback(rootsDir, path, d, err, queryLower, csMap, &results)
+		return h.searchWalkDirCallback(owner, rootsDir, path, d, err, queryLower, csMap, &results)
 	})
 	return results
 }
 
 // searchWalkDirCallback 是 collectSearchResults 中 filepath.WalkDir 的回调函数。
-func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, err error, queryLower string, csMap map[string]string, results *[]fileInfo) error {
+func (h *Handlers) searchWalkDirCallback(owner, rootsDir, path string, d fs.DirEntry, err error, queryLower string, csMap map[string]string, results *[]fileInfo) error {
 	if err != nil {
 		h.logger.Warn("搜索时访问路径失败", "path", path, "error", err)
 		return nil
@@ -265,7 +265,7 @@ func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, e
 		Size:    info.Size(),
 		ModTime: info.ModTime().UnixNano(),
 	}
-	if cs, ok := csMap[filepath.ToSlash(rel)]; ok {
+	if cs, ok := csMap[checksumStoreKey(owner, filepath.ToSlash(rel))]; ok {
 		fi.Checksum = cs
 	}
 	*results = append(*results, fi)

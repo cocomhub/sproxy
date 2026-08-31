@@ -125,8 +125,9 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确保输出目录存在
-	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName)
+	// 确保输出目录存在（按 owner 隔离：.__cloud_archives__/<owner>/）
+	owner := ActorFrom(r.Context())
+	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName, cloudArchiveOwnerDir(owner))
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		h.logger.Error("failed to create archive directory", "error", err)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
@@ -208,7 +209,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 
 	sendJSONResponse(w, CloudArchiveResult{
 		Success:   true,
-		File:      filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
+		File:      archiveName,
 		Size:      archiveSize,
 		Checksum:  checksum,
 		TaskCount: 1,
@@ -316,8 +317,9 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确保输出目录存在
-	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName)
+	// 确保输出目录存在（按 owner 隔离：.__cloud_archives__/<owner>/）
+	owner := ActorFrom(r.Context())
+	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName, cloudArchiveOwnerDir(owner))
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		h.logger.Error("failed to create archive directory", "error", err)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
@@ -393,7 +395,7 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 
 	sendJSONResponse(w, CloudArchiveResult{
 		Success:      true,
-		File:         filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
+		File:         archiveName,
 		Size:         size,
 		Checksum:     checksum,
 		TaskCount:    len(files),

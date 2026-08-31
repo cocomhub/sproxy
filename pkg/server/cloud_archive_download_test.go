@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,10 +16,11 @@ import (
 	"testing"
 )
 
-// writeCloudArchive 在 uploadsDir/.__cloud_archives__ 下写入名为 name 的归档文件，返回内容。
-func writeCloudArchive(t *testing.T, cfgPtr *atomic.Pointer[Config], name string, content []byte) {
+// writeCloudArchive 在 uploadsDir/.__cloud_archives__/[owner/] 下写入名为 name 的归档文件。
+// owner 为空写入归档根目录（未认证租户）；非空写入该 owner 子目录（与服务端按 owner 隔离一致）。
+func writeCloudArchive(t *testing.T, cfgPtr *atomic.Pointer[Config], owner, name string, content []byte) {
 	t.Helper()
-	archiveDir := filepath.Join(cfgPtr.Load().UploadsDir, cloudArchiveDirName)
+	archiveDir := filepath.Join(cfgPtr.Load().UploadsDir, cloudArchiveDirName, cloudArchiveOwnerDir(owner))
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatalf("mkdir archive dir: %v", err)
 	}
@@ -33,7 +36,7 @@ func TestDownloadCloudArchive_Success(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
 	content := []byte("gzip-tar-archive-bytes")
-	writeCloudArchive(t, cfgPtr, "test-archive.tar.gz", content)
+	writeCloudArchive(t, cfgPtr, "", "test-archive.tar.gz", content)
 
 	resp, err := http.Get(url + "/download?filename=test-archive.tar.gz&kind=cloud_archive")
 	if err != nil {
@@ -70,7 +73,7 @@ func TestDownloadCloudArchive_Range(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
 	content := []byte("0123456789abcdef")
-	writeCloudArchive(t, cfgPtr, "range.tar.gz", content)
+	writeCloudArchive(t, cfgPtr, "", "range.tar.gz", content)
 
 	req, _ := http.NewRequest("GET", url+"/download?filename=range.tar.gz&kind=cloud_archive", nil)
 	req.Header.Set("Range", "bytes=2-5")
@@ -101,7 +104,7 @@ func TestDownloadCloudArchive_Chunk(t *testing.T) {
 	for i := range content {
 		content[i] = byte(i % 251)
 	}
-	writeCloudArchive(t, cfgPtr, "chunked.tar.gz", content)
+	writeCloudArchive(t, cfgPtr, "", "chunked.tar.gz", content)
 
 	// 请求第一片（offset=0, length=4096）
 	resp, err := http.Get(url + "/download/chunk?filename=chunked.tar.gz&kind=cloud_archive&offset=0&length=4096")
@@ -155,7 +158,7 @@ func TestDownloadCloudArchive_Stat(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
 	content := []byte("stat-archive-content")
-	writeCloudArchive(t, cfgPtr, "stat.tar.gz", content)
+	writeCloudArchive(t, cfgPtr, "", "stat.tar.gz", content)
 
 	req, _ := http.NewRequest("HEAD", url+"/api/files/stat?filename=stat.tar.gz&kind=cloud_archive", nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -207,7 +210,7 @@ func TestDownloadCloudArchive_InvalidNames(t *testing.T) {
 func TestDownloadCloudArchive_UnknownKind(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
-	writeCloudArchive(t, cfgPtr, "x.tar.gz", []byte("x"))
+	writeCloudArchive(t, cfgPtr, "", "x.tar.gz", []byte("x"))
 
 	for _, kind := range []string{"foo", "internal", "versions", "__cloud__"} {
 		t.Run("kind="+kind, func(t *testing.T) {
@@ -243,7 +246,7 @@ func TestDownloadCloudArchive_NotFound(t *testing.T) {
 func TestDownloadCloudArchive_EmptyKindRejectsInternal(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
-	writeCloudArchive(t, cfgPtr, "x.tar.gz", []byte("x"))
+	writeCloudArchive(t, cfgPtr, "", "x.tar.gz", []byte("x"))
 
 	// 直接传完整内部路径（不带 kind）必须 400
 	resp, err := http.Get(url + "/download?filename=" + cloudArchiveDirName + "/x.tar.gz")
@@ -285,7 +288,8 @@ func TestDownloadCloudArchive_RequiresAuth(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, func(cfg *Config) {
 		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	})
-	writeCloudArchive(t, cfgPtr, "auth-archive.tar.gz", []byte("auth-content"))
+	// 认证租户的归档落在 .__cloud_archives__/<owner>/ 子目录
+	writeCloudArchive(t, cfgPtr, testAccessKey, "auth-archive.tar.gz", []byte("auth-content"))
 
 	// 未签名 → 401
 	resp, err := http.Get(url + "/download?filename=auth-archive.tar.gz&kind=cloud_archive")
@@ -311,5 +315,114 @@ func TestDownloadCloudArchive_RequiresAuth(t *testing.T) {
 	got, _ := io.ReadAll(resp2.Body)
 	if string(got) != "auth-content" {
 		t.Errorf("signed body = %q, want %q", string(got), "auth-content")
+	}
+}
+
+// TestDownloadCloudArchive_OwnerIsolation 验证归档按 owner 隔离：
+// 归档落在 .__cloud_archives__/<owner>/，其他认证租户下载同一归档名返回 404。
+func TestDownloadCloudArchive_OwnerIsolation(t *testing.T) {
+	t.Parallel()
+	otherAK := "sk-test-other-000000"
+	url, cfgPtr := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.AccessKeys = []AccessKeyConfig{
+			{Key: testAccessKey, Secret: testAccessSecret},
+			{Key: otherAK, Secret: testAccessSecret},
+		}
+	})
+	// 归档只属于 testAccessKey 租户
+	writeCloudArchive(t, cfgPtr, testAccessKey, "owner-archive.tar.gz", []byte("owner-content"))
+
+	// 归属者 testAccessKey 可下载 → 200
+	req, _ := http.NewRequest("GET", url+"/download?filename=owner-archive.tar.gz&kind=cloud_archive", nil)
+	signRequest(req, testAccessKey, testAccessSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("owner get: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "owner-content" {
+		t.Fatalf("owner download: status=%d body=%q, want 200 owner-content", resp.StatusCode, string(body))
+	}
+
+	// 其他租户 otherAK 访问同一归档名 → 404（路径落在他人 owner 目录，无法解析）
+	req2, _ := http.NewRequest("GET", url+"/download?filename=owner-archive.tar.gz&kind=cloud_archive", nil)
+	signRequest(req2, otherAK, testAccessSecret)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("other get: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for other owner, got %d", resp2.StatusCode)
+	}
+}
+
+// TestDownloadCloudTask_Kind 验证 kind=cloud_task 下载云任务文件：
+// filename 传 <taskID>/<file>（不含 .__ 内部前缀），服务端校验任务 owner 后拼接
+// uploadsDir/.__cloud__/<taskID>/<file>。跨租户下载同一任务文件返回 404。
+func TestDownloadCloudTask_Kind(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	otherAK := "sk-test-other-000000"
+	cfg := Default()
+	cfg.UploadsDir = tmpDir
+	cfg.AccessKeys = []AccessKeyConfig{
+		{Key: testAccessKey, Secret: testAccessSecret},
+		{Key: otherAK, Secret: testAccessSecret},
+	}
+
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+
+	mux := http.NewServeMux()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:         mux,
+		CfgPtr:      &cfgPtr,
+		Version:     "test",
+		BuildAt:     "test",
+		Logger:      testLogger(),
+		AuditLogger: testLogger(),
+	})
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(func() { ts.Close(); _ = h.Close() })
+
+	// 创建属于 testAccessKey 的任务并写入云端文件
+	task, err := h.cloudMgr.CreateTask("url", "http://example.com/file", "file.txt", 10, testAccessKey)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	taskDir := filepath.Join(tmpDir, cloudDirName, task.ID)
+	if mkErr := os.MkdirAll(taskDir, 0755); mkErr != nil {
+		t.Fatalf("mkdir task dir: %v", mkErr)
+	}
+	if wErr := os.WriteFile(filepath.Join(taskDir, "file.txt"), []byte("cloud-content"), 0644); wErr != nil {
+		t.Fatalf("write cloud file: %v", wErr)
+	}
+
+	// 归属者下载 → 200 + 内容正确
+	dlURL := ts.URL + "/download?filename=" + url.QueryEscape(task.ID+"/file.txt") + "&kind=cloud_task"
+	req, _ := http.NewRequest("GET", dlURL, nil)
+	signRequest(req, testAccessKey, testAccessSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("owner download: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "cloud-content" {
+		t.Fatalf("owner download: status=%d body=%q, want 200 cloud-content", resp.StatusCode, string(body))
+	}
+
+	// 其他租户下载同一任务文件 → 404（任务按 owner 隔离）
+	req2, _ := http.NewRequest("GET", dlURL, nil)
+	signRequest(req2, otherAK, testAccessSecret)
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("other download: %v", err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for other owner, got %d", resp2.StatusCode)
 	}
 }

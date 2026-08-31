@@ -40,6 +40,7 @@ type UploadStoreIface interface {
 	CreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, error)
 	GetSession(uploadID string) *ChunkedUploadSession
 	GetSessionByFilename(filename string) *ChunkedUploadSession
+	GetSessionByFilenameOwner(filename, owner string) *ChunkedUploadSession
 	MarkChunkReceived(uploadID string, chunkIndex int, checksum string) error
 	AllChunksReceived(uploadID string) bool
 	CompleteSession(uploadID string) error
@@ -320,12 +321,29 @@ func (us *UploadStore) ListSessions() []ChunkedUploadSessionMeta {
 	return meta
 }
 
-// GetSessionByFilename 按文件名查找未完成的 session。
+// GetSessionByFilename 按文件名查找未完成的 session（不限 owner，供全局场景/测试使用）。
 func (us *UploadStore) GetSessionByFilename(filename string) *ChunkedUploadSession {
 	us.mu.RLock()
 	defer us.mu.RUnlock()
 	for _, s := range us.sessions {
 		if s.Filename == filename && !s.Completed {
+			return copySession(s)
+		}
+	}
+	return nil
+}
+
+// GetSessionByFilenameOwner 按文件名与 owner 前缀查找未完成的 session。
+// 多租户隔离：会话 key 为 <owner>/<upload_id>，按 owner 前缀过滤避免跨租户碰撞。
+func (us *UploadStore) GetSessionByFilenameOwner(filename, owner string) *ChunkedUploadSession {
+	us.mu.RLock()
+	defer us.mu.RUnlock()
+	prefix := ""
+	if owner != "" {
+		prefix = owner + "/"
+	}
+	for _, s := range us.sessions {
+		if s.Filename == filename && !s.Completed && strings.HasPrefix(s.UploadID, prefix) {
 			return copySession(s)
 		}
 	}

@@ -59,9 +59,10 @@ func (h *Handlers) parseUploadMultipart(w http.ResponseWriter, r *http.Request, 
 }
 
 // setUploadResponseHeaders 设置上传成功后的响应头（checksum、mtime）。
+// checksum key 按 owner 作用域隔离。
 func (h *Handlers) setUploadResponseHeaders(w http.ResponseWriter, r *http.Request, remotePath, filePath, serverChecksum string, logger *slog.Logger) {
 	w.Header().Set(headerFileChecksum, serverChecksum)
-	h.checksumStore.Set(remotePath, serverChecksum)
+	h.checksumStore.Set(h.checksumKeyFor(r, remotePath), serverChecksum)
 
 	// 处理文件修改时间
 	if mtimeStr := r.Header.Get(headerFileMTime); mtimeStr != "" {
@@ -89,7 +90,7 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	if remotePathStr == "" {
 		remotePathStr = handler.Filename
 	}
-	remotePath, filePath, ok := h.resolveFilePath(w, remotePathStr)
+	remotePath, filePath, ok := h.resolveFilePath(w, r, remotePathStr)
 	if !ok {
 		return
 	}
@@ -101,16 +102,17 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 并发上传防护：防止同一文件被多个上传请求同时写入导致 OOM
-	if _, loaded := h.uploadingFiles.LoadOrStore(remotePath, "upload"); loaded {
+	// 并发上传防护：防止同一文件被多个上传请求同时写入导致 OOM（key 按 owner 隔离）
+	upKey := ownerScopedUploadKey(ownerFromRequest(r), remotePath)
+	if _, loaded := h.uploadingFiles.LoadOrStore(upKey, "upload"); loaded {
 		logger.WarnContext(r.Context(), "文件正在上传中，拒绝并发上传", "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在上传中"}, http.StatusConflict)
 		return
 	}
-	defer h.uploadingFiles.Delete(remotePath)
+	defer h.uploadingFiles.Delete(upKey)
 
 	// 重复检测与版本管理
-	if h.handleDuplicateFile(w, r.Context(), filePath, expectedChecksum, remotePath) {
+	if h.handleDuplicateFile(w, r, filePath, expectedChecksum, remotePath) {
 		return
 	}
 
@@ -175,15 +177,15 @@ func writeFileAtomically(ctx context.Context, dstPath string, src io.Reader) (ch
 	return checksum, written, nil
 }
 
-// resolveFilePath 校验 filename 并生成安全的 UploadsDir 下完整路径。
+// resolveFilePath 校验 filename 并生成请求者 owner 存储根下完整路径。
 // 返回已验证的相对路径和绝对路径。校验失败时返回 false。
-func (h *Handlers) resolveFilePath(w http.ResponseWriter, filename string) (remotePath, fullPath string, ok bool) {
+func (h *Handlers) resolveFilePath(w http.ResponseWriter, r *http.Request, filename string) (remotePath, fullPath string, ok bool) {
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
 		return "", "", false
 	}
-	fullPath = h.safePath(remotePath)
+	fullPath = h.safePathFor(r, remotePath)
 	if fullPath == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return "", "", false
@@ -193,7 +195,8 @@ func (h *Handlers) resolveFilePath(w http.ResponseWriter, filename string) (remo
 
 // handleDuplicateFile 检查文件是否存在，处理重复上传和版本管理逻辑。
 // 返回 true 表示已处理（调用方应 return）。
-func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, ctx context.Context, filePath, expectedChecksum, remotePath string) bool {
+func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, r *http.Request, filePath, expectedChecksum, remotePath string) bool {
+	ctx := r.Context()
 	stat, statErr := os.Stat(filePath)
 	if statErr != nil {
 		return false // 文件不存在，继续正常上传
@@ -207,7 +210,7 @@ func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, ctx context.Contex
 	cfg := h.cfgPtr.Load()
 	if cfg.Versioning.Enabled {
 		// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本
-		h.saveVersionBeforeOverwrite(remotePath)
+		h.saveVersionBeforeOverwrite(r, remotePath)
 		// 审查 I-3：覆盖动作记审计（含旧版本已保存的信息）。
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "overwrite", ObjectType: "file", Object: remotePath,

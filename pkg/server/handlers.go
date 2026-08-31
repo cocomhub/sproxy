@@ -507,18 +507,6 @@ func (h *Handlers) Handler() http.Handler {
 	return h.handler
 }
 
-// safePath 在 UploadsDir 下安全拼接 remotePath，结果不越界。
-func (h *Handlers) safePath(remotePath string) string {
-	if remotePath == "" {
-		return ""
-	}
-	cfg := h.cfgPtr.Load()
-	if cfg == nil {
-		return ""
-	}
-	return joinSafePath(cfg.UploadsDir, remotePath)
-}
-
 func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(headerContentType, contentTypeTextPlain)
 	if h.uploadStore != nil {

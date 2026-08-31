@@ -22,7 +22,7 @@ func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetDir := h.safePath(remotePath)
+	targetDir := h.safePathFor(r, remotePath)
 	if targetDir == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
@@ -51,7 +51,7 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	targetDir := h.safePath(remotePath)
+	targetDir := h.safePathFor(r, remotePath)
 	if targetDir == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
@@ -109,11 +109,12 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 清理 checksum store 中该目录下所有文件的记录
+	// 清理 checksum store 中该目录下所有文件的记录（owner 作用域 key）
 	// 使用 "/" 分隔符，与 ChecksumStore 的 key 格式约定保持一致（所有 key 使用 filepath.ToSlash 格式）
-	h.checksumStore.DeletePrefix(remotePath + "/")
+	dirKey := h.checksumKeyFor(r, remotePath)
+	h.checksumStore.DeletePrefix(dirKey + "/")
 	// 清理目录自身的 checksum 记录（如果存在）
-	h.checksumStore.Delete(remotePath)
+	h.checksumStore.Delete(dirKey)
 
 	h.logger.Info("目录已删除", "dir", remotePath)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已删除: %s", remotePath)}, http.StatusOK)

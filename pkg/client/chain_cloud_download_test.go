@@ -488,7 +488,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		json.NewEncoder(w).Encode(CloudArchiveResult{
 			Success:  true,
 			Message:  "ok",
-			File:     filepath.ToSlash(filepath.Join(".__cloud_archives__", "retry-archive.tar.gz")),
+			File:     "retry-archive.tar.gz",
 			Size:     15,
 			Checksum: hex.EncodeToString(sum[:]),
 		})
@@ -611,7 +611,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 		json.NewEncoder(w).Encode(CloudArchiveResult{
 			Success:  true,
 			Message:  "ok",
-			File:     filepath.ToSlash(filepath.Join(".__cloud_archives__", req.ArchiveName+".tar.gz")),
+			File:     req.ArchiveName + ".tar.gz",
 			Size:     15,
 			Checksum: hex.EncodeToString(sum[:]),
 		})
@@ -740,10 +740,9 @@ func TestCloudDownloadChain_DownloadToLocal_KindArchive(t *testing.T) {
 
 	client := NewFileClient(ts.URL)
 	chain := &CloudDownloadChain{
-		client:            client,
-		LocalDir:          dir,
-		ArchiveName:       "x.tar.gz",
-		archiveServerPath: filepath.ToSlash(filepath.Join(cloudArchiveDirName, "x.tar.gz")),
+		client:      client,
+		LocalDir:    dir,
+		ArchiveName: "x.tar.gz",
 	}
 	if err := chain.downloadToLocal(t.Context()); err != nil {
 		t.Fatalf("downloadToLocal: %v", err)
@@ -769,9 +768,9 @@ func TestCloudDownloadChain_DownloadToLocal_KindArchive(t *testing.T) {
 	}
 }
 
-// TestCloudDownloadChain_DownloadToLocal_TraversalNeutralized 验证 downloadToLocal 对服务端返回
-// 含路径穿越组件的归档路径用 filepath.Base 中和：发给服务端的 filename 只含归档名，
-// 本地文件落在 LocalDir 内（不越界写盘）。
+// TestCloudDownloadChain_DownloadToLocal_TraversalNeutralized 验证 downloadToLocal 对
+// ArchiveName 含路径穿越组件时用 filepath.Base 中和：发给服务端的 filename 只含归档名
+// （passwd.tar.gz），本地文件落在 LocalDir 内（不越界写盘）。
 func TestCloudDownloadChain_DownloadToLocal_TraversalNeutralized(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -794,17 +793,16 @@ func TestCloudDownloadChain_DownloadToLocal_TraversalNeutralized(t *testing.T) {
 
 	client := NewFileClient(ts.URL)
 	chain := &CloudDownloadChain{
-		client:            client,
-		LocalDir:          dir,
-		ArchiveName:       "../../etc/passwd", // 路径穿越尝试
-		archiveServerPath: ".__cloud_archives__/../../etc/passwd",
+		client:      client,
+		LocalDir:    dir,
+		ArchiveName: "../../etc/passwd", // 路径穿越尝试
 	}
 	if err := chain.downloadToLocal(t.Context()); err != nil {
 		t.Fatalf("downloadToLocal: %v", err)
 	}
-	// filename 被 filepath.Base 中和为归档名（无路径穿越组件）
-	if seenFilename != "passwd" {
-		t.Errorf("filename sent to server = %q, want %q", seenFilename, "passwd")
+	// filename 被 filepath.Base 中和为归档名（无路径穿越组件），并追加 .tar.gz 后缀
+	if seenFilename != "passwd.tar.gz" {
+		t.Errorf("filename sent to server = %q, want %q", seenFilename, "passwd.tar.gz")
 	}
 	// 本地文件落在 LocalDir 内（passwd.tar.gz，不越界写盘）
 	localPath := filepath.Join(dir, "passwd.tar.gz")
