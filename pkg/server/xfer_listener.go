@@ -6,6 +6,7 @@ package server
 import (
 	"crypto/tls"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/certmgr"
@@ -85,7 +86,13 @@ func BuildXferTLSConfig(cfg *Config) (*tls.Config, error) {
 		AutoTLS:  cfg.TLS.AutoTLS,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("build xfer tls: 创建证书管理器失败: %w", err)
+		// 审查 I-2：xfer TLS 不消费 cfg.TLS.ACME（证书是懒加载 GetCertificate + HTTP-01
+		// 常驻，与 listener 生命周期耦合，不适合复用到独立 xfer listener）。ACME 部署
+		// 下用户需为 xfer 显式配 cert_file/key_file 或开 auto_tls，错误信息明示避免误导。
+		if cfg.TLS.ACME.Enabled {
+			return nil, fmt.Errorf("build xfer tls: xfer listener 不支持 ACME 证书，请配置 tls.cert_file/tls.key_file 或 tls.auto_tls: true（ACME 与 xfer listener 生命周期不兼容）")
+		}
+		return nil, fmt.Errorf("build xfer tls: 创建证书管理器失败（需配置 tls.cert_file/tls.key_file 或 tls.auto_tls: true）: %w", err)
 	}
 	defer func() {
 		if closeErr := mgr.Close(); closeErr != nil {
@@ -128,7 +135,7 @@ func HubXferKey(cfg *Config) ([]byte, error) {
 	return key, nil
 }
 
-// xferIdentityRelDir 是服务端身份文件所在子目录（位于 uploads_dir 下）。
+// xferIdentityRelDir 是服务端身份文件所在子目录（位于 XDG 用户配置目录下）。
 const xferIdentityRelDir = "sproxy"
 
 // xferIdentityFileName 是服务端身份文件名。
@@ -136,13 +143,28 @@ const xferIdentityFileName = "server-identity.json"
 
 // XferIdentityPath 返回服务端 xfer Ed25519 身份文件路径。
 //
-// 默认 <uploads-dir>/sproxy/server-identity.json（AD-4：服务端身份与 TLS 证书解耦，
-// 用于握手指纹 pinning）。uploads_dir 为空时回落相对路径 sproxy/server-identity.json。
+// 优先级：
+//  1. cfg.Hub.XferIdentityFile（显式配置，运维可指定任意受保护目录）；
+//  2. 回落 XDG 用户配置目录 os.UserConfigDir()/sproxy/server-identity.json
+//     （Linux ~/.config/sproxy/、macOS ~/Library/Application Support/sproxy/、
+//     Windows %AppData%/sproxy/，与 sclient XDG 配置约定一致）。
+//
+// **安全约束（审查 C-1）**：绝不把身份文件放 uploads_dir 下——该目录与文件 API
+// 的用户可控命名空间重叠，已认证 peer 可经 GET /download?filename=sproxy/... 读取
+// 私钥、经上传/删除覆盖替换，击穿 AD-4 pinning 信任锚。XDG 用户配置目录默认对
+// 本进程用户可写、对 mesh peer 不可经 HTTP 触达。
 func XferIdentityPath(cfg *Config) string {
-	if cfg == nil || cfg.UploadsDir == "" {
+	if cfg != nil && cfg.Hub.XferIdentityFile != "" {
+		return cfg.Hub.XferIdentityFile
+	}
+	base, err := os.UserConfigDir()
+	if err != nil || base == "" {
+		// os.UserConfigDir 在极少数平台/环境下可能报错（如 $HOME 未设置）。
+		// 此时回落相对路径（保留文件名语义），仍**不在 uploads_dir 下**——
+		// 相比放 uploads_dir 的私钥泄露风险，这是可接受的最后兜底。
 		return filepath.Join(xferIdentityRelDir, xferIdentityFileName)
 	}
-	return filepath.Join(cfg.UploadsDir, xferIdentityRelDir, xferIdentityFileName)
+	return filepath.Join(base, xferIdentityRelDir, xferIdentityFileName)
 }
 
 // LoadXferIdentity 加载/生成服务端 xfer Ed25519 身份（AD-4）。

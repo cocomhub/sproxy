@@ -99,6 +99,11 @@ type HubConfig struct {
 	// （入站端点 /api/hub/federation/nodes，受 SproxySig 认证保护）。
 	// 路由表仍本 hub 权威，联邦只提供发现/可达性，不改路由表状态。
 	Federation FederationConfig `yaml:"federation" mapstructure:"federation"`
+	// XferIdentityFile 是服务端 xfer listener 的 Ed25519 身份文件路径（AD-4：
+	// 用于握手指纹 pinning）。为空时回落到 XDG 用户配置目录
+	// （os.UserConfigDir()/sproxy/server-identity.json），**绝不放 uploads_dir 下**
+	// （与文件 API 命名空间重叠，已认证 peer 可经 /download 读取私钥——审查 C-1）。
+	XferIdentityFile string `yaml:"xfer_identity_file" mapstructure:"xfer_identity_file"`
 }
 
 // FederationConfig 是 hub 联邦节点表同步的配置。

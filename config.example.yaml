@@ -121,6 +121,11 @@ access_keys:
 #   node_id: "node-a"               # 本节点 ID（mesh connect / relay dial 的目标）
 #   max_connections: 256             # 同时处理的中继连接数上限（0/缺省默认 256；I30 防连接洪泛）
 #   persist_file: ""                # hub 状态持久化文件路径（节点注册/信令收件箱重启间保留）；空=关闭（默认）
+#   xfer_identity_file: ""          # 服务端 xfer listener 的 Ed25519 身份文件路径（握手指纹 pinning）。
+#                                   # 空=回落 XDG 用户配置目录（Linux ~/.config/sproxy/、macOS
+#                                   # ~/Library/Application Support/sproxy/、Windows %AppData%/sproxy/）。
+#                                   # **绝不放 uploads_dir 下**（与文件 API 命名空间重叠，私钥可被
+#                                   # 已认证 peer 经 /download 读取/覆盖——安全约束）。
 #   virtual_subnet: "100.64.0.0/10" # 虚拟 IP 子网（CIDR，仅 IPv4；默认 CGNAT RFC 6598，分配从 .2 起、.1 保留网关；
 #                                   # mesh connect <vip>:<port> 虚拟主机寻址；客户端 sclient mesh connect / mesh node
 #                                   # 的 --virtual-subnet 须与此一致，否则 VIP 寻址 fail-closed 拒绝）

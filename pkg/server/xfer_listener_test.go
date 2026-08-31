@@ -142,27 +142,43 @@ func TestHubXferKey_NoAccessKeysFails(t *testing.T) {
 	}
 }
 
-// TestXferIdentityPath 验证服务端身份文件路径默认 <uploads-dir>/sproxy/server-identity.json。
+// TestXferIdentityPath 验证服务端身份文件路径：显式配置优先；未配置回落 XDG
+// 用户配置目录（os.UserConfigDir()/sproxy/server-identity.json）——**绝不放
+// uploads_dir 下**（审查 C-1：与文件 API 命名空间重叠，防私钥泄露/覆盖）。
 func TestXferIdentityPath(t *testing.T) {
-	uploadsDir := filepath.Join("tmp", "data", "uploads")
+	// 1) 显式配置优先。
+	explicit := filepath.Join(t.TempDir(), "ident", "server-identity.json")
 	cfg := Default()
-	cfg.UploadsDir = uploadsDir
-
-	want := filepath.Join(uploadsDir, "sproxy", "server-identity.json")
-	if got := XferIdentityPath(cfg); got != want {
-		t.Errorf("XferIdentityPath = %q, want %q", got, want)
+	cfg.Hub.XferIdentityFile = explicit
+	if got := XferIdentityPath(cfg); got != explicit {
+		t.Errorf("显式配置时应返回 %q，实际 %q", explicit, got)
 	}
 
-	// uploadsDir 为空时仍返回相对路径（不 panic）。
-	if got := XferIdentityPath(&Config{}); !strings.Contains(got, "server-identity.json") {
-		t.Errorf("空 uploadsDir 时应返回含文件名的相对路径，实际 %q", got)
+	// 2) 未配置 → XDG 用户配置目录（含文件名；绝不包含 uploads_dir 相对路径）。
+	cfg2 := Default()
+	cfg2.UploadsDir = "tmp/data/uploads" // 即使设置 uploads_dir 也不受影响
+	got := XferIdentityPath(cfg2)
+	if !strings.Contains(got, "server-identity.json") {
+		t.Errorf("未配置时应含文件名，实际 %q", got)
+	}
+	if strings.Contains(got, "uploads") {
+		t.Errorf("身份文件不得位于 uploads_dir 下（审查 C-1），实际 %q", got)
+	}
+	wantBase, _ := os.UserConfigDir()
+	if !strings.HasPrefix(got, wantBase) {
+		t.Errorf("未配置时应位于 XDG 用户配置目录 %q 下，实际 %q", wantBase, got)
+	}
+
+	// 3) nil 配置不 panic，仍回落 XDG。
+	if got := XferIdentityPath(nil); !strings.Contains(got, "server-identity.json") {
+		t.Errorf("nil 配置应回落 XDG 路径，实际 %q", got)
 	}
 }
 
 // TestLoadXferIdentity 验证 LoadOrCreateIdentity 语义：首次生成、再次加载指纹一致。
 func TestLoadXferIdentity(t *testing.T) {
 	cfg := Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "ident", "server-identity.json")
 
 	id1, err := LoadXferIdentity(cfg)
 	if err != nil {
@@ -199,7 +215,7 @@ func TestLoadXferIdentity(t *testing.T) {
 // 不静默重建覆盖用户文件（LoadOrCreateIdentity 语义）。
 func TestLoadXferIdentity_CorruptFails(t *testing.T) {
 	cfg := Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "ident", "server-identity.json")
 
 	path := XferIdentityPath(cfg)
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -211,5 +227,82 @@ func TestLoadXferIdentity_CorruptFails(t *testing.T) {
 
 	if _, err := LoadXferIdentity(cfg); err == nil {
 		t.Fatal("身份文件损坏时 LoadXferIdentity 应返回 error（fail-closed）")
+	}
+}
+
+// TestBuildXferTLSConfig_AutoTLS 验证 AutoTLS 自签分支：无显式证书文件时生成自签
+// 证书并返回非空 Certificates（覆盖审查 M-5 指出的默认 AutoTLS 路径未测试缺口）。
+// 用 t.Chdir 隔离 selfsigned 默认相对路径（certs/）对 CWD 的污染。
+func TestBuildXferTLSConfig_AutoTLS(t *testing.T) {
+	t.Chdir(t.TempDir()) // selfsigned 默认写相对 certs/，chdir 到临时目录隔离
+	cfg := Default()
+	cfg.TLS.CertFile = "" // AutoTLS 分支：cert_file 为空 → selfsigned 默认路径
+	cfg.TLS.KeyFile = ""
+	cfg.TLS.AutoTLS = true
+
+	tc, err := BuildXferTLSConfig(cfg)
+	if err != nil {
+		t.Fatalf("BuildXferTLSConfig（AutoTLS）应成功: %v", err)
+	}
+	if tc == nil || len(tc.Certificates) != 1 {
+		t.Fatalf("AutoTLS 应生成 1 份证书，实际 tc=%v certs=%d", tc, len(tc.Certificates))
+	}
+	if tc.MinVersion != tls.VersionTLS12 {
+		t.Errorf("MinVersion 应为 TLS1.2，实际 0x%x", tc.MinVersion)
+	}
+}
+
+// TestBuildXferTLSConfig_CertNoKeyFails 验证 cert_file 有而 key_file 缺失时返回
+// error（fail-closed，审查 M-7-1）。
+func TestBuildXferTLSConfig_CertNoKeyFails(t *testing.T) {
+	cfg := Default()
+	cfg.TLS.CertFile = filepath.Join(t.TempDir(), "cert.pem")
+	cfg.TLS.KeyFile = "" // 缺失
+	cfg.TLS.AutoTLS = false
+
+	if _, err := BuildXferTLSConfig(cfg); err == nil {
+		t.Fatal("cert_file 存在但 key_file 缺失时应返回 error（fail-closed）")
+	}
+}
+
+// TestBuildXferTLSConfig_ACMERejects 验证 ACME 启用时 xfer TLS 拒绝并给出可读错误
+// （审查 I-2：ACME 与 xfer listener 生命周期不兼容，错误信息应明示）。
+func TestBuildXferTLSConfig_ACMERejects(t *testing.T) {
+	cfg := Default()
+	cfg.TLS.CertFile = ""
+	cfg.TLS.KeyFile = ""
+	cfg.TLS.AutoTLS = false
+	cfg.TLS.ACME = ACMEConfig{Enabled: true, Domains: []string{"example.com"}}
+
+	_, err := BuildXferTLSConfig(cfg)
+	if err == nil {
+		t.Fatal("ACME 启用时 xfer TLS 应拒绝（fail-closed）")
+	}
+	if !strings.Contains(err.Error(), "不支持 ACME") {
+		t.Errorf("ACME 拒绝错误应明示 xfer 不支持 ACME，实际 %q", err.Error())
+	}
+}
+
+// TestHubXferKey_NonHexSecretFails 验证非法 secret（非 hex）时派生失败（fail-closed，
+// 审查 M-7-2）。
+func TestHubXferKey_NonHexSecretFails(t *testing.T) {
+	cfg := Default()
+	cfg.AccessKeys = []AccessKeyConfig{
+		{Key: "sk-mesh1-" + strings.Repeat("b", 16), Secret: "not-hex-secret!!"},
+	}
+	if _, err := HubXferKey(cfg); err == nil {
+		t.Fatal("非法 secret 时 HubXferKey 应返回 error（fail-closed）")
+	}
+}
+
+// TestXferListenerConfigFromConfig_NoAccessKeys 验证无 access_keys 时 FromConfig
+// 返回零值 AccessKey 字段（不 panic，审查 M-7-3）。
+func TestXferListenerConfigFromConfig_NoAccessKeys(t *testing.T) {
+	cfg := Default()
+	cfg.AccessKeys = nil
+
+	xc := XferListenerConfigFromConfig(cfg)
+	if xc.AccessKey != "" || xc.AccessKeySecret != "" || xc.MeshID != "" {
+		t.Errorf("无 access_keys 时应返回零值 AccessKey 字段，实际 %+v", xc)
 	}
 }

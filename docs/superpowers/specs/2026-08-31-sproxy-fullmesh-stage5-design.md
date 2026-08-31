@@ -92,8 +92,9 @@ status: active
 - 客户端 `sclient tunnel --xfer` 已走同一派生（`cmd/sclient/internal/clientfactory/factory.go:199`）。两端同 AK/SK（同一 mesh 解析实现）→ 派生 key 相等 → ECDH 握手成功。**禁止客户端/服务端各写一套 mesh 解析**。
 
 **AD-4：服务端身份解耦**
-- 新增 `hub.xfer_identity_file`（默认 `<uploads-dir>/sproxy/server-identity.json`），`tunnel.LoadOrCreateIdentity(path)`（`pkg/tunnel/identity.go` 现成：不存在自动生成、损坏 fail-closed 不覆盖）。
-- **TLS 证书与 Ed25519 身份解耦**：TLS 管传输机密性（复用 `cfg.TLS/*` cert/key，certmgr 抽成可复用 `newCertMgr(cfg)` 或独立 xfer_tls cert_file）；Ed25519 管握手 pin。
+- 新增 `hub.xfer_identity_file`（显式配置；为空回落 **XDG 用户配置目录** `os.UserConfigDir()/sproxy/server-identity.json`，即 Linux `~/.config/sproxy/`、macOS `~/Library/Application Support/sproxy/`、Windows `%AppData%/sproxy/`），`tunnel.LoadOrCreateIdentity(path)`（`pkg/tunnel/identity.go` 现成：不存在自动生成、损坏 fail-closed 不覆盖）。
+- **⚠ 安全约束（审查 C-1 修订原默认）**：身份文件**绝不放 uploads_dir 下**——该目录与文件 API 的用户可控命名空间重叠，已认证 peer 可经 `GET /download?filename=sproxy/server-identity.json` 读取私钥、经上传/删除覆盖替换，击穿 pinning 信任锚。XDG 用户配置目录默认对 mesh peer 不可经 HTTP 触达。PR-2 已将 `XferIdentityPath` 实现为配置项优先 + XDG 回落。
+- **TLS 证书与 Ed25519 身份解耦**：TLS 管传输机密性（复用 `cfg.TLS/*` cert/key，certmgr 抽成可复用 `newCertMgr(cfg)` 或独立 xfer_tls cert_file；**xfer 不支持 ACME**，ACME 证书是懒加载 GetCertificate + HTTP-01 常驻，与独立 xfer listener 生命周期不兼容，错误信息明示）；Ed25519 管握手 pin。
 
 ### 3.4 TDD 测试点（先失败）
 1. `internal/tcp/tls_test.go`：DialTLS↔ListenTLS loopback 握手 + 载荷往返；错误 CA → 握手失败（复用 `xfertest` harness 加 TLS 变体）。
