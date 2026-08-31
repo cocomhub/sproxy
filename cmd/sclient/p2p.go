@@ -55,12 +55,15 @@ func NewCmdP2P(ios cli.IOStreams, cfgSvc ...ConfigProvider) *cobra.Command {
 
 // p2pFlags 是 p2p 相关命令的公共 flag。
 type p2pFlags struct {
-	hub      string
-	node     string
-	stun     []string
-	turn     []string
-	turnUser string
-	turnPass string
+	hub         string
+	node        string
+	stun        []string
+	turn        []string
+	turnUser    string
+	turnPass    string
+	turnREST    string
+	turnRESTUsr string
+	turnRESTSvc string
 }
 
 func (f *p2pFlags) add(cmd *cobra.Command) {
@@ -72,12 +75,17 @@ func (f *p2pFlags) add(cmd *cobra.Command) {
 		"TURN 中继服务器地址（可重复/逗号分隔，如 turn:relay.example.com:3478）；需配合 --turn-user/--turn-pass，提升对称 NAT 下打洞成功率")
 	cmd.Flags().StringVar(&f.turnUser, "turn-user", "", "TURN 用户名（静态密码模式，配 --turn/--turn-pass 使用）")
 	cmd.Flags().StringVar(&f.turnPass, "turn-pass", "", "TURN 密码（静态密码模式，配 --turn/--turn-user 使用）")
+	cmd.Flags().StringVar(&f.turnREST, "turn-rest", "", "TURN REST API 短期凭证端点（如 https://turn.example.com/turn；http 仅限 loopback）；配 --turn 使用，REST 优先于 --turn-user/--turn-pass")
+	cmd.Flags().StringVar(&f.turnRESTUsr, "turn-rest-user", "", "TURN REST API 认证用户名（与 --turn-rest 配合，透传给服务端）")
+	cmd.Flags().StringVar(&f.turnRESTSvc, "turn-rest-service", "", "TURN REST API 可选 service 参数（与 --turn-rest 配合，透传给服务端）")
 }
 
 // applyConfig 应用运行时全局配置（STUN/TURN）。在连接创建前调用。
 // TURN 相关仅对显式提供的 flag 生效：--turn 非空才调 SetTURNServers，
-// --turn-user/--turn-pass 非空才调 SetTURNCredential（缺 flag = 保持现状）。
-func (f *p2pFlags) applyConfig() {
+// --turn-user/--turn-pass 非空才调 SetTURNCredential（缺 flag = 保持现状）；
+// --turn-rest 非空才调 SetTURNRESTURL（REST 优先于静态）。非法 REST 配置返回错误
+// （fail-closed，命令终止，不静默忽略）。
+func (f *p2pFlags) applyConfig() error {
 	if f.stun != nil {
 		webrtc.SetSTUNServers(f.stun)
 	}
@@ -87,6 +95,12 @@ func (f *p2pFlags) applyConfig() {
 	if f.turnUser != "" || f.turnPass != "" {
 		webrtc.SetTURNCredential(f.turnUser, f.turnPass)
 	}
+	if f.turnREST != "" {
+		if err := webrtc.SetTURNRESTURL(f.turnREST, f.turnRESTUsr, f.turnRESTSvc); err != nil {
+			return fmt.Errorf("--turn-rest 配置无效: %w", err)
+		}
+	}
+	return nil
 }
 
 // applyConfigFallback 用配置文件补齐未显式指定的 hub/node-id
@@ -175,7 +189,9 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			}
 			ctx := cmd.Context()
 			f.applyConfigFallback(cfgSvc) // P2-配置3：未显式指定的 hub/token/node-id 取配置文件
-			f.applyConfig()
+			if err := f.applyConfig(); err != nil {
+				return err
+			}
 
 			// 选信令器：--manual 用文件或 stdin/stdout 交换（不依赖 hub）；否则经 hub 信令桥
 			var sig webrtc.Signaler
@@ -263,7 +279,9 @@ func newCmdP2PListen(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
 			f.applyConfigFallback(cfgSvc) // P2-配置3：未显式指定的 hub/token/node-id 取配置文件
-			f.applyConfig()
+			if err := f.applyConfig(); err != nil {
+				return err
+			}
 
 			// I46：relay 会话诊断日志经 ios.ErrOut 输出（用户可见 + 可测试），带 node
 			// 上下文便于多会话区分；丢弃日志会让出口拨号拒绝/失败原因完全不可见。

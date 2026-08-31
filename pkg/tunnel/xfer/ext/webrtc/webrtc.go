@@ -489,15 +489,25 @@ func defaultConfig() webrtc.Configuration {
 	if len(stunServers) > 0 {
 		servers = append(servers, webrtc.ICEServer{URLs: stunServers})
 	}
-	// TURN 条目仅在服务器与凭据三者齐备时下发（pion 4.2.18 对无凭据 turn URL
+	// TURN 条目仅在服务器与凭据齐备时下发（pion 4.2.18 对无凭据 turn URL
 	// 报 ErrNoTurnCredentials，缺凭据时下发会导致 newPC 失败——因此静默不追加）。
-	if len(turnServers) > 0 && turnUsername != "" && turnPassword != "" {
-		servers = append(servers, webrtc.ICEServer{
-			URLs:           turnServers,
-			Username:       turnUsername,
-			Credential:     turnPassword,
-			CredentialType: webrtc.ICECredentialTypePassword,
-		})
+	// 凭据来源优先级：REST 短期凭据（拉取成功）> 静态凭据；两者皆无 → 不下发 TURN。
+	if len(turnServers) > 0 {
+		if cred := ensureTURNRESTCredential(); cred != nil {
+			servers = append(servers, webrtc.ICEServer{
+				URLs:           turnServers,
+				Username:       cred.username,
+				Credential:     cred.password,
+				CredentialType: webrtc.ICECredentialTypePassword,
+			})
+		} else if turnUsername != "" && turnPassword != "" {
+			servers = append(servers, webrtc.ICEServer{
+				URLs:           turnServers,
+				Username:       turnUsername,
+				Credential:     turnPassword,
+				CredentialType: webrtc.ICECredentialTypePassword,
+			})
+		}
 	}
 	return webrtc.Configuration{ICEServers: servers}
 }

@@ -94,6 +94,9 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 			if turnUser != "" || turnPass != "" {
 				webrtc.SetTURNCredential(turnUser, turnPass)
 			}
+			if err := applyTURNRESTFlags(cmd); err != nil {
+				return err
+			}
 			if mdns {
 				// 纯 mDNS 直连（不经 hub）：服务端需 `mesh node --mdns` 宣告该服务。
 				// mDNS 认证密钥：--mdns-secret 优先；为空回落配置的 access_key_secret
@@ -246,6 +249,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 		"TURN 中继服务器地址（可重复/逗号分隔，如 turn:relay.example.com:3478）；需配合 --turn-user/--turn-pass，提升对称 NAT 下打洞成功率")
 	cmd.Flags().String("turn-user", "", "TURN 用户名（静态密码模式，配 --turn/--turn-pass 使用）")
 	cmd.Flags().String("turn-pass", "", "TURN 密码（静态密码模式，配 --turn/--turn-user 使用）")
+	addTURNRESTFlags(cmd)
 	return cmd
 }
 
