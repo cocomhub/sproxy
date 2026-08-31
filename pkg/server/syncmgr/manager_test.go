@@ -293,14 +293,19 @@ func TestCancelTask_Queued(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 用 started 信号确定性等 A 的 executor.Run 被调用（= A 已拿到唯一信号量、进入 syncing）。
+	// 注意：started 信号只保证「某个任务」的 Run 被调用，若 A/B 都先提交，B 也可能先抢到
+	// 信号量（goroutine 调度非确定，CI 已复现）。故先等 A 拿到信号量，再提交 B——此时 B 必排队。
+	waitStarted(t, blocking)
+	if got := mgr.Get(taskA.ID).Status; got != StatusSyncing {
+		t.Fatalf("A 应持有信号量进入 syncing，got %q", got)
+	}
+
 	taskB, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1", Src: "dirb"})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// A 取得唯一信号量进入 syncing；B 排队保持 pending。
-	// 用 started 信号确定性等 A 的 executor.Run 被调用（= 已持有信号量、进入 syncing）。
-	waitStarted(t, blocking)
+	// B 在 A 持有唯一信号量后才提交 → 必排队保持 pending（无时序依赖）。
 	b := mgr.Get(taskB.ID)
 	if b.Status != StatusPending {
 		t.Fatalf("B 排队期间应保持 pending，got %q", b.Status)
@@ -453,26 +458,28 @@ func TestConcurrency_Semaphore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// 确定性同步（对齐 flaky-network-test-pattern）：用 channel 信号等 A 的 executor.Run
+	// 被调用（= A 已拿到信号量、开始执行），而非死等固定超时轮询状态——CI Windows -race +
+	// cover 下 goroutine 启动/状态流转慢，死等超时必然 flake（5s→15s 仍破过）。started 信号
+	// 由 mockExecutor.Run 首次调用时 close。
+	// 注意：started 只保证「某个任务」的 Run 被调用。若 A/B 都先提交，B 也可能先抢到信号量
+	// （goroutine 调度非确定，CI 已复现 B 先 syncing 而 A pending）。故先等 A 拿到信号量，
+	// 再提交 B——此时 B 必排队 pending（真正无时序依赖）。
+	waitStarted(t, blocking)
+	if got := mgr.Get(taskA.ID).Status; got != StatusSyncing {
+		t.Fatalf("A 应持有信号量进入 syncing，got %q", got)
+	}
+
 	taskB, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1", Src: "dirb"})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// 确定性同步（对齐 flaky-network-test-pattern）：用 channel 信号等 taskA 的
-	// executor.Run 被调用（= 已拿到信号量、开始执行），而非死等固定超时轮询状态——
-	// CI Windows -race + cover 下 goroutine 启动/状态流转慢，死等超时必然 flake
-	// （5s→15s 仍破过）。started 信号由 mockExecutor.Run 首次调用时 close。
-	select {
-	case <-blocking.started:
-	case <-time.After(30 * time.Second):
-		t.Fatalf("taskA 未在 30s 内开始执行（executor.Run 未被调用）")
-	}
-	// taskA 已持有信号量（MaxConcurrent=1），taskB 必 pending（确定性，无时序依赖）。
 	if b := mgr.Get(taskB.ID); b.Status != StatusPending {
 		t.Fatalf("MaxConcurrent=1 时第二个任务应排队 pending，got %q", b.Status)
 	}
 	blocking.release()
-	// release 后 taskA 的 Run 返回 → 回填完成 → 释放信号量 → taskB 执行并完成。
+	// release 后 A 的 Run 返回 → 回填完成 → 释放信号量 → B 执行并完成。
 	// completed 是「任务确定在跑」后的收尾状态，30s 宽限足够（本地 0.02s，CI 慢也秒级）。
 	waitForStatus(t, mgr, taskA.ID, "completed", 30*time.Second)
 	waitForStatus(t, mgr, taskB.ID, "completed", 30*time.Second)
