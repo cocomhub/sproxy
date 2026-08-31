@@ -1,6 +1,6 @@
 ---
 title: sproxy 完全组网·阶段 5 设计（P3 能力完整性 + 技术债铺底）
-status: planning
+status: active
 ---
 
 # sproxy 完全组网·阶段 5 设计
@@ -46,9 +46,9 @@ status: planning
 - `pkg/server/syncmgr/integration_external_test.go:169` `waitForStatus(…,"syncing",5s)` 仍是固定短死等（#136 只处理了 mock executor 的测试）；CI -race+cover 下有 flake 面。
 - 改造：确定性信号（select + status/handler 通知），弃轮询；顺带统一 manager_test 同类 `waitForStatus`。
 
-### T3. `SignalMsg.Cand` 死字段清理
-- `pkg/tunnel/hub/signaling.go:32` `Cand` 字段仅 `signaling_client.go:152 post()` 写入且恒传 `""`，生产无 sender/consumer；`SignalCandidate` endpoint 仅注册无人 POST（webrtc 走 `Signaler` 接口、ICE 全内联 SDP，trickle 未实现）。
-- 删：`Cand` 字段、`post(...cand)` cand 参数、`SignalCandidate` 常量/endpoint（srvMux + localMux 两处）、persist_test `Cand:` 用例。
+### T3. `SignalMsg.Cand` 死字段清理 → **注释化保留（已实施 #138，未删除）**
+- `pkg/tunnel/hub/signaling.go:41-44` `Cand` 字段仅 `signaling_client.go:152 post()` 写入且恒传 `""`，生产无 sender/consumer；`SignalCandidate` endpoint 仅注册无人 POST（webrtc 走 `Signaler` 接口、ICE 全内联 SDP，trickle 未实现）。
+- **处理（#138 已落地）**：保留 `Cand` 字段与 `SignalCandidate` 常量/endpoint，加详细注释说明为 **trickle ICE 预留注入点**——保留原因：① 兼容存量对端连 `/api/signal/candidate` 不报 404；② 未来 trickle 增量实现（OnICECandidate/AddICECandidate 双向桥）预留。`signaling.go` 明确"字段名沿用信号协议，勿删"。后续若实现 trickle ICE 再启用，不再单删。
 
 ### T4. `test/e2e_mesh_node_test.go:224` 20s 死等
 - `TestE2E_MeshNode_ServiceAccess` 用 ≤20s 轮询 stderr 出直连日志，仍是死等。
@@ -110,7 +110,7 @@ status: planning
 - 身份文件缺失自动生成 ≠ 匿名放行（握手仍需密钥）；损坏 fail-closed。
 
 ### 3.6 子任务（PR 粒度，依赖序）
-1. **PR-1**：`internal/tcp` TLS 变体 + `tcp+tls` 注册 + 测试（纯 stdlib，x509 自签 loopback）。
+1. **PR-1**：`internal/tcp` TLS 变体 + `tcp+tls` 注册 + 测试（纯 stdlib，x509 自签 loopback）。**✅ 代码已就绪**（工作区 `pkg/tunnel/xfer/internal/tcp/tcp_tls.go` 139 行 + `tcp_tls_test.go` 311 行：RoundTrip/WrongCARejected/RegistryVariant/HandshakeFailureSkips；`SetDefaultTLSConfig` fail-closed 保护），待评审提交。
 2. **PR-2**：`pkg/server` 装配辅助 `XferListenerConfig` / `BuildXferTLSConfig` / `HubXferKey` + 身份 `LoadOrCreateIdentity` + 单测。
 3. **PR-3**：root.go 第二 listener 装配 + fail-closed 校验 + 装配测试。
 4. **PR-4**：sclient `--xfer tcp+tls` 的 `--ca-file`/`--insecure`（限 loopback）+ 服务端指纹获取文档化。
