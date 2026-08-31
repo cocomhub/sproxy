@@ -57,6 +57,17 @@ func ValidateFilePath(filename string) (string, error) {
 		return "", fmt.Errorf("文件名不能包含路径穿越: %s", filename)
 	}
 
+	// 审查 I-1（多租户 owner）：拒绝首段以 ".__" 开头的路径——服务端内部目录约定
+	// （.__cloud__ / .__versions__ / .__sync__ / .__downloads__ 等，见 isInternalDir），
+	// 云任务文件落在 .__cloud__/<taskID>/<file> 下。若不拦截，持有任一有效 AK 的租户
+	// 可经 GET /download?filename=.__cloud__/<taskID>/<file> 跨租户读取他人在云端下载
+	// 的文件（taskID 含 32bit 随机难枚举，但日志/共享上下文泄露 path 即可利用）。
+	// 对齐 validateSyncPath 的 .__ 保留策略；仅拦首段（保留用户可上传深层含 .__ 的
+	// 普通文件名如 dir/foo.__bar.txt）。
+	if parts[0] != "" && strings.HasPrefix(parts[0], ".__") {
+		return "", fmt.Errorf("文件名不能访问服务端内部目录（.__ 前缀为服务端保留）: %s", filename)
+	}
+
 	// Windows 非法字符检查（在 Clean 之后执行，使用 cleaned 路径）
 	if runtime.GOOS == "windows" {
 		const invalidChars = `<>:"|?*`

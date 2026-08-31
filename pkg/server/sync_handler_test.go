@@ -482,3 +482,26 @@ func TestSyncAPI_UnauthenticatedOwnerEmpty(t *testing.T) {
 		t.Fatalf("A 应能看见空 owner 任务, got %d: %s", len(listResp.Tasks), body)
 	}
 }
+
+// TestSyncAPI_OwnerNotClientForgeable 验证（审查 Minor 4）：客户端 body 无法伪造
+// owner——CreateRequest.Owner 为 json:"-"，服务端 decode 后强制覆盖为 ActorFrom。
+// 请求 actor=A、body 声称 owner=B → 实际任务 owner 必须为 A。
+func TestSyncAPI_OwnerNotClientForgeable(t *testing.T) {
+	srv := emptyRemote(t)
+	h, base := newSyncTestEnv(t, srv.URL, nil)
+	mux := syncOwnerMux(h, "ak-A") // 注入 actor=ak-A
+	_ = base
+
+	code, body := doSyncOwner(t, mux, "POST", "/api/sync/tasks",
+		`{"direction":"push","remote":"r1","src":"x.txt","owner":"ak-B"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("创建应返回 201，got %d: %s", code, body)
+	}
+	var task syncmgr.SyncTask
+	if err := json.Unmarshal(body, &task); err != nil {
+		t.Fatalf("解析失败: %v, body=%s", err, body)
+	}
+	if task.Owner != "ak-A" {
+		t.Fatalf("owner 应由服务端从请求 actor 派生（防伪造），got %q, want ak-A", task.Owner)
+	}
+}

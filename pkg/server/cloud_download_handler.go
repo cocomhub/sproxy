@@ -339,9 +339,13 @@ func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	owner := ActorFrom(r.Context())
 
-	// 先刷新组状态，再读取最新快照（避免返回更新前的副本）。
-	// UpdateGroupStatus 对不可见组的刷新无副作用（不向调用方泄露信息），
-	// 随后 GetGroup 按 owner 过滤，跨 owner 组返回 404（防枚举）。
+	// 审查 Minor 2：先 GetGroup 校验 owner 可见性（跨 owner 立即 404，不对不可见资源
+	// 执行 UpdateGroupStatus 写操作，消除计时侧信道），通过后再刷新状态并二次 GetGroup
+	// 取最新快照。
+	if _, ok := h.cloudMgr.GetGroup(id, owner); !ok {
+		sendJSONResponse(w, map[string]string{"error": "group not found"}, http.StatusNotFound)
+		return
+	}
 	h.cloudMgr.UpdateGroupStatus(id)
 	group, ok := h.cloudMgr.GetGroup(id, owner)
 	if !ok {

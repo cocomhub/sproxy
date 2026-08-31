@@ -105,3 +105,30 @@ func TestValidateFilePath_LongName(t *testing.T) {
 		t.Fatalf("long name should be preserved verbatim, got %q", got)
 	}
 }
+
+// TestValidateFilePath_RejectsInternalDirPrefix 验证（审查 I-1 多租户 owner）：
+// 首段以 .__ 开头的路径被拒绝——服务端内部目录约定（.__cloud__/.__versions__ 等），
+// 云任务文件落在 .__cloud__/<taskID>/<file>，拦截防止跨租户经 /download 读取。
+func TestValidateFilePath_RejectsInternalDirPrefix(t *testing.T) {
+	for _, f := range []string{
+		".__cloud__/task123/file.zip",
+		".__versions__/x.txt",
+		".__sync__/y.txt",
+		".__downloads__/z.txt",
+		".__cloud__",
+	} {
+		if _, err := ValidateFilePath(f); err == nil {
+			t.Errorf("首段 .__ 路径 %q 应被拒绝", f)
+		}
+	}
+	// 深层含 .__ 的普通用户文件仍允许（只拦首段）。
+	for _, f := range []string{
+		"dir/foo.__bar.txt",
+		"normal.txt",
+		"dir/sub/file.txt",
+	} {
+		if _, err := ValidateFilePath(f); err != nil {
+			t.Errorf("普通路径 %q 应允许，got %v", f, err)
+		}
+	}
+}
