@@ -324,3 +324,53 @@ func TestECDHHandshake_KeyedDialerNilListenerFails(t *testing.T) {
 	cancel()
 	<-srvErr
 }
+
+func TestECDHHandshake_KeyedListenerNilDialerFails(t *testing.T) {
+	// 反向（审查 Minor #2）：keyed listener + nil dialer（无密钥模式）。keyed listener
+	// 握手失败即 fail-closed 拒绝整个隧道（Important #1 修复后 Serve 返回 error）——
+	// 不回退静态密钥，避免固定密钥加密丧失前向保密。同时断言服务端 handler 未执行
+	// （客户端请求被拒、零访问）。
+	t.Parallel()
+	key, _ := ParseKey(testHexKey)
+	a, b := xfertest.Pipe()
+	muxA := mux.New(a, mux.RoleDialer)
+	muxB := mux.New(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	handled := make(chan struct{}, 1)
+	srvErr := make(chan error, 1)
+	go func() {
+		// keyed listener：握手失败（nil dialer 不参与 ECDH，读流即失败）→ Serve fail-closed。
+		tunB := NewTunnel(muxB, key)
+		srvErr <- tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handled <- struct{}{}
+			body, _ := io.ReadAll(r.Body)
+			w.Write(body)
+		}))
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// nil dialer：无密钥，不握手，直接发请求流（被 keyed listener 当握手流消费 → 握手失败）。
+	tunA := NewTunnel(muxA, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/mixed", strings.NewReader("mixed-test"))
+	if resp, err := tunA.Do(req); err == nil {
+		resp.Body.Close()
+		t.Fatal("nil dialer + keyed listener 请求应失败（keyed listener fail-closed）")
+	}
+
+	// 服务端 handler 不得执行（客户端零访问）。
+	select {
+	case <-handled:
+		t.Fatal("keyed listener 拒绝握手后服务端 handler 不应执行")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	cancel()
+	if err := <-srvErr; err == nil {
+		t.Fatal("keyed listener Serve 应返回 error（握手失败 fail-closed），而非 nil")
+	}
+}

@@ -277,8 +277,12 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 }
 
 // Serve 在隧道上提供 HTTP 服务。
-// 在进入 accept 循环前，同步执行 ECDH 握手（listener 侧），超时后回退到静态密钥。
-// 若配置了对端指纹 pinning 且握手校验失败，Serve 返回错误终止（fail-closed）。
+// 在进入 accept 循环前，同步执行 ECDH 握手（listener 侧）。
+// keyed listener（t.key != nil）握手失败即返回错误终止（fail-closed）——C-1 修复后
+// 会话密钥绑定静态密钥，握手失败意味着对端不知道 key（或版本不一致），任何回退都会
+// 引入固定静态密钥加密（丧失前向保密 + 跨连接重放窄面），完整兑现 AD-3 红线
+// 「绝不允许匿名 ECDH + 静态密钥仅作握手失败回退」。
+// 未配置 key（明文模式）不握手，行为不变（向后兼容）。
 func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	if t.key != nil && t.mux.Role() == mux.RoleListener {
 		hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
@@ -287,19 +291,17 @@ func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 		// 同步发布协议变更：旧对端（不混 key）与此端握手将因 sessionKey 不一致而失败。
 		sk, peerFP, err := performHandshakeWithIdentity(hctx, t.mux, false, t.identity, t.peerFingerprints, t.key)
 		cancel()
-		switch {
-		case err == nil:
-			t.skMu.Lock()
-			t.sessionKey = sk
-			t.peerFP = peerFP
-			t.skMu.Unlock()
-		case len(t.peerFingerprints) > 0:
-			// fail-closed：配置了 pin 但握手失败，拒绝整个隧道，不进入 accept 循环。
-			return fmt.Errorf("tunnel: 对端指纹校验失败: %w", err)
-		default:
-			slog.Warn("ECDH 握手失败（listener），回退到静态密钥", "error", err)
+		if err != nil {
+			// fail-closed（审查 Important #1）：keyed listener 握手失败不回退静态密钥——
+			// 任何对端（含攻击者）若不知道 key，派生 sessionKey 与合法对端不同，握手
+			// 虽在协议层成功但数据面首帧必然解密失败；此处握手显式失败（停滞/垃圾/版本
+			// 不一致）同样拒绝。避免固定静态密钥回退丧失前向保密与引入跨连接重放面。
+			return fmt.Errorf("tunnel: 握手失败（keyed listener，fail-closed）: %w", err)
 		}
-		// 未配置 pin 时即使握手失败，Serve 也继续运行（向后兼容）
+		t.skMu.Lock()
+		t.sessionKey = sk
+		t.peerFP = peerFP
+		t.skMu.Unlock()
 	}
 
 	for {
@@ -317,6 +319,12 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 
 	reqMeta, err := t.readAndDecryptMeta(stream)
 	if err != nil {
+		// 审查 Minor #3（诊断）：数据面解密失败通常是密钥不匹配 / 版本不一致（C-1 修复
+		// 的同步发布协议变更）或恶意对端。静默 return 让客户端只得泛化 EOF，运维无法
+		// 定位升级后互通失败。加 Warn 记录错误供排查（不泄露密钥内容，仅错误信息）。
+		if t.key != nil {
+			slog.Warn("隧道请求元数据解密失败（可能密钥不匹配/版本不一致）", "error", err)
+		}
 		return
 	}
 
