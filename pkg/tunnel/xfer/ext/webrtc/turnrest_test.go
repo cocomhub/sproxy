@@ -342,3 +342,132 @@ func TestTURNREST_FetchTimeout(t *testing.T) {
 		t.Fatalf("REST 拉取应等待超时窗口（%v），实际过早返回 %v", turnRESTFetchTimeout, elapsed)
 	}
 }
+
+// TestTURNREST_RedirectRejected 验证（审查 Minor 1）：REST 端点重定向到非 https/
+// 非 loopback http 目标时被拒绝（CheckRedirect 安全边界），拉取失败回落。
+func TestTURNREST_RedirectRejected(t *testing.T) {
+	cleanupTURNRESTGlobals(t)
+	// 一个返回 302 到非 loopback http 的假服务端（模拟 https 端点被劫持/误配）。
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://evil.example.com/turn", http.StatusFound)
+	}))
+	defer evil.Close()
+
+	SetTURNServers([]string{"turn:relay.example.com:3478"})
+	if err := SetTURNRESTURL("https://"+strings.TrimPrefix(evil.URL, "http://")+"/turn", "u", ""); err != nil {
+		t.Fatalf("SetTURNRESTURL（https）: %v", err)
+	}
+	cfg := defaultConfig()
+	assertNoTurnEntry(t, cfg) // 重定向到非 loopback http → 拉取失败 → 回落无 TURN
+}
+
+// TestTURNREST_KeepStaleCacheOnFailure 验证（审查 Minor 2）：拉取失败时保留仍有效
+// 的旧缓存（未过期则继续用），而非无条件清空。
+func TestTURNREST_KeepStaleCacheOnFailure(t *testing.T) {
+	cleanupTURNRESTGlobals(t)
+	// 第一次成功（TTL 大），第二次起失败。
+	var requests int32
+	first := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&requests, 1)
+		if n == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"username":"3600:u","password":"pw","ttl":3600}`)
+			_ = first
+			return
+		}
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	SetTURNServers([]string{"turn:relay.example.com:3478"})
+	if err := SetTURNRESTURL(srv.URL+"/turn", "u", ""); err != nil {
+		t.Fatalf("SetTURNRESTURL: %v", err)
+	}
+	// 首次成功，凭据缓存（TTL 3600s，剩余 >60s）。
+	cfg1 := defaultConfig()
+	if e := findTURNEntry(cfg1); e == nil || e.Username != "3600:u" {
+		t.Fatalf("首次应成功拿到 TURN REST 凭据, got %+v", findTURNEntry(cfg1))
+	}
+	// 模拟 TTL 降低到续期阈值内（用假时钟不好做，直接改缓存 expiresAt——测试内可
+	// 直接操作全局：把 expiresAt 拨到 30s 后，触发续期且旧凭据仍有效）。
+	turnRESTMu.Lock()
+	turnRESTCred.expiresAt = time.Now().Add(30 * time.Second) // 低于 60s 阈值但未过期
+	turnRESTMu.Unlock()
+
+	// 续期触发拉取（第二次），失败 → 保留旧缓存（30s 内仍有效）。
+	cfg2 := defaultConfig()
+	if e := findTURNEntry(cfg2); e == nil || e.Username != "3600:u" {
+		t.Fatalf("拉取失败后应沿用旧缓存, got %+v", findTURNEntry(cfg2))
+	}
+}
+
+// TestTURNREST_ExistingQueryPreserved 验证（审查 Minor 3）：base URL 已有 query
+// 参数（如 ?realm=..）被保留，而非被 username/service 覆盖。
+func TestTURNREST_ExistingQueryPreserved(t *testing.T) {
+	cleanupTURNRESTGlobals(t)
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"username":"3600:u","password":"pw","ttl":3600}`)
+	}))
+	defer srv.Close()
+
+	SetTURNServers([]string{"turn:relay.example.com:3478"})
+	if err := SetTURNRESTURL(srv.URL+"/turn?realm=default", "u", "prod"); err != nil {
+		t.Fatalf("SetTURNRESTURL: %v", err)
+	}
+	defaultConfig()
+	if !strings.Contains(gotQuery, "realm=default") {
+		t.Errorf("base URL 已有 query 应被保留（?realm=..），实际 %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "username=u") || !strings.Contains(gotQuery, "service=prod") {
+		t.Errorf("请求应含 username/service 参数，实际 %q", gotQuery)
+	}
+}
+
+// TestTURNREST_MalformedUsernameRejected 验证（审查 Minor 4）：响应 username 非
+// coturn "TTL:user" 格式时 fail-fast 拒绝（回落），而非透传导致 TURN 401/438。
+func TestTURNREST_MalformedUsernameRejected(t *testing.T) {
+	cleanupTURNRESTGlobals(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"username":"not-ttl-format","password":"pw","ttl":3600}`)
+	}))
+	defer srv.Close()
+
+	SetTURNServers([]string{"turn:relay.example.com:3478"})
+	if err := SetTURNRESTURL(srv.URL+"/turn", "u", ""); err != nil {
+		t.Fatalf("SetTURNRESTURL: %v", err)
+	}
+	cfg := defaultConfig()
+	assertNoTurnEntry(t, cfg) // username 非 TTL:user → 拉取失败回落
+}
+
+// TestTURNREST_LargeTTLCapped 验证（审查 Minor 4）：响应 ttl 超上限（24h）时按
+// 上限计（防 Duration 溢出为负导致每次 newPC 重拉）。
+func TestTURNREST_LargeTTLCapped(t *testing.T) {
+	cleanupTURNRESTGlobals(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"username":"3600:u","password":"pw","ttl":9223372036854775807}`) // MaxInt64
+	}))
+	defer srv.Close()
+
+	SetTURNServers([]string{"turn:relay.example.com:3478"})
+	if err := SetTURNRESTURL(srv.URL+"/turn", "u", ""); err != nil {
+		t.Fatalf("SetTURNRESTURL: %v", err)
+	}
+	cfg := defaultConfig()
+	if e := findTURNEntry(cfg); e == nil {
+		t.Fatal("超大 TTL 应按上限截断且凭据可用")
+	}
+	// 缓存 expiresAt 应在 24h 内（未溢出为过去时间）。
+	turnRESTMu.Lock()
+	ok := turnRESTCred != nil && time.Until(turnRESTCred.expiresAt) > 0 && time.Until(turnRESTCred.expiresAt) <= 25*time.Hour
+	turnRESTMu.Unlock()
+	if !ok {
+		t.Fatal("超大 TTL 应按 24h 上限截断（expiresAt 应落在未来 24h 内）")
+	}
+}

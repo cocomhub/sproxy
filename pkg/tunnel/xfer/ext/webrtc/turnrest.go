@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -33,9 +34,16 @@ const (
 	turnRESTFetchTimeout = 2 * time.Second
 	// turnRESTRenewThreshold 是续期阈值：剩余 TTL 小于该值（或已过期）时下次 PC 前续期。
 	turnRESTRenewThreshold = 60 * time.Second
+	// turnRESTFetchBackoff 是拉取失败后的退避窗口（审查 Minor 2）：失败后该窗口内
+	// 不重拉（用旧缓存或回落），避免端点故障期间每轮 newPC 阻塞重拉 + Warn 刷屏。
+	turnRESTFetchBackoff = 30 * time.Second
 	// maxTURNParamLen 是 TURN REST URL/username/service 的长度上限（防注入/误配）。
 	maxTURNParamLen = 512
 )
+
+// turnRESTTTLUserRegexp 匹配 coturn 短期凭据 username 的 "TTL:user" 格式
+// （审查 Minor 4：响应 username 应形如 "3600:api-user"，非该格式拒绝 fail-fast）。
+var turnRESTTTLUserRegexp = regexp.MustCompile(`^\d+:`)
 
 // restCredential 是 REST 短期 TURN 凭据（服务端算好的，客户端透传）。
 type restCredential struct {
@@ -56,6 +64,27 @@ var (
 	turnRESTCred *restCredential
 	// turnRESTFetchCh 非 nil 表示拉取在途（单飞：首次并发 newPC 只拉一次），关闭后完成。
 	turnRESTFetchCh chan struct{}
+	// turnRESTFetchFailAt 是最近一次拉取失败的时间（审查 Minor 2 退避：失败后
+	// turnRESTFetchBackoff 内不重拉，避免端点故障期间每轮 newPC 阻塞重拉 + Warn 刷屏）。
+	turnRESTFetchFailAt time.Time
+	// turnRESTClient 是拉取 REST 凭据的 http.Client。CheckRedirect 拒绝跨 scheme 重定向
+	// （审查 Minor 1：防止 https 端点 302 到非 loopback http，凭据 query 明文上线）。
+	turnRESTClient = &http.Client{
+		Timeout: turnRESTFetchTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// 重定向目标必须仍是 https（或 loopback http）——与 SetTURNRESTURL 的
+			// scheme 边界一致，防止凭据 query 被带到明文/跨主机端点。
+			allowed := req.URL.Scheme == "https" ||
+				(req.URL.Scheme == "http" && isLoopbackHost(req.URL.Hostname()))
+			if !allowed {
+				return fmt.Errorf("webrtc: TURN REST 重定向目标 %s 违反安全边界（仅 https 或 loopback http）", redactURLQuery(req.URL))
+			}
+			if len(via) >= 5 {
+				return errors.New("webrtc: TURN REST 重定向次数过多")
+			}
+			return nil
+		},
+	}
 )
 
 // SetTURNRESTURL 设置 TURN REST API 短期凭证端点（coturn 标准，与静态凭据并存，REST 优先）。
@@ -73,6 +102,7 @@ func SetTURNRESTURL(urlStr, username, service string) error {
 		turnRESTUsername = ""
 		turnRESTService = ""
 		turnRESTCred = nil
+		turnRESTFetchFailAt = time.Time{} // 清空退避（配置变更后允许立即重拉）
 		turnRESTMu.Unlock()
 		return nil
 	}
@@ -102,7 +132,8 @@ func SetTURNRESTURL(urlStr, username, service string) error {
 	turnRESTURL = u.String()
 	turnRESTUsername = username
 	turnRESTService = service
-	turnRESTCred = nil // 配置变更后旧缓存作废（新端点/新凭据）
+	turnRESTCred = nil                // 配置变更后旧缓存作废（新端点/新凭据）
+	turnRESTFetchFailAt = time.Time{} // 清空退避（新配置允许立即拉取）
 	turnRESTMu.Unlock()
 	return nil
 }
@@ -120,22 +151,26 @@ func fetchTURNRESTCredential() (*restCredential, error) {
 	if err != nil {
 		return nil, fmt.Errorf("webrtc: 解析 TURN REST URL 失败: %w", err)
 	}
-	q := url.Values{}
+	// 审查 Minor 3：合并 base URL 已有的 query（如 ?realm=..）而非整段覆盖。
+	q := u.Query()
 	q.Set("username", user)
 	if svc != "" {
 		q.Set("service", svc)
 	}
 	u.RawQuery = q.Encode()
 
+	// ctx 超时与 turnRESTClient.Timeout 双重兜底（ctx 用于 req 级取消，Timeout 用于
+	// 整个请求含响应体读取）。
 	ctx, cancel := context.WithTimeout(context.Background(), turnRESTFetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("webrtc: 构造 TURN REST 请求失败: %w", err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := turnRESTClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("webrtc: 拉取 TURN REST 凭据失败: %w", err)
+		// 审查 Minor 5：日志/错误剥离 query（不带 username 等参数），避免凭据落日志。
+		return nil, fmt.Errorf("webrtc: 拉取 TURN REST 凭据失败（%s）: %w", redactURLQuery(u), err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -150,8 +185,17 @@ func fetchTURNRESTCredential() (*restCredential, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&cr); err != nil {
 		return nil, fmt.Errorf("webrtc: 解析 TURN REST 响应失败: %w", err)
 	}
+	// 审查 Minor 4：校验响应 username 为 coturn TTL:user 格式、ttl 设上限（防溢出/
+	// 恶意值导致每次 newPC 重拉或撑大 ALLOCATE）。
 	if cr.Username == "" || cr.Password == "" || cr.TTL <= 0 {
 		return nil, errors.New("webrtc: TURN REST 响应缺少 username/password/ttl")
+	}
+	if !turnRESTTTLUserRegexp.MatchString(cr.Username) {
+		return nil, fmt.Errorf("webrtc: TURN REST 响应 username %q 非 coturn TTL:user 格式", redactCredential(cr.Username))
+	}
+	const maxTURNRESTTTL = 24 * 60 * 60 // 24h：TURN 临时凭据 TTL 上限（防溢出/恶意值）
+	if cr.TTL > maxTURNRESTTTL {
+		cr.TTL = maxTURNRESTTTL
 	}
 	return &restCredential{
 		username:  cr.Username,
@@ -160,20 +204,47 @@ func fetchTURNRESTCredential() (*restCredential, error) {
 	}, nil
 }
 
+// redactURLQuery 返回 URL 的 scheme://host/path（剥离 query，防凭据落日志）。
+func redactURLQuery(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	cu := *u
+	cu.RawQuery = ""
+	cu.Fragment = ""
+	return cu.String()
+}
+
+// redactCredential 返回凭据的脱敏形式（保留前缀 + 掩码，防完整值落日志）。
+func redactCredential(v string) string {
+	if len(v) <= 8 {
+		return "***"
+	}
+	return v[:4] + "***"
+}
+
 // ensureTURNRESTCredential 返回当前有效的 REST TURN 凭据（供 defaultConfig 组装 TURN 条目）。
 //   - REST 未配置 → nil（不拉取）；
 //   - 缓存有效（剩余 TTL > 阈值）→ 直接返回；
 //   - 缓存缺失/过期/低 TTL → 惰性拉取（单飞：并发首次只拉一次），成功缓存并返回；
-//   - 拉取失败 → 清空缓存 + 日志 + 返回 nil（调用方回落静态/仅 STUN，不 panic）。
+//   - 拉取失败 → 保留仍有效的旧缓存（未过期则继续用）+ 退避（turnRESTFetchBackoff 内
+//     不重拉）+ 日志 + 返回当前凭据（nil 则调用方回落静态/仅 STUN，不 panic）。
 func ensureTURNRESTCredential() *restCredential {
 	turnRESTMu.Lock()
 	if turnRESTURL == "" {
 		turnRESTMu.Unlock()
 		return nil
 	}
+	// 缓存有效（剩余 TTL > 阈值）→ 直接返回（不重拉）。
 	if c := turnRESTCred; c != nil && time.Until(c.expiresAt) > turnRESTRenewThreshold {
 		turnRESTMu.Unlock()
 		return c
+	}
+	// 退避（审查 Minor 2）：最近一次拉取失败后 turnRESTFetchBackoff 内不重拉——
+	// 若旧缓存仍有效（TTL 内）则继续用，否则回落（返回 nil 或旧缓存）。
+	if !turnRESTFetchFailAt.IsZero() && time.Since(turnRESTFetchFailAt) < turnRESTFetchBackoff {
+		turnRESTMu.Unlock()
+		return turnRESTCred // 可能是旧缓存（TTL 内）或 nil（已过期）
 	}
 	// 有拉取在途（单飞）：等待其完成并返回其结果（成功或失败都不再重拉，
 	// 避免失败时的惊群重复拉取）。
@@ -197,9 +268,16 @@ func ensureTURNRESTCredential() *restCredential {
 	turnRESTFetchCh = nil
 	close(ch)
 	if err != nil {
-		slog.Warn("webrtc: 拉取 TURN REST 短期凭据失败，本次回落静态凭据/仅 STUN", "error", err)
-		turnRESTCred = nil
+		// 审查 Minor 2：保留仍有效的旧缓存（未过期则下次 PC 继续用），并记录失败
+		// 时间启用退避（避免端点故障期间每轮重拉 + Warn 刷屏）。
+		turnRESTFetchFailAt = time.Now()
+		if turnRESTCred == nil || time.Until(turnRESTCred.expiresAt) <= 0 {
+			slog.Warn("webrtc: 拉取 TURN REST 短期凭据失败且无有效缓存，本次回落静态凭据/仅 STUN", "error", err)
+		} else {
+			slog.Warn("webrtc: 拉取 TURN REST 短期凭据失败，沿用旧缓存（剩余 TTL 内）", "error", err)
+		}
 	} else {
+		turnRESTFetchFailAt = time.Time{} // 拉取成功清除退避
 		turnRESTCred = cred
 	}
 	c := turnRESTCred
