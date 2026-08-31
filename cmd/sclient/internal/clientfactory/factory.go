@@ -6,15 +6,20 @@
 package clientfactory
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -53,6 +58,73 @@ func LoadIdentityOptional() (*tunnel.Identity, error) {
 		return nil, err
 	}
 	return id, nil
+}
+
+// buildXferClientTLSConfig 构造 xfer tcp+tls 传输的客户端 *tls.Config。
+//
+// 设计（对齐 hub/federation 的 peer TLS 前例）：
+//   - caFile（--ca-file / xfer_ca_file）非空 → 加载该 PEM CA 构建专属证书池**严格校验**
+//     （InsecureSkipVerify=false）；
+//   - insecure（--insecure / xfer_insecure）→ 跳过证书校验，但**仅限 loopback hub**
+//     （fail-closed，与 federation Config.Validate 一致：远程 + insecure 拒绝）；
+//   - 两者互斥（同时指定报错）；
+//   - 均未指定 → 系统根证书池严格校验（服务端为自签证书时握手报 x509
+//     unknown-authority，用户需 --ca-file 或 --insecure；fail-closed，不静默降级）。
+//
+// MinVersion 固定 TLS1.2（对齐 tcp_tls 传输与仓库其他传输层 TLS 基线）。
+// hubAddr 为 xfer 拨号地址（tcp+tls 应为 host:port），insecure 时校验其 host 为 loopback。
+// insecureSrc 是 insecure 的来源描述（flag/配置），用于互斥错误信息区分（审查 M-3）。
+func buildXferClientTLSConfig(caFile string, insecure bool, insecureSrc, hubAddr string) (*tls.Config, error) {
+	if caFile != "" && insecure {
+		return nil, fmt.Errorf("--ca-file 与 %s 互斥，不能同时使用；若 insecure 来自配置，请先 `sclient config set xfer_insecure false`", insecureSrc)
+	}
+	if insecure {
+		host, _, err := net.SplitHostPort(hubAddr)
+		if err != nil {
+			return nil, fmt.Errorf("解析 xfer hub 地址 %q 失败（tcp+tls 应为 host:port）: %w", hubAddr, err)
+		}
+		if !isLoopbackHost(host) {
+			return nil, fmt.Errorf("--insecure 仅允许连接 loopback hub（当前 %q）；远程 hub 请使用 --ca-file 信任其证书（fail-closed）", hubAddr)
+		}
+		return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, nil //nolint:gosec // 用户显式 --insecure 且已强制 loopback
+	}
+	if caFile != "" {
+		pool, err := loadCertPool(caFile)
+		if err != nil {
+			return nil, err
+		}
+		return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
+	}
+	return &tls.Config{MinVersion: tls.VersionTLS12}, nil
+}
+
+// loadCertPool 读取 PEM CA 文件并构建 x509 证书池。文件不存在/无有效证书返回错误
+// （fail-closed，不静默用系统根池）。与 hub/federation.loadCertPool 同构。
+func loadCertPool(path string) (*x509.CertPool, error) {
+	pemData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取 CA 文件 %s: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemData) {
+		return nil, fmt.Errorf("CA 文件 %s 无有效 PEM 证书", path)
+	}
+	return pool, nil
+}
+
+// isLoopbackHost 报告 host 是否为回环地址（127.0.0.1 / ::1 / localhost）。
+// 用于 --insecure 的安全边界：默认仅 loopback 允许跳过证书校验（远程需 --ca-file）。
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	// net.SplitHostPort 对 IPv6 返回带方括号的 host（如 "[::1]"），strip 后判断。
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Factory 抽象客户端创建，生产/测试可替换。
@@ -199,6 +271,44 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 				return nil, fmt.Errorf("派生 xfer 隧道密钥失败: %w", kErr)
 			}
 			xferKey = hex.EncodeToString(k)
+		}
+		// 阶段5 PR-4：tcp+tls 传输装配客户端 TLS 配置（--ca-file / --insecure /
+		// 配置 xfer_ca_file / xfer_insecure；CLI flag 优先于配置）。非 TLS 传输
+		// （ws/tcp）不装配。
+		// ca-file 与 insecure 均未指定时用系统根池严格校验——服务端自签证书（auto_tls）
+		// 握手报 x509 unknown-authority，用户需显式 --ca-file 或 --insecure（fail-closed，
+		// 不静默降级；对齐 hub/federation 的 peer TLS 前例）。
+		if xferName == "tcp+tls" {
+			// 审查 M-2：tcp+tls 的 hub 必须是裸 host:port（不能是 ws:// 前缀的 URL——
+			// hub_url 配置回落可能带 scheme/path）。提前校验，避免 --insecure 的
+			// SplitHostPort 误拒 loopback、或非 insecure 路径在 DialTLS 处报难以理解的错误。
+			if _, _, hErr := net.SplitHostPort(hub); hErr != nil {
+				return nil, fmt.Errorf("tcp+tls 传输的 hub 地址应为 host:port（不要带 ws:// 等 scheme 前缀），当前 %q: %v；请用 --hub 显式指定或改配 hub_url", hub, hErr)
+			}
+			caFile, _ := cmd.Flags().GetString("ca-file")
+			if caFile == "" {
+				caFile = cfg.XferCAFile
+			}
+			insecureFlag, _ := cmd.Flags().GetBool("insecure")
+			// 审查 M-3：互斥/来源错误信息区分 flag 与配置，降低排查成本。
+			insecureSrc := "flag --insecure"
+			insecure := insecureFlag
+			if cfg.XferInsecure {
+				insecure = true
+				if !insecureFlag {
+					insecureSrc = "配置 xfer_insecure: true"
+				}
+			}
+			// 审查 I-1 约束：builtin.SetDefaultTLSConfig 是 internal/tcp 包级全局，进程内
+			// 仅支持"单 tcp+tls TLS 配置"。当前 sclient CLI 单进程单命令单 NewClient 满足；
+			// **禁止**同进程多 CA/多角色的 tcp+tls 客户端（会静默互相覆盖）。mesh node 等
+			// 未来同进程 Listen+Dial 并存场景需改用显式注入（tcp.DialTLS/ListenTLS），勿沿用
+			// 全局默认。测试依赖"最后一次装配生效"（见 factory_tls_integration_test.go）。
+			tlsCfg, tErr := buildXferClientTLSConfig(caFile, insecure, insecureSrc, hub)
+			if tErr != nil {
+				return nil, tErr
+			}
+			builtin.SetDefaultTLSConfig(tlsCfg)
 		}
 		opts = append(opts, client.WithXfer(xferName, hub, xferKey))
 	} else if len(cfg.PeerFingerprints) > 0 {

@@ -14,6 +14,18 @@
 package builtin
 
 import (
-	// 注册内置 TCP 传输层（init() 中 xfer.Register("tcp")）。
-	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/internal/tcp"
+	"crypto/tls"
+
+	// 命名导入即触发 init()（注册内置 TCP 传输层，xfer.Get("tcp")/xfer.Get("tcp+tls")）。
+	tcp "github.com/cocomhub/sproxy/pkg/tunnel/xfer/internal/tcp"
 )
+
+// SetDefaultTLSConfig 设置内置 tcp+tls 传输的默认 *tls.Config。
+//
+// internal/tcp 仅能被 import 路径以 pkg/tunnel/xfer 为根的包引用；cmd/sproxy（服务端
+// 装配）、cmd/sclient（客户端 --xfer tcp+tls）等外部调用方经本桥设置，绕过 internal
+// 可见性约束。未设置时 tcp+tls 变体 Dial/Listen 返回明确错误（fail-closed，
+// 防无凭据明文承载）。
+func SetDefaultTLSConfig(cfg *tls.Config) {
+	tcp.SetDefaultTLSConfig(cfg)
+}

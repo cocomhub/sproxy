@@ -140,12 +140,14 @@ sclient tunnel <url>
 sclient tunnel -X POST -H "Content-Type: application/json" -d '{"k":"v"}' <url>
 # xfer/mux 隧道模式（启用身份指纹 pinning，见下）
 sclient tunnel --xfer tcp --hub 127.0.0.1:18090 <url>
+# xfer TLS 传输（tcp+tls）：连 sproxy 服务端 xfer_tls listener（auto_tls 自签证书时用 --ca-file 信任）
+sclient tunnel --xfer tcp+tls --hub 127.0.0.1:18087 --ca-file ./sproxy-cert.pem <url>
 ```
 
 通过加密隧道发送任意 HTTP 请求。可用于调试或转发到其他服务。
 
 **xfer/mux 隧道模式（P1 身份 pinning）**：加 `--xfer <name> --hub <addr>` 走
-xfer/mux 隧道（如 `tcp`、`ws`）。该模式在 ECDH 握手时交换 Ed25519 长时身份并做
+xfer/mux 隧道（如 `tcp`、`tcp+tls`、`ws`）。该模式在 ECDH 握手时交换 Ed25519 长时身份并做
 对端指纹 pin 校验：
 
 - 本端身份：`sclient identity generate` 生成（XDG 目录 `sproxy/identity.json`）；
@@ -156,11 +158,29 @@ xfer/mux 隧道（如 `tcp`、`ws`）。该模式在 ECDH 握手时交换 Ed2551
 - fail-closed：pin 不匹配或对端无身份即拒绝；传统隧道（未加 `--xfer`）与文件直连
   命令不做身份交换，配置 `peer_fingerprints` 会 fail-closed 报错并指引使用 `--xfer`。
 
-> **接线现状（N-3）**：`--xfer` 当前对接的是 **xfer/mux listener**（测试或自定义
-> 服务端，如 `sclient relay`/`mesh node` 建立的自定义隧道对端）；**真实 sproxy
-> hub/relay/mesh 节点的数据面协议尚不兼容**——服务端 xfer tunnel listener 待后续
-> 接线，生产环境请勿把 `--xfer` 指向尚未提供该协议的地址（示例中的
-> `127.0.0.1:18090` 仅为示意）。
+**`tcp+tls` 传输的客户端 TLS 配置（阶段5 工作项1）**：`tcp+tls` 对服务端证书做标准
+TLS 校验，按 `--ca-file` / `--insecure`（或配置 `xfer_ca_file` / `xfer_insecure`）装配：
+
+- `--ca-file <pem>`：信任该 PEM 文件中的 CA（自签服务器证书时把服务端证书或签发它的
+  CA 放入此文件），严格校验、不跳过；
+- `--insecure`：跳过证书校验，但**仅限 loopback hub**（远程 hub + `--insecure`
+  fail-closed 拒绝，需改用 `--ca-file`）；与 `--ca-file` 互斥；
+- 两者均未指定：用系统根证书池严格校验——服务端为自签证书（auto_tls）时握手报
+  `x509: certificate signed by unknown authority`，此时应显式 `--ca-file` 或
+  `--insecure`（fail-closed，不静默降级）。
+
+> **远程 hub 的 SAN 限制（审查 M-4）**：sproxy 默认 auto_tls 自签证书 SAN 仅覆盖
+> `localhost` / `sproxy.local` / `127.0.0.1` / `::1`。即使配了 `--ca-file`，**远程
+> hub**（非 loopback 主机名/IP）也会因证书 SAN 不匹配握手失败（`x509: certificate
+> is valid for ... not <remote>`）。远程部署需服务端显式配置 `tls.cert_file` 提供
+> 含该主机名/IP SAN 的证书（见 `config.example.yaml`），仅信任 CA 不够。
+
+> **接线现状**：`--xfer tcp+tls` 已对接真实 sproxy 服务端的 **xfer_tls listener**
+> （配置 `hub.transports.xfer_tls`，默认 `127.0.0.1:18087`；auto_tls 自签证书时客户端
+> 需 `--ca-file` 或 `--insecure`）。`--xfer tcp` / `ws` 仍对接 xfer/mux listener
+> （测试或自定义服务端，如 `sclient relay`/`mesh node` 建立的自定义隧道对端）；真实
+> sproxy hub/relay/mesh 节点的数据面协议仍以各自传输为准，示例中 `127.0.0.1:18090`
+> 仅为示意。
 
 ### identity
 

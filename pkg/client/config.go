@@ -38,6 +38,12 @@ type Config struct {
 	// 配置后 xfer 隧道握手时校验对端身份指纹，不匹配或对端未提供身份时 fail-closed 拒绝。
 	// 指纹格式：64 hex 或 "sha256:<64 hex>"。本端身份由 `sclient identity generate` 生成。
 	PeerFingerprints []string `yaml:"peer_fingerprints" mapstructure:"peer_fingerprints"`
+	// XferCAFile 是 xfer tcp+tls 传输的受信 CA 文件路径（PEM）。为空时用系统根池严格校验
+	// （服务端为自签证书时需配置此项或 XferInsecure，否则握手报 x509 unknown-authority）。
+	XferCAFile string `yaml:"xfer_ca_file" mapstructure:"xfer_ca_file"`
+	// XferInsecure 跳过 xfer tcp+tls 传输的证书校验（仅限 loopback hub；远程 + insecure
+	// fail-closed 拒绝，对齐 federation Config.Validate）。与 XferCAFile 互斥。
+	XferInsecure bool `yaml:"xfer_insecure" mapstructure:"xfer_insecure"`
 }
 
 func DefaultConfig() *Config {
@@ -176,6 +182,12 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 	if len(cfg.PeerFingerprints) > 0 {
 		fmt.Fprintf(w, "PeerFingerprints: %s\n", strings.Join(cfg.PeerFingerprints, ","))
 	}
+	if cfg.XferCAFile != "" {
+		fmt.Fprintf(w, "XferCAFile:      %s\n", cfg.XferCAFile)
+	}
+	if cfg.XferInsecure {
+		fmt.Fprintf(w, "XferInsecure:    %v\n", cfg.XferInsecure)
+	}
 }
 
 // ApplyConfigSet 在内存中更新配置，不写文件。返回更新后的配置和错误。
@@ -234,6 +246,14 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			fps = append(fps, part)
 		}
 		cfg.PeerFingerprints = fps
+	case "xfer_ca_file":
+		cfg.XferCAFile = value
+	case "xfer_insecure":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("无效的 xfer_insecure: %w（应为 true/false）", err)
+		}
+		cfg.XferInsecure = b
 	default:
 		return fmt.Errorf("未知配置键: %s", key)
 	}

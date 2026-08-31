@@ -1,6 +1,6 @@
 ---
 title: sproxy 完全组网·阶段 5 设计（P3 能力完整性 + 技术债铺底）
-status: planning
+status: active
 ---
 
 # sproxy 完全组网·阶段 5 设计
@@ -46,9 +46,9 @@ status: planning
 - `pkg/server/syncmgr/integration_external_test.go:169` `waitForStatus(…,"syncing",5s)` 仍是固定短死等（#136 只处理了 mock executor 的测试）；CI -race+cover 下有 flake 面。
 - 改造：确定性信号（select + status/handler 通知），弃轮询；顺带统一 manager_test 同类 `waitForStatus`。
 
-### T3. `SignalMsg.Cand` 死字段清理
-- `pkg/tunnel/hub/signaling.go:32` `Cand` 字段仅 `signaling_client.go:152 post()` 写入且恒传 `""`，生产无 sender/consumer；`SignalCandidate` endpoint 仅注册无人 POST（webrtc 走 `Signaler` 接口、ICE 全内联 SDP，trickle 未实现）。
-- 删：`Cand` 字段、`post(...cand)` cand 参数、`SignalCandidate` 常量/endpoint（srvMux + localMux 两处）、persist_test `Cand:` 用例。
+### T3. `SignalMsg.Cand` 死字段清理 → **注释化保留（已实施 #138，未删除）**
+- `pkg/tunnel/hub/signaling.go:41-44` `Cand` 字段仅 `signaling_client.go:152 post()` 写入且恒传 `""`，生产无 sender/consumer；`SignalCandidate` endpoint 仅注册无人 POST（webrtc 走 `Signaler` 接口、ICE 全内联 SDP，trickle 未实现）。
+- **处理（#138 已落地）**：保留 `Cand` 字段与 `SignalCandidate` 常量/endpoint，加详细注释说明为 **trickle ICE 预留注入点**——保留原因：① 兼容存量对端连 `/api/signal/candidate` 不报 404；② 未来 trickle 增量实现（OnICECandidate/AddICECandidate 双向桥）预留。`signaling.go` 明确"字段名沿用信号协议，勿删"。后续若实现 trickle ICE 再启用，不再单删。
 
 ### T4. `test/e2e_mesh_node_test.go:224` 20s 死等
 - `TestE2E_MeshNode_ServiceAccess` 用 ≤20s 轮询 stderr 出直连日志，仍是死等。
@@ -84,16 +84,22 @@ status: planning
 - Dialer 侧 TLS：默认系统根池 + `ServerName`（addr host）；`--ca-file` 复用 federation `loadCertPool` 模式；`--insecure-skip-verify` 仅限 loopback（复制 federation Config.Validate 限制）。
 
 **AD-2：服务端装配 = 第二条 accept 循环 → Tunnel.Serve → LocalHandler**
-- root.go `cfg.Hub.Enabled` 块内新增：`hubSrv.ListenTLS(ctx, listenAddr, tlsCfg)` → accept 循环 → `mux.New(conn, RoleListener)` → `tunnel.NewTunnel(m, key, WithIdentity(srvIdentity))` → `tun.Serve(ctx, h.tunnelHandler)`。
-- 复用现成组件：`tunnel.NewTunnel` + `tunnel.Serve`（`pkg/tunnel/tunnel_mux.go:279` 已实现 listener 侧握手与 accept 循环）；handler 用 `server.RegisterRoutes` 造的 `tunnel.NewLocalHandler(nil, localApiHandler, …)`。
+- root.go `RegisterRoutes` 之后新增：`xfer_tls`/`xfer_tcp` 段装配 → `xfer.Get("tcp+tls").Listen` → accept 循环 → `mux.New(conn, RoleListener)` → `tunnel.NewTunnel(m, key, WithIdentity(srvIdentity))` → `tun.Serve(ctx, h.LocalHandler())`。
+- 复用现成组件：`tunnel.NewTunnel` + `tunnel.Serve`（`pkg/tunnel/tunnel_mux.go:279` 已实现 listener 侧握手与 accept 循环）；**handler 用 `server.RegisterRoutes` 构造的 `h.LocalHandler()`（localMux + 中间件链，不含外层帧解密）**——⚠ 修正原设计笔误：xfer 隧道 `handleStream` 已把请求体解密为明文，应直接路由到 localMux；`TunnelHandler()`（`NewLocalHandler` 外层帧解密器）期望 ctx 带派生密钥 + 帧 body，直接使用会 401（集成测试先以 401 红灯暴露，修复后转绿）。
 
-**AD-3：握手密钥一致性（本工作项核心正确性点）**
+**AD-3：握手密钥一致性 + 绑定（本工作项核心正确性点）**
 - listener 侧密钥 = `access_keys[0]` 的 SK → `tunnel.DeriveTunnelKey(sk, AccessKeyMesh(ak))`（`pkg/tunnel/tunnel.go:140,175` HKDF，salt 域分离 + info=mesh_id）。
 - 客户端 `sclient tunnel --xfer` 已走同一派生（`cmd/sclient/internal/clientfactory/factory.go:199`）。两端同 AK/SK（同一 mesh 解析实现）→ 派生 key 相等 → ECDH 握手成功。**禁止客户端/服务端各写一套 mesh 解析**。
+- **⚠ 安全红线（审查 C-1 修复，已实现）**：ECDH 握手会话密钥必须**绑定静态派生密钥**——`performHandshakeWithIdentity` 把 `key` 混入会话密钥派生（非匿名），未知密钥的对端派生不同 sessionKey，首个加密帧 AES-GCM 校验失败即拒。绝不允许"匿名 ECDH + 静态密钥仅作握手失败回退"（攻击者完成匿名握手即零凭据访问完整 localMux）。
+  - **红线完整兑现（审查复审 Important #1）**：keyed listener（`t.key != nil`）握手失败即 `Serve` 返回 error **fail-closed 拒绝整个隧道**，不回退静态密钥——消除固定密钥加密丧失前向保密 + 跨连接重放窄面。明文模式（nil key）不握手、行为不变。
+  - **实现**：`deriveSessionKey(sharedSecret, staticKey)`（`pkg/tunnel/ecdh.go`）——`staticKey == nil` 走旧纯 ECDH 派生（`HKDF(secret=sharedSecret, salt=ecdhSalt, info=ecdhInfo)`，字节级不变）；非 nil 先派生 baseKey（旧派生）再第二层 HKDF：`HKDF(secret=baseKey, salt=ecdhStaticSalt||staticKey, info=ecdhInfoStatic)`，两层输出恒 32 字节。任何 key 变化都改变 sessionKey。
+  - **协商策略决策（评估后选纯同步发布，不加标志位）**：在握手帧上加"是否混 key"标志需在会话密钥派生**之前**交换能力位，而现有握手在 ECDH 公钥交换后立即派生密钥（身份阶段在其后）——加标志需改动线上帧序（旧对端会误读新增字节/死锁）；且服务端配了密钥即必须混 key，任何"可降级到纯 ECDH"的标志都是降级攻击面（C-1 回归）。标志协商唯一能保的兼容（新客户端→旧服务端）无安全价值（旧服务端本就对纯 ECDH 攻击者敞开）。故取**同步发布协议变更**：一端混 key 一端不混 → 首帧解密失败 fail-closed；sclient/sproxy 必须同版本发布（代码注释 + 本设计文档已显著记录）。
+  - **nil key 向后兼容**：`Tunnel` 在 `key == nil` 时短路（不握手、明文传输），行为不变；`performHandshakeWithIdentity` 的 `staticKey == nil` 保持旧纯 ECDH 派生字节级一致。
 
 **AD-4：服务端身份解耦**
-- 新增 `hub.xfer_identity_file`（默认 `<uploads-dir>/sproxy/server-identity.json`），`tunnel.LoadOrCreateIdentity(path)`（`pkg/tunnel/identity.go` 现成：不存在自动生成、损坏 fail-closed 不覆盖）。
-- **TLS 证书与 Ed25519 身份解耦**：TLS 管传输机密性（复用 `cfg.TLS/*` cert/key，certmgr 抽成可复用 `newCertMgr(cfg)` 或独立 xfer_tls cert_file）；Ed25519 管握手 pin。
+- 新增 `hub.xfer_identity_file`（显式配置；为空回落 **XDG 用户配置目录** `os.UserConfigDir()/sproxy/server-identity.json`，即 Linux `~/.config/sproxy/`、macOS `~/Library/Application Support/sproxy/`、Windows `%AppData%/sproxy/`），`tunnel.LoadOrCreateIdentity(path)`（`pkg/tunnel/identity.go` 现成：不存在自动生成、损坏 fail-closed 不覆盖）。
+- **⚠ 安全约束（审查 C-1 修订原默认）**：身份文件**绝不放 uploads_dir 下**——该目录与文件 API 的用户可控命名空间重叠，已认证 peer 可经 `GET /download?filename=sproxy/server-identity.json` 读取私钥、经上传/删除覆盖替换，击穿 pinning 信任锚。XDG 用户配置目录默认对 mesh peer 不可经 HTTP 触达。PR-2 已将 `XferIdentityPath` 实现为配置项优先 + XDG 回落。
+- **TLS 证书与 Ed25519 身份解耦**：TLS 管传输机密性（复用 `cfg.TLS/*` cert/key，certmgr 抽成可复用 `newCertMgr(cfg)` 或独立 xfer_tls cert_file；**xfer 不支持 ACME**，ACME 证书是懒加载 GetCertificate + HTTP-01 常驻，与独立 xfer listener 生命周期不兼容，错误信息明示）；Ed25519 管握手 pin。
 
 ### 3.4 TDD 测试点（先失败）
 1. `internal/tcp/tls_test.go`：DialTLS↔ListenTLS loopback 握手 + 载荷往返；错误 CA → 握手失败（复用 `xfertest` harness 加 TLS 变体）。
@@ -110,7 +116,7 @@ status: planning
 - 身份文件缺失自动生成 ≠ 匿名放行（握手仍需密钥）；损坏 fail-closed。
 
 ### 3.6 子任务（PR 粒度，依赖序）
-1. **PR-1**：`internal/tcp` TLS 变体 + `tcp+tls` 注册 + 测试（纯 stdlib，x509 自签 loopback）。
+1. **PR-1**：`internal/tcp` TLS 变体 + `tcp+tls` 注册 + 测试（纯 stdlib，x509 自签 loopback）。**✅ 代码已就绪**（工作区 `pkg/tunnel/xfer/internal/tcp/tcp_tls.go` 139 行 + `tcp_tls_test.go` 311 行：RoundTrip/WrongCARejected/RegistryVariant/HandshakeFailureSkips；`SetDefaultTLSConfig` fail-closed 保护），待评审提交。
 2. **PR-2**：`pkg/server` 装配辅助 `XferListenerConfig` / `BuildXferTLSConfig` / `HubXferKey` + 身份 `LoadOrCreateIdentity` + 单测。
 3. **PR-3**：root.go 第二 listener 装配 + fail-closed 校验 + 装配测试。
 4. **PR-4**：sclient `--xfer tcp+tls` 的 `--ca-file`/`--insecure`（限 loopback）+ 服务端指纹获取文档化。

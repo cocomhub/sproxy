@@ -26,7 +26,7 @@ type handshakeResult struct {
 func runDialerHandshake(ctx context.Context, m *mux.Mux, id *Identity, pins []string) <-chan handshakeResult {
 	ch := make(chan handshakeResult, 1)
 	go func() {
-		sk, peerFP, err := performHandshakeWithIdentity(ctx, m, true, id, pins)
+		sk, peerFP, err := performHandshakeWithIdentity(ctx, m, true, id, pins, nil)
 		ch <- handshakeResult{sk: sk, peerFP: peerFP, err: err}
 	}()
 	return ch
@@ -47,7 +47,7 @@ func TestHandshakeIdentity_Exchange(t *testing.T) {
 	defer cancel()
 
 	ch := runDialerHandshake(ctx, muxA, idA, nil)
-	skB, peerFPB, err := performHandshakeWithIdentity(ctx, muxB, false, idB, nil)
+	skB, peerFPB, err := performHandshakeWithIdentity(ctx, muxB, false, idB, nil, nil)
 	if err != nil {
 		t.Fatalf("listener handshake: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestHandshakeIdentity_NoIdentity(t *testing.T) {
 
 	ctx := context.Background()
 	ch := runDialerHandshake(ctx, muxA, nil, nil)
-	_, peerFPB, err := performHandshakeWithIdentity(ctx, muxB, false, nil, nil)
+	_, peerFPB, err := performHandshakeWithIdentity(ctx, muxB, false, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("listener handshake: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestHandshakeIdentity_BackwardCompat_OldDialer(t *testing.T) {
 		_, err := performHandshake(ctx, muxA, true) // 旧 dialer
 		ch <- err
 	}()
-	_, peerFPB, err := performHandshakeWithIdentity(ctx, muxB, false, idB, nil)
+	_, peerFPB, err := performHandshakeWithIdentity(ctx, muxB, false, idB, nil, nil)
 	if err != nil {
 		t.Fatalf("new listener vs old dialer should succeed, got %v", err)
 	}
@@ -158,7 +158,7 @@ func TestHandshakeIdentity_PinMatch_Dialer(t *testing.T) {
 
 	ctx := context.Background()
 	ch := runDialerHandshake(ctx, muxA, idA, []string{idB.Fingerprint()})
-	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, idB, nil)
+	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, idB, nil, nil)
 	if err != nil {
 		t.Fatalf("listener handshake: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestHandshakeIdentity_PinMatch_Listener(t *testing.T) {
 
 	ctx := context.Background()
 	ch := runDialerHandshake(ctx, muxA, idA, nil)
-	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, idB, []string{idA.Fingerprint()})
+	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, idB, []string{idA.Fingerprint()}, nil)
 	if err != nil {
 		t.Fatalf("listener pin should match, got %v", err)
 	}
@@ -204,7 +204,7 @@ func TestHandshakeIdentity_PinMismatch_Dialer(t *testing.T) {
 	ctx := context.Background()
 	ch := runDialerHandshake(ctx, muxA, idA, []string{wrong.Fingerprint()})
 	// listener 无 pin，其侧握手应成功返回
-	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, idB, nil)
+	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, idB, nil, nil)
 	if err != nil {
 		t.Fatalf("listener handshake: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestHandshakeIdentity_PinMismatch_Listener(t *testing.T) {
 
 	ctx := context.Background()
 	ch := runDialerHandshake(ctx, muxA, idA, nil)
-	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, idB, []string{wrong.Fingerprint()})
+	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, idB, []string{wrong.Fingerprint()}, nil)
 	if err == nil {
 		t.Fatal("listener pin mismatch should fail")
 	}
@@ -279,7 +279,7 @@ func TestHandshakeIdentity_PinRequired_ListenerNoIdentity(t *testing.T) {
 
 	ctx := context.Background()
 	ch := runDialerHandshake(ctx, muxA, idA, []string{expected.Fingerprint()})
-	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, nil, nil)
+	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("listener handshake: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestHandshakeIdentity_ListenerPinRequired_OldDialer(t *testing.T) {
 		_, err := performHandshake(ctx, muxA, true) // 旧 dialer
 		ch <- err
 	}()
-	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, idB, []string{expected.Fingerprint()})
+	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, idB, []string{expected.Fingerprint()}, nil)
 	if !errors.Is(err, ErrPeerFingerprintRequired) {
 		t.Fatalf("expected ErrPeerFingerprintRequired, got %v", err)
 	}
@@ -407,7 +407,7 @@ func TestHandshakeIdentity_BadSignature_Rejected(t *testing.T) {
 	ctx := context.Background()
 	// dialer 无 pin，但仍必须验签 listener 的身份签名（proof of possession）。
 	ch := runDialerHandshake(ctx, muxA, nil, nil)
-	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, imposter, nil)
+	_, _, err := performHandshakeWithIdentity(ctx, muxB, false, imposter, nil, nil)
 	// listener 侧：写完冒名身份后读 dialer 响应。dialer 验签失败不响应 → listener 读到 EOF。
 	// 无 pin 时 listener 自身不失败；真正的拒绝发生在 dialer 验签。
 	if err != nil {

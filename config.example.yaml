@@ -63,6 +63,10 @@ access_keys:
 # fail-closed）。传统隧道/HTTP 直连命令不走 xfer 握手，配置 peer_fingerprints 会 fail-closed
 # 报错（不静默跳过）；xfer 模式配置了身份/指纹但缺 access_key_secret 同样报错。生成对端
 # 指纹：`sclient identity fingerprint`（带外固化）。
+# xfer_ca_file / xfer_insecure 为 `sclient tunnel --xfer tcp+tls` 的客户端 TLS 配置
+# （等价 --ca-file / --insecure）：xfer_ca_file 信任自签服务端证书的 PEM CA；xfer_insecure
+# 跳过证书校验（仅限 loopback hub，与 xfer_ca_file 互斥）。两者均未配置时用系统根池严格校验，
+# 服务端自签证书（auto_tls）握手报 x509 unknown-authority（fail-closed，不静默降级）。
 
 # 速率限制（默认关闭；enabled: true 时限制 tunnel handler）
 # rate_limit:
@@ -121,6 +125,11 @@ access_keys:
 #   node_id: "node-a"               # 本节点 ID（mesh connect / relay dial 的目标）
 #   max_connections: 256             # 同时处理的中继连接数上限（0/缺省默认 256；I30 防连接洪泛）
 #   persist_file: ""                # hub 状态持久化文件路径（节点注册/信令收件箱重启间保留）；空=关闭（默认）
+#   xfer_identity_file: ""          # 服务端 xfer listener 的 Ed25519 身份文件路径（握手指纹 pinning）。
+#                                   # 空=回落 XDG 用户配置目录（Linux ~/.config/sproxy/、macOS
+#                                   # ~/Library/Application Support/sproxy/、Windows %AppData%/sproxy/）。
+#                                   # **绝不放 uploads_dir 下**（与文件 API 命名空间重叠，私钥可被
+#                                   # 已认证 peer 经 /download 读取/覆盖——安全约束）。
 #   virtual_subnet: "100.64.0.0/10" # 虚拟 IP 子网（CIDR，仅 IPv4；默认 CGNAT RFC 6598，分配从 .2 起、.1 保留网关；
 #                                   # mesh connect <vip>:<port> 虚拟主机寻址；客户端 sclient mesh connect / mesh node
 #                                   # 的 --virtual-subnet 须与此一致，否则 VIP 寻址 fail-closed 拒绝）
@@ -174,3 +183,16 @@ access_keys:
 #       listen: "127.0.0.1:18084"  # TCP 监听地址（为空回落默认 127.0.0.1:18084，loopback；
 #                                  # 远程节点可达需显式配 ":18084" 或具体网卡 IP。注册准入由
 #                                  # access_keys 的 SproxySig 保证，未配置时拒绝所有注册）
+#     # 服务端 xfer listener（阶段5 工作项1）：接收 `sclient tunnel --xfer tcp/tcp+tls --hub <addr>`
+#     # 的会话，经 mux → tunnel 解密 → 路由到本地文件 API。与 hub 中继不同，xfer listener
+#     # 不参与节点注册/VIP/DHT；握手密钥 = access_keys 首对派生（需 access_keys 非空，fail-closed）。
+#     # 注意：xfer 隧道握手的会话密钥绑定 access_keys 派生密钥（未知密钥对端首个加密帧校验失败
+#     # 被拒，非匿名 ECDH——安全红线 C-1 修复）。默认绑 loopback，远程可达须显式 listen。
+#     xfer_tls:
+#       enabled: false      # TLS xfer listener（段名即约定恒 TLS；数据面机密性 + 客户端 pin 服务端
+#                           # Ed25519 指纹）。证书复用 tls.cert_file/key_file 或 tls.auto_tls；xfer 不支持 ACME。
+#       listen: "127.0.0.1:18087"  # 为空回落默认 127.0.0.1:18087（loopback；远程需显式 ":18087"）
+#     xfer_tcp:
+#       enabled: false      # 明文 xfer listener（显式 option，仅调试；生产用 xfer_tls）
+#       listen: "127.0.0.1:18086"  # 为空回落默认 127.0.0.1:18086（loopback）
+#       tls_enabled: false  # true 时把明文段升级为 TLS（复用 tcp+tls 传输 + tls.* 证书）

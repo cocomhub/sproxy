@@ -21,6 +21,13 @@ const (
 	ecdhPublicKeyLen = 32 // X25519 public key 长度
 	sessionKeyLen    = 32 // AES-256 会话密钥长度
 	ecdhSalt         = "sproxy-ecdh-salt-v1"
+	// ecdhInfo 是 ECDH 会话密钥派生的 HKDF info（域分离，防止跨协议/跨用途重放）。
+	ecdhInfo = "sproxy-tunnel-ecdh-v1"
+	// ecdhStaticSalt 是 C-1 修复中"静态密钥绑定"阶段（第二层 HKDF）的 salt 前缀（域分离）。
+	// 与 ecdhSalt/ecdhInfo 区分，确保绑定静态密钥的派生与纯 ECDH 派生互不重叠。
+	ecdhStaticSalt = "sproxy-ecdh-static-salt-v1"
+	// ecdhInfoStatic 是 C-1 修复中"静态密钥绑定"阶段（第二层 HKDF）的 info（域分离）。
+	ecdhInfoStatic = "sproxy-tunnel-ecdh-v1-static"
 
 	// identityFlagPresent 表示握手身份扩展中"对端提供了身份公钥"。
 	// 身份扩展帧结构：[1B flag][Ed25519 pub 32B][Ed25519 sig 64B] 或 [1B flag=0x00]。
@@ -42,9 +49,10 @@ var (
 )
 
 // performHandshake 执行 ECDH X25519 密钥交换，返回会话密钥。
-// 等价于 performHandshakeWithIdentity(ctx, m, dialer, nil, nil)：不交换身份、不校验 pin。
+// 等价于 performHandshakeWithIdentity(ctx, m, dialer, nil, nil, nil)：不交换身份、
+// 不校验 pin、不绑定静态密钥（纯 ECDH 派生，旧行为）。
 func performHandshake(ctx context.Context, m *mux.Mux, dialer bool) ([]byte, error) {
-	sk, _, err := performHandshakeWithIdentity(ctx, m, dialer, nil, nil)
+	sk, _, err := performHandshakeWithIdentity(ctx, m, dialer, nil, nil, nil)
 	return sk, err
 }
 
@@ -54,6 +62,10 @@ func performHandshake(ctx context.Context, m *mux.Mux, dialer bool) ([]byte, err
 // dialer 为 true 表示发起方（客户端），false 表示接受方（服务端）。
 // id 为本端长时身份（可为 nil，表示无身份）；peerFingerprints 为期望的对端指纹列表
 // （可为空，表示不校验——向后兼容现状）。
+// staticKey 是本端静态隧道密钥（AES-256，来自隧道配置/派生）；nil 表示无密钥模式
+// （纯 ECDH 派生，旧行为）；非 nil 时静态密钥参与会话密钥派生（C-1 修复，见
+// deriveSessionKey）。**同步发布协议变更**：一端混 key 而另一端不混时，两端派生出的
+// sessionKey 不同，首个加密帧 AES-GCM 解密失败即被拒（fail-closed）。
 // 返回会话密钥与对端身份指纹（对端未提供身份时为空字符串）。
 //
 // 握手流程：
@@ -64,7 +76,7 @@ func performHandshake(ctx context.Context, m *mux.Mux, dialer bool) ([]byte, err
 //
 // 旧对端兼容：新端与旧端握手时，身份扩展静默跳过；仅当本端配置了 peerFingerprints 时，
 // 对端未提供身份会导致 fail-closed 拒绝（ErrPeerFingerprintRequired）。
-func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, id *Identity, peerFingerprints []string) ([]byte, string, error) {
+func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, id *Identity, peerFingerprints []string, staticKey []byte) ([]byte, string, error) {
 	curve := ecdh.X25519()
 	privateKey, gErr := curve.GenerateKey(rand.Reader)
 	if gErr != nil {
@@ -122,9 +134,9 @@ func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, 
 		return nil, "", fmt.Errorf("ecdh: compute shared secret: %w", eErr)
 	}
 
-	sessionKey, kErr := hkdf.Key(sha256.New, sharedSecret, []byte(ecdhSalt), "sproxy-tunnel-ecdh-v1", sessionKeyLen)
+	sessionKey, kErr := deriveSessionKey(sharedSecret, staticKey)
 	if kErr != nil {
-		return nil, "", fmt.Errorf("ecdh: derive session key: %w", kErr)
+		return nil, "", kErr
 	}
 
 	// 身份交换：listener 先写、dialer 先读（固定方向避免死锁）。
@@ -162,6 +174,41 @@ func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, 
 	}
 
 	return sessionKey, peerFP, nil
+}
+
+// deriveSessionKey 从 ECDH 共享密钥派生 32 字节会话密钥（AES-256）。
+//
+// C-1 修复：静态隧道密钥必须参与会话密钥派生，握手才是**非匿名**的——攻击者能完成
+// 匿名 ECDH（双方都知道 sharedSecret），但不知静态密钥，派生出的 sessionKey 与合法
+// 对端不同，首个加密帧 AES-GCM 解密失败即被拒（fail-closed），零凭据访问被阻断。
+//
+//   - staticKey == nil：纯 ECDH 派生（旧行为，字节级不变）。无密钥模式（nil key）
+//     由 Tunnel 在 key==nil 时短路保证（不握手、明文传输），此处 nil 仅服务于
+//     performHandshake / 测试直呼的原始握手路径。
+//   - staticKey != nil：先按旧派生得到 baseKey（绑定 ECDH 共享密钥），再做第二层
+//     HKDF：以 baseKey 为 IKM、staticKey 混入 salt（PSK 绑定，salt 域分离防跨协议），
+//     info 用独立域标签。任何 staticKey 变化都改变最终 sessionKey；两层输出均恒为
+//     32 字节。
+//
+// **同步发布协议变更**：一端混 key（staticKey != nil）而另一端不混（nil）时，两端
+// sessionKey 不一致，首个加密帧解密失败。这是刻意设计——服务端配置了密钥即必须混，
+// 不接受降级到匿名 ECDH（否则 C-1 回归）。请确保 sclient/sproxy 同版本发布。
+func deriveSessionKey(sharedSecret, staticKey []byte) ([]byte, error) {
+	baseKey, err := hkdf.Key(sha256.New, sharedSecret, []byte(ecdhSalt), ecdhInfo, sessionKeyLen)
+	if err != nil {
+		return nil, fmt.Errorf("ecdh: derive base session key: %w", err)
+	}
+	if staticKey == nil {
+		return baseKey, nil
+	}
+	salt := make([]byte, 0, len(ecdhStaticSalt)+len(staticKey))
+	salt = append(salt, ecdhStaticSalt...)
+	salt = append(salt, staticKey...)
+	sessionKey, err := hkdf.Key(sha256.New, baseKey, salt, ecdhInfoStatic, sessionKeyLen)
+	if err != nil {
+		return nil, fmt.Errorf("ecdh: derive static-bound session key: %w", err)
+	}
+	return sessionKey, nil
 }
 
 // identitySigMessage 构造身份签名消息：域分离前缀 + 双方临时 ECDH 公钥（dialer||listener）。

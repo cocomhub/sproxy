@@ -324,6 +324,63 @@ func TestApplyConfigSet_MeshParams(t *testing.T) {
 	}
 }
 
+// TestApplyConfigSet_XferTLSParams（阶段5 PR-4）：config set 支持 xfer_ca_file /
+// xfer_insecure 两个 xfer tcp+tls 传输配置键；xfer_ca_file 校验非空，
+// xfer_insecure 校验布尔。
+func TestApplyConfigSet_XferTLSParams(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if err := ApplyConfigSet(cfg, "xfer_ca_file", "/path/ca.pem"); err != nil {
+		t.Fatalf("xfer_ca_file set: %v", err)
+	}
+	if cfg.XferCAFile != "/path/ca.pem" {
+		t.Fatalf("XferCAFile = %q, want /path/ca.pem", cfg.XferCAFile)
+	}
+	if err := ApplyConfigSet(cfg, "xfer_ca_file", ""); err != nil {
+		t.Fatalf("xfer_ca_file 清空应成功: %v", err)
+	}
+	if cfg.XferCAFile != "" {
+		t.Fatalf("XferCAFile 清空后应为空, 实际 %q", cfg.XferCAFile)
+	}
+
+	if err := ApplyConfigSet(cfg, "xfer_insecure", "true"); err != nil {
+		t.Fatalf("xfer_insecure set: %v", err)
+	}
+	if !cfg.XferInsecure {
+		t.Fatal("XferInsecure = false, want true")
+	}
+	if err := ApplyConfigSet(cfg, "xfer_insecure", "false"); err != nil {
+		t.Fatalf("xfer_insecure 复位: %v", err)
+	}
+	if cfg.XferInsecure {
+		t.Fatal("XferInsecure = true, want false")
+	}
+	if err := ApplyConfigSet(cfg, "xfer_insecure", "not-bool"); err == nil {
+		t.Fatal("非法 xfer_insecure 应报错")
+	}
+}
+
+// TestLoadConfig_XferTLSParams（阶段5 PR-4）：YAML 中 xfer_ca_file / xfer_insecure
+// 正确解码。
+func TestLoadConfig_XferTLSParams(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sclient.yaml")
+	content := "server_url: https://127.0.0.1:18083\nxfer_ca_file: /etc/sproxy/xfer-ca.pem\nxfer_insecure: true\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XferCAFile != "/etc/sproxy/xfer-ca.pem" {
+		t.Fatalf("XferCAFile = %q, want /etc/sproxy/xfer-ca.pem", cfg.XferCAFile)
+	}
+	if !cfg.XferInsecure {
+		t.Fatal("XferInsecure = false, want true")
+	}
+}
+
 // TestLoadConfig_MeshParams（P2-配置1）：YAML 中 hub_url/node_id 正确解码
 // （已废除的旧配置键不再识别）。
 func TestLoadConfig_MeshParams(t *testing.T) {

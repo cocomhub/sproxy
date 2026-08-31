@@ -6,6 +6,8 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"io"
 	"net/http"
 	"strings"
@@ -85,8 +87,10 @@ func TestNewTunnelWithECDH(t *testing.T) {
 	<-srvErr
 }
 
-func TestECDHHandshake_KeyMismatch(t *testing.T) {
-	// 验证使用不同静态密钥的双方仍能通过 ECDH 协商出相同的会话密钥
+func TestECDHHandshake_WrongKeyFails(t *testing.T) {
+	// C-1 验收（核心）：两端静态密钥不同（keyA != keyB）时，静态密钥必须参与会话密钥
+	// 派生——两端派生出不同的 sessionKey，首个加密帧 AES-GCM 解密失败 → Do 报错。
+	// （修复前：匿名 ECDH 握手 + 静态密钥不参与派生 → 错误 key 也能正常往返，即 C-1 缺陷。）
 	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
@@ -94,7 +98,8 @@ func TestECDHHandshake_KeyMismatch(t *testing.T) {
 	defer muxA.Close()
 	defer muxB.Close()
 
-	key2, _ := ParseKey("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210")
+	keyB, _ := ParseKey("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210")
+	keyA, _ := ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -102,7 +107,7 @@ func TestECDHHandshake_KeyMismatch(t *testing.T) {
 	// 服务端 goroutine 先运行 NewTunnel（监听端阻塞在 Accept）
 	srvErr := make(chan error, 1)
 	go func() {
-		tunB := NewTunnel(muxB, key2)
+		tunB := NewTunnel(muxB, keyB)
 		srvErr <- tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
 			w.Write(body)
@@ -110,18 +115,13 @@ func TestECDHHandshake_KeyMismatch(t *testing.T) {
 	}()
 	time.Sleep(50 * time.Millisecond)
 
-	key1, _ := ParseKey("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-	tunA := NewTunnel(muxA, key1)
+	tunA := NewTunnel(muxA, keyA)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/mismatch", strings.NewReader("mismatch-test"))
 	resp, err := tunA.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "mismatch-test" {
-		t.Fatalf("expected %q, got %q", "mismatch-test", string(body))
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("错误静态密钥的客户端应被拒绝（首个加密帧解密失败，C-1 验收）")
 	}
 	cancel()
 	<-srvErr
@@ -163,4 +163,214 @@ func TestECDHHandshake_NilKeyFallback(t *testing.T) {
 	}
 	cancel()
 	<-srvErr
+}
+
+// handshakeKeys 在内存管道上执行一次 ECDH 握手（含身份阶段），返回双方派生出的
+// sessionKey。dialerKey/listenerKey 分别为两端传入的静态密钥（nil=纯 ECDH）。
+func handshakeKeys(t *testing.T, dialerKey, listenerKey []byte) ([]byte, []byte) {
+	t.Helper()
+	a, b := xfertest.Pipe()
+	muxA := mux.New(a, mux.RoleDialer)
+	muxB := mux.New(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	ctx := context.Background()
+	errCh := make(chan error, 1)
+	var keyA []byte
+	go func() {
+		var err error
+		keyA, _, err = performHandshakeWithIdentity(ctx, muxA, true, nil, nil, dialerKey)
+		errCh <- err
+	}()
+	keyB, _, err := performHandshakeWithIdentity(ctx, muxB, false, nil, nil, listenerKey)
+	if err != nil {
+		t.Fatalf("listener handshake: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("dialer handshake: %v", err)
+	}
+	return keyA, keyB
+}
+
+func TestECDHHandshake_SameKeyDerivesSameKey(t *testing.T) {
+	// 两端同静态密钥 → 派生相同 sessionKey（合法对端互通）。
+	t.Parallel()
+	key, _ := ParseKey(testHexKey)
+	keyA, keyB := handshakeKeys(t, key, key)
+	if !bytes.Equal(keyA, keyB) {
+		t.Fatal("同静态密钥两端应派生相同 sessionKey")
+	}
+}
+
+func TestECDHHandshake_MixedKeyNilDerivationDiffers(t *testing.T) {
+	// C-1：一端静态密钥参与派生、另一端 nil（纯 ECDH）时，两端 sessionKey 必须不同
+	// ——否则混 key 对端与纯 ECDH 对端仍能互通，匿名 ECDH 漏洞未闭合。
+	key, _ := ParseKey(testHexKey)
+	for _, tc := range []struct {
+		name        string
+		dialerKey   []byte
+		listenerKey []byte
+	}{
+		{"dialer keyed / listener pure", key, nil},
+		{"dialer pure / listener keyed", nil, key},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			keyA, keyB := handshakeKeys(t, tc.dialerKey, tc.listenerKey)
+			if bytes.Equal(keyA, keyB) {
+				t.Fatal("混 key 端与纯 ECDH 端 sessionKey 应不同（C-1）")
+			}
+		})
+	}
+}
+
+func TestDeriveSessionKey_Binding(t *testing.T) {
+	// deriveSessionKey 单元级断言：两输入（ECDH 共享密钥 + 静态密钥）都参与派生，
+	// nil 保持旧纯 ECDH 派生字节级一致（向后兼容）。
+	key, _ := ParseKey(testHexKey)
+	key2, _ := ParseKey("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210")
+	sharedSecret := bytes.Repeat([]byte{0xAB}, 32)
+	otherSecret := bytes.Repeat([]byte{0xCD}, 32)
+
+	// 相同输入 → 确定性相同输出。
+	k1, err := deriveSessionKey(sharedSecret, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2, err := deriveSessionKey(sharedSecret, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(k1, k2) {
+		t.Fatal("相同输入应派生相同 sessionKey")
+	}
+
+	// 不同静态密钥 → 不同 sessionKey（C-1 核心：任何 key 变化都改变 sessionKey）。
+	k3, err := deriveSessionKey(sharedSecret, key2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(k1, k3) {
+		t.Fatal("不同静态密钥应派生不同 sessionKey（C-1）")
+	}
+
+	// nil（纯 ECDH）与混 key → 不同。
+	kNil, err := deriveSessionKey(sharedSecret, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(k1, kNil) {
+		t.Fatal("staticKey=nil（纯 ECDH）与混 key 派生应不同")
+	}
+
+	// nil 派生与旧纯 ECDH 派生字节级一致（向后兼容）。
+	oldKey, err := hkdf.Key(sha256.New, sharedSecret, []byte(ecdhSalt), ecdhInfo, sessionKeyLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(kNil, oldKey) {
+		t.Fatal("nil staticKey 派生必须与旧纯 ECDH 派生字节级一致（向后兼容）")
+	}
+
+	// 不同 ECDH 共享密钥 → 不同 sessionKey（共享密钥也必须参与）。
+	k4, err := deriveSessionKey(otherSecret, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(k1, k4) {
+		t.Fatal("不同 ECDH 共享密钥应派生不同 sessionKey")
+	}
+
+	// 输出恒为 32 字节（AES-256）。
+	for _, k := range [][]byte{k1, k3, kNil, k4} {
+		if len(k) != 32 {
+			t.Fatalf("sessionKey 长度应为 32，实际 %d", len(k))
+		}
+	}
+}
+
+func TestECDHHandshake_KeyedDialerNilListenerFails(t *testing.T) {
+	// C-1 同步发布协议变更：keyed dialer + nil listener（无密钥模式）→ 数据面必须失败
+	// （fail-closed，两端 sessionKey 不一致）。同版本 sclient/sproxy 才可互通。
+	t.Parallel()
+	key, _ := ParseKey(testHexKey)
+	a, b := xfertest.Pipe()
+	muxA := mux.New(a, mux.RoleDialer)
+	muxB := mux.New(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	srvErr := make(chan error, 1)
+	go func() {
+		tunB := NewTunnel(muxB, nil)
+		srvErr <- tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			w.Write(body)
+		}))
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	tunA := NewTunnel(muxA, key)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/mixed", strings.NewReader("mixed-test"))
+	resp, err := tunA.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("keyed dialer + nil listener 数据面应失败（C-1：sessionKey 不一致）")
+	}
+	cancel()
+	<-srvErr
+}
+
+func TestECDHHandshake_KeyedListenerNilDialerFails(t *testing.T) {
+	// 反向（审查 Minor #2）：keyed listener + nil dialer（无密钥模式）。keyed listener
+	// 握手失败即 fail-closed 拒绝整个隧道（Important #1 修复后 Serve 返回 error）——
+	// 不回退静态密钥，避免固定密钥加密丧失前向保密。同时断言服务端 handler 未执行
+	// （客户端请求被拒、零访问）。
+	t.Parallel()
+	key, _ := ParseKey(testHexKey)
+	a, b := xfertest.Pipe()
+	muxA := mux.New(a, mux.RoleDialer)
+	muxB := mux.New(b, mux.RoleListener)
+	defer muxA.Close()
+	defer muxB.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	handled := make(chan struct{}, 1)
+	srvErr := make(chan error, 1)
+	go func() {
+		// keyed listener：握手失败（nil dialer 不参与 ECDH，读流即失败）→ Serve fail-closed。
+		tunB := NewTunnel(muxB, key)
+		srvErr <- tunB.Serve(ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handled <- struct{}{}
+			body, _ := io.ReadAll(r.Body)
+			w.Write(body)
+		}))
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// nil dialer：无密钥，不握手，直接发请求流（被 keyed listener 当握手流消费 → 握手失败）。
+	tunA := NewTunnel(muxA, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "/mixed", strings.NewReader("mixed-test"))
+	if resp, err := tunA.Do(req); err == nil {
+		resp.Body.Close()
+		t.Fatal("nil dialer + keyed listener 请求应失败（keyed listener fail-closed）")
+	}
+
+	// 服务端 handler 不得执行（客户端零访问）。
+	select {
+	case <-handled:
+		t.Fatal("keyed listener 拒绝握手后服务端 handler 不应执行")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	cancel()
+	if err := <-srvErr; err == nil {
+		t.Fatal("keyed listener Serve 应返回 error（握手失败 fail-closed），而非 nil")
+	}
 }
