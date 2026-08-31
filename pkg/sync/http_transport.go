@@ -436,19 +436,84 @@ func IsRetryableError(err error) bool {
 // httpStatusFromError 从错误链中提取 HTTP 状态码。client 包以 "请求失败 (HTTP %d): ..."
 // 文本包装非 2xx 错误（未暴露类型化状态错误），此处用文本解析仅用于 5xx 瞬时 vs
 // 4xx 确定性分类；提取失败返回 (0, false)。
+// 审查 M-1：用 LastIndex 从错误文本**末尾**附近找 "HTTP "（客户端错误文本在后部），
+// 而非 Cut 取第一个——错误文本可能含用户可控路径（如文件名含 "HTTP 500"），
+// Cut 会误判第一个匹配为状态码。
 func httpStatusFromError(err error) (int, bool) {
 	const marker = "HTTP "
 	for err != nil {
 		msg := err.Error()
-		if _, after, ok := strings.Cut(msg, marker); ok {
-			rest := after
-			if len(rest) >= 3 {
-				if code, perr := strconv.Atoi(rest[:3]); perr == nil && code >= 100 && code <= 599 {
-					return code, true
-				}
+		// 只从后部匹配（LastIndex），避免文件名/路径里的 "HTTP <code>" 干扰。
+		if i := strings.LastIndex(msg, marker); i >= 0 && i+len(marker)+3 <= len(msg) {
+			rest := msg[i+len(marker):]
+			if code, perr := strconv.Atoi(rest[:3]); perr == nil && code >= 100 && code <= 599 {
+				return code, true
 			}
 		}
 		err = errors.Unwrap(err)
+	}
+	return 0, false
+}
+
+// IsRetryableFileFailure 判断同步任务是否"全部文件传输失败且为可重试瞬时网络故障"。
+//
+// 审查 I-2：引擎把单文件传输错误吞为 FileResult{Action: ActionError}，最终 job.Status
+// 保持 completed（单文件错误不中止整个同步）——因此"push 到宕机远端 / 同步中途掉线"
+// 这类瞬时网络故障不会走 StatusFailed 路径（枚举成功，但所有文件 Stat/WriteFile 失败）。
+// 本函数识别该场景：completed + 有待传输文件（FilesTotal>0）+ 0 成功（FilesDone==0）+
+// 存在网络类错误文本的 ActionError（连接拒绝/超时/EOF/5xx 等）。供 syncexec 标记为
+// 可重试失败（否则任务会以"completed 0 文件 + 全部 error 结果"误导用户）。
+//
+// 注意：FileResult.Error 是字符串（syncFile 用 %v 包装丢失 error 链），无法用
+// errors.Is/As 判别，故用文本特征匹配。仅识别"全部失败"（FilesDone==0）而非部分失败，
+// 避免把少量业务性失败误判为可重试。
+func IsRetryableFileFailure(job *Job) bool {
+	if job == nil || job.Status != StatusCompleted {
+		return false
+	}
+	if job.Stats.FilesTotal <= 0 || job.Stats.FilesDone > 0 {
+		return false // 无待传输文件 / 有成功传输（部分失败不整体重试）
+	}
+	for _, r := range job.Results {
+		if r.Action != ActionError || r.Error == "" {
+			continue
+		}
+		if isRetryableErrText(r.Error) {
+			return true
+		}
+	}
+	// 全部失败但都无网络特征：业务性失败（权限/校验等确定性错误），不整体重试。
+	return false
+}
+
+// isRetryableErrText 判断单文件错误文本是否含可重试瞬时网络故障特征。
+// 覆盖 syncFile/engine 用 %v 包装后的错误文本常见形态：连接拒绝/重置/超时/EOF/5xx。
+func isRetryableErrText(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, kw := range []string{
+		"connection refused", "connection reset", "connection closed",
+		"broken pipe", "timeout", "timed out", "deadline exceeded",
+		"unexpected eof", "no such host", "i/o timeout",
+	} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	if code, ok := httpStatusFromErrorText(msg); ok && code >= 500 {
+		return true
+	}
+	return false
+}
+
+// httpStatusFromErrorText 从单文件错误文本中提取 HTTP 状态码（同 httpStatusFromError
+// 的文本解析，但输入是字符串）。供 isRetryableErrText 判定 5xx。
+func httpStatusFromErrorText(msg string) (int, bool) {
+	const marker = "HTTP "
+	if i := strings.LastIndex(msg, marker); i >= 0 && i+len(marker)+3 <= len(msg) {
+		rest := msg[i+len(marker):]
+		if code, perr := strconv.Atoi(rest[:3]); perr == nil && code >= 100 && code <= 599 {
+			return code, true
+		}
 	}
 	return 0, false
 }

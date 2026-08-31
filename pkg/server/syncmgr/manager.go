@@ -368,7 +368,7 @@ func (m *Manager) List() []SyncTaskMeta {
 	for _, t := range m.tasks {
 		out = append(out, SyncTaskMeta{
 			ID: t.ID, Direction: t.Direction, Remote: t.Remote,
-			Src: t.Src, Dst: t.Dst, Status: t.Status,
+			Src: t.Src, Dst: t.Dst, Status: t.Status, Retries: t.Retries,
 			FilesTotal: t.FilesTotal, FilesDone: t.FilesDone,
 			BytesTotal: t.BytesTotal, BytesDone: t.BytesDone,
 			Error: t.Error, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt, ExpiresAt: t.ExpiresAt,
@@ -580,8 +580,11 @@ func (m *Manager) executeSync(ctx context.Context, task *SyncTask) {
 		}
 
 		// 可重试错误（瞬时网络错误）：达上限转 failed；否则记录后进入下一次重试
+		// 审查 I-1：上限用持久化计数 task.Retries（markRetrying 每次重试前已自增），
+		// 而非循环局部 attempt——重启恢复的 retrying 任务保留 Retries，正确消耗"剩余
+		// 预算"，避免跨重启超预算重试（错误文本"已重试 N 次"与 MaxRetries 语义自洽）。
 		if runResult.Status == StatusFailed && runResult.Retryable {
-			if attempt >= maxRetries {
+			if task.Retries >= maxRetries {
 				errMsg := fmt.Sprintf("同步任务已重试 %d 次仍失败: %s", task.Retries, pickErrorText(runResult, runErr))
 				m.applyRunResultWithError(task, runResult, runErr, errMsg)
 				if serr := m.saveTask(task); serr != nil {
@@ -650,22 +653,25 @@ func (m *Manager) waitRetryBackoff(syncCtx context.Context, task *SyncTask, atte
 
 // retryBackoffDelay 计算第 attempt 次（1-based）重试前的等待延迟。
 // 指数退避：base * backoff^(attempt-1)，封顶 base*10（对齐 cloud 重试预算，避免长尾）。
+// 审查 M-3：backoff 上界校验（超大/NaN 会导致 float64 乘法溢出为负，time.NewTimer(负)
+// 立即触发退化为忙循环），超上界回落默认 2。
 func (m *Manager) retryBackoffDelay(attempt int) time.Duration {
 	base := m.config.RetryDelay
 	if base <= 0 {
 		base = 10 * time.Second
 	}
 	backoff := m.config.RetryBackoff
-	if backoff <= 0 {
+	if backoff <= 0 || backoff > 100 || backoff != backoff { // NaN 检查（backoff != backoff）
 		backoff = 2
 	}
 	capDelay := base * 10
 	delay := base
 	for i := 1; i < attempt; i++ {
-		delay = time.Duration(float64(delay) * backoff)
-		if delay >= capDelay {
+		// 乘法前检查：float64 溢出（+Inf）转 int64 为负 → 负 delay 忙循环。先判 cap。
+		if float64(delay) >= float64(capDelay)/backoff {
 			return capDelay
 		}
+		delay = time.Duration(float64(delay) * backoff)
 	}
 	return delay
 }
@@ -733,10 +739,22 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 		default:
 			task.Error = "同步失败"
 		}
+		// 审查 M-2：failed 终态释放预留配额（pull 任务创建时 TryReserve 1GiB 占位）——
+		// 不释放会永久钉住配额（failed 不可取消，用户只能手动 DeleteTask 或重启）。
+		// 释放后归零防二次释放；磁盘残留由下次周期扫描记账。
+		if task.Direction == string(DirectionPull) && task.ReservedSize > 0 {
+			m.quota.Release(task.ReservedSize, m.quotaCat)
+			task.ReservedSize = 0
+		}
 	default:
 		task.Status = StatusFailed
 		if task.Error == "" {
 			task.Error = "同步执行器返回未知状态"
+		}
+		// 同上：未知状态落 failed 也释放预留配额。
+		if task.Direction == string(DirectionPull) && task.ReservedSize > 0 {
+			m.quota.Release(task.ReservedSize, m.quotaCat)
+			task.ReservedSize = 0
 		}
 	}
 }

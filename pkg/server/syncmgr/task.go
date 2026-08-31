@@ -92,6 +92,7 @@ type SyncTaskMeta struct {
 	Src        string    `json:"src"`
 	Dst        string    `json:"dst"`
 	Status     string    `json:"status"`
+	Retries    int       `json:"retries"` // 已重试次数（阶段 6 自动重试；审查 M-5 列表暴露）
 	FilesTotal int64     `json:"files_total"`
 	FilesDone  int64     `json:"files_done"`
 	BytesTotal int64     `json:"bytes_total"`

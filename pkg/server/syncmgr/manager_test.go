@@ -874,3 +874,29 @@ func TestRetry_RetriesPersisted(t *testing.T) {
 		t.Fatalf("完成后 Retries 应保持 2，got %d", done.Retries)
 	}
 }
+
+// TestQuota_ReconcileOnFailed_Released 验证（审查 M-2）：pull 任务 failed 终态释放
+// 预留配额（创建时 TryReserve 1GiB 占位），不永久钉住配额。
+func TestQuota_ReconcileOnFailed_Released(t *testing.T) {
+	quota := newMockQuota(0)
+	// 非阻塞执行器，预先设 err（Run 立即失败 → runResult nil → failTask 释放配额）。
+	mock := newMockExecutor(nil)
+	mock.mu.Lock()
+	mock.err = errors.New("transfer failed (business error)")
+	mock.mu.Unlock()
+	mgr := newTestManager(t, quota, nil, mock, nil)
+
+	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "pull", Remote: "r1", Src: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 确定性等待 failed（Run 立即失败 → failTask 释放配额）。
+	done := waitForStatus(t, mgr, task.ID, StatusFailed, 5*time.Second)
+	if done == nil {
+		t.Fatal("业务错误应直接 failed")
+	}
+	// failed 终态应释放预留配额（M-2）。
+	if quota.Usage() != 0 {
+		t.Fatalf("failed 后预留配额应释放为 0，got %d", quota.Usage())
+	}
+}

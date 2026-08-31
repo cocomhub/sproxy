@@ -101,6 +101,15 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		// 阶段 6 自动重试：瞬时网络错误（连接拒绝/超时/5xx）标记为可重试，
 		// 业务失败（校验/路径等确定性错误）为 false（重试不会成功）。
 		result.Retryable = syncpkg.IsRetryableError(syncErr)
+	} else if syncpkg.IsRetryableFileFailure(job) {
+		// 审查 I-2：引擎把单文件传输错误吞为 FileResult{ActionError}，最终
+		// job.Status 保持 completed（不触发 StatusFailed 路径）——但"全部文件
+		// 传输失败且错误为网络类"（如 push 到宕机远端）实际是可重试瞬时故障，
+		// 若报 completed（0 文件 + 全部 error 结果）会误导用户。此处识别该场景
+		// 并标记为可重试失败，交给 syncmgr 自动重试。
+		result.Status = string(syncpkg.StatusFailed)
+		result.Error = "同步全部文件传输失败（疑似瞬时网络故障，将重试）"
+		result.Retryable = true
 	}
 	return result, syncErr
 }
