@@ -1614,9 +1614,9 @@ async function downloadCloudFile(taskId, filename, checksum) {
 async function deleteCloudTask(taskId, filename, checksum) {
   try {
     const rawTaskId = stripCloudId(taskId);
-    // 删除云端文件（sc.files.deleteFile 走 checksum 校验）+ 删除任务；路径同样用剥前缀 id
-    const cloudPath = '.__cloud__/' + rawTaskId + '/' + filename;
-    await sc.files.deleteFile(cloudPath, checksum);
+    // 审查 C2：删除云任务只需 sc.cloud.deleteTask——服务端 DeleteTask 已负责
+    // os.RemoveAll(.__cloud__/<taskID>) 清理文件。旧的 sc.files.deleteFile('.__cloud__/...')
+    // 因 delete 端点无 kind 机制（ValidateFilePath 拒绝 .__ 首段）必 400，且属冗余。
     await sc.cloud.deleteTask(rawTaskId);
     refreshCloudTasks();
     return true;

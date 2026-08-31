@@ -616,10 +616,14 @@ func TestCloudDownloadCmd_DownloadSubcommand(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(task)
 		case strings.HasPrefix(r.URL.Path, "/download") && r.Method == http.MethodGet:
-			// 校验远端路径为 .__cloud__/<taskID>/<filename>
+			// 审查 C1：云任务原始文件改用 kind=cloud_task + <taskID>/<filename>
+			// （服务端校验任务 owner 后拼接内部路径，普通下载不开放 .__ 路径访问）。
 			got := r.URL.Query().Get("filename")
-			if got != ".__cloud__/task-dl-1/original.zip" {
-				t.Errorf("expected download filename '.__cloud__/task-dl-1/original.zip', got %q", got)
+			if got != "task-dl-1/original.zip" {
+				t.Errorf("expected download filename 'task-dl-1/original.zip', got %q", got)
+			}
+			if k := r.URL.Query().Get("kind"); k != "cloud_task" {
+				t.Errorf("expected download kind=cloud_task, got %q", k)
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("X-File-Checksum", fileChecksum)

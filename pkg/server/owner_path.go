@@ -17,6 +17,8 @@ func ownerFromRequest(r *http.Request) string {
 // ownerUploadsDirFor 返回指定 owner 的存储根目录。
 // 多租户隔离：owner 非空时用户文件存 uploadsDir/<owner>/ 子目录；未认证（owner 空）
 // 直接使用 uploadsDir（单租户兼容，避免引入默认目录语义）。
+// 审查 I2：owner 作为路径段前必须校验（fail-closed）——非法 owner（如 ..、.__cloud__、
+// 含 / 或 \、Windows 设备名）会让 owner 根逃出 uploadsDir 或与内部目录重合，破坏隔离。
 func (h *Handlers) ownerUploadsDirFor(owner string) string {
 	cfg := h.cfgPtr.Load()
 	if cfg == nil {
@@ -25,7 +27,43 @@ func (h *Handlers) ownerUploadsDirFor(owner string) string {
 	if owner == "" {
 		return cfg.UploadsDir
 	}
+	if !validOwnerDirName(owner) {
+		// 非法 owner 回落单租户根（不 panic）；调用方（认证层）应保证 owner 合法，
+		// 此处纵深防御——避免逃逸/内部目录重合。
+		return cfg.UploadsDir
+	}
 	return filepath.Join(cfg.UploadsDir, owner)
+}
+
+// validOwnerDirName 校验 owner 字符串是否可安全作为 uploadsDir 下的单路径段。
+// 拒绝：空、. / ..、含路径分隔符（/ \）、以 .__ 开头（服务端内部目录约定）、
+// Windows 非法字符与保留设备名（CON/NUL/PRN/AUX/COM1-9/LPT1-9）。
+func validOwnerDirName(owner string) bool {
+	if owner == "" || owner == "." || owner == ".." {
+		return false
+	}
+	if strings.ContainsAny(owner, `/\`) {
+		return false
+	}
+	if strings.HasPrefix(owner, ".__") {
+		return false
+	}
+	if strings.ContainsAny(owner, `<>:"|?*`) {
+		return false
+	}
+	// Windows 保留设备名（大小写不敏感，对齐 cloudfilename.Safe）。
+	upper := strings.ToUpper(owner)
+	if upper == "CON" || upper == "NUL" || upper == "PRN" || upper == "AUX" {
+		return false
+	}
+	if strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT") {
+		if len(upper) > 3 {
+			if upper[3] >= '1' && upper[3] <= '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // ownerUploadsDir 返回请求者 owner 的存储根目录。

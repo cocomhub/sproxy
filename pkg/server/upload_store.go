@@ -653,33 +653,70 @@ func (us *UploadStore) recoverSessions() {
 
 		data, err := os.ReadFile(sessionPath)
 		if err != nil {
+			// 审查 I1：owner 作用域的会话目录为 .__chunked__/<owner>/<id>/——该层目录
+			// 无 session.json（它是 owner 根，非 session），需递归一层其子目录。
+			// 用 os.IsNotExist 区分"目录非 session"与"真读取错误"。
+			if os.IsNotExist(err) {
+				if us.recoverOwnerSessions(sessionDir) {
+					continue
+				}
+			}
 			us.logger.Warn("读取 session.json 失败，跳过", "upload_id", uploadID, "error", err)
 			continue
 		}
 
-		var session ChunkedUploadSession
-		if err := json.Unmarshal(data, &session); err != nil {
-			us.logger.Warn("解析 session.json 失败，跳过", "upload_id", uploadID, "error", err)
-			continue
-		}
-
-		// 已过期的跳过（后续由 cleanupExpired 清理）
-		if time.Now().After(session.ExpiresAt) {
-			continue
-		}
-
-		// 已完成的跳过（保留供 complete 查询）
-		if session.Completed {
-			us.sessions[uploadID] = &session
-			continue
-		}
-
-		// 恢复：扫描磁盘上的 .chunk 文件，与 bitmap 对齐
-		us.reconcileChunks(&session, sessionDir)
-		us.sessions[uploadID] = &session
-		us.logger.Info("恢复上传会话", "upload_id", uploadID, "file_name", session.Filename,
-			"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
+		us.restoreSession(uploadID, sessionDir, data)
 	}
+}
+
+// recoverOwnerSessions 递归恢复 owner 作用域的会话（.__chunked__/<owner>/<id>/）。
+// ownerDir 是 owner 根目录（无 session.json，但有子目录）。返回 true 表示识别为
+// owner 层并尝试恢复其子会话（即使恢复无果也返回 true，避免外层误判为损坏 session）。
+func (us *UploadStore) recoverOwnerSessions(ownerDir string) bool {
+	subs, err := os.ReadDir(ownerDir)
+	if err != nil {
+		return false
+	}
+	found := false
+	for _, sub := range subs {
+		if !sub.IsDir() {
+			continue
+		}
+		uploadID := sub.Name()
+		sessionDir := filepath.Join(ownerDir, uploadID)
+		sessionPath := filepath.Join(sessionDir, "session.json")
+		data, rErr := os.ReadFile(sessionPath)
+		if rErr != nil {
+			us.logger.Warn("读取 owner session.json 失败，跳过", "upload_id", uploadID, "error", rErr)
+			continue
+		}
+		found = true
+		us.restoreSession(uploadID, sessionDir, data)
+	}
+	return found
+}
+
+// restoreSession 从磁盘恢复单个会话（解析 + 过期/完成判断 + 与 bitmap 对齐）。
+func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) {
+	var session ChunkedUploadSession
+	if err := json.Unmarshal(data, &session); err != nil {
+		us.logger.Warn("解析 session.json 失败，跳过", "upload_id", uploadID, "error", err)
+		return
+	}
+	// 已过期的跳过（后续由 cleanupExpired 清理）
+	if time.Now().After(session.ExpiresAt) {
+		return
+	}
+	// 已完成的跳过（保留供 complete 查询）
+	if session.Completed {
+		us.sessions[uploadID] = &session
+		return
+	}
+	// 恢复：扫描磁盘上的 .chunk 文件，与 bitmap 对齐
+	us.reconcileChunks(&session, sessionDir)
+	us.sessions[uploadID] = &session
+	us.logger.Info("恢复上传会话", "upload_id", uploadID, "file_name", session.Filename,
+		"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
 }
 
 // reconcileChunks 扫描磁盘上的 chunk 文件与 bitmap 对齐（处理 crash 后 bitmap 未持久化的情况）。

@@ -449,9 +449,12 @@ func NewCmdCloudDownloadFile(factory clientfactory.Factory, ios cli.IOStreams, c
 				if task.Status != client.TaskStatusCompleted {
 					return fmt.Errorf("任务 %s 未完成（当前 %s），无法下载原始文件", taskID, task.Status)
 				}
-				cloudPath := ".__cloud__/" + taskID + "/" + task.Filename
+				// 审查 C1：云任务原始文件存 .__cloud__/<taskID>/<file>（.__ 内部目录），
+				// 普通下载不开放 .__ 路径访问——改用 kind=cloud_task + <taskID>/<file>
+				// （服务端校验任务 owner 后拼接内部路径）。
+				remotePath := taskID + "/" + task.Filename
 				local := filepath.Join(outputDir, task.Filename)
-				items = append(items, client.DownloadItem{RemotePath: cloudPath, LocalPath: local})
+				items = append(items, client.DownloadItem{RemotePath: remotePath, LocalPath: local, Kind: client.DownloadKindCloudTask})
 			}
 
 			ios.WriteOutLine("下载 %d 个任务的原始文件...", len(items))

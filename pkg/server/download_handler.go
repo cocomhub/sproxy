@@ -129,15 +129,24 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (filename, filePath stri
 		if vErr != nil {
 			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
 		}
-		// 校验任务属于当前 owner（跨租户任务视为不存在，404 防枚举）
-		taskID := remotePath
-		if i := strings.IndexByte(remotePath, '/'); i > 0 {
-			taskID = remotePath[:i]
+		// 校验任务属于当前 owner + 请求文件 == task.Filename（审查 I3：只允许下载
+		// 任务声明的原始文件，防下载任务目录下 .partial/.partial.etag 等残留）。
+		// 跨租户任务或文件不匹配 → 404（防枚举，不泄露存在性）。
+		// 格式必须为 <taskID>/<file>（含分隔符），否则视为不存在。
+		slash := strings.IndexByte(remotePath, '/')
+		if slash <= 0 {
+			return "", "", &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
 		}
+		taskID := remotePath[:slash]
 		if h.cloudMgr == nil {
 			return "", "", &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
 		}
-		if _, ok := h.cloudMgr.SnapshotTask(taskID, ownerFromRequest(r)); !ok {
+		task, ok := h.cloudMgr.SnapshotTask(taskID, ownerFromRequest(r))
+		if !ok {
+			return "", "", &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+		}
+		// 仅允许 taskID/<task.Filename> 精确匹配（防下载任务目录下其它文件）。
+		if remotePath != taskID+"/"+task.Filename {
 			return "", "", &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
 		}
 		cfg := h.cfgPtr.Load()

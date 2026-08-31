@@ -38,6 +38,10 @@ const (
 	// 归档文件存服务端 uploadsDir/.__cloud_archives__/<name>（.__ 内部目录），
 	// 普通下载不开放 .__ 路径访问，kind 方案由服务端在归档目录内拼接。
 	DownloadKindCloudArchive = "cloud_archive"
+	// DownloadKindCloudTask 与服务端 download kind 保持一致（cloud_task）。
+	// 云任务原始文件存服务端 uploadsDir/.__cloud__/<taskID>/<file>，经 kind 由服务端
+	// 校验任务 owner 后拼接下载（RemotePath 传 <taskID>/<file>）。
+	DownloadKindCloudTask = "cloud_task"
 )
 
 // ChunkedUploadResult 表示分块上传的结果。

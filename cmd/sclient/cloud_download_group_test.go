@@ -368,7 +368,12 @@ func TestCloudDownloadGroupCmd_DownloadSubcommand(t *testing.T) {
 		}
 		if r.URL.Path == "/download" && r.Method == http.MethodGet {
 			calledDownload = true
-			if r.URL.Query().Get("filename") != ".__cloud__/task-1/file.zip" {
+			// 审查 C1：云任务原始文件用 kind=cloud_task + <taskID>/<filename>。
+			if r.URL.Query().Get("filename") != "task-1/file.zip" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if r.URL.Query().Get("kind") != "cloud_task" {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
