@@ -187,6 +187,21 @@ func (b *Bucket) getNodes() []*kadNode {
 	return result
 }
 
+// getNodesSnapshot 在 bucket 锁内复制每个节点的 PeerInfo 本体（ID/Addrs/Meta 深拷贝），
+// 供持久化快照遍历（审查 PR-3 I-1：addNode 会在锁内原地改写 kadNode.info，返回
+// 指针切片让调用方无锁读会与 addNode 数据竞争——锁内复制本体消除竞争）。
+func (b *Bucket) getNodesSnapshot() []hub.PeerInfo {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]hub.PeerInfo, 0, len(b.nodes))
+	for _, n := range b.nodes {
+		pi := n.info
+		pi.Addrs = append([]string(nil), n.info.Addrs...)
+		out = append(out, pi)
+	}
+	return out
+}
+
 // restoreNode 从持久化恢复一个节点（Load 用）：加锁追加到 bucket 末尾。
 // 与 addNode 不同：不更新 lastSeen/online（恢复节点视为"上次发现、当前未验证在线"），
 // 不触发 moveToFront（无最近活跃信息），仅在已存在相同 ID 时跳过（文件内重复幂等）
@@ -228,6 +243,11 @@ type Kademlia struct {
 	persistMu    sync.Mutex
 	persistFile  string      // 持久化文件路径；"" 表示持久化关闭（零行为变更）
 	persistTimer *time.Timer // 去抖落盘计时器；非 nil 表示已有排队的落盘
+	// saveMu 串行化实际落盘（SaveCandidates 的 buildSnap+write 全程持锁，审查 PR-3
+	// I-2）：回调与 FlushPersist 的 Save 都在锁内生成快照，后获得锁者必然写更新
+	// 快照——杜绝"陈旧覆盖最新变更"（与联邦 saveMu 模式一致）。变更路径
+	// Insert/Remove 不取此锁（无锁序倒置/死锁）。
+	saveMu sync.Mutex
 }
 
 // NewKademlia creates a new Kademlia instance with the given node ID.
@@ -279,11 +299,13 @@ func (k *Kademlia) Remove(id string) {
 // notifyChange 在路由表变更（Insert/Remove）后触发异步落盘：去抖窗口内合并多次
 // 变更，窗口到期后写**当时**的最新快照。持久化关闭（persistFile 为空）时是 no-op。
 func (k *Kademlia) notifyChange() {
-	k.persistMu.Lock()
-	defer k.persistMu.Unlock()
-	if k.persistFile == "" {
+	// 审查 PR-3 M-4：持久化关闭（默认态）时锁外快速返回，避免每次 Insert/Remove
+	// 一轮互斥锁往返（persistFile 在 EnablePersistence 后只写一次，读可无锁）。
+	if k.PersistFile() == "" {
 		return
 	}
+	k.persistMu.Lock()
+	defer k.persistMu.Unlock()
 	if k.persistTimer != nil {
 		return // 已有排队的落盘，跳过（合并语义：到期落盘读的是最新快照）
 	}
@@ -365,6 +387,9 @@ func defaultLogger(logger *slog.Logger) *slog.Logger {
 //
 // 只存发现用节点信息（id/route/addr），**不存 secret/密钥**（k-bucket 本就不含
 // 敏感字段，且持久化的是发现缓存而非权威路由表）。
+// kadNodeSnap 是 k-bucket 持久化快照中单个节点的离线表示。
+// 审查 PR-3 M-5：只存 id/route_id/addrs，**不持久化 PeerInfo.Meta**（能力宣告等）——
+// 恢复节点 Meta 为空，由重启后的重新发现填充（设计文档 §5 缓存语义）。
 type kadNodeSnap struct {
 	ID      string   `json:"id"`
 	RouteID string   `json:"route_id"`
@@ -378,7 +403,11 @@ type kadSnap struct {
 
 // Save 把当前 k-bucket 原子写盘到 path（同目录临时文件 + fsync + rename + 0600，
 // 与 hub 路由表/联邦候选持久化同模式）。父目录不存在时返回 error。
+// 审查 PR-3 I-2：buildSnap+write 全程持 saveMu，与去抖回调/FlushPersist 串行——
+// 后获得锁者必然生成更新快照，杜绝"陈旧覆盖最新变更"。
 func (k *Kademlia) Save(path string) error {
+	k.saveMu.Lock()
+	defer k.saveMu.Unlock()
 	return writeKadFile(path, k.buildSnap(), k.logger)
 }
 
@@ -387,12 +416,13 @@ func (k *Kademlia) Save(path string) error {
 func (k *Kademlia) buildSnap() kadSnap {
 	var snap kadSnap
 	for i := range k.buckets {
-		nodes := k.buckets[i].getNodes()
-		for _, n := range nodes {
+		// 审查 PR-3 I-1：getNodesSnapshot 在 bucket 锁内复制 PeerInfo 本体，
+		// 避免与 addNode 的原地更新数据竞争（getNodes 返回指针切片无锁读会竞争）。
+		for _, info := range k.buckets[i].getNodesSnapshot() {
 			snap.Nodes = append(snap.Nodes, kadNodeSnap{
-				ID:      n.info.ID,
-				RouteID: NodeIDFromString(n.info.ID).Hex(),
-				Addrs:   append([]string(nil), n.info.Addrs...),
+				ID:      info.ID,
+				RouteID: NodeIDFromString(info.ID).Hex(),
+				Addrs:   append([]string(nil), info.Addrs...),
 			})
 		}
 	}

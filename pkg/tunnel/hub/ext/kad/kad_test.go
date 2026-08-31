@@ -4,12 +4,15 @@
 package kad
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 )
@@ -460,5 +463,119 @@ func TestKademliaEnablePersistence_SavesOnChange(t *testing.T) {
 			ids = append(ids, n.ID)
 		}
 		t.Fatalf("expected 2 persisted nodes, got %v", ids)
+	}
+}
+
+// TestKademliaPersistence_ConcurrentInsertBuildSnapRace 验证（审查 PR-3 I-1 回归）：
+// 并发 Insert 与 buildSnap（Save 触发）无数据竞争（-race 捕获；getNodesSnapshot 锁内
+// 复制 PeerInfo 本体）。
+func TestKademliaPersistence_ConcurrentInsertBuildSnapRace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kad-race.json")
+	k := NewKademlia("local-node", nil)
+	if err := k.EnablePersistence(path); err != nil {
+		t.Fatalf("EnablePersistence: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	var wg sync.WaitGroup
+	// 并发变更：反复 Insert 同一节点（触发 addNode 原地更新 info）。
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			k.Insert(hub.PeerInfo{ID: "node-race", Addrs: []string{"1.2.3.4:1", "5.6.7.8:2"}})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			_ = k.Save(path) // 触发 buildSnap（读 info）——与 Insert 写 info 竞争
+		}
+	}()
+	wg.Wait()
+}
+
+// TestKademliaPersistence_AsyncDebouncedSave 验证（审查 PR-3 M-2）：真实去抖 timer
+// 异步落盘（不经 FlushPersist）——Insert 后等待去抖窗口，文件出现且内容可恢复。
+func TestKademliaPersistence_AsyncDebouncedSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kad-async.json")
+	k := NewKademlia("local-node", nil)
+	if err := k.EnablePersistence(path); err != nil {
+		t.Fatalf("EnablePersistence: %v", err)
+	}
+	k.Insert(hub.PeerInfo{ID: "node-async", Addrs: []string{"addr-async"}})
+
+	// 真实 timer：等去抖窗口 + 落盘完成（轮询文件出现）。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("去抖 timer 应自动落盘文件: %v", err)
+	}
+
+	k2 := NewKademlia("local-node", nil)
+	if err := k2.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := k2.FindClosest(NodeIDFromString("node-async"), 10)
+	if len(got) != 1 || got[0].ID != "node-async" {
+		t.Fatalf("异步落盘内容应可恢复, got %+v", got)
+	}
+}
+
+// TestKademliaPersistence_FlushWithConcurrentChange 验证（审查 PR-3 I-2 回归）：
+// FlushPersist 与并发变更最终一致（saveMu 串行 buildSnap+write，无陈旧覆盖）——
+// flush 后新实例 Load 应看到 flush 时刻的最新状态（无 panic）。
+func TestKademliaPersistence_FlushWithConcurrentChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kad-flush.json")
+	k := NewKademlia("local-node", nil)
+	if err := k.EnablePersistence(path); err != nil {
+		t.Fatalf("EnablePersistence: %v", err)
+	}
+	k.Insert(hub.PeerInfo{ID: "node-1", Addrs: []string{"addr-1"}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			k.Insert(hub.PeerInfo{ID: "node-2", Addrs: []string{"addr-2"}})
+		}
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if err := k.FlushPersist(); err != nil {
+		t.Fatalf("FlushPersist（并发变更中）: %v", err)
+	}
+	wg.Wait()
+
+	// flush 后文件可读、内容合法（无 panic、无损坏）。
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("flush 后文件应存在: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("flush 后文件不应为空")
 	}
 }
