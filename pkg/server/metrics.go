@@ -189,11 +189,18 @@ type metricsResponseWriter struct {
 	http.ResponseWriter
 	statusCode  int
 	wroteHeader bool
+	reqActor    string // 已认证操作主体（authMiddleware 写入，供请求日志记录）
 }
 
 func newMetricsResponseWriter(w http.ResponseWriter) *metricsResponseWriter {
 	return &metricsResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 }
+
+// setActor 记录已认证操作主体（实现 actorCarrier，供 requestLogMiddleware 读取）。
+func (mw *metricsResponseWriter) setActor(a string) { mw.reqActor = a }
+
+// actor 返回已认证操作主体（未认证为空串）。
+func (mw *metricsResponseWriter) actor() string { return mw.reqActor }
 
 func (mw *metricsResponseWriter) WriteHeader(code int) {
 	if !mw.wroteHeader {

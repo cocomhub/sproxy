@@ -48,11 +48,12 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:     mux,
-		CfgPtr:  &cfgPtr,
-		Version: "test",
-		BuildAt: "test",
-		Logger:  slog.Default(),
+		Mux:         mux,
+		CfgPtr:      &cfgPtr,
+		Version:     "test",
+		BuildAt:     "test",
+		Logger:      slog.Default(),
+		AuditLogger: testLogger(), // 丢弃审计日志，避免现有测试输出噪音
 	})
 
 	ts := httptest.NewServer(h.Handler())
@@ -899,11 +900,12 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:     mux,
-		CfgPtr:  &cfgPtr,
-		Version: "test-version",
-		BuildAt: "test-buildat",
-		Logger:  testLogger(),
+		Mux:         mux,
+		CfgPtr:      &cfgPtr,
+		Version:     "test-version",
+		BuildAt:     "test-buildat",
+		Logger:      testLogger(),
+		AuditLogger: testLogger(), // 丢弃审计日志，避免现有测试输出噪音
 	})
 
 	ts := httptest.NewServer(h.Handler())

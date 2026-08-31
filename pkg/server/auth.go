@@ -37,6 +37,22 @@ func meshFromRequest(r *http.Request) string {
 	return MeshFrom(r.Context())
 }
 
+// actorCtxKey 是请求 ctx 中 actor 的私有 key 类型（避免与其他包/库的 string key 碰撞）。
+type actorCtxKey struct{}
+
+// withActor 把操作主体（AccessKey / APIKey 名）写入请求 ctx。
+func withActor(ctx context.Context, actor string) context.Context {
+	return context.WithValue(ctx, actorCtxKey{}, actor)
+}
+
+// ActorFrom 返回请求 ctx 中的操作主体（未认证时返回 ""）。
+// authMiddleware 在认证成功后写入；供敏感 handler 的审计事件（RecordAudit）与
+// 请求日志（requestLogMiddleware）读取「谁发起的操作」。
+func ActorFrom(ctx context.Context) string {
+	actor, _ := ctx.Value(actorCtxKey{}).(string)
+	return actor
+}
+
 // APIKey 表示一个 API 密钥及其权限。
 type APIKey struct {
 	Name       string `yaml:"name" mapstructure:"name"`
@@ -93,22 +109,27 @@ func permissionAllowed(permission, method string) bool {
 }
 
 // matchAPIKey 遍历 API 密钥列表，尝试匹配 token。
-// 返回 authResultOK — 匹配成功且权限允许；
-// 返回 authResultForbidden — 匹配成功但权限不足；
-// 返回 authResultDenied — 不匹配任何 key。
-func matchAPIKey(token, method string, keys []APIKey) authResult {
+// 返回 authResultOK — 匹配成功且权限允许（同时返回该 key 的操作主体名）；
+// 返回 authResultForbidden — 匹配成功但权限不足（主体名空串）；
+// 返回 authResultDenied — 不匹配任何 key（主体名空串）。
+func matchAPIKey(token, method string, keys []APIKey) (authResult, string) {
 	for _, key := range keys {
 		if key.Key == "" {
 			continue
 		}
 		if subtle.ConstantTimeCompare([]byte(token), []byte(key.Key)) == 1 {
 			if permissionAllowed(key.Permission, method) {
-				return authResultOK
+				// actor 优先用 key 名（便于多用户识别），Name 为空时回退 Key。
+				name := key.Name
+				if name == "" {
+					name = key.Key
+				}
+				return authResultOK, name
 			}
-			return authResultForbidden
+			return authResultForbidden, ""
 		}
 	}
-	return authResultDenied
+	return authResultDenied, ""
 }
 
 // handleNoBearerToken 处理缺少 Bearer Authorization 头的情况（仅多用户 APIKeys 场景）。
@@ -127,8 +148,11 @@ func handleNoBearerToken(w http.ResponseWriter, r *http.Request, cfg *Config, ne
 
 // authenticateAPIKey 校验多用户 API 密钥（Bearer，独立特性）。
 func (h *Handlers) authenticateAPIKey(w http.ResponseWriter, r *http.Request, cfg *Config, token string, next http.HandlerFunc) {
-	switch matchAPIKey(token, r.Method, cfg.APIKeys.Keys) {
+	switch res, name := matchAPIKey(token, r.Method, cfg.APIKeys.Keys); res {
 	case authResultOK:
+		// 阶段6-B：把操作主体（APIKey 名）写入 ctx 与响应包装器，供审计与请求日志使用。
+		r = r.WithContext(withActor(r.Context(), name))
+		setResponseActor(w, name)
 		next(w, r)
 	case authResultForbidden:
 		slog.Warn("auth: permission denied",
@@ -234,6 +258,10 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			}
 			// M-9：验签成功后按命中 AK 派生 mesh 写入 ctx，供列表/信令/指标按 mesh 过滤。
 			r = r.WithContext(withMesh(r.Context(), tunnel.AccessKeyMesh(matched.Key)))
+			// 阶段6-B：操作主体（AK）写入 ctx 与响应包装器，供敏感 handler 审计
+			// （RecordAudit 自动读取）与 requestLogMiddleware 的 actor 字段使用。
+			r = r.WithContext(withActor(r.Context(), matched.Key))
+			setResponseActor(w, matched.Key)
 			// I-3：bodyValidator 只在读到 io.EOF 时比对哈希，而 JSON 端点用
 			// json.Decoder、上传用 ParseMultipartForm 都不读到 EOF，哈希比对永不触发。
 			// handler 完成后强制消费剩余 body 触发 EOF 校验；不匹配记 Warn（响应已发，

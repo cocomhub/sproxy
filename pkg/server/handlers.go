@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,10 +50,14 @@ type Handlers struct {
 	// 注入联邦客户端时联动装配其跨 hub 转发器（路由表未命中 → 联邦转发）。
 	relayStream *RelayStreamHandler
 	// hubID 是本 hub 身份（config hub.node_id），跨 hub 转发防环路径记录用。
-	hubID          string
-	signalBroker   *SignalBroker
-	hubPersist     *hub.Persister // hub 状态持久化器（配置 hub.persist_file 时注入；nil = 不持久化）
-	handler        http.Handler
+	hubID        string
+	signalBroker *SignalBroker
+	hubPersist   *hub.Persister // hub 状态持久化器（配置 hub.persist_file 时注入；nil = 不持久化）
+	handler      http.Handler
+	// auditLogger 是操作审计专用 logger：固定 JSON 格式（不随 log_format 切换）、
+	// 与业务 logger 独立，保证审计行可机器检索。RegisterRoutes 初始化；测试可经
+	// RegisterRoutesOpts.AuditLogger 注入 buffer 捕获。
+	auditLogger    *slog.Logger
 	cloudMgr       *CloudDownloadManager
 	syncMgr        *syncmgr.Manager // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	storageMgr     *StorageManager
@@ -116,6 +121,9 @@ type RegisterRoutesOpts struct {
 	// HubRestoredMessages 是启动时从持久化文件恢复的信令收件箱快照
 	// （nodes 已在 routeTable 恢复；messages 需在 SignalBroker 创建后灌入队列）。
 	HubRestoredMessages []hub.MessageSnap
+	// AuditLogger 是操作审计专用 logger（nil 时默认固定 JSON 到 stdout）。
+	// 独立于业务 Logger：格式不随 log_format 配置切换，审计行始终可机器检索。
+	AuditLogger *slog.Logger
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -129,6 +137,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 自动读取 ctx 中的 SpanContext，带上 trace_id/span_id 实现全链路追踪。
 	log = slog.New(tracing.WithContextHandler(log.Handler()))
 
+	// 审计 logger：固定 JSON 格式（不随 log_format 切换），默认写 stdout 与业务
+	// 日志同流；调用方可在 RegisterRoutesOpts.AuditLogger 注入自定义（如测试 buffer）。
+	auditLogger := opts.AuditLogger
+	if auditLogger == nil {
+		auditLogger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+
 	// 初始化 ChecksumStore
 	cs := NewChecksumStore(cfg.UploadsDir, log.With("component", "checksum_store"))
 
@@ -139,6 +154,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		checksumStore: cs,
 		uploadStore:   MustNewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, log.With("component", "upload_store")),
 		logger:        log,
+		auditLogger:   auditLogger,
 		metrics:       NewMetrics(),
 		shareStore:    NewShareStore(log.With("component", "share")),
 		routeTable:    opts.RouteTable,

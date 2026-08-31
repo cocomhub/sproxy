@@ -231,6 +231,10 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if _, err = os.Stat(verFile); os.IsNotExist(err) {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "版本文件不存在: " + versionIDStr,
+		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "版本文件不存在"}, http.StatusNotFound)
 		return
 	}
@@ -243,6 +247,10 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	// 先保存当前版本（回滚前备份），备份失败时返回 500 拒绝执行恢复
 	if _, err = h.saveVersion(remotePath, cfg.UploadsDir); err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "恢复前备份失败: " + versionIDStr,
+		})
 		h.logger.Error("恢复版本前备份失败", "file_name", remotePath, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复版本前备份失败，已中止"}, http.StatusInternalServerError)
 		return
@@ -251,6 +259,10 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	// 拷贝版本文件到目标位置
 	src, err := os.Open(verFile)
 	if err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "打开版本文件失败: " + versionIDStr,
+		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "打开版本文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -258,16 +270,28 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	dst, err := os.Create(targetPath)
 	if err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "创建目标文件失败: " + versionIDStr,
+		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目标文件失败"}, http.StatusInternalServerError)
 		return
 	}
 	defer dst.Close()
 
 	if _, err = io.Copy(dst, src); err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "恢复文件失败: " + versionIDStr,
+		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "恢复文件失败"}, http.StatusInternalServerError)
 		return
 	}
 	if syncErr := dst.Sync(); syncErr != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "同步文件失败: " + versionIDStr,
+		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "同步文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -275,11 +299,19 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	// 更新 checksum
 	checksum, err := FileChecksum(targetPath)
 	if err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "计算文件校验和失败: " + versionIDStr,
+		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "计算文件校验和失败"}, http.StatusInternalServerError)
 		return
 	}
 	h.checksumStore.Set(remotePath, checksum)
 
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "version_restore", ObjectType: "file", Object: remotePath,
+		Result: AuditResultSuccess, Detail: "version_id=" + versionIDStr,
+	})
 	h.logger.Info("文件版本已恢复", "file_name", remotePath, "version_id", versionIDStr)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("已恢复版本 %s", versionIDStr), Checksum: checksum}, http.StatusOK)
 }
@@ -312,8 +344,16 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := os.Remove(verFile); err != nil {
 		if os.IsNotExist(err) {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: "version_delete", ObjectType: "file", Object: remotePath,
+				Result: AuditResultError, Detail: "版本文件不存在: " + versionIDStr,
+			})
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "版本文件不存在"}, http.StatusNotFound)
 		} else {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: "version_delete", ObjectType: "file", Object: remotePath,
+				Result: AuditResultError, Detail: "删除版本文件失败: " + versionIDStr,
+			})
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "删除版本文件失败"}, http.StatusInternalServerError)
 		}
 		return
@@ -323,6 +363,10 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 	verKey := fmt.Sprintf("__version__/%s/%s", remotePath, versionIDStr)
 	h.checksumStore.Delete(verKey)
 
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "version_delete", ObjectType: "file", Object: remotePath,
+		Result: AuditResultSuccess, Detail: "version_id=" + versionIDStr,
+	})
 	sendJSONResponse(w, UploadResponse{Success: true, Message: "版本已删除"}, http.StatusOK)
 }
 

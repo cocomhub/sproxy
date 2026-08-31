@@ -60,25 +60,45 @@ type renameOpCtx struct {
 func executeRename(ctx renameOpCtx) error {
 	ctx.logger.InfoContext(ctx.ctx, "开始重命名", "from", ctx.fromPath, "to", ctx.toPath)
 	if _, err := os.Stat(ctx.fromPath); os.IsNotExist(err) {
+		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
+			Action: "rename", ObjectType: "file", Object: ctx.from,
+			Result: AuditResultError, Detail: "源文件不存在",
+		})
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
 		return err
 	}
 	// TODO: 此处存在 TOCTOU 竞态窗口（Stat 与 Rename 之间），后续优化为原子操作
 	if _, err := os.Stat(ctx.toPath); err == nil {
+		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
+			Action: "rename", ObjectType: "file", Object: ctx.from,
+			Result: AuditResultDenied, Detail: "目标路径已存在: " + ctx.to,
+		})
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
 		return err
 	}
 	if !verifyFileWithChecksum(ctx.fromPath, ctx.expectedChecksum) {
+		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
+			Action: "rename", ObjectType: "file", Object: ctx.from,
+			Result: AuditResultDenied, Detail: "checksum 不匹配",
+		})
 		ctx.logger.WarnContext(ctx.ctx, "rename checksum 校验失败", "from", ctx.from)
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: errMsgSrcChecksumFailed}, http.StatusBadRequest)
 		return fmt.Errorf("checksum mismatch")
 	}
 	if err := os.MkdirAll(filepath.Dir(ctx.toPath), 0755); err != nil {
+		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
+			Action: "rename", ObjectType: "file", Object: ctx.from,
+			Result: AuditResultError, Detail: "创建父目录失败: " + ctx.to,
+		})
 		ctx.logger.ErrorContext(ctx.ctx, errMsgCreateParentDirFailed, "to", ctx.to, "error", err.Error())
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: errMsgCreateParentDirFailed}, http.StatusInternalServerError)
 		return err
 	}
 	if err := atomicRename(ctx.fromPath, ctx.toPath); err != nil {
+		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
+			Action: "rename", ObjectType: "file", Object: ctx.from,
+			Result: AuditResultError, Detail: "重命名失败: " + ctx.to,
+		})
 		ctx.logger.ErrorContext(ctx.ctx, "重命名失败", "from", ctx.from, "to", ctx.to, "error", err.Error())
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
 		return err
@@ -138,6 +158,10 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, op BatchRenameOp,
 		return result
 	}
 	h.checksumStore.Rename(from, to)
+	h.RecordAudit(ctx, AuditEvent{
+		Action: "rename", ObjectType: "file", Object: from,
+		Result: AuditResultSuccess, Detail: "to=" + to,
+	})
 	logger.InfoContext(ctx, "文件已重命名", "from", op.From, "to", op.To)
 	return BatchOperationResult{
 		Filename: op.From + " -> " + op.To,
@@ -216,6 +240,10 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "rename", ObjectType: "file", Object: from,
+		Result: AuditResultSuccess, Detail: "to=" + to,
+	})
 	logger.InfoContext(r.Context(), "文件已重命名", "from", from, "to", to, "checksum", expectedChecksum)
 	sendJSONResponse(w, UploadResponse{
 		Success:  true,

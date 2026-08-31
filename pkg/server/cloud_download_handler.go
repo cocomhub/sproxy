@@ -208,9 +208,17 @@ func (h *Handlers) cloudCancelTask(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
 		}
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "cloud_cancel", ObjectType: "task", Object: id,
+			Result: AuditResultError, Detail: err.Error(),
+		})
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
 		return
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "cloud_cancel", ObjectType: "task", Object: id,
+		Result: AuditResultSuccess,
+	})
 	sendJSONResponse(w, map[string]string{"status": "cancelled"}, http.StatusOK)
 }
 
@@ -218,9 +226,17 @@ func (h *Handlers) cloudCancelTask(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) cloudDeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.cloudMgr.DeleteTask(id); err != nil {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "cloud_delete", ObjectType: "task", Object: id,
+			Result: AuditResultError, Detail: err.Error(),
+		})
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusNotFound)
 		return
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "cloud_delete", ObjectType: "task", Object: id,
+		Result: AuditResultSuccess,
+	})
 	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
 
