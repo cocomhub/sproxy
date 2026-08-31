@@ -375,15 +375,22 @@ func TestDeleteTask(t *testing.T) {
 
 func TestQuota_ReconcileOnComplete_Pull(t *testing.T) {
 	quota := newMockQuota(0)
-	mgr := newTestManager(t, quota, nil, nil, nil)
+	// 用阻塞 executor：任务在 Run 内阻塞（不会立即对账），使"创建时预留占位"断言
+	// 确定成立（而非依赖 SubmitAndStart 返回后 goroutine 尚未完成的时序）。
+	// release 后返回 completed（1 文件 5 字节），对账应收敛到 5。
+	exec := newBlockingMockExecutor()
+	mgr := newTestManager(t, quota, nil, exec, nil)
 
 	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "pull", Remote: "r1", Src: ""})
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 等 Run 真正开始（已拿信号量）后再断言占位，杜绝"任务已完成/未启动"竞态。
+	<-exec.started
 	if quota.Usage() != syncReservePlaceholder {
 		t.Fatalf("创建时应预留占位 %d，got %d", syncReservePlaceholder, quota.Usage())
 	}
+	exec.release()
 	waitForStatus(t, mgr, task.ID, "completed", 5*time.Second)
 	// 完成后按 BytesDone 对账：只预留实际 5 字节
 	if quota.Usage() != 5 {
