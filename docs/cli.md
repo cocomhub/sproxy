@@ -249,7 +249,7 @@ webrtc 打洞直连在对称 NAT 下需要 TURN 中继。以下命令均支持�
 | 参数 | 说明 |
 |------|------|
 | `--turn-rest <url>` | TURN REST API 短期凭证端点（如 `https://turn.example.com/turn`）。REST 优先于静态 `--turn-user`/`--turn-pass` |
-| `--turn-rest-user <user>` | REST API 认证用户名（透传给服务端） |
+| `--turn-rest-user <user>` | REST API 认证用户名（透传给服务端）。**必填**：配 `--turn-rest` 时缺省会命令终止 |
 | `--turn-rest-service <svc>` | 可选 `service` 参数（透传给服务端，如区分 realm/service） |
 
 - 协议：首次建立 webrtc 连接前惰性拉取 `GET {url}?username=<user>[&service=<svc>]`，
