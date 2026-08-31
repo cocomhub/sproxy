@@ -550,10 +550,9 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--token`/`--relay-toke
 | **concurrent** | 竞态检测 | 各 `_test.go` 中含 `sync.WaitGroup` 的测试 |
 
 ### 已知的技术债务
-- `cmd/sproxy/root.go` 中 `runServer` 的信号处理 goroutine 在 `ListenAndServe` 失败时泄漏（`for sig := range signalChan` 永不退出）
-- `test/e2e_test.go` 的 `findModuleRoot` 用文件系统遍历定位 `go.mod`，与已有的 `runtime.Caller` 方案冗余
-- `pkg/tunnel/mux/mux.go` 中的 goroutine 在极端情况下可能泄漏（`retransmitLoop` 因 `releaseStream` vs `closeWithError` 竞争导致）
-- `pkg/server/handlers.go` 中的 `parseDuration` 辅助函数可被 `time.ParseDuration` 替代（用于兼容两种格式的临时桥接）
+- `pkg/server/rename_handler.go:66` TOCTOU 竞态窗口（Stat 与 Rename 之间，后续优化原子）
+- `pkg/server/cloud_download.go:791` URL→ID O(n) 遍历（数百 URL 时建索引）
+- `pkg/server/config_api.go:199` rateLimiter.UpdateConfig 热更新未接线（TODO）
 
 <!-- superpowers-zh:begin (do not edit between these markers) -->
 # Superpowers-ZH 中文增强版

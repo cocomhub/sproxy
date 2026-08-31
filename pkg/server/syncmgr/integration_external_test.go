@@ -151,9 +151,12 @@ func TestManager_RealExecutor_Pull(t *testing.T) {
 
 // TestManager_RealExecutor_Cancel 通过 Manager 取消执行中的真实同步任务。
 func TestManager_RealExecutor_Cancel(t *testing.T) {
-	// GET /api/files 阻塞，使 pull 任务停在枚举阶段（syncing）
+	// GET /api/files 阻塞，使 pull 任务停在枚举阶段（syncing）。
+	// execStarted 是「executor 已进入远程枚举」的确定性信号：blocking GET /api/files
+	// handler 首次被调用即 close，替代 waitForStatus("syncing") 固定轮询（死等必然 flake）。
 	blockCh := make(chan struct{})
-	srv := newBlockingServer(t, newBlockingListMux(blockCh))
+	execStarted := make(chan struct{})
+	srv := newBlockingServer(t, newBlockingListMux(blockCh, execStarted))
 	dir := t.TempDir()
 
 	mgr := syncmgr.NewManager(dir, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
@@ -166,7 +169,15 @@ func TestManager_RealExecutor_Cancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForStatus(t, mgr, task.ID, "syncing", 5*time.Second)
+	// 确定性等待 executor 开始枚举（等价于任务进入 syncing），而非固定 5s 死等。
+	select {
+	case <-execStarted:
+	case <-time.After(10 * time.Second):
+		if st := mgr.Get(task.ID); st != nil {
+			t.Fatalf("executor 未在 10s 内开始枚举；任务状态 = %q", st.Status)
+		}
+		t.Fatal("executor 未在 10s 内开始枚举；任务不存在")
+	}
 	if err := mgr.CancelTask(task.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -174,9 +185,19 @@ func TestManager_RealExecutor_Cancel(t *testing.T) {
 }
 
 // newBlockingListMux 返回 GET /api/files 阻塞直到 blockCh 关闭或 ctx 取消的 mux。
-func newBlockingListMux(blockCh chan struct{}) *http.ServeMux {
+// hitCh（可 nil）在 handler 被调用时 close 一次——这是 executor 已开始枚举（ListDir
+// 已进入任务执行路径）的**确定性信号**，供 TestManager_RealExecutor_Cancel 用
+// select 等待替代固定 waitForStatus("syncing") 轮询（CI -race+cover 下死等必然偶发超时）。
+func newBlockingListMux(blockCh chan struct{}, hitCh chan struct{}) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/files", func(w http.ResponseWriter, r *http.Request) {
+		if hitCh != nil {
+			select {
+			case <-hitCh:
+			default:
+				close(hitCh) // 首次调用即报到（仅 close 一次）
+			}
+		}
 		select {
 		case <-r.Context().Done():
 		case <-blockCh:

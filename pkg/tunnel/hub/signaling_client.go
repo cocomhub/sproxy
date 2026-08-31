@@ -208,7 +208,7 @@ func (s *HubSignaler) poll(ctx context.Context, peer string, kind SignalKind) ([
 	return msgs, nil
 }
 
-// SendOffer 向对端 to 发送 Offer SDP。
+// SendOffer 向对端 to 发送 Offer SDP（cand 为 trickle 预留，当前恒传空串）。
 func (s *HubSignaler) SendOffer(to string, sdp string) error {
 	return s.post(s.baseCtx(), SignalOffer, to, sdp, "")
 }
@@ -220,7 +220,7 @@ func (s *HubSignaler) WaitOffer(ctx context.Context) (string, string, error) {
 	return s.waitSignal(ctx, SignalOffer)
 }
 
-// SendAnswer 向对端 to 发送 Answer SDP。
+// SendAnswer 向对端 to 发送 Answer SDP（cand 为 trickle 预留，当前恒传空串）。
 func (s *HubSignaler) SendAnswer(to string, sdp string) error {
 	return s.post(s.baseCtx(), SignalAnswer, to, sdp, "")
 }

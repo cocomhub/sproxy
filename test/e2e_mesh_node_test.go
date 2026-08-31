@@ -193,7 +193,12 @@ func TestE2E_MeshNode_RelayReachable(t *testing.T) {
 }
 
 // TestE2E_MeshNode_Discovery 验证 mesh node 自动对等发现：两个 mesh node 启动后，
-// node-a 自动发现 node-b（经 hub 节点列表）并 webrtc 直连保持（进程级观测 stderr 日志）。
+// node-a 自动发现 node-b（经 hub 节点列表）并 webrtc 直连保持。
+// 就绪判定：进程级 stderr 观测（出现 "mesh 自动对等直连建立" + peer=e2e-disc-b）。
+// 说明：mesh node 的 DiscoveryPeers 观测通道是产品内确定性信号，但本测试是二进制级
+// E2E —— DiscoveryPeers 不通过 CLI 暴露给子进程，故保留 stderr 轮询（确定性富余量
+// 依赖 DiscoveryPeers 语义已在本包其他测试覆盖）；此处用较短的 20s 上限并在失败时
+// 打印 stderr，避免把 flake 吞掉。
 func TestE2E_MeshNode_Discovery(t *testing.T) {
 	hubURL, ak, sk, hubCleanup := startHubSPROXY(t)
 	defer hubCleanup()
@@ -261,7 +266,9 @@ func TestE2E_MeshNode_ServiceAccess(t *testing.T) {
 		"--discover-interval", "1s", "--gateway-addr", "127.0.0.1:18086")
 	defer cleanupSvc()
 
-	// 等 node-ap 自动直连 node-svc（进程级 stderr 观测，≤20s）。
+	// 等 node-ap 自动直连 node-svc（进程级 stderr 观测，≤20s）。说明同
+	// TestE2E_MeshNode_Discovery：二进制级 E2E 无法经 CLI 暴露 DiscoveryPeers 信号，
+	// 保留 stderr 轮询（确定性富余量由 DiscoveryPeers 的产品语义覆盖）。
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) &&
 		(!strings.Contains(stderrAP.String(), "mesh 自动对等直连建立") || !strings.Contains(stderrAP.String(), "peer=e2e-svc")) {

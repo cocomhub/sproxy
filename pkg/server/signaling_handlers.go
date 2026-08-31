@@ -183,7 +183,8 @@ type signalError struct {
 func (e *signalError) Error() string { return e.msg }
 
 // handleSignalPost 处理 POST /api/signal/{kind}：把一条信令消息投递到目标 peer 收件箱。
-// kind ∈ offer|answer|candidate。
+// kind ∈ offer|answer|candidate（candidate 为 trickle ICE 预留注入点，当前 ICE 全
+// 内联 SDP，未见生产 candidate 消息——保留端点兼容旧对端与未来增量）。
 // 身份绑定：msg.From 必须等于调用方声明的 node-id（X-Node-ID 头），且已注册。
 func (b *SignalBroker) handleSignalPost(w http.ResponseWriter, r *http.Request, kind hub.SignalKind) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxSignalBodyBytes)
