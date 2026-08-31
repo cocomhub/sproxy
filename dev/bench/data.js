@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788135663255,
+  "lastUpdate": 1788135915880,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -314226,6 +314226,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1644598 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "863f84a26038b61d851679062a91d0e1b1ec8a3d",
+          "message": "feat: P2 虚拟 IP / 子网分配（阶段 4 工作项 1 完整：hub 分配+出口 NAT+mesh 路由+CLI+E2E） (#134)\n\n* feat: P2 hub 侧虚拟 IP 分配与下发（子任务 A）\n\n- pkg/tunnel/hub/vip.go: Allocator 接口 + hubAllocator 递增分配（CGNAT 默认\n  100.64.0.0/10，分配从 .2 起），Release 回收 + 快照重建（ReserveSnapshot/\n  PreloadAllocator），IPv4 限定（config.Validate 拦截 IPv6）\n- NodeInfo.VirtualIP: registerNode 瞬态过滤后分配（disc-/mesh-/p2p- 跳过），\n  info.Mesh 显式填充供释放定位\n- REG_OK 能力位下发: CapabilityVirtualIP，节点声明后 REG_OK:<secret>:<vip>\n  携带本节点虚拟 IP（旧客户端不声明能力收到旧格式，完全向后兼容）\n- MeshRouteTable: 显式移除（Remove）触发 VIP 释放回调；连接断开\n  （RemoveIfOwned）不释放（node-id 生命周期内稳定绑定，消除重复分配竞态）；\n  VirtualIPOf/NodeByVirtualIP 反查（mesh 隔离）\n- persist: NodeSnap.VirtualIP 落盘（omitzero）+ 快照恢复 + 分配表重建\n- /api/hub/nodes 返回 virtual_ip；config.hub.virtual_subnet 三段式（IPv4 校验）\n- 测试: 分配唯一性/稳定复用/Release 回收/子网耗尽/快照重建/并发 -race/\n  瞬态过滤/REG_OK 携带 VIP/断开不释放/踢出回收/mesh 隔离/往返落盘\n\n* fix: P2 hub 虚拟 IP 对抗式审查修复（I-1/S-1/S-2/S-4/S-5）\n\n对抗式审查（commit 0f3a9a3）发现全部修复：\n- I-1 竞态：VIP 释放闭包改为 HasInMesh 守卫（同 mesh 并发重注册不释放，\n  跨 mesh 移动释放旧归属），补并发 Remove+registerNode 不变量测试\n- S-1：reserveLocked 拒绝偏移 <2（网络/网关地址不可被快照保留）\n- S-2：跨 mesh 重注册释放旧 mesh 虚拟 IP，补回归测试\n- S-4：isTransientNodeID 收紧为完整形态 <prefix>-<base>-<16hex>，稳定节点名\n  （mesh-node 回落字面量）不再被误判瞬态而静默失效\n- S-5：root.go 防御兜底覆盖 IPv6（避免 NewHubAllocator panic）\n- 补测试：/31 /32 子网耗尽、REG_OK::vip 端到端（仅声明 virtual-ip）\n\n* feat: P2 出口侧虚拟 IP NAT 拨号策略与装配（子任务 B）\n\n- pkg/tunnel/relay/leaf_vip.go: NewVirtualIPDialPolicy——命中顺序 I-1：\n  ServiceAddrs 精确匹配优先（真实 CGNAT 流量逃生口）→ 虚拟子网分支\n  （==selfVIP 且端口 ∈ 白名单改写 127.0.0.1:<port> 放行；==self 但端口不在\n  白名单/!=self 拒绝，C-1 安全红线）→ 回落 NewDialPolicy 公网/CIDR。\n  端口白名单 = 显式 allowPorts ∪ serviceAddrs 宣告端口。IPv6 子网 panic。\n- AutoRegister 声明 CapabilityVirtualIP 并解析 REG_OK:<secret>:<vip>，\n  TempRegistration.VirtualIP 供出口装配 selfVIP；mesh node 常驻拿 VIP，\n  瞬态拨号身份（hub 不分配）为无效 Addr（fail-closed）。\n- NodeConfig 增 VirtualSubnet/VIPAllowPorts；runNodeOnce 用\n  NewVirtualIPDialPolicy 装配（默认 CGNAT 子网，parseVirtualSubnet 兜底）。\n- cmd/sclient: relay start / p2p listen 装配虚拟 IP 拨号策略（selfVIP 由\n  REG_OK 下发；p2p 在注册/重注册后更新 serveOpts）。\n- 测试: NewVirtualIPDialPolicy 全场景（逃生口/白名单/拒绝/selfVIP 无效/\n  IPv6 拒绝/CIDR 回落）、AutoRegister 拿 VIP 端到端、p2p serveOpts 装配。\n\n* fix: P2 出口虚拟 IP 对抗式审查修复（F-1/F-2/F-3/F-4/F-5 + 测试缺口）\n\n- F-1（Important 并发）：p2p.go serveOpts 数据竞争——重注册分支写 serveOpts\n  而已接受连接的 serve goroutine 闭包并发读；spawn 前快照 opts := serveOpts\n  （每条连接固定其建立时刻的策略）\n- F-2：NewVirtualIPDialPolicy 内集中 Warn——selfVIP 有效但不在策略子网内时\n  告警（自定义 hub.virtual_subnet 场景功能静默失效的缓解）\n- F-3/F-4/F-5：文档化端口白名单语义（宣告端口即开放本机同端口）、自身 VIP\n  上宣告的逃生口遮蔽、未宣告 CGNAT 地址 fail-closed\n- 测试缺口：非法 allowPorts（0/65536/负数）跳过、serviceAddrs 端口提取失败\n  跳过、主机名目标不因 selfVIP 白名单被改写（防 DNS 绕过）\n\n* feat: P2 mesh 虚拟 IP 路由 + CLI（子任务 C）\n\n- mesh/vip.go: VipTable（认证数据源防注入）+ Reconcile（hub 权威原子重建）+\n  AddVerified（mDNS 校验确定性一致）+ deterministicAllocator（无 hub 回落）+\n  ParseVirtualAddr/IsVirtualAddr\n- mesh/discovery.go: ListHubNodes 带 virtual_ip；发现循环 Reconcile 重建 vipTable\n- mesh/gateway.go: 网关虚拟 IP 路由分支（req.Peer 空 + Addr ∈ 子网 → 查表定位）\n- mesh/mdns.go: TXT vip= 广播/解析 + 签名内容含 vip\n- mesh/mdns_node.go: mDNS selfVIP 确定性分配 + AddVerified 学习 + 拨号策略装配\n- client: HubNodeInfo.VirtualIP + ListHubNodes 解析；NewStaticMeshTargetRefresher\n  （虚拟 IP 固定目标）\n- cmd/sclient: mesh connect <vip>:<port>（meshVIPDial 包装 + 节点列表解析）、\n  mesh status 显示 virtual_ip、mesh node --virtual-subnet/--vip-allow-port\n\n安全闭环（协调者 MEDIUM）：VipTable.Add 冲突拒绝 + hub 模式 Reconcile 原子重建\n（不依赖谁先声明）+ mDNS 模式 AddVerified 校验与确定性分配一致（防自声明抢占）\n+ 子网外地址拒绝；补回归测试。\n\n* fix: P2 mesh 虚拟 IP 对抗式审查修复（M-1/S-1~S-4/R-1/R-2/R-5）\n\n- M-1（Important）：mesh connect 加 --virtual-subnet flag（默认 CGNAT，可覆盖\n  自定义 hub.virtual_subnet），消除自定义子网下 VIP 寻址静默失效\n- S-1：mDNS 模式 mesh connect <vip>:<port> --mdns 支持（AddVerified 校验确定性\n  后解析 node-id 直连）；导出 mesh.NewDeterministicAllocator\n- S-2：mDNS vipTable 离场清理（Nodes/RemoveByNode，离场对端映射移除，自身保留）\n- S-3：补 gateway 虚拟 IP 路由/未知拒绝、mDNS TXT vip 编解码+签名往返、\n  Reconcile 并发、deterministicAllocator /31//32//30 边界测试\n- S-4：mesh node 装配时 selfVIP 不在配置子网内显式告警\n- R-1/R-2：gateway VIP 分支测试、CLI vipTable.Add 冲突 fail-closed 报错\n- R-5：mDNS TXT vip 字段升级敏感性文档化\n\n* test: P2 虚拟 IP 端到端 E2E（mesh connect <vip> 闭环，子任务 D）\n\nhub 为 node-svc 分配虚拟 IP；mesh connect <vip>:<echoPort>（--webrtc=false 走 hub\n中继）→ 出口 NewVirtualIPDialPolicy 识别 ==selfVIP 且端口 ∈ 白名单 → 改写本机\necho 服务回显。验证 AD-6 数据通路完整。\n\n* test: P2 C-1 安全红线 E2E——mesh connect <vip>:未宣告端口被出口拒绝\n\n未宣告端口 9999 经虚拟 IP 拨号被出口 NewVirtualIPDialPolicy 拒绝（无 echo 回显），\n防 mesh 触达未宣告的网关 18085/SOCKS/agent socket 等 loopback 服务。\n\n* fix: P2 聚焦整 diff 审查闭环（S-1/S-2/R-1~R-5）\n\nS-1：relay start / p2p listen 贯通 --virtual-subnet（默认 CGNAT，可匹配自定义\n  hub.virtual_subnet），消除自定义子网下这两类出口 VIP 拨号静默失效；补\n  parseVIPSubnetFlag / flag 存在测试\nS-2：端口白名单收紧——仅当服务 host 为 loopback/本机 IP 时其端口才进入白名单；\n  远程 LAN 宣告（--service db:192.168.1.10:5432）端口不自动开放（防意外暴露本机\n  同端口），需 --vip-allow-port 显式授权；补远程拒绝 + localhost 放行测试\nR-1：hubAllocator.reserveLocked 拒绝广播地址（偏移 ≥maxHost，与 <2 对称）\nR-2：mDNS 无 hub 启动对确定性分配碰撞风险显式告警\nR-3：Release 注释文档化断连节点 VIP 运行期不回收/重启自然回收\nR-4：mesh connect --virtual-subnet 仅 isVIP 路径校验（服务名寻址不受非法值拦截）\nR-5：快照重建冲突从 Warn 提升为显式 Error（冲突条目不保留，供运维定位）\n\n验证：相关包 go test -race 全绿 + lint 0 + build-all + check-loopback + E2E 通过。\n\n* fix: P2 整体代码审核闭环（发现 1/2）\n\n发现 1（E2E C-1 加固）：TestE2E_MeshConnect_VirtualIP_UnannouncedPortRejected 改为\n在出口节点本机另起真实 hidden 监听器（不宣告端口），先验证直接 127.0.0.1:<port>\n可达，再断言经 <vip>:<port> 不可达——若策略误放行会 echo 成功，测试立即失败，\n锁定的是策略拒绝而非端口不存在。\n\n发现 2（Remove/re-register TOCTOU 加固）：VIP 释放回调加 LookupInfo 双保险——\n同 mesh 重注册且 VirtualIP 已写回路由表时不释放（不破坏 S-2 跨 mesh 释放）；\n补 TestHubServer_RemoveReRegister_NoDupVIPInRouteTable 锁定路由表侧两节点不共享\n同一 VIP 不变量（分配器侧已有 NoDupVIP 测试）。\n\n* fix: P2 meshVIPDial 与网关选路装配顺序修正（整体审核确认）\n\nisVIP && --gateway 同时存在时，原顺序 meshGatewayDial 覆盖 meshVIPDial，导致\n运行时 vip → node-id 重新解析不执行（目标节点 VIP 变化时解析不到最新 node-id，R-5）。\n\n改为先装配网关选路（内层），再包 meshVIPDial（最外层）——虚拟 IP 目标先解析\nnode-id，再回落网关复用已建链路或 mesh.Dial。补 TestMeshVIPDial_WrapsGatewayDial\n锁定组合装配（网关 base 收到解析后的 target.Node）。",
+          "timestamp": "2026-08-31T08:04:08+08:00",
+          "tree_id": "f50a8ac5badc30e0fcb24aabba7b003c1a8183f6",
+          "url": "https://github.com/cocomhub/sproxy/commit/863f84a26038b61d851679062a91d0e1b1ec8a3d"
+        },
+        "date": 1788135906619,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 948.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1241793 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 948.5,
+            "unit": "ns/op",
+            "extra": "1241793 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1241793 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1241793 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 955.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1256942 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 955.3,
+            "unit": "ns/op",
+            "extra": "1256942 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1256942 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1256942 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 943.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1260560 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 943.4,
+            "unit": "ns/op",
+            "extra": "1260560 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1260560 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1260560 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 999.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1267978 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 999.8,
+            "unit": "ns/op",
+            "extra": "1267978 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1267978 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1267978 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 944,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1253043 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 944,
+            "unit": "ns/op",
+            "extra": "1253043 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1253043 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1253043 times\n4 procs"
           }
         ]
       }
