@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788136242332,
+  "lastUpdate": 1788137154785,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -314510,6 +314510,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1254644 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b7fad2b530acfd2e87e5c955fba5a70d59048622",
+          "message": "fix(sync): syncmgr 测试统一确定性 started 信号去 flake（TestCancelTask_Queued 等短死等） (#136)\n\n* fix(sync): syncmgr 测试统一确定性 started 信号去 flake（TestCancelTask_Queued 等短死等）\n\nTestCancelTask_Queued / TestCancelTask_Running / TestSubmitAndStart_StateMachine /\nTestRecoverTasks_RestartSyncing 原来用 waitForStatus(..., \"syncing\", 5s) 短死等阻塞\nmock executor 的任务进入 syncing，CI -race+cover 下 goroutine 启动/状态流转慢，必然\n偶发超时（ubuntu CI 已复现 manager_test.go:280）。\n\n修法：与 TestConcurrency_Semaphore 一致，用 mock executor 的 started channel（Run\n被调用时 close 一次）确定性等待 taskA 已拿信号量、进入执行，新增 waitStarted 辅助；\n终态（completed/cancelled/failed）仍保留 waitForStatus（有 release/宽限，稳健）。\n\n另修复 StateMachine 测试中预先存在的 -race 数据竞争：SubmitAndStart 返回内部共享\n指针，后台 goroutine 加锁写 syncing，测试无锁读 task.Status 偶发被 race 捕获；改用\nmgr.Get 加锁深拷贝快照，并放宽为 pending 或 syncing（异步启动后两者皆合法）。\n\n纯测试改动，不碰生产代码。验证：-race -count=10 目标测试稳定；全包 -race 通过；\ngolangci-lint 0；make check-loopback 通过；go vet / gofmt 干净。\n\n* fix(sync): TestConcurrency_Semaphore/Queued 先等 A 拿信号量再提交 B（消除 B 抢先时序竞态）\n\nCI SonarQube 的 test-cover（-cover 插桩慢负载）复现 TestConcurrency_Semaphore flake：\n`MaxConcurrent=1 时第二个任务应排队 pending，got \"syncing\"`。根因不是 manager 竞态\n（started 信号在拿到信号量之后才 close，无过早释放），而是**测试时序**：A/B 都先提交时，\n两个 goroutine 竞争唯一信号量，B 可能先抢到（goroutine 调度非确定）→ started 被 B 的\nRun 关闭，此时断言 B pending 即失败。\n\n修法：先提交 A，用 started 信号等 A 的 Run 被调用（= A 已持有唯一信号量、进入 syncing），\n**再**提交 B——B 必排队 pending（真正无时序依赖）。TestCancelTask_Queued 同样存在该\n隐患（B 先抢到会让\"B 排队期间应保持 pending\"误判），一并改为先等 A 再提交 B。\n\n纯测试改动。验证：-cover -count=20 目标测试稳定；-race -count=10 稳定；全包 -race 通过；\ngolangci-lint 0；check-loopback / go vet / gofmt 干净。",
+          "timestamp": "2026-08-31T08:41:37+08:00",
+          "tree_id": "394922bc801875686418cac312ed2dd34b938500",
+          "url": "https://github.com/cocomhub/sproxy/commit/b7fad2b530acfd2e87e5c955fba5a70d59048622"
+        },
+        "date": 1788137147377,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 965.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1262056 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 965.8,
+            "unit": "ns/op",
+            "extra": "1262056 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1262056 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1262056 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 973.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1240183 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 973.3,
+            "unit": "ns/op",
+            "extra": "1240183 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1240183 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1240183 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 969.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1249364 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 969.9,
+            "unit": "ns/op",
+            "extra": "1249364 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1249364 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1249364 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 1027,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1240312 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 1027,
+            "unit": "ns/op",
+            "extra": "1240312 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1240312 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1240312 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 964.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1232797 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 964.5,
+            "unit": "ns/op",
+            "extra": "1232797 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1232797 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1232797 times\n4 procs"
           }
         ]
       }
