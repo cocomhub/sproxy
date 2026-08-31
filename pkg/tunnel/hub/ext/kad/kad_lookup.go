@@ -181,8 +181,24 @@ func (d *KademliaDHT) Bootstrap(_ context.Context, seeds []string) error {
 	return nil
 }
 
-// Close cleans up resources.
+// EnablePersistence 启用 k-bucket 持久化（委托 Kademlia）：先 Load 恢复已有快照
+// （缓存语义，路由表仍 hub 权威），此后 Register/Remove 变更经去抖异步落盘。
+// path 为空是 no-op（零行为变更）。Load 的 I/O 错误（非损坏/缺失类）原样返回。
+func (d *KademliaDHT) EnablePersistence(path string) error {
+	return d.kad.EnablePersistence(path)
+}
+
+// PersistFile 返回当前持久化文件路径（"" 表示持久化关闭）。
+func (d *KademliaDHT) PersistFile() string {
+	return d.kad.PersistFile()
+}
+
+// Close 同步落盘未持久化的 k-bucket 变更（去抖窗口内的最后变更不丢失），再清理
+// 资源。持久化关闭时是 no-op。
 func (d *KademliaDHT) Close() error {
+	if err := d.kad.FlushPersist(); err != nil {
+		return fmt.Errorf("kad: 关闭时持久化 k-bucket 失败: %w", err)
+	}
 	return nil
 }
 

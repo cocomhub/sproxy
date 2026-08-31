@@ -225,6 +225,44 @@ HTTP 服务。适用于跨网络服务暴露、集群间请求转发等场景。
 5. 每个请求通过 `http.Client` 转发到本地 `--local` 地址
 6. 响应通过隧道原路返回
 
+### TURN 中继（mesh / p2p / socks / udp / mesh node）
+
+webrtc 打洞直连在对称 NAT 下需要 TURN 中继。以下命令均支持「静态 TURN 凭据」与
+「动态 TURN REST 短期凭据」两种配置（互不排斥，REST 优先）：
+
+- `sclient mesh connect <service>` — 连接 mesh 服务（webrtc 直连优先，hub 中继回落）
+- `sclient p2p connect --peer <id> --tcp <addr>` — WebRTC 打洞直连对端
+- `sclient socks -l :port --exit <node>` — SOCKS 代理出口
+- `sclient udp map -l :udp --exit <node> --remote <host:port>` — UDP 端口映射
+- `sclient mesh node ...` — 常驻 mesh 节点（自动对等发现 + 本地网关）
+
+**静态 TURN（`--turn` 族）**
+
+| 参数 | 说明 |
+|------|------|
+| `--turn <url>...` | TURN 中继服务器地址（可重复/逗号分隔，如 `turn:relay.example.com:3478`） |
+| `--turn-user <user>` | TURN 用户名（静态密码模式，配 `--turn`/`--turn-pass` 使用） |
+| `--turn-pass <pass>` | TURN 密码（静态密码模式，配 `--turn`/`--turn-user` 使用） |
+
+**动态 TURN REST（`--turn-rest` 族，coturn 标准短期凭证）**
+
+| 参数 | 说明 |
+|------|------|
+| `--turn-rest <url>` | TURN REST API 短期凭证端点（如 `https://turn.example.com/turn`）。REST 优先于静态 `--turn-user`/`--turn-pass` |
+| `--turn-rest-user <user>` | REST API 认证用户名（透传给服务端）。**必填**：配 `--turn-rest` 时缺省会命令终止 |
+| `--turn-rest-service <svc>` | 可选 `service` 参数（透传给服务端，如区分 realm/service） |
+
+- 协议：首次建立 webrtc 连接前惰性拉取 `GET {url}?username=<user>[&service=<svc>]`，
+  响应 `{username: "<ttl>:<user>", password: "<base64(HMAC-SHA1)>", ttl: <秒>}` 透传为
+  ICE TURN 凭据；缓存至 TTL 到期前续期（单飞，并发首次只拉一次）。
+- 安全（fail-closed）：端点默认强推 `https://`；明文 `http://` 仅限 loopback（本机调试），
+  非 loopback 的 http 拒绝（否则凭据与 TURN 流量可被中间人读取）。URL / username /
+  service 长度上限 512 字符；响应 username 必须符合 coturn `TTL:user` 格式。非法配置
+  命令终止，不静默忽略。
+- 失败降级：REST 拉取失败时沿用仍有效的旧缓存；无有效缓存则回落静态凭据/仅 STUN，
+  日志告警但不 panic（回落 hub 中继不受影响）。
+- 未配置 `--turn-rest` 时相关命令行为不变（no-op）。
+
 ### genkey
 
 ```bash

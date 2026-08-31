@@ -68,6 +68,18 @@ access_keys:
 # 跳过证书校验（仅限 loopback hub，与 xfer_ca_file 互斥）。两者均未配置时用系统根池严格校验，
 # 服务端自签证书（auto_tls）握手报 x509 unknown-authority（fail-closed，不静默降级）。
 
+# ---- sclient 侧 TURN REST（CLI flag，非服务端配置键；mesh connect / p2p connect /
+# ---- socks / udp map / mesh node 支持）----
+# 动态 TURN REST 短期凭证（coturn 标准）：--turn-rest <url> --turn-rest-user <user>
+# [--turn-rest-service <svc>]（--turn-rest-user 必填：配 --turn-rest 时缺省会命令终止）。
+# 首次建立 webrtc 连接前惰性拉取
+# GET {url}?username=<user>[&service=<svc>] → {username: "<ttl>:<user>", password: <base64>, ttl}，
+# 缓存至 TTL 到期前续期；REST 优先于静态 --turn/--turn-user/--turn-pass，失败降级
+# 回落静态凭据（若有）/仅 STUN（不 panic）。
+# 安全（fail-closed）：端点默认强推 https；明文 http 仅限 loopback（本机调试）；URL/username/service
+# 上限 512 字符；响应 username 须符合 coturn "TTL:user" 格式。非法配置命令终止，不静默忽略。
+# 服务端侧无 TURN 相关配置（TURN 凭据只在 sclient 发起 webrtc 打洞时本地使用）。
+
 # 速率限制（默认关闭；enabled: true 时限制 tunnel handler）
 # rate_limit:
 #   enabled: false
@@ -136,6 +148,10 @@ access_keys:
 #   dht: ""                        # 节点发现表实现：""（默认）= 内置内存 DHT；"kad" = Kademlia（ext/kad，XOR 距离路由表）
 #                                   # 启用 kad 后注册节点喂入 DHT，/api/hub/nodes 合并 DHT 候选（路由表仍权威，DHT 只提供候选/发现）
 #   dht_seeds: []                  # DHT 引导种子节点地址（仅 dht: kad 时消费；空=不引导，预留多 hub 组网）
+#   dht_persist_file: ""           # kad DHT k-bucket 落盘路径（仅 hub.dht: kad 时消费；非空启用，重启恢复上次
+#                                   # 发现缓存不冷启动；空=关闭（默认，零行为变更）。快照只存 id/route_id/addr
+#                                   # （发现缓存无 secret），损坏/缺失/超限文件按空桶启动。路由表仍 hub 权威，
+#                                   # DHT 持久化是缓存语义。文件权限 0600，temp+rename 原子写）
 #   # hub 联邦（hub-to-hub peering，P1）：启用后周期拉取对端 hub 节点表（联邦候选），
 #   # /api/hub/nodes 合并（路由表权威 + DHT + 联邦候选，去重）；入站端点
 #   # /api/hub/federation/nodes（受 SproxySig 认证保护，fail-closed）供对端拉取。
@@ -154,6 +170,10 @@ access_keys:
 #   #   enabled: true
 #   #   interval: "30s"             # 出站拉取周期（默认 30s）
 #   #   timeout: "10s"              # 单次拉取超时（默认 10s）
+#   #   persist_file: ""            # 联邦候选节点表持久化文件路径（非空启用，重启后恢复上次同步的候选，
+#   #                               # 不冷启动；空=关闭（默认，零行为变更）。快照只存 id/addr/mesh
+#   #                               # （发现缓存无 secret），损坏/缺失/超限文件按空候选启动。文件权限 0600，
+#   #                               # temp+rename 原子写，同步去抖落盘）
 #   #   peers:                      # 对端 hub 列表（空=本 hub 仅作为被 peer，不主动拉取）
 #   #     - id: "hub-b"             # 对端 hub 唯一标识（日志/去重；为空回落 URL）。
 #   #                               # 应在整个联邦内全局唯一（通常用对端 node_id 或 URL）；

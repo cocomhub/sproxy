@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestFederationConfig_Defaults：联邦配置默认值（Interval 30s / Timeout 10s）。
@@ -259,5 +261,23 @@ func TestFederationConfig_Validate_DisabledIgnoresPeers(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("联邦关闭时 peers 遗留配置不应阻断: %v", err)
+	}
+}
+
+// TestFederationConfig_PersistFile：federation.persist_file 从 YAML 解析（装配链路：
+// root.go 把 cfg.Hub.Federation.PersistFile 传入 NewFederationClientWithPersist）。
+func TestFederationConfig_PersistFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fed-cands.json")
+	var cfg Config
+	data := []byte("hub:\n  federation:\n    enabled: true\n    persist_file: " + path + "\n")
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if cfg.Hub.Federation.PersistFile != path {
+		t.Fatalf("federation.persist_file 应解析为 %q, got %q", path, cfg.Hub.Federation.PersistFile)
+	}
+	// 未配置时缺省为空（持久化默认关闭，零行为变更）。
+	if got := Default().Hub.Federation.PersistFile; got != "" {
+		t.Fatalf("persist_file 缺省应关闭（空）, got %q", got)
 	}
 }

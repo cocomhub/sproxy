@@ -193,8 +193,27 @@ func runServer(cmd *cobra.Command, args []string) error {
 			// 装配 Kademlia 进 DHTRegistry（Active 返回最高优先级实现 = kad），
 			// 随后经 DHTRegistry.Active() 注入 HubServer/Handlers——registry 是
 			// 实际选择机制（非装饰性副作用）。
-			hub.RegisterDHT("kad", kad.NewDHTNode(dhtNodeID, nil, logger.With("component", "dht")), 10)
+			kadDHT := kad.NewDHT(dhtNodeID, nil, logger.With("component", "dht"))
+			// k-bucket 持久化（缓存语义，路由表仍 hub 权威）：配置
+			// hub.dht_persist_file 时启动 Load 恢复上次发现缓存（不冷启动），
+			// 后续 Register/Remove 变更经去抖异步落盘。文件缺失/损坏/超限按
+			// 空桶启动（kad.Load 语义）；Load 的其余 I/O 错误 fail-fast。
+			if cfg.Hub.DHTPersistFile != "" {
+				if perr := kadDHT.EnablePersistence(cfg.Hub.DHTPersistFile); perr != nil {
+					return fmt.Errorf("初始化 kad DHT 持久化失败: %w", perr)
+				}
+				logger.Info("kad DHT k-bucket 持久化已启用", "file", cfg.Hub.DHTPersistFile)
+			}
+			hub.RegisterDHT("kad", kadDHT, 10)
 			hubDHT = hub.DHTRegistry.Active()
+			// 停服时 flush 去抖窗口内未落盘的 k-bucket 变更（hubDHT.Close 委托
+			// kad.FlushPersist；内存 DHT 的 Close 是 no-op）。
+			// 审查 PR-3 M-1：flush 失败（写盘错误）记录 Error，不静默吞（禁止静默失败）。
+			defer func() {
+				if cerr := hubDHT.Close(); cerr != nil {
+					logger.Error("kad DHT 关停 flush 失败", "err", cerr)
+				}
+			}()
 			if len(cfg.Hub.DHTSeeds) > 0 {
 				// 多 hub DHT 组网未实现，种子暂不引导（kad.Bootstrap 现会把种子
 				// 当假 ID 节点插入路由表，污染发现列表）；预留配置，未来实现
@@ -211,6 +230,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// 拉取认证复用 SproxySig AccessKey（对端 hub 配置的 access_keys）；
 		// peer URL 为空回落默认 loopback（远程 peering 需显式配置，见
 		// Config.Validate）。联邦只提供发现/可达性，不改路由表状态。
+		// federation.persist_file 非空时启用候选持久化（重启后恢复上次同步的
+		// 候选节点，不冷启动；损坏/缺失文件按空候选启动）。
 		if cfg.Hub.Federation.Enabled {
 			peers := make([]hub.FederationPeer, 0, len(cfg.Hub.Federation.Peers))
 			for _, p := range cfg.Hub.Federation.Peers {
@@ -224,13 +245,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 				})
 			}
 			var ferr error
-			fedClient, ferr = hub.NewFederationClient(peers, cfg.Hub.Federation.Interval, cfg.Hub.Federation.Timeout, logger.With("component", "hub_federation"))
+			fedClient, ferr = hub.NewFederationClientWithPersist(peers, cfg.Hub.Federation.Interval, cfg.Hub.Federation.Timeout, logger.With("component", "hub_federation"), cfg.Hub.Federation.PersistFile)
 			if ferr != nil {
 				return fmt.Errorf("初始化 hub 联邦客户端: %w", ferr)
 			}
 			fedClient.Start(ctx)
 			defer fedClient.Close()
-			logger.Info("Hub 联邦已启用", "peers", len(cfg.Hub.Federation.Peers), "interval", cfg.Hub.Federation.Interval)
+			logger.Info("Hub 联邦已启用", "peers", len(cfg.Hub.Federation.Peers), "interval", cfg.Hub.Federation.Interval, "persist_file", cfg.Hub.Federation.PersistFile)
 		}
 		if cfg.Hub.Transports.WS.Enabled {
 			// S36：WS 升级路径固定为 /ws。hub.transports.ws.path 已废弃，
