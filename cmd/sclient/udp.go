@@ -86,6 +86,9 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 			if turnUser != "" || turnPass != "" {
 				webrtc.SetTURNCredential(turnUser, turnPass)
 			}
+			if err := applyTURNRESTFlags(cmd); err != nil {
+				return err
+			}
 
 			logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "udp")
 			svc, svcErr := factory.NewClient(cmd)
@@ -253,5 +256,6 @@ func newCmdUDPMap(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Confi
 	cmd.Flags().StringSlice("turn", nil, "TURN 服务器地址（可重复/逗号分隔）")
 	cmd.Flags().String("turn-user", "", "TURN 用户名")
 	cmd.Flags().String("turn-pass", "", "TURN 密码")
+	addTURNRESTFlags(cmd)
 	return cmd
 }

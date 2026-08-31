@@ -68,6 +68,9 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 			if turnUser != "" || turnPass != "" {
 				webrtc.SetTURNCredential(turnUser, turnPass)
 			}
+			if err := applyTURNRESTFlags(cmd); err != nil {
+				return err
+			}
 
 			// P2-配置3：通用参数配置回落（CLI > 配置文件 > 默认）。常驻节点不需要
 			// FileClient（避免 tunnel_key/InitError 拖垮），直接经 cfgSvc 回落。
@@ -164,5 +167,6 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 		"TURN 中继服务器地址（可重复/逗号分隔，如 turn:relay.example.com:3478）；需配合 --turn-user/--turn-pass，提升对称 NAT 下打洞成功率")
 	cmd.Flags().String("turn-user", "", "TURN 用户名（静态密码模式，配 --turn/--turn-pass 使用）")
 	cmd.Flags().String("turn-pass", "", "TURN 密码（静态密码模式，配 --turn/--turn-user 使用）")
+	addTURNRESTFlags(cmd)
 	return cmd
 }

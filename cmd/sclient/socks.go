@@ -75,6 +75,9 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 			if turnUser != "" || turnPass != "" {
 				webrtc.SetTURNCredential(turnUser, turnPass)
 			}
+			if err := applyTURNRESTFlags(cmd); err != nil {
+				return err
+			}
 
 			logger := slog.New(slog.NewTextHandler(ios.ErrOut, nil)).With("cmd", "socks")
 			// svc best-effort（取 access_key_secret / hub_url / node_id 回落；mDNS 无
@@ -209,5 +212,6 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 	cmd.Flags().StringSlice("turn", nil, "TURN 服务器地址（可重复/逗号分隔）")
 	cmd.Flags().String("turn-user", "", "TURN 用户名")
 	cmd.Flags().String("turn-pass", "", "TURN 密码")
+	addTURNRESTFlags(cmd)
 	return cmd
 }
