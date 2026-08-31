@@ -204,7 +204,8 @@ func fetchTURNRESTCredential() (*restCredential, error) {
 	}, nil
 }
 
-// redactURLQuery 返回 URL 的 scheme://host/path（剥离 query，防凭据落日志）。
+// redactURLQuery 返回 URL 的 scheme://host/path（剥离 query + 掩码 userinfo，
+// 防凭据/密码落日志——安全审查 MEDIUM：Redacted() 自动掩码嵌入的 userinfo）。
 func redactURLQuery(u *url.URL) string {
 	if u == nil {
 		return ""
@@ -212,7 +213,7 @@ func redactURLQuery(u *url.URL) string {
 	cu := *u
 	cu.RawQuery = ""
 	cu.Fragment = ""
-	return cu.String()
+	return cu.Redacted()
 }
 
 // redactCredential 返回凭据的脱敏形式（保留前缀 + 掩码，防完整值落日志）。
