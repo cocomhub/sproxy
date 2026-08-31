@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,5 +141,53 @@ func TestExecutor_RemoteURL_Invalid(t *testing.T) {
 	rc := syncmgr.RemoteConfig{Name: "r1", URL: "not-a-url", AccessKey: "ak", AccessKeySecret: strings.Repeat("a", 64)}
 	if _, err := exec.Run(context.Background(), task, rc); err == nil {
 		t.Fatal("非法 remote URL 应报错")
+	}
+}
+
+// TestExecutor_RetryableNetworkError 验证瞬时网络错误（连接被拒绝）被判别为可重试：
+// RunResult.Retryable=true、Status=failed（阶段 6 自动重试的判别依据）。
+func TestExecutor_RetryableNetworkError(t *testing.T) {
+	// 监听后立即关闭端口 → 连接被拒绝（瞬时网络错误）
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	dir := t.TempDir()
+	exec := NewExecutor(dir, discardLogger())
+	task := &syncmgr.SyncTask{ID: "t1", Direction: string(syncmgr.DirectionPull), Remote: "r1", Src: "", Dst: "", ConflictPolicy: "skip"}
+	res, err := exec.Run(context.Background(), task, remoteConfig("http://"+addr))
+	if err == nil {
+		t.Fatal("连接被拒绝应返回错误")
+	}
+	if res == nil {
+		t.Fatal("应返回 RunResult（引擎产出 failed 状态）")
+	}
+	if res.Status != "failed" {
+		t.Fatalf("连接失败状态应为 failed，got %q", res.Status)
+	}
+	if !res.Retryable {
+		t.Fatalf("网络错误应标记 Retryable=true（连接拒绝=瞬时），got Retryable=%v error=%q", res.Retryable, res.Error)
+	}
+}
+
+// TestExecutor_BusinessErrorNotRetryable 验证业务失败（源路径不存在）不被判为可重试：
+// Retryable=false（确定性错误，重试不会成功）。
+func TestExecutor_BusinessErrorNotRetryable(t *testing.T) {
+	srv, _ := syncmock.NewServer(t)
+	dir := t.TempDir()
+	exec := NewExecutor(dir, discardLogger())
+	task := &syncmgr.SyncTask{ID: "t1", Direction: string(syncmgr.DirectionPush), Remote: "r1", Src: "nonexistent", Dst: "", ConflictPolicy: "skip"}
+	res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
+	if err == nil {
+		t.Fatal("源路径不存在应返回错误")
+	}
+	if res == nil || res.Status != "failed" {
+		t.Fatalf("应返回 failed 状态，got %+v", res)
+	}
+	if res.Retryable {
+		t.Fatal("业务失败（源路径不存在）不应标记为可重试")
 	}
 }

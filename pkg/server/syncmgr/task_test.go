@@ -23,6 +23,7 @@ func TestSyncTask_JSONRoundTrip(t *testing.T) {
 		SyncEmptyDirs:  true,
 		FollowSymlinks: false,
 		Status:         "completed",
+		Retries:        3,
 		FilesTotal:     2,
 		FilesDone:      2,
 		BytesTotal:     100,
@@ -65,6 +66,9 @@ func TestSyncTask_JSONRoundTrip(t *testing.T) {
 		restored.BytesTotal != 100 || restored.BytesDone != 100 {
 		t.Fatalf("进度字段不符: %+v", restored)
 	}
+	if restored.Retries != 3 {
+		t.Fatalf("Retries 应持久化，got %d", restored.Retries)
+	}
 	if len(restored.Results) != 1 || restored.Results[0].Path != "a.txt" || restored.Results[0].Action != "created" {
 		t.Fatalf("results 不符: %+v", restored.Results)
 	}
@@ -82,10 +86,20 @@ func TestApplyConfigDefaults(t *testing.T) {
 	if cfg.TaskTTL != 24*time.Hour {
 		t.Fatalf("TaskTTL 默认应为 24h，got %v", cfg.TaskTTL)
 	}
+	if cfg.MaxRetries != 10 {
+		t.Fatalf("MaxRetries 默认应为 10，got %d", cfg.MaxRetries)
+	}
+	if cfg.RetryDelay != 10*time.Second {
+		t.Fatalf("RetryDelay 默认应为 10s，got %v", cfg.RetryDelay)
+	}
+	if cfg.RetryBackoff != 2 {
+		t.Fatalf("RetryBackoff 默认应为 2，got %v", cfg.RetryBackoff)
+	}
 
-	cfg2 := &Config{MaxConcurrent: 5, TaskTTL: time.Hour}
+	cfg2 := &Config{MaxConcurrent: 5, TaskTTL: time.Hour, MaxRetries: 3, RetryDelay: time.Second, RetryBackoff: 1.5}
 	applyConfigDefaults(cfg2)
-	if cfg2.MaxConcurrent != 5 || cfg2.TaskTTL != time.Hour {
+	if cfg2.MaxConcurrent != 5 || cfg2.TaskTTL != time.Hour || cfg2.MaxRetries != 3 ||
+		cfg2.RetryDelay != time.Second || cfg2.RetryBackoff != 1.5 {
 		t.Fatalf("非零值不应被覆盖: %+v", cfg2)
 	}
 }

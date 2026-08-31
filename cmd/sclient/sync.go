@@ -261,6 +261,12 @@ func waitSyncTask(ctx context.Context, ios cli.IOStreams, svc *client.FileClient
 			if task.BytesTotal > 0 {
 				pct = task.BytesDone * 100 / task.BytesTotal
 			}
+			if task.Status == client.SyncStatusRetrying {
+				// 审查 M-4：重试中显示"重试中"而非"同步中"，区分瞬时故障等待退避。
+				ios.WriteOutLine("  ⟳ 重试中: %d%% (%d/%d bytes, %d/%d files)",
+					pct, task.BytesDone, task.BytesTotal, task.FilesDone, task.FilesTotal)
+				continue
+			}
 			ios.WriteOutLine("  ⟳ 同步中: %d%% (%d/%d bytes, %d/%d files)",
 				pct, task.BytesDone, task.BytesTotal, task.FilesDone, task.FilesTotal)
 		}

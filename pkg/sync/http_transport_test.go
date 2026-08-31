@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -872,5 +873,137 @@ func TestHTTPTransport_Close_InterruptsInflight(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("Close 未中断 in-flight 请求")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IsRetryableError：阶段 6 自动重试的可重试错误判别
+// ---------------------------------------------------------------------------
+
+func TestIsRetryableError(t *testing.T) {
+	// 网络层错误（连接拒绝/重置/超时，net.Error）→ 可重试
+	netErr := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
+	if !IsRetryableError(fmt.Errorf("列出远程目录失败: %w", netErr)) {
+		t.Fatal("net.OpError（连接拒绝）应判为可重试")
+	}
+
+	// 超时（context.DeadlineExceeded）→ 可重试
+	if !IsRetryableError(fmt.Errorf("枚举源目录失败: %w", context.DeadlineExceeded)) {
+		t.Fatal("DeadlineExceeded 应判为可重试")
+	}
+
+	// 上下文取消（用户主动取消）→ 不可重试
+	if IsRetryableError(context.Canceled) {
+		t.Fatal("context.Canceled 不应判为可重试（用户取消）")
+	}
+
+	// HTTP 5xx（服务端瞬时故障）→ 可重试
+	if !IsRetryableError(errors.New("请求失败 (HTTP 500): internal server error")) {
+		t.Fatal("HTTP 500 应判为可重试")
+	}
+	if !IsRetryableError(fmt.Errorf("列出远程目录失败: %w", errors.New("请求失败 (HTTP 503): unavailable"))) {
+		t.Fatal("HTTP 503（包装）应判为可重试")
+	}
+
+	// HTTP 4xx（请求本身有问题）→ 不可重试
+	if IsRetryableError(errors.New("请求失败 (HTTP 404): not found")) {
+		t.Fatal("HTTP 404 不应判为可重试")
+	}
+
+	// 业务/确定性错误（路径校验失败）→ 不可重试
+	if IsRetryableError(errors.New("路径校验失败")) {
+		t.Fatal("业务失败不应判为可重试")
+	}
+
+	// nil → 不可重试
+	if IsRetryableError(nil) {
+		t.Fatal("nil 不应判为可重试")
+	}
+}
+
+// TestIsRetryableFileFailure 验证"全部文件传输失败"判定（审查 I-2）：
+// completed + FilesTotal>0 + FilesDone==0 + 网络类 ActionError → 可重试；
+// 业务性 ActionError（无网络特征）/ 部分成功 → 不可重试。
+func TestIsRetryableFileFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		job  *Job
+		want bool
+	}{
+		{
+			name: "all-fail-network",
+			job: &Job{
+				Status: StatusCompleted,
+				Stats:  Progress{FilesTotal: 3, FilesDone: 0},
+				Results: []FileResult{
+					{Path: "a.txt", Action: ActionError, Error: "写入目标失败: dial tcp 127.0.0.1:18083: connect: connection refused"},
+					{Path: "b.txt", Action: ActionError, Error: "写入目标失败: i/o timeout"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "all-fail-business-no-network",
+			job: &Job{
+				Status: StatusCompleted,
+				Stats:  Progress{FilesTotal: 2, FilesDone: 0},
+				Results: []FileResult{
+					{Path: "a.txt", Action: ActionError, Error: "写入目标失败: permission denied"},
+					{Path: "b.txt", Action: ActionError, Error: "路径非法"},
+				},
+			},
+			want: false, // 业务性全失败（无网络特征）：不整体重试
+		},
+		{
+			name: "partial-success",
+			job: &Job{
+				Status: StatusCompleted,
+				Stats:  Progress{FilesTotal: 2, FilesDone: 1},
+				Results: []FileResult{
+					{Path: "a.txt", Action: ActionError, Error: "写入目标失败: connection refused"},
+				},
+			},
+			want: false, // 部分成功：不整体重试
+		},
+		{
+			name: "no-files",
+			job: &Job{
+				Status: StatusCompleted,
+				Stats:  Progress{FilesTotal: 0, FilesDone: 0},
+			},
+			want: false,
+		},
+		{
+			name: "not-completed",
+			job: &Job{
+				Status: StatusFailed,
+				Stats:  Progress{FilesTotal: 1, FilesDone: 0},
+				Results: []FileResult{
+					{Path: "a.txt", Action: ActionError, Error: "写入目标失败: connection refused"},
+				},
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsRetryableFileFailure(tc.job); got != tc.want {
+				t.Fatalf("IsRetryableFileFailure = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHTTPStatusFromErrorText_FileNameNoFalsePositive 验证（审查 M-1）：错误文本含
+// 用户可控路径（文件名带 "HTTP 500"）时不误判为 5xx（LastIndex 从后部匹配）。
+func TestHTTPStatusFromErrorText_FileNameNoFalsePositive(t *testing.T) {
+	msg := `列出远程目录 "HTTP 500 weird" 失败: 请求失败 (HTTP 400): 路径非法`
+	code, ok := httpStatusFromErrorText(msg)
+	if !ok || code != 400 {
+		t.Fatalf("应从末尾匹配真实状态 400，got code=%d ok=%v", code, ok)
+	}
+	// 文件名含 "HTTP 500" 不应误判为 500。
+	if code >= 500 {
+		t.Fatalf("文件名中的 HTTP 500 不应误判为服务端 5xx，got %d", code)
 	}
 }

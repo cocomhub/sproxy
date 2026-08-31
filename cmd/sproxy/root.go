@@ -343,7 +343,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		syncMgr := syncmgr.NewManager(cfg.UploadsDir, h.SyncQuotaStore(), int(server.CategoryUserFiles),
 			remotes, syncexec.NewExecutor(cfg.UploadsDir, logger.With("component", "sync_exec")),
 			logger.With("component", "sync"),
-			&syncmgr.Config{MaxConcurrent: cfg.Sync.MaxConcurrent, TaskTTL: cfg.Sync.TaskTTL})
+			&syncmgr.Config{
+				MaxConcurrent: cfg.Sync.MaxConcurrent,
+				TaskTTL:       cfg.Sync.TaskTTL,
+				MaxRetries:    cfg.Sync.MaxRetries,
+				RetryDelay:    cfg.Sync.RetryDelay,
+				RetryBackoff:  cfg.Sync.RetryBackoff,
+			})
 		h.SetSyncMgr(syncMgr)
 		defer syncMgr.Stop()
 	}

@@ -133,6 +133,23 @@ sclient rmdir --force <dirname>
 
 见上文"当前目录概念"。
 
+### sync
+
+```bash
+sclient sync push --remote <name> [--src <path>] [--dst <path>] [--recursive] [--wait]
+sclient sync pull --remote <name> [--src <path>] [--dst <path>] [--recursive] [--wait]
+```
+
+- 在本地 sproxy 服务端创建节点间文件同步任务（push 本地→远程 / pull 远程→本地），
+  由服务端 SyncManager 托管执行；`--remote` 是服务端 `sync_remotes` 配置的远程节点名
+- `--src`/`--dst` 均为服务端 uploadsDir 相对路径（默认 `""` = 整个根）；`--recursive` 递归子目录
+- `--conflict skip|overwrite|lww|conflict-rename` 冲突策略；`--sync-empty-dirs`/`--follow-symlinks` 可选
+- `--wait` 阻塞等待任务终态并展示进度（`--timeout` 超时，0=不限）
+- **自动重试**：同步遇瞬时网络错误（连接拒绝/超时/5xx）由 SyncManager 指数退避自动重试
+  （`sync.max_retries` 次内），任务状态在重试期间显示 `retrying`；达上限转 `failed` 且错误
+  信息含"已重试 N 次"；`retries` 字段为已重试次数（持久化，重启后续计）。取消/删除在
+  重试等待期间仍立即生效
+
 ### tunnel
 
 ```bash
