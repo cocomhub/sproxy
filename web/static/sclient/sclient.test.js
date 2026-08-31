@@ -743,6 +743,25 @@ test('files.search / stat / download 映射', async () => {
   assert.deepStrictEqual(dl.headers, {});
 });
 
+test('files.download 自动识别 .__cloud_archives__/ 前缀 → filename 拆归档名 + kind=cloud_archive', async () => {
+  const core = makeMockCore([
+    { status: 200, headers: { 'content-type': 'application/octet-stream' }, body: new TextEncoder().encode('arc') },
+  ]);
+  const api = makeApi(core);
+  const out = await api.files.download('.__cloud_archives__/x.tar.gz');
+  // 路径拼接收敛在服务端：客户端只传归档名 + kind，不把 .__ 内部路径直接透传。
+  assert.strictEqual(core.calls[0].method, 'GET');
+  assert.strictEqual(core.calls[0].path, '/download?filename=x.tar.gz&kind=cloud_archive');
+  assert.strictEqual(core.calls[0].opts.download, true);
+  assert.strictEqual(new TextDecoder().decode(await out.blob.arrayBuffer()), 'arc');
+
+  // 普通文件名不受影响（无 kind 参数）。
+  const core2 = makeMockCore([{ status: 200, headers: {}, body: new TextEncoder().encode('n') }]);
+  const api2 = makeApi(core2);
+  await api2.files.download('dir/plain.txt');
+  assert.strictEqual(core2.calls[0].path, '/download?filename=dir%2Fplain.txt');
+});
+
 // C2 适配测试：download 返回 {blob, headers} 且 headers 携带 X-File-Checksum
 //（app.js downloadFile 用它做本地 SHA-256 往返校验；direct 模式 fetch 头大小写问题
 // 由 transport.directRun 统一小写化，此处验证注入的 downloadHeaders 被透传并在结果中

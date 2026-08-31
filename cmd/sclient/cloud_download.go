@@ -486,7 +486,14 @@ func NewCmdCloudDownloadArchive(factory clientfactory.Factory, ios cli.IOStreams
 			items := make([]client.DownloadItem, 0, len(args))
 			for _, archiveFile := range args {
 				local := filepath.Join(outputDir, filepath.Base(archiveFile))
-				items = append(items, client.DownloadItem{RemotePath: archiveFile, LocalPath: local})
+				// 归档存服务端 uploadsDir/.__cloud_archives__/<name>；download-archive 传归档名
+				// + kind=cloud_archive，服务端在归档目录内拼接（.__ 内部路径不直接透传，
+				// ValidateFilePath 全拒）。filepath.Base 同时中和用户输入的路径穿越组件。
+				items = append(items, client.DownloadItem{
+					RemotePath: filepath.Base(archiveFile),
+					LocalPath:  local,
+					Kind:       client.DownloadKindCloudArchive,
+				})
 			}
 
 			ios.WriteOutLine("下载 %d 个归档文件...", len(items))

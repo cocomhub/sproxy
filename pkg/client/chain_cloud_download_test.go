@@ -20,6 +20,16 @@ import (
 	"time"
 )
 
+// resolveMockDownloadFile 解析 mock 下载文件路径：kind=cloud_archive 时归档在
+// .__cloud_archives__ 子目录（与服务端行为一致），否则 filename 直接拼接。
+func resolveMockDownloadFile(dir string, r *http.Request) string {
+	filename := r.URL.Query().Get("filename")
+	if r.URL.Query().Get("kind") == DownloadKindCloudArchive {
+		return filepath.Join(dir, cloudArchiveDirName, filepath.Base(filename))
+	}
+	return filepath.Join(dir, filepath.FromSlash(filename))
+}
+
 func TestCloudDownloadChain_ImplementsChainRunner(t *testing.T) {
 	t.Parallel()
 	var _ ChainRunner = (*CloudDownloadChain)(nil)
@@ -485,8 +495,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	})
 
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
+		archiveFile := resolveMockDownloadFile(dir, r)
 		os.MkdirAll(filepath.Dir(archiveFile), 0755)
 		if _, err := os.Stat(archiveFile); err != nil {
 			os.WriteFile(archiveFile, []byte("archive-content"), 0644)
@@ -510,8 +519,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
+		archiveFile := resolveMockDownloadFile(dir, r)
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
 			t.Log("ReadFile:", err)
@@ -610,8 +618,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 	})
 
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
+		archiveFile := resolveMockDownloadFile(dir, r)
 		os.MkdirAll(filepath.Dir(archiveFile), 0755)
 		if _, err := os.Stat(archiveFile); err != nil {
 			os.WriteFile(archiveFile, []byte("archive-content"), 0644)
@@ -636,8 +643,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 	})
 
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
+		archiveFile := resolveMockDownloadFile(dir, r)
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
 			t.Log("ReadFile:", err)
@@ -694,47 +700,120 @@ func TestCloudDownloadChain_CleanupRemote_PartialError(t *testing.T) {
 	}
 }
 
-// TestCloudDownloadChain_DownloadToLocal_PathTraversal 测试 downloadToLocal 的路径穿越防护。
-func TestCloudDownloadChain_DownloadToLocal_PathTraversal(t *testing.T) {
+// TestCloudDownloadChain_DownloadToLocal_KindArchive 验证 downloadToLocal 以 kind=cloud_archive
+// 下载归档：filename 传归档名（filepath.Base 提取），stat/chunk 请求均带 kind 参数，
+// 本地文件落在 LocalDir 内且内容正确。
+func TestCloudDownloadChain_DownloadToLocal_KindArchive(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, cloudArchiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatalf("mkdir archive dir: %v", err)
+	}
+	content := []byte("archive-content")
+	if err := os.WriteFile(filepath.Join(archiveDir, "x.tar.gz"), content, 0644); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+	sum := sha256.Sum256(content)
 
 	mux := http.NewServeMux()
+	var lastStatQuery, lastChunkQuery string
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		// 如果是路径穿越尝试，返回 404 让 downloadToLocal 失败
-		if strings.Contains(filename, "..") {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("X-File-Size", "10")
-		w.Header().Set("X-File-Checksum", "abc123")
-		w.Header().Set("X-File-MTime", "1000000")
+		lastStatQuery = r.URL.RawQuery
+		w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(content)))
+		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", time.Now().UnixNano()))
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("test-data"))
+		lastChunkQuery = r.URL.RawQuery
+		archiveFile := resolveMockDownloadFile(dir, r)
+		data, err := os.ReadFile(archiveFile)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Write(data)
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
+	chain := &CloudDownloadChain{
+		client:            client,
+		LocalDir:          dir,
+		ArchiveName:       "x.tar.gz",
+		archiveServerPath: filepath.ToSlash(filepath.Join(cloudArchiveDirName, "x.tar.gz")),
+	}
+	if err := chain.downloadToLocal(t.Context()); err != nil {
+		t.Fatalf("downloadToLocal: %v", err)
+	}
 
-	t.Run("path_traversal_in_archive_name", func(t *testing.T) {
-		chain := &CloudDownloadChain{
-			client:            client,
-			LocalDir:          dir,
-			ArchiveName:       "../../etc/passwd", // 路径穿越尝试
-			archiveServerPath: ".__cloud_archives__/../../etc/passwd",
-		}
-		err := chain.downloadToLocal(t.Context())
-		// filepath.Base 会去掉 ../ 部分，所以 ArchiveName 变成 "passwd"
-		// 但 archiveServerPath 包含 .., 服务端会返回 404 -> 下载失败
-		// 如果服务端返回 404，ChunkedDownload 会报错
-		if err == nil {
-			t.Fatal("expected error from path traversal prevention, got nil")
-		}
+	localPath := filepath.Join(dir, "x.tar.gz")
+	if !strings.HasPrefix(localPath, dir+string(filepath.Separator)) {
+		t.Fatalf("local path outside LocalDir: %s", localPath)
+	}
+	got, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read local: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Errorf("local content = %q, want %q", string(got), string(content))
+	}
+	// stat/chunk 请求均带 kind=cloud_archive 且 filename 为归档名（非 .__ 完整路径）
+	if !strings.Contains(lastStatQuery, "kind=cloud_archive") || !strings.Contains(lastStatQuery, "filename=x.tar.gz") {
+		t.Errorf("stat query = %q, want kind=cloud_archive & filename=x.tar.gz", lastStatQuery)
+	}
+	if !strings.Contains(lastChunkQuery, "kind=cloud_archive") || !strings.Contains(lastChunkQuery, "filename=x.tar.gz") {
+		t.Errorf("chunk query = %q, want kind=cloud_archive & filename=x.tar.gz", lastChunkQuery)
+	}
+}
+
+// TestCloudDownloadChain_DownloadToLocal_TraversalNeutralized 验证 downloadToLocal 对服务端返回
+// 含路径穿越组件的归档路径用 filepath.Base 中和：发给服务端的 filename 只含归档名，
+// 本地文件落在 LocalDir 内（不越界写盘）。
+func TestCloudDownloadChain_DownloadToLocal_TraversalNeutralized(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	sum := sha256.Sum256([]byte("data"))
+	mux := http.NewServeMux()
+	var seenFilename string
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+		seenFilename = r.URL.Query().Get("filename")
+		w.Header().Set("X-File-Size", "4")
+		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", time.Now().UnixNano()))
+		w.WriteHeader(http.StatusOK)
 	})
+	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("data"))
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	chain := &CloudDownloadChain{
+		client:            client,
+		LocalDir:          dir,
+		ArchiveName:       "../../etc/passwd", // 路径穿越尝试
+		archiveServerPath: ".__cloud_archives__/../../etc/passwd",
+	}
+	if err := chain.downloadToLocal(t.Context()); err != nil {
+		t.Fatalf("downloadToLocal: %v", err)
+	}
+	// filename 被 filepath.Base 中和为归档名（无路径穿越组件）
+	if seenFilename != "passwd" {
+		t.Errorf("filename sent to server = %q, want %q", seenFilename, "passwd")
+	}
+	// 本地文件落在 LocalDir 内（passwd.tar.gz，不越界写盘）
+	localPath := filepath.Join(dir, "passwd.tar.gz")
+	if !strings.HasPrefix(localPath, dir+string(filepath.Separator)) {
+		t.Fatalf("local path outside LocalDir: %s", localPath)
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		t.Errorf("expected local file created inside LocalDir: %v", err)
+	}
 }
 
 // TestCloudDownloadChain_SubmitTasks_EmptyResult 测试 submitTasks 时返回空结果。

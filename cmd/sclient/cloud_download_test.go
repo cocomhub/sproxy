@@ -689,9 +689,12 @@ func TestCloudDownloadCmd_DownloadArchiveSubcommand(t *testing.T) {
 	archiveChecksum := sha256Hex(archiveContent)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/download") && r.Method == http.MethodGet {
-			got := r.URL.Query().Get("filename")
-			if got != ".__cloud_archives__/my-archive.tar.gz" {
-				t.Errorf("expected download filename '.__cloud_archives__/my-archive.tar.gz', got %q", got)
+			// 归档下载传归档名 + kind=cloud_archive（不直接透传 .__ 内部路径）。
+			if got := r.URL.Query().Get("filename"); got != "my-archive.tar.gz" {
+				t.Errorf("expected download filename 'my-archive.tar.gz', got %q", got)
+			}
+			if got := r.URL.Query().Get("kind"); got != "cloud_archive" {
+				t.Errorf("expected download kind=cloud_archive, got %q", got)
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("X-File-Checksum", archiveChecksum)

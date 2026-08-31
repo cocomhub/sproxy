@@ -558,10 +558,17 @@ func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
 	if archivePath == "" {
 		archivePath = filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName))
 	}
+	// 提取归档名（filepath.Base 同时中和服务端路径中的路径穿越组件），
+	// 以 kind=cloud_archive 下载：归档存 uploadsDir/.__cloud_archives__/<name>，
+	// .__ 内部目录被 ValidateFilePath 全拒，不能直接传完整路径，kind 方案由服务端拼接。
+	archiveFileName := filepath.Base(archivePath)
+	if archiveFileName == "" {
+		archiveFileName = archiveName
+	}
 
 	localPath := filepath.Join(c.LocalDir, archiveName)
 	c.LocalPath = localPath
-	if err := c.client.ChunkedDownload(ctx, archivePath, localPath); err != nil {
+	if err := c.client.ChunkedDownload(ctx, archiveFileName, localPath, WithChunkedKind(DownloadKindCloudArchive)); err != nil {
 		return fmt.Errorf("下载归档文件失败: %w", err)
 	}
 	return nil

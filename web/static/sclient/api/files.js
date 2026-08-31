@@ -193,11 +193,21 @@
     // headers 保留 X-File-Checksum 以便 UI 做本地 SHA-256 往返校验（C-1 遗留：旧版
     // 只回 Blob 不回响应头，导致直连模式 UI 无法校验）。assert: blob 字节与 header
     // 一致性由调用方（app.js downloadFile）负责——此处只透传。
+    //
+    // kind 自适应：filename 以 .__cloud_archives__/ 开头（云任务归档 API 返回的 File 字段）
+    // → 拆出归档名并把 kind=cloud_archive 传给服务端，由服务端在归档目录内拼接。
+    // 归档存 uploadsDir/.__cloud_archives__/<name>（.__ 内部目录），普通下载不开放 .__
+    // 路径访问（服务端 ValidateFilePath 全拒），kind 方案把路径拼接收敛在服务端。
     function download(filename, opts) {
       const p = opts || {};
       const headers = Object.assign({}, p.headers || {});
       const dlHeaders = Object.assign({}, p.downloadHeaders || {});
-      return coreRequest('GET', '/download?filename=' + encodeURIComponent(filename), {
+      const params = { filename: filename };
+      if (typeof filename === 'string' && filename.indexOf('.__cloud_archives__/') === 0) {
+        params.filename = filename.slice('.__cloud_archives__/'.length);
+        params.kind = 'cloud_archive';
+      }
+      return coreRequest('GET', urlWithParams('/download', params), {
         headers: headers,
         download: true,
         // 注：collectHeaders 不透传给 transport（transport 不消费该字段）——

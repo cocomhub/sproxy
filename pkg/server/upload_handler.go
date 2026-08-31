@@ -191,21 +191,6 @@ func (h *Handlers) resolveFilePath(w http.ResponseWriter, filename string) (remo
 	return remotePath, fullPath, true
 }
 
-// resolveFilePathHTTP 供非 JSON handler 使用（如 stat 返回普通 http.Error）。
-func (h *Handlers) resolveFilePathHTTP(w http.ResponseWriter, filename string) (remotePath, fullPath string, ok bool) {
-	remotePath, err := ValidateFilePath(filename)
-	if err != nil {
-		http.Error(w, "invalid filename", http.StatusBadRequest)
-		return "", "", false
-	}
-	fullPath = h.safePath(remotePath)
-	if fullPath == "" {
-		http.Error(w, "invalid file path", http.StatusBadRequest)
-		return "", "", false
-	}
-	return remotePath, fullPath, true
-}
-
 // handleDuplicateFile 检查文件是否存在，处理重复上传和版本管理逻辑。
 // 返回 true 表示已处理（调用方应 return）。
 func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, ctx context.Context, filePath, expectedChecksum, remotePath string) bool {

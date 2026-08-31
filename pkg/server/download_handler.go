@@ -4,12 +4,143 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync/atomic"
 )
+
+// downloadKindCloudArchive 是云任务归档下载的 kind 值。
+// kind 白名单仅此一项——归档是用户主动打包的产出（归档名含随机难枚举），
+// 第一版对所有认证用户可下载，未来可按 owner 隔离。
+const downloadKindCloudArchive = "cloud_archive"
+
+// downloadPathError 携带 HTTP 状态码与消息，统一 /download 与 /download/chunk 的路径解析错误。
+type downloadPathError struct {
+	status  int
+	message string
+}
+
+func (e *downloadPathError) Error() string { return e.message }
+
+// writeDownloadPathError 将 resolveDownloadPath 返回的错误映射为统一 JSON 响应。
+func writeDownloadPathError(w http.ResponseWriter, err error) {
+	var de *downloadPathError
+	if errors.As(err, &de) {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: de.message}, de.status)
+		return
+	}
+	sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+}
+
+// writeHTTPPathError 将 resolveDownloadPath 返回的错误映射为统一 http.Error 响应
+// （供 stat 等非 JSON handler 使用）。
+func writeHTTPPathError(w http.ResponseWriter, err error) {
+	var de *downloadPathError
+	if errors.As(err, &de) {
+		http.Error(w, de.message, de.status)
+		return
+	}
+	http.Error(w, "invalid filename", http.StatusBadRequest)
+}
+
+// validateCloudArchiveName 校验 kind=cloud_archive 的归档名。
+// 归档名必须是单文件名（无路径分隔符），拒绝空、绝对路径、..、Windows 非法字符。
+// 与 ValidateFilePath 的规则对齐，但不含 .__ 首段拒绝——归档目录本身即 .__ 前缀，
+// 服务端在 cloudArchivePath 中负责拼接与防穿越（. __ 内部目录仅此白名单 kind 可达）。
+func validateCloudArchiveName(name string) *downloadPathError {
+	invalid := &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return &downloadPathError{status: http.StatusBadRequest, message: errMsgEmptyFilename}
+	}
+	if strings.ContainsRune(name, 0) {
+		return invalid
+	}
+	if name[0] == '/' || name[0] == '\\' {
+		return invalid
+	}
+	// 拒绝路径分隔符（/ 与 \）：归档名必须是单文件名，服务端拼接归档目录。
+	if strings.ContainsAny(name, `/\`) {
+		return invalid
+	}
+	// 拒绝 . 与 ..；filepath.Base 兜底，防 Windows 盘符/尾分隔符等绕过。
+	if filepath.Clean(name) == "." || filepath.Clean(name) == ".." || filepath.Base(name) != name {
+		return invalid
+	}
+	// Windows 非法字符（对齐 ValidateFilePath）。
+	if runtime.GOOS == "windows" {
+		const invalidChars = `<>:"|?*`
+		if strings.ContainsAny(name, invalidChars) {
+			return invalid
+		}
+	}
+	return nil
+}
+
+// cloudArchivePath 在 uploadsDir/.__cloud_archives__ 下安全拼接归档名。
+// 返回空字符串表示配置缺失或路径越界（防穿越纵深防御）。
+func (h *Handlers) cloudArchivePath(name string) string {
+	cfg := h.cfgPtr.Load()
+	if cfg == nil {
+		return ""
+	}
+	archiveDir := filepath.Join(cfg.UploadsDir, cloudArchiveDirName)
+	fullPath := filepath.Join(archiveDir, name)
+	if !IsPathWithin(fullPath, archiveDir) {
+		return ""
+	}
+	return fullPath
+}
+
+// resolveDownloadPath 解析 /download、/download/chunk 与 /api/files/stat 的文件路径。
+// 返回用于响应头（Content-Disposition / checksum key）的 filename 与磁盘路径 filePath。
+//
+// kind 为空 → 原逻辑：ValidateFilePath 校验 + UploadsDir 安全拼接（.__ 内部目录全拒）。
+// kind=cloud_archive → filename 为归档名（单文件名），服务端拼接
+//
+//	uploadsDir/.__cloud_archives__/<name> 并确认在归档目录内（防穿越）。
+//
+// 其它 kind → 400（白名单，防任意内部目录访问）。
+func (h *Handlers) resolveDownloadPath(r *http.Request) (filename, filePath string, err error) {
+	name := r.URL.Query().Get("filename")
+	kind := r.URL.Query().Get("kind")
+
+	switch kind {
+	case "":
+		remotePath, vErr := ValidateFilePath(name)
+		if vErr != nil {
+			if name == "" {
+				return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgEmptyFilename}
+			}
+			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
+		}
+		fullPath := h.safePath(remotePath)
+		if fullPath == "" {
+			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
+		}
+		return remotePath, fullPath, nil
+	case downloadKindCloudArchive:
+		if aErr := validateCloudArchiveName(name); aErr != nil {
+			return "", "", aErr
+		}
+		fullPath := h.cloudArchivePath(name)
+		if fullPath == "" {
+			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
+		}
+		return name, fullPath, nil
+	default:
+		return "", "", &downloadPathError{
+			status:  http.StatusBadRequest,
+			message: "未知下载 kind: " + kind,
+		}
+	}
+}
 
 // countingWriter 包装 http.ResponseWriter 并追踪实际写入的字节数。
 // 用于 http.ServeContent 写入后记录实际传输字节（而非 Content-Length）。
@@ -25,19 +156,9 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 }
 
 func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
-	filename := r.URL.Query().Get("filename")
-	if filename == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgEmptyFilename}, http.StatusBadRequest)
-		return
-	}
-	remotePath, err := ValidateFilePath(filename)
+	filename, filePath, err := h.resolveDownloadPath(r)
 	if err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
-		return
-	}
-	filePath := h.safePath(remotePath)
-	if filePath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		writeDownloadPathError(w, err)
 		return
 	}
 
@@ -46,7 +167,7 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 		if os.IsNotExist(err) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		} else {
-			h.logger.Error("打开文件失败", "file_name", remotePath, "error", err.Error())
+			h.logger.Error("打开文件失败", "file_name", filename, "error", err.Error())
 			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
 		}
 		return
@@ -55,28 +176,28 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 
 	info, err := file.Stat()
 	if err != nil {
-		h.logger.Error("stat 文件失败", "file_name", remotePath, "error", err.Error())
+		h.logger.Error("stat 文件失败", "file_name", filename, "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "stat 失败"}, http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Disposition", formatContentDisposition(remotePath))
+	w.Header().Set("Content-Disposition", formatContentDisposition(filename))
 	w.Header().Set(headerContentType, contentTypeOctetStream)
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算
 	// 回退路径优先复用已打开的文件句柄（零额外 I/O），仅当计算成功后才写入缓存。
-	if cs, ok := h.checksumStore.Get(remotePath); ok {
+	if cs, ok := h.checksumStore.Get(filename); ok {
 		w.Header().Set(headerFileChecksum, cs)
 	} else {
 		// 缓存未命中，从已打开文件句柄计算（复用 file，零额外 I/O）
 		_, _ = file.Seek(0, io.SeekStart)
 		if cs, err := Checksum(file); err == nil {
 			_, _ = file.Seek(0, io.SeekStart)
-			h.checksumStore.Set(remotePath, cs)
+			h.checksumStore.Set(filename, cs)
 			w.Header().Set(headerFileChecksum, cs)
 		} else {
-			h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "file_name", remotePath)
+			h.logger.Warn("计算文件 checksum 失败", "error", err.Error(), "file_name", filename)
 		}
 	}
 
@@ -92,17 +213,14 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// stat 处理 HEAD /api/files/stat?filename=<name>。
+// stat 处理 HEAD /api/files/stat?filename=<name>[&kind=cloud_archive]。
 // 通过响应头 X-File-Size、X-File-Checksum、X-File-MTime（UnixNano）返回元信息。
+// kind 为空走普通文件路径；kind=cloud_archive 解析归档目录（供分块下载前 stat）。
 // 文件不存在返回 404；不返回响应体。
 func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
-	filename := r.URL.Query().Get("filename")
-	if filename == "" {
-		http.Error(w, "missing filename", http.StatusBadRequest)
-		return
-	}
-	remotePath, fullPath, ok := h.resolveFilePathHTTP(w, filename)
-	if !ok {
+	filename, fullPath, err := h.resolveDownloadPath(r)
+	if err != nil {
+		writeHTTPPathError(w, err)
 		return
 	}
 	info, err := os.Stat(fullPath)
@@ -110,7 +228,7 @@ func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 		if os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
 		} else {
-			h.logger.Error("stat 失败", "file_name", remotePath, "error", err.Error())
+			h.logger.Error("stat 失败", "file_name", filename, "error", err.Error())
 			http.Error(w, "stat error", http.StatusInternalServerError)
 		}
 		return
@@ -120,7 +238,7 @@ func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
 	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", info.ModTime().UnixNano()))
-	if cs, ok := h.checksumStore.Get(remotePath); ok {
+	if cs, ok := h.checksumStore.Get(filename); ok {
 		w.Header().Set(headerFileChecksum, cs)
 	} else if !info.IsDir() {
 		if cs, err := FileChecksum(fullPath); err == nil {

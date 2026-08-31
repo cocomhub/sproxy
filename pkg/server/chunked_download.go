@@ -80,7 +80,8 @@ func setChunkResponseHeaders(w http.ResponseWriter, filename string, offset, len
 // downloadChunk 下载文件的指定分块。
 //
 // 参数：
-//   - filename: 文件名（path.Base 校验防穿越）
+//   - filename: 文件名（普通下载经 ValidateFilePath 校验；kind=cloud_archive 时为归档名）
+//   - kind: 可选（cloud_archive 走归档目录拼接）
 //   - offset: 起始偏移量（默认 0）
 //   - length: 分块长度（默认 4 MiB）
 //
@@ -91,13 +92,9 @@ func setChunkResponseHeaders(w http.ResponseWriter, filename string, offset, len
 func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 
-	filename := r.URL.Query().Get("filename")
-	if filename == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgEmptyFilename}, http.StatusBadRequest)
-		return
-	}
-	if _, err := ValidateFilePath(filename); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+	filename, filePath, err := h.resolveDownloadPath(r)
+	if err != nil {
+		writeDownloadPathError(w, err)
 		return
 	}
 
@@ -108,11 +105,6 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filePath := h.safePath(filename)
-	if filePath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return
-	}
 	stat, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {

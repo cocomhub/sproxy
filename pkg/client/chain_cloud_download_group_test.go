@@ -109,8 +109,7 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 
 	// Stat endpoint for chunked download
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
+		archiveFile := resolveMockDownloadFile(dir, r)
 		os.MkdirAll(filepath.Dir(archiveFile), 0755)
 		if _, err := os.Stat(archiveFile); err != nil {
 			os.WriteFile(archiveFile, []byte("group-archive-content"), 0644)
@@ -136,8 +135,7 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 
 	// Chunk download endpoint
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
+		archiveFile := resolveMockDownloadFile(dir, r)
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
 			t.Error("ReadFile:", err)

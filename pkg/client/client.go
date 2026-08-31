@@ -626,7 +626,19 @@ func validateOutputPath(path string) error {
 	return nil
 }
 
+// Download 从 sproxy 服务端下载文件并保存到本地。
 func (c *FileClient) Download(ctx context.Context, filename, outputPath string) error {
+	return c.downloadTo(ctx, filename, outputPath, "")
+}
+
+// DownloadCloudArchive 下载云任务归档文件（kind=cloud_archive）。
+// name 为归档名（单文件名，如 "x.tar.gz"），服务端拼接 uploadsDir/.__cloud_archives__/<name>。
+func (c *FileClient) DownloadCloudArchive(ctx context.Context, name, outputPath string) error {
+	return c.downloadTo(ctx, name, outputPath, DownloadKindCloudArchive)
+}
+
+// downloadTo 是 Download / DownloadCloudArchive 的公共实现。
+func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind string) error {
 	if containsPathTraversal(filename) {
 		return fmt.Errorf("filename 不能包含路径穿越符 '..'")
 	}
@@ -634,7 +646,11 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	if err != nil {
 		return err
 	}
-	urlPath := "/download?" + url.Values{"filename": {filename}}.Encode()
+	query := url.Values{"filename": {filename}}
+	if kind != "" {
+		query.Set("kind", kind)
+	}
+	urlPath := "/download?" + query.Encode()
 	headers := make(http.Header)
 
 	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)

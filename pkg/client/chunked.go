@@ -33,6 +33,11 @@ const (
 	// UploadIDAlreadyExists 是服务端返回的特殊 upload_id 值，表示文件已存在（通过 checksum 匹配）。
 	// 此值由服务端协议定义，变更需同步更新。
 	UploadIDAlreadyExists = "already_exists"
+
+	// DownloadKindCloudArchive 与服务端 download kind 保持一致（cloud_archive）。
+	// 归档文件存服务端 uploadsDir/.__cloud_archives__/<name>（.__ 内部目录），
+	// 普通下载不开放 .__ 路径访问，kind 方案由服务端在归档目录内拼接。
+	DownloadKindCloudArchive = "cloud_archive"
 )
 
 // ChunkedUploadResult 表示分块上传的结果。
@@ -92,6 +97,7 @@ type resumeSessionParams struct {
 // downloadChunkParams 是 downloadOneChunk 的参数结构体，用于减少函数参数数量（S107）。
 type downloadChunkParams struct {
 	Filename  string
+	Kind      string // 下载 kind（空=普通文件；cloud_archive=归档）
 	ChunkIdx  int
 	ChunkSize int64
 	FileSize  int64
@@ -786,6 +792,7 @@ type downloadParams struct {
 	chunkSize   int64
 	concurrency int
 	maxChunk    int64
+	kind        string
 }
 
 // getDownloadParams 解析分块下载的选项参数。
@@ -805,12 +812,18 @@ func getDownloadParams(c *FileClient, opts ...ChunkedOption) *downloadParams {
 		chunkSize:   opt.chunkSize,
 		concurrency: opt.concurrency,
 		maxChunk:    maxChunk,
+		kind:        opt.kind,
 	}
 }
 
 // getFileStat 通过 HEAD 请求获取远端文件的元信息。
-func getFileStat(ctx context.Context, c *FileClient, filename string) (fileSize int64, checksum string, modTime int64, err error) {
-	statResp, err := c.doRequest(ctx, "HEAD", "/api/files/stat?filename="+url.QueryEscape(filename), nil, nil)
+// kind 非空时追加 &kind=<kind>（如 cloud_archive），服务端据此解析归档目录。
+func getFileStat(ctx context.Context, c *FileClient, filename, kind string) (fileSize int64, checksum string, modTime int64, err error) {
+	statPath := "/api/files/stat?filename=" + url.QueryEscape(filename)
+	if kind != "" {
+		statPath += "&kind=" + url.QueryEscape(kind)
+	}
+	statResp, err := c.doRequest(ctx, "HEAD", statPath, nil, nil)
 	if err == nil && statResp.StatusCode == http.StatusOK {
 		if s := statResp.Header.Get("X-File-Size"); s != "" {
 			fileSize, _ = strconv.ParseInt(s, 10, 64)
@@ -842,8 +855,8 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		return err
 	}
 
-	// 获取文件信息（直接 Stat）
-	fileSize, expectedChecksum, fileModTime, err := getFileStat(ctx, c, filename)
+	// 获取文件信息（直接 Stat，kind 归档时服务端解析归档目录）
+	fileSize, expectedChecksum, fileModTime, err := getFileStat(ctx, c, filename, params.kind)
 	if err != nil {
 		return err
 	}
@@ -898,6 +911,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 			defer func() { <-sem }()
 			c.downloadOneChunk(ctx, downloadChunkParams{
 				Filename:  filename,
+				Kind:      params.kind,
 				ChunkIdx:  chunkIdx,
 				ChunkSize: chunkSize,
 				FileSize:  fileSize,
@@ -937,6 +951,9 @@ func (c *FileClient) downloadOneChunk(ctx context.Context, p downloadChunkParams
 
 	urlPath := fmt.Sprintf("/download/chunk?filename=%s&offset=%d&length=%d",
 		url.QueryEscape(p.Filename), offset, length)
+	if p.Kind != "" {
+		urlPath += "&kind=" + url.QueryEscape(p.Kind)
+	}
 
 	baseDelay := 500 * time.Millisecond
 
@@ -1058,6 +1075,7 @@ type chunkedOpts struct {
 	chunkSize   int64
 	concurrency int
 	resume      bool
+	kind        string
 }
 
 // WithChunkedChunkSize 设置分块大小。
@@ -1082,6 +1100,14 @@ func WithChunkedConcurrency(n int) ChunkedOption {
 func WithChunkedResume(enabled bool) ChunkedOption {
 	return func(o *chunkedOpts) {
 		o.resume = enabled
+	}
+}
+
+// WithChunkedKind 设置下载 kind（如 "cloud_archive" 下载云任务归档）。
+// kind 为空表示普通文件下载。filename 传归档名（单文件名），服务端按 kind 拼接内部目录。
+func WithChunkedKind(kind string) ChunkedOption {
+	return func(o *chunkedOpts) {
+		o.kind = kind
 	}
 }
 

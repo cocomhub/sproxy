@@ -451,6 +451,10 @@ func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			if r.URL.Query().Get("kind") != "cloud_archive" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("X-File-Checksum", archiveChecksum)
 			w.Write(archiveContent)
