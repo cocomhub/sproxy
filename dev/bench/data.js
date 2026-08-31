@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788196910417,
+  "lastUpdate": 1788197389154,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -316906,6 +316906,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1299843 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c650da5836a74453f1d4f64028e208ac5c235e97",
+          "message": "feat(client): mesh 服务解析 round-robin 轮询——同名多副本均匀分布 + 失败跳过 (#140)\n\n* feat(client): mesh 服务解析 round-robin 轮询——同名多副本均匀分布 + 失败跳过（阶段5 工作项2 PR-1）\n\nMeshTargetRefresher.Resolve 原\"按列表顺序取首个\"（多候选只取 first 或跳过\nlastFailedNode 的 candidate），同名服务多副本无法负载均衡。改为 RR 轮询：\n\n- 候选池：刷新时收集所有同名服务候选，按 NodeID 排序固化（map/遍历序不稳定，\n  排序保证 RR 序列确定性可测）；缓存语义从「单个 target」改「候选池 + 游标」。\n- RR 游标：nextIdx（mu 保护）每次 Resolve（TTL 命中或刷新后）都推进，从池取\n  下一个——TTL 内也轮询（若缓存单 target，RR 退化为恒取同一节点）。\n- 失败跳过：pickNextLocked 线性扫描跳过 lastFailedNode（现有语义保留）；候选池\n  全部为失败节点时回退到游标指向候选（避免无限卡死）。\n- 零改动：LookupService / mesh connect CLI / VIP 寻址 / NewStaticMeshTargetRefresher\n  / Resolve 签名全部不变（static refresher 不轮询，恒返回预设 target）。\n\n6 新测试（TDD 红→绿）：RoundRobin（3 候选 30 次 1:1:1）/ TTLHit（TTL 内序列\n[A,B,C,A]）/ SortedCandidates（乱序→排序 RR）/ FiltersByName（同名过滤）/\nSkipFailedNode（Invalidate 后跳过）/ AllFailedFallback（全失败回退）。现有 7 测试\n零改动保留通过（TTLCacheAndFailover 的 node-a 首断言在 RR 下游标 0=排序首仍成立）。\n\n验证：go test -race ./pkg/client/... ./cmd/sclient/... ./pkg/tunnel/mesh/... 全绿；\nvet + golangci-lint 0 issues；gofmt 合规；go build 通过。\n\n* fix(client): 失败节点冷却自愈——单次瞬时失败不再永久排除节点（PR-1 复审）\n\nPR-1 对抗审查（无 Critical）发现 1 Important + 5 Minor，全修：\n\n- I-1（Important）lastFailedNode 永久跳过\"已恢复\"节点：单次 dial 瞬时失败后 RR\n  从此永久不再选中该节点（3 副本 33/33/33 永久退化为 50/50/0），违背负载均衡核心\n  目标，且使 TTL 刷新\"感知恢复\"失效。修：**时间戳冷却**——Invalidate 记录\n  lastFailedAt，pickNextLocked 仅在 MeshFailCooldown（3×TTL=9s）内跳过失败节点，\n  冷却过后自动重新评估（恢复则重新入池，仍失败则 Invalidate 重置冷却）。平衡\n  \"跳过死节点\"与\"感知恢复\"，避免\"每 TTL 打死节点\"死循环（审查方案 2 更优）。\n- M-2（Minor）设计 §4.3「多失败候选跳过」未实现：单槽语义 + 冷却自愈，同步设计\n  文档 §4.3 修正（mu 保护普通 uint64 游标 = atomic 等效；失败跳过 = 单槽+冷却）。\n- M-5(c)（Minor）SkipFailedNode 只断言\"不含 node-a\"，补：冷却期 b/c 均被选中 +\n  冷却过后 node-a 重新纳入 RR（两阶段验证，注入假时钟）。\n\n验证：go test -race ./pkg/client/... ./cmd/sclient/... 全绿（13 测试）；vet +\ngolangci-lint 0 issues；gofmt 合规。\n\n* test(e2e): mesh 多副本 round-robin + 单点故障回退 e2e 回归（阶段5 工作项2 PR-2）\n\n工作项 2 收尾：test/ 层 e2e 验证 PR-1 的 RR 轮询与失败跳过在真实进程边界生效。\n纯 test/ 层零实现改动。\n\n- test/e2e_mesh_rr_test.go: startMarkedEcho（echo 写节点标识）/ meshEchoRoundTrip\n  （读回标识行判断实际命中节点）/ identifyMeshTarget（重试吸收瞬时失败）/\n  warmUpMeshTargets（暖机至全部副本可达，替代死等）/ waitNodeGone（轮询 hub 注销）。\n- TestE2E_MeshRR_RoundRobin: hub + 两 mesh node 宣告同名 echo + mesh connect 连续\n  建连 N=10，node-a/node-b 各 ≥3（±2 容忍）；瞬时 relay 失败触发 cooldown 致偏斜时\n  重试 3 轮（等 9s cooldown），真实 RR bug 每轮同一副本 0 命中必现。实测稳定 5/5。\n- TestE2E_MeshRR_Failover: 分阶段——kill 前两副本均可达（健康基线）→ 显式 Kill\n  节点 A → waitNodeGone 等 hub 注销 → 后续 5 次建连全部命中存活副本 node-b。\n- flaky 规避：数据面确定性走 hub 中继（startSClientMeshConnect --webrtc=false），\n  完全避开既有 WebRTC mesh flaky（TestE2E_MeshNode_ServiceAccess）；mesh node 用\n  --discover=false 隔离自动对等发现。\n\n验证：go test -race ./test/... -run TestE2E_MeshRR 2/2 PASS（RR 5/5 + failover\n全命中）；全量 e2e（-skip 已知 flaky）无回归；vet + golangci-lint 0 issues；\ngofmt 合规。\n\n* test(e2e): mesh RR e2e 审查修复——Failover 升级机制级验证 + 超时兜底 + 脏轮重测\n\nPR-2 对抗审查（无 Critical）发现 2 Important + 3 Minor，全修：\n\n- I-2（Important）Failover 原 kill 整个 node 进程 → hub 注销 → 候选池刷新只剩\n  [B]，\"全部命中 B\"是平凡场景，未触达 PR-1 核心\"冷却期跳过仍注册的失败节点\"。\n  修：startMarkedEcho 返回可关闭句柄，Failover 改为**关闭 echo listener（mesh node\n  进程保持在线，注册与宣告不变）**——节点 A 仍在候选池，但出口拨号目标端口关闭\n  （hub 中继 502）→ 拨号失败 → Invalidate → 冷却期内 pickNextLocked 跳过 → 全部\n  落到存活副本 node-b。机制级验证，且更快（1.8s vs 等 hub 注销）。\n- I-1（Important）无 per-test 兜底超时：最坏路径（暖机超时+多轮 cooldown+读满超时）\n  可能撞 test/ 包 -timeout。修：checkTestDeadline 基于 t.Deadline() 提前判断（留\n  30s 余量），两个测试主循环每轮调用。\n- M-2（Minor）轮内首次失败触发 cooldown 使整轮偏斜：identifyMeshTarget 返回\n  retried，测量轮中任一脏采样判脏轮重测（不把偏斜分布计入统计）。\n- M-3（Minor）waitNodeGone 弱确认：I-2 改 kill-echo 后不再需要（删除该 helper）。\n\n验证：go test -race ./test/... -run TestE2E_MeshRR 2/2 PASS（RR 5/5 + Failover\n机制级 1.8s）；vet + golangci-lint 0 issues；gofmt 合规。",
+          "timestamp": "2026-09-01T01:25:02+08:00",
+          "tree_id": "904cca2d86eb8cf567dd47bcd084d3824b4dd68b",
+          "url": "https://github.com/cocomhub/sproxy/commit/c650da5836a74453f1d4f64028e208ac5c235e97"
+        },
+        "date": 1788197381586,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 766.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1570161 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 766.5,
+            "unit": "ns/op",
+            "extra": "1570161 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1570161 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1570161 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 759.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1596483 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 759.8,
+            "unit": "ns/op",
+            "extra": "1596483 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1596483 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1596483 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 764.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1581171 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 764.5,
+            "unit": "ns/op",
+            "extra": "1581171 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1581171 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1581171 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 794,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1595649 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 794,
+            "unit": "ns/op",
+            "extra": "1595649 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1595649 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1595649 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 766.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1546530 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 766.6,
+            "unit": "ns/op",
+            "extra": "1546530 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1546530 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1546530 times\n4 procs"
           }
         ]
       }
