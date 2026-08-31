@@ -84,7 +84,7 @@ func waitForStatus(t *testing.T, mgr *syncmgr.Manager, id, want string, timeout 
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		task := mgr.Get(id)
+		task := mgr.Get(id, "")
 		if task == nil {
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -95,7 +95,7 @@ func waitForStatus(t *testing.T, mgr *syncmgr.Manager, id, want string, timeout 
 		time.Sleep(10 * time.Millisecond)
 	}
 	cur := "<deleted>"
-	if task := mgr.Get(id); task != nil {
+	if task := mgr.Get(id, ""); task != nil {
 		cur = task.Status
 	}
 	t.Fatalf("task %s 未在 %v 内达到 %s，当前 %v", id, timeout, want, cur)
@@ -173,12 +173,12 @@ func TestManager_RealExecutor_Cancel(t *testing.T) {
 	select {
 	case <-execStarted:
 	case <-time.After(10 * time.Second):
-		if st := mgr.Get(task.ID); st != nil {
+		if st := mgr.Get(task.ID, ""); st != nil {
 			t.Fatalf("executor 未在 10s 内开始枚举；任务状态 = %q", st.Status)
 		}
 		t.Fatal("executor 未在 10s 内开始枚举；任务不存在")
 	}
-	if err := mgr.CancelTask(task.ID); err != nil {
+	if err := mgr.CancelTask(task.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, mgr, task.ID, "cancelled", 10*time.Second)

@@ -48,13 +48,14 @@ type SyncFileResult struct {
 // SyncTask 表示一个服务端同步任务。
 // ReservedSize 不持久化（重启后由 StorageManager 磁盘扫描校准，任务不再持有预留）。
 //
-// 访问边界（安全审查 MEDIUM，书面确认）：同步任务是 **server-global** 状态，与
-// CloudTask（云下载任务）一致——所有经认证的操作者（access_keys 持有者互信，或
-// api_keys 多用户 Bearer）视为受信任管理员，可列出/操作全部任务。第一版**不区分
-// 创建者 owner**（对齐 CloudTask 无 owner）；若未来启用多租户隔离，需加 owner 字段
-// （由请求 AK 派生）并按 owner 过滤列表/详情/取消/删除。
+// Owner 是任务级多租户隔离字段（阶段 6 工作项 C）：创建时由请求 AK 派生
+// （SproxySig → AK；api_keys → key 名；未认证 → 空串）。过滤规则见 ownerVisible：
+// 空 owner（全局/旧任务/未认证创建）对所有人可见；非空 owner 只对匹配用户
+// （或空 owner 的管理员/未认证）可见。访问边界：List/Get/CancelTask/DeleteTask
+// 均按 owner 过滤，跨 owner 视为不存在（404 防枚举）。
 type SyncTask struct {
 	ID             string   `json:"id"`
+	Owner          string   `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
 	Direction      string   `json:"direction"`
 	Remote         string   `json:"remote"` // sync_remotes.<name> 配置名
 	Src            string   `json:"src"`    // FS 根相对路径（"" = 整个根）
@@ -84,9 +85,10 @@ type SyncTask struct {
 	Restored bool `json:"-"`
 }
 
-// SyncTaskMeta 是列表返回的精简任务元信息。
+// SyncTaskMeta 是列表返回的精简任务元信息（含 owner，供多租户隔离展示）。
 type SyncTaskMeta struct {
 	ID         string    `json:"id"`
+	Owner      string    `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
 	Direction  string    `json:"direction"`
 	Remote     string    `json:"remote"`
 	Src        string    `json:"src"`
@@ -104,6 +106,8 @@ type SyncTaskMeta struct {
 }
 
 // CreateRequest 是创建同步任务的请求。
+// Owner 由服务端从请求认证上下文派生（阶段 6 工作项 C：SproxySig→AK，api_keys→key 名），
+// json:"-" 阻止客户端在 body 中伪造 owner——多租户归属只能由认证决定，绝不信任客户端输入。
 type CreateRequest struct {
 	Direction      string   `json:"direction"`
 	Remote         string   `json:"remote"`
@@ -115,4 +119,5 @@ type CreateRequest struct {
 	ConflictPolicy string   `json:"conflict_policy"`
 	SyncEmptyDirs  bool     `json:"sync_empty_dirs"`
 	FollowSymlinks bool     `json:"follow_symlinks"`
+	Owner          string   `json:"-"` // 服务端派生，客户端不可设置
 }

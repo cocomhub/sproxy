@@ -152,6 +152,7 @@ type BatchRenameOp struct {
 // CloudBatchTaskResult 批量下载单个任务结果。
 type CloudBatchTaskResult struct {
 	ID       string `json:"id"`
+	Owner    string `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
 	URL      string `json:"url"`
 	Filename string `json:"filename"`
 	Status   string `json:"status"`

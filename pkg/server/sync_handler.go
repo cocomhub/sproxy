@@ -57,6 +57,9 @@ func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
 		return
 	}
+	// 多租户：owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空）。
+	// CreateRequest.Owner 为 json:"-"，客户端 body 无法伪造。
+	req.Owner = ActorFrom(r.Context())
 
 	task, isNew, err := h.syncMgr.SubmitAndStart(req)
 	if err != nil {
@@ -69,7 +72,7 @@ func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snapshot := h.syncMgr.Get(task.ID)
+	snapshot := h.syncMgr.Get(task.ID, ActorFrom(r.Context()))
 	if snapshot == nil {
 		sendJSONResponse(w, map[string]string{"error": "task created but not found"}, http.StatusInternalServerError)
 		return
@@ -88,7 +91,7 @@ func (h *Handlers) syncListTasks(w http.ResponseWriter, r *http.Request) {
 		h.syncNotConfigured(w)
 		return
 	}
-	tasks := h.syncMgr.List()
+	tasks := h.syncMgr.List(ActorFrom(r.Context()))
 	sendJSONResponse(w, map[string]any{"success": true, "tasks": tasks}, http.StatusOK)
 }
 
@@ -99,7 +102,7 @@ func (h *Handlers) syncGetTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	task := h.syncMgr.Get(id)
+	task := h.syncMgr.Get(id, ActorFrom(r.Context()))
 	if task == nil {
 		sendJSONResponse(w, map[string]string{"error": "task not found"}, http.StatusNotFound)
 		return
@@ -114,7 +117,7 @@ func (h *Handlers) syncCancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if err := h.syncMgr.CancelTask(id); err != nil {
+	if err := h.syncMgr.CancelTask(id, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, syncmgr.ErrNotFound) {
 			status = http.StatusNotFound
@@ -132,7 +135,7 @@ func (h *Handlers) syncDeleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if err := h.syncMgr.DeleteTask(id); err != nil {
+	if err := h.syncMgr.DeleteTask(id, ActorFrom(r.Context())); err != nil {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusNotFound)
 		return
 	}

@@ -57,7 +57,7 @@ func waitForStatus(t *testing.T, mgr *Manager, id, want string, timeout time.Dur
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		task := mgr.Get(id)
+		task := mgr.Get(id, "")
 		if task == nil {
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -71,7 +71,7 @@ func waitForStatus(t *testing.T, mgr *Manager, id, want string, timeout time.Dur
 		time.Sleep(10 * time.Millisecond)
 	}
 	cur := "<deleted>"
-	if task := mgr.Get(id); task != nil {
+	if task := mgr.Get(id, ""); task != nil {
 		cur = task.Status
 	}
 	t.Fatalf("task %s 未在 %v 内达到 %s，当前 %v", id, timeout, want, cur)
@@ -230,14 +230,14 @@ func TestSubmitAndStart_StateMachine(t *testing.T) {
 	// 注意：SubmitAndStart 返回的是内部共享指针，后台 goroutine 可能已把状态推进到
 	// syncing，直接读 task.Status 是数据竞争（-race 偶发捕获）。用 mgr.Get 取加锁快照：
 	// 刚提交的任务必为 pending，或已被后台 goroutine 快速推进到 syncing（均非终态，合法）。
-	if st := mgr.Get(task.ID).Status; st != StatusPending && st != StatusSyncing {
+	if st := mgr.Get(task.ID, "").Status; st != StatusPending && st != StatusSyncing {
 		t.Fatalf("SubmitAndStart 返回后任务应处于 pending 或 syncing（执行中），got %q", st)
 	}
 
 	// 执行器阻塞 → 任务停在 syncing。用 started 信号确定性等 Run 被调用
 	// （= 已拿信号量、进入 syncing），而非死等固定超时轮询状态。
 	waitStarted(t, blocking)
-	if got := mgr.Get(task.ID).Status; got != StatusSyncing {
+	if got := mgr.Get(task.ID, "").Status; got != StatusSyncing {
 		t.Fatalf("执行器阻塞期间任务应停在 syncing，got %q", got)
 	}
 
@@ -297,7 +297,7 @@ func TestCancelTask_Queued(t *testing.T) {
 	// 注意：started 信号只保证「某个任务」的 Run 被调用，若 A/B 都先提交，B 也可能先抢到
 	// 信号量（goroutine 调度非确定，CI 已复现）。故先等 A 拿到信号量，再提交 B——此时 B 必排队。
 	waitStarted(t, blocking)
-	if got := mgr.Get(taskA.ID).Status; got != StatusSyncing {
+	if got := mgr.Get(taskA.ID, "").Status; got != StatusSyncing {
 		t.Fatalf("A 应持有信号量进入 syncing，got %q", got)
 	}
 
@@ -306,11 +306,11 @@ func TestCancelTask_Queued(t *testing.T) {
 		t.Fatal(err)
 	}
 	// B 在 A 持有唯一信号量后才提交 → 必排队保持 pending（无时序依赖）。
-	b := mgr.Get(taskB.ID)
+	b := mgr.Get(taskB.ID, "")
 	if b.Status != StatusPending {
 		t.Fatalf("B 排队期间应保持 pending，got %q", b.Status)
 	}
-	if err := mgr.CancelTask(taskB.ID); err != nil {
+	if err := mgr.CancelTask(taskB.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, mgr, taskB.ID, "cancelled", 5*time.Second)
@@ -330,7 +330,7 @@ func TestCancelTask_Running(t *testing.T) {
 	}
 	// 用 started 信号确定性等 executor.Run 被调用（= 已持有信号量、进入 syncing）。
 	waitStarted(t, blocking)
-	if err := mgr.CancelTask(task.ID); err != nil {
+	if err := mgr.CancelTask(task.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, mgr, task.ID, "cancelled", 10*time.Second)
@@ -352,10 +352,10 @@ func TestDeleteTask(t *testing.T) {
 		t.Fatalf("持久化文件应存在: %v", err)
 	}
 
-	if err := mgr.DeleteTask(task.ID); err != nil {
+	if err := mgr.DeleteTask(task.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	if mgr.Get(task.ID) != nil {
+	if mgr.Get(task.ID, "") != nil {
 		t.Fatal("删除后任务应不可见")
 	}
 	if quota.Usage() != 0 {
@@ -364,7 +364,7 @@ func TestDeleteTask(t *testing.T) {
 	if _, err := os.Stat(persistFile); !os.IsNotExist(err) {
 		t.Fatalf("删除后持久化文件应移除: %v", err)
 	}
-	if err := mgr.DeleteTask(task.ID); err == nil {
+	if err := mgr.DeleteTask(task.ID, ""); err == nil {
 		t.Fatal("二次删除应报 not found")
 	}
 }
@@ -474,7 +474,7 @@ func TestConcurrency_Semaphore(t *testing.T) {
 	// （goroutine 调度非确定，CI 已复现 B 先 syncing 而 A pending）。故先等 A 拿到信号量，
 	// 再提交 B——此时 B 必排队 pending（真正无时序依赖）。
 	waitStarted(t, blocking)
-	if got := mgr.Get(taskA.ID).Status; got != StatusSyncing {
+	if got := mgr.Get(taskA.ID, "").Status; got != StatusSyncing {
 		t.Fatalf("A 应持有信号量进入 syncing，got %q", got)
 	}
 
@@ -482,7 +482,7 @@ func TestConcurrency_Semaphore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b := mgr.Get(taskB.ID); b.Status != StatusPending {
+	if b := mgr.Get(taskB.ID, ""); b.Status != StatusPending {
 		t.Fatalf("MaxConcurrent=1 时第二个任务应排队 pending，got %q", b.Status)
 	}
 	blocking.release()
@@ -502,7 +502,7 @@ func TestList_ReturnsMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	metas := mgr.List()
+	metas := mgr.List("")
 	if len(metas) != 1 {
 		t.Fatalf("List 应有 1 个任务，got %d", len(metas))
 	}
@@ -542,7 +542,7 @@ func TestCreateTask_ConcurrentDedup(t *testing.T) {
 		t.Fatalf("并发同 key 应只有 1 个新建任务，got %d", newCount)
 	}
 	// 任务列表应只有 1 个活跃任务
-	if n := len(mgr.List()); n != 1 {
+	if n := len(mgr.List("")); n != 1 {
 		t.Fatalf("任务列表应有 1 个，got %d", n)
 	}
 	exec.release()
@@ -770,10 +770,10 @@ func TestRetry_StatusRetryingVisible(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("第 2 次 Run 未被调用")
 	}
-	if got := mgr.Get(task.ID).Status; got != StatusRetrying {
+	if got := mgr.Get(task.ID, "").Status; got != StatusRetrying {
 		t.Fatalf("重试执行期间状态应为 retrying，got %q", got)
 	}
-	if got := mgr.Get(task.ID).Retries; got != 1 {
+	if got := mgr.Get(task.ID, "").Retries; got != 1 {
 		t.Fatalf("重试计数应为 1，got %d", got)
 	}
 	exec.releaseSecond()
@@ -827,7 +827,7 @@ func TestRetry_CancelDuringBackoff(t *testing.T) {
 	// 进入 1 小时退避，状态为 retrying
 	waitForStatus(t, mgr, task.ID, StatusRetrying, 5*time.Second)
 	// 退避等待期间取消 → 立即 cancelled（不等退避结束）
-	if err := mgr.CancelTask(task.ID); err != nil {
+	if err := mgr.CancelTask(task.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, mgr, task.ID, StatusCancelled, 5*time.Second)
@@ -865,7 +865,7 @@ func TestRetry_RetriesPersisted(t *testing.T) {
 
 	// 恢复的 retrying 任务应重启执行（用 started 信号确定性等待，对齐恢复 syncing 的模式）
 	waitStarted(t, blocking)
-	if got := mgr.Get(persisted.ID).Retries; got != 2 {
+	if got := mgr.Get(persisted.ID, "").Retries; got != 2 {
 		t.Fatalf("恢复后 Retries 应保留 2，got %d", got)
 	}
 	blocking.release()

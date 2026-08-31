@@ -63,8 +63,9 @@ func (h *Handlers) cloudArchiveMaxBytes() int64 {
 func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 
-	// 校验任务存在且状态为 completed（使用 SnapshotTask 避免 data race）
-	task, ok := h.cloudMgr.SnapshotTask(taskID)
+	// 校验任务存在且状态为 completed（使用 SnapshotTask 避免 data race）。
+	// 按请求者 owner 过滤：跨 owner 任务视为不存在（404 防枚举）。
+	task, ok := h.cloudMgr.SnapshotTask(taskID, ActorFrom(r.Context()))
 	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "task not found"}, http.StatusNotFound)
 		return
@@ -246,8 +247,8 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	var totalSourceSize int64
 
 	for _, taskID := range req.TaskIDs {
-		// 使用 SnapshotTask 避免 data race
-		task, ok := h.cloudMgr.SnapshotTask(taskID)
+		// 使用 SnapshotTask 避免 data race；按请求者 owner 过滤（跨 owner 任务跳过，防内容外泄）
+		task, ok := h.cloudMgr.SnapshotTask(taskID, ActorFrom(r.Context()))
 		if !ok {
 			h.logger.Warn("cloud batch archive: skipping task not found", "task_id", taskID)
 			skippedTasks = append(skippedTasks, taskID)

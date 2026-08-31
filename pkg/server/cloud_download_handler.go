@@ -46,7 +46,9 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	// 创建任务并启动下载。提交时文件大小未知（-1），SubmitAndStart 的同步条件
 	// （totalSize > 0 且 < syncThreshold）不满足，因此恒异步执行：客户端断连后
 	// 服务端继续异步下载，不阻塞 handler。
-	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context())
+	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
+	owner := ActorFrom(r.Context())
+	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner)
 	if err != nil {
 		// 存储不足（ErrStorageFull）映射 507，其余视为 400（URL 等输入问题已提前拦截）
 		if errors.Is(err, ErrStorageFull) {
@@ -58,7 +60,7 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 返回任务快照（避免并发修改 data race）
-	snapshot, ok := h.cloudMgr.SnapshotTask(task.ID)
+	snapshot, ok := h.cloudMgr.SnapshotTask(task.ID, owner)
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "task created but not found"}, http.StatusInternalServerError)
 		return
@@ -115,6 +117,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 	}
 
 	results := make([]CloudBatchTaskResult, 0, len(req.URLs))
+	owner := ActorFrom(r.Context())
 	for _, entry := range req.URLs {
 		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.config.AllowPrivate)
 		if err != nil {
@@ -129,7 +132,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		}
 
 		// 批量始终异步：nil context
-		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil)
+		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner)
 		if taskErr != nil {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,
@@ -140,7 +143,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		// 使用快照避免并发读写 data race
-		snapshot, ok := h.cloudMgr.SnapshotTask(task.ID)
+		snapshot, ok := h.cloudMgr.SnapshotTask(task.ID, owner)
 		if !ok {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,
@@ -153,6 +156,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		// 成功项 URL 使用规范化值，与 GET /api/cloud/tasks/{id} 的详情一致
 		results = append(results, CloudBatchTaskResult{
 			ID:       snapshot.ID,
+			Owner:    snapshot.Owner,
 			URL:      cleanedURL,
 			Filename: cleanedFilename,
 			Status:   snapshot.Status,
@@ -185,14 +189,14 @@ func parseOffsetLimit(r *http.Request) (offset, limit int) {
 func (h *Handlers) cloudListTasks(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	offset, limit := parseOffsetLimit(r)
-	tasks, total := h.cloudMgr.ListTasks(status, offset, limit)
+	tasks, total := h.cloudMgr.ListTasks(status, offset, limit, ActorFrom(r.Context()))
 	sendJSONResponse(w, map[string]any{"tasks": tasks, "total": total}, http.StatusOK)
 }
 
 // cloudGetTask 处理 GET /api/cloud/tasks/{id}。
 func (h *Handlers) cloudGetTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	task, ok := h.cloudMgr.SnapshotTask(id)
+	task, ok := h.cloudMgr.SnapshotTask(id, ActorFrom(r.Context()))
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "task not found"}, http.StatusNotFound)
 		return
@@ -203,7 +207,7 @@ func (h *Handlers) cloudGetTask(w http.ResponseWriter, r *http.Request) {
 // cloudCancelTask 处理 POST /api/cloud/tasks/{id}/cancel。
 func (h *Handlers) cloudCancelTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.cloudMgr.CancelTask(id); err != nil {
+	if err := h.cloudMgr.CancelTask(id, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -225,7 +229,7 @@ func (h *Handlers) cloudCancelTask(w http.ResponseWriter, r *http.Request) {
 // cloudDeleteTask 处理 DELETE /api/cloud/tasks/{id}。
 func (h *Handlers) cloudDeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.cloudMgr.DeleteTask(id); err != nil {
+	if err := h.cloudMgr.DeleteTask(id, ActorFrom(r.Context())); err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "cloud_delete", ObjectType: "task", Object: id,
 			Result: AuditResultError, Detail: err.Error(),
@@ -253,7 +257,7 @@ func (h *Handlers) cloudResumeTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.cloudMgr.ResumeTask(id, req.Force); err != nil {
+	if err := h.cloudMgr.ResumeTask(id, req.Force, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -304,7 +308,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		normalized[i] = cloudfilename.Entry{URL: cleanedURL, Filename: cleanedFilename}
 	}
 
-	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized)
+	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized, ActorFrom(r.Context()))
 	if err != nil {
 		// 文件名冲突与重复 URL 均属客户端输入错误，映射 409 而非 500
 		if strings.Contains(err.Error(), "filename conflict") ||
@@ -322,7 +326,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	// 返回快照副本：SubmitAndStartGroup 返回的指针与 m.groups 共享，下载 goroutine
 	// 可能在 json.Marshal 期间并发写组状态字段（UpdateGroupStatus），需副本隔离防 data race。
-	snapshot, ok := h.cloudMgr.GetGroup(group.ID)
+	snapshot, ok := h.cloudMgr.GetGroup(group.ID, ActorFrom(r.Context()))
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "group created but not found"}, http.StatusInternalServerError)
 		return
@@ -333,20 +337,23 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 // cloudGetGroup 处理 GET /api/cloud/groups/{id}。
 func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	owner := ActorFrom(r.Context())
 
-	// 先刷新组状态，再读取最新快照（避免返回更新前的副本）
+	// 先刷新组状态，再读取最新快照（避免返回更新前的副本）。
+	// UpdateGroupStatus 对不可见组的刷新无副作用（不向调用方泄露信息），
+	// 随后 GetGroup 按 owner 过滤，跨 owner 组返回 404（防枚举）。
 	h.cloudMgr.UpdateGroupStatus(id)
-	group, ok := h.cloudMgr.GetGroup(id)
+	group, ok := h.cloudMgr.GetGroup(id, owner)
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "group not found"}, http.StatusNotFound)
 		return
 	}
 
-	// 获取组详情时一并返回子任务
+	// 获取组详情时一并返回子任务（仅对请求者可见的子任务，IDOR 防护）
 	h.cloudMgr.mu.RLock()
 	var tasks []*CloudTask
 	for _, tid := range group.TaskIDs {
-		if t, exists := h.cloudMgr.tasks[tid]; exists {
+		if t, exists := h.cloudMgr.tasks[tid]; exists && ownerVisible(t.Owner, owner) {
 			c := *t
 			tasks = append(tasks, &c)
 		}
@@ -365,21 +372,22 @@ func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) cloudListGroups(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	offset, limit := parseOffsetLimit(r)
-	// 先刷新所有组的最新状态，再按 status 过滤返回。否则只刷新"当前已处于该状态"
+	owner := ActorFrom(r.Context())
+	// 先刷新所有可见组的最新状态，再按 status 过滤返回。否则只刷新"当前已处于该状态"
 	// 的组，刚转换到目标状态的组会被过滤查询漏掉，客户端看到的状态滞后。
-	allGroups, _ := h.cloudMgr.ListGroups("", -1, 0)
+	allGroups, _ := h.cloudMgr.ListGroups("", -1, 0, owner)
 	for _, g := range allGroups {
 		h.cloudMgr.UpdateGroupStatus(g.ID)
 	}
 	// total 需按同 status 过滤后的总数计算（ListGroups 内部过滤后统计）
-	groups, total := h.cloudMgr.ListGroups(status, offset, limit)
+	groups, total := h.cloudMgr.ListGroups(status, offset, limit, owner)
 	sendJSONResponse(w, map[string]any{"groups": groups, "total": total}, http.StatusOK)
 }
 
 // cloudCancelGroup 处理 POST /api/cloud/groups/{id}/cancel。
 func (h *Handlers) cloudCancelGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.cloudMgr.CancelGroup(id); err != nil {
+	if err := h.cloudMgr.CancelGroup(id, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -393,7 +401,7 @@ func (h *Handlers) cloudCancelGroup(w http.ResponseWriter, r *http.Request) {
 // cloudDeleteGroup 处理 DELETE /api/cloud/groups/{id}。
 func (h *Handlers) cloudDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.cloudMgr.DeleteGroup(id); err != nil {
+	if err := h.cloudMgr.DeleteGroup(id, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -417,7 +425,7 @@ func (h *Handlers) cloudResumeGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.cloudMgr.ResumeGroup(id, req.Force); err != nil {
+	if err := h.cloudMgr.ResumeGroup(id, req.Force, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -432,7 +440,8 @@ func (h *Handlers) cloudResumeGroup(w http.ResponseWriter, r *http.Request) {
 // 收集组内所有已完成子任务的文件打包为单个 tar.gz（未完成任务跳过并记录）。
 func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	groupID := r.PathValue("id")
-	if _, ok := h.cloudMgr.GetGroup(groupID); !ok {
+	owner := ActorFrom(r.Context())
+	if _, ok := h.cloudMgr.GetGroup(groupID, owner); !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "group not found"}, http.StatusNotFound)
 		return
 	}
@@ -482,13 +491,13 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	var skippedTasks []string
 	var totalSourceSize int64
 
-	group, ok := h.cloudMgr.GetGroup(groupID)
+	group, ok := h.cloudMgr.GetGroup(groupID, owner)
 	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "group not found"}, http.StatusNotFound)
 		return
 	}
 	for _, taskID := range group.TaskIDs {
-		task, found := h.cloudMgr.SnapshotTask(taskID)
+		task, found := h.cloudMgr.SnapshotTask(taskID, owner)
 		if !found {
 			h.logger.Warn("cloud group archive: skipping task not found", "group_id", groupID, "task_id", taskID)
 			skippedTasks = append(skippedTasks, taskID)

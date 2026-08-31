@@ -32,6 +32,20 @@ var ErrStorageFull = errors.New("storage quota exceeded")
 // ErrNotFound 任务不存在。
 var ErrNotFound = errors.New("sync task not found")
 
+// ownerVisible 判定任务 owner 对请求者 owner 是否可见（多租户隔离规则，与
+// pkg/server 的 cloud owner 过滤一致）：
+//   - 请求者 owner 为空（管理员/未认证）→ 可见全部；
+//   - 请求者 owner 非空 → 任务 owner 为空（全局/旧任务，兼容所有用户）或与请求者一致才可见。
+//
+// 空 owner 任务对所有人可见是刻意设计：不破坏现有未认证/单用户部署（旧任务与
+// 未认证创建的任务无归属），且让空 owner 请求者承担管理员语义。
+func ownerVisible(taskOwner, reqOwner string) bool {
+	if reqOwner == "" {
+		return true
+	}
+	return taskOwner == "" || taskOwner == reqOwner
+}
+
 // QuotaStore 抽象存储配额接口（由 pkg/server.StorageManager 实现）。
 // cat 是存储分类（pkg/server.StorageCategory），syncmgr 只使用 CategoryUserFiles。
 type QuotaStore interface {
@@ -254,9 +268,13 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 		return nil, false, err
 	}
 	m.mu.Lock()
-	// 写锁内去重（retrying 仍是活跃任务，同样去重复用）
+	// 写锁内去重（retrying 仍是活跃任务，同样去重复用）。
+	// 去重限**对请求者 owner 可见**的任务（同 owner 或空 owner 全局兼容）：跨 owner 的
+	// 同参任务不吸收——否则 B 提交与 A 相同的 push 任务会返回 A 的任务（泄露 A 的归属
+	// 与进度，且 B 无法建立自己的同步），与 cloud findByURL 的去重语义保持一致。
 	for _, t := range m.tasks {
 		if t.Direction == req.Direction && t.Remote == req.Remote && t.Src == req.Src && t.Dst == req.Dst &&
+			ownerVisible(t.Owner, req.Owner) &&
 			(t.Status == StatusPending || t.Status == StatusSyncing || t.Status == StatusRetrying) {
 			c := *t
 			m.mu.Unlock()
@@ -291,6 +309,7 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 	now := time.Now()
 	task := &SyncTask{
 		ID:             newSyncTaskID(),
+		Owner:          req.Owner, // 服务端派生（ActorFrom ctx），客户端不可伪造
 		Direction:      req.Direction,
 		Remote:         req.Remote,
 		Src:            req.Src,
@@ -345,12 +364,13 @@ func (m *Manager) SubmitAndStart(req CreateRequest) (*SyncTask, bool, error) {
 	return task, isNew, nil
 }
 
-// Get 返回任务深拷贝（切片字段隔离，防止调用方误改污染活任务，审查 M-7），不存在返回 nil。
-func (m *Manager) Get(id string) *SyncTask {
+// Get 返回任务深拷贝（切片字段隔离，防止调用方误改污染活任务，审查 M-7），
+// 不存在或对请求者 owner 不可见（跨 owner，IDOR 防护）时返回 nil。
+func (m *Manager) Get(id, owner string) *SyncTask {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	t, ok := m.tasks[id]
-	if !ok {
+	if !ok || !ownerVisible(t.Owner, owner) {
 		return nil
 	}
 	c := *t
@@ -360,14 +380,18 @@ func (m *Manager) Get(id string) *SyncTask {
 	return &c
 }
 
-// List 返回任务元信息列表（CreatedAt 降序）。
-func (m *Manager) List() []SyncTaskMeta {
+// List 返回任务元信息列表（CreatedAt 降序），按请求者 owner 过滤：
+// owner 非空时只含匹配 owner 与空 owner（全局兼容）的任务；空 owner（管理员/未认证）返回全部。
+func (m *Manager) List(owner string) []SyncTaskMeta {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]SyncTaskMeta, 0, len(m.tasks))
 	for _, t := range m.tasks {
+		if !ownerVisible(t.Owner, owner) {
+			continue
+		}
 		out = append(out, SyncTaskMeta{
-			ID: t.ID, Direction: t.Direction, Remote: t.Remote,
+			ID: t.ID, Owner: t.Owner, Direction: t.Direction, Remote: t.Remote,
 			Src: t.Src, Dst: t.Dst, Status: t.Status, Retries: t.Retries,
 			FilesTotal: t.FilesTotal, FilesDone: t.FilesDone,
 			BytesTotal: t.BytesTotal, BytesDone: t.BytesDone,
@@ -384,10 +408,11 @@ func (m *Manager) List() []SyncTaskMeta {
 }
 
 // CancelTask 取消任务（pending/syncing/retrying 可取消；排队中任务也可取消）。
-func (m *Manager) CancelTask(id string) error {
+// 按请求者 owner 过滤：跨 owner 任务返回 ErrNotFound（404 防枚举，不泄露存在性）。
+func (m *Manager) CancelTask(id, owner string) error {
 	m.mu.Lock()
 	t, ok := m.tasks[id]
-	if !ok {
+	if !ok || !ownerVisible(t.Owner, owner) {
 		m.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
@@ -423,10 +448,11 @@ func (m *Manager) CancelTask(id string) error {
 }
 
 // DeleteTask 删除任务（任何状态均可删除），释放预留配额并移除持久化文件。
-func (m *Manager) DeleteTask(id string) error {
+// 按请求者 owner 过滤：跨 owner 任务返回 ErrNotFound（404 防枚举，不泄露存在性）。
+func (m *Manager) DeleteTask(id, owner string) error {
 	m.mu.Lock()
 	t, ok := m.tasks[id]
-	if !ok {
+	if !ok || !ownerVisible(t.Owner, owner) {
 		m.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}

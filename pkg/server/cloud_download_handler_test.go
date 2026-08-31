@@ -98,8 +98,8 @@ func TestCloudHandler_ListTasks(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100)
-	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200)
+	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
+	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
 
 	resp, err := http.Get(ts.URL + "/api/cloud/tasks")
 	if err != nil {
@@ -127,7 +127,7 @@ func TestCloudHandler_GetTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100)
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
 
 	resp, err := http.Get(ts.URL + "/api/cloud/tasks/" + task.ID)
 	if err != nil {
@@ -167,7 +167,7 @@ func TestCloudHandler_CancelTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100)
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
 	task.Status = "downloading"
 
 	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/cancel", "application/json", nil)
@@ -185,7 +185,7 @@ func TestCloudHandler_DeleteTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100)
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
 	task.Status = "completed"
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/cloud/tasks/"+task.ID, nil)
@@ -204,8 +204,8 @@ func TestCloudHandler_ListTasksFilterByStatus(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100)
-	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200)
+	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
+	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
 	t1.Status = "completed"
 	t2.Status = "failed"
 
@@ -731,7 +731,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 
 	// 等待失败
 	waitTaskDone(t, mgr, task.ID)
-	if cur, _ := mgr.SnapshotTask(task.ID); cur.Status != "failed" {
+	if cur, _ := mgr.SnapshotTask(task.ID, ""); cur.Status != "failed" {
 		t.Fatalf("expected failed task, got %q", cur.Status)
 	}
 

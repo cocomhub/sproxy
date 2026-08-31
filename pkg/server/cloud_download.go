@@ -27,8 +27,14 @@ import (
 const downloadsDirName = ".__downloads__"
 
 // CloudTask 表示一个云端下载任务。
+// Owner 是任务级多租户隔离字段（阶段 6 工作项 C）：创建时由请求 AK 派生
+// （SproxySig → AK；api_keys → key 名；未认证 → 空串）。过滤规则见 ownerVisible：
+// 空 owner（全局/旧任务/未认证创建）对所有人可见；非空 owner 只对匹配用户
+// （或空 owner 的管理员/未认证）可见。List/Get/Cancel/Delete/Resume 均按 owner 过滤，
+// 跨 owner 视为不存在（404 防枚举）。
 type CloudTask struct {
 	ID           string    `json:"id"`
+	Owner        string    `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
 	URL          string    `json:"url"`
 	Method       string    `json:"method"`     // "url" | "upload"
 	Filename     string    `json:"filename"`   // 云端存储文件名
@@ -49,8 +55,10 @@ type CloudTask struct {
 // CloudTaskGroup 表示一个云端下载任务组。
 // 每个子任务仍是独立的 CloudTask（文件保存在 .__cloud__/<taskID>/ 下），
 // 组只负责聚合元数据与组级操作（归档/取消/恢复）。
+// Owner 与子任务一致（创建组的请求 AK 派生），组级 List/Get/Cancel/Delete 按 owner 过滤。
 type CloudTaskGroup struct {
 	ID          string    `json:"id"`
+	Owner       string    `json:"owner,omitempty"` // 组归属（创建者 AK / API key 名；空 = 全局兼容）
 	Name        string    `json:"name"`
 	Status      string    `json:"status"` // downloading | completed | failed | cancelled
 	TaskIDs     []string  `json:"task_ids"`
@@ -82,6 +90,20 @@ type CloudDownloadConfig struct {
 
 // cloudReservePlaceholder 未知大小任务的存储占位大小（1 GiB）。
 const cloudReservePlaceholder = int64(1024 * 1024 * 1024)
+
+// ownerVisible 判定任务 owner 对请求者 owner 是否可见（多租户隔离规则，与
+// syncmgr.ownerVisible 一致）：
+//   - 请求者 owner 为空（管理员/未认证）→ 可见全部；
+//   - 请求者 owner 非空 → 任务 owner 为空（全局/旧任务，兼容所有用户）或与请求者一致才可见。
+//
+// 空 owner 任务对所有人可见是刻意设计：不破坏现有未认证/单用户部署（旧任务与
+// 未认证创建的任务无归属），且让空 owner 请求者承担管理员语义。
+func ownerVisible(taskOwner, reqOwner string) bool {
+	if reqOwner == "" {
+		return true
+	}
+	return taskOwner == "" || taskOwner == reqOwner
+}
 
 // applyCloudConfigDefaults 为 CloudDownloadConfig 的零值字段填充默认值。
 func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
@@ -264,10 +286,12 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 }
 
 // CreateTask 创建云端下载任务（不启动下载）。
-// 自动去重：相同 URL 的 pending/downloading 任务返回已有任务。
-func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64) (*CloudTask, error) {
-	// URL 去重：检查是否存在相同 URL 的活跃任务
-	if existing := m.findByURL(url); existing != nil {
+// owner 是请求认证派生的归属（SproxySig→AK / api_keys→key 名 / 未认证→空串），
+// 由 handler 传入，服务端不信任客户端输入。
+// 自动去重：相同 URL 且**对请求者可见**（同 owner 或全局空 owner）的活跃任务返回已有任务。
+func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSize int64, owner string) (*CloudTask, error) {
+	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）
+	if existing := m.findByURL(url, owner); existing != nil {
 		m.logger.Info("duplicate cloud download request, reusing existing task",
 			"url", url,
 			"existing_id", existing.ID,
@@ -293,6 +317,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 
 	task := &CloudTask{
 		ID:           newTaskID(),
+		Owner:        owner,
 		URL:          url,
 		Method:       method,
 		Filename:     filename,
@@ -324,8 +349,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 // （在调用方 goroutine 内完成，便于小文件请求同步返回）；否则始终异步。
 // 注意：服务端 handler 提交时大小未知（传 -1），因此实际请求恒异步；
 // 同步路径主要供调用方在已知小文件大小时使用。
-func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context) (*CloudTask, error) {
-	task, err := m.CreateTask(method, url, filename, totalSize)
+func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, totalSize int64, syncCtx context.Context, owner string) (*CloudTask, error) {
+	task, err := m.CreateTask(method, url, filename, totalSize, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -786,14 +811,16 @@ func (m *CloudDownloadManager) refreshTaskGroup(task *CloudTask) {
 	}
 }
 
-// findByURL 查找相同 URL 的活跃任务（去重）。
+// findByURL 查找相同 URL 且对请求者 owner 可见的活跃任务（去重）。
 // 仅匹配 pending/downloading 状态（排除 completed/failed/cancelled）。
+// owner 非空时只匹配同 owner 或空 owner（全局）任务——跨 owner 的同 URL 任务不吸收，
+// 避免把 A 的任务泄露给 B（IDOR）或让 B 的请求复用 A 的下载。
 // TODO: 如果 URL 数量增长到数百级别，考虑建立 url→ID 索引避免 O(n) 遍历。
-func (m *CloudDownloadManager) findByURL(url string) *CloudTask {
+func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, t := range m.tasks {
-		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") {
+		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") && ownerVisible(t.Owner, owner) {
 			c := *t
 			return &c
 		}
@@ -801,17 +828,18 @@ func (m *CloudDownloadManager) findByURL(url string) *CloudTask {
 	return nil
 }
 
-// GetTask 返回任务的快照（副本），避免并发修改导致 data race。
-func (m *CloudDownloadManager) GetTask(id string) (*CloudTask, bool) {
-	return m.SnapshotTask(id)
+// GetTask 返回任务的快照（副本），按请求者 owner 过滤（跨 owner 视为不存在）。
+func (m *CloudDownloadManager) GetTask(id, owner string) (*CloudTask, bool) {
+	return m.SnapshotTask(id, owner)
 }
 
 // SnapshotTask 返回任务的快照（副本），避免并发修改导致 data race。
-func (m *CloudDownloadManager) SnapshotTask(id string) (*CloudTask, bool) {
+// 按请求者 owner 过滤：跨 owner 任务返回 (nil, false)（404 防枚举，不泄露存在性）。
+func (m *CloudDownloadManager) SnapshotTask(id, owner string) (*CloudTask, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	t, ok := m.tasks[id]
-	if !ok {
+	if !ok || !ownerVisible(t.Owner, owner) {
 		return nil, false
 	}
 	c := *t
@@ -824,13 +852,14 @@ func (m *CloudDownloadManager) SnapshotTask(id string) (*CloudTask, bool) {
 // 随机值排序，但排序本身确定（同输入同输出），分页跨页仍稳定——仅同纳秒创建的任务
 // 顺序不代表创建序，属可接受（创建时间戳通常唯一）。
 // total 为按 status 过滤后的任务总数（不受分页影响）。
-func (m *CloudDownloadManager) ListTasks(status string, offset, limit int) ([]*CloudTask, int) {
+// owner 非空时只返回匹配 owner 与空 owner（全局兼容）的任务；空 owner（管理员/未认证）返回全部。
+func (m *CloudDownloadManager) ListTasks(status string, offset, limit int, owner string) ([]*CloudTask, int) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var all []*CloudTask
 	for _, t := range m.tasks {
-		if status == "" || t.Status == status {
+		if (status == "" || t.Status == status) && ownerVisible(t.Owner, owner) {
 			c := *t
 			all = append(all, &c)
 		}
@@ -859,10 +888,11 @@ func (m *CloudDownloadManager) ListTasks(status string, offset, limit int) ([]*C
 }
 
 // CancelTask 取消正在进行的任务。
-func (m *CloudDownloadManager) CancelTask(id string) error {
+// 按请求者 owner 过滤：跨 owner 任务返回 not found（404 防枚举，不泄露存在性）。
+func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 	m.mu.Lock()
 	t, ok := m.tasks[id]
-	if !ok {
+	if !ok || !ownerVisible(t.Owner, owner) {
 		m.mu.Unlock()
 		return fmt.Errorf("task not found: %s", id)
 	}
@@ -906,10 +936,11 @@ func (m *CloudDownloadManager) CancelTask(id string) error {
 }
 
 // DeleteTask 删除任务及其云端文件。
-func (m *CloudDownloadManager) DeleteTask(id string) error {
+// 按请求者 owner 过滤：跨 owner 任务返回 not found（404 防枚举，不泄露存在性）。
+func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	m.mu.Lock()
 	t, ok := m.tasks[id]
-	if !ok {
+	if !ok || !ownerVisible(t.Owner, owner) {
 		m.mu.Unlock()
 		return fmt.Errorf("task not found: %s", id)
 	}
@@ -1114,6 +1145,7 @@ func (m *CloudDownloadManager) recoverGroups() {
 		}
 		group := &CloudTaskGroup{
 			ID:         t.GroupID,
+			Owner:      t.Owner, // 继承子任务 owner，避免带 owner 的组被重建为全局可见（组级隔离漏洞）
 			Name:       t.GroupID,
 			Status:     "pending",
 			TaskIDs:    []string{t.ID},
@@ -1314,8 +1346,9 @@ var idCounter struct {
 }
 
 // CreateGroup 创建下载任务组。
+// owner 是请求认证派生的组归属，子任务写入同 owner（组级多租户隔离）。
 // 校验文件名冲突，创建子任务。
-func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Entry) (*CloudTaskGroup, error) {
+func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Entry, owner string) (*CloudTaskGroup, error) {
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("at least one URL is required")
 	}
@@ -1344,6 +1377,7 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 
 	group := &CloudTaskGroup{
 		ID:         groupID,
+		Owner:      owner,
 		Name:       name,
 		Status:     "pending",
 		TotalTasks: len(urls),
@@ -1375,7 +1409,7 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 			}
 		}
 		for i := len(newTaskIDs) - 1; i >= 0; i-- {
-			if err := m.DeleteTask(newTaskIDs[i]); err != nil {
+			if err := m.DeleteTask(newTaskIDs[i], owner); err != nil {
 				m.logger.Warn("failed to rollback group task", "task_id", newTaskIDs[i], "error", err)
 			}
 		}
@@ -1386,10 +1420,11 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 			rollback()
 			return nil, fmt.Errorf("invalid filename for %s: %w", entry.URL, err)
 		}
-		// 该 URL 已有活跃任务 → 本次是去重吸收既有任务，回滚时不删除
-		absorbed := m.findByURL(entry.URL) != nil
+		// 该 URL 已有**对请求者可见**的活跃任务 → 本次是去重吸收既有任务，回滚时不删除。
+		// 跨 owner 的同 URL 任务不可见，不吸收（各自独立下载，防组归属性混乱）。
+		absorbed := m.findByURL(entry.URL, owner) != nil
 
-		task, err := m.CreateTask("url", entry.URL, fn, -1)
+		task, err := m.CreateTask("url", entry.URL, fn, -1, owner)
 		if err != nil {
 			rollback()
 			return nil, fmt.Errorf("create task for %s: %w", entry.URL, err)
@@ -1445,8 +1480,8 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 }
 
 // SubmitAndStartGroup 创建组并启动所有子任务下载。
-func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []cloudfilename.Entry) (*CloudTaskGroup, error) {
-	group, err := m.CreateGroup(name, urls)
+func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []cloudfilename.Entry, owner string) (*CloudTaskGroup, error) {
+	group, err := m.CreateGroup(name, urls, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -1475,12 +1510,12 @@ func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []cloudfile
 	return group, nil
 }
 
-// GetGroup 获取组详情。
-func (m *CloudDownloadManager) GetGroup(id string) (*CloudTaskGroup, bool) {
+// GetGroup 获取组详情，按请求者 owner 过滤（跨 owner 组视为不存在，404 防枚举）。
+func (m *CloudDownloadManager) GetGroup(id, owner string) (*CloudTaskGroup, bool) {
 	m.groupMu.RLock()
 	defer m.groupMu.RUnlock()
 	g, ok := m.groups[id]
-	if !ok {
+	if !ok || !ownerVisible(g.Owner, owner) {
 		return nil, false
 	}
 	c := *g
@@ -1491,13 +1526,14 @@ func (m *CloudDownloadManager) GetGroup(id string) (*CloudTaskGroup, bool) {
 // offset<0 时不偏移；limit<=0 时返回全部（兼容现有语义）。
 // 排序：CreatedAt 降序 + ID 降序 tie-break（同 ListTasks 注释，确定性排序）。
 // total 为按 status 过滤后的组总数（不受分页影响）。
-func (m *CloudDownloadManager) ListGroups(status string, offset, limit int) ([]*CloudTaskGroup, int) {
+// owner 非空时只返回匹配 owner 与空 owner（全局兼容）的组；空 owner（管理员/未认证）返回全部。
+func (m *CloudDownloadManager) ListGroups(status string, offset, limit int, owner string) ([]*CloudTaskGroup, int) {
 	m.groupMu.RLock()
 	defer m.groupMu.RUnlock()
 
 	var all []*CloudTaskGroup
 	for _, g := range m.groups {
-		if status == "" || g.Status == status {
+		if (status == "" || g.Status == status) && ownerVisible(g.Owner, owner) {
 			c := *g
 			all = append(all, &c)
 		}
@@ -1525,17 +1561,18 @@ func (m *CloudDownloadManager) ListGroups(status string, offset, limit int) ([]*
 }
 
 // CancelGroup 取消组内所有 pending/downloading 任务（已完成任务跳过）。
-func (m *CloudDownloadManager) CancelGroup(groupID string) error {
+// 按请求者 owner 过滤：跨 owner 组返回 not found（404 防枚举）。
+func (m *CloudDownloadManager) CancelGroup(groupID, owner string) error {
 	m.groupMu.RLock()
 	group, ok := m.groups[groupID]
 	m.groupMu.RUnlock()
-	if !ok {
+	if !ok || !ownerVisible(group.Owner, owner) {
 		return fmt.Errorf("group not found: %s", groupID)
 	}
 
 	var errs []error
 	for _, tid := range group.TaskIDs {
-		if err := m.CancelTask(tid); err != nil {
+		if err := m.CancelTask(tid, owner); err != nil {
 			// 已完成/已失败任务不可取消、任务已被单独删除，均不视为组取消失败
 			if strings.Contains(err.Error(), "cannot cancel") || strings.Contains(err.Error(), "task not found") {
 				continue
@@ -1548,17 +1585,18 @@ func (m *CloudDownloadManager) CancelGroup(groupID string) error {
 }
 
 // DeleteGroup 删除组记录及所有子任务。
-func (m *CloudDownloadManager) DeleteGroup(groupID string) error {
+// 按请求者 owner 过滤：跨 owner 组返回 not found（404 防枚举）。
+func (m *CloudDownloadManager) DeleteGroup(groupID, owner string) error {
 	m.groupMu.RLock()
 	group, ok := m.groups[groupID]
 	m.groupMu.RUnlock()
-	if !ok {
+	if !ok || !ownerVisible(group.Owner, owner) {
 		return fmt.Errorf("group not found: %s", groupID)
 	}
 
 	var errs []error
 	for _, tid := range group.TaskIDs {
-		if err := m.DeleteTask(tid); err != nil {
+		if err := m.DeleteTask(tid, owner); err != nil {
 			// 组内任务被单独删除后，组级删除不应因此报错
 			if strings.Contains(err.Error(), "task not found") {
 				continue
@@ -1597,10 +1635,11 @@ func (m *CloudDownloadManager) waitTaskStopped(taskID string, timeout time.Durat
 // ResumeTask 恢复失败的下载任务。
 // force=true 时删除已有部分文件重新下载；force=false 时保留 .partial 由下载器
 // 通过 Range 续传（不再改名成 destPath，避免续传退化为全量下载）。
-func (m *CloudDownloadManager) ResumeTask(taskID string, force bool) error {
+// 按请求者 owner 过滤：跨 owner 任务返回 not found（404 防枚举）。
+func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner string) error {
 	m.mu.Lock()
 	task, ok := m.tasks[taskID]
-	if !ok {
+	if !ok || !ownerVisible(task.Owner, owner) {
 		m.mu.Unlock()
 		return fmt.Errorf("task not found: %s", taskID)
 	}
@@ -1681,17 +1720,18 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool) error {
 }
 
 // ResumeGroup 恢复组内所有失败/取消任务。
-func (m *CloudDownloadManager) ResumeGroup(groupID string, force bool) error {
+// 按请求者 owner 过滤：跨 owner 组返回 not found（404 防枚举）。
+func (m *CloudDownloadManager) ResumeGroup(groupID string, force bool, owner string) error {
 	m.groupMu.RLock()
 	group, ok := m.groups[groupID]
 	m.groupMu.RUnlock()
-	if !ok {
+	if !ok || !ownerVisible(group.Owner, owner) {
 		return fmt.Errorf("group not found: %s", groupID)
 	}
 
 	var errs []error
 	for _, tid := range group.TaskIDs {
-		if err := m.ResumeTask(tid, force); err != nil {
+		if err := m.ResumeTask(tid, force, owner); err != nil {
 			// 组内任务被单独删除后，组级恢复不应因此报错（与 CancelGroup/DeleteGroup 一致，
 			// 否则整个组 resume 会误返回 404 让用户以为组不存在）。
 			if strings.Contains(err.Error(), "task not found") {

@@ -68,7 +68,7 @@ func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManage
 // createCompletedTask 创建一个已完成的任务，并在 __cloud__/<id>/ 下创建测试文件。
 func createCompletedTask(t *testing.T, mgr *CloudDownloadManager, filename string) string {
 	t.Helper()
-	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100)
+	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestCloudArchive_TaskNotCompleted(t *testing.T) {
 	defer ts.Close()
 
 	// 创建一个未完成的任务（默认 status = "pending"）
-	task, err := mgr.CreateTask("url", "https://example.com/test.zip", "test.zip", 100)
+	task, err := mgr.CreateTask("url", "https://example.com/test.zip", "test.zip", 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}

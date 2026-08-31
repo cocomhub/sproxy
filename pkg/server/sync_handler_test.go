@@ -316,3 +316,169 @@ func TestSyncAPI_NotConfigured(t *testing.T) {
 		t.Fatalf("未配置 sync 应返回 400，got %d: %s", code, body)
 	}
 }
+
+// syncOwnerMux 构造把固定 actor 注入请求 ctx 后转发 sync handler 的 mux。
+// 模拟已认证请求（authMiddleware 会把 SproxySig AK / API key 名写入 ctx）。
+func syncOwnerMux(h *Handlers, actor string) *http.ServeMux {
+	wrap := func(hf http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			r = r.WithContext(withActor(r.Context(), actor))
+			hf(w, r)
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/sync/tasks", wrap(h.syncCreateTask))
+	mux.HandleFunc("GET /api/sync/tasks", wrap(h.syncListTasks))
+	mux.HandleFunc("GET /api/sync/tasks/{id}", wrap(h.syncGetTask))
+	mux.HandleFunc("POST /api/sync/tasks/{id}/cancel", wrap(h.syncCancelTask))
+	mux.HandleFunc("DELETE /api/sync/tasks/{id}", wrap(h.syncDeleteTask))
+	return mux
+}
+
+// doSyncOwner 以指定 actor 的 mux 发起请求，返回 (status, body)。
+func doSyncOwner(t *testing.T, mux *http.ServeMux, method, path, body string) (int, []byte) {
+	t.Helper()
+	var req *http.Request
+	if body != "" {
+		req = httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		req = httptest.NewRequest(method, path, nil)
+	}
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr.Code, rr.Body.Bytes()
+}
+
+// TestSyncAPI_OwnerFiltering 验证同步任务 API 的多租户隔离（阶段 6 工作项 C）：
+// 不同 AK 用户只能看到/操作自己的任务；admin（空 owner）可见全部；API 返回 owner。
+func TestSyncAPI_OwnerFiltering(t *testing.T) {
+	srv := emptyRemote(t)
+	h, _ := newSyncTestEnv(t, srv.URL, nil)
+	// 预置源文件使 push 任务可成功（避免快速 failed）
+	if err := os.WriteFile(filepath.Join(h.cfgPtr.Load().UploadsDir, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.cfgPtr.Load().UploadsDir, "b.txt"), []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	muxA := syncOwnerMux(h, "ak-A")
+	muxB := syncOwnerMux(h, "ak-B")
+	muxAdmin := syncOwnerMux(h, "")
+
+	// A 与 B 各创建任务
+	code, body := doSyncOwner(t, muxA, "POST", "/api/sync/tasks", `{"direction":"push","remote":"r1","src":"a.txt"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("A 创建应 201, got %d: %s", code, body)
+	}
+	var taskA syncmgr.SyncTask
+	if err := json.Unmarshal(body, &taskA); err != nil {
+		t.Fatal(err)
+	}
+	if taskA.Owner != "ak-A" {
+		t.Fatalf("A 创建任务 Owner = %q, want ak-A", taskA.Owner)
+	}
+
+	code, body = doSyncOwner(t, muxB, "POST", "/api/sync/tasks", `{"direction":"push","remote":"r1","src":"b.txt"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("B 创建应 201, got %d: %s", code, body)
+	}
+	var taskB syncmgr.SyncTask
+	if err := json.Unmarshal(body, &taskB); err != nil {
+		t.Fatal(err)
+	}
+	if taskB.Owner != "ak-B" {
+		t.Fatalf("B 创建任务 Owner = %q, want ak-B", taskB.Owner)
+	}
+
+	// A 的列表只含 A 的任务
+	code, body = doSyncOwner(t, muxA, "GET", "/api/sync/tasks", "")
+	if code != http.StatusOK {
+		t.Fatalf("A 列表应 200, got %d", code)
+	}
+	var listA struct {
+		Tasks []syncmgr.SyncTaskMeta `json:"tasks"`
+	}
+	if err := json.Unmarshal(body, &listA); err != nil {
+		t.Fatal(err)
+	}
+	if len(listA.Tasks) != 1 || listA.Tasks[0].ID != taskA.ID || listA.Tasks[0].Owner != "ak-A" {
+		t.Fatalf("A 列表应只含 A 的任务且带 owner: %s", body)
+	}
+
+	// A Get B 的任务 → 404
+	code, _ = doSyncOwner(t, muxA, "GET", "/api/sync/tasks/"+taskB.ID, "")
+	if code != http.StatusNotFound {
+		t.Fatalf("A Get B 的任务应 404, got %d", code)
+	}
+
+	// A 取消/删除 B 的任务 → 404
+	code, _ = doSyncOwner(t, muxA, "POST", "/api/sync/tasks/"+taskB.ID+"/cancel", "")
+	if code != http.StatusNotFound {
+		t.Fatalf("A 取消 B 的任务应 404, got %d", code)
+	}
+	code, _ = doSyncOwner(t, muxA, "DELETE", "/api/sync/tasks/"+taskB.ID, "")
+	if code != http.StatusNotFound {
+		t.Fatalf("A 删除 B 的任务应 404, got %d", code)
+	}
+
+	// B 的任务仍存在（未被 A 取消/删除）
+	code, _ = doSyncOwner(t, muxB, "GET", "/api/sync/tasks/"+taskB.ID, "")
+	if code != http.StatusOK {
+		t.Fatalf("B 的任务应仍存在, got %d", code)
+	}
+
+	// admin（空 owner）可见全部
+	code, body = doSyncOwner(t, muxAdmin, "GET", "/api/sync/tasks", "")
+	if code != http.StatusOK {
+		t.Fatalf("admin 列表应 200, got %d", code)
+	}
+	var listAdmin struct {
+		Tasks []syncmgr.SyncTaskMeta `json:"tasks"`
+	}
+	if err := json.Unmarshal(body, &listAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if len(listAdmin.Tasks) != 2 {
+		t.Fatalf("admin 列表应含 2 条任务: %s", body)
+	}
+}
+
+// TestSyncAPI_UnauthenticatedOwnerEmpty 验证未认证创建同步任务 → owner 空（全局兼容）。
+func TestSyncAPI_UnauthenticatedOwnerEmpty(t *testing.T) {
+	srv := emptyRemote(t)
+	h, _ := newSyncTestEnv(t, srv.URL, nil)
+	if err := os.WriteFile(filepath.Join(h.cfgPtr.Load().UploadsDir, "u.txt"), []byte("u"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	muxAdmin := syncOwnerMux(h, "")
+
+	code, body := doSyncOwner(t, muxAdmin, "POST", "/api/sync/tasks", `{"direction":"push","remote":"r1","src":"u.txt"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("未认证创建应 201, got %d: %s", code, body)
+	}
+	var task syncmgr.SyncTask
+	if err := json.Unmarshal(body, &task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Owner != "" {
+		t.Fatalf("未认证创建任务 Owner = %q, want 空", task.Owner)
+	}
+
+	// 认证用户 A 的列表应能看到空 owner 任务（全局兼容）
+	muxA := syncOwnerMux(h, "ak-A")
+	code, body = doSyncOwner(t, muxA, "GET", "/api/sync/tasks", "")
+	if code != http.StatusOK {
+		t.Fatalf("A 列表应 200, got %d", code)
+	}
+	var listResp struct {
+		Tasks []syncmgr.SyncTaskMeta `json:"tasks"`
+	}
+	if err := json.Unmarshal(body, &listResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResp.Tasks) != 1 {
+		t.Fatalf("A 应能看见空 owner 任务, got %d: %s", len(listResp.Tasks), body)
+	}
+}
