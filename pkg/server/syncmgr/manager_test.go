@@ -78,6 +78,21 @@ func waitForStatus(t *testing.T, mgr *Manager, id, want string, timeout time.Dur
 	return nil
 }
 
+// waitStarted 确定性等待 mock 执行器的 Run 被调用（= 任务已拿信号量、进入执行）。
+// 对齐 flaky-network-test-pattern：用 channel 信号而非死等固定超时轮询状态——
+// CI Windows -race + cover 下 goroutine 启动/状态流转慢，死等必然 flake。
+func waitStarted(t *testing.T, m *mockExecutor) {
+	t.Helper()
+	if m.started == nil {
+		t.Fatal("waitStarted 需要带 started 信号的 mock 执行器（newBlockingMockExecutor）")
+	}
+	select {
+	case <-m.started:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("executor.Run 未被调用（任务未在 30s 内开始执行）")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // CreateTask 校验
 // ---------------------------------------------------------------------------
@@ -212,12 +227,19 @@ func TestSubmitAndStart_StateMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.Status != StatusPending {
-		t.Fatalf("SubmitAndStart 返回的任务应为 pending，got %q", task.Status)
+	// 注意：SubmitAndStart 返回的是内部共享指针，后台 goroutine 可能已把状态推进到
+	// syncing，直接读 task.Status 是数据竞争（-race 偶发捕获）。用 mgr.Get 取加锁快照：
+	// 刚提交的任务必为 pending，或已被后台 goroutine 快速推进到 syncing（均非终态，合法）。
+	if st := mgr.Get(task.ID).Status; st != StatusPending && st != StatusSyncing {
+		t.Fatalf("SubmitAndStart 返回后任务应处于 pending 或 syncing（执行中），got %q", st)
 	}
 
-	// 执行器阻塞 → 任务停在 syncing
-	waitForStatus(t, mgr, task.ID, "syncing", 5*time.Second)
+	// 执行器阻塞 → 任务停在 syncing。用 started 信号确定性等 Run 被调用
+	// （= 已拿信号量、进入 syncing），而非死等固定超时轮询状态。
+	waitStarted(t, blocking)
+	if got := mgr.Get(task.ID).Status; got != StatusSyncing {
+		t.Fatalf("执行器阻塞期间任务应停在 syncing，got %q", got)
+	}
 
 	blocking.release()
 	done := waitForStatus(t, mgr, task.ID, "completed", 10*time.Second)
@@ -276,8 +298,9 @@ func TestCancelTask_Queued(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A 取得唯一信号量进入 syncing；B 排队保持 pending
-	waitForStatus(t, mgr, taskA.ID, "syncing", 5*time.Second)
+	// A 取得唯一信号量进入 syncing；B 排队保持 pending。
+	// 用 started 信号确定性等 A 的 executor.Run 被调用（= 已持有信号量、进入 syncing）。
+	waitStarted(t, blocking)
 	b := mgr.Get(taskB.ID)
 	if b.Status != StatusPending {
 		t.Fatalf("B 排队期间应保持 pending，got %q", b.Status)
@@ -300,7 +323,8 @@ func TestCancelTask_Running(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForStatus(t, mgr, task.ID, "syncing", 5*time.Second)
+	// 用 started 信号确定性等 executor.Run 被调用（= 已持有信号量、进入 syncing）。
+	waitStarted(t, blocking)
 	if err := mgr.CancelTask(task.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +429,8 @@ func TestRecoverTasks_RestartSyncing(t *testing.T) {
 		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 	t.Cleanup(mgr2.Stop)
 
-	waitForStatus(t, mgr2, task.ID, "syncing", 5*time.Second)
+	// 恢复的 syncing 任务应重启执行：用 started 信号确定性等 executor.Run 被调用。
+	waitStarted(t, blocking)
 	blocking.release()
 	recovered := waitForStatus(t, mgr2, task.ID, "completed", 10*time.Second)
 	if recovered.Direction != "pull" || recovered.Src != "" || recovered.Dst != "restored" {
