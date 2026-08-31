@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788175532366,
+  "lastUpdate": 1788176039872,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -315078,6 +315078,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1303444 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "06e7a75b7f84d99d0a73655b0f557d9b895b172d",
+          "message": "refactor(signal,sync,mesh): 阶段5 前置铺底——cand 预留注释化 + syncmgr/smesh E2E 死等去确定性信号 (#138)\n\n* chore(signal): cand 保留为 trickle ICE 预留注入点，补注释说明（非删除）\n\n用户反馈：部分实现是为未来预留的死代码，不应无脑删除。将 T3 从\"删 Cand 死字段\"\n改为\"保留注入点 + 文档化\"：\n\n- SignalKind 补注释：candidate 为 trickle ICE 预留（当前 non-trickle，ICE 候选全内联\n  SDP、无生产 sender/consumer）；保留常量与 endpoint 的原因 = 兼容存量对端\n  （连 /api/signal/candidate 不 404）+ 未来 trickle 增量复用本信令通道\n  （SignalQueue PopKind/Peek/Confirm 已按 kind 通用）。\n- SignalMsg.Cand 字段补注释（json:\"cand\" 协议字段勿删），保留。\n- signaling_client post 的 cand 参数保留，SendOffer/SendAnswer 注释说明\"候选预留、恒传空串\"。\n- handlers.go candidate endpoint 两处（srvMux+localMux）保留，补预留注释。\n- persist_test 恢复 candidate 快照往返用例（覆盖 Cand 字段往返保留）。\n\n工作量评估记录（供未来决策）：完整 trickle 实现 = 服务端 ~0.5h（endpoint+push 复用）\n+ 客户端 webrtc 集成 1-2 天（OnICECandidate/AddICECandidate 双向桥 + 与 SDP 内联并存\n+ 时序测试），收益为纯首连提速，故不在阶段 5 铺底内实现。\n\n另：TestSnapshotSignalQueue_RoundTrip 修正原\"Cand 计数\"误解——SnapshotSignalQueue\n返回 per-peer 收件箱数（MessageSnap 序列），3 条同 peer 消息 = 1 快照含 3 条。\n\n* test(sync,mesh): syncmgr 真实执行器取消去确定性信号 + mesh node E2E 死等注释澄清\n\nT2（阶段 5 前置铺底 flake 残留）：\nTestManager_RealExecutor_Cancel 原用 waitForStatus(_, \"syncing\", 5s) 固定轮询死等，\nCI -race+cover 下 executor goroutine 启动慢必然偶发超时（#136 只处理了 mock executor\n用例，integration 用真实 executor 无 started 信号，故漏网）。\n改造：newBlockingListMux 增加 hitCh —— GET /api/files handler 首次被调用即 close\n（= executor 已开始远程枚举 = 任务已进入 syncing），测试用 select{<-execStarted,\n<-time.After} 确定性等待替代轮询；取消后仍保留 waitForStatus(\"cancelled\")（终态\n有 release 宽限稳健）。10s 上限远超首次报表时间，逻辑上不再依赖固定等待。\n\nT4（mesh node E2E 死等澄清，非阻塞改动）：\nTestE2E_MeshNode_Discovery / ServiceAccess 的 20s stderr 轮询是二进制级 E2E——mesh\nnode 的 DiscoveryPeers 确定性通道属库内 NodeConfig，不通过 CLI 暴露给子进程，故无法\n在本测试内替代为信号。改为注释说明该限制 + 失败时打印 stderr（防 flake 被吞），\n保留 20s 上限。确定性富余量由库内 DiscoveryPeers 的其他单测覆盖。\n\nT5（CLAUDE.md 技术债更新）：\n历史 4 条债务已全部修复（信号 goroutine / findModuleRoot / mux retransmit /\nparseDuration），标记\"已修复\"防误导；补现存 3 条真实债务（rename TOCTOU /\ncloud O(n) 遍历 / rateLimiter 热更新 TODO）。\n\n* docs(CLAUDE): 已知技术债务——删除已修复的 4 条历史条目，仅留现存 3 条\n\n用户反馈：已修复的内容从 CLAUDE.md 中删除（不保留'已修复'标注占位）。\n4 条（信号 goroutine / findModuleRoot / mux retransmit / parseDuration）已在本\n会话核实全部修复，直接移除；保留现存真实债务（rename TOCTOU / cloud O(n) 遍历 /\nrateLimiter 热更新 TODO）。",
+          "timestamp": "2026-08-31T19:29:42+08:00",
+          "tree_id": "f2e8a222d43b134473ad2985ff836418435400df",
+          "url": "https://github.com/cocomhub/sproxy/commit/06e7a75b7f84d99d0a73655b0f557d9b895b172d"
+        },
+        "date": 1788176031673,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 926.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1288626 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 926.9,
+            "unit": "ns/op",
+            "extra": "1288626 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1288626 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1288626 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 948.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1275367 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 948.7,
+            "unit": "ns/op",
+            "extra": "1275367 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1275367 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1275367 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 940.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1281303 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 940.5,
+            "unit": "ns/op",
+            "extra": "1281303 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1281303 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1281303 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 941.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1174232 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 941.5,
+            "unit": "ns/op",
+            "extra": "1174232 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1174232 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1174232 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 944.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1271766 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 944.2,
+            "unit": "ns/op",
+            "extra": "1271766 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1271766 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1271766 times\n4 procs"
           }
         ]
       }
