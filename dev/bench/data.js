@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788199056410,
+  "lastUpdate": 1788200948212,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -317330,6 +317330,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1312006 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7125687ca893f348341c584af2f3e2c5779f21de",
+          "message": "feat(webrtc): TURN REST 短期凭证——coturn 标准动态凭据，REST 优先静态回落 (#141)\n\n* feat(webrtc): TURN REST 短期凭证——coturn 标准动态凭据，REST 优先静态回落（阶段5 工作项3 PR-1）\n\nTURN 静态密码模式凭证不轮换，长期部署不便。新增 REST API 短期凭证（coturn\ndraft-uberti-behave-turn-rest-00），使对称 NAT 打洞使用自动续期的临时凭据。\n\n- webrtc/turnrest.go: SetTURNRESTURL(url, username, service)——惰性拉取（首次\n  newPC 前，2s 超时）+ 单飞（并发首拉只打一次）+ TTL 缓存（剩余 <60s 续期）；\n  GET {url}?username=..&service=.. → {username: \"TTL:user\", password:\n  base64(HMAC-SHA1), ttl}（客户端透传到 pion，不自算 HMAC）。失败降级：日志 +\n  回落静态凭据/仅 STUN，不 panic、不阻塞打洞回落 hub 中继。安全：https 强推、\n  http 仅 loopback（对齐 sync_remotes 明文模式）、参数长度 ≤512、响应体 ≤64KiB。\n- webrtc/webrtc.go: defaultConfig() 凭据来源 REST 优先 > 静态 fallback；两者皆无\n  不下发 TURN（pion 对无凭据 turn URL 报 ErrNoTurnCredentials）。\n- cmd/sclient: addTURNRESTFlags/applyTURNRESTFlags 共享辅助 + mesh/p2p/socks/udp/\n  mesh_node 接线 --turn-rest/--turn-rest-user/--turn-rest-service（配 --turn 使用，\n  REST 优先）。relay 不加（relay 从不创建 PeerConnection，--turn 静态也未加）。\n\n13 测试（TDD 红→绿）：webrtc 10（安全校验表驱动/TURNRESTEntry 透传/TTL 缓存/\n低 TTL 续期/失败回落静态/无静态回落 STUN/畸形响应回落/单飞 8 并发 1 次/拉取超时）+\nsclient 3（flag no-op/合法 URL/非 loopback http fail-closed）。既有 turn_cred/\nwebrtc/diag_stun 测试不回归。\n\n验证：webrtc + sclient 子模块 go test -race 全绿；vet + golangci-lint 0 issues；\ngofmt 合规；主 module build 通过。\n\n* fix(webrtc): TURN REST 审查修复——重定向边界/失败保留旧缓存/query 合并/凭据校验（PR-1 复审）\n\nPR-1 对抗审查（无 Critical/Important，单飞+缓存+续期并发正确性确认成立）发现\n5 Minor，全修：\n\n- M-1（安全纵深）REST 拉取跟随重定向绕过 http-loopback 边界：http.DefaultClient\n  默认跟随 302，https 端点可被劫持到非 loopback http（凭据 query 明文上线）。修：\n  自定义 turnRESTClient，CheckRedirect 拒绝非 https/非 loopback http 重定向目标。\n- M-2（健壮性）拉取失败无条件清空旧缓存导致持续重拉 + Warn 刷屏：改为保留仍有效\n  旧缓存（未过期继续用）+ 失败退避（turnRESTFetchBackoff=30s 内不重拉）；成功清除\n  退避；SetTURNRESTURL 变更重置退避。\n- M-3（正确性）base URL 已有 query（?realm=..）被整段覆盖：改 q := u.Query() 合并。\n- M-4（fail-fast）响应 username 未校验 TTL:user 格式、ttl 无上限：加\n  turnRESTTTLUserRegexp（^\\d+:）校验非格式拒绝；ttl 超 24h 按上限截断（防 Duration\n  溢出为负导致每次 newPC 重拉）。\n- M-5（安全卫生）Warn 日志含完整请求 URL（带 username query）：redactURLQuery\n  剥离 query、redactCredential 脱敏凭据后记录。\n\n新增 5 测试（TDD 红→绿）：RedirectRejected / KeepStaleCacheOnFailure /\nExistingQueryPreserved / MalformedUsernameRejected / LargeTTLCapped。既有 13 测试\n不回归。\n\n验证：webrtc + sclient 子模块 go test -race 全绿；vet + golangci-lint 0 issues；\ngofmt 合规；主 module build 通过。",
+          "timestamp": "2026-09-01T02:06:03+08:00",
+          "tree_id": "188282903542ce55ef7849d090366a2a844560b8",
+          "url": "https://github.com/cocomhub/sproxy/commit/7125687ca893f348341c584af2f3e2c5779f21de"
+        },
+        "date": 1788200939997,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 971,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1303910 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 971,
+            "unit": "ns/op",
+            "extra": "1303910 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1303910 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1303910 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 924.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1304482 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 924.4,
+            "unit": "ns/op",
+            "extra": "1304482 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1304482 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1304482 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 916.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1311472 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 916.5,
+            "unit": "ns/op",
+            "extra": "1311472 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1311472 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1311472 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1315180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921.1,
+            "unit": "ns/op",
+            "extra": "1315180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1315180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1315180 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 926.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1308504 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 926.2,
+            "unit": "ns/op",
+            "extra": "1308504 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1308504 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1308504 times\n4 procs"
           }
         ]
       }
