@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788209841999,
+  "lastUpdate": 1788210250831,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -318602,6 +318602,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1305770 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "be48527baf6ad67171311bfa0feea02322a09fbb",
+          "message": "feat(server): 操作审计日志 (#145)\n\n* feat(server): 操作审计日志——可检索\"谁在何时对哪个对象做了什么\"（阶段6 工作项B P0）\n\n敏感操作（DELETE/rename/版本 restore/配置变更/云端 cancel/delete）只记普通 slog 无\n操作主体（AK/mesh），不可追责。新增结构化审计：\n\n- pkg/server/audit.go: AuditEvent{Action/Actor/Mesh/ObjectType/Object/Result/Detail/TS}\n  + RecordAudit（独立 auditLogger，固定 JSON 不随 log_format 切换，机器可检索；\n  actor/mesh 未填自动从 ctx 读；logger nil 回退 slog.Default 不 panic）。\n- auth.go: withActor/ActorFrom ctx 注入——SproxySig 验签后写 AK，api_keys 写 key 名\n  （Name 空回退 Key）；matchAPIKey 返回 actor。\n- requestlog.go + metrics.go: actorCarrier 接口 + setResponseActor——authMiddleware 在\n  requestLog 之后运行，ctx 不回传，经 ResponseWriter 携带 actor 回请求完成日志。\n- 覆盖：delete（单+批）、rename（单+批）、版本 restore/delete、config 变更、云端\n  cancel/delete，success/denied/error 全记录。未认证请求省略 actor 字段。\n\n18 测试（TDD 红→绿）：RecordAudit JSON/ctx 自动填充/默认 TS、auth actor 注入\n（SproxySig/APIKey/Name 回退/未认证空）、delete/rename/config/version/cloud 各\nsuccess/error/denied、requestlog 带 actor。\n\n验证：server 全量 go test -race 全绿；vet + golangci-lint 0 issues；gofmt 合规；\n主 build + cmd/sproxy 通过。未触碰 pkg/sync/syncmgr（工作项 A 已闭环）。\n\n* fix(server): 操作审计审查修复——rename 假成功/API key 脱敏/覆盖审计/失败补记（PR-145 复审）\n\n对抗审查（无 Critical，隧道内层 actor 传播可靠）发现 4 Important + 5 Minor，修\nI-1/I-2/I-4 + M-1/M-4 + upload 覆盖审计（I-3 的 share/hub/cloud group 为后续增强）：\n\n- I-1（Important）rename 目标已存在（409）产出 denied+假 success 双审计：原\n  `return err`（err 恰为 nil）让调用方误判成功并追加 success 审计行（被拒绝的 rename\n  记为成功，破坏审计可信度）。修：返回非 nil 哨兵错误 errors.New(\"rename: 目标路径\n  已存在\")。补 TestRenameHandler_RecordsAuditDenied_NoFalseSuccess 回归（409 + 仅\n  denied 无 success）。\n- I-2（安全 MEDIUM，与自动安全审查同源）API key 无 Name 时 actor 回退原始 Bearer\n  令牌明文落审计/请求日志（凭据泄露）。修：回退 SHA-256 摘要前缀（key_<12hex>），\n  绝不把原始 key 落日志；测试断言改为摘要。\n- I-4（Important）batch rename 失败路径无审计：checksum 不匹配/父目录失败/rename\n  失败补审计（denied/error），与单条 rename 及 batch delete 对齐。\n- I-3（部分）upload 覆盖（versioning 关闭 = 静默数据丢失）补审计：versioning 启用\n  覆盖记 success（版本已保存），versioning 关闭拒绝覆盖记 denied。\n- M-1 requestlog actor：mw.actor() 为空时回退 ActorFrom(r.Context())（隧道内层\n  ctx 有 actor 但 setResponseActor 未内层调用）。\n- M-4 delete 失败审计 Detail 含绝对路径（os.Remove 错误）→ 改固定文案，错误详情\n  记业务日志。\n\n验证：server 全量 go test -race 全绿（含新回归测试）；vet + golangci-lint 0 issues；\ngofmt 合规；主 build + cmd/sproxy 通过。",
+          "timestamp": "2026-09-01T04:59:51+08:00",
+          "tree_id": "0f98534cba35e7e8af113324e937cc46a46477d8",
+          "url": "https://github.com/cocomhub/sproxy/commit/be48527baf6ad67171311bfa0feea02322a09fbb"
+        },
+        "date": 1788210241275,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 915.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1325406 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 915.5,
+            "unit": "ns/op",
+            "extra": "1325406 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1325406 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1325406 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 922.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1304473 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 922.7,
+            "unit": "ns/op",
+            "extra": "1304473 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1304473 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1304473 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 914.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1311075 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 914.4,
+            "unit": "ns/op",
+            "extra": "1311075 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1311075 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1311075 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 935.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1227301 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 935.2,
+            "unit": "ns/op",
+            "extra": "1227301 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1227301 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1227301 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 913.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1297680 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 913.6,
+            "unit": "ns/op",
+            "extra": "1297680 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1297680 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1297680 times\n4 procs"
           }
         ]
       }
