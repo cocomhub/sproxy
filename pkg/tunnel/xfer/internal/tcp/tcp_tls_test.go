@@ -153,6 +153,14 @@ func TestTcpTLS_RoundTrip(t *testing.T) {
 	if string(got) != string(msg) {
 		t.Fatalf("server 收到 %q, want %q", got, msg)
 	}
+	// 双向往返（审查 M-3）：客户端也必须能解密读取服务端 Send 的消息。
+	reply := make([]byte, len("reply"))
+	if err := readFull(ctx, clientConn, reply); err != nil {
+		t.Fatalf("client Receive: %v", err)
+	}
+	if string(reply) != "reply" {
+		t.Fatalf("client 收到 %q, want %q", reply, "reply")
+	}
 }
 
 // TestTcpTLS_WrongCARejected 验证客户端不信任服务端证书时握手失败（fail-closed）。
@@ -172,8 +180,9 @@ func TestTcpTLS_WrongCARejected(t *testing.T) {
 	addr := lna.Addr()
 
 	// 服务端必须接受连接并参与 TLS 握手，客户端才会收到服务端证书后校验失败。
-	// wrong-CA 客户端握手失败 → Accept 内部握手失败跳过该连接并继续等待；
-	// goroutine 随 ctx 取消 / ln.Close 退出。
+	// TlsListener 内部并发握手：accept 循环接受连接、后台 handshakeConn 握手；
+	// wrong-CA 客户端握手失败 → 该连接被丢弃，accept 继续等待。goroutine 随
+	// ctx 取消 / ln.Close 退出。
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for {
@@ -182,7 +191,9 @@ func TestTcpTLS_WrongCARejected(t *testing.T) {
 			}
 		}
 	})
-	defer wg.Wait()
+	// defer LIFO：先 cancel（accept goroutine 立即退出）再 wg.Wait，ln.Close 最后收尾，
+	// 避免 3s 死等拖尾（审查 I-2）。
+	defer func() { cancel(); wg.Wait() }()
 
 	// 客户端信任一个无关的 self-signed CA（同函数生成、不同 CA）。
 	_, otherCfg := testTLSConfig(t)
@@ -209,11 +220,14 @@ func TestTcpTLS_RegistryVariant(t *testing.T) {
 		t.Fatal(`xfer.Get("tcp+tls") 应返回已注册的 TLS 变体`)
 	}
 
-	// 未设置默认配置 → Dial 明确报错（fail-closed）。
+	// 未设置默认配置 → Dial / Listen 明确报错（fail-closed，审查 M-4）。
 	ctx := t.Context()
 	tcp.SetDefaultTLSConfig(nil)
 	if _, err := tp.Dial(ctx, "127.0.0.1:1"); err == nil {
 		t.Fatal("未设置默认 TLS 配置时 tcp+tls 变体 Dial 应报错")
+	}
+	if _, err := tp.Listen(ctx, "127.0.0.1:0"); err == nil {
+		t.Fatal("未设置默认 TLS 配置时 tcp+tls 变体 Listen 应报错")
 	}
 
 	// 设置后即可用：用一个**自包含**配置（同时含服务端证书 + 客户端信任池 +
@@ -253,7 +267,6 @@ func TestTcpTLS_RegistryVariant(t *testing.T) {
 	if acceptErr != nil {
 		t.Fatal(acceptErr)
 	}
-	_ = serverCfg
 }
 
 // TestTcpTLS_HandshakeFailureSkips 验证：对端发垃圾/TLS 握手失败时，Accept 跳过该
