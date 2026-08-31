@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788189109878,
+  "lastUpdate": 1788194206831,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -316342,6 +316342,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1294166 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4aba023bfca0e4e71b9cd6cc672bc2e8f5524746",
+          "message": "feat(xfer): tcp+tls 传输 + xfer TLS listener 服务端接线 + sclient 客户端装配 + e2e (#139)\n\n* feat(xfer): tcp+tls 传输变体——DialTLS/ListenTLS + 注册名（阶段5 工作项1 PR-1）\n\nTCP 传输层（pkg/tunnel/xfer/internal/tcp）裸明文无 TLS，公网中继数据面明文；\n本 PR 新增 TLS 变体，为后续 --xfer 服务端 listener 接线（PR-3~5）铺底。\n\n- tcp_tls.go: DialTLS/ListenTLS(ctx, addr, *tls.Config) + TlsListener（Accept 逐连接\n  tls.Server 握手，握手失败跳过继续接受，恶意对端不能打停 listener）；init() 注册\n  \"tcp+tls\" 变体；SetDefaultTLSConfig 包级默认配置，未设置时变体 Dial/Listen 返回\n  明确错误（fail-closed，禁无凭据静默明文）——与 ws 传输 DialWithOptions 包级注入\n  先例一致。TLS 1.2 下限；Dialer 侧 ServerName 缺省取 addr host。\n- tcp_tls_test.go: RoundTrip（握手+载荷往返）/ WrongCARejected（不受信任 CA 快速\n  fail-closed）/ RegistryVariant（注册名可用 + 未设默认配置报错）/ HandshakeFailureSkips\n  （垃圾连接握手失败 listener 不停摆）4 测试，x509 自签 CA loopback，-race 通过。\n- docs: 阶段5 规格文档同步——status planning→active，T3 cand 注释化保留（#138 已\n  实施，从\"删除\"改\"加注释\"），§3.6 PR-1 标注已就绪。\n\n* fix(xfer): tcp+tls 对抗审查修复——并发握手 + 30s 超时 + 测试去死等（PR-1 复审）\n\n对抗式审查发现 2 个必须修复缺陷 + 4 个应修项，全部闭环：\n\n- C-1（Critical）握手无超时 + 串行阻塞：TlsListener.Accept 原来每连接在 accept\n  循环内同步握手，无 deadline → 未认证空连接永久占住 accept，后续合法连接在\n  backlog 排队（单连接 DoS）。重写为**后台 accept loop + 每连接独立 goroutine\n  并发握手**（handshakeTimeout=30s，对齐 quic HandshakeIdleTimeout），单条停顿\n  连接只占自己的握手 goroutine，不阻塞 accept 循环与后续连接。\n- I-1（Important）Accept 递归无界栈增长：握手失败原用 return l.Accept(ctx) 递归\n  → 连续失败栈深度无限。改为 for 循环 + continue（并发握手后天然无递归）。\n- I-2（Important）TestTcpTLS_WrongCARejected defer 顺序导致 3s 死等拖尾：defer\n  LIFO 顺序错误（wg.Wait 在 cancel/Close 前执行）。改 defer func(){cancel();wg.Wait()}\n  先 cancel 再等待，包测试总耗时 5.46s→2.48s。\n- M-2 DialTLS 补 MinVersion=TLS1.2（与 ListenTLS 对称）。\n- M-1 defaultTLSConfig 改 atomic.Pointer[tls.Config]（运行期热设置并发安全）。\n- M-3 RoundTrip 补客户端 Receive 双向往返断言（原只测 client→server 半边）。\n- M-4 RegistryVariant 补 Listen fail-closed 断言 + 删 _ = serverCfg。\n\n验证：go test -race ./pkg/tunnel/xfer/internal/tcp/ 通过；vet + golangci-lint 0\nissues；gofmt 合规。\n\n* feat(server): xfer listener 装配辅助——TLS 构造/密钥派生/身份加载（阶段5 工作项1 PR-2）\n\n为 PR-3（root.go 第二 xfer TLS listener 装配）提供纯装配逻辑，AD-3/AD-4 落地：\n\n- XferListenerConfig + XferListenerConfigFromConfig: 从 server.Config 提取——证书\n  缺省回落 cfg.TLS.*，AK/SK/MeshID 取 access_keys 首对（单一输入来源）。\n- BuildXferTLSConfig: 对齐 root.go startTLSListener 的 certmgr 模式（文件证书 /\n  AutoTLS 自签与主 HTTP server 复用同一证书）；两者皆无 → error fail-closed；\n  MinVersion 固定 TLS1.2；不设 ClientCA（xfer 是 raw TLS listener，mTLS 语义由\n  Ed25519 指纹层负责，AD-4 解耦）。\n- HubXferKey: access_keys[0] → DeriveTunnelKey(sk, AccessKeyMesh(ak))，与客户端\n  同一派生实现（AD-3 两端一致）；无 access_keys → error fail-closed（DoD 4）。\n- XferIdentityPath / LoadXferIdentity: 默认 <uploads-dir>/sproxy/server-identity.json，\n  复用 tunnel.LoadOrCreateIdentity（不存在自动生成 0600、损坏 fail-closed 不覆盖）。\n\n8 个测试：证书回落/无证书 fail-closed/密钥派生等价性/无 AK fail-closed/身份路径/\n生成+再加载指纹一致/损坏 fail-closed。全部 127.0.0.1 + -race，Windows 兼容。\n验证：go test -race ./pkg/server/... 全绿；vet + golangci-lint 0 issues；gofmt 合规。\n\n* fix(server): xfer 装配审查修复——身份文件移出 uploads_dir（C-1）+ ACME 拒启错误 + 边界测试\n\n对抗式审查（PR-2 复审）发现 1 Critical + 1 Important + 5 Minor，全部闭环：\n\n- C-1（Critical）身份私钥存放 uploads_dir 下：XferIdentityPath 原默认\n  <uploads-dir>/sproxy/server-identity.json，与文件 API 用户可控命名空间重叠——\n  已认证 peer 可经 GET /download?filename=sproxy/server-identity.json 读取 Ed25519\n  私钥、经上传/删除覆盖替换，击穿 AD-4 pinning 信任锚。修：新增\n  hub.xfer_identity_file 配置项（显式优先），为空回落 **XDG 用户配置目录**\n  （os.UserConfigDir()/sproxy/，Linux ~/.config/、macOS ~/Library/Application\n  Support/、Windows %AppData%/），**绝不放 uploads_dir 下**（XDG 默认对 mesh peer\n  不可经 HTTP 触达）。\n- I-2（Important）ACME 部署下 xfer 启动失败且错误误导：BuildXferTLSConfig 只传\n  CertFile/KeyFile/AutoTLS，certmgr 分派到 default 分支报通用错误。修：ACME 启用\n  时返回明确错误「xfer listener 不支持 ACME，请配 tls.cert_file/tls.key_file 或\n  tls.auto_tls: true」（ACME 是懒加载 GetCertificate + HTTP-01 常驻，与 xfer\n  listener 生命周期不兼容）。\n- M-5/M-7（测试）补 5 个边界：AutoTLS 自签分支（t.Chdir 隔离 CWD）、cert_file 有\n  key_file 缺失 fail-closed、ACME 拒绝 + 错误信息断言、非 hex secret fail-closed、\n  无 access_keys 时 FromConfig 零值。\n- 文档：config.example.yaml hub 段补 xfer_identity_file 说明；stage5-design AD-4\n  修订默认路径（uploads_dir→XDG）+ ACME 不兼容说明。\n\n验证：go test -race ./pkg/server/... 全绿（含新增 5 测试）；vet + golangci-lint 0\nissues；gofmt 合规；go build 通过。\n\n* feat(sproxy): 服务端 xfer TLS listener 装配——sclient tunnel --xfer tcp+tls 打通（阶段5 工作项1 PR-3）\n\n证书 pinning 能力（阶段3）首次真正服务生产拓扑：服务端新增独立 xfer listener，\n接收 `sclient tunnel --xfer tcp/tcp+tls --hub <addr>` 会话，经 mux → tunnel 解密 →\n路由到本地文件 API。DoD 1-6 全部落地。\n\n- cmd/sproxy/root.go: startXferListener / startOneXferListener——RegisterRoutes 之后\n  装配第二条 accept 循环（handler 彼时才构造）；hub.transports.xfer_tcp/xfer_tls 两段\n  （xfer_tls 恒 TLS / xfer_tcp 明文显式 option + tls_enabled 升级）；握手密钥\n  HubXferKey（AD-3 同 AK/SK 派生）、服务端身份 LoadXferIdentity（AD-4，指纹打日志）；\n  fail-closed（无 access_keys/无证书拒启）；默认绑 loopback；独立信号量控制并发\n  （hub.TryHandleConn 走注册帧语义，与 xfer 隧道帧不兼容）；不注册路由表。\n- pkg/server/handlers.go: 新增 localHandler 字段 + LocalHandler() 方法——修正设计文档\n  AD-2 笔误：xfer 隧道 handleStream 已解密请求体为明文，应路由到 localMux（LocalHandler），\n  而非 TunnelHandler()（传统 POST /tunnel 外层帧解密器，期望 ctx 带派生密钥 + 帧 body，\n  直接使用 401）。集成测试先以 401 红灯暴露，修复后转绿。\n- pkg/server/config.go: TransportConfigs 加 XferTCP/XferTLS 段 + XferTransportConfig +\n  DefaultXferTCPListen(127.0.0.1:18086)/DefaultXferTLSListen(127.0.0.1:18087) + SetDefaults。\n- pkg/tunnel/xfer/builtin: SetDefaultTLSConfig 桥（外部装配方经 builtin 设置 tcp+tls\n  默认配置，绕过 internal 可见性）。\n\n测试：6 单元（TLS/明文/禁用/无 AK fail-closed/无证书 fail-closed/升级）+ 3 集成\n（端到端 upload/list + 错误 pin ErrPeerFingerprintMismatch + loopback 默认）+\nLocalHandler + builtin 桥。全部 127.0.0.1 + -race，Windows 兼容。\n验证：go test -race ./cmd/sproxy/... ./pkg/server/... ./pkg/tunnel/xfer/... 全绿；\nvet + golangci-lint 0 issues；gofmt 合规；go build ./... 通过。\n\n* fix(tunnel): xfer 握手绑定静态密钥——C-1 匿名 ECDH 认证缺陷修复（阶段5 PR-3 复审）\n\n对抗审查（PR-3）发现 Critical C-1：performHandshakeWithIdentity 是匿名 X25519 交换，\n会话密钥 hkdf(sharedSecret) 不含静态隧道密钥，攻击者完成匿名握手即零凭据访问完整\nlocalMux（文件 CRUD + GET/PUT /api/config + 云端下载 SSRF）。审查 agent 实测：错误\n派生密钥 + 正确服务端 pin → Upload/List/config 全通。\n\n修复：静态密钥绑定进会话密钥派生（非匿名 ECDH），未知密钥对端派生不同 sessionKey，\n首个加密帧 AES-GCM 校验失败即拒（fail-closed）。\n\n- pkg/tunnel/ecdh.go: deriveSessionKey(sharedSecret, staticKey)——nil 走旧纯 ECDH\n  派生（字节级不变，向后兼容）；非 nil 两阶段 HKDF：baseKey（旧派生绑定 ECDH）→\n  第二层以 baseKey 为 IKM、staticKey 混入 salt（PSK 绑定，域分离 ecdhStaticSalt/\n  ecdhInfoStatic），任何 key 变化都改变 sessionKey，两层输出恒 32 字节。\n- pkg/tunnel/tunnel_mux.go: ensureHandshake（dialer）与 Serve（listener）握手调用传\n  t.key（非 nil 才进入握手分支），两端对称；同步发布协议变更显著注释。\n- **协商策略（评估后选纯同步发布，不加标志位）**：加标志需在会话密钥派生前改线上帧序\n  （旧对端误读/死锁）；且服务端配 key 即必须混 key，任何\"降级纯 ECDH\"标志都是降级\n  攻击面（C-1 回归）。标志唯一能保的兼容（新客户端→旧服务端）无安全价值。sclient/\n  sproxy 须同版本发布。影响面已核实仅 xfer 隧道路径（mesh/relay 走 relay.Serve 不建\n  Tunnel，不受影响）。\n- 测试（C-1 验收）：TestECDHHandshake_WrongKeyFails（两端不同 key → Do 报错，修复前\n  红）/ TestXferListener_WrongKeyFails（客户端错 key + 正确 pin → TunnelDo 失败）/\n  SameKeyDerivesSameKey / MixedKeyNilDerivationDiffers / DeriveSessionKey_Binding /\n  KeyedDialerNilListenerFails（同步发布预期）。既有纯 ECDH/错 pin/同 key 全链路全绿。\n- 配套：xfer_listener.go 注释修正（密钥绑定保证拒绝匿名，非\"无 key 无法 ECDH\"）；\n  设计文档 AD-3 记录实现 + 协商决策；config.example.yaml 补 xfer_tcp/xfer_tls 段\n  （M-2）；AD-2 tunnelHandler→LocalHandler 笔误修正（M-5）；web/e2e go.mod 依赖更新\n  （UI E2E CI go mod tidy 修复）。\n\n验证：go test -race ./pkg/tunnel/... ./cmd/sproxy/... ./pkg/client/... ./pkg/tunnel/mesh/...\n./pkg/tunnel/relay/... 全绿；vet + golangci-lint 0 issues；gofmt 合规；go build ./... 通过。\n\n* fix(tunnel): C-1 修复复审——keyed listener 握手失败 fail-closed + 诊断日志 + 反向测试\n\nC-1 修复独立复审确认已彻底堵住漏洞（无 Critical），但发现 1 Important + 2 Minor，全修：\n\n- I-1（Important）keyed listener 握手失败仍回退静态密钥：Tunnel.Serve 在 key != nil\n  且握手失败且无 pin 时回退 t.key（丧失前向保密 + 跨连接重放窄面，红线字面未兑现）。\n  修：keyed listener 握手失败即返回 error fail-closed 拒绝整个隧道，彻底消除回退，\n  完整兑现 AD-3「绝不允许匿名 ECDH + 静态密钥仅作握手失败回退」。合法 keyed 客户端\n  握手恒成功不受影响；明文（nil key）不握手行为不变。\n- M-2（Minor）补反向测试 TestECDHHandshake_KeyedListenerNilDialerFails：keyed listener\n  + nil dialer → Serve 返回 error + 服务端 handler 不执行（零访问断言），覆盖运营破坏\n  场景（新服务端 + 旧/keyless 客户端）的真实方向。\n- M-3（Minor）数据面解密失败诊断静默：handleStream 的 readAndDecryptMeta 失败原静默\n  return，客户端只得泛化 EOF，运维无法定位升级后互通失败。修：keyed 隧道解密失败加\n  slog.Warn「可能密钥不匹配/版本不一致」（不泄露密钥内容，仅错误信息）。\n\n验证：go test -race ./pkg/tunnel/... ./cmd/sproxy/... ./pkg/client/... ./cmd/sclient/...\n全绿（含新增反向测试 + 既有纯 ECDH/错 pin/同 key 全链路）；vet + golangci-lint 0\nissues；gofmt 合规。设计文档 AD-3 补充红线完整兑现说明。\n\n* feat(sclient): --xfer tcp+tls 客户端 TLS 装配——--ca-file/--insecure + 配置项（阶段5 工作项1 PR-4）\n\nPR-1~3 打通服务端 xfer TLS listener，但客户端 WithXfer(\"tcp+tls\") 未设置传输层默认\nTLS 配置（defaultTLSConfig nil → fail-closed 报错），sclient 无法连服务端 xfer_tls。\n本 PR 补齐客户端 TLS 装配，`sclient tunnel --xfer tcp+tls --hub <addr>` 全链路打通。\n\n- cmd/sclient/internal/clientfactory/factory.go: buildXferClientTLSConfig（对齐\n  hub/federation peer TLS 前例）——--ca-file 加载 PEM CA 构建专属证书池严格校验；\n  --insecure 跳过校验但**仅限 loopback hub**（fail-closed，远程 + insecure 拒绝）；\n  两者互斥；均未指定用系统根池严格校验（服务端自签报 x509 unknown-authority，\n  fail-closed 不静默降级）。loadCertPool / isLoopbackHost（正确处理 IPv6 [::1]）。\n  装配点仅限 xferName == \"tcp+tls\"（非 TLS 传输不污染全局 defaultTLSConfig）。\n- cmd/sclient/root.go: 新增 --ca-file persistent flag（与 --insecure 同族）。\n- pkg/client/config.go: Config 加 XferCAFile / XferInsecure + ApplyConfigSet case +\n  HandleConfigShow。CLI flag 优先于配置。\n- 测试：7 单元（系统根池/CA/insecure-loopback/非loopback拒绝/互斥/坏文件/非法地址）\n  + 6 集成（真实 TLS server 经 xfer.Get(\"tcp+tls\").Dial 断言装配生效——--ca-file 连通/\n  --insecure loopback 连通/无配置握手失败 x509/互斥/非loopback拒绝/非TLS不装配）。\n- 文档：docs/cli.md tunnel --xfer tcp+tls 示例 + TLS 配置 + 更新 N-3 接线现状注释；\n  docs/config.md；config.example.yaml 补 xfer_ca_file/xfer_insecure 说明。\n- **端到端冒烟（真实 sproxy 二进制）**：sclient tunnel --xfer tcp+tls --hub 127.0.0.1:18087\n  --ca-file <自签> /api/files → {\"files\":[...]} 成功；--insecure loopback 成功；无凭据\n  → x509 unknown-authority；互斥/远程 insecure → 报错。\n\n验证：go test -race ./cmd/sclient/... ./pkg/client/... 全绿（14 新增）；vet +\ngolangci-lint（主+sclient）0 issues；gofmt 合规；go build 通过。\n\n* fix(sclient): xfer TLS 审查修复——hub scheme 校验/互斥来源/全局约束注释/文档（PR-4 复审）\n\nPR-4 对抗审查（无 Critical）发现 1 Important + 5 Minor，全修：\n\n- I-1（Important，前瞻）builtin.SetDefaultTLSConfig 进程级全局多客户端互相覆盖：当前\n  CLI 单命令不触发，但 mesh node 未来同进程 Listen+Dial 会踩坑。加显著注释约束\n  \"进程内仅支持单 tcp+tls TLS 配置，多 CA/多角色需改显式注入（tcp.DialTLS/ListenTLS）\"，\n  并注明测试依赖\"最后一次装配生效\"。\n- M-2（Minor）hub 为 ws:// scheme（hub_url 回落常见）时误拒绝/错误信息误导：tcp+tls\n  分支前置 net.SplitHostPort 校验，报可读错误\"hub 应为 host:port（不要带 ws:// 前缀）\"。\n  补 TestFactory_NewClient_XferTLS_HubSchemeRejected。\n- M-3（Minor）互斥错误未指明 insecure 来源（flag vs 配置）：buildXferClientTLSConfig\n  加 insecureSrc 参数，错误信息区分\"配置 xfer_insecure: true\"并指引\n  `sclient config set xfer_insecure false`。\n- M-1（Minor）--insecure 双语义（HTTP 面无 loopback 限制 vs xfer 面仅 loopback）：root.go\n  帮助文案区分两语义，避免误导。\n- M-4（Minor）文档承诺过度（远程 hub + --ca-file 在 auto_tls 下 SAN 不匹配失败）：\n  docs/cli.md 补远程 SAN 限制说明（需服务端 tls.cert_file 提供含主机名/IP SAN 证书）。\n- M-5（Minor）配置项 xfer_ca_file/xfer_insecure 端到端路径未覆盖：补\n  TestFactory_NewClient_XferTLS_ConfigCAFileWired（配置回落 + OR 合并经 NewClient→Dial\n  生效）；helper 加 cfgExtra 变参。\n\n验证：go test -race ./cmd/sclient/... ./pkg/client/... ./pkg/tunnel/... 全绿（含新增\nM-2/M-5 测试）；vet + golangci-lint（主+sclient）0 issues；gofmt 合规；go build 通过。\n\n* test(e2e): xfer tcp+tls 真实二进制全链路 e2e——upload/list/错key/sclient CLI（阶段5 工作项1 PR-5）\n\n工作项 1 收尾：test/ 层真实二进制 e2e，使 DoD「真实二进制全链路」进入 CI。\n与 cmd/sproxy 集成测试（同进程 RegisterRoutes）互补，验证真实进程边界下\nsproxy ⇄ mux ⇄ tunnel ⇄ 本地文件 API 全链路。\n\n- test/e2e_xfer_tls_test.go: startSPROXYWithXferTLS helper（构建真实 sproxy 二进制\n  + 子进程：hub.enabled + xfer_tls + auto_tls 显式证书 + access_keys + 预生成\n  Ed25519 身份；healthz 就绪门；Kill+Wait sync.Once cleanup）+ 4 小 helper\n  （e2eFreePort / xferKeyFromAK 同 DeriveTunnelKey 派生 / xferE2EClientTLS 复现\n  --ca-file / newXferTLSClient WithXfer+pin）。\n- 3 测试：FileUploadList（C-1 正向：upload/list 成功）/ WrongKeyFails（C-1 验收：\n  错误静态密钥 + 正确 TLS+pin → 数据面 fail-closed）/ SClientCLI（真实 sclient\n  二进制 tunnel --xfer tcp+tls --hub --ca-file /api/files → 输出含已上传文件）。\n- 工程细节：Windows YAML 路径 ToSlash 归一；XDG_CONFIG_HOME/CACHE_HOME 隔离 +\n  --config 临时配置（防加载本地用户配置）；3 测试不 t.Parallel（避免 builtin\n  SetDefaultTLSConfig 全局竞态）。\n\n验证：go test -race ./test/... -run TestE2E_XferTLS 3/3 PASS；vet + golangci-lint 0\nissues；gofmt 合规。注：TestE2E_MeshNode_ServiceAccess 为既有 WebRTC mesh flaky\n（阶段3 复盘已记录），本机偶发失败，与本 PR 无关（PR-5 零实现改动）。\n\n* test(e2e): WrongKeyFails 断言钉死数据面路径（PR-5 复审 Minor #1）\n\nPR-5 对抗审查（无 Critical/Important）确认 3 测试真实、确定、非偶发；1 条 Minor 已修：\nWrongKeyFails 原只断言 err != nil——若未来 Dial/TLS/握手先失败，测试会退化为不覆盖\nC-1（数据面 fail-closed）。加断言：错误必须含 \"resp meta\" 特征（sessionKey 不一致 →\n首帧解密失败 → 服务端关流 → 客户端读响应 metadata 得 EOF），钉死失败发生在数据面，\n与同进程集成测试 TestXferListener_WrongKeyFails 精度对齐。实测错误\n\"tunnel: read resp meta len: EOF\" 通过断言。\n\n验证：go test ./test/... -run TestE2E_XferTLS_WrongKeyFails PASS；lint 0 issues；\ngofmt 合规。\n\n* test(sync): TestQuota_ReconcileOnComplete_Pull 确定性修复——阻塞 executor 消除异步对账竞态\n\nSonarQube CI 偶发失败：manager_test.go:385 \"创建时应预留占位 1073741824，got 5\"。\n根因：测试传 nil executor → newTestManager 回落 newMockExecutor(completedResult())\n（立即完成 5 字节），SubmitAndStart 返回后 goroutine 已完成并对账 → quota.Usage()==5，\n而测试断言\"创建时预留占位 1GiB\"依赖任务尚未对账——异步时序竞态（既有 flaky，\n工作项 1 未碰 syncmgr）。\n\n修：显式传 newBlockingMockExecutor()（Run 阻塞直到 release），\n- 等 exec.started（Run 已开始、已拿信号量）再断言占位 1GiB（确定性，杜绝\n  \"任务已完成/未启动\"两向竞态）；\n- release() 后 waitForStatus completed，断言对账收敛到 5 字节。\n与 TestConcurrency_Semaphore / b7fad2b(#136) 的确定性信号模式一致。\n\n验证：go test -race -count=10 单测全过（确定性）；syncmgr + server 全包绿；\nvet + golangci-lint 0 issues；gofmt 合规。",
+          "timestamp": "2026-09-01T00:32:28+08:00",
+          "tree_id": "30e8a56a5beb2f125df711bc1edad84ac746dbed",
+          "url": "https://github.com/cocomhub/sproxy/commit/4aba023bfca0e4e71b9cd6cc672bc2e8f5524746"
+        },
+        "date": 1788194198521,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 925,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1275648 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 925,
+            "unit": "ns/op",
+            "extra": "1275648 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1275648 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1275648 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 932.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1294137 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 932.6,
+            "unit": "ns/op",
+            "extra": "1294137 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1294137 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1294137 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 967.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1303916 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 967.9,
+            "unit": "ns/op",
+            "extra": "1303916 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1303916 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1303916 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 933.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1289476 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 933.8,
+            "unit": "ns/op",
+            "extra": "1289476 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1289476 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1289476 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 931.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1290415 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 931.1,
+            "unit": "ns/op",
+            "extra": "1290415 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1290415 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1290415 times\n4 procs"
           }
         ]
       }
