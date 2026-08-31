@@ -208,7 +208,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 			hubDHT = hub.DHTRegistry.Active()
 			// 停服时 flush 去抖窗口内未落盘的 k-bucket 变更（hubDHT.Close 委托
 			// kad.FlushPersist；内存 DHT 的 Close 是 no-op）。
-			defer func() { _ = hubDHT.Close() }()
+			// 审查 PR-3 M-1：flush 失败（写盘错误）记录 Error，不静默吞（禁止静默失败）。
+			defer func() {
+				if cerr := hubDHT.Close(); cerr != nil {
+					logger.Error("kad DHT 关停 flush 失败", "err", cerr)
+				}
+			}()
 			if len(cfg.Hub.DHTSeeds) > 0 {
 				// 多 hub DHT 组网未实现，种子暂不引导（kad.Bootstrap 现会把种子
 				// 当假 ID 节点插入路由表，污染发现列表）；预留配置，未来实现
