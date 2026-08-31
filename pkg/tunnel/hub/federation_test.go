@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -406,9 +407,10 @@ func TestFederationClient_PersistSaveRestore(t *testing.T) {
 		t.Fatalf("SaveCandidates 后应产生候选文件: %v", statErr)
 	}
 
-	// 新 client（模拟重启）从同一文件恢复。
+	// 新 client（模拟重启）从同一文件恢复。配置仍含 peerB（审查 Minor 2：恢复只保留
+	// 仍存在于当前配置的对端候选）。
 	fc2, err := hub.NewFederationClientWithPersist(
-		nil, 30*time.Second, 5*time.Second, testFedLogger(), persistFile)
+		[]hub.FederationPeer{{ID: "peerB"}}, 30*time.Second, 5*time.Second, testFedLogger(), persistFile)
 	if err != nil {
 		t.Fatalf("恢复 client: %v", err)
 	}
@@ -507,9 +509,9 @@ func TestFederationClient_PersistAutoSaveOnSync(t *testing.T) {
 	if _, statErr := os.Stat(persistFile); statErr != nil {
 		t.Fatalf("syncPeer 成功后应自动落盘候选文件: %v", statErr)
 	}
-	// 新 client 验证落盘内容可恢复。
+	// 新 client 验证落盘内容可恢复（配置含 peerB——审查 Minor 2 剪枝要求）。
 	fc2, err := hub.NewFederationClientWithPersist(
-		nil, 30*time.Second, 5*time.Second, testFedLogger(), persistFile)
+		[]hub.FederationPeer{{ID: "peerB"}}, 30*time.Second, 5*time.Second, testFedLogger(), persistFile)
 	if err != nil {
 		t.Fatalf("恢复 client: %v", err)
 	}
@@ -531,5 +533,119 @@ func TestFederationClient_PersistRestoreIOError(t *testing.T) {
 		nil, 30*time.Second, 5*time.Second, testFedLogger(), dirPath)
 	if err == nil {
 		t.Fatalf("读取目录路径作为候选文件应返回 error")
+	}
+}
+
+// TestFederationClient_PersistConcurrentScheduleClose 验证（审查 Minor 1 回归）：
+// 高频 scheduleSave + Close 并发下无 panic、文件最终为最新状态（去抖 timer 无
+// Reset 双触发/游离；flushSave 正常收口）。不精确断言写次数（幂等原子写），
+// 只断言并发安全 + 最终一致。
+func TestFederationClient_PersistConcurrentScheduleClose(t *testing.T) {
+	persistFile := filepath.Join(t.TempDir(), "cands.json")
+	peers := []hub.FederationPeer{{ID: "p1", URL: "http://127.0.0.1:18083"}}
+	fc, err := hub.NewFederationClientWithPersist(
+		peers, 30*time.Second, 5*time.Second, testFedLogger(), persistFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				fc.SetCandidatesForTest(map[string][]hub.FederationNode{
+					"p1": {{ID: "n1", Addr: "1.2.3.4:1"}},
+				})
+				fc.SaveCandidates() // 高频写（与 scheduleSave 的 timer 并发）
+				time.Sleep(time.Millisecond)
+			}
+		}(i)
+	}
+	// 同时高频 scheduleSave（触发去抖 timer）。
+	wg.Go(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			fc.SetCandidatesForTest(map[string][]hub.FederationNode{
+				"p1": {{ID: "n1", Addr: "1.2.3.4:1"}},
+			})
+			fc.SaveCandidates()
+			time.Sleep(time.Millisecond)
+		}
+	})
+	wg.Wait()
+
+	fc.Close() // 并发关闭（flushSave 与在途 timer 竞态）
+
+	// 文件应存在且内容为最新状态（无 panic、无损坏）。
+	raw, err := os.ReadFile(persistFile)
+	if err != nil {
+		t.Fatalf("并发关闭后候选文件应存在: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("候选文件不应为空")
+	}
+	// 用 json.Unmarshal 到匿名结构验证可解析（不依赖导出类型）。
+	var check struct {
+		Peers []struct {
+			Peer  string `json:"peer"`
+			Nodes []struct {
+				ID string `json:"id"`
+			} `json:"nodes"`
+		} `json:"peers"`
+	}
+	if err := json.Unmarshal(raw, &check); err != nil {
+		t.Fatalf("并发写后文件应可解析: %v", err)
+	}
+	if len(check.Peers) == 0 {
+		t.Fatal("文件应含候选数据")
+	}
+}
+
+// TestFederationClient_PersistRemovedPeerNotRestored 验证（审查 Minor 2）：配置中
+// 删除的联邦对端，其旧候选在恢复时被丢弃（不跨重启自我延续）。
+func TestFederationClient_PersistRemovedPeerNotRestored(t *testing.T) {
+	persistFile := filepath.Join(t.TempDir(), "cands.json")
+
+	// 第一次：配置含 p1 + p2，写入两个对端的候选。
+	fc1, err := hub.NewFederationClientWithPersist(
+		[]hub.FederationPeer{{ID: "p1", URL: "http://127.0.0.1:18083"}, {ID: "p2", URL: "http://127.0.0.1:18084"}},
+		30*time.Second, 5*time.Second, testFedLogger(), persistFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc1.SetCandidatesForTest(map[string][]hub.FederationNode{
+		"p1": {{ID: "n1", Addr: "1.1.1.1:1"}},
+		"p2": {{ID: "n2", Addr: "2.2.2.2:2"}},
+	})
+	if saveErr := fc1.SaveCandidates(); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	fc1.Close()
+
+	// 第二次：配置删掉 p2，只留 p1——恢复时 p2 的候选应被丢弃。
+	fc2, err := hub.NewFederationClientWithPersist(
+		[]hub.FederationPeer{{ID: "p1", URL: "http://127.0.0.1:18083"}},
+		30*time.Second, 5*time.Second, testFedLogger(), persistFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fc2.Close()
+	for _, n := range fc2.Candidates() {
+		if n.ID == "n2" {
+			t.Fatalf("已从配置删除的对端 p2 的候选 n2 不应被恢复（审查 Minor 2）")
+		}
 	}
 }
