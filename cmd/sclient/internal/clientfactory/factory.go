@@ -73,9 +73,10 @@ func LoadIdentityOptional() (*tunnel.Identity, error) {
 //
 // MinVersion 固定 TLS1.2（对齐 tcp_tls 传输与仓库其他传输层 TLS 基线）。
 // hubAddr 为 xfer 拨号地址（tcp+tls 应为 host:port），insecure 时校验其 host 为 loopback。
-func buildXferClientTLSConfig(caFile string, insecure bool, hubAddr string) (*tls.Config, error) {
+// insecureSrc 是 insecure 的来源描述（flag/配置），用于互斥错误信息区分（审查 M-3）。
+func buildXferClientTLSConfig(caFile string, insecure bool, insecureSrc, hubAddr string) (*tls.Config, error) {
 	if caFile != "" && insecure {
-		return nil, fmt.Errorf("--ca-file 与 --insecure 互斥，不能同时使用")
+		return nil, fmt.Errorf("--ca-file 与 %s 互斥，不能同时使用；若 insecure 来自配置，请先 `sclient config set xfer_insecure false`", insecureSrc)
 	}
 	if insecure {
 		host, _, err := net.SplitHostPort(hubAddr)
@@ -278,13 +279,32 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		// 握手报 x509 unknown-authority，用户需显式 --ca-file 或 --insecure（fail-closed，
 		// 不静默降级；对齐 hub/federation 的 peer TLS 前例）。
 		if xferName == "tcp+tls" {
+			// 审查 M-2：tcp+tls 的 hub 必须是裸 host:port（不能是 ws:// 前缀的 URL——
+			// hub_url 配置回落可能带 scheme/path）。提前校验，避免 --insecure 的
+			// SplitHostPort 误拒 loopback、或非 insecure 路径在 DialTLS 处报难以理解的错误。
+			if _, _, hErr := net.SplitHostPort(hub); hErr != nil {
+				return nil, fmt.Errorf("tcp+tls 传输的 hub 地址应为 host:port（不要带 ws:// 等 scheme 前缀），当前 %q: %v；请用 --hub 显式指定或改配 hub_url", hub, hErr)
+			}
 			caFile, _ := cmd.Flags().GetString("ca-file")
 			if caFile == "" {
 				caFile = cfg.XferCAFile
 			}
 			insecureFlag, _ := cmd.Flags().GetBool("insecure")
-			insecure := insecureFlag || cfg.XferInsecure
-			tlsCfg, tErr := buildXferClientTLSConfig(caFile, insecure, hub)
+			// 审查 M-3：互斥/来源错误信息区分 flag 与配置，降低排查成本。
+			insecureSrc := "flag --insecure"
+			insecure := insecureFlag
+			if cfg.XferInsecure {
+				insecure = true
+				if !insecureFlag {
+					insecureSrc = "配置 xfer_insecure: true"
+				}
+			}
+			// 审查 I-1 约束：builtin.SetDefaultTLSConfig 是 internal/tcp 包级全局，进程内
+			// 仅支持"单 tcp+tls TLS 配置"。当前 sclient CLI 单进程单命令单 NewClient 满足；
+			// **禁止**同进程多 CA/多角色的 tcp+tls 客户端（会静默互相覆盖）。mesh node 等
+			// 未来同进程 Listen+Dial 并存场景需改用显式注入（tcp.DialTLS/ListenTLS），勿沿用
+			// 全局默认。测试依赖"最后一次装配生效"（见 factory_tls_integration_test.go）。
+			tlsCfg, tErr := buildXferClientTLSConfig(caFile, insecure, insecureSrc, hub)
 			if tErr != nil {
 				return nil, tErr
 			}

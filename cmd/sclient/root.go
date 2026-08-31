@@ -113,7 +113,10 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().Int("concurrency", 0, "上传/下载并发数 (默认 4)")
 	root.PersistentFlags().Bool("resume", false, "续传模式 (默认启用)")
 	root.PersistentFlags().Bool("json", false, "以 JSON 格式输出")
-	root.PersistentFlags().Bool("insecure", false, "跳过 TLS 证书验证（用于自签证书开发/测试环境）")
+	// 审查 M-1：--insecure 双语义——HTTP 直连面（WithInsecureTLS）无 loopback 限制
+	// （既有）；xfer tcp+tls 面（buildXferClientTLSConfig）**仅限 loopback hub**
+	// （fail-closed，远程需 --ca-file）。文案区分两者避免误导。
+	root.PersistentFlags().Bool("insecure", false, "跳过 TLS 证书验证：HTTP 直连面不限地址；xfer tcp+tls 面仅限 loopback hub（远程需 --ca-file 信任其证书）")
 	root.PersistentFlags().String("ca-file", "", "xfer tcp+tls 传输的受信 CA 文件路径（PEM；服务端为自签证书时使用，与 --insecure 互斥）")
 	root.PersistentFlags().String("client-cert", "", "mTLS 客户端证书路径（PEM 格式）")
 	root.PersistentFlags().String("client-key", "", "mTLS 客户端私钥路径（PEM 格式）")

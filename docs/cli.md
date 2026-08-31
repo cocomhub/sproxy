@@ -169,6 +169,12 @@ TLS 校验，按 `--ca-file` / `--insecure`（或配置 `xfer_ca_file` / `xfer_i
   `x509: certificate signed by unknown authority`，此时应显式 `--ca-file` 或
   `--insecure`（fail-closed，不静默降级）。
 
+> **远程 hub 的 SAN 限制（审查 M-4）**：sproxy 默认 auto_tls 自签证书 SAN 仅覆盖
+> `localhost` / `sproxy.local` / `127.0.0.1` / `::1`。即使配了 `--ca-file`，**远程
+> hub**（非 loopback 主机名/IP）也会因证书 SAN 不匹配握手失败（`x509: certificate
+> is valid for ... not <remote>`）。远程部署需服务端显式配置 `tls.cert_file` 提供
+> 含该主机名/IP SAN 的证书（见 `config.example.yaml`），仅信任 CA 不够。
+
 > **接线现状**：`--xfer tcp+tls` 已对接真实 sproxy 服务端的 **xfer_tls listener**
 > （配置 `hub.transports.xfer_tls`，默认 `127.0.0.1:18087`；auto_tls 自签证书时客户端
 > 需 `--ca-file` 或 `--insecure`）。`--xfer tcp` / `ws` 仍对接 xfer/mux listener

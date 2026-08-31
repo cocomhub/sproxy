@@ -75,14 +75,14 @@ func startTestTLSTransport(t *testing.T, ctx context.Context, srvCfg *tls.Config
 
 // newXferTLSTestClient 用真实 factory 构造 sclient tunnel --xfer tcp+tls 客户端。
 // flags 追加 --ca-file / --insecure 等 flag 覆盖；hub 指向自签 TLS listener。
-func newXferTLSTestClient(t *testing.T, hubAddr string, flags map[string]string) (*client.FileClient, error) {
+func newXferTLSTestClient(t *testing.T, hubAddr string, flags map[string]string, cfgExtra ...string) (*client.FileClient, error) {
 	t.Helper()
 	dir := t.TempDir()
 	oldHome := xdg.ConfigHome
 	xdg.ConfigHome = dir
 	t.Cleanup(func() { xdg.ConfigHome = oldHome })
 
-	cfgBody := "server_url: https://127.0.0.1:1\nhub_url: " + hubAddr + "\n"
+	cfgBody := "server_url: https://127.0.0.1:1\nhub_url: " + hubAddr + "\n" + strings.Join(cfgExtra, "\n")
 	cfgFile := filepath.Join(dir, "sclient.yaml")
 	if err := os.WriteFile(cfgFile, []byte(cfgBody), 0600); err != nil {
 		t.Fatal(err)
@@ -252,5 +252,44 @@ func TestFactory_NewClient_XferTLS_NonTLSTransportNotAffected(t *testing.T) {
 	}
 	if svc == nil {
 		t.Fatal("expected non-nil service")
+	}
+}
+
+// TestFactory_NewClient_XferTLS_ConfigCAFileWired 验证（审查 M-5）：配置项
+// xfer_ca_file（而非 --ca-file flag）经 NewClient → 全局 TLS 装配 → Dial 生效。
+// 覆盖 "配置回落 + OR 合并" 逻辑的真实路径（纯解析断言不足，需经 factory 端到端）。
+func TestFactory_NewClient_XferTLS_ConfigCAFileWired(t *testing.T) {
+	srvCfg, caFile := genIntegrationTestCerts(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	addr := startTestTLSTransport(t, ctx, srvCfg)
+
+	// 配置写 xfer_ca_file（不传 --ca-file flag），且故意不设置 xfer_insecure。
+	svc, err := newXferTLSTestClient(t, addr, nil, "xfer_ca_file: "+caFile)
+	if err != nil {
+		t.Fatalf("NewClient（配置 xfer_ca_file）应成功: %v", err)
+	}
+	if svc == nil {
+		t.Fatal("expected non-nil service")
+	}
+	dctx, dcancel := context.WithTimeout(ctx, 5*time.Second)
+	defer dcancel()
+	conn, err := xfer.Get("tcp+tls").Dial(dctx, addr)
+	if err != nil {
+		t.Fatalf("tcp+tls Dial（配置 xfer_ca_file 装配后）应成功: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// TestFactory_NewClient_XferTLS_HubSchemeRejected 验证（审查 M-2）：tcp+tls 的 hub 是
+// ws:// scheme URL（hub_url 回落常见）时，前置校验报可读错误（而非在 DialTLS 处
+// 报难以理解的 "too many colons"）。
+func TestFactory_NewClient_XferTLS_HubSchemeRejected(t *testing.T) {
+	_, err := newXferTLSTestClient(t, "ws://127.0.0.1:18083/ws", map[string]string{"insecure": "true"})
+	if err == nil {
+		t.Fatal("tcp+tls 的 hub 为 ws:// URL 时应报可读错误（需裸 host:port）")
+	}
+	if !strings.Contains(err.Error(), "host:port") {
+		t.Errorf("错误应提示 hub 需为 host:port，实际 %q", err.Error())
 	}
 }
