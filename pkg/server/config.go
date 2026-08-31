@@ -130,6 +130,10 @@ type FederationConfig struct {
 	Interval time.Duration `yaml:"interval" mapstructure:"interval"`
 	// Timeout 是单次拉取超时，默认 10s。
 	Timeout time.Duration `yaml:"timeout" mapstructure:"timeout"`
+	// PersistFile 是联邦候选节点表持久化文件路径。非空时启用候选持久化（重启后恢复
+	// 上次同步的候选节点，不冷启动）；为空则持久化关闭（现有行为）。快照只存
+	// id/addr/mesh（发现缓存无 secret），损坏/缺失文件按空候选启动。
+	PersistFile string `yaml:"persist_file" mapstructure:"persist_file"`
 }
 
 // FederationPeerConfig 是联邦对端 hub 的配置（出站拉取）。

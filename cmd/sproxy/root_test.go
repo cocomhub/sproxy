@@ -402,3 +402,43 @@ func waitForConfig(t testing.TB, timeout time.Duration) {
 	}
 	t.Fatalf("config did not become ready within %v", timeout)
 }
+
+// TestBuildServerConfig_FederationPersistFile：hub.federation.persist_file 从配置解析
+// 到 server.Config（装配链路：root.go 将 cfg.Hub.Federation.PersistFile 非空时传入
+// hub.NewFederationClientWithPersist 启用候选持久化）。
+func TestBuildServerConfig_FederationPersistFile(t *testing.T) {
+	cfgPtr.Store(nil)
+	cfgProvider = nil
+
+	oldCfgFile := cfgFile
+	cfgFile = filepath.Join(t.TempDir(), "sproxy.yaml")
+	t.Cleanup(func() { cfgFile = oldCfgFile })
+
+	persistFile := filepath.Join(t.TempDir(), "fed-cands.json")
+	cmd := &cobra.Command{}
+	cmd.Flags().String("addr", ":18083", "")
+	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cmd.Flags().Bool("no-tls", false, "")
+	_ = cmd.Flags().Set("no-tls", "true")
+
+	cfgProvider = sproxycfg.New(cfgFile)
+	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
+	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.Set("hub", map[string]any{
+		"enabled":    true,
+		"transports": map[string]any{"ws": map[string]any{"enabled": true}},
+		"federation": map[string]any{
+			"enabled":      true,
+			"persist_file": persistFile,
+		},
+	})
+	t.Cleanup(func() { cfgProvider = nil })
+
+	cfg, err := buildServerConfig(cmd)
+	if err != nil {
+		t.Fatalf("buildServerConfig: %v", err)
+	}
+	if cfg.Hub.Federation.PersistFile != persistFile {
+		t.Fatalf("federation.persist_file 应解析为 %q, got %q", persistFile, cfg.Hub.Federation.PersistFile)
+	}
+}

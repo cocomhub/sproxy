@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -84,9 +85,28 @@ type FederationClient struct {
 	clients  map[string]*http.Client
 	interval time.Duration
 	logger   *slog.Logger
+
+	// ---- 候选持久化（persistFile 非空时启用） ----
+	// 联邦候选是发现缓存（非权威），快照只存 FederationNode 的 ID/addr/mesh（无 secret）。
+	persistFile string
+	// saveMu 保护候选文件写侧并发（scheduleSave 的 timer 状态 + SaveCandidates 写盘）。
+	// 与 mu 独立：读 cands 用 mu.RLock（短临界），写盘是 I/O 慢操作——不持 mu，
+	// 避免阻塞 Candidates()/PeersForNode() 等读路径。
+	saveMu    sync.Mutex
+	saveTimer *time.Timer // 激活中的去抖计时器；非 nil 表示已调度（受 saveMu 保护）
 }
 
-// NewFederationClient 创建联邦同步客户端。
+// NewFederationClient 创建联邦同步客户端（不启用候选持久化）。
+// 等价于 NewFederationClientWithPersist(..., "", ...)。
+func NewFederationClient(peers []FederationPeer, interval, timeout time.Duration, logger *slog.Logger) (*FederationClient, error) {
+	return NewFederationClientWithPersist(peers, interval, timeout, logger, "")
+}
+
+// NewFederationClientWithPersist 创建联邦同步客户端；persistFile 非空时启用联邦候选
+// 持久化（发现缓存非权威：重启后恢复上次同步的候选节点，不冷启动）。快照只存
+// FederationNode 的 ID/addr/mesh（无 secret），损坏/缺失文件按空候选启动（不因持久化
+// 文件损坏而拒绝启动，与 Persister.Load 一致）。
+//
 // interval<=0 回落默认 30s；timeout<=0 回落默认 10s；logger 为空回落 slog.Default。
 // 每个 peer 独立创建 http.Client，TLS 策略（S-Medium 闭环）：
 //   - CAFile 非空 → 用该 CA 构建专属证书池**严格校验**（InsecureSkipVerify=false，
@@ -95,7 +115,7 @@ type FederationClient struct {
 //   - 默认 → 系统根证书池严格校验（fail-closed：证书非法即拒绝，不静默降级）。
 //
 // CA 文件读取失败返回 error（fail-fast，不静默回退到不校验）。
-func NewFederationClient(peers []FederationPeer, interval, timeout time.Duration, logger *slog.Logger) (*FederationClient, error) {
+func NewFederationClientWithPersist(peers []FederationPeer, interval, timeout time.Duration, logger *slog.Logger, persistFile string) (*FederationClient, error) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
@@ -137,14 +157,48 @@ func NewFederationClient(peers []FederationPeer, interval, timeout time.Duration
 		clients[p.ID] = c
 		normalized = append(normalized, p)
 	}
-	return &FederationClient{
+	fc := &FederationClient{
 		peers:    normalized,
 		cands:    make(map[string][]FederationNode),
 		clients:  clients,
 		interval: interval,
 		logger:   logger,
-	}, nil
+	}
+	if persistFile != "" {
+		fc.persistFile = persistFile
+		if err := fc.restoreCandidates(); err != nil {
+			return nil, fmt.Errorf("读取联邦候选持久化文件失败: %w", err)
+		}
+	}
+	return fc, nil
 }
+
+// federationNodeSnap 是联邦候选持久化快照中单个节点的离线表示（仅 id/addr/mesh）。
+type federationNodeSnap struct {
+	ID   string `json:"id"`
+	Addr string `json:"addr,omitempty"`
+	Mesh string `json:"mesh,omitempty"`
+}
+
+// federationPeerSnap 是一个联邦对端的候选节点列表快照。
+type federationPeerSnap struct {
+	Peer  string               `json:"peer"`
+	Nodes []federationNodeSnap `json:"nodes"`
+}
+
+// federationCandidatesSnap 是联邦候选节点表的持久化快照（JSON）。
+// 只存 peer.ID → 候选节点列表；仅包含 ID/addr/mesh（发现缓存，无 secret）。
+type federationCandidatesSnap struct {
+	Peers []federationPeerSnap `json:"peers"`
+}
+
+// maxFederationCandidatesBytes 是联邦候选持久化文件允许的最大字节数。
+// 超出视为文件损坏（拒绝读入内存），避免攻击者/事故写入超大文件导致启动 OOM
+// （与 hub 路由表持久化 Persister 一致）。
+const maxFederationCandidatesBytes = 64 << 20 // 64 MiB
+
+// federationSaveDebounce 是候选持久化的去抖窗口：变更密集时合并落盘。
+const federationSaveDebounce = 200 * time.Millisecond
 
 // loadCertPool 读取 PEM CA 文件并构建 x509 证书池。文件不存在/无有效证书返回错误。
 func loadCertPool(path string) (*x509.CertPool, error) {
@@ -245,6 +299,8 @@ func (fc *FederationClient) syncPeer(ctx context.Context, p FederationPeer) erro
 	fc.mu.Lock()
 	fc.cands[p.ID] = nodes
 	fc.mu.Unlock()
+	// 触发候选持久化（异步去抖落盘；persistFile 为空时 no-op）。
+	fc.scheduleSave()
 	return nil
 }
 
@@ -304,11 +360,187 @@ func (fc *FederationClient) PeersForNode(id NodeID, mesh string) []FederationPee
 	return out
 }
 
-// Close 释放各 peer 客户端空闲连接（后台 goroutine 由 Start 的 ctx 取消控制退出）。
+// Close 释放各 peer 客户端空闲连接（后台 goroutine 由 Start 的 ctx 取消控制退出），
+// 并在持久化启用时同步 flush 未落盘的候选变更（进程优雅停服前确保最后一次变更不丢失）。
 func (fc *FederationClient) Close() {
 	fc.mu.RLock()
-	defer fc.mu.RUnlock()
 	for _, c := range fc.clients {
 		c.CloseIdleConnections()
 	}
+	fc.mu.RUnlock()
+	fc.flushSave()
+}
+
+// SaveCandidates 把当前候选节点表原子写盘（temp + rename + 0600，同目录临时文件
+// 再 rename，不出现半写文件）。persistFile 为空时是 no-op（返回 nil，不落盘）。
+// 写侧由 saveMu 串行化：并发调用不会产生半写文件/乱序覆盖——每次写入都反映调用
+// 时刻的最新 cands（天然幂等）。
+func (fc *FederationClient) SaveCandidates() error {
+	if fc.persistFile == "" {
+		return nil
+	}
+	fc.saveMu.Lock()
+	defer fc.saveMu.Unlock()
+	fc.mu.RLock()
+	snap := fc.buildSnap()
+	fc.mu.RUnlock()
+	return fc.writeCandidatesFile(snap)
+}
+
+// buildSnap 从当前 cands 构建持久化快照（调用方需持有 fc.mu 读锁）。
+func (fc *FederationClient) buildSnap() federationCandidatesSnap {
+	snap := federationCandidatesSnap{}
+	for peerID, nodes := range fc.cands {
+		ps := federationPeerSnap{Peer: peerID}
+		for _, n := range nodes {
+			ps.Nodes = append(ps.Nodes, federationNodeSnap{ID: string(n.ID), Addr: n.Addr, Mesh: n.Mesh})
+		}
+		snap.Peers = append(snap.Peers, ps)
+	}
+	return snap
+}
+
+// writeCandidatesFile 原子写快照到 persistFile：同目录临时文件 + fsync + rename
+// （与 hub 路由表持久化 Persister 同模式）。父目录不存在时返回 error（调用方记录日志）。
+func (fc *FederationClient) writeCandidatesFile(snap federationCandidatesSnap) error {
+	dir := filepath.Dir(fc.persistFile)
+	tmp, err := os.CreateTemp(dir, filepath.Base(fc.persistFile)+".tmp-*.json")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // 失败路径清理；成功后 rename 使条目失效，Remove 报错无害。
+
+	if err := json.NewEncoder(tmp).Encode(&snap); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, fc.persistFile); err != nil {
+		return err
+	}
+	// 联邦候选虽无敏感信息（仅 id/addr/mesh），仍显式收紧为 0600 与 hub 路由表持久化
+	// 保持一致（统一权限策略，避免节点拓扑泄露给同机其他用户）。
+	if err := os.Chmod(fc.persistFile, 0o600); err != nil {
+		fc.logger.Warn("设置联邦候选文件权限 0600 失败", "path", fc.persistFile, "err", err)
+	}
+	return nil
+}
+
+// scheduleSave 标记候选表有变更并在去抖窗口后异步落盘。多次调用只触发一次落盘
+// （窗口重置），落盘内容始终是**最新** cands（SaveCandidates 读调用时刻状态，
+// 天然合并中间变更，与 Persister.Schedule 的去抖合并语义一致）。persistFile 为空
+// 时是 no-op（零行为变更）。
+func (fc *FederationClient) scheduleSave() {
+	if fc.persistFile == "" {
+		return
+	}
+	fc.saveMu.Lock()
+	defer fc.saveMu.Unlock()
+	if fc.saveTimer == nil {
+		fc.saveTimer = time.AfterFunc(federationSaveDebounce, func() {
+			fc.saveMu.Lock()
+			fc.saveTimer = nil
+			fc.saveMu.Unlock()
+			if err := fc.SaveCandidates(); err != nil {
+				fc.logger.Error("联邦候选持久化失败", "path", fc.persistFile, "err", err)
+			}
+		})
+	} else {
+		_ = fc.saveTimer.Reset(federationSaveDebounce)
+	}
+}
+
+// flushSave 同步落盘当前候选（Close 前调用，确保最后一次变更不丢失）。停掉去抖
+// timer 后写一次；persistFile 为空时是 no-op。
+func (fc *FederationClient) flushSave() {
+	if fc.persistFile == "" {
+		return
+	}
+	fc.saveMu.Lock()
+	t := fc.saveTimer
+	fc.saveTimer = nil
+	fc.saveMu.Unlock()
+	if t != nil {
+		t.Stop()
+	}
+	if err := fc.SaveCandidates(); err != nil {
+		fc.logger.Error("联邦候选持久化 flush 失败", "path", fc.persistFile, "err", err)
+	}
+}
+
+// restoreCandidates 从 persistFile 加载候选节点表（NewFederationClientWithPersist 构造时
+// 调用，模拟重启恢复）。
+//   - 文件不存在（未持久化过）→ 空候选、无错误；
+//   - 文件存在但损坏/非法 JSON，或超出大小上限 → 记录 warn、空候选、无错误
+//     （启动不因持久化文件损坏而失败，也不 panic，与 Persister.Load 一致）；
+//   - 其余 I/O 错误（如路径是目录、权限不足）→ 返回 error，由调用方决定是否中止。
+func (fc *FederationClient) restoreCandidates() error {
+	fi, err := os.Stat(fc.persistFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.Size() > maxFederationCandidatesBytes {
+		// 快速路径：stat 已知超出上限，不读入内存（防启动 OOM）。
+		fc.logger.Warn("联邦候选持久化文件超出大小上限，忽略并启动为空候选", "path", fc.persistFile, "size", fi.Size(), "max", maxFederationCandidatesBytes)
+		return nil
+	}
+	raw, err := os.ReadFile(fc.persistFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	// 权威上限校验（stat 之后文件可能被替换/膨胀，以实际读入长度为准）。
+	if len(raw) > maxFederationCandidatesBytes {
+		fc.logger.Warn("联邦候选持久化文件实际大小超出上限，忽略并启动为空候选", "path", fc.persistFile, "size", len(raw), "max", maxFederationCandidatesBytes)
+		return nil
+	}
+	var snap federationCandidatesSnap
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		fc.logger.Warn("联邦候选持久化文件损坏，忽略并启动为空候选", "path", fc.persistFile, "error", err)
+		return nil
+	}
+	cands := make(map[string][]FederationNode, len(snap.Peers))
+	for _, ps := range snap.Peers {
+		if ps.Peer == "" {
+			continue // 空 peer ID 无归属，丢弃（fail-closed）
+		}
+		nodes := make([]FederationNode, 0, len(ps.Nodes))
+		for _, n := range ps.Nodes {
+			if n.ID == "" {
+				continue // 空 ID 节点无寻址意义，丢弃（与 syncPeer 丢弃语义一致）
+			}
+			nodes = append(nodes, FederationNode{ID: NodeID(n.ID), Addr: n.Addr, Mesh: n.Mesh})
+		}
+		cands[ps.Peer] = nodes
+	}
+	fc.mu.Lock()
+	fc.cands = cands
+	fc.mu.Unlock()
+	return nil
+}
+
+// SetCandidatesForTest 直接设置候选节点表（仅测试注入用；生产路径经 syncPeer 更新）。
+// 复制入参避免与调用方共享底层切片；不触发持久化。
+func (fc *FederationClient) SetCandidatesForTest(peers map[string][]FederationNode) {
+	cands := make(map[string][]FederationNode, len(peers))
+	for k, v := range peers {
+		nodes := make([]FederationNode, len(v))
+		copy(nodes, v)
+		cands[k] = nodes
+	}
+	fc.mu.Lock()
+	fc.cands = cands
+	fc.mu.Unlock()
 }
