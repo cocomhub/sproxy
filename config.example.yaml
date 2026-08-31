@@ -70,10 +70,12 @@ access_keys:
 
 # ---- sclient 侧 TURN REST（CLI flag，非服务端配置键；mesh connect / p2p connect /
 # ---- socks / udp map / mesh node 支持）----
-# 动态 TURN REST 短期凭证（coturn 标准）：--turn-rest <url> [--turn-rest-user <user>]
-# [--turn-rest-service <svc>]。首次建立 webrtc 连接前惰性拉取
+# 动态 TURN REST 短期凭证（coturn 标准）：--turn-rest <url> --turn-rest-user <user>
+# [--turn-rest-service <svc>]（--turn-rest-user 必填：配 --turn-rest 时缺省会命令终止）。
+# 首次建立 webrtc 连接前惰性拉取
 # GET {url}?username=<user>[&service=<svc>] → {username: "<ttl>:<user>", password: <base64>, ttl}，
-# 缓存至 TTL 到期前续期；REST 优先于静态 --turn/--turn-user/--turn-pass，失败降级仅 STUN（不 panic）。
+# 缓存至 TTL 到期前续期；REST 优先于静态 --turn/--turn-user/--turn-pass，失败降级
+# 回落静态凭据（若有）/仅 STUN（不 panic）。
 # 安全（fail-closed）：端点默认强推 https；明文 http 仅限 loopback（本机调试）；URL/username/service
 # 上限 512 字符；响应 username 须符合 coturn "TTL:user" 格式。非法配置命令终止，不静默忽略。
 # 服务端侧无 TURN 相关配置（TURN 凭据只在 sclient 发起 webrtc 打洞时本地使用）。
@@ -170,7 +172,7 @@ access_keys:
 #   #   timeout: "10s"              # 单次拉取超时（默认 10s）
 #   #   persist_file: ""            # 联邦候选节点表持久化文件路径（非空启用，重启后恢复上次同步的候选，
 #   #                               # 不冷启动；空=关闭（默认，零行为变更）。快照只存 id/addr/mesh
-#   #                               # （发现缓存无 secret），损坏/缺失文件按空候选启动。文件权限 0600，
+#   #                               # （发现缓存无 secret），损坏/缺失/超限文件按空候选启动。文件权限 0600，
 #   #                               # temp+rename 原子写，同步去抖落盘）
 #   #   peers:                      # 对端 hub 列表（空=本 hub 仅作为被 peer，不主动拉取）
 #   #     - id: "hub-b"             # 对端 hub 唯一标识（日志/去重；为空回落 URL）。

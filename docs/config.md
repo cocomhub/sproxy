@@ -119,9 +119,11 @@ prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI 
 
 > **TURN 中继配置（CLI flag，非配置键）**：TURN 凭据只在 sclient 发起 webrtc 打洞时
 > 本地使用，**服务端无 TURN 配置**。动态 TURN REST 短期凭证（coturn 标准）通过 CLI
-> flag 传入：`--turn-rest <url> [--turn-rest-user <user>] [--turn-rest-service <svc>]`，
+> flag 传入：`--turn-rest <url> --turn-rest-user <user> [--turn-rest-service <svc>]`
+> （`--turn-rest-user` **必填**：配 `--turn-rest` 时缺省会命令终止），
 > 支持命令为 `mesh connect` / `p2p connect` / `socks` / `udp map` / `mesh node`。REST 优先于
-> 静态 `--turn`/`--turn-user`/`--turn-pass`；失败降级仅 STUN（不 panic）。安全边界：
+> 静态 `--turn`/`--turn-user`/`--turn-pass`；失败降级回落静态凭据（若有）/仅 STUN
+> （不 panic）。安全边界：
 > 端点默认强推 `https://`，明文 `http://` 仅限 loopback；URL/username/service 上限 512
 > 字符。详见 [cli.md](./cli.md) 的「TURN 中继」段落。
 

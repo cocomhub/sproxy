@@ -173,8 +173,9 @@ status: active
 >   `id/route_id/addr`（发现缓存语义，非权威路由表）；损坏/缺失/超限文件按空候选/空桶
 >   启动，不 panic；
 > - TURN REST 端点默认强推 `https://`，明文 `http://` 仅限 loopback；URL/username/service
->   上限 512 字符；响应 username 须符合 coturn `TTL:user` 格式（fail-closed，非法配置
->   命令终止）；REST 拉取失败沿用旧缓存（未过期）或降级仅 STUN + Warn，不 panic。
+>   上限 512 字符；响应 username 须符合 coturn `TTL:user` 格式（否则 fail-closed 拒绝该
+>   凭据并回落）；非法 CLI 配置（如缺 `--turn-rest-user`）命令终止。REST 拉取失败沿用
+>   旧缓存（未过期）或回落静态凭据（若有）/仅 STUN + Warn，不 panic。
 
 ### 5.3 涉及文件
 - TURN：`pkg/tunnel/xfer/ext/webrtc/{webrtc.go, turnrest.go 新}` + `cmd/sclient/{mesh.go, p2p.go, socks.go, udp.go, mesh_node.go}` `--turn-rest` 族 flag + `config.example.yaml`。安全：默认强推 `https://`（`http://` 仅 loopback，复用 sync_remotes 明文校验模式）。**实现说明**：TURN REST 走 webrtc 进程级全局配置（`SetTURNRESTURL`），在 CLI 层应用，未进 `mesh.NodeConfig`（与设计草案差异）；`relay.go` 实际未挂 TURN flag（TURN 仅 webrtc 打洞命令需要，relay 中继不消费）。
