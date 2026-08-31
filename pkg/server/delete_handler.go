@@ -52,9 +52,17 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: "delete", ObjectType: "file", Object: remotePath,
+				Result: AuditResultError, Detail: "文件不存在",
+			})
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 			return
 		}
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "打开文件失败",
+		})
 		h.logger.ErrorContext(r.Context(), "打开文件失败", "file_name", remotePath, "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "打开文件失败"}, http.StatusInternalServerError)
 		return
@@ -64,6 +72,10 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	info, err := file.Stat()
 	if err != nil {
 		file.Close()
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "stat 失败",
+		})
 		h.logger.ErrorContext(r.Context(), "stat 文件失败", "file_name", remotePath, "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "stat 失败"}, http.StatusInternalServerError)
 		return
@@ -75,12 +87,20 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	_, _ = file.Seek(0, io.SeekStart)
 	if err != nil {
 		file.Close()
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "计算 checksum 失败",
+		})
 		h.logger.ErrorContext(r.Context(), "计算文件 checksum 失败", "file_name", remotePath, "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件校验失败"}, http.StatusInternalServerError)
 		return
 	}
 	if cs != expectedChecksum {
 		file.Close()
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultDenied, Detail: "checksum 不匹配",
+		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件校验失败"}, http.StatusBadRequest)
 		logger.WarnContext(r.Context(), "文件校验失败", "file_name", remotePath)
 		return
@@ -89,6 +109,13 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	// 关闭后再删除
 	file.Close()
 	if err := os.Remove(filePath); err != nil {
+		// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
+		// 文件系统布局）；错误详情记业务日志，审计行用固定文案。
+		h.logger.ErrorContext(r.Context(), "删除文件失败", "file_name", remotePath, "error", err.Error())
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "删除文件失败",
+		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -96,6 +123,10 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	if h.metrics != nil {
 		h.metrics.RecordDelete()
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "delete", ObjectType: "file", Object: remotePath,
+		Result: AuditResultSuccess,
+	})
 	logger.InfoContext(r.Context(), "文件已删除", "file_name", remotePath)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件删除成功: %s", remotePath)}, http.StatusOK)
 }
@@ -120,14 +151,28 @@ func (h *Handlers) processBatchDeleteItem(ctx context.Context, f BatchDeleteFile
 	}
 	// 校验 checksum，不匹配时拒绝删除
 	if !verifyFileWithChecksum(filePath, f.Checksum) {
+		h.RecordAudit(ctx, AuditEvent{
+			Action: "delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultDenied, Detail: "checksum 不匹配",
+		})
 		result.Message = "文件校验失败"
 		logger.WarnContext(ctx, "批量删除时 checksum 不匹配", "file_name", remotePath)
 		return result
 	}
 	if err := os.Remove(filePath); err != nil {
+		// 审查 M-4：Detail 不含 err.Error()（绝对路径暴露）。
+		logger.ErrorContext(ctx, "批量删除文件失败", "file_name", remotePath, "error", err.Error())
+		h.RecordAudit(ctx, AuditEvent{
+			Action: "delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "删除文件失败",
+		})
 		result.Message = "删除失败"
 	} else {
 		h.checksumStore.Delete(remotePath)
+		h.RecordAudit(ctx, AuditEvent{
+			Action: "delete", ObjectType: "file", Object: remotePath,
+			Result: AuditResultSuccess,
+		})
 		result.Success = true
 		result.Message = "删除成功"
 	}

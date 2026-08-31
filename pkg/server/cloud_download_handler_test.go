@@ -36,7 +36,7 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
 	})
 
-	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: newTestCfgPtr(dir)}
+	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: newTestCfgPtr(dir), auditLogger: testLogger()}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)

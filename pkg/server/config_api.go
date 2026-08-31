@@ -113,13 +113,23 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KiB
 
+	// auditDenied 记录一次被拒绝的配置变更（含操作主体，便于追责）。
+	auditDenied := func(detail string) {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "config_update", ObjectType: "config",
+			Result: AuditResultDenied, Detail: detail,
+		})
+	}
+
 	var req updateConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		auditDenied("invalid request body")
 		sendJSONResponse(w, map[string]any{"success": false, "message": "invalid request body"}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
+		auditDenied("请求体哈希校验失败")
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
 		return
 	}
@@ -127,6 +137,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 	// 检查是否所有字段均为 nil，拒绝空请求体（{}）
 	if req.LogLevel == nil && req.LogFormat == nil &&
 		req.RateLimitReq == nil && req.RateLimitWin == nil && req.MaxStorageBytes == nil && req.WebTunnel == nil {
+		auditDenied("empty request body: no fields to update")
 		sendJSONResponse(w, map[string]any{"success": false, "message": "empty request body: no fields to update"}, http.StatusBadRequest)
 		return
 	}
@@ -139,6 +150,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if req.LogLevel != nil {
 		validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
 		if !validLevels[*req.LogLevel] {
+			auditDenied("invalid log_level: " + *req.LogLevel)
 			sendJSONResponse(w, map[string]any{"success": false, "message": "invalid log_level, must be debug/info/warn/error"}, http.StatusBadRequest)
 			return
 		}
@@ -148,6 +160,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.LogFormat != nil {
 		if *req.LogFormat != "text" && *req.LogFormat != "json" {
+			auditDenied("invalid log_format: " + *req.LogFormat)
 			sendJSONResponse(w, map[string]any{"success": false, "message": "invalid log_format, must be text/json"}, http.StatusBadRequest)
 			return
 		}
@@ -157,6 +170,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.RateLimitReq != nil {
 		if *req.RateLimitReq <= 0 {
+			auditDenied("invalid rate_limit_requests")
 			sendJSONResponse(w, map[string]any{"success": false, "message": "rate_limit_requests must be non-negative"}, http.StatusBadRequest)
 			return
 		}
@@ -167,6 +181,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 	if req.RateLimitWin != nil {
 		d, err := time.ParseDuration(*req.RateLimitWin)
 		if err != nil || d <= 0 {
+			auditDenied("invalid rate_limit_window duration")
 			sendJSONResponse(w, map[string]any{"success": false, "message": "invalid rate_limit_window duration"}, http.StatusBadRequest)
 			return
 		}
@@ -176,6 +191,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.MaxStorageBytes != nil {
 		if *req.MaxStorageBytes < 0 {
+			auditDenied("invalid max_storage_bytes")
 			sendJSONResponse(w, map[string]any{"success": false, "message": "max_storage_bytes must be non-negative"}, http.StatusBadRequest)
 			return
 		}
@@ -204,6 +220,10 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "config_update", ObjectType: "config",
+		Result: AuditResultSuccess,
+	})
 	sendJSONResponse(w, map[string]any{
 		"success": true,
 		"changed": changed,

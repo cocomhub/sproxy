@@ -51,7 +51,7 @@ func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest
 	}
 	cfgPtr.Store(serverCfg)
 
-	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: &cfgPtr}
+	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: &cfgPtr, auditLogger: testLogger()}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
