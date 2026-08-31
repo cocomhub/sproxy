@@ -211,6 +211,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// 拉取认证复用 SproxySig AccessKey（对端 hub 配置的 access_keys）；
 		// peer URL 为空回落默认 loopback（远程 peering 需显式配置，见
 		// Config.Validate）。联邦只提供发现/可达性，不改路由表状态。
+		// federation.persist_file 非空时启用候选持久化（重启后恢复上次同步的
+		// 候选节点，不冷启动；损坏/缺失文件按空候选启动）。
 		if cfg.Hub.Federation.Enabled {
 			peers := make([]hub.FederationPeer, 0, len(cfg.Hub.Federation.Peers))
 			for _, p := range cfg.Hub.Federation.Peers {
@@ -224,13 +226,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 				})
 			}
 			var ferr error
-			fedClient, ferr = hub.NewFederationClient(peers, cfg.Hub.Federation.Interval, cfg.Hub.Federation.Timeout, logger.With("component", "hub_federation"))
+			fedClient, ferr = hub.NewFederationClientWithPersist(peers, cfg.Hub.Federation.Interval, cfg.Hub.Federation.Timeout, logger.With("component", "hub_federation"), cfg.Hub.Federation.PersistFile)
 			if ferr != nil {
 				return fmt.Errorf("初始化 hub 联邦客户端: %w", ferr)
 			}
 			fedClient.Start(ctx)
 			defer fedClient.Close()
-			logger.Info("Hub 联邦已启用", "peers", len(cfg.Hub.Federation.Peers), "interval", cfg.Hub.Federation.Interval)
+			logger.Info("Hub 联邦已启用", "peers", len(cfg.Hub.Federation.Peers), "interval", cfg.Hub.Federation.Interval, "persist_file", cfg.Hub.Federation.PersistFile)
 		}
 		if cfg.Hub.Transports.WS.Enabled {
 			// S36：WS 升级路径固定为 /ws。hub.transports.ws.path 已废弃，
