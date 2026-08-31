@@ -250,3 +250,188 @@ func TestMeshTargetRefresher_Static(t *testing.T) {
 		t.Fatalf("Invalidate 后 static Resolve 仍应返回固定 target, got %+v", got2)
 	}
 }
+
+// --- 阶段 5 工作项 2 / PR-1：RR 轮询化新增测试 ---
+
+// TestMeshTargetRefresher_RoundRobin 验证三候选 round-robin 均匀分布：
+// SetTTL(time.Hour) 强制一次刷新填充候选池后，TTL 内连调 30 次应各命中 ~10 次
+// （游标 mod 轮询，允许 ±1 偏差）。同时验证 TTL 内只打一次 hub
+// （缓存=候选池+游标，而非单个 target）。
+func TestMeshTargetRefresher_RoundRobin(t *testing.T) {
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string {
+		// 乱序返回（排序后 node-a/b/c），同时覆盖排序确定性。
+		return `[{"name":"svc","node":"node-b","addr":"10.0.0.2:22"},{"name":"svc","node":"node-a","addr":"10.0.0.1:22"},{"name":"svc","node":"node-c","addr":"10.0.0.3:22"}]`
+	}))
+	defer ts.Close()
+
+	svc := NewFileClient(ts.URL)
+	r := NewMeshTargetRefresher(svc, "svc")
+	r.SetTTL(time.Hour)
+
+	counts := map[string]int{}
+	const n = 30
+	for range n {
+		got, err := r.Resolve(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts[got.Node]++
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("RR TTL 内应只打 1 次 hub（缓存=候选池+游标）, got %d", hits.Load())
+	}
+	for _, node := range []string{"node-a", "node-b", "node-c"} {
+		if c := counts[node]; c < n/3-1 || c > n/3+1 {
+			t.Fatalf("RR 分布不均: node=%s hits=%d, want ~%d (±1)", node, c, n/3)
+		}
+	}
+}
+
+// TestMeshTargetRefresher_RoundRobin_TTLHit 验证 TTL 内（未过期）每次 Resolve 也轮询
+// 不同候选——缓存从「单值 target」改为「候选池 + 游标」，否则 RR 失效。
+func TestMeshTargetRefresher_RoundRobin_TTLHit(t *testing.T) {
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string {
+		return `[{"name":"svc","node":"node-a","addr":"10.0.0.1:22"},{"name":"svc","node":"node-b","addr":"10.0.0.2:22"},{"name":"svc","node":"node-c","addr":"10.0.0.3:22"}]`
+	}))
+	defer ts.Close()
+
+	svc := NewFileClient(ts.URL)
+	r := NewMeshTargetRefresher(svc, "svc")
+	r.SetTTL(time.Hour)
+
+	want := []string{"node-a", "node-b", "node-c", "node-a"} // 排序后 [A,B,C] 轮询
+	for i, wantNode := range want {
+		got, err := r.Resolve(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Node != wantNode {
+			t.Fatalf("TTL 内第 %d 次 Resolve = %q, want %q", i+1, got.Node, wantNode)
+		}
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("TTL 内轮询应只打 1 次 hub, got %d", hits.Load())
+	}
+}
+
+// TestMeshTargetRefresher_SkipFailedNode 验证 Invalidate(failedNode) 后 Resolve 在
+// 冷却期内跳过该节点（在其余候选中轮询），冷却过后自动重新评估（恢复节点重新入池，
+// 审查 Important #1）。
+func TestMeshTargetRefresher_SkipFailedNode(t *testing.T) {
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string {
+		return `[{"name":"svc","node":"node-a","addr":"10.0.0.1:22"},{"name":"svc","node":"node-b","addr":"10.0.0.2:22"},{"name":"svc","node":"node-c","addr":"10.0.0.3:22"}]`
+	}))
+	defer ts.Close()
+
+	// 注入可推进的假时钟：控制 TTL 过期与冷却窗口。
+	cur := time.Now()
+	svc := NewFileClient(ts.URL)
+	r := NewMeshTargetRefresher(svc, "svc")
+	r.SetClock(func() time.Time { return cur })
+	r.SetTTL(10 * time.Second)
+
+	// 阶段 1：冷却期内跳过失败节点（首次 Resolve 刷新，lastFailedAt=cur，冷却 9s 内）。
+	r.Invalidate("node-a")
+	const n = 6
+	for i := range n {
+		got, err := r.Resolve(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Node == "node-a" {
+			t.Fatalf("第 %d 次 Resolve（冷却期）不应返回失败节点 node-a, got %q", i+1, got.Node)
+		}
+		// b/c 均应被选中（RR 在其余候选间轮询，非恒取同一节点）。
+		if got.Node != "node-b" && got.Node != "node-c" {
+			t.Fatalf("冷却期 Resolve 应返回 node-b 或 node-c, got %q", got.Node)
+		}
+	}
+
+	// 阶段 2：推进时钟越过冷却窗口（>9s），且 TTL（10s）未过 → Resolve 命中缓存池，
+	// 失败标记失效 → node-a 重新入池被选中。
+	cur = cur.Add(MeshFailCooldown + time.Second)
+	gotB, errB := r.Resolve(context.Background())
+	if errB != nil {
+		t.Fatal(errB)
+	}
+	if gotB.Node != "node-a" {
+		t.Fatalf("冷却期过后 node-a 应重新纳入 RR（审查 Important #1），got %q", gotB.Node)
+	}
+}
+
+// TestMeshTargetRefresher_AllFailedFallback 验证候选池全部为失败节点时回退到游标
+// 指向的候选（不返回 ErrMeshServiceUnavailable，避免无限卡死）。
+func TestMeshTargetRefresher_AllFailedFallback(t *testing.T) {
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string {
+		return `[{"name":"svc","node":"node-a","addr":"10.0.0.1:22"}]`
+	}))
+	defer ts.Close()
+
+	svc := NewFileClient(ts.URL)
+	r := NewMeshTargetRefresher(svc, "svc")
+	r.SetTTL(time.Hour)
+	r.Invalidate("node-a") // 唯一候选也是失败节点
+
+	got, err := r.Resolve(context.Background())
+	if err != nil {
+		t.Fatalf("全部候选失败应回退而非报错, got %v", err)
+	}
+	if got.Node != "node-a" {
+		t.Fatalf("回退应返回游标指向候选 node-a, got %q", got.Node)
+	}
+}
+
+// TestMeshTargetRefresher_SortedCandidates 验证候选池按 NodeID 排序固化
+// （map/遍历序不稳定，排序保证 RR 序列确定可测）。
+func TestMeshTargetRefresher_SortedCandidates(t *testing.T) {
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string {
+		// 乱序返回，排序后应为 node-a, node-b, node-c。
+		return `[{"name":"svc","node":"node-c","addr":"10.0.0.3:22"},{"name":"svc","node":"node-a","addr":"10.0.0.1:22"},{"name":"svc","node":"node-b","addr":"10.0.0.2:22"}]`
+	}))
+	defer ts.Close()
+
+	svc := NewFileClient(ts.URL)
+	r := NewMeshTargetRefresher(svc, "svc")
+	r.SetTTL(time.Hour)
+
+	want := []string{"node-a", "node-b", "node-c"}
+	for i, wantNode := range want {
+		got, err := r.Resolve(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Node != wantNode {
+			t.Fatalf("排序后第 %d 次 Resolve = %q, want %q", i+1, got.Node, wantNode)
+		}
+	}
+}
+
+// TestMeshTargetRefresher_FiltersByName 验证只收集同名服务候选（列表含其他服务名
+// 不影响候选池；过滤后仍按 NodeID 排序轮询）。
+func TestMeshTargetRefresher_FiltersByName(t *testing.T) {
+	var hits atomic.Int32
+	ts := httptest.NewServer(servicesHandler(&hits, func() string {
+		return `[{"name":"other","node":"node-z","addr":"10.9.9.9:22"},{"name":"svc","node":"node-b","addr":"10.0.0.2:22"},{"name":"svc","node":"node-a","addr":"10.0.0.1:22"}]`
+	}))
+	defer ts.Close()
+
+	svc := NewFileClient(ts.URL)
+	r := NewMeshTargetRefresher(svc, "svc")
+	r.SetTTL(time.Hour)
+
+	want := []string{"node-a", "node-b", "node-a"} // 过滤后 [A,B] 轮询
+	for i, wantNode := range want {
+		got, err := r.Resolve(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Node != wantNode {
+			t.Fatalf("过滤后第 %d 次 Resolve = %q, want %q", i+1, got.Node, wantNode)
+		}
+	}
+}

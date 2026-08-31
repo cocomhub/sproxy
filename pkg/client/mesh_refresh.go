@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 )
@@ -19,6 +20,12 @@ const MeshTargetTTL = 3 * time.Second
 
 // MeshResolveTimeout 是单次服务解析的网络超时，防止 hub 无响应拖住连接建立。
 const MeshResolveTimeout = 5 * time.Second
+
+// MeshFailCooldown 是失败节点的跳过冷却窗口（审查 Important #1）。
+// 节点 dial 失败后，在冷却期内 Resolve 跳过它（避免每次 TTL 重试打死节点）；
+// 冷却期过后自动重新评估——若服务已恢复则重新纳入 RR，仍失败则 Invalidate
+// 重置冷却。默认 3×TTL（9s），平衡"跳过死节点"与"感知恢复"。
+const MeshFailCooldown = 3 * MeshTargetTTL
 
 // ErrMeshServiceUnavailable 报告服务当前不可用（节点离线或未宣告）。
 func ErrMeshServiceUnavailable(service string) error {
@@ -78,12 +85,15 @@ type MeshTargetRefresher struct {
 	static bool
 
 	mu             sync.Mutex
-	target         *MeshService
+	target         *MeshService  // 仅 static refresher 使用（固定目标）
+	candidates     []MeshService // 候选池（按 NodeID 排序固化，RR 轮询）
+	nextIdx        uint64        // RR 轮询游标（每次 Resolve 推进）
 	lastRefresh    time.Time
 	refreshing     bool
 	done           chan struct{}
 	refreshErr     error
 	lastFailedNode string
+	lastFailedAt   time.Time // 失败时间戳（MeshFailCooldown 冷却窗口起点；零值=无冷却）
 }
 
 // NewMeshTargetRefresher 创建 refresher。
@@ -107,8 +117,9 @@ func (r *MeshTargetRefresher) SetTTL(ttl time.Duration) { r.ttl = ttl }
 // Service 返回服务名。
 func (r *MeshTargetRefresher) Service() string { return r.service }
 
-// Resolve 返回服务当前目标。缓存新鲜（<TTL）直接返回副本；否则触发一次刷新，
-// 并发调用共享同一刷新（单飞）。服务不在列表返回 ErrMeshServiceUnavailable。
+// Resolve 返回服务当前目标。缓存新鲜（<TTL）直接命中候选池并按 RR 游标轮询取
+// 下一个（多候选均匀分布）；否则触发一次刷新重建候选池，并发调用共享同一刷新
+// （单飞）。服务不在列表返回 ErrMeshServiceUnavailable。
 // 固定目标 refresher（static）始终返回预设 target，不查 hub。
 func (r *MeshTargetRefresher) Resolve(ctx context.Context) (*MeshService, error) {
 	r.mu.Lock()
@@ -121,10 +132,12 @@ func (r *MeshTargetRefresher) Resolve(ctx context.Context) (*MeshService, error)
 		r.mu.Unlock()
 		return &t, nil
 	}
-	if r.target != nil && r.now().Sub(r.lastRefresh) < r.ttl {
-		t := *r.target
+	// TTL 内缓存命中：缓存的是「候选池 + 游标」，每次 Resolve 都从池轮询取下一个，
+	// 保证多候选 RR 均匀分布（若缓存单个 target，RR 会退化为恒取同一节点）。
+	if len(r.candidates) > 0 && r.now().Sub(r.lastRefresh) < r.ttl {
+		t := r.pickNextLocked()
 		r.mu.Unlock()
-		return &t, nil
+		return t, nil
 	}
 	if r.refreshing {
 		done := r.done
@@ -139,9 +152,8 @@ func (r *MeshTargetRefresher) Resolve(ctx context.Context) (*MeshService, error)
 		if r.refreshErr != nil {
 			return nil, r.refreshErr
 		}
-		if r.target != nil {
-			t := *r.target
-			return &t, nil
+		if len(r.candidates) > 0 {
+			return r.pickNextLocked(), nil
 		}
 		return nil, ErrMeshServiceUnavailable(r.service)
 	}
@@ -163,38 +175,60 @@ func (r *MeshTargetRefresher) Resolve(ctx context.Context) (*MeshService, error)
 		r.mu.Unlock()
 		return nil, r.refreshErr
 	}
-	// 多候选 failover：优先选择最近未失败的节点，避免死节点永久遮蔽健康副本
-	// （旧实现恒取 node-ID 字典序首个）。
-	var first, candidate *MeshService
+	// 收集所有同名服务候选，按 NodeID 排序固化（map/遍历序不稳定，排序保证 RR
+	// 序列确定性可测），TTL 内每次 Resolve 从池轮询取下一个。
+	cands := make([]MeshService, 0, 4)
 	for i := range svcs {
-		if svcs[i].Name != r.service {
-			continue
-		}
-		t := svcs[i]
-		if first == nil {
-			first = &t
-		}
-		if candidate == nil && t.Node != r.lastFailedNode {
-			candidate = &t
+		if svcs[i].Name == r.service {
+			cands = append(cands, svcs[i])
 		}
 	}
-	if candidate == nil {
-		candidate = first // 全部候选都是最近失败节点：回退到首个
-	}
-	if candidate != nil {
-		t := *candidate
-		r.target = &t
-		r.lastRefresh = r.now()
+	sort.Slice(cands, func(i, j int) bool { return cands[i].Node < cands[j].Node })
+	if len(cands) == 0 {
+		r.candidates = nil
+		r.lastRefresh = time.Time{}
 		r.mu.Unlock()
-		return &t, nil
+		return nil, ErrMeshServiceUnavailable(r.service)
 	}
-	r.target = nil
-	r.lastRefresh = time.Time{}
+	r.candidates = cands
+	r.lastRefresh = r.now()
+	t := r.pickNextLocked()
 	r.mu.Unlock()
-	return nil, ErrMeshServiceUnavailable(r.service)
+	return t, nil
 }
 
-// Invalidate 使缓存过期：dial 失败后调用，并记录失败节点让下一次 Resolve 跳过它。
+// pickNextLocked 在 mu 保护下从候选池按轮询游标取下一个候选。
+// 游标在每次 Resolve（TTL 命中或刷新后）都推进，保证多候选均匀分布。
+// 跳过 lastFailedNode 且**仍在 MeshFailCooldown 冷却期内**的失败节点（审查
+// Important #1：冷却过后自动重新评估恢复节点，避免单次瞬时失败永久排除某节点）；
+// 若候选池全部为冷却中的失败节点，回退到游标指向的候选——避免全部失败时
+// 无限卡死（返回 nil 仅当候选池为空，调用方已在 len(candidates)>0 前提下调用，
+// 防御性保留）。
+func (r *MeshTargetRefresher) pickNextLocked() *MeshService {
+	n := len(r.candidates)
+	if n == 0 {
+		return nil
+	}
+	// 冷却窗口内才跳过失败节点；冷却已过（或从未失败）→ 失败标记失效，重新评估。
+	skipFailed := !r.lastFailedAt.IsZero() && r.now().Sub(r.lastFailedAt) < MeshFailCooldown
+	start := int(r.nextIdx % uint64(n))
+	for i := range n {
+		idx := (start + i) % n
+		if !skipFailed || r.candidates[idx].Node != r.lastFailedNode {
+			r.nextIdx = uint64((idx + 1) % n)
+			t := r.candidates[idx]
+			return &t
+		}
+	}
+	// 全部候选都是冷却中的失败节点：回退到游标指向的候选。
+	idx := int(r.nextIdx % uint64(n))
+	r.nextIdx = (r.nextIdx + 1) % uint64(n)
+	t := r.candidates[idx]
+	return &t
+}
+
+// Invalidate 使缓存过期：dial 失败后调用，并记录失败节点让下一次 Resolve 在
+// MeshFailCooldown 内跳过它（冷却过后自动重新评估恢复）。
 // 固定目标 refresher（static）no-op（不重查 hub，vip → node 映射由 vipTable 提供）。
 func (r *MeshTargetRefresher) Invalidate(failedNode string) {
 	r.mu.Lock()
@@ -202,9 +236,10 @@ func (r *MeshTargetRefresher) Invalidate(failedNode string) {
 		r.mu.Unlock()
 		return
 	}
-	r.target = nil
+	r.candidates = nil // 强制下次 Resolve 重新拉取候选池
 	r.lastRefresh = time.Time{}
 	r.refreshErr = nil
 	r.lastFailedNode = failedNode
+	r.lastFailedAt = r.now() // 冷却窗口起点
 	r.mu.Unlock()
 }
