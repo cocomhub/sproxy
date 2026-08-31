@@ -122,6 +122,9 @@ access_keys:
 # sync:
 #   max_concurrent: 3                # 最大并发同步任务数（默认 3）
 #   task_ttl: "24h"                  # 完成任务保留时间，过期自动清理
+#   max_retries: 10                  # 瞬时网络错误（连接拒绝/超时/5xx）最大重试次数（默认 10，对齐 cloud retry）
+#   retry_delay: "10s"               # 指数退避基准延迟（第 1 次重试的等待时长，默认 10s）
+#   retry_backoff: 2                 # 指数退避倍率（每次重试延迟乘以此值，默认 2；上限封顶 retry_delay*10）
 # 远程节点（sync_remotes）：第一版用 HTTP 直连远程 sproxy 文件 API（SproxySig 认证）。
 # mesh 通道为后续增强。未配置 access_key/access_key_secret 的 remote 创建任务时 fail-closed 拒绝。
 # sync_remotes:

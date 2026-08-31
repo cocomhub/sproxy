@@ -17,6 +17,15 @@ func TestSyncConfig_Defaults(t *testing.T) {
 	if cfg.Sync.TaskTTL != 24*time.Hour {
 		t.Fatalf("Sync.TaskTTL 默认应为 24h，got %v", cfg.Sync.TaskTTL)
 	}
+	if cfg.Sync.MaxRetries != 10 {
+		t.Fatalf("Sync.MaxRetries 默认应为 10，got %d", cfg.Sync.MaxRetries)
+	}
+	if cfg.Sync.RetryDelay != 10*time.Second {
+		t.Fatalf("Sync.RetryDelay 默认应为 10s，got %v", cfg.Sync.RetryDelay)
+	}
+	if cfg.Sync.RetryBackoff != 2 {
+		t.Fatalf("Sync.RetryBackoff 默认应为 2，got %v", cfg.Sync.RetryBackoff)
+	}
 	if len(cfg.SyncRemotes) != 0 {
 		t.Fatalf("SyncRemotes 默认应为空，got %v", cfg.SyncRemotes)
 	}
@@ -26,12 +35,24 @@ func TestSyncConfig_SetDefaults(t *testing.T) {
 	cfg := Default()
 	cfg.Sync.MaxConcurrent = 0
 	cfg.Sync.TaskTTL = 0
+	cfg.Sync.MaxRetries = 0
+	cfg.Sync.RetryDelay = 0
+	cfg.Sync.RetryBackoff = 0
 	cfg.SetDefaults()
 	if cfg.Sync.MaxConcurrent != 3 {
 		t.Fatalf("SetDefaults 应补 MaxConcurrent=3，got %d", cfg.Sync.MaxConcurrent)
 	}
 	if cfg.Sync.TaskTTL != 24*time.Hour {
 		t.Fatalf("SetDefaults 应补 TaskTTL=24h，got %v", cfg.Sync.TaskTTL)
+	}
+	if cfg.Sync.MaxRetries != 10 {
+		t.Fatalf("SetDefaults 应补 MaxRetries=10，got %d", cfg.Sync.MaxRetries)
+	}
+	if cfg.Sync.RetryDelay != 10*time.Second {
+		t.Fatalf("SetDefaults 应补 RetryDelay=10s，got %v", cfg.Sync.RetryDelay)
+	}
+	if cfg.Sync.RetryBackoff != 2 {
+		t.Fatalf("SetDefaults 应补 RetryBackoff=2，got %v", cfg.Sync.RetryBackoff)
 	}
 }
 

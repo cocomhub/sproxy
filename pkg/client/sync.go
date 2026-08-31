@@ -48,7 +48,8 @@ type SyncTask struct {
 	ConflictPolicy string           `json:"conflict_policy"`
 	SyncEmptyDirs  bool             `json:"sync_empty_dirs"`
 	FollowSymlinks bool             `json:"follow_symlinks"`
-	Status         string           `json:"status"` // pending | syncing | completed | failed | cancelled
+	Status         string           `json:"status"` // pending | syncing | retrying | completed | failed | cancelled
+	Retries        int              `json:"retries"`
 	FilesTotal     int64            `json:"files_total"`
 	FilesDone      int64            `json:"files_done"`
 	BytesTotal     int64            `json:"bytes_total"`
@@ -88,6 +89,7 @@ type SyncTaskList struct {
 const (
 	SyncStatusPending   = "pending"
 	SyncStatusSyncing   = "syncing"
+	SyncStatusRetrying  = "retrying" // 执行中遇可重试瞬时错误，指数退避后自动重试（阶段 6）
 	SyncStatusCompleted = "completed"
 	SyncStatusFailed    = "failed"
 	SyncStatusCancelled = "cancelled"

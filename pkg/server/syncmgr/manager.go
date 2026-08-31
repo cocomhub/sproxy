@@ -45,6 +45,14 @@ type QuotaStore interface {
 type Config struct {
 	MaxConcurrent int           // 最大并发同步任务数，默认 3
 	TaskTTL       time.Duration // 完成任务保留时间，默认 24h
+	// MaxRetries 瞬时网络错误（可重试）最大重试次数，默认 10（对齐 cloud retry）。
+	MaxRetries int
+	// RetryDelay 指数退避基准延迟（第 1 次重试的等待时长），默认 10s。
+	RetryDelay time.Duration
+	// RetryBackoff 指数退避倍率（每次重试延迟乘以此值，如 2 = 2x），默认 2。
+	// 用 float64 表达倍率而非 time.Duration（time.Duration 是纳秒计数，无法表达"2 倍"）。
+	// 退避上限封顶 RetryDelay*10（对齐 cloud 重试预算，避免长尾任务卡死）。
+	RetryBackoff float64
 }
 
 // applyConfigDefaults 为 Config 零值字段填充默认值。
@@ -54,6 +62,15 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	if cfg.TaskTTL <= 0 {
 		cfg.TaskTTL = 24 * time.Hour
+	}
+	if cfg.MaxRetries < 1 {
+		cfg.MaxRetries = 10
+	}
+	if cfg.RetryDelay <= 0 {
+		cfg.RetryDelay = 10 * time.Second
+	}
+	if cfg.RetryBackoff <= 0 {
+		cfg.RetryBackoff = 2
 	}
 }
 
@@ -237,10 +254,10 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 		return nil, false, err
 	}
 	m.mu.Lock()
-	// 写锁内去重
+	// 写锁内去重（retrying 仍是活跃任务，同样去重复用）
 	for _, t := range m.tasks {
 		if t.Direction == req.Direction && t.Remote == req.Remote && t.Src == req.Src && t.Dst == req.Dst &&
-			(t.Status == StatusPending || t.Status == StatusSyncing) {
+			(t.Status == StatusPending || t.Status == StatusSyncing || t.Status == StatusRetrying) {
 			c := *t
 			m.mu.Unlock()
 			m.logger.Info("duplicate sync task request, reusing existing",
@@ -366,7 +383,7 @@ func (m *Manager) List() []SyncTaskMeta {
 	return out
 }
 
-// CancelTask 取消任务（pending/syncing 可取消；排队中任务也可取消）。
+// CancelTask 取消任务（pending/syncing/retrying 可取消；排队中任务也可取消）。
 func (m *Manager) CancelTask(id string) error {
 	m.mu.Lock()
 	t, ok := m.tasks[id]
@@ -374,7 +391,7 @@ func (m *Manager) CancelTask(id string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
-	if t.Status != StatusPending && t.Status != StatusSyncing {
+	if t.Status != StatusPending && t.Status != StatusSyncing && t.Status != StatusRetrying {
 		m.mu.Unlock()
 		return fmt.Errorf("cannot cancel task in status %q", t.Status)
 	}
@@ -501,7 +518,9 @@ func (m *Manager) executeSync(ctx context.Context, task *SyncTask) {
 	}
 
 	m.mu.Lock()
-	if stored, ok := m.tasks[task.ID]; !ok || (stored.Status != StatusPending && stored.Status != StatusSyncing) {
+	// 允许 retrying（重启恢复的 retrying 任务继续执行）：一律重置为 syncing 重新开始本轮执行
+	if stored, ok := m.tasks[task.ID]; !ok ||
+		(stored.Status != StatusPending && stored.Status != StatusSyncing && stored.Status != StatusRetrying) {
 		m.mu.Unlock()
 		return
 	}
@@ -523,72 +542,207 @@ func (m *Manager) executeSync(ctx context.Context, task *SyncTask) {
 		return
 	}
 
-	runResult, runErr := m.executor.Run(syncCtx, task, *remote)
-
-	// 执行器在构造阶段失败（无法创建远程传输等）：无 RunResult，直接 failTask
-	if runResult == nil {
-		if runErr != nil {
-			m.failTask(task, runErr.Error())
-		} else {
-			m.failTask(task, "sync executor returned no result")
+	// 重试循环（阶段 6 工作项 A）：执行器返回可重试的瞬时错误（网络中断/超时/5xx）时
+	// 自动指数退避重试，达 MaxRetries 上限转 failed（错误信息含已重试次数）。
+	// 重试等待期间可取消/删除（waitRetryBackoff 监听 syncCtx.Done）；completed 后不再重试。
+	//
+	// attempt 语义：0 = 首次执行；第 N 次重试前先置 retrying 状态 + 退避等待（attempt=N）。
+	maxRetries := m.config.MaxRetries
+	var lastErr string
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			// 进入重试：置 retrying（保留重试计数）+ 指数退避等待（等待期间可取消/删除）
+			if !m.markRetrying(task, lastErr) {
+				return
+			}
+			if !m.waitRetryBackoff(syncCtx, task, attempt) {
+				return
+			}
 		}
+
+		runResult, runErr := m.executor.Run(syncCtx, task, *remote)
+
+		// 执行器在构造阶段失败（无法创建远程传输等）：无 RunResult，确定性错误，不重试
+		if runResult == nil {
+			if runErr != nil {
+				m.failTask(task, runErr.Error())
+			} else {
+				m.failTask(task, "sync executor returned no result")
+			}
+			return
+		}
+
+		// 执行中取消：引擎已按 ctx 取消返回 cancelled，走终态收尾（applyRunResult
+		// 对已 cancelled 任务不覆盖状态）
+		if runResult.Status == StatusCancelled {
+			m.finishTask(task, runResult, runErr)
+			return
+		}
+
+		// 可重试错误（瞬时网络错误）：达上限转 failed；否则记录后进入下一次重试
+		if runResult.Status == StatusFailed && runResult.Retryable {
+			if attempt >= maxRetries {
+				errMsg := fmt.Sprintf("同步任务已重试 %d 次仍失败: %s", task.Retries, pickErrorText(runResult, runErr))
+				m.applyRunResultWithError(task, runResult, runErr, errMsg)
+				if serr := m.saveTask(task); serr != nil {
+					m.logger.Error("persist retry-exhausted sync task state, state may be lost on restart",
+						"task_id", task.ID, "error", serr)
+				}
+				m.logger.Error("sync task failed after retries exhausted",
+					"task_id", task.ID, "retries", task.Retries, "error", task.Error)
+				return
+			}
+			lastErr = pickErrorText(runResult, runErr)
+			m.logger.Warn("sync task transient error, will retry",
+				"task_id", task.ID, "attempt", attempt+1, "max", maxRetries, "error", lastErr)
+			continue
+		}
+
+		// 非可重试结果（完成/业务失败/未知状态）：直接收尾
+		m.finishTask(task, runResult, runErr)
 		return
 	}
+}
 
-	// 回填进度与结果（写锁内与 CancelTask/DeleteTask 互斥）。用匿名函数 + defer 确保
-	// panic 时释放写锁，否则外层 recover 的 failTask 会获取同一把锁而自锁（审查 M-6）。
-	func() {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		stored, ok := m.tasks[task.ID]
-		if !ok {
-			// 任务已被删除：不再写状态/对账
-			return
-		}
-		if stored.Status == StatusCancelled {
-			// 取消即放弃：终态由 CancelTask 写入，这里不覆盖
-			return
-		}
-		task.FilesTotal = runResult.FilesTotal
-		task.FilesDone = runResult.FilesDone
-		task.BytesTotal = runResult.BytesTotal
-		task.BytesDone = runResult.BytesDone
-		task.Results = runResult.Results
-		task.Status = runResult.Status
-		task.UpdatedAt = time.Now()
+// markRetrying 把任务置为 retrying 并持久化重试计数。任务已被取消/删除时返回 false
+// （调用方停止重试）。
+func (m *Manager) markRetrying(task *SyncTask, lastErr string) bool {
+	m.mu.Lock()
+	stored, ok := m.tasks[task.ID]
+	if !ok || (stored.Status != StatusSyncing && stored.Status != StatusRetrying) {
+		// 任务已删除或已进入终态（取消）：不再重试
+		m.mu.Unlock()
+		return false
+	}
+	task.Retries++
+	task.Status = StatusRetrying
+	if lastErr != "" {
+		task.Error = lastErr
+	}
+	task.UpdatedAt = time.Now()
+	m.mu.Unlock()
+	if err := m.saveTask(task); err != nil {
+		m.logger.Error("persist retrying sync task state, state may be lost on restart",
+			"task_id", task.ID, "error", err)
+	}
+	return true
+}
 
-		switch task.Status {
-		case StatusCompleted:
-			task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
-			task.Error = ""
-			m.reconcileQuotaLocked(task)
-		case StatusCancelled:
-			// 死代码（审查 M-5）：syncCtx 仅被 CancelTask/DeleteTask 取消，二者都已置
-			// cancelled 或删除任务，回填入口的 stored.Status==StatusCancelled 已先返回；
-			// 保留作防御（执行器未来若自判取消可落到此处）。
-			task.Error = runResult.Error
-		case StatusFailed:
-			switch {
-			case runResult.Error != "":
-				task.Error = runResult.Error
-			case runErr != nil:
-				task.Error = runErr.Error()
-			default:
-				task.Error = "同步失败"
-			}
-		default:
-			task.Status = StatusFailed
-			if task.Error == "" {
-				task.Error = "同步执行器返回未知状态"
-			}
-		}
-	}()
+// waitRetryBackoff 指数退避等待（第 attempt 次重试前）。等待期间任务被取消/删除
+// （syncCtx 取消）时返回 false，调用方停止重试。
+func (m *Manager) waitRetryBackoff(syncCtx context.Context, task *SyncTask, attempt int) bool {
+	delay := m.retryBackoffDelay(attempt)
+	m.logger.Info("sync task waiting before retry",
+		"task_id", task.ID, "attempt", attempt, "retries", task.Retries, "delay", delay)
+	// 用可停止的 timer（而非 time.After）：任务在长退避等待中被取消时立即停止 timer，
+	// 避免定时器泄漏到延迟结束才触发。
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-syncCtx.Done():
+		// 任务被取消/删除：终态由 CancelTask/DeleteTask 写入，这里不覆盖
+		m.logger.Info("sync task retry cancelled during backoff", "task_id", task.ID)
+		return false
+	}
+}
 
+// retryBackoffDelay 计算第 attempt 次（1-based）重试前的等待延迟。
+// 指数退避：base * backoff^(attempt-1)，封顶 base*10（对齐 cloud 重试预算，避免长尾）。
+func (m *Manager) retryBackoffDelay(attempt int) time.Duration {
+	base := m.config.RetryDelay
+	if base <= 0 {
+		base = 10 * time.Second
+	}
+	backoff := m.config.RetryBackoff
+	if backoff <= 0 {
+		backoff = 2
+	}
+	capDelay := base * 10
+	delay := base
+	for i := 1; i < attempt; i++ {
+		delay = time.Duration(float64(delay) * backoff)
+		if delay >= capDelay {
+			return capDelay
+		}
+	}
+	return delay
+}
+
+// finishTask 应用终态 RunResult 并持久化（回填进度/状态/错误 + 落盘 + 终态日志）。
+func (m *Manager) finishTask(task *SyncTask, runResult *RunResult, runErr error) {
+	m.applyRunResult(task, runResult, runErr)
 	if err := m.saveTask(task); err != nil {
 		m.logger.Error("persist sync task state failed, state may be lost on restart",
 			"task_id", task.ID, "error", err)
 	}
+	m.logTaskResult(task)
+}
 
+// applyRunResult 在写锁内回填任务进度/状态/错误（终态）。
+func (m *Manager) applyRunResult(task *SyncTask, runResult *RunResult, runErr error) {
+	m.applyRunResultWithError(task, runResult, runErr, "")
+}
+
+// applyRunResultWithError 在写锁内回填任务进度/状态/错误。
+// errorOverride 非空且结果为 failed 时覆盖 Error（用于重试耗尽：保留进度回填但
+// 错误改写为"已重试 N 次"）。用 defer 释放写锁，panic 时外层 recover 的 failTask
+// 不会自锁（审查 M-6）。
+func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, runErr error, errorOverride string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	stored, ok := m.tasks[task.ID]
+	if !ok {
+		// 任务已被删除：不再写状态/对账
+		return
+	}
+	if stored.Status == StatusCancelled {
+		// 取消即放弃：终态由 CancelTask 写入，这里不覆盖
+		return
+	}
+	task.FilesTotal = runResult.FilesTotal
+	task.FilesDone = runResult.FilesDone
+	task.BytesTotal = runResult.BytesTotal
+	task.BytesDone = runResult.BytesDone
+	task.Results = runResult.Results
+	task.Status = runResult.Status
+	task.UpdatedAt = time.Now()
+
+	if errorOverride != "" && task.Status == StatusFailed {
+		task.Error = errorOverride
+		return
+	}
+
+	switch task.Status {
+	case StatusCompleted:
+		task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
+		task.Error = ""
+		m.reconcileQuotaLocked(task)
+	case StatusCancelled:
+		// 死代码（审查 M-5）：syncCtx 仅被 CancelTask/DeleteTask 取消，二者都已置
+		// cancelled 或删除任务，回填入口的 stored.Status==StatusCancelled 已先返回；
+		// 保留作防御（执行器未来若自判取消可落到此处）。
+		task.Error = runResult.Error
+	case StatusFailed:
+		switch {
+		case runResult.Error != "":
+			task.Error = runResult.Error
+		case runErr != nil:
+			task.Error = runErr.Error()
+		default:
+			task.Error = "同步失败"
+		}
+	default:
+		task.Status = StatusFailed
+		if task.Error == "" {
+			task.Error = "同步执行器返回未知状态"
+		}
+	}
+}
+
+// logTaskResult 记录终态结果日志。
+func (m *Manager) logTaskResult(task *SyncTask) {
 	switch task.Status {
 	case StatusCompleted:
 		m.logger.Info("sync task completed",
@@ -598,6 +752,17 @@ func (m *Manager) executeSync(ctx context.Context, task *SyncTask) {
 	case StatusFailed:
 		m.logger.Error("sync task failed", "task_id", task.ID, "error", task.Error)
 	}
+}
+
+// pickErrorText 从 RunResult/error 中取错误文本（优先 RunResult.Error）。
+func pickErrorText(runResult *RunResult, runErr error) string {
+	if runResult != nil && runResult.Error != "" {
+		return runResult.Error
+	}
+	if runErr != nil {
+		return runErr.Error()
+	}
+	return "同步失败"
 }
 
 // reconcileQuotaLocked 按 BytesDone 对账预留配额（调用方须持有写锁）。
@@ -680,7 +845,8 @@ func (m *Manager) saveTask(t *SyncTask) error {
 	return nil
 }
 
-// recoverTasks 从磁盘恢复任务，仅重启 syncing 状态（pending 不自动启动）。
+// recoverTasks 从磁盘恢复任务，仅重启 syncing/retrying 状态（pending 不自动启动）。
+// retrying 任务（重试等待/重试执行中崩溃）与 syncing 一样中断续执行，保留已累计的重试计数。
 func (m *Manager) recoverTasks() {
 	entries, err := os.ReadDir(m.persistDir)
 	if err != nil {
@@ -710,8 +876,8 @@ func (m *Manager) recoverTasks() {
 		m.mu.Unlock()
 		recovered++
 
-		if task.Status == StatusSyncing {
-			m.logger.Info("restarting interrupted sync task", "task_id", task.ID, "remote", task.Remote)
+		if task.Status == StatusSyncing || task.Status == StatusRetrying {
+			m.logger.Info("restarting interrupted sync task", "task_id", task.ID, "remote", task.Remote, "retries", task.Retries)
 			m.mu.Lock()
 			m.running[task.ID] = true
 			m.mu.Unlock()

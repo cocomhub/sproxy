@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -393,4 +394,61 @@ func (t *HTTPTransport) Close() error {
 	}
 	t.tr.CloseIdleConnections()
 	return nil
+}
+
+// IsRetryableError 判断同步错误是否为可重试的瞬时错误（供 syncexec 填充
+// RunResult.Retryable，驱动 syncmgr 阶段 6 自动重试）。
+//
+// 可重试：网络层错误（连接拒绝/重置/超时等 net.Error）、超时
+// （context.DeadlineExceeded）、远程 5xx（HTTP 服务端瞬时故障）。
+// 不可重试：上下文取消（用户主动取消）、业务失败（校验/路径等确定性错误）与
+// 4xx（请求本身有问题，重试不会成功）。
+//
+// 说明（should_retry 接入）：chunk 级 should_retry 标记已在 pkg/client 分块上传管线
+// 内部消费（逐块重试后 complete 校验兜底），此处不重复消费；本函数在传输层之上
+// 提供"整次同步是否值得整体重试"的判别。pkg/client 未暴露类型化 HTTP 状态错误
+// （错误文本 "请求失败 (HTTP %d): ..."），5xx 检测用文本解析，仅用于 5xx 瞬时 vs
+// 4xx 确定性分类，匹配 client 的错误格式。
+func IsRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 用户/系统主动取消：不重试
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	// 超时（context.DeadlineExceeded）：瞬时，重试
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// 网络层错误（连接拒绝/重置/超时，net.Error）：瞬时，重试
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	// 远程 5xx：服务端瞬时故障，重试；4xx 不重试
+	if code, ok := httpStatusFromError(err); ok && code >= 500 {
+		return true
+	}
+	return false
+}
+
+// httpStatusFromError 从错误链中提取 HTTP 状态码。client 包以 "请求失败 (HTTP %d): ..."
+// 文本包装非 2xx 错误（未暴露类型化状态错误），此处用文本解析仅用于 5xx 瞬时 vs
+// 4xx 确定性分类；提取失败返回 (0, false)。
+func httpStatusFromError(err error) (int, bool) {
+	const marker = "HTTP "
+	for err != nil {
+		msg := err.Error()
+		if _, after, ok := strings.Cut(msg, marker); ok {
+			rest := after
+			if len(rest) >= 3 {
+				if code, perr := strconv.Atoi(rest[:3]); perr == nil && code >= 100 && code <= 599 {
+					return code, true
+				}
+			}
+		}
+		err = errors.Unwrap(err)
+	}
+	return 0, false
 }

@@ -14,6 +14,9 @@ type RunResult struct {
 	BytesDone  int64
 	Results    []SyncFileResult // 扁平化文件级结果
 	Error      string           // Status==failed 时的错误文本
+	// Retryable 标记失败是否为可重试的瞬时错误（阶段 6：网络中断/超时/5xx = true；
+	// 业务失败/校验/路径等确定性错误 = false）。仅 Status==failed 时有意义。
+	Retryable bool
 }
 
 // Executor 执行一次同步任务（src/dst 传输编排）。

@@ -98,6 +98,9 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	}
 	if job.Status == syncpkg.StatusFailed && syncErr != nil {
 		result.Error = syncErr.Error()
+		// 阶段 6 自动重试：瞬时网络错误（连接拒绝/超时/5xx）标记为可重试，
+		// 业务失败（校验/路径等确定性错误）为 false（重试不会成功）。
+		result.Retryable = syncpkg.IsRetryableError(syncErr)
 	}
 	return result, syncErr
 }

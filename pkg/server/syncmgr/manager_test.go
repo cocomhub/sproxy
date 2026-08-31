@@ -624,3 +624,253 @@ func TestExecutor_PanicRecovery(t *testing.T) {
 		t.Fatalf("Error 应含 panic，got %q", tk.Error)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 自动重试（阶段 6 工作项 A）
+// ---------------------------------------------------------------------------
+
+// TestRetry_TransientErrorThenSuccess 验证瞬时网络错误自动重试：第 1 次 Run 返回
+// Retryable 错误、第 2 次成功 → 任务最终 completed（不再需要手动重建）。
+func TestRetry_TransientErrorThenSuccess(t *testing.T) {
+	exec := newRetryMockExecutor([]*RunResult{
+		{Status: StatusFailed, Retryable: true, Error: "网络错误: connection refused"},
+		completedResult(),
+	})
+	mgr := newTestManager(t, nil, nil, exec, &Config{
+		MaxConcurrent: 3, TaskTTL: time.Hour, MaxRetries: 3, RetryDelay: 10 * time.Millisecond, RetryBackoff: 2,
+	})
+
+	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := waitForStatus(t, mgr, task.ID, StatusCompleted, 10*time.Second)
+	if exec.callCount() != 2 {
+		t.Fatalf("瞬时错误应重试后成功，期望 2 次 Run，got %d", exec.callCount())
+	}
+	if done.Retries != 1 {
+		t.Fatalf("重试计数应为 1，got %d", done.Retries)
+	}
+	if done.FilesDone != 1 || done.BytesDone != 5 {
+		t.Fatalf("进度字段不符: files=%d/%d bytes=%d", done.FilesDone, done.FilesTotal, done.BytesDone)
+	}
+	if done.Error != "" {
+		t.Fatalf("完成任务 Error 应为空，got %q", done.Error)
+	}
+}
+
+// TestRetry_MaxRetriesExhausted 验证重试上限：mock 恒返回 Retryable → 达 MaxRetries
+// 后转 failed，错误信息含"已重试 N 次"。
+func TestRetry_MaxRetriesExhausted(t *testing.T) {
+	exec := newRetryMockExecutor([]*RunResult{
+		{Status: StatusFailed, Retryable: true, Error: "网络错误: connection refused"},
+		{Status: StatusFailed, Retryable: true, Error: "网络错误: timeout"},
+		{Status: StatusFailed, Retryable: true, Error: "网络错误: 5xx"},
+	})
+	mgr := newTestManager(t, nil, nil, exec, &Config{
+		MaxConcurrent: 3, TaskTTL: time.Hour, MaxRetries: 2, RetryDelay: 5 * time.Millisecond, RetryBackoff: 2,
+	})
+
+	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := waitForStatus(t, mgr, task.ID, StatusFailed, 10*time.Second)
+	if exec.callCount() != 3 {
+		t.Fatalf("MaxRetries=2 应执行 3 次（初始+2 重试），got %d", exec.callCount())
+	}
+	if failed.Retries != 2 {
+		t.Fatalf("重试计数应为 2，got %d", failed.Retries)
+	}
+	if !strings.Contains(failed.Error, "已重试 2 次") {
+		t.Fatalf("失败错误应含已重试次数: %q", failed.Error)
+	}
+	if !strings.Contains(failed.Error, "5xx") {
+		t.Fatalf("失败错误应包含最后一次错误文本: %q", failed.Error)
+	}
+}
+
+// TestRetry_BackoffDelayComputation 验证指数退避延迟计算的纯函数（base * backoff^(n-1)，
+// 封顶 base*10）。
+func TestRetry_BackoffDelayComputation(t *testing.T) {
+	mgr := newTestManager(t, nil, nil, nil, &Config{
+		MaxConcurrent: 1, TaskTTL: time.Hour, MaxRetries: 3, RetryDelay: time.Second, RetryBackoff: 2,
+	})
+	cases := []struct {
+		attempt int
+		want    time.Duration
+	}{
+		{1, time.Second},
+		{2, 2 * time.Second},
+		{3, 4 * time.Second},
+		{4, 8 * time.Second},
+		{5, 10 * time.Second}, // 封顶 base*10
+		{10, 10 * time.Second},
+	}
+	for _, tc := range cases {
+		if got := mgr.retryBackoffDelay(tc.attempt); got != tc.want {
+			t.Fatalf("retryBackoffDelay(%d) 应为 %v，got %v", tc.attempt, tc.want, got)
+		}
+	}
+}
+
+// TestRetry_BackoffTiming 验证重试间隔符合指数退避（仅断言下界：
+// 第 1 次重试 >= base，第 2 次 >= base*2——-race/CI 负载只会让间隔变长，下界断言鲁棒）。
+func TestRetry_BackoffTiming(t *testing.T) {
+	base := 20 * time.Millisecond
+	exec := newRetryMockExecutor([]*RunResult{
+		{Status: StatusFailed, Retryable: true, Error: "e1"},
+		{Status: StatusFailed, Retryable: true, Error: "e2"},
+		completedResult(),
+	})
+	mgr := newTestManager(t, nil, nil, exec, &Config{
+		MaxConcurrent: 3, TaskTTL: time.Hour, MaxRetries: 3, RetryDelay: base, RetryBackoff: 2,
+	})
+
+	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, mgr, task.ID, StatusCompleted, 10*time.Second)
+	gaps := exec.gaps()
+	if len(gaps) != 2 {
+		t.Fatalf("应有 2 个重试间隔，got %d: %v", len(gaps), gaps)
+	}
+	if gaps[0] < base {
+		t.Fatalf("第 1 次重试间隔应 >= %v，got %v", base, gaps[0])
+	}
+	if gaps[1] < 2*base {
+		t.Fatalf("第 2 次重试间隔应 >= %v（指数退避），got %v", 2*base, gaps[1])
+	}
+}
+
+// TestRetry_StatusRetryingVisible 验证重试期间任务 Status == retrying：
+// 第 1 次 Run 返回可重试错误后进入 retrying；第 2 次 Run 执行期间保持 retrying。
+func TestRetry_StatusRetryingVisible(t *testing.T) {
+	exec := newBlockingRetryExecutor()
+	mgr := newTestManager(t, nil, nil, exec, &Config{
+		MaxConcurrent: 3, TaskTTL: time.Hour, MaxRetries: 3, RetryDelay: 100 * time.Millisecond, RetryBackoff: 2,
+	})
+
+	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exec.started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("第 1 次 Run 未被调用")
+	}
+	// 释放第 1 次 Run（返回可重试错误）→ 进入退避，状态应为 retrying
+	exec.releaseFirst()
+	waitForStatus(t, mgr, task.ID, StatusRetrying, 5*time.Second)
+	// 退避结束后第 2 次 Run 开始执行，执行期间状态应保持 retrying
+	select {
+	case <-exec.secondStarted:
+	case <-time.After(30 * time.Second):
+		t.Fatal("第 2 次 Run 未被调用")
+	}
+	if got := mgr.Get(task.ID).Status; got != StatusRetrying {
+		t.Fatalf("重试执行期间状态应为 retrying，got %q", got)
+	}
+	if got := mgr.Get(task.ID).Retries; got != 1 {
+		t.Fatalf("重试计数应为 1，got %d", got)
+	}
+	exec.releaseSecond()
+	waitForStatus(t, mgr, task.ID, StatusCompleted, 10*time.Second)
+}
+
+// TestRetry_BusinessErrorNoRetry 验证业务失败（Retryable=false）不重试，直接 failed。
+func TestRetry_BusinessErrorNoRetry(t *testing.T) {
+	exec := newRetryMockExecutor([]*RunResult{
+		{Status: StatusFailed, Retryable: false, Error: "路径校验失败"},
+	})
+	mgr := newTestManager(t, nil, nil, exec, &Config{
+		MaxConcurrent: 3, TaskTTL: time.Hour, MaxRetries: 3, RetryDelay: 5 * time.Millisecond, RetryBackoff: 2,
+	})
+
+	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := waitForStatus(t, mgr, task.ID, StatusFailed, 5*time.Second)
+	if exec.callCount() != 1 {
+		t.Fatalf("业务失败不应重试，期望 1 次 Run，got %d", exec.callCount())
+	}
+	if !strings.Contains(failed.Error, "路径校验失败") {
+		t.Fatalf("失败错误应保留业务错误: %q", failed.Error)
+	}
+	if failed.Retries != 0 {
+		t.Fatalf("业务失败重试计数应为 0，got %d", failed.Retries)
+	}
+}
+
+// TestRetry_CancelDuringBackoff 验证重试等待（退避）期间取消立即生效：
+// 取消后任务转 cancelled，不再继续重试。
+func TestRetry_CancelDuringBackoff(t *testing.T) {
+	exec := newBlockingRetryExecutor()
+	// 退避 1 小时：若不支持取消，任务会长时间卡在 retrying
+	mgr := newTestManager(t, nil, nil, exec, &Config{
+		MaxConcurrent: 3, TaskTTL: time.Hour, MaxRetries: 3, RetryDelay: time.Hour, RetryBackoff: 2,
+	})
+
+	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exec.started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("第 1 次 Run 未被调用")
+	}
+	exec.releaseFirst()
+	// 进入 1 小时退避，状态为 retrying
+	waitForStatus(t, mgr, task.ID, StatusRetrying, 5*time.Second)
+	// 退避等待期间取消 → 立即 cancelled（不等退避结束）
+	if err := mgr.CancelTask(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, mgr, task.ID, StatusCancelled, 5*time.Second)
+	if exec.callCount() != 1 {
+		t.Fatalf("取消后不应再重试，期望 1 次 Run，got %d", exec.callCount())
+	}
+}
+
+// TestRetry_RetriesPersisted 验证 retries 计数落盘：retrying 任务重启恢复后保留计数，
+// 且 retrying 任务与 syncing 一样在重启后自动恢复执行。
+func TestRetry_RetriesPersisted(t *testing.T) {
+	uploadsDir := t.TempDir()
+	persistDir := filepath.Join(uploadsDir, syncDirName)
+	if err := os.MkdirAll(persistDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 模拟崩溃前持久化的 retrying 任务（重试计数 2）
+	persisted := &SyncTask{
+		ID: "sync-retry-1", Direction: string(DirectionPush), Remote: "r1",
+		Status: StatusRetrying, Retries: 2, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	data, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(persistDir, persisted.ID+".json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	blocking := newBlockingMockExecutor()
+	mgr := NewManager(uploadsDir, newMockQuota(0), 0,
+		[]RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
+		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, MaxRetries: 3, RetryDelay: 10 * time.Millisecond, RetryBackoff: 2})
+	defer mgr.Stop()
+
+	// 恢复的 retrying 任务应重启执行（用 started 信号确定性等待，对齐恢复 syncing 的模式）
+	waitStarted(t, blocking)
+	if got := mgr.Get(persisted.ID).Retries; got != 2 {
+		t.Fatalf("恢复后 Retries 应保留 2，got %d", got)
+	}
+	blocking.release()
+	done := waitForStatus(t, mgr, persisted.ID, StatusCompleted, 10*time.Second)
+	if done.Retries != 2 {
+		t.Fatalf("完成后 Retries 应保持 2，got %d", done.Retries)
+	}
+}

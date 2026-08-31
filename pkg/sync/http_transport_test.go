@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -872,5 +873,50 @@ func TestHTTPTransport_Close_InterruptsInflight(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("Close 未中断 in-flight 请求")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IsRetryableError：阶段 6 自动重试的可重试错误判别
+// ---------------------------------------------------------------------------
+
+func TestIsRetryableError(t *testing.T) {
+	// 网络层错误（连接拒绝/重置/超时，net.Error）→ 可重试
+	netErr := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: connection refused")}
+	if !IsRetryableError(fmt.Errorf("列出远程目录失败: %w", netErr)) {
+		t.Fatal("net.OpError（连接拒绝）应判为可重试")
+	}
+
+	// 超时（context.DeadlineExceeded）→ 可重试
+	if !IsRetryableError(fmt.Errorf("枚举源目录失败: %w", context.DeadlineExceeded)) {
+		t.Fatal("DeadlineExceeded 应判为可重试")
+	}
+
+	// 上下文取消（用户主动取消）→ 不可重试
+	if IsRetryableError(context.Canceled) {
+		t.Fatal("context.Canceled 不应判为可重试（用户取消）")
+	}
+
+	// HTTP 5xx（服务端瞬时故障）→ 可重试
+	if !IsRetryableError(errors.New("请求失败 (HTTP 500): internal server error")) {
+		t.Fatal("HTTP 500 应判为可重试")
+	}
+	if !IsRetryableError(fmt.Errorf("列出远程目录失败: %w", errors.New("请求失败 (HTTP 503): unavailable"))) {
+		t.Fatal("HTTP 503（包装）应判为可重试")
+	}
+
+	// HTTP 4xx（请求本身有问题）→ 不可重试
+	if IsRetryableError(errors.New("请求失败 (HTTP 404): not found")) {
+		t.Fatal("HTTP 404 不应判为可重试")
+	}
+
+	// 业务/确定性错误（路径校验失败）→ 不可重试
+	if IsRetryableError(errors.New("路径校验失败")) {
+		t.Fatal("业务失败不应判为可重试")
+	}
+
+	// nil → 不可重试
+	if IsRetryableError(nil) {
+		t.Fatal("nil 不应判为可重试")
 	}
 }

@@ -228,6 +228,13 @@ type SyncConfig struct {
 	MaxConcurrent int `yaml:"max_concurrent" mapstructure:"max_concurrent"`
 	// TaskTTL 完成任务保留时间，默认 24h。
 	TaskTTL time.Duration `yaml:"task_ttl" mapstructure:"task_ttl"`
+	// MaxRetries 瞬时网络错误（可重试）最大重试次数，默认 10（对齐 cloud retry）。
+	MaxRetries int `yaml:"max_retries" mapstructure:"max_retries"`
+	// RetryDelay 指数退避基准延迟（第 1 次重试的等待时长），默认 10s。
+	RetryDelay time.Duration `yaml:"retry_delay" mapstructure:"retry_delay"`
+	// RetryBackoff 指数退避倍率（每次重试延迟乘以此值，如 2 = 2x），默认 2。
+	// 退避上限封顶 RetryDelay*10（对齐 cloud 重试预算，避免长尾任务卡死）。
+	RetryBackoff float64 `yaml:"retry_backoff" mapstructure:"retry_backoff"`
 }
 
 // SyncRemoteConfig 是同步远程节点配置（sync_remotes 数组元素）。
@@ -321,6 +328,9 @@ func Default() *Config {
 		Sync: SyncConfig{
 			MaxConcurrent: 3,
 			TaskTTL:       24 * time.Hour,
+			MaxRetries:    10,
+			RetryDelay:    10 * time.Second,
+			RetryBackoff:  2,
 		},
 		Hub: HubConfig{
 			VirtualSubnet: hub.DefaultVirtualSubnet,
@@ -393,6 +403,15 @@ func (c *Config) SetDefaults() {
 	}
 	if c.Sync.TaskTTL <= 0 {
 		c.Sync.TaskTTL = 24 * time.Hour
+	}
+	if c.Sync.MaxRetries < 1 {
+		c.Sync.MaxRetries = 10
+	}
+	if c.Sync.RetryDelay <= 0 {
+		c.Sync.RetryDelay = 10 * time.Second
+	}
+	if c.Sync.RetryBackoff <= 0 {
+		c.Sync.RetryBackoff = 2
 	}
 	if c.Hub.MaxConnections <= 0 {
 		c.Hub.MaxConnections = 256
