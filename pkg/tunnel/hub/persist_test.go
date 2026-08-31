@@ -28,7 +28,7 @@ func testSnap() *Snapshot {
 		},
 		Messages: []MessageSnap{
 			{Peer: "node-a", Msgs: []SignalMsg{{ID: "m1", Kind: SignalOffer, From: "node-b", To: "node-a", SDP: "v=0", At: time.Now().UnixMilli()}}},
-			{Peer: "node-b", Msgs: []SignalMsg{{ID: "m2", Kind: SignalCandidate, From: "node-a", To: "node-b", Cand: "ice://x", At: time.Now().UnixMilli()}}},
+			{Peer: "node-b", Msgs: []SignalMsg{{ID: "m2", Kind: SignalAnswer, From: "node-a", To: "node-b", SDP: "a=ice", At: time.Now().UnixMilli()}}},
 		},
 	}
 }
@@ -82,7 +82,7 @@ func TestPersister_SaveLoadRoundTrip(t *testing.T) {
 		for j := range w.Msgs {
 			wm, gm := w.Msgs[j], g.Msgs[j]
 			if wm.ID != gm.ID || wm.Kind != gm.Kind || wm.From != gm.From ||
-				wm.To != gm.To || wm.SDP != gm.SDP || wm.Cand != gm.Cand {
+				wm.To != gm.To || wm.SDP != gm.SDP {
 				t.Fatalf("消息[%d][%d] 内容不一致:\n got=%+v\nwant=%+v", i, j, gm, wm)
 			}
 			if wm.At != gm.At {
@@ -157,12 +157,15 @@ func TestSnapshotRestore_MultiMesh(t *testing.T) {
 }
 
 // TestSnapshotSignalQueue_RoundTrip：信令收件箱快照往返，恢复后 Pop 取回同消息。
+// TestSnapshotSignalQueue_RoundTrip：信令收件箱快照往返，恢复后 Pop 取回同消息。
+// 覆盖 offer/answer/candidate 三种 kind 的混合快照（candidate 为 trickle 预留，
+// 见 SignalKind 注释；快照需保留其 Cand 字段）。
 func TestSnapshotSignalQueue_RoundTrip(t *testing.T) {
 	q := NewSignalQueue()
 	in := []SignalMsg{
 		{ID: "m1", Kind: SignalOffer, From: "node-b", To: "node-a", SDP: "v=0"},
-		{ID: "m2", Kind: SignalCandidate, From: "node-a", To: "node-b", Cand: "ice://x"},
-		{ID: "m3", Kind: SignalAnswer, From: "node-b", To: "node-a", SDP: "v=1"},
+		{ID: "m2", Kind: SignalAnswer, From: "node-b", To: "node-a", SDP: "v=1"},
+		{ID: "m3", Kind: SignalCandidate, From: "node-b", To: "node-a", Cand: "candidate:1 1 UDP ..."},
 	}
 	for _, m := range in {
 		if err := q.Push(m); err != nil {
@@ -173,8 +176,12 @@ func TestSnapshotSignalQueue_RoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.json")
 	p := NewPersister(path)
 	msgs := SnapshotSignalQueue(q)
-	if len(msgs) != 2 {
-		t.Fatalf("SnapshotSignalQueue 收件箱数 = %d, want 2", len(msgs))
+	// 3 条消息都在同一 peer（node-a）→ 期望 1 个 MessageSnap 含 3 条。
+	if len(msgs) != 1 {
+		t.Fatalf("SnapshotSignalQueue 收件箱数 = %d, want 1（3 条同 peer 应收进一个快照）", len(msgs))
+	}
+	if got := len(msgs[0].Msgs); got != 3 {
+		t.Fatalf("快照[0] 消息数 = %d, want 3", got)
 	}
 	if err := p.Save(&Snapshot{Messages: msgs}); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -187,23 +194,25 @@ func TestSnapshotSignalQueue_RoundTrip(t *testing.T) {
 	dst := NewSignalQueue()
 	RestoreSignalQueue(dst, snap.Messages)
 
-	// node-a 收件箱：m1(offer) 与 m3(answer) 按入队顺序（Push 时 ID/At 由队列生成）。
+	// node-a 收件箱：m1(offer)、m2(answer)、m3(candidate) 按入队顺序
+	// （Push 时 ID/At 由队列生成）。candidate 的 Cand 字段须往返保留。
 	m1 := dst.Pop("node-a")
+	m2 := dst.Pop("node-a")
 	m3 := dst.Pop("node-a")
 	if m1 == nil || m1.Kind != SignalOffer || m1.From != "node-b" || m1.SDP != "v=0" {
 		t.Fatalf("恢复后 Pop(node-a) 第 1 次 = %+v, want offer(v=0)", m1)
 	}
-	if m3 == nil || m3.Kind != SignalAnswer || m3.SDP != "v=1" {
-		t.Fatalf("恢复后 Pop(node-a) 第 2 次 = %+v, want answer(v=1)", m3)
+	if m2 == nil || m2.Kind != SignalAnswer || m2.SDP != "v=1" {
+		t.Fatalf("恢复后 Pop(node-a) 第 2 次 = %+v, want answer(v=1)", m2)
+	}
+	if m3 == nil || m3.Kind != SignalCandidate || m3.Cand != "candidate:1 1 UDP ..." {
+		t.Fatalf("恢复后 Pop(node-a) 第 3 次 = %+v, want candidate 且 Cand 保留", m3)
 	}
 	if m := dst.Pop("node-a"); m != nil {
-		t.Fatalf("node-a 收件箱应只剩 2 条消息，多出 %+v", m)
-	}
-	if m := dst.Pop("node-b"); m == nil || m.Kind != SignalCandidate || m.Cand != "ice://x" {
-		t.Fatalf("Pop(node-b) 应取回 candidate，got %+v", m)
+		t.Fatalf("node-a 收件箱应只剩 3 条消息，多出 %+v", m)
 	}
 	if m := dst.Pop("node-b"); m != nil {
-		t.Fatal("node-b 收件箱应只剩 1 条消息")
+		t.Fatalf("node-b 收件箱应为空，got %+v", m)
 	}
 }
 

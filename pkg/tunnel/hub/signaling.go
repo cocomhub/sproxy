@@ -14,12 +14,21 @@ import (
 )
 
 // SignalKind 标识信令消息类型。
+//
+// candidate 类型为 trickle ICE 的预留注入点：当前实现是 **non-trickle**（WebRTC
+// ICE 候选全内联在 offer/answer 的 SDP 中，pion/webrtc 的 `OnICECandidate` 未被
+// 桥接成逐帧消息），故 SignalCandidate 在生产无 sender/consumer。保留常量与
+// endpoint 的原因：① 兼容存量对端——连 `/api/signal/candidate` 不报 404；
+// ② 未来做 trickle ICE 增量（首连提速）时无需另一个协议面，直接复用本信令
+// 通道（SignalQueue 的 PopKind/Peek/Confirm 已按 kind 通用支持）。
+// 启用 trickle 的评估：服务端 ~0.5h（endpoint+push 复用），客户端 webrtc 集成
+// 1–2 天（OnICECandidate/AddICECandidate 双向桥 + 与 SDP 内联并存 + 时序测试）。
 type SignalKind string
 
 const (
 	SignalOffer     SignalKind = "offer"
 	SignalAnswer    SignalKind = "answer"
-	SignalCandidate SignalKind = "candidate"
+	SignalCandidate SignalKind = "candidate" // trickle ICE 预留（见上注释）
 )
 
 // SignalMsg 是经 hub 存转的一条信令消息。
@@ -29,8 +38,11 @@ type SignalMsg struct {
 	From string     `json:"from"` // 发送方 peer
 	To   string     `json:"to"`   // 目标 peer
 	SDP  string     `json:"sdp,omitempty"`
-	Cand string     `json:"cand,omitempty"` // TODO(S8): candidate 端点在服务端无生产发送方，随 B3 删路由后一并移除
-	At   int64      `json:"at"`             // 毫秒时间戳（服务端设置；TTL 判定依据）
+	// Cand 是 trickle ICE 候选（预留注入点）：当前 non-trickle 实现恒空串、生产无
+	// sender/consumer（ICE 候选全内联 SDP）。保留以兼容旧对端与未来 trickle 增量，
+	// 见 SignalKind 注释。字段名沿用信号协议（json:"cand"），勿删。
+	Cand string `json:"cand,omitempty"`
+	At   int64  `json:"at"` // 毫秒时间戳（服务端设置；TTL 判定依据）
 }
 
 // SignalQueue 是 per-peer 的信令收件箱（有界队列）。
