@@ -117,6 +117,14 @@ prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI 
 | `xfer_ca_file` | string | (空) | xfer `tcp+tls` 传输的受信 CA 文件路径（PEM；等价 `--ca-file`）。为空时用系统根池严格校验——服务端为自签证书（auto_tls）时握手报 `x509: certificate signed by unknown authority`，需配置此项或 `xfer_insecure` |
 | `xfer_insecure` | bool | `false` | 跳过 xfer `tcp+tls` 传输的证书校验（等价 `--insecure`）。**仅限 loopback hub**（远程 hub + insecure fail-closed 拒绝，需改用 `xfer_ca_file`）；与 `xfer_ca_file` 互斥 |
 
+> **TURN 中继配置（CLI flag，非配置键）**：TURN 凭据只在 sclient 发起 webrtc 打洞时
+> 本地使用，**服务端无 TURN 配置**。动态 TURN REST 短期凭证（coturn 标准）通过 CLI
+> flag 传入：`--turn-rest <url> [--turn-rest-user <user>] [--turn-rest-service <svc>]`，
+> 支持命令为 `mesh connect` / `p2p connect` / `socks` / `udp map` / `mesh node`。REST 优先于
+> 静态 `--turn`/`--turn-user`/`--turn-pass`；失败降级仅 STUN（不 panic）。安全边界：
+> 端点默认强推 `https://`，明文 `http://` 仅限 loopback；URL/username/service 上限 512
+> 字符。详见 [cli.md](./cli.md) 的「TURN 中继」段落。
+
 ### Hub 中继配置（服务端）
 
 服务端 `sproxy.yaml` 支持以下 hub 配置段：
@@ -125,12 +133,24 @@ prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI 
 hub:
   enabled: true                      # 启用 Hub 中继模式（默认关闭）
   node_id: "sproxy-node-1"           # 节点标识，空串自动生成
+  dht: ""                            # 节点发现表：""= 内置内存 DHT（默认）；"kad" = Kademlia
+  dht_persist_file: ""               # kad k-bucket 落盘路径（仅 dht: kad 时消费；空 = 关闭）
+  federation:
+    enabled: true                    # 启用 hub 联邦（hub-to-hub peering）
+    persist_file: ""                 # 联邦候选节点表持久化路径（空 = 关闭）
   transports:
     ws:
       enabled: true                  # 启用 WebSocket 传输监听
       listen: ":18084"               # WebSocket 监听地址
       path: "/ws"                    # WebSocket 升级路径
 ```
+
+- `dht_persist_file`：非空且 `dht: kad` 时启用 k-bucket 落盘，重启后恢复上次发现缓存
+  （不冷启动）。快照只存 id/route_id/addr（发现缓存无 secret）；损坏/缺失/超限文件按
+  空桶启动。路由表仍 hub 权威，DHT 持久化是**缓存语义**。缺省关闭（零行为变更）。
+- `federation.persist_file`：非空时把联邦候选节点表持久化，重启后恢复上次同步的候选。
+  快照只存 id/addr/mesh（发现缓存无 secret）；损坏/缺失文件按空候选启动。缺省关闭
+  （零行为变更）。文件均 0600 权限 + temp/rename 原子写。
 
 ### 当前目录（cd / pwd）
 

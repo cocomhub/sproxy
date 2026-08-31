@@ -165,8 +165,19 @@ status: active
 2. **联邦候选持久化**（发现缓存非权威）：`FederationClient` 加可选 `persistFile`，`SaveCandidates/restoreCandidates` 复用 `hub.Persister` 原子写；快照只存 ID/addr/mesh（**per-node secret 不落盘**）；损坏文件按空候选不 panic。
 3. **DHT 桶落盘**：ext/kad `Kademlia` 增 `Save(path)/Load(path)`（k-bucket 序列化，nodeID hex + addr，非法条目丢弃）；`hub.dht_persist_file` 配置；缓存语义非权威。
 
+> **✅ 已实现（PR-1~3）**：三项 DoD 均已落地并通过独立对抗式审查（含安全审查 MEDIUM 补强，
+> 详见 §5.5 状态）。PR-4（本 PR）为文档同步 + e2e 冒烟评估。
+> **已确认的最终决策**（与设计一致，落地时复核）：
+> - `federation.persist_file` 与 `hub.dht_persist_file` **缺省关闭**（空 = 零行为变更）；
+> - 持久化快照**不持久化 Meta / per-node secret**——联邦只存 `id/addr/mesh`，kad 只存
+>   `id/route_id/addr`（发现缓存语义，非权威路由表）；损坏/缺失/超限文件按空候选/空桶
+>   启动，不 panic；
+> - TURN REST 端点默认强推 `https://`，明文 `http://` 仅限 loopback；URL/username/service
+>   上限 512 字符；响应 username 须符合 coturn `TTL:user` 格式（fail-closed，非法配置
+>   命令终止）；REST 拉取失败沿用旧缓存（未过期）或降级仅 STUN + Warn，不 panic。
+
 ### 5.3 涉及文件
-- TURN：`pkg/tunnel/xfer/ext/webrtc/{webrtc.go, turnrest.go 新}` + `cmd/sclient/{mesh.go, mesh_node.go, p2p.go, relay.go}` `--turn-rest` 族 flag + `mesh.NodeConfig` + `config.example.yaml`。安全：默认强推 `https://`（`http://` 仅 loopback，复用 sync_remotes 明文校验模式）。
+- TURN：`pkg/tunnel/xfer/ext/webrtc/{webrtc.go, turnrest.go 新}` + `cmd/sclient/{mesh.go, p2p.go, socks.go, udp.go, mesh_node.go}` `--turn-rest` 族 flag + `config.example.yaml`。安全：默认强推 `https://`（`http://` 仅 loopback，复用 sync_remotes 明文校验模式）。**实现说明**：TURN REST 走 webrtc 进程级全局配置（`SetTURNRESTURL`），在 CLI 层应用，未进 `mesh.NodeConfig`（与设计草案差异）；`relay.go` 实际未挂 TURN flag（TURN 仅 webrtc 打洞命令需要，relay 中继不消费）。
 - 联邦持久化：`pkg/tunnel/hub/federation.go` + `cmd/sproxy/root.go`（`hub.federation.persist_file`）+ `pkg/server/config.go`。
 - DHT：`pkg/tunnel/hub/ext/kad/kad.go`（子模块内 JSON 原子写，零新依赖）+ `cmd/sproxy/root.go`（`hub.dht_persist_file`）。
 
@@ -178,10 +189,27 @@ status: active
 5. 装配：`persist_file` 缺省关闭（零行为变更）。
 
 ### 5.5 子任务
-1. **PR-1**：TURN REST（webrtc 子模块 + httptest）→ CLI flag。
-2. **PR-2**：联邦候选持久化（配置 + 装配 + 测试）。
-3. **PR-3**：kad `Save/Load` + root.go 装配。
-4. **PR-4**：文档（cli.md / config.example.yaml）+ e2e 冒烟。
+1. **PR-1**：TURN REST（webrtc 子模块 + httptest）→ CLI flag。**✅ 已实现**（`6699c9b` +
+   复审补强 `3aaf30e`/`1ac1238`/`cdeb658`）：`turnrest.go` 拉取/缓存/单飞/降级 + 安全
+   边界（https 强推 / http 仅 loopback / 参数 ≤512 / 重定向边界 / 凭据脱敏）；sclient
+   `--turn-rest` 族 flag 挂到 `mesh connect` / `p2p connect` / `socks` / `udp map` /
+   `mesh node`。测试：`turnrest_test.go`（httptest loopback）+ `turn_rest_test.go`。
+2. **PR-2**：联邦候选持久化（配置 + 装配 + 测试）。**✅ 已实现**（`7b8fe11` + 复审补强
+   `27a36d1`）：`FederationConfig.PersistFile` + `NewFederationClientWithPersist` +
+   `SaveCandidates/restoreCandidates`（temp+rename 原子写、去抖落盘、恢复对端配置剪枝）。
+   测试：`federation_test.go`（Save/Restore/Corrupt/Missing/Disabled/AutoSaveOnSync/
+   RestoreIOError/ConcurrentScheduleClose/RemovedPeerNotRestored）+ `root_test.go`
+   `TestBuildServerConfig_FederationPersistFile` + `config_federation_test.go`。
+3. **PR-3**：kad `Save/Load` + root.go 装配。**✅ 已实现**（`43cc463` + 复审补强 `3715c65`）：
+   `Kademlia.Save/Load` + `EnablePersistence`（buildSnap 数据竞争修复 + saveMu 串行）；
+   `HubConfig.DHTPersistFile` + root.go 装配。测试：`kad_test.go`（RoundTrip/Missing/
+   Corrupt/TooLarge/InvalidEntries/BucketOverflow/EmptyPathNoop）+ `config_test.go`。
+4. **PR-4**：文档（cli.md / config.example.yaml / config.md / 本设计文档 §5）+ **e2e 冒烟
+   评估**。**✅ 已实现**（本 PR）：文档同步完成；e2e 冒烟**评估后跳过**——TURN REST 是
+   客户端 webrtc 进程级全局配置，难以在 test/ 层真实二进制做端到端验证（需真实打洞链路，
+   成本高且 -race 下脆弱）；联邦/kad 持久化的核心逻辑（Save/Load/损坏恢复/装配）已被
+   PR-2/PR-3 的集成测试 + root_test 装配测试充分覆盖，e2e 冒烟增量价值低（跳过理由见
+   本段内说明）。
 
 ---
 
