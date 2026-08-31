@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -74,7 +75,9 @@ func executeRename(ctx renameOpCtx) error {
 			Result: AuditResultDenied, Detail: "目标路径已存在: " + ctx.to,
 		})
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
-		return err
+		// 审查 I-1：必须返回非 nil 错误——原 `return err`（err 恰为 nil）让调用方误判
+		// 成功并追加一条假的 success 审计行（被拒绝的 rename 记为成功，破坏审计可信度）。
+		return errors.New("rename: 目标路径已存在")
 	}
 	if !verifyFileWithChecksum(ctx.fromPath, ctx.expectedChecksum) {
 		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
@@ -144,16 +147,29 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, op BatchRenameOp,
 	}
 	if !verifyFileWithChecksum(fromPath, op.Checksum) {
 		logger.WarnContext(ctx, "batch rename checksum 不匹配", "from", op.From)
+		// 审查 I-4：batch rename 失败路径与单条 rename 对齐，补审计（checksum 拒绝 → denied）。
+		h.RecordAudit(ctx, AuditEvent{
+			Action: "rename", ObjectType: "file", Object: op.From,
+			Result: AuditResultDenied, Detail: "checksum 不匹配（batch）: to=" + op.To,
+		})
 		result.Message = errMsgSrcChecksumFailed
 		return result
 	}
 	if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
 		logger.ErrorContext(ctx, errMsgCreateParentDirFailed, "to", to, "error", err.Error())
+		h.RecordAudit(ctx, AuditEvent{
+			Action: "rename", ObjectType: "file", Object: op.From,
+			Result: AuditResultError, Detail: "创建父目录失败: to=" + op.To,
+		})
 		result.Message = "创建父目录失败"
 		return result
 	}
 	if err := atomicRename(fromPath, toPath); err != nil {
 		logger.ErrorContext(ctx, "batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
+		h.RecordAudit(ctx, AuditEvent{
+			Action: "rename", ObjectType: "file", Object: op.From,
+			Result: AuditResultError, Detail: "重命名失败: to=" + op.To,
+		})
 		result.Message = "重命名失败"
 		return result
 	}

@@ -5,7 +5,9 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
@@ -119,10 +121,13 @@ func matchAPIKey(token, method string, keys []APIKey) (authResult, string) {
 		}
 		if subtle.ConstantTimeCompare([]byte(token), []byte(key.Key)) == 1 {
 			if permissionAllowed(key.Permission, method) {
-				// actor 优先用 key 名（便于多用户识别），Name 为空时回退 Key。
+				// actor 优先用 key 名（便于多用户识别）；Name 为空时用 key 的
+				// SHA-256 摘要前缀（key_<12hex>）——**绝不把原始 API key 落日志**
+				// （安全审查 MEDIUM：原始 key 是 Bearer 凭据，泄露即被冒用）。
 				name := key.Name
 				if name == "" {
-					name = key.Key
+					sum := sha256.Sum256([]byte(key.Key))
+					name = "key_" + hex.EncodeToString(sum[:6])
 				}
 				return authResultOK, name
 			}

@@ -109,9 +109,12 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	// 关闭后再删除
 	file.Close()
 	if err := os.Remove(filePath); err != nil {
+		// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
+		// 文件系统布局）；错误详情记业务日志，审计行用固定文案。
+		h.logger.ErrorContext(r.Context(), "删除文件失败", "file_name", remotePath, "error", err.Error())
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "delete", ObjectType: "file", Object: remotePath,
-			Result: AuditResultError, Detail: err.Error(),
+			Result: AuditResultError, Detail: "删除文件失败",
 		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除文件失败"}, http.StatusInternalServerError)
 		return
@@ -157,9 +160,11 @@ func (h *Handlers) processBatchDeleteItem(ctx context.Context, f BatchDeleteFile
 		return result
 	}
 	if err := os.Remove(filePath); err != nil {
+		// 审查 M-4：Detail 不含 err.Error()（绝对路径暴露）。
+		logger.ErrorContext(ctx, "批量删除文件失败", "file_name", remotePath, "error", err.Error())
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "delete", ObjectType: "file", Object: remotePath,
-			Result: AuditResultError, Detail: err.Error(),
+			Result: AuditResultError, Detail: "删除文件失败",
 		})
 		result.Message = "删除失败"
 	} else {

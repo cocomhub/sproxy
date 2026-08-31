@@ -223,10 +223,21 @@ func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, ctx context.Contex
 	if cfg.Versioning.Enabled {
 		// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本
 		h.saveVersionBeforeOverwrite(remotePath)
+		// 审查 I-3：覆盖动作记审计（含旧版本已保存的信息）。
+		h.RecordAudit(ctx, AuditEvent{
+			Action: "overwrite", ObjectType: "file", Object: remotePath,
+			Result: AuditResultSuccess, Detail: "覆盖现有文件（版本已保存）",
+		})
 		return false // 继续执行写入流程，用新内容覆盖现有文件
 	}
 	// checksum 不匹配：冲突，需保留现有文件
 	h.logger.WarnContext(ctx, "文件已存在，但校验失败", "file_name", remotePath)
+	// 审查 I-3：versioning 关闭时同名覆盖是静默数据丢失，记审计（当前走冲突拒绝
+	// 分支——保留现有文件，不覆盖；此处为 denied 留痕）。
+	h.RecordAudit(ctx, AuditEvent{
+		Action: "overwrite", ObjectType: "file", Object: remotePath,
+		Result: AuditResultDenied, Detail: "文件已存在且 checksum 不匹配（versioning 关闭，拒绝覆盖）",
+	})
 	// 附带服务端文件的实际 checksum，方便客户端决策
 	if serverCS, csErr := FileChecksum(filePath); csErr == nil {
 		sendJSONResponse(w, UploadResponse{

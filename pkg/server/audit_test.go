@@ -295,8 +295,10 @@ func TestAuthMiddleware_APIKeyActorFallsBackToKey(t *testing.T) {
 	})
 	h := &Handlers{cfgPtr: cfgPtr}
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := ActorFrom(r.Context()); got != "mykey" {
-			t.Errorf("ActorFrom() = %q, want mykey（Name 为空回退 Key）", got)
+		// 安全审查 MEDIUM：Name 为空时 actor 用 key 的 SHA-256 摘要前缀（key_<12hex>），
+		// **绝不把原始 API key 落日志**。
+		if got := ActorFrom(r.Context()); got != "key_5e50f405ace6" {
+			t.Errorf("ActorFrom() = %q, want %q（Name 为空回退摘要而非原始 key）", got, "key_5e50f405ace6")
 		}
 		w.WriteHeader(http.StatusOK)
 	})
@@ -725,5 +727,39 @@ func TestRequestLog_RecordsActor(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("未找到「请求完成」日志：%s", logBuf.String())
+	}
+}
+
+// TestRenameHandler_RecordsAuditDenied_NoFalseSuccess 验证（审查 I-1 回归）：
+// rename 目标已存在（409）时只记 denied 审计，**不追加假的 success 审计行**
+// （原 executeRename 的 `return err` 在文件存在时 err 恰为 nil，调用方误判成功）。
+func TestRenameHandler_RecordsAuditDenied_NoFalseSuccess(t *testing.T) {
+	url, cfgPtr, auditBuf := newAuditTestServer(t, nil)
+	body := []byte("rename-me")
+	writeUploadFile(t, cfgPtr, "old.txt", body)
+	writeUploadFile(t, cfgPtr, "exists.txt", []byte("target exists"))
+
+	req, _ := http.NewRequest("POST", url+"/rename?from=old.txt&to=exists.txt", nil)
+	req.Header.Set("X-File-Checksum", sha256hex(body))
+	signRequest(req, testAccessKey, testAccessSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("目标已存在应返回 409，got %d", resp.StatusCode)
+	}
+
+	// 应有 denied 审计（目标已存在）。
+	denied := findAudit(t, auditBuf, "rename")
+	if denied["result"] != "denied" {
+		t.Fatalf("目标已存在的 rename 审计应 result=denied，got %v", denied["result"])
+	}
+	// 不应有 success 审计行（I-1 假成功回归）。
+	for _, m := range auditLines(t, auditBuf) {
+		if m["action"] == "rename" && m["result"] == "success" {
+			t.Fatalf("被拒绝的 rename 不应产生 success 审计行（审查 I-1 假成功）：%v", m)
+		}
 	}
 }

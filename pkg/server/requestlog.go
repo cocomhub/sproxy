@@ -58,10 +58,16 @@ func (h *Handlers) requestLogMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(mw, r)
 
 		// actor 在认证中间件（requestLog 之后的 handler 链）写入响应包装器；
-		// 未认证请求为空串，省略字段以保持日志简洁。
+		// 隧道内层请求（无 authMiddleware）经 ctx 携带 actor。两者互补：
+		// 外层用 mw.actor()（auth 写入），内层回退 ActorFrom(r.Context())。
+		// 未认证请求为空串，省略字段以保持日志简洁（审查 M-1）。
 		args := []any{"method", r.Method, "path", r.URL.Path,
 			"status", mw.statusCode, "duration", time.Since(start).String()}
-		if a := mw.actor(); a != "" {
+		a := mw.actor()
+		if a == "" {
+			a = ActorFrom(r.Context())
+		}
+		if a != "" {
 			args = append(args, "actor", a)
 		}
 		h.logger.InfoContext(ctx, "请求完成", args...)
