@@ -84,12 +84,16 @@ status: active
 - Dialer 侧 TLS：默认系统根池 + `ServerName`（addr host）；`--ca-file` 复用 federation `loadCertPool` 模式；`--insecure-skip-verify` 仅限 loopback（复制 federation Config.Validate 限制）。
 
 **AD-2：服务端装配 = 第二条 accept 循环 → Tunnel.Serve → LocalHandler**
-- root.go `cfg.Hub.Enabled` 块内新增：`hubSrv.ListenTLS(ctx, listenAddr, tlsCfg)` → accept 循环 → `mux.New(conn, RoleListener)` → `tunnel.NewTunnel(m, key, WithIdentity(srvIdentity))` → `tun.Serve(ctx, h.tunnelHandler)`。
-- 复用现成组件：`tunnel.NewTunnel` + `tunnel.Serve`（`pkg/tunnel/tunnel_mux.go:279` 已实现 listener 侧握手与 accept 循环）；handler 用 `server.RegisterRoutes` 造的 `tunnel.NewLocalHandler(nil, localApiHandler, …)`。
+- root.go `RegisterRoutes` 之后新增：`xfer_tls`/`xfer_tcp` 段装配 → `xfer.Get("tcp+tls").Listen` → accept 循环 → `mux.New(conn, RoleListener)` → `tunnel.NewTunnel(m, key, WithIdentity(srvIdentity))` → `tun.Serve(ctx, h.LocalHandler())`。
+- 复用现成组件：`tunnel.NewTunnel` + `tunnel.Serve`（`pkg/tunnel/tunnel_mux.go:279` 已实现 listener 侧握手与 accept 循环）；**handler 用 `server.RegisterRoutes` 构造的 `h.LocalHandler()`（localMux + 中间件链，不含外层帧解密）**——⚠ 修正原设计笔误：xfer 隧道 `handleStream` 已把请求体解密为明文，应直接路由到 localMux；`TunnelHandler()`（`NewLocalHandler` 外层帧解密器）期望 ctx 带派生密钥 + 帧 body，直接使用会 401（集成测试先以 401 红灯暴露，修复后转绿）。
 
-**AD-3：握手密钥一致性（本工作项核心正确性点）**
+**AD-3：握手密钥一致性 + 绑定（本工作项核心正确性点）**
 - listener 侧密钥 = `access_keys[0]` 的 SK → `tunnel.DeriveTunnelKey(sk, AccessKeyMesh(ak))`（`pkg/tunnel/tunnel.go:140,175` HKDF，salt 域分离 + info=mesh_id）。
 - 客户端 `sclient tunnel --xfer` 已走同一派生（`cmd/sclient/internal/clientfactory/factory.go:199`）。两端同 AK/SK（同一 mesh 解析实现）→ 派生 key 相等 → ECDH 握手成功。**禁止客户端/服务端各写一套 mesh 解析**。
+- **⚠ 安全红线（审查 C-1 修复，已实现）**：ECDH 握手会话密钥必须**绑定静态派生密钥**——`performHandshakeWithIdentity` 把 `key` 混入会话密钥派生（非匿名），未知密钥的对端派生不同 sessionKey，首个加密帧 AES-GCM 校验失败即拒。绝不允许"匿名 ECDH + 静态密钥仅作握手失败回退"（攻击者完成匿名握手即零凭据访问完整 localMux）。
+  - **实现**：`deriveSessionKey(sharedSecret, staticKey)`（`pkg/tunnel/ecdh.go`）——`staticKey == nil` 走旧纯 ECDH 派生（`HKDF(secret=sharedSecret, salt=ecdhSalt, info=ecdhInfo)`，字节级不变）；非 nil 先派生 baseKey（旧派生）再第二层 HKDF：`HKDF(secret=baseKey, salt=ecdhStaticSalt||staticKey, info=ecdhInfoStatic)`，两层输出恒 32 字节。任何 key 变化都改变 sessionKey。
+  - **协商策略决策（评估后选纯同步发布，不加标志位）**：在握手帧上加"是否混 key"标志需在会话密钥派生**之前**交换能力位，而现有握手在 ECDH 公钥交换后立即派生密钥（身份阶段在其后）——加标志需改动线上帧序（旧对端会误读新增字节/死锁）；且服务端配了密钥即必须混 key，任何"可降级到纯 ECDH"的标志都是降级攻击面（C-1 回归）。标志协商唯一能保的兼容（新客户端→旧服务端）无安全价值（旧服务端本就对纯 ECDH 攻击者敞开）。故取**同步发布协议变更**：一端混 key 一端不混 → 首帧解密失败 fail-closed；sclient/sproxy 必须同版本发布（代码注释 + 本设计文档已显著记录）。
+  - **nil key 向后兼容**：`Tunnel` 在 `key == nil` 时短路（不握手、明文传输），行为不变；`performHandshakeWithIdentity` 的 `staticKey == nil` 保持旧纯 ECDH 派生字节级一致。
 
 **AD-4：服务端身份解耦**
 - 新增 `hub.xfer_identity_file`（显式配置；为空回落 **XDG 用户配置目录** `os.UserConfigDir()/sproxy/server-identity.json`，即 Linux `~/.config/sproxy/`、macOS `~/Library/Application Support/sproxy/`、Windows `%AppData%/sproxy/`），`tunnel.LoadOrCreateIdentity(path)`（`pkg/tunnel/identity.go` 现成：不存在自动生成、损坏 fail-closed 不覆盖）。

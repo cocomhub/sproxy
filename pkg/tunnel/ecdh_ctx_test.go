@@ -68,7 +68,7 @@ func TestHandshakeIdentity_IdentityReadBoundedByCtx(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	_, _, hErr := performHandshakeWithIdentity(ctx, muxA, true, idA, []string{pinned.Fingerprint()})
+	_, _, hErr := performHandshakeWithIdentity(ctx, muxA, true, idA, []string{pinned.Fingerprint()}, nil)
 	elapsed := time.Since(start)
 	close(block)
 

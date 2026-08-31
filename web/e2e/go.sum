@@ -1,5 +1,5 @@
-github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260829081301-2d5e55a51fff h1:TuaaWkBqlXq5mU6w4n0PpAlqYjdnvGRrcbafUPJUsVw=
-github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260829081301-2d5e55a51fff/go.mod h1:QFOtrkjH9a3rIj5MYBgs94ltyiBy5DO9f26BmA/Wqn4=
+github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260831112942-06e7a75b7f84 h1:MS2Op4l5Ca6RHCCBTrzCByE1yWwerjppLGnz35AAJrg=
+github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260831112942-06e7a75b7f84/go.mod h1:QFOtrkjH9a3rIj5MYBgs94ltyiBy5DO9f26BmA/Wqn4=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=

@@ -119,7 +119,10 @@ func BuildXferTLSConfig(cfg *Config) (*tls.Config, error) {
 //	DeriveTunnelKey(access_keys[0].Secret, AccessKeyMesh(access_keys[0].Key))
 //
 // 无 access_keys → error fail-closed（与规格 DoD 4 一致：无 access_keys 时
-// xfer listener 拒启；握手无密钥即无法完成 ECDH，拒绝匿名接入）。
+// xfer listener 拒启）。C-1 修复后此注释成立：ECDH 握手会话密钥派生绑定静态密钥
+// （deriveSessionKey），攻击者完成匿名 ECDH 但不知 key，派生出的 sessionKey 与合法
+// 对端不同，首个加密帧 AES-GCM 解密失败即被拒——拒绝匿名接入由密钥绑定保证，而非
+// 仅靠"无 key 无法完成 ECDH"（后者在旧实现中不成立）。
 func HubXferKey(cfg *Config) ([]byte, error) {
 	if cfg == nil || len(cfg.AccessKeys) == 0 {
 		return nil, fmt.Errorf("hub xfer key: 未配置 access_keys（xfer listener 需要 access_keys 首对派生隧道密钥；fail-closed）")

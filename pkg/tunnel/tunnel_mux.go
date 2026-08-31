@@ -103,7 +103,10 @@ func (t *Tunnel) ensureHandshake() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), handshakeTimeout)
 		defer cancel()
-		sk, peerFP, err := performHandshakeWithIdentity(ctx, t.mux, true, t.identity, t.peerFingerprints)
+		// C-1 修复：静态密钥参与会话密钥派生（非匿名 ECDH）。t.key 非 nil 才进入
+		// 本分支，故此处恒传非 nil staticKey。与 listener 侧对称，确保两端派生一致。
+		// 同步发布协议变更：旧对端（不混 key）与此端握手将因 sessionKey 不一致而失败。
+		sk, peerFP, err := performHandshakeWithIdentity(ctx, t.mux, true, t.identity, t.peerFingerprints, t.key)
 		switch {
 		case err == nil:
 			t.skMu.Lock()
@@ -279,7 +282,10 @@ func (t *Tunnel) readResponseMeta(stream mux.Stream) (*Response, error) {
 func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 	if t.key != nil && t.mux.Role() == mux.RoleListener {
 		hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
-		sk, peerFP, err := performHandshakeWithIdentity(hctx, t.mux, false, t.identity, t.peerFingerprints)
+		// C-1 修复：静态密钥参与会话密钥派生（非匿名 ECDH）。t.key 非 nil 才进入
+		// 本分支，故此处恒传非 nil staticKey。与 dialer 侧对称，确保两端派生一致。
+		// 同步发布协议变更：旧对端（不混 key）与此端握手将因 sessionKey 不一致而失败。
+		sk, peerFP, err := performHandshakeWithIdentity(hctx, t.mux, false, t.identity, t.peerFingerprints, t.key)
 		cancel()
 		switch {
 		case err == nil:

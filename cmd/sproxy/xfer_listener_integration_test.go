@@ -186,6 +186,46 @@ func TestXferListener_WrongClientPinFails(t *testing.T) {
 	}
 }
 
+// TestXferListener_WrongKeyFails 验证 C-1 核心修复：客户端用**错误静态密钥**（与
+// 服务端派生隧道密钥不同）连接 xfer TLS listener，即使身份 pinning 正确（握手阶段
+// 通过），数据面也必须失败——静态密钥参与会话密钥派生，两端 sessionKey 不同，
+// 首个加密帧 AES-GCM 解密失败 → TunnelDo 报错（fail-closed，零凭据访问被拒）。
+func TestXferListener_WrongKeyFails(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	cfg, h := xferIntegrationCfg(t)
+
+	infos, aerr := startXferListener(ctx, cfg, h.LocalHandler(), testutil.DiscardLogger())
+	if aerr != nil {
+		t.Fatalf("startXferListener: %v", aerr)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("应返回 1 个 xfer listener，实际 %d", len(infos))
+	}
+	addr := infos[0].Addr
+	t.Cleanup(func() { builtin.SetDefaultTLSConfig(nil) })
+	builtin.SetDefaultTLSConfig(xferClientTLSConfig(t, cfg.TLS.CertFile))
+
+	// 客户端用错误密钥（64 hex，合法但不同于服务端 HubXferKey 派生的密钥）。
+	wrongHexKey := strings.Repeat("ab", 32)
+
+	c := client.NewFileClient("https://127.0.0.1:1",
+		client.WithXfer("tcp+tls", addr, wrongHexKey),
+		client.WithPeerFingerprints([]string{infos[0].Fingerprint}),
+		client.WithTimeout(15*time.Second))
+	if ierr := c.InitError(); ierr != nil {
+		t.Fatalf("client init error: %v", ierr)
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "/api/files", nil)
+	resp, derr := c.TunnelDo(req)
+	if derr == nil {
+		resp.Body.Close()
+		t.Fatal("错误静态密钥的客户端应被拒绝（C-1 验收：匿名 ECDH 让错误 key 也互通时此测试红）")
+	}
+}
+
 // TestXferListener_ConfigSetDefaults 验证 SetDefaults 填充 xfer 默认监听地址
 // （loopback），远程可达须显式 listen（安全边界，DoD 5）。
 func TestXferListener_ConfigSetDefaults(t *testing.T) {
