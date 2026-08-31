@@ -63,6 +63,10 @@ access_keys:
 # fail-closed）。传统隧道/HTTP 直连命令不走 xfer 握手，配置 peer_fingerprints 会 fail-closed
 # 报错（不静默跳过）；xfer 模式配置了身份/指纹但缺 access_key_secret 同样报错。生成对端
 # 指纹：`sclient identity fingerprint`（带外固化）。
+# xfer_ca_file / xfer_insecure 为 `sclient tunnel --xfer tcp+tls` 的客户端 TLS 配置
+# （等价 --ca-file / --insecure）：xfer_ca_file 信任自签服务端证书的 PEM CA；xfer_insecure
+# 跳过证书校验（仅限 loopback hub，与 xfer_ca_file 互斥）。两者均未配置时用系统根池严格校验，
+# 服务端自签证书（auto_tls）握手报 x509 unknown-authority（fail-closed，不静默降级）。
 
 # 速率限制（默认关闭；enabled: true 时限制 tunnel handler）
 # rate_limit:

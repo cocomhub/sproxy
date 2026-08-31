@@ -33,6 +33,7 @@ func newMetaTestRoot(svc *client.FileClient, ios cli.IOStreams) *cobra.Command {
 	root.PersistentFlags().Bool("client-cert-allow-missing", false, "")
 	root.PersistentFlags().Bool("allow-transport-fallback", false, "")
 	root.PersistentFlags().Bool("insecure", false, "")
+	root.PersistentFlags().String("ca-file", "", "")
 	root.AddCommand(NewCmdMeta(clientfactory.NewMock(svc, nil), ios, &state.State{}))
 	return root
 }
