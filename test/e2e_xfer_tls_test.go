@@ -284,7 +284,13 @@ func TestE2E_XferTLS_WrongKeyFails(t *testing.T) {
 		resp.Body.Close()
 		t.Fatal("错误静态密钥的客户端应被拒绝（C-1 验收：数据面 fail-closed）")
 	}
-	t.Logf("错误 key 被拒绝（符合预期）: %v", err)
+	// 审查 Minor #1：钉死失败发生在**数据面**（sessionKey 不一致 → 首帧解密失败 →
+	// 服务端关流 → 客户端读响应 metadata 得 EOF），而非 TLS/身份握手层。CA 与指纹
+	// 正确使握手必然通过，若错误不含数据面特征说明 C-1 语义回归（或路径漂移）。
+	if !strings.Contains(err.Error(), "resp meta") {
+		t.Fatalf("错误应来自数据面响应解密（resp meta），实际: %v（握手层失败说明路径漂移）", err)
+	}
+	t.Logf("错误 key 被拒绝（符合预期，数据面 fail-closed）: %v", err)
 }
 
 // TestE2E_XferTLS_SClientCLI 验证真实 sclient 二进制经 xfer tcp+tls 隧道访问文件 API：
