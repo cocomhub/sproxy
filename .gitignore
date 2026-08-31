@@ -31,7 +31,9 @@ ms-playwright/
 
 # superpowers review artifacts (generated, not committed)
 .superpowers/
-learnings/
+# docs/superpowers/learnings/ 已改为入库（阶段复盘/交接简报是唯一事实来源），
+# 不要在这里加回 learnings/ 忽略规则。
+# .learnings/ 单独入库（git ls-files 确认）。
 
 # remember 插件会话记录（含本地脱敏上下文，不入库）
 .remember/
