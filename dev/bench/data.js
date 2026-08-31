@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788209220989,
+  "lastUpdate": 1788209796667,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -318318,6 +318318,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1811052 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2eed0052b0fb2b6eaa9fe1c3c40c926c1669085f",
+          "message": "feat(sync): 同步任务自动重试——瞬时网络错误指数退避 + retrying 状态 (#144)\n\n* feat(sync): 同步任务自动重试——瞬时网络错误指数退避 + retrying 状态（阶段6 工作项A P0）\n\nsyncmgr 无重试机制，网络闪断即 failed 需手动重建。加瞬时错误自动重试（指数退避），\n达上限转 failed 且可读。\n\n- syncmgr/manager.go: executeSync 改造为重试循环——RunResult.Retryable + StatusFailed\n  时置 retrying 状态 + 指数退避等待后重试；达 MaxRetries 转 failed（错误含\"已重试 N 次\"）。\n  Config 增 MaxRetries(默认10)/RetryDelay(10s)/RetryBackoff(2, float64 表达倍率)。新增\n  markRetrying（持久化计数）/waitRetryBackoff（可停止 timer + syncCtx.Done 取消兼容）/\n  retryBackoffDelay（指数退避封顶 base*10，对齐 cloud 重试预算）/finishTask/\n  applyRunResult[WithError]。去重/CancelTask/recoverTasks 四处置 retrying 守卫。\n- syncmgr/task.go: 增 StatusRetrying 常量 + SyncTask.Retries（持久化，重启恢复续执行）。\n- syncmgr/executor.go: RunResult 增 Retryable。\n- pkg/sync/http_transport.go: IsRetryableError（net.Error/DeadlineExceeded/5xx 可重试；\n  Canceled/4xx/业务失败不可重试）；httpStatusFromError 文本解析（client 未暴露类型化\n  状态错误，仅 5xx/4xx 二分，注释说明约束）。\n- pkg/syncexec/executor.go: 失败时 result.Retryable = IsRetryableError(syncErr)。\n- config.go: SyncConfig 增 sync.max_retries/retry_delay/retry_backoff + 默认值。\n- root.go: 装配传重试配置；config.example.yaml + cli.md 文档。\n\n12 测试（TDD 红→绿）：TransientErrorThenSuccess / MaxRetriesExhausted /\nBackoffDelayComputation / BackoffTiming / StatusRetryingVisible / BusinessErrorNoRetry /\nCancelDuringBackoff / RetriesPersisted / Executor 可重试网络错误 / 业务错误不重试 /\nIsRetryableError 分类 / Config 默认值。确定性信号（started channel）模式沿用，\n-race -count=5 连跑稳定无 flake。\n\n验证：syncmgr/sync/syncexec/server/client/sproxy/sclient go test -race 全绿；\nvet + golangci-lint 0 issues；gofmt 合规；主 build 通过。\n\n* fix(sync): 自动重试审查修复——预算跨重启约束 + 全文件失败判定 + 配额释放 + 诊断（PR-144 复审）\n\n对抗审查（无 Critical，并发安全确认成立）发现 2 Important + 5 Minor，全修：\n\n- I-1（Important）重试预算跨重启不被 MaxRetries 约束：上限用循环局部 attempt（每次\n  executeSync 从 0 计）而非持久化 task.Retries——重启恢复的 retrying 任务保留 Retries\n  却获全新预算，可超预算重试（错误文本\"已重试 15 次\"与文档矛盾）。修：上限改用\n  task.Retries（markRetrying 每次重试前已自增），恢复任务正确消耗剩余预算。\n- I-2（Important）重试只覆盖源枚举阶段：引擎把单文件传输错误吞为 FileResult{ActionError}\n  最终 job.Status=completed（枚举成功但传输失败），push 到宕机远端/中途掉线不重试且报\n  completed 误导。修：pkg/sync.IsRetryableFileFailure——completed + FilesTotal>0 +\n  FilesDone==0 + 存在网络类 ActionError（连接拒绝/超时/EOF/5xx 文本）→ syncexec 标记为\n  可重试失败，交给 syncmgr 自动重试。\n- M-1 httpStatusFromError 用 Cut 取首个 \"HTTP \" 可能被文件名注入误判（如文件叫 \"HTTP 500\"）\n  → 改 LastIndex 从后部匹配。\n- M-2 pull 任务 failed 终态不释放预留配额（1GiB 占位永久钉住）→ applyRunResultWithError\n  failed/未知状态分支释放 ReservedSize（置 0 防二次释放）。\n- M-3 RetryBackoff 极端配置（超大/NaN）float64 乘法溢出为负 → time.NewTimer(负) 忙循环\n  → backoff 上界校验（>100/NaN 回落 2）+ 乘法前 cap 检查。\n- M-4 sclient wait 在 retrying 状态显示\"同步中\" → 改\"重试中\"。\n- M-5 SyncTaskMeta/List 不暴露 Retries → 加字段 + 回填。\n\n新增回归测试：TestIsRetryableFileFailure（网络/业务/部分成功/no-files/非completed 表驱动）\n+ TestHTTPStatusFromErrorText_FileNameNoFalsePositive（M-1）+ TestQuota_ReconcileOnFailed_Released\n（M-2）。现有 12 重试测试不回归。\n\n验证：syncmgr/sync/syncexec/client/server/sproxy/sclient go test -race 全绿；\nvet + golangci-lint 0 issues；gofmt 合规；主 build 通过。",
+          "timestamp": "2026-09-01T04:17:31+08:00",
+          "tree_id": "0cc7fb56b0530cc9babb31b3043ace161a8527c9",
+          "url": "https://github.com/cocomhub/sproxy/commit/2eed0052b0fb2b6eaa9fe1c3c40c926c1669085f"
+        },
+        "date": 1788209787073,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 914.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1233579 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 914.5,
+            "unit": "ns/op",
+            "extra": "1233579 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1233579 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1233579 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 927.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1289780 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 927.7,
+            "unit": "ns/op",
+            "extra": "1289780 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1289780 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1289780 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 929.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1285500 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 929.9,
+            "unit": "ns/op",
+            "extra": "1285500 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1285500 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1285500 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 926.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1296871 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 926.1,
+            "unit": "ns/op",
+            "extra": "1296871 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1296871 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1296871 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 978.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1292551 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 978.4,
+            "unit": "ns/op",
+            "extra": "1292551 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1292551 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1292551 times\n4 procs"
           }
         ]
       }
