@@ -38,7 +38,7 @@ func hubTestServer(t *testing.T) (*httptest.Server, string) {
 	mux.HandleFunc("GET /api/hub/nodes", func(w http.ResponseWriter, r *http.Request) {
 		connectedTime, _ := time.Parse(time.RFC3339, "2026-07-26T00:00:00Z")
 		json.NewEncoder(w).Encode([]HubNodeInfo{
-			{ID: "node-1", Addr: "192.168.1.1:18083", Connected: connectedTime},
+			{ID: "node-1", Addr: "192.168.1.1:18083", Connected: connectedTime, VirtualIP: "100.64.0.2"},
 			{ID: "node-2", Addr: "192.168.1.2:18083", Connected: connectedTime},
 		})
 	})
@@ -112,6 +112,13 @@ func TestListHubNodes(t *testing.T) {
 	}
 	if nodes[1].Connected.IsZero() {
 		t.Error("expected non-zero Connected time")
+	}
+	// virtual_ip 解析：有则填充，无则省略。
+	if nodes[0].VirtualIP != "100.64.0.2" {
+		t.Errorf("expected node-1 VirtualIP 100.64.0.2, got %q", nodes[0].VirtualIP)
+	}
+	if nodes[1].VirtualIP != "" {
+		t.Errorf("expected node-2 VirtualIP empty, got %q", nodes[1].VirtualIP)
 	}
 }
 

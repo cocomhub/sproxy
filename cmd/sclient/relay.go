@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -69,13 +70,15 @@ func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessK
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
-	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, logger)
+	// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
+	virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
+	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, logger)
+		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -104,7 +107,7 @@ func isTerminalRelayError(err error) bool {
 	return errors.Is(err, hub.ErrRegisterRejected)
 }
 
-func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
 	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof。
 	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
 	// 拒绝后客户端困惑——明明连上了却被拒）。
@@ -173,8 +176,10 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		serviceAddrs = append(serviceAddrs, addr)
 	}
 	// 声明 per-node-secret 能力：hub 回 REG_OK:<base64url secret>（B1 已支持，
-	// B3 服务端将据此校验信令身份）。现有调用不传 caps 时行为不变。
-	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, accessKey, proof, ts, nonce, meta, hub.CapabilityPerNodeSecret)); serr != nil {
+	// B3 服务端将据此校验信令身份）；声明 virtual-ip 能力：hub 在 REG_OK 携带本节点
+	// 虚拟 IP（Discover=false 的 relay 出口节点也能立即得知自身 VIP）。不感知能力的
+	// 旧 hub 忽略未知能力位，回旧格式。现有调用不传 caps 时行为不变。
+	if serr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, accessKey, proof, ts, nonce, meta, hub.CapabilityPerNodeSecret, hub.CapabilityVirtualIP)); serr != nil {
 		_ = conn.Close() // P1-15：mux 创建前失败必须关闭 WS，否则重连循环泄漏连接+sendLoop goroutine
 		return fmt.Errorf("发送注册帧失败: %w", serr)
 	}
@@ -187,11 +192,12 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 		_ = conn.Close() // P1-15：同守卫
 		return fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
 	}
-	nodeSecret, ackErr := hub.ParseRegisterAck(string(ack))
+	ackFull, ackErr := hub.ParseRegisterAckFull(string(ack))
 	if ackErr != nil {
 		_ = conn.Close() // P1-15：同守卫
 		return ackErr
 	}
+	nodeSecret := ackFull.Secret
 	if nodeSecret != "" {
 		// per-node secret 与本次注册连接生命周期绑定（重连即轮换），
 		// 只在注册流程内使用，不落盘、不打印值（I1，方案 B）。
@@ -199,6 +205,7 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	} else {
 		logger.Info("已注册到 Hub")
 	}
+	selfVIP := ackFull.VirtualIP
 
 	m := mux.New(conn, mux.RoleListener)
 	defer m.Close()
@@ -217,8 +224,16 @@ func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessK
 	// DialResultFrames=true：经 hub 中继时向 hub 回写拨号结果帧，使 hub 在写 200
 	// 前能确认数据面就绪（I27）。注意 p2p listen（webrtc 直连）必须保持 false，
 	// 否则结果帧会污染数据流。
+	// 出口拨号策略：虚拟 IP NAT（selfVIP 由 REG_OK 下发；默认 CGNAT 子网，可
+	// --virtual-subnet 覆盖以匹配自定义 hub.virtual_subnet，服务宣告端口自动开放）
+	// 优先，内部已含宣告地址精确匹配（逃生口）与公网/CIDR 回落（S-1 审查修复）。
+	vipSubnet, vperr := netip.ParsePrefix(virtualSubnet)
+	if vperr != nil || !vipSubnet.Addr().Is4() {
+		return fmt.Errorf("--virtual-subnet %q 非法（应为 IPv4 CIDR）", virtualSubnet)
+	}
+	vipSubnet = vipSubnet.Masked()
 	opts := []relay.ServeOptions{
-		{DialPolicy: relay.NewServiceDialPolicy(dialAllowCIDRs, serviceAddrs), DialResultFrames: true},
+		{DialPolicy: relay.NewVirtualIPDialPolicy(vipSubnet, selfVIP, nil, dialAllowCIDRs, serviceAddrs), DialResultFrames: true},
 	}
 	err = relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
 	if err != nil {
@@ -296,6 +311,7 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd.Flags().Bool("dial-allow", false, "作为出口节点：允许收到 dial 帧时向目标地址发起出站 TCP 连接（供中继端充当出口网关）")
 	cmd.Flags().StringArray("service", nil, "宣告一个 mesh 服务（格式 name:addr，可重复；供 sclient mesh connect 发现）")
 	cmd.Flags().StringArray("dial-allow-cidr", nil, "出口拨号白名单网段（如 192.168.0.0/16；配合 --dial-allow 放行内网服务，默认仅公网）")
+	cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "虚拟 IP 子网（CIDR，仅 IPv4；需与 hub.virtual_subnet 配置一致；默认 CGNAT 100.64.0.0/10）")
 	return cmd
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -60,6 +61,7 @@ func TestMDNSTXTRoundtrip(t *testing.T) {
 		NodeID:     "node-a",
 		SignalAddr: "192.168.1.10:40001",
 		Services:   svc,
+		VirtualIP:  netip.MustParseAddr("100.64.0.5"),
 	})
 	if err != nil {
 		t.Fatalf("NewMDNS: %v", err)
@@ -72,6 +74,7 @@ func TestMDNSTXTRoundtrip(t *testing.T) {
 	want := map[string]bool{
 		"node=node-a":                true,
 		"saddr=192.168.1.10%3A40001": true, // url.QueryEscape 转义 `:`
+		"vip=100.64.0.5":             true, // S-3：虚拟 IP 广播进 TXT
 		"svc.echo=127.0.0.1%3A2222":  true,
 		"svc.app=10.0.0.1%3A8080":    true,
 	}
@@ -90,6 +93,7 @@ func TestMDNSAnnouncementRoundtrip(t *testing.T) {
 		SignalAddr: "192.168.1.10:40001",
 		Services:   []hub.Service{{Name: "echo", Addr: "192.168.1.10:2222"}},
 		IPs:        []net.IP{net.ParseIP("192.168.1.10")},
+		VirtualIP:  netip.MustParseAddr("100.64.0.5"),
 	})
 	if err != nil {
 		t.Fatalf("NewMDNS: %v", err)
@@ -149,6 +153,9 @@ func TestMDNSAnnouncementRoundtrip(t *testing.T) {
 	}
 	if len(got.IPs) != 1 || !got.IPs[0].Equal(net.ParseIP("192.168.1.10")) {
 		t.Errorf("IPs = %v, want [192.168.1.10]", got.IPs)
+	}
+	if got.VirtualIP != netip.MustParseAddr("100.64.0.5") {
+		t.Errorf("VirtualIP = %v, want 100.64.0.5（TXT vip= 往返）", got.VirtualIP)
 	}
 }
 

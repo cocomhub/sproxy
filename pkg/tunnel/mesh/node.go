@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -16,6 +17,17 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/relay"
 	webrtc "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc"
 )
+
+// parseVirtualSubnet 解析虚拟 IP 子网：空/非法/非 IPv4 回落默认 CGNAT 100.64.0.0/10
+// （非法配置经 config.Validate 拦截，此处仅防御性兜底）。
+func parseVirtualSubnet(cidr string) netip.Prefix {
+	if cidr != "" {
+		if p, err := netip.ParsePrefix(cidr); err == nil && p.Addr().Is4() {
+			return p.Masked()
+		}
+	}
+	return netip.MustParsePrefix(hub.DefaultVirtualSubnet)
+}
 
 const (
 	// nodeReconnectBaseDelay 是 mesh node 断线重连的初始退避。
@@ -52,6 +64,12 @@ type NodeConfig struct {
 	DialAllow bool
 	// DialAllowCIDRs 是出口拨号额外放行的网段。
 	DialAllowCIDRs []string
+	// VirtualSubnet 是虚拟 IP 子网（CIDR，空回落默认 CGNAT 100.64.0.0/10）。
+	// 有 hub 时虚拟 IP 由 hub 分配（REG_OK 下发）；mDNS 无 hub 模式用本地确定性分配。
+	VirtualSubnet string
+	// VIPAllowPorts 是虚拟 IP 开放的额外端口白名单（--vip-allow-port，可多次）。
+	// 缺省 = --service 宣告端口自动开放；此处可额外开放未宣告的本机服务端口。
+	VIPAllowPorts []int
 	// LocalAddr 是 HTTP 中继转发目标（空回落 http://127.0.0.1:8080）。
 	LocalAddr string
 	// Insecure 注册 WS + 信令 HTTP 跳过证书校验（自签 wss hub）。
@@ -183,13 +201,24 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
+	// 出口拨号策略：虚拟 IP NAT（selfVIP 由 REG_OK 下发；子网默认 CGNAT，可配
+	// --virtual-subnet 覆盖）优先，内部已含宣告地址精确匹配（逃生口）与公网/CIDR
+	// 回落。selfVIP 无效（临时身份/旧 hub）时虚拟子网内 fail-closed 拒绝，其余不变。
+	subnet := parseVirtualSubnet(cfg.VirtualSubnet)
+	// S-4：自定义 hub.virtual_subnet 时，本节点 selfVIP（REG_OK 下发）若不在配置的
+	// 虚拟子网内，虚拟 IP 拨号将 fail-closed 拒绝——此处显式告警（而非仅出口策略
+	// Warn）引导核对 hub.virtual_subnet 与 --virtual-subnet 一致性。
+	if reg.VirtualIP.IsValid() && !subnet.Contains(reg.VirtualIP) {
+		logger.Warn("本节点虚拟 IP 不在配置的虚拟子网内（请检查 hub.virtual_subnet 与 --virtual-subnet 是否一致；不一致时虚拟 IP 拨号 fail-closed 拒绝）", "self_vip", reg.VirtualIP, "subnet", subnet)
+	}
+	vipPolicy := relay.NewVirtualIPDialPolicy(subnet, reg.VirtualIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs)
 	// 中继路径 DialResultFrames=true：hub 写 200 前读拨号结果帧确认数据面就绪（I27）。
 	relayOpts := []relay.ServeOptions{
-		{DialPolicy: relay.NewServiceDialPolicy(cfg.DialAllowCIDRs, cfg.ServiceAddrs), DialResultFrames: true},
+		{DialPolicy: vipPolicy, DialResultFrames: true},
 	}
 	// 直连路径 DialResultFrames=false：结果帧会污染 webrtc 数据流（见 relay/leaf.go）。
 	directOpts := []relay.ServeOptions{
-		{DialPolicy: relay.NewServiceDialPolicy(cfg.DialAllowCIDRs, cfg.ServiceAddrs)},
+		{DialPolicy: vipPolicy},
 	}
 
 	// 自动对等发现隐含需接受回拨（Discover=true 时即使 EnableWebRTC=false 也跑直连环）。
@@ -197,7 +226,10 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	errCh := make(chan error, 3)
 	// 共享链路池：自动对等发现写入，本地网关复用（mesh connect --gateway 路由）。
 	links := newLinkPool()
-	gw := newGateway(links, cfg, logger)
+	// 虚拟 IP 表：由 hub 节点列表填充（认证数据源），供网关虚拟 IP 路由与本地拓扑。
+	// subnet 与出口拨号策略一致（默认 CGNAT，可 --virtual-subnet 覆盖）。
+	vipTable := NewVipTable(parseVirtualSubnet(cfg.VirtualSubnet))
+	gw := newGateway(links, cfg, logger, vipTable)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -258,7 +290,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, reg.Secret, localAddr, httpClient, directOpts, logger); err != nil {
+			if err := runDiscoveryLoop(cycleCtx, cfg, reg.TempNode, httpBase, links, reg.Secret, localAddr, httpClient, directOpts, vipTable, logger); err != nil {
 				// 非阻塞写：只有 /api/hub/nodes 4xx（auth/配置级）才致命触发整 cycle
 				// 重连；拨号/瞬时失败在 runDiscoveryLoop 内部冷却处理，不写 errCh。
 				select {

@@ -6,6 +6,7 @@ package hub
 import (
 	"encoding/json"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -22,6 +23,9 @@ type NodeSnap struct {
 	RealNodeID string    `json:"real_node_id,omitempty"`
 	Connected  time.Time `json:"connected"`
 	Services   []Service `json:"services,omitempty"`
+	// VirtualIP 是节点虚拟 IP。omitzero（Go 1.24+）：netip.Addr 是结构体，
+	// omitempty 对其无效；omitzero 走 IsZero()，零值（无效地址）不落盘。
+	VirtualIP netip.Addr `json:"virtual_ip,omitzero"`
 }
 
 // MessageSnap 是一个 peer 的信令收件箱快照。

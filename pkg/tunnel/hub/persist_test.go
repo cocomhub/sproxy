@@ -6,6 +6,7 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -734,5 +735,85 @@ func TestRestoreSignalQueue_OverCapGraceful(t *testing.T) {
 	}
 	if got := q.Total(); got != 0 {
 		t.Fatalf("全部消费后 total = %d, want 0", got)
+	}
+}
+
+// TestNodeSnap_VirtualIP_RoundTrip 校验带虚拟 IP 的 NodeSnap 经 Save→Load 往返后
+// VirtualIP 保留（omitzero 序列化正确）。
+func TestNodeSnap_VirtualIP_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub-vip.json")
+	p := NewPersister(path)
+	want := &Snapshot{
+		Nodes: []NodeSnap{
+			{ID: "node-a", Mesh: "mesh-a", VirtualIP: netip.MustParseAddr("100.64.0.2"), Connected: time.Unix(1700000000, 0)},
+			{ID: "node-b", Mesh: "mesh-a", Connected: time.Unix(1700000100, 0)},
+		},
+	}
+	if err := p.Save(want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := p.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Nodes) != 2 {
+		t.Fatalf("节点数 = %d, want 2", len(got.Nodes))
+	}
+	if got.Nodes[0].VirtualIP != netip.MustParseAddr("100.64.0.2") {
+		t.Fatalf("node-a VirtualIP = %v, want 100.64.0.2", got.Nodes[0].VirtualIP)
+	}
+	if got.Nodes[1].VirtualIP.IsValid() {
+		t.Fatalf("node-b 未分配虚拟 IP 应省略（无效 Addr），got %v", got.Nodes[1].VirtualIP)
+	}
+}
+
+// TestSnapshotRestore_VirtualIP_Preserved 校验快照恢复后节点虚拟 IP 保留在路由表。
+func TestSnapshotRestore_VirtualIP_Preserved(t *testing.T) {
+	src := NewMeshRouteTable()
+	src.Add("mesh-a", NodeInfo{ID: "node-a", VirtualIP: netip.MustParseAddr("100.64.0.2"), Connected: time.Now()}, nil)
+	snap := SnapshotRouteTable(src)
+	if len(snap.Nodes) != 1 || snap.Nodes[0].VirtualIP != netip.MustParseAddr("100.64.0.2") {
+		t.Fatalf("快照应含虚拟 IP, got %+v", snap.Nodes)
+	}
+
+	dst := NewMeshRouteTable()
+	RestoreFromSnapshot(dst, snap)
+	info, ok := dst.LookupInfo("node-a")
+	if !ok {
+		t.Fatal("node-a 恢复后应存在")
+	}
+	if info.VirtualIP != netip.MustParseAddr("100.64.0.2") {
+		t.Fatalf("恢复后 VirtualIP = %v, want 100.64.0.2", info.VirtualIP)
+	}
+}
+
+// TestPreloadAllocator_Rebuild（DoD 1）校验重启快照重建分配表：
+// 已持久化的虚拟 IP 被保留，新节点不占用已保留地址。
+func TestPreloadAllocator_Rebuild(t *testing.T) {
+	a := NewHubAllocator(testVIPSubnet)
+	snap := &Snapshot{
+		Nodes: []NodeSnap{
+			{ID: "node-a", Mesh: "mesh-a", VirtualIP: netip.MustParseAddr("100.64.0.2")},
+			{ID: "node-b", Mesh: "mesh-a", VirtualIP: netip.MustParseAddr("100.64.0.3")},
+		},
+	}
+	if err := PreloadAllocator(a, snap); err != nil {
+		t.Fatalf("PreloadAllocator: %v", err)
+	}
+	// 已保留节点重连复用旧地址。
+	got, err := a.Alloc("mesh-a", "node-a")
+	if err != nil {
+		t.Fatalf("Alloc(node-a): %v", err)
+	}
+	if got != netip.MustParseAddr("100.64.0.2") {
+		t.Fatalf("node-a 重连漂移: got %v, want 100.64.0.2", got)
+	}
+	// 新节点不占用已持久化地址。
+	vn, err := a.Alloc("mesh-a", "node-c")
+	if err != nil {
+		t.Fatalf("Alloc(node-c): %v", err)
+	}
+	if vn == netip.MustParseAddr("100.64.0.2") || vn == netip.MustParseAddr("100.64.0.3") {
+		t.Fatalf("新节点分配到已保留地址 %v", vn)
 	}
 }

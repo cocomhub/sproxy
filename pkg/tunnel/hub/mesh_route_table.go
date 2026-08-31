@@ -4,6 +4,7 @@
 package hub
 
 import (
+	"net/netip"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -22,6 +23,10 @@ type MeshRouteTable struct {
 	// 供 hub 状态持久化在节点集合变更后落盘。在锁外同步调用，必须快速返回；
 	// nil 表示未注册。
 	onChange func()
+	// vipRelease 是节点**显式移除**（Remove，管理端踢出）后的虚拟 IP 释放回调。
+	// 连接断开（RemoveIfOwned）不触发——虚拟 IP 与 node-id 在进程生命周期内稳定
+	// 绑定，重连复用，避免"断开释放/并发重注册"重复分配竞态。在锁外同步调用。
+	vipRelease func(mesh string, id NodeID)
 }
 
 // NewMeshRouteTable 创建每 mesh 独立路由表的聚合。
@@ -72,14 +77,24 @@ func (mrt *MeshRouteTable) Add(mesh string, info NodeInfo, svcs []Service) {
 	info.Mesh = mesh
 	t := mrt.Table(mesh)
 	t.AddWithInfoAndServices(info, svcs)
+	var prevMesh string
+	prevRemoved := false
 	mrt.mu.Lock()
 	if prev, exists := mrt.nodeMesh[info.ID]; exists && prev != mesh {
 		if pt, ok := mrt.tables[prev]; ok {
-			pt.Remove(info.ID)
+			if pt.Remove(info.ID) {
+				prevMesh = prev
+				prevRemoved = true
+			}
 		}
 	}
 	mrt.nodeMesh[info.ID] = mesh
 	mrt.mu.Unlock()
+	if prevRemoved {
+		// S-2：跨 mesh 重注册时释放旧 mesh 的虚拟 IP（节点从 prev 表移除后、nodeMesh
+		// 已指向新 mesh，此处 Has(id) 为 false 不触发 I-1 守卫，正确释放旧归属）。
+		mrt.fireVIPRelease(prevMesh, info.ID)
+	}
 	mrt.fireChange()
 }
 
@@ -128,6 +143,17 @@ func (mrt *MeshRouteTable) Has(id NodeID) bool {
 	return t.Has(id)
 }
 
+// HasInMesh 检查节点是否在指定 mesh 的路由表内（不自动定位）。供 VIP 释放守卫
+// 区分"同 mesh 并发重注册"（表内仍有节点 → 不释放）与"跨 mesh 移动"（旧 mesh 表
+// 已移除 → 释放旧归属）。
+func (mrt *MeshRouteTable) HasInMesh(mesh string, id NodeID) bool {
+	t, ok := mrt.tableOf(mesh)
+	if !ok {
+		return false
+	}
+	return t.Has(id)
+}
+
 // cleanupNodeMesh 在节点已从某 mesh 表移除后清理 nodeMesh 映射与空表。
 // 仅当 nodeMesh[id] 仍指向该 mesh 且表中已无该节点时才清理——防止与并发的
 // Add 重注册竞争：同名节点刚被重新加入（同 mesh 或换 mesh）时不误删其归属。
@@ -164,6 +190,8 @@ func (mrt *MeshRouteTable) Remove(id NodeID) bool {
 	mrt.mu.Lock()
 	mrt.cleanupNodeMesh(id, mesh, t)
 	mrt.mu.Unlock()
+	// 显式移除（管理端踢出）时回收该节点虚拟 IP（连接断开走 RemoveIfOwned 不回收）。
+	mrt.fireVIPRelease(mesh, id)
 	mrt.fireChange()
 	return true
 }
@@ -255,6 +283,51 @@ func (mrt *MeshRouteTable) fireChange() {
 	if fn != nil {
 		fn()
 	}
+}
+
+// SetVIPRelease 注册节点**显式移除**（Remove）后的虚拟 IP 释放回调。传 nil 清除。
+// 供 HubServer 在管理端踢出节点时回收其虚拟 IP（连接断开的 RemoveIfOwned 不触发）。
+func (mrt *MeshRouteTable) SetVIPRelease(fn func(mesh string, id NodeID)) {
+	mrt.mu.Lock()
+	mrt.vipRelease = fn
+	mrt.mu.Unlock()
+}
+
+// fireVIPRelease 在锁外调用 vipRelease 回调（若注册）。
+func (mrt *MeshRouteTable) fireVIPRelease(mesh string, id NodeID) {
+	mrt.mu.RLock()
+	fn := mrt.vipRelease
+	mrt.mu.RUnlock()
+	if fn != nil {
+		fn(mesh, id)
+	}
+}
+
+// VirtualIPOf 返回节点虚拟 IP；未分配（瞬态节点/未启用虚拟 IP）返回无效 Addr。
+func (mrt *MeshRouteTable) VirtualIPOf(id NodeID) netip.Addr {
+	info, ok := mrt.LookupInfo(id)
+	if !ok {
+		return netip.Addr{}
+	}
+	return info.VirtualIP
+}
+
+// NodeByVirtualIP 在指定 mesh 内反查虚拟 IP 对应的节点 ID。
+// mesh 隔离：只在该 mesh 的节点列表内匹配，跨 mesh 虚拟 IP 不可路由。
+func (mrt *MeshRouteTable) NodeByVirtualIP(mesh string, addr netip.Addr) (NodeID, bool) {
+	if !addr.IsValid() {
+		return "", false
+	}
+	t, ok := mrt.tableOf(mesh)
+	if !ok {
+		return "", false
+	}
+	for _, info := range t.List() {
+		if info.VirtualIP == addr {
+			return info.ID, true
+		}
+	}
+	return "", false
 }
 
 // AllMeshes 返回所有已存在的 mesh 列表（debug/管理用）。

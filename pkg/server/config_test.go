@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"gopkg.in/yaml.v3"
 )
 
@@ -479,5 +480,45 @@ func TestConfig_Validate_AccessKeys(t *testing.T) {
 	nonSK.AccessKeys = []AccessKeyConfig{{Key: "legacy-key", Secret: validSecret, MeshID: "custom"}}
 	if err := nonSK.Validate(); err != nil {
 		t.Fatalf("非 sk- AK + 显式 mesh_id 应通过: %v", err)
+	}
+}
+
+// TestConfig_VirtualSubnet_Default 校验 hub.virtual_subnet 默认值为 CGNAT 100.64.0.0/10，
+// 空值经 SetDefaults 填充，非空值不被覆盖。
+func TestConfig_VirtualSubnet_Default(t *testing.T) {
+	c := Default()
+	if c.Hub.VirtualSubnet != hub.DefaultVirtualSubnet {
+		t.Fatalf("Default().Hub.VirtualSubnet = %q, want %q", c.Hub.VirtualSubnet, hub.DefaultVirtualSubnet)
+	}
+	c2 := &Config{}
+	c2.SetDefaults()
+	if c2.Hub.VirtualSubnet != hub.DefaultVirtualSubnet {
+		t.Fatalf("SetDefaults 后 Hub.VirtualSubnet = %q, want %q", c2.Hub.VirtualSubnet, hub.DefaultVirtualSubnet)
+	}
+	c3 := Default()
+	c3.Hub.VirtualSubnet = "10.0.0.0/8"
+	c3.SetDefaults()
+	if c3.Hub.VirtualSubnet != "10.0.0.0/8" {
+		t.Fatalf("SetDefaults 不应覆盖非空 VirtualSubnet, got %q", c3.Hub.VirtualSubnet)
+	}
+}
+
+// TestConfig_VirtualSubnet_Validate 校验 hub.virtual_subnet 校验：非法 CIDR 拒绝、
+// IPv6 拒绝、合法 IPv4 通过。
+func TestConfig_VirtualSubnet_Validate(t *testing.T) {
+	valid := Default()
+	valid.Hub.VirtualSubnet = "10.0.0.0/8"
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("合法 IPv4 子网应通过: %v", err)
+	}
+	invalid := Default()
+	invalid.Hub.VirtualSubnet = "not-a-cidr"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("非法 CIDR 应被 Validate 拒绝")
+	}
+	ipv6 := Default()
+	ipv6.Hub.VirtualSubnet = "fd00::/8"
+	if err := ipv6.Validate(); err == nil {
+		t.Fatal("IPv6 子网应被 Validate 拒绝（虚拟 IP 分配仅支持 IPv4）")
 	}
 }

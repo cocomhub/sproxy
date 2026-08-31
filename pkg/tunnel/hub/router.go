@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -235,9 +236,17 @@ func generateNodeSecret() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
-// buildRegisterAck 构造注册成功 ACK 帧。secret 为空（节点未声明 per-node-secret
-// 能力或生成失败）时返回纯 "REG_OK"，与不感知能力标志的旧客户端兼容。
-func buildRegisterAck(secret string) []byte {
+// buildRegisterAck 构造注册成功 ACK 帧：
+//   - secret 为空且不携带 vip → 纯 "REG_OK"（与不感知能力标志的旧客户端兼容）；
+//   - includeVIP 且 vip 有效 → "REG_OK:<secret>:<vip>"（secret 空时 "REG_OK::<vip>"）；
+//   - 否则 → "REG_OK:<secret>"。
+//
+// includeVIP 由节点是否声明 CapabilityVirtualIP 门控——旧客户端不声明该能力时
+// 收到旧格式，完全向后兼容。
+func buildRegisterAck(secret string, vip netip.Addr, includeVIP bool) []byte {
+	if includeVIP && vip.IsValid() {
+		return []byte(RegisterAckOK + registerAckSecretSep + secret + registerAckSecretSep + vip.String())
+	}
 	if secret == "" {
 		return []byte(RegisterAckOK)
 	}
@@ -333,6 +342,18 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, erro
 		}
 	}
 	mesh := tunnel.AccessKeyMesh(reg.AccessKey)
+	// 虚拟 IP 分配（瞬态节点过滤，I-2）：disc-*/mesh-*/p2p-* 临时身份拨号后即注销，
+	// 分配 VIP 只会制造濒死条目（vipTable 出现幽灵映射），故跳过。分配失败不阻断
+	// 注册（虚拟 IP 是增强寻址能力，非注册前提），仅告警——子网耗尽等极端场景
+	// 下节点仍可经服务名/--node 寻址。
+	if !isTransientNodeID(reg.NodeID) && s.allocator != nil {
+		if vip, aerr := s.allocator.Alloc(mesh, reg.NodeID); aerr == nil {
+			info.VirtualIP = vip
+		} else {
+			s.logger.Warn("虚拟 IP 分配失败", "node", reg.NodeID, "error", aerr)
+		}
+	}
+	info.Mesh = mesh
 	s.rt.Add(mesh, info, validateServices(reg.Meta.Services))
 	// 节点发现表（DHT）喂入：路由表仍权威，DHT 仅作候选节点来源（供 /api/hub/nodes
 	// 合并发现）。注册失败不阻断连接（DHT 是辅助发现，不承载转发）。
@@ -351,12 +372,37 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, erro
 }
 
 // isTransientNodeID 判断 node-id 是否为瞬态临时身份（mesh 自动对等拨号 disc-、
-// mesh connect mesh-、p2p p2p- 前缀的 <prefix>-<base>-<随机hex>）。这些身份拨号完成
-// 后即注销，不应喂入 DHT（发现表只保留稳定真实节点）。
+// mesh connect mesh-、p2p p2p- 的 <prefix>-<base>-<16hex> 完整形态）。这些身份拨号
+// 完成后即注销，不应喂入 DHT（发现表只保留稳定真实节点）、不应分配虚拟 IP。
+//
+// S-4：mesh-/p2p- 判断收紧为完整形态（isTransientDialID），避免把以 mesh-/p2p- 开头
+// 的合法稳定节点名（如主机名不可解析时 mesh node 回落字面量 "mesh-node"）误判为
+// 瞬态身份而不分配虚拟 IP（静默失效）。disc- 保留前缀判断（disc 前缀专用，注册时
+// 有 ParseDiscNodeID 严格校验，无稳定节点会用它）。
 func isTransientNodeID(nodeID string) bool {
-	return strings.HasPrefix(nodeID, discPrefix) ||
-		strings.HasPrefix(nodeID, "mesh-") ||
-		strings.HasPrefix(nodeID, "p2p-")
+	return strings.HasPrefix(nodeID, discPrefix) || isTransientDialID(nodeID)
+}
+
+// isTransientDialID 判断 mesh-/p2p- 拨号临时身份（<prefix>-<base>-<hex 尾段>）。
+// 与 AutoRegister 的临时 node-id 格式对齐（fmt.Sprintf("%s-%s-%s", prefix, base,
+// newTempSuffix())，newTempSuffix 为 16 位 hex）。尾段须为 hex 且长度符合
+// newTempSuffix（8-64 位 hex），base 可含 '-'。
+func isTransientDialID(nodeID string) bool {
+	for _, prefix := range []string{"mesh-", "p2p-"} {
+		if !strings.HasPrefix(nodeID, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(nodeID, prefix)
+		idx := strings.LastIndex(rest, "-")
+		if idx <= 0 {
+			return false
+		}
+		if !isHexSuffix(rest[idx+1:]) {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // DiscPrefix 是 mesh 自动对等发现临时节点 ID 的基前缀（不含 '-'，AutoRegister 的
@@ -435,6 +481,10 @@ type HubServer struct {
 	// DHT 只作为候选节点来源（注册时喂入，发现时供 /api/hub/nodes 合并）。
 	// 由 cmd/sproxy 装配 Kademlia 时经 SetDHT 注入（hub.dht: kad）。
 	dht DHT
+	// allocator 是虚拟 IP 分配器（默认 NewHubAllocator(DefaultVirtualSubnet)）。
+	// 由 cmd/sproxy 装配时经 SetAllocator 注入配置子网对应的分配器（hub.virtual_subnet）。
+	// 分配权在 hub：节点不可自选虚拟 IP。
+	allocator Allocator
 }
 
 // SetDHT 注入节点发现表（DHT）。nil 清除（恢复不启用 DHT 候选）。
@@ -448,6 +498,12 @@ func (s *HubServer) SetDHT(dht DHT) {
 // rt 为每 mesh 独立路由表的聚合（M-9），按注册 AK 解析的 mesh 分表隔离。
 // maxConns 为可选变参：传 >0 的值表示 Hub 同时处理的连接数上限（I30），
 // 不传或 <=0 表示无上限。
+//
+// 虚拟 IP：默认创建 hubAllocator（CGNAT 默认子网），registerNode 为稳定节点分配
+// 虚拟 IP；显式移除节点（MeshRouteTable.Remove，管理端踢出）时经 SetVIPRelease
+// 回调回收。连接断开（RemoveIfOwned）不回收——虚拟 IP 与 node-id 在进程生命周期
+// 内稳定绑定，重连复用，彻底消除"断开释放/并发重注册"的重复分配竞态；重启后
+// 由快照重建（ReserveSnapshot）只恢复仍持久化的节点，离线节点的地址自然回收。
 func NewHubServer(rt *MeshRouteTable, auth *Authenticator, logger *slog.Logger, maxConns ...int) *HubServer {
 	if logger == nil {
 		logger = slog.Default()
@@ -455,11 +511,51 @@ func NewHubServer(rt *MeshRouteTable, auth *Authenticator, logger *slog.Logger, 
 	if auth == nil {
 		auth = NewAuthenticator(nil)
 	}
-	s := &HubServer{rt: rt, auth: auth, logger: logger}
+	s := &HubServer{rt: rt, auth: auth, logger: logger, allocator: NewHubAllocator(DefaultHubAllocatorSubnet())}
+	s.rt.SetVIPRelease(func(mesh string, id NodeID) {
+		// I-1 竞态守卫：Remove 先删节点再触发本回调。若同一 node-id 已被并发重注册
+		// 到**同一 mesh**（Add 覆盖旧连接后该 mesh 表内仍有节点），**不释放**——新注册
+		// 已复用旧 VIP（assigned 命中），释放会破坏虚拟 IP 唯一性（两个存活节点共享
+		// 地址）。
+		// 双保险（整体审查发现 2 加固）：
+		//   1) LookupInfo 命中且同 mesh 且 VirtualIP 已写回路由表 → 重注册已接管，不释放；
+		//   2) HasInMesh（非全局 Has）判断：跨 mesh 移动时旧 mesh 表已移除节点，
+		//      HasInMesh 为 false，正确释放旧归属（S-2）。
+		// 残余 TOCTOU 窗口（本检查与 Release 之间的重注册，节点未 Add 前路由表查不到）
+		// 极小且不引入安全面，由分配器 used 反向映射归属校验兜底；并发交错由
+		// TestHubServer_RemoveReRegister_NoDupVIP（分配器侧）与
+		// TestHubServer_RemoveReRegister_NoDupVIPInRouteTable（路由表侧）锁定。
+		if s.allocator == nil {
+			return
+		}
+		if info, ok := s.rt.LookupInfo(id); ok && info.Mesh == mesh && info.VirtualIP.IsValid() {
+			return // 同 mesh 重注册已把 VirtualIP 写回路由表：不释放。
+		}
+		if s.rt.HasInMesh(mesh, id) {
+			return
+		}
+		s.allocator.Release(mesh, string(id))
+	})
 	if len(maxConns) > 0 && maxConns[0] > 0 {
 		s.maxConns = make(chan struct{}, maxConns[0])
 	}
 	return s
+}
+
+// DefaultHubAllocatorSubnet 返回默认虚拟子网前缀（DefaultVirtualSubnet 的解析结果）。
+func DefaultHubAllocatorSubnet() netip.Prefix {
+	return netip.MustParsePrefix(DefaultVirtualSubnet)
+}
+
+// SetAllocator 替换虚拟 IP 分配器（装配期调用，用配置的 hub.virtual_subnet 构建）。
+// nil 清除（恢复不分配虚拟 IP）。与 SetDHT 一致，须在服务器开始处理连接前调用。
+func (s *HubServer) SetAllocator(a Allocator) {
+	s.allocator = a
+}
+
+// Allocator 返回当前虚拟 IP 分配器（供装配期灌回快照重建分配表；nil 表示未启用）。
+func (s *HubServer) Allocator() Allocator {
+	return s.allocator
 }
 
 // TryHandleConn 非阻塞获取一个连接名额；成功时启动 goroutine 调用 HandleConn 处理连接，
@@ -605,7 +701,9 @@ func (s *HubServer) HandleConn(ctx context.Context, conn xfer.Conn) error {
 
 	// 回发注册 ACK：让客户端尽早感知注册成功（而非等到建流失败才发现）。
 	// 鉴权失败路径在 mux 创建前 return，不经过这里。
-	ack := buildRegisterAck(info.Secret)
+	// 节点声明 virtual-ip 能力时 REG_OK 携带本节点虚拟 IP（防 Discover=false 的
+	// relay 出口节点 / mesh node 静默失效，无需依赖 discovery 环拉 /api/hub/nodes）。
+	ack := buildRegisterAck(info.Secret, info.VirtualIP, hasCapability(reg.Capabilities, CapabilityVirtualIP))
 	if ackErr := conn.Send(ctx, ack); ackErr != nil {
 		s.logger.Warn("回发注册 ACK 失败", "node", reg.NodeID, "error", ackErr)
 		return ackErr

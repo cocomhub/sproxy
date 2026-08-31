@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/iostream"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/spf13/cobra"
 )
@@ -24,10 +26,18 @@ var mdnsLookupTimeout = 5 * time.Second
 // 经 mDNS 发现局域网内宣告 service 的 mesh node（mesh node --mdns 运行），用直连
 // 信令建立 webrtc 数据面，走对端出口拨号。listenAddr 非空时为端口转发模式，否则
 // 单次 stdin/stdout 模式。secret 是共享密钥（--mdns-secret，可为空 = 无认证）。
-func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret string, ios cli.IOStreams) error {
+// virtualSubnet 是虚拟 IP 子网（--virtual-subnet，默认 CGNAT；mDNS 无 hub 模式用
+// 确定性分配，S-1：虚拟 IP 目标经 AddVerified 校验后解析 node-id 直连）。
+func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret, virtualSubnet string, ios cli.IOStreams) error {
 	if nodeID == "" {
 		nodeID = iostream.LocalHostname("mesh-node")
 	}
+	vipSubnet, perr := netip.ParsePrefix(virtualSubnet)
+	if perr != nil || !vipSubnet.Addr().Is4() {
+		return fmt.Errorf("--virtual-subnet %q 非法（应为 IPv4 CIDR）", virtualSubnet)
+	}
+	vipSubnet = vipSubnet.Masked()
+	alloc := mesh.NewDeterministicAllocator(vipSubnet)
 	mdns, err := mesh.NewMDNS(mesh.MDNSConfig{NodeID: nodeID, BrowseOnly: true, Secret: secret})
 	if err != nil {
 		return fmt.Errorf("mDNS 初始化失败: %w", err)
@@ -43,6 +53,13 @@ func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret stri
 	// 多个节点宣告同一服务时逐个尝试（首个信令/拨号失败继续下一个），避免单一节点
 	// 陈旧/不可达即失败。
 	dial := func(dctx context.Context) (net.Conn, error) {
+		// 虚拟 IP 寻址（S-1）：host ∈ 虚拟子网 → 从 mDNS peers 的 VirtualIP 表
+		// （AddVerified 校验与确定性分配一致）解析 node-id，DialDirect 到对端。
+		if host, _, herr := net.SplitHostPort(service); herr == nil {
+			if vip, ok := mesh.ParseVirtualAddr(host); ok && mesh.IsVirtualAddr(vip, vipSubnet) {
+				return dialMDNSVirtualIP(dctx, mdns, vip, service, vipSubnet, alloc, nodeID, secret)
+			}
+		}
 		peers, lerr := mdns.LookupService(dctx, service, mdnsLookupTimeout)
 		if lerr != nil {
 			return nil, fmt.Errorf("mDNS 服务发现失败: %w", lerr)
@@ -95,6 +112,62 @@ func runMDNSConnect(cmd *cobra.Command, service, listenAddr, nodeID, secret stri
 		return mdnsForwardListen(ctx, dial, listenAddr, service, ios)
 	}
 	return mdnsStdioOnce(ctx, dial, service, ios)
+}
+
+// dialMDNSVirtualIP 经 mDNS peers 的 VirtualIP 表（AddVerified 校验确定性）解析
+// 虚拟 IP → node-id，建立直连信令拨号到对端（Addr 保持 <vip>:<port>，出口策略
+// 改写本机端口）。
+func dialMDNSVirtualIP(ctx context.Context, mdns *mesh.MDNSServer, vip netip.Addr, service string, subnet netip.Prefix, alloc hub.Allocator, nodeID, secret string) (net.Conn, error) {
+	// S-2：mDNS 组播宣告是周期性的，单次 connect 可能在对端首个含 vip= 的 TXT
+	// 到达前发起——有界等待 peers 表填充（复用服务名路径的 mdnsLookupTimeout），
+	// 超时才报错；否则单次 stdio 模式在对端刚启动时必然失败。
+	deadline := time.Now().Add(mdnsLookupTimeout)
+	var node string
+	for {
+		vt := mesh.NewVipTable(subnet)
+		for _, p := range mdns.Peers() {
+			if p.VirtualIP.IsValid() && p.SignalAddr != "" {
+				vt.AddVerified(p.VirtualIP, p.NodeID, "", alloc)
+			}
+		}
+		if n, ok := vt.NodeByAddr(vip); ok {
+			node = n
+			break
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("虚拟 IP %s 未在 mDNS 节点列表中找到（等待 %v 超时；请确认目标 mesh node --mdns 已运行并广播虚拟 IP）", vip, mdnsLookupTimeout)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	// 找对端信令端点并校验（防 SSRF，同服务名分支）。
+	var peerSignal string
+	for _, p := range mdns.Peers() {
+		if p.NodeID == node {
+			peerSignal = p.SignalAddr
+			break
+		}
+	}
+	if peerSignal == "" {
+		return nil, fmt.Errorf("节点 %s 未广播信令端点", node)
+	}
+	if verr := mesh.ValidateSignalAddr(peerSignal); verr != nil {
+		return nil, fmt.Errorf("节点 %s 信令端点非法（%s）: %v", node, peerSignal, verr)
+	}
+	sig, serr := mesh.DialDirectSignaler(ctx, peerSignal, nodeID)
+	if serr != nil {
+		return nil, fmt.Errorf("直连信令失败（%s）: %w", peerSignal, serr)
+	}
+	sig.SetSecret(secret) // --mdns-secret：offer 携带 HMAC 签名
+	target := &client.MeshService{Name: service, Node: node, Addr: service}
+	res, derr := mesh.DialDirect(ctx, sig, target)
+	_ = sig.Close()
+	if derr != nil {
+		return nil, derr
+	}
+	return res.Conn, nil
 }
 
 // mdnsForwardListen 端口转发模式：每个入站连接独立走 mDNS 解析 + 直连拨号 + 泵送。

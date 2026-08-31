@@ -16,6 +16,9 @@ type HubNodeInfo struct {
 	ID        string    `json:"id"`
 	Addr      string    `json:"addr,omitempty"`
 	Connected time.Time `json:"connected"`
+	// VirtualIP 是节点虚拟 IP（hub 权威分配；DHT/联邦候选节点无虚拟 IP，省略）。
+	// 供 mesh connect <vip>:<port> 与 mesh node 构建 vipTable。
+	VirtualIP string `json:"virtual_ip,omitempty"`
 }
 
 // HubStats 表示 Hub 中继统计信息。

@@ -6,6 +6,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -71,6 +72,10 @@ type MeshTargetRefresher struct {
 	service string
 	ttl     time.Duration
 	now     func() time.Time // 可注入时钟（测试用）
+	// static 为 true 时是固定目标 refresher（NewStaticMeshTargetRefresher 构造）：
+	// Resolve 始终返回预设 target，不查 hub；Invalidate no-op。用于虚拟 IP 寻址
+	// （mesh connect <vip>:<port> 已解析 node-id，无需服务名刷新）。
+	static bool
 
 	mu             sync.Mutex
 	target         *MeshService
@@ -86,6 +91,13 @@ func NewMeshTargetRefresher(svc *FileClient, service string) *MeshTargetRefreshe
 	return &MeshTargetRefresher{svc: svc, service: service, ttl: MeshTargetTTL, now: time.Now}
 }
 
+// NewStaticMeshTargetRefresher 创建固定目标 refresher（虚拟 IP 寻址用）。
+// Resolve 始终返回 target 的副本，Invalidate no-op——vip → node 映射由调用方的
+// vipTable 提供，不依赖服务名刷新。
+func NewStaticMeshTargetRefresher(target *MeshService) *MeshTargetRefresher {
+	return &MeshTargetRefresher{static: true, target: target, ttl: time.Hour, now: time.Now}
+}
+
 // SetClock 注入替代时钟（测试用）。
 func (r *MeshTargetRefresher) SetClock(now func() time.Time) { r.now = now }
 
@@ -97,8 +109,18 @@ func (r *MeshTargetRefresher) Service() string { return r.service }
 
 // Resolve 返回服务当前目标。缓存新鲜（<TTL）直接返回副本；否则触发一次刷新，
 // 并发调用共享同一刷新（单飞）。服务不在列表返回 ErrMeshServiceUnavailable。
+// 固定目标 refresher（static）始终返回预设 target，不查 hub。
 func (r *MeshTargetRefresher) Resolve(ctx context.Context) (*MeshService, error) {
 	r.mu.Lock()
+	if r.static {
+		if r.target == nil {
+			r.mu.Unlock()
+			return nil, errors.New("静态目标 refresher 未设置 target")
+		}
+		t := *r.target
+		r.mu.Unlock()
+		return &t, nil
+	}
 	if r.target != nil && r.now().Sub(r.lastRefresh) < r.ttl {
 		t := *r.target
 		r.mu.Unlock()
@@ -173,8 +195,13 @@ func (r *MeshTargetRefresher) Resolve(ctx context.Context) (*MeshService, error)
 }
 
 // Invalidate 使缓存过期：dial 失败后调用，并记录失败节点让下一次 Resolve 跳过它。
+// 固定目标 refresher（static）no-op（不重查 hub，vip → node 映射由 vipTable 提供）。
 func (r *MeshTargetRefresher) Invalidate(failedNode string) {
 	r.mu.Lock()
+	if r.static {
+		r.mu.Unlock()
+		return
+	}
 	r.target = nil
 	r.lastRefresh = time.Time{}
 	r.refreshErr = nil

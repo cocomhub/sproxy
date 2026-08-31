@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"sort"
 	"sync"
 	"time"
@@ -55,11 +56,18 @@ func (e *hubAPIError) Error() string {
 	return fmt.Sprintf("list hub nodes: HTTP %d", e.code)
 }
 
-// ListHubNodes 返回 hub 上全部在线节点 ID（含自身与临时节点）。
+// HubNodeInfo 是 /api/hub/nodes 的节点信息（ID + 虚拟 IP），供发现循环填充 vipTable。
+type HubNodeInfo struct {
+	ID string
+	// VIP 是节点虚拟 IP（hub 权威分配；DHT/联邦候选节点无虚拟 IP，为无效 Addr）。
+	VIP netip.Addr
+}
+
+// ListHubNodes 返回 hub 上全部在线节点（含自身与临时节点），携带虚拟 IP。
 // 轻量直连 GET /api/hub/nodes：不构造 FileClient，避免 tunnel_key/InitError 拖垮
 // mesh node 常驻进程（与 relay status 的直连方式一致）。配置了 AccessKeySecret 时
 // 用 SproxySig 签名认证（token 不上线）。4xx/5xx/网络错误统一返回 *hubAPIError。
-func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret string, insecure bool) ([]string, error) {
+func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret string, insecure bool) ([]HubNodeInfo, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("list hub nodes: hub 地址为空")
 	}
@@ -90,18 +98,26 @@ func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret strin
 		return nil, &hubAPIError{code: resp.StatusCode, body: string(body)}
 	}
 	var nodes []struct {
-		ID string `json:"id"`
+		ID        string `json:"id"`
+		VirtualIP string `json:"virtual_ip"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
 		return nil, fmt.Errorf("list hub nodes: 解析失败: %w", err)
 	}
-	ids := make([]string, 0, len(nodes))
+	out := make([]HubNodeInfo, 0, len(nodes))
 	for _, n := range nodes {
-		if n.ID != "" {
-			ids = append(ids, n.ID)
+		if n.ID == "" {
+			continue
 		}
+		var vip netip.Addr
+		if n.VirtualIP != "" {
+			if a, perr := netip.ParseAddr(n.VirtualIP); perr == nil {
+				vip = a
+			}
+		}
+		out = append(out, HubNodeInfo{ID: n.ID, VIP: vip})
 	}
-	return ids, nil
+	return out, nil
 }
 
 // discoveryLoop 维护对等直连集合（共享 linkPool，供本地网关复用）与失败冷却。
@@ -118,7 +134,7 @@ type discoveryLoop struct {
 // localAddr/httpClient/serveOpts 供拨号侧对等链路上跑 relay.Serve（接受对端网关回拨，
 // 双向服务互访）。返回错误仅当 /api/hub/nodes 4xx（auth/配置级致命，触发整 cycle
 // 重连）；拨号失败 / 瞬时列表失败只冷却重试，不返回（避免重连风暴）。
-func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, links *linkPool, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) error {
+func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, links *linkPool, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, vipTable *VipTable, logger *slog.Logger) error {
 	interval := cfg.DiscoveryInterval
 	if interval <= 0 {
 		interval = defaultDiscoveryInterval
@@ -138,7 +154,7 @@ func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase stri
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		if err := dl.discoverOnce(ctx, cfg, nodeID, httpBase, probe, maxParallel, mainSecret, localAddr, httpClient, serveOpts, logger); err != nil {
+		if err := dl.discoverOnce(ctx, cfg, nodeID, httpBase, probe, maxParallel, mainSecret, localAddr, httpClient, serveOpts, vipTable, logger); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -152,8 +168,8 @@ func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase stri
 	}
 }
 
-func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, probe time.Duration, maxParallel int, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) error {
-	peers, err := ListHubNodes(ctx, httpBase, cfg.AccessKey, cfg.AccessKeySecret, cfg.Insecure)
+func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, probe time.Duration, maxParallel int, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, vipTable *VipTable, logger *slog.Logger) error {
+	nodes, err := ListHubNodes(ctx, httpBase, cfg.AccessKey, cfg.AccessKeySecret, cfg.Insecure)
 	if err != nil {
 		var herr *hubAPIError
 		if errors.As(err, &herr) && herr.code >= 400 && herr.code < 500 {
@@ -165,10 +181,26 @@ func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeI
 
 	// sweep 已断开连接（peer 离线自动重拨）。
 	_ = dl.links.sweep()
+	// 从 hub 节点列表**原子重建** vipTable（认证数据源：SproxySig 签名 /api/hub/nodes）。
+	// hub 权威分配在 mesh 隔离内唯一，不依赖"谁先声明"；重建同时清除陈旧/离线节点
+	// 残留映射。含自身 VIP（对端据此可寻址本节点）。
+	if vipTable != nil {
+		entries := make([]VipEntry, 0, len(nodes))
+		for _, n := range nodes {
+			if n.ID == "" || !n.VIP.IsValid() {
+				continue
+			}
+			entries = append(entries, VipEntry{Addr: n.VIP, NodeID: n.ID})
+		}
+		if !vipTable.Reconcile(entries) {
+			logger.Warn("hub 虚拟 IP 列表重建失败（子网外/冲突），保留旧表", "entries", len(entries))
+		}
+	}
 	// 计算 targets：非自身、未连、半拨号去重（peer > nodeID，每对恰好一条链接）、
 	// 冷却内跳过。
 	var targets []string
-	for _, p := range peers {
+	for _, n := range nodes {
+		p := n.ID
 		if p == "" || p == nodeID {
 			continue
 		}

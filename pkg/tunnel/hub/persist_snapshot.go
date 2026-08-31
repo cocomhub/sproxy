@@ -51,6 +51,7 @@ func makeNodeSnaps(mesh string, nodes []NodeInfo, t *RouteTable) []NodeSnap {
 			RealNodeID: n.RealNodeID,
 			Connected:  n.Connected,
 			Services:   t.ServicesOf(n.ID),
+			VirtualIP:  n.VirtualIP,
 		})
 	}
 	return snaps
@@ -74,6 +75,7 @@ func RestoreFromSnapshot(mrt *MeshRouteTable, snap *Snapshot) {
 			Secret:     ns.Secret,
 			RealNodeID: ns.RealNodeID,
 			Connected:  ns.Connected,
+			VirtualIP:  ns.VirtualIP,
 		}, ns.Services)
 	}
 }

@@ -5,11 +5,14 @@ package main
 
 import (
 	"io"
+	"net/netip"
 	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/spf13/cobra"
 )
 
 // mockCfgProvider 是 ConfigProvider 测试桩。
@@ -134,10 +137,10 @@ func TestNewCmdP2PListen_ManualSameOfferAnswer(t *testing.T) {
 // Serve 回落默认 DialAllowed（仅公网）。
 func TestBuildP2PServeOpts_EmptyNil(t *testing.T) {
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	if opts := buildP2PServeOpts(nil, nil, ios); opts != nil {
+	if opts := buildP2PServeOpts(nil, nil, netip.Addr{}, netip.MustParsePrefix("100.64.0.0/10"), ios); opts != nil {
 		t.Fatalf("无配置应返回 nil: %v", opts)
 	}
-	if opts := buildP2PServeOpts([]string{"invalid-no-colon"}, nil, ios); opts != nil {
+	if opts := buildP2PServeOpts([]string{"invalid-no-colon"}, nil, netip.Addr{}, netip.MustParsePrefix("100.64.0.0/10"), ios); opts != nil {
 		t.Fatalf("全部无效服务应返回 nil: %v", opts)
 	}
 }
@@ -146,7 +149,7 @@ func TestBuildP2PServeOpts_EmptyNil(t *testing.T) {
 // 未宣告的 loopback 拒绝、公网目标回落放行（I45）。
 func TestBuildP2PServeOpts_ServiceAllowsExact(t *testing.T) {
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	opts := buildP2PServeOpts([]string{"ssh:127.0.0.1:22"}, nil, ios)
+	opts := buildP2PServeOpts([]string{"ssh:127.0.0.1:22"}, nil, netip.Addr{}, netip.MustParsePrefix("100.64.0.0/10"), ios)
 	if len(opts) != 1 || opts[0].DialPolicy == nil {
 		t.Fatalf("应构造带 DialPolicy 的 ServeOptions: %v", opts)
 	}
@@ -166,7 +169,7 @@ func TestBuildP2PServeOpts_ServiceAllowsExact(t *testing.T) {
 // 私网地址、未命中网段仍拒绝（I45）。
 func TestBuildP2PServeOpts_CIDRAllowsPrivate(t *testing.T) {
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	opts := buildP2PServeOpts(nil, []string{"192.168.0.0/16"}, ios)
+	opts := buildP2PServeOpts(nil, []string{"192.168.0.0/16"}, netip.Addr{}, netip.MustParsePrefix("100.64.0.0/10"), ios)
 	if len(opts) != 1 || opts[0].DialPolicy == nil {
 		t.Fatalf("CIDR 应构造 DialPolicy: %v", opts)
 	}
@@ -175,5 +178,57 @@ func TestBuildP2PServeOpts_CIDRAllowsPrivate(t *testing.T) {
 	}
 	if _, ok := opts[0].DialPolicy("10.0.0.5:22"); ok {
 		t.Fatal("未命中 CIDR 的私网地址应拒绝")
+	}
+}
+
+// TestParseVIPSubnetFlag（S-1 回归）校验 --virtual-subnet 解析：默认 CGNAT、自定义
+// 合法 IPv4、非法/非 IPv4 回落默认。
+func TestParseVIPSubnetFlag(t *testing.T) {
+	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
+	newCmd := func() *cobra.Command {
+		cmd := &cobra.Command{}
+		cmd.Flags().String("virtual-subnet", hub.DefaultVirtualSubnet, "")
+		return cmd
+	}
+	// 默认。
+	if p := parseVIPSubnetFlag(newCmd(), ios); p != netip.MustParsePrefix("100.64.0.0/10") {
+		t.Fatalf("默认子网 = %v, want 100.64.0.0/10", p)
+	}
+	// 自定义合法。
+	cmd := newCmd()
+	_ = cmd.Flags().Set("virtual-subnet", "10.0.0.0/8")
+	if p := parseVIPSubnetFlag(cmd, ios); p != netip.MustParsePrefix("10.0.0.0/8") {
+		t.Fatalf("自定义子网 = %v, want 10.0.0.0/8", p)
+	}
+	// 非法回落默认。
+	cmd = newCmd()
+	_ = cmd.Flags().Set("virtual-subnet", "not-a-cidr")
+	if p := parseVIPSubnetFlag(cmd, ios); p != netip.MustParsePrefix("100.64.0.0/10") {
+		t.Fatalf("非法子网应回落默认, got %v", p)
+	}
+}
+
+// TestNewCmdP2PListen_VirtualSubnetFlag 校验 p2p listen 提供 --virtual-subnet flag
+// （默认 CGNAT），供自定义 hub.virtual_subnet 出口装配（S-1 回归）。
+func TestNewCmdP2PListen_VirtualSubnetFlag(t *testing.T) {
+	cmd := NewCmdP2P(cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	listen := cmd.Commands()[0] // p2p connect
+	_ = listen
+	var listenCmd *cobra.Command
+	for _, c := range cmd.Commands() {
+		if c.Name() == "listen" {
+			listenCmd = c
+			break
+		}
+	}
+	if listenCmd == nil {
+		t.Fatal("p2p listen 子命令不存在")
+	}
+	got := listenCmd.Flags().Lookup("virtual-subnet")
+	if got == nil {
+		t.Fatal("p2p listen 应提供 --virtual-subnet flag（S-1）")
+	}
+	if got.DefValue != hub.DefaultVirtualSubnet {
+		t.Fatalf("--virtual-subnet 默认值 = %q, want %q", got.DefValue, hub.DefaultVirtualSubnet)
 	}
 }

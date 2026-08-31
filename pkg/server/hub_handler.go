@@ -39,15 +39,22 @@ func (h *Handlers) hubNodesHandler(w http.ResponseWriter, r *http.Request) {
 	type nodeResp struct {
 		ID   string `json:"id"`
 		Addr string `json:"addr,omitempty"`
+		// VirtualIP 是节点虚拟 IP（hub 权威分配；DHT/联邦候选节点无虚拟 IP，省略）。
+		VirtualIP string `json:"virtual_ip,omitempty"`
 		// omitzero（Go 1.24+）：time.Time 的零值经 omitempty 仍会序列化为
 		// "0001-01-01T00:00:00Z"，DHT 候选无连接时间需用 omitzero 才真正省略。
 		Connected time.Time `json:"connected,omitzero"`
 	}
 	resp := make([]nodeResp, 0, len(nodes))
 	for _, n := range nodes {
+		var vipStr string
+		if n.VirtualIP.IsValid() {
+			vipStr = n.VirtualIP.String()
+		}
 		resp = append(resp, nodeResp{
 			ID:        string(n.ID),
 			Addr:      n.Addr,
+			VirtualIP: vipStr,
 			Connected: n.Connected,
 		})
 	}

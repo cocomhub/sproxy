@@ -65,6 +65,25 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 	if nodeID == "" {
 		nodeID = iostream.LocalHostname("mesh-node")
 	}
+	// mDNS 无 hub 模式：本地确定性分配虚拟 IP（稳定哈希，AD-1 回落实现），
+	// 供出口拨号策略（NewVirtualIPDialPolicy 的 selfVIP）与广播 TXT（vip=，对端
+	// 据此构建 vipTable）。
+	subnet := parseVirtualSubnet(cfg.VirtualSubnet)
+	alloc := newDeterministicAllocator(subnet)
+	selfVIP, aerr := alloc.Alloc("", nodeID)
+	if aerr != nil {
+		return fmt.Errorf("mesh mDNS: 虚拟 IP 分配失败: %w", aerr)
+	}
+	vipTable := NewVipTable(subnet)
+	vipTable.Add(selfVIP, nodeID)
+	// R-1：确定性分配无全局唯一性保证（无 hub 冲突检测在本地表层面），启动显式
+	// 说明碰撞风险与排查路径，避免"对端 VIP 拨号被拒"时困惑。
+	logger.Info("mDNS 虚拟 IP 确定性分配（无 hub）：碰撞概率低（子网宿主量大）；若对端虚拟 IP 冲突被拒请核对 --virtual-subnet 一致性", "self_vip", selfVIP, "subnet", subnet)
+	// R-2：无密钥模式（LAN 信任模型）下攻击者可伪造广播/抢占确定性 VIP，启动打印
+	// 安全提示（与 mdns.go 安全边界文档一致）。
+	if mdnsKey == "" {
+		logger.Warn("mDNS 无共享密钥（LAN 信任模型）：同网段攻击者可伪造广播/抢占确定性虚拟 IP；生产建议配置 --mdns-secret 或 --access-key-secret")
+	}
 	lanIPs := lanIPv4Addrs()
 
 	mdns, err := NewMDNS(MDNSConfig{
@@ -74,6 +93,7 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 		IPs:        lanIPs,
 		Port:       cfg.MDNSPort,
 		Secret:     mdnsKey, // --mdns-secret 或 access_key_secret 回落：TXT 签名 + 浏览校验
+		VirtualIP:  selfVIP,
 		Logger:     logger,
 	})
 	if err != nil {
@@ -91,11 +111,12 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 		localAddr = "http://127.0.0.1:8080"
 	}
 	// 直连路径 DialResultFrames=false（结果帧会污染 webrtc 数据流，见 relay/leaf.go）。
+	// 出口拨号策略：虚拟 IP NAT（selfVIP 由本地确定性分配；宣告端口自动开放）。
 	directOpts := []relay.ServeOptions{
-		{DialPolicy: relay.NewServiceDialPolicy(cfg.DialAllowCIDRs, cfg.ServiceAddrs)},
+		{DialPolicy: relay.NewVirtualIPDialPolicy(subnet, selfVIP, cfg.VIPAllowPorts, cfg.DialAllowCIDRs, cfg.ServiceAddrs)},
 	}
 	links := newLinkPool()
-	gw := newGateway(links, cfg, logger)
+	gw := newGateway(links, cfg, logger, vipTable)
 
 	logger.Info("mesh mDNS 节点启动（无 hub）", "node", nodeID, "signal_addr", advAddr, "services", len(cfg.Services))
 
@@ -132,7 +153,7 @@ func runNodeMDNSOnly(ctx context.Context, cfg NodeConfig, logger *slog.Logger) e
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := runMDNSDiscoveryLoop(nodeCtx, cfg, nodeID, mdns, links, localAddr, httpClient, directOpts, logger); err != nil {
+			if err := runMDNSDiscoveryLoop(nodeCtx, cfg, nodeID, mdns, links, localAddr, httpClient, directOpts, vipTable, alloc, logger); err != nil {
 				select {
 				case errCh <- err:
 				default:
@@ -175,7 +196,7 @@ type mdnsDiscoveryLoop struct {
 
 // runMDNSDiscoveryLoop 周期经 mDNS 浏览发现其他 mesh node，并行 webrtc 自动直连并
 // 保持（直连信令复用 mDNS 广播的端点），形成 full-mesh 拓扑。返回错误仅当 ctx 取消。
-func runMDNSDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID string, mdns *MDNSServer, links *linkPool, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) error {
+func runMDNSDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID string, mdns *MDNSServer, links *linkPool, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, vipTable *VipTable, alloc hub.Allocator, logger *slog.Logger) error {
 	interval := cfg.DiscoveryInterval
 	if interval <= 0 {
 		interval = defaultDiscoveryInterval
@@ -194,7 +215,7 @@ func runMDNSDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID string, md
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		dl.discoverOnce(ctx, cfg, nodeID, mdns, probe, maxParallel, localAddr, httpClient, serveOpts, logger)
+		dl.discoverOnce(ctx, cfg, nodeID, mdns, probe, maxParallel, localAddr, httpClient, serveOpts, vipTable, alloc, logger)
 		select {
 		case <-ctx.Done():
 			return nil
@@ -203,12 +224,33 @@ func runMDNSDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID string, md
 	}
 }
 
-func (dl *mdnsDiscoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID string, mdns *MDNSServer, probe time.Duration, maxParallel int, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, logger *slog.Logger) {
+func (dl *mdnsDiscoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID string, mdns *MDNSServer, probe time.Duration, maxParallel int, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, vipTable *VipTable, alloc hub.Allocator, logger *slog.Logger) {
 	_ = dl.links.sweep()
+	// S-2：对端离场清理——mDNS AddVerified 只增不删，离场/过期对端的 VIP 映射会残留；
+	// 当前 peers 不存在的 nodeID 移除其映射（自身 nodeID 保留，避免误删自身 VIP）。
+	if vipTable != nil {
+		current := map[string]bool{nodeID: true}
+		for _, p := range mdns.Peers() {
+			current[p.NodeID] = true
+		}
+		for _, node := range vipTable.Nodes() {
+			if !current[node] {
+				vipTable.RemoveByNode(node)
+			}
+		}
+	}
 	var targets []MDNSPeer
 	for _, p := range mdns.Peers() {
 		if p.NodeID == "" || p.NodeID == nodeID || p.SignalAddr == "" {
 			continue
+		}
+		// 填充 vipTable（认证数据源：mDNS 签名 TXT 的 vip=）。**校验声明 VIP 与
+		// 确定性分配结果一致**（AddVerified）——不接受对端自声明的任意绑定值，
+		// 攻击者无法声明任意 VIP 抢占他人（LAN 信任模型内的公式可预测性是设计边界）。
+		if p.VirtualIP.IsValid() && vipTable != nil {
+			if !vipTable.AddVerified(p.VirtualIP, p.NodeID, "", alloc) {
+				logger.Warn("mDNS 对端虚拟 IP 与确定性分配不一致/冲突，拒绝（防自声明抢占）", "vip", p.VirtualIP, "node", p.NodeID)
+			}
 		}
 		if _, ok := dl.links.get(p.NodeID); ok {
 			continue

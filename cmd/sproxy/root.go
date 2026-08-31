@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -121,6 +122,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	var routeTable *hub.MeshRouteTable
 	var persist *hub.Persister          // hub 状态持久化器（仅 hub.enabled 且 persist_file 非空时创建）
 	var restoredMsgs []hub.MessageSnap  // 启动时从持久化恢复的信令收件箱（灌入 SignalBroker）
+	var restoredSnap *hub.Snapshot      // 启动时从持久化恢复的完整快照（灌回虚拟 IP 分配器）
 	var hubDHT hub.DHT                  // hub 节点发现表（hub.dht: kad 时装配；注入 HubServer 与 Handlers）
 	var fedClient *hub.FederationClient // hub 联邦节点表同步客户端（hub.federation.enabled 时装配；注入 Handlers）
 	// Hub 中继：先创建 MeshRouteTable + HubServer 收口（ws/tcp 传输共用注册/中继逻辑），
@@ -139,6 +141,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 			} else if snap != nil {
 				hub.RestoreFromSnapshot(routeTable, snap)
 				restoredMsgs = snap.Messages
+				restoredSnap = snap
 				if len(snap.Nodes) > 0 || len(snap.Messages) > 0 {
 					logger.Info("hub 状态已从持久化恢复", "file", cfg.Hub.PersistFile, "nodes", len(snap.Nodes), "messages", len(snap.Messages))
 				}
@@ -152,6 +155,29 @@ func runServer(cmd *cobra.Command, args []string) error {
 			aks = append(aks, hub.AccessKey{Key: k.Key, Secret: k.Secret})
 		}
 		hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(aks), logger.With("component", "hub"), cfg.Hub.MaxConnections)
+		// 虚拟 IP 分配：按 hub.virtual_subnet 配置的子网构建分配器（默认 CGNAT
+		// 100.64.0.0/10，config.Validate 已保证 IPv4）。分配权在 hub，节点不可自选。
+		// S-5：防御兜底同时覆盖非法 CIDR 与 IPv6（NewHubAllocator 对非 IPv4 panic，
+		// 此处避免把 IPv6 前缀传给它）。默认分配器已在 NewHubServer 建立。
+		if prefix, perr := netip.ParsePrefix(cfg.Hub.VirtualSubnet); perr == nil {
+			if prefix.Addr().Is4() {
+				hubSrv.SetAllocator(hub.NewHubAllocator(prefix))
+			} else {
+				logger.Warn("hub.virtual_subnet 非 IPv4，使用默认子网", "virtual_subnet", cfg.Hub.VirtualSubnet)
+			}
+		} else {
+			logger.Warn("hub.virtual_subnet 非法，使用默认子网", "virtual_subnet", cfg.Hub.VirtualSubnet, "error", perr)
+		}
+		// 重启快照重建分配表：把已持久化的 (mesh,nodeID)→VIP 灌回分配器，
+		// 避免把已持久化的 VIP 再分给新节点（DoD 1）。
+		// R-5：快照内虚拟 IP 冲突/越界（损坏或伪造持久化文件）时显式记录 Error——
+		// 被拒条目不保留，可能使已持久化节点重启后拿新 VIP；清晰告警供运维定位，
+		// 不再静默以空表启动掩盖问题。
+		if restoredSnap != nil {
+			if perr := hub.PreloadAllocator(hubSrv.Allocator(), restoredSnap); perr != nil {
+				logger.Error("虚拟 IP 分配表快照重建冲突（冲突条目不保留；对应节点重启后可能拿到新虚拟 IP）", "error", perr)
+			}
+		}
 		// DHT 节点发现表（hub.dht: kad）：装配 Kademlia，注册进 DHTRegistry，
 		// 注入 HubServer（注册时喂入 DHT）与 Handlers（/api/hub/nodes 合并候选）。
 		// 路由表仍 hub 权威；DHT 只提供候选节点/发现，不改路由表状态。
