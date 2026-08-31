@@ -78,6 +78,21 @@ func waitForStatus(t *testing.T, mgr *Manager, id, want string, timeout time.Dur
 	return nil
 }
 
+// waitStarted 确定性等待 mock 执行器的 Run 被调用（= 任务已拿信号量、进入执行）。
+// 对齐 flaky-network-test-pattern：用 channel 信号而非死等固定超时轮询状态——
+// CI Windows -race + cover 下 goroutine 启动/状态流转慢，死等必然 flake。
+func waitStarted(t *testing.T, m *mockExecutor) {
+	t.Helper()
+	if m.started == nil {
+		t.Fatal("waitStarted 需要带 started 信号的 mock 执行器（newBlockingMockExecutor）")
+	}
+	select {
+	case <-m.started:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("executor.Run 未被调用（任务未在 30s 内开始执行）")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // CreateTask 校验
 // ---------------------------------------------------------------------------
@@ -212,12 +227,19 @@ func TestSubmitAndStart_StateMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.Status != StatusPending {
-		t.Fatalf("SubmitAndStart 返回的任务应为 pending，got %q", task.Status)
+	// 注意：SubmitAndStart 返回的是内部共享指针，后台 goroutine 可能已把状态推进到
+	// syncing，直接读 task.Status 是数据竞争（-race 偶发捕获）。用 mgr.Get 取加锁快照：
+	// 刚提交的任务必为 pending，或已被后台 goroutine 快速推进到 syncing（均非终态，合法）。
+	if st := mgr.Get(task.ID).Status; st != StatusPending && st != StatusSyncing {
+		t.Fatalf("SubmitAndStart 返回后任务应处于 pending 或 syncing（执行中），got %q", st)
 	}
 
-	// 执行器阻塞 → 任务停在 syncing
-	waitForStatus(t, mgr, task.ID, "syncing", 5*time.Second)
+	// 执行器阻塞 → 任务停在 syncing。用 started 信号确定性等 Run 被调用
+	// （= 已拿信号量、进入 syncing），而非死等固定超时轮询状态。
+	waitStarted(t, blocking)
+	if got := mgr.Get(task.ID).Status; got != StatusSyncing {
+		t.Fatalf("执行器阻塞期间任务应停在 syncing，got %q", got)
+	}
 
 	blocking.release()
 	done := waitForStatus(t, mgr, task.ID, "completed", 10*time.Second)
@@ -271,13 +293,19 @@ func TestCancelTask_Queued(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 用 started 信号确定性等 A 的 executor.Run 被调用（= A 已拿到唯一信号量、进入 syncing）。
+	// 注意：started 信号只保证「某个任务」的 Run 被调用，若 A/B 都先提交，B 也可能先抢到
+	// 信号量（goroutine 调度非确定，CI 已复现）。故先等 A 拿到信号量，再提交 B——此时 B 必排队。
+	waitStarted(t, blocking)
+	if got := mgr.Get(taskA.ID).Status; got != StatusSyncing {
+		t.Fatalf("A 应持有信号量进入 syncing，got %q", got)
+	}
+
 	taskB, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1", Src: "dirb"})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// A 取得唯一信号量进入 syncing；B 排队保持 pending
-	waitForStatus(t, mgr, taskA.ID, "syncing", 5*time.Second)
+	// B 在 A 持有唯一信号量后才提交 → 必排队保持 pending（无时序依赖）。
 	b := mgr.Get(taskB.ID)
 	if b.Status != StatusPending {
 		t.Fatalf("B 排队期间应保持 pending，got %q", b.Status)
@@ -300,7 +328,8 @@ func TestCancelTask_Running(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForStatus(t, mgr, task.ID, "syncing", 5*time.Second)
+	// 用 started 信号确定性等 executor.Run 被调用（= 已持有信号量、进入 syncing）。
+	waitStarted(t, blocking)
 	if err := mgr.CancelTask(task.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +434,8 @@ func TestRecoverTasks_RestartSyncing(t *testing.T) {
 		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 	t.Cleanup(mgr2.Stop)
 
-	waitForStatus(t, mgr2, task.ID, "syncing", 5*time.Second)
+	// 恢复的 syncing 任务应重启执行：用 started 信号确定性等 executor.Run 被调用。
+	waitStarted(t, blocking)
 	blocking.release()
 	recovered := waitForStatus(t, mgr2, task.ID, "completed", 10*time.Second)
 	if recovered.Direction != "pull" || recovered.Src != "" || recovered.Dst != "restored" {
@@ -428,26 +458,28 @@ func TestConcurrency_Semaphore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// 确定性同步（对齐 flaky-network-test-pattern）：用 channel 信号等 A 的 executor.Run
+	// 被调用（= A 已拿到信号量、开始执行），而非死等固定超时轮询状态——CI Windows -race +
+	// cover 下 goroutine 启动/状态流转慢，死等超时必然 flake（5s→15s 仍破过）。started 信号
+	// 由 mockExecutor.Run 首次调用时 close。
+	// 注意：started 只保证「某个任务」的 Run 被调用。若 A/B 都先提交，B 也可能先抢到信号量
+	// （goroutine 调度非确定，CI 已复现 B 先 syncing 而 A pending）。故先等 A 拿到信号量，
+	// 再提交 B——此时 B 必排队 pending（真正无时序依赖）。
+	waitStarted(t, blocking)
+	if got := mgr.Get(taskA.ID).Status; got != StatusSyncing {
+		t.Fatalf("A 应持有信号量进入 syncing，got %q", got)
+	}
+
 	taskB, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "push", Remote: "r1", Src: "dirb"})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// 确定性同步（对齐 flaky-network-test-pattern）：用 channel 信号等 taskA 的
-	// executor.Run 被调用（= 已拿到信号量、开始执行），而非死等固定超时轮询状态——
-	// CI Windows -race + cover 下 goroutine 启动/状态流转慢，死等超时必然 flake
-	// （5s→15s 仍破过）。started 信号由 mockExecutor.Run 首次调用时 close。
-	select {
-	case <-blocking.started:
-	case <-time.After(30 * time.Second):
-		t.Fatalf("taskA 未在 30s 内开始执行（executor.Run 未被调用）")
-	}
-	// taskA 已持有信号量（MaxConcurrent=1），taskB 必 pending（确定性，无时序依赖）。
 	if b := mgr.Get(taskB.ID); b.Status != StatusPending {
 		t.Fatalf("MaxConcurrent=1 时第二个任务应排队 pending，got %q", b.Status)
 	}
 	blocking.release()
-	// release 后 taskA 的 Run 返回 → 回填完成 → 释放信号量 → taskB 执行并完成。
+	// release 后 A 的 Run 返回 → 回填完成 → 释放信号量 → B 执行并完成。
 	// completed 是「任务确定在跑」后的收尾状态，30s 宽限足够（本地 0.02s，CI 慢也秒级）。
 	waitForStatus(t, mgr, taskA.ID, "completed", 30*time.Second)
 	waitForStatus(t, mgr, taskB.ID, "completed", 30*time.Second)
