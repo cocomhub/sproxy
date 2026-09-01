@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -81,6 +82,24 @@ func (rt *Root) Stat(rel string) (os.FileInfo, error) {
 // os.Root 保证结果不逃逸 root。
 func (rt *Root) Lstat(rel string) (os.FileInfo, error) {
 	return rt.r.Lstat(rel)
+}
+
+// ReadDir 相对 root 读取目录条目（按名排序）。os.Root 对每路径分量强制 O_NOFOLLOW，
+// 中间目录符号链接指向 root 外时返回错误（不逃逸）。
+func (rt *Root) ReadDir(rel string) ([]os.DirEntry, error) {
+	f, err := rt.r.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(entries, func(a, b os.DirEntry) int {
+		return strings.Compare(a.Name(), b.Name())
+	})
+	return entries, nil
 }
 
 // MkdirAll 相对 root 递归创建目录；已存在时幂等。

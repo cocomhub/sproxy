@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -505,28 +504,33 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		sourceDir := filepath.Join(h.cloudMgr.cloudDirFor(task.Owner), task.ID)
-		sourceFile := filepath.Join(sourceDir, task.Filename)
-		// 校验目标文件位于任务子目录内（防御 task.Filename 含路径穿越）。
-		// 与单任务/批量归档的校验基准（IsPathWithin(sourceDir)）对齐，更严格——
-		// 仅校验落在 cloud 根目录内允许 task.Filename 带 ../ 逃出任务目录。
-		if !IsPathWithin(sourceFile, sourceDir) {
-			h.logger.Error("path traversal detected in group archive",
-				"group_id", groupID, "task_id", taskID, "source_file", sourceFile)
+		// 源文件按任务 owner 租户 cloud/ 桶解析（根内 rel = cloud/<taskID>/<file>）。
+		// FeatureRel 逐段校验（fail-closed，防 task.Filename 穿越任务目录）。
+		srcTnt := h.tenantFor(task.Owner)
+		if srcTnt == nil {
+			h.logger.Warn("cloud group archive: skipping task with unavailable tenant",
+				"group_id", groupID, "task_id", taskID, "owner", task.Owner)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
+		}
+		srcRel, relOK := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
+		if !relOK {
+			h.logger.Warn("cloud group archive: skipping task with invalid source path",
+				"group_id", groupID, "task_id", taskID, "file", task.Filename)
 			skippedTasks = append(skippedTasks, taskID)
 			continue
 		}
 		// 收集后、打包前文件可能被删除/替换，先确认存在并统计大小（用于总量限制与配额预估）
-		if info, statErr := os.Stat(sourceFile); statErr != nil {
+		if info, statErr := srcTnt.Root().Stat(srcRel); statErr != nil {
 			h.logger.Warn("cloud group archive: skipping missing file",
-				"group_id", groupID, "task_id", taskID, "source_file", sourceFile, "error", statErr)
+				"group_id", groupID, "task_id", taskID, "rel", srcRel, "error", statErr)
 			skippedTasks = append(skippedTasks, taskID)
 			continue
 		} else {
 			totalSourceSize += info.Size()
 		}
 		relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
-		groupFiles = append(groupFiles, fileWithRelPath{fullPath: sourceFile, relPath: relPath})
+		groupFiles = append(groupFiles, fileWithRelPath{root: srcTnt.Root(), rel: srcRel, tarRel: relPath})
 	}
 
 	if len(groupFiles) == 0 {

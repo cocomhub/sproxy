@@ -58,8 +58,8 @@ func writeHTTPPathError(w http.ResponseWriter, err error) {
 
 // validateCloudArchiveName 校验 kind=cloud_archive 的归档名。
 // 归档名必须是单文件名（无路径分隔符），拒绝空、绝对路径、..、Windows 非法字符。
-// 与 ValidateFilePath 的规则对齐，但不含 .__ 首段拒绝——归档目录本身即 .__ 前缀，
-// 服务端在 cloudArchivePath 中负责拼接与防穿越（. __ 内部目录仅此白名单 kind 可达）。
+// 与 ValidateFilePath 的规则对齐，但不含 .__ 首段拒绝——归档名经 FeatureRel("archive", name)
+// 解析到租户 archive 功能桶（服务端内部构造，用户不可直达），服务端负责拼接与防穿越。
 func validateCloudArchiveName(name string) *downloadPathError {
 	invalid := &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
 	name = strings.TrimSpace(name)

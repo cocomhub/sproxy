@@ -12,9 +12,12 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // ArchiveRequest 是 POST /api/archive 的请求体。
@@ -91,7 +94,7 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// 源文件按请求者租户 user 桶解析（<root>/<tenant>/user/<path>），
-			// 派生根内绝对路径供 addFileToTar 打开（TOCTOU 防护不变）。
+			// addFileToTar 经 os.Root 相对打开（中间目录符号链接不逃逸，TOCTOU 交叉校验保留）。
 			tnt := h.tenantOf(r)
 			if tnt == nil {
 				logger.Error("归档添加文件失败：租户不可用", "path", relPath)
@@ -102,12 +105,7 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 				logger.Error("归档添加文件失败：无效的文件路径", "path", relPath)
 				continue
 			}
-			fullPath, ok := tnt.Root().Abs(userRel)
-			if !ok {
-				logger.Error("归档添加文件失败：路径越界", "path", relPath)
-				continue
-			}
-			if err := addFileToTar(tw, fullPath, relPath, logger); err != nil {
+			if err := addFileToTar(tw, tnt.Root(), userRel, relPath, logger); err != nil {
 				logger.Error("归档添加文件失败", "path", relPath, "error", err)
 				pipeErr = err
 			}
@@ -180,44 +178,44 @@ func validateArchiveFiles(files []string, w http.ResponseWriter) ([]string, bool
 	return validated, true
 }
 
-// addFileToTar 将单个文件（或目录）添加到 tar writer 中。
+// addFileToTar 将 root 内 rel 对应的文件（或目录）添加到 tar writer 中（tar 条目名为 tarRel）。
 // 如果是目录则递归添加。
-// TOCTOU 防护：Linux 使用 O_NOFOLLOW 不跟随符号链接打开，
-// 交叉验证 os.SameFile 确保 lstat 和 open 后文件一致。
-func addFileToTar(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger) error {
-	return addFileToTarDepth(tw, fullPath, relPath, logger, 0)
+// 安全边界：所有读取经 os.Root 相对路径（root.Lstat/Open/ReadDir），os.Root 对每路径分量
+// 强制 O_NOFOLLOW，中间目录符号链接指向 root 外即报错（不逃逸）；TOCTOU 交叉验证
+// os.SameFile 确保 lstat 和 open 后文件一致（最终组件符号链接被 Lstat 拒绝跟随）。
+func addFileToTar(tw *tar.Writer, root *storage.Root, rel, tarRel string, logger *slog.Logger) error {
+	return addFileToTarDepth(tw, root, rel, tarRel, logger, 0)
 }
 
 // addFileToTarDepth 是 addFileToTar 内部实现，带 depth 参数防止递归过深。
-func addFileToTarDepth(tw *tar.Writer, fullPath, relPath string, logger *slog.Logger, depth int) error {
+func addFileToTarDepth(tw *tar.Writer, root *storage.Root, rel, tarRel string, logger *slog.Logger, depth int) error {
 	if depth > 100 {
-		return fmt.Errorf("目录深度超过限制: %s", relPath)
+		return fmt.Errorf("目录深度超过限制: %s", tarRel)
 	}
 
 	// 使用 Lstat 检测符号链接，拒绝跟随
-	info, err := os.Lstat(fullPath)
+	info, err := root.Lstat(rel)
 	if err != nil {
 		return fmt.Errorf("stat 失败: %w", err)
 	}
 
 	// 检测符号链接，拒绝归档
 	if info.Mode()&os.ModeSymlink != 0 {
-		logger.Warn("跳过符号链接", "path", relPath)
+		logger.Warn("跳过符号链接", "path", tarRel)
 		return nil
 	}
 
 	if info.IsDir() {
-		// 递归添加目录内容
-		var entries []os.DirEntry
-		entries, err = os.ReadDir(fullPath)
-		if err != nil {
-			return fmt.Errorf("读取目录失败: %w", err)
+		// 递归添加目录内容（root 相对读取，防中间目录符号链接逃逸）
+		entries, readErr := root.ReadDir(rel)
+		if readErr != nil {
+			return fmt.Errorf("读取目录失败: %w", readErr)
 		}
 		for _, entry := range entries {
-			childRel := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
-			childFull := filepath.Join(fullPath, entry.Name())
-			if err = addFileToTarDepth(tw, childFull, childRel, logger, depth+1); err != nil {
-				logger.Warn("归档添加子文件失败", "path", childRel, "error", err)
+			childRel := path.Join(rel, entry.Name())
+			childTarRel := filepath.ToSlash(filepath.Join(tarRel, entry.Name()))
+			if err = addFileToTarDepth(tw, root, childRel, childTarRel, logger, depth+1); err != nil {
+				logger.Warn("归档添加子文件失败", "path", childTarRel, "error", err)
 			}
 		}
 		return nil
@@ -225,11 +223,11 @@ func addFileToTarDepth(tw *tar.Writer, fullPath, relPath string, logger *slog.Lo
 
 	// 单个文件大小限制
 	if info.Size() > defaultMaxArchiveSize {
-		return fmt.Errorf("文件 %s 大小 (%d) 超过归档限制 (%d)，请直接下载该文件", relPath, info.Size(), defaultMaxArchiveSize)
+		return fmt.Errorf("文件 %s 大小 (%d) 超过归档限制 (%d)，请直接下载该文件", tarRel, info.Size(), defaultMaxArchiveSize)
 	}
 
-	// 打开文件：Linux 用 O_NOFOLLOW 不跟随符号链接
-	file, err := openFileNoFollow(fullPath)
+	// 打开文件：os.Root 保证不跟随符号链接（最终组件 + 中间目录均 O_NOFOLLOW）
+	file, err := root.Open(rel)
 	if err != nil {
 		return fmt.Errorf("打开文件失败: %w", err)
 	}
@@ -241,14 +239,14 @@ func addFileToTarDepth(tw *tar.Writer, fullPath, relPath string, logger *slog.Lo
 		return fmt.Errorf("stat 已打开文件失败: %w", err)
 	}
 	if !os.SameFile(info, openedInfo) {
-		return fmt.Errorf("文件在 lstat 和 open 之间被替换（TOCTOU）: %s", relPath)
+		return fmt.Errorf("文件在 lstat 和 open 之间被替换（TOCTOU）: %s", tarRel)
 	}
 
 	header, err := tar.FileInfoHeader(info, "")
 	if err != nil {
 		return fmt.Errorf("创建 tar header 失败: %w", err)
 	}
-	header.Name = filepath.ToSlash(relPath)
+	header.Name = filepath.ToSlash(tarRel)
 
 	if err := tw.WriteHeader(header); err != nil {
 		return fmt.Errorf("写入 tar header 失败: %w", err)
@@ -287,12 +285,7 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
 	}
-	fullPath, ok := tnt.Root().Abs(userRel)
-	if !ok {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
-		return
-	}
-	info, err := os.Stat(fullPath)
+	info, err := tnt.Root().Stat(userRel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
@@ -334,7 +327,7 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 
-		if err := addFileToTarDepth(tw, fullPath, filepath.ToSlash(relPath), h.logger, 0); err != nil {
+		if err := addFileToTarDepth(tw, tnt.Root(), userRel, filepath.ToSlash(relPath), h.logger, 0); err != nil {
 			pipeErr = err
 		}
 		if err := tw.Close(); err != nil {

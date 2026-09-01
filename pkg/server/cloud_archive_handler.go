@@ -93,15 +93,18 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 构造源文件路径（任务文件按任务 owner 落租户 cloud/ 桶）
-	sourceDir := filepath.Join(h.cloudMgr.cloudDirFor(task.Owner), task.ID)
-	sourceFile := filepath.Join(sourceDir, task.Filename)
-
-	// 路径穿越防护
-	if !IsPathWithin(sourceFile, sourceDir) {
-		h.logger.Error("path traversal detected in cloud archive",
-			"task_id", taskID, "source_file", sourceFile)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid file path"}, http.StatusInternalServerError)
+	// 构造源文件路径（任务文件按任务 owner 落租户 cloud/ 桶）：根内 rel = cloud/<taskID>/<file>
+	// 经 FeatureRel 校验段名（fail-closed，防 task.Filename 穿越任务目录）。
+	srcTnt := h.tenantFor(task.Owner)
+	if srcTnt == nil {
+		h.logger.Error("云任务源租户不可用（fail-closed）", "task_id", taskID, "owner", task.Owner)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to stat source file"}, http.StatusBadRequest)
+		return
+	}
+	srcRel, ok := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
+	if !ok {
+		h.logger.Error("云任务源路径非法（fail-closed）", "task_id", taskID, "file", task.Filename)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to stat source file"}, http.StatusBadRequest)
 		return
 	}
 
@@ -150,7 +153,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	// 审查 #10 结论（勿再分析）：此 os.Stat 是**必须的**大小校验，并非与 O_EXCL 重复的
 	// 存在性预检——同名冲突由 openArchiveOutput 的 O_EXCL 单一负责（createTarGz 返回
 	// errArchiveExists → 409）；此处 stat 失败即源文件不存在（400），职责不同，无冗余。
-	info, err := os.Stat(sourceFile)
+	info, err := srcTnt.Root().Stat(srcRel)
 	if err != nil {
 		h.logger.Error("failed to stat source file in cloud archive", "task_id", taskID, "error", err)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to stat source file"}, http.StatusBadRequest)
@@ -173,7 +176,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 
 	// 打包（流式 checksum）
 	logger := h.logger.With("archive", "cloud_task", "task_id", taskID)
-	checksum, err := createTarGz(sourceFile, task.Filename, root, rel, logger)
+	checksum, err := createTarGz(srcTnt.Root(), srcRel, task.Filename, root, rel, logger)
 	if err != nil {
 		if errors.Is(err, errArchiveExists) {
 			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
@@ -269,29 +272,34 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		sourceDir := filepath.Join(h.cloudMgr.cloudDirFor(task.Owner), task.ID)
-		sourceFile := filepath.Join(sourceDir, task.Filename)
-
-		// 路径穿越防护
-		if !IsPathWithin(sourceFile, sourceDir) {
-			h.logger.Error("path traversal detected in cloud batch archive",
-				"task_id", taskID, "source_file", sourceFile)
+		// 源文件按任务 owner 租户 cloud/ 桶解析（根内 rel = cloud/<taskID>/<file>）
+		srcTnt := h.tenantFor(task.Owner)
+		if srcTnt == nil {
+			h.logger.Warn("cloud batch archive: skipping task with unavailable tenant",
+				"task_id", taskID, "owner", task.Owner)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
+		}
+		srcRel, ok := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
+		if !ok {
+			h.logger.Warn("cloud batch archive: skipping task with invalid source path",
+				"task_id", taskID, "file", task.Filename)
 			skippedTasks = append(skippedTasks, taskID)
 			continue
 		}
 
 		// 顺带 stat 校验文件存在并累计原始大小（用于总量限制与配额预估）
-		info, statErr := os.Stat(sourceFile)
+		info, statErr := srcTnt.Root().Stat(srcRel)
 		if statErr != nil {
 			h.logger.Warn("cloud batch archive: skipping missing file",
-				"task_id", taskID, "source_file", sourceFile, "error", statErr)
+				"task_id", taskID, "rel", srcRel, "error", statErr)
 			skippedTasks = append(skippedTasks, taskID)
 			continue
 		}
 		totalSourceSize += info.Size()
 
 		relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
-		files = append(files, fileWithRelPath{fullPath: sourceFile, relPath: relPath})
+		files = append(files, fileWithRelPath{root: srcTnt.Root(), rel: srcRel, tarRel: relPath})
 	}
 
 	// 所有任务都被跳过则返回错误
@@ -415,17 +423,19 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
-// fileWithRelPath 是文件路径与 tar 内相对路径对。
+// fileWithRelPath 是源文件（租户根内相对路径）与 tar 内相对路径对。
+// root 是源文件所在租户根（云任务文件按任务 owner 落租户 cloud/ 桶，跨 owner 任务 root 不同）。
 type fileWithRelPath struct {
-	fullPath string
-	relPath  string
+	root   *storage.Root
+	rel    string // 根内相对源路径（cloud/<taskID>/<file>）
+	tarRel string // tar 内条目名
 }
 
 // createTarGz 将单个文件打包为 tar.gz 并返回流式计算的 SHA-256 checksum。
 // 使用 succeeded 标记模式确保出错时清理输出文件。O_EXCL 创建，已存在返回 false 到 created。
-// 输出经租户 root 相对 rel 打开（os.Root 防符号链接逃逸；O_EXCL 语义保留）。
-func createTarGz(sourceFile, sourceName string, root *storage.Root, rel string, logger *slog.Logger) (checksum string, err error) {
-	outputFile, created, err := openArchiveOutput(root, rel)
+// 源文件经 srcRoot 相对 srcRel 读取、输出经 outRoot 相对 outRel 打开（os.Root 防符号链接逃逸；O_EXCL 语义保留）。
+func createTarGz(srcRoot *storage.Root, srcRel, srcTarName string, outRoot *storage.Root, outRel string, logger *slog.Logger) (checksum string, err error) {
+	outputFile, created, err := openArchiveOutput(outRoot, outRel)
 	if err != nil {
 		return "", err
 	}
@@ -438,7 +448,7 @@ func createTarGz(sourceFile, sourceName string, root *storage.Root, rel string, 
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			_ = root.Remove(rel)
+			_ = outRoot.Remove(outRel)
 		}
 	}()
 
@@ -451,7 +461,7 @@ func createTarGz(sourceFile, sourceName string, root *storage.Root, rel string, 
 	tw := tar.NewWriter(gw)
 	defer tw.Close()
 
-	if err := addFileToTar(tw, sourceFile, sourceName, logger); err != nil {
+	if err := addFileToTar(tw, srcRoot, srcRel, srcTarName, logger); err != nil {
 		return "", fmt.Errorf("add file to tar: %w", err)
 	}
 
@@ -462,10 +472,11 @@ func createTarGz(sourceFile, sourceName string, root *storage.Root, rel string, 
 
 // createMultiFileTarGz 将多个文件打包为单个 tar.gz 并返回流式计算的 SHA-256 checksum。
 // 使用 succeeded 标记模式确保出错时清理输出文件。O_EXCL 创建，已存在时置 created=false 并返回 errArchiveExists。
-// 输出经租户 root 相对 rel 打开（os.Root 防符号链接逃逸；O_EXCL 语义保留）。
-func createMultiFileTarGz(files []fileWithRelPath, root *storage.Root, rel string, logger *slog.Logger, created *bool) (checksum string, err error) {
+// 源文件按各自租户根（files[].root）相对读取、输出经 outRoot 相对 outRel 打开
+// （os.Root 防符号链接逃逸；O_EXCL 语义保留）。
+func createMultiFileTarGz(files []fileWithRelPath, outRoot *storage.Root, outRel string, logger *slog.Logger, created *bool) (checksum string, err error) {
 	*created = true
-	outputFile, createdOK, err := openArchiveOutput(root, rel)
+	outputFile, createdOK, err := openArchiveOutput(outRoot, outRel)
 	if err != nil {
 		return "", err
 	}
@@ -479,7 +490,7 @@ func createMultiFileTarGz(files []fileWithRelPath, root *storage.Root, rel strin
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			_ = root.Remove(rel)
+			_ = outRoot.Remove(outRel)
 		}
 	}()
 
@@ -493,8 +504,8 @@ func createMultiFileTarGz(files []fileWithRelPath, root *storage.Root, rel strin
 	defer tw.Close()
 
 	for _, f := range files {
-		if err := addFileToTar(tw, f.fullPath, f.relPath, logger); err != nil {
-			return "", fmt.Errorf("add file %q to tar: %w", f.relPath, err)
+		if err := addFileToTar(tw, f.root, f.rel, f.tarRel, logger); err != nil {
+			return "", fmt.Errorf("add file %q to tar: %w", f.tarRel, err)
 		}
 	}
 
