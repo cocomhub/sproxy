@@ -91,14 +91,14 @@ func TestSafePath_OwnerIsolation(t *testing.T) {
 // TestDownload_RejectsInternalDirPrefix（审查 #4 收敛 + I-1 多租户跨目录读取）：
 // 普通下载/stat（无 kind）访问服务端内部目录首段必须被拒——否则任何持有有效 AK 的
 // 租户可经 GET /download?filename=.__cloud__/<taskID>/<file> 跨租户读取他人云端文件。
-// ValidateFilePath 全局放行 .__（避免破坏 sync push），拦截点收敛到 resolveDownloadPath。
+// 迁移到 Tenant API 后拦截点收敛到 Tenant.UserRel：逐段 ValidSegmentName 拒绝 .__
+// 内部前缀（首段或深层），首段功能桶名（cloud/archive/chunk/meta/user/version）同样拒绝。
 func TestDownload_RejectsInternalDirPrefix(t *testing.T) {
 	tmpDir := t.TempDir()
-	var cfg atomic.Pointer[Config]
-	cfg.Store(&Config{UploadsDir: tmpDir})
-	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
+	h := newAssemblyTestHandlers(t, tmpDir)
+	h.checksumStore = NewChecksumStore(tmpDir, testLogger())
 
-	// 制造一个内部目录跨租户文件（模拟他人云端下载产物）
+	// 制造一个内部目录跨租户文件（模拟他人云端下载产物）——即使文件存在，普通下载也应拒绝
 	internalDir := filepath.Join(tmpDir, ".__cloud__", "task123")
 	if err := os.MkdirAll(internalDir, 0755); err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestDownload_RejectsInternalDirPrefix(t *testing.T) {
 	} {
 		req := httptest.NewRequest("GET", "/download?filename="+url.QueryEscape(name), nil)
 		req = req.WithContext(withActor(req.Context(), "ak-tenant-a"))
-		_, _, err := h.resolveDownloadPath(req)
+		_, err := h.resolveDownloadPath(req)
 		if err == nil {
 			t.Errorf("下载内部目录 %q 应被拒绝", name)
 			continue
@@ -136,13 +136,13 @@ func TestDownload_RejectsInternalDirPrefix(t *testing.T) {
 	}
 	req := httptest.NewRequest("GET", "/download?filename=normal.txt", nil)
 	req = req.WithContext(withActor(req.Context(), ""))
-	if _, _, err := h.resolveDownloadPath(req); err != nil {
+	if dp, err := h.resolveDownloadPath(req); err != nil || dp == nil {
 		t.Errorf("普通下载应允许: %v", err)
 	}
 	// 深层含 .__ 的普通文件仍允许
 	req2 := httptest.NewRequest("GET", "/download?filename=dir/foo.__bar.txt", nil)
 	req2 = req2.WithContext(withActor(req2.Context(), ""))
-	if _, _, err := h.resolveDownloadPath(req2); err != nil {
+	if dp, err := h.resolveDownloadPath(req2); err != nil || dp == nil {
 		t.Errorf("深层 .__ 普通文件应允许: %v", err)
 	}
 }

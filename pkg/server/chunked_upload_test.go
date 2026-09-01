@@ -23,10 +23,14 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // newTestServerWithChunked 启动一个包含分块上传/下载路由的测试服务器。
 // 使用 t.TempDir() 与 t.Cleanup() 自动管理临时目录与 UploadStore 后台 goroutine。
+// 装配多租户存储布局（globalRoot + 租户缓存）：普通 upload/download 已迁移到 Tenant API，
+// 未装配租户会让这些 handler 直接 400。
 func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config], func()) {
 	t.Helper()
 
@@ -50,6 +54,21 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 		checksumStore: cs,
 		uploadStore:   MustNewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
 		logger:        slog.Default(),
+		uploadingStop: make(chan struct{}),
+	}
+	// 多租户存储布局装配（同 newAssemblyTestHandlers / RegisterRoutes）：StorageRoot() 回退
+	// UploadsDir，两者同目录（旧配置兼容）。anonymous 租户预创建。
+	globalRoot, err := storage.OpenRoot(cfg.StorageRoot())
+	if err != nil {
+		t.Fatalf("打开存储根失败: %v", err)
+	}
+	h.globalRoot = globalRoot
+	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
+	h.tenantRoots = make(map[string]*storage.Tenant)
+	h.checksumStores = make(map[string]*ChecksumStore)
+	h.quotaScopes = make(map[string]*quota.Scope)
+	if h.tenantFor(anonymousOwner) == nil {
+		t.Fatal("创建 anonymous 租户失败")
 	}
 
 	mux := http.NewServeMux()
@@ -64,7 +83,7 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	ts := httptest.NewServer(mux)
 	t.Cleanup(func() {
 		ts.Close()
-		h.uploadStore.Stop()
+		_ = h.Close()
 	})
 	// 返回 no-op cleanup 保持调用方代码兼容
 	cleanup := func() {}

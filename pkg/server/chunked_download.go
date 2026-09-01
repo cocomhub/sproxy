@@ -42,15 +42,10 @@ func parseChunkRange(r *http.Request, cfg *Config) (offset, length int64, ok boo
 	return offset, length, true
 }
 
-// seekAndReadFile 打开文件、seek 到指定偏移、读取指定长度的数据。
-// 返回数据内容和其 SHA-256 checksum。
-func (h *Handlers) seekAndReadFile(filePath string, offset, length int64) (data []byte, checksum string, err error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, "", err
-	}
-	defer file.Close()
-
+// seekAndReadFile 从已打开的文件句柄 seek 到指定偏移、读取指定长度的数据。
+// 返回数据内容和其 SHA-256 checksum。调用方负责打开与关闭文件。
+// 普通下载经租户根打开后复用此函数（chunked_download 迁移到 Tenant API）。
+func (h *Handlers) seekAndReadFile(file *os.File, offset, length int64) (data []byte, checksum string, err error) {
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
 		h.logger.Error("文件 seek 失败", "error", err)
 		return nil, "", err
@@ -92,7 +87,7 @@ func setChunkResponseHeaders(w http.ResponseWriter, filename string, offset, len
 func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 
-	filename, filePath, err := h.resolveDownloadPath(r)
+	dp, err := h.resolveDownloadPath(r)
 	if err != nil {
 		writeDownloadPathError(w, err)
 		return
@@ -105,7 +100,13 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stat, err := os.Stat(filePath)
+	// 普通下载经租户根打开（root 相对，防符号链接逃逸）；cloud kind 用旧布局绝对路径。
+	var file *os.File
+	if dp.tnt != nil {
+		file, err = dp.tnt.Root().Open(dp.rel)
+	} else {
+		file, err = os.Open(dp.filePath)
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
@@ -114,12 +115,20 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		h.logger.Error("stat 文件失败", "error", err, "file_name", dp.filename)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+		return
+	}
 
 	fileSize := stat.Size()
 	if offset >= fileSize {
 		if fileSize == 0 && offset == 0 {
 			// 空文件：返回 200 和 0 字节
-			setChunkResponseHeaders(w, filename, 0, 0, 0)
+			setChunkResponseHeaders(w, dp.filename, 0, 0, 0)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -136,19 +145,22 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 读取文件数据（含 seek 和重试回退）
-	data, serverChecksum, err := h.seekAndReadFile(filePath, offset, length)
+	data, serverChecksum, err := h.seekAndReadFile(file, offset, length)
 	if err != nil {
-		h.logger.Error(errMsgOpenFileFailed, "error", err, "file_name", filename)
+		h.logger.Error(errMsgOpenFileFailed, "error", err, "file_name", dp.filename)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
 		return
 	}
 
 	// 设置响应头
-	setChunkResponseHeaders(w, filename, offset, length, fileSize)
+	setChunkResponseHeaders(w, dp.filename, offset, length, fileSize)
 
-	// 如果 ChecksumStore 有记录，返回完整文件 checksum（owner 作用域 key）
-	if cs, ok := h.checksumStore.Get(h.checksumKeyFor(r, filename)); ok {
-		w.Header().Set(headerFileChecksum, cs)
+	// 如果 ChecksumStore 有记录，返回完整文件 checksum（普通下载 per-tenant + rel；
+	// cloud kind 全局 + owner 作用域 key）
+	if csStore, csKey := h.checksumStoreForRead(r, dp); csStore != nil {
+		if cs, ok := csStore.Get(csKey); ok {
+			w.Header().Set(headerFileChecksum, cs)
+		}
 	}
 
 	// 写入响应

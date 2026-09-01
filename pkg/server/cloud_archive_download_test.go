@@ -260,11 +260,16 @@ func TestDownloadCloudArchive_EmptyKindRejectsInternal(t *testing.T) {
 }
 
 // TestDownloadCloudArchive_NormalDownloadStillWorks 验证 kind 为空时普通文件下载不受影响。
+// 普通下载已迁移到 Tenant API：文件落 <storageRoot>/anonymous/user/（未认证）下。
 func TestDownloadCloudArchive_NormalDownloadStillWorks(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 	content := []byte("normal-file")
-	if err := os.WriteFile(filepath.Join(cfgPtr.Load().UploadsDir, "normal.txt"), content, 0644); err != nil {
+	normalPath := filepath.Join(cfgPtr.Load().StorageRoot(), anonymousOwner, "user", "normal.txt")
+	if err := os.MkdirAll(filepath.Dir(normalPath), 0755); err != nil {
+		t.Fatalf("mkdir normal dir: %v", err)
+	}
+	if err := os.WriteFile(normalPath, content, 0644); err != nil {
 		t.Fatalf("write normal file: %v", err)
 	}
 

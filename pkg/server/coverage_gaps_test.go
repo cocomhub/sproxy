@@ -296,10 +296,11 @@ func TestDownload_OpenFileError(t *testing.T) {
 	cs := sha256hex(body)
 	uploadFile(t, url, "downloadable.txt", body, map[string]string{"X-File-Checksum": cs})
 
-	// 修改文件权限使其无法打开（仅 Unix）
+	// 修改文件权限使其无法打开（仅 Unix）。普通下载已迁移到 Tenant API：
+	// 文件落 <storageRoot>/anonymous/user/ 下。
 	if runtime.GOOS != "windows" {
 		cfg := cfgPtr.Load()
-		filePath := filepath.Join(cfg.UploadsDir, "downloadable.txt")
+		filePath := filepath.Join(cfg.StorageRoot(), anonymousOwner, "user", "downloadable.txt")
 		if err := os.Chmod(filePath, 0000); err != nil {
 			t.Fatalf("chmod: %v", err)
 		}

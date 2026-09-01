@@ -1386,8 +1386,9 @@ func TestStat_DirectoryReturnsIsDir(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
-	uploadsDir := cfgPtr.Load().UploadsDir
-	if err := os.Mkdir(filepath.Join(uploadsDir, "statdir"), 0755); err != nil {
+	// 普通 stat 已迁移到 Tenant API：目录建在 <storageRoot>/anonymous/user/ 下。
+	statDir := filepath.Join(cfgPtr.Load().StorageRoot(), anonymousOwner, "user", "statdir")
+	if err := os.MkdirAll(statDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 
