@@ -1001,7 +1001,7 @@ func TestMkdir_HappyPath(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	dirPath := filepath.Join(cfgPtr.Load().UploadsDir, "testdir")
+	dirPath := filepath.Join(cfgPtr.Load().StorageRoot(), "anonymous", "user", "testdir")
 	if info, err := os.Stat(dirPath); err != nil || !info.IsDir() {
 		t.Fatalf("directory should exist: %v", err)
 	}
@@ -1043,7 +1043,8 @@ func TestMkdir_PathTraversal(t *testing.T) {
 func TestMkdir_RejectsInternalDir(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
-	uploadsDir := cfgPtr.Load().UploadsDir
+	// 迁移后 mkdir 在 user 桶内操作：拦截成功后 freshdir 不应出现在 <storage>/anonymous/user/ 下。
+	userRoot := filepath.Join(cfgPtr.Load().StorageRoot(), "anonymous", "user")
 	for _, dirname := range []string{".__cloud__", "sub/.__versions__", ".__chunked__/x"} {
 		req, _ := http.NewRequest("POST", url+"/mkdir?dirname="+dirname, nil)
 		resp, err := http.DefaultClient.Do(req)
@@ -1057,7 +1058,7 @@ func TestMkdir_RejectsInternalDir(t *testing.T) {
 	}
 	// 守卫应在 MkdirAll 前拦截——freshdir/.__cloud__ 被拒后 freshdir 不应被创建
 	// （.__cloud__ 本身是服务端预创建目录，不能断言其不存在）。
-	if _, err := os.Stat(filepath.Join(uploadsDir, "freshdir")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(userRoot, "freshdir")); !os.IsNotExist(err) {
 		t.Fatal("守卫拦截后 freshdir 不应被创建")
 	}
 	req, _ := http.NewRequest("POST", url+"/mkdir?dirname=freshdir/.__cloud__", nil)
@@ -1069,7 +1070,7 @@ func TestMkdir_RejectsInternalDir(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("mkdir freshdir/.__cloud__ 应 400, got %d", resp.StatusCode)
 	}
-	if _, err := os.Stat(filepath.Join(uploadsDir, "freshdir")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(userRoot, "freshdir")); !os.IsNotExist(err) {
 		t.Fatal("mkdir freshdir/.__cloud__ 被拒后 freshdir 不应被创建")
 	}
 }
@@ -1080,8 +1081,10 @@ func TestRmdir_HappyPath(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
-	uploadsDir := cfgPtr.Load().UploadsDir
-	dirPath := filepath.Join(uploadsDir, "toremove")
+	dirPath := filepath.Join(cfgPtr.Load().StorageRoot(), "anonymous", "user", "toremove")
+	if err := os.MkdirAll(filepath.Dir(dirPath), 0755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
 	if err := os.Mkdir(dirPath, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -1104,9 +1107,8 @@ func TestRmdir_WithFiles_AlsoDeletesChecksums(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
-	uploadsDir := cfgPtr.Load().UploadsDir
-	subDir := filepath.Join(uploadsDir, "subdir")
-	if err := os.Mkdir(subDir, 0755); err != nil {
+	subDir := filepath.Join(cfgPtr.Load().StorageRoot(), "anonymous", "user", "subdir")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 
@@ -1218,8 +1220,10 @@ func TestRmdir_ForceRequired(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
-	uploadsDir := cfgPtr.Load().UploadsDir
-	dirPath := filepath.Join(uploadsDir, "forceless")
+	dirPath := filepath.Join(cfgPtr.Load().StorageRoot(), "anonymous", "user", "forceless")
+	if err := os.MkdirAll(filepath.Dir(dirPath), 0755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
 	if err := os.Mkdir(dirPath, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

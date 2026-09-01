@@ -55,7 +55,8 @@ func (t *Tenant) Buckets() []string {
 
 // UserRel 将用户输入路径归一并映射到 user 桶下的安全相对路径。
 // 内部先 NormalizeRemote（TrimSpace、拒绝空/绝对路径/.. 段、ToSlash），再逐段 ValidSegmentName
-// 校验；首段为功能桶名或 __ 遗留前缀时拒绝。通过则返回 "user/<normalized>"。
+// 校验；首段为功能桶名或 __ 遗留前缀**且还有后续段**时拒绝（防引用功能桶/遗留内部路径），
+// 单段恰好叫 cloud/archive 等是用户合法命名（user/ 前缀物理隔离，不触碰功能桶）。
 func (t *Tenant) UserRel(remotePath string) (string, bool) {
 	normalized, ok := NormalizeRemote(remotePath)
 	if !ok {
@@ -64,7 +65,7 @@ func (t *Tenant) UserRel(remotePath string) (string, bool) {
 	if !validSegments(normalized) {
 		return "", false
 	}
-	if first, _, _ := strings.Cut(normalized, "/"); isReservedUserFirstSegment(first) {
+	if first, _, hasMore := strings.Cut(normalized, "/"); hasMore && isReservedUserFirstSegment(first) {
 		return "", false
 	}
 	return bucketUser + "/" + normalized, true

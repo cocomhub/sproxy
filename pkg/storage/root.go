@@ -77,6 +77,12 @@ func (rt *Root) Stat(rel string) (os.FileInfo, error) {
 	return rt.r.Stat(rel)
 }
 
+// Lstat 返回相对路径的文件信息（不跟随符号链接）。供 rmdir 等检查符号链接，
+// os.Root 保证结果不逃逸 root。
+func (rt *Root) Lstat(rel string) (os.FileInfo, error) {
+	return rt.r.Lstat(rel)
+}
+
 // MkdirAll 相对 root 递归创建目录；已存在时幂等。
 func (rt *Root) MkdirAll(rel string, perm os.FileMode) error {
 	return rt.r.MkdirAll(rel, perm)

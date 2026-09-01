@@ -357,12 +357,12 @@ func TestMkdir_WriteFailure(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 	cfg := cfgPtr.Load()
 
-	// 把上传目录设为只读，使 MkdirAll 失败
-	origPerm := cfg.UploadsDir
-	if err := os.Chmod(origPerm, 0444); err != nil {
+	// 把 anonymous 租户根设为只读，使 MkdirAll("user/...") 失败（迁移后 mkdir 在 user 桶内创建）
+	tenantRoot := filepath.Join(cfg.StorageRoot(), "anonymous")
+	if err := os.Chmod(tenantRoot, 0444); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	t.Cleanup(func() { os.Chmod(origPerm, 0755) })
+	t.Cleanup(func() { os.Chmod(tenantRoot, 0755) })
 
 	req, _ := http.NewRequest("POST", url+"/mkdir?dirname=newdir", nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -385,7 +385,10 @@ func TestRmdir_RemoveAllFailure(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 	cfg := cfgPtr.Load()
 
-	dirPath := filepath.Join(cfg.UploadsDir, "lockeddir")
+	dirPath := filepath.Join(cfg.StorageRoot(), "anonymous", "user", "lockeddir")
+	if err := os.MkdirAll(filepath.Dir(dirPath), 0755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
 	if err := os.Mkdir(dirPath, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

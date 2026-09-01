@@ -64,9 +64,12 @@ func TestTenant_UserRel_Extra(t *testing.T) {
 		{"./x", false, ""},
 		{"a/../b", false, ""},
 		{"CON.txt", false, ""},                    // 保留设备名段
-		{"meta/x", false, ""},                     // 功能桶名首段拒绝
-		{"user/x", false, ""},                     // user 桶名首段拒绝
-		{"__x/y", false, ""},                      // __ 遗留前缀首段拒绝
+		{"meta/x", false, ""},                     // 功能桶名首段且带子路径拒绝
+		{"user/x", false, ""},                     // user 桶名首段且带子路径拒绝
+		{"__x/y", false, ""},                      // __ 遗留前缀首段且带子路径拒绝
+		{"cloud", true, "user/cloud"},             // 单段功能桶名是用户合法命名（user/ 前缀物理隔离）
+		{"archive", true, "user/archive"},         // 同上
+		{"meta", true, "user/meta"},               // 同上
 		{"dir/cloud/x", true, "user/dir/cloud/x"}, // 深层功能桶名合法（物理隔离保证）
 		{"dir/__x", true, "user/dir/__x"},         // 深层 __ 前缀合法
 	}
