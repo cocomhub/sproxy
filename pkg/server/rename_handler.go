@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // parseRenameParams 从请求中提取重命名参数：from、to 和 X-File-Checksum。
@@ -29,22 +31,26 @@ func parseRenameParams(r *http.Request) (from, to, checksum string, err error) {
 	if err != nil {
 		return "", "", "", fmt.Errorf("无效的目标路径")
 	}
-	// 写入侧守卫（审查 #4 收敛）：重命名不得落入/移出服务端内部目录
-	if isInternalDirPathPrefix(from) || isInternalDirPathPrefix(to) {
-		return "", "", "", fmt.Errorf("不能访问服务端内部目录（.__ 前缀为服务端保留）")
-	}
+	// 写入侧守卫已收敛：UserRel 保证 user/ 桶内（首段为功能桶名或 .__ 前缀时拒绝），
+	// 无需再单独校验 isInternalDirPathPrefix。
 	checksum = r.Header.Get(headerFileChecksum)
 	return from, to, checksum, nil
 }
 
-// resolveRenamePaths 计算 from 和 to 在指定 owner 存储根下的安全绝对路径。
-func resolveRenamePaths(h *Handlers, owner, from, to string) (fromPath, toPath string, ok bool) {
-	fromPath = h.safePathForOwner(owner, from)
-	toPath = h.safePathForOwner(owner, to)
-	if fromPath == "" || toPath == "" {
-		return "", "", false
+// resolveRenamePaths 计算 from 和 to 在指定 owner 租户 user 桶下的相对路径。
+// from 与 to 必须落在同一租户内（UserRel 保证 user/ 桶内）。返回租户与两条 rel。
+func resolveRenamePaths(h *Handlers, owner, from, to string) (fromRel, toRel string, tnt *storage.Tenant, ok bool) {
+	tnt = h.tenantFor(owner)
+	if tnt == nil {
+		return "", "", nil, false
 	}
-	return fromPath, toPath, true
+	var fok, tok bool
+	fromRel, fok = tnt.UserRel(from)
+	toRel, tok = tnt.UserRel(to)
+	if !fok || !tok {
+		return "", "", nil, false
+	}
+	return fromRel, toRel, tnt, true
 }
 
 // renameOpCtx 是 executeRename 的参数集合，用于减少函数参数数量（go:S107）。
@@ -53,8 +59,9 @@ type renameOpCtx struct {
 	w                http.ResponseWriter
 	ctx              context.Context
 	owner            string
-	fromPath         string
-	toPath           string
+	root             *storage.Root
+	fromRel          string
+	toRel            string
 	from             string
 	to               string
 	expectedChecksum string
@@ -64,8 +71,8 @@ type renameOpCtx struct {
 // executeRename 校验 checksum、执行 Rename、更新 checksumStore。
 // 返回 nil 表示成功；返回 error 表示失败（已在内部发送响应）。
 func executeRename(ctx renameOpCtx) error {
-	ctx.logger.InfoContext(ctx.ctx, "开始重命名", "from", ctx.fromPath, "to", ctx.toPath)
-	if _, err := os.Stat(ctx.fromPath); os.IsNotExist(err) {
+	ctx.logger.InfoContext(ctx.ctx, "开始重命名", "from", ctx.fromRel, "to", ctx.toRel)
+	if _, err := ctx.root.Stat(ctx.fromRel); os.IsNotExist(err) {
 		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
 			Action: "rename", ObjectType: "file", Object: ctx.from,
 			Result: AuditResultError, Detail: "源文件不存在",
@@ -74,7 +81,7 @@ func executeRename(ctx renameOpCtx) error {
 		return err
 	}
 	// TODO: 此处存在 TOCTOU 竞态窗口（Stat 与 Rename 之间），后续优化为原子操作
-	if _, err := os.Stat(ctx.toPath); err == nil {
+	if _, err := ctx.root.Stat(ctx.toRel); err == nil {
 		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
 			Action: "rename", ObjectType: "file", Object: ctx.from,
 			Result: AuditResultDenied, Detail: "目标路径已存在: " + ctx.to,
@@ -84,7 +91,7 @@ func executeRename(ctx renameOpCtx) error {
 		// 成功并追加一条假的 success 审计行（被拒绝的 rename 记为成功，破坏审计可信度）。
 		return errors.New("rename: 目标路径已存在")
 	}
-	if !verifyFileWithChecksum(ctx.fromPath, ctx.expectedChecksum) {
+	if !verifyFileWithChecksumRoot(ctx.root, ctx.fromRel, ctx.expectedChecksum) {
 		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
 			Action: "rename", ObjectType: "file", Object: ctx.from,
 			Result: AuditResultDenied, Detail: "checksum 不匹配",
@@ -93,7 +100,7 @@ func executeRename(ctx renameOpCtx) error {
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: errMsgSrcChecksumFailed}, http.StatusBadRequest)
 		return fmt.Errorf("checksum mismatch")
 	}
-	if err := os.MkdirAll(filepath.Dir(ctx.toPath), 0755); err != nil {
+	if err := ctx.root.MkdirAll(filepath.Dir(ctx.toRel), 0755); err != nil {
 		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
 			Action: "rename", ObjectType: "file", Object: ctx.from,
 			Result: AuditResultError, Detail: "创建父目录失败: " + ctx.to,
@@ -102,7 +109,7 @@ func executeRename(ctx renameOpCtx) error {
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: errMsgCreateParentDirFailed}, http.StatusInternalServerError)
 		return err
 	}
-	if err := atomicRename(ctx.fromPath, ctx.toPath); err != nil {
+	if err := atomicRenameRoot(ctx.root, ctx.fromRel, ctx.toRel); err != nil {
 		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
 			Action: "rename", ObjectType: "file", Object: ctx.from,
 			Result: AuditResultError, Detail: "重命名失败: " + ctx.to,
@@ -111,7 +118,9 @@ func executeRename(ctx renameOpCtx) error {
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
 		return err
 	}
-	ctx.h.checksumStore.Rename(checksumStoreKey(ctx.owner, ctx.from), checksumStoreKey(ctx.owner, ctx.to))
+	if cs := ctx.h.checksumStoreFor(ctx.owner); cs != nil {
+		cs.Rename(ctx.fromRel, ctx.toRel)
+	}
 	return nil
 }
 
@@ -128,26 +137,23 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op 
 		result.Message = "无效的目标路径"
 		return result
 	}
-	// 写入侧守卫（审查 #4 收敛）：批量重命名不得落入/移出服务端内部目录
-	if isInternalDirPathPrefix(from) || isInternalDirPathPrefix(to) {
-		result.Message = "不能访问服务端内部目录（.__ 前缀为服务端保留）"
-		return result
-	}
+	// 写入侧守卫已收敛：UserRel 保证 user/ 桶内（首段为功能桶名或 .__ 前缀时拒绝）。
 	if from == to {
 		result.Success = true
 		result.Message = "源与目标相同，无需移动"
 		return result
 	}
-	fromPath, toPath, ok := resolveRenamePaths(h, owner, from, to)
+	fromRel, toRel, tnt, ok := resolveRenamePaths(h, owner, from, to)
 	if !ok {
 		result.Message = "无效的文件路径"
 		return result
 	}
-	if _, err := os.Stat(fromPath); os.IsNotExist(err) {
+	root := tnt.Root()
+	if _, err := root.Stat(fromRel); os.IsNotExist(err) {
 		result.Message = "源文件不存在"
 		return result
 	}
-	if _, err := os.Stat(toPath); err == nil {
+	if _, err := root.Stat(toRel); err == nil {
 		result.Message = "目标路径已存在"
 		return result
 	}
@@ -155,7 +161,7 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op 
 		result.Message = "缺少 checksum"
 		return result
 	}
-	if !verifyFileWithChecksum(fromPath, op.Checksum) {
+	if !verifyFileWithChecksumRoot(root, fromRel, op.Checksum) {
 		logger.WarnContext(ctx, "batch rename checksum 不匹配", "from", op.From)
 		// 审查 I-4：batch rename 失败路径与单条 rename 对齐，补审计（checksum 拒绝 → denied）。
 		h.RecordAudit(ctx, AuditEvent{
@@ -165,7 +171,7 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op 
 		result.Message = errMsgSrcChecksumFailed
 		return result
 	}
-	if err := os.MkdirAll(filepath.Dir(toPath), 0755); err != nil {
+	if err := root.MkdirAll(filepath.Dir(toRel), 0755); err != nil {
 		logger.ErrorContext(ctx, errMsgCreateParentDirFailed, "to", to, "error", err.Error())
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "rename", ObjectType: "file", Object: op.From,
@@ -174,7 +180,7 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op 
 		result.Message = "创建父目录失败"
 		return result
 	}
-	if err := atomicRename(fromPath, toPath); err != nil {
+	if err := atomicRenameRoot(root, fromRel, toRel); err != nil {
 		logger.ErrorContext(ctx, "batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "rename", ObjectType: "file", Object: op.From,
@@ -183,7 +189,9 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op 
 		result.Message = "重命名失败"
 		return result
 	}
-	h.checksumStore.Rename(checksumStoreKey(owner, from), checksumStoreKey(owner, to))
+	if cs := h.checksumStoreFor(owner); cs != nil {
+		cs.Rename(fromRel, toRel)
+	}
 	h.RecordAudit(ctx, AuditEvent{
 		Action: "rename", ObjectType: "file", Object: from,
 		Result: AuditResultSuccess, Detail: "to=" + to,
@@ -248,8 +256,8 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	owner := ownerFromRequest(r)
-	fromPath, toPath, ok := resolveRenamePaths(h, owner, from, to)
-	if !ok {
+	fromRel, toRel, tnt, ok := resolveRenamePaths(h, owner, from, to)
+	if !ok || tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
@@ -259,8 +267,9 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		w:                w,
 		ctx:              r.Context(),
 		owner:            owner,
-		fromPath:         fromPath,
-		toPath:           toPath,
+		root:             tnt.Root(),
+		fromRel:          fromRel,
+		toRel:            toRel,
 		from:             from,
 		to:               to,
 		expectedChecksum: expectedChecksum,

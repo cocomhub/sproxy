@@ -66,13 +66,14 @@ func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.
 	return ts.URL, &cfgPtr, &auditBuf
 }
 
-// writeUploadFile 直接在上传目录写入一个文件（内容 + 返回其 sha256），
+// writeUploadFile 直接在存储根写入一个文件（内容 + 返回其 sha256），
 // 供 delete/rename 测试无需走完整上传链路。
 // 审计测试服务配置了 access_keys（testAccessKey），请求 owner 恒为 testAccessKey，
-// 故文件落在 uploadsDir/<owner>/ 子目录（与服务端按 owner 隔离一致）。
+// P2 delete/rename 已迁移到 Tenant API，故文件落在 <storageRoot>/<owner>/user/<rel>
+// （新布局；与服务端 UserRel 映射一致）。
 func writeUploadFile(t *testing.T, cfgPtr *atomic.Pointer[Config], name string, content []byte) {
 	t.Helper()
-	full := filepath.Join(cfgPtr.Load().UploadsDir, testAccessKey, filepath.FromSlash(name))
+	full := filepath.Join(cfgPtr.Load().StorageRoot(), testAccessKey, "user", filepath.FromSlash(name))
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(full), err)
 	}

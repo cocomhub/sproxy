@@ -13,18 +13,22 @@ import (
 	"os"
 )
 
-// resolveAndValidateFile 校验文件名并返回请求者 owner 存储根下的安全路径。
+// resolveAndValidateFile 校验文件名并返回请求者租户 user 桶下的相对路径（如 user/dir/f.txt）。
 // 校验失败时返回 ("", "", false)。
-func (h *Handlers) resolveAndValidateFile(r *http.Request, filename string) (remotePath, fullPath string, ok bool) {
+func (h *Handlers) resolveAndValidateFile(r *http.Request, filename string) (remotePath, rel string, ok bool) {
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
 		return "", "", false
 	}
-	fullPath = h.safePathFor(r, remotePath)
-	if fullPath == "" {
+	tnt := h.tenantOf(r)
+	if tnt == nil {
 		return "", "", false
 	}
-	return remotePath, fullPath, true
+	rel, ok = tnt.UserRel(remotePath)
+	if !ok {
+		return "", "", false
+	}
+	return remotePath, rel, true
 }
 
 func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +39,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgEmptyFilename}, http.StatusBadRequest)
 		return
 	}
-	remotePath, filePath, ok := h.resolveAndValidateFile(r, filename)
+	remotePath, rel, ok := h.resolveAndValidateFile(r, filename)
 	if !ok {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
@@ -48,8 +52,15 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tnt := h.tenantOf(r)
+	if tnt == nil || tnt.Root() == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return
+	}
+	root := tnt.Root()
+
 	// 基于 fd 操作缩小 TOCTOU 窗口：先打开文件，再基于 fd 执行 Stat 和 checksum 校验
-	file, err := os.Open(filePath)
+	file, err := root.Open(rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			h.RecordAudit(r.Context(), AuditEvent{
@@ -108,7 +119,7 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 
 	// 关闭后再删除
 	file.Close()
-	if err := os.Remove(filePath); err != nil {
+	if err := root.Remove(rel); err != nil {
 		// 审查 M-4：Detail 不含 err.Error()（os.Remove 错误含绝对路径，暴露服务端
 		// 文件系统布局）；错误详情记业务日志，审计行用固定文案。
 		h.logger.ErrorContext(r.Context(), "删除文件失败", "file_name", remotePath, "error", err.Error())
@@ -119,7 +130,9 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除文件失败"}, http.StatusInternalServerError)
 		return
 	}
-	h.checksumStore.Delete(h.checksumKeyFor(r, remotePath))
+	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
+		cs.Delete(rel)
+	}
 	if h.metrics != nil {
 		h.metrics.RecordDelete()
 	}
@@ -134,12 +147,18 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 // processBatchDeleteItem 处理单条文件删除操作。
 func (h *Handlers) processBatchDeleteItem(ctx context.Context, owner string, f BatchDeleteFile, logger *slog.Logger) BatchOperationResult {
 	result := BatchOperationResult{Filename: f.Filename}
-	remotePath, filePath, ok := h.resolveAndValidateFileForOwner(owner, f.Filename)
+	remotePath, rel, ok := h.resolveAndValidateFileForOwner(owner, f.Filename)
 	if !ok {
 		result.Message = "无效的文件路径"
 		return result
 	}
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		result.Message = "无效的文件路径"
+		return result
+	}
+	root := tnt.Root()
+	if _, err := root.Stat(rel); os.IsNotExist(err) {
 		result.Success = true
 		result.Message = "文件不存在（幂等删除）"
 		logger.WarnContext(ctx, "批量删除：文件不存在（幂等删除）", "file_name", remotePath)
@@ -150,7 +169,7 @@ func (h *Handlers) processBatchDeleteItem(ctx context.Context, owner string, f B
 		return result
 	}
 	// 校验 checksum，不匹配时拒绝删除
-	if !verifyFileWithChecksum(filePath, f.Checksum) {
+	if !verifyFileWithChecksumRoot(root, rel, f.Checksum) {
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "delete", ObjectType: "file", Object: remotePath,
 			Result: AuditResultDenied, Detail: "checksum 不匹配",
@@ -159,7 +178,7 @@ func (h *Handlers) processBatchDeleteItem(ctx context.Context, owner string, f B
 		logger.WarnContext(ctx, "批量删除时 checksum 不匹配", "file_name", remotePath)
 		return result
 	}
-	if err := os.Remove(filePath); err != nil {
+	if err := root.Remove(rel); err != nil {
 		// 审查 M-4：Detail 不含 err.Error()（绝对路径暴露）。
 		logger.ErrorContext(ctx, "批量删除文件失败", "file_name", remotePath, "error", err.Error())
 		h.RecordAudit(ctx, AuditEvent{
@@ -168,7 +187,9 @@ func (h *Handlers) processBatchDeleteItem(ctx context.Context, owner string, f B
 		})
 		result.Message = "删除失败"
 	} else {
-		h.checksumStore.Delete(checksumStoreKey(owner, remotePath))
+		if cs := h.checksumStoreFor(owner); cs != nil {
+			cs.Delete(rel)
+		}
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "delete", ObjectType: "file", Object: remotePath,
 			Result: AuditResultSuccess,

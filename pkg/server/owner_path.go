@@ -84,18 +84,22 @@ func (h *Handlers) safePathFor(r *http.Request, remotePath string) string {
 	return h.safePathForOwner(ownerFromRequest(r), remotePath)
 }
 
-// resolveAndValidateFileForOwner 校验文件名并返回指定 owner 存储根下的安全路径。
-// 供批量操作（ctx 无 *http.Request）使用；校验失败返回 ("", "", false)。
-func (h *Handlers) resolveAndValidateFileForOwner(owner, filename string) (remotePath, fullPath string, ok bool) {
+// resolveAndValidateFileForOwner 校验文件名并返回指定 owner 租户 user 桶下的相对路径
+// （如 user/dir/f.txt）。供批量操作（ctx 无 *http.Request）使用；校验失败返回 ("", "", false)。
+func (h *Handlers) resolveAndValidateFileForOwner(owner, filename string) (remotePath, rel string, ok bool) {
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
 		return "", "", false
 	}
-	fullPath = h.safePathForOwner(owner, remotePath)
-	if fullPath == "" {
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
 		return "", "", false
 	}
-	return remotePath, fullPath, true
+	rel, ok = tnt.UserRel(remotePath)
+	if !ok {
+		return "", "", false
+	}
+	return remotePath, rel, true
 }
 
 // checksumStoreKey owner 非空时前缀 owner，避免跨租户同路径 checksum 冲突。

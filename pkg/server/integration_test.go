@@ -332,8 +332,8 @@ func TestDelete_ChecksumMismatch(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 checksum mismatch, got %d", resp.StatusCode)
 	}
-	// 文件应仍存在
-	if _, err := os.Stat(filepath.Join(cfgPtr.Load().UploadsDir, "safe.txt")); err != nil {
+	// 文件应仍存在（新布局：<storageRoot>/anonymous/user/safe.txt）
+	if _, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot(), anonymousOwner, "user", "safe.txt")); err != nil {
 		t.Fatalf("file should still exist after failed delete: %v", err)
 	}
 }
@@ -356,7 +356,8 @@ func TestDelete_Success(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	if _, err := os.Stat(filepath.Join(cfgPtr.Load().UploadsDir, "bye.txt")); !os.IsNotExist(err) {
+	// 文件应已从新布局移除（<storageRoot>/anonymous/user/bye.txt）
+	if _, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot(), anonymousOwner, "user", "bye.txt")); !os.IsNotExist(err) {
 		t.Fatalf("file should be removed")
 	}
 }
