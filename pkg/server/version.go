@@ -14,7 +14,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 const versionsDirName = ".__versions__"
@@ -30,36 +33,44 @@ type VersionInfo struct {
 
 // saveVersion 在上传覆盖前保存当前文件版本。
 // 返回保存的版本 ID（UnixNano），如果没有旧文件则返回 0。
-// owner 用于 checksum key 作用域隔离（跨租户同名文件版本独立）。
-func (h *Handlers) saveVersion(remotePath, uploadsDir, owner string) (int64, error) {
-	fullPath := joinSafePath(uploadsDir, remotePath)
-	if fullPath == "" {
-		return 0, fmt.Errorf("保存版本: 无效的文件路径: %s", remotePath)
+// userRel 是相对 user 桶的路径（如 dir/f.txt，无 user/ 前缀）；tnt 为请求者租户。
+// 版本文件落 version 桶（version/<userRel>/<id>），checksum key = version/<userRel>/<id>
+// （相对租户根，无 owner 前缀，per-tenant store）——消除旧 __version__ 前缀的 R4 碰撞。
+func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string) (int64, error) {
+	if tnt == nil || tnt.Root() == nil {
+		return 0, fmt.Errorf("保存版本: 租户不可用")
 	}
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+	root := tnt.Root()
+	fullRel, ok := tnt.UserRel(userRel)
+	if !ok {
+		return 0, fmt.Errorf("保存版本: 无效的文件路径: %s", userRel)
+	}
+	if _, err := root.Stat(fullRel); os.IsNotExist(err) {
 		return 0, nil // 新文件，无需保存版本
+	} else if err != nil {
+		return 0, fmt.Errorf("检查源文件失败: %w", err)
 	}
 
 	versionID := time.Now().UnixNano()
 	// 添加随机后缀（0-999），防止同一纳秒内多个请求产生冲突
 	versionID = versionID*1000 + int64(rand.IntN(1000))
-	verDir := joinSafePath(uploadsDir, filepath.Join(versionsDirName, remotePath))
-	if verDir == "" {
-		return 0, fmt.Errorf("保存版本: 无效的版本目录路径: %s/%s", versionsDirName, remotePath)
+	verDir, ok := tnt.FeatureRel("version", userRel)
+	if !ok {
+		return 0, fmt.Errorf("保存版本: 无效的版本目录路径: %s", userRel)
 	}
-	if err := os.MkdirAll(verDir, 0755); err != nil {
+	if err := root.MkdirAll(verDir, 0o755); err != nil {
 		return 0, fmt.Errorf("创建版本目录失败: %w", err)
 	}
 
-	verPath := filepath.Join(verDir, fmt.Sprintf("%d", versionID))
+	verRel := verDir + "/" + strconv.FormatInt(versionID, 10)
 
-	src, err := os.Open(fullPath)
+	src, err := root.Open(fullRel)
 	if err != nil {
 		return 0, fmt.Errorf("打开源文件失败: %w", err)
 	}
 	defer src.Close()
 
-	dst, err := os.Create(verPath)
+	dst, err := root.OpenFile(verRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		return 0, fmt.Errorf("创建版本文件失败: %w", err)
 	}
@@ -73,47 +84,52 @@ func (h *Handlers) saveVersion(remotePath, uploadsDir, owner string) (int64, err
 	hasher := sha256.New()
 	multiWriter := io.MultiWriter(dst, hasher)
 	if _, err = io.Copy(multiWriter, src); err != nil {
-		os.Remove(verPath)
+		_ = root.Remove(verRel)
 		return 0, fmt.Errorf("复制版本文件失败: %w", err)
 	}
 	checksum := hex.EncodeToString(hasher.Sum(nil))
 
-	// 写入 checksumStore（owner 作用域 key）
-	csKey := checksumStoreKey(owner, fmt.Sprintf("__version__/%s/%d", remotePath, versionID))
-	h.checksumStore.Set(csKey, checksum)
+	// 写入 checksumStore（per-tenant store，key = version/<userRel>/<id>，无 owner 前缀）
+	csKey := verRel
+	if cs := h.checksumStoreFor(owner); cs != nil {
+		cs.Set(csKey, checksum)
+	} else {
+		h.logger.Warn("per-tenant checksum store 不可用，跳过版本 checksum 记录", "file_name", userRel)
+	}
 
 	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
 	if err := dst.Sync(); err != nil {
-		os.Remove(verPath)
+		_ = root.Remove(verRel)
 		return 0, fmt.Errorf("同步版本文件失败: %w", err)
 	}
 
-	// 同步父目录确保目录元数据落盘
-	// 注意：syncParentDir 在 Windows 上可能失败（EINVAL/Access Denied），
-	// 文件已成功写入磁盘，父目录 sync 是优化而非必要步骤，不应阻断流程。
-	if err := syncParentDir(verPath); err != nil {
-		h.logger.Warn("同步版本文件父目录失败", "path", verPath, "error", err)
-	}
-
 	// 清理超出上限的旧版本
-	h.cleanupOldVersions(remotePath, uploadsDir)
+	h.cleanupOldVersions(userRel, tnt)
 
-	h.logger.Info("文件版本已保存", "file_name", remotePath, "version_id", versionID)
+	h.logger.Info("文件版本已保存", "file_name", userRel, "version_id", versionID)
 	return versionID, nil
 }
 
 // cleanupOldVersions 删除超出 max_versions 的旧版本。
-func (h *Handlers) cleanupOldVersions(remotePath, uploadsDir string) {
+// userRel 为相对 user 桶的路径；版本文件在 version/<userRel>/ 目录下。
+func (h *Handlers) cleanupOldVersions(userRel string, tnt *storage.Tenant) {
 	cfg := h.cfgPtr.Load()
 	if cfg.Versioning.MaxVersions <= 0 {
 		return
 	}
-
-	verDir := joinSafePath(uploadsDir, filepath.Join(versionsDirName, remotePath))
-	if verDir == "" {
+	if tnt == nil || tnt.Root() == nil {
 		return
 	}
-	entries, err := os.ReadDir(verDir)
+	root := tnt.Root()
+	verDir, ok := tnt.FeatureRel("version", userRel)
+	if !ok {
+		return
+	}
+	abs, ok := root.Abs(verDir)
+	if !ok {
+		return
+	}
+	entries, err := os.ReadDir(abs)
 	if err != nil {
 		return
 	}
@@ -141,8 +157,9 @@ func (h *Handlers) cleanupOldVersions(remotePath, uploadsDir string) {
 	})
 	excess := len(entries) - cfg.Versioning.MaxVersions
 	for i := range excess {
-		if err := os.Remove(filepath.Join(verDir, entries[i].Name())); err != nil {
-			h.logger.Warn("删除旧版本文件失败", "path", filepath.Join(verDir, entries[i].Name()), "error", err)
+		delRel := verDir + "/" + entries[i].Name()
+		if err := root.Remove(delRel); err != nil {
+			h.logger.Warn("删除旧版本文件失败", "path", delRel, "error", err)
 		}
 	}
 }
@@ -166,12 +183,23 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verDir := h.safePathFor(r, filepath.Join(versionsDirName, remotePath))
-	if verDir == "" {
+	tnt := h.tenantOf(r)
+	if tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
-	entries, err := os.ReadDir(verDir)
+	root := tnt.Root()
+	verDir, ok := tnt.FeatureRel("version", remotePath)
+	if !ok {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return
+	}
+	abs, ok := root.Abs(verDir)
+	if !ok {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return
+	}
+	entries, err := os.ReadDir(abs)
 	if os.IsNotExist(err) {
 		sendJSONResponse(w, map[string]any{"versions": []VersionInfo{}}, http.StatusOK)
 		return
@@ -181,6 +209,7 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	csStore := h.checksumStoreFor(ownerFromRequest(r))
 	versions := make([]VersionInfo, 0, len(entries))
 	for _, e := range entries {
 		info, err := e.Info()
@@ -198,10 +227,12 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 			Size:      info.Size(),
 			CreatedAt: time.Unix(0, versionID).Format(time.RFC3339),
 		}
-		// 尝试获取 checksum（owner 作用域 key）
-		csKey := h.checksumKeyFor(r, fmt.Sprintf("__version__/%s/%d", remotePath, versionID))
-		if cs, ok := h.checksumStore.Get(csKey); ok {
-			fi.Checksum = cs
+		// 尝试获取 checksum（per-tenant store，key = version/<rel>/<id>）
+		if csStore != nil {
+			csKey := verDir + "/" + e.Name()
+			if cs, ok := csStore.Get(csKey); ok {
+				fi.Checksum = cs
+			}
 		}
 		versions = append(versions, fi)
 	}
@@ -230,12 +261,19 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	verFile := h.safePathFor(r, filepath.Join(versionsDirName, remotePath, versionIDStr))
-	if verFile == "" {
+	tnt := h.tenantOf(r)
+	if tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
-	if _, err = os.Stat(verFile); os.IsNotExist(err) {
+	root := tnt.Root()
+	verDir, ok := tnt.FeatureRel("version", remotePath)
+	if !ok {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return
+	}
+	verRel := verDir + "/" + versionIDStr
+	if _, err = root.Stat(verRel); os.IsNotExist(err) {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "版本文件不存在: " + versionIDStr,
@@ -244,14 +282,14 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	targetPath := h.safePathFor(r, remotePath)
-	if targetPath == "" {
+	targetRel, ok := tnt.UserRel(remotePath)
+	if !ok {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
 
 	// 先保存当前版本（回滚前备份），备份失败时返回 500 拒绝执行恢复
-	if _, err = h.saveVersion(remotePath, h.ownerUploadsDir(r), ownerFromRequest(r)); err != nil {
+	if _, err = h.saveVersion(remotePath, tnt, ownerFromRequest(r)); err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "恢复前备份失败: " + versionIDStr,
@@ -262,7 +300,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	// 拷贝版本文件到目标位置
-	src, err := os.Open(verFile)
+	src, err := root.Open(verRel)
 	if err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
@@ -273,7 +311,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	}
 	defer src.Close()
 
-	dst, err := os.Create(targetPath)
+	dst, err := root.OpenFile(targetRel, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
@@ -301,8 +339,8 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 更新 checksum
-	checksum, err := FileChecksum(targetPath)
+	// 更新 checksum（per-tenant store，key = user 桶相对路径）
+	checksum, err := FileChecksumRoot(root, targetRel)
 	if err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
@@ -311,7 +349,9 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "计算文件校验和失败"}, http.StatusInternalServerError)
 		return
 	}
-	h.checksumStore.Set(h.checksumKeyFor(r, remotePath), checksum)
+	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
+		cs.Set(targetRel, checksum)
+	}
 
 	h.RecordAudit(r.Context(), AuditEvent{
 		Action: "version_restore", ObjectType: "file", Object: remotePath,
@@ -342,12 +382,19 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	verFile := h.safePathFor(r, filepath.Join(versionsDirName, remotePath, versionIDStr))
-	if verFile == "" {
+	tnt := h.tenantOf(r)
+	if tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
-	if err := os.Remove(verFile); err != nil {
+	root := tnt.Root()
+	verDir, ok := tnt.FeatureRel("version", remotePath)
+	if !ok {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return
+	}
+	verRel := verDir + "/" + versionIDStr
+	if err := root.Remove(verRel); err != nil {
 		if os.IsNotExist(err) {
 			h.RecordAudit(r.Context(), AuditEvent{
 				Action: "version_delete", ObjectType: "file", Object: remotePath,
@@ -364,9 +411,10 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 清理 checksumStore 中对应的版本记录（owner 作用域 key）
-	verKey := h.checksumKeyFor(r, fmt.Sprintf("__version__/%s/%s", remotePath, versionIDStr))
-	h.checksumStore.Delete(verKey)
+	// 清理 checksumStore 中对应的版本记录（key = version/<rel>/<id>，无 owner 前缀）
+	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
+		cs.Delete(verDir + "/" + versionIDStr)
+	}
 
 	h.RecordAudit(r.Context(), AuditEvent{
 		Action: "version_delete", ObjectType: "file", Object: remotePath,
@@ -376,32 +424,31 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 // saveVersionBeforeOverwrite 在文件即将被覆盖前保存旧版本。
-// 在 upload handler 中调用，如果版本管理启用则保存当前版本（按 owner 存储根隔离）。
+// 在 upload handler 中调用，如果版本管理启用则保存当前版本（按请求者租户根隔离）。
 func (h *Handlers) saveVersionBeforeOverwrite(r *http.Request, remotePath string) {
 	cfg := h.cfgPtr.Load()
 	if !cfg.Versioning.Enabled {
 		return
 	}
-	fullPath := h.safePathFor(r, remotePath)
-	if fullPath == "" {
+	tnt := h.tenantOf(r)
+	if tnt == nil || tnt.Root() == nil {
+		h.logger.Warn("saveVersionBeforeOverwrite: 租户不可用", "remote_path", remotePath)
+		return
+	}
+	fullRel, ok := tnt.UserRel(remotePath)
+	if !ok {
 		h.logger.Warn("saveVersionBeforeOverwrite: 无效路径", "remote_path", remotePath)
 		return
 	}
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+	if _, err := tnt.Root().Stat(fullRel); err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		h.logger.Warn("saveVersionBeforeOverwrite: 检查文件失败", "remote_path", remotePath, "error", err)
 		return
 	}
-	if _, err := h.saveVersion(remotePath, h.ownerUploadsDir(r), ownerFromRequest(r)); err != nil {
+	userRel := strings.TrimPrefix(fullRel, tnt.UserRoot()+"/")
+	if _, err := h.saveVersion(userRel, tnt, ownerFromRequest(r)); err != nil {
 		h.logger.Warn("保存文件版本失败", "file_name", remotePath, "error", err)
 	}
-}
-
-// syncParentDir 对指定文件/目录的父目录执行 fsync，确保目录元数据落盘。
-func syncParentDir(path string) error {
-	parent := filepath.Dir(path)
-	f, err := os.Open(parent)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
 }

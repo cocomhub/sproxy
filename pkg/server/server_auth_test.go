@@ -29,13 +29,23 @@ func formatSigAuth(h sproxysig.Header) string {
 		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
 }
 
+// testNonceCounter 为测试签名生成全局唯一 nonce 的递增序号。
+var testNonceCounter atomic.Uint64
+
+// testNonce 生成全局唯一 nonce（UnixNano + 递增序号）：纯 UnixNano 在紧凑的连续
+// 签名调用间可能相同（时钟 tick 未前进），服务端防重放池会把第二个请求判为 replay
+// 返回 401（实测 flaky）。加序号后同一进程内恒唯一。
+func testNonce() string {
+	return fmt.Sprintf("test-nonce-%d-%d", time.Now().UnixNano(), testNonceCounter.Add(1))
+}
+
 // signRequest 用给定 AK/SK 给请求打上合法 SproxySig 头（无 body）。
 func signRequest(r *http.Request, ak, sk string) {
 	now := time.Now()
 	h := sproxysig.Header{
 		Version: sproxysig.Version, AK: ak,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
-		Nonce:      fmt.Sprintf("test-nonce-%d", now.UnixNano()),
+		Nonce:      testNonce(),
 		BodySHA256: sproxysig.EmptyBodyHash(),
 	}
 	h.Sig = sproxysig.Sign(sk, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
@@ -49,7 +59,7 @@ func signTunnelRequest(r *http.Request, ak, sk string) {
 	h := sproxysig.Header{
 		Version: sproxysig.Version, AK: ak,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
-		Nonce:      fmt.Sprintf("test-nonce-%d", now.UnixNano()),
+		Nonce:      testNonce(),
 		BodySHA256: sproxysig.UnsignedBody,
 	}
 	h.Sig = sproxysig.Sign(sk, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)

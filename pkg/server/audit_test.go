@@ -88,7 +88,7 @@ func signBodyRequest(r *http.Request, ak, sk string, body []byte) {
 	h := sproxysig.Header{
 		Version: sproxysig.Version, AK: ak,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
-		Nonce:      fmt.Sprintf("test-nonce-%d", now.UnixNano()),
+		Nonce:      testNonce(),
 		BodySHA256: sha256hex(body),
 	}
 	h.Sig = sproxysig.Sign(sk, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)

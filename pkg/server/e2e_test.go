@@ -36,13 +36,18 @@ func newAuthedClient(url string) *client.FileClient {
 	return client.NewFileClient(url, client.WithAccessKey(e2eAK, e2eSK))
 }
 
+// e2eNonceCounter 为 E2E 签名生成全局唯一 nonce 的递增序号（server_test 包与
+// package server 的 testNonce 隔离；各自的服务端 nonce 池独立）。
+var e2eNonceCounter atomic.Uint64
+
 // signE2ERequest 给裸请求打上合法 SproxySig 头（空 body：body_sha256=sha256("")）。
+// nonce 用 UnixNano + 序号保证同一时钟 tick 内多次签名不重复（防重放池误判 401）。
 func signE2ERequest(r *http.Request) {
 	now := time.Now()
 	h := sproxysig.Header{
 		Version: sproxysig.Version, AK: e2eAK,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
-		Nonce:      fmt.Sprintf("test-nonce-%d", now.UnixNano()),
+		Nonce:      fmt.Sprintf("test-nonce-%d-%d", now.UnixNano(), e2eNonceCounter.Add(1)),
 		BodySHA256: sproxysig.EmptyBodyHash(),
 	}
 	h.Sig = sproxysig.Sign(e2eSK, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
