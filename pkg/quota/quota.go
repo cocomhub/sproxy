@@ -158,17 +158,6 @@ func (p *Pool) adjustUp(diff int64) {
 	}
 }
 
-// adjustTo 把本池已确认占用更新为 next，并向父链传播实际增量（next − 调整前占用）。
-func (p *Pool) adjustTo(next int64) {
-	p.mu.Lock()
-	delta := next - p.committed
-	p.committed = next
-	p.mu.Unlock()
-	if p.parent != nil {
-		p.parent.adjustUp(delta)
-	}
-}
-
 // available 计算可用额度：maxBytes<=0 返回 MaxInt64，否则 maxBytes−(committed+reserved)，负值归 0。
 func (p *Pool) available() int64 {
 	p.mu.RLock()
@@ -222,12 +211,11 @@ func (s *Scope) ReleaseUsage(n int64) {
 	s.pool.releaseCommittedUp(nonNeg(n))
 }
 
-// Adjust 调整已确认占用（覆盖写同文件尺寸变化场景）。
-// 语义：把本作用域已确认占用更新为 next（以 next 为最终占用），
-// 父链按实际增量（next − 调整前占用）同步，保证父链聚合与子作用域一致。
-// prev 为调用方声明的旧占用，仅用于对齐调用契约，不参与计算。
+// Adjust 调整已确认占用（覆盖写同文件尺寸变化场景，diff 语义）。
+// committed += (next − prev)，diff 可正可负，沿父链同步；不经过 reserved。
+// 多文件桶下仅修正被覆盖文件的尺寸变化，不丢弃其它文件占用。
 func (s *Scope) Adjust(prev, next int64) {
-	s.pool.adjustTo(nonNeg(next))
+	s.pool.adjustUp(next - prev)
 }
 
 // Usage 返回已确认占用。
