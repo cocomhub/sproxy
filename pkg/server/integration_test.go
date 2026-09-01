@@ -145,10 +145,10 @@ func TestUpload_PathTraversal(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200 (Go >=1.26 sanitized) or 400 (Go <1.26), got %d: %s", status, respBody)
 	}
-	// 验证文件名已被清洗（不会是 ../escape.txt）
-	uploadsDir := cfgPtr.Load().UploadsDir
-	if _, err := os.Stat(filepath.Join(uploadsDir, "escape.txt")); os.IsNotExist(err) {
-		t.Fatalf("expected file to be saved as escape.txt (sanitized)")
+	// 验证文件名已被清洗（不会是 ../escape.txt），并落新布局 <root>/anonymous/user/
+	root := cfgPtr.Load().StorageRoot()
+	if _, err := os.Stat(filepath.Join(root, anonymousOwner, "user", "escape.txt")); os.IsNotExist(err) {
+		t.Fatalf("expected file to be saved as anonymous/user/escape.txt (sanitized)")
 	}
 }
 
@@ -172,15 +172,16 @@ func TestUpload_ChecksumMismatch(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400 checksum mismatch, got %d", status)
 	}
-	// 确认临时文件已清理
-	if dents, _ := os.ReadDir(cfgPtr.Load().UploadsDir); dents != nil {
+	// 确认临时文件已清理（新布局 <root>/anonymous/user/）
+	chkDir := filepath.Join(cfgPtr.Load().StorageRoot(), anonymousOwner, "user")
+	if dents, _ := os.ReadDir(chkDir); dents != nil {
 		for _, de := range dents {
 			if strings.HasPrefix(de.Name(), "bad.txt.tmp") {
 				t.Fatalf("temp file should have been cleaned up: %s", de.Name())
 			}
 		}
 	}
-	finalPath := filepath.Join(cfgPtr.Load().UploadsDir, "bad.txt")
+	finalPath := filepath.Join(chkDir, "bad.txt")
 	if _, err := os.Stat(finalPath); err == nil {
 		t.Fatalf("final file should not exist: %s", finalPath)
 	}
@@ -233,16 +234,16 @@ func TestUpload_ToSubDirectory(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", status, respBody)
 	}
 
-	// 验证文件保存在子目录下，而非根目录
-	uploadsDir := cfgPtr.Load().UploadsDir
-	savedPath := filepath.Join(uploadsDir, "sub/dir/test.txt")
-	savedPath2 := filepath.Join(uploadsDir, "sub", "dir", "test.txt")
+	// 验证文件保存在子目录下，而非根目录（新布局 <root>/anonymous/user/sub/dir/test.txt）
+	uploadsDir := cfgPtr.Load().StorageRoot()
+	savedPath := filepath.Join(uploadsDir, anonymousOwner, "user", "sub/dir/test.txt")
+	savedPath2 := filepath.Join(uploadsDir, anonymousOwner, "user", "sub", "dir", "test.txt")
 	if _, err := os.Stat(savedPath); os.IsNotExist(err) {
 		if _, err2 := os.Stat(savedPath2); os.IsNotExist(err2) {
-			// 确认没有存到根目录
-			rootPath := filepath.Join(uploadsDir, "test.txt")
+			// 确认没有存到 user 根目录
+			rootPath := filepath.Join(uploadsDir, anonymousOwner, "user", "test.txt")
 			if _, err3 := os.Stat(rootPath); err3 == nil {
-				t.Fatal("文件被错误地保存到了根目录而非子目录")
+				t.Fatal("文件被错误地保存到了 user 根目录而非子目录")
 			}
 			t.Fatalf("文件未在子目录中找到（checked: %s, %s）", savedPath, savedPath2)
 		}

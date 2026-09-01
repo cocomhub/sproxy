@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // hashPool 复用 SHA-256 hash 对象，减少每次上传的分配。
@@ -59,17 +60,21 @@ func (h *Handlers) parseUploadMultipart(w http.ResponseWriter, r *http.Request, 
 }
 
 // setUploadResponseHeaders 设置上传成功后的响应头（checksum、mtime）。
-// checksum key 按 owner 作用域隔离。
-func (h *Handlers) setUploadResponseHeaders(w http.ResponseWriter, r *http.Request, remotePath, filePath, serverChecksum string, logger *slog.Logger) {
+// checksum 写入 per-tenant store，key = 租户根内相对路径 rel（无 owner 前缀）。
+func (h *Handlers) setUploadResponseHeaders(w http.ResponseWriter, r *http.Request, root *storage.Root, remotePath, rel, serverChecksum string, logger *slog.Logger) {
 	w.Header().Set(headerFileChecksum, serverChecksum)
-	h.checksumStore.Set(h.checksumKeyFor(r, remotePath), serverChecksum)
+	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
+		cs.Set(rel, serverChecksum)
+	} else {
+		logger.WarnContext(r.Context(), "per-tenant checksum store 不可用，跳过记录", "file_name", remotePath)
+	}
 
 	// 处理文件修改时间
 	if mtimeStr := r.Header.Get(headerFileMTime); mtimeStr != "" {
 		mtimeInt, err := strconv.ParseInt(mtimeStr, 10, 64)
 		if err == nil && mtimeInt > 0 {
 			modTime := time.Unix(0, mtimeInt)
-			if err := os.Chtimes(filePath, modTime, modTime); err != nil {
+			if err := root.Chtimes(rel, modTime, modTime); err != nil {
 				logger.WarnContext(r.Context(), "设置文件时间戳失败", "file_name", remotePath, "error", err)
 			}
 		}
@@ -90,20 +95,28 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	if remotePathStr == "" {
 		remotePathStr = handler.Filename
 	}
-	remotePath, filePath, ok := h.resolveFilePath(w, r, remotePathStr)
+	remotePath, rel, ok := h.resolveFilePath(w, r, remotePathStr)
 	if !ok {
 		return
 	}
 	logger.DebugContext(r.Context(), "上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
 
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+	tnt := h.tenantOf(r)
+	if tnt == nil || tnt.Root() == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return
+	}
+	root := tnt.Root()
+
+	if err := root.MkdirAll(filepath.Dir(rel), 0755); err != nil {
 		logger.ErrorContext(r.Context(), "创建目录失败", "error", err.Error())
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
 		return
 	}
 
-	// 并发上传防护：防止同一文件被多个上传请求同时写入导致 OOM（key 按 owner 隔离）
-	upKey := ownerScopedUploadKey(ownerFromRequest(r), remotePath)
+	// 并发上传防护：防止同一文件被多个上传请求同时写入导致 OOM。
+	// key 带租户前缀（server 级共享 map，防跨租户同 rel 碰撞）。
+	upKey := tnt.ID + "\x00" + rel
 	if _, loaded := h.uploadingFiles.LoadOrStore(upKey, "upload"); loaded {
 		logger.WarnContext(r.Context(), "文件正在上传中，拒绝并发上传", "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在上传中"}, http.StatusConflict)
@@ -112,12 +125,12 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	defer h.uploadingFiles.Delete(upKey)
 
 	// 重复检测与版本管理
-	if h.handleDuplicateFile(w, r, filePath, expectedChecksum, remotePath) {
+	if h.handleDuplicateFile(w, r, root, rel, expectedChecksum, remotePath) {
 		return
 	}
 
 	// 原子写入 + 流式哈希
-	serverChecksum, _, err := writeFileAtomically(r.Context(), filePath, file)
+	serverChecksum, _, err := writeFileAtomicallyRoot(r.Context(), root, rel, file)
 	if err != nil {
 		logger.ErrorContext(r.Context(), "保存文件失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
@@ -125,14 +138,14 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if serverChecksum != expectedChecksum {
-		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomically 清理）
-		_ = os.Remove(filePath)
+		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomicallyRoot 清理）
+		_ = root.Remove(rel)
 		logger.WarnContext(r.Context(), "文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件 SHA-256 校验失败"}, http.StatusBadRequest)
 		return
 	}
 
-	h.setUploadResponseHeaders(w, r, remotePath, filePath, serverChecksum, logger)
+	h.setUploadResponseHeaders(w, r, root, remotePath, rel, serverChecksum, logger)
 
 	sendJSONResponse(w, UploadResponse{
 		Success:  true,
@@ -144,8 +157,9 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// writeFileAtomically 将 src 原子写入 dstPath，同时计算 SHA-256 哈希。
+// writeFileAtomically 将 src 原子写入 dstPath（绝对路径），同时计算 SHA-256 哈希。
 // 先写到唯一临时文件，再 os.Rename，防止部分写入与并发冲突。
+// 保留供 chunked_upload 使用（任务 12 迁移到 Tenant chunk 桶后移除）；upload 链路用 writeFileAtomicallyRoot。
 func writeFileAtomically(ctx context.Context, dstPath string, src io.Reader) (checksum string, written int64, err error) {
 	tmpFile, err := os.CreateTemp(filepath.Dir(dstPath), filepath.Base(dstPath)+".tmp.*")
 	if err != nil {
@@ -177,9 +191,70 @@ func writeFileAtomically(ctx context.Context, dstPath string, src io.Reader) (ch
 	return checksum, written, nil
 }
 
-// resolveFilePath 校验 filename 并生成请求者 owner 存储根下完整路径。
-// 返回已验证的相对路径和绝对路径。校验失败时返回 false。
-func (h *Handlers) resolveFilePath(w http.ResponseWriter, r *http.Request, filename string) (remotePath, fullPath string, ok bool) {
+// writeFileAtomicallyRoot 将 src 原子写入租户根内 rel 路径，同时计算 SHA-256 哈希。
+// 在目标同目录创建唯一临时文件（root.OpenFile O_EXCL），写入完成后 root.Rename
+// 原子替换，防止部分写入与并发冲突。全程 root 相对，不派生绝对路径（防符号链接逃逸）。
+func writeFileAtomicallyRoot(ctx context.Context, root *storage.Root, rel string, src io.Reader) (checksum string, written int64, err error) {
+	dir := filepath.Dir(rel)
+	base := filepath.Base(rel)
+	tmpRel := filepath.Join(dir, base+".tmp."+fmt.Sprintf("%d", time.Now().UnixNano()))
+	tmpFile, err := root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", 0, fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	defer func() { _ = root.Remove(tmpRel) }()
+
+	h, ok := hashPool.Get().(hash.Hash)
+	if !ok {
+		return "", 0, fmt.Errorf("hashPool 返回非 hash.Hash 类型")
+	}
+	hash := h
+	hash.Reset()
+	defer hashPool.Put(hash)
+	mw := io.MultiWriter(tmpFile, hash)
+	written, err = copyWithContext(mw, src, ctx)
+	if err != nil {
+		tmpFile.Close()
+		return "", written, fmt.Errorf("写入临时文件失败: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return "", written, fmt.Errorf("关闭临时文件失败: %w", err)
+	}
+	checksum = hex.EncodeToString(hash.Sum(nil))
+	if err := atomicRenameRoot(root, tmpRel, rel); err != nil {
+		return checksum, written, fmt.Errorf("重命名临时文件失败: %w", err)
+	}
+	return checksum, written, nil
+}
+
+// atomicRenameRoot 在 storage.Root 内原子重命名 srcRel → dstRel。
+// 与 atomicRename 对齐：快速路径直接 Rename，失败（Windows 并发场景）先删除目标
+// 再重命名，并使用短退避重试以应对 Windows 句柄释放延迟。
+func atomicRenameRoot(root *storage.Root, srcRel, dstRel string) error {
+	// 快速路径：直接重命名
+	if err := root.Rename(srcRel, dstRel); err == nil {
+		return nil
+	}
+	// 慢速路径：删除目标文件，然后重命名临时文件
+	// 使用短退避重试，解决 Windows 上并发 Rename 导致的"Access is denied"
+	const maxAttempts = 5
+	const baseDelay = 2 * time.Millisecond
+	for i := range maxAttempts {
+		_ = root.Remove(dstRel)
+		if err := root.Rename(srcRel, dstRel); err == nil {
+			return nil
+		} else if i == maxAttempts-1 {
+			return fmt.Errorf("重命名失败（已达最大重试次数 %d）: %w", maxAttempts, err)
+		}
+		time.Sleep(baseDelay << i)
+	}
+	return nil
+}
+
+// resolveFilePath 校验 filename 并映射到请求者租户的 user 桶相对路径。
+// 返回已验证的协议路径（remotePath）与租户根内相对路径（rel，如 user/dir/f.txt）。
+// 校验失败时返回 false。
+func (h *Handlers) resolveFilePath(w http.ResponseWriter, r *http.Request, filename string) (remotePath, rel string, ok bool) {
 	remotePath, err := ValidateFilePath(filename)
 	if err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
@@ -192,23 +267,28 @@ func (h *Handlers) resolveFilePath(w http.ResponseWriter, r *http.Request, filen
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件名不能访问服务端内部目录（.__ 前缀为服务端保留）"}, http.StatusBadRequest)
 		return "", "", false
 	}
-	fullPath = h.safePathFor(r, remotePath)
-	if fullPath == "" {
+	tnt := h.tenantOf(r)
+	if tnt == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return "", "", false
 	}
-	return remotePath, fullPath, true
+	rel, ok = tnt.UserRel(remotePath)
+	if !ok {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return "", "", false
+	}
+	return remotePath, rel, true
 }
 
 // handleDuplicateFile 检查文件是否存在，处理重复上传和版本管理逻辑。
-// 返回 true 表示已处理（调用方应 return）。
-func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, r *http.Request, filePath, expectedChecksum, remotePath string) bool {
+// 返回 true 表示已处理（调用方应 return）。root 为请求者租户根，rel 为租户根内相对路径。
+func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, r *http.Request, root *storage.Root, rel, expectedChecksum, remotePath string) bool {
 	ctx := r.Context()
-	stat, statErr := os.Stat(filePath)
+	stat, statErr := root.Stat(rel)
 	if statErr != nil {
 		return false // 文件不存在，继续正常上传
 	}
-	if verifyFileWithChecksum(filePath, expectedChecksum) {
+	if verifyFileWithChecksumRoot(root, rel, expectedChecksum) {
 		// 幂等上传：文件已存在且 checksum 匹配，直接返回成功（不保存版本）
 		w.Header().Set(headerFileChecksum, expectedChecksum)
 		sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件已上传成功, size: %d", stat.Size()), Checksum: expectedChecksum}, http.StatusOK)
@@ -234,7 +314,7 @@ func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, r *http.Request, f
 		Result: AuditResultDenied, Detail: "文件已存在且 checksum 不匹配（versioning 关闭，拒绝覆盖）",
 	})
 	// 附带服务端文件的实际 checksum，方便客户端决策
-	if serverCS, csErr := FileChecksum(filePath); csErr == nil {
+	if serverCS, csErr := FileChecksumRoot(root, rel); csErr == nil {
 		sendJSONResponse(w, UploadResponse{
 			Success:  false,
 			Message:  "文件已存在，但校验失败",
