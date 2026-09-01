@@ -162,6 +162,56 @@ func TestCreateTask_AbsolutePath(t *testing.T) {
 	}
 }
 
+// TestValidateSyncPath 锁定 validateSyncPath 在布局迁移后的真实语义：
+// 仍拒绝路径穿越/绝对路径/盘符/空字节；不再拒绝功能桶名与 .__ 前缀段（用户路径在
+// user 桶内与功能桶物理隔离，审查 I-3 的原 .__ 拒绝逻辑已随迁移删除）。"." 段按
+// 当前实现不被特殊拒绝（非 ".."），测试锁定实际行为。
+func TestValidateSyncPath(t *testing.T) {
+	t.Run("Rejected", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, p string
+		}{
+			{"traversal single", ".."},
+			{"traversal nested", "a/../b"},
+			{"traversal deep", "a/../../b"},
+			{"traversal leading", "../etc"},
+			{"traversal backslash", `..\etc`},
+			{"absolute posix", "/abs"},
+			{"absolute drive", "C:\\abs"},
+			{"absolute drive slash", "C:/abs"},
+			{"nul byte", "fi\x00le"},
+		} {
+			if err := validateSyncPath(tc.p, "src"); err == nil {
+				t.Errorf("%s: %q 应被拒绝", tc.name, tc.p)
+			}
+		}
+	})
+
+	t.Run("Accepted", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, p string
+		}{
+			{"fs root", ""},
+			{"plain file", "dir/file.txt"},
+			{"subdir", "a/b/c.txt"},
+			{"with spaces", "sub dir/file.txt"},
+			{"dot segment", "./meta/x"}, // "." 段不特殊拒绝（非 ".."），锁定实际行为
+			{"bucket user", "user"},
+			{"bucket meta", "meta"},
+			{"bucket cloud", "cloud"},
+			{"bucket archive", "archive"},
+			{"bucket chunk", "chunk"},
+			{"bucket version", "version"},
+			{"legacy magic prefix", ".__foo"},
+			{"legacy magic nested", "dir/.__versions__/x"},
+		} {
+			if err := validateSyncPath(tc.p, "dst"); err != nil {
+				t.Errorf("%s: %q 不应被拒绝，got %v", tc.name, tc.p, err)
+			}
+		}
+	})
+}
+
 func TestCreateTask_Dedup(t *testing.T) {
 	mgr := newTestManager(t, nil, nil, nil, nil)
 	req := CreateRequest{Direction: "push", Remote: "r1", Src: "dir", Dst: "dstdir", Recursive: true}

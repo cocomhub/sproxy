@@ -70,8 +70,8 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	defer cleanupTransports()
 
 	// 本地端（push 的 src / pull 的 dst）按任务 owner 解析到租户 user 根（<root>/<tenant>/user）。
-	// 布局迁移后由注入的 TenantRoot 解析器派生（与 pkg/server 租户布局单一来源，消除
-	// validOwnerName 双端漂移）；owner 由服务端派生（可信），解析失败 fail-closed。
+	// 布局迁移后由注入的 TenantRoot 解析器派生（与 pkg/server 租户布局单一来源，owner
+	// 校验集中到 pkg/storage，消除双端漂移）；owner 由服务端派生（可信），解析失败 fail-closed。
 	localRoot, err := e.userRootFor(task.Owner)
 	if err != nil {
 		return nil, err
