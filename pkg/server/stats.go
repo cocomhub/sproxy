@@ -55,15 +55,23 @@ type StatsResponse struct {
 // 文件数/总大小通过轻量 WalkDir 遍历获取（仅统计用户文件，跳过内部目录），确保实时准确性。
 // 各分类存储使用量由 StorageManager 缓存提供（已由定期扫描校准），避免每次请求遍历全目录计算分类大小。
 // 首次扫描完成前，storageMgr 相关字段返回 503 Service Unavailable。
+//
+// 多租户（审查 M5）：owner 非空（普通认证用户）只统计自己 owner 子目录，避免跨租户
+// 元数据泄露（他人文件数/大小）；空 owner（admin/未认证）仍统计全局总目录（运维指标）。
 func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 	m := h.metrics
 
 	// 遍历目录统计文件数和总大小，跳过版本目录、分块目录、checksum 文件
 	// 注意：内部目录通过 filepath.SkipDir 跳过，无需再用 strings.Contains 二次过滤
+	owner := ActorFrom(r.Context())
+	root := cfg.UploadsDir
+	if owner != "" {
+		root = h.ownerUploadsDirFor(owner)
+	}
 	totalFiles := 0
 	var totalSize int64
-	_ = filepath.WalkDir(cfg.UploadsDir, func(path string, d os.DirEntry, err error) error {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
 			return nil

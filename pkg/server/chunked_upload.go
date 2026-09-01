@@ -128,6 +128,12 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "缺少 upload_id"}, http.StatusBadRequest)
 		return
 	}
+	// 审查 F4：upload_id 不能含路径分隔符 / ".." / ".__" 前缀等——否则可构造
+	// 跨 owner 前缀会话（"ak-A/evil"）让认证方接管，或使会话目录穿越 .__chunked__。
+	if !validUploadID(req.UploadID) {
+		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "无效的 upload_id"}, http.StatusBadRequest)
+		return
+	}
 	if _, err := ValidateFilePath(req.Filename); err != nil {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return

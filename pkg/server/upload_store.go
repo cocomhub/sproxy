@@ -770,6 +770,13 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 	// 按 uploadID 查找
 	if uploadID != "" {
 		if s, ok := us.sessions[uploadID]; ok && !s.Completed {
+			// 审查 F4：按 key 复用前强制校验 filename/checksum/大小一致——否则攻击者可
+			// 预置同 key 会话（伪造 owner 前缀或碰撞）劫持本次续传，篡改目标文件名。
+			if s.Filename != filename || s.FileChecksum != fileChecksum || s.TotalSize != totalSize {
+				us.logger.Warn("upload_id 冲突且元数据不符，拒绝复用旧会话",
+					"upload_id", uploadID, "old_file", s.Filename, "new_file", filename)
+				return nil, false, fmt.Errorf("upload_id 已存在但文件元数据不一致")
+			}
 			us.logger.Info("找到可续传的 session", "upload_id", s.UploadID, "file_name", s.Filename)
 			return copySession(s), true, nil
 		}

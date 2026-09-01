@@ -26,6 +26,49 @@ const syncDirName = ".__sync__"
 // syncReservePlaceholder 未知大小同步任务的本地存储占位大小（1 GiB，对齐 cloud 下载占位）。
 const syncReservePlaceholder = int64(1024 * 1024 * 1024)
 
+// OwnerFileRoot 返回 owner 的本地同步文件根：<base>/<owner>；owner 非法时回退 base。
+// 多租户隔离：同步任务的文件数据（pull 落盘 / push 源）必须落在请求者 owner 子目录下，
+// 与 pkg/server 的 uploadsDir/<owner>/ 布局一致（审查 F1：executor 原先直绑 uploadsDir 根）。
+// owner 由服务端从认证上下文派生（AK / API key 名），此处校验为纵深防御。
+func OwnerFileRoot(base, owner string) string {
+	if !validOwnerName(owner) {
+		return base
+	}
+	return filepath.Join(base, owner)
+}
+
+// validOwnerName 校验 owner 是否可安全作为本地文件根下的单路径段。
+// 对齐 pkg/server.owner_path.validOwnerDirName：拒绝空、. / ..、含路径分隔符、
+// .__ 前缀（服务端内部目录约定）、Windows 非法字符与保留设备名。
+// 保持与 pkg/server 同一条规则，避免双端漂移（两处为同一项目内独立包，无法 import 复用）。
+func validOwnerName(owner string) bool {
+	if owner == "" || owner == "." || owner == ".." {
+		return false
+	}
+	if strings.ContainsAny(owner, `/\`) {
+		return false
+	}
+	if strings.HasPrefix(owner, ".__") {
+		return false
+	}
+	if strings.ContainsAny(owner, `<>:"|?*`) {
+		return false
+	}
+	upper := strings.ToUpper(owner)
+	if upper == "CON" || upper == "NUL" || upper == "PRN" || upper == "AUX" {
+		return false
+	}
+	if strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT") {
+		if len(upper) > 3 {
+			// COM1-9 / LPT1-9（含后续字符如 COM10 不保留，仅精确 1-9）
+			if upper[3] >= '1' && upper[3] <= '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // ErrStorageFull 存储配额不足（对齐 pkg/server.ErrStorageFull 语义）。
 var ErrStorageFull = errors.New("storage quota exceeded")
 

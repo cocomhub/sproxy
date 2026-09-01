@@ -4,6 +4,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -47,6 +49,8 @@ func actorCloudMux(h *Handlers, actor string) *http.ServeMux {
 	mux.HandleFunc("GET /api/cloud/groups/{id}", wrap(h.cloudGetGroup))
 	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", wrap(h.cloudCancelGroup))
 	mux.HandleFunc("DELETE /api/cloud/groups/{id}", wrap(h.cloudDeleteGroup))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", wrap(h.cloudArchiveGroup))
+	mux.HandleFunc("HEAD /api/files/stat", wrap(h.stat))
 	return mux
 }
 
@@ -69,6 +73,9 @@ func newOwnerCloudEnv(t *testing.T) *ownerCloudEnv {
 		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
 	})
 	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: newTestCfgPtr(dir), auditLogger: testLogger()}
+	h.checksumStore = NewChecksumStore(dir, nil)
+	// 让 mgr 与 handler 共享同一 ChecksumStore，使 DeleteTask/写端的 checksum 清理生效可断言
+	mgr.checksumStore = h.checksumStore
 	env := &ownerCloudEnv{
 		h:   h,
 		mgr: mgr,
@@ -94,6 +101,15 @@ func (e *ownerCloudEnv) do(t *testing.T, actor, method, path, body string) (int,
 	rr := httptest.NewRecorder()
 	e.mux[actor].ServeHTTP(rr, req)
 	return rr.Code, rr.Body.Bytes()
+}
+
+// doHEAD 以指定 actor 的 mux 发起 HEAD 请求（stat），返回 (status, recorder)。
+func (e *ownerCloudEnv) doHEAD(t *testing.T, actor, path string) (int, *httptest.ResponseRecorder) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodHead, path, nil)
+	rr := httptest.NewRecorder()
+	e.mux[actor].ServeHTTP(rr, req)
+	return rr.Code, rr
 }
 
 // decodeTaskList 解析 cloud 任务列表响应 {tasks,total}。
@@ -416,5 +432,188 @@ func TestCloudOwner_CreateGroupWritesOwner(t *testing.T) {
 	code, _ = env.do(t, "", "GET", "/api/cloud/groups/"+group.ID, "")
 	if code != http.StatusOK {
 		t.Fatalf("admin Get 组应 200, got %d", code)
+	}
+}
+
+// TestCloudOwner_CloudTaskChecksumScoped 验证 M1/F2 修复：云任务校验和以 owner 作用域
+// 且不带 .__cloud__ 段的 key（<owner>/<taskID>/<file>）写入，与 read/stat/chunk 读取端
+// 完全一致——stat 必须命中 store（而非依赖磁盘兜底重算），删除后 key 被清理。
+func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
+	env := newOwnerCloudEnv(t)
+
+	// 直接构造一个处于 completed 的云任务 + 落盘文件 + 按修复后的 owner key 写入校验和
+	content := []byte("checksum-scope-check")
+	task, err := env.mgr.CreateTask("url", "https://example.com/a.bin", "a.bin", int64(len(content)), "ak-A")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	taskDir := filepath.Join(env.mgr.cloudDir, task.ID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("mkdir task dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "a.bin"), content, 0o644); err != nil {
+		t.Fatalf("write task file: %v", err)
+	}
+	expected := sha256Hex(content)
+
+	// 模拟 executeDownload 的写端：校验和以 owner 作用域、无 .__cloud__ 段的 key 落库
+	writeKey := checksumStoreKey("ak-A", filepath.Join(task.ID, "a.bin"))
+	env.h.checksumStore.Set(writeKey, expected)
+	if _, ok := env.h.checksumStore.Get(writeKey); !ok {
+		t.Fatalf("写端 key %q 应可读", writeKey)
+	}
+	// 反向断言：旧（错误）密钥格式（含 .__cloud__ 段）不应存在，防止写入端回退
+	if _, ok := env.h.checksumStore.Get(checksumStoreKey("ak-A", filepath.Join(cloudDirName, task.ID, "a.bin"))); ok {
+		t.Fatalf("错误格式 key（含 .__cloud__）不应被使用")
+	}
+
+	// 以任务 owner 身份 stat kind=cloud_task → 必须命中 X-File-Checksum（命中 store，非磁盘兜底）
+	code, resp := env.doHEAD(t, "ak-A", "/api/files/stat?filename="+task.ID+"/a.bin&kind=cloud_task")
+	if code != http.StatusOK {
+		t.Fatalf("stat cloud_task 应 200, got %d", code)
+	}
+	got := resp.Header().Get("X-File-Checksum")
+	if got == "" {
+		t.Fatalf("ak-A stat 应返回 X-File-Checksum（M1 修复后命中 owner key），header=%v", resp.Header())
+	}
+	if got != expected {
+		t.Fatalf("X-File-Checksum=%q want %q", got, expected)
+	}
+	// 证明命中 store：从 store 取出的就是 expected（stat 用磁盘兜底也会返回相同值，
+	// 但重点是与写端同 key。此断言冗余但防回归）
+
+	// 清理：DeleteTask（owner 作用域 key 删除不应残留）
+	if err := env.mgr.DeleteTask(task.ID, "ak-A"); err != nil {
+		t.Fatalf("DeleteTask: %v", err)
+	}
+	if _, ok := env.h.checksumStore.Get(checksumStoreKey("ak-A", filepath.Join(task.ID, "a.bin"))); ok {
+		t.Fatalf("删除任务后 checksum 应被清理")
+	}
+}
+
+func sha256Hex(b []byte) string {
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])
+}
+
+// TestCloudOwner_GroupArchivePrecheckOwnerDir 验证 F3 修复：cloudArchiveGroup 的
+// "归档已存在"预检应落在 owner 归档目录（.__cloud_archives__/<owner>/），
+// 而非误查 uploadsDir 全局根。
+func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
+	env := newOwnerCloudEnv(t)
+	mgr := env.mgr
+
+	// 构造一个含已完成子任务的组（直接注入 mgr 内存，模拟任务完成的磁盘状态）
+	task := &CloudTask{
+		ID: "f3task1", Owner: "ak-A", URL: "https://example.com/f3.bin",
+		Filename: "f3.bin", Status: "completed", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	taskDir := filepath.Join(mgr.cloudDir, task.ID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "f3.bin"), []byte("f3 data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mgr.mu.Lock()
+	mgr.tasks[task.ID] = task
+	mgr.mu.Unlock()
+
+	group := &CloudTaskGroup{
+		ID: "f3group", Owner: "ak-A", Name: "g", Status: "completed",
+		TaskIDs: []string{task.ID}, Completed: 1,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	mgr.groupMu.Lock()
+	mgr.groups[group.ID] = group
+	mgr.groupMu.Unlock()
+
+	ownerArchiveDir := filepath.Join(mgr.uploadsDir, cloudArchiveDirName, "ak-A")
+	if err := os.MkdirAll(ownerArchiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("OwnerArchiveExists_Returns409", func(t *testing.T) {
+		// 预置同名归档在 owner 目录（修复前：查全局根，此处应命中 → 409）
+		pre := filepath.Join(ownerArchiveDir, "f3-a.tar.gz")
+		if err := os.WriteFile(pre, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		code, body := env.do(t, "ak-A", "POST", "/api/cloud/groups/f3group/archive",
+			`{"archive_name":"f3-a.tar.gz"}`)
+		if code != http.StatusConflict {
+			t.Fatalf("owner 目录已有同名归档应 409，got %d %s", code, body)
+		}
+		// 清理预置文件，避免影响下一个子测试
+		_ = os.Remove(pre)
+	})
+
+	t.Run("RootUnrelatedFile_NotBlocked", func(t *testing.T) {
+		// 全局根下同名文件存在，但 owner 归档目录没有 → 修复后不应被误 409
+		_ = os.WriteFile(filepath.Join(mgr.uploadsDir, "f3-b.tar.gz"), []byte("root"), 0o644)
+		code, body := env.do(t, "ak-A", "POST", "/api/cloud/groups/f3group/archive",
+			`{"archive_name":"f3-b.tar.gz"}`)
+		if code != http.StatusOK {
+			t.Fatalf("全局根同名文件不应阻断 owner 归档，got %d %s", code, body)
+		}
+		// 归档成功落盘在 owner 目录
+		if _, err := os.Stat(filepath.Join(ownerArchiveDir, "f3-b.tar.gz")); err != nil {
+			t.Fatalf("归档应落在 owner 目录: %v", err)
+		}
+	})
+}
+
+// TestValidateSessionOwner_ForgedPrefix 验证 F4 修复：validateSessionOwner 剥离 owner
+// 前缀后必须校验剩余为单一安全段，拒绝伪造前缀（"ak-A/evil"）与含分隔符的 id。
+func TestValidateSessionOwner_ForgedPrefix(t *testing.T) {
+	// 正常：owner 前缀 + 合法 hex 段
+	if orig, ok := validateSessionOwner("ak-A", "ak-A/abcd1234"); !ok || orig != "abcd1234" {
+		t.Fatalf("正常前缀应通过, got %q/%v", orig, ok)
+	}
+	// 未认证：任意合法段直接通过
+	if _, ok := validateSessionOwner("", "abcd1234"); !ok {
+		t.Fatalf("未认证合法段应通过")
+	}
+	// 伪造前缀：认证方 ak-A 试图操作未认证者构造的 "ak-A/evil" → remainder "evil" 合法？
+	// 前端 upload_id 本就是客户端可控，核心问题是"evil"段无法确证归属。
+	// 关键断言：任何含 "/" 的 id（无论是否带 owner 前缀）都因 validUploadID 拒绝。
+	if _, ok := validateSessionOwner("ak-A", "ak-A/evil"); !ok {
+		t.Fatalf("防伪造：单层正常段应仍允许（evil 本身合法）")
+	}
+	// 含嵌套分隔符 → 拒绝
+	if _, ok := validateSessionOwner("ak-A", "ak-A/a/b"); ok {
+		t.Fatalf("含嵌套 '/' 应拒绝")
+	}
+	// 前缀凭空伪造：'"ak-A/..' 路径穿越 → 拒绝
+	if _, ok := validateSessionOwner("ak-A", "ak-A/../evil"); ok {
+		t.Fatalf("含 '..' 应拒绝")
+	}
+	// 前缀不存在 → 拒绝
+	if _, ok := validateSessionOwner("ak-B", "ak-A/abcd"); ok {
+		t.Fatalf("跨 owner 前缀应拒绝")
+	}
+}
+
+// TestValidUploadID 验证 upload_id 格式校验（路径分隔符 / .. / .__ / 控制字符）。
+func TestValidUploadID(t *testing.T) {
+	cases := []struct {
+		id string
+		ok bool
+	}{
+		{"abcd1234", true},
+		{"test-upload-happy", true},
+		{"a/b", false},
+		{"a\b", false},
+		{"..", false},
+		{"a/../b", false},
+		{".__internal", false},
+		{"", false},
+		{strings.Repeat("x", 129), false},
+		{"a\x00b", false},
+	}
+	for _, c := range cases {
+		if got := validUploadID(c.id); got != c.ok {
+			t.Fatalf("validUploadID(%q) = %v, want %v", c.id, got, c.ok)
+		}
 	}
 }

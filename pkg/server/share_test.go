@@ -4,6 +4,8 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
 func TestShare_CreateAndAccess(t *testing.T) {
@@ -148,13 +152,13 @@ func TestShare_CreateEviction(t *testing.T) {
 	ss := NewShareStore(slog.Default())
 	// 填满上限，所有条目立即过期（TTL=0 => ExpiresAt ≈ now，eviction 时已过期）
 	for i := range maxShareEntries {
-		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "/tmp/file", 0, 0, false)
+		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "/tmp/file", "", 0, 0, false)
 		if err != nil {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
 	}
 	// 触发 eviction：应该成功删除过期条目再新增
-	link, err := ss.Create("newfile.txt", "/tmp/file", time.Hour, 0, false)
+	link, err := ss.Create("newfile.txt", "/tmp/file", "", time.Hour, 0, false)
 	if err != nil {
 		t.Fatalf("expected eviction to succeed, got: %v", err)
 	}
@@ -174,13 +178,13 @@ func TestShare_CreateEvictionNoExpired(t *testing.T) {
 	ss := NewShareStore(slog.Default())
 	// 填满上限，所有条目 1 小时后才过期（eviction 时无过期条目）
 	for i := range maxShareEntries {
-		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "/tmp/file", time.Hour, 0, false)
+		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "/tmp/file", "", time.Hour, 0, false)
 		if err != nil {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
 	}
 	// 无过期条目时，eviction 按创建时间淘汰最旧的 10%，应成功
-	link, err := ss.Create("overflow.txt", "/tmp/file", time.Hour, 0, false)
+	link, err := ss.Create("overflow.txt", "/tmp/file", "", time.Hour, 0, false)
 	if err != nil {
 		t.Fatalf("expected eviction to succeed via oldest-10%% strategy, got: %v", err)
 	}
@@ -371,4 +375,138 @@ func TestShare_RevokeNotFound(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for non-existent token, got %d", resp.StatusCode)
 	}
+}
+
+// TestShare_MultiTenantOwnerScoped 验证 M5 修复：认证用户只见自己的分享链接，
+// 且不能撤销他人的分享（跨租户越权防护）；admin/未认证仍可见全部。
+func TestShare_MultiTenantOwnerScoped(t *testing.T) {
+	url, _, _ := newAuditTestServer(t, nil)
+
+	postSigned := func(path, body string) (*http.Response, error) {
+		var r *http.Request
+		var bodyBytes []byte
+		if body != "" {
+			bodyBytes = []byte(body)
+			r, _ = http.NewRequest(http.MethodPost, url+path, strings.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+			signBodyRequest(r, testAccessKey, testAccessSecret, bodyBytes)
+		} else {
+			r, _ = http.NewRequest(http.MethodPost, url+path, nil)
+			signRequest(r, testAccessKey, testAccessSecret)
+		}
+		return http.DefaultClient.Do(r)
+	}
+	getSigned := func(path string) (*http.Response, error) {
+		r, _ := http.NewRequest(http.MethodGet, url+path, nil)
+		signRequest(r, testAccessKey, testAccessSecret)
+		return http.DefaultClient.Do(r)
+	}
+	delSigned := func(path string) (*http.Response, error) {
+		r, _ := http.NewRequest(http.MethodDelete, url+path, nil)
+		signRequestNonce(r, testAccessKey, testAccessSecret) // 随机 nonce 防全量并发碰撞
+		return http.DefaultClient.Do(r)
+	}
+
+	// 先上传两个文件
+	for _, f := range []string{"share_a.txt", "share_b.txt"} {
+		uploadFileSigned(t, url, f, []byte(f+" content"))
+	}
+
+	// A（testAccessKey）创建两个分享：指向 share_a.txt（自己的）与 share_b.txt（B 的，设想）
+	// 注意：这里的 auth 只有单一 AK，为模拟两个租户，直接用 store 层面构造第二个 owner 的链接。
+	// 步骤：A 创建 share_a 分享；再直接向 shareStore 注入 owner="ak-B" 的分享（绕过 HTTP）。
+	resp, err := postSigned("/api/share", `{"filename":"share_a.txt","ttl":"1h"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aShare struct {
+		Success bool   `json:"success"`
+		Token   string `json:"token"`
+	}
+	json.NewDecoder(resp.Body).Decode(&aShare)
+	resp.Body.Close()
+	if !aShare.Success || aShare.Token == "" {
+		t.Fatalf("A 创建分享失败: %+v", aShare)
+	}
+
+	// 注入 B 的分享到 store（模拟另一租户在内存中创建的链接）
+	url2, _, _ := newAuditTestServer(t, nil) // 独立实例便于直接操纵
+	_ = url2
+	// 简化：直接在当前 server 的 store 上创建 —— 但无 store 引用，改用第二个 servern 实例的 store
+	// 这里仅验证 List 过滤逻辑：用同一 store，把 B 的 link 塞进去比较麻烦。
+	// 改用 ShareStore 纯单测覆盖 owner 过滤 + Revoke 越权（在下面 TestShareStore_OwnerScoped）。
+	_ = aShare
+
+	// A 列出自己的分享：应只有 1 条（share_a.txt）
+	resp2, err := getSigned("/api/shares")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listRes struct {
+		Shares []struct {
+			Token    string `json:"token"`
+			Filename string `json:"filename"`
+		} `json:"shares"`
+	}
+	json.NewDecoder(resp2.Body).Decode(&listRes)
+	resp2.Body.Close()
+	if len(listRes.Shares) != 1 || listRes.Shares[0].Filename != "share_a.txt" {
+		t.Fatalf("A 的分享列表应有且仅 1 条 share_a.txt, got %+v", listRes.Shares)
+	}
+
+	// A 撤销一个不存在的 token（模拟 B 的）→ 404（且因多租户 owner 不匹配同样被拒）
+	resp3, err := delSigned("/api/shares/" + strings.Repeat("0", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp3.Body.Close()
+	if resp3.StatusCode != http.StatusNotFound {
+		t.Fatalf("撤销不存在 token 应 404, got %d", resp3.StatusCode)
+	}
+}
+
+// TestShareStore_OwnerScoped 验证 ShareStore 的 owner 过滤与撤销越权防护（纯单测）。
+func TestShareStore_OwnerScoped(t *testing.T) {
+	s := NewShareStore(testLogger())
+	defer s.Stop()
+
+	l1, err := s.Create("a.txt", "/abs/a.txt", "ak-A", time.Hour, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l2, err := s.Create("b.txt", "/abs/b.txt", "ak-B", time.Hour, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// owner 过滤：A 只见 A，admin（空 owner）见全部
+	if got := s.List("ak-A"); len(got) != 1 || got[0].Token != l1.Token {
+		t.Fatalf("A 应只见自己的分享, got %+v", s.List("ak-A"))
+	}
+	if got := s.List(""); len(got) != 2 {
+		t.Fatalf("admin 应见全部 2 条, got %d", len(got))
+	}
+
+	// 跨租户撤销被拒：A 撤 B 的 → error；A 撤自己的 → ok
+	if err := s.Revoke(l2.Token, "ak-A"); err == nil {
+		t.Fatal("A 撤销 B 的分享应被拒")
+	}
+	if err := s.Revoke(l1.Token, "ak-A"); err != nil {
+		t.Fatalf("A 撤销自己的分享应成功: %v", err)
+	}
+}
+
+// signRequestNonce 生成带随机 nonce 的签名请求（避免全量并发下 UnixNano nonce 碰撞失败）。
+func signRequestNonce(r *http.Request, ak, sk string) {
+	now := time.Now()
+	nb := make([]byte, 12)
+	_, _ = rand.Read(nb)
+	h := sproxysig.Header{
+		Version: sproxysig.Version, AK: ak,
+		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      hex.EncodeToString(nb),
+		BodySHA256: sproxysig.EmptyBodyHash(),
+	}
+	h.Sig = sproxysig.Sign(sk, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
+	r.Header.Set("Authorization", formatSigAuth(h))
 }

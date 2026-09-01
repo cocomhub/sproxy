@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -21,7 +22,8 @@ import (
 
 // Executor 基于 pkg/sync.Engine 的同步执行器（实现 syncmgr.Executor）。
 type Executor struct {
-	// UploadsDir 是本地 FS 根（push 的 src / pull 的 dst）。
+	// UploadsDir 是本地 FS 根（push 的 src / pull 的 dst 的基础目录）。
+	// 实际本地根按任务 owner 派生为 <UploadsDir>/<owner>（多租户隔离，审查 F1）。
 	UploadsDir string
 	// Logger 是执行日志。
 	Logger *slog.Logger
@@ -54,8 +56,16 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	}
 	defer cleanupTransports()
 
+	// 本地端（push 的 src / pull 的 dst）按任务 owner 隔离到 <uploadsDir>/<owner>。
+	// 与 pkg/server uploadsDir/<owner>/ 布局一致（审查 F1）：owner 为空回落全局根。
+	// owner 由服务端派生（可信），OwnerFileRoot 仍做纵深校验。
+	localRoot := syncmgr.OwnerFileRoot(e.UploadsDir, task.Owner)
+	if err := os.MkdirAll(localRoot, 0o755); err != nil {
+		return nil, fmt.Errorf("创建本地同步根 %s 失败: %w", localRoot, err)
+	}
+
 	if task.Direction == string(syncmgr.DirectionPush) {
-		srcFS = syncpkg.NewLocalFS(e.UploadsDir, e.logger())
+		srcFS = syncpkg.NewLocalFS(localRoot, e.logger())
 		tr, err := e.newRemoteTransport(remote)
 		if err != nil {
 			return nil, err
@@ -69,7 +79,7 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		}
 		httpTransports = append(httpTransports, tr)
 		srcFS = tr
-		dstFS = syncpkg.NewLocalFS(e.UploadsDir, e.logger())
+		dstFS = syncpkg.NewLocalFS(localRoot, e.logger())
 	}
 
 	job := &syncpkg.Job{

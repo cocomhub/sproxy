@@ -6,6 +6,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -603,7 +604,8 @@ func initSession(t *testing.T, baseURL, filename string, totalSize int64, fileCh
 
 func initSessionEx(t *testing.T, baseURL, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string) string {
 	t.Helper()
-	uploadID := fmt.Sprintf("test-upload-%s-%d", filename, totalSize)
+	// upload_id 必须是单一安全段（修复后服务端拒绝含 "/" 的 id），用 base64 编码文件名派生段
+	uploadID := fmt.Sprintf("test-upload-%x-%d", sha256.Sum256([]byte(filename)), totalSize)
 	initReq := map[string]any{
 		"upload_id":     uploadID,
 		"filename":      filename,
@@ -1360,5 +1362,34 @@ func TestNegotiateChunkSize_EdgeCases(t *testing.T) {
 				t.Errorf("negotiateChunkSize(%d, %d) adjusted = %v, want %v", tt.clientSize, tt.cfgSize, adj, tt.wantAdj)
 			}
 		})
+	}
+}
+
+// TestUploadInit_RejectsNestedUploadID 验证 F4 修复：upload_id 含路径分隔符/穿越
+// 会被拒绝（此前未认证者可构造 "ak-A/evil" 跨 owner 前缀会话 / .__chunked__ 穿越）。
+func TestUploadInit_RejectsNestedUploadID(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	body := []byte("x")
+	for _, bad := range []string{"ak-A/evil", "a/b", "../evil", "a\b", ".__x"} {
+		initReq := map[string]any{
+			"upload_id":     bad,
+			"filename":      "ok.txt",
+			"total_size":    1,
+			"chunk_size":    4096,
+			"total_chunks":  1,
+			"file_checksum": sha256hex(body),
+		}
+		initJSON, _ := json.Marshal(initReq)
+		resp, err := http.Post(url+"/upload/init", "application/json", bytes.NewReader(initJSON))
+		if err != nil {
+			t.Fatalf("init %q: %v", bad, err)
+		}
+		if resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("upload_id %q 应被拒绝, got 200", bad)
+		}
+		resp.Body.Close()
 	}
 }

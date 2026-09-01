@@ -680,10 +680,13 @@ downloadDone:
 		stored.ReservedSize = result.Size
 	}
 
-	// 写入 ChecksumStore
-	remotePath := filepath.Join(cloudDirName, stored.ID, stored.Filename)
+	// 写入 ChecksumStore。key 与 download/stat/chunk 读取端一致：
+	// 读端 resolveDownloadPath(kind=cloud_task) 返回的 filename 是 <taskID>/<file>（不含
+	// .__cloud__ 内部段），故写端同样用 <owner>/<taskID>/<file>（审查 M1：加 owner 前缀时
+	// 误保留 .__cloud__ 段导致写读 key 不一致、缓存永不命中、每请求全量重算）。
+	remotePath := filepath.Join(stored.ID, stored.Filename)
 	if m.checksumStore != nil {
-		m.checksumStore.Set(remotePath, result.Checksum)
+		m.checksumStore.Set(checksumStoreKey(stored.Owner, remotePath), result.Checksum)
 	}
 
 	// 更新任务状态
@@ -988,10 +991,10 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 		m.logger.Warn("failed to remove persist file", "task_id", id, "error", err)
 	}
 
-	// 清理 checksum
+	// 清理 checksum（owner 作用域 key，与写入端一致，审查 M1）
 	if m.checksumStore != nil {
-		remotePath := filepath.Join(cloudDirName, t.ID, t.Filename)
-		m.checksumStore.Delete(remotePath)
+		remotePath := filepath.Join(t.ID, t.Filename)
+		m.checksumStore.Delete(checksumStoreKey(t.Owner, remotePath))
 		m.logger.Debug("checksum deleted", "task_id", id, "remote_path", remotePath)
 	}
 
@@ -1235,6 +1238,7 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 		id           string
 		taskID       string
 		filename     string
+		owner        string
 		reservedSize int64
 	}
 	m.mu.Lock()
@@ -1254,6 +1258,7 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 				id:           id,
 				taskID:       t.ID,
 				filename:     t.Filename,
+				owner:        t.Owner,
 				reservedSize: t.ReservedSize,
 			})
 			t.ReservedSize = 0 // 释放后归零，防二次释放
@@ -1275,8 +1280,8 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 			m.storage.Release(item.reservedSize, CategoryCloud)
 		}
 		if m.checksumStore != nil {
-			remotePath := filepath.Join(cloudDirName, item.taskID, item.filename)
-			m.checksumStore.Delete(remotePath)
+			remotePath := filepath.Join(item.taskID, item.filename)
+			m.checksumStore.Delete(checksumStoreKey(item.owner, remotePath))
 		}
 		cleaned++
 	}

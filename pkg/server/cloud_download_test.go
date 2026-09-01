@@ -384,9 +384,9 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 	os.MkdirAll(cloudDir, 0755)
 	os.WriteFile(filepath.Join(cloudDir, "cleanup.zip"), []byte("test data"), 0644)
 
-	// 写入 checksum
-	remotePath := filepath.Join(cloudDirName, task.ID, "cleanup.zip")
-	cs.Set(remotePath, "abc123")
+	// 写入 checksum（owner 作用域且不含 .__cloud__ 段的 key，与写端一致，审查 M1）
+	remotePath := filepath.Join(task.ID, "cleanup.zip")
+	cs.Set(checksumStoreKey(task.Owner, remotePath), "abc123")
 
 	// 验证存储使用量 > 0
 	if sm.Usage() == 0 {
@@ -423,8 +423,8 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 		t.Fatalf("expected storage usage=0 after delete, got %d", sm.Usage())
 	}
 
-	// 验证 checksum 已清理
-	if _, ok := cs.Get(remotePath); ok {
+	// 验证 checksum 已清理（key 为 owner 作用域、不含 .__cloud__ 段）
+	if _, ok := cs.Get(checksumStoreKey(task.Owner, remotePath)); ok {
 		t.Error("checksum should be deleted")
 	}
 }

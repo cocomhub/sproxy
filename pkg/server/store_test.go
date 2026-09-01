@@ -252,6 +252,31 @@ func TestUploadStore_GetOrCreateSession_Reuse(t *testing.T) {
 	}
 }
 
+// TestUploadStore_GetOrCreateSession_ReuseGuard 验证 F4 修复：按 key 复用旧会话时
+// 若文件元数据不符（攻击者预置同 key 会话篡改文件名），必须拒绝而非静默复用。
+func TestUploadStore_GetOrCreateSession_ReuseGuard(t *testing.T) {
+	tmpDir := t.TempDir()
+	us := MustNewUploadStore(tmpDir, 0, nil)
+	defer us.Stop()
+
+	// 首次：以 key "sid" 创建（正常文件名）
+	first, _, err := us.GetOrCreateSession("sid", "target.txt", 100, 4096, 1, strings.Repeat("a", 64), 0)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	_ = first
+
+	// 攻击者预置同 key 但不同文件名/校验和 → 复用应失败
+	if _, _, err = us.GetOrCreateSession("sid", "evil.txt", 100, 4096, 1, strings.Repeat("b", 64), 0); err == nil {
+		t.Fatal("同 key 不同文件名应拒绝复用")
+	}
+
+	// 同 key 同元数据 → 仍正常复用（续传不受影响）
+	if _, reused, err := us.GetOrCreateSession("sid", "target.txt", 100, 4096, 1, strings.Repeat("a", 64), 0); err != nil || !reused {
+		t.Fatalf("同元数据应复用, reused=%v err=%v", reused, err)
+	}
+}
+
 func TestUploadStore_ConcurrentMarkChunk(t *testing.T) {
 	tmpDir := t.TempDir()
 	us := MustNewUploadStore(tmpDir, 0, nil)

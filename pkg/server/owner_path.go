@@ -133,15 +133,49 @@ func ownerScopedSessionKey(owner, uploadID string) string {
 
 // validateSessionOwner 校验客户端上传的 upload_id 属于当前 owner。
 // 返回原始 upload_id（去掉 owner 前缀）与是否有效；未认证（owner 空）恒有效。
+// 审查 F4：前缀剥离后必须校验剩余部分仍是"单一安全段"的合法会话 id——
+// 禁止伪造前缀（如未认证者构造 "ak-A/evil" 让认证方接管）、禁止路径分隔符
+// 与 ".."（防 .__chunked__ 目录穿越）。
 func validateSessionOwner(owner, uploadID string) (original string, ok bool) {
 	if owner == "" {
+		if !validUploadID(uploadID) {
+			return "", false
+		}
 		return uploadID, true
 	}
 	prefix := owner + "/"
 	if !strings.HasPrefix(uploadID, prefix) {
 		return "", false
 	}
-	return strings.TrimPrefix(uploadID, prefix), true
+	rest := strings.TrimPrefix(uploadID, prefix)
+	if !validUploadID(rest) {
+		return "", false
+	}
+	return rest, true
+}
+
+// validUploadID 校验会话 id 是否为可安全用作 .__chunked__ 下单路径段的合法 id。
+// 客户端用 sha256 前 32 位 hex 确定性生成；此处防御性校验兜住任意输入：
+// 拒绝空/点段、路径分隔符（/ \）、".__" 前缀、控制字符，并限制长度。
+func validUploadID(id string) bool {
+	if id == "" || id == "." || id == ".." {
+		return false
+	}
+	if strings.ContainsAny(id, `/\`) {
+		return false
+	}
+	if strings.HasPrefix(id, ".__") {
+		return false
+	}
+	if len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // cloudArchiveOwnerDir 返回 owner 的归档子目录名（未认证返回空串，直接用归档根目录）。

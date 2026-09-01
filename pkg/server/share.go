@@ -27,7 +27,8 @@ const (
 type ShareLink struct {
 	Token        string    `json:"token"`
 	Filename     string    `json:"filename"`
-	AbsPath      string    `json:"-"` // 创建时解析的绝对路径
+	AbsPath      string    `json:"-"`               // 创建时解析的绝对路径
+	Owner        string    `json:"owner,omitempty"` // 创建者（AK / API key 名；空 = 全局/admin 兼容）
 	CreatedAt    time.Time `json:"created_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	MaxDownloads int       `json:"max_downloads"` // 0 = 不限
@@ -99,7 +100,7 @@ func (s *ShareStore) Stop() {
 }
 
 // Create 生成新的分享链接并存储。
-func (s *ShareStore) Create(filename, absPath string, ttl time.Duration, maxDownloads int, oneTime bool) (*ShareLink, error) {
+func (s *ShareStore) Create(filename, absPath, owner string, ttl time.Duration, maxDownloads int, oneTime bool) (*ShareLink, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -125,6 +126,7 @@ func (s *ShareStore) Create(filename, absPath string, ttl time.Duration, maxDown
 		Token:        token,
 		Filename:     filename,
 		AbsPath:      absPath,
+		Owner:        owner,
 		CreatedAt:    now,
 		ExpiresAt:    now.Add(ttl),
 		MaxDownloads: maxDownloads,
@@ -208,25 +210,36 @@ func (s *ShareStore) Consume(token string) *ShareLink {
 }
 
 // List 返回所有分享链接的副本。
-func (s *ShareStore) List() []*ShareLink {
+func (s *ShareStore) List(owner string) []*ShareLink {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// 多租户（审查 M5）：owner 非空时只返回自己的分享；空 owner（admin/未认证）返回全部。
 	result := make([]*ShareLink, 0, len(s.links))
 	for _, link := range s.links {
+		if owner != "" && link.Owner != owner {
+			continue
+		}
 		cp := *link
 		result = append(result, &cp)
 	}
 	return result
 }
 
-// Revoke 删除指定 token 的分享链接。链接不存在时返回 error。
-func (s *ShareStore) Revoke(token string) error {
+// Revoke 删除指定 token 的分享链接。
+// 多租户（审查 M5）：owner 非空时必须与链接创建者一致，否则拒绝（跨租户撤销越权）；
+// 空 owner（admin/未认证）仍可撤销任意分享（保持未认证部署兼容）。
+// 链接不存在返回 error（幂等撤销语义不变）。
+func (s *ShareStore) Revoke(token, owner string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.links[token]; !ok {
+	link, ok := s.links[token]
+	if !ok {
 		return fmt.Errorf("分享链接不存在: %s", token)
+	}
+	if owner != "" && link.Owner != owner {
+		return fmt.Errorf("分享链接不存在: %s", token) // 跨租户视为不存在（防枚举，不泄露）
 	}
 	delete(s.links, token)
 	return nil
@@ -308,7 +321,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		ttl = min(d, maxShareTTL)
 	}
 
-	link, err := h.shareStore.Create(req.Filename, fullPath, ttl, req.MaxDownloads, req.OneTime)
+	link, err := h.shareStore.Create(req.Filename, fullPath, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime)
 	if err != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
 		return
@@ -378,7 +391,7 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 
 // listSharesHandler 处理 GET /api/shares，返回所有分享链接。
 func (h *Handlers) listSharesHandler(w http.ResponseWriter, r *http.Request) {
-	links := h.shareStore.List()
+	links := h.shareStore.List(ActorFrom(r.Context()))
 
 	type shareItem struct {
 		Token        string `json:"token"`
@@ -418,7 +431,7 @@ func (h *Handlers) revokeShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.shareStore.Revoke(token); err != nil {
+	if err := h.shareStore.Revoke(token, ActorFrom(r.Context())); err != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: err.Error()}, http.StatusNotFound)
 		return
 	}

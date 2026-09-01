@@ -93,6 +93,104 @@ func TestExecutor_Pull(t *testing.T) {
 	}
 }
 
+// TestExecutor_OwnerIsolation 验证多租户隔离（审查 F1）：带 owner 的同步任务
+// 本地文件根必须落在 <uploadsDir>/<owner>/ 下，而非全局根。
+func TestExecutor_OwnerIsolation(t *testing.T) {
+	t.Run("Push_UsesOwnerRoot", func(t *testing.T) {
+		srv, remote := syncmock.NewServer(t)
+		dir := t.TempDir()
+		// 源文件放在 owner 子目录（与 uploadsDir/<owner>/ 布局一致）
+		writeLocalFile(t, dir, "ak-A/a.txt", "hello owner push")
+		exec := NewExecutor(dir, discardLogger())
+
+		task := &syncmgr.SyncTask{ID: "t1", Direction: "push", Remote: "r1", Src: "", Dst: "", Owner: "ak-A", ConflictPolicy: "skip"}
+		res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != "completed" {
+			t.Fatalf("状态应为 completed，got %q", res.Status)
+		}
+		if res.FilesDone != 1 {
+			t.Fatalf("应推送 1 个文件（owner 根），got %d", res.FilesDone)
+		}
+		f, ok := remote.SnapshotFiles()["a.txt"]
+		if !ok || string(f.Data) != "hello owner push" {
+			t.Fatalf("远端应存在 a.txt 且内容正确: %+v", remote.SnapshotFiles())
+		}
+	})
+
+	t.Run("Pull_WritesOwnerRoot", func(t *testing.T) {
+		srv, remote := syncmock.NewServer(t)
+		remote.SeedFile("sub/owner.txt", "owner content")
+		remote.SeedDir("sub")
+		dir := t.TempDir()
+		exec := NewExecutor(dir, discardLogger())
+
+		task := &syncmgr.SyncTask{ID: "t1", Direction: "pull", Remote: "r1", Src: "sub", Dst: "local", Recursive: true, Owner: "ak-A", ConflictPolicy: "skip"}
+		res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != "completed" {
+			t.Fatalf("状态应为 completed，got %q", res.Status)
+		}
+		// 文件必须落在 ak-A 子目录，而非全局根
+		if got := readLocalFile(t, dir, "ak-A/local/owner.txt"); got != "owner content" {
+			t.Fatalf("owner 根下内容不符: %q", got)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "local/owner.txt")); err == nil {
+			t.Fatalf("文件不应落在全局根 local/owner.txt（隔离失败）")
+		}
+	})
+
+	t.Run("EmptyOwner_UsesGlobalRoot", func(t *testing.T) {
+		srv, remote := syncmock.NewServer(t)
+		remote.SeedFile("sub/g.txt", "global")
+		remote.SeedDir("sub")
+		dir := t.TempDir()
+		exec := NewExecutor(dir, discardLogger())
+
+		task := &syncmgr.SyncTask{ID: "t1", Direction: "pull", Remote: "r1", Src: "sub", Dst: "local", Recursive: true, Owner: "", ConflictPolicy: "skip"}
+		res, err := exec.Run(context.Background(), task, remoteConfig(srv.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Status != "completed" {
+			t.Fatalf("状态应为 completed，got %q", res.Status)
+		}
+		// 空 owner 回落全局根，不产生 owner 子目录
+		if got := readLocalFile(t, dir, "local/g.txt"); got != "global" {
+			t.Fatalf("空 owner 应写全局根: %q", got)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "ak-A", "local/g.txt")); err == nil {
+			t.Fatalf("空 owner 不应产生 owner 子目录（隔离误判）")
+		}
+	})
+}
+
+// TestSyncmgr_OwnerFileRoot 验证 OwnerFileRoot 的 owner 校验与回落规则。
+// 期望值用 filepath.Join 构造，兼容 Windows 分隔符。
+func TestSyncmgr_OwnerFileRoot(t *testing.T) {
+	base := "/uploads"
+	want := func(owner string) string { return filepath.Join(base, owner) }
+	if got := syncmgr.OwnerFileRoot(base, "ak-A"); got != want("ak-A") {
+		t.Fatalf("OwnerFileRoot(ak-A) = %q", got)
+	}
+	if got := syncmgr.OwnerFileRoot(base, ""); got != base {
+		t.Fatalf("空 owner 应回落 base，got %q", got)
+	}
+	if got := syncmgr.OwnerFileRoot(base, "a/b"); got != base {
+		t.Fatalf("含分隔符 owner 应回落 base，got %q", got)
+	}
+	if got := syncmgr.OwnerFileRoot(base, ".__internal"); got != base {
+		t.Fatalf(".__ 前缀 owner 应回落 base，got %q", got)
+	}
+	if got := syncmgr.OwnerFileRoot(base, "CON"); got != base {
+		t.Fatalf("保留设备名 owner 应回落 base，got %q", got)
+	}
+}
+
 func TestExecutor_Push_SameChecksum_Skipped(t *testing.T) {
 	srv, remote := syncmock.NewServer(t)
 	dir := t.TempDir()

@@ -481,14 +481,6 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 用户指定归档名时，校验同名文件是否已存在，存在则拒绝
-	if req.ArchiveName != "" {
-		if _, err := os.Stat(filepath.Join(h.cloudMgr.uploadsDir, archiveName)); err == nil {
-			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists: " + archiveName}, http.StatusConflict)
-			return
-		}
-	}
-
 	// 按子任务目录收集已完成文件（子任务文件实际保存在 .__cloud__/<taskID>/ 下）
 	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
 	var groupFiles []fileWithRelPath
@@ -552,6 +544,14 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("failed to create archive directory", "error", mkErr)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
 		return
+	}
+	// 用户指定归档名时，校验同名文件是否已存在，存在则拒绝（落在 owner 归档目录下，
+	// 审查 F3：此前误查 uploadsDir 全局根，owner 自己的归档漏检 / 全局根无关文件误 409）
+	if req.ArchiveName != "" {
+		if _, err := os.Stat(filepath.Join(archiveDir, archiveName)); err == nil {
+			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists: " + archiveName}, http.StatusConflict)
+			return
+		}
 	}
 	outputPath := filepath.Join(archiveDir, archiveName)
 	if !strings.HasPrefix(filepath.Clean(outputPath), filepath.Clean(archiveDir)+string(filepath.Separator)) {
