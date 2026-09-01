@@ -1027,6 +1027,43 @@ func TestMkdir_PathTraversal(t *testing.T) {
 	}
 }
 
+// TestMkdir_RejectsInternalDir 验证写入侧守卫（审查 #4 收敛）：不得创建服务端内部目录名
+// （.__cloud__/.__versions__ 等）——首段与任意层级（sub/.__chunked__）都拒绝，
+// 防止用户伪造内部目录名破坏隔离 / 触发配额漏计。
+func TestMkdir_RejectsInternalDir(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+	uploadsDir := cfgPtr.Load().UploadsDir
+	for _, dirname := range []string{".__cloud__", "sub/.__versions__", ".__chunked__/x"} {
+		req, _ := http.NewRequest("POST", url+"/mkdir?dirname="+dirname, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("mkdir %q: %v", dirname, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("mkdir %q 应 400（内部目录名保留给服务端），got %d", dirname, resp.StatusCode)
+		}
+	}
+	// 守卫应在 MkdirAll 前拦截——freshdir/.__cloud__ 被拒后 freshdir 不应被创建
+	// （.__cloud__ 本身是服务端预创建目录，不能断言其不存在）。
+	if _, err := os.Stat(filepath.Join(uploadsDir, "freshdir")); !os.IsNotExist(err) {
+		t.Fatal("守卫拦截后 freshdir 不应被创建")
+	}
+	req, _ := http.NewRequest("POST", url+"/mkdir?dirname=freshdir/.__cloud__", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("mkdir freshdir/.__cloud__: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("mkdir freshdir/.__cloud__ 应 400, got %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(uploadsDir, "freshdir")); !os.IsNotExist(err) {
+		t.Fatal("mkdir freshdir/.__cloud__ 被拒后 freshdir 不应被创建")
+	}
+}
+
 // ---- rmdir ----
 
 func TestRmdir_HappyPath(t *testing.T) {
@@ -1146,6 +1183,24 @@ func TestRmdir_PathTraversal(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+// TestRmdir_RejectsInternalDir 验证写入侧守卫（审查 #4 收敛）：不得删除服务端内部目录
+// （防 rmdir 删除 .__cloud__ 等导致服务端状态丢失/他租户数据被删）。
+func TestRmdir_RejectsInternalDir(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+	for _, dirname := range []string{".__cloud__", "sub/.__versions__"} {
+		req, _ := http.NewRequest("POST", url+"/rmdir?dirname="+dirname+"&force=true", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("rmdir %q: %v", dirname, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("rmdir %q 应 400（内部目录名保留给服务端），got %d", dirname, resp.StatusCode)
+		}
 	}
 }
 

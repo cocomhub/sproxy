@@ -131,6 +131,27 @@ func TestArchive_InvalidPath(t *testing.T) {
 	}
 }
 
+// TestArchive_RejectsInternalDirSource 验证读取侧守卫（审查 #4 收敛）：归档源不得引用
+// 服务端内部目录（.__cloud__ 等只能经 kind=cloud_task 白名单由服务端按 owner 拼接）。
+func TestArchive_RejectsInternalDirSource(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	for _, files := range []string{
+		`{"files":[".__cloud__/some/file.bin"]}`,
+		`{"files":["dir/.__versions__/v1"]}`,
+	} {
+		resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(files))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("archive 源 %s 应 400（内部目录不可作归档源），got %d", files, resp.StatusCode)
+		}
+	}
+}
+
 func TestArchive_EmptyFiles(t *testing.T) {
 	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)

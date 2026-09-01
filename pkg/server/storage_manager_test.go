@@ -274,14 +274,22 @@ func TestStorageManager_ScanAndRecalculateCountsUserHiddenDirs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(deep, "d.bin"), []byte("deepfile"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// 多租户 owner 子目录下的 .__ 用户目录同样计入（uploadsDir/<owner>/dir/.__foo/）
+	ownerDeep := filepath.Join(dir, "ak-A", "dir", ".__ownerhidden")
+	if err := os.MkdirAll(ownerDeep, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownerDeep, "o.bin"), []byte("owner"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("hello"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	// hidden(6) + deepfile(8) + hello(5) = 19
-	if got := sm.Usage(); got != 19 {
-		t.Fatalf("expected Usage=19 (用户 .__ 目录计入配额), got %d", got)
+	// hidden(6) + deepfile(8) + owner(5) + hello(5) = 24
+	if got := sm.Usage(); got != 24 {
+		t.Fatalf("expected Usage=24 (用户 .__ 目录计入配额，含 owner 子目录), got %d", got)
 	}
 }
 

@@ -915,6 +915,46 @@ func TestCloudCleanupExpiredOnce_ClearsCompleted(t *testing.T) {
 	}
 }
 
+// TestCloudCleanupExpiredOnce_DeletesChecksum 验证 cleanupExpiredOnce 清理过期任务时
+// 同步删除 owner 作用域的 checksum（key 为 <owner>/<taskID>/<file>，ToSlash 归一）。
+// 覆盖修复 F2 的清理路径（此前该路径用 filepath.Join，Windows 下反斜杠 key 删不中）。
+func TestCloudCleanupExpiredOnce_DeletesChecksum(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cs := NewChecksumStore(dir, testLogger())
+	cfg := defaultCloudDownloadConfig()
+	cfg.TaskTTL = 1 * time.Millisecond
+	mgr := NewCloudDownloadManager(dir, sm, cs, testLogger(), cfg)
+	t.Cleanup(mgr.Close)
+
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "ak-A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.mu.Lock()
+	task.Status = "completed"
+	task.UpdatedAt = time.Now().Add(-time.Hour)
+	mgr.mu.Unlock()
+	mgr.markDirty(task.ID)
+	mgr.flushDirty()
+
+	// 模拟写端落库（owner 作用域 + ToSlash 归一 key，与写端一致）
+	remotePath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
+	csKey := checksumStoreKey(task.Owner, remotePath)
+	cs.Set(csKey, "abc123")
+	if _, ok := cs.Get(csKey); !ok {
+		t.Fatal("写端 checksum 应可读")
+	}
+
+	cleaned := mgr.cleanupExpiredOnce()
+	if cleaned == 0 {
+		t.Fatal("expected 1 task to be cleaned up")
+	}
+	if _, ok := cs.Get(csKey); ok {
+		t.Error("过期任务清理后 checksum 应被删除（owner 作用域 key）")
+	}
+}
+
 func TestCloudCleanupExpiredOnce_SkipsRunning(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

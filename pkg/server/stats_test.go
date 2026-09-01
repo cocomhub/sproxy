@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -213,6 +214,115 @@ func TestStats_OwnerScopedCategories(t *testing.T) {
 	}
 	if cloud != 0 {
 		t.Fatalf("cloud = %d, want 0（owner 根下不应含全局云任务）", cloud)
+	}
+}
+
+// TestStatsHandler_OwnerScoped 验证 GET /api/stats 在认证用户（owner 非空）视角下：
+// 文件数/大小与分类用量（user_files/chunked/versions/cloud/usage）全部按 owner 根作用域
+// 计算——他租户目录与全局 .__cloud__ 内容不计入（防跨租户元数据泄露）。
+func TestStatsHandler_OwnerScoped(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfgPtr := newTestCfgPtr(dir)
+	h := &Handlers{
+		cfgPtr:      cfgPtr,
+		storageMgr:  sm,
+		logger:      testLogger(),
+		auditLogger: testLogger(),
+	}
+
+	mustMkdir := func(p string) {
+		t.Helper()
+		if err := os.MkdirAll(p, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite := func(p, content string) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ownerRoot := filepath.Join(dir, "ak-A")
+	mustMkdir(filepath.Join(ownerRoot, ".__versions__"))
+	mustMkdir(filepath.Join(ownerRoot, ".__chunked__"))
+	mustWrite(filepath.Join(ownerRoot, "user.txt"), "user")            // 4
+	mustWrite(filepath.Join(ownerRoot, ".__versions__", "v1"), "ver")  // 3
+	mustWrite(filepath.Join(ownerRoot, ".__chunked__", "c1"), "chunk") // 5
+	// 他租户文件（不应计入 ak-A 视角）
+	mustMkdir(filepath.Join(dir, "ak-B"))
+	mustWrite(filepath.Join(dir, "ak-B", "other.txt"), "other-tenant-data")
+	// 全局云任务文件（不应计入 ak-A 视角）
+	mustMkdir(filepath.Join(dir, ".__cloud__", "t1"))
+	mustWrite(filepath.Join(dir, ".__cloud__", "t1", "a.bin"), "clouddata")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/stats", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "ak-A"))
+		h.statsHandler(w, r)
+	})
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/stats", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("stats 应 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp StatsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析 stats 失败: %v", err)
+	}
+	// 文件数：仅 owner 根用户文件 user.txt（版本/分块被 walkUploadStats 跳过；他租户不计入）
+	if resp.DiskUsage.TotalFiles != 1 {
+		t.Fatalf("TotalFiles = %d, want 1（他租户/全局不计入）", resp.DiskUsage.TotalFiles)
+	}
+	if resp.StorageUserFiles != 4 {
+		t.Fatalf("StorageUserFiles = %d, want 4", resp.StorageUserFiles)
+	}
+	if resp.StorageVersions != 3 {
+		t.Fatalf("StorageVersions = %d, want 3", resp.StorageVersions)
+	}
+	if resp.StorageChunked != 5 {
+		t.Fatalf("StorageChunked = %d, want 5", resp.StorageChunked)
+	}
+	if resp.StorageCloud != 0 {
+		t.Fatalf("StorageCloud = %d, want 0（全局云任务不计入认证用户）", resp.StorageCloud)
+	}
+	if resp.StorageUsage != 4+3+5 {
+		t.Fatalf("StorageUsage = %d, want %d", resp.StorageUsage, 4+3+5)
+	}
+}
+
+// TestStats_CategoryWalker_SkipsTaskStateDirs 验证 walkUploadStatsByCategory 跳过服务端
+// 任务状态目录（.__downloads__/.__sync__）——owner 根下不常见，但与 storage_manager 扫描
+// 保持一致，避免任务状态文件被计入用户用量。
+func TestStats_CategoryWalker_SkipsTaskStateDirs(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root := filepath.Join(dir, "ak-A")
+	for _, d := range []string{".__downloads__", ".__sync__"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, ".__downloads__", "t.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".__sync__", "s.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "user.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg atomic.Pointer[Config]
+	cfg.Store(&Config{UploadsDir: dir})
+	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
+	userFiles, chunked, versions, cloud := h.walkUploadStatsByCategory(root)
+	if userFiles != 5 {
+		t.Fatalf("userFiles = %d, want 5（任务状态目录跳过）", userFiles)
+	}
+	if chunked != 0 || versions != 0 || cloud != 0 {
+		t.Fatalf("chunked/versions/cloud 应为 0, got %d/%d/%d", chunked, versions, cloud)
 	}
 }
 
