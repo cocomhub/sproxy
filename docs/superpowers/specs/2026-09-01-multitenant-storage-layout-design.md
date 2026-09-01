@@ -111,20 +111,34 @@ func (t *Tenant) MetaStore() *store.JSONStore[...]                     // meta �
 - `os.Root` 未覆盖的操作（如 `os.Chtimes`、`os.SameFile` TOCTOU 交叉校验）统一由 `Root` 提供薄封装：以 root 内已校验的 rel 派生路径执行，并保持与 os.Root 相同的相对路径约束（不接收用户裸路径）。
 - 段名校验单一权威（`pkg/storage/name.go`）：Windows 保留字（含 `CON.txt` 基名判定）、尾点、尾空格、大小写碰撞、分隔符、超长；租户名、upload_id、文件名段共用。
 
-### 4.3 pkg/quota：通用配额（路径化子池 + 预留句柄）
+### 4.3 pkg/quota：通用配额（路径化子池 + 完整操作集）
+
+配额账本分两部分：**已确认占用 committed** 与 **预留中 reserved**。可用额度 = 上限 − (committed + reserved)。
 
 ```go
 global := quota.NewPool(cfg.MaxStorageBytes)        // 根池 ""
 tenant := global.Scope("/tenant/alice", quotaBytes) // 子池，路径化（http 路由式叠加）
 userB  := tenant.Scope("/user")                     // 可继续叠加，后续按功能桶细分配额
 
-res, err := bucket.TryReserve(estimate)   // 预留（预估/占位）
-res.Commit(actualSize)   // 按实际占用对账（内部算 estimate→actual diff）
-res.Release()            // 放弃预留（失败/取消）
+// —— 预留与对账（写路径）——
+res, err := bucket.TryReserve(estimate)   // 预留（预估/占位，增加 reserved；父链同步）
+res.Commit(actualSize)   // 实际落地：reserved → committed，内部算 estimate→actual diff
+res.Release()            // 放弃预留（失败/取消，减少 reserved）
+
+// —— 释放与调整（删除/覆盖写路径）——
+bucket.ReleaseUsage(n)          // 直接释放已确认占用 n（文件删除时按文件大小释放）
+bucket.Adjust(prev, next)       // 占用调整 diff（覆盖写同文件尺寸变化：next−prev）
+
+// —— 查看配额占用（统计/管理员）——
+bucket.Usage()                       // 已确认占用（committed）
+bucket.Reserved()                    // 预留中
+bucket.MaxBytes()                    // 上限（0 = 不限制）
+bucket.Available()                   // 可用额度 = max − (committed+reserved)；max=0 时为 MaxInt 语义
+bucket.UsageByBucket() map[string]int64  // 按子 Scope 归集（按功能桶/租户查看）
 ```
 
-- 子池操作自动向父链聚合 → 调用方只感知自己的 bucket，全局兜底在根池自动生效。
-- 取代现有 `TryReserve(pre) → Release(pre) → TryReserve(actual)` 三段式对账。
+- 子池操作自动向父链聚合 → 调用方只感知自己的 bucket，全局兜底在根池自动生效；`GlobalPool.Usage()` 聚合全部租户。
+- 取代现有 `TryReserve(pre) → Release(pre) → TryReserve(actual)` 三段式对账；文件删除、覆盖写、查询占用均有对应方法（不再散落在各 handler 里裸操作账本）。
 - 命名通用（Pool/Scope/Reservation），不含租户/存储概念。
 
 ## 5. 功能模块落盘映射
@@ -183,6 +197,13 @@ max_storage_bytes: 0             # 全局兜底（保留语义：0 = 不限制�
 | P5 | 删除旧实现：owner_path.go、`.__xx__` 判定、joinSafePath、checksumStoreKey owner 前缀、ownerScoped* 系列 | 全量测试 + E2E 通过，grep 无旧符号残留 |
 
 策略：新功能完整实现（P0-P1 全部新代码），在保证测试场景完整通过的基础上逐步迁移旧实现（P2-P5），每阶段测试全绿再进下一阶段。
+
+## 8.1 实现与审查流程
+
+- **任务细化**：每个阶段按模块拆分为独立子任务（P0 拆 `pkg/quota` / `pkg/store` / `pkg/storage` 三个独立包；P2/P3 按功能模块拆 upload 链路、download 链路、cloud、chunked、sync）。
+- **子 agent 并行**：无文件交集的子任务并行下发子 agent（`dispatching-parallel-agents`）；同一文件的修改不得并行，并行前先确认文件无交集。
+- **独立审查闭环**：每个子 agent 实现完成后，由独立审查 agent 审查**功能正确性、完整性、可用性、无缺陷**；审查对照第 9 节边界场景清单逐项核对，发现缺陷修复后复审（对齐 `independent-review-before-merge` 记忆）。
+- **阶段门禁**：每阶段所有子任务实现 + 独立审查通过 + 对应测试全绿后，才进入下一阶段；P5 收尾以 grep 无旧符号残留为证。
 
 ## 9. 测试矩阵与边界场景清单
 
