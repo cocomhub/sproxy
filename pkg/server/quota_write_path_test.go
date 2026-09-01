@@ -80,11 +80,13 @@ func (e *ownerDownloadEnv) setOwnerQuota(owner string, bytes int64) {
 }
 
 // TestQuota_UploadCommitAndDelete 验证上传配额对账：
-// 上传 60 → Usage 60；覆盖为 40（versioning 开启走覆盖路径）→ Adjust diff -20 → Usage 40；
-// 删除 → ReleaseUsage → Usage 0；bob 配额独立。
+// 上传 60 → Usage 60；覆盖为 40（versioning 开启走覆盖路径，saveVersion 先保存旧版本
+// 60 字节到 version 桶 → Usage 100=user40+version60）→ Adjust diff -20 使 user 桶收敛 40；
+// 删除 user 文件 → ReleaseUsage 释放 user 40，version 桶占用保留（Usage 60）；bob 配额独立。
 func TestQuota_UploadCommitAndDelete(t *testing.T) {
 	env := newOwnerEnv(t)
-	env.setOwnerQuota("alice", 100)
+	// 配额需足够容纳版本字节（旧文件 60）叠加覆盖写预留（新 40）：60+60+40=160 ≤ 200。
+	env.setOwnerQuota("alice", 200)
 	umux := actorUploadDeleteMux(env.h, "alice")
 
 	// 上传 60 字节 → tenant scope Usage()==60
@@ -96,22 +98,23 @@ func TestQuota_UploadCommitAndDelete(t *testing.T) {
 		t.Fatalf("上传 60 后 Usage()=%d want 60", got)
 	}
 
-	// 覆盖为 40 → Adjust diff -20 → Usage()==40（versioning 开启）
+	// 覆盖为 40（versioning 开启）：saveVersion 把旧版本 60 字节计入 version 桶，
+	// user 桶 Adjust(60→40)。Usage = user40 + version60 = 100。
 	env.h.cfgPtr.Load().Versioning.Enabled = true
 	body40 := []byte(strings.Repeat("b", 40))
 	if code, resp := uploadAs(t, umux, "f.txt", body40); code != http.StatusOK {
 		t.Fatalf("覆盖为 40 应 200, got %d: %s", code, resp)
 	}
-	if got := env.h.quotaFor("alice").Usage(); got != 40 {
-		t.Fatalf("覆盖 40 后 Usage()=%d want 40", got)
+	if got := env.h.quotaFor("alice").Usage(); got != 100 {
+		t.Fatalf("覆盖 40 后 Usage()=%d want 100（user 40 + version 60）", got)
 	}
 
-	// 删除 → ReleaseUsage → Usage()==0
+	// 删除 user 文件 → ReleaseUsage 释放 user 40；version 桶占用保留。
 	if code := deleteAs(t, umux, "f.txt", body40); code != http.StatusOK {
 		t.Fatalf("删除应 200, got %d", code)
 	}
-	if got := env.h.quotaFor("alice").Usage(); got != 0 {
-		t.Fatalf("删除后 Usage()=%d want 0", got)
+	if got := env.h.quotaFor("alice").Usage(); got != 60 {
+		t.Fatalf("删除后 Usage()=%d want 60（version 桶占用保留）", got)
 	}
 
 	// 另一租户 bob 配额独立，alice 打满不影响 bob
