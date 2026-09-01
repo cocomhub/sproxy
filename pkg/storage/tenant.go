@@ -55,8 +55,9 @@ func (t *Tenant) Buckets() []string {
 
 // UserRel 将用户输入路径归一并映射到 user 桶下的安全相对路径。
 // 内部先 NormalizeRemote（TrimSpace、拒绝空/绝对路径/.. 段、ToSlash），再逐段 ValidSegmentName
-// 校验；首段为功能桶名或 __ 遗留前缀**且还有后续段**时拒绝（防引用功能桶/遗留内部路径），
-// 单段恰好叫 cloud/archive 等是用户合法命名（user/ 前缀物理隔离，不触碰功能桶）。
+// 校验；首段仅拒绝 __ 遗留内部前缀（防 __version__ 等遗留目录引用）。功能桶名
+// （cloud/archive/chunk/version/meta）作为用户路径首段完全合法——用户路径恒在 user/
+// 桶内，与租户根顶层功能桶物理隔离，无冲突。
 func (t *Tenant) UserRel(remotePath string) (string, bool) {
 	normalized, ok := NormalizeRemote(remotePath)
 	if !ok {
@@ -65,18 +66,15 @@ func (t *Tenant) UserRel(remotePath string) (string, bool) {
 	if !validSegments(normalized) {
 		return "", false
 	}
-	if first, _, hasMore := strings.Cut(normalized, "/"); hasMore && isReservedUserFirstSegment(first) {
+	if first, _, _ := strings.Cut(normalized, "/"); isLegacyUnderscorePrefix(first) {
 		return "", false
 	}
 	return bucketUser + "/" + normalized, true
 }
 
-// isReservedUserFirstSegment 判断用户输入首段是否为保留名：功能桶名或 __ 遗留内部前缀。
-func isReservedUserFirstSegment(seg string) bool {
-	switch seg {
-	case bucketUser, bucketCloud, bucketArchive, bucketChunk, bucketVersion, bucketMeta:
-		return true
-	}
+// isLegacyUnderscorePrefix 判断首段是否为 __ 遗留内部前缀（如 __version__）。
+// .__ 魔法前缀已由 ValidSegmentName 拒绝；功能桶名不在此列（UserRel 已保证 user/ 桶内）。
+func isLegacyUnderscorePrefix(seg string) bool {
 	return strings.HasPrefix(seg, "__")
 }
 

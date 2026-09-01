@@ -4,8 +4,8 @@
 package server
 
 // download_owner_test.go 验证普通下载迁移到 Tenant API 后的新布局：
-// 用户文件映射到 <root>/<owner>/user/<rel>，非 user 桶前缀（cloud/archive/chunk/meta）
-// 与 .__ 内部前缀经 UserRel 拒绝（400）。
+// 用户文件映射到 <root>/<owner>/user/<rel>；功能桶名首段解析到 user/ 桶（文件不存在 404），
+// .__ 内部前缀经 UserRel 拒绝（400）。
 
 import (
 	"maps"
@@ -64,14 +64,15 @@ func (e *ownerDownloadEnv) doGet(t *testing.T, actor, path string) int {
 	return rr.Code
 }
 
-// TestDownload_NonUserBucketRejected 验证普通下载（无 kind）拒绝非 user 桶前缀：
-// cloud/archive/chunk/meta 直接 400（UserRel 首段保留名校验）；普通 user 文件正常。
-func TestDownload_NonUserBucketRejected(t *testing.T) {
+// TestDownload_FeatureBucketFirstSegment 验证普通下载（无 kind）对功能桶名首段路径
+// 解析到 user/ 桶（UserRel 首段功能桶名合法，user/ 前缀物理隔离）：文件不存在 → 404，
+// 存在则正常下载。普通 user 文件不受影响。
+func TestDownload_FeatureBucketFirstSegment(t *testing.T) {
 	env := newOwnerEnv(t)
 	for _, name := range []string{"cloud/t1/f.bin", "archive/x.tar.gz", "chunk/s/00000.chunk", "meta/cloud/t1.json"} {
 		code := env.doGet(t, "alice", "/download?filename="+url.QueryEscape(name))
-		if code != http.StatusBadRequest {
-			t.Fatalf("%q 应 400, got %d", name, code)
+		if code != http.StatusNotFound {
+			t.Fatalf("%q 应 404（解析到 user/ 桶且文件不存在）, got %d", name, code)
 		}
 	}
 
@@ -86,5 +87,18 @@ func TestDownload_NonUserBucketRejected(t *testing.T) {
 	code := env.doGet(t, "alice", "/download?filename=normal.txt")
 	if code != http.StatusOK {
 		t.Fatalf("普通下载应 200, got %d", code)
+	}
+
+	// 功能桶名首段在 user/ 桶内是合法用户路径：<root>/alice/user/cloud/t1/f.bin 可正常下载。
+	cloudFile := filepath.Join(env.root, "alice", "user", "cloud", "t1", "f.bin")
+	if err := os.MkdirAll(filepath.Dir(cloudFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cloudFile, []byte("cloud data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code = env.doGet(t, "alice", "/download?filename=cloud/t1/f.bin")
+	if code != http.StatusOK {
+		t.Fatalf("功能桶名首段文件应 200, got %d", code)
 	}
 }

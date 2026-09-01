@@ -31,7 +31,7 @@ func parseRenameParams(r *http.Request) (from, to, checksum string, err error) {
 	if err != nil {
 		return "", "", "", fmt.Errorf("无效的目标路径")
 	}
-	// 写入侧守卫已收敛：UserRel 保证 user/ 桶内（首段为功能桶名或 .__ 前缀时拒绝），
+	// 写入侧守卫已收敛：UserRel 保证 user/ 桶内（首段 .__/__ 内部前缀时拒绝），
 	// 无需再单独校验 isInternalDirPathPrefix。
 	checksum = r.Header.Get(headerFileChecksum)
 	return from, to, checksum, nil
@@ -137,7 +137,7 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op 
 		result.Message = "无效的目标路径"
 		return result
 	}
-	// 写入侧守卫已收敛：UserRel 保证 user/ 桶内（首段为功能桶名或 .__ 前缀时拒绝）。
+	// 写入侧守卫已收敛：UserRel 保证 user/ 桶内（首段 .__/__ 内部前缀时拒绝）。
 	if from == to {
 		result.Success = true
 		result.Message = "源与目标相同，无需移动"

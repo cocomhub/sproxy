@@ -92,7 +92,8 @@ func TestSafePath_OwnerIsolation(t *testing.T) {
 // 普通下载/stat（无 kind）访问服务端内部目录首段必须被拒——否则任何持有有效 AK 的
 // 租户可经 GET /download?filename=.__cloud__/<taskID>/<file> 跨租户读取他人云端文件。
 // 迁移到 Tenant API 后拦截点收敛到 Tenant.UserRel：逐段 ValidSegmentName 拒绝 .__
-// 内部前缀（首段或深层），首段功能桶名（cloud/archive/chunk/meta/user/version）同样拒绝。
+// 内部前缀（首段或深层）；功能桶名作为用户路径首段合法（user/ 桶内物理隔离），
+// 不在此列（见 TestDownload_FeatureBucketFirstSegment）。
 func TestDownload_RejectsInternalDirPrefix(t *testing.T) {
 	tmpDir := t.TempDir()
 	h := newAssemblyTestHandlers(t, tmpDir)

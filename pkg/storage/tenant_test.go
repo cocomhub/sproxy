@@ -35,8 +35,8 @@ func TestTenant_UserRel(t *testing.T) {
 	if _, ok := tnt.UserRel("__version__/x"); ok {
 		t.Fatalf("非 user 桶前缀输入应拒绝")
 	}
-	if _, ok := tnt.UserRel("cloud/x"); ok {
-		t.Fatalf("用户不得触碰功能桶")
+	if rel, ok := tnt.UserRel("cloud/x"); !ok || rel != "user/cloud/x" {
+		t.Fatalf("功能桶名首段应解析到 user/ 桶: %q,%v", rel, ok)
 	}
 	if rel, ok := tnt.FeatureRel("cloud", "t1/f.bin"); !ok || rel != "cloud/t1/f.bin" {
 		t.Fatalf("FeatureRel=%q,%v", rel, ok)
@@ -64,10 +64,11 @@ func TestTenant_UserRel_Extra(t *testing.T) {
 		{"./x", false, ""},
 		{"a/../b", false, ""},
 		{"CON.txt", false, ""},                    // 保留设备名段
-		{"meta/x", false, ""},                     // 功能桶名首段且带子路径拒绝
-		{"user/x", false, ""},                     // user 桶名首段且带子路径拒绝
-		{"__x/y", false, ""},                      // __ 遗留前缀首段且带子路径拒绝
-		{"cloud", true, "user/cloud"},             // 单段功能桶名是用户合法命名（user/ 前缀物理隔离）
+		{"meta/x", true, "user/meta/x"},           // 功能桶名首段合法（user/ 桶内物理隔离）
+		{"user/x", true, "user/user/x"},           // user 桶名首段合法（user/user 是用户命名空间）
+		{"cloud/x", true, "user/cloud/x"},         // 功能桶名首段带子路径合法
+		{"__x/y", false, ""},                      // __ 遗留前缀首段拒绝
+		{"cloud", true, "user/cloud"},             // 单段功能桶名合法
 		{"archive", true, "user/archive"},         // 同上
 		{"meta", true, "user/meta"},               // 同上
 		{"dir/cloud/x", true, "user/dir/cloud/x"}, // 深层功能桶名合法（物理隔离保证）

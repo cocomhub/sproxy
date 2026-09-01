@@ -106,7 +106,7 @@ type downloadPath struct {
 //
 //   - kind 为空 → 普通下载：ValidateFilePath 校验 + Tenant.UserRel 映射到 user 桶，
 //     返回租户与根内相对路径（后续经 tenant.Root().Open/Stat 打开）。租户不可用或
-//     UserRel 拒绝（非 user 桶前缀 / .__ 内部前缀 / 非法段名）→ 400（downloadPathError）。
+//     UserRel 拒绝（.__/__ 内部前缀 / 非法段名）→ 400（downloadPathError）。
 //   - kind=cloud_archive → 归档名（单文件名），旧布局 uploadsDir/.__cloud_archives__/[owner/]/<name>。
 //   - kind=cloud_task → 云任务文件（任务归属校验），旧布局 uploadsDir/.__cloud__/<taskID>/<file>。
 //   - 其它 kind → 400（白名单，防任意内部目录访问）。
@@ -125,7 +125,7 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 		}
 		// 读取侧守卫（审查 #4 收敛 + 审查 I-1）：普通下载/stat 不得访问非 user 桶路径。
 		// UserRel 内部：NormalizeRemote + 逐段 ValidSegmentName（拒绝 .__ 内部前缀、
-		// Windows 保留设备名等）+ 首段功能桶名/__ 前缀拒绝（cloud/archive/chunk/meta 等）。
+		// Windows 保留设备名等）+ 首段 __ 遗留前缀拒绝；功能桶名首段合法（user/ 桶内）。
 		tnt := h.tenantOf(r)
 		if tnt == nil {
 			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}

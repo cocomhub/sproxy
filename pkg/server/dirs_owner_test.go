@@ -4,9 +4,9 @@
 package server
 
 // dirs_owner_test.go 验证 mkdir/rmdir 迁移到 Tenant API 后的新布局行为：
-// 用户目录映射到 <root>/<owner>/user/<rel>；功能桶名（cloud 等）作为单段目录名
-// 是用户合法命名（user/ 前缀物理隔离，不与功能桶冲突）；rmdir 递归删除并清理
-// per-tenant checksum 记录（key = rel，无 owner 前缀）。
+// 用户目录映射到 <root>/<owner>/user/<rel>；功能桶名（cloud 等）作为用户路径首段
+// 完全合法（user/ 前缀物理隔离，不与功能桶冲突）；rmdir 递归删除并清理 per-tenant
+// checksum 记录（key = rel，无 owner 前缀）。
 
 import (
 	"net/http"
