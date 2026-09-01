@@ -21,7 +21,8 @@ import (
 )
 
 // resolveMockDownloadFile 解析 mock 下载文件路径：kind=cloud_archive 时归档在
-// .__cloud_archives__ 子目录（与服务端行为一致），否则 filename 直接拼接。
+// .__cloud_archives__ 子目录（与服务端行为一致；cloudArchiveDirName 定义见
+// archive_download_test.go），否则 filename 直接拼接。
 func resolveMockDownloadFile(dir string, r *http.Request) string {
 	filename := r.URL.Query().Get("filename")
 	if r.URL.Query().Get("kind") == DownloadKindCloudArchive {

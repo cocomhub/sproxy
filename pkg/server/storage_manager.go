@@ -178,14 +178,15 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		}
 		if d.IsDir() {
 			base := filepath.Base(path)
-			// 内部存储目录（.__chunked__、.__versions__、.__cloud__、.__cloud_archives__）
-			// 需要进入统计；其他 .__ 开头的元数据目录跳过。
-			// 注意：__cloud_archives__ 归档文件必须计入 cloud 分类（下方
-			// case strings.HasPrefix(rel, cloudArchiveDirName+"/") 依赖此处不跳过），
-			// 否则 max_storage_bytes 配额会漏计归档文件。
-			if strings.HasPrefix(base, ".__") &&
-				base != chunkedDirName && base != versionsDirName && base != cloudDirName &&
-				base != cloudArchiveDirName {
+			// 仅跳过服务端任务状态持久化目录（.__downloads__ 云任务 / .__sync__ 同步任务）
+			// ——这些不是用户文件，不计入配额。
+			// 审查 R2：此前跳过"任意非已知内部存储目录的 .__ 前缀目录"，用户可通过
+			// upload/mkdir 自建深层 .__ 目录（如 dir/.__foo/，ValidateFilePath 只拦
+			// internalDirNames 集合）→ 其文件被 SkipDir 漏计配额（配额规避）。现改为
+			// 除任务状态目录外一律进入统计：已知内部存储目录（.__chunked__/.__versions__/
+			// .__cloud__/.__cloud_archives__）需进入以按下方分类；其余 .__ 目录按用户
+			// 文件计入 userFiles。
+			if base == downloadsDirName || base == ".__sync__" {
 				return filepath.SkipDir
 			}
 			return nil

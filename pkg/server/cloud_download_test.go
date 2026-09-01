@@ -384,8 +384,9 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 	os.MkdirAll(cloudDir, 0755)
 	os.WriteFile(filepath.Join(cloudDir, "cleanup.zip"), []byte("test data"), 0644)
 
-	// 写入 checksum（owner 作用域且不含 .__cloud__ 段的 key，与写端一致，审查 M1）
-	remotePath := filepath.Join(task.ID, "cleanup.zip")
+	// 写入 checksum（owner 作用域且不含 .__cloud__ 段的 key，与写端一致，审查 M1；
+	// ToSlash 归一，对齐删除端 key，Windows 兼容）
+	remotePath := filepath.ToSlash(filepath.Join(task.ID, "cleanup.zip"))
 	cs.Set(checksumStoreKey(task.Owner, remotePath), "abc123")
 
 	// 验证存储使用量 > 0

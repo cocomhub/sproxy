@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -82,13 +83,66 @@ func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64
 	return totalFiles, totalSize
 }
 
+// walkUploadStatsByCategory 遍历 root 统计用户文件与分类用量（chunked/versions/cloud）。
+// 与 walkUploadStats 不同：不跳过内部目录，而是按 rel 路径分类计数（对齐 StorageManager
+// 分类语义）；跳过服务端任务状态持久化目录（.__downloads__/.__sync__）。
+// 多租户（审查 M5 收敛）：认证用户 stats 的分类字段应只含自己 owner 根下的用量——
+// cloud 分类在 owner 根下恒为 0（云任务文件存全局 .__cloud__，与 owner 根无关）。
+func (h *Handlers) walkUploadStatsByCategory(root string) (userFiles, chunked, versions, cloud int64) {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
+			return nil
+		}
+		if d.IsDir() {
+			// 服务端任务状态持久化目录不计入配额（对齐 storage_manager 扫描）
+			if base := d.Name(); base == downloadsDirName || base == ".__sync__" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == ".checksums.json" {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		size := info.Size()
+		switch {
+		case hasInternalDirAtAnyDepth(rel, chunkedDirName):
+			chunked += size
+		case hasInternalDirAtAnyDepth(rel, versionsDirName):
+			versions += size
+		case strings.HasPrefix(rel, cloudDirName+"/"):
+			cloud += size
+		case strings.HasPrefix(rel, downloadsDirName+"/"):
+			cloud += size
+		case strings.HasPrefix(rel, cloudArchiveDirName+"/"):
+			cloud += size
+		default:
+			userFiles += size
+		}
+		return nil
+	})
+	return userFiles, chunked, versions, cloud
+}
+
 // statsHandler 处理 GET /api/stats。
 // 文件数/总大小通过轻量 WalkDir 遍历获取（仅统计用户文件，跳过内部目录），确保实时准确性。
 // 各分类存储使用量由 StorageManager 缓存提供（已由定期扫描校准），避免每次请求遍历全目录计算分类大小。
 // 首次扫描完成前，storageMgr 相关字段返回 503 Service Unavailable。
 //
-// 多租户（审查 M5）：owner 非空（普通认证用户）只统计自己 owner 子目录，避免跨租户
-// 元数据泄露（他人文件数/大小）；空 owner（admin/未认证）仍统计全局总目录（运维指标）。
+// 多租户（审查 M5）：owner 非空（普通认证用户）只统计自己 owner 子目录的文件数/大小，
+// 且分类用量字段（storage_user_files/chunked/versions/cloud）也按 owner 根作用域计算，
+// 避免跨租户元数据泄露（他人用量不可见）；空 owner（admin/未认证）仍统计全局总目录
+// 与 storageMgr 全局缓存（运维指标，快速路径）。
 func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 	m := h.metrics
@@ -116,17 +170,26 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 			TotalFiles: totalFiles,
 			TotalSize:  totalSize,
 		},
-		MaxStorageBytes:  h.storageMgr.MaxBytes(),
-		StorageUsage:     h.storageMgr.Usage(),
-		StorageUserFiles: int64(h.storageMgr.FileCount()),
-		ScannedAt:        scannedAt,
+		MaxStorageBytes: h.storageMgr.MaxBytes(),
+		ScannedAt:       scannedAt,
 	}
 
-	usageByCat := h.storageMgr.UsageByCategory()
-	resp.StorageUserFiles = usageByCat[CategoryUserFiles]
-	resp.StorageChunked = usageByCat[CategoryChunked]
-	resp.StorageVersions = usageByCat[CategoryVersions]
-	resp.StorageCloud = usageByCat[CategoryCloud]
+	// 分类用量：认证用户按 owner 根 WalkDir 分类（防跨租户泄露）；空 owner 用全局缓存。
+	if owner != "" {
+		userFiles, chunked, versions, cloud := h.walkUploadStatsByCategory(root)
+		resp.StorageUserFiles = userFiles
+		resp.StorageChunked = chunked
+		resp.StorageVersions = versions
+		resp.StorageCloud = cloud
+		resp.StorageUsage = userFiles + chunked + versions + cloud
+	} else {
+		usageByCat := h.storageMgr.UsageByCategory()
+		resp.StorageUserFiles = usageByCat[CategoryUserFiles]
+		resp.StorageChunked = usageByCat[CategoryChunked]
+		resp.StorageVersions = usageByCat[CategoryVersions]
+		resp.StorageCloud = usageByCat[CategoryCloud]
+		resp.StorageUsage = h.storageMgr.Usage()
+	}
 
 	if m != nil {
 		resp.ActiveConns = m.ActiveConnections.Load()

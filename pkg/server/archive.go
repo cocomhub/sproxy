@@ -157,6 +157,12 @@ func validateArchiveFiles(files []string, w http.ResponseWriter) ([]string, bool
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的文件路径: " + f}, http.StatusBadRequest)
 			return nil, false
 		}
+		// 读取侧守卫（审查 #4 收敛）：归档源不得引用服务端内部目录（.__cloud__ 等只能
+		// 经 kind 白名单由服务端按 owner 拼接；此处 ValidateFilePath 已不再全局拒绝 .__）。
+		if isInternalDirPathPrefix(relPath) {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "不能访问服务端内部目录（.__ 前缀为服务端保留）: " + f}, http.StatusBadRequest)
+			return nil, false
+		}
 		validated = append(validated, relPath)
 	}
 	return validated, true

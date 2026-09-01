@@ -21,6 +21,11 @@ func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录名: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
+	// 写入侧守卫（审查 #4 收敛）：不得创建服务端内部目录名（.__cloud__ 等保留给服务端）。
+	if isInternalDirPathPrefix(remotePath) {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "不能创建服务端内部目录（.__ 前缀为服务端保留）"}, http.StatusBadRequest)
+		return
+	}
 
 	targetDir := h.safePathFor(r, remotePath)
 	if targetDir == "" {
@@ -48,6 +53,11 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 	remotePath, err := ValidateFilePath(dirname)
 	if err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录名: " + err.Error()}, http.StatusBadRequest)
+		return
+	}
+	// 写入侧守卫（审查 #4 收敛）：不得删除服务端内部目录（防 rmdir 删除 .__cloud__ 等）。
+	if isInternalDirPathPrefix(remotePath) {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "不能删除服务端内部目录（.__ 前缀为服务端保留）"}, http.StatusBadRequest)
 		return
 	}
 

@@ -456,14 +456,15 @@ func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
 	}
 	expected := sha256Hex(content)
 
-	// 模拟 executeDownload 的写端：校验和以 owner 作用域、无 .__cloud__ 段的 key 落库
-	writeKey := checksumStoreKey("ak-A", filepath.Join(task.ID, "a.bin"))
+	// 模拟 executeDownload 的写端：校验和以 owner 作用域、无 .__cloud__ 段的 key 落库。
+	// key 用 ToSlash 归一（写端/删除端/读端统一正斜杠协议，Windows 兼容，见 F2）。
+	writeKey := checksumStoreKey("ak-A", filepath.ToSlash(filepath.Join(task.ID, "a.bin")))
 	env.h.checksumStore.Set(writeKey, expected)
 	if _, ok := env.h.checksumStore.Get(writeKey); !ok {
 		t.Fatalf("写端 key %q 应可读", writeKey)
 	}
 	// 反向断言：旧（错误）密钥格式（含 .__cloud__ 段）不应存在，防止写入端回退
-	if _, ok := env.h.checksumStore.Get(checksumStoreKey("ak-A", filepath.Join(cloudDirName, task.ID, "a.bin"))); ok {
+	if _, ok := env.h.checksumStore.Get(checksumStoreKey("ak-A", filepath.ToSlash(filepath.Join(cloudDirName, task.ID, "a.bin")))); ok {
 		t.Fatalf("错误格式 key（含 .__cloud__）不应被使用")
 	}
 
@@ -486,7 +487,7 @@ func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
 	if err := env.mgr.DeleteTask(task.ID, "ak-A"); err != nil {
 		t.Fatalf("DeleteTask: %v", err)
 	}
-	if _, ok := env.h.checksumStore.Get(checksumStoreKey("ak-A", filepath.Join(task.ID, "a.bin"))); ok {
+	if _, ok := env.h.checksumStore.Get(checksumStoreKey("ak-A", filepath.ToSlash(filepath.Join(task.ID, "a.bin")))); ok {
 		t.Fatalf("删除任务后 checksum 应被清理")
 	}
 }

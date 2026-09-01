@@ -17,9 +17,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
-// cloudArchiveDirName 是服务端云任务归档文件存储子目录，与服务端 cloudArchiveDirName 保持一致。
-const cloudArchiveDirName = ".__cloud_archives__"
-
 // TypeCloudDownload 是云端下载链式操作的类型标识。
 const TypeCloudDownload = "cloud_download"
 

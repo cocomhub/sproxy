@@ -166,6 +166,56 @@ func TestStats_SkipsInternalDirsAtAnyDepth(t *testing.T) {
 	}
 }
 
+// TestStats_OwnerScopedCategories 验证（审查 M5 收敛）：认证用户视角的分类用量只含
+// 自己 owner 根下的文件——owner 根下 .__chunked__/.__versions__ 归对应分类，
+// 全局 .__cloud__（他人/全局云任务文件）不计入认证用户视角（云分类为 0）。
+func TestStats_OwnerScopedCategories(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ownerRoot := filepath.Join(dir, "ak-A")
+	if err := os.MkdirAll(filepath.Join(ownerRoot, ".__versions__", "doc"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(ownerRoot, ".__chunked__"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownerRoot, "user.txt"), []byte("user"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownerRoot, ".__versions__", "doc", "v1"), []byte("ver"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownerRoot, ".__chunked__", "chunk.dat"), []byte("chunk"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// 全局 .__cloud__（他人/全局云任务文件）不属于认证用户视角
+	if err := os.MkdirAll(filepath.Join(dir, ".__cloud__", "t1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".__cloud__", "t1", "a.bin"), []byte("clouddata"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg atomic.Pointer[Config]
+	cfg.Store(&Config{UploadsDir: dir})
+	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
+
+	userFiles, chunked, versions, cloud := h.walkUploadStatsByCategory(ownerRoot)
+	// user.txt=4, versions=3, chunked=5, cloud=0（owner 根下无全局 .__cloud__）
+	if userFiles != 4 {
+		t.Fatalf("userFiles = %d, want 4", userFiles)
+	}
+	if versions != 3 {
+		t.Fatalf("versions = %d, want 3", versions)
+	}
+	if chunked != 5 {
+		t.Fatalf("chunked = %d, want 5", chunked)
+	}
+	if cloud != 0 {
+		t.Fatalf("cloud = %d, want 0（owner 根下不应含全局云任务）", cloud)
+	}
+}
+
 func TestStorageConfig_Put(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, func(cfg *Config) {

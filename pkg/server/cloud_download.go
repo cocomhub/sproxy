@@ -994,9 +994,9 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 		m.logger.Warn("failed to remove persist file", "task_id", id, "error", err)
 	}
 
-	// 清理 checksum（owner 作用域 key，与写入端一致，审查 M1）
+	// 清理 checksum（owner 作用域 key，与写入端一致，审查 M1；ToSlash 归一见写端注释）
 	if m.checksumStore != nil {
-		remotePath := filepath.Join(t.ID, t.Filename)
+		remotePath := filepath.ToSlash(filepath.Join(t.ID, t.Filename))
 		m.checksumStore.Delete(checksumStoreKey(t.Owner, remotePath))
 		m.logger.Debug("checksum deleted", "task_id", id, "remote_path", remotePath)
 	}
@@ -1283,7 +1283,7 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 			m.storage.Release(item.reservedSize, CategoryCloud)
 		}
 		if m.checksumStore != nil {
-			remotePath := filepath.Join(item.taskID, item.filename)
+			remotePath := filepath.ToSlash(filepath.Join(item.taskID, item.filename))
 			m.checksumStore.Delete(checksumStoreKey(item.owner, remotePath))
 		}
 		cleaned++

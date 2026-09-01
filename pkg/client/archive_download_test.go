@@ -18,6 +18,10 @@ import (
 	"time"
 )
 
+// cloudArchiveDirName 测试本地镜像服务端归档存储子目录（服务端常量在 pkg/server，
+// client 包不可 import，此处测试本地定义与服务端布局保持一致）。
+const cloudArchiveDirName = ".__cloud_archives__"
+
 // TestChunkedDownload_WithKindCloudArchive 验证 ChunkedDownload + WithChunkedKind(cloud_archive)
 // 的 stat 与 chunk 请求均带 kind=cloud_archive，且归档内容正确落地。
 func TestChunkedDownload_WithKindCloudArchive(t *testing.T) {

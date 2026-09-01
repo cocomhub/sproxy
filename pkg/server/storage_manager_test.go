@@ -254,15 +254,24 @@ func TestStorageManager_ScanAndRecalculateEmptyDir(t *testing.T) {
 	}
 }
 
-func TestStorageManager_ScanAndRecalculateSkipsHiddenDirs(t *testing.T) {
+func TestStorageManager_ScanAndRecalculateCountsUserHiddenDirs(t *testing.T) {
 	dir := t.TempDir()
 
-	// 创建隐藏目录（以 .__ 开头，但不是已知的存储目录）和普通文件
-	unknownHiddenDir := filepath.Join(dir, ".__unknown_meta__")
+	// 用户自建的未知 .__ 目录（非服务端内部存储目录名）应计入配额（审查 R2）：
+	// 此前任意非已知内部目录的 .__ 前缀目录被 SkipDir → 配额漏计（用户可自建 .__ 目录规避配额）。
+	unknownHiddenDir := filepath.Join(dir, ".__userdir")
 	if err := os.MkdirAll(unknownHiddenDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(unknownHiddenDir, "meta.dat"), []byte("hidden"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// 深层 .__ 用户目录同样计入
+	deep := filepath.Join(dir, "sub", ".__deep")
+	if err := os.MkdirAll(deep, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "d.bin"), []byte("deepfile"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("hello"), 0644); err != nil {
@@ -270,10 +279,34 @@ func TestStorageManager_ScanAndRecalculateSkipsHiddenDirs(t *testing.T) {
 	}
 
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	// 未知的 .__ 目录下的文件不应计入
-	// visible.txt = 5 bytes
-	if sm.Usage() != 5 {
-		t.Fatalf("expected Usage=5 (only visible files), got %d", sm.Usage())
+	// hidden(6) + deepfile(8) + hello(5) = 19
+	if got := sm.Usage(); got != 19 {
+		t.Fatalf("expected Usage=19 (用户 .__ 目录计入配额), got %d", got)
+	}
+}
+
+func TestStorageManager_ScanAndRecalculateSkipsTaskStateDirs(t *testing.T) {
+	dir := t.TempDir()
+
+	// 服务端任务状态目录（.__downloads__ / .__sync__）不计入配额（非用户文件）
+	for _, d := range []string{".__downloads__", ".__sync__"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".__downloads__", "task.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".__sync__", "sync.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	if got := sm.Usage(); got != 5 {
+		t.Fatalf("expected Usage=5 (任务状态目录跳过), got %d", got)
 	}
 }
 
