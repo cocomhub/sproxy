@@ -7,11 +7,12 @@ require (
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.0.0
 	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.0.0
-	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0-20260728025421-d6b205ef75ab
-	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0-20260728025421-d6b205ef75ab
+	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0
+	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -50,7 +51,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace github.com/cocomhub/sproxy => ../../
