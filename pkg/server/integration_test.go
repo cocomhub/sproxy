@@ -36,9 +36,14 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	t.Helper()
 
 	tmpDir := t.TempDir()
+	// 新布局根用独立 temp 目录：RegisterRoutes 会在存储根写入 LAYOUT_VERSION 并预创建
+	// anonymous 租户根。旧布局 handler（list/stats 等）枚举 cfg.UploadsDir，若两者同目录
+	// 会看到这些新布局产物导致断言失败（P2 各 handler 迁移到 Tenant API 后再合并）。
+	storageRoot := t.TempDir()
 
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
+	cfg.StorageRootPath = storageRoot
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}
@@ -882,9 +887,12 @@ func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
 func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config]) {
 	t.Helper()
 	tmpDir := t.TempDir()
+	// 新布局根用独立 temp 目录（同 newTestServer：隔离 LAYOUT_VERSION/anonymous 对旧 handler 枚举的污染）。
+	storageRoot := t.TempDir()
 
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
+	cfg.StorageRootPath = storageRoot
 	cfg.ChunkSize = 4 << 10 // 4 KiB for testing
 	cfg.LogLevel = "error"
 	if modifyCfg != nil {

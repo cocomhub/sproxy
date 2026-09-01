@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -363,6 +364,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		displayHost = "127.0.0.1"
 	}
 	fmt.Printf("downserver start at: %s://%s:%s\n", protocol, displayHost, displayPort)
+	fmt.Printf("storage root: %s\n", cfg.StorageRoot())
 	fmt.Printf("uploads dir: %s\n", cfg.UploadsDir)
 
 	srv := createHTTPServer(cfg, h.Handler())
@@ -733,6 +735,16 @@ func handleSighup(oldCfg *server.Config) {
 	}
 	if oldCfg.UploadsDir != newCfg.UploadsDir {
 		slog.Warn("uploads_dir 修改在 SIGHUP 后不会生效（ChecksumStore 不重建），需要重启进程", "old", oldCfg.UploadsDir, "new", newCfg.UploadsDir)
+	}
+	// storage_root / owner_quotas 是多租户布局装配期消费的硬配置（OpenRoot + 配额 Scope 在建时
+	// 固定），SIGHUP 后不重建 → 需重启进程。viper 键 storage_root/owner_quotas 由
+	// LoadFromProvider 的 yaml/mapstructure 标签自动解码；环境变量 SPROXY_STORAGE_ROOT /
+	// SPROXY_OWNER_QUOTAS 由 sproxycfg.New 的 AutomaticEnv 自动绑定。
+	if oldCfg.StorageRoot() != newCfg.StorageRoot() {
+		slog.Warn("storage_root 修改在 SIGHUP 后不会生效（存储根不重建），需要重启进程", "old", oldCfg.StorageRoot(), "new", newCfg.StorageRoot())
+	}
+	if !maps.Equal(oldCfg.OwnerQuotas, newCfg.OwnerQuotas) {
+		slog.Warn("owner_quotas 修改在 SIGHUP 后不会生效（配额 Scope 不重建），需要重启进程")
 	}
 	if oldCfg.RateLimit != newCfg.RateLimit {
 		slog.Warn("rate_limit 修改在 SIGHUP 后不会生效，需要重启进程")

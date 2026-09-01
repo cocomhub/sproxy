@@ -29,8 +29,7 @@ func noRedirectClient() *http.Client {
 func TestHubNodesHandler_Disabled(t *testing.T) {
 	t.Parallel()
 
-	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(Default())
+	cfgPtr := newTestCfgPtr(t.TempDir())
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
 		Mux:     mux,
@@ -60,8 +59,7 @@ func TestHubNodesHandler_Disabled(t *testing.T) {
 func TestHubStatsHandler_Disabled(t *testing.T) {
 	t.Parallel()
 
-	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(Default())
+	cfgPtr := newTestCfgPtr(t.TempDir())
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
 		Mux:     mux,
@@ -91,6 +89,7 @@ func TestHubNodesHandler_Enabled(t *testing.T) {
 
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfg := Default()
+	cfg.UploadsDir = t.TempDir()
 	cfg.Hub.Enabled = true
 	cfg.Hub.NodeID = "test-node"
 	cfgPtr.Store(cfg)
@@ -137,6 +136,7 @@ func TestHubRemoveNodeHandler_Enabled(t *testing.T) {
 
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfg := Default()
+	cfg.UploadsDir = t.TempDir()
 	cfg.Hub.Enabled = true
 	cfgPtr.Store(cfg)
 
@@ -179,6 +179,7 @@ func TestHubStatsHandler_Enabled(t *testing.T) {
 
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfg := Default()
+	cfg.UploadsDir = t.TempDir()
 	cfg.Hub.Enabled = true
 	cfg.Hub.NodeID = "test-node"
 	cfgPtr.Store(cfg)
@@ -222,6 +223,7 @@ func TestHubNodesHandler_MeshIsolation(t *testing.T) {
 	)
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfg := Default()
+	cfg.UploadsDir = t.TempDir()
 	cfg.Hub.Enabled = true
 	cfg.AccessKeys = []AccessKeyConfig{{Key: akA, Secret: sk}, {Key: akB, Secret: sk}}
 	cfgPtr.Store(cfg)

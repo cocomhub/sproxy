@@ -10,12 +10,15 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
@@ -66,6 +69,17 @@ type Handlers struct {
 	uploadingWg    sync.WaitGroup       // 等待 cleanupUploadingFilesLoop 退出
 	closeOnce      sync.Once            // 防止 Close() 重复关闭 channel
 	noncePool      *sproxysig.NoncePool // SproxySig nonce 防重放池
+
+	// 多租户存储布局装配（任务 4，供 P2/P3 各 handler 迁移复用）。
+	// globalRoot 是 OpenRoot 后的全局存储根（含 LAYOUT_VERSION 校验）；
+	// globalPool 是全局配额池（cfg.MaxStorageBytes 兜底）。租户/checksum/配额均懒创建并缓存，
+	// tenantMu 串行化懒创建（无竞态）；P2 各 handler 逐个切换到 tenantOf/checksumStoreFor/quotaFor。
+	globalRoot     *storage.Root              // 全局存储根（OpenRoot + LAYOUT_VERSION）
+	globalPool     *quota.Pool                // 全局配额池（cfg.MaxStorageBytes 兜底）
+	tenantRoots    map[string]*storage.Tenant // 按 owner 缓存租户（含 anonymous；懒创建）
+	checksumStores map[string]*ChecksumStore  // 按 owner 缓存 per-tenant checksum 存储
+	quotaScopes    map[string]*quota.Scope    // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
+	tenantMu       sync.Mutex                 // 串行化 tenantRoots/checksumStores/quotaScopes 懒创建
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -108,6 +122,121 @@ func (h *Handlers) LocalHandler() http.Handler {
 	return h.localHandler
 }
 
+// anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。
+const anonymousOwner = "anonymous"
+
+// normalizeOwner 把空 owner 归一为 anonymous 租户名（未认证请求的默认租户）。
+func normalizeOwner(owner string) string {
+	if owner == "" {
+		return anonymousOwner
+	}
+	return owner
+}
+
+// tenantFor 返回 owner 的租户（空 owner → anonymous）。懒创建：首次访问按 owner 打开
+// <storage_root>/<owner>/ 子根并建租户（ValidSegmentName fail-closed，非法返回 nil）；
+// 已创建的缓存复用。globalRoot 未装配（或已关闭）时返回 nil。
+//
+// 注意：不预先为配置中所有 owner 建租户——首次请求时才建；anonymous 由 RegisterRoutes
+// 启动时预创建（保证默认租户根存在）。
+func (h *Handlers) tenantFor(owner string) *storage.Tenant {
+	owner = normalizeOwner(owner)
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if t, ok := h.tenantRoots[owner]; ok {
+		return t
+	}
+	if h.globalRoot == nil {
+		return nil
+	}
+	// fail-closed：owner 必须先过段名校验，再派生磁盘路径（防 Windows 保留字/穿越）。
+	if !storage.ValidSegmentName(owner) {
+		h.logger.Warn("非法租户名，拒绝创建（fail-closed）", "owner", owner)
+		return nil
+	}
+	abs, ok := h.globalRoot.Abs(owner)
+	if !ok {
+		h.logger.Warn("租户路径越界，拒绝创建（fail-closed）", "owner", owner)
+		return nil
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		h.logger.Warn("创建租户根目录失败", "owner", owner, "error", err)
+		return nil
+	}
+	tenantRoot, err := storage.OpenRoot(abs)
+	if err != nil {
+		h.logger.Warn("打开租户子根失败（fail-closed）", "owner", owner, "error", err)
+		return nil
+	}
+	t, err := storage.NewTenant(owner, tenantRoot)
+	if err != nil {
+		h.logger.Warn("创建租户失败（fail-closed）", "owner", owner, "error", err)
+		_ = tenantRoot.Close()
+		return nil
+	}
+	// 确保 meta 桶存在（供 per-tenant checksum / meta 记录写入）。
+	if err := tenantRoot.MkdirAll("meta", 0o755); err != nil {
+		h.logger.Warn("创建租户 meta 目录失败", "owner", owner, "error", err)
+		_ = tenantRoot.Close()
+		return nil
+	}
+	h.tenantRoots[owner] = t
+	return t
+}
+
+// tenantOf 返回请求者 owner 的租户（owner 空 → anonymous 租户）。构造失败返回 nil
+// （调用方按 400 处理，绝不回落全局根）。
+func (h *Handlers) tenantOf(r *http.Request) *storage.Tenant {
+	return h.tenantFor(ownerFromRequest(r))
+}
+
+// checksumStoreFor 返回 owner 的 per-tenant checksum 存储（懒创建，缓存到 map）。
+// storePath = <tenant meta>/checksums.json；获取不到租户（非法 owner / 根不可用）返回 nil。
+// P2 各 handler 迁移时逐个从全局 h.checksumStore 切换到本方法（本任务只新增能力，不改现有用法）。
+func (h *Handlers) checksumStoreFor(owner string) *ChecksumStore {
+	owner = normalizeOwner(owner)
+	// 先取租户（内部锁 tenantMu，懒创建租户根 + meta 目录）。
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		return nil
+	}
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if cs, ok := h.checksumStores[owner]; ok {
+		return cs
+	}
+	metaAbs, ok := tnt.Root().Abs("meta")
+	if !ok {
+		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
+		return nil
+	}
+	cs := NewChecksumStoreAt(filepath.Join(metaAbs, "checksums.json"), h.logger)
+	h.checksumStores[owner] = cs
+	return cs
+}
+
+// quotaFor 返回 owner 的 per-tenant 配额 Scope（懒创建，缓存到 map）。路径为
+// /tenant/<owner>，上限 = cfg.OwnerQuotaFor(owner)（显式 owner > "*" 默认 > 0；
+// anonymous 用 OwnerQuotaFor("anonymous")）。globalPool 未装配时返回 nil。
+func (h *Handlers) quotaFor(owner string) *quota.Scope {
+	owner = normalizeOwner(owner)
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if s, ok := h.quotaScopes[owner]; ok {
+		return s
+	}
+	if h.globalPool == nil {
+		return nil
+	}
+	var quotaBytes int64
+	if cfg := h.cfgPtr.Load(); cfg != nil {
+		quotaBytes = cfg.OwnerQuotaFor(owner)
+	}
+	s := h.globalPool.Scope("/tenant/"+owner, quotaBytes)
+	h.quotaScopes[owner] = s
+	return s
+}
+
 // RegisterRoutesOpts 是 RegisterRoutes 的选项参数结构体。
 type RegisterRoutesOpts struct {
 	Mux        *http.ServeMux
@@ -144,6 +273,21 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		auditLogger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
+	// 打开全局存储根（多租户布局：<storage_root>/<tenant>/{user,cloud,...}/）。
+	// 目录不存在时先创建（原 uploads_dir 也是惰性创建）；storage.OpenRoot 会写入/校验
+	// LAYOUT_VERSION。失败（目录无法打开 / 布局版本不匹配）是致命装配错误：记 Error 并
+	// panic 拒绝启动，绝不静默继续（否则文件服务会在错误的存储根上运行）。
+	storageRootPath := cfg.StorageRoot()
+	if err := os.MkdirAll(storageRootPath, 0o755); err != nil {
+		log.Error("创建存储根目录失败", "path", storageRootPath, "error", err)
+		panic("创建存储根目录失败: " + err.Error())
+	}
+	globalRoot, err := storage.OpenRoot(storageRootPath)
+	if err != nil {
+		log.Error("打开存储根失败（LAYOUT_VERSION 校验或目录不可用）", "path", storageRootPath, "error", err)
+		panic("打开存储根失败: " + err.Error())
+	}
+
 	// 初始化 ChecksumStore
 	cs := NewChecksumStore(cfg.UploadsDir, log.With("component", "checksum_store"))
 
@@ -163,6 +307,18 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		hubID:         cfg.Hub.NodeID,
 		uploadingStop: make(chan struct{}),
 		noncePool:     sproxysig.NewNoncePool(),
+	}
+	// 装配多租户存储布局：全局配额池 + 懒创建缓存 + 预创建 anonymous 租户。
+	// tenantRoots/checksumStores/quotaScopes 均为懒创建（首次请求时建），见 tenantFor 等辅助。
+	h.globalRoot = globalRoot
+	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
+	h.tenantRoots = make(map[string]*storage.Tenant)
+	h.checksumStores = make(map[string]*ChecksumStore)
+	h.quotaScopes = make(map[string]*quota.Scope)
+	if h.tenantFor(anonymousOwner) == nil {
+		// anonymous 是未认证请求的默认兜底租户，创建失败意味着存储根不可用，拒绝启动。
+		log.Error("预创建 anonymous 租户失败，存储根不可用")
+		panic("预创建 anonymous 租户失败")
 	}
 	h.signalBroker.SetPersister(opts.HubPersist)
 
@@ -485,6 +641,19 @@ func (h *Handlers) Close() error {
 		if err := h.hubPersist.FlushFn(func() *hub.Snapshot { return h.snapshotCurrent() }); err != nil {
 			h.logger.Error("shutdown: hub 状态最终落盘失败", "err", err)
 		}
+	}
+	// 关闭多租户存储根：先关各租户子根（懒创建缓存），再关全局根。置 nil 防重复 Close。
+	h.tenantMu.Lock()
+	for _, tnt := range h.tenantRoots {
+		if tnt != nil && tnt.Root() != nil {
+			_ = tnt.Root().Close()
+		}
+	}
+	h.tenantRoots = map[string]*storage.Tenant{}
+	h.tenantMu.Unlock()
+	if h.globalRoot != nil {
+		_ = h.globalRoot.Close()
+		h.globalRoot = nil
 	}
 	return nil
 }

@@ -248,8 +248,19 @@ type SyncRemoteConfig struct {
 }
 
 type Config struct {
-	Addr       string `yaml:"addr" mapstructure:"addr"`
+	Addr string `yaml:"addr" mapstructure:"addr"`
+	// UploadsDir 保留字段（兼容读旧配置）；新布局存储根由 StorageRoot 决定。
+	// 为空时 StorageRoot() 回退 UploadsDir。
 	UploadsDir string `yaml:"uploads_dir" mapstructure:"uploads_dir"`
+	// StorageRootPath 是存储根目录（新布局 <root>/<tenant>/{user,cloud,...}/）。非空优先；
+	// 为空时 StorageRoot() 回退 UploadsDir（兼容只配 uploads_dir 的旧配置）。
+	// 建议新配置显式设置（默认值 ./storage）。注意：字段名避开 StorageRoot——同名方法
+	// StorageRoot() 提供回退逻辑（Go 不允许字段与同名方法共存），YAML 键仍为 storage_root。
+	StorageRootPath string `yaml:"storage_root" mapstructure:"storage_root"`
+	// OwnerQuotas 是 per-tenant 配额上限（字节），key 为 owner 名（含 "anonymous"），
+	// "*" 为默认值（未显式列出的 owner 用此值）；0 = 不限制。
+	// 启动装配时按此创建各租户的配额 Scope（quotaFor 懒创建）。
+	OwnerQuotas map[string]int64 `yaml:"owner_quotas" mapstructure:"owner_quotas"`
 	// MaxUploadBytes 已移至 internal/size.UploadBodyLimit（1 GiB 硬限制），不可配置。
 	// MaxChunkUploadBytes 已移至 internal/size.DefaultChunkBodyLimit（64 MiB 硬限制），不可配置。
 	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`
@@ -304,10 +315,33 @@ type Config struct {
 	CloudArchiveMaxBytes int64 `yaml:"cloud_archive_max_bytes" mapstructure:"cloud_archive_max_bytes"`
 }
 
+// StorageRoot 返回存储根目录：StorageRootPath 字段非空优先，否则回退 UploadsDir（兼容旧配置）。
+func (c *Config) StorageRoot() string {
+	if c.StorageRootPath != "" {
+		return c.StorageRootPath
+	}
+	return c.UploadsDir
+}
+
+// OwnerQuotaFor 返回指定 owner 的配额上限（字节）：显式 owner 配置 > "*" 默认值 > 0。
+// 未配置任何 owner_quotas 时返回 0（不限制）。
+func (c *Config) OwnerQuotaFor(owner string) int64 {
+	if c.OwnerQuotas == nil {
+		return 0
+	}
+	if v, ok := c.OwnerQuotas[owner]; ok {
+		return v
+	}
+	return c.OwnerQuotas["*"]
+}
+
 func Default() *Config {
 	return &Config{
 		Addr:       ":18083",
 		UploadsDir: "./uploads",
+		// StorageRootPath 故意留空：由 StorageRoot() 回退 UploadsDir，保证旧配置
+		// （只配 uploads_dir）与既有测试辅助（cfg.UploadsDir = tmpDir）继续工作。
+		// 新配置显式设 storage_root 后优先。
 		ServerTimeouts: ServerTimeouts{
 			Shutdown: 30 * time.Second,
 		},

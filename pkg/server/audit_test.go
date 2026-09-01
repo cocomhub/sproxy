@@ -31,9 +31,12 @@ import (
 func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config], *bytes.Buffer) {
 	t.Helper()
 	tmpDir := t.TempDir()
+	// 新布局根用独立 temp 目录（同 newTestServer：隔离 LAYOUT_VERSION/anonymous 对旧 handler 枚举的污染）。
+	storageRoot := t.TempDir()
 
 	cfg := Default()
 	cfg.UploadsDir = tmpDir
+	cfg.StorageRootPath = storageRoot
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	if modifyCfg != nil {
 		modifyCfg(cfg)

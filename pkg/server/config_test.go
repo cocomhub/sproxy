@@ -538,6 +538,71 @@ func TestLoadFromProvider_HubDHTPersistFile(t *testing.T) {
 	}
 }
 
+// TestConfig_StorageRoot 验证 storage_root 回退与 owner_quotas 默认值逻辑（任务 4）。
+// StorageRoot() 字段非空优先，否则回退 UploadsDir（兼容旧配置）；OwnerQuotaFor 显式 owner > "*" > 0。
+func TestConfig_StorageRoot(t *testing.T) {
+	c := Default()
+	c.UploadsDir = "./storage"
+	if c.StorageRoot() != "./storage" {
+		t.Fatalf("StorageRoot=%q", c.StorageRoot())
+	}
+	// OwnerQuotaFor：未配置返回默认值
+	if got := c.OwnerQuotaFor("alice"); got != 0 {
+		t.Fatalf("OwnerQuotaFor(默认)=%d want 0", got)
+	}
+	c.OwnerQuotas = map[string]int64{"*": 5 << 30, "alice": 10 << 30}
+	if got := c.OwnerQuotaFor("alice"); got != 10<<30 {
+		t.Fatalf("OwnerQuotaFor(alice)=%d", got)
+	}
+	if got := c.OwnerQuotaFor("bob"); got != 5<<30 {
+		t.Fatalf("OwnerQuotaFor(bob 默认*)=%d", got)
+	}
+}
+
+// TestLoadFromProvider_StorageRootOwnerQuotas 验证 YAML 解析 storage_root/owner_quotas 配置
+// （owner_quotas 值为字节数整数；"*" 为默认值）。
+func TestLoadFromProvider_StorageRootOwnerQuotas(t *testing.T) {
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"storage_root": "./storage",
+		"owner_quotas": map[string]any{"*": int64(5 << 30), "alice": int64(10 << 30)},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if cfg.StorageRoot() != "./storage" {
+		t.Fatalf("StorageRoot()=%q want ./storage", cfg.StorageRoot())
+	}
+	if got := cfg.OwnerQuotaFor("alice"); got != 10<<30 {
+		t.Fatalf("OwnerQuotaFor(alice)=%d want %d", got, 10<<30)
+	}
+	if got := cfg.OwnerQuotaFor("bob"); got != 5<<30 {
+		t.Fatalf("OwnerQuotaFor(bob)=%d want %d（回退 * 默认）", got, 5<<30)
+	}
+}
+
+// TestLoadFromProvider_UploadsDirFallback 验证仅配置 uploads_dir（旧配置）时 StorageRoot() 回退
+// uploads_dir，保证向后兼容。
+func TestLoadFromProvider_UploadsDirFallback(t *testing.T) {
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{"uploads_dir": "/old/uploads"}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if cfg.StorageRoot() != "/old/uploads" {
+		t.Fatalf("StorageRoot()=%q want /old/uploads（回退 uploads_dir）", cfg.StorageRoot())
+	}
+	// 显式 storage_root 优先于 uploads_dir
+	cfg2, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"uploads_dir":  "/old/uploads",
+		"storage_root": "/new/storage",
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if cfg2.StorageRoot() != "/new/storage" {
+		t.Fatalf("StorageRoot()=%q want /new/storage（storage_root 优先）", cfg2.StorageRoot())
+	}
+}
+
 // TestConfig_VirtualSubnet_Validate 校验 hub.virtual_subnet 校验：非法 CIDR 拒绝、
 // IPv6 拒绝、合法 IPv4 通过。
 func TestConfig_VirtualSubnet_Validate(t *testing.T) {
