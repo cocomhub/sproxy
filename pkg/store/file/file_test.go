@@ -72,17 +72,19 @@ func TestFileStore_RejectUnsafeKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	unsafe := []string{
-		"",       // 空 key
-		"/abs",   // 绝对路径
-		`\abs`,   // Windows 绝对路径
-		"a/../b", // 父目录逃逸
-		"..",     // 根逃逸
-		"../x",   // 根逃逸
-		"a/./b",  // 点段
-		"a//b",   // 空段
-		"a/b/",   // 尾空段
-		"a\\b",   // 段内反斜杠
-		"a/b\\c", // 段内反斜杠
+		"",            // 空 key
+		"/abs",        // 绝对路径
+		`\abs`,        // Windows 绝对路径
+		"a/../b",      // 父目录逃逸
+		"..",          // 根逃逸
+		"../x",        // 根逃逸
+		"a/./b",       // 点段
+		"a//b",        // 空段
+		"a/b/",        // 尾空段
+		"a\\b",        // 段内反斜杠
+		"a/b\\c",      // 段内反斜杠
+		"a.tmp",       // .tmp 保留后缀（会被 List 当临时残留跳过）
+		"cloud/a.tmp", // .tmp 保留后缀（会被 Set("cloud/a") 的临时文件覆盖）
 	}
 	for _, key := range unsafe {
 		if err = st.Set(key, []byte("x")); err == nil {
@@ -141,6 +143,19 @@ func TestFileStore_ListEmptyPrefixMissingDir(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Fatalf("List(不存在的目录)=%d want 0", len(items))
+	}
+}
+
+// TestFileStore_ListAbsolutePrefix 验证绝对路径前缀（/ 或 \ 开头）返回错误。
+func TestFileStore_ListAbsolutePrefix(t *testing.T) {
+	st, err := file.New(store.StoreConfig{Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{"/", "/abs", `\`, `\abs`} {
+		if _, err = st.List(prefix); err == nil {
+			t.Errorf("List(%q) 应返回错误", prefix)
+		}
 	}
 }
 

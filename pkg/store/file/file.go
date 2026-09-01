@@ -196,19 +196,25 @@ func validateKey(key string) error {
 }
 
 // validatePrefix 校验 List 前缀：空前缀合法（遍历整根），其余同 key 校验。
+// 显式拒绝绝对前缀（/ 或 \ 开头），避免 TrimSuffix 后落入空串的模糊语义。
 func validatePrefix(prefix string) error {
 	if prefix == "" {
 		return nil
+	}
+	if strings.HasPrefix(prefix, "/") || strings.HasPrefix(prefix, `\`) {
+		return fmt.Errorf("store/file: 不允许绝对路径前缀: %q", prefix)
 	}
 	return validateSegments(strings.TrimSuffix(prefix, "/"))
 }
 
 // validateSegments 校验协议路径的每个段。
+// 最后一段不允许以 .tmp 结尾（.tmp 是临时文件保留后缀，避免记录与临时文件命名空间冲突）。
 func validateSegments(p string) error {
 	if strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) {
 		return fmt.Errorf("store/file: 不允许绝对路径: %q", p)
 	}
-	for seg := range strings.SplitSeq(p, "/") {
+	segs := strings.Split(p, "/")
+	for i, seg := range segs {
 		if seg == "" {
 			return fmt.Errorf("store/file: 不允许空段: %q", p)
 		}
@@ -217,6 +223,9 @@ func validateSegments(p string) error {
 		}
 		if strings.ContainsAny(seg, `\`) {
 			return fmt.Errorf("store/file: 段内不允许反斜杠: %q", p)
+		}
+		if i == len(segs)-1 && strings.HasSuffix(seg, ".tmp") {
+			return fmt.Errorf("store/file: 最后一段不允许以 .tmp 结尾（保留后缀）: %q", p)
 		}
 	}
 	return nil
