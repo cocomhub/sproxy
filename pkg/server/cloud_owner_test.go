@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // ownerCloudEnv 提供共享 CloudDownloadManager 的多 actor 测试环境：
@@ -564,39 +565,10 @@ func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 	})
 }
 
-// TestValidateSessionOwner_ForgedPrefix 验证 F4 修复：validateSessionOwner 剥离 owner
-// 前缀后必须校验剩余为单一安全段，拒绝伪造前缀（"ak-A/evil"）与含分隔符的 id。
-func TestValidateSessionOwner_ForgedPrefix(t *testing.T) {
-	// 正常：owner 前缀 + 合法 hex 段
-	if orig, ok := validateSessionOwner("ak-A", "ak-A/abcd1234"); !ok || orig != "abcd1234" {
-		t.Fatalf("正常前缀应通过, got %q/%v", orig, ok)
-	}
-	// 未认证：任意合法段直接通过
-	if _, ok := validateSessionOwner("", "abcd1234"); !ok {
-		t.Fatalf("未认证合法段应通过")
-	}
-	// 伪造前缀：认证方 ak-A 试图操作未认证者构造的 "ak-A/evil" → remainder "evil" 合法？
-	// 前端 upload_id 本就是客户端可控，核心问题是"evil"段无法确证归属。
-	// 关键断言：任何含 "/" 的 id（无论是否带 owner 前缀）都因 validUploadID 拒绝。
-	if _, ok := validateSessionOwner("ak-A", "ak-A/evil"); !ok {
-		t.Fatalf("防伪造：单层正常段应仍允许（evil 本身合法）")
-	}
-	// 含嵌套分隔符 → 拒绝
-	if _, ok := validateSessionOwner("ak-A", "ak-A/a/b"); ok {
-		t.Fatalf("含嵌套 '/' 应拒绝")
-	}
-	// 前缀凭空伪造：'"ak-A/..' 路径穿越 → 拒绝
-	if _, ok := validateSessionOwner("ak-A", "ak-A/../evil"); ok {
-		t.Fatalf("含 '..' 应拒绝")
-	}
-	// 前缀不存在 → 拒绝
-	if _, ok := validateSessionOwner("ak-B", "ak-A/abcd"); ok {
-		t.Fatalf("跨 owner 前缀应拒绝")
-	}
-}
-
-// TestValidUploadID 验证 upload_id 格式校验（路径分隔符 / .. / .__ / 控制字符）。
-func TestValidUploadID(t *testing.T) {
+// TestChunkedUploadID_ValidSegmentName 验证 upload_id 过 pkg/storage.ValidSegmentName
+// （段名校验单一权威，任务 12 取代旧 validUploadID）：裸 id 合法；含路径分隔符 / \、
+// ".."、".__" 前缀、Windows 保留设备名、尾点/尾空格被拒（防 chunk 桶目录穿越）。
+func TestChunkedUploadID_ValidSegmentName(t *testing.T) {
 	cases := []struct {
 		id string
 		ok bool
@@ -604,17 +576,18 @@ func TestValidUploadID(t *testing.T) {
 		{"abcd1234", true},
 		{"test-upload-happy", true},
 		{"a/b", false},
-		{"a\b", false},
+		{"a\\b", false},
 		{"..", false},
 		{"a/../b", false},
 		{".__internal", false},
 		{"", false},
-		{strings.Repeat("x", 129), false},
-		{"a\x00b", false},
+		{"CON", false},  // Windows 保留设备名
+		{"foo.", false}, // 尾点（Windows 剥除导致目录合并）
+		{"foo ", false}, // 尾空格
 	}
 	for _, c := range cases {
-		if got := validUploadID(c.id); got != c.ok {
-			t.Fatalf("validUploadID(%q) = %v, want %v", c.id, got, c.ok)
+		if got := storage.ValidSegmentName(c.id); got != c.ok {
+			t.Fatalf("ValidSegmentName(%q) = %v, want %v", c.id, got, c.ok)
 		}
 	}
 }

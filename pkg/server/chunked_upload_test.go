@@ -19,7 +19,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -52,7 +51,6 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 		version:       "test",
 		buildAt:       "test",
 		checksumStore: cs,
-		uploadStore:   MustNewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
 		logger:        slog.Default(),
 		uploadingStop: make(chan struct{}),
 	}
@@ -66,9 +64,13 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenantRoots = make(map[string]*storage.Tenant)
 	h.checksumStores = make(map[string]*ChecksumStore)
+	h.uploadStores = make(map[string]*UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	if h.tenantFor(anonymousOwner) == nil {
 		t.Fatal("创建 anonymous 租户失败")
+	}
+	if h.uploadStoreFor(anonymousOwner) == nil {
+		t.Fatal("创建 anonymous UploadStore 失败")
 	}
 
 	mux := http.NewServeMux()
@@ -365,9 +367,9 @@ func TestUploadComplete_FullFlow(t *testing.T) {
 		t.Fatalf("checksum mismatch: server=%s expected=%s", completeResult.FileChecksum, fileChecksum)
 	}
 
-	// 验证文件已保存
+	// 验证文件已保存（anonymous 租户 user 桶）
 	uploadsDir := cfgPtr.Load().UploadsDir
-	savedPath := filepath.Join(uploadsDir, "full-flow.txt")
+	savedPath := filepath.Join(uploadsDir, "anonymous", "user", "full-flow.txt")
 	if _, err := os.Stat(savedPath); os.IsNotExist(err) {
 		t.Fatalf("saved file not found: %s", savedPath)
 	}
@@ -601,9 +603,9 @@ func TestUploadComplete_SubDir(t *testing.T) {
 		t.Fatalf("expected success, got: %v", completeResult)
 	}
 
-	// 验证文件已创建在子目录中
+	// 验证文件已创建在租户 user 桶子目录中（anonymous 租户）
 	uploadsDir := cfgPtr.Load().UploadsDir
-	savedPath := filepath.Join(uploadsDir, filepath.FromSlash(filename))
+	savedPath := filepath.Join(uploadsDir, "anonymous", "user", filepath.FromSlash(filename))
 	if _, err := os.Stat(savedPath); os.IsNotExist(err) {
 		t.Fatalf("saved file not found at subdirectory path: %s", savedPath)
 	}

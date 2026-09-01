@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,7 +32,6 @@ type Handlers struct {
 	version       string
 	buildAt       string
 	checksumStore ChecksumStoreIface
-	uploadStore   UploadStoreIface
 	tunnelHandler http.Handler
 	// localHandler 是隧道内层本地文件 API handler（localMux + 中间件链，不含外层
 	// 帧解密/密钥检查）。供 xfer listener（阶段 5 工作项 1）直接路由解密后的隧道
@@ -78,8 +78,9 @@ type Handlers struct {
 	globalPool     *quota.Pool                // 全局配额池（cfg.MaxStorageBytes 兜底）
 	tenantRoots    map[string]*storage.Tenant // 按 owner 缓存租户（含 anonymous；懒创建）
 	checksumStores map[string]*ChecksumStore  // 按 owner 缓存 per-tenant checksum 存储
+	uploadStores   map[string]*UploadStore    // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
 	quotaScopes    map[string]*quota.Scope    // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
-	tenantMu       sync.Mutex                 // 串行化 tenantRoots/checksumStores/quotaScopes 懒创建
+	tenantMu       sync.Mutex                 // 串行化 tenantRoots/checksumStores/uploadStores/quotaScopes 懒创建
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -215,6 +216,45 @@ func (h *Handlers) checksumStoreFor(owner string) *ChecksumStore {
 	return cs
 }
 
+// uploadStoreFor 返回 owner 的 per-tenant 分块上传存储（懒创建，缓存到 map）。
+// 存储根 = 租户根下 chunk 桶（<root>/<owner>/chunk/，经 Tenant.Root().Abs("chunk")
+// 派生绝对路径）。每租户独立 UploadStore 实例 → 会话天然物理隔离（会话目录
+// <root>/<owner>/chunk/<uploadID>/），upload_id 无需 owner 前缀；跨租户同裸 id 互不可见。
+// 获取不到租户（非法 owner / 根不可用）或创建失败返回 nil（调用方按 500/404 处理）。
+func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
+	owner = normalizeOwner(owner)
+	// 先取租户（内部锁 tenantMu，懒创建租户根）。
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		return nil
+	}
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if h.uploadStores == nil {
+		h.uploadStores = make(map[string]*UploadStore)
+	}
+	if us, ok := h.uploadStores[owner]; ok {
+		return us
+	}
+	chunkAbs, ok := tnt.Root().Abs("chunk")
+	if !ok {
+		h.logger.Warn("派生租户 chunk 路径失败", "owner", owner)
+		return nil
+	}
+	cfg := h.cfgPtr.Load()
+	var sessionTTL time.Duration
+	if cfg != nil {
+		sessionTTL = cfg.UploadSessionTTL
+	}
+	us, err := NewUploadStore(chunkAbs, sessionTTL, h.logger.With("component", "upload_store", "tenant", owner))
+	if err != nil {
+		h.logger.Error("创建 per-tenant UploadStore 失败", "tenant", owner, "error", err)
+		return nil
+	}
+	h.uploadStores[owner] = us
+	return us
+}
+
 // quotaFor 返回 owner 的 per-tenant 配额 Scope（懒创建，缓存到 map）。路径为
 // /tenant/<owner>，上限 = cfg.OwnerQuotaFor(owner)（显式 owner > "*" 默认 > 0；
 // anonymous 用 OwnerQuotaFor("anonymous")）。globalPool 未装配时返回 nil。
@@ -296,7 +336,6 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		version:       opts.Version,
 		buildAt:       opts.BuildAt,
 		checksumStore: cs,
-		uploadStore:   MustNewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, log.With("component", "upload_store")),
 		logger:        log,
 		auditLogger:   auditLogger,
 		metrics:       NewMetrics(),
@@ -309,16 +348,24 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		noncePool:     sproxysig.NewNoncePool(),
 	}
 	// 装配多租户存储布局：全局配额池 + 懒创建缓存 + 预创建 anonymous 租户。
-	// tenantRoots/checksumStores/quotaScopes 均为懒创建（首次请求时建），见 tenantFor 等辅助。
+	// tenantRoots/checksumStores/uploadStores/quotaScopes 均为懒创建（首次请求时建），
+	// 见 tenantFor/checksumStoreFor/uploadStoreFor 等辅助。
 	h.globalRoot = globalRoot
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenantRoots = make(map[string]*storage.Tenant)
 	h.checksumStores = make(map[string]*ChecksumStore)
+	h.uploadStores = make(map[string]*UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	if h.tenantFor(anonymousOwner) == nil {
 		// anonymous 是未认证请求的默认兜底租户，创建失败意味着存储根不可用，拒绝启动。
 		log.Error("预创建 anonymous 租户失败，存储根不可用")
 		panic("预创建 anonymous 租户失败")
+	}
+	// 预创建 anonymous 分块上传存储：/healthz 探活依赖它（healthz 检查 per-tenant store
+	// 健康状态），同时保证未认证分块上传的 chunk 桶就绪。
+	if h.uploadStoreFor(anonymousOwner) == nil {
+		log.Error("预创建 anonymous UploadStore 失败，存储根不可用")
+		panic("预创建 anonymous UploadStore 失败")
 	}
 	h.signalBroker.SetPersister(opts.HubPersist)
 
@@ -619,9 +666,17 @@ func (h *Handlers) Close() error {
 	})
 	h.uploadingWg.Wait()
 
-	if h.uploadStore != nil {
-		h.uploadStore.Stop()
+	// 停止所有 per-tenant UploadStore（persist/cleanup goroutine）。
+	// 保留 uploadStores map（不清空）：/healthz 探活需能看到已停止的 store 并返回 503；
+	// Stop 幂等（stopOnce），重复 Close 安全。
+	h.tenantMu.Lock()
+	for _, us := range h.uploadStores {
+		if us != nil {
+			us.Stop()
+		}
 	}
+	h.tenantMu.Unlock()
+
 	if h.storageMgr != nil {
 		h.storageMgr.Stop()
 	}
@@ -678,8 +733,17 @@ func (h *Handlers) Handler() http.Handler {
 
 func (h *Handlers) healthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(headerContentType, contentTypeTextPlain)
-	if h.uploadStore != nil {
-		if err := h.uploadStore.Health(); err != nil {
+	// 探活 per-tenant UploadStore：任一已创建的 store 停止即判定不健康。
+	h.tenantMu.Lock()
+	stores := make([]*UploadStore, 0, len(h.uploadStores))
+	for _, us := range h.uploadStores {
+		if us != nil {
+			stores = append(stores, us)
+		}
+	}
+	h.tenantMu.Unlock()
+	for _, us := range stores {
+		if err := us.Health(); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte("UploadStore: " + err.Error()))
 			return
@@ -723,7 +787,14 @@ func (h *Handlers) cleanupUploadingFilesLoop() {
 				if uploadID == "upload" {
 					return true
 				}
-				if h.uploadStore != nil && h.uploadStore.GetSession(uploadID) == nil {
+				// 分块上传条目 value 为 upload_id（裸 id）。uploadingFiles key 为
+				// <tnt.ID>\x00<rel>（chunked init 与 upload handler 同格式），从 key 解析
+				// 租户名取 per-tenant store 判断会话是否已不存在（则清理过期条目）。
+				owner := ""
+				if before, _, ok0 := strings.Cut(filename, "\x00"); ok0 {
+					owner = before
+				}
+				if us := h.uploadStoreFor(owner); us != nil && us.GetSession(uploadID) == nil {
 					h.uploadingFiles.Delete(filename)
 				}
 				return true

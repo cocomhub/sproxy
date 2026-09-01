@@ -40,7 +40,6 @@ type UploadStoreIface interface {
 	CreateSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64) (*ChunkedUploadSession, error)
 	GetSession(uploadID string) *ChunkedUploadSession
 	GetSessionByFilename(filename string) *ChunkedUploadSession
-	GetSessionByFilenameOwner(filename, owner string) *ChunkedUploadSession
 	MarkChunkReceived(uploadID string, chunkIndex int, checksum string) error
 	AllChunksReceived(uploadID string) bool
 	CompleteSession(uploadID string) error
@@ -107,7 +106,7 @@ func (l *ChunkFileLocker) DeleteLock(uploadID string) {
 type UploadStore struct {
 	mu         sync.RWMutex
 	writeMu    sync.Mutex // 串行化 writeSessionJSON，防止 Windows rename 竞争
-	baseDir    string     // <uploadsDir>/.__chunked__/
+	baseDir    string     // 租户 chunk 桶绝对路径（<root>/<owner>/chunk/），会话目录直接位于其下
 	sessions   map[string]*ChunkedUploadSession
 	locker     *ChunkFileLocker // chunk 文件并发锁
 	persistCh  chan string      // uploadID → 异步持久化
@@ -124,11 +123,12 @@ const (
 )
 
 // NewUploadStore 创建并启动 UploadStore，同时从磁盘恢复已有 session。
+// baseDir 是租户 chunk 桶的绝对路径（<root>/<owner>/chunk/，经 Tenant.Root().Abs("chunk")
+// 派生）；会话目录直接位于 baseDir 下（<baseDir>/<uploadID>/）。不再拼接 .__chunked__。
 // sessionTTL 指定未完成上传会话的过期时间，默认 24h。
 func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) (*UploadStore, error) {
-	storeDir := filepath.Join(baseDir, chunkedDirName)
 	log := defaultLogger(logger)
-	if err := os.MkdirAll(storeDir, 0755); err != nil {
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建分块上传目录失败: %w", err)
 	}
 
@@ -140,7 +140,7 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	}
 
 	us := &UploadStore{
-		baseDir:    storeDir,
+		baseDir:    baseDir,
 		sessions:   make(map[string]*ChunkedUploadSession),
 		locker:     NewChunkFileLocker(),
 		persistCh:  make(chan string, 64),
@@ -321,7 +321,8 @@ func (us *UploadStore) ListSessions() []ChunkedUploadSessionMeta {
 	return meta
 }
 
-// GetSessionByFilename 按文件名查找未完成的 session（不限 owner，供全局场景/测试使用）。
+// GetSessionByFilename 按文件名查找未完成的 session。
+// per-tenant UploadStore 实例天然只含本租户会话，无需 owner 过滤。
 func (us *UploadStore) GetSessionByFilename(filename string) *ChunkedUploadSession {
 	us.mu.RLock()
 	defer us.mu.RUnlock()
@@ -331,35 +332,6 @@ func (us *UploadStore) GetSessionByFilename(filename string) *ChunkedUploadSessi
 		}
 	}
 	return nil
-}
-
-// GetSessionByFilenameOwner 按文件名与 owner 查找未完成的 session。
-// 多租户隔离：会话 key 为 <owner>/<upload_id>（未认证无前缀），按 owner 精确匹配。
-// 审查 #6：先前用 owner+"/" 作 strings.HasPrefix，owner 名为前缀包含关系（ak / akx）
-// 或未认证 prefix="" 恒真会把他人会话误判为可见；这里解析 <owner>/<id> 首段精确比较。
-func (us *UploadStore) GetSessionByFilenameOwner(filename, owner string) *ChunkedUploadSession {
-	us.mu.RLock()
-	defer us.mu.RUnlock()
-	for _, s := range us.sessions {
-		if s.Filename != filename || s.Completed {
-			continue
-		}
-		if sessionOwnerMatches(s.UploadID, owner) {
-			return copySession(s)
-		}
-	}
-	return nil
-}
-
-// sessionOwnerMatches 判断会话 key（<owner>/<upload_id>，未认证为裸 id）是否属于 owner。
-// 未认证（owner 空）只匹配裸 id 会话（带 owner 前缀的会话对未认证不可见）；
-// 认证 owner 精确匹配 <owner>/ 前缀，绝不用前缀包含（防 ak/akx 误配，审查 #6）。
-func sessionOwnerMatches(sessionKey, owner string) bool {
-	if owner == "" {
-		// 未认证：只有裸 id 会话（无 "/"）对其可见；owner 前缀会话只属对应租户
-		return !strings.ContainsAny(sessionKey, `/\`)
-	}
-	return strings.HasPrefix(sessionKey, owner+"/")
 }
 
 // MarkChunkReceived 标记指定分块为已接收并持久化。
@@ -645,6 +617,7 @@ func (us *UploadStore) CleanupSessionAfter(uploadID string, delay time.Duration)
 }
 
 // recoverSessions 从磁盘恢复未完成的 session。
+// per-tenant baseDir（租户 chunk 桶）下直接是会话目录，单层恢复即可。
 func (us *UploadStore) recoverSessions() {
 	entries, err := os.ReadDir(us.baseDir)
 	if err != nil {
@@ -665,58 +638,12 @@ func (us *UploadStore) recoverSessions() {
 
 		data, err := os.ReadFile(sessionPath)
 		if err != nil {
-			// 审查 I1：owner 作用域的会话目录为 .__chunked__/<owner>/<id>/——该层目录
-			// 无 session.json（它是 owner 根，非 session），需递归一层其子目录。
-			// 用 os.IsNotExist 区分"目录非 session"与"真读取错误"。
-			if os.IsNotExist(err) {
-				if us.recoverOwnerSessions(sessionDir) {
-					continue
-				}
-			}
 			us.logger.Warn("读取 session.json 失败，跳过", "upload_id", uploadID, "error", err)
 			continue
 		}
 
 		us.restoreSession(uploadID, sessionDir, data)
 	}
-}
-
-// recoverOwnerSessions 递归恢复 owner 作用域的会话（.__chunked__/<owner>/<id>/）。
-// ownerDir 是 owner 根目录（无 session.json，但有子目录）。返回 true 表示识别为
-// owner 层并尝试恢复其子会话（即使恢复无果也返回 true，避免外层误判为损坏 session）。
-// 审查 I-2/#2：恢复的 session map key 必须用 session.json 内的完整 UploadID
-// （<owner>/<id>）——directory 名是 <id>，但活会话的 map key / 目录 / ChunkFilePath
-// 都基于完整 id；用 bare id 做 key 会让 GetSession("owner/id") 落空、续传/complete 404。
-func (us *UploadStore) recoverOwnerSessions(ownerDir string) bool {
-	subs, err := os.ReadDir(ownerDir)
-	if err != nil {
-		return false
-	}
-	found := false
-	for _, sub := range subs {
-		if !sub.IsDir() {
-			continue
-		}
-		sessionDir := filepath.Join(ownerDir, sub.Name())
-		sessionPath := filepath.Join(sessionDir, "session.json")
-		data, rErr := os.ReadFile(sessionPath)
-		if rErr != nil {
-			us.logger.Warn("读取 owner session.json 失败，跳过", "upload_id", sub.Name(), "error", rErr)
-			continue
-		}
-		found = true
-		// 以 session.json 内完整 UploadID 作 map key（活会话 key 契约）：
-		// 目录名是 bare <id>，活会话的 map key / 目录 / ChunkFilePath 都基于
-		// <owner>/<id>。解析 session 取 UploadID 作为恢复 key（restoreSession
-		// 内部会再次解析 session，此处的解析仅用于取 key）。
-		key := filepath.ToSlash(filepath.Join(filepath.Base(ownerDir), sub.Name()))
-		var parsed ChunkedUploadSession
-		if json.Unmarshal(data, &parsed) == nil && parsed.UploadID != "" {
-			key = parsed.UploadID
-		}
-		us.restoreSession(key, sessionDir, data)
-	}
-	return found
 }
 
 // restoreSession 从磁盘恢复单个会话（解析 + 过期/完成判断 + 与 bitmap 对齐）。

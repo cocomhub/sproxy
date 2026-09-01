@@ -16,6 +16,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // ---- 基准测试辅助函数（接受 testing.TB 以支持 testing.B） ----
@@ -78,8 +81,21 @@ func benchServerWithChunked(tb testing.TB, modifyCfg func(*Config)) (string, *at
 		version:       "bench",
 		buildAt:       "bench",
 		checksumStore: cs,
-		uploadStore:   MustNewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
 		logger:        slog.Default(),
+		uploadingStop: make(chan struct{}),
+	}
+	globalRoot, err := storage.OpenRoot(cfg.StorageRoot())
+	if err != nil {
+		tb.Fatalf("打开存储根失败: %v", err)
+	}
+	h.globalRoot = globalRoot
+	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
+	h.tenantRoots = make(map[string]*storage.Tenant)
+	h.checksumStores = make(map[string]*ChecksumStore)
+	h.uploadStores = make(map[string]*UploadStore)
+	h.quotaScopes = make(map[string]*quota.Scope)
+	if h.tenantFor(anonymousOwner) == nil {
+		tb.Fatal("创建 anonymous 租户失败")
 	}
 
 	mux := http.NewServeMux()
@@ -94,7 +110,7 @@ func benchServerWithChunked(tb testing.TB, modifyCfg func(*Config)) (string, *at
 	ts := httptest.NewServer(mux)
 	tb.Cleanup(func() {
 		ts.Close()
-		h.uploadStore.Stop()
+		_ = h.Close()
 	})
 	return ts.URL, &cfgPtr
 }

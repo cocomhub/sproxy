@@ -134,7 +134,9 @@ func TestUploadStore_GetSessionByFilename(t *testing.T) {
 
 func TestUploadStore_DeleteSession(t *testing.T) {
 	tmpDir := t.TempDir()
-	us := MustNewUploadStore(tmpDir, 0, nil)
+	// baseDir 直接是租户 chunk 桶（不再拼接 .__chunked__），会话目录位于其下。
+	chunkDir := filepath.Join(tmpDir, "chunk")
+	us := MustNewUploadStore(chunkDir, 0, nil)
 	defer us.Stop()
 
 	us.CreateSession("del-id", "del.txt", 100, 4096, 1, strings.Repeat("c", 64), 0)
@@ -145,7 +147,7 @@ func TestUploadStore_DeleteSession(t *testing.T) {
 		t.Fatal("session should be nil after delete")
 	}
 
-	sessionDir := filepath.Join(tmpDir, ".__chunked__", "del-id")
+	sessionDir := filepath.Join(chunkDir, "del-id")
 	if _, err := os.Stat(sessionDir); !os.IsNotExist(err) {
 		t.Fatal("session dir should be removed from disk")
 	}
@@ -195,8 +197,9 @@ func TestUploadStore_RecoverFromDisk(t *testing.T) {
 
 func TestUploadStore_ReconcileChunks(t *testing.T) {
 	tmpDir := t.TempDir()
+	chunkDir := filepath.Join(tmpDir, "chunk")
 
-	us1 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	us1.CreateSession("reconcile-id", "reconcile.txt", 8192, 4096, 2, strings.Repeat("f", 64), 0)
 	us1.MarkChunkReceived("reconcile-id", 0, "chunk0hash")
 	us1.Stop()
@@ -204,13 +207,13 @@ func TestUploadStore_ReconcileChunks(t *testing.T) {
 	// MarkChunkReceived only updates the bitmap, doesn't write chunk files.
 	// Write a chunk file on disk to simulate a partial upload where the chunk
 	// file exists but the bitmap wasn't updated (crash before bitmap flush).
-	sessionDir := filepath.Join(tmpDir, ".__chunked__", "reconcile-id")
+	sessionDir := filepath.Join(chunkDir, "reconcile-id")
 	chunkFile := filepath.Join(sessionDir, "00001.chunk")
 	if err := os.WriteFile(chunkFile, []byte("fake chunk data"), 0644); err != nil {
 		t.Fatalf("write chunk file: %v", err)
 	}
 
-	us2 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("reconcile-id")

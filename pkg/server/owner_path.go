@@ -66,11 +66,6 @@ func validOwnerDirName(owner string) bool {
 	return true
 }
 
-// ownerUploadsDir 返回请求者 owner 的存储根目录。
-func (h *Handlers) ownerUploadsDir(r *http.Request) string {
-	return h.ownerUploadsDirFor(ownerFromRequest(r))
-}
-
 // safePathForOwner 在指定 owner 的存储根下安全拼接 remotePath（越界返回空串）。
 func (h *Handlers) safePathForOwner(owner, remotePath string) string {
 	if remotePath == "" {
@@ -114,72 +109,6 @@ func checksumStoreKey(owner, remotePath string) string {
 // checksumKeyFor 生成 ChecksumStore 的 owner 作用域 key。
 func (h *Handlers) checksumKeyFor(r *http.Request, remotePath string) string {
 	return checksumStoreKey(ownerFromRequest(r), remotePath)
-}
-
-// ownerScopedUploadKey 生成 uploadingFiles 并发防护 map 的 owner 作用域 key。
-// 用 NUL 分隔避免与用户路径中的 "/" 冲突（remotePath 不含 NUL，ValidateFilePath 已拒绝）。
-func ownerScopedUploadKey(owner, remotePath string) string {
-	if owner == "" {
-		return remotePath
-	}
-	return owner + "\x00" + remotePath
-}
-
-// ownerScopedSessionKey 生成分块上传会话的 owner 作用域 key。
-// 客户端 upload_id 由文件元数据确定性生成（不含 owner），两租户同文件会碰撞；
-// 服务端用 owner 前缀隔离会话（uploadInit 返回带前缀的 upload_id，后续请求沿用）。
-func ownerScopedSessionKey(owner, uploadID string) string {
-	if owner == "" {
-		return uploadID
-	}
-	return owner + "/" + uploadID
-}
-
-// validateSessionOwner 校验客户端上传的 upload_id 属于当前 owner。
-// 返回原始 upload_id（去掉 owner 前缀）与是否有效；未认证（owner 空）恒有效。
-// 审查 F4：前缀剥离后必须校验剩余部分仍是"单一安全段"的合法会话 id——
-// 禁止伪造前缀（如未认证者构造 "ak-A/evil" 让认证方接管）、禁止路径分隔符
-// 与 ".."（防 .__chunked__ 目录穿越）。
-func validateSessionOwner(owner, uploadID string) (original string, ok bool) {
-	if owner == "" {
-		if !validUploadID(uploadID) {
-			return "", false
-		}
-		return uploadID, true
-	}
-	prefix := owner + "/"
-	if !strings.HasPrefix(uploadID, prefix) {
-		return "", false
-	}
-	rest := strings.TrimPrefix(uploadID, prefix)
-	if !validUploadID(rest) {
-		return "", false
-	}
-	return rest, true
-}
-
-// validUploadID 校验会话 id 是否为可安全用作 .__chunked__ 下单路径段的合法 id。
-// 客户端用 sha256 前 32 位 hex 确定性生成；此处防御性校验兜住任意输入：
-// 拒绝空/点段、路径分隔符（/ \）、".__" 前缀、控制字符，并限制长度。
-func validUploadID(id string) bool {
-	if id == "" || id == "." || id == ".." {
-		return false
-	}
-	if strings.ContainsAny(id, `/\`) {
-		return false
-	}
-	if strings.HasPrefix(id, ".__") {
-		return false
-	}
-	if len(id) > 128 {
-		return false
-	}
-	for _, r := range id {
-		if r < 0x20 || r == 0x7f {
-			return false
-		}
-	}
-	return true
 }
 
 // cloudArchiveOwnerDir 返回 owner 的归档子目录名（未认证返回空串，直接用归档根目录）。

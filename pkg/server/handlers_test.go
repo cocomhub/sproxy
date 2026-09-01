@@ -106,6 +106,7 @@ func newAssemblyTestHandlers(t *testing.T, storageRoot string) *Handlers {
 		globalPool:     quota.NewPool(cfg.MaxStorageBytes),
 		tenantRoots:    make(map[string]*storage.Tenant),
 		checksumStores: make(map[string]*ChecksumStore),
+		uploadStores:   make(map[string]*UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 	}
 	t.Cleanup(func() { _ = h.Close() })

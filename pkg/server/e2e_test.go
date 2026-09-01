@@ -363,9 +363,10 @@ func sha256hex(b []byte) string {
 func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
+	chunkDir := filepath.Join(tmpDir, "chunk")
 
 	// 阶段1: 创建 session 并上传部分分块
-	us1 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 
 	fileData := bytes.Repeat([]byte("ChaosTest"), 2048)
 	fileChecksum := sha256hex(fileData)
@@ -377,16 +378,16 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 		chunkData := fileData[i*int(chunkSize) : (i+1)*int(chunkSize)]
 		chunkCS := sha256hex(chunkData)
 
-		chunkDir := filepath.Join(tmpDir, ".__chunked__", "crash-test-id")
-		os.MkdirAll(chunkDir, 0755)
-		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), chunkData, 0644)
+		sessionDir := filepath.Join(chunkDir, "crash-test-id")
+		os.MkdirAll(sessionDir, 0755)
+		os.WriteFile(filepath.Join(sessionDir, fmt.Sprintf("%05d.chunk", i)), chunkData, 0644)
 
 		us1.MarkChunkReceived("crash-test-id", i, chunkCS)
 	}
 	us1.Stop() // 模拟 crash
 
 	// 阶段2: 新实例 recover
-	us2 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("crash-test-id")
@@ -407,8 +408,8 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 		end := start + int(chunkSize)
 		chunkData := fileData[start:end]
 		chunkCS := sha256hex(chunkData)
-		chunkDir := filepath.Join(tmpDir, ".__chunked__", "crash-test-id")
-		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), chunkData, 0644)
+		sessionDir := filepath.Join(chunkDir, "crash-test-id")
+		os.WriteFile(filepath.Join(sessionDir, fmt.Sprintf("%05d.chunk", i)), chunkData, 0644)
 		us2.MarkChunkReceived("crash-test-id", i, chunkCS)
 	}
 
@@ -420,21 +421,22 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
+	chunkDir := filepath.Join(tmpDir, "chunk")
 
-	us1 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	us1.CreateSession("partial-id", "partial-recover.bin", 8192, 4096, 2, strings.Repeat("x", 64), 0)
 	us1.Stop()
 
 	// 手动写入 chunk 文件但不调用 MarkChunkReceived (模拟 crash)
-	chunkDir := filepath.Join(tmpDir, ".__chunked__", "partial-id")
-	os.MkdirAll(chunkDir, 0755)
+	sessionDir := filepath.Join(chunkDir, "partial-id")
+	os.MkdirAll(sessionDir, 0755)
 
 	for i := range 2 {
 		data := bytes.Repeat([]byte{byte(i)}, 4096)
-		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), data, 0644)
+		os.WriteFile(filepath.Join(sessionDir, fmt.Sprintf("%05d.chunk", i)), data, 0644)
 	}
 
-	us2 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("partial-id")

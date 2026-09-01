@@ -571,8 +571,8 @@ func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams
 	}
 
 	if statusData.UploadID != "" {
-		// 续传命中：采用服务端返回的完整 session id（多租户下带 owner 前缀），
-		// 后续 chunk/complete 必须沿用该 id（bare 确定性 id 会被 validateSessionOwner 拒绝）。
+		// 续传命中：采用服务端返回的 session id（任务 12 起为裸 id，无 owner 前缀；
+		// 租户隔离由服务端 per-tenant chunk 桶物理保证）。后续 chunk/complete 沿用该 id。
 		serverID := statusData.UploadID
 		c.logger.InfoContext(ctx, "续传会话已恢复", "upload_id", shortid.ShortHash(serverID),
 			"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
