@@ -16,11 +16,15 @@ import (
 	"testing"
 )
 
-// writeCloudArchive 在 uploadsDir/.__cloud_archives__/[owner/] 下写入名为 name 的归档文件。
-// owner 为空写入归档根目录（未认证租户）；非空写入该 owner 子目录（与服务端按 owner 隔离一致）。
+// writeCloudArchive 在 <storageRoot>/<tenant>/archive/ 下写入名为 name 的归档文件。
+// owner 为空写入 anonymous 租户（未认证）；非空写入该 owner 租户（与服务端按租户隔离一致）。
 func writeCloudArchive(t *testing.T, cfgPtr *atomic.Pointer[Config], owner, name string, content []byte) {
 	t.Helper()
-	archiveDir := filepath.Join(cfgPtr.Load().UploadsDir, cloudArchiveDirName, cloudArchiveOwnerDir(owner))
+	tenant := owner
+	if tenant == "" {
+		tenant = anonymousOwner
+	}
+	archiveDir := filepath.Join(cfgPtr.Load().StorageRoot(), tenant, "archive")
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatalf("mkdir archive dir: %v", err)
 	}
@@ -30,7 +34,7 @@ func writeCloudArchive(t *testing.T, cfgPtr *atomic.Pointer[Config], owner, name
 }
 
 // TestDownloadCloudArchive_Success 验证 /download?filename=<归档名>&kind=cloud_archive
-// 返回 200、内容正确、Content-Disposition 使用归档名（而非 .__cloud_archives__/ 路径）。
+// 返回 200、内容正确、Content-Disposition 使用归档名（而非内部桶路径）。
 func TestDownloadCloudArchive_Success(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
@@ -293,7 +297,7 @@ func TestDownloadCloudArchive_RequiresAuth(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, func(cfg *Config) {
 		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	})
-	// 认证租户的归档落在 .__cloud_archives__/<owner>/ 子目录
+	// 认证租户的归档落在 <root>/<owner>/archive/ 子目录
 	writeCloudArchive(t, cfgPtr, testAccessKey, "auth-archive.tar.gz", []byte("auth-content"))
 
 	// 未签名 → 401
@@ -324,7 +328,7 @@ func TestDownloadCloudArchive_RequiresAuth(t *testing.T) {
 }
 
 // TestDownloadCloudArchive_OwnerIsolation 验证归档按 owner 隔离：
-// 归档落在 .__cloud_archives__/<owner>/，其他认证租户下载同一归档名返回 404。
+// 归档落在 <root>/<owner>/archive/，其他认证租户下载同一归档名返回 404。
 func TestDownloadCloudArchive_OwnerIsolation(t *testing.T) {
 	t.Parallel()
 	otherAK := "sk-test-other-000000"

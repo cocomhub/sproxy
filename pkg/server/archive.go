@@ -90,9 +90,21 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
-			fullPath := h.safePathFor(r, relPath)
-			if fullPath == "" {
+			// 源文件按请求者租户 user 桶解析（<root>/<tenant>/user/<path>），
+			// 派生根内绝对路径供 addFileToTar 打开（TOCTOU 防护不变）。
+			tnt := h.tenantOf(r)
+			if tnt == nil {
+				logger.Error("归档添加文件失败：租户不可用", "path", relPath)
+				continue
+			}
+			userRel, ok := tnt.UserRel(relPath)
+			if !ok {
 				logger.Error("归档添加文件失败：无效的文件路径", "path", relPath)
+				continue
+			}
+			fullPath, ok := tnt.Root().Abs(userRel)
+			if !ok {
+				logger.Error("归档添加文件失败：路径越界", "path", relPath)
 				continue
 			}
 			if err := addFileToTar(tw, fullPath, relPath, logger); err != nil {
@@ -264,8 +276,19 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath := h.safePathFor(r, relPath)
-	if fullPath == "" {
+	// 源目录按请求者租户 user 桶解析（<root>/<tenant>/user/<path>）。
+	tnt := h.tenantOf(r)
+	if tnt == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
+		return
+	}
+	userRel, ok := tnt.UserRel(relPath)
+	if !ok {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
+		return
+	}
+	fullPath, ok := tnt.Root().Abs(userRel)
+	if !ok {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
 	}

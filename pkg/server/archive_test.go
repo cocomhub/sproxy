@@ -271,8 +271,11 @@ func TestArchive_PreservesMTime(t *testing.T) {
 		"X-File-Checksum": sha256hex(body),
 	})
 
-	// 获取上传后的文件 mtime
-	info, _ := os.Stat(filepath.Join(cfgPtr.Load().UploadsDir, "test.txt"))
+	// 获取上传后的文件 mtime（未认证上传落 <storageRoot>/anonymous/user/）
+	info, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot(), anonymousOwner, "user", "test.txt"))
+	if err != nil {
+		t.Fatalf("stat uploaded file: %v", err)
+	}
 	originalMTime := info.ModTime()
 
 	resp, err := http.Post(url+"/api/archive", "application/json",

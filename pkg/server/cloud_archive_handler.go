@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // CloudArchiveRequest 是 POST /api/cloud/tasks/{id}/archive 的请求体。
@@ -124,17 +126,21 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确保输出目录存在（按 owner 隔离：.__cloud_archives__/<owner>/）
+	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
 	owner := ActorFrom(r.Context())
-	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName, cloudArchiveOwnerDir(owner))
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		return
+	}
+	root := tnt.Root()
+	if err := root.MkdirAll("archive", 0755); err != nil {
 		h.logger.Error("failed to create archive directory", "error", err)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
 		return
 	}
-	outputPath := filepath.Join(archiveDir, archiveName)
-	// 二次验证：确保 outputPath 仍在 archiveDir 内
-	if !strings.HasPrefix(filepath.Clean(outputPath), filepath.Clean(archiveDir)+string(filepath.Separator)) {
+	rel, ok := tnt.FeatureRel("archive", archiveName)
+	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
 		return
 	}
@@ -167,7 +173,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 
 	// 打包（流式 checksum）
 	logger := h.logger.With("archive", "cloud_task", "task_id", taskID)
-	checksum, err := createTarGz(sourceFile, task.Filename, outputPath, logger)
+	checksum, err := createTarGz(sourceFile, task.Filename, root, rel, logger)
 	if err != nil {
 		if errors.Is(err, errArchiveExists) {
 			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
@@ -176,7 +182,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.logger.Error("failed to create archive", "task_id", taskID, "error", err)
-		_ = os.Remove(outputPath)
+		_ = root.Remove(rel)
 		h.storageMgr.Release(pre, CategoryCloud)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
@@ -188,10 +194,10 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	// 注意不能只释放 pre 而不补留——压缩后 actual 通常远小于 pre，若账本净为 0 会少计
 	// actual 字节（配额窗口被放大，直到 30min 扫描校准）。
 	h.storageMgr.Release(pre, CategoryCloud)
-	if actual, statErr := os.Stat(outputPath); statErr == nil {
+	if actual, statErr := root.Stat(rel); statErr == nil {
 		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
 			h.logger.Error("storage full, removing archive to keep ledger consistent", "task_id", taskID, "error", rErr)
-			_ = os.Remove(outputPath)
+			_ = root.Remove(rel)
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
 			}, http.StatusInsufficientStorage)
@@ -199,7 +205,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	archiveInfo, err := os.Stat(outputPath)
+	archiveInfo, err := root.Stat(rel)
 	if err != nil {
 		h.logger.Error("failed to stat archive", "task_id", taskID, "error", err)
 	}
@@ -318,17 +324,21 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确保输出目录存在（按 owner 隔离：.__cloud_archives__/<owner>/）
+	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
 	owner := ActorFrom(r.Context())
-	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName, cloudArchiveOwnerDir(owner))
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		return
+	}
+	root := tnt.Root()
+	if err := root.MkdirAll("archive", 0755); err != nil {
 		h.logger.Error("failed to create archive directory", "error", err)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
 		return
 	}
-	outputPath := filepath.Join(archiveDir, archiveName)
-	// 二次验证：确保 outputPath 仍在 archiveDir 内
-	if !strings.HasPrefix(filepath.Clean(outputPath), filepath.Clean(archiveDir)+string(filepath.Separator)) {
+	rel, ok := tnt.FeatureRel("archive", archiveName)
+	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
 		return
 	}
@@ -352,7 +362,7 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	// 多文件打包（流式 checksum）
 	created := false
 	logger := h.logger.With("archive", "cloud_batch")
-	checksum, err := createMultiFileTarGz(files, outputPath, logger, &created)
+	checksum, err := createMultiFileTarGz(files, root, rel, logger, &created)
 	if err != nil {
 		if !created {
 			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
@@ -361,7 +371,7 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.logger.Error("failed to create batch archive", "error", err)
-		_ = os.Remove(outputPath)
+		_ = root.Remove(rel)
 		h.storageMgr.Release(pre, CategoryCloud)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
@@ -373,10 +383,10 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	// 注意不能只释放 pre 而不补留——压缩后 actual 通常远小于 pre，若账本净为 0 会少计
 	// actual 字节（配额窗口被放大，直到 30min 扫描校准）。
 	h.storageMgr.Release(pre, CategoryCloud)
-	if actual, statErr := os.Stat(outputPath); statErr == nil {
+	if actual, statErr := root.Stat(rel); statErr == nil {
 		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
 			h.logger.Error("storage full, removing archive to keep ledger consistent", "error", rErr)
-			_ = os.Remove(outputPath)
+			_ = root.Remove(rel)
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
 			}, http.StatusInsufficientStorage)
@@ -384,7 +394,7 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	info, err := os.Stat(outputPath)
+	info, err := root.Stat(rel)
 	if err != nil {
 		h.logger.Error("failed to stat archive", "error", err)
 	}
@@ -413,8 +423,9 @@ type fileWithRelPath struct {
 
 // createTarGz 将单个文件打包为 tar.gz 并返回流式计算的 SHA-256 checksum。
 // 使用 succeeded 标记模式确保出错时清理输出文件。O_EXCL 创建，已存在返回 false 到 created。
-func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger) (checksum string, err error) {
-	outputFile, created, err := openArchiveOutput(outputPath)
+// 输出经租户 root 相对 rel 打开（os.Root 防符号链接逃逸；O_EXCL 语义保留）。
+func createTarGz(sourceFile, sourceName string, root *storage.Root, rel string, logger *slog.Logger) (checksum string, err error) {
+	outputFile, created, err := openArchiveOutput(root, rel)
 	if err != nil {
 		return "", err
 	}
@@ -427,7 +438,7 @@ func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger)
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			os.Remove(outputPath)
+			_ = root.Remove(rel)
 		}
 	}()
 
@@ -451,9 +462,10 @@ func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger)
 
 // createMultiFileTarGz 将多个文件打包为单个 tar.gz 并返回流式计算的 SHA-256 checksum。
 // 使用 succeeded 标记模式确保出错时清理输出文件。O_EXCL 创建，已存在时置 created=false 并返回 errArchiveExists。
-func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *slog.Logger, created *bool) (checksum string, err error) {
+// 输出经租户 root 相对 rel 打开（os.Root 防符号链接逃逸；O_EXCL 语义保留）。
+func createMultiFileTarGz(files []fileWithRelPath, root *storage.Root, rel string, logger *slog.Logger, created *bool) (checksum string, err error) {
 	*created = true
-	outputFile, createdOK, err := openArchiveOutput(outputPath)
+	outputFile, createdOK, err := openArchiveOutput(root, rel)
 	if err != nil {
 		return "", err
 	}
@@ -467,7 +479,7 @@ func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *sl
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			os.Remove(outputPath)
+			_ = root.Remove(rel)
 		}
 	}()
 
@@ -494,10 +506,10 @@ func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *sl
 // errArchiveExists 归档输出文件已存在（O_EXCL 创建失败）。
 var errArchiveExists = errors.New("archive file already exists")
 
-// openArchiveOutput 以 O_EXCL 语义打开归档输出文件。
+// openArchiveOutput 以 O_EXCL 语义打开归档输出文件（相对租户 root 的 rel 路径）。
 // 跨平台统一用 errors.Is(err, os.ErrExist) 判已存在（Windows 上 O_EXCL 对已存在文件同样报错）。
-func openArchiveOutput(outputPath string) (*os.File, bool, error) {
-	f, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+func openArchiveOutput(root *storage.Root, rel string) (*os.File, bool, error) {
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil, false, nil

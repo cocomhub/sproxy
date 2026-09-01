@@ -537,25 +537,30 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确保输出目录存在（按 owner 隔离：.__cloud_archives__/<owner>/）
-	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName, cloudArchiveOwnerDir(owner))
-	if mkErr := os.MkdirAll(archiveDir, 0755); mkErr != nil {
+	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		return
+	}
+	root := tnt.Root()
+	if mkErr := root.MkdirAll("archive", 0755); mkErr != nil {
 		h.logger.Error("failed to create archive directory", "error", mkErr)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
 		return
 	}
-	// 用户指定归档名时，校验同名文件是否已存在，存在则拒绝（落在 owner 归档目录下，
-	// 审查 F3：此前误查 uploadsDir 全局根，owner 自己的归档漏检 / 全局根无关文件误 409）
+	rel, ok := tnt.FeatureRel("archive", archiveName)
+	if !ok {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
+		return
+	}
+	// 用户指定归档名时，校验同名文件是否已存在，存在则拒绝（落在租户 archive 桶下，
+	// 审查 F3 语义保留：不查全局根，避免误 409）
 	if req.ArchiveName != "" {
-		if _, err := os.Stat(filepath.Join(archiveDir, archiveName)); err == nil {
+		if _, err := root.Stat(rel); err == nil {
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists: " + archiveName}, http.StatusConflict)
 			return
 		}
-	}
-	outputPath := filepath.Join(archiveDir, archiveName)
-	if !strings.HasPrefix(filepath.Clean(outputPath), filepath.Clean(archiveDir)+string(filepath.Separator)) {
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
-		return
 	}
 
 	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
@@ -576,7 +581,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	// 多文件打包
 	created := false
 	logger := h.logger.With("archive", "group", "group_id", groupID)
-	checksum, err := createMultiFileTarGz(groupFiles, outputPath, logger, &created)
+	checksum, err := createMultiFileTarGz(groupFiles, root, rel, logger, &created)
 	if err != nil {
 		if !created {
 			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
@@ -585,7 +590,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.logger.Error("failed to create group archive", "group_id", groupID, "error", err)
-		_ = os.Remove(outputPath)
+		_ = root.Remove(rel)
 		h.storageMgr.Release(pre, CategoryCloud)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
@@ -597,10 +602,10 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	// 注意不能只释放 pre 而不补留——压缩后 actual 通常远小于 pre，若账本净为 0 会少计
 	// actual 字节（配额窗口被放大，直到 30min 扫描校准）。
 	h.storageMgr.Release(pre, CategoryCloud)
-	if actual, statErr := os.Stat(outputPath); statErr == nil {
+	if actual, statErr := root.Stat(rel); statErr == nil {
 		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
 			h.logger.Error("storage full, removing archive to keep ledger consistent", "group_id", groupID, "error", rErr)
-			_ = os.Remove(outputPath)
+			_ = root.Remove(rel)
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
 			}, http.StatusInsufficientStorage)
@@ -608,7 +613,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	info, _ := os.Stat(outputPath)
+	info, _ := root.Stat(rel)
 	size := int64(0)
 	if info != nil {
 		size = info.Size()

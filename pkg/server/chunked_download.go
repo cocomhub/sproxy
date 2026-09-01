@@ -100,13 +100,8 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 普通下载经租户根打开（root 相对，防符号链接逃逸）；cloud kind 用旧布局绝对路径。
-	var file *os.File
-	if dp.tnt != nil {
-		file, err = dp.tnt.Root().Open(dp.rel)
-	} else {
-		file, err = os.Open(dp.filePath)
-	}
+	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
+	file, err := dp.tnt.Root().Open(dp.rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
@@ -155,9 +150,8 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	// 设置响应头
 	setChunkResponseHeaders(w, dp.filename, offset, length, fileSize)
 
-	// 如果 ChecksumStore 有记录，返回完整文件 checksum（普通下载 per-tenant + rel；
-	// cloud kind 全局 + owner 作用域 key）
-	if csStore, csKey := h.checksumStoreForRead(r, dp); csStore != nil {
+	// 如果 ChecksumStore 有记录，返回完整文件 checksum（per-tenant + 根内相对 key）
+	if csStore, csKey := h.checksumStoreForRead(dp); csStore != nil {
 		if cs, ok := csStore.Get(csKey); ok {
 			w.Header().Set(headerFileChecksum, cs)
 		}

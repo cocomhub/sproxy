@@ -91,14 +91,15 @@ func validateCloudArchiveName(name string) *downloadPathError {
 }
 
 // downloadPath 是 resolveDownloadPath 的解析结果。
-// 普通下载（kind 为空）与 kind=cloud_task 经租户根打开：tnt 非 nil，rel 为租户根内相对路径
-// （user/<path> 或 cloud/<taskID>/<file>）。
-// kind=cloud_archive 保持旧布局（任务 14 迁移）：tnt 为 nil，filePath 为绝对路径。
+// 所有 kind 均返回 tnt + 租户根内相对路径 rel，后续经 tenant.Root().Open/Stat 打开
+// （os.Root 防符号链接逃逸）：
+//   - kind 为空 → user/<path>
+//   - kind=cloud_task → cloud/<taskID>/<file>
+//   - kind=cloud_archive → archive/<name>
 type downloadPath struct {
 	filename string          // 用户可见文件名（Content-Disposition / 日志 / checksum key）
 	tnt      *storage.Tenant // 非 nil = 经 Tenant.Root 定位（防符号链接逃逸）
-	rel      string          // 租户根内相对路径（tnt != nil 时有效，如 user/dir/f.txt、cloud/<taskID>/<file>）
-	filePath string          // 旧布局绝对路径（tnt == nil 时有效，kind=cloud_archive）
+	rel      string          // 租户根内相对路径（如 user/dir/f.txt、cloud/<taskID>/<file>、archive/<name>）
 }
 
 // resolveDownloadPath 解析 /download、/download/chunk 与 /api/files/stat 的文件路径。
@@ -107,10 +108,11 @@ type downloadPath struct {
 //   - kind 为空 → 普通下载：ValidateFilePath 校验 + Tenant.UserRel 映射到 user 桶，
 //     返回租户与根内相对路径（后续经 tenant.Root().Open/Stat 打开）。租户不可用或
 //     UserRel 拒绝（.__/__ 内部前缀 / 非法段名）→ 400（downloadPathError）。
-//   - kind=cloud_archive → 归档名（单文件名），旧布局 uploadsDir/.__cloud_archives__/[owner/]/<name>。
+//   - kind=cloud_archive → 归档名（单文件名），按请求者租户 FeatureRel("archive", name)
+//     解析到 archive 桶，经 tenant.Root().Open/Stat 打开。
 //   - kind=cloud_task → 云任务文件（任务归属校验）：校验任务对请求者可见 + 请求文件精确
 //     匹配任务声明文件名后，按任务 owner 租户 FeatureRel("cloud", <taskID>/<file>) 解析 rel，
-//     经 tenant.Root().Open/Stat 打开。cloud_archive 分支保持旧布局（任务 14 迁移）。
+//     经 tenant.Root().Open/Stat 打开。
 //   - 其它 kind → 400（白名单，防任意内部目录访问）。
 func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 	name := r.URL.Query().Get("filename")
@@ -141,11 +143,11 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 		if aErr := validateCloudArchiveName(name); aErr != nil {
 			return nil, aErr
 		}
-		fullPath := h.cloudArchivePathFor(r, name)
-		if fullPath == "" {
+		tnt, rel := h.cloudArchivePathFor(r, name)
+		if tnt == nil || rel == "" {
 			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
 		}
-		return &downloadPath{filename: name, filePath: fullPath}, nil
+		return &downloadPath{filename: name, tnt: tnt, rel: rel}, nil
 	case downloadKindCloudTask:
 		remotePath, vErr := ValidateFilePath(name)
 		if vErr != nil {
@@ -193,19 +195,15 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 }
 
 // checksumStoreForRead 返回下载/stat/chunk 的 checksum 存储与 key。
-// dp.tnt 非 nil（普通下载 user/ 桶、cloud_task cloud/ 桶）→ per-tenant store + 根内相对
-// 路径 rel（无 owner 前缀；store 按 dp.tnt.ID 取，与写端 checksumStoreFor(owner) 一致）；
-// dp.tnt nil（cloud_archive 旧布局）→ 全局 store + owner 作用域 key。
-// per-tenant store 不可用时返回 nil（调用方跳过 checksum 响应头）。
-func (h *Handlers) checksumStoreForRead(r *http.Request, dp *downloadPath) (ChecksumStoreIface, string) {
-	if dp.tnt != nil {
-		cs := h.checksumStoreFor(dp.tnt.ID)
-		if cs == nil {
-			return nil, ""
-		}
-		return cs, dp.rel
+// 所有下载 kind 均走 per-tenant store + 根内相对路径 rel（无 owner 前缀；store 按
+// dp.tnt.ID 取，与写端 checksumStoreFor(owner) 一致）。per-tenant store 不可用时返回
+// nil（调用方跳过 checksum 响应头）。
+func (h *Handlers) checksumStoreForRead(dp *downloadPath) (ChecksumStoreIface, string) {
+	cs := h.checksumStoreFor(dp.tnt.ID)
+	if cs == nil {
+		return nil, ""
 	}
-	return h.checksumStore, h.checksumKeyFor(r, dp.filename)
+	return cs, dp.rel
 }
 
 // countingWriter 包装 http.ResponseWriter 并追踪实际写入的字节数。
@@ -228,13 +226,8 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 普通下载经租户根打开（root 相对，防符号链接逃逸）；cloud kind 用旧布局绝对路径。
-	var file *os.File
-	if dp.tnt != nil {
-		file, err = dp.tnt.Root().Open(dp.rel)
-	} else {
-		file, err = os.Open(dp.filePath)
-	}
+	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
+	file, err := dp.tnt.Root().Open(dp.rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
@@ -259,9 +252,8 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 
 	// 设置 SHA-256 checksum 响应头：优先从 store 读取，回退实时计算。
 	// 回退路径优先复用已打开的文件句柄（零额外 I/O），仅当计算成功后才写入缓存。
-	// 普通下载（kind 空）用 per-tenant store + 根内相对路径 key（无 owner 前缀）；
-	// cloud 下载（kind 非空）沿用全局 store + owner 作用域 key。
-	if csStore, csKey := h.checksumStoreForRead(r, dp); csStore != nil {
+	// 统一 per-tenant store + 根内相对路径 key（无 owner 前缀，与写端 checksumStoreFor 一致）。
+	if csStore, csKey := h.checksumStoreForRead(dp); csStore != nil {
 		if cs, ok := csStore.Get(csKey); ok {
 			w.Header().Set(headerFileChecksum, cs)
 		} else {
@@ -299,12 +291,7 @@ func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 		writeHTTPPathError(w, err)
 		return
 	}
-	var info os.FileInfo
-	if dp.tnt != nil {
-		info, err = dp.tnt.Root().Stat(dp.rel)
-	} else {
-		info, err = os.Stat(dp.filePath)
-	}
+	info, err := dp.tnt.Root().Stat(dp.rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -319,16 +306,11 @@ func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-File-Size", fmt.Sprintf("%d", info.Size()))
 	w.Header().Set(headerFileMTime, fmt.Sprintf("%d", info.ModTime().UnixNano()))
-	if csStore, csKey := h.checksumStoreForRead(r, dp); csStore != nil {
+	if csStore, csKey := h.checksumStoreForRead(dp); csStore != nil {
 		if cs, ok := csStore.Get(csKey); ok {
 			w.Header().Set(headerFileChecksum, cs)
 		} else if !info.IsDir() {
-			var cs string
-			if dp.tnt != nil {
-				cs, err = FileChecksumRoot(dp.tnt.Root(), dp.rel)
-			} else {
-				cs, err = FileChecksum(dp.filePath)
-			}
+			cs, err := FileChecksumRoot(dp.tnt.Root(), dp.rel)
 			if err == nil {
 				w.Header().Set(headerFileChecksum, cs)
 			}

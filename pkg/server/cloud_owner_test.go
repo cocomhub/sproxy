@@ -495,8 +495,8 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(s[:])
 }
 
-// TestCloudOwner_GroupArchivePrecheckOwnerDir 验证 F3 修复：cloudArchiveGroup 的
-// "归档已存在"预检应落在 owner 归档目录（.__cloud_archives__/<owner>/），
+// TestCloudOwner_GroupArchivePrecheckOwnerDir 验证 F3 修复语义在迁移后仍成立：
+// cloudArchiveGroup 的"归档已存在"预检应落在 owner 租户 archive 桶（<root>/ak-A/archive/），
 // 而非误查 uploadsDir 全局根。
 func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 	env := newOwnerCloudEnv(t)
@@ -527,13 +527,13 @@ func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 	mgr.groups[group.ID] = group
 	mgr.groupMu.Unlock()
 
-	ownerArchiveDir := filepath.Join(mgr.uploadsDir, cloudArchiveDirName, "ak-A")
+	ownerArchiveDir := filepath.Join(mgr.uploadsDir, "ak-A", "archive")
 	if err := os.MkdirAll(ownerArchiveDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Run("OwnerArchiveExists_Returns409", func(t *testing.T) {
-		// 预置同名归档在 owner 目录（修复前：查全局根，此处应命中 → 409）
+		// 预置同名归档在租户 archive 桶 → 409
 		pre := filepath.Join(ownerArchiveDir, "f3-a.tar.gz")
 		if err := os.WriteFile(pre, []byte("old"), 0o644); err != nil {
 			t.Fatal(err)
@@ -541,23 +541,23 @@ func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 		code, body := env.do(t, "ak-A", "POST", "/api/cloud/groups/f3group/archive",
 			`{"archive_name":"f3-a.tar.gz"}`)
 		if code != http.StatusConflict {
-			t.Fatalf("owner 目录已有同名归档应 409，got %d %s", code, body)
+			t.Fatalf("archive 桶已有同名归档应 409，got %d %s", code, body)
 		}
 		// 清理预置文件，避免影响下一个子测试
 		_ = os.Remove(pre)
 	})
 
 	t.Run("RootUnrelatedFile_NotBlocked", func(t *testing.T) {
-		// 全局根下同名文件存在，但 owner 归档目录没有 → 修复后不应被误 409
+		// 全局根下同名文件存在，但租户 archive 桶没有 → 不应被误 409
 		_ = os.WriteFile(filepath.Join(mgr.uploadsDir, "f3-b.tar.gz"), []byte("root"), 0o644)
 		code, body := env.do(t, "ak-A", "POST", "/api/cloud/groups/f3group/archive",
 			`{"archive_name":"f3-b.tar.gz"}`)
 		if code != http.StatusOK {
-			t.Fatalf("全局根同名文件不应阻断 owner 归档，got %d %s", code, body)
+			t.Fatalf("全局根同名文件不应阻断租户归档，got %d %s", code, body)
 		}
-		// 归档成功落盘在 owner 目录
+		// 归档成功落盘在租户 archive 桶
 		if _, err := os.Stat(filepath.Join(ownerArchiveDir, "f3-b.tar.gz")); err != nil {
-			t.Fatalf("归档应落在 owner 目录: %v", err)
+			t.Fatalf("归档应落在租户 archive 桶: %v", err)
 		}
 	})
 }

@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // ownerFromRequest 返回请求 ctx 中的操作主体（未认证返回 ""）。
@@ -67,16 +69,12 @@ func validOwnerDirName(owner string) bool {
 }
 
 // safePathForOwner 在指定 owner 的存储根下安全拼接 remotePath（越界返回空串）。
+// 保留供测试与后续清理引用（P5 删除旧布局实现时一并移除）。
 func (h *Handlers) safePathForOwner(owner, remotePath string) string {
 	if remotePath == "" {
 		return ""
 	}
 	return joinSafePath(h.ownerUploadsDirFor(owner), remotePath)
-}
-
-// safePathFor 在请求者 owner 的存储根下安全拼接 remotePath（越界返回空串）。
-func (h *Handlers) safePathFor(r *http.Request, remotePath string) string {
-	return h.safePathForOwner(ownerFromRequest(r), remotePath)
 }
 
 // resolveAndValidateFileForOwner 校验文件名并返回指定 owner 租户 user 桶下的相对路径
@@ -97,45 +95,19 @@ func (h *Handlers) resolveAndValidateFileForOwner(owner, filename string) (remot
 	return remotePath, rel, true
 }
 
-// checksumStoreKey owner 非空时前缀 owner，避免跨租户同路径 checksum 冲突。
-// 未认证（owner 空）沿用原 key（单租户兼容）。
-func checksumStoreKey(owner, remotePath string) string {
-	if owner == "" {
-		return remotePath
+// cloudArchivePathFor 解析 kind=cloud_archive 归档在请求者租户 archive 桶下的相对路径。
+// 返回 (tenant, rel)（rel 形如 "archive/<name>"）；租户不可用或名称未通过 FeatureRel
+// 校验（单文件名已由 validateCloudArchiveName 前置校验，此处纵深防御）时返回 (nil, "")。
+func (h *Handlers) cloudArchivePathFor(r *http.Request, name string) (*storage.Tenant, string) {
+	tnt := h.tenantFor(ownerFromRequest(r))
+	if tnt == nil {
+		return nil, ""
 	}
-	return owner + "/" + remotePath
-}
-
-// checksumKeyFor 生成 ChecksumStore 的 owner 作用域 key。
-func (h *Handlers) checksumKeyFor(r *http.Request, remotePath string) string {
-	return checksumStoreKey(ownerFromRequest(r), remotePath)
-}
-
-// cloudArchiveOwnerDir 返回 owner 的归档子目录名（未认证返回空串，直接用归档根目录）。
-func cloudArchiveOwnerDir(owner string) string {
-	if owner == "" {
-		return ""
+	rel, ok := tnt.FeatureRel("archive", name)
+	if !ok {
+		return nil, ""
 	}
-	return owner
-}
-
-// cloudArchivePathFor 在 uploadsDir/.__cloud_archives__/[owner/] 下安全拼接归档名。
-// 按 owner 隔离：认证用户归档存各自子目录，未认证（owner 空）存归档根目录。
-// 返回空串表示配置缺失或路径越界（防穿越纵深防御）。
-func (h *Handlers) cloudArchivePathFor(r *http.Request, name string) string {
-	cfg := h.cfgPtr.Load()
-	if cfg == nil {
-		return ""
-	}
-	base := filepath.Join(cfg.UploadsDir, cloudArchiveDirName)
-	if ownerDir := cloudArchiveOwnerDir(ownerFromRequest(r)); ownerDir != "" {
-		base = filepath.Join(base, ownerDir)
-	}
-	fullPath := filepath.Join(base, name)
-	if !IsPathWithin(fullPath, base) {
-		return ""
-	}
-	return fullPath
+	return tnt, rel
 }
 
 // hasInternalDirAtAnyDepth 检查 rel 路径中任意层级是否包含指定内部目录名。
