@@ -145,6 +145,12 @@ func TestTenant_FeatureRel_Extra(t *testing.T) {
 	if _, ok := tnt.FeatureRel("cloud", "/abs"); ok {
 		t.Fatalf("FeatureRel 拒绝绝对 sub")
 	}
+	if _, ok := tnt.FeatureRel("cloud", "a:b/x"); ok {
+		t.Fatalf("FeatureRel 拒绝 Windows 非法字符段")
+	}
+	if _, ok := tnt.FeatureRel("user", "CON.txt"); ok {
+		t.Fatalf("FeatureRel 拒绝保留设备名段")
+	}
 }
 
 // TestNormalizeRemote 路径归一：/ 分隔符、反斜杠转义、拒绝空/绝对/.. /./空段。

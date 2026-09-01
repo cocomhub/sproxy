@@ -61,13 +61,10 @@ func (t *Tenant) UserRel(remotePath string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	segs := strings.Split(normalized, "/")
-	for _, seg := range segs {
-		if !ValidSegmentName(seg) {
-			return "", false
-		}
+	if !validSegments(normalized) {
+		return "", false
 	}
-	if isReservedUserFirstSegment(segs[0]) {
+	if first, _, _ := strings.Cut(normalized, "/"); isReservedUserFirstSegment(first) {
 		return "", false
 	}
 	return bucketUser + "/" + normalized, true
@@ -83,8 +80,8 @@ func isReservedUserFirstSegment(seg string) bool {
 }
 
 // FeatureRel 构造服务端内部功能路径：bucket + "/" + sub。
-// bucket 必须在白名单 [user cloud archive chunk version meta]；sub 经 NormalizeRemote（可为空，
-// 为空时返回裸桶名）。未知 bucket 或非法 sub 返回 ok=false。
+// bucket 必须在白名单 [user cloud archive chunk version meta]；sub 经 NormalizeRemote 与
+// 逐段 ValidSegmentName 校验（可为空，为空时返回裸桶名）。未知 bucket 或非法 sub 返回 ok=false。
 func (t *Tenant) FeatureRel(bucket, sub string) (string, bool) {
 	if !isValidBucket(bucket) {
 		return "", false
@@ -95,6 +92,9 @@ func (t *Tenant) FeatureRel(bucket, sub string) (string, bool) {
 	}
 	normalized, ok := NormalizeRemote(norm)
 	if !ok {
+		return "", false
+	}
+	if !validSegments(normalized) {
 		return "", false
 	}
 	return bucket + "/" + normalized, true

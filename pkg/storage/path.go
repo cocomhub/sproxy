@@ -29,6 +29,17 @@ func NormalizeRemote(remotePath string) (string, bool) {
 	return norm, true
 }
 
+// validSegments 逐段校验协议路径（/ 分隔）：所有段均通过 ValidSegmentName 才返回 true。
+// 供 UserRel / FeatureRel 复用，保证段名校验单一权威在两个单入口都生效。
+func validSegments(rel string) bool {
+	for seg := range strings.SplitSeq(rel, "/") {
+		if !ValidSegmentName(seg) {
+			return false
+		}
+	}
+	return true
+}
+
 // JoinRel 用 / 拼接协议路径段。
 func JoinRel(segs ...string) string {
 	return strings.Join(segs, "/")

@@ -47,12 +47,12 @@ func OpenRoot(path string) (*Root, error) {
 }
 
 // ensureLayoutVersion 读取/写入布局版本标记：不存在则写入，不匹配则报错。
+// 走 os.Root.ReadFile/WriteFile 保持 root 相对且符号链接不逃逸。
 func (rt *Root) ensureLayoutVersion() error {
-	versionPath := filepath.Join(rt.base, layoutVersionFile)
-	data, err := os.ReadFile(versionPath)
+	data, err := rt.r.ReadFile(layoutVersionFile)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return os.WriteFile(versionPath, []byte(LayoutVersion+"\n"), 0o644)
+			return rt.r.WriteFile(layoutVersionFile, []byte(LayoutVersion+"\n"), 0o644)
 		}
 		return fmt.Errorf("storage: 读取 LAYOUT_VERSION: %w", err)
 	}
