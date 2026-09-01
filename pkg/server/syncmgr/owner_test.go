@@ -249,17 +249,18 @@ func TestOwner_UnchangedByStateTransitions(t *testing.T) {
 
 // TestOwner_PersistedAcrossRestart 验证 owner 随任务持久化，重启恢复后保留。
 func TestOwner_PersistedAcrossRestart(t *testing.T) {
-	dir := t.TempDir()
+	base := t.TempDir()
+	tenantRoot, listTenants := newTestTenantRoot(base)
 	quota := newMockQuota(0)
 	remotes := []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")}
 	cfg := &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour}
-	mgr1 := NewManager(dir, quota, 0, remotes, nil, discardLogger(), cfg)
+	mgr1 := NewManager(tenantRoot, listTenants, quota, 0, remotes, nil, discardLogger(), cfg)
 	ta := mustCreate(t, mgr1, "a.txt", "ak-A")
 	tb := mustCreate(t, mgr1, "b.txt", "ak-B")
 	mgr1.Stop()
 
-	// 重建管理器（同一持久化目录）恢复任务
-	mgr2 := NewManager(dir, quota, 0, remotes, nil, discardLogger(), cfg)
+	// 重建管理器（同一基目录）恢复任务
+	mgr2 := NewManager(tenantRoot, listTenants, quota, 0, remotes, nil, discardLogger(), cfg)
 	defer mgr2.Stop()
 	if got := mgr2.Get(ta.ID, ""); got == nil || got.Owner != "ak-A" {
 		t.Fatalf("重启后任务 A Owner = %+v, want ak-A", got)

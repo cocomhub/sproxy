@@ -39,8 +39,8 @@ func newSyncTestEnv(t *testing.T, remoteURL string, modifyCfg func(*Config)) (h 
 	remotes := []syncmgr.RemoteConfig{{
 		Name: "r1", URL: remoteURL, AccessKey: "test-ak", AccessKeySecret: strings.Repeat("a", 64),
 	}}
-	sm := syncmgr.NewManager(cfg.UploadsDir, h.SyncQuotaStore(), int(CategoryUserFiles), remotes,
-		syncexec.NewExecutor(cfg.UploadsDir, h.logger), h.logger,
+	sm := syncmgr.NewManager(h.syncTenantRoot, h.listTenantIDs, h.SyncQuotaStore(), int(CategoryUserFiles), remotes,
+		syncexec.NewExecutor(h.syncTenantRoot, h.logger), h.logger,
 		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour})
 	h.SetSyncMgr(sm)
 
@@ -51,6 +51,26 @@ func newSyncTestEnv(t *testing.T, remoteURL string, modifyCfg func(*Config)) (h 
 		_ = h.Close()
 	})
 	return h, ts.URL
+}
+
+// writeUserFile 把 content 写入指定 owner 租户 user 桶（供 push 源文件预置）。
+// 空 owner → anonymous 租户。布局迁移后 push 源在 <root>/<tenant>/user/ 下。
+func writeUserFile(t *testing.T, h *Handlers, owner, name, content string) {
+	t.Helper()
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		t.Fatal("tenantFor 不可用")
+	}
+	userAbs, ok := tnt.Root().Abs(tnt.UserRoot())
+	if !ok {
+		t.Fatal("派生 user 根失败")
+	}
+	if err := os.MkdirAll(userAbs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userAbs, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // emptyRemote 返回一个空的远程 sproxy（GET /api/files 空列表、stat 404）。
@@ -112,11 +132,9 @@ func doSyncJSON(t *testing.T, method, url, body string) (int, []byte) {
 func TestSyncAPI_CreateTask_Push(t *testing.T) {
 	srv := emptyRemote(t)
 	h, base := newSyncTestEnv(t, srv.URL, nil)
-	// seed 本地源文件，使 push 任务真正可成功（审查 M-2：src 不存在会快速 failed，
-	// 硬断言 pending 属时序侥幸，产生 flake）。
-	if err := os.WriteFile(filepath.Join(h.cfgPtr.Load().UploadsDir, "x.txt"), []byte("data"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// seed 本地源文件到 anonymous 租户 user 桶，使 push 任务真正可成功（审查 M-2：
+	// src 不存在会快速 failed，硬断言 pending 属时序侥幸，产生 flake）。
+	writeUserFile(t, h, "", "x.txt", "data")
 
 	code, body := doSyncJSON(t, "POST", base+"/api/sync/tasks",
 		`{"direction":"push","remote":"r1","src":"x.txt"}`)
@@ -355,13 +373,9 @@ func doSyncOwner(t *testing.T, mux *http.ServeMux, method, path, body string) (i
 func TestSyncAPI_OwnerFiltering(t *testing.T) {
 	srv := emptyRemote(t)
 	h, _ := newSyncTestEnv(t, srv.URL, nil)
-	// 预置源文件使 push 任务可成功（避免快速 failed）
-	if err := os.WriteFile(filepath.Join(h.cfgPtr.Load().UploadsDir, "a.txt"), []byte("a"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(h.cfgPtr.Load().UploadsDir, "b.txt"), []byte("b"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// 预置源文件到各自 owner 租户 user 桶，使 push 任务可成功（避免快速 failed）
+	writeUserFile(t, h, "ak-A", "a.txt", "a")
+	writeUserFile(t, h, "ak-B", "b.txt", "b")
 
 	muxA := syncOwnerMux(h, "ak-A")
 	muxB := syncOwnerMux(h, "ak-B")
@@ -449,9 +463,8 @@ func TestSyncAPI_OwnerFiltering(t *testing.T) {
 func TestSyncAPI_UnauthenticatedOwnerEmpty(t *testing.T) {
 	srv := emptyRemote(t)
 	h, _ := newSyncTestEnv(t, srv.URL, nil)
-	if err := os.WriteFile(filepath.Join(h.cfgPtr.Load().UploadsDir, "u.txt"), []byte("u"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// 预置源文件到 anonymous 租户 user 桶（未认证创建的任务 owner 为空）
+	writeUserFile(t, h, "", "u.txt", "u")
 	muxAdmin := syncOwnerMux(h, "")
 
 	code, body := doSyncOwner(t, muxAdmin, "POST", "/api/sync/tasks", `{"direction":"push","remote":"r1","src":"u.txt"}`)

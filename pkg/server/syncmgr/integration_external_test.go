@@ -12,18 +12,62 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
 	"github.com/cocomhub/sproxy/pkg/testutil/syncmock"
 )
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// newTestTenantEnv 构造测试用租户根解析器 + 租户列表（与生产装配同路径语义）：
+// <base>/<owner>/user 为 user 根、<base>/<owner>/meta/sync 为持久化目录；空 owner →
+// anonymous 租户。owner 用 storage.ValidSegmentName 校验（fail-closed）；list 扫描
+// base 下合法租户目录。外部测试包无法访问 syncmgr 内部 helper，故本地实现。
+func newTestTenantEnv(t *testing.T) (base string, resolver syncmgr.TenantRootResolver, list func() []string) {
+	t.Helper()
+	base = t.TempDir()
+	resolver = func(owner string) (string, string, bool) {
+		if owner == "" {
+			owner = "anonymous"
+		}
+		if !storage.ValidSegmentName(owner) {
+			return "", "", false
+		}
+		return filepath.Join(base, owner, "user"),
+			filepath.Join(base, owner, "meta", "sync"), true
+	}
+	list = func() []string {
+		entries, err := os.ReadDir(base)
+		if err != nil {
+			return nil
+		}
+		var out []string
+		for _, e := range entries {
+			if e.IsDir() && storage.ValidSegmentName(e.Name()) && !strings.HasPrefix(e.Name(), ".") {
+				out = append(out, e.Name())
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	return base, resolver, list
+}
+
+// userRootFor 返回 owner 租户 user 根（空 owner → anonymous）。
+func userRootFor(base, owner string) string {
+	if owner == "" {
+		owner = "anonymous"
+	}
+	return filepath.Join(base, owner, "user")
 }
 
 // memQuota 实现 syncmgr.QuotaStore（外部测试无法访问 syncmgr 内部 mock）。
@@ -105,11 +149,11 @@ func waitForStatus(t *testing.T, mgr *syncmgr.Manager, id, want string, timeout 
 // TestManager_RealExecutor_Push 通过 Manager 提交 push 任务，验证真实同步落盘到远程。
 func TestManager_RealExecutor_Push(t *testing.T) {
 	srv, remote := syncmock.NewServer(t)
-	dir := t.TempDir()
-	writeLocalFile(t, dir, "a.txt", "hello push")
+	base, resolver, list := newTestTenantEnv(t)
+	writeLocalFile(t, userRootFor(base, ""), "a.txt", "hello push")
 
-	mgr := syncmgr.NewManager(dir, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
-		syncexec.NewExecutor(dir, discardLogger()), discardLogger(),
+	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
+		syncexec.NewExecutor(resolver, discardLogger()), discardLogger(),
 		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 	t.Cleanup(mgr.Stop)
 
@@ -132,10 +176,10 @@ func TestManager_RealExecutor_Pull(t *testing.T) {
 	srv, remote := syncmock.NewServer(t)
 	remote.SeedFile("sub/r.txt", "remote content")
 	remote.SeedDir("sub")
-	dir := t.TempDir()
+	base, resolver, list := newTestTenantEnv(t)
 
-	mgr := syncmgr.NewManager(dir, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
-		syncexec.NewExecutor(dir, discardLogger()), discardLogger(),
+	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
+		syncexec.NewExecutor(resolver, discardLogger()), discardLogger(),
 		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 	t.Cleanup(mgr.Stop)
 
@@ -144,7 +188,7 @@ func TestManager_RealExecutor_Pull(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForStatus(t, mgr, task.ID, "completed", 10*time.Second)
-	if got := readLocalFile(t, dir, "local/r.txt"); got != "remote content" {
+	if got := readLocalFile(t, userRootFor(base, ""), "local/r.txt"); got != "remote content" {
 		t.Fatalf("本地内容不符: %q", got)
 	}
 }
@@ -157,10 +201,10 @@ func TestManager_RealExecutor_Cancel(t *testing.T) {
 	blockCh := make(chan struct{})
 	execStarted := make(chan struct{})
 	srv := newBlockingServer(t, newBlockingListMux(blockCh, execStarted))
-	dir := t.TempDir()
+	_, resolver, list := newTestTenantEnv(t)
 
-	mgr := syncmgr.NewManager(dir, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
-		syncexec.NewExecutor(dir, discardLogger()), discardLogger(),
+	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
+		syncexec.NewExecutor(resolver, discardLogger()), discardLogger(),
 		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 	t.Cleanup(mgr.Stop)
 	t.Cleanup(func() { close(blockCh) })
@@ -182,6 +226,44 @@ func TestManager_RealExecutor_Cancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForStatus(t, mgr, task.ID, "cancelled", 10*time.Second)
+}
+
+// TestSync_NewLayout 验证多租户存储布局迁移（P3 任务 15）：创建 pull 任务 owner=alice
+// → 拉取文件落 <root>/alice/user/<dst>（user 桶，非 alice 根）、任务状态落
+// <root>/alice/meta/sync/<taskID>.json（meta/sync 桶，非 uploadsDir/.__sync__/）。
+func TestSync_NewLayout(t *testing.T) {
+	srv, remote := syncmock.NewServer(t)
+	remote.SeedFile("sub/r.txt", "remote content")
+	remote.SeedDir("sub")
+	base, resolver, list := newTestTenantEnv(t)
+
+	mgr := syncmgr.NewManager(resolver, list, &memQuota{}, 0, []syncmgr.RemoteConfig{remoteConfig(srv.URL)},
+		syncexec.NewExecutor(resolver, discardLogger()), discardLogger(),
+		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: time.Hour})
+	t.Cleanup(mgr.Stop)
+
+	task, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{
+		Direction: "pull", Remote: "r1", Src: "sub", Dst: "local", Recursive: true, Owner: "alice",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, mgr, task.ID, "completed", 10*time.Second)
+
+	// 拉取文件落 <base>/alice/user/local/r.txt（user 桶），不在 alice 根直接下
+	userRoot := filepath.Join(base, "alice", "user")
+	if got := readLocalFile(t, userRoot, "local/r.txt"); got != "remote content" {
+		t.Fatalf("alice/user 桶下内容不符: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(base, "alice", "local", "r.txt")); err == nil {
+		t.Fatalf("文件不应落在 alice 根（非 user 桶）: 隔离失败")
+	}
+
+	// 任务状态落 <base>/alice/meta/sync/<taskID>.json
+	persistFile := filepath.Join(base, "alice", "meta", "sync", task.ID+".json")
+	if _, err := os.Stat(persistFile); err != nil {
+		t.Fatalf("任务状态应落 <tenant>/meta/sync/<id>.json: %v", err)
+	}
 }
 
 // newBlockingListMux 返回 GET /api/files 阻塞直到 blockCh 关闭或 ctx 取消的 mux。

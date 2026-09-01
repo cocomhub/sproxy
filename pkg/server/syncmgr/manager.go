@@ -20,54 +20,14 @@ import (
 	"time"
 )
 
-// syncDirName 是同步任务持久化目录名（uploadsDir/.__sync__/）。
-const syncDirName = ".__sync__"
-
 // syncReservePlaceholder 未知大小同步任务的本地存储占位大小（1 GiB，对齐 cloud 下载占位）。
 const syncReservePlaceholder = int64(1024 * 1024 * 1024)
 
-// OwnerFileRoot 返回 owner 的本地同步文件根：<base>/<owner>；owner 非法时回退 base。
-// 多租户隔离：同步任务的文件数据（pull 落盘 / push 源）必须落在请求者 owner 子目录下，
-// 与 pkg/server 的 uploadsDir/<owner>/ 布局一致（审查 F1：executor 原先直绑 uploadsDir 根）。
-// owner 由服务端从认证上下文派生（AK / API key 名），此处校验为纵深防御。
-func OwnerFileRoot(base, owner string) string {
-	if !validOwnerName(owner) {
-		return base
-	}
-	return filepath.Join(base, owner)
-}
-
-// validOwnerName 校验 owner 是否可安全作为本地文件根下的单路径段。
-// 对齐 pkg/server.owner_path.validOwnerDirName：拒绝空、. / ..、含路径分隔符、
-// .__ 前缀（服务端内部目录约定）、Windows 非法字符与保留设备名。
-// 保持与 pkg/server 同一条规则，避免双端漂移（两处为同一项目内独立包，无法 import 复用）。
-func validOwnerName(owner string) bool {
-	if owner == "" || owner == "." || owner == ".." {
-		return false
-	}
-	if strings.ContainsAny(owner, `/\`) {
-		return false
-	}
-	if strings.HasPrefix(owner, ".__") {
-		return false
-	}
-	if strings.ContainsAny(owner, `<>:"|?*`) {
-		return false
-	}
-	upper := strings.ToUpper(owner)
-	if upper == "CON" || upper == "NUL" || upper == "PRN" || upper == "AUX" {
-		return false
-	}
-	if strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT") {
-		if len(upper) > 3 {
-			// COM1-9 / LPT1-9（含后续字符如 COM10 不保留，仅精确 1-9）
-			if upper[3] >= '1' && upper[3] <= '9' {
-				return false
-			}
-		}
-	}
-	return true
-}
+// TenantRootResolver 按任务 owner 解析租户 user 根与 meta/sync 持久化目录的绝对路径。
+// 空 owner 归一为 anonymous 租户；租户不可用（非法 owner / 存储根未装配）返回 ok=false
+// （写路径 fail-closed，绝不回落全局根）。装配层用 storage.NewTenant(owner, globalRoot)
+// 派生（见 pkg/server/sync_handler.go 的 Handlers.syncTenantRoot）。
+type TenantRootResolver func(owner string) (userRootAbs, persistDirAbs string, ok bool)
 
 // ErrStorageFull 存储配额不足（对齐 pkg/server.ErrStorageFull 语义）。
 var ErrStorageFull = errors.New("storage quota exceeded")
@@ -154,8 +114,8 @@ type RemoteConfig struct {
 type Manager struct {
 	tasks       map[string]*SyncTask
 	mu          sync.RWMutex
-	uploadsDir  string
-	persistDir  string // uploadsDir/.__sync__/
+	tenantRoot  TenantRootResolver // 按任务 owner 解析租户 user 根 / meta/sync 持久化目录
+	listTenants func() []string    // 返回全部租户名（恢复扫描；磁盘扫描，非内存缓存）
 	quota       QuotaStore
 	quotaCat    int
 	remotes     map[string]RemoteConfig
@@ -179,17 +139,21 @@ func defaultLogger(l *slog.Logger) *slog.Logger {
 }
 
 // NewManager 创建 SyncManager 并恢复持久化任务。
+// tenantRoot 按任务 owner 解析租户 user 根 / meta/sync 持久化目录（nil 时持久化与本地执行
+// 路径 fail-closed）；listTenants 返回全部租户名供恢复扫描（nil 时跳过恢复）。
 // quota 可为 nil（不启用配额追踪），executor 可为 nil（任务执行时失败，CreateTask 仍可用）。
-func NewManager(uploadsDir string, quota QuotaStore, quotaCat int, remotes []RemoteConfig, executor Executor, logger *slog.Logger, cfg *Config) *Manager {
+// 持久化目录在首次 saveTask 时按租户懒创建（不再预先创建全局目录）。
+func NewManager(tenantRoot TenantRootResolver, listTenants func() []string, quota QuotaStore, quotaCat int, remotes []RemoteConfig, executor Executor, logger *slog.Logger, cfg *Config) *Manager {
 	if cfg == nil {
 		cfg = &Config{}
 	}
 	applyConfigDefaults(cfg)
 	log := defaultLogger(logger)
-
-	persistDir := filepath.Join(uploadsDir, syncDirName)
-	if err := os.MkdirAll(persistDir, 0755); err != nil {
-		log.Warn("创建 sync persist 目录失败", "dir", persistDir, "error", err)
+	if tenantRoot == nil {
+		tenantRoot = func(string) (string, string, bool) { return "", "", false }
+	}
+	if listTenants == nil {
+		listTenants = func() []string { return nil }
 	}
 
 	rmap := make(map[string]RemoteConfig, len(remotes))
@@ -199,8 +163,8 @@ func NewManager(uploadsDir string, quota QuotaStore, quotaCat int, remotes []Rem
 
 	m := &Manager{
 		tasks:       make(map[string]*SyncTask),
-		uploadsDir:  uploadsDir,
-		persistDir:  persistDir,
+		tenantRoot:  tenantRoot,
+		listTenants: listTenants,
 		quota:       quota,
 		quotaCat:    quotaCat,
 		remotes:     rmap,
@@ -235,6 +199,15 @@ func (noopQuota) Release(_ int64, _ int)          {}
 func (noopQuota) Usage() int64                    { return 0 }
 func (noopQuota) MaxBytes() int64                 { return 0 }
 
+// persistDirFor 返回任务 owner 租户 meta/sync 持久化目录绝对路径。租户不可用返回 ""。
+func (m *Manager) persistDirFor(owner string) string {
+	_, p, ok := m.tenantRoot(owner)
+	if !ok {
+		return ""
+	}
+	return p
+}
+
 // validateRemote 校验并返回 remote 配置（fail-closed：未配置凭据拒绝）。
 func (m *Manager) validateRemote(name string) (*RemoteConfig, error) {
 	if name == "" {
@@ -255,10 +228,10 @@ func (m *Manager) validateRemote(name string) (*RemoteConfig, error) {
 	return &cp, nil
 }
 
-// validateSyncPath 校验同步路径：拒绝绝对路径、路径穿越与内部目录访问（"" 表示 FS 根，合法）。
-// 任一路径段以 .__ 开头（服务端内部目录约定，如 .__cloud__/.__versions__/.__sync__）一律
-// 拒绝——否则持有 AK 的用户可 push 把其他租户内部数据外发到远程、或 pull 覆盖同步任务
-// 持久化状态（审查 I-3）。
+// validateSyncPath 校验同步路径：拒绝绝对路径与路径穿越（"" 表示 FS 根，合法）。
+// 不再拒绝 .__ 前缀段——同步 src/dst 相对租户 user 根解析，用户路径恒落在 user/ 桶内，
+// 与租户根顶层功能桶（cloud/chunk/version/meta）物理隔离，天然无法访问功能数据或
+// 同步任务持久化状态（审查 I-3 的原 .__ 拒绝逻辑已随布局迁移删除）。
 func validateSyncPath(p, field string) error {
 	if p == "" {
 		return nil
@@ -276,12 +249,6 @@ func validateSyncPath(p, field string) error {
 	for seg := range strings.SplitSeq(normalized, "/") {
 		if seg == ".." {
 			return fmt.Errorf("%s 不能包含路径穿越: %q", field, p)
-		}
-		if seg == "." {
-			continue
-		}
-		if strings.HasPrefix(seg, ".__") {
-			return fmt.Errorf("%s 不能访问内部目录（.__ 前缀为服务端保留）: %q", field, p)
 		}
 	}
 	return nil
@@ -529,9 +496,11 @@ func (m *Manager) DeleteTask(id, owner string) error {
 	}
 	m.logger.Info("deleting sync task", "task_id", id, "status", t.Status)
 
-	persistFile := filepath.Join(m.persistDir, t.ID+".json")
-	if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
-		m.logger.Warn("failed to remove sync task persist file", "task_id", id, "error", err)
+	if persistDir := m.persistDirFor(t.Owner); persistDir != "" {
+		persistFile := filepath.Join(persistDir, t.ID+".json")
+		if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
+			m.logger.Warn("failed to remove sync task persist file", "task_id", id, "error", err)
+		}
 	}
 	m.logger.Info("sync task deleted", "task_id", id)
 	return nil
@@ -935,7 +904,16 @@ func (m *Manager) saveTask(t *SyncTask) error {
 		m.logger.Warn("failed to marshal sync task", "id", t.ID, "error", err)
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(m.persistDir, t.ID+".json"), data, 0644); err != nil {
+	persistDir := m.persistDirFor(t.Owner)
+	if persistDir == "" {
+		m.logger.Warn("租户不可用，跳过任务持久化", "id", t.ID, "owner", t.Owner)
+		return fmt.Errorf("tenant unavailable for task %s", t.ID)
+	}
+	if err := os.MkdirAll(persistDir, 0755); err != nil {
+		m.logger.Warn("创建持久化目录失败", "dir", persistDir, "error", err)
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(persistDir, t.ID+".json"), data, 0644); err != nil {
 		m.logger.Warn("failed to persist sync task", "id", t.ID, "error", err)
 		return err
 	}
@@ -943,44 +921,52 @@ func (m *Manager) saveTask(t *SyncTask) error {
 }
 
 // recoverTasks 从磁盘恢复任务，仅重启 syncing/retrying 状态（pending 不自动启动）。
-// retrying 任务（重试等待/重试执行中崩溃）与 syncing 一样中断续执行，保留已累计的重试计数。
+// 遍历全部租户的 meta/sync 目录（listTenants 磁盘扫描，非内存缓存），按任务落盘目录
+// 逐租户读取。retrying 任务（重试等待/重试执行中崩溃）与 syncing 一样中断续执行，
+// 保留已累计的重试计数。
 func (m *Manager) recoverTasks() {
-	entries, err := os.ReadDir(m.persistDir)
-	if err != nil {
-		return
-	}
 	recovered := 0
 	restarted := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+	for _, tenant := range m.listTenants() {
+		persistDir := m.persistDirFor(tenant)
+		if persistDir == "" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(m.persistDir, e.Name()))
+		entries, err := os.ReadDir(persistDir)
 		if err != nil {
-			m.logger.Warn("failed to read persisted sync task, skipping", "file", e.Name(), "error", err)
 			continue
 		}
-		var task SyncTask
-		if err := json.Unmarshal(data, &task); err != nil {
-			m.logger.Warn("failed to unmarshal persisted sync task, skipping", "file", e.Name(), "error", err)
-			continue
-		}
-		// 重启后 StorageManager 已按磁盘扫描校准计数器，任务不再持有预留（防二次释放）
-		task.ReservedSize = 0
-		task.Restored = true // 完成对账时不再 TryReserve（审查 I-2）
-		m.mu.Lock()
-		m.tasks[task.ID] = &task
-		m.mu.Unlock()
-		recovered++
-
-		if task.Status == StatusSyncing || task.Status == StatusRetrying {
-			m.logger.Info("restarting interrupted sync task", "task_id", task.ID, "remote", task.Remote, "retries", task.Retries)
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(persistDir, e.Name()))
+			if err != nil {
+				m.logger.Warn("failed to read persisted sync task, skipping", "file", e.Name(), "error", err)
+				continue
+			}
+			var task SyncTask
+			if err := json.Unmarshal(data, &task); err != nil {
+				m.logger.Warn("failed to unmarshal persisted sync task, skipping", "file", e.Name(), "error", err)
+				continue
+			}
+			// 重启后 StorageManager 已按磁盘扫描校准计数器，任务不再持有预留（防二次释放）
+			task.ReservedSize = 0
+			task.Restored = true // 完成对账时不再 TryReserve（审查 I-2）
 			m.mu.Lock()
-			m.running[task.ID] = true
+			m.tasks[task.ID] = &task
 			m.mu.Unlock()
-			m.wg.Add(1)
-			go m.executeSync(context.Background(), &task) //nolint:gosec
-			restarted++
+			recovered++
+
+			if task.Status == StatusSyncing || task.Status == StatusRetrying {
+				m.logger.Info("restarting interrupted sync task", "task_id", task.ID, "remote", task.Remote, "retries", task.Retries)
+				m.mu.Lock()
+				m.running[task.ID] = true
+				m.mu.Unlock()
+				m.wg.Add(1)
+				go m.executeSync(context.Background(), &task) //nolint:gosec
+				restarted++
+			}
 		}
 	}
 	if recovered > 0 {
@@ -992,7 +978,8 @@ func (m *Manager) recoverTasks() {
 func (m *Manager) cleanupExpiredOnce() int {
 	now := time.Now()
 	m.mu.Lock()
-	var expired []string
+	type expiredTask struct{ id, owner string }
+	var expired []expiredTask
 	for id, t := range m.tasks {
 		switch t.Status {
 		case StatusCompleted, StatusFailed, StatusCancelled:
@@ -1000,14 +987,16 @@ func (m *Manager) cleanupExpiredOnce() int {
 			continue
 		}
 		if now.After(t.UpdatedAt.Add(m.config.TaskTTL)) {
-			expired = append(expired, id)
+			expired = append(expired, expiredTask{id: id, owner: t.Owner})
 			delete(m.tasks, id)
 		}
 	}
 	m.mu.Unlock()
 
-	for _, id := range expired {
-		_ = os.Remove(filepath.Join(m.persistDir, id+".json"))
+	for _, et := range expired {
+		if persistDir := m.persistDirFor(et.owner); persistDir != "" {
+			_ = os.Remove(filepath.Join(persistDir, et.id+".json"))
+		}
 	}
 	if len(expired) > 0 {
 		m.logger.Info("expired sync tasks cleaned up", "count", len(expired))

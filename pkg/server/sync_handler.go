@@ -39,6 +39,33 @@ func (h *Handlers) SyncQuotaStore() syncmgr.QuotaStore {
 	return syncQuotaAdapter{sm: h.storageMgr}
 }
 
+// syncTenantRoot 按任务 owner 解析租户 user 根与 meta/sync 持久化目录绝对路径。
+// 空 owner → anonymous 租户；租户不可用（非法 owner / 存储根未装配）返回 ok=false
+// （写路径 fail-closed，绝不回落全局根）。装配层与 syncmgr.TenantRootResolver 对接，
+// 同步 src/dst 相对租户 user 根解析（<root>/<tenant>/user），任务状态落 meta/sync。
+func (h *Handlers) syncTenantRoot(owner string) (userRootAbs, persistDirAbs string, ok bool) {
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		return "", "", false
+	}
+	userAbs, ok1 := tnt.Root().Abs(tnt.UserRoot())
+	if !ok1 {
+		return "", "", false
+	}
+	metaAbs, ok2 := tnt.Root().Abs("meta/sync")
+	if !ok2 {
+		return "", "", false
+	}
+	return userAbs, metaAbs, true
+}
+
+// SyncTenantResolver 返回 syncmgr.TenantRootResolver（按任务 owner 解析租户 user/meta 根，
+// 供 SyncManager 与 syncexec.Executor 装配）。
+func (h *Handlers) SyncTenantResolver() syncmgr.TenantRootResolver { return h.syncTenantRoot }
+
+// SyncTenantList 返回租户名列表函数（磁盘扫描，供 SyncManager 恢复遍历全部租户的 meta/sync）。
+func (h *Handlers) SyncTenantList() func() []string { return h.listTenantIDs }
+
 // syncCreateTask 处理 POST /api/sync/tasks（创建并启动同步任务）。
 func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {
 	if h.syncMgr == nil {

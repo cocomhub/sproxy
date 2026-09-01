@@ -33,6 +33,7 @@ func completedResult() *RunResult {
 }
 
 // newTestManager 创建测试管理器（默认：无配额上限、单远程 r1、mock 执行器立即完成）。
+// 租户根解析器由测试基目录派生（newTestTenantRoot）。
 func newTestManager(t *testing.T, quota *mockQuota, remotes []RemoteConfig, exec Executor, cfg *Config) *Manager {
 	t.Helper()
 	if quota == nil {
@@ -47,7 +48,8 @@ func newTestManager(t *testing.T, quota *mockQuota, remotes []RemoteConfig, exec
 	if remotes == nil {
 		remotes = []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")}
 	}
-	mgr := NewManager(t.TempDir(), quota, 0, remotes, exec, discardLogger(), cfg)
+	tenantRoot, listTenants := newTestTenantRoot(t.TempDir())
+	mgr := NewManager(tenantRoot, listTenants, quota, 0, remotes, exec, discardLogger(), cfg)
 	t.Cleanup(mgr.Stop)
 	return mgr
 }
@@ -347,7 +349,7 @@ func TestDeleteTask(t *testing.T) {
 	if quota.Usage() != syncReservePlaceholder {
 		t.Fatalf("创建 pull 任务应预留配额，got %d", quota.Usage())
 	}
-	persistFile := filepath.Join(mgr.persistDir, task.ID+".json")
+	persistFile := filepath.Join(mgr.persistDirFor(task.Owner), task.ID+".json")
 	if _, err := os.Stat(persistFile); err != nil {
 		t.Fatalf("持久化文件应存在: %v", err)
 	}
@@ -419,11 +421,12 @@ func TestQuota_ReconcileOnFail_Pull(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRecoverTasks_RestartSyncing(t *testing.T) {
-	dir := t.TempDir()
+	base := t.TempDir()
+	tenantRoot, listTenants := newTestTenantRoot(base)
 	blocking := newBlockingMockExecutor()
 
 	// 第一个管理器：创建 pull 任务，人为置 syncing 并落盘
-	mgr1 := NewManager(dir, newMockQuota(0), 0, []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
+	mgr1 := NewManager(tenantRoot, listTenants, newMockQuota(0), 0, []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
 		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 	task, _, err := mgr1.CreateTask(CreateRequest{Direction: "pull", Remote: "r1", Src: "", Dst: "restored"})
 	if err != nil {
@@ -437,7 +440,7 @@ func TestRecoverTasks_RestartSyncing(t *testing.T) {
 	mgr1.Stop()
 
 	// 第二个管理器：recoverTasks 只重启 syncing 任务
-	mgr2 := NewManager(dir, newMockQuota(0), 0, []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
+	mgr2 := NewManager(tenantRoot, listTenants, newMockQuota(0), 0, []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
 		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 	t.Cleanup(mgr2.Stop)
 
@@ -551,8 +554,10 @@ func TestCreateTask_ConcurrentDedup(t *testing.T) {
 // TestRecoveredPullTask_NoDoubleReserve 验证恢复的 pull 任务完成对账不重新 TryReserve
 // （审查 I-2 回归：磁盘已由启动扫描记账，二次预留会配额虚高/瞬时 507）。
 func TestRecoveredPullTask_NoDoubleReserve(t *testing.T) {
-	uploadsDir := t.TempDir()
-	persistDir := filepath.Join(uploadsDir, syncDirName)
+	base := t.TempDir()
+	tenantRoot, listTenants := newTestTenantRoot(base)
+	// 匿名租户（owner==""）的 meta/sync 持久化目录
+	persistDir := filepath.Join(base, "anonymous", "meta", "sync")
 	if err := os.MkdirAll(persistDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +575,7 @@ func TestRecoveredPullTask_NoDoubleReserve(t *testing.T) {
 	}
 
 	quota := newMockQuota(0)
-	mgr := NewManager(uploadsDir, quota, 0,
+	mgr := NewManager(tenantRoot, listTenants, quota, 0,
 		[]RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
 		newMockExecutor(completedResult()), discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour})
 	defer mgr.Stop()
@@ -839,8 +844,10 @@ func TestRetry_CancelDuringBackoff(t *testing.T) {
 // TestRetry_RetriesPersisted 验证 retries 计数落盘：retrying 任务重启恢复后保留计数，
 // 且 retrying 任务与 syncing 一样在重启后自动恢复执行。
 func TestRetry_RetriesPersisted(t *testing.T) {
-	uploadsDir := t.TempDir()
-	persistDir := filepath.Join(uploadsDir, syncDirName)
+	base := t.TempDir()
+	tenantRoot, listTenants := newTestTenantRoot(base)
+	// 匿名租户（owner==""）的 meta/sync 持久化目录
+	persistDir := filepath.Join(base, "anonymous", "meta", "sync")
 	if err := os.MkdirAll(persistDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -858,7 +865,7 @@ func TestRetry_RetriesPersisted(t *testing.T) {
 	}
 
 	blocking := newBlockingMockExecutor()
-	mgr := NewManager(uploadsDir, newMockQuota(0), 0,
+	mgr := NewManager(tenantRoot, listTenants, newMockQuota(0), 0,
 		[]RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
 		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, MaxRetries: 3, RetryDelay: 10 * time.Millisecond, RetryBackoff: 2})
 	defer mgr.Stop()
