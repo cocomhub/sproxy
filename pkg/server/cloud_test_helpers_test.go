@@ -14,7 +14,7 @@ import (
 func newCloudTestManager(t *testing.T, storageRoot string, sm *StorageManager, cfg *CloudDownloadConfig) (*CloudDownloadManager, *Handlers) {
 	t.Helper()
 	h := newAssemblyTestHandlers(t, storageRoot)
-	mgr := NewCloudDownloadManager(storageRoot, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	mgr := NewCloudDownloadManager(storageRoot, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg, h.quotaFor)
 	h.cloudMgr = mgr
 	t.Cleanup(func() { mgr.Close() })
 	return mgr, h

@@ -448,7 +448,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		RetryDelay:      cfg.CloudRetryDelay,
 		Downloader:      cfg.CloudDownloader,
 	}
-	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg)
+	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, h.quotaFor)
 	h.storageMgr = sm
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）

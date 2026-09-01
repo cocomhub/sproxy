@@ -213,19 +213,37 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 预留存储空间（仅新创建会话时预留，续传会话已预留过）
-	if !reused && h.storageMgr != nil {
-		if err := h.storageMgr.TryReserve(session.TotalSize, CategoryChunked); err != nil {
-			// 预留失败，清理已创建的 session
-			store.DeleteSession(session.UploadID)
-			h.logger.Warn("storage full, chunked upload rejected",
-				"file_name", req.Filename,
-				"total_size", session.TotalSize,
-				"current_usage", h.storageMgr.Usage(),
-				"max_bytes", h.storageMgr.MaxBytes(),
-			)
-			sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "存储空间不足"}, http.StatusInsufficientStorage)
-			return
+	// 预留存储空间（仅新创建会话时预留，续传会话已预留过）。
+	// P4 配额接入：优先走租户 Scope（TryReserve），全局兜底由 Scope 父链自动生效；
+	// 未装配 quota（scope 不可用）时回退旧 storageMgr 预留（测试/旧装配兼容）。
+	if !reused {
+		scope := h.quotaFor(owner)
+		if scope != nil {
+			rr, err := scope.TryReserve(session.TotalSize)
+			if err != nil {
+				// 预留失败，清理已创建的 session
+				store.DeleteSession(session.UploadID)
+				h.logger.Warn("storage full, chunked upload rejected",
+					"file_name", req.Filename,
+					"total_size", session.TotalSize,
+				)
+				sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "存储空间不足"}, http.StatusInsufficientStorage)
+				return
+			}
+			session.Reservation = rr
+		} else if h.storageMgr != nil {
+			if err := h.storageMgr.TryReserve(session.TotalSize, CategoryChunked); err != nil {
+				// 预留失败，清理已创建的 session
+				store.DeleteSession(session.UploadID)
+				h.logger.Warn("storage full, chunked upload rejected",
+					"file_name", req.Filename,
+					"total_size", session.TotalSize,
+					"current_usage", h.storageMgr.Usage(),
+					"max_bytes", h.storageMgr.MaxBytes(),
+				)
+				sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "存储空间不足"}, http.StatusInsufficientStorage)
+				return
+			}
 		}
 	}
 
@@ -738,6 +756,14 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		// mergeAndRenameFile 已发送错误响应；分块与会话保留，客户端可重试 init/complete。
 		h.logger.Warn("合并失败但分块保留，客户端可重试", "upload_id", req.UploadID, "file_name", session.Filename)
 		return
+	}
+
+	// P4 配额对账：预留 → 实际落地（合并后的 user 文件 = TotalSize）。
+	// session 为 GetSession 副本，Reservation 指针与存储会话共享，Commit 原子生效一次；
+	// 后续 CleanupSessionAfter → DeleteSession 的 Release 为空操作。
+	if session.Reservation != nil {
+		session.Reservation.Commit(session.TotalSize)
+		session.Reservation = nil
 	}
 
 	h.recordCompleteMetadata(owner, req.UploadID, session, finalChecksum)

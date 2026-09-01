@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -173,6 +174,19 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		}, http.StatusInsufficientStorage)
 		return
 	}
+	// P4 租户配额：预留 pre（全局兜底由 Scope 父链生效）；失败回滚全局预留。
+	var res *quota.Reservation
+	if scope := h.quotaFor(owner); scope != nil {
+		rr, reserveErr := scope.TryReserve(pre)
+		if reserveErr != nil {
+			h.storageMgr.Release(pre, CategoryCloud)
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
+		res = rr
+	}
 
 	// 打包（流式 checksum）
 	logger := h.logger.With("archive", "cloud_task", "task_id", taskID)
@@ -180,12 +194,18 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, errArchiveExists) {
 			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
+			if res != nil {
+				res.Release()
+			}
 			h.storageMgr.Release(pre, CategoryCloud)
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
 			return
 		}
 		h.logger.Error("failed to create archive", "task_id", taskID, "error", err)
 		_ = root.Remove(rel)
+		if res != nil {
+			res.Release()
+		}
 		h.storageMgr.Release(pre, CategoryCloud)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
@@ -193,12 +213,15 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：释放预占后按实际 size 重新预留，账本收敛到 actual。
-	// 注意不能只释放 pre 而不补留——压缩后 actual 通常远小于 pre，若账本净为 0 会少计
-	// actual 字节（配额窗口被放大，直到 30min 扫描校准）。
+	// 按磁盘实际大小对账预留配额：storageMgr 保留 3 步（全局账本 /stats 兼容），
+	// 租户 Scope 单步 Commit(actual)（替换"Release(pre)+TryReserve(actual)"三段式对账）。
 	h.storageMgr.Release(pre, CategoryCloud)
 	if actual, statErr := root.Stat(rel); statErr == nil {
 		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
+			if res != nil {
+				res.Release()
+				res = nil
+			}
 			h.logger.Error("storage full, removing archive to keep ledger consistent", "task_id", taskID, "error", rErr)
 			_ = root.Remove(rel)
 			sendJSONResponse(w, CloudArchiveResult{
@@ -206,6 +229,14 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 			}, http.StatusInsufficientStorage)
 			return
 		}
+		if res != nil {
+			res.Commit(actual.Size())
+			res = nil
+		}
+	}
+	// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
+	if res != nil {
+		res.Release()
 	}
 
 	archiveInfo, err := root.Stat(rel)
@@ -366,6 +397,19 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		}, http.StatusInsufficientStorage)
 		return
 	}
+	// P4 租户配额：预留 pre（全局兜底由 Scope 父链生效）；失败回滚全局预留。
+	var res *quota.Reservation
+	if scope := h.quotaFor(owner); scope != nil {
+		rr, reserveErr := scope.TryReserve(pre)
+		if reserveErr != nil {
+			h.storageMgr.Release(pre, CategoryCloud)
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
+		res = rr
+	}
 
 	// 多文件打包（流式 checksum）
 	created := false
@@ -374,12 +418,18 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if !created {
 			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
+			if res != nil {
+				res.Release()
+			}
 			h.storageMgr.Release(pre, CategoryCloud)
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
 			return
 		}
 		h.logger.Error("failed to create batch archive", "error", err)
 		_ = root.Remove(rel)
+		if res != nil {
+			res.Release()
+		}
 		h.storageMgr.Release(pre, CategoryCloud)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
@@ -387,12 +437,15 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：释放预占后按实际 size 重新预留，账本收敛到 actual。
-	// 注意不能只释放 pre 而不补留——压缩后 actual 通常远小于 pre，若账本净为 0 会少计
-	// actual 字节（配额窗口被放大，直到 30min 扫描校准）。
+	// 按磁盘实际大小对账预留配额：storageMgr 保留 3 步（全局账本 /stats 兼容），
+	// 租户 Scope 单步 Commit(actual)（替换"Release(pre)+TryReserve(actual)"三段式对账）。
 	h.storageMgr.Release(pre, CategoryCloud)
 	if actual, statErr := root.Stat(rel); statErr == nil {
 		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
+			if res != nil {
+				res.Release()
+				res = nil
+			}
 			h.logger.Error("storage full, removing archive to keep ledger consistent", "error", rErr)
 			_ = root.Remove(rel)
 			sendJSONResponse(w, CloudArchiveResult{
@@ -400,6 +453,14 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 			}, http.StatusInsufficientStorage)
 			return
 		}
+		if res != nil {
+			res.Commit(actual.Size())
+			res = nil
+		}
+	}
+	// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
+	if res != nil {
+		res.Release()
 	}
 
 	info, err := root.Stat(rel)

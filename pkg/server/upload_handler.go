@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -129,9 +130,31 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 配额预留（P4）：覆盖写场景先统计旧文件大小 prev（Adjust 差分用），
+	// 随后 TryReserve(handler.Size) 预留新文件空间；写入成功且校验通过后
+	// Commit(实际写入字节数) / Adjust(prev, next)；写入/校验失败 Release()。
+	scope := h.quotaFor(ownerFromRequest(r))
+	prev := int64(0)
+	var res *quota.Reservation
+	if scope != nil {
+		if stat, statErr := root.Stat(rel); statErr == nil {
+			prev = stat.Size()
+		}
+		rr, reserveErr := scope.TryReserve(handler.Size)
+		if reserveErr != nil {
+			logger.WarnContext(r.Context(), "存储配额不足，拒绝上传", "file_name", remotePath, "owner", ownerFromRequest(r))
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "存储配额不足"}, http.StatusInsufficientStorage)
+			return
+		}
+		res = rr
+	}
+
 	// 原子写入 + 流式哈希
-	serverChecksum, _, err := writeFileAtomicallyRoot(r.Context(), root, rel, file)
+	serverChecksum, written, err := writeFileAtomicallyRoot(r.Context(), root, rel, file)
 	if err != nil {
+		if res != nil {
+			res.Release()
+		}
 		logger.ErrorContext(r.Context(), "保存文件失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
 		return
@@ -140,9 +163,23 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	if serverChecksum != expectedChecksum {
 		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomicallyRoot 清理）
 		_ = root.Remove(rel)
+		if res != nil {
+			res.Release()
+		}
 		logger.WarnContext(r.Context(), "文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件 SHA-256 校验失败"}, http.StatusBadRequest)
 		return
+	}
+
+	// 配额对账：覆盖写 Adjust(prev, next)（旧文件已占用 prev，差分后收敛到新大小，
+	// 不经过 reserved）；新文件 Commit(written)。
+	if res != nil {
+		if prev > 0 {
+			scope.Adjust(prev, written)
+			res.Release()
+		} else {
+			res.Commit(written)
+		}
 	}
 
 	h.setUploadResponseHeaders(w, r, root, remotePath, rel, serverChecksum, logger)

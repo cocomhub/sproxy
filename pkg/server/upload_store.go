@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/shortid"
+	"github.com/cocomhub/sproxy/pkg/quota"
 )
 
 // ChunkedUploadSession 表示一个分块上传会话。
@@ -31,6 +32,10 @@ type ChunkedUploadSession struct {
 	CreatedAt      time.Time `json:"created_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	Completed      bool      `json:"completed"`
+
+	// Reservation 是分块上传的租户配额预留句柄（P4）。init 预留、complete Commit、
+	// 会话删除/过期 Release。不持久化（json:"-"），重启后内存预留丢失，由上游对账补齐。
+	Reservation *quota.Reservation `json:"-"`
 }
 
 // UploadStoreIface 定义 UploadStore 的业务接口，方便测试替身。
@@ -438,8 +443,15 @@ func (us *UploadStore) SessionDir(uploadID string) string {
 // DeleteSession 删除会话目录及所有分块文件，并清理 fileLocks 条目防止内存泄漏。
 func (us *UploadStore) DeleteSession(uploadID string) {
 	us.mu.Lock()
+	s := us.sessions[uploadID]
 	delete(us.sessions, uploadID)
 	us.mu.Unlock()
+
+	// P4 配额：清理会话时释放未落地的预留。已完成会话的预留已被 complete Commit
+	// 消费（Commit 原子生效一次），此 Release 为空操作；未完成会话则归还 reserved。
+	if s != nil && s.Reservation != nil {
+		s.Reservation.Release()
+	}
 
 	us.locker.DeleteLock(uploadID)
 
@@ -579,7 +591,11 @@ func (us *UploadStore) cleanupLoop() {
 // cleanupExpired 清理过期未完成的 session。
 // 先持锁收集过期 ID，释放锁后再逐一 os.RemoveAll，避免持锁执行 I/O。
 func (us *UploadStore) cleanupExpired() {
-	var expired []string
+	type expiredItem struct {
+		id          string
+		reservation *quota.Reservation
+	}
+	var expired []expiredItem
 
 	us.mu.Lock()
 	now := time.Now()
@@ -587,16 +603,20 @@ func (us *UploadStore) cleanupExpired() {
 		if !s.Completed && now.After(s.ExpiresAt) {
 			us.logger.Info("清理过期上传会话", "upload_id", id, "file_name", s.Filename, "expires_at", s.ExpiresAt)
 			delete(us.sessions, id)
-			expired = append(expired, id)
+			expired = append(expired, expiredItem{id: id, reservation: s.Reservation})
 		}
 	}
 	us.mu.Unlock()
 
-	for _, id := range expired {
-		us.locker.DeleteLock(id)
-		dir := filepath.Join(us.baseDir, id)
+	for _, item := range expired {
+		// P4 配额：过期会话（从未完成）归还预留，避免 chunk 字节长期挂账。
+		if item.reservation != nil {
+			item.reservation.Release()
+		}
+		us.locker.DeleteLock(item.id)
+		dir := filepath.Join(us.baseDir, item.id)
 		if err := os.RemoveAll(dir); err != nil {
-			us.logger.Warn("清理过期会话目录失败", "upload_id", id, "error", err)
+			us.logger.Warn("清理过期会话目录失败", "upload_id", item.id, "error", err)
 		}
 	}
 }
