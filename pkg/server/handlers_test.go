@@ -250,12 +250,23 @@ func TestHandlers_TenantOf(t *testing.T) {
 	}
 }
 
-// TestRegisterRoutes_CreatesAnonymousTenantAndLayoutVersion 验证启动装配：OpenRoot 写入
-// LAYOUT_VERSION、anonymous 租户根预创建、healthz 正常。
-func TestRegisterRoutes_CreatesAnonymousTenantAndLayoutVersion(t *testing.T) {
+// TestRegisterRoutes_DefaultFallback_LayoutArtifactsVisibleInUploadsDir 显式声明 P1 阶段
+// 默认升级路径的预期临时状态（审查修复）：
+//
+// cfg.StorageRootPath 留空（默认回退）时，StorageRoot()==UploadsDir（默认 ./uploads）。
+// 启动装配（RegisterRoutes → storage.OpenRoot(cfg.StorageRoot())）会把 LAYOUT_VERSION 与
+// anonymous 租户根写入该目录；尚未迁移到 user/ 桶的旧 list/stats handler 会枚举到这些产物
+// ——这是 P1 阶段**预期的临时回归**（并行双轨期间旧 handler 与新布局共享同一存储根）。
+//
+// 这是「声明的意图」而非 bug：P2 各 handler 迁移到 Tenant API（user/ 桶）后，
+// LAYOUT_VERSION/anonymous 不再被 list/stats 列出。请勿把本测试当作 bug 修掉。
+func TestRegisterRoutes_DefaultFallback_LayoutArtifactsVisibleInUploadsDir(t *testing.T) {
 	root := t.TempDir()
 	cfg := Default()
-	cfg.UploadsDir = root
+	cfg.UploadsDir = root // StorageRootPath 留空 → StorageRoot() 回退 UploadsDir
+	if cfg.StorageRoot() != root {
+		t.Fatalf("StorageRoot()=%q 应回退 UploadsDir=%q", cfg.StorageRoot(), root)
+	}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
@@ -270,13 +281,19 @@ func TestRegisterRoutes_CreatesAnonymousTenantAndLayoutVersion(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = h.Close() })
 
-	// LAYOUT_VERSION 写入存储根。
+	// 默认升级路径：UploadsDir（= StorageRoot()）下写入 LAYOUT_VERSION 并预创建 anonymous
+	// 租户根。旧 list/stats handler（未迁移到 user/ 桶）会枚举到这些产物——P1 预期临时状态。
 	if _, err := os.Stat(filepath.Join(root, "LAYOUT_VERSION")); err != nil {
-		t.Fatalf("LAYOUT_VERSION 未写入存储根: %v", err)
+		t.Fatalf("默认回退下 LAYOUT_VERSION 应写入 UploadsDir: %v", err)
 	}
-	// anonymous 租户根预创建（含 meta 目录）。
+	if fi, err := os.Stat(filepath.Join(root, "anonymous")); err != nil {
+		t.Fatalf("默认回退下 anonymous 租户根应创建于 UploadsDir: %v", err)
+	} else if !fi.IsDir() {
+		t.Fatalf("anonymous 应为目录, got %v", fi.Mode())
+	}
+	// anonymous 租户根含 meta 桶目录（供 per-tenant checksum/meta 记录写入）。
 	if _, err := os.Stat(filepath.Join(root, "anonymous", "meta")); err != nil {
-		t.Fatalf("anonymous 租户根未预创建: %v", err)
+		t.Fatalf("anonymous/meta 未创建: %v", err)
 	}
 	// healthz 正常。
 	rr := httptest.NewRecorder()
