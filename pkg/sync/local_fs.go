@@ -65,7 +65,7 @@ func within(root, p string) bool {
 
 // confine 把已 sanitize 的相对路径（clean）映射为 Root 内安全绝对路径，拒绝符号链接逃逸。
 //
-// 防线（对齐 pkg/server.joinSafePath，审查 MEDIUM 闭环）：
+// 防线（对齐 pkg/storage os.Root 的相对打开语义，审查 MEDIUM 闭环）：
 //  1. 拼接 Root 规范路径 + clean；
 //  2. EvalSymlinks 解析目标：目标存在（含中间父目录符号链接）且解析结果落在 Root 内
 //     → 返回解析后的真实路径；解析结果在 Root 外 → 拒绝；

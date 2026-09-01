@@ -45,12 +45,10 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	cs := NewChecksumStore(cfg.UploadsDir, nil)
 	h := &Handlers{
 		cfgPtr:        &cfgPtr,
 		version:       "test",
 		buildAt:       "test",
-		checksumStore: cs,
 		logger:        slog.Default(),
 		uploadingStop: make(chan struct{}),
 	}

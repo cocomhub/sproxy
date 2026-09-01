@@ -25,9 +25,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
-// downloadsDirName 是云端下载持久化目录名。
-const downloadsDirName = ".__downloads__"
-
 // CloudTask 表示一个云端下载任务。
 // Owner 是任务级多租户隔离字段（阶段 6 工作项 C）：创建时由请求 AK 派生
 // （SproxySig → AK；api_keys → key 名；未认证 → 空串）。过滤规则见 ownerVisible：
@@ -61,7 +58,7 @@ type CloudTask struct {
 }
 
 // CloudTaskGroup 表示一个云端下载任务组。
-// 每个子任务仍是独立的 CloudTask（文件保存在 .__cloud__/<taskID>/ 下），
+// 每个子任务仍是独立的 CloudTask（文件保存在租户 cloud 桶 <root>/<tenant>/cloud/<taskID>/ 下），
 // 组只负责聚合元数据与组级操作（归档/取消/恢复）。
 // Owner 与子任务一致（创建组的请求 AK 派生），组级 List/Get/Cancel/Delete 按 owner 过滤。
 type CloudTaskGroup struct {

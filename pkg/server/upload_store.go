@@ -36,6 +36,10 @@ type ChunkedUploadSession struct {
 	// Reservation 是分块上传的租户配额预留句柄（P4）。init 预留、complete Commit、
 	// 会话删除/过期 Release。不持久化（json:"-"），重启后内存预留丢失，由上游对账补齐。
 	Reservation *quota.Reservation `json:"-"`
+	// StorageMgrReserved 是 storageMgr 回退预留的字节数（P5，quota 未装配时启用）。
+	// 与 Reservation 二选一：scope 预留走 Reservation，storageMgr 回退走本字段。
+	// 会话删除/过期/完成时按此释放；不持久化（json:"-"），重启后由对账补齐。
+	StorageMgrReserved int64 `json:"-"`
 }
 
 // UploadStoreIface 定义 UploadStore 的业务接口，方便测试替身。
@@ -120,16 +124,24 @@ type UploadStore struct {
 	wg         sync.WaitGroup
 	sessionTTL time.Duration // 未完成上传会话的保留时间
 	logger     *slog.Logger
+	// storageMgr 是 storageMgr 回退预留的释放目标（P5，quota 未装配时由 uploadStoreFor
+	// 经 SetStorageMgr 注入；nil = 无回退预留需释放）。
+	storageMgr *StorageManager
 }
 
-const (
-	chunkedDirName = ".__chunked__"
-	chunkFileExt   = ".chunk"
-)
+// SetStorageMgr 注入 storageMgr 回退预留的释放目标（P5）。
+// quota 未装配（globalPool nil）时 uploadStoreFor 调用；已装配 quota 时无需注入。
+func (us *UploadStore) SetStorageMgr(sm *StorageManager) {
+	us.mu.Lock()
+	us.storageMgr = sm
+	us.mu.Unlock()
+}
+
+const chunkFileExt = ".chunk"
 
 // NewUploadStore 创建并启动 UploadStore，同时从磁盘恢复已有 session。
 // baseDir 是租户 chunk 桶的绝对路径（<root>/<owner>/chunk/，经 Tenant.Root().Abs("chunk")
-// 派生）；会话目录直接位于 baseDir 下（<baseDir>/<uploadID>/）。不再拼接 .__chunked__。
+// 派生）；会话目录直接位于 baseDir 下（<baseDir>/<uploadID>/）。不再拼接魔法目录。
 // sessionTTL 指定未完成上传会话的过期时间，默认 24h。
 func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) (*UploadStore, error) {
 	log := defaultLogger(logger)
@@ -449,8 +461,16 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 
 	// P4 配额：清理会话时释放未落地的预留。已完成会话的预留已被 complete Commit
 	// 消费（Commit 原子生效一次），此 Release 为空操作；未完成会话则归还 reserved。
-	if s != nil && s.Reservation != nil {
-		s.Reservation.Release()
+	// P5：storageMgr 回退预留（quota 未装配时）同样在此释放（与 Reservation 二选一）。
+	if s != nil {
+		if s.Reservation != nil {
+			s.Reservation.Release()
+		} else if s.StorageMgrReserved > 0 {
+			if us.storageMgr != nil {
+				us.storageMgr.Release(s.StorageMgrReserved, CategoryChunked)
+			}
+			s.StorageMgrReserved = 0
+		}
 	}
 
 	us.locker.DeleteLock(uploadID)
@@ -592,8 +612,9 @@ func (us *UploadStore) cleanupLoop() {
 // 先持锁收集过期 ID，释放锁后再逐一 os.RemoveAll，避免持锁执行 I/O。
 func (us *UploadStore) cleanupExpired() {
 	type expiredItem struct {
-		id          string
-		reservation *quota.Reservation
+		id                 string
+		reservation        *quota.Reservation
+		storageMgrReserved int64
 	}
 	var expired []expiredItem
 
@@ -603,15 +624,18 @@ func (us *UploadStore) cleanupExpired() {
 		if !s.Completed && now.After(s.ExpiresAt) {
 			us.logger.Info("清理过期上传会话", "upload_id", id, "file_name", s.Filename, "expires_at", s.ExpiresAt)
 			delete(us.sessions, id)
-			expired = append(expired, expiredItem{id: id, reservation: s.Reservation})
+			expired = append(expired, expiredItem{id: id, reservation: s.Reservation, storageMgrReserved: s.StorageMgrReserved})
 		}
 	}
 	us.mu.Unlock()
 
 	for _, item := range expired {
 		// P4 配额：过期会话（从未完成）归还预留，避免 chunk 字节长期挂账。
+		// P5：storageMgr 回退预留（quota 未装配时）同样释放（与 Reservation 二选一）。
 		if item.reservation != nil {
 			item.reservation.Release()
+		} else if item.storageMgrReserved > 0 && us.storageMgr != nil {
+			us.storageMgr.Release(item.storageMgrReserved, CategoryChunked)
 		}
 		us.locker.DeleteLock(item.id)
 		dir := filepath.Join(us.baseDir, item.id)

@@ -19,8 +19,23 @@ import (
 
 // downloadKindCloudArchive 是云任务归档下载的 kind 值。
 // kind 白名单仅此一项——归档是用户主动打包的产出（归档名含随机难枚举），
-// 按 owner 隔离存储（.__cloud_archives__/<owner>/）。
+// 按 owner 隔离存储（租户 archive 桶 <root>/<tenant>/archive/）。
 const downloadKindCloudArchive = "cloud_archive"
+
+// cloudArchivePathFor 解析 kind=cloud_archive 归档在请求者租户 archive 桶下的相对路径。
+// 返回 (tenant, rel)（rel 形如 "archive/<name>"）；租户不可用或名称未通过 FeatureRel
+// 校验（单文件名已由 validateCloudArchiveName 前置校验，此处纵深防御）时返回 (nil, "")。
+func (h *Handlers) cloudArchivePathFor(r *http.Request, name string) (*storage.Tenant, string) {
+	tnt := h.tenantFor(ownerFromRequest(r))
+	if tnt == nil {
+		return nil, ""
+	}
+	rel, ok := tnt.FeatureRel("archive", name)
+	if !ok {
+		return nil, ""
+	}
+	return tnt, rel
+}
 
 // downloadKindCloudTask 是云任务文件下载的 kind 值。
 // 云任务文件按任务 owner 落租户 cloud 桶（<root>/<tenant>/cloud/<taskID>/<file>），

@@ -352,8 +352,8 @@ func (c *CloudDownloadGroupChain) downloadToLocal(ctx context.Context) error {
 		archiveName += ".tar.gz"
 	}
 
-	// 归档下载按用途传 kind=cloud_archive：服务端在 .__cloud_archives__/<owner>/ 下
-	// 按 owner 拼接，客户端不接触内部路径，filename 只传归档名。
+	// 归档下载按用途传 kind=cloud_archive：服务端在租户 archive 桶内按 owner 拼接，
+	// 客户端不接触内部路径，filename 只传归档名。
 	localPath := filepath.Join(c.LocalDir, archiveName)
 	c.LocalPath = localPath
 	if err := c.client.ChunkedDownload(ctx, archiveName, localPath, WithChunkedKind(DownloadKindCloudArchive)); err != nil {

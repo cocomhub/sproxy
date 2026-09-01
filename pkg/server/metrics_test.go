@@ -22,15 +22,13 @@ func newTestServerWithMetrics(t *testing.T) (*httptest.Server, *Handlers) {
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	cs := NewChecksumStore(tmpDir, nil)
 	m := NewMetrics()
 	h := &Handlers{
-		cfgPtr:        &cfgPtr,
-		version:       "test",
-		buildAt:       "test",
-		checksumStore: cs,
-		logger:        slog.Default(),
-		metrics:       m,
+		cfgPtr:  &cfgPtr,
+		version: "test",
+		buildAt: "test",
+		logger:  slog.Default(),
+		metrics: m,
 	}
 
 	mux := http.NewServeMux()

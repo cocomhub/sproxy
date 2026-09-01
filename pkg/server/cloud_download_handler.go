@@ -408,15 +408,29 @@ func (h *Handlers) cloudCancelGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 // cloudDeleteGroup 处理 DELETE /api/cloud/groups/{id}。
+// P5：组删除时联动清理组归档文件并释放 archive 桶 Scope（防孤儿归档虚高占用）。
 func (h *Handlers) cloudDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.cloudMgr.DeleteGroup(id, ActorFrom(r.Context())); err != nil {
+	owner := ActorFrom(r.Context())
+	// 先取组快照（含 ArchiveFile），DeleteGroup 后组对象已从 map 移除无法再查。
+	var archiveFile string
+	if g, ok := h.cloudMgr.GetGroup(id, owner); ok {
+		archiveFile = g.ArchiveFile
+	}
+	if err := h.cloudMgr.DeleteGroup(id, owner); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
 		}
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
 		return
+	}
+	// 组归档文件（存的是归档名，如 "g1.tar.gz"）联动删除并释放 Scope。失败仅记日志
+	// （组删除已完成，归档残留由周期扫描校准兜底；不把归档清理失败当作组删除失败）。
+	if archiveFile != "" {
+		if aErr := h.deleteCloudArchive(owner, archiveFile); aErr != nil {
+			h.logger.Warn("删除组归档失败（残留由周期扫描校准）", "group_id", id, "archive", archiveFile, "error", aErr)
+		}
 	}
 	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
@@ -581,25 +595,25 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pre := totalSourceSize + cloudArchiveReservePlaceholder
-	if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-		}, http.StatusInsufficientStorage)
-		return
-	}
-	// P4 租户配额：预留 pre（全局兜底由 Scope 父链生效）；失败回滚全局预留。
-	// 组归档落租户 archive 桶，配额按 archive 桶子 Scope 归集（父链聚合到租户 Scope）。
+	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
+	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
 	var res *quota.Reservation
 	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
 		rr, reserveErr := scope.TryReserve(pre)
 		if reserveErr != nil {
-			h.storageMgr.Release(pre, CategoryCloud)
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)
 			return
 		}
 		res = rr
+	} else if h.storageMgr != nil {
+		if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
 	}
 
 	// 多文件打包
@@ -608,50 +622,46 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	checksum, err := createMultiFileTarGz(groupFiles, root, rel, logger, &created)
 	if err != nil {
 		if !created {
-			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
-			if res != nil {
-				res.Release()
-			}
-			h.storageMgr.Release(pre, CategoryCloud)
+			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
+			releaseArchiveReservation(res, h.storageMgr, pre)
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
 			return
 		}
 		h.logger.Error("failed to create group archive", "group_id", groupID, "error", err)
 		_ = root.Remove(rel)
-		if res != nil {
-			res.Release()
-		}
-		h.storageMgr.Release(pre, CategoryCloud)
+		releaseArchiveReservation(res, h.storageMgr, pre)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
 		}, http.StatusInternalServerError)
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：storageMgr 保留 3 步（全局账本 /stats 兼容），
-	// 租户 Scope 单步 Commit(actual)（替换"Release(pre)+TryReserve(actual)"三段式对账）。
-	h.storageMgr.Release(pre, CategoryCloud)
-	if actual, statErr := root.Stat(rel); statErr == nil {
-		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
-			if res != nil {
-				res.Release()
-				res = nil
-			}
-			h.logger.Error("storage full, removing archive to keep ledger consistent", "group_id", groupID, "error", rErr)
-			_ = root.Remove(rel)
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
-			}, http.StatusInsufficientStorage)
-			return
-		}
-		if res != nil {
-			res.Commit(actual.Size())
+	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
+	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
+	actual := int64(0)
+	if res != nil {
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			res.Commit(actual)
+			res = nil
+		} else {
+			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
+			res.Release()
 			res = nil
 		}
-	}
-	// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
-	if res != nil {
-		res.Release()
+	} else if h.storageMgr != nil {
+		h.storageMgr.Release(pre, CategoryCloud)
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			if rErr := h.storageMgr.TryReserve(actual, CategoryCloud); rErr != nil {
+				h.logger.Error("storage full, removing archive to keep ledger consistent", "group_id", groupID, "error", rErr)
+				_ = root.Remove(rel)
+				sendJSONResponse(w, CloudArchiveResult{
+					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
+				}, http.StatusInsufficientStorage)
+				return
+			}
+		}
 	}
 
 	info, _ := root.Stat(rel)
@@ -659,6 +669,9 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	if info != nil {
 		size = info.Size()
 	}
+
+	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
+	h.recordArchiveUsage(owner, archiveName, size)
 
 	// 更新组归档路径（落库到真实组对象；仅存归档名，客户端不接触 .__ 内部路径）
 	archiveFile := archiveName

@@ -12,7 +12,7 @@ import (
 // mkdir 创建指定子目录。?dirname=path
 // 已迁移到 Tenant API：用户目录映射到 user 桶内（<root>/<owner>/user/<rel>），
 // UserRel 逐段段名校验（拒绝 .__ 内部前缀、功能桶引用、保留设备名等），
-// 无需再单独 isInternalDirPathPrefix 守卫。
+// 无需再单独内部目录守卫。
 func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 	dirname := r.URL.Query().Get("dirname")
 	if dirname == "" {

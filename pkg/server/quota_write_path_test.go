@@ -278,6 +278,144 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 	}
 }
 
+// TestCloudArchive_DeleteReleasesScope 验证 P5 归档删除释放（审查重要 2）：
+// 归档创建 → archive 桶 Scope 计入实际大小；deleteCloudArchive 删除文件并释放 Scope，
+// 不依赖周期扫描自愈。
+func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
+	env := newOwnerEnv(t)
+	env.setOwnerQuota("alice", 1<<30)
+	sm := NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
+	env.h.storageMgr = sm
+	mgr := NewCloudDownloadManager(env.root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}, func(owner string) *quota.Scope {
+		return env.h.quotaBucketFor(owner, "cloud")
+	})
+	env.h.cloudMgr = mgr
+
+	// 创建已完成云任务 + 落盘文件
+	task, err := mgr.CreateTask("url", "https://example.com/del.zip", "del.zip", 100, "alice")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	task.Status = "completed"
+	taskDir := filepath.Join(mgr.cloudDirFor("alice"), task.ID)
+	if mkErr := os.MkdirAll(taskDir, 0o755); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	if wErr := os.WriteFile(filepath.Join(taskDir, "del.zip"), []byte("archive delete test"), 0o644); wErr != nil {
+		t.Fatal(wErr)
+	}
+
+	// alice mux 追加归档 handler
+	aliceMux := env.mux["alice"]
+	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		env.h.cloudArchiveTask(w, r)
+	})
+	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"del.tar.gz"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	aliceMux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("创建归档应 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	archiveAbs := filepath.Join(env.root, "alice", "archive", "del.tar.gz")
+	info, err := os.Stat(archiveAbs)
+	if err != nil {
+		t.Fatalf("归档未落盘: %v", err)
+	}
+	archiveScope := env.h.quotaBucketFor("alice", "archive")
+	if got := archiveScope.Usage(); got != info.Size() {
+		t.Fatalf("归档后 archive 桶 Usage()=%d want %d", got, info.Size())
+	}
+
+	// 删除归档 → 文件移除 + archive 桶 Scope 释放（不依赖周期扫描）
+	if err := env.h.deleteCloudArchive("alice", "del.tar.gz"); err != nil {
+		t.Fatalf("deleteCloudArchive: %v", err)
+	}
+	if _, err := os.Stat(archiveAbs); !os.IsNotExist(err) {
+		t.Fatalf("归档文件应已删除, stat err=%v", err)
+	}
+	if got := archiveScope.Usage(); got != 0 {
+		t.Fatalf("删除归档后 archive 桶 Usage()=%d want 0", got)
+	}
+}
+
+// TestVersionQuota_CommitAndRelease 验证 P5 版本桶配额（审查重要 3）：
+// saveVersion 写版本文件后 version 桶 Scope 计入版本字节；删除版本后释放。
+func TestVersionQuota_CommitAndRelease(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.Versioning.Enabled = true
+	cfg.Versioning.MaxVersions = 10
+	env.h.cfgPtr.Store(cfg)
+
+	tnt := env.h.tenantFor("alice")
+	if tnt == nil {
+		t.Fatal("创建 alice 租户失败")
+	}
+	root := tnt.Root()
+	if err := root.MkdirAll("user", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("version quota body")
+	f, err := root.OpenFile("user/f.txt", os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("创建 user 文件失败: %v", err)
+	}
+	if _, wErr := f.Write(body); wErr != nil {
+		f.Close()
+		t.Fatalf("写 user 文件失败: %v", wErr)
+	}
+	if cErr := f.Close(); cErr != nil {
+		t.Fatalf("关闭 user 文件失败: %v", cErr)
+	}
+
+	// 保存版本（覆盖前备份）
+	vid, err := env.h.saveVersion("f.txt", tnt, "alice")
+	if err != nil {
+		t.Fatalf("saveVersion: %v", err)
+	}
+	if vid == 0 {
+		t.Fatal("应保存到版本")
+	}
+	vScope := env.h.quotaBucketFor("alice", "version")
+	if vScope == nil {
+		t.Fatal("version 桶 Scope 应为非 nil")
+	}
+	if got := vScope.Usage(); got != int64(len(body)) {
+		t.Fatalf("保存版本后 version 桶 Usage()=%d want %d", got, len(body))
+	}
+
+	// 删除版本 → 释放 version 桶 Scope
+	verDir := filepath.Join(env.root, "alice", "version", "f.txt")
+	entries, err := os.ReadDir(verDir)
+	if err != nil {
+		t.Fatalf("读取版本目录失败: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("应恰好 1 个版本, got %d", len(entries))
+	}
+	delMux := http.NewServeMux()
+	delMux.HandleFunc("DELETE /api/versions", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		env.h.deleteVersionHandler(w, r)
+	})
+	delReq := httptest.NewRequest("DELETE", "/api/versions?filename=f.txt&version_id="+entries[0].Name(), nil)
+	delRR := httptest.NewRecorder()
+	delMux.ServeHTTP(delRR, delReq)
+	if delRR.Code != http.StatusOK {
+		t.Fatalf("删除版本应 200, got %d body=%s", delRR.Code, delRR.Body.String())
+	}
+	if got := vScope.Usage(); got != 0 {
+		t.Fatalf("删除版本后 version 桶 Usage()=%d want 0", got)
+	}
+}
+
 // TestQuota_CloudResumeGrowthRejected 验证续传任务增长超过租户上限时被拒绝：
 // failTask 已把预留 Commit 掉（reservation==nil、QuotaCommitted=90），resume 下载增长到
 // 120（sizeDelta=30）必须触发 scope.TryReserve(30) 容量预检失败 → 任务 failed、Scope 归零

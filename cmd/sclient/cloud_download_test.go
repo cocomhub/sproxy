@@ -717,7 +717,7 @@ func TestCloudDownloadCmd_DownloadArchiveSubcommand(t *testing.T) {
 
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"download-archive", ".__cloud_archives__/my-archive.tar.gz"})
+	cmd.SetArgs([]string{"download-archive", "archives/my-archive.tar.gz"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("download-archive subcommand failed: %v", err)
 	}

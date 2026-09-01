@@ -10,83 +10,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 )
-
-func TestSafePath_NormalPath(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	var cfg atomic.Pointer[Config]
-	cfg.Store(&Config{UploadsDir: tmpDir})
-
-	h := &Handlers{cfgPtr: &cfg}
-	result := h.safePathForOwner("", "file.txt")
-	expected := filepath.Join(tmpDir, "file.txt")
-	if result != expected {
-		t.Fatalf("expected %q, got %q", expected, result)
-	}
-}
-
-func TestSafePath_PathTraversal(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	var cfg atomic.Pointer[Config]
-	cfg.Store(&Config{UploadsDir: tmpDir})
-
-	h := &Handlers{cfgPtr: &cfg}
-	result := h.safePathForOwner("", "../etc/passwd")
-	if result != "" {
-		t.Fatalf("expected empty string for path traversal, got %q", result)
-	}
-}
-
-func TestSafePath_SubDirectory(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	var cfg atomic.Pointer[Config]
-	cfg.Store(&Config{UploadsDir: tmpDir})
-
-	h := &Handlers{cfgPtr: &cfg}
-	result := h.safePathForOwner("", "dir/file.txt")
-	expected := filepath.Join(tmpDir, "dir/file.txt")
-	if result != expected {
-		t.Fatalf("expected %q, got %q", expected, result)
-	}
-}
-
-func TestSafePath_EmptyString(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	var cfg atomic.Pointer[Config]
-	cfg.Store(&Config{UploadsDir: tmpDir})
-
-	h := &Handlers{cfgPtr: &cfg}
-	result := h.safePathForOwner("", "")
-	if result != "" {
-		t.Fatalf("expected empty string for empty remotePath, got %q", result)
-	}
-}
-
-// TestSafePath_OwnerIsolation 验证多租户 owner 隔离：owner 非空时文件落到
-// uploadsDir/<owner>/ 子目录；未认证（owner 空）直接用 uploadsDir。
-func TestSafePath_OwnerIsolation(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	var cfg atomic.Pointer[Config]
-	cfg.Store(&Config{UploadsDir: tmpDir})
-
-	h := &Handlers{cfgPtr: &cfg}
-	owned := h.safePathForOwner("ak-tenant-a", "dir/file.txt")
-	expected := filepath.Join(tmpDir, "ak-tenant-a", "dir", "file.txt")
-	if owned != expected {
-		t.Fatalf("expected owner path %q, got %q", expected, owned)
-	}
-	// 越界防护仍生效：owner 非空时 ../ 逃逸被拒绝
-	if out := h.safePathForOwner("ak-tenant-a", "../etc/passwd"); out != "" {
-		t.Fatalf("expected empty for traversal under owner, got %q", out)
-	}
-}
 
 // TestDownload_RejectsInternalDirPrefix（审查 #4 收敛 + I-1 多租户跨目录读取）：
 // 普通下载/stat（无 kind）访问服务端内部目录首段必须被拒——否则任何持有有效 AK 的
@@ -97,7 +22,6 @@ func TestSafePath_OwnerIsolation(t *testing.T) {
 func TestDownload_RejectsInternalDirPrefix(t *testing.T) {
 	tmpDir := t.TempDir()
 	h := newAssemblyTestHandlers(t, tmpDir)
-	h.checksumStore = NewChecksumStore(tmpDir, testLogger())
 
 	// 制造一个内部目录跨租户文件（模拟他人云端下载产物）——即使文件存在，普通下载也应拒绝
 	internalDir := filepath.Join(tmpDir, ".__cloud__", "task123")

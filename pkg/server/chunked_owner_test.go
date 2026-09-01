@@ -54,7 +54,6 @@ func newChunkedTestHandlers(t *testing.T, dir string, chunkSize int64) *Handlers
 
 	h := &Handlers{
 		cfgPtr:        cfgPtr,
-		checksumStore: NewChecksumStore(dir, testLogger()),
 		logger:        testLogger(),
 		auditLogger:   testLogger(),
 		uploadingStop: make(chan struct{}),

@@ -792,13 +792,13 @@ func TestE2E_UploadSessionResume(t *testing.T) {
 	filename := "e2e-resume.bin"
 
 	// 1) init，带 file_mod_time 与 file_checksum，建立会话（reused=false）。
-	// owner 会话前缀化后（a04f1b1）：init 入参用裸 upload_id（服务端加 owner 前缀），
-	// 返回的完整 id 作为后续 session key（chunk/status/complete/fetch 都用完整 id）。
+	// 迁移到 Tenant chunk 桶后（8f96f2f6）：upload_id 不再带 owner 前缀（per-tenant
+	// UploadStore 物理隔离，跨租户同裸 id 互不可见），返回裸 id 作为后续 session key。
 	initResp := doInit(t, baseURL, uploadID, filename, content, chunkSize, modTime, fileChecksum)
-	if initResp.UploadID != e2eTestAK+"/"+uploadID {
-		t.Fatalf("init 返回 upload_id=%q，期望带 owner 前缀 %q", initResp.UploadID, e2eTestAK+"/"+uploadID)
+	if initResp.UploadID != uploadID {
+		t.Fatalf("init 返回 upload_id=%q，期望裸 id %q（无 owner 前缀）", initResp.UploadID, uploadID)
 	}
-	serverID := initResp.UploadID // 完整 session id（含 owner 前缀），后续操作沿用
+	serverID := initResp.UploadID // 裸 session id，后续操作沿用
 
 	// 2) 只传前 2 个分块（部分上传）
 	for _, idx := range []int{0, 1} {
@@ -895,8 +895,8 @@ func TestE2E_UploadSessionResume_MTimeChanged(t *testing.T) {
 	uploadID := "e2e-mtime-" + strings.ReplaceAll(dateStamp(), ":", "") // 每次运行唯一，避免残留会话干扰
 	filename := "e2e-mtime-change.bin"
 
-	// 1) init 带 A 的 checksum/mtime（建立会话）。owner 前缀化后，用返回的完整
-	//    session id（含 owner 前缀）作后续操作 key；init 入参仍用裸 upload_id。
+	// 1) init 带 A 的 checksum/mtime（建立会话）。upload_id 为裸 id（无 owner 前缀，
+	//    per-tenant UploadStore 隔离），返回的 id 作后续操作 key。
 	initA := doInit(t, baseURL, uploadID, filename, contentA, chunkSize, modTimeA, fileChecksumA)
 	serverID := initA.UploadID
 

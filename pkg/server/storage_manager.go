@@ -27,9 +27,6 @@ const (
 	CategoryCloud
 )
 
-// cloudDirName 是云端下载文件的存储子目录名。
-const cloudDirName = ".__cloud__"
-
 // StorageManager 管理上传目录的存储空间使用情况。
 // 通过原子计数器跟踪各分类和总使用量，支持配置上限和运行时调整。
 // P4：全局账本仍供 sync 适配与旧装配兼容；per-tenant 配额由 quota Scope 负责
@@ -204,11 +201,10 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
 			base := filepath.Base(path)
-			// 仅跳过服务端任务状态持久化目录（.__downloads__ 云任务 / .__sync__ 同步任务）
-			// 与新布局 meta 桶（服务端内部账本，不计入配额）。
-			// 审查 R2：除任务状态目录与 meta 桶外一律进入统计——未知 .__ 目录按用户文件
-			// 计入 userFiles（防配额规避）。
-			if base == downloadsDirName || base == ".__sync__" {
+			// 跳过遗留服务端内部目录（.__* 魔法目录，P5 后旧布局不再产生）与新布局
+			// meta 桶（服务端内部账本，不计入配额）。其余目录一律进入统计——
+			// 未知 .__ 目录也跳过（防历史魔法目录残留被误计；新布局用户文件在 user/ 桶）。
+			if strings.HasPrefix(base, ".__") {
 				return filepath.SkipDir
 			}
 			if storageBucketOf(rel) == "meta" {
@@ -242,20 +238,13 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		case "meta":
 			// 已在上方目录层 SkipDir，兜底跳过
 		default:
-			// 旧布局/未知路径：按 legacy 内部目录名分类，否则平铺用户文件。
-			// 布局版本标记（存储根/租户根 LAYOUT_VERSION）不计入。
-			switch {
-			case d.Name() == "LAYOUT_VERSION":
-			case hasInternalDirAtAnyDepth(rel, chunkedDirName):
-				chunked += size
-			case hasInternalDirAtAnyDepth(rel, versionsDirName):
-				versions += size
-			case isLegacyCloudRel(rel):
-				cloud += size
-			default:
-				userFiles += size
-				userFileCount++
+			// 无桶结构的旧布局平铺文件按用户文件计入（新布局路径均落入上方 bucket 分支；
+			// LAYOUT_VERSION 标记文件不计入）。.__ 魔法目录已在目录层 SkipDir 跳过。
+			if d.Name() == "LAYOUT_VERSION" {
+				return nil
 			}
+			userFiles += size
+			userFileCount++
 		}
 		return nil
 	})
@@ -301,13 +290,6 @@ func firstSegment(rel string) string {
 		return before
 	}
 	return ""
-}
-
-// isLegacyCloudRel 判断旧布局云端任务相关目录前缀（.__cloud__/.__downloads__/.__cloud_archives__）。
-func isLegacyCloudRel(rel string) bool {
-	return strings.HasPrefix(rel, cloudDirName+"/") ||
-		strings.HasPrefix(rel, downloadsDirName+"/") ||
-		strings.HasPrefix(rel, cloudArchiveDirName+"/")
 }
 
 // addTenantBucket 把 size 累加到 tenantBuckets[tenant][bucket]。

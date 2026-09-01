@@ -31,10 +31,8 @@ func newTestServerWithUploadInit(t *testing.T, modifyCfg func(*Config)) (*Handle
 	}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
-	cs := NewChecksumStore(cfg.UploadsDir, nil)
 	h := &Handlers{
 		cfgPtr:        &cfgPtr,
-		checksumStore: cs,
 		logger:        slog.Default(),
 		uploadingStop: make(chan struct{}),
 	}

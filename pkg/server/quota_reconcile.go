@@ -3,6 +3,8 @@
 
 package server
 
+import "github.com/cocomhub/sproxy/pkg/storage"
+
 // quota_reconcile.go 实现启动/周期扫描后的 per-tenant 配额 Scope 校准：
 // ScanAndRecalculate 把磁盘按租户桶归集的字节数交给 reconcileQuotaScopes，
 // 通过 quota.Scope.Adjust 把各桶 committed 校准到磁盘实际占用（重启后 Scope 不回溯）。
@@ -15,7 +17,8 @@ package server
 func (h *Handlers) reconcileQuotaScopes(tenantBuckets map[string]map[string]int64) {
 	for tenant, buckets := range tenantBuckets {
 		// 仅校准合法租户（避免 legacy 目录/非法段名被当作租户建 Scope）。
-		if !validOwnerDirName(tenant) {
+		// 段名校验单一权威在 pkg/storage.ValidSegmentName（P5 收敛）。
+		if !storage.ValidSegmentName(tenant) {
 			continue
 		}
 		for _, b := range quotaBucketNames {

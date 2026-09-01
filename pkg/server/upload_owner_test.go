@@ -52,7 +52,6 @@ func newOwnerUploadEnv(t *testing.T) *ownerUploadEnv {
 
 	h := &Handlers{
 		cfgPtr:        &cfgPtr,
-		checksumStore: NewChecksumStore(root, testLogger()), // 旧全局装配（兼容 RED 阶段；迁移后 per-tenant 生效）
 		logger:        testLogger(),
 		auditLogger:   testLogger(),
 		uploadingStop: make(chan struct{}),

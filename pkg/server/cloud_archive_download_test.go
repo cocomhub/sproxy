@@ -56,7 +56,7 @@ func TestDownloadCloudArchive_Success(t *testing.T) {
 	}
 	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "test-archive.tar.gz") {
 		t.Errorf("Content-Disposition missing archive name: %q", cd)
-	} else if strings.Contains(cd, cloudArchiveDirName) {
+	} else if strings.Contains(cd, ".__") {
 		t.Errorf("Content-Disposition should use archive name, not internal dir: %q", cd)
 	}
 	if ar := resp.Header.Get("Accept-Ranges"); ar != "bytes" {
@@ -252,8 +252,8 @@ func TestDownloadCloudArchive_EmptyKindRejectsInternal(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 	writeCloudArchive(t, cfgPtr, "", "x.tar.gz", []byte("x"))
 
-	// 直接传完整内部路径（不带 kind）必须 400
-	resp, err := http.Get(url + "/download?filename=" + cloudArchiveDirName + "/x.tar.gz")
+	// 直接传完整内部路径（不带 kind）必须 400（.__ 前缀段由 UserRel/ValidSegmentName 拒绝）
+	resp, err := http.Get(url + "/download?filename=" + ".__internal__/x.tar.gz")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}

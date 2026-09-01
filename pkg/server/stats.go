@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // DiskUsageStats 磁盘使用统计。
@@ -61,22 +63,26 @@ func isStorageBucket(bucket string) bool {
 	return false
 }
 
-// isLegacyInternalRel 判断 rel 路径任意层级是否包含旧布局内部目录（.__chunked__/.__versions__/
-// .__cloud__/.__cloud_archives__/.__downloads__）。供 stats 遍历跳过 legacy 内部占用。
-func isLegacyInternalRel(rel string) bool {
-	for _, d := range []string{chunkedDirName, versionsDirName, cloudDirName, cloudArchiveDirName, downloadsDirName} {
-		if hasInternalDirAtAnyDepth(rel, d) {
-			return true
+// statsBucketOf 返回统计遍历路径的桶段：兼容两种遍历根——
+//   - 租户根相对路径（user/f.txt、version/doc/v1）：首段即功能桶名；
+//   - 存储根相对路径（alice/user/f.txt）：第 2 段为功能桶名（复用 storageBucketOf）。
+//
+// 已知功能桶名优先按首段识别（租户根遍历），否则回退 storageBucketOf；未知返回 ""。
+func statsBucketOf(rel string) string {
+	if before, _, ok := strings.Cut(rel, "/"); ok {
+		if isStorageBucket(before) {
+			return before
 		}
+	} else if isStorageBucket(rel) {
+		return rel
 	}
-	return false
+	return storageBucketOf(rel)
 }
 
 // walkUploadStats 遍历 root 统计用户文件数与总大小。
 // 新布局桶语义（storage.Root）：只统计 user/ 桶内的文件；跳过其它功能桶（cloud/archive/
-// chunk/version/meta）、服务端任务状态目录（.__downloads__/.__sync__）、.checksums.json 与
-// LAYOUT_VERSION。旧布局平铺文件（无桶结构）按用户文件计入，跳过 legacy 内部目录
-// （.__versions__ 等，审查 #5：任意层级出现即跳过）。
+// chunk/version/meta）、遗留 .__ 魔法目录、.checksums.json 与 LAYOUT_VERSION。
+// 旧布局平铺文件（无桶结构）按用户文件计入。
 func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64) {
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -89,11 +95,12 @@ func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64
 		}
 		relSlash := filepath.ToSlash(rel)
 		if d.IsDir() {
-			if base := d.Name(); base == downloadsDirName || base == ".__sync__" {
+			// 跳过遗留 .__ 魔法目录（P5 后旧布局不再产生）与用户不可见内部目录。
+			if strings.HasPrefix(d.Name(), ".__") {
 				return filepath.SkipDir
 			}
 			// 新布局功能桶目录（非 user）在目录层直接跳过。
-			if b := storageBucketOf(relSlash); isStorageBucket(b) && b != "user" {
+			if b := statsBucketOf(relSlash); isStorageBucket(b) && b != "user" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -106,7 +113,7 @@ func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64
 			h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
 			return nil
 		}
-		b := storageBucketOf(relSlash)
+		b := statsBucketOf(relSlash)
 		switch {
 		case b == "user":
 			// 用户桶文件计入。
@@ -115,8 +122,6 @@ func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64
 			return nil
 		case d.Name() == "LAYOUT_VERSION":
 			// 存储根/租户根的布局版本标记（storage.OpenRoot 写入）不计入。
-			return nil
-		case isLegacyInternalRel(relSlash):
 			return nil
 		default:
 			// 旧布局平铺用户文件计入。
@@ -130,9 +135,8 @@ func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64
 
 // walkUploadStatsByCategory 遍历 root 按新布局桶前缀分类统计用户文件与分类用量
 // （chunked/versions/cloud）。user/→userFiles、cloud/+archive/→cloud、chunk/→chunked、
-// version/→versions；meta/ 与任务状态目录（.__downloads__/.__sync__）跳过。
-// 兼容旧布局路径（无桶结构）：按 legacy 内部目录名分类（.__chunked__/.__versions__/
-// .__cloud__ 等），其余平铺文件按用户文件计入。
+// version/→versions；meta/ 与遗留 .__ 魔法目录跳过。无桶结构的旧布局平铺文件按
+// 用户文件计入。
 func (h *Handlers) walkUploadStatsByCategory(root string) (userFiles, chunked, versions, cloud int64) {
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -140,12 +144,12 @@ func (h *Handlers) walkUploadStatsByCategory(root string) (userFiles, chunked, v
 			return nil
 		}
 		if d.IsDir() {
-			// 服务端任务状态持久化目录与 meta 桶不计入配额（对齐 storage_manager 扫描）。
-			if base := d.Name(); base == downloadsDirName || base == ".__sync__" {
+			// 遗留 .__ 魔法目录与 meta 桶不计入配额（对齐 storage_manager 扫描）。
+			if strings.HasPrefix(d.Name(), ".__") {
 				return filepath.SkipDir
 			}
 			rel, relErr := filepath.Rel(root, path)
-			if relErr == nil && storageBucketOf(filepath.ToSlash(rel)) == "meta" {
+			if relErr == nil && statsBucketOf(filepath.ToSlash(rel)) == "meta" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -164,7 +168,7 @@ func (h *Handlers) walkUploadStatsByCategory(root string) (userFiles, chunked, v
 		}
 		rel = filepath.ToSlash(rel)
 		size := info.Size()
-		switch bucket := storageBucketOf(rel); bucket {
+		switch bucket := statsBucketOf(rel); bucket {
 		case "user":
 			userFiles += size
 		case "cloud", "archive":
@@ -176,17 +180,8 @@ func (h *Handlers) walkUploadStatsByCategory(root string) (userFiles, chunked, v
 		case "meta":
 			// 目录层已 SkipDir，兜底跳过
 		default:
-			// 旧布局/未知路径：按 legacy 内部目录名分类，否则平铺用户文件。
-			switch {
-			case hasInternalDirAtAnyDepth(rel, chunkedDirName):
-				chunked += size
-			case hasInternalDirAtAnyDepth(rel, versionsDirName):
-				versions += size
-			case isLegacyCloudRel(rel):
-				cloud += size
-			default:
-				userFiles += size
-			}
+			// 无桶结构的旧布局平铺文件按用户文件计入（.__ 魔法目录已在目录层跳过）。
+			userFiles += size
 		}
 		return nil
 	})
@@ -224,7 +219,15 @@ func (h *Handlers) statsRootFor(owner string) string {
 				return abs
 			}
 		}
-		return h.ownerUploadsDirFor(owner)
+		// 租户不可用（globalRoot 未装配的旧测试装配 / 非法 owner fail-closed）时，
+		// 按段名校验派生旧布局路径（UploadsDir/<owner>/）；非法 owner 返回空（无统计根）。
+		if !storage.ValidSegmentName(owner) {
+			return ""
+		}
+		if cfg := h.cfgPtr.Load(); cfg != nil {
+			return filepath.Join(cfg.UploadsDir, owner)
+		}
+		return ""
 	}
 	if h.globalRoot != nil {
 		if abs, ok := h.globalRoot.Abs(""); ok {

@@ -632,7 +632,7 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 }
 
 // DownloadCloudArchive 下载云任务归档文件（kind=cloud_archive）。
-// name 为归档名（单文件名，如 "x.tar.gz"），服务端拼接 uploadsDir/.__cloud_archives__/<name>。
+// name 为归档名（单文件名，如 "x.tar.gz"），服务端按 owner 在租户 archive 桶内拼接。
 func (c *FileClient) DownloadCloudArchive(ctx context.Context, name, outputPath string) error {
 	return c.downloadTo(ctx, name, outputPath, DownloadKindCloudArchive)
 }

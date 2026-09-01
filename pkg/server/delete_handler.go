@@ -31,6 +31,24 @@ func (h *Handlers) resolveAndValidateFile(r *http.Request, filename string) (rem
 	return remotePath, rel, true
 }
 
+// resolveAndValidateFileForOwner 校验文件名并返回指定 owner 租户 user 桶下的相对路径
+// （如 user/dir/f.txt）。供批量操作（ctx 无 *http.Request）使用；校验失败返回 ("", "", false)。
+func (h *Handlers) resolveAndValidateFileForOwner(owner, filename string) (remotePath, rel string, ok bool) {
+	remotePath, err := ValidateFilePath(filename)
+	if err != nil {
+		return "", "", false
+	}
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		return "", "", false
+	}
+	rel, ok = tnt.UserRel(remotePath)
+	if !ok {
+		return "", "", false
+	}
+	return remotePath, rel, true
+}
+
 func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	logger := h.logger
 

@@ -172,29 +172,35 @@ func TestStats_SkipsInternalDirsAtAnyDepth(t *testing.T) {
 	}
 }
 
-// TestStats_OwnerScopedCategories 验证（审查 M5 收敛）：认证用户视角的分类用量只含
-// 自己 owner 根下的文件——owner 根下 .__chunked__/.__versions__ 归对应分类，
-// 全局 .__cloud__（他人/全局云任务文件）不计入认证用户视角（云分类为 0）。
+// TestStats_OwnerScopedCategories 验证（审查 M5 收敛）：认证用户视角的分类用量按新布局
+// 桶前缀归集（user/→user、cloud/+archive/→cloud、chunk/→chunked、version/→versions），
+// 他租户目录与全局 .__cloud__（他人/全局云任务文件）不计入认证用户视角（云分类为 0）。
 func TestStats_OwnerScopedCategories(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	ownerRoot := filepath.Join(dir, "ak-A")
-	if err := os.MkdirAll(filepath.Join(ownerRoot, ".__versions__", "doc"), 0755); err != nil {
+	write := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(ownerRoot, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join("user", "user.txt"), "user")         // 4
+	write(filepath.Join("version", "doc", "v1"), "ver")      // 3
+	write(filepath.Join("chunk", "s", "chunk.dat"), "chunk") // 5
+	write(filepath.Join("archive", "a.tar.gz"), "arc")       // 3 → cloud 分类
+	// 他租户目录（不应计入 ak-A 视角）
+	if err := os.MkdirAll(filepath.Join(dir, "ak-B", "user"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(ownerRoot, ".__chunked__"), 0755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ak-B", "user", "other.txt"), []byte("other-tenant-data"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(ownerRoot, "user.txt"), []byte("user"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(ownerRoot, ".__versions__", "doc", "v1"), []byte("ver"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(ownerRoot, ".__chunked__", "chunk.dat"), []byte("chunk"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	// 全局 .__cloud__（他人/全局云任务文件）不属于认证用户视角
+	// 全局遗留 .__cloud__（他人/全局云任务文件）不属于认证用户视角
 	if err := os.MkdirAll(filepath.Join(dir, ".__cloud__", "t1"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +213,7 @@ func TestStats_OwnerScopedCategories(t *testing.T) {
 	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
 
 	userFiles, chunked, versions, cloud := h.walkUploadStatsByCategory(ownerRoot)
-	// user.txt=4, versions=3, chunked=5, cloud=0（owner 根下无全局 .__cloud__）
+	// user=4, versions=3, chunked=5, cloud=3（archive 并入 cloud）
 	if userFiles != 4 {
 		t.Fatalf("userFiles = %d, want 4", userFiles)
 	}
@@ -217,8 +223,8 @@ func TestStats_OwnerScopedCategories(t *testing.T) {
 	if chunked != 5 {
 		t.Fatalf("chunked = %d, want 5", chunked)
 	}
-	if cloud != 0 {
-		t.Fatalf("cloud = %d, want 0（owner 根下不应含全局云任务）", cloud)
+	if cloud != 3 {
+		t.Fatalf("cloud = %d, want 3（archive 桶并入 cloud 分类）", cloud)
 	}
 }
 
@@ -245,20 +251,25 @@ func TestStatsHandler_OwnerScoped(t *testing.T) {
 	}
 	mustWrite := func(p, content string) {
 		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
 	ownerRoot := filepath.Join(dir, "ak-A")
-	mustMkdir(filepath.Join(ownerRoot, ".__versions__"))
-	mustMkdir(filepath.Join(ownerRoot, ".__chunked__"))
-	mustWrite(filepath.Join(ownerRoot, "user.txt"), "user")            // 4
-	mustWrite(filepath.Join(ownerRoot, ".__versions__", "v1"), "ver")  // 3
-	mustWrite(filepath.Join(ownerRoot, ".__chunked__", "c1"), "chunk") // 5
+	for _, d := range []string{"user", "version", "chunk", "archive"} {
+		mustMkdir(filepath.Join(ownerRoot, d))
+	}
+	mustWrite(filepath.Join(ownerRoot, "user", "user.txt"), "user")    // 4
+	mustWrite(filepath.Join(ownerRoot, "version", "doc", "v1"), "ver") // 3
+	mustWrite(filepath.Join(ownerRoot, "chunk", "s", "c1"), "chunk")   // 5
+	mustWrite(filepath.Join(ownerRoot, "archive", "a.tar.gz"), "arc")  // 3 → cloud
 	// 他租户文件（不应计入 ak-A 视角）
-	mustMkdir(filepath.Join(dir, "ak-B"))
-	mustWrite(filepath.Join(dir, "ak-B", "other.txt"), "other-tenant-data")
-	// 全局云任务文件（不应计入 ak-A 视角）
+	mustMkdir(filepath.Join(dir, "ak-B", "user"))
+	mustWrite(filepath.Join(dir, "ak-B", "user", "other.txt"), "other-tenant-data")
+	// 全局遗留 .__cloud__（不应计入 ak-A 视角）
 	mustMkdir(filepath.Join(dir, ".__cloud__", "t1"))
 	mustWrite(filepath.Join(dir, ".__cloud__", "t1", "a.bin"), "clouddata")
 
@@ -276,7 +287,7 @@ func TestStatsHandler_OwnerScoped(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("解析 stats 失败: %v", err)
 	}
-	// 文件数：仅 owner 根用户文件 user.txt（版本/分块被 walkUploadStats 跳过；他租户不计入）
+	// 文件数：仅 owner 租户 user/ 桶用户文件 user.txt（功能桶/他租户/全局不计入）
 	if resp.DiskUsage.TotalFiles != 1 {
 		t.Fatalf("TotalFiles = %d, want 1（他租户/全局不计入）", resp.DiskUsage.TotalFiles)
 	}
@@ -289,11 +300,11 @@ func TestStatsHandler_OwnerScoped(t *testing.T) {
 	if resp.StorageChunked != 5 {
 		t.Fatalf("StorageChunked = %d, want 5", resp.StorageChunked)
 	}
-	if resp.StorageCloud != 0 {
-		t.Fatalf("StorageCloud = %d, want 0（全局云任务不计入认证用户）", resp.StorageCloud)
+	if resp.StorageCloud != 3 {
+		t.Fatalf("StorageCloud = %d, want 3（archive 桶并入 cloud 分类；全局云任务不计入）", resp.StorageCloud)
 	}
-	if resp.StorageUsage != 4+3+5 {
-		t.Fatalf("StorageUsage = %d, want %d", resp.StorageUsage, 4+3+5)
+	if resp.StorageUsage != 4+3+5+3 {
+		t.Fatalf("StorageUsage = %d, want %d", resp.StorageUsage, 4+3+5+3)
 	}
 }
 

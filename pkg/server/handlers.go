@@ -33,7 +33,6 @@ type Handlers struct {
 	cfgPtr        *atomic.Pointer[Config]
 	version       string
 	buildAt       string
-	checksumStore ChecksumStoreIface
 	tunnelHandler http.Handler
 	// localHandler 是隧道内层本地文件 API handler（localMux + 中间件链，不含外层
 	// 帧解密/密钥检查）。供 xfer listener（阶段 5 工作项 1）直接路由解密后的隧道
@@ -83,7 +82,10 @@ type Handlers struct {
 	uploadStores   map[string]*UploadStore            // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
 	quotaScopes    map[string]*quota.Scope            // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
 	quotaBuckets   map[string]map[string]*quota.Scope // 按 owner 缓存功能桶配额子 Scope（user/cloud/archive/chunk/version）
-	tenantMu       sync.Mutex                         // 串行化 tenantRoots/checksumStores/uploadStores/quotaScopes/quotaBuckets 懒创建
+	// archiveUsage 按 owner 登记已确认占用的归档文件（archive 桶），供删除时释放 Scope
+	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
+	archiveUsage map[string]map[string]int64
+	tenantMu     sync.Mutex // 串行化 tenantRoots/checksumStores/uploadStores/quotaScopes/quotaBuckets/archiveUsage 懒创建
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -135,6 +137,11 @@ func normalizeOwner(owner string) string {
 		return anonymousOwner
 	}
 	return owner
+}
+
+// ownerFromRequest 返回请求 ctx 中的操作主体（未认证返回 ""）。
+func ownerFromRequest(r *http.Request) string {
+	return ActorFrom(r.Context())
 }
 
 // tenantFor 返回 owner 的租户（空 owner → anonymous）。懒创建：首次访问按 owner 打开
@@ -219,7 +226,7 @@ func (h *Handlers) listTenantIDs() []string {
 		if !storage.ValidSegmentName(name) {
 			continue
 		}
-		// 跳过遗留服务端内部目录（.__cloud__/.__downloads__/.__sync__ 等）——它们不是租户根。
+		// 跳过遗留服务端内部目录（.__ 魔法目录 / __ 遗留前缀等）——它们不是租户根。
 		if strings.HasPrefix(name, ".__") || strings.HasPrefix(name, "__") {
 			continue
 		}
@@ -231,7 +238,7 @@ func (h *Handlers) listTenantIDs() []string {
 
 // checksumStoreFor 返回 owner 的 per-tenant checksum 存储（懒创建，缓存到 map）。
 // storePath = <tenant meta>/checksums.json；获取不到租户（非法 owner / 根不可用）返回 nil。
-// P2 各 handler 迁移时逐个从全局 h.checksumStore 切换到本方法（本任务只新增能力，不改现有用法）。
+// P5 后不再有全局 checksum store——所有读写侧均经本方法取 per-tenant 实例。
 func (h *Handlers) checksumStoreFor(owner string) *ChecksumStore {
 	owner = normalizeOwner(owner)
 	// 先取租户（内部锁 tenantMu，懒创建租户根 + meta 目录）。
@@ -289,6 +296,9 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 		h.logger.Error("创建 per-tenant UploadStore 失败", "tenant", owner, "error", err)
 		return nil
 	}
+	// P5：quota 未装配（globalPool nil）时，分块上传走 storageMgr 回退预留，
+	// 需把 storageMgr 注入 store 供会话删除/过期释放（scope 预留路径无需）。
+	us.SetStorageMgr(h.storageMgr)
 	h.uploadStores[owner] = us
 	return us
 }
@@ -412,14 +422,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		panic("打开存储根失败: " + err.Error())
 	}
 
-	// 初始化 ChecksumStore
-	cs := NewChecksumStore(cfg.UploadsDir, log.With("component", "checksum_store"))
-
 	h := &Handlers{
 		cfgPtr:        opts.CfgPtr,
 		version:       opts.Version,
 		buildAt:       opts.BuildAt,
-		checksumStore: cs,
 		logger:        log,
 		auditLogger:   auditLogger,
 		metrics:       NewMetrics(),
@@ -441,6 +447,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.uploadStores = make(map[string]*UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	h.quotaBuckets = make(map[string]map[string]*quota.Scope)
+	h.archiveUsage = make(map[string]map[string]int64)
 	if h.tenantFor(anonymousOwner) == nil {
 		// anonymous 是未认证请求的默认兜底租户，创建失败意味着存储根不可用，拒绝启动。
 		log.Error("预创建 anonymous 租户失败，存储根不可用")
@@ -485,7 +492,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 初始化 StorageManager 和 CloudDownloadManager。
 	// P4：StorageManager 保留全局账本（sync/旧装配兼容）；启动扫描经 SetReconciler 按租户桶
 	// 归集校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。云任务配额走 cloud 桶子 Scope。
-	sm := NewStorageManager(cfg.StorageRoot(), cfg.MaxStorageBytes, cs, log.With("component", "storage"))
+	sm := NewStorageManager(cfg.StorageRoot(), cfg.MaxStorageBytes, nil, log.With("component", "storage"))
 	sm.SetReconciler(h.reconcileQuotaScopes)
 	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope（启动对账）
 	cloudCfg := &CloudDownloadConfig{

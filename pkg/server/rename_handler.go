@@ -32,7 +32,7 @@ func parseRenameParams(r *http.Request) (from, to, checksum string, err error) {
 		return "", "", "", fmt.Errorf("无效的目标路径")
 	}
 	// 写入侧守卫已收敛：UserRel 保证 user/ 桶内（首段 .__/__ 内部前缀时拒绝），
-	// 无需再单独校验 isInternalDirPathPrefix。
+	// 无需再单独校验内部目录守卫。
 	checksum = r.Header.Get(headerFileChecksum)
 	return from, to, checksum, nil
 }

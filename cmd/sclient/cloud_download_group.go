@@ -470,8 +470,8 @@ func NewCmdCloudGroupDownloadArchive(factory clientfactory.Factory, ios cli.IOSt
 			items := make([]client.DownloadItem, 0, len(args))
 			for _, archiveFile := range args {
 				local := filepath.Join(outputDir, filepath.Base(archiveFile))
-				// 归档存服务端 uploadsDir/.__cloud_archives__/<name>；download-archive 传归档名
-				// + kind=cloud_archive（.__ 内部路径不直接透传，ValidateFilePath 全拒）。
+				// 归档存服务端租户 archive 桶；download-archive 传归档名 + kind=cloud_archive
+				// （内部桶路径不直接透传）。
 				items = append(items, client.DownloadItem{
 					RemotePath: filepath.Base(archiveFile),
 					LocalPath:  local,

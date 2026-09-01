@@ -21,12 +21,12 @@ import (
 )
 
 // resolveMockDownloadFile 解析 mock 下载文件路径：kind=cloud_archive 时归档在
-// .__cloud_archives__ 子目录（与服务端行为一致；cloudArchiveDirName 定义见
+// archive 桶子目录（与服务端行为一致；archiveDirName 定义见
 // archive_download_test.go），否则 filename 直接拼接。
 func resolveMockDownloadFile(dir string, r *http.Request) string {
 	filename := r.URL.Query().Get("filename")
 	if r.URL.Query().Get("kind") == DownloadKindCloudArchive {
-		return filepath.Join(dir, cloudArchiveDirName, filepath.Base(filename))
+		return filepath.Join(dir, archiveDirName, filepath.Base(filename))
 	}
 	return filepath.Join(dir, filepath.FromSlash(filename))
 }
@@ -448,7 +448,7 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	archiveDir := filepath.Join(dir, ".__cloud_archives__")
+	archiveDir := filepath.Join(dir, archiveDirName)
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +566,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 	dir := t.TempDir()
 	mux := http.NewServeMux()
 
-	archiveDir := filepath.Join(dir, ".__cloud_archives__")
+	archiveDir := filepath.Join(dir, archiveDirName)
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -707,7 +707,7 @@ func TestCloudDownloadChain_CleanupRemote_PartialError(t *testing.T) {
 func TestCloudDownloadChain_DownloadToLocal_KindArchive(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	archiveDir := filepath.Join(dir, cloudArchiveDirName)
+	archiveDir := filepath.Join(dir, archiveDirName)
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatalf("mkdir archive dir: %v", err)
 	}

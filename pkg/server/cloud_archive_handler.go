@@ -46,9 +46,6 @@ type CloudArchiveResult struct {
 	SkippedTasks []string `json:"skipped_tasks,omitempty"`
 }
 
-// cloudArchiveDirName 是云任务归档文件存储子目录。
-const cloudArchiveDirName = ".__cloud_archives__"
-
 // cloudArchiveReservePlaceholder 云归档打包预留占位（100MB）。
 // tar 头（≤512B/文件）+ gzip 可能在极少数情况下产生少量膨胀，预留后按实际大小对账。
 const cloudArchiveReservePlaceholder = int64(100 * 1024 * 1024)
@@ -168,25 +165,25 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pre := info.Size() + cloudArchiveReservePlaceholder
-	if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-		}, http.StatusInsufficientStorage)
-		return
-	}
-	// P4 租户配额：预留 pre（全局兜底由 Scope 父链生效）；失败回滚全局预留。
-	// 归档文件落租户 archive 桶，配额按 archive 桶子 Scope 归集（父链聚合到租户 Scope）。
+	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
+	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
 	var res *quota.Reservation
 	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
 		rr, reserveErr := scope.TryReserve(pre)
 		if reserveErr != nil {
-			h.storageMgr.Release(pre, CategoryCloud)
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)
 			return
 		}
 		res = rr
+	} else if h.storageMgr != nil {
+		if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
 	}
 
 	// 打包（流式 checksum）
@@ -194,51 +191,50 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	checksum, err := createTarGz(srcTnt.Root(), srcRel, task.Filename, root, rel, logger)
 	if err != nil {
 		if errors.Is(err, errArchiveExists) {
-			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
-			if res != nil {
-				res.Release()
-			}
-			h.storageMgr.Release(pre, CategoryCloud)
+			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
+			releaseArchiveReservation(res, h.storageMgr, pre)
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
 			return
 		}
 		h.logger.Error("failed to create archive", "task_id", taskID, "error", err)
 		_ = root.Remove(rel)
-		if res != nil {
-			res.Release()
-		}
-		h.storageMgr.Release(pre, CategoryCloud)
+		releaseArchiveReservation(res, h.storageMgr, pre)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
 		}, http.StatusInternalServerError)
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：storageMgr 保留 3 步（全局账本 /stats 兼容），
-	// 租户 Scope 单步 Commit(actual)（替换"Release(pre)+TryReserve(actual)"三段式对账）。
-	h.storageMgr.Release(pre, CategoryCloud)
-	if actual, statErr := root.Stat(rel); statErr == nil {
-		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
-			if res != nil {
-				res.Release()
-				res = nil
-			}
-			h.logger.Error("storage full, removing archive to keep ledger consistent", "task_id", taskID, "error", rErr)
-			_ = root.Remove(rel)
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
-			}, http.StatusInsufficientStorage)
-			return
-		}
-		if res != nil {
-			res.Commit(actual.Size())
+	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
+	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
+	actual := int64(0)
+	if res != nil {
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			res.Commit(actual)
+			res = nil
+		} else {
+			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
+			res.Release()
 			res = nil
 		}
+	} else if h.storageMgr != nil {
+		h.storageMgr.Release(pre, CategoryCloud)
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			if rErr := h.storageMgr.TryReserve(actual, CategoryCloud); rErr != nil {
+				h.logger.Error("storage full, removing archive to keep ledger consistent", "task_id", taskID, "error", rErr)
+				_ = root.Remove(rel)
+				sendJSONResponse(w, CloudArchiveResult{
+					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
+				}, http.StatusInsufficientStorage)
+				return
+			}
+		}
 	}
-	// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
-	if res != nil {
-		res.Release()
-	}
+
+	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
+	h.recordArchiveUsage(owner, archiveName, actual)
 
 	archiveInfo, err := root.Stat(rel)
 	if err != nil {
@@ -392,25 +388,25 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pre := totalSourceSize + cloudArchiveReservePlaceholder
-	if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-		}, http.StatusInsufficientStorage)
-		return
-	}
-	// P4 租户配额：预留 pre（全局兜底由 Scope 父链生效）；失败回滚全局预留。
-	// 归档文件落租户 archive 桶，配额按 archive 桶子 Scope 归集（父链聚合到租户 Scope）。
+	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
+	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
 	var res *quota.Reservation
 	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
 		rr, reserveErr := scope.TryReserve(pre)
 		if reserveErr != nil {
-			h.storageMgr.Release(pre, CategoryCloud)
 			sendJSONResponse(w, CloudArchiveResult{
 				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
 			}, http.StatusInsufficientStorage)
 			return
 		}
 		res = rr
+	} else if h.storageMgr != nil {
+		if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
 	}
 
 	// 多文件打包（流式 checksum）
@@ -419,51 +415,50 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	checksum, err := createMultiFileTarGz(files, root, rel, logger, &created)
 	if err != nil {
 		if !created {
-			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
-			if res != nil {
-				res.Release()
-			}
-			h.storageMgr.Release(pre, CategoryCloud)
+			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
+			releaseArchiveReservation(res, h.storageMgr, pre)
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
 			return
 		}
 		h.logger.Error("failed to create batch archive", "error", err)
 		_ = root.Remove(rel)
-		if res != nil {
-			res.Release()
-		}
-		h.storageMgr.Release(pre, CategoryCloud)
+		releaseArchiveReservation(res, h.storageMgr, pre)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
 		}, http.StatusInternalServerError)
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：storageMgr 保留 3 步（全局账本 /stats 兼容），
-	// 租户 Scope 单步 Commit(actual)（替换"Release(pre)+TryReserve(actual)"三段式对账）。
-	h.storageMgr.Release(pre, CategoryCloud)
-	if actual, statErr := root.Stat(rel); statErr == nil {
-		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
-			if res != nil {
-				res.Release()
-				res = nil
-			}
-			h.logger.Error("storage full, removing archive to keep ledger consistent", "error", rErr)
-			_ = root.Remove(rel)
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
-			}, http.StatusInsufficientStorage)
-			return
-		}
-		if res != nil {
-			res.Commit(actual.Size())
+	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
+	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
+	actual := int64(0)
+	if res != nil {
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			res.Commit(actual)
+			res = nil
+		} else {
+			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
+			res.Release()
 			res = nil
 		}
+	} else if h.storageMgr != nil {
+		h.storageMgr.Release(pre, CategoryCloud)
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			if rErr := h.storageMgr.TryReserve(actual, CategoryCloud); rErr != nil {
+				h.logger.Error("storage full, removing archive to keep ledger consistent", "error", rErr)
+				_ = root.Remove(rel)
+				sendJSONResponse(w, CloudArchiveResult{
+					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
+				}, http.StatusInsufficientStorage)
+				return
+			}
+		}
 	}
-	// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
-	if res != nil {
-		res.Release()
-	}
+
+	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
+	h.recordArchiveUsage(owner, archiveName, actual)
 
 	info, err := root.Stat(rel)
 	if err != nil {
@@ -591,4 +586,79 @@ func openArchiveOutput(root *storage.Root, rel string) (*os.File, bool, error) {
 		return nil, false, fmt.Errorf("create archive output: %w", err)
 	}
 	return f, true, nil
+}
+
+// releaseArchiveReservation 释放云归档预留，与 TryReserve 的"二选一"对称：
+// scope 预留（res 非 nil）→ Reservation.Release；storageMgr 回退预留 → 按 pre 释放。
+// 不 double release：两条路径互斥，同一归档只走其中一条。
+func releaseArchiveReservation(res *quota.Reservation, sm *StorageManager, pre int64) {
+	if res != nil {
+		res.Release()
+	} else if sm != nil {
+		sm.Release(pre, CategoryCloud)
+	}
+}
+
+// recordArchiveUsage 登记归档文件在租户 archive 桶 Scope 中的已确认占用
+// （P5 审查重要 2：删除归档时按登记释放，不再依赖周期扫描自愈）。
+// actual<=0 时不登记（文件未落盘，无占用可释放）。
+func (h *Handlers) recordArchiveUsage(owner, archiveName string, actual int64) {
+	if actual <= 0 {
+		return
+	}
+	owner = normalizeOwner(owner)
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if h.archiveUsage == nil {
+		h.archiveUsage = make(map[string]map[string]int64)
+	}
+	m := h.archiveUsage[owner]
+	if m == nil {
+		m = make(map[string]int64)
+		h.archiveUsage[owner] = m
+	}
+	m[archiveName] = actual
+}
+
+// deleteCloudArchive 删除租户 archive 桶下指定归档文件并释放其 Scope 占用。
+// 供归档删除路径（DeleteGroup 联动 / 未来归档删除 API）调用；文件不存在视为幂等成功。
+// 释放量以磁盘 stat 为准（与登记一致；登记缺失时按 stat 释放，防止 Scope 虚高）。
+func (h *Handlers) deleteCloudArchive(owner, archiveName string) error {
+	owner = normalizeOwner(owner)
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		return errors.New("租户不可用，无法删除归档")
+	}
+	rel, ok := tnt.FeatureRel("archive", archiveName)
+	if !ok {
+		return fmt.Errorf("非法归档名: %s", archiveName)
+	}
+	root := tnt.Root()
+	size := int64(0)
+	if info, err := root.Stat(rel); err == nil {
+		size = info.Size()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat 归档失败: %w", err)
+	}
+	if err := root.Remove(rel); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("删除归档失败: %w", err)
+	}
+	// 释放 archive 桶 Scope 占用（按磁盘 stat 大小；文件已不存在时按登记释放）。
+	if size <= 0 {
+		h.tenantMu.Lock()
+		if m := h.archiveUsage[owner]; m != nil {
+			size = m[archiveName]
+		}
+		h.tenantMu.Unlock()
+	}
+	if scope := h.quotaBucketFor(owner, "archive"); scope != nil && size > 0 {
+		scope.ReleaseUsage(size)
+	}
+	h.tenantMu.Lock()
+	if m := h.archiveUsage[owner]; m != nil {
+		delete(m, archiveName)
+	}
+	h.tenantMu.Unlock()
+	h.logger.Info("云归档已删除并释放配额", "owner", owner, "archive", archiveName, "size", size)
+	return nil
 }

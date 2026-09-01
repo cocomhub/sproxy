@@ -278,7 +278,7 @@ func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, e
 	if rel == "." {
 		return nil
 	}
-	// 搜索根在 user 桶内（功能桶与 .checksums.json 均不在其下），无需 isInternalDirPathPrefix 过滤。
+	// 搜索根在 user 桶内（功能桶与 .checksums.json 均不在其下），无需内部目录过滤。
 	if !strings.Contains(strings.ToLower(d.Name()), queryLower) {
 		return nil
 	}

@@ -443,5 +443,5 @@ func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
 		t.Fatal("创建 alice 租户失败")
 	}
 	// MaxVersions 默认 0 → cleanup 直接返回，不报错。
-	h.cleanupOldVersions("test.txt", tnt)
+	h.cleanupOldVersions("test.txt", tnt, "alice")
 }

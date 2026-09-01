@@ -18,16 +18,16 @@ import (
 	"time"
 )
 
-// cloudArchiveDirName 测试本地镜像服务端归档存储子目录（服务端常量在 pkg/server，
-// client 包不可 import，此处测试本地定义与服务端布局保持一致）。
-const cloudArchiveDirName = ".__cloud_archives__"
+// archiveDirName 测试本地镜像服务端归档存储子目录（client 包不可 import pkg/server，
+// 此处用中性目录名镜像服务端 archive 桶布局）。
+const archiveDirName = "archives"
 
 // TestChunkedDownload_WithKindCloudArchive 验证 ChunkedDownload + WithChunkedKind(cloud_archive)
 // 的 stat 与 chunk 请求均带 kind=cloud_archive，且归档内容正确落地。
 func TestChunkedDownload_WithKindCloudArchive(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	archiveDir := filepath.Join(dir, cloudArchiveDirName)
+	archiveDir := filepath.Join(dir, archiveDirName)
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatalf("mkdir archive dir: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestChunkedDownload_WithKindCloudArchive(t *testing.T) {
 func TestDownloadCloudArchive(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	archiveDir := filepath.Join(dir, cloudArchiveDirName)
+	archiveDir := filepath.Join(dir, archiveDirName)
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatalf("mkdir archive dir: %v", err)
 	}

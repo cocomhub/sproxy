@@ -25,7 +25,7 @@ import (
 // groupStatusFn 每次查询组详情时调用，返回组状态与子任务列表。
 func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll int) (string, []CloudTask)) *httptest.Server {
 	t.Helper()
-	archiveDir := filepath.Join(dir, ".__cloud_archives__")
+	archiveDir := filepath.Join(dir, archiveDirName)
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestCloudDownloadGroupChain_RunNoClient(t *testing.T) {
 func TestCloudDownloadGroupChain_CleanupRemoteError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	archiveDir := filepath.Join(dir, ".__cloud_archives__")
+	archiveDir := filepath.Join(dir, archiveDirName)
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}

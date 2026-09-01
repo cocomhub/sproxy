@@ -17,10 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
-
-const versionsDirName = ".__versions__"
 
 // VersionInfo 版本信息。
 type VersionInfo struct {
@@ -45,11 +44,13 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 	if !ok {
 		return 0, fmt.Errorf("保存版本: 无效的文件路径: %s", userRel)
 	}
-	if _, err := root.Stat(fullRel); os.IsNotExist(err) {
+	srcInfo, statErr := root.Stat(fullRel)
+	if os.IsNotExist(statErr) {
 		return 0, nil // 新文件，无需保存版本
-	} else if err != nil {
-		return 0, fmt.Errorf("检查源文件失败: %w", err)
+	} else if statErr != nil {
+		return 0, fmt.Errorf("检查源文件失败: %w", statErr)
 	}
+	srcSize := srcInfo.Size()
 
 	versionID := time.Now().UnixNano()
 	// 添加随机后缀（0-999），防止同一纳秒内多个请求产生冲突
@@ -64,14 +65,32 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 
 	verRel := verDir + "/" + strconv.FormatInt(versionID, 10)
 
+	// P5 版本桶配额：写版本文件前预留源文件大小（版本是旧文件的拷贝，字节计入租户
+	// version 桶 Scope），写入成功后 Commit(actual)；失败/放弃 Release。配额不足时
+	// 拒绝保存版本（调用方 best-effort：覆盖写路径跳过版本，恢复路径 500 中止）。
+	var res *quota.Reservation
+	if scope := h.quotaBucketFor(owner, "version"); scope != nil {
+		rr, reserveErr := scope.TryReserve(srcSize)
+		if reserveErr != nil {
+			return 0, fmt.Errorf("保存版本: 存储配额不足: %w", reserveErr)
+		}
+		res = rr
+	}
+
 	src, err := root.Open(fullRel)
 	if err != nil {
+		if res != nil {
+			res.Release()
+		}
 		return 0, fmt.Errorf("打开源文件失败: %w", err)
 	}
 	defer src.Close()
 
 	dst, err := root.OpenFile(verRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
+		if res != nil {
+			res.Release()
+		}
 		return 0, fmt.Errorf("创建版本文件失败: %w", err)
 	}
 	defer dst.Close()
@@ -83,8 +102,12 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 	// 无重复哈希可省，维持现状。
 	hasher := sha256.New()
 	multiWriter := io.MultiWriter(dst, hasher)
-	if _, err = io.Copy(multiWriter, src); err != nil {
+	written, err := io.Copy(multiWriter, src)
+	if err != nil {
 		_ = root.Remove(verRel)
+		if res != nil {
+			res.Release()
+		}
 		return 0, fmt.Errorf("复制版本文件失败: %w", err)
 	}
 	checksum := hex.EncodeToString(hasher.Sum(nil))
@@ -100,19 +123,41 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
 	if err := dst.Sync(); err != nil {
 		_ = root.Remove(verRel)
+		if res != nil {
+			res.Release()
+		}
 		return 0, fmt.Errorf("同步版本文件失败: %w", err)
 	}
 
-	// 清理超出上限的旧版本
-	h.cleanupOldVersions(userRel, tnt)
+	// P5 配额对账：Commit(actual)（多预留部分自动归还）。
+	if res != nil {
+		res.Commit(written)
+		res = nil
+	}
+
+	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope）。
+	h.cleanupOldVersions(userRel, tnt, owner)
 
 	h.logger.Info("文件版本已保存", "file_name", userRel, "version_id", versionID)
 	return versionID, nil
 }
 
+// releaseVersionUsage 释放 version 桶 Scope 中已确认占用的版本文件字节（P5）。
+// 删除版本文件后按删除前 stat 的文件大小释放，避免 version 桶 committed 虚高
+// 依赖周期扫描自愈。size<=0 时为空操作。
+func (h *Handlers) releaseVersionUsage(owner string, size int64) {
+	if size <= 0 {
+		return
+	}
+	if scope := h.quotaBucketFor(owner, "version"); scope != nil {
+		scope.ReleaseUsage(size)
+	}
+}
+
 // cleanupOldVersions 删除超出 max_versions 的旧版本。
 // userRel 为相对 user 桶的路径；版本文件在 version/<userRel>/ 目录下。
-func (h *Handlers) cleanupOldVersions(userRel string, tnt *storage.Tenant) {
+// P5：删除的旧版本按文件大小释放 version 桶 Scope（不依赖周期扫描自愈）。
+func (h *Handlers) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner string) {
 	cfg := h.cfgPtr.Load()
 	if cfg.Versioning.MaxVersions <= 0 {
 		return
@@ -158,9 +203,16 @@ func (h *Handlers) cleanupOldVersions(userRel string, tnt *storage.Tenant) {
 	excess := len(entries) - cfg.Versioning.MaxVersions
 	for i := range excess {
 		delRel := verDir + "/" + entries[i].Name()
+		// 删除旧版本前记录文件大小，删除后释放 version 桶 Scope。
+		var delSize int64
+		if info, sErr := root.Stat(delRel); sErr == nil {
+			delSize = info.Size()
+		}
 		if err := root.Remove(delRel); err != nil {
 			h.logger.Warn("删除旧版本文件失败", "path", delRel, "error", err)
+			continue
 		}
+		h.releaseVersionUsage(owner, delSize)
 	}
 }
 
@@ -394,6 +446,11 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	verRel := verDir + "/" + versionIDStr
+	// P5 版本桶配额：删除前记录文件大小，删除成功后释放 version 桶 Scope。
+	var delSize int64
+	if info, sErr := root.Stat(verRel); sErr == nil {
+		delSize = info.Size()
+	}
 	if err := root.Remove(verRel); err != nil {
 		if os.IsNotExist(err) {
 			h.RecordAudit(r.Context(), AuditEvent{
@@ -410,6 +467,7 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
+	h.releaseVersionUsage(ownerFromRequest(r), delSize)
 
 	// 清理 checksumStore 中对应的版本记录（key = version/<rel>/<id>，无 owner 前缀）
 	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {

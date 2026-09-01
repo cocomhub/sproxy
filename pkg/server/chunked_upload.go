@@ -244,6 +244,8 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 				sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "存储空间不足"}, http.StatusInsufficientStorage)
 				return
 			}
+			// P5 回退预留登记：会话删除/过期/完成时按此释放（DeleteSession/cleanupExpired）。
+			session.StorageMgrReserved = session.TotalSize
 		}
 	}
 

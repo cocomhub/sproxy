@@ -45,8 +45,7 @@ func newOwnerEnv(t *testing.T) *ownerDownloadEnv {
 	t.Helper()
 	root := t.TempDir()
 	h := newAssemblyTestHandlers(t, root)
-	// 全局 checksum store（cloud kind 兼容；普通下载迁移后走 per-tenant store）。
-	h.checksumStore = NewChecksumStore(root, testLogger())
+	// checksum 走 per-tenant store（checksumStoreFor），无全局 store（P5 后）。
 	env := &ownerDownloadEnv{h: h, root: root, mux: map[string]*http.ServeMux{}}
 	maps.Copy(env.mux, map[string]*http.ServeMux{
 		"alice": actorDownloadMux(h, "alice"),

@@ -38,13 +38,11 @@ func benchServer(tb testing.TB, modifyCfg func(*Config)) (string, *atomic.Pointe
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	cs := NewChecksumStore(cfg.UploadsDir, nil)
 	h := &Handlers{
-		cfgPtr:        &cfgPtr,
-		version:       "bench",
-		buildAt:       "bench",
-		checksumStore: cs,
-		logger:        slog.Default(),
+		cfgPtr:  &cfgPtr,
+		version: "bench",
+		buildAt: "bench",
+		logger:  slog.Default(),
 	}
 
 	mux := http.NewServeMux()
@@ -75,12 +73,10 @@ func benchServerWithChunked(tb testing.TB, modifyCfg func(*Config)) (string, *at
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	cs := NewChecksumStore(cfg.UploadsDir, nil)
 	h := &Handlers{
 		cfgPtr:        &cfgPtr,
 		version:       "bench",
 		buildAt:       "bench",
-		checksumStore: cs,
 		logger:        slog.Default(),
 		uploadingStop: make(chan struct{}),
 	}
