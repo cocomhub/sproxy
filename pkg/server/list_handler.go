@@ -52,36 +52,44 @@ func parsePagination(r *http.Request) (offset, limit int) {
 	return
 }
 
-// resolveListDir 处理 listFiles 的 subdir 参数，返回请求者 owner 存储根下的目标目录。
+// resolveListDir 处理 listFiles 的 subdir 参数，返回请求者租户 user 桶内的目标目录
+// 绝对路径（供 os.ReadDir）。默认根 = user 桶绝对路径；subdir 经 UserRel 映射到
+// user/<subdir>（功能桶名首段作为用户路径合法，解析到 user 桶内，功能桶天然不可枚举）。
+// ValidateFilePath 格式校验保留（防穿越/非法字符）。
 func (h *Handlers) resolveListDir(w http.ResponseWriter, r *http.Request) (targetDir string, ok bool) {
-	targetDir = h.ownerUploadsDir(r)
+	tnt := h.tenantOf(r)
+	if tnt == nil || tnt.Root() == nil {
+		h.logger.Warn("租户不可用", "owner", ownerFromRequest(r))
+		sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
+		return "", false
+	}
+	root := tnt.Root()
+	targetDir, ok = root.Abs(tnt.UserRoot())
+	if !ok {
+		h.logger.Warn("派生 user 桶路径失败", "owner", ownerFromRequest(r))
+		sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
+		return "", false
+	}
 	if subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/"); subdir != "" {
 		if _, err := ValidateFilePath(subdir); err != nil {
 			h.logger.Warn("无效的子目录", "subdir", subdir, "error", err.Error())
 			sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
 			return "", false
 		}
-		targetDir = h.safePathFor(r, subdir)
-		if targetDir == "" {
+		rel, uok := tnt.UserRel(subdir)
+		if !uok {
 			h.logger.Warn("无效的子目录路径", "subdir", subdir)
+			sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
+			return "", false
+		}
+		targetDir, ok = root.Abs(rel)
+		if !ok {
+			h.logger.Warn("子目录路径越界", "subdir", subdir)
 			sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
 			return "", false
 		}
 	}
 	return targetDir, true
-}
-
-// isInternalDir 检查是否为内部管理目录或文件，应跳过列表显示。
-// 多租户 owner 隔离后，内部目录只可能作为**首段**出现（uploadsDir/.__versions__，
-// 或 uploadsDir/<owner>/.__versions__）；buildFileListEntries 遍历单层（ReadDir），
-// 用首段判定即可收敛；深层含 .__ 的普通文件（dir/foo.__bar.txt）不受影响。
-// 判断与写入侧守卫 isInternalDirPathPrefix 保持同源（内部目录名集合）。
-func isInternalDir(name string) bool {
-	// 兼容单层条目名与 .checksums.json 特殊文件。
-	if name == ".checksums.json" {
-		return true
-	}
-	return isInternalFirstName(name)
 }
 
 // sortFileEntries 按指定字段和顺序排序文件条目。
@@ -128,14 +136,13 @@ func paginateEntries(entries []fileInfo, offset, limit int) []fileInfo {
 	return entries[start:end]
 }
 
-// buildFileListEntries 从目录条目构建文件信息列表，排除内部目录并附加 checksum。
-// owner 用于 checksum 作用域 key 查找（跨租户同路径独立）。
-func (h *Handlers) buildFileListEntries(owner string, entries []os.DirEntry, csMap map[string]string, subdir string) []fileInfo {
+// buildFileListEntries 从 user 桶目录条目构建文件信息列表并附加 checksum。
+// 列表根在 user 桶内（功能桶与 .checksums.json 均不在其下），无需内部目录过滤。
+// csMap 来自 per-tenant store（key 为相对租户根的 rel，如 user/dir/f.txt）；
+// subdir 为相对 user 桶的子路径，checksum key = "user/" + subdir/entryName。
+func (h *Handlers) buildFileListEntries(entries []os.DirEntry, csMap map[string]string, subdir string) []fileInfo {
 	allFiles := make([]fileInfo, 0, len(entries))
 	for _, e := range entries {
-		if isInternalDir(e.Name()) {
-			continue
-		}
 		if e.IsDir() {
 			allFiles = append(allFiles, fileInfo{
 				Name:  e.Name(),
@@ -157,7 +164,7 @@ func (h *Handlers) buildFileListEntries(owner string, entries []os.DirEntry, csM
 		if subdir != "" {
 			relName = filepath.ToSlash(filepath.Join(subdir, e.Name()))
 		}
-		if cs, ok := csMap[checksumStoreKey(owner, relName)]; ok {
+		if cs, ok := csMap["user/"+relName]; ok {
 			fi.Checksum = cs
 		}
 		allFiles = append(allFiles, fi)
@@ -195,13 +202,19 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 收集所有条目（跳过内部目录）
+	// 收集所有条目（列表根在 user 桶内，功能桶不可枚举）
 	subdir := r.URL.Query().Get("subdir")
-	// getAll 一次快照锁定（审查 #8 结论，勿再分析）：checksum key 形如
-	// "owner?/rel-prefix"，逐条 Get 需 N 次加锁且语义等价于一次 Concurrent Map 拷贝；
+	// getAll 一次快照锁定（审查 #8 结论，勿再分析）：checksum key 为相对租户根的 rel
+	// （如 user/dir/f.txt），逐条 Get 需 N 次加锁且语义等价于一次 Concurrent Map 拷贝；
 	// 单目录最多 10000 条（parsePagination limit 上限），GetAll 拷贝成本可忽略。
-	csMap := h.checksumStore.GetAll()
-	allFiles := h.buildFileListEntries(ownerFromRequest(r), entries, csMap, subdir)
+	owner := ownerFromRequest(r)
+	var csMap map[string]string
+	if cs := h.checksumStoreFor(owner); cs != nil {
+		csMap = cs.GetAll()
+	} else {
+		csMap = map[string]string{}
+	}
+	allFiles := h.buildFileListEntries(entries, csMap, subdir)
 	// 排序
 	sortFileEntries(allFiles, sortBy, sortOrder)
 	total := len(allFiles)
@@ -212,7 +225,7 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 // searchFiles 处理 GET /api/files/search?q=keyword。
-// 递归搜索 uploads_dir 下文件名包含 q 的文件，不区分大小写。
+// 递归搜索请求者租户 user 桶下文件名包含 q 的文件，不区分大小写。
 // 返回与 listFiles 相同的 fileInfo 结构。
 func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -223,23 +236,40 @@ func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	qLower := strings.ToLower(q)
 
 	owner := ownerFromRequest(r)
-	csMap := h.checksumStore.GetAll() // 一次性快照（见 listFiles #8 结论注释，勿再分析）
-	results := h.collectSearchResults(owner, h.ownerUploadsDir(r), qLower, csMap)
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
+		return
+	}
+	// 搜索根 = user 桶绝对路径（功能桶不在其下，天然不参与搜索）。
+	searchRoot, ok := tnt.Root().Abs(tnt.UserRoot())
+	if !ok {
+		sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
+		return
+	}
+	// 一次性快照（见 listFiles #8 结论注释，勿再分析）：per-tenant store，key 为相对租户根的 rel。
+	var csMap map[string]string
+	if cs := h.checksumStoreFor(owner); cs != nil {
+		csMap = cs.GetAll()
+	} else {
+		csMap = map[string]string{}
+	}
+	results := h.collectSearchResults(searchRoot, qLower, csMap)
 	resp := listResponse{Files: results, Total: len(results), Offset: 0, Limit: len(results)}
 	sendJSONResponse(w, resp, http.StatusOK)
 }
 
-// collectSearchResults 递归搜索请求者 owner 存储根下文件名包含 queryLower 的文件。
-func (h *Handlers) collectSearchResults(owner, rootsDir, queryLower string, csMap map[string]string) []fileInfo {
+// collectSearchResults 递归搜索请求者租户 user 桶下文件名包含 queryLower 的文件。
+func (h *Handlers) collectSearchResults(rootsDir, queryLower string, csMap map[string]string) []fileInfo {
 	var results []fileInfo
 	_ = filepath.WalkDir(rootsDir, func(path string, d fs.DirEntry, err error) error {
-		return h.searchWalkDirCallback(owner, rootsDir, path, d, err, queryLower, csMap, &results)
+		return h.searchWalkDirCallback(rootsDir, path, d, err, queryLower, csMap, &results)
 	})
 	return results
 }
 
 // searchWalkDirCallback 是 collectSearchResults 中 filepath.WalkDir 的回调函数。
-func (h *Handlers) searchWalkDirCallback(owner, rootsDir, path string, d fs.DirEntry, err error, queryLower string, csMap map[string]string, results *[]fileInfo) error {
+func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, err error, queryLower string, csMap map[string]string, results *[]fileInfo) error {
 	if err != nil {
 		h.logger.Warn("搜索时访问路径失败", "path", path, "error", err)
 		return nil
@@ -248,14 +278,7 @@ func (h *Handlers) searchWalkDirCallback(owner, rootsDir, path string, d fs.DirE
 	if rel == "." {
 		return nil
 	}
-	// rel 以平台分隔符表达；转正斜杠后取首段做内部目录判定（owner 子目录下的
-	// .__versions__/<owner>/ 深层内部目录同样被截断，多租户一致性，审查 #5）。
-	if isInternalDirPathPrefix(filepath.ToSlash(rel)) {
-		if d.IsDir() {
-			return filepath.SkipDir
-		}
-		return nil
-	}
+	// 搜索根在 user 桶内（功能桶与 .checksums.json 均不在其下），无需 isInternalDirPathPrefix 过滤。
 	if !strings.Contains(strings.ToLower(d.Name()), queryLower) {
 		return nil
 	}
@@ -275,7 +298,7 @@ func (h *Handlers) searchWalkDirCallback(owner, rootsDir, path string, d fs.DirE
 		Size:    info.Size(),
 		ModTime: info.ModTime().UnixNano(),
 	}
-	if cs, ok := csMap[checksumStoreKey(owner, filepath.ToSlash(rel))]; ok {
+	if cs, ok := csMap["user/"+filepath.ToSlash(rel)]; ok {
 		fi.Checksum = cs
 	}
 	*results = append(*results, fi)

@@ -45,8 +45,6 @@ func newOwnerDirsEnv(t *testing.T) *ownerDirsEnv {
 	t.Helper()
 	root := t.TempDir()
 	h := newAssemblyTestHandlers(t, root)
-	// listFiles 仍读全局 checksum store（resolveListDir 迁移属任务 9），装配全局 store 防 nil。
-	h.checksumStore = NewChecksumStore(root, testLogger())
 	// 预创建 anonymous 与 alice 租户（与 newOwnerDelRenameEnv 一致）。
 	if h.tenantFor(anonymousOwner) == nil {
 		t.Fatal("创建 anonymous 租户失败")
@@ -81,8 +79,8 @@ func (e *ownerDirsEnv) doGet(t *testing.T, actor, path string) string {
 
 // TestMkdir_UserBucketUnderUser 验证 mkdir 迁移到 Tenant API 后：
 // 用户在 user/ 桶内创建 "cloud" 目录 → 200，落盘 <root>/alice/user/cloud；
-// 顶层列表不暴露功能桶。注意：meta/user 桶目录在 resolveListDir 迁移（任务 9）
-// 之前仍可见（<tenant>/meta 物理存在），故只断言未落盘的功能桶不出现。
+// 列表根为 user 桶（任务 9 后）：用户目录 cloud（功能桶名首段）合法可见，
+// 功能桶（meta 等，位于租户根顶层、不在 user 桶下）不可枚举。
 func TestMkdir_UserBucketUnderUser(t *testing.T) {
 	env := newOwnerDirsEnv(t)
 
@@ -93,8 +91,13 @@ func TestMkdir_UserBucketUnderUser(t *testing.T) {
 		t.Fatalf("应落盘 alice/user/cloud: %v", err)
 	}
 
+	// 迁移后列表根为 user 桶：用户目录 cloud 出现在列表中（功能桶名作为用户路径首段合法）。
 	body := env.doGet(t, "alice", "/api/files")
-	for _, bucket := range []string{"cloud", "archive", "chunk", "version"} {
+	if !strings.Contains(body, `"cloud"`) {
+		t.Fatalf("user 桶内用户目录 cloud 应出现在列表中: %s", body)
+	}
+	// 功能桶在租户根顶层、不在 user 桶下：meta 由 tenantFor 预创建，不应出现在列表中。
+	for _, bucket := range []string{"meta", "archive", "chunk", "version"} {
 		if strings.Contains(body, `"`+bucket+`"`) {
 			t.Fatalf("顶层列表不应出现功能桶 %q: %s", bucket, body)
 		}

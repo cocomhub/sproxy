@@ -59,8 +59,8 @@ func ValidateFilePath(filename string) (string, error) {
 
 	// 注意：. __ 首段拦截**不**放在此处——ValidateFilePath 被 upload/sync 等写路径
 	// 复用，若全局拒绝 .__ 首段会破坏含 .__ 前缀文件的同步推送（审查 #4）。该拦截
-	// 收敛到面向用户请求的下载/stat/列表路径（resolveDownloadPath / listFiles 的
-	// isInternalDir），由 joinSafePath 的 owner 根 + isInternalDir 兜底防内部目录访问。
+	// 收敛到面向用户请求的下载/stat 路径（resolveDownloadPath 的 isInternalDirPathPrefix），
+	// 由 owner 根 + isInternalDirPathPrefix 兜底防内部目录访问。
 
 	// Windows 非法字符检查（在 Clean 之后执行，使用 cleaned 路径）
 	if runtime.GOOS == "windows" {
@@ -76,10 +76,9 @@ func ValidateFilePath(filename string) (string, error) {
 	return filepath.ToSlash(cleaned), nil
 }
 
-// isInternalFirstName 判断 path 首段是否为服务端内部目录名（download/list 读取侧拦截）。
-// 内部目录名集合：.__cloud__ / .__downloads__ / .__versions__ / .__cloud_archives__ /
-// .__sync__ / .__chunked__（服务端保留，用户文件/同步不得落到这些目录）。
-// 首段判定用 IndexAny(/\ ) 而非仅 "/"，兼容 Windows 分隔符。
+// internalDirNames 是服务端内部目录名集合：.__cloud__ / .__downloads__ /
+// .__versions__ / .__cloud_archives__ / .__sync__ / .__chunked__（服务端保留，
+// 用户文件/同步不得落到这些目录）。由 isInternalDirPathPrefix 使用。
 var internalDirNames = []string{
 	cloudDirName,
 	downloadsDirName,
@@ -90,22 +89,12 @@ var internalDirNames = []string{
 	chunkedDirName,
 }
 
-func isInternalFirstName(path string) bool {
-	if path == "" {
-		return false
-	}
-	first := path
-	if idx := strings.IndexAny(first, `/\`); idx >= 0 {
-		first = first[:idx]
-	}
-	return slices.Contains(internalDirNames, first)
-}
-
 // isInternalDirPathPrefix 判断 path 任一层级是否出现服务端内部目录（首段或深层）。
 // 写入侧（upload/rename/uploadInit）在 ValidateFilePath 后调用，替代此前全局
-// .__ 首段拒绝（审查 #4）；读取侧（download/list/search/stats）用于拦截跨租户或
-// 用户视图访问内部目录（审查 #5：多租户 owner 隔离后内部目录出现在 owner 子目录下，
-// 如 uploadsDir/<owner>/.__versions__/，必须按任意层级识别）。
+// .__ 首段拒绝（审查 #4）；读取侧（download/stat）用于拦截用户视图访问内部目录
+// （审查 #5：多租户 owner 隔离后内部目录出现在 owner 子目录下，如
+// uploadsDir/<owner>/.__versions__/，必须按任意层级识别）。
+// 注：list/search 已迁移到 Tenant user 桶（功能桶/内部目录不在其下），不再需要此守卫。
 func isInternalDirPathPrefix(path string) bool {
 	clean := path
 	if idx := strings.IndexAny(clean, `/\`); idx >= 0 {

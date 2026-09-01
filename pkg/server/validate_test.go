@@ -110,7 +110,8 @@ func TestValidateFilePath_LongName(t *testing.T) {
 // ValidateFilePath **不再全局拒绝** .__ 首段——它是 base 路径校验，被 upload/sync
 // 等写路径复用，全局拒绝会破坏含 .__ 前缀文件的同步推送。服务端内部目录访问防护
 // 改由写入侧 isInternalDirPathPrefix（upload/rename/uploadInit）与读取侧
-// resolveDownloadPath/listFiles 的 isInternalFirstName 收敛拦截。
+// resolveDownloadPath 的 isInternalDirPathPrefix 收敛拦截（list/search 已迁移到
+// Tenant user 桶，内部目录不在其下，不再需要读取侧守卫）。
 func TestValidateFilePath_AllowsInternalDirPrefix(t *testing.T) {
 	for _, f := range []string{
 		".__cloud__/task123/file.zip",
