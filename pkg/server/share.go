@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,7 +28,8 @@ const (
 type ShareLink struct {
 	Token        string    `json:"token"`
 	Filename     string    `json:"filename"`
-	AbsPath      string    `json:"-"`               // 创建时解析的绝对路径
+	TenantID     string    `json:"-"`               // 创建者租户 ID（owner 归一化后的合法段名）
+	Rel          string    `json:"-"`               // 租户根内相对路径（user/<path>），访问时经 tenantFor().Root().Open(rel) 解析
 	Owner        string    `json:"owner,omitempty"` // 创建者（AK / API key 名；空 = 全局/admin 兼容）
 	CreatedAt    time.Time `json:"created_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
@@ -100,7 +102,10 @@ func (s *ShareStore) Stop() {
 }
 
 // Create 生成新的分享链接并存储。
-func (s *ShareStore) Create(filename, absPath, owner string, ttl time.Duration, maxDownloads int, oneTime bool) (*ShareLink, error) {
+// tenantID 是创建者租户 ID（owner 归一化后的合法段名）；rel 是租户根内相对路径
+// （user/<path>）。不再接收绝对路径——访问时经 tenantFor(tenantID).Root().Open(rel)
+// 解析（root 相对，符号链接不逃逸，TOCTOU 收敛）。
+func (s *ShareStore) Create(filename, tenantID, rel, owner string, ttl time.Duration, maxDownloads int, oneTime bool) (*ShareLink, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -125,7 +130,8 @@ func (s *ShareStore) Create(filename, absPath, owner string, ttl time.Duration, 
 	link := &ShareLink{
 		Token:        token,
 		Filename:     filename,
-		AbsPath:      absPath,
+		TenantID:     tenantID,
+		Rel:          rel,
 		Owner:        owner,
 		CreatedAt:    now,
 		ExpiresAt:    now.Add(ttl),
@@ -287,12 +293,20 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath := h.safePathFor(r, remotePath)
-	if fullPath == "" {
+	tnt := h.tenantOf(r)
+	if tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
-	fi, lstatErr := os.Lstat(fullPath)
+	rel, ok := tnt.UserRel(remotePath)
+	if !ok {
+		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return
+	}
+	root := tnt.Root()
+
+	// 符号链接拒绝 + 存在性校验：Lstat 不跟随链接，一次完成两者。
+	fi, lstatErr := root.Lstat(rel)
 	if lstatErr != nil {
 		if os.IsNotExist(lstatErr) {
 			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
@@ -304,6 +318,14 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 	if fi.Mode()&os.ModeSymlink != 0 {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "不支持分享符号链接"}, http.StatusBadRequest)
 		return
+	}
+	// 校验可读：root 相对打开（符号链接不逃逸），立即关闭。分享链接只存 rel，
+	// 不保留句柄——访问时经 root.Open(rel) 重新解析（TOCTOU 收敛）。
+	if f, openErr := root.Open(rel); openErr != nil {
+		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "无法访问文件"}, http.StatusInternalServerError)
+		return
+	} else {
+		_ = f.Close()
 	}
 
 	// 解析并限制 TTL
@@ -321,7 +343,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		ttl = min(d, maxShareTTL)
 	}
 
-	link, err := h.shareStore.Create(req.Filename, fullPath, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime)
+	link, err := h.shareStore.Create(req.Filename, tnt.ID, rel, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime)
 	if err != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
 		return
@@ -352,8 +374,20 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接无效或已过期"}, http.StatusNotFound)
 		return
 	}
-	// 检查文件是否存在
-	if _, err := os.Stat(link.AbsPath); err != nil {
+	// 经 tenantID 找租户根；校验 rel 仍属 user 桶（纵深防御：Rel 是存储字段，
+	// 拒绝越桶引用其他功能桶）。
+	tnt := h.tenantFor(link.TenantID)
+	if tnt == nil || tnt.Root() == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接无效或已过期"}, http.StatusNotFound)
+		return
+	}
+	root := tnt.Root()
+	if !strings.HasPrefix(link.Rel, tnt.UserRoot()+"/") {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接无效或已过期"}, http.StatusNotFound)
+		return
+	}
+	// 检查文件是否存在（root 相对，符号链接不逃逸）
+	if _, err := root.Stat(link.Rel); err != nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享文件已不存在"}, http.StatusGone)
 		return
 	}
@@ -364,8 +398,8 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 直接流式传输文件，不暴露文件路径
-	f, err := os.Open(link.AbsPath)
+	// 直接流式传输文件，不暴露文件路径（root 相对打开，符号链接不逃逸）。
+	f, err := root.Open(link.Rel)
 	if err != nil {
 		http.Error(w, "文件读取失败", http.StatusInternalServerError)
 		return
@@ -379,7 +413,7 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set(headerContentType, contentTypeOctetStream)
-	w.Header().Set("Content-Disposition", formatContentDisposition(filepath.Base(link.Filename)))
+	w.Header().Set("Content-Disposition", formatContentDisposition(filepath.Base(link.Rel)))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.Header().Set("Referrer-Policy", "no-referrer")

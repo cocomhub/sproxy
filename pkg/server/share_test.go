@@ -11,6 +11,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -152,13 +155,13 @@ func TestShare_CreateEviction(t *testing.T) {
 	ss := NewShareStore(slog.Default())
 	// 填满上限，所有条目立即过期（TTL=0 => ExpiresAt ≈ now，eviction 时已过期）
 	for i := range maxShareEntries {
-		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "/tmp/file", "", 0, 0, false)
+		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "anonymous", fmt.Sprintf("user/file%d.txt", i), "", 0, 0, false)
 		if err != nil {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
 	}
 	// 触发 eviction：应该成功删除过期条目再新增
-	link, err := ss.Create("newfile.txt", "/tmp/file", "", time.Hour, 0, false)
+	link, err := ss.Create("newfile.txt", "anonymous", "user/newfile.txt", "", time.Hour, 0, false)
 	if err != nil {
 		t.Fatalf("expected eviction to succeed, got: %v", err)
 	}
@@ -178,13 +181,13 @@ func TestShare_CreateEvictionNoExpired(t *testing.T) {
 	ss := NewShareStore(slog.Default())
 	// 填满上限，所有条目 1 小时后才过期（eviction 时无过期条目）
 	for i := range maxShareEntries {
-		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "/tmp/file", "", time.Hour, 0, false)
+		_, err := ss.Create(fmt.Sprintf("file%d.txt", i), "anonymous", fmt.Sprintf("user/file%d.txt", i), "", time.Hour, 0, false)
 		if err != nil {
 			t.Fatalf("unexpected error at iteration %d: %v", i, err)
 		}
 	}
 	// 无过期条目时，eviction 按创建时间淘汰最旧的 10%，应成功
-	link, err := ss.Create("overflow.txt", "/tmp/file", "", time.Hour, 0, false)
+	link, err := ss.Create("overflow.txt", "anonymous", "user/overflow.txt", "", time.Hour, 0, false)
 	if err != nil {
 		t.Fatalf("expected eviction to succeed via oldest-10%% strategy, got: %v", err)
 	}
@@ -470,11 +473,11 @@ func TestShareStore_OwnerScoped(t *testing.T) {
 	s := NewShareStore(testLogger())
 	defer s.Stop()
 
-	l1, err := s.Create("a.txt", "/abs/a.txt", "ak-A", time.Hour, 0, false)
+	l1, err := s.Create("a.txt", "ak-A", "user/a.txt", "ak-A", time.Hour, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	l2, err := s.Create("b.txt", "/abs/b.txt", "ak-B", time.Hour, 0, false)
+	l2, err := s.Create("b.txt", "ak-B", "user/b.txt", "ak-B", time.Hour, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,6 +496,59 @@ func TestShareStore_OwnerScoped(t *testing.T) {
 	}
 	if err := s.Revoke(l1.Token, "ak-A"); err != nil {
 		t.Fatalf("A 撤销自己的分享应成功: %v", err)
+	}
+}
+
+// TestShare_NewLayoutResolvesUserRel 验证 share 迁移到 Tenant API 后的新布局：
+// 创建分享存储 rel + tenantID（user/<path>），访问经 /s/{token} 由
+// tenantFor(tenantID).Root().Open(rel) 解析并返回文件内容（不再依赖绝对路径）。
+func TestShare_NewLayoutResolvesUserRel(t *testing.T) {
+	env := newOwnerEnv(t)
+	env.h.shareStore = NewShareStore(testLogger())
+	t.Cleanup(env.h.shareStore.Stop)
+
+	// 在 alice 租户 user 桶写文件 dir/f.txt（新布局 <root>/alice/user/dir/f.txt）。
+	fileRel := filepath.Join(env.root, "alice", "user", "dir", "f.txt")
+	if err := os.MkdirAll(filepath.Dir(fileRel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fileRel, []byte("shared content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// share mux：注入 alice actor（模拟 authMiddleware 后 createShareHandler 的 ctx）。
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/share", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		env.h.createShareHandler(w, r)
+	})
+	mux.HandleFunc("GET /s/{token}", env.h.accessShareHandler)
+
+	// 创建分享 user/dir/f.txt → token
+	req := httptest.NewRequest("POST", "/api/share", strings.NewReader(`{"filename":"dir/f.txt","ttl":"1h"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 creating share, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var shareResp ShareCreateResponse
+	if err := json.NewDecoder(rr.Body).Decode(&shareResp); err != nil {
+		t.Fatal(err)
+	}
+	if !shareResp.Success || shareResp.Token == "" {
+		t.Fatalf("expected success + token, got %+v", shareResp)
+	}
+
+	// 经 /s/{token} 访问应返回内容
+	req2 := httptest.NewRequest("GET", "/s/"+shareResp.Token, nil)
+	rr2 := httptest.NewRecorder()
+	mux.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("expected 200 accessing share, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+	if got := rr2.Body.String(); got != "shared content" {
+		t.Fatalf("expected 'shared content', got %q", got)
 	}
 }
 
