@@ -684,7 +684,10 @@ downloadDone:
 	// 读端 resolveDownloadPath(kind=cloud_task) 返回的 filename 是 <taskID>/<file>（不含
 	// .__cloud__ 内部段），故写端同样用 <owner>/<taskID>/<file>（审查 M1：加 owner 前缀时
 	// 误保留 .__cloud__ 段导致写读 key 不一致、缓存永不命中、每请求全量重算）。
-	remotePath := filepath.Join(stored.ID, stored.Filename)
+	// 审查 F2：写端 key 必须与读端（resolveDownloadPath 返回的 <taskID>/<file> 正斜杠
+	// query 值）一致——filepath.Join 在 Windows 下产出反斜杠（ID\file），读端 key 恒正
+	// 斜杠 → 缓存永不命中、每请求全量重算。用 ToSlash 归一为协议正斜杠。
+	remotePath := filepath.ToSlash(filepath.Join(stored.ID, stored.Filename))
 	if m.checksumStore != nil {
 		m.checksumStore.Set(checksumStoreKey(stored.Owner, remotePath), result.Checksum)
 	}

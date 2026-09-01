@@ -791,19 +791,22 @@ func TestE2E_UploadSessionResume(t *testing.T) {
 	uploadID := "e2e-resume-" + fileChecksum[:12]
 	filename := "e2e-resume.bin"
 
-	// 1) init，带 file_mod_time 与 file_checksum，建立会话（reused=false）
+	// 1) init，带 file_mod_time 与 file_checksum，建立会话（reused=false）。
+	// owner 会话前缀化后（a04f1b1）：init 入参用裸 upload_id（服务端加 owner 前缀），
+	// 返回的完整 id 作为后续 session key（chunk/status/complete/fetch 都用完整 id）。
 	initResp := doInit(t, baseURL, uploadID, filename, content, chunkSize, modTime, fileChecksum)
-	if initResp.UploadID != uploadID {
-		t.Fatalf("init 返回 upload_id=%q，期望 %q", initResp.UploadID, uploadID)
+	if initResp.UploadID != e2eTestAK+"/"+uploadID {
+		t.Fatalf("init 返回 upload_id=%q，期望带 owner 前缀 %q", initResp.UploadID, e2eTestAK+"/"+uploadID)
 	}
+	serverID := initResp.UploadID // 完整 session id（含 owner 前缀），后续操作沿用
 
 	// 2) 只传前 2 个分块（部分上传）
 	for _, idx := range []int{0, 1} {
-		uploadChunkE(t, baseURL, uploadID, idx, chunkSize, content)
+		uploadChunkE(t, baseURL, serverID, idx, chunkSize, content)
 	}
 
 	// 3) GET /upload/sessions 断言含该会话且状态 uploading
-	sess := fetchSession(t, baseURL, uploadID)
+	sess := fetchSession(t, baseURL, serverID)
 	if sess == nil {
 		t.Fatal("GET /upload/sessions 应包含该会话")
 	}
@@ -814,14 +817,14 @@ func TestE2E_UploadSessionResume(t *testing.T) {
 		t.Fatalf("received_count 应为 2，got %d", sess.ReceivedCount)
 	}
 
-	// 4) 同 upload_id 再 init → reused 续传，missing_chunks 合理
+	// 4) 同 upload_id 再 init → reused 续传，missing_chunks 合理（init 入参仍用裸 id）
 	init2 := doInit(t, baseURL, uploadID, filename, content, chunkSize, modTime, fileChecksum)
-	if init2.UploadID != uploadID {
-		t.Fatalf("续传 init 返回 upload_id=%q，期望 %q", init2.UploadID, uploadID)
+	if init2.UploadID != serverID {
+		t.Fatalf("续传 init 返回 upload_id=%q，期望 %q", init2.UploadID, serverID)
 	}
 
 	// 5) status 查询获取缺失块
-	delta := doStatus(t, baseURL, uploadID)
+	delta := doStatus(t, baseURL, serverID)
 	if delta.ReceivedCount != 2 {
 		t.Fatalf("续传后 received_count 应为 2，got %d", delta.ReceivedCount)
 	}
@@ -831,11 +834,11 @@ func TestE2E_UploadSessionResume(t *testing.T) {
 
 	// 6) 补传缺失块
 	for _, idx := range delta.MissingChunks {
-		uploadChunkE(t, baseURL, uploadID, idx, chunkSize, content)
+		uploadChunkE(t, baseURL, serverID, idx, chunkSize, content)
 	}
 
 	// 7) complete → 成功 + checksum 一致
-	complete := doComplete(t, baseURL, uploadID)
+	complete := doComplete(t, baseURL, serverID)
 	if !complete.Success {
 		t.Fatalf("complete 失败: %s", complete.Message)
 	}
@@ -844,7 +847,7 @@ func TestE2E_UploadSessionResume(t *testing.T) {
 	}
 
 	// 8) complete 后列表已不含该会话（上传管理器在轮询里靠此判定会话结束）
-	if got := fetchSession(t, baseURL, uploadID); got != nil {
+	if got := fetchSession(t, baseURL, serverID); got != nil {
 		t.Fatalf("complete 后 /upload/sessions 仍含会话: %+v", got)
 	}
 
@@ -892,37 +895,55 @@ func TestE2E_UploadSessionResume_MTimeChanged(t *testing.T) {
 	uploadID := "e2e-mtime-" + strings.ReplaceAll(dateStamp(), ":", "") // 每次运行唯一，避免残留会话干扰
 	filename := "e2e-mtime-change.bin"
 
-	// 1) init 带 A 的 checksum/mtime（建立会话）
-	doInit(t, baseURL, uploadID, filename, contentA, chunkSize, modTimeA, fileChecksumA)
+	// 1) init 带 A 的 checksum/mtime（建立会话）。owner 前缀化后，用返回的完整
+	//    session id（含 owner 前缀）作后续操作 key；init 入参仍用裸 upload_id。
+	initA := doInit(t, baseURL, uploadID, filename, contentA, chunkSize, modTimeA, fileChecksumA)
+	serverID := initA.UploadID
 
 	// 2) 传 A 的第一块
-	uploadChunkE(t, baseURL, uploadID, 0, chunkSize, contentA)
+	uploadChunkE(t, baseURL, serverID, 0, chunkSize, contentA)
 
-	// 3) 同 upload_id 再 init（带 B 的 checksum/mtime）——记录服务端语义
-	initB := doInit(t, baseURL, uploadID, filename, contentB, chunkSize, modTimeB, fileChecksumB)
-	if initB.Success == false {
-		t.Fatalf("同 upload_id 重新 init 应成功: %+v", initB)
+	// 3) 同 upload_id 再 init（带 B 的 checksum/mtime）——审查 F4 reuse guard：同 key
+	//    但元数据（checksum/size）不同 → 服务端**拒绝**复用（防会话劫持/文件名篡改），
+	//    不再静默返回旧会话。真实客户端 upload_id 由元数据派生，内容变则 id 变，永不
+	//    触发此路径。
+	//    由于 init 是普通 JSON POST，doInit 在非 200 时 Fatalf——这里改用裸请求验证
+	//    服务端返回 4xx/5xx（拒绝）。
+	initBody, mErr := json.Marshal(e2eInitRequest{
+		UploadID:     uploadID,
+		Filename:     filename,
+		TotalSize:    int64(len(contentB)),
+		ChunkSize:    chunkSize,
+		TotalChunks:  totalChunks,
+		FileChecksum: fileChecksumB,
+		FileModTime:  modTimeB.UnixNano(),
+	})
+	if mErr != nil {
+		t.Fatalf("marshal init body: %v", mErr)
+	}
+	req, _ := http.NewRequest("POST", baseURL+"/upload/init", bytes.NewReader(initBody))
+	req.Header.Set("Content-Type", "application/json")
+	initBResp, bErr := authedHTTPClient.Do(req)
+	if bErr != nil {
+		t.Fatalf("重新 init 请求失败: %v", bErr)
+	}
+	_ = initBResp.Body.Close()
+	if initBResp.StatusCode == http.StatusOK {
+		t.Fatalf("同 upload_id 不同元数据 init 应被拒绝（F4 reuse guard），got 200")
 	}
 
-	// 4) 服务端返回 reused 会话（原有 received bitmap）；
-	//    断言 /upload/sessions 里 FileModTime 仍是创建时 A 的值（GetOrCreateSession 不覆盖）。
-	sess := fetchSession(t, baseURL, uploadID)
+	// 4) 会话应保留创建时 A 的元数据（拒绝复用后旧会话未被篡改）；
+	//    断言 /upload/sessions 里 FileModTime 仍是创建时 A 的值。
+	sess := fetchSession(t, baseURL, serverID)
 	if sess == nil {
 		t.Fatalf("会话应仍在列表中")
 	}
 	if sess.FileModTime != modTimeA.UnixNano() {
-		t.Fatalf("GetOrCreateSession 续传应保留创建时 FileModTime，got %d want %d", sess.FileModTime, modTimeA.UnixNano())
+		t.Fatalf("拒绝复用后会话应保留创建时 FileModTime，got %d want %d", sess.FileModTime, modTimeA.UnixNano())
 	}
 
-	// 5) 服务端真实契约：同 upload_id 下 chunk 只校验「本次上传分块的自身 checksum」，
-	//    不会因与已接收块内容不同而拒绝（同一 session 内会静默覆盖+置位）。
-	//    真实客户端不依赖此路径：upload_id = sha256(filename|size|mtime|checksum) 前缀，
-	//    内容变了 upload_id 必然变，永远不会对已存在的旧 session 传新内容。
-	//    因此这里不再断言“B 内容应被拒绝”，只验证会话未损坏、可恢复原内容。
-	_ = uploadChunkRaw(t, baseURL, uploadID, 0, sha256hex(chunkSlice(contentB, 0, chunkSize)), chunkSlice(contentB, 0, chunkSize))
-
-	// 6) 恢复原内容 A 的分块 0（幂等跳过/成功）——验证会话未损坏、缺失块列表仍只缺后续块
-	repair := uploadChunkRaw(t, baseURL, uploadID, 0, sha256hex(chunkSlice(contentA, 0, chunkSize)), chunkSlice(contentA, 0, chunkSize))
+	// 5) 恢复原内容 A 的分块 0（幂等跳过/成功）——验证会话未损坏、缺失块列表仍只缺后续块
+	repair := uploadChunkRaw(t, baseURL, serverID, 0, sha256hex(chunkSlice(contentA, 0, chunkSize)), chunkSlice(contentA, 0, chunkSize))
 	if !repair.Success {
 		t.Fatalf("恢复 A 的 chunk0 应成功: %+v", repair)
 	}
@@ -932,9 +953,9 @@ func TestE2E_UploadSessionResume_MTimeChanged(t *testing.T) {
 		if idx == 0 {
 			continue // chunk0 已在上一步恢复
 		}
-		uploadChunkE(t, baseURL, uploadID, idx, chunkSize, contentA)
+		uploadChunkE(t, baseURL, serverID, idx, chunkSize, contentA)
 	}
-	complete := doComplete(t, baseURL, uploadID)
+	complete := doComplete(t, baseURL, serverID)
 	if !complete.Success {
 		t.Fatalf("complete 失败: %s", complete.Message)
 	}
