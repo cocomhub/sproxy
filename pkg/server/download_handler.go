@@ -23,8 +23,8 @@ import (
 const downloadKindCloudArchive = "cloud_archive"
 
 // downloadKindCloudTask 是云任务文件下载的 kind 值。
-// 云任务文件存 uploadsDir/.__cloud__/<taskID>/<file>（.__ 内部目录），
-// filename 传 <taskID>/<file>，服务端校验任务属于当前 owner 后拼接内部目录。
+// 云任务文件按任务 owner 落租户 cloud 桶（<root>/<tenant>/cloud/<taskID>/<file>），
+// filename 传 <taskID>/<file>，服务端校验任务属于当前 owner 后经 FeatureRel("cloud", ...) 解析。
 const downloadKindCloudTask = "cloud_task"
 
 // downloadPathError 携带 HTTP 状态码与消息，统一 /download 与 /download/chunk 的路径解析错误。
@@ -91,14 +91,14 @@ func validateCloudArchiveName(name string) *downloadPathError {
 }
 
 // downloadPath 是 resolveDownloadPath 的解析结果。
-// 普通下载（kind 为空）经租户根打开：tnt 非 nil，rel 为租户根内相对路径（user/<path>）。
-// kind=cloud_archive/cloud_task 保持旧布局（任务 13/14 随数据迁移再切换）：tnt 为 nil，
-// filePath 为绝对路径。
+// 普通下载（kind 为空）与 kind=cloud_task 经租户根打开：tnt 非 nil，rel 为租户根内相对路径
+// （user/<path> 或 cloud/<taskID>/<file>）。
+// kind=cloud_archive 保持旧布局（任务 14 迁移）：tnt 为 nil，filePath 为绝对路径。
 type downloadPath struct {
 	filename string          // 用户可见文件名（Content-Disposition / 日志 / checksum key）
-	tnt      *storage.Tenant // 非 nil = 普通下载（经 Tenant.Root 定位，防符号链接逃逸）
-	rel      string          // 租户根内相对路径（tnt != nil 时有效，如 user/dir/f.txt）
-	filePath string          // 旧布局绝对路径（tnt == nil 时有效，kind=cloud_*）
+	tnt      *storage.Tenant // 非 nil = 经 Tenant.Root 定位（防符号链接逃逸）
+	rel      string          // 租户根内相对路径（tnt != nil 时有效，如 user/dir/f.txt、cloud/<taskID>/<file>）
+	filePath string          // 旧布局绝对路径（tnt == nil 时有效，kind=cloud_archive）
 }
 
 // resolveDownloadPath 解析 /download、/download/chunk 与 /api/files/stat 的文件路径。
@@ -108,7 +108,9 @@ type downloadPath struct {
 //     返回租户与根内相对路径（后续经 tenant.Root().Open/Stat 打开）。租户不可用或
 //     UserRel 拒绝（.__/__ 内部前缀 / 非法段名）→ 400（downloadPathError）。
 //   - kind=cloud_archive → 归档名（单文件名），旧布局 uploadsDir/.__cloud_archives__/[owner/]/<name>。
-//   - kind=cloud_task → 云任务文件（任务归属校验），旧布局 uploadsDir/.__cloud__/<taskID>/<file>。
+//   - kind=cloud_task → 云任务文件（任务归属校验）：校验任务对请求者可见 + 请求文件精确
+//     匹配任务声明文件名后，按任务 owner 租户 FeatureRel("cloud", <taskID>/<file>) 解析 rel，
+//     经 tenant.Root().Open/Stat 打开。cloud_archive 分支保持旧布局（任务 14 迁移）。
 //   - 其它 kind → 400（白名单，防任意内部目录访问）。
 func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 	name := r.URL.Query().Get("filename")
@@ -169,12 +171,19 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 		if remotePath != taskID+"/"+task.Filename {
 			return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
 		}
-		cfg := h.cfgPtr.Load()
-		fullPath := joinSafePath(filepath.Join(cfg.UploadsDir, cloudDirName), remotePath)
-		if fullPath == "" {
+		// 按任务 owner 租户解析 cloud 桶 rel（文件按任务 owner 落盘；空 owner 任务在
+		// anonymous 租户）。用 task.Owner 而非 ownerFromRequest(r)：空 owner（管理员/未认证）
+		// 请求者对任意可见任务都能下载（可见性已由 SnapshotTask 保证），且空 owner 任务对
+		// 认证用户可见时文件在 anonymous 租户——按请求者解析会导致 404（行为回归）。
+		tnt := h.tenantFor(task.Owner)
+		if tnt == nil {
 			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
 		}
-		return &downloadPath{filename: remotePath, filePath: fullPath}, nil
+		rel, ok := tnt.FeatureRel("cloud", remotePath)
+		if !ok {
+			return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+		}
+		return &downloadPath{filename: remotePath, tnt: tnt, rel: rel}, nil
 	default:
 		return nil, &downloadPathError{
 			status:  http.StatusBadRequest,
@@ -184,12 +193,13 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 }
 
 // checksumStoreForRead 返回下载/stat/chunk 的 checksum 存储与 key。
-// 普通下载（dp.tnt 非 nil）→ per-tenant store + 根内相对路径 rel（无 owner 前缀）；
-// cloud 下载（dp.tnt nil）→ 全局 store + owner 作用域 key（旧行为）。
+// dp.tnt 非 nil（普通下载 user/ 桶、cloud_task cloud/ 桶）→ per-tenant store + 根内相对
+// 路径 rel（无 owner 前缀；store 按 dp.tnt.ID 取，与写端 checksumStoreFor(owner) 一致）；
+// dp.tnt nil（cloud_archive 旧布局）→ 全局 store + owner 作用域 key。
 // per-tenant store 不可用时返回 nil（调用方跳过 checksum 响应头）。
 func (h *Handlers) checksumStoreForRead(r *http.Request, dp *downloadPath) (ChecksumStoreIface, string) {
 	if dp.tnt != nil {
-		cs := h.checksumStoreFor(ownerFromRequest(r))
+		cs := h.checksumStoreFor(dp.tnt.ID)
 		if cs == nil {
 			return nil, ""
 		}

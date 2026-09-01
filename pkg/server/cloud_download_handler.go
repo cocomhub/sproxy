@@ -481,8 +481,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 按子任务目录收集已完成文件（子任务文件实际保存在 .__cloud__/<taskID>/ 下）
-	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
+	// 按子任务目录收集已完成文件（子任务文件按任务 owner 落租户 cloud/ 桶）
 	var groupFiles []fileWithRelPath
 	var skippedTasks []string
 	var totalSourceSize int64
@@ -506,7 +505,7 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		sourceDir := filepath.Join(cloudDir, task.ID)
+		sourceDir := filepath.Join(h.cloudMgr.cloudDirFor(task.Owner), task.ID)
 		sourceFile := filepath.Join(sourceDir, task.Filename)
 		// 校验目标文件位于任务子目录内（防御 task.Filename 含路径穿越）。
 		// 与单任务/批量归档的校验基准（IsPathWithin(sourceDir)）对齐，更严格——

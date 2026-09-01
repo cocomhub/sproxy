@@ -91,10 +91,9 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 构造源文件路径
-	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
-	sourceFile := filepath.Join(cloudDir, task.ID, task.Filename)
-	sourceDir := filepath.Join(cloudDir, task.ID)
+	// 构造源文件路径（任务文件按任务 owner 落租户 cloud/ 桶）
+	sourceDir := filepath.Join(h.cloudMgr.cloudDirFor(task.Owner), task.ID)
+	sourceFile := filepath.Join(sourceDir, task.Filename)
 
 	// 路径穿越防护
 	if !IsPathWithin(sourceFile, sourceDir) {
@@ -245,7 +244,6 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 收集所有已完成任务的文件信息，跳过无效任务
-	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
 	var files []fileWithRelPath
 	var skippedTasks []string
 	var totalSourceSize int64
@@ -265,8 +263,8 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		sourceFile := filepath.Join(cloudDir, task.ID, task.Filename)
-		sourceDir := filepath.Join(cloudDir, task.ID)
+		sourceDir := filepath.Join(h.cloudMgr.cloudDirFor(task.Owner), task.ID)
+		sourceFile := filepath.Join(sourceDir, task.Filename)
 
 		// 路径穿越防护
 		if !IsPathWithin(sourceFile, sourceDir) {

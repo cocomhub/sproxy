@@ -67,16 +67,12 @@ func newOwnerCloudEnv(t *testing.T) *ownerCloudEnv {
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  true,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() {
-		mgr.Close()
-		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
-		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
-	})
-	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: newTestCfgPtr(dir), auditLogger: testLogger()}
-	h.checksumStore = NewChecksumStore(dir, nil)
-	// 让 mgr 与 handler 共享同一 ChecksumStore，使 DeleteTask/写端的 checksum 清理生效可断言
-	mgr.checksumStore = h.checksumStore
+	// 装配租户布局：newAssemblyTestHandlers 提供 globalRoot/tenantFor/checksumStoreFor/
+	// listTenantIDs；stat/download 的 kind=cloud_task 分支依赖 per-tenant 解析。
+	h := newAssemblyTestHandlers(t, dir)
+	h.storageMgr = sm
+	mgr := NewCloudDownloadManager(dir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	h.cloudMgr = mgr
 	env := &ownerCloudEnv{
 		h:   h,
 		mgr: mgr,
@@ -375,19 +371,19 @@ func TestCloudOwner_OrphanGroupInheritsOwner(t *testing.T) {
 		AllowPrivate:  true,
 	}
 
-	mgr1 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr1, _ := newCloudTestManager(t, dir, sm, cfg)
 	group, err := mgr1.CreateGroup("g1", []cloudfilename.Entry{{URL: "https://example.com/o.zip", Filename: "o.zip"}}, "ak-A")
 	if err != nil {
 		t.Fatalf("CreateGroup 失败: %v", err)
 	}
 	// 删除组持久化文件（模拟组记录丢失），保留子任务与任务持久化文件
-	if err := os.Remove(filepath.Join(dir, downloadsDirName, "groups", group.ID+".json")); err != nil {
+	if err := os.Remove(filepath.Join(mgr1.persistDirFor("ak-A"), "groups", group.ID+".json")); err != nil {
 		t.Fatalf("删除组持久化文件失败: %v", err)
 	}
 	mgr1.Close()
 
 	// 重启：孤儿组应从子任务重建并继承 owner
-	mgr2 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr2, _ := newCloudTestManager(t, dir, sm, cfg)
 	defer mgr2.Close()
 	g, ok := mgr2.GetGroup(group.ID, "ak-A")
 	if !ok || g.Owner != "ak-A" {
@@ -436,19 +432,19 @@ func TestCloudOwner_CreateGroupWritesOwner(t *testing.T) {
 	}
 }
 
-// TestCloudOwner_CloudTaskChecksumScoped 验证 M1/F2 修复：云任务校验和以 owner 作用域
-// 且不带 .__cloud__ 段的 key（<owner>/<taskID>/<file>）写入，与 read/stat/chunk 读取端
-// 完全一致——stat 必须命中 store（而非依赖磁盘兜底重算），删除后 key 被清理。
+// TestCloudOwner_CloudTaskChecksumScoped 验证 M1/F2 修复：云任务校验和以 per-tenant store +
+// 相对租户根 cloud/<taskID>/<file> key 写入，与 read/stat/chunk 读取端完全一致——stat 必须
+// 命中 store（而非依赖磁盘兜底重算），删除后 key 被清理。
 func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
 	env := newOwnerCloudEnv(t)
 
-	// 直接构造一个处于 completed 的云任务 + 落盘文件 + 按修复后的 owner key 写入校验和
+	// 直接构造一个处于 completed 的云任务 + 落盘文件 + 按迁移后的 per-tenant key 写入校验和
 	content := []byte("checksum-scope-check")
 	task, err := env.mgr.CreateTask("url", "https://example.com/a.bin", "a.bin", int64(len(content)), "ak-A")
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
-	taskDir := filepath.Join(env.mgr.cloudDir, task.ID)
+	taskDir := filepath.Join(env.mgr.cloudDirFor("ak-A"), task.ID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatalf("mkdir task dir: %v", err)
 	}
@@ -457,15 +453,16 @@ func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
 	}
 	expected := sha256Hex(content)
 
-	// 模拟 executeDownload 的写端：校验和以 owner 作用域、无 .__cloud__ 段的 key 落库。
-	// key 用 ToSlash 归一（写端/删除端/读端统一正斜杠协议，Windows 兼容，见 F2）。
-	writeKey := checksumStoreKey("ak-A", filepath.ToSlash(filepath.Join(task.ID, "a.bin")))
-	env.h.checksumStore.Set(writeKey, expected)
-	if _, ok := env.h.checksumStore.Get(writeKey); !ok {
+	// 模拟 executeDownload 的写端：per-tenant store + 相对租户根 key（cloud/<taskID>/<file>），
+	// 无 owner 前缀。key 用 ToSlash 归一（写端/删除端/读端统一正斜杠协议，Windows 兼容，见 F2）。
+	cs := env.h.checksumStoreFor("ak-A")
+	writeKey := filepath.ToSlash(filepath.Join("cloud", task.ID, "a.bin"))
+	cs.Set(writeKey, expected)
+	if _, ok := cs.Get(writeKey); !ok {
 		t.Fatalf("写端 key %q 应可读", writeKey)
 	}
-	// 反向断言：旧（错误）密钥格式（含 .__cloud__ 段）不应存在，防止写入端回退
-	if _, ok := env.h.checksumStore.Get(checksumStoreKey("ak-A", filepath.ToSlash(filepath.Join(cloudDirName, task.ID, "a.bin")))); ok {
+	// 反向断言：旧（错误）密钥格式（含 .__cloud__ 段或 owner 前缀）不应存在，防止写入端回退
+	if _, ok := env.h.checksumStoreFor("ak-A").Get(filepath.ToSlash(filepath.Join("__cloud__", task.ID, "a.bin"))); ok {
 		t.Fatalf("错误格式 key（含 .__cloud__）不应被使用")
 	}
 
@@ -476,7 +473,7 @@ func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
 	}
 	got := resp.Header().Get("X-File-Checksum")
 	if got == "" {
-		t.Fatalf("ak-A stat 应返回 X-File-Checksum（M1 修复后命中 owner key），header=%v", resp.Header())
+		t.Fatalf("ak-A stat 应返回 X-File-Checksum（M1 修复后命中 per-tenant key），header=%v", resp.Header())
 	}
 	if got != expected {
 		t.Fatalf("X-File-Checksum=%q want %q", got, expected)
@@ -484,11 +481,11 @@ func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
 	// 证明命中 store：从 store 取出的就是 expected（stat 用磁盘兜底也会返回相同值，
 	// 但重点是与写端同 key。此断言冗余但防回归）
 
-	// 清理：DeleteTask（owner 作用域 key 删除不应残留）
+	// 清理：DeleteTask（per-tenant key 删除不应残留）
 	if err := env.mgr.DeleteTask(task.ID, "ak-A"); err != nil {
 		t.Fatalf("DeleteTask: %v", err)
 	}
-	if _, ok := env.h.checksumStore.Get(checksumStoreKey("ak-A", filepath.ToSlash(filepath.Join(task.ID, "a.bin")))); ok {
+	if _, ok := env.h.checksumStoreFor("ak-A").Get(writeKey); ok {
 		t.Fatalf("删除任务后 checksum 应被清理")
 	}
 }
@@ -510,7 +507,7 @@ func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 		ID: "f3task1", Owner: "ak-A", URL: "https://example.com/f3.bin",
 		Filename: "f3.bin", Status: "completed", CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
-	taskDir := filepath.Join(mgr.cloudDir, task.ID)
+	taskDir := filepath.Join(mgr.cloudDirFor("ak-A"), task.ID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

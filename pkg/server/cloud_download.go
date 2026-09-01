@@ -21,6 +21,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // downloadsDirName 是云端下载持久化目录名。
@@ -139,22 +140,30 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 	}
 }
 
+// TenantResolver 按 owner 返回租户（空 owner → anonymous；非法 owner 或存储根不可用返回 nil）。
+// 与 Handlers.tenantFor 同签名，RegisterRoutes 装配时直接传 h.tenantFor。
+type TenantResolver func(owner string) *storage.Tenant
+
+// ChecksumResolver 按 owner 返回 per-tenant checksum 存储（不可用返回 nil）。
+// 与 Handlers.checksumStoreFor 同签名，RegisterRoutes 装配时直接传 h.checksumStoreFor。
+type ChecksumResolver func(owner string) *ChecksumStore
+
 // CloudDownloadManager 管理云端下载任务。
 type CloudDownloadManager struct {
-	tasks         map[string]*CloudTask
-	mu            sync.RWMutex
-	uploadsDir    string
-	cloudDir      string // uploadsDir/.__cloud__/
-	persistDir    string // uploadsDir/.__downloads__/
-	storage       *StorageManager
-	checksumStore ChecksumStoreIface
-	logger        *slog.Logger
-	semaphore     chan struct{}
-	config        *CloudDownloadConfig
-	dl            downloader.Downloader
-	cancelFuncs   map[string]context.CancelFunc // 任务取消函数
-	running       map[string]bool               // 任务是否有执行中的下载 goroutine（含排队）
-	metrics       *CloudMetrics
+	tasks            map[string]*CloudTask
+	mu               sync.RWMutex
+	uploadsDir       string
+	tenantFor        TenantResolver   // 按任务 owner 解析租户（空 owner → anonymous）
+	checksumStoreFor ChecksumResolver // 按任务 owner 解析 per-tenant checksum 存储
+	listTenants      func() []string  // 返回全部租户名（恢复扫描；磁盘扫描，非内存缓存）
+	storage          *StorageManager
+	logger           *slog.Logger
+	semaphore        chan struct{}
+	config           *CloudDownloadConfig
+	dl               downloader.Downloader
+	cancelFuncs      map[string]context.CancelFunc // 任务取消函数
+	running          map[string]bool               // 任务是否有执行中的下载 goroutine（含排队）
+	metrics          *CloudMetrics
 
 	// 批量持久化进度更新
 	dirtyTasks  map[string]struct{}
@@ -205,39 +214,48 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 }
 
 // NewCloudDownloadManager 创建云端下载管理器。
-func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumStoreIface, logger *slog.Logger, cfg *CloudDownloadConfig) *CloudDownloadManager {
-	cloudDir := filepath.Join(uploadsDir, cloudDirName)
-	persistDir := filepath.Join(uploadsDir, downloadsDirName)
-
-	if err := os.MkdirAll(cloudDir, 0755); err != nil {
-		defaultLogger(logger).Warn("创建 cloud 目录失败", "dir", cloudDir, "error", err)
+//
+// 迁移后云任务文件与状态按任务 owner 落租户桶：
+//   - 任务文件 → tenantFor(owner).Root() 下 cloud 桶（<root>/<tenant>/cloud/<taskID>/<file>）
+//   - 任务状态 → meta/cloud 桶（<root>/<tenant>/meta/cloud/<taskID>.json）
+//   - 组状态 → meta/cloud/groups（<root>/<tenant>/meta/cloud/groups/<gid>.json）
+//
+// tenantFor/checksumStoreFor/listTenants 由 RegisterRoutes 装配传入（h.tenantFor /
+// h.checksumStoreFor / h.listTenantIDs）；任一为 nil 时回退为不可用（写路径 fail-closed，
+// 不 panic）。空 owner 任务落 anonymous 租户。
+func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, tenantFor TenantResolver, checksumStoreFor ChecksumResolver, listTenants func() []string, logger *slog.Logger, cfg *CloudDownloadConfig) *CloudDownloadManager {
+	if tenantFor == nil {
+		tenantFor = func(string) *storage.Tenant { return nil }
 	}
-	if err := os.MkdirAll(persistDir, 0755); err != nil {
-		defaultLogger(logger).Warn("创建 persist 目录失败", "dir", persistDir, "error", err)
+	if checksumStoreFor == nil {
+		checksumStoreFor = func(string) *ChecksumStore { return nil }
+	}
+	if listTenants == nil {
+		listTenants = func() []string { return nil }
 	}
 
 	// 零值字段填充默认值（超时/重试等必须在这里生效，不依赖调用方接线）
 	applyCloudConfigDefaults(cfg)
 
 	mgr := &CloudDownloadManager{
-		tasks:         make(map[string]*CloudTask),
-		uploadsDir:    uploadsDir,
-		cloudDir:      cloudDir,
-		persistDir:    persistDir,
-		storage:       sm,
-		checksumStore: cs,
-		logger:        defaultLogger(logger),
-		semaphore:     make(chan struct{}, cfg.MaxConcurrent),
-		config:        cfg,
-		dl:            downloader.NewFromConfig(cfg.Downloader),
-		cancelFuncs:   make(map[string]context.CancelFunc),
-		running:       make(map[string]bool),
-		metrics:       &CloudMetrics{},
-		dirtyTasks:    make(map[string]struct{}),
-		flushNow:      make(chan struct{}, 1),
-		stopFlush:     make(chan struct{}),
-		stopCleanup:   make(chan struct{}),
-		groups:        make(map[string]*CloudTaskGroup),
+		tasks:            make(map[string]*CloudTask),
+		uploadsDir:       uploadsDir,
+		tenantFor:        tenantFor,
+		checksumStoreFor: checksumStoreFor,
+		listTenants:      listTenants,
+		storage:          sm,
+		logger:           defaultLogger(logger),
+		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
+		config:           cfg,
+		dl:               downloader.NewFromConfig(cfg.Downloader),
+		cancelFuncs:      make(map[string]context.CancelFunc),
+		running:          make(map[string]bool),
+		metrics:          &CloudMetrics{},
+		dirtyTasks:       make(map[string]struct{}),
+		flushNow:         make(chan struct{}, 1),
+		stopFlush:        make(chan struct{}),
+		stopCleanup:      make(chan struct{}),
+		groups:           make(map[string]*CloudTaskGroup),
 	}
 
 	mgr.logger.Info("cloud download manager initialized",
@@ -283,6 +301,57 @@ func NewCloudDownloadManager(uploadsDir string, sm *StorageManager, cs ChecksumS
 	})
 
 	return mgr
+}
+
+// cloudDirFor 返回 owner 租户 cloud 桶的绝对路径（<root>/<tenant>/cloud）。
+// 租户不可用（非法 owner / 存储根未装配）时返回 ""。
+func (m *CloudDownloadManager) cloudDirFor(owner string) string {
+	tnt := m.tenantFor(owner)
+	if tnt == nil {
+		return ""
+	}
+	abs, _ := tnt.Root().Abs("cloud")
+	return abs
+}
+
+// persistDirFor 返回 owner 租户云任务状态目录（<root>/<tenant>/meta/cloud）。
+// 租户不可用时返回 ""。
+func (m *CloudDownloadManager) persistDirFor(owner string) string {
+	tnt := m.tenantFor(owner)
+	if tnt == nil {
+		return ""
+	}
+	abs, _ := tnt.Root().Abs("meta/cloud")
+	return abs
+}
+
+// groupsDirFor 返回 owner 租户云任务组状态目录（<root>/<tenant>/meta/cloud/groups）。
+// 租户不可用时返回 ""。
+func (m *CloudDownloadManager) groupsDirFor(owner string) string {
+	base := m.persistDirFor(owner)
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "groups")
+}
+
+// taskDirFor 返回 owner 租户下任务文件目录（<root>/<tenant>/cloud/<taskID>）。
+// 租户不可用时返回 ""。
+func (m *CloudDownloadManager) taskDirFor(owner, taskID string) string {
+	base := m.cloudDirFor(owner)
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, taskID)
+}
+
+// removeTaskDir 尽力删除 owner 租户下任务文件目录（租户不可用时为空操作）。
+func (m *CloudDownloadManager) removeTaskDir(owner, taskID string) {
+	dir := m.taskDirFor(owner, taskID)
+	if dir == "" {
+		return
+	}
+	_ = os.RemoveAll(dir)
 }
 
 // CreateTask 创建云端下载任务（不启动下载）。
@@ -491,8 +560,13 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 
 	m.logger.Info("download started", "task_id", task.ID, "url", task.URL, "filename", task.Filename)
 
-	// 构建目标文件路径
-	taskDir := filepath.Join(m.cloudDir, task.ID)
+	// 构建目标文件路径（按任务 owner 落租户 cloud 桶）
+	taskDir := m.taskDirFor(task.Owner, task.ID)
+	if taskDir == "" {
+		m.logger.Warn("租户不可用，无法创建任务目录", "task_id", task.ID, "owner", task.Owner)
+		m.failTask(task, "tenant unavailable")
+		return
+	}
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
 		m.logger.Warn("创建任务目录失败", "task_id", task.ID, "dir", taskDir, "error", err)
 		m.failTask(task, fmt.Sprintf("create task dir: %v", err))
@@ -588,7 +662,7 @@ downloadDone:
 	m.mu.RUnlock()
 	if !exists {
 		m.logger.Info("download finished after task deletion, skipping completion", "task_id", task.ID)
-		_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
+		m.removeTaskDir(task.Owner, task.ID)
 		return
 	}
 
@@ -612,7 +686,7 @@ downloadDone:
 		// 可能残留的任务文件（CancelTask 的 RemoveAll 在 Windows 下可能因文件被占用失败）。
 		if dlCtx.Err() == context.Canceled {
 			m.logger.Info("download cancelled", "task_id", task.ID)
-			_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
+			m.removeTaskDir(task.Owner, task.ID)
 			return
 		}
 		m.failTask(task, downloadErr.Error())
@@ -630,7 +704,7 @@ downloadDone:
 	if !ok {
 		m.mu.Unlock()
 		m.logger.Info("download finished after task deletion, skipping completion", "task_id", task.ID)
-		_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
+		m.removeTaskDir(task.Owner, task.ID)
 		return
 	}
 	if stored.Status == "cancelled" {
@@ -638,7 +712,7 @@ downloadDone:
 		m.logger.Info("download finished after cancel, discarding result", "task_id", task.ID)
 		// 取消即放弃：连同 .partial/.partial.etag 一并清理（CancelTask 已释放存储
 		// 并尝试删除，这里兜底），保持磁盘与已归零账本一致。
-		_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
+		m.removeTaskDir(task.Owner, task.ID)
 		return
 	}
 
@@ -680,16 +754,14 @@ downloadDone:
 		stored.ReservedSize = result.Size
 	}
 
-	// 写入 ChecksumStore。key 与 download/stat/chunk 读取端一致：
-	// 读端 resolveDownloadPath(kind=cloud_task) 返回的 filename 是 <taskID>/<file>（不含
-	// .__cloud__ 内部段），故写端同样用 <owner>/<taskID>/<file>（审查 M1：加 owner 前缀时
-	// 误保留 .__cloud__ 段导致写读 key 不一致、缓存永不命中、每请求全量重算）。
-	// 审查 F2：写端 key 必须与读端（resolveDownloadPath 返回的 <taskID>/<file> 正斜杠
-	// query 值）一致——filepath.Join 在 Windows 下产出反斜杠（ID\file），读端 key 恒正
-	// 斜杠 → 缓存永不命中、每请求全量重算。用 ToSlash 归一为协议正斜杠。
-	remotePath := filepath.ToSlash(filepath.Join(stored.ID, stored.Filename))
-	if m.checksumStore != nil {
-		m.checksumStore.Set(checksumStoreKey(stored.Owner, remotePath), result.Checksum)
+	// 写入 ChecksumStore。迁移后云任务文件落 <tenant>/cloud/<taskID>/<file>，key 用
+	// per-tenant store + 相对租户根的协议正斜杠 rel（cloud/<taskID>/<file>，无 owner 前缀），
+	// 与读端 resolveDownloadPath(kind=cloud_task) 返回的 dp.rel 完全一致。
+	// 审查 F2：filepath.Join 在 Windows 下产出反斜杠（ID\file），读端 key 恒正斜杠 →
+	// 用 ToSlash 归一为协议正斜杠，保证缓存命中。
+	relKey := filepath.ToSlash(filepath.Join("cloud", stored.ID, stored.Filename))
+	if cs := m.checksumStoreFor(stored.Owner); cs != nil {
+		cs.Set(relKey, result.Checksum)
 	}
 
 	// 更新任务状态
@@ -735,7 +807,7 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	// 释放存储：以磁盘实际占用为基准，只释放占位与实际大小的差额。
 	// .partial 保留供续传，账本与实际磁盘保持一致，避免配额窗口被累积突破。
 	oldReserved := task.ReservedSize
-	actual := m.diskUsageOfTask(task.ID)
+	actual := m.diskUsageOfTask(task.Owner, task.ID)
 	if actual < oldReserved {
 		m.storage.Release(oldReserved-actual, CategoryCloud)
 	} else if actual > oldReserved {
@@ -754,7 +826,7 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 			task.UpdatedAt = time.Now()
 			task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 			m.mu.Unlock()
-			_ = os.RemoveAll(filepath.Join(m.cloudDir, task.ID))
+			m.removeTaskDir(task.Owner, task.ID)
 			if saveErr := m.saveTask(task); saveErr != nil {
 				m.logger.Error("persist failed task after storage-full cleanup", "task_id", task.ID, "error", saveErr)
 			}
@@ -776,7 +848,10 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	m.metrics.TasksFailed.Add(1)
 
 	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录
-	taskDir := filepath.Join(m.cloudDir, task.ID)
+	taskDir := m.taskDirFor(task.Owner, task.ID)
+	if taskDir == "" {
+		return
+	}
 	entries, err := os.ReadDir(taskDir)
 	if err != nil {
 		return
@@ -926,10 +1001,8 @@ func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 	// 取消即放弃：清理任务文件（含 .partial/.partial.etag），使磁盘占用与已归零
 	// 的存储账本一致——否则 partial 残留但账本释放，可累计突破 max_storage_bytes
 	// 配额。goroutine 可能仍在响应 cancel 收尾（Windows 下删除被占用文件会失败），
-	// 删除失败时由 executeDownload 的取消路径（RemoveAll）兜底。
-	if err := os.RemoveAll(filepath.Join(m.cloudDir, id)); err != nil && !os.IsNotExist(err) {
-		m.logger.Warn("failed to clean up task dir on cancel", "task_id", id, "error", err)
-	}
+	// 删除失败时由 executeDownload 的取消路径（removeTaskDir）兜底。
+	m.removeTaskDir(t.Owner, id)
 
 	// 终态持久化失败会丢失 cancelled 状态（重启后可能被当作 downloading 重启），必须显式报错
 	if err := m.saveTask(t); err != nil {
@@ -975,30 +1048,34 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 
 	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", t.Status)
 
-	// 删除云端文件
-	taskDir := filepath.Join(m.cloudDir, t.ID)
-	filePath := filepath.Join(taskDir, t.Filename)
-	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-		m.logger.Warn("failed to remove cloud file", "task_id", id, "path", filePath, "error", err)
-	}
-	if err := os.Remove(taskDir); err != nil && !os.IsNotExist(err) {
-		// 目录可能非空（有其他文件），使用 RemoveAll
-		if err := os.RemoveAll(taskDir); err != nil {
-			m.logger.Warn("failed to remove task dir", "task_id", id, "path", taskDir, "error", err)
+	// 删除云端文件（按任务 owner 落租户 cloud 桶）
+	taskDir := m.taskDirFor(t.Owner, t.ID)
+	if taskDir != "" {
+		filePath := filepath.Join(taskDir, t.Filename)
+		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+			m.logger.Warn("failed to remove cloud file", "task_id", id, "path", filePath, "error", err)
+		}
+		if err := os.Remove(taskDir); err != nil && !os.IsNotExist(err) {
+			// 目录可能非空（有其他文件），使用 RemoveAll
+			if err := os.RemoveAll(taskDir); err != nil {
+				m.logger.Warn("failed to remove task dir", "task_id", id, "path", taskDir, "error", err)
+			}
 		}
 	}
 
-	// 删除持久化文件
-	persistFile := filepath.Join(m.persistDir, t.ID+".json")
-	if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
-		m.logger.Warn("failed to remove persist file", "task_id", id, "error", err)
+	// 删除持久化文件（按任务 owner 落租户 meta/cloud）
+	if persistDir := m.persistDirFor(t.Owner); persistDir != "" {
+		persistFile := filepath.Join(persistDir, t.ID+".json")
+		if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
+			m.logger.Warn("failed to remove persist file", "task_id", id, "error", err)
+		}
 	}
 
-	// 清理 checksum（owner 作用域 key，与写入端一致，审查 M1；ToSlash 归一见写端注释）
-	if m.checksumStore != nil {
-		remotePath := filepath.ToSlash(filepath.Join(t.ID, t.Filename))
-		m.checksumStore.Delete(checksumStoreKey(t.Owner, remotePath))
-		m.logger.Debug("checksum deleted", "task_id", id, "remote_path", remotePath)
+	// 清理 checksum（per-tenant store + 相对租户根 key，与写入端一致；ToSlash 归一见写端注释）
+	if cs := m.checksumStoreFor(t.Owner); cs != nil {
+		relKey := filepath.ToSlash(filepath.Join("cloud", t.ID, t.Filename))
+		cs.Delete(relKey)
+		m.logger.Debug("checksum deleted", "task_id", id, "rel", relKey)
 	}
 
 	m.logger.Info("cloud download task deleted and cleaned up", "task_id", id)
@@ -1026,7 +1103,16 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 		m.logger.Warn("failed to marshal task", "id", t.ID, "error", err)
 		return err
 	}
-	taskFile := filepath.Join(m.persistDir, t.ID+".json")
+	persistDir := m.persistDirFor(t.Owner)
+	if persistDir == "" {
+		m.logger.Warn("租户不可用，跳过任务持久化", "id", t.ID, "owner", t.Owner)
+		return fmt.Errorf("tenant unavailable for task %s", t.ID)
+	}
+	if err := os.MkdirAll(persistDir, 0755); err != nil {
+		m.logger.Warn("创建持久化目录失败", "dir", persistDir, "error", err)
+		return err
+	}
+	taskFile := filepath.Join(persistDir, t.ID+".json")
 	if err := os.WriteFile(taskFile, data, 0644); err != nil {
 		m.logger.Warn("failed to persist task", "id", t.ID, "error", err)
 		return err
@@ -1034,47 +1120,53 @@ func (m *CloudDownloadManager) saveTask(t *CloudTask) error {
 	return nil
 }
 
-// recoverTasks 从磁盘恢复所有任务。
+// recoverTasks 从磁盘恢复所有任务（遍历所有租户的 meta/cloud/）。
 // 仅重启 downloading 状态的任务（崩溃前正在下载中）。
 // pending 任务不自动启动——避免 CreateTask 创建但未 SubmitAndStart 的任务在崩溃后意外启动。
 func (m *CloudDownloadManager) recoverTasks() {
-	entries, err := os.ReadDir(m.persistDir)
-	if err != nil {
-		return
-	}
 	recovered := 0
 	restarted := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+	for _, tenant := range m.listTenants() {
+		persistDir := m.persistDirFor(tenant)
+		if persistDir == "" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(m.persistDir, e.Name()))
+		entries, err := os.ReadDir(persistDir)
 		if err != nil {
-			m.logger.Warn("failed to read persisted task, skipping", "file", e.Name(), "error", err)
 			continue
 		}
-		var task CloudTask
-		if err := json.Unmarshal(data, &task); err != nil {
-			m.logger.Warn("failed to unmarshal persisted task, skipping", "file", e.Name(), "error", err)
-			continue
-		}
-		// 重启后以磁盘实际占用为基准重算 ReservedSize，
-		// 与 StorageManager 启动扫描的计数器保持一致（不信任崩溃前持久化的占位值）
-		m.reconcileReservedSize(&task)
-		m.tasks[task.ID] = &task
-		recovered++
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(persistDir, e.Name()))
+			if err != nil {
+				m.logger.Warn("failed to read persisted task, skipping", "file", e.Name(), "error", err)
+				continue
+			}
+			var task CloudTask
+			if err := json.Unmarshal(data, &task); err != nil {
+				m.logger.Warn("failed to unmarshal persisted task, skipping", "file", e.Name(), "error", err)
+				continue
+			}
+			// 重启后以磁盘实际占用为基准重算 ReservedSize，
+			// 与 StorageManager 启动扫描的计数器保持一致（不信任崩溃前持久化的占位值）
+			m.reconcileReservedSize(&task)
+			m.tasks[task.ID] = &task
+			recovered++
 
-		// 仅重启 downloading 状态的任务（崩溃前正在下载）。
-		// pending 任务不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
-		// 就崩溃导致意外启动的边界情况。
-		if task.Status == "downloading" {
-			m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
-			m.mu.Lock()
-			m.running[task.ID] = true
-			m.mu.Unlock()
-			m.wg.Add(1)
-			go m.executeDownload(context.Background(), &task)
-			restarted++
+			// 仅重启 downloading 状态的任务（崩溃前正在下载）。
+			// pending 任务不自动启动——避免 CreateTask 创建但尚未 SubmitAndStart
+			// 就崩溃导致意外启动的边界情况。
+			if task.Status == "downloading" {
+				m.logger.Info("restarting interrupted download", "task_id", task.ID, "url", task.URL)
+				m.mu.Lock()
+				m.running[task.ID] = true
+				m.mu.Unlock()
+				m.wg.Add(1)
+				go m.executeDownload(context.Background(), &task)
+				restarted++
+			}
 		}
 	}
 	if recovered > 0 {
@@ -1083,8 +1175,11 @@ func (m *CloudDownloadManager) recoverTasks() {
 }
 
 // diskUsageOfTask 返回任务目录中所有普通文件的实际字节占用。
-func (m *CloudDownloadManager) diskUsageOfTask(taskID string) int64 {
-	dir := filepath.Join(m.cloudDir, taskID)
+func (m *CloudDownloadManager) diskUsageOfTask(owner, taskID string) int64 {
+	dir := m.taskDirFor(owner, taskID)
+	if dir == "" {
+		return 0
+	}
 	var total int64
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -1105,38 +1200,43 @@ func (m *CloudDownloadManager) diskUsageOfTask(taskID string) int64 {
 // 进程重启后 StorageManager 的计数器来自磁盘扫描，这里让每个任务的预留量
 // 与扫描结果一致，避免后续删除/清理时多退或少退。
 func (m *CloudDownloadManager) reconcileReservedSize(task *CloudTask) {
-	task.ReservedSize = m.diskUsageOfTask(task.ID)
+	task.ReservedSize = m.diskUsageOfTask(task.Owner, task.ID)
 }
 
-// recoverGroups 从磁盘恢复任务组，并修剪已不存在的任务引用。
+// recoverGroups 从磁盘恢复任务组（遍历所有租户的 meta/cloud/groups/），并修剪已不存在的任务引用。
 func (m *CloudDownloadManager) recoverGroups() {
-	groupsDir := filepath.Join(m.persistDir, "groups")
-	entries, err := os.ReadDir(groupsDir)
-	if err != nil {
-		return
-	}
 	recovered := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+	for _, tenant := range m.listTenants() {
+		groupsDir := m.groupsDirFor(tenant)
+		if groupsDir == "" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(groupsDir, e.Name()))
+		entries, err := os.ReadDir(groupsDir)
 		if err != nil {
 			continue
 		}
-		var group CloudTaskGroup
-		if err := json.Unmarshal(data, &group); err != nil {
-			continue
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(groupsDir, e.Name()))
+			if err != nil {
+				continue
+			}
+			var group CloudTaskGroup
+			if err := json.Unmarshal(data, &group); err != nil {
+				continue
+			}
+			group.TaskIDs = m.pruneGroupTaskIDs(group.TaskIDs)
+			if len(group.TaskIDs) == 0 {
+				_ = os.Remove(filepath.Join(groupsDir, e.Name()))
+				continue
+			}
+			m.groupMu.Lock()
+			m.groups[group.ID] = &group
+			m.groupMu.Unlock()
+			recovered++
 		}
-		group.TaskIDs = m.pruneGroupTaskIDs(group.TaskIDs)
-		if len(group.TaskIDs) == 0 {
-			_ = os.Remove(filepath.Join(groupsDir, e.Name()))
-			continue
-		}
-		m.groupMu.Lock()
-		m.groups[group.ID] = &group
-		m.groupMu.Unlock()
-		recovered++
 	}
 
 	// 兼容旧数据：为带 GroupID 但缺少组记录的孤儿任务重建最小组
@@ -1189,12 +1289,12 @@ func (m *CloudDownloadManager) pruneGroupTaskIDs(ids []string) []string {
 	return kept
 }
 
-// groupsDirPath 返回组持久化目录。
-func (m *CloudDownloadManager) groupsDirPath() string {
-	return filepath.Join(m.persistDir, "groups")
+// groupsDirPath 返回 owner 租户的组持久化目录（<root>/<tenant>/meta/cloud/groups）。
+func (m *CloudDownloadManager) groupsDirPath(owner string) string {
+	return m.groupsDirFor(owner)
 }
 
-// saveGroup 持久化任务组到磁盘，返回写盘错误。
+// saveGroup 持久化任务组到磁盘（按组 owner 落租户 meta/cloud/groups），返回写盘错误。
 // 组状态（completed/partial/archive_file 等）持久化失败意味着重启后组元数据丢失，
 // 调用方（组状态变更点）必须显式处理；清理类保存可忽略返回值。
 func (m *CloudDownloadManager) saveGroup(g *CloudTaskGroup) error {
@@ -1212,7 +1312,11 @@ func (m *CloudDownloadManager) saveGroup(g *CloudTaskGroup) error {
 		m.logger.Warn("failed to marshal group", "id", g.ID, "error", err)
 		return err
 	}
-	dir := m.groupsDirPath()
+	dir := m.groupsDirPath(g.Owner)
+	if dir == "" {
+		m.logger.Warn("租户不可用，跳过组持久化", "id", g.ID, "owner", g.Owner)
+		return fmt.Errorf("tenant unavailable for group %s", g.ID)
+	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		m.logger.Warn("failed to create groups dir", "dir", dir, "error", err)
 		return err
@@ -1224,9 +1328,13 @@ func (m *CloudDownloadManager) saveGroup(g *CloudTaskGroup) error {
 	return nil
 }
 
-// removeGroupFile 删除组的持久化文件。
-func (m *CloudDownloadManager) removeGroupFile(groupID string) {
-	_ = os.Remove(filepath.Join(m.groupsDirPath(), groupID+".json"))
+// removeGroupFile 删除 owner 租户下组的持久化文件。
+func (m *CloudDownloadManager) removeGroupFile(groupID, owner string) {
+	dir := m.groupsDirPath(owner)
+	if dir == "" {
+		return
+	}
+	_ = os.Remove(filepath.Join(dir, groupID+".json"))
 }
 
 // cleanupExpiredOnce 执行一次性的过期任务清理，返回清理的任务数量。
@@ -1274,17 +1382,19 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 		return 0
 	}
 
-	// 锁外执行 I/O 和 checksum 操作
+	// 锁外执行 I/O 和 checksum 操作（按任务 owner 落租户桶）
 	cleaned := 0
 	for _, item := range expired {
-		_ = os.Remove(filepath.Join(m.persistDir, item.id+".json"))
-		_ = os.RemoveAll(filepath.Join(m.cloudDir, item.taskID))
+		if persistDir := m.persistDirFor(item.owner); persistDir != "" {
+			_ = os.Remove(filepath.Join(persistDir, item.id+".json"))
+		}
+		m.removeTaskDir(item.owner, item.taskID)
 		if item.reservedSize > 0 {
 			m.storage.Release(item.reservedSize, CategoryCloud)
 		}
-		if m.checksumStore != nil {
-			remotePath := filepath.ToSlash(filepath.Join(item.taskID, item.filename))
-			m.checksumStore.Delete(checksumStoreKey(item.owner, remotePath))
+		if cs := m.checksumStoreFor(item.owner); cs != nil {
+			relKey := filepath.ToSlash(filepath.Join("cloud", item.taskID, item.filename))
+			cs.Delete(relKey)
 		}
 		cleaned++
 	}
@@ -1299,7 +1409,7 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 		kept := m.pruneGroupTaskIDs(g.TaskIDs)
 		if len(kept) == 0 {
 			delete(m.groups, gid)
-			m.removeGroupFile(gid)
+			m.removeGroupFile(gid, g.Owner)
 		} else if len(kept) != len(g.TaskIDs) {
 			g.TaskIDs = kept
 			g.TotalTasks = len(kept)
@@ -1616,7 +1726,7 @@ func (m *CloudDownloadManager) DeleteGroup(groupID, owner string) error {
 	m.groupMu.Lock()
 	delete(m.groups, groupID)
 	m.groupMu.Unlock()
-	m.removeGroupFile(groupID)
+	m.removeGroupFile(groupID, group.Owner)
 
 	return errors.Join(errs...)
 }
@@ -1709,7 +1819,10 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	}
 	m.mu.Unlock()
 
-	taskDir := filepath.Join(m.cloudDir, task.ID)
+	taskDir := m.taskDirFor(task.Owner, task.ID)
+	if taskDir == "" {
+		return fmt.Errorf("tenant unavailable for task %s", taskID)
+	}
 	destPath := filepath.Join(taskDir, task.Filename)
 	if force {
 		_ = os.Remove(destPath)

@@ -36,22 +36,15 @@ func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() {
-		mgr.Close()
-		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
-		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
-	})
+	h := newAssemblyTestHandlers(t, dir)
+	h.storageMgr = sm
+	mgr := NewCloudDownloadManager(dir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	h.cloudMgr = mgr
 
-	var cfgPtr atomic.Pointer[Config]
-	serverCfg := Default()
-	serverCfg.UploadsDir = dir
+	serverCfg := h.cfgPtr.Load()
 	if modify != nil {
 		modify(serverCfg)
 	}
-	cfgPtr.Store(serverCfg)
-
-	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: &cfgPtr, auditLogger: testLogger()}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
@@ -65,7 +58,7 @@ func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManage
 	return setupCloudArchiveTestWithCfg(t, nil)
 }
 
-// createCompletedTask 创建一个已完成的任务，并在 __cloud__/<id>/ 下创建测试文件。
+// createCompletedTask 创建一个已完成的任务，并在 <tenant>/cloud/<id>/ 下创建测试文件。
 func createCompletedTask(t *testing.T, mgr *CloudDownloadManager, filename string) string {
 	t.Helper()
 	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100, "")
@@ -73,8 +66,7 @@ func createCompletedTask(t *testing.T, mgr *CloudDownloadManager, filename strin
 		t.Fatal(err)
 	}
 	task.Status = "completed"
-	cloudDir := filepath.Join(mgr.uploadsDir, cloudDirName)
-	taskDir := filepath.Join(cloudDir, task.ID)
+	taskDir := filepath.Join(mgr.cloudDirFor(""), task.ID)
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
 		t.Fatal(err)
 	}

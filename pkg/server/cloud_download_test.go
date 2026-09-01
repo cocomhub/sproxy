@@ -91,7 +91,7 @@ func TestCloudTask_JSONRoundTrip(t *testing.T) {
 func TestCloudDownloadManager_CreateTask(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
@@ -112,7 +112,7 @@ func TestCloudDownloadManager_CreateTask(t *testing.T) {
 func TestCloudDownloadManager_CreateTaskReservesStorage(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 100, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	_, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 200, "")
@@ -124,7 +124,7 @@ func TestCloudDownloadManager_CreateTaskReservesStorage(t *testing.T) {
 func TestCloudDownloadManager_GetTask(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
@@ -141,7 +141,7 @@ func TestCloudDownloadManager_GetTask(t *testing.T) {
 func TestCloudDownloadManager_GetTaskMissing(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	_, ok := mgr.GetTask("nonexistent", "")
@@ -153,7 +153,7 @@ func TestCloudDownloadManager_GetTaskMissing(t *testing.T) {
 func TestCloudDownloadManager_ListTasks(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
@@ -168,7 +168,7 @@ func TestCloudDownloadManager_ListTasks(t *testing.T) {
 func TestCloudDownloadManager_ListTasksFilterByStatus(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
@@ -191,7 +191,7 @@ func TestCloudDownloadManager_ListTasksFilterByStatus(t *testing.T) {
 func TestCloudDownloadManager_CancelTask(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
@@ -211,7 +211,7 @@ func TestCloudDownloadManager_CancelTask(t *testing.T) {
 func TestCloudDownloadManager_CancelTaskInvalidStatus(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
@@ -228,7 +228,7 @@ func TestCloudDownloadManager_CancelTaskInvalidStatus(t *testing.T) {
 func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
@@ -237,7 +237,7 @@ func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 	mgr.mu.Unlock()
 
 	// 创建云端文件
-	cloudDir := filepath.Join(dir, ".__cloud__", task.ID)
+	cloudDir := filepath.Join(mgr.cloudDirFor(""), task.ID)
 	os.MkdirAll(cloudDir, 0755)
 	os.WriteFile(filepath.Join(cloudDir, "file.zip"), []byte("data"), 0644)
 
@@ -254,13 +254,13 @@ func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 func TestCloudDownloadManager_TaskPersistence(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
 
 	// 验证持久化文件存在
-	taskFile := filepath.Join(dir, ".__downloads__", task.ID+".json")
+	taskFile := filepath.Join(mgr.persistDirFor(""), task.ID+".json")
 	if _, err := os.Stat(taskFile); err != nil {
 		t.Fatalf("expected task file %s to exist: %v", taskFile, err)
 	}
@@ -269,7 +269,7 @@ func TestCloudDownloadManager_TaskPersistence(t *testing.T) {
 func TestCloudDownloadManager_RecoverTasks(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr1 := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr1, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 
 	// 创建两个任务并置为 completed（避免恢复时触发 pending 任务重启下载）
 	t1, _ := mgr1.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
@@ -283,7 +283,7 @@ func TestCloudDownloadManager_RecoverTasks(t *testing.T) {
 	mgr1.Close() // 关闭 mgr1 的 flushLoop/cleanupExpired 后台 goroutine，避免与新 mgr 的清理逻辑交叉
 
 	// 新建一个 manager 模拟重启
-	mgr2 := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr2, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	mgr2.Close()
 	tasks, _ := mgr2.ListTasks("", -1, 0, "")
 	if len(tasks) != 2 {
@@ -304,7 +304,7 @@ func defaultCloudDownloadConfig() *CloudDownloadConfig {
 func TestCloudDownloadManager_URLDedup(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	// 第一次创建
@@ -335,7 +335,7 @@ func TestCloudDownloadManager_URLDedup(t *testing.T) {
 func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	// 创建失败任务
@@ -368,10 +368,8 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 
 func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 	dir := t.TempDir()
-	cs := NewChecksumStore(dir, testLogger())
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, cs, testLogger(), defaultCloudDownloadConfig())
-	t.Cleanup(mgr.Close)
+	mgr, h := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 
 	task, _ := mgr.CreateTask("url", "https://example.com/cleanup.zip", "cleanup.zip", 100, "")
 	mgr.mu.Lock()
@@ -379,15 +377,15 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 	task.Checksum = "abc123"
 	mgr.mu.Unlock()
 
-	// 创建云端文件
-	cloudDir := filepath.Join(dir, ".__cloud__", task.ID)
+	// 创建云端文件（新布局 anonymous/cloud/<taskID>/）
+	cloudDir := filepath.Join(mgr.cloudDirFor(""), task.ID)
 	os.MkdirAll(cloudDir, 0755)
 	os.WriteFile(filepath.Join(cloudDir, "cleanup.zip"), []byte("test data"), 0644)
 
-	// 写入 checksum（owner 作用域且不含 .__cloud__ 段的 key，与写端一致，审查 M1；
-	// ToSlash 归一，对齐删除端 key，Windows 兼容）
-	remotePath := filepath.ToSlash(filepath.Join(task.ID, "cleanup.zip"))
-	cs.Set(checksumStoreKey(task.Owner, remotePath), "abc123")
+	// 写入 checksum（per-tenant store + 相对租户根 cloud/<taskID>/<file> key，与写端一致）
+	cs := h.checksumStoreFor("")
+	relKey := filepath.ToSlash(filepath.Join("cloud", task.ID, "cleanup.zip"))
+	cs.Set(relKey, "abc123")
 
 	// 验证存储使用量 > 0
 	if sm.Usage() == 0 {
@@ -414,7 +412,7 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 	}
 
 	// 验证持久化文件已删除
-	persistFile := filepath.Join(dir, ".__downloads__", task.ID+".json")
+	persistFile := filepath.Join(mgr.persistDirFor(""), task.ID+".json")
 	if _, err := os.Stat(persistFile); !os.IsNotExist(err) {
 		t.Error("persist file should be deleted")
 	}
@@ -424,8 +422,8 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 		t.Fatalf("expected storage usage=0 after delete, got %d", sm.Usage())
 	}
 
-	// 验证 checksum 已清理（key 为 owner 作用域、不含 .__cloud__ 段）
-	if _, ok := cs.Get(checksumStoreKey(task.Owner, remotePath)); ok {
+	// 验证 checksum 已清理（per-tenant store + cloud/ 前缀 key）
+	if _, ok := cs.Get(relKey); ok {
 		t.Error("checksum should be deleted")
 	}
 }
@@ -449,7 +447,7 @@ func TestCloudDownloadManager_SubmitAndStart_Sync(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  true,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "sync-test.bin", int64(len(content)), t.Context(), "")
@@ -467,7 +465,7 @@ func TestCloudDownloadManager_SubmitAndStart_Sync(t *testing.T) {
 	}
 
 	// 验证文件已下载
-	destPath := filepath.Join(dir, ".__cloud__", task.ID, "sync-test.bin")
+	destPath := filepath.Join(mgr.cloudDirFor(""), task.ID, "sync-test.bin")
 	got, err := os.ReadFile(destPath)
 	if err != nil {
 		t.Fatal(err)
@@ -496,7 +494,7 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 		AllowPrivate:  true,
 		FailedTaskTTL: 1 * time.Hour,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "async-test.bin", int64(len(content)), t.Context(), "")
@@ -550,7 +548,7 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	// 优雅关闭：先释放阻塞的 handler（close(blockCh)），再等待 goroutine 退出（mgr.Close()）。
 	// Cleanup 按 LIFO 执行，后注册的 close(blockCh) 先于 mgr.Close() 执行。
 	t.Cleanup(mgr.Close)
@@ -608,7 +606,7 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
 	// 仅创建组（不启动），子任务停在 pending
@@ -667,7 +665,7 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
 	task, _ := mgr.SubmitAndStart("url", srv.URL, "cancel-test.bin", 104857600, nil, "") // nil context = async
@@ -722,7 +720,7 @@ func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
 	task, submitErr := mgr.SubmitAndStart("url", srv.URL, "cancel.bin", 104857600, nil, "")
@@ -731,7 +729,7 @@ func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
 	}
 
 	// 等待 .partial 文件出现（确认下载已开始写盘）
-	taskDir := filepath.Join(dir, ".__cloud__", task.ID)
+	taskDir := filepath.Join(mgr.cloudDirFor(""), task.ID)
 	deadline := time.Now().Add(5 * time.Second)
 	partialWritten := false
 	for time.Now().Before(deadline) {
@@ -781,7 +779,7 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 	}
 
 	// 创建 mgr1，创建任务，手动设置为 downloading 并持久化
-	mgr1 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr1, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr1.Close)
 	task, _ := mgr1.CreateTask("url", srv.URL, "resume.bin", int64(len(content)), "")
 	mgr1.mu.Lock()
@@ -791,7 +789,7 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 	mgr1.saveTask(task)
 
 	// 创建 mgr2 模拟重启，应自动恢复 downloading 任务
-	mgr2 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr2, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr2.Close)
 
 	// 等待恢复的任务完成
@@ -889,7 +887,7 @@ func TestCloudCleanupExpiredOnce_ClearsCompleted(t *testing.T) {
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := defaultCloudDownloadConfig()
 	cfg.TaskTTL = 1 * time.Millisecond
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
@@ -921,11 +919,9 @@ func TestCloudCleanupExpiredOnce_ClearsCompleted(t *testing.T) {
 func TestCloudCleanupExpiredOnce_DeletesChecksum(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	cs := NewChecksumStore(dir, testLogger())
 	cfg := defaultCloudDownloadConfig()
 	cfg.TaskTTL = 1 * time.Millisecond
-	mgr := NewCloudDownloadManager(dir, sm, cs, testLogger(), cfg)
-	t.Cleanup(mgr.Close)
+	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "ak-A")
 	if err != nil {
@@ -938,9 +934,9 @@ func TestCloudCleanupExpiredOnce_DeletesChecksum(t *testing.T) {
 	mgr.markDirty(task.ID)
 	mgr.flushDirty()
 
-	// 模拟写端落库（owner 作用域 + ToSlash 归一 key，与写端一致）
-	remotePath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
-	csKey := checksumStoreKey(task.Owner, remotePath)
+	// 模拟写端落库（per-tenant store + 相对租户根 cloud/<taskID>/<file> key，与写端一致）
+	cs := h.checksumStoreFor("ak-A")
+	csKey := filepath.ToSlash(filepath.Join("cloud", task.ID, task.Filename))
 	cs.Set(csKey, "abc123")
 	if _, ok := cs.Get(csKey); !ok {
 		t.Fatal("写端 checksum 应可读")
@@ -951,7 +947,7 @@ func TestCloudCleanupExpiredOnce_DeletesChecksum(t *testing.T) {
 		t.Fatal("expected 1 task to be cleaned up")
 	}
 	if _, ok := cs.Get(csKey); ok {
-		t.Error("过期任务清理后 checksum 应被删除（owner 作用域 key）")
+		t.Error("过期任务清理后 checksum 应被删除（per-tenant store key）")
 	}
 }
 
@@ -961,7 +957,7 @@ func TestCloudCleanupExpiredOnce_SkipsRunning(t *testing.T) {
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := defaultCloudDownloadConfig()
 	cfg.TaskTTL = 1 * time.Millisecond
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
@@ -989,7 +985,7 @@ func TestCloudFlushDirty_PersistsTasks(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := defaultCloudDownloadConfig()
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
@@ -1000,7 +996,7 @@ func TestCloudFlushDirty_PersistsTasks(t *testing.T) {
 	mgr.markDirty(task.ID)
 	mgr.flushDirty()
 
-	taskPath := filepath.Join(dir, ".__downloads__", task.ID+".json")
+	taskPath := filepath.Join(mgr.persistDirFor(""), task.ID+".json")
 	if _, err := os.Stat(taskPath); os.IsNotExist(err) {
 		t.Error("expected task persistence file after flushDirty")
 	}
@@ -1011,7 +1007,7 @@ func TestCloudFlushNow_TriggersFlush(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := defaultCloudDownloadConfig()
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
 	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
@@ -1022,7 +1018,7 @@ func TestCloudFlushNow_TriggersFlush(t *testing.T) {
 	mgr.markDirty(task.ID)
 	mgr.FlushNow()
 
-	taskPath := filepath.Join(dir, ".__downloads__", task.ID+".json")
+	taskPath := filepath.Join(mgr.persistDirFor(""), task.ID+".json")
 	if _, err := os.Stat(taskPath); os.IsNotExist(err) {
 		t.Error("expected task persistence file after FlushNow")
 	}
@@ -1032,7 +1028,7 @@ func TestCloudDownloadManager_DeleteTaskCleansAndReleases(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	task := &CloudTask{
@@ -1048,7 +1044,7 @@ func TestCloudDownloadManager_DeleteTaskCleansAndReleases(t *testing.T) {
 	mgr.tasks[task.ID] = task
 	mgr.mu.Unlock()
 
-	taskDir := filepath.Join(mgr.cloudDir, task.ID)
+	taskDir := filepath.Join(mgr.cloudDirFor(""), task.ID)
 	os.MkdirAll(taskDir, 0755)
 	os.WriteFile(filepath.Join(taskDir, task.Filename), []byte("test"), 0644)
 	mgr.storage.TryReserve(1000, CategoryCloud)
@@ -1090,7 +1086,7 @@ func TestCloudDownloadManager_ClientDisconnectDownloadContinues(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  true,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1137,7 +1133,7 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  true,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
 	task1, _ := mgr.SubmitAndStart("url", srv.URL+"?1", "block1.bin", 104857600, nil, "")
@@ -1220,7 +1216,7 @@ func TestCloudDownloadManager_MetricsTracking(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  true,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "metrics.bin", int64(len(content)), t.Context(), "")
@@ -1277,7 +1273,7 @@ func TestCloudDownloadManager_RetryOnTransientFailure(t *testing.T) {
 		MaxRetries:    5,
 		RetryDelay:    10 * time.Millisecond,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "retry.bin", -1, nil, "")
@@ -1335,7 +1331,7 @@ func TestCloudDownloadManager_TimeoutThenSuccess(t *testing.T) {
 		MaxRetries:      3,
 		RetryDelay:      10 * time.Millisecond,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "timeout-retry.bin", -1, nil, "")
@@ -1385,7 +1381,7 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 		AllowPrivate:  true,
 		MaxRetries:    1,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
 	task1, err := mgr.SubmitAndStart("url", srv.URL, "block.bin", 104857600, nil, "")
@@ -1475,7 +1471,7 @@ func TestCloudDownloadManager_StorageAccountingNoLeak(t *testing.T) {
 
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), &CloudDownloadConfig{
+	mgr, _ := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
 		SyncThreshold: 1,
 		MaxConcurrent: 3,
 		TaskTTL:       time.Hour,
@@ -1563,7 +1559,7 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 		DownloadTimeout: 300 * time.Millisecond,
 		MaxRetries:      1, // 首次失败后不再自动重试，等待手动 resume
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
 	task, err := mgr.SubmitAndStart("url", srv.URL, "resume.bin", -1, nil, "")
@@ -1576,7 +1572,7 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 	}
 
 	// 失败后应保留 .partial（10 字节）供续传
-	partialPath := filepath.Join(mgr.cloudDir, task.ID, "resume.bin.partial")
+	partialPath := filepath.Join(mgr.cloudDirFor(""), task.ID, "resume.bin.partial")
 	fi, err := os.Stat(partialPath)
 	if err != nil {
 		t.Fatalf("expected partial file to be kept after failure: %v", err)
@@ -1596,7 +1592,7 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 	if !sawRange.Load() {
 		t.Fatal("expected Range header on resume request")
 	}
-	dest := filepath.Join(mgr.cloudDir, task.ID, "resume.bin")
+	dest := filepath.Join(mgr.cloudDirFor(""), task.ID, "resume.bin")
 	got, err := os.ReadFile(dest)
 	if err != nil {
 		t.Fatal(err)
@@ -1623,7 +1619,7 @@ func TestCloudDownloadManager_ResumeTaskForceTrueFullRedownload(t *testing.T) {
 
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), &CloudDownloadConfig{
+	mgr, _ := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
 		SyncThreshold: 1, MaxConcurrent: 1, TaskTTL: time.Hour, FailedTaskTTL: time.Hour,
 		AllowPrivate: true, MaxRetries: 1,
 	})
@@ -1673,7 +1669,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true}
-	mgr1 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr1, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr1.Close() })
 
 	group, err := mgr1.SubmitAndStartGroup("persist-group", []cloudfilename.Entry{
@@ -1708,8 +1704,8 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 		t.Fatalf("expected group completed(2/2), got %s (%d/%d)", g.Status, g.Completed, g.TotalTasks)
 	}
 
-	// 组持久化文件存在
-	if _, err := os.Stat(filepath.Join(dir, ".__downloads__", "groups", group.ID+".json")); err != nil {
+	// 组持久化文件存在（按组 owner 落租户 meta/cloud/groups）
+	if _, err := os.Stat(filepath.Join(mgr1.persistDirFor(""), "groups", group.ID+".json")); err != nil {
 		t.Fatalf("expected group persist file: %v", err)
 	}
 
@@ -1721,7 +1717,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 
 	// 模拟重启：新 manager 恢复组
 	mgr1.Close()
-	mgr2 := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr2, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr2.Close() })
 	g2, ok := mgr2.GetGroup(group.ID, "")
 	if !ok {
@@ -1752,7 +1748,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), &CloudDownloadConfig{
+	mgr, _ := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
 		SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true,
 	})
 	t.Cleanup(func() { mgr.Close() })
@@ -1784,7 +1780,7 @@ func TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
 	group, err := mgr.SubmitAndStartGroup("auto", []cloudfilename.Entry{
@@ -1825,7 +1821,7 @@ func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
 	group, err := mgr.SubmitAndStartGroup("partial", []cloudfilename.Entry{
@@ -1861,7 +1857,7 @@ func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {
 func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), &CloudDownloadConfig{
+	mgr, _ := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
 		SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true,
 	})
 	t.Cleanup(func() { mgr.Close() })
@@ -1925,7 +1921,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 func TestCloudDownloadManager_ListTasksPagination(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	// 创建 5 个任务（URL 去重避免自动合并）
@@ -1970,7 +1966,7 @@ func TestCloudDownloadManager_ListTasksPagination(t *testing.T) {
 func TestCloudDownloadManager_ListGroupsPagination(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	for i := range 4 {
@@ -1999,7 +1995,7 @@ func TestCloudDownloadManager_ListGroupsPagination(t *testing.T) {
 func TestCloudDownloadManager_ListTasksLimitOverflow(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), defaultCloudDownloadConfig())
+	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
 	for i := range 3 {

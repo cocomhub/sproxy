@@ -392,12 +392,12 @@ func TestDownloadCloudTask_Kind(t *testing.T) {
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
 
-	// 创建属于 testAccessKey 的任务并写入云端文件
+	// 创建属于 testAccessKey 的任务并写入云端文件（按 owner 落 <root>/<tenant>/cloud/<taskID>/）
 	task, err := h.cloudMgr.CreateTask("url", "http://example.com/file", "file.txt", 10, testAccessKey)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
-	taskDir := filepath.Join(tmpDir, cloudDirName, task.ID)
+	taskDir := filepath.Join(h.cloudMgr.cloudDirFor(testAccessKey), task.ID)
 	if mkErr := os.MkdirAll(taskDir, 0755); mkErr != nil {
 		t.Fatalf("mkdir task dir: %v", mkErr)
 	}

@@ -19,7 +19,6 @@ import (
 
 func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Server, *CloudDownloadManager) {
 	t.Helper()
-	t.Helper()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
@@ -29,14 +28,11 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  allowPrivate,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() {
-		mgr.Close()
-		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
-		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
-	})
-
-	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: newTestCfgPtr(dir), auditLogger: testLogger()}
+	// 装配租户布局（cloudArchiveTask/cloudArchiveGroup 读取任务源文件经 cloudDirFor 解析）
+	h := newAssemblyTestHandlers(t, dir)
+	h.storageMgr = sm
+	mgr := NewCloudDownloadManager(dir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	h.cloudMgr = mgr
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
@@ -505,8 +501,7 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() { mgr.Close() })
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 
 	h := &Handlers{cloudMgr: mgr}
 	mux := http.NewServeMux()
@@ -770,8 +765,7 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  true,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() { mgr.Close() })
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)

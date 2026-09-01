@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -189,6 +190,41 @@ func (h *Handlers) tenantFor(owner string) *storage.Tenant {
 // （调用方按 400 处理，绝不回落全局根）。
 func (h *Handlers) tenantOf(r *http.Request) *storage.Tenant {
 	return h.tenantFor(ownerFromRequest(r))
+}
+
+// listTenantIDs 返回存储根下全部租户名（磁盘扫描，按名排序）。
+// 供 CloudDownloadManager 恢复扫描使用：进程重启后内存缓存 tenantRoots 只有已访问的
+// 租户（anonymous 预创建），仅靠缓存会漏掉已落盘但尚未访问的租户（如 alice 的云任务）。
+// 磁盘扫描以租户根目录为准（跳过遗留 .__ 内部目录与非法段名目录）。
+func (h *Handlers) listTenantIDs() []string {
+	if h.globalRoot == nil {
+		return nil
+	}
+	base, ok := h.globalRoot.Abs("")
+	if !ok {
+		return nil
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !storage.ValidSegmentName(name) {
+			continue
+		}
+		// 跳过遗留服务端内部目录（.__cloud__/.__downloads__/.__sync__ 等）——它们不是租户根。
+		if strings.HasPrefix(name, ".__") || strings.HasPrefix(name, "__") {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // checksumStoreFor 返回 owner 的 per-tenant checksum 存储（懒创建，缓存到 map）。
@@ -412,7 +448,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		RetryDelay:      cfg.CloudRetryDelay,
 		Downloader:      cfg.CloudDownloader,
 	}
-	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, cs, log.With("component", "cloud"), cloudCfg)
+	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg)
 	h.storageMgr = sm
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）
