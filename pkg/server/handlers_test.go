@@ -108,6 +108,7 @@ func newAssemblyTestHandlers(t *testing.T, storageRoot string) *Handlers {
 		checksumStores: make(map[string]*ChecksumStore),
 		uploadStores:   make(map[string]*UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
+		quotaBuckets:   make(map[string]map[string]*quota.Scope),
 	}
 	t.Cleanup(func() { _ = h.Close() })
 	return h

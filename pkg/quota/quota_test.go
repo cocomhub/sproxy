@@ -109,6 +109,23 @@ func TestScope_ReleaseReservation(t *testing.T) {
 	}
 }
 
+func TestPool_SetMaxBytes(t *testing.T) {
+	root := NewPool(10)
+	s := root.Scope("/t", 100)
+	if _, err := s.TryReserve(20); !errors.Is(err, ErrStorageFull) {
+		t.Fatalf("全局上限 10 应拒绝 20, got %v", err)
+	}
+	root.SetMaxBytes(50) // 运行时扩上限
+	if _, err := s.TryReserve(20); err != nil {
+		t.Fatalf("扩上限后应可预留, got %v", err)
+	}
+	root.SetMaxBytes(0) // 0 = 不限制
+	// 全局不限后，预留未超子池上限应成功。
+	if _, err := s.TryReserve(80); err != nil {
+		t.Fatalf("全局 0 不限 + 子池未超应成功, got %v", err)
+	}
+}
+
 func TestScope_UsageByBucket(t *testing.T) {
 	root := NewPool(1000)
 	t1 := root.Scope("/tenant/a", 500)

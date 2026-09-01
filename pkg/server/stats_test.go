@@ -6,12 +6,17 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/quota"
 )
 
 func TestStats_Empty(t *testing.T) {
@@ -324,6 +329,97 @@ func TestStats_CategoryWalker_SkipsTaskStateDirs(t *testing.T) {
 	if chunked != 0 || versions != 0 || cloud != 0 {
 		t.Fatalf("chunked/versions/cloud 应为 0, got %d/%d/%d", chunked, versions, cloud)
 	}
+}
+
+// actorStatsMux 构造把固定 actor 注入请求 ctx 后转发 stats handler 的 mux。
+// 模拟 authMiddleware 验签后 withActor 的行为（复用 download_owner_test.go 的模式）。
+func actorStatsMux(h *Handlers, actor string) *http.ServeMux {
+	wrap := func(hf http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			r = r.WithContext(withActor(r.Context(), actor))
+			hf(w, r)
+		}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/stats", wrap(h.statsHandler))
+	return mux
+}
+
+// TestStats_OwnerScopedUsage 验证（P4 任务 17）：认证用户 stats 只含本租户占用，分类按桶归集。
+// alice 上传 60（user 桶）+ 云任务 40（cloud 桶）→ storage_user_files=60、storage_cloud=40、
+// usage=100；bob 全部为 0（租户隔离）。
+func TestStats_OwnerScopedUsage(t *testing.T) {
+	env := newOwnerEnv(t)
+	env.h.storageMgr = NewStorageManager(env.root, 1024*1024, nil, testLogger())
+
+	// alice 上传 60 字节 → user 桶
+	umux := actorUploadDeleteMux(env.h, "alice")
+	body60 := []byte(strings.Repeat("a", 60))
+	if code, resp := uploadAs(t, umux, "f.txt", body60); code != http.StatusOK {
+		t.Fatalf("alice 上传应 200, got %d: %s", code, resp)
+	}
+
+	// alice 云任务 40 字节 → cloud 桶（经 CloudDownloadManager SubmitAndStart 走写路径配额）
+	content := []byte(strings.Repeat("c", 40))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+
+	mgr := NewCloudDownloadManager(env.root, env.h.storageMgr, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
+	}, func(owner string) *quota.Scope {
+		return env.h.quotaBucketFor(owner, "cloud")
+	})
+	env.h.cloudMgr = mgr
+	t.Cleanup(func() { mgr.Close() })
+	task, err := mgr.SubmitAndStart("url", srv.URL, "c.bin", int64(len(content)), t.Context(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != "completed" {
+		t.Fatalf("云下载应 completed, got %q", task.Status)
+	}
+
+	// alice stats：user_files=60, cloud=40, usage=100
+	aliceStats := decodeStatsAs(t, env.h, "alice")
+	if aliceStats.StorageUserFiles != 60 {
+		t.Fatalf("alice StorageUserFiles = %d, want 60", aliceStats.StorageUserFiles)
+	}
+	if aliceStats.StorageCloud != 40 {
+		t.Fatalf("alice StorageCloud = %d, want 40", aliceStats.StorageCloud)
+	}
+	if aliceStats.StorageUsage != 100 {
+		t.Fatalf("alice StorageUsage = %d, want 100", aliceStats.StorageUsage)
+	}
+
+	// bob stats：全部为 0（隔离）
+	bobStats := decodeStatsAs(t, env.h, "bob")
+	if bobStats.StorageUserFiles != 0 || bobStats.StorageCloud != 0 || bobStats.StorageUsage != 0 {
+		t.Fatalf("bob stats 应为 0（租户隔离）, got user_files=%d cloud=%d usage=%d",
+			bobStats.StorageUserFiles, bobStats.StorageCloud, bobStats.StorageUsage)
+	}
+}
+
+// decodeStatsAs 以指定 actor 调用 statsHandler 并解码响应。
+func decodeStatsAs(t *testing.T, h *Handlers, actor string) StatsResponse {
+	t.Helper()
+	mux := actorStatsMux(h, actor)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest("GET", "/api/stats", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("stats 应 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp StatsResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析 stats 失败: %v", err)
+	}
+	return resp
 }
 
 func TestStorageConfig_Put(t *testing.T) {

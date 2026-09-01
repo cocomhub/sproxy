@@ -58,6 +58,14 @@ func (p *Pool) MaxBytes() int64 {
 	return p.maxBytes
 }
 
+// SetMaxBytes 运行时调整本池上限（0 = 不限制）。仅影响后续 TryReserve/Reservation 校验，
+// 不回溯既有 committed/reserved。
+func (p *Pool) SetMaxBytes(n int64) {
+	p.mu.Lock()
+	p.maxBytes = n
+	p.mu.Unlock()
+}
+
 // UsageByBucket 从本池向下递归收集所有 Scope 的 committed 占用，key 为完整路径。
 // 本池自身计入其路径 key（根池计入空路径 ""）。
 func (p *Pool) UsageByBucket() map[string]int64 {

@@ -214,10 +214,10 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 预留存储空间（仅新创建会话时预留，续传会话已预留过）。
-	// P4 配额接入：优先走租户 Scope（TryReserve），全局兜底由 Scope 父链自动生效；
+	// P4 配额接入：优先走租户 chunk 桶子 Scope（TryReserve），全局兜底由 Scope 父链自动生效；
 	// 未装配 quota（scope 不可用）时回退旧 storageMgr 预留（测试/旧装配兼容）。
 	if !reused {
-		scope := h.quotaFor(owner)
+		scope := h.quotaBucketFor(owner, "chunk")
 		if scope != nil {
 			rr, err := scope.TryReserve(session.TotalSize)
 			if err != nil {

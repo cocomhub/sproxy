@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/quota"
 )
 
 // actorUploadDeleteMux 构造把固定 actor 注入请求 ctx 后转发 upload/delete handler 的 mux。
@@ -219,7 +221,9 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, env.h.quotaFor)
+	}, func(owner string) *quota.Scope {
+		return env.h.quotaBucketFor(owner, "cloud")
+	})
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件（新布局 <root>/alice/cloud/<id>/<file>）

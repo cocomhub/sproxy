@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -75,13 +76,14 @@ type Handlers struct {
 	// globalRoot 是 OpenRoot 后的全局存储根（含 LAYOUT_VERSION 校验）；
 	// globalPool 是全局配额池（cfg.MaxStorageBytes 兜底）。租户/checksum/配额均懒创建并缓存，
 	// tenantMu 串行化懒创建（无竞态）；P2 各 handler 逐个切换到 tenantOf/checksumStoreFor/quotaFor。
-	globalRoot     *storage.Root              // 全局存储根（OpenRoot + LAYOUT_VERSION）
-	globalPool     *quota.Pool                // 全局配额池（cfg.MaxStorageBytes 兜底）
-	tenantRoots    map[string]*storage.Tenant // 按 owner 缓存租户（含 anonymous；懒创建）
-	checksumStores map[string]*ChecksumStore  // 按 owner 缓存 per-tenant checksum 存储
-	uploadStores   map[string]*UploadStore    // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
-	quotaScopes    map[string]*quota.Scope    // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
-	tenantMu       sync.Mutex                 // 串行化 tenantRoots/checksumStores/uploadStores/quotaScopes 懒创建
+	globalRoot     *storage.Root                      // 全局存储根（OpenRoot + LAYOUT_VERSION）
+	globalPool     *quota.Pool                        // 全局配额池（cfg.MaxStorageBytes 兜底）
+	tenantRoots    map[string]*storage.Tenant         // 按 owner 缓存租户（含 anonymous；懒创建）
+	checksumStores map[string]*ChecksumStore          // 按 owner 缓存 per-tenant checksum 存储
+	uploadStores   map[string]*UploadStore            // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
+	quotaScopes    map[string]*quota.Scope            // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
+	quotaBuckets   map[string]map[string]*quota.Scope // 按 owner 缓存功能桶配额子 Scope（user/cloud/archive/chunk/version）
+	tenantMu       sync.Mutex                         // 串行化 tenantRoots/checksumStores/uploadStores/quotaScopes/quotaBuckets 懒创建
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -291,6 +293,45 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 	return us
 }
 
+// quotaBucketNames 是参与配额归集的功能桶名（对应租户根下的物理桶；meta 不参与配额）。
+var quotaBucketNames = []string{"user", "cloud", "archive", "chunk", "version"}
+
+// isQuotaBucket 判断 bucket 是否在参与配额归集的功能桶白名单内。
+func isQuotaBucket(bucket string) bool {
+	return slices.Contains(quotaBucketNames, bucket)
+}
+
+// ensureTenantQuotaLocked 确保 owner 的租户配额 Scope 与功能桶子 Scope 已创建（调用方须持
+// tenantMu）。首次访问按 owner 在 globalPool 下挂载 /tenant/<owner> Scope（上限 =
+// cfg.OwnerQuotaFor(owner)），并预创建 user/cloud/archive/chunk/version 子 Scope（上限 0 =
+// 不限制，租户上限由父 Scope 单一执行）。globalPool 未装配时返回 (nil, nil)。
+func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[string]*quota.Scope) {
+	if s, ok := h.quotaScopes[owner]; ok {
+		return s, h.quotaBuckets[owner]
+	}
+	if h.globalPool == nil {
+		return nil, nil
+	}
+	if h.quotaScopes == nil {
+		h.quotaScopes = make(map[string]*quota.Scope)
+	}
+	if h.quotaBuckets == nil {
+		h.quotaBuckets = make(map[string]map[string]*quota.Scope)
+	}
+	var quotaBytes int64
+	if cfg := h.cfgPtr.Load(); cfg != nil {
+		quotaBytes = cfg.OwnerQuotaFor(owner)
+	}
+	s := h.globalPool.Scope("/tenant/"+owner, quotaBytes)
+	buckets := make(map[string]*quota.Scope, len(quotaBucketNames))
+	for _, b := range quotaBucketNames {
+		buckets[b] = s.Scope(b, 0)
+	}
+	h.quotaScopes[owner] = s
+	h.quotaBuckets[owner] = buckets
+	return s, buckets
+}
+
 // quotaFor 返回 owner 的 per-tenant 配额 Scope（懒创建，缓存到 map）。路径为
 // /tenant/<owner>，上限 = cfg.OwnerQuotaFor(owner)（显式 owner > "*" 默认 > 0；
 // anonymous 用 OwnerQuotaFor("anonymous")）。globalPool 未装配时返回 nil。
@@ -298,19 +339,26 @@ func (h *Handlers) quotaFor(owner string) *quota.Scope {
 	owner = normalizeOwner(owner)
 	h.tenantMu.Lock()
 	defer h.tenantMu.Unlock()
-	if s, ok := h.quotaScopes[owner]; ok {
-		return s
-	}
-	if h.globalPool == nil {
+	s, _ := h.ensureTenantQuotaLocked(owner)
+	return s
+}
+
+// quotaBucketFor 返回 owner 租户下指定功能桶的配额子 Scope（懒创建，缓存复用）。
+// bucket 必须在 quotaBucketNames 白名单内；globalPool 未装配或非法桶返回 nil。
+// 写路径按物理桶归集：user 上传 → "user"、分块 → "chunk"、云任务 → "cloud"、归档 → "archive"、
+// 版本 → "version"。子 Scope 操作沿父链聚合到租户 Scope 与 globalPool（上限单一执行）。
+func (h *Handlers) quotaBucketFor(owner, bucket string) *quota.Scope {
+	if !isQuotaBucket(bucket) {
 		return nil
 	}
-	var quotaBytes int64
-	if cfg := h.cfgPtr.Load(); cfg != nil {
-		quotaBytes = cfg.OwnerQuotaFor(owner)
+	owner = normalizeOwner(owner)
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	_, buckets := h.ensureTenantQuotaLocked(owner)
+	if buckets == nil {
+		return nil
 	}
-	s := h.globalPool.Scope("/tenant/"+owner, quotaBytes)
-	h.quotaScopes[owner] = s
-	return s
+	return buckets[bucket]
 }
 
 // RegisterRoutesOpts 是 RegisterRoutes 的选项参数结构体。
@@ -392,6 +440,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.checksumStores = make(map[string]*ChecksumStore)
 	h.uploadStores = make(map[string]*UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
+	h.quotaBuckets = make(map[string]map[string]*quota.Scope)
 	if h.tenantFor(anonymousOwner) == nil {
 		// anonymous 是未认证请求的默认兜底租户，创建失败意味着存储根不可用，拒绝启动。
 		log.Error("预创建 anonymous 租户失败，存储根不可用")
@@ -433,8 +482,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		h.cleanupUploadingFilesLoop()
 	})
 
-	// 初始化 StorageManager 和 CloudDownloadManager
-	sm := NewStorageManager(cfg.UploadsDir, cfg.MaxStorageBytes, cs, log.With("component", "storage"))
+	// 初始化 StorageManager 和 CloudDownloadManager。
+	// P4：StorageManager 保留全局账本（sync/旧装配兼容）；启动扫描经 SetReconciler 按租户桶
+	// 归集校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。云任务配额走 cloud 桶子 Scope。
+	sm := NewStorageManager(cfg.StorageRoot(), cfg.MaxStorageBytes, cs, log.With("component", "storage"))
+	sm.SetReconciler(h.reconcileQuotaScopes)
+	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope（启动对账）
 	cloudCfg := &CloudDownloadConfig{
 		SyncThreshold:   cfg.CloudSyncThreshold,
 		MaxConcurrent:   cfg.CloudMaxConcurrent,
@@ -448,7 +501,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		RetryDelay:      cfg.CloudRetryDelay,
 		Downloader:      cfg.CloudDownloader,
 	}
-	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, h.quotaFor)
+	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
+		return h.quotaBucketFor(owner, "cloud")
+	})
 	h.storageMgr = sm
 
 	// 本地路由子 mux（无 authMiddleware，隧道密钥已提供认证）

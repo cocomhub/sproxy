@@ -5,6 +5,8 @@ package server
 
 import (
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/quota"
 )
 
 // newCloudTestManager 创建 CloudDownloadManager，装配基于 storageRoot 的租户解析闭包。
@@ -14,7 +16,9 @@ import (
 func newCloudTestManager(t *testing.T, storageRoot string, sm *StorageManager, cfg *CloudDownloadConfig) (*CloudDownloadManager, *Handlers) {
 	t.Helper()
 	h := newAssemblyTestHandlers(t, storageRoot)
-	mgr := NewCloudDownloadManager(storageRoot, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg, h.quotaFor)
+	mgr := NewCloudDownloadManager(storageRoot, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg, func(owner string) *quota.Scope {
+		return h.quotaBucketFor(owner, "cloud")
+	})
 	h.cloudMgr = mgr
 	t.Cleanup(func() { mgr.Close() })
 	return mgr, h

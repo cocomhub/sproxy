@@ -32,6 +32,8 @@ const cloudDirName = ".__cloud__"
 
 // StorageManager 管理上传目录的存储空间使用情况。
 // 通过原子计数器跟踪各分类和总使用量，支持配置上限和运行时调整。
+// P4：全局账本仍供 sync 适配与旧装配兼容；per-tenant 配额由 quota Scope 负责
+// （ScanAndRecalculate 经 reconcile 回调把磁盘占用校准进各租户桶 Scope）。
 type StorageManager struct {
 	uploadsDir    string
 	maxBytes      atomic.Int64
@@ -44,10 +46,16 @@ type StorageManager struct {
 	lastScanTime  atomic.Pointer[time.Time] // 最近一次全量扫描完成时间
 	logger        *slog.Logger
 	scanMu        sync.RWMutex
+	reconcile     ReconcileFunc // 非 nil 时扫描后按租户桶归集校准配额 Scope（启动/周期对账）
 	stopCh        chan struct{}
 	stopOnce      sync.Once
 	wg            sync.WaitGroup
 }
+
+// ReconcileFunc 是 ScanAndRecalculate 完成磁盘扫描后校准 per-tenant 配额 Scope 的回调。
+// tenantBuckets: tenant 名 → 桶名 → 字节数（仅包含新布局桶结构路径；旧布局平铺文件不进入）。
+// 由 RegisterRoutes 装配为 Handlers.reconcileQuotaScopes；nil = 未装配（跳过 Scope 校准）。
+type ReconcileFunc func(tenantBuckets map[string]map[string]int64)
 
 // NewStorageManager 创建存储管理器，启动时自动扫描目录统计大小。
 func NewStorageManager(dir string, maxBytes int64, _ ChecksumStoreIface, logger *slog.Logger) *StorageManager {
@@ -158,13 +166,26 @@ func (s *StorageManager) Clear() {
 	s.totalUsage.Store(0)
 }
 
-// ScanAndRecalculate 全量扫描上传目录，重新统计各分类文件大小和用户文件数量。
+// SetReconciler 装配扫描后的 per-tenant 配额 Scope 校准回调（nil 清除）。
+// 须在 NewStorageManager 首次扫描之后装配；装配完成后应重跑一次 ScanAndRecalculate
+// 使启动对账生效（RegisterRoutes 已执行）。
+func (s *StorageManager) SetReconciler(fn ReconcileFunc) {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	s.reconcile = fn
+}
+
+// ScanAndRecalculate 全量扫描存储根，重新统计各分类文件大小和用户文件数量。
+// 分类按新布局桶语义（<tenant>/{user,cloud,archive,chunk,version,meta}/）判定，兼容旧布局
+// 平铺文件（默认 userFiles，跳过任务状态目录与 legacy 内部目录）。同时把各租户桶字节数
+// 归集进 tenantBuckets 并交给 reconcile 回调校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。
 func (s *StorageManager) ScanAndRecalculate() error {
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
 
 	var userFiles, chunked, versions, cloud int64
 	var userFileCount int64
+	tenantBuckets := make(map[string]map[string]int64)
 
 	// 解析符号链接，确保扫描的是真实路径
 	realDir, err := filepath.EvalSymlinks(s.uploadsDir)
@@ -176,17 +197,21 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		if err != nil {
 			return err
 		}
+		rel, relErr := filepath.Rel(realDir, path)
+		if relErr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
 			base := filepath.Base(path)
 			// 仅跳过服务端任务状态持久化目录（.__downloads__ 云任务 / .__sync__ 同步任务）
-			// ——这些不是用户文件，不计入配额。
-			// 审查 R2：此前跳过"任意非已知内部存储目录的 .__ 前缀目录"，用户可通过
-			// upload/mkdir 自建深层 .__ 目录（如 dir/.__foo/，ValidateFilePath 只拦
-			// internalDirNames 集合）→ 其文件被 SkipDir 漏计配额（配额规避）。现改为
-			// 除任务状态目录外一律进入统计：已知内部存储目录（.__chunked__/.__versions__/
-			// .__cloud__/.__cloud_archives__）需进入以按下方分类；其余 .__ 目录按用户
-			// 文件计入 userFiles。
+			// 与新布局 meta 桶（服务端内部账本，不计入配额）。
+			// 审查 R2：除任务状态目录与 meta 桶外一律进入统计——未知 .__ 目录按用户文件
+			// 计入 userFiles（防配额规避）。
 			if base == downloadsDirName || base == ".__sync__" {
+				return filepath.SkipDir
+			}
+			if storageBucketOf(rel) == "meta" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -195,29 +220,42 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		if err != nil {
 			return nil // 跳过无法读取的文件
 		}
-		rel, err := filepath.Rel(realDir, path)
-		if err != nil {
+		if d.Name() == ".checksums.json" {
 			return nil
 		}
-		rel = filepath.ToSlash(rel)
 		size := info.Size()
 
-		switch {
-		// 多租户 owner 隔离后，版本目录等内部目录可能出现在 owner 子目录下
-		// （uploadsDir/<owner>/.__versions__/<path>），用任意层级识别分类。
-		case hasInternalDirAtAnyDepth(rel, chunkedDirName):
-			chunked += size
-		case hasInternalDirAtAnyDepth(rel, versionsDirName):
-			versions += size
-		case strings.HasPrefix(rel, cloudDirName+"/"):
-			cloud += size
-		case strings.HasPrefix(rel, downloadsDirName+"/"):
-			cloud += size
-		case strings.HasPrefix(rel, cloudArchiveDirName+"/"):
-			cloud += size
-		default:
+		switch bucket := storageBucketOf(rel); bucket {
+		case "user":
 			userFiles += size
 			userFileCount++
+			addTenantBucket(tenantBuckets, firstSegment(rel), "user", size)
+		case "cloud", "archive":
+			cloud += size
+			addTenantBucket(tenantBuckets, firstSegment(rel), bucket, size)
+		case "chunk":
+			chunked += size
+			addTenantBucket(tenantBuckets, firstSegment(rel), "chunk", size)
+		case "version":
+			versions += size
+			addTenantBucket(tenantBuckets, firstSegment(rel), "version", size)
+		case "meta":
+			// 已在上方目录层 SkipDir，兜底跳过
+		default:
+			// 旧布局/未知路径：按 legacy 内部目录名分类，否则平铺用户文件。
+			// 布局版本标记（存储根/租户根 LAYOUT_VERSION）不计入。
+			switch {
+			case d.Name() == "LAYOUT_VERSION":
+			case hasInternalDirAtAnyDepth(rel, chunkedDirName):
+				chunked += size
+			case hasInternalDirAtAnyDepth(rel, versionsDirName):
+				versions += size
+			case isLegacyCloudRel(rel):
+				cloud += size
+			default:
+				userFiles += size
+				userFileCount++
+			}
 		}
 		return nil
 	})
@@ -233,10 +271,56 @@ func (s *StorageManager) ScanAndRecalculate() error {
 	s.totalUsage.Store(userFiles + chunked + versions + cloud)
 	s.userFileCount.Store(userFileCount)
 
+	// 校准 per-tenant 配额 Scope（启动/周期对账；nil 回调跳过）。
+	if s.reconcile != nil {
+		s.reconcile(tenantBuckets)
+	}
+
 	now := time.Now()
 	s.lastScanTime.Store(&now)
 
 	return nil
+}
+
+// storageBucketOf 返回存储根相对路径（斜杠分隔）的桶段（第 2 段）；无桶结构返回 ""。
+// 例：file.txt → ""；tenant/file.txt → "file.txt"；tenant/user/a.txt → "user"。
+func storageBucketOf(rel string) string {
+	if _, after, ok := strings.Cut(rel, "/"); ok {
+		rest := after
+		if before, _, ok := strings.Cut(rest, "/"); ok {
+			return before
+		}
+		return rest
+	}
+	return ""
+}
+
+// firstSegment 返回存储根相对路径的首段（租户名或顶层目录）；无 "/" 返回空。
+func firstSegment(rel string) string {
+	if before, _, ok := strings.Cut(rel, "/"); ok {
+		return before
+	}
+	return ""
+}
+
+// isLegacyCloudRel 判断旧布局云端任务相关目录前缀（.__cloud__/.__downloads__/.__cloud_archives__）。
+func isLegacyCloudRel(rel string) bool {
+	return strings.HasPrefix(rel, cloudDirName+"/") ||
+		strings.HasPrefix(rel, downloadsDirName+"/") ||
+		strings.HasPrefix(rel, cloudArchiveDirName+"/")
+}
+
+// addTenantBucket 把 size 累加到 tenantBuckets[tenant][bucket]。
+func addTenantBucket(m map[string]map[string]int64, tenant, bucket string, size int64) {
+	if tenant == "" {
+		return
+	}
+	b := m[tenant]
+	if b == nil {
+		b = make(map[string]int64)
+		m[tenant] = b
+	}
+	b[bucket] += size
 }
 
 func (s *StorageManager) addCategory(cat StorageCategory, delta int64) {

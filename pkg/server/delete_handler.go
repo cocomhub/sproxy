@@ -130,8 +130,8 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除文件失败"}, http.StatusInternalServerError)
 		return
 	}
-	// P4 配额对账：删除即释放已确认占用（按删除前 stat 的文件大小）。
-	if scope := h.quotaFor(ownerFromRequest(r)); scope != nil {
+	// P4 配额对账：删除即释放已确认占用（按删除前 stat 的文件大小）；用户文件按 user 桶释放。
+	if scope := h.quotaBucketFor(ownerFromRequest(r), "user"); scope != nil {
 		scope.ReleaseUsage(info.Size())
 	}
 	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
@@ -192,8 +192,8 @@ func (h *Handlers) processBatchDeleteItem(ctx context.Context, owner string, f B
 		})
 		result.Message = "删除失败"
 	} else {
-		// P4 配额对账：批量删除同样按删除前 stat 的文件大小释放占用。
-		if scope := h.quotaFor(owner); scope != nil {
+		// P4 配额对账：批量删除同样按删除前 stat 的文件大小释放占用（user 桶）。
+		if scope := h.quotaBucketFor(owner, "user"); scope != nil {
 			scope.ReleaseUsage(stat.Size())
 		}
 		if cs := h.checksumStoreFor(owner); cs != nil {

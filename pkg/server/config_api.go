@@ -199,6 +199,9 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 		if h.storageMgr != nil {
 			h.storageMgr.SetMaxBytes(*req.MaxStorageBytes)
 		}
+		if h.globalPool != nil {
+			h.globalPool.SetMaxBytes(*req.MaxStorageBytes)
+		}
 		changed = true
 	}
 

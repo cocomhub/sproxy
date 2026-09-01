@@ -175,8 +175,9 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// P4 租户配额：预留 pre（全局兜底由 Scope 父链生效）；失败回滚全局预留。
+	// 归档文件落租户 archive 桶，配额按 archive 桶子 Scope 归集（父链聚合到租户 Scope）。
 	var res *quota.Reservation
-	if scope := h.quotaFor(owner); scope != nil {
+	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
 		rr, reserveErr := scope.TryReserve(pre)
 		if reserveErr != nil {
 			h.storageMgr.Release(pre, CategoryCloud)
@@ -398,8 +399,9 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// P4 租户配额：预留 pre（全局兜底由 Scope 父链生效）；失败回滚全局预留。
+	// 归档文件落租户 archive 桶，配额按 archive 桶子 Scope 归集（父链聚合到租户 Scope）。
 	var res *quota.Reservation
-	if scope := h.quotaFor(owner); scope != nil {
+	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
 		rr, reserveErr := scope.TryReserve(pre)
 		if reserveErr != nil {
 			h.storageMgr.Release(pre, CategoryCloud)

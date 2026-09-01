@@ -133,7 +133,8 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	// 配额预留（P4）：覆盖写场景先统计旧文件大小 prev（Adjust 差分用），
 	// 随后 TryReserve(handler.Size) 预留新文件空间；写入成功且校验通过后
 	// Commit(实际写入字节数) / Adjust(prev, next)；写入/校验失败 Release()。
-	scope := h.quotaFor(ownerFromRequest(r))
+	// 用户上传文件落 user 桶，配额按 user 桶子 Scope 归集（父链聚合到租户 Scope 与 globalPool）。
+	scope := h.quotaBucketFor(ownerFromRequest(r), "user")
 	prev := int64(0)
 	var res *quota.Reservation
 	if scope != nil {
