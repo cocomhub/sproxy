@@ -678,21 +678,30 @@ func TestDelete_NewLayoutChecksumCleaned(t *testing.T) {
 
 **文件：** `pkg/server/dirs.go`；测试既有 mkdir/rmdir 测试 + 新增守卫断言
 
-- [ ] **步骤 1：写失败测试**——`?dirname=cloud` 必须 400（用户不得创建功能桶名）
+- [ ] **步骤 1：写失败测试**——`mkdir dirname=cloud` 应成功（用户目录在 `user/` 桶内，`user/cloud` 与功能桶 `cloud` 不同路径不冲突），且落盘 `user/cloud`、列表在 `user/` 桶内可见、功能桶顶层不可枚举
 
 ```go
-func TestMkdir_FeatureBucketNameRejected(t *testing.T) {
+func TestMkdir_UserBucketUnderUser(t *testing.T) {
     env := newOwnerEnv(t)
-    for _, d := range []string{"cloud", "archive", "chunk", "version", "meta"} {
-        if code := env.doPost(t, "alice", "/mkdir?dirname="+d); code != http.StatusBadRequest {
-            t.Fatalf("mkdir %q 应 400, got %d", d, code)
+    // 用户在 user/ 桶内创建 "cloud" 目录 → 200，落盘 <root>/alice/user/cloud
+    if code := env.doPost(t, "alice", "/mkdir?dirname=cloud"); code != http.StatusOK {
+        t.Fatalf("mkdir cloud 应 200, got %d", code)
+    }
+    if _, err := os.Stat(filepath.Join(env.root, "alice", "user", "cloud")); err != nil {
+        t.Fatalf("应落盘 alice/user/cloud: %v", err)
+    }
+    // 顶层列表不应暴露功能桶（cloud/archive/chunk/version/meta 顶层不可枚举）
+    body := env.doGet(t, "alice", "/api/files")
+    for _, bucket := range []string{"cloud", "archive", "chunk", "version", "meta"} {
+        if strings.Contains(body, `"`+bucket+`"`) {
+            t.Fatalf("顶层列表不应出现功能桶 %q: %s", bucket, body)
         }
     }
 }
 ```
 
-- [ ] **步骤 2：跑失败** → FAIL（当前 `mkdir dirname=cloud` 会成功）
-- [ ] **步骤 3：迁移**：`UserRel` 校验（`cloud` 不是 user 桶下合法路径？——注意：`UserRel("cloud")` 会返回 `user/cloud`，这是合法用户目录！需**额外**拒绝"用户创建与功能桶重名的顶层目录"吗？设计决策：**用户目录在 `user/` 桶内，`user/cloud` 与功能桶 `cloud` 不同路径，不冲突**，无需拒绝。因此本任务仅把 `safePathFor` → `UserRel` + `root.MkdirAll`/`root.RemoveAll`；上述测试改为断言 `user/cloud` 可创建且列表可见，**功能桶顶层不可见**）。修正测试：断言 `mkdir dirname=cloud` → 200，落盘 `alice/user/cloud`；`list` 顶层只显示 `user/` 桶内内容。
+- [ ] **步骤 2：跑失败** → FAIL（当前 `mkdir dirname=cloud` 落盘 `<root>/alice/cloud`，与功能桶同层）
+- [ ] **步骤 3：迁移**：`UserRel` 把用户路径统一加 `user/` 前缀（`UserRel("cloud")` → `user/cloud`）；`safePathFor` → `UserRel` + `root.MkdirAll`/`root.RemoveAll`；`resolveListDir` 默认根 = `user/` 桶，功能桶不在其下天然不可枚举。
 - [ ] **步骤 4：跑通过**：`go test -count=1 -run 'TestMkdir|TestRmdir' ./pkg/server/`
 - [ ] **步骤 5：Commit** `git commit -m "refactor(server): mkdir/rmdir 迁移到 Tenant API（user 桶内创建）"`
 
