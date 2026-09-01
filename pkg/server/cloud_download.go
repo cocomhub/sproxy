@@ -391,6 +391,13 @@ func (m *CloudDownloadManager) releaseScopeCommitted(task *CloudTask) {
 	task.QuotaCommitted = 0
 }
 
+// hasScopeStake 判断任务是否在 Scope 中持有位置（未落地预留或已确认占用）。
+// 新任务持 reservation；续传任务（failTask 已 Commit）持 QuotaCommitted；两者均无
+// （如 scope 未装配创建、或重启恢复的任务）时任务不参与 Scope 记账，无需容量预检。
+func (m *CloudDownloadManager) hasScopeStake(task *CloudTask) bool {
+	return task.reservation != nil || task.QuotaCommitted > 0
+}
+
 // CreateTask 创建云端下载任务（不启动下载）。
 // owner 是请求认证派生的归属（SproxySig→AK / api_keys→key 名 / 未认证→空串），
 // 由 handler 传入，服务端不信任客户端输入。
@@ -810,8 +817,9 @@ downloadDone:
 			m.metrics.TasksFailed.Add(1)
 			return
 		}
-		// 租户配额：预留未提交时超额部分同样需容量（全局通过后仍可能被 per-tenant 上限拦下）
-		if task.reservation != nil {
+		// 租户配额：任务持有 Scope 位置（预留或续传已确认占用）时，增长部分同样需容量
+		// （全局通过后仍可能被 per-tenant 上限拦下；Adjust 不做容量检查，必须在此预检）。
+		if sizeDelta > 0 && m.hasScopeStake(stored) {
 			if scope := m.quotaScope(stored.Owner); scope != nil {
 				extra, err := scope.TryReserve(sizeDelta)
 				if err != nil {
@@ -823,8 +831,8 @@ downloadDone:
 						task.reservation.Release()
 						task.reservation = nil
 					}
+					m.releaseScopeCommitted(stored) // 续传任务旧 committed 随整文件删除释放
 					stored.ReservedSize = 0
-					stored.QuotaCommitted = 0
 					stored.Status = "failed"
 					stored.Error = "storage full after download"
 					stored.UpdatedAt = time.Now()
@@ -848,6 +856,8 @@ downloadDone:
 	}
 
 	// 租户配额落地：新任务 Commit（预留→占用）；续传任务 Adjust 差分收敛到实际大小。
+	// 两条路径都释放超额预留（scopeExtra）：Commit 消费 reservation.amount 后剩余增量仍在
+	// reserved；Adjust 直接把增量进 committed，二者都需要 scopeExtra.Release 归零 reserved。
 	if scope := m.quotaScope(stored.Owner); scope != nil {
 		if task.reservation != nil {
 			task.reservation.Commit(result.Size)
@@ -858,6 +868,9 @@ downloadDone:
 			stored.QuotaCommitted = result.Size
 		} else if stored.QuotaCommitted > 0 {
 			scope.Adjust(stored.QuotaCommitted, result.Size)
+			if scopeExtra != nil {
+				scopeExtra.Release()
+			}
 			stored.QuotaCommitted = result.Size
 		}
 	}
@@ -948,8 +961,9 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 			m.metrics.TasksFailed.Add(1)
 			return
 		}
-		// 租户配额：预留未提交时超额部分同样需容量；失败走与全局一致的删文件路径。
-		if task.reservation != nil {
+		// 租户配额：任务持有 Scope 位置（预留或续传已确认占用）时，增长部分同样需容量；
+		// 失败走与全局一致的删文件路径（Adjust 不做容量检查，必须在此预检）。
+		if actual > oldReserved && m.hasScopeStake(task) {
 			if scope := m.quotaScope(task.Owner); scope != nil {
 				extra, err := scope.TryReserve(actual - oldReserved)
 				if err != nil {
@@ -959,10 +973,12 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 					if oldReserved > 0 {
 						m.storage.Release(oldReserved, CategoryCloud)
 					}
-					task.reservation.Release()
-					task.reservation = nil
+					if task.reservation != nil {
+						task.reservation.Release()
+						task.reservation = nil
+					}
+					m.releaseScopeCommitted(task) // 续传任务旧 committed 随整目录删除释放
 					task.ReservedSize = 0
-					task.QuotaCommitted = 0
 					task.Status = "failed"
 					task.Error = errMsg
 					task.UpdatedAt = time.Now()
@@ -980,6 +996,7 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 		}
 	}
 	// 租户配额落地：预留未提交 → Commit(actual)；已提交（续传再失败）→ Adjust 差分。
+	// 两条路径都释放超额预留 scopeExtra（见 executeDownload 完成路径注释）。
 	if scope := m.quotaScope(task.Owner); scope != nil {
 		if task.reservation != nil {
 			task.reservation.Commit(actual)
@@ -990,6 +1007,9 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 			task.QuotaCommitted = actual
 		} else if task.QuotaCommitted > 0 {
 			scope.Adjust(task.QuotaCommitted, actual)
+			if scopeExtra != nil {
+				scopeExtra.Release()
+			}
 			task.QuotaCommitted = actual
 		}
 	}
