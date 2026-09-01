@@ -115,6 +115,7 @@ type downloadChunkParams struct {
 // tryResumeResult 是 tryResumeSession 的返回值类型，用于替代三返回值模式。
 type tryResumeResult struct {
 	result         *ChunkedUploadResult
+	serverUploadID string // 服务端返回的完整 session id（可能带 owner 前缀）；空表示沿用 p.UploadID
 	shouldContinue bool
 	err            error
 }
@@ -570,26 +571,31 @@ func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams
 	}
 
 	if statusData.UploadID != "" {
-		c.logger.InfoContext(ctx, "续传会话已恢复", "upload_id", shortid.ShortHash(p.UploadID),
+		// 续传命中：采用服务端返回的完整 session id（多租户下带 owner 前缀），
+		// 后续 chunk/complete 必须沿用该 id（bare 确定性 id 会被 validateSessionOwner 拒绝）。
+		serverID := statusData.UploadID
+		c.logger.InfoContext(ctx, "续传会话已恢复", "upload_id", shortid.ShortHash(serverID),
 			"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
 		result, err := c.uploadChunks(ctx, statusData.MissingChunks, chunkUploadOpts{
 			filePath:     p.LocalPath,
-			uploadID:     p.UploadID,
+			uploadID:     serverID,
 			chunkSize:    p.ChunkSize,
 			fileSize:     p.FileSize,
-			totalChunks:  p.TotalChunks,
+			totalChunks:  statusData.TotalChunks,
 			fileChecksum: p.FileChecksum,
 			filename:     p.Filename,
 			concurrency:  p.Concurrency,
 		})
-		return tryResumeResult{result: result, err: err, shouldContinue: false}
+		return tryResumeResult{result: result, serverUploadID: serverID, err: err, shouldContinue: false}
 	}
 
 	return tryResumeResult{shouldContinue: true}
 }
 
-// initNewUploadSession 创建新的上传 session，并返回服务端 chunk_size。
-func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionParams) (int64, int, error) {
+// initNewUploadSession 创建新的上传 session，并返回（服务端 session 完整 id、服务端 chunk_size、总块数）。
+// 服务端在多租户下会对会话 key 做 owner 前缀隔离，返回的 upload_id 可能带前缀，
+// 后续 chunk/complete/status 必须沿用该完整 id（否则 404）。
+func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionParams) (string, int64, int, error) {
 	initBody := chunkedInitRequest{
 		UploadID:     p.UploadID,
 		Filename:     p.Filename,
@@ -605,13 +611,13 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 		headerContentType: {"application/json"},
 	})
 	if err != nil {
-		return 0, 0, fmt.Errorf("初始化上传失败: %w", err)
+		return "", 0, 0, fmt.Errorf("初始化上传失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return 0, 0, fmt.Errorf("初始化上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		return "", 0, 0, fmt.Errorf("初始化上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
 	var initResult struct {
@@ -621,15 +627,21 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 		Message   string `json:"message"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&initResult); err != nil {
-		return 0, 0, fmt.Errorf("解析 init 响应失败: %w", err)
+		return "", 0, 0, fmt.Errorf("解析 init 响应失败: %w", err)
 	}
 	if !initResult.Success {
-		return 0, 0, fmt.Errorf("初始化上传失败: %s", initResult.Message)
+		return "", 0, 0, fmt.Errorf("初始化上传失败: %s", initResult.Message)
 	}
 
 	// 如果 upload_id = "already_exists"，说明文件已存在且 checksum 匹配
 	if initResult.UploadID == UploadIDAlreadyExists {
-		return 0, -1, nil // -1 表示已存在
+		return "", 0, -1, nil // -1 表示已存在
+	}
+
+	// 服务端可能返回带 owner 前缀的 session id（多租户隔离），后续请求必须沿用
+	serverUploadID := initResult.UploadID
+	if serverUploadID == "" {
+		serverUploadID = p.UploadID
 	}
 
 	newChunkSize := p.ChunkSize
@@ -637,7 +649,7 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 		newChunkSize = initResult.ChunkSize
 	}
 	newTotalChunks := int((p.FileSize + newChunkSize - 1) / newChunkSize)
-	return newChunkSize, newTotalChunks, nil
+	return serverUploadID, newChunkSize, newTotalChunks, nil
 }
 
 // ChunkedUpload 分块上传文件到指定的远端路径。支持续传。
@@ -711,6 +723,8 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 			TotalChunks:  totalChunks,
 			Concurrency:  opt.concurrency,
 		})
+		// 续传命中时 tryResumeSession 内部已用服务端完整 session id 上传缺失分块并 complete，
+		// 返回的 result 就是最终结果（续传路径无需再改 uploadID）。
 		if !res.shouldContinue {
 			return res.result, res.err
 		}
@@ -719,7 +733,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	// 新文件 / 不在上传中，创建新 session
 	c.logger.InfoContext(ctx, "新上传", "file_name", filename, "upload_id", shortid.ShortHash(uploadID))
 
-	newChunkSize, newTotalChunks, err := c.initNewUploadSession(ctx, resumeSessionParams{
+	serverUploadID, newChunkSize, newTotalChunks, err := c.initNewUploadSession(ctx, resumeSessionParams{
 		UploadID:     uploadID,
 		Filename:     filename,
 		FileChecksum: fileChecksum,
@@ -739,6 +753,12 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 			Filename:     filename,
 			FileChecksum: fileChecksum,
 		}, nil
+	}
+	// 服务端在多租户下会返回带 owner 前缀的 session id，后续 chunk/complete/status
+	// 必须沿用该完整 id（否则 404）。同时自适应采用服务端协商的 chunk_size。
+	if serverUploadID != uploadID {
+		c.logger.InfoContext(ctx, "服务端返回带 owner 前缀的 session id", "old", shortid.ShortHash(uploadID), "new", shortid.ShortHash(serverUploadID))
+		uploadID = serverUploadID
 	}
 	if newChunkSize != chunkSize {
 		chunkSize = newChunkSize

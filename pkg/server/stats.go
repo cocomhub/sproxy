@@ -51,6 +51,37 @@ type StatsResponse struct {
 	DiskUsed  int64 `json:"disk_used"`
 }
 
+// walkUploadStats 遍历 root 统计用户文件数与总大小，跳过任意层级出现的服务端内部
+// 目录（.__cloud__/.__versions__/.__chunked__ 等，含 owner 子目录下的嵌套）与
+// .checksums.json。审查 #5：此前仅按名字/根层跳过，owner 子目录下的版本文件被误计。
+func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64) {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
+			return nil
+		}
+		if d.IsDir() {
+			rel, relErr := filepath.Rel(root, path)
+			if relErr == nil && isInternalDirPathPrefix(filepath.ToSlash(rel)) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == ".checksums.json" {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
+			return nil
+		}
+		totalFiles++
+		totalSize += info.Size()
+		return nil
+	})
+	return totalFiles, totalSize
+}
+
 // statsHandler 处理 GET /api/stats。
 // 文件数/总大小通过轻量 WalkDir 遍历获取（仅统计用户文件，跳过内部目录），确保实时准确性。
 // 各分类存储使用量由 StorageManager 缓存提供（已由定期扫描校准），避免每次请求遍历全目录计算分类大小。
@@ -69,32 +100,7 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	if owner != "" {
 		root = h.ownerUploadsDirFor(owner)
 	}
-	totalFiles := 0
-	var totalSize int64
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
-			return nil
-		}
-		if d.IsDir() {
-			name := d.Name()
-			if name == chunkedDirName || name == versionsDirName || name == cloudDirName || name == downloadsDirName || name == cloudArchiveDirName {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Name() == ".checksums.json" {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
-			return nil
-		}
-		totalFiles++
-		totalSize += info.Size()
-		return nil
-	})
+	totalFiles, totalSize := h.walkUploadStats(root)
 
 	scannedAt := h.storageMgr.LastScanTime()
 	if scannedAt == nil {

@@ -110,6 +110,12 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (filename, filePath stri
 			}
 			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidFilename}
 		}
+		// 读取侧守卫（审查 #4 收敛 + 审查 I-1）：普通下载/stat 不得访问服务端内部目录
+		// （.__cloud__ 云任务文件等只能经 kind=cloud_task 白名单由服务端按 owner 拼接）。
+		// ValidateFilePath 全局不再拒绝 .__ 首段（避免破坏 sync push），此处显式拦截。
+		if isInternalDirPathPrefix(remotePath) {
+			return "", "", &downloadPathError{status: http.StatusBadRequest, message: "不能访问服务端内部目录（.__ 前缀为服务端保留）"}
+		}
 		fullPath := h.safePathFor(r, remotePath)
 		if fullPath == "" {
 			return "", "", &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}

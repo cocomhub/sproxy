@@ -638,6 +638,9 @@ func (c *FileClient) DownloadCloudArchive(ctx context.Context, name, outputPath 
 }
 
 // downloadTo 是 Download / DownloadCloudArchive 的公共实现。
+// 大文件（超过自动分块阈值）优先走分块下载（断点续传/并发/逐块校验语义），
+// 普通小文件走全量 /download（审查 #11：先前恒走全量，cloud_task/cloud_archive
+// 大文件无分块与进度）。
 func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind string) error {
 	if containsPathTraversal(filename) {
 		return fmt.Errorf("filename 不能包含路径穿越符 '..'")
@@ -645,6 +648,11 @@ func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind 
 	outputPath, err := resolveOutputPath(filename, outputPath)
 	if err != nil {
 		return err
+	}
+	// 预取文件大小，超出自动分块阈值走 ChunkedDownload（kind 同步透传）
+	fileSize, _, _, statErr := getFileStat(ctx, c, filename, kind)
+	if statErr == nil && ShouldAutoChunk(fileSize) {
+		return c.ChunkedDownload(ctx, filename, outputPath, WithChunkedKind(kind))
 	}
 	query := url.Values{"filename": {filename}}
 	if kind != "" {

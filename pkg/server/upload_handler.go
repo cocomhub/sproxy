@@ -185,6 +185,13 @@ func (h *Handlers) resolveFilePath(w http.ResponseWriter, r *http.Request, filen
 		sendJSONResponse(w, UploadResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
 		return "", "", false
 	}
+	// 写入侧守卫（审查 #4 收敛）：用户显式上传/重命名不得落到服务端内部目录
+	// （.__cloud__ 等，它们只可经白名单 kind 或 sync 任务可达）；ValidateFilePath
+	// 全局不再拒绝 .__ 首段（避免破坏 sync push 的本地根 .__ 前缀文件）。
+	if isInternalDirPathPrefix(remotePath) {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件名不能访问服务端内部目录（.__ 前缀为服务端保留）"}, http.StatusBadRequest)
+		return "", "", false
+	}
 	fullPath = h.safePathFor(r, remotePath)
 	if fullPath == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)

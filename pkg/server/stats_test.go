@@ -7,6 +7,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -118,6 +121,48 @@ func TestStats_StorageFields(t *testing.T) {
 		if _, ok := raw[field]; !ok {
 			t.Errorf("missing disk stat field: %s", field)
 		}
+	}
+}
+
+// TestStats_SkipsInternalDirsAtAnyDepth 验证（审查 #5）：stats 遍历跳过任意层级出现的服务端
+// 内部目录——多租户 owner 隔离后版本目录出现在 owner 子目录下（uploadsDir/<owner>/.__versions__/），
+// 若只按名字/仅根层跳过会把历史版本文件计为用户文件，导致 TotalFiles/TotalSize 虚高。
+// 这里直接在当前 owner 存储根内预置 .__versions__ 子目录结构，然后组装 Handlers 调 WalkDir
+// 并断言跳过（不依赖 storageMgr 首次扫描，避免脆性）。
+func TestStats_SkipsInternalDirsAtAnyDepth(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// 布局：owner 根下用户文件 + owner 子目录下的内部版本目录 + 深层含 .__ 的普通文件
+	ownerRoot := filepath.Join(dir, "ak-A")
+	if err := os.MkdirAll(filepath.Join(ownerRoot, ".__versions__", "doc.txt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	userFile := filepath.Join(ownerRoot, "user.txt")
+	if err := os.WriteFile(userFile, []byte("user"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownerRoot, ".__versions__", "doc.txt", "123"), []byte("v1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// 深层含 .__ 的普通文件仍统计（非内部目录首段）：sub/foo.__bar.txt
+	if err := os.MkdirAll(filepath.Join(ownerRoot, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownerRoot, "sub", "foo.__bar.txt"), []byte("y"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg atomic.Pointer[Config]
+	cfg.Store(&Config{UploadsDir: dir})
+	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
+
+	// 复用 statsHandler 的 WalkDir 逻辑：以空 owner 全局视角统计，验证内部目录被跳过
+	totalFiles, totalSize := h.walkUploadStats(dir)
+	if totalFiles != 2 { // user.txt + sub/foo.__bar.txt
+		t.Fatalf("全局统计文件数 = %d, want 2（用户文件 + 深层 .__ 普通文件）", totalFiles)
+	}
+	if totalSize != int64(len("user")+len("y")) {
+		t.Fatalf("全局统计大小 = %d, want %d", totalSize, int64(len("user")+len("y")))
 	}
 }
 

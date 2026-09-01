@@ -333,21 +333,33 @@ func (us *UploadStore) GetSessionByFilename(filename string) *ChunkedUploadSessi
 	return nil
 }
 
-// GetSessionByFilenameOwner 按文件名与 owner 前缀查找未完成的 session。
-// 多租户隔离：会话 key 为 <owner>/<upload_id>，按 owner 前缀过滤避免跨租户碰撞。
+// GetSessionByFilenameOwner 按文件名与 owner 查找未完成的 session。
+// 多租户隔离：会话 key 为 <owner>/<upload_id>（未认证无前缀），按 owner 精确匹配。
+// 审查 #6：先前用 owner+"/" 作 strings.HasPrefix，owner 名为前缀包含关系（ak / akx）
+// 或未认证 prefix="" 恒真会把他人会话误判为可见；这里解析 <owner>/<id> 首段精确比较。
 func (us *UploadStore) GetSessionByFilenameOwner(filename, owner string) *ChunkedUploadSession {
 	us.mu.RLock()
 	defer us.mu.RUnlock()
-	prefix := ""
-	if owner != "" {
-		prefix = owner + "/"
-	}
 	for _, s := range us.sessions {
-		if s.Filename == filename && !s.Completed && strings.HasPrefix(s.UploadID, prefix) {
+		if s.Filename != filename || s.Completed {
+			continue
+		}
+		if sessionOwnerMatches(s.UploadID, owner) {
 			return copySession(s)
 		}
 	}
 	return nil
+}
+
+// sessionOwnerMatches 判断会话 key（<owner>/<upload_id>，未认证为裸 id）是否属于 owner。
+// 未认证（owner 空）只匹配裸 id 会话（带 owner 前缀的会话对未认证不可见）；
+// 认证 owner 精确匹配 <owner>/ 前缀，绝不用前缀包含（防 ak/akx 误配，审查 #6）。
+func sessionOwnerMatches(sessionKey, owner string) bool {
+	if owner == "" {
+		// 未认证：只有裸 id 会话（无 "/"）对其可见；owner 前缀会话只属对应租户
+		return !strings.ContainsAny(sessionKey, `/\`)
+	}
+	return strings.HasPrefix(sessionKey, owner+"/")
 }
 
 // MarkChunkReceived 标记指定分块为已接收并持久化。
@@ -672,6 +684,9 @@ func (us *UploadStore) recoverSessions() {
 // recoverOwnerSessions 递归恢复 owner 作用域的会话（.__chunked__/<owner>/<id>/）。
 // ownerDir 是 owner 根目录（无 session.json，但有子目录）。返回 true 表示识别为
 // owner 层并尝试恢复其子会话（即使恢复无果也返回 true，避免外层误判为损坏 session）。
+// 审查 I-2/#2：恢复的 session map key 必须用 session.json 内的完整 UploadID
+// （<owner>/<id>）——directory 名是 <id>，但活会话的 map key / 目录 / ChunkFilePath
+// 都基于完整 id；用 bare id 做 key 会让 GetSession("owner/id") 落空、续传/complete 404。
 func (us *UploadStore) recoverOwnerSessions(ownerDir string) bool {
 	subs, err := os.ReadDir(ownerDir)
 	if err != nil {
@@ -682,16 +697,24 @@ func (us *UploadStore) recoverOwnerSessions(ownerDir string) bool {
 		if !sub.IsDir() {
 			continue
 		}
-		uploadID := sub.Name()
-		sessionDir := filepath.Join(ownerDir, uploadID)
+		sessionDir := filepath.Join(ownerDir, sub.Name())
 		sessionPath := filepath.Join(sessionDir, "session.json")
 		data, rErr := os.ReadFile(sessionPath)
 		if rErr != nil {
-			us.logger.Warn("读取 owner session.json 失败，跳过", "upload_id", uploadID, "error", rErr)
+			us.logger.Warn("读取 owner session.json 失败，跳过", "upload_id", sub.Name(), "error", rErr)
 			continue
 		}
 		found = true
-		us.restoreSession(uploadID, sessionDir, data)
+		// 以 session.json 内完整 UploadID 作 map key（活会话 key 契约）：
+		// 目录名是 bare <id>，活会话的 map key / 目录 / ChunkFilePath 都基于
+		// <owner>/<id>。解析 session 取 UploadID 作为恢复 key（restoreSession
+		// 内部会再次解析 session，此处的解析仅用于取 key）。
+		key := filepath.ToSlash(filepath.Join(filepath.Base(ownerDir), sub.Name()))
+		var parsed ChunkedUploadSession
+		if json.Unmarshal(data, &parsed) == nil && parsed.UploadID != "" {
+			key = parsed.UploadID
+		}
+		us.restoreSession(key, sessionDir, data)
 	}
 	return found
 }

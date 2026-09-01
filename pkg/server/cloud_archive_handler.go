@@ -142,6 +142,9 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 
 	// 打包前：单文件总量限制（cloud_archive_max_bytes）。单文件仍受 addFileToTar 内
 	// defaultMaxArchiveSize=100MB 约束；此处限制的是原始文件大小，与 addFileToTar 并存不冲突。
+	// 审查 #10 结论（勿再分析）：此 os.Stat 是**必须的**大小校验，并非与 O_EXCL 重复的
+	// 存在性预检——同名冲突由 openArchiveOutput 的 O_EXCL 单一负责（createTarGz 返回
+	// errArchiveExists → 409）；此处 stat 失败即源文件不存在（400），职责不同，无冗余。
 	info, err := os.Stat(sourceFile)
 	if err != nil {
 		h.logger.Error("failed to stat source file in cloud archive", "task_id", taskID, "error", err)

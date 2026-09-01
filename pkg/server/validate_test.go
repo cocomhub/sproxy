@@ -106,10 +106,12 @@ func TestValidateFilePath_LongName(t *testing.T) {
 	}
 }
 
-// TestValidateFilePath_RejectsInternalDirPrefix 验证（审查 I-1 多租户 owner）：
-// 首段以 .__ 开头的路径被拒绝——服务端内部目录约定（.__cloud__/.__versions__ 等），
-// 云任务文件落在 .__cloud__/<taskID>/<file>，拦截防止跨租户经 /download 读取。
-func TestValidateFilePath_RejectsInternalDirPrefix(t *testing.T) {
+// TestValidateFilePath_AllowsInternalDirPrefix 验证（审查 #4 收敛）：
+// ValidateFilePath **不再全局拒绝** .__ 首段——它是 base 路径校验，被 upload/sync
+// 等写路径复用，全局拒绝会破坏含 .__ 前缀文件的同步推送。服务端内部目录访问防护
+// 改由写入侧 isInternalDirPathPrefix（upload/rename/uploadInit）与读取侧
+// resolveDownloadPath/listFiles 的 isInternalFirstName 收敛拦截。
+func TestValidateFilePath_AllowsInternalDirPrefix(t *testing.T) {
 	for _, f := range []string{
 		".__cloud__/task123/file.zip",
 		".__versions__/x.txt",
@@ -117,11 +119,11 @@ func TestValidateFilePath_RejectsInternalDirPrefix(t *testing.T) {
 		".__downloads__/z.txt",
 		".__cloud__",
 	} {
-		if _, err := ValidateFilePath(f); err == nil {
-			t.Errorf("首段 .__ 路径 %q 应被拒绝", f)
+		if _, err := ValidateFilePath(f); err != nil {
+			t.Errorf("ValidateFilePath 首段 .__ 路径 %q 应仍可通过基础校验（内部目录拦截在写/读侧守卫）: %v", f, err)
 		}
 	}
-	// 深层含 .__ 的普通用户文件仍允许（只拦首段）。
+	// 深层含 .__ 的普通用户文件仍允许。
 	for _, f := range []string{
 		"dir/foo.__bar.txt",
 		"normal.txt",
@@ -129,6 +131,31 @@ func TestValidateFilePath_RejectsInternalDirPrefix(t *testing.T) {
 	} {
 		if _, err := ValidateFilePath(f); err != nil {
 			t.Errorf("普通路径 %q 应允许，got %v", f, err)
+		}
+	}
+}
+
+// TestIsInternalDirPathPrefix 验证写入侧守卫：首段为服务端内部目录名 → 拒绝。
+func TestIsInternalDirPathPrefix(t *testing.T) {
+	for _, f := range []string{
+		".__cloud__/task123/file.zip",
+		".__downloads__/a.txt",
+		".__versions__/x/y.txt",
+		".__sync__/y.txt",
+		".__chunked__/s/x",
+		".__cloud_archives__/a.tar.gz",
+	} {
+		if !isInternalDirPathPrefix(f) {
+			t.Errorf("内部目录首段 %q 应被识别", f)
+		}
+	}
+	for _, f := range []string{
+		"dir/foo.__bar.txt",
+		"normal.txt",
+		".__cloud2/x", // 非精确内部目录名
+	} {
+		if isInternalDirPathPrefix(f) {
+			t.Errorf("普通首段 %q 不应被判为内部目录", f)
 		}
 	}
 }

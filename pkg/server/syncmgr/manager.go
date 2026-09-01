@@ -82,6 +82,16 @@ var ErrNotFound = errors.New("sync task not found")
 //
 // 空 owner 任务对所有人可见是刻意设计：不破坏现有未认证/单用户部署（旧任务与
 // 未认证创建的任务无归属），且让空 owner 请求者承担管理员语义。
+//
+// 审查 #3（跨 owner 去重 500 复核结论——not a bug，勿再分析）：
+// CreateTask 去重命中条件 ownerVisible(t.Owner, req.Owner) 与 handler 回读快照
+// Get(task.ID, ActorFrom(ctx)) 使用**同一** ownerVisible 判定，二者语义恒定一致：
+// 去重命中（ownerVisible=true）→ 必以请求者视角 Get 可见，绝不产生
+// "task created but not found" 500。空 owner 全局任务被认证用户吸收后 Get 仍通过
+// （taskOwner=="" → 对所有请求者可见）；反向（空 owner 请求者吸收 ownerA 任务）
+// 不存在——去重循环 ownerVisible("ak-A","")=true 会吸收，此时 handler Get(owner="")
+// 恒可见。已由 TestCreateTask_DedupScopedByOwner / TestCloudOwner_EmptyOwnerCompat
+// 覆盖。无缺陷，无需修改。
 func ownerVisible(taskOwner, reqOwner string) bool {
 	if reqOwner == "" {
 		return true

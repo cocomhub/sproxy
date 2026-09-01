@@ -57,16 +57,10 @@ func ValidateFilePath(filename string) (string, error) {
 		return "", fmt.Errorf("文件名不能包含路径穿越: %s", filename)
 	}
 
-	// 审查 I-1（多租户 owner）：拒绝首段以 ".__" 开头的路径——服务端内部目录约定
-	// （.__cloud__ / .__versions__ / .__sync__ / .__downloads__ 等，见 isInternalDir），
-	// 云任务文件落在 .__cloud__/<taskID>/<file> 下。若不拦截，持有任一有效 AK 的租户
-	// 可经 GET /download?filename=.__cloud__/<taskID>/<file> 跨租户读取他人在云端下载
-	// 的文件（taskID 含 32bit 随机难枚举，但日志/共享上下文泄露 path 即可利用）。
-	// 对齐 validateSyncPath 的 .__ 保留策略；仅拦首段（保留用户可上传深层含 .__ 的
-	// 普通文件名如 dir/foo.__bar.txt）。
-	if parts[0] != "" && strings.HasPrefix(parts[0], ".__") {
-		return "", fmt.Errorf("文件名不能访问服务端内部目录（.__ 前缀为服务端保留）: %s", filename)
-	}
+	// 注意：. __ 首段拦截**不**放在此处——ValidateFilePath 被 upload/sync 等写路径
+	// 复用，若全局拒绝 .__ 首段会破坏含 .__ 前缀文件的同步推送（审查 #4）。该拦截
+	// 收敛到面向用户请求的下载/stat/列表路径（resolveDownloadPath / listFiles 的
+	// isInternalDir），由 joinSafePath 的 owner 根 + isInternalDir 兜底防内部目录访问。
 
 	// Windows 非法字符检查（在 Clean 之后执行，使用 cleaned 路径）
 	if runtime.GOOS == "windows" {
@@ -80,6 +74,53 @@ func ValidateFilePath(filename string) (string, error) {
 
 	// 统一分隔符为 / 用于 API 序列化
 	return filepath.ToSlash(cleaned), nil
+}
+
+// isInternalFirstName 判断 path 首段是否为服务端内部目录名（download/list 读取侧拦截）。
+// 内部目录名集合：.__cloud__ / .__downloads__ / .__versions__ / .__cloud_archives__ /
+// .__sync__ / .__chunked__（服务端保留，用户文件/同步不得落到这些目录）。
+// 首段判定用 IndexAny(/\ ) 而非仅 "/"，兼容 Windows 分隔符。
+var internalDirNames = []string{
+	cloudDirName,
+	downloadsDirName,
+	versionsDirName,
+	cloudArchiveDirName,
+	".__sync__", // syncmgr 持久化目录（uploadsDir/.__sync__/）；syncmgr 是独立子包，
+	//            // 其 syncDirName 常量不可见，此处字面量对齐
+	chunkedDirName,
+}
+
+func isInternalFirstName(path string) bool {
+	if path == "" {
+		return false
+	}
+	first := path
+	if idx := strings.IndexAny(first, `/\`); idx >= 0 {
+		first = first[:idx]
+	}
+	return slices.Contains(internalDirNames, first)
+}
+
+// isInternalDirPathPrefix 判断 path 任一层级是否出现服务端内部目录（首段或深层）。
+// 写入侧（upload/rename/uploadInit）在 ValidateFilePath 后调用，替代此前全局
+// .__ 首段拒绝（审查 #4）；读取侧（download/list/search/stats）用于拦截跨租户或
+// 用户视图访问内部目录（审查 #5：多租户 owner 隔离后内部目录出现在 owner 子目录下，
+// 如 uploadsDir/<owner>/.__versions__/，必须按任意层级识别）。
+func isInternalDirPathPrefix(path string) bool {
+	clean := path
+	if idx := strings.IndexAny(clean, `/\`); idx >= 0 {
+		clean = clean[:idx]
+	}
+	if slices.Contains(internalDirNames, clean) {
+		return true
+	}
+	segs := strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' })
+	for _, seg := range segs {
+		if slices.Contains(internalDirNames, seg) {
+			return true
+		}
+	}
+	return false
 }
 
 // joinSafePath 在 baseDir 下安全拼接 userPath，确认结果不越界。

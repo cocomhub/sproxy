@@ -72,8 +72,16 @@ func (h *Handlers) resolveListDir(w http.ResponseWriter, r *http.Request) (targe
 }
 
 // isInternalDir 检查是否为内部管理目录或文件，应跳过列表显示。
+// 多租户 owner 隔离后，内部目录只可能作为**首段**出现（uploadsDir/.__versions__，
+// 或 uploadsDir/<owner>/.__versions__）；buildFileListEntries 遍历单层（ReadDir），
+// 用首段判定即可收敛；深层含 .__ 的普通文件（dir/foo.__bar.txt）不受影响。
+// 判断与写入侧守卫 isInternalDirPathPrefix 保持同源（内部目录名集合）。
 func isInternalDir(name string) bool {
-	return name == ".checksums.json" || name == chunkedDirName || name == versionsDirName || name == cloudDirName || name == downloadsDirName || name == cloudArchiveDirName
+	// 兼容单层条目名与 .checksums.json 特殊文件。
+	if name == ".checksums.json" {
+		return true
+	}
+	return isInternalFirstName(name)
 }
 
 // sortFileEntries 按指定字段和顺序排序文件条目。
@@ -157,6 +165,7 @@ func (h *Handlers) buildFileListEntries(owner string, entries []os.DirEntry, csM
 	return allFiles
 }
 
+// listFiles 处理 GET /api/files。
 func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	// 支持按层级查询：?subdir=path 列出指定子目录，默认列出根目录
 	targetDir, ok := h.resolveListDir(w, r)
@@ -186,15 +195,15 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	csMap := h.checksumStore.GetAll()
-
 	// 收集所有条目（跳过内部目录）
 	subdir := r.URL.Query().Get("subdir")
+	// getAll 一次快照锁定（审查 #8 结论，勿再分析）：checksum key 形如
+	// "owner?/rel-prefix"，逐条 Get 需 N 次加锁且语义等价于一次 Concurrent Map 拷贝；
+	// 单目录最多 10000 条（parsePagination limit 上限），GetAll 拷贝成本可忽略。
+	csMap := h.checksumStore.GetAll()
 	allFiles := h.buildFileListEntries(ownerFromRequest(r), entries, csMap, subdir)
-
 	// 排序
 	sortFileEntries(allFiles, sortBy, sortOrder)
-
 	total := len(allFiles)
 
 	// 分页
@@ -214,8 +223,7 @@ func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	qLower := strings.ToLower(q)
 
 	owner := ownerFromRequest(r)
-	csMap := h.checksumStore.GetAll()
-
+	csMap := h.checksumStore.GetAll() // 一次性快照（见 listFiles #8 结论注释，勿再分析）
 	results := h.collectSearchResults(owner, h.ownerUploadsDir(r), qLower, csMap)
 	resp := listResponse{Files: results, Total: len(results), Offset: 0, Limit: len(results)}
 	sendJSONResponse(w, resp, http.StatusOK)
@@ -240,7 +248,9 @@ func (h *Handlers) searchWalkDirCallback(owner, rootsDir, path string, d fs.DirE
 	if rel == "." {
 		return nil
 	}
-	if isInternalDir(d.Name()) {
+	// rel 以平台分隔符表达；转正斜杠后取首段做内部目录判定（owner 子目录下的
+	// .__versions__/<owner>/ 深层内部目录同样被截断，多租户一致性，审查 #5）。
+	if isInternalDirPathPrefix(filepath.ToSlash(rel)) {
 		if d.IsDir() {
 			return filepath.SkipDir
 		}

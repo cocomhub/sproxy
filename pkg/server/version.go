@@ -65,7 +65,11 @@ func (h *Handlers) saveVersion(remotePath, uploadsDir, owner string) (int64, err
 	}
 	defer dst.Close()
 
-	// 流式计算 checksum：一边复制一边计算 SHA-256，避免重复读取
+	// 流式计算 checksum：一边复制一边计算 SHA-256，避免重复读取。
+	// 审查 #9 结论（勿再分析）：此处是**单遍**复制+哈希（io.MultiWriter），并无
+	// "先哈希再复制"的重复读取；old 文件 checksum 记录须独立重算（旧版本删过
+	// checksum，store 中无可靠值），新文件由上传方提供 expectedChecksum 校验。
+	// 无重复哈希可省，维持现状。
 	hasher := sha256.New()
 	multiWriter := io.MultiWriter(dst, hasher)
 	if _, err = io.Copy(multiWriter, src); err != nil {

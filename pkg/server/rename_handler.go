@@ -29,6 +29,10 @@ func parseRenameParams(r *http.Request) (from, to, checksum string, err error) {
 	if err != nil {
 		return "", "", "", fmt.Errorf("无效的目标路径")
 	}
+	// 写入侧守卫（审查 #4 收敛）：重命名不得落入/移出服务端内部目录
+	if isInternalDirPathPrefix(from) || isInternalDirPathPrefix(to) {
+		return "", "", "", fmt.Errorf("不能访问服务端内部目录（.__ 前缀为服务端保留）")
+	}
 	checksum = r.Header.Get(headerFileChecksum)
 	return from, to, checksum, nil
 }
@@ -122,6 +126,11 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op 
 	to, err := ValidateFilePath(op.To)
 	if err != nil {
 		result.Message = "无效的目标路径"
+		return result
+	}
+	// 写入侧守卫（审查 #4 收敛）：批量重命名不得落入/移出服务端内部目录
+	if isInternalDirPathPrefix(from) || isInternalDirPathPrefix(to) {
+		result.Message = "不能访问服务端内部目录（.__ 前缀为服务端保留）"
 		return result
 	}
 	if from == to {

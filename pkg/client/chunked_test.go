@@ -547,6 +547,11 @@ func TestTryResumeSession(t *testing.T) {
 		if callCount < 1 {
 			t.Fatal("expected at least one chunk upload call")
 		}
+		// 修复 #1：续传命中时 uploadChunks 必须沿用服务端返回的完整 session id（带 owner 前缀），
+		// 否则带 owner 认证的续传会因 bare id 被 validateSessionOwner 拒绝而 404。
+		if res.serverUploadID != "test-123" {
+			t.Fatalf("serverUploadID = %q, want 服务端返回的完整 id test-123", res.serverUploadID)
+		}
 	})
 }
 
