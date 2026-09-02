@@ -80,6 +80,13 @@ type Config struct {
 	// 用 float64 表达倍率而非 time.Duration（time.Duration 是纳秒计数，无法表达"2 倍"）。
 	// 退避上限封顶 RetryDelay*10（对齐 cloud 重试预算，避免长尾任务卡死）。
 	RetryBackoff float64
+	// PerFileReserve 启用 sync 逐文件预预留（syncexec.Executor 注入 user 桶 Scope guard）：
+	// pull 本地写侧每个文件写前 TryReserve(size)、写成功 Commit 入账。启用后 reconcile 在
+	// completed 时释放创建期占位预留（ReservedSize=0 已由逐文件 guard 等额入账，delta 对账
+	// 会双计），不再按 BytesDone 收敛。与 root.go 装配同步：PerFileReserve=true 时同步注入
+	// Executor.TenantScope（= quotaBucketFor(owner,"user")）。旧装配（PerFileReserve=false，
+	// 默认）保留占位 delta 对账语义。
+	PerFileReserve bool
 }
 
 // applyConfigDefaults 为 Config 零值字段填充默认值。
@@ -877,10 +884,22 @@ func (m *Manager) reconcileQuotaLocked(task *SyncTask) {
 		task.ReservedSize = task.BytesDone // 磁盘扫描已记账，仅记录实际大小，不动 quota
 		return
 	}
+	q := m.taskQuota(task.Owner) // P4/P5：按 owner 解析（resolver 未注入时回退全局 quota）
+	if m.config.PerFileReserve {
+		// 逐文件 guard 模式：每个文件已在写前 TryReserve(size) 并 Commit 入账（Executor 侧），
+		// 此处 completed 只须释放创建期的占位预留（ReservedSize），**不**再按 BytesDone 收敛
+		// ——否则占位 P + guard 逐文件 F 已成 committed，delta(actual=F,P)−P 会把 guard 已入账
+		// 的 F 再扣掉成 0（双计；实际应保留 F 作为磁盘真实占用）。释放占位后归零防二次释放。
+		if reserved := task.ReservedSize; reserved > 0 {
+			q.Release(reserved, m.quotaCat)
+			task.ReservedSize = 0
+		}
+		task.ReservedSize = task.BytesDone // 记录实际大小（仅记账字段，不代表 quota 预留）
+		return
+	}
 	reserved := task.ReservedSize
 	actual := task.BytesDone
 	delta := actual - reserved
-	q := m.taskQuota(task.Owner) // P4/P5：按 owner 解析（resolver 未注入时回退全局 quota）
 	switch {
 	case delta > 0:
 		if err := q.TryReserve(delta, m.quotaCat); err != nil {

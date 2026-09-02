@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -283,6 +284,11 @@ func (u *ChunkedUploader) uploadChunkIndices(ctx context.Context, chunkIndices [
 }
 
 // completeOnce 发送一次 /upload/complete 并解析响应（含 mismatch_chunks）。
+//
+// I-1（任务 6）：协议层统一「先读响应体再判状态」——无论状态码是否 2xx，都先读响应体
+// 解析 JSON；解析出 MismatchChunks 即返回结果（哪怕 success=false），绝不因非 JSON body
+// 或传输层把非 2xx 提早判错而丢失 MismatchChunks。非 JSON body（旧服务端/代理 500 纯文本）
+// 才返回携带 body 文本的确定性错误，调用方可判错决策。
 func (u *ChunkedUploader) completeOnce(ctx context.Context) (*ChunkedUploadResult, error) {
 	completeBody, _ := json.Marshal(chunkedCompleteRequest{UploadID: u.uploadID})
 	resp, err := u.client.doRequest(ctx, "POST", "/upload/complete", bytes.NewReader(completeBody), http.Header{
@@ -293,11 +299,24 @@ func (u *ChunkedUploader) completeOnce(ctx context.Context) (*ChunkedUploadResul
 	}
 	defer resp.Body.Close()
 
+	// 先读限长 body（防恶意超大响应），再尝试 JSON 解析。若解析成功——即便 status 非 2xx
+	// 或 success=false——也返回结果，让调用方（run）基于 Success/MismatchChunks/Message
+	// 决策，而不是在此判定错误（否则 mismatch 信息丢失）。
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var completeResult ChunkedUploadResult
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&completeResult); err != nil {
-		return nil, fmt.Errorf("解析 complete 响应失败: %w", err)
+	if json.Unmarshal(raw, &completeResult) == nil {
+		// 解析成功：返回结果（MismatchChunks/Message 均保留）。
+		return &completeResult, nil
 	}
-	return &completeResult, nil
+	// 非 JSON body：确定性错误，Message 携带原始 body（截断），供调用方判错。
+	msg := strings.TrimSpace(string(raw))
+	if len(msg) > 512 {
+		msg = msg[:512] + "..."
+	}
+	if msg == "" {
+		msg = "空响应体"
+	}
+	return &completeResult, fmt.Errorf("解析 complete 响应失败（HTTP %d）: %s", resp.StatusCode, msg)
 }
 
 // uploadChunkWithRetry 在 goroutine 中执行分块上传，包含重试逻辑。

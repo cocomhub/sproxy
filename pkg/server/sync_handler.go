@@ -74,6 +74,14 @@ func (h *Handlers) SyncQuotaStore() func(owner string) syncmgr.QuotaStore {
 	}
 }
 
+// SyncQuotaScope 返回按任务 owner 解析的 user 桶配额 *quota.Scope（供 syncexec.Executor
+// 逐文件写前 guard 使用）。与服务端写路径同一引用（quotaBucketFor 缓存复用），未装配时 nil。
+func (h *Handlers) SyncQuotaScope() func(owner string) *quota.Scope {
+	return func(owner string) *quota.Scope {
+		return h.quotaBucketFor(owner, "user")
+	}
+}
+
 // syncTenantRoot 按任务 owner 解析租户 user 根与 meta/sync 持久化目录绝对路径。
 // 空 owner → anonymous 租户；租户不可用（非法 owner / 存储根未装配）返回 ok=false
 // （写路径 fail-closed，绝不回落全局根）。装配层与 syncmgr.TenantRootResolver 对接，

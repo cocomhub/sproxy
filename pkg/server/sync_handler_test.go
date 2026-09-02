@@ -18,6 +18,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
+	"github.com/cocomhub/sproxy/pkg/testutil/syncmock"
 )
 
 // newSyncTestEnv 创建带 SyncManager 的测试服务。remoteURL 是 sync_remotes[0].url。
@@ -39,9 +40,11 @@ func newSyncTestEnv(t *testing.T, remoteURL string, modifyCfg func(*Config)) (h 
 	remotes := []syncmgr.RemoteConfig{{
 		Name: "r1", URL: remoteURL, AccessKey: "test-ak", AccessKeySecret: strings.Repeat("a", 64),
 	}}
+	exec := syncexec.NewExecutor(h.syncTenantRoot, h.logger)
+	exec.SetTenantScopeResolver(h.SyncQuotaScope())
 	sm := syncmgr.NewManager(h.syncTenantRoot, h.listTenantIDs, nil, int(CategoryUserFiles), remotes,
-		syncexec.NewExecutor(h.syncTenantRoot, h.logger), h.logger,
-		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour})
+		exec, h.logger,
+		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, PerFileReserve: true})
 	sm.SetQuotaResolver(h.SyncQuotaStore())
 	h.SetSyncMgr(sm)
 
@@ -521,5 +524,64 @@ func TestSyncAPI_OwnerNotClientForgeable(t *testing.T) {
 	}
 	if task.Owner != "ak-A" {
 		t.Fatalf("owner 应由服务端从请求 actor 派生（防伪造），got %q, want ak-A", task.Owner)
+	}
+}
+
+// TestSyncAPI_PullChargesUserBucketQuota 端到端验证逐文件 guard 装配进真实 sync 链路：
+// pull 走后端 SyncManager + syncexec.Executor（装配 SyncQuotaScope），两个远端文件落
+// local 子目录 → alice user 桶 Scope committed == 两文件字节和（10）、Reserved 归 0，
+// 且创建期占位 1GiB 在完成 reconcile 时已释放（PerFileReserve 模式）。
+func TestSyncAPI_PullChargesUserBucketQuota(t *testing.T) {
+	srv, remote := syncmock.NewServer(t)
+	remote.SeedFile("d1/a.txt", "aaaa")
+	remote.SeedFile("d1/b.txt", "bbbbbb")
+	remote.SeedDir("d1")
+	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]int64{"alice": 10 << 30} })
+
+	// 以 alice 身份创建并同步 pull 任务（syncOwnerMux 注入 actor=alice 到 ctx）
+	mux := syncOwnerMux(h, "alice")
+	code, body := doSyncOwner(t, mux, "POST", "/api/sync/tasks",
+		`{"direction":"pull","remote":"r1","src":"d1","dst":"local","recursive":true}`)
+	if code != http.StatusCreated {
+		t.Fatalf("创建应 201, got %d: %s", code, body)
+	}
+	var task syncmgr.SyncTask
+	if err := json.Unmarshal(body, &task); err != nil {
+		t.Fatalf("解析失败: %v, body=%s", err, body)
+	}
+	// 等待完成
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+task.ID, "")
+		var cur syncmgr.SyncTask
+		_ = json.Unmarshal(b, &cur)
+		if cur.Status == "completed" {
+			break
+		}
+		if cur.Status == "failed" {
+			t.Fatalf("任务应完成，实际 failed: %s", b)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// alice user 桶配额 == 两个文件字节和（逐文件 guard 入账）
+	if got := h.quotaBucketFor("alice", "user").Usage(); got != 10 {
+		t.Fatalf("pull 后 alice user 桶 Usage()=%d want 10（逐文件入账）", got)
+	}
+	if got := h.quotaBucketFor("alice", "user").Reserved(); got != 0 {
+		t.Fatalf("pull 后 alice user 桶 Reserved()=%d want 0（占位已释放）", got)
+	}
+	// 磁盘真实落盘 <root>/alice/user/local/...
+	tnt := h.tenantFor("alice")
+	absA, ok := tnt.Root().Abs("user/local/a.txt")
+	if !ok {
+		t.Fatalf("派生文件绝对路径失败")
+	}
+	data, err := os.ReadFile(absA)
+	if err != nil {
+		t.Fatalf("alice/user/local/a.txt 应落盘: %v", err)
+	}
+	if string(data) != "aaaa" {
+		t.Fatalf("a.txt 内容=%q want aaaa", data)
 	}
 }
