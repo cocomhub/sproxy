@@ -359,18 +359,18 @@ func TestChunkedUploadOwner_SameBareIDDifferentOwnerIsolated(t *testing.T) {
 
 	filename := "shared.bin"
 	sharedID := "cccc1111bbbb2222aaaa3333dddd4444"
-	sizeA := 12
-	sizeB := 9
-	csA := sha256Hex([]byte("content-A!!!"))
-	csB := sha256Hex([]byte("content-B!"))
+	aBody := []byte("content-A!!!")
+	bBody := []byte("content-B!")
+	csA := sha256Hex(aBody)
+	csB := sha256Hex(bBody)
 
-	_, respA := env.initAs(t, "ak-A", sharedID, filename, int64(sizeA), 4096, 1, csA)
+	_, respA := env.initAs(t, "ak-A", sharedID, filename, int64(len(aBody)), 4096, 1, csA)
 	uploadIDA, _ := respA["upload_id"].(string)
 	if uploadIDA != sharedID {
 		t.Fatalf("ak-A init 应返回裸 id, got %q", uploadIDA)
 	}
 
-	codeEmpty, respEmpty := env.initAs(t, "", sharedID, filename, int64(sizeB), 4096, 1, csB)
+	codeEmpty, respEmpty := env.initAs(t, "", sharedID, filename, int64(len(bBody)), 4096, 1, csB)
 	if codeEmpty != http.StatusOK {
 		t.Fatalf("空 owner init 失败: %d %v", codeEmpty, respEmpty)
 	}
@@ -380,10 +380,10 @@ func TestChunkedUploadOwner_SameBareIDDifferentOwnerIsolated(t *testing.T) {
 	}
 
 	// 各自用各自 id（同为裸 id，但分属不同租户 store）上传互不影响
-	if c := env.chunkAs(t, "ak-A", sharedID, 0, []byte("content-A!!!")); c != http.StatusOK {
+	if c := env.chunkAs(t, "ak-A", sharedID, 0, aBody); c != http.StatusOK {
 		t.Fatalf("ak-A chunk 失败: %d", c)
 	}
-	if c := env.chunkAs(t, "", sharedID, 0, []byte("content-B!")); c != http.StatusOK {
+	if c := env.chunkAs(t, "", sharedID, 0, bBody); c != http.StatusOK {
 		t.Fatalf("empty chunk 失败: %d", c)
 	}
 	if cc, cresp := env.completeAs(t, "ak-A", sharedID); cc != http.StatusOK {
@@ -407,14 +407,39 @@ func TestChunkedUploadOwner_SameBareIDDifferentOwnerIsolated(t *testing.T) {
 func TestChunkedUploadOwner_RestartRecoversPerTenantSession(t *testing.T) {
 	dir := t.TempDir()
 
-	// 第一代 handlers：创建 alice 会话并上传一个分块
+	// 第一代 handlers：创建 alice 会话、建在途临时名（user 桶）并直写分片 0
 	h1 := newChunkedTestHandlers(t, dir, 0)
 	bareID := "dddd1111bbbb2222cccc3333dddd4444"
 	filename := "dir/restart.bin"
 	content := []byte("restart-content")
-	if _, err := h1.uploadStoreFor("alice").CreateSession(bareID, filename, int64(len(content)), 4096, 1,
-		sha256Hex(content), 0); err != nil {
+	session, err := h1.uploadStoreFor("alice").CreateSession(bareID, filename, int64(len(content)), 4096, 1,
+		sha256Hex(content), 0)
+	if err != nil {
 		t.Fatalf("创建 alice 会话失败: %v", err)
+	}
+	// 生产 init：创建 user 桶临时名（O_EXCL + Truncate + TempPath 持久化）。
+	tnt := h1.tenantFor("alice")
+	rel, ok := tnt.UserRel(filename)
+	if !ok {
+		t.Fatal("UserRel 失败")
+	}
+	tempRel := tempRelForUser(session, rel)
+	tempAbs, _ := tnt.Root().Abs(tempRel)
+	if mkErr := os.MkdirAll(filepath.Dir(tempAbs), 0o755); mkErr != nil {
+		t.Fatalf("mkdir: %v", mkErr)
+	}
+	tmpF, err := os.OpenFile(tempAbs, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("创建临时名: %v", err)
+	}
+	if _, err := tmpF.Write(content); err != nil {
+		tmpF.Close()
+		t.Fatalf("写分片: %v", err)
+	}
+	tmpF.Close()
+	session.TempPath = tempRel
+	if err := h1.uploadStoreFor("alice").PersistNow(bareID); err != nil {
+		t.Fatalf("持久化 session: %v", err)
 	}
 	if err := h1.uploadStoreFor("alice").MarkChunkReceived(bareID, 0, sha256Hex(content)); err != nil {
 		t.Fatalf("标记分块失败: %v", err)
@@ -431,7 +456,7 @@ func TestChunkedUploadOwner_RestartRecoversPerTenantSession(t *testing.T) {
 		t.Fatalf("恢复会话 Filename = %q, want %q", recovered.Filename, filename)
 	}
 	if !recovered.ReceivedChunks[0] {
-		t.Fatalf("恢复会话应保留已接收分块标记（bitmap 对齐）")
+		t.Fatalf("恢复会话应保留已接收分块标记（临时名内容校验匹配）")
 	}
 
 	// complete 走 handler 也须可命中（validateCompleteSession → GetSession）

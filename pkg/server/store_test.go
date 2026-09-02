@@ -195,6 +195,10 @@ func TestUploadStore_RecoverFromDisk(t *testing.T) {
 	}
 }
 
+// TestUploadStore_ReconcileChunks 验证任务 4 改造后的恢复语义：分块内容与 checksum 表
+// 逐分片校验匹配才置 bitmap。 该测试构造了一个通过 Checksum 恢复的会话——任务 4 起不再
+// 有独立 .chunk 文件，磁盘孤儿 chunk 文件不再被 reconcile 计为已接收（临时整文件的
+// 内容校验才是权威）。
 func TestUploadStore_ReconcileChunks(t *testing.T) {
 	tmpDir := t.TempDir()
 	chunkDir := filepath.Join(tmpDir, "chunk")
@@ -204,12 +208,11 @@ func TestUploadStore_ReconcileChunks(t *testing.T) {
 	us1.MarkChunkReceived("reconcile-id", 0, "chunk0hash")
 	us1.Stop()
 
-	// MarkChunkReceived only updates the bitmap, doesn't write chunk files.
-	// Write a chunk file on disk to simulate a partial upload where the chunk
-	// file exists but the bitmap wasn't updated (crash before bitmap flush).
+	// 旧语义（改造前）：磁盘上的孤儿 .chunk 文件在恢复时被 reconcile 置 bitmap=true。
+	// 任务 4 起分片直写整临时文件，.chunk 文件不再存在，孤儿 .chunk 应被忽略——
+	// 该文件不会成为恢复依据（位图保持 session.json 的值）。
 	sessionDir := filepath.Join(chunkDir, "reconcile-id")
-	chunkFile := filepath.Join(sessionDir, "00001.chunk")
-	if err := os.WriteFile(chunkFile, []byte("fake chunk data"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(sessionDir, "00001.chunk"), []byte("fake chunk data"), 0644); err != nil {
 		t.Fatalf("write chunk file: %v", err)
 	}
 
@@ -222,11 +225,9 @@ func TestUploadStore_ReconcileChunks(t *testing.T) {
 		return
 	}
 
-	// reconcileChunks should have detected the orphan chunk file on disk
-	// and marked chunk index 1 as received, even though the bitmap from
-	// session.json had it as false.
-	if !s.ReceivedChunks[1] {
-		t.Fatal("chunk 1 should be marked received after reconcile")
+	// 任务 4：孤儿 .chunk 文件不再被 reconcile 计为已接收（bitmap 保持 session.json）。
+	if s.ReceivedChunks[1] {
+		t.Fatal("chunk 1 should NOT be marked received: 任务 4 起孤儿 .chunk 不再作为恢复依据")
 	}
 }
 
