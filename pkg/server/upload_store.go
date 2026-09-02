@@ -414,6 +414,41 @@ func (us *UploadStore) MarkChunkReceived(uploadID string, chunkIndex int, checks
 	return nil
 }
 
+// ClearChunksReceived 把指定分块索引置为未接收（bitmap 清位 + checksum 记录清空），
+// 并持久化。任务 5 用：全文件校验失败后按 mismatch 逐分片清位——精确恢复客户端
+// 需重传的接收态（坏分片需重传 seek 覆盖，skipped 分片不受影响）。
+// index 越界/会话不存在时返回错误（不 panic）。
+func (us *UploadStore) ClearChunksReceived(uploadID string, indices []int) error {
+	ss := slices.Clone(indices)
+	slices.Sort(ss)
+	us.mu.Lock()
+	s, ok := us.sessions[uploadID]
+	if !ok {
+		us.mu.Unlock()
+		return fmt.Errorf("upload_id 不存在: %s", uploadID)
+	}
+	for _, i := range ss {
+		if i < 0 || i >= s.TotalChunks {
+			us.mu.Unlock()
+			return fmt.Errorf("chunk_index %d 超出范围 [0, %d)", i, s.TotalChunks)
+		}
+		s.ReceivedChunks[i] = false
+		s.ChunkChecksums[i] = ""
+	}
+	us.mu.Unlock()
+
+	select {
+	case <-us.stopCh:
+	default:
+		select {
+		case us.persistCh <- uploadID:
+		default:
+			us.wg.Go(func() { us.persistSession(uploadID) })
+		}
+	}
+	return nil
+}
+
 // AllChunksReceived 检查是否所有分块都已接收。
 func (us *UploadStore) AllChunksReceived(uploadID string) bool {
 	us.mu.RLock()
@@ -833,7 +868,8 @@ func (us *UploadStore) verifyTempChunks(session *ChunkedUploadSession) {
 }
 
 // verifyChunkChecksum 从 f 的 offset 起计算 length 字节的 SHA-256 并与 want 比较。
-// 与 pkg/quota.VerifyChunkChecksum 对齐（后者从 offset 读到 EOF；分片校验须限定分片长度）。
+// 与 pkg/quota.VerifyChunkChecksum 语义不同：后者从 offset 读到 EOF（任务 1 审查遗留，
+// 无长度参数），分片校验必须限定分片长度（末片短于 chunk_size），故此处用本地带长度实现。
 func (us *UploadStore) verifyChunkChecksum(f *os.File, offset, length int64, want string) (bool, error) {
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return false, err
@@ -844,6 +880,56 @@ func (us *UploadStore) verifyChunkChecksum(f *os.File, offset, length int64, wan
 		return false, err
 	}
 	return hex.EncodeToString(h.Sum(nil)) == want, nil
+}
+
+// findMismatchChunks 对临时文件逐分片 seek 重算校验，返回与保存 checksum 表不一致的
+// 分片索引（升序）。与恢复期 verifyTempChunks 相同的带长度语义（offset=i*ChunkSize、
+// length=chunkLenAt）：临时文件缺失/不可读/读取错误时全部标为 mismatch（客户端整文件重传）。
+// 仅对已接收分片（ChunkChecksums[i] 非空）做比对；未接收分片不支持（complete 前置
+// AllChunksReceived 已保证全接收，此处防御性跳过空 checksum 分片）。
+// 任务 5 I-2：重叠/越界写坏单个分片 → 该单片被精确识别为 mismatch（而非泛化 400）。
+func (us *UploadStore) findMismatchChunks(session *ChunkedUploadSession) []int {
+	abs, ok := us.tempAbsPath(session.TempPath)
+	if !ok {
+		us.logger.Warn("complete 校验临时文件路径非法，全部分片视为 mismatch", "upload_id", session.UploadID)
+		return allMismatchIndices(session)
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		us.logger.Warn("complete 校验临时文件不可读，全部分片视为 mismatch", "upload_id", session.UploadID, "error", err)
+		return allMismatchIndices(session)
+	}
+	defer f.Close()
+
+	chunkSize := session.ChunkSize
+	var mismatch []int
+	for i := 0; i < session.TotalChunks; i++ {
+		want := session.ChunkChecksums[i]
+		if want == "" {
+			continue // 未接收分片：complete 前置已保证全接收，此处防御性跳过
+		}
+		ok, err := us.verifyChunkChecksum(f, int64(i)*chunkSize, chunkLenAt(session, i), want)
+		if err != nil {
+			us.logger.Warn("complete 校验临时文件分片失败，全部分片视为 mismatch",
+				"upload_id", session.UploadID, "chunk_index", i, "error", err)
+			return allMismatchIndices(session)
+		}
+		if !ok {
+			us.logger.Warn("complete 校验分片不匹配（需重传）",
+				"upload_id", session.UploadID, "chunk_index", i)
+			mismatch = append(mismatch, i)
+		}
+	}
+	return mismatch
+}
+
+// allMismatchIndices 返回全部分片索引（0..TotalChunks-1，升序）。
+func allMismatchIndices(session *ChunkedUploadSession) []int {
+	out := make([]int, session.TotalChunks)
+	for i := range out {
+		out[i] = i
+	}
+	return out
 }
 
 // countReceived 返回 bitmap 中已置位的数量。
