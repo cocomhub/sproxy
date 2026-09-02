@@ -25,7 +25,7 @@ func newTestServerWithUploadInit(t *testing.T, modifyCfg func(*Config)) (*Handle
 	t.Helper()
 	tmpDir := t.TempDir()
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}
@@ -36,7 +36,7 @@ func newTestServerWithUploadInit(t *testing.T, modifyCfg func(*Config)) (*Handle
 		logger:        slog.Default(),
 		uploadingStop: make(chan struct{}),
 	}
-	globalRoot, err := storage.OpenRoot(cfg.StorageRoot())
+	globalRoot, err := storage.OpenRoot(cfg.StorageRoot)
 	if err != nil {
 		t.Fatalf("打开存储根失败: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestUploadInit_ChecksumMismatchConflict(t *testing.T) {
 	t.Parallel()
 	uploadsDir := t.TempDir()
 	h, _, cleanup := newTestServerWithUploadInit(t, func(c *Config) {
-		c.UploadsDir = uploadsDir
+		c.StorageRoot = uploadsDir
 	})
 	defer cleanup()
 	// 已存在文件放租户 user 桶（anonymous 租户）——init 的"文件已存在"检查走租户根。
@@ -169,7 +169,7 @@ func TestUploadInit_FileAlreadyExistsChecksumMatch(t *testing.T) {
 	t.Parallel()
 	uploadsDir := t.TempDir()
 	h, _, cleanup := newTestServerWithUploadInit(t, func(c *Config) {
-		c.UploadsDir = uploadsDir
+		c.StorageRoot = uploadsDir
 	})
 	defer cleanup()
 

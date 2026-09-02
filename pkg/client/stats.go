@@ -11,9 +11,9 @@ import (
 // StatsResponse 是 GET /api/stats 的响应结构体。
 type StatsResponse struct {
 	DiskUsage struct {
-		UploadsDir string `json:"uploads_dir"`
-		TotalFiles int    `json:"total_files"`
-		TotalSize  int64  `json:"total_size"`
+		StorageRoot string `json:"storage_root"`
+		TotalFiles  int    `json:"total_files"`
+		TotalSize   int64  `json:"total_size"`
 	} `json:"disk_usage"`
 	RequestCounts struct {
 		Total     int64 `json:"total"`

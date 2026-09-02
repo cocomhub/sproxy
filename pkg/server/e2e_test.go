@@ -62,7 +62,7 @@ func startTestServer(t *testing.T) (string, string) {
 	tmpDir := t.TempDir()
 
 	cfg := server.Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.AccessKeys = []server.AccessKeyConfig{{Key: e2eAK, Secret: e2eSK, MeshID: "e2e"}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -451,16 +451,16 @@ func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	cs := server.NewChecksumStore(tmpDir, nil)
+	cs := server.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	cs.Set("k1", "v1")
 	cs.Set("k2", "v2")
 
-	// 模拟 crash: 创建一个 .tmp 残留文件
-	tmpFile := filepath.Join(tmpDir, ".checksums.json.tmp")
+	// 模拟 crash: 创建一个 .tmp 残留文件（与新 storePath 一致：checksums.json.tmp）
+	tmpFile := filepath.Join(tmpDir, "checksums.json.tmp")
 	os.WriteFile(tmpFile, []byte(`{"stale":"data"}`), 0644)
 
 	// 新实例: 应清理 .tmp 并正确加载已持久化的 .json
-	cs2 := server.NewChecksumStore(tmpDir, nil)
+	cs2 := server.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	all := cs2.GetAll()
 	if len(all) != 2 {
 		t.Fatalf("expected 2 entries, got %d; tmp residue was not cleaned", len(all))

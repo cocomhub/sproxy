@@ -230,7 +230,7 @@ func TestHealthz_UploadStoreStopped(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
@@ -300,7 +300,7 @@ func TestDownload_OpenFileError(t *testing.T) {
 	// 文件落 <storageRoot>/anonymous/user/ 下。
 	if runtime.GOOS != "windows" {
 		cfg := cfgPtr.Load()
-		filePath := filepath.Join(cfg.StorageRoot(), anonymousOwner, "user", "downloadable.txt")
+		filePath := filepath.Join(cfg.StorageRoot, anonymousOwner, "user", "downloadable.txt")
 		if err := os.Chmod(filePath, 0000); err != nil {
 			t.Fatalf("chmod: %v", err)
 		}
@@ -358,7 +358,7 @@ func TestMkdir_WriteFailure(t *testing.T) {
 	cfg := cfgPtr.Load()
 
 	// 把 anonymous 租户根设为只读，使 MkdirAll("user/...") 失败（迁移后 mkdir 在 user 桶内创建）
-	tenantRoot := filepath.Join(cfg.StorageRoot(), "anonymous")
+	tenantRoot := filepath.Join(cfg.StorageRoot, "anonymous")
 	if err := os.Chmod(tenantRoot, 0444); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestRmdir_RemoveAllFailure(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 	cfg := cfgPtr.Load()
 
-	dirPath := filepath.Join(cfg.StorageRoot(), "anonymous", "user", "lockeddir")
+	dirPath := filepath.Join(cfg.StorageRoot, "anonymous", "user", "lockeddir")
 	if err := os.MkdirAll(filepath.Dir(dirPath), 0755); err != nil {
 		t.Fatalf("mkdir parent: %v", err)
 	}

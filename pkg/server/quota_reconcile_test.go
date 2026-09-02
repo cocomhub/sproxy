@@ -82,7 +82,7 @@ func TestScanAndRecalculate_SkipsInFlightReservation(t *testing.T) {
 
 // TestRegisterRoutes_StartupReconcilesQuotaScopes 验证 RegisterRoutes 启动装配后：
 // 磁盘既有占用（重启前已落盘）按租户桶校准进 per-tenant Scope（重启后 Scope 不回溯），
-// 且 StorageManager 扫描的是 storage_root（而非 uploads_dir，二者在 storage_root 配置下不同）。
+// 且 StorageManager 扫描的是 storage_root（而非 storage_root，二者在 storage_root 配置下不同）。
 func TestRegisterRoutes_StartupReconcilesQuotaScopes(t *testing.T) {
 	storageRoot := t.TempDir()
 	// 预置磁盘占用：anonymous/user/a.txt 50 + anonymous/cloud/t1/c.bin 30。
@@ -90,8 +90,7 @@ func TestRegisterRoutes_StartupReconcilesQuotaScopes(t *testing.T) {
 	mustWriteFile(t, filepath.Join(storageRoot, "anonymous", "cloud", "t1", "c.bin"), 30)
 
 	cfg := Default()
-	cfg.UploadsDir = t.TempDir() // 与 storage root 分离（验证扫描 storage_root 而非 uploads_dir）
-	cfg.StorageRootPath = storageRoot
+	cfg.StorageRoot = storageRoot
 	cfg.MaxStorageBytes = 1024 * 1024
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)

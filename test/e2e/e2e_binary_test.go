@@ -83,7 +83,7 @@ func TestE2E_Binary_UploadDownloadDelete(t *testing.T) {
 	}
 	args := []string{
 		"--addr", addr,
-		"--uploads-dir", uploadsDir,
+		"--storage-root", uploadsDir,
 		"--config", configPath,
 	}
 	cmd := exec.Command(sproxyBin, args...)

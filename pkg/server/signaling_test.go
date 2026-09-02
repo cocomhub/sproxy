@@ -460,7 +460,7 @@ func TestHubPersist_OnChangeFiltersOrphanInbox(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfg := Default()
 	cfg.Hub.Enabled = true
-	cfg.UploadsDir = filepath.Join(t.TempDir(), "uploads")
+	cfg.StorageRoot = filepath.Join(t.TempDir(), "uploads")
 	cfgPtr.Store(cfg)
 
 	rt := hub.NewMeshRouteTable()

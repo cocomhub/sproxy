@@ -64,8 +64,8 @@ type configResponse struct {
 	HubEnabled         bool   `json:"hub_enabled"`
 	TLSEnabled         bool   `json:"tls_enabled"`
 	Addr               string `json:"addr"`
-	UploadsDir         string `json:"uploads_dir"` // 相对路径；若配置为绝对路径则返回原值
-	WebTunnel          bool   `json:"web_tunnel"`  // web.tunnel：Web UI 领域方法是否默认走加密隧道
+	StorageRoot        string `json:"storage_root"` // 相对路径；若配置为绝对路径则返回原值
+	WebTunnel          bool   `json:"web_tunnel"`   // web.tunnel：Web UI 领域方法是否默认走加密隧道
 }
 
 // configHandler 处理 GET /api/config，返回当前运行时配置（脱敏）。
@@ -88,7 +88,7 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 		HubEnabled:         cfg.Hub.Enabled,
 		TLSEnabled:         cfg.TLS.Enabled,
 		Addr:               cfg.Addr,
-		UploadsDir:         cfg.UploadsDir,
+		StorageRoot:        cfg.StorageRoot,
 		WebTunnel:          cfg.Web.Tunnel,
 	}
 

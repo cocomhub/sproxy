@@ -36,7 +36,7 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	tmpDir := t.TempDir()
 
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.ChunkSize = 4 << 10 // 4 KiB for testing
 	if modifyCfg != nil {
 		modifyCfg(cfg)
@@ -53,8 +53,8 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 		uploadingStop: make(chan struct{}),
 	}
 	// 多租户存储布局装配（同 newAssemblyTestHandlers / RegisterRoutes）：StorageRoot() 回退
-	// UploadsDir，两者同目录（旧配置兼容）。anonymous 租户预创建。
-	globalRoot, err := storage.OpenRoot(cfg.StorageRoot())
+	// StorageRoot，两者同目录（旧配置兼容）。anonymous 租户预创建。
+	globalRoot, err := storage.OpenRoot(cfg.StorageRoot)
 	if err != nil {
 		t.Fatalf("打开存储根失败: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestUploadComplete_FullFlow(t *testing.T) {
 	}
 
 	// 验证文件已保存（anonymous 租户 user 桶）
-	uploadsDir := cfgPtr.Load().UploadsDir
+	uploadsDir := cfgPtr.Load().StorageRoot
 	savedPath := filepath.Join(uploadsDir, "anonymous", "user", "full-flow.txt")
 	if _, err := os.Stat(savedPath); os.IsNotExist(err) {
 		t.Fatalf("saved file not found: %s", savedPath)
@@ -602,7 +602,7 @@ func TestUploadComplete_SubDir(t *testing.T) {
 	}
 
 	// 验证文件已创建在租户 user 桶子目录中（anonymous 租户）
-	uploadsDir := cfgPtr.Load().UploadsDir
+	uploadsDir := cfgPtr.Load().StorageRoot
 	savedPath := filepath.Join(uploadsDir, "anonymous", "user", filepath.FromSlash(filename))
 	if _, err := os.Stat(savedPath); os.IsNotExist(err) {
 		t.Fatalf("saved file not found at subdirectory path: %s", savedPath)

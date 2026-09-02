@@ -77,7 +77,7 @@ var localMuxPatterns = []struct{ method, pattern string }{
 func newTestMux(t *testing.T, withHub bool) http.Handler {
 	t.Helper()
 	cfg := Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	cfg.Hub.Enabled = withHub
 	var cfgPtr atomic.Pointer[Config]
@@ -121,7 +121,7 @@ func hasRoute(t *testing.T, mux http.Handler, probeMethods []string, path string
 // 隧道解密为明文，直接 ServeHTTP 应命中路由返回 200，而非 401。
 func TestHandlers_LocalHandler(t *testing.T) {
 	cfg := Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)

@@ -23,7 +23,7 @@ import (
 func newTestCfgPtr(dir string) *atomic.Pointer[Config] {
 	var p atomic.Pointer[Config]
 	cfg := Default()
-	cfg.UploadsDir = dir
+	cfg.StorageRoot = dir
 	p.Store(cfg)
 	return &p
 }
@@ -352,7 +352,7 @@ func TestCloudArchive_PreservesMTime(t *testing.T) {
 	})
 
 	// 获取原始文件 mtime（未认证上传落 <storageRoot>/anonymous/user/）
-	info, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot(), anonymousOwner, "user", "mtime-test.txt"))
+	info, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot, anonymousOwner, "user", "mtime-test.txt"))
 	if err != nil {
 		t.Fatalf("stat uploaded file: %v", err)
 	}

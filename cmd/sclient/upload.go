@@ -22,7 +22,7 @@ func NewCmdUpload(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 		Short: "上传一个或多个文件",
 		Long: `上传一个或多个文件到 sproxy 服务端。
 		文件路径中的目录结构会被保留。
-		如：sclient upload dir/file.txt 会将文件保存到服务端的 uploads_dir/dir/file.txt
+		如：sclient upload dir/file.txt 会将文件保存到服务端的 storage_root/dir/file.txt
 
 		受当前目录 (cd) 影响：相对路径会拼接当前目录前缀。
 		使用 / 开头的绝对路径可以绕过当前目录。`,

@@ -18,7 +18,7 @@ func newTestServerWithMetrics(t *testing.T) (*httptest.Server, *Handlers) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 

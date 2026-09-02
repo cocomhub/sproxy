@@ -85,7 +85,7 @@ hub:
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("write config %s: %v", name, err)
 	}
-	cmd := exec.Command(binPath, "--addr", addr, "--uploads-dir", uploadsDir, "--config", configPath)
+	cmd := exec.Command(binPath, "--addr", addr, "--storage-root", uploadsDir, "--config", configPath)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sproxy %s: %v", name, err)
 	}

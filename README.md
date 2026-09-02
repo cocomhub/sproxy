@@ -46,10 +46,10 @@
     ./build/bin/sproxy --config ./config.example.yaml
     ```
 
-  - 覆盖配置中的监听地址与上传目录
+  - 覆盖配置中的监听地址与存储根目录
 
     ```bash
-    ./build/bin/sproxy --config ./config.example.yaml --addr :18083 --uploads-dir ./uploads
+    ./build/bin/sproxy --config ./config.example.yaml --addr :18083 --storage-root ./storage
     ```
 
 
@@ -58,7 +58,7 @@
 - `--version`：打印版本与构建信息后退出
 - `--config <PATH>`：指定 YAML 配置文件路径（默认 `config.yaml`，不存在时使用内置默认值）
 - `--addr <ADDR>`：覆盖配置中的监听地址（如 `:18083`）
-- `--uploads-dir <DIR>`：覆盖配置中的上传目录路径
+- `--storage-root <DIR>`：覆盖配置中的存储根目录路径
 - `--tunnel-key <HEX>`：覆盖配置中的隧道密钥（64 位十六进制）
 
 
@@ -99,7 +99,7 @@
 
 ```yaml
 addr: ":18083"
-uploads_dir: "./uploads"
+storage_root: "./storage"
 tunnel_key: "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
 server_timeouts:
   read_header: "5s"
@@ -146,10 +146,10 @@ sproxy 服务端可代替客户端从外部 URL 下载文件（云端离线下�
   ./build/bin/sproxy --addr :18083
   ```
 
-- 指定上传目录
+- 指定存储根目录
 
   ```bash
-  ./build/bin/sproxy --uploads-dir ./uploads
+  ./build/bin/sproxy --storage-root ./storage
   ```
 
 - 指定隧道密钥
@@ -206,5 +206,5 @@ sclient relay dial --node local --tcp 127.0.0.1:2090 \
 ## 注意
 
 - 所有超时字段使用 Go 的持续时间语法（例如 `"30s"`、`"5m"`）。
-- Checksum 持久化在 `<uploads_dir>/.checksums.json`，由 server 自动维护。
+- Checksum 持久化在 `<storage_root>/<tenant>/meta/checksums.json`，由 server 自动维护。
 - 历史版本曾包含 `/{host}/{filepath...}` 的 HTTPS 透明转发与 `/bandwidth` 端点，已在重构中移除，定位收敛为文件服务 + 加密隧道。

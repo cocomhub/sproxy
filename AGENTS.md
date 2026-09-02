@@ -249,8 +249,8 @@ type Conn interface {
 
 1. 默认值（`Default()`）
 2. 配置文件 YAML（`--config` 指定，默认 `sproxy.yaml`）
-3. 环境变量（前缀 `SPROXY_`，如 `SPROXY_ADDR`、`SPROXY_UPLOADS_DIR`）
-4. CLI 标志（`--addr`、`--uploads-dir`、`--tunnel-key`）
+3. 环境变量（前缀 `SPROXY_`，如 `SPROXY_ADDR`、`SPROXY_STORAGE_ROOT`）
+4. CLI 标志（`--addr`、`--storage-root`、`--tunnel-key`）
 
 优先级：CLI 标志 > 环境变量 > 配置文件 > 默认值。
 
@@ -263,7 +263,7 @@ type Conn interface {
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
 | `addr` | string | `:18083` | 监听地址 |
-| `uploads_dir` | string | `./uploads` | 上传目录 |
+| `storage_root` | string | `./storage` | 多租户存储根（`<tenant>/{user,cloud,archive,chunk,version,meta}/` 桶布局） |
 | `tunnel_key` | string | 空（自动生成） | 64 hex chars AES-256 密钥 |
 | `log_level` | string | `info` | debug/info/warn/error |
 | `log_format` | string | `text` | text/json |
@@ -297,7 +297,7 @@ type Conn interface {
 
 所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 必须是 64 个十六进制字符（32 字节 AES-256 密钥），否则启动失败。生成密钥：`sclient genkey`。
 
-SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`uploads_dir`/`tunnel_key`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`access_keys` 需要重启进程。
+SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`storage_root`/`tunnel_key`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`access_keys`/`owner_quotas` 需要重启进程。
 
 ## sclient CLI（`cmd/sclient/`）
 

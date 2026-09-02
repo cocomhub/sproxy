@@ -256,7 +256,7 @@ func (h *Handlers) checksumStoreFor(owner string) *ChecksumStore {
 		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
 		return nil
 	}
-	cs := NewChecksumStoreAt(filepath.Join(metaAbs, "checksums.json"), h.logger)
+	cs := NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), h.logger)
 	h.checksumStores[owner] = cs
 	return cs
 }
@@ -408,10 +408,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	}
 
 	// 打开全局存储根（多租户布局：<storage_root>/<tenant>/{user,cloud,...}/）。
-	// 目录不存在时先创建（原 uploads_dir 也是惰性创建）；storage.OpenRoot 会写入/校验
+	// 目录不存在时先创建（原 storage_root 也是惰性创建）；storage.OpenRoot 会写入/校验
 	// LAYOUT_VERSION。失败（目录无法打开 / 布局版本不匹配）是致命装配错误：记 Error 并
 	// panic 拒绝启动，绝不静默继续（否则文件服务会在错误的存储根上运行）。
-	storageRootPath := cfg.StorageRoot()
+	storageRootPath := cfg.StorageRoot
 	if err := os.MkdirAll(storageRootPath, 0o755); err != nil {
 		log.Error("创建存储根目录失败", "path", storageRootPath, "error", err)
 		panic("创建存储根目录失败: " + err.Error())
@@ -492,7 +492,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 初始化 StorageManager 和 CloudDownloadManager。
 	// P4：StorageManager 保留全局账本（sync/旧装配兼容）；启动扫描经 SetReconciler 按租户桶
 	// 归集校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。云任务配额走 cloud 桶子 Scope。
-	sm := NewStorageManager(cfg.StorageRoot(), cfg.MaxStorageBytes, nil, log.With("component", "storage"))
+	sm := NewStorageManager(cfg.StorageRoot, cfg.MaxStorageBytes, nil, log.With("component", "storage"))
 	sm.SetReconciler(h.reconcileQuotaScopes)
 	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope（启动对账）
 	cloudCfg := &CloudDownloadConfig{
@@ -508,7 +508,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		RetryDelay:      cfg.CloudRetryDelay,
 		Downloader:      cfg.CloudDownloader,
 	}
-	h.cloudMgr = NewCloudDownloadManager(cfg.UploadsDir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
+	h.cloudMgr = NewCloudDownloadManager(cfg.StorageRoot, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
 		return h.quotaBucketFor(owner, "cloud")
 	})
 	h.storageMgr = sm

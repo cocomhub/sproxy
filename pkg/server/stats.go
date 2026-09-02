@@ -15,9 +15,9 @@ import (
 
 // DiskUsageStats 磁盘使用统计。
 type DiskUsageStats struct {
-	UploadsDir string `json:"uploads_dir"`
-	TotalFiles int    `json:"total_files"`
-	TotalSize  int64  `json:"total_size"`
+	StorageRoot string `json:"storage_root"`
+	TotalFiles  int    `json:"total_files"`
+	TotalSize   int64  `json:"total_size"`
 }
 
 // RequestCounts 请求计数统计。
@@ -105,7 +105,7 @@ func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64
 			}
 			return nil
 		}
-		if d.Name() == ".checksums.json" {
+		if d.Name() == "checksums.json" {
 			return nil
 		}
 		info, err := d.Info()
@@ -154,7 +154,7 @@ func (h *Handlers) walkUploadStatsByCategory(root string) (userFiles, chunked, v
 			}
 			return nil
 		}
-		if d.Name() == ".checksums.json" {
+		if d.Name() == "checksums.json" {
 			return nil
 		}
 		info, err := d.Info()
@@ -211,7 +211,7 @@ func statsCategoriesFromBuckets(buckets map[string]int64) (userFiles, cloud, chu
 }
 
 // statsRootFor 返回 stats 遍历的根目录：认证用户 → 租户根（<storageRoot>/<owner>/）；
-// admin（空 owner）→ 存储根（<storageRoot>/）。globalRoot 未装配时回退旧布局 UploadsDir。
+// admin（空 owner）→ 存储根（<storageRoot>/）。globalRoot 未装配时回退 StorageRoot()。
 func (h *Handlers) statsRootFor(owner string) string {
 	if owner != "" {
 		if tnt := h.tenantFor(owner); tnt != nil {
@@ -220,12 +220,12 @@ func (h *Handlers) statsRootFor(owner string) string {
 			}
 		}
 		// 租户不可用（globalRoot 未装配的旧测试装配 / 非法 owner fail-closed）时，
-		// 按段名校验派生旧布局路径（UploadsDir/<owner>/）；非法 owner 返回空（无统计根）。
+		// 按段名校验派生旧布局路径（<storageRoot>/<owner>/）；非法 owner 返回空（无统计根）。
 		if !storage.ValidSegmentName(owner) {
 			return ""
 		}
 		if cfg := h.cfgPtr.Load(); cfg != nil {
-			return filepath.Join(cfg.UploadsDir, owner)
+			return filepath.Join(cfg.StorageRoot, owner)
 		}
 		return ""
 	}
@@ -235,7 +235,7 @@ func (h *Handlers) statsRootFor(owner string) string {
 		}
 	}
 	if cfg := h.cfgPtr.Load(); cfg != nil {
-		return cfg.UploadsDir
+		return cfg.StorageRoot
 	}
 	return ""
 }
@@ -255,9 +255,9 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp := StatsResponse{
 		DiskUsage: DiskUsageStats{
-			UploadsDir: cfg.UploadsDir,
-			TotalFiles: totalFiles,
-			TotalSize:  totalSize,
+			StorageRoot: cfg.StorageRoot,
+			TotalFiles:  totalFiles,
+			TotalSize:   totalSize,
 		},
 	}
 
@@ -332,7 +332,7 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 磁盘统计
-	total, free, used, err := diskStats(cfg.UploadsDir)
+	total, free, used, err := diskStats(cfg.StorageRoot)
 	if err != nil {
 		h.logger.Warn("stats: 获取磁盘统计失败", "error", err)
 	} else {

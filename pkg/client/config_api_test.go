@@ -29,7 +29,7 @@ func TestGetConfig(t *testing.T) {
 			"versioning_enabled":false,"versioning_max_versions":5,
 			"cloud_max_concurrent":3,"cloud_sync_threshold":20971520,
 			"hub_enabled":false,"tls_enabled":true,
-			"addr":":18083","uploads_dir":"./uploads"
+			"addr":":18083","storage_root":"./storage"
 		}`))
 	}))
 	t.Cleanup(ts.Close)
@@ -80,8 +80,8 @@ func TestGetConfig(t *testing.T) {
 	if cfg.Addr != ":18083" {
 		t.Errorf("expected Addr=:18083, got %s", cfg.Addr)
 	}
-	if cfg.UploadsDir != "./uploads" {
-		t.Errorf("expected UploadsDir=./uploads, got %s", cfg.UploadsDir)
+	if cfg.StorageRoot != "./storage" {
+		t.Errorf("expected StorageRoot=./storage, got %s", cfg.StorageRoot)
 	}
 }
 

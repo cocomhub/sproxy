@@ -25,7 +25,7 @@ func newSyncTestEnv(t *testing.T, remoteURL string, modifyCfg func(*Config)) (h 
 	t.Helper()
 	dir := t.TempDir()
 	cfg := Default()
-	cfg.UploadsDir = dir
+	cfg.StorageRoot = dir
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}
@@ -325,7 +325,7 @@ func TestSyncAPI_NotConfigured(t *testing.T) {
 	// 不注入 SyncManager → 400
 	dir := t.TempDir()
 	cfg := Default()
-	cfg.UploadsDir = dir
+	cfg.StorageRoot = dir
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()

@@ -33,8 +33,8 @@ func TestConfig_DefaultsFilled(t *testing.T) {
 	if cfg.Addr == "" {
 		t.Fatal("Addr default empty")
 	}
-	if cfg.UploadsDir == "" {
-		t.Fatal("UploadsDir default empty")
+	if cfg.StorageRoot == "" {
+		t.Fatal("StorageRoot default empty")
 	}
 	if cfg.ChunkSize <= 0 {
 		t.Fatal("ChunkSize default <= 0")
@@ -78,7 +78,7 @@ func TestConfig_Validate_FillsZeroes(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if c.Addr == "" || c.UploadsDir == "" || c.ChunkSize <= 0 ||
+	if c.Addr == "" || c.StorageRoot == "" || c.ChunkSize <= 0 ||
 		c.UploadSessionTTL <= 0 || c.ServerTimeouts.Shutdown <= 0 {
 		t.Fatalf("SetDefaults did not fill zero values: %+v", c)
 	}
@@ -539,12 +539,12 @@ func TestLoadFromProvider_HubDHTPersistFile(t *testing.T) {
 }
 
 // TestConfig_StorageRoot 验证 storage_root 回退与 owner_quotas 默认值逻辑（任务 4）。
-// StorageRoot() 字段非空优先，否则回退 UploadsDir（兼容旧配置）；OwnerQuotaFor 显式 owner > "*" > 0。
+// StorageRoot() 字段非空优先，否则回退 StorageRoot（兼容旧配置）；OwnerQuotaFor 显式 owner > "*" > 0。
 func TestConfig_StorageRoot(t *testing.T) {
 	c := Default()
-	c.UploadsDir = "./storage"
-	if c.StorageRoot() != "./storage" {
-		t.Fatalf("StorageRoot=%q", c.StorageRoot())
+	c.StorageRoot = "./storage"
+	if c.StorageRoot != "./storage" {
+		t.Fatalf("StorageRoot=%q", c.StorageRoot)
 	}
 	// OwnerQuotaFor：未配置返回默认值
 	if got := c.OwnerQuotaFor("alice"); got != 0 {
@@ -569,8 +569,8 @@ func TestLoadFromProvider_StorageRootOwnerQuotas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFromProvider: %v", err)
 	}
-	if cfg.StorageRoot() != "./storage" {
-		t.Fatalf("StorageRoot()=%q want ./storage", cfg.StorageRoot())
+	if cfg.StorageRoot != "./storage" {
+		t.Fatalf("StorageRoot()=%q want ./storage", cfg.StorageRoot)
 	}
 	if got := cfg.OwnerQuotaFor("alice"); got != 10<<30 {
 		t.Fatalf("OwnerQuotaFor(alice)=%d want %d", got, 10<<30)
@@ -580,26 +580,23 @@ func TestLoadFromProvider_StorageRootOwnerQuotas(t *testing.T) {
 	}
 }
 
-// TestLoadFromProvider_UploadsDirFallback 验证仅配置 uploads_dir（旧配置）时 StorageRoot() 回退
-// uploads_dir，保证向后兼容。
-func TestLoadFromProvider_UploadsDirFallback(t *testing.T) {
-	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{"uploads_dir": "/old/uploads"}})
+// TestLoadFromProvider_StorageRootFallback 验证仅配置 storage_root 时正确解析，且旧键
+// uploads_dir 被忽略（回退默认 ./storage）——uploads_dir 字段已完全移除，不兼容旧配置键。
+func TestLoadFromProvider_StorageRootFallback(t *testing.T) {
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{"storage_root": "/old/uploads"}})
 	if err != nil {
 		t.Fatalf("LoadFromProvider: %v", err)
 	}
-	if cfg.StorageRoot() != "/old/uploads" {
-		t.Fatalf("StorageRoot()=%q want /old/uploads（回退 uploads_dir）", cfg.StorageRoot())
+	if cfg.StorageRoot != "/old/uploads" {
+		t.Fatalf("StorageRoot()=%q want /old/uploads", cfg.StorageRoot)
 	}
-	// 显式 storage_root 优先于 uploads_dir
-	cfg2, err := LoadFromProvider(mapProvider{m: map[string]any{
-		"uploads_dir":  "/old/uploads",
-		"storage_root": "/new/storage",
-	}})
+	// 旧键 uploads_dir 已被移除：仅配 uploads_dir 时解析不到 storage_root → 回退默认。
+	cfgOld, err := LoadFromProvider(mapProvider{m: map[string]any{"uploads_dir": "/old/uploads"}})
 	if err != nil {
-		t.Fatalf("LoadFromProvider: %v", err)
+		t.Fatalf("LoadFromProvider(旧键): %v", err)
 	}
-	if cfg2.StorageRoot() != "/new/storage" {
-		t.Fatalf("StorageRoot()=%q want /new/storage（storage_root 优先）", cfg2.StorageRoot())
+	if cfgOld.StorageRoot != "./storage" {
+		t.Fatalf("StorageRoot(仅配 uploads_dir)=%q want 默认 ./storage（旧键已废弃）", cfgOld.StorageRoot)
 	}
 }
 

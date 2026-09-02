@@ -285,7 +285,7 @@ type ConfigResponse struct {
 	HubEnabled         bool   `json:"hub_enabled"`
 	TLSEnabled         bool   `json:"tls_enabled"`
 	Addr               string `json:"addr"`
-	UploadsDir         string `json:"uploads_dir"`
+	StorageRoot        string `json:"storage_root"`
 }
 
 // GetConfig 获取远程服务器配置。

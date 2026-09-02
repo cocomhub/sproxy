@@ -31,12 +31,9 @@ import (
 func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config], *bytes.Buffer) {
 	t.Helper()
 	tmpDir := t.TempDir()
-	// 新布局根用独立 temp 目录（同 newTestServer：隔离 LAYOUT_VERSION/anonymous 对旧 handler 枚举的污染）。
-	storageRoot := t.TempDir()
 
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
-	cfg.StorageRootPath = storageRoot
+	cfg.StorageRoot = tmpDir
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	if modifyCfg != nil {
 		modifyCfg(cfg)
@@ -73,7 +70,7 @@ func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.
 // （新布局；与服务端 UserRel 映射一致）。
 func writeUploadFile(t *testing.T, cfgPtr *atomic.Pointer[Config], name string, content []byte) {
 	t.Helper()
-	full := filepath.Join(cfgPtr.Load().StorageRoot(), testAccessKey, "user", filepath.FromSlash(name))
+	full := filepath.Join(cfgPtr.Load().StorageRoot, testAccessKey, "user", filepath.FromSlash(name))
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(full), err)
 	}
@@ -682,7 +679,7 @@ func TestCloudDeleteTask_RecordsAuditError(t *testing.T) {
 func TestRequestLog_RecordsActor(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)

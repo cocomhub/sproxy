@@ -37,7 +37,7 @@ func genTestCertFiles(t *testing.T) (certFile, keyFile string) {
 // 返回 TLS listener 信息（地址非空、TLS=true、身份指纹非空），无错误。
 func TestStartXferListener_TLSEnabled(t *testing.T) {
 	cfg := server.Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []server.AccessKeyConfig{
 		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
 	}
@@ -80,7 +80,7 @@ func TestStartXferListener_TLSEnabled(t *testing.T) {
 // 返回 TLS=false 的 listener（明文 tcp 仅显式 option）。
 func TestStartXferListener_PlainTCP(t *testing.T) {
 	cfg := server.Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []server.AccessKeyConfig{
 		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
 	}
@@ -106,7 +106,7 @@ func TestStartXferListener_PlainTCP(t *testing.T) {
 // TestStartXferListener_Disabled 验证两个 xfer 段都未启用时无操作（不报错、不启动）。
 func TestStartXferListener_Disabled(t *testing.T) {
 	cfg := server.Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []server.AccessKeyConfig{
 		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
 	}
@@ -124,7 +124,7 @@ func TestStartXferListener_Disabled(t *testing.T) {
 // xfer listener 启用但无 access_keys → 拒启（隧道密钥派生失败，AD-3）。
 func TestStartXferListener_NoAccessKeysFails(t *testing.T) {
 	cfg := server.Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.Hub.Transports.XferTLS.Enabled = true
 	cfg.Hub.Transports.XferTLS.Listen = "127.0.0.1:0"
 	// 无 AccessKeys
@@ -142,7 +142,7 @@ func TestStartXferListener_NoAccessKeysFails(t *testing.T) {
 // xfer_tls 启用但无任何证书（AutoTLS=false、cert_file 空）→ 拒启。
 func TestStartXferListener_NoCertFails(t *testing.T) {
 	cfg := server.Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []server.AccessKeyConfig{
 		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
 	}
@@ -163,7 +163,7 @@ func TestStartXferListener_NoCertFails(t *testing.T) {
 // 时升级为 TLS listener（复用 tcp+tls 传输）。
 func TestStartXferListener_XferTCPTLSUpgraded(t *testing.T) {
 	cfg := server.Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []server.AccessKeyConfig{
 		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
 	}

@@ -45,7 +45,7 @@ func actorChunkedMux(h *Handlers, actor string) *http.ServeMux {
 func newChunkedTestHandlers(t *testing.T, dir string, chunkSize int64) *Handlers {
 	t.Helper()
 	cfg := Default()
-	cfg.UploadsDir = dir
+	cfg.StorageRoot = dir
 	if chunkSize > 0 {
 		cfg.ChunkSize = chunkSize
 	}
@@ -58,7 +58,7 @@ func newChunkedTestHandlers(t *testing.T, dir string, chunkSize int64) *Handlers
 		auditLogger:   testLogger(),
 		uploadingStop: make(chan struct{}),
 	}
-	globalRoot, err := storage.OpenRoot(cfg.StorageRoot())
+	globalRoot, err := storage.OpenRoot(cfg.StorageRoot)
 	if err != nil {
 		t.Fatalf("打开存储根失败: %v", err)
 	}

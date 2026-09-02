@@ -2,7 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 addr: ":18083"
-uploads_dir: "./uploads"
+# 多租户存储根（<storage_root>/<tenant>/{user,cloud,archive,chunk,version,meta}/）。
+storage_root: "./storage"
+
+# 按 owner 配额上限（字节；"*" 为默认值，未显式列出的 owner 用此值；0 = 不限制；
+# 未认证请求映射到 anonymous 租户，可用 "anonymous" 单独限配额）。
+# owner_quotas:
+#   "*": 5368709120        # 5 GiB 默认
+#   anonymous: 1073741824  # 1 GiB 匿名租户
+#   alice: 10737418240     # 10 GiB
+
+# 全局存储兜底：所有租户占用总和上限（0 = 不限制，保留原 max_storage_bytes 语义）。
+# max_storage_bytes: 0
 
 # 单次普通上传（非分块）最大字节数，超过返回 413。0 或不填使用默认 1 GiB。
 # max_upload_bytes: 1073741824
@@ -92,7 +103,7 @@ access_keys:
 # max_chunk_upload_bytes: 8388608   # 单块请求体服务端最大限制 (8MB)，超过返回 413
 # upload_session_ttl: "24h"         # 未完成上传会话保留时间，过期自动清理
 
-# 文件版本管理（默认关闭）。上传覆盖前自动保存旧版本到 .__versions__/ 目录。
+# 文件版本管理（默认关闭）。上传覆盖前自动保存旧版本到 <storage_root>/<tenant>/version/ 桶。
 # versioning:
 #   enabled: true
 #   max_versions: 10                # 保留最近的 N 个版本，超出自动清理
@@ -112,7 +123,7 @@ access_keys:
 
 # 云端下载任务归档（tar.gz）加固：
 # cloud_archive_max_bytes 限制单次云归档打包的原始文件大小总和（字节），0 或不填=不限制。
-# 无论是否设置，都受 max_storage_bytes（TryReserve）兜底；归档文件计入 __cloud_archives__/ 目录空间。
+# 无论是否设置，都受 max_storage_bytes（TryReserve）兜底；归档文件计入对应租户 archive 桶空间。
 # 同名归档文件已存在时返回 409（O_EXCL 防覆盖）；打包完成后按磁盘实际大小对账预留配额。
 # cloud_archive_max_bytes: 10737418240   # 10 GiB 示例
 
@@ -143,7 +154,7 @@ access_keys:
 #   xfer_identity_file: ""          # 服务端 xfer listener 的 Ed25519 身份文件路径（握手指纹 pinning）。
 #                                   # 空=回落 XDG 用户配置目录（Linux ~/.config/sproxy/、macOS
 #                                   # ~/Library/Application Support/sproxy/、Windows %AppData%/sproxy/）。
-#                                   # **绝不放 uploads_dir 下**（与文件 API 命名空间重叠，私钥可被
+#                                   # **绝不放 storage_root 下**（与文件 API 命名空间重叠，私钥可被
 #                                   # 已认证 peer 经 /download 读取/覆盖——安全约束）。
 #   virtual_subnet: "100.64.0.0/10" # 虚拟 IP 子网（CIDR，仅 IPv4；默认 CGNAT RFC 6598，分配从 .2 起、.1 保留网关；
 #                                   # mesh connect <vip>:<port> 虚拟主机寻址；客户端 sclient mesh connect / mesh node

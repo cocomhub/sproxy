@@ -159,7 +159,7 @@ func TestStats_SkipsInternalDirsAtAnyDepth(t *testing.T) {
 	}
 
 	var cfg atomic.Pointer[Config]
-	cfg.Store(&Config{UploadsDir: dir})
+	cfg.Store(&Config{StorageRoot: dir})
 	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
 
 	// 复用 statsHandler 的 WalkDir 逻辑：以空 owner 全局视角统计，验证内部目录被跳过
@@ -209,7 +209,7 @@ func TestStats_OwnerScopedCategories(t *testing.T) {
 	}
 
 	var cfg atomic.Pointer[Config]
-	cfg.Store(&Config{UploadsDir: dir})
+	cfg.Store(&Config{StorageRoot: dir})
 	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
 
 	userFiles, chunked, versions, cloud := h.walkUploadStatsByCategory(ownerRoot)
@@ -331,7 +331,7 @@ func TestStats_CategoryWalker_SkipsTaskStateDirs(t *testing.T) {
 	}
 
 	var cfg atomic.Pointer[Config]
-	cfg.Store(&Config{UploadsDir: dir})
+	cfg.Store(&Config{StorageRoot: dir})
 	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
 	userFiles, chunked, versions, cloud := h.walkUploadStatsByCategory(root)
 	if userFiles != 5 {

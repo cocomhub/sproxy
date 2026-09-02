@@ -148,7 +148,7 @@ func TestHandler_UploadRouteRequiresAuth(t *testing.T) {
 	t.Parallel()
 
 	cfg := Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(cfg)

@@ -27,7 +27,7 @@ func testServer(t *testing.T, opts ...bool) (string, *server.Config, func()) {
 
 	tmpDir := t.TempDir()
 	cfg := server.Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.LogLevel = "error"
 	if len(opts) > 0 && opts[0] {
 		cfg.Versioning.Enabled = true
@@ -57,6 +57,8 @@ func testServer(t *testing.T, opts ...bool) (string, *server.Config, func()) {
 }
 
 // testFile creates a test file in the uploads directory.
+// 多租户布局：list/search/share 等 handler 枚举 <storageRoot>/anonymous/user/（未认证请求
+// 映射到 anonymous 租户），测试文件须写入该 user 桶才能被 Web UI 列表/搜索看到。
 func testFile(t *testing.T, uploadsDir, name, content string) {
 	t.Helper()
 	p := filepath.Join(uploadsDir, name)
@@ -66,6 +68,11 @@ func testFile(t *testing.T, uploadsDir, name, content string) {
 	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// userRoot 返回未认证请求（anonymous 租户）的 user 桶绝对路径。
+func userRoot(cfg *server.Config) string {
+	return filepath.Join(cfg.StorageRoot, "anonymous", "user")
 }
 
 // pageFixture 创建 Playwright browser+page，返回 cleanup 函数。
@@ -134,7 +141,7 @@ func TestFileList(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t)
 	defer cleanup()
 
-	testFile(t, cfg.UploadsDir, "hello.txt", "hello world")
+	testFile(t, userRoot(cfg), "hello.txt", "hello world")
 
 	page, stop := pageFixture(t)
 	defer stop()
@@ -157,7 +164,7 @@ func TestDirectoryNavigation(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t)
 	defer cleanup()
 
-	testFile(t, cfg.UploadsDir, "sub/deep.txt", "deep")
+	testFile(t, userRoot(cfg), "sub/deep.txt", "deep")
 
 	page, stop := pageFixture(t)
 	defer stop()
@@ -233,7 +240,7 @@ func TestDownloadLink(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t)
 	defer cleanup()
 
-	testFile(t, cfg.UploadsDir, "dl-test.txt", "downloadable")
+	testFile(t, userRoot(cfg), "dl-test.txt", "downloadable")
 
 	page, stop := pageFixture(t)
 	defer stop()
@@ -515,7 +522,7 @@ func TestShareButton(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t)
 	defer cleanup()
 
-	testFile(t, cfg.UploadsDir, "share-test.txt", "shareable content")
+	testFile(t, userRoot(cfg), "share-test.txt", "shareable content")
 
 	page, stop := pageFixture(t)
 	defer stop()
@@ -537,7 +544,7 @@ func TestShareAPI(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t)
 	defer cleanup()
 
-	testFile(t, cfg.UploadsDir, "api-share-test.txt", "api content")
+	testFile(t, userRoot(cfg), "api-share-test.txt", "api content")
 
 	page, stop := pageFixture(t)
 	defer stop()
@@ -626,7 +633,7 @@ func TestVersioningLoadVersions(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t, true)
 	defer cleanup()
 
-	testFile(t, cfg.UploadsDir, "versioned.txt", "v1 content")
+	testFile(t, userRoot(cfg), "versioned.txt", "v1 content")
 
 	page, stop := pageFixture(t)
 	defer stop()
@@ -693,7 +700,7 @@ func TestDirArchiveButton(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t)
 	defer cleanup()
 
-	testFile(t, cfg.UploadsDir, "archivedir/sub/dummy.txt", "dummy")
+	testFile(t, userRoot(cfg), "archivedir/sub/dummy.txt", "dummy")
 
 	page, stop := pageFixture(t)
 	defer stop()
@@ -715,7 +722,7 @@ func TestSearchFunction(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t)
 	defer cleanup()
 
-	testFile(t, cfg.UploadsDir, "search-me.txt", "findable content")
+	testFile(t, userRoot(cfg), "search-me.txt", "findable content")
 
 	page, stop := pageFixture(t)
 	defer stop()

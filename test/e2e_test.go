@@ -246,7 +246,7 @@ func startSPROXY(t *testing.T) (string, func()) {
 	}
 	args := []string{
 		"--addr", addr,
-		"--uploads-dir", uploadsDir,
+		"--storage-root", uploadsDir,
 		"--config", configPath,
 	}
 	cmd := exec.Command(binPath, args...)

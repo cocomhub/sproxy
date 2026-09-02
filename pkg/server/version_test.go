@@ -415,7 +415,7 @@ func TestVersion_NewLayout(t *testing.T) {
 func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.Versioning.Enabled = true
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)

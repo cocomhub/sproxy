@@ -21,7 +21,7 @@ func startFullTestServer(t *testing.T) (string, *server.Config) {
 	tmpDir := t.TempDir()
 
 	cfg := server.Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.ChunkSize = 4 << 10 // 4 KiB for test
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)

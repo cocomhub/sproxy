@@ -275,7 +275,7 @@ func TestArchive_PreservesMTime(t *testing.T) {
 	})
 
 	// 获取上传后的文件 mtime（未认证上传落 <storageRoot>/anonymous/user/）
-	info, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot(), anonymousOwner, "user", "test.txt"))
+	info, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot, anonymousOwner, "user", "test.txt"))
 	if err != nil {
 		t.Fatalf("stat uploaded file: %v", err)
 	}
@@ -327,7 +327,7 @@ func makeDirLinkOrSkip(t *testing.T, link, target string) {
 // （addFileToTar 经 os.Root 相对打开，每路径分量 O_NOFOLLOW/O_NOFOLLOW_ANY，越界即失败）。
 func TestArchive_RejectsSymlinkEscape(t *testing.T) {
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
-	root := cfgPtr.Load().StorageRoot()
+	root := cfgPtr.Load().StorageRoot
 
 	// 构造租户 user 目录 + 指向租户根外的目录符号链接
 	userDir := filepath.Join(root, anonymousOwner, "user")

@@ -117,7 +117,7 @@ func TestRunServer_ListenAndServeError(t *testing.T) {
 
 	cmd := &cobra.Command{Use: "sproxy"}
 	cmd.Flags().String("addr", occupiedAddr, "")
-	cmd.Flags().String("uploads-dir", tmpDir, "")
+	cmd.Flags().String("storage-root", tmpDir, "")
 	cmd.Flags().Bool("version", false, "")
 
 	// 注入 signal channel 避免 goroutine 泄漏
@@ -129,9 +129,9 @@ func TestRunServer_ListenAndServeError(t *testing.T) {
 	cfgProvider = setupProviderForSighup(filepath.Join(tmpDir, "sproxy.yaml"))
 	t.Cleanup(func() { cfgProvider = nil })
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	cfgProvider.Set("addr", occupiedAddr)
-	cfgProvider.Set("uploads_dir", tmpDir)
+	cfgProvider.Set("storage_root", tmpDir)
 	cfgProvider.Set("access_keys", []map[string]any{{"key": "sk-test-0000000000000000", "secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mesh_id": "test"}})
 	cfgProvider.Set("log_level", "error")
 

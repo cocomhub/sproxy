@@ -45,8 +45,8 @@ func newOwnerUploadEnv(t *testing.T) *ownerUploadEnv {
 	root := t.TempDir()
 
 	cfg := Default()
-	cfg.UploadsDir = root
-	cfg.StorageRootPath = root
+	cfg.StorageRoot = root
+	cfg.StorageRoot = root
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 

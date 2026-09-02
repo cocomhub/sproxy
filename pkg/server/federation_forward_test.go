@@ -40,7 +40,7 @@ func newRelayTestHub(t *testing.T, rt *hub.MeshRouteTable, accessKeys []AccessKe
 	t.Helper()
 	cfg := Default()
 	cfg.Addr = "127.0.0.1:0"
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.LogLevel = "error"
 	cfg.Hub.Enabled = true
 	cfg.Hub.Federation.Enabled = true

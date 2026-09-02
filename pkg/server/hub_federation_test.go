@@ -151,7 +151,7 @@ func TestFederationEndpoint_AuthRequired(t *testing.T) {
 	rt := hub.NewMeshRouteTable()
 	cfg := Default()
 	cfg.Addr = "127.0.0.1:0"
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.LogLevel = "error"
 	cfg.Hub.Enabled = true
 	cfg.Hub.Federation.Enabled = true
@@ -186,7 +186,7 @@ func TestFederationSync_AuthSuccessAndFailure(t *testing.T) {
 	rt := hub.NewMeshRouteTable()
 	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-b"), Addr: "192.168.1.2:9000"}, nil)
 	cfg := Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.LogLevel = "error"
 	cfg.Hub.Enabled = true
 	cfg.Hub.Federation.Enabled = true
@@ -241,7 +241,7 @@ func TestFederationNodesEndpoint_MeshFromAccessKey(t *testing.T) {
 	rt.Add("meshM", hub.NodeInfo{ID: hub.NodeID("node-m"), Addr: "192.168.1.2:9000"}, nil)
 	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-default"), Addr: "192.168.1.3:9000"}, nil)
 	cfg := Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.LogLevel = "error"
 	cfg.Hub.Enabled = true
 	cfg.Hub.Federation.Enabled = true
@@ -296,7 +296,7 @@ func TestDualHubPeering_NodesVisible(t *testing.T) {
 	rtB := hub.NewMeshRouteTable()
 	rtB.Add("", hub.NodeInfo{ID: hub.NodeID("node-b"), Addr: "192.168.1.2:9000"}, nil)
 	cfgB := Default()
-	cfgB.UploadsDir = t.TempDir()
+	cfgB.StorageRoot = t.TempDir()
 	cfgB.LogLevel = "error"
 	cfgB.Hub.Enabled = true
 	cfgB.Hub.Federation.Enabled = true
@@ -316,7 +316,7 @@ func TestDualHubPeering_NodesVisible(t *testing.T) {
 	rtA := hub.NewMeshRouteTable()
 	rtA.Add("", hub.NodeInfo{ID: hub.NodeID("node-a"), Addr: "192.168.1.1:9000"}, nil)
 	cfgA := Default()
-	cfgA.UploadsDir = t.TempDir()
+	cfgA.StorageRoot = t.TempDir()
 	cfgA.LogLevel = "error"
 	cfgA.Hub.Enabled = true
 	cfgA.Hub.Federation.Enabled = true
@@ -377,7 +377,7 @@ func TestDualHubPeering_MeshNotLeaked(t *testing.T) {
 	rtB.Add("", hub.NodeInfo{ID: hub.NodeID("node-public"), Addr: "192.168.1.2:9000"}, nil)
 	rtB.Add("private", hub.NodeInfo{ID: hub.NodeID("node-secret"), Addr: "192.168.1.9:9000"}, nil)
 	cfgB := Default()
-	cfgB.UploadsDir = t.TempDir()
+	cfgB.StorageRoot = t.TempDir()
 	cfgB.LogLevel = "error"
 	cfgB.Hub.Enabled = true
 	cfgB.Hub.Federation.Enabled = true
@@ -397,7 +397,7 @@ func TestDualHubPeering_MeshNotLeaked(t *testing.T) {
 	rtA := hub.NewMeshRouteTable()
 	rtA.Add("", hub.NodeInfo{ID: hub.NodeID("node-a"), Addr: "192.168.1.1:9000"}, nil)
 	cfgA := Default()
-	cfgA.UploadsDir = t.TempDir()
+	cfgA.StorageRoot = t.TempDir()
 	cfgA.LogLevel = "error"
 	cfgA.Hub.Enabled = true
 	cfgA.Hub.Federation.Enabled = true

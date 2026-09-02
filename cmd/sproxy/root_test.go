@@ -201,12 +201,12 @@ func TestBuildServerConfig_NoTLSFlag(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("no-tls", false, "")
 	cmd.Flags().String("addr", ":18083", "")
-	cmd.Flags().String("uploads-dir", tmpDir, "")
+	cmd.Flags().String("storage-root", tmpDir, "")
 	_ = cmd.Flags().Set("no-tls", "true")
 
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	t.Cleanup(func() { cfgProvider = nil })
 
 	cfg, err := buildServerConfig(cmd)
@@ -227,12 +227,12 @@ func TestBuildServerConfig_NoTLSFlagDefaults(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("no-tls", false, "")
 	cmd.Flags().String("addr", ":18083", "")
-	cmd.Flags().String("uploads-dir", tmpDir, "")
+	cmd.Flags().String("storage-root", tmpDir, "")
 	// 不设置 --no-tls，验证 TLS 默认启用
 
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	t.Cleanup(func() { cfgProvider = nil })
 
 	cfg, err := buildServerConfig(cmd)
@@ -259,13 +259,13 @@ func TestRunServer_RejectsStartupWithoutAuth(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
 	cmd.Flags().Bool("version", false, "")
-	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cmd.Flags().String("storage-root", t.TempDir(), "")
 	cmd.Flags().Bool("no-tls", false, "")
 	_ = cmd.Flags().Set("no-tls", "true")
 
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	t.Cleanup(func() { cfgProvider = nil })
 
 	err := runServer(cmd, nil)
@@ -290,7 +290,7 @@ func TestRunServer_AllowNoAuthFlag(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
 	cmd.Flags().Bool("version", false, "")
-	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cmd.Flags().String("storage-root", t.TempDir(), "")
 	cmd.Flags().Bool("no-tls", false, "")
 	cmd.Flags().Bool("allow-no-auth", false, "")
 	_ = cmd.Flags().Set("no-tls", "true")
@@ -298,7 +298,7 @@ func TestRunServer_AllowNoAuthFlag(t *testing.T) {
 
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	t.Cleanup(func() { cfgProvider = nil })
 
 	// runServer 会启动监听并阻塞于 shutdown——注入关闭信号使其快速返回，
@@ -334,13 +334,13 @@ func TestRunServer_HubEnabledRequiresAccessKeys(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
 	cmd.Flags().Bool("version", false, "")
-	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cmd.Flags().String("storage-root", t.TempDir(), "")
 	cmd.Flags().Bool("no-tls", false, "")
 	_ = cmd.Flags().Set("no-tls", "true")
 
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	cfgProvider.Set("api_keys", map[string]any{"enabled": true, "keys": []map[string]any{{"key": "t1", "permission": "write"}}})
 	cfgProvider.Set("hub", map[string]any{"enabled": true})
 	t.Cleanup(func() { cfgProvider = nil })
@@ -355,17 +355,17 @@ func TestRunServer_HubEnabledRequiresAccessKeys(t *testing.T) {
 }
 
 // setupRunServerAuthConfig 为 runServer 测试配置 access_keys（认证驱动启动必需）
-// 与 uploads_dir，使服务器能通过 fail-fast 检查正常启动。
+// 与 storage_root，使服务器能通过 fail-fast 检查正常启动。
 func setupRunServerAuthConfig(t *testing.T, cmd *cobra.Command) {
 	t.Helper()
 	oldCfgFile := cfgFile
 	cfgFile = filepath.Join(t.TempDir(), "sproxy.yaml")
 	t.Cleanup(func() { cfgFile = oldCfgFile })
 
-	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cmd.Flags().String("storage-root", t.TempDir(), "")
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	cfgProvider.Set("access_keys", []map[string]any{{"key": "sk-test-0000000000000000", "secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mesh_id": "test"}})
 	t.Cleanup(func() { cfgProvider = nil })
 }
@@ -417,13 +417,13 @@ func TestBuildServerConfig_FederationPersistFile(t *testing.T) {
 	persistFile := filepath.Join(t.TempDir(), "fed-cands.json")
 	cmd := &cobra.Command{}
 	cmd.Flags().String("addr", ":18083", "")
-	cmd.Flags().String("uploads-dir", t.TempDir(), "")
+	cmd.Flags().String("storage-root", t.TempDir(), "")
 	cmd.Flags().Bool("no-tls", false, "")
 	_ = cmd.Flags().Set("no-tls", "true")
 
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
-	cfgProvider.BindPFlag("uploads_dir", cmd.Flags().Lookup("uploads-dir"))
+	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	cfgProvider.Set("hub", map[string]any{
 		"enabled":    true,
 		"transports": map[string]any{"ws": map[string]any{"enabled": true}},

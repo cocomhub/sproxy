@@ -24,7 +24,7 @@ func writeCloudArchive(t *testing.T, cfgPtr *atomic.Pointer[Config], owner, name
 	if tenant == "" {
 		tenant = anonymousOwner
 	}
-	archiveDir := filepath.Join(cfgPtr.Load().StorageRoot(), tenant, "archive")
+	archiveDir := filepath.Join(cfgPtr.Load().StorageRoot, tenant, "archive")
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatalf("mkdir archive dir: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestDownloadCloudArchive_NormalDownloadStillWorks(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 	content := []byte("normal-file")
-	normalPath := filepath.Join(cfgPtr.Load().StorageRoot(), anonymousOwner, "user", "normal.txt")
+	normalPath := filepath.Join(cfgPtr.Load().StorageRoot, anonymousOwner, "user", "normal.txt")
 	if err := os.MkdirAll(filepath.Dir(normalPath), 0755); err != nil {
 		t.Fatalf("mkdir normal dir: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestDownloadCloudTask_Kind(t *testing.T) {
 	tmpDir := t.TempDir()
 	otherAK := "sk-test-other-000000"
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.AccessKeys = []AccessKeyConfig{
 		{Key: testAccessKey, Secret: testAccessSecret},
 		{Key: otherAK, Secret: testAccessSecret},

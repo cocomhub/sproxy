@@ -30,7 +30,7 @@ func benchServer(tb testing.TB, modifyCfg func(*Config)) (string, *atomic.Pointe
 	tmpDir := tb.TempDir()
 
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}
@@ -64,7 +64,7 @@ func benchServerWithChunked(tb testing.TB, modifyCfg func(*Config)) (string, *at
 	tmpDir := tb.TempDir()
 
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.ChunkSize = 1 << 20 // 1 MiB for benchmarks
 	if modifyCfg != nil {
 		modifyCfg(cfg)
@@ -80,7 +80,7 @@ func benchServerWithChunked(tb testing.TB, modifyCfg func(*Config)) (string, *at
 		logger:        slog.Default(),
 		uploadingStop: make(chan struct{}),
 	}
-	globalRoot, err := storage.OpenRoot(cfg.StorageRoot())
+	globalRoot, err := storage.OpenRoot(cfg.StorageRoot)
 	if err != nil {
 		tb.Fatalf("打开存储根失败: %v", err)
 	}
