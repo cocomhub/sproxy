@@ -619,3 +619,35 @@ func TestConfig_VirtualSubnet_Validate(t *testing.T) {
 		t.Fatal("IPv6 子网应被 Validate 拒绝（虚拟 IP 分配仅支持 IPv4）")
 	}
 }
+
+// TestConfig_BucketLimits_Default 验证 BucketLimits 默认值为非 nil 空 map
+// （满足 len(c.BucketLimits)==0 的判断，round-trip 后不 panic）。
+func TestConfig_BucketLimits_Default(t *testing.T) {
+	c := Default()
+	if c.BucketLimits == nil {
+		t.Fatal("BucketLimits 默认应为非 nil 空 map（非 nil 可被 map 判断/访问复用）")
+	}
+	if len(c.BucketLimits) != 0 {
+		t.Fatalf("BucketLimits 默认应空 map, got %d entries", len(c.BucketLimits))
+	}
+}
+
+// TestLoadFromProvider_BucketLimits 验证 YAML 解析 bucket_limits 配置（页面在 briefs 中已明确字段名）。
+func TestLoadFromProvider_BucketLimits(t *testing.T) {
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr": ":18083",
+		"bucket_limits": map[string]any{
+			"user/videos/hd": int64(10485760),
+			"cloud":          int64(1 << 30),
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if got := cfg.BucketLimits["user/videos/hd"]; got != 10485760 {
+		t.Fatalf("BucketLimits[user/videos/hd]=%d want 10485760", got)
+	}
+	if got := cfg.BucketLimits["cloud"]; got != 1<<30 {
+		t.Fatalf("BucketLimits[cloud]=%d want %d", got, 1<<30)
+	}
+}

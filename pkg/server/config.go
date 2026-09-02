@@ -256,6 +256,12 @@ type Config struct {
 	// "*" 为默认值（未显式列出的 owner 用此值）；0 = 不限制。
 	// 启动装配时按此创建各租户的配额 Scope（quotaFor 懒创建）。
 	OwnerQuotas map[string]int64 `yaml:"owner_quotas" mapstructure:"owner_quotas"`
+	// BucketLimits 是功能桶/子目录配额上限（字节），key 为相对租户根路径
+	// （如 "user/videos/hd" → <tenant>/user/videos/hd 下字节上限；也支持功能桶根
+	// "cloud"）。0 = 该路径不单独限制（仍受租户总 owner_quotas 与全局
+	// max_storage_bytes 兜底）。启动装配时按此创建路径子 Scope（quotaBucketFor 懒建）；
+	// 仅装配期消费，SIGHUP 后不重建 → bucket_limits 修改需重启进程。
+	BucketLimits map[string]int64 `yaml:"bucket_limits" mapstructure:"bucket_limits"`
 	// MaxUploadBytes 已移至 internal/size.UploadBodyLimit（1 GiB 硬限制），不可配置。
 	// MaxChunkUploadBytes 已移至 internal/size.DefaultChunkBodyLimit（64 MiB 硬限制），不可配置。
 	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`
@@ -326,6 +332,9 @@ func Default() *Config {
 	return &Config{
 		Addr:        ":18083",
 		StorageRoot: "./storage",
+		// OwnerQuotas/BucketLimits 默认空 map（非 nil，便于 map 判断/访问复用）。
+		OwnerQuotas:  map[string]int64{},
+		BucketLimits: map[string]int64{},
 		ServerTimeouts: ServerTimeouts{
 			Shutdown: 30 * time.Second,
 		},

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -303,18 +302,18 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 	return us
 }
 
-// quotaBucketNames 是参与配额归集的功能桶名（对应租户根下的物理桶；meta 不参与配额）。
-var quotaBucketNames = []string{"user", "cloud", "archive", "chunk", "version"}
+// quotaBucketNames 是参与配额归集的功能桶名（对应租户根下的物理桶；meta 桶的配额
+// 参与归集与否由任务 3 的扫描开启决定，此处先装配其子 Scope 供 reconciliation 使用）。
+var quotaBucketNames = []string{"user", "cloud", "archive", "chunk", "version", "meta"}
 
-// isQuotaBucket 判断 bucket 是否在参与配额归集的功能桶白名单内。
-func isQuotaBucket(bucket string) bool {
-	return slices.Contains(quotaBucketNames, bucket)
-}
-
-// ensureTenantQuotaLocked 确保 owner 的租户配额 Scope 与功能桶子 Scope 已创建（调用方须持
-// tenantMu）。首次访问按 owner 在 globalPool 下挂载 /tenant/<owner> Scope（上限 =
-// cfg.OwnerQuotaFor(owner)），并预创建 user/cloud/archive/chunk/version 子 Scope（上限 0 =
-// 不限制，租户上限由父 Scope 单一执行）。globalPool 未装配时返回 (nil, nil)。
+// ensureTenantQuotaLocked 确保 owner 的租户配额 Scope、功能桶子 Scope 与 bucket_limits
+// 路径子 Scope 已创建（调用方须持 tenantMu）。首次访问按 owner 在 globalPool 下挂载
+// /tenant/<owner> Scope（上限 = cfg.OwnerQuotaFor(owner)），并预创建
+// user/cloud/archive/chunk/version/meta 功能桶子 Scope（上限 0 = 不限制，租户上限由父
+// Scope 单一执行），随后按 cfg.BucketLimits 对每个相对路径建精确路径子 Scope
+// （scope.Scope(path, limit)，键即完整逻辑路径，供 quotaBucketFor 精确路径命中复用）。
+// globalPool 未装配时返回 (nil, nil)。bucket_limits/owner_quotas 属装配期硬配置，
+// 懒建后缓存不重建 → SIGHUP 后修改不生效（重启进程）。
 func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[string]*quota.Scope) {
 	if s, ok := h.quotaScopes[owner]; ok {
 		return s, h.quotaBuckets[owner]
@@ -329,13 +328,20 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 		h.quotaBuckets = make(map[string]map[string]*quota.Scope)
 	}
 	var quotaBytes int64
+	var bucketLimits map[string]int64
 	if cfg := h.cfgPtr.Load(); cfg != nil {
 		quotaBytes = cfg.OwnerQuotaFor(owner)
+		bucketLimits = cfg.BucketLimits
 	}
 	s := h.globalPool.Scope("/tenant/"+owner, quotaBytes)
-	buckets := make(map[string]*quota.Scope, len(quotaBucketNames))
+	buckets := make(map[string]*quota.Scope, len(quotaBucketNames)+len(bucketLimits))
 	for _, b := range quotaBucketNames {
 		buckets[b] = s.Scope(b, 0)
+	}
+	for path, limit := range bucketLimits {
+		// 相对租户根路径（如 user/videos/hd）；加到功能桶之外的自定义子目录子 Scope。
+		// 键即完整逻辑路径，quotaBucketFor 精确命中时复用（与功能桶子 Scope 同 map）。
+		buckets[path] = s.Scope(filepath.ToSlash(path), limit)
 	}
 	h.quotaScopes[owner] = s
 	h.quotaBuckets[owner] = buckets
@@ -353,14 +359,18 @@ func (h *Handlers) quotaFor(owner string) *quota.Scope {
 	return s
 }
 
-// quotaBucketFor 返回 owner 租户下指定功能桶的配额子 Scope（懒创建，缓存复用）。
-// bucket 必须在 quotaBucketNames 白名单内；globalPool 未装配或非法桶返回 nil。
-// 写路径按物理桶归集：user 上传 → "user"、分块 → "chunk"、云任务 → "cloud"、归档 → "archive"、
-// 版本 → "version"。子 Scope 操作沿父链聚合到租户 Scope 与 globalPool（上限单一执行）。
+// quotaBucketFor 返回 owner 租户下指定路径的配额子 Scope（懒创建，缓存复用）。
+// 解析优先级（一级命中即返回）：
+//  1. BucketLimits[path] 精确路径子 Scope（子目录/功能桶独立上限，如 user/videos/hd）；
+//  2. 功能桶白名单子 Scope（quotaBucketNames：user/cloud/archive/chunk/version/meta）；
+//  3. 否则 nil——任意的非白名单/未配置路径不建立任意子目录子 Scope。
+//
+// bucket 若不在功能桶白名单（如子目录路径），仅当它出现在 BucketLimits 里才返回对应
+// 子 Scope；globalPool 未装配时返回 nil。写路径按物理桶归集：user 上传 → "user"、
+// 分块 → "chunk"、云任务 → "cloud"、归档 → "archive"、版本 → "version"、meta → "meta"。
+// 子 Scope 操作沿父链聚合到租户 Scope 与 globalPool（上限单一执行：精确路径命中时先
+// 受该子 Scope 上限约束，再聚合到租户/全局）。
 func (h *Handlers) quotaBucketFor(owner, bucket string) *quota.Scope {
-	if !isQuotaBucket(bucket) {
-		return nil
-	}
 	owner = normalizeOwner(owner)
 	h.tenantMu.Lock()
 	defer h.tenantMu.Unlock()
@@ -368,7 +378,12 @@ func (h *Handlers) quotaBucketFor(owner, bucket string) *quota.Scope {
 	if buckets == nil {
 		return nil
 	}
-	return buckets[bucket]
+	// 功能桶白名单键命中优先（保证既有语义），其次 BucketLimits 精确路径键。
+	if sc, ok := buckets[bucket]; ok {
+		return sc
+	}
+	// 任意的非白名单/未配置路径 → nil（不建立任意子目录子 Scope）。
+	return nil
 }
 
 // RegisterRoutesOpts 是 RegisterRoutes 的选项参数结构体。

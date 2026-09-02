@@ -10,6 +10,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -711,4 +712,70 @@ func TestQuota_SyncScopeAdapter(t *testing.T) {
 	}
 	// q 由 SyncQuotaStore() 返回，静态类型已是 syncmgr.QuotaStore（编译期接口保证），
 	// 此处仅在调用侧验证 TryReserve/Release 语义可用。
+}
+
+// TestQuota_BucketLimits_PathScope 验证 bucket_limits 子目录子 Scope 装配与上限生效（任务 2）：
+// 精确路径（user/videos/hd）命中 bucket_limits → quotaBucketFor 返回对应子 Scope，TryReserve
+// 超该子 Scope 上限失败（ErrStorageFull，写路径即 507）；同租户其他未配置路径不建立任意
+// 子 Scope（quotaBucketFor 返回 nil），且 user 桶整体不受子目录上限约束（仅受 owner_quotas
+// 租户总上限兜底）。
+//
+// 注：本任务阶段写路径仍按物理桶归集（upload 落 "user" 桶，如下 HTTP 上传断言），把写路径
+// 解析到精确 path 子 Scope 由后续任务（sync/cloud 装配、任务 8 记账模板）完成；此处用
+// TryReserve 直接验证子 Scope 上限机制（即写路径接入后 507 的实现基础）。
+func TestQuota_BucketLimits_PathScope(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 200}
+	env.h.cfgPtr.Store(cfg)
+
+	// 精确路径命中：subScope 非 nil、上限 100
+	subScope := env.h.quotaBucketFor("alice", "user/videos/hd")
+	if subScope == nil {
+		t.Fatal("quotaBucketFor(alice, user/videos/hd)=nil（bucket_limits 精确路径应命中）")
+	}
+	if got := subScope.MaxBytes(); got != 100 {
+		t.Fatalf("bucket_limits 子目录 Scope MaxBytes=%d want 100", got)
+	}
+
+	// TryReserve(60) 成功 → 子 Scope Reserved 60（预留尚未 Commit）
+	if _, err := subScope.TryReserve(60); err != nil {
+		t.Fatalf("子目录 TryReserve(60) 应成功: %v", err)
+	}
+	if got := subScope.Reserved(); got != 60 {
+		t.Fatalf("子目录 Scope Reserved()=%d want 60", got)
+	}
+	// TryReserve(100)（60+100=160 > 100）→ 被该子 Scope 上限拦住（写路径即 507）
+	if _, err := subScope.TryReserve(100); err == nil {
+		t.Fatal("子目录 TryReserve(100) 应被上限拦住（超 100）")
+	} else if !errors.Is(err, quota.ErrStorageFull) {
+		t.Fatalf("应返回 ErrStorageFull（可映射 507）, got %v", err)
+	}
+
+	// 同租户其他路径不受桶限制：未配置 bucket_limits 的子目录不建立任意子 Scope
+	if sc := env.h.quotaBucketFor("alice", "user/other/sub"); sc != nil {
+		t.Fatalf("未配置 bucket_limits 的子目录路径应返回 nil（不建立任意子 Scope）")
+	}
+
+	// user 桶本身不受子目录上限约束（仅受租户上限）：TryReserve(100) 成功
+	userScope := env.h.quotaBucketFor("alice", "user")
+	if userScope == nil {
+		t.Fatal("user 桶 Scope 应为非 nil")
+	}
+	if _, err := userScope.TryReserve(100); err != nil {
+		t.Fatalf("user 桶 TryReserve(100) 应成功（不被子目录上限约束）: %v", err)
+	}
+
+	// HTTP 写路径阶段仍按物理桶归集（不回归）：上传到子目录 40 字节 → user 桶 + 租户 Usage 40
+	umux := actorUploadDeleteMux(env.h, "alice")
+	if code, resp := uploadAsPath(t, umux, "user/videos/hd/a.txt", []byte(strings.Repeat("a", 40))); code != http.StatusOK {
+		t.Fatalf("子目录 40 字节应 200, got %d: %s", code, resp)
+	}
+	if got := env.h.quotaFor("alice").Usage(); got != 40 {
+		t.Fatalf("上传后租户 Usage()=%d want 40", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 40 {
+		t.Fatalf("上传后 user 桶 Usage()=%d want 40", got)
+	}
 }

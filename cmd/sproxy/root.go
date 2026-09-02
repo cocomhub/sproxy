@@ -745,6 +745,9 @@ func handleSighup(oldCfg *server.Config) {
 	if !maps.Equal(oldCfg.OwnerQuotas, newCfg.OwnerQuotas) {
 		slog.Warn("owner_quotas 修改在 SIGHUP 后不会生效（配额 Scope 不重建），需要重启进程")
 	}
+	if !maps.Equal(oldCfg.BucketLimits, newCfg.BucketLimits) {
+		slog.Warn("bucket_limits 修改在 SIGHUP 后不会生效（配额 Scope 不重建），需要重启进程")
+	}
 	if oldCfg.RateLimit != newCfg.RateLimit {
 		slog.Warn("rate_limit 修改在 SIGHUP 后不会生效，需要重启进程")
 	}
