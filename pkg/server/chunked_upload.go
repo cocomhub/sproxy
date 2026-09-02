@@ -796,7 +796,11 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 			if actual > prev {
 				extra, reserveErr := scope.TryReserve(actual - prev)
 				if reserveErr != nil {
+					// 覆盖写竞态 + 配额不足：合并已用新内容替换旧文件，removeMerged 删除后
+					// 磁盘无文件，user 桶仍记着旧文件 prev 字节——同步 ReleaseUsage(prev) 使
+					// 账本与磁盘一致（否则旧文件字节虚高直至周期扫描校准）。
 					removeMerged()
+					scope.ReleaseUsage(prev)
 					sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "存储配额不足"}, http.StatusInsufficientStorage)
 					return
 				}

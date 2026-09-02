@@ -177,15 +177,19 @@ func TestSyncAPI_CreateTask_RemoteMissing(t *testing.T) {
 	}
 }
 
-func TestSyncAPI_CreateTask_StorageFull(t *testing.T) {
+// TestSyncAPI_CreateTask_QuotaContract 验证 pull 任务创建不受存储配额装配卡死（201 契约）：
+// MaxStorageBytes=1024 只装配到 globalPool，而 anonymous 租户 user 桶 Scope 无上限
+// （OwnerQuotaFor=0 不限制）→ TryReserve(1GiB) 恒成功（reserved=1GiB）→ 创建成功 201，
+// 不真正触发降级分支（降级由 syncmgr.TestCreateTask_QuotaHeadroomDegrades 覆盖；
+// 配额 enforce 由 reconcile 强制，见 TestReconcileQuota_TryReserveFailOnCompletion）。
+func TestSyncAPI_CreateTask_QuotaContract(t *testing.T) {
 	srv := emptyRemote(t)
 	_, base := newSyncTestEnv(t, srv.URL, func(c *Config) { c.MaxStorageBytes = 1024 })
 
-	// pull 方向预留 1 GiB 占位 → 存储不足 → 507
 	code, body := doSyncJSON(t, "POST", base+"/api/sync/tasks",
 		`{"direction":"pull","remote":"r1","src":""}`)
-	if code != http.StatusInsufficientStorage {
-		t.Fatalf("存储不足应返回 507，got %d: %s", code, body)
+	if code != http.StatusCreated {
+		t.Fatalf("pull 创建应成功 201（配额装配不影响创建），got %d: %s", code, body)
 	}
 }
 

@@ -125,7 +125,8 @@ func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {
 
 	task, isNew, err := h.syncMgr.SubmitAndStart(req)
 	if err != nil {
-		// 存储不足（pull 方向预留失败）映射 507；其余（输入校验/remote 缺失等）400
+		// 存储不足映射 507（pull 占位预留已降级为按需，创建不再 507；此处兜底其余配额错误路径）；
+		// 其余（输入校验/remote 缺失等）400
 		if errors.Is(err, syncmgr.ErrStorageFull) || errors.Is(err, ErrStorageFull) {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
 			return

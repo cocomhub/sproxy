@@ -258,12 +258,21 @@ func TestCreateTask_QuotaPush(t *testing.T) {
 	}
 }
 
-func TestCreateTask_QuotaFull(t *testing.T) {
-	quota := newMockQuota(1024) // 远小于 1 GiB 占位
+// TestCreateTask_QuotaHeadroomDegrades 验证占位预留在配额不足时降级而非拒绝：
+// owner_quota < 1GiB 的租户（或全局余量 < 1GiB）仍可创建 pull 任务（ReservedSize=0 按需预留），
+// 配额由 reconcileQuotaLocked 在下载字节实际到达时强制（见 TestReconcileQuota_TryReserveFailOnCompletion）。
+func TestCreateTask_QuotaHeadroomDegrades(t *testing.T) {
+	quota := newMockQuota(1024) // 远小于 1 GiB 占位 → 头部预占失败，降级为按需预留
 	mgr := newTestManager(t, quota, nil, nil, nil)
-	_, _, err := mgr.CreateTask(CreateRequest{Direction: "pull", Remote: "r1"})
-	if !errors.Is(err, ErrStorageFull) {
-		t.Fatalf("应返回 ErrStorageFull，got %v", err)
+	task, _, err := mgr.CreateTask(CreateRequest{Direction: "pull", Remote: "r1"})
+	if err != nil {
+		t.Fatalf("占位预留在配额不足时应降级而非拒绝，got %v", err)
+	}
+	if task.ReservedSize != 0 {
+		t.Fatalf("降级后 ReservedSize 应为 0（按需预留），got %d", task.ReservedSize)
+	}
+	if quota.Usage() != 0 {
+		t.Fatalf("降级后 quota 不应有预留，got %d", quota.Usage())
 	}
 }
 

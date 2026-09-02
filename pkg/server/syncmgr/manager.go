@@ -118,6 +118,7 @@ type Manager struct {
 	listTenants func() []string    // 返回全部租户名（恢复扫描；磁盘扫描，非内存缓存）
 	quota       QuotaStore
 	quotaFor    func(owner string) QuotaStore // 可选：按 owner 解析 per-tenant 配额存储（P4/P5）
+	quotaForMu  sync.RWMutex                  // 独立于 mu 的读写锁，守卫 quotaFor（taskQuota 在持/不持 mu 时均被调用）
 	quotaCat    int
 	remotes     map[string]RemoteConfig
 	executor    Executor
@@ -205,16 +206,21 @@ func (noopQuota) MaxBytes() int64                 { return 0 }
 // 未注入时回退 NewManager 传入的单一 QuotaStore（既有测试/旧装配保持全局语义）。
 // 注入后 NewManager 的 quota 仅作 fallback（resolver 对某 owner 返回 nil 时）。
 func (m *Manager) SetQuotaResolver(quotaFor func(owner string) QuotaStore) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.quotaForMu.Lock()
+	defer m.quotaForMu.Unlock()
 	m.quotaFor = quotaFor
 }
 
 // taskQuota 返回任务 owner 的配额存储：注入 resolver 时按 owner 解析（nil 回退单一 quota），
-// 否则直接返回单一 quota（测试/旧装配）。
+// 否则直接返回单一 quota（测试/旧装配）。quotaFor 经独立 quotaForMu 读写锁守卫，
+// 因为本函数在持 m.mu（CreateTask/CancelTask/failTask/reconcileQuotaLocked）与不持 m.mu
+// （DeleteTask）两种上下文下均被调用——用独立锁可避免与 m.mu 的锁序耦合/死锁。
 func (m *Manager) taskQuota(owner string) QuotaStore {
-	if m.quotaFor != nil {
-		if q := m.quotaFor(owner); q != nil {
+	m.quotaForMu.RLock()
+	qf := m.quotaFor
+	m.quotaForMu.RUnlock()
+	if qf != nil {
+		if q := qf(owner); q != nil {
 			return q
 		}
 	}
@@ -303,8 +309,9 @@ func (m *Manager) validateCreateRequest(req *CreateRequest) error {
 // CreateTask 创建同步任务（不启动执行），返回 (任务, 是否新建)。
 // 去重 + 预留 + 插入整体在写锁内完成（闭合 TOCTOU，审查 I-1：并发同 key 的
 // CreateTask 只有一个能通过，避免双任务并发写同一 dst 路径/远程 session 踩踏）。
-// pull 方向本地落盘，按占位大小预留配额（TryReserve 失败返回 ErrStorageFull）；
-// push 方向远程自行预留，本地不预留。
+// pull 方向本地落盘，按占位大小预留配额（TryReserve 失败降级为按需预留，不拒绝任务——
+// 1GiB 占位对 owner_quota < 1GiB 的租户放不下时，由 reconcileQuotaLocked 在下载字节
+// 实际到达时按增量强制配额）；push 方向远程自行预留，本地不预留。
 func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 	if err := m.validateCreateRequest(&req); err != nil {
 		return nil, false, err
@@ -332,21 +339,23 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 
 	reserved := int64(0)
 	if req.Direction == string(DirectionPull) {
-		reserved = syncReservePlaceholder
+		// 占位预留是 best-effort（P5 建议：按需占位）：1GiB 占位对 owner_quota < 1GiB 的租户
+		// 放不下时**不拒绝任务**——降级为 0 预留（reserved=0），由 reconcileQuotaLocked 在下载
+		// 字节实际到达时按 delta 增量 TryReserve 强制配额（提交永不超限；仅头部预占降级）。
+		// 配额余量检查仍被保留：reconcile 失败释放预留并使任务 failed（见
+		// TestReconcileQuota_TryReserveFailOnCompletion），不破坏已写入文件。
 		q := m.taskQuota(req.Owner) // P4/P5：按 owner 解析（resolver 未注入时回退全局 quota）
-		if err := q.TryReserve(reserved, m.quotaCat); err != nil {
-			m.mu.Unlock()
-			m.logger.Warn("storage full, sync task rejected",
+		if err := q.TryReserve(syncReservePlaceholder, m.quotaCat); err != nil {
+			m.logger.Warn("sync storage headroom reservation failed, degrade to on-demand reservation",
 				"remote", req.Remote,
 				"owner", req.Owner,
-				"requested", reserved,
+				"requested", syncReservePlaceholder,
 				"usage", q.Usage(),
 				"max", q.MaxBytes(),
 				"error", err,
 			)
-			// 统一映射为 ErrStorageFull：TryReserve 只返回配额满或 nil
-			// （真实实现返回 pkg/server.ErrStorageFull，syncmgr 无法 import server）。
-			return nil, false, fmt.Errorf("storage full: %w", ErrStorageFull)
+		} else {
+			reserved = syncReservePlaceholder
 		}
 	}
 
