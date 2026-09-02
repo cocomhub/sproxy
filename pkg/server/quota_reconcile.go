@@ -10,7 +10,8 @@ import "github.com/cocomhub/sproxy/pkg/storage"
 // 通过 quota.Scope.Adjust 把各桶 committed 校准到磁盘实际占用（重启后 Scope 不回溯）。
 
 // reconcileQuotaScopes 按租户桶归集磁盘占用，校准 per-tenant 配额 Scope 的 committed。
-// 只校准参与配额归集的功能桶（user/cloud/archive/chunk/version）；meta 不参与。
+// 校准全部参与配额归集的功能桶（user/cloud/archive/chunk/version/meta，meta 为服务端账本
+// 桶，任务 3 起随扫描计入；quotaBucketNames 白名单统一遍历）。
 // 校准语义：scope.Adjust(prev=当前 committed, next=磁盘字节数) → committed 收敛到磁盘实际。
 // 有在途预留（Reserved>0，如未 Commit 的云任务 partial）时跳过该桶——磁盘 partial 已计入
 // reserved，此时校准 committed 会造成双计（预留 Commit 后再叠加）。

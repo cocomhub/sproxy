@@ -377,6 +377,88 @@ func TestStorageManager_ScanAndRecalculateNewLayoutBuckets(t *testing.T) {
 	}
 }
 
+func TestStorageManager_ScanAndRecalculate_MetaBucket(t *testing.T) {
+	dir := t.TempDir()
+
+	writeAt := func(rel string, b []byte) {
+		t.Helper()
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// meta 桶（<root>/<tenant>/meta/）下既有服务端账本文件（sync 任务/云任务组）。
+	writeAt(filepath.Join("alice", "meta", "sync", "task.json"), []byte("abc1234"))        // 7
+	writeAt(filepath.Join("alice", "meta", "cloud", "groups", "g1.json"), []byte("hello")) // 5
+	writeAt(filepath.Join("alice", "meta", "checksums.json"), make([]byte, 100))           // 跳过（按名），不计
+	writeAt(filepath.Join("alice", "user", "u.txt"), []byte("abc"))                        // 3
+	writeAt("LAYOUT_VERSION", []byte("1"))                                                 // 不计
+
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	t.Cleanup(sm.Stop)
+
+	var captured map[string]map[string]int64
+	sm.SetReconciler(func(m map[string]map[string]int64) { captured = m })
+	if err := sm.ScanAndRecalculate(); err != nil {
+		t.Fatalf("ScanAndRecalculate: %v", err)
+	}
+
+	// meta 计入 totalUsage（7+5=12）；.checksums.json / LAYOUT_VERSION 跳过 → user 3 + meta 12。
+	if got := sm.Usage(); got != 15 {
+		t.Fatalf("Usage()=%d want 15（meta 计入总量、.checksums.json 跳过不双计）", got)
+	}
+	// 分类枚举保持 4 键不变：meta 不入 UsageByCategory。
+	u := sm.UsageByCategory()
+	if len(u) != 4 {
+		t.Fatalf("UsageByCategory 分类数应保持 4, got %d", len(u))
+	}
+	if u[CategoryUserFiles] != 3 || u[CategoryChunked] != 0 || u[CategoryVersions] != 0 || u[CategoryCloud] != 0 {
+		t.Fatalf("分类用量应只含 user=3（meta 不入分类）, got %+v", u)
+	}
+	// tenantBuckets 归集 meta 桶。
+	if captured == nil {
+		t.Fatal("reconcile 回调未收到 tenantBuckets")
+	}
+	if got := captured["alice"]["meta"]; got != 12 {
+		t.Fatalf("tenantBuckets[alice][meta]=%d want 12", got)
+	}
+	if got := captured["alice"]["user"]; got != 3 {
+		t.Fatalf("tenantBuckets[alice][user]=%d want 3", got)
+	}
+}
+
+func TestScanAndRecalculate_MetaReconcilesQuotaScope(t *testing.T) {
+	env := newOwnerEnv(t)
+
+	// 磁盘既有 meta 账本 + 用户文件（重启后 Scope 不回溯）：alice meta/sync 12 + user 60。
+	mustWriteFile(t, filepath.Join(env.root, "alice", "meta", "sync", "task.json"), 12)
+	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "f.txt"), 60)
+
+	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm.SetReconciler(env.h.reconcileQuotaScopes)
+	if err := sm.ScanAndRecalculate(); err != nil {
+		t.Fatalf("ScanAndRecalculate: %v", err)
+	}
+
+	// meta 校准进 meta 子 Scope，并沿父链聚合到租户 Scope 与 globalPool。
+	if got := env.h.quotaFor("alice").Usage(); got != 72 {
+		t.Fatalf("alice Scope Usage()=%d want 72（user 60 + meta 12）", got)
+	}
+	m := env.h.quotaFor("alice").UsageByBucket()
+	if got := m["/tenant/alice/meta"]; got != 12 {
+		t.Fatalf("alice meta 桶 = %d want 12（reconcile 校准到磁盘 meta 字节）", got)
+	}
+	if got := m["/tenant/alice/user"]; got != 60 {
+		t.Fatalf("alice user 桶 = %d want 60", got)
+	}
+	if got := env.h.globalPool.Usage(); got != 72 {
+		t.Fatalf("globalPool Usage()=%d want 72（父链聚合含 meta）", got)
+	}
+}
+
 func TestStorageManager_TryReserve_NegativeSize(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 100, nil, testLogger())
