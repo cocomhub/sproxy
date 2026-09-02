@@ -1391,7 +1391,9 @@ func TestUploadInit_RejectsNestedUploadID(t *testing.T) {
 	defer cleanup()
 
 	body := []byte("x")
-	for _, bad := range []string{"ak-A/evil", "a/b", "../evil", "a\b", ".__x"} {
+	// 注意：这里必须写 `"a\\b"`（Go 源码双反斜杠 = 字面反斜杠），否则 `\b` 是
+	// 退格转义（a\x08b）会逃过校验导致 CI 失败。
+	for _, bad := range []string{"ak-A/evil", "a/b", "../evil", "a\\b", ".__x"} {
 		initReq := map[string]any{
 			"upload_id":     bad,
 			"filename":      "ok.txt",
