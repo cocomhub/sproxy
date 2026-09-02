@@ -39,9 +39,10 @@ func newSyncTestEnv(t *testing.T, remoteURL string, modifyCfg func(*Config)) (h 
 	remotes := []syncmgr.RemoteConfig{{
 		Name: "r1", URL: remoteURL, AccessKey: "test-ak", AccessKeySecret: strings.Repeat("a", 64),
 	}}
-	sm := syncmgr.NewManager(h.syncTenantRoot, h.listTenantIDs, h.SyncQuotaStore(), int(CategoryUserFiles), remotes,
+	sm := syncmgr.NewManager(h.syncTenantRoot, h.listTenantIDs, nil, int(CategoryUserFiles), remotes,
 		syncexec.NewExecutor(h.syncTenantRoot, h.logger), h.logger,
 		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour})
+	sm.SetQuotaResolver(h.SyncQuotaStore())
 	h.SetSyncMgr(sm)
 
 	ts := httptest.NewServer(h.Handler())

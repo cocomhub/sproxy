@@ -117,6 +117,7 @@ type Manager struct {
 	tenantRoot  TenantRootResolver // 按任务 owner 解析租户 user 根 / meta/sync 持久化目录
 	listTenants func() []string    // 返回全部租户名（恢复扫描；磁盘扫描，非内存缓存）
 	quota       QuotaStore
+	quotaFor    func(owner string) QuotaStore // 可选：按 owner 解析 per-tenant 配额存储（P4/P5）
 	quotaCat    int
 	remotes     map[string]RemoteConfig
 	executor    Executor
@@ -198,6 +199,27 @@ func (noopQuota) TryReserve(_ int64, _ int) error { return nil }
 func (noopQuota) Release(_ int64, _ int)          {}
 func (noopQuota) Usage() int64                    { return 0 }
 func (noopQuota) MaxBytes() int64                 { return 0 }
+
+// SetQuotaResolver 注入 per-owner 配额解析器（P4/P5：sync pull 按任务 owner 在 user 桶
+// Scope 上预留/对账，替代全局 StorageManager 适配器，使 owner_quotas 对同步生效）。
+// 未注入时回退 NewManager 传入的单一 QuotaStore（既有测试/旧装配保持全局语义）。
+// 注入后 NewManager 的 quota 仅作 fallback（resolver 对某 owner 返回 nil 时）。
+func (m *Manager) SetQuotaResolver(quotaFor func(owner string) QuotaStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.quotaFor = quotaFor
+}
+
+// taskQuota 返回任务 owner 的配额存储：注入 resolver 时按 owner 解析（nil 回退单一 quota），
+// 否则直接返回单一 quota（测试/旧装配）。
+func (m *Manager) taskQuota(owner string) QuotaStore {
+	if m.quotaFor != nil {
+		if q := m.quotaFor(owner); q != nil {
+			return q
+		}
+	}
+	return m.quota
+}
 
 // persistDirFor 返回任务 owner 租户 meta/sync 持久化目录绝对路径。租户不可用返回 ""。
 func (m *Manager) persistDirFor(owner string) string {
@@ -311,13 +333,15 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 	reserved := int64(0)
 	if req.Direction == string(DirectionPull) {
 		reserved = syncReservePlaceholder
-		if err := m.quota.TryReserve(reserved, m.quotaCat); err != nil {
+		q := m.taskQuota(req.Owner) // P4/P5：按 owner 解析（resolver 未注入时回退全局 quota）
+		if err := q.TryReserve(reserved, m.quotaCat); err != nil {
 			m.mu.Unlock()
 			m.logger.Warn("storage full, sync task rejected",
 				"remote", req.Remote,
+				"owner", req.Owner,
 				"requested", reserved,
-				"usage", m.quota.Usage(),
-				"max", m.quota.MaxBytes(),
+				"usage", q.Usage(),
+				"max", q.MaxBytes(),
 				"error", err,
 			)
 			// 统一映射为 ErrStorageFull：TryReserve 只返回配额满或 nil
@@ -448,7 +472,7 @@ func (m *Manager) CancelTask(id, owner string) error {
 	// 区分用户文件 vs 同步残留），释放预留后磁盘残留字节在下次周期扫描（≤30min）前
 	// 未入账，属接受的瞬时欠计。
 	if t.ReservedSize > 0 {
-		m.quota.Release(t.ReservedSize, m.quotaCat)
+		m.taskQuota(t.Owner).Release(t.ReservedSize, m.quotaCat)
 		t.ReservedSize = 0
 	}
 	// 触发执行取消（排队中任务也已注册 cancelFuncs，可立即生效）
@@ -491,7 +515,7 @@ func (m *Manager) DeleteTask(id, owner string) error {
 	// 释放预留配额。与 CancelTask 同理（审查 M-4）：pull 已落盘文件不清理，残留字节
 	// 在下次周期扫描前未入账，属接受的瞬时欠计。
 	if reserved > 0 {
-		m.quota.Release(reserved, m.quotaCat)
+		m.taskQuota(t.Owner).Release(reserved, m.quotaCat)
 		m.logger.Debug("storage released", "task_id", id, "size", reserved)
 	}
 	m.logger.Info("deleting sync task", "task_id", id, "status", t.Status)
@@ -791,7 +815,7 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 		// 不释放会永久钉住配额（failed 不可取消，用户只能手动 DeleteTask 或重启）。
 		// 释放后归零防二次释放；磁盘残留由下次周期扫描记账。
 		if task.Direction == string(DirectionPull) && task.ReservedSize > 0 {
-			m.quota.Release(task.ReservedSize, m.quotaCat)
+			m.taskQuota(task.Owner).Release(task.ReservedSize, m.quotaCat)
 			task.ReservedSize = 0
 		}
 	default:
@@ -801,7 +825,7 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 		}
 		// 同上：未知状态落 failed 也释放预留配额。
 		if task.Direction == string(DirectionPull) && task.ReservedSize > 0 {
-			m.quota.Release(task.ReservedSize, m.quotaCat)
+			m.taskQuota(task.Owner).Release(task.ReservedSize, m.quotaCat)
 			task.ReservedSize = 0
 		}
 	}
@@ -847,12 +871,13 @@ func (m *Manager) reconcileQuotaLocked(task *SyncTask) {
 	reserved := task.ReservedSize
 	actual := task.BytesDone
 	delta := actual - reserved
+	q := m.taskQuota(task.Owner) // P4/P5：按 owner 解析（resolver 未注入时回退全局 quota）
 	switch {
 	case delta > 0:
-		if err := m.quota.TryReserve(delta, m.quotaCat); err != nil {
+		if err := q.TryReserve(delta, m.quotaCat); err != nil {
 			// 存储不足，无法容纳实际大小：释放旧占位，任务失败（不破坏已写入文件）
 			if reserved > 0 {
-				m.quota.Release(reserved, m.quotaCat)
+				q.Release(reserved, m.quotaCat)
 			}
 			task.ReservedSize = 0
 			task.Status = StatusFailed
@@ -861,7 +886,7 @@ func (m *Manager) reconcileQuotaLocked(task *SyncTask) {
 		}
 		task.ReservedSize = actual
 	case delta < 0:
-		m.quota.Release(-delta, m.quotaCat)
+		q.Release(-delta, m.quotaCat)
 		task.ReservedSize = actual
 	}
 }
@@ -874,7 +899,7 @@ func (m *Manager) failTask(task *SyncTask, errMsg string) {
 		return
 	}
 	if task.ReservedSize > 0 {
-		m.quota.Release(task.ReservedSize, m.quotaCat)
+		m.taskQuota(task.Owner).Release(task.ReservedSize, m.quotaCat)
 		task.ReservedSize = 0
 	}
 	task.Status = StatusFailed

@@ -325,12 +325,17 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	verRel := verDir + "/" + versionIDStr
-	if _, err = root.Stat(verRel); os.IsNotExist(err) {
+	verInfo, err := root.Stat(verRel)
+	if os.IsNotExist(err) {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "版本文件不存在: " + versionIDStr,
 		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "版本文件不存在"}, http.StatusNotFound)
+		return
+	} else if err != nil {
+		h.logger.Error("stat 版本文件失败", "file_name", remotePath, "error", err)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "访问版本文件失败"}, http.StatusInternalServerError)
 		return
 	}
 
@@ -351,9 +356,34 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// P4/P5 配额（I3 修复）：恢复把版本文件拷回 user 桶（O_TRUNC 覆盖当前文件），本质是新增
+	// user 桶字节——缺失配额可反复 restore 突破租户上限。与 upload 对齐：TryReserve(版本大小)
+	// 预留 → 拷贝成功后 Adjust(prev, actual)（覆盖写）/ Commit(actual)（新文件）；失败 Release()。
+	scope := h.quotaBucketFor(ownerFromRequest(r), "user")
+	prev := int64(0)
+	var res *quota.Reservation
+	if scope != nil {
+		if st, statErr := root.Stat(targetRel); statErr == nil {
+			prev = st.Size()
+		}
+		rr, reserveErr := scope.TryReserve(verInfo.Size())
+		if reserveErr != nil {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: "version_restore", ObjectType: "file", Object: remotePath,
+				Result: AuditResultError, Detail: "存储配额不足，拒绝恢复",
+			})
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "存储配额不足"}, http.StatusInsufficientStorage)
+			return
+		}
+		res = rr
+	}
+
 	// 拷贝版本文件到目标位置
 	src, err := root.Open(verRel)
 	if err != nil {
+		if res != nil {
+			res.Release()
+		}
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "打开版本文件失败: " + versionIDStr,
@@ -365,6 +395,9 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	dst, err := root.OpenFile(targetRel, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
+		if res != nil {
+			res.Release()
+		}
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "创建目标文件失败: " + versionIDStr,
@@ -374,7 +407,11 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	}
 	defer dst.Close()
 
-	if _, err = io.Copy(dst, src); err != nil {
+	written, err := io.Copy(dst, src)
+	if err != nil {
+		if res != nil {
+			res.Release()
+		}
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "恢复文件失败: " + versionIDStr,
@@ -383,12 +420,25 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if syncErr := dst.Sync(); syncErr != nil {
+		if res != nil {
+			res.Release()
+		}
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "同步文件失败: " + versionIDStr,
 		})
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "同步文件失败"}, http.StatusInternalServerError)
 		return
+	}
+
+	// P4/P5 配额对账：覆盖写 Adjust(prev, written)；新文件 Commit(written)。
+	if res != nil {
+		if prev > 0 {
+			scope.Adjust(prev, written)
+			res.Release()
+		} else {
+			res.Commit(written)
+		}
 	}
 
 	// 更新 checksum（per-tenant store，key = user 桶相对路径）

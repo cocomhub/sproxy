@@ -753,6 +753,21 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	// recovery 兜底走进程级；未来如需可打断用独立 goroutine + 状态表。）
 	mergeCtx := context.WithoutCancel(r.Context())
 
+	// 配额记账：合并前先统计目标 user 文件当前大小 prev（覆盖写场景用 Adjust；正常 chunked 流程
+	// init 已拒绝覆盖，prev=0）。必须在合并前 stat——合并后文件已落盘，stat 恒为新文件大小，
+	// 会把"新增"误判为"覆盖写"导致 Adjust 差分 0、user 桶从不记账（I1 修复的关键）。
+	tnt := h.tenantFor(owner)
+	var rel string
+	prev := int64(0)
+	if tnt != nil && tnt.Root() != nil {
+		if r, relOK := tnt.UserRel(session.Filename); relOK {
+			rel = r
+			if st, statErr := tnt.Root().Stat(rel); statErr == nil {
+				prev = st.Size()
+			}
+		}
+	}
+
 	finalChecksum, ok := h.mergeAndRenameFile(mergeCtx, w, store, owner, req.UploadID, session)
 	if !ok {
 		// mergeAndRenameFile 已发送错误响应；分块与会话保留，客户端可重试 init/complete。
@@ -760,12 +775,45 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// P4 配额对账：预留 → 实际落地（合并后的 user 文件 = TotalSize）。
-	// session 为 GetSession 副本，Reservation 指针与存储会话共享，Commit 原子生效一次；
-	// 后续 CleanupSessionAfter → DeleteSession 的 Release 为空操作。
+	// P4/P5 配额对账（I1 修复）：合并后的最终文件落 **user 桶**，chunk 会话目录即将清理。
+	// 1) 先归还 chunk 桶预留（chunk 字节不再归属 chunk 桶）；若继续 Commit 到 chunk 桶会造成
+	//    user 桶从未记账、chunk 桶永久虚高、delete 释放钳 0——桶级错位泄漏。
+	// 2) 再到 **user 桶** Scope 上记账：新文件 TryReserve+Commit(actual)；覆盖写（罕见）Adjust(prev, actual)。
+	// session 为 GetSession 副本，Reservation 指针与存储会话共享，Release 原子生效一次。
 	if session.Reservation != nil {
-		session.Reservation.Commit(session.TotalSize)
+		session.Reservation.Release()
 		session.Reservation = nil
+	}
+	if scope := h.quotaBucketFor(owner, "user"); scope != nil {
+		actual := session.TotalSize
+		removeMerged := func() {
+			if tnt != nil && tnt.Root() != nil && rel != "" {
+				_ = tnt.Root().Remove(rel)
+			}
+		}
+		if prev > 0 {
+			// 覆盖写（正常 chunked 流程 init 已拒绝覆盖，此处防御）：容量预检后 Adjust 差分。
+			if actual > prev {
+				extra, reserveErr := scope.TryReserve(actual - prev)
+				if reserveErr != nil {
+					removeMerged()
+					sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "存储配额不足"}, http.StatusInsufficientStorage)
+					return
+				}
+				scope.Adjust(prev, actual)
+				extra.Release()
+			} else {
+				scope.Adjust(prev, actual)
+			}
+		} else {
+			rr, reserveErr := scope.TryReserve(actual)
+			if reserveErr != nil {
+				removeMerged()
+				sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "存储配额不足"}, http.StatusInsufficientStorage)
+				return
+			}
+			rr.Commit(actual)
+		}
 	}
 
 	h.recordCompleteMetadata(owner, req.UploadID, session, finalChecksum)

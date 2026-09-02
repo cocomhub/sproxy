@@ -7,7 +7,33 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
+
+// sumRootDirSize 递归统计租户根内 rel 子树下所有普通文件的总字节数（rmdir 配额释放用）。
+// 经 root.ReadDir 相对遍历（os.Root 防符号链接逃逸），跳过符号链接（Lstat 语义不计数），
+// 子目录递归累加。rmdir 删除前调用，删除成功后按该字节数 ReleaseUsage（I2 修复）。
+func sumRootDirSize(root *storage.Root, rel string) int64 {
+	var total int64
+	entries, err := root.ReadDir(rel)
+	if err != nil {
+		return 0
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			total += sumRootDirSize(root, rel+"/"+e.Name())
+			continue
+		}
+		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			total += info.Size()
+		}
+	}
+	return total
+}
 
 // mkdir 创建指定子目录。?dirname=path
 // 已迁移到 Tenant API：用户目录映射到 user 桶内（<root>/<owner>/user/<rel>），
@@ -117,11 +143,22 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// P5 配额（I2 修复）：删除前统计目录树内文件总字节（user 桶），删除成功后 ReleaseUsage，
+	// 避免 rmdir 递归删除后 user 桶 committed 虚高、用户被误拒 507（与单文件/批量 delete 释放一致）。
+	dirSize := sumRootDirSize(root, rel)
+
 	// 使用 root.RemoveAll 安全递归删除（os.Root 保证符号链接不逃逸）
 	if err := root.RemoveAll(rel); err != nil {
 		h.logger.Error("删除目录失败", "dir", remotePath, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除目录失败"}, http.StatusInternalServerError)
 		return
+	}
+
+	// 删除成功后按目录树实际字节释放 user 桶配额占用。
+	if dirSize > 0 {
+		if scope := h.quotaBucketFor(ownerFromRequest(r), "user"); scope != nil {
+			scope.ReleaseUsage(dirSize)
+		}
 	}
 
 	// 清理 per-tenant checksum store 中该目录下所有文件的记录（key = rel，无 owner 前缀）。

@@ -9,12 +9,14 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +57,30 @@ func uploadAs(t *testing.T, mux *http.ServeMux, filename string, body []byte) (i
 	req := httptest.NewRequest("POST", "/upload", &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set(headerFileChecksum, sha256hex(body))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr.Code, rr.Body.String()
+}
+
+// uploadAsPath 以指定 actor mux 上传到 remotePath（子目录经 X-File-Path 头指定——
+// multipart 的 FileName() 会 filepath.Base 掉目录，子目录路径必须走 X-File-Path）。
+func uploadAsPath(t *testing.T, mux *http.ServeMux, remotePath string, body []byte) (int, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	part, err := mw.CreateFormFile("file", filepath.Base(remotePath))
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(body); err != nil {
+		t.Fatalf("write part: %v", err)
+	}
+	_ = mw.Close()
+
+	req := httptest.NewRequest("POST", "/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerFileChecksum, sha256hex(body))
+	req.Header.Set("X-File-Path", remotePath)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
 	return rr.Code, rr.Body.String()
@@ -516,4 +542,173 @@ func TestQuota_ChunkedUploadCommitAndDelete(t *testing.T) {
 	if got := env.h.quotaFor("alice").Usage(); got != int64(len(content)) {
 		t.Fatalf("分块上传完成 Usage()=%d want %d", got, len(content))
 	}
+	// I1 桶级断言：合并后的最终文件落 user 桶（chunk 桶不记 committed）。
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != int64(len(content)) {
+		t.Fatalf("分块上传完成后 user 桶 Usage()=%d want %d（合并文件落 user 桶）", got, len(content))
+	}
+	if got := env.h.quotaBucketFor("alice", "chunk").Usage(); got != 0 {
+		t.Fatalf("分块上传完成后 chunk 桶 Usage()=%d want 0（chunk 会话目录不记账）", got)
+	}
+
+	// 删除合并后的 user 文件 → user 桶 Usage()==0（ReleaseUsage 按文件大小释放，防桶级错位泄漏）。
+	delMux := http.NewServeMux()
+	delMux.HandleFunc("POST /delete", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		env.h.delete(w, r)
+	})
+	delReq := httptest.NewRequest("POST", "/delete?filename=f.bin", nil)
+	delReq.Header.Set(headerFileChecksum, fileChecksum)
+	delRR := httptest.NewRecorder()
+	delMux.ServeHTTP(delRR, delReq)
+	if delRR.Code != http.StatusOK {
+		t.Fatalf("删除分块上传文件应 200, got %d body=%s", delRR.Code, delRR.Body.String())
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 0 {
+		t.Fatalf("删除后 user 桶 Usage()=%d want 0", got)
+	}
+}
+
+// TestQuota_RmdirReleasesUsage 验证 rmdir 递归删除后释放 user 桶配额（I2 修复）：
+// 与单文件/批量 delete 一致，删除目录树后 user 桶 committed 归零，不依赖周期扫描自愈。
+func TestQuota_RmdirReleasesUsage(t *testing.T) {
+	env := newOwnerEnv(t)
+	env.setOwnerQuota("alice", 1000)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /upload", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		env.h.upload(w, r)
+	})
+	mux.HandleFunc("POST /rmdir", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		env.h.rmdir(w, r)
+	})
+
+	// 子目录内上传 2 个文件（40+20=60 字节；子目录路径经 X-File-Path 指定）
+	if code, resp := uploadAsPath(t, mux, "dir/a.txt", []byte(strings.Repeat("a", 40))); code != http.StatusOK {
+		t.Fatalf("上传 a.txt 应 200, got %d: %s", code, resp)
+	}
+	if code, resp := uploadAsPath(t, mux, "dir/sub/b.txt", []byte(strings.Repeat("b", 20))); code != http.StatusOK {
+		t.Fatalf("上传 b.txt 应 200, got %d: %s", code, resp)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 60 {
+		t.Fatalf("rmdir 前 user 桶 Usage()=%d want 60", got)
+	}
+
+	// rmdir dir（force=true）→ 递归删除 → user 桶释放 60
+	req := httptest.NewRequest("POST", "/rmdir?dirname=dir&force=true", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("rmdir 应 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 0 {
+		t.Fatalf("rmdir 后 user 桶 Usage()=%d want 0（递归删除释放配额）", got)
+	}
+}
+
+// TestQuota_VersionRestoreCommitsUsage 验证版本恢复把版本文件拷回 user 桶时记账（I3 修复）：
+// 恢复前删除目标文件（user 桶归零），恢复后 user 桶 == 版本文件大小。
+func TestQuota_VersionRestoreCommitsUsage(t *testing.T) {
+	env := newOwnerEnv(t)
+	env.setOwnerQuota("alice", 200)
+	env.h.cfgPtr.Load().Versioning.Enabled = true
+
+	mux := http.NewServeMux()
+	wrap := func(hf http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			r = r.WithContext(withActor(r.Context(), "alice"))
+			hf(w, r)
+		}
+	}
+	mux.HandleFunc("POST /upload", wrap(env.h.upload))
+	mux.HandleFunc("POST /delete", wrap(env.h.delete))
+	mux.HandleFunc("GET /api/versions", wrap(env.h.listVersionsHandler))
+	mux.HandleFunc("POST /api/versions/restore", wrap(env.h.restoreVersionHandler))
+
+	// 上传 60 → user 60；覆盖为 40 → saveVersion（version 桶 60）+ Adjust → user 40
+	body60 := []byte(strings.Repeat("a", 60))
+	if code, resp := uploadAs(t, mux, "f.txt", body60); code != http.StatusOK {
+		t.Fatalf("上传 60 应 200, got %d: %s", code, resp)
+	}
+	body40 := []byte(strings.Repeat("b", 40))
+	if code, resp := uploadAs(t, mux, "f.txt", body40); code != http.StatusOK {
+		t.Fatalf("覆盖为 40 应 200, got %d: %s", code, resp)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 40 {
+		t.Fatalf("覆盖后 user 桶 Usage()=%d want 40", got)
+	}
+
+	// 删除 f.txt → user 桶归零（版本仍在 version 桶）
+	delReq := httptest.NewRequest("POST", "/delete?filename=f.txt", nil)
+	delReq.Header.Set(headerFileChecksum, sha256hex(body40))
+	delRR := httptest.NewRecorder()
+	mux.ServeHTTP(delRR, delReq)
+	if delRR.Code != http.StatusOK {
+		t.Fatalf("删除应 200, got %d", delRR.Code)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 0 {
+		t.Fatalf("删除后 user 桶 Usage()=%d want 0", got)
+	}
+
+	// 列出版本取 version_id → 恢复 → user 桶 == 版本文件大小（60）
+	listReq := httptest.NewRequest("GET", "/api/versions?filename=f.txt", nil)
+	listRR := httptest.NewRecorder()
+	mux.ServeHTTP(listRR, listReq)
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("列版本应 200, got %d", listRR.Code)
+	}
+	var listResp struct {
+		Versions []struct {
+			VersionID int64 `json:"version_id"`
+		} `json:"versions"`
+	}
+	if err := json.Unmarshal(listRR.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("解析版本列表失败: %v", err)
+	}
+	if len(listResp.Versions) == 0 {
+		t.Fatal("应至少一个版本")
+	}
+	restoreReq := httptest.NewRequest("POST",
+		"/api/versions/restore?filename=f.txt&version_id="+strconv.FormatInt(listResp.Versions[0].VersionID, 10), nil)
+	restoreRR := httptest.NewRecorder()
+	mux.ServeHTTP(restoreRR, restoreReq)
+	if restoreRR.Code != http.StatusOK {
+		t.Fatalf("恢复版本应 200, got %d body=%s", restoreRR.Code, restoreRR.Body.String())
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != int64(len(body60)) {
+		t.Fatalf("恢复后 user 桶 Usage()=%d want %d（恢复把版本字节计入 user 桶）", got, len(body60))
+	}
+}
+
+// TestQuota_SyncScopeAdapter 验证 sync pull 的 per-owner 配额解析器（I3 修复）：
+// SyncQuotaStore 返回的 resolver 把 TryReserve/Release 落到 owner 的 user 桶 Scope，
+// 使 owner_quotas 对 sync 生效（原全局 syncQuotaAdapter 只受 max_storage_bytes 约束）。
+func TestQuota_SyncScopeAdapter(t *testing.T) {
+	env := newOwnerEnv(t)
+	env.setOwnerQuota("alice", 100)
+	store := env.h.SyncQuotaStore()
+	q := store("alice")
+
+	// TryReserve(60) → user 桶 committed 60（syncmgr 单计数器语义：预留即落地）
+	if err := q.TryReserve(60, 0); err != nil {
+		t.Fatalf("TryReserve(60) 应成功: %v", err)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 60 {
+		t.Fatalf("TryReserve(60) 后 user 桶 Usage()=%d want 60", got)
+	}
+	// 再 TryReserve(60) → 租户聚合 120 > 100 → 拒绝（owner_quotas 生效）
+	if err := q.TryReserve(60, 0); err == nil {
+		t.Fatal("超租户上限应拒绝（owner_quotas 未生效？）")
+	}
+	// Release(60) → user 桶归零
+	q.Release(60, 0)
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 0 {
+		t.Fatalf("Release(60) 后 user 桶 Usage()=%d want 0", got)
+	}
+	// bob 独立不受影响
+	if got := env.h.quotaBucketFor("bob", "user").Usage(); got != 0 {
+		t.Fatalf("bob user 桶 Usage()=%d want 0（独立）", got)
+	}
+	// q 由 SyncQuotaStore() 返回，静态类型已是 syncmgr.QuotaStore（编译期接口保证），
+	// 此处仅在调用侧验证 TryReserve/Release 语义可用。
 }

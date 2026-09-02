@@ -341,7 +341,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 				Name: r.Name, URL: r.URL, AccessKey: r.AccessKey, AccessKeySecret: r.AccessKeySecret,
 			})
 		}
-		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), h.SyncQuotaStore(), int(server.CategoryUserFiles),
+		// P4/P5：quota 以 nil 注入（NewManager 内部回退 noop），随后 SetQuotaResolver 注入
+		// per-owner resolver（sync pull 按任务 owner 在 user 桶 Scope 上预留/对账，owner_quotas 生效）。
+		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(server.CategoryUserFiles),
 			remotes, syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec")),
 			logger.With("component", "sync"),
 			&syncmgr.Config{
@@ -351,6 +353,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 				RetryDelay:    cfg.Sync.RetryDelay,
 				RetryBackoff:  cfg.Sync.RetryBackoff,
 			})
+		syncMgr.SetQuotaResolver(h.SyncQuotaStore())
 		h.SetSyncMgr(syncMgr)
 		defer syncMgr.Stop()
 	}

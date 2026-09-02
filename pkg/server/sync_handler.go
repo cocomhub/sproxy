@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 )
 
@@ -18,6 +19,7 @@ func (h *Handlers) syncNotConfigured(w http.ResponseWriter) {
 }
 
 // syncQuotaAdapter 把 StorageManager 适配为 syncmgr.QuotaStore（StorageCategory ↔ int）。
+// 仅作 fallback：quotaBucketFor 返回 nil（globalPool 未装配）时回退全局账本（旧行为）。
 type syncQuotaAdapter struct {
 	sm *StorageManager
 }
@@ -34,9 +36,42 @@ func (a syncQuotaAdapter) Usage() int64 { return a.sm.Usage() }
 
 func (a syncQuotaAdapter) MaxBytes() int64 { return a.sm.MaxBytes() }
 
-// SyncQuotaStore 返回适配为 syncmgr.QuotaStore 的存储配额接口（供 cmd/sproxy 装配 SyncManager）。
-func (h *Handlers) SyncQuotaStore() syncmgr.QuotaStore {
-	return syncQuotaAdapter{sm: h.storageMgr}
+// scopeQuotaAdapter 把 *quota.Scope 适配为 syncmgr.QuotaStore（per-owner user 桶配额）。
+// syncmgr 的 TryReserve/Release 是"单计数器"语义（预留即落地、释放即扣减）：
+// TryReserve → scope.TryReserve + 立即 Commit（net committed += size、reserved 归零）；
+// Release → scope.ReleaseUsage(size)（committed -= size）。沿父链聚合到租户上限与 globalPool，
+// 使 owner_quotas 对 sync pull 生效（I3 修复：原 syncQuotaAdapter 只受全局 max_storage_bytes 约束）。
+type scopeQuotaAdapter struct {
+	scope *quota.Scope
+}
+
+func (a scopeQuotaAdapter) TryReserve(size int64, _ int) error {
+	res, err := a.scope.TryReserve(size)
+	if err != nil {
+		return err
+	}
+	res.Commit(size)
+	return nil
+}
+
+func (a scopeQuotaAdapter) Release(size int64, _ int) {
+	a.scope.ReleaseUsage(size)
+}
+
+func (a scopeQuotaAdapter) Usage() int64 { return a.scope.Usage() }
+
+func (a scopeQuotaAdapter) MaxBytes() int64 { return a.scope.MaxBytes() }
+
+// SyncQuotaStore 返回按任务 owner 解析的配额存储解析器（P4/P5：sync pull 按 owner 在 user
+// 桶 Scope 上预留/对账，使 owner_quotas 对同步生效）。未装配 quota（scope 不可用）时回退
+// 全局 storageMgr 适配器（旧行为）。
+func (h *Handlers) SyncQuotaStore() func(owner string) syncmgr.QuotaStore {
+	return func(owner string) syncmgr.QuotaStore {
+		if scope := h.quotaBucketFor(owner, "user"); scope != nil {
+			return scopeQuotaAdapter{scope: scope}
+		}
+		return syncQuotaAdapter{sm: h.storageMgr}
+	}
 }
 
 // syncTenantRoot 按任务 owner 解析租户 user 根与 meta/sync 持久化目录绝对路径。
