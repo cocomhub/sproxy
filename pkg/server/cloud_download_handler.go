@@ -9,15 +9,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
+	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/downloader"
 )
+
+// isStorageFull 判断错误是否为存储配额超限（全局 storageMgr 账本或租户 quota.Scope）。
+func isStorageFull(err error) bool {
+	return errors.Is(err, ErrStorageFull) || errors.Is(err, quota.ErrStorageFull)
+}
 
 // cloudCreateDownload 处理 POST /api/cloud/download。
 func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
@@ -46,10 +51,12 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	// 创建任务并启动下载。提交时文件大小未知（-1），SubmitAndStart 的同步条件
 	// （totalSize > 0 且 < syncThreshold）不满足，因此恒异步执行：客户端断连后
 	// 服务端继续异步下载，不阻塞 handler。
-	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context())
+	// owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空串）。
+	owner := ActorFrom(r.Context())
+	task, err := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner)
 	if err != nil {
-		// 存储不足（ErrStorageFull）映射 507，其余视为 400（URL 等输入问题已提前拦截）
-		if errors.Is(err, ErrStorageFull) {
+		// 存储不足（storageMgr 全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）
+		if isStorageFull(err) {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
 			return
 		}
@@ -58,7 +65,7 @@ func (h *Handlers) cloudCreateDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 返回任务快照（避免并发修改 data race）
-	snapshot, ok := h.cloudMgr.SnapshotTask(task.ID)
+	snapshot, ok := h.cloudMgr.SnapshotTask(task.ID, owner)
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "task created but not found"}, http.StatusInternalServerError)
 		return
@@ -115,6 +122,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 	}
 
 	results := make([]CloudBatchTaskResult, 0, len(req.URLs))
+	owner := ActorFrom(r.Context())
 	for _, entry := range req.URLs {
 		cleanedURL, cleanedFilename, err := validateCloudDownloadURL(entry.URL, entry.Filename, h.cloudMgr.config.AllowPrivate)
 		if err != nil {
@@ -129,7 +137,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		}
 
 		// 批量始终异步：nil context
-		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil)
+		task, taskErr := h.cloudMgr.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner)
 		if taskErr != nil {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,
@@ -140,7 +148,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		// 使用快照避免并发读写 data race
-		snapshot, ok := h.cloudMgr.SnapshotTask(task.ID)
+		snapshot, ok := h.cloudMgr.SnapshotTask(task.ID, owner)
 		if !ok {
 			results = append(results, CloudBatchTaskResult{
 				URL:      cleanedURL,
@@ -153,6 +161,7 @@ func (h *Handlers) cloudCreateBatchDownload(w http.ResponseWriter, r *http.Reque
 		// 成功项 URL 使用规范化值，与 GET /api/cloud/tasks/{id} 的详情一致
 		results = append(results, CloudBatchTaskResult{
 			ID:       snapshot.ID,
+			Owner:    snapshot.Owner,
 			URL:      cleanedURL,
 			Filename: cleanedFilename,
 			Status:   snapshot.Status,
@@ -185,14 +194,14 @@ func parseOffsetLimit(r *http.Request) (offset, limit int) {
 func (h *Handlers) cloudListTasks(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	offset, limit := parseOffsetLimit(r)
-	tasks, total := h.cloudMgr.ListTasks(status, offset, limit)
+	tasks, total := h.cloudMgr.ListTasks(status, offset, limit, ActorFrom(r.Context()))
 	sendJSONResponse(w, map[string]any{"tasks": tasks, "total": total}, http.StatusOK)
 }
 
 // cloudGetTask 处理 GET /api/cloud/tasks/{id}。
 func (h *Handlers) cloudGetTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	task, ok := h.cloudMgr.SnapshotTask(id)
+	task, ok := h.cloudMgr.SnapshotTask(id, ActorFrom(r.Context()))
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "task not found"}, http.StatusNotFound)
 		return
@@ -203,7 +212,7 @@ func (h *Handlers) cloudGetTask(w http.ResponseWriter, r *http.Request) {
 // cloudCancelTask 处理 POST /api/cloud/tasks/{id}/cancel。
 func (h *Handlers) cloudCancelTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.cloudMgr.CancelTask(id); err != nil {
+	if err := h.cloudMgr.CancelTask(id, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -225,7 +234,7 @@ func (h *Handlers) cloudCancelTask(w http.ResponseWriter, r *http.Request) {
 // cloudDeleteTask 处理 DELETE /api/cloud/tasks/{id}。
 func (h *Handlers) cloudDeleteTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.cloudMgr.DeleteTask(id); err != nil {
+	if err := h.cloudMgr.DeleteTask(id, ActorFrom(r.Context())); err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "cloud_delete", ObjectType: "task", Object: id,
 			Result: AuditResultError, Detail: err.Error(),
@@ -253,7 +262,7 @@ func (h *Handlers) cloudResumeTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.cloudMgr.ResumeTask(id, req.Force); err != nil {
+	if err := h.cloudMgr.ResumeTask(id, req.Force, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -304,7 +313,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 		normalized[i] = cloudfilename.Entry{URL: cleanedURL, Filename: cleanedFilename}
 	}
 
-	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized)
+	group, err := h.cloudMgr.SubmitAndStartGroup(req.Name, normalized, ActorFrom(r.Context()))
 	if err != nil {
 		// 文件名冲突与重复 URL 均属客户端输入错误，映射 409 而非 500
 		if strings.Contains(err.Error(), "filename conflict") ||
@@ -313,7 +322,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 存储不足映射 507（与单条/批量路径一致）
-		if errors.Is(err, ErrStorageFull) {
+		if isStorageFull(err) {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusInsufficientStorage)
 			return
 		}
@@ -322,7 +331,7 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	// 返回快照副本：SubmitAndStartGroup 返回的指针与 m.groups 共享，下载 goroutine
 	// 可能在 json.Marshal 期间并发写组状态字段（UpdateGroupStatus），需副本隔离防 data race。
-	snapshot, ok := h.cloudMgr.GetGroup(group.ID)
+	snapshot, ok := h.cloudMgr.GetGroup(group.ID, ActorFrom(r.Context()))
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "group created but not found"}, http.StatusInternalServerError)
 		return
@@ -333,20 +342,27 @@ func (h *Handlers) cloudCreateGroup(w http.ResponseWriter, r *http.Request) {
 // cloudGetGroup 处理 GET /api/cloud/groups/{id}。
 func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	owner := ActorFrom(r.Context())
 
-	// 先刷新组状态，再读取最新快照（避免返回更新前的副本）
+	// 审查 Minor 2：先 GetGroup 校验 owner 可见性（跨 owner 立即 404，不对不可见资源
+	// 执行 UpdateGroupStatus 写操作，消除计时侧信道），通过后再刷新状态并二次 GetGroup
+	// 取最新快照。
+	if _, ok := h.cloudMgr.GetGroup(id, owner); !ok {
+		sendJSONResponse(w, map[string]string{"error": "group not found"}, http.StatusNotFound)
+		return
+	}
 	h.cloudMgr.UpdateGroupStatus(id)
-	group, ok := h.cloudMgr.GetGroup(id)
+	group, ok := h.cloudMgr.GetGroup(id, owner)
 	if !ok {
 		sendJSONResponse(w, map[string]string{"error": "group not found"}, http.StatusNotFound)
 		return
 	}
 
-	// 获取组详情时一并返回子任务
+	// 获取组详情时一并返回子任务（仅对请求者可见的子任务，IDOR 防护）
 	h.cloudMgr.mu.RLock()
 	var tasks []*CloudTask
 	for _, tid := range group.TaskIDs {
-		if t, exists := h.cloudMgr.tasks[tid]; exists {
+		if t, exists := h.cloudMgr.tasks[tid]; exists && ownerVisible(t.Owner, owner) {
 			c := *t
 			tasks = append(tasks, &c)
 		}
@@ -365,21 +381,22 @@ func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) cloudListGroups(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	offset, limit := parseOffsetLimit(r)
-	// 先刷新所有组的最新状态，再按 status 过滤返回。否则只刷新"当前已处于该状态"
+	owner := ActorFrom(r.Context())
+	// 先刷新所有可见组的最新状态，再按 status 过滤返回。否则只刷新"当前已处于该状态"
 	// 的组，刚转换到目标状态的组会被过滤查询漏掉，客户端看到的状态滞后。
-	allGroups, _ := h.cloudMgr.ListGroups("", -1, 0)
+	allGroups, _ := h.cloudMgr.ListGroups("", -1, 0, owner)
 	for _, g := range allGroups {
 		h.cloudMgr.UpdateGroupStatus(g.ID)
 	}
 	// total 需按同 status 过滤后的总数计算（ListGroups 内部过滤后统计）
-	groups, total := h.cloudMgr.ListGroups(status, offset, limit)
+	groups, total := h.cloudMgr.ListGroups(status, offset, limit, owner)
 	sendJSONResponse(w, map[string]any{"groups": groups, "total": total}, http.StatusOK)
 }
 
 // cloudCancelGroup 处理 POST /api/cloud/groups/{id}/cancel。
 func (h *Handlers) cloudCancelGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.cloudMgr.CancelGroup(id); err != nil {
+	if err := h.cloudMgr.CancelGroup(id, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -391,15 +408,29 @@ func (h *Handlers) cloudCancelGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 // cloudDeleteGroup 处理 DELETE /api/cloud/groups/{id}。
+// P5：组删除时联动清理组归档文件并释放 archive 桶 Scope（防孤儿归档虚高占用）。
 func (h *Handlers) cloudDeleteGroup(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := h.cloudMgr.DeleteGroup(id); err != nil {
+	owner := ActorFrom(r.Context())
+	// 先取组快照（含 ArchiveFile），DeleteGroup 后组对象已从 map 移除无法再查。
+	var archiveFile string
+	if g, ok := h.cloudMgr.GetGroup(id, owner); ok {
+		archiveFile = g.ArchiveFile
+	}
+	if err := h.cloudMgr.DeleteGroup(id, owner); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
 		}
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, status)
 		return
+	}
+	// 组归档文件（存的是归档名，如 "g1.tar.gz"）联动删除并释放 Scope。失败仅记日志
+	// （组删除已完成，归档残留由周期扫描校准兜底；不把归档清理失败当作组删除失败）。
+	if archiveFile != "" {
+		if aErr := h.deleteCloudArchive(owner, archiveFile); aErr != nil {
+			h.logger.Warn("删除组归档失败（残留由周期扫描校准）", "group_id", id, "archive", archiveFile, "error", aErr)
+		}
 	}
 	sendJSONResponse(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
@@ -417,7 +448,7 @@ func (h *Handlers) cloudResumeGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.cloudMgr.ResumeGroup(id, req.Force); err != nil {
+	if err := h.cloudMgr.ResumeGroup(id, req.Force, ActorFrom(r.Context())); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -432,7 +463,8 @@ func (h *Handlers) cloudResumeGroup(w http.ResponseWriter, r *http.Request) {
 // 收集组内所有已完成子任务的文件打包为单个 tar.gz（未完成任务跳过并记录）。
 func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 	groupID := r.PathValue("id")
-	if _, ok := h.cloudMgr.GetGroup(groupID); !ok {
+	owner := ActorFrom(r.Context())
+	if _, ok := h.cloudMgr.GetGroup(groupID, owner); !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "group not found"}, http.StatusNotFound)
 		return
 	}
@@ -468,27 +500,18 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 用户指定归档名时，校验同名文件是否已存在，存在则拒绝
-	if req.ArchiveName != "" {
-		if _, err := os.Stat(filepath.Join(h.cloudMgr.uploadsDir, archiveName)); err == nil {
-			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists: " + archiveName}, http.StatusConflict)
-			return
-		}
-	}
-
-	// 按子任务目录收集已完成文件（子任务文件实际保存在 .__cloud__/<taskID>/ 下）
-	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
+	// 按子任务目录收集已完成文件（子任务文件按任务 owner 落租户 cloud/ 桶）
 	var groupFiles []fileWithRelPath
 	var skippedTasks []string
 	var totalSourceSize int64
 
-	group, ok := h.cloudMgr.GetGroup(groupID)
+	group, ok := h.cloudMgr.GetGroup(groupID, owner)
 	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "group not found"}, http.StatusNotFound)
 		return
 	}
 	for _, taskID := range group.TaskIDs {
-		task, found := h.cloudMgr.SnapshotTask(taskID)
+		task, found := h.cloudMgr.SnapshotTask(taskID, owner)
 		if !found {
 			h.logger.Warn("cloud group archive: skipping task not found", "group_id", groupID, "task_id", taskID)
 			skippedTasks = append(skippedTasks, taskID)
@@ -501,28 +524,33 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		sourceDir := filepath.Join(cloudDir, task.ID)
-		sourceFile := filepath.Join(sourceDir, task.Filename)
-		// 校验目标文件位于任务子目录内（防御 task.Filename 含路径穿越）。
-		// 与单任务/批量归档的校验基准（IsPathWithin(sourceDir)）对齐，更严格——
-		// 仅校验落在 cloud 根目录内允许 task.Filename 带 ../ 逃出任务目录。
-		if !IsPathWithin(sourceFile, sourceDir) {
-			h.logger.Error("path traversal detected in group archive",
-				"group_id", groupID, "task_id", taskID, "source_file", sourceFile)
+		// 源文件按任务 owner 租户 cloud/ 桶解析（根内 rel = cloud/<taskID>/<file>）。
+		// FeatureRel 逐段校验（fail-closed，防 task.Filename 穿越任务目录）。
+		srcTnt := h.tenantFor(task.Owner)
+		if srcTnt == nil {
+			h.logger.Warn("cloud group archive: skipping task with unavailable tenant",
+				"group_id", groupID, "task_id", taskID, "owner", task.Owner)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
+		}
+		srcRel, relOK := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
+		if !relOK {
+			h.logger.Warn("cloud group archive: skipping task with invalid source path",
+				"group_id", groupID, "task_id", taskID, "file", task.Filename)
 			skippedTasks = append(skippedTasks, taskID)
 			continue
 		}
 		// 收集后、打包前文件可能被删除/替换，先确认存在并统计大小（用于总量限制与配额预估）
-		if info, statErr := os.Stat(sourceFile); statErr != nil {
+		if info, statErr := srcTnt.Root().Stat(srcRel); statErr != nil {
 			h.logger.Warn("cloud group archive: skipping missing file",
-				"group_id", groupID, "task_id", taskID, "source_file", sourceFile, "error", statErr)
+				"group_id", groupID, "task_id", taskID, "rel", srcRel, "error", statErr)
 			skippedTasks = append(skippedTasks, taskID)
 			continue
 		} else {
 			totalSourceSize += info.Size()
 		}
 		relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
-		groupFiles = append(groupFiles, fileWithRelPath{fullPath: sourceFile, relPath: relPath})
+		groupFiles = append(groupFiles, fileWithRelPath{root: srcTnt.Root(), rel: srcRel, tarRel: relPath})
 	}
 
 	if len(groupFiles) == 0 {
@@ -533,17 +561,30 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确保输出目录存在
-	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName)
-	if mkErr := os.MkdirAll(archiveDir, 0755); mkErr != nil {
+	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		return
+	}
+	root := tnt.Root()
+	if mkErr := root.MkdirAll("archive", 0755); mkErr != nil {
 		h.logger.Error("failed to create archive directory", "error", mkErr)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
 		return
 	}
-	outputPath := filepath.Join(archiveDir, archiveName)
-	if !strings.HasPrefix(filepath.Clean(outputPath), filepath.Clean(archiveDir)+string(filepath.Separator)) {
+	rel, ok := tnt.FeatureRel("archive", archiveName)
+	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
 		return
+	}
+	// 用户指定归档名时，校验同名文件是否已存在，存在则拒绝（落在租户 archive 桶下，
+	// 审查 F3 语义保留：不查全局根，避免误 409）
+	if req.ArchiveName != "" {
+		if _, err := root.Stat(rel); err == nil {
+			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists: " + archiveName}, http.StatusConflict)
+			return
+		}
 	}
 
 	// 打包前：总量限制 + 配额预留（与单任务/批量归档一致）
@@ -554,56 +595,86 @@ func (h *Handlers) cloudArchiveGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pre := totalSourceSize + cloudArchiveReservePlaceholder
-	if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-		}, http.StatusInsufficientStorage)
-		return
+	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
+	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
+	var res *quota.Reservation
+	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
+		rr, reserveErr := scope.TryReserve(pre)
+		if reserveErr != nil {
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
+		res = rr
+	} else if h.storageMgr != nil {
+		if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
 	}
 
 	// 多文件打包
 	created := false
 	logger := h.logger.With("archive", "group", "group_id", groupID)
-	checksum, err := createMultiFileTarGz(groupFiles, outputPath, logger, &created)
+	checksum, err := createMultiFileTarGz(groupFiles, root, rel, logger, &created)
 	if err != nil {
 		if !created {
-			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
-			h.storageMgr.Release(pre, CategoryCloud)
+			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
+			releaseArchiveReservation(res, h.storageMgr, pre)
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
 			return
 		}
 		h.logger.Error("failed to create group archive", "group_id", groupID, "error", err)
-		_ = os.Remove(outputPath)
-		h.storageMgr.Release(pre, CategoryCloud)
+		_ = root.Remove(rel)
+		releaseArchiveReservation(res, h.storageMgr, pre)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
 		}, http.StatusInternalServerError)
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：释放预占后按实际 size 重新预留，账本收敛到 actual。
-	// 注意不能只释放 pre 而不补留——压缩后 actual 通常远小于 pre，若账本净为 0 会少计
-	// actual 字节（配额窗口被放大，直到 30min 扫描校准）。
-	h.storageMgr.Release(pre, CategoryCloud)
-	if actual, statErr := os.Stat(outputPath); statErr == nil {
-		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
-			h.logger.Error("storage full, removing archive to keep ledger consistent", "group_id", groupID, "error", rErr)
-			_ = os.Remove(outputPath)
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
-			}, http.StatusInsufficientStorage)
-			return
+	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
+	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
+	actual := int64(0)
+	if res != nil {
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			res.Commit(actual)
+			res = nil
+		} else {
+			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
+			res.Release()
+			res = nil
+		}
+	} else if h.storageMgr != nil {
+		h.storageMgr.Release(pre, CategoryCloud)
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			if rErr := h.storageMgr.TryReserve(actual, CategoryCloud); rErr != nil {
+				h.logger.Error("storage full, removing archive to keep ledger consistent", "group_id", groupID, "error", rErr)
+				_ = root.Remove(rel)
+				sendJSONResponse(w, CloudArchiveResult{
+					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
+				}, http.StatusInsufficientStorage)
+				return
+			}
 		}
 	}
 
-	info, _ := os.Stat(outputPath)
+	info, _ := root.Stat(rel)
 	size := int64(0)
 	if info != nil {
 		size = info.Size()
 	}
 
-	// 更新组归档路径（落库到真实组对象）
-	archiveFile := filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName))
+	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
+	h.recordArchiveUsage(owner, archiveName, size)
+
+	// 更新组归档路径（落库到真实组对象；仅存归档名，客户端不接触 .__ 内部路径）
+	archiveFile := archiveName
 	h.cloudMgr.SetGroupArchiveFile(groupID, archiveFile)
 
 	sendJSONResponse(w, CloudArchiveResult{

@@ -33,8 +33,8 @@ COPY --from=builder --chown=sproxy:sproxy /build/sclient .
 EXPOSE 18083
 
 ENV SPROXY_ADDR=:18083
-ENV SPROXY_UPLOADS_DIR=/app/uploads
+ENV SPROXY_STORAGE_ROOT=/app/storage
 
-VOLUME ["/app/uploads"]
+VOLUME ["/app/storage"]
 
 ENTRYPOINT ["/app/sproxy"]

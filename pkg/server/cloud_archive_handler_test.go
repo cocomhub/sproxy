@@ -15,13 +15,15 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/quota"
 )
 
 // newTestCfgPtr 返回指向默认配置（uploadsDir=dir）的 atomic.Pointer[Config]，供 handler 测试写入 cfgPtr。
 func newTestCfgPtr(dir string) *atomic.Pointer[Config] {
 	var p atomic.Pointer[Config]
 	cfg := Default()
-	cfg.UploadsDir = dir
+	cfg.StorageRoot = dir
 	p.Store(cfg)
 	return &p
 }
@@ -36,22 +38,15 @@ func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() {
-		mgr.Close()
-		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
-		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
-	})
+	h := newAssemblyTestHandlers(t, dir)
+	h.storageMgr = sm
+	mgr := NewCloudDownloadManager(dir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	h.cloudMgr = mgr
 
-	var cfgPtr atomic.Pointer[Config]
-	serverCfg := Default()
-	serverCfg.UploadsDir = dir
+	serverCfg := h.cfgPtr.Load()
 	if modify != nil {
 		modify(serverCfg)
 	}
-	cfgPtr.Store(serverCfg)
-
-	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: &cfgPtr, auditLogger: testLogger()}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
@@ -65,16 +60,15 @@ func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *CloudDownloadManage
 	return setupCloudArchiveTestWithCfg(t, nil)
 }
 
-// createCompletedTask 创建一个已完成的任务，并在 __cloud__/<id>/ 下创建测试文件。
+// createCompletedTask 创建一个已完成的任务，并在 <tenant>/cloud/<id>/ 下创建测试文件。
 func createCompletedTask(t *testing.T, mgr *CloudDownloadManager, filename string) string {
 	t.Helper()
-	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100)
+	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	task.Status = "completed"
-	cloudDir := filepath.Join(mgr.uploadsDir, cloudDirName)
-	taskDir := filepath.Join(cloudDir, task.ID)
+	taskDir := filepath.Join(mgr.cloudDirFor(""), task.ID)
 	if err := os.MkdirAll(taskDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +146,7 @@ func TestCloudArchive_TaskNotCompleted(t *testing.T) {
 	defer ts.Close()
 
 	// 创建一个未完成的任务（默认 status = "pending"）
-	task, err := mgr.CreateTask("url", "https://example.com/test.zip", "test.zip", 100)
+	task, err := mgr.CreateTask("url", "https://example.com/test.zip", "test.zip", 100, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,8 +351,11 @@ func TestCloudArchive_PreservesMTime(t *testing.T) {
 		"X-File-Checksum": sha256hex(body),
 	})
 
-	// 获取原始文件 mtime
-	info, _ := os.Stat(filepath.Join(cfgPtr.Load().UploadsDir, "mtime-test.txt"))
+	// 获取原始文件 mtime（未认证上传落 <storageRoot>/anonymous/user/）
+	info, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot, anonymousOwner, "user", "mtime-test.txt"))
+	if err != nil {
+		t.Fatalf("stat uploaded file: %v", err)
+	}
 	originalMTime := info.ModTime()
 
 	// 创建普通归档验证 mtime
@@ -444,36 +441,128 @@ func TestCloudArchive_SizeLimit(t *testing.T) {
 }
 
 // TestCloudArchive_QuotaRejected 验证存储配额不足时返回 507 且不泄漏预留。
+// P5 收敛后归档配额走租户 archive 桶 Scope（storageMgr 仅回退），故用租户上限触发 507。
 func TestCloudArchive_QuotaRejected(t *testing.T) {
-	ts, mgr, dir := setupCloudArchiveTest(t)
-	defer ts.Close()
+	env := newOwnerEnv(t)
+	// 租户上限 1100：CreateTask 已预留 100（cloud 桶），归档预占（源 + 100MB 占位）必然超限。
+	env.setOwnerQuota("alice", 1100)
+	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	env.h.storageMgr = sm
+	mgr := NewCloudDownloadManager(env.root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}, func(owner string) *quota.Scope {
+		return env.h.quotaBucketFor(owner, "cloud")
+	})
+	env.h.cloudMgr = mgr
 
-	id := createCompletedTask(t, mgr, "test.zip")
-
-	// 占用配额至只剩少量余量（createCompletedTask 的 CreateTask 已预留 100 字节）：
-	// 使归档预占（文件大小 + 100MB）必然超限。预留 MaxBytes()-1100 后剩余 ~1000 字节，
-	// 归档预占失败后这 1000 字节仍可用——验证 507 时账本未被拖高（预占被正确释放）。
-	sm := mgr.storage
-	reserved := sm.MaxBytes() - 1100
-	if err := sm.TryReserve(reserved, CategoryCloud); err != nil {
-		t.Fatal(err)
-	}
-	defer sm.Release(reserved, CategoryCloud)
-
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
-		strings.NewReader(`{"archive_name":"quota.tar.gz"}`))
+	// 创建已完成云任务 + 落盘文件（新布局 <root>/alice/cloud/<id>/<file>）
+	task, err := mgr.CreateTask("url", "https://example.com/quota.zip", "quota.zip", 100, "alice")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("CreateTask: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusInsufficientStorage {
-		t.Fatalf("expected 507 on quota, got %d", resp.StatusCode)
+	task.Status = "completed"
+	taskDir := filepath.Join(mgr.cloudDirFor("alice"), task.ID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("mkdir task dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "quota.zip"), []byte("quota data"), 0o644); err != nil {
+		t.Fatalf("write task file: %v", err)
 	}
 
-	// 预留未泄漏：507 后仍可预留 100 字节（若预占泄漏，此处会再超限）
-	if err := sm.TryReserve(100, CategoryCloud); err != nil {
-		t.Fatalf("expected ledger not leaked after 507, got: %v", err)
+	aliceMux := env.mux["alice"]
+	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		env.h.cloudArchiveTask(w, r)
+	})
+	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"quota.tar.gz"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	aliceMux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusInsufficientStorage {
+		t.Fatalf("expected 507 on quota, got %d body=%s", rr.Code, rr.Body.String())
 	}
-	sm.Release(100, CategoryCloud)
-	_ = dir
+
+	// 预留未泄漏：507 后 alice 租户 Scope 仍只有 CreateTask 的 100 预留（归档预占已回滚）。
+	if got := env.h.quotaFor("alice").Reserved(); got != 100 {
+		t.Fatalf("507 后 alice Reserved()=%d want 100（仅 CreateTask 预留，归档预占已回滚）", got)
+	}
+}
+
+// TestCloudArchive_NewLayout 验证云归档迁移到租户 archive 桶：
+//   - 归档落 <root>/alice/archive/<name>.tar.gz（不再落 .__cloud_archives__/）
+//   - 同名预置在 alice/archive/ → 409（冲突检查落 archive 桶，O_EXCL 语义保留）
+//   - kind=cloud_archive 下载 filename=<name> → 200（FeatureRel("archive", name) 解析）
+func TestCloudArchive_NewLayout(t *testing.T) {
+	env := newOwnerEnv(t) // alice 下载环境（含 <root>/alice/... 布局与 GET /download）
+	root := env.root
+
+	// 装配 cloudMgr + storageMgr（cloudArchiveTask 依赖任务快照与配额对账）
+	sm := NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
+	env.h.storageMgr = sm
+	mgr := NewCloudDownloadManager(root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	})
+	env.h.cloudMgr = mgr
+
+	// 创建已完成云任务 + 落盘文件（新布局 <root>/alice/cloud/<id>/<file>）
+	task, err := mgr.CreateTask("url", "https://example.com/newlayout.zip", "newlayout.zip", 100, "alice")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	task.Status = "completed"
+	taskID := task.ID
+	taskDir := filepath.Join(mgr.cloudDirFor("alice"), task.ID)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("mkdir task dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "newlayout.zip"), []byte("new layout data"), 0o644); err != nil {
+		t.Fatalf("write task file: %v", err)
+	}
+
+	// 为 alice mux 追加云归档 handler（注入 alice actor ctx）
+	aliceMux := env.mux["alice"]
+	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		env.h.cloudArchiveTask(w, r)
+	})
+	post := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/api/cloud/tasks/"+taskID+"/archive", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		aliceMux.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// 同名预置在 alice/archive/ → 409（冲突检查落 archive 桶）
+	pre := filepath.Join(root, "alice", "archive", "preexist.tar.gz")
+	if err := os.MkdirAll(filepath.Dir(pre), 0o755); err != nil {
+		t.Fatalf("mkdir archive dir: %v", err)
+	}
+	if err := os.WriteFile(pre, []byte("old archive"), 0o644); err != nil {
+		t.Fatalf("write preexisting archive: %v", err)
+	}
+	if rr := post(`{"archive_name":"preexist.tar.gz"}`); rr.Code != http.StatusConflict {
+		t.Fatalf("同名归档预置在 archive 桶应 409, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// 创建归档 → 落 <root>/alice/archive/xxx.tar.gz
+	if rr := post(`{"archive_name":"xxx.tar.gz"}`); rr.Code != http.StatusOK {
+		t.Fatalf("创建归档应 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	archivePath := filepath.Join(root, "alice", "archive", "xxx.tar.gz")
+	if _, err := os.Stat(archivePath); err != nil {
+		t.Fatalf("归档应落 <root>/alice/archive/xxx.tar.gz: %v", err)
+	}
+
+	// kind=cloud_archive 下载 filename=xxx.tar.gz → 200
+	if code := env.doGet(t, "alice", "/download?filename=xxx.tar.gz&kind=cloud_archive"); code != http.StatusOK {
+		t.Fatalf("kind=cloud_archive 下载应 200, got %d", code)
+	}
 }

@@ -193,11 +193,17 @@
     // headers 保留 X-File-Checksum 以便 UI 做本地 SHA-256 往返校验（C-1 遗留：旧版
     // 只回 Blob 不回响应头，导致直连模式 UI 无法校验）。assert: blob 字节与 header
     // 一致性由调用方（app.js downloadFile）负责——此处只透传。
+    //
+    // kind 由调用方按用途显式传入（如 cloud_archive 下载云任务归档、cloud_task 下载
+    // 云任务文件）——客户端不接触 .__ 内部路径，filename 传相对路径/归档名，服务端
+    // 按 kind 在对应内部目录内拼接并校验 owner。
     function download(filename, opts) {
       const p = opts || {};
       const headers = Object.assign({}, p.headers || {});
       const dlHeaders = Object.assign({}, p.downloadHeaders || {});
-      return coreRequest('GET', '/download?filename=' + encodeURIComponent(filename), {
+      const params = { filename: filename };
+      if (p.kind) params.kind = p.kind;
+      return coreRequest('GET', urlWithParams('/download', params), {
         headers: headers,
         download: true,
         // 注：collectHeaders 不透传给 transport（transport 不消费该字段）——

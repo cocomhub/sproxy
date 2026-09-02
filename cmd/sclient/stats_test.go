@@ -36,7 +36,7 @@ func TestNewCmdStats_Integration(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{
-			"disk_usage":{"uploads_dir":"./uploads","total_files":10,"total_size":1024},
+			"disk_usage":{"storage_root":"./storage","total_files":10,"total_size":1024},
 			"request_counts":{"total":100,"2xx":80,"4xx":15,"5xx":5},
 			"active_connections":3,
 			"files_uploaded":5,"files_downloaded":20,"files_deleted":2,
@@ -82,7 +82,7 @@ func TestNewCmdConfigRemote_Integration(t *testing.T) {
 			"versioning_enabled":false,"versioning_max_versions":0,
 			"cloud_max_concurrent":3,"cloud_sync_threshold":20971520,
 			"hub_enabled":false,"tls_enabled":true,
-			"addr":":18083","uploads_dir":"./uploads"
+			"addr":":18083","storage_root":"./storage"
 		}`))
 	}))
 	defer ts.Close()

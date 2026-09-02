@@ -6,6 +6,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,21 +19,24 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // newTestServerWithChunked 启动一个包含分块上传/下载路由的测试服务器。
 // 使用 t.TempDir() 与 t.Cleanup() 自动管理临时目录与 UploadStore 后台 goroutine。
+// 装配多租户存储布局（globalRoot + 租户缓存）：普通 upload/download 已迁移到 Tenant API，
+// 未装配租户会让这些 handler 直接 400。
 func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config], func()) {
 	t.Helper()
 
 	tmpDir := t.TempDir()
 
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.ChunkSize = 4 << 10 // 4 KiB for testing
 	if modifyCfg != nil {
 		modifyCfg(cfg)
@@ -41,14 +45,30 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	cs := NewChecksumStore(cfg.UploadsDir, nil)
 	h := &Handlers{
 		cfgPtr:        &cfgPtr,
 		version:       "test",
 		buildAt:       "test",
-		checksumStore: cs,
-		uploadStore:   MustNewUploadStore(cfg.UploadsDir, 24*time.Hour, nil),
 		logger:        slog.Default(),
+		uploadingStop: make(chan struct{}),
+	}
+	// 多租户存储布局装配（同 newAssemblyTestHandlers / RegisterRoutes）：StorageRoot() 回退
+	// StorageRoot，两者同目录（旧配置兼容）。anonymous 租户预创建。
+	globalRoot, err := storage.OpenRoot(cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("打开存储根失败: %v", err)
+	}
+	h.globalRoot = globalRoot
+	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
+	h.tenantRoots = make(map[string]*storage.Tenant)
+	h.checksumStores = make(map[string]*ChecksumStore)
+	h.uploadStores = make(map[string]*UploadStore)
+	h.quotaScopes = make(map[string]*quota.Scope)
+	if h.tenantFor(anonymousOwner) == nil {
+		t.Fatal("创建 anonymous 租户失败")
+	}
+	if h.uploadStoreFor(anonymousOwner) == nil {
+		t.Fatal("创建 anonymous UploadStore 失败")
 	}
 
 	mux := http.NewServeMux()
@@ -63,7 +83,7 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	ts := httptest.NewServer(mux)
 	t.Cleanup(func() {
 		ts.Close()
-		h.uploadStore.Stop()
+		_ = h.Close()
 	})
 	// 返回 no-op cleanup 保持调用方代码兼容
 	cleanup := func() {}
@@ -345,9 +365,9 @@ func TestUploadComplete_FullFlow(t *testing.T) {
 		t.Fatalf("checksum mismatch: server=%s expected=%s", completeResult.FileChecksum, fileChecksum)
 	}
 
-	// 验证文件已保存
-	uploadsDir := cfgPtr.Load().UploadsDir
-	savedPath := filepath.Join(uploadsDir, "full-flow.txt")
+	// 验证文件已保存（anonymous 租户 user 桶）
+	uploadsDir := cfgPtr.Load().StorageRoot
+	savedPath := filepath.Join(uploadsDir, "anonymous", "user", "full-flow.txt")
 	if _, err := os.Stat(savedPath); os.IsNotExist(err) {
 		t.Fatalf("saved file not found: %s", savedPath)
 	}
@@ -581,9 +601,9 @@ func TestUploadComplete_SubDir(t *testing.T) {
 		t.Fatalf("expected success, got: %v", completeResult)
 	}
 
-	// 验证文件已创建在子目录中
-	uploadsDir := cfgPtr.Load().UploadsDir
-	savedPath := filepath.Join(uploadsDir, filepath.FromSlash(filename))
+	// 验证文件已创建在租户 user 桶子目录中（anonymous 租户）
+	uploadsDir := cfgPtr.Load().StorageRoot
+	savedPath := filepath.Join(uploadsDir, "anonymous", "user", filepath.FromSlash(filename))
 	if _, err := os.Stat(savedPath); os.IsNotExist(err) {
 		t.Fatalf("saved file not found at subdirectory path: %s", savedPath)
 	}
@@ -603,7 +623,8 @@ func initSession(t *testing.T, baseURL, filename string, totalSize int64, fileCh
 
 func initSessionEx(t *testing.T, baseURL, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string) string {
 	t.Helper()
-	uploadID := fmt.Sprintf("test-upload-%s-%d", filename, totalSize)
+	// upload_id 必须是单一安全段（修复后服务端拒绝含 "/" 的 id），用 base64 编码文件名派生段
+	uploadID := fmt.Sprintf("test-upload-%x-%d", sha256.Sum256([]byte(filename)), totalSize)
 	initReq := map[string]any{
 		"upload_id":     uploadID,
 		"filename":      filename,
@@ -1360,5 +1381,36 @@ func TestNegotiateChunkSize_EdgeCases(t *testing.T) {
 				t.Errorf("negotiateChunkSize(%d, %d) adjusted = %v, want %v", tt.clientSize, tt.cfgSize, adj, tt.wantAdj)
 			}
 		})
+	}
+}
+
+// TestUploadInit_RejectsNestedUploadID 验证 F4 修复：upload_id 含路径分隔符/穿越
+// 会被拒绝（此前未认证者可构造 "ak-A/evil" 跨 owner 前缀会话 / .__chunked__ 穿越）。
+func TestUploadInit_RejectsNestedUploadID(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, nil)
+	defer cleanup()
+
+	body := []byte("x")
+	// 注意：这里必须写 `"a\\b"`（Go 源码双反斜杠 = 字面反斜杠），否则 `\b` 是
+	// 退格转义（a\x08b）会逃过校验导致 CI 失败。
+	for _, bad := range []string{"ak-A/evil", "a/b", "../evil", "a\\b", ".__x"} {
+		initReq := map[string]any{
+			"upload_id":     bad,
+			"filename":      "ok.txt",
+			"total_size":    1,
+			"chunk_size":    4096,
+			"total_chunks":  1,
+			"file_checksum": sha256hex(body),
+		}
+		initJSON, _ := json.Marshal(initReq)
+		resp, err := http.Post(url+"/upload/init", "application/json", bytes.NewReader(initJSON))
+		if err != nil {
+			t.Fatalf("init %q: %v", bad, err)
+		}
+		if resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			t.Fatalf("upload_id %q 应被拒绝, got 200", bad)
+		}
+		resp.Body.Close()
 	}
 }

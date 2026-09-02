@@ -42,15 +42,10 @@ func parseChunkRange(r *http.Request, cfg *Config) (offset, length int64, ok boo
 	return offset, length, true
 }
 
-// seekAndReadFile 打开文件、seek 到指定偏移、读取指定长度的数据。
-// 返回数据内容和其 SHA-256 checksum。
-func (h *Handlers) seekAndReadFile(filePath string, offset, length int64) (data []byte, checksum string, err error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, "", err
-	}
-	defer file.Close()
-
+// seekAndReadFile 从已打开的文件句柄 seek 到指定偏移、读取指定长度的数据。
+// 返回数据内容和其 SHA-256 checksum。调用方负责打开与关闭文件。
+// 普通下载经租户根打开后复用此函数（chunked_download 迁移到 Tenant API）。
+func (h *Handlers) seekAndReadFile(file *os.File, offset, length int64) (data []byte, checksum string, err error) {
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
 		h.logger.Error("文件 seek 失败", "error", err)
 		return nil, "", err
@@ -80,7 +75,8 @@ func setChunkResponseHeaders(w http.ResponseWriter, filename string, offset, len
 // downloadChunk 下载文件的指定分块。
 //
 // 参数：
-//   - filename: 文件名（path.Base 校验防穿越）
+//   - filename: 文件名（普通下载经 ValidateFilePath 校验；kind=cloud_archive 时为归档名）
+//   - kind: 可选（cloud_archive 走归档目录拼接）
 //   - offset: 起始偏移量（默认 0）
 //   - length: 分块长度（默认 4 MiB）
 //
@@ -91,13 +87,9 @@ func setChunkResponseHeaders(w http.ResponseWriter, filename string, offset, len
 func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
 
-	filename := r.URL.Query().Get("filename")
-	if filename == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgEmptyFilename}, http.StatusBadRequest)
-		return
-	}
-	if _, err := ValidateFilePath(filename); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+	dp, err := h.resolveDownloadPath(r)
+	if err != nil {
+		writeDownloadPathError(w, err)
 		return
 	}
 
@@ -108,12 +100,8 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filePath := h.safePath(filename)
-	if filePath == "" {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return
-	}
-	stat, err := os.Stat(filePath)
+	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
+	file, err := dp.tnt.Root().Open(dp.rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
@@ -122,12 +110,20 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		h.logger.Error("stat 文件失败", "error", err, "file_name", dp.filename)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "访问文件失败"}, http.StatusInternalServerError)
+		return
+	}
 
 	fileSize := stat.Size()
 	if offset >= fileSize {
 		if fileSize == 0 && offset == 0 {
 			// 空文件：返回 200 和 0 字节
-			setChunkResponseHeaders(w, filename, 0, 0, 0)
+			setChunkResponseHeaders(w, dp.filename, 0, 0, 0)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -144,19 +140,21 @@ func (h *Handlers) downloadChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 读取文件数据（含 seek 和重试回退）
-	data, serverChecksum, err := h.seekAndReadFile(filePath, offset, length)
+	data, serverChecksum, err := h.seekAndReadFile(file, offset, length)
 	if err != nil {
-		h.logger.Error(errMsgOpenFileFailed, "error", err, "file_name", filename)
+		h.logger.Error(errMsgOpenFileFailed, "error", err, "file_name", dp.filename)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileReadFailed}, http.StatusInternalServerError)
 		return
 	}
 
 	// 设置响应头
-	setChunkResponseHeaders(w, filename, offset, length, fileSize)
+	setChunkResponseHeaders(w, dp.filename, offset, length, fileSize)
 
-	// 如果 ChecksumStore 有记录，返回完整文件 checksum
-	if cs, ok := h.checksumStore.Get(filename); ok {
-		w.Header().Set(headerFileChecksum, cs)
+	// 如果 ChecksumStore 有记录，返回完整文件 checksum（per-tenant + 根内相对 key）
+	if csStore, csKey := h.checksumStoreForRead(dp); csStore != nil {
+		if cs, ok := csStore.Get(csKey); ok {
+			w.Header().Set(headerFileChecksum, cs)
+		}
 	}
 
 	// 写入响应

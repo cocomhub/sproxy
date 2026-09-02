@@ -20,7 +20,7 @@ func TestGetStats(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{
-			"disk_usage":{"uploads_dir":"./uploads","total_files":10,"total_size":1024},
+			"disk_usage":{"storage_root":"./storage","total_files":10,"total_size":1024},
 			"request_counts":{"total":100,"2xx":80,"4xx":15,"5xx":5},
 			"active_connections":3,
 			"files_uploaded":5,"files_downloaded":20,"files_deleted":2,
@@ -39,8 +39,8 @@ func TestGetStats(t *testing.T) {
 	}
 
 	// DiskUsage (3 fields)
-	if stats.DiskUsage.UploadsDir != "./uploads" {
-		t.Errorf("expected UploadsDir=./uploads, got %q", stats.DiskUsage.UploadsDir)
+	if stats.DiskUsage.StorageRoot != "./storage" {
+		t.Errorf("expected StorageRoot=./storage, got %q", stats.DiskUsage.StorageRoot)
 	}
 	if stats.DiskUsage.TotalFiles != 10 {
 		t.Errorf("expected TotalFiles=10, got %d", stats.DiskUsage.TotalFiles)

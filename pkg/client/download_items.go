@@ -19,6 +19,8 @@ type DownloadItem struct {
 	RemotePath string
 	// LocalPath 本地保存路径。为空时使用 RemotePath 的 basename。
 	LocalPath string
+	// Kind 下载 kind（空=普通文件；DownloadKindCloudArchive=云任务归档，RemotePath 传归档名）。
+	Kind string
 }
 
 // DownloadOption 批量下载选项函数。
@@ -82,7 +84,7 @@ func (c *FileClient) DownloadItems(ctx context.Context, items []DownloadItem, op
 			if local == "" {
 				local = filepath.Base(item.RemotePath)
 			}
-			if err := c.Download(egCtx, item.RemotePath, local); err != nil {
+			if err := c.downloadTo(egCtx, item.RemotePath, local, item.Kind); err != nil {
 				wrapped := fmt.Errorf("下载 %s 失败: %w", item.RemotePath, err)
 				mu.Lock()
 				errs = append(errs, wrapped)

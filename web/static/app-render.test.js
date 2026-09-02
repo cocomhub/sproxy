@@ -127,7 +127,7 @@ test('hubTableHtml 空节点 + 单节点', () => {
 });
 
 test('configTableHtml 全字段 + 编辑面板', () => {
-  const html = r.configTableHtml({ log_level: 'info', log_format: 'json', access_keys_set: true, rate_limit_requests: 10, rate_limit_window: '1s', max_storage_bytes: 0, chunk_size: 4194304, upload_session_ttl: '24h', versioning_enabled: false, cloud_max_concurrent: 3, addr: ':1', uploads_dir: '/u', tls_enabled: false, hub_enabled: false });
+  const html = r.configTableHtml({ log_level: 'info', log_format: 'json', access_keys_set: true, rate_limit_requests: 10, rate_limit_window: '1s', max_storage_bytes: 0, chunk_size: 4194304, upload_session_ttl: '24h', versioning_enabled: false, cloud_max_concurrent: 3, addr: ':1', storage_root: '/u', tls_enabled: false, hub_enabled: false });
   assert.ok(html.includes('运行时配置'));
   assert.ok(html.includes('cfg-log-level'));
   assert.ok(html.includes('cfg-update-log-level'));
@@ -136,7 +136,7 @@ test('configTableHtml 全字段 + 编辑面板', () => {
 });
 
 test('statsTableHtml 各统计', () => {
-  const html = r.statsTableHtml({ uploads_dir: '/d', total_files: 3, total_size: 1024 }, { total: 10, '2xx': 8, '4xx': 1, '5xx': 1 }, { active_connections: 2, files_uploaded: 3, bytes_uploaded: 1024, files_downloaded: 1, bytes_downloaded: 512, files_deleted: 1 });
+  const html = r.statsTableHtml({ storage_root: '/d', total_files: 3, total_size: 1024 }, { total: 10, '2xx': 8, '4xx': 1, '5xx': 1 }, { active_connections: 2, files_uploaded: 3, bytes_uploaded: 1024, files_downloaded: 1, bytes_downloaded: 512, files_deleted: 1 });
   assert.ok(html.includes('/d'));
   assert.ok(html.includes('>3<'));
   assert.ok(html.includes('1.0 KB'));

@@ -33,7 +33,7 @@ func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.
 	tmpDir := t.TempDir()
 
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	if modifyCfg != nil {
 		modifyCfg(cfg)
@@ -63,11 +63,14 @@ func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.
 	return ts.URL, &cfgPtr, &auditBuf
 }
 
-// writeUploadFile 直接在上传目录写入一个文件（内容 + 返回其 sha256），
+// writeUploadFile 直接在存储根写入一个文件（内容 + 返回其 sha256），
 // 供 delete/rename 测试无需走完整上传链路。
+// 审计测试服务配置了 access_keys（testAccessKey），请求 owner 恒为 testAccessKey，
+// P2 delete/rename 已迁移到 Tenant API，故文件落在 <storageRoot>/<owner>/user/<rel>
+// （新布局；与服务端 UserRel 映射一致）。
 func writeUploadFile(t *testing.T, cfgPtr *atomic.Pointer[Config], name string, content []byte) {
 	t.Helper()
-	full := filepath.Join(cfgPtr.Load().UploadsDir, filepath.FromSlash(name))
+	full := filepath.Join(cfgPtr.Load().StorageRoot, testAccessKey, "user", filepath.FromSlash(name))
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(full), err)
 	}
@@ -82,7 +85,7 @@ func signBodyRequest(r *http.Request, ak, sk string, body []byte) {
 	h := sproxysig.Header{
 		Version: sproxysig.Version, AK: ak,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
-		Nonce:      fmt.Sprintf("test-nonce-%d", now.UnixNano()),
+		Nonce:      testNonce(),
 		BodySHA256: sha256hex(body),
 	}
 	h.Sig = sproxysig.Sign(sk, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
@@ -676,7 +679,7 @@ func TestCloudDeleteTask_RecordsAuditError(t *testing.T) {
 func TestRequestLog_RecordsActor(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)

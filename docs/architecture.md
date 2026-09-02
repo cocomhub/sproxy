@@ -162,3 +162,29 @@ sclient                    sproxy (Hub)                   Node B
 | tunnel | `pkg/tunnel/tunnel_mux.go` | 多路复用隧道（Tunnel 类型） |
 | hub | `pkg/tunnel/hub/` | 中继路由表 + 注册框架 |
 | relay | `cmd/sclient/relay.go` | sclient 中继节点命令 |
+
+## 多租户存储布局（文件服务侧）
+
+sproxy 文件服务采用**租户自包含存储布局**（`pkg/storage` / `pkg/quota` / `pkg/store`）：
+
+```
+<storage_root>/
+  LAYOUT_VERSION          # 布局版本标记（storage.OpenRoot 写入/校验）
+  <tenant>/               # 每租户一个子根（匿名租户名 "anonymous"）
+    user/                 # 用户文件桶（upload/download/delete/rename/list/search）
+    cloud/                # 云下载任务文件（<taskID>/<file>）
+    archive/              # 云归档文件（<name>.tar.gz）
+    chunk/                # 分块上传会话目录（<uploadID>/）
+    version/              # 文件版本（<userRel>/<versionID>）
+    meta/                 # 服务端内部账本（checksums.json / cloud 任务状态 / sync 状态）
+```
+
+- 旧的 `.__xx__` 魔法目录（`.__cloud__`/`.__versions__`/`.__chunked__`/`.__downloads__`/
+  `.__cloud_archives__`/`.__sync__`）已废弃（P5 删除），用户文件统一映射到 `user/` 桶。
+- **隔离**：每租户一个 `*os.Root`（`pkg/storage.Root`，os.Root 防穿越由标准库保证）+
+  一个 `quota.Scope`（父子链聚合到全局池）。`storage.Tenant.UserRel/FeatureRel` 是路径
+  判定单一入口（逐段 `ValidSegmentName`，拒绝 `.__` 前缀、Windows 保留设备名等）。
+- **配额**：`pkg/quota` Pool/Scope/Reservation；写路径 TryReserve→Commit，覆盖 Adjust，
+  删除 ReleaseUsage；周期扫描 `reconcileQuotaScopes` 校准 Scope 到磁盘实际（重启不回溯）。
+- **历史路径**：`ValidateFilePath`（`pkg/server/validate.go`）保留做基础清洗，指向
+  `pkg/storage.NormalizeRemote`；租户映射与段名校验以 `pkg/storage` 为准。

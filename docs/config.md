@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 
-1. CLI 旗标（`--addr`、`--uploads-dir`、`--tunnel-key`）
+1. CLI 旗标（`--addr`、`--storage-root`、`--tunnel-key`）
 2. 环境变量（前缀 `SPROXY_`，例如 `SPROXY_ADDR=":18083"`）
 3. 配置文件 YAML（`--config sproxy.yaml`，默认 `sproxy.yaml`）
 4. Default()（`pkg/server/config.go`）
@@ -21,7 +21,8 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `addr` | string | `:18083` | HTTP 监听地址（`host:port` 或 `:port`） |
-| `uploads_dir` | string | `./uploads` | 文件存储根目录，自动创建 |
+| `storage_root` | string | `./storage` | 多租户存储根目录，自动创建 |
+| `owner_quotas` | map[string]int64 | (空) | 按 owner 配额上限（字节）：显式 owner > `"*"` 默认 > 0（不限制） |
 | `max_upload_bytes` | int64 | `1073741824` (1 GiB) | 单次普通上传最大字节，超过 413。0 = 不限制 |
 | `tunnel_key` | string | (空) | 64 位 hex AES-256 密钥。留空时启动自动生成并回写到 YAML |
 | `access_keys` | []{key, secret, mesh_id?} | (空) | SproxySig 请求签名认证（每 mesh 一对 AK/SK）。配置后除 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 之外全路由验签；留空 = 不认证 |
@@ -76,8 +77,8 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 - `log_level`
 - `log_format`
 
-其他字段（`addr`、`uploads_dir`、`tunnel_key`、`rate_limit`、`server_timeouts`、
-`max_header_bytes`、`access_keys`）需要**重启进程**。SIGHUP 时会打印警告说明哪些字段未生效。
+其他字段（`addr`、`storage_root`、`tunnel_key`、`rate_limit`、`server_timeouts`、
+`max_header_bytes`、`access_keys`、`owner_quotas`）需要**重启进程**。SIGHUP 时会打印警告说明哪些字段未生效。
 
 ## 客户端配置（sclient）
 
@@ -166,7 +167,10 @@ sclient 支持工作目录概念，持久化到 XDG cache（`~/.cache/sproxy/cur
 ```yaml
 # sproxy.yaml
 addr: ":18083"
-uploads_dir: "/var/lib/sproxy/uploads"
+storage_root: "/var/lib/sproxy/storage"
+owner_quotas:
+  "*": 10737418240   # 默认每租户 10 GiB
+  alice: 21474836480 # alice 20 GiB
 max_upload_bytes: 5368709120     # 5 GiB
 tunnel_key: "<64 位 hex>"
 access_keys:

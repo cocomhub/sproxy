@@ -193,7 +193,7 @@
     html += row('版本管理', cfg.versioning_enabled ? '✅ 启用' : '❌ 关闭');
     html += row('云端并发', cfg.cloud_max_concurrent);
     html += row('地址', cfg.addr);
-    html += row('上传目录', cfg.uploads_dir);
+    html += row('存储根', cfg.storage_root);
     html += row('TLS', cfg.tls_enabled ? '✅ 启用' : '❌ 关闭');
     html += row('Hub 中继', cfg.hub_enabled ? '✅ 启用' : '❌ 关闭');
     html += '</table>';
@@ -235,7 +235,7 @@
   function statsTableHtml(du, rc, s) {
     return '<table style="width:100%;border-collapse:collapse;font-size:14px;">' +
       '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid var(--border-color);color:var(--text-secondary)">磁盘使用</th></tr>' +
-      '<tr><td style="padding:5px 0;color:var(--text-secondary)">目录</td><td style="text-align:right">' + ((du && du.uploads_dir) || '-') + '</td></tr>' +
+      '<tr><td style="padding:5px 0;color:var(--text-secondary)">目录</td><td style="text-align:right">' + ((du && du.storage_root) || '-') + '</td></tr>' +
       '<tr><td style="padding:5px 0;color:var(--text-secondary)">文件数</td><td style="text-align:right">' + ((du && du.total_files) ?? 0) + '</td></tr>' +
       '<tr><td style="padding:5px 0;color:var(--text-secondary)">总大小</td><td style="text-align:right">' + formatSize(du && du.total_size) + '</td></tr>' +
       '<tr><th colspan="2" style="text-align:left;padding:8px 0;border-bottom:1px solid var(--border-color);color:var(--text-secondary);padding-top:14px">请求统计（自启动）</th></tr>' +

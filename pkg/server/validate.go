@@ -5,7 +5,6 @@ package server
 
 import (
 	"fmt"
-	"log/slog"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -23,6 +22,12 @@ import (
 //   - 逐组件检查 ".."（路径穿越）
 //   - Windows 上检查 <>:"|?* 非法字符
 //   - 返回路径为 filepath.ToSlash 格式（使用 / 分隔符），适合作为 API 返回值
+//
+// 注意：本函数仅做基础路径清洗，**不**做租户/功能桶隔离。用户文件路径到租户
+// user/ 桶的映射与段名校验（含 .__ 内部前缀拒绝、Windows 保留设备名等）统一由
+// pkg/storage 的 Tenant.UserRel / ValidSegmentName 承担——写入/读取侧 handler 在
+// ValidateFilePath 后必须再经 UserRel 判定，避免触碰服务端内部桶。sync 等子包
+// 仍引用本函数做基础清洗，故保留（指向 pkg/storage 的归一原语 NormalizeRemote）。
 func ValidateFilePath(filename string) (string, error) {
 	filename = strings.TrimSpace(filename)
 
@@ -57,6 +62,11 @@ func ValidateFilePath(filename string) (string, error) {
 		return "", fmt.Errorf("文件名不能包含路径穿越: %s", filename)
 	}
 
+	// 注意：.__ 首段拦截**不**放在此处——ValidateFilePath 被 upload/sync 等写路径
+	// 复用，若全局拒绝 .__ 首段会破坏含 .__ 前缀文件的同步推送。服务端内部目录访问
+	// 防护收敛到 pkg/storage.Tenant.UserRel/FeatureRel 的段名校验（ValidSegmentName
+	// 拒绝 .__ 前缀）与 hasServiceInternalPrefix（读取侧响应开始前拦截）。
+
 	// Windows 非法字符检查（在 Clean 之后执行，使用 cleaned 路径）
 	if runtime.GOOS == "windows" {
 		const invalidChars = `<>:"|?*`
@@ -71,98 +81,20 @@ func ValidateFilePath(filename string) (string, error) {
 	return filepath.ToSlash(cleaned), nil
 }
 
-// joinSafePath 在 baseDir 下安全拼接 userPath，确认结果不越界。
-// userPath 必须已通过 ValidateFilePath 校验。返回安全绝对路径，失败时返回空字符串。
-// 内部记录 warn 日志以便追踪非法访问尝试。
-// 注意：使用 slog.Default() 而不是注入 logger，因为此函数是无状态工具函数，
-// 即使 logger 未初始化也能输出日志（防御性编程设计）。
-func joinSafePath(baseDir, userPath string) string {
-	fullPath := filepath.Join(baseDir, userPath)
-	absPath, err := filepath.Abs(fullPath)
-	if err != nil {
-		slog.Default().Warn("joinSafePath: Abs 解析失败", "full_path", fullPath, "error", err)
-		return ""
-	}
-	absBase, err := filepath.Abs(baseDir)
-	if err != nil {
-		slog.Default().Warn("joinSafePath: baseDir Abs 解析失败", "base_dir", baseDir, "error", err)
-		return ""
-	}
-	// 解析 absBase 的符号链接，获取规范路径（处理 Windows 短路径名如 RUNNER~1 → runneradmin）
-	if resolvedBase, e := filepath.EvalSymlinks(absBase); e == nil {
-		absBase = resolvedBase
-	}
-	// 解析 absPath 中所有已存在的目录部分的符号链接，获取规范路径
-	// 注意：absBase 已被解析为规范路径（如 C:runneradmin...），
-	// 而 absPath 仍是 Windows 短格式（C:RUNNER~1...），两者不可直接比较。
-	// 需要逐级解析所有父目录组件，因为短路径名可能出现在任意层级。
-	resolvedPath := absPath
-	for p := resolvedPath; ; p = filepath.Dir(p) {
-		if r, e := filepath.EvalSymlinks(p); e == nil {
-			rel, _ := filepath.Rel(p, resolvedPath)
-			resolvedPath = filepath.Join(r, rel)
-			// 继续解析已解析路径的父目录（短路径名可能在更高层级）
-			// 因为 EvalSymlinks 只解析当前路径的符号链接，不递归解析父目录
-			if r == p || filepath.Dir(r) == filepath.Dir(p) {
-				break
-			}
-			p = r // 继续从已解析的路径向上解析
+// hasServiceInternalPrefix 判断 rel 路径中任意段是否携带服务端内部目录前缀标记。
+// 对齐 pkg/storage.Tenant.UserRel 的判定语义：.__ 前缀任意深度拒绝（ValidSegmentName）；
+// __ 前缀仅首段拒绝（isLegacyUnderscorePrefix）。供读取侧 handler（归档源等）在响应
+// 开始前拦截——UserRel 虽已保证 user/ 桶内映射，但部分路径在流式输出后才解析，
+// 需提前给出明确 400（归档源 validateArchiveFiles）。
+func hasServiceInternalPrefix(rel string) bool {
+	segs := strings.FieldsFunc(rel, func(r rune) bool { return r == '/' || r == '\\' })
+	for i, seg := range segs {
+		if strings.HasPrefix(seg, ".__") {
+			return true
 		}
-		if p == filepath.Dir(p) {
-			break
+		if i == 0 && strings.HasPrefix(seg, "__") {
+			return true
 		}
 	}
-	// 路径越界检查（absBase 已解析为规范路径，resolvedPath 也已解析）
-	if !strings.HasPrefix(resolvedPath, absBase+string(filepath.Separator)) && resolvedPath != absBase {
-		slog.Default().Warn("joinSafePath: 路径越界", "upload_dir", absBase, "resolved_path", absPath)
-		return ""
-	}
-	// 递归检查父目录符号链接：如果 absPath 本身不存在，逐级向上检查父目录的符号链接是否指向 base 外
-	resolved, err := filepath.EvalSymlinks(absPath)
-	if err != nil {
-		dir := absPath
-		for dir != absBase && dir != "." && dir != "/" {
-			dir = filepath.Dir(dir)
-			r, e := filepath.EvalSymlinks(dir)
-			if e == nil {
-				if !strings.HasPrefix(r, absBase+string(filepath.Separator)) && r != absBase {
-					slog.Default().Warn("joinSafePath: 父目录符号链接指向外部路径", "upload_dir", absBase, "joined", absPath, "dir", dir, "real", r)
-					return ""
-				}
-				break
-			}
-		}
-		// 文件不存在时 EvalSymlinks 会失败，这是正常情况（例如上传前文件还不存在）
-		// 此时不返回空，直接返回已校验过的 absPath
-		return absPath
-	}
-	// 二次校验：符号链接指向的真实路径也必须在 base 内
-	if !strings.HasPrefix(resolved, absBase+string(filepath.Separator)) && resolved != absBase {
-		slog.Warn("joinSafePath: 符号链接指向外部路径", "upload_dir", absBase, "joined", absPath, "real", resolved)
-		return ""
-	}
-	return absPath
-}
-
-// IsPathWithin 检查 child 路径是否在 parent 目录内（路径穿越防护）。
-// 使用 filepath.Clean 标准化后通过前缀匹配判断，确保 parent 以分隔符结尾避免误判（如 /a/b 和 /a/bb）。
-// 注意：
-//   - 此函数仅验证路径包含关系，不保证文件实际存在。
-//   - 不处理符号链接解析：如果 child 或 parent 包含符号链接，应在外层调用 filepath.EvalSymlinks 后再传入。
-func IsPathWithin(child, parent string) bool {
-	absChild, err := filepath.Abs(child)
-	if err != nil {
-		return false
-	}
-	absParent, err := filepath.Abs(parent)
-	if err != nil {
-		return false
-	}
-	cleanChild := filepath.Clean(absChild)
-	cleanParent := filepath.Clean(absParent)
-	prefix := cleanParent
-	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
-		prefix += string(filepath.Separator)
-	}
-	return strings.HasPrefix(cleanChild, prefix)
+	return false
 }

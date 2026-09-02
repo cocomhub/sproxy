@@ -612,10 +612,10 @@ func TestJsonOutput_PrintStatsIsValid(t *testing.T) {
 	fm := NewJSONFormatter(&buf)
 	fm.PrintStats(&client.StatsResponse{
 		DiskUsage: struct {
-			UploadsDir string `json:"uploads_dir"`
-			TotalFiles int    `json:"total_files"`
-			TotalSize  int64  `json:"total_size"`
-		}{UploadsDir: "/data", TotalFiles: 10, TotalSize: 1000},
+			StorageRoot string `json:"storage_root"`
+			TotalFiles  int    `json:"total_files"`
+			TotalSize   int64  `json:"total_size"`
+		}{StorageRoot: "/data", TotalFiles: 10, TotalSize: 1000},
 	})
 	output := buf.String()
 	if !json.Valid([]byte(output)) {
@@ -628,10 +628,10 @@ func TestTextFormatter_PrintStats(t *testing.T) {
 	fm := NewTextFormatter(&buf)
 	fm.PrintStats(&client.StatsResponse{
 		DiskUsage: struct {
-			UploadsDir string `json:"uploads_dir"`
-			TotalFiles int    `json:"total_files"`
-			TotalSize  int64  `json:"total_size"`
-		}{UploadsDir: "/data", TotalFiles: 10, TotalSize: 1000},
+			StorageRoot string `json:"storage_root"`
+			TotalFiles  int    `json:"total_files"`
+			TotalSize   int64  `json:"total_size"`
+		}{StorageRoot: "/data", TotalFiles: 10, TotalSize: 1000},
 		RequestCounts: struct {
 			Total     int64 `json:"total"`
 			Status2xx int64 `json:"2xx"`

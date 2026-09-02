@@ -17,7 +17,7 @@ import (
 
 func TestChecksumStore_DeletePrefix(t *testing.T) {
 	tmpDir := t.TempDir()
-	cs := NewChecksumStore(tmpDir, nil)
+	cs := NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 
 	cs.Set("dir1/a.txt", "aaa")
 	cs.Set("dir1/b.txt", "bbb")
@@ -40,7 +40,7 @@ func TestChecksumStore_DeletePrefix(t *testing.T) {
 	}
 
 	// 重新加载验证持久化
-	cs2 := NewChecksumStore(tmpDir, nil)
+	cs2 := NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	if _, ok := cs2.Get("dir1/a.txt"); ok {
 		t.Fatal("persisted file still has deleted prefix entry")
 	}
@@ -51,7 +51,7 @@ func TestChecksumStore_DeletePrefix(t *testing.T) {
 
 func TestChecksumStore_Rename_ToExisting(t *testing.T) {
 	tmpDir := t.TempDir()
-	cs := NewChecksumStore(tmpDir, nil)
+	cs := NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 
 	cs.Set("from.txt", "fromVal")
 	cs.Set("to.txt", "toVal")
@@ -69,12 +69,12 @@ func TestChecksumStore_Rename_ToExisting(t *testing.T) {
 
 func TestChecksumStore_RecoverFromDisk(t *testing.T) {
 	tmpDir := t.TempDir()
-	cs := NewChecksumStore(tmpDir, nil)
+	cs := NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	cs.Set("k1", "v1")
 	cs.Set("k2", "v2")
 
 	// 新建实例从磁盘加载
-	cs2 := NewChecksumStore(tmpDir, nil)
+	cs2 := NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	all := cs2.GetAll()
 	if len(all) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(all))
@@ -86,7 +86,7 @@ func TestChecksumStore_RecoverFromDisk(t *testing.T) {
 
 func TestChecksumStore_GetAll_Consistency(t *testing.T) {
 	tmpDir := t.TempDir()
-	cs := NewChecksumStore(tmpDir, nil)
+	cs := NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 
 	for i := range 100 {
 		cs.Set(fmt.Sprintf("f%d", i), fmt.Sprintf("cs%d", i))
@@ -134,7 +134,9 @@ func TestUploadStore_GetSessionByFilename(t *testing.T) {
 
 func TestUploadStore_DeleteSession(t *testing.T) {
 	tmpDir := t.TempDir()
-	us := MustNewUploadStore(tmpDir, 0, nil)
+	// baseDir 直接是租户 chunk 桶（不再拼接 .__chunked__），会话目录位于其下。
+	chunkDir := filepath.Join(tmpDir, "chunk")
+	us := MustNewUploadStore(chunkDir, 0, nil)
 	defer us.Stop()
 
 	us.CreateSession("del-id", "del.txt", 100, 4096, 1, strings.Repeat("c", 64), 0)
@@ -145,7 +147,7 @@ func TestUploadStore_DeleteSession(t *testing.T) {
 		t.Fatal("session should be nil after delete")
 	}
 
-	sessionDir := filepath.Join(tmpDir, ".__chunked__", "del-id")
+	sessionDir := filepath.Join(chunkDir, "del-id")
 	if _, err := os.Stat(sessionDir); !os.IsNotExist(err) {
 		t.Fatal("session dir should be removed from disk")
 	}
@@ -195,8 +197,9 @@ func TestUploadStore_RecoverFromDisk(t *testing.T) {
 
 func TestUploadStore_ReconcileChunks(t *testing.T) {
 	tmpDir := t.TempDir()
+	chunkDir := filepath.Join(tmpDir, "chunk")
 
-	us1 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	us1.CreateSession("reconcile-id", "reconcile.txt", 8192, 4096, 2, strings.Repeat("f", 64), 0)
 	us1.MarkChunkReceived("reconcile-id", 0, "chunk0hash")
 	us1.Stop()
@@ -204,13 +207,13 @@ func TestUploadStore_ReconcileChunks(t *testing.T) {
 	// MarkChunkReceived only updates the bitmap, doesn't write chunk files.
 	// Write a chunk file on disk to simulate a partial upload where the chunk
 	// file exists but the bitmap wasn't updated (crash before bitmap flush).
-	sessionDir := filepath.Join(tmpDir, ".__chunked__", "reconcile-id")
+	sessionDir := filepath.Join(chunkDir, "reconcile-id")
 	chunkFile := filepath.Join(sessionDir, "00001.chunk")
 	if err := os.WriteFile(chunkFile, []byte("fake chunk data"), 0644); err != nil {
 		t.Fatalf("write chunk file: %v", err)
 	}
 
-	us2 := MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("reconcile-id")
@@ -249,6 +252,31 @@ func TestUploadStore_GetOrCreateSession_Reuse(t *testing.T) {
 	}
 	if s1.UploadID != s2.UploadID {
 		t.Fatal("upload_id should match")
+	}
+}
+
+// TestUploadStore_GetOrCreateSession_ReuseGuard 验证 F4 修复：按 key 复用旧会话时
+// 若文件元数据不符（攻击者预置同 key 会话篡改文件名），必须拒绝而非静默复用。
+func TestUploadStore_GetOrCreateSession_ReuseGuard(t *testing.T) {
+	tmpDir := t.TempDir()
+	us := MustNewUploadStore(tmpDir, 0, nil)
+	defer us.Stop()
+
+	// 首次：以 key "sid" 创建（正常文件名）
+	first, _, err := us.GetOrCreateSession("sid", "target.txt", 100, 4096, 1, strings.Repeat("a", 64), 0)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	_ = first
+
+	// 攻击者预置同 key 但不同文件名/校验和 → 复用应失败
+	if _, _, err = us.GetOrCreateSession("sid", "evil.txt", 100, 4096, 1, strings.Repeat("b", 64), 0); err == nil {
+		t.Fatal("同 key 不同文件名应拒绝复用")
+	}
+
+	// 同 key 同元数据 → 仍正常复用（续传不受影响）
+	if _, reused, err := us.GetOrCreateSession("sid", "target.txt", 100, 4096, 1, strings.Repeat("a", 64), 0); err != nil || !reused {
+		t.Fatalf("同元数据应复用, reused=%v err=%v", reused, err)
 	}
 }
 

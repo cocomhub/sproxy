@@ -144,7 +144,7 @@ func TestHubXferKey_NoAccessKeysFails(t *testing.T) {
 
 // TestXferIdentityPath 验证服务端身份文件路径：显式配置优先；未配置回落 XDG
 // 用户配置目录（os.UserConfigDir()/sproxy/server-identity.json）——**绝不放
-// uploads_dir 下**（审查 C-1：与文件 API 命名空间重叠，防私钥泄露/覆盖）。
+// storage_root 下**（审查 C-1：与文件 API 命名空间重叠，防私钥泄露/覆盖）。
 func TestXferIdentityPath(t *testing.T) {
 	// 1) 显式配置优先。
 	explicit := filepath.Join(t.TempDir(), "ident", "server-identity.json")
@@ -154,15 +154,15 @@ func TestXferIdentityPath(t *testing.T) {
 		t.Errorf("显式配置时应返回 %q，实际 %q", explicit, got)
 	}
 
-	// 2) 未配置 → XDG 用户配置目录（含文件名；绝不包含 uploads_dir 相对路径）。
+	// 2) 未配置 → XDG 用户配置目录（含文件名；绝不包含 storage_root 相对路径）。
 	cfg2 := Default()
-	cfg2.UploadsDir = "tmp/data/uploads" // 即使设置 uploads_dir 也不受影响
+	cfg2.StorageRoot = "tmp/data/uploads" // 即使设置 storage_root 也不受影响
 	got := XferIdentityPath(cfg2)
 	if !strings.Contains(got, "server-identity.json") {
 		t.Errorf("未配置时应含文件名，实际 %q", got)
 	}
 	if strings.Contains(got, "uploads") {
-		t.Errorf("身份文件不得位于 uploads_dir 下（审查 C-1），实际 %q", got)
+		t.Errorf("身份文件不得位于 storage_root 下（审查 C-1），实际 %q", got)
 	}
 	wantBase, _ := os.UserConfigDir()
 	if !strings.HasPrefix(got, wantBase) {

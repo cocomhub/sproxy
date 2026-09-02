@@ -18,6 +18,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // CloudArchiveRequest 是 POST /api/cloud/tasks/{id}/archive 的请求体。
@@ -43,9 +46,6 @@ type CloudArchiveResult struct {
 	SkippedTasks []string `json:"skipped_tasks,omitempty"`
 }
 
-// cloudArchiveDirName 是云任务归档文件存储子目录。
-const cloudArchiveDirName = ".__cloud_archives__"
-
 // cloudArchiveReservePlaceholder 云归档打包预留占位（100MB）。
 // tar 头（≤512B/文件）+ gzip 可能在极少数情况下产生少量膨胀，预留后按实际大小对账。
 const cloudArchiveReservePlaceholder = int64(100 * 1024 * 1024)
@@ -63,8 +63,9 @@ func (h *Handlers) cloudArchiveMaxBytes() int64 {
 func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 
-	// 校验任务存在且状态为 completed（使用 SnapshotTask 避免 data race）
-	task, ok := h.cloudMgr.SnapshotTask(taskID)
+	// 校验任务存在且状态为 completed（使用 SnapshotTask 避免 data race）。
+	// 按请求者 owner 过滤：跨 owner 任务视为不存在（404 防枚举）。
+	task, ok := h.cloudMgr.SnapshotTask(taskID, ActorFrom(r.Context()))
 	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "task not found"}, http.StatusNotFound)
 		return
@@ -90,16 +91,18 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 构造源文件路径
-	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
-	sourceFile := filepath.Join(cloudDir, task.ID, task.Filename)
-	sourceDir := filepath.Join(cloudDir, task.ID)
-
-	// 路径穿越防护
-	if !IsPathWithin(sourceFile, sourceDir) {
-		h.logger.Error("path traversal detected in cloud archive",
-			"task_id", taskID, "source_file", sourceFile)
-		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid file path"}, http.StatusInternalServerError)
+	// 构造源文件路径（任务文件按任务 owner 落租户 cloud/ 桶）：根内 rel = cloud/<taskID>/<file>
+	// 经 FeatureRel 校验段名（fail-closed，防 task.Filename 穿越任务目录）。
+	srcTnt := h.tenantFor(task.Owner)
+	if srcTnt == nil {
+		h.logger.Error("云任务源租户不可用（fail-closed）", "task_id", taskID, "owner", task.Owner)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to stat source file"}, http.StatusBadRequest)
+		return
+	}
+	srcRel, ok := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
+	if !ok {
+		h.logger.Error("云任务源路径非法（fail-closed）", "task_id", taskID, "file", task.Filename)
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to stat source file"}, http.StatusBadRequest)
 		return
 	}
 
@@ -124,23 +127,31 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确保输出目录存在
-	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName)
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
+	owner := ActorFrom(r.Context())
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		return
+	}
+	root := tnt.Root()
+	if err := root.MkdirAll("archive", 0755); err != nil {
 		h.logger.Error("failed to create archive directory", "error", err)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
 		return
 	}
-	outputPath := filepath.Join(archiveDir, archiveName)
-	// 二次验证：确保 outputPath 仍在 archiveDir 内
-	if !strings.HasPrefix(filepath.Clean(outputPath), filepath.Clean(archiveDir)+string(filepath.Separator)) {
+	rel, ok := tnt.FeatureRel("archive", archiveName)
+	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
 		return
 	}
 
 	// 打包前：单文件总量限制（cloud_archive_max_bytes）。单文件仍受 addFileToTar 内
 	// defaultMaxArchiveSize=100MB 约束；此处限制的是原始文件大小，与 addFileToTar 并存不冲突。
-	info, err := os.Stat(sourceFile)
+	// 审查 #10 结论（勿再分析）：此 os.Stat 是**必须的**大小校验，并非与 O_EXCL 重复的
+	// 存在性预检——同名冲突由 openArchiveOutput 的 O_EXCL 单一负责（createTarGz 返回
+	// errArchiveExists → 409）；此处 stat 失败即源文件不存在（400），职责不同，无冗余。
+	info, err := srcTnt.Root().Stat(srcRel)
 	if err != nil {
 		h.logger.Error("failed to stat source file in cloud archive", "task_id", taskID, "error", err)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to stat source file"}, http.StatusBadRequest)
@@ -154,48 +165,78 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pre := info.Size() + cloudArchiveReservePlaceholder
-	if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-		}, http.StatusInsufficientStorage)
-		return
+	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
+	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
+	var res *quota.Reservation
+	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
+		rr, reserveErr := scope.TryReserve(pre)
+		if reserveErr != nil {
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
+		res = rr
+	} else if h.storageMgr != nil {
+		if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
 	}
 
 	// 打包（流式 checksum）
 	logger := h.logger.With("archive", "cloud_task", "task_id", taskID)
-	checksum, err := createTarGz(sourceFile, task.Filename, outputPath, logger)
+	checksum, err := createTarGz(srcTnt.Root(), srcRel, task.Filename, root, rel, logger)
 	if err != nil {
 		if errors.Is(err, errArchiveExists) {
-			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
-			h.storageMgr.Release(pre, CategoryCloud)
+			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
+			releaseArchiveReservation(res, h.storageMgr, pre)
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
 			return
 		}
 		h.logger.Error("failed to create archive", "task_id", taskID, "error", err)
-		_ = os.Remove(outputPath)
-		h.storageMgr.Release(pre, CategoryCloud)
+		_ = root.Remove(rel)
+		releaseArchiveReservation(res, h.storageMgr, pre)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
 		}, http.StatusInternalServerError)
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：释放预占后按实际 size 重新预留，账本收敛到 actual。
-	// 注意不能只释放 pre 而不补留——压缩后 actual 通常远小于 pre，若账本净为 0 会少计
-	// actual 字节（配额窗口被放大，直到 30min 扫描校准）。
-	h.storageMgr.Release(pre, CategoryCloud)
-	if actual, statErr := os.Stat(outputPath); statErr == nil {
-		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
-			h.logger.Error("storage full, removing archive to keep ledger consistent", "task_id", taskID, "error", rErr)
-			_ = os.Remove(outputPath)
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
-			}, http.StatusInsufficientStorage)
-			return
+	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
+	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
+	actual := int64(0)
+	if res != nil {
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			res.Commit(actual)
+			res = nil
+		} else {
+			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
+			res.Release()
+			res = nil
+		}
+	} else if h.storageMgr != nil {
+		h.storageMgr.Release(pre, CategoryCloud)
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			if rErr := h.storageMgr.TryReserve(actual, CategoryCloud); rErr != nil {
+				h.logger.Error("storage full, removing archive to keep ledger consistent", "task_id", taskID, "error", rErr)
+				_ = root.Remove(rel)
+				sendJSONResponse(w, CloudArchiveResult{
+					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
+				}, http.StatusInsufficientStorage)
+				return
+			}
 		}
 	}
 
-	archiveInfo, err := os.Stat(outputPath)
+	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
+	h.recordArchiveUsage(owner, archiveName, actual)
+
+	archiveInfo, err := root.Stat(rel)
 	if err != nil {
 		h.logger.Error("failed to stat archive", "task_id", taskID, "error", err)
 	}
@@ -207,7 +248,7 @@ func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 
 	sendJSONResponse(w, CloudArchiveResult{
 		Success:   true,
-		File:      filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
+		File:      archiveName,
 		Size:      archiveSize,
 		Checksum:  checksum,
 		TaskCount: 1,
@@ -240,14 +281,13 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 收集所有已完成任务的文件信息，跳过无效任务
-	cloudDir := filepath.Join(h.cloudMgr.uploadsDir, cloudDirName)
 	var files []fileWithRelPath
 	var skippedTasks []string
 	var totalSourceSize int64
 
 	for _, taskID := range req.TaskIDs {
-		// 使用 SnapshotTask 避免 data race
-		task, ok := h.cloudMgr.SnapshotTask(taskID)
+		// 使用 SnapshotTask 避免 data race；按请求者 owner 过滤（跨 owner 任务跳过，防内容外泄）
+		task, ok := h.cloudMgr.SnapshotTask(taskID, ActorFrom(r.Context()))
 		if !ok {
 			h.logger.Warn("cloud batch archive: skipping task not found", "task_id", taskID)
 			skippedTasks = append(skippedTasks, taskID)
@@ -260,29 +300,34 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		sourceFile := filepath.Join(cloudDir, task.ID, task.Filename)
-		sourceDir := filepath.Join(cloudDir, task.ID)
-
-		// 路径穿越防护
-		if !IsPathWithin(sourceFile, sourceDir) {
-			h.logger.Error("path traversal detected in cloud batch archive",
-				"task_id", taskID, "source_file", sourceFile)
+		// 源文件按任务 owner 租户 cloud/ 桶解析（根内 rel = cloud/<taskID>/<file>）
+		srcTnt := h.tenantFor(task.Owner)
+		if srcTnt == nil {
+			h.logger.Warn("cloud batch archive: skipping task with unavailable tenant",
+				"task_id", taskID, "owner", task.Owner)
+			skippedTasks = append(skippedTasks, taskID)
+			continue
+		}
+		srcRel, ok := srcTnt.FeatureRel("cloud", task.ID+"/"+task.Filename)
+		if !ok {
+			h.logger.Warn("cloud batch archive: skipping task with invalid source path",
+				"task_id", taskID, "file", task.Filename)
 			skippedTasks = append(skippedTasks, taskID)
 			continue
 		}
 
 		// 顺带 stat 校验文件存在并累计原始大小（用于总量限制与配额预估）
-		info, statErr := os.Stat(sourceFile)
+		info, statErr := srcTnt.Root().Stat(srcRel)
 		if statErr != nil {
 			h.logger.Warn("cloud batch archive: skipping missing file",
-				"task_id", taskID, "source_file", sourceFile, "error", statErr)
+				"task_id", taskID, "rel", srcRel, "error", statErr)
 			skippedTasks = append(skippedTasks, taskID)
 			continue
 		}
 		totalSourceSize += info.Size()
 
 		relPath := filepath.ToSlash(filepath.Join(task.ID, task.Filename))
-		files = append(files, fileWithRelPath{fullPath: sourceFile, relPath: relPath})
+		files = append(files, fileWithRelPath{root: srcTnt.Root(), rel: srcRel, tarRel: relPath})
 	}
 
 	// 所有任务都被跳过则返回错误
@@ -315,16 +360,21 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 确保输出目录存在
-	archiveDir := filepath.Join(h.cloudMgr.uploadsDir, cloudArchiveDirName)
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+	// 确保输出目录存在（租户 archive 桶：<root>/<tenant>/archive/）
+	owner := ActorFrom(r.Context())
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
+		return
+	}
+	root := tnt.Root()
+	if err := root.MkdirAll("archive", 0755); err != nil {
 		h.logger.Error("failed to create archive directory", "error", err)
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "failed to create archive directory"}, http.StatusInternalServerError)
 		return
 	}
-	outputPath := filepath.Join(archiveDir, archiveName)
-	// 二次验证：确保 outputPath 仍在 archiveDir 内
-	if !strings.HasPrefix(filepath.Clean(outputPath), filepath.Clean(archiveDir)+string(filepath.Separator)) {
+	rel, ok := tnt.FeatureRel("archive", archiveName)
+	if !ok {
 		sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "invalid archive path"}, http.StatusInternalServerError)
 		return
 	}
@@ -338,49 +388,79 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pre := totalSourceSize + cloudArchiveReservePlaceholder
-	if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
-		sendJSONResponse(w, CloudArchiveResult{
-			Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
-		}, http.StatusInsufficientStorage)
-		return
+	// P5 收敛：双轨 TryReserve（storageMgr + Scope 同时预留同量字节）改为二选一——
+	// 生产环境 scope 恒非 nil（全局兜底由 Scope 父链生效），storageMgr 仅作回退。
+	var res *quota.Reservation
+	if scope := h.quotaBucketFor(owner, "archive"); scope != nil {
+		rr, reserveErr := scope.TryReserve(pre)
+		if reserveErr != nil {
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
+		res = rr
+	} else if h.storageMgr != nil {
+		if reserveErr := h.storageMgr.TryReserve(pre, CategoryCloud); reserveErr != nil {
+			sendJSONResponse(w, CloudArchiveResult{
+				Success: false, Message: fmt.Sprintf("insufficient storage: %v", reserveErr),
+			}, http.StatusInsufficientStorage)
+			return
+		}
 	}
 
 	// 多文件打包（流式 checksum）
 	created := false
 	logger := h.logger.With("archive", "cloud_batch")
-	checksum, err := createMultiFileTarGz(files, outputPath, logger, &created)
+	checksum, err := createMultiFileTarGz(files, root, rel, logger, &created)
 	if err != nil {
 		if !created {
-			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏
-			h.storageMgr.Release(pre, CategoryCloud)
+			// O_EXCL：同名归档已存在，释放已预留的配额避免泄漏（与 TryReserve 二选一对称）
+			releaseArchiveReservation(res, h.storageMgr, pre)
 			sendJSONResponse(w, CloudArchiveResult{Success: false, Message: "archive file already exists"}, http.StatusConflict)
 			return
 		}
 		h.logger.Error("failed to create batch archive", "error", err)
-		_ = os.Remove(outputPath)
-		h.storageMgr.Release(pre, CategoryCloud)
+		_ = root.Remove(rel)
+		releaseArchiveReservation(res, h.storageMgr, pre)
 		sendJSONResponse(w, CloudArchiveResult{
 			Success: false, Message: fmt.Sprintf("failed to create archive: %v", err),
 		}, http.StatusInternalServerError)
 		return
 	}
 
-	// 按磁盘实际大小对账预留配额：释放预占后按实际 size 重新预留，账本收敛到 actual。
-	// 注意不能只释放 pre 而不补留——压缩后 actual 通常远小于 pre，若账本净为 0 会少计
-	// actual 字节（配额窗口被放大，直到 30min 扫描校准）。
-	h.storageMgr.Release(pre, CategoryCloud)
-	if actual, statErr := os.Stat(outputPath); statErr == nil {
-		if rErr := h.storageMgr.TryReserve(actual.Size(), CategoryCloud); rErr != nil {
-			h.logger.Error("storage full, removing archive to keep ledger consistent", "error", rErr)
-			_ = os.Remove(outputPath)
-			sendJSONResponse(w, CloudArchiveResult{
-				Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
-			}, http.StatusInsufficientStorage)
-			return
+	// 按磁盘实际大小对账预留配额：scope 优先单步 Commit(actual)（多预留部分自动归还）；
+	// storageMgr 回退保留 3 步（Release(pre)+TryReserve(actual)，全局账本 /stats 兼容）。
+	actual := int64(0)
+	if res != nil {
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			res.Commit(actual)
+			res = nil
+		} else {
+			// stat 失败（罕见）：释放预留避免永久挂账（归档文件已落盘，下次扫描校准全局账本）。
+			res.Release()
+			res = nil
+		}
+	} else if h.storageMgr != nil {
+		h.storageMgr.Release(pre, CategoryCloud)
+		if info, statErr := root.Stat(rel); statErr == nil {
+			actual = info.Size()
+			if rErr := h.storageMgr.TryReserve(actual, CategoryCloud); rErr != nil {
+				h.logger.Error("storage full, removing archive to keep ledger consistent", "error", rErr)
+				_ = root.Remove(rel)
+				sendJSONResponse(w, CloudArchiveResult{
+					Success: false, Message: fmt.Sprintf("insufficient storage for archive: %v", rErr),
+				}, http.StatusInsufficientStorage)
+				return
+			}
 		}
 	}
 
-	info, err := os.Stat(outputPath)
+	// P5 归档占用登记（删除时按登记释放 Scope，不再依赖周期扫描自愈）。
+	h.recordArchiveUsage(owner, archiveName, actual)
+
+	info, err := root.Stat(rel)
 	if err != nil {
 		h.logger.Error("failed to stat archive", "error", err)
 	}
@@ -392,7 +472,7 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 
 	sendJSONResponse(w, CloudArchiveResult{
 		Success:      true,
-		File:         filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName)),
+		File:         archiveName,
 		Size:         size,
 		Checksum:     checksum,
 		TaskCount:    len(files),
@@ -401,16 +481,19 @@ func (h *Handlers) cloudArchiveBatch(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
-// fileWithRelPath 是文件路径与 tar 内相对路径对。
+// fileWithRelPath 是源文件（租户根内相对路径）与 tar 内相对路径对。
+// root 是源文件所在租户根（云任务文件按任务 owner 落租户 cloud/ 桶，跨 owner 任务 root 不同）。
 type fileWithRelPath struct {
-	fullPath string
-	relPath  string
+	root   *storage.Root
+	rel    string // 根内相对源路径（cloud/<taskID>/<file>）
+	tarRel string // tar 内条目名
 }
 
 // createTarGz 将单个文件打包为 tar.gz 并返回流式计算的 SHA-256 checksum。
 // 使用 succeeded 标记模式确保出错时清理输出文件。O_EXCL 创建，已存在返回 false 到 created。
-func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger) (checksum string, err error) {
-	outputFile, created, err := openArchiveOutput(outputPath)
+// 源文件经 srcRoot 相对 srcRel 读取、输出经 outRoot 相对 outRel 打开（os.Root 防符号链接逃逸；O_EXCL 语义保留）。
+func createTarGz(srcRoot *storage.Root, srcRel, srcTarName string, outRoot *storage.Root, outRel string, logger *slog.Logger) (checksum string, err error) {
+	outputFile, created, err := openArchiveOutput(outRoot, outRel)
 	if err != nil {
 		return "", err
 	}
@@ -423,7 +506,7 @@ func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger)
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			os.Remove(outputPath)
+			_ = outRoot.Remove(outRel)
 		}
 	}()
 
@@ -436,7 +519,7 @@ func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger)
 	tw := tar.NewWriter(gw)
 	defer tw.Close()
 
-	if err := addFileToTar(tw, sourceFile, sourceName, logger); err != nil {
+	if err := addFileToTar(tw, srcRoot, srcRel, srcTarName, logger); err != nil {
 		return "", fmt.Errorf("add file to tar: %w", err)
 	}
 
@@ -447,9 +530,11 @@ func createTarGz(sourceFile, sourceName, outputPath string, logger *slog.Logger)
 
 // createMultiFileTarGz 将多个文件打包为单个 tar.gz 并返回流式计算的 SHA-256 checksum。
 // 使用 succeeded 标记模式确保出错时清理输出文件。O_EXCL 创建，已存在时置 created=false 并返回 errArchiveExists。
-func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *slog.Logger, created *bool) (checksum string, err error) {
+// 源文件按各自租户根（files[].root）相对读取、输出经 outRoot 相对 outRel 打开
+// （os.Root 防符号链接逃逸；O_EXCL 语义保留）。
+func createMultiFileTarGz(files []fileWithRelPath, outRoot *storage.Root, outRel string, logger *slog.Logger, created *bool) (checksum string, err error) {
 	*created = true
-	outputFile, createdOK, err := openArchiveOutput(outputPath)
+	outputFile, createdOK, err := openArchiveOutput(outRoot, outRel)
 	if err != nil {
 		return "", err
 	}
@@ -463,7 +548,7 @@ func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *sl
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			os.Remove(outputPath)
+			_ = outRoot.Remove(outRel)
 		}
 	}()
 
@@ -477,8 +562,8 @@ func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *sl
 	defer tw.Close()
 
 	for _, f := range files {
-		if err := addFileToTar(tw, f.fullPath, f.relPath, logger); err != nil {
-			return "", fmt.Errorf("add file %q to tar: %w", f.relPath, err)
+		if err := addFileToTar(tw, f.root, f.rel, f.tarRel, logger); err != nil {
+			return "", fmt.Errorf("add file %q to tar: %w", f.tarRel, err)
 		}
 	}
 
@@ -490,10 +575,10 @@ func createMultiFileTarGz(files []fileWithRelPath, outputPath string, logger *sl
 // errArchiveExists 归档输出文件已存在（O_EXCL 创建失败）。
 var errArchiveExists = errors.New("archive file already exists")
 
-// openArchiveOutput 以 O_EXCL 语义打开归档输出文件。
+// openArchiveOutput 以 O_EXCL 语义打开归档输出文件（相对租户 root 的 rel 路径）。
 // 跨平台统一用 errors.Is(err, os.ErrExist) 判已存在（Windows 上 O_EXCL 对已存在文件同样报错）。
-func openArchiveOutput(outputPath string) (*os.File, bool, error) {
-	f, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+func openArchiveOutput(root *storage.Root, rel string) (*os.File, bool, error) {
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil, false, nil
@@ -501,4 +586,79 @@ func openArchiveOutput(outputPath string) (*os.File, bool, error) {
 		return nil, false, fmt.Errorf("create archive output: %w", err)
 	}
 	return f, true, nil
+}
+
+// releaseArchiveReservation 释放云归档预留，与 TryReserve 的"二选一"对称：
+// scope 预留（res 非 nil）→ Reservation.Release；storageMgr 回退预留 → 按 pre 释放。
+// 不 double release：两条路径互斥，同一归档只走其中一条。
+func releaseArchiveReservation(res *quota.Reservation, sm *StorageManager, pre int64) {
+	if res != nil {
+		res.Release()
+	} else if sm != nil {
+		sm.Release(pre, CategoryCloud)
+	}
+}
+
+// recordArchiveUsage 登记归档文件在租户 archive 桶 Scope 中的已确认占用
+// （P5 审查重要 2：删除归档时按登记释放，不再依赖周期扫描自愈）。
+// actual<=0 时不登记（文件未落盘，无占用可释放）。
+func (h *Handlers) recordArchiveUsage(owner, archiveName string, actual int64) {
+	if actual <= 0 {
+		return
+	}
+	owner = normalizeOwner(owner)
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if h.archiveUsage == nil {
+		h.archiveUsage = make(map[string]map[string]int64)
+	}
+	m := h.archiveUsage[owner]
+	if m == nil {
+		m = make(map[string]int64)
+		h.archiveUsage[owner] = m
+	}
+	m[archiveName] = actual
+}
+
+// deleteCloudArchive 删除租户 archive 桶下指定归档文件并释放其 Scope 占用。
+// 供归档删除路径（DeleteGroup 联动 / 未来归档删除 API）调用；文件不存在视为幂等成功。
+// 释放量以磁盘 stat 为准（与登记一致；登记缺失时按 stat 释放，防止 Scope 虚高）。
+func (h *Handlers) deleteCloudArchive(owner, archiveName string) error {
+	owner = normalizeOwner(owner)
+	tnt := h.tenantFor(owner)
+	if tnt == nil {
+		return errors.New("租户不可用，无法删除归档")
+	}
+	rel, ok := tnt.FeatureRel("archive", archiveName)
+	if !ok {
+		return fmt.Errorf("非法归档名: %s", archiveName)
+	}
+	root := tnt.Root()
+	size := int64(0)
+	if info, err := root.Stat(rel); err == nil {
+		size = info.Size()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat 归档失败: %w", err)
+	}
+	if err := root.Remove(rel); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("删除归档失败: %w", err)
+	}
+	// 释放 archive 桶 Scope 占用（按磁盘 stat 大小；文件已不存在时按登记释放）。
+	if size <= 0 {
+		h.tenantMu.Lock()
+		if m := h.archiveUsage[owner]; m != nil {
+			size = m[archiveName]
+		}
+		h.tenantMu.Unlock()
+	}
+	if scope := h.quotaBucketFor(owner, "archive"); scope != nil && size > 0 {
+		scope.ReleaseUsage(size)
+	}
+	h.tenantMu.Lock()
+	if m := h.archiveUsage[owner]; m != nil {
+		delete(m, archiveName)
+	}
+	h.tenantMu.Unlock()
+	h.logger.Info("云归档已删除并释放配额", "owner", owner, "archive", archiveName, "size", size)
+	return nil
 }

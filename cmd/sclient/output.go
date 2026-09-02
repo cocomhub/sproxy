@@ -180,7 +180,7 @@ func (f *TextFormatter) PrintStat(info *client.FileInfo, filename string) {
 func (f *TextFormatter) PrintStats(stats *client.StatsResponse) {
 	fmt.Fprintf(f.w, "服务器统计（自启动以来）\n")
 	fmt.Fprintf(f.w, "磁盘使用:\n")
-	fmt.Fprintf(f.w, "  目录:     %s\n", stats.DiskUsage.UploadsDir)
+	fmt.Fprintf(f.w, "  目录:     %s\n", stats.DiskUsage.StorageRoot)
 	fmt.Fprintf(f.w, "  文件数:   %d\n", stats.DiskUsage.TotalFiles)
 	fmt.Fprintf(f.w, "  总大小:   %s\n", client.FormatByte(float64(stats.DiskUsage.TotalSize)))
 
@@ -228,7 +228,7 @@ func (f *TextFormatter) PrintConfig(cfg *client.ConfigResponse) {
 	fmt.Fprintf(f.w, "  versioning_enabled:     %v\n", cfg.VersioningEnabled)
 	fmt.Fprintf(f.w, "  cloud_max_concurrent:   %d\n", cfg.CloudMaxConcurrent)
 	fmt.Fprintf(f.w, "  addr:                   %s\n", cfg.Addr)
-	fmt.Fprintf(f.w, "  uploads_dir:            %s\n", cfg.UploadsDir)
+	fmt.Fprintf(f.w, "  storage_root:           %s\n", cfg.StorageRoot)
 }
 
 func (f *TextFormatter) Printf(format string, args ...any) {

@@ -152,7 +152,7 @@ const xferIdentityFileName = "server-identity.json"
 //     （Linux ~/.config/sproxy/、macOS ~/Library/Application Support/sproxy/、
 //     Windows %AppData%/sproxy/，与 sclient XDG 配置约定一致）。
 //
-// **安全约束（审查 C-1）**：绝不把身份文件放 uploads_dir 下——该目录与文件 API
+// **安全约束（审查 C-1）**：绝不把身份文件放 storage_root 下——该目录与文件 API
 // 的用户可控命名空间重叠，已认证 peer 可经 GET /download?filename=sproxy/... 读取
 // 私钥、经上传/删除覆盖替换，击穿 AD-4 pinning 信任锚。XDG 用户配置目录默认对
 // 本进程用户可写、对 mesh peer 不可经 HTTP 触达。
@@ -163,8 +163,8 @@ func XferIdentityPath(cfg *Config) string {
 	base, err := os.UserConfigDir()
 	if err != nil || base == "" {
 		// os.UserConfigDir 在极少数平台/环境下可能报错（如 $HOME 未设置）。
-		// 此时回落相对路径（保留文件名语义），仍**不在 uploads_dir 下**——
-		// 相比放 uploads_dir 的私钥泄露风险，这是可接受的最后兜底。
+		// 此时回落相对路径（保留文件名语义），仍**不在 storage_root 下**——
+		// 相比放 storage_root 的私钥泄露风险，这是可接受的最后兜底。
 		return filepath.Join(xferIdentityRelDir, xferIdentityFileName)
 	}
 	return filepath.Join(base, xferIdentityRelDir, xferIdentityFileName)

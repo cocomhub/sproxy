@@ -25,7 +25,7 @@ import (
 // groupStatusFn 每次查询组详情时调用，返回组状态与子任务列表。
 func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll int) (string, []CloudTask)) *httptest.Server {
 	t.Helper()
-	archiveDir := filepath.Join(dir, ".__cloud_archives__")
+	archiveDir := filepath.Join(dir, archiveDirName)
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 		json.NewEncoder(w).Encode(CloudArchiveResult{
 			Success: true,
 			Message: "ok",
-			File:    filepath.ToSlash(filepath.Join(".__cloud_archives__", "group-archive.tar.gz")),
+			File:    "group-archive.tar.gz",
 			Size:    int64(len("group-archive-content")),
 		})
 	})
@@ -109,8 +109,7 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 
 	// Stat endpoint for chunked download
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
+		archiveFile := resolveMockDownloadFile(dir, r)
 		os.MkdirAll(filepath.Dir(archiveFile), 0755)
 		if _, err := os.Stat(archiveFile); err != nil {
 			os.WriteFile(archiveFile, []byte("group-archive-content"), 0644)
@@ -136,8 +135,7 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 
 	// Chunk download endpoint
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
-		filename := r.URL.Query().Get("filename")
-		archiveFile := filepath.Join(dir, filepath.FromSlash(filename))
+		archiveFile := resolveMockDownloadFile(dir, r)
 		data, err := os.ReadFile(archiveFile)
 		if err != nil {
 			t.Error("ReadFile:", err)
@@ -474,7 +472,7 @@ func TestCloudDownloadGroupChain_RunNoClient(t *testing.T) {
 func TestCloudDownloadGroupChain_CleanupRemoteError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	archiveDir := filepath.Join(dir, ".__cloud_archives__")
+	archiveDir := filepath.Join(dir, archiveDirName)
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +491,7 @@ func TestCloudDownloadGroupChain_CleanupRemoteError(t *testing.T) {
 		archivePath := filepath.Join(archiveDir, "cleanup-archive.tar.gz")
 		os.WriteFile(archivePath, []byte("cleanup"), 0644)
 		json.NewEncoder(w).Encode(CloudArchiveResult{
-			Success: true, File: filepath.ToSlash(filepath.Join(".__cloud_archives__", "cleanup-archive.tar.gz")), Size: 7,
+			Success: true, File: "cleanup-archive.tar.gz", Size: 7,
 		})
 	})
 	// 删除组失败：cleanupGroup 应容忍（Run 仍成功）

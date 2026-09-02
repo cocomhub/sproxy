@@ -13,31 +13,47 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // newTestServerWithUploadInit 返回一个包含 chunked upload handler 的 Handlers 实例。
+// 装配多租户存储布局（同 newTestServerWithChunked）：init 的"文件已存在"检查与
+// 会话创建都走租户 user 桶 / per-tenant chunk 桶。
 func newTestServerWithUploadInit(t *testing.T, modifyCfg func(*Config)) (*Handlers, *atomic.Pointer[Config], func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
-	cs := NewChecksumStore(cfg.UploadsDir, nil)
-	store := MustNewUploadStore(cfg.UploadsDir, cfg.UploadSessionTTL, nil)
 	h := &Handlers{
 		cfgPtr:        &cfgPtr,
-		uploadStore:   store,
-		checksumStore: cs,
 		logger:        slog.Default(),
+		uploadingStop: make(chan struct{}),
 	}
-	cleanup := func() {
-		store.Stop()
+	globalRoot, err := storage.OpenRoot(cfg.StorageRoot)
+	if err != nil {
+		t.Fatalf("打开存储根失败: %v", err)
 	}
-	return h, &cfgPtr, cleanup
+	h.globalRoot = globalRoot
+	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
+	h.tenantRoots = make(map[string]*storage.Tenant)
+	h.checksumStores = make(map[string]*ChecksumStore)
+	h.uploadStores = make(map[string]*UploadStore)
+	h.quotaScopes = make(map[string]*quota.Scope)
+	if h.tenantFor(anonymousOwner) == nil {
+		t.Fatal("创建 anonymous 租户失败")
+	}
+	if h.uploadStoreFor(anonymousOwner) == nil {
+		t.Fatal("创建 anonymous UploadStore 失败")
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	return h, &cfgPtr, func() {}
 }
 
 // postInit 发送 upload/init POST 请求，返回 ResponseRecorder。
@@ -73,6 +89,9 @@ func assertMsgContains(t *testing.T, w *httptest.ResponseRecorder, substr string
 
 func writeFile(t *testing.T, path string, data []byte) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
@@ -136,10 +155,11 @@ func TestUploadInit_ChecksumMismatchConflict(t *testing.T) {
 	t.Parallel()
 	uploadsDir := t.TempDir()
 	h, _, cleanup := newTestServerWithUploadInit(t, func(c *Config) {
-		c.UploadsDir = uploadsDir
+		c.StorageRoot = uploadsDir
 	})
 	defer cleanup()
-	writeFile(t, filepath.Join(uploadsDir, "existing.txt"), []byte("some content"))
+	// 已存在文件放租户 user 桶（anonymous 租户）——init 的"文件已存在"检查走租户根。
+	writeFile(t, filepath.Join(uploadsDir, "anonymous", "user", "existing.txt"), []byte("some content"))
 	w := postInit(t, h, `{"upload_id":"id6","filename":"existing.txt","total_size":12,"chunk_size":4096,"total_chunks":1,"file_checksum":"0000000000000000000000000000000000000000000000000000000000000000"}`)
 	assertStatusEq(t, w, 409)
 	assertMsgContains(t, w, "checksum 不匹配")
@@ -149,16 +169,14 @@ func TestUploadInit_FileAlreadyExistsChecksumMatch(t *testing.T) {
 	t.Parallel()
 	uploadsDir := t.TempDir()
 	h, _, cleanup := newTestServerWithUploadInit(t, func(c *Config) {
-		c.UploadsDir = uploadsDir
+		c.StorageRoot = uploadsDir
 	})
 	defer cleanup()
 
-	filePath := filepath.Join(uploadsDir, "exists.txt")
+	// 已存在文件放租户 user 桶（anonymous 租户）；init 直接对文件算 checksum 比对。
 	content := []byte("hello world")
+	filePath := filepath.Join(uploadsDir, "anonymous", "user", "exists.txt")
 	writeFile(t, filePath, content)
-	if err := os.WriteFile(filepath.Join(uploadsDir, ".checksums.json"), []byte(`{"exists.txt":"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"}`), 0644); err != nil {
-		t.Fatal(err)
-	}
 
 	w := postInit(t, h, `{"upload_id":"id7","filename":"exists.txt","total_size":11,"chunk_size":4096,"total_chunks":1,"file_checksum":"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"}`)
 	assertStatusEq(t, w, 200)

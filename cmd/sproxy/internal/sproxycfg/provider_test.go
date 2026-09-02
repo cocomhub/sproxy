@@ -32,7 +32,7 @@ func TestNew_WithConfigFile(t *testing.T) {
 	cfgPath := filepath.Join(dir, "config.yaml")
 	yamlContent := `
 addr: ":19000"
-uploads_dir: "/tmp/uploads"
+storage_root: "/tmp/uploads"
 log_level: "debug"
 `
 	if err := os.WriteFile(cfgPath, []byte(yamlContent), 0644); err != nil {
@@ -45,9 +45,9 @@ log_level: "debug"
 	}
 
 	var cfg struct {
-		Addr       string `mapstructure:"addr"`
-		UploadsDir string `mapstructure:"uploads_dir"`
-		LogLevel   string `mapstructure:"log_level"`
+		Addr        string `mapstructure:"addr"`
+		StorageRoot string `mapstructure:"storage_root"`
+		LogLevel    string `mapstructure:"log_level"`
 	}
 	if err := vp.Unmarshal(&cfg); err != nil {
 		t.Fatalf("Unmarshal 应成功: %v", err)
@@ -55,8 +55,8 @@ log_level: "debug"
 	if cfg.Addr != ":19000" {
 		t.Errorf("addr = %q, want %q", cfg.Addr, ":19000")
 	}
-	if cfg.UploadsDir != "/tmp/uploads" {
-		t.Errorf("uploads_dir = %q, want %q", cfg.UploadsDir, "/tmp/uploads")
+	if cfg.StorageRoot != "/tmp/uploads" {
+		t.Errorf("storage_root = %q, want %q", cfg.StorageRoot, "/tmp/uploads")
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("log_level = %q, want %q", cfg.LogLevel, "debug")

@@ -120,7 +120,7 @@ type HubConfig struct {
 	Federation FederationConfig `yaml:"federation" mapstructure:"federation"`
 	// XferIdentityFile 是服务端 xfer listener 的 Ed25519 身份文件路径（AD-4：
 	// 用于握手指纹 pinning）。为空时回落到 XDG 用户配置目录
-	// （os.UserConfigDir()/sproxy/server-identity.json），**绝不放 uploads_dir 下**
+	// （os.UserConfigDir()/sproxy/server-identity.json），**绝不放 storage_root 下**
 	// （与文件 API 命名空间重叠，已认证 peer 可经 /download 读取私钥——审查 C-1）。
 	XferIdentityFile string `yaml:"xfer_identity_file" mapstructure:"xfer_identity_file"`
 }
@@ -248,8 +248,14 @@ type SyncRemoteConfig struct {
 }
 
 type Config struct {
-	Addr       string `yaml:"addr" mapstructure:"addr"`
-	UploadsDir string `yaml:"uploads_dir" mapstructure:"uploads_dir"`
+	Addr string `yaml:"addr" mapstructure:"addr"`
+	// StorageRoot 是存储根目录（新布局 <root>/<tenant>/{user,cloud,...}/）。
+	// YAML 键为 storage_root（字段与 YAML 键一致，直接字段访问）。
+	StorageRoot string `yaml:"storage_root" mapstructure:"storage_root"`
+	// OwnerQuotas 是 per-tenant 配额上限（字节），key 为 owner 名（含 "anonymous"），
+	// "*" 为默认值（未显式列出的 owner 用此值）；0 = 不限制。
+	// 启动装配时按此创建各租户的配额 Scope（quotaFor 懒创建）。
+	OwnerQuotas map[string]int64 `yaml:"owner_quotas" mapstructure:"owner_quotas"`
 	// MaxUploadBytes 已移至 internal/size.UploadBodyLimit（1 GiB 硬限制），不可配置。
 	// MaxChunkUploadBytes 已移至 internal/size.DefaultChunkBodyLimit（64 MiB 硬限制），不可配置。
 	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`
@@ -304,10 +310,22 @@ type Config struct {
 	CloudArchiveMaxBytes int64 `yaml:"cloud_archive_max_bytes" mapstructure:"cloud_archive_max_bytes"`
 }
 
+// OwnerQuotaFor 返回指定 owner 的配额上限（字节）：显式 owner 配置 > "*" 默认值 > 0。
+// 未配置任何 owner_quotas 时返回 0（不限制）。
+func (c *Config) OwnerQuotaFor(owner string) int64 {
+	if c.OwnerQuotas == nil {
+		return 0
+	}
+	if v, ok := c.OwnerQuotas[owner]; ok {
+		return v
+	}
+	return c.OwnerQuotas["*"]
+}
+
 func Default() *Config {
 	return &Config{
-		Addr:       ":18083",
-		UploadsDir: "./uploads",
+		Addr:        ":18083",
+		StorageRoot: "./storage",
 		ServerTimeouts: ServerTimeouts{
 			Shutdown: 30 * time.Second,
 		},
@@ -356,8 +374,8 @@ func (c *Config) SetDefaults() {
 	if c.Addr == "" {
 		c.Addr = ":18083"
 	}
-	if c.UploadsDir == "" {
-		c.UploadsDir = "./uploads"
+	if c.StorageRoot == "" {
+		c.StorageRoot = "./storage"
 	}
 	if c.ChunkSize <= 0 {
 		c.ChunkSize = size.DefaultChunkSize
@@ -441,8 +459,8 @@ func (c *Config) Validate() error {
 	if c.Addr == "" {
 		return fmt.Errorf("addr 为空，请配置监听地址")
 	}
-	if c.UploadsDir == "" {
-		return fmt.Errorf("uploads_dir 为空，请配置上传目录")
+	if c.StorageRoot == "" {
+		return fmt.Errorf("storage_root 为空，请配置存储根目录")
 	}
 	// 无 auth 配置（access_keys/api_keys 均为空）在 Validate 层是合法的——
 	// fail-fast 拒绝启动在 cmd/sproxy 侧执行。

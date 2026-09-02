@@ -20,17 +20,44 @@ import (
 	"time"
 )
 
-// syncDirName 是同步任务持久化目录名（uploadsDir/.__sync__/）。
-const syncDirName = ".__sync__"
-
 // syncReservePlaceholder 未知大小同步任务的本地存储占位大小（1 GiB，对齐 cloud 下载占位）。
 const syncReservePlaceholder = int64(1024 * 1024 * 1024)
+
+// TenantRootResolver 按任务 owner 解析租户 user 根与 meta/sync 持久化目录的绝对路径。
+// 空 owner 归一为 anonymous 租户；租户不可用（非法 owner / 存储根未装配）返回 ok=false
+// （写路径 fail-closed，绝不回落全局根）。装配层用 storage.NewTenant(owner, globalRoot)
+// 派生（见 pkg/server/sync_handler.go 的 Handlers.syncTenantRoot）。
+type TenantRootResolver func(owner string) (userRootAbs, persistDirAbs string, ok bool)
 
 // ErrStorageFull 存储配额不足（对齐 pkg/server.ErrStorageFull 语义）。
 var ErrStorageFull = errors.New("storage quota exceeded")
 
 // ErrNotFound 任务不存在。
 var ErrNotFound = errors.New("sync task not found")
+
+// ownerVisible 判定任务 owner 对请求者 owner 是否可见（多租户隔离规则，与
+// pkg/server 的 cloud owner 过滤一致）：
+//   - 请求者 owner 为空（管理员/未认证）→ 可见全部；
+//   - 请求者 owner 非空 → 任务 owner 为空（全局/旧任务，兼容所有用户）或与请求者一致才可见。
+//
+// 空 owner 任务对所有人可见是刻意设计：不破坏现有未认证/单用户部署（旧任务与
+// 未认证创建的任务无归属），且让空 owner 请求者承担管理员语义。
+//
+// 审查 #3（跨 owner 去重 500 复核结论——not a bug，勿再分析）：
+// CreateTask 去重命中条件 ownerVisible(t.Owner, req.Owner) 与 handler 回读快照
+// Get(task.ID, ActorFrom(ctx)) 使用**同一** ownerVisible 判定，二者语义恒定一致：
+// 去重命中（ownerVisible=true）→ 必以请求者视角 Get 可见，绝不产生
+// "task created but not found" 500。空 owner 全局任务被认证用户吸收后 Get 仍通过
+// （taskOwner=="" → 对所有请求者可见）；反向（空 owner 请求者吸收 ownerA 任务）
+// 不存在——去重循环 ownerVisible("ak-A","")=true 会吸收，此时 handler Get(owner="")
+// 恒可见。已由 TestCreateTask_DedupScopedByOwner / TestCloudOwner_EmptyOwnerCompat
+// 覆盖。无缺陷，无需修改。
+func ownerVisible(taskOwner, reqOwner string) bool {
+	if reqOwner == "" {
+		return true
+	}
+	return taskOwner == "" || taskOwner == reqOwner
+}
 
 // QuotaStore 抽象存储配额接口（由 pkg/server.StorageManager 实现）。
 // cat 是存储分类（pkg/server.StorageCategory），syncmgr 只使用 CategoryUserFiles。
@@ -87,9 +114,11 @@ type RemoteConfig struct {
 type Manager struct {
 	tasks       map[string]*SyncTask
 	mu          sync.RWMutex
-	uploadsDir  string
-	persistDir  string // uploadsDir/.__sync__/
+	tenantRoot  TenantRootResolver // 按任务 owner 解析租户 user 根 / meta/sync 持久化目录
+	listTenants func() []string    // 返回全部租户名（恢复扫描；磁盘扫描，非内存缓存）
 	quota       QuotaStore
+	quotaFor    func(owner string) QuotaStore // 可选：按 owner 解析 per-tenant 配额存储（P4/P5）
+	quotaForMu  sync.RWMutex                  // 独立于 mu 的读写锁，守卫 quotaFor（taskQuota 在持/不持 mu 时均被调用）
 	quotaCat    int
 	remotes     map[string]RemoteConfig
 	executor    Executor
@@ -112,17 +141,21 @@ func defaultLogger(l *slog.Logger) *slog.Logger {
 }
 
 // NewManager 创建 SyncManager 并恢复持久化任务。
+// tenantRoot 按任务 owner 解析租户 user 根 / meta/sync 持久化目录（nil 时持久化与本地执行
+// 路径 fail-closed）；listTenants 返回全部租户名供恢复扫描（nil 时跳过恢复）。
 // quota 可为 nil（不启用配额追踪），executor 可为 nil（任务执行时失败，CreateTask 仍可用）。
-func NewManager(uploadsDir string, quota QuotaStore, quotaCat int, remotes []RemoteConfig, executor Executor, logger *slog.Logger, cfg *Config) *Manager {
+// 持久化目录在首次 saveTask 时按租户懒创建（不再预先创建全局目录）。
+func NewManager(tenantRoot TenantRootResolver, listTenants func() []string, quota QuotaStore, quotaCat int, remotes []RemoteConfig, executor Executor, logger *slog.Logger, cfg *Config) *Manager {
 	if cfg == nil {
 		cfg = &Config{}
 	}
 	applyConfigDefaults(cfg)
 	log := defaultLogger(logger)
-
-	persistDir := filepath.Join(uploadsDir, syncDirName)
-	if err := os.MkdirAll(persistDir, 0755); err != nil {
-		log.Warn("创建 sync persist 目录失败", "dir", persistDir, "error", err)
+	if tenantRoot == nil {
+		tenantRoot = func(string) (string, string, bool) { return "", "", false }
+	}
+	if listTenants == nil {
+		listTenants = func() []string { return nil }
 	}
 
 	rmap := make(map[string]RemoteConfig, len(remotes))
@@ -132,8 +165,8 @@ func NewManager(uploadsDir string, quota QuotaStore, quotaCat int, remotes []Rem
 
 	m := &Manager{
 		tasks:       make(map[string]*SyncTask),
-		uploadsDir:  uploadsDir,
-		persistDir:  persistDir,
+		tenantRoot:  tenantRoot,
+		listTenants: listTenants,
 		quota:       quota,
 		quotaCat:    quotaCat,
 		remotes:     rmap,
@@ -168,6 +201,41 @@ func (noopQuota) Release(_ int64, _ int)          {}
 func (noopQuota) Usage() int64                    { return 0 }
 func (noopQuota) MaxBytes() int64                 { return 0 }
 
+// SetQuotaResolver 注入 per-owner 配额解析器（P4/P5：sync pull 按任务 owner 在 user 桶
+// Scope 上预留/对账，替代全局 StorageManager 适配器，使 owner_quotas 对同步生效）。
+// 未注入时回退 NewManager 传入的单一 QuotaStore（既有测试/旧装配保持全局语义）。
+// 注入后 NewManager 的 quota 仅作 fallback（resolver 对某 owner 返回 nil 时）。
+func (m *Manager) SetQuotaResolver(quotaFor func(owner string) QuotaStore) {
+	m.quotaForMu.Lock()
+	defer m.quotaForMu.Unlock()
+	m.quotaFor = quotaFor
+}
+
+// taskQuota 返回任务 owner 的配额存储：注入 resolver 时按 owner 解析（nil 回退单一 quota），
+// 否则直接返回单一 quota（测试/旧装配）。quotaFor 经独立 quotaForMu 读写锁守卫，
+// 因为本函数在持 m.mu（CreateTask/CancelTask/failTask/reconcileQuotaLocked）与不持 m.mu
+// （DeleteTask）两种上下文下均被调用——用独立锁可避免与 m.mu 的锁序耦合/死锁。
+func (m *Manager) taskQuota(owner string) QuotaStore {
+	m.quotaForMu.RLock()
+	qf := m.quotaFor
+	m.quotaForMu.RUnlock()
+	if qf != nil {
+		if q := qf(owner); q != nil {
+			return q
+		}
+	}
+	return m.quota
+}
+
+// persistDirFor 返回任务 owner 租户 meta/sync 持久化目录绝对路径。租户不可用返回 ""。
+func (m *Manager) persistDirFor(owner string) string {
+	_, p, ok := m.tenantRoot(owner)
+	if !ok {
+		return ""
+	}
+	return p
+}
+
 // validateRemote 校验并返回 remote 配置（fail-closed：未配置凭据拒绝）。
 func (m *Manager) validateRemote(name string) (*RemoteConfig, error) {
 	if name == "" {
@@ -188,10 +256,10 @@ func (m *Manager) validateRemote(name string) (*RemoteConfig, error) {
 	return &cp, nil
 }
 
-// validateSyncPath 校验同步路径：拒绝绝对路径、路径穿越与内部目录访问（"" 表示 FS 根，合法）。
-// 任一路径段以 .__ 开头（服务端内部目录约定，如 .__cloud__/.__versions__/.__sync__）一律
-// 拒绝——否则持有 AK 的用户可 push 把其他租户内部数据外发到远程、或 pull 覆盖同步任务
-// 持久化状态（审查 I-3）。
+// validateSyncPath 校验同步路径：拒绝绝对路径与路径穿越（"" 表示 FS 根，合法）。
+// 不再拒绝 .__ 前缀段——同步 src/dst 相对租户 user 根解析，用户路径恒落在 user/ 桶内，
+// 与租户根顶层功能桶（cloud/chunk/version/meta）物理隔离，天然无法访问功能数据或
+// 同步任务持久化状态（审查 I-3 的原 .__ 拒绝逻辑已随布局迁移删除）。
 func validateSyncPath(p, field string) error {
 	if p == "" {
 		return nil
@@ -209,12 +277,6 @@ func validateSyncPath(p, field string) error {
 	for seg := range strings.SplitSeq(normalized, "/") {
 		if seg == ".." {
 			return fmt.Errorf("%s 不能包含路径穿越: %q", field, p)
-		}
-		if seg == "." {
-			continue
-		}
-		if strings.HasPrefix(seg, ".__") {
-			return fmt.Errorf("%s 不能访问内部目录（.__ 前缀为服务端保留）: %q", field, p)
 		}
 	}
 	return nil
@@ -247,16 +309,21 @@ func (m *Manager) validateCreateRequest(req *CreateRequest) error {
 // CreateTask 创建同步任务（不启动执行），返回 (任务, 是否新建)。
 // 去重 + 预留 + 插入整体在写锁内完成（闭合 TOCTOU，审查 I-1：并发同 key 的
 // CreateTask 只有一个能通过，避免双任务并发写同一 dst 路径/远程 session 踩踏）。
-// pull 方向本地落盘，按占位大小预留配额（TryReserve 失败返回 ErrStorageFull）；
-// push 方向远程自行预留，本地不预留。
+// pull 方向本地落盘，按占位大小预留配额（TryReserve 失败降级为按需预留，不拒绝任务——
+// 1GiB 占位对 owner_quota < 1GiB 的租户放不下时，由 reconcileQuotaLocked 在下载字节
+// 实际到达时按增量强制配额）；push 方向远程自行预留，本地不预留。
 func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 	if err := m.validateCreateRequest(&req); err != nil {
 		return nil, false, err
 	}
 	m.mu.Lock()
-	// 写锁内去重（retrying 仍是活跃任务，同样去重复用）
+	// 写锁内去重（retrying 仍是活跃任务，同样去重复用）。
+	// 去重限**对请求者 owner 可见**的任务（同 owner 或空 owner 全局兼容）：跨 owner 的
+	// 同参任务不吸收——否则 B 提交与 A 相同的 push 任务会返回 A 的任务（泄露 A 的归属
+	// 与进度，且 B 无法建立自己的同步），与 cloud findByURL 的去重语义保持一致。
 	for _, t := range m.tasks {
 		if t.Direction == req.Direction && t.Remote == req.Remote && t.Src == req.Src && t.Dst == req.Dst &&
+			ownerVisible(t.Owner, req.Owner) &&
 			(t.Status == StatusPending || t.Status == StatusSyncing || t.Status == StatusRetrying) {
 			c := *t
 			m.mu.Unlock()
@@ -272,25 +339,30 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 
 	reserved := int64(0)
 	if req.Direction == string(DirectionPull) {
-		reserved = syncReservePlaceholder
-		if err := m.quota.TryReserve(reserved, m.quotaCat); err != nil {
-			m.mu.Unlock()
-			m.logger.Warn("storage full, sync task rejected",
+		// 占位预留是 best-effort（P5 建议：按需占位）：1GiB 占位对 owner_quota < 1GiB 的租户
+		// 放不下时**不拒绝任务**——降级为 0 预留（reserved=0），由 reconcileQuotaLocked 在下载
+		// 字节实际到达时按 delta 增量 TryReserve 强制配额（提交永不超限；仅头部预占降级）。
+		// 配额余量检查仍被保留：reconcile 失败释放预留并使任务 failed（见
+		// TestReconcileQuota_TryReserveFailOnCompletion），不破坏已写入文件。
+		q := m.taskQuota(req.Owner) // P4/P5：按 owner 解析（resolver 未注入时回退全局 quota）
+		if err := q.TryReserve(syncReservePlaceholder, m.quotaCat); err != nil {
+			m.logger.Warn("sync storage headroom reservation failed, degrade to on-demand reservation",
 				"remote", req.Remote,
-				"requested", reserved,
-				"usage", m.quota.Usage(),
-				"max", m.quota.MaxBytes(),
+				"owner", req.Owner,
+				"requested", syncReservePlaceholder,
+				"usage", q.Usage(),
+				"max", q.MaxBytes(),
 				"error", err,
 			)
-			// 统一映射为 ErrStorageFull：TryReserve 只返回配额满或 nil
-			// （真实实现返回 pkg/server.ErrStorageFull，syncmgr 无法 import server）。
-			return nil, false, fmt.Errorf("storage full: %w", ErrStorageFull)
+		} else {
+			reserved = syncReservePlaceholder
 		}
 	}
 
 	now := time.Now()
 	task := &SyncTask{
 		ID:             newSyncTaskID(),
+		Owner:          req.Owner, // 服务端派生（ActorFrom ctx），客户端不可伪造
 		Direction:      req.Direction,
 		Remote:         req.Remote,
 		Src:            req.Src,
@@ -345,12 +417,13 @@ func (m *Manager) SubmitAndStart(req CreateRequest) (*SyncTask, bool, error) {
 	return task, isNew, nil
 }
 
-// Get 返回任务深拷贝（切片字段隔离，防止调用方误改污染活任务，审查 M-7），不存在返回 nil。
-func (m *Manager) Get(id string) *SyncTask {
+// Get 返回任务深拷贝（切片字段隔离，防止调用方误改污染活任务，审查 M-7），
+// 不存在或对请求者 owner 不可见（跨 owner，IDOR 防护）时返回 nil。
+func (m *Manager) Get(id, owner string) *SyncTask {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	t, ok := m.tasks[id]
-	if !ok {
+	if !ok || !ownerVisible(t.Owner, owner) {
 		return nil
 	}
 	c := *t
@@ -360,14 +433,18 @@ func (m *Manager) Get(id string) *SyncTask {
 	return &c
 }
 
-// List 返回任务元信息列表（CreatedAt 降序）。
-func (m *Manager) List() []SyncTaskMeta {
+// List 返回任务元信息列表（CreatedAt 降序），按请求者 owner 过滤：
+// owner 非空时只含匹配 owner 与空 owner（全局兼容）的任务；空 owner（管理员/未认证）返回全部。
+func (m *Manager) List(owner string) []SyncTaskMeta {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]SyncTaskMeta, 0, len(m.tasks))
 	for _, t := range m.tasks {
+		if !ownerVisible(t.Owner, owner) {
+			continue
+		}
 		out = append(out, SyncTaskMeta{
-			ID: t.ID, Direction: t.Direction, Remote: t.Remote,
+			ID: t.ID, Owner: t.Owner, Direction: t.Direction, Remote: t.Remote,
 			Src: t.Src, Dst: t.Dst, Status: t.Status, Retries: t.Retries,
 			FilesTotal: t.FilesTotal, FilesDone: t.FilesDone,
 			BytesTotal: t.BytesTotal, BytesDone: t.BytesDone,
@@ -384,10 +461,11 @@ func (m *Manager) List() []SyncTaskMeta {
 }
 
 // CancelTask 取消任务（pending/syncing/retrying 可取消；排队中任务也可取消）。
-func (m *Manager) CancelTask(id string) error {
+// 按请求者 owner 过滤：跨 owner 任务返回 ErrNotFound（404 防枚举，不泄露存在性）。
+func (m *Manager) CancelTask(id, owner string) error {
 	m.mu.Lock()
 	t, ok := m.tasks[id]
-	if !ok {
+	if !ok || !ownerVisible(t.Owner, owner) {
 		m.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
@@ -403,7 +481,7 @@ func (m *Manager) CancelTask(id string) error {
 	// 区分用户文件 vs 同步残留），释放预留后磁盘残留字节在下次周期扫描（≤30min）前
 	// 未入账，属接受的瞬时欠计。
 	if t.ReservedSize > 0 {
-		m.quota.Release(t.ReservedSize, m.quotaCat)
+		m.taskQuota(t.Owner).Release(t.ReservedSize, m.quotaCat)
 		t.ReservedSize = 0
 	}
 	// 触发执行取消（排队中任务也已注册 cancelFuncs，可立即生效）
@@ -423,10 +501,11 @@ func (m *Manager) CancelTask(id string) error {
 }
 
 // DeleteTask 删除任务（任何状态均可删除），释放预留配额并移除持久化文件。
-func (m *Manager) DeleteTask(id string) error {
+// 按请求者 owner 过滤：跨 owner 任务返回 ErrNotFound（404 防枚举，不泄露存在性）。
+func (m *Manager) DeleteTask(id, owner string) error {
 	m.mu.Lock()
 	t, ok := m.tasks[id]
-	if !ok {
+	if !ok || !ownerVisible(t.Owner, owner) {
 		m.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
@@ -445,14 +524,16 @@ func (m *Manager) DeleteTask(id string) error {
 	// 释放预留配额。与 CancelTask 同理（审查 M-4）：pull 已落盘文件不清理，残留字节
 	// 在下次周期扫描前未入账，属接受的瞬时欠计。
 	if reserved > 0 {
-		m.quota.Release(reserved, m.quotaCat)
+		m.taskQuota(t.Owner).Release(reserved, m.quotaCat)
 		m.logger.Debug("storage released", "task_id", id, "size", reserved)
 	}
 	m.logger.Info("deleting sync task", "task_id", id, "status", t.Status)
 
-	persistFile := filepath.Join(m.persistDir, t.ID+".json")
-	if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
-		m.logger.Warn("failed to remove sync task persist file", "task_id", id, "error", err)
+	if persistDir := m.persistDirFor(t.Owner); persistDir != "" {
+		persistFile := filepath.Join(persistDir, t.ID+".json")
+		if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
+			m.logger.Warn("failed to remove sync task persist file", "task_id", id, "error", err)
+		}
 	}
 	m.logger.Info("sync task deleted", "task_id", id)
 	return nil
@@ -743,7 +824,7 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 		// 不释放会永久钉住配额（failed 不可取消，用户只能手动 DeleteTask 或重启）。
 		// 释放后归零防二次释放；磁盘残留由下次周期扫描记账。
 		if task.Direction == string(DirectionPull) && task.ReservedSize > 0 {
-			m.quota.Release(task.ReservedSize, m.quotaCat)
+			m.taskQuota(task.Owner).Release(task.ReservedSize, m.quotaCat)
 			task.ReservedSize = 0
 		}
 	default:
@@ -753,7 +834,7 @@ func (m *Manager) applyRunResultWithError(task *SyncTask, runResult *RunResult, 
 		}
 		// 同上：未知状态落 failed 也释放预留配额。
 		if task.Direction == string(DirectionPull) && task.ReservedSize > 0 {
-			m.quota.Release(task.ReservedSize, m.quotaCat)
+			m.taskQuota(task.Owner).Release(task.ReservedSize, m.quotaCat)
 			task.ReservedSize = 0
 		}
 	}
@@ -799,12 +880,13 @@ func (m *Manager) reconcileQuotaLocked(task *SyncTask) {
 	reserved := task.ReservedSize
 	actual := task.BytesDone
 	delta := actual - reserved
+	q := m.taskQuota(task.Owner) // P4/P5：按 owner 解析（resolver 未注入时回退全局 quota）
 	switch {
 	case delta > 0:
-		if err := m.quota.TryReserve(delta, m.quotaCat); err != nil {
+		if err := q.TryReserve(delta, m.quotaCat); err != nil {
 			// 存储不足，无法容纳实际大小：释放旧占位，任务失败（不破坏已写入文件）
 			if reserved > 0 {
-				m.quota.Release(reserved, m.quotaCat)
+				q.Release(reserved, m.quotaCat)
 			}
 			task.ReservedSize = 0
 			task.Status = StatusFailed
@@ -813,7 +895,7 @@ func (m *Manager) reconcileQuotaLocked(task *SyncTask) {
 		}
 		task.ReservedSize = actual
 	case delta < 0:
-		m.quota.Release(-delta, m.quotaCat)
+		q.Release(-delta, m.quotaCat)
 		task.ReservedSize = actual
 	}
 }
@@ -826,7 +908,7 @@ func (m *Manager) failTask(task *SyncTask, errMsg string) {
 		return
 	}
 	if task.ReservedSize > 0 {
-		m.quota.Release(task.ReservedSize, m.quotaCat)
+		m.taskQuota(task.Owner).Release(task.ReservedSize, m.quotaCat)
 		task.ReservedSize = 0
 	}
 	task.Status = StatusFailed
@@ -856,7 +938,16 @@ func (m *Manager) saveTask(t *SyncTask) error {
 		m.logger.Warn("failed to marshal sync task", "id", t.ID, "error", err)
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(m.persistDir, t.ID+".json"), data, 0644); err != nil {
+	persistDir := m.persistDirFor(t.Owner)
+	if persistDir == "" {
+		m.logger.Warn("租户不可用，跳过任务持久化", "id", t.ID, "owner", t.Owner)
+		return fmt.Errorf("tenant unavailable for task %s", t.ID)
+	}
+	if err := os.MkdirAll(persistDir, 0755); err != nil {
+		m.logger.Warn("创建持久化目录失败", "dir", persistDir, "error", err)
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(persistDir, t.ID+".json"), data, 0644); err != nil {
 		m.logger.Warn("failed to persist sync task", "id", t.ID, "error", err)
 		return err
 	}
@@ -864,44 +955,52 @@ func (m *Manager) saveTask(t *SyncTask) error {
 }
 
 // recoverTasks 从磁盘恢复任务，仅重启 syncing/retrying 状态（pending 不自动启动）。
-// retrying 任务（重试等待/重试执行中崩溃）与 syncing 一样中断续执行，保留已累计的重试计数。
+// 遍历全部租户的 meta/sync 目录（listTenants 磁盘扫描，非内存缓存），按任务落盘目录
+// 逐租户读取。retrying 任务（重试等待/重试执行中崩溃）与 syncing 一样中断续执行，
+// 保留已累计的重试计数。
 func (m *Manager) recoverTasks() {
-	entries, err := os.ReadDir(m.persistDir)
-	if err != nil {
-		return
-	}
 	recovered := 0
 	restarted := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+	for _, tenant := range m.listTenants() {
+		persistDir := m.persistDirFor(tenant)
+		if persistDir == "" {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(m.persistDir, e.Name()))
+		entries, err := os.ReadDir(persistDir)
 		if err != nil {
-			m.logger.Warn("failed to read persisted sync task, skipping", "file", e.Name(), "error", err)
 			continue
 		}
-		var task SyncTask
-		if err := json.Unmarshal(data, &task); err != nil {
-			m.logger.Warn("failed to unmarshal persisted sync task, skipping", "file", e.Name(), "error", err)
-			continue
-		}
-		// 重启后 StorageManager 已按磁盘扫描校准计数器，任务不再持有预留（防二次释放）
-		task.ReservedSize = 0
-		task.Restored = true // 完成对账时不再 TryReserve（审查 I-2）
-		m.mu.Lock()
-		m.tasks[task.ID] = &task
-		m.mu.Unlock()
-		recovered++
-
-		if task.Status == StatusSyncing || task.Status == StatusRetrying {
-			m.logger.Info("restarting interrupted sync task", "task_id", task.ID, "remote", task.Remote, "retries", task.Retries)
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(persistDir, e.Name()))
+			if err != nil {
+				m.logger.Warn("failed to read persisted sync task, skipping", "file", e.Name(), "error", err)
+				continue
+			}
+			var task SyncTask
+			if err := json.Unmarshal(data, &task); err != nil {
+				m.logger.Warn("failed to unmarshal persisted sync task, skipping", "file", e.Name(), "error", err)
+				continue
+			}
+			// 重启后 StorageManager 已按磁盘扫描校准计数器，任务不再持有预留（防二次释放）
+			task.ReservedSize = 0
+			task.Restored = true // 完成对账时不再 TryReserve（审查 I-2）
 			m.mu.Lock()
-			m.running[task.ID] = true
+			m.tasks[task.ID] = &task
 			m.mu.Unlock()
-			m.wg.Add(1)
-			go m.executeSync(context.Background(), &task) //nolint:gosec
-			restarted++
+			recovered++
+
+			if task.Status == StatusSyncing || task.Status == StatusRetrying {
+				m.logger.Info("restarting interrupted sync task", "task_id", task.ID, "remote", task.Remote, "retries", task.Retries)
+				m.mu.Lock()
+				m.running[task.ID] = true
+				m.mu.Unlock()
+				m.wg.Add(1)
+				go m.executeSync(context.Background(), &task) //nolint:gosec
+				restarted++
+			}
 		}
 	}
 	if recovered > 0 {
@@ -913,7 +1012,8 @@ func (m *Manager) recoverTasks() {
 func (m *Manager) cleanupExpiredOnce() int {
 	now := time.Now()
 	m.mu.Lock()
-	var expired []string
+	type expiredTask struct{ id, owner string }
+	var expired []expiredTask
 	for id, t := range m.tasks {
 		switch t.Status {
 		case StatusCompleted, StatusFailed, StatusCancelled:
@@ -921,14 +1021,16 @@ func (m *Manager) cleanupExpiredOnce() int {
 			continue
 		}
 		if now.After(t.UpdatedAt.Add(m.config.TaskTTL)) {
-			expired = append(expired, id)
+			expired = append(expired, expiredTask{id: id, owner: t.Owner})
 			delete(m.tasks, id)
 		}
 	}
 	m.mu.Unlock()
 
-	for _, id := range expired {
-		_ = os.Remove(filepath.Join(m.persistDir, id+".json"))
+	for _, et := range expired {
+		if persistDir := m.persistDirFor(et.owner); persistDir != "" {
+			_ = os.Remove(filepath.Join(persistDir, et.id+".json"))
+		}
 	}
 	if len(expired) > 0 {
 		m.logger.Info("expired sync tasks cleaned up", "count", len(expired))

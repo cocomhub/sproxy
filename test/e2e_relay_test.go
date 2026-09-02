@@ -217,7 +217,7 @@ access_keys:
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("write hub config: %v", err)
 	}
-	cmd := exec.Command(binPath, "--addr", addr, "--uploads-dir", uploadsDir, "--config", configPath)
+	cmd := exec.Command(binPath, "--addr", addr, "--storage-root", uploadsDir, "--config", configPath)
 	cmd.Dir = e2eModuleRoot()
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf

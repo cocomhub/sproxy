@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -36,10 +35,10 @@ type ChecksumStore struct {
 	logger    *slog.Logger
 }
 
-// NewChecksumStore 创建 ChecksumStore，从 uploadsDir/.checksums.json 加载已有记录。
-// 同时清理可能由上次进程崩溃残留的 .checksums.json.tmp 文件。
-func NewChecksumStore(uploadsDir string, logger *slog.Logger) *ChecksumStore {
-	storePath := filepath.Join(uploadsDir, ".checksums.json")
+// NewChecksumStore 从指定的 storePath 创建 ChecksumStore（唯一构造入口）：
+// storePath = <tenant meta>/checksums.json（或测试的临时文件路径）。加载已有记录、
+// 清理上次进程崩溃残留的 .tmp 文件——存储路径由调用方显式指定。
+func NewChecksumStore(storePath string, logger *slog.Logger) *ChecksumStore {
 	cs := &ChecksumStore{
 		storePath: storePath,
 		checksums: make(map[string]string),

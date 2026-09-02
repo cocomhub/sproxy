@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -21,15 +22,16 @@ import (
 
 // Executor 基于 pkg/sync.Engine 的同步执行器（实现 syncmgr.Executor）。
 type Executor struct {
-	// UploadsDir 是本地 FS 根（push 的 src / pull 的 dst）。
-	UploadsDir string
+	// TenantRoot 按任务 owner 解析租户 user 根绝对路径（push 的 src / pull 的 dst 根）。
+	// 装配层注入（如 Handlers.syncTenantRoot）；nil 时 Run 报错（fail-closed）。
+	TenantRoot syncmgr.TenantRootResolver
 	// Logger 是执行日志。
 	Logger *slog.Logger
 }
 
-// NewExecutor 创建执行器。
-func NewExecutor(uploadsDir string, logger *slog.Logger) *Executor {
-	return &Executor{UploadsDir: uploadsDir, Logger: logger}
+// NewExecutor 创建执行器。tenantRoot 由装配层注入（见 syncmgr.TenantRootResolver）。
+func NewExecutor(tenantRoot syncmgr.TenantRootResolver, logger *slog.Logger) *Executor {
+	return &Executor{TenantRoot: tenantRoot, Logger: logger}
 }
 
 func (e *Executor) logger() *slog.Logger {
@@ -37,6 +39,19 @@ func (e *Executor) logger() *slog.Logger {
 		return e.Logger
 	}
 	return slog.Default()
+}
+
+// userRootFor 返回任务 owner 租户 user 根绝对路径（LocalFS 根）。解析失败返回错误
+// （fail-closed：租户不可用时任务失败，绝不回落全局根）。
+func (e *Executor) userRootFor(owner string) (string, error) {
+	if e.TenantRoot == nil {
+		return "", fmt.Errorf("同步执行器未配置租户根解析器")
+	}
+	userRoot, _, ok := e.TenantRoot(owner)
+	if !ok {
+		return "", fmt.Errorf("租户不可用: %q", owner)
+	}
+	return userRoot, nil
 }
 
 // Run 执行一次同步（实现 syncmgr.Executor）。
@@ -54,8 +69,19 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	}
 	defer cleanupTransports()
 
+	// 本地端（push 的 src / pull 的 dst）按任务 owner 解析到租户 user 根（<root>/<tenant>/user）。
+	// 布局迁移后由注入的 TenantRoot 解析器派生（与 pkg/server 租户布局单一来源，owner
+	// 校验集中到 pkg/storage，消除双端漂移）；owner 由服务端派生（可信），解析失败 fail-closed。
+	localRoot, err := e.userRootFor(task.Owner)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(localRoot, 0o755); err != nil {
+		return nil, fmt.Errorf("创建本地同步根 %s 失败: %w", localRoot, err)
+	}
+
 	if task.Direction == string(syncmgr.DirectionPush) {
-		srcFS = syncpkg.NewLocalFS(e.UploadsDir, e.logger())
+		srcFS = syncpkg.NewLocalFS(localRoot, e.logger())
 		tr, err := e.newRemoteTransport(remote)
 		if err != nil {
 			return nil, err
@@ -69,7 +95,7 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		}
 		httpTransports = append(httpTransports, tr)
 		srcFS = tr
-		dstFS = syncpkg.NewLocalFS(e.UploadsDir, e.logger())
+		dstFS = syncpkg.NewLocalFS(localRoot, e.logger())
 	}
 
 	job := &syncpkg.Job{

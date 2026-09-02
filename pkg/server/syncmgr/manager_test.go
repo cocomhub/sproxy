@@ -33,6 +33,7 @@ func completedResult() *RunResult {
 }
 
 // newTestManager 创建测试管理器（默认：无配额上限、单远程 r1、mock 执行器立即完成）。
+// 租户根解析器由测试基目录派生（newTestTenantRoot）。
 func newTestManager(t *testing.T, quota *mockQuota, remotes []RemoteConfig, exec Executor, cfg *Config) *Manager {
 	t.Helper()
 	if quota == nil {
@@ -47,7 +48,8 @@ func newTestManager(t *testing.T, quota *mockQuota, remotes []RemoteConfig, exec
 	if remotes == nil {
 		remotes = []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")}
 	}
-	mgr := NewManager(t.TempDir(), quota, 0, remotes, exec, discardLogger(), cfg)
+	tenantRoot, listTenants := newTestTenantRoot(t.TempDir())
+	mgr := NewManager(tenantRoot, listTenants, quota, 0, remotes, exec, discardLogger(), cfg)
 	t.Cleanup(mgr.Stop)
 	return mgr
 }
@@ -57,7 +59,7 @@ func waitForStatus(t *testing.T, mgr *Manager, id, want string, timeout time.Dur
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		task := mgr.Get(id)
+		task := mgr.Get(id, "")
 		if task == nil {
 			time.Sleep(10 * time.Millisecond)
 			continue
@@ -71,7 +73,7 @@ func waitForStatus(t *testing.T, mgr *Manager, id, want string, timeout time.Dur
 		time.Sleep(10 * time.Millisecond)
 	}
 	cur := "<deleted>"
-	if task := mgr.Get(id); task != nil {
+	if task := mgr.Get(id, ""); task != nil {
 		cur = task.Status
 	}
 	t.Fatalf("task %s 未在 %v 内达到 %s，当前 %v", id, timeout, want, cur)
@@ -160,6 +162,56 @@ func TestCreateTask_AbsolutePath(t *testing.T) {
 	}
 }
 
+// TestValidateSyncPath 锁定 validateSyncPath 在布局迁移后的真实语义：
+// 仍拒绝路径穿越/绝对路径/盘符/空字节；不再拒绝功能桶名与 .__ 前缀段（用户路径在
+// user 桶内与功能桶物理隔离，审查 I-3 的原 .__ 拒绝逻辑已随迁移删除）。"." 段按
+// 当前实现不被特殊拒绝（非 ".."），测试锁定实际行为。
+func TestValidateSyncPath(t *testing.T) {
+	t.Run("Rejected", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, p string
+		}{
+			{"traversal single", ".."},
+			{"traversal nested", "a/../b"},
+			{"traversal deep", "a/../../b"},
+			{"traversal leading", "../etc"},
+			{"traversal backslash", `..\etc`},
+			{"absolute posix", "/abs"},
+			{"absolute drive", "C:\\abs"},
+			{"absolute drive slash", "C:/abs"},
+			{"nul byte", "fi\x00le"},
+		} {
+			if err := validateSyncPath(tc.p, "src"); err == nil {
+				t.Errorf("%s: %q 应被拒绝", tc.name, tc.p)
+			}
+		}
+	})
+
+	t.Run("Accepted", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, p string
+		}{
+			{"fs root", ""},
+			{"plain file", "dir/file.txt"},
+			{"subdir", "a/b/c.txt"},
+			{"with spaces", "sub dir/file.txt"},
+			{"dot segment", "./meta/x"}, // "." 段不特殊拒绝（非 ".."），锁定实际行为
+			{"bucket user", "user"},
+			{"bucket meta", "meta"},
+			{"bucket cloud", "cloud"},
+			{"bucket archive", "archive"},
+			{"bucket chunk", "chunk"},
+			{"bucket version", "version"},
+			{"legacy magic prefix", ".__foo"},
+			{"legacy magic nested", "dir/.__versions__/x"},
+		} {
+			if err := validateSyncPath(tc.p, "dst"); err != nil {
+				t.Errorf("%s: %q 不应被拒绝，got %v", tc.name, tc.p, err)
+			}
+		}
+	})
+}
+
 func TestCreateTask_Dedup(t *testing.T) {
 	mgr := newTestManager(t, nil, nil, nil, nil)
 	req := CreateRequest{Direction: "push", Remote: "r1", Src: "dir", Dst: "dstdir", Recursive: true}
@@ -206,12 +258,21 @@ func TestCreateTask_QuotaPush(t *testing.T) {
 	}
 }
 
-func TestCreateTask_QuotaFull(t *testing.T) {
-	quota := newMockQuota(1024) // 远小于 1 GiB 占位
+// TestCreateTask_QuotaHeadroomDegrades 验证占位预留在配额不足时降级而非拒绝：
+// owner_quota < 1GiB 的租户（或全局余量 < 1GiB）仍可创建 pull 任务（ReservedSize=0 按需预留），
+// 配额由 reconcileQuotaLocked 在下载字节实际到达时强制（见 TestReconcileQuota_TryReserveFailOnCompletion）。
+func TestCreateTask_QuotaHeadroomDegrades(t *testing.T) {
+	quota := newMockQuota(1024) // 远小于 1 GiB 占位 → 头部预占失败，降级为按需预留
 	mgr := newTestManager(t, quota, nil, nil, nil)
-	_, _, err := mgr.CreateTask(CreateRequest{Direction: "pull", Remote: "r1"})
-	if !errors.Is(err, ErrStorageFull) {
-		t.Fatalf("应返回 ErrStorageFull，got %v", err)
+	task, _, err := mgr.CreateTask(CreateRequest{Direction: "pull", Remote: "r1"})
+	if err != nil {
+		t.Fatalf("占位预留在配额不足时应降级而非拒绝，got %v", err)
+	}
+	if task.ReservedSize != 0 {
+		t.Fatalf("降级后 ReservedSize 应为 0（按需预留），got %d", task.ReservedSize)
+	}
+	if quota.Usage() != 0 {
+		t.Fatalf("降级后 quota 不应有预留，got %d", quota.Usage())
 	}
 }
 
@@ -230,14 +291,14 @@ func TestSubmitAndStart_StateMachine(t *testing.T) {
 	// 注意：SubmitAndStart 返回的是内部共享指针，后台 goroutine 可能已把状态推进到
 	// syncing，直接读 task.Status 是数据竞争（-race 偶发捕获）。用 mgr.Get 取加锁快照：
 	// 刚提交的任务必为 pending，或已被后台 goroutine 快速推进到 syncing（均非终态，合法）。
-	if st := mgr.Get(task.ID).Status; st != StatusPending && st != StatusSyncing {
+	if st := mgr.Get(task.ID, "").Status; st != StatusPending && st != StatusSyncing {
 		t.Fatalf("SubmitAndStart 返回后任务应处于 pending 或 syncing（执行中），got %q", st)
 	}
 
 	// 执行器阻塞 → 任务停在 syncing。用 started 信号确定性等 Run 被调用
 	// （= 已拿信号量、进入 syncing），而非死等固定超时轮询状态。
 	waitStarted(t, blocking)
-	if got := mgr.Get(task.ID).Status; got != StatusSyncing {
+	if got := mgr.Get(task.ID, "").Status; got != StatusSyncing {
 		t.Fatalf("执行器阻塞期间任务应停在 syncing，got %q", got)
 	}
 
@@ -297,7 +358,7 @@ func TestCancelTask_Queued(t *testing.T) {
 	// 注意：started 信号只保证「某个任务」的 Run 被调用，若 A/B 都先提交，B 也可能先抢到
 	// 信号量（goroutine 调度非确定，CI 已复现）。故先等 A 拿到信号量，再提交 B——此时 B 必排队。
 	waitStarted(t, blocking)
-	if got := mgr.Get(taskA.ID).Status; got != StatusSyncing {
+	if got := mgr.Get(taskA.ID, "").Status; got != StatusSyncing {
 		t.Fatalf("A 应持有信号量进入 syncing，got %q", got)
 	}
 
@@ -306,11 +367,11 @@ func TestCancelTask_Queued(t *testing.T) {
 		t.Fatal(err)
 	}
 	// B 在 A 持有唯一信号量后才提交 → 必排队保持 pending（无时序依赖）。
-	b := mgr.Get(taskB.ID)
+	b := mgr.Get(taskB.ID, "")
 	if b.Status != StatusPending {
 		t.Fatalf("B 排队期间应保持 pending，got %q", b.Status)
 	}
-	if err := mgr.CancelTask(taskB.ID); err != nil {
+	if err := mgr.CancelTask(taskB.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, mgr, taskB.ID, "cancelled", 5*time.Second)
@@ -330,7 +391,7 @@ func TestCancelTask_Running(t *testing.T) {
 	}
 	// 用 started 信号确定性等 executor.Run 被调用（= 已持有信号量、进入 syncing）。
 	waitStarted(t, blocking)
-	if err := mgr.CancelTask(task.ID); err != nil {
+	if err := mgr.CancelTask(task.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, mgr, task.ID, "cancelled", 10*time.Second)
@@ -347,15 +408,15 @@ func TestDeleteTask(t *testing.T) {
 	if quota.Usage() != syncReservePlaceholder {
 		t.Fatalf("创建 pull 任务应预留配额，got %d", quota.Usage())
 	}
-	persistFile := filepath.Join(mgr.persistDir, task.ID+".json")
+	persistFile := filepath.Join(mgr.persistDirFor(task.Owner), task.ID+".json")
 	if _, err := os.Stat(persistFile); err != nil {
 		t.Fatalf("持久化文件应存在: %v", err)
 	}
 
-	if err := mgr.DeleteTask(task.ID); err != nil {
+	if err := mgr.DeleteTask(task.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	if mgr.Get(task.ID) != nil {
+	if mgr.Get(task.ID, "") != nil {
 		t.Fatal("删除后任务应不可见")
 	}
 	if quota.Usage() != 0 {
@@ -364,7 +425,7 @@ func TestDeleteTask(t *testing.T) {
 	if _, err := os.Stat(persistFile); !os.IsNotExist(err) {
 		t.Fatalf("删除后持久化文件应移除: %v", err)
 	}
-	if err := mgr.DeleteTask(task.ID); err == nil {
+	if err := mgr.DeleteTask(task.ID, ""); err == nil {
 		t.Fatal("二次删除应报 not found")
 	}
 }
@@ -419,11 +480,12 @@ func TestQuota_ReconcileOnFail_Pull(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRecoverTasks_RestartSyncing(t *testing.T) {
-	dir := t.TempDir()
+	base := t.TempDir()
+	tenantRoot, listTenants := newTestTenantRoot(base)
 	blocking := newBlockingMockExecutor()
 
 	// 第一个管理器：创建 pull 任务，人为置 syncing 并落盘
-	mgr1 := NewManager(dir, newMockQuota(0), 0, []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
+	mgr1 := NewManager(tenantRoot, listTenants, newMockQuota(0), 0, []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
 		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 	task, _, err := mgr1.CreateTask(CreateRequest{Direction: "pull", Remote: "r1", Src: "", Dst: "restored"})
 	if err != nil {
@@ -437,7 +499,7 @@ func TestRecoverTasks_RestartSyncing(t *testing.T) {
 	mgr1.Stop()
 
 	// 第二个管理器：recoverTasks 只重启 syncing 任务
-	mgr2 := NewManager(dir, newMockQuota(0), 0, []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
+	mgr2 := NewManager(tenantRoot, listTenants, newMockQuota(0), 0, []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
 		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
 	t.Cleanup(mgr2.Stop)
 
@@ -474,7 +536,7 @@ func TestConcurrency_Semaphore(t *testing.T) {
 	// （goroutine 调度非确定，CI 已复现 B 先 syncing 而 A pending）。故先等 A 拿到信号量，
 	// 再提交 B——此时 B 必排队 pending（真正无时序依赖）。
 	waitStarted(t, blocking)
-	if got := mgr.Get(taskA.ID).Status; got != StatusSyncing {
+	if got := mgr.Get(taskA.ID, "").Status; got != StatusSyncing {
 		t.Fatalf("A 应持有信号量进入 syncing，got %q", got)
 	}
 
@@ -482,7 +544,7 @@ func TestConcurrency_Semaphore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b := mgr.Get(taskB.ID); b.Status != StatusPending {
+	if b := mgr.Get(taskB.ID, ""); b.Status != StatusPending {
 		t.Fatalf("MaxConcurrent=1 时第二个任务应排队 pending，got %q", b.Status)
 	}
 	blocking.release()
@@ -502,7 +564,7 @@ func TestList_ReturnsMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	metas := mgr.List()
+	metas := mgr.List("")
 	if len(metas) != 1 {
 		t.Fatalf("List 应有 1 个任务，got %d", len(metas))
 	}
@@ -542,7 +604,7 @@ func TestCreateTask_ConcurrentDedup(t *testing.T) {
 		t.Fatalf("并发同 key 应只有 1 个新建任务，got %d", newCount)
 	}
 	// 任务列表应只有 1 个活跃任务
-	if n := len(mgr.List()); n != 1 {
+	if n := len(mgr.List("")); n != 1 {
 		t.Fatalf("任务列表应有 1 个，got %d", n)
 	}
 	exec.release()
@@ -551,8 +613,10 @@ func TestCreateTask_ConcurrentDedup(t *testing.T) {
 // TestRecoveredPullTask_NoDoubleReserve 验证恢复的 pull 任务完成对账不重新 TryReserve
 // （审查 I-2 回归：磁盘已由启动扫描记账，二次预留会配额虚高/瞬时 507）。
 func TestRecoveredPullTask_NoDoubleReserve(t *testing.T) {
-	uploadsDir := t.TempDir()
-	persistDir := filepath.Join(uploadsDir, syncDirName)
+	base := t.TempDir()
+	tenantRoot, listTenants := newTestTenantRoot(base)
+	// 匿名租户（owner==""）的 meta/sync 持久化目录
+	persistDir := filepath.Join(base, "anonymous", "meta", "sync")
 	if err := os.MkdirAll(persistDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +634,7 @@ func TestRecoveredPullTask_NoDoubleReserve(t *testing.T) {
 	}
 
 	quota := newMockQuota(0)
-	mgr := NewManager(uploadsDir, quota, 0,
+	mgr := NewManager(tenantRoot, listTenants, quota, 0,
 		[]RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
 		newMockExecutor(completedResult()), discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour})
 	defer mgr.Stop()
@@ -770,10 +834,10 @@ func TestRetry_StatusRetryingVisible(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("第 2 次 Run 未被调用")
 	}
-	if got := mgr.Get(task.ID).Status; got != StatusRetrying {
+	if got := mgr.Get(task.ID, "").Status; got != StatusRetrying {
 		t.Fatalf("重试执行期间状态应为 retrying，got %q", got)
 	}
-	if got := mgr.Get(task.ID).Retries; got != 1 {
+	if got := mgr.Get(task.ID, "").Retries; got != 1 {
 		t.Fatalf("重试计数应为 1，got %d", got)
 	}
 	exec.releaseSecond()
@@ -827,7 +891,7 @@ func TestRetry_CancelDuringBackoff(t *testing.T) {
 	// 进入 1 小时退避，状态为 retrying
 	waitForStatus(t, mgr, task.ID, StatusRetrying, 5*time.Second)
 	// 退避等待期间取消 → 立即 cancelled（不等退避结束）
-	if err := mgr.CancelTask(task.ID); err != nil {
+	if err := mgr.CancelTask(task.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, mgr, task.ID, StatusCancelled, 5*time.Second)
@@ -839,8 +903,10 @@ func TestRetry_CancelDuringBackoff(t *testing.T) {
 // TestRetry_RetriesPersisted 验证 retries 计数落盘：retrying 任务重启恢复后保留计数，
 // 且 retrying 任务与 syncing 一样在重启后自动恢复执行。
 func TestRetry_RetriesPersisted(t *testing.T) {
-	uploadsDir := t.TempDir()
-	persistDir := filepath.Join(uploadsDir, syncDirName)
+	base := t.TempDir()
+	tenantRoot, listTenants := newTestTenantRoot(base)
+	// 匿名租户（owner==""）的 meta/sync 持久化目录
+	persistDir := filepath.Join(base, "anonymous", "meta", "sync")
 	if err := os.MkdirAll(persistDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -858,14 +924,14 @@ func TestRetry_RetriesPersisted(t *testing.T) {
 	}
 
 	blocking := newBlockingMockExecutor()
-	mgr := NewManager(uploadsDir, newMockQuota(0), 0,
+	mgr := NewManager(tenantRoot, listTenants, newMockQuota(0), 0,
 		[]RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
 		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, MaxRetries: 3, RetryDelay: 10 * time.Millisecond, RetryBackoff: 2})
 	defer mgr.Stop()
 
 	// 恢复的 retrying 任务应重启执行（用 started 信号确定性等待，对齐恢复 syncing 的模式）
 	waitStarted(t, blocking)
-	if got := mgr.Get(persisted.ID).Retries; got != 2 {
+	if got := mgr.Get(persisted.ID, "").Retries; got != 2 {
 		t.Fatalf("恢复后 Retries 应保留 2，got %d", got)
 	}
 	blocking.release()

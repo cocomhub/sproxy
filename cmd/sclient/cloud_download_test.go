@@ -616,10 +616,14 @@ func TestCloudDownloadCmd_DownloadSubcommand(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(task)
 		case strings.HasPrefix(r.URL.Path, "/download") && r.Method == http.MethodGet:
-			// 校验远端路径为 .__cloud__/<taskID>/<filename>
+			// 审查 C1：云任务原始文件改用 kind=cloud_task + <taskID>/<filename>
+			// （服务端校验任务 owner 后拼接内部路径，普通下载不开放 .__ 路径访问）。
 			got := r.URL.Query().Get("filename")
-			if got != ".__cloud__/task-dl-1/original.zip" {
-				t.Errorf("expected download filename '.__cloud__/task-dl-1/original.zip', got %q", got)
+			if got != "task-dl-1/original.zip" {
+				t.Errorf("expected download filename 'task-dl-1/original.zip', got %q", got)
+			}
+			if k := r.URL.Query().Get("kind"); k != "cloud_task" {
+				t.Errorf("expected download kind=cloud_task, got %q", k)
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("X-File-Checksum", fileChecksum)
@@ -689,9 +693,12 @@ func TestCloudDownloadCmd_DownloadArchiveSubcommand(t *testing.T) {
 	archiveChecksum := sha256Hex(archiveContent)
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/download") && r.Method == http.MethodGet {
-			got := r.URL.Query().Get("filename")
-			if got != ".__cloud_archives__/my-archive.tar.gz" {
-				t.Errorf("expected download filename '.__cloud_archives__/my-archive.tar.gz', got %q", got)
+			// 归档下载传归档名 + kind=cloud_archive（不直接透传 .__ 内部路径）。
+			if got := r.URL.Query().Get("filename"); got != "my-archive.tar.gz" {
+				t.Errorf("expected download filename 'my-archive.tar.gz', got %q", got)
+			}
+			if got := r.URL.Query().Get("kind"); got != "cloud_archive" {
+				t.Errorf("expected download kind=cloud_archive, got %q", got)
 			}
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("X-File-Checksum", archiveChecksum)
@@ -710,7 +717,7 @@ func TestCloudDownloadCmd_DownloadArchiveSubcommand(t *testing.T) {
 
 	var buf strings.Builder
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"download-archive", ".__cloud_archives__/my-archive.tar.gz"})
+	cmd.SetArgs([]string{"download-archive", "archives/my-archive.tar.gz"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("download-archive subcommand failed: %v", err)
 	}

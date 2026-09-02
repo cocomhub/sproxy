@@ -36,13 +36,18 @@ func newAuthedClient(url string) *client.FileClient {
 	return client.NewFileClient(url, client.WithAccessKey(e2eAK, e2eSK))
 }
 
+// e2eNonceCounter 为 E2E 签名生成全局唯一 nonce 的递增序号（server_test 包与
+// package server 的 testNonce 隔离；各自的服务端 nonce 池独立）。
+var e2eNonceCounter atomic.Uint64
+
 // signE2ERequest 给裸请求打上合法 SproxySig 头（空 body：body_sha256=sha256("")）。
+// nonce 用 UnixNano + 序号保证同一时钟 tick 内多次签名不重复（防重放池误判 401）。
 func signE2ERequest(r *http.Request) {
 	now := time.Now()
 	h := sproxysig.Header{
 		Version: sproxysig.Version, AK: e2eAK,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
-		Nonce:      fmt.Sprintf("test-nonce-%d", now.UnixNano()),
+		Nonce:      fmt.Sprintf("test-nonce-%d-%d", now.UnixNano(), e2eNonceCounter.Add(1)),
 		BodySHA256: sproxysig.EmptyBodyHash(),
 	}
 	h.Sig = sproxysig.Sign(e2eSK, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
@@ -57,7 +62,7 @@ func startTestServer(t *testing.T) (string, string) {
 	tmpDir := t.TempDir()
 
 	cfg := server.Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.AccessKeys = []server.AccessKeyConfig{{Key: e2eAK, Secret: e2eSK, MeshID: "e2e"}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -358,9 +363,10 @@ func sha256hex(b []byte) string {
 func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
+	chunkDir := filepath.Join(tmpDir, "chunk")
 
 	// 阶段1: 创建 session 并上传部分分块
-	us1 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 
 	fileData := bytes.Repeat([]byte("ChaosTest"), 2048)
 	fileChecksum := sha256hex(fileData)
@@ -372,16 +378,16 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 		chunkData := fileData[i*int(chunkSize) : (i+1)*int(chunkSize)]
 		chunkCS := sha256hex(chunkData)
 
-		chunkDir := filepath.Join(tmpDir, ".__chunked__", "crash-test-id")
-		os.MkdirAll(chunkDir, 0755)
-		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), chunkData, 0644)
+		sessionDir := filepath.Join(chunkDir, "crash-test-id")
+		os.MkdirAll(sessionDir, 0755)
+		os.WriteFile(filepath.Join(sessionDir, fmt.Sprintf("%05d.chunk", i)), chunkData, 0644)
 
 		us1.MarkChunkReceived("crash-test-id", i, chunkCS)
 	}
 	us1.Stop() // 模拟 crash
 
 	// 阶段2: 新实例 recover
-	us2 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("crash-test-id")
@@ -402,8 +408,8 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 		end := start + int(chunkSize)
 		chunkData := fileData[start:end]
 		chunkCS := sha256hex(chunkData)
-		chunkDir := filepath.Join(tmpDir, ".__chunked__", "crash-test-id")
-		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), chunkData, 0644)
+		sessionDir := filepath.Join(chunkDir, "crash-test-id")
+		os.WriteFile(filepath.Join(sessionDir, fmt.Sprintf("%05d.chunk", i)), chunkData, 0644)
 		us2.MarkChunkReceived("crash-test-id", i, chunkCS)
 	}
 
@@ -415,21 +421,22 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
+	chunkDir := filepath.Join(tmpDir, "chunk")
 
-	us1 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us1 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	us1.CreateSession("partial-id", "partial-recover.bin", 8192, 4096, 2, strings.Repeat("x", 64), 0)
 	us1.Stop()
 
 	// 手动写入 chunk 文件但不调用 MarkChunkReceived (模拟 crash)
-	chunkDir := filepath.Join(tmpDir, ".__chunked__", "partial-id")
-	os.MkdirAll(chunkDir, 0755)
+	sessionDir := filepath.Join(chunkDir, "partial-id")
+	os.MkdirAll(sessionDir, 0755)
 
 	for i := range 2 {
 		data := bytes.Repeat([]byte{byte(i)}, 4096)
-		os.WriteFile(filepath.Join(chunkDir, fmt.Sprintf("%05d.chunk", i)), data, 0644)
+		os.WriteFile(filepath.Join(sessionDir, fmt.Sprintf("%05d.chunk", i)), data, 0644)
 	}
 
-	us2 := server.MustNewUploadStore(tmpDir, 24*time.Hour, nil)
+	us2 := server.MustNewUploadStore(chunkDir, 24*time.Hour, nil)
 	defer us2.Stop()
 
 	s := us2.GetSession("partial-id")
@@ -444,16 +451,16 @@ func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	cs := server.NewChecksumStore(tmpDir, nil)
+	cs := server.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	cs.Set("k1", "v1")
 	cs.Set("k2", "v2")
 
-	// 模拟 crash: 创建一个 .tmp 残留文件
-	tmpFile := filepath.Join(tmpDir, ".checksums.json.tmp")
+	// 模拟 crash: 创建一个 .tmp 残留文件（与新 storePath 一致：checksums.json.tmp）
+	tmpFile := filepath.Join(tmpDir, "checksums.json.tmp")
 	os.WriteFile(tmpFile, []byte(`{"stale":"data"}`), 0644)
 
 	// 新实例: 应清理 .tmp 并正确加载已持久化的 .json
-	cs2 := server.NewChecksumStore(tmpDir, nil)
+	cs2 := server.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	all := cs2.GetAll()
 	if len(all) != 2 {
 		t.Fatalf("expected 2 entries, got %d; tmp residue was not cleaned", len(all))

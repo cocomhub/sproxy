@@ -626,7 +626,22 @@ func validateOutputPath(path string) error {
 	return nil
 }
 
+// Download 从 sproxy 服务端下载文件并保存到本地。
 func (c *FileClient) Download(ctx context.Context, filename, outputPath string) error {
+	return c.downloadTo(ctx, filename, outputPath, "")
+}
+
+// DownloadCloudArchive 下载云任务归档文件（kind=cloud_archive）。
+// name 为归档名（单文件名，如 "x.tar.gz"），服务端按 owner 在租户 archive 桶内拼接。
+func (c *FileClient) DownloadCloudArchive(ctx context.Context, name, outputPath string) error {
+	return c.downloadTo(ctx, name, outputPath, DownloadKindCloudArchive)
+}
+
+// downloadTo 是 Download / DownloadCloudArchive 的公共实现。
+// 大文件（超过自动分块阈值）优先走分块下载（断点续传/并发/逐块校验语义），
+// 普通小文件走全量 /download（审查 #11：先前恒走全量，cloud_task/cloud_archive
+// 大文件无分块与进度）。
+func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind string) error {
 	if containsPathTraversal(filename) {
 		return fmt.Errorf("filename 不能包含路径穿越符 '..'")
 	}
@@ -634,7 +649,16 @@ func (c *FileClient) Download(ctx context.Context, filename, outputPath string) 
 	if err != nil {
 		return err
 	}
-	urlPath := "/download?" + url.Values{"filename": {filename}}.Encode()
+	// 预取文件大小，超出自动分块阈值走 ChunkedDownload（kind 同步透传）
+	fileSize, _, _, statErr := getFileStat(ctx, c, filename, kind)
+	if statErr == nil && ShouldAutoChunk(fileSize) {
+		return c.ChunkedDownload(ctx, filename, outputPath, WithChunkedKind(kind))
+	}
+	query := url.Values{"filename": {filename}}
+	if kind != "" {
+		query.Set("kind", kind)
+	}
+	urlPath := "/download?" + query.Encode()
 	headers := make(http.Header)
 
 	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)

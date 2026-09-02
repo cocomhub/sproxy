@@ -743,6 +743,32 @@ test('files.search / stat / download 映射', async () => {
   assert.deepStrictEqual(dl.headers, {});
 });
 
+test('files.download 按用途传 kind（cloud_archive / cloud_task），不解析 .__ 内部路径', async () => {
+  // 归档下载：调用方显式传 kind=cloud_archive，filename 只传归档名。
+  const core = makeMockCore([
+    { status: 200, headers: { 'content-type': 'application/octet-stream' }, body: new TextEncoder().encode('arc') },
+  ]);
+  const api = makeApi(core);
+  const out = await api.files.download('x.tar.gz', { kind: 'cloud_archive' });
+  // 路径拼接收敛在服务端：客户端不把 .__ 内部路径直接透传。
+  assert.strictEqual(core.calls[0].method, 'GET');
+  assert.strictEqual(core.calls[0].path, '/download?filename=x.tar.gz&kind=cloud_archive');
+  assert.strictEqual(core.calls[0].opts.download, true);
+  assert.strictEqual(new TextDecoder().decode(await out.blob.arrayBuffer()), 'arc');
+
+  // 云任务文件下载：kind=cloud_task，filename 传 <taskID>/<file>。
+  const core2 = makeMockCore([{ status: 200, headers: {}, body: new TextEncoder().encode('t') }]);
+  const api2 = makeApi(core2);
+  await api2.files.download('task-1/data.bin', { kind: 'cloud_task' });
+  assert.strictEqual(core2.calls[0].path, '/download?filename=task-1%2Fdata.bin&kind=cloud_task');
+
+  // 普通文件名不带 kind（调用方不传则不附加参数）。
+  const core3 = makeMockCore([{ status: 200, headers: {}, body: new TextEncoder().encode('n') }]);
+  const api3 = makeApi(core3);
+  await api3.files.download('dir/plain.txt');
+  assert.strictEqual(core3.calls[0].path, '/download?filename=dir%2Fplain.txt');
+});
+
 // C2 适配测试：download 返回 {blob, headers} 且 headers 携带 X-File-Checksum
 //（app.js downloadFile 用它做本地 SHA-256 往返校验；direct 模式 fetch 头大小写问题
 // 由 transport.directRun 统一小写化，此处验证注入的 downloadHeaders 被透传并在结果中

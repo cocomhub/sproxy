@@ -33,6 +33,15 @@ const (
 	// UploadIDAlreadyExists 是服务端返回的特殊 upload_id 值，表示文件已存在（通过 checksum 匹配）。
 	// 此值由服务端协议定义，变更需同步更新。
 	UploadIDAlreadyExists = "already_exists"
+
+	// DownloadKindCloudArchive 与服务端 download kind 保持一致（cloud_archive）。
+	// 归档文件存服务端租户 archive 桶（内部桶），普通下载不开放内部桶路径访问，
+	// kind 方案由服务端在归档桶内按 owner 拼接。
+	DownloadKindCloudArchive = "cloud_archive"
+	// DownloadKindCloudTask 与服务端 download kind 保持一致（cloud_task）。
+	// 云任务原始文件存服务端租户 cloud 桶（内部桶），经 kind 由服务端校验任务
+	// owner 后拼接下载（RemotePath 传 <taskID>/<file>）。
+	DownloadKindCloudTask = "cloud_task"
 )
 
 // ChunkedUploadResult 表示分块上传的结果。
@@ -92,6 +101,7 @@ type resumeSessionParams struct {
 // downloadChunkParams 是 downloadOneChunk 的参数结构体，用于减少函数参数数量（S107）。
 type downloadChunkParams struct {
 	Filename  string
+	Kind      string // 下载 kind（空=普通文件；cloud_archive=归档）
 	ChunkIdx  int
 	ChunkSize int64
 	FileSize  int64
@@ -105,6 +115,7 @@ type downloadChunkParams struct {
 // tryResumeResult 是 tryResumeSession 的返回值类型，用于替代三返回值模式。
 type tryResumeResult struct {
 	result         *ChunkedUploadResult
+	serverUploadID string // 服务端返回的完整 session id（可能带 owner 前缀）；空表示沿用 p.UploadID
 	shouldContinue bool
 	err            error
 }
@@ -560,26 +571,31 @@ func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams
 	}
 
 	if statusData.UploadID != "" {
-		c.logger.InfoContext(ctx, "续传会话已恢复", "upload_id", shortid.ShortHash(p.UploadID),
+		// 续传命中：采用服务端返回的 session id（任务 12 起为裸 id，无 owner 前缀；
+		// 租户隔离由服务端 per-tenant chunk 桶物理保证）。后续 chunk/complete 沿用该 id。
+		serverID := statusData.UploadID
+		c.logger.InfoContext(ctx, "续传会话已恢复", "upload_id", shortid.ShortHash(serverID),
 			"missing", len(statusData.MissingChunks), "total", statusData.TotalChunks)
 		result, err := c.uploadChunks(ctx, statusData.MissingChunks, chunkUploadOpts{
 			filePath:     p.LocalPath,
-			uploadID:     p.UploadID,
+			uploadID:     serverID,
 			chunkSize:    p.ChunkSize,
 			fileSize:     p.FileSize,
-			totalChunks:  p.TotalChunks,
+			totalChunks:  statusData.TotalChunks,
 			fileChecksum: p.FileChecksum,
 			filename:     p.Filename,
 			concurrency:  p.Concurrency,
 		})
-		return tryResumeResult{result: result, err: err, shouldContinue: false}
+		return tryResumeResult{result: result, serverUploadID: serverID, err: err, shouldContinue: false}
 	}
 
 	return tryResumeResult{shouldContinue: true}
 }
 
-// initNewUploadSession 创建新的上传 session，并返回服务端 chunk_size。
-func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionParams) (int64, int, error) {
+// initNewUploadSession 创建新的上传 session，并返回（服务端 session 完整 id、服务端 chunk_size、总块数）。
+// 服务端在多租户下会对会话 key 做 owner 前缀隔离，返回的 upload_id 可能带前缀，
+// 后续 chunk/complete/status 必须沿用该完整 id（否则 404）。
+func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionParams) (string, int64, int, error) {
 	initBody := chunkedInitRequest{
 		UploadID:     p.UploadID,
 		Filename:     p.Filename,
@@ -595,13 +611,13 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 		headerContentType: {"application/json"},
 	})
 	if err != nil {
-		return 0, 0, fmt.Errorf("初始化上传失败: %w", err)
+		return "", 0, 0, fmt.Errorf("初始化上传失败: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return 0, 0, fmt.Errorf("初始化上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		return "", 0, 0, fmt.Errorf("初始化上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
 	var initResult struct {
@@ -611,15 +627,21 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 		Message   string `json:"message"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&initResult); err != nil {
-		return 0, 0, fmt.Errorf("解析 init 响应失败: %w", err)
+		return "", 0, 0, fmt.Errorf("解析 init 响应失败: %w", err)
 	}
 	if !initResult.Success {
-		return 0, 0, fmt.Errorf("初始化上传失败: %s", initResult.Message)
+		return "", 0, 0, fmt.Errorf("初始化上传失败: %s", initResult.Message)
 	}
 
 	// 如果 upload_id = "already_exists"，说明文件已存在且 checksum 匹配
 	if initResult.UploadID == UploadIDAlreadyExists {
-		return 0, -1, nil // -1 表示已存在
+		return "", 0, -1, nil // -1 表示已存在
+	}
+
+	// 服务端可能返回带 owner 前缀的 session id（多租户隔离），后续请求必须沿用
+	serverUploadID := initResult.UploadID
+	if serverUploadID == "" {
+		serverUploadID = p.UploadID
 	}
 
 	newChunkSize := p.ChunkSize
@@ -627,7 +649,7 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 		newChunkSize = initResult.ChunkSize
 	}
 	newTotalChunks := int((p.FileSize + newChunkSize - 1) / newChunkSize)
-	return newChunkSize, newTotalChunks, nil
+	return serverUploadID, newChunkSize, newTotalChunks, nil
 }
 
 // ChunkedUpload 分块上传文件到指定的远端路径。支持续传。
@@ -701,6 +723,8 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 			TotalChunks:  totalChunks,
 			Concurrency:  opt.concurrency,
 		})
+		// 续传命中时 tryResumeSession 内部已用服务端完整 session id 上传缺失分块并 complete，
+		// 返回的 result 就是最终结果（续传路径无需再改 uploadID）。
 		if !res.shouldContinue {
 			return res.result, res.err
 		}
@@ -709,7 +733,7 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 	// 新文件 / 不在上传中，创建新 session
 	c.logger.InfoContext(ctx, "新上传", "file_name", filename, "upload_id", shortid.ShortHash(uploadID))
 
-	newChunkSize, newTotalChunks, err := c.initNewUploadSession(ctx, resumeSessionParams{
+	serverUploadID, newChunkSize, newTotalChunks, err := c.initNewUploadSession(ctx, resumeSessionParams{
 		UploadID:     uploadID,
 		Filename:     filename,
 		FileChecksum: fileChecksum,
@@ -729,6 +753,12 @@ func (c *FileClient) ChunkedUpload(ctx context.Context, localPath, remotePath st
 			Filename:     filename,
 			FileChecksum: fileChecksum,
 		}, nil
+	}
+	// 服务端在多租户下会返回带 owner 前缀的 session id，后续 chunk/complete/status
+	// 必须沿用该完整 id（否则 404）。同时自适应采用服务端协商的 chunk_size。
+	if serverUploadID != uploadID {
+		c.logger.InfoContext(ctx, "服务端返回带 owner 前缀的 session id", "old", shortid.ShortHash(uploadID), "new", shortid.ShortHash(serverUploadID))
+		uploadID = serverUploadID
 	}
 	if newChunkSize != chunkSize {
 		chunkSize = newChunkSize
@@ -786,6 +816,7 @@ type downloadParams struct {
 	chunkSize   int64
 	concurrency int
 	maxChunk    int64
+	kind        string
 }
 
 // getDownloadParams 解析分块下载的选项参数。
@@ -805,12 +836,18 @@ func getDownloadParams(c *FileClient, opts ...ChunkedOption) *downloadParams {
 		chunkSize:   opt.chunkSize,
 		concurrency: opt.concurrency,
 		maxChunk:    maxChunk,
+		kind:        opt.kind,
 	}
 }
 
 // getFileStat 通过 HEAD 请求获取远端文件的元信息。
-func getFileStat(ctx context.Context, c *FileClient, filename string) (fileSize int64, checksum string, modTime int64, err error) {
-	statResp, err := c.doRequest(ctx, "HEAD", "/api/files/stat?filename="+url.QueryEscape(filename), nil, nil)
+// kind 非空时追加 &kind=<kind>（如 cloud_archive），服务端据此解析归档目录。
+func getFileStat(ctx context.Context, c *FileClient, filename, kind string) (fileSize int64, checksum string, modTime int64, err error) {
+	statPath := "/api/files/stat?filename=" + url.QueryEscape(filename)
+	if kind != "" {
+		statPath += "&kind=" + url.QueryEscape(kind)
+	}
+	statResp, err := c.doRequest(ctx, "HEAD", statPath, nil, nil)
 	if err == nil && statResp.StatusCode == http.StatusOK {
 		if s := statResp.Header.Get("X-File-Size"); s != "" {
 			fileSize, _ = strconv.ParseInt(s, 10, 64)
@@ -842,8 +879,8 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 		return err
 	}
 
-	// 获取文件信息（直接 Stat）
-	fileSize, expectedChecksum, fileModTime, err := getFileStat(ctx, c, filename)
+	// 获取文件信息（直接 Stat，kind 归档时服务端解析归档目录）
+	fileSize, expectedChecksum, fileModTime, err := getFileStat(ctx, c, filename, params.kind)
 	if err != nil {
 		return err
 	}
@@ -898,6 +935,7 @@ func (c *FileClient) ChunkedDownload(ctx context.Context, filename, outputPath s
 			defer func() { <-sem }()
 			c.downloadOneChunk(ctx, downloadChunkParams{
 				Filename:  filename,
+				Kind:      params.kind,
 				ChunkIdx:  chunkIdx,
 				ChunkSize: chunkSize,
 				FileSize:  fileSize,
@@ -937,6 +975,9 @@ func (c *FileClient) downloadOneChunk(ctx context.Context, p downloadChunkParams
 
 	urlPath := fmt.Sprintf("/download/chunk?filename=%s&offset=%d&length=%d",
 		url.QueryEscape(p.Filename), offset, length)
+	if p.Kind != "" {
+		urlPath += "&kind=" + url.QueryEscape(p.Kind)
+	}
 
 	baseDelay := 500 * time.Millisecond
 
@@ -1058,6 +1099,7 @@ type chunkedOpts struct {
 	chunkSize   int64
 	concurrency int
 	resume      bool
+	kind        string
 }
 
 // WithChunkedChunkSize 设置分块大小。
@@ -1082,6 +1124,14 @@ func WithChunkedConcurrency(n int) ChunkedOption {
 func WithChunkedResume(enabled bool) ChunkedOption {
 	return func(o *chunkedOpts) {
 		o.resume = enabled
+	}
+}
+
+// WithChunkedKind 设置下载 kind（如 "cloud_archive" 下载云任务归档）。
+// kind 为空表示普通文件下载。filename 传归档名（单文件名），服务端按 kind 拼接内部目录。
+func WithChunkedKind(kind string) ChunkedOption {
+	return func(o *chunkedOpts) {
+		o.kind = kind
 	}
 }
 

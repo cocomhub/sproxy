@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 )
@@ -336,12 +338,85 @@ func TestRestoreVersionHandler_MissingParams(t *testing.T) {
 	}
 }
 
+// TestVersion_NewLayout 验证 version 迁移到 Tenant API 后的新布局：
+// 版本文件落 <root>/alice/version/dir/f.txt/<versionID>，checksum key =
+// "version/dir/f.txt/<id>"（per-tenant store，无 owner 前缀），旧 __version__
+// 前缀 key 不复存在（R4 碰撞消除）。versioning 缝隙修复：新布局 upload 覆盖时
+// saveVersionBeforeOverwrite 必须能保存版本（此前走 safePathFor 旧布局被静默跳过）。
+func TestVersion_NewLayout(t *testing.T) {
+	env := newOwnerUploadEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.Versioning.Enabled = true
+	cfg.Versioning.MaxVersions = 10
+	env.h.cfgPtr.Store(cfg)
+
+	// 首次上传 user/dir/f.txt
+	body1 := []byte("version 1")
+	status, respBody := uploadFile(t, env.urls["alice"], "dir/f.txt", body1, map[string]string{
+		"X-File-Checksum": sha256hex(body1),
+		"X-File-Path":     "dir/f.txt",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("首次上传应成功: %d %s", status, respBody)
+	}
+
+	// 覆盖 → 触发 saveVersionBeforeOverwrite 保存旧版本
+	body2 := []byte("version 2")
+	status, respBody = uploadFile(t, env.urls["alice"], "dir/f.txt", body2, map[string]string{
+		"X-File-Checksum": sha256hex(body2),
+		"X-File-Path":     "dir/f.txt",
+	})
+	if status != http.StatusOK {
+		t.Fatalf("覆盖上传应成功: %d %s", status, respBody)
+	}
+
+	// 版本文件在 <root>/alice/version/dir/f.txt/<versionID>
+	verDir := filepath.Join(env.root, "alice", "version", "dir", "f.txt")
+	entries, err := os.ReadDir(verDir)
+	if err != nil {
+		t.Fatalf("读取版本目录失败: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("应恰好 1 个版本文件, got %d", len(entries))
+	}
+	versionID := entries[0].Name()
+	got, err := os.ReadFile(filepath.Join(verDir, versionID))
+	if err != nil {
+		t.Fatalf("读取版本文件失败: %v", err)
+	}
+	if string(got) != string(body1) {
+		t.Fatalf("版本文件内容 = %q, want %q（应为覆盖前内容）", got, body1)
+	}
+
+	// checksum key = "version/dir/f.txt/<id>"（per-tenant store，无 owner 前缀）
+	csStore := env.h.checksumStoreFor("alice")
+	if csStore == nil {
+		t.Fatal("per-tenant checksum store 应为非 nil")
+	}
+	wantCS := sha256hex(body1)
+	csKey := "version/dir/f.txt/" + versionID
+	if cs, ok := csStore.Get(csKey); !ok {
+		t.Fatalf("checksum key %q 应存在", csKey)
+	} else if cs != wantCS {
+		t.Fatalf("checksum = %s, want %s", cs, wantCS)
+	}
+	// 旧 __version__ 前缀 key 不应存在（R4 碰撞消除）
+	if _, ok := csStore.Get("__version__/dir/f.txt/" + versionID); ok {
+		t.Fatal("旧 __version__ checksum key 不应存在")
+	}
+	// 用户文件本身落在 user 桶
+	if _, err := os.Stat(filepath.Join(env.root, "alice", "user", "dir", "f.txt")); err != nil {
+		t.Fatalf("用户文件应落在 alice/user/dir/f.txt: %v", err)
+	}
+}
+
 // ---- private method tests ----
 
 func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
+	cfg.Versioning.Enabled = true
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
@@ -354,24 +429,19 @@ func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = h.Close() })
 
-	h.saveVersionBeforeOverwrite("")
+	// 空路径 → UserRel 校验失败，记录 warn 并返回（不 panic）。
+	req, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1/upload", nil)
+	h.saveVersionBeforeOverwrite(req, "")
 }
 
 func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
 	t.Parallel()
-	cfg := Default()
-	cfg.UploadsDir = t.TempDir()
-	var cfgPtr atomic.Pointer[Config]
-	cfgPtr.Store(cfg)
-	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:     mux,
-		CfgPtr:  &cfgPtr,
-		Version: "test",
-		BuildAt: "test",
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
-	t.Cleanup(func() { _ = h.Close() })
-
-	h.cleanupOldVersions("test.txt", t.TempDir())
+	root := t.TempDir()
+	h := newAssemblyTestHandlers(t, root)
+	tnt := h.tenantFor("alice")
+	if tnt == nil {
+		t.Fatal("创建 alice 租户失败")
+	}
+	// MaxVersions 默认 0 → cleanup 直接返回，不报错。
+	h.cleanupOldVersions("test.txt", tnt, "alice")
 }

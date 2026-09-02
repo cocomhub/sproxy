@@ -105,3 +105,56 @@ func TestValidateFilePath_LongName(t *testing.T) {
 		t.Fatalf("long name should be preserved verbatim, got %q", got)
 	}
 }
+
+// TestValidateFilePath_AllowsInternalDirPrefix 验证（审查 #4 收敛）：
+// ValidateFilePath **不再全局拒绝** .__ 首段——它是 base 路径校验，被 upload/sync
+// 等写路径复用，全局拒绝会破坏含 .__ 前缀文件的同步推送。服务端内部目录访问防护
+// 收敛到 pkg/storage.Tenant.UserRel/FeatureRel 的段名校验（ValidSegmentName 拒绝 .__
+// 前缀）与 hasServiceInternalPrefix（读取侧响应开始前拦截）。
+func TestValidateFilePath_AllowsInternalDirPrefix(t *testing.T) {
+	for _, f := range []string{
+		".__cloud__/task123/file.zip",
+		".__versions__/x.txt",
+		".__sync__/y.txt",
+		".__downloads__/z.txt",
+		".__cloud__",
+	} {
+		if _, err := ValidateFilePath(f); err != nil {
+			t.Errorf("ValidateFilePath 首段 .__ 路径 %q 应仍可通过基础校验（内部目录拦截在段名校验/读侧守卫）: %v", f, err)
+		}
+	}
+	// 深层含 .__ 的普通用户文件仍允许。
+	for _, f := range []string{
+		"dir/foo.__bar.txt",
+		"normal.txt",
+		"dir/sub/file.txt",
+	} {
+		if _, err := ValidateFilePath(f); err != nil {
+			t.Errorf("普通路径 %q 应允许，got %v", f, err)
+		}
+	}
+}
+
+// TestHasServiceInternalPrefix 验证读取侧守卫：.__ 前缀段任意深度拒绝；__ 前缀仅首段拒绝。
+func TestHasServiceInternalPrefix(t *testing.T) {
+	for _, f := range []string{
+		".__cloud__/task123/file.zip",
+		".__downloads__/a.txt",
+		"dir/.__versions__/x/y.txt",
+		"__version__/x", // __ 首段（legacy 遗留前缀）
+		".__custom/any",
+	} {
+		if !hasServiceInternalPrefix(f) {
+			t.Errorf("内部目录段 %q 应被识别", f)
+		}
+	}
+	for _, f := range []string{
+		"dir/foo.__bar.txt", // 非前缀 .__（段以 foo 开头）
+		"normal.txt",
+		"dir/__foo/x", // __ 非首段（普通用户路径，UserRel 允许）
+	} {
+		if hasServiceInternalPrefix(f) {
+			t.Errorf("普通路径 %q 不应被判为内部目录", f)
+		}
+	}
+}

@@ -29,7 +29,7 @@ import (
 func xferIntegrationCfg(t *testing.T) (*server.Config, *server.Handlers) {
 	t.Helper()
 	cfg := server.Default()
-	cfg.UploadsDir = t.TempDir()
+	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []server.AccessKeyConfig{
 		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
 	}

@@ -15,7 +15,7 @@ import (
 // 验证不变量：
 //  1. 合法路径不返回 error
 //  2. 返回路径被 filepath.ToSlash 格式化（使用 / 分隔符）
-//  3. 返回路径在追加到 UploadsDir 后不会逃逸出目录（无路径穿越）
+//  3. 返回路径在追加到 StorageRoot 后不会逃逸出目录（无路径穿越）
 //  4. 任何输入都不应导致 panic
 func FuzzValidateFilePath(f *testing.F) {
 	// seed corpus

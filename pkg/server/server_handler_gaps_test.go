@@ -17,8 +17,7 @@ import (
 
 // TestHandlers_Close 验证 Close 幂等安全。
 func TestHandlers_Close(t *testing.T) {
-	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(Default())
+	cfgPtr := newTestCfgPtr(t.TempDir())
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
 		Mux:     mux,
@@ -35,8 +34,7 @@ func TestHandlers_Close(t *testing.T) {
 func TestTunnelHandler_ReturnsHandler(t *testing.T) {
 	t.Parallel()
 
-	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(Default())
+	cfgPtr := newTestCfgPtr(t.TempDir())
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
 		Mux:     mux,
@@ -68,8 +66,7 @@ func TestTunnelHandler_ReturnsHandler(t *testing.T) {
 func TestHandler_ReturnsNonNil(t *testing.T) {
 	t.Parallel()
 
-	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(Default())
+	cfgPtr := newTestCfgPtr(t.TempDir())
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
 		Mux:     mux,
@@ -88,8 +85,7 @@ func TestHandler_ReturnsNonNil(t *testing.T) {
 func TestHandler_HealthzRoute(t *testing.T) {
 	t.Parallel()
 
-	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(Default())
+	cfgPtr := newTestCfgPtr(t.TempDir())
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
 		Mux:     mux,
@@ -120,8 +116,7 @@ func TestHandler_HealthzRoute(t *testing.T) {
 func TestHandler_VersionRoute(t *testing.T) {
 	t.Parallel()
 
-	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(Default())
+	cfgPtr := newTestCfgPtr(t.TempDir())
 	mux := http.NewServeMux()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
 		Mux:     mux,
@@ -153,6 +148,7 @@ func TestHandler_UploadRouteRequiresAuth(t *testing.T) {
 	t.Parallel()
 
 	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(cfg)

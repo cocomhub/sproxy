@@ -17,9 +17,6 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
-// cloudArchiveDirName 是服务端云任务归档文件存储子目录，与服务端 cloudArchiveDirName 保持一致。
-const cloudArchiveDirName = ".__cloud_archives__"
-
 // TypeCloudDownload 是云端下载链式操作的类型标识。
 const TypeCloudDownload = "cloud_download"
 
@@ -58,9 +55,8 @@ type CloudDownloadChain struct {
 	Timeout      time.Duration `json:"timeout"`       // 超时时间，恢复时保持
 
 	// 非持久化字段：恢复后需手动设置
-	archiveServerPath string        `json:"-"` // 服务端返回的归档文件路径
-	client            *FileClient   `json:"-"`
-	chainMgr          *ChainManager `json:"-"` // 链式操作管理器，用于阶段间持久化状态
+	client   *FileClient   `json:"-"`
+	chainMgr *ChainManager `json:"-"` // 链式操作管理器，用于阶段间持久化状态
 
 	// backoffFn 存储超限重试的退避间隔（attempt 从 0 起）。nil 时用默认 10s*(1<<attempt)。
 	// 测试注入小退避避免慢 CI（如 10ms）。
@@ -536,12 +532,12 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 
 // archiveTasks 打包归档所有已下载的文件。
 func (c *CloudDownloadChain) archiveTasks(ctx context.Context) error {
-	result, err := c.client.ArchiveCloudTasks(ctx, c.TaskIDs, c.ArchiveName)
+	_, err := c.client.ArchiveCloudTasks(ctx, c.TaskIDs, c.ArchiveName)
 	if err != nil {
 		return fmt.Errorf("archive: %w: %v", ErrArchiveFailed, err)
 	}
-	// 保存服务端返回的归档文件路径，供 downloadToLocal 使用
-	c.archiveServerPath = result.File
+	// 服务端返回的 File 只含归档名（客户端不接触 .__ 内部路径），下载阶段直接用
+	// 客户端自身构造的归档名（与服务端后缀规范化一致），无需保存服务端路径。
 	return nil
 }
 
@@ -553,15 +549,11 @@ func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
 		archiveName += ".tar.gz"
 	}
 
-	// 优先使用服务端返回的路径，兜底使用本地构造（保持与服务端一致的后缀逻辑）
-	archivePath := c.archiveServerPath
-	if archivePath == "" {
-		archivePath = filepath.ToSlash(filepath.Join(cloudArchiveDirName, archiveName))
-	}
-
+	// 归档下载按用途传 kind=cloud_archive：服务端在租户 archive 桶内按 owner 拼接
+	// 归档目录，客户端不接触内部路径，filename 只传归档名。
 	localPath := filepath.Join(c.LocalDir, archiveName)
 	c.LocalPath = localPath
-	if err := c.client.ChunkedDownload(ctx, archivePath, localPath); err != nil {
+	if err := c.client.ChunkedDownload(ctx, archiveName, localPath, WithChunkedKind(DownloadKindCloudArchive)); err != nil {
 		return fmt.Errorf("下载归档文件失败: %w", err)
 	}
 	return nil

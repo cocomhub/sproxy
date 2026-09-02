@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/shortid"
+	"github.com/cocomhub/sproxy/pkg/quota"
 )
 
 // ChunkedUploadSession 表示一个分块上传会话。
@@ -31,6 +32,14 @@ type ChunkedUploadSession struct {
 	CreatedAt      time.Time `json:"created_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	Completed      bool      `json:"completed"`
+
+	// Reservation 是分块上传的租户配额预留句柄（P4）。init 预留、complete Commit、
+	// 会话删除/过期 Release。不持久化（json:"-"），重启后内存预留丢失，由上游对账补齐。
+	Reservation *quota.Reservation `json:"-"`
+	// StorageMgrReserved 是 storageMgr 回退预留的字节数（P5，quota 未装配时启用）。
+	// 与 Reservation 二选一：scope 预留走 Reservation，storageMgr 回退走本字段。
+	// 会话删除/过期/完成时按此释放；不持久化（json:"-"），重启后由对账补齐。
+	StorageMgrReserved int64 `json:"-"`
 }
 
 // UploadStoreIface 定义 UploadStore 的业务接口，方便测试替身。
@@ -106,7 +115,7 @@ func (l *ChunkFileLocker) DeleteLock(uploadID string) {
 type UploadStore struct {
 	mu         sync.RWMutex
 	writeMu    sync.Mutex // 串行化 writeSessionJSON，防止 Windows rename 竞争
-	baseDir    string     // <uploadsDir>/.__chunked__/
+	baseDir    string     // 租户 chunk 桶绝对路径（<root>/<owner>/chunk/），会话目录直接位于其下
 	sessions   map[string]*ChunkedUploadSession
 	locker     *ChunkFileLocker // chunk 文件并发锁
 	persistCh  chan string      // uploadID → 异步持久化
@@ -115,19 +124,28 @@ type UploadStore struct {
 	wg         sync.WaitGroup
 	sessionTTL time.Duration // 未完成上传会话的保留时间
 	logger     *slog.Logger
+	// storageMgr 是 storageMgr 回退预留的释放目标（P5，quota 未装配时由 uploadStoreFor
+	// 经 SetStorageMgr 注入；nil = 无回退预留需释放）。
+	storageMgr *StorageManager
 }
 
-const (
-	chunkedDirName = ".__chunked__"
-	chunkFileExt   = ".chunk"
-)
+// SetStorageMgr 注入 storageMgr 回退预留的释放目标（P5）。
+// quota 未装配（globalPool nil）时 uploadStoreFor 调用；已装配 quota 时无需注入。
+func (us *UploadStore) SetStorageMgr(sm *StorageManager) {
+	us.mu.Lock()
+	us.storageMgr = sm
+	us.mu.Unlock()
+}
+
+const chunkFileExt = ".chunk"
 
 // NewUploadStore 创建并启动 UploadStore，同时从磁盘恢复已有 session。
+// baseDir 是租户 chunk 桶的绝对路径（<root>/<owner>/chunk/，经 Tenant.Root().Abs("chunk")
+// 派生）；会话目录直接位于 baseDir 下（<baseDir>/<uploadID>/）。不再拼接魔法目录。
 // sessionTTL 指定未完成上传会话的过期时间，默认 24h。
 func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) (*UploadStore, error) {
-	storeDir := filepath.Join(baseDir, chunkedDirName)
 	log := defaultLogger(logger)
-	if err := os.MkdirAll(storeDir, 0755); err != nil {
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建分块上传目录失败: %w", err)
 	}
 
@@ -139,7 +157,7 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	}
 
 	us := &UploadStore{
-		baseDir:    storeDir,
+		baseDir:    baseDir,
 		sessions:   make(map[string]*ChunkedUploadSession),
 		locker:     NewChunkFileLocker(),
 		persistCh:  make(chan string, 64),
@@ -321,6 +339,7 @@ func (us *UploadStore) ListSessions() []ChunkedUploadSessionMeta {
 }
 
 // GetSessionByFilename 按文件名查找未完成的 session。
+// per-tenant UploadStore 实例天然只含本租户会话，无需 owner 过滤。
 func (us *UploadStore) GetSessionByFilename(filename string) *ChunkedUploadSession {
 	us.mu.RLock()
 	defer us.mu.RUnlock()
@@ -436,8 +455,23 @@ func (us *UploadStore) SessionDir(uploadID string) string {
 // DeleteSession 删除会话目录及所有分块文件，并清理 fileLocks 条目防止内存泄漏。
 func (us *UploadStore) DeleteSession(uploadID string) {
 	us.mu.Lock()
+	s := us.sessions[uploadID]
 	delete(us.sessions, uploadID)
 	us.mu.Unlock()
+
+	// P4 配额：清理会话时释放未落地的预留。已完成会话的预留已被 complete Commit
+	// 消费（Commit 原子生效一次），此 Release 为空操作；未完成会话则归还 reserved。
+	// P5：storageMgr 回退预留（quota 未装配时）同样在此释放（与 Reservation 二选一）。
+	if s != nil {
+		if s.Reservation != nil {
+			s.Reservation.Release()
+		} else if s.StorageMgrReserved > 0 {
+			if us.storageMgr != nil {
+				us.storageMgr.Release(s.StorageMgrReserved, CategoryChunked)
+			}
+			s.StorageMgrReserved = 0
+		}
+	}
 
 	us.locker.DeleteLock(uploadID)
 
@@ -577,7 +611,12 @@ func (us *UploadStore) cleanupLoop() {
 // cleanupExpired 清理过期未完成的 session。
 // 先持锁收集过期 ID，释放锁后再逐一 os.RemoveAll，避免持锁执行 I/O。
 func (us *UploadStore) cleanupExpired() {
-	var expired []string
+	type expiredItem struct {
+		id                 string
+		reservation        *quota.Reservation
+		storageMgrReserved int64
+	}
+	var expired []expiredItem
 
 	us.mu.Lock()
 	now := time.Now()
@@ -585,16 +624,23 @@ func (us *UploadStore) cleanupExpired() {
 		if !s.Completed && now.After(s.ExpiresAt) {
 			us.logger.Info("清理过期上传会话", "upload_id", id, "file_name", s.Filename, "expires_at", s.ExpiresAt)
 			delete(us.sessions, id)
-			expired = append(expired, id)
+			expired = append(expired, expiredItem{id: id, reservation: s.Reservation, storageMgrReserved: s.StorageMgrReserved})
 		}
 	}
 	us.mu.Unlock()
 
-	for _, id := range expired {
-		us.locker.DeleteLock(id)
-		dir := filepath.Join(us.baseDir, id)
+	for _, item := range expired {
+		// P4 配额：过期会话（从未完成）归还预留，避免 chunk 字节长期挂账。
+		// P5：storageMgr 回退预留（quota 未装配时）同样释放（与 Reservation 二选一）。
+		if item.reservation != nil {
+			item.reservation.Release()
+		} else if item.storageMgrReserved > 0 && us.storageMgr != nil {
+			us.storageMgr.Release(item.storageMgrReserved, CategoryChunked)
+		}
+		us.locker.DeleteLock(item.id)
+		dir := filepath.Join(us.baseDir, item.id)
 		if err := os.RemoveAll(dir); err != nil {
-			us.logger.Warn("清理过期会话目录失败", "upload_id", id, "error", err)
+			us.logger.Warn("清理过期会话目录失败", "upload_id", item.id, "error", err)
 		}
 	}
 }
@@ -615,6 +661,7 @@ func (us *UploadStore) CleanupSessionAfter(uploadID string, delay time.Duration)
 }
 
 // recoverSessions 从磁盘恢复未完成的 session。
+// per-tenant baseDir（租户 chunk 桶）下直接是会话目录，单层恢复即可。
 func (us *UploadStore) recoverSessions() {
 	entries, err := os.ReadDir(us.baseDir)
 	if err != nil {
@@ -639,29 +686,31 @@ func (us *UploadStore) recoverSessions() {
 			continue
 		}
 
-		var session ChunkedUploadSession
-		if err := json.Unmarshal(data, &session); err != nil {
-			us.logger.Warn("解析 session.json 失败，跳过", "upload_id", uploadID, "error", err)
-			continue
-		}
-
-		// 已过期的跳过（后续由 cleanupExpired 清理）
-		if time.Now().After(session.ExpiresAt) {
-			continue
-		}
-
-		// 已完成的跳过（保留供 complete 查询）
-		if session.Completed {
-			us.sessions[uploadID] = &session
-			continue
-		}
-
-		// 恢复：扫描磁盘上的 .chunk 文件，与 bitmap 对齐
-		us.reconcileChunks(&session, sessionDir)
-		us.sessions[uploadID] = &session
-		us.logger.Info("恢复上传会话", "upload_id", uploadID, "file_name", session.Filename,
-			"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
+		us.restoreSession(uploadID, sessionDir, data)
 	}
+}
+
+// restoreSession 从磁盘恢复单个会话（解析 + 过期/完成判断 + 与 bitmap 对齐）。
+func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) {
+	var session ChunkedUploadSession
+	if err := json.Unmarshal(data, &session); err != nil {
+		us.logger.Warn("解析 session.json 失败，跳过", "upload_id", uploadID, "error", err)
+		return
+	}
+	// 已过期的跳过（后续由 cleanupExpired 清理）
+	if time.Now().After(session.ExpiresAt) {
+		return
+	}
+	// 已完成的跳过（保留供 complete 查询）
+	if session.Completed {
+		us.sessions[uploadID] = &session
+		return
+	}
+	// 恢复：扫描磁盘上的 .chunk 文件，与 bitmap 对齐
+	us.reconcileChunks(&session, sessionDir)
+	us.sessions[uploadID] = &session
+	us.logger.Info("恢复上传会话", "upload_id", uploadID, "file_name", session.Filename,
+		"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
 }
 
 // reconcileChunks 扫描磁盘上的 chunk 文件与 bitmap 对齐（处理 crash 后 bitmap 未持久化的情况）。
@@ -715,6 +764,13 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 	// 按 uploadID 查找
 	if uploadID != "" {
 		if s, ok := us.sessions[uploadID]; ok && !s.Completed {
+			// 审查 F4：按 key 复用前强制校验 filename/checksum/大小一致——否则攻击者可
+			// 预置同 key 会话（伪造 owner 前缀或碰撞）劫持本次续传，篡改目标文件名。
+			if s.Filename != filename || s.FileChecksum != fileChecksum || s.TotalSize != totalSize {
+				us.logger.Warn("upload_id 冲突且元数据不符，拒绝复用旧会话",
+					"upload_id", uploadID, "old_file", s.Filename, "new_file", filename)
+				return nil, false, fmt.Errorf("upload_id 已存在但文件元数据不一致")
+			}
 			us.logger.Info("找到可续传的 session", "upload_id", s.UploadID, "file_name", s.Filename)
 			return copySession(s), true, nil
 		}

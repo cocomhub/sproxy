@@ -254,15 +254,33 @@ func TestStorageManager_ScanAndRecalculateEmptyDir(t *testing.T) {
 	}
 }
 
-func TestStorageManager_ScanAndRecalculateSkipsHiddenDirs(t *testing.T) {
+func TestStorageManager_ScanAndRecalculateSkipsAllHiddenDirs(t *testing.T) {
 	dir := t.TempDir()
 
-	// 创建隐藏目录（以 .__ 开头，但不是已知的存储目录）和普通文件
-	unknownHiddenDir := filepath.Join(dir, ".__unknown_meta__")
+	// P5：新布局下用户文件恒在租户 user/ 桶内，.__ 魔法目录已废弃（UserRel 拒绝 .__ 段，
+	// 用户无法经 API 创建）。扫描统一跳过 .__ 前缀目录（含历史遗留魔法目录与未知 .__ 目录），
+	// 不再按已知内部目录名分类。
+	unknownHiddenDir := filepath.Join(dir, ".__userdir")
 	if err := os.MkdirAll(unknownHiddenDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(unknownHiddenDir, "meta.dat"), []byte("hidden"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// 深层 .__ 目录同样跳过
+	deep := filepath.Join(dir, "sub", ".__deep")
+	if err := os.MkdirAll(deep, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "d.bin"), []byte("deepfile"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// 多租户 owner 子目录下的 .__ 目录同样跳过
+	ownerDeep := filepath.Join(dir, "ak-A", "dir", ".__ownerhidden")
+	if err := os.MkdirAll(ownerDeep, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownerDeep, "o.bin"), []byte("owner"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("hello"), 0644); err != nil {
@@ -270,55 +288,92 @@ func TestStorageManager_ScanAndRecalculateSkipsHiddenDirs(t *testing.T) {
 	}
 
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	// 未知的 .__ 目录下的文件不应计入
-	// visible.txt = 5 bytes
-	if sm.Usage() != 5 {
-		t.Fatalf("expected Usage=5 (only visible files), got %d", sm.Usage())
+	// 仅 visible.txt(5) 计入；所有 .__ 目录跳过
+	if got := sm.Usage(); got != 5 {
+		t.Fatalf("expected Usage=5 (.__ 目录全部跳过), got %d", got)
 	}
 }
 
-func TestStorageManager_ScanAndRecalculateCountsInternalDirs(t *testing.T) {
+func TestStorageManager_ScanAndRecalculateSkipsTaskStateDirs(t *testing.T) {
 	dir := t.TempDir()
 
-	// 创建内部存储目录并放入文件
-	chunkedDir := filepath.Join(dir, ".__chunked__")
-	versionsDir := filepath.Join(dir, ".__versions__")
-	cloudDir := filepath.Join(dir, ".__cloud__")
-	for _, d := range []string{chunkedDir, versionsDir, cloudDir} {
-		if err := os.MkdirAll(d, 0755); err != nil {
+	// 服务端任务状态目录（.__downloads__ / .__sync__）不计入配额（非用户文件）
+	for _, d := range []string{".__downloads__", ".__sync__"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(chunkedDir, "chunk.dat"), []byte("12345"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".__downloads__", "task.json"), []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(versionsDir, "v1.bin"), []byte("1234567890"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".__sync__", "sync.json"), []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cloudDir, "download.zip"), []byte("abc"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "user.txt"), []byte("hello"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "visible.txt"), []byte("hello"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
-	// chunked=5 + versions=10 + cloud=3 + user=5 = 23
-	if sm.Usage() != 23 {
-		t.Fatalf("expected Usage=23, got %d", sm.Usage())
+	if got := sm.Usage(); got != 5 {
+		t.Fatalf("expected Usage=5 (任务状态目录跳过), got %d", got)
+	}
+}
+
+func TestStorageManager_ScanAndRecalculateNewLayoutBuckets(t *testing.T) {
+	dir := t.TempDir()
+
+	// P5：新布局扫描按桶前缀分类（<tenant>/{user,cloud,chunk,version}/）。遗留 .__ 魔法
+	// 目录（.__chunked__/.__versions__/.__cloud__）整体跳过，不再按内部目录名分类。
+	for _, d := range []string{".__chunked__", ".__versions__", ".__cloud__"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".__chunked__", "chunk.dat"), []byte("12345"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".__versions__", "v1.bin"), []byte("1234567890"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".__cloud__", "download.zip"), []byte("abc"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// 新布局：alice/user/、alice/cloud/、alice/chunk/、alice/version/
+	for _, rel := range []string{
+		filepath.Join("alice", "user", "u.txt"),
+		filepath.Join("alice", "cloud", "t1", "c.bin"),
+		filepath.Join("alice", "chunk", "s", "ch.dat"),
+		filepath.Join("alice", "version", "v.txt"),
+	} {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("12345"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "alice", "user", "u2.txt"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	// user=5+5=10, cloud=5, chunk=5, version=5 → 25；.__ 目录全跳过
+	if sm.Usage() != 25 {
+		t.Fatalf("expected Usage=25, got %d", sm.Usage())
 	}
 	u := sm.UsageByCategory()
 	if u[CategoryChunked] != 5 {
 		t.Fatalf("expected Chunked=5, got %d", u[CategoryChunked])
 	}
-	if u[CategoryVersions] != 10 {
-		t.Fatalf("expected Versions=10, got %d", u[CategoryVersions])
+	if u[CategoryVersions] != 5 {
+		t.Fatalf("expected Versions=5, got %d", u[CategoryVersions])
 	}
-	if u[CategoryCloud] != 3 {
-		t.Fatalf("expected Cloud=3, got %d", u[CategoryCloud])
+	if u[CategoryCloud] != 5 {
+		t.Fatalf("expected Cloud=5, got %d", u[CategoryCloud])
 	}
-	if u[CategoryUserFiles] != 5 {
-		t.Fatalf("expected UserFiles=5, got %d", u[CategoryUserFiles])
+	if u[CategoryUserFiles] != 10 {
+		t.Fatalf("expected UserFiles=10, got %d", u[CategoryUserFiles])
 	}
 }
 
@@ -402,7 +457,7 @@ func TestStoragePeriodicScan_StopsOnSignal(t *testing.T) {
 func TestStoragePeriodicScan_RecalculatesUsage(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	cs := NewChecksumStore(dir, nil)
+	cs := NewChecksumStore(filepath.Join(dir, "checksums.json"), nil)
 	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
 
 	filePath := filepath.Join(dir, "test.txt")
@@ -438,7 +493,7 @@ func TestStorageScanOnce_EmptyDir(t *testing.T) {
 func TestStoragePeriodicScan_ScanOnceAfterFileAdd(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	cs := NewChecksumStore(dir, nil)
+	cs := NewChecksumStore(filepath.Join(dir, "checksums.json"), nil)
 	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
 
 	filePath := filepath.Join(dir, "scan-test.txt")

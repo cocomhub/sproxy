@@ -7,13 +7,52 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // discardLogger 返回丢弃日志的测试 logger，避免测试输出噪音。
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// newTestTenantRoot 构造测试用租户根解析器与租户列表（与生产装配同路径语义）：
+// <base>/<owner>/user 为 user 根、<base>/<owner>/meta/sync 为持久化目录；空 owner →
+// anonymous 租户。解析只做路径派生（不实际建目录——saveTask/executor 按需 MkdirAll）；
+// owner 复用 storage.ValidSegmentName 校验（fail-closed，非法返回 ok=false）。
+// list 扫描 base 下合法租户目录（跳过 . 前缀遗留目录）。
+func newTestTenantRoot(base string) (TenantRootResolver, func() []string) {
+	resolver := func(owner string) (string, string, bool) {
+		if owner == "" {
+			owner = "anonymous"
+		}
+		if !storage.ValidSegmentName(owner) {
+			return "", "", false
+		}
+		return filepath.Join(base, owner, "user"),
+			filepath.Join(base, owner, "meta", "sync"), true
+	}
+	list := func() []string {
+		entries, err := os.ReadDir(base)
+		if err != nil {
+			return nil
+		}
+		var out []string
+		for _, e := range entries {
+			if e.IsDir() && storage.ValidSegmentName(e.Name()) && !strings.HasPrefix(e.Name(), ".") {
+				out = append(out, e.Name())
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	return resolver, list
 }
 
 // mockQuota 实现 QuotaStore（内存计数，max=0 不限制）。

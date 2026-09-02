@@ -19,7 +19,6 @@ import (
 
 func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Server, *CloudDownloadManager) {
 	t.Helper()
-	t.Helper()
 	dir := t.TempDir()
 	sm := NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &CloudDownloadConfig{
@@ -29,14 +28,11 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  allowPrivate,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() {
-		mgr.Close()
-		os.RemoveAll(filepath.Join(dir, ".__cloud__"))
-		os.RemoveAll(filepath.Join(dir, ".__downloads__"))
-	})
-
-	h := &Handlers{cloudMgr: mgr, logger: testLogger(), storageMgr: sm, cfgPtr: newTestCfgPtr(dir), auditLogger: testLogger()}
+	// 装配租户布局（cloudArchiveTask/cloudArchiveGroup 读取任务源文件经 cloudDirFor 解析）
+	h := newAssemblyTestHandlers(t, dir)
+	h.storageMgr = sm
+	mgr := NewCloudDownloadManager(dir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	h.cloudMgr = mgr
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
@@ -98,8 +94,8 @@ func TestCloudHandler_ListTasks(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100)
-	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200)
+	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
+	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
 
 	resp, err := http.Get(ts.URL + "/api/cloud/tasks")
 	if err != nil {
@@ -127,7 +123,7 @@ func TestCloudHandler_GetTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100)
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
 
 	resp, err := http.Get(ts.URL + "/api/cloud/tasks/" + task.ID)
 	if err != nil {
@@ -167,7 +163,7 @@ func TestCloudHandler_CancelTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100)
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
 	task.Status = "downloading"
 
 	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/cancel", "application/json", nil)
@@ -185,7 +181,7 @@ func TestCloudHandler_DeleteTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100)
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
 	task.Status = "completed"
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/cloud/tasks/"+task.ID, nil)
@@ -204,8 +200,8 @@ func TestCloudHandler_ListTasksFilterByStatus(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100)
-	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200)
+	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
+	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
 	t1.Status = "completed"
 	t2.Status = "failed"
 
@@ -505,8 +501,7 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() { mgr.Close() })
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 
 	h := &Handlers{cloudMgr: mgr}
 	mux := http.NewServeMux()
@@ -688,7 +683,8 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 		t.Fatalf("unexpected archive result: %+v", arch)
 	}
 	// 归档文件真实存在
-	archivePath := filepath.Join(mgr.uploadsDir, filepath.FromSlash(arch.File))
+	// 归档响应 File 只含归档名；磁盘落在 <root>/anonymous/archive/ 下（未认证 owner 空）。
+	archivePath := filepath.Join(mgr.uploadsDir, anonymousOwner, "archive", filepath.FromSlash(arch.File))
 	if _, err2 := os.Stat(archivePath); err2 != nil {
 		t.Fatalf("expected archive file on disk: %v", err2)
 	}
@@ -731,7 +727,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 
 	// 等待失败
 	waitTaskDone(t, mgr, task.ID)
-	if cur, _ := mgr.SnapshotTask(task.ID); cur.Status != "failed" {
+	if cur, _ := mgr.SnapshotTask(task.ID, ""); cur.Status != "failed" {
 		t.Fatalf("expected failed task, got %q", cur.Status)
 	}
 
@@ -769,8 +765,7 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  true,
 	}
-	mgr := NewCloudDownloadManager(dir, sm, nil, testLogger(), cfg)
-	t.Cleanup(func() { mgr.Close() })
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)

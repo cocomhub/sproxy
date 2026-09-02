@@ -412,7 +412,7 @@ func startSPROXYWithAccessKeys(t *testing.T, accessKeysYAML string) (string, fun
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("write temp config: %v", err)
 	}
-	cmd := exec.Command(binPath, "--addr", addr, "--uploads-dir", uploadsDir, "--config", configPath)
+	cmd := exec.Command(binPath, "--addr", addr, "--storage-root", uploadsDir, "--config", configPath)
 	cmd.Dir = moduleRoot
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf

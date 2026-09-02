@@ -38,7 +38,7 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	tmpDir := t.TempDir()
 
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}
@@ -140,10 +140,10 @@ func TestUpload_PathTraversal(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("expected 200 (Go >=1.26 sanitized) or 400 (Go <1.26), got %d: %s", status, respBody)
 	}
-	// 验证文件名已被清洗（不会是 ../escape.txt）
-	uploadsDir := cfgPtr.Load().UploadsDir
-	if _, err := os.Stat(filepath.Join(uploadsDir, "escape.txt")); os.IsNotExist(err) {
-		t.Fatalf("expected file to be saved as escape.txt (sanitized)")
+	// 验证文件名已被清洗（不会是 ../escape.txt），并落新布局 <root>/anonymous/user/
+	root := cfgPtr.Load().StorageRoot
+	if _, err := os.Stat(filepath.Join(root, anonymousOwner, "user", "escape.txt")); os.IsNotExist(err) {
+		t.Fatalf("expected file to be saved as anonymous/user/escape.txt (sanitized)")
 	}
 }
 
@@ -167,15 +167,16 @@ func TestUpload_ChecksumMismatch(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("expected 400 checksum mismatch, got %d", status)
 	}
-	// 确认临时文件已清理
-	if dents, _ := os.ReadDir(cfgPtr.Load().UploadsDir); dents != nil {
+	// 确认临时文件已清理（新布局 <root>/anonymous/user/）
+	chkDir := filepath.Join(cfgPtr.Load().StorageRoot, anonymousOwner, "user")
+	if dents, _ := os.ReadDir(chkDir); dents != nil {
 		for _, de := range dents {
 			if strings.HasPrefix(de.Name(), "bad.txt.tmp") {
 				t.Fatalf("temp file should have been cleaned up: %s", de.Name())
 			}
 		}
 	}
-	finalPath := filepath.Join(cfgPtr.Load().UploadsDir, "bad.txt")
+	finalPath := filepath.Join(chkDir, "bad.txt")
 	if _, err := os.Stat(finalPath); err == nil {
 		t.Fatalf("final file should not exist: %s", finalPath)
 	}
@@ -228,16 +229,16 @@ func TestUpload_ToSubDirectory(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", status, respBody)
 	}
 
-	// 验证文件保存在子目录下，而非根目录
-	uploadsDir := cfgPtr.Load().UploadsDir
-	savedPath := filepath.Join(uploadsDir, "sub/dir/test.txt")
-	savedPath2 := filepath.Join(uploadsDir, "sub", "dir", "test.txt")
+	// 验证文件保存在子目录下，而非根目录（新布局 <root>/anonymous/user/sub/dir/test.txt）
+	uploadsDir := cfgPtr.Load().StorageRoot
+	savedPath := filepath.Join(uploadsDir, anonymousOwner, "user", "sub/dir/test.txt")
+	savedPath2 := filepath.Join(uploadsDir, anonymousOwner, "user", "sub", "dir", "test.txt")
 	if _, err := os.Stat(savedPath); os.IsNotExist(err) {
 		if _, err2 := os.Stat(savedPath2); os.IsNotExist(err2) {
-			// 确认没有存到根目录
-			rootPath := filepath.Join(uploadsDir, "test.txt")
+			// 确认没有存到 user 根目录
+			rootPath := filepath.Join(uploadsDir, anonymousOwner, "user", "test.txt")
 			if _, err3 := os.Stat(rootPath); err3 == nil {
-				t.Fatal("文件被错误地保存到了根目录而非子目录")
+				t.Fatal("文件被错误地保存到了 user 根目录而非子目录")
 			}
 			t.Fatalf("文件未在子目录中找到（checked: %s, %s）", savedPath, savedPath2)
 		}
@@ -326,8 +327,8 @@ func TestDelete_ChecksumMismatch(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 checksum mismatch, got %d", resp.StatusCode)
 	}
-	// 文件应仍存在
-	if _, err := os.Stat(filepath.Join(cfgPtr.Load().UploadsDir, "safe.txt")); err != nil {
+	// 文件应仍存在（新布局：<storageRoot>/anonymous/user/safe.txt）
+	if _, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot, anonymousOwner, "user", "safe.txt")); err != nil {
 		t.Fatalf("file should still exist after failed delete: %v", err)
 	}
 }
@@ -350,7 +351,8 @@ func TestDelete_Success(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	if _, err := os.Stat(filepath.Join(cfgPtr.Load().UploadsDir, "bye.txt")); !os.IsNotExist(err) {
+	// 文件应已从新布局移除（<storageRoot>/anonymous/user/bye.txt）
+	if _, err := os.Stat(filepath.Join(cfgPtr.Load().StorageRoot, anonymousOwner, "user", "bye.txt")); !os.IsNotExist(err) {
 		t.Fatalf("file should be removed")
 	}
 }
@@ -822,7 +824,7 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cs := NewChecksumStore(tmpDir, nil)
+	cs := NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 
 	var wg sync.WaitGroup
 	const goroutines = 50
@@ -845,7 +847,7 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 	wg.Wait()
 
 	// 重新打开 store，确认磁盘内容能正确解析
-	cs2 := NewChecksumStore(tmpDir, nil)
+	cs2 := NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	all := cs2.GetAll()
 	// 至少不能 panic、不能丢出错误。具体保留数量取决于调度。
 	t.Logf("after concurrent ops, store has %d entries", len(all))
@@ -860,7 +862,7 @@ func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cs := NewChecksumStore(tmpDir, nil)
+	cs := NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
 	cs.Set("k", "v")
 	cs.Set("k2", "v2")
 	cs.Delete("k")
@@ -884,7 +886,7 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	tmpDir := t.TempDir()
 
 	cfg := Default()
-	cfg.UploadsDir = tmpDir
+	cfg.StorageRoot = tmpDir
 	cfg.ChunkSize = 4 << 10 // 4 KiB for testing
 	cfg.LogLevel = "error"
 	if modifyCfg != nil {
@@ -991,7 +993,7 @@ func TestMkdir_HappyPath(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
-	dirPath := filepath.Join(cfgPtr.Load().UploadsDir, "testdir")
+	dirPath := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "user", "testdir")
 	if info, err := os.Stat(dirPath); err != nil || !info.IsDir() {
 		t.Fatalf("directory should exist: %v", err)
 	}
@@ -1027,14 +1029,54 @@ func TestMkdir_PathTraversal(t *testing.T) {
 	}
 }
 
+// TestMkdir_RejectsInternalDir 验证写入侧守卫（审查 #4 收敛）：不得创建服务端内部目录名
+// （.__cloud__/.__versions__ 等）——首段与任意层级（sub/.__chunked__）都拒绝，
+// 防止用户伪造内部目录名破坏隔离 / 触发配额漏计。
+func TestMkdir_RejectsInternalDir(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+	// 迁移后 mkdir 在 user 桶内操作：拦截成功后 freshdir 不应出现在 <storage>/anonymous/user/ 下。
+	userRoot := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "user")
+	for _, dirname := range []string{".__cloud__", "sub/.__versions__", ".__chunked__/x"} {
+		req, _ := http.NewRequest("POST", url+"/mkdir?dirname="+dirname, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("mkdir %q: %v", dirname, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("mkdir %q 应 400（内部目录名保留给服务端），got %d", dirname, resp.StatusCode)
+		}
+	}
+	// 守卫应在 MkdirAll 前拦截——freshdir/.__cloud__ 被拒后 freshdir 不应被创建
+	// （.__cloud__ 本身是服务端预创建目录，不能断言其不存在）。
+	if _, err := os.Stat(filepath.Join(userRoot, "freshdir")); !os.IsNotExist(err) {
+		t.Fatal("守卫拦截后 freshdir 不应被创建")
+	}
+	req, _ := http.NewRequest("POST", url+"/mkdir?dirname=freshdir/.__cloud__", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("mkdir freshdir/.__cloud__: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("mkdir freshdir/.__cloud__ 应 400, got %d", resp.StatusCode)
+	}
+	if _, err := os.Stat(filepath.Join(userRoot, "freshdir")); !os.IsNotExist(err) {
+		t.Fatal("mkdir freshdir/.__cloud__ 被拒后 freshdir 不应被创建")
+	}
+}
+
 // ---- rmdir ----
 
 func TestRmdir_HappyPath(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
-	uploadsDir := cfgPtr.Load().UploadsDir
-	dirPath := filepath.Join(uploadsDir, "toremove")
+	dirPath := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "user", "toremove")
+	if err := os.MkdirAll(filepath.Dir(dirPath), 0755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
 	if err := os.Mkdir(dirPath, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -1057,9 +1099,8 @@ func TestRmdir_WithFiles_AlsoDeletesChecksums(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
-	uploadsDir := cfgPtr.Load().UploadsDir
-	subDir := filepath.Join(uploadsDir, "subdir")
-	if err := os.Mkdir(subDir, 0755); err != nil {
+	subDir := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "user", "subdir")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 
@@ -1149,12 +1190,32 @@ func TestRmdir_PathTraversal(t *testing.T) {
 	}
 }
 
+// TestRmdir_RejectsInternalDir 验证写入侧守卫（审查 #4 收敛）：不得删除服务端内部目录
+// （防 rmdir 删除 .__cloud__ 等导致服务端状态丢失/他租户数据被删）。
+func TestRmdir_RejectsInternalDir(t *testing.T) {
+	t.Parallel()
+	url, _ := newTestServerWithAllRoutes(t, nil)
+	for _, dirname := range []string{".__cloud__", "sub/.__versions__"} {
+		req, _ := http.NewRequest("POST", url+"/rmdir?dirname="+dirname+"&force=true", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("rmdir %q: %v", dirname, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("rmdir %q 应 400（内部目录名保留给服务端），got %d", dirname, resp.StatusCode)
+		}
+	}
+}
+
 func TestRmdir_ForceRequired(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
-	uploadsDir := cfgPtr.Load().UploadsDir
-	dirPath := filepath.Join(uploadsDir, "forceless")
+	dirPath := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "user", "forceless")
+	if err := os.MkdirAll(filepath.Dir(dirPath), 0755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
 	if err := os.Mkdir(dirPath, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -1322,8 +1383,9 @@ func TestStat_DirectoryReturnsIsDir(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
-	uploadsDir := cfgPtr.Load().UploadsDir
-	if err := os.Mkdir(filepath.Join(uploadsDir, "statdir"), 0755); err != nil {
+	// 普通 stat 已迁移到 Tenant API：目录建在 <storageRoot>/anonymous/user/ 下。
+	statDir := filepath.Join(cfgPtr.Load().StorageRoot, anonymousOwner, "user", "statdir")
+	if err := os.MkdirAll(statDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 
@@ -1392,7 +1454,7 @@ func TestListFiles_SubdirParameter(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
 
-	uploadsDir := cfgPtr.Load().UploadsDir
+	uploadsDir := cfgPtr.Load().StorageRoot
 	if err := os.MkdirAll(filepath.Join(uploadsDir, "mydir"), 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
