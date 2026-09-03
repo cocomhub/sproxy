@@ -253,9 +253,10 @@ func TestAutoExport_Console(t *testing.T) {
 	}
 }
 
-// TestEnvRestore_HadValue 覆盖 WithOTLPEndpoint 覆写时环境变量原值已存在的恢复
-// 路径（Setenv 恢复原值，而非 Unsetenv）——补 TestOTLPEndpointOverride_EnvRestored
-// 只覆盖"原值不存在→Unsetenv"分支。
+// TestEnvRestore_HadValue 覆盖 WithOTLPEndpoint 覆写时环境变量"原值已存在"的
+// 恢复分支（os.Setenv 恢复原值）。注意：TestOTLPEndpointOverride_EnvRestored 用
+// t.Setenv 预置了原值，同样走 had==true 分支；had==false（原值不存在→Unsetenv）
+// 分支尚无直接用例，依赖 os.Unsetenv 语义（测试进程环境直接受控，风险低）。
 func TestEnvRestore_HadValue(t *testing.T) {
 	t.Setenv("OTEL_TRACES_EXPORTER", "none")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://pre-existing:4317")
@@ -274,7 +275,7 @@ func TestEnvRestore_HadValue(t *testing.T) {
 // Info 而非误导性 Warn（审查 Minor-5 防回归：env unset ≠ 显式 none）。
 // 捕获 build 日志判别层级与文案。
 func TestWarn_none_WhenNotSet(t *testing.T) {
-	// 先 unset（t.Setenv 只对显式设置有效；用 os.Unsetenv + defer 恢复）
+	// 先 unset（t.Setenv 只对显式设置有效；用 os.Unsetenv + t.Cleanup 恢复）
 	prev, had := os.LookupEnv("OTEL_TRACES_EXPORTER")
 	if had {
 		t.Cleanup(func() { os.Setenv("OTEL_TRACES_EXPORTER", prev) })
@@ -303,5 +304,3 @@ func TestWarn_none_WhenNotSet(t *testing.T) {
 		}
 	}
 }
-
-// 断言 helper 引用（确保未使用的 import 不触发编译错误——strings/slog 已被上面使用）。

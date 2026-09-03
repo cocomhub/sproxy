@@ -110,8 +110,9 @@ func (p *Provider) Tracer(name string) core.Tracer {
 }
 
 // Shutdown 停止 TracerProvider 并冲刷待导出 span。幂等：多次调用只执行一次。
-// Shutdown 在 Tracer() 之前调用也不会在后续 Tracer() 泄漏新 provider——
-// tp 保持 nil，后续 Tracer() 按懒装配路径构建（见 Tracer）。
+// 在 Tracer() 之前 Shutdown 属非法顺序（exporter 尚未构建，无从关闭）；
+// 调用方应保证先 Tracer() 后 Shutdown。Shutdown 后再次 Tracer() 走懒装配新建
+// provider（见 Tracer 注释的 no-op 说明），属 documented 边界。
 func (p *Provider) Shutdown(ctx context.Context) error {
 	var err error
 	p.once.Do(func() {
