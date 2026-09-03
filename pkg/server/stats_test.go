@@ -508,3 +508,39 @@ func TestStorageConfig_Put_NegativeValue(t *testing.T) {
 		t.Fatalf("expected 400 for negative value, got %d", resp.StatusCode)
 	}
 }
+
+// TestStats_UsageByBucket_SubdirNoDoubleCount 锁定 W3：UsageByBucket 的"父键含子传播"语义。
+// 子目录配额存在时父键（/tenant/a/user）已含子目录字节——statsCategoriesFromBuckets 只对
+// "当前层路径键以其末段为桶名"累加用途（写路径重查一层），但 stats 聚合必须取父键总量
+// 而非逐键求和。这里直接断言两个权威口径一致（Usage==父键总量==子目录+根项之和）。
+func TestStats_UsageByBucket_SubdirNoDoubleCount(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 500}
+	env.h.cfgPtr.Store(cfg)
+	umux := actorUploadDeleteMux(env.h, "alice")
+
+	// 子目录 30 + user 根 20。
+	if code, resp := uploadAsPath(t, umux, "videos/hd/a.mkv", []byte(strings.Repeat("a", 30))); code != http.StatusOK {
+		t.Fatalf("hd 30 应 200, got %d: %s", code, resp)
+	}
+	if code, resp := uploadAsPath(t, umux, "root.txt", []byte(strings.Repeat("r", 20))); code != http.StatusOK {
+		t.Fatalf("root 20 应 200, got %d: %s", code, resp)
+	}
+
+	// 权威口径：Scope.Usage == 磁盘总量 50（父键含子传播）。
+	tenant := env.h.quotaFor("alice")
+	if got := tenant.Usage(); got != 50 {
+		t.Fatalf("租户 Usage=%d want 50", got)
+	}
+	m := tenant.UsageByBucket()
+	// 父键总量 50（含子目录 30 + 根项 20）。
+	if got := m["/tenant/alice/user"]; got != 50 {
+		t.Fatalf("user 父键 UsageByBucket=%d want 50（父键含子传播）", got)
+	}
+	// 子目录键 30。
+	if got := m["/tenant/alice/user/videos/hd"]; got != 30 {
+		t.Fatalf("hd 子键 UsageByBucket=%d want 30", got)
+	}
+}

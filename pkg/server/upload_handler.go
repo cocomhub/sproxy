@@ -133,8 +133,9 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	// 配额预留（P4）：覆盖写场景先统计旧文件大小 prev（Adjust 差分用），
 	// 随后 TryReserve(handler.Size) 预留新文件空间；写入成功且校验通过后
 	// Commit(实际写入字节数) / Adjust(prev, next)；写入/校验失败 Release()。
-	// 用户上传文件落 user 桶，配额按 user 桶子 Scope 归集（父链聚合到租户 Scope 与 globalPool）。
-	scope := h.quotaBucketFor(ownerFromRequest(r), "user")
+	// 用户上传文件落 user 桶，配额按文件实际 rel 解析子 Scope（最长前缀：user/videos/hd
+	// 命中则受该子目录上限约束），父链聚合到 user 桶 → 租户 → 全局——逐级检查自动完成。
+	scope := h.quotaScopeFor(ownerFromRequest(r), rel)
 	prev := int64(0)
 	var res *quota.Reservation
 	if scope != nil {
@@ -193,40 +194,6 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	if h.metrics != nil {
 		h.metrics.RecordUpload(handler.Size)
 	}
-}
-
-// writeFileAtomically 将 src 原子写入 dstPath（绝对路径），同时计算 SHA-256 哈希。
-// 先写到唯一临时文件，再 os.Rename，防止部分写入与并发冲突。
-// 保留供 chunked_upload 使用（任务 12 迁移到 Tenant chunk 桶后移除）；upload 链路用 writeFileAtomicallyRoot。
-func writeFileAtomically(ctx context.Context, dstPath string, src io.Reader) (checksum string, written int64, err error) {
-	tmpFile, err := os.CreateTemp(filepath.Dir(dstPath), filepath.Base(dstPath)+".tmp.*")
-	if err != nil {
-		return "", 0, fmt.Errorf("创建临时文件失败: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-
-	h, ok := hashPool.Get().(hash.Hash)
-	if !ok {
-		return "", 0, fmt.Errorf("hashPool 返回非 hash.Hash 类型")
-	}
-	hash := h
-	hash.Reset()
-	defer hashPool.Put(hash)
-	mw := io.MultiWriter(tmpFile, hash)
-	written, err = copyWithContext(mw, src, ctx)
-	if err != nil {
-		tmpFile.Close()
-		return "", written, fmt.Errorf("写入临时文件失败: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return "", written, fmt.Errorf("关闭临时文件失败: %w", err)
-	}
-	checksum = hex.EncodeToString(hash.Sum(nil))
-	if err := atomicRename(tmpPath, dstPath); err != nil {
-		return checksum, written, fmt.Errorf("重命名临时文件失败: %w", err)
-	}
-	return checksum, written, nil
 }
 
 // writeFileAtomicallyRoot 将 src 原子写入租户根内 rel 路径，同时计算 SHA-256 哈希。
@@ -358,29 +325,6 @@ func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, r *http.Request, r
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件已存在，但校验失败"}, http.StatusConflict)
 	}
 	return true
-}
-
-// atomicRename 尝试 os.Rename，如果失败（Windows 并发场景），
-// 先删除目标再重命名，并使用短退避重试以应对 Windows 句柄释放延迟。
-func atomicRename(src, dst string) error {
-	// 快速路径：直接重命名
-	if err := os.Rename(src, dst); err == nil {
-		return nil
-	}
-	// 慢速路径：删除目标文件，然后重命名临时文件
-	// 使用短退避重试，解决 Windows 上并发 Rename 导致的"Access is denied"
-	const maxAttempts = 5
-	const baseDelay = 2 * time.Millisecond
-	for i := range maxAttempts {
-		_ = os.Remove(dst)
-		if err := os.Rename(src, dst); err == nil {
-			return nil
-		} else if i == maxAttempts-1 {
-			return fmt.Errorf("重命名失败（已达最大重试次数 %d）: %w", maxAttempts, err)
-		}
-		time.Sleep(baseDelay << i)
-	}
-	return nil
 }
 
 // copyWithContext 是 context-aware 的 io.Copy，每次 Read/Write 前检查 ctx.Done()。

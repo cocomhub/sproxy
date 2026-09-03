@@ -7,6 +7,7 @@ package downloader
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -22,6 +23,21 @@ type Result struct {
 	ETag     string    // 服务器 ETag（用于 If-Range 续传一致性校验）
 }
 
+// QuotaSink 是可选写盘记账 sink：io.Writer + 本次下载（写盘会话）结束时回调。
+// 由调用方（如 cloud download 配额）注入；nil factory 时下载器直写底层文件。
+// Finish(success, oldSize)：success=true 表示本次写盘成功落定（释放未用 reserve +
+// 覆盖写释放 oldSize）；false 表示放弃（保留已 commit 供续传 / 回拨由实现决定）。
+type QuotaSink interface {
+	io.Writer
+	Finish(success bool, oldSize int64)
+}
+
+// SinkFactory 由调用方注入，把下载器写盘目标包装为带记账的 sink。
+// contentLength 是本次写盘会话预计写入的字节数（已知时）或 <=0（未知）；
+// resume 为 true 时表示在既有 .partial 上追加（增量写入），false 表示新建/截断重建。
+// nil 返回表示无需包装（直写）。创建失败返回错误（本次下载中止，不可重试）。
+type SinkFactory func(w io.Writer, contentLength int64, resume bool) (QuotaSink, error)
+
 // Downloader 是云端下载器接口。
 // 各协议实现通过 Registry 注册，按 source URL 匹配调度。
 type Downloader interface {
@@ -35,4 +51,12 @@ type Downloader interface {
 
 	// Name 返回下载器名称（如 "http"、"ftp"）。
 	Name() string
+}
+
+// WriterDownloader 是支持写盘记账 sink 注入的下载器（HTTPDownloader 实现）。
+// DownloadWithWriter 与 Download 等价，但允许调用方把写盘字节经 QuotaSink 记账
+// （外部下载配额边写边记）。调用方通过类型断言判断下载器是否支持。
+type WriterDownloader interface {
+	Downloader
+	DownloadWithWriter(ctx context.Context, source string, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory) (*Result, error)
 }

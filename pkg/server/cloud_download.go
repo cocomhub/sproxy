@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -55,6 +56,10 @@ type CloudTask struct {
 	// QuotaCommitted 表示该任务当前在 Scope 中的已确认占用（Commit 后 = 实际大小）。
 	reservation    *quota.Reservation `json:"-"`
 	QuotaCommitted int64              `json:"-"`
+	// qw 是本任务外部下载写盘的 QuotaWriter（任务 7：边写边记 + 自动补留），
+	// 跨重试/续传复用同一 account（保留 committed/reserved）。nil = scope 未装配（仅全局账本）。
+	// 不持久化：重启恢复的任务由磁盘扫描校准（Restored 语义），不再重建 QW。
+	qw *quota.QuotaWriter `json:"-"`
 }
 
 // CloudTaskGroup 表示一个云端下载任务组。
@@ -376,23 +381,89 @@ func (m *CloudDownloadManager) quotaScope(owner string) *quota.Scope {
 	return m.quotaFor(owner)
 }
 
-// releaseScopeCommitted 释放任务在 Scope 中的已确认占用（续传任务在 storage-full 清理
-// 时旧 .partial 已随整目录删除，须同步释放旧 committed 防配额泄漏）。
-func (m *CloudDownloadManager) releaseScopeCommitted(task *CloudTask) {
-	if task.QuotaCommitted <= 0 {
-		return
+// quotaSinkAdapter 把 *quota.QuotaWriter 适配为 downloader.QuotaSink（任务 7）。
+// 写盘字节经下载器直接进 QuotaWriter（边写边记 + 自动补留）：
+//   - Finish(true, oldSize)：释放未用 reserve + 覆盖写 ReleaseUsage(oldSize)；
+//   - Finish(false, _)：回拨已 commit（ReleaseUsage(written)）+ 释放剩余 reserve，
+//     与下载器「失败保留 .partial」语义配合（供续传/删除对账）。
+type quotaSinkAdapter struct{ qw *quota.QuotaWriter }
+
+func (a *quotaSinkAdapter) Write(p []byte) (int, error) { return a.qw.Write(p) }
+
+// Finish 语义（任务 7，对齐"下载失败保留 .partial 供续传"）：
+//   - success=true：完成——释放未用 reserve（QuotaWriter.Finish(true) 里 releaseUp(reserved)
+//   - ReleaseUsage(oldSize)），committed 收敛实际；
+//   - success=false：失败/写超——只释放未用 reserve（ReleaseReserve），**保留已 commit 字节
+//     继续占账**（.partial 在磁盘上，供 ResumeTask 续传复用；cancel/delete 时由
+//     releaseTaskScope 按 task.QuotaCommitted 回拨）。
+func (a *quotaSinkAdapter) Finish(success bool, oldSize int64) {
+	if success {
+		a.qw.Finish(true, oldSize)
+	} else {
+		a.qw.ReleaseReserve()
 	}
-	if scope := m.quotaScope(task.Owner); scope != nil {
-		scope.ReleaseUsage(task.QuotaCommitted)
-	}
-	task.QuotaCommitted = 0
 }
 
-// hasScopeStake 判断任务是否在 Scope 中持有位置（未落地预留或已确认占用）。
-// 新任务持 reservation；续传任务（failTask 已 Commit）持 QuotaCommitted；两者均无
-// （如 scope 未装配创建、或重启恢复的任务）时任务不参与 Scope 记账，无需容量预检。
-func (m *CloudDownloadManager) hasScopeStake(task *CloudTask) bool {
-	return task.reservation != nil || task.QuotaCommitted > 0
+// downloadSinkFactory 返回把写盘目标包装为 QuotaWriter 的 SinkFactory（每次写盘会话调用）。
+// scope 为 nil（未装配）时返回 nil factory（直写，仅全局 storageMgr 账本）。
+// 复用 task.qw（首次会话 NewQuotaWriter 预留，续传 SetWriter 换文件句柄、保留同一 account）：
+//   - 跨重试/续传不重复预留（防双计）；RunResult 完成后 qw 已结算（written=reserved=0，
+//     再次 New 仅当 task.qw==nil 且 scope 可用——重启恢复的任务 qw==nil 且 Restored 由磁盘扫描
+//     校准，不重建）。
+func (m *CloudDownloadManager) downloadSinkFactory(task *CloudTask) downloader.SinkFactory {
+	scope := m.quotaScope(task.Owner)
+	if scope == nil {
+		return nil
+	}
+	return func(w io.Writer, contentLength int64, resume bool) (downloader.QuotaSink, error) {
+		// task.qw 是被下载 goroutine 独占的使用者（创建/SetWriter/Finish 均在下载执行
+		// goroutine 内调用本闭包），但 SnapshotTask/ListTasks 的浅拷贝会以指针形式把
+		// task.qw 暴露给锁外读者 → 拷贝端置 nil 后，此处读写与下载 goroutine 串行即可
+		// 无 race（同一 goroutine，无并发）。防御：仍持 m.mu 保护，防止未来下载路径
+		// 分裂成多 goroutine（如 retry 重入）时引入竞态。
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if task.qw == nil {
+			var estimate int64
+			if contentLength > 0 {
+				estimate = contentLength
+			}
+			// estimate<=0 → NewQuotaWriter 内部占位 1 GiB。
+			qw, err := quota.NewQuotaWriter(scope, w, estimate)
+			if err != nil {
+				return nil, err
+			}
+			task.qw = qw
+			return &quotaSinkAdapter{qw: qw}, nil
+		}
+		// 续传/重试：复用同一 account，仅换写盘句柄（保留已 commit 用于增量补预留）。
+		task.qw.SetWriter(w)
+		return &quotaSinkAdapter{qw: task.qw}, nil
+	}
+}
+
+// releaseTaskScope 释放任务在租户 Scope 中的全部占用（取消/删除/放弃路径）：
+//   - QuotaCommitted（完成/失败已记录）ReleaseUsage 回拨；
+//   - 下载中 QW 边写边记的已 commit 字节同样取 qw.Committed() 回拨（防取消时 Scope 虚高）；
+//   - 只用 ReleaseReserve 归还 reserve，不用 Finish(false)（其内部已回拨 committed，
+//     与显式 ReleaseUsage 叠加会双释放）；已 commit 字节随后统一 ReleaseUsage 回拨。
+//
+// 幂等：复调/任务无占用/Scope 未装配均为空操作。
+func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
+	if scope := m.quotaScope(task.Owner); scope != nil {
+		released := task.QuotaCommitted
+		if task.qw != nil {
+			released += task.qw.Committed()
+			task.qw.ReleaseReserve() // 只归还未用 reserve；已 commit 字节随后统一 ReleaseUsage 回拨（防双释放）
+			task.qw = nil
+		}
+		if released > 0 {
+			scope.ReleaseUsage(released)
+		}
+	}
+	task.QuotaCommitted = 0
+	task.ReservedSize = 0 // 释放后归零防二次释放（storageMgr 侧由调用方另行处理）
+	task.reservation = nil
 }
 
 // CreateTask 创建云端下载任务（不启动下载）。
@@ -425,20 +496,32 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		return nil, err
 	}
 
-	// P4 租户配额预留（Scope 父链含全局兜底）；失败回滚全局预留。
-	var reservation *quota.Reservation
-	if scope := m.quotaScope(owner); scope != nil {
-		rr, err := scope.TryReserve(reserved)
-		if err != nil {
-			m.storage.Release(reserved, CategoryCloud)
-			m.logger.Warn("storage full, cloud download rejected",
-				"url", url,
-				"requested_size", totalSize,
-				"owner", owner,
-			)
-			return nil, err
+	// P4/P5 租户配额（任务 7 迁移到下载流 QuotaWriter 边写边记）：
+	//   - **已知大小**（totalSize>0）：创建期在**租户根 Scope**（上限=owner_quota）上做
+	//     容量预检，不足即 507（保留"创建即拒绝"同步语义，与旧行为一致——旧实现创建期
+	//     在 cloud 桶 Scope TryReserve 沿父链到租户根被拦截）；
+	//   - **未知大小**（totalSize<=0）：不预检占位，延迟到下载流首次写盘（NewQuotaWriter
+	//     占位 1 GiB 预留；失败→本次下载 failed）。小文件完成后 Scope 不再虚高 1 GiB 占位。
+	// 预检用租户根 Scope 的 Available（父链向上汇总 committed+reserved）。Scope 装配在
+	// quotaFor 注入的 cloud 桶 Scope；租户根经其父链不可直接取指针，改由装配时额外注入
+	// 一个"租户根 Scope 解析器"不可得——故用 cloud 桶 Scope 上溯：Objective 简化为对
+	// cloud 桶 Scope.TryReserve(totalSize) 立即 Release（副作用=沿父链校验租户根/全局上限）。
+	if totalSize > 0 {
+		if scope := m.quotaScope(owner); scope != nil {
+			// 临时预留探测：TryReserve 沿父链校验（租户根 owner_quota + globalPool max），
+			// 满足则立即 Release（探测不落地 committed）。满足=放行；不满足=507。
+			probe, err := scope.TryReserve(totalSize)
+			if err != nil {
+				m.storage.Release(reserved, CategoryCloud)
+				m.logger.Warn("storage full, cloud download rejected",
+					"url", url,
+					"requested_size", totalSize,
+					"owner", owner,
+				)
+				return nil, quota.ErrStorageFull
+			}
+			probe.Release()
 		}
-		reservation = rr
 	}
 
 	task := &CloudTask{
@@ -450,7 +533,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		Status:         "pending",
 		TotalSize:      totalSize,
 		ReservedSize:   reserved,
-		reservation:    reservation,
+		reservation:    nil,
 		QuotaCommitted: 0,
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
@@ -603,10 +686,15 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 复查任务状态与存在性：CancelTask/DeleteTask 可能在信号量获取与此处之间
 	// 执行，若状态已非 pending 或任务已从 map 中删除，则放弃下载。
 	if stored, ok := m.tasks[task.ID]; !ok || (stored.Status != "pending" && stored.Status != "downloading") {
+		status := ""
+		if ok {
+			// 锁内捕获 status：Unlock 后读取会与 ResumeTask/Cancel 的持锁写构成数据竞争。
+			status = stored.Status
+		}
 		m.mu.Unlock()
 		if ok {
 			m.logger.Info("download skipped, task status changed while acquiring slot",
-				"task_id", task.ID, "status", stored.Status)
+				"task_id", task.ID, "status", status)
 		} else {
 			m.logger.Info("download skipped, task deleted while acquiring slot", "task_id", task.ID)
 		}
@@ -666,7 +754,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			attemptCtx, attemptCancel = context.WithTimeout(dlCtx, m.config.DownloadTimeout)
 		}
 
-		result, downloadErr = m.dl.Download(attemptCtx, task.URL, destPath, func(downloaded, total int64) {
+		progressFn := func(downloaded, total int64) {
 			m.mu.Lock()
 			task.Downloaded = downloaded
 			if total > 0 {
@@ -679,7 +767,16 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 			// progress 回调顺序：m.mu.Lock → markDirty(dirtyMu.Lock)。
 			// 将 markDirty 移出 m.mu 范围后锁序不再反转。
 			m.markDirty(id)
-		})
+		}
+
+		// 主写盘路径：下载器支持 WriterDownloader 则注入 QuotaWriter sink（任务 7）
+		// 边写边记 + 自动补留；否则退回普通 Download（仅全局账本）。
+		sinkFactory := m.downloadSinkFactory(task)
+		if wd, ok := m.dl.(downloader.WriterDownloader); ok && sinkFactory != nil {
+			result, downloadErr = wd.DownloadWithWriter(attemptCtx, task.URL, destPath, progressFn, sinkFactory)
+		} else {
+			result, downloadErr = m.dl.Download(attemptCtx, task.URL, destPath, progressFn)
+		}
 
 		// 及时释放本次尝试的定时器，避免累积到函数退出
 		if attemptCancel != nil {
@@ -782,25 +879,23 @@ downloadDone:
 		stored.FileMTime = fileMTime
 	}
 
-	// 存储账本补偿：以 ReservedSize 为基准对齐到实际大小。TryReserve/Release 均为
-	// 内存计数，锁内调用与 failTask/CancelTask 的锁内存储操作保持一致锁序。
-	// P4 租户配额并行对账：Scope 侧在容量预检通过后 Commit(actual)（新任务预留→占用）
-	// 或 Adjust(QuotaCommitted, actual)（续传任务差分）。
+	// 全局 storageMgr 账本补偿：以 ReservedSize 为基准对齐到实际大小（CategoryCloud，
+	// /api/stats 依赖）。TryReserve/Release 均为内存计数，锁内调用与 failTask/CancelTask
+	// 的锁内存储操作保持一致锁序。
+	// 租户 Scope 侧（任务 7）：QuotaWriter 已在写盘时边写边记（commitUp 实时落地 committed、
+	// 写超预留自动补留、下载器 Finish(success,oldSize) 释放未用 reserve），此处不再做
+	// Commit/Adjust 收尾——只需把 task.qw.Committed()（若 Scope 装配且 QW 建成）记入
+	// stored.QuotaCommitted 供续传增量与取消/删除对账。storageMgr 全局账本仍须收敛到实际。
 	reserved := stored.ReservedSize
-	sizeDelta := result.Size - reserved
-	var scopeExtra *quota.Reservation
-	if sizeDelta > 0 {
-		// 实际更大，需要追加预留（全局账本）
-		if err := m.storage.TryReserve(sizeDelta, CategoryCloud); err != nil {
-			// 存储已满无法容纳实际大小：释放旧占位并删文件，避免账本虚高/磁盘残留。
-			if reserved > 0 {
-				m.storage.Release(reserved, CategoryCloud)
-			}
-			if task.reservation != nil {
-				task.reservation.Release()
-				task.reservation = nil
-			}
-			m.releaseScopeCommitted(stored) // 续传任务旧 committed 随整文件删除释放
+	if result.Size > reserved {
+		if err := m.storage.TryReserve(result.Size-reserved, CategoryCloud); err != nil {
+			// 全局账本不足：无法容纳实际大小，删文件 + 失败。Scope 侧由 QW 边写边记已落账
+			// （committed + 未用 reserve），releaseTaskScope 统一回拨防泄漏（含下载中字节）。
+			// 下载器已 Finish(true)（qw.written=0），Scope 中 committed 恒等于 result.Size；
+			// 显式记录 QuotaCommitted 使 releaseTaskScope 按实际大小回拨（否则 released=0 泄漏）。
+			stored.QuotaCommitted = result.Size
+			m.releaseTaskScope(stored)
+			m.storage.Release(reserved, CategoryCloud) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
 			stored.ReservedSize = 0
 			stored.Status = "failed"
 			stored.Error = "storage full after download"
@@ -814,63 +909,19 @@ downloadDone:
 			m.metrics.TasksFailed.Add(1)
 			return
 		}
-		// 租户配额：任务持有 Scope 位置（预留或续传已确认占用）时，增长部分同样需容量
-		// （全局通过后仍可能被 per-tenant 上限拦下；Adjust 不做容量检查，必须在此预检）。
-		if sizeDelta > 0 && m.hasScopeStake(stored) {
-			if scope := m.quotaScope(stored.Owner); scope != nil {
-				extra, err := scope.TryReserve(sizeDelta)
-				if err != nil {
-					m.storage.Release(sizeDelta, CategoryCloud) // 回滚全局追加
-					if reserved > 0 {
-						m.storage.Release(reserved, CategoryCloud)
-					}
-					if task.reservation != nil {
-						task.reservation.Release()
-						task.reservation = nil
-					}
-					m.releaseScopeCommitted(stored) // 续传任务旧 committed 随整文件删除释放
-					stored.ReservedSize = 0
-					stored.Status = "failed"
-					stored.Error = "storage full after download"
-					stored.UpdatedAt = time.Now()
-					stored.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
-					m.mu.Unlock()
-					_ = os.Remove(destPath)
-					m.logger.Error("tenant storage full after download, cannot fit actual size",
-						"task_id", task.ID, "actual_size", result.Size, "reserved", reserved)
-					_ = m.saveTask(stored)
-					m.metrics.TasksFailed.Add(1)
-					return
-				}
-				scopeExtra = extra
-			}
-		}
-		stored.ReservedSize = result.Size
-	} else if sizeDelta < 0 {
-		// 实际更小，释放多余空间
-		m.storage.Release(-sizeDelta, CategoryCloud)
-		stored.ReservedSize = result.Size
+	} else if result.Size < reserved {
+		m.storage.Release(reserved-result.Size, CategoryCloud)
 	}
+	stored.ReservedSize = result.Size
 
-	// 租户配额落地：新任务 Commit（预留→占用）；续传任务 Adjust 差分收敛到实际大小。
-	// 两条路径都释放超额预留（scopeExtra）：Commit 消费 reservation.amount 后剩余增量仍在
-	// reserved；Adjust 直接把增量进 committed，二者都需要 scopeExtra.Release 归零 reserved。
+	// 租户 Scope：记录已确认占用字节，供取消/删除/过期对账（ReleaseUsage）。Scope 未装配
+	// 时恒 0。QW 已完成（下载器 Finish(true) 释放未用 reserve 并清零 written），此处用
+	// result.Size（QW 边写边记写完整个文件必然 committed==result.Size）。QW 句柄置 nil：
+	// 完成后不再写盘，续传/删除不再复用。
 	if scope := m.quotaScope(stored.Owner); scope != nil {
-		if task.reservation != nil {
-			task.reservation.Commit(result.Size)
-			if scopeExtra != nil {
-				scopeExtra.Release()
-			}
-			task.reservation = nil
-			stored.QuotaCommitted = result.Size
-		} else if stored.QuotaCommitted > 0 {
-			scope.Adjust(stored.QuotaCommitted, result.Size)
-			if scopeExtra != nil {
-				scopeExtra.Release()
-			}
-			stored.QuotaCommitted = result.Size
-		}
+		stored.QuotaCommitted = result.Size
 	}
+	task.qw = nil
 
 	// 写入 ChecksumStore。迁移后云任务文件落 <tenant>/cloud/<taskID>/<file>，key 用
 	// per-tenant store + 相对租户根的协议正斜杠 rel（cloud/<taskID>/<file>，无 owner 前缀），
@@ -924,10 +975,12 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	}
 	// 释放存储：以磁盘实际占用为基准，只释放占位与实际大小的差额。
 	// .partial 保留供续传，账本与实际磁盘保持一致，避免配额窗口被累积突破。
-	// P4 租户配额并行对账：Scope 侧 Commit(actual)（预留→占用）或 Adjust 差分。
+	// 租户 Scope 侧（任务 7）：QuotaWriter 已边写边记（committed=已落盘字节），失败路径
+	// 保留 .partial 时这些字节继续占账（供续传），无未用 reserve（下载器已在写盘结束
+	// Finish(false) 释放）；此处不再做 Commit/Adjust 收尾，仅记录 QuotaCommitted 供
+	// 取消/删除对账与续传增量补预留。全局 storageMgr 账本仍按磁盘实际收敛。
 	oldReserved := task.ReservedSize
 	actual := m.diskUsageOfTask(task.Owner, task.ID)
-	var scopeExtra *quota.Reservation
 	if actual < oldReserved {
 		m.storage.Release(oldReserved-actual, CategoryCloud)
 	} else if actual > oldReserved {
@@ -940,11 +993,7 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 			if oldReserved > 0 {
 				m.storage.Release(oldReserved, CategoryCloud)
 			}
-			if task.reservation != nil {
-				task.reservation.Release()
-				task.reservation = nil
-			}
-			m.releaseScopeCommitted(task) // 续传任务旧 committed 随整目录删除释放
+			m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
 			task.ReservedSize = 0
 			task.Status = "failed"
 			task.Error = errMsg
@@ -958,57 +1007,27 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 			m.metrics.TasksFailed.Add(1)
 			return
 		}
-		// 租户配额：任务持有 Scope 位置（预留或续传已确认占用）时，增长部分同样需容量；
-		// 失败走与全局一致的删文件路径（Adjust 不做容量检查，必须在此预检）。
-		if actual > oldReserved && m.hasScopeStake(task) {
-			if scope := m.quotaScope(task.Owner); scope != nil {
-				extra, err := scope.TryReserve(actual - oldReserved)
-				if err != nil {
-					m.logger.Warn("tenant storage full, cannot keep partial for resume, removing task files",
-						"task_id", task.ID, "actual", actual, "reserved", oldReserved, "error", err)
-					m.storage.Release(actual-oldReserved, CategoryCloud) // 回滚全局追加
-					if oldReserved > 0 {
-						m.storage.Release(oldReserved, CategoryCloud)
-					}
-					if task.reservation != nil {
-						task.reservation.Release()
-						task.reservation = nil
-					}
-					m.releaseScopeCommitted(task) // 续传任务旧 committed 随整目录删除释放
-					task.ReservedSize = 0
-					task.Status = "failed"
-					task.Error = errMsg
-					task.UpdatedAt = time.Now()
-					task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
-					m.mu.Unlock()
-					m.removeTaskDir(task.Owner, task.ID)
-					if saveErr := m.saveTask(task); saveErr != nil {
-						m.logger.Error("persist failed task after tenant storage-full cleanup", "task_id", task.ID, "error", saveErr)
-					}
-					m.metrics.TasksFailed.Add(1)
-					return
-				}
-				scopeExtra = extra
-			}
-		}
 	}
-	// 租户配额落地：预留未提交 → Commit(actual)；已提交（续传再失败）→ Adjust 差分。
-	// 两条路径都释放超额预留 scopeExtra（见 executeDownload 完成路径注释）。
-	if scope := m.quotaScope(task.Owner); scope != nil {
-		if task.reservation != nil {
-			task.reservation.Commit(actual)
-			if scopeExtra != nil {
-				scopeExtra.Release()
-			}
-			task.reservation = nil
-			task.QuotaCommitted = actual
-		} else if task.QuotaCommitted > 0 {
+	// 租户 Scope：以 QW 或磁盘为基准 reconcile 到 committed（审查 I3「二选一」模型——
+	// 不得双计）。两条路径互斥：
+	//   1）task.qw 存活（本次下载边写边记进行中）：Write 已实时 commitUp，committed 即
+	//      QW 已写量 qw.Committed()，**不得再 Adjust**（否则与 commitUp 叠加双计）。
+	//      下载器 Finish(false) 已 ReleaseReserve（未用 reserve 归还），此处兜底清残余
+	//      reserve（幂等），QW 结算后置 nil，QuotaCommitted 累加本轮 qw.Committed()（续传
+	//      保留首轮 partial 占用，防覆盖漏计）供取消/删除对账；
+	//   2）task.qw 已 nil（未建 QW / QW 已结算 / 磁盘真值）：以磁盘实际占用为基准 reconcile 到
+	//      committed——增量（手动落盘/旧语义测试）Adjust 补入，减量（force 清 partial）
+	//      Adjust 释放。scope 未装配恒 0。
+	if task.qw != nil {
+		// 续传场景 QuotaCommitted 保留首轮 partial 占用，累加而非覆盖（防首轮已记占用被覆盖漏计）。
+		task.QuotaCommitted += task.qw.Committed()
+		task.qw.ReleaseReserve() // 兜底清未用 reserve（已 Finish(false) 则幂等残余）
+		task.qw = nil
+	} else if scope := m.quotaScope(task.Owner); scope != nil {
+		if actual != task.QuotaCommitted {
 			scope.Adjust(task.QuotaCommitted, actual)
-			if scopeExtra != nil {
-				scopeExtra.Release()
-			}
-			task.QuotaCommitted = actual
 		}
+		task.QuotaCommitted = actual
 	}
 	task.ReservedSize = actual
 	task.Status = "failed"
@@ -1079,6 +1098,7 @@ func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
 	for _, t := range m.tasks {
 		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") && ownerVisible(t.Owner, owner) {
 			c := *t
+			c.qw = nil // 快照不暴露运行时配额句柄
 			return &c
 		}
 	}
@@ -1100,6 +1120,8 @@ func (m *CloudDownloadManager) SnapshotTask(id, owner string) (*CloudTask, bool)
 		return nil, false
 	}
 	c := *t
+	// 快照对外不暴露运行时配额句柄（QW 由下载 goroutine 独占使用；读者无需也不应触碰）。
+	c.qw = nil
 	return &c, true
 }
 
@@ -1118,6 +1140,7 @@ func (m *CloudDownloadManager) ListTasks(status string, offset, limit int, owner
 	for _, t := range m.tasks {
 		if (status == "" || t.Status == status) && ownerVisible(t.Owner, owner) {
 			c := *t
+			c.qw = nil // 快照不暴露运行时配额句柄（同 SnapshotTask）
 			all = append(all, &c)
 		}
 	}
@@ -1153,9 +1176,11 @@ func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("task not found: %s", id)
 	}
-	if t.Status != "pending" && t.Status != "downloading" {
+	if status := t.Status; status != "pending" && status != "downloading" {
+		// 注意：status 须在解锁前捕获——fmt.Errorf 若直接引用 t.Status 会在 m.mu 释放后
+		// 读共享字段，与 ResumeTask 的 task.Status = "pending"（持锁写）构成数据竞争。
 		m.mu.Unlock()
-		return fmt.Errorf("cannot cancel task in status %q", t.Status)
+		return fmt.Errorf("cannot cancel task in status %q", status)
 	}
 	t.Status = "cancelled"
 	t.UpdatedAt = time.Now()
@@ -1166,18 +1191,9 @@ func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 		m.storage.Release(t.ReservedSize, CategoryCloud)
 		t.ReservedSize = 0
 	}
-	// P4 租户配额：取消即放弃。下载中字节仍在 reserved（未 Commit），Release 归还；
-	// QuotaCommitted 理论上恒 0（下载中不落地），防御性释放。
-	if t.reservation != nil {
-		t.reservation.Release()
-		t.reservation = nil
-	}
-	if t.QuotaCommitted > 0 {
-		if scope := m.quotaScope(t.Owner); scope != nil {
-			scope.ReleaseUsage(t.QuotaCommitted)
-		}
-		t.QuotaCommitted = 0
-	}
+	// P4 租户配额：取消即放弃。下载中 QW 边写边记的已 commit 字节回拨 + 释放未用 reserve
+	// （releaseTaskScope 统一处理）；QuotaCommitted（完成/失败已记录）一并 ReleaseUsage。
+	m.releaseTaskScope(t)
 
 	// 触发下载取消（排队中任务也已在 cancelFuncs 注册，可立即生效）
 	if cancel, ok := m.cancelFuncs[id]; ok {
@@ -1227,29 +1243,18 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	if reserved > 0 {
 		t.ReservedSize = 0
 	}
-	committed := t.QuotaCommitted
-	t.QuotaCommitted = 0
-	reservation := t.reservation
-	t.reservation = nil
+	// 锁内捕获 t.Status：Unlock 后读取会与下载 goroutine 的 failTask/CancelTask 持锁写构成数据竞争。
+	delStatus := t.Status
 	m.mu.Unlock()
 
 	if reserved > 0 {
 		m.storage.Release(reserved, CategoryCloud)
 		m.logger.Debug("storage released", "task_id", id, "size", reserved)
 	}
-	// P4 租户配额：pending/downloading 任务有未落地预留 → Release 归还；
-	// completed/failed 任务已 Commit → ReleaseUsage(QuotaCommitted) 释放已确认占用。
-	if scope := m.quotaScope(t.Owner); scope != nil {
-		if reservation != nil {
-			reservation.Release()
-		}
-		if committed > 0 {
-			scope.ReleaseUsage(committed)
-			m.logger.Debug("tenant storage usage released", "task_id", id, "size", committed)
-		}
-	}
+	// P4 租户配额：删除即放弃。QW/QuotaCommitted 统一回拨（含下载中边写边记字节）。
+	m.releaseTaskScope(t)
 
-	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", t.Status)
+	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", delStatus)
 
 	// 删除云端文件（按任务 owner 落租户 cloud 桶）
 	taskDir := m.taskDirFor(t.Owner, t.ID)
@@ -1549,13 +1554,12 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 
 	// 在锁内收集需要清理的 ID 及相关信息，避免锁内 I/O 阻塞
 	type expiredItem struct {
-		id           string
-		taskID       string
-		filename     string
-		owner        string
-		reservedSize int64
-		reservation  *quota.Reservation
-		committed    int64
+		id             string
+		taskID         string
+		filename       string
+		owner          string
+		reservedSize   int64
+		scopeCommitted int64
 	}
 	m.mu.Lock()
 	var expired []expiredItem
@@ -1571,17 +1575,15 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 		}
 		if now.After(t.UpdatedAt.Add(ttl)) {
 			expired = append(expired, expiredItem{
-				id:           id,
-				taskID:       t.ID,
-				filename:     t.Filename,
-				owner:        t.Owner,
-				reservedSize: t.ReservedSize,
-				reservation:  t.reservation,
-				committed:    t.QuotaCommitted,
+				id:             id,
+				taskID:         t.ID,
+				filename:       t.Filename,
+				owner:          t.Owner,
+				reservedSize:   t.ReservedSize,
+				scopeCommitted: t.QuotaCommitted,
 			})
 			t.ReservedSize = 0   // 释放后归零，防二次释放
 			t.QuotaCommitted = 0 // 同上
-			t.reservation = nil  // 同上
 			delete(m.tasks, id)
 		}
 	}
@@ -1601,14 +1603,10 @@ func (m *CloudDownloadManager) cleanupExpiredOnce() int {
 		if item.reservedSize > 0 {
 			m.storage.Release(item.reservedSize, CategoryCloud)
 		}
-		// P4 租户配额：终态任务的 Scope 占用随过期清理释放（已完成/失败已 Commit →
-		// ReleaseUsage；异常残留预留 → Release 兜底）。
-		if scope := m.quotaScope(item.owner); scope != nil {
-			if item.reservation != nil {
-				item.reservation.Release()
-			}
-			if item.committed > 0 {
-				scope.ReleaseUsage(item.committed)
+		// P4 租户配额：终态任务的 Scope 占用随过期清理释放（QuotaCommitted ReleaseUsage）。
+		if item.scopeCommitted > 0 {
+			if scope := m.quotaScope(item.owner); scope != nil {
+				scope.ReleaseUsage(item.scopeCommitted)
 			}
 		}
 		if cs := m.checksumStoreFor(item.owner); cs != nil {
@@ -1738,6 +1736,7 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 			if ok {
 				t.GroupID = ""
 				c := *t
+				c.qw = nil // 内部拷贝不携带运行时配额句柄（saveTask json 亦不含）
 				snap = &c
 			}
 			m.mu.Unlock()
@@ -1980,9 +1979,11 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		m.mu.Unlock()
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	if task.Status != "failed" && task.Status != "cancelled" {
+	if status := task.Status; status != "failed" && status != "cancelled" {
+		// 解锁前捕获 status：fmt.Errorf 若直接引用 task.Status 会在 m.mu 释放后读共享字段，
+		// 与 CancelTask 的 t.Status = "cancelled"（持锁写）构成数据竞争。
 		m.mu.Unlock()
-		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, task.Status)
+		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
 	}
 	// 释放写锁再等待：waitTaskStopped 内部需取读锁，持有写锁会死锁。
 	// 等待期间任务可能被删除或状态被并发修改，之后会重新校验。
@@ -2002,9 +2003,9 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		m.mu.Unlock()
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	if task.Status != "failed" && task.Status != "cancelled" {
+	if status := task.Status; status != "failed" && status != "cancelled" {
 		m.mu.Unlock()
-		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, task.Status)
+		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
 	}
 	if m.running[taskID] {
 		m.mu.Unlock()
@@ -2013,13 +2014,15 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 
 	// 状态先切 pending + running 同步置位：并发双 resume 中第二个会因 running 已置
 	// 被上面的检查拦截，避免两个 goroutine 并发写同一 .partial（Critical 修复）。
+	// UpdatedAt 在 running 置位后更新（值语义）：waitTaskStopped 以 running 为终态信号，
+	// 先置 running 保证 watcher 一旦观察到即可视为本次 resume 已生效；UpdatedAt 紧随写入。
 	task.Status = "pending"
 	m.running[taskID] = true
 	task.Error = ""
 	task.UpdatedAt = time.Now()
 	task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
 
-	// 释放过存储的任务需要重新占位
+	// 释放过存储的任务需要重新占位（全局 storageMgr；Scope 侧由下载流 QuotaWriter 边写边记重建）
 	if task.ReservedSize == 0 {
 		if err := m.storage.TryReserve(cloudReservePlaceholder, CategoryCloud); err != nil {
 			// 占位失败：撤销 pending 切换并清除 running，避免 running 残留
@@ -2033,24 +2036,6 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 					"task_id", taskID, "error", saveErr)
 			}
 			return err
-		}
-		// P4 租户配额：重新预留占位；失败回滚全局预留并撤销 pending。
-		if scope := m.quotaScope(task.Owner); scope != nil {
-			rr, err := scope.TryReserve(cloudReservePlaceholder)
-			if err != nil {
-				m.storage.Release(cloudReservePlaceholder, CategoryCloud)
-				task.Status = "failed"
-				task.Error = "storage full, cannot resume"
-				delete(m.running, taskID)
-				m.mu.Unlock()
-				if saveErr := m.saveTask(task); saveErr != nil {
-					m.logger.Error("persist resume-failure task state, state may be lost on restart",
-						"task_id", taskID, "error", saveErr)
-				}
-				return err
-			}
-			task.reservation = rr
-			task.QuotaCommitted = 0
 		}
 		task.ReservedSize = cloudReservePlaceholder
 	}

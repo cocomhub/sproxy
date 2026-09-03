@@ -174,13 +174,15 @@ func (s *StorageManager) SetReconciler(fn ReconcileFunc) {
 
 // ScanAndRecalculate 全量扫描存储根，重新统计各分类文件大小和用户文件数量。
 // 分类按新布局桶语义（<tenant>/{user,cloud,archive,chunk,version,meta}/）判定，兼容旧布局
-// 平铺文件（默认 userFiles，跳过任务状态目录与 legacy 内部目录）。同时把各租户桶字节数
-// 归集进 tenantBuckets 并交给 reconcile 回调校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。
+// 平铺文件（默认 userFiles，跳过任务状态目录与 legacy 内部目录）。meta 桶服务端账本字节
+// 计入 totalUsage（服务端占用属总量），但 UsageByCategory 保持 4 分类枚举（meta 不入分类）。
+// 同时把各租户桶字节数归集进 tenantBuckets 并交给 reconcile 回调校准 per-tenant 配额 Scope
+// （重启后 Scope 不回溯，meta 子 Scope 一并校准）。.checksums.json 与 LAYOUT_VERSION 不计数。
 func (s *StorageManager) ScanAndRecalculate() error {
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
 
-	var userFiles, chunked, versions, cloud int64
+	var userFiles, chunked, versions, cloud, meta int64
 	var userFileCount int64
 	tenantBuckets := make(map[string]map[string]int64)
 
@@ -201,13 +203,11 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
 			base := filepath.Base(path)
-			// 跳过遗留服务端内部目录（.__* 魔法目录，P5 后旧布局不再产生）与新布局
-			// meta 桶（服务端内部账本，不计入配额）。其余目录一律进入统计——
-			// 未知 .__ 目录也跳过（防历史魔法目录残留被误计；新布局用户文件在 user/ 桶）。
+			// 跳过遗留服务端内部目录（.__* 魔法目录，P5 后旧布局不再产生）。其余目录
+			// 一律进入统计——未知 .__ 目录也跳过（防历史魔法目录残留被误计；新布局
+			// 用户文件在 user/ 桶）。meta 桶不再 SkipDir：服务端账本（sync/cloud 任务
+			// 状态/session 等）按 meta 桶归集计入 totalUsage 与租户 meta 配额。
 			if strings.HasPrefix(base, ".__") {
-				return filepath.SkipDir
-			}
-			if storageBucketOf(rel) == "meta" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -216,7 +216,7 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		if err != nil {
 			return nil // 跳过无法读取的文件
 		}
-		if d.Name() == ".checksums.json" {
+		if isChecksumSidecar(d.Name()) {
 			return nil
 		}
 		size := info.Size()
@@ -225,7 +225,16 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		case "user":
 			userFiles += size
 			userFileCount++
-			addTenantBucket(tenantBuckets, firstSegment(rel), "user", size)
+			tenant := firstSegment(rel)
+			addTenantBucket(tenantBuckets, tenant, "user", size)
+			// bucket_limits 子目录归集：把该文件同时计入其最长命中的路径键（如
+			// "user/videos/hd"），供 reconcile 先深后浅校准子 Scope committed。
+			// bucketDirKey 仅在有子目录链时返回非空键（桶内顶级文件返回 "" → 跳过，不额外
+			// 归集，避免与功能桶键重复双计）。scanner 纯机械归集，键集合由 reconcile 按
+			// 装配的段树过滤（未配置前缀不建立 scope/键）。
+			if dirKey := bucketDirKey(rel); dirKey != "" {
+				addTenantBucket(tenantBuckets, tenant, dirKey, size)
+			}
 		case "cloud", "archive":
 			cloud += size
 			addTenantBucket(tenantBuckets, firstSegment(rel), bucket, size)
@@ -236,7 +245,10 @@ func (s *StorageManager) ScanAndRecalculate() error {
 			versions += size
 			addTenantBucket(tenantBuckets, firstSegment(rel), "version", size)
 		case "meta":
-			// 已在上方目录层 SkipDir，兜底跳过
+			// 服务端内部账本（sync/cloud 任务状态、chunked session、share token 等）：
+			// 计入 totalUsage 与租户 meta 配额 Scope，但不入 stats 分类枚举（4 键不变）。
+			meta += size
+			addTenantBucket(tenantBuckets, firstSegment(rel), "meta", size)
 		default:
 			// 无桶结构的旧布局平铺文件按用户文件计入（新布局路径均落入上方 bucket 分支；
 			// LAYOUT_VERSION 标记文件不计入）。.__ 魔法目录已在目录层 SkipDir 跳过。
@@ -257,7 +269,7 @@ func (s *StorageManager) ScanAndRecalculate() error {
 	s.chunkedSize.Store(chunked)
 	s.versionsSize.Store(versions)
 	s.cloudSize.Store(cloud)
-	s.totalUsage.Store(userFiles + chunked + versions + cloud)
+	s.totalUsage.Store(userFiles + chunked + versions + cloud + meta)
 	s.userFileCount.Store(userFileCount)
 
 	// 校准 per-tenant 配额 Scope（启动/周期对账；nil 回调跳过）。
@@ -292,6 +304,13 @@ func firstSegment(rel string) string {
 	return ""
 }
 
+// isChecksumSidecar 判断文件名是否为 per-tenant checksum 侧边文件（meta 桶/旧布局根下派生
+// 账本，不计入配额与总量）。新布局为 <tenant>/meta/checksums.json；历史旧布局曾用
+// 根目录 .checksums.json → 两者都跳过（含 .tmp 残留），避免 meta 桶字节随文件数膨胀。
+func isChecksumSidecar(name string) bool {
+	return name == "checksums.json" || name == ".checksums.json"
+}
+
 // addTenantBucket 把 size 累加到 tenantBuckets[tenant][bucket]。
 func addTenantBucket(m map[string]map[string]int64, tenant, bucket string, size int64) {
 	if tenant == "" {
@@ -303,6 +322,31 @@ func addTenantBucket(m map[string]map[string]int64, tenant, bucket string, size 
 		m[tenant] = b
 	}
 	b[bucket] += size
+}
+
+// dirPathSuffix 返回 rel 的"桶内目录链键候选"（bucket_limits 键，含功能桶前缀）：
+// rel="alice/user/videos/hd/a.mkv" → "user/videos/hd"；桶内顶级文件 "alice/user/f.txt"
+// → ""（无子目录键：扫描仅归集到功能桶键 "user"，避免与功能桶键重复双计）。
+// reconcile 侧只对装配过的 BucketLimits 键做子目录校准（未配置前缀不建立键/scope）。
+func dirPathSuffix(rel string) string {
+	rest, _, hasSlash := strings.Cut(rel, "/")
+	if !hasSlash {
+		return ""
+	}
+	// rel[首段租户+1 : 最后文件名前的 slash] 是桶内目录链（含功能桶首段）。
+	if idx := strings.LastIndexByte(rel, '/'); idx >= 0 {
+		suffix := rel[len(rest)+1 : idx]
+		if strings.Contains(suffix, "/") {
+			return suffix // 存在桶内子目录（至少 user/dir/...）
+		}
+	}
+	return "" // 桶内顶级文件（无子目录键）
+}
+
+// bucketDirKey 返回 user 桶文件的 bucket_limits 子目录键候选；无子目录时为 ""（扫描不
+// 再额外归集，避免与功能桶键重复双计）。
+func bucketDirKey(rel string) string {
+	return dirPathSuffix(rel)
 }
 
 func (s *StorageManager) addCategory(cat StorageCategory, delta int64) {

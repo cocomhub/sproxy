@@ -864,3 +864,67 @@ func TestCloudHandler_CreateGroup_NormalizesURL(t *testing.T) {
 		t.Fatalf("expected normalized URL %q, got %q", "http://127.0.0.1:1/file.zip", taskURL)
 	}
 }
+
+// TestCloudHandler_CreateDownloadTask_507OnTenantQuota 锁定审查 C 缺口 6：
+// 配额满时 POST /api/cloud/download 返回 507（InsufficientStorage）+ 无任务残留 + Scope 0。
+//
+// 说明：handler 提交恒为未知大小（totalSize=-1），创建期同步配额门是全局 storageMgr
+// 的 1 GiB 占位预留（m.storage.TryReserve(cloudReservePlaceholder)）；租户 Scope 的容量
+// 预检仅在已知大小路径（totalSize>0）触发，未知大小的租户配额在写盘流 NewQuotaWriter
+// 占位预留时执行（异步失败，不返回 507）。因此本测试把全局 storageMgr 上限压到占位之下
+// 触发同步 507，并断言 Scope 不因失败的创建留下任何占用（双轨无泄漏）。
+func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
+	dir := t.TempDir()
+	// 全局 max = 512MB < 1 GiB 占位 → 未知大小任务创建即 507。
+	sm := NewStorageManager(dir, 512*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+		AllowPrivate:  true,
+	}
+	mgr, h := newCloudTestManager(t, dir, sm, cfg)
+	setTestOwnerQuota(h, "alice", 100) // 租户配额也满（100 字节，无法容纳任何下载）
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		h.cloudCreateDownload(w, r)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	body := strings.NewReader(`{"url": "https://example.com/big.bin", "filename": "big.bin"}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusInsufficientStorage {
+		t.Fatalf("配额满应 507, got %d", resp.StatusCode)
+	}
+
+	// 无任务残留（创建失败未入 tasks）。
+	tasks, _ := mgr.ListTasks("", -1, 0, "alice")
+	if len(tasks) != 0 {
+		t.Fatalf("507 后应无任务残留, got %d", len(tasks))
+	}
+
+	// Scope 0（双轨无泄漏：storageMgr 与租户 Scope 均无占用）。
+	if got := sm.Usage(); got != 0 {
+		t.Fatalf("507 后 storageMgr Usage()=%d want 0", got)
+	}
+	cloudB := h.quotaBucketFor("alice", "cloud")
+	if cloudB == nil {
+		t.Fatal("alice cloud 桶 Scope 应为非 nil")
+	}
+	if got := cloudB.Usage(); got != 0 {
+		t.Fatalf("507 后 cloud 桶 Usage()=%d want 0", got)
+	}
+	if got := cloudB.Reserved(); got != 0 {
+		t.Fatalf("507 后 cloud 桶 Reserved()=%d want 0", got)
+	}
+}

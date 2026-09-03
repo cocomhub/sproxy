@@ -359,7 +359,8 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	// P4/P5 配额（I3 修复）：恢复把版本文件拷回 user 桶（O_TRUNC 覆盖当前文件），本质是新增
 	// user 桶字节——缺失配额可反复 restore 突破租户上限。与 upload 对齐：TryReserve(版本大小)
 	// 预留 → 拷贝成功后 Adjust(prev, actual)（覆盖写）/ Commit(actual)（新文件）；失败 Release()。
-	scope := h.quotaBucketFor(ownerFromRequest(r), "user")
+	// scope 按目标 user 桶 rel 解析（与 upload 同一键），子目录配额逐级检查自动生效。
+	scope := h.quotaScopeFor(ownerFromRequest(r), targetRel)
 	prev := int64(0)
 	var res *quota.Reservation
 	if scope != nil {

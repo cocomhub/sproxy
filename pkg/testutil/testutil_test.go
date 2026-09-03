@@ -6,6 +6,7 @@ package testutil
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -104,4 +105,35 @@ func TestCapture_FunctionsDoNotPanic(t *testing.T) {
 		}()
 		CaptureStderr(func() {})
 	})
+}
+
+// TestChecksumAt 验证 ChecksumAt 的分片限定校验（offset+length、空 want 跳过、错 want 拒绝）。
+func TestChecksumAt(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "f.bin")
+	content := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") // 36 字节
+	if err := os.WriteFile(f, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fh, err := os.Open(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fh.Close()
+
+	// offset=0 length=10 → sha256("0123456789")。
+	if ok, err := ChecksumAt(fh, 0, 10, "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882"); err != nil || !ok {
+		t.Fatalf("分片 0-10 应匹配: ok=%v err=%v", ok, err)
+	}
+	// offset=10 length=5 → sha256("ABCDE")（不读后续字节）。
+	if ok, err := ChecksumAt(fh, 10, 5, "f0393febe8baaa55e32f7be2a7cc180bf34e52137d99e056c817a9c07b8f239a"); err != nil || !ok {
+		t.Fatalf("分片 10-15 应匹配: ok=%v err=%v", ok, err)
+	}
+	// 错误 want。
+	if ok, err := ChecksumAt(fh, 10, 5, "abcdef"); err != nil || ok {
+		t.Fatalf("错 want 应不匹配: ok=%v err=%v", ok, err)
+	}
+	// 空 want 跳过。
+	if ok, err := ChecksumAt(fh, 99, 3, ""); err != nil || !ok {
+		t.Fatalf("空 want 应跳过: ok=%v err=%v", ok, err)
+	}
 }

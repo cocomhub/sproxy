@@ -4,8 +4,11 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -32,6 +35,12 @@ type ChunkedUploadSession struct {
 	CreatedAt      time.Time `json:"created_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
 	Completed      bool      `json:"completed"`
+
+	// TempPath 是任务 4 分块在途整文件的存储根相对路径（user 桶下，如
+	// user/.inflight-<hash16>-<upload_id>.part）。init 创建并截断（Truncate(TotalSize)），
+	// chunk 经 seek+BoundWriter 直写，complete 校验后 rename 为正式名，会话删除/过期删除。
+	// 持久化（重启后可恢复续传；恢复时按内容重新校验分片）。
+	TempPath string `json:"temp_path,omitempty"`
 
 	// Reservation 是分块上传的租户配额预留句柄（P4）。init 预留、complete Commit、
 	// 会话删除/过期 Release。不持久化（json:"-"），重启后内存预留丢失，由上游对账补齐。
@@ -137,7 +146,42 @@ func (us *UploadStore) SetStorageMgr(sm *StorageManager) {
 	us.mu.Unlock()
 }
 
-const chunkFileExt = ".chunk"
+// inflightPrefix 是任务 4 分块在途整文件临时名前缀（user 桶目标同目录）：
+// `.inflight-<sha256(正式名)前16hex>-<upload_id>.part`。不以 .__ 开头（避免被
+// ValidSegmentName 拒绝），扫描层对不以 .inflight 开头的普通文件按 user 桶配额计入，
+// 本前缀命中的在途文件随会话清理/过期删除。
+const inflightPrefix = ".inflight-"
+
+// inflightTempName 生成分块在途整文件临时名。name 为存储根相对正式路径（user/...），
+// uploadID 为会话 ID；hash 取 sha256(name) 前 8 字节（16 hex）缩短，uploadID 保证
+// 同目标多会话唯一。返回的临时名可作为单个路径段（inflightToken + uploadID 均为
+// 安全段），散列相同目标不同会话的文件名可区分。
+func inflightTempName(name, uploadID string) string {
+	h := sha256.Sum256([]byte(name))
+	return fmt.Sprintf("%s%s-%s.part", inflightPrefix, hex.EncodeToString(h[:8]), uploadID)
+}
+
+// isInflightTempName 判断 name 是否为分块在途临时文件
+// （.inflight-<hash16>-<upload_id>.part，inflightTempName 命中的完整形态）。
+// 列表/搜索按整临时名过滤（服务端内部在途文件，对外不可见），避免与用户可创建的同名前缀
+// 普通文件（如 <id>.part 形式的用户文件）误拦——严格校验整个临时名形态而非仅前缀。
+func isInflightTempName(name string) bool {
+	rest, ok := strings.CutPrefix(name, inflightPrefix)
+	if !ok {
+		return false
+	}
+	// 形态：<16hex>-<uploadID>.part（uploadID 为合法段名，可为多段拼接前的裸名）。
+	token, idPart, hasPart := strings.Cut(rest, "-")
+	if !hasPart || len(token) != 16 || !strings.HasSuffix(idPart, ".part") {
+		return false
+	}
+	for _, c := range token {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 // NewUploadStore 创建并启动 UploadStore，同时从磁盘恢复已有 session。
 // baseDir 是租户 chunk 桶的绝对路径（<root>/<owner>/chunk/，经 Tenant.Root().Abs("chunk")
@@ -392,6 +436,41 @@ func (us *UploadStore) MarkChunkReceived(uploadID string, chunkIndex int, checks
 	return nil
 }
 
+// ClearChunksReceived 把指定分块索引置为未接收（bitmap 清位 + checksum 记录清空），
+// 并持久化。任务 5 用：全文件校验失败后按 mismatch 逐分片清位——精确恢复客户端
+// 需重传的接收态（坏分片需重传 seek 覆盖，skipped 分片不受影响）。
+// index 越界/会话不存在时返回错误（不 panic）。
+func (us *UploadStore) ClearChunksReceived(uploadID string, indices []int) error {
+	ss := slices.Clone(indices)
+	slices.Sort(ss)
+	us.mu.Lock()
+	s, ok := us.sessions[uploadID]
+	if !ok {
+		us.mu.Unlock()
+		return fmt.Errorf("upload_id 不存在: %s", uploadID)
+	}
+	for _, i := range ss {
+		if i < 0 || i >= s.TotalChunks {
+			us.mu.Unlock()
+			return fmt.Errorf("chunk_index %d 超出范围 [0, %d)", i, s.TotalChunks)
+		}
+		s.ReceivedChunks[i] = false
+		s.ChunkChecksums[i] = ""
+	}
+	us.mu.Unlock()
+
+	select {
+	case <-us.stopCh:
+	default:
+		select {
+		case us.persistCh <- uploadID:
+		default:
+			us.wg.Go(func() { us.persistSession(uploadID) })
+		}
+	}
+	return nil
+}
+
 // AllChunksReceived 检查是否所有分块都已接收。
 func (us *UploadStore) AllChunksReceived(uploadID string) bool {
 	us.mu.RLock()
@@ -442,27 +521,27 @@ func (us *UploadStore) CompleteSession(uploadID string) error {
 	return nil
 }
 
-// ChunkFilePath 返回指定分块的文件路径。
-func (us *UploadStore) ChunkFilePath(uploadID string, chunkIndex int) string {
-	return filepath.Join(us.baseDir, uploadID, chunkIndexFilename(chunkIndex))
-}
+// ChunkFilePath 曾是任务 4 前独立 .chunk 文件的路径推导；改造后分块直写整临时文件，
+// 不再存在 per-chunk 文件，方法已删除（ChunkFileLocker 仍保留供遗留锁域使用）。
 
 // SessionDir 返回会话目录路径。
 func (us *UploadStore) SessionDir(uploadID string) string {
 	return filepath.Join(us.baseDir, uploadID)
 }
 
-// DeleteSession 删除会话目录及所有分块文件，并清理 fileLocks 条目防止内存泄漏。
+// DeleteSession 删除会话目录并清理在途临时文件、释放预留，最后清理 fileLocks 条目防内存泄漏。
 func (us *UploadStore) DeleteSession(uploadID string) {
 	us.mu.Lock()
 	s := us.sessions[uploadID]
 	delete(us.sessions, uploadID)
 	us.mu.Unlock()
 
-	// P4 配额：清理会话时释放未落地的预留。已完成会话的预留已被 complete Commit
-	// 消费（Commit 原子生效一次），此 Release 为空操作；未完成会话则归还 reserved。
-	// P5：storageMgr 回退预留（quota 未装配时）同样在此释放（与 Reservation 二选一）。
+	var tempRel string
 	if s != nil {
+		tempRel = s.TempPath
+		// P4 配额：清理会话时释放未落地的预留。已完成会话的预留已被 complete Commit
+		// 消费（Commit 原子生效一次），此 Release 为空操作；未完成会话则归还 reserved。
+		// P5：storageMgr 回退预留（quota 未装配时）同样在此释放（与 Reservation 二选一）。
 		if s.Reservation != nil {
 			s.Reservation.Release()
 		} else if s.StorageMgrReserved > 0 {
@@ -470,6 +549,16 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 				us.storageMgr.Release(s.StorageMgrReserved, CategoryChunked)
 			}
 			s.StorageMgrReserved = 0
+		}
+	}
+
+	// 任务 4：删除 in-flight 临时文件（在 user 桶，独立于 session 目录；tempRel 来自
+	// session.TempPath，由 init/恢复写入，经路径安全校验后删除）。
+	if s != nil && tempRel != "" {
+		if abs, ok := us.tempAbsPath(tempRel); ok {
+			if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+				us.logger.Warn("删除在途临时文件失败", "upload_id", uploadID, "error", err)
+			}
 		}
 	}
 
@@ -481,15 +570,16 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 	}
 }
 
-// LockChunkIO 获取 chunk 文件写入锁（读锁）。
-// uploadChunk 在写入 chunk 文件前调用，允许多个 uploadChunk 并发写入不同 chunk。
+// LockChunkIO 获取 chunk IO 读锁（任务 4：并发分段 seek 直写整临时文件，锁域按 uploadID
+// 划分，避免同会话 bitmap 更新/MarkChunkReceived 与 complete 读全文件间的竞态；读锁允许多
+// 分片并发写，complete 用 LockChunkMerge 写锁排他读整文件）。
 func (us *UploadStore) LockChunkIO(uploadID string) func() {
 	return us.locker.LockChunkIO(uploadID)
 }
 
-// LockChunkMerge 获取 chunk 文件合并锁（写锁）。
-// mergeOneChunk 在读取 chunk 文件前调用，排他地等待所有正在写入的 chunk 完成后才允许读取，
-// 同时阻塞新的 chunk 写入，避免读到不完整的 chunk。
+// LockChunkMerge 获取 chunk 合并写锁（排他）。
+// complete 在读取整临时文件前调用，等待所有正在写入的分片完成后才允许读取，
+// 同时阻塞新的分片写入，避免读到不完整的临时文件。
 func (us *UploadStore) LockChunkMerge(uploadID string) func() {
 	return us.locker.LockChunkMerge(uploadID)
 }
@@ -527,7 +617,7 @@ func (us *UploadStore) persistSession(uploadID string) {
 	}
 }
 
-// copySession 返回 session 的深拷贝（含两个 slice），调用方需保证持锁或持有稳定副本。
+// CopySession 返回 session 的深拷贝（含两个 slice），调用方需保证持锁或持有稳定副本。
 func copySession(s *ChunkedUploadSession) *ChunkedUploadSession {
 	cp := *s
 	cp.ReceivedChunks = make([]bool, len(s.ReceivedChunks))
@@ -535,6 +625,20 @@ func copySession(s *ChunkedUploadSession) *ChunkedUploadSession {
 	cp.ChunkChecksums = make([]string, len(s.ChunkChecksums))
 	copy(cp.ChunkChecksums, s.ChunkChecksums)
 	return &cp
+}
+
+// PersistNow 同步持久化指定 session（如 init 写入 tempPath 后立即落盘，供重启恢复）。
+// 复用 copySession 快照 + writeSessionJSON；与异步 persistSession 语义一致。
+func (us *UploadStore) PersistNow(uploadID string) error {
+	us.mu.RLock()
+	s, ok := us.sessions[uploadID]
+	if !ok {
+		us.mu.RUnlock()
+		return fmt.Errorf("upload_id 不存在: %s", uploadID)
+	}
+	snapshot := copySession(s)
+	us.mu.RUnlock()
+	return us.writeSessionJSON(snapshot)
 }
 
 // writeSessionJSON 原子写入 session.json。
@@ -609,10 +713,11 @@ func (us *UploadStore) cleanupLoop() {
 }
 
 // cleanupExpired 清理过期未完成的 session。
-// 先持锁收集过期 ID，释放锁后再逐一 os.RemoveAll，避免持锁执行 I/O。
+// 先持锁收集过期 ID，释放锁后再逐一删除临时文件 / os.RemoveAll，避免持锁执行 I/O。
 func (us *UploadStore) cleanupExpired() {
 	type expiredItem struct {
 		id                 string
+		tempRel            string
 		reservation        *quota.Reservation
 		storageMgrReserved int64
 	}
@@ -624,7 +729,7 @@ func (us *UploadStore) cleanupExpired() {
 		if !s.Completed && now.After(s.ExpiresAt) {
 			us.logger.Info("清理过期上传会话", "upload_id", id, "file_name", s.Filename, "expires_at", s.ExpiresAt)
 			delete(us.sessions, id)
-			expired = append(expired, expiredItem{id: id, reservation: s.Reservation, storageMgrReserved: s.StorageMgrReserved})
+			expired = append(expired, expiredItem{id: id, tempRel: s.TempPath, reservation: s.Reservation, storageMgrReserved: s.StorageMgrReserved})
 		}
 	}
 	us.mu.Unlock()
@@ -636,6 +741,14 @@ func (us *UploadStore) cleanupExpired() {
 			item.reservation.Release()
 		} else if item.storageMgrReserved > 0 && us.storageMgr != nil {
 			us.storageMgr.Release(item.storageMgrReserved, CategoryChunked)
+		}
+		// 任务 4：删除 in-flight 临时文件（在 user 桶，独立于 session 目录）。
+		if item.tempRel != "" {
+			if abs, ok := us.tempAbsPath(item.tempRel); ok {
+				if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+					us.logger.Warn("删除过期会话临时文件失败", "upload_id", item.id, "error", err)
+				}
+			}
 		}
 		us.locker.DeleteLock(item.id)
 		dir := filepath.Join(us.baseDir, item.id)
@@ -690,7 +803,7 @@ func (us *UploadStore) recoverSessions() {
 	}
 }
 
-// restoreSession 从磁盘恢复单个会话（解析 + 过期/完成判断 + 与 bitmap 对齐）。
+// restoreSession 从磁盘恢复单个会话（解析 + 过期/完成判断 + 临时文件分片校验）。
 func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) {
 	var session ChunkedUploadSession
 	if err := json.Unmarshal(data, &session); err != nil {
@@ -706,46 +819,143 @@ func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) 
 		us.sessions[uploadID] = &session
 		return
 	}
-	// 恢复：扫描磁盘上的 .chunk 文件，与 bitmap 对齐
-	us.reconcileChunks(&session, sessionDir)
+	// 任务 4：按临时名（user 桶在途整文件）逐分片重算校验，校准 bitmap——
+	// 内容与 checksum 表匹配的分片保留，不匹配/缺失的分片需重传（bitmap 置 false）。
+	if session.TempPath != "" {
+		us.verifyTempChunks(&session)
+	}
 	us.sessions[uploadID] = &session
 	us.logger.Info("恢复上传会话", "upload_id", uploadID, "file_name", session.Filename,
 		"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
 }
 
-// reconcileChunks 扫描磁盘上的 chunk 文件与 bitmap 对齐（处理 crash 后 bitmap 未持久化的情况）。
-func (us *UploadStore) reconcileChunks(session *ChunkedUploadSession, sessionDir string) {
-	chunkEntries, err := os.ReadDir(sessionDir)
-	if err != nil {
+// tempAbsPath 把在途临时文件的存储根相对路径（user/...，相对本租户根）派生为绝对路径。
+// baseDir 恒为 <storage_root>/<owner>/chunk（per-tenant store 只归属一个租户），
+// 其父目录即租户根；再拼 user/ 桶相对段。非 user/ 桶（被篡改/异常）返回 ok=false。
+func (us *UploadStore) tempAbsPath(tempRel string) (string, bool) {
+	if !strings.HasPrefix(tempRel, "user/") {
+		return "", false
+	}
+	tenantRoot := filepath.Dir(us.baseDir)
+	abs := filepath.Join(tenantRoot, filepath.FromSlash(tempRel))
+	// 纵深防御：clean 后必须仍在本租户根内（防 session.json 篡改逃逸）。
+	clean := filepath.Clean(abs)
+	if clean != tenantRoot && !strings.HasPrefix(clean, tenantRoot+string(filepath.Separator)) {
+		return "", false
+	}
+	return clean, true
+}
+
+// verifyTempChunks 打开在途临时文件，逐分片按 checksum 表重算校验：
+// 匹配保留 bitmap，不匹配清除（需重传）。临时文件不存在/打不开时全部清除。
+func (us *UploadStore) verifyTempChunks(session *ChunkedUploadSession) {
+	abs, ok := us.tempAbsPath(session.TempPath)
+	if !ok {
+		us.logger.Warn("恢复会话临时文件路径非法，分片全部重传", "upload_id", session.UploadID)
+		clear(session.ReceivedChunks)
 		return
 	}
+	f, err := os.Open(abs)
+	if err != nil {
+		us.logger.Warn("恢复会话临时文件不可读，分片全部重传", "upload_id", session.UploadID, "error", err)
+		clear(session.ReceivedChunks)
+		return
+	}
+	defer f.Close()
 
-	// 收集磁盘上存在的 .chunk 文件索引
-	diskChunks := make(map[int]bool)
-	for _, e := range chunkEntries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), chunkFileExt) {
+	chunkSize := session.ChunkSize
+	for i := 0; i < session.TotalChunks; i++ {
+		offset := int64(i) * chunkSize
+		want := session.ChunkChecksums[i]
+		if want == "" {
+			// 无 checksum 记录：无法校验，视为需重传（旧会话/异常状态）。
+			session.ReceivedChunks[i] = false
 			continue
 		}
-		name := strings.TrimSuffix(e.Name(), chunkFileExt)
-		var idx int
-		if _, err := fmt.Sscanf(name, "%05d", &idx); err == nil && idx >= 0 && idx < session.TotalChunks {
-			diskChunks[idx] = true
+		// 该分片的实际长度（末片短于 chunk_size），与写侧 chunkLenAt 一致。
+		length := chunkSize
+		if remaining := session.TotalSize - offset; remaining < chunkSize {
+			length = remaining
 		}
-	}
-
-	// 对齐 bitmap：磁盘上有、bitmap 为 false → 置 true（但不清除 checksum，因为无法恢复）
-	for idx := range diskChunks {
-		if !session.ReceivedChunks[idx] {
-			session.ReceivedChunks[idx] = true
-			// checksum 无法恢复，留空；下次 /upload/complete 时若客户端要求校验则会失败
+		ok, err := us.verifyChunkChecksum(f, offset, length, want)
+		if err != nil {
+			us.logger.Warn("临时文件分片校验失败，需重传", "upload_id", session.UploadID, "chunk_index", i, "error", err)
+			session.ReceivedChunks[i] = false
+			continue
+		}
+		if !ok {
+			session.ReceivedChunks[i] = false
 		}
 	}
 }
 
-func chunkIndexFilename(index int) string {
-	return fmt.Sprintf("%05d%s", index, chunkFileExt)
+// verifyChunkChecksum 从 f 的 offset 起计算 length 字节的 SHA-256 并与 want 比较。
+// 与 pkg/testutil.ChecksumAt 语义一致（分片限定校验工具层次：testutil 为通用无状态版，
+// 此处为 server 内部带 logger 版？——实际 ChecksumAt 已够用，但保留本地实现避免与
+// testutil 的强耦合，且返回错误经其中间态语义一致）。
+func (us *UploadStore) verifyChunkChecksum(f *os.File, offset, length int64, want string) (bool, error) {
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return false, err
+	}
+	lim := io.LimitReader(f, length)
+	h := sha256.New()
+	if _, err := io.Copy(h, lim); err != nil {
+		return false, err
+	}
+	return hex.EncodeToString(h.Sum(nil)) == want, nil
 }
 
+// findMismatchChunks 对临时文件逐分片 seek 重算校验，返回与保存 checksum 表不一致的
+// 分片索引（升序）。与恢复期 verifyTempChunks 相同的带长度语义（offset=i*ChunkSize、
+// length=chunkLenAt）：临时文件缺失/不可读/读取错误时全部标为 mismatch（客户端整文件重传）。
+// 仅对已接收分片（ChunkChecksums[i] 非空）做比对；未接收分片不支持（complete 前置
+// AllChunksReceived 已保证全接收，此处防御性跳过空 checksum 分片）。
+// 任务 5 I-2：重叠/越界写坏单个分片 → 该单片被精确识别为 mismatch（而非泛化 400）。
+func (us *UploadStore) findMismatchChunks(session *ChunkedUploadSession) []int {
+	abs, ok := us.tempAbsPath(session.TempPath)
+	if !ok {
+		us.logger.Warn("complete 校验临时文件路径非法，全部分片视为 mismatch", "upload_id", session.UploadID)
+		return allMismatchIndices(session)
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		us.logger.Warn("complete 校验临时文件不可读，全部分片视为 mismatch", "upload_id", session.UploadID, "error", err)
+		return allMismatchIndices(session)
+	}
+	defer f.Close()
+
+	chunkSize := session.ChunkSize
+	var mismatch []int
+	for i := 0; i < session.TotalChunks; i++ {
+		want := session.ChunkChecksums[i]
+		if want == "" {
+			continue // 未接收分片：complete 前置已保证全接收，此处防御性跳过
+		}
+		ok, err := us.verifyChunkChecksum(f, int64(i)*chunkSize, chunkLenAt(session, i), want)
+		if err != nil {
+			us.logger.Warn("complete 校验临时文件分片失败，全部分片视为 mismatch",
+				"upload_id", session.UploadID, "chunk_index", i, "error", err)
+			return allMismatchIndices(session)
+		}
+		if !ok {
+			us.logger.Warn("complete 校验分片不匹配（需重传）",
+				"upload_id", session.UploadID, "chunk_index", i)
+			mismatch = append(mismatch, i)
+		}
+	}
+	return mismatch
+}
+
+// allMismatchIndices 返回全部分片索引（0..TotalChunks-1，升序）。
+func allMismatchIndices(session *ChunkedUploadSession) []int {
+	out := make([]int, session.TotalChunks)
+	for i := range out {
+		out[i] = i
+	}
+	return out
+}
+
+// countReceived 返回 bitmap 中已置位的数量。
 func countReceived(bitmap []bool) int {
 	count := 0
 	for _, b := range bitmap {

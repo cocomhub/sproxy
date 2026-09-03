@@ -485,9 +485,102 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 		t.Fatalf("expected 507 on quota, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
-	// 预留未泄漏：507 后 alice 租户 Scope 仍只有 CreateTask 的 100 预留（归档预占已回滚）。
-	if got := env.h.quotaFor("alice").Reserved(); got != 100 {
-		t.Fatalf("507 后 alice Reserved()=%d want 100（仅 CreateTask 预留，归档预占已回滚）", got)
+	// 预留未泄漏（任务 7 新语义：创建期不再在 Scope 占位——已知大小走写盘 QuotaWriter 边写边记，
+	// 507 后无任何占用）：归档预占已回滚、云桶无残留。
+	if got := env.h.quotaBucketFor("alice", "cloud").Reserved(); got != 0 {
+		t.Fatalf("507 后 cloud 桶 Reserved()=%d want 0（创建期无占位，归档预占已回滚）", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "cloud").Usage(); got != 0 {
+		t.Fatalf("507 后 cloud 桶 Usage()=%d want 0", got)
+	}
+}
+
+// TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry 验证（审查 D）：
+// 归档文件已被外部手工删除（磁盘不存在、size<=0）时，deleteCloudArchive 回退按
+// recordArchiveUsage 登记的字节释放 archive 桶 Scope（cloud_archive_handler.go 的
+// size<=0 分支），归档桶不虚高。若删除只按磁盘 stat 释放，文件已消失时 stat 为 0
+// 将跳过 ReleaseUsage → archive 桶 committed 残留（虚高），下次周期扫描前一直失守。
+func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
+	env := newOwnerEnv(t)
+	env.setOwnerQuota("alice", 1<<30)
+	sm := NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
+	env.h.storageMgr = sm
+	mgr := NewCloudDownloadManager(env.root, sm, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}, func(owner string) *quota.Scope {
+		return env.h.quotaBucketFor(owner, "cloud")
+	})
+	env.h.cloudMgr = mgr
+
+	// 创建已完成云任务 + 落盘文件
+	task, err := mgr.CreateTask("url", "https://example.com/gone.zip", "gone.zip", 100, "alice")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	task.Status = "completed"
+	taskDir := filepath.Join(mgr.cloudDirFor("alice"), task.ID)
+	if mkErr := os.MkdirAll(taskDir, 0o755); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	if wErr := os.WriteFile(filepath.Join(taskDir, "gone.zip"), []byte("gone archive data"), 0o644); wErr != nil {
+		t.Fatal(wErr)
+	}
+
+	// alice mux 追加归档 handler（注入 alice actor ctx）
+	aliceMux := env.mux["alice"]
+	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		env.h.cloudArchiveTask(w, r)
+	})
+	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"gone.tar.gz"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	aliceMux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("创建归档应 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	archiveAbs := filepath.Join(env.root, "alice", "archive", "gone.tar.gz")
+	info, err := os.Stat(archiveAbs)
+	if err != nil {
+		t.Fatalf("归档未落盘: %v", err)
+	}
+	archiveScope := env.h.quotaBucketFor("alice", "archive")
+	regSize := info.Size()
+	if got := archiveScope.Usage(); got != regSize {
+		t.Fatalf("归档后 archive 桶 Usage()=%d want %d（=登记大小）", got, regSize)
+	}
+
+	// 手工删除归档物理文件（模拟外部清理/崩溃后文件已消失），登记仍在。
+	if err := os.Remove(archiveAbs); err != nil {
+		t.Fatalf("手工删除归档: %v", err)
+	}
+	if _, err := os.Stat(archiveAbs); !os.IsNotExist(err) {
+		t.Fatalf("归档文件应已删除, stat err=%v", err)
+	}
+
+	// deleteCloudArchive：文件已不存在（stat size=0）→ 按登记释放 archive 桶。
+	if err := env.h.deleteCloudArchive("alice", "gone.tar.gz"); err != nil {
+		t.Fatalf("deleteCloudArchive: %v", err)
+	}
+	if got := archiveScope.Usage(); got != 0 {
+		t.Fatalf("文件已不在后删除归档，archive 桶 Usage()=%d want 0（按登记释放，不虚高）", got)
+	}
+	// 登记已清除。
+	env.h.tenantMu.Lock()
+	_, stillReg := env.h.archiveUsage["alice"]["gone.tar.gz"]
+	env.h.tenantMu.Unlock()
+	if stillReg {
+		t.Fatal("删除后登记应已清除")
+	}
+	// 幂等：再次删除（登记也不存在）仍成功且桶不虚高。
+	if err := env.h.deleteCloudArchive("alice", "gone.tar.gz"); err != nil {
+		t.Fatalf("再次 deleteCloudArchive 应幂等成功: %v", err)
+	}
+	if got := archiveScope.Usage(); got != 0 {
+		t.Fatalf("再次删除后 archive 桶 Usage()=%d want 0", got)
 	}
 }
 

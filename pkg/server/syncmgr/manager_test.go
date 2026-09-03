@@ -966,3 +966,52 @@ func TestQuota_ReconcileOnFailed_Released(t *testing.T) {
 		t.Fatalf("failed 后预留配额应释放为 0，got %d", quota.Usage())
 	}
 }
+
+// newTestManagerPF 与 newTestManager 相同但启用 PerFileReserve（逐文件 guard 模式）。
+func newTestManagerPF(t *testing.T, quota *mockQuota) *Manager {
+	t.Helper()
+	if quota == nil {
+		quota = newMockQuota(0)
+	}
+	cfg := &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, PerFileReserve: true}
+	tenantRoot, listTenants := newTestTenantRoot(t.TempDir())
+	mgr := NewManager(tenantRoot, listTenants, quota, 0,
+		[]RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
+		newMockExecutor(completedResult()), discardLogger(), cfg)
+	t.Cleanup(mgr.Stop)
+	return mgr
+}
+
+// TestReconcileQuota_PerFileReserve_ReleasesPlaceholderOnly 验证逐文件 guard 模式下
+// completed 对账释放占位预留、不再按 BytesDone 补账（逐文件已等额入账，delta 对账会双计）。
+func TestReconcileQuota_PerFileReserve_ReleasesPlaceholderOnly(t *testing.T) {
+	quota := newMockQuota(0)
+	mgr := newTestManagerPF(t, quota)
+	task, _, err := mgr.SubmitAndStart(CreateRequest{Direction: "pull", Remote: "r1"})
+	if err != nil {
+		t.Fatalf("创建应成功: %v", err)
+	}
+	// 模拟逐文件 guard 已把 5 字节（1 文件）入账到的 user 桶（mockQuota 单一计数器）：
+	// 先补入 5（在 reconcile 前）。reconcile 应只释放占位 P，最终 used == 5。
+	// 注意：mock 执行器立即完成，需在驱动前补入（用新任务可等待完成后再断言更稳——
+	// 但 reconcile 在完成时读 BytesDone=5、仅释放 P，若补入 5 在 reconcile 后则被保留）。
+	// 直接用另一个并发的 mock 执行器不可行（阻塞）；这里 CreateTask 后手动触发 reconcile
+	// 更可控——但 CreateTask 不启动。改为：SubmitAndStart（自动执行一次完成）后再手动
+	// 检查 reconcile 已经把占位释放到 0（BytesDone=5 补账被 guard 语义取代）。
+	// 为确定性，这里只用 completedResult() 执行器（1 文件 5 字节），断言：
+	// 完成前 quota.Used == P（占位）；完成后 == 5（BytesDone 由 guard 语义保留，占位释放）。
+	done := waitForStatus(t, mgr, task.ID, StatusCompleted, 5*time.Second)
+	if done == nil {
+		t.Fatal("任务应完成")
+	}
+	// guard 语义：占位 P 已被释放（Release），completion 不补账；mock 里 BytesDone=5 保留。
+	// 但 mock 执行器没有真的逐文件入账——它的 BytesDone=5 是虚构的"已完成字节"。在 guard
+	// 模式 reconcile 只释放占位，因此 used = 0（没有 guard 入账）。这个断言区分"双计"：
+	// 若 reconcile 仍按 delta 补账，会把 used 从 0 拉回字节数（错误）。
+	if got := quota.Usage(); got != 0 {
+		t.Fatalf("逐文件 guard 模式 completed 后 quota.used=%d want 0（安全：guard 未真实入账则不为 0；双计会 >0）", got)
+	}
+	if done.ReservedSize != 5 {
+		t.Fatalf("ReservedSize 应记录 BytesDone=5, got %d", done.ReservedSize)
+	}
+}

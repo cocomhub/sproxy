@@ -54,7 +54,11 @@ func (p *Pool) Reserved() int64 {
 }
 
 // MaxBytes 返回本池上限（0 = 不限制）。
+// 持读锁读取：SetMaxBytes 锁写时并发读不构成 data race（PUT /api/storage/config 热调
+// 上限与并发 MaxBytes 读同时发生时）。
 func (p *Pool) MaxBytes() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.maxBytes
 }
 
@@ -86,6 +90,75 @@ func (p *Pool) newScope(path string, maxBytes int64) *Scope {
 	p.children = append(p.children, s)
 	p.mu.Unlock()
 	return s
+}
+
+// Resolve 沿 children 段树按路径段逐级下探，返回**最深匹配**子作用域（http route 式）。
+// 段序查找：每个匹配子层继续向下，直到某段无匹配子层为止；返回的节点即最长前缀命中点。
+// 若路径上的层未装配（如 /a/b/c 仅装配到 /a/b），返回已命中的最深层（文件仍受该层上限
+// 约束、committed 归集到该层）。对返回值调用 TryReserve 时，reserveUp 沿 parent 链逐层
+// 各自独立检查 maxBytes——所有层级的配额约束自动完成，调用方无需理会层级。
+// segs 为空时返回 p 自身对应的 Scope（供"桶内顶级文件"回落）。
+func (p *Pool) Resolve(segs []string) *Scope {
+	cur := p
+	for _, seg := range segs {
+		if seg == "" {
+			continue
+		}
+		child := cur.childWithSegment(seg)
+		if child == nil {
+			break
+		}
+		cur = child.pool
+	}
+	return &Scope{pool: cur}
+}
+
+// ResolvePath 把路径按 "/" 拆段后调用 Resolve（便捷版）。
+func (p *Pool) ResolvePath(path string) *Scope {
+	return p.Resolve(strings.Split(path, "/"))
+}
+
+// EnsureScope 拆段逐级下探挂载：已存在的子层复用，不存在的现建（maxBytes 应用于最终层，
+// 中间层 0 = 不限制）。返回最终段的 Scope。用于装配期把配置路径（如 user/videos/hd）
+// 展开为多层嵌套子作用域。
+func (p *Pool) EnsureScope(segs []string, maxBytes int64) *Scope {
+	cur := p
+	for i, seg := range segs {
+		if seg == "" {
+			continue
+		}
+		child := cur.childWithSegment(seg)
+		if child == nil {
+			mb := int64(0)
+			if i == len(segs)-1 {
+				mb = maxBytes
+			}
+			child = cur.newScope(seg, mb)
+		}
+		cur = child.pool
+	}
+	return &Scope{pool: cur}
+}
+
+// childWithSegment 返回 path 末段恰为 seg 的直接子层 Scope（children 段序查找）。
+// p 持有读锁时调用须注意：此处仅遍历快照读取，无并发下的结构性变更。
+func (p *Pool) childWithSegment(seg string) *Scope {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, c := range p.children {
+		if lastSegment(c.pool.path) == seg {
+			return c
+		}
+	}
+	return nil
+}
+
+// lastSegment 取路径最后一段（如 "/tenant/a/user/videos" → "videos"）。
+func lastSegment(path string) string {
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		return path[i+1:]
+	}
+	return path
 }
 
 // collect 以快照方式递归收集各层 committed 到 m。
@@ -196,13 +269,30 @@ type Scope struct {
 	pool *Pool
 }
 
-// Scope 返回该作用域下的子作用域（路径继续叠加；maxBytes 省略时 0 = 不限制）。
-func (s *Scope) Scope(path string, maxBytes ...int64) *Scope {
+// Mount 返回该作用域下的子作用域（路径继续叠加；maxBytes 省略时 0 = 不限制）。
+// 命名避开与类型同名（Scope.Scope 阅读歧义），语义即"挂载子作用域"。
+func (s *Scope) Mount(path string, maxBytes ...int64) *Scope {
 	var mb int64
 	if len(maxBytes) > 0 {
 		mb = maxBytes[0]
 	}
 	return s.pool.newScope(path, mb)
+}
+
+// Resolve 沿本作用域 children 段树按路径段逐级下探（http route 式），返回最深匹配子作用域。
+// 等价于 Pool.Resolve 在本层进行；segs 为空时返回自身。
+func (s *Scope) Resolve(segs []string) *Scope {
+	return s.pool.Resolve(segs)
+}
+
+// ResolvePath 便捷版：把路径按 "/" 拆段后 Resolve。
+func (s *Scope) ResolvePath(path string) *Scope {
+	return s.Resolve(strings.Split(path, "/"))
+}
+
+// EnsureScope 拆段逐级下探挂载到本作用域下（已存在复用，不存在现建），返回最终段 Scope。
+func (s *Scope) EnsureScope(segs []string, maxBytes int64) *Scope {
+	return s.pool.EnsureScope(segs, maxBytes)
 }
 
 // TryReserve 预留 estimate（仅增加 reserved，不落 committed）。失败返回 ErrStorageFull。
@@ -233,7 +323,7 @@ func (s *Scope) Usage() int64 { return s.pool.Usage() }
 func (s *Scope) Reserved() int64 { return s.pool.Reserved() }
 
 // MaxBytes 返回上限（0 = 不限制）。
-func (s *Scope) MaxBytes() int64 { return s.pool.maxBytes }
+func (s *Scope) MaxBytes() int64 { return s.pool.MaxBytes() }
 
 // Available 返回可用额度 = max − (committed+reserved)；max<=0 时返回 MaxInt64。
 func (s *Scope) Available() int64 { return s.pool.available() }

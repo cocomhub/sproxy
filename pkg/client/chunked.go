@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,6 +53,10 @@ type ChunkedUploadResult struct {
 	FileChecksum string `json:"file_checksum,omitempty"`
 	TotalChunks  int    `json:"total_chunks,omitempty"`
 	Message      string `json:"message,omitempty"`
+	// MismatchChunks 是服务端 complete 全文件校验失败后逐分片 seek 重算出的坏分片索引
+	// （协议字段 mismatch_chunks，客户端据此只重传这些分片而不清空整个会话）。服务器端
+	// 任务 5 起返回；旧服务端无此字段（保持省略）。
+	MismatchChunks []int `json:"mismatch_chunks,omitempty"`
 }
 
 // chunkedInitRequest 分块上传初始化请求体。
@@ -200,10 +205,59 @@ func newChunkedUploader(opts chunkedUploaderOpts) *ChunkedUploader {
 	}
 }
 
-// run 执行分块上传循环，上传指定索引列表的分块，然后完成上传。
+// completeMaxAttempts 是 complete 遇 mismatch_chunks 后的最大重试次数。
+// 每次重试只重传上次报告的分片；若服务端持续报告新 mismatch（临时文件被并发破坏等），
+// 达到上限后返回错误（含最后一次报告的 mismatch 分片，调用方决策）。
+const completeMaxAttempts = 3
+
+// run 执行分块上传循环：先上传指定索引列表的分块，再 complete。若 complete 返回
+// mismatch_chunks，仅重传这些分片后再次 complete（有界重试）。
 func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*ChunkedUploadResult, error) {
 	if u.concurrency <= 0 {
 		u.concurrency = 1
+	}
+	u.uploadChunkIndices(ctx, chunkIndices)
+
+	var lastResult *ChunkedUploadResult
+	for range completeMaxAttempts {
+		if u.failed.Load() {
+			return nil, fmt.Errorf("上传失败：部分分块上传失败，可使用 --resume 续传")
+		}
+		completeResult, err := u.completeOnce(ctx)
+		if err != nil {
+			return nil, err
+		}
+		lastResult = completeResult
+		if completeResult.Success {
+			break
+		}
+		if len(completeResult.MismatchChunks) == 0 {
+			// 非 mismatch 类失败（会话过期/校验失败等）→ 直接失败，不盲目重传。
+			return nil, fmt.Errorf("文件合并失败: %s", completeResult.Message)
+		}
+		// mismatch：只重传服务端报告的分片（seek 覆盖），再 complete。
+		u.client.logger.WarnContext(ctx, "complete 返回 mismatch，重传坏分片",
+			"upload_id", shortid.ShortHash(u.uploadID), "mismatch", completeResult.MismatchChunks)
+		u.uploadChunkIndices(ctx, completeResult.MismatchChunks)
+	}
+	if lastResult == nil || !lastResult.Success {
+		if lastResult != nil && len(lastResult.MismatchChunks) > 0 {
+			return nil, fmt.Errorf("分块上传未完成：仍有 %d 个分片校验失败（已达重试上限）: %s",
+				len(lastResult.MismatchChunks), lastResult.Message)
+		}
+		return nil, fmt.Errorf("文件合并失败")
+	}
+
+	u.client.logger.InfoContext(ctx, "分块上传完成", "file_name", u.filename,
+		"checksum", shortid.ShortHash(u.checksum))
+	return lastResult, nil
+}
+
+// uploadChunkIndices 把指定分片索引列表经并发池上传（失败经 uploadChunkWithRetry 退避重试）。
+// failed 置位后跳过剩余分片。
+func (u *ChunkedUploader) uploadChunkIndices(ctx context.Context, chunkIndices []int) {
+	if len(chunkIndices) == 0 {
+		return
 	}
 	sem := make(chan struct{}, u.concurrency)
 	var wg sync.WaitGroup
@@ -220,21 +274,22 @@ func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*Chunked
 		}
 		sem <- struct{}{}
 		wg.Add(1)
-
 		go func(chunkIdx int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			u.uploadChunkWithRetry(ctx, chunkIdx)
 		}(idx)
 	}
-
 	wg.Wait()
+}
 
-	if u.failed.Load() {
-		return nil, fmt.Errorf("上传失败：部分分块上传失败，可使用 --resume 续传")
-	}
-
-	// 完成上传
+// completeOnce 发送一次 /upload/complete 并解析响应（含 mismatch_chunks）。
+//
+// I-1（任务 6）：协议层统一「先读响应体再判状态」——无论状态码是否 2xx，都先读响应体
+// 解析 JSON；解析出 MismatchChunks 即返回结果（哪怕 success=false），绝不因非 JSON body
+// 或传输层把非 2xx 提早判错而丢失 MismatchChunks。非 JSON body（旧服务端/代理 500 纯文本）
+// 才返回携带 body 文本的确定性错误，调用方可判错决策。
+func (u *ChunkedUploader) completeOnce(ctx context.Context) (*ChunkedUploadResult, error) {
 	completeBody, _ := json.Marshal(chunkedCompleteRequest{UploadID: u.uploadID})
 	resp, err := u.client.doRequest(ctx, "POST", "/upload/complete", bytes.NewReader(completeBody), http.Header{
 		headerContentType: {"application/json"},
@@ -244,17 +299,24 @@ func (u *ChunkedUploader) run(ctx context.Context, chunkIndices []int) (*Chunked
 	}
 	defer resp.Body.Close()
 
+	// 先读限长 body（防恶意超大响应），再尝试 JSON 解析。若解析成功——即便 status 非 2xx
+	// 或 success=false——也返回结果，让调用方（run）基于 Success/MismatchChunks/Message
+	// 决策，而不是在此判定错误（否则 mismatch 信息丢失）。
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var completeResult ChunkedUploadResult
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&completeResult); err != nil {
-		return nil, fmt.Errorf("解析 complete 响应失败: %w", err)
+	if json.Unmarshal(raw, &completeResult) == nil {
+		// 解析成功：返回结果（MismatchChunks/Message 均保留）。
+		return &completeResult, nil
 	}
-
-	if !completeResult.Success {
-		return nil, fmt.Errorf("文件合并失败: %s", completeResult.Message)
+	// 非 JSON body：确定性错误，Message 携带原始 body（截断），供调用方判错。
+	msg := strings.TrimSpace(string(raw))
+	if len(msg) > 512 {
+		msg = msg[:512] + "..."
 	}
-
-	u.client.logger.InfoContext(ctx, "分块上传完成", "file_name", u.filename, "checksum", shortid.ShortHash(u.checksum))
-	return &completeResult, nil
+	if msg == "" {
+		msg = "空响应体"
+	}
+	return &completeResult, fmt.Errorf("解析 complete 响应失败（HTTP %d）: %s", resp.StatusCode, msg)
 }
 
 // uploadChunkWithRetry 在 goroutine 中执行分块上传，包含重试逻辑。

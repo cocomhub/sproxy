@@ -364,6 +364,7 @@ func (h *Handlers) cloudGetGroup(w http.ResponseWriter, r *http.Request) {
 	for _, tid := range group.TaskIDs {
 		if t, exists := h.cloudMgr.tasks[tid]; exists && ownerVisible(t.Owner, owner) {
 			c := *t
+			c.qw = nil // 快照不携带下载中 QW 句柄（与 cloud_download.go 四处快照一致）
 			tasks = append(tasks, &c)
 		}
 	}

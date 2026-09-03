@@ -87,6 +87,10 @@ type ChunkCompleteResponse struct {
 	Filename     string `json:"filename,omitempty"`
 	FileChecksum string `json:"file_checksum,omitempty"`
 	Message      string `json:"message,omitempty"`
+	// MismatchChunks 是全文件校验失败（temp 名内容与 file_checksum 不符）时逐分片 seek
+	// 重算后的坏分片索引列表（升序）。客户端据此只重传这些分片再 complete；重传后再次
+	// complete 仍失败则继续收到更新后的列表。空（nil/无此字段）表示非 mismatch 类失败。
+	MismatchChunks []int `json:"mismatch_chunks,omitempty"`
 }
 
 func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {

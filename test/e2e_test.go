@@ -202,6 +202,15 @@ func renameFile(t *testing.T, baseURL, from, to, checksum string) (int, []byte) 
 // and waits for it to be healthy. Returns the base URL and a cleanup function.
 func startSPROXY(t *testing.T) (string, func()) {
 	t.Helper()
+	baseURL, _, cleanup := startSPROXYImpl(t, "")
+	return baseURL, cleanup
+}
+
+// startSPROXYImpl 是 startSPROXY 的内部实现：extraConfig 为追加到临时配置文件的额外
+// YAML 段（如 owner_quotas / bucket_limits），供配额 E2E 测试注入；同时返回 uploadsDir
+// 供磁盘残留断言（507 后无文件落盘）。extraConfig 为空时行为与 startSPROXY 完全一致。
+func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	binName := "sproxy"
@@ -241,6 +250,9 @@ func startSPROXY(t *testing.T) (string, func()) {
 	// e2eTestAK 为 sk-<hex>（2 段），accessKeyMesh 解析 mesh_id 为空字符串；
 	// 服务端 access_keys 不配 mesh_id（默认空）→ 两端 HKDF 派生参数一致。
 	configContent := fmt.Sprintf("tls:\n  enabled: false\ncloud_download_allow_private: true\naccess_keys:\n  - key: %q\n    secret: %q\n", e2eTestAK, e2eTestSK)
+	if extraConfig != "" {
+		configContent += extraConfig
+	}
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("write temp config: %v", err)
 	}
@@ -309,7 +321,7 @@ func startSPROXY(t *testing.T) (string, func()) {
 		}
 	}
 
-	return baseURL, cleanup
+	return baseURL, uploadsDir, cleanup
 }
 
 // ---- E2E tests ----

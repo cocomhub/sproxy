@@ -619,3 +619,73 @@ func TestConfig_VirtualSubnet_Validate(t *testing.T) {
 		t.Fatal("IPv6 子网应被 Validate 拒绝（虚拟 IP 分配仅支持 IPv4）")
 	}
 }
+
+// TestConfig_BucketLimits_Default 验证 BucketLimits 默认值为非 nil 空 map
+// （满足 len(c.BucketLimits)==0 的判断，round-trip 后不 panic）。
+func TestConfig_BucketLimits_Default(t *testing.T) {
+	c := Default()
+	if c.BucketLimits == nil {
+		t.Fatal("BucketLimits 默认应为非 nil 空 map（非 nil 可被 map 判断/访问复用）")
+	}
+	if len(c.BucketLimits) != 0 {
+		t.Fatalf("BucketLimits 默认应空 map, got %d entries", len(c.BucketLimits))
+	}
+}
+
+// TestLoadFromProvider_BucketLimits 验证 YAML 解析 bucket_limits 配置（页面在 briefs 中已明确字段名）。
+// 任务 8 起：功能桶根键（如 "cloud"）与 quotaBucketNames 重叠被 Validate 显式拒绝（防
+// 覆盖功能桶上限），此处用合法子目录键验证解析 + 拒绝重叠的回归。
+func TestLoadFromProvider_BucketLimits(t *testing.T) {
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr": ":18083",
+		"bucket_limits": map[string]any{
+			"user/videos/hd": int64(10485760),
+			"user/archive":   int64(1 << 30),
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if got := cfg.BucketLimits["user/videos/hd"]; got != 10485760 {
+		t.Fatalf("BucketLimits[user/videos/hd]=%d want 10485760", got)
+	}
+	if got := cfg.BucketLimits["user/archive"]; got != 1<<30 {
+		t.Fatalf("BucketLimits[user/archive]=%d want %d", got, 1<<30)
+	}
+	// 功能桶根键与 quotaBucketNames 重叠 → 校验失败（C 任务 2 放行条件 3）。
+	if _, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr":          ":18083",
+		"bucket_limits": map[string]any{"cloud": int64(1 << 30)},
+	}}); err == nil || !strings.Contains(err.Error(), "与功能桶根重叠") {
+		t.Fatalf("bucket_limits 键 cloud 与功能桶根重叠应被拒绝, got %v", err)
+	}
+}
+
+// TestConfig_Validate_BucketLimits_KeyValidation 验证 bucket_limits 路径键合法性校验
+// （C 任务 2 放行条件 2）：拒绝 .. / 绝对路径 / 前导或尾部斜杠 / 空段 / 空串 /
+// 非 user 首段（分层配额仅支持 user 桶子目录）；合法 user 子目录键通过；负上限拒绝。
+func TestConfig_Validate_BucketLimits_KeyValidation(t *testing.T) {
+	badKeys := []string{
+		"", "..", "../escape", "user/../x", "user//x", "/user/x", "user/x/",
+		"user/.", "C:/abs", `user\videos`, "videos/hd", "cloud/x",
+	}
+	for _, k := range badKeys {
+		c := Default()
+		c.BucketLimits = map[string]int64{k: 100}
+		if err := c.Validate(); err == nil {
+			t.Fatalf("bucket_limits 键 %q 应被拒绝, got nil", k)
+		}
+	}
+	// 合法子目录键通过（首段必须为 user；段名全部合法）。
+	c := Default()
+	c.BucketLimits = map[string]int64{"user/ok/deep": 50, "user/videos:en/hd": 30}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("合法 bucket_limits 键不应被拒绝: %v", err)
+	}
+	// 负上限拒绝。
+	c = Default()
+	c.BucketLimits = map[string]int64{"user/x": -5}
+	if err := c.Validate(); err == nil {
+		t.Fatal("bucket_limits 负上限应被拒绝")
+	}
+}

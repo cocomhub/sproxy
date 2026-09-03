@@ -8,6 +8,7 @@ package server
 // ScanAndRecalculate + reconcileQuotaScopes 把磁盘按租户桶归集校准进对应 Scope（Adjust）。
 
 import (
+	"bytes"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -116,6 +117,67 @@ func TestRegisterRoutes_StartupReconcilesQuotaScopes(t *testing.T) {
 	}
 }
 
+// TestRegisterRoutes_StartupReconcilesQuotaScopes_WithBucketLimits 验证（审查 D）startup
+// 装配 bucket_limits 回归：
+//  1. RegisterRoutes 装配后按 BucketLimits 建精确路径子 Scope（quotaBucketFor 命中、
+//     MaxBytes=100），不因子目录未发生任何写而缺失；
+//  2. 写路径超子目录上限（user/videos/hd 100B）但满足租户总上限（OwnerQuotas 200）→ 200
+//     （写路径仍按 user 桶聚合，不被 bucket_limits 子 Scope 截断）；
+//  3. 写路径超租户总上限 → 507（owner 兜底仍生效），且 user 桶不泄漏。
+func TestRegisterRoutes_StartupReconcilesQuotaScopes_WithBucketLimits(t *testing.T) {
+	storageRoot := t.TempDir()
+	cfg := Default()
+	cfg.StorageRoot = storageRoot
+	cfg.MaxStorageBytes = 1024 * 1024
+	cfg.OwnerQuotas = map[string]int64{"anonymous": 200}
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	mux := http.NewServeMux()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux: mux, CfgPtr: &cfgPtr, Version: "t", BuildAt: "t",
+		Logger: testLogger(), AuditLogger: testLogger(),
+	})
+	t.Cleanup(func() { _ = h.Close() })
+
+	// 1) bucket_limits 精确路径子 Scope 已装配（startup 回归）：非 nil、上限 100。
+	subScope := h.quotaBucketFor("anonymous", "user/videos/hd")
+	if subScope == nil {
+		t.Fatal("RegisterRoutes 装配后 quotaBucketFor(anonymous, user/videos/hd)=nil（bucket_limits 未装配？）")
+	}
+	if got := subScope.MaxBytes(); got != 100 {
+		t.Fatalf("bucket_limits 子目录 Scope MaxBytes=%d want 100", got)
+	}
+
+	// 写路径 mux（注入 actor）。
+	umux := actorUploadDeleteMux(h, "anonymous")
+
+	// 2) 上传 140 字节（>子目录上限 100，但 140<租户总上限 200）→ 200（写路径不截断）。
+	code, resp := uploadAsPath(t, umux, "user/videos/hd/big.txt", bytes.Repeat([]byte("a"), 140))
+	if code != http.StatusOK {
+		t.Fatalf("超子目录上限但满足租户总上限应 200, got %d: %s", code, resp)
+	}
+	if got := h.quotaBucketFor("anonymous", "user").Usage(); got != 140 {
+		t.Fatalf("上传 140 后 user 桶 Usage()=%d want 140", got)
+	}
+
+	// 3) 再上传 140 字节 → user 桶累计 280 > 租户总上限 200 → 507（owner 兜底仍生效）。
+	code2, resp2 := uploadAsPath(t, umux, "user/videos/hd/big2.txt", bytes.Repeat([]byte("b"), 140))
+	if code2 != http.StatusInsufficientStorage {
+		t.Fatalf("累计超租户总上限应 507, got %d: %s", code2, resp2)
+	}
+	if got := h.quotaBucketFor("anonymous", "user").Usage(); got != 140 {
+		t.Fatalf("507 后 user 桶 Usage()=%d want 140（不泄漏）", got)
+	}
+	if got := h.quotaBucketFor("anonymous", "user").Reserved(); got != 0 {
+		t.Fatalf("507 后 user 桶 Reserved()=%d want 0（不泄漏）", got)
+	}
+	// 写路径不接入子 Scope：子目录子 Scope 始终未记账（0）。
+	if got := subScope.Usage(); got != 0 {
+		t.Fatalf("写路径不应接入子目录子 Scope（Usage()=%d want 0）", got)
+	}
+}
+
 // mustWriteFile 写 size 字节的文件到 path（自动建目录）。
 func mustWriteFile(t *testing.T, path string, size int) {
 	t.Helper()
@@ -125,4 +187,83 @@ func mustWriteFile(t *testing.T, path string, size int) {
 	if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestReconcile_Subdir_NoDoubleCount 验证 bucket_limits 子目录 reconcile 防双计：
+// 磁盘按段树归集功能桶总量 + 子目录键，先深后浅校准——user 桶收敛到磁盘总量、
+// 子目录收敛到各自磁盘字节，祖先不双计（扫描后 Scope Usage 与磁盘一致）。
+func TestReconcile_Subdir_NoDoubleCount(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100, "user/videos/4k": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 500}
+	env.h.cfgPtr.Store(cfg)
+
+	// 磁盘既有占用（模拟重启后）：user/videos/hd 30 + user/videos/4k 40 + user 根 50 = 120。
+	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "videos", "hd", "a.mkv"), 30)
+	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "videos", "4k", "b.mkv"), 40)
+	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "root.txt"), 50)
+
+	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm.SetReconciler(env.h.reconcileQuotaScopes)
+	if err := sm.ScanAndRecalculate(); err != nil {
+		t.Fatalf("ScanAndRecalculate: %v", err)
+	}
+
+	// 功能桶 user 收敛到磁盘总量 120。
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 120 {
+		t.Fatalf("user 桶 Usage()=%d want 120（磁盘总量）", got)
+	}
+	// 子目录各自收敛（不双计到父）。
+	if got := env.h.quotaBucketFor("alice", "user/videos/hd").Usage(); got != 30 {
+		t.Fatalf("hd 子目录 Usage()=%d want 30", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "user/videos/4k").Usage(); got != 40 {
+		t.Fatalf("4k 子目录 Usage()=%d want 40", got)
+	}
+	// 租户聚合不双计：= 磁盘总量 120。
+	if got := env.h.quotaFor("alice").Usage(); got != 120 {
+		t.Fatalf("租户 Usage()=%d want 120（user 120=hd30+4k40+root50，无双计）", got)
+	}
+	// 未配置前缀不建键（user/music 文件不归到任何子目录键）。
+	if got := env.h.quotaBucketFor("alice", "user/videos").Usage(); got != 70 {
+		t.Fatalf("user/videos 中间层 Usage()=%d want 70（=hd30+4k40 聚合）", got)
+	}
+}
+
+// TestReconcile_Subdir_SkipPropagates 验证子层在途预留时父层整体跳过（双计保护）：
+// user/videos/hd 有未 Commit 预留 → 该键及其父链（user）跳过校准，Scope 保持预留前状态。
+func TestReconcile_Subdir_SkipPropagates(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 500}
+	env.h.cfgPtr.Store(cfg)
+
+	// 磁盘已有 hd 30；Scope 上有 hd 在途预留 20（未 Commit）。
+	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "videos", "hd", "a.mkv"), 30)
+	hd := env.h.quotaBucketFor("alice", "user/videos/hd")
+	rr, err := hd.TryReserve(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm.SetReconciler(env.h.reconcileQuotaScopes)
+	if err := sm.ScanAndRecalculate(); err != nil {
+		t.Fatalf("ScanAndRecalculate: %v", err)
+	}
+
+	// 子层在途预留 → hd 与 user 均跳过校准（不把 reserved partial 双计为 committed）；
+	// hd committed 仍 0，user committed 仍 0。
+	if got := hd.Usage(); got != 0 {
+		t.Fatalf("hd Usage()=%d want 0（在途预留跳过）", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 0 {
+		t.Fatalf("user Usage()=%d want 0（子层 skip 传播到父层）", got)
+	}
+	if got := hd.Reserved(); got != 20 {
+		t.Fatalf("hd Reserved()=%d want 20（预留保留）", got)
+	}
+	rr.Release()
 }

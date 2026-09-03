@@ -10,11 +10,13 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"gopkg.in/yaml.v3"
@@ -256,6 +258,12 @@ type Config struct {
 	// "*" 为默认值（未显式列出的 owner 用此值）；0 = 不限制。
 	// 启动装配时按此创建各租户的配额 Scope（quotaFor 懒创建）。
 	OwnerQuotas map[string]int64 `yaml:"owner_quotas" mapstructure:"owner_quotas"`
+	// BucketLimits 是功能桶/子目录配额上限（字节），key 为相对租户根路径
+	// （如 "user/videos/hd" → <tenant>/user/videos/hd 下字节上限；也支持功能桶根
+	// "cloud"）。0 = 该路径不单独限制（仍受租户总 owner_quotas 与全局
+	// max_storage_bytes 兜底）。启动装配时按此创建路径子 Scope（quotaBucketFor 懒建）；
+	// 仅装配期消费，SIGHUP 后不重建 → bucket_limits 修改需重启进程。
+	BucketLimits map[string]int64 `yaml:"bucket_limits" mapstructure:"bucket_limits"`
 	// MaxUploadBytes 已移至 internal/size.UploadBodyLimit（1 GiB 硬限制），不可配置。
 	// MaxChunkUploadBytes 已移至 internal/size.DefaultChunkBodyLimit（64 MiB 硬限制），不可配置。
 	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`
@@ -326,6 +334,9 @@ func Default() *Config {
 	return &Config{
 		Addr:        ":18083",
 		StorageRoot: "./storage",
+		// OwnerQuotas/BucketLimits 默认空 map（非 nil，便于 map 判断/访问复用）。
+		OwnerQuotas:  map[string]int64{},
+		BucketLimits: map[string]int64{},
 		ServerTimeouts: ServerTimeouts{
 			Shutdown: 30 * time.Second,
 		},
@@ -475,6 +486,52 @@ func (c *Config) Validate() error {
 		case PermissionRead, PermissionWrite, "":
 		default:
 			return fmt.Errorf("api_keys[%d].permission=%q 无效，仅允许 %q 或 %q", i, k.Permission, PermissionRead, PermissionWrite)
+		}
+	}
+	// bucket_limits 校验（任务 2 放行条件 2/3）：
+	//   - 键是相对租户根路径（如 user/videos/hd），拒绝 .. / 绝对路径 / 前导斜杠 /
+	//     空段 / 空串 / 尾部斜杠——防拼出越界或歧义路径子 Scope（quotaBucketFor 按
+	//     filepath.ToSlash(path) 建键，装配期校验与消费保持一致语义）；
+	//   - 与功能桶白名单（quotaBucketNames）重叠显式拒绝（fail-closed）：功能桶根上限
+	//     恒 0（不单独限制，租户总上限单一执行）。若允许 "user:500" 覆盖功能桶子 Scope
+	//     上限，装配顺序（先功能桶 0 后 BucketLimits 500）会做成"user 桶整体 500B 上限"，
+	//     与"仅子目录限流"预期相反，且覆盖绕过静默不可查——配置即拒绝，防脚枪。
+	for path, limit := range c.BucketLimits {
+		n := strings.TrimSpace(path)
+		bad := func() bool { // 键合法性：非空、非绝对（/ 或盘符）、非前导/尾部斜杠、无空段/.. 段
+			if n == "" || strings.HasPrefix(n, "/") || strings.HasSuffix(n, "/") {
+				return true
+			}
+			if len(n) >= 2 && n[1] == ':' {
+				return true // Windows 盘符（C:/x、C:foo）视为绝对路径
+			}
+			if strings.Contains(n, `\`) {
+				return true // 协议路径键恒用 /，拒绝反斜杠（避免跨平台歧义）
+			}
+			for seg := range strings.SplitSeq(n, "/") {
+				if seg == "" || seg == "." || seg == ".." {
+					return true
+				}
+			}
+			return false
+		}
+		if bad() {
+			return fmt.Errorf("bucket_limits 键 %q 非法：必须为相对租户根路径（如 user/videos/hd），不允许空、前导/尾部斜杠或 .. 段", path)
+		}
+		if !storage.ValidSegmentName(segNameOfBucketPath(n)) {
+			return fmt.Errorf("bucket_limits 键 %q 含非法段（拒绝空/绝对/..、.__ 魔法前缀、Windows 保留名与非法字符）", path)
+		}
+		if slices.Contains(quotaBucketNames, n) {
+			return fmt.Errorf("bucket_limits 键 %q 与功能桶根重叠：功能桶根上限由租户总 owner_quotas 单一执行，不支持单独 bucket_limits 覆盖", path)
+		}
+		// 键首段必须为 "user"（分层配额仅挂 user 桶 children 下）。cloud/archive/chunk/version
+		// 桶内无用户子目录目录（archive/<name>、cloud/<taskID>），对它们配子目录永不生效，
+		// 配置即拒绝防误导（fail-closed）。
+		if first, _, ok := strings.Cut(n, "/"); !ok || first != "user" {
+			return fmt.Errorf("bucket_limits 键 %q 非法：分层配额仅支持 user 桶子目录（如 user/videos/hd），其余功能桶无子目录结构", path)
+		}
+		if limit < 0 {
+			return fmt.Errorf("bucket_limits[%q] 上限 %d 非法：配额上限不能为负", path, limit)
 		}
 	}
 	// access_keys 校验（I-1/I-2）：Key 非空、Key 唯一、Secret 为 64 hex（32B）、

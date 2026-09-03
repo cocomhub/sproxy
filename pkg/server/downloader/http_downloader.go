@@ -149,6 +149,13 @@ func (d *HTTPDownloader) finalizeDownload(partialPath, destPath string, modTime 
 // 调用方应在调用前通过 ValidateURLHost 校验 URL 安全性。
 // http.Client 的 CheckRedirect 提供额外的防御层。
 func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath string, onProgress ProgressFunc) (*Result, error) {
+	return d.DownloadWithWriter(ctx, source, destPath, onProgress, nil)
+}
+
+// DownloadWithWriter 与 Download 相同，但允许注入 SinkFactory 包装写盘记账
+// （nil 时不包装，等同 Download）。sinkFactory 在每次写盘会话（全量/续传/收尾）构造；
+// 创建失败返回错误且不可重试。
+func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory) (*Result, error) {
 	// 应用整体超时配置
 	if d.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -187,7 +194,7 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 	if existingSize > 0 {
 		switch resp.StatusCode {
 		case http.StatusPartialContent:
-			result, rerr := d.handleRangeResume(ctx, resp, partialPath, destPath, existingSize, cachedETag, onProgress)
+			result, rerr := d.handleRangeResume(ctx, resp, partialPath, destPath, existingSize, cachedETag, onProgress, sinkFactory)
 			if !errors.Is(rerr, errRangeMismatch) {
 				return result, rerr
 			}
@@ -197,7 +204,7 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 			_ = resp.Body.Close()
 			_ = os.Remove(partialPath)
 			_ = os.Remove(etagPath(partialPath))
-			return d.downloadFull(ctx, source, destPath, onProgress)
+			return d.writeFull(ctx, source, destPath, onProgress, sinkFactory, 0, "")
 
 		case http.StatusOK:
 			// 服务端不支持 Range（或 If-Range 验证失败导致回退 200），
@@ -228,7 +235,7 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 			_ = resp.Body.Close()
 			_ = os.Remove(partialPath)
 			_ = os.Remove(etagPath(partialPath))
-			return d.downloadFull(ctx, source, destPath, onProgress)
+			return d.writeFull(ctx, source, destPath, onProgress, sinkFactory, 0, "")
 
 		default:
 			_, _ = io.Copy(io.Discard, resp.Body)
@@ -242,19 +249,18 @@ func (d *HTTPDownloader) Download(ctx context.Context, source string, destPath s
 		return nil, d.statusError(resp.StatusCode)
 	}
 
-	return d.writeFullBody(ctx, resp, destPath, onProgress)
+	return d.writeFullBody(ctx, resp, destPath, onProgress, sinkFactory)
 }
 
-// downloadFull 发起不带 Range 的全量下载（续传信息不一致时回退使用）。
-func (d *HTTPDownloader) downloadFull(ctx context.Context, source, destPath string, onProgress ProgressFunc) (*Result, error) {
-	resp, err := d.doGet(ctx, source, 0, "")
+// writeFull 执行不带 Range 的全量下载（已知 totalSize 或续传信息不一致时回退使用）。
+func (d *HTTPDownloader) writeFull(ctx context.Context, source, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory, fromRange int64, ifRange string) (*Result, error) {
+	resp, err := d.doGet(ctx, source, fromRange, ifRange)
 	if err != nil {
 		return nil, err
 	}
 	if err2 := d.validateAfterDo(resp); err2 != nil {
 		return nil, err2
 	}
-	// 在 defer 前包 idleReadCloser，使正常路径的 Close 能停止空闲定时器
 	resp.Body = newIdleReadCloser(resp.Body, d.IdleTimeout)
 	defer resp.Body.Close()
 
@@ -262,7 +268,7 @@ func (d *HTTPDownloader) downloadFull(ctx context.Context, source, destPath stri
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, d.statusError(resp.StatusCode)
 	}
-	return d.writeFullBody(ctx, resp, destPath, onProgress)
+	return d.writeFullBody(ctx, resp, destPath, onProgress, sinkFactory)
 }
 
 // doGet 发起 GET 请求；existingSize>0 时携带 Range 和 If-Range 头。
@@ -318,7 +324,8 @@ func (d *HTTPDownloader) statusError(code int) error {
 
 // writeFullBody 将 200 响应体写入 .partial 文件并在成功后原子重命名。
 // 失败时保留 .partial，供下一次 Range 续传复用（避免中断后全量重下）。
-func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response, destPath string, onProgress ProgressFunc) (*Result, error) {
+// sinkFactory 非 nil 时包装写盘记账（QuotaSink）；会话终了无论成败都回调 Finish。
+func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory) (*Result, error) {
 	// 从 Last-Modified 响应头提取原始文件修改时间
 	var modTime time.Time
 	if lm := resp.Header.Get("Last-Modified"); lm != "" {
@@ -343,15 +350,22 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	}
 	defer f.Close()
 
-	h := sha256.New()
-	tee := io.TeeReader(resp.Body, h)
-
 	var totalSize int64
 	if resp.ContentLength > 0 {
 		totalSize = resp.ContentLength
 	} else {
 		totalSize = -1
 	}
+
+	// 可选写盘记账 sink（cloud QuotaWriter）；创建失败不可重试（配额满）。
+	sink, fin, wrapErr := d.wrapSink(f, totalSize, sinkFactory, false)
+	if wrapErr != nil {
+		return nil, wrapErr
+	}
+	done := func(success bool, oldSize int64) { fin(success, oldSize) }
+
+	h := sha256.New()
+	tee := io.TeeReader(resp.Body, h)
 
 	// 写入带进度回调的文件
 	const copyBufferSize = 32 * 1024
@@ -360,8 +374,9 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	for {
 		n, readErr := tee.Read(buf)
 		if n > 0 {
-			if _, err := f.Write(buf[:n]); err != nil {
-				// 写入失败（磁盘问题）：保留已写部分，错误不可重试
+			if _, err := sink.Write(buf[:n]); err != nil {
+				// 写失败（磁盘/配额满）：保留已写部分，错误不可重试
+				done(false, 0)
 				return nil, fmt.Errorf("write file: %w", err)
 			}
 			downloaded += int64(n)
@@ -374,11 +389,13 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 				break
 			}
 			// 读取失败（网络/超时）：保留 .partial 供续传，可重试
+			done(false, 0)
 			return nil, retryablef("read body: %w", readErr)
 		}
 	}
 
 	if err := f.Close(); err != nil {
+		done(false, 0)
 		return nil, fmt.Errorf("close partial file: %w", err)
 	}
 
@@ -395,15 +412,38 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 		}
 	}
 	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
+		done(false, 0)
 		return nil, err
 	}
+	// 落定成功：释放未用 reserve + 覆盖写 ReleaseUsage(oldSize=0)。
+	done(true, 0)
 	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime, ETag: etag}, nil
 }
+
+// wrapSink 用 sinkFactory 包装写盘 writer 并返回 sink 与其终态回调。
+// sinkFactory 为 nil 时返回直写 sink（no-op，无需记账）。创建失败返回错误。
+// resume 为 true 表示在既有 .partial 上追加（增量），false 表示新建/截断重建。
+func (d *HTTPDownloader) wrapSink(w io.Writer, contentLength int64, sinkFactory SinkFactory, resume bool) (QuotaSink, func(success bool, oldSize int64), error) {
+	if sinkFactory == nil {
+		return &rawSink{w: w}, func(bool, int64) {}, nil
+	}
+	sink, err := sinkFactory(w, contentLength, resume)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create quota sink: %w", err)
+	}
+	return sink, sink.Finish, nil
+}
+
+// rawSink 是 sinkFactory 为 nil 时的直写 no-op sink。
+type rawSink struct{ w io.Writer }
+
+func (r *rawSink) Write(p []byte) (int, error) { return r.w.Write(p) }
+func (r *rawSink) Finish(bool, int64)          {}
 
 // handleRangeResume 处理 Range 续传场景：追加写入部分文件并校验。
 // 当服务端返回的 Content-Range 与本地部分文件不一致时返回 errRangeMismatch，
 // 由调用方回退全量下载。
-func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Response, partialPath, destPath string, existingSize int64, cachedETag string, onProgress ProgressFunc) (*Result, error) {
+func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Response, partialPath, destPath string, existingSize int64, cachedETag string, onProgress ProgressFunc, sinkFactory SinkFactory) (*Result, error) {
 	cr := resp.Header.Get("Content-Range")
 	if cr == "" {
 		return nil, errRangeMismatch
@@ -452,6 +492,13 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	}
 	defer f.Close()
 
+	// 可选写盘记账 sink（cloud QuotaWriter）；创建失败不可重试。
+	sink, fin, wrapErr := d.wrapSink(f, totalSize-existingSize, sinkFactory, true)
+	if wrapErr != nil {
+		return nil, wrapErr
+	}
+	done := func(success bool, oldSize int64) { fin(success, oldSize) }
+
 	tee := io.TeeReader(resp.Body, h)
 
 	const copyBufferSize = 32 * 1024
@@ -460,7 +507,8 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	for {
 		n, readErr := tee.Read(buf)
 		if n > 0 {
-			if _, err := f.Write(buf[:n]); err != nil {
+			if _, err := sink.Write(buf[:n]); err != nil {
+				done(false, 0)
 				return nil, fmt.Errorf("write to partial file: %w", err)
 			}
 			downloaded += int64(n)
@@ -473,6 +521,7 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 				break
 			}
 			// 读取中断（网络/超时）：保留部分文件，供下一次续传
+			done(false, 0)
 			return nil, retryablef("read body: %w", readErr)
 		}
 	}
@@ -480,10 +529,12 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	// 校验总大小：服务端声明的 total 与本地已写入不一致时回退全量
 	downloadedTotal := existingSize + downloaded
 	if totalSize > 0 && downloadedTotal != totalSize {
+		done(false, 0)
 		return nil, errRangeMismatch
 	}
 
 	if err := f.Close(); err != nil {
+		done(false, 0)
 		return nil, fmt.Errorf("close partial file: %w", err)
 	}
 
@@ -497,8 +548,10 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 		}
 	}
 	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
+		done(false, 0)
 		return nil, err
 	}
+	done(true, 0)
 	return &Result{Size: downloadedTotal, Checksum: fullChecksum, ModTime: modTime, ETag: etag}, nil
 }
 

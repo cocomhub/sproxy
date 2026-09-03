@@ -9,10 +9,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1003,5 +1005,170 @@ func TestHTTPDownloader_RangeResume_416SameSizeStalePartialRedownloads(t *testin
 	h := sha256.Sum256(fullContent)
 	if result.Checksum != hex.EncodeToString(h[:]) {
 		t.Fatalf("checksum mismatch")
+	}
+}
+
+// --- QuotaSink 注入测试（任务 7：cloud download 边写边记记账） ---
+
+// quotaSinkRecorder 记录 Finish 调用的次数与 success 标志，透传写入底层 writer。
+type quotaSinkRecorder struct {
+	w           io.Writer
+	finishTrue  atomic.Int32
+	finishFalse atomic.Int32
+}
+
+func (s *quotaSinkRecorder) Write(p []byte) (int, error) { return s.w.Write(p) }
+
+func (s *quotaSinkRecorder) Finish(success bool, _ int64) {
+	if success {
+		s.finishTrue.Add(1)
+	} else {
+		s.finishFalse.Add(1)
+	}
+}
+
+// newRecorderFactory 返回把底层 writer 包装为 quotaSinkRecorder 的 SinkFactory。
+func newRecorderFactory(rec *quotaSinkRecorder) downloader.SinkFactory {
+	return func(w io.Writer, _ int64, _ bool) (downloader.QuotaSink, error) {
+		rec.w = w
+		return rec, nil
+	}
+}
+
+// TestHTTPDownloader_QuotaSink_FinishCalledOnSuccessAndFailure 锁定 QuotaSink Finish 语义
+// （审查 C 缺口 4）：成功路径 Finish(true) 恰一次；写入中断路径 Finish(false) 恰一次。
+func TestHTTPDownloader_QuotaSink_FinishCalledOnSuccessAndFailure(t *testing.T) {
+	t.Run("success_finish_true_once", func(t *testing.T) {
+		content := []byte("quota sink success content")
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+			w.Write(content)
+		}))
+		defer srv.Close()
+
+		rec := &quotaSinkRecorder{}
+		dl := &downloader.HTTPDownloader{}
+		dest := filepath.Join(t.TempDir(), "sink-ok.bin")
+		result, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec))
+		if err != nil {
+			t.Fatalf("DownloadWithWriter: %v", err)
+		}
+		if result.Size != int64(len(content)) {
+			t.Fatalf("size=%d want %d", result.Size, len(content))
+		}
+		if got := rec.finishTrue.Load(); got != 1 {
+			t.Fatalf("成功路径 Finish(true) 次数=%d want 1", got)
+		}
+		if got := rec.finishFalse.Load(); got != 0 {
+			t.Fatalf("成功路径 Finish(false) 次数=%d want 0", got)
+		}
+		got, _ := os.ReadFile(dest)
+		if string(got) != string(content) {
+			t.Fatalf("内容=%q want %q", got, content)
+		}
+	})
+
+	t.Run("interrupted_write_finish_false_once", func(t *testing.T) {
+		// Content-Length 谎报 100，只发 10 字节后断流 → 读中断 → Finish(false) 一次 + 保留 .partial。
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(make([]byte, 10))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			// handler 返回 → 连接关闭 → unexpected EOF
+		}))
+		defer srv.Close()
+
+		rec := &quotaSinkRecorder{}
+		dl := &downloader.HTTPDownloader{}
+		dest := filepath.Join(t.TempDir(), "sink-interrupt.bin")
+		_, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec))
+		if err == nil {
+			t.Fatal("中断写入应返回错误")
+		}
+		if got := rec.finishFalse.Load(); got != 1 {
+			t.Fatalf("中断路径 Finish(false) 次数=%d want 1", got)
+		}
+		if got := rec.finishTrue.Load(); got != 0 {
+			t.Fatalf("中断路径 Finish(true) 次数=%d want 0", got)
+		}
+		// .partial 保留 10 字节供续传；最终文件不存在。
+		partial := dest + ".partial"
+		if fi, err := os.Stat(partial); err != nil || fi.Size() != 10 {
+			t.Fatalf(".partial 应保留 10 字节, stat=%v size=%d", err, fi.Size())
+		}
+		if _, err := os.Stat(dest); !os.IsNotExist(err) {
+			t.Fatalf("中断后最终文件不应存在, stat err=%v", err)
+		}
+	})
+}
+
+// TestHTTPDownloader_QuotaSink_CreationErrorAborts 锁定审查 C 缺口 5：
+// sinkFactory 创建失败 → Download 返回含 "create quota sink" 的错误、不重试（非
+// RetryableError）、不写盘（.partial 为空/不存在，dest 不存在）。
+func TestHTTPDownloader_QuotaSink_CreationErrorAborts(t *testing.T) {
+	errFactory := errors.New("quota reserve failed")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.Write(make([]byte, 100))
+	}))
+	defer srv.Close()
+
+	factory := func(io.Writer, int64, bool) (downloader.QuotaSink, error) {
+		return nil, errFactory
+	}
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "sink-err.bin")
+	_, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, factory)
+	if err == nil {
+		t.Fatal("factory 失败应返回错误")
+	}
+	if !strings.Contains(err.Error(), "create quota sink") {
+		t.Fatalf("错误=%q 应含 'create quota sink'", err.Error())
+	}
+	var retryable *downloader.RetryableError
+	if errors.As(err, &retryable) {
+		t.Fatalf("factory 创建失败不应标记可重试, got %v", err)
+	}
+	// 不写盘：.partial 至多空文件，dest 不存在。
+	if fi, statErr := os.Stat(dest + ".partial"); statErr == nil && fi.Size() != 0 {
+		t.Fatalf(".partial 不应写盘, size=%d", fi.Size())
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("dest 不应存在, stat err=%v", err)
+	}
+}
+
+// TestHTTPDownloader_Download_204EmptyBody 锁定缺口 7（可选）：存在 .partial 时服务端返回
+// 204 → 非重试错误、保留 .partial（不删除，供后续续传）。
+func TestHTTPDownloader_Download_204EmptyBody(t *testing.T) {
+	partialContent := []byte("existing partial data")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "204.bin")
+	partialPath := dest + ".partial"
+	os.WriteFile(partialPath, partialContent, 0644)
+
+	_, err := dl.Download(t.Context(), srv.URL, dest, nil)
+	if err == nil {
+		t.Fatal("204 应返回错误")
+	}
+	var retryable *downloader.RetryableError
+	if errors.As(err, &retryable) {
+		t.Fatalf("204 不应标记可重试, got %v", err)
+	}
+	// .partial 保留原内容。
+	got, err := os.ReadFile(partialPath)
+	if err != nil {
+		t.Fatalf(".partial 应保留, %v", err)
+	}
+	if string(got) != string(partialContent) {
+		t.Fatalf(".partial 内容=%q want %q（不得被删除/清空）", got, partialContent)
 	}
 }

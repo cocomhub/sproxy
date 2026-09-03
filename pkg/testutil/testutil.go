@@ -28,6 +28,22 @@ func SHA256Hex(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+// ChecksumAt computes the SHA-256 hex of length bytes from f at offset (seek then
+// limit-read). want == "" skips and returns true.
+func ChecksumAt(f *os.File, offset, length int64, want string) (bool, error) {
+	if want == "" {
+		return true, nil
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return false, err
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(f, length)); err != nil {
+		return false, err
+	}
+	return hex.EncodeToString(h.Sum(nil)) == want, nil
+}
+
 // DiscardLogger returns a slog.Logger that writes to io.Discard.
 func DiscardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
