@@ -269,8 +269,9 @@ type Scope struct {
 	pool *Pool
 }
 
-// Scope 返回该作用域下的子作用域（路径继续叠加；maxBytes 省略时 0 = 不限制）。
-func (s *Scope) Scope(path string, maxBytes ...int64) *Scope {
+// Mount 返回该作用域下的子作用域（路径继续叠加；maxBytes 省略时 0 = 不限制）。
+// 命名避开与类型同名（Scope.Scope 阅读歧义），语义即"挂载子作用域"。
+func (s *Scope) Mount(path string, maxBytes ...int64) *Scope {
 	var mb int64
 	if len(maxBytes) > 0 {
 		mb = maxBytes[0]

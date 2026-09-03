@@ -136,8 +136,8 @@ func TestPool_SetMaxBytes(t *testing.T) {
 func TestScope_UsageByBucket(t *testing.T) {
 	root := NewPool(1000)
 	t1 := root.Scope("/tenant/a", 500)
-	t1.Scope("/user").Adjust(0, 100) // 子桶 user 占用 100
-	t1.Scope("/cloud").Adjust(0, 50) // 子桶 cloud 占用 50
+	t1.Mount("/user").Adjust(0, 100) // 子桶 user 占用 100
+	t1.Mount("/cloud").Adjust(0, 50) // 子桶 cloud 占用 50
 	m := root.UsageByBucket()
 	if m["/tenant/a/user"] != 100 || m["/tenant/a/cloud"] != 50 {
 		t.Fatalf("UsageByBucket=%v", m)
@@ -302,8 +302,8 @@ func TestScope_TryReserve_ExactLimit(t *testing.T) {
 func TestScope_MultiLevelParentChain(t *testing.T) {
 	root := NewPool(1000)
 	a := root.Scope("/a", 50)      // 中间层上限 50
-	user := a.Scope("/user", 20)   // 最内层上限 20
-	cloud := a.Scope("/cloud", 50) // 兄弟作用域（聚合隔离验证）
+	user := a.Mount("/user", 20)   // 最内层上限 20
+	cloud := a.Mount("/cloud", 50) // 兄弟作用域（聚合隔离验证）
 	if got, want := user.MaxBytes(), int64(20); got != want {
 		t.Fatalf("user.MaxBytes=%d want %d", got, want)
 	}
@@ -331,11 +331,11 @@ func TestScope_MultiLevelParentChain(t *testing.T) {
 		t.Fatalf("cloud.TryReserve(20) 应成功（不受兄弟影响）: %v", err)
 	}
 	// 父链上限约束：user 剩余空间 + cloud 20 = 23+12=35>30 仍可；再压 30 → 父链 62>50 拒绝
-	if _, err := a.Scope("/tmp").TryReserve(10); err != nil {
+	if _, err := a.Mount("/tmp").TryReserve(10); err != nil {
 		t.Fatalf("/tmp.TryReserve(10) 应成功: %v", err)
 	}
 	// 此时父链已预留 12+20+10=42，剩余 8。
-	sink := a.Scope("/sink")
+	sink := a.Mount("/sink")
 	if _, err := sink.TryReserve(20); !errors.Is(err, ErrStorageFull) {
 		t.Fatalf("父链超限应拒绝, got %v", err)
 	}
@@ -537,7 +537,7 @@ func TestPool_SetMaxBytes_ShrinkDoesNotReclaim(t *testing.T) {
 // TestPool_ResolveLongestPrefix 验证 http route 式路由：沿 children 段树找最深匹配子作用域。
 func TestPool_ResolveLongestPrefix(t *testing.T) {
 	root := NewPool(1000)
-	root.Scope("/a", 100).Scope("/b", 50).Scope("/c", 20) // 挂 /a(100) → /a/b(50) → /a/b/c(20)
+	root.Scope("/a", 100).Mount("/b", 50).Mount("/c", 20) // 挂 /a(100) → /a/b(50) → /a/b/c(20)
 
 	if got := root.ResolvePath("/a").MaxBytes(); got != 100 {
 		t.Fatalf("Resolve /a MaxBytes=%d want 100", got)

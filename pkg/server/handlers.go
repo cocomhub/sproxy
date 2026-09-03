@@ -311,7 +311,7 @@ var quotaBucketNames = []string{"user", "cloud", "archive", "chunk", "version", 
 // /tenant/<owner> Scope（上限 = cfg.OwnerQuotaFor(owner)），并预创建
 // user/cloud/archive/chunk/version/meta 功能桶子 Scope（上限 0 = 不限制，租户上限由父
 // Scope 单一执行），随后按 cfg.BucketLimits 对每个相对路径建精确路径子 Scope
-// （scope.Scope(path, limit)，键即完整逻辑路径，供 quotaBucketFor 精确路径命中复用）。
+// （scope.Mount(path, limit)，键即完整逻辑路径，供 quotaBucketFor 精确路径命中复用）。
 // globalPool 未装配时返回 (nil, nil)。bucket_limits/owner_quotas 属装配期硬配置，
 // 懒建后缓存不重建 → SIGHUP 后修改不生效（重启进程）。
 func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[string]*quota.Scope) {
@@ -336,7 +336,7 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 	s := h.globalPool.Scope("/tenant/"+owner, quotaBytes)
 	buckets := make(map[string]*quota.Scope, len(quotaBucketNames)+len(bucketLimits))
 	for _, b := range quotaBucketNames {
-		buckets[b] = s.Scope(b, 0)
+		buckets[b] = s.Mount(b, 0)
 	}
 	for path, limit := range bucketLimits {
 		// BucketLimits 分层装配：键如 "user/videos/hd"，拆段逐级挂到功能桶（user）children
