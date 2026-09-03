@@ -57,7 +57,7 @@ func (w *QuotaWriter) Write(p []byte) (int, error) {
 		if err := w.scope.pool.reserveUp(amount - w.reserved); err != nil {
 			return 0, err
 		}
-		w.reserved += amount - w.reserved // 补齐到本次需要
+		w.reserved = amount // 补齐到本次需要
 	}
 	n, err := w.writer.Write(p)
 	if err != nil {
@@ -69,6 +69,21 @@ func (w *QuotaWriter) Write(p []byte) (int, error) {
 	w.reserved -= n64
 	w.written += n64
 	return n, nil
+}
+
+// SetWriter 替换底层写入目标（续传/重试复用同一 account：保留 reserved/committed 状态，
+// 仅换 sink 文件句柄）。调用方保证新 writer 是同一部分文件的追加句柄（或继续写入的空句柄）。
+func (w *QuotaWriter) SetWriter(dst io.Writer) { w.writer = dst }
+
+// Committed 返回本 writer 已确认 committed 的字节数（Finish/结算前调用）。
+// 供调用方在结算时把已 commit 部分记入任务账本（QuotaWriter 本身 Finish 后清零）。
+func (w *QuotaWriter) Committed() int64 { return w.written }
+
+// ReleaseReserve 释放剩余 reserve 但保留已 commit 部分（写失败保留 .partial 供续传：
+// 已 commit 字节继续占账，未用 reserve 归还）。本 writer 结算后不再使用。
+func (w *QuotaWriter) ReleaseReserve() {
+	w.scope.pool.releaseUp(w.reserved)
+	w.reserved = 0
 }
 
 // Finish 结算预留。

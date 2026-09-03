@@ -485,9 +485,13 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 		t.Fatalf("expected 507 on quota, got %d body=%s", rr.Code, rr.Body.String())
 	}
 
-	// 预留未泄漏：507 后 alice 租户 Scope 仍只有 CreateTask 的 100 预留（归档预占已回滚）。
-	if got := env.h.quotaFor("alice").Reserved(); got != 100 {
-		t.Fatalf("507 后 alice Reserved()=%d want 100（仅 CreateTask 预留，归档预占已回滚）", got)
+	// 预留未泄漏（任务 7 新语义：创建期不再在 Scope 占位——已知大小走写盘 QuotaWriter 边写边记，
+	// 507 后无任何占用）：归档预占已回滚、云桶无残留。
+	if got := env.h.quotaBucketFor("alice", "cloud").Reserved(); got != 0 {
+		t.Fatalf("507 后 cloud 桶 Reserved()=%d want 0（创建期无占位，归档预占已回滚）", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "cloud").Usage(); got != 0 {
+		t.Fatalf("507 后 cloud 桶 Usage()=%d want 0", got)
 	}
 }
 
