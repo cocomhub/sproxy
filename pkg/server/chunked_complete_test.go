@@ -22,9 +22,14 @@ import (
 )
 
 // assertChunkedMismatchResponse 断言 complete 响应带 mismatch_chunks 列表，且 session
-// 仍可查（失败保留供重传）、临时名仍存在（供重传 seek 覆盖）、预留未释放。
-func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID string, resp map[string]any, wantMismatch []int) {
+// 仍可查（失败保留供重传）、预留未释放。tempAlive=true（默认）时额外断言临时名仍存在
+// （重传 seek 覆盖需要）；false（临时文件缺失分支）跳过临时名存在性断言。
+func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID string, resp map[string]any, wantMismatch []int, tempAlive ...bool) {
 	t.Helper()
+	alive := true
+	if len(tempAlive) > 0 {
+		alive = tempAlive[0]
+	}
 	if got := resp["success"]; got == true {
 		t.Fatalf("complete 应失败（校验不匹配）, got success=%v body=%v", got, resp)
 	}
@@ -71,13 +76,17 @@ func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID 
 	if sess.TempPath != "" {
 		tnt := env.h.tenantFor("alice")
 		if abs, ok := tnt.Root().Abs(sess.TempPath); ok {
-			if _, err := os.Stat(abs); err != nil {
-				t.Fatalf("mismatch 后临时名应保留（供重传）, stat %s: %v", abs, err)
+			// 临时文件缺失分支（alive=false）：不要求临时名存在（文件已被删除，本分支
+			// 正是该场景）；此时 session.TempPath 仍指向原临时名（会话保留供整文件重传）。
+			if alive {
+				if _, err := os.Stat(abs); err != nil {
+					t.Fatalf("mismatch 后临时名应保留（供重传）, stat %s: %v", abs, err)
+				}
 			}
 		} else {
 			t.Fatalf("session.TempPath 非法: %s", sess.TempPath)
 		}
-	} else {
+	} else if alive {
 		t.Fatal("mismatch 后 session 应仍有 TempPath")
 	}
 	if got := env.h.quotaBucketFor("alice", "user").Reserved(); got == 0 {
@@ -415,7 +424,7 @@ func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 	}
 	finalData, readErr := os.ReadFile(filepath.Join(dir, "alice", "user", filename))
 	if readErr != nil {
-		t.Fatalf("最终文件未落盘: %v", err)
+		t.Fatalf("最终文件未落盘: %v", readErr)
 	}
 	if !bytes.Equal(finalData, total) {
 		t.Fatal("恢复+重传后最终文件内容不正确")
@@ -496,5 +505,52 @@ func TestFindMismatchChunks_StoreUnit(t *testing.T) {
 	// 越界索引应报错（防御）
 	if err := us.ClearChunksReceived(uploadID, []int{5}); err == nil {
 		t.Fatal("越界 ClearChunksReceived 应返回错误")
+	}
+}
+
+// TestCompleteMismatch_TempFileMissing_AllChunksMismatch 覆盖 M-3：临时文件缺失分支——
+// findMismatchChunks 在临时文件不可读/不存在时返回全部分片索引（客户端整文件重传）。
+// 构造会话 + 声称的 TempPath 指向已删除文件（会话仍存活、临时名已随异常消失，如手动
+// 清理或文件被外部删除），complete → 400 + mismatch_chunks == 全部分片（而非 500 或错误
+// 落盘），会话保留供整文件重传。
+func TestCompleteMismatch_TempFileMissing_AllChunksMismatch(t *testing.T) {
+	env := newOwnerChunkedEnv(t)
+	content := bytes.Repeat([]byte("Q"), 9000) // 3 chunks
+	fileChecksum := sha256Hex(content)
+	uploadID := "complete-missing-temp"
+	chunkSize := int64(4096)
+
+	code, resp := env.initAs(t, "alice", uploadID, "missing.bin", int64(len(content)), chunkSize, 3, fileChecksum)
+	if code != http.StatusOK {
+		t.Fatalf("init 应 200, got %d: %v", code, resp)
+	}
+	for i := range 3 {
+		start := i * int(chunkSize)
+		end := min(start+int(chunkSize), len(content))
+		if c := env.chunkAs(t, "alice", uploadID, i, content[start:end]); c != http.StatusOK {
+			t.Fatalf("chunk %d 应 200, got %d", i, c)
+		}
+	}
+	// 删除临时名（模拟中断后桌面清理/异常删除；会话与 bitmap 仍存活）。
+	rel, _ := env.h.tenantFor("alice").UserRel("missing.bin")
+	tempAbs := filepath.Join(env.dir, "alice", "user", inflightTempNameFor(rel, uploadID))
+	if err := os.Remove(tempAbs); err != nil {
+		t.Fatalf("删除临时名: %v", err)
+	}
+
+	// complete → 400 + mismatch_chunks == [0,1,2]（临时文件缺失 → 全部分片标 mismatch）。
+	cc, cresp := env.completeAs(t, "alice", uploadID)
+	if cc != http.StatusBadRequest {
+		t.Fatalf("临时文件缺失 complete 应 400, got %d: %v", cc, cresp)
+	}
+	assertChunkedMismatchResponse(t, env, uploadID, cresp, []int{0, 1, 2}, false)
+	// 正式名不得落盘错误内容。
+	if _, err := os.Stat(filepath.Join(env.dir, "alice", "user", "missing.bin")); !os.IsNotExist(err) {
+		t.Fatalf("临时文件缺失 complete 失败后正式名不应存在, stat err=%v", err)
+	}
+	// 会话保留（供整文件重传复用同一预留）。
+	sess := env.h.uploadStoreFor("alice").GetSession(uploadID)
+	if sess == nil || sess.Completed {
+		t.Fatalf("临时文件缺失后 session 应保留, got %+v", sess)
 	}
 }

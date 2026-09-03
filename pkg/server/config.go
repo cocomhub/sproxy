@@ -10,11 +10,13 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"gopkg.in/yaml.v3"
@@ -484,6 +486,46 @@ func (c *Config) Validate() error {
 		case PermissionRead, PermissionWrite, "":
 		default:
 			return fmt.Errorf("api_keys[%d].permission=%q 无效，仅允许 %q 或 %q", i, k.Permission, PermissionRead, PermissionWrite)
+		}
+	}
+	// bucket_limits 校验（任务 2 放行条件 2/3）：
+	//   - 键是相对租户根路径（如 user/videos/hd），拒绝 .. / 绝对路径 / 前导斜杠 /
+	//     空段 / 空串 / 尾部斜杠——防拼出越界或歧义路径子 Scope（quotaBucketFor 按
+	//     filepath.ToSlash(path) 建键，装配期校验与消费保持一致语义）；
+	//   - 与功能桶白名单（quotaBucketNames）重叠显式拒绝（fail-closed）：功能桶根上限
+	//     恒 0（不单独限制，租户总上限单一执行）。若允许 "user:500" 覆盖功能桶子 Scope
+	//     上限，装配顺序（先功能桶 0 后 BucketLimits 500）会做成"user 桶整体 500B 上限"，
+	//     与"仅子目录限流"预期相反，且覆盖绕过静默不可查——配置即拒绝，防脚枪。
+	for path, limit := range c.BucketLimits {
+		n := strings.TrimSpace(path)
+		bad := func() bool { // 键合法性：非空、非绝对（/ 或盘符）、非前导/尾部斜杠、无空段/.. 段
+			if n == "" || strings.HasPrefix(n, "/") || strings.HasSuffix(n, "/") {
+				return true
+			}
+			if len(n) >= 2 && n[1] == ':' {
+				return true // Windows 盘符（C:/x、C:foo）视为绝对路径
+			}
+			if strings.Contains(n, `\`) {
+				return true // 协议路径键恒用 /，拒绝反斜杠（避免跨平台歧义）
+			}
+			for seg := range strings.SplitSeq(n, "/") {
+				if seg == "" || seg == "." || seg == ".." {
+					return true
+				}
+			}
+			return false
+		}
+		if bad() {
+			return fmt.Errorf("bucket_limits 键 %q 非法：必须为相对租户根路径（如 user/videos/hd），不允许空、前导/尾部斜杠或 .. 段", path)
+		}
+		if !storage.ValidSegmentName(segNameOfBucketPath(n)) {
+			return fmt.Errorf("bucket_limits 键 %q 含非法段（拒绝空/绝对/..、.__ 魔法前缀、Windows 保留名与非法字符）", path)
+		}
+		if slices.Contains(quotaBucketNames, n) {
+			return fmt.Errorf("bucket_limits 键 %q 与功能桶根重叠：功能桶根上限由租户总 owner_quotas 单一执行，不支持单独 bucket_limits 覆盖", path)
+		}
+		if limit < 0 {
+			return fmt.Errorf("bucket_limits[%q] 上限 %d 非法：配额上限不能为负", path, limit)
 		}
 	}
 	// access_keys 校验（I-1/I-2）：Key 非空、Key 唯一、Secret 为 64 hex（32B）、

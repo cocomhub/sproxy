@@ -633,12 +633,14 @@ func TestConfig_BucketLimits_Default(t *testing.T) {
 }
 
 // TestLoadFromProvider_BucketLimits 验证 YAML 解析 bucket_limits 配置（页面在 briefs 中已明确字段名）。
+// 任务 8 起：功能桶根键（如 "cloud"）与 quotaBucketNames 重叠被 Validate 显式拒绝（防
+// 覆盖功能桶上限），此处用合法子目录键验证解析 + 拒绝重叠的回归。
 func TestLoadFromProvider_BucketLimits(t *testing.T) {
 	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
 		"addr": ":18083",
 		"bucket_limits": map[string]any{
 			"user/videos/hd": int64(10485760),
-			"cloud":          int64(1 << 30),
+			"user/archive":   int64(1 << 30),
 		},
 	}})
 	if err != nil {
@@ -647,7 +649,43 @@ func TestLoadFromProvider_BucketLimits(t *testing.T) {
 	if got := cfg.BucketLimits["user/videos/hd"]; got != 10485760 {
 		t.Fatalf("BucketLimits[user/videos/hd]=%d want 10485760", got)
 	}
-	if got := cfg.BucketLimits["cloud"]; got != 1<<30 {
-		t.Fatalf("BucketLimits[cloud]=%d want %d", got, 1<<30)
+	if got := cfg.BucketLimits["user/archive"]; got != 1<<30 {
+		t.Fatalf("BucketLimits[user/archive]=%d want %d", got, 1<<30)
+	}
+	// 功能桶根键与 quotaBucketNames 重叠 → 校验失败（C 任务 2 放行条件 3）。
+	if _, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr":          ":18083",
+		"bucket_limits": map[string]any{"cloud": int64(1 << 30)},
+	}}); err == nil || !strings.Contains(err.Error(), "与功能桶根重叠") {
+		t.Fatalf("bucket_limits 键 cloud 与功能桶根重叠应被拒绝, got %v", err)
+	}
+}
+
+// TestConfig_Validate_BucketLimits_KeyValidation 验证 bucket_limits 路径键合法性校验
+// （C 任务 2 放行条件 2）：拒绝 .. / 绝对路径 / 前导或尾部斜杠 / 空段 / 空串；
+// 合法子目录键通过；负上限拒绝。
+func TestConfig_Validate_BucketLimits_KeyValidation(t *testing.T) {
+	badKeys := []string{
+		"", "..", "../escape", "user/../x", "user//x", "/user/x", "user/x/",
+		"user/.", "C:/abs", `user\videos`,
+	}
+	for _, k := range badKeys {
+		c := Default()
+		c.BucketLimits = map[string]int64{k: 100}
+		if err := c.Validate(); err == nil {
+			t.Fatalf("bucket_limits 键 %q 应被拒绝, got nil", k)
+		}
+	}
+	// 合法子目录键通过（含无功能桶前缀的纯子目录；段名全部合法）。
+	c := Default()
+	c.BucketLimits = map[string]int64{"videos/hd": 100, "user/ok/deep": 50}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("合法 bucket_limits 键不应被拒绝: %v", err)
+	}
+	// 负上限拒绝。
+	c = Default()
+	c.BucketLimits = map[string]int64{"user/x": -5}
+	if err := c.Validate(); err == nil {
+		t.Fatal("bucket_limits 负上限应被拒绝")
 	}
 }

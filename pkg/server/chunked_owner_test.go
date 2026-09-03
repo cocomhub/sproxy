@@ -40,6 +40,33 @@ func actorChunkedMux(h *Handlers, actor string) *http.ServeMux {
 	return mux
 }
 
+// TestChunkedInflight_DeleteSessionReleasesQuota 验证 DeleteSession 删除在途临时文件后
+// user 桶预留同步归还（任务 4 P4 语义；与 TestUploadStore_DeleteSession_RemovesTempFile
+// 的磁盘断言互补，这里断言配额账本）：init 预留 60 → 取消会话（DeleteSession）→ 临时名
+// 删除 + user 桶 Reserved 归零、无泄漏。
+func TestChunkedInflight_DeleteSessionReleasesQuota(t *testing.T) {
+	env := newOwnerChunkedEnv(t)
+	content := bytes.Repeat([]byte("D"), 60)
+	uploadID := "del-session-quota"
+	code, resp := env.initAs(t, "alice", uploadID, "delq.bin", int64(len(content)), 4096, 1, sha256Hex(content))
+	if code != http.StatusOK {
+		t.Fatalf("init 应 200, got %d: %v", code, resp)
+	}
+	userScope := env.h.quotaBucketFor("alice", "user")
+	if got := userScope.Reserved(); got != int64(len(content)) {
+		t.Fatalf("init 后 user 桶 Reserved()=%d want %d", got, len(content))
+	}
+	// 取消会话（调用与 cancel handler 等价的 DeleteSession；临时名随后被清理）。
+	store := env.h.uploadStoreFor("alice")
+	store.DeleteSession(uploadID)
+	if got := userScope.Reserved(); got != 0 {
+		t.Fatalf("DeleteSession 后 user 桶 Reserved()=%d want 0（预留已归还）", got)
+	}
+	if got := userScope.Usage(); got != 0 {
+		t.Fatalf("DeleteSession 后 user 桶 Usage()=%d want 0（无泄漏）", got)
+	}
+}
+
 // newChunkedTestHandlers 构建装配好多租户存储布局（globalRoot + 懒创建缓存）的 Handlers。
 // dir 为存储根；uploadStores 懒创建（首次 uploadStoreFor 时建）。
 func newChunkedTestHandlers(t *testing.T, dir string, chunkSize int64) *Handlers {

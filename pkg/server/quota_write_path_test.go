@@ -758,13 +758,19 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 		t.Fatalf("未配置 bucket_limits 的子目录路径应返回 nil（不建立任意子 Scope）")
 	}
 
-	// user 桶本身不受子目录上限约束（仅受租户上限）：TryReserve(100) 成功
+	// user 桶本身不受子目录上限约束（仅受租户上限）：TryReserve(100) 成功，随即 Release
+	// 归还（避免 100B 预留残留把后续 HTTP 上传的租户可用额度挤掉——预留不释放会 507）。
 	userScope := env.h.quotaBucketFor("alice", "user")
 	if userScope == nil {
 		t.Fatal("user 桶 Scope 应为非 nil")
 	}
-	if _, err := userScope.TryReserve(100); err != nil {
+	if rr, err := userScope.TryReserve(100); err != nil {
 		t.Fatalf("user 桶 TryReserve(100) 应成功（不被子目录上限约束）: %v", err)
+	} else {
+		rr.Release()
+	}
+	if got := userScope.Reserved(); got != 0 {
+		t.Fatalf("Release 后 user 桶 Reserved()=%d want 0", got)
 	}
 
 	// HTTP 写路径阶段仍按物理桶归集（不回归）：上传到子目录 40 字节 → user 桶 + 租户 Usage 40
@@ -777,5 +783,24 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 	}
 	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 40 {
 		t.Fatalf("上传后 user 桶 Usage()=%d want 40", got)
+	}
+
+	// 任务 8（C：bucket_limits 子目录写路径不接 Scope 的已核实结论）：
+	// 上传到受限子目录 user/videos/hd （40 字节 < 子目录上限 100）→ 200，子目录 Scope 不记账
+	// （写路径仍按 user 桶聚合），证明 bucket_limits 子目录子 Scope 上限**不截断** 该子目录写路径。
+	// 子 Scope 的精确路径命中（quotaBucketFor 返回它）仅对显式 TryReserve 校验生效（上文），
+	// 写侧是否接入该子 Scope 由设计确认（本任务范围不接——避免与功能的复杂交互）。
+	subScopeAfter := env.h.quotaBucketFor("alice", "user/videos/hd")
+	if got := subScopeAfter.Usage(); got != 0 {
+		t.Fatalf("上传到子目录后子目录 Scope Usage()=%d want 0（写路径未接入该子 Scope）", got)
+	}
+
+	// 上传到受限子目录且超该子目录上限（80 字节，子目录上限 100 但 user/ 桶已累计 40+80=120 <
+	// 租户上限 200）→ 仍 200（写路径按 user 桶聚合，不被子目录子 Scope 上限拦截）。
+	if code, resp := uploadAsPath(t, umux, "user/videos/hd/big.txt", []byte(strings.Repeat("b", 80))); code != http.StatusOK {
+		t.Fatalf("子目录超子目录上限但满足租户总上限应 200（写路径未接入子目录子 Scope）, got %d: %s", code, resp)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 120 {
+		t.Fatalf("两文件后 user 桶 Usage()=%d want 120", got)
 	}
 }

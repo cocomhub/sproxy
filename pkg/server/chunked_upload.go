@@ -822,12 +822,12 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		UploadID string `json:"upload_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "请求体必须是合法 JSON（无法解析）"}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, ChunkCompleteResponse{Success: false, Message: "请求体校验失败（签名哈希不匹配或 JSON 语法错误）"}, http.StatusBadRequest)
 		return
 	}
 
@@ -880,11 +880,15 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 	// 覆盖写（versioning enabled + 目标存同名旧文件）先备份版本。saveVersion 把旧文件
 	// 复制进 version 桶（version 桶 Scope 记账），不改 user 桶 committed；失败 best-effort。
+	// 任务 8 O-1：覆盖动作记审计（沿用 upload_handler 覆盖写审计写法，Action=overwrite）。
+	overwrote := false
 	if rel != "" && tnt != nil && tnt.Root() != nil {
 		if cfg := h.cfgPtr.Load(); cfg != nil && cfg.Versioning.Enabled {
 			if _, sErr := tnt.Root().Stat(rel); sErr == nil {
 				if _, vErr := h.saveVersion(strings.TrimPrefix(rel, "user/"), tnt, owner); vErr != nil {
 					h.logger.Warn("保存文件版本失败", "file_name", session.Filename, "error", vErr)
+				} else {
+					overwrote = true
 				}
 			}
 		}
@@ -928,6 +932,15 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("per-tenant checksum store 不可用，跳过记录", "owner", owner)
 	}
 
+	// 任务 8 O-1：分块上传覆盖写（rename 已原子替换旧文件）记审计，与 upload_handler
+	// 覆盖写审计写法一致；无覆盖（新文件）不审计（普通上传成功也不记 audit，保持一致）。
+	if overwrote {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "overwrite", ObjectType: "file", Object: session.Filename,
+			Result: AuditResultSuccess, Detail: "分块上传覆盖现有文件（版本已保存）",
+		})
+	}
+
 	h.recordCompleteMetadata(owner, req.UploadID, session, finalChecksum)
 
 	h.logger.Info("文件合并完成", "file_name", session.Filename, "checksum", shortid.ShortHash(finalChecksum), "size", session.TotalSize)
@@ -941,7 +954,8 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 
 // prepareMergedTemp 在 complete 期对临时名做全文件校验（== file_checksum）并逐分片准确
 // 报告 mismatch。校验通过返回 (nil, nil)；全文件校验失败返回 (mismatchList, err)；
-// 临时文件打开/读取失败返回 (nil, err)（调用方按 500）。
+// 临时文件被外部删除/不可读返回 (mismatchList, err)（findMismatchChunks 对缺失返回全部分片
+// mismatch → 调用方按 400 返回 mismatch_chunks，客户端整文件重传，而非 500 永久挂起）。
 // 做法：持 LockChunkMerge 排他（防 chunk 并发 seek 写）后单遍哈希整临时文件比对
 // file_checksum —— 不匹配再逐分片 seek 重算（带长度语义 offset=i*ChunkSize、length=
 // chunkLenAt，与写侧/恢复侧一致）→ 精确定位坏分片 → ClearChunksReceived 落盘 bitmap
@@ -955,6 +969,11 @@ func (h *Handlers) prepareMergedTemp(ctx context.Context, store *UploadStore, tn
 
 	src, err := h.openSessionTemp(tnt, session)
 	if err != nil {
+		// 任务 8 M-3：临时文件缺失/不可读 → findMismatchChunks 返回全部分片 index（客户端
+		// 整文件重传），而非 500（临时名命中 isInflightTempName 不入列表，此处按 mismatch 显式化）。
+		if os.IsNotExist(err) {
+			return allMismatchIndices(session), err
+		}
 		return nil, fmt.Errorf("打开在途临时文件失败: %w", err)
 	}
 	defer src.Close()

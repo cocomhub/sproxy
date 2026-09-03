@@ -444,6 +444,92 @@ func TestSearchFiles_ByKeyword(t *testing.T) {
 	}
 }
 
+// TestListFiles_FiltersInflightTemp 验证任务 8 O-2：分块在途临时文件
+// （.inflight-<hash16>-<upload_id>.part）不出现在列表与搜索结果中。
+// 用 init 创建真实在途临时名（会 TryReserve + 落盘临时文件），随后 /api/files 与
+// /api/files/search 均不得返回该临时名；normal.txt 正常可见。
+func TestListFiles_FiltersInflightTemp(t *testing.T) {
+	url, cfgPtr, cleanup := newTestServer(t, nil)
+	defer cleanup()
+
+	// 普通文件（应可见）
+	body := []byte("normal")
+	if code, _ := uploadFile(t, url, "normal.txt", body, map[string]string{"X-File-Checksum": sha256hex(body)}); code != 200 {
+		t.Fatalf("upload normal: %d", code)
+	}
+	// 创建真实在途临时文件（init 分块上传：TryReserve + 落盘 .inflight-*.part）。
+	content := bytes.Repeat([]byte("I"), 100)
+	reqBody, _ := json.Marshal(map[string]any{
+		"upload_id": "list-filter-tmp", "filename": "infl.bin", "total_size": int64(len(content)),
+		"chunk_size": 4096, "total_chunks": 1, "file_checksum": sha256hex(content),
+	})
+	initReq, _ := http.NewRequest("POST", url+"/upload/init", bytes.NewReader(reqBody))
+	initReq.Header.Set("Content-Type", "application/json")
+	initResp, initErr := http.DefaultClient.Do(initReq)
+	if initErr != nil {
+		t.Fatalf("init: %v", initErr)
+	}
+	_ = initResp.Body.Close()
+	if initResp.StatusCode != 200 {
+		t.Fatalf("init: %d", initResp.StatusCode)
+	}
+	// 磁盘上确有一个 .inflight 临时名。
+	tmpCount := 0
+	userRoot := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "user")
+	entries, _ := os.ReadDir(userRoot)
+	for _, e := range entries {
+		if isInflightTempName(e.Name()) {
+			tmpCount++
+		}
+	}
+	if tmpCount != 1 {
+		t.Fatalf("磁盘应有 1 个 .inflight 临时名, got %d", tmpCount)
+	}
+
+	// 列表不含临时名。
+	listResp, listErr := http.Get(url + "/api/files")
+	if listErr != nil {
+		t.Fatalf("list: %v", listErr)
+	}
+	defer listResp.Body.Close()
+	var list struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	for _, f := range list.Files {
+		if isInflightTempName(f.Name) {
+			t.Fatalf("list 不应包含在途临时名: %+v", list.Files)
+		}
+		if f.Name != "normal.txt" {
+			t.Fatalf("list 应含 normal.txt, got %+v", list.Files)
+		}
+	}
+
+	// 搜索不含临时名（用临时名特征段 ".inflight" 匹配）。
+	searchResp, sErr := http.Get(url + "/api/files/search?q=inflight")
+	if sErr != nil {
+		t.Fatalf("search: %v", sErr)
+	}
+	defer searchResp.Body.Close()
+	var search struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(searchResp.Body).Decode(&search); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	for _, f := range search.Files {
+		if isInflightTempName(f.Name) {
+			t.Fatalf("search 不应包含在途临时名: %+v", search.Files)
+		}
+	}
+}
+
 func TestSearchFiles_Empty(t *testing.T) {
 	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)

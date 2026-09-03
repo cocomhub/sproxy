@@ -161,6 +161,28 @@ func inflightTempName(name, uploadID string) string {
 	return fmt.Sprintf("%s%s-%s.part", inflightPrefix, hex.EncodeToString(h[:8]), uploadID)
 }
 
+// isInflightTempName 判断 name 是否为分块在途临时文件
+// （.inflight-<hash16>-<upload_id>.part，inflightTempName 命中的完整形态）。
+// 列表/搜索按整临时名过滤（服务端内部在途文件，对外不可见），避免与用户可创建的同名前缀
+// 普通文件（如 <id>.part 形式的用户文件）误拦——严格校验整个临时名形态而非仅前缀。
+func isInflightTempName(name string) bool {
+	rest, ok := strings.CutPrefix(name, inflightPrefix)
+	if !ok {
+		return false
+	}
+	// 形态：<16hex>-<uploadID>.part（uploadID 为合法段名，可为多段拼接前的裸名）。
+	token, idPart, hasPart := strings.Cut(rest, "-")
+	if !hasPart || len(token) != 16 || !strings.HasSuffix(idPart, ".part") {
+		return false
+	}
+	for _, c := range token {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // NewUploadStore 创建并启动 UploadStore，同时从磁盘恢复已有 session。
 // baseDir 是租户 chunk 桶的绝对路径（<root>/<owner>/chunk/，经 Tenant.Root().Abs("chunk")
 // 派生）；会话目录直接位于 baseDir 下（<baseDir>/<uploadID>/）。不再拼接魔法目录。
