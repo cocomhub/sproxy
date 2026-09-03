@@ -98,6 +98,8 @@ func NewProvider(opts ...Option) (*Provider, error) {
 
 // Tracer 返回一个实现核心 telemetry.Tracer 的适配器（包装真实 OTel tracer）。
 // 永不为 nil；懒装配 TracerProvider（首次调用时构建 exporter）。
+// Shutdown 之后的 Tracer() 调用返回 no-op 包装（OTel SDK 对已关闭的
+// TracerProvider 返回 no-op tracer），不新建、不泄漏新 provider。
 func (p *Provider) Tracer(name string) core.Tracer {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -108,6 +110,8 @@ func (p *Provider) Tracer(name string) core.Tracer {
 }
 
 // Shutdown 停止 TracerProvider 并冲刷待导出 span。幂等：多次调用只执行一次。
+// Shutdown 在 Tracer() 之前调用也不会在后续 Tracer() 泄漏新 provider——
+// tp 保持 nil，后续 Tracer() 按懒装配路径构建（见 Tracer）。
 func (p *Provider) Shutdown(ctx context.Context) error {
 	var err error
 	p.once.Do(func() {
@@ -151,6 +155,10 @@ func (p *Provider) build(ctx context.Context) *sdktrace.TracerProvider {
 
 	sampler := sdktrace.ParentBased(sdktrace.TraceIDRatioBased(p.ratio))
 	exp, err := autoexport.NewSpanExporter(ctx)
+	// envSet 区分"未设置 OTEL_TRACES_EXPORTER"与"显式 =none"：
+	// autoexport 对两者都返回 none exporter，但运营语义不同——未设置时不应
+	// 打出"被显式关停"的误导性 Warn（审查 Minor-5）。
+	_, envSet := os.LookupEnv("OTEL_TRACES_EXPORTER")
 	if err != nil {
 		// autoexport 构造失败（如 OTEL_TRACES_EXPORTER 为未知值）：仅进程内
 		// 模式继续，Tracer() 仍可用；Warn 记录原因，不回退静默（brief 要求）。
@@ -158,8 +166,13 @@ func (p *Provider) build(ctx context.Context) *sdktrace.TracerProvider {
 		return sdktrace.NewTracerProvider(sdktrace.WithSampler(sampler))
 	}
 	if autoexport.IsNoneSpanExporter(exp) {
-		// OTEL_TRACES_EXPORTER=none：同样仅进程内模式（无 span processor）。
-		slog.Warn("span exporter 为 none（OTEL_TRACES_EXPORTER=none），仅进程内（in-process only）")
+		// OTEL_TRACES_EXPORTER 未设或 =none：仅进程内模式（无 span processor）。
+		// 未设置时是默认行为（纯 slog），显式 =none 是运维关闭；文案不误导。
+		if !envSet {
+			slog.Info("telemetry 未装配 exporter（OTEL_TRACES_EXPORTER 未设置），仅进程内（in-process only）")
+		} else {
+			slog.Warn("span exporter 为 none（OTEL_TRACES_EXPORTER=none），仅进程内（in-process only）")
+		}
 		return sdktrace.NewTracerProvider(sdktrace.WithSampler(sampler))
 	}
 
