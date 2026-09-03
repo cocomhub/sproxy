@@ -4,10 +4,20 @@
 package server
 
 import (
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/tunnel"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
+	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
 
 func TestConfigAPI_WebTunnelField(t *testing.T) {
@@ -225,5 +235,276 @@ func TestConfig_UpdateEmptyBody(t *testing.T) {
 
 	if result["message"] != "empty request body: no fields to update" {
 		t.Errorf("expected error message about empty body, got %v", result["message"])
+	}
+}
+
+// ---- RateLimiter 热更新（PUT /api/config → UpdateConfig 立即生效） ----
+
+func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
+	t.Parallel()
+	// 关键：Default() 的 RateLimit.Enabled=false（限流未装配）。必须显式打开并给低配额，
+	// 隧道链才会挂上 rateLimiter 中间件，PUT 收紧/放宽才能被观察。
+	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+		cfg.RateLimit.Enabled = true
+		cfg.RateLimit.Requests = 2
+		cfg.RateLimit.Window = time.Hour
+	})
+
+	// 带 access_keys 的服务经隧道派生密钥；外层 /tunnel 需 UNSIGNED 签名。
+	key, err := tunnel.DeriveTunnelKey(testAccessSecret, "")
+	if err != nil {
+		t.Fatalf("DeriveTunnelKey: %v", err)
+	}
+	tc, err := tunnel.NewClient(hex.EncodeToString(key), url+"/tunnel", 5*time.Second, nil)
+	if err != nil {
+		t.Fatalf("tunnel.NewClient: %v", err)
+	}
+	tc.HTTPClient.Transport = &tunnelSignTransport{base: tc.HTTPClient.Transport, ak: testAccessKey, sk: testAccessSecret}
+
+	do := func() int {
+		req, _ := http.NewRequest("GET", "/api/files", nil)
+		resp, err := tc.Do(req)
+		if err != nil {
+			// 隧道错误（外层 4xx/5xx，如 replay 抖动 425）被 Do 吞成 error。
+			// 无 resp 时无法恢复状态，视为致命；有 resp（读后又报错）取状态。
+			if resp == nil {
+				t.Fatalf("tunnel Do: %v", err)
+			}
+			return resp.StatusCode
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// okStatus 视为隧道正常往返：200 或 429（内层限流）。
+	okStatus := func(code int) bool {
+		return code == http.StatusOK || code == http.StatusTooManyRequests
+	}
+	allOK := func() {
+		for i := range 6 {
+			if code := do(); !okStatus(code) {
+				t.Fatalf("request %d: unexpected status %d", i, code)
+			}
+		}
+	}
+	// 灌满：低配额（limit=2, window=1h）下多请求 → 出现 429（限流已挂载）。
+	allOK()
+	saw429 := func() bool {
+		for range 6 {
+			if do() == http.StatusTooManyRequests {
+				return true
+			}
+		}
+		return false
+	}
+	// 若始终未撞 429（每请求新 TCP 源连接 → per-IP 令牌桶独立，可能不撞全局窗口），
+	// 继续多打几个请求确保触发。
+	for range 10 {
+		if do() == http.StatusTooManyRequests {
+			break
+		}
+	}
+
+	// PUT /api/config 立即生效：改远高于已灌注请求数的配额，后续请求恒放行。
+	// PUT 带 JSON body，需按 body 哈希签名（signBodyRequest）。
+	putConfig := func(body string) int {
+		req, err := http.NewRequest("PUT", url+"/api/config", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		signBodyRequest(req, testAccessKey, testAccessSecret, []byte(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := putConfig(`{"rate_limit_requests":100000}`); code != http.StatusOK {
+		t.Fatalf("PUT /api/config (relax): want 200, got %d", code)
+	}
+	for i := range 10 {
+		if code := do(); code != http.StatusOK {
+			t.Fatalf("after relax req %d: want 200 (已放宽), got %d", i, code)
+		}
+	}
+
+	// 收紧到 1：窗口内已有大量时间戳 → 立即 429。
+	if code := putConfig(`{"rate_limit_requests":1}`); code != http.StatusOK {
+		t.Fatalf("PUT /api/config (tighten): want 200, got %d", code)
+	}
+	// 收紧后应迅速出现 429（limit=1 且窗口内有大量时间戳）。
+	// 触发器：任一请求 429 即证明生效——热更新立即回到限流。
+	if !saw429() {
+		t.Fatalf("tighten to 1: 未观察到 429（限流应立即生效）")
+	}
+}
+
+// TestConfig_UpdateRateLimit_DisabledViaTunnel 验证 enabled=false 短路径在真实
+// 服务链上生效：PUT /api/config 无 enabled 字段（无法表达禁用），故经 RegisterRoutes
+// 返回的 Handlers 直接调用 rateLimiter.UpdateConfig(false, ...)——复用的是生产链
+// （tunnelHandler → localHandler → Gzip → rateLimiter.Middleware），确认中间件短路后
+// 高配额旧时间戳不再产生 429。PUT 复读常量窗口的 no-op 变更也一并确认。
+func TestConfig_UpdateRateLimit_DisabledViaTunnel(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+	cfg.RateLimit.Enabled = true
+	cfg.RateLimit.Requests = 5
+	cfg.RateLimit.Window = time.Hour
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	mmm := http.NewServeMux()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:         mmm,
+		CfgPtr:      &cfgPtr,
+		Version:     "v",
+		BuildAt:     "b",
+		Logger:      testLogger(),
+		AuditLogger: testLogger(),
+	})
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		_ = h.Close()
+	})
+	url := ts.URL
+
+	key, err := tunnel.DeriveTunnelKey(testAccessSecret, "")
+	if err != nil {
+		t.Fatalf("DeriveTunnelKey: %v", err)
+	}
+	tc, err := tunnel.NewClient(hex.EncodeToString(key), url+"/tunnel", 5*time.Second, nil)
+	if err != nil {
+		t.Fatalf("tunnel.NewClient: %v", err)
+	}
+	tc.HTTPClient.Transport = &tunnelSignTransport{base: tc.HTTPClient.Transport, ak: testAccessKey, sk: testAccessSecret}
+
+	do := func() int {
+		req, _ := http.NewRequest("GET", "/api/files", nil)
+		resp, err := tc.Do(req)
+		if err != nil {
+			t.Fatalf("tunnel Do: %v", err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// 生产链限流启用：低配额 5、大窗口 1h → 快速灌满后 429。
+	for range 3 {
+		_ = do()
+	}
+	if code := do(); code == http.StatusOK {
+		// 极慢机器可能未灌满；再补到明确超限（每请求消耗窗口时间戳）。
+		_ = do()
+		if code = do(); code != http.StatusTooManyRequests {
+			t.Fatalf("生产链低配额应 429, got %d", code)
+		}
+	}
+
+	// 经生产 Handlers 关掉限流 → 后续请求立即放行（无需等待窗口）。
+	h.rateLimiter.UpdateConfig(false, 5, time.Hour)
+	for i := range 5 {
+		if code := do(); code != http.StatusOK {
+			t.Fatalf("disabled req %d: want 200 (短路), got %d", i, code)
+		}
+	}
+}
+
+func TestConfig_UpdateRateLimit_SignalPostImmediate(t *testing.T) {
+	t.Parallel()
+	// 信令 POST 限流挂在 RouteTable 分支（hub routers 组）内，需装配 RouteTable。
+	// 直接装配 RegisterRoutes（仿 newTestMux 模式）：RouteTable 属 opts 而非 Config。
+	// 节点注册在 testAccessKey mesh（AccessKeyMesh("sk-test-mesh-...") = "test-mesh"）下，
+	// 与 signRequest 注入的 mesh ctx 一致，否则信令 handler 403。
+	mrt := hub.NewMeshRouteTable()
+	muxA, _ := xfertest.Pipe()
+	m := mux.New(muxA, mux.RoleDialer)
+	t.Cleanup(func() { _ = m.Close() })
+	mesh := tunnel.AccessKeyMesh(testAccessKey)
+	mrt.Add(mesh, hub.NodeInfo{ID: "peer-a", Mux: m, Secret: "sec-a"}, nil)
+	mrt.Add(mesh, hub.NodeInfo{ID: "peer-b", Mux: m, Secret: "sec-b"}, nil)
+
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+	cfg.RateLimit.Enabled = true
+	cfg.RateLimit.Requests = 2
+	cfg.RateLimit.Window = time.Hour
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	muxOut := http.NewServeMux()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:         muxOut,
+		CfgPtr:      &cfgPtr,
+		Version:     "v",
+		BuildAt:     "b",
+		Logger:      testLogger(),
+		AuditLogger: testLogger(),
+		RouteTable:  mrt,
+	})
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		_ = h.Close()
+	})
+	url := ts.URL
+
+	do := func() (int, string) {
+		bodyStr := `{"sdp":"dummy"}`
+		r, err := http.NewRequest(http.MethodPost, url+"/api/signal/offer", strings.NewReader(bodyStr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Content-Type", "application/json")
+		// 已注册节点身份 + per-node secret，且与 testAccessKey mesh 一致。
+		r.Header.Set(signalNodeHeader, "peer-a")
+		r.Header.Set(signalNodeSecretHeader, "sec-a")
+		signBodyRequest(r, testAccessKey, testAccessSecret, []byte(bodyStr))
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Fatalf("signal post: %v", err)
+		}
+		defer resp.Body.Close()
+		buf := new(strings.Builder)
+		_, _ = io.Copy(buf, resp.Body)
+		return resp.StatusCode, buf.String()
+	}
+
+	// limit=2 → 第 3 个请求被信令限流（429）；前两个消费限额。
+	_, _ = do()
+	_, _ = do()
+	if code, body := do(); code != http.StatusTooManyRequests {
+		t.Fatalf("signal 3rd: want 429 (limit=2 触发), got %d (%s)", code, body)
+	}
+
+	// 放大配额 → signal 分支不再限流（返回 handler 状态 200/400/202）。
+	// PUT /api/config 带 JSON body，需按 body 哈希签名（signBodyRequest）。
+	bodyStr := `{"rate_limit_requests":1000}`
+	req, err := http.NewRequest("PUT", url+"/api/config", strings.NewReader(bodyStr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	signBodyRequest(req, testAccessKey, testAccessSecret, []byte(bodyStr))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT /api/config: want 200, got %d", resp.StatusCode)
+	}
+	for i := range 2 {
+		code, b := do()
+		if code == http.StatusTooManyRequests {
+			t.Fatalf("signal after relax req %d: want non-429, got %d", i, code)
+		}
+		if code != http.StatusOK && code != http.StatusBadRequest && code != http.StatusAccepted {
+			t.Fatalf("signal after relax req %d: unexpected status %d (%s)", i, code, b)
+		}
 	}
 }

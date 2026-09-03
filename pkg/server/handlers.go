@@ -69,6 +69,14 @@ type Handlers struct {
 	uploadingWg    sync.WaitGroup       // 等待 cleanupUploadingFilesLoop 退出
 	closeOnce      sync.Once            // 防止 Close() 重复关闭 channel
 	noncePool      *sproxysig.NoncePool // SproxySig nonce 防重放池
+	// rateLimiter 是隧道内层 API handler 的全局限流器（RegisterRoutes 在
+	// cfg.RateLimit.Enabled 时创建并挂到 apiHandler）。PUT /api/config 经 configMu
+	// 保护调用 UpdateConfig 热更新（含 enabled/limit/window），无需重建 handler 链
+	// （xfer LocalHandler 已持有构造期引用）。nil = 启动未启用限流。
+	rateLimiter *RateLimiter
+	// signalPostRL 是信令 POST 专用限流器（独立实例，与文件传输隔离配额）。
+	// 热更新时与 rateLimiter 一起更新；nil = 启动未启用或未装配 RouteTable。
+	signalPostRL *RateLimiter
 
 	// 多租户存储布局装配（任务 4，供 P2/P3 各 handler 迁移复用）。
 	// globalRoot 是 OpenRoot 后的全局存储根（含 LAYOUT_VERSION 校验）；
@@ -602,6 +610,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	apiHandler = GzipMiddleware(log.With("component", "gzip"))(apiHandler)
 	if cfg.RateLimit.Enabled {
 		rl := NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "rate_limiter"))
+		h.rateLimiter = rl
 		apiHandler = rl.Middleware(apiHandler)
 	}
 	apiHandler = CORSMiddleware(cfg.CORS, log.With("component", "cors"))(apiHandler)
@@ -725,6 +734,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		var signalPostRL *RateLimiter
 		if cfg.RateLimit.Enabled {
 			signalPostRL = NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "signal_rate_limiter"))
+			h.signalPostRL = signalPostRL
 		}
 		signalPost := func(kind hub.SignalKind) http.HandlerFunc {
 			hf := func(w http.ResponseWriter, r *http.Request) {
