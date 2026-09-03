@@ -214,9 +214,18 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 		// Copy-on-Write: 存储新配置的副本
 		h.cfgPtr.Store(&cfg)
 
-		// RateLimiter 热更新：需要批次 C/D 添加 h.rateLimiter 字段和 UpdateConfig 方法
-		// TODO: 当 h.rateLimiter 字段可用时，在此处调用 h.rateLimiter.UpdateConfig(cfg.RateLimit.Requests, cfg.RateLimit.Window)
-
+		// RateLimiter 热更新：同一实例复用 mu 更新参数（enabled/limit/window），
+		// 不重建 handler 链（xfer LocalHandler 已持有构造期引用），不清空时间戳。
+		// 启动未启用限流（cfg.RateLimit.Enabled=false）时字段为 nil：PUT 不能开启
+		// （无 middleware 挂载，开也无效），静默跳过以对齐现有「不可热开启」语义。
+		// 注意：nil 分支的字段访问与启动分支读 cfg 位置一致，均值在 cfgPtr.Store 之后
+		// 读取的均是已更新副本，无竞态。
+		if h.rateLimiter != nil {
+			h.rateLimiter.UpdateConfig(cfg.RateLimit.Enabled, cfg.RateLimit.Requests, cfg.RateLimit.Window)
+		}
+		if h.signalPostRL != nil {
+			h.signalPostRL.UpdateConfig(cfg.RateLimit.Enabled, cfg.RateLimit.Requests, cfg.RateLimit.Window)
+		}
 		// 日志级别或格式变更时，立即重建 logger 使生效
 		if req.LogLevel != nil || req.LogFormat != nil {
 			h.rebuildLogger(&cfg)
