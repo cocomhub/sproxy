@@ -21,20 +21,17 @@ func segNameOfBucketPath(path string) string {
 // ScanAndRecalculate 把磁盘按租户桶归集的字节数交给 reconcileQuotaScopes，
 // 通过 quota.Scope.Adjust 把各桶 committed 校准到磁盘实际占用（重启后 Scope 不回溯）。
 
-// reconcileQuotaScopes 按租户桶归集磁盘占用，校准 per-tenant 配额 Scope 的 committed。
-// 校准语义：scope.Adjust(prev=当前 committed, next=磁盘字节数) → committed 收敛到磁盘实际。
-// 有在途预留（Reserved>0，如未 Commit 的云任务 partial）时跳过该桶——磁盘 partial 已计入
-// reserved，此时校准 committed 会造成双计（预留 Commit 后再叠加）。
-//
-// bucket_limits 分层配额（先深后浅，防双计）：
-//   - 扫描侧已把每个 user 桶文件同时归集进功能桶键 "user"（全量）与其目录链最长候选键
-//     （如 "user/videos/hd"）。reconcile 只对**装配过的 BucketLimits 键**做子目录校准——
-//     subdirKeys 即该租户装配的路径键（按段深排序）。
-//   - 顺序：先校准最深子目录（叶子 Adjust 到其磁盘字节），再向上父层。父层 Adjust(Usage,
-//     磁盘) 是净差语义（adjustUp 传播），会把子层已校准的 committed 吸收进位——串联数学
-//     使 user 桶收敛到磁盘总量、各子目录收敛到各自磁盘字节，**无双计**（推导见计划 §5.2）。
-//   - skip 传播：某子层在途预留被 skip 时，父层必须整体 skip（否则父层 Adjust 吸收子层
-//     diff 造成子层双计）。子层 skip → 该子层及其所有祖先本轮回调全部跳过。
+// 校准语义：
+//   - 先深后浅每键 scope.Adjust(scope.Usage(), diskSize) 收敛到磁盘实际（Adjust 净差、
+//     adjustUp 沿父链传播，父层会吸收子层 delta——串联数学使各键 committed 恰为磁盘字节，
+//     无双计，见上）；
+//   - 有在途预留（Reserved>0）或子层已 skip 时本键跳过（磁盘 partial 已计入 reserved，
+//     此时校准 committed 会造成双计）；skip 整体传播到前缀祖先；
+//   - 注意"读-修正"两拍非原子（先读 scope.Usage() 再 Adjust diff）：对同一键同时有写路径
+//     Commit/ReleaseUsage 时可能欠校/过校。磁盘与 Scope 在下次扫描自动收敛（扫描幂等），
+//     且写路径与 reconcile 共用同一把 Scope 锁（adjustUp/reserveUp 锁内操作），故仅存的
+//     竞态是"reconcile 读到 Usage 后、Adjust 前"写路径已落账——下次扫描自愈。如需强原子
+//     可引入 SetCommittedTo（原子写 commanded=磁盘值，TODO：低风险不阻塞）。
 func (h *Handlers) reconcileQuotaScopes(tenantBuckets map[string]map[string]int64) {
 	// 先确保所有涉及租户装配了 quota BucketLimits 段树（lazy 装配：未触碰过的租户在
 	// configuredBucketLimitKeys 前为空，导致子目录键缺失、校准退化为功能桶级）。装配由
