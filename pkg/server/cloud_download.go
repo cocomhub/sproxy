@@ -686,10 +686,15 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 复查任务状态与存在性：CancelTask/DeleteTask 可能在信号量获取与此处之间
 	// 执行，若状态已非 pending 或任务已从 map 中删除，则放弃下载。
 	if stored, ok := m.tasks[task.ID]; !ok || (stored.Status != "pending" && stored.Status != "downloading") {
+		status := ""
+		if ok {
+			// 锁内捕获 status：Unlock 后读取会与 ResumeTask/Cancel 的持锁写构成数据竞争。
+			status = stored.Status
+		}
 		m.mu.Unlock()
 		if ok {
 			m.logger.Info("download skipped, task status changed while acquiring slot",
-				"task_id", task.ID, "status", stored.Status)
+				"task_id", task.ID, "status", status)
 		} else {
 			m.logger.Info("download skipped, task deleted while acquiring slot", "task_id", task.ID)
 		}
@@ -1238,6 +1243,8 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	if reserved > 0 {
 		t.ReservedSize = 0
 	}
+	// 锁内捕获 t.Status：Unlock 后读取会与下载 goroutine 的 failTask/CancelTask 持锁写构成数据竞争。
+	delStatus := t.Status
 	m.mu.Unlock()
 
 	if reserved > 0 {
@@ -1247,7 +1254,7 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	// P4 租户配额：删除即放弃。QW/QuotaCommitted 统一回拨（含下载中边写边记字节）。
 	m.releaseTaskScope(t)
 
-	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", t.Status)
+	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", delStatus)
 
 	// 删除云端文件（按任务 owner 落租户 cloud 桶）
 	taskDir := m.taskDirFor(t.Owner, t.ID)

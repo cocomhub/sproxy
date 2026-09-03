@@ -92,6 +92,11 @@ func TestScope_GlobalCapExceeded(t *testing.T) {
 	if _, err := b.TryReserve(6); !errors.Is(err, ErrStorageFull) {
 		t.Fatalf("全局兜底应拒绝（6+6>10）, got %v", err)
 	}
+	// 父链失败回滚：b 自身未超上限（100），但父链全局拒绝后 b.reserved 必须回滚为 0，
+	// 否则产生"幽灵预留"（删除回滚代码后本断言必须失败）。
+	if got := b.Reserved(); got != 0 {
+		t.Fatalf("父链失败后 b 预留应回滚为 0, got %d", got)
+	}
 	resA.Release() // 归还
 	if _, err := b.TryReserve(6); err != nil {
 		t.Fatalf("释放后应可预留, got %v", err)
