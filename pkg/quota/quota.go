@@ -54,7 +54,11 @@ func (p *Pool) Reserved() int64 {
 }
 
 // MaxBytes 返回本池上限（0 = 不限制）。
+// 持读锁读取：SetMaxBytes 锁写时并发读不构成 data race（PUT /api/storage/config 热调
+// 上限与并发 MaxBytes 读同时发生时）。
 func (p *Pool) MaxBytes() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.maxBytes
 }
 
@@ -318,7 +322,7 @@ func (s *Scope) Usage() int64 { return s.pool.Usage() }
 func (s *Scope) Reserved() int64 { return s.pool.Reserved() }
 
 // MaxBytes 返回上限（0 = 不限制）。
-func (s *Scope) MaxBytes() int64 { return s.pool.maxBytes }
+func (s *Scope) MaxBytes() int64 { return s.pool.MaxBytes() }
 
 // Available 返回可用额度 = max − (committed+reserved)；max<=0 时返回 MaxInt64。
 func (s *Scope) Available() int64 { return s.pool.available() }

@@ -890,8 +890,8 @@ func (us *UploadStore) verifyTempChunks(session *ChunkedUploadSession) {
 }
 
 // verifyChunkChecksum 从 f 的 offset 起计算 length 字节的 SHA-256 并与 want 比较。
-// 与 pkg/quota.VerifyChunkChecksum 语义不同：后者从 offset 读到 EOF（任务 1 审查遗留，
-// 无长度参数），分片校验必须限定分片长度（末片短于 chunk_size），故此处用本地带长度实现。
+// 语义与 pkg/quota.VerifyChunkChecksum 一致（该包无调用方、纯工具；两者都限定分片
+// 长度，不再从 offset 读到 EOF）。此处保留本地实现避免包间耦合。
 func (us *UploadStore) verifyChunkChecksum(f *os.File, offset, length int64, want string) (bool, error) {
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return false, err
