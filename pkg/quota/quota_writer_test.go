@@ -6,8 +6,6 @@ package quota
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -43,19 +41,6 @@ func (r *failAfterReader) Read(p []byte) (int, error) {
 		return 1, nil
 	}
 	return 0, errTestRead
-}
-
-// expectedHashFromOffset 计算 f[offset:] 的 SHA-256 hex，供 VerifyChunkChecksum 断言。
-func expectedHashFromOffset(t *testing.T, f *os.File, offset int64) string {
-	t.Helper()
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		t.Fatalf("seek: %v", err)
-	}
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		t.Fatalf("hash: %v", err)
-	}
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 func TestQuotaWriterReserveThenCommit(t *testing.T) {
@@ -323,34 +308,6 @@ func TestWriteFileQuota(t *testing.T) {
 			t.Fatalf("copy 失败后 Reserved=%d want 0（释放 reserve）", got)
 		}
 	})
-}
-
-func TestVerifyChunkChecksum(t *testing.T) {
-	root := NewPool(1000)
-	s := root.Scope("/t", 100)
-	f, err := os.CreateTemp(t.TempDir(), "chk")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	defer os.Remove(f.Name())
-	defer f.Close()
-
-	data := []byte("hello world, chunk data!")
-	if _, err := f.WriteAt(data, 10); err != nil {
-		t.Fatalf("WriteAt: %v", err)
-	}
-	want := expectedHashFromOffset(t, f, 10)
-
-	if ok, err := s.VerifyChunkChecksum(f, 10, int64(len(data)), want); !ok || err != nil {
-		t.Fatalf("VerifyChunkChecksum()=(%v,%v) want (true,nil)", ok, err)
-	}
-	if ok, err := s.VerifyChunkChecksum(f, 10, int64(len(data)), "deadbeef"); ok || err != nil {
-		t.Fatalf("VerifyChunkChecksum()=(%v,%v) want (false,nil)", ok, err)
-	}
-	// 空 want 跳过校验返回 true（与 checksum.go 的 verifyChecksum 约定一致）。
-	if ok, err := s.VerifyChunkChecksum(f, 99999, 5, ""); !ok || err != nil {
-		t.Fatalf("空 want 应跳过校验, got (%v,%v)", ok, err)
-	}
 }
 
 // --- 配额磁盘封顶审查补充测试（quota_writer 侧） ---
@@ -703,39 +660,5 @@ func TestQuotaWriter_WriteAndFinishConcurrent(t *testing.T) {
 	}
 	if got := sink.n.Load(); got != total {
 		t.Fatalf("sink 收到字节=%d want %d", got, total)
-	}
-}
-
-// TestVerifyChunkChecksum_ScopeBounds 验证 VerifyChunkChecksum 语义修正：按 offset+length
-// 限定分片范围（不再从 offset 读到 EOF）。
-func TestVerifyChunkChecksum_ScopeBounds(t *testing.T) {
-	f := t.TempDir() + "/f.bin"
-	content := []byte("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ") // 36 字节
-	if err := os.WriteFile(f, content, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	fh, err := os.Open(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fh.Close()
-	root := NewPool(1000)
-	s := root.Scope("/t", 100)
-
-	// offset=0 length=10 → "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882"。
-	if ok, err := s.VerifyChunkChecksum(fh, 0, 10, "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882"); err != nil || !ok {
-		t.Fatalf("校验分片 0-10 应通过: ok=%v err=%v", ok, err)
-	}
-	// offset=10 length=5 → "f0393febe8baaa55e32f7be2a7cc180bf34e52137d99e056c817a9c07b8f239a"（不读后续字节）。
-	if ok, err := s.VerifyChunkChecksum(fh, 10, 5, "f0393febe8baaa55e32f7be2a7cc180bf34e52137d99e056c817a9c07b8f239a"); err != nil || !ok {
-		t.Fatalf("校验分片 10-15 应通过: ok=%v err=%v", ok, err)
-	}
-	// 错误 want → 不匹配。
-	if ok, err := s.VerifyChunkChecksum(fh, 10, 5, "abcdef"); err != nil || ok {
-		t.Fatalf("错误 want 应不匹配: ok=%v err=%v", ok, err)
-	}
-	// want 空 → 跳过。
-	if ok, err := s.VerifyChunkChecksum(fh, 99, 3, ""); err != nil || !ok {
-		t.Fatalf("空 want 应跳过: ok=%v err=%v", ok, err)
 	}
 }

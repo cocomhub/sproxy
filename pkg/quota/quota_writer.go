@@ -5,8 +5,6 @@ package quota
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"os"
 	"sync"
@@ -169,23 +167,4 @@ func (s *Scope) WriteFileQuota(ctx context.Context, f *os.File, size int64, r io
 	}
 	w.Finish(true, oldSize)
 	return n, nil
-}
-
-// VerifyChunkChecksum seek 读回 f 中 [offset, offset+length) 分片重算 SHA-256 hex 与 want
-// 比较，供重启逐块校验（chunk 完整复用校验）。length 限定分片真实范围（末片短于
-// chunk_size 时不会误读后续字节）；want 为空跳过校验返回 true。挂 *Scope 仅为复用路径
-// 样式（不涉及配额记账，纯 IO 校验工具）。
-func (s *Scope) VerifyChunkChecksum(f *os.File, offset, length int64, want string) (bool, error) {
-	if want == "" {
-		return true, nil
-	}
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return false, err
-	}
-	lim := io.LimitReader(f, length)
-	h := sha256.New()
-	if _, err := io.Copy(h, lim); err != nil {
-		return false, err
-	}
-	return hex.EncodeToString(h.Sum(nil)) == want, nil
 }
