@@ -81,7 +81,11 @@ func (w *QuotaWriter) Committed() int64 { return w.written }
 
 // ReleaseReserve 释放剩余 reserve 但保留已 commit 部分（写失败保留 .partial 供续传：
 // 已 commit 字节继续占账，未用 reserve 归还）。本 writer 结算后不再使用。
+// 幂等：reserved 已归零（重复调用/与 Finish 混用）时为空操作，防多扣。
 func (w *QuotaWriter) ReleaseReserve() {
+	if w.reserved <= 0 {
+		return
+	}
 	w.scope.pool.releaseUp(w.reserved)
 	w.reserved = 0
 }

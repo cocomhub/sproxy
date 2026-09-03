@@ -416,6 +416,13 @@ func (m *CloudDownloadManager) downloadSinkFactory(task *CloudTask) downloader.S
 		return nil
 	}
 	return func(w io.Writer, contentLength int64, resume bool) (downloader.QuotaSink, error) {
+		// task.qw 是被下载 goroutine 独占的使用者（创建/SetWriter/Finish 均在下载执行
+		// goroutine 内调用本闭包），但 SnapshotTask/ListTasks 的浅拷贝会以指针形式把
+		// task.qw 暴露给锁外读者 → 拷贝端置 nil 后，此处读写与下载 goroutine 串行即可
+		// 无 race（同一 goroutine，无并发）。防御：仍持 m.mu 保护，防止未来下载路径
+		// 分裂成多 goroutine（如 retry 重入）时引入竞态。
+		m.mu.Lock()
+		defer m.mu.Unlock()
 		if task.qw == nil {
 			var estimate int64
 			if contentLength > 0 {
@@ -433,18 +440,6 @@ func (m *CloudDownloadManager) downloadSinkFactory(task *CloudTask) downloader.S
 		task.qw.SetWriter(w)
 		return &quotaSinkAdapter{qw: task.qw}, nil
 	}
-}
-
-// releaseScopeCommitted 释放任务在 Scope 中的已确认占用（续传任务在 storage-full 清理
-// 时旧 .partial 已随整目录删除，须同步释放旧 committed 防配额泄漏）。
-func (m *CloudDownloadManager) releaseScopeCommitted(task *CloudTask) {
-	if task.QuotaCommitted <= 0 {
-		return
-	}
-	if scope := m.quotaScope(task.Owner); scope != nil {
-		scope.ReleaseUsage(task.QuotaCommitted)
-	}
-	task.QuotaCommitted = 0
 }
 
 // releaseTaskScope 释放任务在租户 Scope 中的全部占用（取消/删除/放弃路径）：
@@ -888,9 +883,9 @@ downloadDone:
 	reserved := stored.ReservedSize
 	if result.Size > reserved {
 		if err := m.storage.TryReserve(result.Size-reserved, CategoryCloud); err != nil {
-			// 全局账本不足：无法容纳实际大小，删文件 + 失败（Scope 侧已由 QW 落账，
-			// 整文件删除时 releaseScopeCommitted 统一释放，防配额泄漏）。
-			m.releaseScopeCommitted(stored)
+			// 全局账本不足：无法容纳实际大小，删文件 + 失败。Scope 侧由 QW 边写边记已落账
+			// （committed + 未用 reserve），releaseTaskScope 统一回拨防泄漏（含下载中字节）。
+			m.releaseTaskScope(stored)
 			stored.ReservedSize = 0
 			stored.Status = "failed"
 			stored.Error = "storage full after download"
@@ -988,7 +983,7 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 			if oldReserved > 0 {
 				m.storage.Release(oldReserved, CategoryCloud)
 			}
-			m.releaseScopeCommitted(task) // 续传任务旧 committed 随整目录删除释放
+			m.releaseTaskScope(task) // 整目录删除：QW committed + reserve 与 QuotaCommitted 一并回拨
 			task.ReservedSize = 0
 			task.Status = "failed"
 			task.Error = errMsg
@@ -1003,17 +998,21 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 			return
 		}
 	}
-	// 租户 Scope：记录 QW 已写量（Write 实时 commit）→ QuotaCommitted 供续传增量补预留与
-	// 取消/删除对账（ReleaseUsage）。失败保留 .partial 时已 commit 字节继续占账（供续传）；
-	// 下载器 Finish(false) 已交给 ReleaseReserve 释放未用 reserve、保留 committed。
+	// 租户 Scope：以 QW 或磁盘为基准 reconcile 到 committed（审查 I3「二选一」模型——
+	// 不得双计）。两条路径互斥：
+	//   1）task.qw 存活（本次下载边写边记进行中）：Write 已实时 commitUp，committed 即
+	//      QW 已写量 qw.Committed()，**不得再 Adjust**（否则与 commitUp 叠加双计）。
+	//      下载器 Finish(false) 已 ReleaseReserve（未用 reserve 归还），此处兜底清残余
+	//      reserve（幂等），QW 结算后置 nil，QuotaCommitted 记 qw.Committed() 供续传增量
+	//      补预留与取消/删除对账；
+	//   2）task.qw 已 nil（未建 QW / QW 已结算 / 磁盘真值）：以磁盘实际占用为基准 reconcile 到
+	//      committed——增量（手动落盘/旧语义测试）Adjust 补入，减量（force 清 partial）
+	//      Adjust 释放。scope 未装配恒 0。
 	if task.qw != nil {
 		task.QuotaCommitted = task.qw.Committed()
+		task.qw.ReleaseReserve() // 兜底清未用 reserve（已 Finish(false) 则幂等残余）
 		task.qw = nil
 	} else if scope := m.quotaScope(task.Owner); scope != nil {
-		// 无活跃 QW（未走 WriterDownloader / QW 已结算 / 下载器未建 QW 就失败）：
-		// 以磁盘实际占用为基准 reconcile 到 committed——增量（手动落盘/旧语义测试）Adjust
-		// 补入；减量（force 清 partial / 建 QW 前失败）Adjust 释放多出。任务保留 .partial
-		// 时 committed=磁盘，供续传增量补预留与取消/删除对账。
 		if actual != task.QuotaCommitted {
 			scope.Adjust(task.QuotaCommitted, actual)
 		}
@@ -1088,6 +1087,7 @@ func (m *CloudDownloadManager) findByURL(url, owner string) *CloudTask {
 	for _, t := range m.tasks {
 		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") && ownerVisible(t.Owner, owner) {
 			c := *t
+			c.qw = nil // 快照不暴露运行时配额句柄
 			return &c
 		}
 	}
@@ -1109,6 +1109,8 @@ func (m *CloudDownloadManager) SnapshotTask(id, owner string) (*CloudTask, bool)
 		return nil, false
 	}
 	c := *t
+	// 快照对外不暴露运行时配额句柄（QW 由下载 goroutine 独占使用；读者无需也不应触碰）。
+	c.qw = nil
 	return &c, true
 }
 
@@ -1127,6 +1129,7 @@ func (m *CloudDownloadManager) ListTasks(status string, offset, limit int, owner
 	for _, t := range m.tasks {
 		if (status == "" || t.Status == status) && ownerVisible(t.Owner, owner) {
 			c := *t
+			c.qw = nil // 快照不暴露运行时配额句柄（同 SnapshotTask）
 			all = append(all, &c)
 		}
 	}
@@ -1718,6 +1721,7 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 			if ok {
 				t.GroupID = ""
 				c := *t
+				c.qw = nil // 内部拷贝不携带运行时配额句柄（saveTask json 亦不含）
 				snap = &c
 			}
 			m.mu.Unlock()
