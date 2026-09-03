@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"io"
 	"os"
+	"sync"
 )
 
 // placeholderReserve 是外部下载在真实大小不可知时的占位预留（1 GiB）。
@@ -26,6 +27,7 @@ const placeholderReserve int64 = 1 << 30
 //   - Finish(true, oldSize)：成功——释放未用 reserve + 覆盖写 ReleaseUsage(oldSize)；
 //     Finish(false, _)：放弃——ReleaseUsage(written) 回拨已 commit 部分 + 释放剩余 reserve。
 type QuotaWriter struct {
+	mu       sync.Mutex // 叶锁：下载 goroutine 裸调 Write 与取消/删除持 m.mu 调 Committed/Finish 并发访问，整体加锁防数据竞争
 	scope    *Scope
 	writer   io.Writer
 	written  int64 // 已确认 committed 的实际写入量
@@ -52,6 +54,8 @@ func newQuotaWriterExact(s *Scope, w io.Writer, amount int64) (*QuotaWriter, err
 // Write 把本次写入量从 reserved 划入 committed；预留不够自动补留。
 // 补留失败返回 ErrStorageFull 且不回调已写量（preserve）。底层 writer 失败同样保留 reserve。
 func (w *QuotaWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	amount := int64(len(p))
 	if amount > w.reserved {
 		if err := w.scope.pool.reserveUp(amount - w.reserved); err != nil {
@@ -73,16 +77,26 @@ func (w *QuotaWriter) Write(p []byte) (int, error) {
 
 // SetWriter 替换底层写入目标（续传/重试复用同一 account：保留 reserved/committed 状态，
 // 仅换 sink 文件句柄）。调用方保证新 writer 是同一部分文件的追加句柄（或继续写入的空句柄）。
-func (w *QuotaWriter) SetWriter(dst io.Writer) { w.writer = dst }
+func (w *QuotaWriter) SetWriter(dst io.Writer) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writer = dst
+}
 
 // Committed 返回本 writer 已确认 committed 的字节数（Finish/结算前调用）。
 // 供调用方在结算时把已 commit 部分记入任务账本（QuotaWriter 本身 Finish 后清零）。
-func (w *QuotaWriter) Committed() int64 { return w.written }
+func (w *QuotaWriter) Committed() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.written
+}
 
 // ReleaseReserve 释放剩余 reserve 但保留已 commit 部分（写失败保留 .partial 供续传：
 // 已 commit 字节继续占账，未用 reserve 归还）。本 writer 结算后不再使用。
 // 幂等：reserved 已归零（重复调用/与 Finish 混用）时为空操作，防多扣。
 func (w *QuotaWriter) ReleaseReserve() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.reserved <= 0 {
 		return
 	}
@@ -94,6 +108,8 @@ func (w *QuotaWriter) ReleaseReserve() {
 // success=true 释放未用 reserve + 覆盖写 ReleaseUsage(oldSize)；
 // success=false 放弃：ReleaseUsage(written) 回拨已 commit 部分 + 释放剩余 reserve。
 func (w *QuotaWriter) Finish(success bool, oldSize int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if success {
 		w.scope.pool.releaseUp(w.reserved) // 释放未用 reserve
 		w.scope.ReleaseUsage(oldSize)      // 覆盖写释放旧文件占用

@@ -445,7 +445,8 @@ func (m *CloudDownloadManager) downloadSinkFactory(task *CloudTask) downloader.S
 // releaseTaskScope 释放任务在租户 Scope 中的全部占用（取消/删除/放弃路径）：
 //   - QuotaCommitted（完成/失败已记录）ReleaseUsage 回拨；
 //   - 下载中 QW 边写边记的已 commit 字节同样取 qw.Committed() 回拨（防取消时 Scope 虚高）；
-//   - qw.Finish(false) 清账（释放未用 reserve + 回拨 committed），供调用方随后放弃。
+//   - 只用 ReleaseReserve 归还 reserve，不用 Finish(false)（其内部已回拨 committed，
+//     与显式 ReleaseUsage 叠加会双释放）；已 commit 字节随后统一 ReleaseUsage 回拨。
 //
 // 幂等：复调/任务无占用/Scope 未装配均为空操作。
 func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
@@ -453,7 +454,7 @@ func (m *CloudDownloadManager) releaseTaskScope(task *CloudTask) {
 		released := task.QuotaCommitted
 		if task.qw != nil {
 			released += task.qw.Committed()
-			task.qw.Finish(false, 0)
+			task.qw.ReleaseReserve() // 只归还未用 reserve；已 commit 字节随后统一 ReleaseUsage 回拨（防双释放）
 			task.qw = nil
 		}
 		if released > 0 {
@@ -885,7 +886,11 @@ downloadDone:
 		if err := m.storage.TryReserve(result.Size-reserved, CategoryCloud); err != nil {
 			// 全局账本不足：无法容纳实际大小，删文件 + 失败。Scope 侧由 QW 边写边记已落账
 			// （committed + 未用 reserve），releaseTaskScope 统一回拨防泄漏（含下载中字节）。
+			// 下载器已 Finish(true)（qw.written=0），Scope 中 committed 恒等于 result.Size；
+			// 显式记录 QuotaCommitted 使 releaseTaskScope 按实际大小回拨（否则 released=0 泄漏）。
+			stored.QuotaCommitted = result.Size
 			m.releaseTaskScope(stored)
+			m.storage.Release(reserved, CategoryCloud) // 全局账本：删整文件归还创建期占位（与 ReservedSize 归零一致）
 			stored.ReservedSize = 0
 			stored.Status = "failed"
 			stored.Error = "storage full after download"
@@ -1003,13 +1008,14 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string) {
 	//   1）task.qw 存活（本次下载边写边记进行中）：Write 已实时 commitUp，committed 即
 	//      QW 已写量 qw.Committed()，**不得再 Adjust**（否则与 commitUp 叠加双计）。
 	//      下载器 Finish(false) 已 ReleaseReserve（未用 reserve 归还），此处兜底清残余
-	//      reserve（幂等），QW 结算后置 nil，QuotaCommitted 记 qw.Committed() 供续传增量
-	//      补预留与取消/删除对账；
+	//      reserve（幂等），QW 结算后置 nil，QuotaCommitted 累加本轮 qw.Committed()（续传
+	//      保留首轮 partial 占用，防覆盖漏计）供取消/删除对账；
 	//   2）task.qw 已 nil（未建 QW / QW 已结算 / 磁盘真值）：以磁盘实际占用为基准 reconcile 到
 	//      committed——增量（手动落盘/旧语义测试）Adjust 补入，减量（force 清 partial）
 	//      Adjust 释放。scope 未装配恒 0。
 	if task.qw != nil {
-		task.QuotaCommitted = task.qw.Committed()
+		// 续传场景 QuotaCommitted 保留首轮 partial 占用，累加而非覆盖（防首轮已记占用被覆盖漏计）。
+		task.QuotaCommitted += task.qw.Committed()
 		task.qw.ReleaseReserve() // 兜底清未用 reserve（已 Finish(false) 则幂等残余）
 		task.qw = nil
 	} else if scope := m.quotaScope(task.Owner); scope != nil {
