@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788344088368,
+  "lastUpdate": 1788461128614,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -321410,6 +321410,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1296049 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6eccd502936806a045c3fd1e6c6a0e561d4bf38e",
+          "message": "feat(quota): 配额磁盘封顶：bucket_limits 分层次配额 + 所有写路径封顶 + 端到端验证 (#154)\n\n* docs(quota): 配额磁盘封顶设计——内部路径预感知大小预留 + 外部下载 QuotaWriter 边下边记 + chunked seek 直写临时名\n\n* docs(plans): 配额磁盘封顶实现计划（8 任务 TDD，QuotaWriter+chunked seek+meta 配额）\n\n* feat(quota): 新增 QuotaWriter/BoundWriter/WriteFileQuota/VerifyChunkChecksum（外部下载边写边记 + 内部预预留工具）\n\n* feat(server): bucket_limits 配置 + meta 子 Scope 装配（相对租户根路径子目录上限，Quota 路径子 Scope 懒建）\n\n* feat(server): 任务 3 meta 桶纳入扫描——ScanAndRecalculate 不再 SkipDir，meta 字节归集进 tenantBuckets[\"meta\"] 并计入 totalUsage（UsageByCategory 4 键不变）；reconcile 真实校准 meta 子 Scope\n\n- 目录层去掉 meta SkipDir；switch 补 case meta → addTenantBucket(meta, size)\n- totalUsage 计入 meta（服务端账本占用属总量）；分类枚举保持 4 键，meta 不入分类\n- checksum 侧边文件跳过改为 isChecksumSidecar：新布局实为 <tenant>/meta/checksums.json\n  （不带点），旧名 .checksums.json 一并保留——避免 meta 桶字节随文件数膨胀/双计\n- quota_reconcile 白名单已含 meta（任务 2），仅同步注释；reconcile Adjust 对 meta 生效\n- 新增 2 测试：扫描归集 + reconcile 校准（meta 子 Scope/租户 Scope/globalPool 聚合）\n\n* feat(server): 任务4 chunked init 改造——临时名建整文件 + seek 直写 + user 桶预留（配额磁盘封顶）\n\n- init：already_exists 不建临时名；同名 session 同 checksum 复用、异 checksum 409；\n  TryReserve(TotalSize) 于 user 桶（507 清理 session）；.inflight-<hash16>-<uploadid>.part\n  O_EXCL 建文件 + Truncate(TotalSize)，session.TempPath 持久化（PersistNow）\n- chunk：读块→checksum 校验→BoundWriter(limit=分片实际长度) seek 直写整临时文件；\n  不再写独立 .chunk 文件；covered 幂等跳过保留\n- complete（最小可用，任务5接缝）：临时文件整文件校验 + rename；mismatch/覆盖写精确化留任务5\n- 清理：DeleteSession/cleanupExpired 删临时名（tempAbsPath 安全校验）+ 释放 user 桶预留\n- 恢复：启动逐分片内容校验（VerifyChunkChecksum 对齐），匹配保留、不匹配重传\n- 测试：新增 chunked_inflight_test.go（init/507/乱序/幂等/重启/清理）；更新 owner 重启、\n  reconcile（孤儿 .chunk 不再作为恢复依据）、SameBareID（分片长度对齐声明）等\n\n* feat(server): 任务5 complete 全文件校验 + mismatch_chunks + 覆盖写 ReleaseUsage（配额磁盘封顶）\n\n- complete 改写：临时名全文件 SHA-256 == file_checksum → rename → checksum store\n- 覆盖写 ReleaseUsage(old) 替代 Adjust（init 已 TryReserve，complete Commit + 释放旧文件字节）\n- 校验失败逐分片 seek 重算（带长度）→ 精确返回 mismatch_chunks（I-2 显式化）\n- 失败保留 session+临时名+预留供重传；mismatch 落盘清位（ClearChunksReceived）\n- findMismatchChunks/allMismatchIndices locate 坏分片（store 级）\n- versioning 覆盖写：checkExistingFileForInit 放行 + complete 前 saveVersion 备份\n- 客户端 ChunkedUploader.run 自动重传 mismatch 分片（有界，completeMaxAttempts=3）\n- ChunkCompleteResponse/ChunkedUploadResult 增加 MismatchChunks 协议字段\n- 恢复后 complete mismatch 一致（TestCompleteAfterRecovery_MismatchConsistent）\n\n* feat(server): 任务6 sync pull 逐文件预预留 + PerFileReserve reconcile 协调 + complete 响应体先读后判（配额磁盘封顶）\n\n* feat(server): 任务7 cloud download 接入 QuotaWriter 边写边记+自动补留（移除 scope Adjust 收尾；已知大小创建期预检；失败保留 .partial 供续传）\n\n* fix(server): 任务7 复审修复——failTask 租户 Scope 对账改「二选一」（QW 存活→记 qw.Committed() 不再 Adjust，防止与 commitUp 双计；QW 已结算→按磁盘 Adjust）；releaseTaskScope 统一回拨含下载中字节；快照拷贝置 qw=nil 堵 data race；ReleaseReserve 幂等防多扣\n\n* fix(server): 任务7 复审二次修复——QuotaWriter 加内部锁防 cancel/delete 并发竞争(C-1)；releaseTaskScope 改 ReleaseReserve 单次回拨防双释放(C-2)；storage-full 完成路径显式记 QuotaCommitted 并归还全局占位(I-1)；failTask 续传再失败 QuotaCommitted 累加防漏计(I-2)；组详情快照 qw 置 nil(Minor)\n\n* feat(server): 任务8 收尾——任务1/5/6 遗留 Minor 全修（bucket_limits 键校验+功能桶重叠拒绝、inflight 临时名 list/search 过滤、覆盖写审计、mismatch 全片分支、错误措辞区分）+ 测试矩阵补闭 + 全量验证\n\n* test(server): 测试覆盖补测闭环——审查A-E 缺口全补（quota 幂等/边界16项、chunked 越界/并发/version 数据级7项、cloud 并发回归+I-1双轨8项、写路径/bucket_limits/sync 8项）+ 修复 CancelTask/ResumeTask 锁外读 Status 数据竞争\n\n* fix(server): 二轮审查收尾——补齐 2 处同类锁外读 Status 竞态遗漏（downloadSkipped 日志/DeleteTask 日志锁内捕获）+ reserveUp 父链失败回滚断言锁定防幽灵预留\n\n* feat(server): bucket_limits 分层配额封顶所有场景——Pool 路由式 Resolve/EnsureScope 嵌套 Scope 自动逐级检查 + quotaScopeFor 最长前缀写路径解析 + reconcile 先深后浅防双计 + 客户端 507→ErrStorageFull\n\n* fix(quota): 审查W1/W2——MaxBytes 持读锁并发安全（PUT storage/config 热调 vs 并发读）+ VerifyChunkChecksum 改带 length 限界分片校验（原读到 EOF 语义误导，上传 store 注释同步）+ 界内校验测试(TDD)\n\n* refactor(quota): 审查 W3-W8——Scope.Mount 消类型同名歧义(W5) + stats UsageByBucket 子目录语义词例加锁(W3) + 收窄 Pool 公开面注释(生产仅 Scope 侧)(W4 文档固化) + Adjust 无上限依赖注释(W6) + reconcile 非原子两拍注释成 TODO(W7) + WriteFileQuota ctx 未用/BoundWriter 单写者注释(W8)\n\n* refactor(quota): 按用户指示移除 VerifyChunkChecksum——有价值复用迁至 pkg/testutil.ChecksumAt（通用分片校验工具，含测试）；quota 包清除 sha256/hex 依赖与 orphan helper；upload_store 注释同步引用新家\n\n* feat(server): rename 跨 bucket_limits 子目录配额对称转移——目标键先 TryReserve（配额不足 507 拒绝防绕过）→ 原子 Rename → 源键 ReleaseUsage；单条/batch rename 对齐，两键相同零操作，未装配退化为旧行为\n\n* docs(server): W7 reconcile 读-修正两拍非原子——补充定稿说明（同锁/幂等自愈/预留保护，低风险不阻塞；SetCommittedTo 原子校准为可选项）",
+          "timestamp": "2026-09-04T02:40:26+08:00",
+          "tree_id": "8fced82979a4a6d73d7fa777460ac57dad232c1e",
+          "url": "https://github.com/cocomhub/sproxy/commit/6eccd502936806a045c3fd1e6c6a0e561d4bf38e"
+        },
+        "date": 1788461119086,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 916.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1301320 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 916.3,
+            "unit": "ns/op",
+            "extra": "1301320 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1301320 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1301320 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 947,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1317608 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 947,
+            "unit": "ns/op",
+            "extra": "1317608 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1317608 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1317608 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 989.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1287294 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 989.3,
+            "unit": "ns/op",
+            "extra": "1287294 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1287294 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1287294 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 922.8,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1304508 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 922.8,
+            "unit": "ns/op",
+            "extra": "1304508 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1304508 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1304508 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1292329 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921.4,
+            "unit": "ns/op",
+            "extra": "1292329 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1292329 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1292329 times\n4 procs"
           }
         ]
       }
