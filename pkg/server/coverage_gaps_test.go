@@ -435,3 +435,127 @@ func TestUpload_ParseMultipartBodyLarge(t *testing.T) {
 		t.Errorf("expected 413 or 400, got %d", resp.StatusCode)
 	}
 }
+
+// TestRename_CrossSubdir_SymmetricQuota 验证（残余项：rename 跨 bucket_limits 子目录的
+// 配额对称转移）：
+//   - 上传 40B 到 user/music（无子目录限制，记 user 根）→ rename 到 user/videos/hd（上限 100）
+//     → 源键 user 释放 40、目标键 hd 入账 40（子目录配额对 rename 同样封顶）；
+//   - 再 rename 60B 同类到 hd（已有 40+60=100 恰满）→ 仍成功（恰好打满）；
+//   - 再 rename 1B 到 hd（100+1>100）→ 507 拒绝 + 目标键不泄漏预留（配额不足防绕过）。
+func TestRename_CrossSubdir_SymmetricQuota(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 300}
+	env.h.cfgPtr.Store(cfg)
+	umux := actorDelRenameMux(env.h, "alice")
+
+	mk := func(n int) []byte { return bytes.Repeat([]byte("a"), n) }
+	upload := func(path string, body []byte) {
+		t.Helper()
+		if code, resp := uploadAsPath(t, umux, path, body); code != http.StatusOK {
+			t.Fatalf("上传 %s 应 200, got %d: %s", path, code, resp)
+		}
+	}
+	rename := func(from, to string, body []byte) int {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/rename?from="+from+"&to="+to, nil)
+		req.Header.Set(headerFileChecksum, sha256hex(body))
+		rr := httptest.NewRecorder()
+		umux.ServeHTTP(rr, req)
+		return rr.Code
+	}
+
+	upload("music/a.txt", mk(40)) // user 桶 40、hd=0
+	// 跨子目录：music → videos/hd。
+	if code := rename("music/a.txt", "videos/hd/a.txt", mk(40)); code != http.StatusOK {
+		t.Fatalf("rename 到 hd 应 200, got %d", code)
+	}
+	if got := env.h.quotaScopeFor("alice", "user/videos/hd").Usage(); got != 40 {
+		t.Fatalf("rename 后 hd Usage=%d want 40（目标键入账）", got)
+	}
+	// 源键（user 根）释放：user 桶仍 40（hd 父链聚合），但 music 不再单独占用——验证源键
+	// ReleaseUsage 生效：user 桶总量仍 40（=hd 40）。
+	// 源文件原在 user/music（无 bucket_limits 子目录配置）→ 归集到 user 桶根。rename 后 user
+	// 根总量仍 40（=hd 40 父链聚合）——源键释放生效（music 不再额外占用，非跨键不残留）。
+	if got := env.h.quotaScopeFor("alice", "user").Usage(); got != 40 {
+		t.Fatalf("rename 后 user 桶根 Usage=%d want 40（=hd 40，源键已释放）", got)
+	}
+	// 恰好打满：再 rename 60B 到 hd（40+60=100 恰满）→ 成功。
+	upload("music/b.txt", mk(60))
+	if code := rename("music/b.txt", "videos/hd/b.txt", mk(60)); code != http.StatusOK {
+		t.Fatalf("恰好打满 rename 应 200, got %d", code)
+	}
+	if got := env.h.quotaScopeFor("alice", "user/videos/hd").Usage(); got != 100 {
+		t.Fatalf("hd Usage=%d want 100（恰满）", got)
+	}
+	// 超限：再 rename 1B 到 hd（100+1>100）→ 507 + 目标键不泄漏。
+	upload("music/c.txt", mk(1))
+	if code := rename("music/c.txt", "videos/hd/c.txt", mk(1)); code != http.StatusInsufficientStorage {
+		t.Fatalf("hd 已满 rename 应 507, got %d", code)
+	}
+	if got := env.h.quotaScopeFor("alice", "user/videos/hd").Reserved(); got != 0 {
+		t.Fatalf("507 后 hd Reserved=%d want 0（目标键不泄漏预留）", got)
+	}
+	// 目标键拒绝时源键始终未动：hd 100、user 根仍 101（music 1 + hd100 父链聚合）。
+	if got := env.h.quotaScopeFor("alice", "user").Usage(); got != 101 {
+		t.Fatalf("507 后 user 桶根 Usage=%d want 101（music 1 + hd 100）", got)
+	}
+}
+
+// TestBatchRename_CrossSubdir_SymmetricQuota 验证批量 rename 跨 bucket_limits 子目录的
+// 配额对称转移（与单条 rename 对齐）：目标键配额不足单条拒绝（批量继续），不泄漏预留。
+func TestBatchRename_CrossSubdir_SymmetricQuota(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 300}
+	env.h.cfgPtr.Store(cfg)
+	mux := actorDelRenameMux(env.h, "alice")
+
+	upload := func(path string, n int) {
+		t.Helper()
+		body := bytes.Repeat([]byte("a"), n)
+		if code, resp := uploadAsPath(t, mux, path, body); code != http.StatusOK {
+			t.Fatalf("上传 %s 应 200, got %d: %s", path, code, resp)
+		}
+	}
+	upload("music/a.txt", 40)
+	upload("music/b.txt", 70)
+
+	// 批量：第 1 条 40B→hd（成功），第 2 条 70B→hd（40+70=110>100 单条拒绝）。
+	body := fmt.Sprintf(`{"operations":[{"from":"music/a.txt","to":"videos/hd/a.txt","checksum":"%s"},{"from":"music/b.txt","to":"videos/hd/b.txt","checksum":"%s"}]}`,
+		sha256hex(bytes.Repeat([]byte("a"), 40)), sha256hex(bytes.Repeat([]byte("a"), 70)))
+	req := httptest.NewRequest("POST", "/api/batch/rename", bytes.NewReader([]byte(body)))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("batch rename 应 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Results []BatchOperationResult `json:"results"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析 batch 响应: %v", err)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("results 应 2 条, got %d", len(resp.Results))
+	}
+	if !resp.Results[0].Success {
+		t.Fatalf("第 1 条（40B→hd）应成功: %+v", resp.Results[0])
+	}
+	if resp.Results[1].Success {
+		t.Fatalf("第 2 条（70B→hd 超额）应失败: %+v", resp.Results[1])
+	}
+	// hd 只入账 40（第 1 条）；第 2 条目标键预留失败不泄漏。
+	if got := env.h.quotaScopeFor("alice", "user/videos/hd").Usage(); got != 40 {
+		t.Fatalf("batch rename 后 hd Usage=%d want 40", got)
+	}
+	if got := env.h.quotaScopeFor("alice", "user/videos/hd").Reserved(); got != 0 {
+		t.Fatalf("batch rename 后 hd Reserved=%d want 0（无泄漏）", got)
+	}
+	// 第 2 条源仍在 music（user 桶根记 70）。
+	if got := env.h.quotaScopeFor("alice", "user").Usage(); got != 110 {
+		t.Fatalf("user 桶根 Usage=%d want 110（music 70 + hd 40）", got)
+	}
+}

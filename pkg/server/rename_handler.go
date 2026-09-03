@@ -109,6 +109,47 @@ func executeRename(ctx renameOpCtx) error {
 		sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: errMsgCreateParentDirFailed}, http.StatusInternalServerError)
 		return err
 	}
+	// 配额：rename 在 user 桶内移动字节（总量不变，桶/租户级天然正确）。但跨 bucket_limits
+	// 子目录时 committed 归属需对称转移——源目录键释放、目标目录键入账（子目录配额对 rename
+	// 同样封顶，防止"先传受限目录外再 rename 进来"绕过）。非跨键（同目录/同键）零操作。
+	// 两键相同时无需记账（释放+入账互相抵消）；globalPool 未装配（quotaScopeFor 返回 nil）
+	// 时退化为无配额记账（旧行为，仅总量正确）。
+	if fromScope := ctx.h.quotaScopeFor(ctx.owner, ctx.fromRel); fromScope != nil {
+		if toScope := ctx.h.quotaScopeFor(ctx.owner, ctx.toRel); toScope != nil && fromScope != toScope {
+			if srcInfo, statErr := ctx.root.Stat(ctx.fromRel); statErr == nil {
+				size := srcInfo.Size()
+				// 目标键先 TryReserve（子目录/租户/全局逐级检查，配额不足拒绝移动避免超限），
+				// 成功后再原子 Rename，最后源键 ReleaseUsage。若 Rename 失败则 Release 归还目标预留。
+				toRes, err := toScope.TryReserve(size)
+				if err != nil {
+					ctx.h.RecordAudit(ctx.ctx, AuditEvent{
+						Action: "rename", ObjectType: "file", Object: ctx.from,
+						Result: AuditResultDenied, Detail: "目标目录配额不足: to=" + ctx.to,
+					})
+					ctx.logger.WarnContext(ctx.ctx, "rename 目标目录配额不足", "from", ctx.fromRel, "to", ctx.toRel, "size", size)
+					sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "目标目录配额不足"}, http.StatusInsufficientStorage)
+					return errors.New("rename: 目标目录配额不足")
+				}
+				if err := atomicRenameRoot(ctx.root, ctx.fromRel, ctx.toRel); err != nil {
+					toRes.Release() // Rename 失败归还目标预留（源键未动）。
+					ctx.h.RecordAudit(ctx.ctx, AuditEvent{
+						Action: "rename", ObjectType: "file", Object: ctx.from,
+						Result: AuditResultError, Detail: "重命名失败: " + ctx.to,
+					})
+					ctx.logger.ErrorContext(ctx.ctx, "重命名失败", "from", ctx.from, "to", ctx.to, "error", err.Error())
+					sendJSONResponse(ctx.w, UploadResponse{Success: false, Message: "重命名失败"}, http.StatusInternalServerError)
+					return err
+				}
+				toRes.Commit(size) // 目标键入账。
+				fromScope.ReleaseUsage(size)
+				if cs := ctx.h.checksumStoreFor(ctx.owner); cs != nil {
+					cs.Rename(ctx.fromRel, ctx.toRel)
+				}
+				return nil
+			}
+			// 源文件 stat 失败（理论不可达：上方已 Stat 校验存在）：不记账，继续原链路。
+		}
+	}
 	if err := atomicRenameRoot(ctx.root, ctx.fromRel, ctx.toRel); err != nil {
 		ctx.h.RecordAudit(ctx.ctx, AuditEvent{
 			Action: "rename", ObjectType: "file", Object: ctx.from,
@@ -179,6 +220,52 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op 
 		})
 		result.Message = "创建父目录失败"
 		return result
+	}
+	// 配额：跨 bucket_limits 子目录移动时对称转移（与 executeRename 同语义）。目标键配额
+	// 不足 → 单条拒绝（批量继续处理其余）。globalPool 未装配（scope nil）时退化为无记账。
+	if fromScope := h.quotaScopeFor(owner, fromRel); fromScope != nil {
+		if toScope := h.quotaScopeFor(owner, toRel); toScope != nil && fromScope != toScope {
+			srcInfo, statErr := root.Stat(fromRel)
+			if statErr == nil {
+				size := srcInfo.Size()
+				toRes, err := toScope.TryReserve(size)
+				if err != nil {
+					h.RecordAudit(ctx, AuditEvent{
+						Action: "rename", ObjectType: "file", Object: op.From,
+						Result: AuditResultDenied, Detail: "目标目录配额不足（batch）: to=" + op.To,
+					})
+					logger.WarnContext(ctx, "batch rename 目标目录配额不足", "from", fromRel, "to", toRel, "size", size)
+					result.Message = "目标目录配额不足"
+					return result
+				}
+				if err := atomicRenameRoot(root, fromRel, toRel); err != nil {
+					toRes.Release()
+					logger.ErrorContext(ctx, "batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
+					h.RecordAudit(ctx, AuditEvent{
+						Action: "rename", ObjectType: "file", Object: op.From,
+						Result: AuditResultError, Detail: "重命名失败: to=" + op.To,
+					})
+					result.Message = "重命名失败"
+					return result
+				}
+				toRes.Commit(size)
+				fromScope.ReleaseUsage(size)
+				if cs := h.checksumStoreFor(owner); cs != nil {
+					cs.Rename(fromRel, toRel)
+				}
+				h.RecordAudit(ctx, AuditEvent{
+					Action: "rename", ObjectType: "file", Object: from,
+					Result: AuditResultSuccess, Detail: "to=" + to,
+				})
+				logger.InfoContext(ctx, "文件已重命名", "from", op.From, "to", op.To)
+				return BatchOperationResult{
+					Filename: op.From + " -> " + op.To,
+					Success:  true,
+					Message:  "重命名成功",
+				}
+			}
+			// stat 失败（理论不可达）：按无配额路径继续，不误报。
+		}
 	}
 	if err := atomicRenameRoot(root, fromRel, toRel); err != nil {
 		logger.ErrorContext(ctx, "batch rename 失败", "from", op.From, "to", op.To, "error", err.Error())
