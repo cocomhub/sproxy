@@ -524,6 +524,12 @@ func (c *Config) Validate() error {
 		if slices.Contains(quotaBucketNames, n) {
 			return fmt.Errorf("bucket_limits 键 %q 与功能桶根重叠：功能桶根上限由租户总 owner_quotas 单一执行，不支持单独 bucket_limits 覆盖", path)
 		}
+		// 键首段必须为 "user"（分层配额仅挂 user 桶 children 下）。cloud/archive/chunk/version
+		// 桶内无用户子目录目录（archive/<name>、cloud/<taskID>），对它们配子目录永不生效，
+		// 配置即拒绝防误导（fail-closed）。
+		if first, _, ok := strings.Cut(n, "/"); !ok || first != "user" {
+			return fmt.Errorf("bucket_limits 键 %q 非法：分层配额仅支持 user 桶子目录（如 user/videos/hd），其余功能桶无子目录结构", path)
+		}
 		if limit < 0 {
 			return fmt.Errorf("bucket_limits[%q] 上限 %d 非法：配额上限不能为负", path, limit)
 		}

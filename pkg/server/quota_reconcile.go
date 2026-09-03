@@ -5,6 +5,8 @@ package server
 
 import (
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -20,29 +22,106 @@ func segNameOfBucketPath(path string) string {
 // 通过 quota.Scope.Adjust 把各桶 committed 校准到磁盘实际占用（重启后 Scope 不回溯）。
 
 // reconcileQuotaScopes 按租户桶归集磁盘占用，校准 per-tenant 配额 Scope 的 committed。
-// 校准全部参与配额归集的功能桶（user/cloud/archive/chunk/version/meta，meta 为服务端账本
-// 桶，任务 3 起随扫描计入；quotaBucketNames 白名单统一遍历）。
 // 校准语义：scope.Adjust(prev=当前 committed, next=磁盘字节数) → committed 收敛到磁盘实际。
 // 有在途预留（Reserved>0，如未 Commit 的云任务 partial）时跳过该桶——磁盘 partial 已计入
 // reserved，此时校准 committed 会造成双计（预留 Commit 后再叠加）。
+//
+// bucket_limits 分层配额（先深后浅，防双计）：
+//   - 扫描侧已把每个 user 桶文件同时归集进功能桶键 "user"（全量）与其目录链最长候选键
+//     （如 "user/videos/hd"）。reconcile 只对**装配过的 BucketLimits 键**做子目录校准——
+//     subdirKeys 即该租户装配的路径键（按段深排序）。
+//   - 顺序：先校准最深子目录（叶子 Adjust 到其磁盘字节），再向上父层。父层 Adjust(Usage,
+//     磁盘) 是净差语义（adjustUp 传播），会把子层已校准的 committed 吸收进位——串联数学
+//     使 user 桶收敛到磁盘总量、各子目录收敛到各自磁盘字节，**无双计**（推导见计划 §5.2）。
+//   - skip 传播：某子层在途预留被 skip 时，父层必须整体 skip（否则父层 Adjust 吸收子层
+//     diff 造成子层双计）。子层 skip → 该子层及其所有祖先本轮回调全部跳过。
 func (h *Handlers) reconcileQuotaScopes(tenantBuckets map[string]map[string]int64) {
+	// 先确保所有涉及租户装配了 quota BucketLimits 段树（lazy 装配：未触碰过的租户在
+	// configuredBucketLimitKeys 前为空，导致子目录键缺失、校准退化为功能桶级）。装配由
+	// ensureTenantQuotaLocked 完成（含 BucketLimits 子 Scope 懒建）。
+	for tenant := range tenantBuckets {
+		h.ensureTenantQuotaLocked(tenant)
+	}
 	for tenant, buckets := range tenantBuckets {
 		// 仅校准合法租户（避免 legacy 目录/非法段名被当作租户建 Scope）。
-		// 段名校验单一权威在 pkg/storage.ValidSegmentName（P5 收敛）。
 		if !storage.ValidSegmentName(tenant) {
 			continue
 		}
-		for _, b := range quotaBucketNames {
-			scope := h.quotaBucketFor(tenant, b)
+		// 功能桶（quotaBucketNames）+ 该租户装配的 BucketLimits 子目录键（段深升序）。
+		keys := append([]string{}, quotaBucketNames...)
+		keys = append(keys, h.configuredBucketLimitKeys(tenant)...)
+		// 先深后浅：子目录键（段深大）先于功能桶（段深 1）与无前缀键。
+		sort.SliceStable(keys, func(i, j int) bool {
+			return depthOfKey(keys[i]) > depthOfKey(keys[j])
+		})
+		// 按键校准；被 skip 的键及其前缀祖先全部跳过（已校准父层会因 skip 吸收 diff 双计，
+		// 故跳过时标记该键"不可用"传播——实现为调整顺序：子层 skip 后父层不再 Adjust）。
+		skipped := make(map[string]bool)
+		for _, key := range keys {
+			if skipped[key] {
+				continue
+			}
+			scope := h.quotaBucketFor(tenant, key)
 			if scope == nil {
 				continue
 			}
-			if scope.Reserved() > 0 {
-				// 在途预留：跳过本桶校准（避免把 reserved 的 partial 双计为 committed）。
+			if scope.Reserved() > 0 || h.anyChildSkipped(key, skipped) {
+				// 在途预留或子层已被 skip → 本键及其前缀祖先跳过（双计保护）。
+				skipped[key] = true
+				if pfx := parentKeyOf(key); pfx != "" {
+					skipped[pfx] = true
+				}
 				continue
 			}
-			diskSize := buckets[b]
+			diskSize := buckets[key]
 			scope.Adjust(scope.Usage(), diskSize)
 		}
 	}
+}
+
+// configuredBucketLimitKeys 返回该租户装配的 BucketLimits 路径键（仅 user 子树，按
+// quotaBuckets map 中路径键集合；未装配租户返回空）。
+func (h *Handlers) configuredBucketLimitKeys(tenant string) []string {
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	buckets := h.quotaBuckets[tenant]
+	if buckets == nil {
+		return nil
+	}
+	var keys []string
+	for k := range buckets {
+		if strings.HasPrefix(k, "user/") {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// anyChildSkipped 判断 key 是否有更深层的子键已被 skip（先深后浅序下仅需查已跳过集合）。
+func (h *Handlers) anyChildSkipped(key string, skipped map[string]bool) bool {
+	for k := range skipped {
+		if k == key {
+			continue
+		}
+		if strings.HasPrefix(k, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// depthOfKey 返回路径键段数（"user" → 1、"user/videos/hd" → 3）。
+func depthOfKey(key string) int {
+	if key == "" {
+		return 0
+	}
+	return strings.Count(key, "/") + 1
+}
+
+// parentKeyOf 返回路径键的父键（"user/videos/hd" → "user/videos"；一级键 → ""）。
+func parentKeyOf(key string) string {
+	if i := strings.LastIndexByte(key, '/'); i > 0 {
+		return key[:i]
+	}
+	return ""
 }

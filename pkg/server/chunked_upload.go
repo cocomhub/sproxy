@@ -240,7 +240,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		// 临时名过 storage.ValidSegmentName，不以 .inflight 开头的 .part 会被扫描按普通
 		// 文件计入 user 桶配额（此处已 TryReserve，账本一致）；会话记录 tempPath。
 		// 全局兜底由 Scope 父链自动生效；未装配 quota 时回退旧 storageMgr 预留。
-		scope := h.quotaBucketFor(owner, "user")
+		scope := h.quotaScopeFor(owner, rel)
 		if scope != nil {
 			rr, reserveErr := scope.TryReserve(session.TotalSize)
 			if reserveErr != nil {
@@ -913,7 +913,9 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	// 覆盖写再 ReleaseUsage(old) 释放已无磁盘实体的旧文件字节。净效果：committed 恰好等于
 	// 新文件真实大小（显式对账，替代 Adjust 差分）。Release 原子生效一次——CompleteSession
 	// 后 CleanupSessionAfter 删除会话时的额外 Release/Commit 为空操作。
-	if scope := h.quotaBucketFor(owner, "user"); scope != nil {
+	// scope 按文件实际 rel 解析（与 init 同一键，EnsureScope 缓存复用→同对象），子目录配额
+	// 与 user 桶/租户逐级检查一致性由父链聚合保证。
+	if scope := h.quotaScopeFor(owner, rel); scope != nil {
 		if session.Reservation != nil {
 			// 先提交新文件字节（reserved → committed），再释放旧文件字节。
 			session.Reservation.Commit(session.TotalSize)

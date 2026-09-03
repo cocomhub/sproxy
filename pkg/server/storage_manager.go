@@ -225,7 +225,16 @@ func (s *StorageManager) ScanAndRecalculate() error {
 		case "user":
 			userFiles += size
 			userFileCount++
-			addTenantBucket(tenantBuckets, firstSegment(rel), "user", size)
+			tenant := firstSegment(rel)
+			addTenantBucket(tenantBuckets, tenant, "user", size)
+			// bucket_limits 子目录归集：把该文件同时计入其最长命中的路径键（如
+			// "user/videos/hd"），供 reconcile 先深后浅校准子 Scope committed。
+			// bucketDirKey 仅在有子目录链时返回非空键（桶内顶级文件返回 "" → 跳过，不额外
+			// 归集，避免与功能桶键重复双计）。scanner 纯机械归集，键集合由 reconcile 按
+			// 装配的段树过滤（未配置前缀不建立 scope/键）。
+			if dirKey := bucketDirKey(rel); dirKey != "" {
+				addTenantBucket(tenantBuckets, tenant, dirKey, size)
+			}
 		case "cloud", "archive":
 			cloud += size
 			addTenantBucket(tenantBuckets, firstSegment(rel), bucket, size)
@@ -313,6 +322,31 @@ func addTenantBucket(m map[string]map[string]int64, tenant, bucket string, size 
 		m[tenant] = b
 	}
 	b[bucket] += size
+}
+
+// dirPathSuffix 返回 rel 的"桶内目录链键候选"（bucket_limits 键，含功能桶前缀）：
+// rel="alice/user/videos/hd/a.mkv" → "user/videos/hd"；桶内顶级文件 "alice/user/f.txt"
+// → ""（无子目录键：扫描仅归集到功能桶键 "user"，避免与功能桶键重复双计）。
+// reconcile 侧只对装配过的 BucketLimits 键做子目录校准（未配置前缀不建立键/scope）。
+func dirPathSuffix(rel string) string {
+	rest, _, hasSlash := strings.Cut(rel, "/")
+	if !hasSlash {
+		return ""
+	}
+	// rel[首段租户+1 : 最后文件名前的 slash] 是桶内目录链（含功能桶首段）。
+	if idx := strings.LastIndexByte(rel, '/'); idx >= 0 {
+		suffix := rel[len(rest)+1 : idx]
+		if strings.Contains(suffix, "/") {
+			return suffix // 存在桶内子目录（至少 user/dir/...）
+		}
+	}
+	return "" // 桶内顶级文件（无子目录键）
+}
+
+// bucketDirKey 返回 user 桶文件的 bucket_limits 子目录键候选；无子目录时为 ""（扫描不
+// 再额外归集，避免与功能桶键重复双计）。
+func bucketDirKey(rel string) string {
+	return dirPathSuffix(rel)
 }
 
 func (s *StorageManager) addCategory(cat StorageCategory, delta int64) {

@@ -343,10 +343,12 @@ func runServer(cmd *cobra.Command, args []string) error {
 		}
 		// P4/P5：quota 以 nil 注入（NewManager 内部回退 noop），随后 SetQuotaResolver 注入
 		// per-owner resolver（sync pull 按任务 owner 在 user 桶 Scope 上预留/对账，owner_quotas 生效）。
-		// 逐文件写前 guard：由 syncexec.Executor 装配 h.SyncQuotaScope()（= quotaBucketFor(owner,"user")），
-		// pull 本地写侧每个文件 TryReserve(size) 后再落盘，配额不足该文件失败（不中止整体）。
+		// 逐文件写前 guard：由 syncexec.Executor 装配 h.SyncQuotaScope() 与 h.SyncScopeFor()——
+		// pull 本地写侧每个文件按实际 rel 路由到 bucket_limits 子目录子 Scope 后 TryReserve(size)
+		// 再落盘，配额不足该文件失败（不中止整体）；子目录配额对 sync pull 生效。
 		exec := syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec"))
 		exec.SetTenantScopeResolver(h.SyncQuotaScope())
+		exec.SetScopeResolver(h.SyncScopeFor())
 		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(server.CategoryUserFiles),
 			remotes, exec,
 			logger.With("component", "sync"),

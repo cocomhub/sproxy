@@ -82,6 +82,13 @@ func (h *Handlers) SyncQuotaScope() func(owner string) *quota.Scope {
 	}
 }
 
+// SyncScopeFor 返回按 (owner, rel) 解析配额子 Scope 的解析器（供 syncexec.Executor 逐文件
+// 写前 guard 按文件实际 rel 路由 bucket_limits 子目录配额；与服务端写路径 quotaScopeFor
+// 同一引用，子目录配额对 sync pull 生效）。
+func (h *Handlers) SyncScopeFor() func(owner, rel string) *quota.Scope {
+	return h.quotaScopeFor
+}
+
 // syncTenantRoot 按任务 owner 解析租户 user 根与 meta/sync 持久化目录绝对路径。
 // 空 owner → anonymous 租户；租户不可用（非法 owner / 存储根未装配）返回 ok=false
 // （写路径 fail-closed，绝不回落全局根）。装配层与 syncmgr.TenantRootResolver 对接，

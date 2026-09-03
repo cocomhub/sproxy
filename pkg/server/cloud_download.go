@@ -2014,6 +2014,8 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 
 	// 状态先切 pending + running 同步置位：并发双 resume 中第二个会因 running 已置
 	// 被上面的检查拦截，避免两个 goroutine 并发写同一 .partial（Critical 修复）。
+	// UpdatedAt 在 running 置位后更新（值语义）：waitTaskStopped 以 running 为终态信号，
+	// 先置 running 保证 watcher 一旦观察到即可视为本次 resume 已生效；UpdatedAt 紧随写入。
 	task.Status = "pending"
 	m.running[taskID] = true
 	task.Error = ""

@@ -14,25 +14,33 @@ import (
 // sumRootDirSize 递归统计租户根内 rel 子树下所有普通文件的总字节数（rmdir 配额释放用）。
 // 经 root.ReadDir 相对遍历（os.Root 防符号链接逃逸），跳过符号链接（Lstat 语义不计数），
 // 子目录递归累加。rmdir 删除前调用，删除成功后按该字节数 ReleaseUsage（I2 修复）。
-func sumRootDirSize(root *storage.Root, rel string) int64 {
-	var total int64
+// rmdirFileStat 是 rmdir 配额释放收集项：每个被删文件的完整相对路径（含功能桶前缀）
+// 与其字节数。按文件 rel 分键释放到对应子 Scope（bucket_limits 子目录配额一致）。
+type rmdirFileStat struct {
+	rel  string
+	size int64
+}
+
+// sumRootDirFiles 递归收集租户根内 rel 子树下所有普通文件（符号链接跳过）的 {rel, size}，
+// rmdir 配额释放用（per-file 分键，保证删除释放落到正确的子目录 Scope）。
+func sumRootDirFiles(root *storage.Root, rel string, out *[]rmdirFileStat) {
 	entries, err := root.ReadDir(rel)
 	if err != nil {
-		return 0
+		return
 	}
 	for _, e := range entries {
+		childRel := rel + "/" + e.Name()
 		if e.IsDir() {
-			total += sumRootDirSize(root, rel+"/"+e.Name())
+			sumRootDirFiles(root, childRel, out)
 			continue
 		}
 		if e.Type()&os.ModeSymlink != 0 {
 			continue
 		}
 		if info, err := e.Info(); err == nil {
-			total += info.Size()
+			*out = append(*out, rmdirFileStat{rel: childRel, size: info.Size()})
 		}
 	}
-	return total
 }
 
 // mkdir 创建指定子目录。?dirname=path
@@ -143,9 +151,11 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// P5 配额（I2 修复）：删除前统计目录树内文件总字节（user 桶），删除成功后 ReleaseUsage，
-	// 避免 rmdir 递归删除后 user 桶 committed 虚高、用户被误拒 507（与单文件/批量 delete 释放一致）。
-	dirSize := sumRootDirSize(root, rel)
+	// P5 配额（I2 修复）：删除前收集目录树内所有文件 {rel, size}（per-file 分键释放，
+	// 保证 bucket_limits 子目录配额与释放对称——子目录删除释放落到对应子 Scope，沿父链
+	// 聚合到 user 桶/租户）。
+	var dirFiles []rmdirFileStat
+	sumRootDirFiles(root, rel, &dirFiles)
 
 	// 使用 root.RemoveAll 安全递归删除（os.Root 保证符号链接不逃逸）
 	if err := root.RemoveAll(rel); err != nil {
@@ -154,10 +164,10 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 删除成功后按目录树实际字节释放 user 桶配额占用。
-	if dirSize > 0 {
-		if scope := h.quotaBucketFor(ownerFromRequest(r), "user"); scope != nil {
-			scope.ReleaseUsage(dirSize)
+	// 删除成功后按各文件实际子 Scope（按 rel 解析）释放配额占用。
+	for _, f := range dirFiles {
+		if scope := h.quotaScopeFor(ownerFromRequest(r), f.rel); scope != nil {
+			scope.ReleaseUsage(f.size)
 		}
 	}
 

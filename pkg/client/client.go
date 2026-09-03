@@ -542,7 +542,13 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, fmt.Errorf("上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		err := fmt.Errorf("上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
+		// （与 doRequest 的 507 映射一致；上传是对 507 做业务响应的路径，需在此补映射）。
+		if resp.StatusCode == http.StatusInsufficientStorage {
+			return nil, fmt.Errorf("%w: %s", ErrStorageFull, err.Error())
+		}
+		return nil, err
 	}
 
 	var result UploadResult
@@ -570,6 +576,9 @@ func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		if resp.StatusCode == http.StatusInsufficientStorage {
+			return fmt.Errorf("%w: %s", ErrStorageFull, fmt.Sprintf("创建目录失败 (HTTP %d): %s", resp.StatusCode, string(body)))
+		}
 		return fmt.Errorf("创建目录失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 	return nil
@@ -588,6 +597,9 @@ func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		if resp.StatusCode == http.StatusInsufficientStorage {
+			return fmt.Errorf("%w: %s", ErrStorageFull, fmt.Sprintf("删除目录失败 (HTTP %d): %s", resp.StatusCode, string(body)))
+		}
 		return fmt.Errorf("删除目录失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 	return nil
@@ -785,6 +797,9 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		if resp.StatusCode == http.StatusInsufficientStorage {
+			return fmt.Errorf("%w: %s", ErrStorageFull, fmt.Sprintf("删除失败 (HTTP %d): %s", resp.StatusCode, string(body)))
+		}
 		return fmt.Errorf("删除失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -839,6 +854,9 @@ func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) 
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		if resp.StatusCode == http.StatusInsufficientStorage {
+			return fmt.Errorf("%w: %s", ErrStorageFull, fmt.Sprintf("重命名失败 (HTTP %d): %s", resp.StatusCode, string(body)))
+		}
 		return fmt.Errorf("重命名失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 	return nil
@@ -1028,6 +1046,9 @@ func (c *FileClient) BatchDelete(ctx context.Context, files []BatchDeleteFile) (
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		if resp.StatusCode == http.StatusInsufficientStorage {
+			return nil, fmt.Errorf("%w: %s", ErrStorageFull, fmt.Sprintf("批量删除失败 (HTTP %d): %s", resp.StatusCode, string(body)))
+		}
 		return nil, fmt.Errorf("批量删除失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 	var result struct {

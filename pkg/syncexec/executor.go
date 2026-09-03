@@ -31,6 +31,10 @@ type Executor struct {
 	// 由 syncmgr 占位/对账机制兜底——兼容未装配 Scope 的旧装配）。写前逐文件
 	// TryReserve(文件 size) 是"写前 guard"，写成功 Commit(actual) 使 user 桶等额入账。
 	TenantScope func(owner string) *quota.Scope
+	// ScopeFor 按 (owner, rel) 解析配额子 Scope（rel 含功能桶前缀，如 "user/dir/f.txt"；
+	// 最长前缀命中 bucket_limits 子目录）。优先于 TenantScope：逐文件预留时按文件实际
+	// 路径路由，子目录配额对 sync pull 生效；未装配时退化为 nil（直写，由占位对账兜底）。
+	ScopeFor func(owner, rel string) *quota.Scope
 	// Logger 是执行日志。
 	Logger *slog.Logger
 }
@@ -38,6 +42,10 @@ type Executor struct {
 // SetTenantScopeResolver 注入 user 桶配额 Scope 解析器（装配层在 newExecutor 后调用；
 // 测试用独立 quota.Pool 建 Scope）。未注入时逐文件预留关闭。
 func (e *Executor) SetTenantScopeResolver(f func(owner string) *quota.Scope) { e.TenantScope = f }
+
+// SetScopeResolver 注入按 (owner, rel) 解析配额子 Scope 的解析器（bucket_limits 子目录
+// 路由；未注入时回落 TenantScope）。
+func (e *Executor) SetScopeResolver(f func(owner, rel string) *quota.Scope) { e.ScopeFor = f }
 
 // NewExecutor 创建执行器。tenantRoot 由装配层注入（见 syncmgr.TenantRootResolver）。
 func NewExecutor(tenantRoot syncmgr.TenantRootResolver, logger *slog.Logger) *Executor {
@@ -65,15 +73,20 @@ func (e *Executor) userRootFor(owner string) (string, error) {
 }
 
 // quotaLocalFS 是 pull 本地写侧的配额感知包装（FS 装饰器）：每次 WriteFile 前按文件
-// size 在 user 桶 Scope 上 TryReserve（写前 guard），写成功 Commit(actual) 使 quota 等额
-// 入账、失败 Release 归还。覆盖写（overwrite）场景：engine 先 Rename 目标到 .sync-tmp 再
-// 写新文件——新文件字节先 TryReserve 落账；旧文件字节仍占 user 桶（本装饰器不事后释放
-// 旧字节），由 syncmgr reconcile（占位释放）与周期扫描 reconcile（Adjust 到磁盘）校准
-// 覆盖写后的净占用。TryReserve 失败返回 ErrStorageFull（该文件 ActionError，不中止整体
-// 同步）；scope 为 nil（未装配）时退化为直写（旧行为）。
+// size 在按文件实际 rel 解析的 user 桶子 Scope 上 TryReserve（写前 guard，最长前缀命中
+// bucket_limits 子目录时受该子目录上限约束，父链聚合逐级检查），写成功 Commit(actual)
+// 使配额等额入账、失败 Release 归还。覆盖写（overwrite）场景：engine 先 Rename 目标到
+// .sync-tmp 再写新文件——新文件字节先 TryReserve 落账；旧文件字节仍占 user 桶（本装饰
+// 器不事后释放旧字节），由 syncmgr reconcile（占位释放）与周期扫描 reconcile（Adjust
+// 到磁盘）校准覆盖写后的净占用。TryReserve 失败返回 ErrStorageFull（该文件 ActionError，
+// 不中止整体同步）；scopeFor 为 nil（未装配）时退化为直写（旧行为）。
 type quotaLocalFS struct {
 	inner syncpkg.FS
-	scope *quota.Scope
+	// owner 为任务 owner；scopeFor 按 (owner, rel) 解析配额子 Scope（nil 时不启用逐文件
+	// 预留）。只留解析器在 WriteFile 时按 relPath 解析——bucket_limits 子目录配额对
+	// sync pull 同样生效。
+	owner    string
+	scopeFor func(owner, rel string) *quota.Scope
 }
 
 func (q *quotaLocalFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
@@ -91,12 +104,14 @@ func (q *quotaLocalFS) Rename(ctx context.Context, f, t string) error {
 func (q *quotaLocalFS) Delete(ctx context.Context, p string) error  { return q.inner.Delete(ctx, p) }
 func (q *quotaLocalFS) MakeDir(ctx context.Context, p string) error { return q.inner.MakeDir(ctx, p) }
 
-// WriteFile 先 TryReserve(size)、写成功 Commit(actual) 入账；失败 Release 归还。
+// WriteFile 先按 relPath 解析子 Scope 并 TryReserve(size)，写成功 Commit(actual) 入账；
+// 失败 Release 归还。scopeFor 为 nil 时退化为直写。
 func (q *quotaLocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
-	if q.scope == nil {
+	scope := q.examScope(relPath)
+	if scope == nil {
 		return q.inner.WriteFile(ctx, relPath, r, size, mtime)
 	}
-	res, err := q.scope.TryReserve(size)
+	res, err := scope.TryReserve(size)
 	if err != nil {
 		return err // 配额不足：该文件失败（ActionError），不中止整体同步
 	}
@@ -110,7 +125,26 @@ func (q *quotaLocalFS) WriteFile(ctx context.Context, relPath string, r io.Reade
 	return nil
 }
 
+// examScope 按 relPath 解析配额子 Scope（relPath 相对 user 桶根；补 "user/" 前缀后交给
+// scopeFor 按 owner 路由——bucket_limits 子目录配额对 sync pull 生效）。scopeFor 为 nil
+// 时返回 nil（退化为直写）。
+func (q *quotaLocalFS) examScope(relPath string) *quota.Scope {
+	if q.scopeFor == nil {
+		return nil
+	}
+	return q.scopeFor(q.owner, "user/"+relPath)
+}
+
 var _ syncpkg.FS = (*quotaLocalFS)(nil)
+
+// scopeFor 是 Executor 的 resolver：优先按 (owner, rel) 路由（bucket_limits 子目录），
+// 未注册时回落 e.TenantScope（仅按 owner 取 user 桶）。
+func (e *Executor) scopeFor(owner, rel string) *quota.Scope {
+	if e.ScopeFor != nil {
+		return e.ScopeFor(owner, rel)
+	}
+	return e.tenantScope(owner)
+}
 
 // tenantScope 返回 owner 的 user 桶配额 Scope（按注入的解析器；nil 时返回 nil）。
 func (e *Executor) tenantScope(owner string) *quota.Scope {
@@ -161,7 +195,14 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		}
 		httpTransports = append(httpTransports, tr)
 		srcFS = tr
-		dstFS = &quotaLocalFS{inner: syncpkg.NewLocalFS(localRoot, e.logger()), scope: e.tenantScope(task.Owner)}
+		dstFS = &quotaLocalFS{
+			inner: syncpkg.NewLocalFS(localRoot, e.logger()),
+			owner: task.Owner,
+			// 解析器按 (owner, rel) 路由 bucket_limits 子目录配额；e.tenantScope 仅按 owner
+			// 取 user 桶——由 syncexec 统一补 "user/" 前缀交给注册的 scopeFor（若为 nil 则
+			// 该租户无配额，退化为直写）。装配层注入的 ParseScope 见 Handlers.SyncQuotaScope。
+			scopeFor: e.scopeFor,
+		}
 	}
 
 	job := &syncpkg.Job{

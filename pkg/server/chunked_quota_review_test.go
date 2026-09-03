@@ -372,3 +372,40 @@ func TestUploadInit_EmptyFile_Rejected400(t *testing.T) {
 		})
 	}
 }
+
+// TestUploadChunk_OversizedLastChunk_TruncatedToRemainder 覆盖（残余项 A）末片超长截断：
+// 末片 limit=剩余字节（如 total 8080、chunk 4096 → 末片 limit=8080-4096=3984），客户端发超长
+// 末片（4000B）→ BoundWriter 截断到 3984，最终 complete 校验通过（截断后 == total_size）。
+func TestUploadChunk_OversizedLastChunk_TruncatedToRemainder(t *testing.T) {
+	url, _, cleanup := newTestServerWithChunked(t, func(c *Config) { c.ChunkSize = 4 << 10 })
+	defer cleanup()
+
+	totalSize := int64(8080)
+	chunk0 := bytes.Repeat([]byte("A"), 4096)
+	content := append(append([]byte{}, chunk0...), bytes.Repeat([]byte("B"), int(totalSize-4096))...)
+	fileChecksum := sha256hex(content)
+
+	uploadID := initSession(t, url, "tail-over.bin", totalSize, fileChecksum)
+	if got := uploadChunk(t, url, uploadID, 0, sha256hex(chunk0), chunk0); got.StatusCode != http.StatusOK {
+		t.Fatalf("chunk0 应 200, got %d", got.StatusCode)
+	}
+	// 末片：limit=3984（remainder），发 4000 字节（超 16）→ BoundWriter 截断到 3984。
+	overLast := bytes.Repeat([]byte("B"), 4000)
+	if got := uploadChunk(t, url, uploadID, 1, sha256hex(overLast), overLast); got.StatusCode != http.StatusOK {
+		t.Fatalf("末片超长应 200（截断）, got %d", got.StatusCode)
+	}
+	// 截断后 == total_size，complete 全文件校验通过。
+	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
+	cresp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cresp.Body.Close()
+	var cr ChunkCompleteResponse
+	if err := json.NewDecoder(cresp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	if !cr.Success {
+		t.Fatalf("complete 应成功（截断后 == total_size）, resp=%+v", cr)
+	}
+}

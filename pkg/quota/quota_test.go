@@ -533,3 +533,84 @@ func TestPool_SetMaxBytes_ShrinkDoesNotReclaim(t *testing.T) {
 		t.Fatalf("缩小上限后新预留应拒绝（父链全局超限）, got %v", err)
 	}
 }
+
+// TestPool_ResolveLongestPrefix 验证 http route 式路由：沿 children 段树找最深匹配子作用域。
+func TestPool_ResolveLongestPrefix(t *testing.T) {
+	root := NewPool(1000)
+	root.Scope("/a", 100).Scope("/b", 50).Scope("/c", 20) // 挂 /a(100) → /a/b(50) → /a/b/c(20)
+
+	if got := root.ResolvePath("/a").MaxBytes(); got != 100 {
+		t.Fatalf("Resolve /a MaxBytes=%d want 100", got)
+	}
+	if got := root.ResolvePath("/a/b/c").MaxBytes(); got != 20 {
+		t.Fatalf("Resolve /a/b/c MaxBytes=%d want 20（最深节点）", got)
+	}
+	// 最长前缀：/a/b/c/deep 未装配 → 回落 /a/b/c。
+	if got := root.ResolvePath("/a/b/c/deep").MaxBytes(); got != 20 {
+		t.Fatalf("Resolve /a/b/c/deep 应回落 /a/b/c（MaxBytes=%d want 20）", got)
+	}
+	// 未装配段回落祖先进程。
+	if got := root.ResolvePath("/a/z").MaxBytes(); got != 100 {
+		t.Fatalf("Resolve /a/z 应回落 /a（MaxBytes=%d want 100）", got)
+	}
+	// 根节点自身（无匹配路径）：回落根，上限为其 maxBytes（此处 root=1000）。
+	if got := root.ResolvePath("/x/y").MaxBytes(); got != 1000 {
+		t.Fatalf("Resolve /x/y 应回落根（MaxBytes=%d want 1000 root 上限）", got)
+	}
+	// Scope.Resolve 便捷版等价（/a/b/c 最深节点）。
+	if got := root.ResolvePath("/a/b/c").MaxBytes(); got != 20 {
+		t.Fatalf("ResolvePath /a/b/c MaxBytes=%d want 20", got)
+	}
+}
+
+// TestPool_EnsureScope_Levels 验证 EnsureScope 拆段逐级下探挂载（已存在复用）。
+func TestPool_EnsureScope_Levels(t *testing.T) {
+	root := NewPool(1000)
+	s1 := root.EnsureScope([]string{"user", "videos", "hd"}, 300)
+	if got := s1.MaxBytes(); got != 300 {
+		t.Fatalf("EnsureScope 最深段 MaxBytes=%d want 300", got)
+	}
+	if got := s1.Usage(); got != 0 {
+		t.Fatalf("新 Scope Usage=%d want 0", got)
+	}
+	// 中间层 0（不限制）。
+	if got := root.ResolvePath("/user").MaxBytes(); got != 0 {
+		t.Fatalf("中间层 user MaxBytes=%d want 0（不限制）", got)
+	}
+	// 重复调用复用同节点（不重复建层）。
+	s2 := root.EnsureScope([]string{"user", "videos", "hd"}, 500) // maxBytes 变更不生效（已存在）
+	if s1 == nil || s2 == nil {
+		t.Fatal("EnsureScope 返回 nil")
+	}
+	// 兄弟路径独立。
+	s3 := root.EnsureScope([]string{"user", "4k"}, 400)
+	if s1.pool == s3.pool {
+		t.Fatal("user/videos/hd 与 user/4k 应为不同节点")
+	}
+}
+
+// TestReserve_LayeredCaps 验证用户绑定 2/3：quota("/a")=100、/a/b=50、/a/b/c=20，
+// 逐级检查由 reserveUp 沿父链自动完成——对最深节点 TryReserve 超中间层上限即被拒。
+func TestReserve_LayeredCaps(t *testing.T) {
+	root := NewPool(1000)
+	root.EnsureScope([]string{"/a"}, 100)
+	root.EnsureScope([]string{"/a", "b"}, 50)
+	deep := root.EnsureScope([]string{"/a", "b", "c"}, 20)
+
+	// 15 ≤ 20 层 → 成功。
+	if _, err := deep.TryReserve(15); err != nil {
+		t.Fatalf("TryReserve(15) 应成功（≤/a/b/c 20）: %v", err)
+	}
+	// 25 > 20（/a/b/c 层）→ 拒。
+	if _, err := deep.TryReserve(25); err == nil {
+		t.Fatal("TryReserve(25) 应被 /a/b/c（20）层上限拦截")
+	}
+	// 40 ≤ 50 但 15+40=55 > 50（/a/b 层）→ 拒——中间层 /a/b 上限拦截。
+	if _, err := deep.TryReserve(40); err == nil {
+		t.Fatal("TryReserve(40) 应被中间层 /a/b（50）上限拦截（逐级检查）")
+	}
+	// 60 ≤ 100（/a 层）但累加 15+60=75 > 50 → 仍被 /a/b 拦截。
+	if _, err := deep.TryReserve(60); err == nil {
+		t.Fatal("TryReserve(60) 应被 /a/b（50）上限拦截")
+	}
+}

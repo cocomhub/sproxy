@@ -739,23 +739,28 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 		t.Fatalf("bucket_limits 子目录 Scope MaxBytes=%d want 100", got)
 	}
 
-	// TryReserve(60) 成功 → 子 Scope Reserved 60（预留尚未 Commit）
-	if _, err := subScope.TryReserve(60); err != nil {
-		t.Fatalf("子目录 TryReserve(60) 应成功: %v", err)
+	// TryReserve(60) 成功 → 子 Scope Reserved 60（预留尚未 Commit）。子 Scope 已挂到 user 桶
+	// 之下（http route 分层），其保留沿父链聚合——user/租户 Reserved 亦为 60。随后尝试
+	// TryReserve(100)（60+100=160 > 子目录上限 100）→ 被该子 Scope 上限拦住（写路径即 507），
+	// 失败时父链回滚自身累加（仍只保留第一次的 60）。
+	res60, err60 := subScope.TryReserve(60)
+	if err60 != nil {
+		t.Fatalf("子目录 TryReserve(60) 应成功: %v", err60)
 	}
-	if got := subScope.Reserved(); got != 60 {
-		t.Fatalf("子目录 Scope Reserved()=%d want 60", got)
-	}
-	// TryReserve(100)（60+100=160 > 100）→ 被该子 Scope 上限拦住（写路径即 507）
 	if _, err := subScope.TryReserve(100); err == nil {
-		t.Fatal("子目录 TryReserve(100) 应被上限拦住（超 100）")
+		t.Fatal("子目录 TryReserve(100) 应被上限拦住（60+100=160>100）")
 	} else if !errors.Is(err, quota.ErrStorageFull) {
 		t.Fatalf("应返回 ErrStorageFull（可映射 507）, got %v", err)
 	}
+	if got := subScope.Reserved(); got != 60 {
+		t.Fatalf("超限预留失败后子目录 Reserved()=%d want 60（仅第一次保留）", got)
+	}
+	res60.Release() // 归还 60，维持后续 HTTP 上传可用额度（与写路径正常 Commit/Release 对应）
 
-	// 同租户其他路径不受桶限制：未配置 bucket_limits 的子目录不建立任意子 Scope
-	if sc := env.h.quotaBucketFor("alice", "user/other/sub"); sc != nil {
-		t.Fatalf("未配置 bucket_limits 的子目录路径应返回 nil（不建立任意子 Scope）")
+	// 同租户其他路径：未配置 bucket_limits 的子目录→沿段树回落 user 桶（http route 式最长
+	// 前缀命中；不再建任意子 Scope，也不会返回 nil——写路径对未配置子目录按 user 桶归集）。
+	if sc := env.h.quotaBucketFor("alice", "user/other/sub"); sc == nil {
+		t.Fatalf("未配置 bucket_limits 的子目录路径应回落 user 桶（http route 最长前缀），而非 nil")
 	}
 
 	// user 桶本身不受子目录上限约束（仅受租户上限）：TryReserve(100) 成功，随即 Release
@@ -773,9 +778,11 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 		t.Fatalf("Release 后 user 桶 Reserved()=%d want 0", got)
 	}
 
-	// HTTP 写路径阶段仍按物理桶归集（不回归）：上传到子目录 40 字节 → user 桶 + 租户 Usage 40
+	// HTTP 写路径：上传到子目录 40 字节 → 子目录 Scope 40、user 桶 40、租户 40
+	// （超子目录上限 100 之内；父链聚合逐级检查自动生效）。注意 remotePath 为相对 user
+	// 桶协议路径（videos/hd/a.txt）——UserRel 会补 "user/" 前缀映射到磁盘 user/videos/hd/a.txt。
 	umux := actorUploadDeleteMux(env.h, "alice")
-	if code, resp := uploadAsPath(t, umux, "user/videos/hd/a.txt", []byte(strings.Repeat("a", 40))); code != http.StatusOK {
+	if code, resp := uploadAsPath(t, umux, "videos/hd/a.txt", []byte(strings.Repeat("a", 40))); code != http.StatusOK {
 		t.Fatalf("子目录 40 字节应 200, got %d: %s", code, resp)
 	}
 	if got := env.h.quotaFor("alice").Usage(); got != 40 {
@@ -785,23 +792,20 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 		t.Fatalf("上传后 user 桶 Usage()=%d want 40", got)
 	}
 
-	// 任务 8（C：bucket_limits 子目录写路径不接 Scope 的已核实结论）：
-	// 上传到受限子目录 user/videos/hd （40 字节 < 子目录上限 100）→ 200，子目录 Scope 不记账
-	// （写路径仍按 user 桶聚合），证明 bucket_limits 子目录子 Scope 上限**不截断** 该子目录写路径。
-	// 子 Scope 的精确路径命中（quotaBucketFor 返回它）仅对显式 TryReserve 校验生效（上文），
-	// 写侧是否接入该子 Scope 由设计确认（本任务范围不接——避免与功能的复杂交互）。
+	// 写路径接入子目录子 Scope（http route 最长前缀）：40 字节计入子目录 Scope（沿父链
+	// 聚合到 user 桶/租户——上方 user 桶断言 40 已隐式覆盖）。
 	subScopeAfter := env.h.quotaBucketFor("alice", "user/videos/hd")
-	if got := subScopeAfter.Usage(); got != 0 {
-		t.Fatalf("上传到子目录后子目录 Scope Usage()=%d want 0（写路径未接入该子 Scope）", got)
+	if got := subScopeAfter.Usage(); got != 40 {
+		t.Fatalf("上传到子目录后子目录 Scope Usage()=%d want 40（写路径已接入子目录子 Scope）", got)
 	}
 
-	// 上传到受限子目录且超该子目录上限（80 字节，子目录上限 100 但 user/ 桶已累计 40+80=120 <
-	// 租户上限 200）→ 仍 200（写路径按 user 桶聚合，不被子目录子 Scope 上限拦截）。
-	if code, resp := uploadAsPath(t, umux, "user/videos/hd/big.txt", []byte(strings.Repeat("b", 80))); code != http.StatusOK {
-		t.Fatalf("子目录超子目录上限但满足租户总上限应 200（写路径未接入子目录子 Scope）, got %d: %s", code, resp)
+	// 上传到受限子目录且超该子目录上限（80 字节，子目录已有 40，40+80=120 > 子目录上限 100，
+	// 但 user 桶累计 120 < 租户上限 200）→ 507（子目录层上限拦截，逐级检查生效）。
+	if code, resp := uploadAsPath(t, umux, "videos/hd/big.txt", []byte(strings.Repeat("b", 80))); code != http.StatusInsufficientStorage {
+		t.Fatalf("子目录超子目录上限应 507（子目录层拦截）, got %d: %s", code, resp)
 	}
-	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 120 {
-		t.Fatalf("两文件后 user 桶 Usage()=%d want 120", got)
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 40 {
+		t.Fatalf("507 后 user 桶 Usage()=%d want 40（不泄漏）", got)
 	}
 }
 
@@ -824,7 +828,8 @@ func TestQuota_BucketLimits_SubdirWriteStillCapsByOwnerLimit(t *testing.T) {
 
 	umux := actorUploadDeleteMux(env.h, "alice")
 	body := []byte(strings.Repeat("a", 140)) // 140 > 租户上限 120
-	code, resp := uploadAsPath(t, umux, "user/videos/hd/big.txt", body)
+	// 注意 remotePath 为相对 user 桶协议路径（videos/hd/big.txt），UserRel 补 user/ 前缀。
+	code, resp := uploadAsPath(t, umux, "videos/hd/big.txt", body)
 	if code != http.StatusInsufficientStorage {
 		t.Fatalf("子目录写 140 字节（>OwnerQuotas 120）应 507, got %d: %s", code, resp)
 	}
@@ -898,5 +903,115 @@ func TestVersionQuota_QuotaFullSkipsVersioningKeepsUserBucket(t *testing.T) {
 	// 降级确已发生：version 目录下无任何版本文件。
 	if entries, rerr := os.ReadDir(filepath.Join(env.root, "alice", "version", "v.txt")); rerr == nil && len(entries) > 0 {
 		t.Fatalf("降级路径不应保存版本, version/ 下残留 %d 个版本", len(entries))
+	}
+}
+
+// TestQuotaScopeFor_LongestPrefix 验证 http route 式写路径解析：rel 首段=功能桶根，
+// 沿 children 段树最长前缀命中；未配置子目录回落功能桶。
+func TestQuotaScopeFor_LongestPrefix(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 200}
+	env.h.cfgPtr.Store(cfg)
+
+	// 最长前缀命中 user/videos/hd。
+	if sc := env.h.quotaScopeFor("alice", "user/videos/hd/a.mkv"); sc == nil || sc.MaxBytes() != 100 {
+		t.Fatalf("quotaScopeFor(user/videos/hd/a.mkv) 应命中 user/videos/hd（MaxBytes=100）: %+v", sc)
+	}
+	// 子目录内更深未装配 → 回落 user/videos/hd（最长前缀）。
+	if sc := env.h.quotaScopeFor("alice", "user/videos/hd/deep/b.mkv"); sc == nil || sc.MaxBytes() != 100 {
+		t.Fatalf("quotaScopeFor(user/videos/hd/deep/...) 应回落 user/videos/hd: %+v", sc)
+	}
+	// 未配置子目录 → 回落 user 桶根（MaxBytes=0 不限制）。
+	if sc := env.h.quotaScopeFor("alice", "user/other/c.txt"); sc == nil || sc.MaxBytes() != 0 {
+		t.Fatalf("quotaScopeFor(user/other/c.txt) 应回落 user 桶: %+v", sc)
+	}
+	// 桶内顶级文件 → user 桶。
+	if sc := env.h.quotaScopeFor("alice", "user/root.txt"); sc == nil || sc.MaxBytes() != 0 {
+		t.Fatalf("quotaScopeFor(user/root.txt) 应回落 user 桶: %+v", sc)
+	}
+	// 非 user 功能桶（version）→ version 桶根（无子目录）。
+	if sc := env.h.quotaScopeFor("alice", "version/dir/f.txt"); sc == nil || sc.MaxBytes() != 0 {
+		t.Fatalf("quotaScopeFor(version/dir/f.txt) 应回落 version 桶: %+v", sc)
+	}
+}
+
+// TestQuota_UploadSubdir507 验证所有场景子目录写封顶（绑定 1）：
+// bucket_limits[user/videos/hd]=100、owner=200，向子目录上传使子目录累计超限 → 507，
+// 不泄漏预留；删除子目录文件后子目录/桶/租户同步释放。
+func TestQuota_UploadSubdir507(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 200}
+	env.h.cfgPtr.Store(cfg)
+	umux := actorUploadDeleteMux(env.h, "alice")
+
+	// 传 60（<100）→ 200。
+	if code, resp := uploadAsPath(t, umux, "videos/hd/a.mkv", []byte(strings.Repeat("a", 60))); code != http.StatusOK {
+		t.Fatalf("子目录 60 应 200, got %d: %s", code, resp)
+	}
+	if got := env.h.quotaScopeFor("alice", "user/videos/hd/a.mkv").Usage(); got != 60 {
+		t.Fatalf("子目录 Usage=%d want 60", got)
+	}
+	// 再传 50（60+50=110 > 100、130<200 租户）→ 507（子目录层拦截）。
+	if code, resp := uploadAsPath(t, umux, "videos/hd/b.mkv", []byte(strings.Repeat("b", 50))); code != http.StatusInsufficientStorage {
+		t.Fatalf("子目录累计超限应 507, got %d: %s", code, resp)
+	}
+	if got := env.h.quotaScopeFor("alice", "user/videos/hd").Reserved(); got != 0 {
+		t.Fatalf("507 后子目录 Reserved()=%d want 0（不泄漏）", got)
+	}
+	if got := env.h.quotaFor("alice").Usage(); got != 60 {
+		t.Fatalf("507 后租户 Usage=%d want 60", got)
+	}
+}
+
+// TestQuota_RmdirSubdir_ReleasesPerFileScope 验证 rmdir 删除子树按各文件 rel 分键释放：
+// 子目录内两个 BucketLimits 键（user/videos/hd、user/videos/4k）各自扣除对应文件字节。
+func TestQuota_RmdirSubdir_ReleasesPerFileScope(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100, "user/videos/4k": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 300}
+	env.h.cfgPtr.Store(cfg)
+	umux := actorUploadDeleteMux(env.h, "alice")
+
+	if code, resp := uploadAsPath(t, umux, "videos/hd/a.txt", []byte(strings.Repeat("a", 30))); code != http.StatusOK {
+		t.Fatalf("hd 30 应 200, got %d: %s", code, resp)
+	}
+	if code, resp := uploadAsPath(t, umux, "videos/4k/b.txt", []byte(strings.Repeat("b", 40))); code != http.StatusOK {
+		t.Fatalf("4k 40 应 200, got %d: %s", code, resp)
+	}
+	if got := env.h.quotaScopeFor("alice", "user/videos/hd").Usage(); got != 30 {
+		t.Fatalf("hd Usage=%d want 30", got)
+	}
+	if got := env.h.quotaScopeFor("alice", "user/videos/4k").Usage(); got != 40 {
+		t.Fatalf("4k Usage=%d want 40", got)
+	}
+
+	// rmdir videos 目录（?dirname=videos&force=true）。
+	req := httptest.NewRequest("POST", "/rmdir?dirname=videos&force=true", nil)
+	rr := httptest.NewRecorder()
+	actorUploadDeleteMux(env.h, "alice").ServeHTTP(rr, req)
+	// 注：actorUploadDeleteMux 只挂 upload/delete，rmdir 走 dirs.go 的 rmdir handler——
+	// 需另挂。此处直接调 h.rmdir 验证 per-file 分键释放。
+	req2 := httptest.NewRequest("POST", "/rmdir?dirname=videos&force=true", nil)
+	rr2 := httptest.NewRecorder()
+	req2 = req2.WithContext(withActor(req2.Context(), "alice"))
+	env.h.rmdir(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("rmdir videos 应 200, got %d", rr2.Code)
+	}
+
+	// hd 与 4k 子 Scope 均归零（per-file 分键释放）。
+	if got := env.h.quotaScopeFor("alice", "user/videos/hd").Usage(); got != 0 {
+		t.Fatalf("rmdir 后 hd Usage=%d want 0", got)
+	}
+	if got := env.h.quotaScopeFor("alice", "user/videos/4k").Usage(); got != 0 {
+		t.Fatalf("rmdir 后 4k Usage=%d want 0", got)
+	}
+	if got := env.h.quotaFor("alice").Usage(); got != 0 {
+		t.Fatalf("rmdir 后租户 Usage=%d want 0", got)
 	}
 }

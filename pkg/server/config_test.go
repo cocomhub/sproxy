@@ -662,12 +662,12 @@ func TestLoadFromProvider_BucketLimits(t *testing.T) {
 }
 
 // TestConfig_Validate_BucketLimits_KeyValidation 验证 bucket_limits 路径键合法性校验
-// （C 任务 2 放行条件 2）：拒绝 .. / 绝对路径 / 前导或尾部斜杠 / 空段 / 空串；
-// 合法子目录键通过；负上限拒绝。
+// （C 任务 2 放行条件 2）：拒绝 .. / 绝对路径 / 前导或尾部斜杠 / 空段 / 空串 /
+// 非 user 首段（分层配额仅支持 user 桶子目录）；合法 user 子目录键通过；负上限拒绝。
 func TestConfig_Validate_BucketLimits_KeyValidation(t *testing.T) {
 	badKeys := []string{
 		"", "..", "../escape", "user/../x", "user//x", "/user/x", "user/x/",
-		"user/.", "C:/abs", `user\videos`,
+		"user/.", "C:/abs", `user\videos`, "videos/hd", "cloud/x",
 	}
 	for _, k := range badKeys {
 		c := Default()
@@ -676,9 +676,9 @@ func TestConfig_Validate_BucketLimits_KeyValidation(t *testing.T) {
 			t.Fatalf("bucket_limits 键 %q 应被拒绝, got nil", k)
 		}
 	}
-	// 合法子目录键通过（含无功能桶前缀的纯子目录；段名全部合法）。
+	// 合法子目录键通过（首段必须为 user；段名全部合法）。
 	c := Default()
-	c.BucketLimits = map[string]int64{"videos/hd": 100, "user/ok/deep": 50}
+	c.BucketLimits = map[string]int64{"user/ok/deep": 50, "user/videos:en/hd": 30}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("合法 bucket_limits 键不应被拒绝: %v", err)
 	}

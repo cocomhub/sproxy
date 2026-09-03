@@ -188,3 +188,82 @@ func mustWriteFile(t *testing.T, path string, size int) {
 		t.Fatal(err)
 	}
 }
+
+// TestReconcile_Subdir_NoDoubleCount 验证 bucket_limits 子目录 reconcile 防双计：
+// 磁盘按段树归集功能桶总量 + 子目录键，先深后浅校准——user 桶收敛到磁盘总量、
+// 子目录收敛到各自磁盘字节，祖先不双计（扫描后 Scope Usage 与磁盘一致）。
+func TestReconcile_Subdir_NoDoubleCount(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100, "user/videos/4k": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 500}
+	env.h.cfgPtr.Store(cfg)
+
+	// 磁盘既有占用（模拟重启后）：user/videos/hd 30 + user/videos/4k 40 + user 根 50 = 120。
+	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "videos", "hd", "a.mkv"), 30)
+	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "videos", "4k", "b.mkv"), 40)
+	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "root.txt"), 50)
+
+	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm.SetReconciler(env.h.reconcileQuotaScopes)
+	if err := sm.ScanAndRecalculate(); err != nil {
+		t.Fatalf("ScanAndRecalculate: %v", err)
+	}
+
+	// 功能桶 user 收敛到磁盘总量 120。
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 120 {
+		t.Fatalf("user 桶 Usage()=%d want 120（磁盘总量）", got)
+	}
+	// 子目录各自收敛（不双计到父）。
+	if got := env.h.quotaBucketFor("alice", "user/videos/hd").Usage(); got != 30 {
+		t.Fatalf("hd 子目录 Usage()=%d want 30", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "user/videos/4k").Usage(); got != 40 {
+		t.Fatalf("4k 子目录 Usage()=%d want 40", got)
+	}
+	// 租户聚合不双计：= 磁盘总量 120。
+	if got := env.h.quotaFor("alice").Usage(); got != 120 {
+		t.Fatalf("租户 Usage()=%d want 120（user 120=hd30+4k40+root50，无双计）", got)
+	}
+	// 未配置前缀不建键（user/music 文件不归到任何子目录键）。
+	if got := env.h.quotaBucketFor("alice", "user/videos").Usage(); got != 70 {
+		t.Fatalf("user/videos 中间层 Usage()=%d want 70（=hd30+4k40 聚合）", got)
+	}
+}
+
+// TestReconcile_Subdir_SkipPropagates 验证子层在途预留时父层整体跳过（双计保护）：
+// user/videos/hd 有未 Commit 预留 → 该键及其父链（user）跳过校准，Scope 保持预留前状态。
+func TestReconcile_Subdir_SkipPropagates(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 500}
+	env.h.cfgPtr.Store(cfg)
+
+	// 磁盘已有 hd 30；Scope 上有 hd 在途预留 20（未 Commit）。
+	mustWriteFile(t, filepath.Join(env.root, "alice", "user", "videos", "hd", "a.mkv"), 30)
+	hd := env.h.quotaBucketFor("alice", "user/videos/hd")
+	rr, err := hd.TryReserve(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewStorageManager(env.root, 1024*1024, nil, testLogger())
+	sm.SetReconciler(env.h.reconcileQuotaScopes)
+	if err := sm.ScanAndRecalculate(); err != nil {
+		t.Fatalf("ScanAndRecalculate: %v", err)
+	}
+
+	// 子层在途预留 → hd 与 user 均跳过校准（不把 reserved partial 双计为 committed）；
+	// hd committed 仍 0，user committed 仍 0。
+	if got := hd.Usage(); got != 0 {
+		t.Fatalf("hd Usage()=%d want 0（在途预留跳过）", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 0 {
+		t.Fatalf("user Usage()=%d want 0（子层 skip 传播到父层）", got)
+	}
+	if got := hd.Reserved(); got != 20 {
+		t.Fatalf("hd Reserved()=%d want 20（预留保留）", got)
+	}
+	rr.Release()
+}
