@@ -689,3 +689,111 @@ func TestConfig_Validate_BucketLimits_KeyValidation(t *testing.T) {
 		t.Fatal("bucket_limits 负上限应被拒绝")
 	}
 }
+
+// TestConfig_Telemetry_Default 验证 telemetry 默认值：
+// 默认关闭（enabled=false）、采样率 1.0、OTLP 端点为空的"仅进程内/环境变量驱动"模式。
+func TestConfig_Telemetry_Default(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	if c.Telemetry.Enabled {
+		t.Fatal("telemetry.enabled 默认应为 false（关闭时保持纯 slog）")
+	}
+	if c.Telemetry.SampleRatio != 1.0 {
+		t.Fatalf("telemetry.sample_ratio 默认应为 1.0，got %v", c.Telemetry.SampleRatio)
+	}
+	if c.Telemetry.OTLPEndpoint != "" {
+		t.Fatalf("telemetry.otlp_endpoint 默认应为空（仅走标准环境变量），got %q", c.Telemetry.OTLPEndpoint)
+	}
+	// 默认配置不启用 telemetry，Validate 仍应通过。
+	c = Default()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("默认配置 Validate 不应报错: %v", err)
+	}
+}
+
+// TestConfig_Telemetry_Disabled_SkipsValidation 验证 telemetry.enabled=false 时
+// 不校验 sample_ratio/otlp_endpoint（历史/闲置配置遗留不阻断启动，与 hub 校验门控一致）。
+func TestConfig_Telemetry_Disabled_SkipsValidation(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	c.Telemetry.Enabled = false
+	c.Telemetry.SampleRatio = 0 // 非法值，但未被启用 → 忽略
+	c.Telemetry.OTLPEndpoint = "not-a-url"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("telemetry.enabled=false 时不应校验 sample_ratio/otlp_endpoint: %v", err)
+	}
+}
+
+// TestConfig_Telemetry_Validate_InvalidSampleRatio 验证启用 telemetry 时
+// 非法采样率（≤0 或 >1）被拒绝。
+func TestConfig_Telemetry_Validate_InvalidSampleRatio(t *testing.T) {
+	t.Parallel()
+	for _, r := range []float64{0, -0.5, 1.5, 2} {
+		c := Default()
+		c.Telemetry.Enabled = true
+		c.Telemetry.SampleRatio = r
+		if err := c.Validate(); err == nil {
+			t.Fatalf("telemetry.sample_ratio=%v 应被拒绝", r)
+		}
+	}
+}
+
+// TestConfig_Telemetry_Validate_InvalidEndpoint 验证启用 telemetry 时
+// 非法 OTLP 端点（非 URL / 非 http(s) scheme / 缺 host）被拒绝。
+func TestConfig_Telemetry_Validate_InvalidEndpoint(t *testing.T) {
+	t.Parallel()
+	bad := []string{"not-a-url", "ftp://collector:4318", "http://", ":4318", "collector:4318"}
+	for _, ep := range bad {
+		c := Default()
+		c.Telemetry.Enabled = true
+		c.Telemetry.SampleRatio = 1.0
+		c.Telemetry.OTLPEndpoint = ep
+		if err := c.Validate(); err == nil {
+			t.Fatalf("telemetry.otlp_endpoint=%q 应被拒绝", ep)
+		}
+	}
+	// 合法端点通过。
+	c := Default()
+	c.Telemetry.Enabled = true
+	c.Telemetry.SampleRatio = 0.5
+	c.Telemetry.OTLPEndpoint = "http://127.0.0.1:4318"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("合法 telemetry 配置不应被拒绝: %v", err)
+	}
+	c = Default()
+	c.Telemetry.Enabled = true
+	c.Telemetry.SampleRatio = 1.0
+	c.Telemetry.OTLPEndpoint = "https://collector.example.com:4318"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("合法 https 端点不应被拒绝: %v", err)
+	}
+}
+
+// TestConfig_Telemetry_EmptyEndpoint_Passes 验证启用 telemetry 但 otlp_endpoint
+// 为空（仅走标准环境变量）是合法配置。
+func TestConfig_Telemetry_EmptyEndpoint_Passes(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	c.Telemetry.Enabled = true
+	c.Telemetry.SampleRatio = 1.0
+	c.Telemetry.OTLPEndpoint = ""
+	if err := c.Validate(); err != nil {
+		t.Fatalf("telemetry.enabled=true 且 otlp_endpoint 为空（仅环境变量）应通过: %v", err)
+	}
+}
+
+// TestConfig_Telemetry_YAMLTags 验证 telemetry 段的 yaml 键名与映射键一致。
+func TestConfig_Telemetry_YAMLTags(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	c.Telemetry = OTELConfig{Enabled: true, SampleRatio: 0.25, OTLPEndpoint: "http://127.0.0.1:4318"}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	for _, key := range []string{"telemetry:", "enabled: true", "sample_ratio: 0.25", "otlp_endpoint: http://127.0.0.1:4318"} {
+		if !strings.Contains(string(data), key) {
+			t.Fatalf("序列化输出缺少 %q：\n%s", key, data)
+		}
+	}
+}

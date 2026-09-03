@@ -28,7 +28,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
-	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
+	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
 )
@@ -1796,7 +1796,7 @@ func TestDoRequest_InjectTraceparent(t *testing.T) {
 	}
 	resp.Body.Close()
 	tp := <-received
-	traceID, spanID, ok := tracing.ParseTraceparent(tp)
+	traceID, spanID, ok := telemetry.ParseTraceparent(tp)
 	if !ok || len(traceID) != 32 || len(spanID) != 16 {
 		t.Fatalf("Traceparent = %q, invalid", tp)
 	}
@@ -1804,7 +1804,7 @@ func TestDoRequest_InjectTraceparent(t *testing.T) {
 
 func TestWithTracer_CustomTracer(t *testing.T) {
 	var injected []string
-	mock := &mockTracer{injectFn: func(ctx context.Context, c tracing.Carrier) { injected = append(injected, c.Get("traceparent")) }}
+	mock := &mockTracer{injectFn: func(ctx context.Context, c telemetry.Carrier) { injected = append(injected, c.Get("traceparent")) }}
 	c := NewFileClient("http://127.0.0.1:1", WithTracer(mock))
 	_ = c
 	if len(injected) != 0 {
@@ -1815,7 +1815,7 @@ func TestWithTracer_CustomTracer(t *testing.T) {
 // mockTracer 用于验证 WithTracer Option 的组织与注入时机。
 type mockTracer struct {
 	startFn  func(context.Context, string) (context.Context, func())
-	injectFn func(context.Context, tracing.Carrier)
+	injectFn func(context.Context, telemetry.Carrier)
 }
 
 func (m *mockTracer) StartSpan(ctx context.Context, name string) (context.Context, func()) {
@@ -1825,7 +1825,7 @@ func (m *mockTracer) StartSpan(ctx context.Context, name string) (context.Contex
 	return ctx, func() {}
 }
 
-func (m *mockTracer) Inject(ctx context.Context, c tracing.Carrier) {
+func (m *mockTracer) Inject(ctx context.Context, c telemetry.Carrier) {
 	if m.injectFn != nil {
 		m.injectFn(ctx, c)
 	}

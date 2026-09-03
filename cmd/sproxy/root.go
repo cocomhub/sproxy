@@ -22,6 +22,8 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
+	"github.com/cocomhub/sproxy/pkg/telemetry"
+	oteltracing "github.com/cocomhub/sproxy/pkg/telemetry/ext/otel"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	kad "github.com/cocomhub/sproxy/pkg/tunnel/hub/ext/kad"
@@ -122,6 +124,30 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// telemetry 装配：telemetry.enabled=true 时创建 OTel provider（autoexport 按环境
+	// 变量驱动 exporter），其 Tracer 注入 server 请求路径——requestLogMiddleware 的
+	// trace/span id 改由 OTel 生成，同时经 SpanContextKey 同步进 slog 日志（见
+	// telemetry.WithContextHandler）。enabled=false（默认）时 tracer 为 nil，server
+	// 保持自生成 id 的既有行为。provider 装配失败（非法采样率/端点）fail-fast 拒绝启动。
+	var tracer telemetry.Tracer // nil = 关闭（默认）
+	if cfg.Telemetry.Enabled {
+		tp, terr := oteltracing.NewProvider(
+			oteltracing.WithSampleRatio(cfg.Telemetry.SampleRatio),
+			oteltracing.WithOTLPEndpoint(cfg.Telemetry.OTLPEndpoint),
+		)
+		if terr != nil {
+			return fmt.Errorf("初始化 telemetry provider 失败: %w", terr)
+		}
+		// 停服时冲刷并关闭 TracerProvider（幂等）。
+		defer func() {
+			if cerr := tp.Shutdown(context.Background()); cerr != nil {
+				logger.Warn("telemetry provider 关停失败", "error", cerr)
+			}
+		}()
+		tracer = tp.Tracer("sproxy")
+		logger.Info("telemetry 已启用", "sample_ratio", cfg.Telemetry.SampleRatio, "otlp_endpoint", cfg.Telemetry.OTLPEndpoint)
+	}
 
 	mux := http.NewServeMux()
 	var routeTable *hub.MeshRouteTable
@@ -309,6 +335,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		RouteTable:          routeTable,
 		HubPersist:          persist,
 		HubRestoredMessages: restoredMsgs,
+		Tracer:              tracer,
 	})
 	if hubDHT != nil {
 		h.SetDHT(hubDHT) // /api/hub/nodes 合并 DHT 候选节点（发现源：路由表权威 + DHT 候选）
