@@ -69,7 +69,7 @@ func writeUserFile(t *testing.T, h *Handlers, owner, name, content string) {
 	if !ok {
 		t.Fatal("派生 user 根失败")
 	}
-	if err := os.MkdirAll(userAbs, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(userAbs, name)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(userAbs, name), []byte(content), 0o644); err != nil {
@@ -583,5 +583,149 @@ func TestSyncAPI_PullChargesUserBucketQuota(t *testing.T) {
 	}
 	if string(data) != "aaaa" {
 		t.Fatalf("a.txt 内容=%q want aaaa", data)
+	}
+}
+
+// TestSyncAPI_PushDoesNotChargeUserBucket 验证（审查 D）push 不做本地配额记账：
+// push 方向本地不预留、不逐文件 guard（syncexec.Executor 的 quotaLocalFS 只装饰 pull
+// 的 dstFS；push 的 srcFS 是裸 LocalFS，数据单向流向远端 mock）——任务完成后 alice
+// user 桶 Usage 必须仍等于源文件预置字节（零额外记账），而非把推送出去的字节重复计费。
+func TestSyncAPI_PushDoesNotChargeUserBucket(t *testing.T) {
+	srv, remote := syncmock.NewServer(t)
+	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]int64{"alice": 100} })
+	_ = h
+
+	// 预置源文件到 alice 租户 user 桶（经上传 handler 记账，源文件本身占 user 桶字节——
+	// 这部分是 user 桶的真实占用；raw writeUserFile 绕过配额池无法验证 push 不重复计费）。
+	umux := http.NewServeMux()
+	umux.HandleFunc("POST /upload", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(withActor(r.Context(), "alice"))
+		h.upload(w, r)
+	})
+	if code, resp := uploadAsPath(t, umux, "local/send.txt", []byte("0123456789")); code != http.StatusOK {
+		t.Fatalf("预置上传应 200, got %d: %s", code, resp)
+	}
+	if got := h.quotaBucketFor("alice", "user").Usage(); got != 10 {
+		t.Fatalf("预置后 alice user 桶 Usage()=%d want 10（源文件占用）", got)
+	}
+
+	// 以 alice 身份创建并同步 push 任务（数据流向本地 → 远端 mock）。
+	mux := syncOwnerMux(h, "alice")
+	code, body := doSyncOwner(t, mux, "POST", "/api/sync/tasks",
+		`{"direction":"push","remote":"r1","src":"local","recursive":true}`)
+	if code != http.StatusCreated {
+		t.Fatalf("创建应 201, got %d: %s", code, body)
+	}
+	var task syncmgr.SyncTask
+	if err := json.Unmarshal(body, &task); err != nil {
+		t.Fatalf("解析失败: %v, body=%s", err, body)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+task.ID, "")
+		var cur syncmgr.SyncTask
+		_ = json.Unmarshal(b, &cur)
+		if cur.Status == "completed" {
+			break
+		}
+		if cur.Status == "failed" {
+			t.Fatalf("任务应完成，实际 failed: %s", b)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// push 完成后 user 桶 Usage 保持 = 源文件字节（10），零额外记账（无 reserved 泄漏）。
+	if got := h.quotaBucketFor("alice", "user").Usage(); got != 10 {
+		t.Fatalf("push 后 alice user 桶 Usage()=%d want 10（push 不本地预留/记账）", got)
+	}
+	if got := h.quotaBucketFor("alice", "user").Reserved(); got != 0 {
+		t.Fatalf("push 后 alice user 桶 Reserved()=%d want 0", got)
+	}
+	// 远端 mock 应已收到推送的文件（push 以 src 相对路径命名，local/send.txt → send.txt，
+	// 与 pull 的 dst 相对命名对称；数据确实发出去，且源文件本地仍在）。
+	snap := remote.SnapshotFiles()
+	f, ok := snap["send.txt"]
+	if !ok || string(f.Data) != "0123456789" {
+		t.Fatalf("远端应收到 send.txt, got %v", snap)
+	}
+}
+
+// TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap 验证（审查 D）多任务叠加父链竞争：
+// owner 上限 10，两个并发 pull 任务各拉 6 字节文件（PerFileReserve 逐文件 guard）——
+// 两个 6 字节不可能都通过租户聚合上限（6+6=12>10），至少一个文件/任务失败；
+// alice user 桶最终 committed<=10 且无预留泄漏。
+func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
+	srv, remote := syncmock.NewServer(t)
+	// 两个独立子目录各 6 字节文件（src 不同避免去重吸收）。
+	remote.SeedFile("d1/a.txt", "aaaaaa")
+	remote.SeedFile("d2/b.txt", "bbbbbb")
+	remote.SeedDir("d1")
+	remote.SeedDir("d2")
+	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]int64{"alice": 10} })
+
+	mux := syncOwnerMux(h, "alice")
+	create := func(src, dst string) string {
+		t.Helper()
+		code, body := doSyncOwner(t, mux, "POST", "/api/sync/tasks",
+			`{"direction":"pull","remote":"r1","src":"`+src+`","dst":"`+dst+`","recursive":true}`)
+		if code != http.StatusCreated {
+			t.Fatalf("创建 pull(%s) 应 201, got %d: %s", src, code, body)
+		}
+		var task syncmgr.SyncTask
+		if err := json.Unmarshal(body, &task); err != nil {
+			t.Fatalf("解析失败: %v, body=%s", err, body)
+		}
+		return task.ID
+	}
+	idA := create("d1", "la")
+	idB := create("d2", "lb")
+
+	// 等待两任务都到终态。
+	deadline := time.Now().Add(15 * time.Second)
+	status := func(id string) string {
+		t.Helper()
+		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
+		var cur syncmgr.SyncTask
+		_ = json.Unmarshal(b, &cur)
+		return cur.Status
+	}
+	for time.Now().Before(deadline) {
+		sA, sB := status(idA), status(idB)
+		terminal := func(s string) bool { return s == "completed" || s == "failed" || s == "cancelled" }
+		if terminal(sA) && terminal(sB) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	sA, sB := status(idA), status(idB)
+	if sA != "completed" && sA != "failed" {
+		t.Fatalf("任务 A 应到终态, got %q", sA)
+	}
+	if sB != "completed" && sB != "failed" {
+		t.Fatalf("任务 B 应到终态, got %q", sB)
+	}
+
+	// 至少一个任务失败（failed）或其文件级 ActionError（engine 吞错误后 completed）。
+	anyFileError := func(id string) bool {
+		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
+		var cur syncmgr.SyncTask
+		_ = json.Unmarshal(b, &cur)
+		for _, r := range cur.Results {
+			if r.Action == "error" && r.Error != "" {
+				return true
+			}
+		}
+		return false
+	}
+	if sA != "failed" && sB != "failed" && !anyFileError(idA) && !anyFileError(idB) {
+		t.Fatalf("两 pull 共 12 字节 > 上限 10，至少一个文件/任务应失败（A=%s B=%s）", sA, sB)
+	}
+
+	// user 桶最终 committed<=10、无预留泄漏。
+	if got := h.quotaBucketFor("alice", "user").Usage(); got > 10 {
+		t.Fatalf("并发 pull 后 alice user 桶 Usage()=%d want <=10（租户聚合上限）", got)
+	}
+	if got := h.quotaBucketFor("alice", "user").Reserved(); got != 0 {
+		t.Fatalf("并发 pull 后 alice user 桶 Reserved()=%d want 0", got)
 	}
 }

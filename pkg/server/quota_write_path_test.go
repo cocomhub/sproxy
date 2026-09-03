@@ -804,3 +804,99 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 		t.Fatalf("两文件后 user 桶 Usage()=%d want 120", got)
 	}
 }
+
+// TestQuota_BucketLimits_SubdirWriteStillCapsByOwnerLimit 验证（审查 D，显式 507 判别）：
+// BucketLimits[user/videos/hd]=100 + OwnerQuotas[alice]=120 时，向该子目录写 140 字节
+// （≤ 子目录上限 100？不——140 > 100），写路径当前按 user 桶逐物理桶归集、不接入子目录
+// 子 Scope，但沿父链聚合到租户 Scope 的 owner 兜底（120）仍生效：
+// TryReserve(140) 在 user 桶子 Scope 汇总到租户 0+140>120 → 507，且 user 桶不泄漏预留。
+func TestQuota_BucketLimits_SubdirWriteStillCapsByOwnerLimit(t *testing.T) {
+	env := newOwnerEnv(t)
+	cfg := env.h.cfgPtr.Load()
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	cfg.OwnerQuotas = map[string]int64{"alice": 120}
+	env.h.cfgPtr.Store(cfg)
+
+	subScope := env.h.quotaBucketFor("alice", "user/videos/hd")
+	if subScope == nil {
+		t.Fatal("quotaBucketFor(alice, user/videos/hd)=nil（bucket_limits 精确路径应命中）")
+	}
+
+	umux := actorUploadDeleteMux(env.h, "alice")
+	body := []byte(strings.Repeat("a", 140)) // 140 > 租户上限 120
+	code, resp := uploadAsPath(t, umux, "user/videos/hd/big.txt", body)
+	if code != http.StatusInsufficientStorage {
+		t.Fatalf("子目录写 140 字节（>OwnerQuotas 120）应 507, got %d: %s", code, resp)
+	}
+	// user 桶、子目录子 Scope、租户 Scope 均不泄漏预留/占用。
+	if got := env.h.quotaBucketFor("alice", "user").Reserved(); got != 0 {
+		t.Fatalf("507 后 user 桶 Reserved()=%d want 0", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 0 {
+		t.Fatalf("507 后 user 桶 Usage()=%d want 0", got)
+	}
+	if got := subScope.Usage(); got != 0 {
+		t.Fatalf("507 后子目录子 Scope Usage()=%d want 0", got)
+	}
+	// 并行对照（探测真实语义）：同租户 root 下写 140 字节同样 507（与 owner 兜底一致，
+	// 不因子目录首段名而放行）。若此分支也 507 则写路径确实只受租户 OwnerQuotas 约束，
+	// 与「BucketLimits 子目录不截断写路径」的设计结论一致。
+	code2, resp2 := uploadAsPath(t, umux, "root.txt", body)
+	if code2 != http.StatusInsufficientStorage {
+		t.Fatalf("root 下写 140 字节（>120）也应 507, got %d: %s", code2, resp2)
+	}
+}
+
+// TestVersionQuota_QuotaFullSkipsVersioningKeepsUserBucket 验证（审查 D）saveVersion 降级路径回归：
+// OwnerQuotas 余量只够 user 文件本身、version 桶（旧文件字节）放不下时——cover 写新文件必须
+// 成功（上传通过）、version 桶不虚高、user 桶正确、无 reserved 泄漏。
+// 布局：OwnerQuotas[alice]=110（在建 Scope 前一次性设定——ensureTenantQuotaLocked 首次访问
+// 时读 OwnerQuotaFor 建租户 Scope 并缓存，属装配期硬配置）。首次上传 60 → user 60；
+// 覆盖写新文件 10 字节前 saveVersion 需 TryReserve(旧文件 60) 到 version 桶：租户余量
+// 110−(60+0)=50 < 60 → 预留失败 → saveVersion 返回错误 → saveVersionBeforeOverwrite
+// best-effort 降级（跳过保存版本），覆盖写路径继续：上传 TryReserve(10) 余量 50≥10 成功、
+// user Adjust(60→10)。
+func TestVersionQuota_QuotaFullSkipsVersioningKeepsUserBucket(t *testing.T) {
+	env := newOwnerEnv(t)
+	// 上限 110 让「首次上传 60」通过（余量 110），但「version 桶放旧文件 60」失败（余量 50<60）。
+	env.setOwnerQuota("alice", 110)
+	cfg := env.h.cfgPtr.Load()
+	cfg.Versioning.Enabled = true
+	cfg.Versioning.MaxVersions = 10
+	env.h.cfgPtr.Store(cfg)
+
+	umux := actorUploadDeleteMux(env.h, "alice")
+	body60 := []byte(strings.Repeat("a", 60))
+	if code, resp := uploadAs(t, umux, "v.txt", body60); code != http.StatusOK {
+		t.Fatalf("首次上传 60 应 200, got %d: %s", code, resp)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 60 {
+		t.Fatalf("首次上传后 user 桶 Usage()=%d want 60", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "version").Usage(); got != 0 {
+		t.Fatalf("首次上传后 version 桶 Usage()=%d want 0（尚无版本）", got)
+	}
+
+	// 覆盖写 10 字节：saveVersion TryReserve(60) 超租户余量（50<60）→ 降级跳过版本。
+	body10 := []byte(strings.Repeat("b", 10))
+	code, resp := uploadAs(t, umux, "v.txt", body10)
+	if code != http.StatusOK {
+		t.Fatalf("version 桶放不下时覆盖写应降级并通过(200), got %d: %s", code, resp)
+	}
+	if got := env.h.quotaBucketFor("alice", "user").Usage(); got != 10 {
+		t.Fatalf("覆盖写后 user 桶 Usage()=%d want 10", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "version").Usage(); got != 0 {
+		t.Fatalf("version 桶预留失败应降级不写版本: Usage()=%d want 0（不虚高）", got)
+	}
+	if got := env.h.quotaBucketFor("alice", "version").Reserved(); got != 0 {
+		t.Fatalf("version 桶 Reserved()=%d want 0（预留失败已释放）", got)
+	}
+	if got := env.h.quotaFor("alice").Reserved(); got != 0 {
+		t.Fatalf("租户 Scope Reserved()=%d want 0（无预留泄漏）", got)
+	}
+	// 降级确已发生：version 目录下无任何版本文件。
+	if entries, rerr := os.ReadDir(filepath.Join(env.root, "alice", "version", "v.txt")); rerr == nil && len(entries) > 0 {
+		t.Fatalf("降级路径不应保存版本, version/ 下残留 %d 个版本", len(entries))
+	}
+}

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -282,3 +283,223 @@ func setTestOwnerQuota(h *Handlers, owner string, bytes int64) {
 type countWriter struct{ n int64 }
 
 func (c *countWriter) Write(p []byte) (int, error) { c.n += int64(len(p)); return len(p), nil }
+
+// TestCloudDownloadManager_CancelDuringWrite_Race 直测审查 C 的 cancel 竞态（严重缺失 2）：
+// 慢速源写盘进行中反复 Cancel → 等下载 goroutine 完全退出 → 断言 releaseTaskScope 幂等：
+// Scope committed/reserved 最终精确归零（不重复回拨、不反负），storageMgr 全局账本同步归零。
+func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
+	blockCh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "104857600") // 100MB，避免意外 EOF
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, 200)) // 先落 200 字节，使 QW 进入已 commit 状态
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-blockCh // 停流，制造「写盘进行中」窗口
+	}))
+	t.Cleanup(func() { close(blockCh); srv.Close() })
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 4<<30, nil, testLogger()) // 全局 4 GiB
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   1,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 30 * time.Second,
+		MaxRetries:      1,
+	}
+	mgr, h := newCloudTestManager(t, dir, sm, cfg)
+	setTestOwnerQuota(h, "alice", 2<<30) // 2 GiB，容纳未知大小占位 1 GiB
+
+	task, err := mgr.SubmitAndStart("url", srv.URL, "cancel-race.bin", -1, t.Context(), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 等待 .partial 出现（下载已开始写盘）
+	taskDir := mgr.taskDirFor("alice", task.ID)
+	deadline := time.Now().Add(5 * time.Second)
+	partialSeen := false
+	for time.Now().Before(deadline) {
+		if _, statErr := os.Stat(filepath.Join(taskDir, "cancel-race.bin.partial")); statErr == nil {
+			partialSeen = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !partialSeen {
+		t.Fatal("下载未开始写盘（.partial 未出现）")
+	}
+
+	// 写盘进行中反复 Cancel：首次成功，后续因状态已 cancelled 返回错误（幂等复查路径）
+	for range 5 {
+		_ = mgr.CancelTask(task.ID, "alice")
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !mgr.waitTaskStopped(task.ID, 5*time.Second) {
+		t.Fatal("cancel 后下载 goroutine 未退出")
+	}
+
+	// 终态为 cancelled
+	snap, ok := mgr.SnapshotTask(task.ID, "alice")
+	if !ok || snap.Status != "cancelled" {
+		t.Fatalf("任务状态=%q want cancelled", snap.Status)
+	}
+
+	// releaseTaskScope 幂等：Scope committed/reserved 精确归零、不反负
+	cloudB := h.quotaBucketFor("alice", "cloud")
+	if cloudB == nil {
+		t.Fatal("alice cloud 桶 Scope 应为非 nil")
+	}
+	if got := cloudB.Usage(); got != 0 {
+		t.Fatalf("cancel 后 cloud 桶 Usage()=%d want 0（已 commit 回拨）", got)
+	}
+	if got := cloudB.Reserved(); got != 0 {
+		t.Fatalf("cancel 后 cloud 桶 Reserved()=%d want 0（reserve 释放）", got)
+	}
+	if got := h.quotaFor("alice").Usage(); got != 0 {
+		t.Fatalf("cancel 后租户根 Usage()=%d want 0", got)
+	}
+	// 幂等复调 releaseTaskScope：不得重复回拨（任务已结算）
+	mgr.mu.Lock()
+	realTask := mgr.tasks[task.ID]
+	mgr.mu.Unlock()
+	if realTask != nil {
+		mgr.releaseTaskScope(realTask)
+	}
+	if got := cloudB.Usage(); got != 0 {
+		t.Fatalf("幂等复调后 cloud 桶 Usage()=%d want 0（不重复回拨）", got)
+	}
+	if got := cloudB.Reserved(); got != 0 {
+		t.Fatalf("幂等复调后 cloud 桶 Reserved()=%d want 0", got)
+	}
+	// storageMgr 全局账本同步归零（CancelTask 已释放 ReservedSize）
+	if got := sm.Usage(); got != 0 {
+		t.Fatalf("cancel 后 storageMgr Usage()=%d want 0", got)
+	}
+}
+
+// TestCloudDownloadManager_ConcurrentResumeAndCancel 直测审查 C 的并发 resume+cancel
+// 竞态（缺口 8）：并发 ResumeTask 与 CancelTask 不得竞争写同一 .partial（running 护栏），
+// -race 下无数据竞争；终态后 Scope/storageMgr 账本不反负、不虚高（<= 磁盘实际占用）。
+func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
+	full := make([]byte, 100)
+	for i := range full {
+		full[i] = byte(i % 251)
+	}
+	var first atomicBool
+	first.set(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			// 续传：返回 206 剩余部分（Range 续传成功路径）
+			w.Header().Set("Content-Range", "bytes 10-99/100")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(full[10:])
+			return
+		}
+		if first.compareAndSwap(true, false) {
+			// 首次：截断响应（Content-Length 谎报 100，只发 10 字节）→ 下载失败保留 .partial
+			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(full[:10])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			return
+		}
+		// 兜底：全量（不应再出现无 Range 请求）
+		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	sm := NewStorageManager(dir, 1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   1,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 300 * time.Millisecond,
+		IdleTimeout:     300 * time.Millisecond,
+		MaxRetries:      1,
+	}
+	mgr, h := newCloudTestManager(t, dir, sm, cfg)
+	setTestOwnerQuota(h, "alice", 1000)
+
+	// 首次下载：截断失败 → failed 保留 10 字节 .partial
+	task, err := mgr.SubmitAndStart("url", srv.URL, "resume-race.bin", int64(len(full)), nil, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+	if snap, _ := mgr.SnapshotTask(task.ID, "alice"); snap.Status != "failed" {
+		t.Fatalf("首次下载应 failed, got %q (%s)", snap.Status, snap.Error)
+	}
+	if got := mgr.diskUsageOfTask("alice", task.ID); got != 10 {
+		t.Fatalf("首次失败后磁盘占用=%d want 10（.partial）", got)
+	}
+	if got := h.quotaFor("alice").Usage(); got != 10 {
+		t.Fatalf("首次失败后 Scope Usage()=%d want 10", got)
+	}
+
+	// 并发 resume+cancel（每个 goroutine 交替调用；-race 检测写 .partial 竞争）
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for range 25 {
+				_ = mgr.ResumeTask(task.ID, false, "alice")
+				_ = mgr.CancelTask(task.ID, "alice")
+			}
+		})
+	}
+	wg.Wait()
+
+	// 等待所有下载 goroutine 退出（running 护栏的终点）
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mgr.mu.RLock()
+		running := mgr.running[task.ID]
+		mgr.mu.RUnlock()
+		if !running {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("并发 resume+cancel 后仍有下载 goroutine 运行")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 终态必须为 failed/cancelled/completed 之一
+	snap, ok := mgr.SnapshotTask(task.ID, "alice")
+	if !ok {
+		t.Fatal("任务消失")
+	}
+	switch snap.Status {
+	case "failed", "cancelled", "completed":
+	default:
+		t.Fatalf("并发后任务状态=%q want failed/cancelled/completed", snap.Status)
+	}
+	disk := mgr.diskUsageOfTask("alice", task.ID)
+	cloudB := h.quotaBucketFor("alice", "cloud")
+	if cloudB.Usage() < 0 || cloudB.Reserved() < 0 {
+		t.Fatalf("并发后账本反负: Usage=%d Reserved=%d", cloudB.Usage(), cloudB.Reserved())
+	}
+	if cloudB.Usage() > disk {
+		t.Fatalf("并发后 Scope Usage()=%d > 磁盘占用=%d（虚高/泄漏）", cloudB.Usage(), disk)
+	}
+	if cloudB.Reserved() != 0 {
+		t.Fatalf("并发后 cloud 桶 Reserved()=%d want 0", cloudB.Reserved())
+	}
+	if sm.Usage() < 0 {
+		t.Fatalf("并发后 storageMgr Usage()=%d 反负", sm.Usage())
+	}
+}
+
+// compareAndSwap 是 atomicBool 的 CAS 便捷方法（并发首请求判定）。
+func (ab *atomicBool) compareAndSwap(old, new bool) bool { return ab.b.CompareAndSwap(old, new) }

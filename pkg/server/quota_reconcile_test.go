@@ -8,6 +8,7 @@ package server
 // ScanAndRecalculate + reconcileQuotaScopes 把磁盘按租户桶归集校准进对应 Scope（Adjust）。
 
 import (
+	"bytes"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -113,6 +114,67 @@ func TestRegisterRoutes_StartupReconcilesQuotaScopes(t *testing.T) {
 	}
 	if got := h.globalPool.Usage(); got != 80 {
 		t.Fatalf("globalPool Usage()=%d want 80（父链聚合）", got)
+	}
+}
+
+// TestRegisterRoutes_StartupReconcilesQuotaScopes_WithBucketLimits 验证（审查 D）startup
+// 装配 bucket_limits 回归：
+//  1. RegisterRoutes 装配后按 BucketLimits 建精确路径子 Scope（quotaBucketFor 命中、
+//     MaxBytes=100），不因子目录未发生任何写而缺失；
+//  2. 写路径超子目录上限（user/videos/hd 100B）但满足租户总上限（OwnerQuotas 200）→ 200
+//     （写路径仍按 user 桶聚合，不被 bucket_limits 子 Scope 截断）；
+//  3. 写路径超租户总上限 → 507（owner 兜底仍生效），且 user 桶不泄漏。
+func TestRegisterRoutes_StartupReconcilesQuotaScopes_WithBucketLimits(t *testing.T) {
+	storageRoot := t.TempDir()
+	cfg := Default()
+	cfg.StorageRoot = storageRoot
+	cfg.MaxStorageBytes = 1024 * 1024
+	cfg.OwnerQuotas = map[string]int64{"anonymous": 200}
+	cfg.BucketLimits = map[string]int64{"user/videos/hd": 100}
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	mux := http.NewServeMux()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux: mux, CfgPtr: &cfgPtr, Version: "t", BuildAt: "t",
+		Logger: testLogger(), AuditLogger: testLogger(),
+	})
+	t.Cleanup(func() { _ = h.Close() })
+
+	// 1) bucket_limits 精确路径子 Scope 已装配（startup 回归）：非 nil、上限 100。
+	subScope := h.quotaBucketFor("anonymous", "user/videos/hd")
+	if subScope == nil {
+		t.Fatal("RegisterRoutes 装配后 quotaBucketFor(anonymous, user/videos/hd)=nil（bucket_limits 未装配？）")
+	}
+	if got := subScope.MaxBytes(); got != 100 {
+		t.Fatalf("bucket_limits 子目录 Scope MaxBytes=%d want 100", got)
+	}
+
+	// 写路径 mux（注入 actor）。
+	umux := actorUploadDeleteMux(h, "anonymous")
+
+	// 2) 上传 140 字节（>子目录上限 100，但 140<租户总上限 200）→ 200（写路径不截断）。
+	code, resp := uploadAsPath(t, umux, "user/videos/hd/big.txt", bytes.Repeat([]byte("a"), 140))
+	if code != http.StatusOK {
+		t.Fatalf("超子目录上限但满足租户总上限应 200, got %d: %s", code, resp)
+	}
+	if got := h.quotaBucketFor("anonymous", "user").Usage(); got != 140 {
+		t.Fatalf("上传 140 后 user 桶 Usage()=%d want 140", got)
+	}
+
+	// 3) 再上传 140 字节 → user 桶累计 280 > 租户总上限 200 → 507（owner 兜底仍生效）。
+	code2, resp2 := uploadAsPath(t, umux, "user/videos/hd/big2.txt", bytes.Repeat([]byte("b"), 140))
+	if code2 != http.StatusInsufficientStorage {
+		t.Fatalf("累计超租户总上限应 507, got %d: %s", code2, resp2)
+	}
+	if got := h.quotaBucketFor("anonymous", "user").Usage(); got != 140 {
+		t.Fatalf("507 后 user 桶 Usage()=%d want 140（不泄漏）", got)
+	}
+	if got := h.quotaBucketFor("anonymous", "user").Reserved(); got != 0 {
+		t.Fatalf("507 后 user 桶 Reserved()=%d want 0（不泄漏）", got)
+	}
+	// 写路径不接入子 Scope：子目录子 Scope 始终未记账（0）。
+	if got := subScope.Usage(); got != 0 {
+		t.Fatalf("写路径不应接入子目录子 Scope（Usage()=%d want 0）", got)
 	}
 }
 

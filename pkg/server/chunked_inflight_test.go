@@ -446,3 +446,43 @@ func TestChunkedUpload_Completed_RejectsNewChunks(t *testing.T) {
 		t.Fatalf("completed 后 chunk 应 410, got %d", c)
 	}
 }
+
+// TestIsInflightTempName_Negatives 验证（审查 D）isInflightTempName 严格按完整临时名形态
+// （.inflight-<16hex>-<upload_id>.part）判定，防止误拦用户可创建的同名前缀普通文件：
+// 普通 <id>.part / 短名 / 非 .inflight- 前缀 / 哈希非 16 hex / 缺 .part 后缀 → 全部 false。
+func TestIsInflightTempName_Negatives(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		// 正向控制：inflightTempName 生成的完整形态必须命中（保证负例不全为假阴性）。
+		{inflightTempName("user/f.txt", "sess-1"), true},
+		{".inflight-1234567890abcdef-upload123.part", true},
+		// 负例：普通 <id>.part / a.part（用户可创建的普通文件，不能被误判为在途临时名）。
+		{"1234.part", false},
+		{"a.part", false},
+		{"data.part", false},
+		{"file.txt", false},
+		// 前缀不匹配：x-inflight-1234.part 不是 .inflight- 开头。
+		{"x-inflight-1234.part", false},
+		// 无连字符分隔（token 未与 uploadID 分离）。
+		{".inflight-1234.part", false},
+		// 哈希不是 16 hex：长度不足。
+		{".inflight-1234-upload.part", false},
+		// 哈希长度对但含非 hex 字符。
+		{".inflight-1234567890abcdeg-upload.part", false},
+		// 哈希长度对但含大写（inflightTempName 用 hex.Encode 恒小写）。
+		{".inflight-1234567890ABCDEF-upload.part", false},
+		// 无 .part 后缀（或后缀非 .part）。
+		{".inflight-1234567890abcdef-upload", false},
+		{".inflight-1234567890abcdef-upload.zip", false},
+		// uploadID 可合法含连字符（Cut 只取首个 - 分隔 token 与剩余 idPart；
+		// 剩余以 .part 结尾即命中）——非负例，作正向补充明确语义。
+		{".inflight-1234567890abcdef-upload-1.part", true},
+	}
+	for _, tc := range cases {
+		if got := isInflightTempName(tc.name); got != tc.want {
+			t.Fatalf("isInflightTempName(%q)=%v want %v", tc.name, got, tc.want)
+		}
+	}
+}

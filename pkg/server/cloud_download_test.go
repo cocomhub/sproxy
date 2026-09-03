@@ -2021,3 +2021,94 @@ func TestCloudDownloadManager_ListTasksLimitOverflow(t *testing.T) {
 		t.Fatalf("expected groups len=1 total=1, got len=%d total=%d", len(groups), gtotal)
 	}
 }
+
+// TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases 锁定审查 C 严重缺失 3
+// 与 I-1 双轨双释放补测：全局 storageMgr max 设不足容纳实际下载量（创建期声明 totalSize 小、
+// 实际 Content-Length 更大）→ 下载器正常写完（QW done(true)、Scope 边写边记）→ 完成路径
+// `TryReserve(result.Size-reserved)` 失败分支 → 任务 failed("storage full after download") +
+// 文件删除 + sm.Usage()==0 + Scope 精确归零（不泄漏）。
+func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *testing.T) {
+	content := make([]byte, 100)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	// 全局 storageMgr max=50：创建期预留 10 成功，但下载 100 后 TryReserve(90) 超限失败。
+	sm := NewStorageManager(dir, 50, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold:   1,
+		MaxConcurrent:   3,
+		TaskTTL:         time.Hour,
+		FailedTaskTTL:   time.Hour,
+		AllowPrivate:    true,
+		DownloadTimeout: 30 * time.Second,
+		MaxRetries:      1,
+	}
+	mgr, h := newCloudTestManager(t, dir, sm, cfg)
+	setTestOwnerQuota(h, "alice", 1000) // 租户配额 1000 > 100，QW 写盘预留在 Scope 内成功
+
+	// 已知大小 10 创建任务（预留 10），实际下载 100 → 完成路径补齐预留失败。
+	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitTaskDone(t, mgr, task.ID)
+
+	snap, ok := mgr.SnapshotTask(task.ID, "alice")
+	if !ok {
+		t.Fatal("任务消失")
+	}
+	if snap.Status != "failed" {
+		t.Fatalf("storage-full-after-download 应 failed, got %q (%s)", snap.Status, snap.Error)
+	}
+	if !strings.Contains(snap.Error, "storage full after download") {
+		t.Fatalf("错误文本=%q 应含 'storage full after download'", snap.Error)
+	}
+
+	// 文件已删除（下载器已 rename 为最终文件，失败分支 os.Remove）。
+	destPath := filepath.Join(mgr.taskDirFor("alice", task.ID), "big.bin")
+	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
+		t.Fatalf("storage-full 后最终文件应已删除, stat err=%v", err)
+	}
+
+	// 全局 storageMgr 账本精确归零（创建期预留 10 已释放）。
+	if got := sm.Usage(); got != 0 {
+		t.Fatalf("storage-full 后 storageMgr Usage()=%d want 0", got)
+	}
+	if got := sm.UsageByCategory()[CategoryCloud]; got != 0 {
+		t.Fatalf("storage-full 后 CategoryCloud=%d want 0", got)
+	}
+
+	// Scope 精确归零：QW 边写边记已 commit 100，releaseTaskScope 按 QuotaCommitted(100) 回拨。
+	cloudB := h.quotaBucketFor("alice", "cloud")
+	if cloudB == nil {
+		t.Fatal("alice cloud 桶 Scope 应为非 nil")
+	}
+	if got := cloudB.Usage(); got != 0 {
+		t.Fatalf("storage-full 后 cloud 桶 Usage()=%d want 0（双轨不泄漏）", got)
+	}
+	if got := cloudB.Reserved(); got != 0 {
+		t.Fatalf("storage-full 后 cloud 桶 Reserved()=%d want 0", got)
+	}
+	if got := h.quotaFor("alice").Usage(); got != 0 {
+		t.Fatalf("storage-full 后租户根 Usage()=%d want 0", got)
+	}
+
+	// 幂等复查：删除任务不改变已归零账本（无二次释放、不反负）。
+	if err := mgr.DeleteTask(task.ID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if got := cloudB.Usage(); got != 0 {
+		t.Fatalf("删除后 cloud 桶 Usage()=%d want 0", got)
+	}
+	if got := cloudB.Reserved(); got != 0 {
+		t.Fatalf("删除后 cloud 桶 Reserved()=%d want 0", got)
+	}
+}

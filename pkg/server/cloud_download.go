@@ -1171,9 +1171,11 @@ func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("task not found: %s", id)
 	}
-	if t.Status != "pending" && t.Status != "downloading" {
+	if status := t.Status; status != "pending" && status != "downloading" {
+		// 注意：status 须在解锁前捕获——fmt.Errorf 若直接引用 t.Status 会在 m.mu 释放后
+		// 读共享字段，与 ResumeTask 的 task.Status = "pending"（持锁写）构成数据竞争。
 		m.mu.Unlock()
-		return fmt.Errorf("cannot cancel task in status %q", t.Status)
+		return fmt.Errorf("cannot cancel task in status %q", status)
 	}
 	t.Status = "cancelled"
 	t.UpdatedAt = time.Now()
@@ -1970,9 +1972,11 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		m.mu.Unlock()
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	if task.Status != "failed" && task.Status != "cancelled" {
+	if status := task.Status; status != "failed" && status != "cancelled" {
+		// 解锁前捕获 status：fmt.Errorf 若直接引用 task.Status 会在 m.mu 释放后读共享字段，
+		// 与 CancelTask 的 t.Status = "cancelled"（持锁写）构成数据竞争。
 		m.mu.Unlock()
-		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, task.Status)
+		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
 	}
 	// 释放写锁再等待：waitTaskStopped 内部需取读锁，持有写锁会死锁。
 	// 等待期间任务可能被删除或状态被并发修改，之后会重新校验。
@@ -1992,9 +1996,9 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		m.mu.Unlock()
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	if task.Status != "failed" && task.Status != "cancelled" {
+	if status := task.Status; status != "failed" && status != "cancelled" {
 		m.mu.Unlock()
-		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, task.Status)
+		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
 	}
 	if m.running[taskID] {
 		m.mu.Unlock()
