@@ -93,9 +93,6 @@ func (rl *RateLimiter) UpdateConfig(enabled bool, limit int, window time.Duratio
 // Allow reports whether the current request is within the global rate limit.
 // 不使用 per-IP 限流。
 func (rl *RateLimiter) Allow() bool {
-	if rl.limit <= 0 {
-		return false
-	}
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	return rl.allowGlobalLocked()

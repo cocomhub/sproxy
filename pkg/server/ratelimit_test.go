@@ -229,6 +229,9 @@ func TestRateLimiter_UpdateConfig_ConcurrentSafe(t *testing.T) {
 		wg.Go(func() {
 			for i := range 50 {
 				rl.UpdateConfig(i%2 == 0, 1+i%4, time.Duration(100+i)*time.Millisecond)
+				// 并发读路径：禁用时走 AllowIP 短路（不再触发 MIDDLEWARE 429），
+				// Allow 与 UpdateConfig 交错（覆盖无锁读 limit 的竞态）。
+				_ = rl.Allow()
 				_ = sendAllowReq(t, h, "192.0.2.9", "/")
 			}
 		})
