@@ -60,7 +60,11 @@ type Handlers struct {
 	// auditLogger 是操作审计专用 logger：固定 JSON 格式（不随 log_format 切换）、
 	// 与业务 logger 独立，保证审计行可机器检索。RegisterRoutes 初始化；测试可经
 	// RegisterRoutesOpts.AuditLogger 注入 buffer 捕获。
-	auditLogger    *slog.Logger
+	auditLogger *slog.Logger
+	// auditRing 是有界内存环形审计缓冲（cfg.Audit.BufferSize，默认 2048；0=关闭）。
+	// RegisterRoutes 按 cfg 装配（BufferSize>0 时创建）；RecordAudit 在 TS 填充后
+	// 挂钩 Add，所有审计录入点自动进 ring。nil = 关闭（GET /api/audit 返回空表）。
+	auditRing      *AuditRing
 	cloudMgr       *CloudDownloadManager
 	syncMgr        *syncmgr.Manager // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
 	storageMgr     *StorageManager
@@ -478,6 +482,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		auditLogger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
+	// 有界内存环形审计缓冲：按 cfg.Audit.BufferSize 装配（默认 2048 由 SetDefaults
+	// 保证；显式 0 = 关闭，auditRing 保持 nil，GET /api/audit 返回空表）。
+	var auditRing *AuditRing
+	if cfg.Audit.BufferSize > 0 {
+		auditRing = NewAuditRing(cfg.Audit.BufferSize)
+	}
+
 	// 打开全局存储根（多租户布局：<storage_root>/<tenant>/{user,cloud,...}/）。
 	// 目录不存在时先创建（原 storage_root 也是惰性创建）；storage.OpenRoot 会写入/校验
 	// LAYOUT_VERSION。失败（目录无法打开 / 布局版本不匹配）是致命装配错误：记 Error 并
@@ -508,6 +519,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		uploadingStop: make(chan struct{}),
 		noncePool:     sproxysig.NewNoncePool(),
 		tracer:        opts.Tracer,
+		auditRing:     auditRing,
 	}
 	// 装配多租户存储布局：全局配额池 + 懒创建缓存 + 预创建 anonymous 租户。
 	// tenantRoots/checksumStores/uploadStores/quotaScopes 均为懒创建（首次请求时建），
@@ -607,6 +619,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
 	localMux.HandleFunc("PUT /api/config", h.updateConfigHandler)
+	// 审计查看：隧道内层注册（无 authMiddleware——隧道加密即认证，与 /api/shares、
+	// /api/stats 的 localMux 侧同模式）。auditHandler 只读 ring 回 JSON，自身不做
+	// 签名校验。浏览器隧道模式下用户面操作必须隧道可达（仅注册主 mux 会 404）。
+	localMux.HandleFunc("GET /api/audit", h.auditHandler)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -794,6 +810,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		localMux.HandleFunc("GET /api/hub/stats", h.hubStatsHandler)
 		localMux.HandleFunc("GET /api/hub/services", h.hubServicesHandler)
 	}
+
+	// 审计查看 API：GET /api/audit 同时注册主 mux（authMiddleware，SproxySig/APIKey
+	// 认证）与 localMux（隧道内层，隧道加密即认证——与 /api/shares、/api/stats 同
+	// 模式）。审计是浏览器隧道模式下的用户面操作，隧道内层必须可达（用户在隧道
+	// 模式下打开审计 tab 应能直接查看；仅注册主 mux 会让隧道模式 404）。
+	srvMux.HandleFunc("GET /api/audit", h.authMiddleware(h.auditHandler))
 
 	srvMux.HandleFunc("GET /healthz", h.healthz)
 	srvMux.HandleFunc("GET /version", h.versionHandler)

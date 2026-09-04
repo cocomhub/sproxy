@@ -142,6 +142,46 @@ test('statsTableHtml 各统计', () => {
   assert.ok(html.includes('1.0 KB'));
 });
 
+// ---- 审计面板 ----
+test('auditTableHtml 空事件 → 空占位', () => {
+  const html = r.auditTableHtml([]);
+  assert.ok(html.includes('暂无审计记录'));
+  assert.ok(!html.includes('<table'));
+});
+
+test('auditTableHtml 事件行 + 时间格式化', () => {
+  const html = r.auditTableHtml([{ action: 'delete', actor: 'ak-1', mesh: 'mesh-a', object_type: 'file', object: 'dir/a.txt', result: 'success', detail: 'to=b.txt', ts: '2026-09-01T12:00:00Z' }]);
+  assert.ok(html.includes('delete'));
+  assert.ok(html.includes('ak-1'));
+  assert.ok(html.includes('mesh-a'));
+  assert.ok(html.includes('dir/a.txt'));
+  assert.ok(html.includes('to=b.txt'));
+  // 时间列按 locale 格式化（toLocaleString），非原始 ISO 串。
+  assert.ok(!html.includes('2026-09-01T12:00:00Z'), '时间应经 toLocaleString 而非原样 ISO');
+});
+
+test('auditTableHtml 所有字段过 escHtml 防 XSS（actor/mesh/detail 重点）', () => {
+  const html = r.auditTableHtml([{
+    action: '<img>', actor: '<script>actor</script>', mesh: '<b>mesh</b>',
+    object_type: '<i>obj</i>', object: '"onmouseover=&', result: '<u>r</u>', detail: '<svg onload=1>', ts: 'x',
+  }]);
+  assert.ok(!html.includes('<img>'));
+  assert.ok(!html.includes('<script>'));
+  assert.ok(!html.includes('<svg'));
+  assert.ok(html.includes('&lt;script&gt;actor&lt;/script&gt;'), 'actor 应转义');
+  assert.ok(html.includes('&lt;b&gt;mesh&lt;/b&gt;'), 'mesh 应转义');
+  assert.ok(html.includes('&lt;svg onload=1&gt;'), 'detail 应转义');
+  assert.ok(html.includes('&quot;onmouseover=&amp;'));
+  assert.ok(!html.includes('<b>mesh</b>'), 'mesh 原始标签不应出现');
+});
+
+test('auditTableHtml 缺字段兜底（-）', () => {
+  const html = r.auditTableHtml([{}]);
+  assert.ok(html.includes('delete') === false, '空事件对象无 action');
+  // 无 action/actor 等字段应渲染占位符而非 undefined。
+  assert.ok(!html.includes('undefined'));
+});
+
 // ---- 云端 / 版本 ----
 test('statusText 全状态 + 未知', () => {
   assert.strictEqual(r.statusText('pending'), '⏳ 等待中');

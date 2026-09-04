@@ -21,15 +21,21 @@ const (
 
 // AuditEvent 是一次敏感操作的结构化审计事件。
 // 通过 RecordAudit 输出为固定 JSON 结构，可检索「谁在何时对哪个对象做了什么」。
+//
+// 字段带显式 json tag（与 stats.go / config_response 等其他 API 响应一致的下划线
+// 命名）：/api/audit 将本结构直接序列化给 Web UI，前端 app-render.auditTableHtml 按
+// 小写字段读取（action/actor/mesh/object/result/detail/ts）。无 tag 时 Go 默认按
+// 字段名（A-Action 等大写）序列化——与前端字段契约不一致，会导致审计表整行显示
+// 占位符 "-"。务必保持 tag 与前端消费字段一一对应。
 type AuditEvent struct {
-	Action     string    // 操作名：delete / rename / version_restore / version_delete / config_update / cloud_cancel / cloud_delete
-	Actor      string    // 操作主体：AccessKey（SproxySig）或 APIKey 名；未认证为空串
-	Mesh       string    // 所属 mesh（SproxySig 派生；APIKey/未认证为空串）
-	ObjectType string    // 对象类型：file / task / config
-	Object     string    // 对象标识：文件路径 / 任务 ID / config
-	Result     string    // 结果：success / denied / error
-	Detail     string    // 补充信息（如 rename 的目标、version_id、失败原因）
-	TS         time.Time // 事件发生时间（零值自动填充当前时间）
+	Action     string    `json:"action"`      // 操作名：delete / rename / version_restore / version_delete / config_update / cloud_cancel / cloud_delete
+	Actor      string    `json:"actor"`       // 操作主体：AccessKey（SproxySig）或 APIKey 名；未认证为空串
+	Mesh       string    `json:"mesh"`        // 所属 mesh（SproxySig 派生；APIKey/未认证为空串）
+	ObjectType string    `json:"object_type"` // 对象类型：file / task / config
+	Object     string    `json:"object"`      // 对象标识：文件路径 / 任务 ID / config
+	Result     string    `json:"result"`      // 结果：success / denied / error
+	Detail     string    `json:"detail"`      // 补充信息（如 rename 的目标、version_id、失败原因）
+	TS         time.Time `json:"ts"`          // 事件发生时间（零值自动填充当前时间）
 }
 
 // RecordAudit 输出一条结构化审计日志。
@@ -48,6 +54,10 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 	if evt.TS.IsZero() {
 		evt.TS = time.Now()
 	}
+	// 挂钩有界内存环形缓冲：TS 填充后 Add 到 ring（ring 为 nil = 关闭，Add 静默跳过）。
+	// 所有现有录入点（delete/rename/config_update/cloud_* 等）经本函数自动进 ring，
+	// 无需逐点修改。Add 不 panic，审计链路绝不影响业务。
+	h.addToAuditRing(evt)
 	logger := h.auditLogger
 	if logger == nil {
 		logger = slog.Default()
@@ -62,4 +72,13 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 		"detail", evt.Detail,
 		"ts", evt.TS.Format(time.RFC3339Nano),
 	)
+}
+
+// addToAuditRing 把已填好 TS 的最终审计事件写入有界环形缓冲（nil ring 静默跳过）。
+// ring 容量满时环形覆盖丢弃最旧；本方法绝不 panic，审计链路不影响业务路径。
+func (h *Handlers) addToAuditRing(evt AuditEvent) {
+	if h.auditRing == nil {
+		return
+	}
+	h.auditRing.Add(evt)
 }

@@ -51,6 +51,14 @@ type RateLimitConfig struct {
 	Window   time.Duration `yaml:"window" mapstructure:"window"`
 }
 
+// AuditConfig 是有界内存环形审计缓冲配置（audit.buffer_size）。
+// BufferSize 为保留的审计事件条数上限（环形覆盖）。默认 2048（SetDefaults 填充，
+// 意味着默认启用 ring）；0 = 显式关闭 ring（GET /api/audit 返回空表）；负值非法。
+// 仅内存缓冲，不落盘（审计留档交给日志 collector 消费 RecordAudit 的 JSON 行）。
+type AuditConfig struct {
+	BufferSize int `yaml:"buffer_size" mapstructure:"buffer_size"`
+}
+
 // OTELConfig 是 OpenTelemetry SDK 装配配置（观测面，非文件功能）。
 // 默认关闭（telemetry.enabled=false）时 server 保持纯 slog 日志，零额外开销；
 // 开启时由 autoexport 按标准环境变量（OTEL_TRACES_EXPORTER /
@@ -302,6 +310,9 @@ type Config struct {
 	// 文件版本管理（默认关闭）
 	Versioning VersionConfig `yaml:"versioning" mapstructure:"versioning"`
 
+	// Audit 是有界内存环形审计缓冲配置（audit.buffer_size，默认 2048）。
+	Audit AuditConfig `yaml:"audit" mapstructure:"audit"`
+
 	// API 密钥配置
 	APIKeys APIKeyConfig `yaml:"api_keys" mapstructure:"api_keys"`
 
@@ -381,6 +392,9 @@ func Default() *Config {
 			MaxRetries:    10,
 			RetryDelay:    10 * time.Second,
 			RetryBackoff:  2,
+		},
+		Audit: AuditConfig{
+			BufferSize: 2048,
 		},
 		Hub: HubConfig{
 			VirtualSubnet: hub.DefaultVirtualSubnet,
@@ -484,6 +498,10 @@ func (c *Config) SetDefaults() {
 	if c.Hub.Federation.Timeout <= 0 {
 		c.Hub.Federation.Timeout = 10 * time.Second
 	}
+	// audit.buffer_size 默认由 Default() 提供（2048）。此处**不**用 ==0 复活默认——
+	// 加载链是 Default()（含 2048）→ Unmarshal → SetDefaults()，若这里有 ==0→2048，
+	// 用户显式写的 audit.buffer_size: 0（=关闭）会被改回 2048，「0=关闭」不可达。
+	// 装配侧（RegisterRoutes）按 >0 判断天然把 0 视为关闭，SetDefaults 无需兜底。
 }
 
 // Validate 校验配置合理性。
@@ -493,6 +511,10 @@ func (c *Config) Validate() error {
 	}
 	if c.StorageRoot == "" {
 		return fmt.Errorf("storage_root 为空，请配置存储根目录")
+	}
+	// audit.buffer_size 不能为负（0 = 关闭，正整数 = 环形容量）。
+	if c.Audit.BufferSize < 0 {
+		return fmt.Errorf("audit.buffer_size 不能为负，当前 %d（0=关闭，正整数=环形缓冲容量）", c.Audit.BufferSize)
 	}
 	// 无 auth 配置（access_keys/api_keys 均为空）在 Validate 层是合法的——
 	// fail-fast 拒绝启动在 cmd/sproxy 侧执行。

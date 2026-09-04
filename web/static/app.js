@@ -489,6 +489,17 @@ async function downloadDirArchive(dirPath) {
 }
 
 // --- 监控 ---
+// statsRefresh 刷新当前活动监控 tab：读激活的 .stats-tab id，按活动 tab 刷新
+// （审计 tab 在 tunnel/无凭据场景刷不到实时操作，但保持「刷新=重拉当前视图」语义统一）。
+// 复用 switchStatsTab 的重载语义（showAudit/showStats），不改 switchStatsTab 内部实现。
+function statsRefresh() {
+  const active = document.querySelector('.stats-tab.active');
+  const id = active ? active.id : 'stats-tab';
+  const tab = id.replace('-tab', '');
+  if (tab === 'audit') { switchStatsTab('audit'); } else { showStats(); }
+}
+
+// showStats 打开监控弹窗并默认展示 stats tab。
 async function showStats() {
   document.getElementById('stats-modal').style.display = 'flex';
   switchStatsTab('stats');
@@ -513,12 +524,16 @@ function switchStatsTab(tab) {
   document.getElementById('stats-panel').style.display = tab === 'stats' ? 'block' : 'none';
   document.getElementById('config-panel').style.display = tab === 'config' ? 'block' : 'none';
   document.getElementById('hub-panel').style.display = tab === 'hub' ? 'block' : 'none';
+  document.getElementById('audit-panel').style.display = tab === 'audit' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
-    el.style.borderBottomColor = el.id === tab + '-tab' ? 'var(--tab-active)' : 'transparent';
-    el.style.color = el.id === tab + '-tab' ? 'var(--text-primary)' : 'var(--text-secondary)';
+    const on = el.id === tab + '-tab';
+    el.classList.toggle('active', on);
+    el.style.borderBottomColor = on ? 'var(--tab-active)' : 'transparent';
+    el.style.color = on ? 'var(--text-primary)' : 'var(--text-secondary)';
   });
   if (tab === 'config') showConfig();
   if (tab === 'hub') showHub();
+  if (tab === 'audit') showAudit();
 }
 
 async function showConfig() {
@@ -546,6 +561,23 @@ async function showHub() {
 }
 
 function hubTableHtml(nodes, stats) { return appRender.hubTableHtml(nodes, stats); }
+
+// --- 审计日志查看 ---
+// showAudit 拉取最近审计事件并渲染到 #audit-panel。direct 与隧道两条路径均可达
+// （/api/audit 同时注册主 mux（authMiddleware）与 localMux（隧道加密即认证））。
+// 加载失败渲染通用错误占位（不展示原始错误细节，minimal）。
+async function showAudit() {
+  document.getElementById('audit-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const data = await sc.audit.list({ limit: 200 });
+    const events = (data && data.events) || [];
+    document.getElementById('audit-panel').innerHTML = auditTableHtml(events);
+  } catch (e) {
+    document.getElementById('audit-panel').innerHTML = '<div class="empty-msg">审计数据请求失败: ' + e.message + '</div>';
+  }
+}
+
+function auditTableHtml(events) { return appRender.auditTableHtml(events); }
 
 async function removeHubNode(nodeId) {
   if (!confirm('确定移除节点 ' + nodeId + '？')) return;
@@ -1839,12 +1871,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // 监控弹窗
   document.getElementById('stats-close-btn').addEventListener('click', hideStats);
-  document.getElementById('stats-refresh-btn').addEventListener('click', showStats);
+  document.getElementById('stats-refresh-btn').addEventListener('click', statsRefresh);
   document.getElementById('stats-close-modal-btn').addEventListener('click', hideStats);
   // 监控弹窗标签页切换
   document.getElementById('stats-tab').addEventListener('click', function() { switchStatsTab('stats'); });
   document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
+  document.getElementById('audit-tab').addEventListener('click', function() { switchStatsTab('audit'); });
 
   // 云端下载（云 URL 行按钮 + Enter 快捷键统一走 bindCloudUrlRowEvents；
   // cloud-modal 已移除——URL 区已迁入 #transfer-page，频道条点击委托在 initTransferPage）。

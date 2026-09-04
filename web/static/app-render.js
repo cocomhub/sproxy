@@ -252,6 +252,41 @@
       '<tr><td style="padding:5px 0;color:var(--text-secondary)">删除文件数</td><td style="text-align:right">' + ((s && s.files_deleted) ?? 0) + '</td></tr></table>';
   }
 
+  // ---- 审计面板（纯渲染） ----
+  // auditTableHtml(events) → 审计事件表格 HTML。所有字段过 escHtml 防 XSS
+  // （actor/mesh/detail 是重点——可被 AK/SK 或 mesh 名污染）；空数组渲染占位。
+  // 时间列用 new Date(ts).toLocaleString()（RFC3339Nano 串 → locale 可读时间）。
+  function auditTableHtml(events) {
+    const list = Array.isArray(events) ? events : [];
+    if (list.length === 0) {
+      return '<div class="empty-msg">暂无审计记录</div>';
+    }
+    const cell = 'padding:6px 8px;border-bottom:1px solid var(--border-color);';
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:var(--bg-hover);">';
+    html += '<th style="' + cell + 'text-align:left;">时间</th>';
+    html += '<th style="' + cell + 'text-align:left;">操作</th>';
+    html += '<th style="' + cell + 'text-align:left;">主体</th>';
+    html += '<th style="' + cell + 'text-align:left;">mesh</th>';
+    html += '<th style="' + cell + 'text-align:left;">对象</th>';
+    html += '<th style="' + cell + 'text-align:left;">结果</th>';
+    html += '<th style="' + cell + 'text-align:left;">详情</th></tr></thead><tbody>';
+    for (let i = 0; i < list.length; i++) {
+      const ev = list[i] || {};
+      const timeText = ev.ts ? new Date(ev.ts).toLocaleString() : '-';
+      html += '<tr>';
+      html += '<td style="' + cell + 'white-space:nowrap;">' + escHtml(timeText) + '</td>';
+      html += '<td style="' + cell + '">' + escHtml(ev.action || '-') + '</td>';
+      html += '<td style="' + cell + '">' + escHtml(ev.actor || '-') + '</td>';
+      html += '<td style="' + cell + '">' + escHtml(ev.mesh || '-') + '</td>';
+      html += '<td style="' + cell + '">' + escHtml(ev.object || '-') + '</td>';
+      html += '<td style="' + cell + '">' + escHtml(ev.result || '-') + '</td>';
+      html += '<td style="' + cell + '">' + escHtml(ev.detail || '-') + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    return html;
+  }
+
   // ---- 云端任务 / 组 ----
   function statusText(status) {
     switch (status) {
@@ -664,6 +699,7 @@
     uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
+    auditTableHtml,
     statusText, buildProgressBar, cloudTaskActions, buildCloudTaskTableHtml,
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
     syncStatusText, buildSyncRowMeta,
