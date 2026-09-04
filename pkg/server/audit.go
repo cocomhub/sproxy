@@ -48,6 +48,10 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 	if evt.TS.IsZero() {
 		evt.TS = time.Now()
 	}
+	// 挂钩有界内存环形缓冲：TS 填充后 Add 到 ring（ring 为 nil = 关闭，Add 静默跳过）。
+	// 所有现有录入点（delete/rename/config_update/cloud_* 等）经本函数自动进 ring，
+	// 无需逐点修改。Add 不 panic，审计链路绝不影响业务。
+	h.addToAuditRing(evt)
 	logger := h.auditLogger
 	if logger == nil {
 		logger = slog.Default()
@@ -62,4 +66,13 @@ func (h *Handlers) RecordAudit(ctx context.Context, evt AuditEvent) {
 		"detail", evt.Detail,
 		"ts", evt.TS.Format(time.RFC3339Nano),
 	)
+}
+
+// addToAuditRing 把已填好 TS 的最终审计事件写入有界环形缓冲（nil ring 静默跳过）。
+// ring 容量满时环形覆盖丢弃最旧；本方法绝不 panic，审计链路不影响业务路径。
+func (h *Handlers) addToAuditRing(evt AuditEvent) {
+	if h.auditRing == nil {
+		return
+	}
+	h.auditRing.Add(evt)
 }

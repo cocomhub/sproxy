@@ -136,6 +136,7 @@ web-test:
 	@node --check web/static/sclient/api/config.js
 	@node --check web/static/sclient/api/hub.js
 	@node --check web/static/sclient/api/sync.js
+	@node --check web/static/sclient/api/audit.js
 	@node --check web/static/sclient/api/index.js
 	@node --check web/static/app-render.js
 	@node --check web/static/transfer-store.js

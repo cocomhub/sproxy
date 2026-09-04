@@ -513,12 +513,14 @@ function switchStatsTab(tab) {
   document.getElementById('stats-panel').style.display = tab === 'stats' ? 'block' : 'none';
   document.getElementById('config-panel').style.display = tab === 'config' ? 'block' : 'none';
   document.getElementById('hub-panel').style.display = tab === 'hub' ? 'block' : 'none';
+  document.getElementById('audit-panel').style.display = tab === 'audit' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
     el.style.borderBottomColor = el.id === tab + '-tab' ? 'var(--tab-active)' : 'transparent';
     el.style.color = el.id === tab + '-tab' ? 'var(--text-primary)' : 'var(--text-secondary)';
   });
   if (tab === 'config') showConfig();
   if (tab === 'hub') showHub();
+  if (tab === 'audit') showAudit();
 }
 
 async function showConfig() {
@@ -546,6 +548,27 @@ async function showHub() {
 }
 
 function hubTableHtml(nodes, stats) { return appRender.hubTableHtml(nodes, stats); }
+
+// --- 审计日志查看 ---
+// showAudit 拉取最近审计事件并渲染到 #audit-panel。direct 模式（配 AK/SK 走
+// SproxySig）可访问；tunnel 模式 /tunnel 转发命中 localMux 无 /api/audit → 404，
+// 渲染"仅 direct 模式可用"占位（前端 catch）。
+async function showAudit() {
+  document.getElementById('audit-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const data = await sc.audit.list({ limit: 200 });
+    if (data && data.status === 404) {
+      document.getElementById('audit-panel').innerHTML = '<div class="empty-msg">审计 API 仅 direct 模式可用（当前经隧道访问，/api/audit 未注册隧道内层）</div>';
+      return;
+    }
+    const events = (data && data.events) || [];
+    document.getElementById('audit-panel').innerHTML = auditTableHtml(events);
+  } catch (e) {
+    document.getElementById('audit-panel').innerHTML = '<div style="color:var(--text-danger);padding:12px;">审计加载失败: ' + e.message + '</div>';
+  }
+}
+
+function auditTableHtml(events) { return appRender.auditTableHtml(events); }
 
 async function removeHubNode(nodeId) {
   if (!confirm('确定移除节点 ' + nodeId + '？')) return;
@@ -1845,6 +1868,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('stats-tab').addEventListener('click', function() { switchStatsTab('stats'); });
   document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
+  document.getElementById('audit-tab').addEventListener('click', function() { switchStatsTab('audit'); });
 
   // 云端下载（云 URL 行按钮 + Enter 快捷键统一走 bindCloudUrlRowEvents；
   // cloud-modal 已移除——URL 区已迁入 #transfer-page，频道条点击委托在 initTransferPage）。
