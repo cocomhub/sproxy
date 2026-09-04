@@ -55,6 +55,16 @@ func wrapKey(sk []byte, ak, context string) ([]byte, error) {
 	return k, nil
 }
 
+// DeriveWrapKey 是 wrapKey 的导出封装，供上层包（server/hub 等）派生同源信封密钥：
+//
+//	key = HKDF-SHA256(secret=sk, salt="sproxy-accesskey-wrap/v1\x00"+context, info=ak)
+//
+// 与内部 wrapKey 完全同实现（唯一实现，避免两处漂移）。上层包必须与包裹时的 sk/ak/
+// context 一致才能解出新 SK——这正是"持有某旧 SK 才能解开对应新 SK"访问控制的基础。
+func DeriveWrapKey(sk []byte, ak, context string) ([]byte, error) {
+	return wrapKey(sk, ak, context)
+}
+
 // EncryptSecret 用信封密钥 wrapKey 加密 32B SK，返回信封（随机 nonce 前置）。
 func EncryptSecret(wrapAK string, sk, wrapKey []byte) (*WrappedSecret, error) {
 	if len(sk) != 32 {

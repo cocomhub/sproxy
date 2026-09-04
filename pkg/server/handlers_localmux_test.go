@@ -46,6 +46,15 @@ var localMuxPatterns = []struct{ method, pattern string }{
 	{"PUT", "/api/config"},
 	// 审计查看：隧道内层与直连面都可达（浏览器隧道模式下审计 tab 是用户面操作）
 	{"GET", "/api/audit"},
+	// 凭据管理（任务 5）：隧道内层裸注册（与 audit 同模式）；浏览器隧道模式下
+	// 凭据管理 tab 应隧道可达。
+	{"GET", "/api/credentials"},
+	{"POST", "/api/credentials"},
+	{"DELETE", "/api/credentials/{ak}"},
+	{"POST", "/api/credentials/{ak}/renew"},
+	{"GET", "/api/credentials/{ak}/sk"},
+	{"DELETE", "/api/credentials/{ak}/sk/{skID}"},
+	{"POST", "/api/credentials/{ak}/sk/{skID}/expire"},
 	{"POST", "/upload/init"},
 	{"POST", "/upload/chunk"},
 	{"GET", "/upload/status"},

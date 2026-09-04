@@ -660,6 +660,17 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// /api/stats 的 localMux 侧同模式）。auditHandler 只读 ring 回 JSON，自身不做
 	// 签名校验。浏览器隧道模式下用户面操作必须隧道可达（仅注册主 mux 会 404）。
 	localMux.HandleFunc("GET /api/audit", h.auditHandler)
+	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
+	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
+	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」
+	// 处理，管理可见性面仍以主 mux（authMiddleware 保护）为准。
+	localMux.HandleFunc("GET /api/credentials", h.akListHandler)
+	localMux.HandleFunc("POST /api/credentials", h.akAddHandler)
+	localMux.HandleFunc("DELETE /api/credentials/{ak}", h.akDeleteHandler)
+	localMux.HandleFunc("POST /api/credentials/{ak}/renew", h.renewCredentialHandler)
+	localMux.HandleFunc("GET /api/credentials/{ak}/sk", h.skListHandler)
+	localMux.HandleFunc("DELETE /api/credentials/{ak}/sk/{skID}", h.skDeleteHandler)
+	localMux.HandleFunc("POST /api/credentials/{ak}/sk/{skID}/expire", h.skExpireHandler)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -853,6 +864,16 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 模式）。审计是浏览器隧道模式下的用户面操作，隧道内层必须可达（用户在隧道
 	// 模式下打开审计 tab 应能直接查看；仅注册主 mux 会让隧道模式 404）。
 	srvMux.HandleFunc("GET /api/audit", h.authMiddleware(h.auditHandler))
+
+	// 凭据管理 API（主 mux：SproxySig auth）。全部走 authMiddleware 保护，
+	// 与 audit/cloud/sync 同模式（本人 set 端点用 ActorFrom(ctx) 判定）。
+	srvMux.HandleFunc("GET /api/credentials", h.authMiddleware(h.akListHandler))
+	srvMux.HandleFunc("POST /api/credentials", h.authMiddleware(h.akAddHandler))
+	srvMux.HandleFunc("DELETE /api/credentials/{ak}", h.authMiddleware(h.akDeleteHandler))
+	srvMux.HandleFunc("POST /api/credentials/{ak}/renew", h.authMiddleware(h.renewCredentialHandler))
+	srvMux.HandleFunc("GET /api/credentials/{ak}/sk", h.authMiddleware(h.skListHandler))
+	srvMux.HandleFunc("DELETE /api/credentials/{ak}/sk/{skID}", h.authMiddleware(h.skDeleteHandler))
+	srvMux.HandleFunc("POST /api/credentials/{ak}/sk/{skID}/expire", h.authMiddleware(h.skExpireHandler))
 
 	srvMux.HandleFunc("GET /healthz", h.healthz)
 	srvMux.HandleFunc("GET /version", h.versionHandler)
