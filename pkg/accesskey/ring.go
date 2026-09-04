@@ -4,6 +4,7 @@
 package accesskey
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -107,7 +108,8 @@ func (r *Ring) addKey(ak string, sk []byte, opts []EntryOption) (string, error) 
 		return "", ErrNotFound
 	}
 	e := SKEntry{
-		SK:        sk,
+		// 复制入参切片，避免调用方在 AddKey 后改写缓冲区污染 ring 内部凭据。
+		SK:        append([]byte(nil), sk...),
 		Kind:      KindPlain,
 		Status:    StatusActive,
 		CreatedAt: r.now(),
@@ -116,10 +118,12 @@ func (r *Ring) addKey(ak string, sk []byte, opts []EntryOption) (string, error) 
 		o(&e)
 	}
 	if e.ID == "" {
-		e.ID = newEntryID()
-		if e.ID == "" {
-			return "", ErrInvalidSecret // crypto/rand 故障，不可重试地拒绝
+		id, err := newEntryID()
+		if err != nil {
+			// crypto/rand 故障属于不可重试的系统性失败，向上抛出（不复用其他哨兵）。
+			return "", fmt.Errorf("accesskey: add key: %w", err)
 		}
+		e.ID = id
 	}
 	for i := range key.Entries {
 		if key.Entries[i].ID == e.ID {
@@ -205,7 +209,13 @@ func (r *Ring) GetEntry(ak, id string) (SKEntry, bool, error) {
 }
 
 // ExpireKey 设置某条 SK 的生效截止时间（直到 until）。until 传零值表示清除过期时间
-// （恢复永久有效）。条目或 AK 不存在返回 ErrNotFound。
+// （恢复永久有效）。设置后同步刷新 Status，避免状态滞留误导展示/持久化：
+//   - until 零值（恢复永久）→ Status=active
+//   - until 非零且尚未到达 → Status=active
+//   - until 非零且已过去 → Status=expired
+//
+// 条目或 AK 不存在返回 ErrNotFound。aliveLocked 判定独立于 Status（仅 disabled 与
+// ExpiresAt 参与），Status 的刷新为使持久化/审计视图一致。
 func (r *Ring) ExpireKey(ak, id string, until time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -215,9 +225,16 @@ func (r *Ring) ExpireKey(ak, id string, until time.Time) error {
 	}
 	for i := range key.Entries {
 		if key.Entries[i].ID == id {
-			key.Entries[i].ExpiresAt = until
-			if !until.IsZero() && !key.Entries[i].ExpiresAt.IsZero() && r.now().After(key.Entries[i].ExpiresAt) {
-				key.Entries[i].Status = StatusExpired
+			e := &key.Entries[i]
+			e.ExpiresAt = until
+			switch {
+			case until.IsZero():
+				// 恢复永久有效。
+				e.Status = StatusActive
+			case r.now().After(until):
+				e.Status = StatusExpired
+			default:
+				e.Status = StatusActive
 			}
 			return nil
 		}
@@ -258,12 +275,31 @@ func (r *Ring) Snapshot() []Key {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]Key, 0, len(r.m))
-	for ak, key := range r.m {
+	for _, key := range r.m {
 		out = append(out, cloneKey(key))
-		_ = ak // ak 即 key.AK
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].AK < out[j].AK })
 	return out
+}
+
+// Replace 用给定 Key 列表原子全量替换 ring 内容（用于 store 装载 / 快照还原）。
+// 每个 Key 的 AK 必须非空，否则返回 ErrInvalidAK 且整个替换不生效。
+// 入参被深拷贝，调用方随后修改不影响 ring。
+func (r *Ring) Replace(keys []Key) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, k := range keys {
+		if k.AK == "" {
+			return ErrInvalidAK
+		}
+	}
+	m := make(map[string]*Key, len(keys))
+	for _, k := range keys {
+		cp := cloneKey(&k)
+		m[k.AK] = &cp
+	}
+	r.m = m
+	return nil
 }
 
 // Len 返回已登记 AK 数量（ring 判空用，如 authMiddleware 无凭据兜底）。

@@ -292,6 +292,139 @@ func TestRing_InvalidArgs(t *testing.T) {
 	})
 }
 
+// TestRing_AddKey_CopiesSecret 修复轮 1#2：AddKey 必须复制入参 SK 切片，调用方随后
+// 改写缓冲区不影响 ring 内部凭据。
+func TestRing_AddKey_CopiesSecret(t *testing.T) {
+	r := NewRing()
+	ak := "sk-cp-1234567890abcdef"
+	if err := r.UpsertAK(ak, "o"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	sk := must32BHex(t, 0x55)
+	if _, err := r.AddKey(ak, sk); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	// 调用方改写入参缓冲
+	for i := range sk {
+		sk[i] = 0xEE
+	}
+	ce := r.CoreEntry(ak)
+	if ce == nil || !bytes.Equal(ce.SK, must32BHex(t, 0x55)) {
+		t.Fatalf("AddKey 后改写入参缓冲污染了 ring 内 SK")
+	}
+}
+
+// TestRing_Replace 修复轮 1#3：Replace 原子全量替换（store 装载 / 快照还原用），
+// 空 AK 校验失败且替换不生效；入参被深拷贝。
+func TestRing_Replace(t *testing.T) {
+	r := NewRing()
+	// 先放旧数据
+	oldAK := "sk-old-1234567890abcdef"
+	if err := r.UpsertAK(oldAK, "old"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	if _, err := r.AddKey(oldAK, must32BHex(t, 1)); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	if r.Len() != 1 {
+		t.Fatalf("初始 Len 应为 1")
+	}
+
+	// 替换为新集合
+	newAKs := []Key{
+		{AK: "sk-b-1234567890abcdef", Owner: "o2", Entries: []SKEntry{
+			{ID: "sk-0000000000aa", SK: must32BHex(t, 0xAA), CreatedAt: fixedNow, Status: StatusActive},
+		}},
+		{AK: "sk-a-1234567890abcdef", Owner: "o1", Entries: []SKEntry{
+			{ID: "sk-0000000000bb", SK: must32BHex(t, 0xBB), CreatedAt: fixedNow, Status: StatusActive},
+		}},
+	}
+	if err := r.Replace(newAKs); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	if r.Len() != 2 {
+		t.Fatalf("Replace 后 Len 应为 2, got %d", r.Len())
+	}
+	if _, ok := r.Lookup(oldAK); ok {
+		t.Fatalf("Replace 后旧 AK 应被移除")
+	}
+	// 深拷贝：改入参不影响 ring
+	newAKs[0].Entries[0].SK[0] ^= 0xff
+	ce := r.CoreEntry("sk-b-1234567890abcdef")
+	if ce == nil {
+		t.Fatalf("CoreEntry(新 AK) 失败")
+	}
+	if !bytes.Equal(ce.SK, must32BHex(t, 0xAA)) {
+		t.Fatalf("Replace 未深拷贝 SK")
+	}
+
+	// 非法入参：含空 AK → ErrInvalidAK 且替换不生效（原子性）
+	snapshotBefore := r.Snapshot()
+	if err := r.Replace([]Key{{AK: "", Owner: "x"}}); err != ErrInvalidAK {
+		t.Fatalf("含空 AK 的 Replace 应 ErrInvalidAK, got %v", err)
+	}
+	snapshotAfter := r.Snapshot()
+	if len(snapshotBefore) != len(snapshotAfter) {
+		t.Fatalf("非法 Replace 不应部分生效")
+	}
+}
+
+// TestRing_ExpireKey_StatusRefresh 修复轮 1#7：ExpireKey 设置 until 后同步刷新 Status——
+// until 零值恢复永久 → active；until 将来 → active；until 已过去 → expired
+// （刷新发生在 ExpireKey 写操作时；纯时间流逝不改写持久化 Status，存活判定独立）。
+func TestRing_ExpireKey_StatusRefresh(t *testing.T) {
+	clk := &mutableClock{}
+	r := NewRing(clk.Now)
+	ak := "sk-ref-1234567890abcdef"
+	if err := r.UpsertAK(ak, "o"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	id, err := r.AddKey(ak, must32BHex(t, 1))
+	if err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	statusOf := func() Status {
+		for _, k := range r.Snapshot() {
+			for _, en := range k.Entries {
+				if en.ID == id {
+					return en.Status
+				}
+			}
+		}
+		return ""
+	}
+
+	// until 将来 → active
+	if err := r.ExpireKey(ak, id, fixedNow.Add(time.Hour)); err != nil {
+		t.Fatalf("ExpireKey(future): %v", err)
+	}
+	if got := statusOf(); got != StatusActive {
+		t.Fatalf("until 将来 Status 应为 active, got %q", got)
+	}
+
+	// until 已过去（相对当前 now 已是过去）→ expired
+	if err := r.ExpireKey(ak, id, fixedNow.Add(-time.Second)); err != nil {
+		t.Fatalf("ExpireKey(past): %v", err)
+	}
+	if got := statusOf(); got != StatusExpired {
+		t.Fatalf("until 已过去 Status 应为 expired, got %q", got)
+	}
+	if ks, ok := r.Lookup(ak); !ok || len(ks) != 0 {
+		t.Fatalf("until 已过去条目应不可用")
+	}
+
+	// until 零值（恢复永久）→ active，且 Lookup 重新返回
+	if err := r.ExpireKey(ak, id, time.Time{}); err != nil {
+		t.Fatalf("ExpireKey(zero): %v", err)
+	}
+	if got := statusOf(); got != StatusActive {
+		t.Fatalf("until 零值恢复永久 Status 应为 active, got %q", got)
+	}
+	if ks, ok := r.Lookup(ak); !ok || len(ks) != 1 {
+		t.Fatalf("恢复永久后 Lookup 应返回条目")
+	}
+}
+
 // TestRing_Snapshot_SortedAndDeepCopy Snapshot 按 AK 排序、深拷贝（改返回切片不影响内部）。
 func TestRing_Snapshot_SortedAndDeepCopy(t *testing.T) {
 	r := NewRing()

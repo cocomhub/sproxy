@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -99,20 +100,21 @@ type Key struct {
 // EntryIDLen 是 SKEntry.ID 中 hex 段长度（12 hex = 6 字节随机，共 6B 熵）。
 const EntryIDLen = 12
 
-// isHexChar 判断 c 是否为小写十六进制字符（newEntryID / ParseMesh 用）。
+// isHexChar 判断 c 是否为（小写或大写）十六进制字符（ParseMesh 用）。
+// 与 pkg/tunnel.isHexString 的 hexChars 一致（含 ABCDEF），避免含大写 hex 的
+// AK（管理导入 / 手工编辑产物）在两端解析出不同 mesh 导致派生参数不一致。
 func isHexChar(c byte) bool {
-	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 // newEntryID 生成 sk-<12hex> 的唯一条目 ID（6 字节 crypto/rand 熵）。
-func newEntryID() string {
+// crypto/rand 失败返回包装错误（调用方据此拒绝写入，不再复用其他哨兵）。
+func newEntryID() (string, error) {
 	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
-		// crypto/rand 失败属于不可恢复的系统性故障，返回零值让调用方判定；
-		// 正常路径（凭据管理）极少触及，调用方遇空 ID 会走错误分支。
-		return ""
+		return "", fmt.Errorf("accesskey: generate entry id: %w", err)
 	}
-	return "sk-" + hex.EncodeToString(b)
+	return "sk-" + hex.EncodeToString(b), nil
 }
 
 // ParseMesh 从 SproxySig AccessKey 提取 mesh 段，语义与 pkg/tunnel.AccessKeyMesh

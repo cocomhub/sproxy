@@ -29,10 +29,13 @@ func TestParseMesh(t *testing.T) {
 		{"sk-prod-1234567890abcdef", "prod"},
 		{"sk-prod-eu-1234567890abcdef", "prod-eu"}, // mesh 含连字符
 		{"sk-meshA-3f8a1234abcd5678", "meshA"},
-		{"sk-1234567890abcdef", ""},     // 无 mesh 段
-		{"other", ""},                   // 非 sk- 前缀
-		{"sk-", ""},                     // 只有前缀
-		{"sk-prod-1234567890abcde", ""}, // hex 段不足 16 位
+		{"sk-PROD-1234567890ABCDEF", "PROD"}, // 大写 hex（与 tunnel hexChars 一致）
+		{"sk-mesh-ABCDEF0123456789", "mesh"}, // 大写 hex 段
+		{"sk-1234567890abcdef", ""},          // 无 mesh 段
+		{"other", ""},                        // 非 sk- 前缀
+		{"sk-", ""},                          // 只有前缀
+		{"sk-prod-1234567890abcde", ""},      // hex 段不足 16 位
+		{"sk-prod-1234567890abcdeg", ""},     // hex 段含非法字符
 		{"", ""},
 	}
 	for _, tt := range tests {
@@ -46,7 +49,10 @@ func TestParseMesh(t *testing.T) {
 func TestNewEntryID_FormatAndUnique(t *testing.T) {
 	seen := map[string]bool{}
 	for range 1000 {
-		id := newEntryID()
+		id, err := newEntryID()
+		if err != nil {
+			t.Fatalf("newEntryID: %v", err)
+		}
 		if !strings.HasPrefix(id, "sk-") {
 			t.Fatalf("newEntryID 应以 sk- 开头, got %q", id)
 		}

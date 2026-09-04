@@ -33,19 +33,22 @@ const (
 	gcmTagSize = 16
 )
 
-// wrapKey 从 SK + context 派生信封密钥（HKDF-SHA256）：
+// wrapKey 从 SK + AK + context 派生信封密钥（HKDF-SHA256）：
 //
-//	key = HKDF-SHA256(secret=sk, salt="sproxy-accesskey-wrap/v1\x00"+context, info=ak-identifier)
+//	key = HKDF-SHA256(secret=sk,
+//	                  salt="sproxy-accesskey-wrap/v1\x00"+context,
+//	                  info=ak)
 //
 // salt 含 context 使不同用途（不同 mesh / 不同端点）派生不同密钥；
-// info 绑定 AK 标识，防止同一 secret 跨 AK 复用信封密钥。输出 32B（AES-256）。
-func wrapKey(sk []byte, context string) ([]byte, error) {
+// info 绑定调用方显式传入的 AK 标识，防止同一 SK secret 跨 AK 复用信封密钥。
+// 输出 32B（AES-256）。
+func wrapKey(sk []byte, ak, context string) ([]byte, error) {
 	if len(sk) != 32 {
 		return nil, ErrInvalidSecret
 	}
 	salt := append([]byte("sproxy-accesskey-wrap/v1\x00"), []byte(context)...)
 	k := make([]byte, 32)
-	hk := hkdf.New(sha256.New, sk, salt, []byte("sproxy-accesskey-wrap"))
+	hk := hkdf.New(sha256.New, sk, salt, []byte(ak))
 	if _, err := io.ReadFull(hk, k); err != nil {
 		return nil, fmt.Errorf("wrapKey hkdf: %w", err)
 	}
