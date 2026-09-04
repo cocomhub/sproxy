@@ -1,21 +1,26 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package sproxysig 实现 SproxySig v1 请求签名认证（AccessKey/AccessKeySecret + HMAC-SHA256）。
+// Package sproxysig 实现 SproxySig v2 请求签名认证（AccessKey/AccessKeySecret + HMAC-SHA256）。
 //
 // 设计（对应认证重构设计文档）：
 //   - 密钥 AccessKeySecret（SK）只存客户端与服务端本地，线上请求只携带公开的
 //     AccessKey（AK）+ 生成时间 ts + 客户端自决的过期时间 exp + 随机 nonce +
-//     body 哈希 body_sha256 + HMAC 签名 sig。
+//     可选的 SK 条目 ID（entryID，sk=<id>）+ body 哈希 body_sha256 + HMAC 签名 sig。
 //   - exp 参与签名：客户端自主决定有效期（默认 5min），服务端校验 now≤exp 且
 //     exp−ts≤max_ttl（服务端上限，客户端可声明更短、不能更长）；事后改长即签名失配。
 //   - nonce 一次性防重放；ts 未来时间容差防提前签名。
 //   - body 防篡改：客户端发送前预计算 body SHA-256 放入签名；服务端先验签
 //     （用 header 声明的哈希）再接收 body，接收时流式累加、EOF 比对。
 //
+// 版本：v2 为当前协议版本。相对 v1，header 增加可选 `sk=<entryID>` 段（AK 的后缀
+// 标识、SK 条目唯一 ID，用于服务端在 AK 多 SK 凭据 ring 中精确定位条目）；canonical
+// 在 AK 段后插入 entryID 段（为空时输出空行，保持段数固定）。v1 头可解析透出
+// Version 字段，但服务端只接受 v=2 的校验（Verify 返回 ErrVersion）。
+//
 // 协议头格式：
 //
-//	Authorization: SproxySig v=1 ak=<AK> ts=<unix_ms> exp=<unix_ms> nonce=<hex> body_sha256=<hex|UNSIGNED> sig=<hex>
+//	Authorization: SproxySig v=2 ak=<AK> [sk=<entryID>] ts=<unix_ms> exp=<unix_ms> nonce=<hex> body_sha256=<hex|UNSIGNED> sig=<hex>
 package sproxysig
 
 import (
@@ -37,8 +42,8 @@ import (
 const (
 	// Scheme 是 Authorization 头的认证 scheme 前缀。
 	Scheme = "SproxySig"
-	// Version 是当前签名协议版本。
-	Version = "1"
+	// Version 是当前签名协议版本（v2：AK 后增加可选 sk=<entryID> 段）。
+	Version = "2"
 	// UnsignedBody 表示无法预计算 body 哈希的流式场景（防篡改降级为只保护 header）。
 	UnsignedBody = "UNSIGNED"
 	// DefaultExpiry 是客户端默认的签名过期时长（5min）。
@@ -64,15 +69,17 @@ var (
 type Header struct {
 	Version    string
 	AK         string
-	TS         int64 // unix ms，客户端生成时间
-	Exp        int64 // unix ms，客户端自决过期时间（参与签名）
+	EntryID    string // SK 条目 ID（sk=<id>，可选；空表示客户端未绑定具体条目）
+	TS         int64  // unix ms，客户端生成时间
+	Exp        int64  // unix ms，客户端自决过期时间（参与签名）
 	Nonce      string
 	BodySHA256 string // body 的 SHA-256 hex 或 "UNSIGNED"
 	Sig        string
 }
 
-// ParseHeader 解析 "SproxySig v=1 ak=... ts=... exp=... nonce=... body_sha256=... sig=..."。
+// ParseHeader 解析 "SproxySig v=2 ak=... [sk=...] ts=... exp=... nonce=... body_sha256=... sig=..."。
 // 字段缺失 / 类型错误 / 未知字段一律 ErrMalformed（fail-closed）。
+// v 仅解析透出（不在此校验版本）；Verify 负责版本匹配（只接受当前 Version）。
 func ParseHeader(auth string) (Header, error) {
 	rest, ok := strings.CutPrefix(auth, Scheme+" ")
 	if !ok {
@@ -91,6 +98,8 @@ func ParseHeader(auth string) (Header, error) {
 			h.Version = v
 		case "ak":
 			h.AK = v
+		case "sk":
+			h.EntryID = v
 		case "ts":
 			n, perr = strconv.ParseInt(v, 10, 64)
 			h.TS = n
@@ -118,12 +127,21 @@ func ParseHeader(auth string) (Header, error) {
 	return h, nil
 }
 
-// Canonical 构造签名输入串（换行分隔，字段内不含换行故无歧义）。
+// Canonical 按 h.Version 构造签名输入串（换行分隔，字段内不含换行故无歧义）。
+// v2：在 AK 段后插入 EntryID 段（空 entryID 输出空行，段数固定为 10，避免报文字段
+// 数随可选段长度漂移）；v1（或未知版本，兼容旧头）走旧 9 段序列。签名的版本前缀
+// 使用 h.Version 而非包级常量——Verify 只接受当前 Version（v2），未知版本在进入
+// canonical 前已被拦截；此处分支语义仅为构造正确的签名输入。
 // path 用 r.URL.EscapedPath()（客户端用同一 url 的 EscapedPath()），query 用 RawQuery。
 func (h Header) Canonical(method, path, query string) string {
-	return strings.Join([]string{
-		"sproxy-sig/v" + Version,
+	parts := []string{
+		"sproxy-sig/v" + h.Version,
 		h.AK,
+	}
+	if h.Version == "2" {
+		parts = append(parts, h.EntryID)
+	}
+	parts = append(parts,
 		strconv.FormatInt(h.TS, 10),
 		strconv.FormatInt(h.Exp, 10),
 		h.Nonce,
@@ -131,7 +149,8 @@ func (h Header) Canonical(method, path, query string) string {
 		path,
 		query,
 		h.BodySHA256,
-	}, "\n")
+	)
+	return strings.Join(parts, "\n")
 }
 
 // Sign 用 SK 计算 canonical 的 HMAC-SHA256 签名（hex）。
@@ -202,12 +221,17 @@ func SignRequest(req *http.Request, ak, sk string) {
 }
 
 // SignAndFormat 用 SK 计算签名并返回完整的 Authorization 头值（SproxySig 格式）。
-// 客户端/信令共用：h 需已填 AK/TS/Exp/Nonce/BodySHA256，Sig 在此计算。
+// 客户端/信令共用：h 需已填 AK/TS/Exp/Nonce/BodySHA256（可选 EntryID），Sig 在此计算。
 func SignAndFormat(sk string, h Header, method, path, query string) string {
 	h.Sig = Sign(sk, h, method, path, query)
-	return Scheme + " v=" + h.Version + " ak=" + h.AK +
+	v := Scheme + " v=" + h.Version + " ak=" + h.AK +
 		" ts=" + strconv.FormatInt(h.TS, 10) + " exp=" + strconv.FormatInt(h.Exp, 10) +
 		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
+	if h.EntryID != "" {
+		// 可选 sk=<entryID> 段插在 ak= 之后（与 canonical 段序一致）。
+		v = strings.Replace(v, " ak=", " ak="+h.AK+" sk="+h.EntryID, 1)
+	}
+	return v
 }
 
 // EmptyBodyHash 返回空 body 的 SHA-256 hex（无 body 请求客户端应签名此值）。

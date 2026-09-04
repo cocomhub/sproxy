@@ -28,6 +28,22 @@ func buildHeader(ak, sk, nonce string, tsOffset, ttl time.Duration, method, path
 	return h
 }
 
+// buildHeaderV2 构造带 EntryID 的 v2 请求头（方法/路径/查询与签名均绑定）。
+func buildHeaderV2(ak, sk, entryID, nonce string, tsOffset, ttl time.Duration, method, path, query, bodyHash string) Header {
+	h := buildHeader(ak, sk, nonce, tsOffset, ttl, method, path, query, bodyHash)
+	h.EntryID = entryID
+	h.Sig = Sign(sk, h, method, path, query)
+	return h
+}
+
+// headerAuthString 按当前 header 字段渲染 Authorization 头值。
+// 供 ParseHeader 断言使用（必须与 SignAndFormat 的渲染顺序一致）。
+func headerAuthString(h Header) string {
+	return Scheme + " v=" + h.Version + " ak=" + h.AK + " sk=" + h.EntryID +
+		" ts=" + itoa(h.TS) + " exp=" + itoa(h.Exp) +
+		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
+}
+
 func TestSignVerify_HappyPath(t *testing.T) {
 	h := buildHeader(testAK, testSK, "nonce-1", 0, DefaultExpiry, "POST", "/upload", "", EmptyBodyHash())
 	// now 在有效期内（ts+2min）。
@@ -67,7 +83,7 @@ func TestVerify_Rejections(t *testing.T) {
 			strings.Repeat("f", 64), ErrBadSignature},
 		{"版本不支持", func() Header {
 			h := buildHeader(testAK, testSK, "n", 0, DefaultExpiry, "GET", "/a", "", EmptyBodyHash())
-			h.Version = "2"
+			h.Version = "3"
 			return h
 		}(),
 			testSK, ErrVersion},
@@ -102,11 +118,54 @@ func TestVerify_ClientShorterTTL_Allowed(t *testing.T) {
 	}
 }
 
+// TestVerify_V2_WithEntryID：v2 头带 sk=<entryID> 段，canonical 含 entryID 段，验签通过。
+func TestVerify_V2_WithEntryID(t *testing.T) {
+	h := buildHeaderV2(testAK, testSK, "sk-abcdef012345", "nonce-v2-1", 0, DefaultExpiry, "POST", "/upload", "", EmptyBodyHash())
+	if h.Version != Version {
+		t.Fatalf("buildHeaderV2 Version 应为 %q, got %q", Version, h.Version)
+	}
+	// canonical 必须包含 entryID 段（AK 段之后）。
+	wantLine := "sproxy-sig/v" + Version + "\n" + testAK + "\n" + "sk-abcdef012345"
+	if got := h.Canonical("POST", "/upload", ""); !strings.HasPrefix(got, wantLine+"\n") {
+		t.Fatalf("canonical 应含 entryID 段:\ngot  %q\nwant 前缀 %q", got, wantLine)
+	}
+	now := baseTime.Add(2 * time.Minute)
+	if err := Verify(testSK, h, "POST", "/upload", "", now, DefaultMaxTTL, DefaultClockSkew, nil); err != nil {
+		t.Fatalf("带 entryID 的 v2 验签应通过, got %v", err)
+	}
+}
+
+// TestVerify_V2_NoEntryID：EntryID 为空 → 校验走空段（空行），通过。
+func TestVerify_V2_NoEntryID(t *testing.T) {
+	h := buildHeaderV2(testAK, testSK, "", "nonce-v2-2", 0, DefaultExpiry, "POST", "/upload", "", EmptyBodyHash())
+	// canonical 中 entryID 段为空（空行，紧接 AK 段后）。
+	wantPrefix := "sproxy-sig/v" + Version + "\n" + testAK + "\n\n"
+	if got := h.Canonical("POST", "/upload", ""); !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("空 entryID 应为空行段:\ngot  %q\nwant 前缀 %q", got, wantPrefix)
+	}
+	now := baseTime.Add(2 * time.Minute)
+	if err := Verify(testSK, h, "POST", "/upload", "", now, DefaultMaxTTL, DefaultClockSkew, nil); err != nil {
+		t.Fatalf("空 entryID 的 v2 验签应通过, got %v", err)
+	}
+}
+
+// TestVerify_Reject_VersionMismatch：明文 v=1 头在校验时被拒（服务端仅支持 v2）。
+func TestVerify_Reject_VersionMismatch(t *testing.T) {
+	// 构造明文 v=1 头：与 v2 相同的字段、仅版本号前缀不同 → 校验必须拒绝。
+	auth := Scheme + " v=1 ak=" + testAK + " ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
+	h, err := ParseHeader(auth)
+	if err != nil {
+		t.Fatalf("ParseHeader: %v", err)
+	}
+	now := baseTime.Add(2 * time.Minute)
+	if err := Verify(testSK, h, "GET", "/a", "", now, DefaultMaxTTL, DefaultClockSkew, nil); !errors.Is(err, ErrVersion) {
+		t.Fatalf("v=1 头应拒绝为 ErrVersion, got %v", err)
+	}
+}
+
 func TestParseHeader(t *testing.T) {
-	h := buildHeader(testAK, testSK, "nonce-9", 0, DefaultExpiry, "PUT", "/api/x", "a=1", BodyHash([]byte("hi")))
-	auth := Scheme + " v=" + h.Version + " ak=" + h.AK + " ts=" + itoa(h.TS) + " exp=" + itoa(h.Exp) +
-		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
-	parsed, err := ParseHeader(auth)
+	h := buildHeaderV2(testAK, testSK, "sk-abcdef012345", "nonce-9", 0, DefaultExpiry, "PUT", "/api/x", "a=1", BodyHash([]byte("hi")))
+	parsed, err := ParseHeader(headerAuthString(h))
 	if err != nil {
 		t.Fatalf("ParseHeader: %v", err)
 	}
@@ -115,20 +174,69 @@ func TestParseHeader(t *testing.T) {
 	}
 }
 
+// TestParseHeader_V2_EntryID：v2 头带 sk=<entryID> 段解析正确（EntryID 填充）。
+func TestParseHeader_V2_EntryID(t *testing.T) {
+	auth := Scheme + " v=2 ak=sk-prod-meshA-3f8a sk=sk-abcdef012345" +
+		" ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
+	h, err := ParseHeader(auth)
+	if err != nil {
+		t.Fatalf("ParseHeader: %v", err)
+	}
+	if h.Version != "2" || h.EntryID != "sk-abcdef012345" {
+		t.Fatalf("解析 ak/entryID 错误: %+v", h)
+	}
+}
+
+// TestParseHeader_V2_NoEntryID：v2 头缺省 sk=<entryID> 段时 EntryID 为空串、其余解析正确。
+func TestParseHeader_V2_NoEntryID(t *testing.T) {
+	h := buildHeader(testAK, testSK, "nonce-9", 0, DefaultExpiry, "PUT", "/a", "", EmptyBodyHash())
+	auth := Scheme + " v=" + h.Version + " ak=" + h.AK + " ts=" + itoa(h.TS) + " exp=" + itoa(h.Exp) +
+		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
+	parsed, err := ParseHeader(auth)
+	if err != nil {
+		t.Fatalf("ParseHeader: %v", err)
+	}
+	if parsed.EntryID != "" {
+		t.Fatalf("缺省 sk 段时 EntryID 应为空, got %q", parsed.EntryID)
+	}
+	if parsed.AK != h.AK || parsed.BodySHA256 != h.BodySHA256 || parsed.Version != h.Version {
+		t.Fatalf("其余字段解析不一致: %+v vs %+v", parsed, h)
+	}
+}
+
+// TestParseHeader_Malformed_EmptySKAlias：显式 sk= 空值按字段空值 fail-closed 拒绝。
+func TestParseHeader_Malformed_EmptySKAlias(t *testing.T) {
+	if _, err := ParseHeader("SproxySig v=2 ak=sk-prod-meshA-3f8a sk= ts=1784808000123 exp=1784808300123 nonce=n body_sha256=" + EmptyBodyHash() + " sig=s"); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("sk= 空值应 ErrMalformed, got %v", err)
+	}
+}
+
 func TestParseHeader_Malformed(t *testing.T) {
 	bad := []string{
 		"",                      // 空
 		"Bearer abc",            // 非 SproxySig
 		"SproxySig",             // 缺空格后字段
-		"SproxySig v=1 ak=only", // 缺字段
-		"SproxySig v=1 ak=x ts=abc exp=1 nonce=n body_sha256=b sig=s",         // ts 非数字
-		"SproxySig v=1 ak=x ts=1 exp=1 nonce=n body_sha256=b sig=s unknown=k", // 未知字段
-		"SproxySig v=1 ts=1 exp=1 nonce=n body_sha256=b sig=s",                // 缺 ak
+		"SproxySig v=2 ak=only", // 缺字段
+		"SproxySig v=2 ak=x ts=abc exp=1 nonce=n body_sha256=b sig=s",         // ts 非数字
+		"SproxySig v=2 ak=x ts=1 exp=1 nonce=n body_sha256=b sig=s unknown=k", // 未知字段
+		"SproxySig v=2 ts=1 exp=1 nonce=n body_sha256=b sig=s",                // 缺 ak
 	}
 	for _, s := range bad {
 		if _, err := ParseHeader(s); !errors.Is(err, ErrMalformed) {
 			t.Errorf("ParseHeader(%q) 期望 ErrMalformed, got %v", s, err)
 		}
+	}
+}
+
+// TestParseHeader_V1_Deprecated：v1 头能解析（不拒绝明文），但 Verify 按版本不匹配拒绝。
+func TestParseHeader_V1_Deprecated(t *testing.T) {
+	auth := Scheme + " v=1 ak=sk-prod-meshA-3f8a ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
+	h, err := ParseHeader(auth)
+	if err != nil {
+		t.Fatalf("v1 头应可解析（Version 字段透出）, got %v", err)
+	}
+	if h.Version != "1" {
+		t.Fatalf("v1 头 Version 应为 '1', got %q", h.Version)
 	}
 }
 
