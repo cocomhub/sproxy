@@ -34,11 +34,10 @@ func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.
 
 	cfg := Default()
 	cfg.StorageRoot = tmpDir
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}
-
+	// 凭据 store 化：注入带 testAccessKey 的 Ring（取代 cfg.AccessKeys）。
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
@@ -46,14 +45,16 @@ func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.
 	auditLogger := slog.New(slog.NewJSONHandler(&auditBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:         mux,
 		CfgPtr:      &cfgPtr,
 		Version:     "test",
 		BuildAt:     "test",
 		Logger:      testLogger(),
 		AuditLogger: auditLogger,
-	})
+	}
+	withTestCreds(&opts)
+	h := RegisterRoutes(t.Context(), opts)
 
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {
@@ -262,8 +263,8 @@ func TestRecordAudit_DefaultTS(t *testing.T) {
 func TestAuthMiddleware_SproxySigActorInjected(t *testing.T) {
 	t.Parallel()
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
-	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool(), credentialRing: ringForTestCreds()}
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := ActorFrom(r.Context()); got != testAccessKey {
 			t.Errorf("ActorFrom() = %q, want %q", got, testAccessKey)
@@ -347,7 +348,7 @@ func TestAuthMiddleware_NoAuthActorEmpty(t *testing.T) {
 	t.Parallel()
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{})
-	h := &Handlers{cfgPtr: cfgPtr}
+	h := &Handlers{cfgPtr: cfgPtr, allowInsecureLoopback: true}
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := ActorFrom(r.Context()); got != "" {
 			t.Errorf("ActorFrom() = %q, want empty", got)
@@ -357,6 +358,7 @@ func TestAuthMiddleware_NoAuthActorEmpty(t *testing.T) {
 	handler := h.authMiddleware(inner)
 
 	r := httptest.NewRequest("GET", "/upload", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -706,20 +708,21 @@ func TestRequestLog_RecordsActor(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = tmpDir
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
 	var logBuf bytes.Buffer
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:         mux,
 		CfgPtr:      &cfgPtr,
 		Version:     "test",
 		BuildAt:     "test",
 		Logger:      slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		AuditLogger: testLogger(),
-	})
+	}
+	withTestCreds(&opts)
+	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {
 		ts.Close()

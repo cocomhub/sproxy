@@ -244,8 +244,7 @@ func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
 	t.Parallel()
 	// 关键：Default() 的 RateLimit.Enabled=false（限流未装配）。必须显式打开并给低配额，
 	// 隧道链才会挂上 rateLimiter 中间件，PUT 收紧/放宽才能被观察。
-	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
-		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+	url, _ := newTestServerWithAllRoutesCreds(t, func(cfg *Config) {
 		cfg.RateLimit.Enabled = true
 		cfg.RateLimit.Requests = 2
 		cfg.RateLimit.Window = time.Hour
@@ -336,21 +335,22 @@ func TestConfig_UpdateRateLimit_DisabledViaTunnel(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	cfg.RateLimit.Enabled = true
 	cfg.RateLimit.Requests = 5
 	cfg.RateLimit.Window = time.Hour
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mmm := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:         mmm,
 		CfgPtr:      &cfgPtr,
 		Version:     "v",
 		BuildAt:     "b",
 		Logger:      testLogger(),
 		AuditLogger: testLogger(),
-	})
+	}
+	withTestCreds(&opts)
+	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -405,14 +405,13 @@ func TestConfig_UpdateRateLimit_SignalPostImmediate(t *testing.T) {
 
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	cfg.RateLimit.Enabled = true
 	cfg.RateLimit.Requests = 2
 	cfg.RateLimit.Window = time.Hour
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	muxOut := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:         muxOut,
 		CfgPtr:      &cfgPtr,
 		Version:     "v",
@@ -420,7 +419,9 @@ func TestConfig_UpdateRateLimit_SignalPostImmediate(t *testing.T) {
 		Logger:      testLogger(),
 		AuditLogger: testLogger(),
 		RouteTable:  mrt,
-	})
+	}
+	withTestCreds(&opts)
+	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {
 		ts.Close()

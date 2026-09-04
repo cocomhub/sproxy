@@ -24,8 +24,9 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `storage_root` | string | `./storage` | 多租户存储根目录，自动创建 |
 | `owner_quotas` | map[string]int64 | (空) | 按 owner 配额上限（字节）：显式 owner > `"*"` 默认 > 0（不限制） |
 | `max_upload_bytes` | int64 | `1073741824` (1 GiB) | 单次普通上传最大字节，超过 413。0 = 不限制 |
-| `tunnel_key` | string | (空) | 64 位 hex AES-256 密钥。留空时启动自动生成并回写到 YAML |
-| `access_keys` | []{key, secret, mesh_id?} | (空) | SproxySig 请求签名认证（每 mesh 一对 AK/SK）。配置后除 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 之外全路由验签；留空 = 不认证 |
+| `registration` | {allow: bool} | `allow: false` | 注册开关（预留给管理注册；`false`=允许自动注册=首启 anonymous 凭据生成） |
+| `allow_insecure_loopback` | bool | `false` | 无任何凭据时（ring 空）放行 loopback 来源的 GET/HEAD（仅本地调试；生产勿开） |
+| `credential_ttl` | duration | `720h` (30d) | 首启 anonymous 凭据有效期；负值 = 禁用首启生成 |
 | `log_level` | string | `info` | `debug` / `info` / `warn` / `error` |
 | `log_format` | string | `text` | `text`（默认）或 `json` |
 | `max_header_bytes` | int | `1048576` (1 MiB) | HTTP 请求头大小上限 |

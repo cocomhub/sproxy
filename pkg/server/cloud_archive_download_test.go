@@ -291,12 +291,10 @@ func TestDownloadCloudArchive_NormalDownloadStillWorks(t *testing.T) {
 	}
 }
 
-// TestDownloadCloudArchive_RequiresAuth 验证 kind 下载走既有认证（access_keys 配置后需签名）。
+// TestDownloadCloudArchive_RequiresAuth 验证 kind 下载走既有认证（凭据 Ring 配置后需签名）。
 func TestDownloadCloudArchive_RequiresAuth(t *testing.T) {
 	t.Parallel()
-	url, cfgPtr := newTestServerWithAllRoutes(t, func(cfg *Config) {
-		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
-	})
+	url, cfgPtr := newTestServerWithAllRoutesCreds(t, nil)
 	// 认证租户的归档落在 <root>/<owner>/archive/ 子目录
 	writeCloudArchive(t, cfgPtr, testAccessKey, "auth-archive.tar.gz", []byte("auth-content"))
 
@@ -332,12 +330,10 @@ func TestDownloadCloudArchive_RequiresAuth(t *testing.T) {
 func TestDownloadCloudArchive_OwnerIsolation(t *testing.T) {
 	t.Parallel()
 	otherAK := "sk-test-other-000000"
-	url, cfgPtr := newTestServerWithAllRoutes(t, func(cfg *Config) {
-		cfg.AccessKeys = []AccessKeyConfig{
-			{Key: testAccessKey, Secret: testAccessSecret},
-			{Key: otherAK, Secret: testAccessSecret},
-		}
-	})
+	url, cfgPtr := newTestServerWithAllRoutesCredsMany(t, nil,
+		testCredPair{ak: testAccessKey, sk: testAccessSecret},
+		testCredPair{ak: otherAK, sk: testAccessSecret},
+	)
 	// 归档只属于 testAccessKey 租户
 	writeCloudArchive(t, cfgPtr, testAccessKey, "owner-archive.tar.gz", []byte("owner-content"))
 
@@ -376,23 +372,24 @@ func TestDownloadCloudTask_Kind(t *testing.T) {
 	otherAK := "sk-test-other-000000"
 	cfg := Default()
 	cfg.StorageRoot = tmpDir
-	cfg.AccessKeys = []AccessKeyConfig{
-		{Key: testAccessKey, Secret: testAccessSecret},
-		{Key: otherAK, Secret: testAccessSecret},
-	}
 
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:         mux,
 		CfgPtr:      &cfgPtr,
 		Version:     "test",
 		BuildAt:     "test",
 		Logger:      testLogger(),
 		AuditLogger: testLogger(),
-	})
+	}
+	withTestCreds(&opts,
+		testCredPair{ak: testAccessKey, sk: testAccessSecret},
+		testCredPair{ak: otherAK, sk: testAccessSecret},
+	)
+	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
 

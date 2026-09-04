@@ -149,17 +149,18 @@ func TestHandler_UploadRouteRequiresAuth(t *testing.T) {
 
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:     mux,
 		CfgPtr:  cfgPtr,
 		Version: "test",
 		BuildAt: "now",
 		Logger:  testLogger(),
-	})
+	}
+	withTestCreds(&opts)
+	h := RegisterRoutes(t.Context(), opts)
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)

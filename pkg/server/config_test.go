@@ -421,65 +421,31 @@ func TestConfig_YAMLTagsMatchMapstructure(t *testing.T) {
 	check(reflect.TypeFor[Config]())
 }
 
-// TestConfig_Validate_AccessKeys 覆盖 access_keys 校验（I-1/I-2）：
-// Secret 长度/hex、Key 唯一、mesh_id 与 AK 内嵌 mesh 一致性。
-func TestConfig_Validate_AccessKeys(t *testing.T) {
-	validSecret := strings.Repeat("a", 64)
-
-	// 合法：单 AK，无 mesh_id（默认空），Secret 64 hex。
-	ok := Default()
-	ok.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: validSecret}}
-	if err := ok.Validate(); err != nil {
-		t.Fatalf("合法 access_keys 应通过: %v", err)
+// TestConfig_Registration_Defaults 覆盖凭据 store 化的新配置字段默认值/校验：
+// registration.allow 默认 false、allow_insecure_loopback 默认 false、credential_ttl
+// 默认 30d；负值 = 显式禁用首启 anonymous（合法，不拒绝）。
+func TestConfig_Registration_Defaults(t *testing.T) {
+	c := Default()
+	if c.Registration.Allow {
+		t.Error("registration.allow 默认应为 false（允许注册）")
 	}
-
-	// Secret 非 64 hex。
-	short := Default()
-	short.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: "short"}}
-	if err := short.Validate(); err == nil {
-		t.Fatal("Secret 非 64 hex 应报错")
+	if c.AllowInsecureLoopback {
+		t.Error("allow_insecure_loopback 默认应为 false（生产无认证 401）")
 	}
-
-	// Secret 非 hex。
-	nonhex := Default()
-	nonhex.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: strings.Repeat("g", 64)}}
-	if err := nonhex.Validate(); err == nil {
-		t.Fatal("Secret 非 hex 应报错")
+	if c.CredentialTTL != 30*24*time.Hour {
+		t.Errorf("credential_ttl 默认应为 30d，实际 %v", c.CredentialTTL)
 	}
-
-	// Key 空。
-	emptyKey := Default()
-	emptyKey.AccessKeys = []AccessKeyConfig{{Key: "", Secret: validSecret}}
-	if err := emptyKey.Validate(); err == nil {
-		t.Fatal("空 Key 应报错")
+	// 负值 = 显式禁用首启（合法，RegisterRoutes 据此跳过 anonymous 生成）。
+	neg := Default()
+	neg.CredentialTTL = -1
+	if err := neg.Validate(); err != nil {
+		t.Errorf("credential_ttl 负值（显式禁首启）应通过 Validate: %v", err)
 	}
-
-	// Key 重复。
-	dup := Default()
-	dup.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: validSecret}, {Key: "sk-prod-1234567890abcdef", Secret: strings.Repeat("b", 64)}}
-	if err := dup.Validate(); err == nil {
-		t.Fatal("重复 Key 应报错")
-	}
-
-	// mesh_id 与 AK 内嵌 mesh 不一致。
-	meshMismatch := Default()
-	meshMismatch.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: validSecret, MeshID: "other"}}
-	if err := meshMismatch.Validate(); err == nil {
-		t.Fatal("mesh_id 与 AK 内嵌 mesh 不一致应报错")
-	}
-
-	// mesh_id 与 AK 内嵌 mesh 一致。
-	meshOK := Default()
-	meshOK.AccessKeys = []AccessKeyConfig{{Key: "sk-prod-1234567890abcdef", Secret: validSecret, MeshID: "prod"}}
-	if err := meshOK.Validate(); err != nil {
-		t.Fatalf("mesh_id 一致应通过: %v", err)
-	}
-
-	// AK 非 sk- 格式时 mesh_id 显式提供不校验一致性。
-	nonSK := Default()
-	nonSK.AccessKeys = []AccessKeyConfig{{Key: "legacy-key", Secret: validSecret, MeshID: "custom"}}
-	if err := nonSK.Validate(); err != nil {
-		t.Fatalf("非 sk- AK + 显式 mesh_id 应通过: %v", err)
+	// 零值经 SetDefaults 复活为 30d。
+	zero := &Config{}
+	zero.SetDefaults()
+	if zero.CredentialTTL != 30*24*time.Hour {
+		t.Errorf("SetDefaults 后 credential_ttl 应为 30d，实际 %v", zero.CredentialTTL)
 	}
 }
 

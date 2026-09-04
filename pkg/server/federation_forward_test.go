@@ -35,8 +35,9 @@ const (
 )
 
 // newRelayTestHub 启动一个带 hub + 联邦配置的完整 sproxy handler（httptest server）。
-// accessKeys 为空时以无认证模式启动；非空时配置 SproxySig 准入（fail-closed）。
-func newRelayTestHub(t *testing.T, rt *hub.MeshRouteTable, accessKeys []AccessKeyConfig) (*Handlers, *httptest.Server) {
+// creds 为空时以无认证模式启动；非空时配置 SproxySig 准入（fail-closed）。
+// 凭据通过 Ring 注入（取代旧 cfg.AccessKeys）。
+func newRelayTestHub(t *testing.T, rt *hub.MeshRouteTable, creds ...testCredPair) (*Handlers, *httptest.Server) {
 	t.Helper()
 	cfg := Default()
 	cfg.Addr = "127.0.0.1:0"
@@ -44,16 +45,23 @@ func newRelayTestHub(t *testing.T, rt *hub.MeshRouteTable, accessKeys []AccessKe
 	cfg.LogLevel = "error"
 	cfg.Hub.Enabled = true
 	cfg.Hub.Federation.Enabled = true
-	cfg.AccessKeys = accessKeys
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	muxsrv := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:        muxsrv,
 		CfgPtr:     &cfgPtr,
 		RouteTable: rt,
 		Logger:     testutil.DiscardLogger(),
-	})
+	}
+	if len(creds) > 0 {
+		withTestCreds(&opts, creds...)
+	} else {
+		noAuth := defaultNoAuthRegOpts()
+		opts.CredentialRing = noAuth.CredentialRing
+		opts.AllowInsecureLoopback = noAuth.AllowInsecureLoopback
+	}
+	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
 	return h, ts
@@ -185,11 +193,11 @@ func TestCrossHubRelay_EndToEnd_Echo(t *testing.T) {
 	// hub-B：路由表注册 node-b（叶子）。
 	rtB := hub.NewMeshRouteTable()
 	rtB.AddNode("", "node-b", callerMux)
-	_, tsB := newRelayTestHub(t, rtB, nil)
+	_, tsB := newRelayTestHub(t, rtB)
 
 	// hub-A：空路由表 + 联邦客户端指向 hub-B。
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: tsB.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
@@ -212,10 +220,10 @@ func TestCrossHubRelay_ConcurrentDial(t *testing.T) {
 	callerMux, echoAddr := newRelayEchoLeaf(t)
 	rtB := hub.NewMeshRouteTable()
 	rtB.AddNode("", "node-b", callerMux)
-	_, tsB := newRelayTestHub(t, rtB, nil)
+	_, tsB := newRelayTestHub(t, rtB)
 
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: tsB.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
@@ -265,10 +273,10 @@ func TestCrossHubRelay_AuthEndToEnd(t *testing.T) {
 	callerMux, echoAddr := newRelayEchoLeaf(t)
 	rtB := hub.NewMeshRouteTable()
 	rtB.AddNode("", "node-b", callerMux)
-	_, tsB := newRelayTestHub(t, rtB, []AccessKeyConfig{{Key: federationForwardTestAK, Secret: federationForwardTestSK}})
+	_, tsB := newRelayTestHub(t, rtB, testCredPair{ak: federationForwardTestAK, sk: federationForwardTestSK})
 
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, []AccessKeyConfig{{Key: federationForwardTestAK, Secret: federationForwardTestSK}})
+	hA, tsA := newRelayTestHub(t, rtA, testCredPair{ak: federationForwardTestAK, sk: federationForwardTestSK})
 
 	// 正确 peer 凭据：hub-A 用 hub-B 认可的 AK/SK 拉取 + 转发。
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{
@@ -300,7 +308,7 @@ func TestRelayStreamHandler_ForwardUpstream401_Maps502(t *testing.T) {
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	mock.relayStatus = http.StatusUnauthorized // 模拟对端拒绝本 hub 凭据
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
@@ -359,7 +367,7 @@ func TestFederationForwarder_Forward_LoopGuard(t *testing.T) {
 func TestRelayStreamHandler_ForwardHopLimit_Returns508(t *testing.T) {
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
@@ -385,7 +393,7 @@ func TestRelayStreamHandler_ForwardHopLimit_Returns508(t *testing.T) {
 func TestRelayStreamHandler_ForwardPathLoop_Returns508(t *testing.T) {
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
@@ -414,7 +422,7 @@ func TestRelayStreamHandler_Forward_FailoverToSecondPeer(t *testing.T) {
 	mockUp := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{
 		{ID: "hubDown", URL: mockDown.srv.URL},
 		{ID: "hubUp", URL: mockUp.srv.URL},
@@ -447,7 +455,7 @@ func TestRelayStreamHandler_Forward_FailoverPastLoop(t *testing.T) {
 	mockY := newMockFedPeer(t, `[{"id":"node-z","addr":"10.0.0.9:9000","mesh":""}]`)
 
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{
 		{ID: "hubX", URL: mockX.srv.URL},
 		{ID: "hubY", URL: mockY.srv.URL},
@@ -481,7 +489,7 @@ func TestRelayStreamHandler_ForwardErrorPropagation_502(t *testing.T) {
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	mock.relayStatus = http.StatusBadGateway
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
@@ -507,7 +515,7 @@ func TestRelayStreamHandler_ForwardErrorPropagation_502(t *testing.T) {
 func TestRelayStreamHandler_Forward_HeadersSent(t *testing.T) {
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{
 		ID: "hubB", URL: mock.srv.URL,
 		AccessKey: federationForwardTestAK, AccessKeySecret: federationForwardTestSK,
@@ -548,7 +556,7 @@ func TestRelayStreamHandler_Forward_HeadersSent(t *testing.T) {
 func TestRelayStreamHandler_ForwardPath_Accumulation(t *testing.T) {
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubC", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
@@ -582,7 +590,7 @@ func TestRelayStreamHandler_ForwardPath_Accumulation(t *testing.T) {
 func TestRelayStreamHandler_ForwardOversizedPath_400(t *testing.T) {
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
@@ -608,7 +616,7 @@ func TestRelayStreamHandler_ForwardOversizedPath_400(t *testing.T) {
 func TestRelayStreamHandler_ForwardUnknownTarget_404(t *testing.T) {
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
-	hA, tsA := newRelayTestHub(t, rtA, nil)
+	hA, tsA := newRelayTestHub(t, rtA)
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
@@ -633,7 +641,7 @@ func TestRelayStreamHandler_ForwardUnknownTarget_404(t *testing.T) {
 // 保持 404（与旧行为一致，联邦转发不改变无联邦语义）。
 func TestRelayStreamHandler_ForwardNoFederation_404(t *testing.T) {
 	rtA := hub.NewMeshRouteTable()
-	_, tsA := newRelayTestHub(t, rtA, nil) // 不 SetFederationClient
+	_, tsA := newRelayTestHub(t, rtA) // 不 SetFederationClient
 	conn, err := relayConnectRaw(t, tsA.URL, "node-x", "1.2.3.4:80", nil)
 	if err == nil {
 		_ = conn.Close()

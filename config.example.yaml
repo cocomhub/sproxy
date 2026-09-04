@@ -46,19 +46,18 @@ tls:
   # 要显式禁用自签证书生成，取消注释并设为 false：
   # auto_tls: false
 
-# SproxySig 请求签名认证（每 mesh 一对 AK/SK；生产环境必须设置）。
-# 启用后，除 /healthz、/version、/ui/、POST /tunnel 之外所有路由都要求
-# Authorization: SproxySig v=1 ... 请求签名头。
-# 生成 AK/SK：sclient access-key create [--mesh <name>]
-# 注意：未配置 access_keys（且 api_keys 未启用）时 sproxy 拒绝启动（fail-fast）。
-# 下面为开发示例凭据，生产环境务必用 `sclient access-key create` 生成并更换。
-access_keys:
-  - key: "sk-00000000000000000000000000000000"
-    secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+# 凭据 store 化（取代 yaml access_keys）：SproxySig 请求签名凭据由服务端自动装配——
+# 首次启动在 <storage_root>/anonymous/meta/credentials.json 生成 anonymous AK/SK 并持久化，
+# 日志打印 AK（请妥善保存并尽快登记正式用户）。正式凭据登记见 sclient trust / /api/credentials。
+#   registration:
+#     allow: false            # 注册开关（预留给管理注册；false = 允许自动注册=首启 anonymous 生成）
+#   allow_insecure_loopback: false  # 无任何凭据时回环来源 GET/HEAD 放行（仅本地调试，生产勿开）
+#   credential_ttl: "720h"    # 首启 anonymous 凭据有效期（默认 30d；负值 = 禁用首启生成，
+#                             # 此时无凭据即 401 拒启场景请配 allow_insecure_loopback）
 
-# 多用户 API 密钥（Bearer，与 access_keys 互斥且优先；可选）。
+# 多用户 API 密钥（Bearer，与 SproxySig 互斥且优先；可选）。
 # 提供 read/write 权限分级，适合多用户 HTTP 文件访问；但不支持隧道/hub——
-# 隧道密钥与 hub 注册准入均来自 access_keys（hub.enabled 时强制要求 access_keys）。
+# 隧道密钥与 hub 注册准入来自凭据 Ring（首启 anonymous 或其他登记凭据）。
 # api_keys:
 #   enabled: true
 #   keys:

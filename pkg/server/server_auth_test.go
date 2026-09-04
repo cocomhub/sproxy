@@ -115,7 +115,7 @@ func TestAuthMiddleware_NoAuthConfigured(t *testing.T) {
 
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{})
-	h := &Handlers{cfgPtr: cfgPtr}
+	h := &Handlers{cfgPtr: cfgPtr, credentialRing: emptyTestRing(), allowInsecureLoopback: true}
 	called := false
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
@@ -123,6 +123,7 @@ func TestAuthMiddleware_NoAuthConfigured(t *testing.T) {
 	handler := h.authMiddleware(inner)
 
 	r := httptest.NewRequest("GET", "/upload", nil)
+	r.RemoteAddr = "127.0.0.1:1234" // loopback：allow_insecure_loopback 兜底放行
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -138,8 +139,8 @@ func TestAuthMiddleware_SproxySigMissing(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
-	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool(), credentialRing: ringForTestCreds()}
 	called := false
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
@@ -162,8 +163,8 @@ func TestAuthMiddleware_SproxySigValid(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
-	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool(), credentialRing: ringForTestCreds()}
 	called := false
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -188,8 +189,8 @@ func TestAuthMiddleware_SproxySigBadSignature(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
-	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool(), credentialRing: ringForTestCreds()}
 	called := false
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
@@ -214,8 +215,8 @@ func TestAuthMiddleware_SproxySigUnknownKey(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
-	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool(), credentialRing: ringForTestCreds()}
 	called := false
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true

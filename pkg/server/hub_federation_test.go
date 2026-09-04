@@ -155,18 +155,18 @@ func TestFederationEndpoint_AuthRequired(t *testing.T) {
 	cfg.LogLevel = "error"
 	cfg.Hub.Enabled = true
 	cfg.Hub.Federation.Enabled = true
-	// fail-closed：配置 access_keys 后联邦端点无凭据必须 401。
-	cfg.AccessKeys = []AccessKeyConfig{{Key: "sk-test-0123456789abcdef", Secret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
 
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:        mux,
 		CfgPtr:     &cfgPtr,
 		RouteTable: rt,
 		Logger:     testutil.DiscardLogger(),
-	})
+	}
+	withTestCreds(&opts, testCredPair{ak: "sk-test-0123456789abcdef", sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"})
+	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
 
@@ -194,16 +194,17 @@ func TestFederationSync_AuthSuccessAndFailure(t *testing.T) {
 		testAK = "sk-0123456789abcdef"
 		testSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	)
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAK, Secret: testSK}}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:        mux,
 		CfgPtr:     &cfgPtr,
 		RouteTable: rt,
 		Logger:     testutil.DiscardLogger(),
-	})
+	}
+	withTestCreds(&opts, testCredPair{ak: testAK, sk: testSK})
+	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
 
@@ -250,16 +251,17 @@ func TestFederationNodesEndpoint_MeshFromAccessKey(t *testing.T) {
 		meshMAK = "sk-meshM-0123456789abcdef"
 		meshMSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	)
-	cfg.AccessKeys = []AccessKeyConfig{{Key: meshMAK, Secret: meshMSK}}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:        mux,
 		CfgPtr:     &cfgPtr,
 		RouteTable: rt,
 		Logger:     testutil.DiscardLogger(),
-	})
+	}
+	withTestCreds(&opts, testCredPair{ak: meshMAK, sk: meshMSK})
+	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
 
@@ -303,12 +305,16 @@ func TestDualHubPeering_NodesVisible(t *testing.T) {
 	var cfgPtrB atomic.Pointer[Config]
 	cfgPtrB.Store(cfgB)
 	muxB := http.NewServeMux()
-	hB := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	optsB := RegisterRoutesOpts{
 		Mux:        muxB,
 		CfgPtr:     &cfgPtrB,
 		RouteTable: rtB,
 		Logger:     testutil.DiscardLogger(),
-	})
+	}
+	noAuthB := defaultNoAuthRegOpts()
+	optsB.CredentialRing = noAuthB.CredentialRing
+	optsB.AllowInsecureLoopback = noAuthB.AllowInsecureLoopback
+	hB := RegisterRoutes(t.Context(), optsB)
 	tsB := httptest.NewServer(hB.Handler())
 	t.Cleanup(func() { tsB.Close(); _ = hB.Close() })
 
@@ -323,12 +329,16 @@ func TestDualHubPeering_NodesVisible(t *testing.T) {
 	var cfgPtrA atomic.Pointer[Config]
 	cfgPtrA.Store(cfgA)
 	muxA := http.NewServeMux()
-	hA := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	optsA := RegisterRoutesOpts{
 		Mux:        muxA,
 		CfgPtr:     &cfgPtrA,
 		RouteTable: rtA,
 		Logger:     testutil.DiscardLogger(),
-	})
+	}
+	noAuthA := defaultNoAuthRegOpts()
+	optsA.CredentialRing = noAuthA.CredentialRing
+	optsA.AllowInsecureLoopback = noAuthA.AllowInsecureLoopback
+	hA := RegisterRoutes(t.Context(), optsA)
 	tsA := httptest.NewServer(hA.Handler())
 	t.Cleanup(func() { tsA.Close(); _ = hA.Close() })
 
@@ -384,12 +394,16 @@ func TestDualHubPeering_MeshNotLeaked(t *testing.T) {
 	var cfgPtrB atomic.Pointer[Config]
 	cfgPtrB.Store(cfgB)
 	muxB := http.NewServeMux()
-	hB := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	optsB := RegisterRoutesOpts{
 		Mux:        muxB,
 		CfgPtr:     &cfgPtrB,
 		RouteTable: rtB,
 		Logger:     testutil.DiscardLogger(),
-	})
+	}
+	noAuthB := defaultNoAuthRegOpts()
+	optsB.CredentialRing = noAuthB.CredentialRing
+	optsB.AllowInsecureLoopback = noAuthB.AllowInsecureLoopback
+	hB := RegisterRoutes(t.Context(), optsB)
 	tsB := httptest.NewServer(hB.Handler())
 	t.Cleanup(func() { tsB.Close(); _ = hB.Close() })
 
@@ -404,12 +418,16 @@ func TestDualHubPeering_MeshNotLeaked(t *testing.T) {
 	var cfgPtrA atomic.Pointer[Config]
 	cfgPtrA.Store(cfgA)
 	muxA := http.NewServeMux()
-	hA := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	optsA := RegisterRoutesOpts{
 		Mux:        muxA,
 		CfgPtr:     &cfgPtrA,
 		RouteTable: rtA,
 		Logger:     testutil.DiscardLogger(),
-	})
+	}
+	noAuthA := defaultNoAuthRegOpts()
+	optsA.CredentialRing = noAuthA.CredentialRing
+	optsA.AllowInsecureLoopback = noAuthA.AllowInsecureLoopback
+	hA := RegisterRoutes(t.Context(), optsA)
 	tsA := httptest.NewServer(hA.Handler())
 	t.Cleanup(func() { tsA.Close(); _ = hA.Close() })
 

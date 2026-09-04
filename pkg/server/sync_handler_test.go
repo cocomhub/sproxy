@@ -34,9 +34,14 @@ func newSyncTestEnv(t *testing.T, remoteURL string, modifyCfg func(*Config)) (h 
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
-	h = RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux: mux, CfgPtr: &cfgPtr, Version: "test", BuildAt: "test", Logger: slog.Default(),
-	})
+	}
+	noAuth := defaultNoAuthRegOpts()
+	opts.CredentialRing = noAuth.CredentialRing
+	opts.CredentialStore = noAuth.CredentialStore
+	opts.AllowInsecureLoopback = noAuth.AllowInsecureLoopback
+	h = RegisterRoutes(t.Context(), opts)
 	remotes := []syncmgr.RemoteConfig{{
 		Name: "r1", URL: remoteURL, AccessKey: "test-ak", AccessKeySecret: strings.Repeat("a", 64),
 	}}
@@ -332,7 +337,12 @@ func TestSyncAPI_NotConfigured(t *testing.T) {
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{Mux: mux, CfgPtr: &cfgPtr, Version: "test", BuildAt: "test", Logger: slog.Default()})
+	opts := RegisterRoutesOpts{Mux: mux, CfgPtr: &cfgPtr, Version: "test", BuildAt: "test", Logger: slog.Default()}
+	noAuth := defaultNoAuthRegOpts()
+	opts.CredentialRing = noAuth.CredentialRing
+	opts.CredentialStore = noAuth.CredentialStore
+	opts.AllowInsecureLoopback = noAuth.AllowInsecureLoopback
+	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
 

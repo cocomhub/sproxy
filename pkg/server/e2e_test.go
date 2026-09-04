@@ -19,12 +19,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
-// e2eAK / e2eSK 是 startTestServer 配置的 SproxySig 测试凭据（与 AccessKeyConfig 一致）。
+// e2eAK / e2eSK 是 startTestServer 配置的 SproxySig 测试凭据。
 const (
 	e2eAK = "sk-e2e-0000000000000000"
 	e2eSK = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -63,7 +64,6 @@ func startTestServer(t *testing.T) (string, string) {
 
 	cfg := server.Default()
 	cfg.StorageRoot = tmpDir
-	cfg.AccessKeys = []server.AccessKeyConfig{{Key: e2eAK, Secret: e2eSK, MeshID: "e2e"}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -72,11 +72,20 @@ func startTestServer(t *testing.T) (string, string) {
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
+	// 凭据 store 化：注入 e2eAK/e2eSK 的 Ring（取代 cfg.AccessKeys）。
+	e2eRing := accesskey.NewRing()
+	e2eSKBytes, _ := hex.DecodeString(e2eSK)
+	if len(e2eSKBytes) != 32 {
+		t.Fatalf("e2eSK 非法: %d bytes", len(e2eSKBytes))
+	}
+	_ = e2eRing.UpsertAK(e2eAK, "e2e")
+	_, _ = e2eRing.AddKey(e2eAK, e2eSKBytes)
 	h := server.RegisterRoutes(t.Context(), server.RegisterRoutesOpts{
-		Mux:     mux,
-		CfgPtr:  &cfgPtr,
-		Version: "v",
-		BuildAt: "t",
+		Mux:            mux,
+		CfgPtr:         &cfgPtr,
+		Version:        "v",
+		BuildAt:        "t",
+		CredentialRing: e2eRing,
 	})
 	t.Cleanup(func() { _ = h.Close() })
 

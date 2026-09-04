@@ -17,7 +17,6 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
 	"github.com/cocomhub/sproxy/pkg/storage"
-	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"gopkg.in/yaml.v3"
 )
@@ -269,6 +268,13 @@ type SyncRemoteConfig struct {
 	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
 }
 
+// RegistrationConfig 是注册（凭据登记）相关配置。
+// Allow 缺省 false = 允许自动注册（首启 anonymous 凭据生成）；true = 显式允许
+// 注册（选填，语义保留给未来管理注册开关）。
+type RegistrationConfig struct {
+	Allow bool `yaml:"allow" mapstructure:"allow"`
+}
+
 type Config struct {
 	Addr string `yaml:"addr" mapstructure:"addr"`
 	// StorageRoot 是存储根目录（新布局 <root>/<tenant>/{user,cloud,...}/）。
@@ -298,10 +304,16 @@ type Config struct {
 	Telemetry OTELConfig `yaml:"telemetry" mapstructure:"telemetry"`
 	CORS      CORSConfig `yaml:"cors" mapstructure:"cors"`
 
-	// AccessKeys 是 SproxySig 请求签名认证的 AccessKey 配置（每 mesh 一对；
-	// 替代旧 auth_token 明文 Bearer）。任一已配置即所有 HTTP 面（文件/信令/
-	// 节点列表/服务发现）要求 SproxySig 签名。hub 侧为多 mesh 时配置多对。
-	AccessKeys []AccessKeyConfig `yaml:"access_keys" mapstructure:"access_keys"`
+	// 注册/无认证兜底配置（凭据 store 化后取代 yaml access_keys）：
+	//   - Registration.Allow 为 true 时允许未登记 AK 的注册（当前文件/hub 面由
+	//     credentialRing.Len()==0 触发首启 anonymous 生成，见 RegisterRoutes；
+	//     false = 缺省，仍生成 anonymous 作为新部署可访问凭据的保证）。
+	//   - AllowInsecureLoopback 仅用于无任何凭据（ring 空）时的本地调试：放行
+	//     loopback 来源的 GET/HEAD，其余 401。生产勿开。
+	//   - CredentialTTL 是首启 anonymous 凭据的有效期（默认 30d）。
+	Registration          RegistrationConfig `yaml:"registration" mapstructure:"registration"`
+	AllowInsecureLoopback bool               `yaml:"allow_insecure_loopback" mapstructure:"allow_insecure_loopback"`
+	CredentialTTL         time.Duration      `yaml:"credential_ttl" mapstructure:"credential_ttl"`
 
 	// 分块上传配置
 	ChunkSize        int64         `yaml:"chunk_size" mapstructure:"chunk_size"`
@@ -383,6 +395,9 @@ func Default() *Config {
 		CORS: CORSConfig{
 			MaxAge: defaultMaxAge,
 		},
+		Registration:          RegistrationConfig{Allow: false},
+		CredentialTTL:         30 * 24 * time.Hour, // 首启 anonymous 凭据有效期
+		AllowInsecureLoopback: false,
 		Web: WebConfig{
 			Tunnel: true,
 		},
@@ -461,6 +476,9 @@ func (c *Config) SetDefaults() {
 	}
 	if c.CloudFailedTaskTTL <= 0 {
 		c.CloudFailedTaskTTL = 1 * time.Hour
+	}
+	if c.CredentialTTL == 0 {
+		c.CredentialTTL = 30 * 24 * time.Hour
 	}
 	if c.Sync.MaxConcurrent <= 0 {
 		c.Sync.MaxConcurrent = 3
@@ -575,29 +593,6 @@ func (c *Config) Validate() error {
 		}
 		if limit < 0 {
 			return fmt.Errorf("bucket_limits[%q] 上限 %d 非法：配额上限不能为负", path, limit)
-		}
-	}
-	// access_keys 校验（I-1/I-2）：Key 非空、Key 唯一、Secret 为 64 hex（32B）、
-	// mesh_id 与 AK 内嵌 mesh 一致（防配置漂移导致两端隧道派生密钥不匹配）。
-	seenAccessKeys := make(map[string]struct{}, len(c.AccessKeys))
-	for i, k := range c.AccessKeys {
-		if k.Key == "" {
-			return fmt.Errorf("access_keys[%d].key 为空，密钥不能为空字符串", i)
-		}
-		if _, dup := seenAccessKeys[k.Key]; dup {
-			return fmt.Errorf("access_keys[%d].key %q 重复", i, k.Key)
-		}
-		seenAccessKeys[k.Key] = struct{}{}
-		if len(k.Secret) != 64 {
-			return fmt.Errorf("access_keys[%d].secret 必须为 64 个十六进制字符（32 字节 AES 密钥源），got %d 字符", i, len(k.Secret))
-		}
-		if _, err := hex.DecodeString(k.Secret); err != nil {
-			return fmt.Errorf("access_keys[%d].secret 不是合法十六进制: %v", i, err)
-		}
-		if k.MeshID != "" {
-			if mesh := tunnel.AccessKeyMesh(k.Key); mesh != "" && mesh != k.MeshID {
-				return fmt.Errorf("access_keys[%d].mesh_id %q 与 AK 内嵌 mesh %q 不一致（sclient 按 AK 解析 mesh 派生隧道密钥）", i, k.MeshID, mesh)
-			}
 		}
 	}
 	if c.RateLimit.Enabled && c.RateLimit.Requests <= 0 {

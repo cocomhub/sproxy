@@ -97,13 +97,17 @@ func TestHubNodesHandler_Enabled(t *testing.T) {
 	rt := hub.NewMeshRouteTable()
 
 	mux := http.NewServeMux()
+	noAuthH := defaultNoAuthRegOpts()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:        mux,
-		CfgPtr:     cfgPtr,
-		Version:    "test",
-		BuildAt:    "now",
-		Logger:     testLogger(),
-		RouteTable: rt,
+		Mux:                   mux,
+		CfgPtr:                cfgPtr,
+		Version:               "test",
+		BuildAt:               "now",
+		Logger:                testLogger(),
+		RouteTable:            rt,
+		CredentialRing:        noAuthH.CredentialRing,
+		CredentialStore:       noAuthH.CredentialStore,
+		AllowInsecureLoopback: noAuthH.AllowInsecureLoopback,
 	})
 	defer h.Close()
 
@@ -146,13 +150,17 @@ func TestHubRemoveNodeHandler_Enabled(t *testing.T) {
 	rt.AddNode("", "node-1", nil)
 
 	mux := http.NewServeMux()
+	noAuthH := defaultNoAuthRegOpts()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:        mux,
-		CfgPtr:     cfgPtr,
-		Version:    "test",
-		BuildAt:    "now",
-		Logger:     testLogger(),
-		RouteTable: rt,
+		Mux:                   mux,
+		CfgPtr:                cfgPtr,
+		Version:               "test",
+		BuildAt:               "now",
+		Logger:                testLogger(),
+		RouteTable:            rt,
+		CredentialRing:        noAuthH.CredentialRing,
+		CredentialStore:       noAuthH.CredentialStore,
+		AllowInsecureLoopback: noAuthH.AllowInsecureLoopback,
 	})
 	defer h.Close()
 
@@ -187,13 +195,17 @@ func TestHubStatsHandler_Enabled(t *testing.T) {
 	rt := hub.NewMeshRouteTable()
 
 	mux := http.NewServeMux()
+	noAuthH := defaultNoAuthRegOpts()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:        mux,
-		CfgPtr:     cfgPtr,
-		Version:    "test",
-		BuildAt:    "now",
-		Logger:     testLogger(),
-		RouteTable: rt,
+		Mux:                   mux,
+		CfgPtr:                cfgPtr,
+		Version:               "test",
+		BuildAt:               "now",
+		Logger:                testLogger(),
+		RouteTable:            rt,
+		CredentialRing:        noAuthH.CredentialRing,
+		CredentialStore:       noAuthH.CredentialStore,
+		AllowInsecureLoopback: noAuthH.AllowInsecureLoopback,
 	})
 	defer h.Close()
 
@@ -225,7 +237,6 @@ func TestHubNodesHandler_MeshIsolation(t *testing.T) {
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.Hub.Enabled = true
-	cfg.AccessKeys = []AccessKeyConfig{{Key: akA, Secret: sk}, {Key: akB, Secret: sk}}
 	cfgPtr.Store(cfg)
 
 	rt := hub.NewMeshRouteTable()
@@ -239,14 +250,16 @@ func TestHubNodesHandler_MeshIsolation(t *testing.T) {
 	rt.Add("mesh-b", hub.NodeInfo{ID: "node-b", Mux: mB, Connected: time.Now()}, nil)
 
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:        mux,
 		CfgPtr:     cfgPtr,
 		Version:    "test",
 		BuildAt:    "now",
 		Logger:     testLogger(),
 		RouteTable: rt,
-	})
+	}
+	withTestCreds(&opts, testCredPair{ak: akA, sk: sk}, testCredPair{ak: akB, sk: sk})
+	h := RegisterRoutes(t.Context(), opts)
 	defer h.Close()
 
 	srv := httptest.NewServer(mux)

@@ -73,14 +73,13 @@ var localMuxPatterns = []struct{ method, pattern string }{
 	{"GET", "/api/hub/stats"},
 }
 
-// newTestMux 返回接入 RegisterRoutes 的 mux（含 access_keys，隧道可用）。
+// newTestMux 返回接入 RegisterRoutes 的 mux（含 testAccessKey 凭据 Ring，隧道可用）。
 // withHub 为 true 时注入 RouteTable（hub.enabled 语义；hub 用户面路由只在
 // opts.RouteTable != nil 时注册）。
 func newTestMux(t *testing.T, withHub bool) http.Handler {
 	t.Helper()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	cfg.Hub.Enabled = withHub
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
@@ -92,6 +91,7 @@ func newTestMux(t *testing.T, withHub bool) http.Handler {
 		BuildAt: "b",
 		Logger:  testLogger(),
 	}
+	withTestCreds(&opts)
 	if withHub {
 		opts.RouteTable = hub.NewMeshRouteTable()
 	}
@@ -124,16 +124,19 @@ func hasRoute(t *testing.T, mux http.Handler, probeMethods []string, path string
 func TestHandlers_LocalHandler(t *testing.T) {
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
+	noAuth := defaultNoAuthRegOpts()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
-		Mux:     mux,
-		CfgPtr:  &cfgPtr,
-		Version: "v",
-		BuildAt: "b",
-		Logger:  testLogger(),
+		Mux:                   mux,
+		CfgPtr:                &cfgPtr,
+		Version:               "v",
+		BuildAt:               "b",
+		Logger:                testLogger(),
+		CredentialRing:        noAuth.CredentialRing,
+		CredentialStore:       noAuth.CredentialStore,
+		AllowInsecureLoopback: noAuth.AllowInsecureLoopback,
 	})
 	t.Cleanup(func() { _ = h.Close() })
 
