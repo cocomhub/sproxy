@@ -11,9 +11,9 @@
  *     opts 可选：limit（int，服务端 clamp ≤500）、action/actor/mesh（精确相等过滤）、
  *     since（RFC3339 时间串）。响应 {events:[...], total}，events 时间倒序。
  *
- * 说明：/api/audit **仅主 mux（authMiddleware）注册**，未在 localMux（隧道内层）
- * 注册——direct SproxySig 模式可访问；隧道模式经 /tunnel 转发命中 localMux 无此
- * 路由 → 404，由调用方（Web UI 审计 tab）捕获并渲染"仅 direct 模式可用"占位。
+ * 说明：/api/audit 同时注册主 mux（authMiddleware/SproxySig）与 localMux（隧道
+ * 内层，隧道加密即认证）——**隧道与 direct 模式均可达**，浏览器审计 tab 两条
+ * 传输路径都能正常拉取。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {

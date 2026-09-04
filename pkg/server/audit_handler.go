@@ -27,9 +27,9 @@ type auditResponse struct {
 // auditHandler 处理 GET /api/audit——Web UI 审计日志查看面板。
 //
 // 设计要点：
-//   - 仅注册主 mux + authMiddleware（SproxySig/APIKey 认证），**不注册 localMux**
-//     （隧道内层路由）——与 /api/hub/federation/nodes 同模式，避免经隧道获得无额外
-//     认证面的审计读取端点。tunnel 模式请求会命中 localMux 无此路由 → 404（前端 catch）。
+//   - 双注册：主 mux 走 authMiddleware（SproxySig/APIKey 认证）；localMux（隧道
+//     内层）裸注册（隧道加密即认证，与 /api/shares、/api/stats 同模式）。审计是
+//     浏览器隧道模式下的用户面操作，隧道内层必须可达。
 //   - ring 为 nil（audit.buffer_size=0 关闭）时返回 200 + 空 events + total 0
 //     （不 404——Web UI 直接渲染空表）。
 //

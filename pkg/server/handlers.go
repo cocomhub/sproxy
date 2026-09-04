@@ -619,6 +619,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
 	localMux.HandleFunc("PUT /api/config", h.updateConfigHandler)
+	// 审计查看：隧道内层注册（无 authMiddleware——隧道加密即认证，与 /api/shares、
+	// /api/stats 的 localMux 侧同模式）。auditHandler 只读 ring 回 JSON，自身不做
+	// 签名校验。浏览器隧道模式下用户面操作必须隧道可达（仅注册主 mux 会 404）。
+	localMux.HandleFunc("GET /api/audit", h.auditHandler)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -807,10 +811,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		localMux.HandleFunc("GET /api/hub/services", h.hubServicesHandler)
 	}
 
-	// 审计查看 API（主 mux only）：GET /api/audit 走 authMiddleware（SproxySig /
-	// APIKey 认证），**不注册 localMux**（隧道内层）——与 /api/hub/federation/nodes
-	// 同模式：审计读取是敏感面，避免经隧道获得无额外认证面的读取端点（tunnel 模式
-	// 命中 localMux 无此路由 → 404，前端 catch 渲染占位）。
+	// 审计查看 API：GET /api/audit 同时注册主 mux（authMiddleware，SproxySig/APIKey
+	// 认证）与 localMux（隧道内层，隧道加密即认证——与 /api/shares、/api/stats 同
+	// 模式）。审计是浏览器隧道模式下的用户面操作，隧道内层必须可达（用户在隧道
+	// 模式下打开审计 tab 应能直接查看；仅注册主 mux 会让隧道模式 404）。
 	srvMux.HandleFunc("GET /api/audit", h.authMiddleware(h.auditHandler))
 
 	srvMux.HandleFunc("GET /healthz", h.healthz)

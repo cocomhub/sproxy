@@ -563,10 +563,9 @@ async function showHub() {
 function hubTableHtml(nodes, stats) { return appRender.hubTableHtml(nodes, stats); }
 
 // --- 审计日志查看 ---
-// showAudit 拉取最近审计事件并渲染到 #audit-panel。direct 模式（配 AK/SK 走
-// SproxySig）可访问；tunnel 模式经 /tunnel 转发命中 localMux 无 /api/audit → 404，
-// coreRequest 对 !ok 响应 throw（E_SERVER），catch 分支渲染中性占位提示仅 direct
-// 模式可用（不区分 404/其他失败——保持最小提示，不把错误细节当用户可操作信息）。
+// showAudit 拉取最近审计事件并渲染到 #audit-panel。direct 与隧道两条路径均可达
+// （/api/audit 同时注册主 mux（authMiddleware）与 localMux（隧道加密即认证））。
+// 加载失败渲染通用错误占位（不展示原始错误细节，minimal）。
 async function showAudit() {
   document.getElementById('audit-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
@@ -574,7 +573,7 @@ async function showAudit() {
     const events = (data && data.events) || [];
     document.getElementById('audit-panel').innerHTML = auditTableHtml(events);
   } catch (e) {
-    document.getElementById('audit-panel').innerHTML = '<div class="empty-msg">审计 API 仅 direct 模式可用（当前经隧道访问，/api/audit 未注册隧道内层）</div>';
+    document.getElementById('audit-panel').innerHTML = '<div class="empty-msg">审计数据请求失败: ' + e.message + '</div>';
   }
 }
 

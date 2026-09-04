@@ -5,6 +5,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -160,7 +161,8 @@ func TestAuditHandler_SinceInvalid(t *testing.T) {
 	}
 }
 
-// TestAuditHandler_NoAuthUnauthorized 验证无凭据访问 /api/audit 返回 401。
+// TestAuditHandler_NoAuthUnauthorized 验证主 mux（direct 面）无凭据访问
+// /api/audit 返回 401（authMiddleware 保护仍在——localMux 可达不代表直连面降权）。
 func TestAuditHandler_NoAuthUnauthorized(t *testing.T) {
 	url, _, _ := newAuditTestServer(t, nil)
 	req, _ := http.NewRequest(http.MethodGet, url+"/api/audit", nil)
@@ -174,9 +176,11 @@ func TestAuditHandler_NoAuthUnauthorized(t *testing.T) {
 	}
 }
 
-// TestAuditHandler_LocalMuxNotRegistered 回归验证 /api/audit 未注册 localMux：
-// 非 auth 直连 LocalHandler（隧道内层入口）命中该路径返回 404。
-func TestAuditHandler_LocalMuxNotRegistered(t *testing.T) {
+// TestAuditHandler_LocalMuxReachable 验证 /api/audit 在隧道内层（localMux）可达：
+// 非 auth 直连 LocalHandler（隧道内层入口，请求体已解密为明文）命中该路径应返回
+// 200（隧道加密即认证，与 /api/shares、/api/stats 同模式）——审计是浏览器隧道
+// 模式下的用户面操作，必须隧道可达。
+func TestAuditHandler_LocalMuxReachable(t *testing.T) {
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
@@ -197,8 +201,85 @@ func TestAuditHandler_LocalMuxNotRegistered(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/api/audit", nil)
 	lh.ServeHTTP(w, r)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("LocalHandler 直连 GET /api/audit 应为 404（/api/audit 不注册 localMux），got %d (body=%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("LocalHandler 直连 GET /api/audit 应为 200（隧道内层可达），got %d (body=%s)", w.Code, w.Body.String())
+	}
+	// 响应体应为合法 auditResponse（events 数组 + total）。
+	var got auditResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("解析隧道内层 /api/audit 响应: %v", err)
+	}
+	if got.Events == nil || got.Total != len(got.Events) {
+		t.Fatalf("隧道内层响应 shape 异常: %+v", got)
+	}
+}
+
+// TestAuditHandler_TunnelRoundTripReachable 验证真实加密隧道路径端到端可达：
+// tunnel.NewClient（HKDF 派生密钥）→ 外层 POST /tunnel（SproxySig UNSIGNED 签名）
+// → 内层 localMux /api/audit 返回 200 且能读到真实审计事件。这是「浏览器隧道
+// 模式下审计 tab 可达」的真链路验证，无桩/mock。
+func TestAuditHandler_TunnelRoundTripReachable(t *testing.T) {
+	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
+		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
+	})
+
+	// 先经直连面记录一条真实 delete 审计事件。
+	body := []byte("tunnel-e2e")
+	if st := uploadFileSigned(t, url, "tunnel-e2e.txt", body); st != http.StatusOK {
+		t.Fatalf("upload status = %d", st)
+	}
+	delReq, _ := http.NewRequest(http.MethodPost, url+"/delete?filename=tunnel-e2e.txt", nil)
+	delReq.Header.Set("X-File-Checksum", sha256hex(body))
+	signRequest(delReq, testAccessKey, testAccessSecret)
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	delResp.Body.Close()
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("delete 应 200, got %d", delResp.StatusCode)
+	}
+
+	// 经真实加密隧道查询 /api/audit（认证驱动隧道：密钥 = HKDF(testAccessSecret)，
+	// 外层 /tunnel 请求带 UNSIGNED 签名）。
+	key, err := tunnel.DeriveTunnelKey(testAccessSecret, "")
+	if err != nil {
+		t.Fatalf("DeriveTunnelKey: %v", err)
+	}
+	tc, err := tunnel.NewClient(hex.EncodeToString(key), url+"/tunnel", 5*time.Second, nil)
+	if err != nil {
+		t.Fatalf("tunnel.NewClient: %v", err)
+	}
+	base := tc.HTTPClient.Transport
+	tc.HTTPClient.Transport = &tunnelSignTransport{base: base, ak: testAccessKey, sk: testAccessSecret}
+
+	req, _ := http.NewRequest(http.MethodGet, "/api/audit", nil)
+	tresp, err := tc.Do(req)
+	if err != nil {
+		t.Fatalf("tunnel Do /api/audit: %v", err)
+	}
+	defer tresp.Body.Close()
+	if tresp.StatusCode != http.StatusOK {
+		t.Fatalf("tunnel /api/audit status = %d, want 200", tresp.StatusCode)
+	}
+	var payload auditResponse
+	if err := json.NewDecoder(tresp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode tunnel audit body: %v", err)
+	}
+	found := false
+	for _, ev := range payload.Events {
+		if ev.Action == "delete" && ev.Object == "tunnel-e2e.txt" {
+			found = true
+			if ev.Actor != testAccessKey {
+				t.Errorf("tunnel 审计 actor = %q, want %q", ev.Actor, testAccessKey)
+			}
+			if ev.TS.IsZero() {
+				t.Errorf("tunnel 审计 TS 为零值")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("隧道 /api/audit 未返回 delete 事件（隧道内层 auditHandler 未生效）: %+v", payload.Events)
 	}
 }
 

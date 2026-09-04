@@ -44,6 +44,8 @@ var localMuxPatterns = []struct{ method, pattern string }{
 	{"GET", "/api/stats"},
 	{"GET", "/api/config"},
 	{"PUT", "/api/config"},
+	// 审计查看：隧道内层与直连面都可达（浏览器隧道模式下审计 tab 是用户面操作）
+	{"GET", "/api/audit"},
 	{"POST", "/upload/init"},
 	{"POST", "/upload/chunk"},
 	{"GET", "/upload/status"},
