@@ -72,10 +72,11 @@ func ComputeRegisterProof(skHex, nodeID string, ts int64, nonce string) (string,
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
-// authenticatorTestRing 是跨包（hub_test / mesh / server / cmd/sclient）测试共用的
-// Ring 装配工厂：从 []AccessKey 构造 Ring（每条 AK 一条 plain alive 条目）。
-// hub 内部（package hub）测试同样可用。AK 未登记或 SK 非法（非 32 字节）的条目被
-// 跳过——fail-closed 语义由 Authenticator 的空 ring 兜底。
+// NewRingFromAccessKeys 是跨包（cmd/sproxy 装配 / hub_test / mesh / server /
+// cmd/sclient 测试）共用的 Ring 装配工厂：从 []AccessKey 构造 Ring
+// （每条 AK 一条 plain alive 条目）。hub 内部（package hub）测试同样可用。
+// AK 未登记或 SK 非法（非 32 字节）的条目被跳过——fail-closed 语义由
+// Authenticator 的空 ring 兜底。
 func NewRingFromAccessKeys(aks []AccessKey) *accesskey.Ring {
 	ring := accesskey.NewRing()
 	for _, k := range aks {
