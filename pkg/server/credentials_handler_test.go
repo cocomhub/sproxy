@@ -498,6 +498,55 @@ func TestCredentials_SKExpire(t *testing.T) {
 	}
 }
 
+// TestCredentials_SKExpire_InvalidUntil 验证 expire 请求体:
+//   - until 非法格式 → 400；
+//   - until 空串 → 恢复永久有效（零值清除过期）。
+func TestCredentials_SKExpire_InvalidUntil(t *testing.T) {
+	url, _, _ := newCredentialsTestServer(t, "", "", testAccessKey, testAccessSecret, nil, nil)
+
+	st, data := signedGet(t, url+"/api/credentials/"+testAccessKey+"/sk", testAccessKey, testAccessSecret)
+	if st != http.StatusOK {
+		t.Fatalf("own sk list status = %d (body=%s)", st, data)
+	}
+	var list skListResponse
+	decodeJSONInto(t, data, &list)
+	var initialID string
+	for _, s := range list.SKs {
+		if s.MetaType == "initial" {
+			initialID = s.SKID
+			break
+		}
+	}
+	if initialID == "" {
+		t.Fatalf("未找到 initial 条目: %+v", list.SKs)
+	}
+	expURL := url + "/api/credentials/" + testAccessKey + "/sk/" + initialID + "/expire"
+
+	// 1. until 非法格式 → 400。
+	status, body := doSignedJSON(t, http.MethodPost, expURL, testAccessKey, testAccessSecret, map[string]any{
+		"until": "not-a-time",
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("until 非法格式 status = %d, want 400 (body=%s)", status, body)
+	}
+	if !bytes.Contains(body, []byte("RFC3339")) {
+		t.Errorf("400 响应应提示 RFC3339 格式, got %s", body)
+	}
+
+	// 2. until 空串 → 恢复永久有效（重复 expire 空 until 应 200，条目仍存活）。
+	stOK, b := doSignedJSON(t, http.MethodPost, expURL, testAccessKey, testAccessSecret, map[string]any{
+		"until": "",
+	})
+	if stOK != http.StatusOK {
+		t.Fatalf("until 空串恢复 status = %d, want 200 (body=%s)", stOK, b)
+	}
+	// 条目仍可认证（未被意外过期）。
+	stAuth, _ := signedGet(t, url+"/api/stats", testAccessKey, testAccessSecret)
+	if stAuth != http.StatusOK {
+		t.Fatalf("恢复永久后 SK 访问 status = %d, want 200", stAuth)
+	}
+}
+
 // renewNewSKHex renew 并返回新 SK 的 hex（解 wrap）。
 func renewNewSKHex(t *testing.T, url, ak, oldSKHex string) string {
 	t.Helper()
@@ -680,6 +729,55 @@ func TestCredentials_AKAdd_Admin(t *testing.T) {
 	stAuth, b := signedGet(t, url+"/api/stats", newAK, newSK)
 	if stAuth != http.StatusOK {
 		t.Fatalf("新增 AK 认证 status = %d, want 200 (body=%s)", stAuth, b)
+	}
+}
+
+// TestCredentials_AKAdd_Edge 验证新增 AK 边界：
+//   - ak 为空 → 400（UpsertAK 校验）；
+//   - secret 非 64-hex / 非 32B → 400（hex 解码校验）；
+//   - 显式 secret 不回传（响应不含 secret 字段）。
+func TestCredentials_AKAdd_Edge(t *testing.T) {
+	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
+
+	// 1. ak 为空 → 400。
+	st, body := doSignedJSON(t, http.MethodPost, url+"/api/credentials", testAdminKey, testAdminSecret, map[string]any{
+		"ak": "", "owner": "x",
+	})
+	if st != http.StatusBadRequest {
+		t.Fatalf("空 ak status = %d, want 400 (body=%s)", st, body)
+	}
+
+	// 2. secret 非 64-hex → 400。
+	st, body = doSignedJSON(t, http.MethodPost, url+"/api/credentials", testAdminKey, testAdminSecret, map[string]any{
+		"ak": "sk-new-edge-00112233445566", "owner": "x", "secret": "not-hex",
+	})
+	if st != http.StatusBadRequest {
+		t.Fatalf("非法 hex secret status = %d, want 400 (body=%s)", st, body)
+	}
+
+	// 3. secret 长度非 32B（64 hex 之外）→ 400。
+	st, body = doSignedJSON(t, http.MethodPost, url+"/api/credentials", testAdminKey, testAdminSecret, map[string]any{
+		"ak": "sk-new-edge-00112233445566", "owner": "x", "secret": strings.Repeat("11", 31),
+	})
+	if st != http.StatusBadRequest {
+		t.Fatalf("secret 非 32B status = %d, want 400 (body=%s)", st, body)
+	}
+
+	// 4. 显式 secret 给定 → 200 且响应不回传 secret。
+	newAK, newSK := "sk-new-edge-00aabbccddeeff", strings.Repeat("22", 32)
+	st, body = doSignedJSON(t, http.MethodPost, url+"/api/credentials", testAdminKey, testAdminSecret, map[string]any{
+		"ak": newAK, "owner": "edge", "secret": newSK,
+	})
+	if st != http.StatusOK {
+		t.Fatalf("显式 secret 新增 status = %d, want 200 (body=%s)", st, body)
+	}
+	if bytes.Contains(body, []byte(newSK)) {
+		t.Errorf("响应回传了显式 secret（不应回传）: %s", body)
+	}
+	// 新凭据立即可认证（secret 真正写入 ring）。
+	stAuth, _ := signedGet(t, url+"/api/stats", newAK, newSK)
+	if stAuth != http.StatusOK {
+		t.Fatalf("新增 AK 认证 status = %d, want 200", stAuth)
 	}
 }
 
