@@ -46,7 +46,7 @@ SIGHUP 不重载，hub.Authenticator 持有无锁静态切片。无生命周期�
 |--------|------|
 | 凭据持久化源 | **从 yaml 彻底移除 access_keys，改为 store 独立存储**（放对应用户 meta 下）。无需历史兼容。 |
 | 数据模型 | **AK→多 SK 条目**（map[AK]→[]SKEntry）。rotate=renew=增量追加新 SK 条目，旧条目自然过期。4A 统一定型。 |
-| 命名 | **4A 即定**：端点 `/api/credentials` + sclient `trust` 命令（renew/list/add/expire/delete）+ 验证函数 `VerifySproxySigMulti`；`access-key` 命令 rename 为 `trust`。 |
+| 命名 | **4A 即定**：端点 `/api/credentials` + sclient `trust` 命令（`renew` / `sk list` / `sk delete` / `sk expire` / `ak list` / `ak add` / `ak delete`）+ 验证函数 `VerifySproxySigMulti`；`access-key` 命令 rename 为 `trust`（内部分 `trust ak`/`trust sk` 子层级）。 |
 | 签名协议 | **升级 v2 且废弃 v1**（破坏性，无存量 client 顾虑）。 |
 | store 落点 | **storage_root/<tenant>/meta/ 下文件**（如 accounts.json，与用户 meta 共放，多租户隔离自然成立）。 |
 | api_keys | **留 yaml**（多用户 Bearer 保留），启用时与 store 凭据**互斥优先**（现状语义保留）。 |
@@ -224,20 +224,34 @@ cmd/sproxy/root.go（启动）:
 
 ### 7.4 管理端点（主 mux + authMiddleware 保护，仿 PUT /api/config 样板）
 
-> **权限分档**：普通凭据用户可 renew / GET 自己的 AK 的 SK 列表 / expire / delete 自己的 AK。
-> **admin-only**：`GET /api/credentials`（全部 AK 列表）仅 admin AK 用户可访问；首个 TOTP 注册用户
-> 即 admin，且无法新增其他 admin。admin 判定：凭据条目 `Role=admin`（AK 的 Key.Role 字段）。
+> **模型前提**：AK=用户身份（稳定），SK=该身份下的多条目（可过期/删除）。因此「删除」语义
+> 必须落在 **SK 条目**上（普通用户层面），而非整个 AK。**账号（AK）注销暂不支持**（范围外，
+> 见 13 节）；admin 才可删除整个 AK，且需**二次确认**。
 
-| 端点 | 行为 |
-|------|------|
-| `POST /api/credentials/renew` body `{mesh}` | 调用方当前 AK 追加新 SK 条目（多 SK 模型：旧条目保留至各自 ExpiresAt）。用调用方 SK 派生 wrap key 加密新 SK（Kind=secret_wrap），store 持久化 + RecordAudit(credential_renew)。**TTL 仅服务端配置控制（客户端不可传）**。返回 `{ak, wrapped_secret(b64), kind, wrap_key_ak, expires_at}` |
-| `POST /api/credentials` body `{ak, owner, role?}` | 新增 key（4B 注册用；4A 保留，仅 admin 可加） |
-| `GET /api/credentials?ak=<ak>` | **仅返回指定 AK 的 SK 列表**（缺省=调用方自己的 AK）。不暴露全部 AK 的 SK。指定他 AK 需 admin |
-| `GET /api/credentials`（无参，admin-only） | 全部 AK 列表（admin 才能看全量） |
-| `POST /api/credentials/{ak}/expire` body `{until}` | 设某条目/某 AK 过期（RFC3339；空=永不过期）；用于多 AK 并存窗口裁切 |
-| `DELETE /api/credentials/{ak}` | 删除 AK（幂等） |
+> **权限分档**：
+> - **普通凭据用户（role=user）**：可 `renew` / `GET` 自己的 AK 的 SK 列表 / `expire` 自己的 SK /
+>   `DELETE` 自己的 SK 条目。**不能**看全量、**不能**删 AK、**不能**注销账号。
+> - **admin（4B 首个 TOTP 注册用户，无法新增其他 admin）**：除普通能力外，可 `GET` 全部 AK 列表、
+>   可 `POST /api/credentials` 新增 key、可 `expire`/`DELETE` 任意 AK（删除 AK 需二次确认）。
+>   admin 判定：凭据条目 `Role=admin`（4A 阶段无 admin——anonymous 为 user，admin-only 端点 4A 返回 403）。
 
-全部 RecordAudit（action=credential_renew/add/expire/delete）。调用方须为合法持有者（authMiddleware 验签通过即证持 SK；admin 校验交给 handler）。
+| 端点 | 权限 | 行为 |
+|------|------|------|
+| `POST /api/credentials/{ak}/renew` body `{mesh?}` | 本人 | 调用方当前 AK 追加新 SK 条目（多 SK 模型：旧条目保留至各自 ExpiresAt）。用调用方 SK 派生 wrap key 加密新 SK（Kind=secret_wrap），store 持久化 + RecordAudit(credential_renew)。**TTL 仅服务端配置控制（客户端不可传）**。返回 `{ak, sk_id, wrapped_secret(b64), kind, wrap_key_ak, expires_at}` |
+| `GET /api/credentials/{ak}/sk` | 本人（`{ak}`=自己）；admin（任意） | 返回**指定 AK 的 SK 列表**（含行 `sk_id/created/expires/status`，每条需各自 wrap key 解密）。不暴露全部 AK 的 SK；缺省=调用方自己 |
+| `DELETE /api/credentials/{ak}/sk/{skID}` | 本人；admin（任意） | **删除单个 SK 条目**（普通用户注销 SK 的唯一手段；删除后该 SK 立即失效，不再可信）。幂等（不存在返回 404）。RecordAudit(credential_sk_delete)。**不支持账号注销（无 AK 级删除入口给普通用户）** |
+| `POST /api/credentials/{ak}/sk/{skID}/expire` body `{until}` | 本人；admin（任意） | 设**单个 SK 条目**过期（RFC3339；空=永不过期）；用于双 SK 并存窗口裁切。RecordAudit(credential_expire) |
+| `GET /api/credentials`（无参，admin-only） | admin | 全部 AK 列表（admin 才能看全量；每个 AK 含其活跃 SK 数/摘要，不下发明文 SK） |
+| `POST /api/credentials` body `{ak, owner, role?}` | admin | 新增 AK（4B 注册用；4A 仅 admin 预创建可选） |
+| `DELETE /api/credentials/{ak}` | **admin 专属 + 二次确认** | 删除整个 AK（身份+全部 SK 条目+关联 meta）。body 须带 `{confirm: "<ak>", force?: bool}`（确认串=目标 AK 名）；未提供/不匹配 → 400。RecordAudit(credential_ak_delete)。**普通用户无此能力** |
+
+> **二次确认设计**：`DELETE /api/credentials/{ak}` body 必须含 `confirm` 字段等于目标 AK 字符串；
+> 且若该 AK 仍有活跃（未过期）SK 条目，默认拒绝，需 `force: true` 才允许（防误删在用的凭据）。
+> 确认串为 AK 名本身——要求调用方明确显式意图，防脚本/误触。
+
+全部变更 `RecordAudit`（action=credential_renew / credential_add / credential_ak_delete /
+credential_sk_delete / credential_expire）。调用方须为合法持有者（authMiddleware 验签通过即证持
+SK；admin 校验交给 handler，按 `ActorFrom(ctx)` 查其 AK 的 role）。
 
 ### 7.5 持久化（store 文件）
 - 写入时机：renew/add/expire/delete 后 → 同步 store（COW 更新 ring 后写 store）。
@@ -300,11 +314,13 @@ sproxy-sig/v2
 
 | 命令 | 行为 |
 |------|------|
-| `trust renew [--mesh M]` | 调 POST /api/credentials/renew（**无 ttl 参数——服务端配置控制**），用本端当前 SK 解 wrap 得到新 SK，config set access_key_secret，打印摘要 |
-| `trust list [--mesh M]` | 调 GET /api/credentials?ak=<自己>，只解密自己的 key |
-| `trust add [--owner O]` | 调 POST /api/credentials（admin-only） |
-| `trust expire <ak> [--until <RFC3339>]` | 调 expire |
-| `trust delete <ak>` | 调 DELETE |
+| `trust renew [--mesh M]` | 调 `POST /api/credentials/{ak}/renew`（**无 ttl 参数——服务端配置控制**），用本端当前 SK 解 wrap 得到新 SK，`config set access_key_secret <newSK>`，打印新 `sk_id` 摘要 |
+| `trust sk list [--ak A]` | 调 `GET /api/credentials/{ak}/sk`（缺省自己），只解密自己的 key 显示，其余 masked |
+| `trust sk delete <skID>` | 调 `DELETE /api/credentials/{ak}/sk/{skID}`（普通用户注销某 SK；删除后立即失效） |
+| `trust sk expire <skID> [--until <RFC3339>]` | 调 `POST /api/credentials/{ak}/sk/{skID}/expire`（设单条 SK 过期） |
+| `trust ak list`（admin） | 调 `GET /api/credentials`（全量 AK 列表，admin-only） |
+| `trust ak add [--owner O]`（admin） | 调 `POST /api/credentials`（admin 预创建 4B 前的账号） |
+| `trust ak delete <ak> [--force]`（admin） | 调 `DELETE /api/credentials/{ak}`（**二次确认**：命令交互确认 AK 名；`--force` 跳过"仍有活跃 SK"检查） |
 
 - `pkg/client/accesskey.go`（新）领域 API（coreRequest 签名）。
 - 4B 追加 `trust login`/查看（GA 登录取 SK）。
