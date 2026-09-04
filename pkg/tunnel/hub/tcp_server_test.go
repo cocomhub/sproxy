@@ -135,7 +135,7 @@ func TestHubTCP_EmptyAccessKeysFailClosed(t *testing.T) {
 	defer cancel()
 
 	rt := hub.NewMeshRouteTable()
-	// auth 传 nil → NewAuthenticator(nil) → fail-closed
+	// auth 传 nil → NewHubServer 兜底 NewAuthenticator(空 ring) → fail-closed
 	hs := hub.NewHubServer(rt, nil, testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
