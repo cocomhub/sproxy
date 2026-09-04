@@ -4,6 +4,7 @@
 package sproxysig
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"strconv"
@@ -278,6 +279,41 @@ func TestNoncePool(t *testing.T) {
 	if !p.Seen("", "n", exp) || !p.Seen("ak", "", exp) {
 		t.Fatal("空 ak/nonce 应 fail-closed 判重放")
 	}
+}
+
+// TestHeader_EntryIDJSONTag：EntryID 的 json/yaml tag 为 "sk"，与线缆字段一致
+// （供未来 Header 序列化 / 配置反序列化使用；编译期结构断言）。
+func TestHeader_EntryIDJSONTag(t *testing.T) {
+	h := Header{Version: "2", AK: "ak", EntryID: "sk-1"}
+	b, err := marshalHeaderJSON(h)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// 字段名必须是 sk（不是 entry_id/other）。
+	if !strings.Contains(string(b), `"sk":"sk-1"`) {
+		t.Fatalf("EntryID 应序列化为 sk 字段, got %s", b)
+	}
+	if strings.Contains(string(b), `"entry_id"`) || strings.Contains(string(b), `"EntryID"`) {
+		t.Fatalf("EntryID 不得序列化为其它字段名, got %s", b)
+	}
+	// 反序列化：sk 值能回到 EntryID。
+	got, err := unmarshalHeaderJSON(b)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.EntryID != "sk-1" || got.AK != "ak" || got.Version != "2" {
+		t.Fatalf("sk → EntryID 反序列化错误: %+v", got)
+	}
+}
+
+func marshalHeaderJSON(h Header) ([]byte, error) {
+	return json.Marshal(h)
+}
+
+func unmarshalHeaderJSON(b []byte) (Header, error) {
+	var h Header
+	err := json.Unmarshal(b, &h)
+	return h, err
 }
 
 func itoa(v int64) string {

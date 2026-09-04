@@ -67,14 +67,19 @@ var (
 
 // Header 是解析后的 SproxySig 认证头。
 type Header struct {
-	Version    string
-	AK         string
-	EntryID    string // SK 条目 ID（sk=<id>，可选；空表示客户端未绑定具体条目）
-	TS         int64  // unix ms，客户端生成时间
-	Exp        int64  // unix ms，客户端自决过期时间（参与签名）
-	Nonce      string
-	BodySHA256 string // body 的 SHA-256 hex 或 "UNSIGNED"
-	Sig        string
+	Version string `json:"v" yaml:"v"`
+	AK      string `json:"ak" yaml:"ak"`
+
+	// EntryID 是 SK 条目 ID（sk=<id>，可选；空表示客户端未绑定具体条目）。
+	// 服务端在凭据 Ring 精确匹配时消费该字段（任务 3+：优先 (ak, entryID) 定位，
+	// entryID 缺失按 AK 全部 active 条目匹配）；本包只负责解析/签名透传。
+	EntryID string `json:"sk" yaml:"sk"`
+
+	TS         int64  `json:"ts" yaml:"ts"`   // unix ms，客户端生成时间
+	Exp        int64  `json:"exp" yaml:"exp"` // unix ms，客户端自决过期时间（参与签名）
+	Nonce      string `json:"nonce" yaml:"nonce"`
+	BodySHA256 string `json:"body_sha256" yaml:"body_sha256"` // body 的 SHA-256 hex 或 "UNSIGNED"
+	Sig        string `json:"sig" yaml:"sig"`
 }
 
 // ParseHeader 解析 "SproxySig v=2 ak=... [sk=...] ts=... exp=... nonce=... body_sha256=... sig=..."。

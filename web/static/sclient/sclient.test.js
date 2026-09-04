@@ -40,7 +40,9 @@ const HMAC_FIXTURE = {
   path: '/tunnel',
   query: '',
   bodySha256: 'UNSIGNED',
-  sigHex: 'a2aae8dddefaed41efc38d8d0173b9c7100f967df27075766cb0312689588ada',
+  // v2 canonical（空 entryID 段 → 空行）的 HMAC-SHA256（Go sproxysig v2 验算接近，
+  // 见 TestVerify_V2_NoEntryID 同向量；此处锁定 JS 侧输出字节）。
+  sigHex: 'd246e13cd506e85d36be6ff8672319e9c3b9e48ce805a9418e93a8164c97f79f',
 };
 
 function hkdfCanonicalInput(mesh) {
@@ -49,8 +51,8 @@ function hkdfCanonicalInput(mesh) {
 }
 
 function hmacCanonicalInput(f) {
-  // canonical 拼接："sproxy-sig/v1\n" + ak + \n + ts + \n + exp + \n + nonce + \n + method + \n + path + \n + query + \n + body_sha256
-  return 'sproxy-sig/v1\n' + f.ak + '\n' + f.ts + '\n' + f.exp + '\n' + f.nonce + '\n' + f.method + '\n' + f.path + '\n' + f.query + '\n' + f.bodySha256;
+  // v2 canonical："sproxy-sig/v2\n" + ak + "\n" + entryID + "\n" + ts + …（entryID 空 → 空行段）
+  return 'sproxy-sig/v2\n' + f.ak + '\n' + (f.entryID || '') + '\n' + f.ts + '\n' + f.exp + '\n' + f.nonce + '\n' + f.method + '\n' + f.path + '\n' + f.query + '\n' + f.bodySha256;
 }
 
 test('HKDF deriveTunnelKey 与 Go tunnel.DeriveTunnelKey 向量一致', async () => {
@@ -178,11 +180,14 @@ test('log.js 级别过滤', () => {
 });
 
 // ==================== sig.js 追加用例（任务 3） ====================
+// v2：空 entryID → canonical 空行段、Authorization 输出 v=2 且不含 sk= 段。
+// 与 Go 对齐三重锁定：signHeader 输出字节、buildCanonical 段序、独立复算 sig。
 
-test('sig.signHeader unsigned canonical 对齐 Go sproxysig 已知向量', async () => {
+test('sig.signHeader unsigned canonical 对齐 Go sproxysig v2 已知向量', async () => {
   // 注入值逐字使用（见 hmacCanonicalInput 顶部向量）：SK=BASE_SK，AK/ts/exp/nonce
-  // 固定，body_sha256='UNSIGNED'。signHeader 内部用 hmacSHA256Hex（baseSK 编码为
-  // UTF-8）计算 canonical 的 HMAC——与 Go hmac.New(sha256.New, []byte(sk)) 同一字节。
+  // 固定，body_sha256='UNSIGNED'，entryID 为空（客户端尚不携带）。signHeader 内部
+  // 用 hmacSHA256Hex（baseSK 编码为 UTF-8）计算 canonical 的 HMAC——与 Go
+  // hmac.New(sha256.New, []byte(sk)) 同一字节。
   const header = await sig.signHeader('POST', '/tunnel', null, {
     ak: HMAC_FIXTURE.ak,
     ts: HMAC_FIXTURE.ts,
@@ -191,10 +196,10 @@ test('sig.signHeader unsigned canonical 对齐 Go sproxysig 已知向量', async
     secret: BASE_SK,
     unsigned: true,
   });
-  assert.strictEqual(header, 'SproxySig v=1 ak=' + HMAC_FIXTURE.ak + ' ts=' + HMAC_FIXTURE.ts + ' exp=' + HMAC_FIXTURE.exp + ' nonce=' + HMAC_FIXTURE.nonce + ' body_sha256=UNSIGNED sig=' + HMAC_FIXTURE.sigHex);
+  assert.strictEqual(header, 'SproxySig v=2 ak=' + HMAC_FIXTURE.ak + ' ts=' + HMAC_FIXTURE.ts + ' exp=' + HMAC_FIXTURE.exp + ' nonce=' + HMAC_FIXTURE.nonce + ' body_sha256=UNSIGNED sig=' + HMAC_FIXTURE.sigHex);
 });
 
-test('sig.buildCanonical 分段拼接与 Go Header.Canonical 一致', () => {
+test('sig.buildCanonical 分段拼接（v2 空 entryID 空行段）与 Go Header.Canonical 一致', () => {
   const c = sig.buildCanonical('POST', '/tunnel', {
     ak: HMAC_FIXTURE.ak,
     ts: HMAC_FIXTURE.ts,
@@ -202,13 +207,14 @@ test('sig.buildCanonical 分段拼接与 Go Header.Canonical 一致', () => {
     nonce: HMAC_FIXTURE.nonce,
     bodySha256: 'UNSIGNED',
   });
-  // 9 段（sproxy-sig/v1、ak、ts、exp、nonce、method、path、query、body_sha256）
+  // 10 段（sproxy-sig/v2、ak、entryID[空行]、ts、exp、nonce、method、path、query、body_sha256）
   const seg = c.split('\n');
-  assert.strictEqual(seg.length, 9);
+  assert.strictEqual(seg.length, 10);
+  assert.strictEqual(seg[2], '', 'entryID 段应为空行');
   assert.strictEqual(c, hmacCanonicalInput(HMAC_FIXTURE));
 });
 
-test('sig.signHeader 常规 body：sha256 hashing 正确 + 完整头部', async () => {
+test('sig.signHeader 常规 body：sha256 hashing 正确 + 完整头部（v2）', async () => {
   const bodyStr = 'hello sproxy sig body';
   const body = new TextEncoder().encode(bodyStr);
   // 短 body 的 SHA-256 hex（等价于 Go BodyHash(body)）。
@@ -217,7 +223,7 @@ test('sig.signHeader 常规 body：sha256 hashing 正确 + 完整头部', async 
   // '/upload?q=1' 拆成 path='/upload' 与 query='q=1'——对齐 Go
   // EscapedPath/RawQuery 语义）。
   const expectedCanonical =
-    'sproxy-sig/v1\n' + HMAC_FIXTURE.ak + '\n' + HMAC_FIXTURE.ts + '\n' + HMAC_FIXTURE.exp + '\n' +
+    'sproxy-sig/v2\n' + HMAC_FIXTURE.ak + '\n\n' + HMAC_FIXTURE.ts + '\n' + HMAC_FIXTURE.exp + '\n' +
     HMAC_FIXTURE.nonce + '\nPOST\n/upload\nq=1\n' + bodyHashHex;
   const header = await sig.signHeader('POST', '/upload?q=1', body, {
     ak: HMAC_FIXTURE.ak,
@@ -227,16 +233,56 @@ test('sig.signHeader 常规 body：sha256 hashing 正确 + 完整头部', async 
     secret: BASE_SK,
   });
   // 完整头部格式 + body 哈希字段
-  assert.ok(header.startsWith('SproxySig v=1 ak=' + HMAC_FIXTURE.ak), header);
+  assert.ok(header.startsWith('SproxySig v=2 ak=' + HMAC_FIXTURE.ak), header);
   assert.ok(header.indexOf('body_sha256=' + bodyHashHex) >= 0, '头部必须携带 body 的 sha256 hex');
   // 提取 sig 并与独立复算的 canonical HMAC 一致（验证 canonical 分段/哈希拼接）
   const bodySig = header.split(' sig=')[1];
   assert.strictEqual(bodySig, await cryptoLib.hmacSHA256Hex(BASE_SK, expectedCanonical));
   // 非 unsigned → body_sha256 不是 UNSIGNED
   assert.ok(header.indexOf('body_sha256=UNSIGNED') < 0);
-  // body_sha256 分段占 canonical 的第 9 段（校验用 buildCanonical 复算）
+  // body_sha256 分段占 canonical 的第 10 段（校验用 buildCanonical 复算）
   const seg = sig.buildCanonical('POST', '/upload?q=1', { ak: HMAC_FIXTURE.ak, ts: HMAC_FIXTURE.ts, exp: HMAC_FIXTURE.exp, nonce: HMAC_FIXTURE.nonce, bodySha256: bodyHashHex });
   assert.strictEqual(seg, expectedCanonical);
+});
+
+// ---- v2 可选 entryID 段（客户端主动携带；未来凭据 Ring 精确定位） ----
+const ENTRY_ID = 'sk-abcdef012345';
+
+test('sig.signHeader 带 entryID：canonical 第 3 段为 entryID 且头部输出 sk=<entryID>', async () => {
+  const entryCanonical =
+    'sproxy-sig/v2\n' + HMAC_FIXTURE.ak + '\n' + ENTRY_ID + '\n' + HMAC_FIXTURE.ts + '\n' + HMAC_FIXTURE.exp + '\n' +
+    HMAC_FIXTURE.nonce + '\nPOST\n/tunnel\n\nUNSIGNED';
+  const header = await sig.signHeader('POST', '/tunnel', null, {
+    ak: HMAC_FIXTURE.ak,
+    ts: HMAC_FIXTURE.ts,
+    exp: HMAC_FIXTURE.exp,
+    nonce: HMAC_FIXTURE.nonce,
+    secret: BASE_SK,
+    unsigned: true,
+    entryID: ENTRY_ID,
+  });
+  assert.ok(header.startsWith('SproxySig v=2 ak=' + HMAC_FIXTURE.ak + ' sk=' + ENTRY_ID), '头部应输出 sk=<entryID> 且紧接 ak 后: ' + header);
+  assert.ok(header.indexOf(' sk=sk-abcdef012345 ts=') >= 0, 'sk 段位置应在 ak 后、ts 前');
+  assert.strictEqual(header.split(' sig=')[1], await cryptoLib.hmacSHA256Hex(BASE_SK, entryCanonical), '签名 canonical 必须含 entryID 段');
+  // buildCanonical 独立复算一致
+  assert.strictEqual(sig.buildCanonical('POST', '/tunnel', {
+    ak: HMAC_FIXTURE.ak, ts: HMAC_FIXTURE.ts, exp: HMAC_FIXTURE.exp, nonce: HMAC_FIXTURE.nonce, bodySha256: 'UNSIGNED', entryID: ENTRY_ID,
+  }), entryCanonical);
+});
+
+test('sig.buildCanonical 空 vs 非空 entryID 段序稳定（均 10 段）', () => {
+  const base = { ak: HMAC_FIXTURE.ak, ts: HMAC_FIXTURE.ts, exp: HMAC_FIXTURE.exp, nonce: HMAC_FIXTURE.nonce, bodySha256: 'UNSIGNED' };
+  const emptySegs = sig.buildCanonical('GET', '/a', base).split('\n');
+  const withEntrySegs = sig.buildCanonical('GET', '/a', Object.assign({}, base, { entryID: ENTRY_ID })).split('\n');
+  assert.strictEqual(emptySegs.length, 10);
+  assert.strictEqual(withEntrySegs.length, 10);
+  assert.strictEqual(emptySegs[2], '', '空 entryID 段为空行');
+  assert.strictEqual(withEntrySegs[2], ENTRY_ID, '带 entryID → 第 3 段填充');
+  // 除 entryID 段外其余 9 段逐段一致（段数不因可选段漂移）
+  for (let i = 0; i < 10; i++) {
+    if (i === 2) continue;
+    assert.strictEqual(emptySegs[i], withEntrySegs[i], '第 ' + i + ' 段应一致');
+  }
 });
 
 // ==================== transport.js 追加用例（任务 4） ====================
@@ -361,7 +407,7 @@ test('直连模式 coreRequest：GET 携带 SproxySig(sha256)', async () => {
     assert.strictEqual(requests[0].method, 'GET');
     const auth = requests[0].headers['Authorization'];
     assert.ok(auth, '直连请求必须携带 SproxySig 头');
-    assert.ok(auth.startsWith('SproxySig v=1 ak=' + AK));
+    assert.ok(auth.startsWith('SproxySig v=2 ak=' + AK));
     assert.ok(auth.indexOf('body_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') >= 0, '直连无 body 签空串 sha256: ' + auth);
     assert.ok(auth.indexOf('body_sha256=UNSIGNED') < 0);
     assert.strictEqual(out.status, 201);
@@ -427,7 +473,7 @@ test('direct coreRequest 有 body 时签名其 SHA-256 且带 body（canonical �
     const ts = auth.split(' ts=')[1].split(' exp=')[0];
     const exp = auth.split(' exp=')[1].split(' nonce=')[0];
     const nonce = auth.split(' nonce=')[1].split(' body_sha256=')[0];
-    const canonical = 'sproxy-sig/v1\n' + AK + '\n' + ts + '\n' + exp + '\n' + nonce + '\nPOST\n/api/batch/rename\n\n' + bodySha;
+    const canonical = 'sproxy-sig/v2\n' + AK + '\n\n' + ts + '\n' + exp + '\n' + nonce + '\nPOST\n/api/batch/rename\n\n' + bodySha;
     const expectSig = await cryptoLib.hmacSHA256Hex(SK, canonical);
     assert.strictEqual(auth.split(' sig=')[1], expectSig);
     assert.deepStrictEqual(new Uint8Array(requests[0].body), body);
@@ -490,13 +536,13 @@ test('隧道外层签名路径与请求 URL 一致（锁定 /tunnel）+ 业务�
     assert.strictEqual(requests.length, 1);
     assert.strictEqual(requests[0].url, '/tunnel', 'fetch URL 必须是 /tunnel');
     const auth = requests[0].init.headers['Authorization'] || requests[0].init.headers['authorization'];
-    // 从头中抽取字段，复算 canonical，断言其 path 段（第 7 段）为 /tunnel。
+    // 从头中抽取字段，复算 canonical，断言其 path 段（第 8 段）为 /tunnel。
     const ak = auth.split(' ak=')[1].split(' ')[0];
     const ts = auth.split(' ts=')[1].split(' exp=')[0];
     const exp = auth.split(' exp=')[1].split(' nonce=')[0];
     const nonce = auth.split(' nonce=')[1].split(' body_sha256=')[0];
     const canonical = sig.buildCanonical('POST', transport.TUNNEL_PATH, { ak, ts, exp, nonce, bodySha256: 'UNSIGNED' });
-    assert.strictEqual(canonical.split('\n')[6], '/tunnel', 'canonical 第 7 段（signHeader path）必须为 /tunnel');
+    assert.strictEqual(canonical.split('\n')[7], '/tunnel', 'canonical 第 8 段（signHeader path）必须为 /tunnel');
     // 且该 canonical 正是头部 sig 的输入（证明 transport 用 /tunnel 而不是 pathWithQuery 签名）。
     assert.strictEqual(auth.split(' sig=')[1], await cryptoLib.hmacSHA256Hex(SK, canonical), '签名输入 canonical 的 path 段 = /tunnel');
   } finally {
@@ -527,7 +573,7 @@ test('隧道模式业务路径（非 /tunnel）正常走隧道：外层锁 /tunn
     const exp = auth.split(' exp=')[1].split(' nonce=')[0];
     const nonce = auth.split(' nonce=')[1].split(' body_sha256=')[0];
     const canonical = sig.buildCanonical('POST', transport.TUNNEL_PATH, { ak, ts, exp, nonce, bodySha256: 'UNSIGNED' });
-    assert.strictEqual(canonical.split('\n')[6] + '/' + canonical.split('\n')[8], '/tunnel/UNSIGNED', 'canonical path 段（第 7 段）锁 /tunnel、body_sha256 段 UNSIGNED');
+    assert.strictEqual(canonical.split('\n')[7] + '/' + canonical.split('\n')[9], '/tunnel/UNSIGNED', 'canonical path 段（第 8 段）锁 /tunnel、body_sha256 段（第 10 段）UNSIGNED');
     // metadata 解密后 url 保留调用方传入的真实业务路径：
     const keyHex = await cryptoLib.bytesToHex(await cryptoLib.deriveTunnelKey(SK, transport.accessKeyMesh(AK)));
     const data = requests[0].init.body;
