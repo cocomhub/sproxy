@@ -50,7 +50,7 @@ tls:
 # 首次启动在 <storage_root>/anonymous/meta/credentials.json 生成 anonymous AK/SK 并持久化，
 # 日志打印 AK（请妥善保存并尽快登记正式用户）。正式凭据登记见 sclient trust / /api/credentials。
 #   registration:
-#     allow: false            # 注册开关（预留给管理注册；false = 允许自动注册=首启 anonymous 生成）
+#     disable: false          # 注册开关：false = 允许注册（默认）；true = 禁止注册（仅存量用户）
 #   allow_insecure_loopback: false  # 无任何凭据时回环来源 GET/HEAD 放行（仅本地调试，生产勿开）
 #   credential_ttl: "720h"    # 首启 anonymous 凭据有效期（默认 30d；负值 = 禁用首启生成，
 #                             # 此时无凭据即 401 拒启场景请配 allow_insecure_loopback）

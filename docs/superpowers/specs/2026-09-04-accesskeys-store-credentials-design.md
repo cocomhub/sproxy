@@ -260,7 +260,7 @@ SK；admin 校验交给 handler，按 `ActorFrom(ctx)` 查其 AK 的 role）。
   （或拆 accounts/keys 两文件，视 4B）。
 - **写原子替换**（临时文件 + rename），失败 RecordAudit(credential_persist_error) + 不丢内存态。
 - **SIGHUP**：不再重载 access_keys（yaml 已废弃），该重载逻辑删除；CLAUDE.md 更新。
-- **首启自动生成 anonymous**：store 为空 → 生成（`registration.allow: false` 亦生成——服务端已有
+- **首启自动生成 anonymous**：store 为空 → 生成（`registration.disable: false` 亦生成——服务端已有
   凭据才能被客户端信任；然后提示以 anonymous AK 登录/注册）。anonymous 为**非 admin**（role=user），
   仅可访问自身 AK 的 SK 列表，不能看全量。
 - **admin 角色 4B 产生**：4A 阶段 store 无 admin（anonymous=user，renew 只产生群组），admin-only
@@ -336,7 +336,7 @@ sproxy-sig/v2
 ## 11. config 变更
 
 - **移除** `access_keys` 配置段（yaml 废弃）。authMiddleware 由 store 驱动。
-- **新增** `registration.allow`（默认 **false** 表「允许注册」的正语义；禁止注册需显式 `true`）
+- **新增** `registration.disable`（默认 **false** 表「允许注册」；禁止注册需显式 `true`——`disable=false`=允许注册，字段名表达的是「是否禁用注册」而非「是否允许」，避免"allow=false 表示允许"的反直觉）
   与 `registration.admin` 概念（首个 TOTP 注册用户即 admin，无法新增其他 admin）。
 - `api_keys` 保留（Bearer，独立），互斥优先。
 - `allow_insecure_loopback`（默认 false：无凭据时回环也仅 healthz；true 放行回环读取）。

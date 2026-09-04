@@ -579,7 +579,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	//   - 仍为空且 cfg.CredentialTTL>=0（未显式禁用首启）→ 生成 anonymous 凭据
 	//     （kind=plain、ExpiresAt=now+CredentialTTL、Meta{Type:bootstrap}）并持久化，
 	//     保证**新部署必有可访问凭据**（注册开关不影响 anonymous 生成——生成逻辑
-	//     独立于 cfg.Registration.Allow）。
+	//     独立于 cfg.Registration.Disable）。
 	h.bootstrapCredentials(opts)
 
 	// 启动时恢复持久化的信令收件箱（节点注册已在 cmd 层通过 RestoreFromSnapshot

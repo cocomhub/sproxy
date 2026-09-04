@@ -422,12 +422,12 @@ func TestConfig_YAMLTagsMatchMapstructure(t *testing.T) {
 }
 
 // TestConfig_Registration_Defaults 覆盖凭据 store 化的新配置字段默认值/校验：
-// registration.allow 默认 false、allow_insecure_loopback 默认 false、credential_ttl
-// 默认 30d；负值 = 显式禁用首启 anonymous（合法，不拒绝）。
+// registration.disable 默认 false（=允许注册）、allow_insecure_loopback 默认 false、
+// credential_ttl 默认 30d；负值 = 显式禁用首启 anonymous（合法，不拒绝）。
 func TestConfig_Registration_Defaults(t *testing.T) {
 	c := Default()
-	if c.Registration.Allow {
-		t.Error("registration.allow 默认应为 false（允许注册）")
+	if c.Registration.Disable {
+		t.Error("registration.disable 默认应为 false（允许注册）")
 	}
 	if c.AllowInsecureLoopback {
 		t.Error("allow_insecure_loopback 默认应为 false（生产无认证 401）")

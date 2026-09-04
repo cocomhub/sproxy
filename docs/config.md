@@ -24,7 +24,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `storage_root` | string | `./storage` | 多租户存储根目录，自动创建 |
 | `owner_quotas` | map[string]int64 | (空) | 按 owner 配额上限（字节）：显式 owner > `"*"` 默认 > 0（不限制） |
 | `max_upload_bytes` | int64 | `1073741824` (1 GiB) | 单次普通上传最大字节，超过 413。0 = 不限制 |
-| `registration` | {allow: bool} | `allow: false` | 注册开关（预留给管理注册；`false`=允许自动注册=首启 anonymous 凭据生成） |
+| `registration` | {disable: bool} | `disable: false` | 注册开关：`false`=允许注册（默认）；`true`=禁止注册（仅存量用户，无法新增） |
 | `allow_insecure_loopback` | bool | `false` | 无任何凭据时（ring 空）放行 loopback 来源的 GET/HEAD（仅本地调试；生产勿开） |
 | `credential_ttl` | duration | `720h` (30d) | 首启 anonymous 凭据有效期；负值 = 禁用首启生成 |
 | `log_level` | string | `info` | `debug` / `info` / `warn` / `error` |
@@ -177,7 +177,7 @@ max_upload_bytes: 5368709120     # 5 GiB
 # 后续经 sclient trust renew 轮换、/api/credentials 管理。mesh 身份从 AK 派生、隧道密钥
 # 由 SK HKDF 派生——mesh/tunnel 密钥均由凭据自动派生，无需手动配置。
 registration:
-  allow: false        # false=允许注册（默认）；true=禁止注册（仅存量用户）
+  disable: false        # false=允许注册（默认）；true=禁止注册（仅存量用户）
 allow_insecure_loopback: false  # 无凭据时回环是否放行读取（默认 false 更严格）
 credential_ttl: 720h  # SK 默认有效期（默认 30d）
 

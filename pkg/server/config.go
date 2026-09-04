@@ -269,10 +269,10 @@ type SyncRemoteConfig struct {
 }
 
 // RegistrationConfig 是注册（凭据登记）相关配置。
-// Allow 缺省 false = 允许自动注册（首启 anonymous 凭据生成）；true = 显式允许
-// 注册（选填，语义保留给未来管理注册开关）。
+// Disable 缺省 false = 允许注册（默认，首启 anonymous 凭据生成）；true = 禁止注册
+// （仅存量用户，无法新增用户）。字段命名避免"allow=false 表示允许"的反直觉语义。
 type RegistrationConfig struct {
-	Allow bool `yaml:"allow" mapstructure:"allow"`
+	Disable bool `yaml:"disable" mapstructure:"disable"`
 }
 
 type Config struct {
@@ -305,9 +305,9 @@ type Config struct {
 	CORS      CORSConfig `yaml:"cors" mapstructure:"cors"`
 
 	// 注册/无认证兜底配置（凭据 store 化后取代 yaml access_keys）：
-	//   - Registration.Allow 为 true 时允许未登记 AK 的注册（当前文件/hub 面由
-	//     credentialRing.Len()==0 触发首启 anonymous 生成，见 RegisterRoutes；
-	//     false = 缺省，仍生成 anonymous 作为新部署可访问凭据的保证）。
+	//   - Registration.Disable 为 false（缺省）= 允许注册；true = 禁止注册（仅存量用户）。
+	//     anonymous 首启生成由 credentialRing.Len()==0 触发（见 RegisterRoutes），
+	//     Disable 不阻止 anonymous 生成——它是新部署可访问凭据的保证。
 	//   - AllowInsecureLoopback 仅用于无任何凭据（ring 空）时的本地调试：放行
 	//     loopback 来源的 GET/HEAD，其余 401。生产勿开。
 	//   - CredentialTTL 是首启 anonymous 凭据的有效期（默认 30d）。
@@ -395,7 +395,7 @@ func Default() *Config {
 		CORS: CORSConfig{
 			MaxAge: defaultMaxAge,
 		},
-		Registration:          RegistrationConfig{Allow: false},
+		Registration:          RegistrationConfig{Disable: false},
 		CredentialTTL:         30 * 24 * time.Hour, // 首启 anonymous 凭据有效期
 		AllowInsecureLoopback: false,
 		Web: WebConfig{
