@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788487691855,
+  "lastUpdate": 1788488923127,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -322542,6 +322542,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1561374 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a7bb35411434aa06182902597e411a6d7f75e9b3",
+          "message": "feat(telemetry): OTel 装配——tracing 重命名上移 + autoexport + OTLP exporter (#157)\n\n* feat(telemetry): OTel 装配——tracing 重命名上移 pkg/telemetry + autoexport provider + OTLP exporter\n\n- pkg/tunnel/tracing → pkg/telemetry（目录上移，包名 telemetry；命名空间为未来 metric/log 扩展预留）；全部 import 同步\n- ext/otel 子模块 → pkg/telemetry/ext/otel（module 路径同步）\n- 新增 oteltracing.Provider：autoexport.NewSpanExporter 环境变量驱动 exporter，WithSampleRatio(ParentBased+TraceIDRatioBased)、WithOTLPEndpoint 覆写、Shutdown 幂等；autoexport=none/失败回落仅进程内 + Warn\n- Tracer.StartSpan 写 core.SpanContextKey，打通 OTel ↔ slog trace_id/span_id\n- pkg/server 新增 Telemetry OTELConfig{enabled,sample_ratio,otlp_endpoint} 配置段 + 校验；RequestLog 桥接：tracer 非 nil 时用 OTel StartSpan（nil 保持原行为）\n- cmd/sproxy 装配：Telemetry.Enabled 时创建 Provider + Tracer 注入 RegisterRoutes + Shutdown 注册；go.mod require+replace\n\n* fix(telemetry): 审查修复——autoexport 真实导出测试 + env 覆写恢复断言 + none 文案区分\n\n- TestOTLPHTTPCollectorExport：httptest OTLP collector 断言 /v1/traces 收到 span（autoexport OTLP 导出路径真实接线证据）\n- TestOTLPEndpointOverride_EnvRestored：触发 build 再断言恢复（修真空断言），补 ep 为空不触碰 env 用例\n- TestEnvRestore_HadValue：覆盖 Setenv 恢复分支（原值已存在）\n- TestAutoExport_Console：console exporter 装配路径\n- provider.go build：LookupEnv 区分 OTEL_TRACES_EXPORTER 未设（Info）/显式 none（Warn），修 Minor-5 误导文案\n- TestProvider_Shutdown_AfterTracer 保留（幂等）；Tracer() 懒装配 tp 保持 nil，Shutdown 前调用不泄漏\n\n* fix(telemetry): Minor 4/附带清理——Shutdown 顺序边界更正注释 + 测试注释精确化\n\n- provider.go：Tracer/Shutdown 注释改为准确文档——Shutdown 在 Tracer() 之前属非法顺序（exporter 未构建无从关闭）；Shutdown 后再次 Tracer() 按懒装配边界处理，不再把泄漏路径误标为不泄漏（复审 Minor 4 NOT ADDRESSED 的误导注释）\n- provider_test.go：TestEnvRestore_HadValue 注释更正（原值已存在分支；Unsetenv 分支无直接用例已注明）；TestWarn_none_WhenNotSet 注释 defer->Cleanup 措辞精确；删除残留占位注释（review 附带项）\n- gofmt + -race + golangci-lint 全绿\n\n* fix(server): rate limiter per-IP 桶键归一化——按纯 IP 而非 IP:port 限流\n\n修复 CI flaky（Windows Test 失败：'signal 3rd: want 429, got 400 缺少 to'）根因：\nRateLimiter.Middleware 用 r.RemoteAddr（含端口）作 per-IP 令牌桶键。客户端每次新\nTCP 连接端口变化 → 触达全新桶（tokens=1）→ 永远走桶路径放行，全局限流永不生效\n（被静默绕过）；本地因连接复用端口稳定故测试偶发通过，CI 连接不复用时暴露。\n\n修复：normalizeRemoteIP 用 net.SplitHostPort 取纯 IP（兼容 IPv6），解析失败回退\n原值（陌生键仍受全局窗口兜底）。回归测试：同一 IP 不同端口 4 连发断言 429 +\nnormalizeRemoteIP 归一化矩阵。\n\n- go test -race ./pkg/server/ 全绿（含原有 UpdateConfig 全用例）\n- golangci-lint 0 issues",
+          "timestamp": "2026-09-04T10:25:08+08:00",
+          "tree_id": "5b2fa8a90ea45f0e86ef9818d5e253e639d0e066",
+          "url": "https://github.com/cocomhub/sproxy/commit/a7bb35411434aa06182902597e411a6d7f75e9b3"
+        },
+        "date": 1788488913349,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 896,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1397803 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 896,
+            "unit": "ns/op",
+            "extra": "1397803 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1397803 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1397803 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 871.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1385139 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 871.5,
+            "unit": "ns/op",
+            "extra": "1385139 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1385139 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1385139 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 869.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1384227 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 869.6,
+            "unit": "ns/op",
+            "extra": "1384227 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1384227 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1384227 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 864.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1396990 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 864.2,
+            "unit": "ns/op",
+            "extra": "1396990 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1396990 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1396990 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 865.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1382338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 865.9,
+            "unit": "ns/op",
+            "extra": "1382338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1382338 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1382338 times\n4 procs"
           }
         ]
       }
