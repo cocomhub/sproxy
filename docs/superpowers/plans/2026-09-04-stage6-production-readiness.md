@@ -46,13 +46,52 @@ sproxy 完全组网路线图（阶段 1-5）已全部完成并合入 master。�
 8. 每个新文件带 SPDX 头：`Copyright 2026 The Cocomhub Authors. All rights reserved.`
    / `SPDX-License-Identifier: Apache-2.0`。
 
+## 凭据域现状更新（2026-09-05，任务 4 前置）
+
+> 本计划起草时任务 4 设计为 `pkg/server/keyring.go`（内存 map + RWMutex），且
+> **hub.Authenticator 持 `accessKeys []AccessKey` 需 SetAccessKeys 动态化**。该
+> 设计已被更彻底的**凭据 store 化重构**取代，下方任务 4 已据此修订；任何涉及
+> `hub.AccessKey` / `Authenticator` 的说明一律以本更新为准：
+
+### 凭据单一事实源：`pkg/accesskey.Ring`
+
+- `pkg/accesskey`（`ring.go` + `accesskey.go`）是**凭据 Ring（AK→多 SK 权威表）+ 信封加密核心**，
+  不含上层依赖（纯 stdlib）。`Ring` 公开方法：
+  - `UpsertAK(ak, owner)` / `AddKey(ak, []byte, opts...)`（`WithID`/`WithKind`/`WithWrapKeyID`/
+    `WithExpiresAt`/`WithMeta`）/ `Lookup` / `CoreEntry` / `GetEntry` / `ExpireKey` / `DeleteKey` /
+    `DeleteAK` / `Snapshot` / `Replace` / `Len`。
+  - **rotate/expire/delete 即动态生效**（共享 Ring 单一事实源，无需 SetAccessKeys 同步）。
+- **`accesskey.KeyPair{Key, Secret}` + `accesskey.NewRingFromKeyPairs([]KeyPair)`**：静态名单装配工厂
+  （每条 AK 一条 plain alive 条目，`Meta.Type="initial"`；非法 SK/AK 跳过）。**替代已删除的
+  `hub.AccessKey` 类型与 `hub.NewRingFromAccessKeys`**——后续所有涉及"静态 AK/SK 装配 Ring"
+  的流程一律使用 accesskey 包，不再使用 hub 包类型/工厂。
+
+### 服务端装配与持久化
+
+- 生产入口 `BootstrapServerCredentials(cfg, logger) (*accesskey.Ring, *CredentialStore, error)`
+  （`pkg/server/handlers.go`）：静态 `access_keys` 经 `accesskey.NewRingFromKeyPairs` 装入共享 Ring；
+  动态凭据落 `pkg/server/credentialstore.go` `CredentialStore`（`<tenant>/meta/credentials.json`，
+  原子写 + 串行 Save，进程重启后 `Load` → `Ring.Replace` 恢复）。**已实现 store 化**，
+  `keyring.go` 方案作废。
+- HTTP 面 `verifySproxySig` 与 hub `Authenticator` **共用同一 `*accesskey.Ring`**（单一事实源）：
+  轮换/过期动态对两面同时生效，无"HTTP 可验签、hub 被拒"不一致面。
+
+### hub 面现状
+
+- `pkg/tunnel/hub/auth.go` `Authenticator{ ring *accesskey.Ring; noncePool *sproxysig.NoncePool }`，
+  `NewAuthenticator(r *accesskey.Ring)`，`Authenticate` 用 `ring.CoreEntry(ak)` 取条目 → 重算
+  HMAC proof 恒时比对。**无 `AccessKey` 类型、无 `SetAccessKeys`**——动态更新天然经共享 Ring。
+  Router/信号中的 `AccessKey`/`AccessKeySecret` 仅为注册消息/配置**字段名**（string），与类型无关。
+- hub 测试装配一律 `accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{...})`（`testRing` helper）。
+
+
 ## 已核实关键现状（Plan agent + 自核）
 
 | 项 | 现状文件 | 关键点 |
 |----|---------|--------|
-| AK 轮换 | `cmd/sclient/access_key.go`（仅 create）、`pkg/sproxysig/sproxysig.go`、`pkg/server/auth.go:200-224`（verifySproxySig 线性遍历 `cfg.AccessKeys`） | authMiddleware 每次从 `h.cfgPtr.Load()` 遍历 AccessKeys 做 constant-time 匹配 → 支持 **copy-on-write 更新运行时凭据** |
-| AK 轮换 hub 面 | `pkg/tunnel/hub/auth.go:74-150` | `Authenticator` 持 `accessKeys []AccessKey` 无锁，`Authenticate` 线性匹配；**需加 RWMutex + SetAccessKeys 支持运行时更新**（否则"新 key 可 HTTP 面验签、hub 注册被拒"不一致） |
-| AK 轮换 SIGHUP | `cmd/sproxy/root.go:729-775 handleSighup` | 只 Store 软配置；`access_keys` 无比较日志（不重载）。需新增：SIGHUP 时对比 access_keys、更新 cfgPtr + hub Authenticator + keyring |
+| AK 轮换 | `cmd/sclient/access_key.go`（仅 create）、`pkg/sproxysig/sproxysig.go`、`pkg/server/auth.go:200-224`（verifySproxySig 静态遍历 `cfg.AccessKeys` + **动态查共享 `*accesskey.Ring`**） | HTTP 面已走凭据 Ring（`BootstrapServerCredentials`；动态 AK 经 `Ring.Lookup`，静态经 `NewRingFromKeyPairs` 导入）→ 支持 copy-on-write 更新运行时凭据 |
+| AK 轮换 hub 面 | `pkg/tunnel/hub/auth.go`（`Authenticator` 持 `*accesskey.Ring`，`Authenticate` 经 `ring.CoreEntry(ak)`） | 与 HTTP 面共用同一 Ring 单一事实源，**rotate/expire 动态对两面同时生效**（无需 RWMutex + SetAccessKeys；无 `hub.AccessKey` 类型，凭据装配一律走 `pkg/accesskey`） |
+| AK 轮换 SIGHUP | `cmd/sproxy/root.go:729-775 handleSighup` | 只 Store 软配置；`access_keys` 无比较日志（不重载）。需新增：SIGHUP 时对比 access_keys、经 `NewRingFromKeyPairs` 重建静态凭据并原子 `Ring.Replace`（或增量导入）+ 落 `CredentialStore` |
 | rateLimiter | `pkg/server/config_api.go:217`、`pkg/server/ratelimit.go`、`pkg/server/handlers.go:603-606` | Handlers 无 rateLimiter 字段；rl 是局部变量；ratelimit 无 UpdateConfig；`signalPostRL`（handlers.go:725-727）另有独立 rl |
 | OTel | `pkg/telemetry/tracer.go`（Tracer 接口，原 `pkg/tunnel/tracing`）、`ext/otel/tracer.go`（适配器 New(t oteltrace.Tracer)）、`go.work` 已含、`cmd/sproxy/go.mod`/`cmd/sclient/go.mod` 未 require | 核心 `Tracer` = StartSpan/Inject；slog 日志层已带 trace_id/span_id（telemetry.WithContextHandler）；ext/otel 目前无 exporter 依赖 |
 | 审计 UI | `pkg/server/audit.go`（RecordAudit→JSON stdout）、`handlers.go:458-461`（auditLogger 创建，默认 JSON stdout）、`web/static/index.html`（stats-modal 3 tab：统计/配置/Hub） | 录入点单点（RecordAudit）；Web 已有 tab 模式可复用；api/index.js 6 命名空间工厂 |
@@ -139,25 +178,43 @@ handler 黑盒（审计动作后查得到、无认证 401、**non-auth 直连 lo
 
 **验证**：`go test -race ./pkg/server/...`、`make web-test`（node --check 全部 JS + upload 回归）、浏览器手测（审计 tab 拉取）。
 
-### 任务 4：AK 轮换（PR-D，SIGHUP 重载 + API + KeyRing + hub 准入同步）
+### 任务 4：AK 轮换（PR-D，SIGHUP 重载 + 管理 API + 凭据 Ring/Store + hub 共用）
 
-**设计**（最大，拆分 2 个 submit-commit 顺序合并，但 1 个 PR 保证"新 key 可 HTTP 面 + hub 注册"一致性）：
-- **KeyRing**（`pkg/server/keyring.go` 新）：内存 `map[ak]→KeyEntry{Secret, Mesh, AddedAt, ExpireAt, state}` + RWMutex；
-  每 mesh 上限（默认 8）、ttl 上限（默认 30d）；Add/Lookup/Expire/Delete/Snapshot/Len。
-- **verifySproxySig 合并查询**（`pkg/server/auth.go`）：先线性遍历静态 `cfg.AccessKeys`，未命中查 `h.keyring.Lookup`；
-  keyring 命中用其 Secret/mesh；旧 key 保留过渡期间仍验签。
+**设计**（最大，拆分 2 个 submit-commit 顺序合并，1 个 PR 保证"新 key 可 HTTP 面 + hub 注册"一致性）
+**（2026-09-05 修订：原始 keyring.go + hub.SetAccessKeys 方案已废弃，见「凭据域现状更新」）**：
+
+- **凭据 Ring/Store 已就绪**：`pkg/accesskey.Ring`（AK→多 SK 权威表，rotate/expire/delete 动态生效）
+  + `pkg/server/credentialstore.go` `CredentialStore`（`<tenant>/meta/credentials.json` 持久化恢复）。
+  本轮聚焦：`PostBoot`/管理 API 的 rotate/expire/delete 写路径落地到 Ring，并经 `Ring.Snapshot()`
+  → `CredentialStore.Save` 持久化。
+- **verifySproxySig 合并查询**（`pkg/server/auth.go`）：静态 `cfg.AccessKeys` + 动态 Ring **已统一为
+  共享 `*accesskey.Ring` 单一事实源**（静态由 `NewRingFromKeyPairs` 导入，动态由 API 写入 Ring）；
+  验签先用 `Ring.CoreEntry(ak)` 取存活条目（含过渡期多 SK 共存），无需再分静态/动态两路。
 - **管理端点**（主 mux + authMiddleware 保护；调用方须是 active key 且 mesh 一致）：
-  - `POST /api/access_keys/rotate {mesh, ttl}` → 服务端 crypto/rand 生成 AK=`sk[-<mesh>]-<16hex>`/SK=32B hex（可参考 cmd/sclient generateAccessKeyPair 逻辑），返回一次明文 SK（唯一一次）。
-  - `GET /api/access_keys` → 列表。
-  - `POST /api/access_keys/{ak}/expire {until}` / `DELETE /api/access_keys/{ak}?force=`（仅 expiring 可删，`--force` 强制）。
+  - `POST /api/access_keys/rotate {mesh, ttl}` → crypto/rand 生成 AK=`sk[-<mesh>]-<16hex>`/SK=32B hex
+    （可复用 `newAnonymousKey`/client 生成逻辑），`Ring.UpsertAK + AddKey`，落 `CredentialStore.Save`，
+    返回一次明文 SK（唯一一次）。
+  - `GET /api/access_keys` → `Ring.Snapshot` 列表。
+  - `POST /api/access_keys/{ak}/expire {until}` → `Ring.ExpireKey`（零值=恢复永久）/ `DELETE
+    /api/access_keys/{ak}?force=` → `Ring.DeleteAK`（仅 expiring 可删，`--force` 强制）。
   - 全部 `RecordAudit`（action=access_key_rotate/expire/delete）。
-- **hub.Authenticator 动态化**（`pkg/tunnel/hub/auth.go`）：加 `mu sync.RWMutex` + `SetAccessKeys([]AccessKey)`；`Authenticate` 读锁。
-- **SIGHUP 重载**（`cmd/sproxy/root.go`）：`handleSighup` 增加 access_keys 对比——变更时 Store cfgPtr + 更新 keyring + `authenticator.SetAccessKeys(...)`；删除/修改"access_keys 修改需重启"的 Warn（改为 Info 生效）。同时更新 `CLAUDE.md` 的 SIGHUP 重载范围说明。
-- **sclient**：`cmd/sclient/access_key.go` 加 `rotate/expire/delete/list` 子命令；`pkg/client/accesskey.go`（新）领域 API `RotateAccessKey/ListAccessKeys/ExpireAccessKey/DeleteAccessKey`（走 coreRequest 签名）。
-- **cmd/sproxy/root.go 装配**：创建 keyring → 注入 `h.SetKeyRing`（如需要）→ keyring Snapshot 更新回调挂到 Authenticator.SetAccessKeys。
+- **hub.Authenticator 共用 Ring**（`pkg/tunnel/hub/auth.go`）：**已实现**——`Authenticator` 持
+  `*accesskey.Ring` 并通过 `ring.CoreEntry(ak)` 取条目，rotate/expire **动态对 HTTP 面与 hub 面
+  同时生效**，无需 SetAccessKeys/RWMutex。
+- **SIGHUP 重载**（`cmd/sproxy/root.go`）：`handleSighup` 增加 access_keys 对比——变更时将静态
+  `access_keys` 经 `accesskey.NewRingFromKeyPairs` 重建并原子 `Ring.Replace`（保动态条目）+ 落
+  `CredentialStore.Save`（若引入静态合并语义）；删除/修改"access_keys 修改需重启"的 Warn（改为
+  Info 生效）。同时更新 `CLAUDE.md` 的 SIGHUP 重载范围说明。
+- **sclient**：`cmd/sclient/access_key.go` 加 `rotate/expire/delete/list` 子命令；
+  `pkg/client/accesskey.go`（新）领域 API `RotateAccessKey/ListAccessKeys/ExpireAccessKey/DeleteAccessKey`
+  （走 coreRequest 签名）。
+- **cmd/sproxy/root.go 装配**：管理 API 写路径注入 Ring → 变更后 `Ring.Snapshot()` →
+  `CredentialStore.Save`；启动 `BootstrapServerCredentials` 已 Load+Replace 恢复。
 
-**TDD 测试**：KeyRing 表驱动（非法 SK/重复/上限/Expire 不存在/Delete 未过期拒绝/Snapshot 排序）；并发 `-race`；
-auth 合并查询（动态 key 验签成功、旧 key 过渡访问、双 key 共存）；rotate 端点黑盒（active key 签名成功→新 key 立即访问；过期 key 401）；e2e 全链路（真实二进制 rotate→新 key 访问→hub 注册）。
+**TDD 测试**：Ring 表驱动（非法 SK/重复/上限/Expire 不存在/Delete 未过期拒绝/Snapshot 排序）——
+`pkg/accesskey/ring_test.go` 已覆盖核心，本轮补 API 写路径（rotate/expire/delete → Snapshot → store
+roundtrip）；rotate 端点黑盒（active key 签名成功→新 key 立即访问、hub 注册也成功；过期 key 401）；
+SIGHUP 变更静态 key 后旧 key 过渡 + 新 key 生效；e2e 全链路（真实二进制 rotate→新 key 访问→hub 注册）。
 
 **验证**：`go test -race ./pkg/server/... ./pkg/tunnel/hub/... ./cmd/sproxy/... ./cmd/sclient/...` + `make lint`（含子 module）+ `make build-all` + `make test-all` + `make check-loopback`。
 
@@ -220,12 +277,13 @@ func (b ByteSize) Set(s string) error           // flag.Value 接口，供 pflag
   - 任务2：sproxy 配 `tracing.otel.enabled: true` + `otlp_endpoint: http://collector:4318` → span 上报；
     未配 endpoint 仅进程内；关闭默认 slog
   - 任务3：sclient 执行 delete/rename 后 `GET /api/audit` 返回对应事件；隧道模式 404
-  - 任务4：rotate 出旧/新 key → 旧 key 请求仍 200 → expire → delete；SIGHUP 改 yaml access_keys 即时生效；hub 节点用新 key 注册成功
+  - 任务4：rotate 出旧/新 key → 旧 key 请求仍 200 → expire → delete；SIGHUP 改 yaml access_keys 即时生效；hub 节点用新 key 注册成功（HTTP 面与 hub 面共用同一 Ring，动态一致）
   - 任务5：`--max-storage-bytes 10GiB`、yaml `max_storage_bytes: 20MiB` 解析生效；日志打印 `Used: 1.2 GiB`
 
 ## 涉改文件汇总
 
-- `pkg/server/ratelimit.go`、`config_api.go`、`handlers.go`、`config.go`、`auth.go`、`audit.go`、`audit_handler.go`(新)、`keyring.go`(新)
+- `pkg/server/ratelimit.go`、`config_api.go`、`handlers.go`、`config.go`、`auth.go`、`audit.go`、`audit_handler.go`(新)、`credentialstore.go`(已在)
+- `pkg/accesskey/ring.go`、`accesskey.go`
 - `pkg/tunnel/hub/auth.go`
 - `pkg/telemetry/ext/otel/provider.go`(新)、`tracer.go`、`go.mod`、`go.sum`
 - `cmd/sproxy/root.go`、`cmd/sproxy/go.mod`、`cmd/sproxy/go.sum`
