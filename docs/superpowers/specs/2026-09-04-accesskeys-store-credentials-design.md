@@ -146,12 +146,13 @@ type Ring struct { mu sync.RWMutex; m map[string]*Key; now func() time.Time }
 
 - `NewRing(now ...func() time.Time) *Ring`
 - `UpsertAK(k *Key) error` — 覆盖 AK 条目（保留已有多 SK 条目）
-- `AddKey(ak string, e SKEntry) error` — **追加**一条 SK 条目（AK 未知→错误）
-- `DeleteAK(ak string) bool`
-- `DeleteKey(ak, entryIdx/entryID) ` — 删特定 SK 条目
-- `ExpireKey(ak string, idx, until time.Time) error` — 设某条 SK 过期
+- `AddKey(ak string, e SKEntry) error` — **追加**一条 SK 条目（AK 未知→错误）；生成 `SKEntry.ID`（`sk-<12hex>`）
+- `DeleteAK(ak string) bool` — 删除整个 AK
+- `DeleteKey(ak, skID string) error` — 删特定 SK 条目（skID 不存在→错误/404）
+- `ExpireKey(ak, skID string, until time.Time) error` — 设某条 SK 过期
 - `Lookup(ak string) ([]SKEntry, bool)` — **读取时过滤已过期条目**（now≥ExpiresAt 剔除）
 - `CoreEntry(ak string) *SKEntry` — 供信令/tunnel/renew 取当前有效主条目（最新未过期）
+- `GetEntry(ak, skID string) (*SKEntry, error)` — 按 entryID 精确取（签名 v2 校验用）
 - `Snapshot() []*Key` — 全部快照（copy，按 AK 排序）
 - `Replace(ks []Key)` / `Len()`
 
@@ -352,6 +353,8 @@ sproxy-sig/v2
 ## 13. 范围外（后续项）
 
 - **4B**：TOTP 注册/登录、Web 界面、sclient login、session SK、服务端控过期细化。
+- **账号注销（本 PR 不支持）**：普通用户无 AK 级删除入口，仅可删除自己的 SK 条目；AK（账号）删除
+  是 admin 专属 + 二次确认。完整「注销账号」流程（含 TOTP secret 清理、meta 保留策略）列为后续项。
 - **4C**：KMS/密钥管理器插件、加密静态存储、（账号存储与 meta 细节）。
 - AK 轮换（owner 延续）、SK 到期告警。
 
