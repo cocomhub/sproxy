@@ -16,7 +16,8 @@ const maxAuditListLimit = 500
 const defaultAuditListLimit = 100
 
 // auditResponse 是 GET /api/audit 的响应体。
-// Events 按时间倒序（最新在前）；Total 为满足过滤条件的全部条数。
+// Events 按时间倒序（最新在前）；Total 为本次返回条数（=len(events)，经 ring
+// Recent 的 limit 截断后的实际条数，非全量命中数）。
 // 事件 TS 经 Go time.Time 默认 JSON 序列化为 RFC3339Nano 字符串。
 type auditResponse struct {
 	Events []AuditEvent `json:"events"`

@@ -4,6 +4,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,38 +14,6 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
-
-// auditHandlerResponse 是 GET /api/audit 的响应结构（对齐 audit_handler.go）。
-type auditHandlerResponse struct {
-	Events []AuditEvent `json:"events"`
-	Total  int          `json:"total"`
-}
-
-// requestAudit 发起一次带 SproxySig 签名的 GET /api/audit 请求。
-func requestAudit(t *testing.T, url, query string) *http.Response {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, url+"/api/audit"+query, nil)
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	signRequest(req, testAccessKey, testAccessSecret)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET /api/audit: %v", err)
-	}
-	return resp
-}
-
-// decodeAuditResponse 解析审计响应体。
-func decodeAuditResponse(t *testing.T, resp *http.Response) auditHandlerResponse {
-	t.Helper()
-	defer resp.Body.Close()
-	var got auditHandlerResponse
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
-		t.Fatalf("decode /api/audit body: %v", err)
-	}
-	return got
-}
 
 // TestAuditHandler_ListAfterDelete 验证审计动作（delete）后经 /api/audit 可查到。
 func TestAuditHandler_ListAfterDelete(t *testing.T) {
@@ -234,7 +203,9 @@ func TestAuditHandler_LocalMuxNotRegistered(t *testing.T) {
 }
 
 // TestAuditHandler_DisabledRingReturnsEmpty 验证 buffer_size=0（ring 禁用）时
-// /api/audit 返回 200 + 空 events + total 0（不 404）。
+// /api/audit 返回 200 + 空 events（非 null）+ total 0（不 404）。
+// 同时验证 events 序列化为 [] 而非 null：两条关闭路径（ring nil 显式 []AuditEvent{}
+// 与 ring 空 Recent 返回 []）都不得弹出 null。
 func TestAuditHandler_DisabledRingReturnsEmpty(t *testing.T) {
 	url, _, _ := newAuditTestServer(t, func(cfg *Config) {
 		cfg.Audit.BufferSize = 0 // 显式关闭 ring
@@ -244,18 +215,87 @@ func TestAuditHandler_DisabledRingReturnsEmpty(t *testing.T) {
 	if gresp.StatusCode != http.StatusOK {
 		t.Fatalf("禁用 ring 应 200, got %d", gresp.StatusCode)
 	}
-	if got.Total != 0 || len(got.Events) != 0 {
-		t.Fatalf("禁用 ring 应 events=[] total=0, got %+v", got)
+	if got.Total != 0 {
+		t.Fatalf("禁用 ring 应 total=0, got %d", got.Total)
+	}
+	if got.Events == nil {
+		t.Fatal("禁用 ring 的 events 应为非 nil 空数组（序列化为 [] 而非 null）")
+	}
+	if len(got.Events) != 0 {
+		t.Fatalf("禁用 ring 应 events 为空, got %+v", got.Events)
+	}
+
+	// 防 JSON null 弹出：原始 body 不得含裸 null 值且 events 键必须序列化成 []。
+	// 通过 RawMessage 解析原始 body 核对 events 字段字面量。
+	rawBody := readAuditRawBody(t, http.StatusOK, url, "")
+	if !json.Valid(rawBody) {
+		t.Fatalf("响应体非法 JSON: %s", rawBody)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &m); err != nil {
+		t.Fatalf("解析原始响应体: %v", err)
+	}
+	if string(m["events"]) != "[]" {
+		t.Fatalf("events 原始字面量 = %s, want []（不得为 null）", m["events"])
 	}
 }
 
-// TestAuditHandler_ConfigBufferSize 验证 SetDefaults 默认 2048（默认启用 ring）。
+// TestAuditHandler_ConfigBufferSize 验证默认启用语义：Default()+SetDefaults 保持
+// 2048（默认启用 ring）；&Config{}+SetDefaults 时 BufferSize 保持 0（不被复活）——
+// 显式 0 = 关闭必须可达（加载链 Default→Unmarshal→SetDefaults 不得把 0 改回 2048）。
 func TestAuditHandler_ConfigBufferSize(t *testing.T) {
+	// 默认加载路径：Default() 已含 Audit.BufferSize=2048，SetDefaults 不改变它。
 	cfg := Default()
 	cfg.SetDefaults()
 	if cfg.Audit.BufferSize != 2048 {
 		t.Fatalf("默认 Audit.BufferSize = %d, want 2048", cfg.Audit.BufferSize)
 	}
+	// 显式 0 关闭：&Config{}+SetDefaults 必须保持 0（SetDefaults 禁止复活 0 → 2048）。
+	empty := &Config{}
+	empty.SetDefaults()
+	if empty.Audit.BufferSize != 0 {
+		t.Fatalf("&Config{}+SetDefaults 的 BufferSize = %d, want 0（显式 0=关闭 不可被复活）", empty.Audit.BufferSize)
+	}
+}
+
+// TestAuditHandler_LoadFromProviderBufferSize 验证加载级语义：
+//   - 显式 audit.buffer_size=0 → 解析为 0（0=关闭可达，且 Validate 不报错）；
+//   - 空 map 加载 → 默认 2048。
+func TestAuditHandler_LoadFromProviderBufferSize(t *testing.T) {
+	// 显式 0 关闭：LoadFromProvider 全链（Default→Unmarshal→SetDefaults→Validate）后
+	// BufferSize 必须保持 0。
+	disabled, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"audit": map[string]any{"buffer_size": 0},
+	}})
+	if err != nil {
+		t.Fatalf("audit.buffer_size=0 应合法（Validate 不报错）: %v", err)
+	}
+	if disabled.Audit.BufferSize != 0 {
+		t.Fatalf("audit.buffer_size=0 解析后 = %d, want 0（0=关闭 不可被 SetDefaults 复活）", disabled.Audit.BufferSize)
+	}
+	// 默认加载：空 map → 默认 2048。
+	def, err := LoadFromProvider(mapProvider{m: map[string]any{}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider(空): %v", err)
+	}
+	if def.Audit.BufferSize != 2048 {
+		t.Fatalf("默认加载 BufferSize = %d, want 2048", def.Audit.BufferSize)
+	}
+}
+
+// readAuditRawBody 复用 requestAudit 取原始 body 字节（不解析结构）。
+func readAuditRawBody(t *testing.T, wantStatus int, url, query string) []byte {
+	t.Helper()
+	resp := requestAudit(t, url, query)
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, wantStatus)
+	}
+	buf := new(bytes.Buffer)
+	if _, err := buf.ReadFrom(resp.Body); err != nil {
+		t.Fatalf("读取 body: %v", err)
+	}
+	return buf.Bytes()
 }
 
 // TestAuditHandler_ConfigValidateNegative 验证 Audit.BufferSize 为负被 Validate 拒绝。

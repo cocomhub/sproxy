@@ -141,6 +141,32 @@ func auditLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	return lines
 }
 
+// requestAudit 发起一次带 SproxySig 签名的 GET /api/audit 请求（audit_handler 黑盒）。
+func requestAudit(t *testing.T, url, query string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url+"/api/audit"+query, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	signRequest(req, testAccessKey, testAccessSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/audit: %v", err)
+	}
+	return resp
+}
+
+// decodeAuditResponse 解析审计响应体（复用生产 auditResponse 类型）。
+func decodeAuditResponse(t *testing.T, resp *http.Response) auditResponse {
+	t.Helper()
+	defer resp.Body.Close()
+	var got auditResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode /api/audit body: %v", err)
+	}
+	return got
+}
+
 // findAudit 返回第一个 action 匹配的审计行。
 func findAudit(t *testing.T, buf *bytes.Buffer, action string) map[string]any {
 	t.Helper()

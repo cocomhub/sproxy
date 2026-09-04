@@ -489,6 +489,17 @@ async function downloadDirArchive(dirPath) {
 }
 
 // --- 监控 ---
+// statsRefresh 刷新当前活动监控 tab：读激活的 .stats-tab id，按活动 tab 刷新
+// （审计 tab 在 tunnel/无凭据场景刷不到实时操作，但保持「刷新=重拉当前视图」语义统一）。
+// 复用 switchStatsTab 的重载语义（showAudit/showStats），不改 switchStatsTab 内部实现。
+function statsRefresh() {
+  const active = document.querySelector('.stats-tab.active');
+  const id = active ? active.id : 'stats-tab';
+  const tab = id.replace('-tab', '');
+  if (tab === 'audit') { switchStatsTab('audit'); } else { showStats(); }
+}
+
+// showStats 打开监控弹窗并默认展示 stats tab。
 async function showStats() {
   document.getElementById('stats-modal').style.display = 'flex';
   switchStatsTab('stats');
@@ -551,20 +562,17 @@ function hubTableHtml(nodes, stats) { return appRender.hubTableHtml(nodes, stats
 
 // --- 审计日志查看 ---
 // showAudit 拉取最近审计事件并渲染到 #audit-panel。direct 模式（配 AK/SK 走
-// SproxySig）可访问；tunnel 模式 /tunnel 转发命中 localMux 无 /api/audit → 404，
-// 渲染"仅 direct 模式可用"占位（前端 catch）。
+// SproxySig）可访问；tunnel 模式经 /tunnel 转发命中 localMux 无 /api/audit → 404，
+// coreRequest 对 !ok 响应 throw（E_SERVER），catch 分支渲染中性占位提示仅 direct
+// 模式可用（不区分 404/其他失败——保持最小提示，不把错误细节当用户可操作信息）。
 async function showAudit() {
   document.getElementById('audit-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
     const data = await sc.audit.list({ limit: 200 });
-    if (data && data.status === 404) {
-      document.getElementById('audit-panel').innerHTML = '<div class="empty-msg">审计 API 仅 direct 模式可用（当前经隧道访问，/api/audit 未注册隧道内层）</div>';
-      return;
-    }
     const events = (data && data.events) || [];
     document.getElementById('audit-panel').innerHTML = auditTableHtml(events);
   } catch (e) {
-    document.getElementById('audit-panel').innerHTML = '<div style="color:var(--text-danger);padding:12px;">审计加载失败: ' + e.message + '</div>';
+    document.getElementById('audit-panel').innerHTML = '<div class="empty-msg">审计 API 仅 direct 模式可用（当前经隧道访问，/api/audit 未注册隧道内层）</div>';
   }
 }
 
@@ -1862,7 +1870,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // 监控弹窗
   document.getElementById('stats-close-btn').addEventListener('click', hideStats);
-  document.getElementById('stats-refresh-btn').addEventListener('click', showStats);
+  document.getElementById('stats-refresh-btn').addEventListener('click', statsRefresh);
   document.getElementById('stats-close-modal-btn').addEventListener('click', hideStats);
   // 监控弹窗标签页切换
   document.getElementById('stats-tab').addEventListener('click', function() { switchStatsTab('stats'); });

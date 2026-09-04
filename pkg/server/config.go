@@ -498,11 +498,10 @@ func (c *Config) SetDefaults() {
 	if c.Hub.Federation.Timeout <= 0 {
 		c.Hub.Federation.Timeout = 10 * time.Second
 	}
-	// audit.buffer_size：0 表示「未显式配置」，按 ==0 填默认 2048（默认启用 ring）；
-	// 显式 0 关闭由 Validate 之外的自定义语义处理——SetDefaults 只保证 0 有默认值。
-	if c.Audit.BufferSize == 0 {
-		c.Audit.BufferSize = 2048
-	}
+	// audit.buffer_size 默认由 Default() 提供（2048）。此处**不**用 ==0 复活默认——
+	// 加载链是 Default()（含 2048）→ Unmarshal → SetDefaults()，若这里有 ==0→2048，
+	// 用户显式写的 audit.buffer_size: 0（=关闭）会被改回 2048，「0=关闭」不可达。
+	// 装配侧（RegisterRoutes）按 >0 判断天然把 0 视为关闭，SetDefaults 无需兜底。
 }
 
 // Validate 校验配置合理性。
