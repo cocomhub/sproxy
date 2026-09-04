@@ -66,7 +66,7 @@ func TestTCPRelay_NoWS_RelayDial(t *testing.T) {
 		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	rt := hub.NewMeshRouteTable()
-	hs := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: ak, Secret: sk}}), testutil.DiscardLogger())
+	hs := hub.NewHubServer(rt, hub.NewAuthenticator(hub.NewRingFromAccessKeys([]hub.AccessKey{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +214,7 @@ func TestTCPRelay_NoWS_ConcurrentRelayDial(t *testing.T) {
 		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	rt := hub.NewMeshRouteTable()
-	hs := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: ak, Secret: sk}}), testutil.DiscardLogger())
+	hs := hub.NewHubServer(rt, hub.NewAuthenticator(hub.NewRingFromAccessKeys([]hub.AccessKey{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -26,8 +26,8 @@ const (
 // startHubTCP 启动一个仅裸 TCP 传输的 hub（无 WS），返回 hub 地址与路由表。
 func startHubTCP(t *testing.T, ctx context.Context, aks []hub.AccessKey) (*hub.MeshRouteTable, string) {
 	t.Helper()
+	auth := hub.NewAuthenticator(hub.NewRingFromAccessKeys(aks))
 	rt := hub.NewMeshRouteTable()
-	auth := hub.NewAuthenticator(aks)
 	hs := hub.NewHubServer(rt, auth, testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
@@ -287,7 +287,7 @@ func TestHubTCP_AcceptCtxCancel(t *testing.T) {
 	defer cancel()
 
 	rt := hub.NewMeshRouteTable()
-	hs := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testAccessKeySecret}}), testutil.DiscardLogger())
+	hs := hub.NewHubServer(rt, hub.NewAuthenticator(hub.NewRingFromAccessKeys([]hub.AccessKey{{Key: testAccessKey, Secret: testAccessKeySecret}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -176,15 +175,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 			}
 		}
 		// 节点注册准入：SproxySig AccessKey + HMAC proof（共享 token 已废除）。
-		// hub 准入凭据来自凭据 Ring（取代 cfg.AccessKeys），从 ring.Snapshot 生成
-		// []hub.AccessKey（hub.NewAuthenticator 签名不改，任务 4 才收 Ring）。
-		hubKeys := make([]hub.AccessKey, 0, credRing.Len())
-		for _, k := range credRing.Snapshot() {
-			if e := credRing.CoreEntry(k.AK); e != nil {
-				hubKeys = append(hubKeys, hub.AccessKey{Key: k.AK, Secret: hex.EncodeToString(e.SK)})
-			}
-		}
-		hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(hubKeys), logger.With("component", "hub"), cfg.Hub.MaxConnections)
+		// hub 与 HTTP 面共用同一个凭据 Ring（credRing，单一事实源）：
+		// rotate / 过期在 ring 上动态生效，无需在 hub 侧做任何同步。
+		hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(credRing), logger.With("component", "hub"), cfg.Hub.MaxConnections)
 		// 虚拟 IP 分配：按 hub.virtual_subnet 配置的子网构建分配器（默认 CGNAT
 		// 100.64.0.0/10，config.Validate 已保证 IPv4）。分配权在 hub，节点不可自选。
 		// S-5：防御兜底同时覆盖非法 CIDR 与 IPv6（NewHubAllocator 对非 IPv4 panic，

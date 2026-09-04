@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -509,7 +510,7 @@ func NewHubServer(rt *MeshRouteTable, auth *Authenticator, logger *slog.Logger, 
 		logger = slog.Default()
 	}
 	if auth == nil {
-		auth = NewAuthenticator(nil)
+		auth = NewAuthenticator(accesskey.NewRing())
 	}
 	s := &HubServer{rt: rt, auth: auth, logger: logger, allocator: NewHubAllocator(DefaultHubAllocatorSubnet())}
 	s.rt.SetVIPRelease(func(mesh string, id NodeID) {
