@@ -526,8 +526,10 @@ function switchStatsTab(tab) {
   document.getElementById('hub-panel').style.display = tab === 'hub' ? 'block' : 'none';
   document.getElementById('audit-panel').style.display = tab === 'audit' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
-    el.style.borderBottomColor = el.id === tab + '-tab' ? 'var(--tab-active)' : 'transparent';
-    el.style.color = el.id === tab + '-tab' ? 'var(--text-primary)' : 'var(--text-secondary)';
+    const on = el.id === tab + '-tab';
+    el.classList.toggle('active', on);
+    el.style.borderBottomColor = on ? 'var(--tab-active)' : 'transparent';
+    el.style.color = on ? 'var(--text-primary)' : 'var(--text-secondary)';
   });
   if (tab === 'config') showConfig();
   if (tab === 'hub') showHub();
