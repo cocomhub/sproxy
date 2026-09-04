@@ -57,6 +57,23 @@ func ActorFrom(ctx context.Context) string {
 	return actor
 }
 
+// entryIDCtxKey 是请求 ctx 中「签名命中的 SK 条目 ID」的私有 key 类型。
+type entryIDCtxKey struct{}
+
+// withEntryID 把 SproxySig 验签命中的 SK 条目 ID 写入请求 ctx。
+// authMiddleware 在验签成功后填写（见 verifySproxySigFromRing）；供凭据管理端点
+// （renew）识别「调用方用哪条 SK 签名」，以该条目 SK 作 wrap key——保证调用方
+// 回放旧 SK 重复 renew 时仍能解开返回的信封（不断盲盒）。
+func withEntryID(ctx context.Context, entryID string) context.Context {
+	return context.WithValue(ctx, entryIDCtxKey{}, entryID)
+}
+
+// EntryIDFrom 返回请求 ctx 中的签名命中条目 ID（未设置时返回 ""）。
+func EntryIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(entryIDCtxKey{}).(string)
+	return id
+}
+
 // APIKey 表示一个 API 密钥及其权限。
 type APIKey struct {
 	Name       string `yaml:"name" mapstructure:"name"`
@@ -179,11 +196,15 @@ func drainAndVerifyBody(r *http.Request) error {
 	return err
 }
 
-// verifiedCredential 是 SproxySig 验签命中的凭据（AK + 匹配条目的 SK + mesh）。
+// verifiedCredential 是 SproxySig 验签命中的凭据（AK + 匹配条目的 SK + mesh + 条目 ID）。
 type verifiedCredential struct {
 	ak     string
 	secret []byte // 命中 SK 条目的 32B 密钥字节（HKDF / 隧道派生用）
 	mesh   string
+	// entryID 是这次验签**实际命中**的 SK 条目 ID。带着该 ID 的请求（客户端显式
+	// sk=<entryID>）精确命中对应条目；无 entryID 的请求在若干 alive 条目中试签、
+	// 命中后记录该条目的 ID。供 renew 等端点识别调用方的 wrap key（用命中条目 SK）。
+	entryID string
 }
 
 // skHex 返回 SK 条目的 64-hex 表示（SproxySig HMAC 与 DeriveTunnelKey 都以 64-hex
@@ -221,6 +242,7 @@ func (h *Handlers) verifySproxySigFromRing(w http.ResponseWriter, r *http.Reques
 	query := r.URL.RawQuery
 
 	var secret []byte
+	var entryID string
 	// bodyValidator 在读到 EOF 时比对哈希（防 body 篡改）。
 	defer func() { r.Body = io.NopCloser(sproxysig.NewBodyValidator(r.Body, hdr.BodySHA256)) }()
 
@@ -237,6 +259,7 @@ func (h *Handlers) verifySproxySigFromRing(w http.ResponseWriter, r *http.Reques
 			return nil, false
 		}
 		secret = entry.SK
+		entryID = hdr.EntryID
 	} else {
 		entries, ok := ring.Lookup(hdr.AK)
 		if !ok || len(entries) == 0 {
@@ -250,6 +273,7 @@ func (h *Handlers) verifySproxySigFromRing(w http.ResponseWriter, r *http.Reques
 			if verr := sproxysig.Verify(skHex(e.SK), hdr, method, path, query, time.Now(), 0, 0, nil); verr == nil {
 				matched = true
 				secret = e.SK
+				entryID = e.ID
 				break
 			}
 		}
@@ -265,7 +289,7 @@ func (h *Handlers) verifySproxySigFromRing(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	return &verifiedCredential{ak: hdr.AK, secret: secret, mesh: accesskey.ParseMesh(hdr.AK)}, true
+	return &verifiedCredential{ak: hdr.AK, secret: secret, mesh: accesskey.ParseMesh(hdr.AK), entryID: entryID}, true
 }
 
 // isLoopbackRemote 判断请求来源是否为 loopback（127.0.0.1 / ::1 / localhost）。
@@ -350,6 +374,9 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// 阶段6-B：操作主体（AK）写入 ctx 与响应包装器，供敏感 handler 审计
 		// （RecordAudit 自动读取）与 requestLogMiddleware 的 actor 字段使用。
 		r = r.WithContext(withActor(r.Context(), cred.ak))
+		// 任务 5：签名命中的 SK 条目 ID 写入 ctx，供 renew 等端点作 wrap key 亲缘性
+		// （用调用方签名命中的条目 SK 包裹新 SK，回放旧 SK 重复 renew 不断盲盒）。
+		r = r.WithContext(withEntryID(r.Context(), cred.entryID))
 		setResponseActor(w, cred.ak)
 		// I-3：bodyValidator 只在读到 io.EOF 时比对哈希，而 JSON 端点用
 		// json.Decoder、上传用 ParseMultipartForm 都不读到 EOF，哈希比对永不触发。

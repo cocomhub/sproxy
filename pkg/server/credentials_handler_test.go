@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -70,6 +72,25 @@ func signedDelete(t *testing.T, url, ak, sk string) (int, []byte) {
 	return doSignedJSON(t, http.MethodDelete, url, ak, sk, nil)
 }
 
+// testWrapKey 复算调用方侧 wrap 信封密钥（与生产 credentialWrapKey 同一拼法：
+// context = credentialWrapContext[#mesh]）。mesh 传调用方 AK 派生值（测试 AK 为
+// sk-test-mesh-... 时非空——覆盖 mesh 纳入派生）。
+func testWrapKey(t *testing.T, sk []byte, ak, mesh string) []byte {
+	t.Helper()
+	if mesh == "" {
+		mesh = accesskey.ParseMesh(ak)
+	}
+	ctx := credentialWrapContext
+	if mesh != "" {
+		ctx = credentialWrapContext + "#" + mesh
+	}
+	k, err := accesskey.DeriveWrapKey(sk, ak, ctx)
+	if err != nil {
+		t.Fatalf("DeriveWrapKey: %v", err)
+	}
+	return k
+}
+
 func mustDecodeHex(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := hex.DecodeString(s)
@@ -98,7 +119,9 @@ func credentialsRingWithAdmin(adminAK, adminSK, userAK, userSK string) *accesske
 
 // newCredentialsTestServer 启动带管理凭据的完整路由测试服务器。
 // adminAK 为空 → 只注入 user（无 admin 条目）；auditBuf 非 nil → 捕获审计日志。
-func newCredentialsTestServer(t *testing.T, adminAK, adminSK, userAK, userSK string, auditBuf *bytes.Buffer) (string, *atomic.Pointer[Config], *accesskey.Ring) {
+// storeOverride 非 nil → 替换注入的 CredentialStore（测试可注入必失败 store 验证
+// 持久化失败路径）。
+func newCredentialsTestServer(t *testing.T, adminAK, adminSK, userAK, userSK string, auditBuf *bytes.Buffer, storeOverride *CredentialStore) (string, *atomic.Pointer[Config], *accesskey.Ring) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	cfg := Default()
@@ -110,12 +133,13 @@ func newCredentialsTestServer(t *testing.T, adminAK, adminSK, userAK, userSK str
 
 	ring := credentialsRingWithAdmin(adminAK, adminSK, userAK, userSK)
 	opts := RegisterRoutesOpts{
-		Mux:            http.NewServeMux(),
-		CfgPtr:         &cfgPtr,
-		Version:        "test-version",
-		BuildAt:        "test-buildat",
-		Logger:         testLogger(),
-		CredentialRing: ring,
+		Mux:             http.NewServeMux(),
+		CfgPtr:          &cfgPtr,
+		Version:         "test-version",
+		BuildAt:         "test-buildat",
+		Logger:          testLogger(),
+		CredentialRing:  ring,
+		CredentialStore: storeOverride,
 	}
 	if auditBuf != nil {
 		opts.AuditLogger = slog.New(slog.NewJSONHandler(auditBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -156,7 +180,7 @@ func auditActions(t *testing.T, buf *bytes.Buffer, action string) []map[string]a
 // TestCredentials_Renew_Roundtrip 验证 renew 全链路：返回结构、旧 SK 解 wrap 得新 SK、
 // 新 SK 立即可用、旧 SK 仍可用（多 SK 共存）。
 func TestCredentials_Renew_Roundtrip(t *testing.T) {
-	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil)
+	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	renewURL := url + "/api/credentials/" + testAccessKey + "/renew"
 	status, body := doSignedJSON(t, http.MethodPost, renewURL, testAccessKey, testAccessSecret, map[string]any{})
@@ -189,10 +213,7 @@ func TestCredentials_Renew_Roundtrip(t *testing.T) {
 
 	// 用旧 SK 解 wrap（调用方侧派生信封密钥）得新 SK。
 	oldSK := mustDecodeHex(t, testAccessSecret)
-	wkey, err := accesskey.DeriveWrapKey(oldSK, testAccessKey, credentialWrapContext)
-	if err != nil {
-		t.Fatalf("DeriveWrapKey: %v", err)
-	}
+	wkey := testWrapKey(t, oldSK, testAccessKey, "")
 	newSK, err := accesskey.DecryptSecret(resp.WrappedSecret, wkey)
 	if err != nil {
 		t.Fatalf("用旧 SK 解 wrap 失败: %v", err)
@@ -257,7 +278,7 @@ func TestCredentials_Renew_TTLServer(t *testing.T) {
 
 // TestCredentials_SKList_OwnListing 验证本人列表含 renew 新条目（sk_id/expires 元数据）。
 func TestCredentials_SKList_OwnListing(t *testing.T) {
-	url, _, _ := newCredentialsTestServer(t, "", testAdminSecret, testAccessKey, testAccessSecret, nil)
+	url, _, _ := newCredentialsTestServer(t, "", testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	renewURL := url + "/api/credentials/" + testAccessKey + "/renew"
 	status, body := doSignedJSON(t, http.MethodPost, renewURL, testAccessKey, testAccessSecret, map[string]any{})
@@ -303,7 +324,7 @@ func TestCredentials_SKList_OwnListing(t *testing.T) {
 // SK 解不开（按 key 隔离）：admin 查看 user 列表，每条 wrapped_secret 用 user 自己 SK
 // 派生密钥可解、用 admin SK 派生密钥解不开。
 func TestCredentials_SKList_WrapKeyIsolation(t *testing.T) {
-	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil)
+	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	st, data := signedGet(t, url+"/api/credentials/"+testAccessKey+"/sk", testAdminKey, testAdminSecret)
 	if st != http.StatusOK {
@@ -322,32 +343,53 @@ func TestCredentials_SKList_WrapKeyIsolation(t *testing.T) {
 			continue
 		}
 		// 调用方（admin）SK 派生密钥 → 应解不开（按 key 隔离）。
-		adminWK, err := accesskey.DeriveWrapKey(adminSK, testAccessKey, credentialWrapContext)
-		if err != nil {
-			t.Fatalf("DeriveWrapKey(admin): %v", err)
-		}
+		adminWK := testWrapKey(t, adminSK, testAccessKey, "")
 		if _, derr := accesskey.DecryptSecret(s.WrappedSecret, adminWK); derr == nil {
 			t.Errorf("非本人条目用 admin SK 应解不开（隔离被破坏）: %s", s.SKID)
 		}
 		// 条目所有者（user）SK 派生密钥 → 应能解开。
-		userWK, err := accesskey.DeriveWrapKey(userSK, testAccessKey, credentialWrapContext)
-		if err != nil {
-			t.Fatalf("DeriveWrapKey(user): %v", err)
-		}
+		userWK := testWrapKey(t, userSK, testAccessKey, "")
 		if _, err := accesskey.DecryptSecret(s.WrappedSecret, userWK); err != nil {
 			t.Errorf("本人条目用 user SK 应能解开: %s err=%v", s.SKID, err)
 		}
 	}
 }
 
-// TestCredentials_SKList_ForbiddenForNonOwner 验证非本人非 admin 查看 SK 列表 → 404。
+// TestCredentials_SKList_ForbiddenForNonOwner 验证非本人非 admin 查看 SK 列表 → 404，
+// 且不泄漏目标 AK 的条目数据。
 func TestCredentials_SKList_ForbiddenForNonOwner(t *testing.T) {
 	akA, skA := testAccessKey, testAccessSecret
 	akB, skB := "sk-test-b-12eeb123", strings.Repeat("33", 32)
-	url, _, _ := newCredentialsTestServer(t, "", "", akA, skA, nil)
-	_ = akB
-	_ = skB
-	_ = url
+	url, _, ring := newCredentialsTestServer(t, "", "", akA, skA, nil, nil)
+	// B 的凭据必须注入服务端 Ring（与认证共享同一实例）：newCredentialsTestServer
+	// 默认只注入 admin+user(A)，否则 B 的签名请求在 authMiddleware 就 401，到不了
+	// handler 的 404 分支（测试 setup 缺陷，非产品缺陷）。
+	if err := ring.UpsertAK(akB, "user"); err != nil {
+		t.Fatalf("UpsertAK(%q): %v", akB, err)
+	}
+	if _, err := ring.AddKey(akB, mustDecodeHex(t, skB), accesskey.WithMeta(accesskey.Meta{Type: "initial"})); err != nil {
+		t.Fatalf("AddKey(akB): %v", err)
+	}
+
+	// 用户 B 用自己 AK 签名查用户 A 的 sk 列表 → 404（非本人非 admin，不泄漏存在性）。
+	st, body := signedGet(t, url+"/api/credentials/"+akA+"/sk", akB, skB)
+	if st != http.StatusNotFound {
+		t.Fatalf("B 查 A 的 sk 列表 status = %d, want 404 (body=%s)", st, body)
+	}
+	// 404 响应不得含 A 的条目数据（不泄漏）。
+	if bytes.Contains(body, []byte("sk_id")) {
+		t.Errorf("404 响应仍泄漏条目元数据: %s", body)
+	}
+	// A 自己的视图不受 B 的请求影响（A 的列表仍 200 且含 initial 条目）。
+	stA, bodyA := signedGet(t, url+"/api/credentials/"+akA+"/sk", akA, skA)
+	if stA != http.StatusOK {
+		t.Fatalf("A 本人查列表 status = %d, want 200 (body=%s)", stA, bodyA)
+	}
+	var listA skListResponse
+	decodeJSONInto(t, bodyA, &listA)
+	if listA.Total < 1 {
+		t.Fatalf("A 的列表 total = %d, want >= 1", listA.Total)
+	}
 }
 
 // ---- sk 删除 ----
@@ -358,7 +400,7 @@ func TestCredentials_SKList_ForbiddenForNonOwner(t *testing.T) {
 //   - audit 记录 credential_sk_delete。
 func TestCredentials_SKDelete(t *testing.T) {
 	var auditBuf bytes.Buffer
-	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, &auditBuf)
+	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, &auditBuf, nil)
 
 	// renew 一个条目并保留它（initial + renew 共存）；删除 renew 条目后 initial 仍可用。
 	renewURL := url + "/api/credentials/" + testAccessKey + "/renew"
@@ -409,7 +451,7 @@ func TestCredentials_SKDelete(t *testing.T) {
 //   - until 过去时间 → 该 SK 立即 401；
 //   - 其他条目仍可用。
 func TestCredentials_SKExpire(t *testing.T) {
-	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil)
+	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	// admin 列出 user 的条目找 initial 条目。
 	st, data := signedGet(t, url+"/api/credentials/"+testAccessKey+"/sk", testAdminKey, testAdminSecret)
@@ -467,15 +509,89 @@ func renewNewSKHex(t *testing.T, url, ak, oldSKHex string) string {
 	var resp renewCredentialResponse
 	decodeJSONInto(t, body, &resp)
 	oldSK := mustDecodeHex(t, oldSKHex)
-	wkey, err := accesskey.DeriveWrapKey(oldSK, ak, credentialWrapContext)
-	if err != nil {
-		t.Fatalf("DeriveWrapKey: %v", err)
-	}
+	wkey := testWrapKey(t, oldSK, ak, "")
 	newSK, err := accesskey.DecryptSecret(resp.WrappedSecret, wkey)
 	if err != nil {
 		t.Fatalf("解码新 SK: %v", err)
 	}
 	return hex.EncodeToString(newSK)
+}
+
+// TestCredentials_Renew_AfterSecondRenewOldSKReusable 验证 Important 1 的核心语义：
+// renew 的 wrap key 用「调用方签名命中的条目 SK」而非最新 CoreEntry——掉线重发的
+// 客户端（仍持上一轮旧 SK，未保存新 SK）再次 renew 时，返回的信封仍能用旧 SK 解开，
+// 不因 CoreEntry 已前移（第二轮 renew 把新条目变成 CoreEntry）而断盲盒。
+func TestCredentials_Renew_AfterSecondRenewOldSKReusable(t *testing.T) {
+	url, _, _ := newCredentialsTestServer(t, "", "", testAccessKey, testAccessSecret, nil, nil)
+	oldSK := mustDecodeHex(t, testAccessSecret)
+
+	// 第一轮 renew：命中 initial 条目 → 信封用 initial SK 包裹。oldSK 应能解出新 SK1。
+	new1 := renewNewSKHex(t, url, testAccessKey, testAccessSecret)
+	if new1 == testAccessSecret {
+		t.Fatalf("第一轮 renew 应产生新 SK，仍等于旧 SK")
+	}
+
+	// 第二轮 renew：此时 CoreEntry 已是最新 alive（SK1 条目）。但调用方仍用旧 SK 签名
+	// （无 entryID → 试签命中 initial 条目），wrap 必须用命中条目的 SK（initial）而非
+	// CoreEntry——否则新信封用 SK1 包裹，旧 SK 解不开（断盲盒）。
+	status, body := doSignedJSON(t, http.MethodPost, url+"/api/credentials/"+testAccessKey+"/renew", testAccessKey, testAccessSecret, map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("第二轮 renew status = %d (body=%s)", status, body)
+	}
+	var resp2 renewCredentialResponse
+	decodeJSONInto(t, body, &resp2)
+	if resp2.SKID == "" {
+		t.Fatalf("第二轮 renew 返回空 sk_id")
+	}
+
+	// 关键断言：用调用方仍持有的旧 SK 派生信封密钥解第二轮信封。
+	wkey := testWrapKey(t, oldSK, testAccessKey, "")
+	new2, err := accesskey.DecryptSecret(resp2.WrappedSecret, wkey)
+	if err != nil {
+		t.Fatalf("用旧 SK 解第二轮信封失败（wrap 误用最新 CoreEntry，断盲盒）: %v", err)
+	}
+	if len(new2) != 32 {
+		t.Fatalf("第二轮新 SK 长度 = %d, want 32", len(new2))
+	}
+	// 用解出的新 SK 认证立即可用。
+	st, b := signedGet(t, url+"/api/stats", testAccessKey, hex.EncodeToString(new2))
+	if st != http.StatusOK {
+		t.Fatalf("第二轮新 SK 访问 status = %d, want 200 (body=%s)", st, b)
+	}
+}
+
+// TestCredentials_PersistFailure 验证持久化失败路径（Important 2）：装配了 store 但
+// Save 失败 → renew 返回 500 + 审计 credential_persist_error + 内存态不丢（ring 已
+// 更新）。store 与产品 CredentialStore 共享同一 source-of-truth——直接用真实 store
+// 指向不可写路径注入必失败，无需引入接口替身。
+func TestCredentials_PersistFailure(t *testing.T) {
+	var auditBuf bytes.Buffer
+	// 用「目录路径上放置同名文件」制造 Save 必失败：MkdirAll(filepath.Dir(path)) 在
+	// path 的父目录是普通文件时恒失败（所有平台一致，不依赖只读权限位）。
+	base := filepath.Join(t.TempDir(), "store-block")
+	if err := os.WriteFile(base, []byte("block"), 0o600); err != nil {
+		t.Fatalf("write block file: %v", err)
+	}
+	store := NewCredentialStore(filepath.Join(base, "credentials.json"))
+	url, _, _ := newCredentialsTestServer(t, "", "", testAccessKey, testAccessSecret, &auditBuf, store)
+
+	renewURL := url + "/api/credentials/" + testAccessKey + "/renew"
+	status, body := doSignedJSON(t, http.MethodPost, renewURL, testAccessKey, testAccessSecret, map[string]any{})
+	if status != http.StatusInternalServerError {
+		t.Fatalf("Save 失败 renew status = %d, want 500 (body=%s)", status, body)
+	}
+	if bytes.Contains(body, []byte("AppData")) || bytes.Contains(body, []byte("\\\\")) {
+		t.Errorf("500 响应不应回传含服务器路径的原始错误: %s", body)
+	}
+	// 审计 credential_persist_error 留痕。
+	if count := len(auditActions(t, &auditBuf, auditActionCredPersistFail)); count < 1 {
+		t.Fatalf("未找到 credential_persist_error 审计")
+	}
+	// 内存态不丢：ring 已追加新条目（AddKey 在 Save 之前成功）——旧 SK 仍可用。
+	st, _ := signedGet(t, url+"/api/stats", testAccessKey, testAccessSecret)
+	if st != http.StatusOK {
+		t.Fatalf("Save 失败后旧 SK 访问 status = %d, want 200（内存态未丢）", st)
+	}
 }
 
 // ---- admin 判定边界（步骤 4 补测）----
@@ -508,7 +624,7 @@ func TestCredentials_RoleAdmin(t *testing.T) {
 
 // TestCredentials_AKList_Admin 验证 admin 全量列表返回 AK 摘要且不下发明文 SK。
 func TestCredentials_AKList_Admin(t *testing.T) {
-	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil)
+	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 	st, data := signedGet(t, url+"/api/credentials", testAdminKey, testAdminSecret)
 	if st != http.StatusOK {
 		t.Fatalf("admin 全量列表 status = %d, want 200 (body=%s)", st, data)
@@ -544,7 +660,7 @@ func TestCredentials_AKList_Admin(t *testing.T) {
 // TestCredentials_AKAdd_Admin 验证 admin 新增 AK 后新凭据立即可认证；显式 secret 单次
 // 返回。
 func TestCredentials_AKAdd_Admin(t *testing.T) {
-	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil)
+	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	newAK := "sk-new-00112233445566aabb"
 	newSK := strings.Repeat("11", 32)
@@ -570,7 +686,7 @@ func TestCredentials_AKAdd_Admin(t *testing.T) {
 // TestCredentials_AKDelete_Security 验证 DELETE /api/credentials/{ak} 全链路安全检查。
 func TestCredentials_AKDelete_Security(t *testing.T) {
 	var auditBuf bytes.Buffer
-	url, _, ring := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, &auditBuf)
+	url, _, ring := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, &auditBuf, nil)
 	target := testAccessKey
 
 	// 1. non-admin 调删除 → 403（admin-only）。
@@ -668,7 +784,7 @@ func TestCredentials_Renew_StillOwnOnlyInNoAdmin(t *testing.T) {
 
 // TestCredentials_NoAuthUnauthorized 验证主 mux（direct 面）无凭据访问凭据管理端点 401。
 func TestCredentials_NoAuthUnauthorized(t *testing.T) {
-	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil)
+	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 	req, _ := http.NewRequest(http.MethodGet, url+"/api/credentials", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -682,9 +798,52 @@ func TestCredentials_NoAuthUnauthorized(t *testing.T) {
 
 // TestCredentials_NonOwnerRenewNotFound 验证 renew 仅限本人：admin renew user 的 AK → 404。
 func TestCredentials_NonOwnerRenewNotFound(t *testing.T) {
-	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil)
+	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 	st, _ := doSignedJSON(t, http.MethodPost, url+"/api/credentials/"+testAccessKey+"/renew", testAdminKey, testAdminSecret, map[string]any{})
 	if st != http.StatusNotFound {
 		t.Fatalf("admin renew user 的 AK status = %d, want 404", st)
+	}
+}
+
+// TestCredentials_Renew_RingNil_500 验证凭据 Ring 未装配（服务端配置错误）时 renew
+// 返回 500 而非泛化的 400（Minor 6：errCredentialRingUnavailable → InternalServerError）。
+func TestCredentials_Renew_RingNil_500(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Default()
+	cfg.StorageRoot = tmpDir
+	cfg.LogLevel = "error"
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:         http.NewServeMux(),
+		CfgPtr:      &cfgPtr,
+		Version:     "v",
+		BuildAt:     "b",
+		Logger:      testLogger(),
+		AuditLogger: testLogger(),
+		// 不注入 CredentialRing → authMiddleware 无凭据时按未认证处理（401，见 auth.go
+		// handleNoCredentials）；本测试经 localMux（隧道内层）直连 handler：localMux
+		// 裸注册不经 authMiddleware，renew 命中 h.credentialRing==nil →
+		// errCredentialRingUnavailable → 500（Minor 6 目标路径）。
+	})
+	ts := httptest.NewServer(h.LocalHandler())
+	t.Cleanup(func() { ts.Close(); _ = h.Close() })
+
+	// localMux 侧（LocalHandler）无 authMiddleware → 不验 SproxySig、actor 为空；
+	// handler 的本人判定在 actor=="" 时返回 404（不泄露），因此 ring-nil 的 500 映射
+	// 无法经路由触达。直接构造 Handlers 白盒验证 renewCredentialHandler 的
+	// errCredentialRingUnavailable → 500 映射（Minor 6 目标路径）。
+	// 注意：actor 必须 == target（PathValue"ak"），否则 actor 前置检查先 404。
+	h2 := &Handlers{cfgPtr: &cfgPtr, credentialRing: nil}
+	req := httptest.NewRequest(http.MethodPost, "/api/credentials/"+testAccessKey+"/renew", nil)
+	req.SetPathValue("ak", testAccessKey)
+	req = req.WithContext(withActor(req.Context(), testAccessKey))
+	rr := httptest.NewRecorder()
+	h2.renewCredentialHandler(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("ring 未装配 renew status = %d, want 500 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(errCredentialRingUnavailable.Error())) {
+		t.Errorf("500 响应应含 %q, got %s", errCredentialRingUnavailable.Error(), rr.Body.String())
 	}
 }

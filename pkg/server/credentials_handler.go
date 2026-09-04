@@ -39,10 +39,23 @@ const (
 	auditActionCredPersistFail = "credential_persist_error"
 )
 
-// credentialWrapContext 是同源页面请求与管理端点共享的 wrap context 常量。
-// spec 7.4：管理端点（renew / 页面 wrap 解密）统一用该 context，保证服务端用旧 SK
-// 包裹的新 SK 能被调用方（用同一旧 SK）解开。
+// credentialWrapContext 是同源页面请求与管理端点共享的 wrap context 前缀。
+// 实际派生用 `credentialWrapContext + "#" + mesh`（mesh 为空时保持该前缀不带井号），
+// 使不同 mesh 派生不同信封密钥（spec 7.4 明令 wrapKey(旧SK, mesh)——wrap 参数绑定
+// mesh，防止跨 mesh 复用）。renew 与 sk 列表 per-key wrap 共用同一拼法，调用方用
+// 同一旧 SK 可解出自己的信封。
 const credentialWrapContext = "sproxy-credentials/v1"
+
+// credentialWrapKey 派生 wrap 信封密钥（HKDF）：context = credentialWrapContext[#mesh]。
+// 与 accesskey.DeriveWrapKey(entry.SK, ak, ctx) 联动——包裹与解开必须用同一条目 SK +
+// 同一 mesh 派生。
+func credentialWrapKey(sk []byte, ak, mesh string) ([]byte, error) {
+	ctx := credentialWrapContext
+	if mesh != "" {
+		ctx = credentialWrapContext + "#" + mesh
+	}
+	return accesskey.DeriveWrapKey(sk, ak, ctx)
+}
 
 // credentialTTLFromCfg 返回服务端控制的新 SK 条目有效期（renew 用，客户端传的 ttl 被忽略）。
 func (h *Handlers) credentialTTLFromCfg() time.Duration {
@@ -79,17 +92,10 @@ func (h *Handlers) getRole(ak string) string {
 	return "user"
 }
 
-// deriveEnvelopeKey 派生 wrap 信封密钥（HKDF-SHA256）。wrap context 用本包固定常量
-// credentialWrapContext，使管理端点与页面 wrap 解密共享同一派生参数。
-func deriveEnvelopeKey(sk []byte, ak, mesh string) ([]byte, error) {
-	return accesskey.DeriveWrapKey(sk, ak, credentialWrapContext)
-}
-
 // renewCredentialRequest 是 POST /api/credentials/{ak}/renew 的请求体（白名单）。
-type renewCredentialRequest struct {
-	// Mesh 是可选字段，用于显式指定 wrap context 覆盖（预留；默认用调用方 AK 派生）。
-	Mesh string `json:"mesh,omitempty"`
-}
+// 当前为空结构：客户端 body 传递的所有字段（含历史草案里的 ttl/mesh）都被忽略——
+// TTL 由服务端控（cfg.CredentialTTL），wrap context 恒由服务端从调用方 AK 派生 mesh。
+type renewCredentialRequest struct{}
 
 // renewCredentialResponse 是 renew 成功的响应体。
 // wrapped_secret 结构与 accesskey.WrappedSecret 的 json tag 对齐
@@ -104,18 +110,19 @@ type renewCredentialResponse struct {
 }
 
 // renewCredentialHandler 处理 POST /api/credentials/{ak}/renew——为调用方的 AK 追加
-// 一条新 SK 条目（信封加密包裹，wrap 用当前 CoreEntry 的旧 SK）。
+// 一条新 SK 条目（信封加密包裹，wrap 用「调用方签名命中的条目 SK」）。
 //
-// 语义（任务 5 裁定）：
+// 语义（任务 5 裁定 + 修复轮 1）：
 //   - 仅允许本人 AK renew（调用方 AK == 目标 AK）。
 //   - 新 SK 的有效期由服务端控制：从 cfg.CredentialTTL 读取（默认 30d），客户端 body
-//     传的 ttl 被忽略（只解析白名单字段）。
-//   - newSK = 32B crypto/rand；wrapKey = deriveEnvelopeKey(oldSK, ak, mesh)；
-//     信封 = EncryptSecret(ak, newSK, wrapKey)。调用方用自己（旧 SK）派生的同一信封
-//     密钥可解出新 SK。
+//     传的字段一律忽略（只解析白名单字段，当前无白名单字段）。
+//   - newSK = 32B crypto/rand；wrapKey = credentialWrapKey(命中条目SK, ak, mesh)；
+//     信封 = EncryptSecret(ak, newSK, wrapKey)。**wrap 用调用方本次签名命中的条目 SK
+//     （EntryIDFrom(ctx)）**——调用方回放旧 SK 重复 renew（未保存上一轮新 SK，断链自愈
+//     重发）时，命中的仍是旧条目，能解开本次信封（不断盲盒）。localMux/隧道内层无
+//     entryID → 回退 CoreEntry（最新 alive 条目；隧道内层无验签主体，不依赖亲缘性）。
 //   - 持久化：Store.Save(ring.Snapshot()) 失败 → RecordAudit(credential_persist_error)
-//   - 500（不丢内存态：ring 已更新，后续请求仍可用新 SK）。这里的 "500" 实际指保存失败
-//     时返回 HTTP 500（不丢内存态：ring 已更新，后续请求仍可用新 SK）。
+//   - 500（不丢内存态：ring 已更新，后续请求仍可用新 SK）。
 func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request) {
 	targetAK := r.PathValue("ak")
 	actor := ActorFrom(r.Context())
@@ -125,7 +132,7 @@ func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 解析 body：只取白名单字段；body 为空（无 body 请求）也允许。
+	// 解析 body：只取白名单字段（当前空，任何字段都被忽略）；body 为空也允许。
 	var req renewCredentialRequest
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
@@ -138,22 +145,30 @@ func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// mesh：优先调用方 AK 派生；body 显式 mesh 必须与派生结果一致（防跨 mesh 派生）。
 	mesh := accesskey.ParseMesh(actor)
-	if req.Mesh != "" && req.Mesh != mesh {
-		sendJSONResponse(w, map[string]any{"error": "mesh 与调用方 AK 不匹配"}, http.StatusBadRequest)
-		return
-	}
-
-	resp, err := h.renewCredential(actor, mesh, r.RemoteAddr)
+	resp, err := h.renewCredential(actor, mesh, EntryIDFrom(r.Context()), r.RemoteAddr)
 	if err != nil {
+		// 持久化失败优先单独留痕（credential_persist_error + 500）：与其他变异端点
+		// （sk 删除/过期、ak 增删）一致，且不向客户端回传含服务器路径的原始错误。
+		if errors.Is(err, errCredentialPersistFailed) {
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: auditActionCredPersistFail, ObjectType: "credential", Object: targetAK,
+				Result: AuditResultError, Detail: err.Error(),
+			})
+			sendJSONResponse(w, map[string]any{"error": "持久化失败"}, http.StatusInternalServerError)
+			return
+		}
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: auditActionCredRenew, ObjectType: "credential", Object: targetAK,
 			Result: AuditResultError, Detail: err.Error(),
 		})
 		status := http.StatusBadRequest
-		if errors.Is(err, accesskey.ErrNotFound) || errors.Is(err, accesskey.ErrExpired) {
+		switch {
+		case errors.Is(err, accesskey.ErrNotFound) || errors.Is(err, accesskey.ErrExpired):
 			status = http.StatusNotFound
+		case errors.Is(err, errCredentialRingUnavailable):
+			// 凭据 Ring 未装配是服务端配置错误（非客户端错误）→ 500。
+			status = http.StatusInternalServerError
 		}
 		sendJSONResponse(w, map[string]any{"error": err.Error()}, status)
 		return
@@ -167,24 +182,50 @@ func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request
 	sendJSONResponse(w, resp, http.StatusOK)
 }
 
+// errCredentialRingUnavailable 是「凭据 Ring 未装配」的哨兵错误（服务端配置错误，
+// renew 出错映射为 500，见 renewCredentialHandler）。
+var errCredentialRingUnavailable = errors.New("凭据 Ring 未装配")
+
+// errCredentialPersistFailed 是「凭据持久化失败」的哨兵错误（由 renewCredential
+// 在 Store.Save 失败时返回；renewCredentialHandler 据其映射为
+// credential_persist_error 审计 + 500，见该 handler）。
+var errCredentialPersistFailed = errors.New("凭据持久化失败")
+
 // renewCredential 执行 renew 的核心逻辑（含持久化），返回响应体。
-func (h *Handlers) renewCredential(ak, mesh, remoteAddr string) (renewCredentialResponse, error) {
+//
+// entryID 是调用方签名命中的 SK 条目 ID（EntryIDFrom(ctx)，localMux/隧道内层为空串）；
+// 非空时用该条目 SK 作 wrap key（取条目当前 SK，验签已证明调用方持有它）；为空回退
+// CoreEntry（最新 alive 条目，隧道内层环绕边界）。
+func (h *Handlers) renewCredential(ak, mesh, entryID, remoteAddr string) (renewCredentialResponse, error) {
 	if h.credentialRing == nil {
-		return renewCredentialResponse{}, errors.New("凭据 Ring 未装配")
+		return renewCredentialResponse{}, errCredentialRingUnavailable
 	}
 
-	// 用当前 CoreEntry 的 SK 作 wrap key：renew 语义 = 用"当前有效 SK"信封包裹新 SK。
-	core := h.credentialRing.CoreEntry(ak)
-	if core == nil {
+	// wrap SK 选择：优先签名命中的条目（有 entryID），否则回退最新 alive（CoreEntry）。
+	var wrapEntry *accesskey.SKEntry
+	if entryID != "" {
+		entry, alive, gerr := h.credentialRing.GetEntry(ak, entryID)
+		// 条目此刻可能已被并发删除/过期——GetEntry(ErrExpired/ErrNotFound) 回退 CoreEntry
+		// （验签在请求进入时已证明持有；此处属竞态窗口，回退保持可用性）。
+		if gerr == nil && alive {
+			cp := entry
+			wrapEntry = &cp
+		}
+	}
+	if wrapEntry == nil {
+		wrapEntry = h.credentialRing.CoreEntry(ak)
+	}
+	if wrapEntry == nil {
 		return renewCredentialResponse{}, accesskey.ErrNotFound
 	}
+	wrapSK := cloneSK(wrapEntry.SK)
 
 	newSK := make([]byte, 32)
 	if _, err := rand.Read(newSK); err != nil {
 		return renewCredentialResponse{}, fmt.Errorf("生成新 SK 失败: %w", err)
 	}
 
-	envelopeKey, err := deriveEnvelopeKey(core.SK, ak, mesh)
+	envelopeKey, err := credentialWrapKey(wrapSK, ak, mesh)
 	if err != nil {
 		return renewCredentialResponse{}, fmt.Errorf("派生信封密钥失败: %w", err)
 	}
@@ -193,11 +234,13 @@ func (h *Handlers) renewCredential(ak, mesh, remoteAddr string) (renewCredential
 		return renewCredentialResponse{}, fmt.Errorf("信封加密新 SK 失败: %w", err)
 	}
 
+	// 同一个 now：条目 ExpiresAt 与响应 expires_at 共用，消除两次 time.Now() 的毫秒漂移。
+	now := time.Now()
 	ttl := h.credentialTTLFromCfg()
 	id, err := h.credentialRing.AddKey(ak, newSK,
 		accesskey.WithKind(accesskey.KindSecretWrap),
 		accesskey.WithWrapKeyID(ak),
-		accesskey.WithExpiresAt(time.Now().Add(ttl)),
+		accesskey.WithExpiresAt(now.Add(ttl)),
 		accesskey.WithMeta(accesskey.Meta{Type: "renew", IP: remoteIP(remoteAddr)}),
 	)
 	if err != nil {
@@ -205,7 +248,9 @@ func (h *Handlers) renewCredential(ak, mesh, remoteAddr string) (renewCredential
 	}
 
 	if err := h.persistCredentials(); err != nil {
-		return renewCredentialResponse{}, err
+		// 归拢为哨兵错误，handler 端按持久化失败映射（500 + credential_persist_error），
+		// 不把含路径的原始错误回给客户端。
+		return renewCredentialResponse{}, fmt.Errorf("%w: %v", errCredentialPersistFailed, err)
 	}
 
 	return renewCredentialResponse{
@@ -213,9 +258,14 @@ func (h *Handlers) renewCredential(ak, mesh, remoteAddr string) (renewCredential
 		SKID:          id,
 		Kind:          envelope.Kind,
 		WrapKeyAK:     envelope.WrapKeyID,
-		ExpiresAt:     time.Now().Add(ttl),
+		ExpiresAt:     now.Add(ttl),
 		WrappedSecret: envelope,
 	}, nil
+}
+
+// cloneSK 复制 SK 字节（renew 取 wrap 条目后可能被并发的 AddKey 重排，复制避免竞态）。
+func cloneSK(sk []byte) []byte {
+	return append([]byte(nil), sk...)
 }
 
 // persistCredentials 把 ring 快照持久化到 credentialStore（Save 已原子）。
@@ -302,7 +352,7 @@ func (h *Handlers) skListHandler(w http.ResponseWriter, r *http.Request) {
 			MetaType: e.Meta.Type,
 		}
 		// per-key wrap：用该条目的 SK 作 wrap key（不依赖调用方持有的旧 SK）。
-		if wk, err := deriveEnvelopeKey(e.SK, targetAK, mesh); err == nil {
+		if wk, err := credentialWrapKey(e.SK, targetAK, mesh); err == nil {
 			if env, err := accesskey.EncryptSecret(targetAK, e.SK, wk); err == nil {
 				s.WrappedSecret = env
 			}
@@ -503,10 +553,10 @@ func (h *Handlers) akAddHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, MaxCredentialsBodyBytes)
 	var req akAddRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"error": credentialBodyDecodeError(err)}, http.StatusBadRequest)
 		return
 	}
 	if err := drainAndVerifyBody(r); err != nil {
@@ -588,10 +638,10 @@ func (h *Handlers) akDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, MaxCredentialsBodyBytes)
 	var req akDeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"error": credentialBodyDecodeError(err)}, http.StatusBadRequest)
 		return
 	}
 	if err := drainAndVerifyBody(r); err != nil {
@@ -637,4 +687,23 @@ func (h *Handlers) akDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		Result: AuditResultSuccess, Detail: fmt.Sprintf("force=%v", req.Force),
 	})
 	sendJSONResponse(w, map[string]any{"success": true, "ak": targetAK}, http.StatusOK)
+}
+
+// MaxCredentialsBodyBytes 是 ak add/delete 请求体的上限（1 KiB——ak/owner/secret/
+// confirm/force 字段都很小；超限直接拒绝，避免恶意大 body）。
+const MaxCredentialsBodyBytes = 1 << 10
+
+// credentialBodyDecodeError 区分两类 JSON 解析错误信息：
+//   - 请求体超过 MaxBytesReader 上限 → 明确提示"请求体过大"（而非泛化 invalid body）；
+//   - 其余语法/类型错误 → invalid request body。
+func credentialBodyDecodeError(err error) string {
+	if err != nil && errors.Is(err, http.ErrBodyReadAfterClose) {
+		// MaxBytesReader 超限后首次读取即返回该错误——提示体量过大。
+		return "request body too large (max 1 KiB)"
+	}
+	var mbe *http.MaxBytesError
+	if errors.As(err, &mbe) {
+		return "request body too large (max 1 KiB)"
+	}
+	return "invalid request body"
 }
