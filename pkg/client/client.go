@@ -29,9 +29,9 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
-	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 )
 
@@ -110,14 +110,14 @@ type FileClient struct {
 	identity               *tunnel.Identity // 本端长时身份（P1 身份 pinning，可选）
 	peerFingerprints       []string         // 对端身份指纹 pinning 列表（可选，非空时握手 fail-closed 校验）
 	logger                 *slog.Logger
-	uploadCache            sync.Map       // key = absFilePath, value = *uploadCacheEntry
-	cacheCleanCounter      atomic.Int64   // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
-	maxCacheEntries        int            // checksum 缓存最大条目数，在 calcFileChecksum 的 Range 清理时统计并淘汰
-	cacheTTL               time.Duration  // checksum 缓存 TTL，0=使用默认值 10m
-	chainManager           *ChainManager  // 链式操作管理器，nil=不启用
-	initError              error          // WithTunnel/WithXfer 初始化错误
-	allowTransportFallback bool           // WithTransportFallback 设置后允许回退到直连模式
-	tracer                 tracing.Tracer // 追踪器，默认 tracing.New()（slog 实现）
+	uploadCache            sync.Map         // key = absFilePath, value = *uploadCacheEntry
+	cacheCleanCounter      atomic.Int64     // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
+	maxCacheEntries        int              // checksum 缓存最大条目数，在 calcFileChecksum 的 Range 清理时统计并淘汰
+	cacheTTL               time.Duration    // checksum 缓存 TTL，0=使用默认值 10m
+	chainManager           *ChainManager    // 链式操作管理器，nil=不启用
+	initError              error            // WithTunnel/WithXfer 初始化错误
+	allowTransportFallback bool             // WithTransportFallback 设置后允许回退到直连模式
+	tracer                 telemetry.Tracer // 追踪器，默认 telemetry.New()（slog 实现）
 }
 
 // NewFileClient 创建一个新的 sproxy 客户端。
@@ -137,7 +137,7 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 		httpClient:      &http.Client{Timeout: 300 * time.Second},
 		chunkSize:       size.DefaultChunkSize, // 4 MiB
 		logger:          tracingLogger(),
-		tracer:          tracing.New(),
+		tracer:          telemetry.New(),
 		maxCacheEntries: defaultMaxCacheEntries,
 		cacheTTL:        defaultCacheTTL,
 	}
@@ -148,8 +148,8 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 }
 
 // WithTracer 设置自定义 Tracer（可传 OpenTelemetry 适配，或测试用的 mock）。
-// 传入 nil 时保持默认实现（tracing.New()），避免 doRequest 中 nil 解引用。
-func WithTracer(t tracing.Tracer) Option {
+// 传入 nil 时保持默认实现（telemetry.New()），避免 doRequest 中 nil 解引用。
+func WithTracer(t telemetry.Tracer) Option {
 	return func(c *FileClient) {
 		if t != nil {
 			c.tracer = t
@@ -160,7 +160,7 @@ func WithTracer(t tracing.Tracer) Option {
 // tracingLogger 返回一个用 WithContextHandler 包装的 logger，使
 // InfoContext/DebugContext(ctx, ...) 日志自动携带 ctx 中的 trace_id/span_id。
 func tracingLogger() *slog.Logger {
-	return slog.New(tracing.WithContextHandler(slog.Default().Handler()))
+	return slog.New(telemetry.WithContextHandler(slog.Default().Handler()))
 }
 
 // WithHTTPClient 设置自定义 HTTP 客户端。
@@ -1276,7 +1276,7 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	// tracer 为 nil 时（如 WithTracer(nil)）回退到默认 slog 实现，避免 nil 解引用。
 	tracer := c.tracer
 	if tracer == nil {
-		tracer = tracing.New()
+		tracer = telemetry.New()
 	}
 	ctx2, end := tracer.StartSpan(ctx, method+" "+urlPath)
 	defer end()
@@ -1385,7 +1385,7 @@ func prehashBody(body io.Reader) (io.Reader, string, func(), error) {
 	return f, hex.EncodeToString(h.Sum(nil)), cleanup, nil
 }
 
-// httpHeaderCarrier 适配 http.Header 为 tracing.Carrier（http.Header 本身
+// httpHeaderCarrier 适配 http.Header 为 telemetry.Carrier（http.Header 本身
 // 不实现 Carrier 接口所需的 Get/Set 签名）。
 type httpHeaderCarrier struct{ h http.Header }
 

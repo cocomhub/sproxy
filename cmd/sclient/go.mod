@@ -55,6 +55,8 @@ require (
 
 replace github.com/cocomhub/sproxy => ../../
 
+replace github.com/cocomhub/sproxy/pkg/telemetry/ext/otel => ../../pkg/telemetry/ext/otel
+
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc => ../../pkg/tunnel/xfer/ext/webrtc
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/mesh => ../../pkg/tunnel/mesh

@@ -5,9 +5,9 @@ use (
 	./cmd/sclient
 	./cmd/sproxy
 	./pkg/certmgr/ext/dnspod
+	./pkg/telemetry/ext/otel
 	./pkg/tunnel/hub/ext/kad
 	./pkg/tunnel/mesh
-	./pkg/tunnel/tracing/ext/otel
 	./pkg/tunnel/xfer/ext/grpc
 	./pkg/tunnel/xfer/ext/quic
 	./pkg/tunnel/xfer/ext/webrtc

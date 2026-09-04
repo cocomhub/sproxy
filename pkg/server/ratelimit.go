@@ -6,6 +6,7 @@ package server
 import (
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"sort"
 	"sync"
@@ -153,7 +154,7 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		// 读 enabled 与 AllowIP 共用 mu（AllowIP 持锁后重读），避免数据竞争。
 		rl.mu.Lock()
 		enabled := rl.enabled
-		ip := r.RemoteAddr
+		ip := normalizeRemoteIP(r.RemoteAddr)
 		allowed := enabled && rl.allowIPLocked(ip)
 		rl.mu.Unlock()
 		if !allowed {
@@ -167,6 +168,18 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// normalizeRemoteIP 把 http.Request.RemoteAddr（"IP:port" 或裸 IP，可能是 IPv6
+// "[::1]:1234"）归一到纯 IP，作为 per-IP 令牌桶的键。
+// 去除端口是必须的：若按 "IP:port" 作键，每请求新 TCP 连接会有新端口，
+// 触达全新桶（tokens=1）→ 永远放行，全局限流永不生效（限流被静默绕过）。
+// 解析失败（罕见畸形输入）时回退原值——per-IP 桶"陌生键"仍受全局窗口兜底。
+func normalizeRemoteIP(remoteAddr string) string {
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return host
+	}
+	return remoteAddr
 }
 
 // allowIPLocked 实现 AllowIP 的加锁体（调用者必须已持有 rl.mu）。

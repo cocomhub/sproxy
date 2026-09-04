@@ -21,9 +21,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
-	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 	"github.com/cocomhub/sproxy/web"
 )
 
@@ -77,6 +77,11 @@ type Handlers struct {
 	// signalPostRL 是信令 POST 专用限流器（独立实例，与文件传输隔离配额）。
 	// 热更新时与 rateLimiter 一起更新；nil = 启动未启用或未装配 RouteTable。
 	signalPostRL *RateLimiter
+	// tracer 是服务端请求路径的可选 telemetry.Tracer（RegisterRoutesOpts.Tracer
+	// 注入；nil = 不接通，保持自生成 id 的既有行为）。非 nil 时 requestLogMiddleware
+	// 为该请求建立真实 span（trace/span id 来自 tracer），ctx 携带 core.SpanContext，
+	// WithContextHandler 自动把 trace_id/span_id 注入日志。nil = 默认 no-op。
+	tracer telemetry.Tracer
 
 	// 多租户存储布局装配（任务 4，供 P2/P3 各 handler 迁移复用）。
 	// globalRoot 是 OpenRoot 后的全局存储根（含 LAYOUT_VERSION 校验）；
@@ -448,6 +453,11 @@ type RegisterRoutesOpts struct {
 	// AuditLogger 是操作审计专用 logger（nil 时默认固定 JSON 到 stdout）。
 	// 独立于业务 Logger：格式不随 log_format 配置切换，审计行始终可机器检索。
 	AuditLogger *slog.Logger
+	// Tracer 是请求路径的可选 telemetry.Tracer（nil = 不接通，requestLogMiddleware
+	// 保持自生成 trace/span id 的既有行为；非 nil = 请求 span 由该 tracer 建立，
+	// 如 ext/otel 经 provider 装配的 OTel tracer）。由 cmd/sproxy 在
+	// telemetry.enabled=true 时注入，打通 OTel ↔ slog 日志链路。
+	Tracer telemetry.Tracer
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -459,7 +469,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	log := defaultLogger(opts.Logger)
 	// 用 WithContextHandler 包装：所有 InfoContext/DebugContext(ctx, ...) 日志
 	// 自动读取 ctx 中的 SpanContext，带上 trace_id/span_id 实现全链路追踪。
-	log = slog.New(tracing.WithContextHandler(log.Handler()))
+	log = slog.New(telemetry.WithContextHandler(log.Handler()))
 
 	// 审计 logger：固定 JSON 格式（不随 log_format 切换），默认写 stdout 与业务
 	// 日志同流；调用方可在 RegisterRoutesOpts.AuditLogger 注入自定义（如测试 buffer）。
@@ -497,6 +507,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		hubID:         cfg.Hub.NodeID,
 		uploadingStop: make(chan struct{}),
 		noncePool:     sproxysig.NewNoncePool(),
+		tracer:        opts.Tracer,
 	}
 	// 装配多租户存储布局：全局配额池 + 懒创建缓存 + 预创建 anonymous 租户。
 	// tenantRoots/checksumStores/uploadStores/quotaScopes 均为懒创建（首次请求时建），

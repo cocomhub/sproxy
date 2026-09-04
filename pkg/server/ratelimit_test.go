@@ -238,3 +238,50 @@ func TestRateLimiter_UpdateConfig_ConcurrentSafe(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestRateLimiter_IPPortNormalizedInBucketKey 修复 CI flaky 的回归测试：
+// per-IP 令牌桶必须按"纯 IP"而非"IP:port"作键。若按键含端口，客户端每次新
+// TCP 连接（RemoteAddr 端口变化）都触达全新桶（tokens=1）→ 永不走全局窗口，
+// 限流被静默绕过。本测试用同一 IP 不同端口连续请求，断言仍被限流。
+func TestRateLimiter_IPPortNormalizedInBucketKey(t *testing.T) {
+	t.Parallel()
+	rl := NewRateLimiter(1, time.Hour, nil) // limit=1、window=1h：per-IP 桶 1 token
+	h := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	// 同一 IP 不同端口（模拟 4 次独立 TCP 连接）：都必须落在同一 IP 桶。
+	// 正常路径：第 1 次放行，后面 3 次全 429（limit=1 且每请求消耗）。
+	for i, port := range []string{"12345", "23456", "34567", "45678"} {
+		code := sendAllowReq(t, h, "203.0.113.7:"+port, "/")
+		if i == 0 {
+			if code != http.StatusOK {
+				t.Fatalf("first req: want 200, got %d", code)
+			}
+		} else if code != http.StatusTooManyRequests {
+			t.Fatalf("req %d (port %s): want 429 (same IP bucket), got %d", i, port, code)
+		}
+	}
+}
+
+// TestNormalizeRemoteIP 覆盖 normalizeRemoteIP 的归一化矩阵。
+func TestNormalizeRemoteIP(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"192.0.2.1:8080", "192.0.2.1"},
+		{"192.0.2.1", "192.0.2.1"}, // 无端口：原样
+		{"[::1]:1234", "::1"},      // IPv6
+		{"203.0.113.9:443", "203.0.113.9"},
+		{"", ""}, // 空：原样
+	}
+	for _, tt := range tests {
+		if got := normalizeRemoteIP(tt.in); got != tt.want {
+			t.Errorf("normalizeRemoteIP(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+	// SplitHostPort 失败路径（畸形输入如 "no-colon-here"）：无端口可拆，
+	// 解析失败 → 回退原值（per-IP 桶用陌生键，仍受全局窗口兜底）。
+	if got := normalizeRemoteIP("no-colon-here"); got != "no-colon-here" {
+		t.Errorf("normalizeRemoteIP(畸形) = %q, want 原值", got)
+	}
+}

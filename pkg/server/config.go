@@ -51,6 +51,18 @@ type RateLimitConfig struct {
 	Window   time.Duration `yaml:"window" mapstructure:"window"`
 }
 
+// OTELConfig 是 OpenTelemetry SDK 装配配置（观测面，非文件功能）。
+// 默认关闭（telemetry.enabled=false）时 server 保持纯 slog 日志，零额外开销；
+// 开启时由 autoexport 按标准环境变量（OTEL_TRACES_EXPORTER /
+// OTEL_EXPORTER_OTLP_ENDPOINT 等）创建真实 exporter。OTLPEndpoint 提供
+// 配置层面的显式覆写（优先于环境变量，见 provider.NewProvider）。
+// SampleRatio 是 ParentBased(TraceIDRatioBased) 采样率，∈ (0,1]。
+type OTELConfig struct {
+	Enabled      bool    `yaml:"enabled" mapstructure:"enabled"`
+	SampleRatio  float64 `yaml:"sample_ratio" mapstructure:"sample_ratio"`
+	OTLPEndpoint string  `yaml:"otlp_endpoint" mapstructure:"otlp_endpoint"`
+}
+
 type ServerTimeouts struct {
 	ReadHeader time.Duration `yaml:"read_header" mapstructure:"read_header"`
 	Read       time.Duration `yaml:"read" mapstructure:"read"`
@@ -272,7 +284,11 @@ type Config struct {
 	MaxHeaderBytes int             `yaml:"max_header_bytes" mapstructure:"max_header_bytes"`
 	TLS            TLSConfig       `yaml:"tls" mapstructure:"tls"`
 	RateLimit      RateLimitConfig `yaml:"rate_limit" mapstructure:"rate_limit"`
-	CORS           CORSConfig      `yaml:"cors" mapstructure:"cors"`
+	// Telemetry 是 OpenTelemetry 观测装配配置（telemetry.enabled）。
+	// telemetry 是比 tracing 更广的 umbrella：当前仅 OTELConfig（trace），
+	// 命名空间为未来扩展 metric/log 观测类型预留。默认关闭。
+	Telemetry OTELConfig `yaml:"telemetry" mapstructure:"telemetry"`
+	CORS      CORSConfig `yaml:"cors" mapstructure:"cors"`
 
 	// AccessKeys 是 SproxySig 请求签名认证的 AccessKey 配置（每 mesh 一对；
 	// 替代旧 auth_token 明文 Bearer）。任一已配置即所有 HTTP 面（文件/信令/
@@ -343,6 +359,11 @@ func Default() *Config {
 		RateLimit: RateLimitConfig{
 			Requests: 10,
 			Window:   time.Second,
+		},
+		Telemetry: OTELConfig{
+			Enabled:      false,
+			SampleRatio:  1.0,
+			OTLPEndpoint: "",
 		},
 		TLS: TLSConfig{
 			Enabled: true,
@@ -562,6 +583,26 @@ func (c *Config) Validate() error {
 	}
 	if c.RateLimit.Enabled && c.RateLimit.Window <= 0 {
 		return fmt.Errorf("rate_limit.enabled=true 但 window=%s 无效，请设置大于 0 的 duration", c.RateLimit.Window)
+	}
+	// telemetry 装配校验：仅 telemetry.enabled=true 时校验采样率与显式 OTLP 端点。
+	// 采样率必须 ∈ (0,1]（ParentBased(TraceIDRatioBased) 合法输入）；显式
+	// otlp_endpoint 必须为 http(s) 且带 host（空 = 仅走标准环境变量，合法）。
+	if c.Telemetry.Enabled {
+		if c.Telemetry.SampleRatio <= 0 || c.Telemetry.SampleRatio > 1 {
+			return fmt.Errorf("telemetry.sample_ratio 必须 ∈ (0,1]，当前 %v", c.Telemetry.SampleRatio)
+		}
+		if c.Telemetry.OTLPEndpoint != "" {
+			u, perr := url.Parse(c.Telemetry.OTLPEndpoint)
+			if perr != nil {
+				return fmt.Errorf("telemetry.otlp_endpoint %q 非法: %v", c.Telemetry.OTLPEndpoint, perr)
+			}
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return fmt.Errorf("telemetry.otlp_endpoint scheme %q 无效，仅允许 http/https", u.Scheme)
+			}
+			if u.Host == "" {
+				return fmt.Errorf("telemetry.otlp_endpoint 缺少 host: %q", c.Telemetry.OTLPEndpoint)
+			}
+		}
 	}
 	if c.Hub.Enabled && !c.Hub.Transports.WS.Enabled && !c.Hub.Transports.TCP.Enabled {
 		// S42 演进：节点接入传输 = ws（挂载主 HTTP server）或 tcp（独立 raw TCP

@@ -24,8 +24,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
-	"github.com/cocomhub/sproxy/pkg/tunnel/tracing"
 )
 
 // newTestServer 启动一个临时的 httptest.Server，绑定到独立的 uploads 目录。
@@ -1729,7 +1729,7 @@ func TestTunnelInnerRequest_InheritsClientTraceID(t *testing.T) {
 	}
 
 	echoed := resp.Header.Get("Traceparent")
-	tid, sid, ok := tracing.ParseTraceparent(echoed)
+	tid, sid, ok := telemetry.ParseTraceparent(echoed)
 	if !ok {
 		t.Fatalf("inner response Traceparent = %q, invalid", echoed)
 	}
