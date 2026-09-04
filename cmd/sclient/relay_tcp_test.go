@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -59,7 +60,7 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	rt := hub.NewMeshRouteTable()
-	hs := hub.NewHubServer(rt, hub.NewAuthenticator(hub.NewRingFromAccessKeys([]hub.AccessKey{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
+	hs := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

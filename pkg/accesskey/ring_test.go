@@ -5,6 +5,7 @@ package accesskey
 
 import (
 	"bytes"
+	"encoding/hex"
 	"sort"
 	"sync"
 	"testing"
@@ -503,4 +504,48 @@ func TestRing_Concurrent(t *testing.T) {
 	wg.Wait()
 	// 全部结束后 ring 状态仍一致
 	_ = r.Snapshot()
+}
+
+// TestNewRingFromKeyPairs 验证导出的装配工厂：合法条目入 ring、非法 SK 被跳过、
+// 条目为 plain alive 且 Meta.Type="initial"、空输入得空 ring。
+func TestNewRingFromKeyPairs(t *testing.T) {
+	hex32 := hex.EncodeToString(must32BHex(t, 0xaa))
+	// 合法 AK/SK + 非法 SK（非 32 字节）→ 只有合法条目存活。
+	ring := NewRingFromKeyPairs([]KeyPair{
+		{Key: "sk-kp-test-1234567890ab", Secret: hex32},
+		{Key: "sk-kp-bad-secret", Secret: "deadbeef"},
+		{Key: "", Secret: hex32},
+	})
+	if entry := ring.CoreEntry("sk-kp-test-1234567890ab"); entry == nil {
+		t.Fatal("合法 AK/SK 应有存活条目")
+	} else {
+		if entry.Kind != KindPlain {
+			t.Fatalf("条目形态应为 plain, got %q", entry.Kind)
+		}
+		if entry.Status != StatusActive {
+			t.Fatalf("条目状态应为 active, got %q", entry.Status)
+		}
+		if entry.Meta.Type != "initial" {
+			t.Fatalf("条目 Meta.Type 应为 initial, got %q", entry.Meta.Type)
+		}
+		if entry.ExpiresAt.IsZero() == false {
+			t.Fatal("初始条目应永久有效（ExpiresAt 零值）")
+		}
+		if got := hex.EncodeToString(entry.SK); got != hex32 {
+			t.Fatalf("条目 SK 应与入参一致, got %q", got)
+		}
+	}
+	if ring.CoreEntry("sk-kp-bad-secret") != nil {
+		t.Fatal("非法 SK 条目不应进入 ring")
+	}
+	if ring.CoreEntry("") != nil {
+		t.Fatal("空 AK 条目不应进入 ring")
+	}
+	if got := ring.Snapshot(); len(got) != 1 {
+		t.Fatalf("Snapshot 应有 1 条，got %d", len(got))
+	}
+	// 空输入 → 空 ring。
+	if got := NewRingFromKeyPairs(nil).Len(); got != 0 {
+		t.Fatalf("空输入应为空 ring, got Len=%d", got)
+	}
 }

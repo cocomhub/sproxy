@@ -37,12 +37,6 @@ const RegisterProofV2Context = "sproxy-hub-register/v2"
 // 客户端与服务端时钟偏差 + 传输延迟；窗口内允许，超出拒绝。
 const registerProofMaxAge = 5 * time.Minute
 
-// AccessKey 是 hub 准入用的 SproxySig 凭据（hub 包自建，勿 import pkg/server）。
-type AccessKey struct {
-	Key    string
-	Secret string
-}
-
 // ErrInvalidAccessKey 是 AK 未命中或 accessKeys 未配置（fail-closed）时返回的哨兵错误。
 var ErrInvalidAccessKey = errors.New("invalid access key")
 
@@ -70,26 +64,6 @@ func ComputeRegisterProof(skHex, nodeID string, ts int64, nonce string) (string,
 	mac := hmac.New(sha256.New, sk)
 	fmt.Fprintf(mac, "%s\n%s\n%d\n%s", RegisterProofV2Context, nodeID, ts, nonce)
 	return hex.EncodeToString(mac.Sum(nil)), nil
-}
-
-// NewRingFromAccessKeys 是跨包（cmd/sproxy 装配 / hub_test / mesh / server /
-// cmd/sclient 测试）共用的 Ring 装配工厂：从 []AccessKey 构造 Ring
-// （每条 AK 一条 plain alive 条目）。hub 内部（package hub）测试同样可用。
-// AK 未登记或 SK 非法（非 32 字节）的条目被跳过——fail-closed 语义由
-// Authenticator 的空 ring 兜底。
-func NewRingFromAccessKeys(aks []AccessKey) *accesskey.Ring {
-	ring := accesskey.NewRing()
-	for _, k := range aks {
-		sk, err := hex.DecodeString(k.Secret)
-		if err != nil || len(sk) != 32 {
-			continue
-		}
-		if err := ring.UpsertAK(k.Key, ""); err != nil {
-			continue
-		}
-		_, _ = ring.AddKey(k.Key, sk, accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
-	}
-	return ring
 }
 
 // Authenticator 验证节点注册的 SproxySig AccessKey + HMAC proof（v2，含 ts/nonce 防重放）。

@@ -20,11 +20,11 @@ const (
 
 // testRing 构造含给定 AK/SK 对的鉴权 Ring（每条 AK 一条 plain alive 条目）。
 // 无参时回落默认 testAK/testSK 单对（与既有测试语义一致）。
-func testRing(aks ...AccessKey) *accesskey.Ring {
-	if len(aks) == 0 {
-		aks = []AccessKey{{Key: testAK, Secret: testSK}}
+func testRing(pairs ...accesskey.KeyPair) *accesskey.Ring {
+	if len(pairs) == 0 {
+		pairs = []accesskey.KeyPair{{Key: testAK, Secret: testSK}}
 	}
-	return NewRingFromAccessKeys(aks)
+	return accesskey.NewRingFromKeyPairs(pairs)
 }
 
 // testRegCred 用 testSK 为指定 nodeID 生成一次注册凭据（proof + ts + nonce）。
@@ -88,8 +88,8 @@ func TestAuthenticator(t *testing.T) {
 
 	// 多对 AK/SK：命中第二对 → 通过
 	multi := NewAuthenticator(testRing(
-		AccessKey{Key: "first-ak", Secret: testSK},
-		AccessKey{Key: testAK, Secret: testSK},
+		accesskey.KeyPair{Key: "first-ak", Secret: testSK},
+		accesskey.KeyPair{Key: testAK, Secret: testSK},
 	))
 	proof6, ts6, nonce6 := testRegCred(t, "node-a")
 	if err := multi.Authenticate(testAK, proof6, "node-a", ts6, nonce6); err != nil {
@@ -161,28 +161,6 @@ func TestAuthenticator_SharedRing(t *testing.T) {
 	proof3, ts3, nonce3 := testRegCred(t, "node-a")
 	if err := a1.Authenticate(testAK, proof3, "node-a", ts3, nonce3); !errors.Is(err, ErrInvalidAccessKey) {
 		t.Fatalf("expected ErrInvalidAccessKey after DeleteAK, got %v", err)
-	}
-}
-
-// TestNewRingFromAccessKeys 验证导出工厂：合法条目入 ring，非法 SK 被跳过。
-func TestNewRingFromAccessKeys(t *testing.T) {
-	// 合法 AK/SK + 非法 SK（非 32 字节）→ 只有合法条目存活。
-	ring := NewRingFromAccessKeys([]AccessKey{
-		{Key: testAK, Secret: testSK},
-		{Key: "bad-sk", Secret: "deadbeef"},
-	})
-	if ring.CoreEntry(testAK) == nil {
-		t.Fatal("testAK 应有存活条目")
-	}
-	if ring.CoreEntry("bad-sk") != nil {
-		t.Fatal("非法 SK 条目不应进入 ring")
-	}
-	if got := ring.Snapshot(); len(got) != 1 {
-		t.Fatalf("Snapshot 应有 1 条，got %d", len(got))
-	}
-	// 空输入 → 空 ring。
-	if got := NewRingFromAccessKeys(nil).Len(); got != 0 {
-		t.Fatalf("空输入应为空 ring, got Len=%d", got)
 	}
 }
 

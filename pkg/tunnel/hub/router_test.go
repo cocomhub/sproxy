@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/testutil/mockxfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -617,7 +618,7 @@ func TestHubServer_RegisterMeshFromAK(t *testing.T) {
 	)
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator(testRing(AccessKey{Key: akA, Secret: testSK}, AccessKey{Key: akB, Secret: testSK})), log)
+	srv := NewHubServer(rt, NewAuthenticator(testRing(accesskey.KeyPair{Key: akA, Secret: testSK}, accesskey.KeyPair{Key: akB, Secret: testSK})), log)
 
 	ackA, closeA := registerRawFrame(t, srv, meshRegFrameJSON(t, "node-a", akA))
 	defer closeA()

@@ -117,6 +117,31 @@ func newEntryID() (string, error) {
 	return "sk-" + hex.EncodeToString(b), nil
 }
 
+// KeyPair 是一对静态凭据（AK + 64-hex SK hex 字符串），用于从静态名单装配 Ring。
+// 不依赖任何上层包（hub/server），凭据域自包含。SK 必须是 32 字节（64 hex）。
+type KeyPair struct {
+	Key    string
+	Secret string // 64-hex SK（hex 编码的 32 字节）
+}
+
+// NewRingFromKeyPairs 从 []KeyPair 构造 Ring（每条 AK 一条 plain alive 条目，
+// Meta{Type:"initial"}）。SK 非 32 字节 / AK 非法（如空）的条目跳过；返回的
+// ring 可用作 http/auth 与 hub.Authenticator 的共享凭据源。
+func NewRingFromKeyPairs(pairs []KeyPair) *Ring {
+	ring := NewRing()
+	for _, k := range pairs {
+		sk, err := hex.DecodeString(k.Secret)
+		if err != nil || len(sk) != 32 {
+			continue
+		}
+		if err := ring.UpsertAK(k.Key, ""); err != nil {
+			continue
+		}
+		_, _ = ring.AddKey(k.Key, sk, WithMeta(Meta{Type: "initial"}))
+	}
+	return ring
+}
+
 // ParseMesh 从 SproxySig AccessKey 提取 mesh 段，语义与 pkg/tunnel.AccessKeyMesh
 // 一致（AK 形如 sk[-<mesh>]-<16hex>）：
 //   - sk-<mesh>-<hex>（mesh 可含连字符）→ mesh
