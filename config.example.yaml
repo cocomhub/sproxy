@@ -144,7 +144,7 @@ tls:
 #     access_key_secret: ""
 
 # Hub 中继（mesh 内网穿透，默认关闭）。
-# 节点注册准入由顶层 access_keys 提供（AK/HMAC proof 证明持有 SK，无需独立 relay_token）。
+# 节点注册准入由凭据 Ring 提供（AK/HMAC proof 证明持有 SK，无需独立 relay_token）。
 # hub:
 #   enabled: true
 #   node_id: "node-a"               # 本节点 ID（mesh connect / relay dial 的目标）
@@ -176,8 +176,8 @@ tls:
 #   # 防环说明：路径恒追加「下一跳 peer.id」（自洽，无需配置即可生效）；配置了
 #   # hub.node_id 且 federation.peers[].id 等于对端 node_id 时，额外在回源前一跳
 #   # 即拒绝（更严格）。链式深度受跳数上限约束（每跳握手预算 30s，建议 2-3 跳）。
-#   # 注意：未配置 access_keys 时（仅本地调试），联邦端点与 /api/hub/nodes 一样
-#   # 对任意请求者开放——生产务必配置 access_keys 并让双方共享同一 mesh 的凭据，
+#   # 注意：无任何凭据时（Ring 空，仅本地调试），联邦端点与 /api/hub/nodes 一样
+#   # 对任意请求者开放——生产务必登记凭据（Ring 非空）并让双方共享同一 mesh 的凭据，
 #   # 否则 peer 拉到的节点只对同名 mesh 请求者可见（fail-closed，但会看不到）。
 #   # federation:
 #   #   enabled: true
@@ -215,11 +215,12 @@ tls:
 #       enabled: false      # 裸 TCP 中继（独立 raw TCP listener，默认关闭；显式开启才生效）
 #       listen: "127.0.0.1:18084"  # TCP 监听地址（为空回落默认 127.0.0.1:18084，loopback；
 #                                  # 远程节点可达需显式配 ":18084" 或具体网卡 IP。注册准入由
-#                                  # access_keys 的 SproxySig 保证，未配置时拒绝所有注册）
+#                                  # 凭据 Ring 的 SproxySig 保证，无凭据时拒绝所有注册）
 #     # 服务端 xfer listener（阶段5 工作项1）：接收 `sclient tunnel --xfer tcp/tcp+tls --hub <addr>`
 #     # 的会话，经 mux → tunnel 解密 → 路由到本地文件 API。与 hub 中继不同，xfer listener
-#     # 不参与节点注册/VIP/DHT；握手密钥 = access_keys 首对派生（需 access_keys 非空，fail-closed）。
-#     # 注意：xfer 隧道握手的会话密钥绑定 access_keys 派生密钥（未知密钥对端首个加密帧校验失败
+#     # 不参与节点注册/VIP/DHT；握手密钥 = 凭据 Ring 首存活条目派生（取代旧 access_keys[0]，
+#     # Ring 空时 fail-closed 拒绝）。
+#     # 注意：xfer 隧道握手的会话密钥绑定凭据派生密钥（未知密钥对端首个加密帧校验失败
 #     # 被拒，非匿名 ECDH——安全红线 C-1 修复）。默认绑 loopback，远程可达须显式 listen。
 #     xfer_tls:
 #       enabled: false      # TLS xfer listener（段名即约定恒 TLS；数据面机密性 + 客户端 pin 服务端

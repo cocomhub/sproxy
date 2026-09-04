@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 
-1. CLI 旗标（`--addr`、`--storage-root`、`--tunnel-key`）
+1. CLI 旗标（`--addr`、`--storage-root`）
 2. 环境变量（前缀 `SPROXY_`，例如 `SPROXY_ADDR=":18083"`）
 3. 配置文件 YAML（`--config sproxy.yaml`，默认 `sproxy.yaml`）
 4. Default()（`pkg/server/config.go`）
@@ -61,15 +61,12 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 所有 `*_timeouts.*` 与 `*_ttl` / `window` 字段都使用 Go duration 字符串：
 `"5s"`、`"30s"`、`"5m"`、`"24h"` 等。
 
-### tunnel_key 自动生成
+### tunnel_key 已废除
 
-如果 `tunnel_key` 在配置加载后仍为空，sproxy 启动时会：
-
-1. 调用 `tunnel.GenerateKey()` 生成新密钥
-2. 通过 `server.SaveConfig` 把完整配置写回 `--config` 指定的 YAML 文件
-3. 在控制台打印 `Generated tunnel key: <hex>`，请妥善保管
-
-如果不希望 sproxy 写入配置文件，请在启动前提供 `tunnel_key`（环境变量或 YAML）。
+旧版由配置文件/环境变量提供 `tunnel_key`（64 hex）再随配置写回 YAML 的行为**已移除**：
+服务端启动不再读取或生成 `tunnel_key`。隧道密钥现在由凭据 Ring 中条目的 SK 经
+`tunnel.DeriveTunnelKey`（HKDF）自动派生——无需手动配置，也无需在客户端配置
+`tunnel_key`（该键被忽略，仅历史兼容）。
 
 ## SIGHUP 热重载
 
@@ -78,8 +75,11 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 - `log_level`
 - `log_format`
 
-其他字段（`addr`、`storage_root`、`tunnel_key`、`rate_limit`、`server_timeouts`、
-`max_header_bytes`、`access_keys`、`owner_quotas`）需要**重启进程**。SIGHUP 时会打印警告说明哪些字段未生效。
+其他字段（`addr`、`storage_root`、`owner_quotas`、`bucket_limits`、`rate_limit`、
+`server_timeouts`、`max_header_bytes`、`tls.enabled`）需要**重启进程**。SIGHUP 时会打印警告说明哪些字段未生效。
+
+凭据已 store 化（`<storage_root>/<owner>/meta/credentials.json`），不再经配置文件——
+SIGHUP 与凭据无关；轮换/管理凭据请用 `sclient trust renew` / `/api/credentials`。
 
 ## 客户端配置（sclient）
 
@@ -106,11 +106,11 @@ prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI 
 |---|---|---|---|
 | `server_url` | string | `https://127.0.0.1:18083` | sproxy 服务端地址 |
 | `timeout` | int | `300` | HTTP 客户端超时（秒） |
-| `tunnel_key` | string | (空) | 64 位 hex；非空时通过 `POST /tunnel` 加密信道访问 |
+| `tunnel_key` | string | (空) | **已废除**（被忽略，仅历史兼容）；隧道密钥现由凭据 SK 经 HKDF 自动派生，无需配置 |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 默认分块大小 |
 | `max_chunk_size` | int64 | `0` | 自适应分块上限；0 = fallback 到 64 MiB |
-| `access_key` | string | (空) | SproxySig 认证 AccessKey（服务端配置了 `access_keys` 时需要） |
-| `access_key_secret` | string | (空) | SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线） |
+| `access_key` | string | (空) | SproxySig 认证 AccessKey（服务端凭据 Ring 中的 AK，见首启日志 / `sclient trust` 登记的 AK） |
+| `access_key_secret` | string | (空) | SproxySig 认证 AccessKeySecret（对应 AK 的 SK——本地密钥，仅计算签名，永不上线） |
 | `allow_transport_fallback` | bool | `false` | 允许隧道/xfer 初始化失败时回退直连 |
 | `hub_url` | string | (空) | mesh/relay/p2p 共用的 hub 地址（http(s) 或 ws(s)，可带 /ws 路径）。为空时各命令按自身语义回落（mesh→server_url，p2p→报错，relay→本地默认） |
 | `relay_token` | string | (空) | hub 中继注册 token（与 relay start --token / hub.relay_token 一致） |
@@ -173,10 +173,13 @@ owner_quotas:
   "*": 10737418240   # 默认每租户 10 GiB
   alice: 21474836480 # alice 20 GiB
 max_upload_bytes: 5368709120     # 5 GiB
-tunnel_key: "<64 位 hex>"
-access_keys:
-  - key: "sk-meshA-3f8a..."
-    secret: "0123...（64 hex）"
+# 凭据不再写在配置文件：首次启动自动生成 anonymous 凭据（SK 落盘，见启动日志 AK），
+# 后续经 sclient trust renew 轮换、/api/credentials 管理。mesh 身份从 AK 派生、隧道密钥
+# 由 SK HKDF 派生——mesh/tunnel 密钥均由凭据自动派生，无需手动配置。
+registration:
+  allow: false        # false=允许注册（默认）；true=禁止注册（仅存量用户）
+allow_insecure_loopback: false  # 无凭据时回环是否放行读取（默认 false 更严格）
+credential_ttl: 720h  # SK 默认有效期（默认 30d）
 
 server_timeouts:
   read_header: "5s"
@@ -196,9 +199,8 @@ rate_limit:
 ```yaml
 # ~/.config/sproxy/sclient.yaml
 server_url: "https://proxy.example.com"
-tunnel_key: "<与服务端相同的 64 位 hex>"
 access_key: "sk-meshA-3f8a..."
-access_key_secret: "0123...（64 hex，与服务端 access_keys 中 secret 一致）"
+access_key_secret: "0123...（64 hex，与服务端该 AK 对应的 SK 一致，见首启日志 / `sclient trust` 输出的 SK）"
 check_checksum: true
 chunk_size: 8388608    # 8 MiB
 ```
