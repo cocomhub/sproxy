@@ -153,7 +153,9 @@ func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request
 		if errors.Is(err, errCredentialPersistFailed) {
 			h.RecordAudit(r.Context(), AuditEvent{
 				Action: auditActionCredPersistFail, ObjectType: "credential", Object: targetAK,
-				Result: AuditResultError, Detail: err.Error(),
+				// Detail 用固定文案（不带 err.Error() 里 %w 包装的存储绝对路径——
+				// 服务器路径不落审计留痕；resp 尚未赋值，取不到 sk_id，用字面文案保留可检索性）。
+				Result: AuditResultError, Detail: "持久化失败",
 			})
 			sendJSONResponse(w, map[string]any{"error": "持久化失败"}, http.StatusInternalServerError)
 			return
