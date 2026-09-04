@@ -262,28 +262,13 @@ func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
 	}
 	tc.HTTPClient.Transport = &tunnelSignTransport{base: tc.HTTPClient.Transport, ak: testAccessKey, sk: testAccessSecret}
 
-	do := func() int {
-		req, _ := http.NewRequest("GET", "/api/files", nil)
-		resp, err := tc.Do(req)
-		if err != nil {
-			// 隧道错误（外层 4xx/5xx，如 replay 抖动 425）被 Do 吞成 error。
-			// 无 resp 时无法恢复状态，视为致命；有 resp（读后又报错）取状态。
-			if resp == nil {
-				t.Fatalf("tunnel Do: %v", err)
-			}
-			return resp.StatusCode
-		}
-		defer resp.Body.Close()
-		return resp.StatusCode
-	}
-
 	// okStatus 视为隧道正常往返：200 或 429（内层限流）。
 	okStatus := func(code int) bool {
 		return code == http.StatusOK || code == http.StatusTooManyRequests
 	}
 	allOK := func() {
 		for i := range 6 {
-			if code := do(); !okStatus(code) {
+			if code := doTunnelGet(t, tc); !okStatus(code) {
 				t.Fatalf("request %d: unexpected status %d", i, code)
 			}
 		}
@@ -292,7 +277,7 @@ func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
 	allOK()
 	saw429 := func() bool {
 		for range 6 {
-			if do() == http.StatusTooManyRequests {
+			if doTunnelGet(t, tc) == http.StatusTooManyRequests {
 				return true
 			}
 		}
@@ -301,7 +286,7 @@ func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
 	// 若始终未撞 429（每请求新 TCP 源连接 → per-IP 令牌桶独立，可能不撞全局窗口），
 	// 继续多打几个请求确保触发。
 	for range 10 {
-		if do() == http.StatusTooManyRequests {
+		if doTunnelGet(t, tc) == http.StatusTooManyRequests {
 			break
 		}
 	}
@@ -326,7 +311,7 @@ func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
 		t.Fatalf("PUT /api/config (relax): want 200, got %d", code)
 	}
 	for i := range 10 {
-		if code := do(); code != http.StatusOK {
+		if code := doTunnelGet(t, tc); code != http.StatusOK {
 			t.Fatalf("after relax req %d: want 200 (已放宽), got %d", i, code)
 		}
 	}
@@ -383,24 +368,14 @@ func TestConfig_UpdateRateLimit_DisabledViaTunnel(t *testing.T) {
 	}
 	tc.HTTPClient.Transport = &tunnelSignTransport{base: tc.HTTPClient.Transport, ak: testAccessKey, sk: testAccessSecret}
 
-	do := func() int {
-		req, _ := http.NewRequest("GET", "/api/files", nil)
-		resp, err := tc.Do(req)
-		if err != nil {
-			t.Fatalf("tunnel Do: %v", err)
-		}
-		defer resp.Body.Close()
-		return resp.StatusCode
-	}
-
 	// 生产链限流启用：低配额 5、大窗口 1h → 快速灌满后 429。
 	for range 3 {
-		_ = do()
+		_ = doTunnelGet(t, tc)
 	}
-	if code := do(); code == http.StatusOK {
+	if code := doTunnelGet(t, tc); code == http.StatusOK {
 		// 极慢机器可能未灌满；再补到明确超限（每请求消耗窗口时间戳）。
-		_ = do()
-		if code = do(); code != http.StatusTooManyRequests {
+		_ = doTunnelGet(t, tc)
+		if code = doTunnelGet(t, tc); code != http.StatusTooManyRequests {
 			t.Fatalf("生产链低配额应 429, got %d", code)
 		}
 	}
@@ -408,7 +383,7 @@ func TestConfig_UpdateRateLimit_DisabledViaTunnel(t *testing.T) {
 	// 经生产 Handlers 关掉限流 → 后续请求立即放行（无需等待窗口）。
 	h.rateLimiter.UpdateConfig(false, 5, time.Hour)
 	for i := range 5 {
-		if code := do(); code != http.StatusOK {
+		if code := doTunnelGet(t, tc); code != http.StatusOK {
 			t.Fatalf("disabled req %d: want 200 (短路), got %d", i, code)
 		}
 	}
@@ -453,31 +428,10 @@ func TestConfig_UpdateRateLimit_SignalPostImmediate(t *testing.T) {
 	})
 	url := ts.URL
 
-	do := func() (int, string) {
-		bodyStr := `{"sdp":"dummy"}`
-		r, err := http.NewRequest(http.MethodPost, url+"/api/signal/offer", strings.NewReader(bodyStr))
-		if err != nil {
-			t.Fatal(err)
-		}
-		r.Header.Set("Content-Type", "application/json")
-		// 已注册节点身份 + per-node secret，且与 testAccessKey mesh 一致。
-		r.Header.Set(signalNodeHeader, "peer-a")
-		r.Header.Set(signalNodeSecretHeader, "sec-a")
-		signBodyRequest(r, testAccessKey, testAccessSecret, []byte(bodyStr))
-		resp, err := http.DefaultClient.Do(r)
-		if err != nil {
-			t.Fatalf("signal post: %v", err)
-		}
-		defer resp.Body.Close()
-		buf := new(strings.Builder)
-		_, _ = io.Copy(buf, resp.Body)
-		return resp.StatusCode, buf.String()
-	}
-
 	// limit=2 → 第 3 个请求被信令限流（429）；前两个消费限额。
-	_, _ = do()
-	_, _ = do()
-	if code, body := do(); code != http.StatusTooManyRequests {
+	_, _ = doSignalPost(t, url)
+	_, _ = doSignalPost(t, url)
+	if code, body := doSignalPost(t, url); code != http.StatusTooManyRequests {
 		t.Fatalf("signal 3rd: want 429 (limit=2 触发), got %d (%s)", code, body)
 	}
 
@@ -499,7 +453,7 @@ func TestConfig_UpdateRateLimit_SignalPostImmediate(t *testing.T) {
 		t.Fatalf("PUT /api/config: want 200, got %d", resp.StatusCode)
 	}
 	for i := range 2 {
-		code, b := do()
+		code, b := doSignalPost(t, url)
 		if code == http.StatusTooManyRequests {
 			t.Fatalf("signal after relax req %d: want non-429, got %d", i, code)
 		}
@@ -507,4 +461,46 @@ func TestConfig_UpdateRateLimit_SignalPostImmediate(t *testing.T) {
 			t.Fatalf("signal after relax req %d: unexpected status %d (%s)", i, code, b)
 		}
 	}
+}
+
+// doTunnelGet 经隧道发送 GET /api/files 并返回状态码，供 rate limiter 热更新
+// 黑盒测试共用（Task1 review Minor-3：抽离三处重复内联的 do）。隧道错误
+// （外层 4xx/5xx，如 replay 抖动 425）被 Do 吞成 error：无 resp 时视为致命；
+// 有 resp（读后又报错）取状态。
+func doTunnelGet(t *testing.T, tc *tunnel.Client) int {
+	t.Helper()
+	req, _ := http.NewRequest("GET", "/api/files", nil)
+	resp, err := tc.Do(req)
+	if err != nil {
+		if resp == nil {
+			t.Fatalf("tunnel Do: %v", err)
+		}
+		return resp.StatusCode
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// doSignalPost 发送信令 offer POST（已注册节点身份 + per-node secret + 签名），
+// 返回状态码与响应体，供 rate limiter 信令分支黑盒测试共用。
+func doSignalPost(t *testing.T, url string) (int, string) {
+	t.Helper()
+	bodyStr := `{"sdp":"dummy"}`
+	r, err := http.NewRequest(http.MethodPost, url+"/api/signal/offer", strings.NewReader(bodyStr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Content-Type", "application/json")
+	// 已注册节点身份 + per-node secret，且与 testAccessKey mesh 一致。
+	r.Header.Set(signalNodeHeader, "peer-a")
+	r.Header.Set(signalNodeSecretHeader, "sec-a")
+	signBodyRequest(r, testAccessKey, testAccessSecret, []byte(bodyStr))
+	resp, err := http.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatalf("signal post: %v", err)
+	}
+	defer resp.Body.Close()
+	buf := new(strings.Builder)
+	_, _ = io.Copy(buf, resp.Body)
+	return resp.StatusCode, buf.String()
 }
