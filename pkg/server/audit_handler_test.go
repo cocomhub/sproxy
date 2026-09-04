@@ -388,7 +388,8 @@ func TestAuditHandler_ConfigValidateNegative(t *testing.T) {
 	}
 }
 
-// TestAuditHandler_SerializeTS 验证事件 TS 经 JSON 序列化为 RFC3339Nano。
+// TestAuditHandler_SerializeTS 验证事件 TS 经 JSON 序列化为 RFC3339Nano，
+// 且字段使用下划线 json tag（action/actor/.../ts，与前端 auditTableHtml 契约一致）。
 func TestAuditHandler_SerializeTS(t *testing.T) {
 	ev := AuditEvent{Action: "delete", TS: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)}
 	raw, err := json.Marshal(ev)
@@ -400,7 +401,10 @@ func TestAuditHandler_SerializeTS(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	want := "2026-09-01T12:00:00Z"
-	if m["TS"] != want {
-		t.Errorf("TS 序列化 = %v, want %q (RFC3339Nano)", m["TS"], want)
+	if m["ts"] != want {
+		t.Errorf("ts 序列化 = %v, want %q (RFC3339Nano)", m["ts"], want)
+	}
+	if m["action"] != "delete" {
+		t.Errorf("action 键 = %v, want delete（下划线 json tag 契约）", m["action"])
 	}
 }
