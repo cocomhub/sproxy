@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
@@ -40,29 +41,35 @@ type XferListenerConfig struct {
 	CertFile string
 	KeyFile  string
 
-	// AccessKey/AccessKeySecret/MeshID 是隧道密钥派生参数（access_keys 首对）。
+	// AccessKey/AccessKeySecret/MeshID 是隧道密钥派生参数（凭据 Ring 首个存活条目）。
 	// HubXferKey 的单一输入来源（AD-3：与客户端同 AK/SK 派生一致）。
 	AccessKey       string
 	AccessKeySecret string
 	MeshID          string
 }
 
-// XferListenerConfigFromConfig 从 server.Config 提取 xfer listener 装配配置：
-//   - CertFile/KeyFile 缺省回落 cfg.TLS.CertFile/KeyFile；
-//   - AccessKey/AccessKeySecret/MeshID 取 access_keys 首对。
-func XferListenerConfigFromConfig(cfg *Config) XferListenerConfig {
+// XferListenerConfigFromRing 从凭据 Ring 提取 xfer listener 装配配置：
+// 证书缺省回落 cfg.TLS.CertFile/KeyFile；AccessKey/AccessKeySecret/MeshID
+// 取 Ring 首个存活（alive）条目。cfg 为 nil 时仅返回零值（不 panic）。
+func XferListenerConfigFromRing(cfg *Config, ring *accesskey.Ring) XferListenerConfig {
 	var xc XferListenerConfig
-	if cfg == nil {
-		return xc
+	if cfg != nil {
+		xc.CertFile = cfg.TLS.CertFile
+		xc.KeyFile = cfg.TLS.KeyFile
 	}
-	xc.CertFile = cfg.TLS.CertFile
-	xc.KeyFile = cfg.TLS.KeyFile
-	if len(cfg.AccessKeys) > 0 {
-		xc.AccessKey = cfg.AccessKeys[0].Key
-		xc.AccessKeySecret = cfg.AccessKeys[0].Secret
-		xc.MeshID = cfg.AccessKeys[0].MeshID
+	if ak, sk, ok := bestFirstCredential(ring); ok {
+		xc.AccessKey = ak
+		xc.AccessKeySecret = sk
+		xc.MeshID = accesskey.ParseMesh(ak)
 	}
 	return xc
+}
+
+// XferListenerConfigFromConfig 从 server.Config + 凭据 Ring 提取 xfer listener 装配配置。
+// 证书缺省回落 cfg.TLS.CertFile/KeyFile；AccessKey/AccessKeySecret/MeshID 取 Ring
+// 首个存活条目（取代已移除的 cfg.AccessKeys[0]）。
+func XferListenerConfigFromConfig(cfg *Config, ring *accesskey.Ring) XferListenerConfig {
+	return XferListenerConfigFromRing(cfg, ring)
 }
 
 // BuildXferTLSConfig 构造服务端 xfer listener 的 *tls.Config。
@@ -77,7 +84,7 @@ func BuildXferTLSConfig(cfg *Config) (*tls.Config, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("build xfer tls: 配置为 nil")
 	}
-	xc := XferListenerConfigFromConfig(cfg)
+	xc := XferListenerConfigFromConfig(cfg, nil) // BuildXferTLSConfig 只消费证书，不依赖凭据
 	// 仅复用证书/自签逻辑；xfer 是 raw TLS listener，不做 HTTP mTLS（ClientCA）——
 	// 握手侧身份 pinning 由 Ed25519 指纹层负责（AD-4 解耦）。
 	mgr, err := certmgr.New(&certmgr.Config{
@@ -112,26 +119,23 @@ func BuildXferTLSConfig(cfg *Config) (*tls.Config, error) {
 	return tc, nil
 }
 
-// HubXferKey 从 cfg.AccessKeys 首对派生 xfer 隧道密钥（AD-3）。
+// HubXferKey 从凭据 Ring 首个存活条目派生 xfer 隧道密钥（AD-3）。
 //
 // 派生参数与客户端完全一致：
 //
-//	DeriveTunnelKey(access_keys[0].Secret, AccessKeyMesh(access_keys[0].Key))
+//	DeriveTunnelKey(firstAlive.SK, AccessKeyMesh(firstAlive.AK))
 //
-// 无 access_keys → error fail-closed（与规格 DoD 4 一致：无 access_keys 时
+// Ring 为空（无可存活条目）→ error fail-closed（与规格 DoD 4 一致：无有效凭据时
 // xfer listener 拒启）。C-1 修复后此注释成立：ECDH 握手会话密钥派生绑定静态密钥
 // （deriveSessionKey），攻击者完成匿名 ECDH 但不知 key，派生出的 sessionKey 与合法
 // 对端不同，首个加密帧 AES-GCM 解密失败即被拒——拒绝匿名接入由密钥绑定保证，而非
 // 仅靠"无 key 无法完成 ECDH"（后者在旧实现中不成立）。
-func HubXferKey(cfg *Config) ([]byte, error) {
-	if cfg == nil || len(cfg.AccessKeys) == 0 {
-		return nil, fmt.Errorf("hub xfer key: 未配置 access_keys（xfer listener 需要 access_keys 首对派生隧道密钥；fail-closed）")
+func HubXferKey(cfg *Config, ring *accesskey.Ring) ([]byte, error) {
+	ak, sk, ok := bestFirstCredential(ring)
+	if !ok {
+		return nil, fmt.Errorf("hub xfer key: 凭据 Ring 为空（xfer listener 需要有效 AK/SK 派生隧道密钥；fail-closed）")
 	}
-	ak := cfg.AccessKeys[0]
-	if ak.Key == "" || ak.Secret == "" {
-		return nil, fmt.Errorf("hub xfer key: access_keys[0] 缺少 key/secret（key=%q）", ak.Key)
-	}
-	key, err := tunnel.DeriveTunnelKey(ak.Secret, tunnel.AccessKeyMesh(ak.Key))
+	key, err := tunnel.DeriveTunnelKey(sk, accesskey.ParseMesh(ak))
 	if err != nil {
 		return nil, fmt.Errorf("hub xfer key: 派生隧道密钥失败: %w", err)
 	}

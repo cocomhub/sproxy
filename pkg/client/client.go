@@ -27,6 +27,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
@@ -104,6 +105,8 @@ type FileClient struct {
 	maxChunkSize           int64
 	accessKey              string           // SproxySig 签名认证 AccessKey（公开标识）
 	accessKeySecret        string           // SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）
+	accessKeyID            string           // SproxySig SK 条目 ID（skeyID，skey-id=<id>；签发时 header 携带，服务端精确取条目）
+	allowMissingEntryID    bool             // 一次性开关：renew 引导允许缺 skeyID（首次 renew 尚无 access_key_id）
 	authToken              string           // 多用户 API 密钥 Bearer（api_keys.enabled 场景）
 	meshHubURL             string           // 配置 hub_url（mesh/relay/p2p 信令/中继 hub，区别于 xfer 的 hubURL）
 	nodeID                 string           // 配置 node_id（本节点默认 ID）
@@ -176,14 +179,14 @@ func WithHTTPClient(hc *http.Client) Option {
 
 // WithTunnel 启用加密隧道传输（access-key 驱动）：
 // 隧道编解码密钥 = HKDF(SK, mesh) 派生；服务端同一算法（authMiddleware 验签后派生）。
-// ak 形如 sk[-<mesh>]-<16hex>，mesh 从 AK 提取（无 mesh 段则为空串）。
+// ak 形如 ak[-<mesh>]-<32hex>（兼容 legacy ak[-<mesh>]-<16hex>），mesh 从 AK 提取（无 mesh 段则为空串）。
 func WithTunnel(ak, sk string) Option {
 	return func(c *FileClient) {
 		// 1) 把 accessKey/Secret 存进 client（doRequest 签名用）
 		c.accessKey = ak
 		c.accessKeySecret = sk
-		// 2) 派生隧道密钥（mesh 由共享 tunnel.AccessKeyMesh 解析，与服务端一致）
-		mesh := tunnel.AccessKeyMesh(ak)
+		// 2) 派生隧道密钥（mesh 由共享 accesskey.ParseMesh 解析，与服务端一致）
+		mesh := accesskey.ParseMesh(ak)
 		key, err := tunnel.DeriveTunnelKey(sk, mesh)
 		if err != nil {
 			c.logger.Warn("创建隧道客户端失败", "error", err)
@@ -197,7 +200,7 @@ func WithTunnel(ak, sk string) Option {
 			c.initError = fmt.Errorf("创建隧道客户端失败: %w", err)
 			return
 		}
-		tc.HTTPClient.Transport = &sigRoundTripper{base: tc.HTTPClient.Transport, ak: ak, sk: sk}
+		tc.HTTPClient.Transport = &sigRoundTripper{base: tc.HTTPClient.Transport, c: c}
 		c.tunnelClient = tc
 	}
 }
@@ -352,12 +355,22 @@ func WithChunkSize(n int64) Option {
 }
 
 // WithAccessKey 设置 SproxySig 请求签名认证（AccessKey/AccessKeySecret）。
-// 服务端配置了 access_keys 时，所有 HTTP 请求（直连/信令/relay）须携带 AK 标识 +
+// 服务端凭据 Ring 非空（登记了该 AK/SK）时，所有 HTTP 请求（直连/信令/relay）须携带 AK 标识 +
 // HMAC 签名；Secret 只存本端计算签名，永不上线。api_keys 场景请用 WithBearerToken。
 func WithAccessKey(ak, sk string) Option {
 	return func(c *FileClient) {
 		c.accessKey = ak
 		c.accessKeySecret = sk
+	}
+}
+
+// WithAccessKeyID 设置 SproxySig 的 SK 条目 ID（skeyID）。v2 协议 skey-id 强制必传：
+// 配置了 access_key 后签发请求 header 必须携带 skey-id=<skeyID>（服务端 (ak, skeyID)
+// 精确定位，无试签回退）。`trust renew` 成功后会自动回填为新的 sk_id（见
+// RenewAccessKey）。缺此值时签名请求报错（renew 引导例外见 RenewAccessKey）。
+func WithAccessKeyID(id string) Option {
+	return func(c *FileClient) {
+		c.accessKeyID = id
 	}
 }
 
@@ -1210,6 +1223,12 @@ func (c *FileClient) AccessKeySecret() string {
 	return c.accessKeySecret
 }
 
+// AccessKeyID 返回 SproxySig 的 SK 条目 ID（skeyID，skey-id=<skeyID>）。
+// v2 协议 skey-id 强制必传（除 renew 引导外；配置了 access_key 后必须提供）。
+func (c *FileClient) AccessKeyID() string {
+	return c.accessKeyID
+}
+
 // AuthToken 返回多用户 API 密钥 Bearer（api_keys 场景）。
 //
 // 安全警示（S49）：返回值是认证凭据，严禁写入日志、错误输出或用于展示。
@@ -1326,7 +1345,14 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 
 // signRequest 为请求构造 SproxySig 签名头，并返回可重放（已预计算哈希）的 body。
 // 返回的 cleanup 非 nil 时需在请求完成后调用（临时文件缓存路径）。
+// v2 canonical：header 携带 skey-id=<skeyID>（c.accessKeyID），服务端
+// verifySproxySigFromRing 以 (ak, skeyID) 精确取条目。skeyID 参与 canonical 拼装。
+// **强制必传**：accessKey 非空但 skeyID 为空时返回错误（v2 协议要求；renew 引导
+// 例外见 RenewAccessKey——首次 renew 前本端恰好无 skeyID）。
 func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string, io.Reader, func(), error) {
+	if c.accessKey != "" && c.accessKeyID == "" && !c.allowMissingEntryID {
+		return "", nil, nil, fmt.Errorf("access_key_id 未配置（v2 skey-id 必传）: 请先 `sclient trust renew` 或配置 access_key_id")
+	}
 	pathPart, queryPart, _ := strings.Cut(urlPath, "?")
 	signedBody, bodyHash, cleanup, err := prehashBody(body)
 	if err != nil {
@@ -1336,6 +1362,7 @@ func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string
 	h := sproxysig.Header{
 		Version:    sproxysig.Version,
 		AK:         c.accessKey,
+		EntryID:    c.accessKeyID,
 		TS:         now.UnixMilli(),
 		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),
@@ -1395,22 +1422,31 @@ func (c httpHeaderCarrier) Set(k, v string)     { c.h.Set(k, v) }
 // sigRoundTripper 是隧道外层客户端的 RoundTripper：给每个 /tunnel 请求
 // 注入 SproxySig 签名（body_sha256=UNSIGNED，流式 body 无法整体哈希）。
 // 服务端 authMiddleware 验签后派生隧道密钥解密；无签名则 401。
+//
+// 凭据从持有者 FileClient 实时读取（ak/sk/skeyID）：隧道客户端在 option 应用
+// 过程中创建（WithTunnel），此时 access_key_id 可能尚未被 WithAccessKeyID 写入，
+// 故不能构造时快照。令本载体引用 *FileClient 避免并发访问字段（签名字段构造后
+// 不再被 writer 修改，读安全）。v2 协议强制必传 skey-id（缺则报错，见 RoundTrip）。
 type sigRoundTripper struct {
-	base   http.RoundTripper
-	ak, sk string
+	base http.RoundTripper
+	c    *FileClient
 }
 
 func (rt *sigRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if rt.c.accessKey != "" && rt.c.accessKeyID == "" && !rt.c.allowMissingEntryID {
+		return nil, fmt.Errorf("access_key_id 未配置（v2 skey-id 必传）: 请先 `sclient trust renew` 或配置 access_key_id")
+	}
 	now := time.Now()
 	h := sproxysig.Header{
 		Version:    sproxysig.Version,
-		AK:         rt.ak,
+		AK:         rt.c.accessKey,
+		EntryID:    rt.c.accessKeyID,
 		TS:         now.UnixMilli(),
 		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),
 		BodySHA256: sproxysig.UnsignedBody,
 	}
-	req.Header.Set("Authorization", sproxysig.SignAndFormat(rt.sk, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
+	req.Header.Set("Authorization", sproxysig.SignAndFormat(rt.c.accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
 	return rt.base.RoundTrip(req)
 }
 

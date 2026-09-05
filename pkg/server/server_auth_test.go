@@ -5,6 +5,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,18 +15,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
 // testAccessKey / testAccessSecret 是 SproxySig 测试密钥对。
 const (
-	testAccessKey    = "sk-test-mesh-aabbcc"
+	testAccessKey    = "ak-test-mesh-aabbcc"
 	testAccessSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
+
+// testEntryID 返回与 ring 中该 AK 条目匹配的确定性 skeyID（ringForTestCreds 用
+// testEntryIDFor 生成）。AK 稳定 → 条目 ID 稳定，测试签名与 ring 精确匹配。
+func testEntryID(ak string) string {
+	sum := sha256.Sum256([]byte(ak + ":skey"))
+	return accesskey.SkeyIDPrefix + hex.EncodeToString(sum[:6])
+}
 
 // formatSigAuth 把 Header 序列化为 Authorization 头。
 func formatSigAuth(h sproxysig.Header) string {
 	return sproxysig.Scheme + " v=" + h.Version + " ak=" + h.AK +
+		" skey-id=" + h.EntryID +
 		" ts=" + strconv.FormatInt(h.TS, 10) + " exp=" + strconv.FormatInt(h.Exp, 10) +
 		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
 }
@@ -39,11 +50,11 @@ func testNonce() string {
 	return fmt.Sprintf("test-nonce-%d-%d", time.Now().UnixNano(), testNonceCounter.Add(1))
 }
 
-// signRequest 用给定 AK/SK 给请求打上合法 SproxySig 头（无 body）。
+// signRequest 用给定 AK/SK 给请求打上合法 SproxySig 头（无 body，v2 带 skey-id）。
 func signRequest(r *http.Request, ak, sk string) {
 	now := time.Now()
 	h := sproxysig.Header{
-		Version: sproxysig.Version, AK: ak,
+		Version: sproxysig.Version, AK: ak, EntryID: testEntryID(ak),
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      testNonce(),
 		BodySHA256: sproxysig.EmptyBodyHash(),
@@ -57,7 +68,7 @@ func signRequest(r *http.Request, ak, sk string) {
 func signTunnelRequest(r *http.Request, ak, sk string) {
 	now := time.Now()
 	h := sproxysig.Header{
-		Version: sproxysig.Version, AK: ak,
+		Version: sproxysig.Version, AK: ak, EntryID: testEntryID(ak),
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      testNonce(),
 		BodySHA256: sproxysig.UnsignedBody,
@@ -115,7 +126,7 @@ func TestAuthMiddleware_NoAuthConfigured(t *testing.T) {
 
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{})
-	h := &Handlers{cfgPtr: cfgPtr}
+	h := &Handlers{cfgPtr: cfgPtr, credentialRing: emptyTestRing(), allowInsecureLoopback: true}
 	called := false
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
@@ -123,6 +134,7 @@ func TestAuthMiddleware_NoAuthConfigured(t *testing.T) {
 	handler := h.authMiddleware(inner)
 
 	r := httptest.NewRequest("GET", "/upload", nil)
+	r.RemoteAddr = "127.0.0.1:1234" // loopback：allow_insecure_loopback 兜底放行
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -138,8 +150,8 @@ func TestAuthMiddleware_SproxySigMissing(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
-	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool(), credentialRing: ringForTestCreds()}
 	called := false
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
@@ -162,8 +174,8 @@ func TestAuthMiddleware_SproxySigValid(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
-	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool(), credentialRing: ringForTestCreds()}
 	called := false
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -188,8 +200,8 @@ func TestAuthMiddleware_SproxySigBadSignature(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
-	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool(), credentialRing: ringForTestCreds()}
 	called := false
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
@@ -214,8 +226,8 @@ func TestAuthMiddleware_SproxySigUnknownKey(t *testing.T) {
 	t.Parallel()
 
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
-	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool(), credentialRing: ringForTestCreds()}
 	called := false
 	inner := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		called = true
@@ -224,7 +236,7 @@ func TestAuthMiddleware_SproxySigUnknownKey(t *testing.T) {
 
 	// 未配置的 AK → 401。
 	r := httptest.NewRequest("GET", "/upload", nil)
-	signRequest(r, "sk-unknown", testAccessSecret)
+	signRequest(r, "ak-unknown", testAccessSecret)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 

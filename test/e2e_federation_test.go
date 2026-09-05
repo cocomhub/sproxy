@@ -60,10 +60,12 @@ func startFederatedHub(t *testing.T, binPath, name string, peerURL string) (stri
 	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
 		t.Fatalf("create uploads dir: %v", err)
 	}
+	// 凭据 store 化：access_keys 不再装配 Ring，须 pre-seed 使 e2eTestAK 被识别。
+	seedCredentialStore(t, uploadsDir, e2eTestAK, e2eTestSK)
 	var peersYAML string
 	if peerURL != "" {
-		peersYAML = fmt.Sprintf("    interval: \"1s\"\n    timeout: \"3s\"\n    peers:\n      - id: \"peer-%s\"\n        url: %q\n        access_key: %q\n        access_key_secret: %q\n",
-			name, peerURL, e2eTestAK, e2eTestSK)
+		peersYAML = fmt.Sprintf("    interval: \"1s\"\n    timeout: \"3s\"\n    peers:\n      - id: \"peer-%s\"\n        url: %q\n        access_key: %q\n        access_key_secret: %q\n        access_key_id: %q\n",
+			name, peerURL, e2eTestAK, e2eTestSK, e2eTestID)
 	} else {
 		peersYAML = "    interval: \"1s\"\n"
 	}
@@ -162,6 +164,7 @@ func TestE2E_DualHubFederation(t *testing.T) {
 		"--node-id", "node-b",
 		"--access-key", e2eTestAK,
 		"--access-key-secret", e2eTestSK,
+		"--access-key-id", e2eTestID,
 	)
 	if err := relayCmd.Start(); err != nil {
 		t.Fatalf("start sclient relay: %v", err)
@@ -216,6 +219,7 @@ func TestE2E_CrossHubRelay(t *testing.T) {
 		"--node-id", "node-b",
 		"--access-key", e2eTestAK,
 		"--access-key-secret", e2eTestSK,
+		"--access-key-id", e2eTestID,
 		"--dial-allow",
 		"--dial-allow-cidr", "127.0.0.0/8",
 	)

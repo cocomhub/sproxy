@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -62,11 +63,11 @@ func TestTCPRelay_NoWS_RelayDial(t *testing.T) {
 
 	// 2. hub：仅裸 TCP 传输（无 WS），SproxySig 准入
 	const (
-		ak = "sk-tcp-do-0000000000000000000000"
+		ak = "ak-tcp-do-0000000000000000000000"
 		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	rt := hub.NewMeshRouteTable()
-	hs := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: ak, Secret: sk}}), testutil.DiscardLogger())
+	hs := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -210,11 +211,11 @@ func TestTCPRelay_NoWS_ConcurrentRelayDial(t *testing.T) {
 	echoAddr := echoLn.Addr().String()
 
 	const (
-		ak = "sk-tcp-conc-000000000000000000000"
+		ak = "ak-tcp-conc-000000000000000000000"
 		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	rt := hub.NewMeshRouteTable()
-	hs := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: ak, Secret: sk}}), testutil.DiscardLogger())
+	hs := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

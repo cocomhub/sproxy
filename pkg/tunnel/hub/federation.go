@@ -47,10 +47,12 @@ type FederationNode struct {
 type FederationPeer struct {
 	ID  string // 对端 hub 唯一标识（日志/去重用；为空回落 URL）
 	URL string // 对端节点表端点基址（如 http://127.0.0.1:18083；为空回落默认 loopback）
-	// AccessKey / AccessKeySecret 是对端 hub 认可的 SproxySig 凭据。
-	// 目标 hub 配置了 access_keys 时必填；远程 peering 由 Config.Validate 强制成对校验。
+	// AccessKey / AccessKeySecret / AccessKeyID 是对端 hub 认可的 SproxySig 凭据
+	// （AccessKeyID 是 SK 条目的 skeyID，v2 协议 skey-id 必传；缺失时无法签名，
+	// 对端 hub 凭据 Ring 非空时必填）。远程 peering 由 Config.Validate 强制成对校验。
 	AccessKey       string
 	AccessKeySecret string
+	AccessKeyID     string
 	// CAFile 是对端 hub 的 TLS 受信 CA 证书文件路径（PEM）。非空时用该 CA 构建
 	// 专属证书池严格校验对端证书（ServerName 由 URL host 自动校验）——自签 hub
 	// 的远程 peering 应配置 ca_file 而非跳过校验。与 InsecureSkipVerify 互斥。
@@ -269,8 +271,16 @@ func (fc *FederationClient) syncPeer(ctx context.Context, p FederationPeer) erro
 	if err != nil {
 		return fmt.Errorf("构造请求 %s: %w", endpoint, err)
 	}
-	// 认证：SproxySig AccessKey 签名（sk 为空时不签名——目标 hub 为无认证调试模式）。
-	sproxysig.SignRequest(req, p.AccessKey, p.AccessKeySecret)
+	// 认证：SproxySig AccessKey 签名（sk 为空时不签名——目标 hub 为无认证调试模式，
+	// 裸请求直接发出）。v2 协议 skey-id 必传：带 AccessKeyID 时用其签名；缺失时若
+	// 配置了 SK 则报错（fail-closed），只有完全无凭据（sk 为空）才允许不签名。
+	if p.AccessKeySecret != "" {
+		if p.AccessKeyID == "" {
+			return fmt.Errorf("peer %s 配置了 AccessKeySecret 但缺 AccessKeyID（v2 skey-id 必传）", p.ID)
+		}
+		sproxysig.SignRequestWithSkeyID(req, p.AccessKey, p.AccessKeyID, p.AccessKeySecret)
+	}
+	// 无凭据（sk 为空）：不设 Authorization，裸请求（无认证调试 hub）。
 
 	client := fc.clients[p.ID]
 	if client == nil {

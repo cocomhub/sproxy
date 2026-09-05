@@ -5,6 +5,7 @@ package server
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
@@ -102,6 +104,18 @@ type Handlers struct {
 	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
 	archiveUsage map[string]map[string]int64
 	tenantMu     sync.Mutex // 串行化 tenantRoots/checksumStores/uploadStores/quotaScopes/quotaBuckets/archiveUsage 懒创建
+
+	// credentialRing 是 SproxySig 凭据权威表（AK→多 SK 条目，凭据 store 化后取代
+	// cfg.AccessKeys）。RegisterRoutes 装配：opts.CredentialRing 显式注入（测试/
+	// xfer 集成）优先；否则从 opts.CredentialStore 载入，仍空则首启 anonymous
+	// （见 bootstrapCredentials）。authMiddleware 只查本 ring、无 yaml 回退。
+	// credentialStore 是 credentialRing 关联的持久化 store（anonymous 生成后
+	// Save；nil = 不持久化，纯内存场景）。
+	credentialRing  *accesskey.Ring
+	credentialStore *CredentialStore
+	// allowInsecureLoopback 是无认证兜底开关（读取优先级：opts 注入 > cfg 配置）。
+	// 仅调试语义：ring 为空时放行 loopback 来源（见 handleNoCredentials）。
+	allowInsecureLoopback bool
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -462,6 +476,18 @@ type RegisterRoutesOpts struct {
 	// 如 ext/otel 经 provider 装配的 OTel tracer）。由 cmd/sproxy 在
 	// telemetry.enabled=true 时注入，打通 OTel ↔ slog 日志链路。
 	Tracer telemetry.Tracer
+	// AllowInsecureLoopback 是测试专用瞬态覆盖：默认 false；测试注入空 Ring 时经
+	// RegisterRoutesOpts 一并设为 true（等价旧 --allow-no-auth 全放行调试语义），
+	// 使无凭据测试直连被兜底放行。为一次性读取（不写入 cfg，避免 SIGHUP/cfgPtr
+	// 并发覆盖污染；多测试并发各用独立 RegisterRoutes，无竞态）。
+	AllowInsecureLoopback bool
+	// CredentialRing 是 SproxySig 凭据表（Ring）。nil 时 RegisterRoutes 自动装配：
+	// 从 CredentialStore 载入，仍空且 cfg.CredentialTTL>=0 则生成首启 anonymous
+	// 凭据并持久化。测试/xfer 集成可显式注入（配合 AllowInsecureLoopback）。
+	CredentialRing *accesskey.Ring
+	// CredentialStore 是凭据 store（nil = 不载入/不持久化，纯内存 Ring 场景，
+	// 如注入空 Ring 的无认证测试）。
+	CredentialStore *CredentialStore
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -520,6 +546,8 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		noncePool:     sproxysig.NewNoncePool(),
 		tracer:        opts.Tracer,
 		auditRing:     auditRing,
+		// 测试注入空 Ring 时的无认证调试兜底（一次性读取；生产走 cfg.AllowInsecureLoopback）。
+		allowInsecureLoopback: opts.AllowInsecureLoopback,
 	}
 	// 装配多租户存储布局：全局配额池 + 懒创建缓存 + 预创建 anonymous 租户。
 	// tenantRoots/checksumStores/uploadStores/quotaScopes 均为懒创建（首次请求时建），
@@ -544,6 +572,15 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		panic("预创建 anonymous UploadStore 失败")
 	}
 	h.signalBroker.SetPersister(opts.HubPersist)
+
+	// 凭据装配（凭据 store 化）：SproxySig 权威表 = Ring。
+	//   - opts.CredentialRing 显式注入（测试 / cmd 装配）优先；
+	//   - 否则从 opts.CredentialStore 载入快照重建；
+	//   - 仍为空且 cfg.CredentialTTL>=0（未显式禁用首启）→ 生成 anonymous 凭据
+	//     （kind=plain、ExpiresAt=now+CredentialTTL、Meta{Type:bootstrap}）并持久化，
+	//     保证**新部署必有可访问凭据**（注册开关不影响 anonymous 生成——生成逻辑
+	//     独立于 cfg.Registration.Disable）。
+	h.bootstrapCredentials(opts)
 
 	// 启动时恢复持久化的信令收件箱（节点注册已在 cmd 层通过 RestoreFromSnapshot
 	// 灌入 routeTable；此处把 messages 灌入 SignalBroker 队列，重启不丢待投递信令）。
@@ -623,6 +660,17 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// /api/stats 的 localMux 侧同模式）。auditHandler 只读 ring 回 JSON，自身不做
 	// 签名校验。浏览器隧道模式下用户面操作必须隧道可达（仅注册主 mux 会 404）。
 	localMux.HandleFunc("GET /api/audit", h.auditHandler)
+	// 凭据管理（任务 5）：隧道内层裸注册（隧道加密即认证，与 audit/share 同模式）。
+	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
+	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」
+	// 处理，管理可见性面仍以主 mux（authMiddleware 保护）为准。
+	localMux.HandleFunc("GET /api/credentials", h.akListHandler)
+	localMux.HandleFunc("POST /api/credentials", h.akAddHandler)
+	localMux.HandleFunc("DELETE /api/credentials/{ak}", h.akDeleteHandler)
+	localMux.HandleFunc("POST /api/credentials/{ak}/renew", h.renewCredentialHandler)
+	localMux.HandleFunc("GET /api/credentials/{ak}/sk", h.skListHandler)
+	localMux.HandleFunc("DELETE /api/credentials/{ak}/sk/{skID}", h.skDeleteHandler)
+	localMux.HandleFunc("POST /api/credentials/{ak}/sk/{skID}/expire", h.skExpireHandler)
 
 	// 分块上传/下载路由（本地）
 	localMux.HandleFunc("POST /upload/init", h.uploadInit)
@@ -796,7 +844,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		if cfg.Hub.Federation.Enabled {
 			// 联邦节点表端点（hub-to-hub peering 入站面）：返回本 hub 路由表节点
 			// （带 mesh），供对端 hub 周期拉取同步。走 authMiddleware（SproxySig
-			// fail-closed：hub 配置 access_keys 后无凭据请求 401），不注册 localMux
+			// fail-closed：凭据 Ring 非空后无凭据请求 401），不注册 localMux
 			// （联邦是 hub 间直连 HTTP 同步，不经隧道）。
 			srvMux.HandleFunc("GET /api/hub/federation/nodes", h.authMiddleware(h.federationNodesHandler))
 		}
@@ -816,6 +864,16 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 模式）。审计是浏览器隧道模式下的用户面操作，隧道内层必须可达（用户在隧道
 	// 模式下打开审计 tab 应能直接查看；仅注册主 mux 会让隧道模式 404）。
 	srvMux.HandleFunc("GET /api/audit", h.authMiddleware(h.auditHandler))
+
+	// 凭据管理 API（主 mux：SproxySig auth）。全部走 authMiddleware 保护，
+	// 与 audit/cloud/sync 同模式（本人 set 端点用 ActorFrom(ctx) 判定）。
+	srvMux.HandleFunc("GET /api/credentials", h.authMiddleware(h.akListHandler))
+	srvMux.HandleFunc("POST /api/credentials", h.authMiddleware(h.akAddHandler))
+	srvMux.HandleFunc("DELETE /api/credentials/{ak}", h.authMiddleware(h.akDeleteHandler))
+	srvMux.HandleFunc("POST /api/credentials/{ak}/renew", h.authMiddleware(h.renewCredentialHandler))
+	srvMux.HandleFunc("GET /api/credentials/{ak}/sk", h.authMiddleware(h.skListHandler))
+	srvMux.HandleFunc("DELETE /api/credentials/{ak}/sk/{skID}", h.authMiddleware(h.skDeleteHandler))
+	srvMux.HandleFunc("POST /api/credentials/{ak}/sk/{skID}/expire", h.authMiddleware(h.skExpireHandler))
 
 	srvMux.HandleFunc("GET /healthz", h.healthz)
 	srvMux.HandleFunc("GET /version", h.versionHandler)
@@ -847,6 +905,137 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.handler = h.metricsMiddleware(h.requestLogMiddleware(srvMux))
 
 	return h
+}
+
+// bootstrapCredentials 装配凭据 Ring 与关联 store（RegisterRoutes 启动时调用一次）：
+//   - 显式注入（opts.CredentialRing）→ 直接使用；
+//   - 否则从 opts.CredentialStore 载入快照（真实/损坏处理见 CredentialStore.Load）；
+//   - 仍为空且 cfg.CredentialTTL>=0 → 生成首启 anonymous 凭据并持久化。
+func (h *Handlers) bootstrapCredentials(opts RegisterRoutesOpts) {
+	if opts.CredentialRing != nil {
+		h.credentialRing = opts.CredentialRing
+		h.credentialStore = opts.CredentialStore
+		return
+	}
+	ring := accesskey.NewRing()
+	var store *CredentialStore
+	if opts.CredentialStore != nil {
+		store = opts.CredentialStore
+		if keys, err := store.Load(); err != nil {
+			h.logger.Error("载入凭据 store 失败（fail-closed：拒绝启动，防止用空凭据表运行）", "error", err)
+			panic("载入凭据 store 失败: " + err.Error())
+		} else if len(keys) > 0 {
+			if rerr := ring.Replace(keys); rerr != nil {
+				h.logger.Error("重建凭据 Ring 失败（fail-closed）", "error", rerr)
+				panic("重建凭据 Ring 失败: " + rerr.Error())
+			}
+			h.logger.Info("已从凭据 store 载入", "keys", len(keys))
+		}
+	}
+	if ring.Len() == 0 && h.credentialTTLEnabled() {
+		if err := h.generateBootstrapCredential(ring, store); err != nil {
+			// 首启 anonymous 生成失败（crypto/rand / 落盘异常）是致命装配错误：拒绝启动。
+			h.logger.Error("首次启动生成 anonymous 凭据失败", "error", err)
+			panic("首次启动生成 anonymous 凭据失败: " + err.Error())
+		}
+	}
+	h.credentialRing = ring
+	h.credentialStore = store
+}
+
+// credentialTTLEnabled 判断是否允许首启 anonymous 生成（cfg.CredentialTTL>=0）。
+func (h *Handlers) credentialTTLEnabled() bool {
+	if cfg := h.cfgPtr.Load(); cfg != nil {
+		return cfg.CredentialTTL >= 0
+	}
+	return true
+}
+
+// generateBootstrapCredential 生成首启 anonymous 凭据（委托包级 bootstrapGenerate）。
+func (h *Handlers) generateBootstrapCredential(ring *accesskey.Ring, store *CredentialStore) error {
+	ttl := 30 * 24 * time.Hour
+	if cfg := h.cfgPtr.Load(); cfg != nil && cfg.CredentialTTL > 0 {
+		ttl = cfg.CredentialTTL
+	}
+	return bootstrapGenerate(ring, store, ttl, h.logger)
+}
+
+// BootstrapServerCredentials 是生产装配入口：为服务端准备凭据 Ring + store
+// （供 cmd/sproxy 在 RegisterRoutes 与 hub 装配之前调用，随后把二者注入 opts）。
+//   - store = <storage_root>/anonymous/meta/credentials.json（服务端级全局凭据，
+//     anonymous 租户的 meta 桶；多租户部署如需 per-owner 凭据经 /api/credentials
+//     管理，见任务 5）；
+//   - 载入既有快照；仍空且 cfg.CredentialTTL>=0 → 生成首启 anonymous 凭据并持久化。
+func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ring, *CredentialStore, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	store := NewCredentialStore(filepath.Join(cfg.StorageRoot, anonymousOwner, "meta"))
+	ring := accesskey.NewRing()
+	if keys, err := store.Load(); err != nil {
+		return nil, nil, fmt.Errorf("载入凭据 store 失败（fail-closed）: %w", err)
+	} else if len(keys) > 0 {
+		if rerr := ring.Replace(keys); rerr != nil {
+			return nil, nil, fmt.Errorf("重建凭据 Ring 失败: %w", rerr)
+		}
+		logger.Info("已从凭据 store 载入", "keys", len(keys), "path", store.path)
+	}
+	if ring.Len() == 0 && cfg.CredentialTTL >= 0 {
+		ttl := 30 * 24 * time.Hour
+		if cfg.CredentialTTL > 0 {
+			ttl = cfg.CredentialTTL
+		}
+		if err := bootstrapGenerate(ring, store, ttl, logger); err != nil {
+			return nil, nil, fmt.Errorf("首次启动生成 anonymous 凭据失败: %w", err)
+		}
+	}
+	return ring, store, nil
+}
+
+// bootstrapGenerate 生成首启 anonymous 凭据：
+//   - AK = ak-<32hex>（16B 随机）、SK = 32B 随机 hex（与 pkg/accesskey.GeneratePair 同款）；
+//   - kind=plain、ExpiresAt=now+ttl、Meta{Type:"bootstrap"}；
+//   - 写入 Ring 并持久化，slog.Info 输出 AK 提示妥善保存。
+func bootstrapGenerate(ring *accesskey.Ring, store *CredentialStore, ttl time.Duration, logger *slog.Logger) error {
+	ak, skHexStr, err := GenerateBootstrapCredential()
+	if err != nil {
+		return err
+	}
+	sk, derr := hex.DecodeString(skHexStr)
+	if derr != nil || len(sk) != 32 {
+		return fmt.Errorf("生成 anonymous SK 解码失败: %v", derr)
+	}
+	if uerr := ring.UpsertAK(ak, "anonymous"); uerr != nil {
+		return fmt.Errorf("登记 anonymous AK 失败: %w", uerr)
+	}
+	if _, aerr := ring.AddKey(ak, sk,
+		accesskey.WithExpiresAt(time.Now().Add(ttl)),
+		accesskey.WithMeta(accesskey.Meta{Type: "bootstrap"}),
+	); aerr != nil {
+		return fmt.Errorf("追加 anonymous SK 失败: %w", aerr)
+	}
+	if store != nil {
+		if serr := store.Save(ring.Snapshot()); serr != nil {
+			return fmt.Errorf("持久化 anonymous 凭据失败: %w", serr)
+		}
+	}
+	logger.Info("首次启动已生成 anonymous 凭据（AK=...），请妥善保存并尽快登记正式用户", "ak", ak)
+	return nil
+}
+
+// bestFirstCredential 返回 Ring 中首个可用（alive）AK 及其 64-hex SK。
+// 供 xfer listener 装配（取代 cfg.AccessKeys[0]）使用。ring 为空 / 无可存活着
+// 返回 ("", "", false)。
+func bestFirstCredential(ring *accesskey.Ring) (ak, skHexStr string, ok bool) {
+	if ring == nil {
+		return "", "", false
+	}
+	for _, k := range ring.Snapshot() {
+		if e := ring.CoreEntry(k.AK); e != nil {
+			return k.AK, skHex(e.SK), true
+		}
+	}
+	return "", "", false
 }
 
 // Close 释放 Handlers 持有的后台资源：停止 UploadStore 的 persist/cleanup goroutine 和 StorageManager 的定期扫描。

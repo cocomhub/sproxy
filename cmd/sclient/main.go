@@ -3,7 +3,10 @@
 
 package main
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 var (
 	Version = "dev"
@@ -12,6 +15,7 @@ var (
 
 func main() {
 	if err := Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "sclient:", err)
 		os.Exit(1)
 	}
 }

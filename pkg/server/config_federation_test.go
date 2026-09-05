@@ -85,7 +85,7 @@ func TestFederationConfig_Validate_BadPeerSKHex(t *testing.T) {
 		{
 			ID:              "peer-local",
 			URL:             "http://127.0.0.1:18083",
-			AccessKey:       "sk-0123456789abcdef",
+			AccessKey:       "ak-0123456789abcdef",
 			AccessKeySecret: "not-hex-not-64",
 		},
 	}
@@ -105,7 +105,7 @@ func TestFederationConfig_Validate_RemotePeerWithCreds(t *testing.T) {
 		{
 			ID:              "peer-remote",
 			URL:             "https://hub.example.com:18083",
-			AccessKey:       "sk-0123456789abcdef",
+			AccessKey:       "ak-0123456789abcdef",
 			AccessKeySecret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		},
 	}
@@ -170,7 +170,7 @@ func TestFederationConfig_Validate_RemoteInsecureRejected(t *testing.T) {
 		{
 			ID:                 "peer-remote",
 			URL:                "https://192.168.1.100:18083",
-			AccessKey:          "sk-0123456789abcdef",
+			AccessKey:          "ak-0123456789abcdef",
 			AccessKeySecret:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 			InsecureSkipVerify: true,
 		},
@@ -229,7 +229,7 @@ func TestFederationConfig_Validate_CAFileNotExist(t *testing.T) {
 			ID:              "peer-local",
 			URL:             "https://127.0.0.1:18083",
 			CAFile:          filepath.Join(t.TempDir(), "does-not-exist.pem"),
-			AccessKey:       "sk-0123456789abcdef",
+			AccessKey:       "ak-0123456789abcdef",
 			AccessKeySecret: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		},
 	}

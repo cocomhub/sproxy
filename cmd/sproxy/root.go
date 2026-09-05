@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/server/syncmgr"
@@ -86,7 +87,7 @@ func init() {
 	rootCmd.Flags().String(flagStorageRoot, "./storage", "存储根目录")
 	rootCmd.Flags().Bool(flagVersion, false, "打印版本与构建信息后退出")
 	rootCmd.Flags().Bool(flagNoTLS, false, "禁用 TLS（覆盖 tls.enabled 配置）")
-	rootCmd.Flags().Bool(flagAllowNoAuth, false, "允许无认证启动（无 access_keys/api_keys；仅限本地调试，生产勿用））")
+	rootCmd.Flags().Bool(flagAllowNoAuth, false, "允许无认证启动（无任何凭据 api_keys/store 时回环调试放行；仅限本地调试，生产勿用）")
 
 	rootCmd.AddCommand(NewVersionSubcommand())
 }
@@ -103,19 +104,14 @@ func runServer(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	// fail-fast：无 access_keys 且 api_keys 未启用时拒绝启动（无法提供认证）。
-	// --allow-no-auth 显式跳过（本地无认证调试/开发，Web UI 无凭据直连仍需可用）。
-	if len(cfg.AccessKeys) == 0 && !cfg.APIKeys.Enabled {
-		allow, _ := cmd.Flags().GetBool(flagAllowNoAuth)
-		if !allow {
-			return fmt.Errorf("拒绝启动：未配置 access_keys（且 api_keys 未启用），无法提供认证")
-		}
-		slog.Warn("无 access_keys/api_keys——以允许无认证模式启动（请仅用于本地调试，勿在生产开放）")
-	}
-	// M-8：api_keys-only（多用户 Bearer）下隧道/hub 不可用——隧道密钥由 access_keys 派生、
-	// hub 注册由 access_keys 准入。启用 hub 时强制 access_keys 非空，消除功能死角。
-	if cfg.Hub.Enabled && len(cfg.AccessKeys) == 0 {
-		return fmt.Errorf("拒绝启动：hub.enabled=true 但未配置 access_keys，中继节点注册需要 SproxySig 准入")
+	// 凭据 store 化装配：SproxySig 权威表 = Ring（取代 yaml access_keys）。
+	// 载入 <storage_root>/anonymous/meta/credentials.json；首启（ring 空）生成
+	// anonymous 凭据并持久化——**新部署必有可访问凭据**，不再 fail-fast 拒启。
+	// cfg.CredentialTTL<0 时跳过首启生成（显式禁用，零信任脚本场景）。
+	// api_keys.enabled 时 Ring 仍装配（hub 准入与隧道派生仍需 AK/SK）。
+	credRing, credStore, err := server.BootstrapServerCredentials(cfg, slog.Default())
+	if err != nil {
+		return fmt.Errorf("装配凭据 Ring 失败: %w", err)
 	}
 	cfgPtr.Store(cfg)
 
@@ -179,13 +175,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 			}
 		}
 		// 节点注册准入：SproxySig AccessKey + HMAC proof（共享 token 已废除）。
-		// hub 准入凭据来自顶层 access_keys 配置，转换后交给 hub.Authenticator。
-		// ws 与 tcp 传输共用同一 HubServer（同一路由表/信号量/鉴权器）。
-		aks := make([]hub.AccessKey, 0, len(cfg.AccessKeys))
-		for _, k := range cfg.AccessKeys {
-			aks = append(aks, hub.AccessKey{Key: k.Key, Secret: k.Secret})
-		}
-		hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(aks), logger.With("component", "hub"), cfg.Hub.MaxConnections)
+		// hub 与 HTTP 面共用同一个凭据 Ring（credRing，单一事实源）：
+		// rotate / 过期在 ring 上动态生效，无需在 hub 侧做任何同步。
+		hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(credRing), logger.With("component", "hub"), cfg.Hub.MaxConnections)
 		// 虚拟 IP 分配：按 hub.virtual_subnet 配置的子网构建分配器（默认 CGNAT
 		// 100.64.0.0/10，config.Validate 已保证 IPv4）。分配权在 hub，节点不可自选。
 		// S-5：防御兜底同时覆盖非法 CIDR 与 IPv6（NewHubAllocator 对非 IPv4 panic，
@@ -254,7 +246,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// 对端 hub 节点表（联邦候选），/api/hub/nodes 合并（路由表权威 +
 		// DHT + 联邦候选，去重）。入站端点 /api/hub/federation/nodes 由
 		// RegisterRoutes 在 hub.enabled 且 federation.enabled 时注册。
-		// 拉取认证复用 SproxySig AccessKey（对端 hub 配置的 access_keys）；
+		// 拉取认证复用 SproxySig AccessKey（对端 hub 凭据 Ring 登记的 AK/SK）；
 		// peer URL 为空回落默认 loopback（远程 peering 需显式配置，见
 		// Config.Validate）。联邦只提供发现/可达性，不改路由表状态。
 		// federation.persist_file 非空时启用候选持久化（重启后恢复上次同步的
@@ -267,6 +259,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 					URL:                p.URL,
 					AccessKey:          p.AccessKey,
 					AccessKeySecret:    p.AccessKeySecret,
+					AccessKeyID:        p.AccessKeyID,
 					CAFile:             p.CAFile,
 					InsecureSkipVerify: p.InsecureSkipVerify,
 				})
@@ -336,6 +329,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 		HubPersist:          persist,
 		HubRestoredMessages: restoredMsgs,
 		Tracer:              tracer,
+		CredentialRing:      credRing,
+		CredentialStore:     credStore,
 	})
 	if hubDHT != nil {
 		h.SetDHT(hubDHT) // /api/hub/nodes 合并 DHT 候选节点（发现源：路由表权威 + DHT 候选）
@@ -355,8 +350,8 @@ func runServer(cmd *cobra.Command, args []string) error {
 	// 必须在 RegisterRoutes 之后启动（handler 彼时才构造）。注意用 LocalHandler() 而非
 	// TunnelHandler()：xfer 隧道 handleStream 已解密请求体为明文，TunnelHandler() 是传统
 	// POST /tunnel 的外层帧解密器（期望 ctx 带派生密钥 + 帧 body），直接使用会 401。
-	// fail-closed：xfer 段启用但装配失败（无 access_keys / 无证书）→ 拒绝启动。
-	if _, err := startXferListener(ctx, cfg, h.LocalHandler(), logger); err != nil {
+	// fail-closed：xfer 段启用但装配失败（无有效凭据 Ring / 无证书）→ 拒绝启动。
+	if _, err := startXferListener(ctx, cfg, credRing, h.LocalHandler(), logger); err != nil {
 		return err
 	}
 	// 文件同步 SyncManager：配置了 sync（sync.max_concurrent 或 sync_remotes 非空）时装配。
@@ -366,6 +361,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		for _, r := range cfg.SyncRemotes {
 			remotes = append(remotes, syncmgr.RemoteConfig{
 				Name: r.Name, URL: r.URL, AccessKey: r.AccessKey, AccessKeySecret: r.AccessKeySecret,
+				AccessKeyID: r.AccessKeyID,
 			})
 		}
 		// P4/P5：quota 以 nil 注入（NewManager 内部回退 noop），随后 SetQuotaResolver 注入
@@ -442,14 +438,15 @@ type xferListenerInfo struct {
 // tunnelHandler 是 server.RegisterRoutes 构造的 localApiHandler（本地文件 API）。
 //
 // 关键正确性点：
-//   - 握手密钥 = server.HubXferKey(cfg)（AD-3：access_keys 首对 SK + mesh 派生，与客户端一致）；
+//   - 握手密钥 = server.HubXferKey(cfg, ring)（AD-3：凭据 Ring 首个存活条目 SK + mesh
+//     派生，与客户端一致）；
 //   - 服务端身份 = server.LoadXferIdentity(cfg)（AD-4：Ed25519，指纹供客户端 pin）；
-//   - fail-closed：xfer 段启用但无 access_keys / 无证书 → 返回 error（拒绝启动）；
+//   - fail-closed：xfer 段启用但 Ring 无有效凭据 / 无证书 → 返回 error（拒绝启动）；
 //   - 默认绑 loopback（127.0.0.1:<port>），远程可达须显式 listen；
 //   - 连接并入数量上限（cfg.Hub.MaxConnections 信号量）；**不注册路由表**（xfer 是
 //     文件 API 隧道面，非中继节点面，不参与节点注册/VIP/DHT——hub 的 TryHandleConn
 //     走注册帧语义，与 xfer 隧道帧不兼容，故独立信号量控制并发）。
-func startXferListener(ctx context.Context, cfg *server.Config, tunnelHandler http.Handler, logger *slog.Logger) ([]xferListenerInfo, error) {
+func startXferListener(ctx context.Context, cfg *server.Config, ring *accesskey.Ring, tunnelHandler http.Handler, logger *slog.Logger) ([]xferListenerInfo, error) {
 	var infos []xferListenerInfo
 	if cfg == nil {
 		return nil, fmt.Errorf("start xfer listener: 配置为 nil")
@@ -462,8 +459,8 @@ func startXferListener(ctx context.Context, cfg *server.Config, tunnelHandler ht
 	if !xferTLS.Enabled && !xferTCP.Enabled {
 		return infos, nil // 未启用 xfer listener：无操作
 	}
-	// fail-closed：xfer listener 需要 access_keys 首对派生隧道密钥（AD-3）。
-	key, err := server.HubXferKey(cfg)
+	// fail-closed：xfer listener 需要凭据 Ring 首个有效条目派生隧道密钥（AD-3）。
+	key, err := server.HubXferKey(cfg, ring)
 	if err != nil {
 		return nil, fmt.Errorf("start xfer listener: %w", err)
 	}

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
 
@@ -35,12 +36,6 @@ const RegisterProofV2Context = "sproxy-hub-register/v2"
 // registerProofMaxAge 是注册证明 ts 的最大新鲜度窗口。
 // 客户端与服务端时钟偏差 + 传输延迟；窗口内允许，超出拒绝。
 const registerProofMaxAge = 5 * time.Minute
-
-// AccessKey 是 hub 准入用的 SproxySig 凭据（hub 包自建，勿 import pkg/server）。
-type AccessKey struct {
-	Key    string
-	Secret string
-}
 
 // ErrInvalidAccessKey 是 AK 未命中或 accessKeys 未配置（fail-closed）时返回的哨兵错误。
 var ErrInvalidAccessKey = errors.New("invalid access key")
@@ -72,39 +67,34 @@ func ComputeRegisterProof(skHex, nodeID string, ts int64, nonce string) (string,
 }
 
 // Authenticator 验证节点注册的 SproxySig AccessKey + HMAC proof（v2，含 ts/nonce 防重放）。
-// fail-closed：accessKeys 为空时拒绝所有注册。
+// 凭据来自共享的 *accesskey.Ring（与 HTTP 认证同源，单一事实源）：
+// rotate / 过期在 ring 上动态生效，无需 SetAccessKeys 同步。
+// fail-closed：ring 为空或 AK 无存活条目时拒绝所有注册。
 type Authenticator struct {
-	accessKeys []AccessKey
-	noncePool  *sproxysig.NoncePool
+	ring      *accesskey.Ring
+	noncePool *sproxysig.NoncePool
 }
 
-// NewAuthenticator 创建鉴权器。accessKeys 为空时创建 fail-closed 鉴权器（拒绝所有注册）。
-func NewAuthenticator(accessKeys []AccessKey) *Authenticator {
+// NewAuthenticator 创建鉴权器。ring 为 nil 时视为空 ring（fail-closed，拒绝所有注册）。
+func NewAuthenticator(r *accesskey.Ring) *Authenticator {
+	if r == nil {
+		r = accesskey.NewRing()
+	}
 	return &Authenticator{
-		accessKeys: accessKeys,
-		noncePool:  sproxysig.NewNoncePool(),
+		ring:      r,
+		noncePool: sproxysig.NewNoncePool(),
 	}
 }
 
 // Authenticate 验证 AK、HMAC proof 与新鲜度：
-//  1. 空 accessKeys → ErrInvalidAccessKey（fail-closed）
-//  2. 遍历按 Key constant-time 匹配；未命中 → ErrInvalidAccessKey
-//  3. |now−ts| > registerProofMaxAge → ErrStaleRegisterProof（防重放）
-//  4. nonce 已用过 → ErrReplayRegisterNonce（防重放）
-//  5. 命中 → 用 Secret 重算 ComputeRegisterProof(secret, nodeID, ts, nonce)，与 proof constant-time 比对；
-//     不匹配 → ErrInvalidAccessKeyProof；匹配 → nil
+//  1. ring 为空或 AK 无存活条目（CoreEntry 为 nil）→ ErrInvalidAccessKey（fail-closed）
+//  2. |now−ts| > registerProofMaxAge → ErrStaleRegisterProof（防重放）
+//  3. nonce 已用过 → ErrReplayRegisterNonce（防重放）
+//  4. 命中 → 用 entry.Secret 重算 ComputeRegisterProof(secret, nodeID, ts, nonce)，
+//     与 proof constant-time 比对；不匹配 → ErrInvalidAccessKeyProof；匹配 → nil
 func (a *Authenticator) Authenticate(ak, proof, nodeID string, ts int64, nonce string) error {
-	if len(a.accessKeys) == 0 {
-		return ErrInvalidAccessKey
-	}
-	var matched *AccessKey
-	for i := range a.accessKeys {
-		if subtle.ConstantTimeCompare([]byte(ak), []byte(a.accessKeys[i].Key)) == 1 {
-			matched = &a.accessKeys[i]
-			break
-		}
-	}
-	if matched == nil {
+	entry := a.ring.CoreEntry(ak)
+	if entry == nil {
 		return ErrInvalidAccessKey
 	}
 	now := time.Now().UnixMilli()
@@ -114,7 +104,7 @@ func (a *Authenticator) Authenticate(ak, proof, nodeID string, ts int64, nonce s
 	if a.noncePool.Seen(ak, nonce, now+registerProofMaxAge.Milliseconds()) {
 		return ErrReplayRegisterNonce
 	}
-	want, err := ComputeRegisterProof(matched.Secret, nodeID, ts, nonce)
+	want, err := ComputeRegisterProof(hex.EncodeToString(entry.SK), nodeID, ts, nonce)
 	if err != nil {
 		return ErrInvalidAccessKeyProof
 	}

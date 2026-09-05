@@ -26,8 +26,9 @@ import (
 type HTTPTransportConfig struct {
 	BaseURL         string                                      // 远程 sproxy 基址（如 http://127.0.0.1:18083）
 	Dial            func(ctx context.Context) (net.Conn, error) // 返回经 mesh 到远程 sproxy 端口的 TCP 流
-	AccessKey       string                                      // SproxySig AK（远程配置 access_keys 时必填）
+	AccessKey       string                                      // SproxySig AK（远程服务端凭据 Ring 登记了该 AK/SK 时必填）
 	AccessKeySecret string
+	AccessKeyID     string // SproxySig SK 条目 ID（skey-id，v2 必传；凭据 Ring 非空时必填）
 	Logger          *slog.Logger
 	// ResponseHeaderTimeout 等待响应头的超时；0 时默认 30s。
 	ResponseHeaderTimeout time.Duration
@@ -110,6 +111,7 @@ func NewHTTPTransport(cfg HTTPTransportConfig) (*HTTPTransport, error) {
 	fc := client.NewFileClient(cfg.BaseURL,
 		client.WithHTTPClient(hc),
 		client.WithAccessKey(cfg.AccessKey, cfg.AccessKeySecret),
+		client.WithAccessKeyID(cfg.AccessKeyID),
 		client.WithLogger(logger),
 	)
 	t.client = fc

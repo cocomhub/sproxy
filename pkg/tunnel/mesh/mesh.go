@@ -244,6 +244,8 @@ type AutoRegisterParams struct {
 	AccessKey string
 	// AccessKeySecret 是 SproxySig AccessKeySecret（本地密钥，仅计算签名与注册证明，永不上线）。
 	AccessKeySecret string
+	// AccessKeyID 是 SproxySig SK 条目 ID（skey-id，v2 协议必传——信令/节点列表签名用）。
+	AccessKeyID string
 	// NodeID 是节点 ID 基础（为空回落主机名）。
 	NodeID string
 	// Prefix 是临时 node 前缀："mesh" | "p2p"。
@@ -354,6 +356,7 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	m := mux.New(conn, mux.RoleListener)
 	signaler := hub.NewHubSignaler(httpBase, p.AccessKey, nodeID, ackFull.Secret)
 	signaler.SetAccessKeySecret(p.AccessKeySecret)
+	signaler.SetAccessKeyID(p.AccessKeyID)
 	signaler.SetContext(ctx)
 	if p.Insecure {
 		signaler.SetHTTPClient(client.InsecureHTTPClient())

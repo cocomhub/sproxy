@@ -17,7 +17,6 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
 	"github.com/cocomhub/sproxy/pkg/storage"
-	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"gopkg.in/yaml.v3"
 )
@@ -90,7 +89,7 @@ type VersionConfig struct {
 // 安全边界：默认绑定 **loopback**（127.0.0.1）——裸 TCP 中继是网络面服务，全接口
 // 绑定意味着任意网卡可达（属 SSRF/暴露面攻击目标）；远程节点可达需显式配置
 // `listen: ":18084"` 或具体网卡 IP。注册准入由 SproxySig AccessKey + HMAC proof
-// 保证（fail-closed：未配置 access_keys 时 hub 拒绝所有注册）。
+// 保证（fail-closed：凭据 Ring 空时 hub 拒绝所有注册）。
 const DefaultHubTCPListen = "127.0.0.1:18084"
 
 // DefaultXferTCPListen 是 xfer_tcp 明文 listener 的默认监听地址
@@ -107,7 +106,7 @@ const DefaultXferTCPListen = "127.0.0.1:18086"
 const DefaultXferTLSListen = "127.0.0.1:18087"
 
 // HubConfig 配置 Hub 中继系统。
-// 节点注册准入由顶层 access_keys 提供（SproxySig AccessKey + HMAC proof），
+// 节点注册准入由凭据 Ring 提供（SproxySig AccessKey + HMAC proof），
 // hub 级不再需要任何 token 配置。
 type HubConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
@@ -172,11 +171,12 @@ type FederationPeerConfig struct {
 	// URL 是对端节点表端点基址（如 http://127.0.0.1:18083）。为空回落默认
 	// loopback（http://127.0.0.1:18083）——远程 peering 必须显式配置 URL。
 	URL string `yaml:"url" mapstructure:"url"`
-	// AccessKey / AccessKeySecret 是对端 hub 认可的 SproxySig 凭据。
-	// 目标 hub 配置了 access_keys 时必填；远程 peering（URL host 非 loopback）
-	// 由 Validate 强制要求（fail-closed）。
+	// AccessKey / AccessKeySecret / AccessKeyID 是对端 hub 认可的 SproxySig 凭据
+	// （AccessKeyID 是 SK 条目 skeyID，v2 协议必传）。目标 hub 凭据 Ring 非空时
+	// 必填；远程 peering（URL host 非 loopback）由 Validate 强制要求（fail-closed）。
 	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
 	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
+	AccessKeyID     string `yaml:"access_key_id" mapstructure:"access_key_id"`
 	// CAFile 是对端 hub 的 TLS 受信 CA 证书文件路径（PEM）。非空时用该 CA 构建
 	// 专属证书池严格校验对端证书（InsecureSkipVerify=false，ServerName 由 URL host
 	// 自动校验）——自签 hub 的远程 peering 应配置 ca_file（受信 CA）而非跳过校验。
@@ -267,6 +267,14 @@ type SyncRemoteConfig struct {
 	URL             string `yaml:"url" mapstructure:"url"`
 	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
 	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
+	AccessKeyID     string `yaml:"access_key_id" mapstructure:"access_key_id"`
+}
+
+// RegistrationConfig 是注册（凭据登记）相关配置。
+// Disable 缺省 false = 允许注册（默认，首启 anonymous 凭据生成）；true = 禁止注册
+// （仅存量用户，无法新增用户）。字段命名避免"allow=false 表示允许"的反直觉语义。
+type RegistrationConfig struct {
+	Disable bool `yaml:"disable" mapstructure:"disable"`
 }
 
 type Config struct {
@@ -298,10 +306,16 @@ type Config struct {
 	Telemetry OTELConfig `yaml:"telemetry" mapstructure:"telemetry"`
 	CORS      CORSConfig `yaml:"cors" mapstructure:"cors"`
 
-	// AccessKeys 是 SproxySig 请求签名认证的 AccessKey 配置（每 mesh 一对；
-	// 替代旧 auth_token 明文 Bearer）。任一已配置即所有 HTTP 面（文件/信令/
-	// 节点列表/服务发现）要求 SproxySig 签名。hub 侧为多 mesh 时配置多对。
-	AccessKeys []AccessKeyConfig `yaml:"access_keys" mapstructure:"access_keys"`
+	// 注册/无认证兜底配置（凭据 store 化后取代 yaml access_keys）：
+	//   - Registration.Disable 为 false（缺省）= 允许注册；true = 禁止注册（仅存量用户）。
+	//     anonymous 首启生成由 credentialRing.Len()==0 触发（见 RegisterRoutes），
+	//     Disable 不阻止 anonymous 生成——它是新部署可访问凭据的保证。
+	//   - AllowInsecureLoopback 仅用于无任何凭据（ring 空）时的本地调试：放行
+	//     loopback 来源的 GET/HEAD，其余 401。生产勿开。
+	//   - CredentialTTL 是首启 anonymous 凭据的有效期（默认 30d）。
+	Registration          RegistrationConfig `yaml:"registration" mapstructure:"registration"`
+	AllowInsecureLoopback bool               `yaml:"allow_insecure_loopback" mapstructure:"allow_insecure_loopback"`
+	CredentialTTL         time.Duration      `yaml:"credential_ttl" mapstructure:"credential_ttl"`
 
 	// 分块上传配置
 	ChunkSize        int64         `yaml:"chunk_size" mapstructure:"chunk_size"`
@@ -383,6 +397,9 @@ func Default() *Config {
 		CORS: CORSConfig{
 			MaxAge: defaultMaxAge,
 		},
+		Registration:          RegistrationConfig{Disable: false},
+		CredentialTTL:         30 * 24 * time.Hour, // 首启 anonymous 凭据有效期
+		AllowInsecureLoopback: false,
 		Web: WebConfig{
 			Tunnel: true,
 		},
@@ -462,6 +479,9 @@ func (c *Config) SetDefaults() {
 	if c.CloudFailedTaskTTL <= 0 {
 		c.CloudFailedTaskTTL = 1 * time.Hour
 	}
+	if c.CredentialTTL == 0 {
+		c.CredentialTTL = 30 * 24 * time.Hour
+	}
 	if c.Sync.MaxConcurrent <= 0 {
 		c.Sync.MaxConcurrent = 3
 	}
@@ -516,7 +536,7 @@ func (c *Config) Validate() error {
 	if c.Audit.BufferSize < 0 {
 		return fmt.Errorf("audit.buffer_size 不能为负，当前 %d（0=关闭，正整数=环形缓冲容量）", c.Audit.BufferSize)
 	}
-	// 无 auth 配置（access_keys/api_keys 均为空）在 Validate 层是合法的——
+	// 无 auth 配置（凭据 Ring / api_keys 均空）在 Validate 层是合法的——
 	// fail-fast 拒绝启动在 cmd/sproxy 侧执行。
 	if c.APIKeys.Enabled && len(c.APIKeys.Keys) == 0 {
 		return fmt.Errorf("api_keys.enabled=true 但未配置任何密钥，认证将拒绝所有请求")
@@ -575,29 +595,6 @@ func (c *Config) Validate() error {
 		}
 		if limit < 0 {
 			return fmt.Errorf("bucket_limits[%q] 上限 %d 非法：配额上限不能为负", path, limit)
-		}
-	}
-	// access_keys 校验（I-1/I-2）：Key 非空、Key 唯一、Secret 为 64 hex（32B）、
-	// mesh_id 与 AK 内嵌 mesh 一致（防配置漂移导致两端隧道派生密钥不匹配）。
-	seenAccessKeys := make(map[string]struct{}, len(c.AccessKeys))
-	for i, k := range c.AccessKeys {
-		if k.Key == "" {
-			return fmt.Errorf("access_keys[%d].key 为空，密钥不能为空字符串", i)
-		}
-		if _, dup := seenAccessKeys[k.Key]; dup {
-			return fmt.Errorf("access_keys[%d].key %q 重复", i, k.Key)
-		}
-		seenAccessKeys[k.Key] = struct{}{}
-		if len(k.Secret) != 64 {
-			return fmt.Errorf("access_keys[%d].secret 必须为 64 个十六进制字符（32 字节 AES 密钥源），got %d 字符", i, len(k.Secret))
-		}
-		if _, err := hex.DecodeString(k.Secret); err != nil {
-			return fmt.Errorf("access_keys[%d].secret 不是合法十六进制: %v", i, err)
-		}
-		if k.MeshID != "" {
-			if mesh := tunnel.AccessKeyMesh(k.Key); mesh != "" && mesh != k.MeshID {
-				return fmt.Errorf("access_keys[%d].mesh_id %q 与 AK 内嵌 mesh %q 不一致（sclient 按 AK 解析 mesh 派生隧道密钥）", i, k.MeshID, mesh)
-			}
 		}
 	}
 	if c.RateLimit.Enabled && c.RateLimit.Requests <= 0 {
@@ -683,7 +680,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("hub.federation.peers[%d].url %q 为远程地址，远程 peering 必须同时配置 access_key 与 access_key_secret", i, p.URL)
 			}
 			if p.AccessKeySecret != "" {
-				// 与顶层 access_keys 的校验一致：SK 必须为 64 hex（32 字节 HMAC 密钥源）。
+				// 与凭据 SK 的校验一致：SK 必须为 64 hex（32 字节 HMAC 密钥源）。
 				if len(p.AccessKeySecret) != 64 {
 					return fmt.Errorf("hub.federation.peers[%d].access_key_secret 必须为 64 个十六进制字符（32 字节），got %d 字符", i, len(p.AccessKeySecret))
 				}
@@ -718,7 +715,7 @@ func (c *Config) Validate() error {
 	}
 	// sync_remotes 校验：URL 合法（http/https + host）、name 唯一非空。
 	// 凭据 fail-closed 在 SyncManager.CreateTask 层执行（Validate 不要求凭据——
-	// 允许配置空凭据的 remote 供未启用 access_keys 的远程节点使用，创建任务时才拒绝）。
+	// 允许配置空凭据的 remote 供未登记凭据的远程节点使用，创建任务时才拒绝）。
 	seenSyncRemoteNames := make(map[string]struct{}, len(c.SyncRemotes))
 	for i, r := range c.SyncRemotes {
 		if r.Name == "" {

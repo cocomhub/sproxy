@@ -33,6 +33,7 @@ func TestUpload_Tunnel_ServerDoesNotReadBody_NoDeadlock(t *testing.T) {
 
 	c := NewFileClient(ts.URL,
 		WithTunnel(testTunnelAK, testTunnelSK),
+		WithAccessKeyID(testTunnelAKID),
 		WithTimeout(2*time.Second),
 	)
 

@@ -244,22 +244,29 @@ func TestBuildServerConfig_NoTLSFlagDefaults(t *testing.T) {
 	}
 }
 
-// ---- 认证 fail-fast 测试 ----
+// ---- 认证凭据装配测试 ----
 
-// TestRunServer_RejectsStartupWithoutAuth 验证 fail-fast：无 access_keys 且 api_keys
-// 未启用时，runServer 直接返回错误拒绝启动（认证驱动隧道要求）。
-func TestRunServer_RejectsStartupWithoutAuth(t *testing.T) {
+// TestRunServer_BootstrapsCredentialsOnStart 验证凭据 store 化后的启动行为：
+// 未配置任何凭据（无 access_keys、api_keys 未启用）时**不再 fail-fast**——
+// 首启自动生成 anonymous 凭据并持久化到 <storage_root>/anonymous/meta/credentials.json，
+// 服务器正常启动（新部署必有可访问凭据）。
+func TestRunServer_BootstrapsCredentialsOnStart(t *testing.T) {
 	cfgPtr.Store(nil)
 	cfgProvider = nil
 
+	storageTmp := t.TempDir()
 	oldCfgFile := cfgFile
 	cfgFile = filepath.Join(t.TempDir(), "sproxy.yaml")
 	t.Cleanup(func() { cfgFile = oldCfgFile })
 
+	sigCh := make(chan os.Signal, 1)
+	testSignalCh = sigCh
+	t.Cleanup(func() { testSignalCh = nil })
+
 	cmd := &cobra.Command{}
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
 	cmd.Flags().Bool("version", false, "")
-	cmd.Flags().String("storage-root", t.TempDir(), "")
+	cmd.Flags().String("storage-root", storageTmp, "")
 	cmd.Flags().Bool("no-tls", false, "")
 	_ = cmd.Flags().Set("no-tls", "true")
 
@@ -268,17 +275,39 @@ func TestRunServer_RejectsStartupWithoutAuth(t *testing.T) {
 	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	t.Cleanup(func() { cfgProvider = nil })
 
-	err := runServer(cmd, nil)
-	if err == nil {
-		t.Fatal("runServer without access_keys should fail fast")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServer(cmd, nil)
+	}()
+
+	// 服务器应正常启动（不 fail-fast），等待就绪后发送 SIGTERM 关闭。
+	waitForConfig(t, 5*time.Second)
+	addr := cfgPtr.Load().Addr
+	waitForServerReady(t, addr, 5*time.Second)
+	sigCh <- syscall.SIGTERM
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("runServer returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not shut down within 5s")
 	}
-	if !strings.Contains(err.Error(), "拒绝启动") {
-		t.Errorf("expected fail-fast error containing '拒绝启动', got: %v", err)
+
+	// 首启 anonymous 凭据应已持久化到 <storage>/anonymous/meta/credentials.json。
+	credPath := filepath.Join(storageTmp, "anonymous", "meta", "credentials.json")
+	data, rerr := os.ReadFile(credPath)
+	if rerr != nil {
+		t.Fatalf("读取首启凭据文件: %v", rerr)
+	}
+	if !strings.Contains(string(data), "bootstrap") {
+		t.Errorf("凭据文件应含 bootstrap 元信息，实际: %s", string(data))
 	}
 }
 
-// TestRunServer_AllowNoAuthFlag 验证 --allow-no-auth 显式跳过 fail-fast：无
-// access_keys/api_keys 时仍可启动（仅限本地无认证调试，Web UI 无凭据直连需要）。
+// TestRunServer_AllowNoAuthFlag 验证 --allow-no-auth flag 兼容保留：服务器在
+// 无任何配置凭据时仍能正常启动（fail-fast 已移除，首启自动生成 anonymous 凭据；
+// flag 不再控制启动门槛，仅为历史兼容保留）。
 func TestRunServer_AllowNoAuthFlag(t *testing.T) {
 	cfgPtr.Store(nil)
 	cfgProvider = nil
@@ -301,8 +330,8 @@ func TestRunServer_AllowNoAuthFlag(t *testing.T) {
 	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	t.Cleanup(func() { cfgProvider = nil })
 
-	// runServer 会启动监听并阻塞于 shutdown——注入关闭信号使其快速返回，
-	// 验证不因 fail-fast 而拒绝（主要断言：未走到 fail-fast 错误路径）。
+	// runServer 启动监听并阻塞于 shutdown——注入关闭信号使其快速返回，
+	// 验证不因缺凭据而拒绝（主要断言：未走到 fail-fast 错误路径）。
 	done := make(chan struct{}, 1)
 	oldSignal := testSignalCh
 	testSignalCh = make(chan os.Signal, 1)
@@ -321,15 +350,20 @@ func TestRunServer_AllowNoAuthFlag(t *testing.T) {
 	}
 }
 
-// TestRunServer_HubEnabledRequiresAccessKeys 验证 M-8：api_keys-only（多用户 Bearer）
-// 下 hub 注册不可用——启用 hub 时强制要求 access_keys 非空（隧道密钥与 hub 准入都来自 access_keys）。
-func TestRunServer_HubEnabledRequiresAccessKeys(t *testing.T) {
+// TestRunServer_HubEnabledBootstrapsCreds 验证 hub.enabled=true 时即使未显式配置
+// 凭据也可启动：首启 anonymous 凭据进入 Ring，hub 准入（SproxySig）+ 隧道派生
+// 均由该凭据驱动（取代旧「hub.enabled 强制要求 access_keys」fail-fast）。
+func TestRunServer_HubEnabledBootstrapsCreds(t *testing.T) {
 	cfgPtr.Store(nil)
 	cfgProvider = nil
 
 	oldCfgFile := cfgFile
 	cfgFile = filepath.Join(t.TempDir(), "sproxy.yaml")
 	t.Cleanup(func() { cfgFile = oldCfgFile })
+
+	sigCh := make(chan os.Signal, 1)
+	testSignalCh = sigCh
+	t.Cleanup(func() { testSignalCh = nil })
 
 	cmd := &cobra.Command{}
 	cmd.Flags().String("addr", "127.0.0.1:0", "")
@@ -342,20 +376,32 @@ func TestRunServer_HubEnabledRequiresAccessKeys(t *testing.T) {
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
 	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	cfgProvider.Set("api_keys", map[string]any{"enabled": true, "keys": []map[string]any{{"key": "t1", "permission": "write"}}})
-	cfgProvider.Set("hub", map[string]any{"enabled": true})
+	cfgProvider.Set("hub", map[string]any{"enabled": true, "transports": map[string]any{"ws": map[string]any{"enabled": true}}})
 	t.Cleanup(func() { cfgProvider = nil })
 
-	err := runServer(cmd, nil)
-	if err == nil {
-		t.Fatal("hub.enabled without access_keys should fail fast")
-	}
-	if !strings.Contains(err.Error(), "hub.enabled=true") {
-		t.Errorf("expected hub access_keys error, got: %v", err)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServer(cmd, nil)
+	}()
+
+	// 用 api_keys 认证的 HTTP 请求探活（hub + xfer 正常装配即启动成功）。
+	waitForConfig(t, 5*time.Second)
+	addr := cfgPtr.Load().Addr
+	waitForServerReady(t, addr, 5*time.Second)
+	sigCh <- syscall.SIGTERM
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("hub.enabled + api_keys 应正常启动，got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not shut down within 5s")
 	}
 }
 
-// setupRunServerAuthConfig 为 runServer 测试配置 access_keys（认证驱动启动必需）
-// 与 storage_root，使服务器能通过 fail-fast 检查正常启动。
+// setupRunServerAuthConfig 为 runServer 测试准备最小可启动配置（storage_root 等）。
+// 凭据 store 化后不再注入 access_keys——首启自动生成 anonymous 凭据；api_keys
+// 可选（SignalShutdown 等测试用不带凭据的裸配置即可启动）。
 func setupRunServerAuthConfig(t *testing.T, cmd *cobra.Command) {
 	t.Helper()
 	oldCfgFile := cfgFile
@@ -366,7 +412,6 @@ func setupRunServerAuthConfig(t *testing.T, cmd *cobra.Command) {
 	cfgProvider = sproxycfg.New(cfgFile)
 	cfgProvider.BindPFlag("addr", cmd.Flags().Lookup("addr"))
 	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
-	cfgProvider.Set("access_keys", []map[string]any{{"key": "sk-test-0000000000000000", "secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mesh_id": "test"}})
 	t.Cleanup(func() { cfgProvider = nil })
 }
 

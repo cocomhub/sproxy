@@ -21,7 +21,7 @@ import (
 // newCmdMeshNode 创建 mesh node：单进程常驻 mesh 节点（注册 + 服务宣告 + 中继 +
 // webrtc 直连 + 自动重连），mesh connect 可直连优先/中继回落到达它。
 //
-// 依赖：hub 已启用中继（hub.enabled=true + access_keys 配置，注册走 SproxySig
+// 依赖：hub 已启用中继（hub.enabled=true + 凭据 Ring 已登记凭据，注册走 SproxySig
 // AccessKey + HMAC proof 准入）。--dial-allow 必须开启（mesh connect 恒发 dial 帧，
 // 出口拨号依赖它；关闭时只剩 HTTP 中继到 --local）。
 func newCmdMeshNode(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
@@ -89,13 +89,16 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 					hubURL = cfg.ServerURL
 				}
 			}
-			// SproxySig 认证 AccessKey/SK 从根 --access-key/--access-key-secret 或配置派生
-			// （信令/节点列表/网关/hub 注册准入均走签名，Secret 永不上线）。hub 注册
-			// 准入由 AutoRegister 用 SK 计算 HMAC proof（绑定 nodeID），无需共享 token。
+			// SproxySig 认证 AccessKey/SK/ID 从根 --access-key/--access-key-secret/--access-key-id
+			// 或配置派生（信令/节点列表/网关/hub 注册准入均走签名，Secret 永不上线；v2
+			// skey-id 必传——信令签名须带 access_key_id，否则 hub 验签 401 触发节点断连重连）。
+			// hub 注册准入由 AutoRegister 用 SK 计算 HMAC proof（绑定 nodeID），无需共享 token。
 			accessKeyFlag, _ := cmd.Flags().GetString("access-key")
 			accessKeySecretFlag, _ := cmd.Flags().GetString("access-key-secret")
+			accessKeyIDFlag, _ := cmd.Flags().GetString("access-key-id")
 			accessKey := client.MeshAccessKey(accessKeyFlag, cfg.AccessKey)
 			accessKeySecret := client.MeshAccessKeySecret(accessKeySecretFlag, cfg.AccessKeySecret)
+			accessKeyID := client.MeshAccessKeyID(accessKeyIDFlag, cfg.AccessKeyID)
 			if nodeID == "" {
 				nodeID = cfg.NodeID
 			}
@@ -119,6 +122,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				NodeID:            nodeID,
 				AccessKey:         accessKey,
 				AccessKeySecret:   accessKeySecret,
+				AccessKeyID:       accessKeyID,
 				Services:          svcs,
 				ServiceAddrs:      addrs,
 				Tags:              tags,

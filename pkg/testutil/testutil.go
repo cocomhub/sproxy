@@ -16,10 +16,17 @@ func TestKey() string {
 	return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 
-// TestAccessKey returns a deterministic AccessKey（sk-<no mesh>-<16B hex>）。
-// 服务端 access_keys 配置与客户端 WithTunnel(ak, sk) 共用此值，保证隧道密钥派生一致。
+// TestAccessKey returns a deterministic AccessKey（ak-<no mesh>-<32hex>）。
+// 服务端凭据 Ring（测试装配）与客户端 WithTunnel(ak, sk) 共用此值，保证隧道密钥派生一致。
+// 注意：测试固定 32hex 标准形态（前缀 ak-，2026-09-05 起统一）。
 func TestAccessKey() string {
-	return "sk-00000000000000000000000000000000"
+	return "ak-00000000000000000000000000000000"
+}
+
+// TestAccessKeyID returns a deterministic skeyID（skey-<12hex>）用于 v2 协议必传的
+// skey-id 段（与 TestAccessKey 配套；服务端测试 Ring 的 AddKey 显式 ID 用它）。
+func TestAccessKeyID() string {
+	return "skey-000000000000"
 }
 
 // SHA256Hex computes the hex-encoded SHA-256 hash of data.

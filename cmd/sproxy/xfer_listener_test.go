@@ -4,11 +4,13 @@
 package main
 
 import (
+	"encoding/hex"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -19,6 +21,23 @@ import (
 // 不真正路由；TLS/mux 握手装配正确性由集成测试覆盖）。
 func xferTestHandler() http.Handler {
 	return http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+}
+
+// xferTestRing 构造含 testutil.TestAccessKey/TestKey 的凭据 Ring（xfer 测试注入）。
+func xferTestRing(t *testing.T) *accesskey.Ring {
+	t.Helper()
+	ring := accesskey.NewRing()
+	sk, err := hex.DecodeString(testutil.TestKey())
+	if err != nil || len(sk) != 32 {
+		t.Fatalf("TestKey 非法: %v", err)
+	}
+	if err := ring.UpsertAK(testutil.TestAccessKey(), "test"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	if _, err := ring.AddKey(testutil.TestAccessKey(), sk); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	return ring
 }
 
 // genTestCertFiles 生成自签证书文件（cert.pem/key.pem），供 xfer_tls 装配测试使用。
@@ -38,9 +57,6 @@ func genTestCertFiles(t *testing.T) (certFile, keyFile string) {
 func TestStartXferListener_TLSEnabled(t *testing.T) {
 	cfg := server.Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []server.AccessKeyConfig{
-		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
-	}
 	certFile, keyFile := genTestCertFiles(t)
 	cfg.TLS.CertFile = certFile
 	cfg.TLS.KeyFile = keyFile
@@ -51,7 +67,7 @@ func TestStartXferListener_TLSEnabled(t *testing.T) {
 
 	t.Cleanup(func() { builtin.SetDefaultTLSConfig(nil) })
 
-	infos, err := startXferListener(t.Context(), cfg, xferTestHandler(), testutil.DiscardLogger())
+	infos, err := startXferListener(t.Context(), cfg, xferTestRing(t), xferTestHandler(), testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("startXferListener（xfer_tls）应成功: %v", err)
 	}
@@ -81,14 +97,11 @@ func TestStartXferListener_TLSEnabled(t *testing.T) {
 func TestStartXferListener_PlainTCP(t *testing.T) {
 	cfg := server.Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []server.AccessKeyConfig{
-		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
-	}
 	cfg.Hub.Transports.XferTCP.Enabled = true
 	cfg.Hub.Transports.XferTCP.Listen = "127.0.0.1:0"
 	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "ident", "server-identity.json")
 
-	infos, err := startXferListener(t.Context(), cfg, xferTestHandler(), testutil.DiscardLogger())
+	infos, err := startXferListener(t.Context(), cfg, xferTestRing(t), xferTestHandler(), testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("startXferListener（xfer_tcp 明文）应成功: %v", err)
 	}
@@ -107,11 +120,8 @@ func TestStartXferListener_PlainTCP(t *testing.T) {
 func TestStartXferListener_Disabled(t *testing.T) {
 	cfg := server.Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []server.AccessKeyConfig{
-		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
-	}
 
-	infos, err := startXferListener(t.Context(), cfg, xferTestHandler(), testutil.DiscardLogger())
+	infos, err := startXferListener(t.Context(), cfg, xferTestRing(t), xferTestHandler(), testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("xfer 未启用时 startXferListener 应无操作返回 nil: %v", err)
 	}
@@ -127,14 +137,14 @@ func TestStartXferListener_NoAccessKeysFails(t *testing.T) {
 	cfg.StorageRoot = t.TempDir()
 	cfg.Hub.Transports.XferTLS.Enabled = true
 	cfg.Hub.Transports.XferTLS.Listen = "127.0.0.1:0"
-	// 无 AccessKeys
+	// 无任何凭据（空 Ring）
 
-	_, err := startXferListener(t.Context(), cfg, xferTestHandler(), testutil.DiscardLogger())
+	_, err := startXferListener(t.Context(), cfg, accesskey.NewRing(), xferTestHandler(), testutil.DiscardLogger())
 	if err == nil {
-		t.Fatal("xfer listener 无 access_keys 时应拒启（fail-closed）")
+		t.Fatal("xfer listener 无凭据时应拒启（fail-closed）")
 	}
-	if !strings.Contains(err.Error(), "access_keys") {
-		t.Errorf("错误应提及 access_keys，实际 %v", err)
+	if !strings.Contains(err.Error(), "凭据") {
+		t.Errorf("错误应提及凭据，实际 %v", err)
 	}
 }
 
@@ -143,9 +153,6 @@ func TestStartXferListener_NoAccessKeysFails(t *testing.T) {
 func TestStartXferListener_NoCertFails(t *testing.T) {
 	cfg := server.Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []server.AccessKeyConfig{
-		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
-	}
 	cfg.TLS.AutoTLS = false
 	cfg.TLS.CertFile = ""
 	cfg.TLS.KeyFile = ""
@@ -153,7 +160,7 @@ func TestStartXferListener_NoCertFails(t *testing.T) {
 	cfg.Hub.Transports.XferTLS.Listen = "127.0.0.1:0"
 	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "ident", "server-identity.json")
 
-	_, err := startXferListener(t.Context(), cfg, xferTestHandler(), testutil.DiscardLogger())
+	_, err := startXferListener(t.Context(), cfg, xferTestRing(t), xferTestHandler(), testutil.DiscardLogger())
 	if err == nil {
 		t.Fatal("xfer_tls 无证书时应拒启（fail-closed）")
 	}
@@ -164,9 +171,6 @@ func TestStartXferListener_NoCertFails(t *testing.T) {
 func TestStartXferListener_XferTCPTLSUpgraded(t *testing.T) {
 	cfg := server.Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []server.AccessKeyConfig{
-		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
-	}
 	certFile, keyFile := genTestCertFiles(t)
 	cfg.TLS.CertFile = certFile
 	cfg.TLS.KeyFile = keyFile
@@ -178,7 +182,7 @@ func TestStartXferListener_XferTCPTLSUpgraded(t *testing.T) {
 
 	t.Cleanup(func() { builtin.SetDefaultTLSConfig(nil) })
 
-	infos, err := startXferListener(t.Context(), cfg, xferTestHandler(), testutil.DiscardLogger())
+	infos, err := startXferListener(t.Context(), cfg, xferTestRing(t), xferTestHandler(), testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("startXferListener（xfer_tcp + tls_enabled）应成功: %v", err)
 	}

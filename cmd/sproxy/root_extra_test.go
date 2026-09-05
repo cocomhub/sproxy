@@ -132,7 +132,6 @@ func TestRunServer_ListenAndServeError(t *testing.T) {
 	cfgProvider.BindPFlag("storage_root", cmd.Flags().Lookup("storage-root"))
 	cfgProvider.Set("addr", occupiedAddr)
 	cfgProvider.Set("storage_root", tmpDir)
-	cfgProvider.Set("access_keys", []map[string]any{{"key": "sk-test-0000000000000000", "secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "mesh_id": "test"}})
 	cfgProvider.Set("log_level", "error")
 
 	// 并发运行 server
