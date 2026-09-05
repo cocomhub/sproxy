@@ -188,6 +188,39 @@ func TestParseHeader_V2_EntryID(t *testing.T) {
 	}
 }
 
+// TestSignAndFormat_EntryID_RoundTrip：SignAndFormat 渲染的带 sk=<id> 头必须能被
+// ParseHeader 还原出正确的 EntryID，且能通过 Verify（canonical 与渲染一致性）。
+// 回归：历史 bug 曾用 Replace(" ak=", " ak="+AK+" sk="+ID) 锚点错误，把 EntryID
+// 粘连到 AK 值后形成 sk=<id><AK>，ParseHeader 解析出的 EntryID 错误、验签失配。
+// 真实消费路径（pkg/client.signRequest）的 v2 签名依赖此一致性。
+func TestSignAndFormat_EntryID_RoundTrip(t *testing.T) {
+	const (
+		ak = "sk-prod-meshA-3f8a"
+		id = "sk-abcdef012345"
+	)
+	h := buildHeader(ak, testSK, "nonce-e1", 0, DefaultExpiry, "POST", "/api/credentials/"+ak+"/renew", "", EmptyBodyHash())
+	h.EntryID = id
+	auth := SignAndFormat(testSK, h, "POST", "/api/credentials/"+ak+"/renew", "")
+	parsed, err := ParseHeader(auth)
+	if err != nil {
+		t.Fatalf("ParseHeader(%s): %v", auth, err)
+	}
+	if parsed.AK != ak {
+		t.Errorf("AK = %q, want %q（sk= 段不得粘连进 AK）", parsed.AK, ak)
+	}
+	if parsed.EntryID != id {
+		t.Errorf("EntryID = %q, want %q（sk= 段值必须只含 entryID 本身）", parsed.EntryID, id)
+	}
+	// Verify 用 baseTime 偏移后的 h 时间（避开真实 now 过期窗口）。
+	parsed2 := parsed
+	parsed2.TS = baseTime.UnixMilli()
+	parsed2.Exp = baseTime.Add(DefaultExpiry).UnixMilli()
+	parsed2.Sig = Sign(testSK, parsed2, "POST", "/api/credentials/"+ak+"/renew", "")
+	if err := Verify(testSK, parsed2, "POST", "/api/credentials/"+ak+"/renew", "", baseTime.Add(time.Minute), 0, 0, nil); err != nil {
+		t.Errorf("Verify 失败（canonical 与渲染不一致）: %v", err)
+	}
+}
+
 // TestParseHeader_V2_NoEntryID：v2 头缺省 sk=<entryID> 段时 EntryID 为空串、其余解析正确。
 func TestParseHeader_V2_NoEntryID(t *testing.T) {
 	h := buildHeader(testAK, testSK, "nonce-9", 0, DefaultExpiry, "PUT", "/a", "", EmptyBodyHash())

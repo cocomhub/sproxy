@@ -227,14 +227,18 @@ func SignRequest(req *http.Request, ak, sk string) {
 
 // SignAndFormat 用 SK 计算签名并返回完整的 Authorization 头值（SproxySig 格式）。
 // 客户端/信令共用：h 需已填 AK/TS/Exp/Nonce/BodySHA256（可选 EntryID），Sig 在此计算。
+// canonical 与渲染必须一致：canonical 的第 2 段（AK 后）是 EntryID（为空输出空行）；
+// 渲染时 sk=<entryID> 段插在 ak 段之后、ts= 之前，值只含 EntryID 本身。
 func SignAndFormat(sk string, h Header, method, path, query string) string {
 	h.Sig = Sign(sk, h, method, path, query)
 	v := Scheme + " v=" + h.Version + " ak=" + h.AK +
 		" ts=" + strconv.FormatInt(h.TS, 10) + " exp=" + strconv.FormatInt(h.Exp, 10) +
 		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
 	if h.EntryID != "" {
-		// 可选 sk=<entryID> 段插在 ak= 之后（与 canonical 段序一致）。
-		v = strings.Replace(v, " ak=", " ak="+h.AK+" sk="+h.EntryID, 1)
+		// 可选 sk=<entryID> 段插在 ak 段之后（与 canonical 段序一致）。用中间的
+		// " ts=" 作锚点精确插入——不能用 Replace(" ak=", ...)（会把 EntryID 粘连到
+		// ak 值后面，形成 sk=<entryID><AK> 的错误值）。
+		v = strings.Replace(v, " ts=", " sk="+h.EntryID+" ts=", 1)
 	}
 	return v
 }

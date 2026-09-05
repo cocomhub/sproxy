@@ -12,10 +12,16 @@ import (
 )
 
 // NewCmdAccessKey 创建 access-key 命令（生成 SproxySig 请求签名认证的一对 AK/SK）。
+//
+// 自任务 6（trust 命令族）起标记 deprecated：AK/SK 生成与凭据管理统一走 `trust`
+// （`trust ak add` 生成注册 / `trust renew` 轮换）。本命令保留 generateAccessKeyPair
+// 的纯生成能力（`access-key create` 仍可用），Aliases 兼容旧调用。
 func NewCmdAccessKey(ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "access-key",
-		Short: "生成 AccessKey/AccessKeySecret（SproxySig 请求签名认证）",
+		Use:        "access-key",
+		Short:      "生成 AccessKey/AccessKeySecret（SproxySig 请求签名认证）",
+		Deprecated: "请使用 `trust ak add`（生成并注册）或 `trust renew`（轮换）。`access-key create` 仅保留纯生成能力。",
+		Aliases:    []string{"trust"}, // 兼容：`sclient access-key` 与 `sclient trust` 均可达（警告提示 deprecated）。
 	}
 	cmd.AddCommand(NewCmdAccessKeyCreate(ios))
 	return cmd
@@ -47,7 +53,7 @@ func NewCmdAccessKeyCreate(ios cli.IOStreams) *cobra.Command {
 //   - AccessKeySecret（本地密钥）= 32B 随机 hex（64 hex chars）
 //
 // 与客户端 pkg/client 的 access_key/access_key_secret 配置及服务端
-// pkg/server 的 access_keys 配置对应。
+// pkg/server 的 access_keys 配置对应；trust ak add 在未显式指定 AK 时也复用本函数。
 func generateAccessKeyPair(mesh string) (string, string, error) {
 	akBytes := make([]byte, 16)
 	if _, err := rand.Read(akBytes); err != nil {

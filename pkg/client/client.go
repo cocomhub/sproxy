@@ -104,6 +104,7 @@ type FileClient struct {
 	maxChunkSize           int64
 	accessKey              string           // SproxySig 签名认证 AccessKey（公开标识）
 	accessKeySecret        string           // SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）
+	accessKeyID            string           // SproxySig SK 条目 ID（sk=<entryID>，可选；签发时 header 携带，服务端精确取条目）
 	authToken              string           // 多用户 API 密钥 Bearer（api_keys.enabled 场景）
 	meshHubURL             string           // 配置 hub_url（mesh/relay/p2p 信令/中继 hub，区别于 xfer 的 hubURL）
 	nodeID                 string           // 配置 node_id（本节点默认 ID）
@@ -358,6 +359,16 @@ func WithAccessKey(ak, sk string) Option {
 	return func(c *FileClient) {
 		c.accessKey = ak
 		c.accessKeySecret = sk
+	}
+}
+
+// WithAccessKeyID 设置 SproxySig 的 SK 条目 ID（entryID，可选）。
+// 服务端凭据 Ring 多 SK 共存时，签发请求 header 携带 sk=<entryID> 使服务端精确取
+// 该条目（而非对全部 alive 条目逐一试签）；未配置时 entryID 为空段（服务端试签回退）。
+// renew 成功后会自动回填为新的 sk_id（见 RenewAccessKey）。
+func WithAccessKeyID(id string) Option {
+	return func(c *FileClient) {
+		c.accessKeyID = id
 	}
 }
 
@@ -1210,6 +1221,12 @@ func (c *FileClient) AccessKeySecret() string {
 	return c.accessKeySecret
 }
 
+// AccessKeyID 返回 SproxySig 的 SK 条目 ID（entryID，可选；为空=客户端未绑定具体条目，
+// 签发 header 不带 sk=<id>，服务端按 AK 试签定位）。
+func (c *FileClient) AccessKeyID() string {
+	return c.accessKeyID
+}
+
 // AuthToken 返回多用户 API 密钥 Bearer（api_keys 场景）。
 //
 // 安全警示（S49）：返回值是认证凭据，严禁写入日志、错误输出或用于展示。
@@ -1326,6 +1343,9 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 
 // signRequest 为请求构造 SproxySig 签名头，并返回可重放（已预计算哈希）的 body。
 // 返回的 cleanup 非 nil 时需在请求完成后调用（临时文件缓存路径）。
+// v2 canonical：配置了 access_key_id（entryID）时 header 携带 sk=<id>，服务端
+// verifySproxySigFromRing 精确取条目；未配置则 entryID 空段（服务端对 AK 全部 alive
+// 条目试签回退）。entryID 参与 canonical 拼装（空段不改变签名输入形态）。
 func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string, io.Reader, func(), error) {
 	pathPart, queryPart, _ := strings.Cut(urlPath, "?")
 	signedBody, bodyHash, cleanup, err := prehashBody(body)
@@ -1336,6 +1356,7 @@ func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string
 	h := sproxysig.Header{
 		Version:    sproxysig.Version,
 		AK:         c.accessKey,
+		EntryID:    c.accessKeyID,
 		TS:         now.UnixMilli(),
 		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),

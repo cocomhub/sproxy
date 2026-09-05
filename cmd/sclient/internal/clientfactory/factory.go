@@ -195,6 +195,11 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" {
 		opts = append(opts, client.WithAccessKey(cfg.AccessKey, cfg.AccessKeySecret))
 	}
+	if cfg.AccessKeyID != "" {
+		// SK 条目 ID（entryID）：签发 header 携带 sk=<id> 使服务端精确取条目
+		// （多 SK 共存时避免逐条试签）。`trust renew` 回填的配置项。
+		opts = append(opts, client.WithAccessKeyID(cfg.AccessKeyID))
+	}
 	if ak, _ := cmd.Flags().GetString("access-key"); ak != "" && !xferEnabled {
 		sk, _ := cmd.Flags().GetString("access-key-secret")
 		// 显式 AK/SK（flag 覆盖）同样开启 access-key 驱动隧道：WithTunnel 内部已存

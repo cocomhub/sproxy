@@ -26,8 +26,12 @@ type Config struct {
 	MaxChunkSize int64  `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
 	// AccessKey / AccessKeySecret 是 SproxySig 请求签名认证（替代旧 auth_token）。
 	// Secret 只存本端计算签名，永不上线；服务端配置 access_keys 时必填。
-	AccessKey              string `yaml:"access_key" mapstructure:"access_key"`
-	AccessKeySecret        string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
+	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
+	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
+	// AccessKeyID 是 SproxySig 的 SK 条目 ID（entryID，可选）。服务端凭据 Ring
+	// 多 SK 共存时，签发请求携带 sk=<id> 使服务端精确取条目；`trust renew` 成功后
+	// 自动回填为新的 sk_id。为空则 entryID 空段（服务端按 AK 试签定位）。
+	AccessKeyID            string `yaml:"access_key_id" mapstructure:"access_key_id"`
 	AllowTransportFallback bool   `yaml:"allow_transport_fallback" mapstructure:"allow_transport_fallback"`
 	// HubURL 是 mesh/relay/p2p 共用的 hub 地址（http(s):// 或 ws(s)://，接受带 /ws 路径）。
 	// 为空时各命令按自身语义回落（mesh connect → server_url，p2p → 报错，relay start → 本地默认）。
@@ -170,6 +174,9 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 	}
 	fmt.Fprintf(w, "AccessKey:     %s\n", cfg.AccessKey)
 	fmt.Fprintf(w, "AccessKeySecret: %s\n", maskedSecret)
+	if cfg.AccessKeyID != "" {
+		fmt.Fprintf(w, "AccessKeyID:   %s\n", cfg.AccessKeyID)
+	}
 	fmt.Fprintf(w, "ChunkSize:     %d\n", cfg.ChunkSize)
 	fmt.Fprintf(w, "MaxChunkSize:  %d\n", cfg.MaxChunkSize)
 	fmt.Fprintf(w, "AllowTransportFallback: %v\n", cfg.AllowTransportFallback)
@@ -202,6 +209,8 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 		cfg.AccessKey = value
 	case "access_key_secret":
 		cfg.AccessKeySecret = value
+	case "access_key_id":
+		cfg.AccessKeyID = value
 	case "timeout":
 		if timeout, err := strconv.Atoi(value); err != nil {
 			return fmt.Errorf("无效的超时值: %w", err)
