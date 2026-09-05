@@ -60,7 +60,7 @@ type RegisterFrame struct {
 	NodeID string `json:"node_id"`
 	// Token 已废弃：不再用于准入（保留字段避免破坏旧客户端 JSON）。
 	Token string `json:"token,omitempty"`
-	// AccessKey 是 SproxySig 准入 AccessKey（与 access_keys 配置一致）。
+	// AccessKey 是 SproxySig 准入 AccessKey（与凭据 Ring 登记的一致）。
 	AccessKey string `json:"access_key,omitempty"`
 	// AccessKeyProof 是 ComputeRegisterProof 输出（HMAC-SHA256 证明持有 SK）。
 	AccessKeyProof string `json:"access_key_proof,omitempty"`

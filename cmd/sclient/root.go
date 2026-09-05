@@ -104,7 +104,7 @@ func NewRootCmd() *cobra.Command {
 
 	root.PersistentFlags().StringVar(&cfgFile, "config", defaultCfgPath, "配置文件路径")
 	root.PersistentFlags().StringP("server", "s", "", "服务器地址 (覆盖配置中的 server_url)")
-	root.PersistentFlags().String("access-key", "", "SproxySig 认证 AccessKey (服务端配置了 access_keys 时需要)")
+	root.PersistentFlags().String("access-key", "", "SproxySig 认证 AccessKey（服务端凭据 Ring 登记了对应 AK/SK 时需要）")
 	root.PersistentFlags().String("access-key-secret", "", "SproxySig 认证 AccessKeySecret (本地密钥，仅计算签名，永不上线)")
 	root.PersistentFlags().StringP("output", "o", "", "指定下载文件的输出路径")
 	root.PersistentFlags().BoolP("verbose", "v", false, "显示详细输出")

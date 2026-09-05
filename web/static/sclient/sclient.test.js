@@ -447,7 +447,7 @@ test('effectiveMode 无凭据强制 direct（无密钥无法隧道且 config.get
   transport.configure({ accessKey: '', accessKeySecret: '', tunnelDefault: true });
 });
 
-test('direct 无凭据请求不带 SproxySig 头（兼容服务端未配 access_keys）', async () => {
+test('direct 无凭据请求不带 SproxySig 头（兼容服务端凭据 Ring 空）', async () => {
   const origFetch = globalThis.fetch;
   try {
     transport.configure({ accessKey: '', accessKeySecret: '', mode: 'direct' });

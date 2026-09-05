@@ -41,12 +41,12 @@ build/bin/sclient genkey
 
 ```yaml
 addr: ":18083"
-tunnel_key: "<64 hex>"           # 顶层隧道密钥（sclient genkey 生成）
-auth_token: "<auth-token>"       # 顶层 Bearer token（mesh status / relay dial / p2p 信令用）
+access_key: "<ak-...>"        # SproxySig AccessKey（凭据 Ring 登记；见 sclient trust ak add）
+access_key_secret: "<64hex>"  # 对应 Secret（只本端计算签名，永不上线）
 hub:
   enabled: true
   node_id: "hub"
-  relay_token: "<relay-token>"   # 中继注册共享密钥（hub.enabled=true 时必填）
+  # relay_token 已废除：hub 注册准入由凭据 Ring 的 SproxySig AK+HMAC proof 提供
   max_connections: 256
   transports:
     ws:
@@ -179,9 +179,9 @@ build/bin/sclient relay dial --node local --tcp 127.0.0.1:2090 \
 ## 7. p2p 打洞直连（数据面不经 hub）
 
 `p2p connect` / `p2p listen` 信令经 hub 完成，且连接前会**自动注册自身**（B17，声明
-per-node-secret 能力）。`--token` 是信令 Bearer（hub 的 `auth_token`）；
-`--relay-token` 是自动注册用的 relay_token（与 `relay start --token` 一致；
-两者相同时可省略 `--relay-token`）。
+per-node-secret 能力）。hub 注册准入由服务端凭据 Ring 的 SproxySig AK/SK 提供
+（`sclient trust ak add` 登记）；`--token`/`--relay-token` 为 mesh 节点注册信令令牌
+（与 `relay start --token` 一致；两者相同时可省略 `--relay-token`）。
 
 **中继端侧**（`p2p listen` 以精确 node-id 注册，供对端 `--peer` 寻址；
 `--service ssh:192.168.1.50:22` 精确放行对端拨号目标——B14 后默认仅公网，私网目标必须放行）：
@@ -283,8 +283,8 @@ build/bin/sclient p2p listen --manual --node-id relay
 
 | 现象 | 原因 | 解决 |
 |---|---|---|
-| `relay start` 报"注册失败: invalid token" | relay_token 不一致 | 检查 `--token` 与 hub.yaml 的 `hub.relay_token` |
-| `mesh status` 报 401 | auth_token 不对 | 用 `--auth-token` 传 hub 的 `auth_token` |
+| `relay start` 报"注册失败: invalid proof/access key" | 凭据 Ring 未登记该 AK/SK | 检查 `--access-key`/`--access-key-secret` 与服务端凭据 Ring 一致（`sclient trust ak add` 登记） |
+| `mesh status` 报 401 | SproxySig 验签失败 | 用正确的 `--access-key`/`--access-key-secret`（对应服务端 Ring 中该 mesh 的 AK/SK）传参 |
 | `mesh connect` 报"mesh 服务不可用（节点离线或未宣告）" | 目标节点没注册/离线 | 先确认目标 `relay start` 成功、`mesh status` 能看到该服务 |
 | `relay dial --tcp 内网` 连接被拒 | `DialAllowed` 默认仅公网 | 目标节点加 `--dial-allow-cidr` 放行对应网段 |
 | `p2p connect` 报打洞失败 | 对端没跑 `p2p listen` | 确认对端 `p2p listen` 在运行 |
@@ -292,7 +292,8 @@ build/bin/sclient p2p listen --manual --node-id relay
 
 ## 安全提醒
 
-- `hub.yaml` 中的三个密钥（auth_token / tunnel_key / relay_token）务必换成随机值
+- hub 注册准入由服务端凭据 Ring 中的 AK/SK 提供（`sclient trust ak add` 登记；`relay_token`/`tunnel_key`/`auth_token` 均已废除）
+- 服务端凭据务必从首启启动日志或 `sclient trust` 登记流程获取并妥善保存；生产环境不要把匿名凭据留存
 - `--dial-allow` 让叶子可出站拨号，仅对可信节点开启
 - `--dial-allow-cidr` 显式放行网段，默认仅公网目标
 - `--insecure` 关闭 TLS 证书校验，存在 MITM 风险：**仅限开发/测试的自签证书环境**；

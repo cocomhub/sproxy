@@ -165,7 +165,7 @@ const meshCharset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456
 //   - AccessKeySecret（本地密钥）= 32B 随机 hex（64 hex chars）
 //
 // r 传 nil 时用 crypto/rand（生产路径）；测试可注入确定性 reader。与客户端
-// pkg/client 的 access_key/access_key_secret 配置及服务端 pkg/server 的 access_keys
+// pkg/client 的 access_key/access_key_secret 配置及服务端 pkg/server 凭据 Ring
 // 配置对应；sclient `trust ak add` 未显式指定 AK 时用本函数在本地生成一对
 // （原 cmd generateAccessKeyPair 删除后内联，唯一事实源）。
 func GeneratePair(r io.Reader, mesh string) (ak, sk string, err error) {

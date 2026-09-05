@@ -25,7 +25,7 @@ type Config struct {
 	ChunkSize    int64  `yaml:"chunk_size" mapstructure:"chunk_size"`
 	MaxChunkSize int64  `yaml:"max_chunk_size" mapstructure:"max_chunk_size"`
 	// AccessKey / AccessKeySecret 是 SproxySig 请求签名认证（替代旧 auth_token）。
-	// Secret 只存本端计算签名，永不上线；服务端配置 access_keys 时必填。
+	// Secret 只存本端计算签名，永不上线；服务端凭据 Ring 登记了该 AK/SK 时必填。
 	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
 	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
 	// AccessKeyID 是 SproxySig 的 SK 条目 ID（entryID，可选）。服务端凭据 Ring

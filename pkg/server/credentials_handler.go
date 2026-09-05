@@ -4,7 +4,6 @@
 package server
 
 import (
-	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -225,9 +224,15 @@ func (h *Handlers) renewCredential(ak, mesh, entryID, remoteAddr string) (renewC
 	}
 	wrapSK := cloneSK(wrapEntry.SK)
 
-	newSK := make([]byte, 32)
-	if _, err := rand.Read(newSK); err != nil {
+	// 新 SK 生成收归 pkg/accesskey 唯一事实源（M5 后统一：RandomHexHex 32B 随机 hex
+	// 解码为 32B——同 akAddHandler 的 secret 生成路径，禁止本包直接 crypto/rand）。
+	skHexStr, err := accesskey.RandomHexHex(32)
+	if err != nil {
 		return renewCredentialResponse{}, fmt.Errorf("生成新 SK 失败: %w", err)
+	}
+	newSK, err := hex.DecodeString(skHexStr)
+	if err != nil {
+		return renewCredentialResponse{}, fmt.Errorf("解码新 SK 失败: %w", err)
 	}
 
 	envelopeKey, err := credentialWrapKey(wrapSK, ak, mesh)

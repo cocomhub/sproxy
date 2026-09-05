@@ -43,7 +43,7 @@ function sclientInit() {
 
   // 落地服务端 web.tunnel 默认值（GET /api/config 下发），失败静默（直接模式仍可用）。
   // 关键：/api/config 在 authMiddleware 保护内，请求必须带 SproxySig 签名
-  //（有 access_keys 时）或服务端未配 access_keys（此时 config.get 无签名可成功）。
+  //（凭据 Ring 非空时）或服务端凭据 Ring 空（此时 config.get 无签名可成功）。
   // 无凭据（未输 AK/SK）时签名无从产生，既拿不到 web.tunnel 又不能安全请求——
   // 直接保持 transport 默认（direct 由 transport 无凭据规则保证），跳过 config.get。
   // 有凭据时正常 config.get（direct 带签名 200 / 隧道 401 时 catch 保持默认）。

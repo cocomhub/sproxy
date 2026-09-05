@@ -21,7 +21,7 @@ import (
 // newCmdMeshNode 创建 mesh node：单进程常驻 mesh 节点（注册 + 服务宣告 + 中继 +
 // webrtc 直连 + 自动重连），mesh connect 可直连优先/中继回落到达它。
 //
-// 依赖：hub 已启用中继（hub.enabled=true + access_keys 配置，注册走 SproxySig
+// 依赖：hub 已启用中继（hub.enabled=true + 凭据 Ring 已登记凭据，注册走 SproxySig
 // AccessKey + HMAC proof 准入）。--dial-allow 必须开启（mesh connect 恒发 dial 帧，
 // 出口拨号依赖它；关闭时只剩 HTTP 中继到 --local）。
 func newCmdMeshNode(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {

@@ -124,8 +124,8 @@
   // 优先级：localStorage override（transport 显式值）> mode（configure 注入）>
   // 无凭据强制 direct > 服务端 web.tunnel。
   // 无凭据（未配置 accessKey/accessKeySecret）：无法派生隧道密钥，也无法安全读取
-  // 服务端 web.tunnel 开关——强制直连；direct 无凭据时也不带签名头（服务端未配
-  // access_keys 时无认证放行；配了则由服务端 401 提示需登录，避免「隧道模式需要
+  // 服务端 web.tunnel 开关——强制直连；direct 无凭据时也不带签名头（服务端凭据
+  // Ring 空时无认证放行；非空则由服务端 401 提示需登录，避免「隧道模式需要
   // accessKeySecret」这类低信息报错）。
   function effectiveMode() {
     const o = configLib.readLocalOverride();
@@ -412,8 +412,8 @@
     const ak = cfg.accessKey;
     const sk = cfg.accessKeySecret;
     // SproxySig（有 body 用其 SHA-256；无 body 签空串）——对齐 Go signRequest。
-    // 无凭据（ak/sk 均缺）：不加处理就不是签名头，交由服务端决定（未配 access_keys
-    // 时放行；配了则 401，URL 上仍可取 /healthz //version /ui/ 查阅——不同于抛错）。
+    // 无凭据（ak/sk 均缺）：不加处理就不是签名头，交由服务端决定（凭据 Ring 空时放行；
+    // 非空则 401，URL 上仍可取 /healthz /version /ui/ 查阅——不同于抛错）。
     // 一个可缺一个完整时仍按协议要求完整签名头（若服务端配了单侧可能 401）。
     let auth = '';
     if (ak || sk) {

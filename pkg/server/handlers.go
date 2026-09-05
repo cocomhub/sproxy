@@ -844,7 +844,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		if cfg.Hub.Federation.Enabled {
 			// 联邦节点表端点（hub-to-hub peering 入站面）：返回本 hub 路由表节点
 			// （带 mesh），供对端 hub 周期拉取同步。走 authMiddleware（SproxySig
-			// fail-closed：hub 配置 access_keys 后无凭据请求 401），不注册 localMux
+			// fail-closed：凭据 Ring 非空后无凭据请求 401），不注册 localMux
 			// （联邦是 hub 间直连 HTTP 同步，不经隧道）。
 			srvMux.HandleFunc("GET /api/hub/federation/nodes", h.authMiddleware(h.federationNodesHandler))
 		}

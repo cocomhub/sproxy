@@ -48,7 +48,7 @@ type FederationPeer struct {
 	ID  string // 对端 hub 唯一标识（日志/去重用；为空回落 URL）
 	URL string // 对端节点表端点基址（如 http://127.0.0.1:18083；为空回落默认 loopback）
 	// AccessKey / AccessKeySecret 是对端 hub 认可的 SproxySig 凭据。
-	// 目标 hub 配置了 access_keys 时必填；远程 peering 由 Config.Validate 强制成对校验。
+	// 对端 hub 凭据 Ring 非空时必填；远程 peering 由 Config.Validate 强制成对校验。
 	AccessKey       string
 	AccessKeySecret string
 	// CAFile 是对端 hub 的 TLS 受信 CA 证书文件路径（PEM）。非空时用该 CA 构建

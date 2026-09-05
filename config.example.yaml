@@ -140,7 +140,7 @@ tls:
 # sync_remotes:
 #   - name: "node-a"                 # 配置名（创建任务时 remote 字段引用）
 #     url: "http://192.168.1.10:18083"
-#     access_key: ""                 # 远程 sproxy 认可的 SproxySig AK/SK（sclient access-key create 生成）
+#     access_key: ""                 # 远程 sproxy 认可的 SproxySig AK/SK（与凭据 Ring 中登记的 AK/SK 一致；登记/轮换见 sclient trust）
 #     access_key_secret: ""
 
 # Hub 中继（mesh 内网穿透，默认关闭）。

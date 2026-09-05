@@ -354,7 +354,7 @@ func WithChunkSize(n int64) Option {
 }
 
 // WithAccessKey 设置 SproxySig 请求签名认证（AccessKey/AccessKeySecret）。
-// 服务端配置了 access_keys 时，所有 HTTP 请求（直连/信令/relay）须携带 AK 标识 +
+// 服务端凭据 Ring 非空（登记了该 AK/SK）时，所有 HTTP 请求（直连/信令/relay）须携带 AK 标识 +
 // HMAC 签名；Secret 只存本端计算签名，永不上线。api_keys 场景请用 WithBearerToken。
 func WithAccessKey(ak, sk string) Option {
 	return func(c *FileClient) {

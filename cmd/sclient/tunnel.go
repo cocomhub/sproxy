@@ -84,7 +84,8 @@ func NewCmdTunnel(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 		Use:   "tunnel [flags] <url>",
 		Short: "通过加密隧道转发请求",
 		Long: `通过加密隧道发送 HTTP 请求。
-	需要配置 tunnel_key 才能使用。
+	隧道由 access_key/access_key_secret 驱动（服务端凭据 Ring 验签后按 AK 派生隧道密钥，
+	无需配置 tunnel_key；见 sclient config 与 trust 命令）。
 
 	示例:
 	  sclient tunnel https://api.example.com/data

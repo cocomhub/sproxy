@@ -17,7 +17,7 @@ func TestKey() string {
 }
 
 // TestAccessKey returns a deterministic AccessKey（ak-<no mesh>-<32hex>）。
-// 服务端 access_keys 配置与客户端 WithTunnel(ak, sk) 共用此值，保证隧道密钥派生一致。
+// 服务端凭据 Ring（测试装配）与客户端 WithTunnel(ak, sk) 共用此值，保证隧道密钥派生一致。
 // 注意：测试固定 32hex 标准形态（前缀 ak-，2026-09-05 起统一）。
 func TestAccessKey() string {
 	return "ak-00000000000000000000000000000000"

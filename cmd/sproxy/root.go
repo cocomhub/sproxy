@@ -87,7 +87,7 @@ func init() {
 	rootCmd.Flags().String(flagStorageRoot, "./storage", "存储根目录")
 	rootCmd.Flags().Bool(flagVersion, false, "打印版本与构建信息后退出")
 	rootCmd.Flags().Bool(flagNoTLS, false, "禁用 TLS（覆盖 tls.enabled 配置）")
-	rootCmd.Flags().Bool(flagAllowNoAuth, false, "允许无认证启动（无 access_keys/api_keys；仅限本地调试，生产勿用））")
+	rootCmd.Flags().Bool(flagAllowNoAuth, false, "允许无认证启动（无任何凭据 api_keys/store 时回环调试放行；仅限本地调试，生产勿用）")
 
 	rootCmd.AddCommand(NewVersionSubcommand())
 }
@@ -246,7 +246,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		// 对端 hub 节点表（联邦候选），/api/hub/nodes 合并（路由表权威 +
 		// DHT + 联邦候选，去重）。入站端点 /api/hub/federation/nodes 由
 		// RegisterRoutes 在 hub.enabled 且 federation.enabled 时注册。
-		// 拉取认证复用 SproxySig AccessKey（对端 hub 配置的 access_keys）；
+		// 拉取认证复用 SproxySig AccessKey（对端 hub 凭据 Ring 登记的 AK/SK）；
 		// peer URL 为空回落默认 loopback（远程 peering 需显式配置，见
 		// Config.Validate）。联邦只提供发现/可达性，不改路由表状态。
 		// federation.persist_file 非空时启用候选持久化（重启后恢复上次同步的

@@ -89,7 +89,7 @@ type VersionConfig struct {
 // 安全边界：默认绑定 **loopback**（127.0.0.1）——裸 TCP 中继是网络面服务，全接口
 // 绑定意味着任意网卡可达（属 SSRF/暴露面攻击目标）；远程节点可达需显式配置
 // `listen: ":18084"` 或具体网卡 IP。注册准入由 SproxySig AccessKey + HMAC proof
-// 保证（fail-closed：未配置 access_keys 时 hub 拒绝所有注册）。
+// 保证（fail-closed：凭据 Ring 空时 hub 拒绝所有注册）。
 const DefaultHubTCPListen = "127.0.0.1:18084"
 
 // DefaultXferTCPListen 是 xfer_tcp 明文 listener 的默认监听地址
@@ -106,7 +106,7 @@ const DefaultXferTCPListen = "127.0.0.1:18086"
 const DefaultXferTLSListen = "127.0.0.1:18087"
 
 // HubConfig 配置 Hub 中继系统。
-// 节点注册准入由顶层 access_keys 提供（SproxySig AccessKey + HMAC proof），
+// 节点注册准入由凭据 Ring 提供（SproxySig AccessKey + HMAC proof），
 // hub 级不再需要任何 token 配置。
 type HubConfig struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
@@ -172,7 +172,7 @@ type FederationPeerConfig struct {
 	// loopback（http://127.0.0.1:18083）——远程 peering 必须显式配置 URL。
 	URL string `yaml:"url" mapstructure:"url"`
 	// AccessKey / AccessKeySecret 是对端 hub 认可的 SproxySig 凭据。
-	// 目标 hub 配置了 access_keys 时必填；远程 peering（URL host 非 loopback）
+	// 目标 hub 凭据 Ring 非空时必填；远程 peering（URL host 非 loopback）
 	// 由 Validate 强制要求（fail-closed）。
 	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
 	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
@@ -534,7 +534,7 @@ func (c *Config) Validate() error {
 	if c.Audit.BufferSize < 0 {
 		return fmt.Errorf("audit.buffer_size 不能为负，当前 %d（0=关闭，正整数=环形缓冲容量）", c.Audit.BufferSize)
 	}
-	// 无 auth 配置（access_keys/api_keys 均为空）在 Validate 层是合法的——
+	// 无 auth 配置（凭据 Ring / api_keys 均空）在 Validate 层是合法的——
 	// fail-fast 拒绝启动在 cmd/sproxy 侧执行。
 	if c.APIKeys.Enabled && len(c.APIKeys.Keys) == 0 {
 		return fmt.Errorf("api_keys.enabled=true 但未配置任何密钥，认证将拒绝所有请求")
@@ -678,7 +678,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("hub.federation.peers[%d].url %q 为远程地址，远程 peering 必须同时配置 access_key 与 access_key_secret", i, p.URL)
 			}
 			if p.AccessKeySecret != "" {
-				// 与顶层 access_keys 的校验一致：SK 必须为 64 hex（32 字节 HMAC 密钥源）。
+				// 与凭据 SK 的校验一致：SK 必须为 64 hex（32 字节 HMAC 密钥源）。
 				if len(p.AccessKeySecret) != 64 {
 					return fmt.Errorf("hub.federation.peers[%d].access_key_secret 必须为 64 个十六进制字符（32 字节），got %d 字符", i, len(p.AccessKeySecret))
 				}
@@ -713,7 +713,7 @@ func (c *Config) Validate() error {
 	}
 	// sync_remotes 校验：URL 合法（http/https + host）、name 唯一非空。
 	// 凭据 fail-closed 在 SyncManager.CreateTask 层执行（Validate 不要求凭据——
-	// 允许配置空凭据的 remote 供未启用 access_keys 的远程节点使用，创建任务时才拒绝）。
+	// 允许配置空凭据的 remote 供未登记凭据的远程节点使用，创建任务时才拒绝）。
 	seenSyncRemoteNames := make(map[string]struct{}, len(c.SyncRemotes))
 	for i, r := range c.SyncRemotes {
 		if r.Name == "" {
