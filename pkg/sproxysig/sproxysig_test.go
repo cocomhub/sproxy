@@ -177,7 +177,7 @@ func TestParseHeader(t *testing.T) {
 
 // TestParseHeader_V2_EntryID：v2 头带 sk=<entryID> 段解析正确（EntryID 填充）。
 func TestParseHeader_V2_EntryID(t *testing.T) {
-	auth := Scheme + " v=2 ak=sk-prod-meshA-3f8a sk=sk-abcdef012345" +
+	auth := Scheme + " v=2 ak=ak-prod-meshA-3f8a sk=sk-abcdef012345" +
 		" ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
 	h, err := ParseHeader(auth)
 	if err != nil {
@@ -240,7 +240,7 @@ func TestParseHeader_V2_NoEntryID(t *testing.T) {
 
 // TestParseHeader_Malformed_EmptySKAlias：显式 sk= 空值按字段空值 fail-closed 拒绝。
 func TestParseHeader_Malformed_EmptySKAlias(t *testing.T) {
-	if _, err := ParseHeader("SproxySig v=2 ak=sk-prod-meshA-3f8a sk= ts=1784808000123 exp=1784808300123 nonce=n body_sha256=" + EmptyBodyHash() + " sig=s"); !errors.Is(err, ErrMalformed) {
+	if _, err := ParseHeader("SproxySig v=2 ak=ak-prod-meshA-3f8a sk= ts=1784808000123 exp=1784808300123 nonce=n body_sha256=" + EmptyBodyHash() + " sig=s"); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("sk= 空值应 ErrMalformed, got %v", err)
 	}
 }

@@ -195,7 +195,7 @@ tls:
 #   #                                      # 如 http://host:port，不带 /api/… 路径；为空回落
 #   #                                      # 默认 127.0.0.1:18083 loopback；远程 peering 需显式
 #   #                                      # 配置 URL 与成对 access_key/access_key_secret）
-#   #       access_key: "sk-xxx"   # 对端 hub 认可的 SproxySig AccessKey（双方共享同一 mesh 的
+#   #       access_key: "ak-xxx"   # 对端 hub 认可的 SproxySig AccessKey（双方共享同一 mesh 的
 #   #                               # 凭据；**多 mesh 部署需为每个 mesh 单独配一对 peer/AK**——
 #   #                               # 转发在目标 hub 以对端 AK 的 mesh 重新鉴权，客户端 mesh
 #   #                               # 必须与 peer AK mesh 及目标节点 mesh 三者一致才可达）

@@ -199,7 +199,7 @@ rate_limit:
 ```yaml
 # ~/.config/sproxy/sclient.yaml
 server_url: "https://proxy.example.com"
-access_key: "sk-meshA-3f8a..."
+access_key: "ak-meshA-3f8a..."
 access_key_secret: "0123...（64 hex，与服务端该 AK 对应的 SK 一致，见首启日志 / `sclient trust` 输出的 SK）"
 check_checksum: true
 chunk_size: 8388608    # 8 MiB

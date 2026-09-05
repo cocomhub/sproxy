@@ -251,7 +251,7 @@ func (s *CredentialStore) Save(keys []accesskey.Key) error // 临时文件+renam
 
 `handlers.go`：
 - `RegisterRoutesOpts` 加 `CredentialRing *accesskey.Ring`、`CredentialStore *CredentialStore`
-- `RegisterRoutes`：若 `CredentialRing==nil` → `NewRing()` 并从 Store.Load 灌入；仍空且 `cfg.CredentialTTL>=0`（未禁首启）→ **生成 anonymous**：`generateAccessKeyPair("")` 风格生成 AK（`sk-<32hex>`，16B 标准）+ SK（32B），`AddKey`（Kind=plain，ExpiresAt=now+CredentialTTL），`Store.Save`，slog.Info 明示「首次启动已生成 anonymous 凭据」。存入 `h.credentialRing`/`h.credentialStore`。
+- `RegisterRoutes`：若 `CredentialRing==nil` → `NewRing()` 并从 Store.Load 灌入；仍空且 `cfg.CredentialTTL>=0`（未禁首启）→ **生成 anonymous**：`GeneratePair("")` 风格生成 AK（`ak-<32hex>`，16B 标准）+ SK（32B），`AddKey`（Kind=plain，ExpiresAt=now+CredentialTTL），`Store.Save`，slog.Info 明示「首次启动已生成 anonymous 凭据」。存入 `h.credentialRing`/`h.credentialStore`。
 - `h.tenantFor`/`credentialStoreFor(owner)`：按 owner 定位 `<storage_root>/<owner>/meta/` 的 store（复用 tenantRoots 缓存模式）。
 
 `auth.go`：
