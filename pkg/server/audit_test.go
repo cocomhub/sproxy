@@ -188,7 +188,7 @@ func TestRecordAudit_OutputsStructuredJSON(t *testing.T) {
 	ts := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	h.RecordAudit(context.Background(), AuditEvent{
 		Action:     "delete",
-		Actor:      "sk-test",
+		Actor:      "ak-test",
 		Mesh:       "mesh-a",
 		ObjectType: "file",
 		Object:     "dir/a.txt",
@@ -205,8 +205,8 @@ func TestRecordAudit_OutputsStructuredJSON(t *testing.T) {
 	if m["action"] != "delete" {
 		t.Errorf("action = %v, want delete", m["action"])
 	}
-	if m["actor"] != "sk-test" {
-		t.Errorf("actor = %v, want sk-test", m["actor"])
+	if m["actor"] != "ak-test" {
+		t.Errorf("actor = %v, want ak-test", m["actor"])
 	}
 	if m["mesh"] != "mesh-a" {
 		t.Errorf("mesh = %v, want mesh-a", m["mesh"])

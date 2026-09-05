@@ -23,7 +23,7 @@ import (
 
 // 测试辅助常量：admin 凭据（testAdminKey 带 Meta.Type=="admin" 条目）。
 const (
-	testAdminKey    = "sk-admin-mesh-bbccdd"
+	testAdminKey    = "ak-admin-mesh-bbccdd"
 	testAdminSecret = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 )
 
@@ -359,7 +359,7 @@ func TestCredentials_SKList_WrapKeyIsolation(t *testing.T) {
 // 且不泄漏目标 AK 的条目数据。
 func TestCredentials_SKList_ForbiddenForNonOwner(t *testing.T) {
 	akA, skA := testAccessKey, testAccessSecret
-	akB, skB := "sk-test-b-12eeb123", strings.Repeat("33", 32)
+	akB, skB := "ak-test-b-12eeb123", strings.Repeat("33", 32)
 	url, _, ring := newCredentialsTestServer(t, "", "", akA, skA, nil, nil)
 	// B 的凭据必须注入服务端 Ring（与认证共享同一实例）：newCredentialsTestServer
 	// 默认只注入 admin+user(A)，否则 B 的签名请求在 authMiddleware 就 401，到不了
@@ -664,7 +664,7 @@ func TestCredentials_RoleAdmin(t *testing.T) {
 	if got := h.getRole(testAccessKey); got != "user" {
 		t.Errorf("getRole(user) = %q, want user", got)
 	}
-	if got := h.getRole("sk-unknown-0000000000000000"); got != "user" {
+	if got := h.getRole("ak-unknown-0000000000000000"); got != "user" {
 		t.Errorf("getRole(unknown) = %q, want user", got)
 	}
 }
@@ -711,7 +711,7 @@ func TestCredentials_AKList_Admin(t *testing.T) {
 func TestCredentials_AKAdd_Admin(t *testing.T) {
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
-	newAK := "sk-new-00112233445566aabb"
+	newAK := "ak-new-00112233445566aabb"
 	newSK := strings.Repeat("11", 32)
 	st, body := doSignedJSON(t, http.MethodPost, url+"/api/credentials", testAdminKey, testAdminSecret, map[string]any{
 		"ak": newAK, "owner": "alice", "secret": newSK,
@@ -749,7 +749,7 @@ func TestCredentials_AKAdd_Edge(t *testing.T) {
 
 	// 2. secret 非 64-hex → 400。
 	st, body = doSignedJSON(t, http.MethodPost, url+"/api/credentials", testAdminKey, testAdminSecret, map[string]any{
-		"ak": "sk-new-edge-00112233445566", "owner": "x", "secret": "not-hex",
+		"ak": "ak-new-edge-00112233445566", "owner": "x", "secret": "not-hex",
 	})
 	if st != http.StatusBadRequest {
 		t.Fatalf("非法 hex secret status = %d, want 400 (body=%s)", st, body)
@@ -757,14 +757,14 @@ func TestCredentials_AKAdd_Edge(t *testing.T) {
 
 	// 3. secret 长度非 32B（64 hex 之外）→ 400。
 	st, body = doSignedJSON(t, http.MethodPost, url+"/api/credentials", testAdminKey, testAdminSecret, map[string]any{
-		"ak": "sk-new-edge-00112233445566", "owner": "x", "secret": strings.Repeat("11", 31),
+		"ak": "ak-new-edge-00112233445566", "owner": "x", "secret": strings.Repeat("11", 31),
 	})
 	if st != http.StatusBadRequest {
 		t.Fatalf("secret 非 32B status = %d, want 400 (body=%s)", st, body)
 	}
 
 	// 4. 显式 secret 给定 → 200 且响应不回传 secret。
-	newAK, newSK := "sk-new-edge-00aabbccddeeff", strings.Repeat("22", 32)
+	newAK, newSK := "ak-new-edge-00aabbccddeeff", strings.Repeat("22", 32)
 	st, body = doSignedJSON(t, http.MethodPost, url+"/api/credentials", testAdminKey, testAdminSecret, map[string]any{
 		"ak": newAK, "owner": "edge", "secret": newSK,
 	})
@@ -797,7 +797,7 @@ func TestCredentials_AKDelete_Security(t *testing.T) {
 
 	// 2. admin：confirm 不匹配 → 400。
 	st, body := doSignedJSON(t, http.MethodDelete, url+"/api/credentials/"+target, testAdminKey, testAdminSecret, map[string]any{
-		"confirm": "sk-wrong", "force": true,
+		"confirm": "ak-wrong", "force": true,
 	})
 	if st != http.StatusBadRequest {
 		t.Fatalf("confirm 不匹配 status = %d, want 400 (body=%s)", st, body)
@@ -830,8 +830,8 @@ func TestCredentials_AKDelete_Security(t *testing.T) {
 	}
 
 	// 5. 删除不存在 AK → 404。
-	st, _ = doSignedJSON(t, http.MethodDelete, url+"/api/credentials/sk-ghost-0000000000000000", testAdminKey, testAdminSecret, map[string]any{
-		"confirm": "sk-ghost-0000000000000000", "force": true,
+	st, _ = doSignedJSON(t, http.MethodDelete, url+"/api/credentials/ak-ghost-0000000000000000", testAdminKey, testAdminSecret, map[string]any{
+		"confirm": "ak-ghost-0000000000000000", "force": true,
 	})
 	if st != http.StatusNotFound {
 		t.Fatalf("删除不存在 AK status = %d, want 404", st)
@@ -850,7 +850,7 @@ func TestCredentials_NoAdmin_Hard403(t *testing.T) {
 		t.Fatalf("无 admin 全量列表 status = %d, want 403 (body=%s)", st, body)
 	}
 	st, body = doSignedJSON(t, http.MethodPost, url+"/api/credentials", testAccessKey, testAccessSecret, map[string]any{
-		"ak": "sk-new-0000000000000000", "owner": "x",
+		"ak": "ak-new-0000000000000000", "owner": "x",
 	})
 	if st != http.StatusForbidden {
 		t.Fatalf("无 admin POST status = %d, want 403 (body=%s)", st, body)

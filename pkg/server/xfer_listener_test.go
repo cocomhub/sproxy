@@ -24,8 +24,8 @@ func TestXferListenerConfigFromConfig(t *testing.T) {
 	cfg.TLS.CertFile = "/tmp/cert.pem"
 	cfg.TLS.KeyFile = "/tmp/key.pem"
 	ring := ringForTestCreds(
-		testCredPair{ak: "sk-mesh1-aaaaaaaaaaaaaaaa", sk: strings.Repeat("a", 64)},
-		testCredPair{ak: "sk-other-bbbbbbbbbbbbbbbb", sk: strings.Repeat("b", 64)},
+		testCredPair{ak: "ak-mesh1-aaaaaaaaaaaaaaaa", sk: strings.Repeat("a", 64)},
+		testCredPair{ak: "ak-other-bbbbbbbbbbbbbbbb", sk: strings.Repeat("b", 64)},
 	)
 
 	xc := XferListenerConfigFromRing(cfg, ring)
@@ -35,8 +35,8 @@ func TestXferListenerConfigFromConfig(t *testing.T) {
 	if xc.KeyFile != cfg.TLS.KeyFile {
 		t.Errorf("KeyFile 应回落 cfg.TLS.KeyFile %q，实际 %q", cfg.TLS.KeyFile, xc.KeyFile)
 	}
-	if xc.AccessKey != "sk-mesh1-aaaaaaaaaaaaaaaa" {
-		t.Errorf("AccessKey 应取 Ring 首存活 %q，实际 %q", "sk-mesh1-aaaaaaaaaaaaaaaa", xc.AccessKey)
+	if xc.AccessKey != "ak-mesh1-aaaaaaaaaaaaaaaa" {
+		t.Errorf("AccessKey 应取 Ring 首存活 %q，实际 %q", "ak-mesh1-aaaaaaaaaaaaaaaa", xc.AccessKey)
 	}
 	if xc.AccessKeySecret != strings.Repeat("a", 64) {
 		t.Errorf("AccessKeySecret 应取 Ring 首存活 SK，实际 %q", xc.AccessKeySecret)
@@ -108,7 +108,7 @@ func TestBuildXferTLSConfig_NoCertFails(t *testing.T) {
 // 且与直接 DeriveTunnelKey(secret, AccessKeyMesh(ak)) 等价（AD-3 一致性）。
 func TestHubXferKey_FromFirstAccessKey(t *testing.T) {
 	sk := strings.Repeat("a", 64) // 合法 64 hex（32B）
-	ak := "sk-mesh1-" + strings.Repeat("b", 16)
+	ak := "ak-mesh1-" + strings.Repeat("b", 16)
 	mesh := tunnel.AccessKeyMesh(ak)
 	if mesh != "mesh1" {
 		t.Fatalf("AccessKeyMesh(%q) 应为 mesh1，实际 %q", ak, mesh)
@@ -117,7 +117,7 @@ func TestHubXferKey_FromFirstAccessKey(t *testing.T) {
 	cfg := Default()
 	ring := ringForTestCreds(
 		testCredPair{ak: ak, sk: sk},
-		testCredPair{ak: "sk-other-" + strings.Repeat("c", 16), sk: strings.Repeat("d", 64)},
+		testCredPair{ak: "ak-other-" + strings.Repeat("c", 16), sk: strings.Repeat("d", 64)},
 	)
 
 	key, err := HubXferKey(cfg, ring)
@@ -298,9 +298,9 @@ func TestHubXferKey_NonHexSecretFails(t *testing.T) {
 	cfg := Default()
 	badRing := accesskey.NewRing()
 	// 32 个 'g'（非 hex 无法解码为 32B），ringForTestCreds 会跳过；直接构造非法条目。
-	_ = badRing.UpsertAK("sk-mesh1-"+strings.Repeat("b", 16), "t")
+	_ = badRing.UpsertAK("ak-mesh1-"+strings.Repeat("b", 16), "t")
 	// 非 32B SK → AddKey 返回 ErrInvalidSecret，无法入 ring → 视为空 ring。
-	if _, err := badRing.AddKey("sk-mesh1-"+strings.Repeat("b", 16), []byte("short")); err == nil {
+	if _, err := badRing.AddKey("ak-mesh1-"+strings.Repeat("b", 16), []byte("short")); err == nil {
 		t.Fatal("非法 SK 应被 AddKey 拒绝")
 	}
 	if _, err := HubXferKey(cfg, badRing); err == nil {

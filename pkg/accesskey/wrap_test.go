@@ -15,18 +15,18 @@ func TestWrapKey_Deterministic(t *testing.T) {
 	for i := range sk {
 		sk[i] = byte(i)
 	}
-	k1, err := wrapKey(sk, "sk-mesh-1234567890abcdef", "ctx-a")
+	k1, err := wrapKey(sk, "ak-mesh-1234567890abcdef", "ctx-a")
 	if err != nil {
 		t.Fatalf("wrapKey: %v", err)
 	}
-	k2, err := wrapKey(sk, "sk-mesh-1234567890abcdef", "ctx-a")
+	k2, err := wrapKey(sk, "ak-mesh-1234567890abcdef", "ctx-a")
 	if err != nil {
 		t.Fatalf("wrapKey: %v", err)
 	}
 	if !bytes.Equal(k1, k2) {
 		t.Fatalf("同输入 wrapKey 应确定性一致")
 	}
-	k3, err := wrapKey(sk, "sk-mesh-1234567890abcdef", "ctx-b")
+	k3, err := wrapKey(sk, "ak-mesh-1234567890abcdef", "ctx-b")
 	if err != nil {
 		t.Fatalf("wrapKey: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestWrapKey_Deterministic(t *testing.T) {
 		t.Fatalf("不同 context 的 wrapKey 应不同")
 	}
 	// 不同 ak（info）派生不同 key（修复轮 1#4：info 绑定 AK）
-	k4, err := wrapKey(sk, "sk-other-1234567890abcdef", "ctx-a")
+	k4, err := wrapKey(sk, "ak-other-1234567890abcdef", "ctx-a")
 	if err != nil {
 		t.Fatalf("wrapKey: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestWrapKey_Deterministic(t *testing.T) {
 		t.Fatalf("不同 ak 的 wrapKey 应不同")
 	}
 	// 非 32B sk 报错
-	if _, err := wrapKey([]byte("short"), "sk-mesh-1234567890abcdef", "ctx"); err == nil {
+	if _, err := wrapKey([]byte("short"), "ak-mesh-1234567890abcdef", "ctx"); err == nil {
 		t.Fatalf("非 32B sk 的 wrapKey 应报错")
 	}
 }
@@ -51,11 +51,11 @@ func TestWrapKey_Deterministic(t *testing.T) {
 func TestWrapKey_DifferentMaterials(t *testing.T) {
 	skA := bytes.Repeat([]byte{0x01}, 32)
 	skB := bytes.Repeat([]byte{0x02}, 32)
-	kA, err := wrapKey(skA, "sk-mesh-1234567890abcdef", "ctx")
+	kA, err := wrapKey(skA, "ak-mesh-1234567890abcdef", "ctx")
 	if err != nil {
 		t.Fatalf("wrapKey A: %v", err)
 	}
-	kB, err := wrapKey(skB, "sk-mesh-1234567890abcdef", "ctx")
+	kB, err := wrapKey(skB, "ak-mesh-1234567890abcdef", "ctx")
 	if err != nil {
 		t.Fatalf("wrapKey B: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestWrapKey_DifferentMaterials(t *testing.T) {
 		t.Fatalf("不同 sk 派生 key 应不同")
 	}
 	// 同 sk 不同 ak（info）也派生不同 key
-	kC, err := wrapKey(skA, "sk-other-1234567890abcdef", "ctx")
+	kC, err := wrapKey(skA, "ak-other-1234567890abcdef", "ctx")
 	if err != nil {
 		t.Fatalf("wrapKey C: %v", err)
 	}
@@ -75,12 +75,12 @@ func TestWrapKey_DifferentMaterials(t *testing.T) {
 // TestEncryptDecrypt_Roundtrip EncryptSecret / DecryptSecret 往返成功。
 func TestEncryptDecrypt_Roundtrip(t *testing.T) {
 	sk := bytes.Repeat([]byte{0x42}, 32)
-	wrapK, err := wrapKey(sk, "sk-mesh-a-1234567890abcdef", "mesh-a")
+	wrapK, err := wrapKey(sk, "ak-mesh-a-1234567890abcdef", "mesh-a")
 	if err != nil {
 		t.Fatalf("wrapKey: %v", err)
 	}
 	// 两个不同密文的 wrap 密钥（一个来自其他 sk 的派生、一个 context 混用）——见下述独立测试
-	ws, err := EncryptSecret("sk-mesh-a-1234567890abcdef", sk, wrapK)
+	ws, err := EncryptSecret("ak-mesh-a-1234567890abcdef", sk, wrapK)
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
@@ -113,11 +113,11 @@ func TestEncryptDecrypt_Roundtrip(t *testing.T) {
 // TestEncryptDecrypt_Tamper 密文篡改 → 解密报错（GCM auth 失败）。
 func TestEncryptDecrypt_Tamper(t *testing.T) {
 	sk := bytes.Repeat([]byte{0x77}, 32)
-	wrapK, err := wrapKey(sk, "sk-mesh-1234567890abcdef", "ctx")
+	wrapK, err := wrapKey(sk, "ak-mesh-1234567890abcdef", "ctx")
 	if err != nil {
 		t.Fatalf("wrapKey: %v", err)
 	}
-	ws, err := EncryptSecret("sk-a-1234567890abcdef", sk, wrapK)
+	ws, err := EncryptSecret("ak-a-1234567890abcdef", sk, wrapK)
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
@@ -146,15 +146,15 @@ func TestEncryptDecrypt_Tamper(t *testing.T) {
 // TestEncryptDecrypt_ContextMismatch context 混用（派生 key 不同）→ 解密失败。
 func TestEncryptDecrypt_ContextMismatch(t *testing.T) {
 	sk := bytes.Repeat([]byte{0x31}, 32)
-	kA, err := wrapKey(sk, "sk-mesh-1234567890abcdef", "ctx-a")
+	kA, err := wrapKey(sk, "ak-mesh-1234567890abcdef", "ctx-a")
 	if err != nil {
 		t.Fatalf("wrapKey A: %v", err)
 	}
-	kB, err := wrapKey(sk, "sk-mesh-1234567890abcdef", "ctx-b")
+	kB, err := wrapKey(sk, "ak-mesh-1234567890abcdef", "ctx-b")
 	if err != nil {
 		t.Fatalf("wrapKey B: %v", err)
 	}
-	ws, err := EncryptSecret("sk-a-1234567890abcdef", sk, kA)
+	ws, err := EncryptSecret("ak-a-1234567890abcdef", sk, kA)
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
@@ -168,15 +168,15 @@ func TestEncryptDecrypt_ContextMismatch(t *testing.T) {
 func TestEncryptDecrypt_WrongEnvelopeKey(t *testing.T) {
 	sk := bytes.Repeat([]byte{0x51}, 32)
 	other := bytes.Repeat([]byte{0x52}, 32)
-	wrapK, err := wrapKey(sk, "sk-mesh-1234567890abcdef", "ctx")
+	wrapK, err := wrapKey(sk, "ak-mesh-1234567890abcdef", "ctx")
 	if err != nil {
 		t.Fatalf("wrapKey: %v", err)
 	}
-	otherK, err := wrapKey(other, "sk-mesh-1234567890abcdef", "ctx")
+	otherK, err := wrapKey(other, "ak-mesh-1234567890abcdef", "ctx")
 	if err != nil {
 		t.Fatalf("wrapKey(other): %v", err)
 	}
-	ws, err := EncryptSecret("sk-a-1234567890abcdef", sk, wrapK)
+	ws, err := EncryptSecret("ak-a-1234567890abcdef", sk, wrapK)
 	if err != nil {
 		t.Fatalf("EncryptSecret: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestEncryptDecrypt_WrongEnvelopeKey(t *testing.T) {
 func TestWrappedSecret_JSON(t *testing.T) {
 	ws := WrappedSecret{
 		Kind:      KindSecretWrap,
-		WrapKeyID: "sk-mesh-1234567890abcdef",
+		WrapKeyID: "ak-mesh-1234567890abcdef",
 		Nonce:     []byte{0xde, 0xad, 0xbe, 0xef},
 		Cipher:    []byte{0x01, 0x02, 0x03},
 	}

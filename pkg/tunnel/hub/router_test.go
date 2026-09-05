@@ -613,8 +613,8 @@ func meshRegFrameJSON(t *testing.T, nodeID, ak string) string {
 // 节点落入对应 mesh 的独立 RouteTable（跨 mesh 不可见）。
 func TestHubServer_RegisterMeshFromAK(t *testing.T) {
 	const (
-		akA = "sk-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
-		akB = "sk-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
+		akA = "ak-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
+		akB = "ak-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
 	)
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
@@ -897,8 +897,8 @@ func TestHubServer_CrossMeshReRegisterReleasesOldVIP(t *testing.T) {
 	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
 	alloc := srv.Allocator().(*hubAllocator)
 
-	const akMeshA = "sk-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
-	const akMeshB = "sk-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
+	const akMeshA = "ak-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
+	const akMeshB = "ak-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
 
 	mA := newTestMux(t)
 	infoA, err := srv.registerNode(&RegisterFrame{NodeID: "node-x", AccessKey: akMeshA}, mA)

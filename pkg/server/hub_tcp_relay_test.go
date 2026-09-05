@@ -63,7 +63,7 @@ func TestTCPRelay_NoWS_RelayDial(t *testing.T) {
 
 	// 2. hub：仅裸 TCP 传输（无 WS），SproxySig 准入
 	const (
-		ak = "sk-tcp-do-0000000000000000000000"
+		ak = "ak-tcp-do-0000000000000000000000"
 		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	rt := hub.NewMeshRouteTable()
@@ -211,7 +211,7 @@ func TestTCPRelay_NoWS_ConcurrentRelayDial(t *testing.T) {
 	echoAddr := echoLn.Addr().String()
 
 	const (
-		ak = "sk-tcp-conc-000000000000000000000"
+		ak = "ak-tcp-conc-000000000000000000000"
 		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	rt := hub.NewMeshRouteTable()

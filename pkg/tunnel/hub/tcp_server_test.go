@@ -20,7 +20,7 @@ import (
 
 // testAccessKey / testAccessKeySecret 是测试用 SproxySig AK/SK。
 const (
-	testAccessKey       = "sk-test-00000000000000000000000000"
+	testAccessKey       = "ak-test-00000000000000000000000000"
 	testAccessKeySecret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
@@ -113,7 +113,7 @@ func TestHubTCP_InvalidAccessKeyRejected(t *testing.T) {
 	ts := time.Now().UnixMilli()
 	nonce := hub.NewRegisterNonce()
 	proof, _ := hub.ComputeRegisterProof("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "evil", ts, nonce)
-	frame := hub.NewRegisterFrame("evil", "sk-unknown-key", proof, ts, nonce, hub.Meta{})
+	frame := hub.NewRegisterFrame("evil", "ak-unknown-key", proof, ts, nonce, hub.Meta{})
 	if serr := conn.Send(ctx, frame); serr != nil {
 		t.Fatal(serr)
 	}

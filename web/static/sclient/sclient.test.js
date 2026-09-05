@@ -32,7 +32,7 @@ const HKDF_FIXTURES = [
 ];
 
 const HMAC_FIXTURE = {
-  ak: 'sk-meshA-1234567890abcdef',
+  ak: 'ak-meshA-1234567890abcdef',
   ts: '1700000000000',
   exp: '1700000300000',
   nonce: '00112233445566778899aabbccddeeff',
@@ -42,7 +42,9 @@ const HMAC_FIXTURE = {
   bodySha256: 'UNSIGNED',
   // v2 canonical（空 entryID 段 → 空行）的 HMAC-SHA256（Go sproxysig v2 验算接近，
   // 见 TestVerify_V2_NoEntryID 同向量；此处锁定 JS 侧输出字节）。
-  sigHex: 'd246e13cd506e85d36be6ff8672319e9c3b9e48ce805a9418e93a8164c97f79f',
+  // 2026-09-05：ak 由 sk-meshA-… 改为 ak-meshA-…（前缀 ak-），HMAC 输入（ak 段）
+  // 变化 → sigHex 同步重算。
+  sigHex: '782a89490e5c5a3f1dc79c4934dcf9983cc58abc3779fa0895d88138bc450a11',
 };
 
 function hkdfCanonicalInput(mesh) {
@@ -246,6 +248,7 @@ test('sig.signHeader 常规 body：sha256 hashing 正确 + 完整头部（v2）'
 });
 
 // ---- v2 可选 entryID 段（客户端主动携带；未来凭据 Ring 精确定位） ----
+// ENTRY_ID 是完整 SK 条目 ID（sk-<12hex>），EntryID 保留 sk- 前缀（与 AK 的 ak- 区分）。
 const ENTRY_ID = 'sk-abcdef012345';
 
 test('sig.signHeader 带 entryID：canonical 第 3 段为 entryID 且头部输出 sk=<entryID>', async () => {
@@ -321,15 +324,20 @@ async function encryptFrameAAD(secretHex, plainUtf8, aad) {
   return concatBytes(u32be(12 + ct.byteLength), iv, new Uint8Array(ct));
 }
 
-test('accessKeyMesh 与 Go AccessKeyMesh 语义一致（隧道密钥派生 mesh 段）', () => {
+test('accessKeyMesh 与 Go ParseMesh 语义一致（隧道密钥派生 mesh 段，前缀 ak- 双兼容 32/16hex）', () => {
   const { accessKeyMesh } = transport;
-  assert.strictEqual(accessKeyMesh('sk-prod-1234567890abcdef'), 'prod');
-  assert.strictEqual(accessKeyMesh('sk-prod-eu-1234567890abcdef'), 'prod-eu');
-  assert.strictEqual(accessKeyMesh('sk-meshA-3f8a1234abcd5678'), 'meshA');
-  assert.strictEqual(accessKeyMesh('sk-1234567890abcdef'), '');
+  assert.strictEqual(accessKeyMesh('ak-prod-1234567890abcdef1234567890abcdef'), 'prod');
+  assert.strictEqual(accessKeyMesh('ak-prod-eu-1234567890abcdef1234567890abcdef'), 'prod-eu');
+  assert.strictEqual(accessKeyMesh('ak-meshA-3f8a1234abcd5678abcdef0123456789'), 'meshA');
+  assert.strictEqual(accessKeyMesh('ak-1234567890abcdef1234567890abcdef'), '');
+  assert.strictEqual(accessKeyMesh('ak-prod-1234567890abcdef'), 'prod');
+  assert.strictEqual(accessKeyMesh('ak-prod-eu-1234567890abcdef'), 'prod-eu');
+  assert.strictEqual(accessKeyMesh('ak-meshA-3f8a1234abcd5678'), 'meshA');
+  assert.strictEqual(accessKeyMesh('ak-1234567890abcdef'), '');
   assert.strictEqual(accessKeyMesh('other'), '');
-  assert.strictEqual(accessKeyMesh('sk-'), '');
-  assert.strictEqual(accessKeyMesh('sk-prod-1234567890abcde'), '');
+  assert.strictEqual(accessKeyMesh('sk-prod-1234567890abcdef'), ''); // 旧前缀 sk- 不再识别
+  assert.strictEqual(accessKeyMesh('ak-'), '');
+  assert.strictEqual(accessKeyMesh('ak-prod-1234567890abcde'), '');
   assert.strictEqual(accessKeyMesh(''), '');
 });
 
@@ -629,7 +637,7 @@ function decodeText(u8) {
   return String(u8);
 }
 
-const AK = 'sk-meshA-1234567890abcdef';
+const AK = 'ak-meshA-1234567890abcdef';
 const SK = '2b40d5b60e6792134f07b44b46e2e19fb72f967136868015cb922d720c1aa6f5';
 // 与 transport.js 内部 AAD 常量相同的上下文标签（Go AADMeta/AADStream）。
 const AAD_META = 'tunnel:meta:v1';

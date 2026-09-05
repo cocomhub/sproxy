@@ -297,7 +297,7 @@ func newCmdTrustAKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 // newCmdTrustAKAdd 创建 trust ak add 命令（admin，生成 AK/SK 对并注册）。
 //
 // 未显式指定 ak 时本地生成一对：生成逻辑收归 pkg/accesskey.GeneratePair（M5 后
-// 唯一事实源，替代已删除的 cmd generateAccessKeyPair）——ak=sk-<mesh>-<32hex>、
+// 唯一事实源，替代已删除的 cmd generateAccessKeyPair）——ak=ak-<mesh>-<32hex>、
 // sk=32B hex；mesh flag 已有（仅未指定 ak 参数时生效）。
 func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{

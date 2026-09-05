@@ -77,7 +77,7 @@ func trustRenewHandler(t *testing.T, ak, skHex string, env *accesskey.WrappedSec
 }
 
 func TestTrustRenew_UpdatesConfig(t *testing.T) {
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	oldSK := make([]byte, 32)
 	_, _ = rand.Read(oldSK)
 	oldSKHex := hex.EncodeToString(oldSK)
@@ -156,7 +156,7 @@ func TestTrustRenew_NoCredentials(t *testing.T) {
 // ---- trust sk ----
 
 func TestTrustSKList_ShowsOnlyDecryptable(t *testing.T) {
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	mySK := make([]byte, 32)
 	_, _ = rand.Read(mySK)
 	mySKHex := hex.EncodeToString(mySK)
@@ -212,7 +212,7 @@ func TestTrustSKList_ShowsOnlyDecryptable(t *testing.T) {
 
 func TestTrustSKDelete(t *testing.T) {
 	const (
-		ak   = "sk-0123456789abcdef"
+		ak   = "ak-0123456789abcdef"
 		skID = "sk-aaaaaaaaaaaa"
 	)
 	var gotPath string
@@ -247,7 +247,7 @@ func TestTrustSKDelete(t *testing.T) {
 
 func TestTrustSKExpire(t *testing.T) {
 	const (
-		ak   = "sk-0123456789abcdef"
+		ak   = "ak-0123456789abcdef"
 		skID = "sk-aaaaaaaaaaaa"
 	)
 	until := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
@@ -285,7 +285,7 @@ func TestTrustSKExpire(t *testing.T) {
 
 func TestTrustSKExpire_BadUntil(t *testing.T) {
 	const (
-		ak   = "sk-0123456789abcdef"
+		ak   = "ak-0123456789abcdef"
 		skID = "sk-aaaaaaaaaaaa"
 	)
 	sk := make([]byte, 32)
@@ -306,7 +306,7 @@ func TestTrustSKExpire_BadUntil(t *testing.T) {
 // ---- trust ak ----
 
 func TestTrustAKDelete_ConfirmsName(t *testing.T) {
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -344,7 +344,7 @@ func TestTrustAKDelete_ConfirmsName(t *testing.T) {
 }
 
 func TestTrustAKDelete_CancelOnMismatch(t *testing.T) {
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -375,7 +375,7 @@ func TestTrustAKDelete_CancelOnMismatch(t *testing.T) {
 // TestTrustAKDelete_EOFNoInput_ReturnsError（M4）：stdin 立即 EOF / 管道空 → 删除命令
 // 返回非零 error（未确认（无输入），已中止），不得静默「已取消」+ 退出码 0。
 func TestTrustAKDelete_EOFNoInput_ReturnsError(t *testing.T) {
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -412,7 +412,7 @@ func TestTrustAKDelete_EOFNoInput_ReturnsError(t *testing.T) {
 // TestTrustAKDelete_EmptyLine_ReturnsError（M4 分支变体）：输入仅为换行（EOF 前读到空行）
 // 同样是非零 error——空输入不可当作确认。
 func TestTrustAKDelete_EmptyLine_ReturnsError(t *testing.T) {
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	svc := client.NewFileClient("http://127.0.0.1:1")
 	factory := clientfactory.NewMock(svc, nil)
 
@@ -437,7 +437,7 @@ func TestWrapContext_ServerClientConsistency(t *testing.T) {
 	for i := range sk {
 		sk[i] = byte(i)
 	}
-	for _, ak := range []string{"sk-0123456789abcdef", "sk-meshA-0123456789abcdef", "sk-prod-eu-0123456789abcdef"} {
+	for _, ak := range []string{"ak-0123456789abcdef", "ak-meshA-0123456789abcdef", "ak-prod-eu-0123456789abcdef"} {
 		mesh := accesskey.ParseMesh(ak)
 		ctx := accesskey.WrapContextCredentials
 		if mesh != "" {
@@ -458,7 +458,7 @@ func TestWrapContext_ServerClientConsistency(t *testing.T) {
 }
 
 // TestTrustAKAdd_NoAKArg_GeneratesPair 覆盖 `trust ak add` 未显式指定 AK 时的等价生成逻辑：
-//   - ak 以 sk- 开头（mesh 非空时 sk-<mesh>-）
+//   - ak 以 ak- 开头（mesh 非空时 ak-<mesh>-）
 //   - sk 为 32B 随机 hex（64 hex chars）
 //   - 两次生成不同（随机性）
 //
@@ -470,8 +470,8 @@ func TestTrustAKAdd_NoAKArg_GeneratesPair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GeneratePair: %v", err)
 	}
-	if !strings.HasPrefix(ak, "sk-") {
-		t.Errorf("expected ak to start with sk-, got: %q", ak)
+	if !strings.HasPrefix(ak, "ak-") {
+		t.Errorf("expected ak to start with ak-, got: %q", ak)
 	}
 	if len(sk) != 64 {
 		t.Errorf("expected sk to be 64 hex chars, got %d", len(sk))
@@ -502,7 +502,7 @@ func TestTrustAKAdd_NoAKArg_GeneratesPair_Command(t *testing.T) {
 	}
 	sk := make([]byte, 32)
 	_, _ = rand.Read(sk)
-	const adminAK = "sk-admin-0123456789abcdef"
+	const adminAK = "ak-admin-0123456789abcdef"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
@@ -520,8 +520,8 @@ func TestTrustAKAdd_NoAKArg_GeneratesPair_Command(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("trust ak add failed: %v", err)
 	}
-	if !strings.HasPrefix(gotBody.AK, "sk-") {
-		t.Errorf("generated AK should start with sk-, got %q", gotBody.AK)
+	if !strings.HasPrefix(gotBody.AK, "ak-") {
+		t.Errorf("generated AK should start with ak-, got %q", gotBody.AK)
 	}
 	if gotBody.Owner != "tenant-x" {
 		t.Errorf("owner = %q, want tenant-x", gotBody.Owner)
@@ -559,7 +559,7 @@ func TestTrustCommandTreeReachable(t *testing.T) {
 			factory := clientfactory.NewMock(svc, nil)
 			var out, errOut strings.Builder
 			ios := cli.IOStreams{Out: &out, ErrOut: &errOut, In: strings.NewReader("wrong\n")}
-			cfgSvc := &testConfigProvider{cfg: &client.Config{AccessKey: "sk-test-0000000000000000", AccessKeySecret: strings.Repeat("11", 32)}}
+			cfgSvc := &testConfigProvider{cfg: &client.Config{AccessKey: "ak-test-0000000000000000", AccessKeySecret: strings.Repeat("11", 32)}}
 			cmd := NewCmdTrust(factory, ios, cfgSvc, new(string))
 			cmd.SetArgs(strings.Fields(full))
 			runErr := cmd.Execute()
@@ -588,7 +588,7 @@ func TestTrustCommandTreeReachable(t *testing.T) {
 		var out strings.Builder
 		ios := cli.IOStreams{Out: &out, ErrOut: io.Discard, In: strings.NewReader("wrong\n")}
 		cmd := NewCmdTrust(factory, ios, nil, new(string))
-		cmd.SetArgs([]string{"ak", "delete", "sk-test-delete00000000"})
+		cmd.SetArgs([]string{"ak", "delete", "ak-test-delete00000000"})
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("ak delete: 命令树可达但执行错误=%v", err)
 		}
@@ -602,7 +602,7 @@ func TestTrustCommandTreeReachable(t *testing.T) {
 
 func TestTrustRenew_ConfigIsolation(t *testing.T) {
 	// 确保 trust renew 只写目标配置文件，不触碰真实用户配置目录。
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	oldSK := make([]byte, 32)
 	_, _ = rand.Read(oldSK)
 	oldSKHex := hex.EncodeToString(oldSK)

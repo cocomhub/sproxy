@@ -165,7 +165,7 @@ func TestFederationEndpoint_AuthRequired(t *testing.T) {
 		RouteTable: rt,
 		Logger:     testutil.DiscardLogger(),
 	}
-	withTestCreds(&opts, testCredPair{ak: "sk-test-0123456789abcdef", sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"})
+	withTestCreds(&opts, testCredPair{ak: "ak-test-0123456789abcdef", sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"})
 	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
@@ -191,7 +191,7 @@ func TestFederationSync_AuthSuccessAndFailure(t *testing.T) {
 	cfg.Hub.Enabled = true
 	cfg.Hub.Federation.Enabled = true
 	const (
-		testAK = "sk-0123456789abcdef"
+		testAK = "ak-0123456789abcdef"
 		testSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	)
 	var cfgPtr atomic.Pointer[Config]
@@ -246,9 +246,9 @@ func TestFederationNodesEndpoint_MeshFromAccessKey(t *testing.T) {
 	cfg.LogLevel = "error"
 	cfg.Hub.Enabled = true
 	cfg.Hub.Federation.Enabled = true
-	// meshM 的 AK（sk-meshM-<32hex> 标准形态）：authMiddleware 验签后按 ParseMesh 派生 mesh=meshM。
+	// meshM 的 AK（ak-meshM-<32hex> 标准形态）：authMiddleware 验签后按 ParseMesh 派生 mesh=meshM。
 	const (
-		meshMAK = "sk-meshM-0123456789abcdef"
+		meshMAK = "ak-meshM-0123456789abcdef"
 		meshMSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	)
 	var cfgPtr atomic.Pointer[Config]

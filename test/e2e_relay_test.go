@@ -200,6 +200,8 @@ func startHubSPROXY(t *testing.T) (string, string, string, func()) {
 	ak, sk := generateTestAccessKeyPair(t)
 	uploadsDir := filepath.Join(tmpDir, "uploads")
 	_ = os.MkdirAll(uploadsDir, 0755)
+	// 凭据 store 化：access_keys 不再装配 Ring，须 pre-seed 使 ak 被识别。
+	seedCredentialStore(t, uploadsDir, ak, sk)
 
 	configPath := filepath.Join(tmpDir, "hub.yaml")
 	configContent := fmt.Sprintf(`tls:

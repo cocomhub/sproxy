@@ -14,7 +14,7 @@ import (
 
 // testAK / testSK 是认证测试用的合法 AK/SK（SK 为 64 hex 字符 = 32 字节）。
 const (
-	testAK = "sk-test-access-key"
+	testAK = "ak-test-access-key"
 	testSK = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 

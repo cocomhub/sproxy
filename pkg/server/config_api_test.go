@@ -393,7 +393,7 @@ func TestConfig_UpdateRateLimit_SignalPostImmediate(t *testing.T) {
 	t.Parallel()
 	// 信令 POST 限流挂在 RouteTable 分支（hub routers 组）内，需装配 RouteTable。
 	// 直接装配 RegisterRoutes（仿 newTestMux 模式）：RouteTable 属 opts 而非 Config。
-	// 节点注册在 testAccessKey mesh（AccessKeyMesh("sk-test-mesh-...") = "test-mesh"）下，
+	// 节点注册在 testAccessKey mesh（AccessKeyMesh("ak-test-mesh-...") = "test-mesh"）下，
 	// 与 signRequest 注入的 mesh ctx 一致，否则信令 handler 403。
 	mrt := hub.NewMeshRouteTable()
 	muxA, _ := xfertest.Pipe()

@@ -85,7 +85,7 @@ func decodeBody(t *testing.T, r *http.Request, v any) {
 
 func TestFileClient_RenewAccessKey(t *testing.T) {
 	const (
-		ak      = "sk-0123456789abcdef"
+		ak      = "ak-0123456789abcdef"
 		entryID = "sk-abcdefabcdef"
 		newID   = "sk-1234567890ab"
 	)
@@ -162,7 +162,7 @@ func TestFileClient_RenewAccessKey(t *testing.T) {
 func TestFileClient_RenewAccessKey_MeshContext(t *testing.T) {
 	// mesh 非空：服务端 wrap context 追加 #<mesh>，客户端必须同拼法才能解开。
 	const (
-		ak      = "sk-meshA-0123456789abcdef"
+		ak      = "ak-meshA-0123456789abcdef"
 		entryID = "sk-abcdefabcdef"
 		newID   = "sk-1234567890ab"
 	)
@@ -204,7 +204,7 @@ func TestFileClient_RenewAccessKey_NoCredentials(t *testing.T) {
 
 func TestFileClient_RenewAccessKey_DecryptMismatch(t *testing.T) {
 	// 服务端用错误的旧 SK 包裹 → 客户端解开失败（GCM auth），不得误认成功。
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	oldSK := randSKBytes(t)
 	wrongSK := randSKBytes(t)
 	mux := http.NewServeMux()
@@ -234,7 +234,7 @@ func TestFileClient_RenewAccessKey_DecryptMismatch(t *testing.T) {
 // ---- ListAccessKeys ----
 
 func TestFileClient_ListAccessKeys(t *testing.T) {
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	mySK := randSKBytes(t)
 	mySKHex := hex.EncodeToString(mySK)
 	otherSK := randSKBytes(t)
@@ -287,7 +287,7 @@ func TestFileClient_ListAccessKeys(t *testing.T) {
 
 func TestFileClient_DeleteSK(t *testing.T) {
 	const (
-		ak   = "sk-0123456789abcdef"
+		ak   = "ak-0123456789abcdef"
 		skID = "sk-aaaaaaaaaaaa"
 	)
 	var gotMethod, gotPath string
@@ -310,7 +310,7 @@ func TestFileClient_DeleteSK(t *testing.T) {
 
 func TestFileClient_ExpireSK(t *testing.T) {
 	const (
-		ak   = "sk-0123456789abcdef"
+		ak   = "ak-0123456789abcdef"
 		skID = "sk-aaaaaaaaaaaa"
 	)
 	until := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
@@ -344,7 +344,7 @@ func TestFileClient_ExpireSK(t *testing.T) {
 
 func TestFileClient_AddAK(t *testing.T) {
 	const (
-		ak     = "sk-0123456789abcdef"
+		ak     = "ak-0123456789abcdef"
 		owner  = "tenant-1"
 		secret = "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
 	)
@@ -375,7 +375,7 @@ func TestFileClient_AddAK(t *testing.T) {
 }
 
 func TestFileClient_DeleteAK(t *testing.T) {
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	var gotBody struct {
 		Confirm string `json:"confirm"`
 		Force   bool   `json:"force"`
@@ -408,7 +408,7 @@ func TestFileClient_DeleteAK(t *testing.T) {
 }
 
 func TestFileClient_ListAKs(t *testing.T) {
-	const ak = "sk-0123456789abcdef"
+	const ak = "ak-0123456789abcdef"
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/credentials", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{

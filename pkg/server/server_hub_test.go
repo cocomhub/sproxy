@@ -229,8 +229,8 @@ func TestHubNodesHandler_MeshIsolation(t *testing.T) {
 	t.Parallel()
 
 	const (
-		akA = "sk-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
-		akB = "sk-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
+		akA = "ak-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
+		akB = "ak-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
 		sk  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	cfgPtr := &atomic.Pointer[Config]{}

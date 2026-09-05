@@ -35,25 +35,26 @@ func TestParseMesh(t *testing.T) {
 		want string
 	}{
 		// 标准 32hex（16B）
-		{"sk-prod-1234567890abcdef1234567890abcdef", "prod"},
-		{"sk-prod-eu-1234567890abcdef1234567890abcdef", "prod-eu"}, // mesh 含连字符
-		{"sk-meshA-3f8a1234abcd5678abcdef0123456789", "meshA"},
-		{"sk-PROD-1234567890ABCDEF1234567890ABCDEF", "PROD"}, // 大写 hex
-		{"sk-mesh-ABCDEF0123456789ABCDEF0123456789", "mesh"}, // 大写 hex 段
-		{"sk-1234567890abcdef1234567890abcdef", ""},          // 无 mesh 段
+		{"ak-prod-1234567890abcdef1234567890abcdef", "prod"},
+		{"ak-prod-eu-1234567890abcdef1234567890abcdef", "prod-eu"}, // mesh 含连字符
+		{"ak-meshA-3f8a1234abcd5678abcdef0123456789", "meshA"},
+		{"ak-PROD-1234567890ABCDEF1234567890ABCDEF", "PROD"}, // 大写 hex
+		{"ak-mesh-ABCDEF0123456789ABCDEF0123456789", "mesh"}, // 大写 hex 段
+		{"ak-1234567890abcdef1234567890abcdef", ""},          // 无 mesh 段
 		// legacy 16hex（8B，前向兼容：既有 16hex 凭据/网格仍能解析 mesh）
-		{"sk-prod-1234567890abcdef", "prod"},
-		{"sk-prod-eu-1234567890abcdef", "prod-eu"},
-		{"sk-1234567890abcdef", ""},
+		{"ak-prod-1234567890abcdef", "prod"},
+		{"ak-prod-eu-1234567890abcdef", "prod-eu"},
+		{"ak-1234567890abcdef", ""},
 		// 非法形态
 		{"other", ""}, // 非白名单前缀
-		{"ak-1234567890abcdef1234567890abcdef", ""},  // ak- 前缀不在白名单
-		{"hub-1234567890abcdef1234567890abcdef", ""}, // 未来类型前缀未入白名单
-		{"sk-", ""},                                       // 只有前缀
-		{"sk-prod-1234567890abcde", ""},                   // hex 段不足（15）
-		{"sk-prod-1234567890abcd", ""},                    // 12 hex 也不接受
-		{"sk-prod-1234567890abcdeg", ""},                  // hex 段含非法字符
-		{"sk-prod-1234567890abcdef1234567890abcdefg", ""}, // 33 hex 超长
+		{"sk-1234567890abcdef1234567890abcdef", ""},       // 旧前缀 sk- 不再识别
+		{"hub-1234567890abcdef1234567890abcdef", ""},      // 未来类型前缀未入白名单
+		{"sk-1234567890abcdef", ""},                       // 旧前缀 legacy sk- 不再识别
+		{"ak-", ""},                                       // 只有前缀
+		{"ak-prod-1234567890abcde", ""},                   // hex 段不足（15）
+		{"ak-prod-1234567890abcd", ""},                    // 12 hex 也不接受
+		{"ak-prod-1234567890abcdeg", ""},                  // hex 段含非法字符
+		{"ak-prod-1234567890abcdef1234567890abcdefg", ""}, // 33 hex 超长
 		{"", ""},
 	}
 	for _, tt := range tests {
@@ -66,10 +67,10 @@ func TestParseMesh(t *testing.T) {
 // TestParseMesh_MultipleEntryPointsAccessKeyMesh 断言 tunnel 入口结果与本地一致
 // （经 tunnel_test 全语料另证等价；此处仅补充 MeshFrom 别名）。
 func TestParseMesh_MultipleEntryPointsAccessKeyMesh(t *testing.T) {
-	if got := MeshFrom("sk-a-1234567890abcdef"); got != "a" {
+	if got := MeshFrom("ak-a-1234567890abcdef"); got != "a" {
 		t.Errorf("MeshFrom legacy = %q, want a", got)
 	}
-	if got := MeshFrom("sk-b-1234567890abcdef1234567890abcdef"); got != "b" {
+	if got := MeshFrom("ak-b-1234567890abcdef1234567890abcdef"); got != "b" {
 		t.Errorf("MeshFrom standard = %q, want b", got)
 	}
 }
@@ -78,17 +79,18 @@ func TestParseMesh_MultipleEntryPointsAccessKeyMesh(t *testing.T) {
 // 字母且用作"无 mesh"或"旧网格"时，mesh 解析必须正确（不破坏兼容）。
 func TestParseMesh_Legacy16HexMesh(t *testing.T) {
 	for _, mesh := range []string{"prod", "prod-eu", "meshA"} {
-		ak := "sk-" + mesh + "-" + constLegacyAKHex
+		ak := "ak-" + mesh + "-" + constLegacyAKHex
 		if got := ParseMesh(ak); got != mesh {
-			t.Errorf("legacy16hex ParseMesh(%q) = %q, want %q", ak, got, mesh)
+			t.Errorf("legacy16hex ParseMesh(%q) = %q, want %q（prefix 应为 ak-）", ak, got, mesh)
 		}
 	}
-	if got := ParseMesh("sk-" + constLegacyAKHex); got != "" {
-		t.Errorf("ParseMesh(sk-<16hex>) = %q, want \"\"", got)
+	if got := ParseMesh("ak-" + constLegacyAKHex); got != "" {
+		t.Errorf("ParseMesh(ak-<16hex>) = %q, want \"\"（无 mesh 段）", got)
 	}
 }
 
-// TestNewEntryID_FormatAndUnique newEntryID 格式为 sk-<12hex> 且互不重复。
+// TestNewEntryID_FormatAndUnique newEntryID 格式为 sk-<12hex> 且互不重复（SK 条目
+// ID 保留 sk- 前缀，不与 AK 的 ak- 混淆；EntryID 是完整 sk-<12hex>）。
 func TestNewEntryID_FormatAndUnique(t *testing.T) {
 	seen := map[string]bool{}
 	for range 1000 {
@@ -130,8 +132,8 @@ func TestGeneratePair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GeneratePair: %v", err)
 	}
-	if !strings.HasPrefix(ak, "sk-") {
-		t.Errorf("expected ak to start with sk-, got: %q", ak)
+	if !strings.HasPrefix(ak, "ak-") {
+		t.Errorf("expected ak to start with ak-, got: %q", ak)
 	}
 	// 标准形态：无 mesh → len(ak) == len(AccessKeyPrefix)+AccessKeyHexLen*2（32 hex 随机段）。
 	if len(ak) != len(AccessKeyPrefix)+AccessKeyHexLen*2 {
@@ -196,11 +198,11 @@ func TestGeneratePair_MeshPrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GeneratePair(meshA): %v", err)
 	}
-	if !strings.HasPrefix(ak, "sk-meshA-") {
-		t.Errorf("expected ak with sk-meshA- prefix, got: %q", ak)
+	if !strings.HasPrefix(ak, "ak-meshA-") {
+		t.Errorf("expected ak with ak-meshA- prefix, got: %q", ak)
 	}
-	if len(ak) != len("sk-meshA-")+AccessKeyHexLen*2 {
-		t.Errorf("ak len = %d, want %d", len(ak), len("sk-meshA-")+AccessKeyHexLen*2)
+	if len(ak) != len("ak-meshA-")+AccessKeyHexLen*2 {
+		t.Errorf("ak len = %d, want %d", len(ak), len("ak-meshA-")+AccessKeyHexLen*2)
 	}
 }
 
@@ -214,7 +216,7 @@ func TestGeneratePair_InjectReader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GeneratePair(inject): %v", err)
 	}
-	if !strings.HasPrefix(ak, "sk-") {
+	if !strings.HasPrefix(ak, "ak-") {
 		t.Errorf("expected ak prefix, got: %q", ak)
 	}
 	if len(ak) != len(AccessKeyPrefix)+AccessKeyHexLen*2 {
@@ -241,25 +243,27 @@ func TestIsValidAK(t *testing.T) {
 		ak   string
 		want bool
 	}{
-		{"sk-1234567890abcdef1234567890abcdef", true},          // 标准 32hex 无 mesh
-		{"sk-prod-1234567890abcdef1234567890abcdef", true},     // 标准 32hex 带 mesh
-		{"sk-prod-eu-1234567890abcdef1234567890abcdef", true},  // mesh 含连字符
-		{"sk-mesh_a-1234567890abcdef1234567890abcdef", true},   // mesh 含下划线
-		{"sk-1234567890abcdef", true},                          // legacy 16hex
-		{"sk-prod-1234567890abcdef", true},                     // legacy 16hex 带 mesh
-		{"sk-ABCDEF0123456789ABCDEF0123456789", true},          // 大写 hex
-		{"ak-1234567890abcdef1234567890abcdef", false},         // 前缀不在白名单
+		{"ak-1234567890abcdef1234567890abcdef", true},          // 标准 32hex 无 mesh
+		{"ak-prod-1234567890abcdef1234567890abcdef", true},     // 标准 32hex 带 mesh
+		{"ak-prod-eu-1234567890abcdef1234567890abcdef", true},  // mesh 含连字符
+		{"ak-mesh_a-1234567890abcdef1234567890abcdef", true},   // mesh 含下划线
+		{"ak-1234567890abcdef", true},                          // legacy 16hex
+		{"ak-prod-1234567890abcdef", true},                     // legacy 16hex 带 mesh
+		{"ak-ABCDEF0123456789ABCDEF0123456789", true},          // 大写 hex
+		{"sk-1234567890abcdef1234567890abcdef", false},         // 旧前缀 sk- 不再识别
+		{"sk-prod-1234567890abcdef1234567890abcdef", false},    // 旧前缀 sk- 不再识别
+		{"sk-1234567890abcdef", false},                         // 旧前缀 legacy sk- 不再识别
 		{"hub-1234567890abcdef1234567890abcdef", false},        // 未来类型前缀未入白名单
 		{"totp-1234567890abcdef1234567890abcdef", false},       // 同上
-		{"sk-1234567890abcdef1234567890abcdeg", false},         // hex 段含 g
-		{"sk-1234567890abcdef1234567890abcde", false},          // 31 hex 长度不符
-		{"sk-1234567890abcdef1", false},                        // 17 hex 长度不符
-		{"sk-", false},                                         // 只有前缀
-		{"sk", false},                                          // 无前缀连接符
-		{"sk-prod-", false},                                    // 空 hex 段
-		{"sk-pr od-1234567890abcdef1234567890abcdef", false},   // mesh 含空格
-		{"sk-prod..x-1234567890abcdef1234567890abcdef", false}, // mesh 含非法字符（.）
-		{"sk-prod+/x-1234567890abcdef1234567890abcdef", false}, // mesh 含非法字符
+		{"ak-1234567890abcdef1234567890abcdeg", false},         // hex 段含 g
+		{"ak-1234567890abcdef1234567890abcde", false},          // 31 hex 长度不符
+		{"ak-1234567890abcdef1", false},                        // 17 hex 长度不符
+		{"ak-", false},                                         // 只有前缀
+		{"ak", false},                                          // 无前缀连接符
+		{"ak-prod-", false},                                    // 空 hex 段
+		{"ak-pr od-1234567890abcdef1234567890abcdef", false},   // mesh 含空格
+		{"ak-prod..x-1234567890abcdef1234567890abcdef", false}, // mesh 含非法字符（.）
+		{"ak-prod+/x-1234567890abcdef1234567890abcdef", false}, // mesh 含非法字符
 		{"other", false},
 		{"", false},
 	}
@@ -273,11 +277,11 @@ func TestIsValidAK(t *testing.T) {
 // TestAKConstantsContract 锁定前缀/长度常量（4B 类型前缀扩展点的单一事实源）；
 // 若未来新增前缀（hub-/relay-/totp-/api-），只扩充 AllowedAKPrefixes 即可。
 func TestAKConstantsContract(t *testing.T) {
-	if AccessKeyPrefix != "sk-" {
-		t.Errorf("AccessKeyPrefix = %q, want %q", AccessKeyPrefix, "sk-")
+	if AccessKeyPrefix != "ak-" {
+		t.Errorf("AccessKeyPrefix = %q, want %q", AccessKeyPrefix, "ak-")
 	}
-	if len(AllowedAKPrefixes) != 1 || AllowedAKPrefixes[0] != "sk-" {
-		t.Errorf("AllowedAKPrefixes = %v, want [sk-]", AllowedAKPrefixes)
+	if len(AllowedAKPrefixes) != 1 || AllowedAKPrefixes[0] != "ak-" {
+		t.Errorf("AllowedAKPrefixes = %v, want [ak-]", AllowedAKPrefixes)
 	}
 	// 生成字节数 = AccessKeyHexLen（16B）；解析双兼容常量 = 8B legacy。
 	if AccessKeyHexLen != 16 || AccessKeyHexLegacy != 8 {
@@ -301,8 +305,8 @@ func TestStandardAKRandomSegmentLen(t *testing.T) {
 			t.Errorf("标准生成 AK 随机段应为 32 hex, got %q (len=%d)", ak, len(ak))
 		}
 	}
-	if len(AllowedAKPrefixes) != 1 || AllowedAKPrefixes[0] != "sk-" {
-		t.Errorf("AllowedAKPrefixes 白名单应只含 sk-: %v", AllowedAKPrefixes)
+	if len(AllowedAKPrefixes) != 1 || AllowedAKPrefixes[0] != "ak-" {
+		t.Errorf("AllowedAKPrefixes 白名单应只含 ak-: %v", AllowedAKPrefixes)
 	}
 }
 
@@ -319,7 +323,7 @@ func TestWrapContextCredentials(t *testing.T) {
 func TestExpireKey_StatusExpiredUntil(t *testing.T) {
 	clk := &mutableClock{}
 	r := NewRing(clk.Now)
-	ak := "sk-t1-1234567890abcdef"
+	ak := "ak-t1-1234567890abcdef"
 	if err := r.UpsertAK(ak, "o"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
@@ -358,7 +362,7 @@ func TestSKEntry_ZeroValues(t *testing.T) {
 func TestWrappedSecret_StructFields(t *testing.T) {
 	ws := WrappedSecret{
 		Kind:      KindSecretWrap,
-		WrapKeyID: "sk-w-1234567890abcdef",
+		WrapKeyID: "ak-w-1234567890abcdef",
 		Nonce:     []byte{0x01, 0x02},
 		Cipher:    []byte{0x03, 0x04},
 	}

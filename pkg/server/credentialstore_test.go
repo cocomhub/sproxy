@@ -42,7 +42,7 @@ func TestCredentialStore_SaveLoadRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	st := NewCredentialStore(filepath.Join(dir, "tenant-a", "meta"))
 
-	orig := seedTestRing(t, "sk-test-aabbcc", testAccessSecret, false)
+	orig := seedTestRing(t, "ak-test-aabbcc", testAccessSecret, false)
 	if err := st.Save(orig); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestCredentialStore_LoadCorrupt(t *testing.T) {
 func TestCredentialStore_SaveNoTmpLeftover(t *testing.T) {
 	dir := t.TempDir()
 	st := NewCredentialStore(filepath.Join(dir, "tenant", "meta"))
-	if err := st.Save(seedTestRing(t, "sk-aabbcc", testAccessSecret, false)); err != nil {
+	if err := st.Save(seedTestRing(t, "ak-aabbcc", testAccessSecret, false)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	entries, err := os.ReadDir(filepath.Join(dir, "tenant", "meta"))
@@ -126,7 +126,7 @@ func TestCredentialStore_ConcurrentSave(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
-			if err := st.Save(seedTestRing(t, "sk-aabbcc", testAccessSecret, false)); err != nil {
+			if err := st.Save(seedTestRing(t, "ak-aabbcc", testAccessSecret, false)); err != nil {
 				t.Errorf("并发 Save: %v", err)
 			}
 		})
@@ -137,7 +137,7 @@ func TestCredentialStore_ConcurrentSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("并发 Save 后 Load: %v", err)
 	}
-	if len(got) != 1 || got[0].AK != "sk-aabbcc" {
+	if len(got) != 1 || got[0].AK != "ak-aabbcc" {
 		t.Fatalf("并发 Save 后文件损坏: %+v", got)
 	}
 }
@@ -189,7 +189,7 @@ func TestCredentialStore_FileLayout(t *testing.T) {
 	if st.path != filepath.Join(meta, "credentials.json") {
 		t.Fatalf("path = %q", st.path)
 	}
-	if err := st.Save(seedTestRing(t, "sk-aabbcc", testAccessSecret, false)); err != nil {
+	if err := st.Save(seedTestRing(t, "ak-aabbcc", testAccessSecret, false)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(meta, "credentials.json")); err != nil {

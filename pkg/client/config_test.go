@@ -18,7 +18,7 @@ import (
 
 // 测试共享常量：access-key 驱动的隧道密钥固定 AK/SK。
 const (
-	testTunnelAK = "sk-test-1234567890abcdef1234567890abcdef"
+	testTunnelAK = "ak-test-1234567890abcdef1234567890abcdef"
 	testTunnelSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
 

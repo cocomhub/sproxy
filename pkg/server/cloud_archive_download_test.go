@@ -329,7 +329,7 @@ func TestDownloadCloudArchive_RequiresAuth(t *testing.T) {
 // 归档落在 <root>/<owner>/archive/，其他认证租户下载同一归档名返回 404。
 func TestDownloadCloudArchive_OwnerIsolation(t *testing.T) {
 	t.Parallel()
-	otherAK := "sk-test-other-000000"
+	otherAK := "ak-test-other-000000"
 	url, cfgPtr := newTestServerWithAllRoutesCredsMany(t, nil,
 		testCredPair{ak: testAccessKey, sk: testAccessSecret},
 		testCredPair{ak: otherAK, sk: testAccessSecret},
@@ -369,7 +369,7 @@ func TestDownloadCloudArchive_OwnerIsolation(t *testing.T) {
 func TestDownloadCloudTask_Kind(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	otherAK := "sk-test-other-000000"
+	otherAK := "ak-test-other-000000"
 	cfg := Default()
 	cfg.StorageRoot = tmpDir
 

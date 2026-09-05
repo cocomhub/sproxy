@@ -943,21 +943,22 @@ func TestAccessKeyMesh(t *testing.T) {
 		want string
 	}{
 		// 标准 32hex（16B）
-		{"sk-prod-1234567890abcdef1234567890abcdef", "prod"},
-		{"sk-prod-eu-1234567890abcdef1234567890abcdef", "prod-eu"}, // mesh 含连字符
-		{"sk-meshA-3f8a1234abcd5678abcdef0123456789", "meshA"},
-		{"sk-1234567890abcdef1234567890abcdef", ""}, // 无 mesh 段
+		{"ak-prod-1234567890abcdef1234567890abcdef", "prod"},
+		{"ak-prod-eu-1234567890abcdef1234567890abcdef", "prod-eu"}, // mesh 含连字符
+		{"ak-meshA-3f8a1234abcd5678abcdef0123456789", "meshA"},
+		{"ak-1234567890abcdef1234567890abcdef", ""}, // 无 mesh 段
 		// legacy 16hex（8B，前向兼容既有 16hex 凭据/网格）
-		{"sk-prod-1234567890abcdef", "prod"},
-		{"sk-prod-eu-1234567890abcdef", "prod-eu"},
-		{"sk-meshA-3f8a1234abcd5678", "meshA"},
-		{"sk-1234567890abcdef", ""}, // 无 mesh 段
+		{"ak-prod-1234567890abcdef", "prod"},
+		{"ak-prod-eu-1234567890abcdef", "prod-eu"},
+		{"ak-meshA-3f8a1234abcd5678", "meshA"},
+		{"ak-1234567890abcdef", ""}, // 无 mesh 段
 		// 非法形态
-		{"other", ""},                   // 非 sk- 前缀
-		{"sk-", ""},                     // 只有前缀
-		{"sk-prod-1234567890abcde", ""}, // hex 段 15 位
-		{"sk-prod-1234567890abcdef1234567890abcdeg", ""},  // 长度 32 但含非 hex
-		{"sk-prod-1234567890abcdef1234567890abcdef0", ""}, // 33 hex 超长
+		{"other", ""}, // 非 ak- 前缀
+		{"sk-prod-1234567890abcdef1234567890abcdef", ""}, // 旧前缀 sk- 不再识别
+		{"ak-", ""},                     // 只有前缀
+		{"ak-prod-1234567890abcde", ""}, // hex 段 15 位
+		{"sk-prod-1234567890abcdef1234567890abcdeg", ""},  // 旧前缀 sk- + 非 hex 也拒
+		{"ak-prod-1234567890abcdef1234567890abcdef0", ""}, // 33 hex 超长
 		{"", ""},
 	}
 	for _, tt := range tests {

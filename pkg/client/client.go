@@ -178,7 +178,7 @@ func WithHTTPClient(hc *http.Client) Option {
 
 // WithTunnel 启用加密隧道传输（access-key 驱动）：
 // 隧道编解码密钥 = HKDF(SK, mesh) 派生；服务端同一算法（authMiddleware 验签后派生）。
-// ak 形如 sk[-<mesh>]-<32hex>（兼容 legacy sk[-<mesh>]-<16hex>），mesh 从 AK 提取（无 mesh 段则为空串）。
+// ak 形如 ak[-<mesh>]-<32hex>（兼容 legacy ak[-<mesh>]-<16hex>），mesh 从 AK 提取（无 mesh 段则为空串）。
 func WithTunnel(ak, sk string) Option {
 	return func(c *FileClient) {
 		// 1) 把 accessKey/Secret 存进 client（doRequest 签名用）

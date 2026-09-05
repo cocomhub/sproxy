@@ -365,7 +365,7 @@ func TestE2E_FileListAfterUpload(t *testing.T) {
 
 // ---- E2E: SproxySig 请求签名认证 ----
 
-// generateTestAccessKeyPair 生成一对 SproxySig AK/SK（AccessKey=sk-<16hex>，Secret=32B hex）。
+// generateTestAccessKeyPair 生成一对 SproxySig AK/SK（AccessKey=ak-<16hex>，Secret=32B hex）。
 func generateTestAccessKeyPair(t *testing.T) (string, string) {
 	t.Helper()
 	akBytes := make([]byte, 16)
@@ -376,7 +376,34 @@ func generateTestAccessKeyPair(t *testing.T) (string, string) {
 	if _, err := rand.Read(skBytes); err != nil {
 		t.Fatalf("generate SK: %v", err)
 	}
-	return "sk-" + hex.EncodeToString(akBytes), hex.EncodeToString(skBytes)
+	return "ak-" + hex.EncodeToString(akBytes), hex.EncodeToString(skBytes)
+}
+
+// parseSeedFromAccessKeysYAML 从 accessKeysYAML 片段（"  - key: ...\n    secret: ...\n"）
+// 提取 key/secret，供 pre-seed 凭据 store。无法解析返回空串（调用方按需处理）。
+func parseSeedFromAccessKeysYAML(t *testing.T, accessKeysYAML string) (string, string) {
+	t.Helper()
+	var ak, sk string
+	for line := range strings.SplitSeq(accessKeysYAML, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "- ")
+		line = strings.TrimSpace(line)
+		scheme, val, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		val = strings.Trim(strings.TrimSpace(val), `"`)
+		switch strings.TrimSpace(scheme) {
+		case "key":
+			ak = val
+		case "secret":
+			sk = val
+		}
+	}
+	if ak == "" || sk == "" {
+		t.Fatalf("parseSeedFromAccessKeysYAML: 无法解析 key/secret: %q", accessKeysYAML)
+	}
+	return ak, sk
 }
 
 // startSPROXYWithAccessKeys 启动一个配置了 SproxySig access_keys 的 sproxy（TLS 关闭），
@@ -407,6 +434,10 @@ func startSPROXYWithAccessKeys(t *testing.T, accessKeysYAML string) (string, fun
 	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
 		t.Fatalf("create uploads dir: %v", err)
 	}
+	// 凭据 store 化：access_keys 不再装配 Ring，须 pre-seed 使 ak 被识别。
+	// accessKeysYAML 参数是可注入的键值片段；这里用解析出的 ak 对应 seed。
+	ak, sk := parseSeedFromAccessKeysYAML(t, accessKeysYAML)
+	seedCredentialStore(t, uploadsDir, ak, sk)
 	configPath := filepath.Join(tmpDir, "sproxy.yaml")
 	configContent := "tls:\n  enabled: false\ntunnel_key: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\naccess_keys:\n" + accessKeysYAML
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {

@@ -60,6 +60,8 @@ func startFederatedHub(t *testing.T, binPath, name string, peerURL string) (stri
 	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
 		t.Fatalf("create uploads dir: %v", err)
 	}
+	// 凭据 store 化：access_keys 不再装配 Ring，须 pre-seed 使 e2eTestAK 被识别。
+	seedCredentialStore(t, uploadsDir, e2eTestAK, e2eTestSK)
 	var peersYAML string
 	if peerURL != "" {
 		peersYAML = fmt.Sprintf("    interval: \"1s\"\n    timeout: \"3s\"\n    peers:\n      - id: \"peer-%s\"\n        url: %q\n        access_key: %q\n        access_key_secret: %q\n",

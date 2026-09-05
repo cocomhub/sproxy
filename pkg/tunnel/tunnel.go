@@ -131,7 +131,7 @@ func GenerateKey() (string, error) {
 	return hex.EncodeToString(key), nil
 }
 
-// AccessKeyMesh 从 SproxySig AccessKey 提取 mesh 段（AK 形如 sk[-<mesh>]-<32hex>，
+// AccessKeyMesh 从 SproxySig AccessKey 提取 mesh 段（AK 形如 ak[-<mesh>]-<32hex>，
 // 随机段兼容 legacy 16hex）。薄委托 pkg/accesskey.ParseMesh —— AK 解析一律收归
 // accesskey 包（用户硬约束），本包不再自行解析 AK 结构（原内嵌字符串解析实现已删除）。
 func AccessKeyMesh(ak string) string { return accesskey.ParseMesh(ak) }

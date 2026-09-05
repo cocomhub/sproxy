@@ -56,7 +56,7 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 
 	// 2. hub：仅裸 TCP（无 WS），SproxySig 准入
 	const (
-		ak = "sk-relay-tcp-000000000000000000000"
+		ak = "ak-relay-tcp-000000000000000000000"
 		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	rt := hub.NewMeshRouteTable()

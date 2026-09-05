@@ -89,7 +89,7 @@ func (s *CredentialStore) Save(keys []accesskey.Key) error {
 
 // GenerateBootstrapCredential 生成首启 anonymous 凭据的 AK/SK。
 // 直接委托 pkg/accesskey.GeneratePair（""）——AK/SK 生成一律收归 accesskey 包
-// （用户硬约束，禁止其它包自行生成）；AK = sk-<32hex>(16B)、SK = 32B 随机 hex，
+// （用户硬约束，禁止其它包自行生成）；AK = ak-<32hex>(16B)、SK = 32B 随机 hex，
 // 与 GeneratePair 同源同长。供 handlers.bootstrapGenerate 在首启装配时调用。
 func GenerateBootstrapCredential() (ak, sk string, err error) {
 	return accesskey.GeneratePair(nil, "")

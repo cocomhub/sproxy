@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	testAK = "sk-prod-meshA-3f8a"
+	testAK = "ak-prod-meshA-3f8a"
 	testSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
 
@@ -195,7 +195,7 @@ func TestParseHeader_V2_EntryID(t *testing.T) {
 // 真实消费路径（pkg/client.signRequest）的 v2 签名依赖此一致性。
 func TestSignAndFormat_EntryID_RoundTrip(t *testing.T) {
 	const (
-		ak = "sk-prod-meshA-3f8a"
+		ak = "ak-prod-meshA-3f8a"
 		id = "sk-abcdef012345"
 	)
 	h := buildHeader(ak, testSK, "nonce-e1", 0, DefaultExpiry, "POST", "/api/credentials/"+ak+"/renew", "", EmptyBodyHash())
@@ -264,7 +264,7 @@ func TestParseHeader_Malformed(t *testing.T) {
 
 // TestParseHeader_V1_Deprecated：v1 头能解析（不拒绝明文），但 Verify 按版本不匹配拒绝。
 func TestParseHeader_V1_Deprecated(t *testing.T) {
-	auth := Scheme + " v=1 ak=sk-prod-meshA-3f8a ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
+	auth := Scheme + " v=1 ak=ak-prod-meshA-3f8a ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
 	h, err := ParseHeader(auth)
 	if err != nil {
 		t.Fatalf("v1 头应可解析（Version 字段透出）, got %v", err)

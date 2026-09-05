@@ -30,7 +30,7 @@ import (
 // federationForwardTestAK / SK：跨 hub 转发认证测试用的默认 mesh 凭据
 // （sk-<32hex>，ParseMesh → 空 mesh）。
 const (
-	federationForwardTestAK = "sk-0011223344556677"
+	federationForwardTestAK = "ak-0011223344556677"
 	federationForwardTestSK = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 )
 

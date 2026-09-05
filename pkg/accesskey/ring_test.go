@@ -47,7 +47,7 @@ func must32BHex(t *testing.T, n byte) []byte {
 // TestRing_Lookup_Empty 空 ring Lookup 返回 (nil, false)。
 func TestRing_Lookup_Empty(t *testing.T) {
 	r := NewRing()
-	ks, ok := r.Lookup("sk-whatever")
+	ks, ok := r.Lookup("ak-whatever")
 	if ok {
 		t.Fatalf("Lookup 空 ring 应返回 ok=false")
 	}
@@ -59,7 +59,7 @@ func TestRing_Lookup_Empty(t *testing.T) {
 // TestRing_UpsertAK_ThenLookup UpsertAK 后 Lookup 可查到，CoreEntry 返回最新加入条目。
 func TestRing_UpsertAK_ThenLookup(t *testing.T) {
 	r := NewRing()
-	ak := "sk-1234567890abcdef"
+	ak := "ak-1234567890abcdef"
 	if err := r.UpsertAK(ak, "owner-1"); err != nil {
 		t.Fatalf("UpsertAK 失败: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestRing_UpsertAK_ThenLookup(t *testing.T) {
 func TestRing_AddKey_Multiple(t *testing.T) {
 	clk := &mutableClock{}
 	r := NewRing(clk.Now)
-	ak := "sk-abcdef1234567890"
+	ak := "ak-abcdef1234567890"
 	if err := r.UpsertAK(ak, "o"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestRing_AddKey_Multiple(t *testing.T) {
 // TestRing_AddKey_UnknownAK AddKey 对不存在 AK 返回错误。
 func TestRing_AddKey_UnknownAK(t *testing.T) {
 	r := NewRing()
-	_, err := r.AddKey("sk-9999999999999999", must32BHex(t, 0xAA))
+	_, err := r.AddKey("ak-9999999999999999", must32BHex(t, 0xAA))
 	if err == nil {
 		t.Fatalf("AddKey 对不存在 AK 应返回错误")
 	}
@@ -133,7 +133,7 @@ func TestRing_AddKey_UnknownAK(t *testing.T) {
 func TestRing_ExpireKey(t *testing.T) {
 	clk := &mutableClock{}
 	r := NewRing(clk.Now)
-	ak := "sk-mesh-1234567890abcdef"
+	ak := "ak-mesh-1234567890abcdef"
 	if err := r.UpsertAK(ak, "o"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestRing_ExpireKey(t *testing.T) {
 func TestRing_ExpireKey_UntilZero(t *testing.T) {
 	clk := &mutableClock{}
 	r := NewRing(clk.Now)
-	ak := "sk-z-1234567890abcdef"
+	ak := "ak-z-1234567890abcdef"
 	if err := r.UpsertAK(ak, "o"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestRing_ExpireKey_UntilZero(t *testing.T) {
 // TestRing_DeleteKey 删除某条后 Lookup 不含它、再删同条返回错误（404 语义）。
 func TestRing_DeleteKey(t *testing.T) {
 	r := NewRing()
-	ak := "sk-d-1234567890abcdef"
+	ak := "ak-d-1234567890abcdef"
 	if err := r.UpsertAK(ak, "o"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestRing_DeleteKey(t *testing.T) {
 // TestRing_DeleteAK 删除整个 AK → Lookup false。
 func TestRing_DeleteAK(t *testing.T) {
 	r := NewRing()
-	ak := "sk-a-1234567890abcdef"
+	ak := "ak-a-1234567890abcdef"
 	if err := r.UpsertAK(ak, "o"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestRing_InvalidArgs(t *testing.T) {
 	})
 	t.Run("AddKey bad SK len", func(t *testing.T) {
 		r := NewRing()
-		ak := "sk-b-1234567890abcdef"
+		ak := "ak-b-1234567890abcdef"
 		if err := r.UpsertAK(ak, "o"); err != nil {
 			t.Fatalf("UpsertAK: %v", err)
 		}
@@ -266,7 +266,7 @@ func TestRing_InvalidArgs(t *testing.T) {
 	})
 	t.Run("AddKey empty ID auto-generate", func(t *testing.T) {
 		r := NewRing()
-		ak := "sk-c-1234567890abcdef"
+		ak := "ak-c-1234567890abcdef"
 		if err := r.UpsertAK(ak, "o"); err != nil {
 			t.Fatalf("UpsertAK: %v", err)
 		}
@@ -280,7 +280,7 @@ func TestRing_InvalidArgs(t *testing.T) {
 	})
 	t.Run("AddKey duplicate ID", func(t *testing.T) {
 		r := NewRing()
-		ak := "sk-d2-1234567890abcdef"
+		ak := "ak-d2-1234567890abcdef"
 		if err := r.UpsertAK(ak, "o"); err != nil {
 			t.Fatalf("UpsertAK: %v", err)
 		}
@@ -297,7 +297,7 @@ func TestRing_InvalidArgs(t *testing.T) {
 // 改写缓冲区不影响 ring 内部凭据。
 func TestRing_AddKey_CopiesSecret(t *testing.T) {
 	r := NewRing()
-	ak := "sk-cp-1234567890abcdef"
+	ak := "ak-cp-1234567890abcdef"
 	if err := r.UpsertAK(ak, "o"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestRing_AddKey_CopiesSecret(t *testing.T) {
 func TestRing_Replace(t *testing.T) {
 	r := NewRing()
 	// 先放旧数据
-	oldAK := "sk-old-1234567890abcdef"
+	oldAK := "ak-old-1234567890abcdef"
 	if err := r.UpsertAK(oldAK, "old"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
@@ -333,10 +333,10 @@ func TestRing_Replace(t *testing.T) {
 
 	// 替换为新集合
 	newAKs := []Key{
-		{AK: "sk-b-1234567890abcdef", Owner: "o2", Entries: []SKEntry{
+		{AK: "ak-b-1234567890abcdef", Owner: "o2", Entries: []SKEntry{
 			{ID: "sk-0000000000aa", SK: must32BHex(t, 0xAA), CreatedAt: fixedNow, Status: StatusActive},
 		}},
-		{AK: "sk-a-1234567890abcdef", Owner: "o1", Entries: []SKEntry{
+		{AK: "ak-a-1234567890abcdef", Owner: "o1", Entries: []SKEntry{
 			{ID: "sk-0000000000bb", SK: must32BHex(t, 0xBB), CreatedAt: fixedNow, Status: StatusActive},
 		}},
 	}
@@ -351,7 +351,7 @@ func TestRing_Replace(t *testing.T) {
 	}
 	// 深拷贝：改入参不影响 ring
 	newAKs[0].Entries[0].SK[0] ^= 0xff
-	ce := r.CoreEntry("sk-b-1234567890abcdef")
+	ce := r.CoreEntry("ak-b-1234567890abcdef")
 	if ce == nil {
 		t.Fatalf("CoreEntry(新 AK) 失败")
 	}
@@ -376,7 +376,7 @@ func TestRing_Replace(t *testing.T) {
 func TestRing_ExpireKey_StatusRefresh(t *testing.T) {
 	clk := &mutableClock{}
 	r := NewRing(clk.Now)
-	ak := "sk-ref-1234567890abcdef"
+	ak := "ak-ref-1234567890abcdef"
 	if err := r.UpsertAK(ak, "o"); err != nil {
 		t.Fatalf("UpsertAK: %v", err)
 	}
@@ -430,9 +430,9 @@ func TestRing_ExpireKey_StatusRefresh(t *testing.T) {
 func TestRing_Snapshot_SortedAndDeepCopy(t *testing.T) {
 	r := NewRing()
 	aks := []string{
-		"sk-3333333333333333",
-		"sk-1111111111111111",
-		"sk-2222222222222222",
+		"ak-3333333333333333",
+		"ak-1111111111111111",
+		"ak-2222222222222222",
 	}
 	for _, ak := range aks {
 		if err := r.UpsertAK(ak, "o"); err != nil {
@@ -456,9 +456,9 @@ func TestRing_Snapshot_SortedAndDeepCopy(t *testing.T) {
 	}
 	// 深拷贝：修改返回切片内部不影响 ring
 	snap[0].Entries[0].SK[0] ^= 0xff
-	snap[0].AK = "sk-hacked"
+	snap[0].AK = "ak-hacked"
 	orig := r.Snapshot()[0]
-	if orig.AK == "sk-hacked" {
+	if orig.AK == "ak-hacked" {
 		t.Fatalf("深拷贝失败：修改 Snapshot 的 AK 影响了内部")
 	}
 	if bytes.Equal(orig.Entries[0].SK, snap[0].Entries[0].SK) {
@@ -472,7 +472,7 @@ func TestRing_Concurrent(t *testing.T) {
 	const nAK = 8
 	const rounds = 200
 	akName := func(i int) string {
-		return "sk-cn-" + string(rune('a'+i)) + "1234567890abcd"
+		return "ak-cn-" + string(rune('a'+i)) + "1234567890abcd"
 	}
 	for i := range nAK {
 		if err := r.UpsertAK(akName(i), "o"); err != nil {
@@ -512,11 +512,11 @@ func TestNewRingFromKeyPairs(t *testing.T) {
 	hex32 := hex.EncodeToString(must32BHex(t, 0xaa))
 	// 合法 AK/SK + 非法 SK（非 32 字节）→ 只有合法条目存活。
 	ring := NewRingFromKeyPairs([]KeyPair{
-		{Key: "sk-kp-test-1234567890ab", Secret: hex32},
+		{Key: "ak-kp-test-1234567890ab", Secret: hex32},
 		{Key: "sk-kp-bad-secret", Secret: "deadbeef"},
 		{Key: "", Secret: hex32},
 	})
-	if entry := ring.CoreEntry("sk-kp-test-1234567890ab"); entry == nil {
+	if entry := ring.CoreEntry("ak-kp-test-1234567890ab"); entry == nil {
 		t.Fatal("合法 AK/SK 应有存活条目")
 	} else {
 		if entry.Kind != KindPlain {
@@ -535,7 +535,7 @@ func TestNewRingFromKeyPairs(t *testing.T) {
 			t.Fatalf("条目 SK 应与入参一致, got %q", got)
 		}
 	}
-	if ring.CoreEntry("sk-kp-bad-secret") != nil {
+	if ring.CoreEntry("ak-kp-bad-secret") != nil {
 		t.Fatal("非法 SK 条目不应进入 ring")
 	}
 	if ring.CoreEntry("") != nil {

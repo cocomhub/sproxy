@@ -18,7 +18,7 @@ import (
 
 // testAccessKey / testAccessSecret 是 SproxySig 测试密钥对。
 const (
-	testAccessKey    = "sk-test-mesh-aabbcc"
+	testAccessKey    = "ak-test-mesh-aabbcc"
 	testAccessSecret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
 
@@ -225,7 +225,7 @@ func TestAuthMiddleware_SproxySigUnknownKey(t *testing.T) {
 
 	// 未配置的 AK → 401。
 	r := httptest.NewRequest("GET", "/upload", nil)
-	signRequest(r, "sk-unknown", testAccessSecret)
+	signRequest(r, "ak-unknown", testAccessSecret)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 

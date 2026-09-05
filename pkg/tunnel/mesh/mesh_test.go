@@ -36,7 +36,7 @@ import (
 
 // 测试用合法 AK/SK：SK 必须为 64 hex 字符（32 字节），ComputeRegisterProof 才可计算。
 const (
-	testAccessKey = "sk-test-access-key"
+	testAccessKey = "ak-test-access-key"
 	testSecret    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 

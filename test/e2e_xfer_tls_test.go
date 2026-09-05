@@ -130,6 +130,8 @@ func startSPROXYWithXferTLS(t *testing.T) (xferTLSEnv, func()) {
 	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
 		t.Fatalf("创建 uploads 目录: %v", err)
 	}
+	// 凭据 store 化：access_keys 不再装配 Ring，须 pre-seed 使 e2eTestAK 被识别。
+	seedCredentialStore(t, uploadsDir, e2eTestAK, e2eTestSK)
 
 	// 路径用 filepath.ToSlash 归一（Windows 反斜杠会触发 YAML 双引号转义，
 	// 前斜杠在 Go os 层全平台可用，与既有 helper 语义一致）。

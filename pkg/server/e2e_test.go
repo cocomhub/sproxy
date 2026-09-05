@@ -27,7 +27,7 @@ import (
 
 // e2eAK / e2eSK 是 startTestServer 配置的 SproxySig 测试凭据。
 const (
-	e2eAK = "sk-e2e-0000000000000000"
+	e2eAK = "ak-e2e-0000000000000000"
 	e2eSK = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
@@ -166,7 +166,7 @@ func TestE2E_Tunnel_UploadDownload(t *testing.T) {
 	sum := sha256.Sum256(payload)
 	wantCS := hex.EncodeToString(sum[:])
 
-	c := client.NewFileClient(url, client.WithTunnel("sk-e2e-0000000000000000", strings.Repeat("a", 64)))
+	c := client.NewFileClient(url, client.WithTunnel("ak-e2e-0000000000000000", strings.Repeat("a", 64)))
 
 	if _, err := c.Upload(t.Context(), srcPath, "tunnel.txt"); err != nil {
 		t.Fatalf("Upload via tunnel: %v", err)

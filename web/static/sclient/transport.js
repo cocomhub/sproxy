@@ -92,16 +92,18 @@
     return err;
   }
 
-  // ---- AccessKeyMesh：Go tunnel.AccessKeyMesh 的 JS 移植（I-1 唯一实现） ----
-  // sk-<mesh>-<16hex>（mesh 可含连字符，取最后一个 '-'）→ mesh；
-  // sk-<16hex>（无 mesh 段）→ ''；格式不合法 → ''。
+  // ---- AccessKeyMesh：Go accesskey.ParseMesh 的 JS 移植（唯一实现，前缀/长度与 Go 对齐） ----
+  // ak-<mesh>-<32hex>（mesh 可含连字符，取最后一个 '-'）→ mesh；
+  // ak-<32hex>（无 mesh 段）→ ''；格式不合法 → ''。
+  // 双兼容：随机段 accept 32 hex（标准 16B）或 16 hex（legacy 8B）；其它长度拒绝。
+  // 2026-09-05：前缀由 'sk-' 统一改为 'ak-'（alpha 破坏性变更，无历史兼容）。
   function accessKeyMesh(ak) {
-    if (typeof ak !== 'string' || ak.indexOf('sk-') !== 0) return '';
+    if (typeof ak !== 'string' || ak.indexOf('ak-') !== 0) return '';
     const rest = ak.slice(3);
     const idx = rest.lastIndexOf('-');
-    if (idx <= 0 || idx + 17 !== rest.length) return '';
+    if (idx < 0) return '';
     const hexPart = rest.slice(idx + 1);
-    if (!/^[0-9a-fA-F]{16}$/.test(hexPart)) return '';
+    if (!/^(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{32})$/.test(hexPart)) return '';
     return rest.slice(0, idx);
   }
 

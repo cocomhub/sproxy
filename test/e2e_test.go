@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -38,7 +39,7 @@ import (
 // 认证驱动模式下全部 HTTP 面（除 healthz/version/ui//tunnel）必须验签；
 // 与 testutil.TestAccessKey/TestKey 一致，保证 sclient/FileClient 派生隧道密钥一致。
 const (
-	e2eTestAK = "sk-00000000000000000000000000000000"
+	e2eTestAK = "ak-00000000000000000000000000000000"
 	e2eTestSK = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
@@ -77,6 +78,44 @@ func (t *signingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 
 // authedHTTPClient 是带 SproxySig 签名的 HTTP client（替代 http.DefaultClient）。
 var authedHTTPClient = &http.Client{Transport: &signingTransport{base: http.DefaultTransport}}
+
+// seedCredentialStore 在 <storageRoot>/anonymous/meta/credentials.json 预写一条
+// plain alive 条目（ser.CredentialStore.Save 的 JSON 格式），使服务端凭据 Ring
+// 首启即识别该 AK/SK——凭据 store 化后 yaml access_keys 不再装配 Ring，E2E 若
+// 依赖确定性测试凭据必须 pre-seed。skHex 须为 64 hex（32B）。
+func seedCredentialStore(t *testing.T, storageRoot, ak, skHex string) {
+	t.Helper()
+	sk, derr := hex.DecodeString(skHex)
+	if derr != nil {
+		t.Fatalf("seed credential store: decode sk: %v", derr)
+	}
+	f := struct {
+		Version int             `json:"version"`
+		Keys    []accesskey.Key `json:"keys"`
+	}{
+		Version: 1,
+		Keys: []accesskey.Key{{
+			AK: ak, Owner: "test",
+			Entries: []accesskey.SKEntry{{
+				ID: "sk-000000000001", SK: sk, Kind: accesskey.KindPlain,
+				CreatedAt: time.Now().UTC().Truncate(time.Second),
+				Status:    accesskey.StatusActive,
+				Meta:      accesskey.Meta{Type: "initial"},
+			}},
+		}},
+	}
+	metaDir := filepath.Join(storageRoot, "anonymous", "meta")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatalf("seed credential store mkdir: %v", err)
+	}
+	data, jerr := json.MarshalIndent(f, "", "  ")
+	if jerr != nil {
+		t.Fatalf("seed credential store marshal: %v", jerr)
+	}
+	if werr := os.WriteFile(filepath.Join(metaDir, "credentials.json"), data, 0o644); werr != nil {
+		t.Fatalf("seed credential store write: %v", werr)
+	}
+}
 
 // ---- helpers ----
 
@@ -247,7 +286,7 @@ func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) 
 	// 写入临时配置文件，禁用 TLS（E2E 测试使用纯 HTTP 连接）。
 	// 认证驱动：配置 access_keys（fail-fast 要求），客户端统一用 e2eTestAK/e2eTestSK 签名。
 	configPath := filepath.Join(tmpDir, "sproxy.yaml")
-	// e2eTestAK 为 sk-<hex>（2 段），accessKeyMesh 解析 mesh_id 为空字符串；
+	// e2eTestAK 为 ak-<hex>（2 段），accessKeyMesh 解析 mesh_id 为空字符串；
 	// 服务端 access_keys 不配 mesh_id（默认空）→ 两端 HKDF 派生参数一致。
 	configContent := fmt.Sprintf("tls:\n  enabled: false\ncloud_download_allow_private: true\naccess_keys:\n  - key: %q\n    secret: %q\n", e2eTestAK, e2eTestSK)
 	if extraConfig != "" {
@@ -256,6 +295,11 @@ func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) 
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("write temp config: %v", err)
 	}
+	// 凭据 store 化装配：服务端凭据表 = Ring（来自 <storage_root>/anonymous/meta/credentials.json，
+	// 取代 yaml access_keys）。首启（ring 空）生成 anonymous 随机凭据，导致 e2eTestAK
+	// 不会被识别。为使 E2E 拿到确定性 e2eTestAK，预先在该路径写入一条 plain alive 条目
+	// （与 server.CredentialStore.Save 的 JSON 格式一致；见 server.NewCredentialStore）。
+	seedCredentialStore(t, uploadsDir, e2eTestAK, e2eTestSK)
 	args := []string{
 		"--addr", addr,
 		"--storage-root", uploadsDir,
