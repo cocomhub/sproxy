@@ -32,9 +32,30 @@ func NewCmdTrust(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 		Short: "凭据信任管理（renew 轮换 SK / SK 条目管理 / AK 管理）",
 	}
 	cmd.AddCommand(newCmdTrustRenew(factory, ios, cfgSvc, cfgFile))
-	cmd.AddCommand(newCmdTrustSK(factory, ios))
-	cmd.AddCommand(newCmdTrustAK(factory, ios))
+	cmd.AddCommand(newCmdTrustSK(factory, ios, cfgSvc))
+	cmd.AddCommand(newCmdTrustAK(factory, ios, cfgSvc))
 	return cmd
+}
+
+// newTrustDirectClient 为凭据管理命令构建「直连模式」客户端。
+//
+// 凭据管理端点（renew / sk 列表/删除/过期 / ak 增删）的「本人判定」依赖
+// authMiddleware 在验签成功后注入的 actor（ActorFrom(ctx)）。隧道内层（localMux）
+// 不注入 actor → 这些端点在内层按 404 处理，**隧道模式下无法工作**。因此 trust
+// 一切命令必须走直连模式（外层 SproxySig 验签 → actor 来自签名头上的 AK）。
+//
+// 实现：若用户未显式 --server，则用配置 server_url 填充该 flag——factory 的
+// serverFlagNotSet 据此判「未显式指定」为 false，从而跳过 WithTunnel、走
+// WithAccessKey 直连签名路径。用户显式给了 --server 则原样透传。
+func newTrustDirectClient(cmd *cobra.Command, factory clientfactory.Factory, cfgSvc ConfigProvider) (*client.FileClient, error) {
+	if s, _ := cmd.Flags().GetString("server"); s == "" && cfgSvc != nil {
+		if cfg, err := cfgSvc.LoadConfig(); err == nil && cfg.ServerURL != "" {
+			if f := cmd.Flags().Lookup("server"); f != nil {
+				_ = f.Value.Set(cfg.ServerURL)
+			}
+		}
+	}
+	return factory.NewClient(cmd)
 }
 
 // ---- trust renew ----
@@ -46,7 +67,7 @@ func newCmdTrustRenew(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 		Short: "轮换当前 AK 的 SK（新 SK 立即生效，旧 SK 服务端仍可用）",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
+			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
@@ -93,27 +114,27 @@ func newCmdTrustRenew(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 // ---- trust sk ----
 
 // newCmdTrustSK 创建 trust sk 命令族（list / delete / expire）。
-func newCmdTrustSK(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func newCmdTrustSK(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sk",
 		Short: "SK 条目管理（list / delete / expire）",
 	}
 	cmd.PersistentFlags().String("ak", "", "目标 AccessKey（默认本端 access_key）")
-	cmd.AddCommand(newCmdTrustSKList(factory, ios))
-	cmd.AddCommand(newCmdTrustSKDelete(factory, ios))
-	cmd.AddCommand(newCmdTrustSKExpire(factory, ios))
+	cmd.AddCommand(newCmdTrustSKList(factory, ios, cfgSvc))
+	cmd.AddCommand(newCmdTrustSKDelete(factory, ios, cfgSvc))
+	cmd.AddCommand(newCmdTrustSKExpire(factory, ios, cfgSvc))
 	return cmd
 }
 
 // newCmdTrustSKList 创建 trust sk list 命令：列出目标 AK 的 SK 条目，只展示能解开的条目。
-func newCmdTrustSKList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func newCmdTrustSKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "列出 AK 的 SK 条目（只展示本端能解开 secret 的条目，其余 masked）",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ak, _ := cmd.Flags().GetString("ak")
-			svc, err := factory.NewClient(cmd)
+			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
@@ -154,14 +175,14 @@ func newCmdTrustSKList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 }
 
 // newCmdTrustSKDelete 创建 trust sk delete 命令。
-func newCmdTrustSKDelete(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func newCmdTrustSKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete <sk_id>",
 		Short: "删除单条 SK（删除后该 SK 签名立即失效）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ak, _ := cmd.Flags().GetString("ak")
-			svc, err := factory.NewClient(cmd)
+			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
@@ -183,7 +204,7 @@ func newCmdTrustSKDelete(factory clientfactory.Factory, ios cli.IOStreams) *cobr
 }
 
 // newCmdTrustSKExpire 创建 trust sk expire 命令。
-func newCmdTrustSKExpire(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func newCmdTrustSKExpire(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var until string
 	cmd := &cobra.Command{
 		Use:   "expire <sk_id> [--until RFC3339]",
@@ -191,7 +212,7 @@ func newCmdTrustSKExpire(factory clientfactory.Factory, ios cli.IOStreams) *cobr
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ak, _ := cmd.Flags().GetString("ak")
-			svc, err := factory.NewClient(cmd)
+			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
@@ -229,25 +250,25 @@ func newCmdTrustSKExpire(factory clientfactory.Factory, ios cli.IOStreams) *cobr
 // ---- trust ak ----
 
 // newCmdTrustAK 创建 trust ak 命令族（list / add / delete，admin-only）。
-func newCmdTrustAK(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func newCmdTrustAK(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ak",
 		Short: "AccessKey 管理（list / add / delete，需要 admin 权限）",
 	}
-	cmd.AddCommand(newCmdTrustAKList(factory, ios))
-	cmd.AddCommand(newCmdTrustAKAdd(factory, ios))
-	cmd.AddCommand(newCmdTrustAKDelete(factory, ios, nil))
+	cmd.AddCommand(newCmdTrustAKList(factory, ios, cfgSvc))
+	cmd.AddCommand(newCmdTrustAKAdd(factory, ios, cfgSvc))
+	cmd.AddCommand(newCmdTrustAKDelete(factory, ios, cfgSvc))
 	return cmd
 }
 
 // newCmdTrustAKList 创建 trust ak list 命令（admin）。
-func newCmdTrustAKList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func newCmdTrustAKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "列出全部 AccessKey（admin）",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
+			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
@@ -271,13 +292,13 @@ func newCmdTrustAKList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 }
 
 // newCmdTrustAKAdd 创建 trust ak add 命令（admin，生成 AK/SK 对并注册）。
-func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add [ak]",
 		Short: "新增 AccessKey（admin；不指定 SK 时服务端生成并单次回传）",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc, err := factory.NewClient(cmd)
+			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)
@@ -338,7 +359,7 @@ func newCmdTrustAKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSv
 				return nil
 			}
 
-			svc, err := factory.NewClient(cmd)
+			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
 				ios.WriteErrLine("初始化客户端失败: %v", err)
 				return fmt.Errorf(errFmtInitClient, err)

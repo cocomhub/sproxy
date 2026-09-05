@@ -101,7 +101,8 @@ func TestTrustRenew_UpdatesConfig(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 
 	var buf strings.Builder
-	cmd := NewCmdTrust(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &testConfigProvider{cfg: cfg}, &cfgPath)
+	ios := cli.IOStreams{Out: &buf, ErrOut: io.Discard, In: strings.NewReader("\n")}
+	cmd := NewCmdTrust(factory, ios, &testConfigProvider{cfg: cfg}, &cfgPath)
 	cmd.SetArgs([]string{"renew"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("trust renew failed: %v", err)
@@ -410,6 +411,9 @@ func TestTrustAKAdd_NoAKArg_GeneratesPair(t *testing.T) {
 
 // ---- access-key deprecated ----
 
+// TestAccessKey_DeprecatedAlias 验证 access-key 命令已标 deprecated（提示指向 trust），
+// 但其上**不得**挂 `Aliases: ["trust"]`——否则 cobra 先到先得匹配会让独立命令树
+// trust 全部子命令（renew/sk/ak）被 access-key 遮蔽而不可达（Critical C1 回归）。
 func TestAccessKey_DeprecatedAlias(t *testing.T) {
 	var out, errOut strings.Builder
 	cmd := NewCmdAccessKey(cli.IOStreams{Out: &out, ErrOut: &errOut})
@@ -423,13 +427,71 @@ func TestAccessKey_DeprecatedAlias(t *testing.T) {
 		t.Errorf("expected AK/SK lines still printed, got: %s", out.String())
 	}
 	// deprecated 提示（cobra 仅对不触达隐式子命令的父命令打印）应指向 trust。
-	// 直接断言 cmd.Deprecated 字段（cobra 命令定义层面），避免依赖 Execute 的输出时序。
 	if !strings.Contains(cmd.Deprecated, "trust") {
 		t.Errorf("expected deprecated hint mentioning 'trust', got: %q", cmd.Deprecated)
 	}
-	if len(cmd.Aliases) == 0 || cmd.Aliases[0] != "trust" {
-		t.Errorf("expected alias 'trust' on access-key command, got %v", cmd.Aliases)
+	if len(cmd.Aliases) > 0 {
+		t.Errorf("access-key 必须无 alias（C1 遮蔽修复）：got %v", cmd.Aliases)
 	}
+}
+
+// TestTrustCommandTreeReachable 用真实 cobra 执行路由验证完整 trust 命令树可达：
+// `root trust <子命令>` 必须解析到独立 trust 命令（而非被 access-key 遮蔽——C1 回归
+//
+//	guards）。cobra findNext 配 Name/Alias 先到先得，access-key 若挂 Aliases:["trust"]
+//	会把 trust 树吃掉，此测试会失败。
+func TestTrustCommandTreeReachable(t *testing.T) {
+	cmds := map[string]string{
+		"sk list":     "SK_ID", // 列表头
+		"sk delete x": "SK 已删除",
+		"sk expire x": "设 SK 过期",
+		"ak list":     "AccessKey",
+	}
+	for full, want := range cmds {
+		full := full
+		want := want
+		t.Run(full, func(t *testing.T) {
+			svc := client.NewFileClient("http://127.0.0.1:1") // 直连占位（无真实 RPC）
+			factory := clientfactory.NewMock(svc, nil)
+			var out, errOut strings.Builder
+			ios := cli.IOStreams{Out: &out, ErrOut: &errOut, In: strings.NewReader("wrong\n")}
+			cfgSvc := &testConfigProvider{cfg: &client.Config{AccessKey: "sk-test-0000000000000000", AccessKeySecret: strings.Repeat("11", 32)}}
+			cmd := NewCmdTrust(factory, ios, cfgSvc, new(string))
+			cmd.SetArgs(strings.Fields(full))
+			runErr := cmd.Execute()
+			// 关键断言：命令树可达（解析成功进入 RunE）——access-key 若挂 Aliases:["trust"]
+			// 会把 trust 树遮蔽，cobra 反报 unknown command（runErr 为 cobra 未知子命令错误）。
+			// 此处相反：解析成功、进入 RunE；RPC 本身（127.0.0.1:1 拒绝）或字段校验的错误
+			// 不影响「树可达」判定——只要求不是 cobra 的 unknown-command 关口被 alias 挡住。
+			if runErr != nil {
+				msg := runErr.Error()
+				if strings.Contains(msg, "unknown command") || strings.Contains(msg, "unrecognized") {
+					t.Fatalf("%s: 命令树被遮蔽（runErr=%q）——C1 回归", full, msg)
+				}
+				// 其余错误 = 命令已解析并进入 RunE（校验/RPC 层），可达性 OK。
+				return
+			}
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("%s: 期望输出含 %q, got: %s", full, want, out.String())
+			}
+		})
+	}
+
+	// ak delete 走交互确认路径：输入不符 → 打印取消（命令树可达 + 交互生效）。
+	t.Run("ak delete x", func(t *testing.T) {
+		svc := client.NewFileClient("http://127.0.0.1:1")
+		factory := clientfactory.NewMock(svc, nil)
+		var out strings.Builder
+		ios := cli.IOStreams{Out: &out, ErrOut: io.Discard, In: strings.NewReader("wrong\n")}
+		cmd := NewCmdTrust(factory, ios, nil, new(string))
+		cmd.SetArgs([]string{"ak", "delete", "sk-test-delete00000000"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("ak delete: 命令树可达但执行错误=%v", err)
+		}
+		if !strings.Contains(out.String(), "已取消") {
+			t.Errorf("ak delete: 期望取消输出, got %q", out.String())
+		}
+	})
 }
 
 // ---- config file isolation ----

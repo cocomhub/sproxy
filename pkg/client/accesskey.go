@@ -109,6 +109,11 @@ func (c *FileClient) RenewAccessKey(ctx context.Context) (*RenewResult, error) {
 	if c.accessKey == "" || c.accessKeySecret == "" {
 		return nil, fmt.Errorf("%w: renew 需要 access_key 与 access_key_secret", ErrNoCredentials)
 	}
+	// access_key_secret 必须是合法 64-hex（32 字节）；非法则解 wrap 必然失败，直接报错
+	// 而非等 GCM 校验失败再暴露（避免 must32 静默吞错路径）。
+	if _, derr := hex.DecodeString(c.accessKeySecret); derr != nil {
+		return nil, fmt.Errorf("本端 access_key_secret 非法（非 64-hex）: %w", ErrNoCredentials)
+	}
 	ak := c.accessKey
 	urlPath := "/api/credentials/" + ak + "/renew"
 	var resp renewCredentialResponse

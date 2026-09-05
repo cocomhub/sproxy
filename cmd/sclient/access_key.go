@@ -15,13 +15,17 @@ import (
 //
 // 自任务 6（trust 命令族）起标记 deprecated：AK/SK 生成与凭据管理统一走 `trust`
 // （`trust ak add` 生成注册 / `trust renew` 轮换）。本命令保留 generateAccessKeyPair
-// 的纯生成能力（`access-key create` 仍可用），Aliases 兼容旧调用。
+// 的纯生成能力（`access-key create` 仍可用）。
+//
+// 注意：**绝不**在此命令上设置 `Aliases: []string{"trust"}`——cobra 按注册顺序做
+// 先到先得的 Name/Alias 匹配，access-key 先注册会把独立命令树 `trust` 的入口整个
+// 遮蔽（`sclient trust renew` 会解析到 access-key → 报 unknown command）。trust 由
+// NewCmdTrust 作独立根命令注册（root.go）。
 func NewCmdAccessKey(ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:        "access-key",
 		Short:      "生成 AccessKey/AccessKeySecret（SproxySig 请求签名认证）",
 		Deprecated: "请使用 `trust ak add`（生成并注册）或 `trust renew`（轮换）。`access-key create` 仅保留纯生成能力。",
-		Aliases:    []string{"trust"}, // 兼容：`sclient access-key` 与 `sclient trust` 均可达（警告提示 deprecated）。
 	}
 	cmd.AddCommand(NewCmdAccessKeyCreate(ios))
 	return cmd
