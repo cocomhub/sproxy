@@ -246,7 +246,7 @@ func TestFederationNodesEndpoint_MeshFromAccessKey(t *testing.T) {
 	cfg.LogLevel = "error"
 	cfg.Hub.Enabled = true
 	cfg.Hub.Federation.Enabled = true
-	// meshM 的 AK（sk-meshM-<16hex>）：authMiddleware 验签后按 AccessKeyMesh 派生 mesh=meshM。
+	// meshM 的 AK（sk-meshM-<32hex> 标准形态）：authMiddleware 验签后按 ParseMesh 派生 mesh=meshM。
 	const (
 		meshMAK = "sk-meshM-0123456789abcdef"
 		meshMSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

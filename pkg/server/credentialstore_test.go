@@ -142,20 +142,43 @@ func TestCredentialStore_ConcurrentSave(t *testing.T) {
 	}
 }
 
-// TestNewAnonymousKey_Format 验证首启 anonymous 凭据生成格式。
-func TestNewAnonymousKey_Format(t *testing.T) {
-	ak, sk, err := newAnonymousKey()
+// TestGenerateBootstrapCredential_Format 验证首启 anonymous 凭据生成格式：AK
+// 随机段 32hex(16B)、SK 64 hex，直接委托 pkg/accesskey.GeneratePair（""）——生成
+// 收归 accesskey，服务端不再自行组装。与 GeneratePair 同源同长。
+func TestGenerateBootstrapCredential_Format(t *testing.T) {
+	ak, sk, err := GenerateBootstrapCredential()
 	if err != nil {
-		t.Fatalf("newAnonymousKey: %v", err)
+		t.Fatalf("GenerateBootstrapCredential: %v", err)
 	}
-	if !strings.HasPrefix(ak, "sk-") || len(ak) != len("sk-")+32 {
-		t.Errorf("AK 格式非法: %q", ak)
+	if !strings.HasPrefix(ak, accesskey.AccessKeyPrefix) {
+		t.Errorf("AK 应以 %q 开头: %q", accesskey.AccessKeyPrefix, ak)
+	}
+	// AK 随机段恒 32 hex（16 字节）——与服务端标准 GeneratePair 同长。
+	if len(ak) != len(accesskey.AccessKeyPrefix)+accesskey.AccessKeyHexLen*2 {
+		t.Errorf("AK 随机段应为 %d hex(%dB): got %q (len=%d)",
+			accesskey.AccessKeyHexLen*2, accesskey.AccessKeyHexLen, ak, len(ak))
 	}
 	if len(sk) != 64 {
 		t.Errorf("SK 长度 = %d, want 64", len(sk))
 	}
 	if _, err := hex.DecodeString(sk); err != nil {
 		t.Errorf("SK 非 hex: %v", err)
+	}
+	// 熵等价断言：解析/校验通过官方入口。
+	if !accesskey.IsValidAK(ak) {
+		t.Errorf("anonymous 产物应通过 IsValidAK: %q", ak)
+	}
+	if got := accesskey.ParseMesh(ak); got != "" {
+		t.Errorf("anonymous 无 mesh，ParseMesh = %q, want \"\"", got)
+	}
+	// 与 GeneratePair("") 产同长同构（同源字节数）。
+	gak, _, gerr := accesskey.GeneratePair(nil, "")
+	if gerr != nil {
+		t.Fatalf("GeneratePair: %v", gerr)
+	}
+	if len(ak) != len(gak) {
+		t.Errorf("GenerateBootstrapCredential 与 GeneratePair AK 长度不一致: %d vs %d（同源应同长）",
+			len(ak), len(gak))
 	}
 }
 

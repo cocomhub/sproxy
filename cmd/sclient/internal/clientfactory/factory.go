@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/adrg/xdg"
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
@@ -270,7 +271,7 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 		}
 		xferKey := ""
 		if cfg.AccessKeySecret != "" {
-			mesh := tunnel.AccessKeyMesh(cfg.AccessKey)
+			mesh := accesskey.ParseMesh(cfg.AccessKey)
 			k, kErr := tunnel.DeriveTunnelKey(cfg.AccessKeySecret, mesh)
 			if kErr != nil {
 				return nil, fmt.Errorf("派生 xfer 隧道密钥失败: %w", kErr)

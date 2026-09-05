@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
-	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin" // 注册内置 TCP 传输层（裸 TCP 中继）
@@ -301,7 +300,8 @@ func validateServices(svcs []Service) []Service {
 // 避免同名节点重连且新注册不带服务时旧服务残留，M4/S4）。
 // 节点声明 per-node-secret 能力时生成独立 secret 存入 NodeInfo.Secret（I1/S1）。
 //
-// mesh 隔离（M-9）：mesh 由注册 AK 解析（tunnel.AccessKeyMesh），写入 NodeInfo.Mesh 并
+// mesh 隔离（M-9）：mesh 由注册 AK 解析（accesskey.ParseMesh，原 tunnel.AccessKeyMesh
+// 收归 accesskey 后的唯一实现），写入 NodeInfo.Mesh 并
 // 注册到该 mesh 的独立 RouteTable（默认 mesh "" 等价单 mesh 行为）。
 //
 // mesh 自动对等发现临时身份（disc-<base>-<unixnano>）做防冒充校验（S-fix）：
@@ -342,7 +342,7 @@ func (s *HubServer) registerNode(reg *RegisterFrame, m *mux.Mux) (NodeInfo, erro
 			s.logger.Warn("生成 per-node secret 失败，节点按未声明能力处理", "node", reg.NodeID, "error", err)
 		}
 	}
-	mesh := tunnel.AccessKeyMesh(reg.AccessKey)
+	mesh := accesskey.ParseMesh(reg.AccessKey)
 	// 虚拟 IP 分配（瞬态节点过滤，I-2）：disc-*/mesh-*/p2p-* 临时身份拨号后即注销，
 	// 分配 VIP 只会制造濒死条目（vipTable 出现幽灵映射），故跳过。分配失败不阻断
 	// 注册（虚拟 IP 是增强寻址能力，非注册前提），仅告警——子网耗尽等极端场景

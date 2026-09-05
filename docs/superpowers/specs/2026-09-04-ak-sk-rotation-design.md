@@ -69,7 +69,7 @@ config 响应展示。auth/hub 都只查 Ring，**不存在两个凭据源，物
 ```go
 // Kind 明文 / SecretWrap 两个枚举，见「SK 自加密传递」。
 type Key struct {
-    AK        string    // 身份锚：sk[-<mesh>]-<16hex>，永不轮换
+    AK        string    // 身份锚：sk[-<mesh>]-<32hex>（标准 16B；legacy <16hex> 兼容），永不轮换
     Mesh      string    //          mesh，AccessKeyMesh(AK) 导出，不存字段避免漂移
     Owner     string    //         稳定 owner（默认 = AK）
     Secret    []byte    //         32B 明文 SK（仅供服务端内部）；对外序列化时经加密

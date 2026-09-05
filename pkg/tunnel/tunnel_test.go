@@ -936,18 +936,28 @@ func TestResponseJSON(t *testing.T) {
 
 // TestAccessKeyMesh 覆盖 AccessKey 的 mesh 段解析：支持连字符 mesh、无 mesh 段、
 // 非 sk- 前缀等（I-1：客户端派生与服务端 HKDF info 共用的单一解析实现）。
+// 随机段接受标准 32hex 与 legacy 16hex 双兼容（与 pkg/accesskey.ParseMesh 同语料）。
 func TestAccessKeyMesh(t *testing.T) {
 	tests := []struct {
 		ak   string
 		want string
 	}{
+		// 标准 32hex（16B）
+		{"sk-prod-1234567890abcdef1234567890abcdef", "prod"},
+		{"sk-prod-eu-1234567890abcdef1234567890abcdef", "prod-eu"}, // mesh 含连字符
+		{"sk-meshA-3f8a1234abcd5678abcdef0123456789", "meshA"},
+		{"sk-1234567890abcdef1234567890abcdef", ""}, // 无 mesh 段
+		// legacy 16hex（8B，前向兼容既有 16hex 凭据/网格）
 		{"sk-prod-1234567890abcdef", "prod"},
-		{"sk-prod-eu-1234567890abcdef", "prod-eu"}, // mesh 含连字符
+		{"sk-prod-eu-1234567890abcdef", "prod-eu"},
 		{"sk-meshA-3f8a1234abcd5678", "meshA"},
-		{"sk-1234567890abcdef", ""},     // 无 mesh 段
+		{"sk-1234567890abcdef", ""}, // 无 mesh 段
+		// 非法形态
 		{"other", ""},                   // 非 sk- 前缀
 		{"sk-", ""},                     // 只有前缀
-		{"sk-prod-1234567890abcde", ""}, // hex 段不足 16 位
+		{"sk-prod-1234567890abcde", ""}, // hex 段 15 位
+		{"sk-prod-1234567890abcdef1234567890abcdeg", ""},  // 长度 32 但含非 hex
+		{"sk-prod-1234567890abcdef1234567890abcdef0", ""}, // 33 hex 超长
 		{"", ""},
 	}
 	for _, tt := range tests {

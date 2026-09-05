@@ -573,27 +573,31 @@ func (h *Handlers) akAddHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 新增 AK（plain 条目）。显式 secret 未给则生成 32B 随机，返回给 admin 一次。
-	sk := make([]byte, 32)
+	// 新增 AK（plain 条目）。显式 secret 未给则生成 32B 随机（accesskey.RandomHexHex 收归
+	// 随机段生成，避免 handler 直接 rand），返回给 admin 一次。
+	var sk string
 	if req.Secret != "" {
 		dec, derr := hex.DecodeString(req.Secret)
 		if derr != nil || len(dec) != 32 {
 			sendJSONResponse(w, map[string]any{"error": "secret 需为 64-hex（32 字节）"}, http.StatusBadRequest)
 			return
 		}
-		sk = dec
+		sk = req.Secret
 	} else {
-		if _, err := rand.Read(sk); err != nil {
+		gen, gerr := accesskey.RandomHexHex(32)
+		if gerr != nil {
 			sendJSONResponse(w, map[string]any{"error": "生成 secret 失败"}, http.StatusInternalServerError)
 			return
 		}
+		sk = gen
 	}
+	skBytes, _ := hex.DecodeString(sk)
 
 	if err := h.credentialRing.UpsertAK(req.AK, req.Owner); err != nil {
 		sendJSONResponse(w, map[string]any{"error": err.Error()}, http.StatusBadRequest)
 		return
 	}
-	id, err := h.credentialRing.AddKey(req.AK, sk, accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
+	newID, err := h.credentialRing.AddKey(req.AK, skBytes, accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
 	if err != nil {
 		sendJSONResponse(w, map[string]any{"error": err.Error()}, http.StatusBadRequest)
 		return
@@ -602,7 +606,7 @@ func (h *Handlers) akAddHandler(w http.ResponseWriter, r *http.Request) {
 	if err := h.persistCredentials(); err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: auditActionCredPersistFail, ObjectType: "credential", Object: req.AK,
-			Detail: id, Result: AuditResultError,
+			Detail: newID, Result: AuditResultError,
 		})
 		sendJSONResponse(w, map[string]any{"error": "持久化失败"}, http.StatusInternalServerError)
 		return
@@ -610,14 +614,14 @@ func (h *Handlers) akAddHandler(w http.ResponseWriter, r *http.Request) {
 
 	h.RecordAudit(r.Context(), AuditEvent{
 		Action: auditActionCredAKAdd, ObjectType: "credential", Object: req.AK,
-		Result: AuditResultSuccess, Detail: fmt.Sprintf("sk_id=%s", id),
+		Result: AuditResultSuccess, Detail: fmt.Sprintf("sk_id=%s", newID),
 	})
 	if req.Secret == "" {
 		// 仅未显式提供 secret 时单次返回生成的秘密。
-		sendJSONResponse(w, map[string]any{"ak": req.AK, "sk_id": id, "secret": hex.EncodeToString(sk)}, http.StatusOK)
+		sendJSONResponse(w, map[string]any{"ak": req.AK, "sk_id": newID, "secret": sk}, http.StatusOK)
 		return
 	}
-	sendJSONResponse(w, map[string]any{"ak": req.AK, "sk_id": id}, http.StatusOK)
+	sendJSONResponse(w, map[string]any{"ak": req.AK, "sk_id": newID}, http.StatusOK)
 }
 
 // akDeleteRequest 是 DELETE /api/credentials/{ak} 的请求体（admin + 二次确认）。

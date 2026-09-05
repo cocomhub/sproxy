@@ -116,7 +116,7 @@ type Kind  string        // plain | secret_wrap | totp_wrap(4B)
 type Status string       // active | expired | disabled
 
 type Key struct {
-    AK        string   // 身份锚，sk[-<mesh>]-<16hex>
+    AK        string   // 身份锚，sk[-<mesh>]-<32hex>（16B 标准；解析层兼容 legacy <16hex>）
     Mesh      string   // 由 AccessKeyMesh(AK) 导出，不存字段避免漂移
     Owner     string   // 稳定 owner（默认 = AK；4B 注册用户 = 用户名）
     Entries   []SKEntry // 该 AK 的全部 SK 条目（多 SK 并存）

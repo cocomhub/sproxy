@@ -993,11 +993,11 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 }
 
 // bootstrapGenerate 生成首启 anonymous 凭据：
-//   - AK = sk-<16B hex>、SK = 32B 随机 hex（与 sclient access_key create 同款）；
+//   - AK = sk-<32hex>（16B 随机）、SK = 32B 随机 hex（与 pkg/accesskey.GeneratePair 同款）；
 //   - kind=plain、ExpiresAt=now+ttl、Meta{Type:"bootstrap"}；
 //   - 写入 Ring 并持久化，slog.Info 输出 AK 提示妥善保存。
 func bootstrapGenerate(ring *accesskey.Ring, store *CredentialStore, ttl time.Duration, logger *slog.Logger) error {
-	ak, skHexStr, err := newAnonymousKey()
+	ak, skHexStr, err := GenerateBootstrapCredential()
 	if err != nil {
 		return err
 	}

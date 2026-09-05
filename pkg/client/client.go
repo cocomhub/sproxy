@@ -27,6 +27,7 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
@@ -177,14 +178,14 @@ func WithHTTPClient(hc *http.Client) Option {
 
 // WithTunnel 启用加密隧道传输（access-key 驱动）：
 // 隧道编解码密钥 = HKDF(SK, mesh) 派生；服务端同一算法（authMiddleware 验签后派生）。
-// ak 形如 sk[-<mesh>]-<16hex>，mesh 从 AK 提取（无 mesh 段则为空串）。
+// ak 形如 sk[-<mesh>]-<32hex>（兼容 legacy sk[-<mesh>]-<16hex>），mesh 从 AK 提取（无 mesh 段则为空串）。
 func WithTunnel(ak, sk string) Option {
 	return func(c *FileClient) {
 		// 1) 把 accessKey/Secret 存进 client（doRequest 签名用）
 		c.accessKey = ak
 		c.accessKeySecret = sk
-		// 2) 派生隧道密钥（mesh 由共享 tunnel.AccessKeyMesh 解析，与服务端一致）
-		mesh := tunnel.AccessKeyMesh(ak)
+		// 2) 派生隧道密钥（mesh 由共享 accesskey.ParseMesh 解析，与服务端一致）
+		mesh := accesskey.ParseMesh(ak)
 		key, err := tunnel.DeriveTunnelKey(sk, mesh)
 		if err != nil {
 			c.logger.Warn("创建隧道客户端失败", "error", err)

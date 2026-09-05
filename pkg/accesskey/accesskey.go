@@ -1,12 +1,32 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package accesskey 是凭据 Ring（AK→多 SK 权威表）与信封加密核心。
+// Package accesskey 是凭据 Ring（AK→多 SK 权威表）、信封加密核心，以及 **AK/SK 生成与
+// 解析的唯一权威（唯一事实源）**：所有 AK/SK 的生成（GeneratePair / GeneratePairLegacy /
+// GenerateID）与解析（ParseMesh / IsValidAK / RandomHexHex）一律收归本包，其它包
+// （server / tunnel / client / cmd）禁止自行实现生成或解析逻辑，只能调用本包（参见
+// MeshFrom 的委托说明）。
 //
 // 数据模型：一个 AK（Access Key）可挂载多条 SK 条目（SKEntry），每条持有独立的
 // SK 密钥字节、生命周期（CreatedAt/ExpiresAt）、状态与元信息。物理层调用方（auth
 // 验签 / hub.Authenticator / 派生密钥）通过 Ring 的统一快照查询获取"当前活跃"条目，
 // 从而实现 SK 的运行时滚动（renew）与多条目共存，无需重启进程。
+//
+// # 权威 AK/SK 格式规格（单一事实源，一切生成/解析/文档以此为唯一口径）
+//
+//	AK = sk[-<mesh>]-<32hex>       （标准）：sk- 前缀 + 可选 mesh（可含连字符）+ 32 hex 随机段 = 16 字节 = 2^128 熵
+//	AK = sk[-<mesh>]-<16hex>       （legacy 兼容）：16 hex 随机段 = 8 字节 = 2^64 熵（旧 8B AK，仅解析层向后兼容）
+//	SK = <64hex>                   （恒 64 hex = 32 字节 = AES-256 密钥长度）
+//
+// 规则：
+//   - 前缀白名单：AccessKeyPrefix = "sk-" 是唯一允许前缀；往后如需引入新类型
+//     （如 hub-/relay-/totp-/api-）只改动 AllowedAKPrefixes 白名单，解析逻辑不变。
+//   - 随机段：标准恒 32 hex（AccessKeyHexLen*2 字符）；解析层同时接受 legacy 16 hex。
+//   - mesh 段只允许 [0-9A-Za-z_-] 字符，可含连字符，可为空。
+//
+// 生成（GeneratePair）一律产 32hex(16B) 标准形态；解析
+// （ParseMesh / pkg/tunnel.AccessKeyMesh / IsValidAK）接受标准与 legacy 双兼容，
+// 其它形态一律拒绝（返回空 mesh / false）。
 package accesskey
 
 import (
@@ -90,7 +110,7 @@ type SKEntry struct {
 // 注意：Mesh 段不存字段。Mesh 由 AK 字符串派生（本包提供 ParseMesh 纯函数，
 // 语义与 pkg/tunnel.AccessKeyMesh 一致），避免在两处各存一份导致漂移。
 type Key struct {
-	// AK Access Key 标识，形如 sk[-<mesh>]-<16hex>。
+	// AK Access Key 标识，形如 sk[-<mesh>]-<32hex>（legacy 兼容 sk[-<mesh>]-<16hex>）。
 	AK string
 	// Owner 该 AK 的归属者（租户 / 用户）。
 	Owner string
@@ -108,11 +128,33 @@ type KeyPair struct {
 	Secret string // 64-hex SK（hex 编码的 32 字节）
 }
 
-// AccessKeyHexLen 是 AccessKey 字符串中 hex 随机段长度（16 hex = 8 字节随机）。
+// AccessKeyHexLen 是标准 AK 随机段的字节长度（16 字节 = 32 hex 字符，2^128 熵）。
+// 语义：Generation 用 AccessKeyHexLen 字节（32 hex）产随机段；解析层（ParseMesh /
+// IsValidAK）以 "随机段 hex 字符数 = AccessKeyHexLen*2（32）" 为标准，同时按
+// AccessKeyHexLegacy 兼容旧 8B（16 hex）AK。
 const AccessKeyHexLen = 16
 
+// AccessKeyHexLegacy 是 legacy（旧 8B）AK 随机段的字节长度（8 字节 = 16 hex 字符，
+// 2^64 熵）。仅解析 / 显式 legacy 生成（GeneratePairLegacy）使用：接受旧凭据（含既有
+// 16hex 网格）的 mesh 解析，不参与新标准生成。
+const AccessKeyHexLegacy = 8
+
+// AccessKeyPrefix 是 AK 的唯一类型前缀（标准 AK 一律以它开头）。
+//
+// 这是 4B 类型前缀扩展点：将来如需引入新 AK 类型（如 hub-/relay-/totp-/api-），
+// 只需在此追加新前缀常量并把其加入 AllowedAKPrefixes 白名单，解析逻辑（ParseMesh /
+// IsValidAK）不需要改动（它们只认白名单，回溯到本常量数组）。
+const AccessKeyPrefix = "sk-"
+
+// AllowedAKPrefixes 是允许的 AK 类型前缀白名单（当前唯一允许 sk-）。
+// 新增 AK 类型前缀时把新前缀常量并入本数组即可，无需求改任何解析函数。
+var AllowedAKPrefixes = []string{AccessKeyPrefix}
+
+// meshCharset 是 mesh 段的允许字符集（字母数字 + 下划线 + 连字符）。
+const meshCharset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+
 // GeneratePair 生成一对 AccessKey/AccessKeySecret：
-//   - AccessKey（公开标识）= sk-<mesh>-<16B hex>（mesh 为空时 sk-<16B hex>）
+//   - AccessKey（公开标识）= sk-<mesh>-<32hex>（mesh 为空时 sk-<32hex>）
 //   - AccessKeySecret（本地密钥）= 32B 随机 hex（64 hex chars）
 //
 // r 传 nil 时用 crypto/rand（生产路径）；测试可注入确定性 reader。与客户端
@@ -123,7 +165,7 @@ func GeneratePair(r io.Reader, mesh string) (ak, sk string, err error) {
 	if r == nil {
 		r = rand.Reader
 	}
-	akBytes := make([]byte, AccessKeyHexLen/2) // 16 hex = 8 字节随机
+	akBytes := make([]byte, AccessKeyHexLen) // 16 字节 = 32 hex 随机段（标准形态）
 	if _, err := io.ReadFull(r, akBytes); err != nil {
 		return "", "", fmt.Errorf("accesskey: generate ak: %w", err)
 	}
@@ -131,11 +173,58 @@ func GeneratePair(r io.Reader, mesh string) (ak, sk string, err error) {
 	if _, err := io.ReadFull(r, skBytes); err != nil {
 		return "", "", fmt.Errorf("accesskey: generate sk: %w", err)
 	}
-	prefix := "sk"
-	if mesh != "" {
-		prefix += "-" + mesh
+	return meshHex(mesh) + hex.EncodeToString(akBytes), hex.EncodeToString(skBytes), nil
+}
+
+// meshHex 把 mesh 拼进 AK 前缀："sk-"（mesh 为空）或 "sk-<mesh>-"（mesh 非空）。
+// 生成路径的 mesh 拼法（与解析层取最后一个 '-' 的语义互逆；AccessKeyPrefix 含尾 '-'）。
+func meshHex(mesh string) string {
+	if mesh == "" {
+		return AccessKeyPrefix // => "sk-"
 	}
-	return prefix + "-" + hex.EncodeToString(akBytes), hex.EncodeToString(skBytes), nil
+	return AccessKeyPrefix + mesh + "-"
+}
+
+// RandomHexHex 生成 n 字节 crypto/rand 随机数的 hex 编码（供本包内生成/Prefix+Random 组装用）。
+// 其它包若要"随机段+前缀"拼接，应使用本包导出的生成函数（GeneratePair / GenerateID /
+// GeneratePairLegacy），而非自行调用 rand。失败返回包装错误。
+func RandomHexHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("accesskey: random: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// GenerateID 生成 sk-<12hex> 的随机凭据 ID 段（等价 newEntryID 的导出入口；ext 子模块
+// 可经此获得权威 ID 段，无需自行内联生成）。
+func GenerateID(r io.Reader) (string, error) {
+	if r == nil {
+		r = rand.Reader
+	}
+	b := make([]byte, EntryIDLen/2) // 6 字节 = 12 hex
+	if _, err := io.ReadFull(r, b); err != nil {
+		return "", fmt.Errorf("accesskey: generate id: %w", err)
+	}
+	return "sk-" + hex.EncodeToString(b), nil
+}
+
+// GeneratePairLegacy 生成 legacy（旧 8B）形态的 AK 对：sk[-<mesh>]-<16hex>（随机段
+// AccessKeyHexLegacy 字节 = 16 hex）。仅用于导出/回填既有 16hex 兼容凭据，或解析层
+// 双兼容语料的确定性构造；常规新凭据一律用 GeneratePair（标准 32hex）。
+func GeneratePairLegacy(r io.Reader, mesh string) (ak, sk string, err error) {
+	if r == nil {
+		r = rand.Reader
+	}
+	akBytes := make([]byte, AccessKeyHexLegacy)
+	if _, err := io.ReadFull(r, akBytes); err != nil {
+		return "", "", fmt.Errorf("accesskey: generate legacy ak: %w", err)
+	}
+	skBytes := make([]byte, 32)
+	if _, err := io.ReadFull(r, skBytes); err != nil {
+		return "", "", fmt.Errorf("accesskey: generate legacy sk: %w", err)
+	}
+	return meshHex(mesh) + hex.EncodeToString(akBytes), hex.EncodeToString(skBytes), nil
 }
 
 // WrapContextCredentials 是凭据信封加密的 wrap context 固定前缀（唯一事实源，M5）。
@@ -181,32 +270,107 @@ func NewRingFromKeyPairs(pairs []KeyPair) *Ring {
 	return ring
 }
 
-// ParseMesh 从 SproxySig AccessKey 提取 mesh 段，语义与 pkg/tunnel.AccessKeyMesh
-// 一致（AK 形如 sk[-<mesh>]-<16hex>）：
-//   - sk-<mesh>-<hex>（mesh 可含连字符）→ mesh
-//   - sk-<hex>（无 mesh 段）→ ""
+// MeshFrom 取 AK 的 mesh 段（等价 ParseMesh 的别名入口，供调用方在语义需要
+// "委托 tunnel" 语境下使用；两者实现相同）。AK 解析一律收归本包（用户硬约束）。
+func MeshFrom(ak string) string { return ParseMesh(ak) }
+
+// ParseMesh 从 SproxySig AccessKey 提取 mesh 段（tunnel.AccessKeyMesh 薄委托指向本
+// 实现；AK 形如 sk[-<mesh>]-<hex>，随机段接受标准 32hex 与 legacy 16hex 双兼容）：
+//   - sk-<mesh>-<32hex> / sk-<mesh>-<16hex>（mesh 可含连字符）→ mesh
+//   - sk-<32hex> / sk-<16hex>（无 mesh 段）→ ""
 //   - 其他格式 → ""
 //
-// 本包为消除对 pkg/tunnel 的依赖（避免循环依赖）内嵌复制了该实现；
-// 两端派生参数一致性依赖此单一实现与 tunnel 保持同步。
+// 兼容性说明：16hex（legacy 8B AK）与 32hex（标准 16B AK）均正确解析 mesh；
+// 其它随机段长度一律拒绝（返回空 mesh）——若拒绝会破坏现存 16hex 凭据（含既有
+// 16hex 资源网格）的服务端派生/mesh 审计，故必须保留双兼容。
 func ParseMesh(ak string) string {
-	if !strings.HasPrefix(ak, "sk-") {
-		return ""
-	}
-	rest := strings.TrimPrefix(ak, "sk-")
-	// 末尾必须为 -<16 hex>（mesh 段可含连字符，故取最后一个 '-'）。
-	idx := strings.LastIndex(rest, "-")
-	if idx <= 0 || idx+17 != len(rest) {
-		return ""
-	}
-	hexPart := rest[idx+1:]
-	if len(hexPart) != 16 {
-		return ""
-	}
-	for i := 0; i < len(hexPart); i++ {
-		if !isHexChar(hexPart[i]) {
-			return ""
+	for _, p := range AllowedAKPrefixes {
+		if after, ok := strings.CutPrefix(ak, p); ok {
+			rest := after
+			// 末尾必须为 -<hex>（mesh 段可含连字符，故取最后一个 '-'）；
+			// hex 段长度 ∈ {16, 32}（legacy 8B / 标准 16B）。
+			idx := strings.LastIndex(rest, "-")
+			if idx < 0 {
+				return ""
+			}
+			hexPart := rest[idx+1:]
+			if _, ok := hexSegmentOK(hexPart); !ok {
+				return ""
+			}
+			return rest[:idx]
 		}
 	}
-	return rest[:idx]
+	return ""
+}
+
+// hexSegmentOK 校验 AK 末尾随机 hex 段：长度 ∈ {16, 32}（标准 32 hex / legacy 16 hex）
+// 且有且仅有 hex 字符（isHexChar 判断；允许大写 ABCDEF）。命中时返回 (hexLen, true)。
+func hexSegmentOK(s string) (int, bool) {
+	var n int
+	switch len(s) {
+	case AccessKeyHexLen * 2: // 32 hex（标准 16B）
+		n = AccessKeyHexLen
+	case AccessKeyHexLegacy * 2: // 16 hex（legacy 8B）
+		n = AccessKeyHexLegacy
+	default:
+		return 0, false
+	}
+	allHex := true
+	for i := 0; i < len(s); i++ {
+		if !isHexChar(s[i]) {
+			allHex = false
+			break
+		}
+	}
+	if !allHex {
+		return 0, false
+	}
+	return n, true
+}
+
+// IsValidAK 判断 ak 是否为合法 AccessKey：
+//   - 前缀 ∈ AllowedAKPrefixes（当前唯一可接受 sk-）——白名单回溯，未来新类型前缀
+//     加入白名单即自动放行；
+//   - 末尾随机 hex 段为 32hex（标准）或 16hex（legacy）
+//   - mesh 段只允许 [0-9A-Za-z_-] 字符（连字符/字母数字/下划线；无 mesh 段时整个
+//     rest 即随机段，无需 mesh 校验）。
+func IsValidAK(ak string) bool {
+	if ak == "" {
+		return false
+	}
+	for _, p := range AllowedAKPrefixes {
+		if !strings.HasPrefix(ak, p) {
+			continue
+		}
+		rest := strings.TrimPrefix(ak, p)
+		if rest == "" {
+			return false
+		}
+		idx := strings.LastIndex(rest, "-")
+		var hexPart, meshPart string
+		if idx < 0 {
+			// 无 mesh 段：整个 rest 即随机 hex 段。
+			hexPart = rest
+		} else {
+			hexPart = rest[idx+1:]
+			meshPart = rest[:idx]
+			if meshPart == "" {
+				// "sk--<hex>" 双连字符歧义 → 拒绝（空 mesh 应写作 sk-<hex>）。
+				return false
+			}
+		}
+		if _, ok := hexSegmentOK(hexPart); !ok {
+			return false
+		}
+		if meshPart == "" {
+			return true // 无 mesh 段
+		}
+		for i := 0; i < len(meshPart); i++ {
+			if !strings.ContainsRune(meshCharset, rune(meshPart[i])) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }

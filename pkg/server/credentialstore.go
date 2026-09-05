@@ -4,8 +4,6 @@
 package server
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -89,17 +87,10 @@ func (s *CredentialStore) Save(keys []accesskey.Key) error {
 	return nil
 }
 
-// newAnonymousKey 生成首启 anonymous 凭据的 AK/SK。
-// 机理与 pkg/accesskey.GeneratePair（"") 同源（服务端不 import cmd/sclient 跨模块，
-// 此处内联等价实现）：AK = sk-<16B hex>，SK = 32B 随机 hex。
-func newAnonymousKey() (ak, sk string, err error) {
-	akBytes := make([]byte, 16)
-	if _, err := rand.Read(akBytes); err != nil {
-		return "", "", fmt.Errorf("credentials store: 生成 anonymous AK 失败: %w", err)
-	}
-	skBytes := make([]byte, 32)
-	if _, err := rand.Read(skBytes); err != nil {
-		return "", "", fmt.Errorf("credentials store: 生成 anonymous SK 失败: %w", err)
-	}
-	return "sk-" + hex.EncodeToString(akBytes), hex.EncodeToString(skBytes), nil
+// GenerateBootstrapCredential 生成首启 anonymous 凭据的 AK/SK。
+// 直接委托 pkg/accesskey.GeneratePair（""）——AK/SK 生成一律收归 accesskey 包
+// （用户硬约束，禁止其它包自行生成）；AK = sk-<32hex>(16B)、SK = 32B 随机 hex，
+// 与 GeneratePair 同源同长。供 handlers.bootstrapGenerate 在首启装配时调用。
+func GenerateBootstrapCredential() (ak, sk string, err error) {
+	return accesskey.GeneratePair(nil, "")
 }

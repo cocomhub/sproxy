@@ -16,8 +16,9 @@ func TestKey() string {
 	return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }
 
-// TestAccessKey returns a deterministic AccessKey（sk-<no mesh>-<16B hex>）。
+// TestAccessKey returns a deterministic AccessKey（sk-<no mesh>-<32hex>）。
 // 服务端 access_keys 配置与客户端 WithTunnel(ak, sk) 共用此值，保证隧道密钥派生一致。
+// 注意：测试固定 32hex 标准形态；两端解析层对其等效（ParseMesh→空 mesh 一致）。
 func TestAccessKey() string {
 	return "sk-00000000000000000000000000000000"
 }
