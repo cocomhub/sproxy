@@ -6,8 +6,10 @@ sproxy 完全组网路线图（阶段 1-5）已全部完成并合入 master。�
 同步重试（#144）、操作审计（#145）、多租户存储布局（#146）、配额磁盘封顶（#154）、TURN REST（#141）、
 联邦/kad 持久化（#142）已合入。**剩余 5 项生产可用性能力未实现/待增强**（用户 2026-09-04 `/plan` + 追加确认）：
 
-1. **AK 轮换**：sclient 仅有 `access-key create`（生成一对 AK/SK 打印），无 rotate/expire/delete；
-   服务端 `access_keys` 为静态配置（SIGHUP 不重载 access_keys），无法平滑轮换凭据。
+1. **AK 轮换**：sclient 现已（2026-09 凭据 store 化）提供 `trust` 命令族（`trust renew`
+   轮换 SK / `trust ak add` 生成注册 AK / `trust sk` 管理条目）——`access-key create`
+   已删除。服务端 `access_keys` 为静态配置（SIGHUP 不重载 access_keys），无法平滑
+   轮换凭据。
 2. **rateLimiter.UpdateConfig 热更新**：`pkg/server/config_api.go:217` 明确 TODO，
    `PUT /api/config` 改 rate_limit 只改 cfgPtr，已启动的限流实例不生效。
 3. **OTel 装配（含 exporter）**：`pkg/telemetry/ext/otel` 适配器存在且独立 module（已入 go.work），

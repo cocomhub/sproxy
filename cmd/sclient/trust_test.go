@@ -4,9 +4,11 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -370,7 +372,129 @@ func TestTrustAKDelete_CancelOnMismatch(t *testing.T) {
 	}
 }
 
+// TestTrustAKDelete_EOFNoInput_ReturnsError（M4）：stdin 立即 EOF / 管道空 → 删除命令
+// 返回非零 error（未确认（无输入），已中止），不得静默「已取消」+ 退出码 0。
+func TestTrustAKDelete_EOFNoInput_ReturnsError(t *testing.T) {
+	const ak = "sk-0123456789abcdef"
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	sk := make([]byte, 32)
+	_, _ = rand.Read(sk)
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)))
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf, errBuf strings.Builder
+	// In 为立即 EOF 的 reader（空字符串）。
+	ios := cli.IOStreams{In: strings.NewReader(""), Out: &buf, ErrOut: &errBuf}
+	cmd := NewCmdTrust(factory, ios, &testConfigProvider{cfg: &client.Config{AccessKey: ak}}, nil)
+	cmd.SetArgs([]string{"ak", "delete", ak})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("trust ak delete with EOF input: 应返回非零 error")
+	} else if !errors.Is(err, errDeleteAKNotConfirmed) {
+		t.Errorf("应返回 errDeleteAKNotConfirmed, got: %v", err)
+	}
+	if called {
+		t.Error("server should not be called when no confirmation input")
+	}
+	if !strings.Contains(errBuf.String(), "未确认") {
+		t.Errorf("expected '未确认' on stderr, got: %s", errBuf.String())
+	}
+	if strings.Contains(buf.String(), "已取消") {
+		t.Errorf("EOF 场景不应打印'已取消'(视为成功), got: %s", buf.String())
+	}
+}
+
+// TestTrustAKDelete_EmptyLine_ReturnsError（M4 分支变体）：输入仅为换行（EOF 前读到空行）
+// 同样是非零 error——空输入不可当作确认。
+func TestTrustAKDelete_EmptyLine_ReturnsError(t *testing.T) {
+	const ak = "sk-0123456789abcdef"
+	svc := client.NewFileClient("http://127.0.0.1:1")
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf, errBuf strings.Builder
+	ios := cli.IOStreams{In: strings.NewReader("\n"), Out: &buf, ErrOut: &errBuf}
+	cmd := NewCmdTrust(factory, ios, &testConfigProvider{cfg: &client.Config{AccessKey: ak}}, nil)
+	cmd.SetArgs([]string{"ak", "delete", ak})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("trust ak delete with empty line input: 应返回非零 error")
+	} else if !errors.Is(err, errDeleteAKNotConfirmed) {
+		t.Errorf("应返回 errDeleteAKNotConfirmed, got: %v", err)
+	}
+}
+
+// TestWrapContext_ServerClientConsistency（M5）：客户端 wrapContextFor 与服务端
+// credentialWrapKey 用同一前缀常量派生——两端对同一 sk/ak/mesh 必须派生出相同信封密钥。
+// server 侧实现（pkg/server.credentialWrapKey）无法从 cmd 包直接引用，这里用其拼法
+// （credentialWrapContext 别名 = accesskey.WrapContextCredentials）复算并对齐
+// client.wrapContextFor 派生结果。
+func TestWrapContext_ServerClientConsistency(t *testing.T) {
+	sk := make([]byte, 32)
+	for i := range sk {
+		sk[i] = byte(i)
+	}
+	for _, ak := range []string{"sk-0123456789abcdef", "sk-meshA-0123456789abcdef", "sk-prod-eu-0123456789abcdef"} {
+		mesh := accesskey.ParseMesh(ak)
+		ctx := accesskey.WrapContextCredentials
+		if mesh != "" {
+			ctx = accesskey.WrapContextCredentials + "#" + mesh
+		}
+		serverK, err := accesskey.DeriveWrapKey(sk, ak, ctx)
+		if err != nil {
+			t.Fatalf("DeriveWrapKey(server side, ak=%q): %v", ak, err)
+		}
+		clientK, err := accesskey.DeriveWrapKey(sk, ak, client.CredentialWrapContext(ak))
+		if err != nil {
+			t.Fatalf("DeriveWrapKey(client side, ak=%q): %v", ak, err)
+		}
+		if !bytes.Equal(serverK, clientK) {
+			t.Errorf("ak=%q: 服务端/客户端 wrap key 派生不一致（M5 回归）", ak)
+		}
+	}
+}
+
+// TestTrustAKAdd_NoAKArg_GeneratesPair 覆盖 `trust ak add` 未显式指定 AK 时的等价生成逻辑：
+//   - ak 以 sk- 开头（mesh 非空时 sk-<mesh>-）
+//   - sk 为 32B 随机 hex（64 hex chars）
+//   - 两次生成不同（随机性）
+//
+// 生成由 pkg/accesskey.GeneratePair 承担（原 cmd generateAccessKeyPair 删除后内联，
+// 唯一事实源）；真实命令路径（mock RPC 断言发送的 AK/SK）见同文件
+// TestTrustAKAdd_NoAKArg_GeneratesPair_Command。
 func TestTrustAKAdd_NoAKArg_GeneratesPair(t *testing.T) {
+	ak, sk, err := accesskey.GeneratePair(nil, "")
+	if err != nil {
+		t.Fatalf("GeneratePair: %v", err)
+	}
+	if !strings.HasPrefix(ak, "sk-") {
+		t.Errorf("expected ak to start with sk-, got: %q", ak)
+	}
+	if len(sk) != 64 {
+		t.Errorf("expected sk to be 64 hex chars, got %d", len(sk))
+	}
+	for _, c := range sk {
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+		if !isHex {
+			t.Errorf("sk 含非 hex 字符 %q", sk)
+			break
+		}
+	}
+	ak2, sk2, err := accesskey.GeneratePair(nil, "")
+	if err != nil {
+		t.Fatalf("GeneratePair(second): %v", err)
+	}
+	if ak == ak2 || sk == sk2 {
+		t.Error("expected two generated pairs to differ")
+	}
+}
+
+// TestTrustAKAdd_NoAKArg_GeneratesPair_Command 走真实 cobra 命令 + mock RPC 断言
+// `trust ak add`（无 ak 参数）把一行本端生成的 AK 发送到服务端。
+func TestTrustAKAdd_NoAKArg_GeneratesPair_Command(t *testing.T) {
 	var gotBody struct {
 		AK     string `json:"ak"`
 		Owner  string `json:"owner"`
@@ -382,6 +506,7 @@ func TestTrustAKAdd_NoAKArg_GeneratesPair(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		// 本端指定 secret → 服务端不回传（secret 字段仅回显注册值）。
 		_ = json.NewEncoder(w).Encode(map[string]any{"ak": gotBody.AK, "sk_id": "sk-created1", "secret": gotBody.Secret})
 	}))
 	defer srv.Close()
@@ -411,29 +536,8 @@ func TestTrustAKAdd_NoAKArg_GeneratesPair(t *testing.T) {
 
 // ---- access-key deprecated ----
 
-// TestAccessKey_DeprecatedAlias 验证 access-key 命令已标 deprecated（提示指向 trust），
-// 但其上**不得**挂 `Aliases: ["trust"]`——否则 cobra 先到先得匹配会让独立命令树
-// trust 全部子命令（renew/sk/ak）被 access-key 遮蔽而不可达（Critical C1 回归）。
-func TestAccessKey_DeprecatedAlias(t *testing.T) {
-	var out, errOut strings.Builder
-	cmd := NewCmdAccessKey(cli.IOStreams{Out: &out, ErrOut: &errOut})
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"create"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("access-key create failed: %v", err)
-	}
-	if !strings.Contains(out.String(), "AccessKey:") || !strings.Contains(out.String(), "AccessKeySecret:") {
-		t.Errorf("expected AK/SK lines still printed, got: %s", out.String())
-	}
-	// deprecated 提示（cobra 仅对不触达隐式子命令的父命令打印）应指向 trust。
-	if !strings.Contains(cmd.Deprecated, "trust") {
-		t.Errorf("expected deprecated hint mentioning 'trust', got: %q", cmd.Deprecated)
-	}
-	if len(cmd.Aliases) > 0 {
-		t.Errorf("access-key 必须无 alias（C1 遮蔽修复）：got %v", cmd.Aliases)
-	}
-}
+// 原 TestAccessKey_DeprecatedAlias 随 access-key 命令删除而消失（用户裁定直接删除，
+// 非仅 deprecated）；其要防的 C1 遮蔽已由 TestTrustCommandTreeReachable 覆盖。
 
 // TestTrustCommandTreeReachable 用真实 cobra 执行路由验证完整 trust 命令树可达：
 // `root trust <子命令>` 必须解析到独立 trust 命令（而非被 access-key 遮蔽——C1 回归

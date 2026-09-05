@@ -324,7 +324,8 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 - **无 body 请求** `body_sha256 = sha256("")`（`sproxysig.EmptyBodyHash()`）
 - 客户端（sclient/FileClient/mesh/relay/信令）统一 `--access-key`/`--access-key-secret`（或配置 `access_key`/`access_key_secret`），Secret 只存本端计算签名、永不上线
 - Web UI 用 **WebCrypto** 计算 HMAC（`crypto.subtle`），AK/SK 存 `sessionStorage`（关页即清）；未配置 AK/SK 时不发签名头（无认证兼容）
-- 生成 AK/SK：`sclient access-key create [--mesh <name>]`（AK=`sk[-<mesh>]-<16hex>`，SK=32B 随机 hex）
+- 生成 AK/SK：`sclient trust ak add [--mesh <name>]`（不指定 ak 时本地生成一对并注册；
+  AK=`sk[-<mesh>]-<16hex>`，SK=32B 随机 hex，服务端单次回传初始 Secret）
 
 ## sclient CLI（`cmd/sclient/`）
 

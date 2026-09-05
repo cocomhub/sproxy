@@ -6,7 +6,8 @@
 ## 1. 背景与动机
 
 sproxy 生产可用性阶段 6 任务 4（PR-D）。当前 `access_keys` 是静态装配期配置：
-`sclient access-key create` 唯一入口，服务端仅启动时读取一次，SIGHUP 不重载 access_keys，
+旧 `sclient access-key create`（2026-09 凭据 store 化后已删除，由 `trust ak add` 生成注册取代）
+唯一入口，服务端仅启动时读取一次，SIGHUP 不重载 access_keys，
 hub.Authenticator 持有无锁静态切片。无任何 rotate / expire / delete / 多密钥生命周期管理。
 
 **动机（用户决策）**：定期合规轮换（30/90 天换钥），而非泄密应急响应。因此设计重心在

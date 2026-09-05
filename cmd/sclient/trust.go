@@ -6,11 +6,14 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
@@ -292,6 +295,10 @@ func newCmdTrustAKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 }
 
 // newCmdTrustAKAdd 创建 trust ak add 命令（admin，生成 AK/SK 对并注册）。
+//
+// 未显式指定 ak 时本地生成一对：生成逻辑收归 pkg/accesskey.GeneratePair（M5 后
+// 唯一事实源，替代已删除的 cmd generateAccessKeyPair）——ak=sk-<mesh>-<16hex>、
+// sk=32B hex；mesh flag 已有（仅未指定 ak 参数时生效）。
 func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add [ak]",
@@ -310,10 +317,10 @@ func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 				ak = args[0]
 			}
 			if ak == "" {
-				// 未指定 AK：本地生成一对（消费 generateAccessKeyPair，避免导出新生成逻辑）。
+				// 未指定 AK：本地生成一对（access-key 命令删除后内联，唯一实现）。
 				var pairErr error
 				mesh, _ := cmd.Flags().GetString("mesh")
-				ak, secret, pairErr = generateAccessKeyPair(mesh)
+				ak, secret, pairErr = accesskey.GeneratePair(nil, mesh)
 				if pairErr != nil {
 					ios.WriteErrLine("生成 AccessKey 失败: %v", pairErr)
 					return fmt.Errorf("生成 AccessKey 失败: %w", pairErr)
@@ -341,6 +348,11 @@ func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 	return cmd
 }
 
+// errDeleteAKNotConfirmed 是 trust ak delete 在确认输入为空（stdin EOF / 管道空）时
+// 返回的非零错误：无输入即中止，绝不把「未确认」当成功（M4——此前空输入与不匹配
+// 一样打印「已取消」并返回 nil，退出码 0 误报成功）。
+var errDeleteAKNotConfirmed = errors.New("删除已中止：未收到确认输入")
+
 // newCmdTrustAKDelete 创建 trust ak delete 命令（admin + 交互确认 AK 名）。
 func newCmdTrustAKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var force bool
@@ -353,8 +365,20 @@ func newCmdTrustAKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSv
 			// 交互二次确认：必须逐字输入目标 AK 名（对齐服务端 confirm 字段）。
 			fmt.Fprintf(ios.ErrOut, "将永久删除 AccessKey %q（其下所有 SK 立即失效）。请输入 AK 名确认: ", target)
 			reader := bufio.NewReader(ios.In)
-			line, _ := reader.ReadString('\n')
-			if strings.TrimSpace(line) != target {
+			line, err := reader.ReadString('\n')
+			if errors.Is(err, io.EOF) && strings.TrimSpace(line) == "" {
+				// stdin 立即 EOF / 管道无输入：无确认输入 → 非零退出（M4）。
+				ios.WriteErrLine("未确认（无输入），已中止")
+				return errDeleteAKNotConfirmed
+			}
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				// 读到空行（输入仅为换行）：同样视为无确认输入（M4）。
+				ios.WriteErrLine("未确认（空输入），已中止")
+				return errDeleteAKNotConfirmed
+			}
+			if trimmed != target {
+				// 输入非空但不匹配：CLI 显式取消 = 正常返回（成功语义）。
 				fmt.Fprintln(ios.Out, "已取消（输入与目标 AK 不一致）")
 				return nil
 			}

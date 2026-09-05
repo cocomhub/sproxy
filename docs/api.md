@@ -23,7 +23,7 @@ SPDX-License-Identifier: Apache-2.0
   但允许 `/` 作为子目录分隔符（如 `sub/dir/file.txt`）。
 - **认证**：当 `access_keys` 配置非空时，除 `/healthz`、`/version`、`/ui/`、
   `POST /tunnel` 之外的所有路由都要求 `Authorization: SproxySig v=1 ...`（AccessKey/
-  AccessKeySecret + HMAC-SHA256 请求签名；AK/SK 由 `sclient access-key create` 生成）。
+  AccessKeySecret + HMAC-SHA256 请求签名；AK/SK 由 `sclient trust ak add` 生成注册）。
   详见 CLAUDE.md「认证：SproxySig 请求签名」。
 - **隧道**：所有路由（除 `POST /tunnel` 自身）都可以通过 `POST /tunnel` 走 AES-256-GCM
   加密信道访问，sclient 默认就这么做。

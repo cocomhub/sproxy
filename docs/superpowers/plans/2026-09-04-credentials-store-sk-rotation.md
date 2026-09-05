@@ -461,14 +461,14 @@ func (c *FileClient) DeleteAK(ak string, force bool) error
 `trust_test.go`（CaptureStdout 模式）：
 - `trust renew`：mock 服务返回 wrapped → 命令解出新 SK、打印「已轮换 SK：sk_id=...」、调用 `config set access_key_secret`（断言配置更新）
 - `trust sk list`/`sk delete`/`sk expire`/`ak add`/`ak delete`：参数/退出码
-- rename：`access-key` 命令仍存在但打 deprecated 提示指向 `trust`；`generateAccessKeyPair` 保留（renew 用）或迁移
+- rename（用户 2026-09-05 裁定改为直接删除）：`access-key` 命令删除，生成逻辑内联进 `trust ak add`（收归 `pkg/accesskey.GeneratePair`）
 
 - [ ] **步骤 6：实现 trust 命令**
 
 `cmd/sclient/trust.go`：
 - `NewCmdTrust`（组）→ `trust ak`（list/add/delete[--force 交互确认 AK 名]）、`trust sk`（list/delete/expire）、`trust renew`
-- cobra 结构仿现有 `NewCmdAccessKey`；解密用 `accesskey.DecryptSecret`
-- `access_key.go` 的 `access-key` 命令标记 deprecated 并 alias 到 trust；`pkg/client/config.go` 加 `AccessKeyID string`（optional，renew 后 `config set access_key_id`）
+- cobra 结构独立于被删除的 `NewCmdAccessKey`；解密用 `accesskey.DecryptSecret`
+- `access_key.go` 已删除（用户裁定）；生成逻辑内联 `trust ak add`（`pkg/accesskey.GeneratePair`）；`pkg/client/config.go` 加 `AccessKeyID string`（optional，renew 后 `config set access_key_id`）
 - `client.go` 的 `signRequest` 在 v2 下携带 `sk=<entryID>` 头（config 有值时）
 
 - [ ] **步骤 7：验证 + 收尾（web/CI）**
