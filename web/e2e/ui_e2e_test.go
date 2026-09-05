@@ -29,6 +29,11 @@ func testServer(t *testing.T, opts ...bool) (string, *server.Config, func()) {
 	cfg := server.Default()
 	cfg.StorageRoot = tmpDir
 	cfg.LogLevel = "error"
+	// UI E2E 为无凭据场景（页面不带 SproxySig 凭据）：禁首启 anonymous 生成
+	// （CredentialTTL=-1 → ring 空），并允许 loopback 无认证兜底（httptest 天然
+	// 127.0.0.1）——v2 skey-id 必传下 Web 请求不带凭据即 401，UI E2E 需此兜底。
+	cfg.CredentialTTL = -1
+	cfg.AllowInsecureLoopback = true
 	if len(opts) > 0 && opts[0] {
 		cfg.Versioning.Enabled = true
 		cfg.Versioning.MaxVersions = 10
