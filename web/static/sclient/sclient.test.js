@@ -425,6 +425,32 @@ test('直连模式 coreRequest：GET 携带 SproxySig(sha256)', async () => {
   }
 });
 
+test('直连模式 coreRequest：配置 accessKeyID 时头部携带 sk=<entryID>（精确匹配条目）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    const entryID = 'sk-abcdef012345';
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK, accessKeyID: entryID });
+    const requests = [];
+    globalThis.fetch = async (_url, init) => { requests.push(init); return new Response('direct body', { status: 201 }); };
+
+    await transport.coreRequest('GET', '/api/credentials/' + AK + '/renew', { bodyBytes: new TextEncoder().encode('{}') });
+
+    assert.strictEqual(requests.length, 1);
+    const auth = requests[0].headers['Authorization'];
+    assert.ok(auth, '直连请求必须携带 SproxySig 头');
+    // sk=<entryID> 段插在 ak 之后、ts= 之前（对齐 Go SignAndFormat）。
+    assert.ok(auth.indexOf('ak=' + AK + ' sk=' + entryID + ' ts=') >= 0, 'sk=<entryID> 段缺失或位置错: ' + auth);
+    // canonical 复算：带上 entryID 段后签名与 Go 端一致（用独立复算辅助验证）。
+    const parsed = auth.match(/ts=(\d+) exp=(\d+) nonce=([0-9a-f]+) body_sha256=([0-9a-f]+) sig=([0-9a-f]+)/);
+    assert.ok(parsed, '头部字段结构异常: ' + auth);
+    const canonical = 'sproxy-sig/v2\n' + AK + '\n' + entryID + '\n' + parsed[1] + '\n' + parsed[2] + '\n' + parsed[3] + '\nGET\n/api/credentials/' + AK + '/renew\n\n' + parsed[4];
+    const want = await cryptoLib.hmacSHA256Hex(SK, canonical);
+    assert.strictEqual(parsed[5], want, '带 entryID 的 canonical HMAC 应与独立复算一致');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test('effectiveMode 无凭据强制 direct（无密钥无法隧道且 config.get 不可签名）', () => {
   setLocalStorageValue(null);
   // 无凭据 + tunnelDefault=true：即使服务端想开隧道，也必须回落 direct（不能桶装造
@@ -461,7 +487,7 @@ test('direct 无凭据请求不带 SproxySig 头（兼容服务端凭据 Ring �
     assert.strictEqual(auth, undefined, '无凭据直连不应带 Authorization 头');
   } finally {
     globalThis.fetch = origFetch;
-    transport.configure({ accessKey: AK, accessKeySecret: SK, mode: undefined });
+    transport.configure({ accessKey: AK, accessKeySecret: SK, accessKeyID: '', mode: undefined });
   }
 });
 

@@ -63,7 +63,7 @@
   // 其余字段保留默认。返回合并后的配置副本。
   function configure(patch) {
     if (!patch || typeof patch !== 'object') return Object.assign({}, cfg);
-    const allowed = ['baseUrl', 'accessKey', 'accessKeySecret', 'transport', 'tunnelDefault', 'overrideKey'];
+    const allowed = ['baseUrl', 'accessKey', 'accessKeySecret', 'accessKeyID', 'transport', 'tunnelDefault', 'overrideKey'];
     for (const key of allowed) {
       const val = patch[key];
       if (val === undefined || val === null) continue;
@@ -300,6 +300,7 @@
     const auth = await sigLib.signHeader('POST', TUNNEL_PATH, fullBody, {
       ak: cfg.accessKey,
       secret: cfg.accessKeySecret,
+      entryID: cfg.accessKeyID || '',
       unsigned: true,
     });
 
@@ -419,7 +420,7 @@
     if (ak || sk) {
       if (!ak || !sk) throw SclientError('E_AUTH', '直连模式需要 ak 与 secret 都配置）', undefined);
       try {
-        auth = await sigLib.signHeader(method, pathWithQuery, bodyBytes || null, { ak, secret: sk });
+        auth = await sigLib.signHeader(method, pathWithQuery, bodyBytes || null, { ak, secret: sk, entryID: cfg.accessKeyID || '' });
       } catch (e) {
         throw SclientError('E_AUTH', '签名失败：' + (e && e.message), undefined);
       }

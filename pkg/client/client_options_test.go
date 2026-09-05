@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/xfertest"
@@ -109,6 +111,62 @@ func TestWithTunnel_InvalidKey(t *testing.T) {
 	if c.tunnelClient != nil {
 		t.Fatal("tunnelClient should be nil for invalid key")
 	}
+}
+
+// TestTunnelSigRoundTripper_CarriesEntryID 锁定 sigRoundTripper 的 entryID 接线：
+// 外层 /tunnel 请求必须携带配置的 sk=<entryID>（而非仅试签），否则 renew 后主路径
+// 带 entryID 而隧道外层路径不带会导致服务端对命中条目不可预测（断盲盒）。
+// 凭据从持有者 FileClient 实时读取（WithTunnel 后 WithAccessKeyID 也生效）。
+func TestTunnelSigRoundTripper_CarriesEntryID(t *testing.T) {
+	// 记录服务端收到的 Authorization 并返回隧道帧（mock serve 足够让外层签名被触发）。
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<not-a-frame>"))
+	}))
+	defer ts.Close()
+
+	entryID := "sk-abcdef012345"
+	c := NewFileClient(ts.URL)
+	// 构造顺序模拟真实工厂：先 WithTunnel（此时尚无 access_key_id），再 WithAccessKeyID。
+	WithTunnel(testTunnelAK, validKey64(t))(c)
+	WithAccessKeyID(entryID)(c)
+	if c.tunnelClient == nil {
+		t.Fatal("tunnelClient should be created")
+	}
+
+	// 直接调用隧道外层 RoundTripper 触发一次签名（等价隧道 Do 的外层签名路径）。
+	rt := &sigRoundTripper{base: http.DefaultTransport, c: c}
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/tunnel", strings.NewReader("frame"))
+	if _, err := rt.RoundTrip(req); err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+
+	if !strings.Contains(gotAuth, "v=2 ak="+testTunnelAK) {
+		t.Fatalf("Authorization 应含 v=2 ak，got: %s", gotAuth)
+	}
+	if !strings.Contains(gotAuth, " sk="+entryID+" ") {
+		t.Fatalf("Authorization 应携带 sk=<entryID>（精确匹配条目），got: %s", gotAuth)
+	}
+	// canonical 复算：带 entryID 段签名应可被服务端 Verify（对齐 SignAndFormat 渲染）。
+	parsed, err := sproxysig.ParseHeader(gotAuth)
+	if err != nil {
+		t.Fatalf("ParseHeader: %v", err)
+	}
+	if parsed.EntryID != entryID {
+		t.Fatalf("解析 entryID = %q, want %q", parsed.EntryID, entryID)
+	}
+	// 用有效 SK 校验签名（隧道外层 body_sha256=UNSIGNED；时间窗口内 now 取请求构造时刻）。
+	if err := sproxysig.Verify(validKey64(t), parsed, http.MethodPost, "/tunnel", "", time.Now(), 0, 0, nil); err != nil {
+		t.Fatalf("带 entryID 的外层签名 Verify 失败: %v", err)
+	}
+}
+
+// validKey64 返回 64 个 hex 字符的合法 AES-256 密钥（测试辅助）。
+func validKey64(t *testing.T) string {
+	t.Helper()
+	return "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 }
 
 func TestWithProgress(t *testing.T) {

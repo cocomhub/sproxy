@@ -199,7 +199,7 @@ func WithTunnel(ak, sk string) Option {
 			c.initError = fmt.Errorf("创建隧道客户端失败: %w", err)
 			return
 		}
-		tc.HTTPClient.Transport = &sigRoundTripper{base: tc.HTTPClient.Transport, ak: ak, sk: sk}
+		tc.HTTPClient.Transport = &sigRoundTripper{base: tc.HTTPClient.Transport, c: c}
 		c.tunnelClient = tc
 	}
 }
@@ -1417,22 +1417,28 @@ func (c httpHeaderCarrier) Set(k, v string)     { c.h.Set(k, v) }
 // sigRoundTripper 是隧道外层客户端的 RoundTripper：给每个 /tunnel 请求
 // 注入 SproxySig 签名（body_sha256=UNSIGNED，流式 body 无法整体哈希）。
 // 服务端 authMiddleware 验签后派生隧道密钥解密；无签名则 401。
+//
+// 凭据从持有者 FileClient 实时读取（ak/sk/entryID）：隧道客户端在 option 应用
+// 过程中创建（WithTunnel），此时 access_key_id 可能尚未被 WithAccessKeyID 写入，
+// 故不能构造时快照。令本载体引用 *FileClient 避免并发访问字段（签名字段构造后
+// 不再被 writer 修改，读安全）。
 type sigRoundTripper struct {
-	base   http.RoundTripper
-	ak, sk string
+	base http.RoundTripper
+	c    *FileClient
 }
 
 func (rt *sigRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	now := time.Now()
 	h := sproxysig.Header{
 		Version:    sproxysig.Version,
-		AK:         rt.ak,
+		AK:         rt.c.accessKey,
+		EntryID:    rt.c.accessKeyID,
 		TS:         now.UnixMilli(),
 		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),
 		BodySHA256: sproxysig.UnsignedBody,
 	}
-	req.Header.Set("Authorization", sproxysig.SignAndFormat(rt.sk, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
+	req.Header.Set("Authorization", sproxysig.SignAndFormat(rt.c.accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
 	return rt.base.RoundTrip(req)
 }
 
