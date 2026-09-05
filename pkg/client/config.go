@@ -28,9 +28,9 @@ type Config struct {
 	// Secret 只存本端计算签名，永不上线；服务端凭据 Ring 登记了该 AK/SK 时必填。
 	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
 	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
-	// AccessKeyID 是 SproxySig 的 SK 条目 ID（entryID，可选）。服务端凭据 Ring
-	// 多 SK 共存时，签发请求携带 sk=<id> 使服务端精确取条目；`trust renew` 成功后
-	// 自动回填为新的 sk_id。为空则 entryID 空段（服务端按 AK 试签定位）。
+	// AccessKeyID 是 SproxySig 的 SK 条目 ID（skeyID）。v2 协议 skey-id 强制必传：
+	// 配置了 access_key 后签发请求必须携带 skey-id=<skeyID>，服务端凭据 Ring 以
+	// (ak, skeyID) 精确定位。`trust renew` 成功后自动回填为新的 sk_id。
 	AccessKeyID            string `yaml:"access_key_id" mapstructure:"access_key_id"`
 	AllowTransportFallback bool   `yaml:"allow_transport_fallback" mapstructure:"allow_transport_fallback"`
 	// HubURL 是 mesh/relay/p2p 共用的 hub 地址（http(s):// 或 ws(s)://，接受带 /ws 路径）。

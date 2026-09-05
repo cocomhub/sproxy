@@ -27,6 +27,10 @@ import (
 
 // ---- trust renew ----
 
+// testTrustEntryID 是 trust 测试客户端的确定性 skeyID（v2 必传；mock 服务端不查 ring，
+// 只验签名 over header，故任意 skey-<...> 值即可；非 renew 命令的测试客户端必须携带）。
+const testTrustEntryID = "skey-mineaaaa"
+
 // testTrustWrapContext 复算 wrap context（对齐 pkg/client 的 CredentialWrapContextPrefix 契约）。
 func testTrustWrapContext(ak string) string {
 	mesh := accesskey.ParseMesh(ak)
@@ -51,12 +55,14 @@ func testTrustEnvelope(t *testing.T, wrapSK []byte, ak string, secret []byte) *a
 }
 
 // trustRenewHandler 构造 renew mock handler：校验签名（真实验签路径），返回带信封的响应。
+// 客户端首次 `trust renew` 尚无 access_key_id（renew 引导例外）→ 用宽松解析接受
+// 缺 skey-id 段（与生产服务端 verifySproxySigFromRing 的自 renew 引导一致）。
 func trustRenewHandler(t *testing.T, ak, skHex string, env *accesskey.WrappedSecret) http.HandlerFunc {
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
-		hdr, err := sproxysig.ParseHeader(r.Header.Get("Authorization"))
+		hdr, err := sproxysig.ParseHeaderAllowMissingSkeyID(r.Header.Get("Authorization"))
 		if err != nil {
-			t.Errorf("ParseHeader: %v", err)
+			t.Errorf("ParseHeaderAllowMissingSkeyID: %v", err)
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -67,7 +73,7 @@ func trustRenewHandler(t *testing.T, ak, skHex string, env *accesskey.WrappedSec
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ak":             ak,
-			"sk_id":          "sk-newentry1234",
+			"sk_id":          "skey-newentry1234",
 			"kind":           "secret_wrap",
 			"wrap_key_ak":    ak,
 			"expires_at":     time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339),
@@ -113,7 +119,7 @@ func TestTrustRenew_UpdatesConfig(t *testing.T) {
 	if !strings.Contains(buf.String(), "SK 已轮换") {
 		t.Errorf("expected 'SK 已轮换' in output, got: %s", buf.String())
 	}
-	if !strings.Contains(buf.String(), "sk_id=sk-newentry1234") {
+	if !strings.Contains(buf.String(), "sk_id=skey-newentry1234") {
 		t.Errorf("expected sk_id in output, got: %s", buf.String())
 	}
 
@@ -125,7 +131,7 @@ func TestTrustRenew_UpdatesConfig(t *testing.T) {
 	if reloaded.AccessKeySecret != hex.EncodeToString(newSK) {
 		t.Errorf("access_key_secret 未回填: got %q want %q", reloaded.AccessKeySecret, hex.EncodeToString(newSK))
 	}
-	if reloaded.AccessKeyID != "sk-newentry1234" {
+	if reloaded.AccessKeyID != "skey-newentry1234" {
 		t.Errorf("access_key_id 未回填: got %q", reloaded.AccessKeyID)
 	}
 }
@@ -173,10 +179,10 @@ func TestTrustSKList_ShowsOnlyDecryptable(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ak": ak,
 			"sk": []map[string]any{
-				{"sk_id": "sk-mineaaaa", "created": time.Now().Add(-time.Hour).Format(time.RFC3339),
+				{"sk_id": "skey-mineaaaa", "created": time.Now().Add(-time.Hour).Format(time.RFC3339),
 					"expires": time.Now().Add(time.Hour).Format(time.RFC3339), "status": "active",
 					"meta_type": "renew", "wrapped_secret": envMine},
-				{"sk_id": "sk-otheraa", "created": time.Now().Add(-2 * time.Hour).Format(time.RFC3339),
+				{"sk_id": "skey-otheraa", "created": time.Now().Add(-2 * time.Hour).Format(time.RFC3339),
 					"expires": time.Now().Add(2 * time.Hour).Format(time.RFC3339), "status": "active",
 					"meta_type": "initial", "wrapped_secret": envOther},
 			},
@@ -185,7 +191,7 @@ func TestTrustSKList_ShowsOnlyDecryptable(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, mySKHex))
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, mySKHex), client.WithAccessKeyID(testTrustEntryID))
 	factory := clientfactory.NewMock(svc, nil)
 
 	var buf strings.Builder
@@ -195,11 +201,11 @@ func TestTrustSKList_ShowsOnlyDecryptable(t *testing.T) {
 		t.Fatalf("trust sk list failed: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "sk-mineaaaa") {
-		t.Errorf("expected own entry sk-mineaaaa in output, got: %s", out)
+	if !strings.Contains(out, "skey-mineaaaa") {
+		t.Errorf("expected own entry skey-mineaaaa in output, got: %s", out)
 	}
-	if !strings.Contains(out, "sk-otheraa") {
-		t.Errorf("expected other entry sk-otheraa in output, got: %s", out)
+	if !strings.Contains(out, "skey-otheraa") {
+		t.Errorf("expected other entry skey-otheraa in output, got: %s", out)
 	}
 	// 自己条目能解开 → <decrypted>；他人条目 masked → <encrypted>。
 	if !strings.Contains(out, "<decrypted>") {
@@ -213,7 +219,7 @@ func TestTrustSKList_ShowsOnlyDecryptable(t *testing.T) {
 func TestTrustSKDelete(t *testing.T) {
 	const (
 		ak   = "ak-0123456789abcdef"
-		skID = "sk-aaaaaaaaaaaa"
+		skID = "skey-aaaaaaaaaaaa"
 	)
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -227,7 +233,7 @@ func TestTrustSKDelete(t *testing.T) {
 
 	sk := make([]byte, 32)
 	_, _ = rand.Read(sk)
-	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)))
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
 	factory := clientfactory.NewMock(svc, nil)
 
 	var buf strings.Builder
@@ -248,7 +254,7 @@ func TestTrustSKDelete(t *testing.T) {
 func TestTrustSKExpire(t *testing.T) {
 	const (
 		ak   = "ak-0123456789abcdef"
-		skID = "sk-aaaaaaaaaaaa"
+		skID = "skey-aaaaaaaaaaaa"
 	)
 	until := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	var gotBody struct {
@@ -266,7 +272,7 @@ func TestTrustSKExpire(t *testing.T) {
 
 	sk := make([]byte, 32)
 	_, _ = rand.Read(sk)
-	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)))
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
 	factory := clientfactory.NewMock(svc, nil)
 
 	var buf strings.Builder
@@ -286,11 +292,11 @@ func TestTrustSKExpire(t *testing.T) {
 func TestTrustSKExpire_BadUntil(t *testing.T) {
 	const (
 		ak   = "ak-0123456789abcdef"
-		skID = "sk-aaaaaaaaaaaa"
+		skID = "skey-aaaaaaaaaaaa"
 	)
 	sk := make([]byte, 32)
 	_, _ = rand.Read(sk)
-	svc := client.NewFileClient("http://127.0.0.1:1", client.WithAccessKey(ak, hex.EncodeToString(sk)))
+	svc := client.NewFileClient("http://127.0.0.1:1", client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
 	factory := clientfactory.NewMock(svc, nil)
 
 	var buf strings.Builder
@@ -328,7 +334,7 @@ func TestTrustAKDelete_ConfirmsName(t *testing.T) {
 
 	sk := make([]byte, 32)
 	_, _ = rand.Read(sk)
-	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)))
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
 	factory := clientfactory.NewMock(svc, nil)
 
 	// 输入正确的 AK 名 → 删除请求发出。
@@ -354,7 +360,7 @@ func TestTrustAKDelete_CancelOnMismatch(t *testing.T) {
 
 	sk := make([]byte, 32)
 	_, _ = rand.Read(sk)
-	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)))
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
 	factory := clientfactory.NewMock(svc, nil)
 
 	var buf strings.Builder
@@ -385,7 +391,7 @@ func TestTrustAKDelete_EOFNoInput_ReturnsError(t *testing.T) {
 
 	sk := make([]byte, 32)
 	_, _ = rand.Read(sk)
-	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)))
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
 	factory := clientfactory.NewMock(svc, nil)
 
 	var buf, errBuf strings.Builder
@@ -507,11 +513,11 @@ func TestTrustAKAdd_NoAKArg_GeneratesPair_Command(t *testing.T) {
 		defer r.Body.Close()
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		// 本端指定 secret → 服务端不回传（secret 字段仅回显注册值）。
-		_ = json.NewEncoder(w).Encode(map[string]any{"ak": gotBody.AK, "sk_id": "sk-created1", "secret": gotBody.Secret})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ak": gotBody.AK, "sk_id": "skey-created1", "secret": gotBody.Secret})
 	}))
 	defer srv.Close()
 
-	svc := client.NewFileClient(srv.URL, client.WithAccessKey(adminAK, hex.EncodeToString(sk)))
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(adminAK, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
 	factory := clientfactory.NewMock(svc, nil)
 
 	var buf strings.Builder
@@ -529,7 +535,7 @@ func TestTrustAKAdd_NoAKArg_GeneratesPair_Command(t *testing.T) {
 	if len(gotBody.Secret) != 64 {
 		t.Errorf("generated secret should be 64 hex, got %d chars", len(gotBody.Secret))
 	}
-	if !strings.Contains(buf.String(), "sk_id=sk-created1") {
+	if !strings.Contains(buf.String(), "sk_id=skey-created1") {
 		t.Errorf("expected created sk_id in output, got: %s", buf.String())
 	}
 }

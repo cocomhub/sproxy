@@ -263,6 +263,7 @@ func (e *Executor) newRemoteTransport(remote syncmgr.RemoteConfig) (*syncpkg.HTT
 		Dial:            dial,
 		AccessKey:       remote.AccessKey,
 		AccessKeySecret: remote.AccessKeySecret,
+		AccessKeyID:     remote.AccessKeyID,
 		Logger:          e.logger(),
 	})
 }

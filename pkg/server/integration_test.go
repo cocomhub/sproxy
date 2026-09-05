@@ -1844,9 +1844,10 @@ func TestSproxySig_BodyTamperRejected(t *testing.T) {
 	sum := sha256.Sum256(orig)
 
 	// 手动构造签名：声明原始 body 哈希，但实际发送篡改后的 body（结构合法）。
+	// v2 skey-id 必传：EntryID 用 testEntryID(testAccessKey) 精确匹配服务端 Ring 条目。
 	now := time.Now()
 	h := sproxysig.Header{
-		Version: sproxysig.Version, AK: testAccessKey,
+		Version: sproxysig.Version, AK: testAccessKey, EntryID: testEntryID(testAccessKey),
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),
 		BodySHA256: hex.EncodeToString(sum[:]),

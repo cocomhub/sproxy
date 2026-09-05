@@ -22,7 +22,7 @@ import (
 // 因此这里用 BootstrapServerCredentials 生成/载入真实凭据并注入 opts，同时把该
 // AK/SK 通过返回值传给调用方（I2：以返回值注入替代包级全局，消 data race 隐患），
 // 由调用方 WithAccessKey(ak, skHex) 传入 FileClient，使 e2e 走真实签名路径。
-func startFullTestServer(t *testing.T) (url string, cfg *server.Config, ak, skHex string) {
+func startFullTestServer(t *testing.T) (url string, cfg *server.Config, ak, skHex, entryID string) {
 	t.Helper()
 	tmpDir := t.TempDir()
 
@@ -46,6 +46,7 @@ func startFullTestServer(t *testing.T) (url string, cfg *server.Config, ak, skHe
 	}
 	ak = keys[0].AK
 	skHex = hex.EncodeToString(keys[0].Entries[0].SK)
+	entryID = keys[0].Entries[0].ID
 
 	var cfgPtr atomic.Pointer[server.Config]
 	cfgPtr.Store(cfg)
@@ -64,11 +65,11 @@ func startFullTestServer(t *testing.T) (url string, cfg *server.Config, ak, skHe
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
-	return ts.URL, cfg, ak, skHex
+	return ts.URL, cfg, ak, skHex, entryID
 }
 
 func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
-	url, _, ak, skHex := startFullTestServer(t)
+	url, _, ak, skHex, entryID := startFullTestServer(t)
 
 	srcDir := t.TempDir()
 	fileData := bytes.Repeat([]byte("ClientChunkedTest!"), 1280) // ~20 KiB
@@ -77,7 +78,7 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	c := NewFileClient(url, WithAccessKey(ak, skHex))
+	c := NewFileClient(url, WithAccessKey(ak, skHex), WithAccessKeyID(entryID))
 	c.chunkSize = 4096
 	c.maxChunkSize = 4096
 
@@ -107,7 +108,7 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 }
 
 func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
-	url, _, ak, skHex := startFullTestServer(t)
+	url, _, ak, skHex, entryID := startFullTestServer(t)
 
 	srcDir := t.TempDir()
 	fileData := bytes.Repeat([]byte("ChunkedTestData"), 2048) // ~32 KiB
@@ -116,7 +117,7 @@ func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	c := NewFileClient(url, WithAccessKey(ak, skHex))
+	c := NewFileClient(url, WithAccessKey(ak, skHex), WithAccessKeyID(entryID))
 	c.chunkSize = 4096
 	c.maxChunkSize = 4096
 
@@ -145,7 +146,7 @@ func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
 }
 
 func TestClient_SmallFileUploadWithoutChunking(t *testing.T) {
-	url, _, ak, skHex := startFullTestServer(t)
+	url, _, ak, skHex, entryID := startFullTestServer(t)
 
 	srcDir := t.TempDir()
 	smallData := bytes.Repeat([]byte("S"), 1024) // 1 KiB
@@ -159,7 +160,7 @@ func TestClient_SmallFileUploadWithoutChunking(t *testing.T) {
 		t.Fatal("file below AutoChunkThreshold should not auto-chunk")
 	}
 
-	c := NewFileClient(url, WithAccessKey(ak, skHex))
+	c := NewFileClient(url, WithAccessKey(ak, skHex), WithAccessKeyID(entryID))
 	result, err := c.Upload(t.Context(), srcPath, "small.bin")
 	if err != nil {
 		t.Fatalf("Upload (non-chunked): %v", err)

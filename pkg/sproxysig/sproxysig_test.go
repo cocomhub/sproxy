@@ -40,7 +40,7 @@ func buildHeaderV2(ak, sk, entryID, nonce string, tsOffset, ttl time.Duration, m
 // headerAuthString 按当前 header 字段渲染 Authorization 头值。
 // 供 ParseHeader 断言使用（必须与 SignAndFormat 的渲染顺序一致）。
 func headerAuthString(h Header) string {
-	return Scheme + " v=" + h.Version + " ak=" + h.AK + " sk=" + h.EntryID +
+	return Scheme + " v=" + h.Version + " ak=" + h.AK + " skey-id=" + h.EntryID +
 		" ts=" + itoa(h.TS) + " exp=" + itoa(h.Exp) +
 		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
 }
@@ -119,14 +119,14 @@ func TestVerify_ClientShorterTTL_Allowed(t *testing.T) {
 	}
 }
 
-// TestVerify_V2_WithEntryID：v2 头带 sk=<entryID> 段，canonical 含 entryID 段，验签通过。
+// TestVerify_V2_WithEntryID：v2 头带 skey-id=<skeyID> 段，canonical 含 skeyID 段，验签通过。
 func TestVerify_V2_WithEntryID(t *testing.T) {
-	h := buildHeaderV2(testAK, testSK, "sk-abcdef012345", "nonce-v2-1", 0, DefaultExpiry, "POST", "/upload", "", EmptyBodyHash())
+	h := buildHeaderV2(testAK, testSK, "skey-abcdef012345", "nonce-v2-1", 0, DefaultExpiry, "POST", "/upload", "", EmptyBodyHash())
 	if h.Version != Version {
 		t.Fatalf("buildHeaderV2 Version 应为 %q, got %q", Version, h.Version)
 	}
 	// canonical 必须包含 entryID 段（AK 段之后）。
-	wantLine := "sproxy-sig/v" + Version + "\n" + testAK + "\n" + "sk-abcdef012345"
+	wantLine := "sproxy-sig/v" + Version + "\n" + testAK + "\n" + "skey-abcdef012345"
 	if got := h.Canonical("POST", "/upload", ""); !strings.HasPrefix(got, wantLine+"\n") {
 		t.Fatalf("canonical 应含 entryID 段:\ngot  %q\nwant 前缀 %q", got, wantLine)
 	}
@@ -137,6 +137,8 @@ func TestVerify_V2_WithEntryID(t *testing.T) {
 }
 
 // TestVerify_V2_NoEntryID：EntryID 为空 → 校验走空段（空行），通过。
+// 注：Verify 本身不强制 skeyID（canonical 空段语义仍成立）；**强制必传由
+// ParseHeader 与服务端 verifySproxySigFromRing 执行**（v2 必传，缺段 401）。
 func TestVerify_V2_NoEntryID(t *testing.T) {
 	h := buildHeaderV2(testAK, testSK, "", "nonce-v2-2", 0, DefaultExpiry, "POST", "/upload", "", EmptyBodyHash())
 	// canonical 中 entryID 段为空（空行，紧接 AK 段后）。
@@ -152,8 +154,8 @@ func TestVerify_V2_NoEntryID(t *testing.T) {
 
 // TestVerify_Reject_VersionMismatch：明文 v=1 头在校验时被拒（服务端仅支持 v2）。
 func TestVerify_Reject_VersionMismatch(t *testing.T) {
-	// 构造明文 v=1 头：与 v2 相同的字段、仅版本号前缀不同 → 校验必须拒绝。
-	auth := Scheme + " v=1 ak=" + testAK + " ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
+	// 构造明文 v=1 头：与 v2 相同的字段（含 skey-id 段）、仅版本号前缀不同 → 校验必须拒绝。
+	auth := Scheme + " v=1 ak=" + testAK + " skey-id=skey-abcdef012345 ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
 	h, err := ParseHeader(auth)
 	if err != nil {
 		t.Fatalf("ParseHeader: %v", err)
@@ -165,7 +167,7 @@ func TestVerify_Reject_VersionMismatch(t *testing.T) {
 }
 
 func TestParseHeader(t *testing.T) {
-	h := buildHeaderV2(testAK, testSK, "sk-abcdef012345", "nonce-9", 0, DefaultExpiry, "PUT", "/api/x", "a=1", BodyHash([]byte("hi")))
+	h := buildHeaderV2(testAK, testSK, "skey-abcdef012345", "nonce-9", 0, DefaultExpiry, "PUT", "/api/x", "a=1", BodyHash([]byte("hi")))
 	parsed, err := ParseHeader(headerAuthString(h))
 	if err != nil {
 		t.Fatalf("ParseHeader: %v", err)
@@ -175,28 +177,28 @@ func TestParseHeader(t *testing.T) {
 	}
 }
 
-// TestParseHeader_V2_EntryID：v2 头带 sk=<entryID> 段解析正确（EntryID 填充）。
+// TestParseHeader_V2_EntryID：v2 头带 skey-id=<skeyID> 段解析正确（EntryID 填充）。
 func TestParseHeader_V2_EntryID(t *testing.T) {
-	auth := Scheme + " v=2 ak=ak-prod-meshA-3f8a sk=sk-abcdef012345" +
+	auth := Scheme + " v=2 ak=ak-prod-meshA-3f8a skey-id=skey-abcdef012345" +
 		" ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
 	h, err := ParseHeader(auth)
 	if err != nil {
 		t.Fatalf("ParseHeader: %v", err)
 	}
-	if h.Version != "2" || h.EntryID != "sk-abcdef012345" {
+	if h.Version != "2" || h.EntryID != "skey-abcdef012345" {
 		t.Fatalf("解析 ak/entryID 错误: %+v", h)
 	}
 }
 
-// TestSignAndFormat_EntryID_RoundTrip：SignAndFormat 渲染的带 sk=<id> 头必须能被
+// TestSignAndFormat_EntryID_RoundTrip：SignAndFormat 渲染的带 skey-id=<id> 头必须能被
 // ParseHeader 还原出正确的 EntryID，且能通过 Verify（canonical 与渲染一致性）。
 // 回归：历史 bug 曾用 Replace(" ak=", " ak="+AK+" sk="+ID) 锚点错误，把 EntryID
-// 粘连到 AK 值后形成 sk=<id><AK>，ParseHeader 解析出的 EntryID 错误、验签失配。
+// 粘连到 AK 值后形成 skey-id=<id><AK>，ParseHeader 解析出的 EntryID 错误、验签失配。
 // 真实消费路径（pkg/client.signRequest）的 v2 签名依赖此一致性。
 func TestSignAndFormat_EntryID_RoundTrip(t *testing.T) {
 	const (
 		ak = "ak-prod-meshA-3f8a"
-		id = "sk-abcdef012345"
+		id = "skey-abcdef012345"
 	)
 	h := buildHeader(ak, testSK, "nonce-e1", 0, DefaultExpiry, "POST", "/api/credentials/"+ak+"/renew", "", EmptyBodyHash())
 	h.EntryID = id
@@ -206,10 +208,10 @@ func TestSignAndFormat_EntryID_RoundTrip(t *testing.T) {
 		t.Fatalf("ParseHeader(%s): %v", auth, err)
 	}
 	if parsed.AK != ak {
-		t.Errorf("AK = %q, want %q（sk= 段不得粘连进 AK）", parsed.AK, ak)
+		t.Errorf("AK = %q, want %q（skey-id= 段不得粘连进 AK）", parsed.AK, ak)
 	}
 	if parsed.EntryID != id {
-		t.Errorf("EntryID = %q, want %q（sk= 段值必须只含 entryID 本身）", parsed.EntryID, id)
+		t.Errorf("EntryID = %q, want %q（skey-id= 段值必须只含 entryID 本身）", parsed.EntryID, id)
 	}
 	// Verify 用 baseTime 偏移后的 h 时间（避开真实 now 过期窗口）。
 	parsed2 := parsed
@@ -221,27 +223,21 @@ func TestSignAndFormat_EntryID_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestParseHeader_V2_NoEntryID：v2 头缺省 sk=<entryID> 段时 EntryID 为空串、其余解析正确。
+// TestParseHeader_V2_NoEntryID：v2 头缺省 skey-id=<skeyID> 段 → ErrMalformed
+// （v2 协议 skey-id 强制必传，fail-closed——服务端据此直接 401，无试签回退）。
 func TestParseHeader_V2_NoEntryID(t *testing.T) {
 	h := buildHeader(testAK, testSK, "nonce-9", 0, DefaultExpiry, "PUT", "/a", "", EmptyBodyHash())
 	auth := Scheme + " v=" + h.Version + " ak=" + h.AK + " ts=" + itoa(h.TS) + " exp=" + itoa(h.Exp) +
 		" nonce=" + h.Nonce + " body_sha256=" + h.BodySHA256 + " sig=" + h.Sig
-	parsed, err := ParseHeader(auth)
-	if err != nil {
-		t.Fatalf("ParseHeader: %v", err)
-	}
-	if parsed.EntryID != "" {
-		t.Fatalf("缺省 sk 段时 EntryID 应为空, got %q", parsed.EntryID)
-	}
-	if parsed.AK != h.AK || parsed.BodySHA256 != h.BodySHA256 || parsed.Version != h.Version {
-		t.Fatalf("其余字段解析不一致: %+v vs %+v", parsed, h)
+	if _, err := ParseHeader(auth); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("缺省 skey-id 段应 ErrMalformed（v2 必传）, got %v", err)
 	}
 }
 
-// TestParseHeader_Malformed_EmptySKAlias：显式 sk= 空值按字段空值 fail-closed 拒绝。
-func TestParseHeader_Malformed_EmptySKAlias(t *testing.T) {
-	if _, err := ParseHeader("SproxySig v=2 ak=ak-prod-meshA-3f8a sk= ts=1784808000123 exp=1784808300123 nonce=n body_sha256=" + EmptyBodyHash() + " sig=s"); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("sk= 空值应 ErrMalformed, got %v", err)
+// TestParseHeader_Malformed_EmptySkeyIDAlias：显式 skey-id= 空值按字段空值 fail-closed 拒绝。
+func TestParseHeader_Malformed_EmptySkeyIDAlias(t *testing.T) {
+	if _, err := ParseHeader("SproxySig v=2 ak=ak-prod-meshA-3f8a skey-id= ts=1784808000123 exp=1784808300123 nonce=n body_sha256=" + EmptyBodyHash() + " sig=s"); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("skey-id= 空值应 ErrMalformed, got %v", err)
 	}
 }
 
@@ -251,9 +247,12 @@ func TestParseHeader_Malformed(t *testing.T) {
 		"Bearer abc",            // 非 SproxySig
 		"SproxySig",             // 缺空格后字段
 		"SproxySig v=2 ak=only", // 缺字段
-		"SproxySig v=2 ak=x ts=abc exp=1 nonce=n body_sha256=b sig=s",         // ts 非数字
-		"SproxySig v=2 ak=x ts=1 exp=1 nonce=n body_sha256=b sig=s unknown=k", // 未知字段
-		"SproxySig v=2 ts=1 exp=1 nonce=n body_sha256=b sig=s",                // 缺 ak
+		"SproxySig v=2 ak=x ts=abc exp=1 nonce=n body_sha256=b sig=s",                                // ts 非数字
+		"SproxySig v=2 ak=x ts=1 exp=1 nonce=n body_sha256=b sig=s unknown=k",                        // 未知字段
+		"SproxySig v=2 ts=1 exp=1 nonce=n body_sha256=b sig=s",                                       // 缺 ak
+		"SproxySig v=2 ak=x skey-id=y ts=1 exp=1 nonce=n body_sha256=b sig=s unknown=k",              // 未知字段（带 skey-id）
+		"SproxySig v=2 ak=x skey-id= ts=1784808000123 exp=1784808300123 nonce=n body_sha256=b sig=s", // skey-id 空值
+		"SproxySig v=2 ak=x ts=1784808000123 exp=1784808300123 nonce=n body_sha256=b sig=s",          // 缺 skey-id（v2 必传）
 	}
 	for _, s := range bad {
 		if _, err := ParseHeader(s); !errors.Is(err, ErrMalformed) {
@@ -262,9 +261,9 @@ func TestParseHeader_Malformed(t *testing.T) {
 	}
 }
 
-// TestParseHeader_V1_Deprecated：v1 头能解析（不拒绝明文），但 Verify 按版本不匹配拒绝。
+// TestParseHeader_V1_Deprecated：v1 头能解析（携带 skey-id 段时），但 Verify 按版本不匹配拒绝。
 func TestParseHeader_V1_Deprecated(t *testing.T) {
-	auth := Scheme + " v=1 ak=ak-prod-meshA-3f8a ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
+	auth := Scheme + " v=1 ak=ak-prod-meshA-3f8a skey-id=skey-abcdef012345 ts=1784808000123 exp=1784808300123 nonce=deadbeef body_sha256=" + EmptyBodyHash() + " sig=AABB"
 	h, err := ParseHeader(auth)
 	if err != nil {
 		t.Fatalf("v1 头应可解析（Version 字段透出）, got %v", err)
@@ -314,28 +313,28 @@ func TestNoncePool(t *testing.T) {
 	}
 }
 
-// TestHeader_EntryIDJSONTag：EntryID 的 json/yaml tag 为 "sk"，与线缆字段一致
-// （供未来 Header 序列化 / 配置反序列化使用；编译期结构断言）。
+// TestHeader_EntryIDJSONTag：EntryID 的 json/yaml tag 为 "skey_id"，与线缆字段的
+// skey-id 段对齐（snake_case；供未来 Header 序列化 / 配置反序列化使用；编译期结构断言）。
 func TestHeader_EntryIDJSONTag(t *testing.T) {
-	h := Header{Version: "2", AK: "ak", EntryID: "sk-1"}
+	h := Header{Version: "2", AK: "ak", EntryID: "skey-1"}
 	b, err := marshalHeaderJSON(h)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	// 字段名必须是 sk（不是 entry_id/other）。
-	if !strings.Contains(string(b), `"sk":"sk-1"`) {
-		t.Fatalf("EntryID 应序列化为 sk 字段, got %s", b)
+	// 字段名必须是 skey_id（不是 sk/entry_id/other）。
+	if !strings.Contains(string(b), `"skey_id":"skey-1"`) {
+		t.Fatalf("EntryID 应序列化为 skey_id 字段, got %s", b)
 	}
-	if strings.Contains(string(b), `"entry_id"`) || strings.Contains(string(b), `"EntryID"`) {
+	if strings.Contains(string(b), `"sk"`) || strings.Contains(string(b), `"entry_id"`) || strings.Contains(string(b), `"EntryID"`) {
 		t.Fatalf("EntryID 不得序列化为其它字段名, got %s", b)
 	}
-	// 反序列化：sk 值能回到 EntryID。
+	// 反序列化：skey_id 值能回到 EntryID。
 	got, err := unmarshalHeaderJSON(b)
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.EntryID != "sk-1" || got.AK != "ak" || got.Version != "2" {
-		t.Fatalf("sk → EntryID 反序列化错误: %+v", got)
+	if got.EntryID != "skey-1" || got.AK != "ak" || got.Version != "2" {
+		t.Fatalf("skey_id → EntryID 反序列化错误: %+v", got)
 	}
 }
 

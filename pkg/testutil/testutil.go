@@ -23,6 +23,12 @@ func TestAccessKey() string {
 	return "ak-00000000000000000000000000000000"
 }
 
+// TestAccessKeyID returns a deterministic skeyID（skey-<12hex>）用于 v2 协议必传的
+// skey-id 段（与 TestAccessKey 配套；服务端测试 Ring 的 AddKey 显式 ID 用它）。
+func TestAccessKeyID() string {
+	return "skey-000000000000"
+}
+
 // SHA256Hex computes the hex-encoded SHA-256 hash of data.
 func SHA256Hex(data []byte) string {
 	h := sha256.Sum256(data)

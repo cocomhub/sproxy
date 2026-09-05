@@ -171,11 +171,12 @@ type FederationPeerConfig struct {
 	// URL 是对端节点表端点基址（如 http://127.0.0.1:18083）。为空回落默认
 	// loopback（http://127.0.0.1:18083）——远程 peering 必须显式配置 URL。
 	URL string `yaml:"url" mapstructure:"url"`
-	// AccessKey / AccessKeySecret 是对端 hub 认可的 SproxySig 凭据。
-	// 目标 hub 凭据 Ring 非空时必填；远程 peering（URL host 非 loopback）
-	// 由 Validate 强制要求（fail-closed）。
+	// AccessKey / AccessKeySecret / AccessKeyID 是对端 hub 认可的 SproxySig 凭据
+	// （AccessKeyID 是 SK 条目 skeyID，v2 协议必传）。目标 hub 凭据 Ring 非空时
+	// 必填；远程 peering（URL host 非 loopback）由 Validate 强制要求（fail-closed）。
 	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
 	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
+	AccessKeyID     string `yaml:"access_key_id" mapstructure:"access_key_id"`
 	// CAFile 是对端 hub 的 TLS 受信 CA 证书文件路径（PEM）。非空时用该 CA 构建
 	// 专属证书池严格校验对端证书（InsecureSkipVerify=false，ServerName 由 URL host
 	// 自动校验）——自签 hub 的远程 peering 应配置 ca_file（受信 CA）而非跳过校验。
@@ -266,6 +267,7 @@ type SyncRemoteConfig struct {
 	URL             string `yaml:"url" mapstructure:"url"`
 	AccessKey       string `yaml:"access_key" mapstructure:"access_key"`
 	AccessKeySecret string `yaml:"access_key_secret" mapstructure:"access_key_secret"`
+	AccessKeyID     string `yaml:"access_key_id" mapstructure:"access_key_id"`
 }
 
 // RegistrationConfig 是注册（凭据登记）相关配置。

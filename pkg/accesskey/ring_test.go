@@ -274,8 +274,8 @@ func TestRing_InvalidArgs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AddKey(empty id): %v", err)
 		}
-		if len(id) != len("sk-")+EntryIDLen {
-			t.Fatalf("自动生成 ID 长度应为 sk-<12hex>, got %q (%d)", id, len(id))
+		if len(id) != len("skey-")+EntryIDLen {
+			t.Fatalf("自动生成 ID 长度应为 skey-<12hex>, got %q (%d)", id, len(id))
 		}
 	})
 	t.Run("AddKey duplicate ID", func(t *testing.T) {
@@ -284,10 +284,10 @@ func TestRing_InvalidArgs(t *testing.T) {
 		if err := r.UpsertAK(ak, "o"); err != nil {
 			t.Fatalf("UpsertAK: %v", err)
 		}
-		if _, err := r.AddKey(ak, must32BHex(t, 6), WithID("sk-000000000001")); err != nil {
+		if _, err := r.AddKey(ak, must32BHex(t, 6), WithID("skey-000000000001")); err != nil {
 			t.Fatalf("首次 AddKey: %v", err)
 		}
-		if _, err := r.AddKey(ak, must32BHex(t, 7), WithID("sk-000000000001")); err != ErrDuplicate {
+		if _, err := r.AddKey(ak, must32BHex(t, 7), WithID("skey-000000000001")); err != ErrDuplicate {
 			t.Fatalf("重复 ID 应 ErrDuplicate, got %v", err)
 		}
 	})
@@ -334,10 +334,10 @@ func TestRing_Replace(t *testing.T) {
 	// 替换为新集合
 	newAKs := []Key{
 		{AK: "ak-b-1234567890abcdef", Owner: "o2", Entries: []SKEntry{
-			{ID: "sk-0000000000aa", SK: must32BHex(t, 0xAA), CreatedAt: fixedNow, Status: StatusActive},
+			{ID: "skey-0000000000aa", SK: must32BHex(t, 0xAA), CreatedAt: fixedNow, Status: StatusActive},
 		}},
 		{AK: "ak-a-1234567890abcdef", Owner: "o1", Entries: []SKEntry{
-			{ID: "sk-0000000000bb", SK: must32BHex(t, 0xBB), CreatedAt: fixedNow, Status: StatusActive},
+			{ID: "skey-0000000000bb", SK: must32BHex(t, 0xBB), CreatedAt: fixedNow, Status: StatusActive},
 		}},
 	}
 	if err := r.Replace(newAKs); err != nil {

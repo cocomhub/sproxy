@@ -259,6 +259,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 					URL:                p.URL,
 					AccessKey:          p.AccessKey,
 					AccessKeySecret:    p.AccessKeySecret,
+					AccessKeyID:        p.AccessKeyID,
 					CAFile:             p.CAFile,
 					InsecureSkipVerify: p.InsecureSkipVerify,
 				})
@@ -360,6 +361,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		for _, r := range cfg.SyncRemotes {
 			remotes = append(remotes, syncmgr.RemoteConfig{
 				Name: r.Name, URL: r.URL, AccessKey: r.AccessKey, AccessKeySecret: r.AccessKeySecret,
+				AccessKeyID: r.AccessKeyID,
 			})
 		}
 		// P4/P5：quota 以 nil 注入（NewManager 内部回退 noop），随后 SetQuotaResolver 注入

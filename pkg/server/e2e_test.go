@@ -31,10 +31,14 @@ const (
 	e2eSK = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
+// e2eEntryID 是 e2eAK 在测试 Ring 中的确定性条目 ID（与 startTestServer 注入的
+// AddKey 显式 ID 精确匹配——server_test 包无法引用 package server 的 testEntryID）。
+const e2eEntryID = "skey-02d8c211df5b" // sha256("ak-e2e-0000000000000000:skey")[:6] 前 6 字节
+
 // newAuthedClient 返回带 SproxySig 凭据的直连 client（不走隧道）。
 // 服务端配置了 access_keys 时，直连 HTTP 面需验签。
 func newAuthedClient(url string) *client.FileClient {
-	return client.NewFileClient(url, client.WithAccessKey(e2eAK, e2eSK))
+	return client.NewFileClient(url, client.WithAccessKey(e2eAK, e2eSK), client.WithAccessKeyID(e2eEntryID))
 }
 
 // e2eNonceCounter 为 E2E 签名生成全局唯一 nonce 的递增序号（server_test 包与
@@ -46,13 +50,14 @@ var e2eNonceCounter atomic.Uint64
 func signE2ERequest(r *http.Request) {
 	now := time.Now()
 	h := sproxysig.Header{
-		Version: sproxysig.Version, AK: e2eAK,
+		Version: sproxysig.Version, AK: e2eAK, EntryID: e2eEntryID,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      fmt.Sprintf("test-nonce-%d-%d", now.UnixNano(), e2eNonceCounter.Add(1)),
 		BodySHA256: sproxysig.EmptyBodyHash(),
 	}
 	h.Sig = sproxysig.Sign(e2eSK, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
 	r.Header.Set("Authorization", sproxysig.Scheme+" v="+h.Version+" ak="+h.AK+
+		" skey-id="+h.EntryID+
 		" ts="+strconv.FormatInt(h.TS, 10)+" exp="+strconv.FormatInt(h.Exp, 10)+
 		" nonce="+h.Nonce+" body_sha256="+h.BodySHA256+" sig="+h.Sig)
 }
@@ -79,7 +84,7 @@ func startTestServer(t *testing.T) (string, string) {
 		t.Fatalf("e2eSK 非法: %d bytes", len(e2eSKBytes))
 	}
 	_ = e2eRing.UpsertAK(e2eAK, "e2e")
-	_, _ = e2eRing.AddKey(e2eAK, e2eSKBytes)
+	_, _ = e2eRing.AddKey(e2eAK, e2eSKBytes, accesskey.WithID(e2eEntryID))
 	h := server.RegisterRoutes(t.Context(), server.RegisterRoutesOpts{
 		Mux:            mux,
 		CfgPtr:         &cfgPtr,
@@ -166,7 +171,9 @@ func TestE2E_Tunnel_UploadDownload(t *testing.T) {
 	sum := sha256.Sum256(payload)
 	wantCS := hex.EncodeToString(sum[:])
 
-	c := client.NewFileClient(url, client.WithTunnel("ak-e2e-0000000000000000", strings.Repeat("a", 64)))
+	c := client.NewFileClient(url,
+		client.WithTunnel("ak-e2e-0000000000000000", strings.Repeat("a", 64)),
+		client.WithAccessKeyID(e2eEntryID))
 
 	if _, err := c.Upload(t.Context(), srcPath, "tunnel.txt"); err != nil {
 		t.Fatalf("Upload via tunnel: %v", err)

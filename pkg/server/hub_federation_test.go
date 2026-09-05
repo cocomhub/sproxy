@@ -208,8 +208,8 @@ func TestFederationSync_AuthSuccessAndFailure(t *testing.T) {
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
 
-	// 正确凭据：拉取成功，候选含 node-b。
-	fcOK, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: ts.URL, AccessKey: testAK, AccessKeySecret: testSK}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	// 正确凭据：拉取成功，候选含 node-b（v2 必传 skey-id = testEntryID(ak)）。
+	fcOK, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: ts.URL, AccessKey: testAK, AccessKeySecret: testSK, AccessKeyID: testEntryID(testAK)}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcOK.Close)
 	if err := fcOK.SyncAll(context.Background()); err != nil {
 		t.Fatalf("正确凭据拉取应成功: %v", err)
@@ -227,7 +227,7 @@ func TestFederationSync_AuthSuccessAndFailure(t *testing.T) {
 	}
 
 	// 错误 SK：拉取失败（401，fail-closed）。
-	fcBad, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: ts.URL, AccessKey: testAK, AccessKeySecret: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
+	fcBad, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: ts.URL, AccessKey: testAK, AccessKeySecret: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", AccessKeyID: testEntryID(testAK)}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcBad.Close)
 	if err := fcBad.SyncAll(context.Background()); err == nil {
 		t.Fatalf("错误 SK 拉取应返回错误（fail-closed 401）")
@@ -269,7 +269,7 @@ func TestFederationNodesEndpoint_MeshFromAccessKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	sproxysig.SignRequest(req, meshMAK, meshMSK)
+	sproxysig.SignRequestWithSkeyID(req, meshMAK, testEntryID(meshMAK), meshMSK)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET: %v", err)

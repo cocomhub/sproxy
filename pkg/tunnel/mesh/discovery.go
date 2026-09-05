@@ -66,8 +66,9 @@ type HubNodeInfo struct {
 // ListHubNodes 返回 hub 上全部在线节点（含自身与临时节点），携带虚拟 IP。
 // 轻量直连 GET /api/hub/nodes：不构造 FileClient，避免 tunnel_key/InitError 拖垮
 // mesh node 常驻进程（与 relay status 的直连方式一致）。配置了 AccessKeySecret 时
-// 用 SproxySig 签名认证（token 不上线）。4xx/5xx/网络错误统一返回 *hubAPIError。
-func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret string, insecure bool) ([]HubNodeInfo, error) {
+// 用 SproxySig 签名认证（v2 skey-id 必传；accessKeyID 由 cfg.AccessKeyID 注入，
+// token 不上线）。4xx/5xx/网络错误统一返回 *hubAPIError。
+func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret, accessKeyID string, insecure bool) ([]HubNodeInfo, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("list hub nodes: hub 地址为空")
 	}
@@ -77,7 +78,7 @@ func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret strin
 	}
 	if accessKeySecret != "" {
 		now := time.Now()
-		h := sproxysig.Header{Version: sproxysig.Version, AK: accessKey,
+		h := sproxysig.Header{Version: sproxysig.Version, AK: accessKey, EntryID: accessKeyID,
 			TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 			Nonce: sproxysig.NewNonce(), BodySHA256: sproxysig.EmptyBodyHash()}
 		req.Header.Set("Authorization", sproxysig.SignAndFormat(accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
@@ -169,7 +170,7 @@ func runDiscoveryLoop(ctx context.Context, cfg NodeConfig, nodeID, httpBase stri
 }
 
 func (dl *discoveryLoop) discoverOnce(ctx context.Context, cfg NodeConfig, nodeID, httpBase string, probe time.Duration, maxParallel int, mainSecret string, localAddr string, httpClient *http.Client, serveOpts []relay.ServeOptions, vipTable *VipTable, logger *slog.Logger) error {
-	nodes, err := ListHubNodes(ctx, httpBase, cfg.AccessKey, cfg.AccessKeySecret, cfg.Insecure)
+	nodes, err := ListHubNodes(ctx, httpBase, cfg.AccessKey, cfg.AccessKeySecret, cfg.AccessKeyID, cfg.Insecure)
 	if err != nil {
 		var herr *hubAPIError
 		if errors.As(err, &herr) && herr.code >= 400 && herr.code < 500 {
@@ -255,7 +256,8 @@ func (dl *discoveryLoop) dialPeer(ctx context.Context, cfg NodeConfig, nodeID, m
 	temp, err := AutoRegister(ctx, AutoRegisterParams{
 		HubURL: cfg.HubURL, ServerURL: cfg.ServerURL,
 		AccessKey: cfg.AccessKey, AccessKeySecret: cfg.AccessKeySecret,
-		NodeID: nodeID, Prefix: hub.DiscPrefix, ExactNode: false,
+		AccessKeyID: cfg.AccessKeyID,
+		NodeID:      nodeID, Prefix: hub.DiscPrefix, ExactNode: false,
 		Insecure:   cfg.Insecure,
 		RealNodeID: nodeID, RealNodeProof: realNodeProof(mainSecret, nodeID),
 	})

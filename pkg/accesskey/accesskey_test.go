@@ -89,8 +89,8 @@ func TestParseMesh_Legacy16HexMesh(t *testing.T) {
 	}
 }
 
-// TestNewEntryID_FormatAndUnique newEntryID 格式为 sk-<12hex> 且互不重复（SK 条目
-// ID 保留 sk- 前缀，不与 AK 的 ak- 混淆；EntryID 是完整 sk-<12hex>）。
+// TestNewEntryID_FormatAndUnique newEntryID 格式为 skey-<12hex> 且互不重复（SK 条目
+// ID 保留 skey- 前缀，与 AK 的 ak- 对称；EntryID 是完整 skey-<12hex>）。
 func TestNewEntryID_FormatAndUnique(t *testing.T) {
 	seen := map[string]bool{}
 	for range 1000 {
@@ -98,13 +98,13 @@ func TestNewEntryID_FormatAndUnique(t *testing.T) {
 		if err != nil {
 			t.Fatalf("newEntryID: %v", err)
 		}
-		if !strings.HasPrefix(id, "sk-") {
-			t.Fatalf("newEntryID 应以 sk- 开头, got %q", id)
+		if !strings.HasPrefix(id, SkeyIDPrefix) {
+			t.Fatalf("newEntryID 应以 skey- 开头, got %q", id)
 		}
-		if len(id) != len("sk-")+EntryIDLen {
-			t.Fatalf("newEntryID 长度应为 sk-<12hex>, got %q (%d)", id, len(id))
+		if len(id) != len(SkeyIDPrefix)+EntryIDLen {
+			t.Fatalf("newEntryID 长度应为 skey-<12hex>, got %q (%d)", id, len(id))
 		}
-		for _, c := range id[len("sk-"):] {
+		for _, c := range id[len(SkeyIDPrefix):] {
 			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
 			if !isHex {
 				t.Fatalf("newEntryID 的 hex 段含非法字符 %q", id)
@@ -120,7 +120,7 @@ func TestNewEntryID_FormatAndUnique(t *testing.T) {
 // TestGetEntry_NotFound 不存在的条目返回 ErrNotFound。
 func TestGetEntry_NotFound(t *testing.T) {
 	r := NewRing()
-	if _, _, err := r.GetEntry("sk-x", "sk-000000000000"); err != ErrNotFound {
+	if _, _, err := r.GetEntry("sk-x", "skey-000000000000"); err != ErrNotFound {
 		t.Fatalf("不存在条目应 ErrNotFound, got %v", err)
 	}
 }

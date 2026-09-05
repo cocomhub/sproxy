@@ -278,10 +278,11 @@ func TestCrossHubRelay_AuthEndToEnd(t *testing.T) {
 	rtA := hub.NewMeshRouteTable()
 	hA, tsA := newRelayTestHub(t, rtA, testCredPair{ak: federationForwardTestAK, sk: federationForwardTestSK})
 
-	// 正确 peer 凭据：hub-A 用 hub-B 认可的 AK/SK 拉取 + 转发。
+	// 正确 peer 凭据：hub-A 用 hub-B 认可的 AK/SK（v2 必传 skey-id = testEntryID）拉取 + 转发。
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{
 		ID: "hubB", URL: tsB.URL,
 		AccessKey: federationForwardTestAK, AccessKeySecret: federationForwardTestSK,
+		AccessKeyID: testEntryID(federationForwardTestAK),
 	}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {
@@ -289,8 +290,10 @@ func TestCrossHubRelay_AuthEndToEnd(t *testing.T) {
 	}
 	hA.SetFederationClient(fcA)
 
-	// 客户端经 client.FileClient（SproxySig 签名）拨 hub-A 的 relay stream。
-	cl := client.NewFileClient(tsA.URL, client.WithAccessKey(federationForwardTestAK, federationForwardTestSK))
+	// 客户端经 client.FileClient（SproxySig 签名，v2 必传 skey-id）拨 hub-A 的 relay stream。
+	cl := client.NewFileClient(tsA.URL,
+		client.WithAccessKey(federationForwardTestAK, federationForwardTestSK),
+		client.WithAccessKeyID(testEntryID(federationForwardTestAK)))
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	conn, err := cl.RelayStream(ctx, "node-b", echoAddr)
@@ -519,6 +522,7 @@ func TestRelayStreamHandler_Forward_HeadersSent(t *testing.T) {
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{
 		ID: "hubB", URL: mock.srv.URL,
 		AccessKey: federationForwardTestAK, AccessKeySecret: federationForwardTestSK,
+		AccessKeyID: testEntryID(federationForwardTestAK),
 	}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())
 	t.Cleanup(fcA.Close)
 	if err := fcA.SyncAll(context.Background()); err != nil {

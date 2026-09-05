@@ -197,9 +197,11 @@ var errCredentialPersistFailed = errors.New("凭据持久化失败")
 
 // renewCredential 执行 renew 的核心逻辑（含持久化），返回响应体。
 //
-// entryID 是调用方签名命中的 SK 条目 ID（EntryIDFrom(ctx)，localMux/隧道内层为空串）；
-// 非空时用该条目 SK 作 wrap key（取条目当前 SK，验签已证明调用方持有它）；为空回退
-// CoreEntry（最新 alive 条目，隧道内层环绕边界）。
+// entryID 是调用方签名命中的 SK 条目 ID（EntryIDFrom(ctx)，本地路由 / 隧道内层为空串）。
+// 非空时用该条目 SK 作 wrap key（取条目当前 SK，验签已证明调用方持有它）。为空（仅
+// 本地路由 / 隧道内层 / 引导 renew）回退 CoreEntry（最新 alive 条目）。GetEntry 命中
+// 失败（已被并发删除/过期）同样回退 CoreEntry——竞态可用性优先（入口必传校验已在
+// auth 层执行，此处回退不失安全性）。
 func (h *Handlers) renewCredential(ak, mesh, entryID, remoteAddr string) (renewCredentialResponse, error) {
 	if h.credentialRing == nil {
 		return renewCredentialResponse{}, errCredentialRingUnavailable

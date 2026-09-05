@@ -72,6 +72,40 @@ func signedDelete(t *testing.T, url, ak, sk string) (int, []byte) {
 	return doSignedJSON(t, http.MethodDelete, url, ak, sk, nil)
 }
 
+// signedGetEntry 携带显式 skeyID 的签名 GET（renew 后测试命中新条目用）。
+func signedGetEntry(t *testing.T, url, ak, entryID, sk string) (int, []byte) {
+	t.Helper()
+	return doSignedJSONEntry(t, url, ak, entryID, sk, nil)
+}
+
+// doSignedJSONEntry 携带显式 skeyID 的签名 JSON 请求（renew 后新条目验证用）。
+func doSignedJSONEntry(t *testing.T, url, ak, entryID, sk string, body any) (int, []byte) {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			t.Fatalf("encode body: %v", err)
+		}
+	}
+	req, err := http.NewRequest("GET", url, &buf)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+		signBodyRequestEntry(req, ak, entryID, sk, buf.Bytes())
+	} else {
+		signRequestEntry(req, ak, entryID, sk)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", "GET", url, err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, data
+}
+
 // testWrapKey 复算调用方侧 wrap 信封密钥（与生产 credentialWrapKey 同一拼法：
 // context = credentialWrapContext[#mesh]）。mesh 传调用方 AK 派生值（测试 AK 为
 // sk-test-mesh-... 时非空——覆盖 mesh 纳入派生）。
@@ -102,17 +136,18 @@ func mustDecodeHex(t *testing.T, s string) []byte {
 
 // credentialsRingWithAdmin 构造带 admin 条目（Meta.Type=="admin"）与 user 条目的 Ring。
 // adminAK 为空时只注入 user（无 admin 条目，模拟 4A 无 admin 部署）。
+// 条目 ID 用 testEntryID(ak) 确定性生成（与 signRequest/signBodyRequest 精确匹配）。
 func credentialsRingWithAdmin(adminAK, adminSK, userAK, userSK string) *accesskey.Ring {
 	ring := accesskey.NewRing()
 	if adminAK != "" {
 		ask, _ := hex.DecodeString(adminSK)
 		_ = ring.UpsertAK(adminAK, "admin")
-		_, _ = ring.AddKey(adminAK, ask, accesskey.WithMeta(accesskey.Meta{Type: "admin"}))
+		_, _ = ring.AddKey(adminAK, ask, accesskey.WithID(testEntryID(adminAK)), accesskey.WithMeta(accesskey.Meta{Type: "admin"}))
 	}
 	usk, _ := hex.DecodeString(userSK)
 	if userAK != "" {
 		_ = ring.UpsertAK(userAK, "user")
-		_, _ = ring.AddKey(userAK, usk, accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
+		_, _ = ring.AddKey(userAK, usk, accesskey.WithID(testEntryID(userAK)), accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
 	}
 	return ring
 }
@@ -223,8 +258,9 @@ func TestCredentials_Renew_Roundtrip(t *testing.T) {
 	}
 	newSKHex := hex.EncodeToString(newSK)
 
-	// 新 SK 立即可用。
-	st, b := signedGet(t, url+"/api/stats", testAccessKey, newSKHex)
+	// 新 SK 立即可用（使用 renew 响应的实际条目 ID——v2 skey-id 必传，renew 后
+	// testEntryID(ak) 指向的是旧条目，须用响应里新条目的 skeyID 签名才命中）。
+	st, b := signedGetEntry(t, url+"/api/stats", testAccessKey, resp.SKID, newSKHex)
 	if st != http.StatusOK {
 		t.Fatalf("新 SK 访问 status = %d, want 200 (body=%s)", st, b)
 	}
@@ -367,7 +403,7 @@ func TestCredentials_SKList_ForbiddenForNonOwner(t *testing.T) {
 	if err := ring.UpsertAK(akB, "user"); err != nil {
 		t.Fatalf("UpsertAK(%q): %v", akB, err)
 	}
-	if _, err := ring.AddKey(akB, mustDecodeHex(t, skB), accesskey.WithMeta(accesskey.Meta{Type: "initial"})); err != nil {
+	if _, err := ring.AddKey(akB, mustDecodeHex(t, skB), accesskey.WithID(testEntryID(akB)), accesskey.WithMeta(accesskey.Meta{Type: "initial"})); err != nil {
 		t.Fatalf("AddKey(akB): %v", err)
 	}
 
@@ -471,9 +507,8 @@ func TestCredentials_SKExpire(t *testing.T) {
 		t.Fatalf("未找到 initial 条目: %+v", list.SKs)
 	}
 
-	// 先 renew 一个新条目（其 SK 在过期后仍是"其他存活条目"；过期之后再 renew 会因
-	// 无存活 SK 而无法认证，故必须在过期前完成）。
-	newSKHex := renewNewSKHex(t, url, testAccessKey, testAccessSecret)
+	// 先 renew 一个新条目并把新条目 ID 留存（v2 必传后过期验证需要新条目 skeyID 签名）。
+	newSKHex, newEntryID := renewNewSKAndID(t, url, testAccessKey, testAccessSecret)
 
 	// 过期初始条目（admin 过期 target 条目）。
 	expURL := url + "/api/credentials/" + testAccessKey + "/sk/" + initialID + "/expire"
@@ -491,10 +526,10 @@ func TestCredentials_SKExpire(t *testing.T) {
 		t.Fatalf("过期 SK 访问 status = %d, want 401", stExpired)
 	}
 
-	// "其他条目可用"：renew 的新条目 SK 在过期后仍可用。
-	stOK, _ := signedGet(t, url+"/api/stats", testAccessKey, newSKHex)
+	// "其他条目可用"：renew 的新条目 SK 在过期后仍可用（v2 必传后用新条目 skeyID 命中）。
+	stOK, bad := signedGetEntry(t, url+"/api/stats", testAccessKey, newEntryID, newSKHex)
 	if stOK != http.StatusOK {
-		t.Fatalf("过期后新条目访问 status = %d, want 200", stOK)
+		t.Fatalf("过期后新条目访问 status = %d, want 200 (body=%s)", stOK, bad)
 	}
 }
 
@@ -566,6 +601,29 @@ func renewNewSKHex(t *testing.T, url, ak, oldSKHex string) string {
 	return hex.EncodeToString(newSK)
 }
 
+// renewNewSKAndID renew 并返回新 SK hex + 新条目 skeyID（一次 renew 双取，避免两次调 renew
+// 造成条目数量叠加——v2 必传下第二次 renew 命中的已不是 initial）。
+func renewNewSKAndID(t *testing.T, url, ak, oldSKHex string) (string, string) {
+	t.Helper()
+	renewURL := url + "/api/credentials/" + ak + "/renew"
+	status, body := doSignedJSON(t, http.MethodPost, renewURL, ak, oldSKHex, map[string]any{})
+	if status != http.StatusOK {
+		t.Fatalf("renew status = %d (body=%s)", status, body)
+	}
+	var resp renewCredentialResponse
+	decodeJSONInto(t, body, &resp)
+	if resp.SKID == "" {
+		t.Fatalf("renew 未返回 sk_id (body=%s)", body)
+	}
+	oldSK := mustDecodeHex(t, oldSKHex)
+	wkey := testWrapKey(t, oldSK, ak, "")
+	newSK, err := accesskey.DecryptSecret(resp.WrappedSecret, wkey)
+	if err != nil {
+		t.Fatalf("解码新 SK: %v", err)
+	}
+	return hex.EncodeToString(newSK), resp.SKID
+}
+
 // TestCredentials_Renew_AfterSecondRenewOldSKReusable 验证 Important 1 的核心语义：
 // renew 的 wrap key 用「调用方签名命中的条目 SK」而非最新 CoreEntry——掉线重发的
 // 客户端（仍持上一轮旧 SK，未保存新 SK）再次 renew 时，返回的信封仍能用旧 SK 解开，
@@ -602,8 +660,8 @@ func TestCredentials_Renew_AfterSecondRenewOldSKReusable(t *testing.T) {
 	if len(new2) != 32 {
 		t.Fatalf("第二轮新 SK 长度 = %d, want 32", len(new2))
 	}
-	// 用解出的新 SK 认证立即可用。
-	st, b := signedGet(t, url+"/api/stats", testAccessKey, hex.EncodeToString(new2))
+	// 用解出的新 SK + 第二轮返回的新条目 ID 签名认证立即可用（v2 必传：须用 resp2.SKID）。
+	st, b := signedGetEntry(t, url+"/api/stats", testAccessKey, resp2.SKID, hex.EncodeToString(new2))
 	if st != http.StatusOK {
 		t.Fatalf("第二轮新 SK 访问 status = %d, want 200 (body=%s)", st, b)
 	}
@@ -720,13 +778,15 @@ func TestCredentials_AKAdd_Admin(t *testing.T) {
 		t.Fatalf("admin 新增 AK status = %d, want 200 (body=%s)", st, body)
 	}
 	var addResp struct {
-		AK string `json:"ak"`
+		AK   string `json:"ak"`
+		SKID string `json:"sk_id"`
 	}
 	decodeJSONInto(t, body, &addResp)
 	if addResp.AK != newAK {
 		t.Errorf("新增 AK = %q, want %q", addResp.AK, newAK)
 	}
-	stAuth, b := signedGet(t, url+"/api/stats", newAK, newSK)
+	// 用 add 响应实际生成的 skeyID 签名（v2 必传：随机生成条目 ID 与 testEntryID 不同）。
+	stAuth, b := signedGetEntry(t, url+"/api/stats", newAK, addResp.SKID, newSK)
 	if stAuth != http.StatusOK {
 		t.Fatalf("新增 AK 认证 status = %d, want 200 (body=%s)", stAuth, b)
 	}
@@ -774,8 +834,16 @@ func TestCredentials_AKAdd_Edge(t *testing.T) {
 	if bytes.Contains(body, []byte(newSK)) {
 		t.Errorf("响应回传了显式 secret（不应回传）: %s", body)
 	}
-	// 新凭据立即可认证（secret 真正写入 ring）。
-	stAuth, _ := signedGet(t, url+"/api/stats", newAK, newSK)
+	// 新凭据立即可认证（用 add 响应实际 skeyID 签名——随机生成 ID ≠ testEntryID，v2 必传）。
+	var addResp struct {
+		AK   string `json:"ak"`
+		SKID string `json:"sk_id"`
+	}
+	decodeJSONInto(t, body, &addResp)
+	if addResp.AK != newAK {
+		t.Errorf("新增 AK = %q, want %q", addResp.AK, newAK)
+	}
+	stAuth, _ := signedGetEntry(t, url+"/api/stats", newAK, addResp.SKID, newSK)
 	if stAuth != http.StatusOK {
 		t.Fatalf("新增 AK 认证 status = %d, want 200", stAuth)
 	}

@@ -201,9 +201,9 @@ type verifiedCredential struct {
 	ak     string
 	secret []byte // 命中 SK 条目的 32B 密钥字节（HKDF / 隧道派生用）
 	mesh   string
-	// entryID 是这次验签**实际命中**的 SK 条目 ID。带着该 ID 的请求（客户端显式
-	// sk=<entryID>）精确命中对应条目；无 entryID 的请求在若干 alive 条目中试签、
-	// 命中后记录该条目的 ID。供 renew 等端点识别调用方的 wrap key（用命中条目 SK）。
+	// entryID 是这次验签**实际命中**的 SK 条目 ID（skeyID）。v2 协议要求客户端在
+	// skey-id= 段显式携带该 ID，服务端以 (ak, skeyID) 精确定位（无试签回退）。
+	// 供 renew 等端点识别调用方的 wrap key（用命中条目 SK）。
 	entryID string
 }
 
@@ -218,19 +218,54 @@ func skHex(sk []byte) string {
 // reader 包装 r.Body：流式接收、EOF 与声明比对（防 body 篡改；验签已在 body 接收前
 // 用声明哈希完成，失败即 401 无回滚）。
 //
-// 凭据定位（凭据 store 化 / 多 SK）：
-//   - 请求头带 sk=<entryID> → ring.GetEntry(ak, id) 精确取；条目不存在/非存活 → 401；
-//   - 无 entryID → ring.Lookup(ak) 对每个 alive 条目 constant-time 试签（任一命中即可），
-//     AK 未登记 → 401。
+// 凭据定位（凭据 store 化 / 多 SK，v2 强制必传）：
+//   - 请求头必须携带 skey-id=<skeyID>（ParseHeader(AllowMissingSkeyID) + 下方必传判定；
+//     缺失 → 401）；
+//   - ring.GetEntry(ak, skeyID) 精确取条目；条目不存在/非存活 → 401。
+//   - **无试签回退**：不再对 AK 全部 alive 条目逐条试签。
+//
+// 唯一例外：自 renew 引导（POST /api/credentials/{selfAK}/renew）允许缺 skey-id，
+// 按「该 AK 唯一存活条目」定位（客户端首次 `trust renew` 取首个 skeyID 的入口）；
+// 多个存活条目或缺 skey-id 的非 renew 路径 → 401（fail-closed）。
 //
 // mesh 由命中 AK 派生（accesskey.ParseMesh，与 pkg/tunnel.AccessKeyMesh 语义一致）。
 func (h *Handlers) verifySproxySigFromRing(w http.ResponseWriter, r *http.Request, ring *accesskey.Ring) (*verifiedCredential, bool) {
-	hdr, err := sproxysig.ParseHeader(r.Header.Get("Authorization"))
+	auth := r.Header.Get("Authorization")
+	renewAK := r.PathValue("ak")
+	isSelfRenew := renewAK != "" && r.URL.Path == "/api/credentials/"+renewAK+"/renew"
+
+	// v2 协议 skey-id 强制必传。唯一例外：自 renew 引导——客户端首次 `trust renew`
+	// 尚无 access_key_id（取首个 skeyID 的入口），允许缺 skey-id 由下方「唯一存活
+	// 条目」定位（只验 AK+该条目，不试签）。其余路径缺段即 401（fail-closed）。
+	var hdr sproxysig.Header
+	var err error
+	if isSelfRenew {
+		hdr, err = sproxysig.ParseHeaderAllowMissingSkeyID(auth)
+	} else {
+		hdr, err = sproxysig.ParseHeader(auth)
+	}
 	if err != nil {
 		slog.Warn("auth: 非法 SproxySig 头",
 			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "error", err)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return nil, false
+	}
+	if hdr.EntryID == "" && !isSelfRenew {
+		slog.Warn("auth: 缺少 skey-id 段（v2 必传）",
+			"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "ak", hdr.AK)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return nil, false
+	}
+	if hdr.EntryID == "" {
+		// 自 renew 引导：仅允许该 AK 唯一存活条目（不试签；多条目必须显式 skey-id）。
+		entries, ok := ring.Lookup(hdr.AK)
+		if !ok || len(entries) != 1 {
+			slog.Warn("auth: 缺少 skey-id 且 AK 非唯一存活条目（v2 必传）",
+				"remote", r.RemoteAddr, "method", r.Method, "path", r.URL.Path, "ak", hdr.AK, "alive", len(entries))
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return nil, false
+		}
+		hdr.EntryID = entries[0].ID
 	}
 
 	var nonceSeen func(ak, nonce string, expMs int64) bool
@@ -241,55 +276,28 @@ func (h *Handlers) verifySproxySigFromRing(w http.ResponseWriter, r *http.Reques
 	path := r.URL.EscapedPath()
 	query := r.URL.RawQuery
 
-	var secret []byte
-	var entryID string
 	// bodyValidator 在读到 EOF 时比对哈希（防 body 篡改）。
 	defer func() { r.Body = io.NopCloser(sproxysig.NewBodyValidator(r.Body, hdr.BodySHA256)) }()
 
-	if hdr.EntryID != "" {
-		entry, alive, gerr := ring.GetEntry(hdr.AK, hdr.EntryID)
-		if gerr != nil || !alive {
-			slog.Warn("auth: SproxySig 条目未找到或不可用", "ak", hdr.AK, "entry", hdr.EntryID, "error", gerr)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return nil, false
-		}
-		if verr := sproxysig.Verify(skHex(entry.SK), hdr, method, path, query, time.Now(), 0, 0, nonceSeen); verr != nil {
-			slog.Warn("auth: SproxySig 校验失败", "ak", hdr.AK, "entry", hdr.EntryID, "error", verr)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return nil, false
-		}
-		secret = entry.SK
-		entryID = hdr.EntryID
-	} else {
-		entries, ok := ring.Lookup(hdr.AK)
-		if !ok || len(entries) == 0 {
-			slog.Warn("auth: 未知 AccessKey", "ak", hdr.AK, "remote", r.RemoteAddr)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return nil, false
-		}
-		// 无 entryID：对每个 alive 条目 constant-time 试签（nonce 去重放签名命中后）。
-		var matched bool
-		for _, e := range entries {
-			if verr := sproxysig.Verify(skHex(e.SK), hdr, method, path, query, time.Now(), 0, 0, nil); verr == nil {
-				matched = true
-				secret = e.SK
-				entryID = e.ID
-				break
-			}
-		}
-		if !matched {
-			slog.Warn("auth: SproxySig 校验失败", "ak", hdr.AK, "error", sproxysig.ErrBadSignature)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return nil, false
-		}
-		if nonceSeen != nil && nonceSeen(hdr.AK, hdr.Nonce, hdr.Exp) {
-			slog.Warn("auth: SproxySig nonce 重放", "ak", hdr.AK)
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return nil, false
-		}
+	// (ak, skeyID) 精确取条目（无试签）。
+	entry, alive, gerr := ring.GetEntry(hdr.AK, hdr.EntryID)
+	if gerr != nil || !alive {
+		slog.Warn("auth: SproxySig 条目未找到或不可用", "ak", hdr.AK, "entry", hdr.EntryID, "error", gerr)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return nil, false
+	}
+	if verr := sproxysig.Verify(skHex(entry.SK), hdr, method, path, query, time.Now(), 0, 0, nonceSeen); verr != nil {
+		slog.Warn("auth: SproxySig 校验失败", "ak", hdr.AK, "entry", hdr.EntryID, "error", verr)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return nil, false
 	}
 
-	return &verifiedCredential{ak: hdr.AK, secret: secret, mesh: accesskey.ParseMesh(hdr.AK), entryID: entryID}, true
+	return &verifiedCredential{ak: hdr.AK, secret: entry.SK, mesh: accesskey.ParseMesh(hdr.AK), entryID: hdr.EntryID}, true
+}
+
+// srvPathIsRenew 判断路径是否为「目标 AK 的自 renew 端点」。
+func srvPathIsRenew(path, ak string) bool {
+	return path == "/api/credentials/"+ak+"/renew"
 }
 
 // isLoopbackRemote 判断请求来源是否为 loopback（127.0.0.1 / ::1 / localhost）。

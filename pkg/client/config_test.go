@@ -20,6 +20,8 @@ import (
 const (
 	testTunnelAK = "ak-test-1234567890abcdef1234567890abcdef"
 	testTunnelSK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	// testTunnelAKID 是 v2 skey-id 必传的确定性条目 ID（隧道/上传等需要 skey 签名的测试用）。
+	testTunnelAKID = "skey-test-tunnel-ak"
 )
 
 // mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。

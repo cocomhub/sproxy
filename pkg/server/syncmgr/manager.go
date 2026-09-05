@@ -114,6 +114,7 @@ type RemoteConfig struct {
 	URL             string // http(s)://host:port
 	AccessKey       string
 	AccessKeySecret string
+	AccessKeyID     string // SproxySig SK 条目 ID（skey-id，v2 必传）
 }
 
 // Manager 管理同步任务生命周期（照搬 CloudDownloadManager 模式）。

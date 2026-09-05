@@ -17,16 +17,19 @@
 //	AK = ak[-<mesh>]-<32hex>       （标准）：ak- 前缀 + 可选 mesh（可含连字符）+ 32 hex 随机段 = 16 字节 = 2^128 熵
 //	AK = ak[-<mesh>]-<16hex>       （legacy 兼容）：16 hex 随机段 = 8 字节 = 2^64 熵（旧 8B AK，仅解析层向后兼容）
 //	SK = <64hex>                   （恒 64 hex = 32 字节 = AES-256 密钥长度）
+//	SK 条目 ID（skeyID）= skey-<12hex>（SK 条目唯一 ID；前缀 skey- 与 AK 的 ak- 对称）
 //
 // 规则：
 //   - 前缀白名单：AccessKeyPrefix = "ak-" 是唯一允许前缀；往后如需引入新类型
 //     （如 hub-/relay-/totp-/api-）只改动 AllowedAKPrefixes 白名单，解析逻辑不变。
 //   - 随机段：标准恒 32 hex（AccessKeyHexLen*2 字符）；解析层同时接受 legacy 16 hex。
 //   - mesh 段只允许 [0-9A-Za-z_-] 字符，可含连字符，可为空。
+//   - SK 条目 ID（skeyID）前缀固定 "skey-"（SkeyIDPrefix），随机段 12 hex（6 字节）；
+//     用于 v2 签名协议 skey-id= 段（服务端 (ak, skeyID) 精确定位条目，无试签回退）。
 //
 // 2026-09-05 破坏性变更（alpha 阶段，无历史兼容）：AK 前缀由 "sk-" 统一改为 "ak-"，
-// 与 SK 条目 ID / EntryID 的 "sk-" 前缀区分开（AK 是公开标识，EntryID 是私密 SK
-// 条目标识）。存量 "sk-" AK 一律不再识别（ParseMesh/IsValidAK 返回空/false）。
+// SK 条目 ID / EntryID 前缀由 "sk-" 改为 "skey-"（与 AK 的 "ak-" 对称，SK 条目 ID
+// 是私密条目标识）。存量 "sk-" AK / "sk-" 条目 ID 一律不再识别/生成。
 //
 // 生成（GeneratePair）一律产 32hex(16B) 标准形态；解析
 // （ParseMesh / pkg/tunnel.AccessKeyMesh / IsValidAK）接受标准与 legacy 双兼容，
@@ -91,7 +94,7 @@ type Meta struct {
 
 // SKEntry 是单个 SK 凭据条目。
 type SKEntry struct {
-	// ID 唯一 ID，形如 sk-<12hex>（创建时由 newEntryID 生成）。
+	// ID 唯一 ID，形如 skey-<12hex>（创建时由 newEntryID 生成）。
 	ID string
 	// SK 32 字节 AES-256 密钥字节。
 	SK []byte
@@ -125,6 +128,11 @@ type Key struct {
 // EntryIDLen 是 SKEntry.ID 中 hex 段长度（12 hex = 6 字节随机，共 6B 熵）。
 const EntryIDLen = 12
 
+// SkeyIDPrefix 是 SK 条目 ID（skeyID）的固定前缀（"skey-"），与 AK 的 "ak-" 前缀对称。
+// v2 签名协议 skey-id= 段携带的 skeyID 均以此开头；生成（GenerateID / newEntryID）与
+// 展示均使用本常量，避免字面量漂移。
+const SkeyIDPrefix = "skey-"
+
 // KeyPair 是一对静态凭据（AK + 64-hex SK hex 字符串），用于从静态名单装配 Ring。
 // 不依赖任何上层包（hub/server），凭据域自包含。SK 必须是 32 字节（64 hex）。
 type KeyPair struct {
@@ -144,13 +152,14 @@ const AccessKeyHexLen = 16
 const AccessKeyHexLegacy = 8
 
 // AccessKeyPrefix 是 AK 的唯一类型前缀（标准 AK 一律以它开头）。统一为 "ak-"：
-// 与 SK 条目 ID / EntryID 的 "sk-" 前缀区分（AK 公开标识 vs 私密 SK 条目；详见 GenerateID）。
+// 与 SK 条目 ID / EntryID 的 "skey-" 前缀区分（AK 公开标识 vs 私密 SK 条目；详见 GenerateID）。
 //
 // 这是 4B 类型前缀扩展点：将来如需引入新 AK 类型（如 hub-/relay-/totp-/api-），
 // 只需在此追加新前缀常量并把其加入 AllowedAKPrefixes 白名单，解析逻辑（ParseMesh /
 // IsValidAK）不需要改动（它们只认白名单，回溯到本常量数组）。
 //
 // 2026-09-05 破坏性变更（alpha）：由 "sk-" 改为 "ak-"（user 裁定统统一 ak，无历史兼容）。
+// SK 条目 ID 前缀改 "skey-"（SkeyIDPrefix），与 AK 前缀对称（见该常量）。
 const AccessKeyPrefix = "ak-"
 
 // AllowedAKPrefixes 是允许的 AK 类型前缀白名单（当前唯一允许 ak-）。
@@ -203,7 +212,7 @@ func RandomHexHex(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// GenerateID 生成 sk-<12hex> 的随机凭据 ID 段（等价 newEntryID 的导出入口；ext 子模块
+// GenerateID 生成 skey-<12hex> 的随机凭据 ID 段（等价 newEntryID 的导出入口；ext 子模块
 // 可经此获得权威 ID 段，无需自行内联生成）。
 func GenerateID(r io.Reader) (string, error) {
 	if r == nil {
@@ -213,7 +222,7 @@ func GenerateID(r io.Reader) (string, error) {
 	if _, err := io.ReadFull(r, b); err != nil {
 		return "", fmt.Errorf("accesskey: generate id: %w", err)
 	}
-	return "sk-" + hex.EncodeToString(b), nil
+	return SkeyIDPrefix + hex.EncodeToString(b), nil
 }
 
 // GeneratePairLegacy 生成 legacy（旧 8B）形态的 AK 对：ak[-<mesh>]-<16hex>（随机段
@@ -249,7 +258,7 @@ func isHexChar(c byte) bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
-// newEntryID 生成 sk-<12hex> 的唯一条目 ID（6 字节 crypto/rand 熵）。
+// newEntryID 生成 skey-<12hex> 的唯一条目 ID（6 字节 crypto/rand 熵）。
 // crypto/rand 失败返回包装错误（调用方据此拒绝写入，不再复用其他哨兵）。
 func newEntryID() (string, error) {
 	id, err := GenerateID(nil)

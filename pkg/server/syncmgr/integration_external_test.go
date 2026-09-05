@@ -121,7 +121,8 @@ func readLocalFile(t *testing.T, dir, rel string) string {
 }
 
 func remoteConfig(srvURL string) syncmgr.RemoteConfig {
-	return syncmgr.RemoteConfig{Name: "r1", URL: srvURL, AccessKey: "test-ak", AccessKeySecret: strings.Repeat("a", 64)}
+	return syncmgr.RemoteConfig{Name: "r1", URL: srvURL, AccessKey: "test-ak", AccessKeySecret: strings.Repeat("a", 64),
+		AccessKeyID: "skey-test-remote"}
 }
 
 func waitForStatus(t *testing.T, mgr *syncmgr.Manager, id, want string, timeout time.Duration) *syncmgr.SyncTask {

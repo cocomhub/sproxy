@@ -626,7 +626,7 @@ func TestListHubNodes(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nodes, err := ListHubNodes(context.Background(), ts.URL, "test-ak", "test-sk", false)
+	nodes, err := ListHubNodes(context.Background(), ts.URL, "test-ak", "test-sk", "skey-test-ak", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,7 +646,7 @@ func TestListHubNodes(t *testing.T) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}))
 	defer ts401.Close()
-	_, err = ListHubNodes(context.Background(), ts401.URL, "test-ak", "test-sk", false)
+	_, err = ListHubNodes(context.Background(), ts401.URL, "test-ak", "test-sk", "skey-test-ak", false)
 	var herr *hubAPIError
 	if !errors.As(err, &herr) || herr.code != http.StatusUnauthorized {
 		t.Fatalf("期望 hubAPIError 401, got %v", err)
@@ -661,7 +661,7 @@ func TestListHubNodes_VirtualIP(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nodes, err := ListHubNodes(context.Background(), ts.URL, "", "", false)
+	nodes, err := ListHubNodes(context.Background(), ts.URL, "", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

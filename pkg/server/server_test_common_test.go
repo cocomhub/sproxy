@@ -50,12 +50,17 @@ func withHeader(r *http.Request, key, value string) *http.Request {
 }
 
 // testCredPair 是测试凭据的 AK/SK 对（SK 为 64-hex 表示）。
+// 可选 skeyID 字段：缺省用 testEntryID(ak) 确定性生成（与 signRequest 精确匹配）。
 type testCredPair struct {
 	ak, sk string
+	// skeyID 显式指定条目 ID（与 ring 注入条目一致；缺省 testEntryID(ak)）。
+	skeyID string
 }
 
 // ringForTestCreds 构造含给定 AK/SK 对（每对一条 plain alive 条目）的 Ring。
 // 无参数时回落默认 testAccessKey/testAccessSecret 单对（与 withTestCreds 一致）。
+// 条目 ID 用 testEntryID(ak) 确定性生成（与 signRequest/signTunnelRequest 精确匹配，
+// 保证 v2 必传 skey-id 的测试签名能被服务端 (ak, skeyID) 定位）。
 func ringForTestCreds(creds ...testCredPair) *accesskey.Ring {
 	if len(creds) == 0 {
 		creds = []testCredPair{{ak: testAccessKey, sk: testAccessSecret}}
@@ -66,8 +71,12 @@ func ringForTestCreds(creds ...testCredPair) *accesskey.Ring {
 		if err != nil || len(sk) != 32 {
 			continue
 		}
+		id := c.skeyID
+		if id == "" {
+			id = testEntryID(c.ak)
+		}
 		_ = ring.UpsertAK(c.ak, "test")
-		_, _ = ring.AddKey(c.ak, sk, accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
+		_, _ = ring.AddKey(c.ak, sk, accesskey.WithID(id), accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
 	}
 	return ring
 }

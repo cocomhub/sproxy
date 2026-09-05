@@ -80,17 +80,35 @@ func writeUploadFile(t *testing.T, cfgPtr *atomic.Pointer[Config], name string, 
 	}
 }
 
-// signBodyRequest 给带 body 的请求打上合法 SproxySig 头（body_sha256 预计算）。
+// signBodyRequest 给带 body 的请求打上合法 SproxySig 头（body_sha256 预计算，v2 带 skey-id）。
 func signBodyRequest(r *http.Request, ak, sk string, body []byte) {
+	h := signHeader(ak, testEntryID(ak), r.Method, sk, r, sha256hex(body))
+	r.Header.Set("Authorization", formatSigAuth(h))
+}
+
+// signRequestEntry 使用显式 skeyID 的免 body 签名（renew 后新条目测试用）。
+func signRequestEntry(r *http.Request, ak, entryID, sk string) {
+	h := signHeader(ak, entryID, r.Method, sk, r, sproxysig.EmptyBodyHash())
+	r.Header.Set("Authorization", formatSigAuth(h))
+}
+
+// signBodyRequestEntry 使用显式 skeyID 的带 body 签名（renew 后新条目测试用）。
+func signBodyRequestEntry(r *http.Request, ak, entryID, sk string, body []byte) {
+	h := signHeader(ak, entryID, r.Method, sk, r, sha256hex(body))
+	r.Header.Set("Authorization", formatSigAuth(h))
+}
+
+// signHeader 构造带给定 entryID 的 v2 签名头（免/带 body 共用）。
+func signHeader(ak, entryID, method, sk string, r *http.Request, bodyHash string) sproxysig.Header {
 	now := time.Now()
 	h := sproxysig.Header{
-		Version: sproxysig.Version, AK: ak,
+		Version: sproxysig.Version, AK: ak, EntryID: entryID,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      testNonce(),
-		BodySHA256: sha256hex(body),
+		BodySHA256: bodyHash,
 	}
-	h.Sig = sproxysig.Sign(sk, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
-	r.Header.Set("Authorization", formatSigAuth(h))
+	h.Sig = sproxysig.Sign(sk, h, method, r.URL.EscapedPath(), r.URL.RawQuery)
+	return h
 }
 
 // uploadFileSigned 带 SproxySig 签名上传一个文件（multipart），返回状态码。

@@ -44,6 +44,7 @@ func newSyncTestEnv(t *testing.T, remoteURL string, modifyCfg func(*Config)) (h 
 	h = RegisterRoutes(t.Context(), opts)
 	remotes := []syncmgr.RemoteConfig{{
 		Name: "r1", URL: remoteURL, AccessKey: "test-ak", AccessKeySecret: strings.Repeat("a", 64),
+		AccessKeyID: testEntryID("test-ak"),
 	}}
 	exec := syncexec.NewExecutor(h.syncTenantRoot, h.logger)
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())

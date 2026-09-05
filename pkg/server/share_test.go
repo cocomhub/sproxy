@@ -558,7 +558,7 @@ func signRequestNonce(r *http.Request, ak, sk string) {
 	nb := make([]byte, 12)
 	_, _ = rand.Read(nb)
 	h := sproxysig.Header{
-		Version: sproxysig.Version, AK: ak,
+		Version: sproxysig.Version, AK: ak, EntryID: testEntryID(ak),
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      hex.EncodeToString(nb),
 		BodySHA256: sproxysig.EmptyBodyHash(),

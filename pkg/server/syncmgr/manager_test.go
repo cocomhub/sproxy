@@ -17,7 +17,8 @@ import (
 
 // testRemote 构造一个带假凭据的 RemoteConfig（mock 执行器不真正访问网络）。
 func testRemote(name, url string) RemoteConfig {
-	return RemoteConfig{Name: name, URL: url, AccessKey: "test-ak", AccessKeySecret: strings.Repeat("a", 64)}
+	return RemoteConfig{Name: name, URL: url, AccessKey: "test-ak", AccessKeySecret: strings.Repeat("a", 64),
+		AccessKeyID: "skey-test-remote"}
 }
 
 // completedResult 返回一个"完成"的 RunResult（1 文件 5 字节）。

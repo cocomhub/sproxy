@@ -113,9 +113,9 @@ func TestWithTunnel_InvalidKey(t *testing.T) {
 	}
 }
 
-// TestTunnelSigRoundTripper_CarriesEntryID 锁定 sigRoundTripper 的 entryID 接线：
-// 外层 /tunnel 请求必须携带配置的 sk=<entryID>（而非仅试签），否则 renew 后主路径
-// 带 entryID 而隧道外层路径不带会导致服务端对命中条目不可预测（断盲盒）。
+// TestTunnelSigRoundTripper_CarriesEntryID 锁定 sigRoundTripper 的 skeyID 接线：
+// 外层 /tunnel 请求必须携带配置的 skey-id=<skeyID>（v2 必传，服务端 (ak, skeyID)
+// 精确定位，无试签回退）。
 // 凭据从持有者 FileClient 实时读取（WithTunnel 后 WithAccessKeyID 也生效）。
 func TestTunnelSigRoundTripper_CarriesEntryID(t *testing.T) {
 	// 记录服务端收到的 Authorization 并返回隧道帧（mock serve 足够让外层签名被触发）。
@@ -127,7 +127,7 @@ func TestTunnelSigRoundTripper_CarriesEntryID(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	entryID := "sk-abcdef012345"
+	entryID := "skey-abcdef012345"
 	c := NewFileClient(ts.URL)
 	// 构造顺序模拟真实工厂：先 WithTunnel（此时尚无 access_key_id），再 WithAccessKeyID。
 	WithTunnel(testTunnelAK, validKey64(t))(c)
@@ -146,20 +146,20 @@ func TestTunnelSigRoundTripper_CarriesEntryID(t *testing.T) {
 	if !strings.Contains(gotAuth, "v=2 ak="+testTunnelAK) {
 		t.Fatalf("Authorization 应含 v=2 ak，got: %s", gotAuth)
 	}
-	if !strings.Contains(gotAuth, " sk="+entryID+" ") {
-		t.Fatalf("Authorization 应携带 sk=<entryID>（精确匹配条目），got: %s", gotAuth)
+	if !strings.Contains(gotAuth, " skey-id="+entryID+" ") {
+		t.Fatalf("Authorization 应携带 skey-id=<skeyID>（v2 必传，精确匹配条目），got: %s", gotAuth)
 	}
-	// canonical 复算：带 entryID 段签名应可被服务端 Verify（对齐 SignAndFormat 渲染）。
+	// canonical 复算：带 skeyID 段签名应可被服务端 Verify（对齐 SignAndFormat 渲染）。
 	parsed, err := sproxysig.ParseHeader(gotAuth)
 	if err != nil {
 		t.Fatalf("ParseHeader: %v", err)
 	}
 	if parsed.EntryID != entryID {
-		t.Fatalf("解析 entryID = %q, want %q", parsed.EntryID, entryID)
+		t.Fatalf("解析 skeyID = %q, want %q", parsed.EntryID, entryID)
 	}
 	// 用有效 SK 校验签名（隧道外层 body_sha256=UNSIGNED；时间窗口内 now 取请求构造时刻）。
 	if err := sproxysig.Verify(validKey64(t), parsed, http.MethodPost, "/tunnel", "", time.Now(), 0, 0, nil); err != nil {
-		t.Fatalf("带 entryID 的外层签名 Verify 失败: %v", err)
+		t.Fatalf("带 skeyID 的外层签名 Verify 失败: %v", err)
 	}
 }
 

@@ -55,7 +55,7 @@ type RenewResult struct {
 	AK string
 	// NewSecret 新 SK 的 32B 字节（hex 编码后即 access_key_secret 配置值）。
 	NewSecret []byte
-	// SKID 新 SK 条目的 ID（sk-<12hex>），应回填 access_key_id 配置。
+	// SKID 新 SK 条目的 ID（skey-<12hex>），应回填 access_key_id 配置。
 	SKID string
 	// ExpiresAt 新 SK 的有效期（服务端 TTL 控制，zero 表示永久）。
 	ExpiresAt time.Time
@@ -105,14 +105,17 @@ type AKSummary struct {
 var ErrNoCredentials = errors.New("未配置 access_key_secret（SproxySig 凭据）")
 
 // RenewAccessKey 轮换当前 AK 的 SK：用当前本端 SK 签名 POST /renew，用同一 SK 解开
-// 服务端包裹的新 SK，并把本端凭据切换为新 SK + 新 entryID（renew 后立即可用）。
+// 服务端包裹的新 SK，并把本端凭据切换为新 SK + 新 skeyID（renew 后立即可用）。
 //
 // 契约：
+//   - 本端尚无 skeyID（首次 renew / 引导）时允许缺 access_key_id 签名——v2 唯一允许
+//     缺 skey-id 的场景，服务端按「该 AK 唯一存活条目」定位（只验 AK+该条目）。
+//     renew 返回新 skeyID 后，后续所有签名请求要求配置 access_key_id。
 //   - wrap key = DeriveWrapKey(当前本端 SK, ak, "sproxy-credentials/v1[#mesh]")；
 //     与服务端 credentialWrapKey 同拼法（mesh 从 AK 派生）。解不开（GCM auth 失败 /
 //     kind 不符 / nonce/ciphertext 畸形）时返回错误，不误认成功。
 //   - 成功后本端 accessKeySecret / accessKeyID 立即回填为响应值（多 SK 共存：
-//     旧 SK 服务端仍可用，本端优先用新 SK 签名——服务端按 entryID 精确定位）。
+//     旧 SK 服务端仍可用，本端优先用新 SK 签名——服务端按 skeyID 精确定位）。
 func (c *FileClient) RenewAccessKey(ctx context.Context) (*RenewResult, error) {
 	if c.accessKey == "" || c.accessKeySecret == "" {
 		return nil, fmt.Errorf("%w: renew 需要 access_key 与 access_key_secret", ErrNoCredentials)
@@ -124,6 +127,12 @@ func (c *FileClient) RenewAccessKey(ctx context.Context) (*RenewResult, error) {
 	}
 	ak := c.accessKey
 	urlPath := "/api/credentials/" + ak + "/renew"
+	// renew 引导例外：本端尚无 skeyID 时允许缺段（首次 renew 拿 scID 的入口）。
+	hadID := c.accessKeyID != ""
+	if !hadID {
+		c.allowMissingEntryID = true
+		defer func() { c.allowMissingEntryID = false }()
+	}
 	var resp renewCredentialResponse
 	if err := c.doJSON(ctx, http.MethodPost, urlPath, struct{}{}, &resp); err != nil {
 		return nil, fmt.Errorf("renew 失败: %w", err)

@@ -22,6 +22,10 @@ import (
 
 // ---- test helpers（mock 服务端 + wrap 信封构造）----
 
+// testClientEntryID 是 pkg/client 测试用的确定性 skeyID（v2 必传）。mock 服务端不查
+// ring（无真实 ring），只验证签名 over 收到的 header，故任意 skey-<...> 值即可。
+const testClientEntryID = "skey-abcdefabcdef"
+
 // randSKBytes 生成 32B 随机 SK（测试用）。
 func randSKBytes(t *testing.T) []byte {
 	t.Helper()
@@ -59,8 +63,8 @@ func testWrapEnvelope(t *testing.T, wrapSK []byte, ak string, secret []byte) *ac
 }
 
 // verifySignedRequest 用 skHex 校验请求的 SproxySig 头（真实签名路径——客户端
-// signRequest 必须以 v2 canonical + 可选 entryID 构造，服务端 Verify 要能通过）。
-// 返回解析出的 Header 供 entryID 断言。
+// signRequest 必须以 v2 canonical + skey-id 构造，服务端 Verify 要能通过）。
+// 返回解析出的 Header 供 skeyID 断言。
 func verifySignedRequest(t *testing.T, r *http.Request, skHex string) sproxysig.Header {
 	t.Helper()
 	hdr, err := sproxysig.ParseHeader(r.Header.Get("Authorization"))
@@ -69,6 +73,20 @@ func verifySignedRequest(t *testing.T, r *http.Request, skHex string) sproxysig.
 	}
 	if err := sproxysig.Verify(skHex, hdr, r.Method, r.URL.EscapedPath(), r.URL.RawQuery, time.Now(), 0, 0, nil); err != nil {
 		t.Fatalf("Verify 失败（客户端签名未被 mock 服务端接受）: %v", err)
+	}
+	return hdr
+}
+
+// verifySignedRequestAllowMissing 用 skHex 校验请求签名（renew 引导例外——客户端首次
+// renew 尚无 skeyID，缺 skey-id 段也接受；Verify 对空 entryID 走空段，语义一致）。
+func verifySignedRequestAllowMissing(t *testing.T, r *http.Request, skHex string) sproxysig.Header {
+	t.Helper()
+	hdr, err := sproxysig.ParseHeaderAllowMissingSkeyID(r.Header.Get("Authorization"))
+	if err != nil {
+		t.Fatalf("ParseHeaderAllowMissingSkeyID: %v", err)
+	}
+	if err := sproxysig.Verify(skHex, hdr, r.Method, r.URL.EscapedPath(), r.URL.RawQuery, time.Now(), 0, 0, nil); err != nil {
+		t.Fatalf("Verify 失败（renew 引导客户端签名未被 mock 服务端接受）: %v", err)
 	}
 	return hdr
 }
@@ -86,8 +104,8 @@ func decodeBody(t *testing.T, r *http.Request, v any) {
 func TestFileClient_RenewAccessKey(t *testing.T) {
 	const (
 		ak      = "ak-0123456789abcdef"
-		entryID = "sk-abcdefabcdef"
-		newID   = "sk-1234567890ab"
+		entryID = "skey-abcdefabcdef"
+		newID   = "skey-1234567890ab"
 	)
 	oldSK := randSKBytes(t)
 	oldSKHex := hex.EncodeToString(oldSK)
@@ -131,11 +149,11 @@ func TestFileClient_RenewAccessKey(t *testing.T) {
 	if res.AK != ak {
 		t.Errorf("AK = %q, want %q", res.AK, ak)
 	}
-	// 签名头携带了 entryID（v2 精确取条目）。
+	// 签名头携带了 skeyID（v2 精确取条目）。
 	if gotEntryID != entryID {
-		t.Errorf("请求 entryID = %q, want %q", gotEntryID, entryID)
+		t.Errorf("请求 skeyID = %q, want %q", gotEntryID, entryID)
 	}
-	// 回填：本端凭据已切换为新 SK + 新 entryID（新 SK 立即可用）。
+	// 回填：本端凭据已切换为新 SK + 新 skeyID（新 SK 立即可用）。
 	if svc.AccessKeySecret() != hex.EncodeToString(newSK) {
 		t.Errorf("AccessKeySecret 未回填: got %q want %q", svc.AccessKeySecret(), hex.EncodeToString(newSK))
 	}
@@ -159,12 +177,57 @@ func TestFileClient_RenewAccessKey(t *testing.T) {
 	}
 }
 
+// TestFileClient_RenewAccessKey_BootstrapNoSkeyID：renew 引导例外——本端尚无
+// access_key_id（首次 renew）时允许缺 skeyID 签名（v2 唯一例外；服务端按唯一存活
+// 条目定位）。renew 返回 skeyID 后立即可用。
+func TestFileClient_RenewAccessKey_BootstrapNoSkeyID(t *testing.T) {
+	const (
+		ak    = "ak-0123456789abcdef"
+		newID = "skey-1234567890ab"
+	)
+	oldSK := randSKBytes(t)
+	oldSKHex := hex.EncodeToString(oldSK)
+	newSK := randSKBytes(t)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/credentials/"+ak+"/renew", func(w http.ResponseWriter, r *http.Request) {
+		hdr := verifySignedRequestAllowMissing(t, r, oldSKHex)
+		if hdr.EntryID != "" {
+			t.Errorf("renew 引导请求不应带 skey-id, got %q", hdr.EntryID)
+		}
+		env := testWrapEnvelope(t, oldSK, ak, newSK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ak":             ak,
+			"sk_id":          newID,
+			"kind":           "secret_wrap",
+			"wrap_key_ak":    ak,
+			"expires_at":     time.Now().Add(time.Hour).Format(time.RFC3339),
+			"wrapped_secret": env,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// 未配置 access_key_id（首次 renew 引导）。
+	svc := NewFileClient(srv.URL, WithAccessKey(ak, oldSKHex))
+	res, err := svc.RenewAccessKey(context.Background())
+	if err != nil {
+		t.Fatalf("RenewAccessKey（引导）: %v", err)
+	}
+	if res.SKID != newID {
+		t.Errorf("SKID = %q, want %q", res.SKID, newID)
+	}
+	if svc.AccessKeyID() != newID {
+		t.Errorf("AccessKeyID 未回填: got %q want %q", svc.AccessKeyID(), newID)
+	}
+}
+
 func TestFileClient_RenewAccessKey_MeshContext(t *testing.T) {
 	// mesh 非空：服务端 wrap context 追加 #<mesh>，客户端必须同拼法才能解开。
 	const (
 		ak      = "ak-meshA-0123456789abcdef"
-		entryID = "sk-abcdefabcdef"
-		newID   = "sk-1234567890ab"
+		entryID = "skey-abcdefabcdef"
+		newID   = "skey-1234567890ab"
 	)
 	oldSK := randSKBytes(t)
 	oldSKHex := hex.EncodeToString(oldSK)
@@ -209,11 +272,12 @@ func TestFileClient_RenewAccessKey_DecryptMismatch(t *testing.T) {
 	wrongSK := randSKBytes(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/credentials/"+ak+"/renew", func(w http.ResponseWriter, r *http.Request) {
-		verifySignedRequest(t, r, hex.EncodeToString(oldSK))
+		// 客户端未配置 access_key_id（renew 引导例外）→ 用宽松解析。
+		verifySignedRequestAllowMissing(t, r, hex.EncodeToString(oldSK))
 		env := testWrapEnvelope(t, wrongSK, ak, randSKBytes(t))
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ak":             ak,
-			"sk_id":          "sk-1234567890ab",
+			"sk_id":          "skey-1234567890ab",
 			"kind":           "secret_wrap",
 			"wrap_key_ak":    ak,
 			"expires_at":     time.Now().Add(time.Hour).Format(time.RFC3339),
@@ -223,6 +287,7 @@ func TestFileClient_RenewAccessKey_DecryptMismatch(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
+	// 未配置 access_key_id 也允许（renew 引导例外）——签名缺段由引导路径放行。
 	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(oldSK)))
 	if _, err := svc.RenewAccessKey(context.Background()); err == nil {
 		t.Error("expected error when wrapped_secret 无法用本端 SK 解开")
@@ -249,12 +314,12 @@ func TestFileClient_ListAccessKeys(t *testing.T) {
 			"ak": ak,
 			"sk": []map[string]any{
 				{
-					"sk_id": "sk-aaaaaaaaaaaa", "created": time.Now().Add(-time.Hour).Format(time.RFC3339),
+					"sk_id": "skey-aaaaaaaaaaaa", "created": time.Now().Add(-time.Hour).Format(time.RFC3339),
 					"expires": time.Now().Add(time.Hour).Format(time.RFC3339), "status": "active",
 					"meta_type": "renew", "wrapped_secret": envA,
 				},
 				{
-					"sk_id": "sk-bbbbbbbbbbbb", "created": time.Now().Add(-2 * time.Hour).Format(time.RFC3339),
+					"sk_id": "skey-bbbbbbbbbbbb", "created": time.Now().Add(-2 * time.Hour).Format(time.RFC3339),
 					"expires": time.Now().Add(2 * time.Hour).Format(time.RFC3339), "status": "active",
 					"meta_type": "initial", "wrapped_secret": envB,
 				},
@@ -266,7 +331,7 @@ func TestFileClient_ListAccessKeys(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	svc := NewFileClient(srv.URL, WithAccessKey(ak, mySKHex))
+	svc := NewFileClient(srv.URL, WithAccessKey(ak, mySKHex), WithAccessKeyID(testClientEntryID))
 	infos, err := svc.ListAccessKeys(context.Background(), ak)
 	if err != nil {
 		t.Fatalf("ListAccessKeys: %v", err)
@@ -288,7 +353,7 @@ func TestFileClient_ListAccessKeys(t *testing.T) {
 func TestFileClient_DeleteSK(t *testing.T) {
 	const (
 		ak   = "ak-0123456789abcdef"
-		skID = "sk-aaaaaaaaaaaa"
+		skID = "skey-aaaaaaaaaaaa"
 	)
 	var gotMethod, gotPath string
 	mux := http.NewServeMux()
@@ -299,7 +364,7 @@ func TestFileClient_DeleteSK(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))))
+	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))), WithAccessKeyID(testClientEntryID))
 	if err := svc.DeleteSK(context.Background(), ak, skID); err != nil {
 		t.Fatalf("DeleteSK: %v", err)
 	}
@@ -311,7 +376,7 @@ func TestFileClient_DeleteSK(t *testing.T) {
 func TestFileClient_ExpireSK(t *testing.T) {
 	const (
 		ak   = "ak-0123456789abcdef"
-		skID = "sk-aaaaaaaaaaaa"
+		skID = "skey-aaaaaaaaaaaa"
 	)
 	until := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	var gotBody struct {
@@ -325,7 +390,7 @@ func TestFileClient_ExpireSK(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))))
+	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))), WithAccessKeyID(testClientEntryID))
 	if err := svc.ExpireSK(context.Background(), ak, skID, until); err != nil {
 		t.Fatalf("ExpireSK: %v", err)
 	}
@@ -356,12 +421,12 @@ func TestFileClient_AddAK(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/credentials", func(w http.ResponseWriter, r *http.Request) {
 		decodeBody(t, r, &gotBody)
-		_ = json.NewEncoder(w).Encode(map[string]any{"ak": ak, "sk_id": "sk-aaaaaaaaaaaa"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ak": ak, "sk_id": "skey-aaaaaaaaaaaa"})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))))
+	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))), WithAccessKeyID(testClientEntryID))
 	res, err := svc.AddAK(context.Background(), ak, owner, secret)
 	if err != nil {
 		t.Fatalf("AddAK: %v", err)
@@ -369,7 +434,7 @@ func TestFileClient_AddAK(t *testing.T) {
 	if gotBody.AK != ak || gotBody.Owner != owner || gotBody.Secret != secret {
 		t.Errorf("request body = %+v, want ak=%q owner=%q secret set", gotBody, ak, owner)
 	}
-	if res.SKID != "sk-aaaaaaaaaaaa" {
+	if res.SKID != "skey-aaaaaaaaaaaa" {
 		t.Errorf("AddAKResult.SKID = %q", res.SKID)
 	}
 }
@@ -388,7 +453,7 @@ func TestFileClient_DeleteAK(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))))
+	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))), WithAccessKeyID(testClientEntryID))
 	if err := svc.DeleteAK(context.Background(), ak, true); err != nil {
 		t.Fatalf("DeleteAK: %v", err)
 	}
@@ -421,7 +486,7 @@ func TestFileClient_ListAKs(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))))
+	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))), WithAccessKeyID(testClientEntryID))
 	sums, err := svc.ListAKs(context.Background())
 	if err != nil {
 		t.Fatalf("ListAKs: %v", err)
