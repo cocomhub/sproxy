@@ -708,7 +708,8 @@ func TestE2E_CloudDownloadChain(t *testing.T) {
 
 	fc := client.NewFileClient(baseURL,
 		client.WithCacheDir(t.TempDir()),
-		client.WithAccessKey(e2eTestAK, e2eTestSK))
+		client.WithAccessKey(e2eTestAK, e2eTestSK),
+		client.WithAccessKeyID(e2eTestID))
 
 	// 创建一个测试 HTTP 服务器提供下载文件，并返回 Last-Modified 头
 	fileContent := []byte("test file content for cloud download chain e2e")
@@ -804,6 +805,7 @@ func TestE2E_TunnelEncryption(t *testing.T) {
 
 	fc := client.NewFileClient(baseURL,
 		client.WithTunnel(e2eTestAK, key),
+		client.WithAccessKeyID(e2eTestID),
 	)
 
 	content := []byte("tunnel encrypted test content")

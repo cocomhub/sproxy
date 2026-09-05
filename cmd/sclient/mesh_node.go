@@ -89,13 +89,16 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 					hubURL = cfg.ServerURL
 				}
 			}
-			// SproxySig 认证 AccessKey/SK 从根 --access-key/--access-key-secret 或配置派生
-			// （信令/节点列表/网关/hub 注册准入均走签名，Secret 永不上线）。hub 注册
-			// 准入由 AutoRegister 用 SK 计算 HMAC proof（绑定 nodeID），无需共享 token。
+			// SproxySig 认证 AccessKey/SK/ID 从根 --access-key/--access-key-secret/--access-key-id
+			// 或配置派生（信令/节点列表/网关/hub 注册准入均走签名，Secret 永不上线；v2
+			// skey-id 必传——信令签名须带 access_key_id，否则 hub 验签 401 触发节点断连重连）。
+			// hub 注册准入由 AutoRegister 用 SK 计算 HMAC proof（绑定 nodeID），无需共享 token。
 			accessKeyFlag, _ := cmd.Flags().GetString("access-key")
 			accessKeySecretFlag, _ := cmd.Flags().GetString("access-key-secret")
+			accessKeyIDFlag, _ := cmd.Flags().GetString("access-key-id")
 			accessKey := client.MeshAccessKey(accessKeyFlag, cfg.AccessKey)
 			accessKeySecret := client.MeshAccessKeySecret(accessKeySecretFlag, cfg.AccessKeySecret)
+			accessKeyID := client.MeshAccessKeyID(accessKeyIDFlag, cfg.AccessKeyID)
 			if nodeID == "" {
 				nodeID = cfg.NodeID
 			}
@@ -119,6 +122,7 @@ per-node secret），并行提供经 hub 的中继服务与 WebRTC 直连，mesh
 				NodeID:            nodeID,
 				AccessKey:         accessKey,
 				AccessKeySecret:   accessKeySecret,
+				AccessKeyID:       accessKeyID,
 				Services:          svcs,
 				ServiceAddrs:      addrs,
 				Tags:              tags,
