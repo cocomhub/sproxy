@@ -230,6 +230,8 @@ access_keys:
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start hub sproxy: %v", err)
 	}
+	// 失败时打印 hub stderr（中继/验签/转发错误的关键证据，S112 同模式）。
+	logStderrOnFailure(t, "hub sproxy", &stderrBuf)
 	baseURL := fmt.Sprintf("http://%s", addr)
 	cleanup := newKillWaitCleanup(cmd)
 

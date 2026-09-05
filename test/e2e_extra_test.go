@@ -273,8 +273,8 @@ func TestE2E_SclientCLI(t *testing.T) {
 		"X-File-Checksum": sha256hex([]byte("sclient e2e")),
 	})
 
-	// sclient list: use a temp config to avoid local tunnel interference
-	//（v2 skey-id 必传：config 必须带 access_key_id 精确匹配服务端 seed 条目。）
+	// sclient list: use a temp config to avoid local tunnel interference.
+	// （v2 skey-id 必传：config 必须带 access_key_id 精确匹配服务端 seed 条目。）
 	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
 	cfgContent := fmt.Sprintf("server_url: %s\naccess_key: %s\naccess_key_secret: %s\naccess_key_id: %s\n", baseURL, e2eTestAK, e2eTestSK, e2eTestID)
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {

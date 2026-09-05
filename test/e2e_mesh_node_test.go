@@ -52,6 +52,7 @@ func startSClientMeshNode(t *testing.T, hubURL, nodeID, serviceSpec, ak, sk stri
 	// logStderrOnFailure 在 cleanup 里读取，无锁并发访问会被 -race 标记竞争。
 	stderrBuf := newLockedBuffer()
 	cmd.Stderr = stderrBuf
+	cmd.Stdout = stderrBuf // 合并 stdout：slog/错误可能输出到 stdout（telemetry handler 重定向）
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sclient mesh node: %v", err)
 	}
@@ -59,8 +60,19 @@ func startSClientMeshNode(t *testing.T, hubURL, nodeID, serviceSpec, ak, sk stri
 	logStderrOnFailure(t, "sclient mesh node "+nodeID, stderrBuf)
 
 	// 等 mesh node 注册到 hub（waitNodeRegistered 轮询 /api/hub/nodes）。
-	waitNodeRegistered(t, hubURL, nodeID, ak, sk, stderrBuf, newKillWaitCleanup(cmd))
-	return newKillWaitCleanup(cmd)
+	kw := newKillWaitCleanup(cmd)
+	// 诊断：注册后进程若意外退出，数据面必然失败（hub 转发到死连接）。
+	t.Cleanup(func() {
+		if ps := cmd.ProcessState; ps != nil && ps.Exited() {
+			t.Logf("诊断: mesh node %s 已退出（exit=%v）; stderr:\n%s", nodeID, ps.ExitCode(), stderrBuf.String())
+		}
+	})
+	waitNodeRegistered(t, hubURL, nodeID, ak, sk, stderrBuf, kw)
+	// 注册后立即检查：若进程已自然退出（数据面 serve 崩溃），root cause 即此。
+	if ps := cmd.ProcessState; ps != nil && ps.Exited() {
+		t.Logf("诊断: mesh node %s 注册后立即退出（exit=%v）; stderr:\n%s", nodeID, ps.ExitCode(), stderrBuf.String())
+	}
+	return kw
 }
 
 // lockedBuffer 是带锁的 bytes.Buffer：子进程 stderr 由 os/exec 后台 goroutine
@@ -152,7 +164,7 @@ func TestE2E_MeshNode_RelayReachable(t *testing.T) {
 
 	// mesh node：单进程常驻，宣告 echo 服务 + 出口拨号放行。
 	// --discover=false：本测试只验证中继可达路径，隔离对 mesh connect 临时节点的空探测。
-	leafCleanup := startSClientMeshNode(t, hubURL, "e2e-mesh-node", "echo:"+echoAddr, ak, sk, "--discover=false")
+	leafCleanup := startSClientMeshNode(t, hubURL, "e2e-mesh-node", "echo:"+echoAddr, ak, sk, "--discover=false", "--dial-allow-cidr", "127.0.0.0/8")
 	defer leafCleanup()
 
 	// mesh connect 端口转发（--webrtc=false 走中继回落，确定性验证 mesh node 中继路径）。

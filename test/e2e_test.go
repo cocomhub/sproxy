@@ -41,9 +41,9 @@ import (
 // 一致保证隧道密钥派生一致）。e2eTestID 是条目 ID（skey-<12hex> 标准形态）——v2 协议
 // skey-id 强制必传，服务端 Ring 的 seed 条目与 sclient 签名的 skeyID 必须精确匹配。
 const (
-	e2eTestAK  = "ak-00000000000000000000000000000000"
-	e2eTestSK  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	e2eTestID  = "skey-000000000001"
+	e2eTestAK = "ak-00000000000000000000000000000000"
+	e2eTestSK = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	e2eTestID = "skey-000000000001"
 )
 
 // signingTransport 自动给每个请求加 SproxySig 签名头（body 预哈希后重放）。
