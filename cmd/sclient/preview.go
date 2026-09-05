@@ -44,13 +44,13 @@ func isTextExt(ext string) bool {
 	return false
 }
 
-func previewText(ios cli.IOStreams, serverURL, accessKey, accessKeySecret, filename string) error {
+func previewText(ios cli.IOStreams, serverURL, accessKey, accessKeySecret, accessKeyID, filename string) error {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
 		serverURL+"/download?filename="+url.QueryEscape(filename), nil)
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
-	sproxysig.SignRequest(req, accessKey, accessKeySecret)
+	sproxysig.SignRequestWithSkeyID(req, accessKey, accessKeyID, accessKeySecret)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -105,7 +105,7 @@ var openViewer = func(path string) error {
 	return cmd.Start()
 }
 
-func previewImage(ios cli.IOStreams, serverURL, accessKey, accessKeySecret, filename string) error {
+func previewImage(ios cli.IOStreams, serverURL, accessKey, accessKeySecret, accessKeyID, filename string) error {
 	tmpDir, err := os.MkdirTemp("", "sproxy-preview-*")
 	if err != nil {
 		return fmt.Errorf("创建临时目录失败: %w", err)
@@ -119,7 +119,7 @@ func previewImage(ios cli.IOStreams, serverURL, accessKey, accessKeySecret, file
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
-	sproxysig.SignRequest(req, accessKey, accessKeySecret)
+	sproxysig.SignRequestWithSkeyID(req, accessKey, accessKeyID, accessKeySecret)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -183,17 +183,17 @@ func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.S
 				return err
 			}
 
-			serverURL, accessKey, accessKeySecret := getCloudServerURL(cmd, cfgSvc)
+			serverURL, accessKey, accessKeySecret, accessKeyID := getCloudServerURL(cmd, cfgSvc)
 			if serverURL == "" {
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或配置 server_url")
 			}
 
 			ext := strings.ToLower(filepath.Ext(filename))
 			if isImageExt(ext) {
-				return previewImage(ios, serverURL, accessKey, accessKeySecret, filename)
+				return previewImage(ios, serverURL, accessKey, accessKeySecret, accessKeyID, filename)
 			}
 			if isTextExt(ext) {
-				return previewText(ios, serverURL, accessKey, accessKeySecret, filename)
+				return previewText(ios, serverURL, accessKey, accessKeySecret, accessKeyID, filename)
 			}
 			return fmt.Errorf("无法预览此文件类型: %s", ext)
 		},

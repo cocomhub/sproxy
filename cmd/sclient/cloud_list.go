@@ -17,18 +17,20 @@ type cloudTaskInfo = client.CloudTask
 
 // getCloudServerURL 从 flag 和配置中获取 server URL 与 SproxySig 认证 AccessKey/SK。
 // 被 cloud_cancel.go 和 preview.go 共享使用。
-func getCloudServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, accessKey, accessKeySecret string) {
+func getCloudServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, accessKey, accessKeySecret, accessKeyID string) {
 	serverURL, _ = cmd.Root().PersistentFlags().GetString("server")
 	if serverURL == "" && cfgSvc != nil {
 		if cfg, err := cfgSvc.LoadConfig(); err == nil {
 			serverURL = cfg.ServerURL
 			accessKey = cfg.AccessKey
 			accessKeySecret = cfg.AccessKeySecret
+			accessKeyID = cfg.AccessKeyID
 		}
 	}
 	if accessKeySecret == "" {
 		accessKey, _ = cmd.Root().PersistentFlags().GetString("access-key")
 		accessKeySecret, _ = cmd.Root().PersistentFlags().GetString("access-key-secret")
+		accessKeyID, _ = cmd.Root().PersistentFlags().GetString("access-key-id")
 	}
 	return
 }

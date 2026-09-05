@@ -274,8 +274,9 @@ func TestE2E_SclientCLI(t *testing.T) {
 	})
 
 	// sclient list: use a temp config to avoid local tunnel interference
+	//（v2 skey-id 必传：config 必须带 access_key_id 精确匹配服务端 seed 条目。）
 	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
-	cfgContent := fmt.Sprintf("server_url: %s\naccess_key: %s\naccess_key_secret: %s\n", baseURL, e2eTestAK, e2eTestSK)
+	cfgContent := fmt.Sprintf("server_url: %s\naccess_key: %s\naccess_key_secret: %s\naccess_key_id: %s\n", baseURL, e2eTestAK, e2eTestSK, e2eTestID)
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +498,7 @@ func TestE2E_SproxySigAuth(t *testing.T) {
 	// sclient list（SproxySig 签名）→ 退出码 0（未签名会 401 → 非零退出）。
 	// 服务端日志可确认 GET /api/files 被签名请求命中并返回 200。
 	bin := e2eBinPath(t, "cmd/sclient")
-	args := []string{"list", "--server", baseURL, "--access-key", ak, "--access-key-secret", sk}
+	args := []string{"list", "--server", baseURL, "--access-key", ak, "--access-key-secret", sk, "--access-key-id", e2eTestID}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = e2eModuleRoot()
 	var stdout, stderr bytes.Buffer

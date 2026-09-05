@@ -331,8 +331,8 @@ func TestE2E_XferTLS_SClientCLI(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(cliDir, "config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(cliDir, "cache"))
 	cfgPath := filepath.Join(cliDir, "sclient.yaml")
-	cfgContent := fmt.Sprintf("server_url: %s\naccess_key: %s\naccess_key_secret: %s\n",
-		env.baseURL, e2eTestAK, e2eTestSK)
+	cfgContent := fmt.Sprintf("server_url: %s\naccess_key: %s\naccess_key_secret: %s\naccess_key_id: %s\n",
+		env.baseURL, e2eTestAK, e2eTestSK, e2eTestID)
 	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0600); err != nil {
 		t.Fatal(err)
 	}

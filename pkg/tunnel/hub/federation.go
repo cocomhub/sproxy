@@ -271,17 +271,16 @@ func (fc *FederationClient) syncPeer(ctx context.Context, p FederationPeer) erro
 	if err != nil {
 		return fmt.Errorf("构造请求 %s: %w", endpoint, err)
 	}
-	// 认证：SproxySig AccessKey 签名（sk 为空时不签名——目标 hub 为无认证调试模式）。
-	// v2 协议 skey-id 必传：带 AccessKeyID 时用其签名；缺失时若配置了 SK 则报错
-	// （fail-closed），只有完全无凭据（sk 为空）才允许不签名。
-	if p.AccessKeySecret == "" {
-		sproxysig.SignRequest(req, p.AccessKey, p.AccessKeySecret)
-	} else {
+	// 认证：SproxySig AccessKey 签名（sk 为空时不签名——目标 hub 为无认证调试模式，
+	// 裸请求直接发出）。v2 协议 skey-id 必传：带 AccessKeyID 时用其签名；缺失时若
+	// 配置了 SK 则报错（fail-closed），只有完全无凭据（sk 为空）才允许不签名。
+	if p.AccessKeySecret != "" {
 		if p.AccessKeyID == "" {
 			return fmt.Errorf("peer %s 配置了 AccessKeySecret 但缺 AccessKeyID（v2 skey-id 必传）", p.ID)
 		}
 		sproxysig.SignRequestWithSkeyID(req, p.AccessKey, p.AccessKeyID, p.AccessKeySecret)
 	}
+	// 无凭据（sk 为空）：不设 Authorization，裸请求（无认证调试 hub）。
 
 	client := fc.clients[p.ID]
 	if client == nil {

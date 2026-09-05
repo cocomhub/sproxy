@@ -264,8 +264,8 @@ test('sig.signHeader 带 entryID：canonical 第 3 段为 entryID 且头部输�
     unsigned: true,
     entryID: ENTRY_ID,
   });
-  assert.ok(header.startsWith('SproxySig v=2 ak=' + HMAC_FIXTURE.ak + ' sk=' + ENTRY_ID), '头部应输出 sk=<entryID> 且紧接 ak 后: ' + header);
-  assert.ok(header.indexOf(' sk=sk-abcdef012345 ts=') >= 0, 'sk 段位置应在 ak 后、ts 前');
+  assert.ok(header.startsWith('SproxySig v=2 ak=' + HMAC_FIXTURE.ak + ' skey-id=' + ENTRY_ID), '头部应输出 sk=<entryID> 且紧接 ak 后: ' + header);
+  assert.ok(header.indexOf(' skey-id=sk-abcdef012345 ts=') >= 0, 'sk 段位置应在 ak 后、ts 前');
   assert.strictEqual(header.split(' sig=')[1], await cryptoLib.hmacSHA256Hex(BASE_SK, entryCanonical), '签名 canonical 必须含 entryID 段');
   // buildCanonical 独立复算一致
   assert.strictEqual(sig.buildCanonical('POST', '/tunnel', {
@@ -439,7 +439,7 @@ test('直连模式 coreRequest：配置 accessKeyID 时头部携带 sk=<entryID>
     const auth = requests[0].headers['Authorization'];
     assert.ok(auth, '直连请求必须携带 SproxySig 头');
     // sk=<entryID> 段插在 ak 之后、ts= 之前（对齐 Go SignAndFormat）。
-    assert.ok(auth.indexOf('ak=' + AK + ' sk=' + entryID + ' ts=') >= 0, 'sk=<entryID> 段缺失或位置错: ' + auth);
+    assert.ok(auth.indexOf('ak=' + AK + ' skey-id=' + entryID + ' ts=') >= 0, 'sk=<entryID> 段缺失或位置错: ' + auth);
     // canonical 复算：带上 entryID 段后签名与 Go 端一致（用独立复算辅助验证）。
     const parsed = auth.match(/ts=(\d+) exp=(\d+) nonce=([0-9a-f]+) body_sha256=([0-9a-f]+) sig=([0-9a-f]+)/);
     assert.ok(parsed, '头部字段结构异常: ' + auth);

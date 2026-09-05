@@ -295,11 +295,6 @@ func (h *Handlers) verifySproxySigFromRing(w http.ResponseWriter, r *http.Reques
 	return &verifiedCredential{ak: hdr.AK, secret: entry.SK, mesh: accesskey.ParseMesh(hdr.AK), entryID: hdr.EntryID}, true
 }
 
-// srvPathIsRenew 判断路径是否为「目标 AK 的自 renew 端点」。
-func srvPathIsRenew(path, ak string) bool {
-	return path == "/api/credentials/"+ak+"/renew"
-}
-
 // isLoopbackRemote 判断请求来源是否为 loopback（127.0.0.1 / ::1 / localhost）。
 // 供 allow_insecure_loopback 本地无认证调试兜底使用。
 func isLoopbackRemote(remoteAddr string) bool {

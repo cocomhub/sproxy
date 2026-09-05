@@ -37,10 +37,13 @@ import (
 
 // e2eTestAK / e2eTestSK 是 startSPROXY 配置的 SproxySig 测试凭据。
 // 认证驱动模式下全部 HTTP 面（除 healthz/version/ui//tunnel）必须验签；
-// 与 testutil.TestAccessKey/TestKey 一致，保证 sclient/FileClient 派生隧道密钥一致。
+// e2eTestAK / e2eTestSK / e2eTestID 是 E2E 确定性测试凭据（与 testutil.TestAccessKey
+// 一致保证隧道密钥派生一致）。e2eTestID 是条目 ID（skey-<12hex> 标准形态）——v2 协议
+// skey-id 强制必传，服务端 Ring 的 seed 条目与 sclient 签名的 skeyID 必须精确匹配。
 const (
-	e2eTestAK = "ak-00000000000000000000000000000000"
-	e2eTestSK = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	e2eTestAK  = "ak-00000000000000000000000000000000"
+	e2eTestSK  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	e2eTestID  = "skey-000000000001"
 )
 
 // signingTransport 自动给每个请求加 SproxySig 签名头（body 预哈希后重放）。
@@ -67,7 +70,7 @@ func (t *signingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	now := time.Now()
 	h := sproxysig.Header{
-		Version: sproxysig.Version, AK: e2eTestAK,
+		Version: sproxysig.Version, AK: e2eTestAK, EntryID: e2eTestID,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),
 		BodySHA256: bodyHash,
@@ -97,7 +100,7 @@ func seedCredentialStore(t *testing.T, storageRoot, ak, skHex string) {
 		Keys: []accesskey.Key{{
 			AK: ak, Owner: "test",
 			Entries: []accesskey.SKEntry{{
-				ID: "sk-000000000001", SK: sk, Kind: accesskey.KindPlain,
+				ID: e2eTestID, SK: sk, Kind: accesskey.KindPlain,
 				CreatedAt: time.Now().UTC().Truncate(time.Second),
 				Status:    accesskey.StatusActive,
 				Meta:      accesskey.Meta{Type: "initial"},

@@ -112,7 +112,7 @@
     const bodySha256 = unsigned ? UNSIGNED_BODY : await bodyHash(body);
     const canonical = buildCanonical(method, pathWithQuery, { ak, ts: now, exp, nonce, bodySha256, entryID });
     const sig = await cryptoLib.hmacSHA256Hex(secret, canonical);
-    const skPart = (entryID && String(entryID)) ? ' sk=' + String(entryID) : '';
+    const skPart = (entryID && String(entryID)) ? ' skey-id=' + String(entryID) : '';
     return SCHEME + ' v=' + VERSION + ' ak=' + ak + skPart + ' ts=' + now + ' exp=' + exp + ' nonce=' + nonce + ' body_sha256=' + bodySha256 + ' sig=' + sig;
   }
 

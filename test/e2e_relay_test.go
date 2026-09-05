@@ -89,15 +89,18 @@ func signedHubGET(baseURL, path, ak, sk string) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	sproxysig.SignRequest(req, ak, sk)
+	// v2 skey-id 必传：签名字段带 seed 条目的固定 ID（与 startHubSPROXY 的 seedCredentialStore 一致）。
+	sproxysig.SignRequestWithSkeyID(req, ak, e2eTestID, sk)
 	return e2eHTTPClient.Do(req)
 }
 
 // sproxySigHeader 构造 SproxySig Authorization 头值（带 body 哈希；原始 socket 请求用）。
+// v2 skey-id 必传：skeyID 用 e2eTestID（seed 条目的固定 ID——调用方 ak 都来自 startHubSPROXY
+// 的 seedCredentialStore，其条目 ID 即 e2eTestID）。
 func sproxySigHeader(ak, sk, method, path, query string, body []byte) string {
 	now := time.Now()
 	h := sproxysig.Header{
-		Version: sproxysig.Version, AK: ak,
+		Version: sproxysig.Version, AK: ak, EntryID: e2eTestID,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce: sproxysig.NewNonce(), BodySHA256: sproxysig.BodyHash(body),
 	}
@@ -276,6 +279,7 @@ func startSClientRelay(t *testing.T, hubURL, nodeID, ak, sk string) func() {
 		"--node-id", nodeID,
 		"--access-key", ak,
 		"--access-key-secret", sk,
+		"--access-key-id", e2eTestID,
 		"--dial-allow",                     // 允许叶子出站拨号（供 caller 经 /api/relay/stream 中继）
 		"--dial-allow-cidr", "127.0.0.0/8", // E2E 用回环 echo，放行回环网段
 	}
@@ -462,6 +466,7 @@ func startSClientRelayService(t *testing.T, hubURL, nodeID, serviceSpec, ak, sk 
 		"--node-id", nodeID,
 		"--access-key", ak,
 		"--access-key-secret", sk,
+		"--access-key-id", e2eTestID,
 		"--service", serviceSpec,
 		"--dial-allow",
 	}
@@ -508,6 +513,7 @@ func startSClientMeshConnect(t *testing.T, hubURL, service, ak, sk string, extra
 		"--listen", listenAddr,
 		"--access-key", ak,
 		"--access-key-secret", sk,
+		"--access-key-id", e2eTestID,
 		"--webrtc=false",
 	}
 	args = append(args, extraArgs...)
