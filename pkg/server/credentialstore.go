@@ -90,8 +90,8 @@ func (s *CredentialStore) Save(keys []accesskey.Key) error {
 }
 
 // newAnonymousKey 生成首启 anonymous 凭据的 AK/SK。
-// 逻辑与 cmd/sclient/access_key.go 的 generateAccessKeyPair("") 同款（机理复制，
-// 服务端不 import cmd/sclient 跨模块）：AK = sk-<16B hex>，SK = 32B 随机 hex。
+// 机理与 pkg/accesskey.GeneratePair（"") 同源（服务端不 import cmd/sclient 跨模块，
+// 此处内联等价实现）：AK = sk-<16B hex>，SK = 32B 随机 hex。
 func newAnonymousKey() (ak, sk string, err error) {
 	akBytes := make([]byte, 16)
 	if _, err := rand.Read(akBytes); err != nil {

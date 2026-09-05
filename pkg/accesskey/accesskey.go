@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -100,6 +101,51 @@ type Key struct {
 // EntryIDLen 是 SKEntry.ID 中 hex 段长度（12 hex = 6 字节随机，共 6B 熵）。
 const EntryIDLen = 12
 
+// KeyPair 是一对静态凭据（AK + 64-hex SK hex 字符串），用于从静态名单装配 Ring。
+// 不依赖任何上层包（hub/server），凭据域自包含。SK 必须是 32 字节（64 hex）。
+type KeyPair struct {
+	Key    string
+	Secret string // 64-hex SK（hex 编码的 32 字节）
+}
+
+// AccessKeyHexLen 是 AccessKey 字符串中 hex 随机段长度（16 hex = 8 字节随机）。
+const AccessKeyHexLen = 16
+
+// GeneratePair 生成一对 AccessKey/AccessKeySecret：
+//   - AccessKey（公开标识）= sk-<mesh>-<16B hex>（mesh 为空时 sk-<16B hex>）
+//   - AccessKeySecret（本地密钥）= 32B 随机 hex（64 hex chars）
+//
+// r 传 nil 时用 crypto/rand（生产路径）；测试可注入确定性 reader。与客户端
+// pkg/client 的 access_key/access_key_secret 配置及服务端 pkg/server 的 access_keys
+// 配置对应；sclient `trust ak add` 未显式指定 AK 时用本函数在本地生成一对
+// （原 cmd generateAccessKeyPair 删除后内联，唯一事实源）。
+func GeneratePair(r io.Reader, mesh string) (ak, sk string, err error) {
+	if r == nil {
+		r = rand.Reader
+	}
+	akBytes := make([]byte, AccessKeyHexLen/2) // 16 hex = 8 字节随机
+	if _, err := io.ReadFull(r, akBytes); err != nil {
+		return "", "", fmt.Errorf("accesskey: generate ak: %w", err)
+	}
+	skBytes := make([]byte, 32)
+	if _, err := io.ReadFull(r, skBytes); err != nil {
+		return "", "", fmt.Errorf("accesskey: generate sk: %w", err)
+	}
+	prefix := "sk"
+	if mesh != "" {
+		prefix += "-" + mesh
+	}
+	return prefix + "-" + hex.EncodeToString(akBytes), hex.EncodeToString(skBytes), nil
+}
+
+// WrapContextCredentials 是凭据信封加密的 wrap context 固定前缀（唯一事实源，M5）。
+//
+// 服务端（pkg/server.credentialWrapContext）与客户端（pkg/client.CredentialWrapContextPrefix）
+// 分别以别名引用本常量；任何一端改动必须全部同步，否则旧 SK 解不开服务端包裹的新 SK
+// （renew 全部失败）。实际派生用 `WrapContextCredentials + "#" + mesh`（mesh 为空保持
+// 无井号），使不同 mesh 派生不同信封密钥（spec 7.4 明令 wrapKey(旧SK, mesh)）。
+const WrapContextCredentials = "sproxy-credentials/v1"
+
 // isHexChar 判断 c 是否为（小写或大写）十六进制字符（ParseMesh 用）。
 // 与 pkg/tunnel.isHexString 的 hexChars 一致（含 ABCDEF），避免含大写 hex 的
 // AK（管理导入 / 手工编辑产物）在两端解析出不同 mesh 导致派生参数不一致。
@@ -115,13 +161,6 @@ func newEntryID() (string, error) {
 		return "", fmt.Errorf("accesskey: generate entry id: %w", err)
 	}
 	return "sk-" + hex.EncodeToString(b), nil
-}
-
-// KeyPair 是一对静态凭据（AK + 64-hex SK hex 字符串），用于从静态名单装配 Ring。
-// 不依赖任何上层包（hub/server），凭据域自包含。SK 必须是 32 字节（64 hex）。
-type KeyPair struct {
-	Key    string
-	Secret string // 64-hex SK（hex 编码的 32 字节）
 }
 
 // NewRingFromKeyPairs 从 []KeyPair 构造 Ring（每条 AK 一条 plain alive 条目，

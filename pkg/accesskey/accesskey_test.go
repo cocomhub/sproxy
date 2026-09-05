@@ -80,6 +80,79 @@ func TestGetEntry_NotFound(t *testing.T) {
 	}
 }
 
+// TestGeneratePair 覆盖 GeneratePair 生成逻辑（access-key 命令删除后内联进
+// `trust ak add` 的等价生成）：ak 前缀 / mesh 段 / sk 64-hex / 两次不同。
+func TestGeneratePair(t *testing.T) {
+	ak, sk, err := GeneratePair(nil, "")
+	if err != nil {
+		t.Fatalf("GeneratePair: %v", err)
+	}
+	if !strings.HasPrefix(ak, "sk-") {
+		t.Errorf("expected ak to start with sk-, got: %q", ak)
+	}
+	if len(sk) != 64 {
+		t.Errorf("expected sk to be 64 hex chars, got %d", len(sk))
+	}
+	for _, c := range sk {
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+		if !isHex {
+			t.Errorf("sk 含非 hex 字符 %q", sk)
+			break
+		}
+	}
+	ak2, sk2, err := GeneratePair(nil, "")
+	if err != nil {
+		t.Fatalf("GeneratePair(second): %v", err)
+	}
+	if ak == ak2 || sk == sk2 {
+		t.Error("expected two generated pairs to differ")
+	}
+}
+
+func TestGeneratePair_MeshPrefix(t *testing.T) {
+	ak, _, err := GeneratePair(nil, "meshA")
+	if err != nil {
+		t.Fatalf("GeneratePair(meshA): %v", err)
+	}
+	if !strings.HasPrefix(ak, "sk-meshA-") {
+		t.Errorf("expected ak with sk-meshA- prefix, got: %q", ak)
+	}
+}
+
+// TestGeneratePair_InjectReader GeneratePair 支持注入确定性 reader（cmd 测试可据此
+// 断言生成内容，无需真实随机）。
+func TestGeneratePair_InjectReader(t *testing.T) {
+	// 8B ak 随机 + 32B sk 随机 = 40B；content 前 40B 即消耗读满。
+	content := append(bytes.Repeat([]byte{0x11}, 8), bytes.Repeat([]byte{0x22}, 32)...)
+	rd := bytes.NewReader(content)
+	ak, sk, err := GeneratePair(rd, "")
+	if err != nil {
+		t.Fatalf("GeneratePair(inject): %v", err)
+	}
+	if !strings.HasPrefix(ak, "sk-") {
+		t.Errorf("expected ak prefix, got: %q", ak)
+	}
+	if len(ak) != len("sk-")+AccessKeyHexLen {
+		t.Errorf("ak len = %d, want %d", len(ak), len("sk-")+AccessKeyHexLen)
+	}
+	wantSK := strings.Repeat("22", 32)
+	if sk != wantSK {
+		t.Errorf("sk = %q, want %q（确定性 reader 应精确消费）", sk, wantSK)
+	}
+	short := bytes.NewReader(make([]byte, 4)) // 不足以读满 ak → 必须报错
+	if _, _, err := GeneratePair(short, ""); err == nil {
+		t.Error("expected error when reader is too short")
+	}
+}
+
+// TestWrapContextCredentials 断言凭据 wrap context 常量值（M5 收归后唯一事实源，
+// server 与 client 分别以别名引用；此处锁定该字面量防止无意改动破坏双端派生）。
+func TestWrapContextCredentials(t *testing.T) {
+	if WrapContextCredentials != "sproxy-credentials/v1" {
+		t.Errorf("WrapContextCredentials = %q, want %q", WrapContextCredentials, "sproxy-credentials/v1")
+	}
+}
+
 // TestExpireKey_StatusExpiredUntil 设一个未来时间会设置 ExpiresAt，届时条目过期。
 // 用可变时钟验证 alive 判定（含 ExpiresAt 已到）。
 func TestExpireKey_StatusExpiredUntil(t *testing.T) {

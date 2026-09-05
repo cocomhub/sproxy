@@ -213,11 +213,15 @@ func TestHandleConfigShow(t *testing.T) {
 	if !strings.Contains(out, "Timeout:       120") {
 		t.Errorf("expected Timeout in output, got: %s", out)
 	}
-	if !strings.Contains(out, "AccessKeySecret: my-s****") {
-		t.Errorf("expected masked AccessKeySecret in output, got: %s", out)
+	if !strings.Contains(out, "AccessKeySecret: ****") {
+		t.Errorf("expected fully-masked AccessKeySecret in output, got: %s", out)
 	}
-	if !strings.Contains(out, "my-s****") {
-		t.Errorf("expected masked AuthToken in output, got: %s", out)
+	// M2：show 输出不得泄露任何 secret hex 前缀字符。
+	if strings.Contains(out, "my-s") {
+		t.Errorf("secret 前缀泄漏到 show 输出: %s", out)
+	}
+	if strings.Contains(out, "my-secret-token") {
+		t.Errorf("secret 明文泄漏到 show 输出: %s", out)
 	}
 	if !strings.Contains(out, "ChunkSize:     8388608") {
 		t.Errorf("expected ChunkSize in output, got: %s", out)
@@ -283,8 +287,29 @@ func TestHandleConfigShow_MaskedShortKey(t *testing.T) {
 	HandleConfigShow(cfg, &buf)
 	out := buf.String()
 
-	if !strings.Contains(out, "AccessKeySecret: shor****") {
-		t.Errorf("expected masked AccessKeySecret, got: %s", out)
+	if !strings.Contains(out, "AccessKeySecret: ****") {
+		t.Errorf("expected fully-masked AccessKeySecret, got: %s", out)
+	}
+	// M2：短 secret 同样全掩，不泄露任何字符。
+	if strings.Contains(out, "short") {
+		t.Errorf("短 secret 前缀泄漏到 show 输出: %s", out)
+	}
+}
+
+func TestHandleConfigShow_EmptySecret(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AccessKeySecret = ""
+
+	var buf bytes.Buffer
+	HandleConfigShow(cfg, &buf)
+	out := buf.String()
+
+	// 未配置 secret 时输出空值（不打印 *）。既已缺省会显示 0 长度值。
+	if !strings.Contains(out, "AccessKeySecret: ") {
+		t.Errorf("expected AccessKeySecret line with empty value, got: %s", out)
+	}
+	if strings.Contains(out, "AccessKeySecret: ****") {
+		t.Errorf("未配置 secret 不应打印掩码 ****, got: %s", out)
 	}
 }
 

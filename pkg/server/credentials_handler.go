@@ -44,7 +44,10 @@ const (
 // 使不同 mesh 派生不同信封密钥（spec 7.4 明令 wrapKey(旧SK, mesh)——wrap 参数绑定
 // mesh，防止跨 mesh 复用）。renew 与 sk 列表 per-key wrap 共用同一拼法，调用方用
 // 同一旧 SK 可解出自己的信封。
-const credentialWrapContext = "sproxy-credentials/v1"
+//
+// 值收归 pkg/accesskey.WrapContextCredentials（唯一事实源，M5）——本名作别名引用，
+// 与客户端 pkg/client.CredentialWrapContextPrefix 保持同一常量，杜绝双端字面量漂移。
+const credentialWrapContext = accesskey.WrapContextCredentials
 
 // credentialWrapKey 派生 wrap 信封密钥（HKDF）：context = credentialWrapContext[#mesh]。
 // 与 accesskey.DeriveWrapKey(entry.SK, ak, ctx) 联动——包裹与解开必须用同一条目 SK +

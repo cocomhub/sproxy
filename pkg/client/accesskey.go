@@ -24,21 +24,29 @@ import (
 //   - wrap context 与服务端 credentialWrapContext 同拼法：CredentialWrapContextPrefix
 //     （mesh 非空追加 "#"+mesh）。mesh 由 AK 派生（accesskey.ParseMesh）。
 
-// CredentialWrapContextPrefix 是凭据 wrap context 的固定前缀，与服务端
-// pkg/server.credentialWrapContext（"sproxy-credentials/v1"）双向契约一致：
+// CredentialWrapContextPrefix 是凭据 wrap context 的固定前缀（值收归
+// pkg/accesskey.WrapContextCredentials——唯一事实源，M5；本名作别名引用），
+// 与服务端 pkg/server.credentialWrapContext 保持同一常量：
 //   - 服务端：credentialWrapContext + ["#"+mesh]
 //   - 客户端：CredentialWrapContextPrefix + ["#"+mesh]
 //
-// 任何一端改动必须双端同步，否则旧 SK 解不开服务端包裹的新 SK（renew 全部失败）。
-const CredentialWrapContextPrefix = "sproxy-credentials/v1"
+// 任何一端改动必须全部同步，否则旧 SK 解不开服务端包裹的新 SK（renew 全部失败）。
+const CredentialWrapContextPrefix = accesskey.WrapContextCredentials
 
-// wrapContextFor 计算 wrap context（prefix + [#mesh]）。
-func wrapContextFor(ak string) string {
+// CredentialWrapContext 计算 wrap context（prefix + [#mesh]）——mesh 由 AK 派生：
+// 空 mesh 保持前缀不带井号；非空追加 "#"+mesh。与 accesskey ParseMesh + 服务端
+// credentialWrapKey 同拼法（双向契约）；cmd/web 测试复算闭环用。
+func CredentialWrapContext(ak string) string {
 	mesh := accesskey.ParseMesh(ak)
 	if mesh == "" {
 		return CredentialWrapContextPrefix
 	}
 	return CredentialWrapContextPrefix + "#" + mesh
+}
+
+// wrapContextFor 计算 wrap context（prefix + [#mesh]）。
+func wrapContextFor(ak string) string {
+	return CredentialWrapContext(ak)
 }
 
 // RenewResult 是 RenewAccessKey 的解包结果：新 SK 已从 wrapped_secret 解开并立即可用。

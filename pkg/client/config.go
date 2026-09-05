@@ -166,11 +166,10 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 	}
 	fmt.Fprintf(w, "ServerURL:     %s\n", cfg.ServerURL)
 	fmt.Fprintf(w, "Timeout:       %d\n", cfg.Timeout)
-	maskedSecret := cfg.AccessKeySecret
-	if len(maskedSecret) > 4 {
-		maskedSecret = maskedSecret[:4] + "****"
-	} else if len(maskedSecret) > 0 {
-		maskedSecret = "****"
+	// AccessKeySecret 属凭据（S49）：全掩，不泄露任何 hex（M2——不再打前缀）。
+	maskedSecret := "****"
+	if cfg.AccessKeySecret == "" {
+		maskedSecret = ""
 	}
 	fmt.Fprintf(w, "AccessKey:     %s\n", cfg.AccessKey)
 	fmt.Fprintf(w, "AccessKeySecret: %s\n", maskedSecret)

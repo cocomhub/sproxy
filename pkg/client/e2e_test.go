@@ -16,24 +16,17 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 )
 
-// testCredentialAK/testCredentialSK 是 startFullTestServer 生成的首启 anonymous 凭据
-// （经 BootstrapServerCredentials 注入服务端 ring 与 FileClient）。包级全局由
-// startFullTestServer 在每次调用时覆盖（测试以并行隔离，但均为同一服务器实例）。
-var (
-	testCredentialAK string
-	testCredentialSK string
-)
-
 // startFullTestServer 启动完整 sproxy 服务（含所有路由和分块上传支持）。
 // 凭据 store 化（task3）后：无 ring/store 时服务器会 bootstrap 生成 anonymous 凭据，
 // authMiddleware 随之进入 SproxySig 验签路径——未配置 AK/SK 的裸请求会被 401 拒绝。
 // 因此这里用 BootstrapServerCredentials 生成/载入真实凭据并注入 opts，同时把该
-// AK/SK 通过 WithAccessKey 传给 FileClient，使 e2e 走真实签名路径。
-func startFullTestServer(t *testing.T) (string, *server.Config) {
+// AK/SK 通过返回值传给调用方（I2：以返回值注入替代包级全局，消 data race 隐患），
+// 由调用方 WithAccessKey(ak, skHex) 传入 FileClient，使 e2e 走真实签名路径。
+func startFullTestServer(t *testing.T) (url string, cfg *server.Config, ak, skHex string) {
 	t.Helper()
 	tmpDir := t.TempDir()
 
-	cfg := server.Default()
+	cfg = server.Default()
 	cfg.StorageRoot = tmpDir
 	cfg.ChunkSize = 4 << 10 // 4 KiB for test
 	if err := cfg.Validate(); err != nil {
@@ -51,8 +44,8 @@ func startFullTestServer(t *testing.T) (string, *server.Config) {
 	if len(keys) == 0 || len(keys[0].Entries) == 0 || len(keys[0].Entries[0].SK) != 32 {
 		t.Fatalf("BootstrapServerCredentials 未生成 32B anonymous 凭据（keys=%d）", len(keys))
 	}
-	ak := keys[0].AK
-	skHex := hex.EncodeToString(keys[0].Entries[0].SK)
+	ak = keys[0].AK
+	skHex = hex.EncodeToString(keys[0].Entries[0].SK)
 
 	var cfgPtr atomic.Pointer[server.Config]
 	cfgPtr.Store(cfg)
@@ -71,13 +64,11 @@ func startFullTestServer(t *testing.T) (string, *server.Config) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
-	// 让所有调用方默认持有 anonymous 凭据。
-	testCredentialAK, testCredentialSK = ak, skHex
-	return ts.URL, cfg
+	return ts.URL, cfg, ak, skHex
 }
 
 func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
-	url, _ := startFullTestServer(t)
+	url, _, ak, skHex := startFullTestServer(t)
 
 	srcDir := t.TempDir()
 	fileData := bytes.Repeat([]byte("ClientChunkedTest!"), 1280) // ~20 KiB
@@ -86,7 +77,7 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	c := NewFileClient(url, WithAccessKey(testCredentialAK, testCredentialSK))
+	c := NewFileClient(url, WithAccessKey(ak, skHex))
 	c.chunkSize = 4096
 	c.maxChunkSize = 4096
 
@@ -116,7 +107,7 @@ func TestClientChunkedUpload_Download_RoundTrip(t *testing.T) {
 }
 
 func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
-	url, _ := startFullTestServer(t)
+	url, _, ak, skHex := startFullTestServer(t)
 
 	srcDir := t.TempDir()
 	fileData := bytes.Repeat([]byte("ChunkedTestData"), 2048) // ~32 KiB
@@ -125,7 +116,7 @@ func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	c := NewFileClient(url, WithAccessKey(testCredentialAK, testCredentialSK))
+	c := NewFileClient(url, WithAccessKey(ak, skHex))
 	c.chunkSize = 4096
 	c.maxChunkSize = 4096
 
@@ -154,7 +145,7 @@ func TestClientChunkedUpload_ThenRegularDownload(t *testing.T) {
 }
 
 func TestClient_SmallFileUploadWithoutChunking(t *testing.T) {
-	url, _ := startFullTestServer(t)
+	url, _, ak, skHex := startFullTestServer(t)
 
 	srcDir := t.TempDir()
 	smallData := bytes.Repeat([]byte("S"), 1024) // 1 KiB
@@ -168,7 +159,7 @@ func TestClient_SmallFileUploadWithoutChunking(t *testing.T) {
 		t.Fatal("file below AutoChunkThreshold should not auto-chunk")
 	}
 
-	c := NewFileClient(url, WithAccessKey(testCredentialAK, testCredentialSK))
+	c := NewFileClient(url, WithAccessKey(ak, skHex))
 	result, err := c.Upload(t.Context(), srcPath, "small.bin")
 	if err != nil {
 		t.Fatalf("Upload (non-chunked): %v", err)
