@@ -48,8 +48,8 @@ type totpNonceEntry struct {
 // 请求头 nonce），语义与本池不同——本池按裸 nonce 键、**单次消费**（任何消费尝试即删，
 // 防同 nonce 爆破）、**绑定来源 IP**、TTL 60s、**无 AK 前缀**、池上限 4096。故单独实现。
 //
-// 并发安全：mu 保护 map；Add 在超过上限时淘汰最旧条目；obtain（== consume）在命中时
-// 立即删除并校验 IP 与过期；插入/消费时惰性清理过期项。
+// 并发安全：mu 保护 map；Add 在超过上限时淘汰最旧条目；obtain 在命中时立即删除并
+// 校验 IP 与过期；插入/消费时惰性清理过期项。
 type totpNoncePool struct {
 	mu sync.Mutex
 	m  map[string]totpNonceEntry
@@ -129,12 +129,6 @@ func (p *totpNoncePool) obtain(nonce, ip string) (time.Time, bool) {
 		return time.Time{}, false // IP 绑定不匹配
 	}
 	return e.expiresAt, true
-}
-
-// consume 是 obtain 的节名别名（测试/未来 login 共用同义语义）。保留二者之一在
-// 调用侧越少越好——此处统一收口到 obtain。
-func (p *totpNoncePool) consume(nonce, ip string) (time.Time, bool) {
-	return p.obtain(nonce, ip)
 }
 
 // size 返回当前池中（含已过期未清理）条目数（测试透视用）。
@@ -271,7 +265,7 @@ func (h *Handlers) registerCredentialHandler(w http.ResponseWriter, r *http.Requ
 		ak, req.Owner, skBytes, nil, accesskey.RoleUser, h.credentialTTLFromCfg(),
 	)
 	if addErr != nil {
-		h.registrationAddError(auditActionCredRegisterDenied, ak, addErr)
+		h.registrationAddError(r.Context(), auditActionCredRegisterDenied, ak, addErr)
 		sendJSONResponse(w, map[string]any{"error": credentialAddErrorMessage(addErr)}, credentialAddErrorStatus(addErr))
 		return
 	}
@@ -337,8 +331,8 @@ func (h *Handlers) registerTotp(w http.ResponseWriter, r *http.Request, reqOwner
 		ak, reqOwner, nil, totpSecret, accesskey.RoleUser, 0,
 	)
 	if addErr != nil {
-		// 复用简单模式错误映射（撞 AK / 参数缺失等）。
-		h.registrationAddError(auditActionCredRegisterDenied, ak, addErr)
+		// 复用简单模式错误映射（撞 AK / 参数缺失等）。ctx 透传保调用方链路。
+		h.registrationAddError(ctx, auditActionCredRegisterDenied, ak, addErr)
 		sendJSONResponse(w, map[string]any{"error": credentialAddErrorMessage(addErr)}, credentialAddErrorStatus(addErr))
 		return
 	}
@@ -434,21 +428,20 @@ func (h *Handlers) persistAfterRegister(w http.ResponseWriter, r *http.Request, 
 }
 
 // registrationAddError 记录 AddRegistration 失败的 denied 审计（两分支共用）。
-func (h *Handlers) registrationAddError(action string, ak string, addErr error) {
-	detail := addErr.Error()
-	switch {
-	case errors.Is(addErr, accesskey.ErrDuplicate):
-		detail = "重复注册"
-	case errors.Is(addErr, accesskey.ErrRegistrationRequiresSecret):
-		detail = "注册参数缺失"
-	}
-	h.RecordAudit(context.Background(), AuditEvent{
+// ctx 由调用方透传（保 trace/caller 链路，不用 context.Background()）；
+// detail 用稳定文案映射（不回显底层 error 原文——避免错误细节注入审计行，
+// 兜底统一 "注册失败"，与响应文案一致）。
+func (h *Handlers) registrationAddError(ctx context.Context, action string, ak string, addErr error) {
+	h.RecordAudit(ctx, AuditEvent{
 		Action: action, ObjectType: "credential", Object: ak,
-		Result: AuditResultError, Detail: detail,
+		Result: AuditResultError, Detail: credentialAddErrorMessage(addErr),
 	})
 }
 
-// credentialAddErrorMessage 映射 AddRegistration 错误到响应文案。
+// credentialAddErrorMessage 映射 AddRegistration 错误到稳定响应文案。
+// 只对已知哨兵给出具体文案；兜底统一 "注册失败"（不回显底层 error 原文，防错误
+// 细节/注入串入响应与审计行）。与 credentialAddErrorStatus / registrationAddError
+// 共享同一映射语义。
 func credentialAddErrorMessage(addErr error) string {
 	switch {
 	case errors.Is(addErr, accesskey.ErrDuplicate):
@@ -474,7 +467,14 @@ func credentialAddErrorStatus(addErr error) int {
 // 行为：生成 16B 随机 nonce（sproxysig.NewNonce()，现有唯一实现）入 totpNoncePool
 // （TTL 60s、单次使用、绑定来源 IP、池上限 4096、插入/消费时惰性清理过期项，D5），
 // 返回 {nonce, expires_at}。body 防护同 register（M7：MaxBytesReader + drainAndVerifyBody）。
-// 零凭据窗口可达（TOTP 登录前置步骤，无 admin 亦放行）。
+//
+// **设计意图 = 零凭据窗口可达**（TOTP 登录前置步骤，无 admin 亦放行）：
+//   - loopback 门禁依赖面：nonce 端点本身**不实现**首个注册回环门禁
+//     （checkRegistrationAllowed）——该门禁在**同请求链路的 register** 上执行
+//     （`POST /api/credentials/register`）。TOTP 登录（任务⑨）消费 nonce 前必然先经
+//     register 的 loopback 预检建立首个 admin；若未来把 nonce 移入仅 localMux 内部
+//     而脱离 register 门禁面，将绕过「首 admin 仅回环」保护——维护者须保证两者
+//     激活路径一致。
 func (h *Handlers) nonceHandler(w http.ResponseWriter, r *http.Request) {
 	if h.totpNoncePool == nil {
 		sendJSONResponse(w, map[string]any{"error": "nonce 池未装配"}, http.StatusInternalServerError)

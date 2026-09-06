@@ -1051,7 +1051,7 @@ func TestNonceEndpoint_PoolCap(t *testing.T) {
 	if sz := pool.size(); sz != maxTotpNoncePool {
 		t.Errorf("池满后 size = %d, want %d（惰性淘汰钳制）", sz, maxTotpNoncePool)
 	}
-	if _, ok := pool.consume(first.Nonce, "127.0.0.1"); ok {
+	if _, ok := pool.obtain(first.Nonce, "127.0.0.1"); ok {
 		t.Errorf("最早 nonce 应被淘汰（池满后消费不命中）")
 	}
 }
@@ -1075,11 +1075,11 @@ func TestNoncePool_ConsumeRejectsAllIPExceptIssuer(t *testing.T) {
 		t.Fatalf("totpNoncePool 未装配（nil）")
 	}
 	// 同来源 IP 首次消费成功。
-	if _, ok := pool.consume(nr.Nonce, normalizedTestIP(loopRemoteV4)); !ok {
+	if _, ok := pool.obtain(nr.Nonce, normalizedTestIP(loopRemoteV4)); !ok {
 		t.Errorf("同来源 IP 消费 nonce 应成功（首次消费）")
 	}
 	// 二次消费（同 IP）失败——单次使用。
-	if _, ok := pool.consume(nr.Nonce, normalizedTestIP(loopRemoteV4)); ok {
+	if _, ok := pool.obtain(nr.Nonce, normalizedTestIP(loopRemoteV4)); ok {
 		t.Errorf("二次消费 nonce 应失败（单次使用）")
 	}
 
@@ -1090,11 +1090,11 @@ func TestNoncePool_ConsumeRejectsAllIPExceptIssuer(t *testing.T) {
 	}
 	var nr2 nonceResp
 	_ = json.Unmarshal(body2, &nr2)
-	if _, ok := pool.consume(nr2.Nonce, "203.0.113.7"); ok {
+	if _, ok := pool.obtain(nr2.Nonce, "203.0.113.7"); ok {
 		t.Errorf("不同来源 IP 消费 nonce 应拒绝（IP 绑定）")
 	}
 	// ……且该次失败尝试已消费 nonce（D5「失败也消费」）——此后任何来源再消费都失败。
-	if _, ok := pool.consume(nr2.Nonce, normalizedTestIP(loopRemoteV4)); ok {
+	if _, ok := pool.obtain(nr2.Nonce, normalizedTestIP(loopRemoteV4)); ok {
 		t.Errorf("被错误 IP 尝试后 nonce 不应可再用（失败也消费）")
 	}
 
