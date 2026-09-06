@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/otp"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -1118,4 +1119,631 @@ func nonceCountFor(h *Handlers) int {
 		return -1
 	}
 	return h.totpNoncePool.size()
+}
+
+// ---- TOTP 登录端点（task 9）----
+
+// loginResp 是 POST /api/credentials/login 的成功响应体（snake_case，M2）。
+type loginResp struct {
+	AK                   string                   `json:"ak"`
+	SessionSkeyID        string                   `json:"session_skey_id"`
+	SessionExpiresAt     time.Time                `json:"session_expires_at"`
+	WrappedSessionSecret *accesskey.WrappedSecret `json:"wrapped_session_secret"`
+}
+
+// loginResult 登录取回解密的 session SK（wrapped 经 insertEntryID 解封）。
+type loginResult struct {
+	resp          loginResp
+	sessionSK     []byte
+	sessionSkeyID string
+}
+
+// newTOTPTestServer 装配 force_totp=true + 高限频的登录黑盒测试服务器（FRED 语义：
+// 可注入 clock 的 Ring）。mod 改配置；clockJa 为 nil 用真实时钟。
+func newTOTPTestServer(t *testing.T, mod func(*Config), ring *accesskey.Ring) (*Handlers, http.Handler, *atomic.Pointer[Config], *accesskey.Ring) {
+	t.Helper()
+	if ring == nil {
+		ring = accesskey.NewRing(time.Now)
+	}
+	hh, cfgPtr, outRing := newRegisterHandlersTOTP(t, ring, mod)
+	return hh, hh.Handler(), cfgPtr, outRing
+}
+
+// newRegisterHandlersTOTP 与 newRegisterHandlers 一致，但注入默认 ForceTOTP=true +
+// 更高的 login 限频（避免 per-AK 锁定测试被 429 干扰）并暴露白盒 Handlers。
+func newRegisterHandlersTOTP(t *testing.T, ring *accesskey.Ring, mod func(*Config)) (*Handlers, *atomic.Pointer[Config], *accesskey.Ring) {
+	t.Helper()
+	if ring == nil {
+		ring = accesskey.NewRing(time.Now)
+	}
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir() // 隔离每个测试的存储根（避免污染工作区 ./storage）
+	cfg.ChunkSize = 4 << 10
+	cfg.Registration.ForceTOTP = true
+	if mod != nil {
+		mod(cfg)
+	}
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	return newRegisterHandlersCfg(t, ring, &cfgPtr)
+}
+
+// newRegisterHandlersCfg 是低层装配：用给定 cfgPtr/Ring（登录测试回归，避免重复
+// RegisterRoutes 样板）。TotpRateLimit/LoginRateLimit 注入高阈值防限频干扰。
+func newRegisterHandlersCfg(t *testing.T, ring *accesskey.Ring, cfgPtr *atomic.Pointer[Config]) (*Handlers, *atomic.Pointer[Config], *accesskey.Ring) {
+	t.Helper()
+	opts := RegisterRoutesOpts{
+		Mux:            http.NewServeMux(),
+		CfgPtr:         cfgPtr,
+		Version:        "test-version",
+		BuildAt:        "test-buildat",
+		Logger:         testLogger(),
+		CredentialRing: ring,
+		// 登录黑盒测试需连发（per-AK 锁定 5+ 次、垃圾 nonce 多连发），默认 10/min
+		// 限频会过早 429 干扰语义断言——注入高阈值瞬态（与 nonce 池测试同法）。
+		TotpRateLimit:  1000000,
+		LoginRateLimit: 1000000,
+	}
+	h := RegisterRoutes(t.Context(), opts)
+	t.Cleanup(func() { _ = h.Close() })
+	return h, cfgPtr, ring
+}
+
+// registerTOTPFor 在 ForceTOTP=true 服务器上注册一个 TOTP 账号，返回 AK 与 base32 secret。
+// owner 为空 → 默认 "totp-login"。
+func registerTOTPFor(t *testing.T, h http.Handler, akOwner string) (string, string) {
+	t.Helper()
+	if akOwner == "" {
+		akOwner = "totp-login"
+	}
+	st, body := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"`+akOwner+`"}`))
+	if st != http.StatusOK {
+		t.Fatalf("TOTP 注册 status = %d, want 200 (body=%s)", st, body)
+	}
+	var p totpRegistered
+	if err := json.Unmarshal(body, &p); err != nil {
+		t.Fatalf("unmarshal register: %v (body=%s)", err, body)
+	}
+	return p.AK, p.Base32Secret
+}
+
+// totpCodeFor 用 pkg/otp 复算指定时刻的 TOTP 动态码（模拟 GA）。
+func totpCodeFor(t *testing.T, base32Secret string, now time.Time) (string, []byte) {
+	t.Helper()
+	secret, derr := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(base32Secret)
+	if derr != nil {
+		t.Fatalf("base32 解码失败: %v", derr)
+	}
+	code, cerr := otp.NewTOTP(secret).Code(now)
+	if cerr != nil {
+		t.Fatalf("totp code: %v", cerr)
+	}
+	return code, secret
+}
+
+// serveLogin 对 handler 发 login 请求（RemoteAddr 由调用方指定）。
+func serveLogin(t *testing.T, h http.Handler, remoteAddr string, body []byte) (int, []byte) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/credentials/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if remoteAddr != "" {
+		req.RemoteAddr = remoteAddr
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w.Code, w.Body.Bytes()
+}
+
+// obtainNonce 走 nonce 端点签发一枚绑定指定来源 IP 的 nonce，返回 nonce 字符串。
+func obtainNonce(t *testing.T, h http.Handler, ip string) string {
+	t.Helper()
+	st, body := serveNonce(t, h, ip, []byte(`{}`))
+	if st != http.StatusOK {
+		t.Fatalf("nonce 签发 status = %d, want 200 (body=%s)", st, body)
+	}
+	var nr nonceResp
+	if err := json.Unmarshal(body, &nr); err != nil {
+		t.Fatalf("unmarshal nonce: %v (body=%s)", err, body)
+	}
+	return nr.Nonce
+}
+
+// loginSuccessf 执行一次期待成功的 TOTP 登录（正确 nonce + 正确 code），返回解密的
+// session SK / skeyID。remoteAddr 允许覆盖来源 IP（默认 loopRemoteV4）。code 按真实
+// 时钟复算。注入 ring 时钟的测试用 loginSuccessAt 显式传 now。
+func loginSuccessf(t *testing.T, h http.Handler, cfgPtr *atomic.Pointer[Config], ak, base32Secret, nonce, loginType, remoteAddr string) loginResult {
+	t.Helper()
+	return loginSuccessAt(t, h, cfgPtr, ak, base32Secret, nonce, loginType, remoteAddr, time.Now())
+}
+
+// loginSuccessAt 是 loginSuccessf 的注入时钟版本：code 在指定 now 时刻复算（与 ring
+// 注入时钟对齐，保证 TOTP ±1 窗口命中）。
+func loginSuccessAt(t *testing.T, h http.Handler, cfgPtr *atomic.Pointer[Config], ak, base32Secret, nonce, loginType, remoteAddr string, now time.Time) loginResult {
+	t.Helper()
+	if remoteAddr == "" {
+		remoteAddr = loopRemoteV4
+	}
+	code, _ := totpCodeFor(t, base32Secret, now)
+	body := map[string]any{"ak": ak, "nonce": nonce, "code": code}
+	if loginType != "" {
+		body["login_type"] = loginType
+	}
+	raw, _ := json.Marshal(body)
+	st, respBody := serveLogin(t, h, remoteAddr, raw)
+	if st != http.StatusOK {
+		t.Fatalf("登录 status = %d, want 200 (body=%s; ak=%s nonce=%s code=%s)", st, respBody, ak, nonce, code)
+	}
+	var lr loginResp
+	if err := json.Unmarshal(respBody, &lr); err != nil {
+		t.Fatalf("unmarshal login: %v (body=%s)", err, respBody)
+	}
+	// 响应字段契约（M2）。
+	if lr.AK != ak {
+		t.Errorf("resp.ak = %q, want %q", lr.AK, ak)
+	}
+	if !strings.HasPrefix(lr.SessionSkeyID, accesskey.SkeyIDPrefix) {
+		t.Errorf("session_skey_id = %q, want 前缀 %q", lr.SessionSkeyID, accesskey.SkeyIDPrefix)
+	}
+	if lr.WrappedSessionSecret == nil || lr.WrappedSessionSecret.Kind != accesskey.KindTOTPWrap {
+		t.Fatalf("wrapped_session_secret.kind = %+v, want totp_wrap", lr.WrappedSessionSecret)
+	}
+	// 用 DeriveTOTPWrapKey(code,ak,nonce) 解封 session SK（I3 唯一路径）。
+	wrapKey, kerr := accesskey.DeriveTOTPWrapKey(code, ak, nonce)
+	if kerr != nil {
+		t.Fatalf("DeriveTOTPWrapKey: %v", kerr)
+	}
+	sessSK, derr := accesskey.DecryptSecretKind(lr.WrappedSessionSecret, accesskey.KindTOTPWrap, wrapKey)
+	if derr != nil {
+		t.Fatalf("DecryptSecretKind: %v", derr)
+	}
+	if len(sessSK) != 32 {
+		t.Fatalf("解出的 session SK 长度 = %d, want 32", len(sessSK))
+	}
+	return loginResult{resp: lr, sessionSK: sessSK, sessionSkeyID: lr.SessionSkeyID}
+}
+
+// signedGetWithSKID 直接用 handler 发送显式 skeyID 签名的 GET（session SK 立即可用断言）。
+func signedGetWithSKID(t *testing.T, h http.Handler, path, ak, entryID, skHexStr string) (int, []byte) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.RemoteAddr = loopRemoteV4
+	signRequestEntry(req, ak, entryID, skHexStr)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// TestLogin_Success 验证登录成功全链路：注册拿 base32_secret → 测试内用 pkg/otp
+// 复算 code（模拟 GA）→ nonce → login → 200 {ak, session_skey_id, session_expires_at,
+// wrapped_session_secret}（M2）；session_skey_id 前缀 skey-；用
+// DeriveTOTPWrapKey(code,ak,nonce) + DecryptSecretKind(KindTOTPWrap) 解出 32B session
+// SK（I3）；ring 新增 session 条目（Kind==totp_wrap、WrapKeyID 为空 M13、Meta.Type=="login"
+// IP 绑定）；session skeyID 立即可用（签名 GET /api/credentials/<ak>/sk → 200）。
+func TestLogin_Success(t *testing.T) {
+	hh, h, _, _ := newTOTPTestServer(t, nil, nil)
+	ak, b32 := registerTOTPFor(t, h, "")
+	nonce := obtainNonce(t, h, loopRemoteV4)
+
+	lr := loginSuccessf(t, h, hh.cfgPtr, ak, b32, nonce, "", "")
+	// session_expires_at ≈ now + cfg.Registration.SessionTTL（web 缺省 24h，容差 ±3s）。
+	want := time.Now().Add(24 * time.Hour)
+	if d := lr.resp.SessionExpiresAt.Sub(want); d > 3*time.Second || d < -3*time.Second {
+		t.Errorf("session_expires_at = %v, want ≈ %v（web 24h）", lr.resp.SessionExpiresAt, want)
+	}
+
+	// ring 新增 session 条目：Kind 标记、WrapKeyID 置空（M13）、Meta.Type/IP。
+	k, ok := hh.credentialRing.GetKey(ak)
+	if !ok {
+		t.Fatalf("ring 中无 AK %q", ak)
+	}
+	if len(k.Entries) != 1 {
+		t.Fatalf("登录后应有 1 条 session 条目, got %d", len(k.Entries))
+	}
+	e := k.Entries[0]
+	if e.ID != lr.sessionSkeyID {
+		t.Errorf("ring 条目 ID = %q, want 响应 %q", e.ID, lr.sessionSkeyID)
+	}
+	if e.Kind != accesskey.KindTOTPWrap {
+		t.Errorf("session 条目 Kind = %q, want %q", e.Kind, accesskey.KindTOTPWrap)
+	}
+	if e.WrapKeyID != "" {
+		t.Errorf("session 条目 WrapKeyID = %q, want 空（M13：wrap 来自 TOTP code+nonce）", e.WrapKeyID)
+	}
+	if e.Meta.Type != "login" {
+		t.Errorf("session 条目 Meta.Type = %q, want login", e.Meta.Type)
+	}
+	if e.Meta.IP != normalizedTestIP(loopRemoteV4) {
+		t.Errorf("session 条目 Meta.IP = %q, want %q", e.Meta.IP, normalizedTestIP(loopRemoteV4))
+	}
+	if !bytes.Equal(e.SK, lr.sessionSK) {
+		t.Errorf("ring 条目 SK 与解封 session SK 不一致")
+	}
+
+	// session skeyID 立即可用（v2 强制必传路径）：签名 GET /api/credentials/<ak>/sk → 200。
+	st, body := signedGetWithSKID(t, h, "/api/credentials/"+ak+"/sk", ak, lr.sessionSkeyID, hex.EncodeToString(lr.sessionSK))
+	if st != http.StatusOK {
+		t.Fatalf("session skeyID 签名 GET /api/credentials/%s/sk status = %d, want 200 (body=%s)", ak, st, body)
+	}
+}
+
+// TestLogin_WrongCode_401 验证错误动态码 → 401，且该 nonce 已被消费（同 nonce 再登录也
+// 不应成功——防同 nonce 爆破，D5）。
+func TestLogin_WrongCode_401(t *testing.T) {
+	_, h, _, _ := newTOTPTestServer(t, nil, nil)
+	ak, b32 := registerTOTPFor(t, h, "")
+	nonce := obtainNonce(t, h, loopRemoteV4)
+
+	now := time.Now()
+	code, _ := totpCodeFor(t, b32, now)
+	wrong := "000000"
+	if wrong == code {
+		wrong = "111111"
+	}
+	body, _ := json.Marshal(map[string]any{"ak": ak, "nonce": nonce, "code": wrong})
+	st, respBody := serveLogin(t, h, loopRemoteV4, body)
+	if st != http.StatusUnauthorized {
+		t.Fatalf("错误动态码 status = %d, want 401 (body=%s)", st, respBody)
+	}
+
+	// 该 nonce 已被本次尝试消费：即使此时用正确 code 再登录，也应 401（nonce 不可复用）。
+	st2, _ := serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{"ak": ak, "nonce": nonce, "code": code}))
+	if st2 == http.StatusOK {
+		t.Fatalf("被消费的 nonce 不应可复用（登录不得成功）")
+	}
+}
+
+// mustJSON 序列化任意值为 JSON 字节（测试辅助）。
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
+// TestLogin_PerAKLockout 验证 per-AK 失败锁定（U4）：同一 AK 连续 5 次错误动态码 →
+// 第 6 次登录（**含正确动态码 + 正确 nonce**）→ 401（锁定窗口内）；ring 注入 now 前进
+// 超过 LoginFailWindow → 自动解锁，可登录成功。
+func TestLogin_PerAKLockout(t *testing.T) {
+	fixed := time.Now()
+	var mu sync.Mutex
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return fixed }
+	ring := accesskey.NewRing(clock)
+	hh, h, cfgPtr, _ := newTOTPTestServer(t, func(c *Config) {
+		c.Registration.LoginFailLimit = 5
+		c.Registration.LoginFailWindow = 15 * time.Minute
+	}, ring)
+	ak, b32 := registerTOTPFor(t, h, "")
+
+	// 连续 5 次错误动态码（各自新 nonce，避免 IP/过期干扰 TOTP 错语义）。
+	for i := range 4 {
+		n := obtainNonce(t, h, loopRemoteV4)
+		body := mustJSON(t, map[string]any{"ak": ak, "nonce": n, "code": "000000"})
+		st, _ := serveLogin(t, h, loopRemoteV4, body)
+		if st != http.StatusUnauthorized {
+			t.Fatalf("错误码 #%d status = %d, want 401", i, st)
+		}
+	}
+	// 第 5 次错误码 → 触发锁定（failCount 达 5）。
+	n5 := obtainNonce(t, h, loopRemoteV4)
+	st5, _ := serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{"ak": ak, "nonce": n5, "code": "000000"}))
+	if st5 != http.StatusUnauthorized {
+		t.Fatalf("第 5 次错误码 status = %d, want 401", st5)
+	}
+
+	// 第 6 次登录：**正确 nonce + 正确 code** 仍 401（锁定窗口内，不随 IP 失效）。
+	mu.Lock()
+	lkStateBefore := hh.loginFailTracker.lockedUntil(ak)
+	mu.Unlock()
+	if lkStateBefore.IsZero() {
+		t.Fatalf("第 5 次失败后 AK 应处于锁定态（lockedUntil 非零）")
+	}
+	n6 := obtainNonce(t, h, loopRemoteV4)
+	codeOK, _ := totpCodeFor(t, b32, fixed)
+	st6, body6 := serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{"ak": ak, "nonce": n6, "code": codeOK}))
+	if st6 != http.StatusUnauthorized {
+		t.Fatalf("锁定窗口内正确动态码 status = %d, want 401 (body=%s)", st6, body6)
+	}
+
+	// ring 注入 now 前进超过 LoginFailWindow → 解锁。
+	mu.Lock()
+	fixed = fixed.Add(16 * time.Minute)
+	mu.Unlock()
+	n7 := obtainNonce(t, h, loopRemoteV4)
+	lr := loginSuccessAt(t, h, cfgPtr, ak, b32, n7, "", "", fixed)
+	if len(lr.sessionSK) != 32 {
+		t.Fatalf("解锁后登录得到 session SK 长度 = %d, want 32", len(lr.sessionSK))
+	}
+}
+
+// TestLogin_NoTOTPSecret_404 验证登录对无 TOTPSecret 的 AK → 404（M16，I1）。
+// 覆盖两种来源：force_totp=false 注册的 AK（简单模式，无 TOTP 分支）+ 构造 ring 中存在
+// 但无 TOTPSecret 的 AK。
+func TestLogin_NoTOTPSecret_404(t *testing.T) {
+	// 场景 A：force_totp=false 注册的 AK（简单模式）；登录端点存在但无 TOTPSecret。
+	_, h, _, _ := newTOTPTestServer(t, func(c *Config) { c.Registration.ForceTOTP = false }, nil)
+	simpleAK, _ := registerSimpleFor(t, h)
+	nonce := obtainNonce(t, h, loopRemoteV4)
+	body := mustJSON(t, map[string]any{"ak": simpleAK, "nonce": nonce, "code": "000000"})
+	st, respBody := serveLogin(t, h, loopRemoteV4, body)
+	if st != http.StatusNotFound {
+		t.Fatalf("无 TOTPSecret AK 登录 status = %d, want 404 (body=%s)", st, respBody)
+	}
+
+	// 场景 B：构造 ring 中存在但无 TOTPSecret 的 AK（R2-N2：AK 不存在→404 语义一致）。
+	ring := accesskey.NewRing()
+	skB, _ := hex.DecodeString(testAccessSecret)
+	_ = ring.UpsertAK(testAccessKey, "plain")
+	_, _ = ring.AddKey(testAccessKey, skB, accesskey.WithID(testEntryID(testAccessKey)))
+	_, h2, _, _ := newTOTPTestServer(t, nil, ring)
+	nonce2 := obtainNonce(t, h2, loopRemoteV4)
+	st2, _ := serveLogin(t, h2, loopRemoteV4, mustJSON(t, map[string]any{"ak": testAccessKey, "nonce": nonce2, "code": "000000"}))
+	if st2 != http.StatusNotFound {
+		t.Fatalf("构造无 TOTPSecret AK 登录 status = %d, want 404", st2)
+	}
+}
+
+// registerSimpleFor 在 force_totp=false 服务器上注册一个简单模式 AK，返回 AK/SK。
+func registerSimpleFor(t *testing.T, h http.Handler) (string, string) {
+	t.Helper()
+	st, body := serveRegister(t, h, loopRemoteV4, []byte(`{}`))
+	if st != http.StatusOK {
+		t.Fatalf("简单模式注册 status = %d, want 200 (body=%s)", st, body)
+	}
+	var p registeredPair
+	if err := json.Unmarshal(body, &p); err != nil {
+		t.Fatalf("unmarshal register: %v (body=%s)", err, body)
+	}
+	return p.AK, p.SK
+}
+
+// TestLogin_NonceReplay 验证 nonce 重放：同一 nonce 二次登录（正确 code）→ 401/400
+// （已被首次消费，R2-N2 语义：池中存在但已消费 → 记失败，但首登已成功，故第二次为
+// 无效 nonce → 拒绝）。
+func TestLogin_NonceReplay(t *testing.T) {
+	hh, h, _, _ := newTOTPTestServer(t, nil, nil)
+	ak, b32 := registerTOTPFor(t, h, "")
+	nonce := obtainNonce(t, h, loopRemoteV4)
+	_ = loginSuccessf(t, h, hh.cfgPtr, ak, b32, nonce, "", "")
+
+	// 重放同一 nonce（虽 code 正确）→ 拒绝。
+	now := time.Now()
+	code, _ := totpCodeFor(t, b32, now)
+	st, body := serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{"ak": ak, "nonce": nonce, "code": code}))
+	if st == http.StatusOK {
+		t.Fatalf("nonce 重放登录不得成功 (body=%s)", body)
+	}
+	if st != http.StatusUnauthorized && st != http.StatusBadRequest {
+		t.Errorf("nonce 重放 status = %d, want 401/400", st)
+	}
+}
+
+// TestLogin_NonceExpired 验证 nonce 过期：注入过期时间后消费 → 401/400。
+func TestLogin_NonceExpired(t *testing.T) {
+	hh, h, _, _ := newTOTPTestServer(t, nil, nil)
+	ak, b32 := registerTOTPFor(t, h, "")
+	nonce := obtainNonce(t, h, loopRemoteV4)
+
+	// 直接把池中该 nonce 的过期时间改写为过去（白盒注入），模拟时钟前进导致过期。
+	hh.totpNoncePool.mu.Lock()
+	if e, ok := hh.totpNoncePool.m[nonce]; ok {
+		e.expiresAt = time.Now().Add(-time.Second)
+		hh.totpNoncePool.m[nonce] = e
+	}
+	hh.totpNoncePool.mu.Unlock()
+
+	now := time.Now()
+	code, _ := totpCodeFor(t, b32, now)
+	st, body := serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{"ak": ak, "nonce": nonce, "code": code}))
+	if st == http.StatusOK {
+		t.Fatalf("过期 nonce 登录不得成功 (body=%s)", body)
+	}
+	if st != http.StatusUnauthorized && st != http.StatusBadRequest {
+		t.Errorf("过期 nonce status = %d, want 401/400", st)
+	}
+}
+
+// TestLogin_NonceIPMismatch 验证 nonce IP 绑定（D5）：nonce 从 127.0.0.1 签发、从另一
+// 来源 IP 消费 → 401（注入 RemoteAddr 变化）。
+func TestLogin_NonceIPMismatch(t *testing.T) {
+	_, h, _, _ := newTOTPTestServer(t, nil, nil)
+	ak, b32 := registerTOTPFor(t, h, "")
+	// nonce 从 127.0.0.1 签发（loopRemoteV4）。
+	nonce := obtainNonce(t, h, loopRemoteV4)
+	now := time.Now()
+	code, _ := totpCodeFor(t, b32, now)
+	// 从另一来源 IP 消费 → 401。
+	st, body := serveLogin(t, h, remoteNonLoop, mustJSON(t, map[string]any{"ak": ak, "nonce": nonce, "code": code}))
+	if st != http.StatusUnauthorized {
+		t.Fatalf("IP 不匹配 nonce status = %d, want 401 (body=%s)", st, body)
+	}
+}
+
+// TestLogin_GarbageNonceDoesNotCountFailure 验证垃圾 nonce 不计失败（R2-N2）：同一 AK
+// 携带池中不存在的 nonce 连发多条 login → 均 401 但不累计失败计数；随后正确 nonce +
+// 正确 code 登录成功（未被误锁）。
+func TestLogin_GarbageNonceDoesNotCountFailure(t *testing.T) {
+	hh, h, _, _ := newTOTPTestServer(t, func(c *Config) {
+		c.Registration.LoginFailLimit = 5 // 保持默认阈值——若垃圾 nonce 计失败，4 条后就该锁
+	}, nil)
+	ak, b32 := registerTOTPFor(t, h, "")
+
+	// 连发 8 条垃圾 nonce（池中不存在）——若计入失败，早已触发锁定（>5）。
+	for i := range 8 {
+		st, body := serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{
+			"ak": ak, "nonce": "deadbeefdeadbeefdeadbeefdeadbeef" + fmt.Sprintf("%02d", i), "code": "123456",
+		}))
+		if st != http.StatusUnauthorized {
+			t.Fatalf("垃圾 nonce #%d status = %d, want 401 (body=%s)", i, st, body)
+		}
+	}
+
+	// 未误锁：正确 nonce + 正确 code 登录成功。
+	nonce := obtainNonce(t, h, loopRemoteV4)
+	lr := loginSuccessf(t, h, hh.cfgPtr, ak, b32, nonce, "", "")
+	if len(lr.sessionSK) != 32 {
+		t.Fatalf("垃圾 nonce 后登录 session SK 长度 = %d, want 32", len(lr.sessionSK))
+	}
+}
+
+// TestLogin_PoolPruneOnConsume 验证 nonce 池登录侧淘汰（M16）：插入过期 nonce 后 login
+// 消费触发惰性清理（池大小收缩断言）。
+func TestLogin_PoolPruneOnConsume(t *testing.T) {
+	hh, h, _, _ := newTOTPTestServer(t, nil, nil)
+	ak, b32 := registerTOTPFor(t, h, "")
+	nonce := obtainNonce(t, h, loopRemoteV4)
+	before := hh.totpNoncePool.size()
+
+	// 篡改该 nonce 过期时间为过去（模拟过期）→ login 消费路径应惰性清掉它。
+	hh.totpNoncePool.mu.Lock()
+	if e, ok := hh.totpNoncePool.m[nonce]; ok {
+		e.expiresAt = time.Now().Add(-time.Second)
+		hh.totpNoncePool.m[nonce] = e
+	}
+	hh.totpNoncePool.mu.Unlock()
+
+	now := time.Now()
+	code, _ := totpCodeFor(t, b32, now)
+	_, _ = serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{"ak": ak, "nonce": nonce, "code": code}))
+	after := hh.totpNoncePool.size()
+	if after >= before {
+		t.Errorf("消费过期 nonce 后池大小 = %d, want < %d（惰性清理应收缩）", after, before)
+	}
+}
+
+// TestLogin_TTLServersideAndScenarios 验证 TTL 服务端控 + 分场景（D3）：
+//   - login_type 缺省（web）→ session_expires_at == now+SessionTTL；
+//   - login_type=cli → == now+CliTTL；
+//   - 客户端 body 带 ttl 字段被忽略（不改 session TTL）；
+//   - session 条目在 ExpiresAt 后签名 → 401（ring 注入 now 前进使条目过期）。
+func TestLogin_TTLServersideAndScenarios(t *testing.T) {
+	fixed := time.Now()
+	var mu sync.Mutex
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return fixed }
+	ring := accesskey.NewRing(clock)
+	_, h, cfgPtr, _ := newTOTPTestServer(t, func(c *Config) {
+		c.Registration.SessionTTL = 24 * time.Hour
+		c.Registration.CliTTL = 7 * 24 * time.Hour
+	}, ring)
+	ak, b32 := registerTOTPFor(t, h, "")
+
+	// web（缺省）→ SessionTTL。
+	nonceW := obtainNonce(t, h, loopRemoteV4)
+	lrW := loginSuccessf(t, h, cfgPtr, ak, b32, nonceW, "", "")
+	wantW := fixed.Add(24 * time.Hour)
+	if d := lrW.resp.SessionExpiresAt.Sub(wantW); d > time.Second || d < -time.Second {
+		t.Errorf("web 缺省 session_expires_at = %v, want ≈ %v", lrW.resp.SessionExpiresAt, wantW)
+	}
+
+	// login_type=cli → CliTTL。
+	nonceC := obtainNonce(t, h, loopRemoteV4)
+	lrC := loginSuccessf(t, h, cfgPtr, ak, b32, nonceC, "cli", "")
+	wantC := fixed.Add(7 * 24 * time.Hour)
+	if d := lrC.resp.SessionExpiresAt.Sub(wantC); d > time.Second || d < -time.Second {
+		t.Errorf("cli session_expires_at = %v, want ≈ %v", lrC.resp.SessionExpiresAt, wantC)
+	}
+
+	// 客户端 body 带 ttl 字段被忽略（无白名单字段）→ 仍 web TTL。
+	nonceT := obtainNonce(t, h, loopRemoteV4)
+	codeT, _ := totpCodeFor(t, b32, fixed)
+	stT, bodyT := serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{
+		"ak": ak, "nonce": nonceT, "code": codeT, "ttl": "100h",
+	}))
+	if stT != http.StatusOK {
+		t.Fatalf("带 ttl 字段登录 status = %d, want 200 (body=%s)", stT, bodyT)
+	}
+	var lrT loginResp
+	_ = json.Unmarshal(bodyT, &lrT)
+	if d := lrT.SessionExpiresAt.Sub(wantW); d > time.Second || d < -time.Second {
+		t.Errorf("ttl 字段后 session_expires_at = %v, want ≈ web TTL %v（ttl 被忽略）", lrT.SessionExpiresAt, wantW)
+	}
+
+	// session 条目在 ExpiresAt 后签名 → 401（ring 注入 now 前进到条目过期后）。
+	mu.Lock()
+	fixed = lrC.resp.SessionExpiresAt.Add(time.Second)
+	mu.Unlock()
+	st, body := signedGetWithSKID(t, h, "/api/credentials/"+ak+"/sk", ak, lrC.sessionSkeyID, hex.EncodeToString(lrC.sessionSK))
+	if st == http.StatusOK {
+		t.Fatalf("过期 session 签名应 401，却 200 (body=%s)", body)
+	}
+}
+
+// TestLogin_UnknownLoginType_400 验证 login_type 未知值 → 400（M8/M16）。
+func TestLogin_UnknownLoginType_400(t *testing.T) {
+	_, h, _, _ := newTOTPTestServer(t, nil, nil)
+	ak, b32 := registerTOTPFor(t, h, "")
+	nonce := obtainNonce(t, h, loopRemoteV4)
+	now := time.Now()
+	code, _ := totpCodeFor(t, b32, now)
+	st, body := serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{
+		"ak": ak, "nonce": nonce, "code": code, "login_type": "mobile",
+	}))
+	if st != http.StatusBadRequest {
+		t.Fatalf("未知 login_type status = %d, want 400 (body=%s)", st, body)
+	}
+}
+
+// TestLogin_SessionPruneOnAdd 验证 session 条目惰性修剪（M11）：多次登录后该 AK 过期
+// session 条目被清除（仅保留存活条目）。ring 注入 now——先签近过期 session，再推进 now
+// 使其过期，再次登录时旧过期条目应被剪掉。
+func TestLogin_SessionPruneOnAdd(t *testing.T) {
+	start := time.Now().Truncate(time.Second)
+	var mu sync.Mutex
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return start }
+	ring := accesskey.NewRing(clock)
+	hh, h, cfgPtr, _ := newTOTPTestServer(t, func(c *Config) {
+		// 短 session TTL 让测试快速制造过期条目。
+		c.Registration.SessionTTL = time.Hour
+		c.Registration.CliTTL = 2 * time.Hour
+	}, ring)
+	ak, b32 := registerTOTPFor(t, h, "")
+
+	// 两次登录（code 按注入时钟 start 复算）→ 2 条活跃 session 条目。
+	getNow := func() time.Time { mu.Lock(); defer mu.Unlock(); return start }
+	n1 := obtainNonce(t, h, loopRemoteV4)
+	_ = loginSuccessAt(t, h, cfgPtr, ak, b32, n1, "", "", getNow())
+	n2 := obtainNonce(t, h, loopRemoteV4)
+	_ = loginSuccessAt(t, h, cfgPtr, ak, b32, n2, "", "", getNow())
+	k, _ := hh.credentialRing.GetKey(ak)
+	if len(k.Entries) != 2 {
+		t.Fatalf("两次登录后条目数 = %d, want 2", len(k.Entries))
+	}
+
+	// 阶段 2：推进 now 使此前两条 session 条目全部过期（SessionTTL=1h，均为
+	// T0+60m；now=T0+120m > expires）。第三次登录追加前剪掉全部过期条目 →
+	// 剩 [新增]=1 条。
+	mu.Lock()
+	start = start.Add(2 * time.Hour)
+	mu.Unlock()
+	n3 := obtainNonce(t, h, loopRemoteV4)
+	_ = loginSuccessAt(t, h, cfgPtr, ak, b32, n3, "", "", getNow())
+	k2, _ := hh.credentialRing.GetKey(ak)
+	if len(k2.Entries) != 1 {
+		t.Errorf("第三次登录应剪掉全部过期条目, 剩余 = %d, want 1（仅存活新增）", len(k2.Entries))
+	}
+
+	// 阶段 3：推进 now 超过新增条目 ExpiresAt（now=T0+120m+2h > expires3=T0+120m+1h）。
+	// 再登录触发同样修剪 → 恒只剩新增 1 条（Entries 不累积）。
+	mu.Lock()
+	start = start.Add(2 * time.Hour)
+	mu.Unlock()
+	n4 := obtainNonce(t, h, loopRemoteV4)
+	_ = loginSuccessAt(t, h, cfgPtr, ak, b32, n4, "", "", getNow())
+	k3, _ := hh.credentialRing.GetKey(ak)
+	if len(k3.Entries) != 1 {
+		t.Errorf("阶段 3 登录后全部过期条目应被剪掉, 剩余 = %d, want 1", len(k3.Entries))
+	}
+}
+
+// TestLogin_EmptyAKTrackerskip 验证空 AK 不登记失败锁定（防 map 污染 DoS）：
+// 空 AK + 垃圾/未知 nonce → 401 不计失败；登录返回 401 而非 500。
+func TestLogin_EmptyAKTrackerskip(t *testing.T) {
+	_, h, _, _ := newTOTPTestServer(t, nil, nil)
+	st, body := serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{
+		"ak": "", "nonce": "deadbeefdeadbeefdeadbeefdeadbeef", "code": "123456",
+	}))
+	if st == http.StatusOK {
+		t.Fatalf("空 AK 登录不得成功 (body=%s)", body)
+	}
 }

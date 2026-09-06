@@ -137,6 +137,18 @@ type Handlers struct {
 	// totpLimiter 是 TOTP 登录 + nonce 端点共用的独立限频器（10/min，D6/M1）。
 	// 公开端点的暴力破解防线，与 registerLimiter 隔离配额。
 	totpLimiter *RateLimiter
+	// loginFailTracker 是 per-AK TOTP 登录失败锁定表（U4）：map[ak]→
+	// {failCount, lockedUntil} + mutex。连续失败达 cfg.Registration.LoginFailLimit
+	// → 锁定 LoginFailWindow（锁定期内该 AK 登录一律 401，含正确动态码，不随 IP
+	// 变化失效）；登录成功清零。map 上限 1024 + 惰性清理（R2-N1）——插入时若已达
+	// 上限，先剪掉 lockedUntil 已过期的条目，仍满则淘汰最早插入条目，防 map 无界
+	// 增长。空 AK 键跳过（不登记）。登录失败计数语义（R2-N2）见 register_handler.go
+	// recordLoginFailure 注释。
+	loginFailTracker *loginFailTracker
+	// loginLimiter 是 POST /api/credentials/login 的独立限频器（10/min；与
+	// totpLimiter 语义同级，独立实例避免 nonce 签发与登录消费互相挤压配额，
+	// D6/M1）。公开端点，无 authMiddleware。
+	loginLimiter *RateLimiter
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -519,6 +531,9 @@ type RegisterRoutesOpts struct {
 	// 请求数；0 = 默认 10/min）。与 AllowInsecureLoopback 同为一次性读取的测试瞬态，
 	// 不写入 cfg（避免 SIGHUP/cfgPtr 并发覆盖污染）。
 	TotpRateLimit int
+	// LoginRateLimit 是 login_limiter 的测试专用瞬态覆盖（每分钟请求数；
+	// 0 = 默认 10/min）。同 TotpRateLimit 语义，供登录黑盒测试避免过早限流。
+	LoginRateLimit int
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -578,6 +593,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		totpNoncePool: newTotpNoncePool(),
 		tracer:        opts.Tracer,
 		auditRing:     auditRing,
+		// per-AK 失败锁定表（U4）：恒装配（登录端点存在即需；上限 + 惰性清理见
+		// loginFailTracker 注释）。
+		loginFailTracker: newLoginFailTracker(),
 		// 测试注入空 Ring 时的无认证调试兜底（一次性读取；生产走 cfg.AllowInsecureLoopback）。
 		allowInsecureLoopback: opts.AllowInsecureLoopback,
 	}
@@ -714,6 +732,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// nonce 端点 localMux 侧：登录前置步骤须在隧道模式下可达（M1）；与主 mux 共用
 	// 同一 totpLimiter 实例（login+nonce 共配额，任务⑨ login 挂同实例）。
 	localMux.Handle("POST /api/credentials/nonce", h.totpLimiter.Middleware(http.HandlerFunc(h.nonceHandler)))
+	// 登录端点 localMux 侧：TOTP 登录须在浏览器隧道模式下可达（M1）；与主 mux
+	// 共用同一 loginLimiter 实例。
+	localMux.Handle("POST /api/credentials/login", h.loginLimiter.Middleware(http.HandlerFunc(h.loginCredentialHandler)))
 	localMux.HandleFunc("GET /api/credentials", h.akListHandler)
 	localMux.HandleFunc("POST /api/credentials", h.akAddHandler)
 	localMux.HandleFunc("DELETE /api/credentials/{ak}", h.akDeleteHandler)
@@ -959,6 +980,18 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	}
 	h.totpLimiter = NewRateLimiter(totpPerMin, time.Minute, log.With("component", "totp_limiter"))
 	srvMux.Handle("POST /api/credentials/nonce", h.totpLimiter.Middleware(http.HandlerFunc(h.nonceHandler)))
+
+	// TOTP 登录端点（task 9）：公开端点 + 独立限频 loginLimiter（与 totpLimiter
+	// 隔离配额——nonce 签发是预注册前的低频步骤，登录是高频爆破面，共用一个配额
+	// 会让 nonce 签发挤掉登录防御预算），不包 authMiddleware。loginLimiter 须在
+	// localMux 装配之前创建（与 registerLimiter/totpLimiter 同法，localMux 侧复用
+	// 同一实例）。
+	loginPerMin := 10
+	if opts.LoginRateLimit > 0 {
+		loginPerMin = opts.LoginRateLimit
+	}
+	h.loginLimiter = NewRateLimiter(loginPerMin, time.Minute, log.With("component", "login_limiter"))
+	srvMux.Handle("POST /api/credentials/login", h.loginLimiter.Middleware(http.HandlerFunc(h.loginCredentialHandler)))
 
 	// 凭据管理 API（主 mux：SproxySig auth）。全部走 authMiddleware 保护，
 	// 与 audit/cloud/sync 同模式（本人 set 端点用 ActorFrom(ctx) 判定）。
