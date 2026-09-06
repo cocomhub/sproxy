@@ -22,9 +22,8 @@ import (
 //   - 本人操作（renew / 查询/删除/过期自己 AK 的 sk 条目）：认证通过即视为本人——
 //     Ring 的 SK 条目即访问凭据，能签名访问即持有某 SK，等价于该 AK 的所有者。
 //   - admin-only（GET /api/credentials 全量列表 / POST 新增 AK / DELETE 整个 AK）：
-//     依赖 ring 中某 AK 的存活条目 Meta.Type=="admin" 判定（getRole）。4A 未引入
-//     Role 字段（4B 预留，SKEntry.Meta 已可承载），因此 4A 部署下无 admin 条目 →
-//     admin-only 端点恒 403。4B 注册产生的 admin 条目会自动沿用本约定。
+//     依赖账号级 `Key.Role=="admin"` 判定（getRole，4B-1 起，DEC-A）。4A 无 role 字段
+//     的旧数据载入时由 Replace 归一为 RoleUser → admin-only 端点恒 403。
 
 // 审计 action 常量（凭据管理域）。
 const (
@@ -68,30 +67,25 @@ func (h *Handlers) credentialTTLFromCfg() time.Duration {
 	return ttl
 }
 
-// getRole 返回请求者在凭据 Ring 中的角色。
+// getRole 返回请求者在凭据 Ring 中的账号级角色。
 //
-// 角色判定（4A 约定）：遍历 ring 中该 AK 下全部存活（alive）条目，任一条目满足
-// `entry.Meta.Type=="admin"` 即视为 admin。4B 注册（/api/credentials POST）产生的
-// admin 条目自动沿用本约定；kind 不强制（plain 形如 "admin" 的条目同样生效，测试/
-// 管理手工导入便利）。4A 无 admin 条目 → 恒返回 user。AK 不存在或全部条目非存活亦
-// 返回 user。
-//
-// 注意：不新增 Key/SKEntry 的 Role 字段（保持 4A 最小）。admin 角色是操作级判定，
-// 逐请求调用，不做缓存（避免删除 admin 条目后角色滞留）。
+// 角色判定（4B-1 起，DEC-A）：读 `ring.GetKey(ak).Role`（账号级 Key.Role），
+// `Role==RoleAdmin` → "admin"，其余（user/node/空）→ 按 Key.Role 原值返回。
+// 不再遍历存活条目 `Meta.Type=="admin"`（Meta.Type 仅登录来源 provenance）。
+// AK 不存在 / ring 为 nil → "user"。admin 角色是操作级判定，逐请求实时，不缓存
+// （删除 admin 账号后角色立即失效）。
 func (h *Handlers) getRole(ak string) string {
 	if h.credentialRing == nil {
 		return "user"
 	}
-	entries, ok := h.credentialRing.Lookup(ak)
+	k, ok := h.credentialRing.GetKey(ak)
 	if !ok {
 		return "user"
 	}
-	for _, e := range entries {
-		if e.Meta.Type == "admin" {
-			return "admin"
-		}
+	if k.Role == "" {
+		return "user"
 	}
-	return "user"
+	return string(k.Role)
 }
 
 // renewCredentialRequest 是 POST /api/credentials/{ak}/renew 的请求体（白名单）。

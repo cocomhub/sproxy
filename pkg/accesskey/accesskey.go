@@ -70,6 +70,18 @@ const (
 	StatusDisabled Status = "disabled"
 )
 
+// Role 描述账号级角色（4B-1 新增，DEC-A）：持久化进 credentials.json 的 Key.Role 字段。
+type Role string
+
+const (
+	// RoleUser 默认（普通凭据用户，可进行文件操作）。
+	RoleUser Role = "user"
+	// RoleNode mesh/hub/relay 节点账号（文件操作无 node）。
+	RoleNode Role = "node"
+	// RoleAdmin 管理角色（首注册自动授予；同一 ring 无法经注册新增其他 admin）。
+	RoleAdmin Role = "admin"
+)
+
 // sentinel 哨兵错误：调用方（auth / 验证 / 管理端点）据此精确区分失败类型。
 var (
 	// ErrNotFound 条目（AK 或 SK）不存在（404 语义）。
@@ -82,6 +94,8 @@ var (
 	ErrInvalidSecret = errors.New("accesskey: invalid secret length")
 	// ErrInvalidAK AK 非法（空串等）。
 	ErrInvalidAK = errors.New("accesskey: invalid access key")
+	// ErrRegistrationRequiresSecret 注册必须提供 sk 或 totpSecret 之一（不能双 nil）。
+	ErrRegistrationRequiresSecret = errors.New("accesskey: registration requires sk or totpSecret")
 )
 
 // Meta 是 SK 条目的附加元信息（审计 / 展示用）。
@@ -121,6 +135,11 @@ type Key struct {
 	AK string
 	// Owner 该 AK 的归属者（租户 / 用户）。
 	Owner string
+	// Role 账号级角色（user/node/admin；旧 credentials.json 无 role 字段载入时
+	// 由 Replace 归一为 RoleUser，R3-M4）。
+	Role Role `json:"role"`
+	// TOTPSecret 4B-2：TOTP 注册时生成、账号级，随 Key 序列化落盘（简单模式为 nil）。
+	TOTPSecret []byte `json:"totp_secret,omitempty"`
 	// Entries 该 AK 挂载的全部 SK 条目。
 	Entries []SKEntry
 }

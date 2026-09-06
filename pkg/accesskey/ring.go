@@ -285,6 +285,8 @@ func (r *Ring) Snapshot() []Key {
 // Replace 用给定 Key 列表原子全量替换 ring 内容（用于 store 装载 / 快照还原）。
 // 每个 Key 的 AK 必须非空，否则返回 ErrInvalidAK 且整个替换不生效。
 // 入参被深拷贝，调用方随后修改不影响 ring。
+// 旧 credentials.json（4A 无 role 字段）载入时 Role 为空串——这里归一为 RoleUser
+// （R3-M4），显式 role 字段保留。
 func (r *Ring) Replace(keys []Key) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -296,10 +298,126 @@ func (r *Ring) Replace(keys []Key) error {
 	m := make(map[string]*Key, len(keys))
 	for _, k := range keys {
 		cp := cloneKey(&k)
+		if cp.Role == "" {
+			cp.Role = RoleUser
+		}
 		m[k.AK] = &cp
 	}
 	r.m = m
 	return nil
+}
+
+// GetKey 返回 AK 对应完整 Key 的深拷贝（含 Role / TOTPSecret）；不存在 → (nil, false)。
+//
+// I1：getRole 读 Key.Role 与登录 handler 取 TOTPSecret 的唯一访问路径（Lookup/GetEntry/
+// Snapshot 均拿不到含 Role 的整 Key）。调用方修改返回值不影响 ring。
+func (r *Ring) GetKey(ak string) (*Key, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	key, ok := r.m[ak]
+	if !ok {
+		return nil, false
+	}
+	cp := cloneKey(key)
+	return &cp, true
+}
+
+// AddRegistration 注册一个新账号（4B 简单模式 / TOTP 模式共用，DEC-A/DEC-B，I2）：
+//
+//   - sk 非 nil（简单模式）→ 写 Key.Role + 内联追加一条 plain SK 条目（ExpiresAt =
+//     now+ttl，ttl 由调用方注入——pkg/accesskey 不读服务端配置，R4-I1）；
+//   - totpSecret 非 nil（TOTP 模式）→ 写 Key.TOTPSecret，不追加 SK 条目（ttl 忽略），
+//     返回 id 为空串；
+//   - sk 与 totpSecret 必须恰有一个非 nil（双 nil → ErrRegistrationRequiresSecret，R3-M2）；
+//   - sk 非 nil 且非 32 字节 → ErrInvalidSecret。
+//
+// admin 授予由方法内原子判定覆盖（D2/I2/M5）：写锁内扫描全 ring 无 Key.Role=="admin"
+// → 本次授 RoleAdmin（首注册恒 admin，无论入参）；已有 admin → 本次 RoleUser（非首注册
+// 传 RoleAdmin 降级为 RoleUser；RoleNode/RoleUser 入参按原值）。已为 admin 的账号重复
+// 注册保持 admin。granted = 本次是否授予 admin；id = 简单模式新建 SK 条目 ID。
+//
+// owner 空值默认 = AK 字符串（R2-N4）。
+//
+// 注意：方法持有写锁期间内联完成 Key 建立 + 条目追加，不得重入 UpsertAK/AddKey
+// （sync.RWMutex 不可重入，持写锁再调会死锁，M5）。
+func (r *Ring) AddRegistration(ak, owner string, sk, totpSecret []byte, role Role, ttl time.Duration) (granted bool, id string, err error) {
+	// sk 与 totpSecret 恰有一个非 nil（双 nil → error，R3-M2）。
+	if (sk == nil) == (totpSecret == nil) {
+		return false, "", ErrRegistrationRequiresSecret
+	}
+	if ak == "" {
+		return false, "", ErrInvalidAK
+	}
+	if owner == "" {
+		owner = ak // R2-N4
+	}
+	if sk != nil && len(sk) != 32 {
+		return false, "", ErrInvalidSecret
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// 扫描全 ring：是否已有 admin（决定本次授予角色）。
+	hasAdmin := false
+	for _, k := range r.m {
+		if k.Role == RoleAdmin {
+			hasAdmin = true
+			break
+		}
+	}
+
+	now := r.now()
+	key, exists := r.m[ak]
+	if !exists {
+		key = &Key{AK: ak, Owner: owner}
+		r.m[ak] = key
+	} else {
+		key.Owner = owner
+	}
+
+	// 角色决定（granted = 是否授予 admin）：
+	//   1. 该 AK 已是 admin（重复注册）→ 保持 admin；
+	//   2. 全 ring 无 admin → 首注册恒授 admin（无论入参）；
+	//   3. 入参请求 admin → 降级 user（不可经注册产生第二个 admin）；
+	//   4. 其余按入参（user/node），空值归一 user。
+	switch {
+	case key.Role == RoleAdmin:
+		granted = true
+	case !hasAdmin:
+		key.Role = RoleAdmin
+		granted = true
+	case role == RoleAdmin:
+		key.Role = RoleUser
+		granted = false
+	default:
+		if role == "" {
+			role = RoleUser
+		}
+		key.Role = role
+		granted = false
+	}
+
+	if totpSecret != nil {
+		// TOTP 模式：只写账号级 TOTPSecret，无 SK 条目，ttl 忽略。
+		key.TOTPSecret = cloneBytes(totpSecret)
+		return granted, "", nil
+	}
+
+	// 简单模式：内联追加 plain SK 条目（ExpiresAt = now + ttl，R4-I1）。
+	e := SKEntry{
+		SK:        cloneBytes(sk),
+		Kind:      KindPlain,
+		Status:    StatusActive,
+		CreatedAt: now,
+		ExpiresAt: now.Add(ttl),
+	}
+	e.ID, err = newEntryID()
+	if err != nil {
+		return false, "", fmt.Errorf("accesskey: add registration: %w", err)
+	}
+	key.Entries = append(key.Entries, e)
+	return granted, e.ID, nil
 }
 
 // Len 返回已登记 AK 数量（ring 判空用，如 authMiddleware 无凭据兜底）。
@@ -309,13 +427,29 @@ func (r *Ring) Len() int {
 	return len(r.m)
 }
 
-// cloneKey 深拷贝 Key（Entries 的 SK 底层字节一并复制）。
+// cloneKey 深拷贝 Key（Role/TOTPSecret 与 Entries 的 SK 底层字节一并复制）。
 func cloneKey(k *Key) Key {
-	cp := Key{AK: k.AK, Owner: k.Owner, Entries: make([]SKEntry, 0, len(k.Entries))}
+	cp := Key{
+		AK:         k.AK,
+		Owner:      k.Owner,
+		Role:       k.Role,
+		TOTPSecret: cloneBytes(k.TOTPSecret),
+		Entries:    make([]SKEntry, 0, len(k.Entries)),
+	}
 	for _, e := range k.Entries {
 		cp.Entries = append(cp.Entries, cloneEntry(e))
 	}
 	return cp
+}
+
+// cloneBytes 深拷贝字节切片（nil 保持 nil，避免空切片与 nil 语义漂移）。
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
 }
 
 // cloneEntry 深拷贝 SKEntry（复制 SK 底层字节，避免共享切片）。
