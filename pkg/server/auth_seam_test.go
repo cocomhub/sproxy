@@ -293,6 +293,7 @@ func TestRequireRole_Matrix(t *testing.T) {
 		{"admin 组拒绝 user", &Principal{Role: string(accesskey.RoleUser)}, string(accesskey.RoleAdmin), errForbidden},
 		{"admin 组拒绝 node", &Principal{Role: string(accesskey.RoleNode)}, string(accesskey.RoleAdmin), errForbidden},
 		{"未知角色按最低档（user 组拒绝）", &Principal{Role: "superuser"}, string(accesskey.RoleUser), errForbidden},
+		{"未知 minRole fail-closed", &Principal{Role: string(accesskey.RoleAdmin)}, "owener", errForbidden},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -506,6 +507,108 @@ func TestAuthSeam_ChainFailureContinuesToNext(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("链首失败后续尝试 GET /api/files status = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestAuthSeam_HostAuthenticator_NilPrincipalContinue 验证宿主 Authenticator 违反接口
+// 契约返回 (nil, nil) 时链内跳过该成员（不 panic 不解引用），后续成员仍可认证成功
+// （与 R4-I3 链失败继续语义一致）。
+func TestAuthSeam_HostAuthenticator_NilPrincipalContinue(t *testing.T) {
+	cfgPtr := &atomic.Pointer[Config]{}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr}
+	h.authenticators = []Authenticator{
+		&fakeAuthenticator{principal: nil, err: nil}, // 违反契约：(nil, nil)
+		&fakeAuthenticator{principal: &Principal{AK: "ext-user-1", Role: string(accesskey.RoleUser)}},
+	}
+	called := false
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := h.authMiddleware(inner)
+
+	r := httptest.NewRequest("GET", "/api/files", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200（nil principal 成员被跳过，后续成员认证成功）", w.Code)
+	}
+	if !called {
+		t.Fatal("后续成员认证成功后应放行 next")
+	}
+}
+
+// ---- 显式空链 replace 语义（Minor 2 修复）----
+
+// TestAuthSeam_EmptyChain_RespectedReplace 验证显式注入空链（[]Authenticator{}）不被
+// 默认链覆盖：空链 = 无任何 authenticator → 所有请求未认证，走 handleNoCredentials
+// 兜底（ring 空 + allow_insecure_loopback → 回环直通 200）。
+func TestAuthSeam_EmptyChain_RespectedReplace(t *testing.T) {
+	url, _, _ := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
+		noAuth := defaultNoAuthRegOpts()
+		opts.CredentialRing = noAuth.CredentialRing // 空 Ring
+		opts.CredentialStore = nil
+		opts.AllowInsecureLoopback = noAuth.AllowInsecureLoopback
+		opts.Authenticators = []Authenticator{} // 显式空链（非 nil）→ replace 为空
+	})
+
+	// 回环来源（httptest 恒回环）→ handleNoCredentials 兜底直通 → 200。
+	resp, err := http.Get(url + "/api/files")
+	if err != nil {
+		t.Fatalf("GET /api/files: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("空链 + 回环 GET /api/files status = %d, want 200（handleNoCredentials 兜底）", resp.StatusCode)
+	}
+}
+
+// TestAuthSeam_EmptyChain_NoAuthEvenWithSignature 是空链语义的判别性测试：即使带合法
+// SproxySig 签名（默认链 RingAuthenticator 会认证成功 → 200），空链下也无任何
+// authenticator → 未认证（ring 非空 → 401）。此用例在修复前（空链被静默回退默认链）
+// 会返回 200，修复后 401。
+func TestAuthSeam_EmptyChain_NoAuthEvenWithSignature(t *testing.T) {
+	url, _, _ := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
+		withTestCreds(opts)                     // 非空 Ring：testAccessKey
+		opts.Authenticators = []Authenticator{} // 显式空链（非 nil）→ replace 默认链为空
+	})
+
+	req, _ := http.NewRequest("GET", url+"/api/files", nil)
+	signRequest(req, testAccessKey, testAccessSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/files: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("空链 + 合法签名 GET /api/files status = %d, want 401（空链无任何 authenticator，不被默认链覆盖）", resp.StatusCode)
+	}
+}
+
+// TestAuthSeam_EmptyChain_NonLoopback401 白盒验证显式空链 + 非回环来源 → 401。
+func TestAuthSeam_EmptyChain_NonLoopback401(t *testing.T) {
+	cfgPtr := &atomic.Pointer[Config]{}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, credentialRing: emptyTestRing()}
+	h.authenticators = []Authenticator{} // 显式空链
+	called := false
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+	})
+	handler := h.authMiddleware(inner)
+
+	r := httptest.NewRequest("GET", "/api/files", nil)
+	r.RemoteAddr = "192.168.1.5:9999" // 非回环来源
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("空链 + 非回环 status = %d, want 401", w.Code)
+	}
+	if called {
+		t.Fatal("空链 + 非回环不应放行")
 	}
 }
 

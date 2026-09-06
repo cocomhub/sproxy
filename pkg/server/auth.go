@@ -331,7 +331,8 @@ var (
 // 属于 user 组。minRole 参数指明目标门禁组：
 //   - minRole=user（文件组）→ 放行 user/admin，拒绝 node；
 //   - minRole=node（mesh 组）→ 放行 node/admin，拒绝 user；
-//   - minRole=admin → 仅放行 admin。
+//   - minRole=admin → 仅放行 admin；
+//   - 未知 minRole（拼错组名等）→ **fail-closed 拒绝（403）**，防未来接线意外放行。
 //
 // Role 空值归一 RoleUser 后判定（R3-M4，含 UpsertAK 直建的空 Role key——经 GetKey
 // 读 Role 后归一，与 getRole 语义一致）。principal 为 nil（未认证且非回环直通）→
@@ -348,18 +349,21 @@ func requireRole(principal *Principal, minRole string) error {
 		role = string(accesskey.RoleUser)
 	}
 	switch minRole {
-	case string(accesskey.RoleNode):
-		if role == string(accesskey.RoleNode) || role == string(accesskey.RoleAdmin) {
-			return nil
-		}
-	case string(accesskey.RoleAdmin):
-		if role == string(accesskey.RoleAdmin) {
-			return nil
-		}
-	default: // minRole=user（文件操作组）：放行 user/admin，拒绝 node
+	case string(accesskey.RoleUser): // 文件操作组：放行 user/admin，拒绝 node
 		if role == string(accesskey.RoleUser) || role == string(accesskey.RoleAdmin) {
 			return nil
 		}
+	case string(accesskey.RoleNode): // mesh/hub 组：放行 node/admin，拒绝 user
+		if role == string(accesskey.RoleNode) || role == string(accesskey.RoleAdmin) {
+			return nil
+		}
+	case string(accesskey.RoleAdmin): // admin 组：仅放行 admin
+		if role == string(accesskey.RoleAdmin) {
+			return nil
+		}
+	default:
+		// 未知 minRole（拼错组名等）→ fail-closed 拒绝（403），防未来接线意外放行。
+		return errForbidden
 	}
 	return errForbidden
 }
@@ -522,9 +526,12 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		// 认证；handleNoCredentials 只是「链全失败且 ring 空」的最终兜底。
 		//
 		// 兼容直接构造 Handlers（不经 RegisterRoutes 装配）的既有调用方（单元测试 /
-		// 旧嵌入）：authenticators 为空且 ring 非 nil 时回退默认链 [RingAuthenticator]。
+		// 旧嵌入）：authenticators 字段为 nil（未装配）且 ring 非 nil 时回退默认链
+		// [RingAuthenticator]。注意：**显式注入的空链（非 nil 空切片）不回退**——
+		// 语义为「无任何 authenticator → 所有请求未认证」（走 handleNoCredentials
+		// 兜底），宿主 replace 成空链不得被默认链覆盖。
 		authenticators := h.authenticators
-		if len(authenticators) == 0 && h.credentialRing != nil {
+		if h.authenticators == nil && h.credentialRing != nil {
 			authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool)}
 		}
 		if len(authenticators) > 0 {
@@ -533,6 +540,12 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 				principal, aerr := a.Authenticate(r.Context(), r)
 				if aerr != nil {
 					lastErr = aerr
+					continue
+				}
+				if principal == nil {
+					// 防御：宿主 Authenticator 违反接口契约返回 (nil, nil)——跳过该
+					// 成员继续尝试后续（与 R4-I3 链失败继续语义一致），不 panic。
+					lastErr = fmt.Errorf("auth: %s authenticator returned nil principal", a.Name())
 					continue
 				}
 				h.authenticated(w, r, principal, next)
@@ -551,7 +564,8 @@ func (h *Handlers) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// 防御：认证链未装配且 ring 为 nil（正常不可达）→ 无认证兜底。
+		// 防御：认证链未装配且 ring 为 nil，或显式空链（正常为前者；空链语义 =
+		// 无任何 authenticator → 未认证）→ 无认证兜底。
 		h.handleNoCredentials(w, r, cfg, next)
 	}
 }

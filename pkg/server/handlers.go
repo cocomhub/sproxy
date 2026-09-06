@@ -595,7 +595,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.bootstrapCredentials(opts)
 
 	// 认证链装配（DEC-C）：宿主注入的 Authenticators 非 nil → replace 默认链（宿主
-	// 全权掌控，需含 RingAuthenticator 则自行加入，R3-I2）；nil → 默认
+	// 全权掌控，需含 RingAuthenticator 则自行加入，R3-I2）。**显式注入空链（非 nil
+	// 空切片）同样尊重**——空链 = 无任何 authenticator → 所有请求未认证（authMiddleware
+	// 走 handleNoCredentials 兜底，不被默认链覆盖）；nil（未注入）→ 默认
 	// [RingAuthenticator{credentialRing}]（R3-I1：4A 默认行为零回归）。
 	if opts.Authenticators != nil {
 		h.authenticators = opts.Authenticators
