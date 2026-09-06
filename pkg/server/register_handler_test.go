@@ -5,12 +5,14 @@ package server
 
 import (
 	"bytes"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +40,15 @@ func newRegisterTestServer(t *testing.T, mod func(*Config)) (http.Handler, *atom
 // newRegisterTestServerWithRing 用显式 Ring 装配（nil → 空 Ring）。
 func newRegisterTestServerWithRing(t *testing.T, ring *accesskey.Ring, mod func(*Config)) (http.Handler, *atomic.Pointer[Config], *accesskey.Ring) {
 	t.Helper()
+	h, cfgPtr, outRing := newRegisterHandlers(t, ring, mod)
+	return h.Handler(), cfgPtr, outRing
+}
+
+// newRegisterHandlers 是装配低层：返回 *Handlers（不包 Handler()），供需要白盒
+// 访问 Handlers 字段（如 totpNoncePool）的测试使用。行为与 newRegisterTestServer
+// 一致（零凭据空 Ring 待注册）。
+func newRegisterHandlers(t *testing.T, ring *accesskey.Ring, mod func(*Config)) (*Handlers, *atomic.Pointer[Config], *accesskey.Ring) {
+	t.Helper()
 	tmpDir := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = tmpDir
@@ -58,10 +69,13 @@ func newRegisterTestServerWithRing(t *testing.T, ring *accesskey.Ring, mod func(
 		BuildAt:        "test-buildat",
 		Logger:         testLogger(),
 		CredentialRing: ring,
+		// nonce 池上限语义验证需连发 >4096 次，totpLimiter(10/min) 会过早限流——
+		// 限频高低与池语义无关，测试注入高阈值瞬态。
+		TotpRateLimit: 100000,
 	}
 	h := RegisterRoutes(t.Context(), opts)
 	t.Cleanup(func() { _ = h.Close() })
-	return h.Handler(), &cfgPtr, ring
+	return h, &cfgPtr, ring
 }
 
 // serveRegister 直接对 handler 发 register 请求（RemoteAddr 由调用方指定）。
@@ -791,4 +805,317 @@ func TestRegister_NoAuthUnauthorizedOther(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("无凭据 GET /api/credentials 应 401, got %d", w.Code)
 	}
+}
+
+// ---- TOTP 注册分支（force_totp）----
+
+// totpRegistered 是 force_totp 模式 register 响应体（无 sk 字段）。
+type totpRegistered struct {
+	AK           string `json:"ak"`
+	Owner        string `json:"owner"`
+	Admin        bool   `json:"admin"`
+	OTPAuthURI   string `json:"otpauth_uri"`
+	Base32Secret string `json:"base32_secret"`
+}
+
+// serveNonce 对 handler 发 nonce 请求（RemoteAddr 由调用方指定）。
+func serveNonce(t *testing.T, h http.Handler, remoteAddr string, body []byte) (int, []byte) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/credentials/nonce", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	if remoteAddr != "" {
+		req.RemoteAddr = remoteAddr
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w.Code, w.Body.Bytes()
+}
+
+// TestRegisterTOTP_Success 验证 force_totp=true 注册成功：回环来源 → 200，
+// 响应含 {ak, admin:true, otpauth_uri, base32_secret} 且**无 sk 字段**；AK 形态
+// ak-<32hex>；otpauth URI 含 secret=<base32>；base32_secret 无 padding 且能按
+// base32 解码回约 20B；GetKey(ak).TOTPSecret 非 nil 且 20B。
+func TestRegisterTOTP_Success(t *testing.T) {
+	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
+
+	st, body := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"totp1"}`))
+	if st != http.StatusOK {
+		t.Fatalf("TOTP 注册 status = %d, want 200 (body=%s)", st, body)
+	}
+	var p totpRegistered
+	if err := json.Unmarshal(body, &p); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, body)
+	}
+	if !accesskey.IsValidAK(p.AK) || !strings.HasPrefix(p.AK, accesskey.AccessKeyPrefix) ||
+		len(p.AK) != len(accesskey.AccessKeyPrefix)+accesskey.AccessKeyHexLen*2 {
+		t.Errorf("AK 形态异常（应 ak-<32hex>）: %q", p.AK)
+	}
+	if !p.Admin {
+		t.Errorf("TOTP 首注册 admin = false, want true")
+	}
+	// 无 sk 字段：简单模式的 sk/skey_id 在 force_totp 响应中必须省略。
+	if bytes.Contains(body, []byte(`"sk":`)) {
+		t.Errorf("TOTP 注册响应不应含 sk 字段: %s", body)
+	}
+	if bytes.Contains(body, []byte(`"skey_id":`)) {
+		t.Errorf("TOTP 注册响应不应含 skey_id 字段: %s", body)
+	}
+	if p.OTPAuthURI == "" {
+		t.Errorf("otpauth_uri 为空")
+	}
+	if !strings.Contains(p.OTPAuthURI, "secret="+p.Base32Secret) {
+		t.Errorf("otpauth URI 应含 secret=<base32>（got uri=%q base32=%q）", p.OTPAuthURI, p.Base32Secret)
+	}
+	// base32 无 padding（不能被 '=' 填充），且可解码回 ≈20B（GenerateSecret）。
+	if strings.Contains(p.Base32Secret, "=") {
+		t.Errorf("base32_secret 不应有 padding: %q", p.Base32Secret)
+	}
+	decoded, derr := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(p.Base32Secret)
+	if derr != nil {
+		t.Fatalf("base32_secret 解码失败: %v (%q)", derr, p.Base32Secret)
+	}
+	if len(decoded) != 20 {
+		t.Errorf("base32_secret 解码长度 = %d, want 20（otp.GenerateSecret 20B）", len(decoded))
+	}
+
+	k, ok := ring.GetKey(p.AK)
+	if !ok {
+		t.Fatalf("ring 中无新 AK %q", p.AK)
+	}
+	if len(k.TOTPSecret) != 20 {
+		t.Errorf("Key.TOTPSecret 长度 = %d, want 20", len(k.TOTPSecret))
+	}
+}
+
+// TestRegisterTOTP_NoSKEntry 验证 TOTP 注册不建 SK 条目：GetKey(ak).Entries 为空。
+func TestRegisterTOTP_NoSKEntry(t *testing.T) {
+	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
+
+	st, body := serveRegister(t, h, loopRemoteV4, []byte(`{}`))
+	if st != http.StatusOK {
+		t.Fatalf("TOTP 注册 status = %d, want 200 (body=%s)", st, body)
+	}
+	var p totpRegistered
+	_ = json.Unmarshal(body, &p)
+	k, ok := ring.GetKey(p.AK)
+	if !ok {
+		t.Fatalf("ring 中无新 AK %q", p.AK)
+	}
+	if len(k.Entries) != 0 {
+		t.Errorf("TOTP 注册不应建 SK 条目, Entries=%+v", k.Entries)
+	}
+}
+
+// TestRegisterTOTP_FirstUserAdmin 验证 TOTP 模式首 user 即 admin、第二注册 admin=false。
+func TestRegisterTOTP_FirstUserAdmin(t *testing.T) {
+	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
+
+	_, b1 := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"first"}`))
+	var p1 totpRegistered
+	_ = json.Unmarshal(b1, &p1)
+	if !p1.Admin {
+		t.Errorf("TOTP 首注册 granted=false, want true")
+	}
+	if got := roleOf2(t, ring, p1.AK); got != "admin" {
+		t.Errorf("TOTP 首注册 getRole = %q, want admin", got)
+	}
+
+	_, b2 := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"second"}`))
+	var p2 totpRegistered
+	_ = json.Unmarshal(b2, &p2)
+	if p2.Admin {
+		t.Errorf("TOTP 第二注册 granted=true, want false")
+	}
+	if got := roleOf2(t, ring, p2.AK); got != "user" {
+		t.Errorf("TOTP 第二注册 getRole = %q, want user", got)
+	}
+}
+
+// TestRegisterTOTP_DefaultSimpleMode 验证 force_totp=false（默认）回归：简单模式仍
+// 返回 {sk, skey_id} 且无 otpauth 字段（force_totp 分支 + omitempty 互斥省略）。
+func TestRegisterTOTP_DefaultSimpleMode(t *testing.T) {
+	h, _, _ := newRegisterTestServer(t, nil) // ForceTOTP 默认 false
+
+	st, body := serveRegister(t, h, loopRemoteV4, []byte(`{}`))
+	if st != http.StatusOK {
+		t.Fatalf("默认简单模式注册 status = %d, want 200 (body=%s)", st, body)
+	}
+	var p registeredPair
+	if err := json.Unmarshal(body, &p); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, body)
+	}
+	if len(p.SK) != 64 {
+		t.Errorf("简单模式 sk 长度 = %d, want 64", len(p.SK))
+	}
+	if !strings.HasPrefix(p.SkeyID, accesskey.SkeyIDPrefix) {
+		t.Errorf("简单模式 skey_id = %q, want 前缀 %q", p.SkeyID, accesskey.SkeyIDPrefix)
+	}
+	if bytes.Contains(body, []byte(`"otpauth_uri"`)) || bytes.Contains(body, []byte(`"base32_secret"`)) {
+		t.Errorf("简单模式响应不应含 otpauth 字段: %s", body)
+	}
+}
+
+// TestRegisterTOTP_LoopbackGate 验证 U2：force_totp 分支同样受回环门禁（远程首注册 403）。
+func TestRegisterTOTP_LoopbackGate(t *testing.T) {
+	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
+
+	st, body := serveRegister(t, h, remoteNonLoop, []byte(`{}`))
+	if st != http.StatusForbidden {
+		t.Fatalf("TOTP 远程首注册 status = %d, want 403 (body=%s)", st, body)
+	}
+	if ring.Len() != 0 {
+		t.Errorf("TOTP 拒绝后 ring 不应新增凭据, len=%d", ring.Len())
+	}
+
+	// 回环注册成功后远程可再注册（admin 已存在）。
+	st4, _ := serveRegister(t, h, loopRemoteV4, []byte(`{}`))
+	if st4 != http.StatusOK {
+		t.Fatalf("TOTP 回环首注册 status = %d, want 200", st4)
+	}
+	stR, _ := serveRegister(t, h, remoteNonLoop, []byte(`{"owner":"remote"}`))
+	if stR != http.StatusOK {
+		t.Fatalf("TOTP 有 admin 后远程注册 status = %d, want 200", stR)
+	}
+}
+
+// ---- nonce 端点 ----
+
+// nonceResp 是 nonce 端点响应体。
+type nonceResp struct {
+	Nonce     string    `json:"nonce"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// TestNonceEndpoint_Success 验证 nonce 端点（force_totp=true）：POST → 200
+// {nonce, expires_at}；两次不同；零凭据窗口回环可达（TOTP 登录前置步骤）。
+func TestNonceEndpoint_Success(t *testing.T) {
+	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
+	if n := ring.Len(); n != 0 {
+		t.Fatalf("预置 = %d 个凭据, want 0（零凭据语义）", n)
+	}
+
+	st1, body1 := serveNonce(t, h, loopRemoteV4, []byte(`{}`))
+	if st1 != http.StatusOK {
+		t.Fatalf("nonce status = %d, want 200（零凭据窗口可达） (body=%s)", st1, body1)
+	}
+	var n1 nonceResp
+	if err := json.Unmarshal(body1, &n1); err != nil {
+		t.Fatalf("unmarshal nonce: %v (body=%s)", err, body1)
+	}
+	if len(n1.Nonce) != 32 {
+		t.Errorf("nonce 长度 = %d, want 32 hex (16B)", len(n1.Nonce))
+	}
+	if _, derr := hex.DecodeString(n1.Nonce); derr != nil {
+		t.Errorf("nonce 非 hex: %v", derr)
+	}
+	if n1.ExpiresAt.IsZero() {
+		t.Errorf("expires_at 为零值")
+	}
+
+	// 两次不同（16B 随机）。
+	st2, body2 := serveNonce(t, h, loopRemoteV4, []byte(`{}`))
+	if st2 != http.StatusOK {
+		t.Fatalf("nonce #2 status = %d, want 200 (body=%s)", st2, body2)
+	}
+	var n2 nonceResp
+	_ = json.Unmarshal(body2, &n2)
+	if n1.Nonce == n2.Nonce {
+		t.Errorf("两次 nonce 相同（应 16B 随机）: %q", n1.Nonce)
+	}
+}
+
+// TestNonceEndpoint_PoolCap 验证 nonce 池上限 4096（D5）：连续签发超过上限的 nonce
+// 全部 200（池满**淘汰最旧**而非拒绝），且池大小恒被钳到上限、最早签发者已被淘汰。
+func TestNonceEndpoint_PoolCap(t *testing.T) {
+	hh, _, _ := newRegisterHandlers(t, nil, func(c *Config) { c.Registration.ForceTOTP = true })
+	h := hh.Handler()
+
+	stFirst, bodyFirst := serveNonce(t, h, loopRemoteV4, []byte(`{}`))
+	if stFirst != http.StatusOK {
+		t.Fatalf("首个 nonce status = %d, want 200 (body=%s)", stFirst, bodyFirst)
+	}
+	var first nonceResp
+	_ = json.Unmarshal(bodyFirst, &first)
+
+	for i := 2; i <= maxTotpNoncePool+8; i++ {
+		st, body := serveNonce(t, h, loopRemoteV4, []byte(`{}`))
+		if st != http.StatusOK {
+			t.Fatalf("nonce #%d status = %d, want 200（池满应淘汰最旧而非拒绝） (body=%s)", i, st, body)
+		}
+	}
+
+	pool := hh.totpNoncePool
+	if pool == nil {
+		t.Fatalf("totpNoncePool 未装配（nil）")
+	}
+	if sz := pool.size(); sz != maxTotpNoncePool {
+		t.Errorf("池满后 size = %d, want %d（惰性淘汰钳制）", sz, maxTotpNoncePool)
+	}
+	if _, ok := pool.consume(first.Nonce, "127.0.0.1"); ok {
+		t.Errorf("最早 nonce 应被淘汰（池满后消费不命中）")
+	}
+}
+
+// TestNoncePool_ConsumeRejectsAllIPExceptIssuer 以白盒方式验证单次消费 + IP 绑定：
+// nonce 从某来源 IP 签发后，另一来源 IP 消费被拒、同 IP 消费成功且二次消费失败。
+// 入口 = h 的 totpNoncePool（RegisterRoutes 装配时非 nil）。
+func TestNoncePool_ConsumeRejectsAllIPExceptIssuer(t *testing.T) {
+	hh, _, _ := newRegisterHandlers(t, nil, func(c *Config) { c.Registration.ForceTOTP = true })
+	h := hh.Handler()
+	count := nonceCountFor(hh)
+	st, body := serveNonce(t, h, loopRemoteV4, []byte(`{}`))
+	if st != http.StatusOK {
+		t.Fatalf("nonce status = %d, want 200 (body=%s)", st, body)
+	}
+	var nr nonceResp
+	_ = json.Unmarshal(body, &nr)
+
+	pool := hh.totpNoncePool
+	if pool == nil {
+		t.Fatalf("totpNoncePool 未装配（nil）")
+	}
+	// 同来源 IP 首次消费成功。
+	if _, ok := pool.consume(nr.Nonce, normalizedTestIP(loopRemoteV4)); !ok {
+		t.Errorf("同来源 IP 消费 nonce 应成功（首次消费）")
+	}
+	// 二次消费（同 IP）失败——单次使用。
+	if _, ok := pool.consume(nr.Nonce, normalizedTestIP(loopRemoteV4)); ok {
+		t.Errorf("二次消费 nonce 应失败（单次使用）")
+	}
+
+	// IP 绑定：新签发一个 nonce，从另一来源 IP 消费拒绝……
+	st2, body2 := serveNonce(t, h, loopRemoteV4, []byte(`{}`))
+	if st2 != http.StatusOK {
+		t.Fatalf("nonce #2 status = %d, want 200 (body=%s)", st2, body2)
+	}
+	var nr2 nonceResp
+	_ = json.Unmarshal(body2, &nr2)
+	if _, ok := pool.consume(nr2.Nonce, "203.0.113.7"); ok {
+		t.Errorf("不同来源 IP 消费 nonce 应拒绝（IP 绑定）")
+	}
+	// ……且该次失败尝试已消费 nonce（D5「失败也消费」）——此后任何来源再消费都失败。
+	if _, ok := pool.consume(nr2.Nonce, normalizedTestIP(loopRemoteV4)); ok {
+		t.Errorf("被错误 IP 尝试后 nonce 不应可再用（失败也消费）")
+	}
+
+	if after := nonceCountFor(hh); after != count {
+		t.Errorf("消费后池大小 = %d, want %d（单次消费逐条删除）", after, count)
+	}
+}
+
+// normalizedTestIP 与 normalizeRemoteIP 对齐（Strip host:port），测试用归一化辅助。
+func normalizedTestIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
+// nonceCountFor 透视当前 nonce 池大小（白盒，仅测试用）。
+func nonceCountFor(h *Handlers) int {
+	if h.totpNoncePool == nil {
+		return -1
+	}
+	return h.totpNoncePool.size()
 }

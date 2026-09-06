@@ -273,8 +273,14 @@ type SyncRemoteConfig struct {
 // RegistrationConfig 是注册（凭据登记）相关配置。
 // Disable 缺省 false = 允许注册（默认，首启 anonymous 凭据生成）；true = 禁止注册
 // （仅存量用户，无法新增用户）。字段命名避免"allow=false 表示允许"的反直觉语义。
+// ForceTOTP（yaml force_totp，默认 false）：true 时 register 走 TOTP 分支——注册
+// 只下发 AK + otpauth_uri/base32_secret（用户须经 TOTP 登录拿 session SK，DEC-B），
+// 不直接下发明文 SK。false（默认）= 简单 AK/SK 模式（register 直接下发 SK）。
 type RegistrationConfig struct {
 	Disable bool `yaml:"disable" mapstructure:"disable"`
+	// ForceTOTP 强制 TOTP 注册（DEC-B）：默认 false = 简单 AK/SK 注册（4A 语义
+	// 回归）；true = 仅按 TOTP 注册（不建 SK 条目，见 register_handler.go）。
+	ForceTOTP bool `yaml:"force_totp" mapstructure:"force_totp"`
 }
 
 type Config struct {
@@ -397,7 +403,7 @@ func Default() *Config {
 		CORS: CORSConfig{
 			MaxAge: defaultMaxAge,
 		},
-		Registration:          RegistrationConfig{Disable: false},
+		Registration:          RegistrationConfig{Disable: false, ForceTOTP: false},
 		CredentialTTL:         30 * 24 * time.Hour, // 首启 anonymous 凭据有效期
 		AllowInsecureLoopback: false,
 		Web: WebConfig{

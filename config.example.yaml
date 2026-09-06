@@ -52,6 +52,9 @@ tls:
 # 正式凭据登记/角色管理见 sclient trust。
 #   registration:
 #     disable: false          # 注册开关：false = 允许注册（默认）；true = 禁止注册（仅存量用户）
+#     force_totp: false       # 强制 TOTP 注册（默认 false）：true = register 只下发
+#                             # AK + otpauth_uri/base32_secret，用户须经 TOTP 登录拿 session SK；
+#                             # false（默认）= 简单 AK/SK 注册，register 直接下发 SK。
 #   allow_insecure_loopback: false  # 无任何凭据（ring 空）时回环来源 GET/HEAD 放行（仅本地调试，生产勿开）
 #   credential_ttl: "720h"    # 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d）
 
