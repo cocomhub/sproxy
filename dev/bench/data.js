@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788641453495,
+  "lastUpdate": 1788655366101,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -323810,6 +323810,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1654888 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1618835f8b682b069c239d74465c3be194ddfb12",
+          "message": "feat(server): 凭据 Store 化 + 多 SK 轮换与管理——签名 v2 / trust 命令 / AK 标准化 (#159)\n\n* docs: AK/SK 轮换（SK 轮换 + 自加密传递）设计规格\n\n* docs: AccessKeys→Store 凭据架构重塑 + SK 轮换 + 首次连接安全（TOTP）设计规格\n\n* docs: 凭据端点/命令按多SK模型收口——普通用户 sk 级操作 + admin ak 级删除(二次确认) + 暂不支持注销\n\n* docs: 设计规格补 Ring 方法(get by skID)对齐新端点 + 明确账号注销范围外\n\n* feat(accesskey): AK→多SK 凭据 Ring + 信封加密(wrap) 核心包\n\n* fix(accesskey): 审查修复 7 项——hex 大小写一致性、SK 深拷贝、Replace 原子替换、wrap info 绑定 AK、newEntryID 错误、ExpireKey 状态刷新、死代码清理\n\n* feat(sproxysig): 签名协议升级 v2——可选 sk=<entryID> 段 + canonical 分支\n\n* fix(sproxysig): 审查修复轮 1——Web UI sig.js 对齐 v2 + EntryID json/yaml tag + 消费注释\n\n* feat(server): 凭据 store 化——yaml access_keys 移除、Ring 权威表、首启 anonymous、无认证回环兜底\n\n* docs: 凭据 store 化后清理 config.md/example 过期的 access_keys 示例与注释\n\n* feat(server): registration.allow 改名为 registration.disable——false=允许注册，字段名与语义一致\n\n* feat(tunnel/hub): Authenticator 共享 accesskey.Ring——凭据单一事实源\n\n* test(tunnel/hub): 更新空鉴权测试注释以匹配新兜底语义\n\n* docs(tunnel/hub): 修正 NewRingFromAccessKeys 导出函数文档注释\n\n* refactor(accesskey): NewRingFromAccessKeys 迁移为 accesskey.NewRingFromKeyPairs + 废弃 hub.AccessKey\n\n* docs(plans): 阶段6 生产可用性计划——AK轮换/rateLimiter热更新/OTel装配/审计UI/单位工具包\n\n* docs(plans): 阶段6 任务4 凭据域修订——废除 keyring+SetAccessKeys，统一走 accesskey.Ring/KeyPair\n\n* feat(server): /api/credentials 管理端点——renew/sk 增删查 + admin 二次确认删 AK + 审计\n\n* fix(server): renew wrap 用签名命中条目 SK + mesh 入 context + 持久化失败与隔离测试\n\n* test(server): 补凭据端点边界覆盖——expire until 非法/空串、AK add 空 ak/非法 secret/不回传\n\n* fix(server): persist 失败审计 Detail 去路径——不落服务器绝对路径\n\n* feat(sclient): trust 命令族——renew/sk 管理 + pkg/client 领域 API + 签名 v2\n\n* fix(sclient): trust 命令树修复——移除遮蔽 alias + 凭据管理强制直连模式 + 可逆性回归测试\n\n* refactor(sclient): 删除已废弃的 access-key 命令——生成逻辑内联进 trust ak add\n\n* fix(client): e2e 凭据参数化 + wrap context 常量收归 accesskey + config show 全掩密钥 + ak delete EOF 显式报错\n\n* feat(accesskey): AK 格式标准化为 32hex(16B)——GeneratePair/anonymous 统一字节数 + ParseMesh 双兼容 + sk- 前缀白名单单一事实源\n\n- accesskey 权威规格：AK=sk[-<mesh>]-<32hex>（legacy <16hex> 仅解析兼容）+ 前缀白名单\n- AccessKeyHexLen=16B 生成字节数；新增 AccessKeyPrefix/AllowedAKPrefixes/IsValidAK/\n  GeneratePairLegacy/RandomHexHex/GenerateID/MeshFrom\n- ParseMesh 收规双兼容（16/32 hex），tunnel.AccessKeyMesh 改薄委托，删 tunnel 自解析\n- newAnonymousKey 删除，bootstrapGenerate 委托 GenerateBootstrapCredential→GeneratePair\n- clientfactory/client/hub/router 全部改经 accesskey.ParseMesh；docs 口径统一 32hex(16B)\n\n* feat(accesskey): AK 公开标识前缀标准化为 ak-——GeneratePair/全仓字面量/JS 解析对齐 + EntryID 保留 sk-\n\n* fix(accesskey): 终扫 AK 语境 sk- 残留——sproxy sig 头/spec/plans/config 示例 + federation 注释统一 ak-\n\n* fix(accesskey): 收尾修复——renew SK 生成收归单一事实源 + CLAUDE.md/docs 认证章节升级到 v2/32hex/Ring 语义 + entryID 接线文档与输出标签统一\n\n- pkg/server/credentials_handler.go: renew 新 SK 改走 accesskey.RandomHexHex(32)（消除裸 crypto/rand，与 akAddHandler 一致）\n- CLAUDE.md: SproxySig 认证章节 v1→v2（可选 sk=<entryID> 段 + canonical 10 段）、tunnel_key 标记已废除、配置表增 registration.disable/allow_insecure_loopback/credential_ttl、SIGHUP 范围更新、sclient 表增 trust 族\n- docs/api.md / docs/tunnel.md / docs/mesh-testing.md / docs/cli.md: v1→v2 + 凭据 Ring 语义；mesh-testing 移除 tunnel_key/auth_token/relay_token 示例\n- config.example.yaml: sync remote access_key 指引改 trust 登记\n- cmd/scliient config/root/tunnel help、output.go 输出标签 access_keys→credentials_set、多文件代码注释 access_keys→凭据 Ring（解释性陈旧）\n- web: transport.js/app.js/sclient.test.js 注释/测试名同步 v2 语义\n\n* fix(client): entryID 接线补全——Go 隧道外层 sigRoundTripper 携带 sk=<entryID> + Web config/transport 接线\n\n* feat(sproxysig): entryID 定名 skeyID——协议段 skey-id= + 前缀 skey-<12hex> + v2 强制必传(去试签回退)，全链(客户端/联邦/sync/mesh/信令/隧道)接线 skeyID\n\n* fix(ci): v2 skey-id 必传全链接线——E2E sclient/联邦/hub 凭据装配补 access_key_id + 生产 preview/relay 签名链 + sig.js 段名 skey-id + lint unused\n\n* fix(sclient): 修复 Execute 错误静默吞掉——错误打印到 stderr + E2E mesh 诊断与 lint\n\n* fix(web/e2e): UI E2E 无凭据场景用 loopback 兜底——禁 anonymous + AllowInsecureLoopback(v2 skey-id 必传下 Web 无凭据需回环放行)\n\n* fix(mesh): mesh node 命令补 access-key-id——信令签名 skey-id 必传(修复 v2 下节点断连重连数据面中断) + E2E client 补 skeyID",
+          "timestamp": "2026-09-06T08:39:12+08:00",
+          "tree_id": "923d428f5b913ea1f76bfdafa95599d59f823206",
+          "url": "https://github.com/cocomhub/sproxy/commit/1618835f8b682b069c239d74465c3be194ddfb12"
+        },
+        "date": 1788655357054,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 792.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1542502 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 792.9,
+            "unit": "ns/op",
+            "extra": "1542502 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1542502 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1542502 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 788.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1521343 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 788.1,
+            "unit": "ns/op",
+            "extra": "1521343 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1521343 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1521343 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 801.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1527678 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 801.9,
+            "unit": "ns/op",
+            "extra": "1527678 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1527678 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1527678 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 788.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1529983 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 788.5,
+            "unit": "ns/op",
+            "extra": "1529983 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1529983 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1529983 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 775,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1519132 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 775,
+            "unit": "ns/op",
+            "extra": "1519132 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1519132 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1519132 times\n4 procs"
           }
         ]
       }
