@@ -185,6 +185,70 @@ func TestEncryptDecrypt_WrongEnvelopeKey(t *testing.T) {
 	}
 }
 
+// TestEncryptDecryptKind_TOTPKind EncryptSecretKind(KindTOTPWrap, ...) 产出 Kind=="totp_wrap"
+// 信封；DecryptSecretKind(w, KindTOTPWrap, key) 往返成功（4B-2 TOTP 登录解 session SK 路径）。
+func TestEncryptDecryptKind_TOTPKind(t *testing.T) {
+	sk := must32BHex(t, 0x77)
+	totpK, err := DeriveTOTPWrapKey("123456", "ak-totp-1234567890abcdef", "aabbccdd")
+	if err != nil {
+		t.Fatalf("DeriveTOTPWrapKey: %v", err)
+	}
+	env, err := EncryptSecretKind(KindTOTPWrap, "ak-totp-1234567890abcdef", sk, totpK)
+	if err != nil {
+		t.Fatalf("EncryptSecretKind: %v", err)
+	}
+	if env.Kind != KindTOTPWrap {
+		t.Fatalf("Kind 应为 totp_wrap, got %q", env.Kind)
+	}
+	if env.WrapKeyID != "ak-totp-1234567890abcdef" {
+		t.Fatalf("WrapKeyID 不符, got %q", env.WrapKeyID)
+	}
+
+	got, err := DecryptSecretKind(env, KindTOTPWrap, totpK)
+	if err != nil {
+		t.Fatalf("DecryptSecretKind: %v", err)
+	}
+	if !bytes.Equal(got, sk) {
+		t.Fatalf("TOTP 包裹往返后 SK 不匹配")
+	}
+
+	// 默认 DecryptSecret（仅认 secret_wrap）对 TOTP 信封必须报错（防跨 kind 误认）。
+	if _, derr := DecryptSecret(env, totpK); derr == nil {
+		t.Fatalf("DecryptSecret 对 KindTOTPWrap 信封应报错")
+	}
+
+	// DecryptSecretKind 对 kind 不匹配（secret_wrap 信封用 totp_wrap 期望）应报错。
+	envSW, err := EncryptSecretKind(KindSecretWrap, "ak-a-1234567890abcdef", sk, totpK)
+	if err != nil {
+		t.Fatalf("EncryptSecretKind(secret_wrap): %v", err)
+	}
+	if _, derr := DecryptSecretKind(envSW, KindTOTPWrap, totpK); derr == nil {
+		t.Fatalf("DecryptSecretKind 期望 totp_wrap 对 secret_wrap 信封应报错")
+	}
+}
+
+// TestEncryptSecretKind_DefaultKind EncryptSecretKind 默认 Kind=KindSecretWrap 时与
+// EncryptSecret 行为一致（无显式 kind 时生产 secret_wrap 信封）。
+func TestEncryptSecretKind_DefaultKind(t *testing.T) {
+	sk := must32BHex(t, 0x42)
+	ak := "ak-mesh-a-1234567890abcdef"
+	wrapK := must32BHex(t, 0x11)
+	env, err := EncryptSecretKind(KindSecretWrap, ak, sk, wrapK)
+	if err != nil {
+		t.Fatalf("EncryptSecretKind: %v", err)
+	}
+	if env.Kind != KindSecretWrap {
+		t.Fatalf("Kind 应为 secret_wrap, got %q", env.Kind)
+	}
+	got, err := DecryptSecretKind(env, KindSecretWrap, wrapK)
+	if err != nil {
+		t.Fatalf("DecryptSecretKind: %v", err)
+	}
+	if !bytes.Equal(got, sk) {
+		t.Fatalf("secret_wrap 往返后 SK 不匹配")
+	}
+}
+
 // TestWrappedSecret_JSON WrappedSecret json tag（nonce/ciphertext）序列化往返。
 func TestWrappedSecret_JSON(t *testing.T) {
 	ws := WrappedSecret{

@@ -66,7 +66,15 @@ func DeriveWrapKey(sk []byte, ak, context string) ([]byte, error) {
 }
 
 // EncryptSecret 用信封密钥 wrapKey 加密 32B SK，返回信封（随机 nonce 前置）。
+// 默认 Kind=KindSecretWrap（= EncryptSecretKind(KindSecretWrap, ...) 的薄委托）。
 func EncryptSecret(wrapAK string, sk, wrapKey []byte) (*WrappedSecret, error) {
+	return EncryptSecretKind(KindSecretWrap, wrapAK, sk, wrapKey)
+}
+
+// EncryptSecretKind 用信封密钥 wrapKey 加密 32B SK，返回带显式 Kind 的信封
+// （随机 nonce 前置）。kind 标记包裹形态（secret_wrap / totp_wrap，见 Kind）；
+// 除 Kind 字段外，加密算法与 EncryptSecret 完全一致。
+func EncryptSecretKind(kind Kind, wrapAK string, sk, wrapKey []byte) (*WrappedSecret, error) {
 	if len(sk) != 32 {
 		return nil, ErrInvalidSecret
 	}
@@ -87,7 +95,7 @@ func EncryptSecret(wrapAK string, sk, wrapKey []byte) (*WrappedSecret, error) {
 	}
 	ct := gcm.Seal(nil, nonce, sk, nil)
 	return &WrappedSecret{
-		Kind:      KindSecretWrap,
+		Kind:      kind,
 		WrapKeyID: wrapAK,
 		Nonce:     nonce,
 		Cipher:    ct,
@@ -97,10 +105,17 @@ func EncryptSecret(wrapAK string, sk, wrapKey []byte) (*WrappedSecret, error) {
 // DecryptSecret 用 envelopeWrapKey 解开信封，还原 32B SK。任何认证失败（密钥错、
 // 密文篡改、nonce 篡改）都返回错误（GCM auth 失败），且校验 Kind 必须为 secret_wrap。
 func DecryptSecret(w *WrappedSecret, envelopeWrapKey []byte) ([]byte, error) {
+	return DecryptSecretKind(w, KindSecretWrap, envelopeWrapKey)
+}
+
+// DecryptSecretKind 用 envelopeWrapKey 解开信封，还原 32B SK；expected 指定期望的
+// Kind（secret_wrap / totp_wrap），不符则拒绝。任何认证失败（密钥错、密文篡改、
+// nonce 篡改）都返回错误（GCM auth 失败）。与 EncryptSecretKind 对称。
+func DecryptSecretKind(w *WrappedSecret, expected Kind, envelopeWrapKey []byte) ([]byte, error) {
 	if w == nil {
 		return nil, errors.New("accesskey: nil wrapped secret")
 	}
-	if w.Kind != KindSecretWrap {
+	if w.Kind != expected {
 		return nil, fmt.Errorf("accesskey: unexpected wrap kind %q", w.Kind)
 	}
 	if len(envelopeWrapKey) != 32 {

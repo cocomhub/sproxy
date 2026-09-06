@@ -506,6 +506,63 @@ func TestRing_Concurrent(t *testing.T) {
 	_ = r.Snapshot()
 }
 
+// TestRing_TOTPSecretDeepCopy Snapshot / Replace / GetKey 返回的副本含 TOTPSecret（账号级），
+// 且为深拷贝——修改返回值不影响原 ring（4B-2 登录 handler 按 GetKey 取 TOTPSecret 的唯一路径）。
+func TestRing_TOTPSecretDeepCopy(t *testing.T) {
+	totp := []byte{0xCA, 0xFE, 0xBA, 0xBE}
+	ak := "ak-totp-1234567890abcdef"
+
+	// 经 AddRegistration(TOTP 模式) 写入账号级 TOTPSecret。
+	r := NewRing()
+	granted, _, err := r.AddRegistration(ak, "", nil, totp, RoleAdmin, 0)
+	if err != nil {
+		t.Fatalf("AddRegistration: %v", err)
+	}
+	if !granted {
+		t.Fatalf("首注册应授 admin")
+	}
+
+	// GetKey（登录 handler 唯一访问路径）取到含 TOTPSecret 的深拷贝。
+	k, ok := r.GetKey(ak)
+	if !ok {
+		t.Fatalf("GetKey 应 ok=true")
+	}
+	if !bytes.Equal(k.TOTPSecret, totp) {
+		t.Fatalf("GetKey 未携带 TOTPSecret, got %x", k.TOTPSecret)
+	}
+	// 修改返回值缓冲区不影响 ring。
+	orig := append([]byte(nil), totp...)
+	for i := range k.TOTPSecret {
+		k.TOTPSecret[i] ^= 0xff
+	}
+	if got, ok := r.GetKey(ak); !ok || !bytes.Equal(got.TOTPSecret, orig) {
+		t.Fatalf("修改 GetKey 返回值污染了 ring 内 TOTPSecret")
+	}
+
+	// Snapshot 同样携带并深拷贝。
+	snap := r.Snapshot()
+	if len(snap) != 1 || !bytes.Equal(snap[0].TOTPSecret, totp) {
+		t.Fatalf("Snapshot 未携带 TOTPSecret: %v", snap)
+	}
+	snap[0].TOTPSecret[0] = 0
+	if got, ok := r.GetKey(ak); !ok || !bytes.Equal(got.TOTPSecret, orig) {
+		t.Fatalf("修改 Snapshot 返回值污染了 ring 内 TOTPSecret")
+	}
+
+	// Replace 装载的 Key 恢复 TOTPSecret。
+	inputTotp := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	newKeys := []Key{{AK: ak, Owner: "o", Role: RoleUser, TOTPSecret: inputTotp}}
+	if err := r.Replace(newKeys); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	// 修改入参不影响 ring（Replace 内 cloneKey 复制 TOTPSecret）。
+	want := append([]byte(nil), inputTotp...)
+	newKeys[0].TOTPSecret[0] = 0x00
+	if got, ok := r.GetKey(ak); !ok || !bytes.Equal(got.TOTPSecret, want) {
+		t.Fatalf("Replace 未深拷贝 TOTPSecret: got %x, want %x", got.TOTPSecret, want)
+	}
+}
+
 // TestNewRingFromKeyPairs 验证导出的装配工厂：合法条目入 ring、非法 SK 被跳过、
 // 条目为 plain alive 且 Meta.Type="initial"、空输入得空 ring。
 func TestNewRingFromKeyPairs(t *testing.T) {
