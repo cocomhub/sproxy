@@ -138,6 +138,12 @@ func mustDecodeHex(t *testing.T, s string) []byte {
 // adminAK 为空时只注入 user（无 admin，模拟 4A 无 admin 部署）。
 // 条目 ID 用 testEntryID(ak) 确定性生成（与 signRequest/signBodyRequest 精确匹配）。
 // 注意：4B-1 起 admin 判定读账号级 Key.Role（DEC-A），不再读 Meta.Type=="admin"。
+//
+// 本 helper 是**测试专用装配工具**：它模拟的是「存量 store 中已持久化的 admin 条目」
+// （4A 无 register 时 authority 即 store 文件）——即经 `trust ak add`/手动编辑
+// credentials.json 落盘的既有 admin 账号。4B-1 起**生产环境 admin 的唯一产生途径是
+// 首个回环注册（AddRegistration 原子授予）**；测试里 setKeyRole 直接改 Role 仅用于
+// 复现「磁盘上已存在 admin」这一状态，绝不意味着 admin 可经非注册路径凭空产生。
 func credentialsRingWithAdmin(t *testing.T, adminAK, adminSK, userAK, userSK string) *accesskey.Ring {
 	t.Helper()
 	ring := accesskey.NewRing()
@@ -159,6 +165,11 @@ func credentialsRingWithAdmin(t *testing.T, adminAK, adminSK, userAK, userSK str
 
 // setKeyRole 把 ring 中指定 AK 的账号级角色设为 role（测试辅助：经 Snapshot+Replace
 // 回写，模拟 store 载入含 role 字段的 Key；同包测试不直接触碰 Ring 内部 map）。
+//
+// 语义提醒（与 credentialsRingWithAdmin 同款）：本 helper 模拟的是「存量 store 中
+// 已持久化的 admin 条目」（4A 无 register 时 authority 即 store 文件）。4B-1 起生产
+// admin 的唯一产生途径是首个回环注册（AddRegistration 原子授予）——测试里改 Role
+// 仅用于复现磁盘上已存在的管理账号状态，不代表可经非注册路径产生 admin。
 func setKeyRole(t *testing.T, ring *accesskey.Ring, ak string, role accesskey.Role) {
 	t.Helper()
 	snap := ring.Snapshot()
