@@ -306,3 +306,107 @@ func must32(b []byte, err error) []byte {
 	}
 	return b
 }
+
+// ---- TOTP 登录领域 API（task 10）----
+//
+// 与服务端 pkg/server/register_handler.go 构成双向契约：
+//   - register：POST /api/credentials/register（公开端点），TOTP 分支返回
+//     {ak, owner, admin, otpauth_uri, base32_secret}——不创建 SK 条目，用户须经
+//     TOTP 登录拿 session SK（DEC-B）。
+//   - nonce：POST /api/credentials/nonce（公开端点），返回 {nonce, expires_at}
+//     （TTL 60s、单次使用、绑定来源 IP）。
+//   - login：POST /api/credentials/login（公开端点），body 白名单
+//     {ak, nonce, code, login_type}（login_type web/cli，D3 服务端控 TTL）；响应
+//     snake_case（M2）{ak, session_skey_id, session_expires_at,
+//     wrapped_session_secret}——wrapped_session_secret 为 KindTOTPWrap 信封，客户端
+//     用 DeriveTOTPWrapKey(code, ak, nonce) + DecryptSecretKind(KindTOTPWrap) 解开
+//     session SK（M9）。
+//
+// 本组 RPC 显式无凭据客户端（M14）：发送前由构造侧保证 access_key/
+// access_key_secret/access_key_id 三字段清空（trust login 用零凭据 FileClient 构造
+// + WithSendNoAuth 短路签名），ConfigSigner 在 accessKeySecret=="" 时不签名直达
+// 公开端点。
+
+// TOTPRegisterResult 是 RegisterTOTP 的解包结果（TOTP 分支响应，无 sk/skey_id）。
+type TOTPRegisterResult struct {
+	AK           string `json:"ak"`
+	Owner        string `json:"owner"`
+	Admin        bool   `json:"admin"`
+	OTPAuthURI   string `json:"otpauth_uri"`
+	Base32Secret string `json:"base32_secret"`
+}
+
+// TOTPNonce 是 RequestTOTPNonce 的响应（nonce 一次性、短 TTL）。
+type TOTPNonce struct {
+	Nonce     string    `json:"nonce"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// TOTPLoginResult 是 LoginTOTP 的解包结果：session 凭据三件套 + 解密后的明文 session
+// SK。SessionSK 属凭据（S49）：仅本端签名使用，严禁写日志/错误输出/展示。
+type TOTPLoginResult struct {
+	AK               string    `json:"ak"`
+	SessionSkeyID    string    `json:"session_skey_id"` // 响应字段 snake_case（M2）；Go 字段可驼峰
+	SessionExpiresAt time.Time `json:"session_expires_at"`
+	SessionSK        []byte    // 解密后的明文 session SK（仅本端，不上线）
+}
+
+// RegisterTOTP 注册一个新的 TOTP 账号（公开端点，显式无凭据链路 M14——客户端已在
+// 构造时清空凭据三字段）。owner 为空时服务端归一为 AK。
+func (c *FileClient) RegisterTOTP(ctx context.Context, owner string) (*TOTPRegisterResult, error) {
+	var resp TOTPRegisterResult
+	req := struct {
+		Owner string `json:"owner"`
+	}{Owner: owner}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/credentials/register", req, &resp); err != nil {
+		return nil, fmt.Errorf("注册失败: %w", err)
+	}
+	return &resp, nil
+}
+
+// RequestTOTPNonce 向服务端申请一次性登录 nonce（公开端点，M14 无凭据链路）。
+func (c *FileClient) RequestTOTPNonce(ctx context.Context) (*TOTPNonce, error) {
+	var resp TOTPNonce
+	if err := c.doJSON(ctx, http.MethodPost, "/api/credentials/nonce", nil, &resp); err != nil {
+		return nil, fmt.Errorf("获取 nonce 失败: %w", err)
+	}
+	return &resp, nil
+}
+
+// LoginTOTP 用 TOTP 动态码登录：POST /api/credentials/login（公开端点，M14 无凭据
+// 链路），loginType 透传（web/cli，D3 服务端控 TTL），响应 wrapped_session_secret
+// 为 KindTOTPWrap 信封——用 DeriveTOTPWrapKey(code, ak, nonce) 派生的 wrap key 经
+// DecryptSecretKind(KindTOTPWrap) 解开 session SK 返回。
+func (c *FileClient) LoginTOTP(ctx context.Context, ak, nonce, code, loginType string) (*TOTPLoginResult, error) {
+	req := struct {
+		AK        string `json:"ak"`
+		Nonce     string `json:"nonce"`
+		Code      string `json:"code"`
+		LoginType string `json:"login_type"`
+	}{AK: ak, Nonce: nonce, Code: code, LoginType: loginType}
+	var resp struct {
+		AK                   string                   `json:"ak"`
+		SessionSkeyID        string                   `json:"session_skey_id"`
+		SessionExpiresAt     time.Time                `json:"session_expires_at"`
+		WrappedSessionSecret *accesskey.WrappedSecret `json:"wrapped_session_secret"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/api/credentials/login", req, &resp); err != nil {
+		return nil, fmt.Errorf("登录失败: %w", err)
+	}
+	if resp.WrappedSessionSecret == nil {
+		return nil, fmt.Errorf("登录失败: 响应缺少 wrapped_session_secret")
+	}
+	sessionSK, err := accesskey.DecryptSecretKind(
+		resp.WrappedSessionSecret, accesskey.KindTOTPWrap,
+		must32(accesskey.DeriveTOTPWrapKey(code, ak, nonce)),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("解不开 session 密钥（动态码与信封密钥不匹配或信封损坏）: %w", err)
+	}
+	return &TOTPLoginResult{
+		AK:               resp.AK,
+		SessionSkeyID:    resp.SessionSkeyID,
+		SessionExpiresAt: resp.SessionExpiresAt,
+		SessionSK:        sessionSK,
+	}, nil
+}

@@ -62,6 +62,17 @@ func testWrapEnvelope(t *testing.T, wrapSK []byte, ak string, secret []byte) *ac
 	return env
 }
 
+// totpWrapKeyForTest 派生 TOTP 登录信封密钥（与服务端 login 的 DeriveTOTPWrapKey 同
+// 路径——mock 服务端用它包裹 session SK；客户端 LoginTOTP 内部同源解开）。
+func totpWrapKeyForTest(t *testing.T, code, ak, nonce string) []byte {
+	t.Helper()
+	wk, err := accesskey.DeriveTOTPWrapKey(code, ak, nonce)
+	if err != nil {
+		t.Fatalf("DeriveTOTPWrapKey: %v", err)
+	}
+	return wk
+}
+
 // verifySignedRequest 用 skHex 校验请求的 SproxySig 头（真实签名路径——客户端
 // signRequest 必须以 v2 canonical + skey-id 构造，服务端 Verify 要能通过）。
 // 返回解析出的 Header 供 skeyID 断言。
@@ -471,6 +482,218 @@ func TestFileClient_DeleteAK(t *testing.T) {
 		t.Error("expected error when confirm mismatch")
 	}
 }
+
+// ---- TOTP 登录领域 API（task 10：RegisterTOTP / RequestTOTPNonce / LoginTOTP）----
+//
+// TOTP 注册/登录走**显式无凭据客户端**（M14）：RPC 发送前清空
+// access_key / access_key_secret / access_key_id 三字段——ConfigSigner 在
+// accessKeySecret=="" 时不签名（doRequest 的直接路径），避免把配置里可能过期的
+// 凭据签名头带到公开端点。以下测试断言请求**无 Authorization 头**。
+
+// newTOTPNoCredentialClient 构造无凭据的 TOTP 客户端（场景对齐生产：全新部署 /
+// 已有 admin 的存量机器都可能是空凭据；SendNoAuth 钝化防意外带上配置签名）。
+func newTOTPNoCredentialClient(t *testing.T, url string) *FileClient {
+	t.Helper()
+	// 明确用空凭据（无 WithAccessKey）构造——sendNoAuth 是本实现的 M14 显式通道。
+	c := NewFileClient(url, WithSendNoAuth(true))
+	// 防御性断言：新客户端不应带任何凭据字段（M14 三字段清空语义的构造侧基线）。
+	if c.accessKey != "" || c.accessKeySecret != "" || c.accessKeyID != "" {
+		t.Fatalf("TOTP 客户端应无凭据: ak=%q secret=%q id=%q", c.accessKey, c.accessKeySecret, c.accessKeyID)
+	}
+	return c
+}
+
+// requireNoAuthorization 断言请求未带 SproxySig 签名头（M14：无凭据客户端直达公开
+// 端点——带过期配置凭据的签名头会被 authMiddleware 401 拒绝，TOTP 登录整体不可用）。
+func requireNoAuthorization(t *testing.T, r *http.Request) {
+	t.Helper()
+	if got := r.Header.Get("Authorization"); got != "" {
+		t.Errorf("TOTP RPC 不应带 Authorization 头（M14 无凭据客户端）, got %q", got)
+	}
+}
+
+func TestFileClient_RegisterTOTP(t *testing.T) {
+	const (
+		ak           = "ak-totp-0123456789abcdef"
+		admin        = true
+		otpauthURI   = "otpauth://totp/demo?secret=AAAA&issuer=sproxy"
+		base32Secret = "JBSWY3DPEHPK3PXP"
+	)
+	// 服务端 owner 空时归一为 AK（registerTotp label 同 AK）。
+	const wantOwner = "tenant-x"
+	var gotOwner string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/credentials/register", func(w http.ResponseWriter, r *http.Request) {
+		requireNoAuthorization(t, r)
+		var body struct {
+			Owner string `json:"owner"`
+		}
+		decodeBody(t, r, &body)
+		gotOwner = body.Owner
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ak": ak, "owner": wantOwner, "admin": admin,
+			"otpauth_uri": otpauthURI, "base32_secret": base32Secret,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	res, err := newTOTPNoCredentialClient(t, srv.URL).RegisterTOTP(context.Background(), wantOwner)
+	if err != nil {
+		t.Fatalf("RegisterTOTP: %v", err)
+	}
+	if gotOwner != wantOwner {
+		t.Errorf("request owner = %q, want %q", gotOwner, wantOwner)
+	}
+	if res.AK != ak || !res.Admin || res.Owner != wantOwner {
+		t.Errorf("result = %+v, want ak=%q owner=%q admin=%v", res, ak, wantOwner, admin)
+	}
+	if res.OTPAuthURI != otpauthURI || res.Base32Secret != base32Secret {
+		t.Errorf("otpauth/base32 未解析: %+v", res)
+	}
+}
+
+func TestFileClient_RequestTOTPNonce(t *testing.T) {
+	future := time.Now().Add(45 * time.Second).Truncate(time.Second)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/credentials/nonce", func(w http.ResponseWriter, r *http.Request) {
+		requireNoAuthorization(t, r)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"nonce":      "aabbccddeeff00112233445566778899",
+			"expires_at": future.Format(time.RFC3339),
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	nonce, err := newTOTPNoCredentialClient(t, srv.URL).RequestTOTPNonce(context.Background())
+	if err != nil {
+		t.Fatalf("RequestTOTPNonce: %v", err)
+	}
+	if nonce.Nonce != "aabbccddeeff00112233445566778899" {
+		t.Errorf("nonce = %q", nonce.Nonce)
+	}
+	if !nonce.ExpiresAt.Equal(future) {
+		t.Errorf("expires_at = %v, want %v", nonce.ExpiresAt, future)
+	}
+}
+
+// totpLoginWireBody 是 LoginTOTP mock 服务端收到的请求体（白名单字段断言）。
+type totpLoginWireBody struct {
+	AK        string `json:"ak"`
+	Nonce     string `json:"nonce"`
+	Code      string `json:"code"`
+	LoginType string `json:"login_type"`
+}
+
+func TestFileClient_LoginTOTP(t *testing.T) {
+	const (
+		ak        = "ak-totp-0123456789abcdef"
+		nonce     = "11223344556677889900aabbccddeeff"
+		code      = "123456"
+		skuSkeyID = "skey-login-aabbccdd"
+	)
+	sessionSK := randSKBytes(t)
+	wk := totpWrapKeyForTest(t, code, ak, nonce)
+	envelope, err := accesskey.EncryptSecretKind(accesskey.KindTOTPWrap, ak, sessionSK, wk)
+	if err != nil {
+		t.Fatalf("EncryptSecretKind: %v", err)
+	}
+	future := time.Now().Add(30 * 24 * time.Hour).Truncate(time.Second)
+
+	for _, loginType := range []string{"web", "cli"} {
+		t.Run("login_type="+loginType, func(t *testing.T) {
+			var gotBody totpLoginWireBody
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /api/credentials/login", func(w http.ResponseWriter, r *http.Request) {
+				requireNoAuthorization(t, r)
+				decodeBody(t, r, &gotBody)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"ak":                     ak,
+					"session_skey_id":        skuSkeyID,
+					"session_expires_at":     future.Format(time.RFC3339),
+					"wrapped_session_secret": envelope,
+				})
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			res, err := newTOTPNoCredentialClient(t, srv.URL).LoginTOTP(
+				context.Background(), ak, nonce, code, loginType)
+			if err != nil {
+				t.Fatalf("LoginTOTP(%s): %v", loginType, err)
+			}
+			// 请求体：login_type 透传（D3）、ak/nonce/code 正确。
+			if gotBody.AK != ak || gotBody.Nonce != nonce || gotBody.Code != code {
+				t.Errorf("request body = %+v, want ak=%q nonce=%q code=%q", gotBody, ak, nonce, code)
+			}
+			if gotBody.LoginType != loginType {
+				t.Errorf("login_type = %q, want %q（透传）", gotBody.LoginType, loginType)
+			}
+			// 响应解析：session_skey_id（snake_case，M2）与 session SK 解出。
+			if res.AK != ak || res.SessionSkeyID != skuSkeyID {
+				t.Errorf("result = %+v, want ak=%q session_skey_id=%q", res, ak, skuSkeyID)
+			}
+			if !res.SessionExpiresAt.Equal(future) {
+				t.Errorf("session_expires_at = %v, want %v", res.SessionExpiresAt, future)
+			}
+			if !bytes.Equal(res.SessionSK, sessionSK) {
+				t.Errorf("解密 session SK 不匹配: got %x want %x", res.SessionSK, sessionSK)
+			}
+		})
+	}
+}
+
+// TestFileClient_LoginTOTP_BadCode 覆盖解密失败分支：mock 用错误动态码派生 wrap key
+// 包裹 → LogTOTP 解不开（GCM auth / kind 拒）必须返回错误，不得误认成功。
+func TestFileClient_LoginTOTP_BadCode(t *testing.T) {
+	const (
+		ak    = "ak-totp-0123456789abcdef"
+		nonce = "10203040506070809000000000000000"
+		code  = "654321"
+	)
+	// 服务端用「另一组 code」派生 wrap key 包裹——与客户端持有 code 派生的 key 不符。
+	wrongKey, err := accesskey.DeriveTOTPWrapKey("999999", ak, nonce)
+	if err != nil {
+		t.Fatalf("DeriveTOTPWrapKey: %v", err)
+	}
+	env, err := accesskey.EncryptSecretKind(accesskey.KindTOTPWrap, ak, randSKBytes(t), wrongKey)
+	if err != nil {
+		t.Fatalf("EncryptSecretKind: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/credentials/login", func(w http.ResponseWriter, r *http.Request) {
+		requireNoAuthorization(t, r)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ak": ak, "session_skey_id": "skey-x", "wrapped_session_secret": env,
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if _, err := newTOTPNoCredentialClient(t, srv.URL).LoginTOTP(context.Background(), ak, nonce, code, "cli"); err == nil {
+		t.Fatal("expected error when wrapped session secret 无法用该 code 解开")
+	} else if !strings.Contains(err.Error(), "解不开") {
+		t.Errorf("错误信息应说明解开失败, got: %v", err)
+	}
+}
+
+// TestFileClient_LoginTOTP_NoWrappedSecret 覆盖响应缺 wrapped_session_secret 的分支。
+func TestFileClient_LoginTOTP_NoWrappedSecret(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/credentials/login", func(w http.ResponseWriter, r *http.Request) {
+		requireNoAuthorization(t, r)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ak": "ak-x", "session_skey_id": "skey-x"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	if _, err := newTOTPNoCredentialClient(t, srv.URL).LoginTOTP(context.Background(), "ak-x", "nonce", "123456", "cli"); err == nil {
+		t.Fatal("expected error when response missing wrapped_session_secret")
+	}
+}
+
+// ---- ListAKs ----
 
 func TestFileClient_ListAKs(t *testing.T) {
 	const ak = "ak-0123456789abcdef"
