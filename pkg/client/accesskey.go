@@ -343,12 +343,13 @@ type TOTPNonce struct {
 }
 
 // TOTPLoginResult 是 LoginTOTP 的解包结果：session 凭据三件套 + 解密后的明文 session
-// SK。SessionSK 属凭据（S49）：仅本端签名使用，严禁写日志/错误输出/展示。
+// SK。SessionSK 属凭据（S49）：仅本端签名使用，严禁写日志/错误输出/展示；
+// json:"-" 显式固化「永不上线」——即便该结构被（误）序列化也不会泄露明文 SK。
 type TOTPLoginResult struct {
 	AK               string    `json:"ak"`
 	SessionSkeyID    string    `json:"session_skey_id"` // 响应字段 snake_case（M2）；Go 字段可驼峰
 	SessionExpiresAt time.Time `json:"session_expires_at"`
-	SessionSK        []byte    // 解密后的明文 session SK（仅本端，不上线）
+	SessionSK        []byte    `json:"-"` // 解密后的明文 session SK（仅本端，永不上线）
 }
 
 // RegisterTOTP 注册一个新的 TOTP 账号（公开端点，显式无凭据链路 M14——客户端已在

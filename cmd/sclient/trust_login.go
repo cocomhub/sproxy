@@ -27,8 +27,8 @@ var errLoginNotConfirmed = errors.New("登录已中止：未收到确认输入")
 
 // errLoginOverwriteDenied 是 trust login 在用户**拒绝覆盖现有凭据**（D4 覆盖确认
 // 输入非 y/yes）时返回的非零错误，与 errLoginNotConfirmed 并列（语义区分：不是
-// "没输入"，而是"用户明确拒绝覆盖"）。
-var errLoginOverwriteDenied = errors.New("已取消：拒绝覆盖现有凭据")
+// "没输入"，而是"用户明确拒绝覆盖"）。文案含动作指引：可用 --overwrite 跳过确认。
+var errLoginOverwriteDenied = errors.New("已取消：拒绝覆盖现有凭据（如需新会话可用 --overwrite 跳过确认）")
 
 // newCmdTrustLogin 创建 trust login 命令：GA 密钥录入→注册/登录→解 session SK 回填
 // access_key 三件套。

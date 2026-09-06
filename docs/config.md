@@ -25,6 +25,11 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `owner_quotas` | map[string]int64 | (空) | 按 owner 配额上限（字节）：显式 owner > `"*"` 默认 > 0（不限制） |
 | `max_upload_bytes` | int64 | `1073741824` (1 GiB) | 单次普通上传最大字节，超过 413。0 = 不限制 |
 | `registration` | {disable: bool} | `disable: false` | 注册开关：`false`=允许注册（默认）；`true`=禁止注册（仅存量用户，无法新增） |
+| `registration.force_totp` | bool | `false` | `true` 时 register 走 TOTP 分支——注册不生成 SK 条目，用户须经 `sclient trust login` 录入 GA 密钥后登录拿短命 session SK（DEC-B） |
+| `registration.session_ttl` | duration | `24h` | TOTP 登录（`login_type=web`，缺省）签发的 session SK 有效期（D3 服务端控） |
+| `registration.cli_ttl` | duration | `7d` | TOTP 登录（`login_type=cli`，`sclient trust login` 回填场景）的 session SK 有效期（D3） |
+| `registration.login_fail_limit` | int | `5` | per-AK TOTP 登录失败锁定阈值（U4）：连续失败达此数即进入锁定窗口 |
+| `registration.login_fail_window` | duration | `15m` | per-AK 登录失败锁定期（U4）：达阈值后锁定该时长，到期自动解锁 |
 | `allow_insecure_loopback` | bool | `false` | 无任何凭据时（ring 空）放行 loopback 来源的 GET/HEAD（仅本地调试；生产勿开） |
 | `credential_ttl` | duration | `720h` (30d) | 首启 anonymous 凭据有效期；负值 = 禁用首启生成 |
 | `log_level` | string | `info` | `debug` / `info` / `warn` / `error` |
@@ -80,6 +85,24 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 
 凭据已 store 化（`<storage_root>/<owner>/meta/credentials.json`），不再经配置文件——
 SIGHUP 与凭据无关；轮换/管理凭据请用 `sclient trust renew` / `/api/credentials`。
+
+### sclient trust login（TOTP 登录回填）
+
+`force_totp: true` 部署下，用户通过 `sclient trust login` 完成 GA 密钥录入→注册/登录
+→解 session SK 回填 `access_key` 三件套：
+
+- 未注册（本地无 `access_key` 配置）或 `--register` → 调 `POST /api/credentials/register`
+  注册，打印 `ak` / `base32_secret`（**只展示这一次**）/ `otpauth_uri`；响应 `admin:true`
+  时额外提示「您是首个注册用户，将成为 admin」（S2）。
+- 已注册 → 直接提示输入 6 位动态码；本地无配置 AK 时可用 `--ak <AK>` 手动指定（M6）。
+- `RequestTOTPNonce` → `LoginTOTP(..., "cli")`（`login_type=cli`，D3）→ 服务端签发
+  短命 session SK（`KindTOTPWrap` 信封，`registration.cli_ttl` 默认 7d）→ 客户端解开后
+  回填 `access_key` / `access_key_secret` / `access_key_id`。
+- 回填前 D4 覆盖确认：已有 `access_key_secret`（可能来自 renew 的长命 SK）时提示并
+  交互确认（y/N），`--overwrite` 跳过；拒绝覆盖 → 非零退出（独立哨兵
+  `errLoginOverwriteDenied`）。
+- flags：`--owner`（影响文件桶归属，默认=AK，S1）、`--register`、`--overwrite`、`--ak`。
+- TOTP 注册/登录走**显式无凭据客户端**（M14）：公开端点直达，不携带签名头。
 
 ## 客户端配置（sclient）
 
@@ -178,6 +201,11 @@ max_upload_bytes: 5368709120     # 5 GiB
 # 由 SK HKDF 派生——mesh/tunnel 密钥均由凭据自动派生，无需手动配置。
 registration:
   disable: false        # false=允许注册（默认）；true=禁止注册（仅存量用户）
+  force_totp: false     # true=TOTP 注册分支（sclient trust login 登录回填）；默认简单 AK/SK
+  session_ttl: 24h      # TOTP 登录（web）session SK 有效期（默认 24h，D3）
+  cli_ttl: 168h         # TOTP 登录（cli 回填）session SK 有效期（默认 7d，D3）
+  login_fail_limit: 5   # per-AK 登录失败锁定阈值（U4，默认 5）
+  login_fail_window: 15m # per-AK 锁定窗口（U4，默认 15m）
 allow_insecure_loopback: false  # 无凭据时回环是否放行读取（默认 false 更严格）
 credential_ttl: 720h  # SK 默认有效期（默认 30d）
 

@@ -732,10 +732,10 @@ func loginDenied(w http.ResponseWriter, status int) {
 	sendJSONResponse(w, map[string]any{"error": "登录失败"}, status)
 }
 
-// loginTotalAndWindow 读取 cfg.Registration 的 TOTP 登录会话 TTL（D3 服务端控）：
+// loginSessionTTL 读取 cfg.Registration 的 TOTP 登录会话 TTL（D3 服务端控）：
 // loginType=web（缺省）→ SessionTTL；loginType=cli → CliTTL。未知 login_type →
-// ("", ok=false)，调用方按 400（M8）。
-func (h *Handlers) loginTotalAndWindow(loginType string) (time.Duration, bool) {
+// (0, ok=false)，调用方按 400（M8）。
+func (h *Handlers) loginSessionTTL(loginType string) (time.Duration, bool) {
 	cfg := h.cfgPtr.Load()
 	switch loginType {
 	case "", "web":
@@ -833,7 +833,7 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// login_type 白名单校验（M8）：未知值 → 400。
-	if _, ok := h.loginTotalAndWindow(req.LoginType); !ok {
+	if _, ok := h.loginSessionTTL(req.LoginType); !ok {
 		h.RecordAudit(ctx, AuditEvent{
 			Action: auditActionCredLoginDenied, ObjectType: "credential", Object: req.AK,
 			Result: AuditResultDenied, Detail: "未知 login_type",
@@ -925,7 +925,7 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 		loginDenied(w, http.StatusUnauthorized)
 		return
 	}
-	sessionTTL, _ := h.loginTotalAndWindow(req.LoginType)
+	sessionTTL, _ := h.loginSessionTTL(req.LoginType)
 	expiresAt2 := now.Add(sessionTTL)
 
 	// 8. **先信封加密、后追加条目 / 持久化**（修复轮 1 Minor1）：envelope 加密失败

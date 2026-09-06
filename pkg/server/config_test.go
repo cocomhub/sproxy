@@ -435,6 +435,22 @@ func TestConfig_Registration_Defaults(t *testing.T) {
 	if c.CredentialTTL != 30*24*time.Hour {
 		t.Errorf("credential_ttl 默认应为 30d，实际 %v", c.CredentialTTL)
 	}
+	// TOTP 注册/登录新字段（task ⑧-⑩）默认值。
+	if c.Registration.ForceTOTP {
+		t.Error("registration.force_totp 默认应为 false（简单 AK/SK 注册）")
+	}
+	if c.Registration.SessionTTL != 24*time.Hour {
+		t.Errorf("registration.session_ttl 默认应为 24h，实际 %v", c.Registration.SessionTTL)
+	}
+	if c.Registration.CliTTL != 7*24*time.Hour {
+		t.Errorf("registration.cli_ttl 默认应为 7d(168h)，实际 %v", c.Registration.CliTTL)
+	}
+	if c.Registration.LoginFailLimit != 5 {
+		t.Errorf("registration.login_fail_limit 默认应为 5，实际 %d", c.Registration.LoginFailLimit)
+	}
+	if c.Registration.LoginFailWindow != 15*time.Minute {
+		t.Errorf("registration.login_fail_window 默认应为 15m，实际 %v", c.Registration.LoginFailWindow)
+	}
 	// 负值 = 显式禁用首启（合法，RegisterRoutes 据此跳过 anonymous 生成）。
 	neg := Default()
 	neg.CredentialTTL = -1
@@ -446,6 +462,34 @@ func TestConfig_Registration_Defaults(t *testing.T) {
 	zero.SetDefaults()
 	if zero.CredentialTTL != 30*24*time.Hour {
 		t.Errorf("SetDefaults 后 credential_ttl 应为 30d，实际 %v", zero.CredentialTTL)
+	}
+	// TOTP 字段零值经 SetDefaults 复活为默认。
+	if zero.Registration.SessionTTL != 24*time.Hour {
+		t.Errorf("SetDefaults 后 session_ttl 应为 24h，实际 %v", zero.Registration.SessionTTL)
+	}
+	if zero.Registration.CliTTL != 7*24*time.Hour {
+		t.Errorf("SetDefaults 后 cli_ttl 应为 7d(168h)，实际 %v", zero.Registration.CliTTL)
+	}
+	if zero.Registration.LoginFailLimit != 5 {
+		t.Errorf("SetDefaults 后 login_fail_limit 应为 5，实际 %d", zero.Registration.LoginFailLimit)
+	}
+	if zero.Registration.LoginFailWindow != 15*time.Minute {
+		t.Errorf("SetDefaults 后 login_fail_window 应为 15m，实际 %v", zero.Registration.LoginFailWindow)
+	}
+	// Validate 负向：非法值必须拒绝。
+	invalid := func(mut func(*RegistrationConfig)) error {
+		c := Default()
+		mut(&c.Registration)
+		return c.Validate()
+	}
+	if err := invalid(func(r *RegistrationConfig) { r.LoginFailLimit = 0 }); err == nil {
+		t.Error("login_fail_limit=0 应被 Validate 拒绝")
+	}
+	if err := invalid(func(r *RegistrationConfig) { r.SessionTTL = 0 }); err == nil {
+		t.Error("session_ttl=0 应被 Validate 拒绝")
+	}
+	if err := invalid(func(r *RegistrationConfig) { r.CliTTL = -time.Hour }); err == nil {
+		t.Error("cli_ttl<=0 应被 Validate 拒绝")
 	}
 }
 
