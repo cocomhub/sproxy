@@ -544,6 +544,9 @@ type akAddRequest struct {
 	AK     string `json:"ak"`
 	Owner  string `json:"owner"`
 	Secret string `json:"secret,omitempty"`
+	// Role 账号级角色（node/user，默认 user；admin AK 不可经此创建——role:"admin"
+	// 拒绝/降级，防管理端点产生二主，I6/DEC-A）。
+	Role string `json:"role,omitempty"`
 }
 
 // akAddHandler 处理 POST /api/credentials——admin 新增 AK（4B 注册用；4A 无 admin → 403）。
@@ -594,9 +597,28 @@ func (h *Handlers) akAddHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	skBytes, _ := hex.DecodeString(sk)
 
+	// role 解析（I6/DEC-A）：'node'/'user'/'空' 合法（''/user → user）；role:"admin"
+	// 拒绝（400）——admin 只经 register 首注册原子授予，管理端点不可创建（防二主接管）。
+	role := accesskey.RoleUser
+	if req.Role == string(accesskey.RoleNode) {
+		role = accesskey.RoleNode
+	} else if req.Role != "" && req.Role != string(accesskey.RoleUser) {
+		sendJSONResponse(w, map[string]any{"error": "role 仅支持 node/user（admin 不可经此创建）"}, http.StatusBadRequest)
+		return
+	}
+
 	if err := h.credentialRing.UpsertAK(req.AK, req.Owner); err != nil {
 		sendJSONResponse(w, map[string]any{"error": err.Error()}, http.StatusBadRequest)
 		return
+	}
+	if role != accesskey.RoleUser {
+		// 非默认角色：登记后回写 Key.Role（Snapshot+Replace 是公开改写路径；akAdd
+		// 由 admin 调用，覆盖 UpsertAK 直建的空 Role 无害——replace 归一空为 user，
+		// 显式非 user 角色回写）。
+		if err := h.setAKRole(req.AK, role); err != nil {
+			sendJSONResponse(w, map[string]any{"error": err.Error()}, http.StatusBadRequest)
+			return
+		}
 	}
 	newID, err := h.credentialRing.AddKey(req.AK, skBytes, accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
 	if err != nil {
@@ -631,6 +653,27 @@ type akDeleteRequest struct {
 	Force   bool   `json:"force"`
 }
 
+// setAKRole 经公开 Snapshot+Replace 改写指定 AK 的账号级角色（akAddHandler 非 user
+// 角色回写用）。AK 不存在返回 ErrNotFound 语义错误。
+func (h *Handlers) setAKRole(ak string, role accesskey.Role) error {
+	if h.credentialRing == nil {
+		return errCredentialRingUnavailable
+	}
+	snap := h.credentialRing.Snapshot()
+	found := false
+	for i := range snap {
+		if snap[i].AK == ak {
+			snap[i].Role = role
+			found = true
+			break
+		}
+	}
+	if !found {
+		return accesskey.ErrNotFound
+	}
+	return h.credentialRing.Replace(snap)
+}
+
 // akDeleteHandler 处理 DELETE /api/credentials/{ak}——admin 删除整个 AK。
 //
 // 二次确认：confirm 必须等于目标 AK（不匹配 400）；有活跃 SK（Lookup 非空）且非 force
@@ -661,6 +704,17 @@ func (h *Handlers) akDeleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.Confirm != targetAK {
 		sendJSONResponse(w, map[string]any{"error": "confirm 必须等于目标 AK"}, http.StatusBadRequest)
+		return
+	}
+
+	// I6：admin 角色 AK 不可删除（防唯一 admin 自删→系统无 admin、下一次注册者
+	// 即 admin 的接管竞态）。检查放在 confirm 之后（先过确认门槛），直接查 Ring。
+	if k, ok := h.credentialRing.GetKey(targetAK); ok && k.Role == accesskey.RoleAdmin {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: auditActionCredAKDelete, ObjectType: "credential", Object: targetAK,
+			Result: AuditResultDenied, Detail: "admin role ak not deletable",
+		})
+		sendJSONResponse(w, map[string]any{"error": "admin 角色 AK 不可删除"}, http.StatusBadRequest)
 		return
 	}
 

@@ -178,18 +178,20 @@ func TestCredentialStore_ConcurrentSave(t *testing.T) {
 	}
 }
 
-// TestGenerateBootstrapCredential_Format 验证首启 anonymous 凭据生成格式：AK
-// 随机段 32hex(16B)、SK 64 hex，直接委托 pkg/accesskey.GeneratePair（""）——生成
-// 收归 accesskey，服务端不再自行组装。与 GeneratePair 同源同长。
+// TestGenerateBootstrapCredential_Format 验证 register 端点 AK/SK 生成格式契约：
+// 经 RegisterRoutes + 回环首注册产出的 AK 随机段 32hex(16B)、SK 64 hex——
+// 委托 pkg/accesskey.GeneratePair（""），与 GeneratePair 同源同长（U3 移除首启
+// anonymous 后，该格式断言改挂在公开注册端点的实际产物上，见 register_handler_test
+// TestRegister_SimpleMode_Success。本测试保留对 accesskey.GeneratePair 的直接契约）。
 func TestGenerateBootstrapCredential_Format(t *testing.T) {
-	ak, sk, err := GenerateBootstrapCredential()
+	ak, sk, err := accesskey.GeneratePair(nil, "")
 	if err != nil {
-		t.Fatalf("GenerateBootstrapCredential: %v", err)
+		t.Fatalf("GeneratePair: %v", err)
 	}
 	if !strings.HasPrefix(ak, accesskey.AccessKeyPrefix) {
 		t.Errorf("AK 应以 %q 开头: %q", accesskey.AccessKeyPrefix, ak)
 	}
-	// AK 随机段恒 32 hex（16 字节）——与服务端标准 GeneratePair 同长。
+	// AK 随机段恒 32 hex（16 字节）——服务端 register 生成标准形态。
 	if len(ak) != len(accesskey.AccessKeyPrefix)+accesskey.AccessKeyHexLen*2 {
 		t.Errorf("AK 随机段应为 %d hex(%dB): got %q (len=%d)",
 			accesskey.AccessKeyHexLen*2, accesskey.AccessKeyHexLen, ak, len(ak))
@@ -197,24 +199,23 @@ func TestGenerateBootstrapCredential_Format(t *testing.T) {
 	if len(sk) != 64 {
 		t.Errorf("SK 长度 = %d, want 64", len(sk))
 	}
-	if _, err := hex.DecodeString(sk); err != nil {
-		t.Errorf("SK 非 hex: %v", err)
+	if _, derr := hex.DecodeString(sk); derr != nil {
+		t.Errorf("SK 非 hex: %v", derr)
 	}
 	// 熵等价断言：解析/校验通过官方入口。
 	if !accesskey.IsValidAK(ak) {
-		t.Errorf("anonymous 产物应通过 IsValidAK: %q", ak)
+		t.Errorf("产物应通过 IsValidAK: %q", ak)
 	}
 	if got := accesskey.ParseMesh(ak); got != "" {
-		t.Errorf("anonymous 无 mesh，ParseMesh = %q, want \"\"", got)
+		t.Errorf("无 mesh，ParseMesh = %q, want \"\"", got)
 	}
-	// 与 GeneratePair("") 产同长同构（同源字节数）。
-	gak, _, gerr := accesskey.GeneratePair(nil, "")
-	if gerr != nil {
-		t.Fatalf("GeneratePair: %v", gerr)
+	// 两次生成不同（随机性）。
+	ak2, sk2, err := accesskey.GeneratePair(nil, "")
+	if err != nil {
+		t.Fatalf("GeneratePair(second): %v", err)
 	}
-	if len(ak) != len(gak) {
-		t.Errorf("GenerateBootstrapCredential 与 GeneratePair AK 长度不一致: %d vs %d（同源应同长）",
-			len(ak), len(gak))
+	if ak == ak2 || sk == sk2 {
+		t.Errorf("两次生成应不同")
 	}
 }
 

@@ -254,12 +254,14 @@ func (c *FileClient) ExpireSK(ctx context.Context, ak, skID string, until time.T
 }
 
 // AddAK 新增一条 AK（admin-only）。secret 为 64-hex（32 字节），为空表示由服务端生成。
-func (c *FileClient) AddAK(ctx context.Context, ak, owner, secret string) (*AddAKResult, error) {
+// role 为账号角色（""/"user"/"node"；服务端对 "admin" 拒绝）。空/缺省按 user 处理。
+func (c *FileClient) AddAK(ctx context.Context, ak, owner, secret, role string) (*AddAKResult, error) {
 	req := struct {
 		AK     string `json:"ak"`
 		Owner  string `json:"owner"`
 		Secret string `json:"secret,omitempty"`
-	}{AK: ak, Owner: owner, Secret: secret}
+		Role   string `json:"role,omitempty"`
+	}{AK: ak, Owner: owner, Secret: secret, Role: role}
 	var resp struct {
 		AK     string `json:"ak"`
 		SKID   string `json:"sk_id"`

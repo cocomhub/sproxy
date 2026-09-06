@@ -246,10 +246,11 @@ func TestBuildServerConfig_NoTLSFlagDefaults(t *testing.T) {
 
 // ---- 认证凭据装配测试 ----
 
-// TestRunServer_BootstrapsCredentialsOnStart 验证凭据 store 化后的启动行为：
-// 未配置任何凭据（无 access_keys、api_keys 未启用）时**不再 fail-fast**——
-// 首启自动生成 anonymous 凭据并持久化到 <storage_root>/anonymous/meta/credentials.json，
-// 服务器正常启动（新部署必有可访问凭据）。
+// TestRunServer_BootstrapsCredentialsOnStart 验证凭据 store 化后的启动行为（U3）：
+// 未配置任何凭据（无 access_keys、api_keys 未启用）时**不再 fail-fast，也不再自动
+// 生成 anonymous 凭据**——服务器以零凭据启动，等 register 公开端点产生首个 admin。
+// 本测试断言服务器正常启动 + 启动后 credentials.json **不存在/为空**（零凭据语义，
+// 取代旧「自动生成 anonymous bootstrap」断言）。
 func TestRunServer_BootstrapsCredentialsOnStart(t *testing.T) {
 	cfgPtr.Store(nil)
 	cfgProvider = nil
@@ -294,14 +295,13 @@ func TestRunServer_BootstrapsCredentialsOnStart(t *testing.T) {
 		t.Fatal("server did not shut down within 5s")
 	}
 
-	// 首启 anonymous 凭据应已持久化到 <storage>/anonymous/meta/credentials.json。
+	// U3：零凭据启动——不自动生成 anonymous bootstrap，credentials.json 不应存在
+	// （或为空文件），系统待 register 公开端点接入首个 admin。
 	credPath := filepath.Join(storageTmp, "anonymous", "meta", "credentials.json")
-	data, rerr := os.ReadFile(credPath)
-	if rerr != nil {
-		t.Fatalf("读取首启凭据文件: %v", rerr)
-	}
-	if !strings.Contains(string(data), "bootstrap") {
-		t.Errorf("凭据文件应含 bootstrap 元信息，实际: %s", string(data))
+	if data, rerr := os.ReadFile(credPath); rerr == nil {
+		if strings.Contains(string(data), "bootstrap") {
+			t.Errorf("U3：零凭据启动不应自动生成 bootstrap 凭据，文件: %s", string(data))
+		}
 	}
 }
 
