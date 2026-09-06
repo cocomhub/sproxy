@@ -5,7 +5,7 @@ package server
 
 import (
 	"context"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -113,9 +113,19 @@ type Handlers struct {
 	// Save；nil = 不持久化，纯内存场景）。
 	credentialRing  *accesskey.Ring
 	credentialStore *CredentialStore
+	// authenticators 是认证面插件化链（DEC-C）：authMiddleware 遍历链，任一成功 →
+	// Principal 入 ctx 并放行。RegisterRoutes 装配：opts.Authenticators 显式注入
+	// （非 nil → replace 默认链，宿主全权掌控）优先；nil → 默认
+	// [RingAuthenticator{credentialRing}]。api_keys Bearer 是链前独立检查，不入链。
+	authenticators []Authenticator
 	// allowInsecureLoopback 是无认证兜底开关（读取优先级：opts 注入 > cfg 配置）。
 	// 仅调试语义：ring 为空时放行 loopback 来源（见 handleNoCredentials）。
 	allowInsecureLoopback bool
+	// registerLimiter 是公开注册端点的独立限频器（复用 pkg/server.RateLimiter，
+	// per-IP 令牌桶 + 全局滑动窗口，5/min 封顶，D6/M1）。注册是唯一用户入口（U3）
+	// 且不经 authMiddleware——蓄意攻击者可任意 IP 洪泛，故逐 IP 限频 + 全局窗口
+	// 兜底。与文件传输/信令限流（rateLimiter/signalPostRL）隔离配额。nil = 启动未装配。
+	registerLimiter *RateLimiter
 }
 
 // TunnelUpdater 是隧道处理器密钥热替换接口。
@@ -488,6 +498,12 @@ type RegisterRoutesOpts struct {
 	// CredentialStore 是凭据 store（nil = 不载入/不持久化，纯内存 Ring 场景，
 	// 如注入空 Ring 的无认证测试）。
 	CredentialStore *CredentialStore
+	// Authenticators 是认证面插件化宿主嵌入点（DEC-C，R3-I1/I2）：非 nil →
+	// **replace 默认链**（宿主全权掌控，需含 RingAuthenticator 则自行加入）；nil →
+	// 默认装配 []Authenticator{RingAuthenticator{...}}。宿主可注入自有实现（映射
+	// 自有用户/会话 → Principal），文件操作按 Principal.AK 落桶（宿主把目标桶 ID
+	// 放入 Principal.AK，保持 4A 按 AK 落桶现状零回归）。
+	Authenticators []Authenticator
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -582,6 +598,17 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	//     独立于 cfg.Registration.Disable）。
 	h.bootstrapCredentials(opts)
 
+	// 认证链装配（DEC-C）：宿主注入的 Authenticators 非 nil → replace 默认链（宿主
+	// 全权掌控，需含 RingAuthenticator 则自行加入，R3-I2）。**显式注入空链（非 nil
+	// 空切片）同样尊重**——空链 = 无任何 authenticator → 所有请求未认证（authMiddleware
+	// 走 handleNoCredentials 兜底，不被默认链覆盖）；nil（未注入）→ 默认
+	// [RingAuthenticator{credentialRing}]（R3-I1：4A 默认行为零回归）。
+	if opts.Authenticators != nil {
+		h.authenticators = opts.Authenticators
+	} else {
+		h.authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool)}
+	}
+
 	// 启动时恢复持久化的信令收件箱（节点注册已在 cmd 层通过 RestoreFromSnapshot
 	// 灌入 routeTable；此处把 messages 灌入 SignalBroker 队列，重启不丢待投递信令）。
 	if len(opts.HubRestoredMessages) > 0 {
@@ -664,6 +691,10 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// localMux 侧无 authMiddleware → 不经 SproxySig 验签，ActorFrom(ctx) 为空；本人
 	// 判定依赖 actor 的端点（renew/sk 列表/删除/过期）在 localMux 侧按「未认证 404」
 	// 处理，管理可见性面仍以主 mux（authMiddleware 保护）为准。
+	// 公开注册端点 localMux 侧：浏览器隧道模式下凭据优先页需隧道可达（M1）。
+	// 与主 mux 共用 registerPublic handler（同一 registerLimiter 实例，独立于
+	// 文件传输限流）。
+	localMux.Handle("POST /api/credentials/register", h.registerLimiter.Middleware(http.HandlerFunc(h.registerCredentialHandler)))
 	localMux.HandleFunc("GET /api/credentials", h.akListHandler)
 	localMux.HandleFunc("POST /api/credentials", h.akAddHandler)
 	localMux.HandleFunc("DELETE /api/credentials/{ak}", h.akDeleteHandler)
@@ -689,6 +720,25 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		apiHandler = rl.Middleware(apiHandler)
 	}
 	apiHandler = CORSMiddleware(cfg.CORS, log.With("component", "cors"))(apiHandler)
+	// ★ MUST-FIX（任务②审查 Important）：隧道内层 requireRole 门禁收口——文件操作
+	// 路由组在 localMux 侧同样过 requireRole(user)（DEC-C）。node 角色 AK 即便合法
+	// 开隧道（外层 authMiddleware 放行），内层文件操作也 403，杜绝 node 借 /tunnel
+	// 访问文件（匿名租户落桶）。
+	//
+	// ctx 透传语义（关键正确性点）：
+	//   - 传统 POST /tunnel（tunnel.Handler dispatchLocal）：`http.NewRequestWithContext(
+	//     r.Context(), ...)`——**内外层 ctx 共享**，外层认证注入的 Principal 天然透传
+	//     内层，requireRole 用内层可读的 PrincipalFrom(ctx) 判定，node → 403、
+	//     user/admin → 放行且落正确租户；
+	//   - xfer 直连路径（tunnel_mux.handleStream）：`http.NewRequest(...)` 不携带外层
+	//     ctx → PrincipalFrom(ctx)==nil。门禁要求「principal != nil 才收口」：xfer 面
+	//     恒 nil → 不拦截（保持既有会话密钥身份语义），fail-open 由 xfer 握手本身
+	//     （静态密钥 + Ed25519 pinning）闭合——node 账号不配置 xfer 凭据即无法建立
+	//     xfer 会话。见 task-3-report.md「隧道内层门禁收口说明」。
+	//   - 同理，凭据管理端点（renew/sk/ak 管理）在 localMux 侧保持裸注册（不包本
+	//     门禁）：admin-only 判定依赖 ActorFrom（内层传统隧道路径为空 → 404），
+	//     不被 requireRole 误伤；register 是公开端点（独立限频）。
+	apiHandler = h.localMuxGate(apiHandler)
 
 	// 隧道内层请求同样挂 requestLogMiddleware：解析客户端注入的 traceparent，
 	// 生成子 span 并把 SpanContext 写入 ctx，使内层 handler 的 InfoContext/DebugContext
@@ -701,32 +751,35 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.localHandler = h.requestLogMiddleware(apiHandler)
 	h.tunnelHandler = tunnel.NewLocalHandler(nil, h.localHandler, log.With("component", "tunnel"))
 
-	srvMux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
-	srvMux.HandleFunc("GET /download", h.authMiddleware(h.download))
-	srvMux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
-	srvMux.HandleFunc("POST /rename", h.authMiddleware(h.rename))
-	srvMux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
-	srvMux.HandleFunc("HEAD /api/files/stat", h.authMiddleware(h.stat))
-	srvMux.HandleFunc("POST /upload/init", h.authMiddleware(h.uploadInit))
-	srvMux.HandleFunc("POST /upload/chunk", h.authMiddleware(h.uploadChunk))
-	srvMux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
-	srvMux.HandleFunc("GET /upload/sessions", h.authMiddleware(h.uploadSessions))
-	srvMux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
-	srvMux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
-	srvMux.HandleFunc("POST /mkdir", h.authMiddleware(h.mkdir))
-	srvMux.HandleFunc("POST /rmdir", h.authMiddleware(h.rmdir))
-	srvMux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
-	srvMux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
-	srvMux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
-	srvMux.HandleFunc("POST /api/archive", h.authMiddleware(h.archiveHandler))
-	srvMux.HandleFunc("GET /api/archive-dir", h.authMiddleware(h.archiveDirHandler))
-	srvMux.HandleFunc("GET /api/versions", h.authMiddleware(h.listVersionsHandler))
-	srvMux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
-	srvMux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
+	// 文件操作路由组（DEC-C）：authMiddleware + requireRole(user) 门禁
+	// （upload/download/delete/rename/list/stat/mkdir/rmdir/search/batch/chunk/
+	// archive/versions/share…；Role∈{user,admin}）。
+	srvMux.HandleFunc("POST /upload", h.fileRoute(h.upload))
+	srvMux.HandleFunc("GET /download", h.fileRoute(h.download))
+	srvMux.HandleFunc("POST /delete", h.fileRoute(h.delete))
+	srvMux.HandleFunc("POST /rename", h.fileRoute(h.rename))
+	srvMux.HandleFunc("GET /api/files", h.fileRoute(h.listFiles))
+	srvMux.HandleFunc("HEAD /api/files/stat", h.fileRoute(h.stat))
+	srvMux.HandleFunc("POST /upload/init", h.fileRoute(h.uploadInit))
+	srvMux.HandleFunc("POST /upload/chunk", h.fileRoute(h.uploadChunk))
+	srvMux.HandleFunc("GET /upload/status", h.fileRoute(h.uploadStatus))
+	srvMux.HandleFunc("GET /upload/sessions", h.fileRoute(h.uploadSessions))
+	srvMux.HandleFunc("POST /upload/complete", h.fileRoute(h.uploadComplete))
+	srvMux.HandleFunc("GET /download/chunk", h.fileRoute(h.downloadChunk))
+	srvMux.HandleFunc("POST /mkdir", h.fileRoute(h.mkdir))
+	srvMux.HandleFunc("POST /rmdir", h.fileRoute(h.rmdir))
+	srvMux.HandleFunc("GET /api/files/search", h.fileRoute(h.searchFiles))
+	srvMux.HandleFunc("POST /api/batch/delete", h.fileRoute(h.batchDelete))
+	srvMux.HandleFunc("POST /api/batch/rename", h.fileRoute(h.batchRename))
+	srvMux.HandleFunc("POST /api/archive", h.fileRoute(h.archiveHandler))
+	srvMux.HandleFunc("GET /api/archive-dir", h.fileRoute(h.archiveDirHandler))
+	srvMux.HandleFunc("GET /api/versions", h.fileRoute(h.listVersionsHandler))
+	srvMux.HandleFunc("POST /api/versions/restore", h.fileRoute(h.restoreVersionHandler))
+	srvMux.HandleFunc("DELETE /api/versions", h.fileRoute(h.deleteVersionHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	srvMux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
-	srvMux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
+	srvMux.HandleFunc("POST /api/share", h.fileRoute(h.createShareHandler))
 	srvMux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 
 	// 分享管理 API（localMux：隧道内部使用）
@@ -734,9 +787,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/shares", h.listSharesHandler)
 	localMux.HandleFunc("DELETE /api/shares/{token}", h.revokeShareHandler)
 
-	// 分享管理 API（主 mux：Bearer auth）
-	srvMux.HandleFunc("GET /api/shares", h.authMiddleware(h.listSharesHandler))
-	srvMux.HandleFunc("DELETE /api/shares/{token}", h.authMiddleware(h.revokeShareHandler))
+	// 分享管理 API（主 mux：Bearer auth + requireRole(user) 门禁）
+	srvMux.HandleFunc("GET /api/shares", h.fileRoute(h.listSharesHandler))
+	srvMux.HandleFunc("DELETE /api/shares/{token}", h.fileRoute(h.revokeShareHandler))
 
 	// 云端下载 API（localMux：隧道认证）
 	localMux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
@@ -865,6 +918,16 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 模式下打开审计 tab 应能直接查看；仅注册主 mux 会让隧道模式 404）。
 	srvMux.HandleFunc("GET /api/audit", h.authMiddleware(h.auditHandler))
 
+	// 公开注册端点（4B DEC-F）：唯一用户入口，不挂 authMiddleware（主 mux +
+	// localMux 双注册，仿 /healthz 层）——仅经独立限频 registerLimiter 收口。
+	// register 激活前系统处于零凭据态，无凭据请求必须可直达（远程首注册仅经回环
+	// 门禁拒绝，见 registerCredentialHandler）。
+	//
+	// registerLimiter 必须在 localMux 装配之前、localMux 侧复用同一限频器实例创建。
+	h.registerLimiter = NewRateLimiter(5, time.Minute, log.With("component", "register_limiter"))
+	registerPublic := h.registerLimiter.Middleware(http.HandlerFunc(h.registerCredentialHandler))
+	srvMux.Handle("POST /api/credentials/register", registerPublic)
+
 	// 凭据管理 API（主 mux：SproxySig auth）。全部走 authMiddleware 保护，
 	// 与 audit/cloud/sync 同模式（本人 set 端点用 ActorFrom(ctx) 判定）。
 	srvMux.HandleFunc("GET /api/credentials", h.authMiddleware(h.akListHandler))
@@ -907,10 +970,115 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	return h
 }
 
+// isFileGroupedRoute 判定给定路由是否属于「文件操作组」（单一事实源，拒绝双份清单
+// 漂移，F1/F2 收口）。文件操作组的成员 = 主 mux 面经 fileRoute 包装的路由全集：
+//   - 精确匹配：upload/download/delete/rename、api/files*/mkdir/rmdir/batch*、
+//     archive/versions/share/shares（share 列表 /api/shares 与撤销已含）；
+//   - 前缀分支：/upload/{init,chunk,status,sessions,complete} 与 /download/chunk
+//     （分块上传/下载，与 fileRoute 包裹的 chunk 组严格对齐）。
+//
+// 用途：
+//   - fileRoute（主 mux 面）：path 命中组 → requireRole(user) 门禁；未命中 → 返回
+//     errNotFileGrouped，调用方写 500 + Error 日志（fail-closed 防接线错误把文件类
+//     新路由漏挂门禁——宁可显式故障，不为未列出的新文件路由静默放行）；
+//   - localMuxGate（隧道内层面）：path 命中组 → principal 非 nil（传统 POST /tunnel
+//     路径）时 requireRole(user) 收口、node → 403；principal nil（xfer 直连路径）
+//     跳过（会话由握手密钥/pinning 闭合）；未命中 → 保持既有裸注册（隧道加密即
+//     认证 / cloud/credentials/audit/stats/config/hub 等非文件面）。
+//
+// 新增文件类路由必须同步：既挂主 mux fileRoute，又在本函数补成员——两处同源，
+// 漏其一即测试（TestRegister_TunnelInnerGate* / TestLocalMuxCoversAllTunnelRoutes）
+// 暴露。
+func isFileGroupedRoute(path string) bool {
+	switch path {
+	case "/upload", "/download", "/delete", "/rename",
+		"/api/files", "/api/files/stat", "/api/files/search",
+		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
+		"/api/archive", "/api/archive-dir",
+		"/api/versions", "/api/versions/restore",
+		"/api/share", "/api/shares",
+		// 分块上传/下载（主 mux 面均挂 fileRoute——见 RegisterRoutes 装配处清单）；
+		// 前缀含两个入口：/upload/{init,chunk,status,sessions,complete}。
+		"/upload/init", "/upload/chunk", "/upload/status", "/upload/sessions", "/upload/complete",
+		"/download/chunk":
+		return true
+	}
+	// 动态参数路径组（Go 1.22 ServeMux {token} 通配——调用方传入的是实际 path，
+	// 需按前缀判定）：/api/shares/{token}（撤销也属文件组）。精确列表 /api/shares
+	// 已在上方案例命中；此处补带 token 子路径。
+	if strings.HasPrefix(path, "/api/shares/") {
+		return true
+	}
+	return false
+}
+
+// localMuxGate 包装隧道内层 localMux（含传统 POST /tunnel 与 xfer 直连两路径共用的
+// apiHandler 链）：对「文件操作路由组」过 requireRole(PrincipalFrom(ctx), RoleUser)
+// 门禁（任务② MUST-FIX 收口）。组成员 = isFileGroupedRoute（与主 mux fileRoute 同源）。
+// 判定语义见 isFileGroupedRoute / RegisterRoutes 装配处大段注释。
+func (h *Handlers) localMuxGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isFileGroupedRoute(r.URL.Path) {
+			// 非文件组（cloud/credentials/register/audit/stats/config/hub/信令…）：
+			// 保持既有裸注册（隧道加密即认证 / 免身份语义）。
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 文件组：principal 非 nil（传统隧道路径外层已认证）才收口；nil（xfer
+		// 直连，无外层身份）跳过——xfer 会话由握手密钥 / Ed25519 pinning 闭合身份。
+		// 前提：HubXferKey 候选必须是 user/admin 凭据（node AK 不应进入 xfer 握手
+		// 密钥候选集——若 node 凭据排序在前，xfer 面会对该 node 开放文件面），见
+		// task-3-report.md「隧道内层门禁收口说明」。
+		if p := PrincipalFrom(r.Context()); p != nil {
+			if err := requireRole(p, string(accesskey.RoleUser)); err != nil {
+				status := http.StatusForbidden
+				if errors.Is(err, errUnauthorized) {
+					status = http.StatusUnauthorized
+				}
+				http.Error(w, err.Error(), status)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// fileRoute 包装文件操作路由：authMiddleware 认证 + requireRole(user) 门禁（DEC-C）。
+// 认证面插件化后，文件操作路由组要求 Role∈{user,admin}（minRole=user；R3-M4：空
+// Role 归一 user 放行）。未认证且非回环直通（principal==nil）→ 401；角色不足 → 403。
+//
+// 组判定 = isFileGroupedRoute（单一事实源，与 localMuxGate 同源）：**未列出的路径
+// 一律 500 + Error 日志**（fail-closed）——防止未来给文件类新路由只挂本包装却忘挂
+// gate，或反之，静默绕过 requireRole。注意：fileRoute 只应包装文件组路由（主 mux
+// 装配处全部如此）；非文件组路由继续用 authMiddleware（如 /api/cloud、/api/stats）。
+func (h *Handlers) fileRoute(handler http.HandlerFunc) http.HandlerFunc {
+	return h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if !isFileGroupedRoute(r.URL.Path) {
+			// fail-closed：本包装被错误用于非文件组路径（如未来把 cloud 路由误挂
+			// fileRoute），显式拒绝并留痕，避免「看似受门禁实则裸放」的静默态。
+			h.logger.Error("fileRoute 用于未列入文件组的路径（接线错误）", "method", r.Method, "path", r.URL.Path)
+			http.Error(w, "internal: route not in file group", http.StatusInternalServerError)
+			return
+		}
+		if err := requireRole(PrincipalFrom(r.Context()), string(accesskey.RoleUser)); err != nil {
+			status := http.StatusForbidden
+			if errors.Is(err, errUnauthorized) {
+				status = http.StatusUnauthorized
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		handler(w, r)
+	})
+}
+
 // bootstrapCredentials 装配凭据 Ring 与关联 store（RegisterRoutes 启动时调用一次）：
 //   - 显式注入（opts.CredentialRing）→ 直接使用；
 //   - 否则从 opts.CredentialStore 载入快照（真实/损坏处理见 CredentialStore.Load）；
-//   - 仍为空且 cfg.CredentialTTL>=0 → 生成首启 anonymous 凭据并持久化。
+//   - **U3：零凭据启动**——不再生成首启 anonymous 凭据（4A 的 generateBootstrapCredential
+//     路径已移除）。store 为空 = 系统以零凭据等待注册：register 公开端点是唯一用户
+//     入口，首个经回环注册的用户由 AddRegistration 原子授 admin（DEC-F/D2）。
+//     空 store 时记启动日志提示「首次注册经回环，将成为 admin」（S2）。
 func (h *Handlers) bootstrapCredentials(opts RegisterRoutesOpts) {
 	if opts.CredentialRing != nil {
 		h.credentialRing = opts.CredentialRing
@@ -932,32 +1100,13 @@ func (h *Handlers) bootstrapCredentials(opts RegisterRoutesOpts) {
 			h.logger.Info("已从凭据 store 载入", "keys", len(keys))
 		}
 	}
-	if ring.Len() == 0 && h.credentialTTLEnabled() {
-		if err := h.generateBootstrapCredential(ring, store); err != nil {
-			// 首启 anonymous 生成失败（crypto/rand / 落盘异常）是致命装配错误：拒绝启动。
-			h.logger.Error("首次启动生成 anonymous 凭据失败", "error", err)
-			panic("首次启动生成 anonymous 凭据失败: " + err.Error())
-		}
+	// U3：零凭据等待注册——store 为空即不生成任何凭据（ring.Len()==0），
+	// 首个注册者（回环）由 register 端点经 AddRegistration 原子授 admin。
+	if ring.Len() == 0 {
+		h.logger.Info("零凭据启动：首次注册请在本机回环执行 /api/credentials/register，首位注册者将成为 admin")
 	}
 	h.credentialRing = ring
 	h.credentialStore = store
-}
-
-// credentialTTLEnabled 判断是否允许首启 anonymous 生成（cfg.CredentialTTL>=0）。
-func (h *Handlers) credentialTTLEnabled() bool {
-	if cfg := h.cfgPtr.Load(); cfg != nil {
-		return cfg.CredentialTTL >= 0
-	}
-	return true
-}
-
-// generateBootstrapCredential 生成首启 anonymous 凭据（委托包级 bootstrapGenerate）。
-func (h *Handlers) generateBootstrapCredential(ring *accesskey.Ring, store *CredentialStore) error {
-	ttl := 30 * 24 * time.Hour
-	if cfg := h.cfgPtr.Load(); cfg != nil && cfg.CredentialTTL > 0 {
-		ttl = cfg.CredentialTTL
-	}
-	return bootstrapGenerate(ring, store, ttl, h.logger)
 }
 
 // BootstrapServerCredentials 是生产装配入口：为服务端准备凭据 Ring + store
@@ -965,7 +1114,8 @@ func (h *Handlers) generateBootstrapCredential(ring *accesskey.Ring, store *Cred
 //   - store = <storage_root>/anonymous/meta/credentials.json（服务端级全局凭据，
 //     anonymous 租户的 meta 桶；多租户部署如需 per-owner 凭据经 /api/credentials
 //     管理，见任务 5）；
-//   - 载入既有快照；仍空且 cfg.CredentialTTL>=0 → 生成首启 anonymous 凭据并持久化。
+//   - 载入既有快照；**U3：不再生成首启 anonymous 凭据**——store 为空则返回空 Ring，
+//     系统以零凭据等待 register 公开端点（首个回环注册者授 admin）。
 func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ring, *CredentialStore, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -980,47 +1130,11 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 		}
 		logger.Info("已从凭据 store 载入", "keys", len(keys), "path", store.path)
 	}
-	if ring.Len() == 0 && cfg.CredentialTTL >= 0 {
-		ttl := 30 * 24 * time.Hour
-		if cfg.CredentialTTL > 0 {
-			ttl = cfg.CredentialTTL
-		}
-		if err := bootstrapGenerate(ring, store, ttl, logger); err != nil {
-			return nil, nil, fmt.Errorf("首次启动生成 anonymous 凭据失败: %w", err)
-		}
+	// U3：不生成 anonymous——空 store = 零凭据等待注册。
+	if ring.Len() == 0 {
+		logger.Info("零凭据启动：请在本机回环执行 /api/credentials/register，首个注册者将成为 admin")
 	}
 	return ring, store, nil
-}
-
-// bootstrapGenerate 生成首启 anonymous 凭据：
-//   - AK = ak-<32hex>（16B 随机）、SK = 32B 随机 hex（与 pkg/accesskey.GeneratePair 同款）；
-//   - kind=plain、ExpiresAt=now+ttl、Meta{Type:"bootstrap"}；
-//   - 写入 Ring 并持久化，slog.Info 输出 AK 提示妥善保存。
-func bootstrapGenerate(ring *accesskey.Ring, store *CredentialStore, ttl time.Duration, logger *slog.Logger) error {
-	ak, skHexStr, err := GenerateBootstrapCredential()
-	if err != nil {
-		return err
-	}
-	sk, derr := hex.DecodeString(skHexStr)
-	if derr != nil || len(sk) != 32 {
-		return fmt.Errorf("生成 anonymous SK 解码失败: %v", derr)
-	}
-	if uerr := ring.UpsertAK(ak, "anonymous"); uerr != nil {
-		return fmt.Errorf("登记 anonymous AK 失败: %w", uerr)
-	}
-	if _, aerr := ring.AddKey(ak, sk,
-		accesskey.WithExpiresAt(time.Now().Add(ttl)),
-		accesskey.WithMeta(accesskey.Meta{Type: "bootstrap"}),
-	); aerr != nil {
-		return fmt.Errorf("追加 anonymous SK 失败: %w", aerr)
-	}
-	if store != nil {
-		if serr := store.Save(ring.Snapshot()); serr != nil {
-			return fmt.Errorf("持久化 anonymous 凭据失败: %w", serr)
-		}
-	}
-	logger.Info("首次启动已生成 anonymous 凭据（AK=...），请妥善保存并尽快登记正式用户", "ak", ak)
-	return nil
 }
 
 // bestFirstCredential 返回 Ring 中首个可用（alive）AK 及其 64-hex SK。

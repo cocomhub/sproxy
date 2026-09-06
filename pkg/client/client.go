@@ -107,6 +107,7 @@ type FileClient struct {
 	accessKeySecret        string           // SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）
 	accessKeyID            string           // SproxySig SK 条目 ID（skeyID，skey-id=<id>；签发时 header 携带，服务端精确取条目）
 	allowMissingEntryID    bool             // 一次性开关：renew 引导允许缺 skeyID（首次 renew 尚无 access_key_id）
+	requestSigner          RequestSigner    // 自定义请求签名器（WithRequestSigner 注入；nil=默认 ConfigSigner）
 	authToken              string           // 多用户 API 密钥 Bearer（api_keys.enabled 场景）
 	meshHubURL             string           // 配置 hub_url（mesh/relay/p2p 信令/中继 hub，区别于 xfer 的 hubURL）
 	nodeID                 string           // 配置 node_id（本节点默认 ID）
@@ -371,6 +372,17 @@ func WithAccessKey(ak, sk string) Option {
 func WithAccessKeyID(id string) Option {
 	return func(c *FileClient) {
 		c.accessKeyID = id
+	}
+}
+
+// WithRequestSigner 注入自定义请求签名器（RequestSigner seam）：宿主可复用自有凭据源 /
+// 签名器（如 TOTP 登录会话），替换默认的 ConfigSigner。注入后直连（doRequest）与隧道
+// （sigRoundTripper 外层 /tunnel，含 xfer 隧道两路径）都走该 Signer，且 doRequest 不再
+// 预计算 body 哈希（由 Signer 全权接管请求体）。未注入时保持现状 ConfigSigner 行为
+// （access_key/access_key_secret/access_key_id 驱动的 SproxySig 签名）。
+func WithRequestSigner(s RequestSigner) Option {
+	return func(c *FileClient) {
+		c.requestSigner = s
 	}
 }
 
@@ -1266,6 +1278,23 @@ func (c *FileClient) PeerFingerprints() []string {
 func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header) (*http.Response, error) {
 	// SproxySig 请求签名认证（AccessKey/AccessKeySecret）：发送前预计算 body 哈希，
 	// 构造 Authorization 头；Secret 只本端计算签名，永不上线。api_keys 场景用 Bearer。
+	// 注入自定义 Signer 时（WithRequestSigner）由该 Signer 全权接管签名与 body 处理，
+	// 不再走默认 ConfigSigner 的 prehashBody / Authorization 装配。
+	if c.requestSigner != nil {
+		req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
+		if err != nil {
+			return nil, fmt.Errorf("创建请求失败: %w", err)
+		}
+		for k, vals := range headers {
+			for _, v := range vals {
+				req.Header.Add(k, v)
+			}
+		}
+		if serr := c.requestSigner.Sign(ctx, req); serr != nil {
+			return nil, fmt.Errorf("SproxySig 签名失败: %w", serr)
+		}
+		return c.doRequestPrepared(ctx, req)
+	}
 	if c.accessKeySecret != "" {
 		sigAuth, signedBody, cleanup, serr := c.signRequest(method, urlPath, body)
 		if serr != nil {
@@ -1290,20 +1319,25 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 			req.Header.Add(k, v)
 		}
 	}
+	return c.doRequestPrepared(ctx, req)
+}
 
+// doRequestPrepared 完成追踪 span 注入并选择传输路径（隧道 / xfer / 直连）。
+func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (*http.Response, error) {
 	// 追踪：为本次请求建立 span，并把 traceparent 头注入到请求头中。
 	// tracer 为 nil 时（如 WithTracer(nil)）回退到默认 slog 实现，避免 nil 解引用。
 	tracer := c.tracer
 	if tracer == nil {
 		tracer = telemetry.New()
 	}
-	ctx2, end := tracer.StartSpan(ctx, method+" "+urlPath)
+	ctx2, end := tracer.StartSpan(ctx, req.Method+" "+req.URL.Path)
 	defer end()
 	tracer.Inject(ctx2, httpHeaderCarrier{req.Header})
 	// 请求上下文改用 ctx2：span 生命周期覆盖实际传输，且后续 Context 版日志自动带 trace_id/span_id。
 	req = req.WithContext(ctx2)
 
 	var resp *http.Response
+	var err error
 	if c.tunnelClient != nil {
 		if c.initError != nil {
 			return nil, c.initError
@@ -1326,7 +1360,10 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	}
 
 	// 直连模式：补全 server URL
-	fullURL := c.serverURL + urlPath
+	fullURL := c.serverURL + req.URL.Path
+	if req.URL.RawQuery != "" {
+		fullURL += "?" + req.URL.RawQuery
+	}
 	req.URL, err = url.Parse(fullURL)
 	if err != nil {
 		return nil, fmt.Errorf("解析 URL 失败: %w", err)
@@ -1343,15 +1380,79 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	return closeBodyIfErr(resp, err)
 }
 
+// RequestSigner 是请求签名器 seam：宿主可注入自有凭据源/签名器（替换默认
+// ConfigSigner）。Sign 在请求「发送前」调用，可改写请求头（含 Authorization）与
+// 请求体（req.Body）；签名器新增的头部必须存在于最终请求中。
+type RequestSigner interface {
+	Sign(ctx context.Context, req *http.Request) error
+}
+
+// ErrSkeyIDRequired 是 v2「skey-id 必传」缺失的哨兵错误（configSigner.Sign 返回）。
+// 供 sigRoundTripper.RoundTrip 以 errors.Is 精确判定并附加既有引导文案；注入自定义
+// Signer 的自定义错误原样透传、不被该哨兵改写。
+var ErrSkeyIDRequired = errors.New("access_key_id 未配置（v2 skey-id 必传）")
+
+// configSigner 是默认签名器：用 FileClient 配置的 access_key/access_key_secret/
+// access_key_id 构造 SproxySig v2 签名头（承接现状 signRequest/sigRoundTripper 行为，
+// 含 WithAccessKey/WithAccessKeyID 等 option 注入的字段；accessKeySecret=="" 时不签名
+// ——公开端点直达）。凭据从持有者 FileClient 实时读取（隧道客户端在 option 应用过程中
+// 创建，access_key_id 可能随后由 WithAccessKeyID 写入，不能构造时快照）。
+type configSigner struct {
+	c *FileClient
+}
+
+// Sign 为请求构造 SproxySig 签名头（HEAD 无 body，其余直连路径预计算哈希；隧道外层
+// /tunnel 标 UNSIGNED 且不触碰 body）。两路径共用同一签名语义（R4-M3）。
+func (s *configSigner) Sign(ctx context.Context, req *http.Request) error {
+	if req == nil || req.URL == nil {
+		return fmt.Errorf("signRequest: 非法请求（nil req/url）")
+	}
+	c := s.c
+	// v2 skey-id 强制必传：配置了 access_key 但缺 access_key_id 且非 renew 引导
+	// （allowMissingEntryID）→ 报错（v2 协议要求；renew 引导例外见 RenewAccessKey）。
+	if c.accessKey != "" && c.accessKeyID == "" && !c.allowMissingEntryID {
+		return fmt.Errorf("%w: 请先 `sclient trust renew` 或配置 access_key_id", ErrSkeyIDRequired)
+	}
+	now := time.Now()
+	h := sproxysig.Header{
+		Version:    sproxysig.Version,
+		AK:         c.accessKey,
+		EntryID:    c.accessKeyID,
+		TS:         now.UnixMilli(),
+		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
+		Nonce:      sproxysig.NewNonce(),
+		BodySHA256: sproxysig.UnsignedBody,
+	}
+	// 直连路径预计算 body 哈希——与现状 signRequest 一致：nil body → EmptyBodyHash
+	// （prehashBody 对 nil 直接返回，无需独立分支）；非 nil 时才替换 req.Body（避免用
+	// io.NopCloser 包裹 nil）。隧道外层（/tunnel）保持 UNSIGNED 且不得读取/替换
+	// req.Body——流式加密帧为一次性不可重放流，spool 替换会破坏上行加密/关闭时序；
+	// 原 sigRoundTripper 从不触碰 body（R3-M5 逐条对齐）。
+	if !strings.HasSuffix(req.URL.Path, "/tunnel") {
+		signedBody, bodyHash, cleanup, err := prehashBody(req.Body)
+		if err != nil {
+			return err
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		h.BodySHA256 = bodyHash
+		if signedBody != nil {
+			req.Body = io.NopCloser(signedBody)
+		}
+	}
+	req.Header.Set("Authorization", sproxysig.SignAndFormat(c.accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
+	return nil
+}
+
 // signRequest 为请求构造 SproxySig 签名头，并返回可重放（已预计算哈希）的 body。
-// 返回的 cleanup 非 nil 时需在请求完成后调用（临时文件缓存路径）。
 // v2 canonical：header 携带 skey-id=<skeyID>（c.accessKeyID），服务端
 // verifySproxySigFromRing 以 (ak, skeyID) 精确取条目。skeyID 参与 canonical 拼装。
 // **强制必传**：accessKey 非空但 skeyID 为空时返回错误（v2 协议要求；renew 引导
 // 例外见 RenewAccessKey——首次 renew 前本端恰好无 skeyID）。
 func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string, io.Reader, func(), error) {
 	if c.accessKey != "" && c.accessKeyID == "" && !c.allowMissingEntryID {
-		return "", nil, nil, fmt.Errorf("access_key_id 未配置（v2 skey-id 必传）: 请先 `sclient trust renew` 或配置 access_key_id")
+		return "", nil, nil, fmt.Errorf("%w: 请先 `sclient trust renew` 或配置 access_key_id", ErrSkeyIDRequired)
 	}
 	pathPart, queryPart, _ := strings.Cut(urlPath, "?")
 	signedBody, bodyHash, cleanup, err := prehashBody(body)
@@ -1419,6 +1520,16 @@ type httpHeaderCarrier struct{ h http.Header }
 func (c httpHeaderCarrier) Get(k string) string { return c.h.Get(k) }
 func (c httpHeaderCarrier) Set(k, v string)     { c.h.Set(k, v) }
 
+// sigRequestSigner 返回持有者 FileClient 生效的签名器：注入自定义 Signer 时用之，
+// 否则默认 ConfigSigner。逐请求实时解析（同 accessKey/accessKeyID 实时读取——隧道
+// 客户端在 option 应用过程中创建，signer 可能随后注入）。
+func (c *FileClient) sigRequestSigner() RequestSigner {
+	if c.requestSigner != nil {
+		return c.requestSigner
+	}
+	return &configSigner{c: c}
+}
+
 // sigRoundTripper 是隧道外层客户端的 RoundTripper：给每个 /tunnel 请求
 // 注入 SproxySig 签名（body_sha256=UNSIGNED，流式 body 无法整体哈希）。
 // 服务端 authMiddleware 验签后派生隧道密钥解密；无签名则 401。
@@ -1433,20 +1544,14 @@ type sigRoundTripper struct {
 }
 
 func (rt *sigRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if rt.c.accessKey != "" && rt.c.accessKeyID == "" && !rt.c.allowMissingEntryID {
-		return nil, fmt.Errorf("access_key_id 未配置（v2 skey-id 必传）: 请先 `sclient trust renew` 或配置 access_key_id")
+	if err := rt.c.sigRequestSigner().Sign(context.Background(), req); err != nil {
+		// v2 缺 skey-id：附加既有标准文案（错误文案与旧 sigRoundTripper 逐字一致）；
+		// 其余错误（含注入 Signer 的自定义错误）原样透传，不回译/改写。
+		if errors.Is(err, ErrSkeyIDRequired) {
+			return nil, fmt.Errorf("%w: 请先 `sclient trust renew` 或配置 access_key_id", ErrSkeyIDRequired)
+		}
+		return nil, err
 	}
-	now := time.Now()
-	h := sproxysig.Header{
-		Version:    sproxysig.Version,
-		AK:         rt.c.accessKey,
-		EntryID:    rt.c.accessKeyID,
-		TS:         now.UnixMilli(),
-		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
-		Nonce:      sproxysig.NewNonce(),
-		BodySHA256: sproxysig.UnsignedBody,
-	}
-	req.Header.Set("Authorization", sproxysig.SignAndFormat(rt.c.accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
 	return rt.base.RoundTrip(req)
 }
 

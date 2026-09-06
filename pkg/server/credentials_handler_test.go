@@ -21,7 +21,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 )
 
-// 测试辅助常量：admin 凭据（testAdminKey 带 Meta.Type=="admin" 条目）。
+// 测试辅助常量：admin 凭据（testAdminKey 为账号级 Key.Role==RoleAdmin 的 admin）。
 const (
 	testAdminKey    = "ak-admin-mesh-bbccdd"
 	testAdminSecret = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
@@ -134,22 +134,59 @@ func mustDecodeHex(t *testing.T, s string) []byte {
 	return b
 }
 
-// credentialsRingWithAdmin 构造带 admin 条目（Meta.Type=="admin"）与 user 条目的 Ring。
-// adminAK 为空时只注入 user（无 admin 条目，模拟 4A 无 admin 部署）。
+// credentialsRingWithAdmin 构造带 admin 账号（Key.Role==RoleAdmin）与 user 账号的 Ring。
+// adminAK 为空时只注入 user（无 admin，模拟 4A 无 admin 部署）。
 // 条目 ID 用 testEntryID(ak) 确定性生成（与 signRequest/signBodyRequest 精确匹配）。
-func credentialsRingWithAdmin(adminAK, adminSK, userAK, userSK string) *accesskey.Ring {
+// 注意：4B-1 起 admin 判定读账号级 Key.Role（DEC-A），不再读 Meta.Type=="admin"。
+//
+// 本 helper 是**测试专用装配工具**：它模拟的是「存量 store 中已持久化的 admin 条目」
+// （4A 无 register 时 authority 即 store 文件）——即经 `trust ak add`/手动编辑
+// credentials.json 落盘的既有 admin 账号。4B-1 起**生产环境 admin 的唯一产生途径是
+// 首个回环注册（AddRegistration 原子授予）**；测试里 setKeyRole 直接改 Role 仅用于
+// 复现「磁盘上已存在 admin」这一状态，绝不意味着 admin 可经非注册路径凭空产生。
+func credentialsRingWithAdmin(t *testing.T, adminAK, adminSK, userAK, userSK string) *accesskey.Ring {
+	t.Helper()
 	ring := accesskey.NewRing()
 	if adminAK != "" {
 		ask, _ := hex.DecodeString(adminSK)
 		_ = ring.UpsertAK(adminAK, "admin")
-		_, _ = ring.AddKey(adminAK, ask, accesskey.WithID(testEntryID(adminAK)), accesskey.WithMeta(accesskey.Meta{Type: "admin"}))
+		_, _ = ring.AddKey(adminAK, ask, accesskey.WithID(testEntryID(adminAK)), accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
 	}
 	usk, _ := hex.DecodeString(userSK)
 	if userAK != "" {
 		_ = ring.UpsertAK(userAK, "user")
 		_, _ = ring.AddKey(userAK, usk, accesskey.WithID(testEntryID(userAK)), accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
 	}
+	if adminAK != "" {
+		setKeyRole(t, ring, adminAK, accesskey.RoleAdmin)
+	}
 	return ring
+}
+
+// setKeyRole 把 ring 中指定 AK 的账号级角色设为 role（测试辅助：经 Snapshot+Replace
+// 回写，模拟 store 载入含 role 字段的 Key；同包测试不直接触碰 Ring 内部 map）。
+//
+// 语义提醒（与 credentialsRingWithAdmin 同款）：本 helper 模拟的是「存量 store 中
+// 已持久化的 admin 条目」（4A 无 register 时 authority 即 store 文件）。4B-1 起生产
+// admin 的唯一产生途径是首个回环注册（AddRegistration 原子授予）——测试里改 Role
+// 仅用于复现磁盘上已存在的管理账号状态，不代表可经非注册路径产生 admin。
+func setKeyRole(t *testing.T, ring *accesskey.Ring, ak string, role accesskey.Role) {
+	t.Helper()
+	snap := ring.Snapshot()
+	found := false
+	for i := range snap {
+		if snap[i].AK == ak {
+			snap[i].Role = role
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("ring 中无 AK %q", ak)
+	}
+	if err := ring.Replace(snap); err != nil {
+		t.Fatalf("setKeyRole Replace: %v", err)
+	}
 }
 
 // newCredentialsTestServer 启动带管理凭据的完整路由测试服务器。
@@ -166,7 +203,7 @@ func newCredentialsTestServer(t *testing.T, adminAK, adminSK, userAK, userSK str
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	ring := credentialsRingWithAdmin(adminAK, adminSK, userAK, userSK)
+	ring := credentialsRingWithAdmin(t, adminAK, adminSK, userAK, userSK)
 	opts := RegisterRoutesOpts{
 		Mux:             http.NewServeMux(),
 		CfgPtr:          &cfgPtr,
@@ -280,7 +317,7 @@ func TestCredentials_Renew_TTLServer(t *testing.T) {
 	cfg.LogLevel = "error"
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
-	ring := credentialsRingWithAdmin("", "", testAccessKey, testAccessSecret)
+	ring := credentialsRingWithAdmin(t, "", "", testAccessKey, testAccessSecret)
 	opts := RegisterRoutesOpts{
 		Mux:            http.NewServeMux(),
 		CfgPtr:         &cfgPtr,
@@ -703,8 +740,8 @@ func TestCredentials_PersistFailure(t *testing.T) {
 
 // ---- admin 判定边界（步骤 4 补测）----
 
-// TestCredentials_RoleAdmin 验证 getRole 边界：admin 条目存在 → admin；普通用户 → user；
-// 未知 AK → user。
+// TestCredentials_RoleAdmin 验证 getRole 边界（4B-1 起读账号级 Key.Role，DEC-A）：
+// admin 角色 → admin；普通用户 → user；未知 AK → user。
 func TestCredentials_RoleAdmin(t *testing.T) {
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{CredentialTTL: 30 * 24 * time.Hour})
@@ -712,9 +749,10 @@ func TestCredentials_RoleAdmin(t *testing.T) {
 	ask := mustDecodeHex(t, testAdminSecret)
 	usk := mustDecodeHex(t, testAccessSecret)
 	_ = h.credentialRing.UpsertAK(testAdminKey, "admin")
-	_, _ = h.credentialRing.AddKey(testAdminKey, ask, accesskey.WithMeta(accesskey.Meta{Type: "admin"}))
+	_, _ = h.credentialRing.AddKey(testAdminKey, ask, accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
 	_ = h.credentialRing.UpsertAK(testAccessKey, "user")
 	_, _ = h.credentialRing.AddKey(testAccessKey, usk, accesskey.WithMeta(accesskey.Meta{Type: "initial"}))
+	setKeyRole(t, h.credentialRing, testAdminKey, accesskey.RoleAdmin)
 
 	if got := h.getRole(testAdminKey); got != "admin" {
 		t.Errorf("getRole(admin) = %q, want admin", got)
@@ -724,6 +762,14 @@ func TestCredentials_RoleAdmin(t *testing.T) {
 	}
 	if got := h.getRole("ak-unknown-0000000000000000"); got != "user" {
 		t.Errorf("getRole(unknown) = %q, want user", got)
+	}
+	// AK 存在但 Role 为空（如 4A bootstrap anonymous 直建、未走 Replace 归一）→ user 缺省。
+	emptyRoleAK := "ak-empty-0000000000000000"
+	if err := h.credentialRing.UpsertAK(emptyRoleAK, "nobody"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	if got := h.getRole(emptyRoleAK); got != "user" {
+		t.Errorf("getRole(empty Role) = %q, want user（user 缺省）", got)
 	}
 }
 

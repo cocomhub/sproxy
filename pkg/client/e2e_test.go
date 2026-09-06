@@ -5,6 +5,7 @@ package client
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
@@ -17,11 +18,11 @@ import (
 )
 
 // startFullTestServer 启动完整 sproxy 服务（含所有路由和分块上传支持）。
-// 凭据 store 化（task3）后：无 ring/store 时服务器会 bootstrap 生成 anonymous 凭据，
-// authMiddleware 随之进入 SproxySig 验签路径——未配置 AK/SK 的裸请求会被 401 拒绝。
-// 因此这里用 BootstrapServerCredentials 生成/载入真实凭据并注入 opts，同时把该
-// AK/SK 通过返回值传给调用方（I2：以返回值注入替代包级全局，消 data race 隐患），
-// 由调用方 WithAccessKey(ak, skHex) 传入 FileClient，使 e2e 走真实签名路径。
+// 凭据 store 化（task3）后：无 ring/store 时不生成 anonymous（U3 零凭据启动），
+// 裸请求会被 authMiddleware 401 拒绝；这里经 BootstrappServerCredentials 载入——
+// **U3 后不再自动生成 anonymous**，故显式种入一条用户级凭据再注入 opts，并把
+// AK/SK/skeyID 通过返回值传给调用方（I2：以返回值注入替代包级全局，消 data race
+// 隐患），由调用方 WithAccessKey(ak, skHex) 传入 FileClient，使 e2e 走真实签名路径。
 func startFullTestServer(t *testing.T) (url string, cfg *server.Config, ak, skHex, entryID string) {
 	t.Helper()
 	tmpDir := t.TempDir()
@@ -33,20 +34,35 @@ func startFullTestServer(t *testing.T) (url string, cfg *server.Config, ak, skHe
 		t.Fatalf("Validate: %v", err)
 	}
 
-	// 生成/载入 anonymous 凭据（首启生成并持久化到 <root>/anonymous/meta/）。
-	// 注意：此处重要性——BootstrapServerCredentials 副作用是写 credentials.json，
-	// 必须在 RegisterRoutes 之前调用；随后以相同 ring+store 注入 opts。
-	ring, store, err := server.BootstrapServerCredentials(cfg, nil)
+	// U3：BootstrapServerCredentials 不再生成匿名凭据——显式种入一条 plain user 凭据
+	// （与旧 anonymous 产物同构：入口 SK 32B、条目 ID 确定性生成），供 e2e 签名使用。
+	ring, store, berr := server.BootstrapServerCredentials(cfg, nil)
+	if berr != nil {
+		t.Fatalf("BootstrapServerCredentials: %v", berr)
+	}
+	akBytes := make([]byte, 16)
+	if _, err := rand.Read(akBytes); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	skBytes := make([]byte, 32)
+	if _, err := rand.Read(skBytes); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	ak = hex.EncodeToString(append([]byte("ak-"), akBytes...))
+	skHex = hex.EncodeToString(skBytes)
+	if err := ring.UpsertAK(ak, "e2e"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	id, err := ring.AddKey(ak, skBytes)
 	if err != nil {
-		t.Fatalf("BootstrapServerCredentials: %v", err)
+		t.Fatalf("AddKey: %v", err)
 	}
-	keys := ring.Snapshot()
-	if len(keys) == 0 || len(keys[0].Entries) == 0 || len(keys[0].Entries[0].SK) != 32 {
-		t.Fatalf("BootstrapServerCredentials 未生成 32B anonymous 凭据（keys=%d）", len(keys))
+	entryID = id
+	if store != nil {
+		if serr := store.Save(ring.Snapshot()); serr != nil {
+			t.Fatalf("store.Save: %v", serr)
+		}
 	}
-	ak = keys[0].AK
-	skHex = hex.EncodeToString(keys[0].Entries[0].SK)
-	entryID = keys[0].Entries[0].ID
 
 	var cfgPtr atomic.Pointer[server.Config]
 	cfgPtr.Store(cfg)

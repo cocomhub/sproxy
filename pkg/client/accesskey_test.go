@@ -427,7 +427,7 @@ func TestFileClient_AddAK(t *testing.T) {
 	defer srv.Close()
 
 	svc := NewFileClient(srv.URL, WithAccessKey(ak, hex.EncodeToString(randSKBytes(t))), WithAccessKeyID(testClientEntryID))
-	res, err := svc.AddAK(context.Background(), ak, owner, secret)
+	res, err := svc.AddAK(context.Background(), ak, owner, secret, "")
 	if err != nil {
 		t.Fatalf("AddAK: %v", err)
 	}

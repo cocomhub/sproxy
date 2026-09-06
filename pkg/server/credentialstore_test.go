@@ -72,6 +72,42 @@ func TestCredentialStore_SaveLoadRoundtrip(t *testing.T) {
 	}
 }
 
+// TestCredentialStore_SaveLoadRoundtrip_AccountRoleAndTOTP 固化账号级字段的 JSON 落盘契约：
+// Save→Load 往返后 Key.Role 与 Key.TOTPSecret 保留（json tag "role"/"totp_secret"）。
+// 覆盖 R3-M4 兼容链路的另一端——新字段落盘后重启读回不丢。
+func TestCredentialStore_SaveLoadRoundtrip_AccountRoleAndTOTP(t *testing.T) {
+	dir := t.TempDir()
+	st := NewCredentialStore(filepath.Join(dir, "tenant", "meta"))
+
+	// TOTP 模式注册：首注册授 admin + 写 TOTPSecret（ttl 在 TOTP 模式被忽略，传 0）。
+	ring := accesskey.NewRing()
+	if _, _, err := ring.AddRegistration("ak-acct-1234567890abcdef", "owner-x", nil,
+		[]byte("01234567890123456789012345678901"), accesskey.RoleUser, 0); err != nil {
+		t.Fatalf("AddRegistration(TOTP): %v", err)
+	}
+	orig := ring.Snapshot()
+	if err := st.Save(orig); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := st.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].Role != accesskey.RoleAdmin {
+		t.Errorf("Key.Role 未保留, got %q, want %q", got[0].Role, accesskey.RoleAdmin)
+	}
+	if string(got[0].TOTPSecret) != "01234567890123456789012345678901" {
+		t.Errorf("Key.TOTPSecret 未保留, got %q", got[0].TOTPSecret)
+	}
+	// TOTP 模式注册无 SK 条目也保留（无 SK 条目侧）。
+	if len(got[0].Entries) != 0 {
+		t.Errorf("TOTP 模式注册不应有 SK 条目, got %d", len(got[0].Entries))
+	}
+}
+
 // TestCredentialStore_LoadMissing 验证文件不存在时 Load 返回空（非错）。
 func TestCredentialStore_LoadMissing(t *testing.T) {
 	st := NewCredentialStore(filepath.Join(t.TempDir(), "tenant", "meta"))
@@ -142,18 +178,20 @@ func TestCredentialStore_ConcurrentSave(t *testing.T) {
 	}
 }
 
-// TestGenerateBootstrapCredential_Format 验证首启 anonymous 凭据生成格式：AK
-// 随机段 32hex(16B)、SK 64 hex，直接委托 pkg/accesskey.GeneratePair（""）——生成
-// 收归 accesskey，服务端不再自行组装。与 GeneratePair 同源同长。
+// TestGenerateBootstrapCredential_Format 验证 register 端点 AK/SK 生成格式契约：
+// 经 RegisterRoutes + 回环首注册产出的 AK 随机段 32hex(16B)、SK 64 hex——
+// 委托 pkg/accesskey.GeneratePair（""），与 GeneratePair 同源同长（U3 移除首启
+// anonymous 后，该格式断言改挂在公开注册端点的实际产物上，见 register_handler_test
+// TestRegister_SimpleMode_Success。本测试保留对 accesskey.GeneratePair 的直接契约）。
 func TestGenerateBootstrapCredential_Format(t *testing.T) {
-	ak, sk, err := GenerateBootstrapCredential()
+	ak, sk, err := accesskey.GeneratePair(nil, "")
 	if err != nil {
-		t.Fatalf("GenerateBootstrapCredential: %v", err)
+		t.Fatalf("GeneratePair: %v", err)
 	}
 	if !strings.HasPrefix(ak, accesskey.AccessKeyPrefix) {
 		t.Errorf("AK 应以 %q 开头: %q", accesskey.AccessKeyPrefix, ak)
 	}
-	// AK 随机段恒 32 hex（16 字节）——与服务端标准 GeneratePair 同长。
+	// AK 随机段恒 32 hex（16 字节）——服务端 register 生成标准形态。
 	if len(ak) != len(accesskey.AccessKeyPrefix)+accesskey.AccessKeyHexLen*2 {
 		t.Errorf("AK 随机段应为 %d hex(%dB): got %q (len=%d)",
 			accesskey.AccessKeyHexLen*2, accesskey.AccessKeyHexLen, ak, len(ak))
@@ -161,24 +199,23 @@ func TestGenerateBootstrapCredential_Format(t *testing.T) {
 	if len(sk) != 64 {
 		t.Errorf("SK 长度 = %d, want 64", len(sk))
 	}
-	if _, err := hex.DecodeString(sk); err != nil {
-		t.Errorf("SK 非 hex: %v", err)
+	if _, derr := hex.DecodeString(sk); derr != nil {
+		t.Errorf("SK 非 hex: %v", derr)
 	}
 	// 熵等价断言：解析/校验通过官方入口。
 	if !accesskey.IsValidAK(ak) {
-		t.Errorf("anonymous 产物应通过 IsValidAK: %q", ak)
+		t.Errorf("产物应通过 IsValidAK: %q", ak)
 	}
 	if got := accesskey.ParseMesh(ak); got != "" {
-		t.Errorf("anonymous 无 mesh，ParseMesh = %q, want \"\"", got)
+		t.Errorf("无 mesh，ParseMesh = %q, want \"\"", got)
 	}
-	// 与 GeneratePair("") 产同长同构（同源字节数）。
-	gak, _, gerr := accesskey.GeneratePair(nil, "")
-	if gerr != nil {
-		t.Fatalf("GeneratePair: %v", gerr)
+	// 两次生成不同（随机性）。
+	ak2, sk2, err := accesskey.GeneratePair(nil, "")
+	if err != nil {
+		t.Fatalf("GeneratePair(second): %v", err)
 	}
-	if len(ak) != len(gak) {
-		t.Errorf("GenerateBootstrapCredential 与 GeneratePair AK 长度不一致: %d vs %d（同源应同长）",
-			len(ak), len(gak))
+	if ak == ak2 || sk == sk2 {
+		t.Errorf("两次生成应不同")
 	}
 }
 

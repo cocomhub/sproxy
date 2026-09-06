@@ -312,6 +312,7 @@ func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 			}
 			owner, _ := cmd.Flags().GetString("owner")
 			secret, _ := cmd.Flags().GetString("secret")
+			role, _ := cmd.Flags().GetString("role")
 			ak := ""
 			if len(args) == 1 {
 				ak = args[0]
@@ -326,7 +327,7 @@ func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 					return fmt.Errorf("生成 AccessKey 失败: %w", pairErr)
 				}
 			}
-			res, err := svc.AddAK(cmd.Context(), ak, owner, secret)
+			res, err := svc.AddAK(cmd.Context(), ak, owner, secret, role)
 			if err != nil {
 				ios.WriteErrLine("新增 AK 失败: %v", err)
 				return fmt.Errorf("新增 AK 失败: %w", err)
@@ -345,6 +346,7 @@ func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 	cmd.Flags().String("owner", "", "AK 归属者（可选）")
 	cmd.Flags().String("secret", "", "指定 Secret 值（64-hex；不指定则服务端生成并单次回传）")
 	cmd.Flags().String("mesh", "", "生成 AK 时的 mesh 标识（仅未指定 ak 参数时生效）")
+	cmd.Flags().String("role", "user", "账号角色：user 或 node（node 用于 mesh 节点账号，不可访问文件组）")
 	return cmd
 }
 

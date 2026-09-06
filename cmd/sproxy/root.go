@@ -105,9 +105,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	// 凭据 store 化装配：SproxySig 权威表 = Ring（取代 yaml access_keys）。
-	// 载入 <storage_root>/anonymous/meta/credentials.json；首启（ring 空）生成
-	// anonymous 凭据并持久化——**新部署必有可访问凭据**，不再 fail-fast 拒启。
-	// cfg.CredentialTTL<0 时跳过首启生成（显式禁用，零信任脚本场景）。
+	// 载入 <storage_root>/anonymous/meta/credentials.json；**U3：零凭据启动**——store
+	// 为空不生成 anonymous 凭据，系统以零凭据等 register 公开端点接入首个 admin
+	// （首个经回环注册的用户由 AddRegistration 原子授 admin）。
 	// api_keys.enabled 时 Ring 仍装配（hub 准入与隧道派生仍需 AK/SK）。
 	credRing, credStore, err := server.BootstrapServerCredentials(cfg, slog.Default())
 	if err != nil {
