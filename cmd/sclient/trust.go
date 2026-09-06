@@ -35,6 +35,7 @@ func NewCmdTrust(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 		Short: "凭据信任管理（renew 轮换 SK / SK 条目管理 / AK 管理）",
 	}
 	cmd.AddCommand(newCmdTrustRenew(factory, ios, cfgSvc, cfgFile))
+	cmd.AddCommand(newCmdTrustLogin(factory, ios, cfgSvc, cfgFile))
 	cmd.AddCommand(newCmdTrustSK(factory, ios, cfgSvc))
 	cmd.AddCommand(newCmdTrustAK(factory, ios, cfgSvc))
 	return cmd

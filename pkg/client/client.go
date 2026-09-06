@@ -106,6 +106,7 @@ type FileClient struct {
 	accessKey              string           // SproxySig 签名认证 AccessKey（公开标识）
 	accessKeySecret        string           // SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）
 	accessKeyID            string           // SproxySig SK 条目 ID（skeyID，skey-id=<id>；签发时 header 携带，服务端精确取条目）
+	sendNoAuth             bool             // WithSendNoAuth：强制不签名/TOTP 显式无凭据链路（M14，doRequest 层短路）
 	allowMissingEntryID    bool             // 一次性开关：renew 引导允许缺 skeyID（首次 renew 尚无 access_key_id）
 	requestSigner          RequestSigner    // 自定义请求签名器（WithRequestSigner 注入；nil=默认 ConfigSigner）
 	authToken              string           // 多用户 API 密钥 Bearer（api_keys.enabled 场景）
@@ -364,6 +365,28 @@ func WithAccessKey(ak, sk string) Option {
 		c.accessKeySecret = sk
 	}
 }
+
+// WithSendNoAuth 强制该 FileClient 的**所有直连请求**不携带 SproxySig 签名头
+// （doRequest 层短路签名，即便 accessKeySecret 非空）。
+//
+// 用途：TOTP 注册/登录等**显式无凭据链路**（M14）——RPC 由本端落入配置
+// access_key/access_key_secret/access_key_id 三字段被显式清空的无凭据客户端构造，
+// 但逐请求防呆（sendNoAuth 短路）确保即使构造遗漏也不会把带过期凭据的签名头带到
+// 公开端点（会被 authMiddleware 401 拒绝，TOTP 登录整体不可用）。
+//
+// 边界：本开关仅约束**直连公开端点**；隧道化客户端（WithTunnel/WithXfer 的
+// /tunnel 外层认证链，经 sigRoundTripper）不受此开关约束，仍需凭据才能通过外层
+// 认证。TOTP 登录是零凭据窗口能力，只走直连公开端点，与本开关适用面一致。
+func WithSendNoAuth(enabled bool) Option {
+	return func(c *FileClient) {
+		c.sendNoAuth = enabled
+	}
+}
+
+// sendNoAuth 是 doRequest 层的免签名开关（WithSendNoAuth 注入）。true 时短路默认
+// ConfigSigner 路径（accessKeySecret!="" 的签名单分支）与注入的自定义 Signer 路径，
+// 请求直达服务端公开端点（无 Authorization 头）。false/缺省保持现状行为。
+func (c *FileClient) sendNoAuthEnabled() bool { return c.sendNoAuth }
 
 // WithAccessKeyID 设置 SproxySig 的 SK 条目 ID（skeyID）。v2 协议 skey-id 强制必传：
 // 配置了 access_key 后签发请求 header 必须携带 skey-id=<skeyID>（服务端 (ak, skeyID)
@@ -1280,6 +1303,13 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 	// 构造 Authorization 头；Secret 只本端计算签名，永不上线。api_keys 场景用 Bearer。
 	// 注入自定义 Signer 时（WithRequestSigner）由该 Signer 全权接管签名与 body 处理，
 	// 不再走默认 ConfigSigner 的 prehashBody / Authorization 装配。
+	//
+	// sendNoAuth（WithSendNoAuth，M14 TOTP 显式无凭据链路）：强制短路全部签名路径
+	// （含注入的自定义 Signer ），请求直达公开端点——防带过期配置凭据的签名头被
+	// authMiddleware 401 拒绝，TOTP 注册/登录整体不可用。
+	if c.sendNoAuthEnabled() {
+		return c.sendUnsigned(ctx, method, urlPath, body, headers)
+	}
 	if c.requestSigner != nil {
 		req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
 		if err != nil {
@@ -1310,6 +1340,22 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		headers.Set("Authorization", sigAuth)
 	}
 
+	req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	for k, vals := range headers {
+		for _, v := range vals {
+			req.Header.Add(k, v)
+		}
+	}
+	return c.doRequestPrepared(ctx, req)
+}
+
+// sendUnsigned 构造**不签名**的直连请求（M14 TOTP 显式无凭据链路用）：与 doRequest
+// 的核心装配共享，但跳过 signRequest / 注入 Signer——请求不带 Authorization 头直达
+// 服务端公开端点（register/nonce/login）。
+func (c *FileClient) sendUnsigned(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)

@@ -273,8 +273,27 @@ type SyncRemoteConfig struct {
 // RegistrationConfig 是注册（凭据登记）相关配置。
 // Disable 缺省 false = 允许注册（默认，首启 anonymous 凭据生成）；true = 禁止注册
 // （仅存量用户，无法新增用户）。字段命名避免"allow=false 表示允许"的反直觉语义。
+// ForceTOTP（yaml force_totp，默认 false）：true 时 register 走 TOTP 分支——注册
+// 只下发 AK + otpauth_uri/base32_secret（用户须经 TOTP 登录拿 session SK，DEC-B），
+// 不直接下发明文 SK。false（默认）= 简单 AK/SK 模式（register 直接下发 SK）。
 type RegistrationConfig struct {
 	Disable bool `yaml:"disable" mapstructure:"disable"`
+	// ForceTOTP 强制 TOTP 注册（DEC-B）：默认 false = 简单 AK/SK 注册（4A 语义
+	// 回归）；true = 仅按 TOTP 注册（不建 SK 条目，见 register_handler.go）。
+	ForceTOTP bool `yaml:"force_totp" mapstructure:"force_totp"`
+	// SessionTTL 是 TOTP 登录（login_type=web，缺省）签发的 session SK 有效期
+	// （D3 服务端控 TTL；默认 24h）。
+	SessionTTL time.Duration `yaml:"session_ttl" mapstructure:"session_ttl"`
+	// CliTTL 是 login_type=cli（sclient trust login 回填）的 session SK 有效期
+	// （默认 7d——CLI 长期运行 daemon 需要更长会话磨损窗口）。
+	CliTTL time.Duration `yaml:"cli_ttl" mapstructure:"cli_ttl"`
+	// LoginFailLimit 是 per-AK 失败锁定阈值（U4）：该 AK 连续失败达此次数即进入
+	// 锁定窗口（默认 5）。锁定窗口内该 AK 的登录一律 401（含正确动态码，不随 IP
+	// 变化失效——防分布式 botnet 爆破）。
+	LoginFailLimit int `yaml:"login_fail_limit" mapstructure:"login_fail_limit"`
+	// LoginFailWindow 是 per-AK 失败锁定期（默认 15m，U4）：达 LoginFailLimit 后
+	// 锁定 LoginFailWindow 时长，到期自动解锁（无需管理员介入）。
+	LoginFailWindow time.Duration `yaml:"login_fail_window" mapstructure:"login_fail_window"`
 }
 
 type Config struct {
@@ -397,7 +416,14 @@ func Default() *Config {
 		CORS: CORSConfig{
 			MaxAge: defaultMaxAge,
 		},
-		Registration:          RegistrationConfig{Disable: false},
+		Registration: RegistrationConfig{
+			Disable:         false,
+			ForceTOTP:       false,
+			SessionTTL:      24 * time.Hour,     // TOTP 登录 web session 默认 24h（D3）
+			CliTTL:          7 * 24 * time.Hour, // CLI 回填 session 默认 7d（D3）
+			LoginFailLimit:  5,                  // per-AK 失败锁定阈值（U4）
+			LoginFailWindow: 15 * time.Minute,   // 锁定窗口 15m（U4）
+		},
 		CredentialTTL:         30 * 24 * time.Hour, // 首启 anonymous 凭据有效期
 		AllowInsecureLoopback: false,
 		Web: WebConfig{
@@ -482,6 +508,19 @@ func (c *Config) SetDefaults() {
 	if c.CredentialTTL == 0 {
 		c.CredentialTTL = 30 * 24 * time.Hour
 	}
+	// Registration 子配置默认（Web/CLI session TTL、per-AK 失败锁定阈值/窗口）。
+	if c.Registration.SessionTTL <= 0 {
+		c.Registration.SessionTTL = 24 * time.Hour
+	}
+	if c.Registration.CliTTL <= 0 {
+		c.Registration.CliTTL = 7 * 24 * time.Hour
+	}
+	if c.Registration.LoginFailLimit <= 0 {
+		c.Registration.LoginFailLimit = 5
+	}
+	if c.Registration.LoginFailWindow <= 0 {
+		c.Registration.LoginFailWindow = 15 * time.Minute
+	}
 	if c.Sync.MaxConcurrent <= 0 {
 		c.Sync.MaxConcurrent = 3
 	}
@@ -550,6 +589,20 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("api_keys[%d].permission=%q 无效，仅允许 %q 或 %q", i, k.Permission, PermissionRead, PermissionWrite)
 		}
+	}
+	// registration 子配置校验（TOTP 登录会话/锁定参数）：login_fail_limit 必须 ≥1
+	// （<1 无法锁定，防脚枪）；session_ttl / cli_ttl / login_fail_window 必须 >0。
+	if c.Registration.LoginFailLimit < 1 {
+		return fmt.Errorf("registration.login_fail_limit=%d 无效，至少为 1（per-AK 失败锁定阈值）", c.Registration.LoginFailLimit)
+	}
+	if c.Registration.SessionTTL <= 0 {
+		return fmt.Errorf("registration.session_ttl=%s 无效，必须大于 0", c.Registration.SessionTTL)
+	}
+	if c.Registration.CliTTL <= 0 {
+		return fmt.Errorf("registration.cli_ttl=%s 无效，必须大于 0", c.Registration.CliTTL)
+	}
+	if c.Registration.LoginFailWindow <= 0 {
+		return fmt.Errorf("registration.login_fail_window=%s 无效，必须大于 0", c.Registration.LoginFailWindow)
 	}
 	// bucket_limits 校验（任务 2 放行条件 2/3）：
 	//   - 键是相对租户根路径（如 user/videos/hd），拒绝 .. / 绝对路径 / 前导斜杠 /

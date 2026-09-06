@@ -506,6 +506,63 @@ func TestRing_Concurrent(t *testing.T) {
 	_ = r.Snapshot()
 }
 
+// TestRing_TOTPSecretDeepCopy Snapshot / Replace / GetKey 返回的副本含 TOTPSecret（账号级），
+// 且为深拷贝——修改返回值不影响原 ring（4B-2 登录 handler 按 GetKey 取 TOTPSecret 的唯一路径）。
+func TestRing_TOTPSecretDeepCopy(t *testing.T) {
+	totp := []byte{0xCA, 0xFE, 0xBA, 0xBE}
+	ak := "ak-totp-1234567890abcdef"
+
+	// 经 AddRegistration(TOTP 模式) 写入账号级 TOTPSecret。
+	r := NewRing()
+	granted, _, err := r.AddRegistration(ak, "", nil, totp, RoleAdmin, 0)
+	if err != nil {
+		t.Fatalf("AddRegistration: %v", err)
+	}
+	if !granted {
+		t.Fatalf("首注册应授 admin")
+	}
+
+	// GetKey（登录 handler 唯一访问路径）取到含 TOTPSecret 的深拷贝。
+	k, ok := r.GetKey(ak)
+	if !ok {
+		t.Fatalf("GetKey 应 ok=true")
+	}
+	if !bytes.Equal(k.TOTPSecret, totp) {
+		t.Fatalf("GetKey 未携带 TOTPSecret, got %x", k.TOTPSecret)
+	}
+	// 修改返回值缓冲区不影响 ring。
+	orig := append([]byte(nil), totp...)
+	for i := range k.TOTPSecret {
+		k.TOTPSecret[i] ^= 0xff
+	}
+	if got, ok := r.GetKey(ak); !ok || !bytes.Equal(got.TOTPSecret, orig) {
+		t.Fatalf("修改 GetKey 返回值污染了 ring 内 TOTPSecret")
+	}
+
+	// Snapshot 同样携带并深拷贝。
+	snap := r.Snapshot()
+	if len(snap) != 1 || !bytes.Equal(snap[0].TOTPSecret, totp) {
+		t.Fatalf("Snapshot 未携带 TOTPSecret: %v", snap)
+	}
+	snap[0].TOTPSecret[0] = 0
+	if got, ok := r.GetKey(ak); !ok || !bytes.Equal(got.TOTPSecret, orig) {
+		t.Fatalf("修改 Snapshot 返回值污染了 ring 内 TOTPSecret")
+	}
+
+	// Replace 装载的 Key 恢复 TOTPSecret。
+	inputTotp := []byte{0xDE, 0xAD, 0xBE, 0xEF}
+	newKeys := []Key{{AK: ak, Owner: "o", Role: RoleUser, TOTPSecret: inputTotp}}
+	if err := r.Replace(newKeys); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	// 修改入参不影响 ring（Replace 内 cloneKey 复制 TOTPSecret）。
+	want := append([]byte(nil), inputTotp...)
+	newKeys[0].TOTPSecret[0] = 0x00
+	if got, ok := r.GetKey(ak); !ok || !bytes.Equal(got.TOTPSecret, want) {
+		t.Fatalf("Replace 未深拷贝 TOTPSecret: got %x, want %x", got.TOTPSecret, want)
+	}
+}
+
 // TestNewRingFromKeyPairs 验证导出的装配工厂：合法条目入 ring、非法 SK 被跳过、
 // 条目为 plain alive 且 Meta.Type="initial"、空输入得空 ring。
 func TestNewRingFromKeyPairs(t *testing.T) {
@@ -548,4 +605,103 @@ func TestNewRingFromKeyPairs(t *testing.T) {
 	if got := NewRingFromKeyPairs(nil).Len(); got != 0 {
 		t.Fatalf("空输入应为空 ring, got Len=%d", got)
 	}
+}
+
+// TestRing_AddKey_PruneExpiredEntries 验证惰性条目修剪（M11）：
+//   - addKey 追加新条目前，该 AK 名下 now ≥ ExpiresAt 的过期条目被清除（保留
+//     ExpiresAt 零值=永不过期条目）；
+//   - Replace 载入快照时执行同样修剪；
+//   - pruneExpiredEntriesLocked 返回被修剪条数。
+//
+// 场景：注入可前进时钟——先加一条 1h 后过期的 session 条目与一条永久条目，推进时钟
+// 超过 1h 后再次 AddKey → 过期条目被剪、永久条目保留 + 新增条目。
+func TestRing_AddKey_PruneExpiredEntries(t *testing.T) {
+	clk := &mutableClock{}
+	r := NewRing(clk.Now)
+	ak := "ak-prune-1234567890abcd"
+	if err := r.UpsertAK(ak, "o"); err != nil {
+		t.Fatalf("UpsertAK: %v", err)
+	}
+	sk := must32BHex(t, 0x44)
+
+	// 第 1 条：1h 后过期（模拟 TOTP 登录 session 条目）。
+	idShort, err := r.AddKey(ak, sk, WithExpiresAt(clk.Now().Add(time.Hour)), WithMeta(Meta{Type: "login"}))
+	if err != nil {
+		t.Fatalf("AddKey short: %v", err)
+	}
+	// 第 2 条：永不过期（零值），不参与修剪。
+	idPerm, err := r.AddKey(ak, sk, WithMeta(Meta{Type: "login"}))
+	if err != nil {
+		t.Fatalf("AddKey perm: %v", err)
+	}
+	if k, _ := r.GetKey(ak); len(k.Entries) != 2 {
+		t.Fatalf("基线条目数 = %d, want 2", len(k.Entries))
+	}
+
+	// 推进 90 分钟：短条目已过期（now = fixedNow+90m > expires=fixedNow+1h）。
+	clk.Advance(90 * time.Minute)
+	id3, err := r.AddKey(ak, sk, WithExpiresAt(clk.Now().Add(time.Hour)), WithMeta(Meta{Type: "login"}))
+	if err != nil {
+		t.Fatalf("AddKey third: %v", err)
+	}
+	if id3 == idShort || id3 == idPerm {
+		t.Fatalf("新增条目 ID 不应与既有重复")
+	}
+	k, _ := r.GetKey(ak)
+	if len(k.Entries) != 2 {
+		t.Fatalf("AddKey 修剪后条目数 = %d, want 2（过期被剪 + 永久保留 + 新增）", len(k.Entries))
+	}
+	gotIDs := map[string]bool{}
+	permSeen := false
+	for _, e := range k.Entries {
+		gotIDs[e.ID] = true
+		if e.ExpiresAt.IsZero() {
+			permSeen = true
+		}
+	}
+	if !gotIDs[idPerm] {
+		t.Errorf("永久条目（ExpiresAt 零值）应保留, ids=%v", gotIDs)
+	}
+	if !permSeen {
+		t.Errorf("保留条目中应有零值 ExpiresAt 的永久条目")
+	}
+	if gotIDs[idShort] {
+		t.Errorf("过期条目 %q 应被修剪掉", idShort)
+	}
+
+	// pruneExpiredEntriesLocked 直接调用：返回被修剪条数（携带零值永久条目 + 无过期
+	// 条目 → 修剪 0）。
+	keyLive, _ := r.GetKey(ak)
+	n, ok := pruneExpiredEntriesLockedForTest(r, keyLive)
+	if !ok {
+		t.Fatalf("pruneExpiredEntriesLocked 可直接调用")
+	}
+	if n != 0 {
+		t.Errorf("无过期条目时修剪条数 = %d, want 0", n)
+	}
+
+	// Replace 载入快照时的修剪：构造含已过期条目的 Key 快照 → Replace 后条目被剪。
+	futureKey := Key{
+		AK: "ak-repl-1234567890abcd",
+		Entries: []SKEntry{
+			{ID: "skey-00000000aa01", SK: must32BHex(t, 0x01), CreatedAt: fixedNow, Status: StatusActive, ExpiresAt: fixedNow.Add(30 * time.Minute)},
+			{ID: "skey-00000000aa02", SK: must32BHex(t, 0x02), CreatedAt: fixedNow, Status: StatusActive, ExpiresAt: time.Time{}},
+		},
+	}
+	if err := r.Replace([]Key{futureKey}); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	kr, _ := r.GetKey("ak-repl-1234567890abcd")
+	if len(kr.Entries) != 1 {
+		t.Fatalf("Replace 应从快照剪掉已过期条目, remaining=%d, want 1", len(kr.Entries))
+	}
+	if kr.Entries[0].ID != "skey-00000000aa02" {
+		t.Errorf("Replace 后保留条目应为永久条目, got %q", kr.Entries[0].ID)
+	}
+}
+
+// pruneExpiredEntriesLockedForTest 是 pruneExpiredEntriesLocked 的白盒入口（测试包内
+// 同包，直接调用即可；此处仅作显式代理以表达意图）。
+func pruneExpiredEntriesLockedForTest(r *Ring, key *Key) (int, bool) {
+	return r.pruneExpiredEntriesLocked(key, r.Now()), true
 }

@@ -44,6 +44,25 @@ func aliveLocked(e SKEntry, now time.Time) bool {
 	return now.Before(e.ExpiresAt)
 }
 
+// pruneExpiredEntriesLocked 修剪该 AK 名下 `now ≥ ExpiresAt`（已过期/到期）的 SK 条目，
+// **保留 ExpiresAt 零值条目**（永不过期条目不参与修剪，R3-M1）——防 Key.Entries 因
+// TOTP 登录反复签发 24h/7d session 条目而只增不减（M11）。返回被修剪掉的条目数。
+// 调用方必须已持有 r.mu（写锁）。
+func (r *Ring) pruneExpiredEntriesLocked(key *Key, now time.Time) int {
+	kept := key.Entries[:0]
+	pruned := 0
+	for i := range key.Entries {
+		e := key.Entries[i]
+		if !e.ExpiresAt.IsZero() && !e.ExpiresAt.After(now) {
+			pruned++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	key.Entries = kept
+	return pruned
+}
+
 // UpsertAK 登记一个 AK（存在则更新 Owner，不重置其条目）。AK 为空返回 ErrInvalidAK。
 func (r *Ring) UpsertAK(ak, owner string) error {
 	if ak == "" {
@@ -96,6 +115,20 @@ func (r *Ring) AddKey(ak string, sk []byte, opts ...EntryOption) (string, error)
 	return r.addKey(ak, sk, opts)
 }
 
+// Now 返回 ring 当前时钟（测试注入时钟优先；未注入回落 time.Now）。供 handler 与
+// loginFailTracker 共用同一时间线（登录 TTL/修剪/锁定判定一致）。
+//
+// **无锁理由（修复轮 1 建议 1）**：r.now 在 NewRing 构造时一次性注入、不可变、无
+// setter（Go map/字段并发写才有竞态，纯读是安全的）——与其余持锁方法（Lookup/
+// AddKey 等因读写共享状态才加锁）契约区分。保持无锁使注入时钟在「handler 判定 →
+// AddKey 修剪/过期 → tracker 锁定」三层穿透一致性（多锁会引入多次取值的时间漂移）。
+func (r *Ring) Now() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
 // addKey 是 AddKey 的内部实现（加锁 + 校验 + 追加），供公共同名方法调用。
 func (r *Ring) addKey(ak string, sk []byte, opts []EntryOption) (string, error) {
 	if len(sk) != 32 {
@@ -107,12 +140,16 @@ func (r *Ring) addKey(ak string, sk []byte, opts []EntryOption) (string, error) 
 	if !ok {
 		return "", ErrNotFound
 	}
+	// 惰性修剪（M11）：追加新条目前对该 AK 剪掉已过期条目（保留零值=永久条目），
+	// 防 TOTP 登录反复签发短命 session 条目导致 Entries 只增不减。永不过期条目不裁剪。
+	pruneNow := r.now()
+	r.pruneExpiredEntriesLocked(key, pruneNow)
 	e := SKEntry{
 		// 复制入参切片，避免调用方在 AddKey 后改写缓冲区污染 ring 内部凭据。
 		SK:        append([]byte(nil), sk...),
 		Kind:      KindPlain,
 		Status:    StatusActive,
-		CreatedAt: r.now(),
+		CreatedAt: pruneNow,
 	}
 	for _, o := range opts {
 		o(&e)
@@ -301,6 +338,9 @@ func (r *Ring) Replace(keys []Key) error {
 		if cp.Role == "" {
 			cp.Role = RoleUser
 		}
+		// 惰性修剪（M11）：载入快照时同步剪掉已过期条目（保留零值=永久条目），
+		// 防重启后陈旧 session 条目的磁盘快照持续累积。当前时间取 r.now()。
+		r.pruneExpiredEntriesLocked(&cp, r.now())
 		m[k.AK] = &cp
 	}
 	r.m = m
@@ -418,6 +458,10 @@ func (r *Ring) AddRegistration(ak, owner string, sk, totpSecret []byte, role Rol
 	}
 
 	// 简单模式：内联追加 plain SK 条目（ExpiresAt = now + ttl，R4-I1）。
+	// 先对既有过期条目惰性修剪（M11）：重复注册会给同一 AK 追加新 SK 条目（长
+	// TTL / 永久条目），已过期条目不参与本路径也应被清理——与 addKey 的修剪语义
+	// 一致，防 Entries 只增不减。
+	r.pruneExpiredEntriesLocked(key, now)
 	e := SKEntry{
 		SK:        cloneBytes(sk),
 		Kind:      KindPlain,
