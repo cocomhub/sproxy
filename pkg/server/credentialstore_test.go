@@ -72,6 +72,42 @@ func TestCredentialStore_SaveLoadRoundtrip(t *testing.T) {
 	}
 }
 
+// TestCredentialStore_SaveLoadRoundtrip_AccountRoleAndTOTP 固化账号级字段的 JSON 落盘契约：
+// Save→Load 往返后 Key.Role 与 Key.TOTPSecret 保留（json tag "role"/"totp_secret"）。
+// 覆盖 R3-M4 兼容链路的另一端——新字段落盘后重启读回不丢。
+func TestCredentialStore_SaveLoadRoundtrip_AccountRoleAndTOTP(t *testing.T) {
+	dir := t.TempDir()
+	st := NewCredentialStore(filepath.Join(dir, "tenant", "meta"))
+
+	// TOTP 模式注册：首注册授 admin + 写 TOTPSecret（ttl 在 TOTP 模式被忽略，传 0）。
+	ring := accesskey.NewRing()
+	if _, _, err := ring.AddRegistration("ak-acct-1234567890abcdef", "owner-x", nil,
+		[]byte("01234567890123456789012345678901"), accesskey.RoleUser, 0); err != nil {
+		t.Fatalf("AddRegistration(TOTP): %v", err)
+	}
+	orig := ring.Snapshot()
+	if err := st.Save(orig); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := st.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].Role != accesskey.RoleAdmin {
+		t.Errorf("Key.Role 未保留, got %q, want %q", got[0].Role, accesskey.RoleAdmin)
+	}
+	if string(got[0].TOTPSecret) != "01234567890123456789012345678901" {
+		t.Errorf("Key.TOTPSecret 未保留, got %q", got[0].TOTPSecret)
+	}
+	// TOTP 模式注册无 SK 条目也保留（无 SK 条目侧）。
+	if len(got[0].Entries) != 0 {
+		t.Errorf("TOTP 模式注册不应有 SK 条目, got %d", len(got[0].Entries))
+	}
+}
+
 // TestCredentialStore_LoadMissing 验证文件不存在时 Load 返回空（非错）。
 func TestCredentialStore_LoadMissing(t *testing.T) {
 	st := NewCredentialStore(filepath.Join(t.TempDir(), "tenant", "meta"))

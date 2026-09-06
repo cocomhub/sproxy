@@ -328,13 +328,22 @@ func (r *Ring) GetKey(ak string) (*Key, bool) {
 //     now+ttl，ttl 由调用方注入——pkg/accesskey 不读服务端配置，R4-I1）；
 //   - totpSecret 非 nil（TOTP 模式）→ 写 Key.TOTPSecret，不追加 SK 条目（ttl 忽略），
 //     返回 id 为空串；
-//   - sk 与 totpSecret 必须恰有一个非 nil（双 nil → ErrRegistrationRequiresSecret，R3-M2）；
-//   - sk 非 nil 且非 32 字节 → ErrInvalidSecret。
+//   - sk 与 totpSecret 必须恰有一个非 nil（双 nil → ErrRegistrationRequiresSecret，
+//     双非 nil 同拒，R3-M2）；
+//   - sk 非 nil 且非 32 字节 → ErrInvalidSecret；totpSecret 非 nil 且为空切片 →
+//     ErrInvalidSecret（格式/长度细节留任务⑦）。
 //
-// admin 授予由方法内原子判定覆盖（D2/I2/M5）：写锁内扫描全 ring 无 Key.Role=="admin"
-// → 本次授 RoleAdmin（首注册恒 admin，无论入参）；已有 admin → 本次 RoleUser（非首注册
-// 传 RoleAdmin 降级为 RoleUser；RoleNode/RoleUser 入参按原值）。已为 admin 的账号重复
-// 注册保持 admin。granted = 本次是否授予 admin；id = 简单模式新建 SK 条目 ID。
+// 角色语义（granted = 本次是否授予 admin；id = 简单模式新建 SK 条目 ID）：
+//   - 首注册恒授 RoleAdmin（无论入参）——写锁内原子判定：扫描全 ring 无 Key.Role=="admin"
+//     即授 admin（D2/I2/M5），杜绝并发双 admin；
+//   - 非首注册按入参保留（RoleUser/RoleNode 原值写入），唯一例外是入参 RoleAdmin 降级为
+//     RoleUser（不可经注册产生第二个 admin）；
+//   - 已为 admin 的账号重复注册保持 admin（不降级）；
+//   - 已存在账号以空 role（""）重复注册会归一 RoleUser 并覆盖原角色（仅 admin 受保护）。
+//
+// 同账号跨模式重复注册语义（有意设计）：各写各的、互不清除——简单模式注册追加 SK 条目但
+// 保留既有 TOTPSecret；TOTP 模式注册写入 TOTPSecret 但保留既有 SK 条目。账号可同时持有
+// TOTPSecret 与 SK 条目（TOTP 登录 + API SK 并存），调用方如需互斥需自行管理。
 //
 // owner 空值默认 = AK 字符串（R2-N4）。
 //
@@ -352,6 +361,10 @@ func (r *Ring) AddRegistration(ak, owner string, sk, totpSecret []byte, role Rol
 		owner = ak // R2-N4
 	}
 	if sk != nil && len(sk) != 32 {
+		return false, "", ErrInvalidSecret
+	}
+	// 非 nil 空 TOTP 密钥拒绝（具体格式/长度校验留任务⑦）。
+	if totpSecret != nil && len(totpSecret) == 0 {
 		return false, "", ErrInvalidSecret
 	}
 
@@ -415,6 +428,14 @@ func (r *Ring) AddRegistration(ak, owner string, sk, totpSecret []byte, role Rol
 	e.ID, err = newEntryID()
 	if err != nil {
 		return false, "", fmt.Errorf("accesskey: add registration: %w", err)
+	}
+	// ID 唯一性防御：与 addKey 对齐（追加前检查新 ID 与既有条目不重复）。newEntryID 为
+	// 6B 熵（~2^-48 碰撞概率可忽略），但保持两条内联写入路径一致，未来若 ID 构造改为
+	// 可注入也不会引入重复条目。
+	for i := range key.Entries {
+		if key.Entries[i].ID == e.ID {
+			return false, "", ErrDuplicate
+		}
 	}
 	key.Entries = append(key.Entries, e)
 	return granted, e.ID, nil

@@ -255,6 +255,20 @@ func TestRing_AddRegistration(t *testing.T) {
 		}
 	})
 
+	t.Run("双非 nil 报错", func(t *testing.T) {
+		r := NewRing()
+		if _, _, err := r.AddRegistration(ak1, "o1", must32BHex(t, 1), []byte("x"), RoleUser, ttl); err == nil {
+			t.Errorf("sk 与 totpSecret 均非 nil 应返回 error（不同时非 nil）")
+		}
+	})
+
+	t.Run("空 TOTP secret 拒绝", func(t *testing.T) {
+		r := NewRing()
+		if _, _, err := r.AddRegistration(ak1, "o1", nil, []byte{}, RoleUser, ttl); err == nil {
+			t.Errorf("totpSecret 非 nil 空切片应返回 error")
+		}
+	})
+
 	t.Run("简单模式深拷贝 SK", func(t *testing.T) {
 		r := NewRing()
 		sk := must32BHex(t, 0x77)
