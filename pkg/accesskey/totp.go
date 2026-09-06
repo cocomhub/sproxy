@@ -3,6 +3,19 @@
 
 package accesskey
 
+// 调用面纪律（4B-2 TOTP 登录）：
+//
+//   - TOTP 登录只走本文件的 DeriveTOTPWrapKey + KindTOTPWrap 信封这一条路径：
+//     DeriveTOTPWrapKey(code, ak, nonce) 派生信封密钥，EncryptSecretKind(KindTOTPWrap, …)
+//     / DecryptSecretKind(w, KindTOTPWrap, …) 包裹/解开会话 session SK。
+//   - TOTP 登录派发的 session SK 不参与 secret_wrap 包裹链：它既不是由旧 SK
+//     经 DeriveWrapKey(WrapContextCredentials#mesh) 包裹的 renew 产物，也不会被
+//     admin credentials 流程（renew / sk 列表 per-key wrap）当作新凭据条目挂载。
+//     会话 SK 仅在本次登录的短 TTL 内用于签名，过期即丢弃——不得以 KindSecretWrap
+//     包裹、不得落入 credentials JSON 的 Entries。
+//   - 因此 credentials 一侧的 EncryptSecret / DecryptSecret（默认 KindSecretWrap）
+//     不得用来处理 TOTP 登录信封；TOTP 信封必须显式 KindTOTPWrap（DecryptSecret
+//     对 KindTOTPWrap 信封也会拒绝，见 wrap_test.go）。
 import "crypto/sha256"
 
 // WrapContextTOTP 是 TOTP 登录 session 密钥信封加密的 wrap context 固定前缀

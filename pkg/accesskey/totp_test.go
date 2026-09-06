@@ -62,6 +62,8 @@ func TestDeriveTOTPWrapKey_Deterministic(t *testing.T) {
 
 // TestDeriveTOTPWrapKey_CrossContext TOTP wrap key 与 credentials wrap context 派生 key
 // 不同（防跨 context 复用）；且实现严格等于 wrapKey(sha256(code), ak, WrapContextTOTP#nonce)。
+// 对抗侧使用 4A 实际派生的完整 context 形态：WrapContextCredentials + "#" + mesh
+// （credentialWrapKey 的 mesh 由 AK 派生，见 pkg/server/credentials_handler.go）。
 func TestDeriveTOTPWrapKey_CrossContext(t *testing.T) {
 	const code = "123456"
 	const ak = "ak-totp-1234567890abcdef"
@@ -71,8 +73,11 @@ func TestDeriveTOTPWrapKey_CrossContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveTOTPWrapKey: %v", err)
 	}
-	// credentials context 的规范化形态（WrapContextCredentials 无 mesh 时即前缀本身）。
-	credsK, err := wrapKey(sumSHA256([]byte(code)), ak, WrapContextCredentials)
+	// 对抗侧：server recover / renew 实际用的 credentials wrap 路径
+	// （credentialWrapKey = DeriveWrapKey(entry.SK, ak, WrapContextCredentials#mesh)）。
+	mesh := ParseMesh(ak) // "totp"；4A 由 AK 派生并化入 context（无 mesh 则裸前缀）
+	credsCtx := WrapContextCredentials + "#" + mesh
+	credsK, err := wrapKey(sumSHA256([]byte(code)), ak, credsCtx)
 	if err != nil {
 		t.Fatalf("wrapKey(credentials ctx): %v", err)
 	}
