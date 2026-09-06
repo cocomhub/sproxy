@@ -20,10 +20,15 @@ import (
 
 // ---- trust login（TOTP 登录）----
 
-// errLoginNotConfirmed 是 trust login 在确认输入为空（stdin EOF / 管道空）或覆盖
-// 确认被拒绝时返回的非零错误：无输入即中止，绝不把「未确认」当成功（M4——仿
+// errLoginNotConfirmed 是 trust login 在确认输入为空（stdin EOF / 管道空）时
+// 返回的非零错误：无输入即中止，绝不把「未确认」当成功（M4——仿
 // errDeleteAKNotConfirmed 语义）。
 var errLoginNotConfirmed = errors.New("登录已中止：未收到确认输入")
+
+// errLoginOverwriteDenied 是 trust login 在用户**拒绝覆盖现有凭据**（D4 覆盖确认
+// 输入非 y/yes）时返回的非零错误，与 errLoginNotConfirmed 并列（语义区分：不是
+// "没输入"，而是"用户明确拒绝覆盖"）。
+var errLoginOverwriteDenied = errors.New("已取消：拒绝覆盖现有凭据")
 
 // newCmdTrustLogin 创建 trust login 命令：GA 密钥录入→注册/登录→解 session SK 回填
 // access_key 三件套。
@@ -151,6 +156,8 @@ func runTrustLogin(ctx context.Context, ios cli.IOStreams, cfgSvc ConfigProvider
 		loginRes.AK, loginRes.SessionExpiresAt.Format("2006-01-02 15:04"))
 
 	// 4. 覆盖确认（D4）：已有凭据（可能来自 renew 的长命 SK）→ 提示确认后回填。
+	// 拒绝覆盖返回独立哨兵 errLoginOverwriteDenied（与动态码阶段的
+	// errLoginNotConfirmed 语义区分）。
 	if cfg.AccessKeySecret != "" && !opts.overwrite {
 		fmt.Fprint(ios.ErrOut, "将覆盖现有 access_key_secret 凭据；长期运行 daemon 建议 `trust renew`，确认覆盖? (y/N): ")
 		cLine, cerr := reader.ReadString('\n')
@@ -165,7 +172,7 @@ func runTrustLogin(ctx context.Context, ios cli.IOStreams, cfgSvc ConfigProvider
 		}
 		if cAns != "y" && cAns != "yes" {
 			ios.WriteErrLine("已取消（拒绝覆盖现有凭据）")
-			return errLoginNotConfirmed
+			return errLoginOverwriteDenied
 		}
 	}
 

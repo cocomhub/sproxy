@@ -1052,8 +1052,10 @@ func TestNonceEndpoint_PoolCap(t *testing.T) {
 	if sz := pool.size(); sz != maxTotpNoncePool {
 		t.Errorf("池满后 size = %d, want %d（惰性淘汰钳制）", sz, maxTotpNoncePool)
 	}
+	// 确定性淘汰（Fix 3）：must 早于 first 的 nonce 应被淘汰（池满后消费不命中）。
+	// 全局最早 nonce（first,ts=T0）必须不在池中。
 	if _, ok := pool.obtain(first.Nonce, "127.0.0.1"); ok {
-		t.Errorf("最早 nonce 应被淘汰（池满后消费不命中）")
+		t.Errorf("最早 nonce（全局第一批）应被淘汰（池满后消费不命中）")
 	}
 }
 

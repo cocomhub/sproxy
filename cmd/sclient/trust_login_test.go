@@ -316,8 +316,8 @@ func TestTrustLogin_OverwriteConfirm_No(t *testing.T) {
 	if err == nil {
 		t.Fatal("拒绝覆盖时应返回非零 error")
 	}
-	if !errors.Is(err, errLoginNotConfirmed) {
-		t.Errorf("应返回 errLoginNotConfirmed, got: %v", err)
+	if !errors.Is(err, errLoginOverwriteDenied) {
+		t.Errorf("应返回 errLoginOverwriteDenied, got: %v", err)
 	}
 	// 覆盖被拒绝 → 配置未被改写。
 	cfg := env.reload(t)

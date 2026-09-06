@@ -373,6 +373,10 @@ func WithAccessKey(ak, sk string) Option {
 // access_key/access_key_secret/access_key_id 三字段被显式清空的无凭据客户端构造，
 // 但逐请求防呆（sendNoAuth 短路）确保即使构造遗漏也不会把带过期凭据的签名头带到
 // 公开端点（会被 authMiddleware 401 拒绝，TOTP 登录整体不可用）。
+//
+// 边界：本开关仅约束**直连公开端点**；隧道化客户端（WithTunnel/WithXfer 的
+// /tunnel 外层认证链，经 sigRoundTripper）不受此开关约束，仍需凭据才能通过外层
+// 认证。TOTP 登录是零凭据窗口能力，只走直连公开端点，与本开关适用面一致。
 func WithSendNoAuth(enabled bool) Option {
 	return func(c *FileClient) {
 		c.sendNoAuth = enabled

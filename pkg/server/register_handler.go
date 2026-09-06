@@ -79,11 +79,15 @@ func (p *totpNoncePool) add(nonce, ip string, now time.Time) time.Time {
 		}
 	}
 	if len(p.m) >= p.max {
-		// 池满 → 淘汰过期时间最早的一条（求 expiresAt 最小者删除，为新条目腾位）。
+		// 池满 → 确定性淘汰过期时间最早的一条（求 expiresAt 最小者删除，为新条目
+		// 腾位；非 LRU——只保证语义是「最早过期的先被淘汰」，与
+		// TestNonceEndpoint_PoolCap「最早 nonce 被淘汰」断言一致，避免 map 随机序
+		// 遍历导致的间歇 flake）。expiresAt 相同（同批注入）时按 nonce 字典序最小者
+		// 删除，使淘汰结果完全确定。
 		oldestKey := ""
 		var oldestAt time.Time
 		for n, e := range p.m {
-			if oldestKey == "" || e.expiresAt.Before(oldestAt) {
+			if oldestKey == "" || e.expiresAt.Before(oldestAt) || (e.expiresAt.Equal(oldestAt) && n < oldestKey) {
 				oldestAt = e.expiresAt
 				oldestKey = n
 			}
