@@ -28,6 +28,9 @@ import (
 // newRealTOTPServer 启动 force_totp=true 的真实 TCP 黑盒测试服务器（httptest.NewServer，
 // RemoteAddr 天然回环，U2 首注册可达）。可注入显式 Ring / CredentialStore；限频器注入
 // 高阈值防连发干扰（与 register_handler_test.go newRegisterHandlersCfg 同法）。
+//
+// 返回 URL、cfgPtr、*Handlers（S4 交叉断言走生产 h.getRole(ak)，消除测试私有转写与
+// 生产逻辑漂移风险）与 ring（白盒透视登录条目等）。
 func newRealTOTPServer(t *testing.T, mod func(*Config), ring *accesskey.Ring, store *CredentialStore) (string, *atomic.Pointer[Config], *accesskey.Ring) {
 	t.Helper()
 	if ring == nil {
@@ -60,6 +63,43 @@ func newRealTOTPServer(t *testing.T, mod func(*Config), ring *accesskey.Ring, st
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(ts.Close)
 	return ts.URL, &cfgPtr, ring
+}
+
+// newRealTOTPServerH 是带 *Handlers 的装配变体（S4 / getRole 断言走生产 h.getRole(ak)）。
+// 其余语义与 newRealTOTPServer 完全一致；多数测试仍用 URL 版，仅需要生产 getRole 或
+// 白盒 Handlers 字段的测试用本变体。
+func newRealTOTPServerH(t *testing.T, mod func(*Config), ring *accesskey.Ring, store *CredentialStore) (*Handlers, string, *accesskey.Ring) {
+	t.Helper()
+	if ring == nil {
+		ring = accesskey.NewRing()
+	}
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.ChunkSize = 4 << 10
+	cfg.LogLevel = "error"
+	cfg.Registration.ForceTOTP = true
+	if mod != nil {
+		mod(cfg)
+	}
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+
+	opts := RegisterRoutesOpts{
+		Mux:             http.NewServeMux(),
+		CfgPtr:          &cfgPtr,
+		Version:         "totp-e2e-h",
+		BuildAt:         "test",
+		Logger:          testLogger(),
+		CredentialRing:  ring,
+		CredentialStore: store,
+		TotpRateLimit:   1000000,
+		LoginRateLimit:  1000000,
+	}
+	h := RegisterRoutes(t.Context(), opts)
+	t.Cleanup(func() { _ = h.Close() })
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(ts.Close)
+	return h, ts.URL, ring
 }
 
 // newNoCredentialTOTPClient 构造用于公开端点的显式无凭据客户端（M14：sendNoAuth 短路
@@ -131,12 +171,22 @@ func doRegisterToURL(t *testing.T, url, owner string) (int, registerRespH) {
 	return resp.StatusCode, out
 }
 
-// hGetRole 读取 Key 的账号级角色（与 server.getRole 判定一致；AK 不存在回落 user）。
-func hGetRole(k *accesskey.Key) string {
-	if k == nil || k.Role == "" {
-		return "user"
+// registerHTTP 是 doRegisterToURL 的并发安全/无 t.Helper 版本：返回 error 而非内部
+// t.Fatalf，供子 goroutine 安全调用（子 goroutine 内零 Fatal 路径，汇总到主 goroutine）。
+func registerHTTP(url, owner string) (int, registerRespH, error) {
+	body := "{}"
+	if owner != "" {
+		body = `{"owner":"` + owner + `"}`
 	}
-	return string(k.Role)
+	resp, err := http.Post(url+"/api/credentials/register", "application/json", strings.NewReader(body))
+	if err != nil {
+		return 0, registerRespH{}, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	var out registerRespH
+	_ = json.Unmarshal(data, &out)
+	return resp.StatusCode, out, nil
 }
 
 // ---- 1. TOTP 注册→登录→session 全链路 ----
@@ -157,7 +207,7 @@ func hGetRole(k *accesskey.Key) string {
 // pkg/client + pkg/accesskey + pkg/otp 的公开面，不经任何 server 内测试 helper，
 // 验证「登录端点签发 → 客户端解封 → 会话请求 200」这条完整链不被装配细节偏差破坏。
 func TestTOTPLogin_FullChain(t *testing.T) {
-	url, _, ring := newRealTOTPServer(t, nil, nil, nil)
+	hh, url, _ := newRealTOTPServerH(t, nil, nil, nil)
 	noAuth := newNoCredentialTOTPClient(t, url)
 
 	reg, err := noAuth.RegisterTOTP(context.Background(), "full-chain")
@@ -196,16 +246,13 @@ func TestTOTPLogin_FullChain(t *testing.T) {
 		t.Errorf("新 AK 根目录文件表应为空, got %d 项", len(files))
 	}
 
-	// S4：响应 admin（= AddRegistration granted）与 getRole(ak) 交叉断言一致。
+	// S4：响应 admin（= AddRegistration granted）与生产 getRole(ak) 交叉断言一致（Fix 2）。
+	// FullChain 主链保持 URL-only 装配，S4 的 getRole 走 hh.getRole 而非测试私有转写。
 	if !reg.Admin {
 		t.Errorf("首注册 granted=false, want true")
 	}
-	k, ok := ring.GetKey(reg.AK)
-	if !ok {
-		t.Fatalf("ring 中无新 AK %q", reg.AK)
-	}
-	if got := hGetRole(k); got != "admin" {
-		t.Errorf("getRole(%q) = %q, want admin（S4 一致性：granted=true ↔ role=admin）", reg.AK, got)
+	if got := hh.getRole(reg.AK); got != "admin" {
+		t.Errorf("getRole(%q) = %q, want admin（S4 一致性：granted=true ↔ 生产 getRole==admin）", reg.AK, got)
 	}
 }
 
@@ -310,9 +357,10 @@ func TestRegisterTOTP_Disabled(t *testing.T) {
 }
 
 // TestRegisterTOTP_FirstIsAdmin 验证 TOTP 首注册 granted==admin 且 getRole==admin
-// （S4 交叉断言）；第二注册 admin=false 且 getRole==user。
+// （S4 交叉断言，getRole 走生产 *Handlers.getRole(ak)——Fix 2 消除测试私有转写漂移）；
+// 第二注册 admin=false 且 getRole==user。
 func TestRegisterTOTP_FirstIsAdmin(t *testing.T) {
-	url, _, ring := newRealTOTPServer(t, nil, nil, nil)
+	hh, url, _ := newRealTOTPServerH(t, nil, nil, nil)
 
 	st1, p1 := doRegisterToURL(t, url, "first")
 	if st1 != http.StatusOK {
@@ -321,9 +369,8 @@ func TestRegisterTOTP_FirstIsAdmin(t *testing.T) {
 	if !p1.Admin {
 		t.Errorf("首注册 granted=false, want true")
 	}
-	k1, ok := ring.GetKey(p1.AK)
-	if !ok || hGetRole(k1) != "admin" {
-		t.Errorf("首注册 getRole = %q, want admin（S4 一致性）", hGetRole(k1))
+	if got := hh.getRole(p1.AK); got != "admin" {
+		t.Errorf("getRole(首) = %q, want admin（S4 一致性：granted=true ↔ 生产 getRole==admin）", got)
 	}
 
 	st2, p2 := doRegisterToURL(t, url, "second")
@@ -333,9 +380,8 @@ func TestRegisterTOTP_FirstIsAdmin(t *testing.T) {
 	if p2.Admin {
 		t.Errorf("第二注册 granted=true, want false")
 	}
-	k2, _ := ring.GetKey(p2.AK)
-	if hGetRole(k2) != "user" {
-		t.Errorf("第二注册 getRole = %q, want user", hGetRole(k2))
+	if got := hh.getRole(p2.AK); got != "user" {
+		t.Errorf("getRole(第二) = %q, want user（S4 一致性）", got)
 	}
 }
 
@@ -357,7 +403,14 @@ func TestRegisterTOTP_ConcurrentFirstAdmin(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			st, p := doRegisterToURL(t, url, fmt.Sprintf("conc-%d", i))
+			// 子 goroutine 零 Fatal：registerHTTP 返回 error，由主 goroutine 汇总
+			// t.Fatalf（Fix 3——doRegisterToURL 内含 t.Helper/t.Fatalf 快失败分支，
+			// 并发内绝不可用）。
+			st, p, rerr := registerHTTP(url, fmt.Sprintf("conc-%d", i))
+			if rerr != nil {
+				errs[i] = rerr
+				return
+			}
 			if st != http.StatusOK {
 				errs[i] = fmt.Errorf("status=%d", st)
 				return
@@ -531,7 +584,9 @@ func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 	if simple.AK == "" {
 		t.Fatalf("简单注册响应缺 AK")
 	}
-	// 该 AK 无 TOTPSecret → 完整登录（有效 nonce + 任意 code）→ 404。
+	// 该 AK 无 TOTPSecret → 完整登录（有效 nonce + 任意 code）→ 404，且响应体为
+	// 固定文案 `{"error":"not found"}`（M16；handler register_handler.go 887 行唯一
+	// 404 分支 sendJSONResponse(w, map[string]any{"error": "not found"}, 404)）。
 	noAuth := newNoCredentialTOTPClient(t, url)
 	nonce, err := noAuth.RequestTOTPNonce(context.Background())
 	if err != nil {
@@ -543,6 +598,31 @@ func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("无 TOTPSecret 登录错误应含 HTTP 404, got %v", err)
+	}
+
+	// Fix 1（Minor 1）：直接发裸 HTTP login（有效 nonce）读响应体，断言固定 404 文案。
+	nonce2, err := noAuth.RequestTOTPNonce(context.Background())
+	if err != nil {
+		t.Fatalf("RequestTOTPNonce(#2): %v", err)
+	}
+	loginBody, _ := json.Marshal(map[string]any{"ak": simple.AK, "nonce": nonce2.Nonce, "code": "000000"})
+	lresp, lerr := http.Post(url+"/api/credentials/login", "application/json", strings.NewReader(string(loginBody)))
+	if lerr != nil {
+		t.Fatalf("login POST: %v", lerr)
+	}
+	defer lresp.Body.Close()
+	ldata, _ := io.ReadAll(lresp.Body)
+	if lresp.StatusCode != http.StatusNotFound {
+		t.Fatalf("无 TOTPSecret login 裸 HTTP status = %d, want 404 (body=%s)", lresp.StatusCode, ldata)
+	}
+	var ldec struct {
+		Error string `json:"error"`
+	}
+	if jerr := json.Unmarshal(ldata, &ldec); jerr != nil {
+		t.Fatalf("404 响应体非 JSON: %v (%s)", jerr, ldata)
+	}
+	if ldec.Error != "not found" {
+		t.Errorf("404 响应体 error = %q, want %q（M16 固定文案）", ldec.Error, "not found")
 	}
 }
 
@@ -579,16 +659,19 @@ func TestAdminRole_TOTPPersistAfterRestart(t *testing.T) {
 	if !ok {
 		t.Fatalf("重启后 AK %q 不存在", reg.AK)
 	}
-	if hGetRole(k2) != "admin" {
-		t.Errorf("重启后 getRole = %q, want admin", hGetRole(k2))
-	}
 	if len(k2.TOTPSecret) != 20 {
 		t.Fatalf("重启后 TOTPSecret 长度 = %d, want 20", len(k2.TOTPSecret))
+	}
+	// getRole 走生产方法（Fix 2）：先经 bootstrapCredentials 等价装配出新服务器
+	// （newRealTOTPServer 内部 RegisterRoutes→bootstrapCredentials 从 store 载入 ring2
+	// 快照重建），再用 h.getRole 断言重启后角色仍 admin。
+	hh2, url2, _ := newRealTOTPServerH(t, nil, ring2, store)
+	if got := hh2.getRole(reg.AK); got != "admin" {
+		t.Errorf("重启后 getRole(生产 h.getRole) = %q, want admin", got)
 	}
 
 	// 用重启后 secret 的 base32 形式复算 code 走完整登录端点 → 200（R2-N5 闭环）。
 	b32 := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(k2.TOTPSecret)
-	url2, _, _ := newRealTOTPServer(t, nil, ring2, store)
 	noAuth2 := newNoCredentialTOTPClient(t, url2)
 	nonce, err := noAuth2.RequestTOTPNonce(context.Background())
 	if err != nil {
