@@ -68,6 +68,15 @@ func newTotpNoncePool() *totpNoncePool {
 	}
 }
 
+// SetClock 注入池时钟（测试用）：默认 nil → time.Now。仿 Ring.SetNow 模式——先建的
+// totpNoncePool 在 handler 装配后注入，使随后所有 addFor/obtain 的 now 从该时钟取，
+// 测试可注入严格递增时钟让每个 nonce 的 expiresAt 互不相同（池满淘汰断言才确定）。
+func (p *totpNoncePool) SetClock(fn func() time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.nowFn = fn
+}
+
 // add 打入一个来源 IP 绑定的 nonce，返回其过期时间。超过池上限时淘汰最旧条目
 // （按 expiresAt 升序找最早，不删 new）并惰性清掉所有已过期项。调用方持有 mu。
 func (p *totpNoncePool) add(nonce, ip string, now time.Time) time.Time {

@@ -1027,9 +1027,26 @@ func TestNonceEndpoint_Success(t *testing.T) {
 
 // TestNonceEndpoint_PoolCap 验证 nonce 池上限 4096（D5）：连续签发超过上限的 nonce
 // 全部 200（池满**淘汰最旧**而非拒绝），且池大小恒被钳到上限、最早签发者已被淘汰。
+//
+// 确定性说明（fix 轮 2）：生产时钟下连发 4104 个 nonce 全在毫秒级同批签发 →
+// expiresAt 全部相同 → 池满淘汰的 min-expiresAt 退化为 tie-break（nonce 字典序最小），
+// 而首个 nonce 是随机的、不保证被淘汰 → 断言「first 必被淘汰」天然失效（间歇 ~70%
+// FAIL）。故在连发循环前注入**严格递增时钟**，使每个 nonce 的 expiresAt 互不相同，
+// 池满淘汰对绝对最早（first, T0）完全确定。
 func TestNonceEndpoint_PoolCap(t *testing.T) {
 	hh, _, _ := newRegisterHandlers(t, nil, func(c *Config) { c.Registration.ForceTOTP = true })
 	h := hh.Handler()
+
+	// 注入严格递增时钟（handler 装配后、连发 nonce 前；serveNonce→nonceHandler→
+	// addFor 走同一 pool 实例 hh.totpNoncePool）。每签一个 nonce tick+1ms，expiresAt
+	// 严格递增且互不相同 → 池满淘汰 min-expiresAt 对最老的 first 完全确定。
+	base := time.Now().Truncate(time.Second)
+	tick := 0
+	hh.totpNoncePool.SetClock(func() time.Time {
+		tt := base.Add(time.Duration(tick) * time.Millisecond)
+		tick++
+		return tt
+	})
 
 	stFirst, bodyFirst := serveNonce(t, h, loopRemoteV4, []byte(`{}`))
 	if stFirst != http.StatusOK {
