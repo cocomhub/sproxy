@@ -970,45 +970,96 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	return h
 }
 
+// isFileGroupedRoute 判定给定路由是否属于「文件操作组」（单一事实源，拒绝双份清单
+// 漂移，F1/F2 收口）。文件操作组的成员 = 主 mux 面经 fileRoute 包装的路由全集：
+//   - 精确匹配：upload/download/delete/rename、api/files*/mkdir/rmdir/batch*、
+//     archive/versions/share/shares（share 列表 /api/shares 与撤销已含）；
+//   - 前缀分支：/upload/{init,chunk,status,sessions,complete} 与 /download/chunk
+//     （分块上传/下载，与 fileRoute 包裹的 chunk 组严格对齐）。
+//
+// 用途：
+//   - fileRoute（主 mux 面）：path 命中组 → requireRole(user) 门禁；未命中 → 返回
+//     errNotFileGrouped，调用方写 500 + Error 日志（fail-closed 防接线错误把文件类
+//     新路由漏挂门禁——宁可显式故障，不为未列出的新文件路由静默放行）；
+//   - localMuxGate（隧道内层面）：path 命中组 → principal 非 nil（传统 POST /tunnel
+//     路径）时 requireRole(user) 收口、node → 403；principal nil（xfer 直连路径）
+//     跳过（会话由握手密钥/pinning 闭合）；未命中 → 保持既有裸注册（隧道加密即
+//     认证 / cloud/credentials/audit/stats/config/hub 等非文件面）。
+//
+// 新增文件类路由必须同步：既挂主 mux fileRoute，又在本函数补成员——两处同源，
+// 漏其一即测试（TestRegister_TunnelInnerGate* / TestLocalMuxCoversAllTunnelRoutes）
+// 暴露。
+func isFileGroupedRoute(path string) bool {
+	switch path {
+	case "/upload", "/download", "/delete", "/rename",
+		"/api/files", "/api/files/stat", "/api/files/search",
+		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
+		"/api/archive", "/api/archive-dir",
+		"/api/versions", "/api/versions/restore",
+		"/api/share", "/api/shares",
+		// 分块上传/下载（主 mux 面均挂 fileRoute——见 RegisterRoutes 装配处清单）；
+		// 前缀含两个入口：/upload/{init,chunk,status,sessions,complete}。
+		"/upload/init", "/upload/chunk", "/upload/status", "/upload/sessions", "/upload/complete",
+		"/download/chunk":
+		return true
+	}
+	// 动态参数路径组（Go 1.22 ServeMux {token} 通配——调用方传入的是实际 path，
+	// 需按前缀判定）：/api/shares/{token}（撤销也属文件组）。精确列表 /api/shares
+	// 已在上方案例命中；此处补带 token 子路径。
+	if strings.HasPrefix(path, "/api/shares/") {
+		return true
+	}
+	return false
+}
+
 // localMuxGate 包装隧道内层 localMux（含传统 POST /tunnel 与 xfer 直连两路径共用的
 // apiHandler 链）：对「文件操作路由组」过 requireRole(PrincipalFrom(ctx), RoleUser)
-// 门禁（任务② MUST-FIX 收口）。判定见 RegisterRoutes 装配处大段注释。
+// 门禁（任务② MUST-FIX 收口）。组成员 = isFileGroupedRoute（与主 mux fileRoute 同源）。
+// 判定语义见 isFileGroupedRoute / RegisterRoutes 装配处大段注释。
 func (h *Handlers) localMuxGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/upload", "/download", "/delete", "/rename",
-			"/api/files", "/api/files/stat", "/api/files/search",
-			"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
-			"/api/archive", "/api/archive-dir",
-			"/api/versions", "/api/versions/restore",
-			"/api/share", "/api/shares":
-			// 文件组：principal 非 nil（传统隧道路径外层已认证）才收口；nil（xfer
-			// 直连，无外层身份）跳过——xfer 会话由握手密钥/pinning 闭合身份。
-			if p := PrincipalFrom(r.Context()); p != nil {
-				if err := requireRole(p, string(accesskey.RoleUser)); err != nil {
-					status := http.StatusForbidden
-					if errors.Is(err, errUnauthorized) {
-						status = http.StatusUnauthorized
-					}
-					http.Error(w, err.Error(), status)
-					return
-				}
-			}
-		default:
-			// 非文件组（chunk/cloud/credentials/register/audit/stats/config/hub…）：
+		if !isFileGroupedRoute(r.URL.Path) {
+			// 非文件组（cloud/credentials/register/audit/stats/config/hub/信令…）：
 			// 保持既有裸注册（隧道加密即认证 / 免身份语义）。
+			next.ServeHTTP(w, r)
+			return
+		}
+		// 文件组：principal 非 nil（传统隧道路径外层已认证）才收口；nil（xfer
+		// 直连，无外层身份）跳过——xfer 会话由握手密钥 / Ed25519 pinning 闭合身份。
+		// 前提：HubXferKey 候选必须是 user/admin 凭据（node AK 不应进入 xfer 握手
+		// 密钥候选集——若 node 凭据排序在前，xfer 面会对该 node 开放文件面），见
+		// task-3-report.md「隧道内层门禁收口说明」。
+		if p := PrincipalFrom(r.Context()); p != nil {
+			if err := requireRole(p, string(accesskey.RoleUser)); err != nil {
+				status := http.StatusForbidden
+				if errors.Is(err, errUnauthorized) {
+					status = http.StatusUnauthorized
+				}
+				http.Error(w, err.Error(), status)
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
 // fileRoute 包装文件操作路由：authMiddleware 认证 + requireRole(user) 门禁（DEC-C）。
-// 认证面插件化后，文件操作路由组（upload/download/delete/rename/list/stat/mkdir/rmdir/
-// search/batch/chunk/archive/versions/share…）要求 Role∈{user,admin}（minRole=user；
-// R3-M4：空 Role 归一 user 放行）。未认证且非回环直通（principal==nil）→ 401；
-// 角色不足 → 403。
+// 认证面插件化后，文件操作路由组要求 Role∈{user,admin}（minRole=user；R3-M4：空
+// Role 归一 user 放行）。未认证且非回环直通（principal==nil）→ 401；角色不足 → 403。
+//
+// 组判定 = isFileGroupedRoute（单一事实源，与 localMuxGate 同源）：**未列出的路径
+// 一律 500 + Error 日志**（fail-closed）——防止未来给文件类新路由只挂本包装却忘挂
+// gate，或反之，静默绕过 requireRole。注意：fileRoute 只应包装文件组路由（主 mux
+// 装配处全部如此）；非文件组路由继续用 authMiddleware（如 /api/cloud、/api/stats）。
 func (h *Handlers) fileRoute(handler http.HandlerFunc) http.HandlerFunc {
 	return h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if !isFileGroupedRoute(r.URL.Path) {
+			// fail-closed：本包装被错误用于非文件组路径（如未来把 cloud 路由误挂
+			// fileRoute），显式拒绝并留痕，避免「看似受门禁实则裸放」的静默态。
+			h.logger.Error("fileRoute 用于未列入文件组的路径（接线错误）", "method", r.Method, "path", r.URL.Path)
+			http.Error(w, "internal: route not in file group", http.StatusInternalServerError)
+			return
+		}
 		if err := requireRole(PrincipalFrom(r.Context()), string(accesskey.RoleUser)); err != nil {
 			status := http.StatusForbidden
 			if errors.Is(err, errUnauthorized) {
