@@ -63,7 +63,7 @@
   // 其余字段保留默认。返回合并后的配置副本。
   function configure(patch) {
     if (!patch || typeof patch !== 'object') return Object.assign({}, cfg);
-    const allowed = ['baseUrl', 'accessKey', 'accessKeySecret', 'transport', 'tunnelDefault', 'overrideKey'];
+    const allowed = ['baseUrl', 'accessKey', 'accessKeySecret', 'accessKeyID', 'transport', 'tunnelDefault', 'overrideKey'];
     for (const key of allowed) {
       const val = patch[key];
       if (val === undefined || val === null) continue;
@@ -92,16 +92,18 @@
     return err;
   }
 
-  // ---- AccessKeyMesh：Go tunnel.AccessKeyMesh 的 JS 移植（I-1 唯一实现） ----
-  // sk-<mesh>-<16hex>（mesh 可含连字符，取最后一个 '-'）→ mesh；
-  // sk-<16hex>（无 mesh 段）→ ''；格式不合法 → ''。
+  // ---- AccessKeyMesh：Go accesskey.ParseMesh 的 JS 移植（唯一实现，前缀/长度与 Go 对齐） ----
+  // ak-<mesh>-<32hex>（mesh 可含连字符，取最后一个 '-'）→ mesh；
+  // ak-<32hex>（无 mesh 段）→ ''；格式不合法 → ''。
+  // 双兼容：随机段 accept 32 hex（标准 16B）或 16 hex（legacy 8B）；其它长度拒绝。
+  // 2026-09-05：前缀由 'sk-' 统一改为 'ak-'（alpha 破坏性变更，无历史兼容）。
   function accessKeyMesh(ak) {
-    if (typeof ak !== 'string' || ak.indexOf('sk-') !== 0) return '';
+    if (typeof ak !== 'string' || ak.indexOf('ak-') !== 0) return '';
     const rest = ak.slice(3);
     const idx = rest.lastIndexOf('-');
-    if (idx <= 0 || idx + 17 !== rest.length) return '';
+    if (idx < 0) return '';
     const hexPart = rest.slice(idx + 1);
-    if (!/^[0-9a-fA-F]{16}$/.test(hexPart)) return '';
+    if (!/^(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{32})$/.test(hexPart)) return '';
     return rest.slice(0, idx);
   }
 
@@ -122,8 +124,8 @@
   // 优先级：localStorage override（transport 显式值）> mode（configure 注入）>
   // 无凭据强制 direct > 服务端 web.tunnel。
   // 无凭据（未配置 accessKey/accessKeySecret）：无法派生隧道密钥，也无法安全读取
-  // 服务端 web.tunnel 开关——强制直连；direct 无凭据时也不带签名头（服务端未配
-  // access_keys 时无认证放行；配了则由服务端 401 提示需登录，避免「隧道模式需要
+  // 服务端 web.tunnel 开关——强制直连；direct 无凭据时也不带签名头（服务端凭据
+  // Ring 空时无认证放行；非空则由服务端 401 提示需登录，避免「隧道模式需要
   // accessKeySecret」这类低信息报错）。
   function effectiveMode() {
     const o = configLib.readLocalOverride();
@@ -298,6 +300,7 @@
     const auth = await sigLib.signHeader('POST', TUNNEL_PATH, fullBody, {
       ak: cfg.accessKey,
       secret: cfg.accessKeySecret,
+      entryID: cfg.accessKeyID || '',
       unsigned: true,
     });
 
@@ -410,14 +413,14 @@
     const ak = cfg.accessKey;
     const sk = cfg.accessKeySecret;
     // SproxySig（有 body 用其 SHA-256；无 body 签空串）——对齐 Go signRequest。
-    // 无凭据（ak/sk 均缺）：不加处理就不是签名头，交由服务端决定（未配 access_keys
-    // 时放行；配了则 401，URL 上仍可取 /healthz //version /ui/ 查阅——不同于抛错）。
+    // 无凭据（ak/sk 均缺）：不加处理就不是签名头，交由服务端决定（凭据 Ring 空时放行；
+    // 非空则 401，URL 上仍可取 /healthz /version /ui/ 查阅——不同于抛错）。
     // 一个可缺一个完整时仍按协议要求完整签名头（若服务端配了单侧可能 401）。
     let auth = '';
     if (ak || sk) {
       if (!ak || !sk) throw SclientError('E_AUTH', '直连模式需要 ak 与 secret 都配置）', undefined);
       try {
-        auth = await sigLib.signHeader(method, pathWithQuery, bodyBytes || null, { ak, secret: sk });
+        auth = await sigLib.signHeader(method, pathWithQuery, bodyBytes || null, { ak, secret: sk, entryID: cfg.accessKeyID || '' });
       } catch (e) {
         throw SclientError('E_AUTH', '签名失败：' + (e && e.message), undefined);
       }

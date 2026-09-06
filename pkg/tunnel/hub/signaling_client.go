@@ -33,6 +33,8 @@ type HubSignaler struct {
 	// accessKeySecret 是 SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）。
 	// 空则不签名（无认证开发环境）。
 	accessKeySecret string
+	// accessKeyID 是 SproxySig SK 条目 ID（skey-id，v2 协议必传——信令签名用）。
+	accessKeyID string
 	// nodeID 是本节点已注册的节点 ID（信令 from；服务端校验其已注册）。
 	nodeID string
 	// secret 是本节点的 per-node secret（I1）：非空时 post/poll 携带
@@ -77,6 +79,11 @@ func (s *HubSignaler) SetAccessKeySecret(sk string) {
 	s.accessKeySecret = sk
 }
 
+// SetAccessKeyID 设置 SproxySig SK 条目 ID（skey-id，v2 协议必传）。
+func (s *HubSignaler) SetAccessKeyID(id string) {
+	s.accessKeyID = id
+}
+
 // sign 为信令请求打上 SproxySig 签名头（bodyHash 由调用方预计算）。
 func (s *HubSignaler) sign(req *http.Request, bodyHash string) {
 	if s.accessKeySecret == "" {
@@ -86,6 +93,7 @@ func (s *HubSignaler) sign(req *http.Request, bodyHash string) {
 	h := sproxysig.Header{
 		Version:    sproxysig.Version,
 		AK:         s.accessKey,
+		EntryID:    s.accessKeyID,
 		TS:         now.UnixMilli(),
 		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),

@@ -192,6 +192,7 @@ func newCmdMeshConnect(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 					ServerURL:       svc.ServerURL(),
 					AccessKey:       svc.AccessKey(),
 					AccessKeySecret: svc.AccessKeySecret(),
+					AccessKeyID:     svc.AccessKeyID(),
 					NodeID:          nodeID,
 					Prefix:          "mesh",
 					ExactNode:       false,

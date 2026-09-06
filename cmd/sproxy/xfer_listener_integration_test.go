@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -24,15 +25,13 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer/builtin"
 )
 
-// xferIntegrationCfg 构造带 hub 语义（xfer_tls 启用 + access_keys）的完整 server.Config。
-// 返回 cfg 与清理函数（关闭 handlers）。
-func xferIntegrationCfg(t *testing.T) (*server.Config, *server.Handlers) {
+// xferIntegrationCfg 构造带 hub 语义（xfer_tls 启用 + 凭据 Ring）的完整 server.Config。
+// 返回 cfg 与清理函数（关闭 handlers）。ring 为该服务端凭据表（hub 准入 + xfer
+// 隧道密钥派生共用）。
+func xferIntegrationCfg(t *testing.T) (*server.Config, *accesskey.Ring, *server.Handlers) {
 	t.Helper()
 	cfg := server.Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []server.AccessKeyConfig{
-		{Key: testutil.TestAccessKey(), Secret: testutil.TestKey()},
-	}
 	certFile, keyFile := genTestCertFiles(t)
 	cfg.TLS.CertFile = certFile
 	cfg.TLS.KeyFile = keyFile
@@ -41,18 +40,24 @@ func xferIntegrationCfg(t *testing.T) (*server.Config, *server.Handlers) {
 	cfg.Hub.Transports.XferTLS.Listen = "127.0.0.1:0"
 	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "ident", "server-identity.json")
 
+	ring := accesskey.NewRing()
+	skBytes, _ := hex.DecodeString(testutil.TestKey())
+	_ = ring.UpsertAK(testutil.TestAccessKey(), "test")
+	_, _ = ring.AddKey(testutil.TestAccessKey(), skBytes)
+
 	var cfgPtr atomic.Pointer[server.Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
 	h := server.RegisterRoutes(t.Context(), server.RegisterRoutesOpts{
-		Mux:     mux,
-		CfgPtr:  &cfgPtr,
-		Version: "v",
-		BuildAt: "b",
-		Logger:  testutil.DiscardLogger(),
+		Mux:            mux,
+		CfgPtr:         &cfgPtr,
+		Version:        "v",
+		BuildAt:        "b",
+		Logger:         testutil.DiscardLogger(),
+		CredentialRing: ring,
 	})
 	t.Cleanup(func() { _ = h.Close() })
-	return cfg, h
+	return cfg, ring, h
 }
 
 // xferClientTLSConfig 构造客户端信任服务端证书的 *tls.Config（CertPool + ServerName，
@@ -82,9 +87,9 @@ func TestXferListener_FileUploadList(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	cfg, h := xferIntegrationCfg(t)
+	cfg, ring, h := xferIntegrationCfg(t)
 
-	infos, aerr := startXferListener(ctx, cfg, h.LocalHandler(), testutil.DiscardLogger())
+	infos, aerr := startXferListener(ctx, cfg, ring, h.LocalHandler(), testutil.DiscardLogger())
 	if aerr != nil {
 		t.Fatalf("startXferListener: %v", aerr)
 	}
@@ -98,7 +103,7 @@ func TestXferListener_FileUploadList(t *testing.T) {
 	builtin.SetDefaultTLSConfig(xferClientTLSConfig(t, cfg.TLS.CertFile))
 
 	// 隧道密钥（与服务端同 AK/SK 派生，AD-3）。
-	key, kerr := server.HubXferKey(cfg)
+	key, kerr := server.HubXferKey(cfg, ring)
 	if kerr != nil {
 		t.Fatalf("HubXferKey: %v", kerr)
 	}
@@ -148,9 +153,9 @@ func TestXferListener_WrongClientPinFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	cfg, h := xferIntegrationCfg(t)
+	cfg, ring, h := xferIntegrationCfg(t)
 
-	infos, aerr := startXferListener(ctx, cfg, h.LocalHandler(), testutil.DiscardLogger())
+	infos, aerr := startXferListener(ctx, cfg, ring, h.LocalHandler(), testutil.DiscardLogger())
 	if aerr != nil {
 		t.Fatalf("startXferListener: %v", aerr)
 	}
@@ -158,7 +163,7 @@ func TestXferListener_WrongClientPinFails(t *testing.T) {
 	t.Cleanup(func() { builtin.SetDefaultTLSConfig(nil) })
 	builtin.SetDefaultTLSConfig(xferClientTLSConfig(t, cfg.TLS.CertFile))
 
-	key, kerr := server.HubXferKey(cfg)
+	key, kerr := server.HubXferKey(cfg, ring)
 	if kerr != nil {
 		t.Fatalf("HubXferKey: %v", kerr)
 	}
@@ -194,9 +199,9 @@ func TestXferListener_WrongKeyFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	cfg, h := xferIntegrationCfg(t)
+	cfg, ring, h := xferIntegrationCfg(t)
 
-	infos, aerr := startXferListener(ctx, cfg, h.LocalHandler(), testutil.DiscardLogger())
+	infos, aerr := startXferListener(ctx, cfg, ring, h.LocalHandler(), testutil.DiscardLogger())
 	if aerr != nil {
 		t.Fatalf("startXferListener: %v", aerr)
 	}

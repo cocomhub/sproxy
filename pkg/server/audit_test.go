@@ -34,11 +34,10 @@ func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.
 
 	cfg := Default()
 	cfg.StorageRoot = tmpDir
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	if modifyCfg != nil {
 		modifyCfg(cfg)
 	}
-
+	// 凭据 store 化：注入带 testAccessKey 的 Ring（取代 cfg.AccessKeys）。
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
@@ -46,14 +45,16 @@ func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.
 	auditLogger := slog.New(slog.NewJSONHandler(&auditBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:         mux,
 		CfgPtr:      &cfgPtr,
 		Version:     "test",
 		BuildAt:     "test",
 		Logger:      testLogger(),
 		AuditLogger: auditLogger,
-	})
+	}
+	withTestCreds(&opts)
+	h := RegisterRoutes(t.Context(), opts)
 
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {
@@ -79,17 +80,35 @@ func writeUploadFile(t *testing.T, cfgPtr *atomic.Pointer[Config], name string, 
 	}
 }
 
-// signBodyRequest 给带 body 的请求打上合法 SproxySig 头（body_sha256 预计算）。
+// signBodyRequest 给带 body 的请求打上合法 SproxySig 头（body_sha256 预计算，v2 带 skey-id）。
 func signBodyRequest(r *http.Request, ak, sk string, body []byte) {
+	h := signHeader(ak, testEntryID(ak), r.Method, sk, r, sha256hex(body))
+	r.Header.Set("Authorization", formatSigAuth(h))
+}
+
+// signRequestEntry 使用显式 skeyID 的免 body 签名（renew 后新条目测试用）。
+func signRequestEntry(r *http.Request, ak, entryID, sk string) {
+	h := signHeader(ak, entryID, r.Method, sk, r, sproxysig.EmptyBodyHash())
+	r.Header.Set("Authorization", formatSigAuth(h))
+}
+
+// signBodyRequestEntry 使用显式 skeyID 的带 body 签名（renew 后新条目测试用）。
+func signBodyRequestEntry(r *http.Request, ak, entryID, sk string, body []byte) {
+	h := signHeader(ak, entryID, r.Method, sk, r, sha256hex(body))
+	r.Header.Set("Authorization", formatSigAuth(h))
+}
+
+// signHeader 构造带给定 entryID 的 v2 签名头（免/带 body 共用）。
+func signHeader(ak, entryID, method, sk string, r *http.Request, bodyHash string) sproxysig.Header {
 	now := time.Now()
 	h := sproxysig.Header{
-		Version: sproxysig.Version, AK: ak,
+		Version: sproxysig.Version, AK: ak, EntryID: entryID,
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      testNonce(),
-		BodySHA256: sha256hex(body),
+		BodySHA256: bodyHash,
 	}
-	h.Sig = sproxysig.Sign(sk, h, r.Method, r.URL.EscapedPath(), r.URL.RawQuery)
-	r.Header.Set("Authorization", formatSigAuth(h))
+	h.Sig = sproxysig.Sign(sk, h, method, r.URL.EscapedPath(), r.URL.RawQuery)
+	return h
 }
 
 // uploadFileSigned 带 SproxySig 签名上传一个文件（multipart），返回状态码。
@@ -187,7 +206,7 @@ func TestRecordAudit_OutputsStructuredJSON(t *testing.T) {
 	ts := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	h.RecordAudit(context.Background(), AuditEvent{
 		Action:     "delete",
-		Actor:      "sk-test",
+		Actor:      "ak-test",
 		Mesh:       "mesh-a",
 		ObjectType: "file",
 		Object:     "dir/a.txt",
@@ -204,8 +223,8 @@ func TestRecordAudit_OutputsStructuredJSON(t *testing.T) {
 	if m["action"] != "delete" {
 		t.Errorf("action = %v, want delete", m["action"])
 	}
-	if m["actor"] != "sk-test" {
-		t.Errorf("actor = %v, want sk-test", m["actor"])
+	if m["actor"] != "ak-test" {
+		t.Errorf("actor = %v, want ak-test", m["actor"])
 	}
 	if m["mesh"] != "mesh-a" {
 		t.Errorf("mesh = %v, want mesh-a", m["mesh"])
@@ -262,8 +281,8 @@ func TestRecordAudit_DefaultTS(t *testing.T) {
 func TestAuthMiddleware_SproxySigActorInjected(t *testing.T) {
 	t.Parallel()
 	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(&Config{AccessKeys: []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}})
-	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool()}
+	cfgPtr.Store(&Config{})
+	h := &Handlers{cfgPtr: cfgPtr, noncePool: sproxysig.NewNoncePool(), credentialRing: ringForTestCreds()}
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := ActorFrom(r.Context()); got != testAccessKey {
 			t.Errorf("ActorFrom() = %q, want %q", got, testAccessKey)
@@ -347,7 +366,7 @@ func TestAuthMiddleware_NoAuthActorEmpty(t *testing.T) {
 	t.Parallel()
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{})
-	h := &Handlers{cfgPtr: cfgPtr}
+	h := &Handlers{cfgPtr: cfgPtr, allowInsecureLoopback: true}
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := ActorFrom(r.Context()); got != "" {
 			t.Errorf("ActorFrom() = %q, want empty", got)
@@ -357,6 +376,7 @@ func TestAuthMiddleware_NoAuthActorEmpty(t *testing.T) {
 	handler := h.authMiddleware(inner)
 
 	r := httptest.NewRequest("GET", "/upload", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 
@@ -706,20 +726,21 @@ func TestRequestLog_RecordsActor(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = tmpDir
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
 	var logBuf bytes.Buffer
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:         mux,
 		CfgPtr:      &cfgPtr,
 		Version:     "test",
 		BuildAt:     "test",
 		Logger:      slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		AuditLogger: testLogger(),
-	})
+	}
+	withTestCreds(&opts)
+	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {
 		ts.Close()

@@ -295,7 +295,7 @@ func (d *relayForwardDialer) Dial(ctx context.Context, peer hub.FederationPeer, 
 	fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
 	if peer.AccessKeySecret != "" {
 		now := time.Now()
-		h := sproxysig.Header{Version: sproxysig.Version, AK: peer.AccessKey,
+		h := sproxysig.Header{Version: sproxysig.Version, AK: peer.AccessKey, EntryID: peer.AccessKeyID,
 			TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 			Nonce: sproxysig.NewNonce(), BodySHA256: sproxysig.BodyHash(body)}
 		fmt.Fprintf(&b, "Authorization: %s\r\n", sproxysig.SignAndFormat(peer.AccessKeySecret, h, http.MethodPost, path, ""))

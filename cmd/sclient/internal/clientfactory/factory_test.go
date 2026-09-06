@@ -227,7 +227,7 @@ func TestFactory_NewClient_Xfer_IdentityAndPinWired(t *testing.T) {
 		data: map[string]any{
 			"server_url":        "http://127.0.0.1:18083",
 			"hub_url":           "127.0.0.1:9999",
-			"access_key":        "sk-00000000000000000000000000000000",
+			"access_key":        "ak-00000000000000000000000000000000",
 			"access_key_secret": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			"peer_fingerprints": []string{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
 		},

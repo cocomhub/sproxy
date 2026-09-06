@@ -75,7 +75,7 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 	resp := configResponse{
 		LogLevel:           cfg.LogLevel,
 		LogFormat:          cfg.LogFormat,
-		AccessKeysSet:      len(cfg.AccessKeys) > 0,
+		AccessKeysSet:      h.credentialRing != nil && h.credentialRing.Len() > 0,
 		RateLimitRequests:  cfg.RateLimit.Requests,
 		RateLimitWindow:    cfg.RateLimit.Window.String(),
 		MaxStorageBytes:    cfg.MaxStorageBytes,

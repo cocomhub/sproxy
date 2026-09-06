@@ -183,15 +183,16 @@ func TestAuditHandler_NoAuthUnauthorized(t *testing.T) {
 func TestAuditHandler_LocalMuxReachable(t *testing.T) {
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
-	cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:    mux,
 		CfgPtr: &cfgPtr,
 		Logger: testLogger(),
-	})
+	}
+	withTestCreds(&opts)
+	h := RegisterRoutes(t.Context(), opts)
 	t.Cleanup(func() { _ = h.Close() })
 
 	lh := h.LocalHandler()
@@ -219,9 +220,7 @@ func TestAuditHandler_LocalMuxReachable(t *testing.T) {
 // → 内层 localMux /api/audit 返回 200 且能读到真实审计事件。这是「浏览器隧道
 // 模式下审计 tab 可达」的真链路验证，无桩/mock。
 func TestAuditHandler_TunnelRoundTripReachable(t *testing.T) {
-	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
-		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
-	})
+	url, _ := newTestServerWithAllRoutesCreds(t, nil)
 
 	// 先经直连面记录一条真实 delete 审计事件。
 	body := []byte("tunnel-e2e")

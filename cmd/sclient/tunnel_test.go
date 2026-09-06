@@ -146,7 +146,9 @@ func TestTunnelCmd_MethodFlag(t *testing.T) {
 	proxy := httptest.NewServer(tunnelProxyHandler(t, testutil.TestAccessKey(), key))
 	defer proxy.Close()
 
-	svc := client.NewFileClient(proxy.URL, client.WithTunnel(testutil.TestAccessKey(), key))
+	svc := client.NewFileClient(proxy.URL,
+		client.WithTunnel(testutil.TestAccessKey(), key),
+		client.WithAccessKeyID(testutil.TestAccessKeyID()))
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard, Out: io.Discard})
 	cmd.SetArgs([]string{"-X", "POST", target.URL + "/data"})
@@ -172,7 +174,9 @@ func TestTunnelCmd_HeaderFlag(t *testing.T) {
 	proxy := httptest.NewServer(tunnelProxyHandler(t, testutil.TestAccessKey(), key))
 	defer proxy.Close()
 
-	svc := client.NewFileClient(proxy.URL, client.WithTunnel(testutil.TestAccessKey(), key))
+	svc := client.NewFileClient(proxy.URL,
+		client.WithTunnel(testutil.TestAccessKey(), key),
+		client.WithAccessKeyID(testutil.TestAccessKeyID()))
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard, Out: io.Discard})
 	cmd.SetArgs([]string{"-H", "X-Custom: value", target.URL + "/data"})
@@ -199,7 +203,7 @@ func TestTunnelCmd_DataFlag(t *testing.T) {
 	proxy := httptest.NewServer(tunnelProxyHandler(t, testutil.TestAccessKey(), key))
 	defer proxy.Close()
 
-	svc := client.NewFileClient(proxy.URL, client.WithTunnel(testutil.TestAccessKey(), key))
+	svc := client.NewFileClient(proxy.URL, client.WithTunnel(testutil.TestAccessKey(), key), client.WithAccessKeyID(testutil.TestAccessKeyID()))
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard, Out: io.Discard})
 	cmd.SetArgs([]string{"-d", `{"key":"val"}`, target.URL + "/data"})
@@ -222,7 +226,7 @@ func TestTunnelCmd_IncludeFlag(t *testing.T) {
 	proxy := httptest.NewServer(tunnelProxyHandler(t, testutil.TestAccessKey(), key))
 	defer proxy.Close()
 
-	svc := client.NewFileClient(proxy.URL, client.WithTunnel(testutil.TestAccessKey(), key))
+	svc := client.NewFileClient(proxy.URL, client.WithTunnel(testutil.TestAccessKey(), key), client.WithAccessKeyID(testutil.TestAccessKeyID()))
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard, Out: io.Discard})
 	cmd.SetArgs([]string{"-i", target.URL + "/data"})
@@ -234,7 +238,9 @@ func TestTunnelCmd_IncludeFlag(t *testing.T) {
 
 func TestTunnelCmd_WithConfigKey(t *testing.T) {
 	t.Parallel()
-	svc := client.NewFileClient("http://127.0.0.1:1", client.WithTunnel(testutil.TestAccessKey(), testutil.TestKey()))
+	svc := client.NewFileClient("http://127.0.0.1:1",
+		client.WithTunnel(testutil.TestAccessKey(), testutil.TestKey()),
+		client.WithAccessKeyID(testutil.TestAccessKeyID()))
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard, Out: io.Discard})
 	cmd.SetArgs([]string{"http://any-host.local/data"})

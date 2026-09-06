@@ -51,6 +51,9 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 		buildAt:       "test",
 		logger:        slog.Default(),
 		uploadingStop: make(chan struct{}),
+		// 凭证 store 化：无认证测试注入空 Ring + allow_insecure_loopback 兜底放行。
+		credentialRing:        emptyTestRing(),
+		allowInsecureLoopback: true,
 	}
 	// 多租户存储布局装配（同 newAssemblyTestHandlers / RegisterRoutes）：StorageRoot() 回退
 	// StorageRoot，两者同目录（旧配置兼容）。anonymous 租户预创建。

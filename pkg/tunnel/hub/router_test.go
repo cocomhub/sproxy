@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/testutil/mockxfer"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -61,7 +62,7 @@ func testRegFrameJSON(t *testing.T, nodeID, extra string) string {
 
 func TestHubServer_RegisterReadFailure_SilentNoRegErr(t *testing.T) {
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 
 	conn := &mockxfer.MockConn{
 		ReceiveFn: func(context.Context) ([]byte, error) {
@@ -91,7 +92,7 @@ func TestHubServer_RegisterReadFailure_SilentNoRegErr(t *testing.T) {
 func TestHubServerRegisterAndRemove(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -150,7 +151,7 @@ func TestHubServerRegisterAndRemove(t *testing.T) {
 func TestHubServerBadToken(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -213,7 +214,7 @@ func TestHubServerBadToken(t *testing.T) {
 func TestHubServer_TryHandleConn_MaxConns(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log, 1)
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), log, 1)
 
 	ctx := t.Context()
 
@@ -254,7 +255,7 @@ func TestHubServer_TryHandleConn_MaxConns(t *testing.T) {
 func TestHubServer_TryHandleConn_NoLimit(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log) // 不传上限 = 无上限
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), log) // 不传上限 = 无上限
 	ctx := t.Context()
 
 	client, server := xfertest.Pipe()
@@ -271,7 +272,7 @@ func TestHubServer_TryHandleConn_NoLimit(t *testing.T) {
 func TestHubServerBareNodeID(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -324,7 +325,7 @@ func TestHubServerBareNodeID(t *testing.T) {
 func TestHubServerRegisterSecretCapability(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -393,7 +394,7 @@ func TestHubServerRegisterSecretCapability(t *testing.T) {
 func TestHubServerRegisterNoCapabilityPlainAck(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -452,7 +453,7 @@ func TestHubServerRegisterNoCapabilityPlainAck(t *testing.T) {
 func TestHubServerJSONMissingNodeID(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -577,7 +578,7 @@ func registerRawFrame(t *testing.T, srv *HubServer, frame string) (string, func(
 // 派生的 HMAC 证明 → 注册成功且 RealNodeID 记录。
 func TestHubServer_DiscIdentity_ValidProof(t *testing.T) {
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 	secret, closeReal := registerNodeAndGetSecret(t, srv, "victim-a")
 	defer closeReal()
 	if secret == "" {
@@ -612,12 +613,12 @@ func meshRegFrameJSON(t *testing.T, nodeID, ak string) string {
 // 节点落入对应 mesh 的独立 RouteTable（跨 mesh 不可见）。
 func TestHubServer_RegisterMeshFromAK(t *testing.T) {
 	const (
-		akA = "sk-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
-		akB = "sk-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
+		akA = "ak-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
+		akB = "ak-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
 	)
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: akA, Secret: testSK}, {Key: akB, Secret: testSK}}), log)
+	srv := NewHubServer(rt, NewAuthenticator(testRing(accesskey.KeyPair{Key: akA, Secret: testSK}, accesskey.KeyPair{Key: akB, Secret: testSK})), log)
 
 	ackA, closeA := registerRawFrame(t, srv, meshRegFrameJSON(t, "node-a", akA))
 	defer closeA()
@@ -659,7 +660,7 @@ func TestHubServer_RegisterMeshFromAK(t *testing.T) {
 // （防冒充他人污染 accept 侧链路池）。
 func TestHubServer_DiscIdentity_ForgedRejected(t *testing.T) {
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 	_, closeReal := registerNodeAndGetSecret(t, srv, "victim-a")
 	defer closeReal()
 
@@ -755,7 +756,7 @@ func TestHubServer_RegisterTransientNoVIP(t *testing.T) {
 // 虚拟 IP（防 Discover=false 的出口节点静默失效），且与路由表一致。
 func TestHubServer_RegisterVIPInAck(t *testing.T) {
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -896,8 +897,8 @@ func TestHubServer_CrossMeshReRegisterReleasesOldVIP(t *testing.T) {
 	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
 	alloc := srv.Allocator().(*hubAllocator)
 
-	const akMeshA = "sk-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
-	const akMeshB = "sk-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
+	const akMeshA = "ak-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
+	const akMeshB = "ak-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
 
 	mA := newTestMux(t)
 	infoA, err := srv.registerNode(&RegisterFrame{NodeID: "node-x", AccessKey: akMeshA}, mA)
@@ -987,7 +988,7 @@ func TestHubServer_RegisterStableMeshPrefixedNodeGetsVIP(t *testing.T) {
 // 占位），向后兼容解析正确。
 func TestHubServer_RegisterVIPInAck_NoSecret(t *testing.T) {
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 	dial, serverConn, _ := pipeXfer()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)

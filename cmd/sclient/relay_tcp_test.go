@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/testutil"
@@ -55,11 +56,11 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 
 	// 2. hub：仅裸 TCP（无 WS），SproxySig 准入
 	const (
-		ak = "sk-relay-tcp-000000000000000000000"
+		ak = "ak-relay-tcp-000000000000000000000"
 		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
 	rt := hub.NewMeshRouteTable()
-	hs := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: ak, Secret: sk}}), testutil.DiscardLogger())
+	hs := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +73,7 @@ func TestRelayStart_TCPTransport_NoWS_RelayDial(t *testing.T) {
 	leafErr := make(chan error, 1)
 	go func() {
 		leafErr <- runRelayOnce(ctx, "tcp", "leaf-cli-tcp", hubAddr, "http://127.0.0.1:1",
-			ak, sk, false, true, []string{"echo:" + echoAddr}, nil, hub.DefaultVirtualSubnet, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			ak, sk, "", false, true, []string{"echo:" + echoAddr}, nil, hub.DefaultVirtualSubnet, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
 
 	// 4. 等待叶子注册进路由表

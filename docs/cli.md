@@ -37,7 +37,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`tunnel`](#tunnel) | 通过隧道发送任意 HTTP 请求（`--xfer <name> --hub <addr>` 走 xfer/mux 隧道，启用身份指纹 pinning） |
 | [`identity`](#identity) | 节点长时身份密钥管理（Ed25519，供对端指纹 pinning） |
 | [`relay`](#relay) | 中继节点：连接到 Hub，转发请求到本地 HTTP 服务 |
-| [`genkey`](#genkey) | 生成 tunnel_key |
+| [`genkey`](#genkey) | 生成 64 hex 密钥（tunnel_key 已废除，仅历史用途） |
 | [`config`](#config) | 配置管理 |
 | [`version`](#version) | 打印版本信息 |
 
@@ -294,7 +294,8 @@ sclient genkey
 sclient config                       # show（同 show）
 sclient config show
 sclient config set server_url http://proxy:18083
-sclient config set tunnel_key <64hex>
+sclient config set access_key_secret <64hex>   # SproxySig Secret（本地凭据）
+sclient config set access_key_id <sk-...>      # 多 SK 时可选（SK 条目 ID；trust renew 回填）
 ```
 
 ### version
@@ -303,7 +304,7 @@ sclient config set tunnel_key <64hex>
 sclient version
 ```
 
-打印 sclient 版本、配置文件路径、生效的 server / tunnel_key 摘要。
+打印 sclient 版本、配置文件路径、生效的 server / AccessKey 摘要（Secret 全掩）。
 
 ### search
 
@@ -343,8 +344,8 @@ sclient batch-rename <from1> <to1> [from2 to2...]
 | 现象 | 可能原因 |
 |---|---|
 | `路径包含父级引用 '..'` | 客户端预拦截了不安全路径，去掉 `..` 或用绝对路径 |
-| `tunnel error (HTTP 403)` | 服务端 `tunnel_key` 为空 / 启动失败，检查 sproxy 日志 |
+| `tunnel error (HTTP 401)` | 外层 `POST /tunnel` SproxySig 验签失败（凭据缺失/非法/过期/重放），检查 `access_key`/`access_key_secret` 是否与服务端凭据 Ring 一致 |
 | `tunnel error (HTTP 400)` | 隧道密钥与服务端不一致，或网络中间层破坏了请求体 |
-| `unauthorized` (401) | SproxySig 签名缺失/非法/过期（服务端配置了 `access_keys` 时），检查 `~/.config/sproxy/sclient.yaml` 的 `access_key`/`access_key_secret` 是否与服务端一致 |
+| `unauthorized` (401) | SproxySig 签名缺失/非法/过期（服务端凭据 Ring 非空时），检查 `~/.config/sproxy/sclient.yaml` 的 `access_key`/`access_key_secret` 是否与服务端一致 |
 | `源文件 SHA-256 校验失败` | mv 期间本地文件已变，刷新本地 checksum 后重试 |
 | `文件已存在但 checksum 不匹配` (409) | 服务端已有同名文件且内容不同，先 mv 或 delete |

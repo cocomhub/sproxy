@@ -17,7 +17,7 @@ import (
 )
 
 // getHubServerURL 从 flag 和配置中获取 Hub 服务器地址与 SproxySig 认证 AK/SK。
-func getHubServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, accessKey, accessKeySecret string) {
+func getHubServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, accessKey, accessKeySecret, accessKeyID string) {
 	serverURL, _ = cmd.Root().PersistentFlags().GetString("server")
 	if serverURL == "" {
 		if hubURL, _ := cmd.Flags().GetString("hub"); hubURL != "" {
@@ -34,6 +34,7 @@ func getHubServerURL(cmd *cobra.Command, cfgSvc ConfigProvider) (serverURL, acce
 			serverURL = cfg.ServerURL
 			accessKey = cfg.AccessKey
 			accessKeySecret = cfg.AccessKeySecret
+			accessKeyID = cfg.AccessKeyID
 		}
 	}
 	if accessKeySecret == "" {
@@ -52,7 +53,7 @@ func NewCmdRelayRemoveNode(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Comm
 		RunE: func(cmd *cobra.Command, args []string) error {
 			nodeID := args[0]
 
-			serverURL, accessKey, accessKeySecret := getHubServerURL(cmd, cfgSvc)
+			serverURL, accessKey, accessKeySecret, accessKeyID := getHubServerURL(cmd, cfgSvc)
 			if serverURL == "" {
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或 --hub 或配置 server_url")
 			}
@@ -62,7 +63,7 @@ func NewCmdRelayRemoveNode(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Comm
 			if err != nil {
 				return fmt.Errorf("创建请求失败: %w", err)
 			}
-			sproxysig.SignRequest(req, accessKey, accessKeySecret)
+			sproxysig.SignRequestWithSkeyID(req, accessKey, accessKeyID, accessKeySecret)
 
 			httpClient := &http.Client{Timeout: 10 * time.Second}
 			resp, err := httpClient.Do(req)
@@ -96,7 +97,7 @@ func NewCmdRelayStats(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 		Short: "查看 Hub 统计信息",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			serverURL, accessKey, accessKeySecret := getHubServerURL(cmd, cfgSvc)
+			serverURL, accessKey, accessKeySecret, accessKeyID := getHubServerURL(cmd, cfgSvc)
 			if serverURL == "" {
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或 --hub 或配置 server_url")
 			}
@@ -106,7 +107,7 @@ func NewCmdRelayStats(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("创建请求失败: %w", err)
 			}
-			sproxysig.SignRequest(req, accessKey, accessKeySecret)
+			sproxysig.SignRequestWithSkeyID(req, accessKey, accessKeyID, accessKeySecret)
 
 			httpClient := &http.Client{Timeout: 10 * time.Second}
 			resp, err := httpClient.Do(req)

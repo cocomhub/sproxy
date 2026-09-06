@@ -68,6 +68,15 @@ func MeshAccessKeySecret(flagKey, cfgKey string) string {
 	return cfgKey
 }
 
+// MeshAccessKeyID 返回 SproxySig 认证 SK 条目 ID（skey-id，v2 协议必传）：
+// 显式 flag 优先，否则配置值。信令/节点列表/网关签名须携带，否则 hub 验签 401。
+func MeshAccessKeyID(flagID, cfgID string) string {
+	if flagID != "" {
+		return flagID
+	}
+	return cfgID
+}
+
 // MeshTargetRefresher 按需解析 mesh 目标，带 TTL 缓存与单飞（single-flight）刷新。
 //
 // 并发安全设计：所有缓存字段由 mu 保护；刷新期间**不持有 mu 做网络调用**——

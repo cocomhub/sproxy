@@ -22,7 +22,7 @@ func TestHubServer_SetDHT_FeedsRegistration(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
 	dht := newMemoryDHT()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
 	srv.SetDHT(dht)
 	dial, serverConn, _ := pipeXfer()
 
@@ -90,7 +90,7 @@ func TestHubServer_SetDHT_SkipsTransientNodes(t *testing.T) {
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
 	dht := newMemoryDHT()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), log)
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
 	srv.SetDHT(dht)
 	dial, serverConn, _ := pipeXfer()
 
@@ -172,7 +172,7 @@ func TestIsTransientNodeID(t *testing.T) {
 // TestHubServer_NilDHT_NoFeed：未注入 DHT 时注册不 panic、路由表行为不变。
 func TestHubServer_NilDHT_NoFeed(t *testing.T) {
 	rt := NewMeshRouteTable()
-	srv := NewHubServer(rt, NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}}), testutil.DiscardLogger())
+	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 	// 不调 SetDHT（默认 nil）。
 
 	conn := &mockxfer.MockConn{

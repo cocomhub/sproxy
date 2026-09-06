@@ -184,7 +184,7 @@ type Conn interface {
 
 ## 关键路由（`pkg/server/handlers.go`）
 
-`RegisterRoutes` 在 `cmd/sproxy/root.go` 中挂到 `http.NewServeMux`。支持两层认证：主 mux 走 SproxySig 请求签名（`authMiddleware`，配置 `access_keys` 时启用；`api_keys` 仍走独立 Bearer 多用户模式），`localMux` 走隧道密钥（`POST /tunnel` 内部路由时跳过认证）。
+`RegisterRoutes` 在 `cmd/sproxy/root.go` 中挂到 `http.NewServeMux`。支持两层认证：主 mux 走 SproxySig 请求签名（`authMiddleware`，凭据 Ring 非空时启用；`api_keys` 仍走独立 Bearer 多用户模式），`localMux` 走隧道密钥（`POST /tunnel` 内部路由时跳过认证）。
 
 ### 基础
 - `GET /` — 301 重定向到 `/ui/`
@@ -272,7 +272,8 @@ type Conn interface {
 | `addr` | string | `:18083` | 监听地址 |
 | `storage_root` | string | `./storage` | 多租户存储根（`<tenant>/{user,cloud,archive,chunk,version,meta}/` 桶布局） |
 | `owner_quotas` | map[string]int64 | 空 | 按 owner 配额上限（显式 owner > `"*"` 默认 > 0 不限制） |
-| `tunnel_key` | string | 空（自动生成） | 64 hex chars AES-256 密钥 |
+| `tunnel_key` | string | 已废除（忽略） | **已废除**：隧道密钥由凭据 Ring 中条目的 SK 经 HKDF 自动派生；配置该键仅历史兼容 | 
+| `registration.disable` | bool | false | 注册开关：false=允许注册（默认）；true=禁止注册（仅存量用户） |
 | `log_level` | string | `info` | debug/info/warn/error |
 | `log_format` | string | `text` | text/json |
 | `max_header_bytes` | int | 1048576 | 最大 HTTP 头字节数 |
@@ -286,8 +287,10 @@ type Conn interface {
 | `tls.cert_file` / `tls.key_file` | string | | |
 | `tls.auto_tls` | bool | true | 自动生成 ECDSA P-256 自签证书 |
 | `tls.client_ca` | string | | mTLS CA 证书路径 |
-| `access_keys` | []AccessKey | 空 | SproxySig 请求签名认证（每 mesh 一对 AK/SK：`{key, secret, mesh_id?}`；配置后除 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 外全 HTTP 面验签） |
-| `api_keys.enabled` / `.keys` | | 关闭 | 多用户 API 密钥（独立 Bearer 特性，与 access_keys 互斥，优先） |
+| `registration.disable` | bool | false | 注册开关：false=允许注册（默认）；true=禁止注册（仅存量用户）。anonymous 首启生成（ring 空时）不受其影响 |
+| `allow_insecure_loopback` | bool | false | 无任何凭据（ring 空）时放行 loopback 来源 GET/HEAD（仅本地调试，生产勿开） |
+| `credential_ttl` | duration | 720h | 首启 anonymous 凭据有效期；负值 = 禁用首启生成 |
+| `api_keys.enabled` / `.keys` | | 关闭 | 多用户 API 密钥（独立 Bearer 特性，与 store 凭据互斥，优先） |
 | `rate_limit.enabled` / `.requests` / `.window` | | 关闭 | tunnel handler 限流 |
 | `chunk_size` | int | 4 MB | 分块上传每块大小 |
 | `max_chunk_size` | int | 64 MB | 客户端最大分块大小 |
@@ -307,24 +310,25 @@ type Conn interface {
 | `provider.timeout` / `.retry` | | | 提供者超时/重试 |
 | `max_storage_bytes` | int64 | 0（不限） | 存储上限 |
 
-所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 必须是 64 个十六进制字符（32 字节 AES-256 密钥），否则启动失败。生成密钥：`sclient genkey`；生成 SproxySig AccessKey/AccessKeySecret：`sclient access-key create [--mesh <name>]`（输出 AK/SK 供服务端 `access_keys` 配置与客户端 `access_key`/`access_key_secret` 使用）。
+所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 已废除（配置忽略，见 `docs/config.md`）；隧道密钥由凭据 SK 经 HKDF 自动派生。生成 SproxySig AccessKey/AccessKeySecret：`sclient trust ak add [--mesh <name>]`（不指定 ak 时本地生成；SK 由服务端或本端生成，`trust renew` 轮换 SK——统一由 `pkg/accesskey` 单一事实源生成，AK=`ak[-<mesh>]-<32hex>`、SK=64hex(32B)）。
 
-SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`storage_root`/`tunnel_key`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`access_keys`/`owner_quotas` 需要重启进程。
+SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`storage_root`/`owner_quotas`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`tls.enabled` 需要重启进程（`tunnel_key`/`access_keys` 已随凭据 store 化移除——凭据管理与轮换走 `sclient trust`/`/api/credentials`，与 SIGHUP 无关）。
 
 ## 认证：SproxySig 请求签名（`pkg/sproxysig`）
 
-服务端配置 `access_keys: [{key, secret, mesh_id?}]`（每 mesh 一对）后，除
+服务端凭据 Ring 非空后（首启自动登记 anonymous 凭据；凭据由 `<storage_root>/<owner>/meta/credentials.json` store 持久化，取代旧 `access_keys`），除
 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 外的全部 HTTP 面（文件/信令/节点列表/
-服务发现/网关/云端下载）走 **SproxySig v1 请求签名**，替代旧 `auth_token` 明文 Bearer。
-`api_keys`（多用户 Bearer）与 access_keys 互斥，api_keys 优先。
+服务发现/网关/云端下载）走 **SproxySig v2 请求签名**，替代旧 `auth_token` 明文 Bearer 与 v1。
+`api_keys`（多用户 Bearer）与 store 凭据互斥，api_keys 优先。
 
-- **协议头**：`Authorization: SproxySig v=1 ak=<AK> ts=<unix_ms> exp=<unix_ms> nonce=<16B hex> body_sha256=<hex|UNSIGNED> sig=<hex>`
-- **签名**：`sig = HMAC-SHA256(SK, "sproxy-sig/v1\n" + ak + "\n" + ts + "\n" + exp + "\n" + nonce + "\n" + method + "\n" + path + "\n" + query + "\n" + body_sha256)`（canonical 为换行拼接，path 用 `EscapedPath()`，query 用 `RawQuery`）
-- **服务端校验**：取 AK→SK、重算 sig 恒时比较、`now≤exp`、`exp−ts≤max_ttl(15min)`、nonce 防重放池；带 body 请求客户端**发送前预计算哈希**，服务端流式累加、EOF 比对（防篡改）
+- **协议头**：`Authorization: SproxySig v=2 ak=<AK> [sk=<entryID>] ts=<unix_ms> exp=<unix_ms> nonce=<16B hex> body_sha256=<hex|UNSIGNED> sig=<hex>`（可选 `sk=<entryID>` 段 = SK 条目 ID `sk-<12hex>`，多 SK 并存时精确锁定被验条目）
+- **签名**：`sig = HMAC-SHA256(SK, "sproxy-sig/v2\n" + ak + "\n" + [entryID] + "\n" + ts + "\n" + exp + "\n" + nonce + "\n" + method + "\n" + path + "\n" + query + "\n" + body_sha256)`（canonical 为换行拼接，v2 在 AK 段后插入 entryID 段，空 entryID 输出空行共 10 段；path 用 `EscapedPath()`，query 用 `RawQuery`）
+- **服务端校验**：按 `ak`+`sk`（无 entryID 时对全部存活条目试签）取 Ring 中条目 SK、重算 sig 恒时比较、`now≤exp`、`exp−ts≤max_ttl(15min)`、nonce 防重放池；带 body 请求客户端**发送前预计算哈希**，服务端流式累加、EOF 比对（防篡改）。**v1 已废弃**：`v=1` 头校验时直接 `ErrVersion` 拒绝
 - **无 body 请求** `body_sha256 = sha256("")`（`sproxysig.EmptyBodyHash()`）
-- 客户端（sclient/FileClient/mesh/relay/信令）统一 `--access-key`/`--access-key-secret`（或配置 `access_key`/`access_key_secret`），Secret 只存本端计算签名、永不上线
+- **AK/SK 格式（`pkg/accesskey` 唯一事实源）**：AK=`ak[-<mesh>]-<32hex>`（16B 标准；解析层兼容 legacy `ak[-<mesh>]-<16hex>` 8B）；SK=64hex(32B)。**2026-09-05 破坏性变更（alpha）**：旧 `sk-` 前缀 AK 一律不再识别
+- 客户端（sclient/FileClient/mesh/relay/信令）统一 `--access-key`/`--access-key-secret`（或配置 `access_key`/`access_key_secret`，多 SK 时可选 `access_key_id`），Secret 只存本端计算签名、永不上线
 - Web UI 用 **WebCrypto** 计算 HMAC（`crypto.subtle`），AK/SK 存 `sessionStorage`（关页即清）；未配置 AK/SK 时不发签名头（无认证兼容）
-- 生成 AK/SK：`sclient access-key create [--mesh <name>]`（AK=`sk[-<mesh>]-<16hex>`，SK=32B 随机 hex）
+- 生成/轮换 AK/SK：`sclient trust ak add [--mesh <name>]`（不指定 ak 时本地生成一对并注册，服务端单次回传初始 Secret）；`sclient trust renew` 轮换 SK（服务端控 TTL，默认 30d）；`sclient trust sk list/delete/expire` 管理 SK 条目（管理员可 `trust ak list/add/delete`）
 
 ## sclient CLI（`cmd/sclient/`）
 
@@ -352,8 +356,10 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 | `mesh connect <service> [-l :port]` | 连接 mesh 服务（webrtc 直连优先，hub 中继回落；`--gateway <addr>` 经本地 mesh node 网关复用已建直连链路） |
 | `mesh status` | 列出 hub 上的 mesh 服务（`--gateway <addr>` 改查本地 mesh node 直连拓扑/链路类型） |
 | `mesh node [flags]` | 单进程常驻 mesh 节点（注册+中继+webrtc 直连+自动对等发现+本地网关）：`--hub` `--node-id` `--token` `--service` `--dial-allow` `--discover` `--discover-interval` `--gateway-addr` |
-| `access-key create [--mesh <name>]` | 生成一对 AccessKey/AccessKeySecret 打印（供服务端 `access_keys` 配置与客户端 `access_key`/`access_key_secret`） |
-| `genkey` | 生成 64 hex 密钥 |
+| `trust renew` | 调 `POST /api/credentials/{ak}/renew` 轮换 SK（服务端控 TTL，客户端不可传 ttl）；新 SK 自动回填 `access_key_secret`/`access_key_id` |
+| `trust sk list` / `trust sk delete <skID>` / `trust sk expire <skID> [--until RFC3339]` | 管理本 AK 的 SK 条目（list 只展示本端能解开的 secret，其余 masked） |
+| `trust ak list` / `trust ak add [--mesh M]` / `trust ak delete <ak> [--force]` | AccessKey 管理（admin-only；ak add 不指定 ak 时本地生成一对并注册，服务端单次回传初始 Secret；ak delete 需交互输入 AK 名二次确认） |
+| `genkey` | 生成 64 hex 密钥（tunnel_key 已废除，仅历史用途） |
 | `config [show\|set <k> <v>]` | 配置管理 |
 | `diag` | 诊断连接问题 |
 | `version` | 版本 + 配置信息 |
@@ -382,7 +388,7 @@ sclient relay start --hub wss://hub:18083/ws --node-id local \
   --token T --insecure --dial-allow --service app:127.0.0.1:2090
 
 # 云端节点：经 hub 中继拨本地端 2090 服务（SproxySig 需 --access-key/--access-key-secret，
-# 与服务端 access_keys 一致；自签 TLS hub 需 --insecure）
+# 与服务端凭据 Ring 登记的 AK/SK 一致；自签 TLS hub 需 --insecure）
 sclient relay dial --node local --tcp 127.0.0.1:2090 \
   -s https://hub:18083 --access-key <AK> --access-key-secret <SK> --insecure
 # 云端即可向该连接写入数据，数据经 hub 中继到达本地端服务
@@ -465,7 +471,7 @@ sclient mesh status --gateway 127.0.0.1:18085   # 直连拓扑 / 链路类型
 **多环境**：`SCLIENT_ENV=prod` 时默认加载 `sclient.prod.yaml`（同一目录下），便于维护
 prod/staging/dev 多套配置。**通用 mesh 配置键**（`sclient config set` 支持）：
 - `server_url` — 服务器地址
-- `access_key` / `access_key_secret` — SproxySig 认证 AK/SK（服务端配置了 `access_keys` 时需要；Secret 只本端计算签名，永不上线）
+- `access_key` / `access_key_secret` — SproxySig 认证 AK/SK（与服务端凭据 Ring 登记的 AK/SK 一致；Secret 只本端计算签名，永不上线）。多 SK 时可配 `access_key_id`（SK 条目 ID，`trust renew` 自动回填）
 - `hub_url` — mesh/relay/p2p 共用 hub 地址（http(s)/ws(s)，可带 /ws 路径）
 - `relay_token` — hub 中继注册 token（与 relay start --token / hub.relay_token 一致）
 - `node_id` — 本节点默认 ID（为空回落主机名）
@@ -531,7 +537,7 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--token`/`--relay-toke
 5. **Viper 隔离** — 测试优先使用 `viper.New()` 创建独立实例而非 `GetViper()` 全局单例（`LoadFromViper(v *viper.Viper)` 已接受参数）。
 
 ### 测试注意事项
-1. **E2E 测试配置隔离** — 启动 sclient 子进程时，必须用 `--config` 指向临时配置文件，不要只用 `--server` flag。`--server` 不会阻止加载本地 `~/.config/sproxy/sclient.yaml` 中的 tunnel_key 等配置，导致测试意外通过隧道通信。
+1. **E2E 测试配置隔离** — 启动 sclient 子进程时，必须用 `--config` 指向临时配置文件，不要只用 `--server` flag。`--server` 不会阻止加载本地 `~/.config/sproxy/sclient.yaml` 中的 access_key/access_key_secret 等配置，导致测试意外通过隧道/认证通信。
 2. **`-race` 下超时翻倍** — 含 goroutine 的测试（特别是 mux/p2p）在 `-race` 下运行时间显著增加。Context timeout 设置时留足余量，推荐正常值的 3 倍。
 3. **覆盖率测量排除`test/`和`tools/`** — `go test -cover ./...` 包含 E2E 测试包和工具包会稀释 total 覆盖率。正确做法：`go test -cover ./internal/... ./pkg/... ./cmd/...`
 4. **Makefile 修改优先用 Edit tool** — sed 处理 Makefile 的多行模式（反斜杠续行、`$$` 转义、`{` `}`嵌套）极其脆弱。复杂修改用 Read + Edit 工具。

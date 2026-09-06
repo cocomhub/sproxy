@@ -47,14 +47,19 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
-	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+	opts := RegisterRoutesOpts{
 		Mux:         mux,
 		CfgPtr:      &cfgPtr,
 		Version:     "test",
 		BuildAt:     "test",
 		Logger:      slog.Default(),
 		AuditLogger: testLogger(), // 丢弃审计日志，避免现有测试输出噪音
-	})
+	}
+	noAuth := defaultNoAuthRegOpts()
+	opts.CredentialRing = noAuth.CredentialRing
+	opts.CredentialStore = noAuth.CredentialStore
+	opts.AllowInsecureLoopback = noAuth.AllowInsecureLoopback
+	h := RegisterRoutes(t.Context(), opts)
 
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {
@@ -62,6 +67,43 @@ func newTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Point
 		_ = h.Close()
 	})
 	// 兼容旧的 `defer cleanup()` 调用语义，仍返回一个 no-op cleanup（实际工作交给 t.Cleanup）。
+	cleanup := func() {}
+	return ts.URL, &cfgPtr, cleanup
+}
+
+// newTestServerCreds 启动带 testAccessKey 凭据 Ring 的测试服务（认证驱动：
+// 直接面请求需 SproxySig 签名；等价旧 cfg.AccessKeys 注入语义）。
+func newTestServerCreds(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config], func()) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+
+	cfg := Default()
+	cfg.StorageRoot = tmpDir
+	if modifyCfg != nil {
+		modifyCfg(cfg)
+	}
+
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+
+	mux := http.NewServeMux()
+	opts := RegisterRoutesOpts{
+		Mux:         mux,
+		CfgPtr:      &cfgPtr,
+		Version:     "test",
+		BuildAt:     "test",
+		Logger:      slog.Default(),
+		AuditLogger: testLogger(),
+	}
+	withTestCreds(&opts)
+	h := RegisterRoutes(t.Context(), opts)
+
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		_ = h.Close()
+	})
 	cleanup := func() {}
 	return ts.URL, &cfgPtr, cleanup
 }
@@ -875,9 +917,7 @@ func TestRedirectRoot(t *testing.T) {
 }
 
 func TestAuthMiddleware(t *testing.T) {
-	url, _, cleanup := newTestServer(t, func(c *Config) {
-		c.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
-	})
+	url, _, cleanup := newTestServerCreds(t, nil)
 	defer cleanup()
 
 	resp, err := http.Get(url + "/api/files")
@@ -987,14 +1027,62 @@ func newTestServerWithAllRoutes(t *testing.T, modifyCfg func(*Config)) (string, 
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
+	noAuth := defaultNoAuthRegOpts()
 	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:                   mux,
+		CfgPtr:                &cfgPtr,
+		Version:               "test-version",
+		BuildAt:               "test-buildat",
+		Logger:                testLogger(),
+		AuditLogger:           testLogger(), // 丢弃审计日志，避免现有测试输出噪音
+		CredentialRing:        noAuth.CredentialRing,
+		CredentialStore:       noAuth.CredentialStore,
+		AllowInsecureLoopback: noAuth.AllowInsecureLoopback,
+	})
+
+	ts := httptest.NewServer(h.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		_ = h.Close()
+	})
+	return ts.URL, &cfgPtr
+}
+
+// newTestServerWithAllRoutesCreds 启动带 testAccessKey 凭据 Ring 的完整路由测试服务器
+// （认证驱动：直接面请求需 SproxySig 签名，隧道经由 testAccessKey/testAccessSecret
+// 派生——与旧 cfg.AccessKeys 注入语义一致）。
+func newTestServerWithAllRoutesCreds(t *testing.T, modifyCfg func(*Config)) (string, *atomic.Pointer[Config]) {
+	t.Helper()
+	return newTestServerWithAllRoutesCredsMany(t, modifyCfg, testCredPair{ak: testAccessKey, sk: testAccessSecret})
+}
+
+// newTestServerWithAllRoutesCredsMany 启动带多组凭据 Ring 的完整路由测试服务器。
+func newTestServerWithAllRoutesCredsMany(t *testing.T, modifyCfg func(*Config), creds ...testCredPair) (string, *atomic.Pointer[Config]) {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	cfg := Default()
+	cfg.StorageRoot = tmpDir
+	cfg.ChunkSize = 4 << 10 // 4 KiB for testing
+	cfg.LogLevel = "error"
+	if modifyCfg != nil {
+		modifyCfg(cfg)
+	}
+
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+
+	mux := http.NewServeMux()
+	opts := RegisterRoutesOpts{
 		Mux:         mux,
 		CfgPtr:      &cfgPtr,
 		Version:     "test-version",
 		BuildAt:     "test-buildat",
 		Logger:      testLogger(),
-		AuditLogger: testLogger(), // 丢弃审计日志，避免现有测试输出噪音
-	})
+		AuditLogger: testLogger(),
+	}
+	withTestCreds(&opts, creds...)
+	h := RegisterRoutes(t.Context(), opts)
 
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {
@@ -1697,10 +1785,8 @@ func TestUpload_ExistingFileChecksumMismatch(t *testing.T) {
 // 其 trace_id 与客户端一致（span_id 为新生成），实现隧道内层全链路追踪。
 func TestTunnelInnerRequest_InheritsClientTraceID(t *testing.T) {
 	t.Parallel()
-	// 认证驱动隧道：配置 access_keys，隧道密钥由 AK/SK 派生。
-	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
-		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
-	})
+	// 认证驱动隧道：凭据 Ring 注入 testAccessKey，隧道密钥由 AK/SK 派生。
+	url, _ := newTestServerWithAllRoutesCreds(t, nil)
 
 	// 客户端密钥 = HKDF(testAccessSecret, meshID="")；/tunnel 外层请求需 UNSIGNED 签名。
 	key, err := tunnel.DeriveTunnelKey(testAccessSecret, "")
@@ -1751,18 +1837,17 @@ func TestTunnelInnerRequest_InheritsClientTraceID(t *testing.T) {
 // 而非响应后留痕）。签名用原始 body 哈希声明，实际发送篡改 body，哈希比对不匹配。
 func TestSproxySig_BodyTamperRejected(t *testing.T) {
 	t.Parallel()
-	url, _ := newTestServerWithAllRoutes(t, func(cfg *Config) {
-		cfg.AccessKeys = []AccessKeyConfig{{Key: testAccessKey, Secret: testAccessSecret}}
-	})
+	url, _ := newTestServerWithAllRoutesCreds(t, nil)
 
 	// 原始 body 与哈希（签名声明用它）。
 	orig := []byte(`{"filename":"real.txt"}`)
 	sum := sha256.Sum256(orig)
 
 	// 手动构造签名：声明原始 body 哈希，但实际发送篡改后的 body（结构合法）。
+	// v2 skey-id 必传：EntryID 用 testEntryID(testAccessKey) 精确匹配服务端 Ring 条目。
 	now := time.Now()
 	h := sproxysig.Header{
-		Version: sproxysig.Version, AK: testAccessKey,
+		Version: sproxysig.Version, AK: testAccessKey, EntryID: testEntryID(testAccessKey),
 		TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),
 		BodySHA256: hex.EncodeToString(sum[:]),

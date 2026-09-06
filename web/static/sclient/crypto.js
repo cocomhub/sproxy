@@ -12,8 +12,9 @@
  *
  * 与 Go 端对齐的已知向量（任务 2 注入值）：
  *   - HKDF：salt="sproxy-tunnel-key-v1"，info=mesh，派生 32B 隧道密钥
- *   - SproxySig canonical："sproxy-sig/v1\n" + ak + \n + ts + \n + exp + \n +
- *     nonce + \n + method + \n + path + \n + query + \n + body_sha256
+ *   - SproxySig canonical（v2）："sproxy-sig/v2\n" + ak + "\n" + entryID + "\n" +
+ *     ts + \n + exp + \n + nonce + \n + method + \n + path + \n + query + \n + body_sha256
+ *     （v2 共 10 段；entryID 缺省为空行段。v1 时代无 entryID 段，仅 9 段。）
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {

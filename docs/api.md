@@ -21,9 +21,8 @@ SPDX-License-Identifier: Apache-2.0
 - **路径校验**：所有 `filename` / `from` / `to` / `dirname` / `subdir` 参数都会经过
   `ValidateFilePath`：拒绝 `..`、绝对路径、空字节、Windows 非法字符 `<>:"|?*`，
   但允许 `/` 作为子目录分隔符（如 `sub/dir/file.txt`）。
-- **认证**：当 `access_keys` 配置非空时，除 `/healthz`、`/version`、`/ui/`、
-  `POST /tunnel` 之外的所有路由都要求 `Authorization: SproxySig v=1 ...`（AccessKey/
-  AccessKeySecret + HMAC-SHA256 请求签名；AK/SK 由 `sclient access-key create` 生成）。
+- **认证**：当服务端凭据 Ring 非空时（首启自动登记 anonymous 凭据，见 `sclient trust` / `/api/credentials`），除 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 之外的所有路由都要求 `Authorization: SproxySig v=2 ...`（AccessKey/
+  AccessKeySecret + HMAC-SHA256 请求签名；AK/SK 由 `sclient trust ak add` 生成注册，`sclient trust renew` 轮换 SK）。
   详见 CLAUDE.md「认证：SproxySig 请求签名」。
 - **隧道**：所有路由（除 `POST /tunnel` 自身）都可以通过 `POST /tunnel` 走 AES-256-GCM
   加密信道访问，sclient 默认就这么做。
@@ -78,7 +77,7 @@ BuildAt: 2026-06-01T12:00:00Z
 |---|---|
 | 200 | 上传成功或文件已存在 checksum 一致 |
 | 400 | 文件名无效 / 缺少 X-File-Checksum / SHA-256 校验失败 |
-| 401 | 未授权（access_keys 配置时签名缺失/非法/过期/重放） |
+| 401 | 未授权（凭据 Ring 非空时签名缺失/非法/过期/重放） |
 | 409 | 文件已存在但 checksum 不一致 |
 | 413 | 请求体超过 max_upload_bytes |
 | 500 | 服务端写文件失败 |
@@ -331,7 +330,7 @@ AES-256-GCM 加密的转发请求。请求体为帧协议：
 | HTTP | 业务原因（示例） |
 |---|---|
 | 400 | 路径无效、缺必填头、checksum 不匹配、chunk_checksum 不是 hex |
-| 401 | SproxySig 校验未通过（access_keys 配置时） |
+| 401 | SproxySig 校验未通过（凭据 Ring 非空时） |
 | 404 | 文件不存在、upload_id 不存在 |
 | 409 | 文件 / 目录已存在 |
 | 410 | 上传会话已完成 |

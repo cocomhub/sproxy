@@ -147,9 +147,10 @@ func (c *FileClient) RelayStreamWithHeaders(ctx context.Context, target, addr st
 	b.WriteString("Content-Type: application/json\r\n")
 	fmt.Fprintf(&b, "Content-Length: %d\r\n", len(body))
 	if c.accessKeySecret != "" {
-		// SproxySig 请求签名认证（token 不上线）：method/path/body 哈希参与签名。
+		// SproxySig 请求签名认证（token 不上线）：method/path/body 哈希参与签名；
+		// v2 skey-id 必传——accessKeyID 由配置注入（renew/初始条目）。
 		now := time.Now()
-		h := sproxysig.Header{Version: sproxysig.Version, AK: c.accessKey,
+		h := sproxysig.Header{Version: sproxysig.Version, AK: c.accessKey, EntryID: c.accessKeyID,
 			TS: now.UnixMilli(), Exp: now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 			Nonce: sproxysig.NewNonce(), BodySHA256: sproxysig.BodyHash(body)}
 		fmt.Fprintf(&b, "Authorization: %s\r\n", sproxysig.SignAndFormat(c.accessKeySecret, h, http.MethodPost, path, ""))

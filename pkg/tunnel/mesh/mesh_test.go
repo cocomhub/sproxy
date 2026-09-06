@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -35,7 +36,7 @@ import (
 
 // 测试用合法 AK/SK：SK 必须为 64 hex 字符（32 字节），ComputeRegisterProof 才可计算。
 const (
-	testAccessKey = "sk-test-access-key"
+	testAccessKey = "ak-test-access-key"
 	testSecret    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
@@ -145,7 +146,7 @@ func TestDial_FallsBackToRelay(t *testing.T) {
 // 信令请求携带 X-Node-Secret / X-Node-ID（B2/B3），closer 移除临时节点。
 func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 	rt := hub.NewMeshRouteTable()
-	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: testAccessKey, Secret: testSecret}})), nil)
 
 	muxHTTP := http.NewServeMux()
 	wsNode := ws.NewHandlerNode()
@@ -219,7 +220,7 @@ func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 // 的被寻址方需稳定 ID 供 --peer 寻址），closer 移除节点。
 func TestAutoRegister_ExactNode(t *testing.T) {
 	rt := hub.NewMeshRouteTable()
-	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: testAccessKey, Secret: testSecret}})), nil)
 	muxHTTP := http.NewServeMux()
 	wsNode := ws.NewHandlerNode()
 	wsNode.AddToMux(muxHTTP, "/ws")
@@ -284,7 +285,7 @@ func TestAutoRegister_EmptySecretFailsClosed(t *testing.T) {
 func runNodeTestHub(t *testing.T, withSignaling bool) (*hub.MeshRouteTable, *httptest.Server, context.CancelFunc) {
 	t.Helper()
 	rt := hub.NewMeshRouteTable()
-	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: testAccessKey, Secret: testSecret}})), nil)
 	muxHTTP := http.NewServeMux()
 	wsNode := ws.NewHandlerNode()
 	wsNode.AddToMux(muxHTTP, "/ws")
@@ -625,7 +626,7 @@ func TestListHubNodes(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nodes, err := ListHubNodes(context.Background(), ts.URL, "test-ak", "test-sk", false)
+	nodes, err := ListHubNodes(context.Background(), ts.URL, "test-ak", "test-sk", "skey-test-ak", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -645,7 +646,7 @@ func TestListHubNodes(t *testing.T) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}))
 	defer ts401.Close()
-	_, err = ListHubNodes(context.Background(), ts401.URL, "test-ak", "test-sk", false)
+	_, err = ListHubNodes(context.Background(), ts401.URL, "test-ak", "test-sk", "skey-test-ak", false)
 	var herr *hubAPIError
 	if !errors.As(err, &herr) || herr.code != http.StatusUnauthorized {
 		t.Fatalf("期望 hubAPIError 401, got %v", err)
@@ -660,7 +661,7 @@ func TestListHubNodes_VirtualIP(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nodes, err := ListHubNodes(context.Background(), ts.URL, "", "", false)
+	nodes, err := ListHubNodes(context.Background(), ts.URL, "", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1244,7 +1245,7 @@ func TestRunNode_FullMeshThreeNodes(t *testing.T) {
 // 身份（ExactNode=false）为瞬态，hub 不分配虚拟 IP，reg.VirtualIP 无效。
 func TestAutoRegister_GetsVirtualIP(t *testing.T) {
 	rt := hub.NewMeshRouteTable()
-	srv := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testSecret}}), nil)
+	srv := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: testAccessKey, Secret: testSecret}})), nil)
 	muxHTTP := http.NewServeMux()
 	wsNode := ws.NewHandlerNode()
 	wsNode.AddToMux(muxHTTP, "/ws")

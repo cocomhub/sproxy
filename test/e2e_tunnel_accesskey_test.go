@@ -41,7 +41,7 @@ func sclientConfig(t *testing.T, baseURL string) string {
 	t.Helper()
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
-	content := "server_url: " + baseURL + "\naccess_key: " + e2eTestAK + "\naccess_key_secret: " + e2eTestSK + "\n"
+	content := "server_url: " + baseURL + "\naccess_key: " + e2eTestAK + "\naccess_key_secret: " + e2eTestSK + "\naccess_key_id: " + e2eTestID + "\n"
 	if err := os.WriteFile(cfgPath, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}

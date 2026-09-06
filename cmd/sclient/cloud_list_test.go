@@ -174,7 +174,7 @@ func TestGetCloudServerURL_FromFlag(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}
 	root.AddCommand(cmd)
 
-	serverURL, ak, sk := getCloudServerURL(cmd, nil)
+	serverURL, ak, sk, _ := getCloudServerURL(cmd, nil)
 	if serverURL != "http://test-server:18083" {
 		t.Errorf("expected server URL from flag, got %q", serverURL)
 	}
@@ -194,7 +194,7 @@ func TestGetCloudServerURL_FromConfig(t *testing.T) {
 	root.AddCommand(cmd)
 
 	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://cfg-server:18083", AccessKey: "cfg-ak", AccessKeySecret: "cfg-sk"}}
-	serverURL, ak, sk := getCloudServerURL(cmd, cfgSvc)
+	serverURL, ak, sk, _ := getCloudServerURL(cmd, cfgSvc)
 	if serverURL != "http://cfg-server:18083" {
 		t.Errorf("expected server URL from config, got %q", serverURL)
 	}
@@ -217,7 +217,7 @@ func TestGetCloudServerURL_FlagOverridesConfig(t *testing.T) {
 	root.AddCommand(cmd)
 
 	cfgSvc := &testConfigProvider{cfg: &client.Config{ServerURL: "http://cfg-server:18083", AccessKey: "cfg-ak", AccessKeySecret: "cfg-sk"}}
-	serverURL, ak, sk := getCloudServerURL(cmd, cfgSvc)
+	serverURL, ak, sk, _ := getCloudServerURL(cmd, cfgSvc)
 	if serverURL != "http://flag-server:18083" {
 		t.Errorf("expected flag to override config, got %q", serverURL)
 	}

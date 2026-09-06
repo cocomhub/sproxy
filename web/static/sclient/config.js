@@ -24,9 +24,13 @@
       // 服务端基址，空串表示与当前页面同源。
       baseUrl: '',
       // SproxySig 认证（可选）：accessKey / accessKeySecret 只在请求签名时使用，
-      // Secret 永不上线。
+      // Secret 永不上线。accessKeyID 是 SK 条目 ID（sk=<entryID>，多 SK 共存时可
+      // 选）：签发请求携带 sk=<id> 使服务端精确取该条目（否则服务端对全部存活条目
+      // 试签）。当前仅由签名层预留——页面上层暂无持久化该字段的入口，未配置时
+      // entryID 空段（服务端试签回退，与 Go 端空 entryID 行为一致）。
       accessKey: '',
       accessKeySecret: '',
+      accessKeyID: '',
       // 传输模式：auto（自动协商）/ direct（强制直连，穿透 SproxySig 校验时用于测试）。
       transport: 'auto',
       // 隧道是否默认启用（preferTunnel 语义）。

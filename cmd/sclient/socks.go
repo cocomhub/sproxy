@@ -121,6 +121,7 @@ func newCmdSocks(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 					ServerURL:       svc.ServerURL(),
 					AccessKey:       svc.AccessKey(),
 					AccessKeySecret: svc.AccessKeySecret(),
+					AccessKeyID:     svc.AccessKeyID(),
 					NodeID:          nodeID,
 					Prefix:          "mesh",
 					ExactNode:       false,

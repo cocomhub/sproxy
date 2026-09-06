@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -19,15 +20,15 @@ import (
 
 // testAccessKey / testAccessKeySecret 是测试用 SproxySig AK/SK。
 const (
-	testAccessKey       = "sk-test-00000000000000000000000000"
+	testAccessKey       = "ak-test-00000000000000000000000000"
 	testAccessKeySecret = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
 // startHubTCP 启动一个仅裸 TCP 传输的 hub（无 WS），返回 hub 地址与路由表。
-func startHubTCP(t *testing.T, ctx context.Context, aks []hub.AccessKey) (*hub.MeshRouteTable, string) {
+func startHubTCP(t *testing.T, ctx context.Context, pairs []accesskey.KeyPair) (*hub.MeshRouteTable, string) {
 	t.Helper()
+	auth := hub.NewAuthenticator(accesskey.NewRingFromKeyPairs(pairs))
 	rt := hub.NewMeshRouteTable()
-	auth := hub.NewAuthenticator(aks)
 	hs := hub.NewHubServer(rt, auth, testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
@@ -80,7 +81,7 @@ func TestHubTCP_RegisterViaTCP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	rt, hubAddr := startHubTCP(t, ctx, []hub.AccessKey{{Key: testAccessKey, Secret: testAccessKeySecret}})
+	rt, hubAddr := startHubTCP(t, ctx, []accesskey.KeyPair{{Key: testAccessKey, Secret: testAccessKeySecret}})
 	_, _ = registerLeafTCP(t, ctx, hubAddr, "leaf-tcp", testAccessKey, testAccessKeySecret)
 
 	if !rt.Has("leaf-tcp") {
@@ -99,7 +100,7 @@ func TestHubTCP_InvalidAccessKeyRejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	rt, hubAddr := startHubTCP(t, ctx, []hub.AccessKey{{Key: testAccessKey, Secret: testAccessKeySecret}})
+	rt, hubAddr := startHubTCP(t, ctx, []accesskey.KeyPair{{Key: testAccessKey, Secret: testAccessKeySecret}})
 
 	tp := xfer.Get("tcp")
 	conn, err := tp.Dial(ctx, hubAddr)
@@ -112,7 +113,7 @@ func TestHubTCP_InvalidAccessKeyRejected(t *testing.T) {
 	ts := time.Now().UnixMilli()
 	nonce := hub.NewRegisterNonce()
 	proof, _ := hub.ComputeRegisterProof("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "evil", ts, nonce)
-	frame := hub.NewRegisterFrame("evil", "sk-unknown-key", proof, ts, nonce, hub.Meta{})
+	frame := hub.NewRegisterFrame("evil", "ak-unknown-key", proof, ts, nonce, hub.Meta{})
 	if serr := conn.Send(ctx, frame); serr != nil {
 		t.Fatal(serr)
 	}
@@ -135,7 +136,7 @@ func TestHubTCP_EmptyAccessKeysFailClosed(t *testing.T) {
 	defer cancel()
 
 	rt := hub.NewMeshRouteTable()
-	// auth 传 nil → NewAuthenticator(nil) → fail-closed
+	// auth 传 nil → NewHubServer 兜底 NewAuthenticator(空 ring) → fail-closed
 	hs := hub.NewHubServer(rt, nil, testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
@@ -172,7 +173,7 @@ func TestHubTCP_DisconnectRemovesNode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	rt, hubAddr := startHubTCP(t, ctx, []hub.AccessKey{{Key: testAccessKey, Secret: testAccessKeySecret}})
+	rt, hubAddr := startHubTCP(t, ctx, []accesskey.KeyPair{{Key: testAccessKey, Secret: testAccessKeySecret}})
 	conn, m := registerLeafTCP(t, ctx, hubAddr, "leaf-disc", testAccessKey, testAccessKeySecret)
 
 	if !rt.Has("leaf-disc") {
@@ -198,7 +199,7 @@ func TestHubTCP_ConcurrentRegistrations(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 
-	rt, hubAddr := startHubTCP(t, ctx, []hub.AccessKey{{Key: testAccessKey, Secret: testAccessKeySecret}})
+	rt, hubAddr := startHubTCP(t, ctx, []accesskey.KeyPair{{Key: testAccessKey, Secret: testAccessKeySecret}})
 
 	const n = 8
 	var wg sync.WaitGroup
@@ -287,7 +288,7 @@ func TestHubTCP_AcceptCtxCancel(t *testing.T) {
 	defer cancel()
 
 	rt := hub.NewMeshRouteTable()
-	hs := hub.NewHubServer(rt, hub.NewAuthenticator([]hub.AccessKey{{Key: testAccessKey, Secret: testAccessKeySecret}}), testutil.DiscardLogger())
+	hs := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: testAccessKey, Secret: testAccessKeySecret}})), testutil.DiscardLogger())
 	ln, err := hs.ListenTCP(ctx, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

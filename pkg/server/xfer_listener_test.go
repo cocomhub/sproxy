@@ -12,41 +12,48 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
-// TestXferListenerConfigFromConfig 验证从 server.Config 提取 xfer listener 配置：
-// 证书缺省回落 cfg.TLS.*，access_key 派生参数取 access_keys 首对。
+// TestXferListenerConfigFromConfig 验证从 server.Config + 凭据 Ring 提取 xfer
+// listener 配置：证书缺省回落 cfg.TLS.*，access_key 派生参数取 Ring 首个存活条目。
 func TestXferListenerConfigFromConfig(t *testing.T) {
 	cfg := Default()
 	cfg.TLS.CertFile = "/tmp/cert.pem"
 	cfg.TLS.KeyFile = "/tmp/key.pem"
-	cfg.AccessKeys = []AccessKeyConfig{
-		{Key: "sk-mesh1-aaaaaaaaaaaaaaaa", Secret: strings.Repeat("a", 64), MeshID: "mesh1"},
-		{Key: "sk-other-bbbbbbbbbbbbbbbb", Secret: strings.Repeat("b", 64), MeshID: "other"},
-	}
+	ring := ringForTestCreds(
+		testCredPair{ak: "ak-mesh1-aaaaaaaaaaaaaaaa", sk: strings.Repeat("a", 64)},
+		testCredPair{ak: "ak-other-bbbbbbbbbbbbbbbb", sk: strings.Repeat("b", 64)},
+	)
 
-	xc := XferListenerConfigFromConfig(cfg)
+	xc := XferListenerConfigFromRing(cfg, ring)
 	if xc.CertFile != cfg.TLS.CertFile {
 		t.Errorf("CertFile 应回落 cfg.TLS.CertFile %q，实际 %q", cfg.TLS.CertFile, xc.CertFile)
 	}
 	if xc.KeyFile != cfg.TLS.KeyFile {
 		t.Errorf("KeyFile 应回落 cfg.TLS.KeyFile %q，实际 %q", cfg.TLS.KeyFile, xc.KeyFile)
 	}
-	if xc.AccessKey != cfg.AccessKeys[0].Key {
-		t.Errorf("AccessKey 应取首对 %q，实际 %q", cfg.AccessKeys[0].Key, xc.AccessKey)
+	if xc.AccessKey != "ak-mesh1-aaaaaaaaaaaaaaaa" {
+		t.Errorf("AccessKey 应取 Ring 首存活 %q，实际 %q", "ak-mesh1-aaaaaaaaaaaaaaaa", xc.AccessKey)
 	}
-	if xc.AccessKeySecret != cfg.AccessKeys[0].Secret {
-		t.Errorf("AccessKeySecret 应取首对 %q，实际 %q", cfg.AccessKeys[0].Secret, xc.AccessKeySecret)
+	if xc.AccessKeySecret != strings.Repeat("a", 64) {
+		t.Errorf("AccessKeySecret 应取 Ring 首存活 SK，实际 %q", xc.AccessKeySecret)
 	}
-	if xc.MeshID != cfg.AccessKeys[0].MeshID {
-		t.Errorf("MeshID 应取首对 %q，实际 %q", cfg.AccessKeys[0].MeshID, xc.MeshID)
+	if xc.MeshID != "mesh1" {
+		t.Errorf("MeshID 应派生自 AK mesh=%q，实际 %q", "mesh1", xc.MeshID)
+	}
+
+	// 旧入口（cfg + ring）保持一致。
+	xc2 := XferListenerConfigFromConfig(cfg, ring)
+	if xc2 != xc {
+		t.Errorf("XferListenerConfigFromConfig 应与 FromRing 一致，实际 %+v vs %+v", xc2, xc)
 	}
 
 	// nil 配置 → 零值（不 panic）。
 	var zero XferListenerConfig
-	if got := XferListenerConfigFromConfig(nil); got != zero {
+	if got := XferListenerConfigFromRing(nil, nil); got != zero {
 		t.Errorf("nil 配置应返回零值，实际 %+v", got)
 	}
 }
@@ -97,23 +104,23 @@ func TestBuildXferTLSConfig_NoCertFails(t *testing.T) {
 	}
 }
 
-// TestHubXferKey_FromFirstAccessKey 验证从 access_keys 首对派生隧道密钥，
+// TestHubXferKey_FromFirstAccessKey 验证从凭据 Ring 首个存活条目派生隧道密钥，
 // 且与直接 DeriveTunnelKey(secret, AccessKeyMesh(ak)) 等价（AD-3 一致性）。
 func TestHubXferKey_FromFirstAccessKey(t *testing.T) {
 	sk := strings.Repeat("a", 64) // 合法 64 hex（32B）
-	ak := "sk-mesh1-" + strings.Repeat("b", 16)
+	ak := "ak-mesh1-" + strings.Repeat("b", 16)
 	mesh := tunnel.AccessKeyMesh(ak)
 	if mesh != "mesh1" {
 		t.Fatalf("AccessKeyMesh(%q) 应为 mesh1，实际 %q", ak, mesh)
 	}
 
 	cfg := Default()
-	cfg.AccessKeys = []AccessKeyConfig{
-		{Key: ak, Secret: sk, MeshID: "mesh1"},
-		{Key: "sk-other-" + strings.Repeat("c", 16), Secret: strings.Repeat("d", 64), MeshID: "other"},
-	}
+	ring := ringForTestCreds(
+		testCredPair{ak: ak, sk: sk},
+		testCredPair{ak: "ak-other-" + strings.Repeat("c", 16), sk: strings.Repeat("d", 64)},
+	)
 
-	key, err := HubXferKey(cfg)
+	key, err := HubXferKey(cfg, ring)
 	if err != nil {
 		t.Fatalf("HubXferKey 应成功: %v", err)
 	}
@@ -129,16 +136,17 @@ func TestHubXferKey_FromFirstAccessKey(t *testing.T) {
 	}
 }
 
-// TestHubXferKey_NoAccessKeysFails 验证无 access_keys 时返回 error（fail-closed，
-// 与规格 DoD 4 一致：无 access_keys → xfer listener 拒启）。
+// TestHubXferKey_NoAccessKeysFails 验证 Ring 为空时返回 error（fail-closed，
+// 与规格 DoD 4 一致：无有效凭据 → xfer listener 拒启）。
 func TestHubXferKey_NoAccessKeysFails(t *testing.T) {
-	cfg := Default() // 无 AccessKeys
+	cfg := Default()
+	empty := accesskey.NewRing()
 
-	if _, err := HubXferKey(cfg); err == nil {
-		t.Fatal("无 access_keys 时 HubXferKey 应返回 error（fail-closed）")
+	if _, err := HubXferKey(cfg, empty); err == nil {
+		t.Fatal("空 Ring 时 HubXferKey 应返回 error（fail-closed）")
 	}
-	if _, err := HubXferKey(nil); err == nil {
-		t.Fatal("nil 配置时 HubXferKey 应返回 error（fail-closed）")
+	if _, err := HubXferKey(nil, nil); err == nil {
+		t.Fatal("nil 配置/ring 时 HubXferKey 应返回 error（fail-closed）")
 	}
 }
 
@@ -284,25 +292,30 @@ func TestBuildXferTLSConfig_ACMERejects(t *testing.T) {
 }
 
 // TestHubXferKey_NonHexSecretFails 验证非法 secret（非 hex）时派生失败（fail-closed，
-// 审查 M-7-2）。
+// 审查 M-7-2）。Ring 注入非 hex SK 时 AddKey 拒绝（SK 必须 32B），资历由
+// testCredPair 的 64-hex 解析在 ringForTestCreds 跳过——此处验证空/非法 ring 行为。
 func TestHubXferKey_NonHexSecretFails(t *testing.T) {
 	cfg := Default()
-	cfg.AccessKeys = []AccessKeyConfig{
-		{Key: "sk-mesh1-" + strings.Repeat("b", 16), Secret: "not-hex-secret!!"},
+	badRing := accesskey.NewRing()
+	// 32 个 'g'（非 hex 无法解码为 32B），ringForTestCreds 会跳过；直接构造非法条目。
+	_ = badRing.UpsertAK("ak-mesh1-"+strings.Repeat("b", 16), "t")
+	// 非 32B SK → AddKey 返回 ErrInvalidSecret，无法入 ring → 视为空 ring。
+	if _, err := badRing.AddKey("ak-mesh1-"+strings.Repeat("b", 16), []byte("short")); err == nil {
+		t.Fatal("非法 SK 应被 AddKey 拒绝")
 	}
-	if _, err := HubXferKey(cfg); err == nil {
-		t.Fatal("非法 secret 时 HubXferKey 应返回 error（fail-closed）")
+	if _, err := HubXferKey(cfg, badRing); err == nil {
+		t.Fatal("无有效条目时 HubXferKey 应返回 error（fail-closed）")
 	}
 }
 
-// TestXferListenerConfigFromConfig_NoAccessKeys 验证无 access_keys 时 FromConfig
-// 返回零值 AccessKey 字段（不 panic，审查 M-7-3）。
+// TestXferListenerConfigFromConfig_NoAccessKeys 验证空 Ring 时 FromConfig 返回零值
+// AccessKey 字段（不 panic，审查 M-7-3）。
 func TestXferListenerConfigFromConfig_NoAccessKeys(t *testing.T) {
 	cfg := Default()
-	cfg.AccessKeys = nil
+	empty := accesskey.NewRing()
 
-	xc := XferListenerConfigFromConfig(cfg)
+	xc := XferListenerConfigFromConfig(cfg, empty)
 	if xc.AccessKey != "" || xc.AccessKeySecret != "" || xc.MeshID != "" {
-		t.Errorf("无 access_keys 时应返回零值 AccessKey 字段，实际 %+v", xc)
+		t.Errorf("空 Ring 时应返回零值 AccessKey 字段，实际 %+v", xc)
 	}
 }

@@ -32,9 +32,11 @@ func newTestServerWithUploadInit(t *testing.T, modifyCfg func(*Config)) (*Handle
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 	h := &Handlers{
-		cfgPtr:        &cfgPtr,
-		logger:        slog.Default(),
-		uploadingStop: make(chan struct{}),
+		cfgPtr:                &cfgPtr,
+		logger:                slog.Default(),
+		uploadingStop:         make(chan struct{}),
+		credentialRing:        emptyTestRing(),
+		allowInsecureLoopback: true,
 	}
 	globalRoot, err := storage.OpenRoot(cfg.StorageRoot)
 	if err != nil {
@@ -60,6 +62,7 @@ func newTestServerWithUploadInit(t *testing.T, modifyCfg func(*Config)) (*Handle
 func postInit(t *testing.T, h *Handlers, bodyJSON string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/upload/init", strings.NewReader(bodyJSON))
+	req.RemoteAddr = "127.0.0.1:1234" // loopback：allow_insecure_loopback 兜底放行
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.authMiddleware(http.HandlerFunc(h.uploadInit)).ServeHTTP(w, req)

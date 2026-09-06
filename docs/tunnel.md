@@ -13,8 +13,8 @@ SPDX-License-Identifier: Apache-2.0
 - 32 字节（256 位）AES 密钥
 - 配置文件中使用 64 位十六进制字符表示（`a-f` / `0-9`）
 - 生成：`sclient genkey` 或 `tunnel.GenerateKey()`
-- 服务端：`tunnel_key` 配置项 → 启动时 viper 加载，留空时自动生成并回写
-- 客户端：`tunnel_key` 配置项（默认路径 XDG，详见 [config.md](./config.md)）
+- 服务端：隧道密钥由凭据 Ring 中条目的 SK 经 `tunnel.DeriveTunnelKey`（HKDF）自动派生（凭据 store 化后已移除 `tunnel_key` 配置，见 [config.md](./config.md)「tunnel_key 已废除」）
+- 客户端：`tunnel_key` 配置项**已废除**（被忽略，仅历史兼容）；隧道/文件访问由 `access_key`/`access_key_secret` 驱动（access-key 驱动隧道），密钥来自服务端凭据 Ring 的首启 anonymous 凭据或 `sclient trust ak add` 登记
 - 长度与 hex 格式校验由 `tunnel.ParseKey` 统一负责，启动失败说明密钥格式不对
 
 > 密钥泄漏即视同失去保密性；切勿提交到 git、不要写进截图、不要走非可信信道。
@@ -91,7 +91,7 @@ io.Copy(os.Stdout, resp.Body)
 
 | 现象 | 含义 |
 |---|---|
-| HTTP 403 | 服务端 `tunnel_key` 为空，明确拒绝隧道请求 |
+| HTTP 401 | 外层 `POST /tunnel` SproxySig 验签失败（凭据缺失/非法/过期/重放），未派生出隧道密钥 |
 | HTTP 400 | metadata 帧损坏（长度过大 / 解密失败 / JSON 错误） |
 | HTTP 500 | metadata 编码出错（极少见） |
 | `Decrypt` 报 error | 密钥不匹配 / 密文被篡改 / 帧截断 |

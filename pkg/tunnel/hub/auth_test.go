@@ -4,16 +4,28 @@
 package hub
 
 import (
+	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 )
 
 // testAK / testSK 是认证测试用的合法 AK/SK（SK 为 64 hex 字符 = 32 字节）。
 const (
-	testAK = "sk-test-access-key"
+	testAK = "ak-test-access-key"
 	testSK = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
+
+// testRing 构造含给定 AK/SK 对的鉴权 Ring（每条 AK 一条 plain alive 条目）。
+// 无参时回落默认 testAK/testSK 单对（与既有测试语义一致）。
+func testRing(pairs ...accesskey.KeyPair) *accesskey.Ring {
+	if len(pairs) == 0 {
+		pairs = []accesskey.KeyPair{{Key: testAK, Secret: testSK}}
+	}
+	return accesskey.NewRingFromKeyPairs(pairs)
+}
 
 // testRegCred 用 testSK 为指定 nodeID 生成一次注册凭据（proof + ts + nonce）。
 // 每次调用使用唯一 nonce（NewRegisterNonce），满足 Authenticate 的 nonce 去重。
@@ -43,7 +55,7 @@ func testRegCredAt(t *testing.T, nodeID string, ts int64) (proof string, nonce s
 
 func TestAuthenticator(t *testing.T) {
 	// 正确 AK/SK：proof 匹配 → 通过
-	a := NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}})
+	a := NewAuthenticator(testRing())
 	proof, ts, nonce := testRegCred(t, "node-a")
 	if err := a.Authenticate(testAK, proof, "node-a", ts, nonce); err != nil {
 		t.Fatal("expected success for matching AK/proof")
@@ -61,11 +73,11 @@ func TestAuthenticator(t *testing.T) {
 		t.Fatalf("expected ErrInvalidAccessKey for unknown AK, got %v", err)
 	}
 
-	// 空 accessKeys = fail-closed：拒绝所有注册（C2 纵深加固）
-	a2 := NewAuthenticator(nil)
+	// 空 ring = fail-closed：拒绝所有注册（C2 纵深加固）
+	a2 := NewAuthenticator(accesskey.NewRing())
 	proof4, ts4, nonce4 := testRegCred(t, "node-a")
 	if err := a2.Authenticate(testAK, proof4, "node-a", ts4, nonce4); !errors.Is(err, ErrInvalidAccessKey) {
-		t.Fatalf("expected ErrInvalidAccessKey when accessKeys empty (fail-closed), got %v", err)
+		t.Fatalf("expected ErrInvalidAccessKey when ring empty (fail-closed), got %v", err)
 	}
 
 	// proof 绑定 nodeID：同一 SK 对另一 nodeID 的 proof 不匹配 → 拒绝（防串用/重放）
@@ -75,10 +87,10 @@ func TestAuthenticator(t *testing.T) {
 	}
 
 	// 多对 AK/SK：命中第二对 → 通过
-	multi := NewAuthenticator([]AccessKey{
-		{Key: "first-ak", Secret: testSK},
-		{Key: testAK, Secret: testSK},
-	})
+	multi := NewAuthenticator(testRing(
+		accesskey.KeyPair{Key: "first-ak", Secret: testSK},
+		accesskey.KeyPair{Key: testAK, Secret: testSK},
+	))
 	proof6, ts6, nonce6 := testRegCred(t, "node-a")
 	if err := multi.Authenticate(testAK, proof6, "node-a", ts6, nonce6); err != nil {
 		t.Fatalf("expected success when matching second AK, got %v", err)
@@ -86,7 +98,7 @@ func TestAuthenticator(t *testing.T) {
 }
 
 func TestAuthenticator_StaleTS(t *testing.T) {
-	a := NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}})
+	a := NewAuthenticator(testRing())
 	// ts 超出新鲜度窗口（+2×窗口）→ ErrStaleRegisterProof
 	old := time.Now().Add(-2 * registerProofMaxAge).UnixMilli()
 	proof, nonce := testRegCredAt(t, "node-a", old)
@@ -102,7 +114,7 @@ func TestAuthenticator_StaleTS(t *testing.T) {
 }
 
 func TestAuthenticator_NonceReplay(t *testing.T) {
-	a := NewAuthenticator([]AccessKey{{Key: testAK, Secret: testSK}})
+	a := NewAuthenticator(testRing())
 	// 同一 nonce 二次使用 → ErrReplayRegisterNonce（防重放）
 	ts := time.Now().UnixMilli()
 	nonce := NewRegisterNonce()
@@ -115,6 +127,40 @@ func TestAuthenticator_NonceReplay(t *testing.T) {
 	}
 	if err := a.Authenticate(testAK, proof, "node-a", ts, nonce); !errors.Is(err, ErrReplayRegisterNonce) {
 		t.Fatalf("expected ErrReplayRegisterNonce for replayed nonce, got %v", err)
+	}
+}
+
+// TestAuthenticator_SharedRing（任务 4 新增）：共享同一 ring 实例的两个 Authenticator
+// 行为一致（无需 SetAccessKeys）——rotate 后在共享 ring 上动态生效。
+func TestAuthenticator_SharedRing(t *testing.T) {
+	ring := testRing()
+	a1 := NewAuthenticator(ring)
+	a2 := NewAuthenticator(ring)
+
+	proof, ts, nonce := testRegCred(t, "node-a")
+	if err := a1.Authenticate(testAK, proof, "node-a", ts, nonce); err != nil {
+		t.Fatalf("a1 should pass for ring AK: %v", err)
+	}
+	// ring 追加新 SK → a2 立即可见（共享实例动态生效）。
+	skHex, err := hex.DecodeString(testSK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ring.AddKey(testAK, skHex, accesskey.WithMeta(accesskey.Meta{Type: "rotated"}))
+	if err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	proof2, ts2, nonce2 := testRegCred(t, "node-a")
+	if err := a2.Authenticate(testAK, proof2, "node-a", ts2, nonce2); err != nil {
+		t.Fatalf("a2 should see rotated entry via shared ring: %v", err)
+	}
+	// ring 全删 AK → 两个实例都 fail-closed。
+	if err := ring.DeleteAK(testAK); err != nil {
+		t.Fatalf("DeleteAK: %v", err)
+	}
+	proof3, ts3, nonce3 := testRegCred(t, "node-a")
+	if err := a1.Authenticate(testAK, proof3, "node-a", ts3, nonce3); !errors.Is(err, ErrInvalidAccessKey) {
+		t.Fatalf("expected ErrInvalidAccessKey after DeleteAK, got %v", err)
 	}
 }
 

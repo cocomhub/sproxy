@@ -34,7 +34,7 @@ func TestMeshServices(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewFileClient(ts.URL, WithAccessKey("test-ak", "test-sk"))
+	c := NewFileClient(ts.URL, WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
 	svcs, err := c.MeshServices(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestMeshConnect_NotFound(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewFileClient(ts.URL, WithAccessKey("test-ak", "test-sk"))
+	c := NewFileClient(ts.URL, WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
 	_, _, err := c.MeshConnect(context.Background(), "missing-svc")
 	if err == nil {
 		t.Fatal("expected error for missing service")
@@ -138,7 +138,7 @@ func TestMeshConnect_Echo(t *testing.T) {
 		}
 	}()
 
-	c := NewFileClient("http://"+ln.Addr().String(), WithAccessKey("test-ak", "test-sk"))
+	c := NewFileClient("http://"+ln.Addr().String(), WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -272,7 +272,7 @@ func TestMeshConnect_MultiCandidateFallback(t *testing.T) {
 		}
 	}()
 
-	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"))
+	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -565,7 +565,7 @@ func TestMeshConnect_504Fallback(t *testing.T) {
 		}
 	}()
 
-	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"))
+	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -655,7 +655,7 @@ func TestMeshConnect_AllCandidatesFail(t *testing.T) {
 		}
 	}()
 
-	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"))
+	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 

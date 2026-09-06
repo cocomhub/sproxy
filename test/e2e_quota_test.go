@@ -121,8 +121,9 @@ func TestE2E_QuotaClientStorageFull(t *testing.T) {
 	}
 }
 
-// testFileClient 构造带 E2E AK/SK 的 FileClient（复用 TestE2E_CloudDownloadChain 形态）。
+// testFileClient 构造带 E2E AK/SK/ID 的 FileClient（v2 skey-id 必传，复用 TestE2E_CloudDownloadChain 形态）。
 func testFileClient(baseURL string) *client.FileClient {
 	return client.NewFileClient(baseURL,
-		client.WithAccessKey(e2eTestAK, e2eTestSK))
+		client.WithAccessKey(e2eTestAK, e2eTestSK),
+		client.WithAccessKeyID(e2eTestID))
 }

@@ -139,6 +139,7 @@ func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, cfg
 	insecure, _ := cmd.Flags().GetBool("insecure")
 	ak, _ := cmd.Root().PersistentFlags().GetString("access-key")
 	sk, _ := cmd.Root().PersistentFlags().GetString("access-key-secret")
+	akID, _ := cmd.Root().PersistentFlags().GetString("access-key-id")
 	if cfgSvc != nil {
 		if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
 			if ak == "" {
@@ -147,12 +148,16 @@ func (f *p2pFlags) registerSignaler(ctx context.Context, cmd *cobra.Command, cfg
 			if sk == "" {
 				sk = cfg.AccessKeySecret
 			}
+			if akID == "" {
+				akID = cfg.AccessKeyID
+			}
 		}
 	}
 	return mesh.AutoRegister(ctx, mesh.AutoRegisterParams{
 		HubURL:          f.hub,
 		AccessKey:       ak,
 		AccessKeySecret: sk,
+		AccessKeyID:     akID,
 		NodeID:          f.localNode(),
 		Prefix:          "p2p",
 		ExactNode:       exactNode,

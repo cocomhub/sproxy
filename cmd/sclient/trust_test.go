@@ -1,0 +1,649 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package main
+
+import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/sproxysig"
+)
+
+// ---- trust renew ----
+
+// testTrustEntryID 是 trust 测试客户端的确定性 skeyID（v2 必传；mock 服务端不查 ring，
+// 只验签名 over header，故任意 skey-<...> 值即可；非 renew 命令的测试客户端必须携带）。
+const testTrustEntryID = "skey-mineaaaa"
+
+// testTrustWrapContext 复算 wrap context（对齐 pkg/client 的 CredentialWrapContextPrefix 契约）。
+func testTrustWrapContext(ak string) string {
+	mesh := accesskey.ParseMesh(ak)
+	if mesh == "" {
+		return client.CredentialWrapContextPrefix
+	}
+	return client.CredentialWrapContextPrefix + "#" + mesh
+}
+
+// testTrustEnvelope 用 wrapSK 包裹 secret 生成信封（mock 服务端用）。
+func testTrustEnvelope(t *testing.T, wrapSK []byte, ak string, secret []byte) *accesskey.WrappedSecret {
+	t.Helper()
+	wk, err := accesskey.DeriveWrapKey(wrapSK, ak, testTrustWrapContext(ak))
+	if err != nil {
+		t.Fatalf("DeriveWrapKey: %v", err)
+	}
+	env, err := accesskey.EncryptSecret(ak, secret, wk)
+	if err != nil {
+		t.Fatalf("EncryptSecret: %v", err)
+	}
+	return env
+}
+
+// trustRenewHandler 构造 renew mock handler：校验签名（真实验签路径），返回带信封的响应。
+// 客户端首次 `trust renew` 尚无 access_key_id（renew 引导例外）→ 用宽松解析接受
+// 缺 skey-id 段（与生产服务端 verifySproxySigFromRing 的自 renew 引导一致）。
+func trustRenewHandler(t *testing.T, ak, skHex string, env *accesskey.WrappedSecret) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		hdr, err := sproxysig.ParseHeaderAllowMissingSkeyID(r.Header.Get("Authorization"))
+		if err != nil {
+			t.Errorf("ParseHeaderAllowMissingSkeyID: %v", err)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if err := sproxysig.Verify(skHex, hdr, r.Method, r.URL.EscapedPath(), r.URL.RawQuery, time.Now(), 0, 0, nil); err != nil {
+			t.Errorf("Verify: %v", err)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ak":             ak,
+			"sk_id":          "skey-newentry1234",
+			"kind":           "secret_wrap",
+			"wrap_key_ak":    ak,
+			"expires_at":     time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339),
+			"wrapped_secret": env,
+		})
+	}
+}
+
+func TestTrustRenew_UpdatesConfig(t *testing.T) {
+	const ak = "ak-0123456789abcdef"
+	oldSK := make([]byte, 32)
+	_, _ = rand.Read(oldSK)
+	oldSKHex := hex.EncodeToString(oldSK)
+	newSK := make([]byte, 32)
+	_, _ = rand.Read(newSK)
+	env := testTrustEnvelope(t, oldSK, ak, newSK)
+
+	srv := httptest.NewServer(http.HandlerFunc(trustRenewHandler(t, ak, oldSKHex, env)))
+	defer srv.Close()
+
+	// 隔离配置文件（不触碰真实用户配置）。
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "sclient.yaml")
+	cfg := client.DefaultConfig()
+	cfg.ServerURL = srv.URL
+	cfg.AccessKey = ak
+	cfg.AccessKeySecret = oldSKHex
+	if err := client.SaveConfig(cfg, cfgPath); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, oldSKHex))
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf strings.Builder
+	ios := cli.IOStreams{Out: &buf, ErrOut: io.Discard, In: strings.NewReader("\n")}
+	cmd := NewCmdTrust(factory, ios, &testConfigProvider{cfg: cfg}, &cfgPath)
+	cmd.SetArgs([]string{"renew"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("trust renew failed: %v", err)
+	}
+
+	if !strings.Contains(buf.String(), "SK 已轮换") {
+		t.Errorf("expected 'SK 已轮换' in output, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "sk_id=skey-newentry1234") {
+		t.Errorf("expected sk_id in output, got: %s", buf.String())
+	}
+
+	// 配置文件必须已持久化新 SK 与 sk_id（回填）。
+	reloaded, err := client.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.AccessKeySecret != hex.EncodeToString(newSK) {
+		t.Errorf("access_key_secret 未回填: got %q want %q", reloaded.AccessKeySecret, hex.EncodeToString(newSK))
+	}
+	if reloaded.AccessKeyID != "skey-newentry1234" {
+		t.Errorf("access_key_id 未回填: got %q", reloaded.AccessKeyID)
+	}
+}
+
+func TestTrustRenew_NoCredentials(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+	}))
+	defer srv.Close()
+
+	svc := client.NewFileClient(srv.URL)
+	factory := clientfactory.NewMock(svc, nil)
+	cfgPath := filepath.Join(t.TempDir(), "sclient.yaml")
+
+	var buf strings.Builder
+	cmd := NewCmdTrust(factory, cli.IOStreams{Out: &buf, ErrOut: &buf}, &testConfigProvider{cfg: client.DefaultConfig()}, &cfgPath)
+	cmd.SetArgs([]string{"renew"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when no credentials")
+	}
+	if !strings.Contains(err.Error(), "access_key_secret") {
+		t.Errorf("error should mention access_key_secret, got: %v", err)
+	}
+}
+
+// ---- trust sk ----
+
+func TestTrustSKList_ShowsOnlyDecryptable(t *testing.T) {
+	const ak = "ak-0123456789abcdef"
+	mySK := make([]byte, 32)
+	_, _ = rand.Read(mySK)
+	mySKHex := hex.EncodeToString(mySK)
+	otherSK := make([]byte, 32)
+	_, _ = rand.Read(otherSK)
+
+	envMine := testTrustEnvelope(t, mySK, ak, mySK)
+	envOther := testTrustEnvelope(t, otherSK, ak, otherSK)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/credentials/"+ak+"/sk" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ak": ak,
+			"sk": []map[string]any{
+				{"sk_id": "skey-mineaaaa", "created": time.Now().Add(-time.Hour).Format(time.RFC3339),
+					"expires": time.Now().Add(time.Hour).Format(time.RFC3339), "status": "active",
+					"meta_type": "renew", "wrapped_secret": envMine},
+				{"sk_id": "skey-otheraa", "created": time.Now().Add(-2 * time.Hour).Format(time.RFC3339),
+					"expires": time.Now().Add(2 * time.Hour).Format(time.RFC3339), "status": "active",
+					"meta_type": "initial", "wrapped_secret": envOther},
+			},
+			"total": 2, "admin": false,
+		})
+	}))
+	defer srv.Close()
+
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, mySKHex), client.WithAccessKeyID(testTrustEntryID))
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf strings.Builder
+	cmd := NewCmdTrust(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &testConfigProvider{cfg: &client.Config{AccessKey: ak}}, nil)
+	cmd.SetArgs([]string{"sk", "list"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("trust sk list failed: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "skey-mineaaaa") {
+		t.Errorf("expected own entry skey-mineaaaa in output, got: %s", out)
+	}
+	if !strings.Contains(out, "skey-otheraa") {
+		t.Errorf("expected other entry skey-otheraa in output, got: %s", out)
+	}
+	// 自己条目能解开 → <decrypted>；他人条目 masked → <encrypted>。
+	if !strings.Contains(out, "<decrypted>") {
+		t.Errorf("expected own entry marked <decrypted>, got: %s", out)
+	}
+	if !strings.Contains(out, "<encrypted>") {
+		t.Errorf("expected other entry marked <encrypted>, got: %s", out)
+	}
+}
+
+func TestTrustSKDelete(t *testing.T) {
+	const (
+		ak   = "ak-0123456789abcdef"
+		skID = "skey-aaaaaaaaaaaa"
+	)
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %s, want DELETE", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer srv.Close()
+
+	sk := make([]byte, 32)
+	_, _ = rand.Read(sk)
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf strings.Builder
+	cmd := NewCmdTrust(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &testConfigProvider{cfg: &client.Config{AccessKey: ak}}, nil)
+	cmd.SetArgs([]string{"sk", "delete", skID})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("trust sk delete failed: %v", err)
+	}
+	wantPath := "/api/credentials/" + ak + "/sk/" + skID
+	if gotPath != wantPath {
+		t.Errorf("path = %q, want %q", gotPath, wantPath)
+	}
+	if !strings.Contains(buf.String(), "SK 已删除") {
+		t.Errorf("expected 'SK 已删除' in output, got: %s", buf.String())
+	}
+}
+
+func TestTrustSKExpire(t *testing.T) {
+	const (
+		ak   = "ak-0123456789abcdef"
+		skID = "skey-aaaaaaaaaaaa"
+	)
+	until := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	var gotBody struct {
+		Until string `json:"until"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		defer r.Body.Close()
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "until": gotBody.Until})
+	}))
+	defer srv.Close()
+
+	sk := make([]byte, 32)
+	_, _ = rand.Read(sk)
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf strings.Builder
+	cmd := NewCmdTrust(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &testConfigProvider{cfg: &client.Config{AccessKey: ak}}, nil)
+	cmd.SetArgs([]string{"sk", "expire", skID, "--until", until.Format(time.RFC3339)})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("trust sk expire failed: %v", err)
+	}
+	if gotBody.Until != until.Format(time.RFC3339) {
+		t.Errorf("until = %q, want %q", gotBody.Until, until.Format(time.RFC3339))
+	}
+	if !strings.Contains(buf.String(), skID) {
+		t.Errorf("expected sk_id in output, got: %s", buf.String())
+	}
+}
+
+func TestTrustSKExpire_BadUntil(t *testing.T) {
+	const (
+		ak   = "ak-0123456789abcdef"
+		skID = "skey-aaaaaaaaaaaa"
+	)
+	sk := make([]byte, 32)
+	_, _ = rand.Read(sk)
+	svc := client.NewFileClient("http://127.0.0.1:1", client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf strings.Builder
+	cmd := NewCmdTrust(factory, cli.IOStreams{Out: &buf, ErrOut: &buf}, &testConfigProvider{cfg: &client.Config{AccessKey: ak}}, nil)
+	cmd.SetArgs([]string{"sk", "expire", skID, "--until", "not-a-time"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected error for invalid --until")
+	} else if !strings.Contains(err.Error(), "RFC3339") {
+		t.Errorf("error should mention RFC3339, got: %v", err)
+	}
+}
+
+// ---- trust ak ----
+
+func TestTrustAKDelete_ConfirmsName(t *testing.T) {
+	const ak = "ak-0123456789abcdef"
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %s, want DELETE", r.Method)
+		}
+		defer r.Body.Close()
+		var body struct {
+			Confirm string `json:"confirm"`
+			Force   bool   `json:"force"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Confirm != ak {
+			t.Errorf("confirm = %q, want %q", body.Confirm, ak)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "ak": ak})
+	}))
+	defer srv.Close()
+
+	sk := make([]byte, 32)
+	_, _ = rand.Read(sk)
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
+	factory := clientfactory.NewMock(svc, nil)
+
+	// 输入正确的 AK 名 → 删除请求发出。
+	ios := cli.IOStreams{In: strings.NewReader(ak + "\n"), Out: &strings.Builder{}, ErrOut: io.Discard}
+	cmd := NewCmdTrust(factory, ios, &testConfigProvider{cfg: &client.Config{AccessKey: ak}}, nil)
+	cmd.SetArgs([]string{"ak", "delete", ak})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("trust ak delete failed: %v", err)
+	}
+	if gotPath != "/api/credentials/"+ak {
+		t.Errorf("path = %q, want %q", gotPath, "/api/credentials/"+ak)
+	}
+}
+
+func TestTrustAKDelete_CancelOnMismatch(t *testing.T) {
+	const ak = "ak-0123456789abcdef"
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	sk := make([]byte, 32)
+	_, _ = rand.Read(sk)
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf strings.Builder
+	ios := cli.IOStreams{In: strings.NewReader("wrong-name\n"), Out: &buf, ErrOut: io.Discard}
+	cmd := NewCmdTrust(factory, ios, &testConfigProvider{cfg: &client.Config{AccessKey: ak}}, nil)
+	cmd.SetArgs([]string{"ak", "delete", ak})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("trust ak delete (mismatch) should not error: %v", err)
+	}
+	if called {
+		t.Error("server should not be called when confirmation mismatches")
+	}
+	if !strings.Contains(buf.String(), "已取消") {
+		t.Errorf("expected '已取消' in output, got: %s", buf.String())
+	}
+}
+
+// TestTrustAKDelete_EOFNoInput_ReturnsError（M4）：stdin 立即 EOF / 管道空 → 删除命令
+// 返回非零 error（未确认（无输入），已中止），不得静默「已取消」+ 退出码 0。
+func TestTrustAKDelete_EOFNoInput_ReturnsError(t *testing.T) {
+	const ak = "ak-0123456789abcdef"
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	sk := make([]byte, 32)
+	_, _ = rand.Read(sk)
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf, errBuf strings.Builder
+	// In 为立即 EOF 的 reader（空字符串）。
+	ios := cli.IOStreams{In: strings.NewReader(""), Out: &buf, ErrOut: &errBuf}
+	cmd := NewCmdTrust(factory, ios, &testConfigProvider{cfg: &client.Config{AccessKey: ak}}, nil)
+	cmd.SetArgs([]string{"ak", "delete", ak})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("trust ak delete with EOF input: 应返回非零 error")
+	} else if !errors.Is(err, errDeleteAKNotConfirmed) {
+		t.Errorf("应返回 errDeleteAKNotConfirmed, got: %v", err)
+	}
+	if called {
+		t.Error("server should not be called when no confirmation input")
+	}
+	if !strings.Contains(errBuf.String(), "未确认") {
+		t.Errorf("expected '未确认' on stderr, got: %s", errBuf.String())
+	}
+	if strings.Contains(buf.String(), "已取消") {
+		t.Errorf("EOF 场景不应打印'已取消'(视为成功), got: %s", buf.String())
+	}
+}
+
+// TestTrustAKDelete_EmptyLine_ReturnsError（M4 分支变体）：输入仅为换行（EOF 前读到空行）
+// 同样是非零 error——空输入不可当作确认。
+func TestTrustAKDelete_EmptyLine_ReturnsError(t *testing.T) {
+	const ak = "ak-0123456789abcdef"
+	svc := client.NewFileClient("http://127.0.0.1:1")
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf, errBuf strings.Builder
+	ios := cli.IOStreams{In: strings.NewReader("\n"), Out: &buf, ErrOut: &errBuf}
+	cmd := NewCmdTrust(factory, ios, &testConfigProvider{cfg: &client.Config{AccessKey: ak}}, nil)
+	cmd.SetArgs([]string{"ak", "delete", ak})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("trust ak delete with empty line input: 应返回非零 error")
+	} else if !errors.Is(err, errDeleteAKNotConfirmed) {
+		t.Errorf("应返回 errDeleteAKNotConfirmed, got: %v", err)
+	}
+}
+
+// TestWrapContext_ServerClientConsistency（M5）：客户端 wrapContextFor 与服务端
+// credentialWrapKey 用同一前缀常量派生——两端对同一 sk/ak/mesh 必须派生出相同信封密钥。
+// server 侧实现（pkg/server.credentialWrapKey）无法从 cmd 包直接引用，这里用其拼法
+// （credentialWrapContext 别名 = accesskey.WrapContextCredentials）复算并对齐
+// client.wrapContextFor 派生结果。
+func TestWrapContext_ServerClientConsistency(t *testing.T) {
+	sk := make([]byte, 32)
+	for i := range sk {
+		sk[i] = byte(i)
+	}
+	for _, ak := range []string{"ak-0123456789abcdef", "ak-meshA-0123456789abcdef", "ak-prod-eu-0123456789abcdef"} {
+		mesh := accesskey.ParseMesh(ak)
+		ctx := accesskey.WrapContextCredentials
+		if mesh != "" {
+			ctx = accesskey.WrapContextCredentials + "#" + mesh
+		}
+		serverK, err := accesskey.DeriveWrapKey(sk, ak, ctx)
+		if err != nil {
+			t.Fatalf("DeriveWrapKey(server side, ak=%q): %v", ak, err)
+		}
+		clientK, err := accesskey.DeriveWrapKey(sk, ak, client.CredentialWrapContext(ak))
+		if err != nil {
+			t.Fatalf("DeriveWrapKey(client side, ak=%q): %v", ak, err)
+		}
+		if !bytes.Equal(serverK, clientK) {
+			t.Errorf("ak=%q: 服务端/客户端 wrap key 派生不一致（M5 回归）", ak)
+		}
+	}
+}
+
+// TestTrustAKAdd_NoAKArg_GeneratesPair 覆盖 `trust ak add` 未显式指定 AK 时的等价生成逻辑：
+//   - ak 以 ak- 开头（mesh 非空时 ak-<mesh>-）
+//   - sk 为 32B 随机 hex（64 hex chars）
+//   - 两次生成不同（随机性）
+//
+// 生成由 pkg/accesskey.GeneratePair 承担（原 cmd generateAccessKeyPair 删除后内联，
+// 唯一事实源）；真实命令路径（mock RPC 断言发送的 AK/SK）见同文件
+// TestTrustAKAdd_NoAKArg_GeneratesPair_Command。
+func TestTrustAKAdd_NoAKArg_GeneratesPair(t *testing.T) {
+	ak, sk, err := accesskey.GeneratePair(nil, "")
+	if err != nil {
+		t.Fatalf("GeneratePair: %v", err)
+	}
+	if !strings.HasPrefix(ak, "ak-") {
+		t.Errorf("expected ak to start with ak-, got: %q", ak)
+	}
+	if len(sk) != 64 {
+		t.Errorf("expected sk to be 64 hex chars, got %d", len(sk))
+	}
+	for _, c := range sk {
+		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+		if !isHex {
+			t.Errorf("sk 含非 hex 字符 %q", sk)
+			break
+		}
+	}
+	ak2, sk2, err := accesskey.GeneratePair(nil, "")
+	if err != nil {
+		t.Fatalf("GeneratePair(second): %v", err)
+	}
+	if ak == ak2 || sk == sk2 {
+		t.Error("expected two generated pairs to differ")
+	}
+}
+
+// TestTrustAKAdd_NoAKArg_GeneratesPair_Command 走真实 cobra 命令 + mock RPC 断言
+// `trust ak add`（无 ak 参数）把一行本端生成的 AK 发送到服务端。
+func TestTrustAKAdd_NoAKArg_GeneratesPair_Command(t *testing.T) {
+	var gotBody struct {
+		AK     string `json:"ak"`
+		Owner  string `json:"owner"`
+		Secret string `json:"secret"`
+	}
+	sk := make([]byte, 32)
+	_, _ = rand.Read(sk)
+	const adminAK = "ak-admin-0123456789abcdef"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		// 本端指定 secret → 服务端不回传（secret 字段仅回显注册值）。
+		_ = json.NewEncoder(w).Encode(map[string]any{"ak": gotBody.AK, "sk_id": "skey-created1", "secret": gotBody.Secret})
+	}))
+	defer srv.Close()
+
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(adminAK, hex.EncodeToString(sk)), client.WithAccessKeyID(testTrustEntryID))
+	factory := clientfactory.NewMock(svc, nil)
+
+	var buf strings.Builder
+	cmd := NewCmdTrust(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &testConfigProvider{cfg: &client.Config{AccessKey: adminAK}}, nil)
+	cmd.SetArgs([]string{"ak", "add", "--owner", "tenant-x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("trust ak add failed: %v", err)
+	}
+	if !strings.HasPrefix(gotBody.AK, "ak-") {
+		t.Errorf("generated AK should start with ak-, got %q", gotBody.AK)
+	}
+	if gotBody.Owner != "tenant-x" {
+		t.Errorf("owner = %q, want tenant-x", gotBody.Owner)
+	}
+	if len(gotBody.Secret) != 64 {
+		t.Errorf("generated secret should be 64 hex, got %d chars", len(gotBody.Secret))
+	}
+	if !strings.Contains(buf.String(), "sk_id=skey-created1") {
+		t.Errorf("expected created sk_id in output, got: %s", buf.String())
+	}
+}
+
+// ---- access-key deprecated ----
+
+// 原 TestAccessKey_DeprecatedAlias 随 access-key 命令删除而消失（用户裁定直接删除，
+// 非仅 deprecated）；其要防的 C1 遮蔽已由 TestTrustCommandTreeReachable 覆盖。
+
+// TestTrustCommandTreeReachable 用真实 cobra 执行路由验证完整 trust 命令树可达：
+// `root trust <子命令>` 必须解析到独立 trust 命令（而非被 access-key 遮蔽——C1 回归
+//
+//	guards）。cobra findNext 配 Name/Alias 先到先得，access-key 若挂 Aliases:["trust"]
+//	会把 trust 树吃掉，此测试会失败。
+func TestTrustCommandTreeReachable(t *testing.T) {
+	cmds := map[string]string{
+		"sk list":     "SK_ID", // 列表头
+		"sk delete x": "SK 已删除",
+		"sk expire x": "设 SK 过期",
+		"ak list":     "AccessKey",
+	}
+	for full, want := range cmds {
+		full := full
+		want := want
+		t.Run(full, func(t *testing.T) {
+			svc := client.NewFileClient("http://127.0.0.1:1") // 直连占位（无真实 RPC）
+			factory := clientfactory.NewMock(svc, nil)
+			var out, errOut strings.Builder
+			ios := cli.IOStreams{Out: &out, ErrOut: &errOut, In: strings.NewReader("wrong\n")}
+			cfgSvc := &testConfigProvider{cfg: &client.Config{AccessKey: "ak-test-0000000000000000", AccessKeySecret: strings.Repeat("11", 32)}}
+			cmd := NewCmdTrust(factory, ios, cfgSvc, new(string))
+			cmd.SetArgs(strings.Fields(full))
+			runErr := cmd.Execute()
+			// 关键断言：命令树可达（解析成功进入 RunE）——access-key 若挂 Aliases:["trust"]
+			// 会把 trust 树遮蔽，cobra 反报 unknown command（runErr 为 cobra 未知子命令错误）。
+			// 此处相反：解析成功、进入 RunE；RPC 本身（127.0.0.1:1 拒绝）或字段校验的错误
+			// 不影响「树可达」判定——只要求不是 cobra 的 unknown-command 关口被 alias 挡住。
+			if runErr != nil {
+				msg := runErr.Error()
+				if strings.Contains(msg, "unknown command") || strings.Contains(msg, "unrecognized") {
+					t.Fatalf("%s: 命令树被遮蔽（runErr=%q）——C1 回归", full, msg)
+				}
+				// 其余错误 = 命令已解析并进入 RunE（校验/RPC 层），可达性 OK。
+				return
+			}
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("%s: 期望输出含 %q, got: %s", full, want, out.String())
+			}
+		})
+	}
+
+	// ak delete 走交互确认路径：输入不符 → 打印取消（命令树可达 + 交互生效）。
+	t.Run("ak delete x", func(t *testing.T) {
+		svc := client.NewFileClient("http://127.0.0.1:1")
+		factory := clientfactory.NewMock(svc, nil)
+		var out strings.Builder
+		ios := cli.IOStreams{Out: &out, ErrOut: io.Discard, In: strings.NewReader("wrong\n")}
+		cmd := NewCmdTrust(factory, ios, nil, new(string))
+		cmd.SetArgs([]string{"ak", "delete", "ak-test-delete00000000"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("ak delete: 命令树可达但执行错误=%v", err)
+		}
+		if !strings.Contains(out.String(), "已取消") {
+			t.Errorf("ak delete: 期望取消输出, got %q", out.String())
+		}
+	})
+}
+
+// ---- config file isolation ----
+
+func TestTrustRenew_ConfigIsolation(t *testing.T) {
+	// 确保 trust renew 只写目标配置文件，不触碰真实用户配置目录。
+	const ak = "ak-0123456789abcdef"
+	oldSK := make([]byte, 32)
+	_, _ = rand.Read(oldSK)
+	oldSKHex := hex.EncodeToString(oldSK)
+	newSK := make([]byte, 32)
+	_, _ = rand.Read(newSK)
+	env := testTrustEnvelope(t, oldSK, ak, newSK)
+
+	srv := httptest.NewServer(http.HandlerFunc(trustRenewHandler(t, ak, oldSKHex, env)))
+	defer srv.Close()
+
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "sclient.yaml")
+	cfg := client.DefaultConfig()
+	cfg.ServerURL = srv.URL
+	cfg.AccessKey = ak
+	cfg.AccessKeySecret = oldSKHex
+	if err := client.SaveConfig(cfg, cfgPath); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	svc := client.NewFileClient(srv.URL, client.WithAccessKey(ak, oldSKHex))
+	factory := clientfactory.NewMock(svc, nil)
+
+	cmd := NewCmdTrust(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &testConfigProvider{cfg: cfg}, &cfgPath)
+	cmd.SetArgs([]string{"renew"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("trust renew failed: %v", err)
+	}
+
+	// 配置目录下只有我们创建的 sclient.yaml；没有其它文件被写入。
+	entries, err := os.ReadDir(cfgDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "sclient.yaml" {
+		t.Fatalf("expected only sclient.yaml in config dir, got %v", entries)
+	}
+}

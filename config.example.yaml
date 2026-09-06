@@ -46,19 +46,18 @@ tls:
   # 要显式禁用自签证书生成，取消注释并设为 false：
   # auto_tls: false
 
-# SproxySig 请求签名认证（每 mesh 一对 AK/SK；生产环境必须设置）。
-# 启用后，除 /healthz、/version、/ui/、POST /tunnel 之外所有路由都要求
-# Authorization: SproxySig v=1 ... 请求签名头。
-# 生成 AK/SK：sclient access-key create [--mesh <name>]
-# 注意：未配置 access_keys（且 api_keys 未启用）时 sproxy 拒绝启动（fail-fast）。
-# 下面为开发示例凭据，生产环境务必用 `sclient access-key create` 生成并更换。
-access_keys:
-  - key: "sk-00000000000000000000000000000000"
-    secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+# 凭据 store 化（取代 yaml access_keys）：SproxySig 请求签名凭据由服务端自动装配——
+# 首次启动在 <storage_root>/anonymous/meta/credentials.json 生成 anonymous AK/SK 并持久化，
+# 日志打印 AK（请妥善保存并尽快登记正式用户）。正式凭据登记见 sclient trust / /api/credentials。
+#   registration:
+#     disable: false          # 注册开关：false = 允许注册（默认）；true = 禁止注册（仅存量用户）
+#   allow_insecure_loopback: false  # 无任何凭据时回环来源 GET/HEAD 放行（仅本地调试，生产勿开）
+#   credential_ttl: "720h"    # 首启 anonymous 凭据有效期（默认 30d；负值 = 禁用首启生成，
+#                             # 此时无凭据即 401 拒启场景请配 allow_insecure_loopback）
 
-# 多用户 API 密钥（Bearer，与 access_keys 互斥且优先；可选）。
+# 多用户 API 密钥（Bearer，与 SproxySig 互斥且优先；可选）。
 # 提供 read/write 权限分级，适合多用户 HTTP 文件访问；但不支持隧道/hub——
-# 隧道密钥与 hub 注册准入均来自 access_keys（hub.enabled 时强制要求 access_keys）。
+# 隧道密钥与 hub 注册准入来自凭据 Ring（首启 anonymous 或其他登记凭据）。
 # api_keys:
 #   enabled: true
 #   keys:
@@ -141,11 +140,11 @@ access_keys:
 # sync_remotes:
 #   - name: "node-a"                 # 配置名（创建任务时 remote 字段引用）
 #     url: "http://192.168.1.10:18083"
-#     access_key: ""                 # 远程 sproxy 认可的 SproxySig AK/SK（sclient access-key create 生成）
+#     access_key: ""                 # 远程 sproxy 认可的 SproxySig AK/SK（与凭据 Ring 中登记的 AK/SK 一致；登记/轮换见 sclient trust）
 #     access_key_secret: ""
 
 # Hub 中继（mesh 内网穿透，默认关闭）。
-# 节点注册准入由顶层 access_keys 提供（AK/HMAC proof 证明持有 SK，无需独立 relay_token）。
+# 节点注册准入由凭据 Ring 提供（AK/HMAC proof 证明持有 SK，无需独立 relay_token）。
 # hub:
 #   enabled: true
 #   node_id: "node-a"               # 本节点 ID（mesh connect / relay dial 的目标）
@@ -177,8 +176,8 @@ access_keys:
 #   # 防环说明：路径恒追加「下一跳 peer.id」（自洽，无需配置即可生效）；配置了
 #   # hub.node_id 且 federation.peers[].id 等于对端 node_id 时，额外在回源前一跳
 #   # 即拒绝（更严格）。链式深度受跳数上限约束（每跳握手预算 30s，建议 2-3 跳）。
-#   # 注意：未配置 access_keys 时（仅本地调试），联邦端点与 /api/hub/nodes 一样
-#   # 对任意请求者开放——生产务必配置 access_keys 并让双方共享同一 mesh 的凭据，
+#   # 注意：无任何凭据时（Ring 空，仅本地调试），联邦端点与 /api/hub/nodes 一样
+#   # 对任意请求者开放——生产务必登记凭据（Ring 非空）并让双方共享同一 mesh 的凭据，
 #   # 否则 peer 拉到的节点只对同名 mesh 请求者可见（fail-closed，但会看不到）。
 #   # federation:
 #   #   enabled: true
@@ -196,7 +195,7 @@ access_keys:
 #   #                                      # 如 http://host:port，不带 /api/… 路径；为空回落
 #   #                                      # 默认 127.0.0.1:18083 loopback；远程 peering 需显式
 #   #                                      # 配置 URL 与成对 access_key/access_key_secret）
-#   #       access_key: "sk-xxx"   # 对端 hub 认可的 SproxySig AccessKey（双方共享同一 mesh 的
+#   #       access_key: "ak-xxx"   # 对端 hub 认可的 SproxySig AccessKey（双方共享同一 mesh 的
 #   #                               # 凭据；**多 mesh 部署需为每个 mesh 单独配一对 peer/AK**——
 #   #                               # 转发在目标 hub 以对端 AK 的 mesh 重新鉴权，客户端 mesh
 #   #                               # 必须与 peer AK mesh 及目标节点 mesh 三者一致才可达）
@@ -216,11 +215,12 @@ access_keys:
 #       enabled: false      # 裸 TCP 中继（独立 raw TCP listener，默认关闭；显式开启才生效）
 #       listen: "127.0.0.1:18084"  # TCP 监听地址（为空回落默认 127.0.0.1:18084，loopback；
 #                                  # 远程节点可达需显式配 ":18084" 或具体网卡 IP。注册准入由
-#                                  # access_keys 的 SproxySig 保证，未配置时拒绝所有注册）
+#                                  # 凭据 Ring 的 SproxySig 保证，无凭据时拒绝所有注册）
 #     # 服务端 xfer listener（阶段5 工作项1）：接收 `sclient tunnel --xfer tcp/tcp+tls --hub <addr>`
 #     # 的会话，经 mux → tunnel 解密 → 路由到本地文件 API。与 hub 中继不同，xfer listener
-#     # 不参与节点注册/VIP/DHT；握手密钥 = access_keys 首对派生（需 access_keys 非空，fail-closed）。
-#     # 注意：xfer 隧道握手的会话密钥绑定 access_keys 派生密钥（未知密钥对端首个加密帧校验失败
+#     # 不参与节点注册/VIP/DHT；握手密钥 = 凭据 Ring 首存活条目派生（取代旧 access_keys[0]，
+#     # Ring 空时 fail-closed 拒绝）。
+#     # 注意：xfer 隧道握手的会话密钥绑定凭据派生密钥（未知密钥对端首个加密帧校验失败
 #     # 被拒，非匿名 ECDH——安全红线 C-1 修复）。默认绑 loopback，远程可达须显式 listen。
 #     xfer_tls:
 #       enabled: false      # TLS xfer listener（段名即约定恒 TLS；数据面机密性 + 客户端 pin 服务端

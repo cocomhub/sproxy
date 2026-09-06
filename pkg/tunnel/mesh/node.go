@@ -54,6 +54,8 @@ type NodeConfig struct {
 	AccessKey string
 	// AccessKeySecret 是 SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）。
 	AccessKeySecret string
+	// AccessKeyID 是 SproxySig SK 条目 ID（skey-id，v2 协议必传——信令/节点列表/网关签名用）。
+	AccessKeyID string
 	// Services 是宣告到 hub 的服务（mesh connect 服务发现）。
 	Services []hub.Service
 	// ServiceAddrs 是出口拨号精确放行地址（含 loopback/私网，供 NewServiceDialPolicy）。
@@ -182,6 +184,7 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 		ServerURL:       cfg.ServerURL,
 		AccessKey:       cfg.AccessKey,
 		AccessKeySecret: cfg.AccessKeySecret,
+		AccessKeyID:     cfg.AccessKeyID,
 		NodeID:          cfg.NodeID,
 		Prefix:          "mesh",
 		ExactNode:       true, // mesh node 是稳定 node-id，供 mesh connect 寻址

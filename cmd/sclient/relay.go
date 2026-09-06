@@ -39,7 +39,7 @@ const (
 )
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
-func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string) error {
+func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string) error {
 	switch transport {
 	case "ws", "tcp":
 	default:
@@ -72,13 +72,13 @@ func runRelayStart(cmd *cobra.Command, transport, hubURL, local, nodeID, accessK
 
 	// 虚拟 IP 子网：--virtual-subnet 覆盖默认 CGNAT（S-1 审查修复，匹配自定义 hub 子网）。
 	virtualSubnet, _ := cmd.Flags().GetString("virtual-subnet")
-	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
+	return runRelayWithRetry(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
 }
 
-func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
+func runRelayWithRetry(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
 	delay := reconnectBaseDelay
 	for {
-		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
+		err := runRelayOnce(ctx, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID, insecure, dialAllow, services, dialAllowCIDRs, virtualSubnet, logger)
 		if err == nil || ctx.Err() != nil {
 			return err
 		}
@@ -107,7 +107,7 @@ func isTerminalRelayError(err error) bool {
 	return errors.Is(err, hub.ErrRegisterRejected)
 }
 
-func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
+func runRelayOnce(ctx context.Context, transport, nodeID, hubURL, local, accessKey, accessKeySecret, accessKeyID string, insecure bool, dialAllow bool, services, dialAllowCIDRs []string, virtualSubnet string, logger *slog.Logger) error {
 	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof。
 	// fail-closed：AccessKeySecret 为空时直接报错（防止无凭据注册被 hub fail-closed
 	// 拒绝后客户端困惑——明明连上了却被拒）。
@@ -279,12 +279,13 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 			nodeID, _ := cmd.Flags().GetString("node-id")
 			accessKey, _ := cmd.Flags().GetString("access-key")
 			accessKeySecret, _ := cmd.Flags().GetString("access-key-secret")
+			accessKeyID, _ := cmd.Flags().GetString("access-key-id")
 			insecure, _ := cmd.Flags().GetBool("insecure")
 			dialAllow, _ := cmd.Flags().GetBool("dial-allow")
 			services, _ := cmd.Flags().GetStringArray("service")
 			dialAllowCIDRs, _ := cmd.Flags().GetStringArray("dial-allow-cidr")
-			// P2-配置3：通用参数配置回落——--hub/--node-id/--access-key/--access-key-secret
-			// 未显式指定时取配置 hub_url/node_id/access_key/access_key_secret（CLI > 配置 > 默认）。
+			// P2-配置3：通用参数配置回落——--hub/--node-id/--access-key/--access-key-secret/--access-key-id
+			// 未显式指定时取配置 hub_url/node_id/access_key/access_key_secret/access_key_id（CLI > 配置 > 默认）。
 			if cfgSvc != nil {
 				if cfg, cerr := cfgSvc.LoadConfig(); cerr == nil {
 					if hubURL == "" {
@@ -296,12 +297,15 @@ func NewCmdRelayStart(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 					if accessKeySecret == "" {
 						accessKeySecret = cfg.AccessKeySecret
 					}
+					if accessKeyID == "" {
+						accessKeyID = cfg.AccessKeyID
+					}
 					if nodeID == "" {
 						nodeID = cfg.NodeID
 					}
 				}
 			}
-			return runRelayStart(cmd, transport, hubURL, local, nodeID, accessKey, accessKeySecret, insecure, dialAllow, services, dialAllowCIDRs)
+			return runRelayStart(cmd, transport, hubURL, local, nodeID, accessKey, accessKeySecret, accessKeyID, insecure, dialAllow, services, dialAllowCIDRs)
 		},
 	}
 	cmd.Flags().String("transport", "ws", "连接到 Hub 的传输层: ws（默认，WebSocket）/ tcp（裸 TCP，hub.transports.tcp.listen）")
@@ -341,13 +345,15 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 				return fmt.Errorf("未指定服务器地址，请使用 --server 或 --hub 或配置 server_url")
 			}
 
-			// 获取 SproxySig 认证密钥
+			// 获取 SproxySig 认证密钥（v2 skey-id 必传：同时取 access-key-id）
 			accessKey, _ := cmd.Flags().GetString("access-key")
 			accessKeySecret, _ := cmd.Flags().GetString("access-key-secret")
+			accessKeyID, _ := cmd.Flags().GetString("access-key-id")
 			if accessKeySecret == "" && cfgSvc != nil {
 				if cfg, err := cfgSvc.LoadConfig(); err == nil {
 					accessKey = cfg.AccessKey
 					accessKeySecret = cfg.AccessKeySecret
+					accessKeyID = cfg.AccessKeyID
 				}
 			}
 
@@ -357,7 +363,7 @@ func NewCmdRelayStatus(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command 
 			if err != nil {
 				return fmt.Errorf("创建请求失败: %w", err)
 			}
-			sproxysig.SignRequest(req, accessKey, accessKeySecret)
+			sproxysig.SignRequestWithSkeyID(req, accessKey, accessKeyID, accessKeySecret)
 			// B17：--insecure 时复用 insecureHTTPClient（跳过证书校验，自签 https hub 场景）。
 			httpClient := &http.Client{Timeout: 10 * time.Second}
 			if insecure, _ := cmd.Flags().GetBool("insecure"); insecure {
