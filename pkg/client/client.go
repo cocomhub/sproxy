@@ -1387,6 +1387,11 @@ type RequestSigner interface {
 	Sign(ctx context.Context, req *http.Request) error
 }
 
+// ErrSkeyIDRequired 是 v2「skey-id 必传」缺失的哨兵错误（configSigner.Sign 返回）。
+// 供 sigRoundTripper.RoundTrip 以 errors.Is 精确判定并附加既有引导文案；注入自定义
+// Signer 的自定义错误原样透传、不被该哨兵改写。
+var ErrSkeyIDRequired = errors.New("access_key_id 未配置（v2 skey-id 必传）")
+
 // configSigner 是默认签名器：用 FileClient 配置的 access_key/access_key_secret/
 // access_key_id 构造 SproxySig v2 签名头（承接现状 signRequest/sigRoundTripper 行为，
 // 含 WithAccessKey/WithAccessKeyID 等 option 注入的字段；accessKeySecret=="" 时不签名
@@ -1406,7 +1411,7 @@ func (s *configSigner) Sign(ctx context.Context, req *http.Request) error {
 	// v2 skey-id 强制必传：配置了 access_key 但缺 access_key_id 且非 renew 引导
 	// （allowMissingEntryID）→ 报错（v2 协议要求；renew 引导例外见 RenewAccessKey）。
 	if c.accessKey != "" && c.accessKeyID == "" && !c.allowMissingEntryID {
-		return fmt.Errorf("access_key_id 未配置（v2 skey-id 必传）: 请先 `sclient trust renew` 或配置 access_key_id")
+		return fmt.Errorf("%w: 请先 `sclient trust renew` 或配置 access_key_id", ErrSkeyIDRequired)
 	}
 	now := time.Now()
 	h := sproxysig.Header{
@@ -1447,7 +1452,7 @@ func (s *configSigner) Sign(ctx context.Context, req *http.Request) error {
 // 例外见 RenewAccessKey——首次 renew 前本端恰好无 skeyID）。
 func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string, io.Reader, func(), error) {
 	if c.accessKey != "" && c.accessKeyID == "" && !c.allowMissingEntryID {
-		return "", nil, nil, fmt.Errorf("access_key_id 未配置（v2 skey-id 必传）: 请先 `sclient trust renew` 或配置 access_key_id")
+		return "", nil, nil, fmt.Errorf("%w: 请先 `sclient trust renew` 或配置 access_key_id", ErrSkeyIDRequired)
 	}
 	pathPart, queryPart, _ := strings.Cut(urlPath, "?")
 	signedBody, bodyHash, cleanup, err := prehashBody(body)
@@ -1540,8 +1545,10 @@ type sigRoundTripper struct {
 
 func (rt *sigRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err := rt.c.sigRequestSigner().Sign(context.Background(), req); err != nil {
-		if strings.Contains(err.Error(), "access_key_id 未配置（v2 skey-id 必传）") {
-			return nil, fmt.Errorf("access_key_id 未配置（v2 skey-id 必传）: 请先 `sclient trust renew` 或配置 access_key_id")
+		// v2 缺 skey-id：附加既有标准文案（错误文案与旧 sigRoundTripper 逐字一致）；
+		// 其余错误（含注入 Signer 的自定义错误）原样透传，不回译/改写。
+		if errors.Is(err, ErrSkeyIDRequired) {
+			return nil, fmt.Errorf("%w: 请先 `sclient trust renew` 或配置 access_key_id", ErrSkeyIDRequired)
 		}
 		return nil, err
 	}

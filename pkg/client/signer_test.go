@@ -5,6 +5,9 @@ package client
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -182,19 +185,128 @@ func TestRequestSigner_WithRequestSigner_Tunnel(t *testing.T) {
 	}
 }
 
-// renew 引导缺段承接：非引导态缺 access_key_id 报错；allowMissingEntryID 引导态放行
-// （直接调用 ConfigSigner 断言错误信息，避免网络往返）。
+// renew 引导缺段承接：非引导态缺 access_key_id 报错（errors.Is 命中 ErrSkeyIDRequired，
+// 文案含既有「access_key_id 未配置」）；allowMissingEntryID 引导态放行
+// （直接调用 ConfigSigner 断言错误，避免网络往返）。
 func TestRequestSigner_ConfigSigner_SkeyIDRequired(t *testing.T) {
 	cs := &configSigner{c: &FileClient{accessKey: testSignerAK, accessKeySecret: testSignerSK()}}
 	req, _ := http.NewRequest(http.MethodGet, "https://example.invalid/probe", nil)
-	if err := cs.Sign(context.Background(), req); err == nil {
+	err := cs.Sign(context.Background(), req)
+	if err == nil {
 		t.Fatal("非引导态缺 access_key_id 应报错")
-	} else if !strings.Contains(err.Error(), "access_key_id 未配置（v2 skey-id 必传）") {
-		t.Errorf("错误信息不符, got %v", err)
+	}
+	if !errors.Is(err, ErrSkeyIDRequired) {
+		t.Errorf("缺 skeyID 错误应以哨兵 ErrSkeyIDRequired 包装（可 errors.Is）, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "access_key_id 未配置") {
+		t.Errorf("错误信息应含既有文案「access_key_id 未配置」, got %v", err)
 	}
 
 	cs.c.allowMissingEntryID = true
 	if err := cs.Sign(context.Background(), req); err != nil {
 		t.Errorf("renew 引导态（allowMissingEntryID）应放行, got %v", err)
 	}
+}
+
+// RoundTrip 错误透传：注入 Signer 返回自定义错误时，RoundTrip 原样透传该错误
+// （不作为 ErrSkeyIDRequired 回译改写）。默认路径缺 skey-id（errors.Is）才附加既有
+// 标准文案。
+func TestRequestSigner_SigRoundTripper_ErrorPassthrough(t *testing.T) {
+	// 注入 Signer 返回自定义错误 → 原样透传（不被「回译」成 skey-id 文案）。
+	customErr := errors.New("custom-signer-denied")
+	fs := &fakeSignerErr{err: customErr}
+	c := &FileClient{requestSigner: fs}
+	rt := &sigRoundTripper{base: http.DefaultTransport, c: c}
+	req, _ := http.NewRequest(http.MethodPost, "https://example.invalid/tunnel", strings.NewReader("frame"))
+	_, err := rt.RoundTrip(req)
+	if err == nil {
+		t.Fatal("RoundTrip 应透传注入 Signer 的错误")
+	}
+	if !errors.Is(err, customErr) {
+		t.Errorf("注入 Signer 自定义错误应被原样透传（errors.Is 可命中）, got %v", err)
+	}
+	if errors.Is(err, ErrSkeyIDRequired) {
+		t.Errorf("注入 Signer 自定义错误不应被误判为 ErrSkeyIDRequired, got %v", err)
+	}
+	if fs.calls.Load() != 1 {
+		t.Errorf("注入 Signer 每请求应恰好调用一次, got %d", fs.calls.Load())
+	}
+
+	// 默认路径缺 skey-id → 附加既有标准文案（哨兵 + 引导提示）。
+	miss := &FileClient{accessKey: testSignerAK, accessKeySecret: testSignerSK()}
+	rt2 := &sigRoundTripper{base: http.DefaultTransport, c: miss}
+	_, err = rt2.RoundTrip(httpReq(t, "https://example.invalid/tunnel"))
+	if err == nil {
+		t.Fatal("默认路径缺 skey-id 应报错")
+	}
+	if !errors.Is(err, ErrSkeyIDRequired) {
+		t.Errorf("缺 skeyID 应以哨兵 ErrSkeyIDRequired 命中, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "请先 `sclient trust renew` 或配置 access_key_id") {
+		t.Errorf("缺 skeyID 错误应含引导文案, got %v", err)
+	}
+}
+
+// fakeSignerErr 记录调用次数并返回固定错误（RoundTrip 错误透传测试用）。
+type fakeSignerErr struct {
+	calls atomic.Int64
+	err   error
+}
+
+func (f *fakeSignerErr) Sign(_ context.Context, _ *http.Request) error {
+	f.calls.Add(1)
+	return f.err
+}
+
+func httpReq(t *testing.T, url string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader("frame"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	return req
+}
+
+// xfer + 注入 Signer 组合：xfer 隧道本体数据面经 mux 直连（不经 /tunnel HTTP 签名面，
+// 认证靠注册帧内 access_key+proof），故「注入 Signer 不被绕过」的语义是——对 xfer 面
+// 调用的 HTTP 面入口（doRequest 直连分支）仍逐请求走注入 Signer；TunnelDo（纯 xfer
+// 传输）不经 HTTP 签名面、不触发签名器（签名面外，符合设计）。
+func TestRequestSigner_XferAndInjectedSigner(t *testing.T) {
+	fs := &fakeSigner{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	name := registerPipeXfer(t, nil, testSignerSK()) // hexKey 必须 64-hex（32B）
+	c := NewFileClient(ts.URL,
+		WithXfer(name, "hub://test", testSignerSK()), // 与注册端同一密钥
+		WithRequestSigner(fs),
+	)
+
+	// doRequest 直连分支（HTTP 面）：走注入 Signer。
+	if _, err := c.doRequest(context.Background(), "GET", "/probe", nil, nil); err != nil {
+		t.Fatalf("doRequest(xfer 配置): %v", err)
+	}
+	if fs.calls.Load() != 1 {
+		t.Errorf("xfer 配置下 doRequest 每请求应调用注入 Signer 一次, got %d", fs.calls.Load())
+	}
+
+	// TunnelDo 经 xfer mux 真实隧道：数据面不经 HTTP 签名面（签名面外），
+	// 不触发签名器、也不产生 Authorization 头。
+	n := fs.calls.Load()
+	req, _ := http.NewRequest(http.MethodGet, "http://echo/x", nil)
+	resp, err := c.TunnelDo(req)
+	if err != nil {
+		t.Fatalf("TunnelDo(xfer): %v", err)
+	}
+	_ = resp.Body.Close()
+	if fs.calls.Load() != n {
+		t.Errorf("xfer 隧道数据面不应触发注入 Signer（签名面外）: calls %d → %d", n, fs.calls.Load())
+	}
+
+	// 显式声明：xfer 隧道路径不经过注入 Signer——这是设计语义（R3-M5 的「隧道路径」
+	// 指 /tunnel 外层签名面；xfer mux 认证体在注册帧兴趣面之外），记录为文档化行为。
+	_ = io.Discard
+	_ = fmt.Sprintf
 }
