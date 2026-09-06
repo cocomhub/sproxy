@@ -117,6 +117,11 @@ func (r *Ring) AddKey(ak string, sk []byte, opts ...EntryOption) (string, error)
 
 // Now 返回 ring 当前时钟（测试注入时钟优先；未注入回落 time.Now）。供 handler 与
 // loginFailTracker 共用同一时间线（登录 TTL/修剪/锁定判定一致）。
+//
+// **无锁理由（修复轮 1 建议 1）**：r.now 在 NewRing 构造时一次性注入、不可变、无
+// setter（Go map/字段并发写才有竞态，纯读是安全的）——与其余持锁方法（Lookup/
+// AddKey 等因读写共享状态才加锁）契约区分。保持无锁使注入时钟在「handler 判定 →
+// AddKey 修剪/过期 → tracker 锁定」三层穿透一致性（多锁会引入多次取值的时间漂移）。
 func (r *Ring) Now() time.Time {
 	if r.now != nil {
 		return r.now()

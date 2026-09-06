@@ -141,9 +141,9 @@ type Handlers struct {
 	// {failCount, lockedUntil} + mutex。连续失败达 cfg.Registration.LoginFailLimit
 	// → 锁定 LoginFailWindow（锁定期内该 AK 登录一律 401，含正确动态码，不随 IP
 	// 变化失效）；登录成功清零。map 上限 1024 + 惰性清理（R2-N1）——插入时若已达
-	// 上限，先剪掉 lockedUntil 已过期的条目，仍满则淘汰最早插入条目，防 map 无界
-	// 增长。空 AK 键跳过（不登记）。登录失败计数语义（R2-N2）见 register_handler.go
-	// recordLoginFailure 注释。
+	// 上限，先剪掉 lockedUntil 已过期的条目，仍满则按 map 迭代序淘汰任意一条
+	// （**无严格 LRU 语义**，只钳制无界增长），防 map 膨胀。空 AK 键跳过（不登记）。
+	// 登录失败计数语义（R2-N2）见 register_handler.go recordLoginFailure 注释。
 	loginFailTracker *loginFailTracker
 	// loginLimiter 是 POST /api/credentials/login 的独立限频器（10/min；与
 	// totpLimiter 语义同级，独立实例避免 nonce 签发与登录消费互相挤压配额，

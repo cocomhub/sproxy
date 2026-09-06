@@ -573,6 +573,10 @@ func isEOF(err error) bool {
 const (
 	auditActionCredLogin       = "credential_login"
 	auditActionCredLoginDenied = "credential_login_denied"
+	// auditActionCredLoginWrapError 是登录 session 信封加密失败的独立审计动作
+	// （修复轮 1 Minor2）：与 credential_persist_error（持久化失败）语义分离——
+	// wrap 失败是密码学层内部错误、未追加条目，不回滚语义。
+	auditActionCredLoginWrapError = "credential_login_wrap_error"
 )
 
 // loginFailTrackerMaxEntries 是 per-AK 失败锁定表的 AK 条数上限（U4，R2-N1）。
@@ -631,7 +635,9 @@ func (t *loginFailTracker) recordFailure(ak string, limit int, window time.Durat
 	defer t.mu.Unlock()
 	e, ok := t.m[ak]
 	if !ok {
-		// 新 AK 键：若已达上限，先修剪已过锁定期的条目，仍满则淘汰最早插入条目。
+		// 新 AK 键：若已达上限，先修剪 lockedUntil 已过期的条目，仍满则按 map 迭代
+		// 序淘汰任意一条（无严格 LRU 语义——go map 迭代无序，这里只钳制无界增长，
+		// 淘汰哪条都不影响安全语义；措辞见任务⑨简报 R2-N1）。
 		if len(t.m) >= loginFailTrackerMaxEntries {
 			for k, v := range t.m {
 				if !v.lockedUntil.IsZero() && !v.lockedUntil.After(now) {
@@ -639,8 +645,7 @@ func (t *loginFailTracker) recordFailure(ak string, limit int, window time.Durat
 				}
 			}
 			if len(t.m) >= loginFailTrackerMaxEntries {
-				// 仍满：淘汰任意一条（map 迭代无序；「最早插入」无持久序，任意淘汰
-				// 已足够钳制无界增长——防病态 map 膨胀即达标）。
+				// 仍满：按 map 迭代序淘汰任意一条（无 LRU），防病态 map 膨胀。
 				for k := range t.m {
 					delete(t.m, k)
 					break
@@ -777,12 +782,16 @@ func (h *Handlers) loginFailPolicy() (limit int, window time.Duration) {
 //     renew 事实源模式）。
 //  7. sessionTTL = cfg.Registration.SessionTTL（web，默认 24h）/ CliTTL（cli，默认
 //     7d，D3）；客户端 body 白名单无 ttl 字段——传了忽略。
-//  8. `AddKey(ak, sessionSK, WithKind(KindTOTPWrap), WithWrapKeyID(""),
+//  8. **先 envelope 加密、后追加条目**（修复轮 1 Minor1）：`envelope =
+//     EncryptSecretKind(KindTOTPWrap, ak, sessionSK, wrapKey)`；加密失败 → 独立
+//     `credential_login_wrap_error` 审计 + 500，**不追加 session 条目**（杜绝幽灵
+//     存活条目）。
+//  9. `AddKey(ak, sessionSK, WithKind(KindTOTPWrap), WithWrapKeyID(""),
 //     WithExpiresAt(now+sessionTTL), WithMeta(Meta{Type:"login", IP}))`——
 //     **WrapKeyID 置空**（wrap 来自 TOTP code+nonce 而非 SK 间包裹，M13）；追加前
 //     惰性修剪该 AK 过期 session 条目（M11，ring.addKey 内执行）。
-//  9. persistCredentials()（失败 → credential_persist_error 审计 + 500）。
-//  10. `envelope = EncryptSecretKind(KindTOTPWrap, ak, sessionSK, wrapKey)`。
+//  10. persistCredentials()（失败 → credential_persist_error 审计 + 500，已加密
+//     envelope 丢弃——内存态保留但本次不放行）。
 //  11. RecordAudit(credential_login)；成功 → 清零该 AK 失败计数（U4）。
 //  12. 返回 {ak, session_skey_id, session_expires_at, wrapped_session_secret}。
 func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request) {
@@ -905,6 +914,23 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 	}
 	sessionTTL, _ := h.loginTotalAndWindow(req.LoginType)
 	expiresAt2 := now.Add(sessionTTL)
+
+	// 8. **先信封加密、后追加条目 / 持久化**（修复轮 1 Minor1）：envelope 加密失败
+	// 则**不追加 session 条目**——杜绝「幽灵」存活条目（服务端有主条目、客户端解
+	// 不出、nonce 已消费、失败计数却未按登录失败记）。加密是服务端内部错误（非
+	// 凭据拒绝）→ 独立审计 `credential_login_wrap_error`（Minor2）+ 500。
+	envelope, eerr := accesskey.EncryptSecretKind(accesskey.KindTOTPWrap, req.AK, sessionSK, wrapKey)
+	if eerr != nil {
+		h.RecordAudit(ctx, AuditEvent{
+			Action: auditActionCredLoginWrapError, ObjectType: "credential", Object: req.AK,
+			Result: AuditResultError, Detail: "信封加密失败",
+		})
+		sendJSONResponse(w, map[string]any{"error": "签发 session 失败"}, http.StatusInternalServerError)
+		return
+	}
+
+	// 9. AddKey：session 条目（KindTOTPWrap/WrapKeyID 空/expiresAt/Meta login+IP；
+	// 过期裁剪由 ring 内执行，M11）。ErrNotFound 属并发删除竞态（AK 刚校验过存在）。
 	skeyID, aerr := h.credentialRing.AddKey(req.AK, sessionSK,
 		accesskey.WithKind(accesskey.KindTOTPWrap),
 		accesskey.WithWrapKeyID(""),
@@ -912,30 +938,19 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 		accesskey.WithMeta(accesskey.Meta{Type: "login", IP: ip}),
 	)
 	if aerr != nil {
-		// ErrNotFound 属并发删除竞态（AK 刚校验过存在）——按登录失败处理。
 		h.recordLoginFailure(ctx, req.AK, now, "派发 session 失败")
 		loginDenied(w, http.StatusUnauthorized)
 		return
 	}
 
-	// 9. 持久化（失败 → credential_persist_error + 500，不丢内存态）。
+	// 10. 持久化（失败 → credential_persist_error + 500；已加密 envelope 丢弃——内存
+	// 态保留但本次不放行）。
 	if err := h.persistCredentials(); err != nil {
 		h.RecordAudit(ctx, AuditEvent{
 			Action: auditActionCredPersistFail, ObjectType: "credential", Object: req.AK,
 			Detail: skeyID, Result: AuditResultError,
 		})
 		sendJSONResponse(w, map[string]any{"error": "持久化失败"}, http.StatusInternalServerError)
-		return
-	}
-
-	// 10. 信封加密返回（只传 wrapped，M9）。
-	envelope, eerr := accesskey.EncryptSecretKind(accesskey.KindTOTPWrap, req.AK, sessionSK, wrapKey)
-	if eerr != nil {
-		h.RecordAudit(ctx, AuditEvent{
-			Action: auditActionCredPersistFail, ObjectType: "credential", Object: req.AK,
-			Detail: skeyID, Result: AuditResultError,
-		})
-		sendJSONResponse(w, map[string]any{"error": "签名会话失败"}, http.StatusInternalServerError)
 		return
 	}
 
@@ -959,12 +974,7 @@ func (h *Handlers) loginCredentialHandler(w http.ResponseWriter, r *http.Request
 // 达到 LoginFailLimit 时触发 per-AK 锁定（U4）；同时落 denied 审计。
 func (h *Handlers) recordLoginFailure(ctx context.Context, ak string, now time.Time, detail string) {
 	limit, window := h.loginFailPolicy()
-	locked := h.loginFailTracker.recordFailure(ak, limit, window, now)
-	status := AuditResultDenied
-	if locked {
-		status = AuditResultDenied
-	}
-	_ = status
+	h.loginFailTracker.recordFailure(ak, limit, window, now)
 	h.RecordAudit(ctx, AuditEvent{
 		Action: auditActionCredLoginDenied, ObjectType: "credential", Object: ak,
 		Result: AuditResultDenied, Detail: detail,
@@ -979,3 +989,11 @@ func (h *Handlers) ringNow() time.Time {
 	}
 	return time.Now()
 }
+
+// **TOTPSecret 内存明文加固注记（修复轮 1 建议 2）**：
+// `Key.TOTPSecret` 在服务端以**明文常驻内存**（Ring m map，随 credentials.json
+// base64 落盘）供 `pkg/otp.Validate` 在每次登录时校验动态码。这是与 SK 同级的
+// 暴露面——进程被越权读取内存即泄漏全部 TOTP secret。已知边界：静态加密（4C
+// SecureStorer / 磁盘加密）与内存加固（如 memguard / 换出 / mlock）一并延迟到
+// 4C KMS 插件任务处理；本任务是时序正确性目标，不扩大 4B 范围。勿在此引入新的
+// 明文中转副本高于必要（session SK 只在本次请求栈内存在，不进 ring JSON）。
