@@ -6,6 +6,7 @@ package server
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -113,6 +114,11 @@ type Handlers struct {
 	// Save；nil = 不持久化，纯内存场景）。
 	credentialRing  *accesskey.Ring
 	credentialStore *CredentialStore
+	// authenticators 是认证面插件化链（DEC-C）：authMiddleware 遍历链，任一成功 →
+	// Principal 入 ctx 并放行。RegisterRoutes 装配：opts.Authenticators 显式注入
+	// （非 nil → replace 默认链，宿主全权掌控）优先；nil → 默认
+	// [RingAuthenticator{credentialRing}]。api_keys Bearer 是链前独立检查，不入链。
+	authenticators []Authenticator
 	// allowInsecureLoopback 是无认证兜底开关（读取优先级：opts 注入 > cfg 配置）。
 	// 仅调试语义：ring 为空时放行 loopback 来源（见 handleNoCredentials）。
 	allowInsecureLoopback bool
@@ -488,6 +494,12 @@ type RegisterRoutesOpts struct {
 	// CredentialStore 是凭据 store（nil = 不载入/不持久化，纯内存 Ring 场景，
 	// 如注入空 Ring 的无认证测试）。
 	CredentialStore *CredentialStore
+	// Authenticators 是认证面插件化宿主嵌入点（DEC-C，R3-I1/I2）：非 nil →
+	// **replace 默认链**（宿主全权掌控，需含 RingAuthenticator 则自行加入）；nil →
+	// 默认装配 []Authenticator{RingAuthenticator{...}}。宿主可注入自有实现（映射
+	// 自有用户/会话 → Principal），文件操作按 Principal.AK 落桶（宿主把目标桶 ID
+	// 放入 Principal.AK，保持 4A 按 AK 落桶现状零回归）。
+	Authenticators []Authenticator
 }
 
 // RegisterRoutes 将所有 HTTP 路由注册到 mux 上，并返回 *Handlers。
@@ -581,6 +593,15 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	//     保证**新部署必有可访问凭据**（注册开关不影响 anonymous 生成——生成逻辑
 	//     独立于 cfg.Registration.Disable）。
 	h.bootstrapCredentials(opts)
+
+	// 认证链装配（DEC-C）：宿主注入的 Authenticators 非 nil → replace 默认链（宿主
+	// 全权掌控，需含 RingAuthenticator 则自行加入，R3-I2）；nil → 默认
+	// [RingAuthenticator{credentialRing}]（R3-I1：4A 默认行为零回归）。
+	if opts.Authenticators != nil {
+		h.authenticators = opts.Authenticators
+	} else {
+		h.authenticators = []Authenticator{NewRingAuthenticator(h.credentialRing, h.noncePool)}
+	}
 
 	// 启动时恢复持久化的信令收件箱（节点注册已在 cmd 层通过 RestoreFromSnapshot
 	// 灌入 routeTable；此处把 messages 灌入 SignalBroker 队列，重启不丢待投递信令）。
@@ -701,32 +722,35 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.localHandler = h.requestLogMiddleware(apiHandler)
 	h.tunnelHandler = tunnel.NewLocalHandler(nil, h.localHandler, log.With("component", "tunnel"))
 
-	srvMux.HandleFunc("POST /upload", h.authMiddleware(h.upload))
-	srvMux.HandleFunc("GET /download", h.authMiddleware(h.download))
-	srvMux.HandleFunc("POST /delete", h.authMiddleware(h.delete))
-	srvMux.HandleFunc("POST /rename", h.authMiddleware(h.rename))
-	srvMux.HandleFunc("GET /api/files", h.authMiddleware(h.listFiles))
-	srvMux.HandleFunc("HEAD /api/files/stat", h.authMiddleware(h.stat))
-	srvMux.HandleFunc("POST /upload/init", h.authMiddleware(h.uploadInit))
-	srvMux.HandleFunc("POST /upload/chunk", h.authMiddleware(h.uploadChunk))
-	srvMux.HandleFunc("GET /upload/status", h.authMiddleware(h.uploadStatus))
-	srvMux.HandleFunc("GET /upload/sessions", h.authMiddleware(h.uploadSessions))
-	srvMux.HandleFunc("POST /upload/complete", h.authMiddleware(h.uploadComplete))
-	srvMux.HandleFunc("GET /download/chunk", h.authMiddleware(h.downloadChunk))
-	srvMux.HandleFunc("POST /mkdir", h.authMiddleware(h.mkdir))
-	srvMux.HandleFunc("POST /rmdir", h.authMiddleware(h.rmdir))
-	srvMux.HandleFunc("GET /api/files/search", h.authMiddleware(h.searchFiles))
-	srvMux.HandleFunc("POST /api/batch/delete", h.authMiddleware(h.batchDelete))
-	srvMux.HandleFunc("POST /api/batch/rename", h.authMiddleware(h.batchRename))
-	srvMux.HandleFunc("POST /api/archive", h.authMiddleware(h.archiveHandler))
-	srvMux.HandleFunc("GET /api/archive-dir", h.authMiddleware(h.archiveDirHandler))
-	srvMux.HandleFunc("GET /api/versions", h.authMiddleware(h.listVersionsHandler))
-	srvMux.HandleFunc("POST /api/versions/restore", h.authMiddleware(h.restoreVersionHandler))
-	srvMux.HandleFunc("DELETE /api/versions", h.authMiddleware(h.deleteVersionHandler))
+	// 文件操作路由组（DEC-C）：authMiddleware + requireRole(user) 门禁
+	// （upload/download/delete/rename/list/stat/mkdir/rmdir/search/batch/chunk/
+	// archive/versions/share…；Role∈{user,admin}）。
+	srvMux.HandleFunc("POST /upload", h.fileRoute(h.upload))
+	srvMux.HandleFunc("GET /download", h.fileRoute(h.download))
+	srvMux.HandleFunc("POST /delete", h.fileRoute(h.delete))
+	srvMux.HandleFunc("POST /rename", h.fileRoute(h.rename))
+	srvMux.HandleFunc("GET /api/files", h.fileRoute(h.listFiles))
+	srvMux.HandleFunc("HEAD /api/files/stat", h.fileRoute(h.stat))
+	srvMux.HandleFunc("POST /upload/init", h.fileRoute(h.uploadInit))
+	srvMux.HandleFunc("POST /upload/chunk", h.fileRoute(h.uploadChunk))
+	srvMux.HandleFunc("GET /upload/status", h.fileRoute(h.uploadStatus))
+	srvMux.HandleFunc("GET /upload/sessions", h.fileRoute(h.uploadSessions))
+	srvMux.HandleFunc("POST /upload/complete", h.fileRoute(h.uploadComplete))
+	srvMux.HandleFunc("GET /download/chunk", h.fileRoute(h.downloadChunk))
+	srvMux.HandleFunc("POST /mkdir", h.fileRoute(h.mkdir))
+	srvMux.HandleFunc("POST /rmdir", h.fileRoute(h.rmdir))
+	srvMux.HandleFunc("GET /api/files/search", h.fileRoute(h.searchFiles))
+	srvMux.HandleFunc("POST /api/batch/delete", h.fileRoute(h.batchDelete))
+	srvMux.HandleFunc("POST /api/batch/rename", h.fileRoute(h.batchRename))
+	srvMux.HandleFunc("POST /api/archive", h.fileRoute(h.archiveHandler))
+	srvMux.HandleFunc("GET /api/archive-dir", h.fileRoute(h.archiveDirHandler))
+	srvMux.HandleFunc("GET /api/versions", h.fileRoute(h.listVersionsHandler))
+	srvMux.HandleFunc("POST /api/versions/restore", h.fileRoute(h.restoreVersionHandler))
+	srvMux.HandleFunc("DELETE /api/versions", h.fileRoute(h.deleteVersionHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	srvMux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
-	srvMux.HandleFunc("POST /api/share", h.authMiddleware(h.createShareHandler))
+	srvMux.HandleFunc("POST /api/share", h.fileRoute(h.createShareHandler))
 	srvMux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 
 	// 分享管理 API（localMux：隧道内部使用）
@@ -734,9 +758,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/shares", h.listSharesHandler)
 	localMux.HandleFunc("DELETE /api/shares/{token}", h.revokeShareHandler)
 
-	// 分享管理 API（主 mux：Bearer auth）
-	srvMux.HandleFunc("GET /api/shares", h.authMiddleware(h.listSharesHandler))
-	srvMux.HandleFunc("DELETE /api/shares/{token}", h.authMiddleware(h.revokeShareHandler))
+	// 分享管理 API（主 mux：Bearer auth + requireRole(user) 门禁）
+	srvMux.HandleFunc("GET /api/shares", h.fileRoute(h.listSharesHandler))
+	srvMux.HandleFunc("DELETE /api/shares/{token}", h.fileRoute(h.revokeShareHandler))
 
 	// 云端下载 API（localMux：隧道认证）
 	localMux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
@@ -905,6 +929,25 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	h.handler = h.metricsMiddleware(h.requestLogMiddleware(srvMux))
 
 	return h
+}
+
+// fileRoute 包装文件操作路由：authMiddleware 认证 + requireRole(user) 门禁（DEC-C）。
+// 认证面插件化后，文件操作路由组（upload/download/delete/rename/list/stat/mkdir/rmdir/
+// search/batch/chunk/archive/versions/share…）要求 Role∈{user,admin}（minRole=user；
+// R3-M4：空 Role 归一 user 放行）。未认证且非回环直通（principal==nil）→ 401；
+// 角色不足 → 403。
+func (h *Handlers) fileRoute(handler http.HandlerFunc) http.HandlerFunc {
+	return h.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if err := requireRole(PrincipalFrom(r.Context()), string(accesskey.RoleUser)); err != nil {
+			status := http.StatusForbidden
+			if errors.Is(err, errUnauthorized) {
+				status = http.StatusUnauthorized
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		handler(w, r)
+	})
 }
 
 // bootstrapCredentials 装配凭据 Ring 与关联 store（RegisterRoutes 启动时调用一次）：
