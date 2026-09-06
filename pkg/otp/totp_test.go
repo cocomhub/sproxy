@@ -116,7 +116,7 @@ func TestGenerateSecret(t *testing.T) {
 }
 
 func TestURI(t *testing.T) {
-	// RFC 4648 base32 无 padding： "12345678901234567890" → GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ（40 字节无 padding）
+	// RFC 4648 base32 无 padding： "12345678901234567890" → GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ（32 字符|20 字节×8/5=32）
 	secret := []byte("12345678901234567890")
 
 	tp := NewTOTP(secret)
