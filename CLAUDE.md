@@ -287,9 +287,9 @@ type Conn interface {
 | `tls.cert_file` / `tls.key_file` | string | | |
 | `tls.auto_tls` | bool | true | 自动生成 ECDSA P-256 自签证书 |
 | `tls.client_ca` | string | | mTLS CA 证书路径 |
-| `registration.disable` | bool | false | 注册开关：false=允许注册（默认）；true=禁止注册（仅存量用户）。anonymous 首启生成（ring 空时）不受其影响 |
+| `registration.disable` | bool | false | 注册开关：false=允许注册（默认）；true=禁止注册（仅存量用户） |
 | `allow_insecure_loopback` | bool | false | 无任何凭据（ring 空）时放行 loopback 来源 GET/HEAD（仅本地调试，生产勿开） |
-| `credential_ttl` | duration | 720h | 首启 anonymous 凭据有效期；负值 = 禁用首启生成 |
+| `credential_ttl` | duration | 720h | 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d） |
 | `api_keys.enabled` / `.keys` | | 关闭 | 多用户 API 密钥（独立 Bearer 特性，与 store 凭据互斥，优先） |
 | `rate_limit.enabled` / `.requests` / `.window` | | 关闭 | tunnel handler 限流 |
 | `chunk_size` | int | 4 MB | 分块上传每块大小 |
@@ -316,7 +316,7 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 
 ## 认证：SproxySig 请求签名（`pkg/sproxysig`）
 
-服务端凭据 Ring 非空后（首启自动登记 anonymous 凭据；凭据由 `<storage_root>/<owner>/meta/credentials.json` store 持久化，取代旧 `access_keys`），除
+服务端**U3 零凭据启动**：store 为空时不再生成首启 anonymous 凭据，系统以零凭据等待注册——首个 admin 经本机回环 `POST /api/credentials/register` 注册（唯一用户入口，原子授 admin；仅回环可达，U2 门禁）。凭据由 `<storage_root>/<owner>/meta/credentials.json` store 持久化，取代旧 `access_keys`。Ring 非空后除
 `/healthz`、`/version`、`/ui/`、`POST /tunnel` 外的全部 HTTP 面（文件/信令/节点列表/
 服务发现/网关/云端下载）走 **SproxySig v2 请求签名**，替代旧 `auth_token` 明文 Bearer 与 v1。
 `api_keys`（多用户 Bearer）与 store 凭据互斥，api_keys 优先。
@@ -328,7 +328,7 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 - **AK/SK 格式（`pkg/accesskey` 唯一事实源）**：AK=`ak[-<mesh>]-<32hex>`（16B 标准；解析层兼容 legacy `ak[-<mesh>]-<16hex>` 8B）；SK=64hex(32B)。**2026-09-05 破坏性变更（alpha）**：旧 `sk-` 前缀 AK 一律不再识别
 - 客户端（sclient/FileClient/mesh/relay/信令）统一 `--access-key`/`--access-key-secret`（或配置 `access_key`/`access_key_secret`，多 SK 时可选 `access_key_id`），Secret 只存本端计算签名、永不上线
 - Web UI 用 **WebCrypto** 计算 HMAC（`crypto.subtle`），AK/SK 存 `sessionStorage`（关页即清）；未配置 AK/SK 时不发签名头（无认证兼容）
-- 生成/轮换 AK/SK：`sclient trust ak add [--mesh <name>]`（不指定 ak 时本地生成一对并注册，服务端单次回传初始 Secret）；`sclient trust renew` 轮换 SK（服务端控 TTL，默认 30d）；`sclient trust sk list/delete/expire` 管理 SK 条目（管理员可 `trust ak list/add/delete`）
+- 生成/轮换 AK/SK：`sclient trust ak add [--mesh <name>] [--role user|node]`（不指定 ak 时本地生成一对并注册，服务端单次回传初始 Secret；`--role node` 创建 mesh 节点账号——不可访问文件组，默认 `user`）；`sclient trust renew` 轮换 SK（服务端控 TTL，默认 30d）；`sclient trust sk list/delete/expire` 管理 SK 条目（管理员可 `trust ak list/add/delete`）
 
 ## sclient CLI（`cmd/sclient/`）
 
