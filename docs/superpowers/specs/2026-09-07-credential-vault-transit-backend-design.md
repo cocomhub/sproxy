@@ -141,11 +141,12 @@ if cfg.CredentialStore.Encrypt {
 | 层 | 手段 | 覆盖 |
 |---|---|---|
 | L1 单元 | httptest 假 Vault | 请求/响应 JSON 解析、base64/AAD context 编解码、错误分类（403/404/503-sealed/5xx）、decrypt 缓存命中/过期/失效、非 vault:v1: 输入拒绝、ca_file 加载 |
-| L2 契约 | 真 Vault dev mode | 真实 API 行为（encrypt→decrypt 往返）、AAD context 语义（不同 context 解密失败）、密文格式（vault:v1: 前缀、版本字段） |
-| L3 行为 | 真 Vault + 状态操作 | key 轮换（rotate 后旧密文仍可解）、权限拒绝（无权限 token → 403）、seal/unseal（sealed 时加密失败明确报错） |
+| L2 契约 | 真 Vault dev mode | 真实 API 行为（encrypt→decrypt 往返）、AAD context 语义（同 AAD 成功 / 异 AAD 解密失败，**key 需 derived=true**——非 derived key 忽略 context）、密文格式（vault:v1: 前缀、版本字段） |
+| L3 行为 | 真 Vault + 状态操作 | key 轮换（rotate 后 latest_version 递增 + 旧密文仍可解）、权限拒绝（受限 policy token → Decrypt permission denied） |
 
-- **L2/L3 用真实 Vault**：CI 无 Vault 服务 → L2/L3 用 **test tag**（如 `//go:build vault_integration`）或 docker 可选——设计裁定：**L2/L3 走 build tag `vault_integration`**，本地有 Vault/docker 时 `go test -tags=vault_integration` 跑；CI 默认不跑（避免 CI 依赖外部服务），但提供 `make test-vault` 目标手动/本地跑。L1（httptest mock）进常规 CI。
-- 真实 Vault 冒烟一次（L2/L3）记录为合并前 to-do（本地 docker `vault server -dev`）。
+- **L2/L3 用真实 Vault（用户 2026-09-07 调整后）**：`vault_integration_test.go` **无 build tag**、运行时检测 `VAULT_ADDR`（默认 http://127.0.0.1:8200）可达性——不可达 `t.Skip`（本地无 Vault / CI 非 ubuntu-vault job 自动跳过不失败）。docker 容器（`scripts/test-vault.sh`）/ CI ubuntu `services.vault` 起真实 Vault（镜像钉 minor 如 `hashicorp/vault:1.18`）时自动实跑 L2/L3。L1（httptest mock）进常规 CI 恒跑。
+- **requireVault 就绪语义（审查 M8 定稿）**：健康检查 `GET /v1/sys/health`——**200 视为就绪**；网络不可达 / 429（standby）/501（未初始化）/503（sealed）一律视为不可用 → `t.Skip`。
+- L3-seal 不做自动化（真实 seal 锁 dev 实例、需 unseal key 恢复，环境破坏风险）——sealed 错误分类已由 L1 mock（503 sealed 用例）覆盖；文档说明默认跳过。
 
 ## 范围外（后续独立规划）
 
@@ -156,6 +157,6 @@ if cfg.CredentialStore.Encrypt {
 ## 文件清单
 
 - 新建：`pkg/accesskey/vault_storer.go`、`pkg/accesskey/vault_storer_test.go`（L1 httptest）
-- 新建（可选 L2/L3）：`pkg/accesskey/vault_integration_test.go`（`//go:build vault_integration`）
+- 新建：`pkg/accesskey/vault_integration_test.go`（**无 build tag**，运行时检测 VAULT_ADDR 可达性，不可达 `t.Skip`）、`scripts/test-vault.sh`（docker 自动起容器）
 - 修改：`pkg/server/config.go`（`CredentialStoreConfig` 加 Backend + Vault 子段 + Validate/SetDefaults）、`pkg/server/handlers.go`（Bootstrap 分支 + resolveVaultToken）、`pkg/server/config_test.go`（Validate 增量）、`pkg/server/credential_store_encrypt_test.go`（装配）
-- 文档：`config.example.yaml`、`docs/config.md`、Makefile（test-vault 目标）
+- 文档/CI：`config.example.yaml`、`docs/config.md`、Makefile（test-vault 目标）、`.github/workflows/ci.yml`（ubuntu test job + vault service；windows 拆独立 job 仅 L1）

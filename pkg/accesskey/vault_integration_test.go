@@ -42,9 +42,14 @@ func vaultEnv() (addr, token string) {
 	return addr, token
 }
 
+// vaultClient 是集成测试共用的 Vault HTTP client（带 10s 超时，与 vault_storer.go 默认
+// 一致——防 Vault 卡死时挂到 go test 全局 timeout）。
+var vaultClient = &http.Client{Timeout: 10 * time.Second}
+
 // requireVault 探测 Vault 可达性：健康检查 GET {addr}/v1/sys/health（短超时）。
-// 网络不可达 / 状态非 200/429（dev/active 实例）→ t.Skip（无 Vault 环境自动跳过）。
-// 返回 (addr, token) 供用例装配 VaultTransitStorer。
+// 语义（用户 2026-09-07 调整 + 审查 M8）：**200 视为就绪**；网络不可达 /
+// 429（standby）/501（未初始化）/503（sealed）等一律视为不可用 → t.Skip（集成测试需
+// unsealed dev 实例）。返回 (addr, token) 供用例装配 VaultTransitStorer。
 func requireVault(t *testing.T) (string, string) {
 	t.Helper()
 	addr, token := vaultEnv()
@@ -58,26 +63,31 @@ func requireVault(t *testing.T) (string, string) {
 		t.Skipf("Vault 不可达（%v）——跳过 L2/L3 集成测试（docker/CI vault service 存在时自动实跑）", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// 200 = dev/active；429 = standby。501（未初始化）/503（sealed）等视为不可用，
-	// 跳过而非硬失败（集成测试需 unsealed dev 实例）。
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusTooManyRequests {
-		t.Skipf("Vault 状态码 %d（需 dev/active 实例，health 期望 200）——跳过 L2/L3 集成测试", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Skipf("Vault 状态码 %d（仅 200=dev/active 视为就绪；429/501/503 视为不可用）——跳过 L2/L3 集成测试", resp.StatusCode)
 	}
 	return addr, token
 }
 
-// vaultPost 向 Vault HTTP API 发 POST（X-Vault-Token + JSON body），返回状态码与 body。
-func vaultPost(t *testing.T, addr, token, path, body string) (int, string) {
+// vaultRequest 向 Vault HTTP API 发 method 请求（X-Vault-Token；POST 带 JSON body），
+// 返回状态码与 body。带超时 client（M5）。
+func vaultRequest(t *testing.T, method, addr, token, path, body string) (int, string) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, addr+path, strings.NewReader(body))
+	var reqBody io.Reader
+	if body != "" {
+		reqBody = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, addr+path, reqBody)
 	if err != nil {
-		t.Fatalf("构造 POST %s 请求: %v", path, err)
+		t.Fatalf("构造 %s %s 请求: %v", method, path, err)
 	}
 	req.Header.Set("X-Vault-Token", token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := vaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
+		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
@@ -85,6 +95,18 @@ func vaultPost(t *testing.T, addr, token, path, body string) (int, string) {
 		t.Fatalf("读响应 %s: %v", path, err)
 	}
 	return resp.StatusCode, string(data)
+}
+
+// vaultPost 向 Vault HTTP API 发 POST（X-Vault-Token + JSON body），返回状态码与 body。
+func vaultPost(t *testing.T, addr, token, path, body string) (int, string) {
+	t.Helper()
+	return vaultRequest(t, http.MethodPost, addr, token, path, body)
+}
+
+// vaultGet 向 Vault HTTP API 发 GET（X-Vault-Token），返回状态码与 body。
+func vaultGet(t *testing.T, addr, token, path string) (int, string) {
+	t.Helper()
+	return vaultRequest(t, http.MethodGet, addr, token, path, "")
 }
 
 // ensureTransitKey 幂等装配 transit engine 挂载 + 命名加密 key（重复跑不炸）。
@@ -195,20 +217,17 @@ func TestVault_L3_KeyRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encrypt(rotate 前): %v", err)
 	}
+	versionBefore := latestKeyVersion(t, addr, token, key)
 
 	// rotate key（幂等）。
 	if code, body := vaultPost(t, addr, token, "/v1/transit/keys/"+key+"/rotate", `{}`); !httpOK(code) {
 		t.Fatalf("rotate key %s: HTTP %d: %s", key, code, body)
 	}
 
-	// 新密文应使用新版本（密文不同）。
-	newSecret := []byte("post-rotation-secret")
-	ctNew, err := s.Encrypt(newSecret)
-	if err != nil {
-		t.Fatalf("Encrypt(rotate 后): %v", err)
-	}
-	if bytes.Equal(ctOld, ctNew) {
-		t.Fatal("rotate 后新密文应与旧密文不同（版本前向）")
+	// 版本前向以 Vault latest_version 递增为准（M2：密文不等不能证版本前向——每次 Encrypt
+	// 随机 nonce 同 key 两次密文必不同，rotate 未生效也成立）。
+	if got := latestKeyVersion(t, addr, token, key); got <= versionBefore {
+		t.Fatalf("rotate 后 latest_version 应递增（before=%d, after=%d）", versionBefore, got)
 	}
 	// 旧密文仍可解（Vault 按版本自解）。
 	pt, err := s.Decrypt(ctOld)
@@ -218,6 +237,24 @@ func TestVault_L3_KeyRotation(t *testing.T) {
 	if !bytes.Equal(pt, old) {
 		t.Fatalf("旧密文还原不一致, got %q", pt)
 	}
+}
+
+// latestKeyVersion 读取 transit key 的 latest_version（GET /v1/transit/keys/<name>）。
+func latestKeyVersion(t *testing.T, addr, token, name string) int {
+	t.Helper()
+	code, body := vaultGet(t, addr, token, "/v1/transit/keys/"+name)
+	if code != http.StatusOK {
+		t.Fatalf("read transit key %s: HTTP %d: %s", name, code, body)
+	}
+	var out struct {
+		Data struct {
+			LatestVersion int `json:"latest_version"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatalf("解析 key %s 响应: %v", name, err)
+	}
+	return out.Data.LatestVersion
 }
 
 // TestVault_L3_PermissionDeniedOnDecrypt 验证受限 token：仅 encrypt 无 decrypt 的 policy

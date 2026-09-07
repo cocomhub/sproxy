@@ -65,7 +65,7 @@ jobs:
     # 全量跑，vault_integration_test.go 检测 VAULT_ADDR 可达 → 不 skip 实跑 L2/L3。
     services:
       vault:
-        image: hashicorp/vault:latest
+        image: hashicorp/vault:1.18
         env:
           VAULT_DEV_ROOT_TOKEN_ID: root
         ports:
