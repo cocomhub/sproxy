@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -792,23 +793,30 @@ func TestVaultCache_Hit_ReturnsCopy(t *testing.T) {
 	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
 
 	const ct = "vault:v1:copy"
-	first, err := s.Decrypt([]byte(ct))
-	if err != nil {
+	// 首解（未命中 → Vault 请求，写入缓存）。
+	if _, err := s.Decrypt([]byte(ct)); err != nil {
 		t.Fatalf("Decrypt #1: %v", err)
 	}
-	if len(first) == 0 {
-		t.Fatalf("测试前提不成立：明文为空无法验证副本隔离")
-	}
-	first[0] = 'X' // 篡改返回明文
+	// 命中路径拿到 second → 篡改它：若 cacheGet 回归成直接返内部 entry.plaintext（别名
+	// bug），篡改会污染缓存内部 buffer，Decrypt#3 必然复现。此步真正锁死 cacheGet
+	// copy-on-read。
 	second, err := s.Decrypt([]byte(ct))
 	if err != nil {
 		t.Fatalf("Decrypt #2: %v", err)
 	}
-	if string(second) != "sensitive-data" {
-		t.Fatalf("命中缓存应返回不受篡改影响的明文, got %q", second)
+	if len(second) == 0 {
+		t.Fatalf("测试前提不成立：明文为空无法验证副本隔离")
+	}
+	second[0] = 'X'
+	third, err := s.Decrypt([]byte(ct))
+	if err != nil {
+		t.Fatalf("Decrypt #3: %v", err)
+	}
+	if string(third) != "sensitive-data" {
+		t.Fatalf("cacheGet 应返回副本（篡改命中结果不影响后续读）, got %q", third)
 	}
 	if n := mock.reqCount(); n != 1 {
-		t.Fatalf("缓存命中后 mock 应只收到 1 次请求, got %d", n)
+		t.Fatalf("三次 Decrypt 均应命中缓存, mock 应只收到 1 次请求, got %d", n)
 	}
 }
 
@@ -899,5 +907,45 @@ func TestVaultCache_Encrypt_DoesNotTouch(t *testing.T) {
 	s.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("Encrypt 不应写缓存, 缓存长度应为 0, got %d", n)
+	}
+}
+
+// TestVaultCache_ConcurrentDecrypt_RaceSafe 验证缓存并发安全：N goroutine 对同一 storer
+// 混合同密文（命中路径，并发读）+ 各自异密文（写入路径）并发 Decrypt → -race 验证无数据
+// 竞争；请求计数确定性正确（shared 预热 1 次 + 每 goroutine 各自 distinct 1 次）。
+func TestVaultCache_ConcurrentDecrypt_RaceSafe(t *testing.T) {
+	const goroutines = 8
+	mock := newMockVault(t, vaultTestToken)
+	mock.setDecryptFn(func(ciphertext string) string { return "pt:" + ciphertext })
+	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
+
+	const sharedCT = "vault:v1:shared"
+	// 预填充 shared：并发阶段 shared 恒命中，不产生「并发首解同 key → 重复请求」的计数竞态。
+	if _, err := s.Decrypt([]byte(sharedCT)); err != nil {
+		t.Fatalf("预热 shared 缓存: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := range goroutines {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ownCT := fmt.Appendf(nil, "vault:v1:own-%d", i)
+			// shared 命中（并发读已缓存密文）+ own 首解（miss 写缓存）+ own 二次（命中）。
+			if _, err := s.Decrypt([]byte(sharedCT)); err != nil {
+				t.Errorf("goroutine %d Decrypt shared: %v", i, err)
+			}
+			if _, err := s.Decrypt(ownCT); err != nil {
+				t.Errorf("goroutine %d Decrypt own#1: %v", i, err)
+			}
+			if _, err := s.Decrypt(ownCT); err != nil {
+				t.Errorf("goroutine %d Decrypt own#2: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	// shared 预热 1 次 + 每 goroutine 各自 distinct 密文 1 次 = goroutines+1。
+	if want, got := goroutines+1, mock.reqCount(); got != want {
+		t.Fatalf("并发 Decrypt 请求计数应为 %d, got %d", want, got)
 	}
 }

@@ -59,7 +59,7 @@ type VaultOptions struct {
 	CAFile   string        // 自签 CA 证书路径（可选；空 → 系统证书池）
 	Timeout  time.Duration // HTTP 超时（≤0 → 10s）
 	AADPath  string        // AAD context 绑定（建议调用方传凭据文件相对路径）
-	CacheTTL time.Duration // decrypt 结果缓存 TTL（0 = 关闭缓存）
+	CacheTTL time.Duration // decrypt 结果缓存 TTL（≤0 均视为关闭）
 }
 
 // 编译期断言：*VaultTransitStorer 满足 SecureStorer（防签名漂移，仿 AESGCMStorer 断言模式）。
@@ -76,9 +76,14 @@ const (
 	// vaultMaxResponseBytes 是 Vault 响应体读取上限（1 MiB）。Transit 成功/错误响应都很小；
 	// 超过上限疑似非 Vault Transit 端点或中间层异常，fail-closed 拒绝解析（防无界读内存）。
 	vaultMaxResponseBytes = 1 << 20
-	// vaultCacheMaxEntries 是 decrypt 缓存惰性清理的触发阈值：插入时 len(cache) 超过该值
-	// 就清一次过期项（防无界增长；简单 map 无容量上限，靠过期清理回收）。
+	// vaultCacheMaxEntries 是 decrypt 缓存的软阈值：插入时 len(cache) 达到该规模先做一次
+	// 过期项软清理。TTL 窗口内的活跃 distinct 密文数远小于此值（正常读路径只 Load 同一
+	// 凭据文件），软清理足以回收；它不是硬上限——硬上限见 vaultCacheHardLimit。
 	vaultCacheMaxEntries = 1000
+	// vaultCacheHardLimit 是 decrypt 缓存的硬顶（2×软阈值）：软清理后 len(cache) 仍达到
+	// 硬顶 → 驱逐任意活项，保证 map 规模有界（防 TTL 窗口内活跃 distinct 密文超软阈值时
+	// 每次插入 O(n) 软清理清不掉导致的无界增长）。
+	vaultCacheHardLimit = 2 * vaultCacheMaxEntries
 )
 
 // vaultEncryptRequest 是 POST {mount}/encrypt/{key} 的请求体。
@@ -265,25 +270,34 @@ func (s *VaultTransitStorer) Decrypt(ciphertext []byte) ([]byte, error) {
 }
 
 // cacheGet 查询解密缓存（调用方保证 s.cache != nil）。命中且未过期 → 返回明文副本 + true；
-// 未命中 / 已过期 → (nil, false)（过期项留待 cachePut 惰性清理，此处不删）。
+// 未命中 → (nil, false)。发现已过期 → 顺手 delete 释放（明文不应滞留超过 TTL，且不必依赖
+// 后续惰性清理时机）。
 func (s *VaultTransitStorer) cacheGet(key string) ([]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.cache[key]
-	if !ok || !time.Now().Before(entry.expires) {
+	if !ok {
+		return nil, false
+	}
+	if !time.Now().Before(entry.expires) {
+		delete(s.cache, key)
 		return nil, false
 	}
 	// 返回副本：防调用方改写内部缓存 buffer。
 	return append([]byte(nil), entry.plaintext...), true
 }
 
-// cachePut 写入解密缓存（调用方保证 s.cache != nil）。明文存副本（防外部改写）。
-// 插入时 len(cache) 超过阈值触发一次惰性过期清理（防无界增长）。
+// cachePut 写入解密缓存（调用方保证 s.cache != nil）。明文存副本（防外部改写）。内存上限
+// 双层保障：先软清理（len ≥ 软阈值时清一次过期项），软清理后仍达硬顶则驱逐任意活项
+// （TTL 窗口内活跃 distinct 密文超软阈值时仍保证 map 有界）。
 func (s *VaultTransitStorer) cachePut(key string, plaintext []byte, expires time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.cache) > vaultCacheMaxEntries {
+	if len(s.cache) >= vaultCacheMaxEntries {
 		s.sweepExpiredLocked()
+	}
+	if len(s.cache) >= vaultCacheHardLimit {
+		s.evictToHardLimitLocked()
 	}
 	s.cache[key] = vaultCacheEntry{
 		plaintext: append([]byte(nil), plaintext...),
@@ -291,13 +305,24 @@ func (s *VaultTransitStorer) cachePut(key string, plaintext []byte, expires time
 	}
 }
 
-// sweepExpiredLocked 清理一次全部已过期缓存项（调用方须持有 s.mu）。
+// sweepExpiredLocked 软清理一次全部已过期缓存项（调用方须持有 s.mu）。
 func (s *VaultTransitStorer) sweepExpiredLocked() {
 	now := time.Now()
 	for k, e := range s.cache {
 		if !now.Before(e.expires) {
 			delete(s.cache, k)
 		}
+	}
+}
+
+// evictToHardLimitLocked 硬顶兜底：驱逐任意活项直至 len(cache) < vaultCacheHardLimit
+// （调用方须持有 s.mu；驱逐后由调用方插入新项，map 规模保持在硬顶以内）。
+func (s *VaultTransitStorer) evictToHardLimitLocked() {
+	for k := range s.cache {
+		if len(s.cache) < vaultCacheHardLimit {
+			return
+		}
+		delete(s.cache, k)
 	}
 }
 
