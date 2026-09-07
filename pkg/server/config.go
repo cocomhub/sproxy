@@ -308,8 +308,9 @@ type VaultConfig struct {
 	CAFile    string        `yaml:"ca_file" mapstructure:"ca_file"`     // 自签 CA PEM 路径（可选，默认系统池）
 	Timeout   time.Duration `yaml:"timeout" mapstructure:"timeout"`     // 默认 10s
 	// CacheTTL 是 VaultTransitStorer decrypt 结果缓存 TTL（默认 30s）。viper 零值歧义
-	// 无法区分「未设」与「显式 0」——SetDefaults 对 ==0 一律回落 30s，故 config 层缓存
-	// 恒默认开、不可显式关（文档注明）；VaultOptions.CacheTTL 内部 API 可传 0 关闭（测试用）。
+	// 无法区分「未设」与「显式 0」——SetDefaults 对 <=0 一律回落 30s（负值同视为未设），
+	// 故 config 层缓存恒默认开、不可显式关（文档注明）；VaultOptions.CacheTTL 内部 API
+	// 可传 0 关闭（测试用）。
 	CacheTTL time.Duration `yaml:"cache_ttl" mapstructure:"cache_ttl"`
 }
 
@@ -484,7 +485,7 @@ func Default() *Config {
 				Mount:    "transit",     // transit engine 缺省挂载路径
 				TokenEnv: "VAULT_TOKEN", // token 环境变量名
 				Timeout:  10 * time.Second,
-				CacheTTL: 30 * time.Second, // decrypt 缓存默认 30s（viper 零值歧义：0 回落 30s，config 不可关缓存）
+				CacheTTL: 30 * time.Second, // decrypt 缓存默认 30s（viper 零值歧义：<=0 回落 30s，config 不可关缓存）
 			},
 		},
 		Web: WebConfig{
@@ -570,7 +571,7 @@ func (c *Config) SetDefaults() {
 		c.CredentialTTL = 30 * 24 * time.Hour
 	}
 	// credential_store 子配置默认（4C-2 / Vault Transit）：backend 空 → aesgcm；vault 子段
-	// mount/token_env/timeout/cache_ttl 零值回落。CacheTTL 用 ==0 → 30s（viper 零值歧义，
+	// mount/token_env/timeout/cache_ttl 零值回落。CacheTTL 用 <=0 → 30s（viper 零值歧义，
 	// config 层缓存恒默认开、不可显式关，见 VaultConfig.CacheTTL 注释）。
 	if c.CredentialStore.Backend == "" {
 		c.CredentialStore.Backend = "aesgcm"
@@ -890,6 +891,22 @@ func (c *Config) Validate() error {
 		case "vault":
 			if c.CredentialStore.Vault.Addr == "" {
 				return fmt.Errorf("credential_store.backend=vault 需配置 credential_store.vault.addr")
+			}
+			// vault.addr 解析 + scheme 校验（对齐 sync_remotes 先例）。非 loopback 主机
+			// 必须 https——http 明文传输 Vault token + 凭据属泄露向量（安全审查 MEDIUM）；
+			// loopback 允许 http（dev 容器 http://127.0.0.1:8200）。
+			u, perr := url.Parse(c.CredentialStore.Vault.Addr)
+			if perr != nil {
+				return fmt.Errorf("credential_store.vault.addr=%q 非法: %v", c.CredentialStore.Vault.Addr, perr)
+			}
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return fmt.Errorf("credential_store.vault.addr=%q scheme %q 非法，仅允许 http/https", c.CredentialStore.Vault.Addr, u.Scheme)
+			}
+			if u.Host == "" {
+				return fmt.Errorf("credential_store.vault.addr=%q 缺少 host", c.CredentialStore.Vault.Addr)
+			}
+			if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+				return fmt.Errorf("credential_store.vault.addr=%q 非 loopback 必须使用 https（防 Vault token/凭据明文传输）", c.CredentialStore.Vault.Addr)
 			}
 			if c.CredentialStore.Vault.KeyName == "" {
 				return fmt.Errorf("credential_store.backend=vault 需配置 credential_store.vault.key_name")

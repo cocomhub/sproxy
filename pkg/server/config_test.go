@@ -4,6 +4,7 @@
 package server
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -856,26 +857,80 @@ func TestConfig_CredentialStore_Backend(t *testing.T) {
 			mut(&c.CredentialStore.Vault)
 			return c
 		}
+		const addr = "https://vault:8200" // 非 loopback 需 https（S-1 收紧）
 		if err := vaultBase(func(*VaultConfig) {}).Validate(); err == nil || !strings.Contains(err.Error(), "vault.addr") {
 			t.Errorf("vault.addr 空应拒绝且错误含 vault.addr, got %v", err)
 		}
-		if err := vaultBase(func(v *VaultConfig) { v.Addr = "http://vault:8200" }).Validate(); err == nil || !strings.Contains(err.Error(), "vault.key_name") {
+		if err := vaultBase(func(v *VaultConfig) { v.Addr = addr }).Validate(); err == nil || !strings.Contains(err.Error(), "vault.key_name") {
 			t.Errorf("vault.key_name 空应拒绝且错误含 vault.key_name, got %v", err)
 		}
 		err := vaultBase(func(v *VaultConfig) {
-			v.Addr = "http://vault:8200"
+			v.Addr = addr
 			v.KeyName = "sproxy"
 		}).Validate()
 		if err == nil || !strings.Contains(err.Error(), "token") {
 			t.Errorf("token 源全空应拒绝且错误含 token, got %v", err)
 		}
 		err = vaultBase(func(v *VaultConfig) {
-			v.Addr = "http://vault:8200"
+			v.Addr = addr
 			v.KeyName = "sproxy"
 			v.TokenFile = "/etc/sproxy/vault-token"
 		}).Validate()
 		if err != nil {
 			t.Errorf("addr+key_name+token_file 齐应通过 Validate, got %v", err)
+		}
+		// M-2 正向：自定义 TokenEnv 名 + 环境变量非空 → 通过（防 tokEnv 回落逻辑回归）。
+		t.Setenv("SPROXY_TEST_VAULT_TOKEN", "tok")
+		if err := vaultBase(func(v *VaultConfig) {
+			v.Addr = addr
+			v.KeyName = "sproxy"
+			v.TokenEnv = "SPROXY_TEST_VAULT_TOKEN"
+		}).Validate(); err != nil {
+			t.Errorf("自定义 token_env + 环境变量应通过 Validate, got %v", err)
+		}
+		// M-2 正向：TokenEnv=="" 回落 VAULT_TOKEN + 环境变量非空 → 通过。
+		t.Setenv("VAULT_TOKEN", "tok")
+		if err := vaultBase(func(v *VaultConfig) {
+			v.Addr = addr
+			v.KeyName = "sproxy"
+			v.TokenEnv = ""
+		}).Validate(); err != nil {
+			t.Errorf("TokenEnv 空回落 VAULT_TOKEN + 环境变量应通过 Validate, got %v", err)
+		}
+	})
+	t.Run("backend=vault addr scheme/loopback 校验", func(t *testing.T) {
+		t.Setenv("VAULT_TOKEN", "tok")
+		cases := []struct {
+			name    string
+			addr    string
+			wantErr string // 空 = 应通过
+		}{
+			{name: "loopback http 通过", addr: "http://127.0.0.1:8200"},
+			{name: "localhost http 通过", addr: "http://localhost:8200"},
+			{name: "IPv6 loopback http 通过", addr: "http://[::1]:8200"},
+			{name: "非 loopback https 通过", addr: "https://vault.example.com:8200"},
+			{name: "非 loopback http 拒绝", addr: "http://vault.example.com:8200", wantErr: "https"},
+			{name: "无 scheme 拒绝", addr: "vault:8200", wantErr: "scheme"},
+			{name: "缺 host 拒绝", addr: "https://", wantErr: "host"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				c := Default()
+				c.CredentialStore.Backend = "vault"
+				c.CredentialStore.Encrypt = true
+				c.CredentialStore.Vault.Addr = tc.addr
+				c.CredentialStore.Vault.KeyName = "sproxy"
+				err := c.Validate()
+				if tc.wantErr == "" {
+					if err != nil {
+						t.Errorf("addr %q 应通过 Validate, got %v", tc.addr, err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("addr %q 应拒绝且错误含 %q, got %v", tc.addr, tc.wantErr, err)
+				}
+			})
 		}
 	})
 	t.Run("backend=aesgcm+encrypt master key 门禁回归", func(t *testing.T) {
@@ -893,4 +948,53 @@ func TestConfig_CredentialStore_Backend(t *testing.T) {
 			t.Errorf("aesgcm+encrypt + master_key_file 应通过 Validate, got %v", err)
 		}
 	})
+}
+
+// TestConfig_Vault_NestedDecode 验证 credential_store.vault 子段嵌套 YAML/mapstructure 解码
+// （S-2）：含 vault.addr/key_name/timeout/cache_ttl（字符串 duration）的 YAML 走 LoadConfig →
+// 断言 Timeout/CacheTTL 正确解码；Mount/TokenEnv 显式空 → SetDefaults 回落默认。
+func TestConfig_Vault_NestedDecode(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "cfg.yaml")
+	doc := `
+addr: ":18083"
+storage_root: "./storage"
+credential_store:
+  encrypt: false
+  backend: vault
+  vault:
+    addr: "https://vault:8200"
+    key_name: "sproxy"
+    mount: ""
+    token_env: ""
+    timeout: "10s"
+    cache_ttl: "30s"
+`
+	if err := os.WriteFile(cfgPath, []byte(doc), 0o600); err != nil {
+		t.Fatalf("写临时配置: %v", err)
+	}
+	c, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.CredentialStore.Backend != "vault" {
+		t.Errorf("backend 应解码为 vault, got %q", c.CredentialStore.Backend)
+	}
+	if c.CredentialStore.Vault.Addr != "https://vault:8200" {
+		t.Errorf("vault.addr 应解码为 https://vault:8200, got %q", c.CredentialStore.Vault.Addr)
+	}
+	if c.CredentialStore.Vault.KeyName != "sproxy" {
+		t.Errorf("vault.key_name 应解码为 sproxy, got %q", c.CredentialStore.Vault.KeyName)
+	}
+	if c.CredentialStore.Vault.Timeout != 10*time.Second {
+		t.Errorf("vault.timeout 应解码为 10s, got %v", c.CredentialStore.Vault.Timeout)
+	}
+	if c.CredentialStore.Vault.CacheTTL != 30*time.Second {
+		t.Errorf("vault.cache_ttl 应解码为 30s, got %v", c.CredentialStore.Vault.CacheTTL)
+	}
+	if c.CredentialStore.Vault.Mount != "transit" {
+		t.Errorf("vault.mount 空应回落 transit, got %q", c.CredentialStore.Vault.Mount)
+	}
+	if c.CredentialStore.Vault.TokenEnv != "VAULT_TOKEN" {
+		t.Errorf("vault.token_env 空应回落 VAULT_TOKEN, got %q", c.CredentialStore.Vault.TokenEnv)
+	}
 }

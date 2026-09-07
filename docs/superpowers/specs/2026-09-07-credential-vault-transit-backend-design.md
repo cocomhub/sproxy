@@ -34,7 +34,9 @@ credential_store:
     token_env: "VAULT_TOKEN"      # token 环境变量名（默认 VAULT_TOKEN）
     ca_file: ""                   # 自签 CA 证书路径（可选，默认系统池）
     timeout: "10s"                # HTTP 超时（默认 10s）
-    cache_ttl: "30s"              # decrypt 结果缓存 TTL（0 = 关闭缓存）
+    cache_ttl: "30s"              # decrypt 结果缓存 TTL（默认 30s）
+                                  # final ruling：config 层设 0 无效回落 30s（viper 零值歧义——
+                                  # 缓存恒默认开、不可显式关）；关闭仅限 VaultOptions 内部传 0（测试）
 ```
 
 **语义**：
