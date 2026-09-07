@@ -4,7 +4,7 @@
 
 **目标：** 为 sproxy 凭据静态存储加密新增 HashiCorp Vault Transit 后端：`credential_store.backend: aesgcm|vault` 分支装配，vault 走 Vault Transit 引擎加解密（纯 stdlib HTTP，无 hashicorp SDK），AAD context 绑文件身份，decrypt 结果短 TTL 缓存。
 
-**架构：** `SecureStorer` 接口已是正确抽象（Vault Transit encrypt/decrypt 天然字节进出）。新增 `VaultTransitStorer` 实现（`pkg/accesskey/vault_storer.go`，内置），`BootstrapServerCredentials` 按 `cfg.CredentialStore.Backend` switch 装配（aesgcm=现状路径不变 / vault=新 storer）。三层测试：L1 httptest mock Vault 进 CI；L2/L3 真实 Vault 走 `vault_integration` build tag + `make test-vault`。
+**架构：** `SecureStorer` 接口已是正确抽象（Vault Transit encrypt/decrypt 天然字节进出）。新增 `VaultTransitStorer` 实现（`pkg/accesskey/vault_storer.go`，内置），`BootstrapServerCredentials` 按 `cfg.CredentialStore.Backend` switch 装配（aesgcm=现状路径不变 / vault=新 storer）。三层测试：L1 httptest mock Vault 常规跑；L2/L3 真实 Vault 运行时检测可达性（docker 容器 / CI services 自动起，不可达 t.Skip）。
 
 **技术栈：** Go 1.26 纯 stdlib（`net/http`/`encoding/json`/`encoding/base64`/`crypto/x509`），无新增三方依赖。
 
@@ -12,20 +12,25 @@
 
 **BASE：** 8fea0422（origin/master，4C 已合并）。PR 建议：单 PR（backend 分支装配 + VaultStorer + 三层测试）。
 
+**测试策略（用户 2026-09-07 调整）**：L1 httptest mock 常规跑；L2/L3 **无 build tag**，运行时检测 `VAULT_ADDR`（默认 127.0.0.1:8200）可达性——可达则实跑、不可达 `t.Skip`。本地/CI 有 docker → `scripts/test-vault.sh` 或 CI ubuntu `services: vault` 起真实 Vault dev 容器自动测；无 docker → 自动 skip 不失败。CI test job 拆 ubuntu（+vault service，L1+L2/L3）与 windows（仅 L1）两 job（windows runner 不支持 `services:`）。
+
 ---
 
 ## 文件结构
 
 - 创建：`pkg/accesskey/vault_storer.go` — `VaultTransitStorer` 实现 `SecureStorer`（纯 stdlib HTTP 调 Vault Transit API；AAD context；decrypt 缓存）
 - 创建：`pkg/accesskey/vault_storer_test.go` — L1 httptest mock Vault 单元测试
-- 创建：`pkg/accesskey/vault_integration_test.go` — L2/L3 真实 Vault（`//go:build vault_integration`）
+- 创建：`pkg/accesskey/vault_integration_test.go` — L2/L3 真实 Vault（**无 build tag**，运行时检测 VAULT_ADDR 可达性 t.Skip）
+- 创建：`pkg/testutil/vaultmock/` — httptest mock Vault server 测试工具（L1 + 装配测试共享）
+- 创建：`scripts/test-vault.sh` — 起 docker hashicorp/vault dev 容器 → 跑 L2/L3 → 清理
 - 创建：`pkg/testutil/vaultmock/` — httptest mock Vault server 测试工具（L1 与装配测试共享；仿 `pkg/testutil/mockserver` 模式）
 - 修改：`pkg/server/config.go` — `CredentialStoreConfig` 加 `Backend string` + `Vault VaultConfig`；`VaultConfig` 类型；SetDefaults（backend 默认 aesgcm、vault.mount 默认 transit、vault.token_env 默认 VAULT_TOKEN、vault.timeout 默认 10s、vault.cache_ttl 默认 30s）；Validate（backend 枚举 + vault 必填）
 - 修改：`pkg/server/handlers.go` — `BootstrapServerCredentials` 按 backend 分支 + `resolveVaultToken`
 - 修改：`pkg/server/config_test.go` — Validate 增量表驱动
 - 修改：`pkg/server/credential_store_encrypt_test.go` — 装配测试（backend=vault mock Vault；backend=aesgcm 回归）
 - 修改：`config.example.yaml`、`docs/config.md` — vault 子段注释
-- 修改：`Makefile` — `test-vault` 目标（`go test -tags=vault_integration`）
+- 修改：`Makefile` — `test-vault` 目标（调 scripts/test-vault.sh）
+- 修改：`.github/workflows/ci.yml` — test job 拆 ubuntu（+vault services）+ windows 两 job
 
 ---
 
@@ -373,59 +378,189 @@ git add pkg/server/handlers.go pkg/server/credential_store_encrypt_test.go pkg/t
 
 ---
 
-### 任务 5：L2/L3 真实 Vault 集成测试 + make test-vault
+### 任务 5：L2/L3 真实 Vault 集成测试（docker 容器自动起）+ CI docker job
+
+> **测试策略（用户 2026-09-07 调整）**：docker 存在时 L2/L3 直接起真实 Vault 容器测试；CI test job（ubuntu）也加 docker service 跑集成测试。不再依赖手动 `make test-vault` 或 build tag 隔离——改为**运行时检测 Vault 可达性自动 skip**。
 
 **文件：**
-- 创建：`pkg/accesskey/vault_integration_test.go`（`//go:build vault_integration`）
-- 修改：`Makefile`
+- 创建：`pkg/accesskey/vault_integration_test.go`（**无 build tag**，运行时检测 VAULT_ADDR 可达性，不可达 `t.Skip`）
+- 创建：`scripts/test-vault.sh`（起 docker Vault dev 容器 → 跑测试 → 清理；无 docker 时提示）
+- 修改：`Makefile`（`test-vault` 目标调脚本）
+- 修改：`.github/workflows/ci.yml`（test job ubuntu 分支：加 vault service container + 跑 vault 集成测试步骤）
 
-- [ ] **步骤 1：编写 L2/L3 集成测试**
+- [ ] **步骤 1：编写 L2/L3 集成测试（运行时检测，无 build tag）**
 
-`pkg/accesskey/vault_integration_test.go`（`//go:build vault_integration`）：
+`pkg/accesskey/vault_integration_test.go`：
 
 ```go
-// 真实 Vault 集成测试（L2 契约 / L3 行为）。需本地 Vault dev mode：
-//   docker run --rm -p 8200:8200 -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault
-// 或 vault server -dev -dev-root-token-id=root。运行：make test-vault
+// 真实 Vault 集成测试（L2 契约 / L3 行为）。运行时检测 VAULT_ADDR（默认
+// http://127.0.0.1:8200）可达性——不可达 t.Skip（本地无 Vault / CI 非 ubuntu-vault job）。
+// 测试前置：transit engine + 测试 key 由 TestMain 经 HTTP API 自动建（幂等）。
 package accesskey_test
 
-// 环境变量：VAULT_ADDR（默认 http://127.0.0.1:8200）、VAULT_TOKEN（默认 root）、
-// VAULT_SKIP 置任意值跳过（CI 无 Vault 时防御）。
+// 环境变量：VAULT_ADDR（默认 http://127.0.0.1:8200）、VAULT_TOKEN（默认 root）。
+// 约定容器 root token 恒 "root"（scripts/test-vault.sh 与 CI service 均用
+// VAULT_DEV_ROOT_TOKEN_ID=root）。
 ```
 
-用例：
-- **L2 契约-往返**：test helper 建 transit key（若不存在 `vault secrets enable transit` + `vault write -f transit/keys/<name>`，通过 http API 或直接假设已配置——选：test 用 HTTP API 建 key，若 400 key 已存在则忽略）→ Encrypt 任意明文 → 密文含 `vault:v1:` 前缀 → Decrypt 还原。
-- **L2-AAD context**：Encrypt with AADPath=A → Decrypt with AADPath=A 成功；Decrypt with AADPath=B → 失败（Transit context 不匹配语义）。
+TestMain 或首个测试前 helper：
+```go
+func requireVault(t *testing.T) string {
+    addr := os.Getenv("VAULT_ADDR"); if addr == "" { addr = "http://127.0.0.1:8200" }
+    // 健康检查（短超时）：GET {addr}/v1/sys/health —— 不可达/非 200 → t.Skip
+    // （200/429=初始化/501=未初始化 都视为 Vault 在——dev mode 200）。
+    return addr
+}
+func ensureTransitKey(t *testing.T, addr, token, name string) {
+    // POST {addr}/v1/sys/mounts/transit  若 400 (已存在) 忽略
+    // POST {addr}/v1/transit/keys/{name} 若 400 (已存在) 忽略
+    // （Vault HTTP API，幂等——重复跑不炸）
+}
+```
+
+用例（全部 `t.Skip` 门控，非 CI-vault job 自动跳过）：
+- **L2 契约-往返**：`ensureTransitKey` → Encrypt 任意明文 → 密文含 `vault:v1:` 前缀 → Decrypt 还原 = 原文。
+- **L2-AAD context**：Encrypt with AADPath=A → Decrypt with AADPath=A 成功；Decrypt with AADPath=B → 失败（Transit context 不匹配）。
 - **L3-key 轮换**：`POST /v1/transit/keys/<name>/rotate` → 旧密文 Decrypt 仍成功（Vault 按版本自解）。
-- **L3-权限拒绝**：建受限 policy token（仅 encrypt 无 decrypt 或反之）→ 越权操作 → error 含「permission denied」。
-- **L3-seal**：真实 seal/unseal 需要 unseal key——dev mode 单 key 可 `POST /v1/sys/seal` 用 root token → 随后 Encrypt → error 含「sealed」→ `POST /v1/sys/unseal`（dev root key 空）恢复。（seal/unseal 测试风险：若环境非 dev 会破坏——**选：L3-seal 用单独新建的 Vault 实例或标记 skip-if-not-dev**；简化：只测「mock 503-sealed 已在 L1 覆盖」，真实 seal 用 `VAULT_SEAL_TEST=1` 门控，默认跳过。**最终：L3 覆盖轮换 + 权限拒绝；seal/unseal 用环境变量门控的独立子测试，默认 skip，因真实 seal 有环境破坏风险。**）
-- 前置：`VAULT_ADDR` 不可达 → `t.Skip`（防 CI 意外跑）。
+- **L3-权限拒绝**：建受限 policy token（仅 encrypt 无 decrypt，经 `POST /v1/auth/token/create` + policy JSON）→ Decrypt → error 含「permission denied」。
+- **L3-seal（门控 `VAULT_SEAL_TEST=1`，默认 skip）**：真实 seal 有环境破坏风险（会锁 dev 实例）——仅当显式设 `VAULT_SEAL_TEST=1` 且测试用**独立 Vault 实例**时跑。默认跳过（sealed 错误路径已由 L1 mock 503 覆盖）。**简化为文档说明，不在常规 L3 用例集。**
 
-- [ ] **步骤 2：确认默认跳过**
+- [ ] **步骤 2：确认无 Vault 时自动跳过**
 
-运行：`go test -race -count=1 ./pkg/accesskey/`（无 tag）→ vault_integration_test.go 不编译（build tag），现有测试绿。
+运行：`go test -race -count=1 ./pkg/accesskey/`（本地无 Vault）→ vault_integration_test.go 编译但 requireVault `t.Skip` → 绿（skip 计数可见）。既有测试零影响。
 
-- [ ] **步骤 3：Makefile test-vault 目标**
+- [ ] **步骤 3：scripts/test-vault.sh（起 docker Vault 容器）**
+
+`scripts/test-vault.sh`：
+
+```bash
+#!/usr/bin/env bash
+# 起 hashcorp/vault dev 容器 → 跑 L2/L3 集成测试 → 清理容器。
+# 无 docker 时提示（测试自动 skip，不失败）。
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker 不可用，跳过 Vault 集成测试（vault_integration 用例将 t.Skip）" >&2
+  exit 0
+fi
+
+name="sproxy-vault-test"
+# 清理可能的残留
+docker rm -f "$name" >/dev/null 2>&1 || true
+
+docker run -d --rm --name "$name" \
+  -p 8200:8200 \
+  -e VAULT_DEV_ROOT_TOKEN_ID=root \
+  hashicorp/vault:latest >/dev/null
+
+cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+
+# 等 Vault 就绪（健康检查 200）
+for i in $(seq 1 30); do
+  if curl -sf http://127.0.0.1:8200/v1/sys/health >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+
+VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root \
+  go test -race -count=1 -timeout=120s ./pkg/accesskey/ -run "Vault|L2|L3" -v
+```
+
+- [ ] **步骤 4：Makefile test-vault 目标**
 
 Makefile 加：
 
 ```makefile
-# 真实 Vault 集成测试（需本地 Vault dev mode：docker run --rm -p 8200:8200 \
-# -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault）
+# L2/L3 真实 Vault 集成测试：docker 可用时起 hashicorp/vault dev 容器自动跑；
+# 无 docker 时测试自动 t.Skip（不失败）。
 .PHONY: test-vault
 test-vault:
-	cd pkg/accesskey && go test -race -count=1 -tags=vault_integration ./...
+	bash scripts/test-vault.sh
 ```
 
-- [ ] **步骤 4：验证（有本地 Vault 时）**
+- [ ] **步骤 5：CI test job（ubuntu）加 docker vault service**
 
-运行：`make test-vault`（本地 Vault dev mode 存在时）
-预期：PASS（L2 往返/AAD + L3 轮换/权限）。若本地无 Vault → 说明需先起 docker。
+`.github/workflows/ci.yml` test job 结构调整——ubuntu 分支加 vault service container：
 
-- [ ] **步骤 5：Commit**
+```yaml
+  test:
+    name: Test (Go ${{ matrix.go }}, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        go: ["1.26"]
+    runs-on: ${{ matrix.os }}
+    # Vault dev container（ubuntu 专属——windows job 跳过 vault 集成）
+    services:
+      vault:
+        image: hashicorp/vault:latest
+        env:
+          VAULT_DEV_ROOT_TOKEN_ID: root
+        ports:
+          - 8200:8200
+        options: >-
+          --health-cmd "wget -qO- http://127.0.0.1:8200/v1/sys/health || exit 1"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    steps:
+      # ...既有 checkout/setup-go/prepare/vet...
+      - name: go test (race)
+        run: make test
+
+      - name: Vault integration test (ubuntu only)
+        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root go test -race -count=1 -timeout=120s ./pkg/accesskey/ -run "Vault|L2|L3" -v
+        if: matrix.os == 'ubuntu-latest'
+```
+
+> GitHub Actions `services:` 对 **windows-latest runner 不支持**（docker 仅 ubuntu/macos runner）。故 `services.vault` 会对 windows 矩阵 job 报错——需拆：**test job 仅 ubuntu 跑 services**，windows 用独立 job 或 `if: matrix.os == 'ubuntu-latest'` 无法应用于 services。**正确做法：拆两个 job**——`test`（ubuntu + vault service，含 L1/L2/L3 全量）+ `test-windows`（windows，仅 L1）。见步骤 5 修正。
+
+**步骤 5 修正（windows runner 不支持 services:）：**
+
+CI 改为拆 job：
+
+```yaml
+  test:
+    name: Test (Go 1.26, ubuntu, +Vault)
+    runs-on: ubuntu-latest
+    services:
+      vault:
+        image: hashicorp/vault:latest
+        env: { VAULT_DEV_ROOT_TOKEN_ID: root }
+        ports: ["8200:8200"]
+        options: >-
+          --health-cmd "wget -qO- http://127.0.0.1:8200/v1/sys/health || exit 1"
+          --health-interval 2s --health-timeout 2s --health-retries 20
+    steps:
+      # checkout/setup-go/prepare/vet 同现状
+      - name: go test (race, incl Vault L2/L3)
+        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test   # make test 跑全量；vault_integration 检测到 addr 可达不 skip
+      - name: go test (coverage)        # ubuntu 专属，同现状
+        run: make cover-check
+
+  test-windows:
+    name: Test (Go 1.26, windows)
+    runs-on: windows-latest
+    steps:
+      # 同现状 windows 分支（choco make + vet + make test），无 services
+```
+
+> `make test` 的 GOTEST_FLAGS 需确保 vault_integration_test.go 在无 tag 时**编译并跑**（本设计无 build tag，运行时检测）——`make test` 即全量跑，vault_integration 检测 VAULT_ADDR 可达（service 注入 127.0.0.1:8200）→ 不 skip 实跑 L2/L3。Windows job 无 Vault → vault_integration t.Skip → L1 仍跑。**这达成「docker 存在自动测、不存在自动 skip」目标，CI 双平台覆盖。**
+>
+> 注意：cover-check 会把 vault_integration 用例算进覆盖率（跑通时增加覆盖；skip 时不计）——**排除策略**：覆盖率命令 `go test -cover ./pkg/accesskey/...` 不含 -tags，vault 用例在 ubuntu 实跑计入、windows skip 不计。跨平台覆盖率数值差异可接受（ubuntu 为准）。若需一致，cover 命令排除 vault_integration 文件——**选：接受差异，ubuntu 覆盖率含 vault 集成（更高更真）。**
+
+- [ ] **步骤 6：验证**
+
+本地（有 docker）：`make test-vault` → 起容器 → L2/L3 全绿。
+本地（无 docker）：`go test -race -count=1 ./pkg/accesskey/` → vault 用例 t.Skip → 绿。
+CI：ubuntu test job 跑 L1+L2/L3（service vault）；windows test job 跑 L1（skip L2/L3）。
+
+- [ ] **步骤 7：Commit**
 
 ```bash
-git add pkg/accesskey/vault_integration_test.go Makefile && git commit -m "test(accesskey): Vault L2/L3 集成测试——往返/AAD/轮换/权限 (vault_integration tag) + make test-vault"
+git add pkg/accesskey/vault_integration_test.go scripts/test-vault.sh Makefile .github/workflows/ci.yml && git commit -m "test(accesskey): Vault L2/L3 集成测试——docker 自动起真实容器 + CI ubuntu services + 运行时可达性 skip"
 ```
 
 ---
@@ -437,12 +572,13 @@ git add pkg/accesskey/vault_integration_test.go Makefile && git commit -m "test(
 ```bash
 git fetch origin && git rebase origin/master
 go test -race -count=1 ./pkg/accesskey/... ./pkg/server/... ./pkg/client/... ./cmd/sclient/... ./cmd/sproxy/...
+make test-vault     # docker 存在时起真实 Vault 容器跑 L2/L3；无 docker 自动 skip
 make lint && make build-all && make check-loopback && go vet ./...
 ```
 
-- [ ] **步骤 2：手测（真实 Vault 冒烟，L2/L3 实跑）**
+- [ ] **步骤 2：手测（真实 Vault 冒烟，docker 容器）**
 
-- 起 `docker run --rm -p 8200:8200 -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault`；
+- 起 `make test-vault`（自动 docker 容器，跑 L2/L3）或手动 `docker run --rm -p 8200:8200 -e VAULT_DEV_ROOT_TOKEN_ID=root hashicorp/vault`；
 - `vault secrets enable transit` + `vault write -f transit/keys/sproxy`；
 - config：`credential_store: {encrypt: true, backend: vault, vault: {addr: http://127.0.0.1:8200, key_name: sproxy, token: root}}`；
 - 启动 sproxy → 日志「凭据静态存储加密已启用 backend=vault」→ register 一个用户 → 检查 `credentials.json` 为 `vault:v1:` 密文 → 重启 sproxy → 凭据还原（list/签名 200）；
@@ -468,4 +604,5 @@ gh pr create --title "feat(server): Vault Transit 凭据存储加密后端——
 
 - **规格覆盖度**：AD-1 backend 字段（任务 3）+ 装配分支（任务 4）✓ / AD-2 Transit 直加密（任务 1）✓ / AD-3 纯 stdlib（任务 1 import 清单）✓ / AD-4 AAD context（任务 1 Encrypt/Decrypt context 字段 + AADPath）✓ / AD-5 decrypt 缓存（任务 2）✓ / 三层测试 L1（任务 1-2 mock + 任务 4 vaultmock 抽共享）/ L2-L3（任务 5）✓ / 错误分类 sealed/403/404/5xx/前缀拒绝（任务 1）✓ / config Validate + SetDefaults + 文档（任务 3）✓。
 - **占位符扫描**：无 TODO/待定；每任务含实际代码/测试。L3 seal 测试「环境破坏风险」已裁定为 env 门控默认 skip（非占位——明确行为）。
+- **测试策略一致性（用户 2026-09-07 调整后）**：vault_integration_test.go **无 build tag**、运行时检测 VAULT_ADDR；docker 容器/CI services 起真实 Vault 时自动实跑 L2/L3，无 Vault 时 t.Skip（L1 恒跑）。文件结构/任务 5/收尾验证/测试策略四段均同步为无 build tag + docker 自动起，无残留「vault_integration tag + 手动 make test-vault」旧描述。
 - **类型一致性**：`VaultTransitStorer`/`VaultOptions{Addr,Mount,KeyName,Token,CAFile,Timeout,AADPath,CacheTTL}`/`VaultConfig{Addr,Mount,KeyName,TokenFile,TokenEnv,CAFile,Timeout,CacheTTL}`/`resolveVaultToken` 跨任务一致；`credential_store.backend` yaml 键一致。
