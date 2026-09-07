@@ -185,15 +185,18 @@
       <button type="button" id="register-tab" class="login-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">注册</button>
     </div>
     <div id="login-panel">
-      <div style="margin-bottom:12px;">
-        <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">AccessKey</label>
-        <input type="text" id="login-ak" placeholder="输入 AccessKey..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
-      </div>
-      <div style="margin-bottom:12px;">
-        <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">6 位动态码</label>
-        <input type="text" id="login-code" placeholder="输入身份验证器动态码..." autocomplete="one-time-code" inputmode="numeric" maxlength="6" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
-      </div>
-      <button type="button" id="do-login-btn" class="btn btn-primary" style="width:100%;">登录</button>
+      <!-- FF1：AK/动态码输入框外包一层 form，Enter 触发提交（键盘可访问性） -->
+      <form id="login-form" onsubmit="return false;">
+        <div style="margin-bottom:12px;">
+          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">AccessKey</label>
+          <input type="text" id="login-ak" placeholder="输入 AccessKey..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+        </div>
+        <div style="margin-bottom:12px;">
+          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">6 位动态码</label>
+          <input type="text" id="login-code" placeholder="输入身份验证器动态码..." autocomplete="one-time-code" inputmode="numeric" maxlength="6" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+        </div>
+        <button type="button" id="do-login-btn" class="btn btn-primary" style="width:100%;">登录</button>
+      </form>
       <div id="login-result" style="margin-top:12px;"></div>
     </div>
     <div id="register-panel" style="display:none;">

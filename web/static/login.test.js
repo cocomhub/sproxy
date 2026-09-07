@@ -208,6 +208,35 @@ test('QR 集成：renderQRInto 无 sproxyQR 时不抛错且挂载点不动', asy
   }
 });
 
+test('QR 集成：仅有 renderToMatrix 时走像素网格退路（stub 只注 renderToMatrix）', async () => {
+  // FF3：覆盖「有 renderToMatrix 但无 renderToSVG」的退路分支——用 2x2 矩阵断言 grid 网格内容。
+  const prev = globalThis.sproxyQR;
+  globalThis.sproxyQR = {
+    renderToMatrix() {
+      return [new Uint8Array([1, 0]), new Uint8Array([0, 1])];
+    },
+  };
+  try {
+    const el = { innerHTML: '' };
+    await loginLib.renderQRInto(el, 'otpauth://totp/x?secret=JBSWY3DPEHPK3PXP');
+    assert.ok(el.innerHTML.indexOf('display:grid') >= 0, '退路应渲染 grid 容器');
+    assert.ok((el.innerHTML.match(/width:4px;height:4px;background:#000/g) || []).length === 2, '暗点模块数应为 2');
+    assert.ok((el.innerHTML.match(/width:4px;height:4px;background:#fff/g) || []).length === 2, '亮点模块数应为 2');
+  } finally {
+    if (prev === undefined) delete globalThis.sproxyQR; else globalThis.sproxyQR = prev;
+  }
+});
+
+test('键盘可访问性：login-panel 表单 Enter 提交已接线（FF1 结构性断言）', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'login.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+  // login-panel（AK/动态码输入框容器）应以 <form> 包裹且 onsubmit 阻止默认并触发登录
+  assert.ok(html.includes('<form id="login-form"'), 'index.html login-panel 应用 form 包裹（id=login-form）');
+  assert.ok(src.includes("getElementById('login-form')"), 'login.js 应绑定 #login-form 的 submit 事件');
+  assert.ok(src.includes('doLogin()'), 'submit 处理器应调 doLogin');
+  assert.ok(src.includes('preventDefault'), 'Enter 提交应 preventDefault（避免整页刷新）');
+});
+
 test('app.js 顶层读取并保存 sproxy_access_key_id（saveAccessKeys 同步写），登录页与之对接', () => {
   const appSrc = fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8');
   const loginSrc = fs.readFileSync(path.join(__dirname, 'login.js'), 'utf8');

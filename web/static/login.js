@@ -206,6 +206,13 @@ if (typeof document !== 'undefined') {
     if (registerTab) registerTab.addEventListener('click', function () { switchLoginTab('register'); });
     var doLoginBtn = document.getElementById('do-login-btn');
     if (doLoginBtn) doLoginBtn.addEventListener('click', function () { doLogin(); });
+    // FF1：登录表单 Enter 提交（键盘可访问性）——onsubmit 返回 false 已阻默认刷新，
+    // 这里再显式 preventDefault + 调 doLogin（按钮与表单共用同一入口，避免重复触发）。
+    var loginForm = document.getElementById('login-form');
+    if (loginForm) loginForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      doLogin();
+    });
     var doRegisterBtn = document.getElementById('do-register-btn');
     if (doRegisterBtn) doRegisterBtn.addEventListener('click', function () { doRegister(); });
   });

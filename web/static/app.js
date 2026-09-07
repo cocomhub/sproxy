@@ -9,9 +9,18 @@ const BASE = '';
 // 永不上线；线上请求只携带 AccessKey + HMAC 签名。存 sessionStorage（关页即清）。
 // AccessKeyID = SK 条目 ID（skey-id=，多 SK 共存时精确锁定被验条目）；Web 登录（login.js）
 // 成功后回填，saveAccessKeys 同步持久化。
+// FF2：accessKey 用 sproxy_last_ak 兜底时（跨标签页非常规场景：另一标签页把 AK 切到
+// LastAK 并触发 F6 清空 keyID），同步清掉不匹配的 accessKeyID ——否则本地 sessionStorage
+// 里遗留的 skey-id=（属于上一个 AK）会被精确锁定导致 401；清空后服务端对全部存活条目试签。
 let accessKey = sessionStorage.getItem('sproxy_access_key') || sessionStorage.getItem('sproxy_last_ak') || '';
 let accessKeySecret = sessionStorage.getItem('sproxy_access_key_secret') || '';
 let accessKeyID = sessionStorage.getItem('sproxy_access_key_id') || '';
+// 仅当 accessKey 直接来自 sproxy_access_key（非 last_ak 兜底）时才保留 accessKeyID；
+// 兜底路径下该 keyID 归属不明/可能过期 → 置空（与 saveAccessKeys 的 F6 语义一致）。
+if (!sessionStorage.getItem('sproxy_access_key') && !!accessKeyID) {
+  accessKeyID = '';
+  sessionStorage.removeItem('sproxy_access_key_id');
+}
 let currentSubdir = localStorage.getItem('sproxy_subdir') || '';
 let _searchActive = false;
 let _currentOffset = 0;
