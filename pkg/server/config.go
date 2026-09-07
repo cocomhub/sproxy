@@ -343,6 +343,33 @@ type CredentialStoreConfig struct {
 // （base64 编码 32B）。master_key_file 非空时优先读文件；仅文件未配置时读本变量。
 const CredentialMasterKeyEnv = "SPROXY_CREDENTIAL_MASTER_KEY"
 
+// VolumeACLMode 是卷 ACL 模式。allow=默认拒绝+白名单；deny=默认开放+黑名单。
+type VolumeACLMode string
+
+const (
+	VolumeACLAllow VolumeACLMode = "allow"
+	VolumeACLDeny  VolumeACLMode = "deny"
+)
+
+// VolumeACLConfig 是卷 ACL 配置（volumes[].acl）。
+// Mode 缺省 deny（默认开放，单卷零回归）；显式 allow 时仅列出的 owner 可写入该卷。
+// Owners 是 owner 白/黑名单（按 owner 名段名校验，语义由装配层按 Mode 解释）。
+type VolumeACLConfig struct {
+	Mode   VolumeACLMode `yaml:"mode" mapstructure:"mode"`
+	Owners []string      `yaml:"owners" mapstructure:"owners"`
+}
+
+// VolumeConfig 是单卷配置（volumes[] 元素）：独立挂载根 + 卷容量上限 + ACL。
+// Name 为卷唯一标识（复用 storage.ValidSegmentName 段名规则，见 Validate）；
+// Root 为该卷独立存储根（含 <tenant>/ 六桶布局）；VolCapacity 为该卷字节上限
+// （0 = 不限制，仍受租户 owner_quotas 与 max_storage_bytes 兜底）。
+type VolumeConfig struct {
+	Name        string           `yaml:"name" mapstructure:"name"`
+	Root        string           `yaml:"root" mapstructure:"root"`
+	VolCapacity int64            `yaml:"vol_capacity" mapstructure:"vol_capacity"`
+	ACL         *VolumeACLConfig `yaml:"acl,omitempty" mapstructure:"acl"`
+}
+
 type Config struct {
 	Addr string `yaml:"addr" mapstructure:"addr"`
 	// StorageRoot 是存储根目录（新布局 <root>/<tenant>/{user,cloud,...}/）。
@@ -358,6 +385,11 @@ type Config struct {
 	// max_storage_bytes 兜底）。启动装配时按此创建路径子 Scope（quotaBucketFor 懒建）；
 	// 仅装配期消费，SIGHUP 后不重建 → bucket_limits 修改需重启进程。
 	BucketLimits map[string]int64 `yaml:"bucket_limits" mapstructure:"bucket_limits"`
+	// Placement 卷路由策略 prefer-default|spread（缺省 prefer-default）。
+	Placement string `yaml:"placement" mapstructure:"placement"`
+	// Volumes 卷列表；缺省（nil/空）由 Normalize/Default 合成单默认卷
+	// （name=default, root=StorageRoot），YAML 未配 volumes 时行为与单根布局一致。
+	Volumes []VolumeConfig `yaml:"volumes" mapstructure:"volumes"`
 	// MaxUploadBytes 已移至 internal/size.UploadBodyLimit（1 GiB 硬限制），不可配置。
 	// MaxChunkUploadBytes 已移至 internal/size.DefaultChunkBodyLimit（64 MiB 硬限制），不可配置。
 	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`
@@ -450,6 +482,11 @@ func Default() *Config {
 		// OwnerQuotas/BucketLimits 默认空 map（非 nil，便于 map 判断/访问复用）。
 		OwnerQuotas:  map[string]int64{},
 		BucketLimits: map[string]int64{},
+		// Placement/Volumes：缺省 prefer-default + 合成单默认卷（root=StorageRoot）。
+		// Default() 即产出归一后的单卷形态（SetDefaults 对 len==0/占位单卷再次兜底），
+		// 保证直接消费 Default() 的路径总能看到非空 Volumes。
+		Placement: "prefer-default",
+		Volumes:   []VolumeConfig{{Name: "default", Root: "./storage"}},
 		ServerTimeouts: ServerTimeouts{
 			Shutdown: 30 * time.Second,
 		},
@@ -527,6 +564,34 @@ func (c *Config) SetDefaults() {
 	}
 	if c.StorageRoot == "" {
 		c.StorageRoot = "./storage"
+	}
+	// 卷配置归一（多卷）：placement 缺省 prefer-default；volumes 未配（nil/空）合成
+	// 单默认卷（name=default, root=StorageRoot）。Default() 已合成占位单卷时，若
+	// storage_root 被显式改走（既有单卷配置只改 storage_root、不写 volumes 的升级路径），
+	// 让默认卷 root 跟随 storage_root，避免写文件落在旧默认根。已配卷时逐卷补首卷空
+	// root 与缺省 ACL（mode 缺省 deny = 默认开放，单卷零回归）。
+	if c.Placement == "" {
+		c.Placement = "prefer-default"
+	}
+	if len(c.Volumes) == 0 {
+		c.Volumes = []VolumeConfig{{Name: "default", Root: c.StorageRoot}}
+	} else if len(c.Volumes) == 1 && c.Volumes[0].Name == "default" &&
+		c.Volumes[0].Root == "./storage" && c.StorageRoot != "./storage" {
+		c.Volumes[0].Root = c.StorageRoot
+	}
+	for i := range c.Volumes {
+		if c.Volumes[i].Root == "" {
+			if i == 0 {
+				c.Volumes[i].Root = c.StorageRoot
+			}
+			// 非首卷空 root 保留 → Validate 拒绝（非首卷需显式指定挂载根）
+		}
+		if c.Volumes[i].ACL == nil {
+			c.Volumes[i].ACL = &VolumeACLConfig{Mode: VolumeACLDeny} // 缺省开放
+		}
+		if c.Volumes[i].ACL.Mode == "" {
+			c.Volumes[i].ACL.Mode = VolumeACLDeny
+		}
 	}
 	if c.ChunkSize <= 0 {
 		c.ChunkSize = size.DefaultChunkSize
@@ -650,6 +715,48 @@ func (c *Config) Validate() error {
 	}
 	if c.StorageRoot == "" {
 		return fmt.Errorf("storage_root 为空，请配置存储根目录")
+	}
+	// 兜底合成单卷（幂等，仅 len==0 时）：Validate 可能在 Normalize（SetDefaults）前被调
+	// （如直接构造 &Config{...}.Validate()），此时视为未配 volumes，合成单默认卷
+	// （name=default, root=StorageRoot），保证后续卷校验与消费侧总能看到非空 Volumes。
+	if len(c.Volumes) == 0 {
+		c.Volumes = []VolumeConfig{{Name: "default", Root: c.StorageRoot}}
+	}
+	// volumes/placement 校验（多卷）。placement 缺省 prefer-default 由 SetDefaults 归一；
+	// 直接 Validate（未 Normalize）时 placement 为空在此拒绝。卷名复用
+	// storage.ValidSegmentName 段名规则（拒绝空/绝对/..、.__ 魔法前缀、Windows 保留名
+	// 与非法字符），与租户/桶段名校验同一权威。
+	switch c.Placement {
+	case "prefer-default", "spread":
+	default:
+		return fmt.Errorf("placement 非法 %q：仅支持 prefer-default|spread", c.Placement)
+	}
+	seen := make(map[string]bool, len(c.Volumes))
+	for i := range c.Volumes {
+		v := &c.Volumes[i]
+		if !storage.ValidSegmentName(v.Name) {
+			return fmt.Errorf("卷名 %q 非法（拒绝空/绝对/..、.__ 前缀、Windows 保留名与非法字符）", v.Name)
+		}
+		if seen[v.Name] {
+			return fmt.Errorf("卷名重复 %q", v.Name)
+		}
+		seen[v.Name] = true
+		if v.Root == "" {
+			return fmt.Errorf("卷 %q root 为空（非首卷需显式指定挂载根）", v.Name)
+		}
+		if v.VolCapacity < 0 {
+			return fmt.Errorf("卷 %q 容量上限 %d 非法：不能为负", v.Name, v.VolCapacity)
+		}
+		if a := v.ACL; a != nil {
+			if a.Mode != VolumeACLAllow && a.Mode != VolumeACLDeny {
+				return fmt.Errorf("卷 %q acl mode %q 非法：仅支持 allow|deny", v.Name, a.Mode)
+			}
+			for _, o := range a.Owners {
+				if !storage.ValidSegmentName(o) {
+					return fmt.Errorf("卷 %q acl owners 含非法 owner %q", v.Name, o)
+				}
+			}
+		}
 	}
 	// audit.buffer_size 不能为负（0 = 关闭，正整数 = 环形容量）。
 	if c.Audit.BufferSize < 0 {
