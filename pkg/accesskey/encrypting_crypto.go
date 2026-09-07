@@ -17,9 +17,14 @@ import (
 //
 // 与 wrap.go 的 EncryptSecretKind（SK 信封）同构但**无 32B 明文长度约束**——凭据文件
 // 是任意长 JSON，故收归独立实现（4C KMS 的 DEK 信封复用本函数）。
+//
+// 格式说明（S-1）：信封为 `nonce || ct`，**无版本/魔术头**——算法或参数升级（如改
+// nonce 长度 / 换 AEAD）无法靠字节自描述区分，需整体迁移既有密文文件（重加密为
+// 新格式）；未来引入 v2 时可在密文最前加 1B 格式 tag 做显式版本标识，本实现刻意
+// 保持最小信封（凭据文件由 master key 域隔离 + 原子写管理生命周期）。
 func EncryptWithKey(key, plaintext []byte) ([]byte, error) {
 	if len(key) != 32 {
-		return nil, ErrInvalidSecret
+		return nil, ErrInvalidMasterKey
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -38,10 +43,11 @@ func EncryptWithKey(key, plaintext []byte) ([]byte, error) {
 }
 
 // DecryptWithKey 用 32B master key 解开 EncryptWithKey 产物。任何认证失败（密钥错、
-// 密文篡改、nonce 篡改）或坏格式（短于 nonce）都返回 error（fail-closed）。
+// 密文篡改、nonce 篡改）或坏格式（短于 nonce、不足 GCM tag）都返回 error（fail-closed，
+// 不 panic）。
 func DecryptWithKey(key, data []byte) ([]byte, error) {
 	if len(key) != 32 {
-		return nil, ErrInvalidSecret
+		return nil, ErrInvalidMasterKey
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {

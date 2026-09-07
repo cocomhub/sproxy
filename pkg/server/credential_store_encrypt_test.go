@@ -138,14 +138,28 @@ func TestResolveCredentialMasterKey_EnvFallback(t *testing.T) {
 		t.Fatalf("文件 key 解析不一致")
 	}
 
+	// S-3：file 与 env 同时设置 → file 优先（resolveCredentialMasterKey 的 if 顺序钉死）。
+	envKey := bytes.Repeat([]byte{0x9e}, 32)
+	t.Setenv(CredentialMasterKeyEnv, base64.StdEncoding.EncodeToString(envKey))
+	cfg.CredentialStore.MasterKeyFile = mkPath
+	gotFileWins, err := resolveCredentialMasterKey(cfg)
+	if err != nil {
+		t.Fatalf("resolve(file+env): %v", err)
+	}
+	if !bytes.Equal(gotFileWins, key) {
+		t.Fatalf("file 与 env 同时设置时应以 file 为准, got %x", gotFileWins)
+	}
+	if bytes.Equal(gotFileWins, envKey) {
+		t.Fatalf("file 与 env 同时设置时不应取 env")
+	}
+
 	// 文件为空 + 环境变量：回落 env。
-	t.Setenv(CredentialMasterKeyEnv, base64.StdEncoding.EncodeToString(key))
 	cfg.CredentialStore.MasterKeyFile = ""
 	got2, err := resolveCredentialMasterKey(cfg)
 	if err != nil {
 		t.Fatalf("resolve(env): %v", err)
 	}
-	if !bytes.Equal(got2, key) {
+	if !bytes.Equal(got2, envKey) {
 		t.Fatalf("env key 解析不一致")
 	}
 

@@ -4,6 +4,7 @@
 package accesskey
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -57,7 +58,14 @@ func (s *EncryptingStorer) Load() ([]Key, error) {
 	if s.secure != nil {
 		pt, err := s.secure.Decrypt(data)
 		if err != nil {
-			return nil, fmt.Errorf("credentials store: 解密 %s 失败——密文被篡改 / master key 不匹配 / 文件仍为明文未迁移（fail-closed 拒绝，不静默重建）: %w", s.path, err)
+			// 解密失败三因（明文未迁移 / 密文篡改 / master key 错）合一难以诊断——先做
+			// 廉价嗅探区分明文未迁移（M-3）：明文凭据 JSON 恒以 '{'（0x7b）开头且含
+			// "keys" 字段；密文首字节随机，巧合概率 ~1/256 可接受（且还需恰含 "keys"
+			// 字节序列，实际可忽略）。真实密文篡改 / 密钥错保持 GCM 失败提示。
+			if looksLikePlaintextJSON(data) {
+				return nil, fmt.Errorf("credentials store: 解密 %s 失败——文件仍为明文 JSON 未迁移（credential_store.encrypt=true 开启前既有凭据文件需先迁移为密文；fail-closed 拒绝，不静默重建）: %w", s.path, err)
+			}
+			return nil, fmt.Errorf("credentials store: 解密 %s 失败——密文被篡改 / master key 不匹配（fail-closed 拒绝，不静默重建）: %w", s.path, err)
 		}
 		data = pt
 	}
@@ -111,4 +119,15 @@ func (s *EncryptingStorer) Save(keys []Key) error {
 		return fmt.Errorf("credentials store: 原子重命名失败: %w", err)
 	}
 	return nil
+}
+
+// looksLikePlaintextJSON 廉价嗅探磁盘内容是否为明文凭据 JSON（首字节 '{' 且含 "keys"
+// 字段字样）——供加密态 Load 解密失败时定向诊断「文件仍为明文未迁移」（M-3）。
+// 明文 JSON（MarshalIndent）恒以 0x7b 开头并含 "keys"；密文首字节随机，误判概率
+// ~1/256 且还需恰含 "keys" 字节序列，实际可忽略。仅影响错误文案，不影响 fail-closed 语义。
+func looksLikePlaintextJSON(data []byte) bool {
+	if len(data) == 0 || data[0] != '{' {
+		return false
+	}
+	return bytes.Contains(data, []byte(`"keys"`))
 }

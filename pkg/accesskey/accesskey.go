@@ -92,6 +92,10 @@ var (
 	ErrDuplicate = errors.New("accesskey: duplicate entry id")
 	// ErrInvalidSecret SK 非 32 字节（AES-256 密钥长度）。
 	ErrInvalidSecret = errors.New("accesskey: invalid secret length")
+	// ErrInvalidMasterKey master key 非 32 字节（AES-256 密钥长度）。静态存储加密
+	// （EncryptWithKey/DecryptWithKey）专用哨兵，与 SK 条目的 ErrInvalidSecret 区分——
+	// 复用 ErrInvalidSecret 会给出「invalid secret length」误导（SK 语义，审查 M-1）。
+	ErrInvalidMasterKey = errors.New("accesskey: invalid master key length")
 	// ErrInvalidAK AK 非法（空串等）。
 	ErrInvalidAK = errors.New("accesskey: invalid access key")
 	// ErrRegistrationRequiresSecret 注册必须提供 sk 或 totpSecret 之一（不能双 nil）。

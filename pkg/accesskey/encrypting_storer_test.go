@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,8 +255,13 @@ func TestEncryptWithKey_WrongKeyAndTamper(t *testing.T) {
 	if _, err := DecryptWithKey(keyA, []byte("too-short")); err == nil {
 		t.Fatal("坏格式（短于 nonce）应报错")
 	}
-	if _, err := EncryptWithKey([]byte("bad-key"), payload); err == nil {
-		t.Fatal("非 32B key 加密应报错")
+	// M-1：非 32B master key 返回专用哨兵 ErrInvalidMasterKey（而非 SK 语义的
+	// ErrInvalidSecret，避免文案误导）。
+	if _, err := EncryptWithKey([]byte("bad-key"), payload); !errors.Is(err, ErrInvalidMasterKey) {
+		t.Fatalf("非 32B key 加密应返回 ErrInvalidMasterKey, got %v", err)
+	}
+	if _, err := DecryptWithKey([]byte("bad-key"), sealed); !errors.Is(err, ErrInvalidMasterKey) {
+		t.Fatalf("非 32B key 解密应返回 ErrInvalidMasterKey, got %v", err)
 	}
 }
 
@@ -355,6 +361,71 @@ func TestLoadMasterKeyFromFile_Base64AndRaw(t *testing.T) {
 		}
 	})
 
+	t.Run("raw-末字节为换行0x0a不剥", func(t *testing.T) {
+		// I-1 回归：合法 raw 32B key 的末字节恰为 0x0a（换行字节），整文件即密钥，
+		// 不得按尾换行剥离（旧 TrimSpace 实现会误剥导致 31B 误拒）。
+		raw := bytes.Repeat([]byte{0x5a}, 32)
+		raw[31] = 0x0a
+		p := filepath.Join(t.TempDir(), "master.key")
+		if err := os.WriteFile(p, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadMasterKeyFromFile(p)
+		if err != nil {
+			t.Fatalf("LoadMasterKeyFromFile(raw-end-0x0a): %v", err)
+		}
+		if !bytes.Equal(got, raw) {
+			t.Fatalf("raw 末字节 0x0a 不应剥离: got %x", got)
+		}
+	})
+
+	t.Run("raw-首字节为空格0x20不剥", func(t *testing.T) {
+		// I-1 回归：raw key 首字节为合法空白字节 0x20，不得被 TrimSpace 误剥。
+		raw := bytes.Repeat([]byte{0x24}, 32)
+		raw[0] = 0x20
+		p := filepath.Join(t.TempDir(), "master.key")
+		if err := os.WriteFile(p, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadMasterKeyFromFile(p)
+		if err != nil {
+			t.Fatalf("LoadMasterKeyFromFile(raw-lead-space): %v", err)
+		}
+		if !bytes.Equal(got, raw) {
+			t.Fatalf("raw 首字节 0x20 不应剥离: got %x", got)
+		}
+	})
+
+	t.Run("raw-32B加尾LF", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "master.key")
+		content := append(append([]byte(nil), key...), '\n')
+		if err := os.WriteFile(p, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadMasterKeyFromFile(p)
+		if err != nil {
+			t.Fatalf("LoadMasterKeyFromFile(raw+LF): %v", err)
+		}
+		if !bytes.Equal(got, key) {
+			t.Fatalf("raw 32B+LF 应剥尾换行还原密钥: got %x", got)
+		}
+	})
+
+	t.Run("raw-32B加尾CRLF", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "master.key")
+		content := append(append(append([]byte(nil), key...), '\r'), '\n')
+		if err := os.WriteFile(p, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadMasterKeyFromFile(p)
+		if err != nil {
+			t.Fatalf("LoadMasterKeyFromFile(raw+CRLF): %v", err)
+		}
+		if !bytes.Equal(got, key) {
+			t.Fatalf("raw 32B+CRLF 应剥尾换行还原密钥: got %x", got)
+		}
+	})
+
 	t.Run("非法内容", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "master.key")
 		if err := os.WriteFile(p, []byte("not-a-key"), 0o600); err != nil {
@@ -370,6 +441,46 @@ func TestLoadMasterKeyFromFile_Base64AndRaw(t *testing.T) {
 			t.Fatal("缺失 master key 文件应报错")
 		}
 	})
+}
+
+// TestEncryptWithKey_NonceUnique 验证同明文 + 同 key 两次加密的密文不同（nonce 每次
+// 随机，防 IV 复用回归——若 nonce 复用，同明文两次加密产物相同，攻击者可据密文相等
+// 性推断明文关系）。
+func TestEncryptWithKey_NonceUnique(t *testing.T) {
+	key := bytes.Repeat([]byte{0x6a}, 32)
+	payload := []byte(`{"version":1,"keys":[]}`)
+	sealed1, err := EncryptWithKey(key, payload)
+	if err != nil {
+		t.Fatalf("EncryptWithKey(first): %v", err)
+	}
+	sealed2, err := EncryptWithKey(key, payload)
+	if err != nil {
+		t.Fatalf("EncryptWithKey(second): %v", err)
+	}
+	if len(sealed1) != len(sealed2) {
+		t.Fatalf("两次密文长度应一致: %d vs %d", len(sealed1), len(sealed2))
+	}
+	if bytes.Equal(sealed1, sealed2) {
+		t.Fatalf("同明文同 key 两次加密密文应不同（nonce 复用回归）")
+	}
+}
+
+// TestDecryptWithKey_ShortCiphertextNoPanic 验证密文长度恰为 NonceSize()（12）或
+// 12+1..12+15（不足 GCM tag 16B）时 DecryptWithKey 返回 error 而非 panic（防坏格式
+// 输入触发 gcm.Open 越界/panic 回归）。
+func TestDecryptWithKey_ShortCiphertextNoPanic(t *testing.T) {
+	key := bytes.Repeat([]byte{0x3c}, 32)
+	for n := 12; n <= 27; n++ {
+		data := bytes.Repeat([]byte{0x00}, n)
+		if _, err := DecryptWithKey(key, data); err == nil {
+			t.Fatalf("密文长度 %d（不足 nonce+tag）Decrypt 应返回 error", n)
+		}
+	}
+	// 边界：恰好 nonce+tag（28B）不 panic，但随机内容认证失败返回 error。
+	full := bytes.Repeat([]byte{0x00}, 12+16)
+	if _, err := DecryptWithKey(key, full); err == nil {
+		t.Fatalf("随机 28B 密文认证应失败")
+	}
 }
 
 // TestAESGCMStorer_ImplementsSecureStorer 编译期 + 行为断言：AESGCMStorer 满足
