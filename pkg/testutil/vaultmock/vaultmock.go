@@ -127,13 +127,23 @@ func (s *Server) SetDecryptError(status int, msg string) {
 // decrypt 按覆写/DecryptTo/镜像回 plaintext。token 不一致通过 t.Errorf 上报
 // （handler 运行在 httptest server goroutine，禁用 t.Fatalf）。
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.t.Errorf("vaultmock: 读取请求体失败: %v", err)
+		writeVaultErrors(w, http.StatusBadRequest, "bad request body")
+		return
+	}
 	var req struct {
 		Plaintext  string `json:"plaintext"`
 		Ciphertext string `json:"ciphertext"`
 		Context    string `json:"context"`
 	}
-	_ = json.Unmarshal(body, &req)
+	if uerr := json.Unmarshal(body, &req); uerr != nil {
+		// 非 JSON 请求体：暴露测试请求构造 bug（M-3），fail-closed 拒绝而非静默回空密文。
+		s.t.Errorf("vaultmock: 请求体非法 JSON（测试请求构造 bug?）: %v", uerr)
+		writeVaultErrors(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
 
 	token := r.Header.Get("X-Vault-Token")
 	isEncrypt := strings.Contains(r.URL.Path, "/encrypt/")

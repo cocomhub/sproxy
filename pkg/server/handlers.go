@@ -1198,9 +1198,13 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 	// （密钥不出 Vault）。token/凭据不落日志。
 	if cfg.CredentialStore.Encrypt {
 		storePath := filepath.Join(metaDir, "credentials.json")
+		// backend 是规范化后的日志值：直接 Config{Backend:""}（未经 SetDefaults）走 aesgcm
+		// 分支时 cfg.Backend 为空串，日志应仍记 "aesgcm"（M-1）。
+		backend := "aesgcm"
 		var secure accesskey.SecureStorer
 		switch cfg.CredentialStore.Backend {
 		case "vault":
+			backend = "vault"
 			tok, err := resolveVaultToken(cfg.CredentialStore.Vault)
 			if err != nil {
 				return nil, nil, err
@@ -1231,7 +1235,7 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 			secure = accesskey.AESGCMStorer{Key: masterKey}
 		}
 		store = accesskey.NewEncryptingStorer(storePath, secure)
-		logger.Info("凭据静态存储加密已启用", "backend", cfg.CredentialStore.Backend)
+		logger.Info("凭据静态存储加密已启用", "backend", backend)
 	}
 	ring := accesskey.NewRing()
 	if keys, err := store.Load(); err != nil {

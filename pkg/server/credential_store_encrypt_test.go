@@ -222,6 +222,10 @@ func writeVaultTokenFile(t *testing.T, dir, content string) string {
 
 // vaultAADContext 返回装配侧预期的 AAD context 值：base64(owner 唯一相对 storage_root 路径)
 // = base64("anonymous/meta/credentials.json")（I-2：绑 owner 相对路径，防跨节点/租户搬移）。
+//
+// 注意：该字面量必须与 handlers.go BootstrapServerCredentials 的 AADPath 推导保持同步
+// （filepath.ToSlash(filepath.Join(anonymousOwner,"meta","credentials.json"))）——若装配
+// 回退常量 "credentials.json"，本测试断言 mock 收到 context 会立即失败（I-2 防回归）。
 func vaultAADContext() string {
 	return base64.StdEncoding.EncodeToString([]byte("anonymous/meta/credentials.json"))
 }
