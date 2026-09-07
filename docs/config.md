@@ -32,8 +32,17 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `registration.login_fail_window` | duration | `15m` | per-AK 登录失败锁定期（U4）：达阈值后锁定该时长，到期自动解锁 |
 | `allow_insecure_loopback` | bool | `false` | 无任何凭据时（ring 空）放行 loopback 来源的 GET/HEAD（仅本地调试；生产勿开） |
 | `credential_ttl` | duration | `720h` (30d) | 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d） |
-| `credential_store.encrypt` | bool | `false` | 凭据静态存储加密：`true` = `<tenant>/meta/credentials.json` 以 AES-256-GCM 密文落盘（EncryptingStorer 装配）；`false`/缺省 = 明文 JSON（零回归） |
-| `credential_store.master_key_file` | string | (空) | master key 文件路径（base64 32B 或 raw 32B）；为空时回落环境变量 `SPROXY_CREDENTIAL_MASTER_KEY`（base64 32B）。`encrypt=true` 且两者皆无时启动失败。生成：`openssl rand -base64 32` |
+| `credential_store.encrypt` | bool | `false` | 凭据静态存储加密：`true` = `<tenant>/meta/credentials.json` 以密文落盘（EncryptingStorer 装配）；`false`/缺省 = 明文 JSON（零回归） |
+| `credential_store.backend` | string | `aesgcm` | 加密后端枚举：`aesgcm`（缺省，本地 master key AES-256-GCM）或 `vault`（HashiCorp Vault Transit，密钥永不出 Vault）。非法值启动校验拒绝 |
+| `credential_store.master_key_file` | string | (空) | aesgcm 专用 master key 文件路径（base64 32B 或 raw 32B）；为空时回落环境变量 `SPROXY_CREDENTIAL_MASTER_KEY`（base64 32B）。`encrypt=true` + backend=aesgcm 且两者皆无时启动失败。生成：`openssl rand -base64 32` |
+| `credential_store.vault.addr` | string | (空) | backend=vault 时 Vault 服务地址（http/https，必须）。`encrypt=true` + backend=vault 时缺失启动失败 |
+| `credential_store.vault.mount` | string | `transit` | transit engine 挂载路径 |
+| `credential_store.vault.key_name` | string | (空) | backend=vault 时 transit 加密 key 名（必须）。`encrypt=true` + backend=vault 时缺失启动失败。**key 需以 `derived=true` 创建**（AAD context 绑定文件身份才生效；非 derived key 忽略 context，见装配冒烟注释） |
+| `credential_store.vault.token_file` | string | (空) | Vault token 文件路径（读取后 trim）；为空时回落 `token_env` 环境变量 |
+| `credential_store.vault.token_env` | string | `VAULT_TOKEN` | Vault token 环境变量名。`encrypt=true` + backend=vault 且 token_file 与环境变量皆无时启动失败 |
+| `credential_store.vault.ca_file` | string | (空) | Vault 自签 CA PEM 路径（可选，默认系统证书池） |
+| `credential_store.vault.timeout` | duration | `10s` | Vault HTTP 超时 |
+| `credential_store.vault.cache_ttl` | duration | `30s` | decrypt 结果缓存 TTL。设 `0` 无效回落 `30s`（viper 零值歧义——config 层缓存恒默认开，不可显式关；`VaultOptions.CacheTTL` 内部 API 可传 0 关闭，供测试） |
 | `log_level` | string | `info` | `debug` / `info` / `warn` / `error` |
 | `log_format` | string | `text` | `text`（默认）或 `json` |
 | `max_header_bytes` | int | `1048576` (1 MiB) | HTTP 请求头大小上限 |

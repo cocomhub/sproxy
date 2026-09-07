@@ -64,13 +64,33 @@ tls:
 
 # 凭据静态存储加密（4C-2，默认关闭 = 明文现状零回归）：
 #   credential_store:
-#     encrypt: false          # true = <tenant>/meta/credentials.json 以 AES-256-GCM 密文落盘
+#     encrypt: false          # true = <tenant>/meta/credentials.json 以密文落盘
 #                             #（EncryptingStorer 装配）；false/缺省 = 明文 JSON（server.CredentialStore）
-#     master_key_file: ""     # master key 文件路径（base64 32B 或 raw 32B 两种格式都接受）；
-#                             # 为空时回落环境变量 SPROXY_CREDENTIAL_MASTER_KEY（base64 32B）。
-#                             # 生成 master key：openssl rand -base64 32
-#                             # 注意：开启加密前若已有明文 credentials.json，需先迁移（Load 对明文
-#                             # 文件 fail-closed 报错，不静默重建）——首次开启前清空 store 或先备份删除。
+#     backend: aesgcm         # 加密后端：aesgcm（缺省，本地 master key AES-256-GCM）
+#                             #   | vault（HashiCorp Vault Transit，密钥永不出 Vault）
+#     master_key_file: ""     # aesgcm 专用 master key 文件路径（base64 32B 或 raw 32B 两种格式
+#                             #   都接受）；为空时回落环境变量 SPROXY_CREDENTIAL_MASTER_KEY。
+#                             #   生成 master key：openssl rand -base64 32
+#                             #   注意：开启加密前若已有明文 credentials.json，需先迁移（Load 对明文
+#                             #   文件 fail-closed 报错，不静默重建）——首次开启前清空 store 或先备份删除。
+#     vault:                  # backend=vault 专用子段（encrypt=true + backend=vault 时必需）
+#       addr: "https://vault:8200"  # Vault 服务地址（http/https，必须）
+#       mount: "transit"      # transit engine 挂载路径（默认 "transit"）
+#       key_name: "sproxy"    # transit 加密 key 名（必须）
+#       token_file: ""        # Vault token 文件路径（读取后 trim）；空则回落 token_env
+#       token_env: "VAULT_TOKEN" # token 环境变量名（默认 VAULT_TOKEN）
+#       ca_file: ""           # Vault 自签 CA PEM 路径（可选，默认系统证书池）
+#       timeout: "10s"        # Vault HTTP 超时（默认 10s）
+#       cache_ttl: "30s"      # decrypt 结果缓存 TTL（默认 30s；设 0 无效回落 30s——viper 零值
+#                             #   歧义，config 层缓存恒默认开、不可显式关）
+#     # Vault Transit 本地冒烟（dev 容器 + transit key 创建）：
+#     #   docker run -d --cap-add=IPC_LOCK -e 'VAULT_DEV_ROOT_TOKEN_ID=sproxy-dev' \
+#     #     -p 8200:8200 --name vault hashicorp/vault:latest
+#     #   export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=sproxy-dev
+#     #   vault secrets enable transit
+#     #   vault write transit/keys/sproxy derived=true
+#     #   # 注意：AAD context 绑定（credentials.json 文件身份）仅对 derived=true 的 transit key
+#     #   # 生效——非 derived key 会忽略 context，密文可被搬到任意文件解开（防搬移失效）。
 
 # 多用户 API 密钥（Bearer，与 SproxySig 互斥且优先；可选）。
 # 提供 read/write 权限分级，适合多用户 HTTP 文件访问；但不支持隧道/hub——

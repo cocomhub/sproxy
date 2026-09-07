@@ -118,6 +118,12 @@ test-ci test-cover: prepare
 notest:
 	@scripts/check-test-files.sh
 
+# L2/L3 真实 Vault 集成测试：docker 可用时起 hashicorp/vault dev 容器自动跑；
+# 无 docker 时测试自动 t.Skip（不失败）。
+.PHONY: test-vault
+test-vault:
+	bash scripts/test-vault.sh
+
 .PHONY: web-test
 web-test:
 	@node --check web/static/app.js

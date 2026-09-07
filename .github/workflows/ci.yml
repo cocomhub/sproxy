@@ -58,23 +58,70 @@ jobs:
           args: --timeout=5m ./...
 
   test:
-    name: Test (Go ${{ matrix.go }}, ${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        go: ["1.26"]
-    runs-on: ${{ matrix.os }}
+    name: Test (Go 1.26, ubuntu, +Vault)
+    runs-on: ubuntu-latest
+    # Vault dev container（ubuntu 专属：windows runner 不支持 services → L2/L3 拆到
+    # test-windows job，仅 L1 + vault 用例自动 t.Skip）。health-cmd 200 就绪后 make test
+    # 全量跑，vault_integration_test.go 检测 VAULT_ADDR 可达 → 不 skip 实跑 L2/L3。
+    services:
+      vault:
+        image: hashicorp/vault:1.18
+        env:
+          VAULT_DEV_ROOT_TOKEN_ID: root
+        ports:
+          - 8200:8200
+        options: >-
+          --health-cmd "wget -qO- http://127.0.0.1:8200/v1/sys/health || exit 1"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
-          go-version: ${{ matrix.go }}
+          go-version: "1.26"
+          check-latest: true
+
+      - name: prepare (buildmeta embed)
+        run: make prepare
+
+      - name: go vet
+        run: make vet
+
+      - name: go test (race, incl Vault L2/L3)
+        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test
+
+      - name: go test (coverage)
+        run: make cover-check
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-ubuntu
+          path: build/cover.out
+
+      - name: Upload coverage to CodeCov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+        with:
+          files: build/cover.out
+          flags: unittests
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  test-windows:
+    name: Test (Go 1.26, windows)
+    runs-on: windows-latest
+    # windows runner 无 docker services → vault 集成测试 t.Skip，仅 L1 实跑。
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
+        with:
+          go-version: "1.26"
           check-latest: true
 
       - name: Ensure make (Windows)
-        if: matrix.os == 'windows-latest'
         run: choco install make -y
 
       - name: prepare (buildmeta embed)
@@ -85,26 +132,6 @@ jobs:
 
       - name: go test (race)
         run: make test
-
-      - name: go test (coverage)
-        run: make cover-check
-        if: matrix.os == 'ubuntu-latest'
-
-      - name: Upload coverage
-        uses: actions/upload-artifact@v7
-        with:
-          name: coverage-${{ matrix.os }}
-          path: build/cover.out
-        if: matrix.os == 'ubuntu-latest'
-
-      - name: Upload coverage to CodeCov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
-        with:
-          files: build/cover.out
-          flags: unittests
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-        if: matrix.os == 'ubuntu-latest'
 
   build:
     name: Build
