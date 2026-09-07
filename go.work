@@ -4,6 +4,8 @@ use (
 	.
 	./cmd/sclient
 	./cmd/sproxy
+	./pkg/accesskey/ext/auth/totp
+	./pkg/accesskey/ext/kms
 	./pkg/certmgr/ext/dnspod
 	./pkg/telemetry/ext/otel
 	./pkg/tunnel/hub/ext/kad
