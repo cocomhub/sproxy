@@ -76,7 +76,7 @@ func DecryptWithKey(key, data []byte) ([]byte, error) {
 
 // AESGCMStorer 是 SecureStorer 的 AES-256-GCM 加密值类型实现：Encrypt/Decrypt 委托
 // EncryptWithKey/DecryptWithKey（Key 为 32B master key）。EncryptingStorer 以它为
-// 加密后端；4C-3 的 KMSStorer 复用 SecureStorer 形态（DEK 信封亦走 EncryptWithKey）。
+// 加密后端；同包 KMSStorer 复用 SecureStorer 形态（DEK 信封亦走 EncryptWithKey）。
 type AESGCMStorer struct {
 	// Key 是 32B AES-256 master key（直接作密钥；nonce 随机已提供语义安全）。
 	Key []byte

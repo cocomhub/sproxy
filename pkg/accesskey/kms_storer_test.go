@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package kms
+package accesskey
 
 import (
 	"bytes"
@@ -11,11 +11,9 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-
-	accesskey "github.com/cocomhub/sproxy/pkg/accesskey"
 )
 
-// recordingKMSClient 是 KMS 插件测试探针：EncryptDEK 用可辨识前缀包裹明文 DEK
+// recordingKMSClient 是 KMSStorer 测试探针：EncryptDEK 用可辨识前缀包裹明文 DEK
 // （便于断言 DEK 段在信封中可寻址），DecryptDEK 还原；同时记录每次收到的 DEK。
 // 只依赖 stdlib，无 mock 库。
 type recordingKMSClient struct {
@@ -62,8 +60,8 @@ func (m *recordingKMSClient) encryptDEKCount() int {
 // TestKMSStorer_Roundtrip_EnvelopeSelfDescribing 验证 KMSStorer 核心契约：
 //   - Encrypt→Decrypt 往返还原明文；
 //   - 密文信封自描述（magic 前缀 + 2B BE 长度段），DEK 密文在信封中可寻址；
-//   - 信封内 DEK 确实就是 EncryptWithKey 加密数据所用的数据密钥（用 accesskey
-//     导出原语独立还原正文）。
+//   - 信封内 DEK 确实就是 EncryptWithKey 加密数据所用的数据密钥（用本包导出原语
+//     独立还原正文）。
 func TestKMSStorer_Roundtrip_EnvelopeSelfDescribing(t *testing.T) {
 	mock := &recordingKMSClient{}
 	s := NewKMSStorer(mock)
@@ -97,8 +95,8 @@ func TestKMSStorer_Roundtrip_EnvelopeSelfDescribing(t *testing.T) {
 	}
 	body := ct[segStart+dekLen:]
 
-	// 独立还原：用信封内 DEK + accesskey 导出原语解开正文，应等于明文。
-	got, err := accesskey.DecryptWithKey(dek, body)
+	// 独立还原：用信封内 DEK + 本包导出原语解开正文，应等于明文。
+	got, err := DecryptWithKey(dek, body)
 	if err != nil {
 		t.Fatalf("用信封内 DEK 独立解密正文: %v", err)
 	}
@@ -125,7 +123,8 @@ func TestKMSStorer_Roundtrip_EnvelopeSelfDescribing(t *testing.T) {
 }
 
 // TestKMSStorer_Decrypt_TamperFails 验证解密对篡改的 fail-closed：正文任一字节翻转
-// （GCM 认证失败）与 magic 篡改（格式错误）都必须报错，绝不返回错误明文。
+// （GCM 认证失败）、magic 篡改（格式错误）、DEK 密文段翻转（GCM 兜底）与截断都必须
+// 报错，绝不返回错误明文。
 func TestKMSStorer_Decrypt_TamperFails(t *testing.T) {
 	mock := &recordingKMSClient{}
 	s := NewKMSStorer(mock)
@@ -174,7 +173,7 @@ func TestKMSStorer_Decrypt_TamperFails(t *testing.T) {
 	}
 }
 
-// TestKMSStorer_Unconfigured_ErrNotConfigured 验证骨架默认态 fail-closed：
+// TestKMSStorer_Unconfigured_ErrNotConfigured 验证未配置态 fail-closed：
 // nil/未配置 KMS 客户端 → Encrypt/Decrypt 返回 ErrNotConfigured（哨兵错误），
 // 非占位、非 panic。
 func TestKMSStorer_Unconfigured_ErrNotConfigured(t *testing.T) {
@@ -208,31 +207,27 @@ func TestKMSStorer_Unconfigured_ErrNotConfigured(t *testing.T) {
 	}
 }
 
-// TestKMSStorer_RegistryIntegration 验证注册表接入：
-//   - init() 已把默认未配置骨架注册为 "kms"，GetStorer[SecureStorer] 命中且
-//     Encrypt 返回 ErrNotConfigured；
-//   - 自定义 KMSStorer 注册后经注册表取值可完成加解密往返；
+// TestKMSStorer_NoAutoRegister_AndRegistryRoundtrip 验证 KMSStorer 内置后的注册表语义：
+//   - 内置不再有 init() 自举 → "kms" 名字不应自动占用注册表（Bootstrap 装配直接构造，
+//     无需注册表探测）；
+//   - 显式经注册表注入（RegisterStorer + 自定义 KMSClient）后可完成加解密往返；
 //   - UnregisterStorer 后不再命中。
-func TestKMSStorer_RegistryIntegration(t *testing.T) {
-	// init 注册的默认项。
-	def, ok := accesskey.GetStorer[accesskey.SecureStorer]("kms")
-	if !ok {
-		t.Fatalf("init 注册的 %q 应命中 SecureStorer", "kms")
-	}
-	if _, err := def.Encrypt([]byte("x")); !errors.Is(err, ErrNotConfigured) {
-		t.Fatalf("默认注册项 Encrypt 应返回 ErrNotConfigured, got %v", err)
+func TestKMSStorer_NoAutoRegister_AndRegistryRoundtrip(t *testing.T) {
+	// 内置 + 无 init：注册表不应预置 "kms"。
+	if _, ok := GetStorer[SecureStorer]("kms"); ok {
+		t.Fatalf("内置 KMSStorer 不应自动注册 \"kms\"（Bootstrap 直接构造，无需注册表探测）")
 	}
 
-	// 自定义注册 + 往返。
+	// 显式注册 + 往返。
 	const name = "kms-test-4c3"
 	mock := &recordingKMSClient{}
-	if err := accesskey.RegisterStorer(name, NewKMSStorer(mock)); err != nil {
+	if err := RegisterStorer(name, NewKMSStorer(mock)); err != nil {
 		t.Fatalf("RegisterStorer: %v", err)
 	}
 	// t.Cleanup 兜底反注册：中途 t.Fatalf 失败也不残留全局注册表（S4），
 	// 使名字在后续用例/重跑中可复用。
-	t.Cleanup(func() { accesskey.UnregisterStorer(name) })
-	got, ok := accesskey.GetStorer[accesskey.SecureStorer](name)
+	t.Cleanup(func() { UnregisterStorer(name) })
+	got, ok := GetStorer[SecureStorer](name)
 	if !ok {
 		t.Fatalf("GetStorer[SecureStorer](%q) 应命中", name)
 	}
@@ -248,8 +243,8 @@ func TestKMSStorer_RegistryIntegration(t *testing.T) {
 		t.Fatalf("注册项往返不一致: got %q", dec)
 	}
 
-	accesskey.UnregisterStorer(name)
-	if _, ok := accesskey.GetStorer[accesskey.SecureStorer](name); ok {
+	UnregisterStorer(name)
+	if _, ok := GetStorer[SecureStorer](name); ok {
 		t.Fatalf("UnregisterStorer 后不应命中")
 	}
 }
