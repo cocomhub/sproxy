@@ -42,7 +42,8 @@ test('renderToMatrix 四角 finder 图案在位（7x7 空心矩形 + 中心点�
     assert.strictEqual(m[r0 + 6][c0 + 6], 1, 'finder 右下角暗');
   }
   // 分隔带：左上 finder 的右侧（col 7）与下方（row 7）均为亮。
-  for (let i = 0; i < 8; i++) {
+  // 注意只断言 i<7（(7,7) 是数据模块，非分隔带，不得纳入结构性断言）。
+  for (let i = 0; i < 7; i++) {
     assert.strictEqual(m[i][7], 0, '左上 finder 右侧分隔带 (' + i + ',7) 应亮');
     assert.strictEqual(m[7][i], 0, '左上 finder 下方分隔带 (7,' + i + ') 应亮');
   }

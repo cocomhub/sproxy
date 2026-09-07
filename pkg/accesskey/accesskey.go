@@ -101,29 +101,29 @@ var (
 // Meta 是 SK 条目的附加元信息（审计 / 展示用）。
 type Meta struct {
 	// Type 条目类型，如 "renew"、"initial"（4B 可扩展）。
-	Type string
+	Type string `json:"type,omitempty"`
 	// IP 创建条目时的客户端来源 IP（审计线索）。
-	IP string
+	IP string `json:"ip,omitempty"`
 }
 
 // SKEntry 是单个 SK 凭据条目。
 type SKEntry struct {
 	// ID 唯一 ID，形如 skey-<12hex>（创建时由 newEntryID 生成）。
-	ID string
+	ID string `json:"id,omitempty"`
 	// SK 32 字节 AES-256 密钥字节。
-	SK []byte
+	SK []byte `json:"sk,omitempty"`
 	// Kind 密钥形态（plain / secret_wrap / totp_wrap）。
-	Kind Kind
+	Kind Kind `json:"kind,omitempty"`
 	// WrapKeyID 当 Kind 为 secret_wrap 时，指明包裹该 SK 的信封密钥（AK）的 ID。
-	WrapKeyID string
+	WrapKeyID string `json:"wrap_key_id,omitempty"`
 	// CreatedAt 创建时间。
-	CreatedAt time.Time
+	CreatedAt time.Time `json:"created_at"`
 	// ExpiresAt 过期时间；零值表示永久有效。
-	ExpiresAt time.Time
+	ExpiresAt time.Time `json:"expires_at"`
 	// Status 生命周期状态（active / expired / disabled）。
-	Status Status
+	Status Status `json:"status,omitempty"`
 	// Meta 附加元信息（类型 / 来源 IP）。
-	Meta Meta
+	Meta Meta `json:"meta"`
 }
 
 // Key 是单个 AK（Access Key）及其挂载的全部 SK 条目。
@@ -132,16 +132,16 @@ type SKEntry struct {
 // 语义与 pkg/tunnel.AccessKeyMesh 一致），避免在两处各存一份导致漂移。
 type Key struct {
 	// AK Access Key 标识，形如 ak[-<mesh>]-<32hex>（legacy 兼容 ak[-<mesh>]-<16hex>）。
-	AK string
+	AK string `json:"ak,omitempty"`
 	// Owner 该 AK 的归属者（租户 / 用户）。
-	Owner string
+	Owner string `json:"owner,omitempty"`
 	// Role 账号级角色（user/node/admin；旧 credentials.json 无 role 字段载入时
 	// 由 Replace 归一为 RoleUser，R3-M4）。
-	Role Role `json:"role"`
+	Role Role `json:"role,omitempty"`
 	// TOTPSecret 4B-2：TOTP 注册时生成、账号级，随 Key 序列化落盘（简单模式为 nil）。
 	TOTPSecret []byte `json:"totp_secret,omitempty"`
 	// Entries 该 AK 挂载的全部 SK 条目。
-	Entries []SKEntry
+	Entries []SKEntry `json:"entries,omitempty"`
 }
 
 // EntryIDLen 是 SKEntry.ID 中 hex 段长度（12 hex = 6 字节随机，共 6B 熵）。

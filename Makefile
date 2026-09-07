@@ -255,7 +255,7 @@ gofix:
 
 .PHONY: addlicense
 addlicense:
-	addlicense -c "The Cocomhub Authors. All rights reserved." -s=only -ignore ".claude/**" -ignore ".trae/**" -ignore ".cursor/**" .
+	addlicense -c "The Cocomhub Authors. All rights reserved." -s=only -ignore ".claude/**" -ignore ".trae/**" -ignore ".cursor/**" -ignore "web/static/vendor/**" .
 
 .PHONY: fmt
 fmt: gofix addlicense

@@ -14,6 +14,9 @@
 //   sclientTransport（sclient/transport.js）——公开端点请求 + configure 同步凭据
 //   showToast（app.js）
 //   accessKey / accessKeySecret / accessKeyID（app.js 顶层 let）
+//   applyWebLoginKeys（app.js）——登录成功后统一刷新页面凭据态（输入框/顶层变量/transport）
+//   refreshList（app.js）——登录成功后刷新文件列表
+//   sproxyQR（qrcode.js）——客户端 QR 渲染（renderToSVG / renderToMatrix）
 //
 // 端点契约（公开路由，无需签名）：
 //   POST /api/credentials/register  body {owner}        → {ak, owner, admin, otpauth_uri, base32_secret}
@@ -56,6 +59,7 @@ if (typeof module === 'object' && module.exports) {
     requestTOTPNonceByCore,
     loginTOTPByCore,
     renderRegisterResultHtml,
+    renderQRInto,
     b64ToBytes,
     bytesToHex: sclientCryptoBytesToHex,
   };
@@ -176,7 +180,12 @@ function renderRegisterResultHtml(data) {
   html += '<code style="display:block;padding:8px;background:var(--bg-hover);border-radius:4px;font-size:13px;word-break:break-all;">' + htmlEsc(d.base32_secret || '') + '</code>';
   if (d.otpauth_uri) {
     html += '<p style="margin:8px 0 4px;font-size:13px;color:var(--text-secondary);">otpauth 链接</p>';
-    html += '<a href="' + htmlEsc(d.otpauth_uri) + '" target="_blank" rel="noopener" style="font-size:13px;word-break:break-all;">' + htmlEsc(d.otpauth_uri) + '</a>';
+    // 防御性 scheme 校验：仅 otpauth:// 渲染为可点击链接；其它（异常/被篡改数据）输出纯文本防钓鱼/XSS。
+    if (String(d.otpauth_uri).slice(0, 11) === 'otpauth://') {
+      html += '<a href="' + htmlEsc(d.otpauth_uri) + '" target="_blank" rel="noopener" style="font-size:13px;word-break:break-all;">' + htmlEsc(d.otpauth_uri) + '</a>';
+    } else {
+      html += '<span style="font-size:13px;word-break:break-all;">' + htmlEsc(d.otpauth_uri) + '</span>';
+    }
   }
   html += '<div id="qr-register" style="margin-top:8px;"></div>';
   html += '<p style="margin:8px 0 0;font-size:12px;color:var(--text-muted);">注册完成，请使用上方密钥在身份验证器中添加账号，然后切到「登录」标签用动态码登录。</p>';
@@ -207,7 +216,7 @@ function openLoginModal() {
   if (!modal) return;
   modal.style.display = 'flex';
   switchLoginTab('login');
-  // 最近 AK 记忆（S3）：spproxy_last_ak 预填 AK 输入框
+  // 最近 AK 记忆（S3）：sproxy_last_ak 预填 AK 输入框
   try {
     var last = sessionStorage.getItem('sproxy_last_ak');
     var akInput = document.getElementById('login-ak');

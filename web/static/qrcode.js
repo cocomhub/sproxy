@@ -47,11 +47,6 @@
     return out;
   }
 
-  // 转义 SVG 属性/文本（仅基础：& < > "）。
-  function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
-
   // text → 内联 SVG 字符串（1 模块=1 rect；含 viewBox 与白色背景，可缩放）。
   function renderToSVG(text) {
     const qr = createQR(text);

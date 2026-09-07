@@ -93,6 +93,15 @@ document.getElementById('token').value = accessKeySecret;
 function saveAccessKeys() {
   accessKey = document.getElementById('accessKey').value.trim();
   accessKeySecret = document.getElementById('token').value.trim();
+  // F6：手动保存的 AK 与当前已存 AK 不一致（切换账号）时，清空 skey-id（accessKeyID）
+  // ——否则 session 登录遗留的 skey-id= 会精确锁定一个不属于当前 AK 的 SK 条目，
+  // 后续请求静默 401（历史缺陷）。登录流程写入的 AK 与此处一致，不受影响。
+  var prevAk = null;
+  try { prevAk = sessionStorage.getItem('sproxy_access_key'); } catch (e) { /* ignore */ }
+  if (accessKey && prevAk && accessKey !== prevAk) {
+    accessKeyID = '';
+    sessionStorage.removeItem('sproxy_access_key_id');
+  }
   sessionStorage.setItem('sproxy_access_key', accessKey);
   sessionStorage.setItem('sproxy_access_key_secret', accessKeySecret);
   sessionStorage.setItem('sproxy_access_key_id', accessKeyID);

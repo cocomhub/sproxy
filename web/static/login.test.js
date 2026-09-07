@@ -174,12 +174,38 @@ test('注册响应渲染 → base32 文本 / otpauth_uri 链接 / admin 提示 /
   assert.ok(html.includes('otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP'), '应给出 otpauth_uri（链接/复制）');
   assert.ok(html.includes('管理员'), 'admin=true 应有提示');
   assert.ok(html.includes('qr-register'), '结果区应有 QR 挂载点（客户端 JS QR 渲染）');
+  // F8：非 otpauth:// scheme 不渲染为可点击链接（纯文本），防任意 href
+  const bad = loginLib.renderRegisterResultHtml({ otpauth_uri: 'javascript:alert(1)' });
+  assert.ok(!bad.includes('<a href='), '非 otpauth:// 不得输出 <a href=');
+  assert.ok(bad.includes('javascript:alert(1)') && bad.includes('<span'), '非 otpauth:// 应输出纯文本 <span>');
 });
 
-test('QR 矩阵由 qrcode.js renderToMatrix 生成（注入慢速：内容为 otpauth_uri）', () => {
-  // login.js 的 qrCanvasFor 应委托全局 sproxyQR.renderToMatrix——结构性快照：
-  const src = fs.readFileSync(path.join(__dirname, 'login.js'), 'utf8');
-  assert.ok(src.includes('sproxyQR.renderToMatrix') || src.includes('renderToMatrix'), 'login.js 应调用 renderToMatrix 生成 QR');
+test('QR 集成：renderQRInto 委托 sproxyQR 渲染挂载点（stub 注入断言 SVG）', async () => {
+  // 注入最小 sproxyQR stub（renderToSVG 返回确定性 SVG），断言 el.innerHTML 被写入。
+  const prev = globalThis.sproxyQR;
+  globalThis.sproxyQR = {
+    renderToSVG(uri) { return '<svg xmlns="http://www.w3.org/2000/svg"><rect width="21" height="21"/></svg>'; },
+  };
+  try {
+    const el = { innerHTML: '' };
+    await loginLib.renderQRInto(el, 'otpauth://totp/alice?secret=JBSWY3DPEHPK3PXP');
+    assert.ok(el.innerHTML.startsWith('<svg'), '挂载点应被写成 SVG：' + el.innerHTML);
+    assert.ok(el.innerHTML.includes('xmlns='), 'SVG 应含 xmlns');
+  } finally {
+    if (prev === undefined) delete globalThis.sproxyQR; else globalThis.sproxyQR = prev;
+  }
+});
+
+test('QR 集成：renderQRInto 无 sproxyQR 时不抛错且挂载点不动', async () => {
+  const prev = globalThis.sproxyQR;
+  delete globalThis.sproxyQR;
+  try {
+    const el = { innerHTML: 'keep' };
+    await loginLib.renderQRInto(el, 'otpauth://totp/x?secret=JBSWY3DPEHPK3PXP');
+    assert.strictEqual(el.innerHTML, 'keep', '无 sproxyQR 时应静默保持原内容');
+  } finally {
+    if (prev !== undefined) globalThis.sproxyQR = prev;
+  }
 });
 
 test('app.js 顶层读取并保存 sproxy_access_key_id（saveAccessKeys 同步写），登录页与之对接', () => {
