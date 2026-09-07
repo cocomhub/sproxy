@@ -27,20 +27,54 @@ func TestPlainStorer_Roundtrip(t *testing.T) {
 	if !bytes.Equal(dec, payload) {
 		t.Fatalf("Decrypt 应还原明文: got %q, want %q", dec, payload)
 	}
-	// 空输入往返也保持原样（nil/空语义）。
+	// 空输入往返也保持原样（nil↔nil：结果必须为 nil，而非非 nil 空切片）。
 	empty, err := s.Encrypt(nil)
 	if err != nil {
 		t.Fatalf("Encrypt(nil): %v", err)
 	}
-	if len(empty) != 0 {
-		t.Fatalf("Encrypt(nil) 应返回空: got %d bytes", len(empty))
+	if empty != nil {
+		t.Fatalf("Encrypt(nil) 应返回 nil, got %#v (len=%d)", empty, len(empty))
 	}
 	empty2, err := s.Decrypt(nil)
 	if err != nil {
 		t.Fatalf("Decrypt(nil): %v", err)
 	}
-	if len(empty2) != 0 {
-		t.Fatalf("Decrypt(nil) 应返回空: got %d bytes", len(empty2))
+	if empty2 != nil {
+		t.Fatalf("Decrypt(nil) 应返回 nil, got %#v (len=%d)", empty2, len(empty2))
+	}
+}
+
+// TestPlainStorer_DeepCopy 钉死 PlainStorer 的深拷贝契约（审查 M3）：若实现被
+// 「简化」为直接返回入参切片（`return p, nil`），调用方 mutate 返回切片会反过来
+// 污染入参缓冲——对凭据快照是静默数据损坏。双向断言：mutate Encrypt 返回值 → 入参
+// 原样；mutate Decrypt 返回值 → 密文原样（拷贝语义不共享底层数组）。
+func TestPlainStorer_DeepCopy(t *testing.T) {
+	var s PlainStorer
+
+	// Encrypt：mutate 返回切片，入参必须不受影响。
+	pt := []byte("plaintext-payload")
+	enc, err := s.Encrypt(pt)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	for i := range enc {
+		enc[i] ^= 0xFF
+	}
+	if !bytes.Equal(pt, []byte("plaintext-payload")) {
+		t.Fatalf("Encrypt 返回切片与入参共享底层数组（非深拷贝）: 入参被污染为 %q", pt)
+	}
+
+	// Decrypt：mutate 返回切片，密文必须不受影响。
+	dec, err := s.Decrypt(enc)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	before := append([]byte(nil), enc...)
+	for i := range dec {
+		dec[i] = 0x00
+	}
+	if !bytes.Equal(enc, before) {
+		t.Fatalf("Decrypt 返回切片与密文共享底层数组（非深拷贝）: 密文被污染")
 	}
 }
 
@@ -104,31 +138,47 @@ func TestStorerRegistry_RegisterGetUnregister(t *testing.T) {
 	}
 }
 
-// typedNilPtrStorer 是 typed-nil 探针：*typedNilPtrStorer 满足 SecureStorer，
+// typedNilPtrStorer 是 typed-nil 指针探针：*typedNilPtrStorer 满足 SecureStorer，
 // 零值即 nil 指针。
 type typedNilPtrStorer struct{}
 
 func (*typedNilPtrStorer) Encrypt(p []byte) ([]byte, error) { return p, nil }
 func (*typedNilPtrStorer) Decrypt(c []byte) ([]byte, error) { return c, nil }
 
-// TestStorerRegistry_RejectTypedNil 验证 RegisterStorer 对 typed-nil 值的防御：
-//   - RegisterStorer(name, (*typedNilPtrStorer)(nil)) → 错误（拒绝入库）；
-//   - 拒绝后 GetStorer 不命中（ok==false），不 panic；
-//   - 字面 nil 同样拒绝。
+// typedNilMapStorer 是 typed-nil 非指针 nil-able 探针：map 派生类型，零值即 nil map。
+type typedNilMapStorer map[string]struct{}
+
+func (typedNilMapStorer) Encrypt(p []byte) ([]byte, error) { return p, nil }
+func (typedNilMapStorer) Decrypt(c []byte) ([]byte, error) { return c, nil }
+
+// TestStorerRegistry_RejectTypedNil 验证 RegisterStorer 对 nil 值的防御（审查 M2）：
+//   - 字面 nil → 错误；
+//   - typed-nil 指针（(*typedNilPtrStorer)(nil)）→ 错误（拒绝入库）；
+//   - typed-nil 非指针 nil-able（nil map 派生类型）→ 错误（守卫覆盖 Pointer 以外
+//     的 Chan/Func/Map/Slice/Interface）；
+//   - 拒绝后 GetStorer 不命中（ok==false），不 panic。
 func TestStorerRegistry_RejectTypedNil(t *testing.T) {
-	const ln = "reject-typed-nil"
-
-	if err := RegisterStorer(ln, (*typedNilPtrStorer)(nil)); err == nil {
-		t.Fatalf("RegisterStorer typed-nil 应返回错误（拒绝入库）")
-	}
-	if _, ok := GetStorer[*typedNilPtrStorer](ln); ok {
-		t.Fatalf("typed-nil 拒绝后不应命中注册表")
-	}
-
 	if err := RegisterStorer("reject-literal-nil", nil); err == nil {
 		t.Fatalf("RegisterStorer 字面 nil 应返回错误")
 	}
 	if _, ok := GetStorer[PlainStorer]("reject-literal-nil"); ok {
 		t.Fatalf("字面 nil 拒绝后不应命中注册表")
+	}
+
+	const ln = "reject-typed-nil"
+	if err := RegisterStorer(ln, (*typedNilPtrStorer)(nil)); err == nil {
+		t.Fatalf("RegisterStorer typed-nil 指针应返回错误（拒绝入库）")
+	}
+	if _, ok := GetStorer[*typedNilPtrStorer](ln); ok {
+		t.Fatalf("typed-nil 指针拒绝后不应命中注册表")
+	}
+
+	const lnMap = "reject-typed-nil-map"
+	var nilMap typedNilMapStorer // nil map
+	if err := RegisterStorer(lnMap, nilMap); err == nil {
+		t.Fatalf("RegisterStorer typed-nil map 应返回错误（拒绝入库）")
+	}
+	if _, ok := GetStorer[typedNilMapStorer](lnMap); ok {
+		t.Fatalf("typed-nil map 拒绝后不应命中注册表")
 	}
 }

@@ -28,6 +28,10 @@ type SecureStorer interface {
 // Encrypt / Decrypt 均原样返回输入（深拷贝，避免返回入参切片被调用方改写污染）。
 type PlainStorer struct{}
 
+// 编译期断言：PlainStorer 满足 SecureStorer（防签名漂移，与
+// pkg/server/credentialstore.go 的 `var _ accesskey.CredentialStorer` 同款模式）。
+var _ SecureStorer = PlainStorer{}
+
 // Encrypt 原样返回输入（深拷贝）。
 func (PlainStorer) Encrypt(p []byte) ([]byte, error) {
 	return append([]byte(nil), p...), nil

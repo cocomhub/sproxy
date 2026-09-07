@@ -107,10 +107,12 @@ type Handlers struct {
 
 	// credentialRing 是 SproxySig 凭据权威表（AK→多 SK 条目，凭据 store 化后取代
 	// cfg.AccessKeys）。RegisterRoutes 装配：opts.CredentialRing 显式注入（测试/
-	// xfer 集成）优先；否则从 opts.CredentialStore 载入，仍空则首启 anonymous
-	// （见 bootstrapCredentials）。authMiddleware 只查本 ring、无 yaml 回退。
-	// credentialStore 是 credentialRing 关联的持久化 store（anonymous 生成后
-	// Save；nil = 不持久化，纯内存场景）。持接口类型，可注入外部 storer 实现。
+	// xfer 集成）优先；否则从 opts.CredentialStore 载入（见 bootstrapCredentials）。
+	// **U3 零凭据启动**——载入后仍空不再生成 anonymous，系统以零凭据等待注册：
+	// register 公开端点是唯一用户入口，首个经回环注册的用户原子授 admin。
+	// authMiddleware 只查本 ring、无 yaml 回退。
+	// credentialStore 是 credentialRing 关联的持久化 store（凭据变更后 Save；
+	// nil = 不持久化，纯内存场景）。持接口类型，可注入外部 storer 实现。
 	credentialRing  *accesskey.Ring
 	credentialStore accesskey.CredentialStorer
 	// authenticators 是认证面插件化链（DEC-C）：authMiddleware 遍历链，任一成功 →
@@ -515,8 +517,9 @@ type RegisterRoutesOpts struct {
 	// 并发覆盖污染；多测试并发各用独立 RegisterRoutes，无竞态）。
 	AllowInsecureLoopback bool
 	// CredentialRing 是 SproxySig 凭据表（Ring）。nil 时 RegisterRoutes 自动装配：
-	// 从 CredentialStore 载入，仍空且 cfg.CredentialTTL>=0 则生成首启 anonymous
-	// 凭据并持久化。测试/xfer 集成可显式注入（配合 AllowInsecureLoopback）。
+	// 从 CredentialStore 载入；仍空则 **U3 零凭据启动**——不生成 anonymous，系统以
+	// 零凭据等待注册（register 公开端点唯一入口，首位回环注册者原子授 admin）。
+	// 测试/xfer 集成可显式注入（配合 AllowInsecureLoopback）。
 	CredentialRing *accesskey.Ring
 	// CredentialStore 是凭据 store（nil = 不载入/不持久化，纯内存 Ring 场景，
 	// 如注入空 Ring 的无认证测试）。持 accesskey.CredentialStorer（接口提取后

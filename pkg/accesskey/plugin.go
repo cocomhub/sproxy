@@ -29,8 +29,10 @@ var registry = &storerRegistry{m: map[string]any{}}
 // RegisterStorer 注册一个 storer（CredentialStorer / SecureStorer / 未来实现）。
 // 重名注册返回错误（防覆盖静默替换）；同名反注册后可重新注册。
 //
-// 值校验：真实 nil 与 typed-nil（如 `(*CredentialStore)(nil)` 装箱进接口）均拒绝
-// ——typed-nil 入库后 GetStorer[T] 对非接口 T 走类型断言会 panic。
+// 值校验：真实 nil 与 typed-nil（即把 nil 的 nil-able 值装箱进接口，如
+// `(*CredentialStore)(nil)`、nil map 派生类型）一律拒绝——typed-nil 入库后
+// GetStorer[T] 可能返回 ok=true 的 nil 底层值，调用方再调其方法会对 nil 接收者
+// panic（comma-ok 类型断言本身不 panic）。
 func RegisterStorer(name string, v any) error {
 	if name == "" {
 		return fmt.Errorf("accesskey: register storer: 空名字")
@@ -38,9 +40,14 @@ func RegisterStorer(name string, v any) error {
 	if v == nil {
 		return fmt.Errorf("accesskey: register storer %q: nil 值", name)
 	}
+	// 拒绝 nil-able kind 的 typed-nil（reflect.IsNil 仅对 Chan/Func/Map/Pointer/
+	// Slice/Interface 合法；值类型 struct 实现不入此分支）。
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Pointer && rv.IsNil() {
-		return fmt.Errorf("accesskey: register storer %q: typed-nil 值（nil 指针装箱）", name)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice, reflect.Interface:
+		if rv.IsNil() {
+			return fmt.Errorf("accesskey: register storer %q: typed-nil 值（nil 底层装箱）", name)
+		}
 	}
 	registry.Lock()
 	defer registry.Unlock()
@@ -62,8 +69,9 @@ func UnregisterStorer(name string) {
 // GetStorer 按目标类型取已注册 storer：名字已注册、且值与类型参数 T 匹配时
 // 返回 (值, true)；未注册或类型不匹配返回 (零值, false)。
 //
-// 注意：注册值若为 typed-nil 会在断言阶段对非接口 T 触发 panic——RegisterStorer
-// 已拒绝 nil 值实现入库，调用方不应绕过注册表直接写入 registry。
+// 注意：typed-nil 值入库后本函数可能返回 ok=true 的 nil 底层值，调用方再调其
+// 方法会对 nil 接收者 panic——RegisterStorer 已拒绝 nil 指针等 typed-nil 入库，
+// 调用方也不应绕过注册表直接写入 registry。
 func GetStorer[T any](name string) (T, bool) {
 	var zero T
 	registry.RLock()
