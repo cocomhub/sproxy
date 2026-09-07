@@ -434,7 +434,7 @@ func TestVaultTransitStorer_Encrypt_CiphertextVerbatim(t *testing.T) {
 	}
 }
 
-// TestVaultTransitStorer_Decrypt_RejectNonVaultPrefix 验证非 vault:v1: 前缀输入直接拒绝：
+// TestVaultTransitStorer_Decrypt_RejectNonVaultPrefix 验证非 vault:v<N>: 前缀输入直接拒绝：
 // Decrypt 返回 error 且不发任何 Vault 请求（防明文误喂）。
 func TestVaultTransitStorer_Decrypt_RejectNonVaultPrefix(t *testing.T) {
 	mock := newMockVault(t, vaultTestToken)
@@ -442,10 +442,10 @@ func TestVaultTransitStorer_Decrypt_RejectNonVaultPrefix(t *testing.T) {
 
 	_, err := s.Decrypt([]byte(`{"version":1,"keys":[]}`))
 	if err == nil {
-		t.Fatalf("Decrypt 非 vault:v1: 前缀输入应报错")
+		t.Fatalf("Decrypt 非 vault:v<N>: 前缀输入应报错")
 	}
 	if n := mock.reqCount(); n != 0 {
-		t.Fatalf("非 vault:v1: 输入不应请求 Vault, got %d 次请求", n)
+		t.Fatalf("非 vault:v<N>: 输入不应请求 Vault, got %d 次请求", n)
 	}
 }
 
@@ -951,14 +951,59 @@ func TestVaultCache_ConcurrentDecrypt_RaceSafe(t *testing.T) {
 }
 
 // TestVaultTransitStorer_Encrypt_EmptyCiphertextRejected 验证 Encrypt 响应守卫（S1）：
-// mock 回空 data.ciphertext（非 vault:v1: 前缀）→ Encrypt error——拒绝 0 字节密文落盘覆盖
-// 既有好密文（EncryptingStorer.Save 会把空字节写盘，下次启动 Load fail-closed）。
+// mock 回空 data.ciphertext（非 vault:v<N>: 前缀）→ Encrypt error——拒绝 0 字节密文落盘
+// 覆盖既有好密文（EncryptingStorer.Save 会把空字节写盘，下次启动 Load fail-closed）。
 func TestVaultTransitStorer_Encrypt_EmptyCiphertextRejected(t *testing.T) {
 	mock := newMockVault(t, vaultTestToken)
 	mock.override("encrypt", http.StatusOK, `{"data":{"ciphertext":""}}`)
 	s := newTestVaultStorer(t, mock, vaultTestAAD)
 
-	if _, err := s.Encrypt([]byte("x")); err == nil || !strings.Contains(err.Error(), "vault:v1:") {
-		t.Fatalf("空/非 vault:v1: 前缀 ciphertext 应拒绝且错误含前缀线索, got %v", err)
+	if _, err := s.Encrypt([]byte("x")); err == nil || !strings.Contains(err.Error(), "vault:v") {
+		t.Fatalf("空/非 vault:v<N>: 前缀 ciphertext 应拒绝且错误含前缀线索, got %v", err)
 	}
+}
+
+// TestVaultTransitStorer_CiphertextPrefix_VersionAgnostic 验证密文前缀守卫**版本无关**：
+// vault:v2:（key rotate 后真实 Vault 返回）应被 Encrypt 放行、Decrypt 不拒——修复硬编码
+// vault:v1: 匹配在轮换场景误拒合法密文（CI cover 复现）。
+func TestVaultTransitStorer_CiphertextPrefix_VersionAgnostic(t *testing.T) {
+	t.Run("Encrypt vault:v2 放行", func(t *testing.T) {
+		mock := newMockVault(t, vaultTestToken)
+		const v2CT = "vault:v2:zcfbu..."
+		mock.setEncryptCiphertext(v2CT)
+		s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+		ct, err := s.Encrypt([]byte("x"))
+		if err != nil {
+			t.Fatalf("Encrypt（vault:v2 密文）应放行: %v", err)
+		}
+		if string(ct) != v2CT {
+			t.Fatalf("Encrypt 应原样返回 %q, got %q", v2CT, ct)
+		}
+	})
+	t.Run("Decrypt vault:v2 不拒绝", func(t *testing.T) {
+		mock := newMockVault(t, vaultTestToken)
+		mock.setDecryptFn(func(string) string { return "decrypted" })
+		s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+		pt, err := s.Decrypt([]byte("vault:v2:zcfbu..."))
+		if err != nil {
+			t.Fatalf("Decrypt（vault:v2 输入）不应被前缀守卫拒绝: %v", err)
+		}
+		if string(pt) != "decrypted" {
+			t.Fatalf("Decrypt 应还原明文, got %q", pt)
+		}
+		if n := mock.reqCount(); n != 1 {
+			t.Fatalf("vault:v2 应放行并请求 Vault（guard 不拒）, mock 应收 1 次, got %d", n)
+		}
+	})
+	t.Run("Decrypt vault:v0 放行", func(t *testing.T) {
+		mock := newMockVault(t, vaultTestToken)
+		mock.setDecryptFn(func(string) string { return "decrypted" })
+		s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+		if _, err := s.Decrypt([]byte("vault:v0:x")); err != nil {
+			t.Fatalf("vault:v0 输入不应被拒（版本段 ≥1 位数字即可）: %v", err)
+		}
+	})
 }

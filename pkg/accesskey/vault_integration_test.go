@@ -151,7 +151,7 @@ func newVaultStorer(t *testing.T, addr, token, key, aad string) *accesskey.Vault
 }
 
 // TestVault_L2_EncryptDecryptRoundtrip 验证真实 Vault Transit 契约：Encrypt 返回密文含
-// vault:v1: 前缀 → Decrypt 还原原文（L2）。
+// vault:v<N>: 前缀（版本无关）→ Decrypt 还原原文（L2）。
 func TestVault_L2_EncryptDecryptRoundtrip(t *testing.T) {
 	addr, token := requireVault(t)
 	const key = "sproxy-it-roundtrip"
@@ -163,8 +163,8 @@ func TestVault_L2_EncryptDecryptRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encrypt: %v", err)
 	}
-	if !bytes.HasPrefix(ct, []byte("vault:v1:")) {
-		t.Fatalf("密文应含 vault:v1: 前缀, got %q", ct)
+	if !bytes.HasPrefix(ct, []byte("vault:v")) {
+		t.Fatalf("密文应含 vault:v<N>: 前缀（版本无关）, got %q", ct)
 	}
 	pt, err := s.Decrypt(ct)
 	if err != nil {

@@ -66,9 +66,10 @@ type VaultOptions struct {
 var _ SecureStorer = (*VaultTransitStorer)(nil)
 
 const (
-	// vaultCiphertextPrefix 是 Vault Transit 密文的自描述前缀。Decrypt 输入非此前缀
-	// 直接拒绝（fail-closed，防明文误喂 Vault）。
-	vaultCiphertextPrefix = "vault:v1:"
+	// vaultCiphertextMagic 是 Vault Transit 密文的自描述前缀魔数（**版本无关**）：密文实际
+	// 形如 vault:v<N>:...（N = key 版本，rotate 后递增，如 vault:v2:）。校验须匹配版本段
+	// 而非硬编码 v1——硬编码 v1 会在 key 轮换后误拒合法密文。
+	vaultCiphertextMagic = "vault:v"
 	// vaultDefaultMount 是 Transit engine 的缺省挂载路径。
 	vaultDefaultMount = "transit"
 	// vaultDefaultTimeout 是缺省 HTTP 超时。
@@ -85,6 +86,22 @@ const (
 	// 每次插入 O(n) 软清理清不掉导致的无界增长）。
 	vaultCacheHardLimit = 2 * vaultCacheMaxEntries
 )
+
+// isVaultCiphertext 判断字符串是否为 Vault Transit 密文：匹配 vault:v + 一位以上数字 + ':'。
+// 版本段随 key rotate 递增（vault:v1: / vault:v2: / ...），不做精确 v1 匹配（手写解析，
+// 无需 regexp）。
+func isVaultCiphertext(s string) bool {
+	if !strings.HasPrefix(s, vaultCiphertextMagic) {
+		return false
+	}
+	rest := s[len(vaultCiphertextMagic):]
+	digits := 0
+	for rest != "" && rest[0] >= '0' && rest[0] <= '9' {
+		digits++
+		rest = rest[1:]
+	}
+	return digits >= 1 && strings.HasPrefix(rest, ":")
+}
 
 // vaultEncryptRequest 是 POST {mount}/encrypt/{key} 的请求体。
 type vaultEncryptRequest struct {
@@ -203,7 +220,8 @@ func loadVaultCertPool(caFile string) (*x509.CertPool, error) {
 
 // Encrypt 把明文经 Vault Transit 加密：POST {addr}/v1/{mount}/encrypt/{keyName}，请求体
 // {"plaintext": base64(明文), "context": base64(AADPath)}，携带 X-Vault-Token 头。返回
-// Vault 响应的 data.ciphertext 原样（含 vault:v1: 版本前缀，保存即原样字节）。
+// Vault 响应的 data.ciphertext 原样（含 vault:v<N>: 版本前缀——N 随 key rotate 递增，
+// 保存即原样字节）。
 func (s *VaultTransitStorer) Encrypt(plaintext []byte) ([]byte, error) {
 	reqBody, err := json.Marshal(vaultEncryptRequest{
 		Plaintext: base64.StdEncoding.EncodeToString(plaintext),
@@ -221,20 +239,20 @@ func (s *VaultTransitStorer) Encrypt(plaintext []byte) ([]byte, error) {
 		return nil, fmt.Errorf("vault: encrypt 响应解析失败: %w", err)
 	}
 	ct := out.Data.Ciphertext
-	if ct == nil || *ct == "" || !strings.HasPrefix(*ct, vaultCiphertextPrefix) {
-		return nil, fmt.Errorf("vault: encrypt 响应 data.ciphertext 缺失或非 %s 前缀（拒绝落盘不可解密文）", vaultCiphertextPrefix)
+	if ct == nil || !isVaultCiphertext(*ct) {
+		return nil, fmt.Errorf("vault: encrypt 响应 data.ciphertext 缺失或非 %s<N>: 前缀（拒绝落盘不可解密文）", vaultCiphertextMagic)
 	}
 	return []byte(*ct), nil
 }
 
-// Decrypt 把 Vault Transit 密文解回明文。输入非 vault:v1: 前缀直接报错（不请求 Vault，
+// Decrypt 把 Vault Transit 密文解回明文。输入非 vault:v<N>: 前缀直接报错（不请求 Vault，
 // 防明文误喂）。缓存开启时（CacheTTL>0）先查短 TTL 缓存：命中未过期 → 直接返回明文副本，
 // 不请求 Vault；未命中 → POST {addr}/v1/{mount}/decrypt/{keyName}（请求体
 // {"ciphertext": <密文>, "context": base64(AADPath)}），响应 data.plaintext 经 base64 解码
 // 后写入缓存并返回。
 func (s *VaultTransitStorer) Decrypt(ciphertext []byte) ([]byte, error) {
-	if !bytes.HasPrefix(ciphertext, []byte(vaultCiphertextPrefix)) {
-		return nil, fmt.Errorf("vault: decrypt 拒绝非 %s 前缀输入（%d 字节，疑似明文误喂）", vaultCiphertextPrefix, len(ciphertext))
+	if !isVaultCiphertext(string(ciphertext)) {
+		return nil, fmt.Errorf("vault: decrypt 拒绝非 %s<N>: 前缀输入（%d 字节，疑似明文误喂）", vaultCiphertextMagic, len(ciphertext))
 	}
 	key := string(ciphertext)
 	if s.cache != nil {
