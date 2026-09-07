@@ -296,20 +296,46 @@ type RegistrationConfig struct {
 	LoginFailWindow time.Duration `yaml:"login_fail_window" mapstructure:"login_fail_window"`
 }
 
+// VaultConfig 是 Vault Transit 后端子配置（credential_store.vault 段，
+// backend=vault + encrypt=true 时必需）。
+type VaultConfig struct {
+	Addr    string `yaml:"addr" mapstructure:"addr"`
+	Mount   string `yaml:"mount" mapstructure:"mount"` // transit engine 挂载（默认 "transit"）
+	KeyName string `yaml:"key_name" mapstructure:"key_name"`
+	// TokenFile 是 Vault token 文件路径（读取后 trim）；为空时回落 TokenEnv 环境变量。
+	TokenFile string        `yaml:"token_file" mapstructure:"token_file"`
+	TokenEnv  string        `yaml:"token_env" mapstructure:"token_env"` // 默认 "VAULT_TOKEN"
+	CAFile    string        `yaml:"ca_file" mapstructure:"ca_file"`     // 自签 CA PEM 路径（可选，默认系统池）
+	Timeout   time.Duration `yaml:"timeout" mapstructure:"timeout"`     // 默认 10s
+	// CacheTTL 是 VaultTransitStorer decrypt 结果缓存 TTL（默认 30s）。viper 零值歧义
+	// 无法区分「未设」与「显式 0」——SetDefaults 对 ==0 一律回落 30s，故 config 层缓存
+	// 恒默认开、不可显式关（文档注明）；VaultOptions.CacheTTL 内部 API 可传 0 关闭（测试用）。
+	CacheTTL time.Duration `yaml:"cache_ttl" mapstructure:"cache_ttl"`
+}
+
 // CredentialStoreConfig 是凭据静态存储加密配置（credential_store 段，4C-2）。
 // Encrypt 缺省 false = 明文（现状 server.CredentialStore，零回归）；true = 装配
-// accesskey.EncryptingStorer 对 <tenant>/meta/credentials.json 做 AES-256-GCM
-// 字节级加密静态存储（密钥：master_key_file 或环境变量 CredentialMasterKeyEnv）。
+// accesskey.EncryptingStorer 对 <tenant>/meta/credentials.json 做字节级加密静态存储，
+// backend 选择加密后端：
 //
-// master key 说明：Encrypt=true 必须能解析出 32B master key（base64 32B 或 raw
-// 32B）——优先 master_key_file（文件可读性在装配层校验）；为空时回落环境变量
-// CredentialMasterKeyEnv（base64 32B）。本任务不做口令派生路径（无独立盐配置），
+//   - backend=aesgcm（缺省/空）：本地 AES-256-GCM 加密（master_key_file 或环境变量
+//     CredentialMasterKeyEnv 作 master key，见下）；
+//   - backend=vault：HashiCorp Vault Transit 引擎加解密（密钥永不出 Vault，见 VaultConfig），
+//     忽略 master_key_file，要求 vault 子段 addr/key_name/token 源齐全。
+//
+// master key 说明（aesgcm）：Encrypt=true + backend=aesgcm 必须能解析出 32B master key
+// （base64 32B 或 raw 32B）——优先 master_key_file（文件可读性在装配层校验）；为空时回落
+// 环境变量 CredentialMasterKeyEnv（base64 32B）。本任务不做口令派生路径（无独立盐配置），
 // 该 32B 直接作 AES-256 key（EncryptWithKey 内部随机 nonce 已提供语义安全）。
 type CredentialStoreConfig struct {
 	Encrypt bool `yaml:"encrypt" mapstructure:"encrypt"`
+	// Backend 是加密后端枚举：aesgcm（缺省）| vault；空 → SetDefaults 归一 aesgcm。
+	Backend string `yaml:"backend" mapstructure:"backend"`
 	// MasterKeyFile 是 master key 文件路径（base64 32B 或 raw 32B，见
-	// accesskey.LoadMasterKeyFromFile）。为空时回落 CredentialMasterKeyEnv。
+	// accesskey.LoadMasterKeyFromFile）。backend=aesgcm 时为空回落 CredentialMasterKeyEnv。
 	MasterKeyFile string `yaml:"master_key_file" mapstructure:"master_key_file"`
+	// Vault 是 backend=vault 时的子配置（见 VaultConfig）。
+	Vault VaultConfig `yaml:"vault" mapstructure:"vault"`
 }
 
 // CredentialMasterKeyEnv 是 credential_store 加密装配的 master key 环境变量名
@@ -357,8 +383,9 @@ type Config struct {
 	CredentialTTL         time.Duration      `yaml:"credential_ttl" mapstructure:"credential_ttl"`
 
 	// CredentialStore 是凭据静态存储加密配置（credential_store 段，4C-2）。
-	// Encrypt=true 时凭据文件以 AES-256-GCM 加密落盘（BootstrapServerCredentials 装配
-	// EncryptingStorer），默认明文零回归。
+	// Encrypt=true 时凭据文件以加密字节落盘（BootstrapServerCredentials 装配
+	// EncryptingStorer）；backend 选择 aesgcm（本地 AES-256-GCM，缺省）或 vault（Vault
+	// Transit），默认明文零回归。
 	CredentialStore CredentialStoreConfig `yaml:"credential_store" mapstructure:"credential_store"`
 
 	// 分块上传配置
@@ -451,6 +478,15 @@ func Default() *Config {
 		},
 		CredentialTTL:         30 * 24 * time.Hour, // 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d）
 		AllowInsecureLoopback: false,
+		CredentialStore: CredentialStoreConfig{
+			Backend: "aesgcm", // 缺省本地 AES-256-GCM；vault = Vault Transit
+			Vault: VaultConfig{
+				Mount:    "transit",     // transit engine 缺省挂载路径
+				TokenEnv: "VAULT_TOKEN", // token 环境变量名
+				Timeout:  10 * time.Second,
+				CacheTTL: 30 * time.Second, // decrypt 缓存默认 30s（viper 零值歧义：0 回落 30s，config 不可关缓存）
+			},
+		},
 		Web: WebConfig{
 			Tunnel: true,
 		},
@@ -532,6 +568,24 @@ func (c *Config) SetDefaults() {
 	}
 	if c.CredentialTTL == 0 {
 		c.CredentialTTL = 30 * 24 * time.Hour
+	}
+	// credential_store 子配置默认（4C-2 / Vault Transit）：backend 空 → aesgcm；vault 子段
+	// mount/token_env/timeout/cache_ttl 零值回落。CacheTTL 用 ==0 → 30s（viper 零值歧义，
+	// config 层缓存恒默认开、不可显式关，见 VaultConfig.CacheTTL 注释）。
+	if c.CredentialStore.Backend == "" {
+		c.CredentialStore.Backend = "aesgcm"
+	}
+	if c.CredentialStore.Vault.Mount == "" {
+		c.CredentialStore.Vault.Mount = "transit"
+	}
+	if c.CredentialStore.Vault.TokenEnv == "" {
+		c.CredentialStore.Vault.TokenEnv = "VAULT_TOKEN"
+	}
+	if c.CredentialStore.Vault.Timeout <= 0 {
+		c.CredentialStore.Vault.Timeout = 10 * time.Second
+	}
+	if c.CredentialStore.Vault.CacheTTL <= 0 {
+		c.CredentialStore.Vault.CacheTTL = 30 * time.Second
 	}
 	// Registration 子配置默认（Web/CLI session TTL、per-AK 失败锁定阈值/窗口）。
 	if c.Registration.SessionTTL <= 0 {
@@ -819,12 +873,39 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("sync_remotes[%d].url 使用明文 http 且非 loopback（AK/SK 将明文上线；远程 remote 请用 https，本机调试可用 http://127.0.0.1）: %q", i, r.URL)
 		}
 	}
-	// credential_store 加密装配校验（4C-2）：Encrypt=true 时必须能解析出 master key——
-	// master_key_file 非空（文件可读性由装配层校验，见 BootstrapServerCredentials）
-	// 或环境变量 CredentialMasterKeyEnv 已设；二者皆无 fail-fast（防误开加密后启动即
-	// 解密失败、用空凭据表运行）。
-	if c.CredentialStore.Encrypt && c.CredentialStore.MasterKeyFile == "" && os.Getenv(CredentialMasterKeyEnv) == "" {
-		return fmt.Errorf("credential_store.encrypt=true 需配置 credential_store.master_key_file 或环境变量 %s（base64 编码 32B master key）", CredentialMasterKeyEnv)
+	// credential_store 加密装配校验（4C-2 / Vault Transit）：先校验 backend 枚举，再按
+	// backend 分支校验 Encrypt=true 的密钥来源——
+	//   - aesgcm（缺省/空）：必须能解析出 master key（master_key_file 非空，文件可读性由
+	//     装配层校验，见 BootstrapServerCredentials；或环境变量 CredentialMasterKeyEnv 已设）；
+	//     二者皆无 fail-fast（防误开加密后启动即解密失败、用空凭据表运行）。
+	//   - vault：要求 vault 子段 addr/key_name 与 token 源（token_file 或 TokenEnv 环境变量）
+	//     齐全；忽略 master_key_file（Vault 持 key，无需本地 master key）。
+	switch c.CredentialStore.Backend {
+	case "", "aesgcm", "vault":
+	default:
+		return fmt.Errorf("credential_store.backend=%q 无效，仅允许 aesgcm 或 vault", c.CredentialStore.Backend)
+	}
+	if c.CredentialStore.Encrypt {
+		switch c.CredentialStore.Backend {
+		case "vault":
+			if c.CredentialStore.Vault.Addr == "" {
+				return fmt.Errorf("credential_store.backend=vault 需配置 credential_store.vault.addr")
+			}
+			if c.CredentialStore.Vault.KeyName == "" {
+				return fmt.Errorf("credential_store.backend=vault 需配置 credential_store.vault.key_name")
+			}
+			tokEnv := c.CredentialStore.Vault.TokenEnv
+			if tokEnv == "" {
+				tokEnv = "VAULT_TOKEN"
+			}
+			if c.CredentialStore.Vault.TokenFile == "" && os.Getenv(tokEnv) == "" {
+				return fmt.Errorf("credential_store.backend=vault 需配置 credential_store.vault.token_file 或环境变量 %s", tokEnv)
+			}
+		default: // aesgcm / ""（向后兼容）
+			if c.CredentialStore.MasterKeyFile == "" && os.Getenv(CredentialMasterKeyEnv) == "" {
+				return fmt.Errorf("credential_store.encrypt=true 需配置 credential_store.master_key_file 或环境变量 %s（base64 编码 32B master key）", CredentialMasterKeyEnv)
+			}
+		}
 	}
 	return nil
 }
