@@ -5,10 +5,22 @@
 // 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
 
 const BASE = '';
-// SproxySig 请求签名认证（AccessKey/AccessKeySecret）。Secret 只存本端计算签名，
+// SproxySig 请求签名认证（AccessKey/AccessKeySecret/AccessKeyID）。Secret 只存本端计算签名，
 // 永不上线；线上请求只携带 AccessKey + HMAC 签名。存 sessionStorage（关页即清）。
-let accessKey = sessionStorage.getItem('sproxy_access_key') || '';
+// AccessKeyID = SK 条目 ID（skey-id=，多 SK 共存时精确锁定被验条目）；Web 登录（login.js）
+// 成功后回填，saveAccessKeys 同步持久化。
+// FF2：accessKey 用 sproxy_last_ak 兜底时（跨标签页非常规场景：另一标签页把 AK 切到
+// LastAK 并触发 F6 清空 keyID），同步清掉不匹配的 accessKeyID ——否则本地 sessionStorage
+// 里遗留的 skey-id=（属于上一个 AK）会被精确锁定导致 401；清空后服务端对全部存活条目试签。
+let accessKey = sessionStorage.getItem('sproxy_access_key') || sessionStorage.getItem('sproxy_last_ak') || '';
 let accessKeySecret = sessionStorage.getItem('sproxy_access_key_secret') || '';
+let accessKeyID = sessionStorage.getItem('sproxy_access_key_id') || '';
+// 仅当 accessKey 直接来自 sproxy_access_key（非 last_ak 兜底）时才保留 accessKeyID；
+// 兜底路径下该 keyID 归属不明/可能过期 → 置空（与 saveAccessKeys 的 F6 语义一致）。
+if (!sessionStorage.getItem('sproxy_access_key') && !!accessKeyID) {
+  accessKeyID = '';
+  sessionStorage.removeItem('sproxy_access_key_id');
+}
 let currentSubdir = localStorage.getItem('sproxy_subdir') || '';
 let _searchActive = false;
 let _currentOffset = 0;
@@ -38,6 +50,7 @@ function sclientInit() {
   sclientTransport.configure({
     accessKey: accessKey,
     accessKeySecret: accessKeySecret,
+    accessKeyID: accessKeyID,
   });
   sc = sclientApi.apiFromGlobals();
 
@@ -49,7 +62,7 @@ function sclientInit() {
   // 有凭据时正常 config.get（direct 带签名 200 / 隧道 401 时 catch 保持默认）。
   if (!accessKeySecret) return;
   sc.config.get().then(function(data) {
-    sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, tunnelDefault: !!data.web_tunnel });
+    sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, accessKeyID: accessKeyID, tunnelDefault: !!data.web_tunnel });
   }).catch(function() { /* 忽略——无 web.tunnel 存取时保持默认 */ });
 }
 
@@ -75,6 +88,7 @@ function toggleTransport(cb) {
     sclientTransport.configure({
       accessKey: accessKey,
       accessKeySecret: accessKeySecret,
+      accessKeyID: accessKeyID,
       mode: on ? 'tunnel' : 'direct',
       tunnelDefault: undefined,
     });
@@ -88,13 +102,45 @@ document.getElementById('token').value = accessKeySecret;
 function saveAccessKeys() {
   accessKey = document.getElementById('accessKey').value.trim();
   accessKeySecret = document.getElementById('token').value.trim();
+  // F6：手动保存的 AK 与当前已存 AK 不一致（切换账号）时，清空 skey-id（accessKeyID）
+  // ——否则 session 登录遗留的 skey-id= 会精确锁定一个不属于当前 AK 的 SK 条目，
+  // 后续请求静默 401（历史缺陷）。登录流程写入的 AK 与此处一致，不受影响。
+  var prevAk = null;
+  try { prevAk = sessionStorage.getItem('sproxy_access_key'); } catch (e) { /* ignore */ }
+  if (accessKey && prevAk && accessKey !== prevAk) {
+    accessKeyID = '';
+    sessionStorage.removeItem('sproxy_access_key_id');
+  }
   sessionStorage.setItem('sproxy_access_key', accessKey);
   sessionStorage.setItem('sproxy_access_key_secret', accessKeySecret);
+  sessionStorage.setItem('sproxy_access_key_id', accessKeyID);
+  // 最近 AK 记忆（S3）：手动保存也回写，登录页打开时预填
+  if (accessKey) sessionStorage.setItem('sproxy_last_ak', accessKey);
   // 同步到 transport（sc 已创建时；含 override/默认沿用）
   try {
-    sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, mode: undefined, tunnelDefault: undefined });
+    sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, accessKeyID: accessKeyID, mode: undefined, tunnelDefault: undefined });
   } catch (e) { /* ignore */ }
   showToast('AccessKey 已保存', 'success');
+}
+
+// applyWebLoginKeys：Web 登录成功（login.js）后统一刷新本页凭据态——
+// 更新顶层内存变量、auth-bar 输入框、sessionStorage 三键 + sproxy_last_ak，
+// 并同步 transport（含 accessKeyID 精确匹配 session SK 条目）。login.js 调用。
+function applyWebLoginKeys(ak, secret, id) {
+  accessKey = ak || accessKey;
+  accessKeySecret = secret || accessKeySecret;
+  accessKeyID = id || accessKeyID;
+  try {
+    document.getElementById('accessKey').value = accessKey;
+    document.getElementById('token').value = accessKeySecret;
+  } catch (e) { /* DOM 未就绪忽略 */ }
+  sessionStorage.setItem('sproxy_access_key', accessKey);
+  sessionStorage.setItem('sproxy_access_key_secret', accessKeySecret);
+  sessionStorage.setItem('sproxy_access_key_id', accessKeyID);
+  if (accessKey) sessionStorage.setItem('sproxy_last_ak', accessKey);
+  try {
+    sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, accessKeyID: accessKeyID, mode: undefined, tunnelDefault: undefined });
+  } catch (e) { /* ignore */ }
 }
 
 // --- UI 工具 ---

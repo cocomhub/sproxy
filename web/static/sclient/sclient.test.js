@@ -75,6 +75,49 @@ test('sha256Hex 基础正确（RFC 6234 向量）', async () => {
   assert.strictEqual(await cryptoLib.sha256Hex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
 });
 
+// ---- TOTP wrap key 派生（任务 ⑫：Web 登录页） ----
+// Go 事实源 pkg/accesskey/totp.go：
+//   key = HKDF-SHA256(secret=sha256(code) 32B,
+//                     salt="sproxy-accesskey-wrap/v1\x00"+"sproxy-totp/v1"+"#"+nonce,
+//                     info=ak) → 32B
+// 固定向量由 Go <DeriveTOTPWrapKey + EncryptSecretKind> 实测打印（任务⑫简报注入值）——
+// JS 端硬性验收，测试内不得凭空捏造。
+const TOTP_WRAP_FIXTURE = {
+  code: '123456',
+  ak: 'ak-test-00112233445566778899aabbccddeeff',
+  nonce: 'abcd1234ef56789012abcdef',
+  sha256CodeHex: '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92',
+  wrapKeyHex: '4575bcd975517a91caa598317d371c92e07391dbfec38d83f941ec82f19bc19c',
+  sessionSKHex: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
+  envelope: {
+    kind: 'totp_wrap',
+    wrap_key_id: 'ak-test-00112233445566778899aabbccddeeff',
+    nonce: 'REoIv33rrZwMMbMi',      // base64（Go []byte JSON 序列化）
+    ciphertext: 'JCVvN5UyNALPAzektgYIUKPEmz37uWCDKeuNa2yGSyLMxQ3Bkzru4ohwF6DOCJQt', // base64
+  },
+};
+
+test('deriveTOTPWrapKey 与 Go DeriveTOTPWrapKey 固定向量一致（code/ak/nonce 派生 wrap key）', async () => {
+  assert.strictEqual(await cryptoLib.sha256Hex(TOTP_WRAP_FIXTURE.code), TOTP_WRAP_FIXTURE.sha256CodeHex);
+  const key = await cryptoLib.deriveTOTPWrapKey(
+    TOTP_WRAP_FIXTURE.code, TOTP_WRAP_FIXTURE.ak, TOTP_WRAP_FIXTURE.nonce
+  );
+  assert.strictEqual(cryptoLib.bytesToHex(key), TOTP_WRAP_FIXTURE.wrapKeyHex);
+});
+
+test('TOTP wrap 信封解密（AES-GCM, base64 nonce/ciphertext）解出 session SK（Go 对齐验收）', async () => {
+  function base64ToBytes(b64) {
+    return Uint8Array.from(Buffer.from(b64, 'base64'));
+  }
+  const key = await cryptoLib.importAesGcmKey(TOTP_WRAP_FIXTURE.wrapKeyHex);
+  const plain = await cryptoLib.aesGcmDecrypt(
+    key,
+    base64ToBytes(TOTP_WRAP_FIXTURE.envelope.nonce),
+    base64ToBytes(TOTP_WRAP_FIXTURE.envelope.ciphertext)
+  );
+  assert.strictEqual(cryptoLib.bytesToHex(plain), TOTP_WRAP_FIXTURE.sessionSKHex);
+});
+
 test('hexToBytes / bytesToHex 往返一致', () => {
   const raw = '00112233aabbccddEEff';
   assert.strictEqual(cryptoLib.bytesToHex(cryptoLib.hexToBytes(raw)), raw.toLowerCase());
@@ -286,6 +329,50 @@ test('sig.buildCanonical 空 vs 非空 entryID 段序稳定（均 10 段）', ()
     if (i === 2) continue;
     assert.strictEqual(emptySegs[i], withEntrySegs[i], '第 ' + i + ' 段应一致');
   }
+});
+
+// ---- sig.js 注释清理 + skey-id 向量（任务 ⑫）----
+// 输出段已是 skey-id=（与 Go 对齐）；过时注释不得再写 sk=（防误导打错参数）。
+// 同时锁定一条带 entryID 的完整头部向量（TS/EXP/NONCE/SK 固定，canonical/HMAC 独立复算）。
+
+function loadSigSource() {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  return fs.readFileSync(path.join(__dirname, 'sig.js'), 'utf8');
+}
+
+test('sig.js 注释清理：过时 sk= 写法为 0、输出段为 skey-id=', () => {
+  const src = loadSigSource();
+  // 「sk=」只在极少数上下文合法（如通用缩写/变量名成分）；这里用「非字母数字后的
+  // sk= 非前导连字符」识别过时输出格式——四处旧注释已点名这种写法。
+  const stale = src.match(/[^A-Za-z0-9-]sk=[A-Za-z0-9]/g) || [];
+  assert.strictEqual(stale.length, 0, 'sig.js 注释不得残留 "sk=<entry>" 过时写法: ' + JSON.stringify(stale));
+  assert.ok(src.includes(' skey-id='), 'sig.js 输出段应为 skey-id= 形式');
+});
+
+function skeyIdCanonicalInput(eid) {
+  return 'sproxy-sig/v2\n' + AK + '\n' + eid + '\n' + TS + '\n' + EXP + '\n' + NONCE + '\nPOST\n/api/credentials/login\n\nUNSIGNED';
+}
+const TS = '1700000000000';
+const EXP = '1700000300000';
+const NONCE = '00112233445566778899aabbccddeeff';
+
+test('sig.signHeader 带 entryID 头部字节 = "skey-id="（skey-id 向量，Go SignAndFormat 对齐；sk= 已废弃）', async () => {
+  const header = await sig.signHeader('POST', '/api/credentials/login', null, {
+    ak: AK,
+    ts: TS,
+    exp: EXP,
+    nonce: NONCE,
+    secret: SK,
+    unsigned: true,
+    entryID: ENTRY_ID,
+  });
+  // canonical 第 3 段为 entryID；头部中间字段精确锁定
+  const canonical = skeyIdCanonicalInput(ENTRY_ID);
+  const wantSig = await cryptoLib.hmacSHA256Hex(SK, canonical);
+  assert.strictEqual(header, 'SproxySig v=2 ak=' + AK + ' skey-id=' + ENTRY_ID + ' ts=' + TS + ' exp=' + EXP + ' nonce=' + NONCE + ' body_sha256=UNSIGNED sig=' + wantSig);
+  assert.ok(header.indexOf('skey-id=' + ENTRY_ID) >= 0, '头部必须为 skey-id=<entryID>（非 sk=）');
+  assert.ok((header.match(/\ssk=/g) || []).length === 0, '头部不得含过时 sk= 输出段');
 });
 
 // ==================== transport.js 追加用例（任务 4） ====================

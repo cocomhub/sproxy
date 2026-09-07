@@ -141,6 +141,8 @@ web-test:
 	@node --check web/static/app-render.js
 	@node --check web/static/transfer-store.js
 	@node --check web/static/download.js
+	@node --check web/static/login.js
+	@node --check web/static/qrcode.js
 	@node --check web/static/download.test.js
 	@node --check web/static/transfer-render.test.js
 	@node --check web/static/sync.test.js
@@ -152,6 +154,8 @@ web-test:
 	node --test web/static/app-transfer-actions.test.js
 	node --test web/static/upload.test.js
 	node --test web/static/download.test.js
+	node --test web/static/login.test.js
+	node --test web/static/qrcode.test.js
 	node --test web/static/sclient/sclient.test.js
 
 .PHONY: cover-check
@@ -251,7 +255,7 @@ gofix:
 
 .PHONY: addlicense
 addlicense:
-	addlicense -c "The Cocomhub Authors. All rights reserved." -s=only -ignore ".claude/**" -ignore ".trae/**" -ignore ".cursor/**" .
+	addlicense -c "The Cocomhub Authors. All rights reserved." -s=only -ignore ".claude/**" -ignore ".trae/**" -ignore ".cursor/**" -ignore "web/static/vendor/**" .
 
 .PHONY: fmt
 fmt: gofix addlicense
