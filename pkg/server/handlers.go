@@ -1226,6 +1226,11 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 			if err != nil {
 				return nil, nil, err
 			}
+			// 启动探活（F1）：POST /v1/auth/token/lookup-self 同时验可达性 + token 有效性。
+			// 空 store 首启也探（Load 无密文不发 Vault 请求）——防配错 Vault 静默启动到首写才炸。
+			if perr := v.Probe(); perr != nil {
+				return nil, nil, fmt.Errorf("credential_store.backend=vault 启动探活失败（可达性或 token 有效性）: %w", perr)
+			}
 			secure = v
 		default: // aesgcm（含空 = 向后兼容）
 			masterKey, err := resolveCredentialMasterKey(cfg)
@@ -1285,6 +1290,7 @@ func resolveVaultToken(vc VaultConfig) (string, error) {
 			return "", fmt.Errorf("读取 vault token 文件失败: %w", err)
 		}
 		tok := strings.TrimSpace(string(data))
+		tok = strings.TrimPrefix(tok, "\uFEFF") // 清 UTF-8 BOM（Windows 编辑的 token 文件常带，否则 403 难排查）
 		if tok != "" {
 			return tok, nil
 		}

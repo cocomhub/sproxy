@@ -43,6 +43,10 @@ type Server struct {
 	// decrypt 错误覆写（errStatus != 0 时启用：返回 status + {"errors":[errBody]}）。
 	errStatus int
 	errBody   string
+	// lookup-self 错误覆写（lookupStatus != 0 时启用；否则 token 匹配期望 → 200，
+	// 不匹配期望（Options.Token 非空）→ 403 permission denied）。
+	lookupStatus int
+	lookupErr    string
 
 	encryptCount int
 	decryptCount int
@@ -123,6 +127,15 @@ func (s *Server) SetDecryptError(status int, msg string) {
 	s.errBody = msg
 }
 
+// SetLookupSelfError 让 /v1/auth/token/lookup-self 端点回指定状态码 + {"errors":[msg]}
+// （模拟 token 无效/权限不足，供启动探活 fail-fast 测试）。
+func (s *Server) SetLookupSelfError(status int, msg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lookupStatus = status
+	s.lookupErr = msg
+}
+
 // ServeHTTP 实现 mock Vault Transit 端点。记录请求；encrypt 回 ciphertext 镜像、
 // decrypt 按覆写/DecryptTo/镜像回 plaintext。token 不一致通过 t.Errorf 上报
 // （handler 运行在 httptest server goroutine，禁用 t.Fatalf）。
@@ -138,55 +151,87 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Ciphertext string `json:"ciphertext"`
 		Context    string `json:"context"`
 	}
-	if uerr := json.Unmarshal(body, &req); uerr != nil {
-		// 非 JSON 请求体：暴露测试请求构造 bug（M-3），fail-closed 拒绝而非静默回空密文。
-		s.t.Errorf("vaultmock: 请求体非法 JSON（测试请求构造 bug?）: %v", uerr)
-		writeVaultErrors(w, http.StatusBadRequest, "invalid JSON body")
-		return
+	// lookup-self 探活 POST 无 body；仅非空 body 需 JSON 解析。非 JSON 请求体：暴露测试请求
+	// 构造 bug（M-3），fail-closed 拒绝而非静默回空密文。
+	if len(body) > 0 {
+		if uerr := json.Unmarshal(body, &req); uerr != nil {
+			s.t.Errorf("vaultmock: 请求体非法 JSON（测试请求构造 bug?）: %v", uerr)
+			writeVaultErrors(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
 	}
 
 	token := r.Header.Get("X-Vault-Token")
-	isEncrypt := strings.Contains(r.URL.Path, "/encrypt/")
+	op := vaultMockOp(r.URL.Path)
 
 	s.mu.Lock()
 	s.tokens = append(s.tokens, token)
 	s.contexts = append(s.contexts, req.Context)
-	if isEncrypt {
+	switch op {
+	case "encrypt":
 		s.encryptCount++
 		s.plaintexts = append(s.plaintexts, req.Plaintext)
-	} else {
+	case "decrypt":
 		s.decryptCount++
 		s.ciphertexts = append(s.ciphertexts, req.Ciphertext)
 	}
 	decryptTo := s.decryptTo
 	errStatus := s.errStatus
 	errBody := s.errBody
+	lookupStatus := s.lookupStatus
+	lookupErr := s.lookupErr
 	s.mu.Unlock()
 
 	if s.token != "" && token != s.token {
 		s.t.Errorf("vaultmock: X-Vault-Token = %q, want %q", token, s.token)
 	}
 
-	if isEncrypt {
+	switch op {
+	case "encrypt":
 		// encrypt 镜像：ciphertext = "vault:v1:" + base64(明文)（自描述，decrypt 可往返）。
 		writeVaultData(w, http.StatusOK, map[string]string{"ciphertext": "vault:v1:" + req.Plaintext})
-		return
+	case "decrypt":
+		if errStatus != 0 {
+			writeVaultErrors(w, errStatus, errBody)
+			return
+		}
+		if decryptTo != nil {
+			writeVaultData(w, http.StatusOK, map[string]string{"plaintext": base64.StdEncoding.EncodeToString(decryptTo)})
+			return
+		}
+		pt, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(req.Ciphertext, "vault:v1:"))
+		if err != nil {
+			writeVaultErrors(w, http.StatusBadRequest, "bad ciphertext base64")
+			return
+		}
+		writeVaultData(w, http.StatusOK, map[string]string{"plaintext": base64.StdEncoding.EncodeToString(pt)})
+	case "lookup-self":
+		// token 自查端点（启动探活）：覆写优先；否则 token 匹配期望 → 200，不匹配 → 403。
+		if lookupStatus != 0 {
+			writeVaultErrors(w, lookupStatus, lookupErr)
+			return
+		}
+		if s.token != "" && token != s.token {
+			writeVaultErrors(w, http.StatusForbidden, "permission denied")
+			return
+		}
+		writeVaultData(w, http.StatusOK, map[string]string{})
+	default:
+		writeVaultErrors(w, http.StatusNotFound, "unknown endpoint")
 	}
+}
 
-	if errStatus != 0 {
-		writeVaultErrors(w, errStatus, errBody)
-		return
+// vaultMockOp 从 URL path 识别 mock 端点（encrypt/decrypt/lookup-self），无法识别返回空串。
+func vaultMockOp(path string) string {
+	switch {
+	case strings.Contains(path, "/encrypt/"):
+		return "encrypt"
+	case strings.Contains(path, "/decrypt/"):
+		return "decrypt"
+	case strings.Contains(path, "/auth/token/lookup-self"):
+		return "lookup-self"
 	}
-	if decryptTo != nil {
-		writeVaultData(w, http.StatusOK, map[string]string{"plaintext": base64.StdEncoding.EncodeToString(decryptTo)})
-		return
-	}
-	pt, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(req.Ciphertext, "vault:v1:"))
-	if err != nil {
-		writeVaultErrors(w, http.StatusBadRequest, "bad ciphertext base64")
-		return
-	}
-	writeVaultData(w, http.StatusOK, map[string]string{"plaintext": base64.StdEncoding.EncodeToString(pt)})
+	return ""
 }
 
 // writeVaultData 以 {"data":{...}} 形态回 JSON（对齐 Vault Transit 成功响应）。

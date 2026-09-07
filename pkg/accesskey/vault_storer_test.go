@@ -949,3 +949,16 @@ func TestVaultCache_ConcurrentDecrypt_RaceSafe(t *testing.T) {
 		t.Fatalf("并发 Decrypt 请求计数应为 %d, got %d", want, got)
 	}
 }
+
+// TestVaultTransitStorer_Encrypt_EmptyCiphertextRejected 验证 Encrypt 响应守卫（S1）：
+// mock 回空 data.ciphertext（非 vault:v1: 前缀）→ Encrypt error——拒绝 0 字节密文落盘覆盖
+// 既有好密文（EncryptingStorer.Save 会把空字节写盘，下次启动 Load fail-closed）。
+func TestVaultTransitStorer_Encrypt_EmptyCiphertextRejected(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	mock.override("encrypt", http.StatusOK, `{"data":{"ciphertext":""}}`)
+	s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+	if _, err := s.Encrypt([]byte("x")); err == nil || !strings.Contains(err.Error(), "vault:v1:") {
+		t.Fatalf("空/非 vault:v1: 前缀 ciphertext 应拒绝且错误含前缀线索, got %v", err)
+	}
+}

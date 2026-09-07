@@ -6,6 +6,8 @@ package server
 import (
 	"bytes"
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -380,4 +382,59 @@ func TestBootstrap_VaultBackend(t *testing.T) {
 			t.Fatalf("aesgcm 落盘不应含明文 JSON \"keys\" 字样")
 		}
 	})
+}
+
+// TestBootstrap_VaultBackend_ProbeFailFast 验证 backend=vault 启动探活 fail-fast（F1）：
+// VaultTransitStorer 装配后发一次 POST /v1/auth/token/lookup-self——认证失败（403）或
+// Vault 网络不可达 → Bootstrap error（空 store 首启也探，防配错 Vault 静默启动到首写才炸）。
+func TestBootstrap_VaultBackend_ProbeFailFast(t *testing.T) {
+	t.Run("lookup-self 403 token 无效 fail-fast", func(t *testing.T) {
+		mock := vaultmock.NewServer(t, vaultmock.Options{})
+		mock.SetLookupSelfError(http.StatusForbidden, "permission denied")
+		dir := t.TempDir()
+		cfg := Default()
+		cfg.StorageRoot = filepath.Join(dir, "storage")
+		cfg.CredentialStore.Encrypt = true
+		cfg.CredentialStore.Backend = "vault"
+		cfg.CredentialStore.Vault.Addr = mock.URL()
+		cfg.CredentialStore.Vault.KeyName = "sproxy"
+		cfg.CredentialStore.Vault.TokenFile = writeVaultTokenFile(t, dir, "bad-token\n")
+
+		if _, _, err := BootstrapServerCredentials(cfg, nil); err == nil || !strings.Contains(err.Error(), "探活") {
+			t.Fatalf("lookup-self 403（token 无效）应 fail-fast 且错误含探活, got %v", err)
+		}
+	})
+	t.Run("Vault 网络不可达 fail-fast", func(t *testing.T) {
+		dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		dead.Close() // 关闭后端口不可达
+		dir := t.TempDir()
+		cfg := Default()
+		cfg.StorageRoot = filepath.Join(dir, "storage")
+		cfg.CredentialStore.Encrypt = true
+		cfg.CredentialStore.Backend = "vault"
+		cfg.CredentialStore.Vault.Addr = dead.URL
+		cfg.CredentialStore.Vault.KeyName = "sproxy"
+		cfg.CredentialStore.Vault.TokenFile = writeVaultTokenFile(t, dir, "tok\n")
+
+		if _, _, err := BootstrapServerCredentials(cfg, nil); err == nil || !strings.Contains(err.Error(), "探活") {
+			t.Fatalf("Vault 网络不可达应 fail-fast 且错误含探活, got %v", err)
+		}
+	})
+}
+
+// TestResolveVaultToken_BOM 验证 token 文件 UTF-8 BOM 清除（M7）：Windows 编辑器常存 BOM，
+// 不清除会 403 难排查。
+func TestResolveVaultToken_BOM(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "vault-token")
+	if err := os.WriteFile(p, []byte("\xef\xbb\xbfbom-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := resolveVaultToken(VaultConfig{TokenFile: p})
+	if err != nil {
+		t.Fatalf("resolveVaultToken: %v", err)
+	}
+	if tok != "bom-token" {
+		t.Fatalf("token 文件 BOM 应被清除, got %q", tok)
+	}
 }

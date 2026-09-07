@@ -220,10 +220,11 @@ func (s *VaultTransitStorer) Encrypt(plaintext []byte) ([]byte, error) {
 	if err = json.Unmarshal(respBody, &out); err != nil {
 		return nil, fmt.Errorf("vault: encrypt 响应解析失败: %w", err)
 	}
-	if out.Data.Ciphertext == nil {
-		return nil, errors.New("vault: encrypt 响应缺 data.ciphertext 字段")
+	ct := out.Data.Ciphertext
+	if ct == nil || *ct == "" || !strings.HasPrefix(*ct, vaultCiphertextPrefix) {
+		return nil, fmt.Errorf("vault: encrypt 响应 data.ciphertext 缺失或非 %s 前缀（拒绝落盘不可解密文）", vaultCiphertextPrefix)
 	}
-	return []byte(*out.Data.Ciphertext), nil
+	return []byte(*ct), nil
 }
 
 // Decrypt 把 Vault Transit 密文解回明文。输入非 vault:v1: 前缀直接报错（不请求 Vault，
@@ -324,6 +325,31 @@ func (s *VaultTransitStorer) evictToHardLimitLocked() {
 		}
 		delete(s.cache, k)
 	}
+}
+
+// Probe 验证 Vault 可达性 + token 有效性：POST {addr}/v1/auth/token/lookup-self
+// （token 自查端点，least-privilege token 亦可自查）。网络错 / 非 200（token 无效 403 /
+// 权限不足）→ error——供 backend=vault 启动探活 fail-fast（空 store 首启也探，防配错 Vault
+// 静默启动到首写才炸）。
+func (s *VaultTransitStorer) Probe() error {
+	endpoint := s.addr + "/v1/auth/token/lookup-self"
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("vault: 构造探活请求失败: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", s.token)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("vault: 探活失败（Vault 不可达）: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return fmt.Errorf("vault: 读取探活响应失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("vault: 探活失败（token 无效或权限不足，HTTP %d）", resp.StatusCode)
+	}
+	return nil
 }
 
 // aadContext 返回 AAD context 字段值 = base64(AADPath)（可读 AAD、调试友好）。aadPath
