@@ -1,0 +1,395 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package accesskey
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// sampleEncryptingKeys 构造一个含账号级字段（Role/TOTPSecret）+ 多条 SK 条目（含
+// secret_wrap 形态）的凭据快照，供加密静态存储往返断言使用。
+func sampleEncryptingKeys() []Key {
+	created := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	expires := created.Add(24 * time.Hour)
+	return []Key{
+		{
+			AK:         "ak-admin-0123456789abcdef0123456789abcdef",
+			Owner:      "owner-admin",
+			Role:       RoleAdmin,
+			TOTPSecret: []byte("01234567890123456789012345678901"),
+		},
+		{
+			AK:    "ak-user-0123456789abcdef0123456789abcdef",
+			Owner: "owner-user",
+			Role:  RoleUser,
+			Entries: []SKEntry{
+				{
+					ID:        "skey-abcdef012345",
+					SK:        []byte("01234567890123456789012345678901"),
+					Kind:      KindPlain,
+					Status:    StatusActive,
+					CreatedAt: created,
+					ExpiresAt: expires,
+					Meta:      Meta{Type: "initial", IP: "127.0.0.1"},
+				},
+				{
+					ID:        "skey-abcdef012346",
+					SK:        []byte("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
+					Kind:      KindSecretWrap,
+					WrapKeyID: "ak-user-0123456789abcdef0123456789abcdef",
+					Status:    StatusActive,
+					CreatedAt: created.Add(time.Hour),
+					Meta:      Meta{Type: "renew"},
+				},
+			},
+		},
+	}
+}
+
+// assertKeysDeepEqual 深比较两个 Key 快照（AK/Owner/Role/TOTPSecret/SK 字节/条目元数据/
+// 时间逐字段），仿 TestCredentialStore_SaveLoadRoundtrip_AccountRoleAndTOTP 断言风格。
+func assertKeysDeepEqual(t *testing.T, got, want []Key) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		g, w := got[i], want[i]
+		if g.AK != w.AK || g.Owner != w.Owner || g.Role != w.Role {
+			t.Errorf("key %d 账号字段不一致: %+v vs %+v", i, g, w)
+		}
+		if string(g.TOTPSecret) != string(w.TOTPSecret) {
+			t.Errorf("key %d TOTPSecret 不一致: %q vs %q", i, g.TOTPSecret, w.TOTPSecret)
+		}
+		if len(g.Entries) != len(w.Entries) {
+			t.Fatalf("key %d entries = %d, want %d", i, len(g.Entries), len(w.Entries))
+		}
+		for j := range w.Entries {
+			ge, we := g.Entries[j], w.Entries[j]
+			if ge.ID != we.ID || ge.Kind != we.Kind || ge.WrapKeyID != we.WrapKeyID ||
+				ge.Status != we.Status || ge.Meta.Type != we.Meta.Type || ge.Meta.IP != we.Meta.IP {
+				t.Errorf("key %d entry %d 元数据不一致: %+v vs %+v", i, j, ge, we)
+			}
+			if string(ge.SK) != string(we.SK) {
+				t.Errorf("key %d entry %d SK 字节不一致", i, j)
+			}
+			if !ge.CreatedAt.Equal(we.CreatedAt) || !ge.ExpiresAt.Equal(we.ExpiresAt) {
+				t.Errorf("key %d entry %d 时间不一致: %+v vs %+v", i, j, ge.CreatedAt, we.CreatedAt)
+			}
+		}
+	}
+}
+
+// TestEncryptingStorer_SaveLoadRoundtrip_Encrypted 验证加密静态存储的往返：
+// Save（含 Role/TOTPSecret/多条 SK）→ 磁盘为密文（不含 "keys" 明文 JSON 字样且字节
+// ≠ 明文）→ Load 还原出与 Save 前深等价的 Key 快照。
+func TestEncryptingStorer_SaveLoadRoundtrip_Encrypted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
+	key := bytes.Repeat([]byte{0x42}, 32)
+	st := NewEncryptingStorer(path, AESGCMStorer{Key: key})
+
+	orig := sampleEncryptingKeys()
+	if err := st.Save(orig); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	// 加密态磁盘格式：密文字节，无明文 JSON 壳——断言不含 "keys" 字段字样。
+	if bytes.Contains(disk, []byte(`"keys"`)) {
+		t.Fatalf("加密态磁盘不应出现明文 JSON 的 \"keys\" 字样")
+	}
+	// 与明文 JSON 字节必须不同。
+	plain := encryptedCredentialsFile{Version: 1, Keys: orig}
+	if plainJSON, jerr := json.MarshalIndent(plain, "", "  "); jerr == nil && bytes.Equal(disk, plainJSON) {
+		t.Fatalf("加密态磁盘字节不应等于明文 JSON")
+	}
+
+	got, err := st.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	assertKeysDeepEqual(t, got, orig)
+}
+
+// TestEncryptingStorer_LoadTamper 验证密文篡改一个字节后 Load 报错（GCM 认证失败，
+// fail-closed，不静默重建）。
+func TestEncryptingStorer_LoadTamper(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
+	st := NewEncryptingStorer(path, AESGCMStorer{Key: bytes.Repeat([]byte{0x11}, 32)})
+	if err := st.Save(sampleEncryptingKeys()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk[len(disk)/2] ^= 0x01 // 翻转中间一个密文字节
+	if err := os.WriteFile(path, disk, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Load(); err == nil {
+		t.Fatal("篡改密文后 Load 应返回 error（GCM auth 失败）")
+	}
+}
+
+// TestEncryptingStorer_LoadWrongMasterKey 验证用不同 master key 解密已有密文报错
+// （密钥错 → GCM 认证失败，fail-closed）。
+func TestEncryptingStorer_LoadWrongMasterKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
+	stA := NewEncryptingStorer(path, AESGCMStorer{Key: bytes.Repeat([]byte{0x01}, 32)})
+	if err := stA.Save(sampleEncryptingKeys()); err != nil {
+		t.Fatalf("Save(A): %v", err)
+	}
+	stB := NewEncryptingStorer(path, AESGCMStorer{Key: bytes.Repeat([]byte{0x02}, 32)})
+	if _, err := stB.Load(); err == nil {
+		t.Fatal("用错误 master key Load 应返回 error")
+	}
+}
+
+// TestEncryptingStorer_PlainModeRoundtrip 验证 secure=nil 明文模式的往返 = 现状
+// （磁盘为明文 JSON，Load 原样还原）。
+func TestEncryptingStorer_PlainModeRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
+	st := NewEncryptingStorer(path, nil)
+
+	orig := sampleEncryptingKeys()
+	if err := st.Save(orig); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(disk, []byte(`"keys"`)) {
+		t.Fatalf("明文模式磁盘应含明文 JSON 的 \"keys\" 字样")
+	}
+	got, err := st.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	assertKeysDeepEqual(t, got, orig)
+}
+
+// TestEncryptingStorer_LoadPlaintextFailsClosed 验证开启加密后 Load 到历史明文文件
+// 报错（fail-closed 不静默改写/重建，提示需先迁移）。
+func TestEncryptingStorer_LoadPlaintextFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
+	// 先用明文模式落盘（等价历史明文凭据文件）。
+	plainSt := NewEncryptingStorer(path, nil)
+	if err := plainSt.Save(sampleEncryptingKeys()); err != nil {
+		t.Fatalf("Save(plain): %v", err)
+	}
+	// 换加密 storer Load → 明文文件被当作密文解密必失败。
+	encSt := NewEncryptingStorer(path, AESGCMStorer{Key: bytes.Repeat([]byte{0x21}, 32)})
+	if _, err := encSt.Load(); err == nil {
+		t.Fatal("加密 storer Load 历史明文文件应返回 error（fail-closed）")
+	}
+}
+
+// TestEncryptingStorer_LoadMissing 验证文件不存在时 Load 返回 (nil, nil)（首次启动）。
+func TestEncryptingStorer_LoadMissing(t *testing.T) {
+	st := NewEncryptingStorer(filepath.Join(t.TempDir(), "tenant", "meta", "credentials.json"), AESGCMStorer{Key: bytes.Repeat([]byte{0x31}, 32)})
+	got, err := st.Load()
+	if err != nil {
+		t.Fatalf("Load 缺失文件应返回 nil,nil: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("got = %v, want nil", got)
+	}
+}
+
+// TestEncryptWithKey_EnvelopeRoundtrip 验证字节级信封封装往返：EncryptWithKey 产物为
+// nonce(12B) || ciphertext（GCM tag 含尾），DecryptWithKey 还原明文。
+func TestEncryptWithKey_EnvelopeRoundtrip(t *testing.T) {
+	key := bytes.Repeat([]byte{0x5a}, 32)
+	payload := bytes.Repeat([]byte("credentials-json-payload-中文"), 10)
+	sealed, err := EncryptWithKey(key, payload)
+	if err != nil {
+		t.Fatalf("EncryptWithKey: %v", err)
+	}
+	if len(sealed) != 12+len(payload)+gcmTagSize {
+		t.Fatalf("sealed len = %d, want nonce12 + payload %d + tag16", len(sealed), len(payload))
+	}
+	got, err := DecryptWithKey(key, sealed)
+	if err != nil {
+		t.Fatalf("DecryptWithKey: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("解密结果与明文不一致")
+	}
+}
+
+// TestEncryptWithKey_WrongKeyAndTamper 验证密钥错/密文篡改/坏格式均报错（fail-closed）。
+func TestEncryptWithKey_WrongKeyAndTamper(t *testing.T) {
+	keyA := bytes.Repeat([]byte{0x0a}, 32)
+	keyB := bytes.Repeat([]byte{0x0b}, 32)
+	payload := []byte("secrets")
+	sealed, err := EncryptWithKey(keyA, payload)
+	if err != nil {
+		t.Fatalf("EncryptWithKey: %v", err)
+	}
+	if _, err := DecryptWithKey(keyB, sealed); err == nil {
+		t.Fatal("错误 key 解密应报错")
+	}
+	tampered := append([]byte(nil), sealed...)
+	tampered[len(tampered)-1] ^= 0x01
+	if _, err := DecryptWithKey(keyA, tampered); err == nil {
+		t.Fatal("篡改密文应报错")
+	}
+	if _, err := DecryptWithKey(keyA, []byte("too-short")); err == nil {
+		t.Fatal("坏格式（短于 nonce）应报错")
+	}
+	if _, err := EncryptWithKey([]byte("bad-key"), payload); err == nil {
+		t.Fatal("非 32B key 加密应报错")
+	}
+}
+
+// TestDeriveMasterKey_Deterministic 验证 DeriveMasterKey 的派生确定性：
+// 同 passphrase+salt 两次一致；salt 不同派生不同（HKDF 域分离）。
+func TestDeriveMasterKey_Deterministic(t *testing.T) {
+	pass := []byte("correct horse battery staple")
+	salt := bytes.Repeat([]byte{0xaa}, 16)
+	k1, err := DeriveMasterKey(pass, salt)
+	if err != nil {
+		t.Fatalf("DeriveMasterKey: %v", err)
+	}
+	k2, err := DeriveMasterKey(pass, salt)
+	if err != nil {
+		t.Fatalf("DeriveMasterKey(second): %v", err)
+	}
+	if len(k1) != 32 {
+		t.Fatalf("derived key len = %d, want 32", len(k1))
+	}
+	if !bytes.Equal(k1, k2) {
+		t.Fatalf("同 passphrase+salt 派生应一致")
+	}
+	// salt 不同 → 派生不同（防跨用途/跨盐复用）。
+	k3, err := DeriveMasterKey(pass, bytes.Repeat([]byte{0xbb}, 16))
+	if err != nil {
+		t.Fatalf("DeriveMasterKey(diff salt): %v", err)
+	}
+	if bytes.Equal(k1, k3) {
+		t.Fatalf("salt 不同派生应不同")
+	}
+	// passphrase 不同 → 派生不同。
+	k4, err := DeriveMasterKey([]byte("another passphrase"), salt)
+	if err != nil {
+		t.Fatalf("DeriveMasterKey(diff pass): %v", err)
+	}
+	if bytes.Equal(k1, k4) {
+		t.Fatalf("passphrase 不同派生应不同")
+	}
+}
+
+// TestMasterKeyFromBase64_ValidAndInvalid 验证 base64 解码 32B master key：合法输入
+// 返回 32B；非法输入（非 base64 / 非 32B）报错。
+func TestMasterKeyFromBase64_ValidAndInvalid(t *testing.T) {
+	key := bytes.Repeat([]byte{0xc3}, 32)
+	b64 := base64.StdEncoding.EncodeToString(key)
+	got, err := MasterKeyFromBase64(b64)
+	if err != nil {
+		t.Fatalf("MasterKeyFromBase64: %v", err)
+	}
+	if !bytes.Equal(got, key) {
+		t.Fatalf("解码结果不一致")
+	}
+	// 尾部换行/空白容忍（openssl rand -base64 输出带换行）。
+	got2, err := MasterKeyFromBase64(b64 + "\n")
+	if err != nil || !bytes.Equal(got2, key) {
+		t.Fatalf("带换行的 base64 应容忍: got %x, err %v", got2, err)
+	}
+	if _, err := MasterKeyFromBase64("!!not-base64!!"); err == nil {
+		t.Fatal("非法 base64 应报错")
+	}
+	if _, err := MasterKeyFromBase64(base64.StdEncoding.EncodeToString([]byte("short"))); err == nil {
+		t.Fatal("非 32B 解码结果应报错")
+	}
+}
+
+// TestLoadMasterKeyFromFile_Base64AndRaw 验证 master key 文件的两种格式都接受：
+// base64 32B（含尾换行）与 raw 32B 字节；非法内容报错。
+func TestLoadMasterKeyFromFile_Base64AndRaw(t *testing.T) {
+	key := bytes.Repeat([]byte{0x7e}, 32)
+
+	t.Run("base64-带换行", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "master.key")
+		content := base64.StdEncoding.EncodeToString(key) + "\n"
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadMasterKeyFromFile(p)
+		if err != nil {
+			t.Fatalf("LoadMasterKeyFromFile: %v", err)
+		}
+		if !bytes.Equal(got, key) {
+			t.Fatalf("base64 格式解码不一致")
+		}
+	})
+
+	t.Run("raw-32B", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "master.key")
+		if err := os.WriteFile(p, key, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadMasterKeyFromFile(p)
+		if err != nil {
+			t.Fatalf("LoadMasterKeyFromFile(raw): %v", err)
+		}
+		if !bytes.Equal(got, key) {
+			t.Fatalf("raw 格式读取不一致")
+		}
+	})
+
+	t.Run("非法内容", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "master.key")
+		if err := os.WriteFile(p, []byte("not-a-key"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadMasterKeyFromFile(p); err == nil {
+			t.Fatal("非法 master key 文件应报错")
+		}
+	})
+
+	t.Run("文件不存在", func(t *testing.T) {
+		if _, err := LoadMasterKeyFromFile(filepath.Join(t.TempDir(), "nope.key")); err == nil {
+			t.Fatal("缺失 master key 文件应报错")
+		}
+	})
+}
+
+// TestAESGCMStorer_ImplementsSecureStorer 编译期 + 行为断言：AESGCMStorer 满足
+// SecureStorer 且往返等价（Encrypt 非明文 → Decrypt 还原）。
+func TestAESGCMStorer_ImplementsSecureStorer(t *testing.T) {
+	var _ SecureStorer = AESGCMStorer{}
+	s := AESGCMStorer{Key: bytes.Repeat([]byte{0x77}, 32)}
+	payload := []byte(`{"version":1,"keys":[]}`)
+	ct, err := s.Encrypt(payload)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if bytes.Equal(ct, payload) || strings.Contains(string(ct), "version") {
+		t.Fatalf("AESGCMStorer.Encrypt 输出应为密文，非明文")
+	}
+	pt, err := s.Decrypt(ct)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	if !bytes.Equal(pt, payload) {
+		t.Fatalf("AESGCMStorer 往返不一致")
+	}
+}

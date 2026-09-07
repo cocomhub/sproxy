@@ -296,6 +296,26 @@ type RegistrationConfig struct {
 	LoginFailWindow time.Duration `yaml:"login_fail_window" mapstructure:"login_fail_window"`
 }
 
+// CredentialStoreConfig 是凭据静态存储加密配置（credential_store 段，4C-2）。
+// Encrypt 缺省 false = 明文（现状 server.CredentialStore，零回归）；true = 装配
+// accesskey.EncryptingStorer 对 <tenant>/meta/credentials.json 做 AES-256-GCM
+// 字节级加密静态存储（密钥：master_key_file 或环境变量 CredentialMasterKeyEnv）。
+//
+// master key 说明：Encrypt=true 必须能解析出 32B master key（base64 32B 或 raw
+// 32B）——优先 master_key_file（文件可读性在装配层校验）；为空时回落环境变量
+// CredentialMasterKeyEnv（base64 32B）。本任务不做口令派生路径（无独立盐配置），
+// 该 32B 直接作 AES-256 key（EncryptWithKey 内部随机 nonce 已提供语义安全）。
+type CredentialStoreConfig struct {
+	Encrypt bool `yaml:"encrypt" mapstructure:"encrypt"`
+	// MasterKeyFile 是 master key 文件路径（base64 32B 或 raw 32B，见
+	// accesskey.LoadMasterKeyFromFile）。为空时回落 CredentialMasterKeyEnv。
+	MasterKeyFile string `yaml:"master_key_file" mapstructure:"master_key_file"`
+}
+
+// CredentialMasterKeyEnv 是 credential_store 加密装配的 master key 环境变量名
+// （base64 编码 32B）。master_key_file 非空时优先读文件；仅文件未配置时读本变量。
+const CredentialMasterKeyEnv = "SPROXY_CREDENTIAL_MASTER_KEY"
+
 type Config struct {
 	Addr string `yaml:"addr" mapstructure:"addr"`
 	// StorageRoot 是存储根目录（新布局 <root>/<tenant>/{user,cloud,...}/）。
@@ -331,10 +351,15 @@ type Config struct {
 	//     Disable 不阻止 anonymous 生成——它是新部署可访问凭据的保证。
 	//   - AllowInsecureLoopback 仅用于无任何凭据（ring 空）时的本地调试：放行
 	//     loopback 来源的 GET/HEAD，其余 401。生产勿开。
-	//   - CredentialTTL 是首启 anonymous 凭据的有效期（默认 30d）。
+	//   - CredentialTTL 是新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d）。
 	Registration          RegistrationConfig `yaml:"registration" mapstructure:"registration"`
 	AllowInsecureLoopback bool               `yaml:"allow_insecure_loopback" mapstructure:"allow_insecure_loopback"`
 	CredentialTTL         time.Duration      `yaml:"credential_ttl" mapstructure:"credential_ttl"`
+
+	// CredentialStore 是凭据静态存储加密配置（credential_store 段，4C-2）。
+	// Encrypt=true 时凭据文件以 AES-256-GCM 加密落盘（BootstrapServerCredentials 装配
+	// EncryptingStorer），默认明文零回归。
+	CredentialStore CredentialStoreConfig `yaml:"credential_store" mapstructure:"credential_store"`
 
 	// 分块上传配置
 	ChunkSize        int64         `yaml:"chunk_size" mapstructure:"chunk_size"`
@@ -424,7 +449,7 @@ func Default() *Config {
 			LoginFailLimit:  5,                  // per-AK 失败锁定阈值（U4）
 			LoginFailWindow: 15 * time.Minute,   // 锁定窗口 15m（U4）
 		},
-		CredentialTTL:         30 * 24 * time.Hour, // 首启 anonymous 凭据有效期
+		CredentialTTL:         30 * 24 * time.Hour, // 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d）
 		AllowInsecureLoopback: false,
 		Web: WebConfig{
 			Tunnel: true,
@@ -793,6 +818,13 @@ func (c *Config) Validate() error {
 		if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
 			return fmt.Errorf("sync_remotes[%d].url 使用明文 http 且非 loopback（AK/SK 将明文上线；远程 remote 请用 https，本机调试可用 http://127.0.0.1）: %q", i, r.URL)
 		}
+	}
+	// credential_store 加密装配校验（4C-2）：Encrypt=true 时必须能解析出 master key——
+	// master_key_file 非空（文件可读性由装配层校验，见 BootstrapServerCredentials）
+	// 或环境变量 CredentialMasterKeyEnv 已设；二者皆无 fail-fast（防误开加密后启动即
+	// 解密失败、用空凭据表运行）。
+	if c.CredentialStore.Encrypt && c.CredentialStore.MasterKeyFile == "" && os.Getenv(CredentialMasterKeyEnv) == "" {
+		return fmt.Errorf("credential_store.encrypt=true 需配置 credential_store.master_key_file 或环境变量 %s（base64 编码 32B master key）", CredentialMasterKeyEnv)
 	}
 	return nil
 }
