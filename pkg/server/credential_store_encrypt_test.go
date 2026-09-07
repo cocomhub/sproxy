@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/testutil/vaultmock"
 )
 
 // writeMasterKeyFile 写一个 base64 32B master key 文件（openssl rand -base64 32 形态，
@@ -205,6 +206,174 @@ func TestConfigValidate_CredentialStoreEncrypt(t *testing.T) {
 		cfg := Default()
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("encrypt 默认关应通过 Validate: %v", err)
+		}
+	})
+}
+
+// writeVaultTokenFile 写一个 vault token 文件（内容按入参，含尾换行由调用方控制）。
+func writeVaultTokenFile(t *testing.T, dir, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, "vault-token")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// vaultAADContext 返回装配侧预期的 AAD context 值：base64(owner 唯一相对 storage_root 路径)
+// = base64("anonymous/meta/credentials.json")（I-2：绑 owner 相对路径，防跨节点/租户搬移）。
+func vaultAADContext() string {
+	return base64.StdEncoding.EncodeToString([]byte("anonymous/meta/credentials.json"))
+}
+
+// vaultTestKeys 构造含 Role + TOTPSecret 的凭据快照（验证 vault 加解密后原样还原）。
+func vaultTestKeys() []accesskey.Key {
+	return []accesskey.Key{{
+		AK:         "ak-vault-0123456789abcdef",
+		Owner:      anonymousOwner,
+		Role:       accesskey.RoleAdmin,
+		TOTPSecret: []byte{0xde, 0xad, 0xbe, 0xef, 0x01},
+	}}
+}
+
+// TestBootstrap_VaultBackend 验证 credential_store.backend=vault 装配：Bootstrap 返回
+// *EncryptingStorer（VaultTransitStorer 作 SecureStorer）；Save → mock Vault 收到 encrypt
+// （token 头 + context=base64("anonymous/meta/credentials.json")）→ 落盘为 vault:v1: 密文；
+// Load → mock decrypt 还原 keys（含 Role/TOTPSecret）。
+func TestBootstrap_VaultBackend(t *testing.T) {
+	t.Run("Save encrypt to vault and Load restore", func(t *testing.T) {
+		mock := vaultmock.NewServer(t, vaultmock.Options{Token: "vault-tok"})
+		dir := t.TempDir()
+		cfg := Default()
+		cfg.StorageRoot = filepath.Join(dir, "storage")
+		cfg.CredentialStore.Encrypt = true
+		cfg.CredentialStore.Backend = "vault"
+		cfg.CredentialStore.Vault.Addr = mock.URL()
+		cfg.CredentialStore.Vault.KeyName = "sproxy"
+		cfg.CredentialStore.Vault.TokenFile = writeVaultTokenFile(t, dir, "vault-tok\n")
+
+		ring, store, err := BootstrapServerCredentials(cfg, nil)
+		if err != nil {
+			t.Fatalf("BootstrapServerCredentials: %v", err)
+		}
+		if ring == nil || ring.Len() != 0 {
+			t.Fatalf("空 store 首启应返回空 Ring, got len=%d", ring.Len())
+		}
+		enc, ok := store.(*accesskey.EncryptingStorer)
+		if !ok {
+			t.Fatalf("backend=vault 时 store 应为 *accesskey.EncryptingStorer, got %T", store)
+		}
+
+		if err = enc.Save(vaultTestKeys()); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if n := mock.EncryptCount(); n != 1 {
+			t.Fatalf("Save 应触发 1 次 encrypt, got %d", n)
+		}
+		if got := mock.LastToken(); got != "vault-tok" {
+			t.Fatalf("mock 收到的 X-Vault-Token 应为 vault-tok, got %q", got)
+		}
+		wantCtx := vaultAADContext()
+		if got := mock.LastContext(); got != wantCtx {
+			t.Fatalf("mock 收到的 context 应为 base64(owner 相对路径) %q, got %q", wantCtx, got)
+		}
+
+		disk := filepath.Join(cfg.StorageRoot, anonymousOwner, "meta", "credentials.json")
+		raw, err := os.ReadFile(disk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.HasPrefix(raw, []byte("vault:v1:")) {
+			t.Fatalf("落盘应含 vault:v1: 前缀密文, got %q", raw[:min(len(raw), 24)])
+		}
+
+		gotKeys, err := enc.Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(gotKeys) != 1 {
+			t.Fatalf("Load 应还原 1 个 key, got %d", len(gotKeys))
+		}
+		k := gotKeys[0]
+		if k.AK != "ak-vault-0123456789abcdef" || k.Owner != anonymousOwner || k.Role != accesskey.RoleAdmin {
+			t.Fatalf("还原 key 字段不一致: %+v", k)
+		}
+		if !bytes.Equal(k.TOTPSecret, []byte{0xde, 0xad, 0xbe, 0xef, 0x01}) {
+			t.Fatalf("还原 TOTPSecret 不一致: %x", k.TOTPSecret)
+		}
+	})
+
+	t.Run("token_file 优先于 env", func(t *testing.T) {
+		mock := vaultmock.NewServer(t, vaultmock.Options{Token: "tokenA"}) // mock 期望 tokenA
+		dir := t.TempDir()
+		t.Setenv("VAULT_TOKEN", "tokenB") // env 若被误用即与 mock 期望不符
+		cfg := Default()
+		cfg.StorageRoot = filepath.Join(dir, "storage")
+		cfg.CredentialStore.Encrypt = true
+		cfg.CredentialStore.Backend = "vault"
+		cfg.CredentialStore.Vault.Addr = mock.URL()
+		cfg.CredentialStore.Vault.KeyName = "sproxy"
+		cfg.CredentialStore.Vault.TokenFile = writeVaultTokenFile(t, dir, "tokenA\n")
+
+		_, store, err := BootstrapServerCredentials(cfg, nil)
+		if err != nil {
+			t.Fatalf("BootstrapServerCredentials: %v", err)
+		}
+		if err := store.Save(vaultTestKeys()); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if got := mock.LastToken(); got != "tokenA" {
+			t.Fatalf("token_file 应优先于 env, mock 收到 %q, want tokenA", got)
+		}
+	})
+
+	t.Run("token 全无 fail-fast", func(t *testing.T) {
+		t.Setenv("VAULT_TOKEN", "")
+		mock := vaultmock.NewServer(t, vaultmock.Options{})
+		cfg := Default()
+		cfg.StorageRoot = filepath.Join(t.TempDir(), "storage")
+		cfg.CredentialStore.Encrypt = true
+		cfg.CredentialStore.Backend = "vault"
+		cfg.CredentialStore.Vault.Addr = mock.URL()
+		cfg.CredentialStore.Vault.KeyName = "sproxy"
+
+		if _, _, err := BootstrapServerCredentials(cfg, nil); err == nil {
+			t.Fatal("token 源全无时 Bootstrap 应返回 error（fail-fast）")
+		} else if !strings.Contains(err.Error(), "token") {
+			t.Fatalf("错误应含 token 线索: %v", err)
+		}
+	})
+
+	t.Run("backend 空归一 aesgcm 回归", func(t *testing.T) {
+		dir := t.TempDir()
+		_, mkPath := writeMasterKeyFile(t, dir)
+		cfg := Default()
+		cfg.StorageRoot = filepath.Join(dir, "storage")
+		cfg.CredentialStore.Encrypt = true
+		cfg.CredentialStore.Backend = "" // 空 = aesgcm（向后兼容）
+		cfg.CredentialStore.MasterKeyFile = mkPath
+
+		ring, store, err := BootstrapServerCredentials(cfg, nil)
+		if err != nil {
+			t.Fatalf("BootstrapServerCredentials: %v", err)
+		}
+		if ring == nil {
+			t.Fatal("ring 不应为 nil")
+		}
+		enc, ok := store.(*accesskey.EncryptingStorer)
+		if !ok {
+			t.Fatalf("backend 空时 store 应为 *accesskey.EncryptingStorer, got %T", store)
+		}
+		if err = enc.Save(seedTestRing(t, "ak-vault-empty-012345678", testAccessSecret, false)); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		disk := filepath.Join(cfg.StorageRoot, anonymousOwner, "meta", "credentials.json")
+		raw, err := os.ReadFile(disk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(raw, []byte(`"keys"`)) {
+			t.Fatalf("aesgcm 落盘不应含明文 JSON \"keys\" 字样")
 		}
 	})
 }

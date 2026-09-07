@@ -1192,18 +1192,46 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 	metaDir := filepath.Join(cfg.StorageRoot, anonymousOwner, "meta")
 	var store accesskey.CredentialStorer = NewCredentialStore(metaDir)
 	// 4C-2：credential_store.encrypt=true 时把凭据文件包装为加密静态存储
-	// （EncryptingStorer，AES-256-GCM 字节级加密落盘）——cmd 与 opts 注入面不变
+	// （EncryptingStorer，按 backend 选 SecureStorer）——cmd 与 opts 注入面不变
 	// （返回类型已是 CredentialStorer 接口，替换实现无缝）。默认关 = 明文零回归。
+	// backend：aesgcm（缺省/空）= 本地 AES-256-GCM master key；vault = Vault Transit
+	// （密钥不出 Vault）。token/凭据不落日志。
 	if cfg.CredentialStore.Encrypt {
-		masterKey, err := resolveCredentialMasterKey(cfg)
-		if err != nil {
-			return nil, nil, err
+		storePath := filepath.Join(metaDir, "credentials.json")
+		var secure accesskey.SecureStorer
+		switch cfg.CredentialStore.Backend {
+		case "vault":
+			tok, err := resolveVaultToken(cfg.CredentialStore.Vault)
+			if err != nil {
+				return nil, nil, err
+			}
+			v, err := accesskey.NewVaultTransitStorer(accesskey.VaultOptions{
+				Addr:     cfg.CredentialStore.Vault.Addr,
+				Mount:    cfg.CredentialStore.Vault.Mount, // SetDefaults 已填 "transit"
+				KeyName:  cfg.CredentialStore.Vault.KeyName,
+				Token:    tok,
+				CAFile:   cfg.CredentialStore.Vault.CAFile,
+				Timeout:  cfg.CredentialStore.Vault.Timeout, // SetDefaults 已填 10s
+				CacheTTL: cfg.CredentialStore.Vault.CacheTTL,
+				// I-2：AAD context 绑 owner 唯一相对 storage_root 路径（匿名租户全局凭据
+				// 文件）——同 vault mount+key 下不同凭据文件 context 各不相同，密文被复制/
+				// 搬移到另一文件即 decrypt 失败（防跨节点/租户搬移）。filepath.ToSlash 归一
+				// 跨平台路径分隔符，防 Windows 反斜杠导致 AAD 不一致。
+				AADPath: filepath.ToSlash(filepath.Join(anonymousOwner, "meta", "credentials.json")),
+			})
+			if err != nil {
+				return nil, nil, err
+			}
+			secure = v
+		default: // aesgcm（含空 = 向后兼容）
+			masterKey, err := resolveCredentialMasterKey(cfg)
+			if err != nil {
+				return nil, nil, err
+			}
+			secure = accesskey.AESGCMStorer{Key: masterKey}
 		}
-		store = accesskey.NewEncryptingStorer(
-			filepath.Join(metaDir, "credentials.json"),
-			accesskey.AESGCMStorer{Key: masterKey},
-		)
-		logger.Info("凭据静态存储加密已启用（credential_store.encrypt=true，credentials.json 以 AES-256-GCM 密文落盘）")
+		store = accesskey.NewEncryptingStorer(storePath, secure)
+		logger.Info("凭据静态存储加密已启用", "backend", cfg.CredentialStore.Backend)
 	}
 	ring := accesskey.NewRing()
 	if keys, err := store.Load(); err != nil {
@@ -1241,6 +1269,30 @@ func resolveCredentialMasterKey(cfg *Config) ([]byte, error) {
 		return key, nil
 	}
 	return nil, fmt.Errorf("credential_store.encrypt=true 需配置 credential_store.master_key_file 或环境变量 %s（base64 编码 32B master key）", CredentialMasterKeyEnv)
+}
+
+// resolveVaultToken 解析 backend=vault 装配所需的 Vault token（来源顺序：token_file 文件
+// （读入后 TrimSpace）> TokenEnv 环境变量 > error fail-fast）。token 值只用于构造
+// VaultTransitStorer（HTTP 头），不落日志。
+func resolveVaultToken(vc VaultConfig) (string, error) {
+	if vc.TokenFile != "" {
+		data, err := os.ReadFile(vc.TokenFile)
+		if err != nil {
+			return "", fmt.Errorf("读取 vault token 文件失败: %w", err)
+		}
+		tok := strings.TrimSpace(string(data))
+		if tok != "" {
+			return tok, nil
+		}
+	}
+	envName := vc.TokenEnv
+	if envName == "" {
+		envName = "VAULT_TOKEN"
+	}
+	if tok := os.Getenv(envName); tok != "" {
+		return tok, nil
+	}
+	return "", fmt.Errorf("credential_store.backend=vault 需配置 token_file 或环境变量 %s", envName)
 }
 
 // bestFirstCredential 返回 Ring 中首个可用（alive）AK 及其 64-hex SK。
