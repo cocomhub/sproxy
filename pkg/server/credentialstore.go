@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
@@ -85,4 +86,24 @@ func (s *CredentialStore) Save(keys []accesskey.Key) error {
 		return fmt.Errorf("credentials store: 原子重命名失败: %w", err)
 	}
 	return nil
+}
+
+// 编译期断言：*CredentialStore 满足 accesskey.CredentialStorer（接口提取后
+// 宿主经 opts/Handlers 持接口，具体类型仍可在构造处显式引用）。
+var _ accesskey.CredentialStorer = (*CredentialStore)(nil)
+
+// normalizeStorer 把注入的 CredentialStorer 归一为可比较的 nil 语义：
+// 接口不为 nil、但底层是 nil 指针（如 `var s *CredentialStore = nil` 赋值进
+// 接口）时，返回真正的 nil——否则 persistCredentials 的 `== nil` 守卫生效不了，
+// 会对 nil 接收者调用 Save 触发 panic（旧具体指针字段不存在此问题；接口提取后
+// **唯一**的运行时行为差异点，须在注入边界归一，测试基座零迁移）。
+func normalizeStorer(s accesskey.CredentialStorer) accesskey.CredentialStorer {
+	if s == nil {
+		return nil
+	}
+	v := reflect.ValueOf(s)
+	if v.Kind() == reflect.Pointer && v.IsNil() {
+		return nil
+	}
+	return s
 }

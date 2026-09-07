@@ -110,9 +110,9 @@ type Handlers struct {
 	// xfer 集成）优先；否则从 opts.CredentialStore 载入，仍空则首启 anonymous
 	// （见 bootstrapCredentials）。authMiddleware 只查本 ring、无 yaml 回退。
 	// credentialStore 是 credentialRing 关联的持久化 store（anonymous 生成后
-	// Save；nil = 不持久化，纯内存场景）。
+	// Save；nil = 不持久化，纯内存场景）。持接口类型，可注入外部 storer 实现。
 	credentialRing  *accesskey.Ring
-	credentialStore *CredentialStore
+	credentialStore accesskey.CredentialStorer
 	// authenticators 是认证面插件化链（DEC-C）：authMiddleware 遍历链，任一成功 →
 	// Principal 入 ctx 并放行。RegisterRoutes 装配：opts.Authenticators 显式注入
 	// （非 nil → replace 默认链，宿主全权掌控）优先；nil → 默认
@@ -519,8 +519,9 @@ type RegisterRoutesOpts struct {
 	// 凭据并持久化。测试/xfer 集成可显式注入（配合 AllowInsecureLoopback）。
 	CredentialRing *accesskey.Ring
 	// CredentialStore 是凭据 store（nil = 不载入/不持久化，纯内存 Ring 场景，
-	// 如注入空 Ring 的无认证测试）。
-	CredentialStore *CredentialStore
+	// 如注入空 Ring 的无认证测试）。持 accesskey.CredentialStorer（接口提取后
+	// 外部可注入 KMS 等 storer 实现；*CredentialStore 自动满足）。
+	CredentialStore accesskey.CredentialStorer
 	// Authenticators 是认证面插件化宿主嵌入点（DEC-C，R3-I1/I2）：非 nil →
 	// **replace 默认链**（宿主全权掌控，需含 RingAuthenticator 则自行加入）；nil →
 	// 默认装配 []Authenticator{RingAuthenticator{...}}。宿主可注入自有实现（映射
@@ -630,6 +631,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	//     （kind=plain、ExpiresAt=now+CredentialTTL、Meta{Type:bootstrap}）并持久化，
 	//     保证**新部署必有可访问凭据**（注册开关不影响 anonymous 生成——生成逻辑
 	//     独立于 cfg.Registration.Disable）。
+	// 凭据装配（见 bootstrapCredentials：显式注入 Ring 优先，否则从 store 载入，
+	// 接口化后仍空则零凭据等待注册）。storer 归一（typed-nil → nil）在
+	// bootstrapCredentials 内完成（见 normalizeStorer）。
 	h.bootstrapCredentials(opts)
 
 	// 认证链装配（DEC-C）：宿主注入的 Authenticators 非 nil → replace 默认链（宿主
@@ -1145,15 +1149,14 @@ func (h *Handlers) fileRoute(handler http.HandlerFunc) http.HandlerFunc {
 //     入口，首个经回环注册的用户由 AddRegistration 原子授 admin（DEC-F/D2）。
 //     空 store 时记启动日志提示「首次注册经回环，将成为 admin」（S2）。
 func (h *Handlers) bootstrapCredentials(opts RegisterRoutesOpts) {
+	store := normalizeStorer(opts.CredentialStore)
 	if opts.CredentialRing != nil {
 		h.credentialRing = opts.CredentialRing
-		h.credentialStore = opts.CredentialStore
+		h.credentialStore = store
 		return
 	}
 	ring := accesskey.NewRing()
-	var store *CredentialStore
-	if opts.CredentialStore != nil {
-		store = opts.CredentialStore
+	if store != nil {
 		if keys, err := store.Load(); err != nil {
 			h.logger.Error("载入凭据 store 失败（fail-closed：拒绝启动，防止用空凭据表运行）", "error", err)
 			panic("载入凭据 store 失败: " + err.Error())
@@ -1181,7 +1184,7 @@ func (h *Handlers) bootstrapCredentials(opts RegisterRoutesOpts) {
 //     管理，见任务 5）；
 //   - 载入既有快照；**U3：不再生成首启 anonymous 凭据**——store 为空则返回空 Ring，
 //     系统以零凭据等待 register 公开端点（首个回环注册者授 admin）。
-func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ring, *CredentialStore, error) {
+func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ring, accesskey.CredentialStorer, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -1193,7 +1196,7 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 		if rerr := ring.Replace(keys); rerr != nil {
 			return nil, nil, fmt.Errorf("重建凭据 Ring 失败: %w", rerr)
 		}
-		logger.Info("已从凭据 store 载入", "keys", len(keys), "path", store.path)
+		logger.Info("已从凭据 store 载入", "keys", len(keys))
 	}
 	// U3：不生成 anonymous——空 store = 零凭据等待注册。
 	if ring.Len() == 0 {
