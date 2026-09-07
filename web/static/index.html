@@ -23,6 +23,7 @@
     <label for="token">Secret:</label>
     <input type="password" id="token" placeholder="可选，输入 AccessKeySecret">
     <button type="button" id="save-access-btn">保存</button>
+    <button type="button" id="login-btn" style="margin-left:8px;">登录/注册</button>
     <label style="margin-left:16px;"><input type="checkbox" id="use-tunnel-checkbox"> 走隧道（调试）</label>
   </div>
   <div id="files-page">
@@ -172,6 +173,40 @@
   </div>
 </div>
 
+<!-- 注册/登录弹窗（4B-3 Web 认证） -->
+<div id="login-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:560px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;font-size:16px;">凭据登录 / 注册</h3>
+      <button type="button" id="login-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
+    </div>
+    <div id="login-tab-bar" style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid var(--tab-border);">
+      <button type="button" id="login-tab" class="login-tab active" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid var(--tab-active);margin-bottom:-2px;font-size:14px;color:var(--text-primary);">登录</button>
+      <button type="button" id="register-tab" class="login-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">注册</button>
+    </div>
+    <div id="login-panel">
+      <div style="margin-bottom:12px;">
+        <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">AccessKey</label>
+        <input type="text" id="login-ak" placeholder="输入 AccessKey..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+      </div>
+      <div style="margin-bottom:12px;">
+        <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">6 位动态码</label>
+        <input type="text" id="login-code" placeholder="输入身份验证器动态码..." autocomplete="one-time-code" inputmode="numeric" maxlength="6" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+      </div>
+      <button type="button" id="do-login-btn" class="btn btn-primary" style="width:100%;">登录</button>
+      <div id="login-result" style="margin-top:12px;"></div>
+    </div>
+    <div id="register-panel" style="display:none;">
+      <div style="margin-bottom:12px;">
+        <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">用户名（owner）</label>
+        <input type="text" id="register-owner" placeholder="注册用户名（首个注册将成为 admin）..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+      </div>
+      <button type="button" id="do-register-btn" class="btn btn-primary" style="width:100%;">注册</button>
+      <div id="register-result" style="margin-top:12px;"></div>
+    </div>
+  </div>
+</div>
+
 <script src="sclient/sha256.js"></script>
 <script src="sclient/crypto.js"></script>
 <script src="sclient/sig.js"></script>
@@ -187,6 +222,10 @@
 <script src="sclient/api/sync.js"></script>
 <script src="sclient/api/audit.js"></script>
 <script src="sclient/api/index.js"></script>
+<!-- 4B-3：客户端 QR（vendored）+ 注册/登录页（依赖 app.js 的 showToast/accessKey 等，须在其前加载） -->
+<script src="vendor/qrcode-generator.js"></script>
+<script src="qrcode.js"></script>
+<script src="login.js"></script>
 <script src="cloudfilename.js"></script>
 <script src="transfer-store.js"></script>
 <script src="download.js"></script>

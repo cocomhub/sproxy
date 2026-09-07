@@ -31,7 +31,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `registration.login_fail_limit` | int | `5` | per-AK TOTP 登录失败锁定阈值（U4）：连续失败达此数即进入锁定窗口 |
 | `registration.login_fail_window` | duration | `15m` | per-AK 登录失败锁定期（U4）：达阈值后锁定该时长，到期自动解锁 |
 | `allow_insecure_loopback` | bool | `false` | 无任何凭据时（ring 空）放行 loopback 来源的 GET/HEAD（仅本地调试；生产勿开） |
-| `credential_ttl` | duration | `720h` (30d) | 首启 anonymous 凭据有效期；负值 = 禁用首启生成 |
+| `credential_ttl` | duration | `720h` (30d) | 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d） |
 | `log_level` | string | `info` | `debug` / `info` / `warn` / `error` |
 | `log_format` | string | `text` | `text`（默认）或 `json` |
 | `max_header_bytes` | int | `1048576` (1 MiB) | HTTP 请求头大小上限 |

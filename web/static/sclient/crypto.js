@@ -98,6 +98,26 @@
     return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
   }
 
+  // TOTP 登录信封密钥派生（对齐 Go pkg/accesskey.DeriveTOTPWrapKey）：
+  //   key = HKDF-SHA256(secret=sha256(code)  /*32B hex→UTF-8 原始字节*/,
+  //                     salt="sproxy-accesskey-wrap/v1\x00" + "sproxy-totp/v1" + "#" + nonce,
+  //                     info=ak) → 32B（AES-256）
+  // 固定向量见 sclient.test.js（Go 端实测）：code="123456" / ak / nonce →
+  //   4575bcd975517a91caa598317d371c92e07391dbfec38d83f941ec82f19bc19c。
+  async function deriveTOTPWrapKey(code, ak, nonce) {
+    // secret = sha256(code) 的 32B（hex string → Uint8Array；复用 sha256Hex/hexToBytes）。
+    const secret32 = hexToBytes(await sha256Hex(code));
+    if (secret32.length !== 32) throw new Error('TOTP code sha256 必须为 32 字节');
+    const ikm = await crypto.subtle.importKey('raw', secret32, 'HKDF', false, ['deriveBits']);
+    const salt = te.encode('sproxy-accesskey-wrap/v1\x00' + 'sproxy-totp/v1' + '#' + nonce);
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'HKDF', hash: 'SHA-256', salt, info: te.encode(ak || '') },
+      ikm,
+      256
+    );
+    return new Uint8Array(bits);
+  }
+
   // AES-GCM 加密单块，返回 {iv, ciphertext}。iv 为 12B 随机。
   async function aesGcmEncrypt(key, plainBytes) {
     const plain = asBytes(plainBytes);
@@ -131,6 +151,7 @@
     sha256Hex,
     hmacSHA256Hex,
     deriveTunnelKey,
+    deriveTOTPWrapKey,
     importAesGcmKey,
     aesGcmEncrypt,
     aesGcmDecrypt,

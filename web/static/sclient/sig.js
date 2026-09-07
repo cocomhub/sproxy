@@ -6,7 +6,7 @@
  * 构造 canonical 对齐 Go pkg/sproxysig.Header.Canonical / Sign（HMAC-SHA256，
  * secret 按 UTF-8 原文参与签名），输出完整 Authorization 头：
  *
- *   SproxySig v=2 ak=<AK> [sk=<entryID>] ts=<unix_ms> exp=<unix_ms> nonce=<hex>
+ *   SproxySig v=2 ak=<AK> [skey-id=<entryID>] ts=<unix_ms> exp=<unix_ms> nonce=<hex>
  *   body_sha256=<hex|UNSIGNED> sig=<hex>
  *
  * canonical（v2，共 10 段 \n 分隔，第 3 段为 entryID）：
@@ -24,9 +24,9 @@
  *   - hmacSHA256Hex(secret, canonical)：secret 为 UTF-8 原文串，不 hex-decode
  *     （crypto.js 既有约定，与 Go []byte(sk) 同一字节）。
  *   - entryID：可选（sclient config 尚无该字段），缺省空串 → canonical 段为空行、
- *     Authorization 头不输出 sk= 段——与服务端 Verify 空 entryID 空段匹配路径一致；
+ *     Authorization 头不输出 skey-id= 段——与服务端 Verify 空 entryID 空段匹配路径一致；
  *     后续若接入客户端主动携带 entryID（凭据 Ring 精确匹配），在 fields.entryID
- *     传入并配合输出 sk=<entryID>。
+ *     传入并配合输出 skey-id=<entryID>。
  *
  * API：
  *   buildCanonical(method, pathWithQuery, fields) → canonical 字符串
@@ -99,8 +99,8 @@
   // 生成完整 SproxySig Authorization 头。
   // 返回 Promise<string>。options：
   //   ak/secret 必填；ts/exp/nonce 可省略（自动生成）；unsigned 直传 'UNSIGNED'；
-  //   entryID 可选（缺省不携带——v2 canonical 走空段，Authorization 不含 sk= 段；
-  //   非空时在 ak= 后输出 sk=<entryID>，与 Go SignAndFormat 对齐）。
+  //   entryID 可选（缺省不携带——v2 canonical 走空段，Authorization 不含 skey-id= 段；
+  //   非空时在 ak= 后输出 skey-id=<entryID>，与 Go SignAndFormat 对齐）。
   async function signHeader(method, pathWithQuery, body, options) {
     if (!options) throw new TypeError('sig.signHeader 需要 options（ak/secret）');
     const { ak, secret, entryID } = options;
