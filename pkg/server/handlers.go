@@ -1189,7 +1189,22 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 	if logger == nil {
 		logger = slog.Default()
 	}
-	store := NewCredentialStore(filepath.Join(cfg.StorageRoot, anonymousOwner, "meta"))
+	metaDir := filepath.Join(cfg.StorageRoot, anonymousOwner, "meta")
+	var store accesskey.CredentialStorer = NewCredentialStore(metaDir)
+	// 4C-2：credential_store.encrypt=true 时把凭据文件包装为加密静态存储
+	// （EncryptingStorer，AES-256-GCM 字节级加密落盘）——cmd 与 opts 注入面不变
+	// （返回类型已是 CredentialStorer 接口，替换实现无缝）。默认关 = 明文零回归。
+	if cfg.CredentialStore.Encrypt {
+		masterKey, err := resolveCredentialMasterKey(cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		store = accesskey.NewEncryptingStorer(
+			filepath.Join(metaDir, "credentials.json"),
+			accesskey.AESGCMStorer{Key: masterKey},
+		)
+		logger.Info("凭据静态存储加密已启用（credential_store.encrypt=true，credentials.json 以 AES-256-GCM 密文落盘）")
+	}
 	ring := accesskey.NewRing()
 	if keys, err := store.Load(); err != nil {
 		return nil, nil, fmt.Errorf("载入凭据 store 失败（fail-closed）: %w", err)
@@ -1204,6 +1219,28 @@ func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ri
 		logger.Info("零凭据启动：请在本机回环执行 /api/credentials/register，首个注册者将成为 admin")
 	}
 	return ring, store, nil
+}
+
+// resolveCredentialMasterKey 解析 credential_store.encrypt=true 装配所需的 32B master
+// key（单一事实源 = accesskey 的 LoadMasterKeyFromFile / MasterKeyFromBase64，本层只做
+// 读取与来源选择，不写 AES/HKDF）。来源顺序：master_key_file 文件 > 环境变量
+// CredentialMasterKeyEnv；两者都无 → error（fail-fast，防启动后解密失败用空凭据表运行）。
+func resolveCredentialMasterKey(cfg *Config) ([]byte, error) {
+	if cfg.CredentialStore.MasterKeyFile != "" {
+		key, err := accesskey.LoadMasterKeyFromFile(cfg.CredentialStore.MasterKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("读取 credential_store.master_key_file 失败: %w", err)
+		}
+		return key, nil
+	}
+	if v := os.Getenv(CredentialMasterKeyEnv); v != "" {
+		key, err := accesskey.MasterKeyFromBase64(v)
+		if err != nil {
+			return nil, fmt.Errorf("解析环境变量 %s 失败: %w", CredentialMasterKeyEnv, err)
+		}
+		return key, nil
+	}
+	return nil, fmt.Errorf("credential_store.encrypt=true 需配置 credential_store.master_key_file 或环境变量 %s（base64 编码 32B master key）", CredentialMasterKeyEnv)
 }
 
 // bestFirstCredential 返回 Ring 中首个可用（alive）AK 及其 64-hex SK。

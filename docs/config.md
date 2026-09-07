@@ -32,6 +32,8 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `registration.login_fail_window` | duration | `15m` | per-AK 登录失败锁定期（U4）：达阈值后锁定该时长，到期自动解锁 |
 | `allow_insecure_loopback` | bool | `false` | 无任何凭据时（ring 空）放行 loopback 来源的 GET/HEAD（仅本地调试；生产勿开） |
 | `credential_ttl` | duration | `720h` (30d) | 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d） |
+| `credential_store.encrypt` | bool | `false` | 凭据静态存储加密：`true` = `<tenant>/meta/credentials.json` 以 AES-256-GCM 密文落盘（EncryptingStorer 装配）；`false`/缺省 = 明文 JSON（零回归） |
+| `credential_store.master_key_file` | string | (空) | master key 文件路径（base64 32B 或 raw 32B）；为空时回落环境变量 `SPROXY_CREDENTIAL_MASTER_KEY`（base64 32B）。`encrypt=true` 且两者皆无时启动失败。生成：`openssl rand -base64 32` |
 | `log_level` | string | `info` | `debug` / `info` / `warn` / `error` |
 | `log_format` | string | `text` | `text`（默认）或 `json` |
 | `max_header_bytes` | int | `1048576` (1 MiB) | HTTP 请求头大小上限 |

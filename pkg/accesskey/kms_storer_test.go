@@ -1,0 +1,250 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package accesskey
+
+import (
+	"bytes"
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"sync"
+	"testing"
+)
+
+// recordingKMSClient 是 KMSStorer 测试探针：EncryptDEK 用可辨识前缀包裹明文 DEK
+// （便于断言 DEK 段在信封中可寻址），DecryptDEK 还原；同时记录每次收到的 DEK。
+// 只依赖 stdlib，无 mock 库。
+type recordingKMSClient struct {
+	mu           sync.Mutex
+	encryptedDEK [][]byte // 每次 EncryptDEK 收到的明文 DEK（防 -race 并发）
+	decryptCalls int
+}
+
+// prefix 是 mock 包裹前缀（"kms:" + 原始 DEK = 返回的 KMS 密文）。
+func (m *recordingKMSClient) prefix() []byte { return []byte("kms:") }
+
+func (m *recordingKMSClient) EncryptDEK(_ context.Context, plaintext []byte) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.encryptedDEK = append(m.encryptedDEK, append([]byte(nil), plaintext...))
+	return append(append([]byte(nil), m.prefix()...), plaintext...), nil
+}
+
+func (m *recordingKMSClient) DecryptDEK(_ context.Context, ciphertext []byte) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.decryptCalls++
+	if !bytes.HasPrefix(ciphertext, m.prefix()) {
+		return nil, fmt.Errorf("mock KMS: 未知密文前缀")
+	}
+	return append([]byte(nil), ciphertext[len(m.prefix()):]...), nil
+}
+
+func (m *recordingKMSClient) lastEncryptedDEK() []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.encryptedDEK) == 0 {
+		return nil
+	}
+	return append([]byte(nil), m.encryptedDEK[len(m.encryptedDEK)-1]...)
+}
+
+func (m *recordingKMSClient) encryptDEKCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.encryptedDEK)
+}
+
+// TestKMSStorer_Roundtrip_EnvelopeSelfDescribing 验证 KMSStorer 核心契约：
+//   - Encrypt→Decrypt 往返还原明文；
+//   - 密文信封自描述（magic 前缀 + 2B BE 长度段），DEK 密文在信封中可寻址；
+//   - 信封内 DEK 确实就是 EncryptWithKey 加密数据所用的数据密钥（用本包导出原语
+//     独立还原正文）。
+func TestKMSStorer_Roundtrip_EnvelopeSelfDescribing(t *testing.T) {
+	mock := &recordingKMSClient{}
+	s := NewKMSStorer(mock)
+	plaintext := []byte(`{"version":1,"keys":[{"ak":"ak-test-4c3"}]}`)
+
+	ct, err := s.Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	// 信封自描述：magic 前缀 + DEK 长度字段。
+	if !bytes.HasPrefix(ct, []byte(magic)) {
+		t.Fatalf("密文应含 magic 前缀 %q, got %q", magic, ct[:min(len(ct), len(magic))])
+	}
+	if len(ct) < magicLen+dekLenFieldLen {
+		t.Fatalf("密文过短: %d", len(ct))
+	}
+	dekLen := int(binary.BigEndian.Uint16(ct[magicLen : magicLen+dekLenFieldLen]))
+	segStart := magicLen + dekLenFieldLen
+	if segStart+dekLen > len(ct) {
+		t.Fatalf("DEK 长度字段越界: dek_len=%d, 实际剩余=%d", dekLen, len(ct)-segStart)
+	}
+	seg := ct[segStart : segStart+dekLen]
+	// mock 包裹格式："kms:" + 32B DEK → 段可寻址。
+	if !bytes.HasPrefix(seg, mock.prefix()) {
+		t.Fatalf("DEK 段应为 mock 包裹格式（含 %q 前缀）", mock.prefix())
+	}
+	dek := seg[len(mock.prefix()):]
+	if len(dek) != 32 {
+		t.Fatalf("DEK 应为 32B（AES-256），got %d", len(dek))
+	}
+	body := ct[segStart+dekLen:]
+
+	// 独立还原：用信封内 DEK + 本包导出原语解开正文，应等于明文。
+	got, err := DecryptWithKey(dek, body)
+	if err != nil {
+		t.Fatalf("用信封内 DEK 独立解密正文: %v", err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("信封内 DEK 解密结果与明文不一致: got %q", got)
+	}
+
+	// mock 记录：EncryptDEK 收到的 DEK 与信封内 DEK 一致。
+	if n := mock.encryptDEKCount(); n != 1 {
+		t.Fatalf("EncryptDEK 应恰好调用 1 次, got %d", n)
+	}
+	if captured := mock.lastEncryptedDEK(); !bytes.Equal(captured, dek) {
+		t.Fatalf("KMS 包裹的 DEK 与信封内 DEK 不一致")
+	}
+
+	// 整体 Decrypt 往返。
+	dec, err := s.Decrypt(ct)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	if !bytes.Equal(dec, plaintext) {
+		t.Fatalf("Decrypt 应还原明文: got %q", dec)
+	}
+}
+
+// TestKMSStorer_Decrypt_TamperFails 验证解密对篡改的 fail-closed：正文任一字节翻转
+// （GCM 认证失败）、magic 篡改（格式错误）、DEK 密文段翻转（GCM 兜底）与截断都必须
+// 报错，绝不返回错误明文。
+func TestKMSStorer_Decrypt_TamperFails(t *testing.T) {
+	mock := &recordingKMSClient{}
+	s := NewKMSStorer(mock)
+	plaintext := []byte("credentials-snapshot-with-secrets")
+	ct, err := s.Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	// 篡改正文区（跳过 magic/长度段，命中 body 的 nonce/ct/tag）。
+	bodyStart := magicLen + dekLenFieldLen + int(binary.BigEndian.Uint16(ct[magicLen:magicLen+dekLenFieldLen]))
+	if bodyStart >= len(ct) {
+		t.Fatalf("测试前提不成立：无正文区")
+	}
+	tampered := append([]byte(nil), ct...)
+	tampered[len(tampered)-5] ^= 0xFF // 翻转 body 尾部（GCM tag 区）
+	if _, err := s.Decrypt(tampered); err == nil {
+		t.Fatalf("篡改正文后 Decrypt 应失败（fail-closed）")
+	}
+
+	// 篡改 magic → 格式错误（自描述诊断路径）。
+	badMagic := append([]byte(nil), ct...)
+	badMagic[0] ^= 0xFF
+	if _, err := s.Decrypt(badMagic); err == nil {
+		t.Fatalf("篡改 magic 后 Decrypt 应失败（格式错误）")
+	}
+
+	// 翻转 DEK 密文段内容（M3）：保持 magic/长度字段/prefix 不变，只翻转 DEK 载荷区
+	// 一字节。mock 对 DEK 无完整性保护（还原出错误 DEK），兜底依赖 DecryptWithKey 的
+	// GCM 认证——锁定该 fail-closed 路径（不得返回错误明文）。
+	segStart := magicLen + dekLenFieldLen
+	flipAt := segStart + len(mock.prefix()) + 10 // DEK 载荷区（prefix 之后）
+	if flipAt >= bodyStart {
+		t.Fatalf("测试前提不成立：DEK 载荷区过短（无翻转点）")
+	}
+	tamperedDEK := append([]byte(nil), ct...)
+	tamperedDEK[flipAt] ^= 0xFF
+	if _, err := s.Decrypt(tamperedDEK); err == nil {
+		t.Fatalf("篡改 DEK 密文段后 Decrypt 应失败（fail-closed）")
+	}
+
+	// 截断信封 → 错误。
+	truncated := ct[:bodyStart-1]
+	if _, err := s.Decrypt(truncated); err == nil {
+		t.Fatalf("截断密文后 Decrypt 应失败")
+	}
+}
+
+// TestKMSStorer_Unconfigured_ErrNotConfigured 验证未配置态 fail-closed：
+// nil/未配置 KMS 客户端 → Encrypt/Decrypt 返回 ErrNotConfigured（哨兵错误），
+// 非占位、非 panic。
+func TestKMSStorer_Unconfigured_ErrNotConfigured(t *testing.T) {
+	s := NewKMSStorer(nil) // 默认未配置态
+	if _, err := s.Encrypt([]byte("x")); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("未配置 Encrypt 应返回 ErrNotConfigured, got %v", err)
+	}
+	// 即使输入是非法信封，未配置也应先行报 ErrNotConfigured（fail-fast）。
+	if _, err := s.Decrypt([]byte("not-an-envelope")); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("未配置 Decrypt 应返回 ErrNotConfigured, got %v", err)
+	}
+
+	// UnconfiguredClient 显式注入（值形态）同样返回哨兵错误。
+	var uc UnconfiguredClient
+	if _, err := uc.EncryptDEK(context.Background(), []byte("dek")); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("UnconfiguredClient.EncryptDEK 应返回 ErrNotConfigured, got %v", err)
+	}
+	if _, err := uc.DecryptDEK(context.Background(), []byte("dek")); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("UnconfiguredClient.DecryptDEK 应返回 ErrNotConfigured, got %v", err)
+	}
+
+	// *UnconfiguredClient 指针形态经 requireConfigured 同样判未配置（M2）：
+	// 注入 &UnconfiguredClient{} 不得落入「已配置」分支——否则 Decrypt 对非法输入会
+	// 返格式错误而非 ErrNotConfigured，破坏未配置语义 fail-fast 承诺。
+	sPtr := NewKMSStorer(&UnconfiguredClient{})
+	if _, err := sPtr.Encrypt([]byte("x")); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("*UnconfiguredClient Encrypt 应返回 ErrNotConfigured, got %v", err)
+	}
+	if _, err := sPtr.Decrypt([]byte("not-an-envelope")); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("*UnconfiguredClient Decrypt（非法输入）应返回 ErrNotConfigured, got %v", err)
+	}
+}
+
+// TestKMSStorer_NoAutoRegister_AndRegistryRoundtrip 验证 KMSStorer 内置后的注册表语义：
+//   - 内置不再有 init() 自举 → "kms" 名字不应自动占用注册表（Bootstrap 装配直接构造，
+//     无需注册表探测）；
+//   - 显式经注册表注入（RegisterStorer + 自定义 KMSClient）后可完成加解密往返；
+//   - UnregisterStorer 后不再命中。
+func TestKMSStorer_NoAutoRegister_AndRegistryRoundtrip(t *testing.T) {
+	// 内置 + 无 init：注册表不应预置 "kms"。
+	if _, ok := GetStorer[SecureStorer]("kms"); ok {
+		t.Fatalf("内置 KMSStorer 不应自动注册 \"kms\"（Bootstrap 直接构造，无需注册表探测）")
+	}
+
+	// 显式注册 + 往返。
+	const name = "kms-test-4c3"
+	mock := &recordingKMSClient{}
+	if err := RegisterStorer(name, NewKMSStorer(mock)); err != nil {
+		t.Fatalf("RegisterStorer: %v", err)
+	}
+	// t.Cleanup 兜底反注册：中途 t.Fatalf 失败也不残留全局注册表（S4），
+	// 使名字在后续用例/重跑中可复用。
+	t.Cleanup(func() { UnregisterStorer(name) })
+	got, ok := GetStorer[SecureStorer](name)
+	if !ok {
+		t.Fatalf("GetStorer[SecureStorer](%q) 应命中", name)
+	}
+	ct, err := got.Encrypt([]byte("hello-kms"))
+	if err != nil {
+		t.Fatalf("注册项 Encrypt: %v", err)
+	}
+	dec, err := got.Decrypt(ct)
+	if err != nil {
+		t.Fatalf("注册项 Decrypt: %v", err)
+	}
+	if !bytes.Equal(dec, []byte("hello-kms")) {
+		t.Fatalf("注册项往返不一致: got %q", dec)
+	}
+
+	UnregisterStorer(name)
+	if _, ok := GetStorer[SecureStorer](name); ok {
+		t.Fatalf("UnregisterStorer 后不应命中")
+	}
+}
