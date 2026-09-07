@@ -627,13 +627,11 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 凭据装配（凭据 store 化）：SproxySig 权威表 = Ring。
 	//   - opts.CredentialRing 显式注入（测试 / cmd 装配）优先；
 	//   - 否则从 opts.CredentialStore 载入快照重建；
-	//   - 仍为空且 cfg.CredentialTTL>=0（未显式禁用首启）→ 生成 anonymous 凭据
-	//     （kind=plain、ExpiresAt=now+CredentialTTL、Meta{Type:bootstrap}）并持久化，
-	//     保证**新部署必有可访问凭据**（注册开关不影响 anonymous 生成——生成逻辑
-	//     独立于 cfg.Registration.Disable）。
-	// 凭据装配（见 bootstrapCredentials：显式注入 Ring 优先，否则从 store 载入，
-	// 接口化后仍空则零凭据等待注册）。storer 归一（typed-nil → nil）在
-	// bootstrapCredentials 内完成（见 normalizeStorer）。
+	//   - **U3 零凭据启动**——store 为空不再生成首启 anonymous 凭据，系统以零凭据
+	//     等待注册：register 公开端点是唯一用户入口，首个经回环注册的用户由
+	//     AddRegistration 原子授 admin（DEC-F/D2）。空 store 时 bootstrapCredentials
+	//     记启动日志提示「首次注册经回环，将成为 admin」（S2）。
+	// storer 归一（typed-nil → nil）在 bootstrapCredentials 内完成（见 normalizeStorer）。
 	h.bootstrapCredentials(opts)
 
 	// 认证链装配（DEC-C）：宿主注入的 Authenticators 非 nil → replace 默认链（宿主

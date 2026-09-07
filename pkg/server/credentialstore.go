@@ -97,6 +97,8 @@ var _ accesskey.CredentialStorer = (*CredentialStore)(nil)
 // 接口）时，返回真正的 nil——否则 persistCredentials 的 `== nil` 守卫生效不了，
 // 会对 nil 接收者调用 Save 触发 panic（旧具体指针字段不存在此问题；接口提取后
 // **唯一**的运行时行为差异点，须在注入边界归一，测试基座零迁移）。
+// 注意：不能裸用 reflect.ValueOf(s).IsNil()——对非指针值类型（含满足接口的
+// struct 实现）会 panic；先按 Kind 限定 nil 敏感类型再判空。
 func normalizeStorer(s accesskey.CredentialStorer) accesskey.CredentialStorer {
 	if s == nil {
 		return nil

@@ -103,3 +103,32 @@ func TestStorerRegistry_RegisterGetUnregister(t *testing.T) {
 		t.Fatalf("未注册名不应命中")
 	}
 }
+
+// typedNilPtrStorer 是 typed-nil 探针：*typedNilPtrStorer 满足 SecureStorer，
+// 零值即 nil 指针。
+type typedNilPtrStorer struct{}
+
+func (*typedNilPtrStorer) Encrypt(p []byte) ([]byte, error) { return p, nil }
+func (*typedNilPtrStorer) Decrypt(c []byte) ([]byte, error) { return c, nil }
+
+// TestStorerRegistry_RejectTypedNil 验证 RegisterStorer 对 typed-nil 值的防御：
+//   - RegisterStorer(name, (*typedNilPtrStorer)(nil)) → 错误（拒绝入库）；
+//   - 拒绝后 GetStorer 不命中（ok==false），不 panic；
+//   - 字面 nil 同样拒绝。
+func TestStorerRegistry_RejectTypedNil(t *testing.T) {
+	const ln = "reject-typed-nil"
+
+	if err := RegisterStorer(ln, (*typedNilPtrStorer)(nil)); err == nil {
+		t.Fatalf("RegisterStorer typed-nil 应返回错误（拒绝入库）")
+	}
+	if _, ok := GetStorer[*typedNilPtrStorer](ln); ok {
+		t.Fatalf("typed-nil 拒绝后不应命中注册表")
+	}
+
+	if err := RegisterStorer("reject-literal-nil", nil); err == nil {
+		t.Fatalf("RegisterStorer 字面 nil 应返回错误")
+	}
+	if _, ok := GetStorer[PlainStorer]("reject-literal-nil"); ok {
+		t.Fatalf("字面 nil 拒绝后不应命中注册表")
+	}
+}

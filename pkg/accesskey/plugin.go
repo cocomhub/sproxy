@@ -5,11 +5,18 @@ package accesskey
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
 )
 
 // storerRegistry 是 storer（CredentialStorer / SecureStorer / 未来实现）的插件
 // 注册表，仿 pkg/tunnel/xfer.Register 风格：全局单例 + 名字路由 + 类型参数化取值。
+//
+// 设计说明：本注册表用 `map[string]any` 混存多接口类型（CredentialStorer /
+// SecureStorer / 未来实现），而非复用 pkg/plugin.Registry[T]（泛型单接口表）——
+// 泛型注册表按接口类型注册需各建实例、再叠加名字路由，一张表混存时复杂度不减；
+// 保持单一注册表 + GetStorer[T] 类型参数化取值更贴合 4C（KMS 插件多接口接入）。
+//
 // 4C-2（KMS 加密实现）经 RegisterStorer 把加密 storer 注入，宿主按名装配。
 type storerRegistry struct {
 	sync.RWMutex
@@ -21,12 +28,19 @@ var registry = &storerRegistry{m: map[string]any{}}
 
 // RegisterStorer 注册一个 storer（CredentialStorer / SecureStorer / 未来实现）。
 // 重名注册返回错误（防覆盖静默替换）；同名反注册后可重新注册。
+//
+// 值校验：真实 nil 与 typed-nil（如 `(*CredentialStore)(nil)` 装箱进接口）均拒绝
+// ——typed-nil 入库后 GetStorer[T] 对非接口 T 走类型断言会 panic。
 func RegisterStorer(name string, v any) error {
 	if name == "" {
 		return fmt.Errorf("accesskey: register storer: 空名字")
 	}
 	if v == nil {
 		return fmt.Errorf("accesskey: register storer %q: nil 值", name)
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
+		return fmt.Errorf("accesskey: register storer %q: typed-nil 值（nil 指针装箱）", name)
 	}
 	registry.Lock()
 	defer registry.Unlock()
@@ -47,6 +61,9 @@ func UnregisterStorer(name string) {
 
 // GetStorer 按目标类型取已注册 storer：名字已注册、且值与类型参数 T 匹配时
 // 返回 (值, true)；未注册或类型不匹配返回 (零值, false)。
+//
+// 注意：注册值若为 typed-nil 会在断言阶段对非接口 T 触发 panic——RegisterStorer
+// 已拒绝 nil 值实现入库，调用方不应绕过注册表直接写入 registry。
 func GetStorer[T any](name string) (T, bool) {
 	var zero T
 	registry.RLock()
