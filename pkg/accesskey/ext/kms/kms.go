@@ -88,13 +88,14 @@ func (UnconfiguredClient) DecryptDEK(_ context.Context, _ []byte) ([]byte, error
 }
 
 // requireConfigured 校验 storer 处于已配置态。nil 接收者、nil client、或 client 为
-// UnconfiguredClient（未配置哨兵）一律返回 ErrNotConfigured——Encrypt/Decrypt 在处理
-// 任何密文/信封之前先行 fail-fast，保证未配置语义不被后续解析错误掩盖。
+// UnconfiguredClient 哨兵（值或指针形态）一律返回 ErrNotConfigured——Encrypt/Decrypt
+// 在处理任何密文/信封之前先行 fail-fast，保证未配置语义不被后续解析错误掩盖。
 func (s *KMSStorer) requireConfigured() error {
 	if s == nil || s.client == nil {
 		return ErrNotConfigured
 	}
-	if _, ok := s.client.(UnconfiguredClient); ok {
+	switch s.client.(type) {
+	case UnconfiguredClient, *UnconfiguredClient:
 		return ErrNotConfigured
 	}
 	return nil
@@ -124,6 +125,11 @@ func (s *KMSStorer) Encrypt(plaintext []byte) ([]byte, error) {
 			return nil, ErrNotConfigured
 		}
 		return nil, fmt.Errorf("kms: 包裹 DEK 失败: %w", err)
+	}
+	if len(dekCt) == 0 {
+		// 行为异常但返 nil error 的 KMSClient 会给出空密文：拼装会得到
+		// dek_len=0 的永不可解信封。写入端 fail-fast 拒绝（M1）。
+		return nil, errors.New("kms: KMS 包裹 DEK 返回空密文（实现异常，拒绝拼装不可解信封）")
 	}
 	if len(dekCt) > maxDEKLen {
 		return nil, fmt.Errorf("kms: DEK 密文过长（%d 字节，长度字段上限 %d）", len(dekCt), maxDEKLen)

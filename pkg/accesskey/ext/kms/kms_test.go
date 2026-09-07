@@ -153,6 +153,20 @@ func TestKMSStorer_Decrypt_TamperFails(t *testing.T) {
 		t.Fatalf("篡改 magic 后 Decrypt 应失败（格式错误）")
 	}
 
+	// 翻转 DEK 密文段内容（M3）：保持 magic/长度字段/prefix 不变，只翻转 DEK 载荷区
+	// 一字节。mock 对 DEK 无完整性保护（还原出错误 DEK），兜底依赖 DecryptWithKey 的
+	// GCM 认证——锁定该 fail-closed 路径（不得返回错误明文）。
+	segStart := magicLen + dekLenFieldLen
+	flipAt := segStart + len(mock.prefix()) + 10 // DEK 载荷区（prefix 之后）
+	if flipAt >= bodyStart {
+		t.Fatalf("测试前提不成立：DEK 载荷区过短（无翻转点）")
+	}
+	tamperedDEK := append([]byte(nil), ct...)
+	tamperedDEK[flipAt] ^= 0xFF
+	if _, err := s.Decrypt(tamperedDEK); err == nil {
+		t.Fatalf("篡改 DEK 密文段后 Decrypt 应失败（fail-closed）")
+	}
+
 	// 截断信封 → 错误。
 	truncated := ct[:bodyStart-1]
 	if _, err := s.Decrypt(truncated); err == nil {
@@ -173,13 +187,24 @@ func TestKMSStorer_Unconfigured_ErrNotConfigured(t *testing.T) {
 		t.Fatalf("未配置 Decrypt 应返回 ErrNotConfigured, got %v", err)
 	}
 
-	// UnconfiguredClient 显式注入同样返回哨兵错误。
+	// UnconfiguredClient 显式注入（值形态）同样返回哨兵错误。
 	var uc UnconfiguredClient
 	if _, err := uc.EncryptDEK(context.Background(), []byte("dek")); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("UnconfiguredClient.EncryptDEK 应返回 ErrNotConfigured, got %v", err)
 	}
 	if _, err := uc.DecryptDEK(context.Background(), []byte("dek")); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("UnconfiguredClient.DecryptDEK 应返回 ErrNotConfigured, got %v", err)
+	}
+
+	// *UnconfiguredClient 指针形态经 requireConfigured 同样判未配置（M2）：
+	// 注入 &UnconfiguredClient{} 不得落入「已配置」分支——否则 Decrypt 对非法输入会
+	// 返格式错误而非 ErrNotConfigured，破坏未配置语义 fail-fast 承诺。
+	sPtr := NewKMSStorer(&UnconfiguredClient{})
+	if _, err := sPtr.Encrypt([]byte("x")); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("*UnconfiguredClient Encrypt 应返回 ErrNotConfigured, got %v", err)
+	}
+	if _, err := sPtr.Decrypt([]byte("not-an-envelope")); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("*UnconfiguredClient Decrypt（非法输入）应返回 ErrNotConfigured, got %v", err)
 	}
 }
 
@@ -204,6 +229,9 @@ func TestKMSStorer_RegistryIntegration(t *testing.T) {
 	if err := accesskey.RegisterStorer(name, NewKMSStorer(mock)); err != nil {
 		t.Fatalf("RegisterStorer: %v", err)
 	}
+	// t.Cleanup 兜底反注册：中途 t.Fatalf 失败也不残留全局注册表（S4），
+	// 使名字在后续用例/重跑中可复用。
+	t.Cleanup(func() { accesskey.UnregisterStorer(name) })
 	got, ok := accesskey.GetStorer[accesskey.SecureStorer](name)
 	if !ok {
 		t.Fatalf("GetStorer[SecureStorer](%q) 应命中", name)

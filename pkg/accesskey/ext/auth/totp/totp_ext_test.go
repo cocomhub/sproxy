@@ -53,6 +53,8 @@ func TestTotpRegistry_RegisterUnregisterRoundtrip(t *testing.T) {
 	if err := accesskey.RegisterStorer(name, stubProvider{out: want}); err != nil {
 		t.Fatalf("RegisterStorer: %v", err)
 	}
+	// t.Cleanup 兜底反注册：中途 t.Fatalf 失败也不残留全局注册表（S4）。
+	t.Cleanup(func() { accesskey.UnregisterStorer(name) })
 	p, ok := accesskey.GetStorer[Provider](name)
 	if !ok {
 		t.Fatalf("GetStorer[Provider](%q) 应命中", name)
