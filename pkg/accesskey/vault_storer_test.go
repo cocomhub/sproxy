@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"maps"
 	"net/http"
@@ -52,10 +53,11 @@ type mockVaultServer struct {
 	decryptFn         func(ciphertext string) string
 }
 
-// vaultMockResp 是一次性的覆写响应（错误场景：403/404/503/5xx 等）。
+// vaultMockResp 是一次性的覆写响应（错误/重定向场景：403/404/503/5xx/302 等）。
 type vaultMockResp struct {
-	status int
-	body   string
+	status  int
+	body    string
+	headers map[string]string // 额外响应头（如 302 的 Location）
 }
 
 // newMockVault 创建 mock Vault server，并注册 t.Cleanup 关闭。
@@ -72,9 +74,29 @@ func (m *mockVaultServer) URL() string { return m.srv.URL }
 
 // override 为指定操作（"encrypt"/"decrypt"）设置固定状态码 + body 的覆写响应。
 func (m *mockVaultServer) override(op string, status int, body string) {
+	m.overrideResp(op, vaultMockResp{status: status, body: body})
+}
+
+// overrideResp 设置完整覆写响应（含响应头，如 302 的 Location）。
+func (m *mockVaultServer) overrideResp(op string, resp vaultMockResp) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.overrides[op] = vaultMockResp{status: status, body: body}
+	m.overrides[op] = resp
+}
+
+// newMockVaultTLS 创建启用 TLS 的 mock Vault server（httptest.NewTLSServer），并把其自签
+// CA 导出为临时 PEM 路径返回——供 CAFile 正路径测试验证 RootCAs/Transport 装配。
+func newMockVaultTLS(t *testing.T, token string) (*mockVaultServer, string) {
+	t.Helper()
+	m := &mockVaultServer{t: t, token: token, overrides: map[string]vaultMockResp{}}
+	m.srv = httptest.NewTLSServer(m)
+	t.Cleanup(m.srv.Close)
+	caPath := filepath.Join(t.TempDir(), "vault-ca.pem")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: m.srv.Certificate().Raw})
+	if err := os.WriteFile(caPath, certPEM, 0o600); err != nil {
+		t.Fatalf("导出 mock CA 到临时文件: %v", err)
+	}
+	return m, caPath
 }
 
 // setEncryptCiphertext 固定 encrypt 端点回放的 data.ciphertext（原样透传断言）。
@@ -149,10 +171,19 @@ func (m *mockVaultServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fn := m.decryptFn
 	m.mu.Unlock()
 
+	if r.Method != http.MethodPost {
+		m.t.Errorf("mock vault: method = %s, want POST", r.Method)
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+		m.t.Errorf("mock vault: Content-Type = %q, want application/json", ct)
+	}
 	if got := r.Header.Get("X-Vault-Token"); got != m.token {
 		m.t.Errorf("mock vault: X-Vault-Token = %q, want %q", got, m.token)
 	}
 	if hasOverride {
+		for k, v := range ov.headers {
+			w.Header().Set(k, v)
+		}
 		w.WriteHeader(ov.status)
 		_, _ = io.WriteString(w, ov.body)
 		return
@@ -417,7 +448,8 @@ func TestVaultTransitStorer_Decrypt_RejectNonVaultPrefix(t *testing.T) {
 }
 
 // TestVaultTransitStorer_New_Validation 验证构造函数 fail-fast 校验：
-// addr 非空 + http/https scheme、key_name 非空、token 非空（空 token → 「vault: token 为空」）。
+// addr 非空 + http/https scheme + host 非空、key_name 非空、token 非空（空 token →
+// 「vault: token 为空」）。
 func TestVaultTransitStorer_New_Validation(t *testing.T) {
 	mock := newMockVault(t, vaultTestToken)
 	tests := []struct {
@@ -434,6 +466,11 @@ func TestVaultTransitStorer_New_Validation(t *testing.T) {
 			name:    "非法 scheme",
 			opts:    VaultOptions{Addr: "ftp://vault:8200", KeyName: vaultTestKey, Token: vaultTestToken},
 			wantErr: "scheme",
+		},
+		{
+			name:    "缺 host",
+			opts:    VaultOptions{Addr: "http://", KeyName: vaultTestKey, Token: vaultTestToken},
+			wantErr: "host",
 		},
 		{
 			name:    "空 key_name",
@@ -583,8 +620,122 @@ func TestVaultTransitStorer_ErrorClassification(t *testing.T) {
 		}
 		if _, err := s.Encrypt([]byte("x")); err == nil {
 			t.Fatalf("Vault 不可达时 Encrypt 应报错")
-		} else if !strings.Contains(err.Error(), "vault") {
-			t.Fatalf("网络错误应含 vault 前缀, got %v", err)
+		} else if !strings.Contains(err.Error(), "vault") || !strings.Contains(err.Error(), "不可达") ||
+			!strings.Contains(err.Error(), "encrypt") {
+			t.Fatalf("网络错误应为 vault: encrypt ...不可达 分类（区分 vaultAPIError）, got %v", err)
+		}
+	})
+}
+
+// TestVaultTransitStorer_Encrypt_NoFollowRedirect 验证 http.Client 禁止跟随重定向：
+// mock 返回 302 + Location 指向另一 host，请求不被跟随（X-Vault-Token 不外泄到重定向
+// 目标），302 响应原样收尾为错误（含状态码）。
+func TestVaultTransitStorer_Encrypt_NoFollowRedirect(t *testing.T) {
+	leakTarget := newMockVault(t, vaultTestToken) // 若被跟随将收到带 token 的请求
+	mock := newMockVault(t, vaultTestToken)
+	mock.overrideResp("encrypt", vaultMockResp{
+		status: http.StatusFound,
+		body:   `{"errors":["redirecting"]}`,
+		headers: map[string]string{
+			"Location": leakTarget.URL() + "/v1/transit/encrypt/sproxy",
+		},
+	})
+	s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+	_, err := s.Encrypt([]byte("secret"))
+	if err == nil {
+		t.Fatalf("302 响应 Encrypt 应报错（不跟随重定向）")
+	}
+	if !strings.Contains(err.Error(), "302") {
+		t.Fatalf("错误应含 302 状态码（原样收尾跳转响应）, got %v", err)
+	}
+	if n := leakTarget.reqCount(); n != 0 {
+		t.Fatalf("重定向不应被跟随（target 收到 %d 次请求，X-Vault-Token 有外泄风险）", n)
+	}
+}
+
+// TestVaultTransitStorer_CAFile_RealTLSCert 验证 CAFile 正路径：以 httptest.NewTLSServer
+// 的自签证书为 CA 装配 storer，Encrypt/Decrypt 经 TLS 真连通（验证 RootCAs/Transport 克隆
+// 装配，M-6）。
+func TestVaultTransitStorer_CAFile_RealTLSCert(t *testing.T) {
+	mock, caPath := newMockVaultTLS(t, vaultTestToken)
+	s, err := NewVaultTransitStorer(VaultOptions{
+		Addr: mock.URL(), Mount: vaultTestMount, KeyName: vaultTestKey,
+		Token: vaultTestToken, AADPath: vaultTestAAD, CAFile: caPath,
+	})
+	if err != nil {
+		t.Fatalf("NewVaultTransitStorer(CAFile): %v", err)
+	}
+	secret := []byte("over-tls-secret")
+	ct, err := s.Encrypt(secret)
+	if err != nil {
+		t.Fatalf("CAFile Encrypt（TLS 真连通）: %v", err)
+	}
+	pt, err := s.Decrypt(ct)
+	if err != nil {
+		t.Fatalf("CAFile Decrypt: %v", err)
+	}
+	if !bytes.Equal(pt, secret) {
+		t.Fatalf("CAFile 全链路往返应还原明文, got %q", pt)
+	}
+}
+
+// TestVaultTransitStorer_EmptyPlaintext_Roundtrip 验证空明文往返：base64("")=="" 是合法
+// data.plaintext，响应字段判存在性（指针）不应把空串当缺字段拒绝（M-3）。
+func TestVaultTransitStorer_EmptyPlaintext_Roundtrip(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+	ct, err := s.Encrypt(nil)
+	if err != nil {
+		t.Fatalf("Encrypt(空): %v", err)
+	}
+	pt, err := s.Decrypt(ct)
+	if err != nil {
+		t.Fatalf("Decrypt(空明文密文): %v", err)
+	}
+	if len(pt) != 0 {
+		t.Fatalf("空明文往返应还原为空, got %q", pt)
+	}
+}
+
+// TestVaultTransitStorer_SuccessResponse_GuardBranches 验证成功响应（200）的守卫分支：
+// 缺字段 / 非 JSON / plaintext 非法 base64 均返回明确 error（fail-closed，不 panic）。
+func TestVaultTransitStorer_SuccessResponse_GuardBranches(t *testing.T) {
+	t.Run("Encrypt 缺 data.ciphertext", func(t *testing.T) {
+		mock := newMockVault(t, vaultTestToken)
+		mock.override("encrypt", http.StatusOK, `{"data":{}}`)
+		s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+		if _, err := s.Encrypt([]byte("x")); err == nil || !strings.Contains(err.Error(), "data.ciphertext") {
+			t.Fatalf("缺 data.ciphertext 应报错含字段名, got %v", err)
+		}
+	})
+	t.Run("Decrypt 缺 data.plaintext", func(t *testing.T) {
+		mock := newMockVault(t, vaultTestToken)
+		mock.override("decrypt", http.StatusOK, `{"data":{}}`)
+		s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+		if _, err := s.Decrypt([]byte("vault:v1:abc")); err == nil || !strings.Contains(err.Error(), "data.plaintext") {
+			t.Fatalf("缺 data.plaintext 应报错含字段名, got %v", err)
+		}
+	})
+	t.Run("200 非 JSON", func(t *testing.T) {
+		mock := newMockVault(t, vaultTestToken)
+		mock.override("encrypt", http.StatusOK, `not-json`)
+		s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+		if _, err := s.Encrypt([]byte("x")); err == nil || !strings.Contains(err.Error(), "解析") {
+			t.Fatalf("200 非 JSON 应报解析错误, got %v", err)
+		}
+	})
+	t.Run("data.plaintext 非法 base64", func(t *testing.T) {
+		mock := newMockVault(t, vaultTestToken)
+		mock.override("decrypt", http.StatusOK, `{"data":{"plaintext":"!!!not-base64!!!"}}`)
+		s := newTestVaultStorer(t, mock, vaultTestAAD)
+
+		if _, err := s.Decrypt([]byte("vault:v1:abc")); err == nil || !strings.Contains(err.Error(), "base64") {
+			t.Fatalf("plaintext 非法 base64 应报错, got %v", err)
 		}
 	})
 }

@@ -59,6 +59,9 @@ const (
 	vaultDefaultMount = "transit"
 	// vaultDefaultTimeout 是缺省 HTTP 超时。
 	vaultDefaultTimeout = 10 * time.Second
+	// vaultMaxResponseBytes 是 Vault 响应体读取上限（1 MiB）。Transit 成功/错误响应都很小；
+	// 超过上限疑似非 Vault Transit 端点或中间层异常，fail-closed 拒绝解析（防无界读内存）。
+	vaultMaxResponseBytes = 1 << 20
 )
 
 // vaultEncryptRequest 是 POST {mount}/encrypt/{key} 的请求体。
@@ -73,20 +76,23 @@ type vaultDecryptRequest struct {
 	Context    string `json:"context,omitempty"`
 }
 
-// vaultDataEnvelope 是 Vault Transit 成功响应的外壳：{"data":{...}}。
+// vaultDataEnvelope 是 Vault Transit 成功响应的外壳：{"data":{...}}。字段用指针判
+// **存在性**而非空串——空明文的 base64 恒为 ""（base64("")==""），用空串当缺字段哨兵会
+// 破坏 SecureStorer 空内容往返（M-3）。
 type vaultDataEnvelope struct {
 	Data struct {
-		Ciphertext string `json:"ciphertext"`
-		Plaintext  string `json:"plaintext"`
+		Ciphertext *string `json:"ciphertext"`
+		Plaintext  *string `json:"plaintext"`
 	} `json:"data"`
 }
 
 // NewVaultTransitStorer 构造 VaultTransitStorer。
 //
-// fail-fast 校验：addr 非空且 scheme 为 http/https（url.Parse）、key_name 非空、token 非空
-// （空 → error「vault: token 为空」）。mount 空 → "transit"；timeout ≤0 → 10s；CAFile 非空时
-// 读取 PEM 并构造自签 CA 的 TLS 根池（失败返回明确 error）；否则使用默认
-// `http.Client{Timeout}`。decrypt 缓存 map 初始化留待缓存任务启用（CacheTTL>0 时）。
+// fail-fast 校验：addr 非空且 scheme 为 http/https + host 非空（url.Parse）、key_name 非空、
+// token 非空（空 → error「vault: token 为空」）。mount 空 → "transit"；timeout ≤0 → 10s；
+// CAFile 非空时读取 PEM 并构造自签 CA 的 TLS 根池（失败返回明确 error）；否则使用默认
+// `http.Client{Timeout}`。两分支 client 均禁止跟随重定向（防 X-Vault-Token 外泄）。decrypt
+// 缓存 map 初始化留待缓存任务启用（CacheTTL>0 时）。
 func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 	if opts.Addr == "" {
 		return nil, errors.New("vault: addr 为空（需指向 Vault 服务地址）")
@@ -97,6 +103,9 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("vault: addr scheme 必须为 http/https，got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("vault: addr 缺少 host（需 http(s)://host[:port] 形式，got %q）", opts.Addr)
 	}
 	if opts.KeyName == "" {
 		return nil, errors.New("vault: key_name 为空（需指定 Transit 加密 key）")
@@ -112,18 +121,21 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 	if timeout <= 0 {
 		timeout = vaultDefaultTimeout
 	}
-	client := &http.Client{Timeout: timeout}
+	client := newVaultHTTPClient(timeout, nil)
 	if opts.CAFile != "" {
 		pool, err := loadVaultCertPool(opts.CAFile)
 		if err != nil {
 			return nil, err
 		}
-		client = &http.Client{
-			Timeout: timeout,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-			},
+		// 以 http.DefaultTransport 为基座克隆后仅覆写 TLSClientConfig：保留
+		// ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认（M-6：不自建零值 Transport）。
+		defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			return nil, errors.New("vault: 无法取得默认 HTTP Transport 基座（非 *http.Transport）")
 		}
+		transport := defaultTransport.Clone()
+		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+		client = newVaultHTTPClient(timeout, transport)
 	}
 	return &VaultTransitStorer{
 		addr:    strings.TrimRight(opts.Addr, "/"),
@@ -133,6 +145,19 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 		aadPath: opts.AADPath,
 		client:  client,
 	}, nil
+}
+
+// newVaultHTTPClient 构造 Vault API 客户端：超时 + 禁止跟随重定向。默认 http.Client 最多
+// 跟 10 跳，跨主机跳转只剥离 Authorization/Cookie 等头，X-Vault-Token 是自定义头会被原样
+// 带到重定向目标（token 外泄）——Vault API 客户端应直接收尾跳转响应（I-1）。
+func newVaultHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // loadVaultCertPool 读取 PEM CA 文件并构造 CertPool（Vault 自签/内网 CA 场景）。
@@ -168,10 +193,10 @@ func (s *VaultTransitStorer) Encrypt(plaintext []byte) ([]byte, error) {
 	if err = json.Unmarshal(respBody, &out); err != nil {
 		return nil, fmt.Errorf("vault: encrypt 响应解析失败: %w", err)
 	}
-	if out.Data.Ciphertext == "" {
-		return nil, errors.New("vault: encrypt 响应缺 data.ciphertext")
+	if out.Data.Ciphertext == nil {
+		return nil, errors.New("vault: encrypt 响应缺 data.ciphertext 字段")
 	}
-	return []byte(out.Data.Ciphertext), nil
+	return []byte(*out.Data.Ciphertext), nil
 }
 
 // Decrypt 把 Vault Transit 密文解回明文。输入非 vault:v1: 前缀直接报错（不请求 Vault，
@@ -197,10 +222,10 @@ func (s *VaultTransitStorer) Decrypt(ciphertext []byte) ([]byte, error) {
 	if err = json.Unmarshal(respBody, &out); err != nil {
 		return nil, fmt.Errorf("vault: decrypt 响应解析失败: %w", err)
 	}
-	if out.Data.Plaintext == "" {
-		return nil, errors.New("vault: decrypt 响应缺 data.plaintext")
+	if out.Data.Plaintext == nil {
+		return nil, errors.New("vault: decrypt 响应缺 data.plaintext 字段")
 	}
-	pt, err := base64.StdEncoding.DecodeString(out.Data.Plaintext)
+	pt, err := base64.StdEncoding.DecodeString(*out.Data.Plaintext)
 	if err != nil {
 		return nil, fmt.Errorf("vault: decrypt 响应 plaintext 非法 base64: %w", err)
 	}
@@ -219,7 +244,8 @@ func (s *VaultTransitStorer) aadContext() string {
 // post 向 Vault Transit 发送 op（encrypt/decrypt）POST 请求并返回 200 响应 body。
 // URL = {addr}/v1/{mount}/{op}/{keyName}（不经 url 拼接转义——addr 已在构造校验）；
 // 携带 X-Vault-Token 头与 Content-Type: application/json。网络错误包装为含 "vault" 前缀
-// 的 error（Vault 不可达分类）；非 200 → vaultAPIError 分类解析。
+// 的 error（Vault 不可达分类）；非 200 → vaultAPIError 分类解析。响应体经
+// io.LimitReader 限读（1 MiB），超限返回明确 error（M-4：防无界读内存）。
 func (s *VaultTransitStorer) post(op string, reqBody []byte) ([]byte, error) {
 	endpoint := s.addr + "/v1/" + s.mount + "/" + op + "/" + s.keyName
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, endpoint, bytes.NewReader(reqBody))
@@ -233,9 +259,13 @@ func (s *VaultTransitStorer) post(op string, reqBody []byte) ([]byte, error) {
 		return nil, fmt.Errorf("vault: %s 请求失败（Vault 不可达）: %w", op, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	// 多读 1 字节探测是否超限：不把截断 JSON 喂给解析器（截断会得误导性的 syntax error）。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, vaultMaxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("vault: 读取 %s 响应失败: %w", op, err)
+	}
+	if len(body) > vaultMaxResponseBytes {
+		return nil, fmt.Errorf("vault: %s 响应超过 %d 字节上限（疑似非 Vault Transit 端点）", op, vaultMaxResponseBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, vaultAPIError(op, resp, body)
