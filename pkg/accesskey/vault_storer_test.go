@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // 任务 1 的 L1 单元测试：VaultTransitStorer 核心 Encrypt/Decrypt + AAD context + 错误分类。
@@ -738,4 +739,165 @@ func TestVaultTransitStorer_SuccessResponse_GuardBranches(t *testing.T) {
 			t.Fatalf("plaintext 非法 base64 应报错, got %v", err)
 		}
 	})
+}
+
+// ---- Task 2：decrypt 短 TTL 缓存 ----
+
+// newCachedVaultStorer 用指定 CacheTTL 构造缓存开启的 VaultTransitStorer（失败即终止）。
+func newCachedVaultStorer(t *testing.T, mock *mockVaultServer, ttl time.Duration, aadPath string) *VaultTransitStorer {
+	t.Helper()
+	s, err := NewVaultTransitStorer(VaultOptions{
+		Addr:     mock.URL(),
+		Mount:    vaultTestMount,
+		KeyName:  vaultTestKey,
+		Token:    vaultTestToken,
+		AADPath:  aadPath,
+		CacheTTL: ttl,
+	})
+	if err != nil {
+		t.Fatalf("NewVaultTransitStorer(CacheTTL=%s): %v", ttl, err)
+	}
+	return s
+}
+
+// TestVaultCache_Hit_NoSecondRequest 验证缓存命中：CacheTTL>0 时同密文二次 Decrypt 命中
+// 缓存，mock 只收到 1 次请求，两次结果 bytes 相等。
+func TestVaultCache_Hit_NoSecondRequest(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	mock.setDecryptFn(func(ciphertext string) string { return "pt:" + ciphertext })
+	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
+
+	const ct = "vault:v1:same"
+	first, err := s.Decrypt([]byte(ct))
+	if err != nil {
+		t.Fatalf("Decrypt #1: %v", err)
+	}
+	second, err := s.Decrypt([]byte(ct))
+	if err != nil {
+		t.Fatalf("Decrypt #2: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("缓存命中两次结果应一致, got %q vs %q", first, second)
+	}
+	if n := mock.reqCount(); n != 1 {
+		t.Fatalf("缓存命中后 mock 应只收到 1 次请求, got %d", n)
+	}
+}
+
+// TestVaultCache_Hit_ReturnsCopy 验证命中返回的是副本：篡改返回明文不影响缓存内部 buffer，
+// 二次 Decrypt 仍返回原始明文（且不触发第二次 Vault 请求）。
+func TestVaultCache_Hit_ReturnsCopy(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	mock.setDecryptFn(func(string) string { return "sensitive-data" })
+	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
+
+	const ct = "vault:v1:copy"
+	first, err := s.Decrypt([]byte(ct))
+	if err != nil {
+		t.Fatalf("Decrypt #1: %v", err)
+	}
+	if len(first) == 0 {
+		t.Fatalf("测试前提不成立：明文为空无法验证副本隔离")
+	}
+	first[0] = 'X' // 篡改返回明文
+	second, err := s.Decrypt([]byte(ct))
+	if err != nil {
+		t.Fatalf("Decrypt #2: %v", err)
+	}
+	if string(second) != "sensitive-data" {
+		t.Fatalf("命中缓存应返回不受篡改影响的明文, got %q", second)
+	}
+	if n := mock.reqCount(); n != 1 {
+		t.Fatalf("缓存命中后 mock 应只收到 1 次请求, got %d", n)
+	}
+}
+
+// TestVaultCache_Expired_Refetch 验证缓存过期后重新请求 Vault。为确定性直接篡改缓存
+// entry 的 expires 为过去（不走短 TTL + sleep 的时序依赖）。
+func TestVaultCache_Expired_Refetch(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	mock.setDecryptFn(func(string) string { return "pt" })
+	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
+
+	const ct = "vault:v1:exp"
+	if _, err := s.Decrypt([]byte(ct)); err != nil {
+		t.Fatalf("Decrypt #1: %v", err)
+	}
+	key := string(ct)
+	s.mu.Lock()
+	e, ok := s.cache[key]
+	if !ok {
+		s.mu.Unlock()
+		t.Fatalf("首次 Decrypt 后缓存应含该密文")
+	}
+	e.expires = time.Now().Add(-time.Second)
+	s.cache[key] = e
+	s.mu.Unlock()
+
+	if _, err := s.Decrypt([]byte(ct)); err != nil {
+		t.Fatalf("Decrypt #2: %v", err)
+	}
+	if n := mock.reqCount(); n != 2 {
+		t.Fatalf("过期后应重新请求 Vault, mock 应收到 2 次, got %d", n)
+	}
+}
+
+// TestVaultCache_DifferentCiphertext_NoShare 验证不同密文不共享缓存项（各自请求 Vault）。
+func TestVaultCache_DifferentCiphertext_NoShare(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	mock.setDecryptFn(func(ciphertext string) string { return "pt:" + ciphertext })
+	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
+
+	ptA, err := s.Decrypt([]byte("vault:v1:A"))
+	if err != nil {
+		t.Fatalf("Decrypt A: %v", err)
+	}
+	ptB, err := s.Decrypt([]byte("vault:v1:B"))
+	if err != nil {
+		t.Fatalf("Decrypt B: %v", err)
+	}
+	if bytes.Equal(ptA, ptB) {
+		t.Fatalf("不同密文应解出不同明文, got %q", ptA)
+	}
+	if n := mock.reqCount(); n != 2 {
+		t.Fatalf("不同密文应各请求一次 Vault, mock 应收到 2 次, got %d", n)
+	}
+}
+
+// TestVaultCache_DisabledWhenTTLZero 验证 CacheTTL=0（关闭）：缓存 map 为 nil，每次
+// Decrypt 直查 Vault（mock 收 2 次）。
+func TestVaultCache_DisabledWhenTTLZero(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	mock.setDecryptFn(func(string) string { return "pt" })
+	s := newTestVaultStorer(t, mock, vaultTestAAD) // CacheTTL 未设 = 0
+	if s.cache != nil {
+		t.Fatalf("CacheTTL=0 时缓存 map 应为 nil")
+	}
+
+	const ct = "vault:v1:off"
+	if _, err := s.Decrypt([]byte(ct)); err != nil {
+		t.Fatalf("Decrypt #1: %v", err)
+	}
+	if _, err := s.Decrypt([]byte(ct)); err != nil {
+		t.Fatalf("Decrypt #2: %v", err)
+	}
+	if n := mock.reqCount(); n != 2 {
+		t.Fatalf("缓存关闭时每次应直查 Vault, mock 应收到 2 次, got %d", n)
+	}
+}
+
+// TestVaultCache_Encrypt_DoesNotTouch 验证 Encrypt 不写缓存（只缓存 Decrypt 结果）。
+func TestVaultCache_Encrypt_DoesNotTouch(t *testing.T) {
+	mock := newMockVault(t, vaultTestToken)
+	s := newCachedVaultStorer(t, mock, time.Hour, vaultTestAAD)
+
+	if _, err := s.Encrypt([]byte("secret")); err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	s.mu.Lock()
+	n := len(s.cache)
+	s.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("Encrypt 不应写缓存, 缓存长度应为 0, got %d", n)
+	}
 }

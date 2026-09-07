@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,19 @@ type VaultTransitStorer struct {
 	token   string // X-Vault-Token 请求头
 	aadPath string // AAD context 绑定的文件身份（相对路径；空 = 无 AAD 绑定）
 	client  *http.Client
+
+	// decrypt 结果短 TTL 缓存（AD-5）：key = ciphertext 字符串，value = {明文, 过期时间}。
+	// cache 为 nil 时缓存关闭（CacheTTL=0），Decrypt 每次直查 Vault。map 非并发安全，
+	// 读写一律持 mu。
+	mu       sync.Mutex
+	cache    map[string]vaultCacheEntry // nil = 关闭
+	cacheTTL time.Duration              // 缓存 TTL（>0 时 cache 非 nil）
+}
+
+// vaultCacheEntry 是 decrypt 缓存的一条结果。
+type vaultCacheEntry struct {
+	plaintext []byte    // 解密明文（缓存内部 buffer；命中返回副本）
+	expires   time.Time // 过期时间（time.Now() ≥ expires 视为失效）
 }
 
 // VaultOptions 是 VaultTransitStorer 的构造参数。
@@ -45,7 +59,7 @@ type VaultOptions struct {
 	CAFile   string        // 自签 CA 证书路径（可选；空 → 系统证书池）
 	Timeout  time.Duration // HTTP 超时（≤0 → 10s）
 	AADPath  string        // AAD context 绑定（建议调用方传凭据文件相对路径）
-	CacheTTL time.Duration // decrypt 结果缓存 TTL（0 = 关闭缓存；预留，缓存逻辑由后续任务启用）
+	CacheTTL time.Duration // decrypt 结果缓存 TTL（0 = 关闭缓存）
 }
 
 // 编译期断言：*VaultTransitStorer 满足 SecureStorer（防签名漂移，仿 AESGCMStorer 断言模式）。
@@ -62,6 +76,9 @@ const (
 	// vaultMaxResponseBytes 是 Vault 响应体读取上限（1 MiB）。Transit 成功/错误响应都很小；
 	// 超过上限疑似非 Vault Transit 端点或中间层异常，fail-closed 拒绝解析（防无界读内存）。
 	vaultMaxResponseBytes = 1 << 20
+	// vaultCacheMaxEntries 是 decrypt 缓存惰性清理的触发阈值：插入时 len(cache) 超过该值
+	// 就清一次过期项（防无界增长；简单 map 无容量上限，靠过期清理回收）。
+	vaultCacheMaxEntries = 1000
 )
 
 // vaultEncryptRequest 是 POST {mount}/encrypt/{key} 的请求体。
@@ -91,8 +108,8 @@ type vaultDataEnvelope struct {
 // fail-fast 校验：addr 非空且 scheme 为 http/https + host 非空（url.Parse）、key_name 非空、
 // token 非空（空 → error「vault: token 为空」）。mount 空 → "transit"；timeout ≤0 → 10s；
 // CAFile 非空时读取 PEM 并构造自签 CA 的 TLS 根池（失败返回明确 error）；否则使用默认
-// `http.Client{Timeout}`。两分支 client 均禁止跟随重定向（防 X-Vault-Token 外泄）。decrypt
-// 缓存 map 初始化留待缓存任务启用（CacheTTL>0 时）。
+// `http.Client{Timeout}`。两分支 client 均禁止跟随重定向（防 X-Vault-Token 外泄）。CacheTTL
+// >0 → 初始化 decrypt 结果缓存 map；=0 → 缓存关闭（Decrypt 直查 Vault）。
 func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 	if opts.Addr == "" {
 		return nil, errors.New("vault: addr 为空（需指向 Vault 服务地址）")
@@ -137,14 +154,19 @@ func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 		client = newVaultHTTPClient(timeout, transport)
 	}
-	return &VaultTransitStorer{
+	s := &VaultTransitStorer{
 		addr:    strings.TrimRight(opts.Addr, "/"),
 		mount:   mount,
 		keyName: opts.KeyName,
 		token:   opts.Token,
 		aadPath: opts.AADPath,
 		client:  client,
-	}, nil
+	}
+	if opts.CacheTTL > 0 {
+		s.cacheTTL = opts.CacheTTL
+		s.cache = make(map[string]vaultCacheEntry)
+	}
+	return s, nil
 }
 
 // newVaultHTTPClient 构造 Vault API 客户端：超时 + 禁止跟随重定向。默认 http.Client 最多
@@ -200,15 +222,22 @@ func (s *VaultTransitStorer) Encrypt(plaintext []byte) ([]byte, error) {
 }
 
 // Decrypt 把 Vault Transit 密文解回明文。输入非 vault:v1: 前缀直接报错（不请求 Vault，
-// 防明文误喂）。POST {addr}/v1/{mount}/decrypt/{keyName}，请求体 {"ciphertext": <密文>,
-// "context": base64(AADPath)}；响应 data.plaintext 经 base64 解码后返回。缓存逻辑由后续
-// 任务启用（当前每次直查 Vault）。
+// 防明文误喂）。缓存开启时（CacheTTL>0）先查短 TTL 缓存：命中未过期 → 直接返回明文副本，
+// 不请求 Vault；未命中 → POST {addr}/v1/{mount}/decrypt/{keyName}（请求体
+// {"ciphertext": <密文>, "context": base64(AADPath)}），响应 data.plaintext 经 base64 解码
+// 后写入缓存并返回。
 func (s *VaultTransitStorer) Decrypt(ciphertext []byte) ([]byte, error) {
 	if !bytes.HasPrefix(ciphertext, []byte(vaultCiphertextPrefix)) {
 		return nil, fmt.Errorf("vault: decrypt 拒绝非 %s 前缀输入（%d 字节，疑似明文误喂）", vaultCiphertextPrefix, len(ciphertext))
 	}
+	key := string(ciphertext)
+	if s.cache != nil {
+		if pt, ok := s.cacheGet(key); ok {
+			return pt, nil
+		}
+	}
 	reqBody, err := json.Marshal(vaultDecryptRequest{
-		Ciphertext: string(ciphertext),
+		Ciphertext: key,
 		Context:    s.aadContext(),
 	})
 	if err != nil {
@@ -229,7 +258,47 @@ func (s *VaultTransitStorer) Decrypt(ciphertext []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vault: decrypt 响应 plaintext 非法 base64: %w", err)
 	}
+	if s.cache != nil {
+		s.cachePut(key, pt, time.Now().Add(s.cacheTTL))
+	}
 	return pt, nil
+}
+
+// cacheGet 查询解密缓存（调用方保证 s.cache != nil）。命中且未过期 → 返回明文副本 + true；
+// 未命中 / 已过期 → (nil, false)（过期项留待 cachePut 惰性清理，此处不删）。
+func (s *VaultTransitStorer) cacheGet(key string) ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.cache[key]
+	if !ok || !time.Now().Before(entry.expires) {
+		return nil, false
+	}
+	// 返回副本：防调用方改写内部缓存 buffer。
+	return append([]byte(nil), entry.plaintext...), true
+}
+
+// cachePut 写入解密缓存（调用方保证 s.cache != nil）。明文存副本（防外部改写）。
+// 插入时 len(cache) 超过阈值触发一次惰性过期清理（防无界增长）。
+func (s *VaultTransitStorer) cachePut(key string, plaintext []byte, expires time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.cache) > vaultCacheMaxEntries {
+		s.sweepExpiredLocked()
+	}
+	s.cache[key] = vaultCacheEntry{
+		plaintext: append([]byte(nil), plaintext...),
+		expires:   expires,
+	}
+}
+
+// sweepExpiredLocked 清理一次全部已过期缓存项（调用方须持有 s.mu）。
+func (s *VaultTransitStorer) sweepExpiredLocked() {
+	now := time.Now()
+	for k, e := range s.cache {
+		if !now.Before(e.expires) {
+			delete(s.cache, k)
+		}
+	}
 }
 
 // aadContext 返回 AAD context 字段值 = base64(AADPath)（可读 AAD、调试友好）。aadPath
