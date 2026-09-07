@@ -22,6 +22,12 @@ import (
 // nonce 长度 / 换 AEAD）无法靠字节自描述区分，需整体迁移既有密文文件（重加密为
 // 新格式）；未来引入 v2 时可在密文最前加 1B 格式 tag 做显式版本标识，本实现刻意
 // 保持最小信封（凭据文件由 master key 域隔离 + 原子写管理生命周期）。
+//
+// AAD 说明（建议 C）：当前**无 AAD**（gcm.Seal/Open 的 additionalData 传 nil）——单一
+// 全局 credentials.json + 单一 master key 下安全（密文不可搬移别处仍被同一 key 解开，
+// 因为目标路径本就是同一文件）。未来若多文件共用同一 master key，应以 path/owner 作
+// AAD（`gcm.Seal(nil, nonce, plaintext, []byte(path))`）绑定密文到文件身份，防跨文件
+// 密文搬移/替换；本实现刻意保持最小接口，AAD 由调用方在需要时经加密上下文引入。
 func EncryptWithKey(key, plaintext []byte) ([]byte, error) {
 	if len(key) != 32 {
 		return nil, ErrInvalidMasterKey

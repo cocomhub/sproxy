@@ -137,11 +137,20 @@ func TestEncryptingStorer_LoadTamper(t *testing.T) {
 		t.Fatal(err)
 	}
 	disk[len(disk)/2] ^= 0x01 // 翻转中间一个密文字节
-	if err := os.WriteFile(path, disk, 0o600); err != nil {
-		t.Fatal(err)
+	if werr := os.WriteFile(path, disk, 0o600); werr != nil {
+		t.Fatal(werr)
 	}
-	if _, err := st.Load(); err == nil {
+	_, err = st.Load()
+	if err == nil {
 		t.Fatal("篡改密文后 Load 应返回 error（GCM auth 失败）")
+	}
+	// M-1：篡改密文（首字节随机，非明文）必须走「密文被篡改 / key 错」分支，不得被
+	// looksLikePlaintextJSON 误判为明文未迁移（「未迁移」是明文嗅探分支的唯一提示 token）。
+	if strings.Contains(err.Error(), "未迁移") {
+		t.Fatalf("篡改密文不应提示明文未迁移: %v", err)
+	}
+	if !strings.Contains(err.Error(), "密文被篡改") {
+		t.Fatalf("篡改密文应提示密文被篡改: %v", err)
 	}
 }
 
@@ -155,8 +164,18 @@ func TestEncryptingStorer_LoadWrongMasterKey(t *testing.T) {
 		t.Fatalf("Save(A): %v", err)
 	}
 	stB := NewEncryptingStorer(path, AESGCMStorer{Key: bytes.Repeat([]byte{0x02}, 32)})
-	if _, err := stB.Load(); err == nil {
+	_, err := stB.Load()
+	if err == nil {
 		t.Fatal("用错误 master key Load 应返回 error")
+	}
+	// M-1：key 错时磁盘为真密文（首字节随机），须走「密文被篡改 / key 错」分支，
+	// 不得被 looksLikePlaintextJSON 误判为明文未迁移（「未迁移」是明文嗅探分支的唯一
+	// 提示 token）。
+	if strings.Contains(err.Error(), "未迁移") {
+		t.Fatalf("key 错不应提示明文未迁移: %v", err)
+	}
+	if !strings.Contains(err.Error(), "master key 不匹配") {
+		t.Fatalf("key 错应提示 master key 不匹配: %v", err)
 	}
 }
 
@@ -197,8 +216,14 @@ func TestEncryptingStorer_LoadPlaintextFailsClosed(t *testing.T) {
 	}
 	// 换加密 storer Load → 明文文件被当作密文解密必失败。
 	encSt := NewEncryptingStorer(path, AESGCMStorer{Key: bytes.Repeat([]byte{0x21}, 32)})
-	if _, err := encSt.Load(); err == nil {
+	_, err := encSt.Load()
+	if err == nil {
 		t.Fatal("加密 storer Load 历史明文文件应返回 error（fail-closed）")
+	}
+	// M-1：历史明文 JSON（'{' 开头 + 含 "keys"）必须走 looksLikePlaintextJSON 嗅探分支，
+	// 给出「明文 JSON 未迁移」定向提示（「未迁移」是明文嗅探分支的唯一提示 token）。
+	if !strings.Contains(err.Error(), "未迁移") {
+		t.Fatalf("明文文件 Load 应提示明文未迁移: %v", err)
 	}
 }
 
@@ -502,5 +527,115 @@ func TestAESGCMStorer_ImplementsSecureStorer(t *testing.T) {
 	}
 	if !bytes.Equal(pt, payload) {
 		t.Fatalf("AESGCMStorer 往返不一致")
+	}
+}
+
+// TestLooksLikePlaintextJSON 表驱动锁定明文嗅探判定（M-1，encrypting_storer.go
+// looksLikePlaintextJSON）——该分支决定 Load 解密失败时给「明文未迁移」定向提示还是
+// 笼统「密文被篡改/key 错」，改坏恒返 false 会让 LoadPlaintextFailsClosed 误判。
+func TestLooksLikePlaintextJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want bool
+	}{
+		{
+			name: "明文JSON首{含keys",
+			data: []byte("{\n  \"version\": 1,\n  \"keys\": []\n}"),
+			want: true,
+		},
+		{
+			name: "明文JSON含keys无尾换行",
+			data: []byte(`{"version":1,"keys":[{"ak":"x"}]}`),
+			want: true,
+		},
+		{
+			name: "首{但不含keys字段",
+			data: []byte(`{"version":1,"entries":[]}`),
+			want: false,
+		},
+		{
+			name: "随机密文字节首非{",
+			data: bytes.Repeat([]byte{0xa3}, 200),
+			want: false,
+		},
+		{
+			name: "随机密文恰首{但无keys",
+			data: append([]byte{'{'}, bytes.Repeat([]byte{0x5c}, 64)...),
+			want: false,
+		},
+		{
+			name: "空输入",
+			data: nil,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := looksLikePlaintextJSON(tc.data); got != tc.want {
+				t.Fatalf("looksLikePlaintextJSON = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// recordingSecureStorer 是 SecureStorer 的计数探针（M-3）：委托 Encrypt/Decrypt 时计数，
+// 用于锁定 EncryptingStorer 的委托契约——加密态 Save 恰 Encrypt=1、Load 恰 Decrypt=1，
+// 明文态（secure=nil）不委托任何 SecureStorer。
+type recordingSecureStorer struct {
+	encryptCalls int
+	decryptCalls int
+}
+
+func (r *recordingSecureStorer) Encrypt(p []byte) ([]byte, error) {
+	r.encryptCalls++
+	return append([]byte(nil), p...), nil
+}
+
+func (r *recordingSecureStorer) Decrypt(c []byte) ([]byte, error) {
+	r.decryptCalls++
+	return append([]byte(nil), c...), nil
+}
+
+// TestEncryptingStorer_DelegateCountContract 验证 EncryptingStorer 对 SecureStorer 的委托
+// 计数契约（计划任务 2 步骤 1「mock SecureStorer 断言 Save 前调 Encrypt」的落地）：
+//   - 加密态 Save 恰好 Encrypt=1（不重复加密）、Load 恰好 Decrypt=1（不重复解密）；
+//   - 明文态（secure=nil）不经 SecureStorer——磁盘保持明文 JSON 即证明未调用 Encrypt。
+func TestEncryptingStorer_DelegateCountContract(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tenant", "meta", "credentials.json")
+	rec := &recordingSecureStorer{}
+	st := NewEncryptingStorer(path, rec)
+
+	if err := st.Save(sampleEncryptingKeys()); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if rec.encryptCalls != 1 || rec.decryptCalls != 0 {
+		t.Fatalf("加密态 Save 应恰 Encrypt=1 Decrypt=0, got Encrypt=%d Decrypt=%d", rec.encryptCalls, rec.decryptCalls)
+	}
+	if _, err := st.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if rec.encryptCalls != 1 || rec.decryptCalls != 1 {
+		t.Fatalf("加密态 Load 应恰 Encrypt=1 Decrypt=1, got Encrypt=%d Decrypt=%d", rec.encryptCalls, rec.decryptCalls)
+	}
+
+	// 明文态（secure=nil）：不经 SecureStorer（Save 直写明文 JSON、Load 直读）——
+	// secure 为 nil 无计数对象，以「磁盘保持明文 JSON（含 \"keys\"）」作为未调用 Encrypt
+	// 的可观察证据（等价 Encrypt/Decrypt 调用 = 0）。
+	plainPath := filepath.Join(dir, "plain", "credentials.json")
+	plainSt := NewEncryptingStorer(plainPath, nil)
+	if err := plainSt.Save(sampleEncryptingKeys()); err != nil {
+		t.Fatalf("plain Save: %v", err)
+	}
+	disk, err := os.ReadFile(plainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(disk, []byte(`"keys"`)) {
+		t.Fatalf("明文态磁盘应保持明文 JSON（未调用 Encrypt）")
+	}
+	if _, err := plainSt.Load(); err != nil {
+		t.Fatalf("plain Load: %v", err)
 	}
 }
