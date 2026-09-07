@@ -88,7 +88,9 @@ tls:
 #     #     -p 8200:8200 --name vault hashicorp/vault:latest
 #     #   export VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=sproxy-dev
 #     #   vault secrets enable transit
-#     #   vault write -f transit/keys/sproxy
+#     #   vault write transit/keys/sproxy derived=true
+#     #   # 注意：AAD context 绑定（credentials.json 文件身份）仅对 derived=true 的 transit key
+#     #   # 生效——非 derived key 会忽略 context，密文可被搬到任意文件解开（防搬移失效）。
 
 # 多用户 API 密钥（Bearer，与 SproxySig 互斥且优先；可选）。
 # 提供 read/write 权限分级，适合多用户 HTTP 文件访问；但不支持隧道/hub——
