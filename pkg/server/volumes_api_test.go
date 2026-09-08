@@ -23,6 +23,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // volumesAPIWrap 绑定卷 API + 配套文件操作 handler 到固定 actor（volSet 生效）。
@@ -327,6 +329,60 @@ func TestVolumesAPI_LocalMuxRegistered(t *testing.T) {
 	lh.ServeHTTP(w2, httptest.NewRequest(http.MethodPost, "/api/volumes/move", nil))
 	if w2.Code != http.StatusBadRequest {
 		t.Fatalf("localMux POST /api/volumes/move status=%d want 400（body=%s）", w2.Code, w2.Body.String())
+	}
+}
+
+// TestVolumesAPI_Move_ConcurrentDeleteIsNotExistReleasesOnce 回归 PR-D F1：并发 delete（不持
+// uploadingFiles 锁）在 move stat 与 Remove 之间已删源 → move Remove 返 IsNotExist——该分支
+// **只 commit to 侧**、绝不再 from 侧释放（并发 delete 已释放过 owner 全局 + from 卷池，再释放
+// 即欠计）。用 removeMovedSource seam 确定性模拟 IsNotExist（真实并发时序跨平台不可确定）；
+// 预置「并发 delete 已完成 from 侧释放」的账本态（owner 全局 + main 卷池各 -S），断言 move 后
+// 不因第二次 IsNotExist 再减（owner 全局 = S+T、main 池 = T、disk2 池 = S）。
+func TestVolumesAPI_Move_ConcurrentDeleteIsNotExistReleasesOnce(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	volumes := []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
+		{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
+	}
+	url, h, _ := newVolumesAPIServer(t, "alice", volumes, nil)
+
+	bodyA := []byte("AAAAAAAAAA") // 10B（将移动）
+	bodyB := []byte("BBBBBBB")    // 7B（留在 main，作池非零基线以暴露双释放）
+	volumeUpload(t, url, "a.txt", bodyA, "")
+	volumeUpload(t, url, "b.txt", bodyB, "")
+	sA, sB := int64(len(bodyA)), int64(len(bodyB))
+	if got := h.quotaBucketFor("alice", "user").Usage(); got != sA+sB {
+		t.Fatalf("初始 owner user Scope=%d want %d", got, sA+sB)
+	}
+	if got := h.volSet.Pool("main").Usage(); got != sA+sB {
+		t.Fatalf("初始 main 池=%d want %d", got, sA+sB)
+	}
+
+	// 模拟并发 delete 已完成 a.txt 的 from 侧释放（owner 全局 + main 卷池各 -S）；源文件仍物理
+	// 在盘使 move 的 stat 通过、复制成功。Remove seam 返回 IsNotExist 模拟「delete 在 stat 与
+	// Remove 间删源」。
+	h.quotaBucketFor("alice", "user").ReleaseUsage(sA)
+	h.volSet.Pool("main").ReleaseCommitted(sA)
+	orig := removeMovedSource
+	removeMovedSource = func(*storage.Root, string) error { return os.ErrNotExist }
+	t.Cleanup(func() { removeMovedSource = orig })
+
+	status, respBody := moveVolume(t, url, "main", "disk2", "a.txt")
+	if status != http.StatusOK {
+		t.Fatalf("IsNotExist 分支应回成功（数据已落目标卷）, got %d %s", status, respBody)
+	}
+
+	// 关键断言：owner 全局与 main 卷池只释放一次——a.txt 的 from 释放已由并发 delete 完成，
+	// IsNotExist 分支不得再 scope.ReleaseUsage / fromPool.ReleaseCommitted（预修复双释放 → owner
+	// 欠计 B、main 池把 B 也扣掉/钳 0）。
+	if got := h.quotaBucketFor("alice", "user").Usage(); got != sA+sB {
+		t.Fatalf("owner user Scope=%d want %d（a.txt 落 disk2 + b.txt 留 main；IsNotExist 双释放会欠计）", got, sA+sB)
+	}
+	if got := h.volSet.Pool("main").Usage(); got != sB {
+		t.Fatalf("main 池=%d want %d（只剩 b.txt；IsNotExist 再释放会连 b.txt 也扣掉）", got, sB)
+	}
+	if got := h.volSet.Pool("disk2").Usage(); got != sA {
+		t.Fatalf("disk2 池=%d want %d（a.txt 已落 disk2）", got, sA)
 	}
 }
 

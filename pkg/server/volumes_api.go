@@ -70,6 +70,14 @@ func (h *Handlers) listVolumesHandler(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, volumesListResponse{Volumes: out}, http.StatusOK)
 }
 
+// removeMovedSource 是 move 删源的可替换测试 seam：默认直接委托 storage.Root.Remove。
+// 测试可临时替换以确定性模拟「并发 delete 在 move stat 与 Remove 之间已删源」的 IsNotExist
+// 竞态（真实并发时序跨平台不可确定——Windows 上源文件在 move 复制期间被打开，并发 Remove
+// 通常共享冲突失败而非 IsNotExist）。生产路径不替换。
+var removeMovedSource = func(root *storage.Root, rel string) error {
+	return root.Remove(rel)
+}
+
 // moveVolumeHandler 处理 POST /api/volumes/move（参数与语义见文件头注释）。
 func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 	filename := r.URL.Query().Get("filename")
@@ -243,10 +251,30 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 删源：成功 → 双 release（from 侧 committed）；IsNotExist = 并发删除已把源移走且已释放
-	// from 账本（目标已持数据）→ 只 commit to 侧；其它错误 → 回滚 to 侧（删目标 + 释放预留）。
-	rmErr := fromRoot.Remove(rel)
-	if rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+	// 删源三分支：
+	//   - 成功（nil）→ 双 commit（to 侧预留对账为实际占用 written）+ from 侧释放（owner 全局
+	//     + from 卷池）——本函数正常移动路径；
+	//   - IsNotExist = 并发 delete（不持 uploadingFiles 锁）已先删源并**已释放 from 侧账本**
+	//     （目标卷已持数据）→ **只 commit to 侧**、立即 return，绝不 from 侧再释放（否则 owner
+	//     全局 + from 卷池各欠计 S，PR-D F1）；回包按成功（源消失但数据已落目标卷，移动语义完成）；
+	//   - 其它错误 → 回滚 to 侧（删目标 + 释放预留），源保留。
+	rmErr := removeMovedSource(fromRoot, rel)
+	if rmErr != nil {
+		if errors.Is(rmErr, os.ErrNotExist) {
+			if scopeRes != nil {
+				scopeRes.Commit(written)
+			}
+			if poolRes != nil {
+				poolRes.Commit(written)
+			}
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: "volume_move", ObjectType: "file", Object: remotePath,
+				Result: AuditResultSuccess, Detail: "源已被并发删除，目标卷已持数据（from 侧账本由并发 delete 释放）",
+			})
+			h.logger.Info("跨卷移动完成：源已被并发删除", "file_name", remotePath, "from", fromVol, "to", toVol)
+			sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("文件已移动: %s (%s → %s)", remotePath, fromVol, toVol)}, http.StatusOK)
+			return
+		}
 		_ = toTnt.Root().Remove(rel)
 		if scopeRes != nil {
 			scopeRes.Release()
