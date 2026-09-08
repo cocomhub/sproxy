@@ -91,6 +91,14 @@ func volumeUploadCore(baseURL, filename string, body []byte, vol string) (int, h
 	return resp.StatusCode, resp.Header, respBody, nil
 }
 
+// newTestUploadServer 绑定 actor 的 h.upload mux 并启动 httptest server，返回服务 URL。
+func newTestUploadServer(t *testing.T, h *Handlers, actor string) string {
+	t.Helper()
+	ts := httptest.NewServer(actorUploadMux(h, actor))
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
 // volumeUpload 执行带可选 volume 表单字段的 multipart 上传（恒带 X-File-Checksum），
 // 返回状态码、响应头与 body。传输错误触发 t.Fatalf。
 func volumeUpload(t *testing.T, baseURL, filename string, body []byte, vol string) (int, http.Header, []byte) {
@@ -394,6 +402,87 @@ func TestUpload_AutoSkipsACLDeniedVolume(t *testing.T) {
 	}
 	if diskFileExists(t, dirs[1], "alice", "b.txt") {
 		t.Fatal("auto 不得写入 ACL 排他卷 priv")
+	}
+}
+
+// seedVolumeFile 在指定卷根下直接落一个 owner 文件（模拟 ACL 收紧前写入的遗留文件）。
+func seedVolumeFile(t *testing.T, volRoot, owner, rel string, content []byte) {
+	t.Helper()
+	p := filepath.Join(volRoot, owner, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatalf("seed mkdir: %v", err)
+	}
+	if err := os.WriteFile(p, content, 0o644); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+}
+
+// TestUpload_AutoDupCheckHomeAware_DefaultACLExcludes F-1 承重：auto dup-check 必须 home-aware。
+// 形态：默认卷 allow:[alice] 排除 bob + bob 在默认卷留有遗留文件（ACL 收紧前）。
+//   - Part A：alice 默认卷覆盖写版本化快路径不受影响（仍 main + version）。
+//   - Part B（versioning on）：bob 同 rel 异 checksum → 200 落 disk2（视图卷），
+//     版本**不得泄漏写默认卷 version/**，默认卷遗留不触发版本化。
+//   - Part C（versioning off）：bob 同 rel 异 checksum → 200 新文件落 disk2（非假 409）。
+func TestUpload_AutoDupCheckHomeAware_DefaultACLExcludes(t *testing.T) {
+	build := func(t *testing.T, versioning bool) (*Handlers, []string, string, string) {
+		t.Helper()
+		dirs := []string{t.TempDir(), t.TempDir()}
+		cfg := Default()
+		cfg.StorageRoot = dirs[0]
+		cfg.Placement = "prefer-default"
+		cfg.Versioning.Enabled = versioning
+		cfg.Volumes = []VolumeConfig{
+			{Name: "main", Root: dirs[0], VolCapacity: 1 << 20,
+				ACL: &VolumeACLConfig{Mode: VolumeACLAllow, Owners: []string{"alice"}}},
+			{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("cfg.Validate: %v", err)
+		}
+		h := buildVolSetHandlers(t, cfg)
+		seedVolumeFile(t, dirs[0], "bob", "user/a.txt", []byte("LEFTOVER-OLD"))
+		return h, dirs, newTestUploadServer(t, h, "alice"), newTestUploadServer(t, h, "bob")
+	}
+
+	// ---- Part A + Part B（versioning on，同一 server）----
+	_, dirsB, urlAlice, urlBob := build(t, true)
+
+	// alice 快路径：默认卷（allow:[alice]）覆盖写版本化仍生效（stay-home main）。
+	assertUploadVolume(t, urlAlice, "a.txt", []byte("ALICE-ONE"), "", "main", http.StatusOK)
+	assertUploadVolume(t, urlAlice, "a.txt", []byte("ALICE-TWO-2"), "", "main", http.StatusOK)
+	if entries, err := os.ReadDir(filepath.Join(dirsB[0], "alice", "version")); err != nil || len(entries) == 0 {
+		t.Fatalf("alice 默认卷覆盖写应生成版本文件（version 目录 err=%v entries=%d）", err, len(entries))
+	}
+
+	// bob 同 rel 异 checksum（versioning on）：主文件 200 落 disk2（视图卷），
+	// 不得触发默认卷遗留的版本化覆盖写（版本泄漏到无权卷）。
+	status, hdr, respBody := volumeUpload(t, urlBob, "a.txt", []byte("BOB-NEW-123"), "")
+	if status != http.StatusOK {
+		t.Fatalf("bob 上传 status=%d want 200（不得被默认卷遗留误伤/泄漏）, body=%s", status, respBody)
+	}
+	if got := hdr.Get("X-Volume"); got != "disk2" {
+		t.Fatalf("bob X-Volume=%q want disk2（默认卷被 ACL 排除，唯一视图卷）", got)
+	}
+	if !diskFileExists(t, dirsB[1], "bob", "a.txt") {
+		t.Fatal("bob 主文件应落 disk2")
+	}
+	// 无版本泄漏写默认卷 version/（bob 无权用默认卷）。
+	if _, err := os.Stat(filepath.Join(dirsB[0], "bob", "version")); err == nil {
+		t.Fatal("bob 版本不得泄漏写默认卷 version/（AD-6）")
+	}
+	// 默认卷遗留原样保留（未被当作 home 覆盖）。
+	if got, _ := os.ReadFile(filepath.Join(dirsB[0], "bob", "user", "a.txt")); string(got) != "LEFTOVER-OLD" {
+		t.Fatalf("默认卷 bob 遗留应保留原内容, got %q", got)
+	}
+
+	// ---- Part C（versioning off，独立 server）----
+	_, _, _, urlBobC := build(t, false)
+	statusC, hdrC, respBodyC := volumeUpload(t, urlBobC, "a.txt", []byte("BOB-NEW-456"), "")
+	if statusC != http.StatusOK {
+		t.Fatalf("versioning off bob 上传 status=%d want 200（不得假 409）, body=%s", statusC, respBodyC)
+	}
+	if got := hdrC.Get("X-Volume"); got != "disk2" {
+		t.Fatalf("versioning off bob X-Volume=%q want disk2", got)
 	}
 }
 

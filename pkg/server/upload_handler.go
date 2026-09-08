@@ -133,38 +133,37 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 	explicitVol := r.FormValue("volume")
 
-	// 重复检测与版本管理（自动路由）：先在视图内定位 rel 的 home 卷（写前定位，F1-A/F1-B），
-	// 对 home 卷根做幂等/冲突/版本检查（幂等同 checksum 重传在容量/配额检查前直接 200，不因
-	// 卷满误拒）。home 存在（默认卷或非默认卷都行）→ 覆盖写必须 stay-home 到 home 卷（容量
-	// 路由只用于新文件，否则同 rel 跨卷双份 + owner 双计）。显式 volume 不做此检查：其语义是
-	// 新文件定位，同名已存在（含同 checksum）一律由 routeUpload 唯一性 409。
+	// 重复检测与版本管理（自动路由）：先做「写前视图定位」确认 rel 的真实 home 卷（F1-A/B），
+	// **只在 home 命中时**对其根做幂等/冲突/版本检查——幂等同 checksum 重传在容量/配额检查前
+	// 直接 200（不因卷满误拒）；命中 → 覆盖写必须 stay-home 到 home 卷（容量路由只用于新文件，
+	// 否则同 rel 跨卷双份 + owner 双计）。显式 volume 不做此检查：其语义是新文件定位，同名已
+	// 存在（含同 checksum）一律由 routeUpload 唯一性 409。
+	//
+	// F-1（AD-6 写侧闭合）：home 以 owner 卷视图为界（locateOwnerFile 只搜 AllowedVolumes）。
+	// locate miss（rel 不在 owner 视图任何卷，含「默认卷被 ACL 排除但仍留 owner 遗留」）→
+	// 该 rel 不属于 owner 逻辑树，**跳过 dup-check 视为新文件**交容量路由——不得对无权卷的
+	// 遗留做版本化覆盖写（泄漏到无权卷 version/）或假 409/假幂等（误伤新写入）。
 	forceHomeVol := ""
 	if explicitVol == "" {
-		homeTnt := h.tenantFor(owner) // 默认租户兜底（新文件 / 唯一根）
-		if homeTnt == nil || homeTnt.Root() == nil {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-			return
-		}
-		// 幂等 200 / 版本备份分支在 routeUpload 之前回包，X-Volume 在此先置 home 卷名
-		// （命中即真实所在卷）；route 决出其它卷时下方 Set 覆写（新文件容量路由场景）。
-		if loc, found := h.locateOwnerFile(owner, rel); found && loc != nil && loc.tenant != nil {
+		loc, found := h.locateOwnerFile(owner, rel)
+		if found && loc != nil && loc.tenant != nil {
 			forceHomeVol = loc.volumeName
-			homeTnt = loc.tenant
 			if loc.volumeName != "" {
 				w.Header().Set(headerVolume, loc.volumeName)
 			}
-		} else if h.volSet != nil && h.volSet.defaultName != "" {
-			w.Header().Set(headerVolume, h.volSet.defaultName)
+			handled, existed := h.handleDuplicateFile(w, r, loc.tenant, rel, expectedChecksum, remotePath)
+			if handled {
+				return // 幂等 200 / 冲突 409 已回包
+			}
+			// existed=true = home 卷命中且继续（版本化覆盖写）→ stay-home（forceHomeVol 保留，
+			// 容量不足 routeUpload 直接 507 不换卷）。existed=false 是 locate 命中与 dup-check
+			// 间 TOCTOU 的防御（理论竞态）→ 交容量路由。
+			if !existed {
+				forceHomeVol = ""
+			}
 		}
-		handled, existed := h.handleDuplicateFile(w, r, homeTnt, rel, expectedChecksum, remotePath)
-		if handled {
-			return // 幂等 200 / 冲突 409 已回包
-		}
-		// existed=true = home 卷命中且继续（版本化覆盖写）→ 覆盖写必须 stay-home（F1-A/B）。
-		// home 卷容量不足时 routeUpload 直接 507 不换卷（forceHomeVol 语义）。
-		if !existed {
-			forceHomeVol = "" // 新文件：交容量路由
-		}
+		// locate miss → 新文件：交容量路由（无 dup-check；volSet==nil 唯一根下 stat miss
+		// 等价旧行为——handleDuplicateFile 在 miss 时本就返回 false）。
 	}
 
 	// 卷路由 + 双账本预留（T4/T5）：routeUpload 按 ACL/placement 选目标卷，在 owner 全局
