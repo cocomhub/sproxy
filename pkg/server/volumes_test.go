@@ -304,6 +304,35 @@ func TestReconcileVolumePool_SingleVolume(t *testing.T) {
 	rr.Release()
 }
 
+// TestReconcileVolumePool_NestedDirKeyNoDoubleCount 回归 Important-1：StorageManager 真实扫描会
+// 对嵌套 user 文件同时产出功能桶键（user）与子目录键（user/videos），adjustVolumePool 只按功能桶
+// 顶层键求和——嵌套文件不双计，卷池 Usage == 物理字节。
+func TestReconcileVolumePool_NestedDirKeyNoDoubleCount(t *testing.T) {
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.MaxStorageBytes = 10000
+	h := buildVolSetHandlers(t, cfg)
+
+	// 真实扫描形态：alice/user/a.txt(100) + alice/user/videos/b.mkv(200) + cloud/t1/c.bin(50)
+	// → tenantBuckets={alice:{user:300, user/videos:200, cloud:50}}（user 已含嵌套文件字节）。
+	tenantBuckets := map[string]map[string]int64{
+		"alice": {"user": 300, "user/videos": 200, "cloud": 50},
+	}
+	h.reconcileVolumePool("default", tenantBuckets)
+
+	// 卷池 = 物理字节 350（300+50），而非 550（300+200+50 嵌套双计）。
+	if got := h.volSet.Pool("default").Usage(); got != 350 {
+		t.Fatalf("default 卷池 Usage()=%d want 350（嵌套 user/videos 只计一次，不双计）", got)
+	}
+	// owner 全局 Scope 同样收敛到物理字节（reconcileQuotaScopes 先深后浅已消重）。
+	if got := h.quotaFor("alice").Usage(); got != 350 {
+		t.Fatalf("alice 全局 Scope Usage()=%d want 350", got)
+	}
+	if got := h.quotaBucketFor("alice", "user").Usage(); got != 300 {
+		t.Fatalf("alice user 桶 Usage()=%d want 300", got)
+	}
+}
+
 // TestReconcileVolumes_VolumeTypeSmoke 确保 volumeSet 与 pkg/volume 域类型打通（装配产物可直接
 // 作为 volume.AllowedVolumes / OrderCandidates 输入——T4 路由的输入形状）。
 func TestReconcileVolumes_VolumeTypeSmoke(t *testing.T) {

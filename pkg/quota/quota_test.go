@@ -50,11 +50,15 @@ func TestPool_Adjust(t *testing.T) {
 	if got := pool.Usage(); got != 5 {
 		t.Fatalf("Usage=%d want 5", got)
 	}
-	// 防下溢归零：从 5 下调到 0 再负向 diff → 归 0 不反负。
-	pool.Adjust(5, 100)
-	pool.Adjust(100, 5)
-	if got := pool.Usage(); got != 5 {
-		t.Fatalf("Usage=%d want 5", got)
+	// 防下溢归零（负向穿零分支）：先把 committed 归 0，再施加负向 diff（Adjust(0,-5) diff=-5）
+	// → committed 下溢被 adjustUp 钳制为 0，绝不反负。
+	pool.Adjust(5, 0)
+	if got := pool.Usage(); got != 0 {
+		t.Fatalf("归零后 Usage=%d want 0", got)
+	}
+	pool.Adjust(0, -5)
+	if got := pool.Usage(); got != 0 {
+		t.Fatalf("负向穿零应归 0 不反负, got %d", got)
 	}
 }
 

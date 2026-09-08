@@ -142,7 +142,8 @@ type VolumeConfig struct {
 // Config 顶层增字段：
 // Placement 卷路由策略 prefer-default|spread（缺省 prefer-default）
 Placement string `yaml:"placement" mapstructure:"placement"`
-// Volumes 卷列表；缺省（nil/空）由 Normalize 合成单默认卷（name=default, root=StorageRoot）。
+// Volumes 卷列表；缺省由 Default 烘焙单默认卷（name=default, root=defaultStorageRoot 占位，
+// 装配层 F1 裁决为 cfg.StorageRoot）；零值 Config 由 SetDefaults/Validate 兜底合成。契约 Volumes 恒 ≥1。
 Volumes  []VolumeConfig `yaml:"volumes" mapstructure:"volumes"`
 ```
 

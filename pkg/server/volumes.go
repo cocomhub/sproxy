@@ -59,9 +59,10 @@ func (vs *volumeSet) Default() volume.Volume {
 	return volume.DefaultVolume(vs.volumes)
 }
 
-// All 返回全部装配卷（声明序，默认卷在 [0]）。
+// All 返回全部装配卷的**副本**（声明序，默认卷在 [0]）。返回副本防调用方改写内部底层数组
+// 造成别名污染（volume.Volume 是值类型，切片头复制即隔离；append 到副本不影响 vs.volumes）。
 func (vs *volumeSet) All() []volume.Volume {
-	return vs.volumes
+	return append([]volume.Volume(nil), vs.volumes...)
 }
 
 // ByName 按卷名查找装配卷描述。
@@ -118,6 +119,13 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*volumeSet, error) {
 		rootDir := vc.Root
 		if i == 0 {
 			rootDir = resolveDefaultVolumeRoot(cfg)
+			// F1 诊断日志：首卷 root 为占位 defaultStorageRoot 被裁决覆写为 cfg.StorageRoot 时
+			// 打 Warn——「配置写 ./storage、实际落 /data」可诊断（config 层 M-4 保留显式占位值，
+			// 装配层视同未配，语义裂口见 resolveDefaultVolumeRoot 注释）。
+			if rootDir != vc.Root {
+				log.Warn("默认卷根 F1 裁决：Volumes[0].Root 为占位形态，改用 cfg.StorageRoot 建默认卷根",
+					"volume", vc.Name, "placeholder_root", vc.Root, "storage_root", cfg.StorageRoot, "resolved_root", rootDir)
+			}
 		}
 		if err := os.MkdirAll(rootDir, 0o755); err != nil {
 			_ = vs.Close()

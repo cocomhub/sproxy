@@ -683,11 +683,11 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 初始化 StorageManager 和 CloudDownloadManager。
 	// P4：StorageManager 保留全局账本（sync/旧装配兼容）；启动扫描经 SetReconciler 按租户桶
 	// 归集校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。云任务配额走 cloud 桶子 Scope。
-	// 多卷（任务 3）：StorageManager 扫描目录 = 默认卷根（resolveDefaultVolumeRoot；单卷形态
-	// = cfg.StorageRoot，零回归）；reconcile 双目标——owner 全局 Scope（reconcileQuotaScopes）
-	// + 默认卷容量池校准（reconcileVolumePool）。多卷逐卷扫描校准框架见 reconcileVolumes
-	// （T4 与写路径一并接线）。
-	sm := NewStorageManager(resolveDefaultVolumeRoot(cfg), cfg.MaxStorageBytes, nil, log.With("component", "storage"))
+	// 多卷（任务 3）：StorageManager 扫描目录 = 默认卷根（vs.Default().RootDir——单一事实源，
+	// 与 assembleVolumes 的 i==0 裁决共用同一装配产物，防两处裁决漂移；单卷形态 = cfg.StorageRoot，
+	// 零回归）；reconcile 双目标——owner 全局 Scope（reconcileQuotaScopes）+ 默认卷容量池校准
+	// （reconcileVolumePool）。多卷逐卷扫描校准框架见 reconcileVolumes（T4 与写路径一并接线）。
+	sm := NewStorageManager(vs.Default().RootDir, cfg.MaxStorageBytes, nil, log.With("component", "storage"))
 	defaultVolName := vs.defaultName
 	sm.SetReconciler(func(tenantBuckets map[string]map[string]int64) {
 		h.reconcileVolumePool(defaultVolName, tenantBuckets)

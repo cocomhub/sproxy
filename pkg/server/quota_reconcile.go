@@ -123,7 +123,16 @@ func parentKeyOf(key string) string {
 	return ""
 }
 
-// adjustVolumePool 把卷容量池 committed 收敛到该卷全部租户桶磁盘字节之和。
+// adjustVolumePool 把卷容量池 committed 收敛到该卷磁盘物理占用：逐租户累加**功能桶顶层键**
+// （quotaBucketNames：user/cloud/archive/chunk/version/meta）对应值，忽略 bucket_limits 子目录键
+// （如 user/videos）与旧布局平铺键。
+//
+// 为什么只按功能桶键求和：StorageManager 扫描对嵌套 user 文件既累加功能桶键（user）又累加
+// 子目录键（user/videos/…，storage_manager.go bucketDirKey）；reconcileQuotaScopes 用「先深后浅 +
+// 串联 diff」消重，但卷池没有段树子层，若直接全键求和会把嵌套文件在 user 与 user/videos 两处各计
+// 一次（双计 → 卷池虚假占满，T4 spread/容量上限误判）。功能桶键本身已含全部嵌套文件字节，故仅
+// 累加功能桶键即得物理占用。
+//
 // 卷池在途预留 >0 时跳过（与 reconcileQuotaScopes 的双计保护同语义：磁盘 partial 已计入
 // reserved，此时校准 committed 会造成双计）。卷池不存在（volSet nil / 未知卷名）时安全跳过。
 // 卷池无子层（每卷独立根池，未挂 owner Scope 子层），故池 Usage() 即池自身 committed。
@@ -137,8 +146,8 @@ func (h *Handlers) adjustVolumePool(name string, tenantBuckets map[string]map[st
 	}
 	var total int64
 	for _, buckets := range tenantBuckets {
-		for _, size := range buckets {
-			total += size
+		for _, b := range quotaBucketNames {
+			total += buckets[b]
 		}
 	}
 	pool.Adjust(pool.Usage(), total)
