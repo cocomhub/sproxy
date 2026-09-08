@@ -1490,8 +1490,8 @@ func (h *Handlers) webRedirect(w http.ResponseWriter, r *http.Request) {
 }
 
 // cleanupUploadingFilesLoop 定期清理 uploadingFiles 中已过期（不存在对应 session）的条目。
-// 普通 upload 条目 value 为 "upload"（无 session），直接跳过。
-// 作为 goroutine 在 RegisterRoutes 中启动，由 Close() 通过关闭 uploadingStop 停止。
+// 作为 goroutine 在 RegisterRoutes 中启动，由 Close() 通过关闭 uploadingStop 停止；单次清理
+// 委托 cleanupUploadingFilesPass（独立可测）。
 func (h *Handlers) cleanupUploadingFilesLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
@@ -1500,31 +1500,38 @@ func (h *Handlers) cleanupUploadingFilesLoop() {
 		case <-h.uploadingStop:
 			return
 		case <-ticker.C:
-			h.uploadingFiles.Range(func(key, value any) bool {
-				filename, ok := key.(string)
-				if !ok {
-					return true
-				}
-				uploadID, ok := value.(string)
-				if !ok {
-					return true
-				}
-				// 普通 upload 条目 value 为 "upload"，无对应 session，跳过
-				if uploadID == "upload" {
-					return true
-				}
-				// 分块上传条目 value 为 upload_id（裸 id）。uploadingFiles key 为
-				// <tnt.ID>\x00<rel>（chunked init 与 upload handler 同格式），从 key 解析
-				// 租户名取 per-tenant store 判断会话是否已不存在（则清理过期条目）。
-				owner := ""
-				if before, _, ok0 := strings.Cut(filename, "\x00"); ok0 {
-					owner = before
-				}
-				if us := h.uploadStoreFor(owner); us != nil && us.GetSession(uploadID) == nil {
-					h.uploadingFiles.Delete(filename)
-				}
-				return true
-			})
+			h.cleanupUploadingFilesPass()
 		}
 	}
+}
+
+// cleanupUploadingFilesPass 执行一轮 uploadingFiles 过期清理。
+// 普通 upload 条目 value 为 "upload"、move 锁条目 value 为 "move"——两者都无对应 session，
+// 直接跳过（若把 "move" 当 upload_id 查 GetSession("move")==nil 会误删锁条目：超 10 分钟的
+// 长 move 持锁被清理 → 同 rel 并发 move 越过锁，T6c 修复轮建议 1）。
+func (h *Handlers) cleanupUploadingFilesPass() {
+	h.uploadingFiles.Range(func(key, value any) bool {
+		filename, ok := key.(string)
+		if !ok {
+			return true
+		}
+		uploadID, ok := value.(string)
+		if !ok {
+			return true
+		}
+		if uploadID == "upload" || uploadID == "move" {
+			return true
+		}
+		// 分块上传条目 value 为 upload_id（裸 id）。uploadingFiles key 为
+		// <tnt.ID>\x00<rel>（chunked init 与 upload handler 同格式），从 key 解析
+		// 租户名取 per-tenant store 判断会话是否已不存在（则清理过期条目）。
+		owner := ""
+		if before, _, ok0 := strings.Cut(filename, "\x00"); ok0 {
+			owner = before
+		}
+		if us := h.uploadStoreFor(owner); us != nil && us.GetSession(uploadID) == nil {
+			h.uploadingFiles.Delete(filename)
+		}
+		return true
+	})
 }

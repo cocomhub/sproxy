@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -246,6 +247,86 @@ func TestVolumesAPI_Move_Success(t *testing.T) {
 	}
 	if got := h.quotaBucketFor("alice", "user").Usage(); got != int64(len(body)) {
 		t.Fatalf("move 后 owner user 桶 Scope=%d want %d（同 owner 移动字节不净增）", got, len(body))
+	}
+}
+
+// TestCleanupUploadingFilesPass_SkipsMoveLock 回归 T6c 修复轮建议 1：uploadingFiles 过期清理
+// 必须把 value=="move" 与 value=="upload" 并列跳过——若把 "move" 当 upload_id 查
+// GetSession("move")==nil 会误删 move 锁条目（超 10 分钟长 move 持锁被清理 → 同 rel 并发 move
+// 越过锁）。value=裸 upload_id 且无对应 session 的条目仍应被清理。
+func TestCleanupUploadingFilesPass_SkipsMoveLock(t *testing.T) {
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	h := buildVolSetHandlers(t, cfg)
+
+	h.uploadingFiles.Store("alice\x00upload.txt", "upload")         // 普通 upload：无 session，保留
+	h.uploadingFiles.Store("alice\x00move.txt", "move")             // move 锁：无 session，保留（回归）
+	h.uploadingFiles.Store("alice\x00ghost.txt", "no-such-session") // 分块上传裸 id：session 不存在 → 清理
+	h.cleanupUploadingFilesPass()
+
+	for _, k := range []string{"alice\x00upload.txt", "alice\x00move.txt"} {
+		if _, ok := h.uploadingFiles.Load(k); !ok {
+			t.Fatalf("条目 %q 应保留（value=upload/move 无 session 直接跳过，修复前 move 被误删）", k)
+		}
+	}
+	if _, ok := h.uploadingFiles.Load("alice\x00ghost.txt"); ok {
+		t.Fatal("无对应 session 的分块上传条目应被清理")
+	}
+}
+
+// TestVolumesAPI_List_VolSetNilReturnsEmpty GET /api/volumes volSet nil（旧装配/手工构造路径）
+// 返回空列表 200（生产 RegisterRoutes 恒装配 volSet，此分支属防御覆盖）。
+func TestVolumesAPI_List_VolSetNilReturnsEmpty(t *testing.T) {
+	h := &Handlers{}
+	req := httptest.NewRequest(http.MethodGet, "/api/volumes", nil)
+	rr := httptest.NewRecorder()
+	h.listVolumesHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("volSet nil GET /api/volumes status=%d want 200", rr.Code)
+	}
+	var out volumesListResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rr.Body.String())
+	}
+	if len(out.Volumes) != 0 {
+		t.Fatalf("volSet nil 应返回空列表, got %+v", out.Volumes)
+	}
+}
+
+// TestVolumesAPI_LocalMuxRegistered 直接断言两条新卷路由在隧道内层 localMux 裸注册可达
+// （TestLocalMuxCoversAllTunnelRoutes 只探主 mux srvMux，对 localMux 侧是间接保证；此处
+// 直打 LocalHandler()：GET /api/volumes → 200、POST /api/volumes/move 缺参 → 400，均非 404）。
+func TestVolumesAPI_LocalMuxRegistered(t *testing.T) {
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	mux := http.NewServeMux()
+	noAuth := defaultNoAuthRegOpts()
+	h := RegisterRoutes(t.Context(), RegisterRoutesOpts{
+		Mux:                   mux,
+		CfgPtr:                &cfgPtr,
+		Version:               "v",
+		BuildAt:               "b",
+		Logger:                testLogger(),
+		CredentialRing:        noAuth.CredentialRing,
+		CredentialStore:       noAuth.CredentialStore,
+		AllowInsecureLoopback: noAuth.AllowInsecureLoopback,
+	})
+	t.Cleanup(func() { _ = h.Close() })
+	lh := h.LocalHandler()
+
+	// GET /api/volumes 隧道内层可达 → handler 处理（单卷默认开放返回 200），非 404。
+	w := httptest.NewRecorder()
+	lh.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/volumes", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("localMux GET /api/volumes status=%d want 200（body=%s）", w.Code, w.Body.String())
+	}
+	// POST /api/volumes/move 隧道内层可达 → 缺参 handler 返回 400，非 404 page not found。
+	w2 := httptest.NewRecorder()
+	lh.ServeHTTP(w2, httptest.NewRequest(http.MethodPost, "/api/volumes/move", nil))
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("localMux POST /api/volumes/move status=%d want 400（body=%s）", w2.Code, w2.Body.String())
 	}
 }
 

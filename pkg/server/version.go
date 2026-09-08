@@ -66,32 +66,50 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 
 	verRel := verDir + "/" + strconv.FormatInt(versionID, 10)
 
-	// P5 版本桶配额：写版本文件前预留源文件大小（版本是旧文件的拷贝，字节计入租户
-	// version 桶 Scope），写入成功后 Commit(actual)；失败/放弃 Release。配额不足时
-	// 拒绝保存版本（调用方 best-effort：覆盖写路径跳过版本，恢复路径 500 中止）。
-	var res *quota.Reservation
+	// P5 版本桶配额（双账本 reserve-then-commit，AD-7）：写版本文件前在 owner 全局 version 桶
+	// Scope 与 home 卷容量池**同时预留**源文件大小（版本是旧文件拷贝，字节计入 version 桶
+	// Scope + 该卷容量池），写入成功后 Commit(actual)；失败/放弃双 Release。任一侧配额不足即
+	// 拒绝保存版本（调用方语义与单卷 owner 全局 version Scope 满一致：覆盖写 best-effort 跳过
+	// 版本、恢复路径 500 中止）——卷容量对版本字节由预留封顶（T6c 安全②：不再事后 Adjust
+	// fail-open，防借版本反复写把卷堆满）。
+	pool := h.volumePoolForTenant(tnt)
+	var scopeRes, poolRes *quota.Reservation
 	if scope := h.quotaBucketFor(owner, "version"); scope != nil {
 		rr, reserveErr := scope.TryReserve(srcSize)
 		if reserveErr != nil {
 			return 0, fmt.Errorf("保存版本: 存储配额不足: %w", reserveErr)
 		}
-		res = rr
+		scopeRes = rr
+	}
+	if pool != nil {
+		rr, reserveErr := pool.TryReserve(srcSize)
+		if reserveErr != nil {
+			if scopeRes != nil {
+				scopeRes.Release()
+			}
+			return 0, fmt.Errorf("保存版本: 卷容量不足: %w", reserveErr)
+		}
+		poolRes = rr
+	}
+	releaseRes := func() {
+		if scopeRes != nil {
+			scopeRes.Release()
+		}
+		if poolRes != nil {
+			poolRes.Release()
+		}
 	}
 
 	src, err := root.Open(fullRel)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		return 0, fmt.Errorf("打开源文件失败: %w", err)
 	}
 	defer src.Close()
 
 	dst, err := root.OpenFile(verRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		return 0, fmt.Errorf("创建版本文件失败: %w", err)
 	}
 	defer dst.Close()
@@ -106,9 +124,7 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 	written, err := io.Copy(multiWriter, src)
 	if err != nil {
 		_ = root.Remove(verRel)
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		return 0, fmt.Errorf("复制版本文件失败: %w", err)
 	}
 	checksum := hex.EncodeToString(hasher.Sum(nil))
@@ -124,22 +140,18 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
 	if err := dst.Sync(); err != nil {
 		_ = root.Remove(verRel)
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		return 0, fmt.Errorf("同步版本文件失败: %w", err)
 	}
 
-	// P5 配额对账：Commit(actual)（多预留部分自动归还）。
-	if res != nil {
-		res.Commit(written)
-		res = nil
+	// P5 配额对账：双 Commit(actual)（多预留部分自动归还，预留转 committed）。
+	if scopeRes != nil {
+		scopeRes.Commit(written)
+		scopeRes = nil
 	}
-	// 版本桶双账本 → home 卷容量池（T6c 发现-3）：版本字节物理写在该卷 <owner>/version/，
-	// 须补记入该卷容量池 committed（owner 全局侧已由上面 version 桶 Scope Commit 入账）。
-	// 原仅依赖 reconcile 周期自愈——两次校准间版本字节不占卷容量，可能使卷容量静默超限。
-	if pool := h.volumePoolForTenant(tnt); pool != nil {
-		pool.Adjust(0, written)
+	if poolRes != nil {
+		poolRes.Commit(written)
+		poolRes = nil
 	}
 
 	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope + 卷容量池）。
@@ -377,13 +389,16 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	// user 桶字节——缺失配额可反复 restore 突破租户上限。与 upload 对齐：TryReserve(版本大小)
 	// 预留 → 拷贝成功后 Adjust(prev, actual)（覆盖写）/ Commit(actual)（新文件）；失败 Release()。
 	// scope 按目标 user 桶 rel 解析（与 upload 同一键），子目录配额逐级检查自动生效。
+	// 卷容量池同族（T6c 安全② reserve-then-commit）：恢复新增/覆盖的 user 字节同样先 TryReserve
+	// home 卷容量池（写前封顶，不再只事后 Adjust fail-open），任一侧配额不足 → 507 拒绝恢复。
 	scope := h.quotaScopeFor(ownerFromRequest(r), targetRel)
+	pool := h.volumePoolForTenant(tnt)
 	prev := int64(0)
-	var res *quota.Reservation
+	if st, statErr := root.Stat(targetRel); statErr == nil {
+		prev = st.Size()
+	}
+	var res, poolRes *quota.Reservation
 	if scope != nil {
-		if st, statErr := root.Stat(targetRel); statErr == nil {
-			prev = st.Size()
-		}
 		rr, reserveErr := scope.TryReserve(verInfo.Size())
 		if reserveErr != nil {
 			h.RecordAudit(r.Context(), AuditEvent{
@@ -395,13 +410,34 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		}
 		res = rr
 	}
+	if pool != nil {
+		rr, reserveErr := pool.TryReserve(verInfo.Size())
+		if reserveErr != nil {
+			if res != nil {
+				res.Release()
+			}
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: "version_restore", ObjectType: "file", Object: remotePath,
+				Result: AuditResultError, Detail: "卷容量不足，拒绝恢复",
+			})
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "存储配额不足"}, http.StatusInsufficientStorage)
+			return
+		}
+		poolRes = rr
+	}
+	releaseRes := func() {
+		if res != nil {
+			res.Release()
+		}
+		if poolRes != nil {
+			poolRes.Release()
+		}
+	}
 
 	// 拷贝版本文件到目标位置
 	src, err := root.Open(verRel)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "打开版本文件失败: " + versionIDStr,
@@ -413,9 +449,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	dst, err := root.OpenFile(targetRel, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "创建目标文件失败: " + versionIDStr,
@@ -427,9 +461,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	written, err := io.Copy(dst, src)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "恢复文件失败: " + versionIDStr,
@@ -438,9 +470,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if syncErr := dst.Sync(); syncErr != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "同步文件失败: " + versionIDStr,
@@ -449,7 +479,8 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// P4/P5 配额对账：覆盖写 Adjust(prev, written)；新文件 Commit(written)。
+	// P4/P5 配额对账：覆盖写 Adjust(prev, written) + Release 预留；新文件 Commit(written)。
+	// owner 全局 scope 与卷容量池同语义（卷池侧同样 reserve-then-commit，物理字节入卷池）。
 	if res != nil {
 		if prev > 0 {
 			scope.Adjust(prev, written)
@@ -458,11 +489,13 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 			res.Commit(written)
 		}
 	}
-	// 恢复写 user 桶双账本 → 卷容量池（T6c 发现-3 同族闭合）：恢复把版本内容拷回 user 桶，
-	// 新增/覆盖的 user 字节须同步记入目标卷容量池（owner 全局侧已由上面 scope 入账；否则恢复
-	// 产生的 user 字节不占卷容量，删除该文件时卷池释放与入账不对称）。
-	if pool := h.volumePoolForTenant(tnt); pool != nil {
-		pool.Adjust(prev, written)
+	if poolRes != nil {
+		if prev > 0 {
+			pool.Adjust(prev, written)
+			poolRes.Release()
+		} else {
+			poolRes.Commit(written)
+		}
 	}
 
 	// 更新 checksum（per-tenant store，key = user 桶相对路径）

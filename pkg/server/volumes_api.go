@@ -222,6 +222,26 @@ func (h *Handlers) moveVolumeHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "移动文件失败"}, http.StatusInternalServerError)
 		return
 	}
+	// 纵深防御（TOCTOU 闭合）：复制字节数须与 stat 源尺寸一致——不一致 = 源在复制中被并发改写/
+	// 截断（uploadingFiles 锁已挡住同 rel upload/move，delete/restore 未持锁）。fail-closed：
+	// 删目标 + 双 Release 回滚，源不动，不把「不确定内容」当移动成功提交。
+	if written != size {
+		_ = toTnt.Root().Remove(rel)
+		if scopeRes != nil {
+			scopeRes.Release()
+		}
+		if poolRes != nil {
+			poolRes.Release()
+		}
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "volume_move", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "复制字节与源尺寸不一致（源被并发改写），已回滚",
+		})
+		h.logger.Error("move: 复制字节与源尺寸不一致，已回滚", "file_name", remotePath,
+			"from", fromVol, "to", toVol, "size", size, "written", written)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "移动文件失败"}, http.StatusInternalServerError)
+		return
+	}
 
 	// 删源：成功 → 双 release（from 侧 committed）；IsNotExist = 并发删除已把源移走且已释放
 	// from 账本（目标已持数据）→ 只 commit to 侧；其它错误 → 回滚 to 侧（删目标 + 释放预留）。
