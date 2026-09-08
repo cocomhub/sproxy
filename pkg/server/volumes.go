@@ -557,6 +557,18 @@ func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
 // defaultVolumeAllows 判断 owner 是否被默认卷 ACL 放行（读/删/改名「未命中回落默认租户」前
 // 的护栏——默认卷不在 owner 视图时不得回落默认租户 Open，防经回落读到默认卷自身遗留文件）。
 // volSet nil（旧装配路径，无卷 ACL）→ 恒 true（唯一根即默认，零回归）。
+//
+// 排除面边界（F3/F4/F5 review 成文，不改行为）：本 ACL 门禁覆盖的是 **user 桶文件面**——T6b 触及
+// 的六类入口（batch delete/rename、search、share create/access、archive-dir、mkdir、uploadStatus
+// 探测）及 download/stat/单删/单改名/版本端点均经本函数/locateOwnerFile 收口，默认卷被排除时
+// 这些入口对默认卷 user 桶遗留一律不可见。以下为**设计内例外**（服务端自有桶/聚合面，不属 user
+// 文件门禁范围，§6「meta 单点权威 + 默认卷为元数据面」/§11「cloud/archive 产物落默认卷」）：
+//   - /api/stats 聚合（statsRootFor）：仍聚合默认卷 owner 根的**总量文件数/字节**（无文件名/内容）；
+//   - sync pull 目标（syncTenantRoot）：按 owner 解析默认卷 user 根，pull 产物写默认卷 user 桶；
+//   - cloud-archive 源/输出（cloud_archive_handler）：cloud 桶与 archive 桶均默认卷，owner 可经
+//     自建归档回读默认卷上自己生成的内容。
+//
+// 若未来把「排除」理解为撤销 owner 对默认卷一切内容访问，需另行调整上述聚合/服务端桶例外。
 func (h *Handlers) defaultVolumeAllows(owner string) bool {
 	owner = normalizeOwner(owner)
 	if h.volSet == nil {

@@ -93,6 +93,10 @@ func (h *Handlers) SyncScopeFor() func(owner, rel string) *quota.Scope {
 // 空 owner → anonymous 租户；租户不可用（非法 owner / 存储根未装配）返回 ok=false
 // （写路径 fail-closed，绝不回落全局根）。装配层与 syncmgr.TenantRootResolver 对接，
 // 同步 src/dst 相对租户 user 根解析（<root>/<tenant>/user），任务状态落 meta/sync。
+//
+// 排除面边界（F4 review 成文）：sync pull 目标解析到**默认卷** user 根属默认卷 ACL 排除面的
+// 设计内例外（服务端自有 meta/sync 桶 + 同步目标按 owner 逻辑树解析，非 T6b 门禁入口）。
+// 见 volumes.go defaultVolumeAllows 边界注释。不改行为，仅记录避免未来误判为漏洞。
 func (h *Handlers) syncTenantRoot(owner string) (userRootAbs, persistDirAbs string, ok bool) {
 	tnt := h.tenantFor(owner)
 	if tnt == nil {

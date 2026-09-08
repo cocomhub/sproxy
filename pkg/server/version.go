@@ -238,7 +238,10 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	tnt, _, ok := h.resolveVersionTarget(ownerFromRequest(r), remotePath)
 	if !ok || tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		// F1（review 收口）：resolveVersionTarget !ok 仅当「默认卷被 ACL 排除 + 视图内无可见
+		// 文件/版本目录」——按 404 文件不存在（与默认卷开放形态下 restore/delete 的「不存在」
+		// 404 及单卷「文件不存在」语义一致；默认卷开放的 list 200-空回落路径不受影响，恒 ok）。
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		return
 	}
 	root := tnt.Root()
@@ -316,7 +319,10 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	tnt, _, ok := h.resolveVersionTarget(ownerFromRequest(r), remotePath)
 	if !ok || tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		// F1（review 收口）：resolveVersionTarget !ok 仅当「默认卷被 ACL 排除 + 视图内无可见
+		// 文件/版本目录」——按 404 文件不存在（与默认卷开放形态下 restore/delete 的「不存在」
+		// 404 及单卷「文件不存在」语义一致；默认卷开放的 list 200-空回落路径不受影响，恒 ok）。
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		return
 	}
 	root := tnt.Root()
@@ -488,7 +494,10 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 
 	tnt, _, ok := h.resolveVersionTarget(ownerFromRequest(r), remotePath)
 	if !ok || tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		// F1（review 收口）：resolveVersionTarget !ok 仅当「默认卷被 ACL 排除 + 视图内无可见
+		// 文件/版本目录」——按 404 文件不存在（与默认卷开放形态下 restore/delete 的「不存在」
+		// 404 及单卷「文件不存在」语义一致；默认卷开放的 list 200-空回落路径不受影响，恒 ok）。
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		return
 	}
 	root := tnt.Root()

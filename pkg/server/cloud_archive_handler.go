@@ -60,6 +60,11 @@ func (h *Handlers) cloudArchiveMaxBytes() int64 {
 
 // cloudArchiveTask 处理 POST /api/cloud/tasks/{id}/archive。
 // 将已完成云下载任务的文件打包为 tar.gz 归档文件。
+//
+// 排除面边界（F5 review 成文）：cloud 源（cloud 桶）与 archive 输出（archive 桶）均落**默认卷**
+// （tenantFor），属 §11「cloud/archive 产物落默认卷」设计内例外——默认卷被 ACL 排除的 owner 仍可
+// 经自建归档回读默认卷上自己生成的 cloud 内容。见 volumes.go defaultVolumeAllows 边界注释。
+// 不改行为，仅记录避免未来误判为漏洞。
 func (h *Handlers) cloudArchiveTask(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 

@@ -518,12 +518,22 @@ func TestT6b_Archive_InputLocatesDisk2(t *testing.T) {
 }
 
 func TestT6b_Archive_ACLExcludedDefaultInputSkipped(t *testing.T) {
-	cfg, dirs := t6bVolCfg(t, true, "bob")
+	cfg, dirs := t6bVolCfg(t, true, "bob") // main 排除 bob
 	url, _, _ := t6bServer(t, "bob", cfg)
 	const secret = "MAIN-ARCHIVE-SECRET"
 	seedVolumeFile(t, dirs[0], "bob", "user/legacy.txt", []byte(secret))
 
-	resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(`{"files":["legacy.txt"]}`))
+	// 混合请求（F7 抗变异）：可见 disk2 文件（须打包）+ ACL 排除默认卷遗留（须跳过）。
+	// 实现若退化为「不打包任何文件」→ disk2 断言红；若直读排除遗留 → legacy 断言红。
+	visibleBody := []byte("VISIBLE-ON-DISK2")
+	if status, hdr, b := volumeUpload(t, url, "visible.txt", visibleBody, ""); status != http.StatusOK {
+		t.Fatalf("visible.txt 上传应 200, got %d %s", status, b)
+	} else if hdr.Get("X-Volume") != "disk2" {
+		t.Fatalf("visible.txt X-Volume=%q want disk2", hdr.Get("X-Volume"))
+	}
+
+	reqBody := `{"files":["legacy.txt","visible.txt"]}`
+	resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,8 +541,11 @@ func TestT6b_Archive_ACLExcludedDefaultInputSkipped(t *testing.T) {
 		t.Fatalf("archive status=%d（流式 200）", resp.StatusCode)
 	}
 	entries := t6bArchiveEntries(t, resp)
+	if entries["visible.txt"] != string(visibleBody) {
+		t.Fatalf("可见 disk2 文件必须打包在产物中（抗变异）: %+v", entries)
+	}
 	for name, content := range entries {
-		if strings.Contains(name, "legacy") || content == secret {
+		if name == "legacy.txt" || content == secret {
 			t.Fatalf("ACL 排除默认卷遗留绝不可被归档读取（内容泄漏）: %+v", entries)
 		}
 	}

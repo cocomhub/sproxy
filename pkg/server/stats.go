@@ -214,6 +214,10 @@ func statsCategoriesFromBuckets(buckets map[string]int64) (userFiles, cloud, chu
 // admin（空 owner）→ 存储根（<默认卷根>/）。globalRoot 未装配时回退
 // resolveDefaultVolumeRoot(cfg)（默认卷根——显式 volumes[0].root ≠ storage_root 分叉时
 // stats 必须遍历默认卷而非 cfg.StorageRoot，PR-B 终审建议 9）。
+//
+// 排除面边界（F3 review 成文）：stats 聚合属默认卷 ACL 排除面的**设计内例外**——默认卷被排除时
+// 仍返回 owner 默认卷根的聚合总量（文件数/字节，无文件名/内容）。见 volumes.go defaultVolumeAllows
+// 边界注释。不改行为，仅记录避免未来误判为漏洞。
 func (h *Handlers) statsRootFor(owner string) string {
 	if owner != "" {
 		if tnt := h.tenantFor(owner); tnt != nil {

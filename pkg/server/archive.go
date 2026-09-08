@@ -333,6 +333,11 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		srcs = append(srcs, dirSrc{tnt: tnt0, userRel: userRel})
 	} else {
+		// F6（review 边界成文）：跨卷「同名文件/目录并存」（rel 在一卷是目录、另一卷是文件）时，
+		// 策略为**打包存在的目录、忽略同名文件条目**并返回 200——目录可跨卷并存、不受 AD-4 文件
+		// 唯一性约束，rel 在视图内存在目录即可打包。这与单卷「指定路径不是目录 → 400」有语义差异
+		// （单卷 rel 唯一，不可能目录/文件同址；多卷仅异常共存时触发），属刻意取舍，非漏洞。
+		// 仅当视图内**完全没有该 rel 的目录**且存在同名文件时才回落 400（notDir 且无目录）。
 		notDir := false
 		for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
 			exists, vErr := h.volumeFileExists(v.Name, owner, userRel)
