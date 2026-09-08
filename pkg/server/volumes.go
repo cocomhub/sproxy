@@ -12,6 +12,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -304,18 +305,23 @@ func (r *volumeRoute) release() {
 }
 
 // routeUpload 为 owner 的 rel 选目标卷并在 owner 全局 + 卷容量双账本预留（写路径核心）。
-// 语义（AD-7/§7，placement/ACL/换卷/显式唯一性全在此）：
+// 语义（AD-7/§7，placement/ACL/换卷/显式唯一性/覆盖写 stay-home 全在此）：
 //   - 候选 = AllowedVolumes(owner 视图)（ACL allow/deny 已解析进 volume.Volume.ACL）；
 //   - 显式 volume（非空）→ 仅该卷候选且须在视图（不在 = 403）；显式先查唯一性（AD-4）：
 //     目标卷 stat 已有同 rel → 409；视图其它卷已有同 rel → 409 + 所在卷名；
-//   - 自动路由：候选按 cfg.Placement（OrderCandidates，used = 卷池 Usage 闭包）排序依序尝试：
-//     owner 全局 Scope TryReserve 成功 → 卷容量池 TryReserve；卷池满 → Release owner 预留换下一
-//     候选；owner 全局满 → 直接 ErrStorageFull 不换卷；全部卷满 → ErrStorageFull。
+//   - forceHome=true（自动路由 + 默认卷已存在 rel 的覆盖写，F1-A）→ 强制默认卷单候选：
+//     容量路由只用于新文件，已存在 rel 必须 stay-home；默认卷容量 TryReserve 满直接 507
+//     不换卷（与单卷语义一致），防止跨卷双份 + owner 双计。
+//   - 自动路由（新文件）：候选按 cfg.Placement（OrderCandidates，used = 卷池 Usage 闭包）
+//     排序依序尝试：owner 全局 Scope TryReserve 成功 → 卷容量池 TryReserve；卷池满 →
+//     Release owner 预留换下一候选；owner 全局满 → 直接 ErrStorageFull 不换卷；全部卷满 →
+//     ErrStorageFull。
 //
 // 返回 volumeRoute（含双预留句柄）。volSet 未装配（旧装配路径）回落既有单卷行为：
 // 默认租户 + owner 全局 Scope 预留，无卷容量池（零回归）。
-func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64) (*volumeRoute, error) {
+func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, forceHome bool) (*volumeRoute, error) {
 	// 旧装配路径（volSet nil）：单卷零回归——默认租户 + owner 全局 Scope 预留。
+	// forceHome 此时无卷语义（唯一根即 home），天然 stay-home。
 	if h.volSet == nil {
 		tnt := h.tenantFor(owner)
 		if tnt == nil {
@@ -336,6 +342,16 @@ func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64) (*vol
 	view := volume.AllowedVolumes(h.volSet.All(), owner)
 	if len(view) == 0 {
 		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, "volume not allowed", nil)
+	}
+
+	// 覆盖写 stay-home（F1-A）：rel 已在默认卷命中并走版本化覆盖写，强制回默认卷单候选，
+	// 容量不足直接 507（reserveVolume 返回 routeErrVolFull/routeErrOwnerFull，上传侧映射），不换卷。
+	if forceHome {
+		v, ok := h.volSet.ByName(h.volSet.defaultName)
+		if !ok || !v.Authorize(owner) {
+			return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, "volume not allowed", nil)
+		}
+		return h.reserveVolume(owner, rel, v.Name, size)
 	}
 
 	// 显式指定卷：ACL 校验 + 唯一性查重，单候选双预留（无换卷）。
@@ -426,20 +442,34 @@ func (h *Handlers) volumeTenant(volName, owner string) *storage.Tenant {
 }
 
 // volumeFileExists 探测指定卷上 owner 的 rel 是否已存在（只读，不创建租户目录）。
-// 路径 = <卷根>/<owner>/<rel>（rel 含 user/ 前缀）；卷未知/stat 失败返回 false。
-func (h *Handlers) volumeFileExists(volName, owner, rel string) bool {
+// 路径 = <卷根>/<owner>/<rel>（rel 含 user/ 前缀）。
+// 语义 fail-closed：卷未知 → (false, nil)；stat 确证不存在（fs.ErrNotExist）→ (false, nil)；
+// 其它 stat 错误（权限/IO 等）→ (false, err)，调用方按 500 处理——不得把「探测失败」当
+// 「不存在」继续写（防权限/IO 错误下误覆盖判断）。
+func (h *Handlers) volumeFileExists(volName, owner, rel string) (bool, error) {
 	rt := h.volSet.Root(volName)
 	if rt == nil {
-		return false
+		return false, nil
 	}
 	_, err := rt.Stat(owner + "/" + rel)
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("探测卷 %q 文件状态失败: %w", volName, err)
 }
 
 // checkVolumeUniqueness 显式卷唯一性查重（AD-4）：目标卷已有同 rel → 409；
-// 视图其它卷已有同 rel → 409 + 所在卷名。仅在显式 volume 时调用（自动路由唯一性由路由保证）。
+// 视图其它卷已有同 rel → 409 + 所在卷名。stat 探测失败（非不存在）→ 500 fail-closed。
+// 仅在显式 volume 时调用（自动路由唯一性由路由保证）。
 func (h *Handlers) checkVolumeUniqueness(owner, rel, targetVol string, view []volume.Volume) error {
-	if h.volumeFileExists(targetVol, owner, rel) {
+	exists, err := h.volumeFileExists(targetVol, owner, rel)
+	if err != nil {
+		return newRouteError(routeErrOther, http.StatusInternalServerError, errMsgSaveFailed, err)
+	}
+	if exists {
 		return newRouteError(routeErrConflict, http.StatusConflict,
 			fmt.Sprintf("目标卷 %q 已存在同名文件", targetVol), nil)
 	}
@@ -447,7 +477,11 @@ func (h *Handlers) checkVolumeUniqueness(owner, rel, targetVol string, view []vo
 		if v.Name == targetVol {
 			continue
 		}
-		if h.volumeFileExists(v.Name, owner, rel) {
+		exists, err := h.volumeFileExists(v.Name, owner, rel)
+		if err != nil {
+			return newRouteError(routeErrOther, http.StatusInternalServerError, errMsgSaveFailed, err)
+		}
+		if exists {
 			return newRouteError(routeErrConflict, http.StatusConflict,
 				fmt.Sprintf("同名文件已存在于卷 %q", v.Name), nil)
 		}
