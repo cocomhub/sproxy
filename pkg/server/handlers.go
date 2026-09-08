@@ -765,6 +765,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/versions", h.listVersionsHandler)
 	localMux.HandleFunc("POST /api/versions/restore", h.restoreVersionHandler)
 	localMux.HandleFunc("DELETE /api/versions", h.deleteVersionHandler)
+	// 卷 API（隧道内层裸注册：隧道加密即认证，与版本/share 同模式）
+	localMux.HandleFunc("GET /api/volumes", h.listVolumesHandler)
+	localMux.HandleFunc("POST /api/volumes/move", h.moveVolumeHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
 	localMux.HandleFunc("PUT /api/config", h.updateConfigHandler)
@@ -867,6 +870,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/versions", h.fileRoute(h.listVersionsHandler))
 	srvMux.HandleFunc("POST /api/versions/restore", h.fileRoute(h.restoreVersionHandler))
 	srvMux.HandleFunc("DELETE /api/versions", h.fileRoute(h.deleteVersionHandler))
+	// 卷 API（主 mux：fileRoute = authMiddleware + requireRole(user)，per-owner 文件面）
+	srvMux.HandleFunc("GET /api/volumes", h.fileRoute(h.listVolumesHandler))
+	srvMux.HandleFunc("POST /api/volumes/move", h.fileRoute(h.moveVolumeHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	srvMux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
@@ -1112,6 +1118,7 @@ func isFileGroupedRoute(path string) bool {
 		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
 		"/api/archive", "/api/archive-dir",
 		"/api/versions", "/api/versions/restore",
+		"/api/volumes", "/api/volumes/move",
 		"/api/share", "/api/shares",
 		// 分块上传/下载（主 mux 面均挂 fileRoute——见 RegisterRoutes 装配处清单）；
 		// 前缀含两个入口：/upload/{init,chunk,status,sessions,complete}。

@@ -135,8 +135,14 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 		res.Commit(written)
 		res = nil
 	}
+	// 版本桶双账本 → home 卷容量池（T6c 发现-3）：版本字节物理写在该卷 <owner>/version/，
+	// 须补记入该卷容量池 committed（owner 全局侧已由上面 version 桶 Scope Commit 入账）。
+	// 原仅依赖 reconcile 周期自愈——两次校准间版本字节不占卷容量，可能使卷容量静默超限。
+	if pool := h.volumePoolForTenant(tnt); pool != nil {
+		pool.Adjust(0, written)
+	}
 
-	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope）。
+	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope + 卷容量池）。
 	h.cleanupOldVersions(userRel, tnt, owner)
 
 	h.logger.Info("文件版本已保存", "file_name", userRel, "version_id", versionID)
@@ -145,13 +151,17 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 
 // releaseVersionUsage 释放 version 桶 Scope 中已确认占用的版本文件字节（P5）。
 // 删除版本文件后按删除前 stat 的文件大小释放，避免 version 桶 committed 虚高
-// 依赖周期扫描自愈。size<=0 时为空操作。
-func (h *Handlers) releaseVersionUsage(owner string, size int64) {
+// 依赖周期扫描自愈。tnt 为版本文件所在卷租户——版本字节同时释放所在卷容量池
+// （T6c 发现-3 双账本，与 saveVersion 写侧 Adjust 对称）。size<=0 时为空操作。
+func (h *Handlers) releaseVersionUsage(tnt *storage.Tenant, owner string, size int64) {
 	if size <= 0 {
 		return
 	}
 	if scope := h.quotaBucketFor(owner, "version"); scope != nil {
 		scope.ReleaseUsage(size)
+	}
+	if pool := h.volumePoolForTenant(tnt); pool != nil {
+		pool.ReleaseCommitted(size)
 	}
 }
 
@@ -213,7 +223,7 @@ func (h *Handlers) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner
 			h.logger.Warn("删除旧版本文件失败", "path", delRel, "error", err)
 			continue
 		}
-		h.releaseVersionUsage(owner, delSize)
+		h.releaseVersionUsage(tnt, owner, delSize)
 	}
 }
 
@@ -448,6 +458,12 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 			res.Commit(written)
 		}
 	}
+	// 恢复写 user 桶双账本 → 卷容量池（T6c 发现-3 同族闭合）：恢复把版本内容拷回 user 桶，
+	// 新增/覆盖的 user 字节须同步记入目标卷容量池（owner 全局侧已由上面 scope 入账；否则恢复
+	// 产生的 user 字节不占卷容量，删除该文件时卷池释放与入账不对称）。
+	if pool := h.volumePoolForTenant(tnt); pool != nil {
+		pool.Adjust(prev, written)
+	}
 
 	// 更新 checksum（per-tenant store，key = user 桶相对路径）
 	checksum, err := FileChecksumRoot(root, targetRel)
@@ -528,7 +544,7 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
-	h.releaseVersionUsage(ownerFromRequest(r), delSize)
+	h.releaseVersionUsage(tnt, ownerFromRequest(r), delSize)
 
 	// 清理 checksumStore 中对应的版本记录（key = version/<rel>/<id>，无 owner 前缀）
 	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {

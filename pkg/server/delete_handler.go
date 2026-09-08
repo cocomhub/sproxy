@@ -175,9 +175,10 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	// 卷容量池双 Release（AD-7）：写入经双账本预留/提交，删除须释放文件所在卷池，否则卷池
 	// Usage 虚高（路由/换卷误判），依赖 reconcile 才自愈。homeVol 空（无卷语义旧装配）跳过。
+	// 用 ReleaseCommitted 原子扣减（PR-C 终审 Minor：替代「读 Usage 两次 + Adjust」非原子序列）。
 	if homeVol != "" && h.volSet != nil {
 		if pool := h.volSet.Pool(homeVol); pool != nil {
-			pool.Adjust(pool.Usage(), pool.Usage()-info.Size())
+			pool.ReleaseCommitted(info.Size())
 		}
 	}
 	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
@@ -269,7 +270,7 @@ func (h *Handlers) processBatchDeleteItem(ctx context.Context, owner string, f B
 		// 卷容量池双 Release（AD-7）：删除释放文件所在卷池，否则 Usage 虚高（与单删一致）。
 		if homeVol != "" && h.volSet != nil {
 			if pool := h.volSet.Pool(homeVol); pool != nil {
-				pool.Adjust(pool.Usage(), pool.Usage()-stat.Size())
+				pool.ReleaseCommitted(stat.Size())
 			}
 		}
 		if cs := h.checksumStoreFor(owner); cs != nil {

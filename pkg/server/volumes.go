@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -552,6 +553,36 @@ func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
 		return &fileLocation{volumeName: v.Name, tenant: tnt}, true
 	}
 	return nil, false
+}
+
+// volumePoolForTenant 返回 tnt 租户所在卷的容量池（版本桶/恢复等以 tenant 定位写盘但缺卷名
+// 上下文的路径补双账本用）。判定：比对租户根物理绝对路径与各卷根 <卷根>/<owner>（卷上租户由
+// volumeTenant/tenantFor 恰以该路径 OpenRoot 建立，故 clean 后精确相等）。volSet nil / 租户
+// 不可用 / 未命中任何卷 → nil（fail-closed，调用方按无卷语义跳过）。O(n)（n = 卷数，个位数），
+// 版本写/删低频路径可接受。
+func (h *Handlers) volumePoolForTenant(tnt *storage.Tenant) *quota.Pool {
+	if h.volSet == nil || tnt == nil || tnt.Root() == nil {
+		return nil
+	}
+	tenantAbs, ok := tnt.Root().Abs("")
+	if !ok {
+		return nil
+	}
+	tenantAbs = filepath.Clean(tenantAbs)
+	for _, v := range h.volSet.All() {
+		rt := h.volSet.Root(v.Name)
+		if rt == nil {
+			continue
+		}
+		volOwnerAbs, ok2 := rt.Abs(tnt.ID)
+		if !ok2 {
+			continue
+		}
+		if filepath.Clean(volOwnerAbs) == tenantAbs {
+			return h.volSet.Pool(v.Name)
+		}
+	}
+	return nil
 }
 
 // defaultVolumeAllows 判断 owner 是否被默认卷 ACL 放行（读/删/改名「未命中回落默认租户」前

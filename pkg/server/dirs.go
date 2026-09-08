@@ -197,7 +197,7 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 					volBytes += f.size
 				}
 				if volBytes > 0 {
-					pool.Adjust(pool.Usage(), pool.Usage()-volBytes)
+					pool.ReleaseCommitted(volBytes)
 				}
 			}
 		}
