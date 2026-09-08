@@ -343,6 +343,10 @@ type CredentialStoreConfig struct {
 // （base64 编码 32B）。master_key_file 非空时优先读文件；仅文件未配置时读本变量。
 const CredentialMasterKeyEnv = "SPROXY_CREDENTIAL_MASTER_KEY"
 
+// defaultStorageRoot 是 storage_root 与合成默认卷的缺省挂载根。Default()/SetDefaults()
+// 共用同一常量（单一事实源），避免魔数在多处漂移。
+const defaultStorageRoot = "./storage"
+
 // VolumeACLMode 是卷 ACL 模式。allow=默认拒绝+白名单；deny=默认开放+黑名单。
 type VolumeACLMode string
 
@@ -354,6 +358,10 @@ const (
 // VolumeACLConfig 是卷 ACL 配置（volumes[].acl）。
 // Mode 缺省 deny（默认开放，单卷零回归）；显式 allow 时仅列出的 owner 可写入该卷。
 // Owners 是 owner 白/黑名单（按 owner 名段名校验，语义由装配层按 Mode 解释）。
+//
+// 安全边界（security MEDIUM 文档化落点，行为有意维持）：未配置/空 ACL（Mode=deny +
+// 空 owners）= **默认开放**——这是为兼容默认卷/旧单根布局的有意语义（规格 AD-6，
+// 2026-09-08 裁定维持全开放）；生产环境对敏感卷请显式 `mode: allow` 白名单收紧。
 type VolumeACLConfig struct {
 	Mode   VolumeACLMode `yaml:"mode" mapstructure:"mode"`
 	Owners []string      `yaml:"owners" mapstructure:"owners"`
@@ -478,7 +486,7 @@ func (c *Config) OwnerQuotaFor(owner string) int64 {
 func Default() *Config {
 	return &Config{
 		Addr:        ":18083",
-		StorageRoot: "./storage",
+		StorageRoot: defaultStorageRoot,
 		// OwnerQuotas/BucketLimits 默认空 map（非 nil，便于 map 判断/访问复用）。
 		OwnerQuotas:  map[string]int64{},
 		BucketLimits: map[string]int64{},
@@ -486,7 +494,7 @@ func Default() *Config {
 		// Default() 即产出归一后的单卷形态（SetDefaults 对 len==0/占位单卷再次兜底），
 		// 保证直接消费 Default() 的路径总能看到非空 Volumes。
 		Placement: "prefer-default",
-		Volumes:   []VolumeConfig{{Name: "default", Root: "./storage"}},
+		Volumes:   []VolumeConfig{{Name: "default", Root: defaultStorageRoot}},
 		ServerTimeouts: ServerTimeouts{
 			Shutdown: 30 * time.Second,
 		},
@@ -563,29 +571,24 @@ func (c *Config) SetDefaults() {
 		c.Addr = ":18083"
 	}
 	if c.StorageRoot == "" {
-		c.StorageRoot = "./storage"
+		c.StorageRoot = defaultStorageRoot
 	}
 	// 卷配置归一（多卷）：placement 缺省 prefer-default；volumes 未配（nil/空）合成
-	// 单默认卷（name=default, root=StorageRoot）。Default() 已合成占位单卷时，若
-	// storage_root 被显式改走（既有单卷配置只改 storage_root、不写 volumes 的升级路径），
-	// 让默认卷 root 跟随 storage_root，避免写文件落在旧默认根。已配卷时逐卷补首卷空
-	// root 与缺省 ACL（mode 缺省 deny = 默认开放，单卷零回归）。
+	// 单默认卷（name=default, root=StorageRoot）。已配卷时逐卷补**空** root（仅首卷，
+	// 跟随 storage_root；非首卷空 root 保留 → Validate 拒绝）与缺省 ACL（mode 缺省
+	// deny = 默认开放，单卷零回归）。绝不覆写非空显式 root——用户显式写的
+	// volumes[].root（含首卷）恒保留。
 	if c.Placement == "" {
 		c.Placement = "prefer-default"
 	}
 	if len(c.Volumes) == 0 {
 		c.Volumes = []VolumeConfig{{Name: "default", Root: c.StorageRoot}}
-	} else if len(c.Volumes) == 1 && c.Volumes[0].Name == "default" &&
-		c.Volumes[0].Root == "./storage" && c.StorageRoot != "./storage" {
-		c.Volumes[0].Root = c.StorageRoot
 	}
 	for i := range c.Volumes {
-		if c.Volumes[i].Root == "" {
-			if i == 0 {
-				c.Volumes[i].Root = c.StorageRoot
-			}
-			// 非首卷空 root 保留 → Validate 拒绝（非首卷需显式指定挂载根）
+		if c.Volumes[i].Root == "" && i == 0 {
+			c.Volumes[i].Root = c.StorageRoot
 		}
+		// 非首卷空 root 保留 → Validate 拒绝（非首卷需显式指定挂载根）
 		if c.Volumes[i].ACL == nil {
 			c.Volumes[i].ACL = &VolumeACLConfig{Mode: VolumeACLDeny} // 缺省开放
 		}
@@ -716,16 +719,20 @@ func (c *Config) Validate() error {
 	if c.StorageRoot == "" {
 		return fmt.Errorf("storage_root 为空，请配置存储根目录")
 	}
-	// 兜底合成单卷（幂等，仅 len==0 时）：Validate 可能在 Normalize（SetDefaults）前被调
-	// （如直接构造 &Config{...}.Validate()），此时视为未配 volumes，合成单默认卷
-	// （name=default, root=StorageRoot），保证后续卷校验与消费侧总能看到非空 Volumes。
+	// 兜底归一（幂等，仅空值时）：Validate 可能在 Normalize（SetDefaults）前被调
+	// （如直接构造 &Config{...}.Validate()）——volumes 空视为未配合成单默认卷
+	// （name=default, root=StorageRoot）、placement 空归一 prefer-default，保证后续
+	// 卷校验与消费侧总能看到非空 Volumes 与合法 placement（假定或自行归一，两种路径均
+	// 得校验）。非空值（含用户显式非法值）不被改写，交由下方校验拒绝。
 	if len(c.Volumes) == 0 {
 		c.Volumes = []VolumeConfig{{Name: "default", Root: c.StorageRoot}}
 	}
-	// volumes/placement 校验（多卷）。placement 缺省 prefer-default 由 SetDefaults 归一；
-	// 直接 Validate（未 Normalize）时 placement 为空在此拒绝。卷名复用
-	// storage.ValidSegmentName 段名规则（拒绝空/绝对/..、.__ 魔法前缀、Windows 保留名
-	// 与非法字符），与租户/桶段名校验同一权威。
+	if c.Placement == "" {
+		c.Placement = "prefer-default"
+	}
+	// volumes/placement 校验（多卷）。卷名复用 storage.ValidSegmentName 段名规则
+	// （拒绝空/绝对/..、.__ 魔法前缀、Windows 保留名与非法字符），与租户/桶段名校验
+	// 同一权威。
 	switch c.Placement {
 	case "prefer-default", "spread":
 	default:

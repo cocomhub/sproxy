@@ -22,19 +22,28 @@ func TestVolumesConfig_DefaultsAndParse(t *testing.T) {
 	}
 }
 
-// TestVolumesConfig_LoadProvider_StorageRootOnlySynthesizesFollowingRoot 覆盖既有单卷
-// 配置的升级路径：YAML 仅改 storage_root、不写 volumes 时，归一后的合成默认卷 root 必须
-// 跟随 storage_root（而不是停在 Default() 的占位旧根 ./storage），保证写文件落在新根。
-func TestVolumesConfig_LoadProvider_StorageRootOnlySynthesizesFollowingRoot(t *testing.T) {
-	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{"storage_root": "/data/root"}})
+// TestVolumesConfig_SetDefaults_KeepsExplicitFirstVolumeRoot 锁定 M-4 红线：SetDefaults 只
+// 填充**空** root，绝不覆写用户显式写的非空 volumes[0].root——即便 storage_root 另配了
+// /data，显式 root /mnt/x 也必须保留（防归一阶段静默吞掉用户意图）。
+func TestVolumesConfig_SetDefaults_KeepsExplicitFirstVolumeRoot(t *testing.T) {
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"storage_root": "/data",
+		"volumes": []any{
+			map[string]any{"name": "default", "root": "/mnt/x"},
+		},
+	}})
 	if err != nil {
 		t.Fatalf("LoadFromProvider: %v", err)
 	}
-	if got := len(cfg.Volumes); got != 1 {
-		t.Fatalf("未配 volumes 应有合成单卷, got %d", got)
+	if len(cfg.Volumes) != 1 || cfg.Volumes[0].Root != "/mnt/x" {
+		t.Fatalf("显式 volumes[0].root 不应被 storage_root 覆写, got %+v", cfg.Volumes)
 	}
-	if cfg.Volumes[0].Name != "default" || cfg.Volumes[0].Root != "/data/root" {
-		t.Fatalf("合成默认卷应跟随 storage_root, got %+v", cfg.Volumes[0])
+	if cfg.Volumes[0].Name != "default" {
+		t.Fatalf("卷名应保留显式 default, got %q", cfg.Volumes[0].Name)
+	}
+	// 归一后显式 root 仍有效 → Validate 应通过（不因覆写而丢根）。
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
 }
 
@@ -56,6 +65,13 @@ func TestVolumesConfig_Validate(t *testing.T) {
 		}, "重复"},
 		{"非法卷名", func(c *Config) { c.Volumes[0].Name = ".." }, "非法"},
 		{"负容量", func(c *Config) { c.Volumes[0].VolCapacity = -1 }, "不能为负"},
+		{"非法 placement", func(c *Config) { c.Placement = "round-robin" }, "placement"},
+		{"非法 owner", func(c *Config) {
+			c.Volumes[0].ACL = &VolumeACLConfig{Mode: VolumeACLDeny, Owners: []string{"a/b"}}
+		}, "acl owners"},
+		{"非首卷空 root", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{Name: "disk2"})
+		}, "root"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
