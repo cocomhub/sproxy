@@ -31,15 +31,19 @@ type Volume struct {
 	ACL      ACL
 }
 
-// Authorize 判定 owner 是否可用本卷。fail-closed：allow 未命中即拒。
+// Authorize 判定 owner 是否可用本卷。ACL.Mode 假定已由 config Validate 校验为 allow|deny；
+// 此处对未知值 fail-closed：Mode==""（零值/未配，上游未设）归入 deny 开放语义（AD-6 兼容
+// 默认卷缺省开放），Mode 为其它非空未知字符串 → 拒绝。
 func (v Volume) Authorize(owner string) bool {
 	switch v.ACL.Mode {
 	case ModeAllow:
 		_, ok := v.ACL.Owners[owner]
 		return ok
-	default: // ModeDeny（含零值）：默认开放，黑名单命中才拒
+	case "", ModeDeny: // 零值/未配 或 deny：默认开放，黑名单命中才拒
 		_, banned := v.ACL.Owners[owner]
 		return !banned
+	default: // 未知/未来 mode：fail-closed
+		return false
 	}
 }
 
