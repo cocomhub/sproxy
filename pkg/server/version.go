@@ -533,13 +533,13 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 // saveVersionBeforeOverwrite 在文件即将被覆盖前保存旧版本。
-// 在 upload handler 中调用，如果版本管理启用则保存当前版本（按请求者租户根隔离）。
-func (h *Handlers) saveVersionBeforeOverwrite(r *http.Request, remotePath string) {
+// 在 upload handler 中调用，如果版本管理启用则保存当前版本。tnt 为旧文件实际所在卷的租户
+// （覆盖写 stay-home 定位后的 home 卷；单卷 = 默认租户）。version/ 桶随 user/ 文件同卷（AD-5）。
+func (h *Handlers) saveVersionBeforeOverwrite(r *http.Request, remotePath string, tnt *storage.Tenant) {
 	cfg := h.cfgPtr.Load()
 	if !cfg.Versioning.Enabled {
 		return
 	}
-	tnt := h.tenantOf(r)
 	if tnt == nil || tnt.Root() == nil {
 		h.logger.Warn("saveVersionBeforeOverwrite: 租户不可用", "remote_path", remotePath)
 		return

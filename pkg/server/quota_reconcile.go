@@ -161,8 +161,8 @@ func (h *Handlers) reconcileVolumePool(name string, tenantBuckets map[string]map
 	h.adjustVolumePool(name, tenantBuckets)
 }
 
-// reconcileVolumes 是多卷 reconcile 双目标框架（本任务立框架；T4 起由逐卷扫描喂入并随写路径
-// 一并验证）：volumeBuckets[卷名][tenant][bucket] = 该卷扫描归集的字节数。
+// reconcileVolumes 是多卷 reconcile 双目标框架：volumeBuckets[卷名][tenant][bucket] = 该卷
+// 扫描归集的字节数。
 //
 //  1. owner 全局 Scope 校准必须用**跨卷合计**——先把各卷按 owner/桶聚合成一份 tenantBuckets，
 //     再单次执行现有 reconcileQuotaScopes。不能逐卷 Adjust 同一 Scope：每卷扫描各自回调会把
@@ -186,4 +186,25 @@ func (h *Handlers) reconcileVolumes(volumeBuckets map[string]map[string]map[stri
 	for volName, tenantBuckets := range volumeBuckets {
 		h.adjustVolumePool(volName, tenantBuckets)
 	}
+}
+
+// reconcileVolumesFromDisk 逐卷扫描全部卷根（scanStorageDir，与 StorageManager 同分类逻辑）
+// 并把归集喂给 reconcileVolumes（F2：AD-7 重启/周期对账闭合——各卷容量池收敛到物理字节、
+// owner 全局 Scope 收敛到跨卷合计）。volSet nil（旧装配路径）为空操作。RegisterRoutes 多卷
+// 装配的 reconciler 直接消费本入口；测试亦可对无 StorageManager 的 Handlers 直接调用。
+func (h *Handlers) reconcileVolumesFromDisk() {
+	if h.volSet == nil {
+		return
+	}
+	vols := h.volSet.All()
+	volumeBuckets := make(map[string]map[string]map[string]int64, len(vols))
+	for _, v := range vols {
+		buckets, _, err := scanStorageDir(v.RootDir)
+		if err != nil {
+			h.logger.Error("逐卷扫描失败，跳过该卷校准", "volume", v.Name, "error", err)
+			continue
+		}
+		volumeBuckets[v.Name] = buckets
+	}
+	h.reconcileVolumes(volumeBuckets)
 }

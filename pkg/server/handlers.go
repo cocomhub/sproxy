@@ -690,9 +690,16 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	sm := NewStorageManager(vs.Default().RootDir, cfg.MaxStorageBytes, nil, log.With("component", "storage"))
 	defaultVolName := vs.defaultName
 	sm.SetReconciler(func(tenantBuckets map[string]map[string]int64) {
-		h.reconcileVolumePool(defaultVolName, tenantBuckets)
+		// 单卷（含缺省形态）：StorageManager 已扫默认卷 → reconcileVolumePool 双校准（零回归）。
+		if len(vs.volumes) == 1 {
+			h.reconcileVolumePool(defaultVolName, tenantBuckets)
+			return
+		}
+		// 多卷（F2，AD-7 闭合）：逐卷扫描全部卷根双校准——默认卷归集已由本次 ScanAndRecalculate
+		// 提供（tenantBuckets），其余卷在 reconcileVolumesFromDisk 内各自 scanStorageDir。
+		h.reconcileVolumesFromDisk()
 	})
-	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope（启动对账）
+	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope + 逐卷容量池（启动对账）
 	cloudCfg := &CloudDownloadConfig{
 		SyncThreshold:   cfg.CloudSyncThreshold,
 		MaxConcurrent:   cfg.CloudMaxConcurrent,

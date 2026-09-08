@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // resolveAndValidateFile 校验文件名并返回请求者租户 user 桶下的相对路径（如 user/dir/f.txt）。
@@ -70,12 +72,28 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return
+	// 跨卷定位（任务 5）：文件可能因换卷落在非默认卷。带显式 ?volume= 只在指定卷定位
+	// （不在视图/卷上无此文件 → 404，fail-closed）。全视图未命中回落默认租户，由 Open 产出
+	// 404/500（与单卷既有错误语义一致）。
+	owner := ownerFromRequest(r)
+	loc, found := h.locateForRead(owner, rel, r.URL.Query().Get("volume"))
+	var homeVol string
+	var root *storage.Root
+	if found && loc != nil && loc.tenant != nil {
+		homeVol = loc.volumeName
+		root = loc.tenant.Root()
+	} else {
+		if r.URL.Query().Get("volume") != "" {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
+			return
+		}
+		tnt := h.tenantFor(owner)
+		if tnt == nil || tnt.Root() == nil {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+			return
+		}
+		root = tnt.Root()
 	}
-	root := tnt.Root()
 
 	// 基于 fd 操作缩小 TOCTOU 窗口：先打开文件，再基于 fd 执行 Stat 和 checksum 校验
 	file, err := root.Open(rel)
@@ -152,6 +170,13 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	// 解析子 Scope（与写入同一键，父链聚合释放到子目录/user/租户各层）。
 	if scope := h.quotaScopeFor(ownerFromRequest(r), rel); scope != nil {
 		scope.ReleaseUsage(info.Size())
+	}
+	// 卷容量池双 Release（AD-7）：写入经双账本预留/提交，删除须释放文件所在卷池，否则卷池
+	// Usage 虚高（路由/换卷误判），依赖 reconcile 才自愈。homeVol 空（无卷语义旧装配）跳过。
+	if homeVol != "" && h.volSet != nil {
+		if pool := h.volSet.Pool(homeVol); pool != nil {
+			pool.Adjust(pool.Usage(), pool.Usage()-info.Size())
+		}
 	}
 	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
 		cs.Delete(rel)

@@ -133,37 +133,44 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 
 	explicitVol := r.FormValue("volume")
 
-	// 重复检测与版本管理（自动路由）：在默认卷根先做幂等/冲突/版本检查（与旧实现一致——
-	// 幂等同 checksum 重传在容量/配额检查前直接 200，不因卷满误拒）。显式 volume 不做此
-	// 检查：其语义是新文件定位，同名已存在（含同 checksum）一律由 routeUpload 唯一性 409。
-	// 注：多卷下文件若曾因换卷落在非默认卷，此处默认卷 stat 未命中属已知缺口（场景 B，
-	// T5 承重验收项「写前视图定位 rel → 命中强制回写原卷」）；本任务先闭合场景 A（覆盖写
-	// stay-home：默认卷命中 proceed → 强制默认卷）。
-	overwriteHomeDefault := false
+	// 重复检测与版本管理（自动路由）：先在视图内定位 rel 的 home 卷（写前定位，F1-A/F1-B），
+	// 对 home 卷根做幂等/冲突/版本检查（幂等同 checksum 重传在容量/配额检查前直接 200，不因
+	// 卷满误拒）。home 存在（默认卷或非默认卷都行）→ 覆盖写必须 stay-home 到 home 卷（容量
+	// 路由只用于新文件，否则同 rel 跨卷双份 + owner 双计）。显式 volume 不做此检查：其语义是
+	// 新文件定位，同名已存在（含同 checksum）一律由 routeUpload 唯一性 409。
+	forceHomeVol := ""
 	if explicitVol == "" {
-		// 幂等 200 / 版本备份分支在 routeUpload 之前回包，X-Volume 在此先置默认卷名
-		// （文件确实在默认卷根命中）；route 决出非默认卷时下方 Set 覆写。
-		if h.volSet != nil && h.volSet.defaultName != "" {
-			w.Header().Set(headerVolume, h.volSet.defaultName)
-		}
-		tnt0 := h.tenantFor(owner)
-		if tnt0 == nil || tnt0.Root() == nil {
+		homeTnt := h.tenantFor(owner) // 默认租户兜底（新文件 / 唯一根）
+		if homeTnt == nil || homeTnt.Root() == nil {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 			return
 		}
-		handled, existed := h.handleDuplicateFile(w, r, tnt0.Root(), rel, expectedChecksum, remotePath)
+		// 幂等 200 / 版本备份分支在 routeUpload 之前回包，X-Volume 在此先置 home 卷名
+		// （命中即真实所在卷）；route 决出其它卷时下方 Set 覆写（新文件容量路由场景）。
+		if loc, found := h.locateOwnerFile(owner, rel); found && loc != nil && loc.tenant != nil {
+			forceHomeVol = loc.volumeName
+			homeTnt = loc.tenant
+			if loc.volumeName != "" {
+				w.Header().Set(headerVolume, loc.volumeName)
+			}
+		} else if h.volSet != nil && h.volSet.defaultName != "" {
+			w.Header().Set(headerVolume, h.volSet.defaultName)
+		}
+		handled, existed := h.handleDuplicateFile(w, r, homeTnt, rel, expectedChecksum, remotePath)
 		if handled {
 			return // 幂等 200 / 冲突 409 已回包
 		}
-		// existed=true = 默认卷命中且继续（版本化覆盖写）→ 覆盖写必须 stay-home（F1-A），
-		// 容量路由只用于新文件，否则跨卷双份 + owner 双计。
-		overwriteHomeDefault = existed
+		// existed=true = home 卷命中且继续（版本化覆盖写）→ 覆盖写必须 stay-home（F1-A/B）。
+		// home 卷容量不足时 routeUpload 直接 507 不换卷（forceHomeVol 语义）。
+		if !existed {
+			forceHomeVol = "" // 新文件：交容量路由
+		}
 	}
 
-	// 卷路由 + 双账本预留（T4）：routeUpload 按 ACL/placement 选目标卷，在 owner 全局
+	// 卷路由 + 双账本预留（T4/T5）：routeUpload 按 ACL/placement 选目标卷，在 owner 全局
 	// Scope + 卷容量池双 TryReserve；显式 volume= 时做 ACL 校验与唯一性查重（403/409）；
-	// overwriteHomeDefault=true 时强制默认卷单候选（容量不足 507 不换卷）。
-	route, err := h.routeUpload(owner, rel, explicitVol, handler.Size, overwriteHomeDefault)
+	// forceHomeVol 非空时强制该 home 卷单候选（容量不足 507 不换卷）。
+	route, err := h.routeUpload(owner, rel, explicitVol, handler.Size, forceHomeVol)
 	if err != nil {
 		h.sendUploadRouteError(w, r, remotePath, err)
 		return
@@ -312,11 +319,16 @@ func (h *Handlers) resolveFilePath(w http.ResponseWriter, r *http.Request, filen
 }
 
 // handleDuplicateFile 检查文件是否存在，处理重复上传和版本管理逻辑。
-// 返回 handled=true 表示已处理并回包（调用方应 return）；existed=true 表示 rel 在 root 上
-// 已存在且走「继续写入」（版本化覆盖写 proceed 分支）——调用方据此推断 home 卷 = root 所在卷
-// （覆盖写 stay-home 不变式，F1-A）。root 为请求者租户根，rel 为租户根内相对路径。
-func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, r *http.Request, root *storage.Root, rel, expectedChecksum, remotePath string) (handled bool, existed bool) {
+// 返回 handled=true 表示已处理并回包（调用方应 return）；existed=true 表示 rel 在 homeTnt
+// 上已存在且走「继续写入」（版本化覆盖写 proceed 分支）——调用方据此强制 route 回
+// homeTnt 所在卷（覆盖写 stay-home 不变式，F1-A/F1-B）。homeTnt 为已定位的 home 卷租户
+// （自动路由写前 locateOwnerFile 定位；单卷 = 默认租户），rel 为租户根内相对路径。
+func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, r *http.Request, homeTnt *storage.Tenant, rel, expectedChecksum, remotePath string) (handled bool, existed bool) {
 	ctx := r.Context()
+	if homeTnt == nil || homeTnt.Root() == nil {
+		return false, false
+	}
+	root := homeTnt.Root()
 	stat, statErr := root.Stat(rel)
 	if statErr != nil {
 		return false, false // 文件不存在，继续正常上传（新文件或非本卷 home）
@@ -329,8 +341,8 @@ func (h *Handlers) handleDuplicateFile(w http.ResponseWriter, r *http.Request, r
 	}
 	cfg := h.cfgPtr.Load()
 	if cfg.Versioning.Enabled {
-		// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本
-		h.saveVersionBeforeOverwrite(r, remotePath)
+		// 版本管理启用时，checksum 不匹配视为有意覆盖旧版本（homeTnt 即旧文件所在卷）
+		h.saveVersionBeforeOverwrite(r, remotePath, homeTnt)
 		// 审查 I-3：覆盖动作记审计（含旧版本已保存的信息）。
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "overwrite", ObjectType: "file", Object: remotePath,

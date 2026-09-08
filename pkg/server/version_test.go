@@ -431,7 +431,7 @@ func TestSaveVersionBeforeOverwrite_InvalidPath(t *testing.T) {
 
 	// 空路径 → UserRel 校验失败，记录 warn 并返回（不 panic）。
 	req, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1/upload", nil)
-	h.saveVersionBeforeOverwrite(req, "")
+	h.saveVersionBeforeOverwrite(req, "", h.tenantOf(req))
 }
 
 func TestCleanupOldVersions_NoMaxVersions(t *testing.T) {
