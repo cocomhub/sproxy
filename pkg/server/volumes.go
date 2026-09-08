@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -554,9 +555,51 @@ func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
 	return nil, false
 }
 
+// volumePoolForTenant 返回 tnt 租户所在卷的容量池（版本桶/恢复等以 tenant 定位写盘但缺卷名
+// 上下文的路径补双账本用）。判定：比对租户根物理绝对路径与各卷根 <卷根>/<owner>（卷上租户由
+// volumeTenant/tenantFor 恰以该路径 OpenRoot 建立，故 clean 后精确相等）。volSet nil / 租户
+// 不可用 / 未命中任何卷 → nil（fail-closed，调用方按无卷语义跳过）。O(n)（n = 卷数，个位数），
+// 版本写/删低频路径可接受。
+func (h *Handlers) volumePoolForTenant(tnt *storage.Tenant) *quota.Pool {
+	if h.volSet == nil || tnt == nil || tnt.Root() == nil {
+		return nil
+	}
+	tenantAbs, ok := tnt.Root().Abs("")
+	if !ok {
+		return nil
+	}
+	tenantAbs = filepath.Clean(tenantAbs)
+	for _, v := range h.volSet.All() {
+		rt := h.volSet.Root(v.Name)
+		if rt == nil {
+			continue
+		}
+		volOwnerAbs, ok2 := rt.Abs(tnt.ID)
+		if !ok2 {
+			continue
+		}
+		if filepath.Clean(volOwnerAbs) == tenantAbs {
+			return h.volSet.Pool(v.Name)
+		}
+	}
+	return nil
+}
+
 // defaultVolumeAllows 判断 owner 是否被默认卷 ACL 放行（读/删/改名「未命中回落默认租户」前
 // 的护栏——默认卷不在 owner 视图时不得回落默认租户 Open，防经回落读到默认卷自身遗留文件）。
 // volSet nil（旧装配路径，无卷 ACL）→ 恒 true（唯一根即默认，零回归）。
+//
+// 排除面边界（F3/F4/F5 review 成文，不改行为）：本 ACL 门禁覆盖的是 **user 桶文件面**——T6b 触及
+// 的六类入口（batch delete/rename、search、share create/access、archive-dir、mkdir、uploadStatus
+// 探测）及 download/stat/单删/单改名/版本端点均经本函数/locateOwnerFile 收口，默认卷被排除时
+// 这些入口对默认卷 user 桶遗留一律不可见。以下为**设计内例外**（服务端自有桶/聚合面，不属 user
+// 文件门禁范围，§6「meta 单点权威 + 默认卷为元数据面」/§11「cloud/archive 产物落默认卷」）：
+//   - /api/stats 聚合（statsRootFor）：仍聚合默认卷 owner 根的**总量文件数/字节**（无文件名/内容）；
+//   - sync pull 目标（syncTenantRoot）：按 owner 解析默认卷 user 根，pull 产物写默认卷 user 桶；
+//   - cloud-archive 源/输出（cloud_archive_handler）：cloud 桶与 archive 桶均默认卷，owner 可经
+//     自建归档回读默认卷上自己生成的内容。
+//
+// 若未来把「排除」理解为撤销 owner 对默认卷一切内容访问，需另行调整上述聚合/服务端桶例外。
 func (h *Handlers) defaultVolumeAllows(owner string) bool {
 	owner = normalizeOwner(owner)
 	if h.volSet == nil {
@@ -564,6 +607,23 @@ func (h *Handlers) defaultVolumeAllows(owner string) bool {
 	}
 	v, ok := h.volSet.ByName(h.volSet.defaultName)
 	return ok && v.Authorize(owner)
+}
+
+// primaryViewTenant 返回 owner 视图内首个卷的租户（写新目录/新文件等「不跨卷写」入口用）。
+// 默认卷在视图时即默认租户（声明序首卷，单卷零回归）；默认卷被 ACL 排除时落到首个其它视图卷。
+// 视图全空 / 卷租户不可用返回 nil（调用方按 400 fail-closed）。volSet nil（旧装配）回落默认租户。
+func (h *Handlers) primaryViewTenant(owner string) *storage.Tenant {
+	owner = normalizeOwner(owner)
+	if h.volSet == nil {
+		return h.tenantFor(owner)
+	}
+	for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
+		tnt := h.volumeTenant(v.Name, owner)
+		if tnt != nil && tnt.Root() != nil {
+			return tnt
+		}
+	}
+	return nil
 }
 
 // locateForRead 是读/删/改名路径的卷定位统一入口（带可选显式 volume 过滤）：

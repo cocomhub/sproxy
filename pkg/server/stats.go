@@ -210,8 +210,14 @@ func statsCategoriesFromBuckets(buckets map[string]int64) (userFiles, cloud, chu
 	return userFiles, cloud, chunked, versions
 }
 
-// statsRootFor 返回 stats 遍历的根目录：认证用户 → 租户根（<storageRoot>/<owner>/）；
-// admin（空 owner）→ 存储根（<storageRoot>/）。globalRoot 未装配时回退 StorageRoot()。
+// statsRootFor 返回 stats 遍历的根目录：认证用户 → 租户根（<默认卷根>/<owner>/）；
+// admin（空 owner）→ 存储根（<默认卷根>/）。globalRoot 未装配时回退
+// resolveDefaultVolumeRoot(cfg)（默认卷根——显式 volumes[0].root ≠ storage_root 分叉时
+// stats 必须遍历默认卷而非 cfg.StorageRoot，PR-B 终审建议 9）。
+//
+// 排除面边界（F3 review 成文）：stats 聚合属默认卷 ACL 排除面的**设计内例外**——默认卷被排除时
+// 仍返回 owner 默认卷根的聚合总量（文件数/字节，无文件名/内容）。见 volumes.go defaultVolumeAllows
+// 边界注释。不改行为，仅记录避免未来误判为漏洞。
 func (h *Handlers) statsRootFor(owner string) string {
 	if owner != "" {
 		if tnt := h.tenantFor(owner); tnt != nil {
@@ -220,12 +226,12 @@ func (h *Handlers) statsRootFor(owner string) string {
 			}
 		}
 		// 租户不可用（globalRoot 未装配的旧测试装配 / 非法 owner fail-closed）时，
-		// 按段名校验派生旧布局路径（<storageRoot>/<owner>/）；非法 owner 返回空（无统计根）。
+		// 按段名校验派生旧布局路径（<默认卷根>/<owner>/）；非法 owner 返回空（无统计根）。
 		if !storage.ValidSegmentName(owner) {
 			return ""
 		}
 		if cfg := h.cfgPtr.Load(); cfg != nil {
-			return filepath.Join(cfg.StorageRoot, owner)
+			return filepath.Join(resolveDefaultVolumeRoot(cfg), owner)
 		}
 		return ""
 	}
@@ -235,7 +241,7 @@ func (h *Handlers) statsRootFor(owner string) string {
 		}
 	}
 	if cfg := h.cfgPtr.Load(); cfg != nil {
-		return cfg.StorageRoot
+		return resolveDefaultVolumeRoot(cfg)
 	}
 	return ""
 }
@@ -255,7 +261,7 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp := StatsResponse{
 		DiskUsage: DiskUsageStats{
-			StorageRoot: cfg.StorageRoot,
+			StorageRoot: resolveDefaultVolumeRoot(cfg),
 			TotalFiles:  totalFiles,
 			TotalSize:   totalSize,
 		},
@@ -331,8 +337,8 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 磁盘统计
-	total, free, used, err := diskStats(cfg.StorageRoot)
+	// 磁盘统计（默认卷根——分叉配置下 stats 反映默认卷所在磁盘，而非 cfg.StorageRoot）
+	total, free, used, err := diskStats(resolveDefaultVolumeRoot(cfg))
 	if err != nil {
 		h.logger.Warn("stats: 获取磁盘统计失败", "error", err)
 	} else {

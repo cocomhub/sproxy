@@ -98,6 +98,16 @@ func (p *Pool) Adjust(prev, next int64) {
 	p.adjustUp(next - prev)
 }
 
+// ReleaseCommitted 释放本池已确认占用 n（文件/版本删除按实际删除字节从 committed 扣减）。
+// 语义与 Adjust 同域但面向「已知删除量」：Adjust(prev,next) 传新旧两值差分，本方法直接
+// 扣减 n（等价 Adjust(Usage, Usage−n) 的**原子单锁**版本——替换 delete/rmdir/版本删除
+// 原先「读 Usage 两次 + Adjust」非原子序列，防并发写路径与释放交错时读-改-写竞态欠校）。
+// 只调本池自身（根池无父链），不触碰 reserved，防下溢归零（绝不反负）。n<=0 为空操作。
+// 调用方须保证本池无挂载子层 Scope（与 Adjust 同约束——server 侧每卷容量池为独立根池）。
+func (p *Pool) ReleaseCommitted(n int64) {
+	p.releaseCommittedUp(nonNeg(n))
+}
+
 // newScope 创建路径为父路径拼接 path 的新子作用域，其底层账本挂到本池之下。
 func (p *Pool) newScope(path string, maxBytes int64) *Scope {
 	child := &Pool{

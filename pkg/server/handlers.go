@@ -360,7 +360,13 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 	if cfg != nil {
 		sessionTTL = cfg.UploadSessionTTL
 	}
-	us, err := NewUploadStore(chunkAbs, sessionTTL, h.logger.With("component", "upload_store", "tenant", owner))
+	// 多卷（AD-5）：会话可跨卷定卷，UploadStore 需按 session.Volume 解析目标卷租户根
+	// （temp 文件删除/恢复/过期清理）。**卷根注册必须先于 NewUploadStore 的 recoverSessions**
+	// ——recover 按 session.Volume 解析在途 temp 文件，非默认卷会话若未预注册会把 temp 解析
+	// 到默认卷 → 打开失败清空 bitmap → 断点续传退化为整文件重传（T6a 修复轮发现-1）。
+	// Root.Abs 只推导不创建目录（无副作用——目标卷租户目录仍由写路径首次使用时懒建）。
+	us, err := NewUploadStore(chunkAbs, sessionTTL, h.logger.With("component", "upload_store", "tenant", owner),
+		h.uploadVolumeRootsFor(owner))
 	if err != nil {
 		h.logger.Error("创建 per-tenant UploadStore 失败", "tenant", owner, "error", err)
 		return nil
@@ -370,6 +376,28 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 	us.SetStorageMgr(h.storageMgr)
 	h.uploadStores[owner] = us
 	return us
+}
+
+// uploadVolumeRootsFor 返回 owner 在各**非默认**卷的租户根绝对路径映射（供 UploadStore
+// recover/DeleteSession/cleanupExpired 按 session.Volume 解析目标卷 temp 路径）。
+// 默认卷（""）回落 UploadStore.baseDir 父目录，无需注册。Root.Abs 只推导不创建目录。
+// 调用方须已持 h.tenantMu（uploadStoreFor 内调用）。
+func (h *Handlers) uploadVolumeRootsFor(owner string) map[string]string {
+	roots := map[string]string{}
+	if h.volSet == nil {
+		return roots
+	}
+	for _, v := range h.volSet.All() {
+		if v.Name == h.volSet.defaultName {
+			continue
+		}
+		if rt := h.volSet.Root(v.Name); rt != nil {
+			if abs, ok := rt.Abs(owner); ok {
+				roots[v.Name] = abs
+			}
+		}
+	}
+	return roots
 }
 
 // quotaBucketNames 是参与配额归集的功能桶名（对应租户根下的物理桶；meta 桶的配额
@@ -713,7 +741,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		RetryDelay:      cfg.CloudRetryDelay,
 		Downloader:      cfg.CloudDownloader,
 	}
-	h.cloudMgr = NewCloudDownloadManager(cfg.StorageRoot, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
+	h.cloudMgr = NewCloudDownloadManager(vs.Default().RootDir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
 		return h.quotaBucketFor(owner, "cloud")
 	})
 	h.storageMgr = sm
@@ -737,6 +765,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	localMux.HandleFunc("GET /api/versions", h.listVersionsHandler)
 	localMux.HandleFunc("POST /api/versions/restore", h.restoreVersionHandler)
 	localMux.HandleFunc("DELETE /api/versions", h.deleteVersionHandler)
+	// 卷 API（隧道内层裸注册：隧道加密即认证，与版本/share 同模式）
+	localMux.HandleFunc("GET /api/volumes", h.listVolumesHandler)
+	localMux.HandleFunc("POST /api/volumes/move", h.moveVolumeHandler)
 	localMux.HandleFunc("GET /api/stats", h.statsHandler)
 	localMux.HandleFunc("GET /api/config", h.configHandler)
 	localMux.HandleFunc("PUT /api/config", h.updateConfigHandler)
@@ -839,6 +870,9 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /api/versions", h.fileRoute(h.listVersionsHandler))
 	srvMux.HandleFunc("POST /api/versions/restore", h.fileRoute(h.restoreVersionHandler))
 	srvMux.HandleFunc("DELETE /api/versions", h.fileRoute(h.deleteVersionHandler))
+	// 卷 API（主 mux：fileRoute = authMiddleware + requireRole(user)，per-owner 文件面）
+	srvMux.HandleFunc("GET /api/volumes", h.fileRoute(h.listVolumesHandler))
+	srvMux.HandleFunc("POST /api/volumes/move", h.fileRoute(h.moveVolumeHandler))
 	srvMux.HandleFunc("GET /api/stats", h.authMiddleware(h.statsHandler))
 	srvMux.HandleFunc("GET /api/config", h.authMiddleware(h.configHandler))
 	srvMux.HandleFunc("PUT /api/config", h.authMiddleware(h.updateConfigHandler))
@@ -1084,6 +1118,7 @@ func isFileGroupedRoute(path string) bool {
 		"/mkdir", "/rmdir", "/api/batch/delete", "/api/batch/rename",
 		"/api/archive", "/api/archive-dir",
 		"/api/versions", "/api/versions/restore",
+		"/api/volumes", "/api/volumes/move",
 		"/api/share", "/api/shares",
 		// 分块上传/下载（主 mux 面均挂 fileRoute——见 RegisterRoutes 装配处清单）；
 		// 前缀含两个入口：/upload/{init,chunk,status,sessions,complete}。
@@ -1198,16 +1233,18 @@ func (h *Handlers) bootstrapCredentials(opts RegisterRoutesOpts) {
 
 // BootstrapServerCredentials 是生产装配入口：为服务端准备凭据 Ring + store
 // （供 cmd/sproxy 在 RegisterRoutes 与 hub 装配之前调用，随后把二者注入 opts）。
-//   - store = <storage_root>/anonymous/meta/credentials.json（服务端级全局凭据，
-//     anonymous 租户的 meta 桶；多租户部署如需 per-owner 凭据经 /api/credentials
-//     管理，见任务 5）；
+//   - store = <默认卷根>/anonymous/meta/credentials.json（服务端级全局凭据，anonymous
+//     租户的 meta 桶；多租户部署如需 per-owner 凭据经 /api/credentials 管理，见任务 5）。
+//     **默认卷根经 resolveDefaultVolumeRoot 裁决**（非 cfg.StorageRoot）——显式
+//     volumes[0].root ≠ storage_root 分叉时凭据必须落默认卷 meta（AD-5 meta 归属默认卷
+//     不变式；否则重启凭据 Ring 丢失，PR-B 终审建议 9）。
 //   - 载入既有快照；**U3：不再生成首启 anonymous 凭据**——store 为空则返回空 Ring，
 //     系统以零凭据等待 register 公开端点（首个回环注册者授 admin）。
 func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ring, accesskey.CredentialStorer, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	metaDir := filepath.Join(cfg.StorageRoot, anonymousOwner, "meta")
+	metaDir := filepath.Join(resolveDefaultVolumeRoot(cfg), anonymousOwner, "meta")
 	var store accesskey.CredentialStorer = NewCredentialStore(metaDir)
 	// 4C-2：credential_store.encrypt=true 时把凭据文件包装为加密静态存储
 	// （EncryptingStorer，按 backend 选 SecureStorer）——cmd 与 opts 注入面不变
@@ -1453,8 +1490,8 @@ func (h *Handlers) webRedirect(w http.ResponseWriter, r *http.Request) {
 }
 
 // cleanupUploadingFilesLoop 定期清理 uploadingFiles 中已过期（不存在对应 session）的条目。
-// 普通 upload 条目 value 为 "upload"（无 session），直接跳过。
-// 作为 goroutine 在 RegisterRoutes 中启动，由 Close() 通过关闭 uploadingStop 停止。
+// 作为 goroutine 在 RegisterRoutes 中启动，由 Close() 通过关闭 uploadingStop 停止；单次清理
+// 委托 cleanupUploadingFilesPass（独立可测）。
 func (h *Handlers) cleanupUploadingFilesLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
@@ -1463,31 +1500,38 @@ func (h *Handlers) cleanupUploadingFilesLoop() {
 		case <-h.uploadingStop:
 			return
 		case <-ticker.C:
-			h.uploadingFiles.Range(func(key, value any) bool {
-				filename, ok := key.(string)
-				if !ok {
-					return true
-				}
-				uploadID, ok := value.(string)
-				if !ok {
-					return true
-				}
-				// 普通 upload 条目 value 为 "upload"，无对应 session，跳过
-				if uploadID == "upload" {
-					return true
-				}
-				// 分块上传条目 value 为 upload_id（裸 id）。uploadingFiles key 为
-				// <tnt.ID>\x00<rel>（chunked init 与 upload handler 同格式），从 key 解析
-				// 租户名取 per-tenant store 判断会话是否已不存在（则清理过期条目）。
-				owner := ""
-				if before, _, ok0 := strings.Cut(filename, "\x00"); ok0 {
-					owner = before
-				}
-				if us := h.uploadStoreFor(owner); us != nil && us.GetSession(uploadID) == nil {
-					h.uploadingFiles.Delete(filename)
-				}
-				return true
-			})
+			h.cleanupUploadingFilesPass()
 		}
 	}
+}
+
+// cleanupUploadingFilesPass 执行一轮 uploadingFiles 过期清理。
+// 普通 upload 条目 value 为 "upload"、move 锁条目 value 为 "move"——两者都无对应 session，
+// 直接跳过（若把 "move" 当 upload_id 查 GetSession("move")==nil 会误删锁条目：超 10 分钟的
+// 长 move 持锁被清理 → 同 rel 并发 move 越过锁，T6c 修复轮建议 1）。
+func (h *Handlers) cleanupUploadingFilesPass() {
+	h.uploadingFiles.Range(func(key, value any) bool {
+		filename, ok := key.(string)
+		if !ok {
+			return true
+		}
+		uploadID, ok := value.(string)
+		if !ok {
+			return true
+		}
+		if uploadID == "upload" || uploadID == "move" {
+			return true
+		}
+		// 分块上传条目 value 为 upload_id（裸 id）。uploadingFiles key 为
+		// <tnt.ID>\x00<rel>（chunked init 与 upload handler 同格式），从 key 解析
+		// 租户名取 per-tenant store 判断会话是否已不存在（则清理过期条目）。
+		owner := ""
+		if before, _, ok0 := strings.Cut(filename, "\x00"); ok0 {
+			owner = before
+		}
+		if us := h.uploadStoreFor(owner); us != nil && us.GetSession(uploadID) == nil {
+			h.uploadingFiles.Delete(filename)
+		}
+		return true
+	})
 }

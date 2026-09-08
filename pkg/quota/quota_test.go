@@ -705,3 +705,63 @@ func TestPool_TryReserveZeroAndNegative(t *testing.T) {
 		t.Fatalf("零预留后 Reserved=%d want 0", got)
 	}
 }
+
+// TestPool_ReleaseCommitted 验证 Pool.ReleaseCommitted 原子释放已确认占用（PR-C 终审 Minor：
+// delete/rmdir 卷池释放原「读 Usage 两次 + Adjust」非原子序列收敛为单方法）：
+//   - 直接扣减 committed（与 Adjust 同锁内语义，无 reserved 参与）；
+//   - 超额释放防下溢归零不反负；
+//   - 负值/零释放为空操作；
+//   - 与 Adjust(0, n)（入账）互逆：Adjust(0, 30) → ReleaseCommitted(10) → committed 20。
+func TestPool_ReleaseCommitted(t *testing.T) {
+	pool := NewPool(100)
+	pool.Adjust(0, 30) // 入账 30（diff 语义）
+	if got := pool.Usage(); got != 30 {
+		t.Fatalf("入账后 Usage=%d want 30", got)
+	}
+	pool.ReleaseCommitted(10) // 释放 10 → 20
+	if got := pool.Usage(); got != 20 {
+		t.Fatalf("释放 10 后 Usage=%d want 20", got)
+	}
+	if got := pool.Reserved(); got != 0 {
+		t.Fatalf("ReleaseCommitted 不应触碰 Reserved, got %d", got)
+	}
+	// 超额释放防下溢：comitted 20，释放 100 → 归 0 不反负。
+	pool.ReleaseCommitted(100)
+	if got := pool.Usage(); got != 0 {
+		t.Fatalf("超额释放后 Usage=%d want 0（钳制不反负）", got)
+	}
+	// 零/负释放为空操作（nonNeg）。
+	pool.Adjust(0, 5)
+	pool.ReleaseCommitted(0)
+	pool.ReleaseCommitted(-3)
+	if got := pool.Usage(); got != 5 {
+		t.Fatalf("零/负释放应不改变 Usage, got %d", got)
+	}
+}
+
+// TestPool_ReleaseCommitted_AtomicNoReservedSideEffect 验证 ReleaseCommitted 不触碰在途预留：
+// 预留中的额度不能被「释放 committed」误还（reserved 与 committed 独立账本）。
+func TestPool_ReleaseCommitted_AtomicNoReservedSideEffect(t *testing.T) {
+	pool := NewPool(100)
+	res, err := pool.TryReserve(20) // reserved 20
+	if err != nil {
+		t.Fatalf("TryReserve(20): %v", err)
+	}
+	res.Commit(20) // reserved 0 / committed 20（正常写路径对账）
+	pool.Adjust(0, 10)
+	res2, err := pool.TryReserve(10) // reserved 10（另一在途写）
+	if err != nil {
+		t.Fatalf("TryReserve(10): %v", err)
+	}
+	pool.ReleaseCommitted(15) // committed 30 → 15；reserved 10 不受影响
+	if got := pool.Usage(); got != 15 {
+		t.Fatalf("ReleaseCommitted 后 Usage=%d want 15", got)
+	}
+	if got := pool.Reserved(); got != 10 {
+		t.Fatalf("ReleaseCommitted 不应影响在途预留 Reserved=%d want 10", got)
+	}
+	res2.Release()
+	if got := pool.Reserved(); got != 0 {
+		t.Fatalf("Release 后 Reserved=%d want 0", got)
+	}
+}

@@ -19,6 +19,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // VersionInfo 版本信息。
@@ -65,32 +66,50 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 
 	verRel := verDir + "/" + strconv.FormatInt(versionID, 10)
 
-	// P5 版本桶配额：写版本文件前预留源文件大小（版本是旧文件的拷贝，字节计入租户
-	// version 桶 Scope），写入成功后 Commit(actual)；失败/放弃 Release。配额不足时
-	// 拒绝保存版本（调用方 best-effort：覆盖写路径跳过版本，恢复路径 500 中止）。
-	var res *quota.Reservation
+	// P5 版本桶配额（双账本 reserve-then-commit，AD-7）：写版本文件前在 owner 全局 version 桶
+	// Scope 与 home 卷容量池**同时预留**源文件大小（版本是旧文件拷贝，字节计入 version 桶
+	// Scope + 该卷容量池），写入成功后 Commit(actual)；失败/放弃双 Release。任一侧配额不足即
+	// 拒绝保存版本（调用方语义与单卷 owner 全局 version Scope 满一致：覆盖写 best-effort 跳过
+	// 版本、恢复路径 500 中止）——卷容量对版本字节由预留封顶（T6c 安全②：不再事后 Adjust
+	// fail-open，防借版本反复写把卷堆满）。
+	pool := h.volumePoolForTenant(tnt)
+	var scopeRes, poolRes *quota.Reservation
 	if scope := h.quotaBucketFor(owner, "version"); scope != nil {
 		rr, reserveErr := scope.TryReserve(srcSize)
 		if reserveErr != nil {
 			return 0, fmt.Errorf("保存版本: 存储配额不足: %w", reserveErr)
 		}
-		res = rr
+		scopeRes = rr
+	}
+	if pool != nil {
+		rr, reserveErr := pool.TryReserve(srcSize)
+		if reserveErr != nil {
+			if scopeRes != nil {
+				scopeRes.Release()
+			}
+			return 0, fmt.Errorf("保存版本: 卷容量不足: %w", reserveErr)
+		}
+		poolRes = rr
+	}
+	releaseRes := func() {
+		if scopeRes != nil {
+			scopeRes.Release()
+		}
+		if poolRes != nil {
+			poolRes.Release()
+		}
 	}
 
 	src, err := root.Open(fullRel)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		return 0, fmt.Errorf("打开源文件失败: %w", err)
 	}
 	defer src.Close()
 
 	dst, err := root.OpenFile(verRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		return 0, fmt.Errorf("创建版本文件失败: %w", err)
 	}
 	defer dst.Close()
@@ -105,9 +124,7 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 	written, err := io.Copy(multiWriter, src)
 	if err != nil {
 		_ = root.Remove(verRel)
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		return 0, fmt.Errorf("复制版本文件失败: %w", err)
 	}
 	checksum := hex.EncodeToString(hasher.Sum(nil))
@@ -123,19 +140,21 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
 	if err := dst.Sync(); err != nil {
 		_ = root.Remove(verRel)
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		return 0, fmt.Errorf("同步版本文件失败: %w", err)
 	}
 
-	// P5 配额对账：Commit(actual)（多预留部分自动归还）。
-	if res != nil {
-		res.Commit(written)
-		res = nil
+	// P5 配额对账：双 Commit(actual)（多预留部分自动归还，预留转 committed）。
+	if scopeRes != nil {
+		scopeRes.Commit(written)
+		scopeRes = nil
+	}
+	if poolRes != nil {
+		poolRes.Commit(written)
+		poolRes = nil
 	}
 
-	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope）。
+	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope + 卷容量池）。
 	h.cleanupOldVersions(userRel, tnt, owner)
 
 	h.logger.Info("文件版本已保存", "file_name", userRel, "version_id", versionID)
@@ -144,13 +163,17 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 
 // releaseVersionUsage 释放 version 桶 Scope 中已确认占用的版本文件字节（P5）。
 // 删除版本文件后按删除前 stat 的文件大小释放，避免 version 桶 committed 虚高
-// 依赖周期扫描自愈。size<=0 时为空操作。
-func (h *Handlers) releaseVersionUsage(owner string, size int64) {
+// 依赖周期扫描自愈。tnt 为版本文件所在卷租户——版本字节同时释放所在卷容量池
+// （T6c 发现-3 双账本，与 saveVersion 写侧 Adjust 对称）。size<=0 时为空操作。
+func (h *Handlers) releaseVersionUsage(tnt *storage.Tenant, owner string, size int64) {
 	if size <= 0 {
 		return
 	}
 	if scope := h.quotaBucketFor(owner, "version"); scope != nil {
 		scope.ReleaseUsage(size)
+	}
+	if pool := h.volumePoolForTenant(tnt); pool != nil {
+		pool.ReleaseCommitted(size)
 	}
 }
 
@@ -212,7 +235,7 @@ func (h *Handlers) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner
 			h.logger.Warn("删除旧版本文件失败", "path", delRel, "error", err)
 			continue
 		}
-		h.releaseVersionUsage(owner, delSize)
+		h.releaseVersionUsage(tnt, owner, delSize)
 	}
 }
 
@@ -235,9 +258,12 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+	tnt, _, ok := h.resolveVersionTarget(ownerFromRequest(r), remotePath)
+	if !ok || tnt == nil || tnt.Root() == nil {
+		// F1（review 收口）：resolveVersionTarget !ok 仅当「默认卷被 ACL 排除 + 视图内无可见
+		// 文件/版本目录」——按 404 文件不存在（与默认卷开放形态下 restore/delete 的「不存在」
+		// 404 及单卷「文件不存在」语义一致；默认卷开放的 list 200-空回落路径不受影响，恒 ok）。
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		return
 	}
 	root := tnt.Root()
@@ -313,9 +339,12 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+	tnt, _, ok := h.resolveVersionTarget(ownerFromRequest(r), remotePath)
+	if !ok || tnt == nil || tnt.Root() == nil {
+		// F1（review 收口）：resolveVersionTarget !ok 仅当「默认卷被 ACL 排除 + 视图内无可见
+		// 文件/版本目录」——按 404 文件不存在（与默认卷开放形态下 restore/delete 的「不存在」
+		// 404 及单卷「文件不存在」语义一致；默认卷开放的 list 200-空回落路径不受影响，恒 ok）。
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		return
 	}
 	root := tnt.Root()
@@ -360,13 +389,16 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 	// user 桶字节——缺失配额可反复 restore 突破租户上限。与 upload 对齐：TryReserve(版本大小)
 	// 预留 → 拷贝成功后 Adjust(prev, actual)（覆盖写）/ Commit(actual)（新文件）；失败 Release()。
 	// scope 按目标 user 桶 rel 解析（与 upload 同一键），子目录配额逐级检查自动生效。
+	// 卷容量池同族（T6c 安全② reserve-then-commit）：恢复新增/覆盖的 user 字节同样先 TryReserve
+	// home 卷容量池（写前封顶，不再只事后 Adjust fail-open），任一侧配额不足 → 507 拒绝恢复。
 	scope := h.quotaScopeFor(ownerFromRequest(r), targetRel)
+	pool := h.volumePoolForTenant(tnt)
 	prev := int64(0)
-	var res *quota.Reservation
+	if st, statErr := root.Stat(targetRel); statErr == nil {
+		prev = st.Size()
+	}
+	var res, poolRes *quota.Reservation
 	if scope != nil {
-		if st, statErr := root.Stat(targetRel); statErr == nil {
-			prev = st.Size()
-		}
 		rr, reserveErr := scope.TryReserve(verInfo.Size())
 		if reserveErr != nil {
 			h.RecordAudit(r.Context(), AuditEvent{
@@ -378,13 +410,34 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		}
 		res = rr
 	}
+	if pool != nil {
+		rr, reserveErr := pool.TryReserve(verInfo.Size())
+		if reserveErr != nil {
+			if res != nil {
+				res.Release()
+			}
+			h.RecordAudit(r.Context(), AuditEvent{
+				Action: "version_restore", ObjectType: "file", Object: remotePath,
+				Result: AuditResultError, Detail: "卷容量不足，拒绝恢复",
+			})
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "存储配额不足"}, http.StatusInsufficientStorage)
+			return
+		}
+		poolRes = rr
+	}
+	releaseRes := func() {
+		if res != nil {
+			res.Release()
+		}
+		if poolRes != nil {
+			poolRes.Release()
+		}
+	}
 
 	// 拷贝版本文件到目标位置
 	src, err := root.Open(verRel)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "打开版本文件失败: " + versionIDStr,
@@ -396,9 +449,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	dst, err := root.OpenFile(targetRel, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "创建目标文件失败: " + versionIDStr,
@@ -410,9 +461,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 
 	written, err := io.Copy(dst, src)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "恢复文件失败: " + versionIDStr,
@@ -421,9 +470,7 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if syncErr := dst.Sync(); syncErr != nil {
-		if res != nil {
-			res.Release()
-		}
+		releaseRes()
 		h.RecordAudit(r.Context(), AuditEvent{
 			Action: "version_restore", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "同步文件失败: " + versionIDStr,
@@ -432,13 +479,22 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// P4/P5 配额对账：覆盖写 Adjust(prev, written)；新文件 Commit(written)。
+	// P4/P5 配额对账：覆盖写 Adjust(prev, written) + Release 预留；新文件 Commit(written)。
+	// owner 全局 scope 与卷容量池同语义（卷池侧同样 reserve-then-commit，物理字节入卷池）。
 	if res != nil {
 		if prev > 0 {
 			scope.Adjust(prev, written)
 			res.Release()
 		} else {
 			res.Commit(written)
+		}
+	}
+	if poolRes != nil {
+		if prev > 0 {
+			pool.Adjust(prev, written)
+			poolRes.Release()
+		} else {
+			poolRes.Commit(written)
 		}
 	}
 
@@ -485,9 +541,12 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+	tnt, _, ok := h.resolveVersionTarget(ownerFromRequest(r), remotePath)
+	if !ok || tnt == nil || tnt.Root() == nil {
+		// F1（review 收口）：resolveVersionTarget !ok 仅当「默认卷被 ACL 排除 + 视图内无可见
+		// 文件/版本目录」——按 404 文件不存在（与默认卷开放形态下 restore/delete 的「不存在」
+		// 404 及单卷「文件不存在」语义一致；默认卷开放的 list 200-空回落路径不受影响，恒 ok）。
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
 		return
 	}
 	root := tnt.Root()
@@ -518,7 +577,7 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
-	h.releaseVersionUsage(ownerFromRequest(r), delSize)
+	h.releaseVersionUsage(tnt, ownerFromRequest(r), delSize)
 
 	// 清理 checksumStore 中对应的版本记录（key = version/<rel>/<id>，无 owner 前缀）
 	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
@@ -530,6 +589,49 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		Result: AuditResultSuccess, Detail: "version_id=" + versionIDStr,
 	})
 	sendJSONResponse(w, UploadResponse{Success: true, Message: "版本已删除"}, http.StatusOK)
+}
+
+// resolveVersionTarget 解析版本操作的作用租户与 user 桶 rel（T6a/T6b：版本端点 home 卷定位 +
+// 孤儿版本跨卷闭合）。版本桶随 user 文件所在卷（AD-5，saveVersion 已按 home 卷写 version/）。
+// 定位顺序：
+//  1. locateOwnerFile 命中 user 文件 home 卷 → 同卷 version 桶操作（多卷 disk2 文件的版本可见）；
+//  2. user 文件 miss（已删除）→ 遍历 owner 视图卷找 version/<remotePath> 目录（孤儿版本闭合，
+//     保「删文件保留版本可恢复」语义——list/restore/delete 仍可作用于孤儿版本所在卷）；
+//  3. 全视图无版本目录：默认卷在视图内回落默认租户（与单卷「文件无版本 → 空列表」兼容）；
+//     默认卷不在 owner 视图则返回 false（fail-closed，ACL 不泄漏）。
+func (h *Handlers) resolveVersionTarget(owner, remotePath string) (*storage.Tenant, string, bool) {
+	owner = normalizeOwner(owner)
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, "", false
+	}
+	rel, ok := tnt.UserRel(remotePath)
+	if !ok {
+		return nil, "", false
+	}
+	if h.volSet != nil {
+		// 1) user 文件在视图内 → 该 home 卷租户（版本同卷 AD-5）。
+		if loc, found := h.locateOwnerFile(owner, rel); found && loc != nil && loc.tenant != nil && loc.tenant.Root() != nil {
+			return loc.tenant, rel, true
+		}
+		// 2) user 文件 miss → 孤儿版本跨卷闭合：遍历 owner 视图卷找 version/<remotePath> 目录。
+		if verRel, vok := tnt.FeatureRel("version", remotePath); vok {
+			for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
+				exists, err := h.volumeFileExists(v.Name, owner, verRel)
+				if err != nil || !exists {
+					continue
+				}
+				if vt := h.volumeTenant(v.Name, owner); vt != nil && vt.Root() != nil {
+					return vt, rel, true
+				}
+			}
+		}
+		// 3) 默认卷不在视图 → 不回落（fail-closed）。
+		if !h.defaultVolumeAllows(owner) {
+			return nil, "", false
+		}
+	}
+	return tnt, rel, true
 }
 
 // saveVersionBeforeOverwrite 在文件即将被覆盖前保存旧版本。

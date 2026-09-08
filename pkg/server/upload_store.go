@@ -39,12 +39,23 @@ type ChunkedUploadSession struct {
 	// TempPath 是任务 4 分块在途整文件的存储根相对路径（user 桶下，如
 	// user/.inflight-<hash16>-<upload_id>.part）。init 创建并截断（Truncate(TotalSize)），
 	// chunk 经 seek+BoundWriter 直写，complete 校验后 rename 为正式名，会话删除/过期删除。
-	// 持久化（重启后可恢复续传；恢复时按内容重新校验分片）。
+	// 持久化（重启后可恢复续传；恢复时按内容重新校验分片）。TempPath 相对**目标卷**租户根
+	// （Volume 决定在哪个卷上解析）。
 	TempPath string `json:"temp_path,omitempty"`
+
+	// Volume 是 init 经 routeUpload 定卷的目标卷名（空 = 默认卷 / 单卷旧会话，多卷装配前
+	// 全部为空 → 解析为默认租户，零回归）。version/chunk 桶与目标 user 文件同卷（AD-5）。
+	// 持久化：重启恢复时按 Volume 在对应卷租户根解析 TempPath。
+	Volume string `json:"volume,omitempty"`
 
 	// Reservation 是分块上传的租户配额预留句柄（P4）。init 预留、complete Commit、
 	// 会话删除/过期 Release。不持久化（json:"-"），重启后内存预留丢失，由上游对账补齐。
 	Reservation *quota.Reservation `json:"-"`
+
+	// Pool/PoolRes 是 routeUpload 双账本的卷容量池预留句柄（T4/AD-7，volSet 装配时启用）。
+	// init 预留、complete Commit/Adjust、会话删除/过期 Release。不持久化（json:"-"）。
+	Pool    *quota.Pool        `json:"-"`
+	PoolRes *quota.Reservation `json:"-"`
 	// StorageMgrReserved 是 storageMgr 回退预留的字节数（P5，quota 未装配时启用）。
 	// 与 Reservation 二选一：scope 预留走 Reservation，storageMgr 回退走本字段。
 	// 会话删除/过期/完成时按此释放；不持久化（json:"-"），重启后由对账补齐。
@@ -124,7 +135,7 @@ func (l *ChunkFileLocker) DeleteLock(uploadID string) {
 type UploadStore struct {
 	mu         sync.RWMutex
 	writeMu    sync.Mutex // 串行化 writeSessionJSON，防止 Windows rename 竞争
-	baseDir    string     // 租户 chunk 桶绝对路径（<root>/<owner>/chunk/），会话目录直接位于其下
+	baseDir    string     // 默认卷租户 chunk 桶绝对路径（<默认卷根>/<owner>/chunk/），会话目录直接位于其下
 	sessions   map[string]*ChunkedUploadSession
 	locker     *ChunkFileLocker // chunk 文件并发锁
 	persistCh  chan string      // uploadID → 异步持久化
@@ -136,6 +147,10 @@ type UploadStore struct {
 	// storageMgr 是 storageMgr 回退预留的释放目标（P5，quota 未装配时由 uploadStoreFor
 	// 经 SetStorageMgr 注入；nil = 无回退预留需释放）。
 	storageMgr *StorageManager
+	// volTenantRoots 是卷名 → 该卷 owner 租户根绝对路径的映射（非默认卷；默认卷 = Dir(baseDir)）。
+	// 会话可跨卷定卷（session.Volume），TempPath 需按目标卷租户根解析（DeleteSession/
+	// cleanupExpired/verifyTempChunks/findMismatchChunks 共用）。mu 保护。
+	volTenantRoots map[string]string
 }
 
 // SetStorageMgr 注入 storageMgr 回退预留的释放目标（P5）。
@@ -144,6 +159,34 @@ func (us *UploadStore) SetStorageMgr(sm *StorageManager) {
 	us.mu.Lock()
 	us.storageMgr = sm
 	us.mu.Unlock()
+}
+
+// SetVolumeTenantRoot 注册非默认卷 → owner 租户根绝对路径（供会话 TempPath 按目标卷解析）。
+// 默认卷（""）始终回落 Dir(baseDir)，无需注册。幂等：重复注册同卷覆盖（路径不变）。
+func (us *UploadStore) SetVolumeTenantRoot(volume, tenantRootAbs string) {
+	if volume == "" || tenantRootAbs == "" {
+		return
+	}
+	us.mu.Lock()
+	if us.volTenantRoots == nil {
+		us.volTenantRoots = make(map[string]string)
+	}
+	us.volTenantRoots[volume] = tenantRootAbs
+	us.mu.Unlock()
+}
+
+// tenantRootFor 返回 session.Volume 对应的租户根绝对路径。默认卷（Volume 空/未注册）=
+// 本 store 归属租户根（baseDir 的父目录，即 <默认卷根>/<owner>）。
+func (us *UploadStore) tenantRootFor(volume string) string {
+	if volume != "" {
+		us.mu.RLock()
+		r := us.volTenantRoots[volume]
+		us.mu.RUnlock()
+		if r != "" {
+			return r
+		}
+	}
+	return filepath.Dir(us.baseDir)
 }
 
 // inflightPrefix 是任务 4 分块在途整文件临时名前缀（user 桶目标同目录）：
@@ -187,7 +230,11 @@ func isInflightTempName(name string) bool {
 // baseDir 是租户 chunk 桶的绝对路径（<root>/<owner>/chunk/，经 Tenant.Root().Abs("chunk")
 // 派生）；会话目录直接位于 baseDir 下（<baseDir>/<uploadID>/）。不再拼接魔法目录。
 // sessionTTL 指定未完成上传会话的过期时间，默认 24h。
-func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) (*UploadStore, error) {
+// volumeRoots（可选，变参）是卷名 → 该卷 owner 租户根绝对路径映射，**必须在 recoverSessions
+// 之前装配**——recover 按 session.Volume 经 tempAbsPath 解析在途 temp 文件所在卷（AD-5 换卷
+// 路径核心）；非默认卷会话若未预注册会把 temp 解析到默认卷 → 打开失败清空 bitmap → 续传
+// 退化为整文件重传（T6a 修复轮发现-1）。
+func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger, volumeRoots ...map[string]string) (*UploadStore, error) {
 	log := defaultLogger(logger)
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建分块上传目录失败: %w", err)
@@ -201,13 +248,19 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 	}
 
 	us := &UploadStore{
-		baseDir:    baseDir,
-		sessions:   make(map[string]*ChunkedUploadSession),
-		locker:     NewChunkFileLocker(),
-		persistCh:  make(chan string, 64),
-		stopCh:     make(chan struct{}),
-		sessionTTL: sessionTTL,
-		logger:     log,
+		baseDir:        baseDir,
+		sessions:       make(map[string]*ChunkedUploadSession),
+		locker:         NewChunkFileLocker(),
+		persistCh:      make(chan string, 64),
+		stopCh:         make(chan struct{}),
+		sessionTTL:     sessionTTL,
+		logger:         log,
+		volTenantRoots: make(map[string]string),
+	}
+	if len(volumeRoots) > 0 && volumeRoots[0] != nil {
+		for v, root := range volumeRoots[0] {
+			us.SetVolumeTenantRoot(v, root)
+		}
 	}
 	us.recoverSessions()
 
@@ -224,8 +277,8 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 
 // MustNewUploadStore 创建 UploadStore，失败时 panic。
 // 仅用于 handlers.go 等无法优雅处理错误的位置。
-func MustNewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) *UploadStore {
-	us, err := NewUploadStore(baseDir, sessionTTL, logger)
+func MustNewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger, volumeRoots ...map[string]string) *UploadStore {
+	us, err := NewUploadStore(baseDir, sessionTTL, logger, volumeRoots...)
 	if err != nil {
 		logger = defaultLogger(logger)
 		logger.Error("创建 UploadStore 失败", "error", err)
@@ -542,6 +595,7 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 		// P4 配额：清理会话时释放未落地的预留。已完成会话的预留已被 complete Commit
 		// 消费（Commit 原子生效一次），此 Release 为空操作；未完成会话则归还 reserved。
 		// P5：storageMgr 回退预留（quota 未装配时）同样在此释放（与 Reservation 二选一）。
+		// 卷容量池双账本预留（routeUpload，volSet 装配时）随会话删除 Release（AD-7）。
 		if s.Reservation != nil {
 			s.Reservation.Release()
 		} else if s.StorageMgrReserved > 0 {
@@ -550,12 +604,17 @@ func (us *UploadStore) DeleteSession(uploadID string) {
 			}
 			s.StorageMgrReserved = 0
 		}
+		if s.PoolRes != nil {
+			s.PoolRes.Release()
+			s.PoolRes = nil
+		}
 	}
 
 	// 任务 4：删除 in-flight 临时文件（在 user 桶，独立于 session 目录；tempRel 来自
-	// session.TempPath，由 init/恢复写入，经路径安全校验后删除）。
+	// session.TempPath，由 init/恢复写入，经路径安全校验后删除）。多卷会话按 session.Volume
+	// 在目标卷租户根解析（AD-5 temp 与 user 文件同卷）。
 	if s != nil && tempRel != "" {
-		if abs, ok := us.tempAbsPath(tempRel); ok {
+		if abs, ok := us.tempAbsPath(s); ok {
 			if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
 				us.logger.Warn("删除在途临时文件失败", "upload_id", uploadID, "error", err)
 			}
@@ -717,8 +776,9 @@ func (us *UploadStore) cleanupLoop() {
 func (us *UploadStore) cleanupExpired() {
 	type expiredItem struct {
 		id                 string
-		tempRel            string
+		session            *ChunkedUploadSession // 供 tempAbsPath 按 Volume 解析（保留引用）
 		reservation        *quota.Reservation
+		poolRes            *quota.Reservation
 		storageMgrReserved int64
 	}
 	var expired []expiredItem
@@ -729,7 +789,7 @@ func (us *UploadStore) cleanupExpired() {
 		if !s.Completed && now.After(s.ExpiresAt) {
 			us.logger.Info("清理过期上传会话", "upload_id", id, "file_name", s.Filename, "expires_at", s.ExpiresAt)
 			delete(us.sessions, id)
-			expired = append(expired, expiredItem{id: id, tempRel: s.TempPath, reservation: s.Reservation, storageMgrReserved: s.StorageMgrReserved})
+			expired = append(expired, expiredItem{id: id, session: s, reservation: s.Reservation, poolRes: s.PoolRes, storageMgrReserved: s.StorageMgrReserved})
 		}
 	}
 	us.mu.Unlock()
@@ -737,14 +797,19 @@ func (us *UploadStore) cleanupExpired() {
 	for _, item := range expired {
 		// P4 配额：过期会话（从未完成）归还预留，避免 chunk 字节长期挂账。
 		// P5：storageMgr 回退预留（quota 未装配时）同样释放（与 Reservation 二选一）。
+		// 卷容量池双账本预留（routeUpload，volSet 装配时）随过期 Release（AD-7）。
 		if item.reservation != nil {
 			item.reservation.Release()
 		} else if item.storageMgrReserved > 0 && us.storageMgr != nil {
 			us.storageMgr.Release(item.storageMgrReserved, CategoryChunked)
 		}
-		// 任务 4：删除 in-flight 临时文件（在 user 桶，独立于 session 目录）。
-		if item.tempRel != "" {
-			if abs, ok := us.tempAbsPath(item.tempRel); ok {
+		if item.poolRes != nil {
+			item.poolRes.Release()
+		}
+		// 任务 4：删除 in-flight 临时文件（在 user 桶，独立于 session 目录）。多卷会话按
+		// session.Volume 在目标卷租户根解析。
+		if item.session != nil && item.session.TempPath != "" {
+			if abs, ok := us.tempAbsPath(item.session); ok {
 				if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
 					us.logger.Warn("删除过期会话临时文件失败", "upload_id", item.id, "error", err)
 				}
@@ -829,16 +894,17 @@ func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) 
 		"received", countReceived(session.ReceivedChunks), "total", session.TotalChunks)
 }
 
-// tempAbsPath 把在途临时文件的存储根相对路径（user/...，相对本租户根）派生为绝对路径。
-// baseDir 恒为 <storage_root>/<owner>/chunk（per-tenant store 只归属一个租户），
-// 其父目录即租户根；再拼 user/ 桶相对段。非 user/ 桶（被篡改/异常）返回 ok=false。
-func (us *UploadStore) tempAbsPath(tempRel string) (string, bool) {
-	if !strings.HasPrefix(tempRel, "user/") {
+// tempAbsPath 把在途临时文件的存储根相对路径（user/...，相对**目标卷**租户根）派生为绝对路径。
+// baseDir 恒为 <默认卷根>/<owner>/chunk（per-tenant store 只归属一个租户），默认卷租户根 =
+// 其父目录；多卷会话（session.Volume 非空）按 volTenantRoots 解析目标卷租户根（AD-5：
+// temp 与 user 文件同卷）。再拼 user/ 桶相对段。非 user/ 桶（被篡改/异常）返回 ok=false。
+func (us *UploadStore) tempAbsPath(session *ChunkedUploadSession) (string, bool) {
+	if session == nil || !strings.HasPrefix(session.TempPath, "user/") {
 		return "", false
 	}
-	tenantRoot := filepath.Dir(us.baseDir)
-	abs := filepath.Join(tenantRoot, filepath.FromSlash(tempRel))
-	// 纵深防御：clean 后必须仍在本租户根内（防 session.json 篡改逃逸）。
+	tenantRoot := us.tenantRootFor(session.Volume)
+	abs := filepath.Join(tenantRoot, filepath.FromSlash(session.TempPath))
+	// 纵深防御：clean 后必须仍在该租户根内（防 session.json 篡改逃逸）。
 	clean := filepath.Clean(abs)
 	if clean != tenantRoot && !strings.HasPrefix(clean, tenantRoot+string(filepath.Separator)) {
 		return "", false
@@ -849,7 +915,7 @@ func (us *UploadStore) tempAbsPath(tempRel string) (string, bool) {
 // verifyTempChunks 打开在途临时文件，逐分片按 checksum 表重算校验：
 // 匹配保留 bitmap，不匹配清除（需重传）。临时文件不存在/打不开时全部清除。
 func (us *UploadStore) verifyTempChunks(session *ChunkedUploadSession) {
-	abs, ok := us.tempAbsPath(session.TempPath)
+	abs, ok := us.tempAbsPath(session)
 	if !ok {
 		us.logger.Warn("恢复会话临时文件路径非法，分片全部重传", "upload_id", session.UploadID)
 		clear(session.ReceivedChunks)
@@ -912,7 +978,7 @@ func (us *UploadStore) verifyChunkChecksum(f *os.File, offset, length int64, wan
 // AllChunksReceived 已保证全接收，此处防御性跳过空 checksum 分片）。
 // 任务 5 I-2：重叠/越界写坏单个分片 → 该单片被精确识别为 mismatch（而非泛化 400）。
 func (us *UploadStore) findMismatchChunks(session *ChunkedUploadSession) []int {
-	abs, ok := us.tempAbsPath(session.TempPath)
+	abs, ok := us.tempAbsPath(session)
 	if !ok {
 		us.logger.Warn("complete 校验临时文件路径非法，全部分片视为 mismatch", "upload_id", session.UploadID)
 		return allMismatchIndices(session)

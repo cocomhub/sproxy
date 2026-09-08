@@ -303,8 +303,11 @@ func TestUpload_OverwriteStayHome_DefaultVolumeFull(t *testing.T) {
 	if !diskFileExists(t, dirs[0], "alice", "a.txt") {
 		t.Fatal("main 原文件应保留（507 覆盖未落盘）")
 	}
+	// main 卷池 = user 8（T6c 安全② 版本写卷池 reserve-then-commit：覆盖尝试的版本备份先在
+	// main 卷池 TryReserve(8)，但 main 容量 10 已被 user 8 占用 → 版本保存被拒（best-effort
+	// 跳过版本，与单卷 owner 全局 version 桶满一致），卷池不新增版本字节、无虚高欠计）。
 	if got := h.volSet.Pool("main").Usage(); got != 8 {
-		t.Fatalf("main 卷池 Usage=%d want 8（507 后不得双计）", got)
+		t.Fatalf("main 卷池 Usage=%d want 8（版本保存被卷容量拒绝，无版本字节入账）", got)
 	}
 
 	// 幂等重传同尺寸仍 200 落默认卷（X-Volume=main）。
