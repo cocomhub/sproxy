@@ -15,7 +15,7 @@ import (
 )
 
 // NewCmdVolumes 创建 volumes 子命令：列出当前 owner 可见的卷（name/mode/capacity/usage/allowed）。
-// 数据来自服务端 GET /api/volumes（per-owner ACL；单卷/无卷语义返回空列表）。
+// 数据来自服务端 GET /api/volumes（per-owner ACL）。
 func NewCmdVolumes(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "volumes",
@@ -23,7 +23,7 @@ func NewCmdVolumes(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comm
 		Long: `列出当前凭据可见的存储卷及其用量。
 
 每个卷显示名称、ACL 模式、容量上限（0=不限）、当前已用与是否允许写入。
-卷未装配（单卷无卷语义）时显示空列表。`,
+缺省单卷配置列出默认卷（default）；多卷配置列出当前凭据可见的全部卷。`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)

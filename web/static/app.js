@@ -3,6 +3,7 @@
 
 // 主逻辑：文件列表、CRUD、批量操作、导航、UI 工具。
 // 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
+// global: setVolumeContext（upload.js，上传「卷」上下文 setter；本文件两处经 typeof 守卫引用）
 
 const BASE = '';
 // SproxySig 请求签名认证（AccessKey/AccessKeySecret/AccessKeyID）。Secret 只存本端计算签名，
