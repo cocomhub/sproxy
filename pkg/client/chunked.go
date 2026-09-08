@@ -68,6 +68,7 @@ type chunkedInitRequest struct {
 	TotalChunks  int    `json:"total_chunks"`
 	FileChecksum string `json:"file_checksum"`
 	FileModTime  int64  `json:"file_mod_time"` // UnixNano
+	Volume       string `json:"volume,omitempty"`
 }
 
 // chunkedCompleteRequest 分块上传完成请求体。
@@ -666,6 +667,7 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 		TotalChunks:  p.TotalChunks,
 		FileChecksum: p.FileChecksum,
 		FileModTime:  p.ModTime.UnixNano(),
+		Volume:       c.volume,
 	}
 	initJSON, _ := json.Marshal(initBody)
 
@@ -908,6 +910,8 @@ func getFileStat(ctx context.Context, c *FileClient, filename, kind string) (fil
 	statPath := "/api/files/stat?filename=" + url.QueryEscape(filename)
 	if kind != "" {
 		statPath += "&kind=" + url.QueryEscape(kind)
+	} else {
+		statPath += c.volumeQueryPart()
 	}
 	statResp, err := c.doRequest(ctx, "HEAD", statPath, nil, nil)
 	if err == nil && statResp.StatusCode == http.StatusOK {
@@ -1039,6 +1043,8 @@ func (c *FileClient) downloadOneChunk(ctx context.Context, p downloadChunkParams
 		url.QueryEscape(p.Filename), offset, length)
 	if p.Kind != "" {
 		urlPath += "&kind=" + url.QueryEscape(p.Kind)
+	} else {
+		urlPath += c.volumeQueryPart()
 	}
 
 	baseDelay := 500 * time.Millisecond

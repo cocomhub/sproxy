@@ -15,6 +15,27 @@ storage_root: "./storage"
 # 全局存储兜底：所有租户占用总和上限（0 = 不限制，保留原 max_storage_bytes 语义）。
 # max_storage_bytes: 0
 
+# ---- 多卷存储（可选；配了 volumes 则默认卷 = volumes[0]，其余为追加盘；不配 = 单卷零回归）----
+# 每个卷是独立物理根，装配时各自 storage.OpenRoot（独立 LAYOUT_VERSION 校验）+ 卷容量 Pool。
+# 文件寻址 = (卷, owner, 相对路径)，读路径跨卷定位、写路径自动路由；owner 全局配额跨卷合计。
+# placement: "prefer-default"   # 自动路由策略：prefer-default（默认，优先默认卷、满则换下一候选）
+#                               #  | spread（按卷用量最少优先）。显式 ?volume=/--volume 时忽略。
+# volumes:
+#   - name: "main"              # 默认卷名（volumes[0] 为默认卷；root 缺省取 storage_root）
+#     root: "./storage"         # 物理根目录（首卷 root 缺省/占位形态时用 storage_root 建根，F1 门禁）
+#     vol_capacity: 0           # 本卷容量上限（字节；0 = 不限）。auto 路由按容量换卷（TryReserve）。
+#     acl:                      # 卷 ACL（缺省 = deny + 空名单 = 默认开放，兼容默认卷/旧单根）
+#       mode: "deny"            # deny=黑名单（列出的 owner 禁止）；allow=白名单（仅列出的 owner 允许）
+#       owners: []              # owner 名列表；空名单 = 全部放行（deny）或全部拒绝（allow）
+#   - name: "disk2"             # 追加盘：独立物理根，多卷场景演示
+#     root: "/data/sproxy-disk2"
+#     vol_capacity: 10737418240 # 10 GiB 卷容量
+#     # acl:
+#     #   mode: "allow"         # 仅白名单 owner 可用 disk2
+#     #   owners: ["alice"]
+# 客户端显式深入：sclient volumes / upload --volume disk2 / list --volume / mv --to-volume；
+# 文件列表项带 volume 字段（WebUI 卷 badge 与监控弹窗「卷」仪表）；GET /api/volumes per-owner 可见。
+
 # 单次普通上传（非分块）最大字节数，超过返回 413。0 或不填使用默认 1 GiB。
 # max_upload_bytes: 1073741824
 

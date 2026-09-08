@@ -80,6 +80,11 @@ function currentStore() { return _injectedStore || noopStore(); }
 function transferStoreSingleton() { return currentStore(); }
 function resetTransferStoreCache() { _injectedStore = null; }
 
+// ---- 卷上下文（多卷上传）：工具栏「卷」下拉 → setVolumeContext；空 = auto（不加 volume 参数）----
+let _volumeContext = '';
+function setVolumeContext(v) { _volumeContext = (v === undefined || v === null) ? '' : String(v); }
+function currentVolume() { return _volumeContext; }
+
 // legacyUploadModuleName：历史地址导出名 upload 恒指向本模块（页内函数声明），
 // app.js 经 `setTransferStore(getTransferStore())` 注入——见 app.js 注释。
 // 注意：本文件**不得**再声明 getTransferStore（app.js 已声明），否则同页顶层重名。
@@ -115,6 +120,7 @@ function sessionToTransferItem(sess) {
     total: totalSize,
     meta: {
       uploadId: uploadId,
+      volume: (typeof sess.volume === 'string') ? sess.volume : '',
       fileChecksum: (typeof sess.fileChecksum === 'string') ? sess.fileChecksum : '',
       mtimeNano: (typeof sess.mtimeNano === 'number' && isFinite(sess.mtimeNano)) ? sess.mtimeNano : '',
       totalChunks: (typeof sess.totalChunks === 'number' && sess.totalChunks > 0) ? sess.totalChunks : 0,
@@ -206,10 +212,13 @@ async function chunkedUpload(file, resumeItem) {
   const fileName = currentSubdir ? currentSubdir + '/' + file.name : file.name;
   const totalSize = file.size || 0;
   const progId = createProgressBar(fileName, totalSize, 1);
+  // 续传优先沿用会话原卷（item.meta.volume），否则用当前下拉卷（空 = auto）。
+  const volume = (resumeItem && resumeItem.meta && resumeItem.meta.volume) || currentVolume() || undefined;
   try {
     const result = await sc.files.upload(file, {
       subdir: currentSubdir ? currentSubdir : undefined,
       forceChunked: true,
+      volume: volume,
       onProgress: function(pr) {
         // 分块回调对对象（{loaded,total,chunkIndex,totalChunks}）；计算期数值。
         // 统一经 progressText 计算 + renderProgress 渲染（两段隔离）。
@@ -256,6 +265,7 @@ async function simpleUpload(file) {
   try {
     const result = await sc.files.upload(file, {
       subdir: currentSubdir ? currentSubdir : undefined,
+      volume: currentVolume() || undefined,
       onProgress: function(pr) {
         renderProgress(progId, progressText({ label: '计算 SHA-256…', loaded: pr, total: totalSize }));
       },
@@ -486,6 +496,7 @@ async function uploadFiles(files) {
     try {
       const result = await sc.files.upload(file, {
         subdir: currentSubdir ? currentSubdir : undefined,
+        volume: currentVolume() || undefined,
         // 真暂停检查点：分块 for 循环每块开头查询本 upload_id 的暂停标志。
         // 暂停按钮（app.js 委托）置标志 → isCancelled 为真 → 抛 E_CANCELLED → 下面的
         // catch 归一为「已暂停」toast；取消按钮则直接 removeUploadSession（走失败路径不重试）。
@@ -566,6 +577,7 @@ if (typeof document !== 'undefined') {
 if (typeof module === 'object' && module.exports) {
   module.exports = {
     setTransferStore, transferStoreSingleton, resetTransferStoreCache, currentStore,
+    setVolumeContext, currentVolume,
     saveUploadSession, removeUploadSession, saveFileHandleForSession,
     sessionToTransferItem, completedBitmap, resumedChunkCount,
     progressText, renderProgress, createProgressBar, removeProgressBar,

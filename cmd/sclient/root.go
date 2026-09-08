@@ -91,6 +91,7 @@ func NewRootCmd() *cobra.Command {
 			cfgProvider.BindPFlag("access_key", cmd.Flags().Lookup("access-key"))
 			cfgProvider.BindPFlag("access_key_secret", cmd.Flags().Lookup("access-key-secret"))
 			cfgProvider.BindPFlag("access_key_id", cmd.Flags().Lookup("access-key-id"))
+			cfgProvider.BindPFlag("volume", cmd.Flags().Lookup("volume"))
 			currentDir = loadCurrentDir()
 			cliState.CurrentDir = currentDir
 
@@ -108,6 +109,7 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().String("access-key", "", "SproxySig 认证 AccessKey（服务端凭据 Ring 登记了对应 AK/SK 时需要）")
 	root.PersistentFlags().String("access-key-secret", "", "SproxySig 认证 AccessKeySecret (本地密钥，仅计算签名，永不上线)")
 	root.PersistentFlags().String("access-key-id", "", "SproxySig SK 条目 ID（skey-id，v2 协议必传；`trust renew` 回填）")
+	root.PersistentFlags().String("volume", "", "存储卷上下文（默认空 = auto；upload/download/list/meta/delete/mv 等文件操作限定到指定卷）")
 	root.PersistentFlags().StringP("output", "o", "", "指定下载文件的输出路径")
 	root.PersistentFlags().BoolP("verbose", "v", false, "显示详细输出")
 	root.PersistentFlags().Bool("chunked", false, "启用分块上传/下载模式")
@@ -144,6 +146,7 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdDownload(factory, ios, cliState))
 	root.AddCommand(NewCmdDelete(factory, ios, cliState))
 	root.AddCommand(NewCmdList(factory, ios, cliState))
+	root.AddCommand(NewCmdVolumes(factory, ios))
 	root.AddCommand(NewCmdSearch(factory, ios))
 	root.AddCommand(NewCmdStat(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdMv(factory, ios, cliState))

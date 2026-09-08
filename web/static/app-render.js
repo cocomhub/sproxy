@@ -119,7 +119,8 @@
     }
     const cs = fi.checksum || '';
     const csDisplay = cs ? '<span class="checksum-cell" data-checksum="' + escHtml(cs) + '" title="' + escHtml(cs) + '">' + escHtml(getChecksumPrefix(cs)) + '<span class="copy-icon">📋</span></span>' : '-';
-    return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + '</td>' +
+    const volBadge = fi.volume ? ' <span class="vol-badge" title="卷 ' + escHtml(fi.volume) + '">' + escHtml(fi.volume) + '</span>' : '';
+    return '<tr><td class="check-col"><input type="checkbox" class="file-select" data-filename="' + escHtml(fullName) + '" data-checksum="' + escHtml(cs) + '"></td><td class="overflow-dots" title="' + escHtml(fullName) + '">' + escHtml(fi.name) + volBadge + '</td>' +
       '<td class="size-cell">' + formatSize(fi.size) + '</td>' +
       '<td>' + csDisplay + '</td>' +
       '<td class="file-actions">' +
@@ -693,13 +694,43 @@
     return running.map(buildTransferRowHtml).join('') + _completedGroupsHtml(completed);
   }
 
+  // ---- 卷仪表（/api/volumes → 每卷容量/用量进度条） ----
+  function volumesTableHtml(vols) {
+    if (!vols || vols.length === 0) {
+      return '<div class="empty-msg">暂无可见卷</div>';
+    }
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:14px;">';
+    html += '<thead><tr style="background:var(--bg-hover);">';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">卷</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">模式</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">容量</th>';
+    html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">用量</th>';
+    html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid var(--border-color);">允许</th>';
+    html += '</tr></thead><tbody>';
+    for (const v of vols || []) {
+      const capTxt = v.capacity > 0 ? formatSize(v.capacity) : '不限';
+      const bar = (v.capacity > 0 && v.usage >= 0)
+        ? buildProgressBar(v.usage, v.capacity)
+        : '<div style="font-size:12px;color:var(--text-muted);margin-top:2px;">' + formatSize(v.usage || 0) + '（不限容量）</div>';
+      html += '<tr>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-weight:600;">' + escHtml(v.name) + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;color:var(--text-secondary);">' + escHtml(v.mode || '-') + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + capTxt + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);min-width:180px;">' + bar + '</td>';
+      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">' + (v.allowed ? '✅' : '❌') + '</td>';
+      html += '</tr>';
+    }
+    html += '</tbody></table>';
+    return html;
+  }
+
   return {
     escHtml, formatSize, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
     stripCloudId,
     uploadProgressText,
     parseCloudLines, previewKind, buildFileTableHtml, buildFileRowHtml,
     buildLoadMoreHtml, buildAllLoadedHtml, hubTableHtml, configTableHtml, statsTableHtml,
-    auditTableHtml,
+    auditTableHtml, volumesTableHtml,
     statusText, buildProgressBar, cloudTaskActions, buildCloudTaskTableHtml,
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
     syncStatusText, buildSyncRowMeta,

@@ -196,6 +196,14 @@ func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
 	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" {
 		opts = append(opts, client.WithAccessKey(cfg.AccessKey, cfg.AccessKeySecret))
 	}
+	// 卷上下文（多卷服务端）：CLI --volume flag 优先，回落配置 volume；两者皆空 = auto（零变化）。
+	volFlag, _ := cmd.Flags().GetString("volume")
+	switch {
+	case volFlag != "":
+		opts = append(opts, client.WithVolume(volFlag))
+	case cfg.Volume != "":
+		opts = append(opts, client.WithVolume(cfg.Volume))
+	}
 	if cfg.AccessKeyID != "" {
 		// SK 条目 ID（entryID）：签发 header 携带 sk=<id> 使服务端精确取条目
 		// （多 SK 共存时避免逐条试签）。`trust renew` 回填的配置项。

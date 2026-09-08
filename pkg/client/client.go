@@ -42,6 +42,7 @@ const (
 	headerFileChecksum  = "X-File-Checksum"
 	headerFileMTime     = "X-File-MTime"
 	headerContentType   = "Content-Type"
+	headerVolume        = "X-Volume"
 )
 
 // ErrNotFound 表示请求的资源不存在（HTTP 404）。
@@ -52,6 +53,8 @@ type UploadResult struct {
 	Success  bool   `json:"success"`
 	Message  string `json:"message"`
 	Checksum string `json:"file_checksum,omitempty"`
+	// Volume 是上传落盘的目标卷名（服务端 X-Volume 响应头；旧服务端/无卷语义为空）。
+	Volume string `json:"volume,omitempty"`
 }
 
 // ProgressReader 是一个带进度回调的 io.Reader 包装。
@@ -106,6 +109,7 @@ type FileClient struct {
 	accessKey              string           // SproxySig 签名认证 AccessKey（公开标识）
 	accessKeySecret        string           // SproxySig AccessKeySecret（本地密钥，仅计算签名，永不上线）
 	accessKeyID            string           // SproxySig SK 条目 ID（skeyID，skey-id=<id>；签发时 header 携带，服务端精确取条目）
+	volume                 string           // 卷上下文（空 = auto；非空时上传/下载/list/stat/delete/rename 附加 volume 参数）
 	sendNoAuth             bool             // WithSendNoAuth：强制不签名/TOTP 显式无凭据链路（M14，doRequest 层短路）
 	allowMissingEntryID    bool             // 一次性开关：renew 引导允许缺 skeyID（首次 renew 尚无 access_key_id）
 	requestSigner          RequestSigner    // 自定义请求签名器（WithRequestSigner 注入；nil=默认 ConfigSigner）
@@ -556,6 +560,12 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 			return
 		default:
 		}
+		if c.volume != "" {
+			if vErr := mw.WriteField("volume", c.volume); vErr != nil {
+				pw.CloseWithError(fmt.Errorf("写入 volume 字段: %w", vErr))
+				return
+			}
+		}
 		part, wErr := mw.CreateFormFile("file", remoteClean)
 		if wErr != nil {
 			pw.CloseWithError(wErr)
@@ -602,6 +612,9 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	var result UploadResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf(errFmtParseResponse, err)
+	}
+	if v := resp.Header.Get(headerVolume); v != "" {
+		result.Volume = v
 	}
 
 	if !result.Success {
@@ -717,6 +730,8 @@ func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind 
 	query := url.Values{"filename": {filename}}
 	if kind != "" {
 		query.Set("kind", kind)
+	} else {
+		c.appendVolumeQuery(query)
 	}
 	urlPath := "/download?" + query.Encode()
 	headers := make(http.Header)
@@ -806,7 +821,9 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 	if containsPathTraversal(filename) {
 		return fmt.Errorf("文件名不能包含路径穿越符 '..'")
 	}
-	urlPath := "/delete?" + url.Values{"filename": {filename}}.Encode()
+	delQuery := url.Values{"filename": {filename}}
+	c.appendVolumeQuery(delQuery)
+	urlPath := "/delete?" + delQuery.Encode()
 	headers := make(http.Header)
 
 	// 先通过 Stat 获取远端 checksum
@@ -870,6 +887,8 @@ type FileInfo struct {
 	Checksum string `json:"checksum"`
 	ModTime  int64  `json:"mod_time"` // UnixNano
 	IsDir    bool   `json:"is_dir"`
+	// Volume 是条目所在卷名（多卷聚合列表新增字段；旧服务端/单卷无卷语义时为空，向后兼容）。
+	Volume string `json:"volume"`
 }
 
 // Rename 通过 POST /rename?from=&to= 在服务端将文件从 from 移到 to。
@@ -890,7 +909,9 @@ func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) 
 		return fmt.Errorf("fromChecksum 不能为空（必须传入源文件 SHA-256 以防误覆盖）")
 	}
 
-	urlPath := "/rename?" + url.Values{"from": {from}, "to": {to}}.Encode()
+	renameQuery := url.Values{"from": {from}, "to": {to}}
+	c.appendVolumeQuery(renameQuery)
+	urlPath := "/rename?" + renameQuery.Encode()
 	headers := make(http.Header)
 	headers.Set(headerFileChecksum, fromChecksum)
 
@@ -920,7 +941,9 @@ func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, erro
 	if containsPathTraversal(filename) {
 		return nil, fmt.Errorf("文件名不能包含路径穿越符 '..'")
 	}
-	urlPath := "/api/files/stat?" + url.Values{"filename": {filename}}.Encode()
+	statQuery := url.Values{"filename": {filename}}
+	c.appendVolumeQuery(statQuery)
+	urlPath := "/api/files/stat?" + statQuery.Encode()
 	resp, err := c.doRequest(ctx, "HEAD", urlPath, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf(errFmtRequestFailed, err)
@@ -968,7 +991,7 @@ func (c *FileClient) List(ctx context.Context, subdirs ...string) ([]FileInfo, e
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.doRequest(ctx, "GET", "/api/files?subdir="+subdir, nil, headers)
+	resp, err := c.doRequest(ctx, "GET", "/api/files?subdir="+subdir+c.volumeQueryPart(), nil, headers)
 	if err != nil {
 		return nil, fmt.Errorf(errFmtRequestFailed, err)
 	}
@@ -997,7 +1020,7 @@ func (c *FileClient) ListWithPagination(ctx context.Context, offset, limit int, 
 	if err != nil {
 		return nil, 0, err
 	}
-	urlPath := fmt.Sprintf("/api/files?subdir=%s&offset=%d&limit=%d", subdir, offset, limit)
+	urlPath := fmt.Sprintf("/api/files?subdir=%s&offset=%d&limit=%d", subdir, offset, limit) + c.volumeQueryPart()
 	resp, err := c.doRequest(ctx, "GET", urlPath, nil, headers)
 	if err != nil {
 		return nil, 0, fmt.Errorf(errFmtRequestFailed, err)

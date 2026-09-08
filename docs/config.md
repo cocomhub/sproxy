@@ -67,6 +67,37 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `max_chunk_upload_bytes` | int64 | `8388608` (8 MiB) | 单块请求体最大限制 |
 | `upload_session_ttl` | duration | `24h` | 未完成会话保留时间 |
 
+### 多卷存储（volumes / placement）
+
+可选。配置 `volumes` 后启用多卷存储；**不配置 = 单卷零回归**（`storage_root` 单根，
+`volumes[0]` 自动合成为默认卷，卷名 `default`）。多卷模式文件寻址 = `(卷, owner, 相对路径)`，
+读路径跨卷定位、写路径自动路由、owner 全局配额跨卷合计。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `placement` | string | `prefer-default` | 自动路由策略：`prefer-default`（默认卷优先，容量满则换下一候选）或 `spread`（卷用量最少优先）。显式 `--volume` / `volume` 参数时忽略 |
+| `volumes` | []object | (空) | 卷集合。`volumes[0]` 为默认卷（root 缺省取 `storage_root`；第二卷起必须显式 root） |
+| `volumes[].name` | string | (必需) | 卷名（owner 视图/API 中可见标识） |
+| `volumes[].root` | string | (卷0=`storage_root`) | 卷物理根目录（装配时自动 `MkdirAll` + `storage.OpenRoot` LAYOUT_VERSION 校验） |
+| `volumes[].vol_capacity` | int64 | `0` | 本卷容量上限（字节；0 = 不限）。auto 路由按容量换卷（每卷独立容量池） |
+| `volumes[].acl.mode` | string | `deny` | 卷 ACL 模式：`deny`（黑名单，`owners` 列出的 owner 禁止）或 `allow`（白名单，仅列出的 owner 允许）。缺省 `deny` + 空 `owners` = 默认开放（兼容旧单根） |
+| `volumes[].acl.owners` | []string | (空) | ACL 名单。空名单在 `deny` 下全部放行、在 `allow` 下全部拒绝 |
+
+配置示例见 `config.example.yaml`。
+
+**API / 客户端**：
+
+- `GET /api/volumes`（auth + per-owner）→ `{volumes: [{name, mode, capacity, usage, allowed}]}`
+  仅返回当前 owner 允许的卷（ACL 收紧卷绝不列出）。
+- `POST /api/volumes/move?from_volume=<v>&to_volume=<v>&filename=<rel>`（同 owner 同相对路径跨卷迁移）。
+- upload / download / list / stat / delete / rename 支持可选 `volume` 参数（upload 表单字段、
+  其余 query）；缺省 = auto（无卷语义 / 服务端自动路由）。
+- 上传成功响应头 `X-Volume` 标识落盘卷；`/api/files` 列表文件条目带 `volume` 字段。
+- sclient：`volumes` 子命令（可见卷 + 用量）、`upload --volume` / `list --volume` /
+  `download`/`delete`/`meta` 可选 `--volume`、`mv --to-volume <卷>`（跨卷 move）。
+- WebUI：文件行卷 badge + 监控弹窗「卷」仪表 + 上传「卷」下拉（`/api/volumes` 驱动；
+  未配 AK/SK 时仪表优雅降级，不破坏无认证浏览）。
+
 ### Gzip 压缩
 
 服务端自动为 JSON 响应启用 gzip 压缩（当客户端 `Accept-Encoding` 包含 `gzip` 时），

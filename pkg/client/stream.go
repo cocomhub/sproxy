@@ -21,7 +21,9 @@ func (c *FileClient) OpenDownload(ctx context.Context, filename string) (io.Read
 	if containsPathTraversal(filename) {
 		return nil, fmt.Errorf("filename 不能包含路径穿越符 '..'")
 	}
-	urlPath := "/download?" + url.Values{"filename": {filename}}.Encode()
+	query := url.Values{"filename": {filename}}
+	c.appendVolumeQuery(query)
+	urlPath := "/download?" + query.Encode()
 	resp, err := c.doRequest(ctx, "GET", urlPath, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf(errFmtRequestFailed, err)

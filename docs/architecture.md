@@ -188,3 +188,35 @@ sproxy 文件服务采用**租户自包含存储布局**（`pkg/storage` / `pkg/
   删除 ReleaseUsage；周期扫描 `reconcileQuotaScopes` 校准 Scope 到磁盘实际（重启不回溯）。
 - **历史路径**：`ValidateFilePath`（`pkg/server/validate.go`）保留做基础清洗，指向
   `pkg/storage.NormalizeRemote`；租户映射与段名校验以 `pkg/storage` 为准。
+
+### 多卷布局（可选）
+
+多卷（配置 `volumes`，`pkg/volume` 纯域 + `pkg/server/volumes.go` 装配）在不破坏单卷布局的
+前提下把「存储根」从单个扩展为多个物理根。每卷是独立物理根，装配时各自
+`storage.OpenRoot`（独立 `LAYOUT_VERSION` 校验）并建立卷容量池（`pkg/quota.Pool`）：
+
+```
+volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘，如 disk2)
+  LAYOUT_VERSION                                  LAYOUT_VERSION
+  <tenant>/                                       <tenant>/
+    user/  cloud/  archive/  chunk/  version/       user/  cloud/  archive/  chunk/  version/
+    meta/   # meta 单点权威：默认卷（volumes[0]）持有 checksums/凭据/任务状态
+```
+
+- **寻址**：文件 = `(卷, owner, 相对路径)`。`storage.Tenant.UserRel/FeatureRel` 映射不变；
+  每卷的 user 桶都遵循同构六桶布局（AD-5：非默认卷 `version/`/`chunk/` 等特征桶跟随 user 卷）。
+- **默认卷权威（meta 单点）**：`<default>/<owner>/meta/` 仍是 checksum、凭据与云任务状态的
+  权威归属；默认卷被 ACL 排除的 owner 不得经回退读默认卷遗留（AD-6 收口）。
+- **写路由**：`routeUpload`（`pkg/server/volumes.go`）按 owner 卷视图（ACL）选卷——显式
+  `volume` 单候选、自动 `placement`（`prefer-default`/`spread`）+ 换卷。owner 全局配额跨卷合计，
+  卷容量独立封顶；双账本（Scope + 卷 Pool）reserve→Commit/Adjust/Release。
+- **读定位**：`locateOwnerFile`/`locateForRead` 默认卷快路径 + 视图其余卷只读探测；唯一性
+  （AD-4）保证同 rel 至多一卷命中。带 `?volume=` 时只在指定卷定位（fail-closed 404）。
+- **卷 ACL**：`volumes[].acl.mode`（deny 黑名单/allow 白名单）由 `parseVolumeACL` 解析为
+  `pkg/volume.ACL`；owner 卷视图 = `volume.AllowedVolumes`。默认缺省（deny + 空名单）= 默认开放。
+- **跨卷移动**：`POST /api/volumes/move?from_volume&to_volume&filename`——to 侧双 reserve →
+  流式复制（O_EXCL 临时 + fsync + 原子 rename）→ 删源 → 双 commit + from 侧释放；目标唯一性查重 409。
+- **API/客户端**：`GET /api/volumes`（per-owner）、list 文件条目 `volume` 字段、upload 成功
+  `X-Volume` 头、可选 `volume` 参数（upload 表单 / 其余 query）。FileClient 卷上下文
+  （`WithVolume`/`SetVolume`，零值=auto）、`Volumes()`/`MoveVolume()`；sclient `volumes` /
+  `--volume` / `mv --to-volume`；WebUI 卷 badge + 仪表 + 上传下拉。
