@@ -1,0 +1,531 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package server
+
+// upload_volume_test.go 验证多卷 upload 路由（任务 4）：prefer-default 选卷 + 换卷、
+// 显式 volume 的 ACL/唯一性、owner 全局配额跨卷封顶与 X-Volume 响应头。用假盘
+// （t.TempDir）双卷经 actorUploadMux 直驱 h.upload 集成断言落卷位置。
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/volume"
+)
+
+// newVolumeUploadServer 装配多卷 Handlers（volSet 生效）并绑定 actor 的 upload mux。
+// volumes 逐卷独立根（首卷即默认卷），ownerQuota 为 actor 的 owner_quotas（0 = 不限制）。
+// 返回服务 URL、Handlers（供池/磁盘断言）与各卷根目录（与 volumes 一一对应）。
+func newVolumeUploadServer(t *testing.T, actor string, volumes []VolumeConfig, ownerQuota int64) (string, *Handlers, []string) {
+	t.Helper()
+	return newVolumeUploadServerMod(t, actor, volumes, ownerQuota, nil)
+}
+
+// newVolumeUploadServerMod 是 newVolumeUploadServer 的可配置变体：mod 在 Validate 前改 cfg
+// （如开 versioning）。nil 时等价 newVolumeUploadServer。
+func newVolumeUploadServerMod(t *testing.T, actor string, volumes []VolumeConfig, ownerQuota int64, mod func(*Config)) (string, *Handlers, []string) {
+	t.Helper()
+	cfg := Default()
+	cfg.StorageRoot = volumes[0].Root
+	cfg.Placement = "prefer-default"
+	if ownerQuota > 0 {
+		cfg.OwnerQuotas = map[string]int64{actor: ownerQuota}
+	}
+	cfg.Volumes = volumes
+	if mod != nil {
+		mod(cfg)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("cfg.Validate: %v", err)
+	}
+	h := buildVolSetHandlers(t, cfg)
+	ts := httptest.NewServer(actorUploadMux(h, actor))
+	t.Cleanup(ts.Close)
+	dirs := make([]string, len(volumes))
+	for i := range volumes {
+		dirs[i] = volumes[i].Root
+	}
+	return ts.URL, h, dirs
+}
+
+// volumeUploadCore 执行带可选 volume 表单字段的 multipart 上传（恒带 X-File-Checksum），
+// 返回状态码、响应头、body 与错误（不调用 t.Fatal，供并发 goroutine 安全使用）。
+func volumeUploadCore(baseURL, filename string, body []byte, vol string) (int, http.Header, []byte, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if vol != "" {
+		if err := mw.WriteField("volume", vol); err != nil {
+			return 0, nil, nil, fmt.Errorf("write volume field: %w", err)
+		}
+	}
+	part, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("create form file: %w", err)
+	}
+	if _, err = part.Write(body); err != nil {
+		return 0, nil, nil, fmt.Errorf("write part: %w", err)
+	}
+	_ = mw.Close()
+
+	req, err := http.NewRequest("POST", baseURL+"/upload", &buf)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("new req: %w", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerFileChecksum, sha256hex(body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("do upload: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header, respBody, nil
+}
+
+// newTestUploadServer 绑定 actor 的 h.upload mux 并启动 httptest server，返回服务 URL。
+func newTestUploadServer(t *testing.T, h *Handlers, actor string) string {
+	t.Helper()
+	ts := httptest.NewServer(actorUploadMux(h, actor))
+	t.Cleanup(ts.Close)
+	return ts.URL
+}
+
+// volumeUpload 执行带可选 volume 表单字段的 multipart 上传（恒带 X-File-Checksum），
+// 返回状态码、响应头与 body。传输错误触发 t.Fatalf。
+func volumeUpload(t *testing.T, baseURL, filename string, body []byte, vol string) (int, http.Header, []byte) {
+	t.Helper()
+	status, hdr, respBody, err := volumeUploadCore(baseURL, filename, body, vol)
+	if err != nil {
+		t.Fatalf("upload %s: %v", filename, err)
+	}
+	return status, hdr, respBody
+}
+
+// diskFileExists 断言卷根下 owner/user/<name> 是否存在。
+func diskFileExists(t *testing.T, volRoot, owner, name string) bool {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(volRoot, owner, "user", name))
+	return err == nil
+}
+
+func assertUploadVolume(t *testing.T, url string, filename string, body []byte, vol, wantVolume string, wantStatus int) {
+	t.Helper()
+	status, hdr, respBody := volumeUpload(t, url, filename, body, vol)
+	if status != wantStatus {
+		t.Fatalf("upload %s (volume=%q): status=%d want %d, body=%s", filename, vol, status, wantStatus, respBody)
+	}
+	if wantStatus == http.StatusOK {
+		if got := hdr.Get("X-Volume"); got != wantVolume {
+			t.Fatalf("upload %s: X-Volume=%q want %q", filename, got, wantVolume)
+		}
+	}
+}
+
+// TestUpload_RoutesToDefaultThenNext 双卷（main 容量小、disk2 大），prefer-default：
+// main 未满落 main；main 满换 disk2。X-Volume 分别断言 main/disk2，磁盘布局 1+1。
+func TestUpload_RoutesToDefaultThenNext(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	volumes := []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 10},
+		{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
+	}
+	url, h, dirs := newVolumeUploadServer(t, "alice", volumes, 0)
+
+	bodyA := []byte("AAAAAAA") // 7B：main 容量 10 足够
+	status, hdr, respBody := volumeUpload(t, url, "a.txt", bodyA, "")
+	if status != http.StatusOK {
+		t.Fatalf("首次上传应成功: %d %s", status, respBody)
+	}
+	if got := hdr.Get("X-Volume"); got != "main" {
+		t.Fatalf("首次上传 X-Volume=%q want main（默认卷优先）", got)
+	}
+
+	bodyB := []byte("BBBBBBB") // 7B：main 已用 7，预留 7 > 10 → 换 disk2
+	status, hdr, respBody = volumeUpload(t, url, "b.txt", bodyB, "")
+	if status != http.StatusOK {
+		t.Fatalf("main 满后上传应换卷成功: %d %s", status, respBody)
+	}
+	if got := hdr.Get("X-Volume"); got != "disk2" {
+		t.Fatalf("第二次上传 X-Volume=%q want disk2（main 满换卷）", got)
+	}
+
+	if !diskFileExists(t, dirs[0], "alice", "a.txt") {
+		t.Fatal("a.txt 应落在 main（默认卷）")
+	}
+	if diskFileExists(t, dirs[0], "alice", "b.txt") {
+		t.Fatal("b.txt 不应落在 main")
+	}
+	if !diskFileExists(t, dirs[1], "alice", "b.txt") {
+		t.Fatal("b.txt 应落在 disk2")
+	}
+
+	if got := h.volSet.Pool("main").Usage(); got != 7 {
+		t.Fatalf("main 卷池 Usage=%d want 7", got)
+	}
+	if got := h.volSet.Pool("disk2").Usage(); got != 7 {
+		t.Fatalf("disk2 卷池 Usage=%d want 7", got)
+	}
+}
+
+// TestUpload_ExplicitVolume 显式 volume：指定 disk2 生效（main 未满也落 disk2）；
+// 不在视图（ghost）→ 403；目标 rel 已在 main → 409（唯一性，AD-4）。
+func TestUpload_ExplicitVolume(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	volumes := []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 10},
+		{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
+	}
+	url, _, dirs := newVolumeUploadServer(t, "alice", volumes, 0)
+
+	body := []byte("12345678") // 8B
+	assertUploadVolume(t, url, "a.txt", body, "", "main", http.StatusOK)
+
+	// main 未满（8 ≤ 10）也须显式指定 disk2 生效。
+	assertUploadVolume(t, url, "b.txt", body, "disk2", "disk2", http.StatusOK)
+	if !diskFileExists(t, dirs[1], "alice", "b.txt") {
+		t.Fatal("b.txt 应落在 disk2（显式 volume 指定）")
+	}
+	if diskFileExists(t, dirs[0], "alice", "b.txt") {
+		t.Fatal("b.txt 不应落在 main（显式指定 disk2）")
+	}
+
+	// ghost 不在卷集合 / 视图 → 403。
+	status, _, _ := volumeUpload(t, url, "c.txt", body, "ghost")
+	if status != http.StatusForbidden {
+		t.Fatalf("volume=ghost status=%d want 403", status)
+	}
+
+	// 唯一性：a.txt 已在 main，显式指定 disk2 → 409 + 所在卷提示。
+	status, _, respBody := volumeUpload(t, url, "a.txt", body, "disk2")
+	if status != http.StatusConflict {
+		t.Fatalf("跨卷同名显式上传 status=%d want 409, body=%s", status, respBody)
+	}
+	if len(respBody) == 0 {
+		t.Fatal("409 响应应有提示 body")
+	}
+}
+
+// TestUpload_OwnerGlobalQuotaCrossVolume owner 全局配额（15B）跨卷封顶：
+// 两次 7B 分别落 main/disk2，第三次 7B → 507（owner 全局满，不因有第二卷放行）。
+func TestUpload_OwnerGlobalQuotaCrossVolume(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	volumes := []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 10},
+		{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
+	}
+	url, _, dirs := newVolumeUploadServer(t, "alice", volumes, 15)
+
+	body := []byte("1234567") // 7B
+	// 第一次 7B → main（7 ≤ 10 且 7 ≤ 15）。
+	assertUploadVolume(t, url, "a.txt", body, "", "main", http.StatusOK)
+	// 第二次 7B：main 卷池 7+7>10 → 换 disk2；owner 全局 14 ≤ 15。
+	assertUploadVolume(t, url, "b.txt", body, "", "disk2", http.StatusOK)
+	// 第三次 7B：owner 全局 14+7>15 → 507（即使两卷都有余量）。
+	status, _, respBody := volumeUpload(t, url, "c.txt", body, "")
+	if status != http.StatusInsufficientStorage {
+		t.Fatalf("owner 全局满后第三次上传 status=%d want 507, body=%s", status, respBody)
+	}
+
+	if !diskFileExists(t, dirs[0], "alice", "a.txt") {
+		t.Fatal("a.txt 应落在 main")
+	}
+	if !diskFileExists(t, dirs[1], "alice", "b.txt") {
+		t.Fatal("b.txt 应落在 disk2")
+	}
+	if diskFileExists(t, dirs[0], "alice", "c.txt") || diskFileExists(t, dirs[1], "alice", "c.txt") {
+		t.Fatal("c.txt 不应落盘（owner 全局配额拒绝）")
+	}
+}
+
+// TestUpload_IdempotentReuploadVolumeFull 幂等重传不被卷容量误拒（零回归）：单卷容量打满后，
+// 同 checksum 重传已有文件 → 幂等 200（不重新预留）；不同 checksum → 409 冲突（versioning 关闭），
+// 均不因卷满返回 507。
+func TestUpload_IdempotentReuploadVolumeFull(t *testing.T) {
+	dirs := []string{t.TempDir()}
+	volumes := []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 10},
+	}
+	url, _, _ := newVolumeUploadServer(t, "alice", volumes, 0)
+
+	body := []byte("12345678") // 8B：占满 main 卷容量 10（committed 8）
+	assertUploadVolume(t, url, "a.txt", body, "", "main", http.StatusOK)
+
+	// 同 checksum 重传 → 幂等 200（无 507），X-Volume 仍为 main。
+	status, hdr, respBody := volumeUpload(t, url, "a.txt", body, "")
+	if status != http.StatusOK {
+		t.Fatalf("卷满后同 checksum 幂等重传 status=%d want 200, body=%s", status, respBody)
+	}
+	if got := hdr.Get("X-Volume"); got != "main" {
+		t.Fatalf("幂等重传 X-Volume=%q want main", got)
+	}
+
+	// 不同 checksum 重传（versioning 关闭）→ 409 冲突（保留现有文件，不覆盖）。
+	status, _, _ = volumeUpload(t, url, "a.txt", []byte("DIFFERENT"), "")
+	if status != http.StatusConflict {
+		t.Fatalf("卷满后不同 checksum 重传 status=%d want 409", status)
+	}
+}
+
+// TestUpload_OverwriteStayHome_DefaultVolumeFull F1-A 承重：versioning 开启 + 覆盖写默认卷
+// 已有文件，新尺寸整额 TryReserve 超默认卷容量 → 507（stay-home，不换卷），disk2 不得产生
+// 第二份、卷池无双计；幂等重传同尺寸仍 200 落默认卷。
+func TestUpload_OverwriteStayHome_DefaultVolumeFull(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	volumes := []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 10},
+		{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
+	}
+	url, h, dirs := newVolumeUploadServerMod(t, "alice", volumes, 0, func(c *Config) {
+		c.Versioning.Enabled = true
+	})
+
+	body8 := []byte("12345678") // 8B：main 容量 10，余量 2
+	assertUploadVolume(t, url, "a.txt", body8, "", "main", http.StatusOK)
+
+	// 覆盖写 10B：整额预留 8+10>10 → 必须 507 stay-home，不得换卷 disk2（防跨卷双份 + 双计）。
+	body10 := []byte("1234567890")
+	status, _, respBody := volumeUpload(t, url, "a.txt", body10, "")
+	if status != http.StatusInsufficientStorage {
+		t.Fatalf("覆盖写超默认卷容量 status=%d want 507（stay-home 不换卷）, body=%s", status, respBody)
+	}
+	if diskFileExists(t, dirs[1], "alice", "a.txt") {
+		t.Fatal("覆盖写不得在 disk2 产生第二份（同 rel 跨卷双份）")
+	}
+	if !diskFileExists(t, dirs[0], "alice", "a.txt") {
+		t.Fatal("main 原文件应保留（507 覆盖未落盘）")
+	}
+	if got := h.volSet.Pool("main").Usage(); got != 8 {
+		t.Fatalf("main 卷池 Usage=%d want 8（507 后不得双计）", got)
+	}
+
+	// 幂等重传同尺寸仍 200 落默认卷（X-Volume=main）。
+	assertUploadVolume(t, url, "a.txt", body8, "", "main", http.StatusOK)
+}
+
+// TestUpload_ConcurrentContentionVolumeCapacity 并发竞卷：N goroutine 同时上传不同文件名，
+// 撞同一卷容量上限（main 容量恰够 1 个 8B 文件）→ 恰 1 个成功落 main、其余换 disk2 成功或
+// 507，main/disk2 卷池 Usage 无超计（-race 下验证 Pool.TryReserve 原子性）。
+func TestUpload_ConcurrentContentionVolumeCapacity(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	volumes := []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 10},
+		{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
+	}
+	url, h, _ := newVolumeUploadServer(t, "alice", volumes, 0)
+
+	const n = 8
+	body := []byte("12345678") // 8B：main 容量 10 恰够 1 个
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	codes := make([]int, n)
+	vols := make([]string, n)
+	transportErrs := 0
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			fn := fmt.Sprintf("f%d.txt", i)
+			status, hdr, _, err := volumeUploadCore(url, fn, body, "")
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				transportErrs++
+				codes[i] = -1
+				return
+			}
+			codes[i] = status
+			vols[i] = hdr.Get("X-Volume")
+		}(i)
+	}
+	wg.Wait()
+	if transportErrs != 0 {
+		t.Fatalf("%d 个并发上传传输失败", transportErrs)
+	}
+
+	mainOK, disk2OK, errs := 0, 0, 0
+	for i := range n {
+		switch codes[i] {
+		case http.StatusOK:
+			switch vols[i] {
+			case "main":
+				mainOK++
+			case "disk2":
+				disk2OK++
+			default:
+				t.Fatalf("并发上传 f%d.txt 成功但 X-Volume=%q 异常", i, vols[i])
+			}
+		case http.StatusInsufficientStorage:
+			errs++
+		default:
+			t.Fatalf("并发上传 f%d.txt status=%d vol=%q", i, codes[i], vols[i])
+		}
+	}
+	if mainOK != 1 {
+		t.Fatalf("main 应恰 1 个成功（容量 10 只够 1×8B），got %d", mainOK)
+	}
+	// main 卷池 Usage 恰 8（无双计/超计）。
+	if got := h.volSet.Pool("main").Usage(); got != 8 {
+		t.Fatalf("main 卷池 Usage=%d want 8", got)
+	}
+	if got := h.volSet.Pool("disk2").Usage(); got != int64(disk2OK*len(body)) {
+		t.Fatalf("disk2 卷池 Usage=%d want %d（=%d 成功×8B）", got, disk2OK*len(body), disk2OK)
+	}
+	t.Logf("并发竞卷：main=%d disk2=%d 507=%d", mainOK, disk2OK, errs)
+}
+
+// TestUpload_AutoSkipsACLDeniedVolume ACL×auto：排他卷（allow 白名单不含 alice）+ 默认卷容量
+// 耗尽 → auto 绝不到排他卷（容量再缺也只 507，不落 ACL 外卷）。
+func TestUpload_AutoSkipsACLDeniedVolume(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	volumes := []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 10}, // 默认卷容量小，很快耗尽
+		{Name: "priv", Root: dirs[1], VolCapacity: 1 << 20,
+			ACL: &VolumeACLConfig{Mode: VolumeACLAllow, Owners: []string{"bob"}}}, // 仅 bob，alice 不可见
+	}
+	url, _, dirs := newVolumeUploadServer(t, "alice", volumes, 0)
+
+	body := []byte("12345678") // 8B
+	assertUploadVolume(t, url, "a.txt", body, "", "main", http.StatusOK)
+	// main 满（8+8>10）→ auto 应 507（priv 不在 alice 视图，绝不当候选），而非落 priv。
+	status, _, _ := volumeUpload(t, url, "b.txt", body, "")
+	if status != http.StatusInsufficientStorage {
+		t.Fatalf("auto 容量耗尽且唯一候选 ACL 外 → status=%d want 507", status)
+	}
+	if diskFileExists(t, dirs[1], "alice", "b.txt") {
+		t.Fatal("auto 不得写入 ACL 排他卷 priv")
+	}
+}
+
+// seedVolumeFile 在指定卷根下直接落一个 owner 文件（模拟 ACL 收紧前写入的遗留文件）。
+func seedVolumeFile(t *testing.T, volRoot, owner, rel string, content []byte) {
+	t.Helper()
+	p := filepath.Join(volRoot, owner, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatalf("seed mkdir: %v", err)
+	}
+	if err := os.WriteFile(p, content, 0o644); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+}
+
+// TestUpload_AutoDupCheckHomeAware_DefaultACLExcludes F-1 承重：auto dup-check 必须 home-aware。
+// 形态：默认卷 allow:[alice] 排除 bob + bob 在默认卷留有遗留文件（ACL 收紧前）。
+//   - Part A：alice 默认卷覆盖写版本化快路径不受影响（仍 main + version）。
+//   - Part B（versioning on）：bob 同 rel 异 checksum → 200 落 disk2（视图卷），
+//     版本**不得泄漏写默认卷 version/**，默认卷遗留不触发版本化。
+//   - Part C（versioning off）：bob 同 rel 异 checksum → 200 新文件落 disk2（非假 409）。
+func TestUpload_AutoDupCheckHomeAware_DefaultACLExcludes(t *testing.T) {
+	build := func(t *testing.T, versioning bool) (*Handlers, []string, string, string) {
+		t.Helper()
+		dirs := []string{t.TempDir(), t.TempDir()}
+		cfg := Default()
+		cfg.StorageRoot = dirs[0]
+		cfg.Placement = "prefer-default"
+		cfg.Versioning.Enabled = versioning
+		cfg.Volumes = []VolumeConfig{
+			{Name: "main", Root: dirs[0], VolCapacity: 1 << 20,
+				ACL: &VolumeACLConfig{Mode: VolumeACLAllow, Owners: []string{"alice"}}},
+			{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("cfg.Validate: %v", err)
+		}
+		h := buildVolSetHandlers(t, cfg)
+		seedVolumeFile(t, dirs[0], "bob", "user/a.txt", []byte("LEFTOVER-OLD"))
+		return h, dirs, newTestUploadServer(t, h, "alice"), newTestUploadServer(t, h, "bob")
+	}
+
+	// ---- Part A + Part B（versioning on，同一 server）----
+	_, dirsB, urlAlice, urlBob := build(t, true)
+
+	// alice 快路径：默认卷（allow:[alice]）覆盖写版本化仍生效（stay-home main）。
+	assertUploadVolume(t, urlAlice, "a.txt", []byte("ALICE-ONE"), "", "main", http.StatusOK)
+	assertUploadVolume(t, urlAlice, "a.txt", []byte("ALICE-TWO-2"), "", "main", http.StatusOK)
+	if entries, err := os.ReadDir(filepath.Join(dirsB[0], "alice", "version")); err != nil || len(entries) == 0 {
+		t.Fatalf("alice 默认卷覆盖写应生成版本文件（version 目录 err=%v entries=%d）", err, len(entries))
+	}
+
+	// bob 同 rel 异 checksum（versioning on）：主文件 200 落 disk2（视图卷），
+	// 不得触发默认卷遗留的版本化覆盖写（版本泄漏到无权卷）。
+	status, hdr, respBody := volumeUpload(t, urlBob, "a.txt", []byte("BOB-NEW-123"), "")
+	if status != http.StatusOK {
+		t.Fatalf("bob 上传 status=%d want 200（不得被默认卷遗留误伤/泄漏）, body=%s", status, respBody)
+	}
+	if got := hdr.Get("X-Volume"); got != "disk2" {
+		t.Fatalf("bob X-Volume=%q want disk2（默认卷被 ACL 排除，唯一视图卷）", got)
+	}
+	if !diskFileExists(t, dirsB[1], "bob", "a.txt") {
+		t.Fatal("bob 主文件应落 disk2")
+	}
+	// 无版本泄漏写默认卷 version/（bob 无权用默认卷）。
+	if _, err := os.Stat(filepath.Join(dirsB[0], "bob", "version")); err == nil {
+		t.Fatal("bob 版本不得泄漏写默认卷 version/（AD-6）")
+	}
+	// 默认卷遗留原样保留（未被当作 home 覆盖）。
+	if got, _ := os.ReadFile(filepath.Join(dirsB[0], "bob", "user", "a.txt")); string(got) != "LEFTOVER-OLD" {
+		t.Fatalf("默认卷 bob 遗留应保留原内容, got %q", got)
+	}
+
+	// ---- Part C（versioning off，独立 server）----
+	_, _, _, urlBobC := build(t, false)
+	statusC, hdrC, respBodyC := volumeUpload(t, urlBobC, "a.txt", []byte("BOB-NEW-456"), "")
+	if statusC != http.StatusOK {
+		t.Fatalf("versioning off bob 上传 status=%d want 200（不得假 409）, body=%s", statusC, respBodyC)
+	}
+	if got := hdrC.Get("X-Volume"); got != "disk2" {
+		t.Fatalf("versioning off bob X-Volume=%q want disk2", got)
+	}
+}
+
+// TestUpload_SingleVolumeXVolumeHeader 单卷零回归：真实 HTTP 装配（RegisterRoutes，
+// volSet 生效）下普通上传落默认卷，响应头带 X-Volume: default（向后兼容，多卷客户端可见）。
+func TestUpload_SingleVolumeXVolumeHeader(t *testing.T) {
+	url, _ := newTestServerWithAllRoutes(t, nil)
+
+	body := []byte("single volume content")
+	status, hdr, respBody := volumeUpload(t, url, "sv.txt", body, "")
+	if status != http.StatusOK {
+		t.Fatalf("单卷上传应成功: %d %s", status, respBody)
+	}
+	if got := hdr.Get("X-Volume"); got != "default" {
+		t.Fatalf("单卷上传 X-Volume=%q want default", got)
+	}
+}
+
+// TestVolumeOrderPreferDefault 直接验证 pkg/volume 排序与装配卷集合的输入形状打通
+// （main 恒前；used 按池 Usage 生效）。
+func TestVolumeOrderPreferDefault(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	cfg := Default()
+	cfg.StorageRoot = dirs[0]
+	cfg.Volumes = []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 10},
+		{Name: "disk2", Root: dirs[1], VolCapacity: 100},
+	}
+	vs, err := assembleVolumes(cfg, testLogger())
+	if err != nil {
+		t.Fatalf("assembleVolumes: %v", err)
+	}
+	t.Cleanup(func() { _ = vs.Close() })
+
+	allowed := volume.AllowedVolumes(vs.All(), "bob")
+	ordered := volume.OrderCandidates(allowed, volume.ModePreferDefault, func(name string) int64 {
+		p := vs.Pool(name)
+		if p == nil {
+			return 0
+		}
+		return p.Usage()
+	})
+	if len(ordered) != 2 || ordered[0].Name != "main" || ordered[1].Name != "disk2" {
+		t.Fatalf("prefer-default 候选序应为 [main disk2], got %+v", ordered)
+	}
+}

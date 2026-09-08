@@ -4,11 +4,13 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // sumRootDirSize 递归统计租户根内 rel 子树下所有普通文件的总字节数（rmdir 配额释放用）。
@@ -80,8 +82,10 @@ func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 }
 
 // rmdir 删除指定目录（含所有内容）。?dirname=path&force=true
-// 已迁移到 Tenant API：路径映射到 user 桶（<root>/<owner>/user/<rel>），
-// 递归删除用 root.RemoveAll（os.Root 保证符号链接不逃逸，替代手写 removeDirNoFollow）；
+// 已迁移到 Tenant API：路径映射到 user 桶（<root>/<owner>/user/<rel>）。
+// 多卷（任务 5）：同一子目录可能因换卷在多个卷上都存在（main/disk2 各有其文件），故按 owner
+// 视图逐卷定位、对**每个存在该目录的卷**删除其子树（默认卷优先定位；目录非文件，不受 AD-4
+// 文件唯一性约束，可跨卷并存）。递归删除用 root.RemoveAll（os.Root 保证符号链接不逃逸）；
 // checksum 从 per-tenant store 清理 rel 前缀与 rel 自身。
 func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 	dirname := r.URL.Query().Get("dirname")
@@ -94,53 +98,65 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录名: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
+	// 归一 owner（空 → anonymous）：目录探测/删除与列表/写路径同键，未认证请求归属 anonymous。
+	owner := normalizeOwner(ownerFromRequest(r))
+	// 路径映射与卷无关，用默认租户做纯路径校验；卷感知只决定目录落到哪些卷的租户根。
+	tnt0 := h.tenantFor(owner)
+	if tnt0 == nil || tnt0.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
 	}
-	root := tnt.Root()
-	rel, ok := tnt.UserRel(remotePath)
+	rel, ok := tnt0.UserRel(remotePath)
 	if !ok {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
 	}
 
-	// 使用 Lstat 检查符号链接，拒绝操作（不跟随符号链接）
-	stat, err := root.Lstat(rel)
-	if err != nil {
-		if os.IsNotExist(err) {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
-		} else {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "访问目录失败"}, http.StatusInternalServerError)
+	// 收集 owner 视图内存在该目录的卷租户（默认卷优先；目录不存在于任何卷 → 404）。
+	type rmTarget struct {
+		volName string
+		tnt     *storage.Tenant
+	}
+	var targets []rmTarget
+	if h.volSet == nil {
+		targets = append(targets, rmTarget{volName: "", tnt: tnt0})
+	} else {
+		view := volume.AllowedVolumes(h.volSet.All(), owner)
+		for _, v := range view {
+			rt := h.volSet.Root(v.Name)
+			if rt == nil {
+				continue
+			}
+			// 探测用卷根相对 <owner>/<rel>（不创建租户目录）；确认存在再取租户操作。
+			if _, err := rt.Stat(owner + "/" + rel); err != nil {
+				continue
+			}
+			tnt := h.volumeTenant(v.Name, owner)
+			if tnt == nil || tnt.Root() == nil {
+				continue
+			}
+			targets = append(targets, rmTarget{volName: v.Name, tnt: tnt})
 		}
-		return
 	}
-	if stat.Mode()&os.ModeSymlink != 0 {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "不允许删除符号链接"}, http.StatusBadRequest)
-		return
-	}
-	if !stat.IsDir() {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "指定路径不是目录"}, http.StatusBadRequest)
+	if len(targets) == 0 {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
 		return
 	}
 
-	// 再次检查，确认目录未被替换（TOCTOU 防御）
-	stat2, err := root.Lstat(rel)
-	if err != nil {
-		if os.IsNotExist(err) {
+	// 符号链接 / 非目录检查与 TOCTOU 二次检查：在首个命中卷（默认卷优先）执行，错误语义与
+	// 单卷一致（目录不存在 404 / 符号链接或非目录 400）。
+	primary := targets[0]
+	if err := validateRmdirTarget(primary.tnt.Root(), rel); err != nil {
+		switch {
+		case os.IsNotExist(err):
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
-		} else {
+		case errors.Is(err, errRmdirSymlink):
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "不允许删除符号链接"}, http.StatusBadRequest)
+		case errors.Is(err, errRmdirNotDir):
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "指定路径不是目录"}, http.StatusBadRequest)
+		default:
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "访问目录失败"}, http.StatusInternalServerError)
 		}
-		return
-	}
-	if stat2.Mode()&os.ModeSymlink != 0 {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "不允许删除符号链接"}, http.StatusBadRequest)
-		return
-	}
-	if !stat2.IsDir() {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "指定路径不是目录"}, http.StatusBadRequest)
 		return
 	}
 
@@ -151,29 +167,43 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// P5 配额（I2 修复）：删除前收集目录树内所有文件 {rel, size}（per-file 分键释放，
-	// 保证 bucket_limits 子目录配额与释放对称——子目录删除释放落到对应子 Scope，沿父链
-	// 聚合到 user 桶/租户）。
-	var dirFiles []rmdirFileStat
-	sumRootDirFiles(root, rel, &dirFiles)
-
-	// 使用 root.RemoveAll 安全递归删除（os.Root 保证符号链接不逃逸）
-	if err := root.RemoveAll(rel); err != nil {
-		h.logger.Error("删除目录失败", "dir", remotePath, "error", err)
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除目录失败"}, http.StatusInternalServerError)
-		return
+	// 逐卷删除存在该目录的子树；每卷删除前收集树内文件 {rel,size}（per-file 分键释放 owner
+	// 全局 Scope——跨卷合计语义正确，文件 rel 唯一故不双计），并按所在卷释放卷容量池。
+	var allFiles []rmdirFileStat
+	for _, tg := range targets {
+		root := tg.tnt.Root()
+		var dirFiles []rmdirFileStat
+		sumRootDirFiles(root, rel, &dirFiles)
+		if err := root.RemoveAll(rel); err != nil {
+			h.logger.Error("删除目录失败", "dir", remotePath, "error", err)
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "删除目录失败"}, http.StatusInternalServerError)
+			return
+		}
+		allFiles = append(allFiles, dirFiles...)
+		// 卷容量池释放：本卷被删字节 = dirFiles 之和。
+		if tg.volName != "" && h.volSet != nil {
+			if pool := h.volSet.Pool(tg.volName); pool != nil {
+				var volBytes int64
+				for _, f := range dirFiles {
+					volBytes += f.size
+				}
+				if volBytes > 0 {
+					pool.Adjust(pool.Usage(), pool.Usage()-volBytes)
+				}
+			}
+		}
 	}
 
 	// 删除成功后按各文件实际子 Scope（按 rel 解析）释放配额占用。
-	for _, f := range dirFiles {
-		if scope := h.quotaScopeFor(ownerFromRequest(r), f.rel); scope != nil {
+	for _, f := range allFiles {
+		if scope := h.quotaScopeFor(owner, f.rel); scope != nil {
 			scope.ReleaseUsage(f.size)
 		}
 	}
 
 	// 清理 per-tenant checksum store 中该目录下所有文件的记录（key = rel，无 owner 前缀）。
 	// 使用 "/" 分隔符，与 ChecksumStore 的 key 格式约定保持一致（所有 key 使用 filepath.ToSlash 格式）。
-	if cs := h.checksumStoreFor(ownerFromRequest(r)); cs != nil {
+	if cs := h.checksumStoreFor(owner); cs != nil {
 		cs.DeletePrefix(rel + "/")
 		// 清理目录自身的 checksum 记录（如果存在）
 		cs.Delete(rel)
@@ -181,4 +211,28 @@ func (h *Handlers) rmdir(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("目录已删除", "dir", remotePath)
 	sendJSONResponse(w, UploadResponse{Success: true, Message: fmt.Sprintf("目录已删除: %s", remotePath)}, http.StatusOK)
+}
+
+// errRmdirSymlink / errRmdirNotDir 是 rmdir 目标校验的哨兵错误（供状态映射）。
+var (
+	errRmdirSymlink = fmt.Errorf("rmdir: 不允许删除符号链接")
+	errRmdirNotDir  = fmt.Errorf("rmdir: 指定路径不是目录")
+)
+
+// validateRmdirTarget 对 rel 做 Lstat 校验 + TOCTOU 二次校验：不存在返回 fs.ErrNotExist；
+// 符号链接返回 errRmdirSymlink；非目录返回 errRmdirNotDir。其余错误原样返回。
+func validateRmdirTarget(root *storage.Root, rel string) error {
+	for range 2 { // 两次 Lstat（TOCTOU 防御，与旧实现一致）
+		stat, err := root.Lstat(rel)
+		if err != nil {
+			return err
+		}
+		if stat.Mode()&os.ModeSymlink != 0 {
+			return errRmdirSymlink
+		}
+		if !stat.IsDir() {
+			return errRmdirNotDir
+		}
+	}
+	return nil
 }

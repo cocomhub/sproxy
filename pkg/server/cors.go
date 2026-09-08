@@ -92,7 +92,7 @@ func CORSMiddleware(cfg CORSConfig, logger *slog.Logger) func(http.Handler) http
 
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", strings.Join(allowedHeaders, ", "))
-			w.Header().Set("Access-Control-Expose-Headers", "X-File-Checksum, X-File-Size, X-File-MTime, X-File-IsDir, Content-Range, Content-Disposition")
+			w.Header().Set("Access-Control-Expose-Headers", "X-File-Checksum, X-File-Size, X-File-MTime, X-File-IsDir, X-Volume, Content-Range, Content-Disposition")
 			w.Header().Set("Access-Control-Max-Age", strconv.Itoa(maxAge))
 
 			if r.Method == http.MethodOptions {

@@ -10,9 +10,13 @@ package server
 // 写路径切到卷感知（T4 起），因此单卷零回归可测。
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
+	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -52,6 +56,11 @@ type volumeSet struct {
 	pools map[string]*quota.Pool
 	// defaultName 是默认卷名（cfg.Volumes[0].Name）。
 	defaultName string
+	// tenants 是 (非默认) 卷 × owner 的租户懒建缓存：key = volName + "\x00" + owner。
+	// 默认卷租户由 server.tenantRoots（tenantFor）单一持有，不在此缓存（避免同路径双句柄）。
+	// tenantMu 串行化懒建（与 Close 并发时保护 map）。
+	tenants  map[string]*storage.Tenant
+	tenantMu sync.Mutex
 }
 
 // Default 返回默认卷描述（volumes[0]）。
@@ -92,6 +101,14 @@ func (vs *volumeSet) Pool(name string) *quota.Pool {
 
 // Close 关闭全部卷根句柄（幂等：重复调用安全，nil/已关跳过）。
 func (vs *volumeSet) Close() error {
+	vs.tenantMu.Lock()
+	for key, t := range vs.tenants {
+		if t != nil && t.Root() != nil {
+			_ = t.Root().Close()
+		}
+		delete(vs.tenants, key)
+	}
+	vs.tenantMu.Unlock()
 	for name, rt := range vs.roots {
 		if rt != nil {
 			_ = rt.Close()
@@ -99,6 +116,50 @@ func (vs *volumeSet) Close() error {
 		delete(vs.roots, name)
 	}
 	return nil
+}
+
+// Tenant 返回指定卷上 owner 的租户（懒建缓存）。未知卷名/非法 owner/根不可用返回 nil
+// （fail-closed）。物理位置 = <卷根>/<owner>/（与默认卷 tenantFor 布局同构；meta 桶仅在默认
+// 卷权威，非默认卷不预建 meta）。默认卷（vs.defaultName）不在此缓存——调用方应走
+// server.tenantFor(owner)（既有 tenantRoots 缓存单一持有），避免同路径双句柄。
+func (vs *volumeSet) Tenant(volName, owner string, log *slog.Logger) *storage.Tenant {
+	log = defaultLogger(log)
+	key := volName + "\x00" + owner
+	vs.tenantMu.Lock()
+	defer vs.tenantMu.Unlock()
+	if t, ok := vs.tenants[key]; ok {
+		return t
+	}
+	rt := vs.roots[volName]
+	if rt == nil {
+		return nil
+	}
+	if !storage.ValidSegmentName(owner) {
+		log.Warn("非法租户名，拒绝在卷上创建（fail-closed）", "volume", volName, "owner", owner)
+		return nil
+	}
+	abs, ok := rt.Abs(owner)
+	if !ok {
+		log.Warn("租户路径越界，拒绝在卷上创建（fail-closed）", "volume", volName, "owner", owner)
+		return nil
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		log.Warn("创建卷上租户根目录失败", "volume", volName, "owner", owner, "error", err)
+		return nil
+	}
+	tenantRoot, err := storage.OpenRoot(abs)
+	if err != nil {
+		log.Warn("打开卷上租户子根失败（fail-closed）", "volume", volName, "owner", owner, "error", err)
+		return nil
+	}
+	t, err := storage.NewTenant(owner, tenantRoot)
+	if err != nil {
+		log.Warn("创建卷上租户失败（fail-closed）", "volume", volName, "owner", owner, "error", err)
+		_ = tenantRoot.Close()
+		return nil
+	}
+	vs.tenants[key] = t
+	return t
 }
 
 // assembleVolumes 按 cfg.Volumes 装配卷集合：逐卷 MkdirAll + storage.OpenRoot（LAYOUT_VERSION
@@ -111,8 +172,9 @@ func assembleVolumes(cfg *Config, log *slog.Logger) (*volumeSet, error) {
 		return nil, fmt.Errorf("卷集合装配失败：volumes 为空（契约要求 Volumes 恒 ≥1）")
 	}
 	vs := &volumeSet{
-		roots: make(map[string]*storage.Root, len(cfg.Volumes)),
-		pools: make(map[string]*quota.Pool, len(cfg.Volumes)),
+		roots:   make(map[string]*storage.Root, len(cfg.Volumes)),
+		pools:   make(map[string]*quota.Pool, len(cfg.Volumes)),
+		tenants: make(map[string]*storage.Tenant),
 	}
 	for i := range cfg.Volumes {
 		vc := cfg.Volumes[i]
@@ -168,4 +230,365 @@ func parseVolumeACL(ac *VolumeACLConfig) volume.ACL {
 		acl.Owners[o] = struct{}{}
 	}
 	return acl
+}
+
+// ---- 写路径卷路由（任务 4）----
+
+// routeErrorKind 区分 routeUpload 失败类别（换卷语义与 HTTP 映射用）。
+type routeErrorKind int
+
+const (
+	routeErrOther routeErrorKind = iota
+	routeErrNotAllowed
+	routeErrConflict
+	routeErrOwnerFull // owner 全局配额满：不换卷，直接 507
+	routeErrVolFull   // 卷容量满：prefer-default 下换下一候选卷
+)
+
+// routeError 是 routeUpload 的失败载体：带 HTTP 状态与对外消息。
+// kind 供自动路由换卷判断；err 为底层原因（如 quota.ErrStorageFull），errors.Is 可用。
+type routeError struct {
+	kind   routeErrorKind
+	status int
+	msg    string
+	err    error
+}
+
+func (e *routeError) Error() string { return e.msg }
+func (e *routeError) Unwrap() error { return e.err }
+
+func newRouteError(kind routeErrorKind, status int, msg string, err error) *routeError {
+	return &routeError{kind: kind, status: status, msg: msg, err: err}
+}
+
+// volumeRoute 是 routeUpload 的预留结果：目标卷 + 目标卷租户 + owner 全局 Scope 与卷容量池
+// 双账本预留句柄。调用方写成功后 commit(prev, written)（覆盖写按 prev 双 Adjust 差分），
+// 写失败 / 校验失败 / 幂等重复时 release() 双回滚。
+type volumeRoute struct {
+	volumeName string          // 空 = volSet 未装配（旧路径，无卷语义）
+	tenant     *storage.Tenant // 目标卷上 owner 租户（写盘 root）
+	scope      *quota.Scope    // owner 全局 Scope（globalPool 未装配时为 nil）
+	scopeRes   *quota.Reservation
+	pool       *quota.Pool // 目标卷容量池（volSet nil 时为 nil）
+	poolRes    *quota.Reservation
+}
+
+// commit 双账本结算：新文件（prev==0）双 Commit(written)；覆盖写（prev>0）双 Adjust(prev,
+// written) + 双 Release（预留全额归还，committed 只记尺寸差分——与既有单 Scope 覆盖写语义一致）。
+func (r *volumeRoute) commit(prev, written int64) {
+	if r.scopeRes != nil {
+		if prev > 0 {
+			r.scope.Adjust(prev, written)
+			r.scopeRes.Release()
+		} else {
+			r.scopeRes.Commit(written)
+		}
+	}
+	if r.poolRes != nil {
+		if prev > 0 {
+			r.pool.Adjust(prev, written)
+			r.poolRes.Release()
+		} else {
+			r.poolRes.Commit(written)
+		}
+	}
+}
+
+// release 双回滚（写失败 / checksum 不匹配 / 幂等重复响应）。
+func (r *volumeRoute) release() {
+	if r.scopeRes != nil {
+		r.scopeRes.Release()
+	}
+	if r.poolRes != nil {
+		r.poolRes.Release()
+	}
+}
+
+// routeUpload 为 owner 的 rel 选目标卷并在 owner 全局 + 卷容量双账本预留（写路径核心）。
+// 语义（AD-7/§7，placement/ACL/换卷/显式唯一性/覆盖写 stay-home 全在此）：
+//   - 候选 = AllowedVolumes(owner 视图)（ACL allow/deny 已解析进 volume.Volume.ACL）；
+//   - 显式 volume（非空）→ 仅该卷候选且须在视图（不在 = 403）；显式先查唯一性（AD-4）：
+//     目标卷 stat 已有同 rel → 409；视图其它卷已有同 rel → 409 + 所在卷名；
+//   - forceHomeVol（非空）= 已存在 rel 的覆盖写 stay-home（F1-A/F1-B）→ 强制该 home 卷单候选：
+//     容量路由只用于新文件，已存在 rel 必须写回其 home 卷；home 卷容量 TryReserve 满直接 507
+//     不换卷（与单卷语义一致），防止跨卷双份 + owner 双计。home 卷不在 owner 视图 → 403。
+//   - 自动路由（新文件，forceHomeVol 空）：候选按 cfg.Placement（OrderCandidates，used =
+//     卷池 Usage 闭包）排序依序尝试：owner 全局 Scope TryReserve 成功 → 卷容量池 TryReserve；
+//     卷池满 → Release owner 预留换下一候选；owner 全局满 → 直接 ErrStorageFull 不换卷；
+//     全部卷满 → ErrStorageFull。
+//
+// 返回 volumeRoute（含双预留句柄）。volSet 未装配（旧装配路径）回落既有单卷行为：
+// 默认租户 + owner 全局 Scope 预留，无卷容量池（零回归）。forceHomeVol 此时无卷语义
+// （唯一根即 home），天然 stay-home。
+func (h *Handlers) routeUpload(owner, rel, explicitVol string, size int64, forceHomeVol string) (*volumeRoute, error) {
+	// 旧装配路径（volSet nil）：单卷零回归——默认租户 + owner 全局 Scope 预留。
+	// forceHomeVol 此时无卷语义（唯一根即 home），天然 stay-home。
+	if h.volSet == nil {
+		tnt := h.tenantFor(owner)
+		if tnt == nil {
+			return nil, newRouteError(routeErrOther, http.StatusBadRequest, errMsgInvalidPath, nil)
+		}
+		route := &volumeRoute{tenant: tnt, scope: h.quotaScopeFor(owner, rel)}
+		if route.scope != nil {
+			res, err := route.scope.TryReserve(size)
+			if err != nil {
+				return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, "存储配额不足", err)
+			}
+			route.scopeRes = res
+		}
+		return route, nil
+	}
+
+	owner = normalizeOwner(owner)
+	view := volume.AllowedVolumes(h.volSet.All(), owner)
+	if len(view) == 0 {
+		return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, "volume not allowed", nil)
+	}
+
+	// 覆盖写 stay-home（F1-A/F1-B）：rel 已在某卷命中（locateOwnerFile 定位的 home 卷）并走
+	// 版本化覆盖写，强制回该 home 卷单候选，容量不足直接 507（reserveVolume 返回
+	// routeErrVolFull/routeErrOwnerFull，上传侧映射），不换卷——防止同 rel 跨卷双份 + owner 双计。
+	if forceHomeVol != "" {
+		v, ok := h.volSet.ByName(forceHomeVol)
+		if !ok || !v.Authorize(owner) {
+			return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, "volume not allowed", nil)
+		}
+		return h.reserveVolume(owner, rel, v.Name, size)
+	}
+
+	// 显式指定卷：ACL 校验 + 唯一性查重，单候选双预留（无换卷）。
+	if explicitVol != "" {
+		v, ok := h.volSet.ByName(explicitVol)
+		if !ok || !v.Authorize(owner) {
+			return nil, newRouteError(routeErrNotAllowed, http.StatusForbidden, "volume not allowed", nil)
+		}
+		if err := h.checkVolumeUniqueness(owner, rel, v.Name, view); err != nil {
+			return nil, err
+		}
+		route, err := h.reserveVolume(owner, rel, v.Name, size)
+		if err != nil {
+			return nil, err
+		}
+		return route, nil
+	}
+
+	// 自动路由：按 placement 排序候选，依序双预留；owner 全局满不换卷、卷满换下一候选。
+	cfg := h.cfgPtr.Load()
+	placement := volume.ModePreferDefault
+	if cfg != nil && cfg.Placement != "" {
+		placement = volume.Mode(cfg.Placement)
+	}
+	ordered := volume.OrderCandidates(view, placement, func(name string) int64 {
+		if p := h.volSet.Pool(name); p != nil {
+			return p.Usage()
+		}
+		return 0
+	})
+	var volFullErr error
+	for _, v := range ordered {
+		route, err := h.reserveVolume(owner, rel, v.Name, size)
+		if err == nil {
+			return route, nil
+		}
+		var re *routeError
+		if errors.As(err, &re) && re.kind == routeErrVolFull {
+			volFullErr = err // 卷容量满：保留最后一错误，继续下一候选
+			continue
+		}
+		return nil, err // owner 全局满 / 其它：直接返回
+	}
+	if volFullErr != nil {
+		return nil, volFullErr
+	}
+	return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, "存储配额不足", quota.ErrStorageFull)
+}
+
+// reserveVolume 对单卷做 owner 全局 Scope + 卷容量池双预留。
+// owner 全局满 → routeErrOwnerFull（terminal）；卷池满 → routeErrVolFull（调用方可换卷）。
+// 卷池预留失败时回滚 owner 全局预留。volSet.Tenant 取卷上租户（默认卷委托 h.tenantFor）。
+func (h *Handlers) reserveVolume(owner, rel, volName string, size int64) (*volumeRoute, error) {
+	tnt := h.volumeTenant(volName, owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, newRouteError(routeErrOther, http.StatusBadRequest, errMsgInvalidPath, nil)
+	}
+	route := &volumeRoute{volumeName: volName, tenant: tnt, scope: h.quotaScopeFor(owner, rel)}
+	if route.scope != nil {
+		res, err := route.scope.TryReserve(size)
+		if err != nil {
+			return nil, newRouteError(routeErrOwnerFull, http.StatusInsufficientStorage, "存储配额不足", err)
+		}
+		route.scopeRes = res
+	}
+	if pool := h.volSet.Pool(volName); pool != nil {
+		res, err := pool.TryReserve(size)
+		if err != nil {
+			if route.scopeRes != nil {
+				route.scopeRes.Release()
+			}
+			return nil, newRouteError(routeErrVolFull, http.StatusInsufficientStorage, "存储配额不足", err)
+		}
+		route.pool, route.poolRes = pool, res
+	}
+	return route, nil
+}
+
+// volumeTenant 返回指定卷上 owner 的租户（写盘 root）。默认卷委托 h.tenantFor（既有
+// tenantRoots 缓存，单卷零回归）；非默认卷走 volSet 懒建缓存（Tenant）。volSet nil / 未知
+// 卷名回落默认租户语义（由调用方保证不会走到未知卷名）。
+func (h *Handlers) volumeTenant(volName, owner string) *storage.Tenant {
+	owner = normalizeOwner(owner)
+	if h.volSet == nil || volName == "" || volName == h.volSet.defaultName {
+		return h.tenantFor(owner)
+	}
+	return h.volSet.Tenant(volName, owner, h.logger)
+}
+
+// volumeFileExists 探测指定卷上 owner 的 rel 是否已存在（只读，不创建租户目录）。
+// 路径 = <卷根>/<owner>/<rel>（rel 含 user/ 前缀）。
+// 语义 fail-closed：卷未知 → (false, nil)；stat 确证不存在（fs.ErrNotExist）→ (false, nil)；
+// 其它 stat 错误（权限/IO 等）→ (false, err)，调用方按 500 处理——不得把「探测失败」当
+// 「不存在」继续写（防权限/IO 错误下误覆盖判断）。
+func (h *Handlers) volumeFileExists(volName, owner, rel string) (bool, error) {
+	owner = normalizeOwner(owner)
+	rt := h.volSet.Root(volName)
+	if rt == nil {
+		return false, nil
+	}
+	_, err := rt.Stat(owner + "/" + rel)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("探测卷 %q 文件状态失败: %w", volName, err)
+}
+
+// checkVolumeUniqueness 显式卷唯一性查重（AD-4）：目标卷已有同 rel → 409；
+// 视图其它卷已有同 rel → 409 + 所在卷名。stat 探测失败（非不存在）→ 500 fail-closed。
+// 仅在显式 volume 时调用（自动路由唯一性由路由保证）。
+func (h *Handlers) checkVolumeUniqueness(owner, rel, targetVol string, view []volume.Volume) error {
+	exists, err := h.volumeFileExists(targetVol, owner, rel)
+	if err != nil {
+		return newRouteError(routeErrOther, http.StatusInternalServerError, errMsgSaveFailed, err)
+	}
+	if exists {
+		return newRouteError(routeErrConflict, http.StatusConflict,
+			fmt.Sprintf("目标卷 %q 已存在同名文件", targetVol), nil)
+	}
+	for _, v := range view {
+		if v.Name == targetVol {
+			continue
+		}
+		exists, err := h.volumeFileExists(v.Name, owner, rel)
+		if err != nil {
+			return newRouteError(routeErrOther, http.StatusInternalServerError, errMsgSaveFailed, err)
+		}
+		if exists {
+			return newRouteError(routeErrConflict, http.StatusConflict,
+				fmt.Sprintf("同名文件已存在于卷 %q", v.Name), nil)
+		}
+	}
+	return nil
+}
+
+// ---- 读路径跨卷定位（任务 5）----
+
+// fileLocation 是一次跨卷定位结果：rel 所在卷名 + 目标卷上 owner 租户（读/删/改盘 root）。
+// volumeName 空 = 无卷语义的旧装配路径（volSet nil，唯一根即默认租户）。
+type fileLocation struct {
+	volumeName string
+	tenant     *storage.Tenant
+}
+
+// locateOwnerFile 返回 owner 卷视图内 rel（user/ 前缀完整桶路径）所在卷的租户（读定位）。
+// 顺序：默认卷快路径（tenantFor 命中即用，覆盖绝大多数既有行为，单卷零回归）；
+// 未命中才遍历视图其余卷（volumeFileExists 探测，不创建租户目录——只读无副作用）。
+// 全部未命中返回 (nil, false)。
+//
+// 唯一性保证（AD-4）下同 rel 不会多卷命中；防御性若真出现多卷命中，默认卷优先 + 注释
+// 注明「首卷胜出」——调用方只应依赖「至多一卷命中」的不变式。
+//
+// 返回不携带错误：探测失败的卷视同「未命中」（调用方通常回落默认卷根，由 Open/Stat 产出
+// 404/500，与单卷既有错误语义一致）。显式指定卷的过滤定位见 locateForRead。
+func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
+	if h.volSet == nil {
+		// 旧装配路径：唯一根。stat 命中即定位成功（volumeName 空）。
+		tnt := h.tenantFor(owner)
+		if tnt == nil || tnt.Root() == nil {
+			return nil, false
+		}
+		if _, err := tnt.Root().Stat(rel); err != nil {
+			return nil, false
+		}
+		return &fileLocation{volumeName: "", tenant: tnt}, true
+	}
+
+	owner = normalizeOwner(owner)
+	// 默认卷快路径：仅当默认卷在 owner 视图（ACL Authorize）内才可命中——tenantFor +
+	// stat 命中即返回会跳过 AllowedVolumes 循环，默认卷被显式 allow 白名单收紧时未列入 owner
+	// 经快路径仍能读到默认卷文件（ACL bypass，AD-6「所有定位/读取点先过 ACL」）。
+	// 单卷缺省形态（deny + 空名单）Authorize 恒 true → 快路径行为不变（零回归）。
+	if defVol, ok := h.volSet.ByName(h.volSet.defaultName); ok && defVol.Authorize(owner) {
+		if defTnt := h.tenantFor(owner); defTnt != nil && defTnt.Root() != nil {
+			if _, err := defTnt.Root().Stat(rel); err == nil {
+				return &fileLocation{volumeName: h.volSet.defaultName, tenant: defTnt}, true
+			}
+		}
+	}
+	// 遍历视图其余卷（只探测，不创建租户目录）；默认卷不在视图则不会出现于 AllowedVolumes。
+	for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
+		if v.Name == h.volSet.defaultName {
+			continue
+		}
+		exists, err := h.volumeFileExists(v.Name, owner, rel)
+		if err != nil || !exists {
+			continue
+		}
+		tnt := h.volumeTenant(v.Name, owner)
+		if tnt == nil {
+			continue
+		}
+		return &fileLocation{volumeName: v.Name, tenant: tnt}, true
+	}
+	return nil, false
+}
+
+// defaultVolumeAllows 判断 owner 是否被默认卷 ACL 放行（读/删/改名「未命中回落默认租户」前
+// 的护栏——默认卷不在 owner 视图时不得回落默认租户 Open，防经回落读到默认卷自身遗留文件）。
+// volSet nil（旧装配路径，无卷 ACL）→ 恒 true（唯一根即默认，零回归）。
+func (h *Handlers) defaultVolumeAllows(owner string) bool {
+	owner = normalizeOwner(owner)
+	if h.volSet == nil {
+		return true
+	}
+	v, ok := h.volSet.ByName(h.volSet.defaultName)
+	return ok && v.Authorize(owner)
+}
+
+// locateForRead 是读/删/改名路径的卷定位统一入口（带可选显式 volume 过滤）：
+//   - explicitVol 非空 → 只在指定卷定位；未知卷名或 owner 不在该卷视图（ACL）→ 未命中
+//     （fail-closed，调用方按 404，不泄卷存在性）；
+//   - explicitVol 空 → 全视图定位（locateOwnerFile）。
+func (h *Handlers) locateForRead(owner, rel, explicitVol string) (*fileLocation, bool) {
+	owner = normalizeOwner(owner)
+	if explicitVol != "" {
+		if h.volSet == nil {
+			return nil, false
+		}
+		v, ok := h.volSet.ByName(explicitVol)
+		if !ok || !v.Authorize(owner) {
+			return nil, false
+		}
+		exists, err := h.volumeFileExists(v.Name, owner, rel)
+		if err != nil || !exists {
+			return nil, false
+		}
+		tnt := h.volumeTenant(v.Name, owner)
+		if tnt == nil {
+			return nil, false
+		}
+		return &fileLocation{volumeName: v.Name, tenant: tnt}, true
+	}
+	return h.locateOwnerFile(owner, rel)
 }

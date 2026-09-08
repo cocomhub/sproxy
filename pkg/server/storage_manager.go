@@ -172,24 +172,28 @@ func (s *StorageManager) SetReconciler(fn ReconcileFunc) {
 	s.reconcile = fn
 }
 
-// ScanAndRecalculate 全量扫描存储根，重新统计各分类文件大小和用户文件数量。
-// 分类按新布局桶语义（<tenant>/{user,cloud,archive,chunk,version,meta}/）判定，兼容旧布局
-// 平铺文件（默认 userFiles，跳过任务状态目录与 legacy 内部目录）。meta 桶服务端账本字节
-// 计入 totalUsage（服务端占用属总量），但 UsageByCategory 保持 4 分类枚举（meta 不入分类）。
-// 同时把各租户桶字节数归集进 tenantBuckets 并交给 reconcile 回调校准 per-tenant 配额 Scope
-// （重启后 Scope 不回溯，meta 子 Scope 一并校准）。.checksums.json 与 LAYOUT_VERSION 不计数。
-func (s *StorageManager) ScanAndRecalculate() error {
-	s.scanMu.Lock()
-	defer s.scanMu.Unlock()
+// storageScanTotals 是 scanStorageDir 的分类总量结果（meta 不计入 4 分类枚举但计入 total）。
+type storageScanTotals struct {
+	user          int64
+	chunked       int64
+	versions      int64
+	cloud         int64
+	meta          int64
+	total         int64
+	userFileCount int64
+}
 
-	var userFiles, chunked, versions, cloud, meta int64
-	var userFileCount int64
+// scanStorageDir 走查一个存储根目录（卷根 / storage_root），按新布局桶语义归集各租户桶字节
+// 并分类统计。供 StorageManager.ScanAndRecalculate 与多卷 reconcile（F2：每卷一个根逐卷扫）
+// 共用同一套分类逻辑，避免两处实现漂移。分类规则见 ScanAndRecalculate 注释。
+func scanStorageDir(dir string) (map[string]map[string]int64, storageScanTotals, error) {
+	var totals storageScanTotals
 	tenantBuckets := make(map[string]map[string]int64)
 
 	// 解析符号链接，确保扫描的是真实路径
-	realDir, err := filepath.EvalSymlinks(s.uploadsDir)
+	realDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		realDir = s.uploadsDir
+		realDir = dir
 	}
 
 	err = filepath.WalkDir(realDir, func(path string, d fs.DirEntry, err error) error {
@@ -223,8 +227,8 @@ func (s *StorageManager) ScanAndRecalculate() error {
 
 		switch bucket := storageBucketOf(rel); bucket {
 		case "user":
-			userFiles += size
-			userFileCount++
+			totals.user += size
+			totals.userFileCount++
 			tenant := firstSegment(rel)
 			addTenantBucket(tenantBuckets, tenant, "user", size)
 			// bucket_limits 子目录归集：把该文件同时计入其最长命中的路径键（如
@@ -236,18 +240,18 @@ func (s *StorageManager) ScanAndRecalculate() error {
 				addTenantBucket(tenantBuckets, tenant, dirKey, size)
 			}
 		case "cloud", "archive":
-			cloud += size
+			totals.cloud += size
 			addTenantBucket(tenantBuckets, firstSegment(rel), bucket, size)
 		case "chunk":
-			chunked += size
+			totals.chunked += size
 			addTenantBucket(tenantBuckets, firstSegment(rel), "chunk", size)
 		case "version":
-			versions += size
+			totals.versions += size
 			addTenantBucket(tenantBuckets, firstSegment(rel), "version", size)
 		case "meta":
 			// 服务端内部账本（sync/cloud 任务状态、chunked session、share token 等）：
 			// 计入 totalUsage 与租户 meta 配额 Scope，但不入 stats 分类枚举（4 键不变）。
-			meta += size
+			totals.meta += size
 			addTenantBucket(tenantBuckets, firstSegment(rel), "meta", size)
 		default:
 			// 无桶结构的旧布局平铺文件按用户文件计入（新布局路径均落入上方 bucket 分支；
@@ -255,22 +259,39 @@ func (s *StorageManager) ScanAndRecalculate() error {
 			if d.Name() == "LAYOUT_VERSION" {
 				return nil
 			}
-			userFiles += size
-			userFileCount++
+			totals.user += size
+			totals.userFileCount++
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, totals, err
+	}
+	totals.total = totals.user + totals.chunked + totals.versions + totals.cloud + totals.meta
+	return tenantBuckets, totals, nil
+}
 
+// ScanAndRecalculate 全量扫描存储根，重新统计各分类文件大小和用户文件数量。
+// 分类按新布局桶语义（<tenant>/{user,cloud,archive,chunk,version,meta}/）判定，兼容旧布局
+// 平铺文件（默认 userFiles，跳过任务状态目录与 legacy 内部目录）。meta 桶服务端账本字节
+// 计入 totalUsage（服务端占用属总量），但 UsageByCategory 保持 4 分类枚举（meta 不入分类）。
+// 同时把各租户桶字节数归集进 tenantBuckets 并交给 reconcile 回调校准 per-tenant 配额 Scope
+// （重启后 Scope 不回溯，meta 子 Scope 一并校准）。.checksums.json 与 LAYOUT_VERSION 不计数。
+func (s *StorageManager) ScanAndRecalculate() error {
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+
+	tenantBuckets, totals, err := scanStorageDir(s.uploadsDir)
 	if err != nil {
 		return err
 	}
 
-	s.userFilesSize.Store(userFiles)
-	s.chunkedSize.Store(chunked)
-	s.versionsSize.Store(versions)
-	s.cloudSize.Store(cloud)
-	s.totalUsage.Store(userFiles + chunked + versions + cloud + meta)
-	s.userFileCount.Store(userFileCount)
+	s.userFilesSize.Store(totals.user)
+	s.chunkedSize.Store(totals.chunked)
+	s.versionsSize.Store(totals.versions)
+	s.cloudSize.Store(totals.cloud)
+	s.totalUsage.Store(totals.total)
+	s.userFileCount.Store(totals.userFileCount)
 
 	// 校准 per-tenant 配额 Scope（启动/周期对账；nil 回调跳过）。
 	if s.reconcile != nil {

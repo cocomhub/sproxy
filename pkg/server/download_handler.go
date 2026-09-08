@@ -145,15 +145,33 @@ func (h *Handlers) resolveDownloadPath(r *http.Request) (*downloadPath, error) {
 		// 读取侧守卫（审查 #4 收敛 + 审查 I-1）：普通下载/stat 不得访问非 user 桶路径。
 		// UserRel 内部：NormalizeRemote + 逐段 ValidSegmentName（拒绝 .__ 内部前缀、
 		// Windows 保留设备名等）+ 首段 __ 遗留前缀拒绝；功能桶名首段合法（user/ 桶内）。
-		tnt := h.tenantOf(r)
-		if tnt == nil {
+		// 路径映射与卷无关（user/<path> 相对各卷租户根），用默认租户做纯路径校验。
+		owner := normalizeOwner(ownerFromRequest(r))
+		tnt0 := h.tenantFor(owner)
+		if tnt0 == nil {
 			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
 		}
-		rel, ok := tnt.UserRel(remotePath)
+		rel, ok := tnt0.UserRel(remotePath)
 		if !ok {
 			return nil, &downloadPathError{status: http.StatusBadRequest, message: errMsgInvalidPath}
 		}
-		return &downloadPath{filename: remotePath, tnt: tnt, rel: rel}, nil
+		// 跨卷定位（任务 5）：默认卷快路径命中即用；未命中遍历视图其余卷。带显式 ?volume=
+		// 只在指定卷定位（不在视图/卷上无此文件 → 404，fail-closed 不泄卷存在性）。
+		explicitVol := r.URL.Query().Get("volume")
+		loc, found := h.locateForRead(owner, rel, explicitVol)
+		if !found {
+			if explicitVol != "" {
+				return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+			}
+			// 全视图未命中：仅当默认卷对 owner 授权才回落默认租户（由调用方 Open/Stat 产出
+			// 404/500，与单卷既有错误语义一致）。默认卷被 ACL 排除时不得回落——否则 owner 可经
+			// 默认租户 Open 读到默认卷自身路径的遗留文件（ACL bypass，AD-6）。
+			if !h.defaultVolumeAllows(owner) {
+				return nil, &downloadPathError{status: http.StatusNotFound, message: errMsgFileNotFound}
+			}
+			return &downloadPath{filename: remotePath, tnt: tnt0, rel: rel}, nil
+		}
+		return &downloadPath{filename: remotePath, tnt: loc.tenant, rel: rel}, nil
 	case downloadKindCloudArchive:
 		if aErr := validateCloudArchiveName(name); aErr != nil {
 			return nil, aErr

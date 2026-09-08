@@ -342,11 +342,44 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner := ownerFromRequest(r)
+	owner := normalizeOwner(ownerFromRequest(r))
 	fromRel, toRel, tnt, ok := resolveRenamePaths(h, owner, from, to)
 	if !ok || tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
+	}
+
+	// 跨卷定位源 home（任务 5）：文件可能因换卷落在非默认卷，rename 在 home 卷内完成
+	// （同卷；跨卷移动走 T6 move API）。带显式 ?volume= 只在指定卷定位源（不在 → 404）。
+	// 全视图未命中仅当默认卷对 owner 授权才回落默认租户（由 executeRename 的 Stat 产出 404，
+	// 与单卷一致）；默认卷被 ACL 排除时不得回落——否则 owner 可 rename 默认卷自身路径的
+	// 遗留文件（ACL bypass，AD-6）。
+	explicitVol := r.URL.Query().Get("volume")
+	loc, found := h.locateForRead(owner, fromRel, explicitVol)
+	var homeVol string
+	var root *storage.Root
+	switch {
+	case found && loc != nil && loc.tenant != nil:
+		homeVol = loc.volumeName
+		root = loc.tenant.Root()
+	case explicitVol != "":
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
+		return
+	case !h.defaultVolumeAllows(owner):
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
+		return
+	default:
+		root = tnt.Root()
+	}
+
+	// AD-4 唯一性：目标 rel 不得已存在于 owner 视图其它卷（否则 rename 后同逻辑路径跨卷
+	// 双份）。目标已在同一 home 卷由 executeRename 的 Stat 捕获（409）；目标在其它卷 →
+	// 直接 409（跨卷移动非本任务语义）。单卷/无卷语义时 homeVol 空 → 跳过。
+	if homeVol != "" && h.volSet != nil {
+		if dstLoc, dstFound := h.locateOwnerFile(owner, toRel); dstFound && dstLoc != nil && dstLoc.volumeName != homeVol {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "目标路径已存在"}, http.StatusConflict)
+			return
+		}
 	}
 
 	if err := executeRename(renameOpCtx{
@@ -354,7 +387,7 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		w:                w,
 		ctx:              r.Context(),
 		owner:            owner,
-		root:             tnt.Root(),
+		root:             root,
 		fromRel:          fromRel,
 		toRel:            toRel,
 		from:             from,

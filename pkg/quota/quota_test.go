@@ -640,3 +640,68 @@ func TestReserve_LayeredCaps(t *testing.T) {
 		t.Fatal("TryReserve(60) 应被 /a/b（50）上限拦截")
 	}
 }
+
+// TestPool_TryReserveCommitRelease 直接锁定 Pool.TryReserve 语义（卷容量池等独立根池入口）：
+// 根池 TryReserve → Commit/Release；满返回 ErrStorageFull；Release 后额度归还可再用。
+func TestPool_TryReserveCommitRelease(t *testing.T) {
+	pool := NewPool(10)
+
+	// 预留 8 → 成功（Reserved 记在池上，不向子层传播——池为独立根）。
+	res, err := pool.TryReserve(8)
+	if err != nil {
+		t.Fatalf("TryReserve(8) 应成功: %v", err)
+	}
+	if got := pool.Reserved(); got != 8 {
+		t.Fatalf("Reserved=%d want 8", got)
+	}
+	if got := pool.Usage(); got != 0 {
+		t.Fatalf("Commit 前 Usage=%d want 0", got)
+	}
+
+	// 池满：committed 0 + reserved 8 + 请求 3 > 10 → ErrStorageFull。
+	if _, rerr := pool.TryReserve(3); !errors.Is(rerr, ErrStorageFull) {
+		t.Fatalf("TryReserve(3) 应 ErrStorageFull, got %v", rerr)
+	}
+
+	// Commit 实际 6：reserved 8→committed 6，多预留 2 归还。
+	res.Commit(6)
+	if got := pool.Usage(); got != 6 {
+		t.Fatalf("Commit 后 Usage=%d want 6", got)
+	}
+	if got := pool.Reserved(); got != 0 {
+		t.Fatalf("Commit 后 Reserved=%d want 0", got)
+	}
+
+	// committed 6 + 请求 4 = 10 恰好打满 → 成功；再 +1 → 满。
+	res2, err := pool.TryReserve(4)
+	if err != nil {
+		t.Fatalf("TryReserve(4) 应成功（恰打满 10）: %v", err)
+	}
+	if _, rerr := pool.TryReserve(1); !errors.Is(rerr, ErrStorageFull) {
+		t.Fatalf("打满后 TryReserve(1) 应 ErrStorageFull, got %v", rerr)
+	}
+	res2.Release() // 放弃 4 预留 → 可用额度回到 4
+
+	res3, err := pool.TryReserve(4)
+	if err != nil {
+		t.Fatalf("Release 后 TryReserve(4) 应成功: %v", err)
+	}
+	res3.Release()
+	if got := pool.Reserved(); got != 0 {
+		t.Fatalf("全部 Release 后 Reserved=%d want 0", got)
+	}
+}
+
+// TestPool_TryReserveZeroAndNegative 负数/零 estimate 归一（与 Scope.TryReserve 一致）。
+func TestPool_TryReserveZeroAndNegative(t *testing.T) {
+	pool := NewPool(10)
+	if _, err := pool.TryReserve(0); err != nil {
+		t.Fatalf("TryReserve(0) 应成功: %v", err)
+	}
+	if _, err := pool.TryReserve(-5); err != nil {
+		t.Fatalf("TryReserve(-5) 应成功（nonNeg 归零）: %v", err)
+	}
+	if got := pool.Reserved(); got != 0 {
+		t.Fatalf("零预留后 Reserved=%d want 0", got)
+	}
+}
