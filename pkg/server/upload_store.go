@@ -230,7 +230,11 @@ func isInflightTempName(name string) bool {
 // baseDir 是租户 chunk 桶的绝对路径（<root>/<owner>/chunk/，经 Tenant.Root().Abs("chunk")
 // 派生）；会话目录直接位于 baseDir 下（<baseDir>/<uploadID>/）。不再拼接魔法目录。
 // sessionTTL 指定未完成上传会话的过期时间，默认 24h。
-func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) (*UploadStore, error) {
+// volumeRoots（可选，变参）是卷名 → 该卷 owner 租户根绝对路径映射，**必须在 recoverSessions
+// 之前装配**——recover 按 session.Volume 经 tempAbsPath 解析在途 temp 文件所在卷（AD-5 换卷
+// 路径核心）；非默认卷会话若未预注册会把 temp 解析到默认卷 → 打开失败清空 bitmap → 续传
+// 退化为整文件重传（T6a 修复轮发现-1）。
+func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger, volumeRoots ...map[string]string) (*UploadStore, error) {
 	log := defaultLogger(logger)
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建分块上传目录失败: %w", err)
@@ -253,6 +257,11 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 		logger:         log,
 		volTenantRoots: make(map[string]string),
 	}
+	if len(volumeRoots) > 0 && volumeRoots[0] != nil {
+		for v, root := range volumeRoots[0] {
+			us.SetVolumeTenantRoot(v, root)
+		}
+	}
 	us.recoverSessions()
 
 	// 启动持久化 goroutine
@@ -268,8 +277,8 @@ func NewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logge
 
 // MustNewUploadStore 创建 UploadStore，失败时 panic。
 // 仅用于 handlers.go 等无法优雅处理错误的位置。
-func MustNewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger) *UploadStore {
-	us, err := NewUploadStore(baseDir, sessionTTL, logger)
+func MustNewUploadStore(baseDir string, sessionTTL time.Duration, logger *slog.Logger, volumeRoots ...map[string]string) *UploadStore {
+	us, err := NewUploadStore(baseDir, sessionTTL, logger, volumeRoots...)
 	if err != nil {
 		logger = defaultLogger(logger)
 		logger.Error("创建 UploadStore 失败", "error", err)

@@ -430,6 +430,112 @@ func TestChunkedUpload_InitPinsVolume(t *testing.T) {
 	// 直接断言最终文件存在即完成验证目标；临时清理由既有会话清理测试覆盖。
 }
 
+// TestChunkedUpload_RecoverDisk2SessionResumes 回归 T6a 修复轮发现-1：非默认卷（disk2）在途
+// 分块会话重启恢复时，UploadStore 的卷根注册必须先于 recoverSessions——否则 recover 把 temp
+// 解析到默认卷 → 打开失败清空 bitmap → 断点续传退化为整文件重传。断言重启后已收分块 bitmap
+// 保留（chunk 追加成功而非整文件重传），且续传补完分块可 complete 出完整文件。
+func TestChunkedUpload_RecoverDisk2SessionResumes(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	mkCfg := func() *Config {
+		cfg := Default()
+		cfg.StorageRoot = dirs[0]
+		cfg.Placement = "prefer-default"
+		cfg.ChunkSize = 4 << 10
+		cfg.Volumes = []VolumeConfig{
+			{Name: "main", Root: dirs[0], VolCapacity: 8}, // 容量小 → 新文件 init 换 disk2
+			{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("cfg.Validate: %v", err)
+		}
+		return cfg
+	}
+
+	// 第一生命周期：init + 上传 chunk 0 → disk2 在途会话（分 2 片，只收 1 片）。
+	h1 := buildVolSetHandlers(t, mkCfg())
+	ts := httptest.NewServer(chunkedVolumeMux(h1, "alice"))
+	t.Cleanup(ts.Close)
+
+	fileData := []byte("0123456789abcdefghij") // 20B > main 8 → disk2；2 片 x10B
+	fileChecksum := sha256hex(fileData)
+	const uploadID = "resume-disk2-session"
+	status, body := chunkedPost(t, ts.URL, "/upload/init", map[string]any{
+		"upload_id":     uploadID,
+		"filename":      "resume.bin",
+		"total_size":    len(fileData),
+		"chunk_size":    10,
+		"total_chunks":  2,
+		"file_checksum": fileChecksum,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("init 应 200, got %d %s", status, body)
+	}
+	// 上传 chunk 0（前 10B）。
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("upload_id", uploadID)
+	_ = mw.WriteField("chunk_index", "0")
+	_ = mw.WriteField("chunk_checksum", sha256hex(fileData[:10]))
+	part, _ := mw.CreateFormFile("chunk", "00000.chunk")
+	_, _ = part.Write(fileData[:10])
+	_ = mw.Close()
+	resp, err := http.Post(ts.URL+"/upload/chunk", mw.FormDataContentType(), &buf)
+	if err != nil {
+		t.Fatalf("chunk 0: %v", err)
+	}
+	chunkBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("chunk 0 应 200, got %d %s", resp.StatusCode, chunkBody)
+	}
+	// 同步落盘 session.json（重启前确定性持久化 bitmap）。
+	if perr := h1.uploadStoreFor("alice").PersistNow(uploadID); perr != nil {
+		t.Fatalf("PersistNow: %v", perr)
+	}
+
+	// 重启：同一卷根新建 Handlers → 新 UploadStore → recoverSessions。
+	h2 := buildVolSetHandlers(t, mkCfg())
+	store2 := h2.uploadStoreFor("alice")
+	s := store2.GetSession(uploadID)
+	if s == nil {
+		t.Fatalf("重启后应恢复会话 %s", uploadID)
+	}
+	if !s.ReceivedChunks[0] || s.ReceivedChunks[1] {
+		t.Fatalf("重启恢复后 bitmap 应保留 chunk0 已收 / chunk1 待收: got %v（发现-1：temp 解析错卷清空 bitmap → 整文件重传）", s.ReceivedChunks)
+	}
+
+	// 续传补 chunk 1 → complete → disk2 完整文件（非整文件重传路径）。
+	ts2 := httptest.NewServer(chunkedVolumeMux(h2, "alice"))
+	t.Cleanup(ts2.Close)
+	var buf2 bytes.Buffer
+	mw2 := multipart.NewWriter(&buf2)
+	_ = mw2.WriteField("upload_id", uploadID)
+	_ = mw2.WriteField("chunk_index", "1")
+	_ = mw2.WriteField("chunk_checksum", sha256hex(fileData[10:]))
+	part2, _ := mw2.CreateFormFile("chunk", "00001.chunk")
+	_, _ = part2.Write(fileData[10:])
+	_ = mw2.Close()
+	resp2, err := http.Post(ts2.URL+"/upload/chunk", mw2.FormDataContentType(), &buf2)
+	if err != nil {
+		t.Fatalf("chunk 1 (续传): %v", err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("chunk 1 (续传) 应 200, got %d", resp2.StatusCode)
+	}
+	status, body = chunkedPost(t, ts2.URL, "/upload/complete", map[string]any{"upload_id": uploadID})
+	if status != http.StatusOK {
+		t.Fatalf("complete 应 200, got %d %s", status, body)
+	}
+	got, err := os.ReadFile(filepath.Join(dirs[1], "alice", "user", "resume.bin"))
+	if err != nil {
+		t.Fatalf("read disk2 resume.bin: %v", err)
+	}
+	if !bytes.Equal(got, fileData) {
+		t.Fatalf("续传 complete 内容不完整: got %q want %q", got, fileData)
+	}
+}
+
 // TestCloudArchive_DefaultVolumeBinding 验证 cloud/archive 写根绑定默认卷（AD-5 例外）：
 // 分叉配置下 tenantFor 解析的租户根在默认卷根（dirB）而非 cfg.StorageRoot（dirA）——
 // cloud/archive 产物经 tenantFor 落默认卷，与 meta 归属一致。

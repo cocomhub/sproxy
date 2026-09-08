@@ -360,7 +360,13 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 	if cfg != nil {
 		sessionTTL = cfg.UploadSessionTTL
 	}
-	us, err := NewUploadStore(chunkAbs, sessionTTL, h.logger.With("component", "upload_store", "tenant", owner))
+	// 多卷（AD-5）：会话可跨卷定卷，UploadStore 需按 session.Volume 解析目标卷租户根
+	// （temp 文件删除/恢复/过期清理）。**卷根注册必须先于 NewUploadStore 的 recoverSessions**
+	// ——recover 按 session.Volume 解析在途 temp 文件，非默认卷会话若未预注册会把 temp 解析
+	// 到默认卷 → 打开失败清空 bitmap → 断点续传退化为整文件重传（T6a 修复轮发现-1）。
+	// Root.Abs 只推导不创建目录（无副作用——目标卷租户目录仍由写路径首次使用时懒建）。
+	us, err := NewUploadStore(chunkAbs, sessionTTL, h.logger.With("component", "upload_store", "tenant", owner),
+		h.uploadVolumeRootsFor(owner))
 	if err != nil {
 		h.logger.Error("创建 per-tenant UploadStore 失败", "tenant", owner, "error", err)
 		return nil
@@ -368,23 +374,30 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 	// P5：quota 未装配（globalPool nil）时，分块上传走 storageMgr 回退预留，
 	// 需把 storageMgr 注入 store 供会话删除/过期释放（scope 预留路径无需）。
 	us.SetStorageMgr(h.storageMgr)
-	// 多卷（AD-5）：会话可跨卷定卷，UploadStore 需按 session.Volume 解析目标卷租户根
-	// （temp 文件删除/恢复/过期清理）。注册本 owner 在各卷的租户根（Abs 只推导不创建，
-	// 无副作用——目标卷租户目录仍由写路径首次使用时懒建）。
-	if h.volSet != nil {
-		for _, v := range h.volSet.All() {
-			if v.Name == h.volSet.defaultName {
-				continue
-			}
-			if rt := h.volSet.Root(v.Name); rt != nil {
-				if abs, ok := rt.Abs(owner); ok {
-					us.SetVolumeTenantRoot(v.Name, abs)
-				}
+	h.uploadStores[owner] = us
+	return us
+}
+
+// uploadVolumeRootsFor 返回 owner 在各**非默认**卷的租户根绝对路径映射（供 UploadStore
+// recover/DeleteSession/cleanupExpired 按 session.Volume 解析目标卷 temp 路径）。
+// 默认卷（""）回落 UploadStore.baseDir 父目录，无需注册。Root.Abs 只推导不创建目录。
+// 调用方须已持 h.tenantMu（uploadStoreFor 内调用）。
+func (h *Handlers) uploadVolumeRootsFor(owner string) map[string]string {
+	roots := map[string]string{}
+	if h.volSet == nil {
+		return roots
+	}
+	for _, v := range h.volSet.All() {
+		if v.Name == h.volSet.defaultName {
+			continue
+		}
+		if rt := h.volSet.Root(v.Name); rt != nil {
+			if abs, ok := rt.Abs(owner); ok {
+				roots[v.Name] = abs
 			}
 		}
 	}
-	h.uploadStores[owner] = us
-	return us
+	return roots
 }
 
 // quotaBucketNames 是参与配额归集的功能桶名（对应租户根下的物理桶；meta 桶的配额
