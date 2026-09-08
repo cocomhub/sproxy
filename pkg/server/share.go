@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 const (
@@ -293,17 +295,33 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
+	owner := normalizeOwner(ownerFromRequest(r))
+	tnt0 := h.tenantFor(owner)
+	if tnt0 == nil || tnt0.Root() == nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
-	rel, ok := tnt.UserRel(remotePath)
+	rel, ok := tnt0.UserRel(remotePath)
 	if !ok {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
-	root := tnt.Root()
+	// 跨卷定位（T6b）：分享源文件必须在 owner 卷视图内。默认卷被 ACL 排除时默认卷遗留
+	// 不可见 → 404（fail-closed，内容不可经 token 流出）；非默认卷文件可正常创建分享
+	// （access 时经视图重新定位）。
+	var root *storage.Root
+	tntID := tnt0.ID
+	if h.volSet != nil {
+		loc, found := h.locateOwnerFile(owner, rel)
+		if !found || loc == nil || loc.tenant == nil || loc.tenant.Root() == nil {
+			sendJSONResponse(w, ShareCreateResponse{Success: false, Message: errMsgFileNotFound}, http.StatusNotFound)
+			return
+		}
+		root = loc.tenant.Root()
+		tntID = loc.tenant.ID
+	} else {
+		root = tnt0.Root()
+	}
 
 	// 符号链接拒绝 + 存在性校验：Lstat 不跟随链接，一次完成两者。
 	fi, lstatErr := root.Lstat(rel)
@@ -343,7 +361,7 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		ttl = min(d, maxShareTTL)
 	}
 
-	link, err := h.shareStore.Create(req.Filename, tnt.ID, rel, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime)
+	link, err := h.shareStore.Create(req.Filename, tntID, rel, ActorFrom(r.Context()), ttl, req.MaxDownloads, req.OneTime)
 	if err != nil {
 		sendJSONResponse(w, ShareCreateResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
 		return
@@ -381,10 +399,23 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接无效或已过期"}, http.StatusNotFound)
 		return
 	}
-	root := tnt.Root()
 	if !strings.HasPrefix(link.Rel, tnt.UserRoot()+"/") {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享链接无效或已过期"}, http.StatusNotFound)
 		return
+	}
+	// 跨卷定位（T6b）：分享源文件在创建者 owner 卷视图内重新定位——文件在非默认卷的分享
+	// 可经视图命中；默认卷被 ACL 收紧排除 owner 后，指向默认卷遗留文件的分享不再可访问
+	// （fail-closed，内容不可经 token 流出）。
+	var root *storage.Root
+	if h.volSet != nil {
+		loc, found := h.locateOwnerFile(link.TenantID, link.Rel)
+		if !found || loc == nil || loc.tenant == nil || loc.tenant.Root() == nil {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "分享文件已不存在"}, http.StatusGone)
+			return
+		}
+		root = loc.tenant.Root()
+	} else {
+		root = tnt.Root()
 	}
 	// 检查文件是否存在（root 相对，符号链接不逃逸）
 	if _, err := root.Stat(link.Rel); err != nil {

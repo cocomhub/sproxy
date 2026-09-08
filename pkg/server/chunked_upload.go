@@ -725,6 +725,8 @@ func (h *Handlers) lookupFilenameStatus(w http.ResponseWriter, owner, filename s
 }
 
 // checkFileExistsStatus 检查租户 user 桶内文件是否已存在且 checksum 匹配。
+// 多卷（T6b）：已完成文件按文件名跨卷定位（locateOwnerFile）——非默认卷文件可探测；
+// 默认卷被 ACL 排除时默认卷遗留不可见 → 未命中返回 false（调用方 404，fail-closed 不泄存在性）。
 // 返回 true 表示已处理请求。
 func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, owner, filename string) bool {
 	tnt := h.tenantFor(owner)
@@ -737,7 +739,16 @@ func (h *Handlers) checkFileExistsStatus(w http.ResponseWriter, owner, filename 
 		sendJSONResponse(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return true
 	}
-	root := tnt.Root()
+	var root *storage.Root
+	if h.volSet != nil {
+		loc, found := h.locateOwnerFile(owner, rel)
+		if !found || loc == nil || loc.tenant == nil || loc.tenant.Root() == nil {
+			return false
+		}
+		root = loc.tenant.Root()
+	} else {
+		root = tnt.Root()
+	}
 	stat, err := root.Stat(rel)
 	if err != nil {
 		return false

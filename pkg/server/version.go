@@ -19,6 +19,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // VersionInfo 版本信息。
@@ -532,11 +533,14 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 	sendJSONResponse(w, UploadResponse{Success: true, Message: "版本已删除"}, http.StatusOK)
 }
 
-// resolveVersionTarget 解析版本操作的作用租户与 user 桶 rel（T6a：版本端点 home 卷定位）。
-// 版本桶随 user 文件所在卷（AD-5，saveVersion 已按 home 卷写 version/）；list/restore/delete
-// 先前置 locateOwnerFile 定位 user 文件 home 卷 → 同卷 version 桶操作（多卷 disk2 文件的版本
-// 不再不可见，PR-C/T5 review 记账闭合）。文件未命中（不存在/已删）回落默认租户——单卷旧布局
-// 与「删文件保留版本可恢复」语义兼容；默认卷不在 owner 视图时不回落（fail-closed，ACL 不泄漏）。
+// resolveVersionTarget 解析版本操作的作用租户与 user 桶 rel（T6a/T6b：版本端点 home 卷定位 +
+// 孤儿版本跨卷闭合）。版本桶随 user 文件所在卷（AD-5，saveVersion 已按 home 卷写 version/）。
+// 定位顺序：
+//  1. locateOwnerFile 命中 user 文件 home 卷 → 同卷 version 桶操作（多卷 disk2 文件的版本可见）；
+//  2. user 文件 miss（已删除）→ 遍历 owner 视图卷找 version/<remotePath> 目录（孤儿版本闭合，
+//     保「删文件保留版本可恢复」语义——list/restore/delete 仍可作用于孤儿版本所在卷）；
+//  3. 全视图无版本目录：默认卷在视图内回落默认租户（与单卷「文件无版本 → 空列表」兼容）；
+//     默认卷不在 owner 视图则返回 false（fail-closed，ACL 不泄漏）。
 func (h *Handlers) resolveVersionTarget(owner, remotePath string) (*storage.Tenant, string, bool) {
 	owner = normalizeOwner(owner)
 	tnt := h.tenantFor(owner)
@@ -548,9 +552,23 @@ func (h *Handlers) resolveVersionTarget(owner, remotePath string) (*storage.Tena
 		return nil, "", false
 	}
 	if h.volSet != nil {
-		if loc, found := h.locateOwnerFile(owner, rel); found && loc != nil && loc.tenant != nil {
+		// 1) user 文件在视图内 → 该 home 卷租户（版本同卷 AD-5）。
+		if loc, found := h.locateOwnerFile(owner, rel); found && loc != nil && loc.tenant != nil && loc.tenant.Root() != nil {
 			return loc.tenant, rel, true
 		}
+		// 2) user 文件 miss → 孤儿版本跨卷闭合：遍历 owner 视图卷找 version/<remotePath> 目录。
+		if verRel, vok := tnt.FeatureRel("version", remotePath); vok {
+			for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
+				exists, err := h.volumeFileExists(v.Name, owner, verRel)
+				if err != nil || !exists {
+					continue
+				}
+				if vt := h.volumeTenant(v.Name, owner); vt != nil && vt.Root() != nil {
+					return vt, rel, true
+				}
+			}
+		}
+		// 3) 默认卷不在视图 → 不回落（fail-closed）。
 		if !h.defaultVolumeAllows(owner) {
 			return nil, "", false
 		}

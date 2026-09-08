@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // ArchiveRequest 是 POST /api/archive 的请求体。
@@ -72,6 +73,7 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 	pr, pw := io.Pipe()
 	defer pr.Close()
 	var closeOnce sync.Once
+	owner := normalizeOwner(ownerFromRequest(r))
 	go func() {
 		var pipeErr error
 		defer closeOnce.Do(func() {
@@ -93,19 +95,15 @@ func (h *Handlers) archiveHandler(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 
-			// 源文件按请求者租户 user 桶解析（<root>/<tenant>/user/<path>），
-			// addFileToTar 经 os.Root 相对打开（中间目录符号链接不逃逸，TOCTOU 交叉校验保留）。
-			tnt := h.tenantOf(r)
-			if tnt == nil {
-				logger.Error("归档添加文件失败：租户不可用", "path", relPath)
+			// 跨卷定位（T6b）：归档源文件按 owner 卷视图定位（addFileToTar 经 os.Root 相对
+			// 打开——中间目录符号链接不逃逸，TOCTOU 交叉校验保留）。非默认卷文件可打包；
+			// 默认卷被 ACL 排除时默认卷遗留不可见 → 跳过（不读取无权卷内容，fail-closed）。
+			root, userRel := h.archiveFileRootFor(owner, relPath)
+			if root == nil {
+				logger.Error("归档添加文件失败：文件不在视图", "path", relPath)
 				continue
 			}
-			userRel, ok := tnt.UserRel(relPath)
-			if !ok {
-				logger.Error("归档添加文件失败：无效的文件路径", "path", relPath)
-				continue
-			}
-			if err := addFileToTar(tw, tnt.Root(), userRel, relPath, logger); err != nil {
+			if err := addFileToTar(tw, root, userRel, relPath, logger); err != nil {
 				logger.Error("归档添加文件失败", "path", relPath, "error", err)
 				pipeErr = err
 			}
@@ -177,6 +175,29 @@ func validateArchiveFiles(files []string, w http.ResponseWriter) ([]string, bool
 		validated = append(validated, relPath)
 	}
 	return validated, true
+}
+
+// archiveFileRootFor 返回归档源文件 relPath 在 owner 卷视图内的 root 与 user 桶 rel。
+// 未命中（视图全无）或默认卷被 ACL 排除（遗留不可见）返回 (nil, "")——调用方跳过，
+// 绝不读取无权卷内容（fail-closed）。volSet nil（旧装配）回落默认租户（唯一根）。
+func (h *Handlers) archiveFileRootFor(owner, relPath string) (*storage.Root, string) {
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, ""
+	}
+	userRel, ok := tnt.UserRel(relPath)
+	if !ok {
+		return nil, ""
+	}
+	if h.volSet != nil {
+		if loc, found := h.locateOwnerFile(owner, userRel); found && loc != nil && loc.tenant != nil && loc.tenant.Root() != nil {
+			return loc.tenant.Root(), userRel
+		}
+		if !h.defaultVolumeAllows(owner) {
+			return nil, ""
+		}
+	}
+	return tnt.Root(), userRel
 }
 
 // addFileToTar 将 root 内 rel 对应的文件（或目录）添加到 tar writer 中（tar 条目名为 tarRel）。
@@ -276,27 +297,69 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 源目录按请求者租户 user 桶解析（<root>/<tenant>/user/<path>）。
-	tnt := h.tenantOf(r)
-	if tnt == nil {
+	owner := normalizeOwner(ownerFromRequest(r))
+	tnt0 := h.tenantFor(owner)
+	if tnt0 == nil || tnt0.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
 	}
-	userRel, ok := tnt.UserRel(relPath)
+	userRel, ok := tnt0.UserRel(relPath)
 	if !ok {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
 	}
-	info, err := tnt.Root().Stat(userRel)
-	if err != nil {
-		if os.IsNotExist(err) {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
-		} else {
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "访问目录失败"}, http.StatusInternalServerError)
-		}
-		return
+
+	// 多卷（T6b）：目录可跨卷并存（换卷目录不一定每卷都有），收集 owner 视图内存在该目录的
+	// 卷租户逐卷打包；默认卷被 ACL 排除时不参与（fail-closed，不打包无权卷遗留）。
+	type dirSrc struct {
+		tnt     *storage.Tenant
+		userRel string
 	}
-	if !info.IsDir() {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "指定路径不是目录"}, http.StatusBadRequest)
+	var srcs []dirSrc
+	if h.volSet == nil {
+		// 旧装配路径：唯一根 stat 校验目录存在 + 是目录（与单卷既有错误语义一致）。
+		info, statErr := tnt0.Root().Stat(userRel)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
+			} else {
+				sendJSONResponse(w, UploadResponse{Success: false, Message: "访问目录失败"}, http.StatusInternalServerError)
+			}
+			return
+		}
+		if !info.IsDir() {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "指定路径不是目录"}, http.StatusBadRequest)
+			return
+		}
+		srcs = append(srcs, dirSrc{tnt: tnt0, userRel: userRel})
+	} else {
+		notDir := false
+		for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
+			exists, vErr := h.volumeFileExists(v.Name, owner, userRel)
+			if vErr != nil || !exists {
+				continue
+			}
+			tnt := h.volumeTenant(v.Name, owner)
+			if tnt == nil || tnt.Root() == nil {
+				continue
+			}
+			info, statErr := tnt.Root().Stat(userRel)
+			if statErr != nil {
+				continue
+			}
+			if !info.IsDir() {
+				notDir = true
+				continue
+			}
+			srcs = append(srcs, dirSrc{tnt: tnt, userRel: userRel})
+		}
+		if notDir && len(srcs) == 0 {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "指定路径不是目录"}, http.StatusBadRequest)
+			return
+		}
+	}
+	if len(srcs) == 0 {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "目录不存在"}, http.StatusNotFound)
 		return
 	}
 
@@ -320,16 +383,18 @@ func (h *Handlers) archiveDirHandler(w http.ResponseWriter, r *http.Request) {
 		gw := gzip.NewWriter(pw)
 		tw := tar.NewWriter(gw)
 
-		// 检查客户端是否断开连接
-		select {
-		case <-r.Context().Done():
-			pipeErr = r.Context().Err()
-			return
-		default:
-		}
+		for _, src := range srcs {
+			// 检查客户端是否断开连接
+			select {
+			case <-r.Context().Done():
+				pipeErr = r.Context().Err()
+				return
+			default:
+			}
 
-		if err := addFileToTarDepth(tw, tnt.Root(), userRel, filepath.ToSlash(relPath), h.logger, 0); err != nil {
-			pipeErr = err
+			if err := addFileToTarDepth(tw, src.tnt.Root(), src.userRel, filepath.ToSlash(relPath), h.logger, 0); err != nil {
+				pipeErr = err
+			}
 		}
 		if err := tw.Close(); err != nil {
 			pipeErr = err

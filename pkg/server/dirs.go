@@ -60,18 +60,27 @@ func (h *Handlers) mkdir(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录名: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
+	// 路径映射与卷无关（user/<path> 相对各卷租户根），用默认租户做纯路径校验；
+	// 实际落盘目录选 owner 视图内首个卷（默认卷优先——默认卷开放时即默认租户，零回归；
+	// 默认卷被 ACL 排除时落到视图卷，绝不经默认租户直写默认卷遗留，AD-6 闭合）。
+	owner := normalizeOwner(ownerFromRequest(r))
+	tnt0 := h.tenantFor(owner)
+	if tnt0 == nil || tnt0.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
 	}
-	rel, ok := tnt.UserRel(remotePath)
+	rel, ok := tnt0.UserRel(remotePath)
 	if !ok {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
 		return
 	}
+	target := h.primaryViewTenant(owner)
+	if target == nil || target.Root() == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "无效的目录路径"}, http.StatusBadRequest)
+		return
+	}
 
-	if err := tnt.Root().MkdirAll(rel, 0755); err != nil {
+	if err := target.Root().MkdirAll(rel, 0755); err != nil {
 		h.logger.Error(errMsgCreateDirFailed, "dir", remotePath, "error", err)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgCreateDirFailed}, http.StatusInternalServerError)
 		return

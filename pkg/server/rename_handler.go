@@ -166,6 +166,10 @@ func executeRename(ctx renameOpCtx) error {
 }
 
 // processBatchRenameItem 处理单条批量重命名操作。
+//
+// 多卷（T6b）：源文件按 owner 卷视图跨卷定位（locateOwnerFile）——非默认卷文件可批量改名
+// （同卷内移动），不再恒默认卷 404。默认卷被 ACL 排除时源在默认卷的遗留按不可见处理
+// （源文件不存在，fail-closed 不泄存在性）。目标跨卷已存在（AD-4）→ 409 语义（目标路径已存在）。
 func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op BatchRenameOp, logger *slog.Logger) BatchOperationResult {
 	result := BatchOperationResult{Filename: op.From + " -> " + op.To}
 	from, err := ValidateFilePath(op.From)
@@ -184,12 +188,33 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op 
 		result.Message = "源与目标相同，无需移动"
 		return result
 	}
+	owner = normalizeOwner(owner)
 	fromRel, toRel, tnt, ok := resolveRenamePaths(h, owner, from, to)
 	if !ok {
 		result.Message = "无效的文件路径"
 		return result
 	}
-	root := tnt.Root()
+
+	// 跨卷定位源（home 卷内完成 rename；默认卷被 ACL 排除时不得回落默认租户）。
+	loc, found := h.locateOwnerFile(owner, fromRel)
+	var root *storage.Root
+	var homeVol string
+	switch {
+	case found && loc != nil && loc.tenant != nil && loc.tenant.Root() != nil:
+		homeVol = loc.volumeName
+		root = loc.tenant.Root()
+	case h.volSet != nil && !h.defaultVolumeAllows(owner):
+		result.Message = "源文件不存在"
+		return result
+	default:
+		// 旧装配 / 单卷默认开放：回落默认租户由 Stat 产出「源文件不存在」（与单卷一致）。
+		if tnt == nil || tnt.Root() == nil {
+			result.Message = "无效的文件路径"
+			return result
+		}
+		root = tnt.Root()
+	}
+
 	if _, err := root.Stat(fromRel); os.IsNotExist(err) {
 		result.Message = "源文件不存在"
 		return result
@@ -197,6 +222,13 @@ func (h *Handlers) processBatchRenameItem(ctx context.Context, owner string, op 
 	if _, err := root.Stat(toRel); err == nil {
 		result.Message = "目标路径已存在"
 		return result
+	}
+	// AD-4 唯一性：目标 rel 不得已在 owner 视图其它卷存在（同 rel 跨卷双份）。单卷 homeVol 空跳过。
+	if homeVol != "" && h.volSet != nil {
+		if dstLoc, dstFound := h.locateOwnerFile(owner, toRel); dstFound && dstLoc != nil && dstLoc.volumeName != homeVol {
+			result.Message = "目标路径已存在"
+			return result
+		}
 	}
 	if op.Checksum == "" {
 		result.Message = "缺少 checksum"

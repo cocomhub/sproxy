@@ -316,7 +316,9 @@ func (h *Handlers) listRelForOwner(owner, subdir string) (string, bool) {
 
 // searchFiles 处理 GET /api/files/search?q=keyword。
 // 递归搜索请求者租户 user 桶下文件名包含 q 的文件，不区分大小写。
-// 返回与 listFiles 相同的 fileInfo 结构。
+// 多卷（T6b）：按 owner 卷视图逐卷递归搜索（不只默认卷），文件条目带 volume 字段；
+// 目录条目为逻辑目录（可跨卷并存）只列一次、Volume 空。默认卷被 ACL 排除则不搜默认卷
+// （不泄默认卷遗留元数据）。
 func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
@@ -325,18 +327,7 @@ func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	qLower := strings.ToLower(q)
 
-	owner := ownerFromRequest(r)
-	tnt := h.tenantFor(owner)
-	if tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
-		return
-	}
-	// 搜索根 = user 桶绝对路径（功能桶不在其下，天然不参与搜索）。
-	searchRoot, ok := tnt.Root().Abs(tnt.UserRoot())
-	if !ok {
-		sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
-		return
-	}
+	owner := normalizeOwner(ownerFromRequest(r))
 	// 一次性快照（见 listFiles #8 结论注释，勿再分析）：per-tenant store，key 为相对租户根的 rel。
 	var csMap map[string]string
 	if cs := h.checksumStoreFor(owner); cs != nil {
@@ -344,22 +335,64 @@ func (h *Handlers) searchFiles(w http.ResponseWriter, r *http.Request) {
 	} else {
 		csMap = map[string]string{}
 	}
-	results := h.collectSearchResults(searchRoot, qLower, csMap)
+
+	if h.volSet == nil {
+		// 旧装配路径：单卷唯一根（搜索根 = user 桶绝对路径；功能桶天然不参与搜索）。
+		tnt := h.tenantFor(owner)
+		if tnt == nil || tnt.Root() == nil {
+			sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
+			return
+		}
+		searchRoot, ok := tnt.Root().Abs(tnt.UserRoot())
+		if !ok {
+			sendJSONResponse(w, listResponse{Files: []fileInfo{}}, http.StatusBadRequest)
+			return
+		}
+		var results []fileInfo
+		h.collectSearchResults(searchRoot, qLower, csMap, "", &results, make(map[string]bool))
+		resp := listResponse{Files: results, Total: len(results), Offset: 0, Limit: len(results)}
+		sendJSONResponse(w, resp, http.StatusOK)
+		return
+	}
+
+	// 多卷：owner 视图逐卷搜索。
+	vols := volume.AllowedVolumes(h.volSet.All(), owner)
+	if len(vols) == 0 {
+		sendJSONResponse(w, listResponse{Files: []fileInfo{}, Total: 0, Offset: 0, Limit: 0}, http.StatusOK)
+		return
+	}
+	var results []fileInfo
+	seenDirs := make(map[string]bool)
+	for _, v := range vols {
+		// 只搜 user 桶存在的卷（只读探测，不创建租户目录——搜索是 GET 无副作用）。
+		exists, err := h.volumeFileExists(v.Name, owner, "user")
+		if err != nil || !exists {
+			continue
+		}
+		tnt := h.volumeTenant(v.Name, owner)
+		if tnt == nil || tnt.Root() == nil {
+			continue
+		}
+		searchRoot, ok := tnt.Root().Abs(tnt.UserRoot())
+		if !ok {
+			continue
+		}
+		h.collectSearchResults(searchRoot, qLower, csMap, v.Name, &results, seenDirs)
+	}
 	resp := listResponse{Files: results, Total: len(results), Offset: 0, Limit: len(results)}
 	sendJSONResponse(w, resp, http.StatusOK)
 }
 
 // collectSearchResults 递归搜索请求者租户 user 桶下文件名包含 queryLower 的文件。
-func (h *Handlers) collectSearchResults(rootsDir, queryLower string, csMap map[string]string) []fileInfo {
-	var results []fileInfo
+// volumeName 非空时为多卷搜索结果（文件条目带该卷名）；seenDirs 跨卷去重逻辑目录条目。
+func (h *Handlers) collectSearchResults(rootsDir, queryLower string, csMap map[string]string, volumeName string, results *[]fileInfo, seenDirs map[string]bool) {
 	_ = filepath.WalkDir(rootsDir, func(path string, d fs.DirEntry, err error) error {
-		return h.searchWalkDirCallback(rootsDir, path, d, err, queryLower, csMap, &results)
+		return h.searchWalkDirCallback(rootsDir, path, d, err, queryLower, csMap, volumeName, results, seenDirs)
 	})
-	return results
 }
 
 // searchWalkDirCallback 是 collectSearchResults 中 filepath.WalkDir 的回调函数。
-func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, err error, queryLower string, csMap map[string]string, results *[]fileInfo) error {
+func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, err error, queryLower string, csMap map[string]string, volumeName string, results *[]fileInfo, seenDirs map[string]bool) error {
 	if err != nil {
 		h.logger.Warn("搜索时访问路径失败", "path", path, "error", err)
 		return nil
@@ -378,8 +411,14 @@ func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, e
 		return nil
 	}
 	if d.IsDir() {
+		// 目录条目：聚合逻辑目录只列一次（跨卷并存），不绑定单卷。
+		name := filepath.ToSlash(rel)
+		if seenDirs[name] {
+			return nil
+		}
+		seenDirs[name] = true
 		*results = append(*results, fileInfo{
-			Name:  filepath.ToSlash(rel),
+			Name:  name,
 			IsDir: true,
 		})
 		return nil
@@ -392,6 +431,7 @@ func (h *Handlers) searchWalkDirCallback(rootsDir, path string, d fs.DirEntry, e
 		Name:    filepath.ToSlash(rel),
 		Size:    info.Size(),
 		ModTime: info.ModTime().UnixNano(),
+		Volume:  volumeName,
 	}
 	if cs, ok := csMap["user/"+filepath.ToSlash(rel)]; ok {
 		fi.Checksum = cs

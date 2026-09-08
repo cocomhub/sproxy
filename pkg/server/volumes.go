@@ -566,6 +566,23 @@ func (h *Handlers) defaultVolumeAllows(owner string) bool {
 	return ok && v.Authorize(owner)
 }
 
+// primaryViewTenant 返回 owner 视图内首个卷的租户（写新目录/新文件等「不跨卷写」入口用）。
+// 默认卷在视图时即默认租户（声明序首卷，单卷零回归）；默认卷被 ACL 排除时落到首个其它视图卷。
+// 视图全空 / 卷租户不可用返回 nil（调用方按 400 fail-closed）。volSet nil（旧装配）回落默认租户。
+func (h *Handlers) primaryViewTenant(owner string) *storage.Tenant {
+	owner = normalizeOwner(owner)
+	if h.volSet == nil {
+		return h.tenantFor(owner)
+	}
+	for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
+		tnt := h.volumeTenant(v.Name, owner)
+		if tnt != nil && tnt.Root() != nil {
+			return tnt
+		}
+	}
+	return nil
+}
+
 // locateForRead 是读/删/改名路径的卷定位统一入口（带可选显式 volume 过滤）：
 //   - explicitVol 非空 → 只在指定卷定位；未知卷名或 owner 不在该卷视图（ACL）→ 未命中
 //     （fail-closed，调用方按 404，不泄卷存在性）；

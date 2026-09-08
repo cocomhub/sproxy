@@ -195,6 +195,10 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // processBatchDeleteItem 处理单条文件删除操作。
+//
+// 多卷（T6b）：逐文件按 owner 卷视图跨卷定位（locateOwnerFile）——非默认卷文件可批量删除，
+// 不再恒默认卷 404/静默成功。语义：真实缺失（视图全无）才幂等成功提示；默认卷被 ACL 排除时
+// 默认卷遗留不可见按缺失处理（fail-closed，不泄存在性，绝不经默认租户直删遗留）。
 func (h *Handlers) processBatchDeleteItem(ctx context.Context, owner string, f BatchDeleteFile, logger *slog.Logger) BatchOperationResult {
 	result := BatchOperationResult{Filename: f.Filename}
 	remotePath, rel, ok := h.resolveAndValidateFileForOwner(owner, f.Filename)
@@ -202,12 +206,32 @@ func (h *Handlers) processBatchDeleteItem(ctx context.Context, owner string, f B
 		result.Message = "无效的文件路径"
 		return result
 	}
-	tnt := h.tenantFor(owner)
-	if tnt == nil || tnt.Root() == nil {
-		result.Message = "无效的文件路径"
+	owner = normalizeOwner(owner)
+
+	// 跨卷定位：定位 rel 实际所在卷（视图内）。homeVol 供删除后卷容量池 Release（与单删一致）。
+	loc, found := h.locateOwnerFile(owner, rel)
+	var root *storage.Root
+	var homeVol string
+	switch {
+	case found && loc != nil && loc.tenant != nil && loc.tenant.Root() != nil:
+		homeVol = loc.volumeName
+		root = loc.tenant.Root()
+	case h.volSet != nil && !h.defaultVolumeAllows(owner):
+		// 默认卷被 ACL 排除：视图外遗留不可见 → 幂等成功（不泄存在性，不直删默认卷）。
+		result.Success = true
+		result.Message = "文件不存在（幂等删除）"
+		logger.WarnContext(ctx, "批量删除：文件不在视图（幂等删除）", "file_name", remotePath)
 		return result
+	default:
+		// 旧装配 / 单卷默认开放：locateOwnerFile 已覆盖默认卷，miss 即真实缺失（Stat 兜底幂等）。
+		tnt := h.tenantFor(owner)
+		if tnt == nil || tnt.Root() == nil {
+			result.Message = "无效的文件路径"
+			return result
+		}
+		root = tnt.Root()
 	}
-	root := tnt.Root()
+
 	stat, statErr := root.Stat(rel)
 	if os.IsNotExist(statErr) {
 		result.Success = true
@@ -241,6 +265,12 @@ func (h *Handlers) processBatchDeleteItem(ctx context.Context, owner string, f B
 		// P4 配额对账：批量删除同样按删除前 stat 的文件大小释放占用（按 rel 解析子 Scope）。
 		if scope := h.quotaScopeFor(owner, rel); scope != nil {
 			scope.ReleaseUsage(stat.Size())
+		}
+		// 卷容量池双 Release（AD-7）：删除释放文件所在卷池，否则 Usage 虚高（与单删一致）。
+		if homeVol != "" && h.volSet != nil {
+			if pool := h.volSet.Pool(homeVol); pool != nil {
+				pool.Adjust(pool.Usage(), pool.Usage()-stat.Size())
+			}
 		}
 		if cs := h.checksumStoreFor(owner); cs != nil {
 			cs.Delete(rel)
