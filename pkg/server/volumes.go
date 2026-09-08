@@ -525,13 +525,18 @@ func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
 	}
 
 	owner = normalizeOwner(owner)
-	// 默认卷快路径：tenantFor（既有 tenantRoots 缓存）已足够——命中即用，handler 主路径不变。
-	if defTnt := h.tenantFor(owner); defTnt != nil && defTnt.Root() != nil {
-		if _, err := defTnt.Root().Stat(rel); err == nil {
-			return &fileLocation{volumeName: h.volSet.defaultName, tenant: defTnt}, true
+	// 默认卷快路径：仅当默认卷在 owner 视图（ACL Authorize）内才可命中——tenantFor +
+	// stat 命中即返回会跳过 AllowedVolumes 循环，默认卷被显式 allow 白名单收紧时未列入 owner
+	// 经快路径仍能读到默认卷文件（ACL bypass，AD-6「所有定位/读取点先过 ACL」）。
+	// 单卷缺省形态（deny + 空名单）Authorize 恒 true → 快路径行为不变（零回归）。
+	if defVol, ok := h.volSet.ByName(h.volSet.defaultName); ok && defVol.Authorize(owner) {
+		if defTnt := h.tenantFor(owner); defTnt != nil && defTnt.Root() != nil {
+			if _, err := defTnt.Root().Stat(rel); err == nil {
+				return &fileLocation{volumeName: h.volSet.defaultName, tenant: defTnt}, true
+			}
 		}
 	}
-	// 遍历视图其余卷（只探测，不创建租户目录）。
+	// 遍历视图其余卷（只探测，不创建租户目录）；默认卷不在视图则不会出现于 AllowedVolumes。
 	for _, v := range volume.AllowedVolumes(h.volSet.All(), owner) {
 		if v.Name == h.volSet.defaultName {
 			continue
@@ -547,6 +552,18 @@ func (h *Handlers) locateOwnerFile(owner, rel string) (*fileLocation, bool) {
 		return &fileLocation{volumeName: v.Name, tenant: tnt}, true
 	}
 	return nil, false
+}
+
+// defaultVolumeAllows 判断 owner 是否被默认卷 ACL 放行（读/删/改名「未命中回落默认租户」前
+// 的护栏——默认卷不在 owner 视图时不得回落默认租户 Open，防经回落读到默认卷自身遗留文件）。
+// volSet nil（旧装配路径，无卷 ACL）→ 恒 true（唯一根即默认，零回归）。
+func (h *Handlers) defaultVolumeAllows(owner string) bool {
+	owner = normalizeOwner(owner)
+	if h.volSet == nil {
+		return true
+	}
+	v, ok := h.volSet.ByName(h.volSet.defaultName)
+	return ok && v.Authorize(owner)
 }
 
 // locateForRead 是读/删/改名路径的卷定位统一入口（带可选显式 volume 过滤）：

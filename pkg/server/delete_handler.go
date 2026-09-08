@@ -73,17 +73,19 @@ func (h *Handlers) delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 跨卷定位（任务 5）：文件可能因换卷落在非默认卷。带显式 ?volume= 只在指定卷定位
-	// （不在视图/卷上无此文件 → 404，fail-closed）。全视图未命中回落默认租户，由 Open 产出
-	// 404/500（与单卷既有错误语义一致）。
-	owner := ownerFromRequest(r)
-	loc, found := h.locateForRead(owner, rel, r.URL.Query().Get("volume"))
+	// （不在视图/卷上无此文件 → 404，fail-closed）。全视图未命中仅当默认卷对 owner 授权才
+	// 回落默认租户（由 Open 产出 404/500，与单卷既有错误语义一致）；默认卷被 ACL 排除时不得
+	// 回落——否则 owner 可经默认租户 Open 删除默认卷自身路径的遗留文件（ACL bypass，AD-6）。
+	owner := normalizeOwner(ownerFromRequest(r))
+	explicitVol := r.URL.Query().Get("volume")
+	loc, found := h.locateForRead(owner, rel, explicitVol)
 	var homeVol string
 	var root *storage.Root
 	if found && loc != nil && loc.tenant != nil {
 		homeVol = loc.volumeName
 		root = loc.tenant.Root()
 	} else {
-		if r.URL.Query().Get("volume") != "" {
+		if explicitVol != "" || !h.defaultVolumeAllows(owner) {
 			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
 			return
 		}

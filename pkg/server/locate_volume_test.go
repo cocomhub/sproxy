@@ -427,6 +427,60 @@ func TestList_ACLNormalizesAnonymousOwner(t *testing.T) {
 	}
 }
 
+// TestLocate_DefaultVolumeACLFastPathEnforced security MEDIUM：默认卷被显式 allow 白名单收紧
+// （{mode:allow, owners:[alice]}）时，未列入 owner（bob）不得经 locateOwnerFile 默认卷快路径
+// stat 命中**默认卷上 bob 自身租户路径**的文件（ACL bypass，AD-6——该文件可能为 ACL 收紧前
+// 遗留或物理预置）。bob download/stat 该文件 → 404（修复前快路径 stat 命中会 200 读到）；
+// alice 读默认卷自己文件仍 200（快路径放行）。
+func TestLocate_DefaultVolumeACLFastPathEnforced(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir()}
+	volumes := []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20,
+			ACL: &VolumeACLConfig{Mode: VolumeACLAllow, Owners: []string{"alice"}}},
+		{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
+	}
+	cfg := Default()
+	cfg.StorageRoot = dirs[0]
+	cfg.Placement = "prefer-default"
+	cfg.Volumes = volumes
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("cfg.Validate: %v", err)
+	}
+	h := buildVolSetHandlers(t, cfg)
+	aliceTS := httptest.NewServer(volumeRWMux(h, "alice"))
+	t.Cleanup(aliceTS.Close)
+	bobTS := httptest.NewServer(volumeRWMux(h, "bob"))
+	t.Cleanup(bobTS.Close)
+
+	// 夹具直写默认卷：bob 自己的租户路径下预置文件（模拟 ACL 收紧前遗留/物理落盘）+
+	// alice 自己的文件（快路径放行正例）。mustWriteVolumeFile 内容为 'A' 重复。
+	mustWriteVolumeFile(t, dirs[0], "bob", "user/secret.txt", len("BOB-STALE"))
+	mustWriteVolumeFile(t, dirs[0], "alice", "user/own.txt", len("ALICE-OWN"))
+	bobBody := bytes.Repeat([]byte{'A'}, len("BOB-STALE"))
+	aliceBody := bytes.Repeat([]byte{'A'}, len("ALICE-OWN"))
+
+	// bob 读默认卷上自己路径的文件 → 必须 404（bob 不在默认卷 allow 视图，ACL bypass 修复）。
+	if status, _, data := volumeDownload(t, bobTS.URL, "secret.txt", ""); status != http.StatusNotFound {
+		t.Fatalf("bob download 默认卷遗留文件 status=%d want 404（ACL bypass）, body=%s", status, data)
+	}
+	if status, _ := volumeStat(t, bobTS.URL, "secret.txt"); status != http.StatusNotFound {
+		t.Fatalf("bob stat 默认卷遗留文件 status=%d want 404（ACL bypass）", status)
+	}
+
+	// alice 仍可读默认卷自己文件（快路径放行）。
+	if status, _, data := volumeDownload(t, aliceTS.URL, "own.txt", ""); status != http.StatusOK || !bytes.Equal(data, aliceBody) {
+		t.Fatalf("alice download 默认卷文件 status=%d data=%q want 200+内容", status, data)
+	}
+	if status, hdr := volumeStat(t, aliceTS.URL, "own.txt"); status != http.StatusOK || hdr.Get("X-File-Size") != fmt.Sprintf("%d", len(aliceBody)) {
+		t.Fatalf("alice stat 默认卷文件 status=%d want 200 size=%d", status, len(aliceBody))
+	}
+	// bob 的遗留文件字节确在默认卷根（证明 404 是 ACL 拦截而非文件不存在）。
+	got, err := os.ReadFile(filepath.Join(dirs[0], "bob", "user", "secret.txt"))
+	if err != nil || !bytes.Equal(got, bobBody) {
+		t.Fatalf("前置：默认卷根应存在 bob 遗留文件: err=%v got=%q", err, got)
+	}
+}
+
 // TestDeleteRename_ExplicitVolumeFilter delete/rename 带 ?volume= 只在指定卷定位：
 // b 在 disk2 → ?volume=disk2 删/改成功；指向 main → 404（不在该卷，不泄卷）。
 func TestDeleteRename_ExplicitVolumeFilter(t *testing.T) {

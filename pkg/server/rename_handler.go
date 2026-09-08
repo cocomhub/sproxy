@@ -342,7 +342,7 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner := ownerFromRequest(r)
+	owner := normalizeOwner(ownerFromRequest(r))
 	fromRel, toRel, tnt, ok := resolveRenamePaths(h, owner, from, to)
 	if !ok || tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
@@ -351,7 +351,9 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 
 	// 跨卷定位源 home（任务 5）：文件可能因换卷落在非默认卷，rename 在 home 卷内完成
 	// （同卷；跨卷移动走 T6 move API）。带显式 ?volume= 只在指定卷定位源（不在 → 404）。
-	// 全视图未命中回落默认租户，由 executeRename 的 Stat 产出 404（源不存在，与单卷一致）。
+	// 全视图未命中仅当默认卷对 owner 授权才回落默认租户（由 executeRename 的 Stat 产出 404，
+	// 与单卷一致）；默认卷被 ACL 排除时不得回落——否则 owner 可 rename 默认卷自身路径的
+	// 遗留文件（ACL bypass，AD-6）。
 	explicitVol := r.URL.Query().Get("volume")
 	loc, found := h.locateForRead(owner, fromRel, explicitVol)
 	var homeVol string
@@ -361,6 +363,9 @@ func (h *Handlers) rename(w http.ResponseWriter, r *http.Request) {
 		homeVol = loc.volumeName
 		root = loc.tenant.Root()
 	case explicitVol != "":
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
+		return
+	case !h.defaultVolumeAllows(owner):
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "源文件不存在"}, http.StatusNotFound)
 		return
 	default:
