@@ -146,7 +146,7 @@ Placement string `yaml:"placement" mapstructure:"placement"`
 Volumes  []VolumeConfig `yaml:"volumes" mapstructure:"volumes"`
 ```
 
-`Default()` 里 `Placement: "prefer-default"`、`Volumes: nil`（保持 nil 以便 Normalize 区分「未配」）。normalize 区（`:528` 附近 `c.StorageRoot` 兜底之后）加：
+`Default()` 里直接烘焙归一后的单卷形态：`Placement: "prefer-default"`、`Volumes: []VolumeConfig{{Name: "default", Root: defaultStorageRoot}}`（首卷 root 用占位常量 `defaultStorageRoot("./storage")`——注意不是 `c.StorageRoot`，故 YAML 只写 `storage_root:/data` 时 Default 的合成卷 root 停在占位，装配层以 `resolveDefaultVolumeRoot` 裁决为 `cfg.StorageRoot`，见任务 3 F1 门禁）。**契约「Volumes 恒 ≥1、首卷 = 默认卷」由 Default 预合成保证**；normalize 区（`:528` 附近 `c.StorageRoot` 兜底之后）仍保留 `len==0` 兜底（直接消费零值 Config 的路径同样得合成）加：
 
 ```go
 if c.Placement == "" { c.Placement = "prefer-default" }

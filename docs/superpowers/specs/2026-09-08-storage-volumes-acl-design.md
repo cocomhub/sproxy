@@ -77,7 +77,7 @@ owner 在节点上的「可见/可写卷集合」由各卷 ACL 计算得出（�
 配置级 `placement: prefer-default | spread`（缺省 `prefer-default`）：
 
 - `prefer-default`：owner 视图内**默认卷**（首个卷）有配额余量且 TryReserve 成功即落默认；默认卷满/不允许才依卷序尝试后续卷（每个失败换下一卷）。
-- `spread`：按每卷「(容量上限 − 已用)」余量占比均衡选择。
+- `spread`：按每卷「(容量上限 − 已用)」**绝对余量降序**选择；**不限容量卷（`vol_capacity: 0`）余量按 0 计、排末尾作溢出兜底**（其无限余量若参与排序会让 spread 恒选它、有界盘永不被均衡利用，故反语义）。
 
 两者都先过 ACL 过滤 + 卷容量 TryReserve + owner 全局 TryReserve（双账本见 AD-7）。`prefer-default` 保证旧单根不搬家；`spread` 供真正多盘利用。
 
@@ -194,7 +194,7 @@ volumes:
 2. 计算 owner 卷视图（ACL 允许卷序）。
 3. 按 placement 在视图内选卷候选：
    - `prefer-default`：默认卷在视图内则先试默认；不在则依序。
-   - `spread`：按余量占比加权选。
+   - `spread`：按绝对余量（容量−已用）降序选；不限容量卷排末尾作溢出兜底。
 4. 双 TryReserve（owner 全局 → 目标卷）成功后写；owner 全局满 = `ErrStorageFull`（不换卷）；卷容量满 → 换下一候选卷（`prefer-default` 才可能有多候选），全满 `ErrStorageFull`。
 5. 落盘后双 Commit；失败回滚双预留。
 
