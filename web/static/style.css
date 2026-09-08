@@ -16,6 +16,7 @@
   --text-link: #2b6cb5;
   --border-color: #eee;
   --border-input: #ccc;
+  --bg-input: #fff;
   --btn-primary-bg: #2b6cb5;
   --btn-primary-hover: #24599a;
   --btn-danger-bg: #c0392b;
@@ -57,6 +58,7 @@
     --text-link: #6db3f0;
     --border-color: #3a3a60;
     --border-input: #4a4a70;
+    --bg-input: #101028;
     /* 以下按钮/提示色均按白字 ≥4.5:1 校准（WCAG AA），通过 python 计算相对亮度验证 */
     --btn-primary-bg: #3a6ea5;
     --btn-primary-hover: #4476ab;
@@ -99,6 +101,7 @@
   --text-link: #6db3f0;
   --border-color: #3a3a60;
   --border-input: #4a4a70;
+  --bg-input: #101028;
   /* 以下按钮/提示色均按白字 ≥4.5:1 校准（WCAG AA），与 @media 暗色块保持一致 */
   --btn-primary-bg: #3a6ea5;
   --btn-primary-hover: #4476ab;
@@ -177,6 +180,7 @@ tr:hover td { background: var(--bg-hover); }
 .toast-warning { background: var(--toast-warning); }
 .toast-info { background: var(--toast-info); }
 .size-cell { white-space: nowrap; }
+.vol-badge { display:inline-block; margin-left:6px; padding:0 6px; border-radius:8px; font-size:11px; font-weight:600; line-height:16px; background: var(--bg-auth); color: var(--text-secondary); border:1px solid var(--border-color); vertical-align:1px; white-space:nowrap; }
 .breadcrumb-btn { background: none; border: none; color: var(--text-link); cursor: pointer; padding: 0; font: inherit; }
 .chunk-progress-text { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 .resume-btn { margin: 4px 0; padding: 2px 8px; font-size: 12px; background: var(--toast-success); color: #fff; border: none; border-radius: 3px; cursor: pointer; }

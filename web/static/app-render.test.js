@@ -101,6 +101,18 @@ test('buildFileRowHtml 目录行', () => {
   assert.ok(html.includes('dir-enter-btn'));
 });
 
+test('buildFileRowHtml 文件行卷 badge：有 volume 显示、无 volume 不显示', () => {
+  const withVol = r.buildFileRowHtml({ name: 'a.txt', size: 10, volume: 'disk2' }, 'a.txt');
+  assert.ok(withVol.includes('vol-badge'));
+  assert.ok(withVol.includes('>disk2<'), 'badge 应显示卷名');
+  const withoutVol = r.buildFileRowHtml({ name: 'a.txt', size: 10 }, 'a.txt');
+  assert.ok(!withoutVol.includes('vol-badge'), '无 volume 字段不显示 badge');
+  // XSS：卷名转义
+  const xssVol = r.buildFileRowHtml({ name: 'a.txt', size: 10, volume: '<img>' }, 'a.txt');
+  assert.ok(!xssVol.includes('<img>'));
+  assert.ok(xssVol.includes('&lt;img&gt;'));
+});
+
 test('buildFileTableHtml 空 / 多行', () => {
   assert.ok(r.buildFileTableHtml([], 'x').includes('</tbody></table>'));
   const html = r.buildFileTableHtml([{ name: 'f1', size: 10, is_dir: false }, { name: 'd2', is_dir: true }], 'sub');
@@ -140,6 +152,23 @@ test('statsTableHtml 各统计', () => {
   assert.ok(html.includes('/d'));
   assert.ok(html.includes('>3<'));
   assert.ok(html.includes('1.0 KB'));
+});
+
+test('volumesTableHtml 空列表 + 多卷仪表', () => {
+  assert.ok(r.volumesTableHtml([]).includes('暂无可见卷'));
+  assert.ok(r.volumesTableHtml(null).includes('暂无可见卷'));
+  const html = r.volumesTableHtml([
+    { name: 'main', mode: 'deny', capacity: 0, usage: 10, allowed: true },
+    { name: 'disk2', mode: 'allow', capacity: 2048, usage: 1024, allowed: false },
+  ]);
+  assert.ok(html.includes('main'));
+  assert.ok(html.includes('disk2'));
+  assert.ok(html.includes('不限'));
+  assert.ok(html.includes('1.0 KB'));
+  // XSS：卷名转义
+  const xss = r.volumesTableHtml([{ name: '<svg onload=1>', mode: 'x', capacity: 0, usage: 0, allowed: true }]);
+  assert.ok(!xss.includes('<svg'));
+  assert.ok(xss.includes('&lt;svg onload=1&gt;'));
 });
 
 // ---- 审计面板 ----

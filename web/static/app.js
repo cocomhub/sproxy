@@ -143,6 +143,36 @@ function applyWebLoginKeys(ak, secret, id) {
   } catch (e) { /* ignore */ }
 }
 
+// --- 卷：上传下拉（工具栏「卷」）---
+// 选项来源 /api/volumes（owner 可见卷）；加载失败（无凭据/未授权）时下拉保持 auto。
+function populateUploadVolumeSelect(vols) {
+  const sel = document.getElementById('upload-volume');
+  if (!sel) return;
+  const cur = sel.value || '';
+  while (sel.options.length > 1) sel.remove(1);
+  for (const v of vols || []) {
+    if (!v || !v.name) continue;
+    const opt = document.createElement('option');
+    opt.value = v.name;
+    opt.textContent = v.name;
+    sel.appendChild(opt);
+  }
+  // 恢复原选择；若原选择已不在可见卷内则回落 auto。
+  let found = false;
+  for (let i = 0; i < sel.options.length; i++) {
+    if (sel.options[i].value === cur) { found = true; break; }
+  }
+  sel.value = found ? cur : '';
+  if (typeof setVolumeContext === 'function') setVolumeContext(sel.value);
+}
+
+async function initUploadVolumeSelect() {
+  try {
+    const data = await sc.files.volumes();
+    populateUploadVolumeSelect(data && data.volumes);
+  } catch (e) { /* 无凭据/未授权/无卷 API：保持 auto，不破坏无认证浏览 */ }
+}
+
 // --- UI 工具 ---
 function showToast(msg, type) {
   const el = document.getElementById('toast');
@@ -542,7 +572,9 @@ function statsRefresh() {
   const active = document.querySelector('.stats-tab.active');
   const id = active ? active.id : 'stats-tab';
   const tab = id.replace('-tab', '');
-  if (tab === 'audit') { switchStatsTab('audit'); } else { showStats(); }
+  if (tab === 'audit') { switchStatsTab('audit'); return; }
+  if (tab === 'volumes') { switchStatsTab('volumes'); return; }
+  showStats();
 }
 
 // showStats 打开监控弹窗并默认展示 stats tab。
@@ -571,6 +603,7 @@ function switchStatsTab(tab) {
   document.getElementById('config-panel').style.display = tab === 'config' ? 'block' : 'none';
   document.getElementById('hub-panel').style.display = tab === 'hub' ? 'block' : 'none';
   document.getElementById('audit-panel').style.display = tab === 'audit' ? 'block' : 'none';
+  document.getElementById('volumes-panel').style.display = tab === 'volumes' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
     const on = el.id === tab + '-tab';
     el.classList.toggle('active', on);
@@ -580,6 +613,23 @@ function switchStatsTab(tab) {
   if (tab === 'config') showConfig();
   if (tab === 'hub') showHub();
   if (tab === 'audit') showAudit();
+  if (tab === 'volumes') showVolumes();
+}
+
+// showVolumes 拉取卷仪表（/api/volumes）并渲染到 #volumes-panel。
+// 无凭据/未授权（401/403）时优雅降级：渲染引导提示而非破坏浏览。
+async function showVolumes() {
+  const panel = document.getElementById('volumes-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const data = await sc.files.volumes();
+    const vols = (data && data.volumes) || [];
+    panel.innerHTML = appRender.volumesTableHtml(vols);
+  } catch (e) {
+    // 认证失败（401/403）或服务端无卷 API：不当作破坏性错误，提示配置 AK/SK 或该端点不可用。
+    panel.innerHTML = '<div class="empty-msg">卷信息不可用：' + appRender.escHtml(e && e.message ? e.message : String(e)) + '<br><span style="font-size:12px;">请配置 AccessKey/Secret 后重试（未配置凭据时仅无认证端点可访问）。</span></div>';
+  }
 }
 
 async function showConfig() {
@@ -1889,10 +1939,18 @@ document.addEventListener('DOMContentLoaded', function() {
     transportCb.addEventListener('change', function() { toggleTransport(transportCb); });
   }
 
-  // 文件输入
+  // 文件输入（上传前把「卷」下拉当前值写入 upload.js 卷上下文）
+  var uploadVolumeSel = document.getElementById('upload-volume');
+  if (uploadVolumeSel) {
+    uploadVolumeSel.addEventListener('change', function() {
+      if (typeof setVolumeContext === 'function') setVolumeContext(uploadVolumeSel.value);
+    });
+  }
   document.getElementById('file-input').addEventListener('change', function() {
+    if (uploadVolumeSel && typeof setVolumeContext === 'function') setVolumeContext(uploadVolumeSel.value);
     uploadFiles(this.files);
   });
+  initUploadVolumeSelect();
 
   // 工具栏
   document.getElementById('refresh-btn').addEventListener('click', refreshList);
@@ -1924,6 +1982,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
   document.getElementById('audit-tab').addEventListener('click', function() { switchStatsTab('audit'); });
+  document.getElementById('volumes-tab').addEventListener('click', function() { switchStatsTab('volumes'); });
 
   // 云端下载（云 URL 行按钮 + Enter 快捷键统一走 bindCloudUrlRowEvents；
   // cloud-modal 已移除——URL 区已迁入 #transfer-page，频道条点击委托在 initTransferPage）。

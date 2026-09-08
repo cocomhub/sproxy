@@ -193,18 +193,19 @@ type Conn interface {
 - `GET /version` — 文本 `Version: x\nBuildAt: y`
 - `GET /metrics` — Prometheus 风格的 metrics
 
-### 文件操作（需 `X-File-Checksum` 头）
-- `POST /upload` — multipart 字段名 `file`，文件名通过 `ValidateFilePath` 校验，支持子目录路径
-- `GET /download?filename=<name>` — `ValidateFilePath` 校验防穿越；支持 `Range` header
-- `POST /delete?filename=<name>` — 匹配 checksum后才删
-- `POST /rename?from=<old>&to=<new>` — 重命名/移动文件
+### 文件操作（需 `X-File-Checksum` 头；多卷下可选 `volume` 参数）
+- `POST /upload` — multipart 字段名 `file`，文件名通过 `ValidateFilePath` 校验，支持子目录路径；
+  可选 multipart 字段 `volume`（显式目标卷，缺省 auto 自动路由）；成功响应头 `X-Volume` 标识落盘卷
+- `GET /download?filename=<name>` — `ValidateFilePath` 校验防穿越；支持 `Range` header；可选 `volume` query（只在指定卷定位）
+- `POST /delete?filename=<name>` — 匹配 checksum后才删；可选 `volume` query
+- `POST /rename?from=<old>&to=<new>` — 重命名/移动文件；可选 `volume` query（只在该卷定位源；跨卷用 `/api/volumes/move`）
 
 ### 目录操作
 - `POST /mkdir?dirname=<name>` — 创建空目录
 - `POST /rmdir?dirname=<name>` — 删除空目录
 
 ### API
-- `GET /api/files?subdir=path` — JSON `{files: [{name, size, checksum, mod_time, is_dir}]}`
+- `GET /api/files?subdir=path` — JSON `{files: [{name, size, checksum, mod_time, is_dir, volume}]}`（文件条目带 `volume` 卷名；目录条目无卷；可选 `volume` query 只列指定卷）
 - `HEAD /api/files/stat?filename=<name>` — 单文件元信息（响应头）
 - `GET /api/files/search?q=<query>&subdir=<subdir>` — 文件名搜索（子字符串匹配）
 - `POST /api/batch/delete` — 批量删除（JSON body: `{files: [...]}`）
@@ -241,6 +242,11 @@ type Conn interface {
 ### 统计 & 存储
 - `GET /api/stats` — 服务端统计信息
 - `PUT /api/storage/config` — 更新存储配置（动态调整 max_storage_bytes）
+
+### 卷（多卷存储，需配置 `volumes`；不配 = 单卷零回归）
+- `GET /api/volumes` — owner 可见卷列表（auth + per-owner）：`{volumes: [{name, mode, capacity, usage, allowed}]}`（ACL 收紧卷绝不列出）
+- `POST /api/volumes/move?from_volume=<v>&to_volume=<v>&filename=<rel>` — 同 owner 同相对路径跨卷迁移（目标唯一性查重 409 / ACL 403 / 配额不足 507）
+- 客户端：FileClient 卷上下文（`WithVolume`/`SetVolume`，零值=auto）、`Volumes()`、`MoveVolume()`、`VolumeOf()`；sclient `volumes` / `upload --volume` / `list --volume` / `download`/`delete`/`meta` `--volume` / `mv --to-volume`；WebUI 文件行卷 badge + 监控弹窗「卷」仪表 + 上传「卷」下拉
 
 ### Hub 中继管理（需配置 `hub.enabled: true` + `RouteTable`）
 - `GET /api/hub/nodes` — 列出已注册节点

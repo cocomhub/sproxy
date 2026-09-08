@@ -175,6 +175,7 @@
         limit: p.limit !== undefined ? String(p.limit) : '500',
         sort: p.sort,
         order: p.order,
+        volume: p.volume, // 可选卷过滤（空 = auto，不发送）
       });
       return jsonRequest('GET', path).then(function (d) { return d; });
     }
@@ -187,6 +188,12 @@
 
     function stat(filename) {
       return coreRequest('HEAD', '/api/files/stat?filename=' + encodeURIComponent(filename), {});
+    }
+
+    // volumes 获取当前 owner 可见卷列表（GET /api/volumes；per-owner ACL）。
+    // 返回 {status, headers, volumes:[{name,mode,capacity,usage,allowed}]}。
+    function volumes() {
+      return jsonRequest('GET', '/api/volumes', undefined);
     }
 
     // ---- 下载：返回 { blob, headers }（隧道 mode 流式、direct arrayBuffer→Blob）。
@@ -290,7 +297,10 @@
     async function simpleUpload(file, fileName, p) {
       const checksum = await computeSHA256(file, p.onProgress);
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const mp = util.buildMultipart({}, {
+      // 简单上传：可选 volume 作为 multipart 普通字段（服务端 upload handler FormValue("volume")）。
+      const fields = {};
+      if (p.volume) fields.volume = p.volume;
+      const mp = util.buildMultipart(fields, {
         name: 'file', filename: fileName, contentType: 'application/octet-stream', bytes: bytes,
       });
       const res = await coreRequest('POST', '/upload', {
@@ -318,7 +328,7 @@
       // 无从发现，且此时服务端也还没有 init 会话（无法续传）。刷新后重选文件重算 checksum，
       // upload_id（seed=filename|size|mtime|checksum）不变即可续传。
       const preUploadId = await generateUploadId(fileName, totalSize, startMtimeNano, '');
-      if (persist) persist({ upload_id: preUploadId, filename: fileName, totalSize: totalSize, totalChunks: Math.ceil(totalSize / chunkSize), status: 'hashing', mtimeNano: startMtimeNano });
+      if (persist) persist({ upload_id: preUploadId, filename: fileName, totalSize: totalSize, totalChunks: Math.ceil(totalSize / chunkSize), status: 'hashing', mtimeNano: startMtimeNano, volume: p.volume });
 
       const checksum = await computeSHA256(file, p.onProgress);
       const mtimeNano = ((file.lastModified) || Date.now()) * 1000000;
@@ -328,6 +338,7 @@
         upload_id: uploadId, filename: fileName, total_size: totalSize,
         chunk_size: chunkSize, total_chunks: Math.ceil(totalSize / chunkSize),
         file_checksum: checksum, file_mod_time: mtimeNano,
+        volume: p.volume || undefined, // 可选显式卷（服务端 init 定卷）
       });
       if (!initRes.success) {
         return { success: false, message: initRes.message || '初始化失败', filename: fileName };
@@ -345,7 +356,7 @@
       if (persist) {
         const serverChunkSize = initRes.chunk_size || chunkSize;
         persist({ upload_id: preUploadId, filename: fileName }, true); // 清 hashing 占位（对无占位的全新上传是无害 no-op）
-        persist({ upload_id: sessionId, filename: fileName, totalSize: totalSize, totalChunks: Math.ceil(totalSize / serverChunkSize), fileChecksum: checksum, status: 'uploading' });
+        persist({ upload_id: sessionId, filename: fileName, totalSize: totalSize, totalChunks: Math.ceil(totalSize / serverChunkSize), fileChecksum: checksum, status: 'uploading', volume: p.volume });
       }
 
       // 查询缺失分块（服务端权威列表；失败回退全量上传）。
@@ -393,7 +404,7 @@
           loaded += (end - start);
           if (p.onProgress) p.onProgress({ loaded: loaded, total: totalSize, chunkIndex: idx, totalChunks: totalChunksAdj });
           // 每个分块成功即更新持久化会话（进度字段，供续传 UI 展示）。
-          if (persist) persist({ upload_id: sessionId, filename: fileName, totalSize: totalSize, totalChunks: totalChunksAdj, fileChecksum: checksum, status: 'uploading', completedChunks: indices.slice(0, i + 1), loaded: loaded });
+          if (persist) persist({ upload_id: sessionId, filename: fileName, totalSize: totalSize, totalChunks: totalChunksAdj, fileChecksum: checksum, status: 'uploading', completedChunks: indices.slice(0, i + 1), loaded: loaded, volume: p.volume });
         } else if (!chunkRes.should_retry) {
           return { success: false, message: chunkRes.message || ('分块 ' + idx + ' 上传失败'), upload_id: sessionId, filename: fileName };
         }
@@ -433,6 +444,7 @@
       list,
       search,
       stat,
+      volumes,
       download,
       upload,
       mkdir,

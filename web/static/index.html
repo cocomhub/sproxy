@@ -30,6 +30,11 @@
   <div class="toolbar">
     <label class="btn btn-primary" for="file-input" id="upload-btn-label">上传文件</label>
     <input type="file" id="file-input" multiple style="display:none">
+    <label for="upload-volume" style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-secondary);white-space:nowrap;" title="上传目标卷（默认 auto）">卷
+      <select id="upload-volume" aria-label="上传卷" style="padding:5px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;color:var(--text-primary);background:var(--bg-input);">
+        <option value="">auto</option>
+      </select>
+    </label>
     <button type="button" id="refresh-btn" class="btn btn-secondary">刷新列表</button>
     <input type="text" id="search-input" placeholder="搜索文件…" aria-label="搜索文件" style="padding:6px 10px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;flex:1;min-width:160px;">
     <button type="button" id="search-btn" class="btn btn-primary">搜索</button>
@@ -99,11 +104,13 @@
       <button type="button" id="config-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">配置</button>
       <button type="button" id="hub-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Hub</button>
       <button type="button" id="audit-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">审计</button>
+      <button type="button" id="volumes-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">卷</button>
     </div>
     <div id="stats-panel"></div>
     <div id="config-panel" style="display:none;"></div>
     <div id="hub-panel" style="display:none;"></div>
     <div id="audit-panel" style="display:none;"></div>
+    <div id="volumes-panel" style="display:none;"></div>
     <div style="margin-top:16px;text-align:right;">
       <button type="button" id="stats-refresh-btn" class="btn btn-secondary" style="margin-right:8px;">刷新</button>
       <button type="button" id="stats-close-modal-btn" class="btn btn-primary">关闭</button>

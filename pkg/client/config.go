@@ -48,6 +48,9 @@ type Config struct {
 	// XferInsecure 跳过 xfer tcp+tls 传输的证书校验（仅限 loopback hub；远程 + insecure
 	// fail-closed 拒绝，对齐 federation Config.Validate）。与 XferCAFile 互斥。
 	XferInsecure bool `yaml:"xfer_insecure" mapstructure:"xfer_insecure"`
+	// Volume 是默认卷上下文（空 = auto）。多卷服务端下把文件操作默认限定到指定卷；
+	// 单条命令可用 --volume flag 覆盖（flag > 配置 > auto）。
+	Volume string `yaml:"volume" mapstructure:"volume"`
 }
 
 func DefaultConfig() *Config {
@@ -194,6 +197,9 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 	if cfg.XferInsecure {
 		fmt.Fprintf(w, "XferInsecure:    %v\n", cfg.XferInsecure)
 	}
+	if cfg.Volume != "" {
+		fmt.Fprintf(w, "Volume:          %s\n", cfg.Volume)
+	}
 }
 
 // ApplyConfigSet 在内存中更新配置，不写文件。返回更新后的配置和错误。
@@ -262,6 +268,8 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			return fmt.Errorf("无效的 xfer_insecure: %w（应为 true/false）", err)
 		}
 		cfg.XferInsecure = b
+	case "volume":
+		cfg.Volume = strings.TrimSpace(value)
 	default:
 		return fmt.Errorf("未知配置键: %s", key)
 	}
