@@ -197,7 +197,9 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 	if sortOrder != "desc" {
 		sortOrder = "asc"
 	}
-	owner := ownerFromRequest(r)
+	// 归一 owner（空 → anonymous）：列表/写路径同键，未认证请求归属 anonymous。ACL 视图判定与
+	// 路径探测必须用归一后的 owner——防 owner="" 以空串参与 ACL（对 deny+黑名单卷误放行）或建 "" 目录。
+	owner := normalizeOwner(ownerFromRequest(r))
 	subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/")
 
 	// 旧装配路径（volSet nil）：单卷唯一根，走既有 resolveListDir + os.ReadDir（零回归）。

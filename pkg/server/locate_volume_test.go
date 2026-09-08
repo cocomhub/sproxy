@@ -394,6 +394,39 @@ func TestDeleteRename_LocatesAcrossVolumes(t *testing.T) {
 	}
 }
 
+// TestList_ACLNormalizesAnonymousOwner 修复 Minor-1：listFiles 的 ACL 视图判定必须 normalizeOwner
+// （空 owner → anonymous）。未认证（空 owner）请求多卷：
+//   - allow 仅 anonymous 的卷 → 200（归一后 anonymous 命中白名单；若 owner="" 会误 404）；
+//   - deny 含 anonymous 的卷 → 404（归一后命中黑名单；若 owner="" 会误 200 放行）。
+func TestList_ACLNormalizesAnonymousOwner(t *testing.T) {
+	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
+	volumes := []VolumeConfig{
+		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
+		{Name: "privAllow", Root: dirs[1], VolCapacity: 1 << 20,
+			ACL: &VolumeACLConfig{Mode: VolumeACLAllow, Owners: []string{"anonymous"}}},
+		{Name: "privDeny", Root: dirs[2], VolCapacity: 1 << 20,
+			ACL: &VolumeACLConfig{Mode: VolumeACLDeny, Owners: []string{"anonymous"}}},
+	}
+	// actor ""（未认证 / 空 owner）。
+	url, _, _ := volumeRWServer(t, "", volumes, nil)
+
+	// 根列表：空 owner 归一 anonymous → 仅 main + privAllow 可见，privDeny 不见 → 200。
+	if status, shape := volumeList(t, url, "", ""); status != http.StatusOK {
+		t.Fatalf("空 owner 根列表 status=%d want 200", status)
+	} else if shape.Total != 0 {
+		t.Fatalf("空 owner 根列表应空（无匿名文件），got total=%d", shape.Total)
+	}
+
+	// ?volume=privAllow（allow 仅 anonymous）→ 归一后 200；owner="" 直判会 404。
+	if status, _ := volumeList(t, url, "", "privAllow"); status != http.StatusOK {
+		t.Fatalf("空 owner ?volume=privAllow status=%d want 200（normalizeOwner → anonymous 白名单命中）", status)
+	}
+	// ?volume=privDeny（deny 含 anonymous）→ 归一后 404；owner="" 直判会误放行 200。
+	if status, _ := volumeList(t, url, "", "privDeny"); status != http.StatusNotFound {
+		t.Fatalf("空 owner ?volume=privDeny status=%d want 404（normalizeOwner → anonymous 黑名单命中）", status)
+	}
+}
+
 // TestDeleteRename_ExplicitVolumeFilter delete/rename 带 ?volume= 只在指定卷定位：
 // b 在 disk2 → ?volume=disk2 删/改成功；指向 main → 404（不在该卷，不泄卷）。
 func TestDeleteRename_ExplicitVolumeFilter(t *testing.T) {
