@@ -36,6 +36,32 @@ func TestScope_TryReserveCommitRelease(t *testing.T) {
 	}
 }
 
+func TestPool_Adjust(t *testing.T) {
+	pool := NewPool(100)
+	pool.Adjust(0, 10) // 建立占用 10（diff 语义：committed += next-prev）
+	if got := pool.Usage(); got != 10 {
+		t.Fatalf("Usage=%d want 10", got)
+	}
+	pool.Adjust(10, 25) // diff +15 → 25
+	if got := pool.Usage(); got != 25 {
+		t.Fatalf("Usage=%d want 25", got)
+	}
+	pool.Adjust(25, 5) // 缩小 diff -20 → 5
+	if got := pool.Usage(); got != 5 {
+		t.Fatalf("Usage=%d want 5", got)
+	}
+	// 防下溢归零（负向穿零分支）：先把 committed 归 0，再施加负向 diff（Adjust(0,-5) diff=-5）
+	// → committed 下溢被 adjustUp 钳制为 0，绝不反负。
+	pool.Adjust(5, 0)
+	if got := pool.Usage(); got != 0 {
+		t.Fatalf("归零后 Usage=%d want 0", got)
+	}
+	pool.Adjust(0, -5)
+	if got := pool.Usage(); got != 0 {
+		t.Fatalf("负向穿零应归 0 不反负, got %d", got)
+	}
+}
+
 func TestScope_Adjust(t *testing.T) {
 	root := NewPool(100)
 	s := root.Scope("/t", 100)

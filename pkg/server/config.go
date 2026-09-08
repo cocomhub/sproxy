@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -739,6 +740,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("placement 非法 %q：仅支持 prefer-default|spread", c.Placement)
 	}
 	seen := make(map[string]bool, len(c.Volumes))
+	seenRoots := make(map[string]bool, len(c.Volumes))
 	for i := range c.Volumes {
 		v := &c.Volumes[i]
 		if !storage.ValidSegmentName(v.Name) {
@@ -751,6 +753,17 @@ func (c *Config) Validate() error {
 		if v.Root == "" {
 			return fmt.Errorf("卷 %q root 为空（非首卷需显式指定挂载根）", v.Name)
 		}
+		// 重复 root 拒绝（终审附加）：两卷共享同一物理根会破坏 owner 路径唯一性（同相对路径
+		// 可散落两卷）且双卷容量池对同一盘重复记账（配额失守），配置即拒绝（filepath.Clean
+		// 归一尾斜杠/点段后等值比较）。
+		// 边界：本检查**仅词法等值防呆，非物理唯一性证明**——硬链接/符号链接指向同一目录、
+		// 大小写不敏感 FS 的 case 变体、卷 A 根 ⊆ 卷 B 根的嵌套挂载均可绕过字符串等值；装配层
+		// OpenRoot（LAYOUT_VERSION）与写路径唯一性强制（T4）为更深层兜底。
+		rootKey := filepath.Clean(v.Root)
+		if seenRoots[rootKey] {
+			return fmt.Errorf("卷 root 重复 %q（卷 %q 与其它卷词法等值共享 root；仅防呆，硬链接/符号链接/大小写变体等物理别名不在此列）", v.Root, v.Name)
+		}
+		seenRoots[rootKey] = true
 		if v.VolCapacity < 0 {
 			return fmt.Errorf("卷 %q 容量上限 %d 非法：不能为负", v.Name, v.VolCapacity)
 		}

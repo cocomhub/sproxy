@@ -104,6 +104,10 @@ type Handlers struct {
 	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
 	archiveUsage map[string]map[string]int64
 	tenantMu     sync.Mutex // 串行化 tenantRoots/checksumStores/uploadStores/quotaScopes/quotaBuckets/archiveUsage 懒创建
+	// volSet 是装配后的卷集合（RegisterRoutes 装配；nil = 未装配卷功能的旧装配路径，如
+	// 测试手工构造的 Handlers）。默认卷语义：globalRoot 字段 = 默认卷根、tenantFor 走默认卷。
+	// 写路径本任务仍只走默认卷（T4 起卷感知），volSet 供多卷 reconcile 与后续卷路由消费。
+	volSet *volumeSet
 
 	// credentialRing 是 SproxySig 凭据权威表（AK→多 SK 条目，凭据 store 化后取代
 	// cfg.AccessKeys）。RegisterRoutes 装配：opts.CredentialRing 显式注入（测试/
@@ -565,19 +569,16 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		auditRing = NewAuditRing(cfg.Audit.BufferSize)
 	}
 
-	// 打开全局存储根（多租户布局：<storage_root>/<tenant>/{user,cloud,...}/）。
-	// 目录不存在时先创建（原 storage_root 也是惰性创建）；storage.OpenRoot 会写入/校验
-	// LAYOUT_VERSION。失败（目录无法打开 / 布局版本不匹配）是致命装配错误：记 Error 并
-	// panic 拒绝启动，绝不静默继续（否则文件服务会在错误的存储根上运行）。
-	storageRootPath := cfg.StorageRoot
-	if err := os.MkdirAll(storageRootPath, 0o755); err != nil {
-		log.Error("创建存储根目录失败", "path", storageRootPath, "error", err)
-		panic("创建存储根目录失败: " + err.Error())
-	}
-	globalRoot, err := storage.OpenRoot(storageRootPath)
+	// 卷集合装配（多卷，任务 3）：按 cfg.Volumes 逐卷 MkdirAll + storage.OpenRoot
+	// （LAYOUT_VERSION 写入/校验）+ 卷容量 Pool + ACL 解析。缺省形态（YAML 只配
+	// storage_root 未配 volumes）由 resolveDefaultVolumeRoot 裁决为 cfg.StorageRoot——
+	// F1 门禁：Volumes[0].Root 占位（defaultStorageRoot）时不按它建根，防存储根静默漂移
+	// 到 ./storage（单卷零回归红线）。失败（目录无法打开 / 布局版本不匹配）是致命装配
+	// 错误：记 Error 并 panic 拒绝启动，绝不静默继续（否则文件服务会在错误的存储根上运行）。
+	vs, err := assembleVolumes(cfg, log)
 	if err != nil {
-		log.Error("打开存储根失败（LAYOUT_VERSION 校验或目录不可用）", "path", storageRootPath, "error", err)
-		panic("打开存储根失败: " + err.Error())
+		log.Error("卷集合装配失败", "error", err)
+		panic("卷集合装配失败: " + err.Error())
 	}
 
 	h := &Handlers{
@@ -602,11 +603,14 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		loginFailTracker: newLoginFailTracker(),
 		// 测试注入空 Ring 时的无认证调试兜底（一次性读取；生产走 cfg.AllowInsecureLoopback）。
 		allowInsecureLoopback: opts.AllowInsecureLoopback,
+		volSet:                vs,
 	}
 	// 装配多租户存储布局：全局配额池 + 懒创建缓存 + 预创建 anonymous 租户。
 	// tenantRoots/checksumStores/uploadStores/quotaScopes 均为懒创建（首次请求时建），
 	// 见 tenantFor/checksumStoreFor/uploadStoreFor 等辅助。
-	h.globalRoot = globalRoot
+	// globalRoot 语义 = 默认卷根（F1 裁决；单卷形态 = cfg.StorageRoot，既有 tenantFor/handler
+	// 默认卷语义零回归）；globalPool 仍是 owner 全局 max 兜底（cfg.MaxStorageBytes，跨卷合计）。
+	h.globalRoot = vs.DefaultRoot()
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenantRoots = make(map[string]*storage.Tenant)
 	h.checksumStores = make(map[string]*ChecksumStore)
@@ -679,8 +683,15 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// 初始化 StorageManager 和 CloudDownloadManager。
 	// P4：StorageManager 保留全局账本（sync/旧装配兼容）；启动扫描经 SetReconciler 按租户桶
 	// 归集校准 per-tenant 配额 Scope（重启后 Scope 不回溯）。云任务配额走 cloud 桶子 Scope。
-	sm := NewStorageManager(cfg.StorageRoot, cfg.MaxStorageBytes, nil, log.With("component", "storage"))
-	sm.SetReconciler(h.reconcileQuotaScopes)
+	// 多卷（任务 3）：StorageManager 扫描目录 = 默认卷根（vs.Default().RootDir——单一事实源，
+	// 与 assembleVolumes 的 i==0 裁决共用同一装配产物，防两处裁决漂移；单卷形态 = cfg.StorageRoot，
+	// 零回归）；reconcile 双目标——owner 全局 Scope（reconcileQuotaScopes）+ 默认卷容量池校准
+	// （reconcileVolumePool）。多卷逐卷扫描校准框架见 reconcileVolumes（T4 与写路径一并接线）。
+	sm := NewStorageManager(vs.Default().RootDir, cfg.MaxStorageBytes, nil, log.With("component", "storage"))
+	defaultVolName := vs.defaultName
+	sm.SetReconciler(func(tenantBuckets map[string]map[string]int64) {
+		h.reconcileVolumePool(defaultVolName, tenantBuckets)
+	})
 	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope（启动对账）
 	cloudCfg := &CloudDownloadConfig{
 		SyncThreshold:   cfg.CloudSyncThreshold,
@@ -1362,7 +1373,9 @@ func (h *Handlers) Close() error {
 			h.logger.Error("shutdown: hub 状态最终落盘失败", "err", err)
 		}
 	}
-	// 关闭多租户存储根：先关各租户子根（懒创建缓存），再关全局根。置 nil 防重复 Close。
+	// 关闭多租户存储根：先关各租户子根（懒创建缓存），再关卷集合根（含默认卷根 =
+	// globalRoot）。置 nil 防重复 Close。volSet == nil（手工构造的旧装配路径）回落直接关
+	// globalRoot（既有行为）。
 	h.tenantMu.Lock()
 	for _, tnt := range h.tenantRoots {
 		if tnt != nil && tnt.Root() != nil {
@@ -1371,7 +1384,11 @@ func (h *Handlers) Close() error {
 	}
 	h.tenantRoots = map[string]*storage.Tenant{}
 	h.tenantMu.Unlock()
-	if h.globalRoot != nil {
+	if h.volSet != nil {
+		_ = h.volSet.Close()
+		h.volSet = nil
+		h.globalRoot = nil
+	} else if h.globalRoot != nil {
 		_ = h.globalRoot.Close()
 		h.globalRoot = nil
 	}

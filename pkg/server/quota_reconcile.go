@@ -122,3 +122,68 @@ func parentKeyOf(key string) string {
 	}
 	return ""
 }
+
+// adjustVolumePool 把卷容量池 committed 收敛到该卷磁盘物理占用：逐租户累加**功能桶顶层键**
+// （quotaBucketNames：user/cloud/archive/chunk/version/meta）对应值，忽略 bucket_limits 子目录键
+// （如 user/videos）与旧布局平铺键。
+//
+// 为什么只按功能桶键求和：StorageManager 扫描对嵌套 user 文件既累加功能桶键（user）又累加
+// 子目录键（user/videos/…，storage_manager.go bucketDirKey）；reconcileQuotaScopes 用「先深后浅 +
+// 串联 diff」消重，但卷池没有段树子层，若直接全键求和会把嵌套文件在 user 与 user/videos 两处各计
+// 一次（双计 → 卷池虚假占满，T4 spread/容量上限误判）。功能桶键本身已含全部嵌套文件字节，故仅
+// 累加功能桶键即得物理占用。
+//
+// 卷池在途预留 >0 时跳过（与 reconcileQuotaScopes 的双计保护同语义：磁盘 partial 已计入
+// reserved，此时校准 committed 会造成双计）。卷池不存在（volSet nil / 未知卷名）时安全跳过。
+// 卷池无子层（每卷独立根池，未挂 owner Scope 子层），故池 Usage() 即池自身 committed。
+func (h *Handlers) adjustVolumePool(name string, tenantBuckets map[string]map[string]int64) {
+	if h.volSet == nil {
+		return
+	}
+	pool := h.volSet.Pool(name)
+	if pool == nil || pool.Reserved() > 0 {
+		return
+	}
+	var total int64
+	for _, buckets := range tenantBuckets {
+		for _, b := range quotaBucketNames {
+			total += buckets[b]
+		}
+	}
+	pool.Adjust(pool.Usage(), total)
+}
+
+// reconcileVolumePool 是单卷扫描回调（StorageManager 装配形态，RegisterRoutes 绑定默认卷）：
+// 把该卷磁盘占用同时校准进 owner 全局 Scope（现有 reconcileQuotaScopes 语义——单卷模式下
+// 该卷即 owner 全部占用）与该卷容量池（reconcile 双目标）。多卷跨卷聚合见 reconcileVolumes。
+func (h *Handlers) reconcileVolumePool(name string, tenantBuckets map[string]map[string]int64) {
+	h.reconcileQuotaScopes(tenantBuckets)
+	h.adjustVolumePool(name, tenantBuckets)
+}
+
+// reconcileVolumes 是多卷 reconcile 双目标框架（本任务立框架；T4 起由逐卷扫描喂入并随写路径
+// 一并验证）：volumeBuckets[卷名][tenant][bucket] = 该卷扫描归集的字节数。
+//
+//  1. owner 全局 Scope 校准必须用**跨卷合计**——先把各卷按 owner/桶聚合成一份 tenantBuckets，
+//     再单次执行现有 reconcileQuotaScopes。不能逐卷 Adjust 同一 Scope：每卷扫描各自回调会把
+//     owner Scope 重复校准到最后一份卷的字节（跨卷合计语义丢失）。
+//  2. 每卷容量池逐卷各自收敛到该卷磁盘占用（adjustVolumePool，含 Reserved>0 跳过）。
+func (h *Handlers) reconcileVolumes(volumeBuckets map[string]map[string]map[string]int64) {
+	agg := make(map[string]map[string]int64)
+	for _, tenantBuckets := range volumeBuckets {
+		for tenant, buckets := range tenantBuckets {
+			dest := agg[tenant]
+			if dest == nil {
+				dest = make(map[string]int64)
+				agg[tenant] = dest
+			}
+			for bucket, size := range buckets {
+				dest[bucket] += size
+			}
+		}
+	}
+	h.reconcileQuotaScopes(agg)
+	for volName, tenantBuckets := range volumeBuckets {
+		h.adjustVolumePool(volName, tenantBuckets)
+	}
+}

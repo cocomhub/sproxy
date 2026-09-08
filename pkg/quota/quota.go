@@ -78,6 +78,16 @@ func (p *Pool) UsageByBucket() map[string]int64 {
 	return m
 }
 
+// Adjust 调整本池已确认占用（reconcile 收敛用，diff 语义）：committed += (next − prev)，
+// 可正可负（防下溢归零），不经过 reserved。
+// 与 Scope.Adjust 的差异：Scope.Adjust 沿父链向上传播（子桶 diff 聚合到根池）；本方法
+// **只调本池自身**（根池无父链）。调用方须保证本池无挂载子层 Scope（或已把子层占用聚合进
+// 参数），否则直接校准本池 committed 会与子层 adjustUp 传播产生双计——server 侧每卷容量池
+// （volumeSet.pools）为独立根池、T3 未挂子层，reconcile 用它把池收敛到磁盘实际。
+func (p *Pool) Adjust(prev, next int64) {
+	p.adjustUp(next - prev)
+}
+
 // newScope 创建路径为父路径拼接 path 的新子作用域，其底层账本挂到本池之下。
 func (p *Pool) newScope(path string, maxBytes int64) *Scope {
 	child := &Pool{
