@@ -34,6 +34,16 @@ func NewPool(maxBytes int64) *Pool {
 	return &Pool{maxBytes: maxBytes}
 }
 
+// TryReserve 在池上预留 estimate（独立根池语义，不挂子层；卷容量池等直接入账）。
+// 失败返回 ErrStorageFull。返回的 Reservation 对池本身 Commit/Release。
+func (p *Pool) TryReserve(estimate int64) (*Reservation, error) {
+	amt := nonNeg(estimate)
+	if err := p.reserveUp(amt); err != nil {
+		return nil, err
+	}
+	return &Reservation{pool: p, amount: amt}, nil
+}
+
 // Scope 返回挂载到根池上的新子作用域（路径化叠加，maxBytes<=0 不限制）。
 func (p *Pool) Scope(path string, maxBytes int64) *Scope {
 	return p.newScope(path, maxBytes)
@@ -311,7 +321,7 @@ func (s *Scope) TryReserve(estimate int64) (*Reservation, error) {
 	if err := s.pool.reserveUp(amt); err != nil {
 		return nil, err
 	}
-	return &Reservation{scope: s, amount: amt}, nil
+	return &Reservation{pool: s.pool, amount: amt}, nil
 }
 
 // ReleaseUsage 释放已确认占用 n（文件删除时按文件大小释放）。
@@ -347,8 +357,9 @@ func (s *Scope) UsageByBucket() map[string]int64 {
 
 // Reservation 是预留句柄。Commit(actual) 按实际对账；Release() 放弃预留。
 // 保证 Commit/Release 至多生效一次（重复调用忽略）。
+// pool 是预留所在的底层账本节点（Scope 预留 = Scope.pool；Pool 预留 = 池自身）。
 type Reservation struct {
-	scope  *Scope
+	pool   *Pool
 	amount int64
 	done   atomic.Bool
 }
@@ -358,7 +369,7 @@ func (r *Reservation) Commit(actual int64) {
 	if !r.done.CompareAndSwap(false, true) {
 		return
 	}
-	r.scope.pool.commitUp(r.amount, nonNeg(actual))
+	r.pool.commitUp(r.amount, nonNeg(actual))
 }
 
 // Release 放弃预留（归还 reserved）。
@@ -366,7 +377,7 @@ func (r *Reservation) Release() {
 	if !r.done.CompareAndSwap(false, true) {
 		return
 	}
-	r.scope.pool.releaseUp(r.amount)
+	r.pool.releaseUp(r.amount)
 }
 
 // nonNeg 把负数归零（estimate/actual/释放量不允许为负）。

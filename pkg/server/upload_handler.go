@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -20,13 +21,28 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
-	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // hashPool 复用 SHA-256 hash 对象，减少每次上传的分配。
 var hashPool = sync.Pool{
 	New: func() any { return sha256.New() },
+}
+
+// headerVolume 是上传成功响应头：落盘目标卷名（多卷路由断言/客户端定位用；单卷向后兼容）。
+const headerVolume = "X-Volume"
+
+// sendUploadRouteError 把 routeUpload 的 *routeError 映射为 HTTP 响应（403/409/507/400）。
+// 非 routeError 视为内部错误（500）。
+func (h *Handlers) sendUploadRouteError(w http.ResponseWriter, r *http.Request, remotePath string, err error) {
+	var re *routeError
+	if errors.As(err, &re) {
+		h.logger.WarnContext(r.Context(), "上传卷路由拒绝", "file_name", remotePath, "status", re.status, "reason", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: re.msg}, re.status)
+		return
+	}
+	h.logger.ErrorContext(r.Context(), "上传卷路由失败", "file_name", remotePath, "error", err.Error())
+	sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
 }
 
 // parseUploadMultipart 解析上传请求的 multipart 表单，返回文件、文件信息、期望的 checksum 和错误。
@@ -91,7 +107,8 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 路径校验（支持子目录）
+	// 路径校验（支持子目录）。rel 与卷无关（user/<path> 相对各卷租户根），
+	// 卷感知只决定文件落到哪一卷的租户根。
 	remotePathStr := r.Header.Get("X-File-Path")
 	if remotePathStr == "" {
 		remotePathStr = handler.Filename
@@ -102,22 +119,11 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	logger.DebugContext(r.Context(), "上传路径", "remote_path", remotePath, "header", r.Header.Get("X-File-Path"), "multipart", handler.Filename)
 
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return
-	}
-	root := tnt.Root()
+	owner := ownerFromRequest(r)
 
-	if err := root.MkdirAll(filepath.Dir(rel), 0755); err != nil {
-		logger.ErrorContext(r.Context(), "创建目录失败", "error", err.Error())
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
-		return
-	}
-
-	// 并发上传防护：防止同一文件被多个上传请求同时写入导致 OOM。
-	// key 带租户前缀（server 级共享 map，防跨租户同 rel 碰撞）。
-	upKey := tnt.ID + "\x00" + rel
+	// 并发上传防护：防止同一 owner 同 rel 被多个上传请求同时写入导致 OOM。
+	// key = <owner>\x00<rel>（server 级共享 map，防跨租户同 rel 碰撞）。
+	upKey := normalizeOwner(owner) + "\x00" + rel
 	if _, loaded := h.uploadingFiles.LoadOrStore(upKey, "upload"); loaded {
 		logger.WarnContext(r.Context(), "文件正在上传中，拒绝并发上传", "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在上传中"}, http.StatusConflict)
@@ -125,38 +131,64 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.uploadingFiles.Delete(upKey)
 
-	// 重复检测与版本管理
-	if h.handleDuplicateFile(w, r, root, rel, expectedChecksum, remotePath) {
+	explicitVol := r.FormValue("volume")
+
+	// 重复检测与版本管理（自动路由）：在默认卷根先做幂等/冲突/版本检查（与旧实现一致——
+	// 幂等同 checksum 重传在容量/配额检查前直接 200，不因卷满误拒）。显式 volume 不做此
+	// 检查：其语义是新文件定位，同名已存在（含同 checksum）一律由 routeUpload 唯一性 409。
+	// 注：多卷下文件若曾因换卷落在非默认卷，此处默认卷 stat 未命中属已知缺口（自动路由唯一
+	// 性由路由保证；文件定位/回写由后续 read-side 卷感知任务强化）。
+	if explicitVol == "" {
+		// 幂等 200 / 版本备份分支在 routeUpload 之前回包，X-Volume 在此先置默认卷名
+		// （文件确实在默认卷根命中）；route 决出非默认卷时下方 Set 覆写。
+		if h.volSet != nil && h.volSet.defaultName != "" {
+			w.Header().Set(headerVolume, h.volSet.defaultName)
+		}
+		tnt0 := h.tenantFor(owner)
+		if tnt0 == nil || tnt0.Root() == nil {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+			return
+		}
+		if h.handleDuplicateFile(w, r, tnt0.Root(), rel, expectedChecksum, remotePath) {
+			return // 幂等 200 / 冲突 409 已回包
+		}
+	}
+
+	// 卷路由 + 双账本预留（T4）：routeUpload 按 ACL/placement 选目标卷，在 owner 全局
+	// Scope + 卷容量池双 TryReserve；显式 volume= 时做 ACL 校验与唯一性查重（403/409）。
+	route, err := h.routeUpload(owner, rel, explicitVol, handler.Size)
+	if err != nil {
+		h.sendUploadRouteError(w, r, remotePath, err)
+		return
+	}
+	if route.tenant == nil || route.tenant.Root() == nil {
+		route.release()
+		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return
+	}
+	// 目标卷暴露给客户端（成功分支断言用；错误分支客户端忽略）。
+	if route.volumeName != "" {
+		w.Header().Set(headerVolume, route.volumeName)
+	}
+	root := route.tenant.Root()
+
+	if mkdirErr := root.MkdirAll(filepath.Dir(rel), 0755); mkdirErr != nil {
+		route.release()
+		logger.ErrorContext(r.Context(), "创建目录失败", "error", mkdirErr.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "创建目录失败"}, http.StatusInternalServerError)
 		return
 	}
 
-	// 配额预留（P4）：覆盖写场景先统计旧文件大小 prev（Adjust 差分用），
-	// 随后 TryReserve(handler.Size) 预留新文件空间；写入成功且校验通过后
-	// Commit(实际写入字节数) / Adjust(prev, next)；写入/校验失败 Release()。
-	// 用户上传文件落 user 桶，配额按文件实际 rel 解析子 Scope（最长前缀：user/videos/hd
-	// 命中则受该子目录上限约束），父链聚合到 user 桶 → 租户 → 全局——逐级检查自动完成。
-	scope := h.quotaScopeFor(ownerFromRequest(r), rel)
+	// 覆盖写场景先统计旧文件大小 prev（双 Adjust 差分用）。
 	prev := int64(0)
-	var res *quota.Reservation
-	if scope != nil {
-		if stat, statErr := root.Stat(rel); statErr == nil {
-			prev = stat.Size()
-		}
-		rr, reserveErr := scope.TryReserve(handler.Size)
-		if reserveErr != nil {
-			logger.WarnContext(r.Context(), "存储配额不足，拒绝上传", "file_name", remotePath, "owner", ownerFromRequest(r))
-			sendJSONResponse(w, UploadResponse{Success: false, Message: "存储配额不足"}, http.StatusInsufficientStorage)
-			return
-		}
-		res = rr
+	if stat, statErr := root.Stat(rel); statErr == nil {
+		prev = stat.Size()
 	}
 
-	// 原子写入 + 流式哈希
+	// 原子写入 + 流式哈希（目标卷 root）。
 	serverChecksum, written, err := writeFileAtomicallyRoot(r.Context(), root, rel, file)
 	if err != nil {
-		if res != nil {
-			res.Release()
-		}
+		route.release()
 		logger.ErrorContext(r.Context(), "保存文件失败", "error", err.Error(), "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
 		return
@@ -165,24 +197,15 @@ func (h *Handlers) upload(w http.ResponseWriter, r *http.Request) {
 	if serverChecksum != expectedChecksum {
 		// 清理已写入的校验失败文件，忽略错误（临时文件由 writeFileAtomicallyRoot 清理）
 		_ = root.Remove(rel)
-		if res != nil {
-			res.Release()
-		}
+		route.release()
 		logger.WarnContext(r.Context(), "文件 SHA-256 校验失败", "server", serverChecksum, "client", expectedChecksum, "file_name", remotePath)
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件 SHA-256 校验失败"}, http.StatusBadRequest)
 		return
 	}
 
-	// 配额对账：覆盖写 Adjust(prev, next)（旧文件已占用 prev，差分后收敛到新大小，
-	// 不经过 reserved）；新文件 Commit(written)。
-	if res != nil {
-		if prev > 0 {
-			scope.Adjust(prev, written)
-			res.Release()
-		} else {
-			res.Commit(written)
-		}
-	}
+	// 双账本结算：覆盖写 Adjust(prev, written) + Release（旧文件已占用 prev，差分收敛到
+	// 新大小）；新文件 Commit(written)。owner 全局 Scope 与卷容量池同语义。
+	route.commit(prev, written)
 
 	h.setUploadResponseHeaders(w, r, root, remotePath, rel, serverChecksum, logger)
 
