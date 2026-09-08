@@ -37,6 +37,7 @@ make test            # 快速单元测试（已取消 vet/check-loopback 依赖�
 make test-cover      # 测试 + 覆盖率收集
 make test-packages   # 分组运行测试，快速定位失败包
 make test-all        # 测试所有子 module（含 ext/ws、ext/quic、ext/grpc 等）
+make test-e2e        # 真二进制端到端测试（test/ 由 build-tag e2e 门控，CI e2e job 调用）
 make build-all       # 构建所有子 module
 make cover-check     # 覆盖率门禁检查（默认 70%）
 make cover-html      # 覆盖率 HTML 报告到 build/coverage/cover.html
@@ -547,6 +548,7 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--token`/`--relay-toke
 2. **`-race` 下超时翻倍** — 含 goroutine 的测试（特别是 mux/p2p）在 `-race` 下运行时间显著增加。Context timeout 设置时留足余量，推荐正常值的 3 倍。
 3. **覆盖率测量排除`test/`和`tools/`** — `go test -cover ./...` 包含 E2E 测试包和工具包会稀释 total 覆盖率。正确做法：`go test -cover ./internal/... ./pkg/... ./cmd/...`
 4. **Makefile 修改优先用 Edit tool** — sed 处理 Makefile 的多行模式（反斜杠续行、`$$` 转义、`{` `}`嵌套）极其脆弱。复杂修改用 Read + Edit 工具。
+5. **`test/` 由 `//go:build e2e` 门控** — `test/*.go`（4041 行真二进制 e2e 套件）带 `//go:build e2e`，默认单测（`make test` / `go test ./...`）不编译、不运行；显式入口为 `make test-e2e`（`go test -tags=e2e ./test`，CI e2e job 调用），tag 化前后覆盖场景 1:1 不丢门禁。`test/e2e/` 子目录的 `e2e_binary_test.go` 同为 e2e tag 门控但为历史孤儿（认证重构后 401，从未受 CI 门控），**不在** `make test-e2e` 范围内。
 
 ### 测试模式清单
 

@@ -1,6 +1,8 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build e2e
+
 // Package sproxy_test — 认证驱动隧道 E2E：
 // access_keys 配置后，sclient 凭 access_key/access_key_secret 派生隧道密钥走通
 // 纯隧道 upload/list（无 tunnel_key）。验证服务端 fail-fast 要求的 access_keys

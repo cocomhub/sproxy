@@ -281,6 +281,15 @@ test-all:
 		cd $(CURDIR); \
 	done
 
+# 真二进制端到端测试：构建 sproxy/sclient 真实二进制 + 子进程启动，覆盖文件面/隧道/
+# mesh/relay/quota 等完整链路。默认 make test 不含（build-tag e2e 门控），CI e2e job 调用。
+# 注意：target 为 ./test（非递归），与归位前 make test 覆盖的 test/*.go 十文件 1:1 对齐；
+# test/e2e/ 下 e2e_binary_test.go 为既有历史孤儿（认证重构后 401，从未受任何 CI 门控），
+# 排除在 e2e 门禁之外，避免把既存红测试带入新 job。
+.PHONY: test-e2e
+test-e2e: prepare
+	$(GO) test $(GORACE) $(GOTEST_COUNT) -timeout=20m -tags=e2e ./test
+
 .PHONY: build-all
 build-all:
 	@for dir in $(SUB_MODULE_DIRS); do \
@@ -329,6 +338,7 @@ help:
 	@echo "  fmt             Format code (gofix + addlicense + gofmt)"
 	@echo "  clean           Clean build artifacts"
 	@echo "  test-all        Test all sub-modules"
+	@echo "  test-e2e        Run real-binary e2e tests (build-tag e2e)"
 	@echo "  build-all       Build all sub-modules"
 	@echo "  check-ci        Full CI pipeline"
 	@echo "  sonar-analyze    Run SonarQube Cloud analysis"

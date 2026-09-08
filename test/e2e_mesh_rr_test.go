@@ -1,6 +1,8 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build e2e
+
 // 阶段 5 工作项 2 / PR-2：mesh 多副本 round-robin + 单点故障回退 e2e 回归。
 // 依赖 PR-1（MeshTargetRefresher.Resolve 候选池 + 游标 RR + 失败冷却自愈）。
 // 数据面确定性走 hub 中继（startSClientMeshConnect 硬编码 --webrtc=false），
