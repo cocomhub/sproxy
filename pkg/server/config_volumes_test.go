@@ -63,6 +63,12 @@ func TestVolumesConfig_Validate(t *testing.T) {
 		{"重复卷名", func(c *Config) {
 			c.Volumes = append(c.Volumes, VolumeConfig{Name: "default", Root: "/x"})
 		}, "重复"},
+		{"重复卷 root", func(c *Config) {
+			c.Volumes = []VolumeConfig{
+				{Name: "v1", Root: "/mnt/x"},
+				{Name: "v2", Root: "/mnt/x"},
+			}
+		}, "root 重复"},
 		{"非法卷名", func(c *Config) { c.Volumes[0].Name = ".." }, "非法"},
 		{"负容量", func(c *Config) { c.Volumes[0].VolCapacity = -1 }, "不能为负"},
 		{"非法 placement", func(c *Config) { c.Placement = "round-robin" }, "placement"},
