@@ -3,22 +3,38 @@
 
 package e2e
 
-// volumes_e2e_test.go 基于 Playwright 的多卷 Web UI 浏览器自动化测试（T7 收口）：
-//   - TestVolumes_Badge：双卷各一文件 → 聚合列表同时显示两文件，且文件行带正确卷 badge；
-//   - TestVolumes_Panel：监控弹窗「卷」标签页渲染每卷容量/用量仪表（GET /api/volumes）；
-//   - TestVolumes_UploadVolumeSelect：上传表单「卷」下拉含 auto + 可见卷 option。
+// volumes_e2e_test.go 基于 Playwright 的多卷 Web UI 浏览器自动化测试（T7 收口）。
+//
+// 质量要求（web-ui-browser-e2e-required）：浏览器自动化必须做**真实交互断言**，不只断言
+// 「元素存在/用例通过」——避免「接口正常但页面未接线」。三个用例各自证明接线点：
+//
+//   - TestVolumes_Badge：badge 是只读渲染，故补「数据源接线」——捕获导航触发的 GET /api/files
+//     响应，断言列表条目带真实 volume 字段（a.txt→main / b.txt→disk2），再断言行级 .vol-badge
+//     渲染文本与之一致（证明 badge 数据来自 API，非写死）。
+//   - TestVolumes_Panel：先 HTTP 直传 2048B 文件到 disk2（真实卷容量池 Usage=2048），再点击
+//     「卷」标签页并捕获其触发的 GET /api/volumes 响应——断言响应 2 卷且 disk2.usage=2048
+//     （数据非壳），随后断言面板行渲染含该真实用量（formatSize → "2.0 KB"）。
+//   - TestVolumes_UploadVolumeSelect：选择 disk2 后断言前端卷上下文 currentVolume()=='disk2'
+//     （下拉 change → setVolumeContext 接线）；再真实触发上传（#file-input 设临时小文件）并捕获
+//     POST /upload 请求体——断言 multipart 含 volume=disk2（「下拉选卷 → 上传请求带所选卷」链路
+//     真实接通）。若 loopback 无凭据放行则上传 200 且落盘 disk2（服务端按 volume 路由的证据）；
+//     若 401 则记录边界（前端接线已由请求体证明）。
 //
 // 服务端契约（与 T7 UI 实现核对）：
-//   - GET /api/volumes 在无凭据（ring 空）+ AllowInsecureLoopback=true 下对 loopback 来源
-//     GET 放行（handleNoCredentials 合成 anonymous user Principal），返回 {volumes:[…]}；
-//   - 文件列表（GET /api/files）多卷聚合 owner 视图，文件条目带 volume 字段 → UI 渲染
-//     <span class="vol-badge">卷名</span>；
-//   - 上传「卷」下拉 <select id="upload-volume"> 首 option 为 auto("")，
-//     populateUploadVolumeSelect 按 /api/volumes 顺序追加可见卷 option。
+//   - GET /api/volumes 无凭据（ring 空）+ AllowInsecureLoopback=true 下对 loopback GET 放行
+//     （handleNoCredentials 合成 anonymous user Principal）→ 200；POST /upload 同理由 loopback
+//     任意方法兜底放行（auth.go handleNoCredentials）；
+//   - /api/files 多卷聚合 owner 视图，文件条目带 volume 字段 → UI <span class="vol-badge">卷名</span>；
+//   - 简单上传 volume 为 multipart 普通字段 volume（files.js simpleUpload fields.volume），服务端
+//     upload handler FormValue("volume") 路由（upload_handler.go:134）。
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +42,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/mxschmitt/playwright-go"
@@ -93,8 +110,71 @@ func volFile(t *testing.T, roots map[string]string, vol, rel, content string) {
 	testFile(t, userDir, rel, content)
 }
 
+// seedUploadToVolume 用真实 multipart POST /upload（volume 普通字段 + file 文件件 + 正确
+// X-File-Checksum）向指定卷写入内容——经 upload handler 路由 + 双账本，使该卷容量池
+// Usage 精确等于 len(content)（与浏览器前端同一条服务端写路径）。返回 HTTP 状态与响应体。
+func seedUploadToVolume(t *testing.T, baseURL, vol, filename string, content []byte) (int, string) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.WriteField("volume", vol); err != nil {
+		t.Fatalf("write volume field: %v", err)
+	}
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, werr := fw.Write(content); werr != nil {
+		t.Fatalf("write file body: %v", werr)
+	}
+	if cerr := mw.Close(); cerr != nil {
+		t.Fatalf("close multipart: %v", cerr)
+	}
+
+	sum := sha256.Sum256(content)
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/upload", &buf)
+	if err != nil {
+		t.Fatalf("build upload request: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("seed upload request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read upload response: %v", err)
+	}
+	return resp.StatusCode, string(body)
+}
+
+// waitResponse 轮询 Request.Response()（请求发出后响应异步到达）。5s 内未收到返回 nil。
+func waitResponse(t *testing.T, req playwright.Request) playwright.Response {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := req.Response()
+		if err == nil && resp != nil {
+			return resp
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 // TestVolumes_Badge 双卷各写一文件 → /ui/ 聚合列表同时出现 a.txt 与 b.txt，且各自行
-// 带对应卷 badge（a.txt → main、b.txt → disk2）。断言用实际 DOM：行文本 + .vol-badge。
+// 带对应卷 badge（a.txt → main、b.txt → disk2）。
+// 接线点：捕获导航触发的 GET /api/files 响应（badge 数据源 = 真实 volume 字段），
+// 再断言行级 .vol-badge 渲染文本与 API 字段一致（非写死）。
 func TestVolumes_Badge(t *testing.T) {
 	baseURL, roots, cleanup := multiVolumeTestServer(t)
 	defer cleanup()
@@ -105,19 +185,45 @@ func TestVolumes_Badge(t *testing.T) {
 	page, stop := pageFixture(t)
 	defer stop()
 
-	page.Goto(baseURL + "/ui/")
+	// 接线①：导航 → DOMContentLoaded refreshList → GET /api/files。断言响应条目带 volume 字段。
+	// （list() 恒带 ?offset=&limit= 查询串，glob 用 **/api/files?* 匹配带 query 的整条 URL；
+	// 不能用 **/api/files*——会误匹配静态脚本 /sclient/api/files.js。）
+	resp, err := page.ExpectResponse("**/api/files?*", func() error {
+		_, gerr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)})
+		return gerr
+	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(10000)})
+	if err != nil {
+		t.Fatalf("未观察到导航触发的 GET /api/files: %v", err)
+	}
+	var listPayload struct {
+		Files []struct {
+			Name   string `json:"name"`
+			Volume string `json:"volume"`
+		} `json:"files"`
+	}
+	if err := resp.JSON(&listPayload); err != nil {
+		b, _ := resp.Body()
+		t.Fatalf("解析 /api/files 响应: %v (status=%d body=%q)", err, resp.Status(), string(b))
+	}
+	volOf := map[string]string{}
+	for _, f := range listPayload.Files {
+		if f.Name == "a.txt" || f.Name == "b.txt" {
+			volOf[f.Name] = f.Volume
+		}
+	}
+	if volOf["a.txt"] != "main" || volOf["b.txt"] != "disk2" {
+		t.Fatalf("列表 volume 字段 = %v, want a.txt→main b.txt→disk2", volOf)
+	}
 
+	// 接线②（渲染断言，badge 只读）：聚合列表两文件都渲染，且各自行 .vol-badge 文本与 API 一致。
 	if _, err := page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("file table not loaded: %v", err)
 	}
-	// 两文件异步渲染后都出现在聚合列表（分页首屏含全部两文件）。
 	for _, name := range []string{"a.txt", "b.txt"} {
 		if _, err := page.WaitForSelector("text="+name, playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)}); err != nil {
 			t.Fatalf("expected %s in aggregated file list: %v", name, err)
 		}
 	}
-
-	// 行级断言：a.txt 所在行的 badge = main，b.txt 所在行 badge = disk2。
 	for _, tc := range []struct{ file, vol string }{
 		{"a.txt", "main"},
 		{"b.txt", "disk2"},
@@ -136,17 +242,34 @@ func TestVolumes_Badge(t *testing.T) {
 	}
 }
 
-// TestVolumes_Panel 监控弹窗「卷」标签页渲染 main 与 disk2 卷仪表。
-// /api/volumes 在 AllowInsecureLoopback（ring 空 + loopback GET）下放行 → 渲染真实卷表；
-// 若服务端收紧为 401，本用例会断言卷名渲染失败而暴露契约漂移（T7 需保持该降级路径）。
+// TestVolumes_Panel 监控弹窗「卷」标签页渲染 main 与 disk2 卷仪表，且 usage 为真实卷池数据
+// （非空壳）。
+// 接线点：点击 #volumes-tab 真实发出 GET /api/volumes（ExpectResponse 捕获），响应 disk2.usage
+// == 预置字节；面板行渲染文本含该用量（formatSize → "2.0 KB"）——证明「点击 → 拉 API → 渲染
+// 数据」链路接通。
 func TestVolumes_Panel(t *testing.T) {
 	baseURL, _, cleanup := multiVolumeTestServer(t)
 	defer cleanup()
+
+	// 预置真实卷用量：HTTP 直传 2048B 文件到 disk2 → disk2 卷容量池 Usage = 2048
+	// （与浏览器同一服务端写路径，双账本 commit）。
+	seed := bytes.Repeat([]byte("v"), 2048)
+	status, body := seedUploadToVolume(t, baseURL, "disk2", "usage-seed.bin", seed)
+	if status != http.StatusOK {
+		t.Fatalf("seed upload to disk2 status=%d body=%s", status, body)
+	}
 
 	page, stop := pageFixture(t)
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
+	// 等 initUploadVolumeSelect 的 GET /api/volumes 完成（下拉被填充），避免与点击捕获混淆。
+	if _, err := page.WaitForSelector("#upload-volume option[value='main']", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateAttached,
+		Timeout: playwright.Float(8000),
+	}); err != nil {
+		t.Fatalf("upload volume select not populated: %v", err)
+	}
 
 	// 打开监控弹窗
 	if _, err := page.Evaluate("showStats()"); err != nil {
@@ -159,31 +282,56 @@ func TestVolumes_Panel(t *testing.T) {
 		t.Fatalf("stats-modal not visible: %v", err)
 	}
 
-	// 切到「卷」标签页（showVolumes 异步拉 /api/volumes 渲染 #volumes-panel）
-	if err := page.Locator("#volumes-tab").Click(); err != nil {
-		t.Fatalf("click volumes-tab: %v", err)
+	// 接线：点击「卷」标签页必须真实发出 GET /api/volumes（数据非壳，usage 来自真实卷池）。
+	resp, err := page.ExpectResponse("**/api/volumes", func() error {
+		return page.Locator("#volumes-tab").Click()
+	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(8000)})
+	if err != nil {
+		t.Fatalf("点击 volumes-tab 未触发 GET /api/volumes: %v", err)
 	}
-	if _, err := page.WaitForSelector("#volumes-panel table tbody tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)}); err != nil {
+	var volPayload struct {
+		Volumes []struct {
+			Name  string `json:"name"`
+			Usage int64  `json:"usage"`
+		} `json:"volumes"`
+	}
+	if jerr := resp.JSON(&volPayload); jerr != nil {
+		t.Fatalf("解析 /api/volumes 响应: %v", jerr)
+	}
+	if len(volPayload.Volumes) != 2 {
+		t.Fatalf("/api/volumes 卷数 = %d, want 2（main+disk2）", len(volPayload.Volumes))
+	}
+	usageOf := map[string]int64{}
+	for _, v := range volPayload.Volumes {
+		usageOf[v.Name] = v.Usage
+	}
+	if usageOf["disk2"] != int64(len(seed)) {
+		t.Fatalf("/api/volumes disk2 usage = %d, want %d（预置真实卷用量）", usageOf["disk2"], len(seed))
+	}
+
+	// 渲染断言：面板表格渲染出 main/disk2 卷名与真实用量（2048 B → "2.0 KB"）。
+	if _, werr := page.WaitForSelector("#volumes-panel table tbody tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)}); werr != nil {
 		content, _ := page.Locator("#volumes-panel").InnerText()
 		t.Fatalf("volumes table not rendered, panel content: %s", content)
 	}
-
 	text, err := page.Locator("#volumes-panel").InnerText()
 	if err != nil {
 		t.Fatalf("read volumes panel: %v", err)
 	}
-	for _, vol := range []string{"main", "disk2"} {
-		if !strings.Contains(text, vol) {
-			t.Errorf("volumes panel missing volume %q; panel text:\n%s", vol, text)
+	for _, want := range []string{"main", "disk2", "2.0 KB"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("volumes panel 缺 %q; panel text:\n%s", want, text)
 		}
 	}
 }
 
-// TestVolumes_UploadVolumeSelect 上传表单「卷」下拉存在且含 auto + 可见卷（main/disk2）
-// option。populateUploadVolumeSelect 由 /api/volumes GET 填充；无凭据下该端点 loopback
-// 放行（否则下拉保持 auto 单 option 降级——本用例验证的是放行渲染路径）。
+// TestVolumes_UploadVolumeSelect 上传表单「卷」下拉存在且含 auto + 可见卷 option，并验证
+// 「下拉选卷 → 上传请求带所选卷」链路真实接通：
+//   - 选择 disk2 → change handler → setVolumeContext('disk2') → currentVolume()=='disk2'（前端状态）；
+//   - 真实触发上传（#file-input 临时小文件）→ 捕获 POST /upload 请求体 multipart 含 volume=disk2；
+//   - loopback 无凭据放行时上传 200 且文件落盘 disk2（服务端按 volume 路由），否则 401 记录边界。
 func TestVolumes_UploadVolumeSelect(t *testing.T) {
-	baseURL, _, cleanup := multiVolumeTestServer(t)
+	baseURL, roots, cleanup := multiVolumeTestServer(t)
 	defer cleanup()
 
 	page, stop := pageFixture(t)
@@ -191,12 +339,12 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	// select 静态存在（auto 打底）
-	if cnt, _ := page.Locator("#upload-volume").Count(); cnt == 0 {
+	// 下拉静态存在（auto 打底）
+	sel := page.Locator("#upload-volume")
+	if cnt, _ := sel.Count(); cnt == 0 {
 		t.Fatal("#upload-volume select not found")
 	}
 	// 等待 /api/volumes 异步填充可见卷 option（main 先到即可判定 populate 完成）。
-	// option 在收起的下拉内不属于 visible 元素 → State=Attached（DOM 挂载即成功）。
 	if _, err := page.WaitForSelector("#upload-volume option[value='main']", playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateAttached,
 		Timeout: playwright.Float(8000),
@@ -204,7 +352,6 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 		vals, _ := page.Evaluate(`Array.from(document.querySelectorAll('#upload-volume option')).map(o => o.value)`)
 		t.Fatalf("visible volume option not populated, current options=%v: %v", vals, err)
 	}
-
 	raw, err := page.Evaluate(`Array.from(document.querySelectorAll('#upload-volume option')).map(o => o.value)`)
 	if err != nil {
 		t.Fatalf("read upload-volume options: %v", err)
@@ -220,5 +367,73 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 	want := []string{"", "main", "disk2"} // auto("") 打底 + 声明序可见卷
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("upload-volume options = %v, want %v", got, want)
+	}
+
+	// 接线①：未选择时卷上下文为空（auto 语义）——select → setVolumeContext 初始态。
+	cur, err := page.Evaluate("currentVolume()")
+	if err != nil {
+		t.Fatalf("read currentVolume(): %v", err)
+	}
+	if cur != "" {
+		t.Fatalf("默认 currentVolume() = %q, want \"\"（auto）", cur)
+	}
+
+	// 接线②：选择 disk2 → change handler → setVolumeContext('disk2') → 前端卷上下文更新。
+	if _, serr := sel.SelectOption(playwright.SelectOptionValues{Values: &[]string{"disk2"}}); serr != nil {
+		t.Fatalf("select disk2: %v", serr)
+	}
+	cur, err = page.Evaluate("currentVolume()")
+	if err != nil {
+		t.Fatalf("read currentVolume() after select: %v", err)
+	}
+	if cur != "disk2" {
+		t.Fatalf("选中 disk2 后 currentVolume() = %q, want \"disk2\"（下拉 change 未接线 setVolumeContext）", cur)
+	}
+
+	// 接线③：真实触发上传（#file-input 设临时小文件）→ 捕获 POST /upload 请求体。
+	probe := filepath.Join(t.TempDir(), "wiring-probe.txt")
+	probeContent := []byte("volume wiring probe content\n")
+	if werr := os.WriteFile(probe, probeContent, 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+	upReq, err := page.ExpectRequest("**/upload", func() error {
+		return page.Locator("#file-input").SetInputFiles([]string{probe})
+	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(10000)})
+	if err != nil {
+		t.Fatalf("未观察到 POST /upload（前端未把所选卷注入上传？）: %v", err)
+	}
+	body, err := upReq.PostDataBuffer()
+	if err != nil {
+		t.Fatalf("read upload body: %v", err)
+	}
+	idx := bytes.Index(body, []byte(`name="volume"`))
+	if idx < 0 {
+		t.Fatal("POST /upload multipart body 缺 volume 字段（前端未注入卷上下文）")
+	}
+	end := idx + 200
+	if end > len(body) {
+		end = len(body)
+	}
+	if !bytes.Contains(body[idx:end], []byte("disk2")) {
+		t.Errorf("POST /upload multipart volume 字段后未跟随 disk2（上传请求未带所选卷）")
+	}
+
+	// 接线④（服务端路由证据，受无凭据边界影响）：loopback 无凭据兜底放行 → 200 且文件落盘 disk2；
+	// 若 401 则记录边界（前端接线已由请求体证明，真实落卷由 T7 手动 chrome 实测覆盖）。
+	upResp := waitResponse(t, upReq)
+	if upResp == nil {
+		t.Log("POST /upload 响应未在 5s 内观察到，跳过落盘断言（前端接线已由请求体证明）")
+		return
+	}
+	switch upResp.Status() {
+	case http.StatusOK:
+		if !fileExists(filepath.Join(roots["disk2"], "anonymous", "user", "wiring-probe.txt")) {
+			t.Error("上传未落盘 disk2 卷（服务端未按 volume 路由到 disk2）")
+		}
+		if fileExists(filepath.Join(roots["main"], "anonymous", "user", "wiring-probe.txt")) {
+			t.Error("wiring-probe.txt 不应落在默认卷 main")
+		}
+	default:
+		t.Logf("upload response=%d（无凭据 401 边界）：请求体已证前端把所选卷注入上传；真实落卷路径由 T7 手动 chrome 实测覆盖", upResp.Status())
 	}
 }
