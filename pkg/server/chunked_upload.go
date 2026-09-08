@@ -117,6 +117,7 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		TotalChunks  int    `json:"total_chunks"`
 		FileChecksum string `json:"file_checksum"`
 		FileModTime  int64  `json:"file_mod_time"`
+		Volume       string `json:"volume,omitempty"` // 显式目标卷（可选；缺省 auto 路由）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
@@ -169,7 +170,8 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 取 owner 的租户与 per-tenant UploadStore（会话目录 <root>/<owner>/chunk/<id>/）。
+	// 取 owner 的租户与 per-tenant UploadStore（会话目录 <默认卷根>/<owner>/chunk/<id>/；
+	// 会话元数据统一默认卷 chunk 桶，temp 整文件在目标卷 user 桶，见 routeUpload 注释）。
 	owner := ownerFromRequest(r)
 	store := h.uploadStoreFor(owner)
 	if store == nil {
@@ -177,29 +179,58 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
 		return
 	}
-	tnt := h.tenantFor(owner)
-	if tnt == nil || tnt.Root() == nil {
+	defTnt := h.tenantFor(owner)
+	if defTnt == nil || defTnt.Root() == nil {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
-	rel, ok := tnt.UserRel(req.Filename)
+	rel, ok := defTnt.UserRel(req.Filename)
+	// tnt 是目标卷租户（temp 文件写盘根）。新会话由 routeUpload 定卷后赋值；续传会话首个
+	// init 已定卷（session.Volume），仅按需派生（见 !reused 块）。
+	var tnt *storage.Tenant
 	if !ok {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 
-	// 排他上传检查：同一文件不能并发上传（key 与 upload handler 一致：<tnt.ID>\x00<rel>）
-	upKey := tnt.ID + "\x00" + rel
+	// 排他上传检查：同一文件不能并发上传（key 与 upload handler 一致：<owner>\x00<rel>）
+	upKey := normalizeOwner(owner) + "\x00" + rel
 	if _, loaded := h.uploadingFiles.LoadOrStore(upKey, req.UploadID); loaded {
 		sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "该文件正在上传中"}, http.StatusConflict)
 		return
 	}
 	defer h.uploadingFiles.Delete(upKey)
 
-	// 已存在同名文件的检查（租户 user 桶）——命中（already_exists / checksum 冲突）时
-	// 不建临时名、不预留，直接返回。
-	if h.checkExistingFileForInit(w, tnt, rel, req.Filename, req.FileChecksum) {
-		return
+	// 目标卷路由准备（AD-5：init 即定卷——chunk/temp/complete 与最终 user 文件同卷，rename
+	// 原子）。语义与 upload handler 对齐：
+	//   - 显式 volume（非空）→ 只该卷候选（routeUpload 唯一性 409），不做 home dup-check；
+	//   - auto（显式空）→ 写前 locateOwnerFile 定位 rel home 卷：命中 → 在该 home 卷根做
+	//     幂等/冲突/版本检查，覆盖写 stay-home（forceHomeVol=home）；locate miss → 新文件
+	//     交容量路由（无 dup-check）。volSet nil（旧装配单卷）跳过定位（唯一根即 home）。
+	//   - 实际 routeUpload（预留）延到 GetOrCreateSession 之后仅对新会话执行（续传会话复用
+	//     已定卷与预留，避免双计）。
+	explicitVol := req.Volume
+	if explicitVol == "" {
+		explicitVol = r.URL.Query().Get("volume")
+	}
+	forceHomeVol := ""
+	if explicitVol == "" {
+		// home dup-check 只在「文件确实存在于 owner 视图」时执行（幂等 200 / versioning 关
+		// checksum 冲突 409）；locate miss（视图内无此 rel）视为新文件跳过——防对无权卷遗留
+		// 文件做版本化覆盖写/假冲突（AD-6 写侧闭合，F-1 同族）。volSet nil（旧装配唯一根）
+		// 恒在默认租户 dup-check（单卷零回归）。
+		var homeTnt *storage.Tenant
+		if h.volSet == nil {
+			homeTnt = defTnt
+		} else if loc, found := h.locateOwnerFile(owner, rel); found && loc != nil && loc.tenant != nil {
+			forceHomeVol = loc.volumeName
+			homeTnt = loc.tenant
+		}
+		if homeTnt != nil {
+			if h.checkExistingFileForInit(w, homeTnt, rel, req.Filename, req.FileChecksum) {
+				return // 幂等 200 / checksum 冲突 409（versioning 关）已回包
+			}
+		}
 	}
 
 	// 分块大小协商
@@ -235,25 +266,30 @@ func (h *Handlers) uploadInit(w http.ResponseWriter, r *http.Request) {
 
 	if !reused {
 		// 任务 4：在途整文件（user 桶目标同目录）与配额预留。
-		// 先 TryReserve(TotalSize) 于 user 桶 Scope（507 时清理 session 返回 507，
-		// 不创建临时名），再 O_EXCL 建临时名 + Truncate(TotalSize) 防跨 worker 冲突。
-		// 临时名过 storage.ValidSegmentName，不以 .inflight 开头的 .part 会被扫描按普通
-		// 文件计入 user 桶配额（此处已 TryReserve，账本一致）；会话记录 tempPath。
-		// 全局兜底由 Scope 父链自动生效；未装配 quota 时回退旧 storageMgr 预留。
-		scope := h.quotaScopeFor(owner, rel)
-		if scope != nil {
-			rr, reserveErr := scope.TryReserve(session.TotalSize)
-			if reserveErr != nil {
-				store.DeleteSession(session.UploadID)
-				h.logger.Warn("storage full, chunked upload rejected",
-					"file_name", req.Filename,
-					"total_size", session.TotalSize,
-				)
-				sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: "存储空间不足"}, http.StatusInsufficientStorage)
-				return
-			}
-			session.Reservation = rr
-		} else if h.storageMgr != nil {
+		// 多卷（AD-5/AD-7）：routeUpload 先定卷 + owner 全局 Scope + 卷容量池双 TryReserve
+		// （507 时清理 session 返回 507，不创建临时名）；tnt 为 route 目标卷租户（temp/complete
+		// 同卷 rename 原子）。单卷旧装配（volSet nil）：routeUpload 回落既有 scope TryReserve
+		// 语义；scope 未装配（quota nil）时回退旧 storageMgr 预留（与改造前一致，零回归）。
+		route, routeErr := h.routeUpload(owner, rel, explicitVol, req.TotalSize, forceHomeVol)
+		if routeErr != nil {
+			store.DeleteSession(session.UploadID)
+			h.sendUploadRouteError(w, r, req.Filename, routeErr)
+			return
+		}
+		if route.tenant == nil || route.tenant.Root() == nil {
+			route.release()
+			store.DeleteSession(session.UploadID)
+			sendJSONResponse(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+			return
+		}
+		tnt = route.tenant
+		session.Volume = route.volumeName
+		session.Reservation = route.scopeRes // owner 全局/user 桶 Scope 预留（双账本之一）
+		session.Pool = route.pool
+		session.PoolRes = route.poolRes // 卷容量池预留（双账本之二）
+		if session.Reservation == nil && h.storageMgr != nil {
+			// P5 回退：quota 未装配（route.scopeRes nil，volSet nil 旧装配 / globalPool nil）
+			// 时回退旧 storageMgr 全局预留；会话删除/过期/完成时按 StorageMgrReserved 释放。
 			if err := h.storageMgr.TryReserve(session.TotalSize, CategoryChunked); err != nil {
 				store.DeleteSession(session.UploadID)
 				h.logger.Warn("storage full, chunked upload rejected",
@@ -481,7 +517,8 @@ func (h *Handlers) uploadChunk(w http.ResponseWriter, r *http.Request) {
 	// MarkChunkReceived(i, checksum)。请求体已受 MaxBytesReader(DefaultChunkBodyLimit)
 	// 限制，单块 ≤ ~60 MiB（测试 4KiB），内存缓冲可控。
 	// 乱序安全：seek 固定 offset + BoundWriter 逐段写，互不覆盖；并发分段写沿用锁。
-	tnt := h.tenantFor(owner)
+	// 多卷（AD-5）：temp 整文件在会话定卷的 user 桶（init 定卷），chunk 直写须经该卷租户。
+	tnt := h.volumeTenant(session.Volume, owner)
 	if tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, ChunkUploadResponse{Success: false, Message: "上传会话缺少在途临时文件"}, http.StatusInternalServerError)
 		return
@@ -774,8 +811,10 @@ func (h *Handlers) validateCompleteSession(w http.ResponseWriter, store *UploadS
 }
 
 // recordCompleteMetadata 记录文件 checksum、保留时间戳并清理上传 session。
+// 文件在会话定卷（session.Volume；空 = 默认卷）的 user 桶——Chtimes 须经该卷租户；
+// checksum store 是 owner 逻辑命名空间（默认卷 meta 单一权威），与物理卷无关。
 func (h *Handlers) recordCompleteMetadata(owner, uploadID string, session *ChunkedUploadSession, finalChecksum string) {
-	tnt := h.tenantFor(owner)
+	tnt := h.volumeTenant(session.Volume, owner)
 	if tnt == nil || tnt.Root() == nil {
 		h.logger.Warn("记录完成元数据失败：租户不可用", "owner", owner)
 		return
@@ -846,8 +885,9 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 	// （complete 内部仍保守检查 ctx.Done；recovery 兜底走进程级。）
 	mergeCtx := context.WithoutCancel(r.Context())
 
-	// 取 owner 的租户与 user 桶相对路径（覆盖写 ReleaseUsage / complete 用）。
-	tnt := h.tenantFor(owner)
+	// 取会话目标卷租户与 user 桶相对路径（覆盖写 ReleaseUsage / complete / saveVersion 用）。
+	// 多卷（AD-5）：init 定卷，temp + rename + version 全在目标卷（session.Volume 空 = 默认卷）。
+	tnt := h.volumeTenant(session.Volume, owner)
 	rel := ""
 	if tnt != nil && tnt.Root() != nil {
 		if r, ok := tnt.UserRel(session.Filename); ok {
@@ -925,6 +965,19 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 			// 覆盖写：rename 已原子替换，旧文件字节从磁盘消失 → ReleaseUsage(old)。
 			scope.ReleaseUsage(prev)
 		}
+	}
+	// 卷容量池双账本结算（AD-7，routeUpload 双预留之一）：新文件 Commit(total)；
+	// 覆盖写 Adjust(prev, total) 差分收敛 + 释放预留（与 upload handler route.commit 语义一致，
+	// 防卷池 Usage 虚高/路由误判）。
+	if session.Pool != nil && session.PoolRes != nil {
+		if prev > 0 {
+			session.Pool.Adjust(prev, session.TotalSize)
+			session.PoolRes.Release()
+		} else {
+			session.PoolRes.Commit(session.TotalSize)
+		}
+		session.Pool = nil
+		session.PoolRes = nil
 	}
 
 	// 写 checksum store（per-tenant key = rel，与 download 读取一致）。

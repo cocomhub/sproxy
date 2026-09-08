@@ -368,6 +368,21 @@ func (h *Handlers) uploadStoreFor(owner string) *UploadStore {
 	// P5：quota 未装配（globalPool nil）时，分块上传走 storageMgr 回退预留，
 	// 需把 storageMgr 注入 store 供会话删除/过期释放（scope 预留路径无需）。
 	us.SetStorageMgr(h.storageMgr)
+	// 多卷（AD-5）：会话可跨卷定卷，UploadStore 需按 session.Volume 解析目标卷租户根
+	// （temp 文件删除/恢复/过期清理）。注册本 owner 在各卷的租户根（Abs 只推导不创建，
+	// 无副作用——目标卷租户目录仍由写路径首次使用时懒建）。
+	if h.volSet != nil {
+		for _, v := range h.volSet.All() {
+			if v.Name == h.volSet.defaultName {
+				continue
+			}
+			if rt := h.volSet.Root(v.Name); rt != nil {
+				if abs, ok := rt.Abs(owner); ok {
+					us.SetVolumeTenantRoot(v.Name, abs)
+				}
+			}
+		}
+	}
 	h.uploadStores[owner] = us
 	return us
 }
@@ -713,7 +728,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 		RetryDelay:      cfg.CloudRetryDelay,
 		Downloader:      cfg.CloudDownloader,
 	}
-	h.cloudMgr = NewCloudDownloadManager(cfg.StorageRoot, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
+	h.cloudMgr = NewCloudDownloadManager(vs.Default().RootDir, sm, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, log.With("component", "cloud"), cloudCfg, func(owner string) *quota.Scope {
 		return h.quotaBucketFor(owner, "cloud")
 	})
 	h.storageMgr = sm
@@ -1198,16 +1213,18 @@ func (h *Handlers) bootstrapCredentials(opts RegisterRoutesOpts) {
 
 // BootstrapServerCredentials 是生产装配入口：为服务端准备凭据 Ring + store
 // （供 cmd/sproxy 在 RegisterRoutes 与 hub 装配之前调用，随后把二者注入 opts）。
-//   - store = <storage_root>/anonymous/meta/credentials.json（服务端级全局凭据，
-//     anonymous 租户的 meta 桶；多租户部署如需 per-owner 凭据经 /api/credentials
-//     管理，见任务 5）；
+//   - store = <默认卷根>/anonymous/meta/credentials.json（服务端级全局凭据，anonymous
+//     租户的 meta 桶；多租户部署如需 per-owner 凭据经 /api/credentials 管理，见任务 5）。
+//     **默认卷根经 resolveDefaultVolumeRoot 裁决**（非 cfg.StorageRoot）——显式
+//     volumes[0].root ≠ storage_root 分叉时凭据必须落默认卷 meta（AD-5 meta 归属默认卷
+//     不变式；否则重启凭据 Ring 丢失，PR-B 终审建议 9）。
 //   - 载入既有快照；**U3：不再生成首启 anonymous 凭据**——store 为空则返回空 Ring，
 //     系统以零凭据等待 register 公开端点（首个回环注册者授 admin）。
 func BootstrapServerCredentials(cfg *Config, logger *slog.Logger) (*accesskey.Ring, accesskey.CredentialStorer, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	metaDir := filepath.Join(cfg.StorageRoot, anonymousOwner, "meta")
+	metaDir := filepath.Join(resolveDefaultVolumeRoot(cfg), anonymousOwner, "meta")
 	var store accesskey.CredentialStorer = NewCredentialStore(metaDir)
 	// 4C-2：credential_store.encrypt=true 时把凭据文件包装为加密静态存储
 	// （EncryptingStorer，按 backend 选 SecureStorer）——cmd 与 opts 注入面不变

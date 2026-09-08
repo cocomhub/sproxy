@@ -235,8 +235,8 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
+	tnt, _, ok := h.resolveVersionTarget(ownerFromRequest(r), remotePath)
+	if !ok || tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
@@ -313,8 +313,8 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
+	tnt, _, ok := h.resolveVersionTarget(ownerFromRequest(r), remotePath)
+	if !ok || tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
@@ -485,8 +485,8 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	tnt := h.tenantOf(r)
-	if tnt == nil || tnt.Root() == nil {
+	tnt, _, ok := h.resolveVersionTarget(ownerFromRequest(r), remotePath)
+	if !ok || tnt == nil || tnt.Root() == nil {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return
 	}
@@ -530,6 +530,32 @@ func (h *Handlers) deleteVersionHandler(w http.ResponseWriter, r *http.Request) 
 		Result: AuditResultSuccess, Detail: "version_id=" + versionIDStr,
 	})
 	sendJSONResponse(w, UploadResponse{Success: true, Message: "版本已删除"}, http.StatusOK)
+}
+
+// resolveVersionTarget 解析版本操作的作用租户与 user 桶 rel（T6a：版本端点 home 卷定位）。
+// 版本桶随 user 文件所在卷（AD-5，saveVersion 已按 home 卷写 version/）；list/restore/delete
+// 先前置 locateOwnerFile 定位 user 文件 home 卷 → 同卷 version 桶操作（多卷 disk2 文件的版本
+// 不再不可见，PR-C/T5 review 记账闭合）。文件未命中（不存在/已删）回落默认租户——单卷旧布局
+// 与「删文件保留版本可恢复」语义兼容；默认卷不在 owner 视图时不回落（fail-closed，ACL 不泄漏）。
+func (h *Handlers) resolveVersionTarget(owner, remotePath string) (*storage.Tenant, string, bool) {
+	owner = normalizeOwner(owner)
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, "", false
+	}
+	rel, ok := tnt.UserRel(remotePath)
+	if !ok {
+		return nil, "", false
+	}
+	if h.volSet != nil {
+		if loc, found := h.locateOwnerFile(owner, rel); found && loc != nil && loc.tenant != nil {
+			return loc.tenant, rel, true
+		}
+		if !h.defaultVolumeAllows(owner) {
+			return nil, "", false
+		}
+	}
+	return tnt, rel, true
 }
 
 // saveVersionBeforeOverwrite 在文件即将被覆盖前保存旧版本。

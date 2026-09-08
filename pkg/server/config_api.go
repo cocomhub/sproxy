@@ -88,7 +88,7 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 		HubEnabled:         cfg.Hub.Enabled,
 		TLSEnabled:         cfg.TLS.Enabled,
 		Addr:               cfg.Addr,
-		StorageRoot:        cfg.StorageRoot,
+		StorageRoot:        resolveDefaultVolumeRoot(cfg),
 		WebTunnel:          cfg.Web.Tunnel,
 	}
 
