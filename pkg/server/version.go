@@ -38,7 +38,8 @@ var (
 	lastVersionID int64
 )
 
-// newVersionID 生成新的文件版本 ID：毫秒时间戳 ×1000 + 3 位随机后缀（0-999）。
+// newVersionID 生成新的文件版本 ID：**毫秒时间戳 ×1000 + 3 位随机后缀（0-999），
+// 冲突时单调递增兜底**。
 //
 // 溢出修复：旧实现为 time.Now().UnixNano()*1000 + rand.IntN(1000)。UnixNano()≈1.76e18，
 // ×1000 后≈1.76e21，远超 int64 上限 9.22e18 —— 约每 213.5 天回绕一次且符号各半，当前
@@ -58,6 +59,16 @@ func newVersionID() int64 {
 	lastVersionID = id
 	versionIDMu.Unlock()
 	return id
+}
+
+// versionIDTime 由版本 ID 还原其创建时间。
+// 版本 ID = 毫秒时间戳 ×1000 + 3 位随机后缀（见 newVersionID），故 /1000 得毫秒时间戳。
+// 历史遗留的非正 ID（旧纳秒 ×1000 溢出产物）无法还原有意义的时间，回落 fallback。
+func versionIDTime(versionID int64, fallback time.Time) time.Time {
+	if versionID <= 0 {
+		return fallback
+	}
+	return time.UnixMilli(versionID / 1000)
 }
 
 // saveVersion 在上传覆盖前保存当前文件版本。
@@ -330,7 +341,9 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 			Filename:  filepath.ToSlash(remotePath),
 			VersionID: versionID,
 			Size:      info.Size(),
-			CreatedAt: time.Unix(0, versionID).Format(time.RFC3339),
+			// 版本 ID 为毫秒时间戳×1000+随机后缀（见 newVersionID），/1000 还原毫秒时间戳；
+			// 历史遗留的非正 ID 无法还原时间，回落版本文件 mtime。
+			CreatedAt: versionIDTime(versionID, info.ModTime()).Format(time.RFC3339),
 		}
 		// 尝试获取 checksum（per-tenant store，key = version/<rel>/<id>）
 		if csStore != nil {
