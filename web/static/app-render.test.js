@@ -254,3 +254,41 @@ test('buildCloudTaskTableHtml / buildCloudGroupTableHtml / buildVersionTableHtml
 test('buildVersionTableHtml 空数组', () => {
   assert.ok(r.buildVersionTableHtml([], 'f.txt').includes('共 0 个版本'));
 });
+// ---- 批量操作结果（batchOpSummary）----
+// 服务端 /api/batch/{delete,rename} 返回 {results:[{filename,success,message}]}（无顶层
+// success）——四态覆盖：全成功 / 部分失败 / 全失败 / 空 results。
+test('batchOpSummary 全成功', () => {
+  const s = r.batchOpSummary([{ filename: 'a', success: true }, { filename: 'b', success: true }], '删除');
+  assert.strictEqual(s.ok, true);
+  assert.strictEqual(s.message, '删除完成（2 个）');
+});
+
+test('batchOpSummary 部分失败', () => {
+  const s = r.batchOpSummary([
+    { filename: 'a', success: true },
+    { filename: 'b', success: false, message: '目标已存在' },
+  ], '重命名');
+  assert.strictEqual(s.ok, false);
+  assert.strictEqual(s.message, '重命名：1 成功 / 1 失败（目标已存在）');
+});
+
+test('batchOpSummary 全失败', () => {
+  const s = r.batchOpSummary([
+    { filename: 'a', success: false, message: '校验失败' },
+    { filename: 'b', success: false, message: '校验失败' },
+  ], '删除');
+  assert.strictEqual(s.ok, false);
+  // 只附首条失败 message
+  assert.strictEqual(s.message, '删除：0 成功 / 2 失败（校验失败）');
+});
+
+test('batchOpSummary 空 results / 非数组 / 失败项无 message', () => {
+  const empty = r.batchOpSummary([], '删除');
+  assert.strictEqual(empty.ok, false);
+  assert.strictEqual(empty.message, '删除：服务器未返回结果');
+  assert.strictEqual(r.batchOpSummary(null, '删除').ok, false);
+  assert.strictEqual(r.batchOpSummary(undefined, '重命名').ok, false);
+  // 失败项无 message → 不拼空括号
+  const noMsg = r.batchOpSummary([{ filename: 'a', success: false }], '删除');
+  assert.strictEqual(noMsg.message, '删除：0 成功 / 1 失败');
+});

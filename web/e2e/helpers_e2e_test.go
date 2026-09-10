@@ -272,6 +272,21 @@ func seedConfigUpdate(t *testing.T, baseURL string) int {
 	return resp.StatusCode
 }
 
+// waitToastSuccess 轮询 #toast 文本包含 want（≤timeoutMs），并断言其样式类含
+// toast-success——证明前端走的是成功分支（而非「服务端成功却弹错误 toast」）。
+// showToast 3s 后仅移除 show 类（opacity），textContent/class 保留，断言稳定。
+func waitToastSuccess(t *testing.T, page playwright.Page, want string, timeoutMs float64) {
+	t.Helper()
+	waitTextVisible(t, page, "#toast", want, timeoutMs)
+	cls, err := page.Locator("#toast").GetAttribute("class")
+	if err != nil {
+		t.Fatalf("读取 #toast class: %v", err)
+	}
+	if !strings.Contains(cls, "toast-success") {
+		t.Fatalf("#toast class = %q, want 含 toast-success（成功分支未生效）", cls)
+	}
+}
+
 // waitTextGone 轮询 sel 容器的 InnerText，直到不再包含 want（≤timeout）。
 // 用于断言删除/重命名/切目录后的行消失（避免只断元素存在）。
 func waitTextGone(t *testing.T, page playwright.Page, sel, want string, timeoutMs float64) {

@@ -724,6 +724,34 @@
     return html;
   }
 
+  // ---- 批量操作结果 ----
+  // batchOpSummary(results, actionLabel) → {ok, message}。
+  //
+  // 服务端 /api/batch/delete 与 /api/batch/rename 回包为
+  // {results:[{filename,success,message}]}（**无顶层 success 字段**，见 pkg/server/response.go
+  // BatchResponse）。历史缺陷：app.js 曾以 data.success 判定 → 恒为 undefined 假值 →
+  // 成功也弹「失败」且不刷新列表。统一在此归一：
+  //   - ok 要求 results 非空**且**逐条 success（空 results 视为失败——响应异常）；
+  //   - 全成功 message：'<label>完成（N 个）'；
+  //   - 有失败 message：'<label>：X 成功 / Y 失败'，附首条失败 message（若有）。
+  // 纯函数：不碰 DOM/全局，可 node:test 直测。
+  function batchOpSummary(results, actionLabel) {
+    const list = Array.isArray(results) ? results : [];
+    const label = actionLabel == null ? '' : String(actionLabel);
+    if (list.length === 0) {
+      return { ok: false, message: label + '：服务器未返回结果' };
+    }
+    const failed = list.filter(function (r) { return !(r && r.success); });
+    const okCount = list.length - failed.length;
+    if (failed.length === 0) {
+      return { ok: true, message: label + '完成（' + okCount + ' 个）' };
+    }
+    let message = label + '：' + okCount + ' 成功 / ' + failed.length + ' 失败';
+    const firstMsg = failed[0] && failed[0].message;
+    if (firstMsg) message += '（' + firstMsg + '）';
+    return { ok: false, message: message };
+  }
+
   return {
     escHtml, formatSize, getChecksumPrefix, bytesToHex, normalizeList, zipNames,
     stripCloudId,
@@ -735,5 +763,6 @@
     cloudGroupActions, buildCloudGroupTableHtml, buildVersionTableHtml,
     syncStatusText, buildSyncRowMeta,
     TRANSFER_CHANNELS, filterTransferItems, buildTransferRowHtml, buildTransferListHtml,
+    batchOpSummary,
   };
 });

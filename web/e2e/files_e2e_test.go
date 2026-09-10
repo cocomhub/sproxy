@@ -393,16 +393,10 @@ func TestFiles_BatchDelete(t *testing.T) {
 		t.Errorf("b2 checksum 不匹配: %s", byName["b2.txt"])
 	}
 
-	// DOM：两行消失、表格清空（空列表不再渲染 #file-table）。
-	//
-	// ⚠️ 已发现真实 UI 缺陷（不在本 PR 改动范围，见报告）：服务端 /api/batch/delete 返回
-	// {"results":[...]}（无顶层 success 字段），而 app.js batchDelete() 以 data.success
-	// 判定成功——undefined 为假 → 走 else 分支（弹「批量删除失败」错误 toast）且**不调用
-	// refreshList()**，故列表不会自动刷新。此处以显式「刷新列表」点击驱动 refreshList
-	// （仍为点击 → GET /api/files → DOM 变化），据实断言服务端删除已生效且渲染一致。
-	if rerr := expectFilesReload(page, func() error { return page.Locator("#refresh-btn").Click() }); rerr != nil {
-		t.Fatalf("刷新列表未触发 GET /api/files: %v", rerr)
-	}
+	// DOM：前端以服务端 {results:[...]} 归一成败（appRender.batchOpSummary）——成功后
+	// 必须弹成功 toast 且**自动** refreshList，无需手动刷新即两行消失、表格清空。
+	// （不修则：弹错误 toast 且列表不刷新 → 本断言失败。）
+	waitToastSuccess(t, page, "删除完成", 8000)
 	waitTextGone(t, page, "#file-list", "b1.txt", 8000)
 	waitTextGone(t, page, "#file-list", "b2.txt", 8000)
 	if cnt, _ := page.Locator("#file-table tr").Count(); cnt != 0 {
@@ -517,24 +511,13 @@ func TestFiles_BatchRename(t *testing.T) {
 		t.Fatalf("批量重命名映射 = %v, want r1.txt→n1.txt r2.txt→n2.txt", toOf)
 	}
 
-	// ⚠️ 同 TestFiles_BatchDelete：/api/batch/rename 亦返回 {"results":[...]}（无顶层
-	// success），app.js batchRename() 以 data.success 判定 → 不自动 refreshList。此处以
-	// 显式「刷新列表」点击驱动渲染（点击 → GET /api/files → DOM 变化），据实断言服务端
-	// 重命名已生效。
-	if rerr := expectFilesReload(page, func() error { return page.Locator("#refresh-btn").Click() }); rerr != nil {
-		t.Fatalf("刷新列表未触发 GET /api/files: %v", rerr)
-	}
+	// DOM：成功 toast + **自动** refreshList（同 TestFiles_BatchDelete）——新名出现、
+	// 旧名消失，均无需手动刷新。（不修则列表不刷新 → 本断言失败。）
+	waitToastSuccess(t, page, "重命名完成", 8000)
 	waitTextVisible(t, page, "#file-list", "n1.txt", 8000)
 	waitTextVisible(t, page, "#file-list", "n2.txt", 8000)
 	waitTextGone(t, page, "#file-list", "r1.txt", 8000)
 	waitTextGone(t, page, "#file-list", "r2.txt", 8000)
-}
-
-// expectFilesReload 在 action 期间捕获一次 GET /api/files?* 响应（用于显式刷新列表的
-// 点击断言）。返回 error 表示未观察到该请求。
-func expectFilesReload(page playwright.Page, action func() error) error {
-	_, err := page.ExpectResponse("**/api/files?*", action, playwright.PageExpectResponseOptions{Timeout: playwright.Float(8000)})
-	return err
 }
 
 // TestFiles_Rmdir 删除目录（confirm）：POST /rmdir?dirname=&force=true → 目录行消失。
