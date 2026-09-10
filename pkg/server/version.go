@@ -44,12 +44,15 @@ var (
 // 溢出修复：旧实现为 time.Now().UnixNano()*1000 + rand.IntN(1000)。UnixNano()≈1.76e18，
 // ×1000 后≈1.76e21，远超 int64 上限 9.22e18 —— 约每 213.5 天回绕一次且符号各半，当前
 // 时段生成的 ID 恒为负（客户端/服务端按正数语义消费时不可用）。改用毫秒精度 ×1000 后
-// 最大约 1.76e15，远小于 int64 上限，正数可用至约 2.9 亿年。
+// 最大约 1.79e15，远小于 int64 上限，正数可用至约 29 万年。
 //
 // 唯一性：同一毫秒内提供 1000 个随机后缀槽位。但无节流的连续调用可在同一毫秒内产生
 // 远超 1000 次调用（实测 10000 次仅得 1000 个唯一值），故在进程内加锁保证严格单调递增
-// ——候选值不前进时取 lastVersionID+1，使高频连续调用下 ID 仍唯一。落盘侧另以
-// O_CREATE|O_EXCL 兜底（跨进程/重启场景）。
+// ——候选值不前进时取 lastVersionID+1，使高频连续调用下 ID 仍唯一。
+//
+// 范围界定：lastVersionID 的单调性仅在**本进程内**成立，跨进程或跨重启不保证全局单调；
+// 那些场景由「毫秒时间戳 + 随机后缀」本身的低碰撞概率，以及落盘侧
+// O_CREATE|O_EXCL（已存在则报错）兜底，不会静默覆盖既有版本。
 func newVersionID() int64 {
 	id := time.Now().UnixMilli()*1000 + int64(rand.IntN(1000))
 	versionIDMu.Lock()
@@ -63,12 +66,20 @@ func newVersionID() int64 {
 
 // versionIDTime 由版本 ID 还原其创建时间。
 // 版本 ID = 毫秒时间戳 ×1000 + 3 位随机后缀（见 newVersionID），故 /1000 得毫秒时间戳。
-// 历史遗留的非正 ID（旧纳秒 ×1000 溢出产物）无法还原有意义的时间，回落 fallback。
+// 历史遗留 ID 均无法可靠还原时间，回落 fallback（调用方传版本文件 mtime）：
+//   - 非正 ID：旧纳秒 ×1000 回绕为负；
+//   - 正的巨值 ID：旧纳秒 ×1000 回绕为正（约一半概率），/1000 后解码为 ~公元 10500 年。
 func versionIDTime(versionID int64, fallback time.Time) time.Time {
 	if versionID <= 0 {
 		return fallback
 	}
-	return time.UnixMilli(versionID / 1000)
+	ts := time.UnixMilli(versionID / 1000)
+	// 合理上限：ID 派生时间不应显著超前于当前——拦截上述回绕为正的巨值遗留 ID，
+	// 避免把版本显示成遥远的未来时间。
+	if ts.After(time.Now().Add(24 * time.Hour)) {
+		return fallback
+	}
+	return ts
 }
 
 // saveVersion 在上传覆盖前保存当前文件版本。

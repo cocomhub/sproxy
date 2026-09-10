@@ -9,17 +9,36 @@ import (
 	"time"
 )
 
-// TestNewVersionID_Positive 断言版本 ID 生成恒为正。
+// TestNewVersionID_Positive 断言版本 ID 生成恒为正，且由 ID 还原出的时间接近当前。
 //
 // 回归：旧实现 time.Now().UnixNano()*1000 中 UnixNano()≈1.76e18，×1000 后≈1.76e21
 // 远超 int64 上限 9.22e18 → 回绕（约 213.5 天一轮、符号各半），当前时段生成的 ID 恒为负。
+//
+// 强护栏说明：仅断言「为正」不足以拦截回归——单调兜底会把任何 ≤lastVersionID 的候选
+// 钳成 lastVersionID+1，若进程内已有合法历史值，回绕为负的候选仍会被钳成看似正常的
+// ID。故本测试先把 lastVersionID 归零，再断言 ID 还原的时间必须贴近当前：候选一旦回退
+// 成 UnixNano()*1000，回绕为负时只会钳出 1,2,3…（还原成 1970），回绕为正的巨值时被
+// versionIDTime 上限判定回落零值——两种情况本测试都会失败。
+//
+// 非并行：需独占重置包级 lastVersionID，避免与其他并行测试互相干扰（非并行测试不会与
+// t.Parallel() 测试并发执行）。
 func TestNewVersionID_Positive(t *testing.T) {
-	t.Parallel()
+	versionIDMu.Lock()
+	lastVersionID = 0
+	versionIDMu.Unlock()
 
 	const n = 10000
 	for i := range n {
-		if id := newVersionID(); id <= 0 {
+		id := newVersionID()
+		if id <= 0 {
 			t.Fatalf("第 %d 次生成 version_id = %d，应为正数（int64 溢出回归）", i, id)
+		}
+		got := versionIDTime(id, time.Time{})
+		if got.IsZero() {
+			t.Fatalf("第 %d 次生成 version_id = %d 无法还原时间（巨值回绕产物）", i, id)
+		}
+		if d := time.Since(got); d < -5*time.Second || d > 5*time.Second {
+			t.Fatalf("第 %d 次生成 version_id = %d 还原时间 %v 偏离当前 %v（时间戳精度/溢出回归）", i, id, got, d)
 		}
 	}
 }
@@ -99,15 +118,22 @@ func TestVersionIDTime_NewIDNearNow(t *testing.T) {
 	}
 }
 
-// TestVersionIDTime_LegacyFallback 断言历史非正 ID 无法还原时间时回落 fallback，
-// 且不会被当作合法时间（负数/零）。
+// TestVersionIDTime_LegacyFallback 断言历史 ID 无法还原时间时回落 fallback，
+// 且不会被当作合法时间（负数/零/回绕为正的巨值）。
 func TestVersionIDTime_LegacyFallback(t *testing.T) {
 	t.Parallel()
 
 	fallback := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	for _, id := range []int64{0, -1, -269429080180906331} {
+	ids := map[string]int64{
+		"零值":         0,
+		"负一":         -1,
+		"旧纳秒回绕为负":    -269429080180906331,
+		"旧纳秒回绕为正的巨值": 269000000000000000,  // /1000 → ~公元 10500 年
+		"int64 最大值":  9223372036854775807, // /1000 → ~公元 294000 年
+	}
+	for name, id := range ids {
 		if got := versionIDTime(id, fallback); !got.Equal(fallback) {
-			t.Errorf("versionIDTime(%d) = %v, want fallback %v", id, got, fallback)
+			t.Errorf("versionIDTime(%s: %d) = %v, want fallback %v", name, id, got, fallback)
 		}
 	}
 }
