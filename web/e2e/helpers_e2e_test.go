@@ -27,7 +27,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -158,6 +160,51 @@ func requestJSON(t *testing.T, req playwright.Request, v any) {
 	if err := json.Unmarshal(b, v); err != nil {
 		t.Fatalf("解析请求体 JSON: %v (body=%q)", err, string(b))
 	}
+}
+
+// startFileSource 启动一个 127.0.0.1 的 httptest 文件源，返回可见 URL 与 cleanup。
+// 用于云下载 e2e（cloud_download_allow_private=true 才放行回环源）。
+func startFileSource(t *testing.T, name string, content []byte) (string, func()) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/"+name, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		_, _ = w.Write(content)
+	})
+	ts := httptest.NewServer(mux) // 默认 127.0.0.1
+	return ts.URL + "/" + name, ts.Close
+}
+
+// startStallingSource 启动一个「挂住不返回」的源：handler 阻塞到 stop() 被调用，
+// 使云任务停在 downloading 状态，供取消（cancel）用例断言。
+func startStallingSource(t *testing.T, name string) (string, func()) {
+	t.Helper()
+	done := make(chan struct{})
+	var once sync.Once
+	mux := http.NewServeMux()
+	mux.HandleFunc("/"+name, func(w http.ResponseWriter, r *http.Request) {
+		<-done // 直到 cleanup 才解除阻塞
+	})
+	ts := httptest.NewServer(mux)
+	return ts.URL + "/" + name, func() { once.Do(func() { close(done) }); ts.Close() }
+}
+
+// seedConfigUpdate 用真实 HTTP PUT /api/config 触发一条 config_update 审计事件
+// （config_api.go 无条件 RecordAudit）。返回状态码。loopback + 无凭据兜底放行。
+func seedConfigUpdate(t *testing.T, baseURL string) int {
+	t.Helper()
+	body := strings.NewReader(`{"log_level":"info"}`)
+	req, err := http.NewRequest(http.MethodPut, baseURL+"/api/config", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("seed config update: %v", err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
 }
 
 // waitTextGone 轮询 sel 容器的 InnerText，直到不再包含 want（≤timeout）。
