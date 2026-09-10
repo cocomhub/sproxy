@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mxschmitt/playwright-go"
 )
@@ -120,8 +121,18 @@ func TestFiles_Mkdir(t *testing.T) {
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
-	if err := waitLoc(page, "#file-list .empty-msg", playwright.WaitForSelectorStateVisible, 8000); err != nil {
-		t.Fatalf("初始空列表未渲染: %v", err)
+	// 基线（R3）：等首次 refreshList 落定——占位「加载中...」消失且列表已有终态文本
+	// （比单等 .empty-msg 更强：证明服务端列表已返回，而非停在载入前占位）。
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		txt, err := page.Locator("#file-list").InnerText()
+		if err == nil && strings.TrimSpace(txt) != "" && !strings.Contains(txt, "加载中") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if txt, _ := page.Locator("#file-list").InnerText(); strings.Contains(txt, "加载中") || strings.TrimSpace(txt) == "" {
+		t.Fatalf("文件列表未加载完成: %q", txt)
 	}
 	// 基线：无任何目录行（反 false-green——目录行必须是 mkdir 之后新增）。
 	if cnt, _ := page.Locator(".dir-row").Count(); cnt != 0 {
@@ -316,6 +327,10 @@ func TestFiles_Delete(t *testing.T) {
 	if fileExists(filepath.Join(userRoot(cfg), "del-me.txt")) {
 		t.Error("删除后文件仍存在于磁盘")
 	}
+	// 正向断言（R1）：列表处于正常空态，而非「请求失败」（仅断文本消失会被刷新失败骗过）。
+	if txt, _ := page.Locator("#file-list").InnerText(); strings.Contains(txt, "请求失败") {
+		t.Errorf("删除后列表处于请求失败态:\n%s", txt)
+	}
 }
 
 // TestFiles_BatchDelete 批量删除：勾选 2 个 → confirm → POST /api/batch/delete（body
@@ -401,6 +416,18 @@ func TestFiles_BatchDelete(t *testing.T) {
 	waitTextGone(t, page, "#file-list", "b2.txt", 8000)
 	if cnt, _ := page.Locator("#file-table tr").Count(); cnt != 0 {
 		t.Errorf("批量删除后 #file-table tr 计数 = %d, want 0", cnt)
+	}
+	// 工具栏状态复位（M2）：删空后必须调用 clearSelection()，否则仍显示「已选 2 个文件」
+	// 且工具栏保持展开；refreshList 空列表分支不碰工具栏，故此断言直接捕获该缺陷。
+	if txt, _ := page.Locator("#batch-count").InnerText(); !strings.Contains(txt, "已选 0") {
+		t.Errorf("批量删除后 #batch-count = %q, want 含「已选 0」（clearSelection 未调用？）", txt)
+	}
+	if cls, _ := page.Locator("#batch-toolbar").GetAttribute("class"); strings.Contains(cls, "show") {
+		t.Errorf("批量删除后 #batch-toolbar class = %q, 不应保留 show（选择态未复位）", cls)
+	}
+	// 正向断言（R1）：列表已回到正常的空态，而非请求失败态。
+	if txt, _ := page.Locator("#file-list").InnerText(); strings.Contains(txt, "请求失败") {
+		t.Errorf("批量删除后列表处于请求失败态:\n%s", txt)
 	}
 }
 
@@ -552,6 +579,10 @@ func TestFiles_Rmdir(t *testing.T) {
 	}
 
 	waitTextGone(t, page, "#file-list", "rmdir-me", 8000)
+	// 正向断言（R1）：目录行消失后列表处于正常态而非请求失败态。
+	if txt, _ := page.Locator("#file-list").InnerText(); strings.Contains(txt, "请求失败") {
+		t.Errorf("删除目录后列表处于请求失败态:\n%s", txt)
+	}
 }
 
 // sha256Sum 返回 content 的 SHA-256 摘要（供 e2e 用例预算期望 checksum）。

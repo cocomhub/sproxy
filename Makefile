@@ -186,6 +186,13 @@ vet:
 lint:
 	golangci-lint run
 
+# web/e2e 是嵌套 module（被 SUB_MODULE_DIRS 的 -not -path './web/e2e/*' 排除），
+# 根 `golangci-lint run ./...` 扫不到它——CI 的 ui-e2e job 单独 lint 该 module，
+# 本地用本 target 对齐同一门禁（GOWORK=off 避免 go.work 全 module 加载）。
+.PHONY: lint-web-e2e
+lint-web-e2e:
+	cd web/e2e && GOWORK=off golangci-lint run -c ../../.golangci.yml ./...
+
 .PHONY: bench
 bench:
 	@mkdir -p $(BUILD_DIR)/bench
@@ -301,7 +308,7 @@ build-all:
 	done
 
 .PHONY: check-ci
-check-ci: vet lint check-loopback notest build-ci test-cover cover-check test-all build-all
+check-ci: vet lint lint-web-e2e check-loopback notest build-ci test-cover cover-check test-all build-all
 
 .PHONY: sonar-analyze
 sonar-analyze:
@@ -332,6 +339,7 @@ help:
 	@echo "  notest          Verify all packages have test files"
 	@echo "  vet             Run go vet"
 	@echo "  lint            Run golangci-lint"
+	@echo "  lint-web-e2e    Run golangci-lint for the nested web/e2e module"
 	@echo "  bench-local     Run benchmarks with metadata (local use)"
 	@echo "  bench           Run benchmarks (CI, output to build/bench/output.txt)"
 	@echo "  check-loopback  Check for unsafe listen addresses"

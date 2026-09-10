@@ -88,9 +88,26 @@ func TestCloudDownload_SubmitCompleteRemove(t *testing.T) {
 		t.Fatalf("#transfer-body 未显示: %v", werr)
 	}
 	waitTextVisible(t, page, "#transfer-body", "已完成", 15000)
+
+	// 停掉 3s 轮询再操作：renderTransferChannel() 每次重建 #transfer-body，会把已完成
+	// 分组的 <details> 重置为折叠——展开与点删除之间若撞上重建则按钮不可见/不可点。
+	// 停轮询后 DOM 不再被重建（删除处理器自身会 refreshCloudTasks()，UI 仍更新）。
+	if _, sErr := page.Evaluate("stopCloudPolling()"); sErr != nil {
+		t.Fatalf("stopCloudPolling: %v", sErr)
+	}
 	// 已完成项被折叠在 <details> 内；展开后行文本才可读、操作按钮才可点。
-	if expErr := page.Locator("#transfer-body summary").First().Click(); expErr != nil {
-		t.Fatalf("展开已完成分组: %v", expErr)
+	// clickRemove 仍带「不可见则先展开」的幂等兜底（防任何残余重建）。
+	clickRemove := func() error {
+		btn := page.Locator("#transfer-body .cloud-remove-btn").First()
+		if vis, verr := btn.IsVisible(); verr != nil || !vis {
+			if cerr := page.Locator("#transfer-body summary").First().Click(); cerr != nil {
+				return cerr
+			}
+		}
+		return btn.Click()
+	}
+	if cerr := page.Locator("#transfer-body summary").First().Click(); cerr != nil {
+		t.Fatalf("展开已完成分组: %v", cerr)
 	}
 	waitTextVisible(t, page, "#transfer-body", "cloud-src.bin", 10000)
 
@@ -120,9 +137,7 @@ func TestCloudDownload_SubmitCompleteRemove(t *testing.T) {
 	}
 
 	// 删除：DELETE /api/cloud/tasks/{id} → 行消失。
-	req2, err := page.ExpectRequest("**/api/cloud/tasks/*", func() error {
-		return page.Locator("#transfer-body .cloud-remove-btn").First().Click()
-	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(8000)})
+	req2, err := page.ExpectRequest("**/api/cloud/tasks/*", clickRemove, playwright.PageExpectRequestOptions{Timeout: playwright.Float(10000)})
 	if err != nil {
 		t.Fatalf("未观察到 DELETE /api/cloud/tasks/{id}（删除未接线？）: %v", err)
 	}

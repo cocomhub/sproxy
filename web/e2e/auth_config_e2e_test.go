@@ -278,10 +278,21 @@ func TestVolumes_SingleVolumeSelect(t *testing.T) {
 	page, stop := pageFixture(t)
 	defer stop()
 
-	page.Goto(baseURL + "/ui/")
-	// 等 initUploadVolumeSelect 的 GET /api/volumes 完成（默认卷 default 被填充）。
-	if err := waitLoc(page, "#upload-volume option[value='default']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
-		t.Fatalf("默认卷 option 未填充: %v", err)
+	// 统一到红线 1（R2）：导航期捕获 initUploadVolumeSelect 触发的 GET /api/volumes，
+	// 断言状态码后再断言 option 渲染（数据来自 API 而非静态 DOM）。
+	volResp, err := page.ExpectResponse("**/api/volumes", func() error {
+		_, gerr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)})
+		return gerr
+	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(10000)})
+	if err != nil {
+		t.Fatalf("未观察到导航触发的 GET /api/volumes: %v", err)
+	}
+	if got := volResp.Status(); got != http.StatusOK {
+		t.Fatalf("GET /api/volumes status = %d, want 200", got)
+	}
+	// 默认卷 default 被填充。
+	if werr := waitLoc(page, "#upload-volume option[value='default']", playwright.WaitForSelectorStateAttached, 8000); werr != nil {
+		t.Fatalf("默认卷 option 未填充: %v", werr)
 	}
 
 	raw, err := page.Evaluate(`Array.from(document.querySelectorAll('#upload-volume option')).map(o => o.value)`)

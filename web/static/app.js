@@ -519,6 +519,9 @@ async function batchDelete() {
     const data = await sc.files.batchDelete(files);
     const s = appRender.batchOpSummary((data && data.results) || [], '删除');
     showToast(s.message, s.ok ? 'success' : 'error');
+    // 与 batchRename 对称：先复位选择态（否则删空后 refreshList 走空列表提前返回，
+    // 工具栏仍显示「已选 N 个文件」），再刷新列表。
+    clearSelection();
     refreshList();
   } catch (e) { showToast('批量删除失败: ' + e.message, 'error'); }
 }

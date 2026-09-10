@@ -3,14 +3,10 @@
 
 package e2e
 
-// helpers_e2e_test.go 提供 PR-F2 交互式 Web UI E2E 的共用基建。随各任务按需增补
-// （避免引入尚未被引用的 helper 触发 lint `unused`）：
-//
-//   - testServerCfg：可配置的测试实例启动器（ForceTOTP / CloudDownloadAllowPrivate /
-//     自定义 Volumes 等开关），testServer 为它的薄委托，保证既有用例零回归。
-//   - waitLoc：以 Locator.WaitFor 替代已废弃的 Page.WaitForSelector（lint SA1019）。
-//   - waitTextGone / waitTextVisible：轮询容器文本直到目标词消失/出现——断言「变化后的
-//     DOM」而非「元素存在」。
+// helpers_e2e_test.go 收录 PR-F2 交互式 Web UI E2E 的全部共享 helper（服务启动、
+// 定位/文本等待、dialog 处理、请求体解析、本地文件源、审计 seed、TOTP 算码、签名请求
+// 记录等）——各 helper 的职责与用法见其函数注释。helper 随使用它的任务增量引入（避免
+// 尚未被引用的包级函数触发 lint `unused`）。
 //
 // 无凭据前提与既有 testServer 完全一致（CredentialTTL=-1 → ring 空 +
 // AllowInsecureLoopback=true → loopback 兜底放行），保证既有用例语义不变。
