@@ -18,6 +18,7 @@ package e2e
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -34,6 +35,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/otp"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/mxschmitt/playwright-go"
 )
@@ -160,6 +162,69 @@ func requestJSON(t *testing.T, req playwright.Request, v any) {
 	if err := json.Unmarshal(b, v); err != nil {
 		t.Fatalf("解析请求体 JSON: %v (body=%q)", err, string(b))
 	}
+}
+
+// signedRequestRecorder 记录页面发出的带 SproxySig v=2 签名头的外发请求。
+//
+// 判据用「任一带签名外发请求」而非固定 GET /api/files：一旦凭据生效，前端
+// effectiveMode() 可能切到隧道模式（POST /tunnel，内层请求被加密不可见），此时签名头
+// 挂在外层 /tunnel 上；无凭据/服务端关闭隧道时则是直连 GET /api/files。两者都是
+// 「凭据已参与请求签名」的等价证据。
+type signedRequestRecorder struct {
+	mu   sync.Mutex
+	urls []string
+}
+
+// recordSignedRequests 在 page 上安装常驻请求监听，返回记录器（须在触发动作前安装）。
+func recordSignedRequests(page playwright.Page) *signedRequestRecorder {
+	r := &signedRequestRecorder{}
+	page.OnRequest(func(req playwright.Request) {
+		if strings.HasPrefix(req.Headers()["authorization"], "SproxySig v=2 ") {
+			r.mu.Lock()
+			r.urls = append(r.urls, req.Method()+" "+req.URL())
+			r.mu.Unlock()
+		}
+	})
+	return r
+}
+
+// count 返回当前已记录的签名请求数。
+func (r *signedRequestRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.urls)
+}
+
+// waitIncrease 轮询直到签名请求数超过 baseline（≤timeout），返回最新一条描述；
+// 超时返回空串。
+func (r *signedRequestRecorder) waitIncrease(baseline int, timeoutMs float64) string {
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		if len(r.urls) > baseline {
+			last := r.urls[len(r.urls)-1]
+			r.mu.Unlock()
+			return last
+		}
+		r.mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+	}
+	return ""
+}
+
+// totpCodeFromBase32 用 Go 侧 pkg/otp 对注册返回的 base32_secret（无 padding）算当前码。
+// 服务端固定 30s 窗口：算码后须在同一进程内立即用于登录（避免跨 30s 边界过期）。
+func totpCodeFromBase32(t *testing.T, secret string) string {
+	t.Helper()
+	raw, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
+	if err != nil {
+		t.Fatalf("base32 解码 %q: %v", secret, err)
+	}
+	code, err := otp.NewTOTP(raw).Code(time.Now())
+	if err != nil {
+		t.Fatalf("TOTP 算码: %v", err)
+	}
+	return code
 }
 
 // startFileSource 启动一个 127.0.0.1 的 httptest 文件源，返回可见 URL 与 cleanup。
