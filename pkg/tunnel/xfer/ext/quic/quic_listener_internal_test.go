@@ -96,6 +96,8 @@ func TestQuicListenerClose(t *testing.T) {
 
 func TestQuicListenerAcceptSuccess(t *testing.T) {
 	ms := &mockStream{}
+	// Accept 会读取并校验 Dial 侧发送的流宣告帧（零长度帧），先放入读缓冲。
+	writeFrame(&ms.readBuf, nil)
 	mconn := &stubConnection{stream: ms}
 	mln := &mockQUICListener{
 		addr:       &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9001},

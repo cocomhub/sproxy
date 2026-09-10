@@ -76,6 +76,9 @@ func quicNetSupported(t *testing.T) {
 func newQUICConnPair(t *testing.T) (client, server xfer.Conn, listener xfer.Listener, cleanup func()) {
 	t.Helper()
 	quicNetSupported(t)
+	// 注入可互相校验的证书 env，使 Dial 能真实完成 TLS 校验握手。
+	// 调用方均为非并行测试，t.Setenv 合法。
+	setupQUICTLS(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

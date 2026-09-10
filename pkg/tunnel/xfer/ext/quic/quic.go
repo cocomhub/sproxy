@@ -26,6 +26,7 @@
 package quic
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -35,6 +36,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -49,6 +51,26 @@ import (
 
 // alpnSproxyQuic 是 QUIC 的 ALPN 协议标识符。
 const alpnSproxyQuic = "sproxy-quic"
+
+// QUIC 接收窗口。Send 为阻塞写：窗口过小（quic-go 默认单流 512 KiB、
+// 连接级 768 KiB）时，单条大消息会在接收端尚未读取时长时间阻塞。
+// 提高到下列值以匹配隧道单条消息（mux 帧）的常见体量。
+const (
+	// streamReceiveWindow 是单流接收窗口。
+	streamReceiveWindow = 4 << 20
+	// connReceiveWindow 是连接级接收窗口，不小于单流窗口，
+	// 否则单流会被连接级窗口提前限流。
+	connReceiveWindow = 8 << 20
+)
+
+// announceFrame 是 Dial 打开 stream 后立即发送的流宣告帧（4B 大端零长度）。
+//
+// QUIC 只在对端发送数据后才向本端宣告 stream —— quic-go 的 OpenStreamSync
+// 不产生任何线上信令，对端 AcceptStream 会一直阻塞。若服务端在 Accept 内同步
+// 等待 stream，就会与"对端先等待 Accept 返回、再发送业务数据"这一正常用法死锁。
+// 故 Dial 建流后立即发送一个零长度宣告帧，服务端 Accept 读到并校验后即返回，
+// 业务消息流不受影响。
+var announceFrame = []byte{0, 0, 0, 0}
 
 func init() {
 	xfer.Register(&xfer.Transport{
@@ -73,6 +95,9 @@ type streamInterface interface {
 }
 
 func (c *quicConn) Send(ctx context.Context, msg []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -89,6 +114,9 @@ func (c *quicConn) Send(ctx context.Context, msg []byte) error {
 }
 
 func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if c.closed {
 		return nil, xfer.ErrConnClosed
 	}
@@ -185,6 +213,10 @@ func (l *QuicListener) Accept(ctx context.Context) (xfer.Conn, error) {
 			ch <- result{nil, err}
 			return
 		}
+		if err := discardAnnounce(stream); err != nil {
+			ch <- result{nil, err}
+			return
+		}
 		ch <- result{&quicConn{stream: stream}, nil}
 	}()
 	select {
@@ -195,6 +227,18 @@ func (l *QuicListener) Accept(ctx context.Context) (xfer.Conn, error) {
 	case <-l.closeCh:
 		return nil, xfer.ErrConnClosed
 	}
+}
+
+// discardAnnounce 读取并校验 Dial 侧发送的流宣告帧（见 announceFrame）。
+func discardAnnounce(stream streamInterface) error {
+	buf := make([]byte, len(announceFrame))
+	if _, err := io.ReadFull(stream, buf); err != nil {
+		return fmt.Errorf("quic announce: %w", err)
+	}
+	if !bytes.Equal(buf, announceFrame) {
+		return fmt.Errorf("quic announce: 非法的宣告帧 %x", buf)
+	}
+	return nil
 }
 
 func (l *QuicListener) Close() error {
@@ -239,8 +283,10 @@ func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
 		return nil, err
 	}
 	qconn, err := quic.DialAddr(ctx, addr, tlsConf, &quic.Config{
-		HandshakeIdleTimeout: 30 * time.Second,
-		MaxIdleTimeout:       60 * time.Second,
+		HandshakeIdleTimeout:           30 * time.Second,
+		MaxIdleTimeout:                 60 * time.Second,
+		InitialStreamReceiveWindow:     streamReceiveWindow,
+		InitialConnectionReceiveWindow: connReceiveWindow,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("quic dial: %w", err)
@@ -250,13 +296,26 @@ func Dial(ctx context.Context, addr string) (xfer.Conn, error) {
 		_ = qconn.CloseWithError(0, "stream failed")
 		return nil, fmt.Errorf("quic open stream: %w", err)
 	}
+	// 立即宣告 stream（见 announceFrame），否则服务端 Accept 会阻塞到首次业务发送。
+	if _, err := stream.Write(announceFrame); err != nil {
+		_ = qconn.CloseWithError(0, "announce failed")
+		return nil, fmt.Errorf("quic announce: %w", err)
+	}
 	return &quicConn{stream: stream}, nil
 }
 
 // Listen 在 addr 启用 QUIC 监听器。
 // addr 格式：host:port（如 "127.0.0.1:9000"）。
+//
+// 监听证书按环境变量选择：
+//   - 同时设置 SPROXY_QUIC_CERT_FILE 与 SPROXY_QUIC_KEY_FILE → 用 tls.LoadX509KeyPair 加载；
+//   - 两者都未设置 → 回落开发用临时自签证书（selfSignedCert）；
+//   - 只设置其一 → 返回错误（fail-closed，不静默回落）。
+//
+// 生产环境应显式配置证书，并通过 Dial 侧同源的 SPROXY_QUIC_CA_CERT
+// （或系统 CA 池）完成真实校验。
 func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
-	cert, err := selfSignedCert()
+	cert, err := listenCert()
 	if err != nil {
 		return nil, fmt.Errorf("quic cert: %w", err)
 	}
@@ -265,9 +324,11 @@ func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
 		NextProtos:   []string{alpnSproxyQuic},
 	}
 	ln, err := quic.ListenAddr(addr, tlsConf, &quic.Config{
-		HandshakeIdleTimeout: 30 * time.Second,
-		MaxIdleTimeout:       60 * time.Second,
-		MaxIncomingStreams:   1000,
+		HandshakeIdleTimeout:           30 * time.Second,
+		MaxIdleTimeout:                 60 * time.Second,
+		MaxIncomingStreams:             1000,
+		InitialStreamReceiveWindow:     streamReceiveWindow,
+		InitialConnectionReceiveWindow: connReceiveWindow,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("quic listen: %w", err)
@@ -275,6 +336,28 @@ func Listen(ctx context.Context, addr string) (xfer.Listener, error) {
 	return &QuicListener{ln: &quicListenerAdapter{ln: ln}, closeCh: make(chan struct{})}, nil
 }
 
+// listenCert 按 SPROXY_QUIC_CERT_FILE / SPROXY_QUIC_KEY_FILE 选择监听证书。
+// 两者都未设置时回落开发用临时自签证书；只设置其一时返回错误（fail-closed）。
+func listenCert() (tls.Certificate, error) {
+	certFile := os.Getenv("SPROXY_QUIC_CERT_FILE")
+	keyFile := os.Getenv("SPROXY_QUIC_KEY_FILE")
+	switch {
+	case certFile == "" && keyFile == "":
+		return selfSignedCert()
+	case certFile == "" || keyFile == "":
+		return tls.Certificate{}, errors.New("SPROXY_QUIC_CERT_FILE 与 SPROXY_QUIC_KEY_FILE 必须同时设置")
+	default:
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return tls.Certificate{}, fmt.Errorf("加载证书/私钥失败: %w", err)
+		}
+		return cert, nil
+	}
+}
+
+// selfSignedCert 生成开发用临时自签证书。
+// 证书带 localhost / 127.0.0.1 / ::1 SAN，并具备 CA 属性（IsCA + KeyUsageCertSign），
+// 以便在被显式 pin 为信任根时同样能通过校验。
 func selfSignedCert() (tls.Certificate, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -286,8 +369,11 @@ func selfSignedCert() (tls.Certificate, error) {
 		Subject:               pkix.Name{Organization: []string{alpnSproxyQuic}},
 		NotBefore:             now,
 		NotAfter:              now.Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
+		IsCA:                  true,
 		BasicConstraintsValid: true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
