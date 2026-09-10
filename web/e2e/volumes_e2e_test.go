@@ -391,3 +391,113 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 		t.Logf("upload response=%d（无凭据 401 边界）：请求体已证前端把所选卷注入上传；真实落卷路径由 T7 手动 chrome 实测覆盖", upResp.Status())
 	}
 }
+
+// TestVolumes_SingleVolumeDefaultBadgeAndPanel 单卷缺省（未配 volumes → 服务端合成 default 卷）
+// 下，文件行卷 badge 与「卷」监控面板同样显示 default，与多卷形态一致。
+//
+// 产品 UI 决策（2026-09）：单卷也显示 default。此前 SDD 列为待决策项——服务端本就合成
+// default 卷并回填 volume/列出 /api/volumes，前端渲染无条件分支，故决策为「保持显示」；
+// 本用例把该决策锁进回归（防未来把单卷 badge/面板当噪音隐藏）。
+//
+// 接线点（同 TestVolumes_Badge/Panel 的真交互断言）：
+//   - 捕获导航触发的 GET /api/files → 断言单卷条目带 volume="default"（badge 数据源非写死）；
+//   - 断言行级 .vol-badge 文本 = default；
+//   - 点击 #volumes-tab 捕获 GET /api/volumes → 响应恰 1 卷 default，面板文本含 default。
+func TestVolumes_SingleVolumeDefaultBadgeAndPanel(t *testing.T) {
+	baseURL, _, cleanup := testServer(t)
+	defer cleanup()
+
+	// 走真实上传写路径（multipart volume=default），使文件确实落在 default 卷 user 桶。
+	content := []byte("single volume default badge payload")
+	if status, body := seedUploadToVolume(t, baseURL, "default", "solo.txt", content); status != http.StatusOK {
+		t.Fatalf("seed upload to default status=%d body=%s", status, body)
+	}
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	// 接线①：导航 → GET /api/files（列表数据源）。断言条目带 volume="default"。
+	resp, err := page.ExpectResponse("**/api/files?*", func() error {
+		_, gerr := page.Goto(baseURL+"/ui/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)})
+		return gerr
+	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(10000)})
+	if err != nil {
+		t.Fatalf("未观察到导航触发的 GET /api/files: %v", err)
+	}
+	var listPayload struct {
+		Files []struct {
+			Name   string `json:"name"`
+			Volume string `json:"volume"`
+		} `json:"files"`
+	}
+	if jerr := resp.JSON(&listPayload); jerr != nil {
+		b, _ := resp.Body()
+		t.Fatalf("解析 /api/files 响应: %v (status=%d body=%q)", jerr, resp.Status(), string(b))
+	}
+	gotVol := ""
+	for _, f := range listPayload.Files {
+		if f.Name == "solo.txt" {
+			gotVol = f.Volume
+		}
+	}
+	if gotVol != "default" {
+		t.Fatalf("单卷 /api/files solo.txt volume = %q, want \"default\"", gotVol)
+	}
+
+	// 接线①续（渲染断言）：行级 .vol-badge 文本与 API 字段一致（证明 badge 来自 API，非写死）。
+	if werr := waitLoc(page, "#file-table tr", nil, 8000); werr != nil {
+		t.Fatalf("file table not loaded: %v", werr)
+	}
+	if lerr := waitLoc(page, "text=solo.txt", nil, 8000); lerr != nil {
+		t.Fatalf("solo.txt 未出现在文件列表: %v", lerr)
+	}
+	badge := page.Locator("#file-table tr").Filter(playwright.LocatorFilterOptions{HasText: "solo.txt"}).Locator(".vol-badge")
+	if n, berr := badge.Count(); berr != nil || n != 1 {
+		t.Fatalf("单卷行 solo.txt .vol-badge count = %d (err=%v), want 1（单卷 badge 未渲染）", n, berr)
+	}
+	badgeTxt, err := badge.InnerText()
+	if err != nil {
+		t.Fatalf("读取 badge 文本: %v", err)
+	}
+	if strings.TrimSpace(badgeTxt) != "default" {
+		t.Errorf("单卷 badge = %q, want \"default\"", strings.TrimSpace(badgeTxt))
+	}
+
+	// 接线②：打开监控弹窗 → 点击「卷」标签页必须真实发出 GET /api/volumes（面板数据源）。
+	if _, eerr := page.Evaluate("showStats()"); eerr != nil {
+		t.Fatalf("showStats: %v", eerr)
+	}
+	if merr := waitLoc(page, "#stats-modal", playwright.WaitForSelectorStateVisible, 8000); merr != nil {
+		t.Fatalf("stats-modal not visible: %v", merr)
+	}
+	vresp, err := page.ExpectResponse("**/api/volumes", func() error {
+		return page.Locator("#volumes-tab").Click()
+	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(8000)})
+	if err != nil {
+		t.Fatalf("点击 volumes-tab 未触发 GET /api/volumes: %v", err)
+	}
+	var volPayload struct {
+		Volumes []struct {
+			Name string `json:"name"`
+		} `json:"volumes"`
+	}
+	if jerr := vresp.JSON(&volPayload); jerr != nil {
+		t.Fatalf("解析 /api/volumes 响应: %v", jerr)
+	}
+	if len(volPayload.Volumes) != 1 || volPayload.Volumes[0].Name != "default" {
+		t.Fatalf("单卷 /api/volumes = %+v, want 恰 1 卷 default", volPayload.Volumes)
+	}
+
+	// 渲染断言：面板表格渲染出 default 卷名（非空壳）。
+	if werr := waitLoc(page, "#volumes-panel table tbody tr", nil, 8000); werr != nil {
+		panelTxt, _ := page.Locator("#volumes-panel").InnerText()
+		t.Fatalf("单卷卷面板未渲染, panel content: %s", panelTxt)
+	}
+	panelText, err := page.Locator("#volumes-panel").InnerText()
+	if err != nil {
+		t.Fatalf("读取 volumes panel: %v", err)
+	}
+	if !strings.Contains(panelText, "default") {
+		t.Errorf("单卷卷面板缺 \"default\"; panel text:\n%s", panelText)
+	}
+}
