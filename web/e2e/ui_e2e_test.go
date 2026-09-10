@@ -3,17 +3,16 @@
 
 // Package e2e 提供基于 Playwright 的 Web UI 端到端测试。
 // 独立 go.mod 避免污染主仓库依赖。
+//
+// 本文件保留「静态入口存在 / 弹窗开关」类冒烟用例；**真交互断言**（点击 → 网络请求
+// → DOM 副作用）见 files_e2e_test.go / share_version_e2e_test.go /
+// cloud_audit_e2e_test.go / auth_config_e2e_test.go。
 package e2e
 
 import (
-	"io"
-	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/server"
@@ -21,44 +20,16 @@ import (
 )
 
 // testServer 启动 sproxy 测试实例并返回 baseURL 和 cleanup。
-// opts 为可选参数，第一个 bool 表示是否启用版本管理。
+// opts 为可选参数，第一个 bool 表示是否启用版本管理。薄委托 testServerCfg，
+// 签名与语义（含无凭据前提）保持不变，既有调用点零改动。
 func testServer(t *testing.T, opts ...bool) (string, *server.Config, func()) {
 	t.Helper()
-
-	tmpDir := t.TempDir()
-	cfg := server.Default()
-	cfg.StorageRoot = tmpDir
-	cfg.LogLevel = "error"
-	// UI E2E 为无凭据场景（页面不带 SproxySig 凭据）：禁首启 anonymous 生成
-	// （CredentialTTL=-1 → ring 空），并允许 loopback 无认证兜底（httptest 天然
-	// 127.0.0.1）——v2 skey-id 必传下 Web 请求不带凭据即 401，UI E2E 需此兜底。
-	cfg.CredentialTTL = -1
-	cfg.AllowInsecureLoopback = true
-	if len(opts) > 0 && opts[0] {
-		cfg.Versioning.Enabled = true
-		cfg.Versioning.MaxVersions = 10
-	}
-
-	var cfgPtr atomic.Pointer[server.Config]
-	cfgPtr.Store(cfg)
-
-	mux := http.NewServeMux()
-	h := server.RegisterRoutes(t.Context(), server.RegisterRoutesOpts{
-		Mux:     mux,
-		CfgPtr:  &cfgPtr,
-		Version: "e2e-test",
-		BuildAt: "e2e-test",
-		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	return testServerCfg(t, func(cfg *server.Config) {
+		if len(opts) > 0 && opts[0] {
+			cfg.Versioning.Enabled = true
+			cfg.Versioning.MaxVersions = 10
+		}
 	})
-
-	ts := httptest.NewServer(h.Handler())
-	return ts.URL, cfg, func() {
-		ts.Close()
-		h.Close()
-		// 清理云端下载目录，防止 TempDir RemoveAll 失败
-		os.RemoveAll(filepath.Join(tmpDir, ".__cloud__"))
-		os.RemoveAll(filepath.Join(tmpDir, ".__downloads__"))
-	}
 }
 
 // testFile creates a test file in the uploads directory.
@@ -135,8 +106,7 @@ func TestUILoads(t *testing.T) {
 		t.Errorf("title = %q, should contain 'sproxy'", title)
 	}
 
-	_, err = page.WaitForSelector("h1", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
-	if err != nil {
+	if err := waitLoc(page, "h1", nil, 8000); err != nil {
 		t.Fatalf("h1 not found: %v", err)
 	}
 }
@@ -153,8 +123,7 @@ func TestFileList(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	_, err := page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
-	if err != nil {
+	if err := waitLoc(page, "#file-table tr", nil, 8000); err != nil {
 		t.Fatalf("file table not loaded: %v", err)
 	}
 
@@ -176,50 +145,8 @@ func TestDirectoryNavigation(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 
-	_, err := page.WaitForSelector("#dir-bar", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
-	if err != nil {
+	if err := waitLoc(page, "#dir-bar", nil, 8000); err != nil {
 		t.Fatalf("dir-bar not found: %v", err)
-	}
-}
-
-// TestAuthFlow 验证 Token 输入和 localStorage 持久化。
-func TestAuthFlow(t *testing.T) {
-	baseURL, _, cleanup := testServer(t)
-	defer cleanup()
-
-	page, stop := pageFixture(t)
-	defer stop()
-
-	page.Goto(baseURL + "/ui/")
-
-	// 等待页面 JS 初始化完成。
-	_, err := page.WaitForSelector("#token", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
-		t.Fatalf("token input not visible: %v", err)
-	}
-
-	// 直接操作 localStorage，验证页面 JS 上下文可读写。
-	if _, err := page.Evaluate(`localStorage.setItem('sproxy_token', 'test-token-123')`); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := page.Evaluate(`localStorage.getItem('sproxy_token')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var val string
-	switch v := raw.(type) {
-	case string:
-		val = v
-	case nil:
-		t.Fatal("localStorage.getItem returned nil, JS context may not have localStorage access")
-	default:
-		t.Fatalf("unexpected type %T: %v", raw, raw)
-	}
-	if val != "test-token-123" {
-		t.Errorf("stored token = %q, want test-token-123", val)
 	}
 }
 
@@ -251,7 +178,9 @@ func TestDownloadLink(t *testing.T) {
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
-	page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
+	if err := waitLoc(page, "#file-table tr", nil, 8000); err != nil {
+		t.Fatalf("file table not loaded: %v", err)
+	}
 
 	links := page.Locator(".file-download-btn")
 	if cnt, _ := links.Count(); cnt == 0 {
@@ -341,11 +270,7 @@ func TestCloudDownloadModalOpens(t *testing.T) {
 	}
 
 	// 等待传输页可见
-	_, err := page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#transfer-page", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("transfer-page not visible: %v", err)
 	}
 
@@ -371,10 +296,7 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 	if err := page.Locator("#main-tab-transfer").Click(); err != nil {
 		t.Fatalf("click main-tab-transfer: %v", err)
 	}
-	page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
+	waitLoc(page, "#transfer-page", playwright.WaitForSelectorStateVisible, 8000)
 
 	// 关闭传输页（切回文件主 tab）
 	if err := page.Locator("#main-tab-files").Click(); err != nil {
@@ -382,73 +304,16 @@ func TestCloudDownloadModalCloses(t *testing.T) {
 	}
 
 	// 验证传输页隐藏
-	_, err := page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateHidden,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#transfer-page", playwright.WaitForSelectorStateHidden, 8000); err != nil {
 		t.Fatalf("transfer-page should be hidden: %v", err)
 	}
 
 	// 重新进入再切离（验证幂等性）
 	page.Locator("#main-tab-transfer").Click()
-	page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
+	waitLoc(page, "#transfer-page", playwright.WaitForSelectorStateVisible, 8000)
 	page.Locator("#main-tab-files").Click()
-	_, err = page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateHidden,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#transfer-page", playwright.WaitForSelectorStateHidden, 8000); err != nil {
 		t.Fatalf("transfer-page should be hidden after second close: %v", err)
-	}
-}
-
-// TestCloudDownloadCreateTask 验证创建云端下载任务（输入 URL 点击仅提交）。
-func TestCloudDownloadCreateTask(t *testing.T) {
-	baseURL, _, cleanup := testServer(t)
-	defer cleanup()
-
-	page, stop := pageFixture(t)
-	defer stop()
-
-	page.Goto(baseURL + "/ui/")
-
-	// 点击云按钮进入传输页（URL 行静态存在于 #transfer-page 内）
-	if err := page.Locator("#cloud-btn").Click(); err != nil {
-		t.Fatalf("click cloud-btn: %v", err)
-	}
-	_, err := page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
-		t.Fatalf("transfer-page not visible: %v", err)
-	}
-
-	// 输入 URL
-	if err := page.Locator("#cloud-url").Fill("https://example.com/test.zip"); err != nil {
-		t.Fatalf("fill cloud-url: %v", err)
-	}
-
-	// 点击仅提交按钮
-	if err := page.Locator("#cloud-submit-btn").Click(); err != nil {
-		t.Fatalf("click submit btn: %v", err)
-	}
-
-	// 等待传输列表渲染（URL 不可达，但至少验证没有 crash）
-	_, err = page.WaitForSelector("#transfer-body", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(10000),
-	})
-	if err != nil {
-		t.Fatalf("transfer-body not visible: %v", err)
-	}
-	// 云任务频道已激活（提交后在云任务频道视图）
-	if cnt, _ := page.Locator("#transfer-channel-cloud_tasks.active").Count(); cnt == 0 {
-		t.Error("cloud_tasks channel not active after submit")
 	}
 }
 
@@ -473,19 +338,12 @@ func TestCloudDownloadTaskList(t *testing.T) {
 	}
 
 	// 等待传输列表渲染
-	_, err := page.WaitForSelector("#transfer-body", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#transfer-body", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("transfer-body not visible: %v", err)
 	}
 
 	// 验证任务列表区可用（任务列表/空态由统一渲染管输出）
-	_, err = page.WaitForSelector("#transfer-channel-cloud_tasks.active", playwright.PageWaitForSelectorOptions{
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#transfer-channel-cloud_tasks.active", nil, 8000); err != nil {
 		t.Fatalf("cloud_tasks channel not active: %v", err)
 	}
 }
@@ -504,11 +362,7 @@ func TestCloudDownloadURLInput(t *testing.T) {
 	if err := page.Locator("#cloud-btn").Click(); err != nil {
 		t.Fatalf("click cloud-btn: %v", err)
 	}
-	_, err := page.WaitForSelector("#transfer-page", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#transfer-page", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("transfer-page not visible: %v", err)
 	}
 
@@ -522,29 +376,8 @@ func TestCloudDownloadURLInput(t *testing.T) {
 	}
 }
 
-// TestShareButton 验证文件行有分享按钮。
-func TestShareButton(t *testing.T) {
-	baseURL, cfg, cleanup := testServer(t)
-	defer cleanup()
-
-	testFile(t, userRoot(cfg), "share-test.txt", "shareable content")
-
-	page, stop := pageFixture(t)
-	defer stop()
-
-	page.Goto(baseURL + "/ui/")
-	page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
-
-	if cnt, _ := page.Locator(".file-actions .btn-share").Count(); cnt == 0 {
-		// 退而求其次：通过 JS 验证 shareFile 函数存在
-		exists, err := page.Evaluate("typeof window.shareFile === 'function'")
-		if err != nil || exists != true {
-			t.Fatal("shareFile function not found")
-		}
-	}
-}
-
-// TestShareAPI 验证分享 API 可调用。
+// TestShareAPI 验证分享 API 可调用（直 fetch；协议层验证，UI 接线由
+// TestShare_CreateAndPublicAccess 覆盖）。
 func TestShareAPI(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t)
 	defer cleanup()
@@ -605,11 +438,7 @@ func TestVersioningModalOpenClose(t *testing.T) {
 	if _, err := page.Evaluate("showVersioning()"); err != nil {
 		t.Fatalf("showVersioning: %v", err)
 	}
-	_, err := page.WaitForSelector("#version-modal", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#version-modal", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("version-modal not visible: %v", err)
 	}
 
@@ -624,79 +453,8 @@ func TestVersioningModalOpenClose(t *testing.T) {
 	if _, err := page.Evaluate("hideVersioning()"); err != nil {
 		t.Fatalf("hideVersioning: %v", err)
 	}
-	_, err = page.WaitForSelector("#version-modal", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateHidden,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#version-modal", playwright.WaitForSelectorStateHidden, 8000); err != nil {
 		t.Fatalf("version-modal should be hidden: %v", err)
-	}
-}
-
-// TestVersioningLoadVersions 验证加载版本历史。
-func TestVersioningLoadVersions(t *testing.T) {
-	baseURL, cfg, cleanup := testServer(t, true)
-	defer cleanup()
-
-	testFile(t, userRoot(cfg), "versioned.txt", "v1 content")
-
-	page, stop := pageFixture(t)
-	defer stop()
-
-	page.Goto(baseURL + "/ui/")
-
-	page.Evaluate("showVersioning()")
-	page.WaitForSelector("#version-modal", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-
-	// 输入文件名并加载版本
-	if err := page.Locator("#version-filename").Fill("versioned.txt"); err != nil {
-		t.Fatalf("fill version-filename: %v", err)
-	}
-	if err := page.Locator("#version-load-btn").Click(); err != nil {
-		t.Fatalf("click version-load-btn: %v", err)
-	}
-
-	// 新文件没有版本历史，应显示 empty-msg
-	_, err := page.WaitForSelector("#version-body .empty-msg", playwright.PageWaitForSelectorOptions{
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
-		t.Error("expected empty-msg in version body for new file (no version history)")
-	}
-}
-
-// TestVersioningDisabledMessage 验证版本管理未启用时显示友好提示。
-func TestVersioningDisabledMessage(t *testing.T) {
-	baseURL, _, cleanup := testServer(t, false)
-	defer cleanup()
-
-	page, stop := pageFixture(t)
-	defer stop()
-
-	page.Goto(baseURL + "/ui/")
-
-	page.Evaluate("showVersioning()")
-	page.WaitForSelector("#version-modal", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-
-	if err := page.Locator("#version-filename").Fill("any.txt"); err != nil {
-		t.Fatalf("fill version-filename: %v", err)
-	}
-	if err := page.Locator("#version-load-btn").Click(); err != nil {
-		t.Fatalf("click version-load-btn: %v", err)
-	}
-
-	// 应显示 empty-msg（版本管理未启用提示）
-	_, err := page.WaitForSelector("#version-body .empty-msg", playwright.PageWaitForSelectorOptions{
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
-		t.Error("expected empty-msg in version body when versioning disabled")
 	}
 }
 
@@ -711,7 +469,9 @@ func TestDirArchiveButton(t *testing.T) {
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
-	page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
+	if err := waitLoc(page, "#file-table tr", nil, 8000); err != nil {
+		t.Fatalf("file table not loaded: %v", err)
+	}
 
 	if cnt, _ := page.Locator(".dir-archive-btn").Count(); cnt == 0 {
 		// 退而求其次：通过 JS 验证 downloadDirArchive 函数存在
@@ -722,7 +482,8 @@ func TestDirArchiveButton(t *testing.T) {
 	}
 }
 
-// TestSearchFunction 验证搜索功能可用。
+// TestSearchFunction 验证搜索功能可用（存在性冒烟；URL 参数与结果隔离由
+// TestFiles_Search 覆盖）。
 func TestSearchFunction(t *testing.T) {
 	baseURL, cfg, cleanup := testServer(t)
 	defer cleanup()
@@ -733,7 +494,9 @@ func TestSearchFunction(t *testing.T) {
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
-	page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)})
+	if err := waitLoc(page, "#file-table tr", nil, 8000); err != nil {
+		t.Fatalf("file table not loaded: %v", err)
+	}
 
 	// 输入搜索关键词
 	if err := page.Locator("#search-input").Fill("search"); err != nil {
@@ -746,10 +509,7 @@ func TestSearchFunction(t *testing.T) {
 	}
 
 	// 等待搜索结果中的 search-me.txt 出现
-	_, err := page.WaitForSelector("text=search-me.txt", playwright.PageWaitForSelectorOptions{
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "text=search-me.txt", nil, 8000); err != nil {
 		t.Error("expected search-me.txt in search results")
 	}
 
@@ -771,11 +531,7 @@ func TestStorageConfigInStats(t *testing.T) {
 
 	// 打开监控弹窗
 	page.Evaluate("showStats()")
-	_, err := page.WaitForSelector("#stats-modal", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#stats-modal", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("stats-modal not visible: %v", err)
 	}
 
@@ -785,11 +541,7 @@ func TestStorageConfigInStats(t *testing.T) {
 	}
 
 	// 等待配置面板加载完成（含异步渲染的配置内容）
-	_, err = page.WaitForSelector("#cfg-max-storage", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#cfg-max-storage", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		// 获取面板内容帮助调试
 		content, _ := page.Locator("#config-panel").InnerText()
 		t.Fatalf("cfg-max-storage not visible in config panel, panel content: %s", content)
@@ -804,6 +556,7 @@ func TestStorageConfigInStats(t *testing.T) {
 }
 
 // TestStorageConfigAPI 验证存储配置 API 可调用（通过新的 PUT /api/config 端点）。
+// 直 fetch；UI 接线（点击 → PUT body → 重拉）由 TestConfig_UpdateMaxStorage 覆盖。
 func TestStorageConfigAPI(t *testing.T) {
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
@@ -845,11 +598,7 @@ func TestHubTab(t *testing.T) {
 
 	// 打开监控弹窗
 	page.Evaluate("showStats()")
-	_, err := page.WaitForSelector("#stats-modal", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	})
-	if err != nil {
+	if err := waitLoc(page, "#stats-modal", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("stats-modal not visible: %v", err)
 	}
 

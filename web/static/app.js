@@ -513,9 +513,16 @@ async function batchDelete() {
   if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
   if (!confirm('确定要删除选中的 ' + files.length + ' 个文件吗？')) return;
   try {
+    // 服务端 /api/batch/delete 回包为 {results:[{filename,success,message}]}（无顶层
+    // success）——成败与文案统一由 appRender.batchOpSummary 归一；逐条处理下部分成功
+    // 也会落盘，故无论成败都 refreshList()。
     const data = await sc.files.batchDelete(files);
-    if (data.success) { showToast(data.message || '删除完成', 'success'); refreshList(); }
-    else { showToast(data.message || '批量删除失败', 'error'); }
+    const s = appRender.batchOpSummary((data && data.results) || [], '删除');
+    showToast(s.message, s.ok ? 'success' : 'error');
+    // 与 batchRename 对称：先复位选择态（否则删空后 refreshList 走空列表提前返回，
+    // 工具栏仍显示「已选 N 个文件」），再刷新列表。
+    clearSelection();
+    refreshList();
   } catch (e) { showToast('批量删除失败: ' + e.message, 'error'); }
 }
 
@@ -532,9 +539,13 @@ async function batchRename() {
   }
   if (operations.length === 0) { showToast('没有需要重命名的文件', 'info'); return; }
   try {
+    // prompt 取消/跳过的项不进 operations，故以服务端 results 为准（逐条 {success,message}）；
+    // 部分成功也会落盘，因此无论成败都清选择 + refreshList()。
     const data = await sc.files.batchRename(operations);
-    if (data.success) { showToast(data.message || '重命名完成', 'success'); clearSelection(); refreshList(); }
-    else { showToast(data.message || '批量重命名失败', 'error'); }
+    const s = appRender.batchOpSummary((data && data.results) || [], '重命名');
+    showToast(s.message, s.ok ? 'success' : 'error');
+    clearSelection();
+    refreshList();
   } catch (e) { showToast('批量重命名失败: ' + e.message, 'error'); }
 }
 

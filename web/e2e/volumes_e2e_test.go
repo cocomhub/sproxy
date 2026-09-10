@@ -30,11 +30,8 @@ package e2e
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"log/slog"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -115,41 +112,7 @@ func volFile(t *testing.T, roots map[string]string, vol, rel, content string) {
 // Usage 精确等于 len(content)（与浏览器前端同一条服务端写路径）。返回 HTTP 状态与响应体。
 func seedUploadToVolume(t *testing.T, baseURL, vol, filename string, content []byte) (int, string) {
 	t.Helper()
-
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	if err := mw.WriteField("volume", vol); err != nil {
-		t.Fatalf("write volume field: %v", err)
-	}
-	fw, err := mw.CreateFormFile("file", filename)
-	if err != nil {
-		t.Fatalf("create form file: %v", err)
-	}
-	if _, werr := fw.Write(content); werr != nil {
-		t.Fatalf("write file body: %v", werr)
-	}
-	if cerr := mw.Close(); cerr != nil {
-		t.Fatalf("close multipart: %v", cerr)
-	}
-
-	sum := sha256.Sum256(content)
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/upload", &buf)
-	if err != nil {
-		t.Fatalf("build upload request: %v", err)
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("X-File-Checksum", hex.EncodeToString(sum[:]))
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("seed upload request: %v", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read upload response: %v", err)
-	}
-	return resp.StatusCode, string(body)
+	return seedUploadMultipart(t, baseURL, vol, filename, content)
 }
 
 // waitResponse 轮询 Request.Response()（请求发出后响应异步到达）。5s 内未收到返回 nil。
@@ -216,11 +179,11 @@ func TestVolumes_Badge(t *testing.T) {
 	}
 
 	// 接线②（渲染断言，badge 只读）：聚合列表两文件都渲染，且各自行 .vol-badge 文本与 API 一致。
-	if _, err := page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)}); err != nil {
+	if err := waitLoc(page, "#file-table tr", nil, 8000); err != nil {
 		t.Fatalf("file table not loaded: %v", err)
 	}
 	for _, name := range []string{"a.txt", "b.txt"} {
-		if _, err := page.WaitForSelector("text="+name, playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)}); err != nil {
+		if err := waitLoc(page, "text="+name, nil, 8000); err != nil {
 			t.Fatalf("expected %s in aggregated file list: %v", name, err)
 		}
 	}
@@ -264,10 +227,7 @@ func TestVolumes_Panel(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 	// 等 initUploadVolumeSelect 的 GET /api/volumes 完成（下拉被填充），避免与点击捕获混淆。
-	if _, err := page.WaitForSelector("#upload-volume option[value='main']", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateAttached,
-		Timeout: playwright.Float(8000),
-	}); err != nil {
+	if err := waitLoc(page, "#upload-volume option[value='main']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
 		t.Fatalf("upload volume select not populated: %v", err)
 	}
 
@@ -275,10 +235,7 @@ func TestVolumes_Panel(t *testing.T) {
 	if _, err := page.Evaluate("showStats()"); err != nil {
 		t.Fatalf("showStats: %v", err)
 	}
-	if _, err := page.WaitForSelector("#stats-modal", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	}); err != nil {
+	if err := waitLoc(page, "#stats-modal", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("stats-modal not visible: %v", err)
 	}
 
@@ -310,7 +267,7 @@ func TestVolumes_Panel(t *testing.T) {
 	}
 
 	// 渲染断言：面板表格渲染出 main/disk2 卷名与真实用量（2048 B → "2.0 KB"）。
-	if _, werr := page.WaitForSelector("#volumes-panel table tbody tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)}); werr != nil {
+	if werr := waitLoc(page, "#volumes-panel table tbody tr", nil, 8000); werr != nil {
 		content, _ := page.Locator("#volumes-panel").InnerText()
 		t.Fatalf("volumes table not rendered, panel content: %s", content)
 	}
@@ -345,10 +302,7 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 		t.Fatal("#upload-volume select not found")
 	}
 	// 等待 /api/volumes 异步填充可见卷 option（main 先到即可判定 populate 完成）。
-	if _, err := page.WaitForSelector("#upload-volume option[value='main']", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateAttached,
-		Timeout: playwright.Float(8000),
-	}); err != nil {
+	if err := waitLoc(page, "#upload-volume option[value='main']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
 		vals, _ := page.Evaluate(`Array.from(document.querySelectorAll('#upload-volume option')).map(o => o.value)`)
 		t.Fatalf("visible volume option not populated, current options=%v: %v", vals, err)
 	}
