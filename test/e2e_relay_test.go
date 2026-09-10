@@ -1,6 +1,8 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build e2e
+
 // Package test 提供端到端测试：构建真实二进制并启动。
 // 本文件验证 mesh 中继的三端闭环：hub(sproxy) + leaf(sclient relay start) +
 // caller(原始 CONNECT / mesh connect CLI)。

@@ -1,6 +1,8 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build e2e
+
 // Package sproxy_test — 阶段 5 工作项 1 PR-5：xfer tcp+tls 真实二进制 e2e。
 // 与 cmd/sproxy 集成测试（同进程 RegisterRoutes + startXferListener）互补：
 // 本文件构建真实 sproxy 二进制并以子进程启动，验证 xfer_tls 全链路

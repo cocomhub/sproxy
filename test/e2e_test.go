@@ -1,6 +1,8 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build e2e
+
 // Package sproxy_test provides end-to-end smoke tests for the sproxy server.
 // Tests build and start a real sproxy binary, then exercise its HTTP API.
 package sproxy_test
