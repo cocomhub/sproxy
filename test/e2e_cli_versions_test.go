@@ -9,9 +9,7 @@
 package sproxy_test
 
 import (
-	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,7 +23,7 @@ import (
 const versioningConfig = "versioning:\n  enabled: true\n  max_versions: 5\n"
 
 // versionListResp 是 `meta version list --json` / GET /api/versions 的响应容器。
-// VersionID/Size 必须用 int64（服务端版本 ID 为 UnixNano*1000+rand，float64 会丢精度）。
+// VersionID/Size 必须用 int64（服务端版本 ID 为毫秒时间戳×1000+随机后缀，float64 会丢精度）。
 type versionListResp struct {
 	Filename string               `json:"filename"`
 	Versions []client.VersionInfo `json:"versions"`
@@ -63,48 +61,29 @@ func onlyFileNamed(t *testing.T, root, name string) string {
 
 // versionOp 执行一次版本 restore/delete 操作（op ∈ {"restore","delete"}）。
 //
-// 分派策略（**产品缺陷规避，非测试设计**）：
-//   - versionID > 0：走 CLI 契约路径 `sclient meta version <op> <file> <id>`（真子进程）；
-//   - versionID <= 0：服务端 versionID 生成 `UnixNano()*1000+rand` 存在 int64 溢出
-//     （pkg/server/version.go:55-58；UnixNano≈1.79e18，×1000 溢出约 194 倍，当前时段
-//     恒为负），而 client.RestoreVersion/DeleteVersion 有 `versionID <= 0` 守卫
-//     （pkg/client/version.go:42-43,61-62）→ CLI 恒失败 "version_id must be positive"。
-//     此时退回**同一路由的签名 HTTP 调用**，使服务端 restore/delete 语义仍被真实副作用
-//     （磁盘版本文件 / 当前文件内容 / API 列表）断言覆盖，不让整段覆盖随缺陷丢失。
+// 无条件走 CLI 契约路径（真 sclient 子进程）：
+// `sclient meta version <op> <filename> <version_id>`；并断言 CLI 自身的文本输出，
+// 以此**证明该操作确实由 sclient 二进制执行**（HTTP 直调不会产生这些 stdout）。
 //
-// 缺陷修复后 versionID 转正，本 helper 自动改走 CLI 分支（HTTP 兜底分支不再触发）。
+// versionID 由服务端 newVersionID() 生成（毫秒时间戳 ×1000 + 随机后缀 + 进程内单调递增），
+// 恒为正；客户端 RestoreVersion/DeleteVersion 的 `versionID <= 0` 守卫不再被触发。
+// 此处**不做任何按符号分派/HTTP 兜底**——一旦 ID 再次变负，CLI 会立刻失败并使本用例变红，
+// 从而把该回归挡在门禁内，而不是被测试的兜底逻辑掩盖。
 func versionOp(t *testing.T, env *cliEnv, op, filename string, versionID int64) {
 	t.Helper()
 	idStr := strconv.FormatInt(versionID, 10)
-	if versionID > 0 {
-		env.sclient(t, env.TmpDir, "meta", "version", op, filename, idStr)
-		return
-	}
-	t.Logf("version_id=%d <= 0（服务端 int64 溢出缺陷）→ CLI %s 不可用，退回签名 HTTP 同路由调用", versionID, op)
-
-	var method, apiURL string
+	var wantMsg string
 	switch op {
 	case "restore":
-		method = http.MethodPost
-		apiURL = env.BaseURL + "/api/versions/restore?filename=" + url.QueryEscape(filename) + "&version_id=" + idStr
+		wantMsg = "已恢复文件 '" + filename + "' 到版本 " + idStr
 	case "delete":
-		method = http.MethodDelete
-		apiURL = env.BaseURL + "/api/versions?filename=" + url.QueryEscape(filename) + "&version_id=" + idStr
+		wantMsg = "已删除文件 '" + filename + "' 的版本 " + idStr
 	default:
 		t.Fatalf("未知版本操作 %q", op)
 	}
-	req, err := http.NewRequest(method, apiURL, nil)
-	if err != nil {
-		t.Fatalf("构造 %s 请求失败: %v", op, err)
-	}
-	resp, err := authedHTTPClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s 请求失败: %v", op, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("%s 期望 200, got %d: %s", op, resp.StatusCode, body)
+	out := env.sclient(t, env.TmpDir, "meta", "version", op, filename, idStr)
+	if !strings.Contains(out, wantMsg) {
+		t.Fatalf("%s 应由真实 CLI 子进程执行，stdout 应含 %q, got:\n%s", op, wantMsg, out)
 	}
 }
 
@@ -147,6 +126,12 @@ func TestE2E_CLI_VersionsLifecycle(t *testing.T) {
 		t.Fatalf("版本 checksum 应为 V1: got %s, want %s", ver.Checksum, checksumV1)
 	}
 	vid := ver.VersionID
+	// 版本 ID 恒为正（服务端 newVersionID()：毫秒时间戳×1000+随机后缀，进程内单调递增）。
+	// 显式断言该不变量：ID 若再次变负，此处立即以明确信息变红，而非让后续 CLI
+	// 调用以 "version_id must be positive" 的间接形式失败。
+	if vid <= 0 {
+		t.Fatalf("版本 ID 应为正数（服务端 newVersionID 不变量）, got %d", vid)
+	}
 
 	// 4) 接口交叉核对：GET /api/versions 含同一 version_id
 	var apiVersions versionListResp
@@ -234,7 +219,8 @@ func TestE2E_CLI_VersionsLifecycle(t *testing.T) {
 		t.Fatalf("delete 版本不应影响当前文件（应仍为 V1）: got %q", got)
 	}
 
-	// 8) 负例：删除不存在的版本 "0" → CLI 非零退出，且当前文件与版本列表不变
+	// 8) 负例：删除非法版本 "0" → CLI 非零退出，且当前文件与版本列表不变。
+	//    命中 client 侧 versionID<=0 守卫（该守卫按裁定保留，不放行非正 ID）。
 	currentBefore := readLocalFile(t, onlyFileNamed(t, env.StorageRoot, "vfile.txt"))
 	stdout, stderr, err := env.sclientRun(t, env.TmpDir, "meta", "version", "delete", "vfile.txt", "0")
 	if err == nil {
