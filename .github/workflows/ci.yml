@@ -165,6 +165,14 @@ jobs:
         run: choco install make -y
       - name: prepare (buildmeta embed)
         run: make prepare
+      # e2e 套件带 //go:build e2e，默认 tags 的 lint job 扫不到；此处显式按 e2e tag
+      # lint test/...（含 test/e2e/ 子包），与本地 make lint-e2e 同一门禁。
+      # 置于耗时的真二进制 e2e 之前，让 lint 失败快速暴露。
+      - name: golangci-lint (e2e build tag)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          args: --timeout=5m --build-tags=e2e ./test/...
       - name: go test e2e (real binaries)
         run: make test-e2e
 
