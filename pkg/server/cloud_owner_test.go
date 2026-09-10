@@ -225,7 +225,16 @@ func TestCloudOwner_GetIDOR(t *testing.T) {
 // TestCloudOwner_CancelDeleteIDOR 验证取消/删除按 owner 过滤：跨 owner → 404 且任务不变。
 func TestCloudOwner_CancelDeleteIDOR(t *testing.T) {
 	env := newOwnerCloudEnv(t)
-	idA := env.createCloudTaskAs(t, "ak-A", "https://example.com/a.zip")
+
+	// 用本地挂起源（永不响应，直到请求被取消）作下载源：使任务稳定停留在
+	// pending/downloading（可取消）状态，避免真实外网 URL 在 CI 上快速失败→任务进入
+	// 终态 failed→CancelTask 拒绝非可取消状态返回 400 的竞态（Windows CI 偶发）。
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	idA := env.createCloudTaskAs(t, "ak-A", srv.URL+"/a.zip")
 
 	// B 取消 A 的任务 → 404
 	code, _ := env.do(t, "ak-B", "POST", "/api/cloud/tasks/"+idA+"/cancel", "")
