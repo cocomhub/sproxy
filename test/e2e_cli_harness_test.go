@@ -115,8 +115,11 @@ func (e *cliEnv) sclientJSON(t *testing.T, dir string, v any, args ...string) {
 	}
 }
 
-// findFilesNamed 在 root 下递归找 basename == name 的条目，返回绝对路径切片（按路径排序）。
-// 用于磁盘副作用断言（不硬编码 tenant 段——tenant 名由凭据 Owner 推导，属实现细节）。
+// findFilesNamed 在 root 下递归找 basename == name 的**普通文件**，返回绝对路径切片
+// （按路径排序）。用于磁盘副作用断言（不硬编码 tenant 段——tenant 名由凭据推导，属实现细节）。
+//
+// 只匹配非目录条目：版本桶的形态是 <tenant>/version/<rel>/<version_id>，即版本文件的
+// 父目录 basename 恰为 <rel>（如 vfile.txt），若不过滤目录会被误计为「文件」。
 // root 不存在时不报错（返回空切片），便于断言「某卷下无该文件」。
 func findFilesNamed(t *testing.T, root, name string) []string {
 	t.Helper()
@@ -128,7 +131,7 @@ func findFilesNamed(t *testing.T, root, name string) []string {
 			}
 			return werr
 		}
-		if d.Name() == name {
+		if d.Name() == name && !d.IsDir() {
 			found = append(found, path)
 		}
 		return nil
