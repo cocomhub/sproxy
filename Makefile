@@ -17,11 +17,12 @@ EXE := .exe
 else
 EXE :=
 endif
-GO              := GOOS=$(GOOS) GOARCH=$(GOARCH) $(RAW_GO)
-GORACE          := -race
-GOTEST_COUNT    ?= -count=1
-GOTEST_TIMEOUT  ?= -timeout=5m
-NOTEST_IGNORE   := .notestignore
+GO                 := GOOS=$(GOOS) GOARCH=$(GOARCH) $(RAW_GO)
+GORACE             := -race
+GOTEST_COUNT       ?= -count=1
+GOTEST_TIMEOUT     ?= -timeout=5m
+GOTEST_TIMEOUT_E2E ?= -timeout=20m
+NOTEST_IGNORE      := .notestignore
 SUB_MODULE_DIRS := $(shell find . -name 'go.mod' \
   -not -path './$(BUILD_DIR)/*' \
   -not -path './.claude/*' \
@@ -283,12 +284,13 @@ test-all:
 
 # 真二进制端到端测试：构建 sproxy/sclient 真实二进制 + 子进程启动，覆盖文件面/隧道/
 # mesh/relay/quota 等完整链路。默认 make test 不含（build-tag e2e 门控），CI e2e job 调用。
-# 注意：target 为 ./test（非递归），与归位前 make test 覆盖的 test/*.go 十文件 1:1 对齐；
-# test/e2e/ 下 e2e_binary_test.go 为既有历史孤儿（认证重构后 401，从未受任何 CI 门控），
-# 排除在 e2e 门禁之外，避免把既存红测试带入新 job。
+# 已知损坏的历史孤儿：test/e2e/e2e_binary_test.go（package e2e_test，已带 //go:build e2e）
+# 在认证重构后固定 401 unauthorized，且从未受任何 CI 门控。当前用非递归 ./test 有意排除它，
+# 以保持与归位前 make test 覆盖的 test/*.go 十文件 1:1。**修复该孤儿后应把本 target 改回
+# ./test/...**（否则它永不被拾取）。该孤儿由 F3（CLI 真服务 e2e）跟踪处理。
 .PHONY: test-e2e
 test-e2e: prepare
-	$(GO) test $(GORACE) $(GOTEST_COUNT) -timeout=20m -tags=e2e ./test
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT_E2E) -tags=e2e ./test
 
 .PHONY: build-all
 build-all:
@@ -379,7 +381,7 @@ test-packages: vet check-loopback
 	@echo "=== pkg/tunnel/... ===" && $(GO) test -race -count=1 -timeout=30s ./pkg/tunnel/... 2>&1
 	@echo "=== pkg/client/... ===" && $(GO) test -race -count=1 -timeout=30s ./pkg/client/... 2>&1
 	@echo "=== pkg/server/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/server/... 2>&1
-	@echo "=== test/... ===" && $(GO) test -race -count=1 -timeout=60s ./test/... 2>&1
+	@echo "=== test/ (e2e tag) ===" && $(GO) test -race -count=1 -timeout=20m -tags=e2e ./test 2>&1
 
 # 覆盖率 HTML 报告
 .PHONY: cover-html

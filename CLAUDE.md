@@ -548,7 +548,7 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--token`/`--relay-toke
 2. **`-race` 下超时翻倍** — 含 goroutine 的测试（特别是 mux/p2p）在 `-race` 下运行时间显著增加。Context timeout 设置时留足余量，推荐正常值的 3 倍。
 3. **覆盖率测量排除`test/`和`tools/`** — `go test -cover ./...` 包含 E2E 测试包和工具包会稀释 total 覆盖率。正确做法：`go test -cover ./internal/... ./pkg/... ./cmd/...`
 4. **Makefile 修改优先用 Edit tool** — sed 处理 Makefile 的多行模式（反斜杠续行、`$$` 转义、`{` `}`嵌套）极其脆弱。复杂修改用 Read + Edit 工具。
-5. **`test/` 由 `//go:build e2e` 门控** — `test/*.go`（4041 行真二进制 e2e 套件）带 `//go:build e2e`，默认单测（`make test` / `go test ./...`）不编译、不运行；显式入口为 `make test-e2e`（`go test -tags=e2e ./test`，CI e2e job 调用），tag 化前后覆盖场景 1:1 不丢门禁。`test/e2e/` 子目录的 `e2e_binary_test.go` 同为 e2e tag 门控但为历史孤儿（认证重构后 401，从未受 CI 门控），**不在** `make test-e2e` 范围内。
+5. **`test/` 由 `//go:build e2e` 门控** — `test/*.go`（4041 行真二进制 e2e 套件）带 `//go:build e2e`，默认单测（`make test` / `go test ./...`）不编译、不运行；显式入口为 `make test-e2e`（`go test -tags=e2e ./test`，CI e2e job 调用），tag 化前后覆盖场景 1:1 不丢门禁。`test/e2e/` 子目录的 `e2e_binary_test.go` 为历史孤儿（认证重构后 401，从未受 CI 门控），当前被有意排除在 `make test-e2e` 之外、由 F3（CLI 真服务 e2e）跟踪处理；**修复它后应把该 target 改回 `./test/...`**（否则该孤儿永不被拾取）。
 
 ### 测试模式清单
 

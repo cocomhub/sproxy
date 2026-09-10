@@ -15,7 +15,7 @@
 - `go.work` 组合 11 个 module（根 `.` + cmd/sclient + cmd/sproxy + certmgr/ext/dnspod + telemetry/ext/otel + tunnel/hub/ext/kad + tunnel/mesh + xfer/ext/{grpc,quic,webrtc,ws} + web/e2e）。
 - **workspace 模式下 `go test ./...`（根目录）只测根 module**：`go list ./...` = 46 包，cmd/sclient、cmd/sproxy、web/e2e 命中 0。`make test`（ci.yml test job 用）因此从不编译/运行子 module 任何测试。
 - `Makefile` `SUB_MODULE_DIRS` = `find . -name go.mod` 排除 build/.claude/vendor/**web/e2e** 与根 `.` → 恰 10 个：cmd/sclient、cmd/sproxy、pkg/certmgr/ext/dnspod、pkg/telemetry/ext/otel、pkg/tunnel/hub/ext/kad、pkg/tunnel/mesh、pkg/tunnel/xfer/ext/{grpc,quic,webrtc,ws}。`test-all` target 已存在（逐个 `cd $dir && go test -race -count=1 -timeout=5m ./... || exit 1`），**CI 从不调用**。
-- `cmd/sclient` 有 54 个 `_test.go`（约 16k 行）；`cmd/sproxy` 有 6 个 `_test.go`；均只在 `make test-all` 时运行。
+- `cmd/sclient` 有 48 个 `_test.go`（约 16k 行）；`cmd/sproxy` 有 6 个 `_test.go`；均只在 `make test-all` 时运行。
 - `test/` 目录 10 个文件、4041 行、package `sproxy_test`、无 `go:build`、无 `TestMain`、**全部是 `_test.go`**，helper 与用例同文件自足。因无 tag，现被 `make test` 的 `go test ./...` 吞入 → ubuntu + windows 两个 test job 每次都现场 `go build ./cmd/sproxy` 跑重型二进制 e2e（ci.yml test job 与 test-windows 皆然）。
 - CI 现有 job：lint / test（ubuntu+Vault，`make test` + cover-check）/ test-windows / build（matrix，`make build-ci` + `build-all`）/ benchmark / sonar / ui-e2e。push master 与 PR 均触发。`paths-ignore` 已忽略 `docs/**`。
 - 既定红线（memory）：所有 test job 监听 127.0.0.1；make target 是 CI 唯一入口（不写裸 go 命令）；lint 0 issues。
@@ -141,7 +141,7 @@ test-e2e: prepare
 
 ## 自检
 
-1. **覆盖度：** (a) cmd/sclient+cmd/sproxy（54+6 测试文件，唯一真正零覆盖面）→ 任务 1；(b) 其余 8 个 ext/hub/mesh 子 module 同样零 CI → 任务 1 一并接入（`test-all` 天然含）；(c) web/e2e 已有独立 ui-e2e job，**不**动其排除状态；(d) `test/` 重型 e2e 无条件吞入 `make test` → 任务 2 归位。全规格闭环。
+1. **覆盖度：** (a) cmd/sclient+cmd/sproxy（48+6 测试文件，唯一真正零覆盖面）→ 任务 1；(b) 其余 8 个 ext/hub/mesh 子 module 同样零 CI → 任务 1 一并接入（`test-all` 天然含）；(c) web/e2e 已有独立 ui-e2e job，**不**动其排除状态；(d) `test/` 重型 e2e 无条件吞入 `make test` → 任务 2 归位。全规格闭环。
 2. **占位符扫描：** 无 TODO/待定；每步含精确命令与预期。
 3. **类型/命令一致性：** `make test-all`、`make test-e2e`、job 名 `test-submodules`/`e2e` 在 Makefile 与 ci.yml 间逐一对应；`$(GO)`/`$(RAW_GO)` 沿用现有变量。
 4. **风险注记：** 10 个子 module 测试是首次受 CI 门控，任务 1 步骤 1 强制先本地修绿再上 CI，防止把既有花测试放进门禁制造首个红 master；任务 2 的 tag 与 e2e job 同 PR 原子落地防门禁真空。
