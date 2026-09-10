@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789056075977,
+  "lastUpdate": 1789056755331,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -328184,6 +328184,150 @@ window.BENCHMARK_DATA = {
           {
             "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
             "value": 1048,
+            "unit": "ns/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1000000 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "510acd490b591c11e18c189eff931ef4a71e51e9",
+          "message": "fix(quic): 传输 TLS 校验可用性 + Accept 死锁/ctx/流控修复 (#172)\n\n* fix(quic): TLS 校验可用性——Listen 支持显式证书 + 自签证书补 SAN/CA\n\nTLS 缺陷：Listen 恒用 selfSignedCert()（无 SAN、非 CA），而 Dial 用系统 CA 池\n（或 SPROXY_QUIC_CA_CERT）校验，导致 dial 永远无法验证 listen（Linux 报\ndoesn't contain any IP SANs，Windows 报 signed by unknown authority）。\n\n- Listen：新增 listenCert()，按 SPROXY_QUIC_CERT_FILE / SPROXY_QUIC_KEY_FILE\n  加载证书；只配置其一时返回明确错误（fail-closed，不静默回落）；均未配置时\n  回落开发用自签证书\n- selfSignedCert：补 DNSNames/127.0.0.1/::1 SAN，并设 IsCA + KeyUsageCertSign，\n  使其被显式 pin 为信任根时也能通过校验\n- DialTLSConfig 默认安全语义不变（系统 CA 池；SPROXY_QUIC_CA_CERT 仍是唯一 CA\n  注入途径）；不启用 InsecureSkipVerify\n\n同时修复为让模块网络测试真实通过而暴露的三个既有缺陷（此前网络测试只在\nWindows 上被 skip、CI 首跑即因 TLS 全红，从未被触发）：\n\n- 流宣告：QUIC 只在对端发送数据后才宣告 stream，服务端 Accept 同步等待\n  AcceptStream 会与\"对端先等 Accept 返回、再发数据\"的正常用法死锁。改为 Dial\n  建流后立即发送零长度宣告帧、Accept 读取校验后返回\n- ctx：Send/Receive 入口尊重已取消的 ctx（在途阻塞写仍不可中断）\n- 流控窗口：默认单流 512 KiB/连接级 768 KiB 会让单条大消息（1 MiB）在阻塞写下\n  卡死，提升至 4 MiB/8 MiB（Dial/Listen 对称）\n\n测试侧新增 tls_test_helper_test.go 生成 CA+leaf 并注入三个证书 env，\nTestQUIC / newQUICConnPair 在 Listen/Dial 前调用，完成真实 TLS 校验握手。\n\n* fix(quic): 审查修复——宣告魔数消歧义 + Receive 兑现 ctx + Accept 收尾关连接\n\n第 1 轮审查（0 Critical / 3 Important / 5 Minor）逐条修复：\n\nI-2 宣告帧与合法空消息同形：零长度宣告帧与\"合法空消息\"二进制同形，旧\nDial 发出的空首帧会被 Accept 静默吞掉（数据丢失）。改用固定 8 字节不可变\n魔数 announceMagic（const）：Dial 首帧发该魔数，Accept 读到并校验通过才\n返回；不等则返回明确错误并关闭该连接与流（不静默）。同时引入\nmaxMessageBytes（1 MiB，与 tcp/ws 对齐）使魔数在结构上不可能与合法帧同形\n（合法帧长度 ≤ 1 MiB，而魔数前 4 字节大端解读为 1.4 GB），并顺带拒绝恶意\n超大长度前缀触发的巨型分配。补测试：非魔数首帧（旧零长度帧/普通消息/\n篡改魔数/EOF）→ Accept 报错且连接与流被关闭；Accept 后魔数不被上抛为消息。\n\nI-1 Receive 不兑现 ctx：原仅拦\"调用时已取消\"，700ms deadline 的 Receive\n仍阻塞到空闲超时。改用 quic.Stream 的 SetReadDeadline：ctx 有 deadline 时\n直接作为读 deadline；ctx 可取消时由 watcher goroutine 在取消瞬间把 deadline\n设为当前时刻解除阻塞（f 返回后退出，不泄漏）；读结束复位 deadline。因 ctx\n结束而失败时返回 ctx 的错误，语义对齐 tcp 传输。补测试：短 deadline/取消\n的 Receive 毫秒级返回、deadline 复位、50 轮无 goroutine 泄漏。\n\nI-3 Accept 错误分支不关连接/流：AcceptStream 失败与宣告校验失败均关闭该\nQUIC 连接与流，未认证对端的连接不再滞留到空闲超时；QuicListener 新增活跃\n连接登记表，Close() 时一并关闭所有已 accept 的连接（含与 Close 并发的\nAccept，track 在关闭后返回 false 由调用方即时清理）。\n\nMinor：\n- 宣告魔数改为 const（原为可变 var []byte）\n- 流控窗口注释补 quic-go 默认值/上限对照与 ConnSuite LargePayload 体量\n- 补 selfSignedCert SAN/IsCA 断言、listenCert 三种 env 组合、discardAnnounce\n  正反用例、announceMagic 与合法帧不同形断言\n\n* fix(quic): 定向复审修复——deadline 用例去 flaky + framing 错误废弃连接 + 宣告读取绑 ctx\n\nNB-1 TestQuicConnReceiveWithDeadline flaky（-count=100 约 3-4% 失败）：\nstream 的 ReadDeadline 与 ctx 的 deadline 是两套独立计时器，读先超时时 ctx.Err()\n仍为 nil，返回的是包装后的 i/o timeout，原「错误类型必须是 DeadlineExceeded」断言\n过严。改为断言「ctx 被兑现」的真实语义：start 取在创建 ctx 之前，断言返回耗时落在\n[deadline, deadline+2s] 且 err 非 nil。保留 cancel-only 用例、deadline 复位、\n无 goroutine 泄漏等既有断言。\n\nNB-2 framing 错误不关连接：超长长度前缀分支原先只返回普通 error，上层 mux\nreadLoop 会把已错位的流当瞬时错误重试并读入垃圾帧。对齐 tcp 传输的 failConn\n语义新增 quicConn.failConn()：帧协议破坏（超长长度前缀、长度前缀部分消费、\nbody 读取失败）时废弃连接，超长分支返回包装后的 xfer.ErrConnClosed，后续\nSend/Receive 立即返回 ErrConnClosed。\n\n残留观察：discardAnnounce 的 io.ReadFull 原先不受 ctx 约束，对端「不发任何字节」\n时会滞留到 60s 空闲超时。改为复用 withReadDeadline（新增 fallback 参数）绑定\nctx：ctx 有 deadline 用其值，否则用 announceTimeout(10s) 兜底。\n\n顺带：quicConn.closed 改 atomic.Bool（原「Receive 无锁读 / Close 有锁写」是\n既有数据竞争，新增 failConn 会扩大触发面；与 tcp 传输一致），Send 的互斥锁更名\nwriteMu。\n\n测试：新增 TestQuicConnReceiveMessageTooLarge（断言 err 包装 ErrConnClosed、\nstream/conn 已关闭、后续调用直接 ErrConnClosed）与 TestDiscardAnnounce_RespectsCtx\n（对端不发字节时由 ctx 有界兑现）；TestDiscardAnnounce 适配 ctx 参数。",
+          "timestamp": "2026-09-11T00:08:47+08:00",
+          "tree_id": "0b336fc3f32b2c7826a0c273d2e927fc71fe948a",
+          "url": "https://github.com/cocomhub/sproxy/commit/510acd490b591c11e18c189eff931ef4a71e51e9"
+        },
+        "date": 1789056743799,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 978.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1230972 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 978.6,
+            "unit": "ns/op",
+            "extra": "1230972 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1230972 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1230972 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 949.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1244269 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 949.7,
+            "unit": "ns/op",
+            "extra": "1244269 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1244269 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1244269 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 965.6,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1247737 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 965.6,
+            "unit": "ns/op",
+            "extra": "1247737 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1247737 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1247737 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 953.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1244331 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 953.1,
+            "unit": "ns/op",
+            "extra": "1244331 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1244331 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1244331 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 1002,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1000000 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 1002,
             "unit": "ns/op",
             "extra": "1000000 times\n4 procs"
           },
