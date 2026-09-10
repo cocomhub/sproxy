@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789062706026,
+  "lastUpdate": 1789063082222,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -329474,6 +329474,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1294570 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "52c0b62ec8dc95ee9f6117c5423f98ff1521e4a8",
+          "message": "test(web): 交互式浏览器 e2e 补强（19 真交互用例）+ 批量操作结果解析修复 (#175)\n\n* docs(plan): PR-F2 Web 交互 e2e 补强实现计划\n\n* test(e2e): 测试基建与 web/e2e lint 归零\n\n- 新增 helpers_e2e_test.go：testServerCfg 可配置启动器（ForceTOTP/云下载回环源等），\n  testServer 改为其薄委托（签名与语义零改动）\n- 新增 waitLoc：以 Locator.WaitFor 替代已废弃的 Page.WaitForSelector\n- 清退 false-green 用例：TestAuthFlow（陈旧 localStorage key）、TestVersioningLoadVersions\n  / TestVersioningDisabledMessage（断 .empty-msg 预置节点）、TestCloudDownloadCreateTask\n  （停在 preview 未点 confirm）、TestShareButton（引用已删全局 shareFile）\n- 修复 govet shadow（随删除用例一并消除）；web/e2e lint 8 issues → 0\n- ci.yml：ui-e2e timeout 120s→600s；新增 web/e2e module lint 步骤（GOWORK=off）\n\n* test(e2e): 文件类真交互用例（上传/mkdir/面包屑/搜索）\n\n新增 files_e2e_test.go 任务 1 组，每例走「控件操作 → 断言网络请求 → 断言变化后的 DOM」：\n- TestFiles_Upload：SetInputFiles → POST /upload（X-File-Checksum == 预算 SHA-256、\n  multipart file 字段、未选卷时不带 volume）→ #file-table 从无到有 + 磁盘落盘\n- TestFiles_Mkdir：fill+click → POST /mkdir?dirname=newdir → .dir-row 计数 0→1\n- TestFiles_Breadcrumb：进入/返回目录 → GET /api/files?subdir= 断言 + 面包屑与列表切换\n- TestFiles_Search：搜索 → GET /api/files/search?q= → 列表被结果替换（other.txt 消失）\n  并断言清除后恢复\n\n新增 helper：waitTextGone / waitTextVisible（轮询容器文本，断言变化而非存在）\n\n* test(e2e): dialog 组真交互用例（单删/批删/rename/批重命名/rmdir）\n\n文件类 dialog 流程每例先装 OnDialog（否则 Playwright auto-dismiss 使点击 inert），\n再断言请求与 DOM 变化：\n- TestFiles_Delete：confirm → POST /delete?filename=（X-File-Checksum 校验）→ 行消失+磁盘删除\n- TestFiles_BatchDelete：勾选 2 → POST /api/batch/delete body files[{filename,checksum}] → 列表清空\n- TestFiles_Rename：prompt Accept 新名 → POST /rename?from=&to= → 新名出现/旧名消失\n- TestFiles_BatchRename：序列 prompt 按消息分派 → POST /api/batch/rename operations[] → 新名出现\n- TestFiles_Rmdir：confirm → POST /rmdir?dirname=&force=true → 目录行消失\n\n新增 helper：respondDialogs / acceptDialog / requestJSON。\n注：批删/批重命名用例记录了服务端 /api/batch/* 响应缺顶层 success 导致 UI 不自动刷新\n的既有缺陷（见用例内 DEFECT 注释与报告），生产代码不在本 PR 改动范围。\n\n* test(e2e): 分享/公链/版本管理真交互用例\n\n新增 share_version_e2e_test.go：\n- TestShare_CreateAndPublicAccess：点分享按钮 → 弹窗预填文件名 → POST /api/share\n  断言 body {filename,ttl:24h,max_downloads:0,one_time:false} → 列表行取 data-token →\n  Go 侧 GET /s/{token} 断言 200 + Content-Disposition attachment + 字节一致 →\n  撤销 DELETE /api/shares/{token} → 列表回空态\n- TestVersioning_UploadCreatesVersions：同文件名两次真上传（auto 路由覆盖写）产版本 →\n  GET /api/versions 断言 200 且 versions 非空 → 表格行 + 恢复按钮 + 「共 N 个版本」→\n  恢复 POST /api/versions/restore 断言 filename/version_id\n- TestVersioning_DisabledReturns501：禁用时 GET /api/versions 断言 501 + DOM「加载失败」\n  且不渲染表格\n\n基建：seedUploadMultipart 支持无 volume 字段的 auto 路由上传（覆盖写产版本的唯一真实\n路径——显式卷会命中卷唯一性查重 409），seedUploadToVolume 改为其薄委托。\n\n* test(e2e): 云端下载与审计面板真交互用例\n\n新增 cloud_audit_e2e_test.go：\n- TestCloudDownload_SubmitCompleteRemove：本地 httptest 源 → #cloud-submit-btn 进入预览\n  （断言 .cloud-preview-filename == cloud-src.bin）→ #cloud-preview-confirm-btn 发\n  POST /api/cloud/download 断言 body {url,filename} → 轮询 ≥15s 等「已完成」→ 展开分组\n  断言文件名 + Go 侧 /api/cloud/tasks 任务 completed → DELETE /api/cloud/tasks/{id} → 行消失\n- TestCloudDownload_Cancel：挂起源（handler 阻塞）使任务停在下载中 →\n  POST /api/cloud/tasks/{id}/cancel（URL 以 /cancel 结尾）→ DOM「已取消」\n- TestAudit_RendersSeededEvent：Go 侧 PUT /api/config seed config_update → 点审计 tab\n  捕获 GET /api/audit?limit=200 断言事件 action/result + 表格行 + stats-panel 隐藏\n\n基建：startFileSource / startStallingSource（127.0.0.1 httptest） / seedConfigUpdate。\n云下载用例开启 CloudDownloadAllowPrivate（默认拒绝回环源）。\n\n* test(e2e): 登录注册/存储配置/卷下拉真交互用例\n\n新增 auth_config_e2e_test.go：\n- TestAuth_RegisterTOTP_AndLogin（自包含 server，ForceTOTP）：UI 注册断言\n  POST /api/credentials/register 返回 {ak 前缀 ak-, base32_secret, admin:true} +\n  #register-result 展示 AK/base32 + #qr-register svg → 同进程算 TOTP 码登录 →\n  断言带 SproxySig v=2 签名的外发请求 + sessionStorage 三键 + 弹窗关闭\n- TestAuth_SaveKeysSigns（自包含）：Go 侧简单注册取 ak/sk → auth-bar 保存 →\n  sessionStorage 三键断言 + 刷新请求带签名头 + 列表脱离 401 态\n- TestConfig_UpdateMaxStorage：配置 tab → fill → PUT /api/config 断言 body\n  {max_storage_bytes:104857600} → 重拉后 input 回填 + toast「配置已更新」\n- TestVolumes_SingleVolumeSelect：默认单卷 options=[\"\",\"default\"] +\n  currentVolume() auto→default（下拉 change 接线）\n\n基建：signedRequestRecorder（兼容直连 GET /api/files 与隧道 POST /tunnel 两种签名\n形态） / totpCodeFromBase32（pkg/otp 同进程算码）。\n\n* fix(web): 批量删除/重命名按服务端 results 判定成败并始终刷新列表\n\n服务端 /api/batch/delete 与 /api/batch/rename 回包为\nBatchResponse{results:[{filename,success,message}]}（无顶层 success），而 app.js 的\nbatchDelete/batchRename 以 data.success 判定——undefined 恒假 → 操作成功也弹「失败」\n错误 toast 且不调用 refreshList，列表停留在陈旧状态。\n\n- app-render.js：新增纯函数 batchOpSummary(results, actionLabel) → {ok, message}\n  （ok = results 非空且逐条 success；全成功「<label>完成（N 个）」，有失败\n  「<label>：X 成功 / Y 失败」+ 首条失败 message；空 results 视为失败）。经 appRender\n  命名空间导出（不在 app.js 重复定义）。\n- app.js：batchDelete/batchRename 改用 batchOpSummary 归一成败与文案，并按 ok 选\n  success/error toast；无论成败都 refreshList()（逐条处理，部分成功也已落盘）。\n- app-render.test.js：新增 batchOpSummary 四态单测（全成功/部分失败/全失败/空 results\n  及失败项无 message）。\n- web/e2e：两个批量用例去掉「显式刷新」绕过，改为断言成功 toast（含 toast-success 类）\n  + 不手动刷新即列表更新；新增 waitToastSuccess helper。\n\n* test(e2e): 修复审查 Minor/建议项（轮询竞态/选择态复位/门禁覆盖/注释与断言强化）\n\n- M1 云下载删除用例：操作前 stopCloudPolling() 消除 3s 轮询重建 #transfer-body 导致\n  <details> 折叠的竞态；删除点击带「不可见先展开」幂等兜底，ExpectRequest 超时放宽至 10s。\n  -count=100 压测 100/100 通过（133.7s，无 flake）。\n- M2 app.js batchDelete 补 clearSelection()（与 batchRename 对称）——删空后 refreshList\n  空列表分支提前返回，工具栏会残留「已选 N 个文件」。e2e 增 #batch-count/#batch-toolbar\n  断言；对照实验：去掉该行 → 用例失败（已选 2 个文件/show），恢复 → 通过。\n- M3 Makefile 新增 lint-web-e2e target（web/e2e 嵌套 module 的 lint，GOWORK=off）并挂入\n  check-ci（test-all/build-all 语义不变），help 补一行。\n- M4 helpers_e2e_test.go 头注释改为总述，不再维护易失同步的 helper 清单。\n- R1 TestFiles_Delete/BatchDelete/Rmdir 末尾补正向断言：列表不含「请求失败」。\n- R2 TestVolumes_SingleVolumeSelect 补 ExpectResponse(\"**/api/volumes\") 前置断言（红线 1）。\n- R3 TestFiles_Mkdir 基线改为「等列表落定（无「加载中」且非空）+ .dir-row 计数 0」。",
+          "timestamp": "2026-09-11T01:54:20+08:00",
+          "tree_id": "2b0128075b934d2306a13dea74226e0168d0edbd",
+          "url": "https://github.com/cocomhub/sproxy/commit/52c0b62ec8dc95ee9f6117c5423f98ff1521e4a8"
+        },
+        "date": 1789063070805,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 930.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1305769 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 930.2,
+            "unit": "ns/op",
+            "extra": "1305769 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1305769 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1305769 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 933.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1293004 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 933.1,
+            "unit": "ns/op",
+            "extra": "1293004 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1293004 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1293004 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 921.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1235992 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 921.1,
+            "unit": "ns/op",
+            "extra": "1235992 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1235992 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1235992 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 925.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1217576 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 925.7,
+            "unit": "ns/op",
+            "extra": "1217576 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1217576 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1217576 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 929.4,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1303785 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 929.4,
+            "unit": "ns/op",
+            "extra": "1303785 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1303785 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1303785 times\n4 procs"
           }
         ]
       }
