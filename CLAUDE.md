@@ -37,7 +37,7 @@ make test            # 快速单元测试（已取消 vet/check-loopback 依赖�
 make test-cover      # 测试 + 覆盖率收集
 make test-packages   # 分组运行测试，快速定位失败包
 make test-all        # 测试所有子 module（含 ext/ws、ext/quic、ext/grpc 等）
-make test-e2e        # 真二进制端到端测试（test/ 由 build-tag e2e 门控，CI e2e job 调用）
+make test-e2e        # 真二进制端到端（./test/... 递归，含 CLI + 隧道/mesh/relay/quota），CI e2e job 调用
 make build-all       # 构建所有子 module
 make cover-check     # 覆盖率门禁检查（默认 70%）
 make cover-html      # 覆盖率 HTML 报告到 build/coverage/cover.html
@@ -531,6 +531,15 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--token`/`--relay-toke
 - **`pkg/server/integration_test.go`** — `newTestServer` + `newTestServerWithAllRoutes` 等变体
 - **`pkg/client/client_test.go`** — `newMockServer`（sproxy 兼容的 mock 服务端）
 - **`test/e2e_test.go`** — `startSPROXY`（构建真实二进制并启动的端到端测试辅助）
+- **`test/e2e_cli_harness_test.go`** — **CLI 真服务 e2e harness**（`//go:build e2e`，`package sproxy_test`）：
+  `startCLIEnv(t, extraConfig)` 复用 `startSPROXYImpl` 起真实 sproxy 子进程 + `e2eBinPath(t,"cmd/sclient")`
+  构建的 sclient 二进制；`(e *cliEnv).sclientRun/sclient/sclientJSON` 以**子进程**驱动 CLI
+  （自动注入 `--config <不存在路径>` 与 `XDG_CACHE_HOME`/`XDG_CONFIG_HOME` 隔离本机用户态，
+  以及 `--access-key/-secret/-id` 走加密隧道）；`findFilesNamed`/`findFilesPrefixed`（磁盘副作用）、
+  `getJSON`（签名 HTTP 接口交叉核对）、`rawGET`（公开 `/s/{token}`）为断言原语。
+  新增 CLI 用例请按命令族拆到 `test/e2e_cli_<族>_test.go` 并复用上述 helper；入口 `make test-e2e`
+  （递归 `./test/...`，含 `test/e2e/` 子包）。**断言铁律**：每条正例 CLI 调用必须落到真实副作用
+  （磁盘文件内容/checksum 或签名 API 响应），不得只断退出码或 stdout 含某字样。
 - **`pkg/tunnel/xfer/xfertest/`** — 跨传输实现的通用测试套件（`harness.go`, `pipe.go`, `suite.go`）
 - **`pkg/testutil/mockserver/`** — mock HTTP server
 - **`pkg/testutil/mockdht/`** — mock DHT
@@ -548,7 +557,7 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--token`/`--relay-toke
 2. **`-race` 下超时翻倍** — 含 goroutine 的测试（特别是 mux/p2p）在 `-race` 下运行时间显著增加。Context timeout 设置时留足余量，推荐正常值的 3 倍。
 3. **覆盖率测量排除`test/`和`tools/`** — `go test -cover ./...` 包含 E2E 测试包和工具包会稀释 total 覆盖率。正确做法：`go test -cover ./internal/... ./pkg/... ./cmd/...`
 4. **Makefile 修改优先用 Edit tool** — sed 处理 Makefile 的多行模式（反斜杠续行、`$$` 转义、`{` `}`嵌套）极其脆弱。复杂修改用 Read + Edit 工具。
-5. **`test/` 由 `//go:build e2e` 门控** — `test/*.go`（4041 行真二进制 e2e 套件）带 `//go:build e2e`，默认单测（`make test` / `go test ./...`）不编译、不运行；显式入口为 `make test-e2e`（`go test -tags=e2e ./test`，CI e2e job 调用），tag 化前后覆盖场景 1:1 不丢门禁。`test/e2e/` 子目录的 `e2e_binary_test.go` 为历史孤儿（认证重构后 401，从未受 CI 门控），当前被有意排除在 `make test-e2e` 之外、由 F3（CLI 真服务 e2e）跟踪处理；**修复它后应把该 target 改回 `./test/...`**（否则该孤儿永不被拾取）。
+5. **`test/` 由 `//go:build e2e` 门控** — `test/*.go`（真二进制 e2e 套件）带 `//go:build e2e`，默认单测（`make test` / `go test ./...`）不编译、不运行；显式入口为 `make test-e2e`（`go test -tags=e2e ./test/...`，递归，CI e2e job 调用），tag 化前后覆盖场景 1:1 不丢门禁。`make test-e2e` 递归 `./test/...`，`test/e2e/` 子包（CLI 真服务二进制 e2e）一并纳入门禁。
 
 ### 测试模式清单
 

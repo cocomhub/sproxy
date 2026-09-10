@@ -52,9 +52,9 @@ jobs:
         run: make prepare
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: latest
+          version: v2.13.2
           args: --timeout=5m ./...
 
   test:
@@ -165,6 +165,17 @@ jobs:
         run: choco install make -y
       - name: prepare (buildmeta embed)
         run: make prepare
+      # e2e 套件带 //go:build e2e，默认 tags 的 lint job 扫不到；此处显式按 e2e tag
+      # lint test/...（含 test/e2e/ 子包），与本地 make lint-e2e 同一门禁。
+      # 置于耗时的真二进制 e2e 之前，让 lint 失败快速暴露。
+      # 仅 Linux：Windows runner 的 checkout 按 core.autocrlf 将 LF 转 CRLF，gofmt 会误报；
+      # Windows 仍跑真二进制 e2e（测试本身跨平台）。
+      - name: golangci-lint (e2e build tag)
+        if: runner.os == 'Linux'
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.13.2
+          args: --timeout=5m --build-tags=e2e ./test/...
       - name: go test e2e (real binaries)
         run: make test-e2e
 
@@ -265,11 +276,11 @@ jobs:
         with:
           go-version: "1.26"
       - name: Lint web/e2e module
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         env:
           GOWORK: "off"
         with:
-          version: latest
+          version: v2.13.2
           working-directory: web/e2e
           args: --timeout=5m -c ../../.golangci.yml ./...
       - name: Install Playwright browsers
