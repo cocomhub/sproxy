@@ -42,6 +42,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -63,6 +64,10 @@ const (
 	// connReceiveWindow 是连接级接收窗口。
 	connReceiveWindow = 8 << 20
 )
+
+// announceTimeout 是读取对端宣告魔数的兜底超时：宣告帧由 Dial 在建流后立即发送，
+// 该时限只用于兜住「连接后不发任何字节」的未认证对端，避免其占住连接槽直到空闲超时。
+const announceTimeout = 10 * time.Second
 
 // maxMessageBytes 是单条消息的最大字节数（与 tcp/ws 传输对齐，1 MiB）。
 // 与 announceMagic 配合使宣告帧不可与合法帧混淆：合法帧以 4B 大端长度前缀开头，
@@ -99,8 +104,12 @@ type quicConn struct {
 	// onClose 是 Close 收尾回调（服务端用于从 listener 的活跃连接表移除自身）。
 	onClose func()
 
-	mu     sync.Mutex
-	closed bool
+	// writeMu 保护 Send 的并发写入（4B 头 + 负载需整体写出）。
+	writeMu sync.Mutex
+	// closed 用原子标记：Receive 在阻塞读前无锁检查、Close/failConn 可在任意时刻
+	// 由其他 goroutine 调用，普通 bool + 锁会引入「Receive 无锁读 / Close 有锁写」
+	// 的数据竞争（与 tcp 传输同理）。
+	closed atomic.Bool
 }
 
 // streamInterface 是 quic.Stream 的最小接口，*quic.Stream 和测试 mock 均满足。
@@ -116,9 +125,9 @@ func (c *quicConn) Send(ctx context.Context, msg []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.closed.Load() {
 		return xfer.ErrConnClosed
 	}
 	frame := make([]byte, 4+len(msg))
@@ -140,22 +149,31 @@ func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if c.closed {
+	if c.closed.Load() {
 		return nil, xfer.ErrConnClosed
 	}
 	var msg []byte
-	err := withReadDeadline(ctx, c.stream, func() error {
+	err := withReadDeadline(ctx, c.stream, 0, func() error {
 		lenBuf := make([]byte, 4)
-		if _, rerr := io.ReadFull(c.stream, lenBuf); rerr != nil {
+		n, rerr := io.ReadFull(c.stream, lenBuf)
+		if rerr != nil {
+			if n > 0 {
+				// 长度前缀被部分消费：流已错位，必须废弃连接（与 tcp 传输一致）。
+				c.failConn()
+			}
 			return fmt.Errorf("quic recv length: %w", rerr)
 		}
 		msgLen := binary.BigEndian.Uint32(lenBuf)
 		if msgLen > maxMessageBytes {
-			// 帧协议破坏（或宣告帧残留）：拒绝巨型分配，避免按恶意长度申请内存。
-			return fmt.Errorf("quic recv: message too large: %d bytes (max %d)", msgLen, maxMessageBytes)
+			// 帧协议破坏：废弃连接并返回 ErrConnClosed，避免巨型分配，也避免上层
+			// mux readLoop 把已错位的流当瞬时错误重试而读入垃圾帧（同 tcp failConn）。
+			c.failConn()
+			return fmt.Errorf("quic recv: message too large: %d bytes (max %d): %w", msgLen, maxMessageBytes, xfer.ErrConnClosed)
 		}
 		body := make([]byte, msgLen)
 		if _, rerr := io.ReadFull(c.stream, body); rerr != nil {
+			// 长度前缀已被消费，body 读取失败意味着流错位，必须废弃连接。
+			c.failConn()
 			return fmt.Errorf("quic recv body: %w", rerr)
 		}
 		msg = body
@@ -173,13 +191,20 @@ func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
 
 // withReadDeadline 在 f 执行期间把 ctx 的 deadline/取消映射为 stream 的读 deadline，
 // 使阻塞读能被 ctx 兑现（对齐 tcp 传输的 SetReadDeadline 语义）：
-//   - ctx 有 deadline → 直接作为读 deadline；
-//   - ctx 可取消（Done() 非 nil）→ watcher goroutine 在取消时把 deadline 设为当前时刻
+//   - ctx 有 deadline → 直接作为读 deadline；无 deadline 且 fallback > 0 → 用
+//     now+fallback 兜底（用于未认证对端的宣告读取，防其不发字节占住连接）；
+//   - ctx 可取消（Done() != nil）→ watcher goroutine 在取消时把 deadline 设为当前时刻
 //     立即解除阻塞，f 返回后 watcher 退出（不泄漏）；
 //   - 结束后把 deadline 复位为零值，避免残留 deadline 影响后续长连接数据面。
-func withReadDeadline(ctx context.Context, stream streamInterface, f func() error) error {
+func withReadDeadline(ctx context.Context, stream streamInterface, fallback time.Duration, f func() error) error {
+	deadline := time.Time{}
 	if dl, ok := ctx.Deadline(); ok {
-		_ = stream.SetReadDeadline(dl)
+		deadline = dl
+	} else if fallback > 0 {
+		deadline = time.Now().Add(fallback)
+	}
+	if !deadline.IsZero() {
+		_ = stream.SetReadDeadline(deadline)
 	}
 	done := make(chan struct{})
 	watcherDone := make(chan struct{})
@@ -205,16 +230,19 @@ func withReadDeadline(ctx context.Context, stream streamInterface, f func() erro
 	return err
 }
 
+// failConn 废弃连接（幂等）：帧协议破坏（超长长度前缀、流错位）时调用，
+// 关闭 stream 与底层 QUIC 连接，使后续 Send/Receive 立即返回 ErrConnClosed，
+// 且阻塞中的读被解除。与 tcp 传输的 failConn 语义一致。
+func (c *quicConn) failConn() {
+	_ = c.Close()
+}
+
 // Close 关闭连接：关闭 stream（发送 FIN）并关闭底层 QUIC 连接（若有），
 // 解除任何阻塞中的读/写。可安全多次调用。
 func (c *quicConn) Close() error {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
+	if c.closed.Swap(true) {
 		return nil
 	}
-	c.closed = true
-	c.mu.Unlock()
 
 	err := c.stream.Close()
 	if c.conn != nil {
@@ -312,7 +340,7 @@ func (l *QuicListener) Accept(ctx context.Context) (xfer.Conn, error) {
 			ch <- result{nil, err}
 			return
 		}
-		if err := discardAnnounce(stream); err != nil {
+		if err := discardAnnounce(ctx, stream); err != nil {
 			_ = stream.Close()
 			_ = qconn.Close()
 			ch <- result{nil, err}
@@ -375,11 +403,19 @@ func (l *QuicListener) closeAccepted() {
 }
 
 // discardAnnounce 读取并校验 Dial 侧发送的流宣告魔数（见 announceMagic）。
-// 校验失败返回明确错误（不静默丢弃数据），调用方负责关闭连接与流。
-func discardAnnounce(stream streamInterface) error {
+// 读取受 ctx 约束（无 deadline 时用 announceTimeout 兜底），避免「连接后不发任何
+// 字节」的未认证对端占住连接槽；校验失败返回明确错误（不静默丢弃数据），
+// 调用方负责关闭连接与流。
+func discardAnnounce(ctx context.Context, stream streamInterface) error {
 	buf := make([]byte, len(announceMagic))
-	if _, err := io.ReadFull(stream, buf); err != nil {
-		return fmt.Errorf("quic announce: %w", err)
+	err := withReadDeadline(ctx, stream, announceTimeout, func() error {
+		if _, rerr := io.ReadFull(stream, buf); rerr != nil {
+			return fmt.Errorf("quic announce: %w", rerr)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	if string(buf) != announceMagic {
 		return fmt.Errorf("quic announce: 非法的宣告魔数 %x", buf)

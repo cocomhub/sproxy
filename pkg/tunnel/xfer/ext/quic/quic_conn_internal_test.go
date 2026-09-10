@@ -296,24 +296,32 @@ func (s *blockingStream) SetReadDeadline(t time.Time) error {
 }
 
 // TestQuicConnReceiveWithDeadline 验证 Receive 用 ctx deadline 兑现阻塞读：
-// 必须在毫秒级返回错误，而不是阻塞到对端发送数据或连接空闲超时。
+// 必须在 deadline 附近的有界时间内返回错误，而不是阻塞到对端发送数据或连接空闲超时。
+//
+// 不断言具体错误类型：stream 的读 deadline 与 ctx 的 deadline 是两套独立计时器，
+// 读先超时时 ctx.Err() 可能仍为 nil，返回的是包装后的 i/o timeout。本用例断言的是
+// 「ctx 被兑现」的真实语义——返回不早于 deadline，且落在 deadline + 有界余量内。
 func TestQuicConnReceiveWithDeadline(t *testing.T) {
 	c := &quicConn{stream: &blockingStream{}}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	const timeout = 50 * time.Millisecond
+
+	// start 取在创建 ctx 之前：deadline = 创建时刻 + timeout > start + timeout，
+	// 故 elapsed ≥ timeout 恒成立（读不会早于 deadline 返回）。
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	start := time.Now()
 	_, err := c.Receive(ctx)
 	elapsed := time.Since(start)
 
 	if err == nil {
 		t.Fatal("expected error for expired ctx deadline")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	if elapsed < timeout {
+		t.Fatalf("Receive 在 ctx deadline 之前返回（%v < %v）", elapsed, timeout)
 	}
-	if elapsed > time.Second {
-		t.Fatalf("Receive 未兑现 ctx deadline，耗时 %v", elapsed)
+	if elapsed > timeout+2*time.Second {
+		t.Fatalf("Receive 未在 ctx deadline 的有界余量内返回，耗时 %v", elapsed)
 	}
 }
 
@@ -383,4 +391,55 @@ func TestQuicConnReceiveNoGoroutineLeak(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("goroutine leak: base=%d now=%d", base, runtime.NumGoroutine())
+}
+
+// TestQuicConnReceiveMessageTooLarge 验证超长长度前缀（framing 破坏）会废弃连接，
+// 并返回包装后的 xfer.ErrConnClosed，使上层 mux readLoop 判终态而不把已错位的流
+// 当瞬时错误重试（与 tcp 传输的 failConn 语义一致）。
+func TestQuicConnReceiveMessageTooLarge(t *testing.T) {
+	s := &mockStream{}
+	var prefix [4]byte
+	binary.BigEndian.PutUint32(prefix[:], uint32(2*maxMessageBytes))
+	s.readBuf.Write(prefix[:])
+	c := &quicConn{stream: s}
+
+	_, err := c.Receive(context.Background())
+	if err == nil {
+		t.Fatal("expected error for oversized message length")
+	}
+	if !errors.Is(err, xfer.ErrConnClosed) {
+		t.Fatalf("expected error wrapping xfer.ErrConnClosed, got %v", err)
+	}
+	if !s.closed {
+		t.Fatal("stream should be closed on framing error")
+	}
+	if !c.closed.Load() {
+		t.Fatal("conn should be marked closed on framing error")
+	}
+
+	// 后续调用直接返回 ErrConnClosed，不再读入垃圾帧。
+	if _, err := c.Receive(context.Background()); !errors.Is(err, xfer.ErrConnClosed) {
+		t.Fatalf("expected ErrConnClosed after failConn, got %v", err)
+	}
+}
+
+// TestDiscardAnnounce_RespectsCtx 验证宣告读取受 ctx 约束：对端「不发任何字节」时
+// 由 ctx deadline 解除阻塞，而不是滞留到连接空闲超时（60s）。
+func TestDiscardAnnounce_RespectsCtx(t *testing.T) {
+	stream := &blockingStream{}
+	const timeout = 50 * time.Millisecond
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	err := discardAnnounce(ctx, stream)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error when peer sends nothing")
+	}
+	if elapsed < timeout || elapsed > timeout+2*time.Second {
+		t.Fatalf("宣告读取未被 ctx 有界兑现，耗时 %v", elapsed)
+	}
 }

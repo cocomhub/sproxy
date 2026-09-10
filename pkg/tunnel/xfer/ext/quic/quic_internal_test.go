@@ -4,6 +4,7 @@
 package quic
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -204,7 +205,7 @@ func TestDiscardAnnounce(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &mockStream{}
 			s.readBuf.WriteString(tt.content)
-			err := discardAnnounce(s)
+			err := discardAnnounce(context.Background(), s)
 			if tt.wantErr != (err != nil) {
 				t.Fatalf("wantErr=%v, got err=%v", tt.wantErr, err)
 			}
