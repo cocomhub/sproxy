@@ -30,11 +30,8 @@ package e2e
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"io"
 	"log/slog"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -115,41 +112,7 @@ func volFile(t *testing.T, roots map[string]string, vol, rel, content string) {
 // Usage 精确等于 len(content)（与浏览器前端同一条服务端写路径）。返回 HTTP 状态与响应体。
 func seedUploadToVolume(t *testing.T, baseURL, vol, filename string, content []byte) (int, string) {
 	t.Helper()
-
-	var buf bytes.Buffer
-	mw := multipart.NewWriter(&buf)
-	if err := mw.WriteField("volume", vol); err != nil {
-		t.Fatalf("write volume field: %v", err)
-	}
-	fw, err := mw.CreateFormFile("file", filename)
-	if err != nil {
-		t.Fatalf("create form file: %v", err)
-	}
-	if _, werr := fw.Write(content); werr != nil {
-		t.Fatalf("write file body: %v", werr)
-	}
-	if cerr := mw.Close(); cerr != nil {
-		t.Fatalf("close multipart: %v", cerr)
-	}
-
-	sum := sha256.Sum256(content)
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/upload", &buf)
-	if err != nil {
-		t.Fatalf("build upload request: %v", err)
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("X-File-Checksum", hex.EncodeToString(sum[:]))
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("seed upload request: %v", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read upload response: %v", err)
-	}
-	return resp.StatusCode, string(body)
+	return seedUploadMultipart(t, baseURL, vol, filename, content)
 }
 
 // waitResponse 轮询 Request.Response()（请求发出后响应异步到达）。5s 内未收到返回 nil。

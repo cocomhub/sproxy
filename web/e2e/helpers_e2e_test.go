@@ -16,9 +16,13 @@ package e2e
 // AllowInsecureLoopback=true → loopback 兜底放行），保证既有用例语义不变。
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +35,53 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/mxschmitt/playwright-go"
 )
+
+// seedUploadMultipart 用真实 multipart POST /upload（file 文件件 + 正确 X-File-Checksum）
+// 写入内容，与浏览器前端同一条服务端写路径。vol 非空时附 volume 普通字段（显式卷路由，
+// 受卷唯一性查重 409 约束）；vol 为空时**不带** volume 字段，等价前端 currentVolume()==""
+// 的 auto 路由——同名再次上传会走 handleDuplicateFile 的覆盖写路径（Versioning.Enabled
+// 时保存旧版本），这是产出版本历史的唯一真实途径。
+// 返回 HTTP 状态与响应体。
+func seedUploadMultipart(t *testing.T, baseURL, vol, filename string, content []byte) (int, string) {
+	t.Helper()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if vol != "" {
+		if err := mw.WriteField("volume", vol); err != nil {
+			t.Fatalf("write volume field: %v", err)
+		}
+	}
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, werr := fw.Write(content); werr != nil {
+		t.Fatalf("write file body: %v", werr)
+	}
+	if cerr := mw.Close(); cerr != nil {
+		t.Fatalf("close multipart: %v", cerr)
+	}
+
+	sum := sha256.Sum256(content)
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/upload", &buf)
+	if err != nil {
+		t.Fatalf("build upload request: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("seed upload request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read upload response: %v", err)
+	}
+	return resp.StatusCode, string(body)
+}
 
 // testServerCfg 启动 sproxy 测试实例，允许调用方在启动前修改 cfg——用于
 // ForceTOTP=true（TOTP 注册）、CloudDownloadAllowPrivate=true（回环云下载源）、
