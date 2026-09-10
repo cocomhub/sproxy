@@ -1506,9 +1506,9 @@ func (h *Handlers) cleanupUploadingFilesLoop() {
 }
 
 // cleanupUploadingFilesPass 执行一轮 uploadingFiles 过期清理。
-// 普通 upload 条目 value 为 "upload"、move 锁条目 value 为 "move"——两者都无对应 session，
-// 直接跳过（若把 "move" 当 upload_id 查 GetSession("move")==nil 会误删锁条目：超 10 分钟的
-// 长 move 持锁被清理 → 同 rel 并发 move 越过锁，T6c 修复轮建议 1）。
+// 锁标记条目（upload/move/txn，见 isUploadingLockMarker）都无对应 session，直接跳过
+// （若把 "move" 当 upload_id 查 GetSession("move")==nil 会误删锁条目：超 10 分钟的长
+// move/delete/restore/complete 持锁被清理 → 同 rel 并发操作越过锁，T6c 修复轮建议 1）。
 func (h *Handlers) cleanupUploadingFilesPass() {
 	h.uploadingFiles.Range(func(key, value any) bool {
 		filename, ok := key.(string)
@@ -1519,7 +1519,7 @@ func (h *Handlers) cleanupUploadingFilesPass() {
 		if !ok {
 			return true
 		}
-		if uploadID == "upload" || uploadID == "move" {
+		if isUploadingLockMarker(uploadID) {
 			return true
 		}
 		// 分块上传条目 value 为 upload_id（裸 id）。uploadingFiles key 为

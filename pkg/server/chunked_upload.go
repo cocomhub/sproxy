@@ -906,6 +906,19 @@ func (h *Handlers) uploadComplete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 文件级互斥（T6c move 锁架构延伸）：complete 会把 temp 原子 rename 为最终文件，与并发
+	// move（复制→删源）共用同 rel 锁——无锁时 move 删源后 complete 仍可把文件落回源卷，与
+	// 目标卷副本并存（AD-4 破坏）；持锁后 move 期间 complete 409（客户端可稍后重试，
+	// session/temp/预留均保留）。
+	if rel != "" {
+		release, locked := h.acquireFileLock(owner, rel)
+		if !locked {
+			sendJSONResponse(w, ChunkCompleteResponse{Success: false, Filename: session.Filename, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
+			return
+		}
+		defer release()
+	}
+
 	// 全文件校验临时名内容 == session.FileChecksum：
 	//  校验通过 → rename 为正式名 → 写 checksum store → 覆盖写 ReleaseUsage(old)；
 	//  校验失败 → 逐分片 seek 重算 → mismatch_chunks（失败保留 session+临时名+预留供重传，

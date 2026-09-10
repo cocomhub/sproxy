@@ -425,6 +425,20 @@ func (h *Handlers) restoreVersionHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// 文件级互斥（T6c move 锁架构延伸）：restore 会写回 user 文件（可能与其 home 卷不同），
+	// 与并发 move（复制→删源）共用同 rel 锁——无锁时 move 删源后 restore 可能把文件写回源卷，
+	// 与目标卷副本并存（AD-4 破坏）；持锁后并发 move 期间 restore 409。
+	release, locked := h.acquireFileLock(ownerFromRequest(r), targetRel)
+	if !locked {
+		h.RecordAudit(r.Context(), AuditEvent{
+			Action: "version_restore", ObjectType: "file", Object: remotePath,
+			Result: AuditResultDenied, Detail: "文件正在移动/上传中",
+		})
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
+		return
+	}
+	defer release()
+
 	// 先保存当前版本（回滚前备份），备份失败时返回 500 拒绝执行恢复
 	if _, err = h.saveVersion(remotePath, tnt, ownerFromRequest(r)); err != nil {
 		h.RecordAudit(r.Context(), AuditEvent{
