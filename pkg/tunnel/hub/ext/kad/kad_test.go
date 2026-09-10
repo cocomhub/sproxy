@@ -504,6 +504,12 @@ func TestKademliaPersistence_ConcurrentInsertBuildSnapRace(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+
+	// 停掉去抖 timer 并同步落盘：否则测试返回后仍挂起的异步落盘会在 t.TempDir()
+	// 的 RemoveAll 清理期间写入临时文件，触发 "directory not empty" 偶发失败。
+	if err := k.FlushPersist(); err != nil {
+		t.Fatalf("FlushPersist: %v", err)
+	}
 }
 
 // TestKademliaPersistence_AsyncDebouncedSave 验证（审查 PR-3 M-2）：真实去抖 timer
@@ -535,6 +541,11 @@ func TestKademliaPersistence_AsyncDebouncedSave(t *testing.T) {
 	got := k2.FindClosest(NodeIDFromString("node-async"), 10)
 	if len(got) != 1 || got[0].ID != "node-async" {
 		t.Fatalf("异步落盘内容应可恢复, got %+v", got)
+	}
+
+	// 收敛残留：确保无挂起去抖 timer 在测试返回后写盘（与 TempDir 清理竞态）。
+	if err := k.FlushPersist(); err != nil {
+		t.Fatalf("FlushPersist: %v", err)
 	}
 }
 
