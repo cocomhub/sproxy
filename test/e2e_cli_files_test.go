@@ -9,7 +9,6 @@
 package sproxy_test
 
 import (
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -206,11 +205,10 @@ func TestE2E_CLI_MvBatchRename(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("mv 后应有 1 个 mv_new.txt, got %d: %v", len(found), found)
 	}
-	onDisk, err := os.ReadFile(found[0])
-	if err != nil {
-		t.Fatalf("读取 mv_new.txt 失败: %v", err)
-	}
-	if string(onDisk) != string(contentA) {
+	// err 限定在 if 作用域内：避免后续 for 循环内的 err 声明触发 govet shadow。
+	if onDisk, rerr := os.ReadFile(found[0]); rerr != nil {
+		t.Fatalf("读取 mv_new.txt 失败: %v", rerr)
+	} else if string(onDisk) != string(contentA) {
 		t.Fatalf("mv 后内容不一致: got %q, want %q", onDisk, contentA)
 	}
 	if got := findFilesNamed(t, env.StorageRoot, "mv_old.txt"); len(got) != 0 {
@@ -269,22 +267,6 @@ func TestE2E_CLI_MvBatchRename(t *testing.T) {
 }
 
 // ---- 本文件内共享的小工具 ----
-
-// getJSON 用签名 client 发起 GET 并把 JSON 响应解析进 v（非 200 即 Fatalf）。
-func getJSON(t *testing.T, url string, v any) {
-	t.Helper()
-	resp, err := authedHTTPClient.Get(url)
-	if err != nil {
-		t.Fatalf("GET %s 失败: %v", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET %s 期望 200, got %d", url, resp.StatusCode)
-	}
-	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
-		t.Fatalf("GET %s JSON 解析失败: %v", url, err)
-	}
-}
 
 // assertFileInfo 断言 files 中存在 name 且 checksum 一致。
 func assertFileInfo(t *testing.T, files []client.FileInfo, name, checksum string) {

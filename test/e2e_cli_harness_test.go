@@ -143,6 +143,23 @@ func findFilesNamed(t *testing.T, root, name string) []string {
 	return found
 }
 
+// getJSON 用签名 client（authedHTTPClient）发起 GET 并把 JSON 响应解析进 v；
+// 非 200 即 Fatalf。用于 CLI 调用之外的「接口侧」交叉核对断言。
+func getJSON(t *testing.T, url string, v any) {
+	t.Helper()
+	resp, err := authedHTTPClient.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s 失败: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s 期望 200, got %d", url, resp.StatusCode)
+	}
+	if derr := json.NewDecoder(resp.Body).Decode(v); derr != nil {
+		t.Fatalf("GET %s JSON 解析失败: %v", url, derr)
+	}
+}
+
 // rawHTTPClient 是公开路由探测用的短超时客户端（/s/{token} 无签名，裸 GET 即可）。
 var rawHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
