@@ -47,6 +47,8 @@ func (m *mockQUICListener) Close() error {
 type stubConnection struct {
 	stream    streamInterface
 	streamErr error
+	closeErr  error
+	closed    bool
 }
 
 func (s *stubConnection) AcceptStream(ctx context.Context) (streamInterface, error) {
@@ -54,6 +56,11 @@ func (s *stubConnection) AcceptStream(ctx context.Context) (streamInterface, err
 		return nil, s.streamErr
 	}
 	return s.stream, nil
+}
+
+func (s *stubConnection) Close() error {
+	s.closed = true
+	return s.closeErr
 }
 
 func TestQuicListenerAddr(t *testing.T) {
@@ -96,8 +103,8 @@ func TestQuicListenerClose(t *testing.T) {
 
 func TestQuicListenerAcceptSuccess(t *testing.T) {
 	ms := &mockStream{}
-	// Accept 会读取并校验 Dial 侧发送的流宣告帧（零长度帧），先放入读缓冲。
-	writeFrame(&ms.readBuf, nil)
+	// Accept 会读取并校验 Dial 侧发送的流宣告魔数，先放入读缓冲。
+	ms.readBuf.WriteString(announceMagic)
 	mconn := &stubConnection{stream: ms}
 	mln := &mockQUICListener{
 		addr:       &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9001},
@@ -122,8 +129,83 @@ func TestQuicListenerAcceptSuccess(t *testing.T) {
 	if qc.stream != ms {
 		t.Fatal("conn should wrap the mock stream")
 	}
+	// 宣告魔数不得被当作业务消息：Accept 后首个 Receive 应读到对端首条业务消息。
+	if got := ms.readBuf.Len(); got != 0 {
+		t.Fatalf("announce magic should be consumed by Accept, %d bytes left", got)
+	}
 
 	conn.Close()
+}
+
+// TestQuicListenerAccept_InvalidAnnounce 校验首帧非宣告魔数时 Accept 返回明确错误，
+// 并关闭该 QUIC 连接与流（不静默丢弃数据、不残留连接）。
+func TestQuicListenerAccept_InvalidAnnounce(t *testing.T) {
+	tests := []struct {
+		name  string
+		first []byte
+	}{
+		{"合法空消息（旧的零长度帧）", []byte{0, 0, 0, 0}},
+		{"普通消息首帧", []byte{0, 0, 0, 5, 'h', 'e', 'l', 'l', 'o'}},
+		{"魔数被篡改", []byte("SPROXYQ2")},
+		{"读到 EOF（无任何数据）", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := &mockStream{}
+			ms.readBuf.Write(tt.first)
+			mconn := &stubConnection{stream: ms}
+			mln := &mockQUICListener{
+				addr:       &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9003},
+				acceptConn: mconn,
+			}
+			ln := &QuicListener{ln: mln, closeCh: make(chan struct{})}
+
+			conn, err := ln.Accept(context.Background())
+			if err == nil {
+				conn.Close()
+				t.Fatal("expected error for non-magic first frame")
+			}
+			if !mconn.closed {
+				t.Fatal("QUIC connection should be closed on announce failure")
+			}
+			if !ms.closed {
+				t.Fatal("stream should be closed on announce failure")
+			}
+		})
+	}
+}
+
+// TestQuicListenerClose_ClosesAccepted 校验 listener Close 时已 accept 的连接
+// 与流被一并关闭（不残留到空闲超时）。
+func TestQuicListenerClose_ClosesAccepted(t *testing.T) {
+	ms := &mockStream{}
+	ms.readBuf.WriteString(announceMagic)
+	mconn := &stubConnection{stream: ms}
+	mln := &mockQUICListener{
+		addr:       &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9006},
+		acceptConn: mconn,
+	}
+	ln := &QuicListener{ln: mln, closeCh: make(chan struct{})}
+
+	conn, err := ln.Accept(context.Background())
+	if err != nil {
+		t.Fatalf("accept failed: %v", err)
+	}
+
+	if err := ln.Close(); err != nil {
+		t.Fatalf("listener close failed: %v", err)
+	}
+	if !ms.closed {
+		t.Fatal("accepted stream should be closed on listener Close")
+	}
+	if !mconn.closed {
+		t.Fatal("accepted QUIC connection should be closed on listener Close")
+	}
+
+	// Accept 返回的 conn 随 listener 一并关闭，再次 Close 幂等。
+	if err := conn.Close(); err != nil {
+		t.Fatalf("idempotent close failed: %v", err)
+	}
 }
 
 func TestQuicListenerAccept_InternalError(t *testing.T) {
