@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789066145232,
+  "lastUpdate": 1789066554848,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -329758,6 +329758,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1264976 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "137aaa349b338d38da7c1f25d5b83b5da4f03e53",
+          "message": "fix(version): 版本 ID 生成 int64 溢出修复 + created_at 毫秒语义还原 (#176)\n\n* fix(version): 版本 ID 生成 int64 溢出修复\n\n旧实现 versionID := time.Now().UnixNano()*1000 + rand.IntN(1000)：\nUnixNano()≈1.76e18，×1000 后≈1.76e21，远超 int64 上限 9.22e18，\n约每 213.5 天回绕一次且符号各半，当前时段生成的 versionID 恒为负\n（int64 最小值 -269429080180906331 实测）。\n\n- 改用毫秒时间戳 ×1000 + 3 位随机后缀：最大约 1.76e15，远小于 int64\n  上限，正数可用至约 2.9 亿年\n- 叠加进程内单调递增兜底：同一毫秒仅 1000 个随机槽位，无节流的高频\n  调用（实测 10000 次仅得 1000 个唯一值）会重复，故候选值不前进时取\n  lastVersionID+1，保证高频连续生成唯一；落盘侧 O_CREATE|O_EXCL 兜底\n- 抽取 newVersionID() 便于直接单测，更新相关 ID 语义注释\n- 新增 version_id_test.go：恒为正、10000 次连续唯一、并发唯一\n\n* fix(version): created_at 按毫秒 ID 语义还原 + 生成器注释明确兜底\n\n同一 ID 语义缺陷族：版本 ID 改毫秒制后，listVersionsHandler 仍以\ntime.Unix(0, versionID) 把 ID 当纳秒解释——新 ID（≈1.79e15）会被解析为\n1970-01-22（实测），属用户可见缺陷。\n\n- 抽出 versionIDTime(versionID, fallback)：ID/1000 还原毫秒时间戳\n  （time.UnixMilli）；历史遗留非正 ID 无法还原时间，回落版本文件 mtime，\n  不放行/不兼容负数\n- listVersionsHandler 改用 versionIDTime(versionID, info.ModTime())\n- newVersionID 注释明确「毫秒×1000+随机后缀，冲突时单调递增兜底」\n- 新增测试：新 ID 还原时间接近当前且年份 ≥2000（非 1970/1969）；\n  非正 ID 回落 fallback\n\n* fix(version): 审查修复——注释数值校正 + 溢出护栏强化 + 遗留巨值 ID 上限\n\nM-1 文档：newVersionID 注释「正数可用至约 2.9 亿年」漏除 ×1000，校正为\n「约 29 万年」；同段 1.76e15 校正为 1.79e15。\n\nM-2 测试护栏：TestNewVersionID_Positive 仅断言「为正」不足以拦截回归——\n单调兜底会把 ≤lastVersionID 的候选钳成 lastVersionID+1，进程内已有合法历史\n值时，回退成 UnixNano()*1000 的负候选仍会被钳成看似正常的 ID。改为非并行\n测试、先归零 lastVersionID，再加「ID 还原时间必须贴近当前」的性质断言，\n使候选回退时必失败（对抗实验：临时回退候选表达式，测试报红，已还原）。\n\nM-3 健壮性：versionIDTime 增加合理上限——还原结果 > now+24h 时回落\nfallback（旧纳秒 ×1000 回绕为正的巨值 ID 会解码为 ~公元 10500 年）。\n新增用例覆盖「旧纳秒回绕为正的巨值」「int64 最大值」。\n\n建议-1：注释明确 lastVersionID 单调性仅限进程内，跨进程/重启由时间戳+\n随机后缀+O_CREATE|O_EXCL 兜底（不静默覆盖既有版本）。",
+          "timestamp": "2026-09-11T02:51:28+08:00",
+          "tree_id": "74c4e72bebdc4fcdcf8d4fd54b89ff5151acecb2",
+          "url": "https://github.com/cocomhub/sproxy/commit/137aaa349b338d38da7c1f25d5b83b5da4f03e53"
+        },
+        "date": 1789066545745,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 715.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1673620 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 715.7,
+            "unit": "ns/op",
+            "extra": "1673620 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1673620 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1673620 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 718.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1674850 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 718.2,
+            "unit": "ns/op",
+            "extra": "1674850 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1674850 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1674850 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 717.5,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1698628 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 717.5,
+            "unit": "ns/op",
+            "extra": "1698628 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1698628 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1698628 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 755.7,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1665708 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 755.7,
+            "unit": "ns/op",
+            "extra": "1665708 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1665708 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1665708 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 711,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1672234 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 711,
+            "unit": "ns/op",
+            "extra": "1672234 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1672234 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1672234 times\n4 procs"
           }
         ]
       }
