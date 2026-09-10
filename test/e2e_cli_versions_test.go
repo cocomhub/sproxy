@@ -72,18 +72,23 @@ func onlyFileNamed(t *testing.T, root, name string) string {
 func versionOp(t *testing.T, env *cliEnv, op, filename string, versionID int64) {
 	t.Helper()
 	idStr := strconv.FormatInt(versionID, 10)
-	var wantMsg string
+	// 只断言「操作动词 + 文件名 + version_id」三个稳定要素，不绑定完整文案——
+	// sclient 措辞微调不应导致假失败；而 HTTP 直调根本不产生 stdout，故这些要素
+	// 足以证明该操作确由 sclient 二进制执行。
+	var verb string
 	switch op {
 	case "restore":
-		wantMsg = "已恢复文件 '" + filename + "' 到版本 " + idStr
+		verb = "已恢复"
 	case "delete":
-		wantMsg = "已删除文件 '" + filename + "' 的版本 " + idStr
+		verb = "已删除"
 	default:
 		t.Fatalf("未知版本操作 %q", op)
 	}
 	out := env.sclient(t, env.TmpDir, "meta", "version", op, filename, idStr)
-	if !strings.Contains(out, wantMsg) {
-		t.Fatalf("%s 应由真实 CLI 子进程执行，stdout 应含 %q, got:\n%s", op, wantMsg, out)
+	for _, want := range []string{verb, filename, idStr} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("%s 应由真实 CLI 子进程执行，stdout 应含 %q, got:\n%s", op, want, out)
+		}
 	}
 }
 

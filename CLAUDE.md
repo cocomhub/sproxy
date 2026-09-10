@@ -531,6 +531,15 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--token`/`--relay-toke
 - **`pkg/server/integration_test.go`** — `newTestServer` + `newTestServerWithAllRoutes` 等变体
 - **`pkg/client/client_test.go`** — `newMockServer`（sproxy 兼容的 mock 服务端）
 - **`test/e2e_test.go`** — `startSPROXY`（构建真实二进制并启动的端到端测试辅助）
+- **`test/e2e_cli_harness_test.go`** — **CLI 真服务 e2e harness**（`//go:build e2e`，`package sproxy_test`）：
+  `startCLIEnv(t, extraConfig)` 复用 `startSPROXYImpl` 起真实 sproxy 子进程 + `e2eBinPath(t,"cmd/sclient")`
+  构建的 sclient 二进制；`(e *cliEnv).sclientRun/sclient/sclientJSON` 以**子进程**驱动 CLI
+  （自动注入 `--config <不存在路径>` 与 `XDG_CACHE_HOME`/`XDG_CONFIG_HOME` 隔离本机用户态，
+  以及 `--access-key/-secret/-id` 走加密隧道）；`findFilesNamed`/`findFilesPrefixed`（磁盘副作用）、
+  `getJSON`（签名 HTTP 接口交叉核对）、`rawGET`（公开 `/s/{token}`）为断言原语。
+  新增 CLI 用例请按命令族拆到 `test/e2e_cli_<族>_test.go` 并复用上述 helper；入口 `make test-e2e`
+  （递归 `./test/...`，含 `test/e2e/` 子包）。**断言铁律**：每条正例 CLI 调用必须落到真实副作用
+  （磁盘文件内容/checksum 或签名 API 响应），不得只断退出码或 stdout 含某字样。
 - **`pkg/tunnel/xfer/xfertest/`** — 跨传输实现的通用测试套件（`harness.go`, `pipe.go`, `suite.go`）
 - **`pkg/testutil/mockserver/`** — mock HTTP server
 - **`pkg/testutil/mockdht/`** — mock DHT

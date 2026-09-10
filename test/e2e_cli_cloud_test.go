@@ -9,10 +9,12 @@
 package sproxy_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -84,8 +86,9 @@ func TestE2E_CLI_CloudDownloadSubmitWaitDelete(t *testing.T) {
 		t.Fatalf("任务 filename 应为 payload.bin, got %q", tasks[0].Filename)
 	}
 
-	// 3) wait 至完成
-	env.sclient(t, env.TmpDir, "cloud-download", "wait", tid)
+	// 3) wait 至完成。显式 --timeout：CLI 默认 30m 与 go test 的 -timeout 同量级，
+	// 一旦任务卡死会耗尽整轮预算；此处收窄到明显小于测试超时的值，让失败快速暴露。
+	env.sclient(t, env.TmpDir, "cloud-download", "wait", tid, "--timeout", "2m")
 
 	// 4) 状态为 completed
 	task, ok := findCloudTask(cloudTasks(t, env), tid)
@@ -121,21 +124,32 @@ func TestE2E_CLI_CloudDownloadSubmitWaitDelete(t *testing.T) {
 }
 
 // TestE2E_CLI_CloudDownloadCancel 覆盖取消语义：
-// 源站阻塞 → 任务停留 pending/downloading → cancel → 状态 cancelled 且不留盘。
+// 源站先吐头部+部分字节（令下载器创建并写入 .partial）再阻塞 → 任务停留
+// pending/downloading → 确认 .partial 已落盘 → cancel → 状态 cancelled 且
+// **未完成产物（slow.bin.partial / .partial.etag）被清理干净**。
 func TestE2E_CLI_CloudDownloadCancel(t *testing.T) {
 	env := startCLIEnv(t, "")
 
 	release := make(chan struct{})
+	// 源站内容：先写前半段并 Flush，使下载器拿到响应头并 os.Create(.partial) 后阻塞在
+	// 读 body；否则若 handler 在写任何字节前就阻塞，客户端拿不到响应头，下载器不会创建
+	// .partial —— 后续「清理 .partial」断言就会因产物从未存在而空转。
+	slowPayload := bytes.Repeat([]byte("s"), 64*1024)
 
 	// defer 顺序（LIFO）关键：先注册 src.Close，后注册 close(release)，
 	// 使退出时先释放阻塞中的 handler，src.Close() 才不会等待挂起请求而死锁。
 	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(slowPayload)))
+		_, _ = w.Write(slowPayload[:len(slowPayload)/2])
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
 		select {
 		case <-release:
 		case <-r.Context().Done():
 			return
 		}
-		_, _ = w.Write([]byte("slow payload"))
+		_, _ = w.Write(slowPayload[len(slowPayload)/2:])
 	}))
 	defer src.Close()
 	defer close(release)
@@ -164,6 +178,23 @@ func TestE2E_CLI_CloudDownloadCancel(t *testing.T) {
 		t.Fatalf("轮询超时：任务状态仍为 %q，期望 pending/downloading", status)
 	}
 
+	// 确认未完成产物已落盘：下载器把未完成内容写到 <dest>.partial
+	// （pkg/server/downloader/http_downloader.go:167）。此步是断言非空转的前提——
+	// 只有产物确实存在过，「cancel 清理了它」才有意义。
+	partialDeadline := time.Now().Add(30 * time.Second)
+	var partials []string
+	for time.Now().Before(partialDeadline) {
+		partials = findFilesPrefixed(t, env.StorageRoot, "slow.bin")
+		if len(partials) > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(partials) == 0 {
+		t.Fatalf("取消前应已存在未完成产物 slow.bin.partial（否则清理断言空转）；"+
+			"存储根 %s 下未找到 slow.bin* —— 请核对下载器 partial 落盘路径假设", env.StorageRoot)
+	}
+
 	// cancel → 状态 cancelled
 	env.sclient(t, env.TmpDir, "cloud-download", "cancel", tid)
 	task, ok := findCloudTask(cloudTasks(t, env), tid)
@@ -174,9 +205,23 @@ func TestE2E_CLI_CloudDownloadCancel(t *testing.T) {
 		t.Fatalf("cancel 后状态应为 cancelled, got %q", task.Status)
 	}
 
-	// 磁盘副作用：取消丢弃未完成产物
-	if got := findFilesNamed(t, env.StorageRoot, "slow.bin"); len(got) != 0 {
-		t.Fatalf("取消后不应留下 slow.bin 产物, got %v", got)
+	// 磁盘副作用：取消丢弃未完成产物——断言 `slow.bin*` 前缀下**无任何残留**，
+	// 覆盖 slow.bin.partial 与 slow.bin.partial.etag（只断精确名 "slow.bin" 会恒真空转：
+	// 未完成时根本没有 slow.bin 这个文件）。
+	// 清理是 best-effort 且可能异步：CancelTask 先尝试 removeTaskDir，若下载 goroutine
+	// 仍持有文件（Windows 删除被占用文件会失败）则由 executeDownload 的取消路径兜底
+	// （pkg/server/cloud_download.go CancelTask 注释）。故轮询至产物消失（-race 3 倍余量）。
+	cleanDeadline := time.Now().Add(30 * time.Second)
+	var leftover []string
+	for time.Now().Before(cleanDeadline) {
+		leftover = findFilesPrefixed(t, env.StorageRoot, "slow.bin")
+		if len(leftover) == 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(leftover) != 0 {
+		t.Fatalf("取消后未完成产物（slow.bin.partial / .partial.etag）应被清理, got %v", leftover)
 	}
 }
 

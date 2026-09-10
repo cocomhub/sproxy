@@ -193,6 +193,13 @@ lint:
 lint-web-e2e:
 	cd web/e2e && GOWORK=off golangci-lint run -c ../../.golangci.yml ./...
 
+# e2e 测试文件（test/、test/e2e/ 下带 //go:build e2e 的套件）的 lint：
+# 裸 `golangci-lint run`（make lint）在默认 build tags 下**不扫**这些文件，
+# 故单列本 target 对齐同一门禁，避免 e2e 代码游离在 lint 之外。
+.PHONY: lint-e2e
+lint-e2e:
+	golangci-lint run --build-tags=e2e ./test/...
+
 .PHONY: bench
 bench:
 	@mkdir -p $(BUILD_DIR)/bench
@@ -306,7 +313,7 @@ build-all:
 	done
 
 .PHONY: check-ci
-check-ci: vet lint lint-web-e2e check-loopback notest build-ci test-cover cover-check test-all build-all
+check-ci: vet lint lint-web-e2e lint-e2e check-loopback notest build-ci test-cover cover-check test-all build-all
 
 .PHONY: sonar-analyze
 sonar-analyze:
@@ -387,7 +394,7 @@ test-packages: vet check-loopback
 	@echo "=== pkg/tunnel/... ===" && $(GO) test -race -count=1 -timeout=30s ./pkg/tunnel/... 2>&1
 	@echo "=== pkg/client/... ===" && $(GO) test -race -count=1 -timeout=30s ./pkg/client/... 2>&1
 	@echo "=== pkg/server/... ===" && $(GO) test -race -count=1 -timeout=60s ./pkg/server/... 2>&1
-	@echo "=== test/ (e2e tag) ===" && $(GO) test -race -count=1 -timeout=20m -tags=e2e ./test 2>&1
+	@echo "=== test/... (e2e tag) ===" && $(GO) test -race -count=1 -timeout=30m -tags=e2e ./test/... 2>&1
 
 # 覆盖率 HTML 报告
 .PHONY: cover-html

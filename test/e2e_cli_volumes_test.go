@@ -169,9 +169,30 @@ func TestE2E_CLI_Volumes(t *testing.T) {
 		t.Fatalf("迁移后 stat checksum 不一致: got %s, want %s", got, checksum)
 	}
 
-	// 5) 负例：未知卷 → 非零退出
+	// 5) 负例：未知卷 → 非零退出（只读操作，无副作用）
 	stdout, stderr, err := env.sclientRun(t, env.TmpDir, "--volume", "nosuchvol", "list")
 	if err == nil {
 		t.Fatalf("未知卷应非零退出\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+
+	// 6) 负例：向未知卷上传 → 非零退出，且**两个卷根均无该文件**（无副作用断言）。
+	//    比只断错误码更强：失败的上传若在服务端产生任何落盘/卷状态变化都会被检出。
+	if werr := os.WriteFile(filepath.Join(env.TmpDir, "nosuchvol.txt"), []byte("should not land"), 0644); werr != nil {
+		t.Fatalf("写本地文件失败: %v", werr)
+	}
+	stdout, stderr, err = env.sclientRun(t, env.TmpDir, "--volume", "nosuchvol", "upload", "nosuchvol.txt")
+	if err == nil {
+		t.Fatalf("向未知卷上传应非零退出\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if got := findFilesPrefixed(t, env.StorageRoot, "nosuchvol.txt"); len(got) != 0 {
+		t.Fatalf("失败的上传不应在默认卷落盘, got %v", got)
+	}
+	if got := findFilesPrefixed(t, disk2Root, "nosuchvol.txt"); len(got) != 0 {
+		t.Fatalf("失败的上传不应在 disk2 卷落盘, got %v", got)
+	}
+	var volsAfter volListResp
+	getJSON(t, env.BaseURL+"/api/volumes", &volsAfter)
+	if len(volsAfter.Volumes) != len(vols.Volumes) {
+		t.Fatalf("失败的上传不应改变卷集合: %d -> %d", len(vols.Volumes), len(volsAfter.Volumes))
 	}
 }

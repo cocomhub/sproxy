@@ -118,10 +118,27 @@ func TestE2E_CLI_ShareLifecycle(t *testing.T) {
 		t.Fatalf("revoke 后 GET /api/shares 不应再含 token %s", created.Token)
 	}
 
-	// 6) 负例：分享不存在的文件 → 非零退出
+	// 6) 负例：分享不存在的文件 → 非零退出，且**未新增任何分享**（副作用断言）
 	stdout, stderr, err := env.sclientRun(t, env.TmpDir, "share", "create", "no_such.txt")
 	if err == nil {
 		t.Fatalf("share create 不存在的文件应非零退出\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	var afterFailedCreate shareListResp
+	getJSON(t, env.BaseURL+"/api/shares", &afterFailedCreate)
+	if len(afterFailedCreate.Shares) != 0 {
+		t.Fatalf("失败的 share create 不应新增分享, got %+v", afterFailedCreate.Shares)
+	}
+
+	// 7) 负例：撤销不存在的 token → 非零退出，且分享列表不变（副作用断言）
+	stdout, stderr, err = env.sclientRun(t, env.TmpDir, "share", "revoke", "no-such-token-000000")
+	if err == nil {
+		t.Fatalf("撤销不存在的 token 应非零退出\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	var afterFailedRevoke shareListResp
+	getJSON(t, env.BaseURL+"/api/shares", &afterFailedRevoke)
+	if len(afterFailedRevoke.Shares) != len(afterFailedCreate.Shares) {
+		t.Fatalf("失败的 share revoke 不应改变分享数: %d -> %d",
+			len(afterFailedCreate.Shares), len(afterFailedRevoke.Shares))
 	}
 }
 

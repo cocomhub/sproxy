@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -115,13 +116,13 @@ func (e *cliEnv) sclientJSON(t *testing.T, dir string, v any, args ...string) {
 	}
 }
 
-// findFilesNamed 在 root 下递归找 basename == name 的**普通文件**，返回绝对路径切片
-// （按路径排序）。用于磁盘副作用断言（不硬编码 tenant 段——tenant 名由凭据推导，属实现细节）。
+// walkFiles 在 root 下递归遍历**普通文件**（跳过目录），把 basename 交给 match；
+// 命中者收集为绝对路径并按路径排序返回。
 //
 // 只匹配非目录条目：版本桶的形态是 <tenant>/version/<rel>/<version_id>，即版本文件的
 // 父目录 basename 恰为 <rel>（如 vfile.txt），若不过滤目录会被误计为「文件」。
 // root 不存在时不报错（返回空切片），便于断言「某卷下无该文件」。
-func findFilesNamed(t *testing.T, root, name string) []string {
+func walkFiles(t *testing.T, root string, match func(name string) bool) []string {
 	t.Helper()
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, werr error) error {
@@ -131,7 +132,7 @@ func findFilesNamed(t *testing.T, root, name string) []string {
 			}
 			return werr
 		}
-		if d.Name() == name && !d.IsDir() {
+		if !d.IsDir() && match(d.Name()) {
 			found = append(found, path)
 		}
 		return nil
@@ -141,6 +142,24 @@ func findFilesNamed(t *testing.T, root, name string) []string {
 	}
 	sort.Strings(found)
 	return found
+}
+
+// findFilesNamed 在 root 下递归找 basename == name 的普通文件（按路径排序）。
+// 用于磁盘副作用断言（不硬编码 tenant 段——tenant 名由凭据推导，属实现细节）。
+func findFilesNamed(t *testing.T, root, name string) []string {
+	t.Helper()
+	return walkFiles(t, root, func(n string) bool { return n == name })
+}
+
+// findFilesPrefixed 在 root 下递归找 basename 以 prefix 开头的普通文件（按路径排序）。
+//
+// 用途：断言「某文件的派生/中间产物均已清理」。典型场景是云端下载的未完成产物——
+// 下载器把未完成内容写到 <dest>.partial（pkg/server/downloader/http_downloader.go:167），
+// 另有 <dest>.partial.etag 伴侣；只按精确名 <dest> 断言会**恒真空转**
+// （未完成时 <dest> 根本不存在），必须按前缀匹配才能检出「取消/失败未清理 partial」的回归。
+func findFilesPrefixed(t *testing.T, root, prefix string) []string {
+	t.Helper()
+	return walkFiles(t, root, func(n string) bool { return strings.HasPrefix(n, prefix) })
 }
 
 // getJSON 用签名 client（authedHTTPClient）发起 GET 并把 JSON 响应解析进 v；
