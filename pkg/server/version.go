@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -25,14 +26,64 @@ import (
 // VersionInfo 版本信息。
 type VersionInfo struct {
 	Filename  string `json:"filename"`
-	VersionID int64  `json:"version_id"` // UnixNano timestamp
+	VersionID int64  `json:"version_id"` // 毫秒时间戳×1000 + 随机后缀（见 newVersionID）
 	Size      int64  `json:"size"`
 	Checksum  string `json:"checksum,omitempty"`
 	CreatedAt string `json:"created_at"`
 }
 
+// 版本 ID 生成器的进程内单调兜底状态。
+var (
+	versionIDMu   sync.Mutex
+	lastVersionID int64
+)
+
+// newVersionID 生成新的文件版本 ID：**毫秒时间戳 ×1000 + 3 位随机后缀（0-999），
+// 冲突时单调递增兜底**。
+//
+// 溢出修复：旧实现为 time.Now().UnixNano()*1000 + rand.IntN(1000)。UnixNano()≈1.76e18，
+// ×1000 后≈1.76e21，远超 int64 上限 9.22e18 —— 约每 213.5 天回绕一次且符号各半，当前
+// 时段生成的 ID 恒为负（客户端/服务端按正数语义消费时不可用）。改用毫秒精度 ×1000 后
+// 最大约 1.79e15，远小于 int64 上限，正数可用至约 29 万年。
+//
+// 唯一性：同一毫秒内提供 1000 个随机后缀槽位。但无节流的连续调用可在同一毫秒内产生
+// 远超 1000 次调用（实测 10000 次仅得 1000 个唯一值），故在进程内加锁保证严格单调递增
+// ——候选值不前进时取 lastVersionID+1，使高频连续调用下 ID 仍唯一。
+//
+// 范围界定：lastVersionID 的单调性仅在**本进程内**成立，跨进程或跨重启不保证全局单调；
+// 那些场景由「毫秒时间戳 + 随机后缀」本身的低碰撞概率，以及落盘侧
+// O_CREATE|O_EXCL（已存在则报错）兜底，不会静默覆盖既有版本。
+func newVersionID() int64 {
+	id := time.Now().UnixMilli()*1000 + int64(rand.IntN(1000))
+	versionIDMu.Lock()
+	if id <= lastVersionID {
+		id = lastVersionID + 1
+	}
+	lastVersionID = id
+	versionIDMu.Unlock()
+	return id
+}
+
+// versionIDTime 由版本 ID 还原其创建时间。
+// 版本 ID = 毫秒时间戳 ×1000 + 3 位随机后缀（见 newVersionID），故 /1000 得毫秒时间戳。
+// 历史遗留 ID 均无法可靠还原时间，回落 fallback（调用方传版本文件 mtime）：
+//   - 非正 ID：旧纳秒 ×1000 回绕为负；
+//   - 正的巨值 ID：旧纳秒 ×1000 回绕为正（约一半概率），/1000 后解码为 ~公元 10500 年。
+func versionIDTime(versionID int64, fallback time.Time) time.Time {
+	if versionID <= 0 {
+		return fallback
+	}
+	ts := time.UnixMilli(versionID / 1000)
+	// 合理上限：ID 派生时间不应显著超前于当前——拦截上述回绕为正的巨值遗留 ID，
+	// 避免把版本显示成遥远的未来时间。
+	if ts.After(time.Now().Add(24 * time.Hour)) {
+		return fallback
+	}
+	return ts
+}
+
 // saveVersion 在上传覆盖前保存当前文件版本。
-// 返回保存的版本 ID（UnixNano），如果没有旧文件则返回 0。
+// 返回保存的版本 ID（毫秒时间戳×1000 + 随机后缀，见 newVersionID），如果没有旧文件则返回 0。
 // userRel 是相对 user 桶的路径（如 dir/f.txt，无 user/ 前缀）；tnt 为请求者租户。
 // 版本文件落 version 桶（version/<userRel>/<id>），checksum key = version/<userRel>/<id>
 // （相对租户根，无 owner 前缀，per-tenant store）——消除旧 __version__ 前缀的 R4 碰撞。
@@ -53,9 +104,7 @@ func (h *Handlers) saveVersion(userRel string, tnt *storage.Tenant, owner string
 	}
 	srcSize := srcInfo.Size()
 
-	versionID := time.Now().UnixNano()
-	// 添加随机后缀（0-999），防止同一纳秒内多个请求产生冲突
-	versionID = versionID*1000 + int64(rand.IntN(1000))
+	versionID := newVersionID()
 	verDir, ok := tnt.FeatureRel("version", userRel)
 	if !ok {
 		return 0, fmt.Errorf("保存版本: 无效的版本目录路径: %s", userRel)
@@ -206,7 +255,7 @@ func (h *Handlers) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner
 		return
 	}
 
-	// 按文件名（UnixNano 时间戳）排序，删除最旧的
+	// 按文件名（版本 ID 为单调递增数值）排序，删除最旧的
 	// 使用 ParseInt 解析为 int64 后做数值比较，消除字符串字典序与数值序不一致的隐患。
 	// 使用 SliceStable 保持相等元素的原始顺序，避免排序不稳定带来的不确定性。
 	sort.SliceStable(entries, func(i, j int) bool {
@@ -303,7 +352,9 @@ func (h *Handlers) listVersionsHandler(w http.ResponseWriter, r *http.Request) {
 			Filename:  filepath.ToSlash(remotePath),
 			VersionID: versionID,
 			Size:      info.Size(),
-			CreatedAt: time.Unix(0, versionID).Format(time.RFC3339),
+			// 版本 ID 为毫秒时间戳×1000+随机后缀（见 newVersionID），/1000 还原毫秒时间戳；
+			// 历史遗留的非正 ID 无法还原时间，回落版本文件 mtime。
+			CreatedAt: versionIDTime(versionID, info.ModTime()).Format(time.RFC3339),
 		}
 		// 尝试获取 checksum（per-tenant store，key = version/<rel>/<id>）
 		if csStore != nil {
