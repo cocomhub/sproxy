@@ -216,11 +216,11 @@ func TestVolumes_Badge(t *testing.T) {
 	}
 
 	// 接线②（渲染断言，badge 只读）：聚合列表两文件都渲染，且各自行 .vol-badge 文本与 API 一致。
-	if _, err := page.WaitForSelector("#file-table tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)}); err != nil {
+	if err := waitLoc(page, "#file-table tr", nil, 8000); err != nil {
 		t.Fatalf("file table not loaded: %v", err)
 	}
 	for _, name := range []string{"a.txt", "b.txt"} {
-		if _, err := page.WaitForSelector("text="+name, playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)}); err != nil {
+		if err := waitLoc(page, "text="+name, nil, 8000); err != nil {
 			t.Fatalf("expected %s in aggregated file list: %v", name, err)
 		}
 	}
@@ -264,10 +264,7 @@ func TestVolumes_Panel(t *testing.T) {
 
 	page.Goto(baseURL + "/ui/")
 	// 等 initUploadVolumeSelect 的 GET /api/volumes 完成（下拉被填充），避免与点击捕获混淆。
-	if _, err := page.WaitForSelector("#upload-volume option[value='main']", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateAttached,
-		Timeout: playwright.Float(8000),
-	}); err != nil {
+	if err := waitLoc(page, "#upload-volume option[value='main']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
 		t.Fatalf("upload volume select not populated: %v", err)
 	}
 
@@ -275,10 +272,7 @@ func TestVolumes_Panel(t *testing.T) {
 	if _, err := page.Evaluate("showStats()"); err != nil {
 		t.Fatalf("showStats: %v", err)
 	}
-	if _, err := page.WaitForSelector("#stats-modal", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8000),
-	}); err != nil {
+	if err := waitLoc(page, "#stats-modal", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("stats-modal not visible: %v", err)
 	}
 
@@ -310,7 +304,7 @@ func TestVolumes_Panel(t *testing.T) {
 	}
 
 	// 渲染断言：面板表格渲染出 main/disk2 卷名与真实用量（2048 B → "2.0 KB"）。
-	if _, werr := page.WaitForSelector("#volumes-panel table tbody tr", playwright.PageWaitForSelectorOptions{Timeout: playwright.Float(8000)}); werr != nil {
+	if werr := waitLoc(page, "#volumes-panel table tbody tr", nil, 8000); werr != nil {
 		content, _ := page.Locator("#volumes-panel").InnerText()
 		t.Fatalf("volumes table not rendered, panel content: %s", content)
 	}
@@ -345,10 +339,7 @@ func TestVolumes_UploadVolumeSelect(t *testing.T) {
 		t.Fatal("#upload-volume select not found")
 	}
 	// 等待 /api/volumes 异步填充可见卷 option（main 先到即可判定 populate 完成）。
-	if _, err := page.WaitForSelector("#upload-volume option[value='main']", playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateAttached,
-		Timeout: playwright.Float(8000),
-	}); err != nil {
+	if err := waitLoc(page, "#upload-volume option[value='main']", playwright.WaitForSelectorStateAttached, 8000); err != nil {
 		vals, _ := page.Evaluate(`Array.from(document.querySelectorAll('#upload-volume option')).map(o => o.value)`)
 		t.Fatalf("visible volume option not populated, current options=%v: %v", vals, err)
 	}

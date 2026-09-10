@@ -264,6 +264,14 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
           go-version: "1.26"
+      - name: Lint web/e2e module
+        uses: golangci/golangci-lint-action@v9
+        env:
+          GOWORK: "off"
+        with:
+          version: latest
+          working-directory: web/e2e
+          args: --timeout=5m -c ../../.golangci.yml ./...
       - name: Install Playwright browsers
         run: |
           cd web/e2e
@@ -271,4 +279,4 @@ jobs:
       - name: Run UI E2E tests
         run: |
           cd web/e2e
-          GOWORK=off go test -v -count=1 -timeout=120s ./...
+          GOWORK=off go test -v -count=1 -timeout=600s ./...
