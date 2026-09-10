@@ -9,6 +9,8 @@ package e2e
 //   - testServerCfg：可配置的测试实例启动器（ForceTOTP / CloudDownloadAllowPrivate /
 //     自定义 Volumes 等开关），testServer 为它的薄委托，保证既有用例零回归。
 //   - waitLoc：以 Locator.WaitFor 替代已废弃的 Page.WaitForSelector（lint SA1019）。
+//   - waitTextGone / waitTextVisible：轮询容器文本直到目标词消失/出现——断言「变化后的
+//     DOM」而非「元素存在」。
 //
 // 无凭据前提与既有 testServer 完全一致（CredentialTTL=-1 → ring 空 +
 // AllowInsecureLoopback=true → loopback 兜底放行），保证既有用例语义不变。
@@ -20,8 +22,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/mxschmitt/playwright-go"
@@ -77,4 +81,35 @@ func waitLoc(page playwright.Page, selector string, state *playwright.WaitForSel
 		State:   state,
 		Timeout: playwright.Float(timeoutMs),
 	})
+}
+
+// waitTextGone 轮询 sel 容器的 InnerText，直到不再包含 want（≤timeout）。
+// 用于断言删除/重命名/切目录后的行消失（避免只断元素存在）。
+func waitTextGone(t *testing.T, page playwright.Page, sel, want string, timeoutMs float64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	for time.Now().Before(deadline) {
+		txt, err := page.Locator(sel).InnerText()
+		if err == nil && !strings.Contains(txt, want) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("文本 %q 未在 %.0fms 内从 %s 消失（疑似未接线）", want, timeoutMs, sel)
+}
+
+// waitTextVisible 轮询 sel 容器的 InnerText，直到包含 want（≤timeout）。
+// 用于断言轮询类流程（如云下载每 3s 刷新）后出现的状态文案。
+func waitTextVisible(t *testing.T, page playwright.Page, sel, want string, timeoutMs float64) {
+	t.Helper()
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	for time.Now().Before(deadline) {
+		txt, err := page.Locator(sel).InnerText()
+		if err == nil && strings.Contains(txt, want) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	txt, _ := page.Locator(sel).InnerText()
+	t.Fatalf("文本 %q 未在 %.0fms 内出现在 %s 中（疑似未接线）；当前文本: %q", want, timeoutMs, sel, txt)
 }
