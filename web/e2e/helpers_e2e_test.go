@@ -16,6 +16,7 @@ package e2e
 // AllowInsecureLoopback=true → loopback 兜底放行），保证既有用例语义不变。
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -81,6 +82,31 @@ func waitLoc(page playwright.Page, selector string, state *playwright.WaitForSel
 		State:   state,
 		Timeout: playwright.Float(timeoutMs),
 	})
+}
+
+// respondDialogs 安装 page 级 dialog 处理器（常驻）。Playwright 默认 auto-dismiss，
+// 未装处理器时 confirm() 返回 false → 点击 inert；所有 confirm/prompt 流程必须先装。
+// 序列 dialog（批重命名 N 个 prompt）在 respond 内按 d.Message() 分派（Playwright
+// 串行派发 dialog 事件，按消息无状态分派即安全）。
+func respondDialogs(page playwright.Page, respond func(d playwright.Dialog)) {
+	page.OnDialog(func(d playwright.Dialog) { respond(d) })
+}
+
+// acceptDialog 对每个 dialog 一律 Accept（prompt 时写入 promptText）。
+func acceptDialog(page playwright.Page, promptText string) {
+	respondDialogs(page, func(d playwright.Dialog) { _ = d.Accept(promptText) })
+}
+
+// requestJSON 解析捕获到的请求体 JSON 到 v。
+func requestJSON(t *testing.T, req playwright.Request, v any) {
+	t.Helper()
+	b, err := req.PostDataBuffer()
+	if err != nil {
+		t.Fatalf("读取请求体: %v", err)
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		t.Fatalf("解析请求体 JSON: %v (body=%q)", err, string(b))
+	}
 }
 
 // waitTextGone 轮询 sel 容器的 InnerText，直到不再包含 want（≤timeout）。
