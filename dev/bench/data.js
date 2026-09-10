@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789070566128,
+  "lastUpdate": 1789070842300,
   "repoUrl": "https://github.com/cocomhub/sproxy",
   "entries": {
     "Benchmark": [
@@ -330462,6 +330462,150 @@ window.BENCHMARK_DATA = {
             "value": 9,
             "unit": "allocs/op",
             "extra": "1295260 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "suixibing@gmail.com",
+            "name": "suixibing",
+            "username": "suixibing"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a19cdcc2817d1ed1438899c6387a4630ba73aaa3",
+          "message": "test(e2e): CLI 真服务端到端补强（12 用例 + 孤儿修复 + 递归门禁） (#177)\n\n* docs(plan): PR-F3 CLI 真服务 e2e 补强实现计划\n\n* test(e2e): CLI 真服务 harness + 基础文件面/元信息用例\n\n新增 test/e2e_cli_harness_test.go：startCLIEnv 复用 startSPROXYImpl 起真实\nsproxy 子进程 + e2eBinPath 构建的 sclient 二进制，sclientRun/sclient/sclientJSON\n以子进程驱动 CLI，并注入 --config 与 XDG_CACHE_HOME/XDG_CONFIG_HOME 隔离本机用户态\n（cd 的 currentDir 持久化在 XDG 缓存，与 --config 无关）。findFilesNamed/rawGET\n提供磁盘副作用与公开路由断言原语。\n\n新增 test/e2e_cli_files_test.go 三个用例：\n- UploadDownloadListDelete：upload→磁盘+checksum、/api/files、list --json、\n  download 字节全等、/api/stats 计数、delete→磁盘消失 + stat 404\n- StatSearchStats：多文件 upload 磁盘校验、stats 与 stat server 字段一致、\n  search --json 唯一命中且 checksum 一致、search 文本输出\n- MvBatchRename：mv/batch-rename 的接口 checksum + 磁盘新旧名副作用、\n  源不存在负例断言非零退出且无副作用\n\n* test(e2e): CLI 分享生命周期与一次性链接用例\n\n新增 test/e2e_cli_share_test.go：\n- ShareLifecycle：share create --json → GET /api/shares 含 token/未过期 →\n  公开 /s/{token} 无签名下载逐字节全等 + Content-Disposition 指出文件名 →\n  share list --json → share revoke → 公开路由 404 + API 列表移除；\n  负例 share create 不存在文件断言非零退出\n- ShareOneTime：--one-time 创建后首次访问 200 且内容全等，\n  二次访问因 Consume 删除链接返回 404\n\n* test(e2e): CLI 版本管理生命周期与关闭态用例\n\n新增 test/e2e_cli_versions_test.go（versioning.enabled + max_versions:5）：\n- VersionsLifecycle：覆盖上传保存旧版本 → meta version list --json（size/checksum/\n  int64 version_id）→ GET /api/versions 交叉核对 → 磁盘版本文件（落 version 桶、\n  按 version_id 命名、内容 == V1）→ restore（当前文件回 V1 + stat checksum 一致 +\n  restore 前自动备份 V2）→ delete（列表回 1、API 与磁盘均无该 id、当前文件不动）→\n  负例删除版本 0 非零退出且无副作用\n- VersionsDisabled：versioning 缺省关闭时 meta version list 非零退出（服务端 501），\n  文件仍留在磁盘\n\nfindFilesNamed 收紧为只匹配普通文件：版本桶形态 <tenant>/version/<rel>/<version_id>\n使版本文件父目录 basename 恰为 <rel>，原实现会把该目录误计为文件。\n\n发现产品缺陷（未改生产代码）：服务端 versionID = UnixNano()*1000+rand 存在 int64\n溢出（UnixNano≈1.79e18，×1000 溢出约 194 倍，当前时段恒为负），而 client 侧\nRestoreVersion/DeleteVersion 有 versionID <= 0 守卫，导致 CLI restore/delete 恒失败\n\"version_id must be positive\"（且负 id 裸传还会被 pflag 当 shorthand flag 拒绝）。\n测试以 versionOp helper 分派：id > 0 走 CLI 契约路径，id <= 0 退回同路由签名 HTTP\n调用以保住服务端语义覆盖；缺陷修复后自动改走 CLI。\n\n* test(e2e): CLI 云端下载提交/等待/取消/删除用例\n\n新增 test/e2e_cli_cloud_test.go，源站为 127.0.0.1 httptest（基础配置已含\ncloud_download_allow_private: true）：\n- CloudDownloadSubmitWaitDelete：submit → list --json 取 id 且 filename 为\n  payload.bin → wait 至 completed → 磁盘 payload.bin 内容 checksum 一致 →\n  delete --yes → 任务列表与磁盘双清\n- CloudDownloadCancel：源站阻塞在 release channel → 轮询至 pending/downloading →\n  cancel → 状态 cancelled 且不留 slow.bin 产物\n- CloudDownloadDeleteRequiresYes：无 --yes 的 delete 非零退出且任务仍在\n\ncloudTasks helper 处理 CLI 空列表在 JSON 模式下输出为空的契约（cloud_list.go 走\nfm.Println，JSONFormatter 忽略），空输出即零任务而非解析失败。\n\n* test(e2e): CLI 多卷列表/落卷/分卷查询/跨卷迁移用例\n\n新增 test/e2e_cli_volumes_test.go（volumes=main+disk2，placement: prefer-default；\nmain 卷 root 留空归一为 --storage-root 目录，保证凭据 store 种子路径不变）：\n- volumes --json 断言 main/disk2 可见、allowed、缺省 ACL mode=deny（默认开放），\n  并与 GET /api/volumes 卷名集合交叉核对\n- upload --volume disk2 → 文件落 disk2 卷根且内容一致、默认卷根无该文件\n- list --volume 分卷隔离：disk2 可见且带卷名、main 不可见\n- mv --to-volume main 跨卷迁移 → disk2 卷根清空、默认卷根内容 checksum 一致、\n  HEAD /api/files/stat checksum 一致\n- 负例：未知卷 list 非零退出\n\ncliFileList helper 处理 CLI 空列表在 JSON 模式下输出为空的契约（list.go 走\nfm.Println，JSONFormatter 忽略），空输出即零文件而非解析失败。\n\n* test(e2e): 共享 getJSON helper 归位 harness + 修 govet shadow\n\n- getJSON（签名 HTTP + JSON 解码，被 files/share/versions/volumes 四个用例文件\n  共用）从 e2e_cli_files_test.go 移入 harness 文件，与 authedHTTPClient 同处；\n- 修 govet shadow：文件面用例中 err 限定在 if 作用域内，避免后续 for 循环内的\n  err 声明遮蔽（golangci-lint --build-tags=e2e 从 4 issues 降至 0）。\n\n* test(e2e): 修复 test/e2e 孤儿二进制用例并纳入 test-e2e 递归门禁\n\n修 test/e2e/e2e_binary_test.go（认证重构后固定 401 的历史孤儿）：\n- 自足实现（跨包无法复用 test/ helper）包级常量 e2eAK/e2eSK/e2eID 与\n  seedCredentialStoreLocal，向 <storage-root>/anonymous/meta/credentials.json\n  预写 plain alive 凭据，使服务端 Ring 首启即识别 CLI 携带的 AK（不 seed 则首启\n  生成随机 anonymous 凭据 → 401）；\n- 配置去掉已废除的 tunnel_key；\n- 4 条 sclient 调用统一注入 --config（不存在路径，隔离本机用户配置）、\n  --access-key/-secret/-id 三件套，并以 XDG_CACHE_HOME/XDG_CONFIG_HOME 隔离\n  cd 持久化的当前目录；\n- 补真实副作用断言：upload 后 WalkDir 找到 hello.txt 且内容一致、download 字节\n  全等、delete 后磁盘不再有 hello.txt；新增 findFilesNamedLocal（只匹配普通文件）。\n\nMakefile：test-e2e 由非递归 ./test 改回 ./test/...（递归收 test/e2e/ 子包），\nGOTEST_TIMEOUT_E2E 20m→30m，重写 target 上方注释（去掉孤儿排除说明）。\nCLAUDE.md：同步 make test-e2e 描述与测试规范第 5 条。\n\n* test(e2e): 版本用例移除负 ID HTTP 兜底，无条件走真实 CLI\n\n版本 ID 溢出缺陷已在 master 修复（137aaa34：newVersionID 改为毫秒时间戳×1000+\n随机后缀+进程内单调递增，恒为正），负 ID 兜底分支即成死代码，且保留会掩盖\n「ID 再次变负」的回归。本次收尾：\n\n- versionOp 删除按 versionID 符号分派与签名 HTTP 回退，无条件走\n  `sclient meta version <op> <filename> <version_id>` 真子进程路径；\n- 新增 CLI 自身文本输出断言（restore→\"已恢复文件 '...' 到版本 <id>\"、\n  delete→\"已删除文件 '...' 的版本 <id>\"），以此证明操作确由 sclient 二进制执行\n  （HTTP 直调不产生这些 stdout），取代原先的隐式假设；\n- VersionsLifecycle 显式断言 version_id > 0（newVersionID 不变量），\n  使「ID 再次变负」以明确信息变红而非间接的 must be positive 失败；\n- 清理相关注释（UnixNano*1000 → 毫秒时间戳×1000）与不再使用的 io/net/url import。\n\n* test(e2e): F3 审查修复（M-1/M-2 + 5 项建议）\n\nM-2（测试有效性，必修）取消用例的「不留盘」断言原查精确名 slow.bin，而未完成产物\n实名是 slow.bin.partial（pkg/server/downloader/http_downloader.go:167）→ 断言恒真、\n取消不清理 partial 的回归检不出。改法：\n- harness 新增 findFilesPrefixed（按 basename 前缀递归匹配普通文件）；\n- 源站改为先写一半 body 并 Flush，使下载器真正创建并写入 .partial；\n- 取消前**先等 slow.bin* 产物出现**（不存在即 Fatal，杜绝空转），取消后轮询断言\n  slow.bin*（含 .partial/.partial.etag）已清空（清理 best-effort 且可能异步，留 3 倍余量）。\n对抗实验：临时把 removeTaskDir 改为 no-op（禁用全部清理路径），用例变红并打印残留\nslow.bin.partial；已完整还原（pkg/ 无 diff、无残留标记）。\n\nM-1（遗留不一致，必修）Makefile test-packages 的 e2e 分组仍是旧的非递归 ./test + 20m，\n与「递归纳入 test/e2e」不一致 → 改为 -tags=e2e ./test/... + 30m。\n\n建议项：\n1. 负例补无副作用断言——share：失败的 create 不新增分享、失败的 revoke 不改分享数；\n   volumes：向未知卷 upload 非零退出且两个卷根均无该文件、卷集合不变。\n2. cloud-download wait 显式 --timeout 2m（默认 30m 与 go test 超时同量级，卡死会耗尽预算）。\n3. 版本用例的 CLI stdout 断言由精确整句放宽为「动词 + 文件名 + version_id」三要素\n   （仍足以证明走 sclient 二进制：HTTP 直调不产生 stdout），避免文案微调导致假失败。\n4. 新增 lint-e2e target（golangci-lint --build-tags=e2e ./test/...）并挂入 check-ci——\n   裸 make lint 不带 e2e tag，扫不到 //go:build e2e 的测试文件。\n5. CLAUDE.md 测试工具集补 test/e2e_cli_harness_test.go 的 harness 说明（startCLIEnv /\n   sclientRun / sclientJSON / findFilesNamed / findFilesPrefixed / getJSON / rawGET、入口与断言铁律）。\n\n* ci(e2e): e2e job 补 e2e build-tag lint 步骤，闭合门禁真空\n\nlint-e2e（golangci-lint --build-tags=e2e ./test/...）此前只在本地 make check-ci\n可达：CI 的 e2e job 只跑 make test-e2e，lint job 用默认 build tags（扫不到\n//go:build e2e 的文件）→ 新门禁在 CI 从未执行，与已挂进 ui-e2e job 的 lint-web-e2e\n形成缺口。\n\n在 e2e job（ubuntu+windows 矩阵）的 prepare 之后、耗时的 go test e2e 之前插入\ngolangci-lint 步骤，写法与 ui-e2e job 的 web/e2e lint 一致：\ngolangci/golangci-lint-action@v9 + version: latest +\nargs: --timeout=5m --build-tags=e2e ./test/...（working-directory 取仓库根）。\n\n* ci: 固定 golangci-lint-action 到 commit SHA 与精确工具版本（供应链加固）\n\n* ci(e2e): e2e build-tag lint 步骤限定 Linux（Windows checkout CRLF 致 gofmt 误报）",
+          "timestamp": "2026-09-11T04:03:51+08:00",
+          "tree_id": "36b7b3cadfcae69081433ed43d1f3435edc5158a",
+          "url": "https://github.com/cocomhub/sproxy/commit/a19cdcc2817d1ed1438899c6387a4630ba73aaa3"
+        },
+        "date": 1789070832259,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 755.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1556487 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 755.9,
+            "unit": "ns/op",
+            "extra": "1556487 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1556487 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1556487 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 765.3,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1570498 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 765.3,
+            "unit": "ns/op",
+            "extra": "1570498 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1570498 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1570498 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 804.2,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1557630 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 804.2,
+            "unit": "ns/op",
+            "extra": "1557630 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1557630 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1557630 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 787.9,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1560091 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 787.9,
+            "unit": "ns/op",
+            "extra": "1560091 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1560091 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1560091 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel)",
+            "value": 791.1,
+            "unit": "ns/op\t    1776 B/op\t       9 allocs/op",
+            "extra": "1532401 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - ns/op",
+            "value": 791.1,
+            "unit": "ns/op",
+            "extra": "1532401 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - B/op",
+            "value": 1776,
+            "unit": "B/op",
+            "extra": "1532401 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkEncryptDecrypt (github.com/cocomhub/sproxy/pkg/tunnel) - allocs/op",
+            "value": 9,
+            "unit": "allocs/op",
+            "extra": "1532401 times\n4 procs"
           }
         ]
       }
