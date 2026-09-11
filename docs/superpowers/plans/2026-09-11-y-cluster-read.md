@@ -265,8 +265,8 @@ func (v Volume) AuthorizeMeshRead(node, fingerprint, owner string) bool {
 		return false
 	}
 	want := normalizeFingerprint(fingerprint)
-	for i := range v.MeshReaders {
-		mr := &v.MeshReaders[i]
+	for i := range v.ACL.MeshReaders {
+		mr := &v.ACL.MeshReaders[i]
 		if mr.Node != node || mr.Owner != owner {
 			continue
 		}
@@ -285,9 +285,9 @@ func (v Volume) MeshReaderFor(fingerprint string) (MeshReader, bool) {
 	if want == "" {
 		return MeshReader{}, false
 	}
-	for i := range v.MeshReaders {
-		if fingerprintEqual(normalizeFingerprint(v.MeshReaders[i].Fingerprint), want) {
-			return v.MeshReaders[i], true
+	for i := range v.ACL.MeshReaders {
+		if fingerprintEqual(normalizeFingerprint(v.ACL.MeshReaders[i].Fingerprint), want) {
+			return v.ACL.MeshReaders[i], true
 		}
 	}
 	return MeshReader{}, false
