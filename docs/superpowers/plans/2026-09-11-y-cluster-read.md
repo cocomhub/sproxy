@@ -506,8 +506,8 @@ type VolumeMeshReaderConfig struct {
 				if mr.Owner == "" {
 					return fmt.Errorf("卷 %q 的 mesh_readers.owner 不能为空", v.Name)
 				}
-				if err := storage.ValidSegmentName(mr.Owner); err != nil {
-					return fmt.Errorf("卷 %q 的 mesh_readers.owner 非法: %w", v.Name, err)
+				if !storage.ValidSegmentName(mr.Owner) { // 注意：返回 bool，不是 error（pkg/storage/name.go:25）
+					return fmt.Errorf("卷 %q 的 mesh_readers.owner 非法 %q（须为合法段名）", v.Name, mr.Owner)
 				}
 				norm, err := tunnel.ParseFingerprint(mr.Fingerprint)
 				if err != nil {
