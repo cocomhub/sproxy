@@ -343,18 +343,26 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 
 | 命令 | 用途 |
 |------|------|
-| `upload <file>...` | 上传文件，路径保留目录结构 |
-| `download <filename> [output]` | 下载文件 |
-| `delete <filename>` | 删除文件 |
-| `batch <file>` | 从文件逐行读取命令批量执行 |
-| `batch-delete <file>` | 批量删除（从文件读取文件名列表） |
-| `batch-rename <file>` | 批量重命名（从文件读取 from/to 对） |
-| `list` | 列出文件（支持 `--subdir`，受 `cd` 影响） |
-| `stat <filename>` | 查询单文件元信息 |
-| `search <query>` | 搜索文件名 |
-| `mv <from> <to>` | 重命名/移动文件 |
-| `archive <name> <path>...` | 创建归档 |
-| `cloud-download <url>...` | 创建云端下载任务 |
+| `upload <file>...` | 上传文件，路径保留目录结构（可选 `--volume` 限定目标卷） |
+| `download <filename> [output]` | 下载文件（可选 `--volume`） |
+| `delete <filename>` | 删除文件（可选 `--volume`） |
+| `batch-delete <file1> [file2...]` | 批量删除多个文件（一次提交避免逐文件 RTT） |
+| `batch-rename <from1> <to1> [from2 to2...]` | 批量重命名（参数成对传入 from/to） |
+| `list` | 列出文件（支持 `--subdir`，可选 `--volume`，受 `cd` 影响） |
+| `volumes` | 列出当前凭据可见的存储卷（name/mode/capacity/usage/allowed；缺省单卷列 default） |
+| `stat [server]` | 显示本地 client 状态或远端服务统计（`stat server`）；文件元信息查询见 `meta` |
+| `meta <filename>` | 查询单文件元信息（含版本历史摘要；子命令 `meta version list/restore/delete` 管理版本） |
+| `search <keyword>` | 搜索文件名 |
+| `mv <from> <to>` | 重命名/移动文件（`--volume` 限定源卷；`--to-volume` 跨卷迁移） |
+| `mkdir <dirname>` / `rmdir <dirname>` | 创建 / 删除空目录 |
+| `preview <filename>` | 预览服务端文件（下载到临时目录并调用本地打开） |
+| `archive <file>...` / `archive-dir <dirname>` | 将服务端文件/目录打包下载为 tar.gz |
+| `cloud-download <url>...` | 云端下载（链式：提交→等待→打包→下载→清理） |
+| `cloud-download-group` | 云端下载到组（链式，支持组管理） |
+| `sync <push\|pull>` | 节点间文件同步 |
+| `share create/list/revoke` | 文件分享管理 |
+| `stats` | 显示服务器统计信息 |
+| `identity generate/show/fingerprint` | 节点长时身份密钥与指纹管理（供对端 pinning） |
 | `tunnel [flags] <url>` | 隧道请求 |
 | `relay start/status/...` | 中继节点（连接 Hub）：`relay start --hub wss://.../ws --token T --node-id N [--service name:addr] [--dial-allow] [--dial-allow-cidr CIDR]` |
 | `relay dial --node <id> --tcp <addr> [-l :port]` | 经 hub 中继拨号到目标节点出口（任意 TCP） |
@@ -364,14 +372,17 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 | `mesh status` | 列出 hub 上的 mesh 服务（`--gateway <addr>` 改查本地 mesh node 直连拓扑/链路类型） |
 | `mesh node [flags]` | 单进程常驻 mesh 节点（注册+中继+webrtc 直连+自动对等发现+本地网关）：`--hub` `--node-id` `--token` `--service` `--dial-allow` `--discover` `--discover-interval` `--gateway-addr` |
 | `trust renew` | 调 `POST /api/credentials/{ak}/renew` 轮换 SK（服务端控 TTL，客户端不可传 ttl）；新 SK 自动回填 `access_key_secret`/`access_key_id` |
+| `trust login` | 注册 / 登录获取 AK/SK（首个 admin 经本机回环注册） |
 | `trust sk list` / `trust sk delete <skID>` / `trust sk expire <skID> [--until RFC3339]` | 管理本 AK 的 SK 条目（list 只展示本端能解开的 secret，其余 masked） |
 | `trust ak list` / `trust ak add [--mesh M]` / `trust ak delete <ak> [--force]` | AccessKey 管理（admin-only；ak add 不指定 ak 时本地生成一对并注册，服务端单次回传初始 Secret；ak delete 需交互输入 AK 名二次确认） |
 | `genkey` | 生成 64 hex 密钥（tunnel_key 已废除，仅历史用途） |
-| `config [show\|set <k> <v>]` | 配置管理 |
+| `config [show\|set <k> <v>\|remote]` | 配置管理 |
 | `diag` | 诊断连接问题 |
-| `version` | 版本 + 配置信息 |
-| `cd [path]` | 切换当前目录 |
-| `pwd` | 打印当前目录 |
+| `socks -l :port --exit <node>` | 启动 SOCKS5 代理（CONNECT 经 mesh 到指定出口节点） |
+| `udp map -l :udp --exit <node> --remote <host:port>` | UDP 隧道（端口映射） |
+| `version` / `version dirty-info` | 版本 + 配置信息 |
+| `cd [path]` / `pwd` | 切换当前目录 / 打印当前目录 |
+| `completion` / `help` | cobra 内置补全与帮助 |
 
 ### mesh 内网穿透（双重 NAT 场景）
 
