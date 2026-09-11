@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -233,14 +232,16 @@ func parseVolumeACL(ac *VolumeACLConfig) volume.ACL {
 		acl.Owners[o] = struct{}{}
 	}
 	// Y 一期：跨节点只读授权条目（指纹归一为规范形；非法值已由 Config.Validate 拒绝）。
-	// 保留 best-effort 归一以防装配路径未经 Validate 直接调用（与 pkg/volume 的比较归一化对齐）。
 	for _, mr := range ac.MeshReaders {
-		fp := strings.ToLower(strings.TrimSpace(mr.Fingerprint))
-		if norm, err := tunnel.ParseFingerprint(mr.Fingerprint); err == nil {
-			fp = norm
+		// 解析失败即丢弃该条目（fail-closed 纵深防御）：降级保留一个语义不明的
+		// 字符串会在未来改动中被误用。生产路径上非法指纹已由 Config.Validate 响亮
+		// 拒绝，本分支不可达；此处仅作装配层兜底。
+		norm, err := tunnel.ParseFingerprint(mr.Fingerprint)
+		if err != nil {
+			continue
 		}
 		acl.MeshReaders = append(acl.MeshReaders, volume.MeshReader{
-			Node: mr.Node, Fingerprint: fp, Owner: mr.Owner,
+			Node: mr.Node, Fingerprint: norm, Owner: mr.Owner,
 		})
 	}
 	return acl

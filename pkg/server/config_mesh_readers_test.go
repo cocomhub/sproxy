@@ -126,3 +126,68 @@ func TestMeshReadersConfig_ParseVolumeACL(t *testing.T) {
 		t.Fatal("解析后的 ACL 应放行 nodeA/alice 只读")
 	}
 }
+
+// TestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint 表驱动钉住 parseVolumeACL 的
+// 指纹归一：接受纯 hex / 大小写 / 可省前缀 / 首尾空白，输出恒为规范形 "sha256:<64 小写 hex>"。
+//
+// 该归一化是「畸形指纹唯一防线」的下游一环：pkg/volume 的 normalizeFingerprint 只做
+// Trim+ToLower、不校验 sha256: 前缀与 64 位 hex，配置写错格式只会**静默永不命中**
+// （授权被拒但无任何报错）。故这条链路值得单独钉住，而非只靠「大写+带前缀」一种输入。
+func TestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint(t *testing.T) {
+	hexOnly := strings.TrimPrefix(testReaderFP, "sha256:")
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"纯 64 hex（无前缀）", hexOnly},
+		{"大写 hex（无前缀）", strings.ToUpper(hexOnly)},
+		{"大写 hex + 大写前缀 SHA256:", "SHA256:" + strings.ToUpper(hexOnly)},
+		{"首尾带空白", "  " + testReaderFP + "\t"},
+		{"已规范形（幂等）", testReaderFP},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			acl := parseVolumeACL(&VolumeACLConfig{
+				Mode:        VolumeACLAllow,
+				Owners:      []string{"alice"},
+				MeshReaders: []VolumeMeshReaderConfig{{Node: "nodeA", Fingerprint: tc.in, Owner: "alice"}},
+			})
+			if len(acl.MeshReaders) != 1 {
+				t.Fatalf("合法指纹 %q 不应被丢弃, got %d 条", tc.in, len(acl.MeshReaders))
+			}
+			if got := acl.MeshReaders[0].Fingerprint; got != testReaderFP {
+				t.Fatalf("输入 %q 应归一为规范形 %q, got %q", tc.in, testReaderFP, got)
+			}
+		})
+	}
+}
+
+// TestMeshReadersConfig_ParseVolumeACL_DropsMalformed 钉住装配层 fail-closed：畸形指纹被
+// **丢弃该条目**而非降级保留（降级保留一个语义不明的字符串会在未来改动中被误用）。
+//
+// 三条断言对应审查要求：① 畸形条目不在结果里；② 不 panic（直接调 parseVolumeACL，
+// 不经 Config.Validate——本函数在生产路径上畸形指纹已被 Validate 响亮拒绝，此处是装配层
+// 兜底；若实现改为 panic/fatal 本用例即失败）；③ 同批合法条目仍在 → 证明是「丢弃单条」
+// 而非「整体清空」（后者同样能骗过 len 比较之外的宽松断言）。
+func TestMeshReadersConfig_ParseVolumeACL_DropsMalformed(t *testing.T) {
+	notHex := "sha256:" + strings.Repeat("z", 64) // 长度合法但非 hex
+	acl := parseVolumeACL(&VolumeACLConfig{
+		Mode:   VolumeACLAllow,
+		Owners: []string{"alice"},
+		MeshReaders: []VolumeMeshReaderConfig{
+			{Node: "nodeA", Fingerprint: "sha256:abc", Owner: "alice"}, // 长度非法 → 丢弃
+			{Node: "nodeB", Fingerprint: testReaderFP, Owner: "alice"}, // 合法 → 必须保留
+			{Node: "nodeC", Fingerprint: notHex, Owner: "alice"},       // 非 hex → 丢弃
+		},
+	})
+	if len(acl.MeshReaders) != 1 {
+		t.Fatalf("畸形指纹应被丢弃、合法条目应保留（期望 1 条）, got %d 条: %+v", len(acl.MeshReaders), acl.MeshReaders)
+	}
+	got := acl.MeshReaders[0]
+	if got.Node != "nodeB" || got.Owner != "alice" {
+		t.Fatalf("保留的应是合法条目 nodeB/alice, got %+v", got)
+	}
+	if got.Fingerprint != testReaderFP {
+		t.Fatalf("保留条目指纹应为规范形 %q, got %q", testReaderFP, got.Fingerprint)
+	}
+}
