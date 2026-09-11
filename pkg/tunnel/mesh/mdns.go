@@ -239,6 +239,14 @@ func (s *MDNSServer) Start(ctx context.Context) error {
 		// 不值得因此拒绝启动整个 mDNS。对照：收敛路径对同一 syscall 的失败是**致命**
 		// 的（见 mdns_loopback_*.go）——那里"同机多实例互收"正是被测对象本身，
 		// 静默降级会让用例变绿而失效。两处都不静默，只是严重级别按用途不同。
+		//
+		// 已知与被取代的手写实现（各平台统一 4 字节 SetsockoptInt）**不完全等价**，
+		// x/net 的该选项长度按平台取（ipv4/sys_*.go）：
+		//   - Len=4（darwin/dragonfly/freebsd/linux/windows）——与旧实现等价；
+		//   - Len=1（netbsd/openbsd/aix/solaris/zos）——旧实现以 4 字节设置与该平台
+		//     期望不符、其失败被静默忽略，故这些平台上生产路径的回环很可能一直没生效；
+		//     现在才真正生效。方向是"静默失效 → 真正生效"，**属未实测的生产行为变化**
+		//     （手上无这些平台的机器），登记在此备查；勿为"消除差异"再手写平台代码。
 		if lerr := ipv4.NewPacketConn(conn).SetMulticastLoopback(true); lerr != nil {
 			s.logger.Warn("mdns: 开启组播回环失败，同机多实例将无法互收", "error", lerr)
 		}

@@ -326,7 +326,11 @@ func waitMDNSPeer(s *MDNSServer, nodeID string, timeout time.Duration) (MDNSPeer
 }
 
 // TestMDNSDiscovery_TwoNodes 是 mDNS 局域网互发现的集成测试：同机两个实例加入同一
-// 组播组，互相发现对方（node-id + 服务 + 信令端点）。组播在部分 CI/容器不可用时跳过。
+// 组播组，互相发现对方（node-id + 服务 + 信令端点）。
+//
+// 组播不可用时按环境分流（见 shouldFailOnMDNSUnavailable）：**Windows+CI 下 FAIL**
+// （本用例守的"同机双实例同端口 + 组播互收"不变式不容被绿掉的 SKIP 掩盖）；其余
+// （含 Linux 容器无组播路由）仍 skip。
 func TestMDNSDiscovery_TwoNodes(t *testing.T) {
 	testMDNSLoopback(t)
 	port := 15353 // 测试专用端口，避免占用标准 5353

@@ -100,10 +100,17 @@ func TestMeshConnect_MDNSDispatch(t *testing.T) {
 	if err := cmd.Flags().Set("mdns", "true"); err != nil {
 		t.Fatal(err)
 	}
-	// 断言必须收紧到哨兵错误：`runMDNSConnect` 的启动失败路径返回的是
-	// "mDNS 启动失败: %w"（同样含 "mDNS"），只查字符串会让"收敛路径绑定退化"时
-	// 本用例仍然变绿。ErrMDNSServiceNotFound 才能证明"mDNS 收发链路成立、只是没有
-	// 该服务"。
+	// 断言收紧到哨兵错误的**真实价值**：`runMDNSConnect` 的启动失败路径返回的是
+	// "mDNS 启动失败: %w"（同样含 "mDNS"），只查字符串会让"收敛路径绑定退化"时本用例
+	// 仍然变绿；改用 ErrMDNSServiceNotFound 后，**绑定机制一旦退化（bind/入组/选项设置
+	// 失败）即变红**，这就是该收紧的意义。
+	//
+	// 但**不要**据此认为本用例覆盖了组播投递：LookupService 只轮询本地 peers 缓存、
+	// 从不碰 socket，超时即返回该哨兵错误，故它只证明「Start 未报错 + 窗口内无匹配对端」。
+	// 「绑得上但收不到包」同样会走到这里。真正验证投递的是 pkg/tunnel/mesh 的真收发用例：
+	// TestMDNSDiscovery_TwoNodes（同机双实例互收）、TestMDNSLookupService，以及
+	// TestMeshNodeMDNS_* / TestMeshSocks5_Exit / TestMeshUDPMap_Bidirectional——
+	// 删除或削弱那些用例前请先读这段。
 	err := cmd.RunE(cmd, []string{"nosuchsvc"})
 	if err == nil {
 		t.Fatal("期望 mDNS 路径报错（未发现服务或 mDNS 不可用）")
