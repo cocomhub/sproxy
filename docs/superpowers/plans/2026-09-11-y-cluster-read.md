@@ -666,7 +666,7 @@ func newRemoteReadHandlers(t *testing.T, cfg *Config, auditBuf *bytes.Buffer) *H
 	opts.Logger = testLogger()
 	opts.AuditLogger = slog.New(slog.NewJSONHandler(auditBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	h := RegisterRoutes(t.Context(), opts)
-	t.Cleanup(h.Close)
+	t.Cleanup(func() { _ = h.Close() }) // Close() 返回 error，不能直接当 func() 传
 	return h
 }
 
@@ -931,7 +931,11 @@ func (rh *remoteReadHandler) serve(w http.ResponseWriter, r *http.Request, op st
 // authorize 解析并校验授权；不通过时写 404/401 并记审计，返回 ok=false。
 func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (*remoteTarget, bool) {
 	volName := strings.TrimSpace(r.URL.Query().Get("volume"))
-	relPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	// path 归一为 owner user 桶内相对路径：**必须去掉前导 "/"**。否则 download/stat
+	// 会把 "/docs/a.txt" 当 filename 传给既有 resolveDownloadPath → ValidateFilePath
+	// 拒绝「以 / 开头」→ 100% 400。（list 恰好被 listFiles 自带的 TrimPrefix 掩盖，
+	// 所以只测 list 发现不了这个 bug——T3 实施时实测发现。）
+	relPath := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("path")), "/")
 
 	denied := func(result, detail string) (*remoteTarget, bool) {
 		rh.h.RecordAudit(r.Context(), AuditEvent{
