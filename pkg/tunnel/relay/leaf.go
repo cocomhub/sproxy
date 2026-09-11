@@ -58,6 +58,16 @@ type ServeOptions struct {
 // Serve 是叶子侧的流接收循环。
 // localAddr 是本地 HTTP 服务地址（HTTP 中继转发目标）；
 // dialAllow 为 true 时启用出口模式（收到 dial 帧可出站连接）。
+//
+// 契约：Serve 是接受循环，只在 ctx 取消或致命错误（mux 关闭）时返回，且
+// **恒不返回 nil**——唯一的函数级 return 是 mux.Accept 的错误分支，该分支以
+// err != nil 为前提。因此调用方无需判空：cmd/sclient 与 pkg/tunnel/mesh 的多处
+// 调用点省掉了 `if err != nil` 守卫（否则 staticcheck SA4023 会报"恒真"），
+// 它们依赖的正是这条不变量；反过来，任何新增的 `return nil` 路径都会静默
+// 破坏这些调用方的语义。
+//
+// 返回即代表本次 serve 已结束：非 nil 错误应视为终止性错误，由调用方按各自
+// 策略记录/上报（如日志 + 退避重连）。
 func Serve(ctx context.Context, m *mux.Mux, localAddr string, dialAllow bool, httpClient *http.Client, logger *slog.Logger, opts ...ServeOptions) error {
 	if logger == nil {
 		logger = slog.Default()
