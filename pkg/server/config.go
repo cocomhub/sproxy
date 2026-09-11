@@ -18,6 +18,7 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/provider"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"gopkg.in/yaml.v3"
 )
@@ -366,6 +367,20 @@ const (
 type VolumeACLConfig struct {
 	Mode   VolumeACLMode `yaml:"mode" mapstructure:"mode"`
 	Owners []string      `yaml:"owners" mapstructure:"owners"`
+	// MeshReaders 是跨节点只读授权条目（Y 一期，AD-5）；省略 = 无任何节点被授权。
+	MeshReaders []VolumeMeshReaderConfig `yaml:"mesh_readers,omitempty" mapstructure:"mesh_readers"`
+}
+
+// VolumeMeshReaderConfig 是卷 ACL 的跨节点只读授权条目：把 mesh 节点身份
+// （node + Ed25519 指纹）绑定到一个可只读访问的 owner 命名空间。
+//
+// 安全边界：pkg/volume 侧的比较归一化**不做**规范形校验（不校验 sha256: 前缀与 64 位 hex），
+// 畸形指纹在授权判定里只会「静默永不命中」；因此解析期（Validate）的校验是唯一防线，
+// 非法指纹必须在此被响亮拒绝（fail-closed）。
+type VolumeMeshReaderConfig struct {
+	Node        string `yaml:"node" mapstructure:"node"`
+	Fingerprint string `yaml:"fingerprint" mapstructure:"fingerprint"`
+	Owner       string `yaml:"owner" mapstructure:"owner"`
 }
 
 // VolumeConfig 是单卷配置（volumes[] 元素）：独立挂载根 + 卷容量上限 + ACL。
@@ -596,6 +611,15 @@ func (c *Config) SetDefaults() {
 		if c.Volumes[i].ACL.Mode == "" {
 			c.Volumes[i].ACL.Mode = VolumeACLDeny
 		}
+		// Y 一期：mesh_readers 指纹归一为规范形（去空白/大小写/可省前缀）。
+		// 非法指纹在此保持原样，交由 Validate 响亮拒绝（fail-closed）。
+		if ac := c.Volumes[i].ACL; ac != nil {
+			for j := range ac.MeshReaders {
+				if norm, err := tunnel.ParseFingerprint(ac.MeshReaders[j].Fingerprint); err == nil {
+					ac.MeshReaders[j].Fingerprint = norm
+				}
+			}
+		}
 	}
 	if c.ChunkSize <= 0 {
 		c.ChunkSize = size.DefaultChunkSize
@@ -775,6 +799,28 @@ func (c *Config) Validate() error {
 				if !storage.ValidSegmentName(o) {
 					return fmt.Errorf("卷 %q acl owners 含非法 owner %q", v.Name, o)
 				}
+			}
+			// Y 一期：mesh_readers 逐条校验（加载期响亮拒绝，fail-closed）。此处排在 owners
+			// 校验之后——owners 名单是既有语义，先报既有错误以保持错误面稳定。
+			seenReaders := map[string]struct{}{}
+			for _, mr := range a.MeshReaders {
+				if mr.Node == "" {
+					return fmt.Errorf("卷 %q 的 mesh_readers.node 不能为空", v.Name)
+				}
+				if mr.Owner == "" {
+					return fmt.Errorf("卷 %q 的 mesh_readers.owner 不能为空", v.Name)
+				}
+				if !storage.ValidSegmentName(mr.Owner) {
+					return fmt.Errorf("卷 %q 的 mesh_readers.owner 非法 %q（须为合法段名）", v.Name, mr.Owner)
+				}
+				norm, err := tunnel.ParseFingerprint(mr.Fingerprint)
+				if err != nil {
+					return fmt.Errorf("卷 %q 的 mesh_readers.fingerprint 非法: %w", v.Name, err)
+				}
+				if _, dup := seenReaders[norm]; dup {
+					return fmt.Errorf("卷 %q 的 mesh_readers 指纹重复（归一后）: %s", v.Name, norm)
+				}
+				seenReaders[norm] = struct{}{}
 			}
 		}
 	}

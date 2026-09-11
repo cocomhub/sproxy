@@ -17,10 +17,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -229,6 +231,17 @@ func parseVolumeACL(ac *VolumeACLConfig) volume.ACL {
 	}
 	for _, o := range ac.Owners {
 		acl.Owners[o] = struct{}{}
+	}
+	// Y 一期：跨节点只读授权条目（指纹归一为规范形；非法值已由 Config.Validate 拒绝）。
+	// 保留 best-effort 归一以防装配路径未经 Validate 直接调用（与 pkg/volume 的比较归一化对齐）。
+	for _, mr := range ac.MeshReaders {
+		fp := strings.ToLower(strings.TrimSpace(mr.Fingerprint))
+		if norm, err := tunnel.ParseFingerprint(mr.Fingerprint); err == nil {
+			fp = norm
+		}
+		acl.MeshReaders = append(acl.MeshReaders, volume.MeshReader{
+			Node: mr.Node, Fingerprint: fp, Owner: mr.Owner,
+		})
 	}
 	return acl
 }
