@@ -37,6 +37,14 @@ func listenMDNSLoopback(_ context.Context, group *net.UDPAddr) (*net.UDPConn, *i
 	}
 	pc := ipv4.NewPacketConn(conn)
 	// 组播回环：同机多实例互收（x/net 跨平台实现，等价于原手写 IP_MULTICAST_LOOP=1）。
+	//
+	// **本调用是承重的**（与 Windows 收敛路径的"默认已开、只是保险"性质相反，勿套用）：
+	// 本平台收敛路径沿用 net.ListenMulticastUDP，而 Go 在该路径会**主动**把
+	// IP_MULTICAST_LOOP 设为 0（net/udpsock_posix.go 的 listenIPv4MulticastUDP 调
+	// setIPv4MulticastLoopback(fd, false)），不显式开启就会静默失去同机多实例互收。
+	// 两平台在此**默认值相反**：Windows 收敛路径改用 net.ListenPacket、默认值为 1，
+	// 详见 mdns_loopback_windows.go 的 mdnsTestBindIP 注释。
+	//
 	// 此处失败**致命**（与生产路径的告警降级不同，见 mdns.go 中该 syscall 的严重级别说明）：
 	// 收敛路径存在的意义就是"同机多实例互收"，静默降级会让用例变绿而失效。
 	if err := pc.SetMulticastLoopback(true); err != nil {
