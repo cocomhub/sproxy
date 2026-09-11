@@ -4,6 +4,8 @@
 package server
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -111,7 +113,7 @@ func TestMeshReadersConfig_ParseVolumeACL(t *testing.T) {
 		Mode:        VolumeACLAllow,
 		Owners:      []string{"alice"},
 		MeshReaders: []VolumeMeshReaderConfig{{Node: "nodeA", Fingerprint: strings.ToUpper(testReaderFP), Owner: "alice"}},
-	})
+	}, nil)
 	if len(acl.MeshReaders) != 1 {
 		t.Fatalf("mesh_readers 应解析出 1 条, got %d", len(acl.MeshReaders))
 	}
@@ -151,7 +153,7 @@ func TestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint(t *testing.T) {
 				Mode:        VolumeACLAllow,
 				Owners:      []string{"alice"},
 				MeshReaders: []VolumeMeshReaderConfig{{Node: "nodeA", Fingerprint: tc.in, Owner: "alice"}},
-			})
+			}, nil)
 			if len(acl.MeshReaders) != 1 {
 				t.Fatalf("合法指纹 %q 不应被丢弃, got %d 条", tc.in, len(acl.MeshReaders))
 			}
@@ -163,13 +165,18 @@ func TestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint(t *testing.T) {
 }
 
 // TestMeshReadersConfig_ParseVolumeACL_DropsMalformed 钉住装配层 fail-closed：畸形指纹被
-// **丢弃该条目**而非降级保留（降级保留一个语义不明的字符串会在未来改动中被误用）。
+// **丢弃该条目**而非降级保留（降级保留一个语义不明的字符串会在未来改动中被误用），且丢弃
+// **不静默**——每条被丢弃的条目都留 Warn 日志（本项目「禁止静默失败」原则）。
 //
-// 三条断言对应审查要求：① 畸形条目不在结果里；② 不 panic（直接调 parseVolumeACL，
-// 不经 Config.Validate——本函数在生产路径上畸形指纹已被 Validate 响亮拒绝，此处是装配层
-// 兜底；若实现改为 panic/fatal 本用例即失败）；③ 同批合法条目仍在 → 证明是「丢弃单条」
-// 而非「整体清空」（后者同样能骗过 len 比较之外的宽松断言）。
+// 断言对应审查要求：① 畸形条目不在结果里；② 不 panic（直接调 parseVolumeACL，不经
+// Config.Validate——本函数在生产路径上畸形指纹已被 Validate 响亮拒绝，此处是装配层兜底；
+// 若实现改为 panic/fatal 本用例即失败）；③ 同批合法条目仍在 → 证明是「丢弃单条」而非
+// 「整体清空」；④ 恰好 2 条 Warn（3 条中 2 条畸形）且含 mesh_readers/指纹非法关键词 →
+// 既证明留下痕迹，也证明**合法条目不产生噪音告警**。
 func TestMeshReadersConfig_ParseVolumeACL_DropsMalformed(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
 	notHex := "sha256:" + strings.Repeat("z", 64) // 长度合法但非 hex
 	acl := parseVolumeACL(&VolumeACLConfig{
 		Mode:   VolumeACLAllow,
@@ -179,7 +186,9 @@ func TestMeshReadersConfig_ParseVolumeACL_DropsMalformed(t *testing.T) {
 			{Node: "nodeB", Fingerprint: testReaderFP, Owner: "alice"}, // 合法 → 必须保留
 			{Node: "nodeC", Fingerprint: notHex, Owner: "alice"},       // 非 hex → 丢弃
 		},
-	})
+	}, log)
+
+	// ①③ 丢弃是对的：只保留合法条目，且是 nodeB 而非整体清空。
 	if len(acl.MeshReaders) != 1 {
 		t.Fatalf("畸形指纹应被丢弃、合法条目应保留（期望 1 条）, got %d 条: %+v", len(acl.MeshReaders), acl.MeshReaders)
 	}
@@ -189,5 +198,23 @@ func TestMeshReadersConfig_ParseVolumeACL_DropsMalformed(t *testing.T) {
 	}
 	if got.Fingerprint != testReaderFP {
 		t.Fatalf("保留条目指纹应为规范形 %q, got %q", testReaderFP, got.Fingerprint)
+	}
+
+	// ④ 丢弃不是静默的：恰好 2 条 Warn（两条畸形各一条），且带可检索关键词。
+	out := strings.TrimSpace(buf.String())
+	if out == "" {
+		t.Fatal("丢弃畸形指纹必须留 Warn 日志，实际无任何日志输出（静默失败）")
+	}
+	records := strings.Split(out, "\n")
+	if len(records) != 2 {
+		t.Fatalf("应为 2 条 Warn（每条畸形指纹一条，合法条目不告警）, got %d 条: %s", len(records), out)
+	}
+	for _, rec := range records {
+		if !strings.Contains(rec, "丢弃 mesh_readers 条目") || !strings.Contains(rec, "指纹非法") {
+			t.Fatalf("告警缺少可检索关键词, got %s", rec)
+		}
+		if !strings.Contains(rec, `"node"`) || !strings.Contains(rec, `"owner"`) {
+			t.Fatalf("告警应携带 node/owner 便于定位条目, got %s", rec)
+		}
 	}
 }

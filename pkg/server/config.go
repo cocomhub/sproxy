@@ -613,11 +613,12 @@ func (c *Config) SetDefaults() {
 		}
 		// Y 一期：mesh_readers 指纹归一为规范形（去空白/大小写/可省前缀）。
 		// 非法指纹在此保持原样，交由 Validate 响亮拒绝（fail-closed）。
-		if ac := c.Volumes[i].ACL; ac != nil {
-			for j := range ac.MeshReaders {
-				if norm, err := tunnel.ParseFingerprint(ac.MeshReaders[j].Fingerprint); err == nil {
-					ac.MeshReaders[j].Fingerprint = norm
-				}
+		// ac 恒非 nil：上面几行的缺省填充（ACL == nil 即赋空 ACL）已建立该不变式，
+		// 故此处不做 nil 比较（做了也是死分支，反而让人误以为 ACL 可为 nil）。
+		ac := c.Volumes[i].ACL
+		for j := range ac.MeshReaders {
+			if norm, err := tunnel.ParseFingerprint(ac.MeshReaders[j].Fingerprint); err == nil {
+				ac.MeshReaders[j].Fingerprint = norm
 			}
 		}
 	}
