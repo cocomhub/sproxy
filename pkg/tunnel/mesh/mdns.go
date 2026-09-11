@@ -228,11 +228,19 @@ func (s *MDNSServer) Start(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("mdns: 加入组播 %s 失败: %w", group, err)
 		}
-		// 组播回环（同机多实例互收）：net 包不提供 SetMulticastLoopback，用
-		// x/net/ipv4 的跨平台实现（取代原先手写的两个平台 setsockopt 文件）。
-		// 失败不致命（Linux/macOS 默认已开启），仅记调试日志。
+		// 组播回环（同机多实例互收）：**这一步必需**——Go 的 ListenMulticastUDP 路径会
+		// 显式把组播回环设为关（net/udpsock_posix.go 的 listenIPv4MulticastUDP 调用
+		// setIPv4MulticastLoopback(fd, false)，linux/bsd/windows 三份实现都是真
+		// setsockopt），不在此显式开启就会**静默**失去"同机多实例互收"。
+		// net 包不提供 SetMulticastLoopback，故用 x/net/ipv4 的跨平台实现（取代原先
+		// 手写的两个平台 setsockopt 文件）。
+		//
+		// 失败处理：**告警但不中断**。该项只影响同机多实例互收，跨机发现不受影响，
+		// 不值得因此拒绝启动整个 mDNS。对照：收敛路径对同一 syscall 的失败是**致命**
+		// 的（见 mdns_loopback_*.go）——那里"同机多实例互收"正是被测对象本身，
+		// 静默降级会让用例变绿而失效。两处都不静默，只是严重级别按用途不同。
 		if lerr := ipv4.NewPacketConn(conn).SetMulticastLoopback(true); lerr != nil {
-			s.logger.Debug("mdns: 开启组播回环失败", "error", lerr)
+			s.logger.Warn("mdns: 开启组播回环失败，同机多实例将无法互收", "error", lerr)
 		}
 	}
 	_ = conn.SetReadBuffer(64 << 10)

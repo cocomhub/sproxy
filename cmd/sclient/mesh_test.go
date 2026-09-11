@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -99,12 +100,16 @@ func TestMeshConnect_MDNSDispatch(t *testing.T) {
 	if err := cmd.Flags().Set("mdns", "true"); err != nil {
 		t.Fatal(err)
 	}
+	// 断言必须收紧到哨兵错误：`runMDNSConnect` 的启动失败路径返回的是
+	// "mDNS 启动失败: %w"（同样含 "mDNS"），只查字符串会让"收敛路径绑定退化"时
+	// 本用例仍然变绿。ErrMDNSServiceNotFound 才能证明"mDNS 收发链路成立、只是没有
+	// 该服务"。
 	err := cmd.RunE(cmd, []string{"nosuchsvc"})
 	if err == nil {
 		t.Fatal("期望 mDNS 路径报错（未发现服务或 mDNS 不可用）")
 	}
-	if !strings.Contains(err.Error(), "mDNS") {
-		t.Fatalf("期望错误含 mDNS, got: %v", err)
+	if !errors.Is(err, mesh.ErrMDNSServiceNotFound) {
+		t.Fatalf("期望 mDNS 未发现服务（ErrMDNSServiceNotFound, 证明发现链路可用）, got: %v", err)
 	}
 }
 

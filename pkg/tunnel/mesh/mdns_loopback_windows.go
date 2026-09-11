@@ -19,9 +19,13 @@ import (
 
 // mdnsTestBindIP 是 Windows 收敛路径绑定的单播回环地址。
 //
-// 为什么不用通配地址：Windows 防火墙会对「绑定通配地址的 UDP socket」弹授权窗，
-// 实测（Windows 11 + x/net/ipv4）改绑 127.0.0.1 后不再弹窗；组播回环开启后同机
-// 多实例仍能互收（发往 224.0.0.251:<port> 的报文会投递给本机所有绑该端口的 socket）。
+// 为什么不用通配地址：Windows 防火墙会对「绑定通配地址的 UDP socket」弹授权窗。
+// 证据来源分别标注：
+//   - 来源 A（控制者 spike，用户肉眼确认无弹窗）：绑 127.0.0.1 不弹窗；
+//   - 来源 B（本实现的实测，本机 Windows 11 + x/net/ipv4）：绑 127.0.0.1 +
+//     JoinGroup(loopback) 后，发往 224.0.0.251:<port> 的报文会被本机**已加入该组**
+//     的多个同端口 socket 都收到（未 JoinGroup 的收不到）；组播回环由
+//     SetMulticastLoopback(true) 保证——见 listenMDNSLoopback。
 const mdnsTestBindIP = "127.0.0.1"
 
 // listenMDNSLoopback 是 Windows 上 mDNS 测试收敛路径的组播收发端：绑**单播回环
@@ -60,6 +64,8 @@ func listenMDNSLoopback(ctx context.Context, group *net.UDPAddr) (*net.UDPConn, 
 		return nil, nil, fmt.Errorf("mdns: 设置组播出口接口失败: %w", err)
 	}
 	// 组播回环：同机多实例互收（x/net 跨平台实现，等价于原手写 IP_MULTICAST_LOOP=1）。
+	// 此处失败**致命**（与生产路径的告警降级不同，见 mdns.go 中该 syscall 的严重级别说明）：
+	// 收敛路径存在的意义就是"同机多实例互收"，静默降级会让用例变绿而失效。
 	if err := pc.SetMulticastLoopback(true); err != nil {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("mdns: 开启组播回环失败: %w", err)
