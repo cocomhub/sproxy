@@ -39,6 +39,8 @@ func uploadingLockMux(h *Handlers, actor string) *http.ServeMux {
 	mux.HandleFunc("POST /upload/complete", wrap(h.uploadComplete))
 	mux.HandleFunc("POST /api/volumes/move", wrap(h.moveVolumeHandler))
 	mux.HandleFunc("POST /api/versions/restore", wrap(h.restoreVersionHandler))
+	mux.HandleFunc("GET /api/versions", wrap(h.listVersionsHandler))
+	mux.HandleFunc("DELETE /api/versions", wrap(h.deleteVersionHandler))
 	return mux
 }
 
