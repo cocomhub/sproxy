@@ -325,9 +325,11 @@ func (dl *mdnsDiscoveryLoop) dialPeerDirect(ctx context.Context, cfg NodeConfig,
 	dl.links.set(p.NodeID, m)
 	go func(m *mux.Mux) {
 		defer func() { _ = m.Close() }()
-		if err := relay.Serve(ctx, m, localAddr, cfg.DialAllow, httpClient, logger, serveOpts...); err != nil {
-			logger.Debug("mesh mDNS 对等链路 serve 结束", "peer", p.NodeID, "error", err)
-		}
+		// relay.Serve 是接受循环，只在 ctx 取消或出错时返回，恒不返回 nil
+		// （relay/leaf.go 的 Serve 函数体内无 return nil 路径，staticcheck SA4023 已证），
+		// 故无需判空守卫，直接记录退出原因。
+		err := relay.Serve(ctx, m, localAddr, cfg.DialAllow, httpClient, logger, serveOpts...)
+		logger.Debug("mesh mDNS 对等链路 serve 结束", "peer", p.NodeID, "error", err)
 	}(m)
 	logger.Info("mesh mDNS 自动对等直连建立", "peer", p.NodeID)
 	if cfg.DiscoveryPeers != nil {

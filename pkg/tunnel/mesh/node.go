@@ -237,9 +237,10 @@ func runNodeOnce(ctx context.Context, cfg NodeConfig, logger *slog.Logger) error
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := relay.Serve(cycleCtx, reg.Mux, localAddr, cfg.DialAllow, httpClient, logger, relayOpts...); err != nil {
-			errCh <- err
-		}
+		// relay.Serve 是接受循环，只在 ctx 取消或出错时返回，恒不返回 nil
+		// （relay/leaf.go 的 Serve 函数体内无 return nil 路径，staticcheck SA4023 已证），
+		// 故无需判空守卫，退出原因照常上报 errCh。
+		errCh <- relay.Serve(cycleCtx, reg.Mux, localAddr, cfg.DialAllow, httpClient, logger, relayOpts...)
 	}()
 	wg.Add(1)
 	if enableAccept {
@@ -362,9 +363,11 @@ func runWebRTCAcceptLoop(ctx context.Context, signaler webrtc.Signaler, nodeID, 
 		}
 		go func(m *mux.Mux, peerID string, registered bool) {
 			defer m.Close() // serve 结束即关 mux → 关底层 webrtc conn → 解除 pump
-			if err := relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...); err != nil {
-				logger.Debug("mesh node 直连会话结束", "error", err)
-			}
+			// relay.Serve 是接受循环，只在 ctx 取消或出错时返回，恒不返回 nil
+			// （relay/leaf.go 的 Serve 函数体内无 return nil 路径，staticcheck SA4023 已证），
+			// 故无需判空守卫，直接记录退出原因。
+			err := relay.Serve(ctx, m, localAddr, dialAllow, httpClient, logger, opts...)
+			logger.Debug("mesh node 直连会话结束", "error", err)
 			if registered {
 				// 仅当链路池中仍指向本条 mux 才移除（防重连竞态：新链路已 set 时不误删）。
 				links.removeIf(peerID, m)
