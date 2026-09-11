@@ -70,6 +70,9 @@ func (v Volume) AuthorizeMeshRead(node, fingerprint, owner string) bool {
 // MeshReaderFor 返回本卷 mesh_readers 中指纹命中 fingerprint 的首个条目。
 // 空指纹或无命中返回 false（fail-closed）。供 B 侧远程 handler 由「已认证对端指纹」
 // 反查 (node, owner) 绑定——owner 绝不由请求方指定。
+//
+// 注意：本方法只做指纹反查，不施加卷 ACL 的第二重约束（不调 Authorize）。
+// 它不得作为唯一授权依据——授权判定必须走 AuthorizeMeshRead（两约束齐备）。
 func (v Volume) MeshReaderFor(fingerprint string) (MeshReader, bool) {
 	want := normalizeFingerprint(fingerprint)
 	if want == "" {
@@ -85,6 +88,10 @@ func (v Volume) MeshReaderFor(fingerprint string) (MeshReader, bool) {
 
 // normalizeFingerprint 归一化指纹用于比较：去首尾空白 + 转小写（前缀 "sha256:" 保留，
 // 两端一致即可；配置侧已由 tunnel.ParseFingerprint 归一为规范形）。
+//
+// 规范形校验（"sha256:" 前缀 / 64 位 hex）刻意不在本包：畸形指纹由 pkg/server 的配置
+// 加载期（Config.Validate 调 tunnel.ParseFingerprint）响亮拒绝，故本函数只需处理大小写
+// 与空白。不校验意味着畸形值只会「永不命中」，方向仍是 fail-closed。
 func normalizeFingerprint(fp string) string {
 	return strings.ToLower(strings.TrimSpace(fp))
 }
